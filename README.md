@@ -107,7 +107,15 @@ leave them staged. Nothing is pushed. Submodule review is not supported.
 ## Scope and limitations
 
 HLS tooling, Cabal-plan project browsing, compile/run/debug integration and
-persistent preferences are subsequent milestones. Their menu actions explain
+persistent preferences are subsequent milestones.
+
+Haskell Language Server will supply diagnostics, completion, hover/type
+information and definition navigation. Runtime debugging will use THC's Truffle
+debugger when the program runs through THC: the Debug menu should expose its
+breakpoints, stepping, call stack and variable inspection. These are separate
+backends; HLS is not the runtime debugger.
+
+Their menu actions explain
 that they are unavailable. Directory arguments do not pretend to be projects.
 The terminal clipboard is editor-local; use bracketed paste for external text.
 Search is literal and case-sensitive. Undo uses up to 100 complete text
