@@ -13,11 +13,11 @@ hexColumn :: Int -> Int
 hexColumn index = 10+3*index+if index>=8 then 1 else 0
 
 hexDividers :: [Int]
-hexDividers = [60,77]
+hexDividers = [8,60]
 
 -- Each cell carries its byte offset, so both panes highlight the same selection.
 hexRow :: Int -> Text -> [(Char,Maybe Int)]
-hexRow row bytes = plain (hexNumber 8 start<>"  ") ++ concatMap cell [0..15] ++ plain " │" ++ concatMap ascii [0..15] ++ plain "│"
+hexRow row bytes = plain (hexNumber 8 start<>"│ ") ++ concatMap cell [0..15] ++ plain " │" ++ concatMap ascii [0..15]
   where
     start=row*16
     chunk=T.take 16 (T.drop start bytes)

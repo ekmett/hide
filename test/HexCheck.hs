@@ -14,7 +14,7 @@ import THC.Edit.Buffer
 import THC.Edit.Files
 import THC.Edit.Hex
 import THC.Edit.Model
-import THC.Edit.Render (snapshot)
+import THC.Edit.Render (snapshot, snapshotHtml)
 import qualified THC.Edit.AgentFiles as A
 
 checks :: IO ()
@@ -72,7 +72,11 @@ checks = bracket temporary removeFile $ \path -> do
       scrolled=fst (handleEvent (V.EvMouseDown (left bar+width bar-1) (top bar) V.BLeft []) narrow)
       widened=key (V.KFun 5) scrolled
   check "hex dividers join both borders and continue below EOF"
-    (and [cellAt opened x 1=='╤' && cellAt opened x 23=='╧' && all (\y -> cellAt opened x y=='│') [2..22] | x<-[61,78]])
+    (and [cellAt opened x 1=='╤' && cellAt opened x 23=='╧' && all (\y -> cellAt opened x y=='│') [2..22] | x<-[9,61]])
+  check "no divider beside the scrollbar" (all (\y -> cellAt opened 78 y/='│') [2..22])
+  let dots=snapshotHtml (desktop (newByteBuffer (BS.pack [65,0,46,255,66])))
+  check "placeholder dots are gray but literal periods stay yellow"
+    (all (`T.isInfixOf` dots) ["color:rgb(170,170,170);background:rgb(0,0,170)'>.</span>","color:rgb(255,255,85);background:rgb(0,0,170)'>.</span>"])
   check "full width hex has no horizontal scrollbar or scrollable blank column"
     (not ("◄" `T.isInfixOf` image) && maybe False (\w -> scrollbarLimit False narrowDoc w==0 && width (scrollbarRect False narrowDoc w)==0) (activeWindow opened))
   check "narrow hex retains working horizontal scrollbar"

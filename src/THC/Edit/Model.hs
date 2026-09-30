@@ -33,7 +33,7 @@ newDocument b file = restyle (Document b file Nothing [] 0 True)
 
 -- ponytail: retokenize the buffer after edits; use an incremental engine if large-file latency warrants it.
 restyle :: Document -> Document
-restyle doc | byteMode (documentBuffer doc) = doc {documentHighlight=[],documentWidth=78}
+restyle doc | byteMode (documentBuffer doc) = doc {documentHighlight=[],documentWidth=77}
 restyle doc = doc {documentHighlight=highlightFor (maybe "Main.hs" filePath (documentFile doc)) text,
   documentWidth=maximum (0:[displayColumn line (T.length line) | raw<-textLines text,let line=T.dropWhileEnd (=='\r') raw])}
   where text=contents (documentBuffer doc)
@@ -690,11 +690,14 @@ windowPositionText doc w | byteMode (documentBuffer doc) = " HEX "<>hexNumber 8 
 windowPositionText doc w = let (r,c)=bufferLineColumn (documentBuffer doc) (caret (selection w))
   in " "<>T.pack (show (r+1))<>":"<>T.pack (show (c+1))<>" "
 
+windowPositionColumn :: Document -> Int
+windowPositionColumn doc = if byteMode (documentBuffer doc) then 10 else 2
+
 scrollbarRect :: Bool -> Document -> Window -> Rect
 scrollbarRect vertical doc w
   | vertical = Rect (x+ww-1) (y+1) 1 (max 0 (hh-2))
   | byteMode (documentBuffer doc) && scrollbarLimit False doc w==0 = Rect x (y+hh-1) 0 1
-  | otherwise = let start=2+T.length (windowPositionText doc w) in Rect (x+start) (y+hh-1) (max 0 (ww-start-2)) 1
+  | otherwise = let start=windowPositionColumn doc+T.length (windowPositionText doc w) in Rect (x+start) (y+hh-1) (max 0 (ww-start-2)) 1
   where Rect x y ww hh=bounds w
 
 scrollbarLimit :: Bool -> Document -> Window -> Int

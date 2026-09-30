@@ -110,7 +110,7 @@ windowLayers d active w =
     | not (byteMode (documentBuffer doc)), issue<-diagnostics d, Just (diagnosticPath issue)==fmap filePath (documentFile doc), diagnosticRow issue>=scrollRow w, diagnosticRow issue<scrollRow w+hh-2]
   ++ (if active then
     [place (x+2) y (label frame "[" V.<|> label (attr (V.RGBColor 85 255 85) blue) (if videoMode d==Nothing then "x" else "■") V.<|> label frame "]"),place (x+ww-6) y (label frame "[" V.<|> label (attr cyan blue) "↑" V.<|> label frame "]")
-    ,place (x+2) (y+hh-1) (label frame (T.take (max 0 (ww-4)) (windowPositionText doc w)))
+    ,place (x+windowPositionColumn doc) (y+hh-1) (label frame (T.take (max 0 (ww-windowPositionColumn doc-2)) (windowPositionText doc w)))
     ,scrollbarImage True,scrollbarImage False] else [])
   ++ hexDividerLayers
   ++ [place (x+ww-7-T.length number) y (label frame number)
@@ -142,8 +142,10 @@ windowLayers d active w =
     textImage=V.vertCat [renderLine n | n<-[scrollRow w..scrollRow w+contentHeight-1]]
     renderLine n | byteMode b && n>=documentRows doc = V.charFill edit ' ' contentWidth 1
     renderLine n | byteMode b = V.cropRight contentWidth (V.translateX (negate (scrollColumn w)) (V.horizCat
-      [V.char (if active && maybe False highlighted offset then selected else edit) ch | (ch,offset)<-hexRow n t]) V.<|> V.charFill edit ' ' contentWidth 1)
-      where highlighted offset = offset==caret (selection w) || let (a,z)=ordered (selection w) in offset>=a && offset<z
+      [V.char (if active && maybe False highlighted offset then selected else if ch=='.' && maybe False (\i -> T.index bytes (i-n*16)/='.') offset then attr gray blue else edit) ch | (ch,offset)<-hexRow n t]) V.<|> V.charFill edit ' ' contentWidth 1)
+      where
+        bytes=T.take 16 (T.drop (n*16) t)
+        highlighted offset = offset==caret (selection w) || let (a,z)=ordered (selection w) in offset>=a && offset<z
     renderLine n=V.cropRight contentWidth (V.translateX (negate (scrollColumn w)) (styledImage (lineColor n) active (selection w) (bufferLineOffset b n) (fromMaybe [] (atMay styledLines n))) V.<|> V.charFill edit ' ' contentWidth 1)
 
     lineColor n = case documentLabel doc of
