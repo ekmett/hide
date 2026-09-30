@@ -29,3 +29,16 @@ reject changes before staging/commit; normal Git hooks remain authoritative and
 may transform the commit, with a visible report if the committed tree differs.
 This intentionally follows Git hook semantics rather than replacing hooks.
 HLS and Cabal-plan component browsing remain the next backend milestones.
+
+Coordination: “thc mba” owns THC repository/interface decisions; “thc linux”
+is a worker for delegated implementation and validation. The editor stays in
+its own repository. Runtime Debug actions will eventually use THC's Truffle
+debugger; HLS supplies static editor tooling.
+
+The final Linux frame revealed a startup resize race despite a successful render
+return code: X11 had not completed the requested window resize. Calling
+SDL_SyncWindow after SDL_SetWindowSize fixes it. Verified actual Metal and Vulkan
+BMP dimensions at 800x512 for `--size 100x32 --scale 1`, with correct glyphs,
+status bar and shadows. The forwarded X11 Vulkan driver still emits a DRI3
+warning, but the captured frame is correct; native Linux desktop interaction
+has not been manually exercised.

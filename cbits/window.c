@@ -57,7 +57,9 @@ int thc_open(const char *backend, int requested_scale, int requested_cols, int r
     SDL_GetWindowSize(window, &ww, &wh);
     double density = (double)pw / SDL_max(1, ww);
     scale = requested_scale ? requested_scale : SDL_max(1, (int)lround(2 * density));
-    SDL_SetWindowSize(window, (int)lround(requested_cols * 8 * scale / density), (int)lround(requested_rows * 16 * scale / density));
+    if (!SDL_SetWindowSize(window, (int)lround(requested_cols * 8 * scale / density), (int)lround(requested_rows * 16 * scale / density))) return 0;
+    /* X11/Wayland resize requests can complete after SetWindowSize returns. */
+    if (!SDL_SyncWindow(window)) return 0;
     SDL_SetWindowMinimumSize(window, (int)ceil(40 * 8 * scale / density), (int)ceil(12 * 16 * scale / density));
     geometry();
     return SDL_StartTextInput(window);

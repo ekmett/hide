@@ -115,8 +115,7 @@ debugger when the program runs through THC: the Debug menu should expose its
 breakpoints, stepping, call stack and variable inspection. These are separate
 backends; HLS is not the runtime debugger.
 
-Their menu actions explain
-that they are unavailable. Directory arguments do not pretend to be projects.
+Unimplemented menu actions explain that they are unavailable. Directory arguments do not pretend to be projects.
 The terminal clipboard is editor-local; use bracketed paste for external text.
 Search is literal and case-sensitive. Undo uses up to 100 complete text
 snapshots; this first implementation targets ordinary source files, not huge
