@@ -4,7 +4,7 @@ version: 0.1.0.0
 synopsis: Turbo Haskell's terminal editor
 build-type: Simple
 data-files: README.md, assets/fonts/*.hex, assets/fonts/*.txt, assets/fonts/README.md
-extra-source-files: cbits/window.h, tools/convert-font.py, test/native-input.c
+extra-source-files: cbits/window.h, tools/convert-font.py, test/native-input.c, test/HighlightBench.hs
 
 flag window
   description: Build the optional SDL3 Metal/Vulkan frontend
@@ -18,6 +18,7 @@ common settings
 
 library
   import: settings
+  build-depends: skylighting >=0.15 && <0.16
   hs-source-dirs: src
   other-modules: Paths_thc_edit
   autogen-modules: Paths_thc_edit

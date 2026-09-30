@@ -42,3 +42,16 @@ BMP dimensions at 800x512 for `--size 100x32 --scale 1`, with correct glyphs,
 status bar and shadows. The forwarded X11 Vulkan driver still emits a DRI3
 warning, but the captured frame is correct; native Linux desktop interaction
 has not been manually exercised.
+
+Follow-up: replaced the bespoke lexer with Skylighting 0.15's KDE/Kate grammar
+set, selected by filename and cached per document across split views. Tests
+cover source preservation, CRLF/Unicode/incomplete input, Python selection,
+unknown extensions, edits, undo and filename changes. Benchmark command and
+measurements (36 ms/1,001-line retokenization, 2 ms cached redraw) are in README.
+The bundled Skylighting grammar package is GPL-2; this stays outside THC.
+
+Added Borland-numbered Mode 3 (80x25) and Mode 259 (C80+Font8x8,80x50), exposed
+in Preferences and --mode. Per the user's preference, both retain the existing
+8x16 bitmap and change its vertical aspect ratio. Native tests cover geometry,
+cursor/mouse placement, runtime changes, custom dimensions and failed resize
+rollback; mode changes preserve buffers and scale the existing pane layout.

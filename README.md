@@ -38,9 +38,21 @@ cabal run -fwindow thc-edit -- --vulkan --size 100x32 Main.hs
 
 `--window` selects Metal on macOS and Vulkan elsewhere. The default is the
 terminal; set `THC_EDIT_BACKEND=metal`, `vulkan`, `auto` or `terminal` to change
-it. An explicit backend flag takes precedence. The window starts at **80x25
-characters**; `--size COLSxROWS` accepts 40..512 columns and 12..256 rows.
-`--scale 1` through `--scale 8` sets the integer pixel scale independently.
+it. An explicit backend flag takes precedence. The window starts in **Mode 3 (80x25)**; `--size COLSxROWS` accepts 40..512 columns and 12..256 rows.
+`--mode 259` (or `--mode 0x103`) selects **80x50** with half-height rendering;
+`--mode 3` returns to **80x25**. Options > Preferences > Screen size switches
+between them while running. The numbers follow Turbo Pascal's `C80 = 3` and
+`C80 + Font8x8 = 259`; 259 is a Borland text-mode constant, not VESA mode 0x103.
+Both modes use the same 8x16 glyphs, with a different vertical aspect ratio.
+`--size` overrides the character dimensions of either mode. These options do
+not change your terminal's font or dimensions.
+
+```sh
+cabal run -fwindow thc-edit -- --metal --mode 259 Main.hs
+```
+
+`--scale 1` through `--scale 8` sets the pixel scale independently. In Mode 259,
+scale 2 or higher retains every bitmap row; scale 1 downsamples vertically.
 Resizing the window changes the character grid. SDL3 is an optional build
 dependency and is not needed for the terminal frontend or THC itself.
 
@@ -66,7 +78,7 @@ Shortcuts > Function Keys. Command+O/S/W/Q also opens, saves, closes and exits.
   and commits from Tools > Approve changes.
 - Modal text inputs, checkboxes, radio buttons, lists and buttons. Try
   **Tools > Widget gallery** to exercise the dialog controls.
-- UTF-8 files, Haskell lexical highlighting including nested comments,
+- UTF-8 files, filename-selected syntax highlighting from Skylighting,
   selections, undo/redo, internal clipboard, bracketed terminal paste,
   find/replace-one and go-to-line.
 - Checked saves, dirty-close prompts, CRLF preservation, and optional WordStar
@@ -83,12 +95,30 @@ Shortcuts > Function Keys. Command+O/S/W/Q also opens, saves, closes and exits.
 | Find / replace / next match / go to line | Ctrl+F / Ctrl+R / Ctrl+L / Ctrl+G |
 | Dialog focus / accept / cancel | Tab or Shift+Tab / Enter / Escape |
 
-Select WordStar under **Options > Editor**, or use `--wordstar`:
+Select WordStar under **Options > Preferences**, or use `--wordstar`:
 Ctrl+E/S/D/X moves up/left/right/down; Ctrl+A/F moves by word; Ctrl+Y deletes
 one line. Ctrl+K then B/K marks block start/end, C/V copies/cuts, Y deletes
 the block, S saves and D closes. Ctrl+Q then S/D moves to line start/end,
 R/C to file start/end, F finds and A replaces. Escape cancels a prefix.
 This is a useful subset, not a complete WordStar emulation.
+
+## Syntax highlighting
+
+[Skylighting](https://github.com/jgm/skylighting) supplies the maintained
+KDE/Kate language definitions, including Haskell and over 100 other languages.
+The filename selects the grammar; unnamed buffers default to Haskell, and
+unknown file types stay plain. The editor only maps token categories to its
+palette. No editor-specific lexer or keyword lists are maintained.
+
+Tokens are cached per document and shared by split views. Edits and filename
+changes refresh the cache; cursor movement reuses it. A local GHC 9.14.1 benchmark
+on 1,001 Haskell lines measured about 36 ms per full retokenization and 2 ms per
+cached split-view redraw. Large files may need an incremental engine later.
+To rerun: `cabal exec -- ghc -O2 -package thc-edit test/HighlightBench.hs -o /tmp/thc-highlight-bench`,
+then `/tmp/thc-highlight-bench`.
+
+The `skylighting` package and its bundled grammar set are GPL-2 licensed;
+`skylighting-core` is BSD-3-Clause. This dependency belongs only to thc-edit.
 
 ## Git review and approval
 
@@ -141,7 +171,7 @@ cabal run -v0 thc-edit -- --demo --scene menu --snapshot-html > menu.html
 cabal run -v0 thc-edit -- --demo --scene gallery --snapshot-html > gallery.html
 ```
 
-Scenes: `desktop`, `menu`, `about`, `gallery`, `split`, `open`, `tree`, `help`, `diff`. Event-replay tests exercise
+Scenes: `desktop`, `menu`, `about`, `gallery`, `split`, `open`, `tree`, `help`, `diff`, `preferences`. Event-replay tests exercise
 the same pure desktop transitions used by the terminal application; file tests
 use real temporary files for conflict, permission, symlink and encoding cases.
 

@@ -27,19 +27,21 @@ import THC.Edit.Model
 import THC.Edit.Render
 import THC.Edit.Files
 
-data Option = Use Backend | Scale String | Size String | Demo | WordStar | Snapshot | Html | Scene String | Usage deriving Eq
+data Option = Use Backend | Scale String | Size String | Mode String | Demo | WordStar | Snapshot | Html | Scene String | Usage deriving Eq
 options :: [OptDescr Option]
 options = [Option [] ["metal"] (NoArg (Use Metal)) "Open a Metal window"
           ,Option [] ["vulkan"] (NoArg (Use Vulkan)) "Open a Vulkan window"
           ,Option [] ["window"] (NoArg (Use Auto)) "Open a window using the platform backend"
           ,Option [] ["terminal"] (NoArg (Use Terminal)) "Use the terminal (override THC_EDIT_BACKEND)"
           ,Option [] ["scale"] (ReqArg Scale "N") "Integer window pixel scale, 1 to 8"
-          ,Option [] ["size"] (ReqArg Size "COLSxROWS") "Initial window dimensions in characters (default 80x25)"
+          ,Option [] ["mode"] (ReqArg Mode "NUMBER") "Window screen mode: 3 (80x25), 259 (80x50); default 3"
+          ,Option [] ["vga50"] (NoArg (Mode "259")) "Alias for --mode 259 (window only)"
+          ,Option [] ["size"] (ReqArg Size "COLSxROWS") "Initial character dimensions (override --mode dimensions)"
           ,Option [] ["demo"] (NoArg Demo) "Open a sample Haskell buffer"
           ,Option [] ["wordstar"] (NoArg WordStar) "Use WordStar editing keys"
           ,Option [] ["snapshot"] (NoArg Snapshot) "Print an 80x25 text snapshot and exit"
           ,Option [] ["snapshot-html"] (NoArg Html) "Print an HTML preview of actual Vty output and exit"
-          ,Option [] ["scene"] (ReqArg Scene "desktop|menu|about|gallery|split|open|tree|help|diff") "Preview scene (with --demo)"
+          ,Option [] ["scene"] (ReqArg Scene "desktop|menu|about|gallery|split|open|tree|help|diff|preferences") "Preview scene (with --demo)"
           ,Option ['h'] ["help"] (NoArg Usage) "Show help"]
 
 main :: IO ()
@@ -51,16 +53,22 @@ main = do
   else if Usage `elem` flags then putStr (usageInfo "Usage: thc-edit [OPTIONS] [--] [FILE.hs ...]\n\nTurbo Haskell source editor.\nF2 Save, F3 Open, F10 Menu, Alt+X Exit.\n" options)
   else do
     backend <- either die pure (chooseBackend backendDefault [b | Use b <- flags])
+    screenMode <- case [s | Mode s <- flags] of
+      [] -> pure 3
+      [s] -> either die pure (parseScreenMode s)
+      _ -> die "Specify --mode or --vga50 only once."
+    when (backend == Terminal && any isMode flags && Snapshot `notElem` flags && Html `notElem` flags) $
+      die "--mode/--vga50 requires --window, --metal or --vulkan; terminal size is controlled by your terminal."
     scale <- case [s | Scale s <- flags] of
       [] -> pure 0
       [s] | Just n <- readMaybe s, n >= 1, n <= 8 -> pure n
       _ -> die "--scale needs one integer from 1 to 8."
     dimensions <- case [s | Size s <- flags] of
-      [] -> pure (80,25)
+      [] -> pure (modeSize screenMode)
       [s] -> either die pure (parseWindowSize s)
       _ -> die "Specify --size only once."
     let initial=if Demo `elem` flags then addDocument Nothing (newBuffer (activeText demoDesktop)) (initialDesktop dimensions) else initialDesktop dimensions
-        configured=(fst (handleEvent (uncurry V.EvResize dimensions) initial)) {wordStar=WordStar `elem` flags}
+        configured=(fst (handleEvent (uncurry V.EvResize dimensions) initial)) {wordStar=WordStar `elem` flags,videoMode=if backend == Terminal then Nothing else Just screenMode}
     (_,loaded)<-applyEffects configured (map ReadPath paths)
     (_,withGit)<-applyEffects loaded [RefreshGit (startingDirectory loaded)]
     staged<-foldM stageScene withGit [scene | Scene scene<-flags]
@@ -72,6 +80,9 @@ main = do
       when (V.supportsMode (V.outputIface vty) V.BracketedPaste) (V.setMode (V.outputIface vty) V.BracketedPaste True)
       size<-V.displayBounds (V.outputIface vty)
       loop vty (fst (handleEvent (uncurry V.EvResize size) staged))
+  where
+    isMode Mode{} = True
+    isMode _ = False
 
 stageScene :: Desktop -> String -> IO Desktop
 stageScene d scene = case lookup scene [("open",Open),("tree",ToggleTree),("help",Help),("diff",GitDiff)] of
@@ -84,6 +95,7 @@ setScene d scene=case scene of
   "menu" -> d {menu=Just (0,1)}
   "about" -> fst (runCommand About d)
   "gallery" -> fst (runCommand Gallery d)
+  "preferences" -> fst (runCommand EditorOptions d)
   "split" -> fst (runCommand SplitHorizontal d)
   _ -> message "Unknown preview scene" [T.pack scene] d
 
@@ -104,6 +116,7 @@ applyEffects = foldM apply . (False,)
   where
     apply state@(True,_) _=pure state
     apply (_,d) Exit=pure (True,d)
+    apply (_,d) SetScreenMode{}=pure (False,d {status="Screen modes are available in a graphical window."})
     apply (_,d) (ReadPath path)=do
       directory<-doesDirectoryExist path
       if directory then apply (False,d) (ReadTree path)
@@ -183,7 +196,7 @@ applyEffects = foldM apply . (False,)
           Left err->pure (False,message "Cannot save file" (wrapMessage (T.pack err)) d)
           Right file->do
             let b=documentBuffer doc
-                clean=doc {documentFile=Just file,documentBuffer=b {saved=contents b}}
+                clean=restyle doc {documentFile=Just file,documentBuffer=b {saved=contents b}}
                 updated=d {buffers=M.insert bid clean (buffers d),status="File saved."}
             (_,refreshed)<-apply (False,updated) (RefreshGit (takeDirectory (filePath file)))
             case after of

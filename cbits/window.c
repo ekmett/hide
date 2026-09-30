@@ -9,7 +9,7 @@ static SDL_Window *window;
 static SDL_Renderer *renderer;
 static SDL_Texture *texture;
 static uint32_t *pixels;
-static int cols, rows, scale, origin_x, origin_y, pixel_w, pixel_h;
+static int cols, rows, scale, cell_height, origin_x, origin_y, pixel_w, pixel_h;
 static char *input_text;
 static char *clipboard_text;
 static bool left_down;
@@ -39,12 +39,12 @@ void thc_close(void) {
 static void geometry(void) {
     SDL_GetRenderOutputSize(renderer, &pixel_w, &pixel_h);
     cols = SDL_clamp(pixel_w / (8 * scale), 1, 512);
-    rows = SDL_clamp(pixel_h / (16 * scale), 1, 256);
+    rows = SDL_clamp(pixel_h / (cell_height * scale), 1, 256);
     origin_x = (pixel_w - cols * 8 * scale) / 2;
-    origin_y = (pixel_h - rows * 16 * scale) / 2;
+    origin_y = (pixel_h - rows * cell_height * scale) / 2;
 }
 
-int thc_open(const char *backend, int requested_scale, int requested_cols, int requested_rows) {
+int thc_open(const char *backend, int requested_scale, int requested_cols, int requested_rows, int height) {
     if (!SDL_Init(SDL_INIT_VIDEO)) return 0;
     command_event = SDL_RegisterEvents(1);
     window = SDL_CreateWindow("Turbo Haskell", 1280, 800, SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
@@ -57,12 +57,31 @@ int thc_open(const char *backend, int requested_scale, int requested_cols, int r
     SDL_GetWindowSize(window, &ww, &wh);
     double density = (double)pw / SDL_max(1, ww);
     scale = requested_scale ? requested_scale : SDL_max(1, (int)lround(2 * density));
-    if (!SDL_SetWindowSize(window, (int)lround(requested_cols * 8 * scale / density), (int)lround(requested_rows * 16 * scale / density))) return 0;
-    /* X11/Wayland resize requests can complete after SetWindowSize returns. */
-    if (!SDL_SyncWindow(window)) return 0;
-    SDL_SetWindowMinimumSize(window, (int)ceil(40 * 8 * scale / density), (int)ceil(12 * 16 * scale / density));
-    geometry();
+    if (!thc_mode(height, requested_cols, requested_rows)) return 0;
     return SDL_StartTextInput(window);
+}
+
+int thc_mode(int height, int requested_cols, int requested_rows) {
+    if (height != 8 && height != 16) return SDL_SetError("Cell height must be 8 or 16");
+    int pw, ph, ww, wh, min_w, min_h;
+    SDL_GetWindowSizeInPixels(window, &pw, &ph);
+    SDL_GetWindowSize(window, &ww, &wh);
+    SDL_GetWindowMinimumSize(window, &min_w, &min_h);
+    double density = (double)pw / SDL_max(1, ww);
+    /* Lower the old minimum before switching a small custom-size window. */
+    /* X11/Wayland resize requests can complete after SetWindowSize returns. */
+    if (!SDL_SetWindowMinimumSize(window, (int)ceil(40 * 8 * scale / density), (int)ceil(12 * height * scale / density)) ||
+        !SDL_SetWindowSize(window, (int)lround(requested_cols * 8 * scale / density), (int)lround(requested_rows * height * scale / density)) ||
+        !SDL_SyncWindow(window)) {
+        char error[1024]; SDL_strlcpy(error, SDL_GetError(), sizeof(error));
+        SDL_SetWindowMinimumSize(window, min_w, min_h);
+        SDL_SetWindowSize(window, ww, wh);
+        SDL_SyncWindow(window);
+        return SDL_SetError("%s", error);
+    }
+    cell_height = height;
+    geometry();
+    return 1;
 }
 
 void thc_size(int *w, int *h) { geometry(); *w = cols; *h = rows; }
@@ -106,7 +125,7 @@ int thc_present(void) {
     if (!SDL_UpdateTexture(texture, NULL, pixels, cols * 8 * sizeof(*pixels))) return 0;
     SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
     if (!SDL_RenderClear(renderer)) return 0;
-    SDL_FRect target = {(float)origin_x, (float)origin_y, (float)(cols * 8 * scale), (float)(rows * 16 * scale)};
+    SDL_FRect target = {(float)origin_x, (float)origin_y, (float)(cols * 8 * scale), (float)(rows * cell_height * scale)};
     if (!SDL_RenderTexture(renderer, texture, NULL, &target)) return 0;
     const char *capture = SDL_getenv("THC_EDIT_CAPTURE");
     if (capture && *capture && !thc_capture(capture)) return 0;
@@ -139,7 +158,7 @@ static void pointer(float x, float y, int32_t *event) {
     SDL_GetWindowSize(window, &ww, &wh);
     /* Floor is essential outside the grid: C integer truncation would hit cell 0. */
     event[1] = (int)floor((x * pixel_w / SDL_max(1, ww) - origin_x) / (8 * scale));
-    event[2] = (int)floor((y * pixel_h / SDL_max(1, wh) - origin_y) / (16 * scale));
+    event[2] = (int)floor((y * pixel_h / SDL_max(1, wh) - origin_y) / (cell_height * scale));
     event[4] = modifiers(SDL_GetModState());
 }
 void thc_post_command(int command) {

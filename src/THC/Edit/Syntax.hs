@@ -1,40 +1,37 @@
-module THC.Edit.Syntax where
-import Data.Char (isAlpha, isAlphaNum, isDigit, isUpper)
+{-# LANGUAGE OverloadedStrings #-}
+module THC.Edit.Syntax (Style(..), highlight, highlightFor) where
+
+import Data.List (intercalate)
 import qualified Data.Text as T
+import qualified Skylighting as S
+import System.FilePath (takeFileName)
 
 data Style = Plain | Keyword | Comment | Literal | Number | Constructor | Pragma deriving (Eq,Show)
 
--- Stateful scan includes nested comments; styling never changes source text.
 highlight :: T.Text -> [(Char,Style)]
-highlight = scan . T.unpack
+highlight = highlightFor "Main.hs"
+
+-- Language rules come entirely from Skylighting's maintained KDE definitions.
+-- Only their token categories are mapped to the editor's palette here.
+highlightFor :: FilePath -> T.Text -> [(Char,Style)]
+highlightFor path source = case S.syntaxesByFilename S.defaultSyntaxMap (takeFileName path) of
+  syntax:_ -> case S.tokenize (S.TokenizerConfig S.defaultSyntaxMap False) syntax source of
+    Right lines' ->
+      let styled = intercalate [('\n',Plain)] (map (concatMap paint) lines')
+                   ++ [('\n',Plain) | "\n" `T.isSuffixOf` source]
+      -- Never change buffer positions if a tokenizer normalizes its input.
+      in if T.pack (map fst styled) == source then styled else plain
+    Left _ -> plain
+  [] -> plain
   where
-    paint st = map (,st)
-    scan [] = []
-    scan ('{':'-':'#':xs) = paint Pragma "{-#" ++ block 1 Pragma xs
-    scan ('{':'-':xs) = paint Comment "{-" ++ block 1 Comment xs
-    scan ('-':'-':xs) | case xs of [] -> True; x:_ -> not (symbol x) =
-      let (a,b) = break (=='\n') xs in paint Comment ("--"++a) ++ scan b
-    scan ('"':xs) = ('"',Literal) : quoted '"' xs
-    scan ('\'':c:'\'':xs) = paint Literal ['\'',c,'\''] ++ scan xs
-    scan ('\'':'\\':c:'\'':xs) = paint Literal ['\'','\\',c,'\''] ++ scan xs
-    scan (c:cs)
-      | isAlpha c || c == '_' =
-          let (a,b) = span (\x -> isAlphaNum x || x `elem` "_'") cs
-              token = c:a
-              style | token `elem` keywords = Keyword
-                    | isUpper c = Constructor
-                    | otherwise = Plain
-          in paint style token ++ scan b
-      | isDigit c = let (a,b) = span (\x -> isAlphaNum x || x `elem` "._") cs
-                    in paint Number (c:a) ++ scan b
-      | otherwise = (c,Plain) : scan cs
-    block :: Int -> Style -> String -> [(Char,Style)]
-    block _ _ [] = []
-    block n st ('{':'-':xs) = paint st "{-" ++ block (n+1) st xs
-    block n st ('-':'}':xs) = paint st "-}" ++ (if n == 1 then scan xs else block (n-1) st xs)
-    block n st (c:cs) = (c,st) : block n st cs
-    quoted _ [] = []
-    quoted q ('\\':c:cs) = paint Literal ['\\',c] ++ quoted q cs
-    quoted q (c:cs) = (c,Literal) : (if c == q then scan cs else quoted q cs)
-    symbol c = c `elem` "!#$%&*+./<=>?@\\^|-~:"
-    keywords = words "as case class data default deriving do else family forall foreign hiding if import in infix infixl infixr instance let mdo module newtype of pattern qualified role safe then type unsafe where stock anyclass via"
+    plain = map (,Plain) (T.unpack source)
+    paint (token,text) = map (,style token) (T.unpack text)
+    style token = case token of
+      S.KeywordTok -> Keyword; S.ControlFlowTok -> Keyword; S.ImportTok -> Keyword
+      S.CommentTok -> Comment; S.DocumentationTok -> Comment; S.AnnotationTok -> Comment; S.CommentVarTok -> Comment
+      S.CharTok -> Literal; S.SpecialCharTok -> Literal; S.StringTok -> Literal
+      S.VerbatimStringTok -> Literal; S.SpecialStringTok -> Literal
+      S.DecValTok -> Number; S.BaseNTok -> Number; S.FloatTok -> Number
+      S.DataTypeTok -> Constructor; S.ConstantTok -> Constructor
+      S.PreprocessorTok -> Pragma; S.ExtensionTok -> Pragma
+      _ -> Plain

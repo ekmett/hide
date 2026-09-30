@@ -95,13 +95,13 @@ windowLayers d active w =
   ,place x y (box frame active ww hh)]
   where
     Rect x y ww hh=bounds w
-    doc=fromMaybe (Document (newBuffer "") Nothing Nothing) (M.lookup (bufferId w) (buffers d))
+    doc=fromMaybe (newDocument (newBuffer "") Nothing) (M.lookup (bufferId w) (buffers d))
     b=documentBuffer doc; t=contents b
     file=maybe ("NONAME"<>T.pack (show (bufferId w))<>".HS") (T.pack . takeFileName . filePath) (documentFile doc)
     title=" "<>fromMaybe file (documentLabel doc)<>(if dirty b then " * " else " ")
     frame=attr (if active then white else gray) blue
     (r,c)=lineColumn t (caret (selection w))
-    styledLines=splitStyled (if documentLabel doc /= Nothing then [(ch,Plain) | ch<-T.unpack t] else highlight t)
+    styledLines=splitStyled (if documentLabel doc /= Nothing then [(ch,Plain) | ch<-T.unpack t] else documentHighlight doc)
     thumb=1+scrollRow w*max 1 (hh-5) `div` max 1 (length styledLines-1)
     contentWidth=max 0 (ww-2); contentHeight=max 0 (hh-2)
     textImage=V.vertCat [renderLine n | n<-[scrollRow w..scrollRow w+contentHeight-1]]

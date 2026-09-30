@@ -4,7 +4,7 @@ import THC.Edit.Frontend
 import THC.Edit.Model
 #ifdef WITH_WINDOW
 import Control.Exception (bracket_)
-import Control.Monad (forM_, when, unless)
+import Control.Monad (forM_, when, unless, foldM)
 import Data.Foldable (toList)
 import qualified Data.ByteString as BS
 import qualified Data.Text as T
@@ -21,7 +21,8 @@ import System.IO (hPutStrLn, stderr)
 import THC.Edit.Font
 import THC.Edit.Render
 
-foreign import ccall unsafe "thc_open" c_open :: CString -> CInt -> CInt -> CInt -> IO CInt
+foreign import ccall unsafe "thc_open" c_open :: CString -> CInt -> CInt -> CInt -> CInt -> IO CInt
+foreign import ccall unsafe "thc_mode" c_mode :: CInt -> CInt -> CInt -> IO CInt
 foreign import ccall unsafe "thc_close" c_close :: IO ()
 foreign import ccall unsafe "thc_error" c_error :: IO CString
 foreign import ccall unsafe "thc_backend" c_backend :: IO CString
@@ -122,7 +123,7 @@ runWindow backend scale effects initial = do
   let driver = case backend of Metal -> "metal"; Vulkan -> "vulkan"; _ -> if os == "darwin" then "metal" else "vulkan"
   -- SDL must stay on the main OS thread; GHC's main action is a bound thread.
   bracket_ (pure ()) c_close $ do
-    withCString driver $ \name -> check ("Cannot start " ++ driver ++ " window") (c_open name (fromIntegral scale) (fromIntegral (fst (screenSize initial))) (fromIntegral (snd (screenSize initial))))
+    withCString driver $ \name -> check ("Cannot start " ++ driver ++ " window") (c_open name (fromIntegral scale) (fromIntegral (fst (screenSize initial))) (fromIntegral (snd (screenSize initial))) (fromIntegral (modeHeight (maybe 3 id (videoMode initial)))))
     c_backend >>= peekCString >>= hPutStrLn stderr . ("Turbo Haskell renderer: " ++)
     nativeMenus
     sized <- alloca $ \wp -> alloca $ \hp -> do
@@ -138,8 +139,21 @@ runWindow backend scale effects initial = do
       draw font d
       event <- allocaArray 6 $ \p -> check "Read window event" (c_wait p) >> map fromIntegral <$> peekArray 6 p
       (next,requests) <- dispatch event d
-      (exit,updated) <- effects next requests
+      (exit,updated) <- foldM windowEffect (False,next) requests
       unless exit (loop font updated)
+    windowEffect state@(True,_) _ = pure state
+    windowEffect (_,d) (SetScreenMode mode) = do
+      let (cols,rows) = modeSize mode
+      ok <- c_mode (fromIntegral (modeHeight mode)) (fromIntegral cols) (fromIntegral rows)
+      err <- if ok == 0 then c_error >>= peekCString else pure ""
+      alloca $ \wp -> alloca $ \hp -> do
+        c_size wp hp
+        w <- fromIntegral <$> peek wp
+        h <- fromIntegral <$> peek hp
+        pure (False, if ok == 0
+          then message "Cannot change screen mode" [T.pack err] (fst (handleEvent (V.EvResize w h) d))
+          else (resizeScreenMode (w,h) d) {videoMode=Just mode})
+    windowEffect (_,d) request = effects d [request]
     dispatch (1:key:mods:_) d
       | key == fromEnum 'v' && mods .&. 10 /= 0 && (not (wordStar d) || mods .&. 8 /= 0) = paste d
       | otherwise = case decodeKey key mods of

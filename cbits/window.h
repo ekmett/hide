@@ -2,7 +2,8 @@
 #define THC_WINDOW_H
 #include <stdint.h>
 void thc_post_command(int command);
-int thc_open(const char *backend, int scale, int cols, int rows);
+int thc_open(const char *backend, int scale, int cols, int rows, int cell_height);
+int thc_mode(int cell_height, int cols, int rows);
 void thc_close(void);
 const char *thc_error(void);
 const char *thc_backend(void);

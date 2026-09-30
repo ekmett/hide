@@ -1,4 +1,4 @@
-module THC.Edit.Frontend (Backend(..), chooseBackend, parseWindowSize, decodeKey) where
+module THC.Edit.Frontend (Backend(..), chooseBackend, parseWindowSize, parseScreenMode, modeSize, modeHeight, decodeKey) where
 import Data.Bits ((.&.))
 import Data.Char (chr, isDigit)
 import Text.Read (readMaybe)
@@ -6,6 +6,18 @@ import Data.List (nub)
 import qualified Graphics.Vty as V
 
 data Backend = Terminal | Auto | Metal | Vulkan deriving (Eq,Show)
+
+-- Borland TextMode constants: C80 (3), C80 + Font8x8 (259).
+parseScreenMode :: String -> Either String Int
+parseScreenMode value = case readMaybe (case value of '$':xs -> "0x" ++ xs; _ -> value) of
+  Just n | n `elem` [3,259] -> Right n
+  _ -> Left "--mode needs 3 (80x25) or 259 (80x50); hexadecimal 0x03/0x103 also works."
+
+modeSize :: Int -> (Int,Int)
+modeSize mode = (80, if mode == 259 then 50 else 25)
+
+modeHeight :: Int -> Int
+modeHeight mode = if mode == 259 then 8 else 16
 
 chooseBackend :: Maybe String -> [Backend] -> Either String Backend
 chooseBackend env explicit = case nub explicit of

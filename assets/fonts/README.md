@@ -1,6 +1,10 @@
 # Bundled bitmap fonts
 
-The window uses 8 × 16 pixel cells. IBM VGA glyphs take precedence; GNU
+The source framebuffer uses 8 × 16 pixel cells. Mode 3 displays them at
+their original aspect ratio; Mode 259 compresses their display height by
+half to fit 80 × 50 characters in the same pixel area, using nearest-neighbor
+sampling. Both modes use the same unmodified bitmap assets.
+IBM VGA glyphs take precedence; GNU
 Unifont fills uncovered code points with 8 × 16 or 16 × 16 bitmaps. Unsupported
 code points display the IBM replacement glyph. These assets affect display
 only: they do not replace characters in the document. There is no runtime

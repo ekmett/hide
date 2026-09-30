@@ -13,6 +13,7 @@ import Text.Read (readMaybe)
 import System.FilePath ((</>), takeDirectory)
 import THC.Edit.Browser (Entry(..))
 import THC.Edit.Git (GitReview)
+import THC.Edit.Syntax (Style, highlightFor)
 import THC.Edit.Buffer
 import THC.Edit.Files (FileState(..))
 
@@ -21,7 +22,15 @@ data Rect = Rect { left :: Int, top :: Int, width :: Int, height :: Int } derivi
 inside :: Rect -> Int -> Int -> Bool
 inside (Rect x y w h) a b = a >= x && a < x+w && b >= y && b < y+h
 
-data Document = Document { documentBuffer :: Buffer, documentFile :: Maybe FileState, documentLabel :: Maybe Text } deriving (Eq,Show)
+data Document = Document { documentBuffer :: Buffer, documentFile :: Maybe FileState, documentLabel :: Maybe Text, documentHighlight :: [(Char,Style)] } deriving (Eq,Show)
+-- Shared by split views; cursor movement and repaint reuse the lazy token cache.
+newDocument :: Buffer -> Maybe FileState -> Document
+newDocument b file = restyle (Document b file Nothing [])
+
+-- ponytail: retokenize the buffer after edits; use an incremental engine if large-file latency warrants it.
+restyle :: Document -> Document
+restyle doc = doc {documentHighlight=highlightFor (maybe "Main.hs" filePath (documentFile doc)) (contents (documentBuffer doc))}
+
 data Window = Window
   { windowId :: Int, bufferId :: Int, bounds :: Rect, selection :: Selection
   , scrollRow :: Int, scrollColumn :: Int, restoredBounds :: Maybe Rect
@@ -30,7 +39,7 @@ data Command = New | Open | Save | SaveAs | Close | Quit | Undo | Redo | Cut | C
   | Find | FindNext | Replace | GoTo | SelectAll | Zoom | NextWindow | Cascade | Tile
   | SplitVertical | SplitHorizontal | About | Help | EditorOptions | Gallery
   | ToggleTree | GitDiff | GitCommit | Disabled Text deriving (Eq,Show)
-data Effect = ReadPath FilePath | BrowsePath FilePath Text | OpenChoice FilePath Text Text | ReadTree FilePath | ExpandTree Int | ReadHelp | RefreshGit FilePath | ReadGitDiff | AskGitCommit | WriteGitCommit Text | SaveDocument Int (Maybe FilePath) (Maybe Command) | Exit deriving (Eq,Show)
+data Effect = ReadPath FilePath | BrowsePath FilePath Text | OpenChoice FilePath Text Text | ReadTree FilePath | ExpandTree Int | ReadHelp | RefreshGit FilePath | ReadGitDiff | AskGitCommit | WriteGitCommit Text | SaveDocument Int (Maybe FilePath) (Maybe Command) | SetScreenMode Int | Exit deriving (Eq,Show)
 data Field = Input Text Text Int | CheckBox Text Bool | Radio Text [Text] Int | ListBox Text [Text] Int | FileList [Entry] Int deriving (Eq,Show)
 data Purpose = Opening FilePath Text [Entry] | Committing | Saving Int (Maybe Command) | Finding | Replacing | GoingTo
   | Confirm Command | Information | Settings | Widgets deriving (Eq,Show)
@@ -45,7 +54,7 @@ data Desktop = Desktop
   { screenSize :: (Int,Int), windows :: [Window], buffers :: M.Map Int Document
   , nextId :: Int, menu :: Maybe (Int,Int), dialog :: Maybe Dialog, drag :: Maybe Drag
   , clipboard :: Text, wordStar :: Bool, prefix :: Maybe Char, status :: Text
-  , blockStart :: Maybe (Int,Int), lastFind :: Text, sideTree :: Maybe Sidebar, branchStatus :: Text, nativeMac :: Bool, gitReview :: Maybe GitReview
+  , blockStart :: Maybe (Int,Int), lastFind :: Text, sideTree :: Maybe Sidebar, branchStatus :: Text, nativeMac :: Bool, gitReview :: Maybe GitReview, videoMode :: Maybe Int
   } deriving (Eq,Show)
 
 data MenuItem = MenuItem Text Text Command deriving (Eq,Show)
@@ -58,7 +67,7 @@ menus =
   ,("Compile",'c',[off "Compile" "Alt+F9" "THC compilation is not connected yet.",off "Make" "F9" "Cabal project integration is a later milestone."])
   ,("Debug",'d',[off "Inspect type..." "" "HLS is not connected yet.",off "Go to definition" "" "HLS is not connected yet."])
   ,("Tools",'t',[mi "File tree" "Ctrl+B" ToggleTree,mi "Git diff..." "" GitDiff,mi "Approve changes..." "" GitCommit,mi "Widget gallery..." "" Gallery,off "Project browser..." "" "Cabal component browsing is not connected yet."])
-  ,("Options",'o',[mi "Editor..." "" EditorOptions])
+  ,("Options",'o',[mi "Preferences..." "" EditorOptions])
   ,("Window",'w',[mi "Tile" "" Tile,mi "Cascade" "" Cascade,mi "Split vertically" "" SplitVertical,mi "Split horizontally" "" SplitHorizontal,mi "Zoom" "F5" Zoom,mi "Next" "F6" NextWindow,mi "Close" "Alt+F3" Close])
   ,("Help",'h',[mi "Contents" "F1" Help,mi "About Turbo Haskell..." "" About])]
   where mi = MenuItem
@@ -91,7 +100,7 @@ menuRect d i = Rect (min x (max 0 (sw-w))) 1 w (length (menuItems i)+2)
         w = min sw (maximum [T.length t + T.length (menuShortcut d entry) + 5 | entry@(MenuItem t _ _) <- menuItems i])
 
 initialDesktop :: (Int,Int) -> Desktop
-initialDesktop size = Desktop size [] M.empty 1 Nothing Nothing Nothing "" False Nothing "" Nothing "" Nothing "" False Nothing
+initialDesktop size = Desktop size [] M.empty 1 Nothing Nothing Nothing "" False Nothing "" Nothing "" Nothing "" False Nothing Nothing
 
 activeWindow :: Desktop -> Maybe Window
 activeWindow = listToMaybe . windows
@@ -103,7 +112,7 @@ fitRect (sw,sh) (Rect x y w h) = Rect (max 0 (min x (sw-w'))) (max 1 (min y (sh-
   where w' = max 1 (min sw (max 16 w)); h' = max 1 (min (max 1 (sh-2)) (max 5 h))
 
 addDocument :: Maybe FileState -> Buffer -> Desktop -> Desktop
-addDocument file b d = d { windows = w : windows d, buffers = M.insert i (Document b file Nothing) (buffers d), nextId = i+1, sideTree=fmap (\tree -> tree {treeFocused=False}) (sideTree d) }
+addDocument file b d = d { windows = w : windows d, buffers = M.insert i (newDocument b file) (buffers d), nextId = i+1, sideTree=fmap (\tree -> tree {treeFocused=False}) (sideTree d) }
   where
     i = nextId d
     offset = length (windows d) `mod` 5
@@ -133,7 +142,7 @@ editActive :: (Selection -> Buffer -> Buffer) -> Maybe Int -> Desktop -> Desktop
 editActive _ _ d | maybe False treeFocused (sideTree d) = d
 editActive f cursor d = case (activeWindow d, activeDocument d) of
   (Just _, Just doc) | documentLabel doc /= Nothing -> d {status="This window is read-only."}
-  (Just active, Just doc) -> ensureVisible d { buffers = M.insert bid doc {documentBuffer = changed} (buffers d), windows = map adjust (windows d) }
+  (Just active, Just doc) -> ensureVisible d { buffers = M.insert bid (restyle doc {documentBuffer = changed}) (buffers d), windows = map adjust (windows d) }
     where
       bid = bufferId active
       original = documentBuffer doc
@@ -211,7 +220,9 @@ runCommand cmd source = go cmd (source {menu = Nothing, prefix = Nothing, drag =
     go ToggleTree d = case sideTree d of Just _ -> (setTree Nothing d,[]); Nothing -> (d,[ReadTree (startingDirectory d)])
     go GitDiff d = (d,[ReadGitDiff])
     go GitCommit d = (d,[AskGitCommit])
-    go EditorOptions d = (prompt "Editor options" Settings [Radio "Key bindings" ["Modern","WordStar"] (if wordStar d then 1 else 0)] d,[])
+    go EditorOptions d = (prompt "Preferences" Settings
+      ([Radio "Key bindings" ["Modern","WordStar"] (if wordStar d then 1 else 0)] ++
+       [Radio "Screen size" ["Mode 3 (80x25)","Mode 259 (80x50)"] (if mode == 259 then 1 else 0) | Just mode <- [videoMode d]]) d,[])
     go Gallery d = (prompt "Dialog controls" Widgets [Input "Module name" "Main" 4,CheckBox "Auto indent" True,Radio "Tab width" ["4 columns","8 columns"] 1,ListBox "Source files" ["Main.hs","Types.hs","Parser.hs","Syntax.hs","Eval.hs"] 0] d,[])
     go (Disabled reason) d = (d {status = reason},[])
     confirm action d = (d {dialog = Just (Dialog "Save changes?" (Confirm action) [] 0 ["Save","Discard","Cancel"] ["Save changes to " <> documentTitle d <> "?"])},[])
@@ -298,6 +309,19 @@ buttonRects d dg = zipWith (\bx label -> Rect bx (y+h-2) (T.length label+4) 1) s
     widths = map ((+4) . T.length) (buttons dg)
     total = sum widths+2*(length widths-1)
     starts = scanl (\a b -> a+b+2) (x+max 1 ((w-total) `div` 2)) widths
+
+-- A screen-mode change scales the desktop layout to use the new row count.
+resizeScreenMode :: (Int,Int) -> Desktop -> Desktop
+resizeScreenMode (sw,sh) d = ensureVisible resized {windows=map stretch (windows d)}
+  where
+    resized = fst (handleEvent (V.EvResize sw sh) d)
+    (oldW,oldH) = screenSize d
+    oldTree = treeWidthOf d
+    newTree = treeWidthOf resized
+    x n = newTree + (n-oldTree) * (sw-newTree) `div` max 1 (oldW-oldTree)
+    y n = 1 + (n-1) * (sh-2) `div` max 1 (oldH-2)
+    stretchRect (Rect l t w h) = fitWindow resized (Rect (x l) (y t) (x (l+w)-x l) (y (t+h)-y t))
+    stretch w = w {bounds=stretchRect (bounds w),restoredBounds=fmap stretchRect (restoredBounds w)}
 
 handleEvent :: V.Event -> Desktop -> (Desktop,[Effect])
 handleEvent (V.EvResize sw sh) d = let resized=d {screenSize=(max 1 sw,max 3 sh),sideTree=fmap (\t -> t {treeWidth=min (treeWidth t) (max 0 (sw-16))}) (sideTree d)} in (resized {windows=map (\w -> w {bounds=fitWindow resized (bounds w)}) (windows d),drag=Nothing,menu=Nothing},[])
@@ -540,7 +564,9 @@ submitDialog button dg original
                     Quit -> runCommand Quit (discardActive d)
                     _ -> (d,[])
                 | otherwise -> (d,[])
-    Settings -> (d {wordStar=any (\f -> case f of Radio _ _ 1 -> True; _ -> False) (fields dg),status="Editor options updated."},[])
+    Settings -> (d {wordStar=any (\f -> case f of Radio "Key bindings" _ 1 -> True; _ -> False) (fields dg),status="Preferences updated."},
+      [SetScreenMode mode | Radio "Screen size" _ chosen <- fields dg,
+       let mode = if chosen == 1 then 259 else 3, Just mode /= videoMode d])
     Widgets -> (d {status="Dialog test complete."},[])
     Information -> (d,[])
   where
