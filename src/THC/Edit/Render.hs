@@ -23,6 +23,8 @@ blue, gray, black, white, yellow, cyan, green, red :: V.Color
 blue=V.RGBColor 0 0 170; gray=V.RGBColor 170 170 170; black=V.RGBColor 0 0 0
 white=V.RGBColor 255 255 255; yellow=V.RGBColor 255 255 85; cyan=V.RGBColor 85 255 255
 green=V.RGBColor 0 170 0; red=V.RGBColor 170 0 0
+scrollCyan :: V.Color
+scrollCyan=V.RGBColor 0 170 170
 attr :: V.Color -> V.Color -> V.Attr
 attr fg bg = V.defAttr `V.withForeColor` fg `V.withBackColor` bg
 paper, edit, selected, shadow :: V.Attr
@@ -48,28 +50,42 @@ renderDesktop d = (V.picForLayers layers) {V.picCursor=cursor}
     layers = case dialog d of
       Nothing -> withMenu
       Just dg -> dialogLayers d dg ++ [castShadow (screenSize d) (dialogRect d dg) withMenu] ++ withMenu
-    withMenu = case menu d of
+    withMenu = case contextMenu d of
+      Just popup@(r,_) -> contextLayers d popup ++ [castShadow (screenSize d) r base] ++ base
+      Nothing -> withMainMenu
+    withMainMenu = case menu d of
       Nothing -> base
       Just m@(i,_) -> menuLayers d m ++ [castShadow (screenSize d) (menuRect d i) base] ++ base
     base = [place 0 0 menuBar, place 0 (sh-1) statusBar]
+      ++ problemsLayers d
       ++ maybe [] (treeLayers d) (sideTree d)
-      ++ concat [windowLayers d (i==0) w | (i,w)<-zip [0::Int ..] (windows d)]
-      ++ [V.charFill (attr gray blue) '░' sw sh]
-    menuBar = V.cropRight sw (V.char paper ' ' V.<|> V.horizCat [V.char paper ' ' V.<|> label (attr red gray) (T.take 1 title) V.<|> label paper (T.drop 1 title<>" ") | (title,_,_)<-menus] V.<|> V.charFill paper ' ' sw 1)
-    statusBar = V.cropRight (max 0 (sw-T.length badge)) (keyLegend (case prefix d of
-      Just c -> " Ctrl+"<>T.singleton c<>"-  (Esc cancels)"
-      Nothing -> if dialog d/=Nothing then " Tab Next  Enter Select  Esc Cancel"
-                 else if not (T.null (status d)) then " F1 Help | "<>status d
-                 else " F1 Help  F2 Save  F3 Open  F5 Zoom  F6 Next  F10 Menu") V.<|> V.charFill paper ' ' sw 1) V.<|> label paper badge
-    badge = if T.null (branchStatus d) then "" else " │ "<>branchStatus d<>" "
+      ++ foldr stackWindow [V.charFill (attr blue gray) '░' sw sh] (zip [0::Int ..] (windows d))
+    stackWindow (i,w) below = windowLayers d (i==0) w ++ [castShadow (screenSize d) (bounds w) below] ++ below
+    menuBar = V.cropRight sw (V.char paper ' ' V.<|> V.horizCat
+      [V.char normal ' ' V.<|> label (attr red bg) (T.take 1 title) V.<|> label normal (T.drop 1 title<>" ")
+       | (i,(title,_,_))<-zip [0..] menus,let bg=if fmap fst (menu d)==Just i then green else gray,let normal=attr black bg]
+      V.<|> V.charFill paper ' ' sw 1)
+    statusBar = V.cropRight (max 0 (sw-T.length badge)) (keyLegend statusText V.<|> V.charFill paper ' ' sw 1) V.<|> badgeImage
+    statusText
+      | Just _ <- dragOriginal d = " ↑↓→← Move  Shift+↑↓→← Resize  ↵ Done  Esc Cancel"
+      | Just text <- menuHelp d = " "<>text
+      | Just c <- prefix d = " Ctrl+"<>T.singleton c<>"-  (Esc cancels)"
+      | dialog d/=Nothing = " Tab Next  Enter Select  Esc Cancel"
+      | not (T.null (typeHint d)) = " "<>typeHint d
+      | not (T.null (status d)) = " F1 Help | "<>status d
+      | otherwise = " F1 Help  F2 Save  F3 Open  F5 Zoom  F6 Next  F10 Menu"
+    badge = gitBadgeText d
+    badgeImage = if T.null badge then V.emptyImage else label paper (" │ "<>gitBranchText d<>" ")
+      V.<|> label (attr green gray) ("+"<>gitCountText (branchAdded d)) V.<|> label paper " "
+      V.<|> label (attr red gray) ("-"<>gitCountText (branchDeleted d)) V.<|> label paper " "
     cursor = case dialog d of
       Just dg -> case drop (focus dg) (zip (fieldRects d dg) (fields dg)) of
         (Rect x y w _,Input _ value p):_ -> let offset=max 0 (displayColumn value p-w+1)
                                          in V.Cursor (x+displayColumn value p-offset) (y+1)
         _ -> V.NoCursor
-      Nothing | menu d/=Nothing -> V.NoCursor
+      Nothing | menu d/=Nothing || contextMenu d/=Nothing || problemsFocused d || maybe False treeFocused (sideTree d) -> V.NoCursor
       Nothing -> case (activeWindow d,activeDocument d) of
-        (Just w,Just doc) -> let { (r,c)=lineColumn (contents (documentBuffer doc)) (caret (selection w)); x=left (bounds w)+1+displayColumn (lineAt (contents (documentBuffer doc)) r) c-scrollColumn w; y=top (bounds w)+1+r-scrollRow w }
+        (Just w,Just doc) -> let { (r,c)=bufferLineColumn (documentBuffer doc) (caret (selection w)); x=left (bounds w)+1+displayColumn (bufferLineAt (documentBuffer doc) r) c-scrollColumn w; y=top (bounds w)+1+r-scrollRow w }
                             in if inside (Rect (left (bounds w)+1) (top (bounds w)+1) (width (bounds w)-2) (height (bounds w)-2)) x y then V.Cursor x y else V.NoCursor
         _ -> V.NoCursor
 
@@ -86,29 +102,39 @@ castShadow size (Rect x y w h) below =
 
 windowLayers :: Desktop -> Bool -> Window -> [V.Image]
 windowLayers d active w =
-  [place (x+2) y (label frame "[■]"),place (x+ww-6) y (label frame "[↕]")
-  ,place (x+max 6 ((ww-T.length title) `div` 2)) y (label frame (T.take (max 0 (ww-14)) title))
-  ,place (x+2) (y+hh-1) (label frame (" "<>T.pack (show (r+1))<>":"<>T.pack (show (c+1))<>" "))
+  [place x (y+1+diagnosticRow issue-scrollRow w) (label (attr (if diagnosticSeverity issue==1 then V.RGBColor 255 85 85 else yellow) blue) "▶")
+    | issue<-diagnostics d, Just (diagnosticPath issue)==fmap filePath (documentFile doc), diagnosticRow issue>=scrollRow w, diagnosticRow issue<scrollRow w+hh-2]
+  ++ [place (x+2) y (label frame "[" V.<|> label (attr (V.RGBColor 85 255 85) blue) "■" V.<|> label frame "]"),place (x+ww-6) y (label frame "[" V.<|> label (attr cyan blue) "↑" V.<|> label frame "]")
+  ,place (x+ww-7-T.length number) y (label frame number)
+  ,place (x+max 6 ((ww-T.length title) `div` 2)) y (label frame (T.take (max 0 (ww-17-T.length number)) title))
+  ,place (x+2) (y+hh-1) (label frame (T.take (max 0 (ww-4)) (windowPositionText doc w)))
   ,place (x+ww-2) (y+hh-1) (label frame "◢")
-  ,place (x+ww-1) (y+1) (V.vertCat [V.char frame (if n==0 then '▲' else if n==hh-3 then '▼' else if n==thumb then '█' else '░') | n<-[0..hh-3]])
+  ,scrollbarImage True,scrollbarImage False
   ,place (x+1) (y+1) textImage
-  ,place x y (box frame active ww hh)]
+  ,place x y (box frame (active && not moving) ww hh)]
   where
     Rect x y ww hh=bounds w
     doc=fromMaybe (newDocument (newBuffer "") Nothing) (M.lookup (bufferId w) (buffers d))
     b=documentBuffer doc; t=contents b
     file=maybe ("NONAME"<>T.pack (show (bufferId w))<>".HS") (T.pack . takeFileName . filePath) (documentFile doc)
     title=" "<>fromMaybe file (documentLabel doc)<>(if dirty b then " * " else " ")
-    frame=attr (if active then white else gray) blue
-    (r,c)=lineColumn t (caret (selection w))
+    number=T.pack (show (windowNumber w))
+    moving=case drag d of Just (Moving wid _ _) -> wid==windowId w; Just (Resizing wid _ _) -> wid==windowId w; _ -> False
+    frame=attr (if moving then cyan else if active then white else gray) blue
     styledLines=splitStyled (if documentLabel doc /= Nothing then [(ch,Plain) | ch<-T.unpack t] else documentHighlight doc)
-    thumb=1+scrollRow w*max 1 (hh-5) `div` max 1 (length styledLines-1)
+    scrollbarImage vertical =
+      let Rect sx sy bw bh=scrollbarRect vertical doc w
+          len=if vertical then bh else bw
+          thumb=scrollbarThumb len (scrollbarLimit vertical doc w) (if vertical then scrollRow w else scrollColumn w)
+          cell n=V.char (if n==0 || n==len-1 then attr blue scrollCyan else attr scrollCyan blue)
+            (if n==0 then if vertical then '▲' else '◄' else if n==len-1 then if vertical then '▼' else '►' else if n==thumb then '█' else '░')
+      in place sx sy ((if vertical then V.vertCat else V.horizCat) [cell n | n<-[0..len-1]])
     contentWidth=max 0 (ww-2); contentHeight=max 0 (hh-2)
     textImage=V.vertCat [renderLine n | n<-[scrollRow w..scrollRow w+contentHeight-1]]
-    renderLine n=V.cropRight contentWidth (V.translateX (negate (scrollColumn w)) (styledImage (lineColor n) active (selection w) (lineOffset t n) (fromMaybe [] (atMay styledLines n))) V.<|> V.charFill edit ' ' contentWidth 1)
+    renderLine n=V.cropRight contentWidth (V.translateX (negate (scrollColumn w)) (styledImage (lineColor n) active (selection w) (bufferLineOffset b n) (fromMaybe [] (atMay styledLines n))) V.<|> V.charFill edit ' ' contentWidth 1)
 
     lineColor n = case documentLabel doc of
-      Just "Git diff" -> let line=lineAt t n in Just (attr (if "+" `T.isPrefixOf` line then V.RGBColor 85 255 85 else if "-" `T.isPrefixOf` line then V.RGBColor 255 85 85 else if "@@" `T.isPrefixOf` line then cyan else yellow) blue)
+      Just "Git diff" -> let line=bufferLineAt b n in Just (attr (if "+" `T.isPrefixOf` line then V.RGBColor 85 255 85 else if "-" `T.isPrefixOf` line then V.RGBColor 255 85 85 else if "@@" `T.isPrefixOf` line then cyan else yellow) blue)
       Just _ -> Just (attr yellow blue)
       Nothing -> Nothing
 
@@ -146,7 +172,7 @@ treeLayers d tree = [place 0 1 image]
 
 keyLegend :: Text -> V.Image
 keyLegend text = V.horizCat [label (if shortcut token then attr red gray else paper) token | token <- T.groupBy (\a b -> isSpace a == isSpace b) text]
-  where shortcut t = t `elem` ["Tab","Enter","Esc"] || any (`T.isPrefixOf` t) ["F1","F2","F3","F5","F6","Ctrl+","Alt+","Shift+","Cmd+"]
+  where shortcut t = t `elem` ["Tab","Enter","Esc","↑↓→←","↵"] || any (`T.isPrefixOf` t) ["F1","F2","F3","F5","F6","Ctrl+","Alt+","Shift+","Cmd+"]
 
 menuLayers :: Desktop -> (Int,Int) -> [V.Image]
 menuLayers d (i,j) = [place x y contents']
@@ -158,24 +184,56 @@ menuLayers d (i,j) = [place x y contents']
     item n entry@(MenuItem title _ cmd) = V.char paper '│' V.<|> V.cropRight (w-2) content V.<|> V.char paper '│'
       where
         key = menuShortcut d entry
-        disabled = case cmd of Disabled _ -> True; _ -> False
+        disabled = not (commandEnabled d cmd)
         bg = if n == j then green else gray
         a = attr (if disabled then V.RGBColor 85 85 85 else black) bg
         hot = attr red bg
         pos = fromMaybe 0 (T.findIndex ((==menuMnemonic entry) . toLower) title)
         name = label a (T.take pos title) V.<|> label (if disabled then a else hot) (T.take 1 (T.drop pos title)) V.<|> label a (T.drop (pos+1) title)
-        content = label a " " V.<|> name V.<|> label a (T.replicate (max 1 (w-4-T.length title-T.length key)) " ") V.<|> label hot key V.<|> label a " "
+        content = label a " " V.<|> name V.<|> label a (T.replicate (max 1 (w-4-T.length title-T.length key)) " ") V.<|> label (if disabled then a else hot) key V.<|> label a " "
+
+problemsLayers :: Desktop -> [V.Image]
+problemsLayers d
+  | not (problemsVisible d) || h<2 = []
+  | otherwise = [place (x+max 1 ((w-10) `div` 2)) y (label frame " Messages "),place (x+w-5) y (label frame "[×]"),place (x+w-7-T.length number) y (label frame number)]
+      ++ [place (x+1) (y+1+i) (row (if index==problemsSelected d then attr white blue else bodyColor) (w-2) (format issue))
+         | (i,(index,issue))<-zip [0..] (take (h-2) (drop (problemsScroll d) (zip [0..] (diagnostics d))))]
+      ++ [place (x+1) (y+1) (row bodyColor (w-2) " No messages reported.") | null (diagnostics d)]
+      ++ [place x y (box frame (problemsFocused d) w h)]
+  where
+    Rect x y w h=problemsRect d
+    frame=attr white scrollCyan
+    bodyColor=attr black scrollCyan
+    number=maybe "" (T.pack . show) (messagesNumber d)
+    format issue=" "<>(case diagnosticSeverity issue of 1 -> "Error "; 2 -> "Warning "; 3 -> "Info "; _ -> "Hint ")<>T.pack (takeFileName (diagnosticPath issue))<>":"<>T.pack (show (diagnosticRow issue+1))<>":"<>T.pack (show (diagnosticColumn issue+1))<>" "<>T.unwords (T.words (diagnosticMessage issue))
+
+contextLayers :: Desktop -> (Rect,Int) -> [V.Image]
+contextLayers d (Rect x y w h,chosen) =
+  [place (x+1) (y+i+1) (row (if i==chosen then selected else paper) (w-2) (" "<>title)) | (i,(title,_))<-zip [0..] (contextItems (contextKind d))]
+  ++ [place x y (box paper False w h)]
 
 dialogLayers :: Desktop -> Dialog -> [V.Image]
 dialogLayers d dg =
-  [place (x+max 1 ((w-T.length title) `div` 2)) y (label paper title)]
-  ++ [place bx by (row a bw ("[ "<>name<>" ]")) | (i,(Rect bx by bw _,name))<-zip [0..] (zip (buttonRects d dg) (buttons dg)),let a=if focus dg==length (fields dg)+i then attr white green else attr black (V.RGBColor 0 170 170)]
+  [place (x+max 1 ((w-T.length title) `div` 2)) y (label (attr white gray) title)]
+  ++ [place bx by (V.cropRight bw (buttonImage i name)) | (i,(Rect bx by bw _,name))<-zip [0..] (zip (buttonRects d dg) (buttons dg))]
+  ++ [place (bx+1) (by+1) (V.charFill (attr black black) ' ' bw 1) | Rect bx by bw _<-buttonRects d dg]
   ++ concat [fieldLayer i r f | (i,(r,f))<-zip [0..] (zip (fieldRects d dg) (fields dg))]
   ++ [place (x+3) (y+2+i) (row paper (w-6) line) | (i,line)<-zip [0..] (body dg),y+2+i<y+h-3]
-  ++ [place x y (box paper True w h)]
+  ++ [place x y (box (attr white gray) True w h)]
   where
     Rect x y w h=dialogRect d dg
     title=" "<>dialogTitle dg<>" "
+    pushed i=buttonPressed d==Just i && buttonHover d==Just i
+    buttonImage i name = label normal (if pushed i then "   " else "  ") V.<|> label normal (T.take pos name)
+      V.<|> label (attr white bg) (T.take 1 (T.drop pos name)) V.<|> label normal (T.drop (pos+1) name)
+      V.<|> label normal (if pushed i then " " else "  ")
+      where
+        bg | pushed i = V.RGBColor 0 85 0
+           | buttonHover d==Just i = V.RGBColor 85 255 85
+           | otherwise = green
+        normal=attr (if focus dg==length (fields dg)+i then white else black) bg
+        mnemonic=fromMaybe Nothing (atMay (buttonMnemonics dg) i)
+        pos=fromMaybe (T.length name) (mnemonic >>= \c -> T.findIndex ((==c) . toLower) name)
     fieldLayer i (Rect fx fy fw _) field
       | fy>=y+h-3 = []
       | otherwise = [place fx (max (y+2) fy) (V.cropBottom (max 0 (y+h-3-max (y+2) fy)) (V.translateY (min 0 (fy-y-2)) image))]

@@ -1,7 +1,7 @@
 # THC Edit: Turbo Haskell's editor
 
 Status: approved. The desktop and local-file editing milestone is implemented.
-HLS and Cabal project browsing remain planned; see the implementation record.
+HLS editor tooling is implemented; Cabal-plan source filtering remains planned.
 
 ## Intent and decisions
 
@@ -57,8 +57,8 @@ Terminal shrink/expand must keep dialogs and focused controls reachable.
 
 One buffer owns text, file identity, dirty state, undo/redo history and revision.
 Each view owns its cursor, selection and scroll position; splitting a buffer
-creates a view, not another independent copy. Begin with standard text and
-sequence structures; measure before introducing a rope or piece table.
+creates a view, not another independent copy. Text uses a persistent finger tree
+of lines measured by character and line counts; undo shares unchanged subtrees.
 
 Support insertion/deletion, word and line movement, selection, cut/copy/paste,
 undo/redo, indentation, find/replace, go-to-line, multiple files and Haskell
@@ -110,7 +110,7 @@ units, not every source file: combine it with component build information or
 Cabal-library metadata. Honor selected flags and source directories. Distinguish
 local editable files, generated files and dependency sources. Missing metadata
 or sources are visible limitations, not a silently substituted recursive glob.
-Coordinate a read-only metadata contract with thc mba/thc linux, reusing THC's
+Use a read-only metadata contract with THC, reusing its
 existing plan/build-info knowledge without invoking Core acquisition just to
 browse a project. Opening a file must not require a project build.
 

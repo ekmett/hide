@@ -1,11 +1,10 @@
 # Turbo desktop and local editing implementation plan
 
-> Execute inline with superpowers:executing-plans. Check each task against the approved design.
 
 **Goal:** Deliver a runnable `thc-edit` with the classic desktop, functional widgets and safe local editing.
 **Architecture:** Pure buffer and desktop state transitions produce file-operation requests. A cell renderer shares window/control geometry with hit testing; Vty owns terminal I/O and cleanup.
 **Tech stack:** Haskell, Vty/crossplatform, boot libraries. No Brick or native editor framework.
-**Spec:** ../specs/2026-09-30-thc-edit-design.md
+**Spec:** ../design/2026-09-30-thc-edit-design.md
 
 ## Constraints and review focus
 
@@ -76,4 +75,20 @@ HLS transport/tooling and Cabal component browsing get a separate implementation
 - Linux source transfer awaits explicit destination approval after automatic
   approval review blocked copying the private bundle to castlemeadow.
 - Durable repository synchronized through `776385c`; a clean first build and
-  full test suite passed there. Both `thc mba` and `thc linux` received status.
+  full test suite passed there.
+
+## Language tools and desktop controls
+
+- Added asynchronous HLS synchronization, type hover, completion, definition,
+  diagnostics and checked cross-file rename, with real-server checks.
+- Buffers now retain persistent finger trees measured by lines and characters.
+- Messages uses a cyan dock with cross-file Alt+F7/F8 navigation. Editor and
+  Messages windows share stable numbers selected by Alt+1 through Alt+9.
+- Matched menu selection, dialog buttons, mouse color inversion, scrollbars,
+  shadows, move/resize frames and contextual status help to the references.
+- Git status includes added/deleted line counts. Its context menu runs Fetch,
+  fast-forward Pull and Merge in the background with dirty-buffer safeguards.
+- Added default-on caret blinking, physical-pixel tile zoom with Ctrl/Alt +/-
+  and density-aware Alt+0 reset. THC_EDIT_SCALE defaults --scale.
+- Verified native and terminal suites, native input with sanitizers, real HLS
+  editing/rename checks, and isolated Metal menu/Messages/scale-1 captures.

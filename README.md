@@ -51,15 +51,21 @@ not change your terminal's font or dimensions.
 cabal run -fwindow thc-edit -- --metal --mode 259 Main.hs
 ```
 
-`--scale 1` through `--scale 8` sets the pixel scale independently. In Mode 259,
+`--scale 1` through `--scale 8` sets the pixel scale independently.
+`THC_EDIT_SCALE` supplies the default; an explicit `--scale` takes precedence. In Mode 259,
 scale 2 or higher retains every bitmap row; scale 1 downsamples vertically.
+Ctrl or Alt plus `+`/`-` changes tile scale while preserving the character grid;
+`=` also increases it. Alt+0 restores the display-aware default (2 on standard displays, 4 on
+Retina displays at 2× density). Tiles use physical drawable pixels with nearest
+neighbor scaling; the graphical window requests high-density rendering.
 Resizing the window changes the character grid. SDL3 is an optional build
 dependency and is not needed for the terminal frontend or THC itself.
 
 Both frontends draw the same UI. The window uses a bundled IBM VGA bitmap font,
 with GNU Unifont for additional Unicode characters; see the licenses in
 `assets/fonts`. The window has a system clipboard and, on macOS, native menus
-with Command shortcuts. Option remains available for accented characters.
+with Command shortcuts. Option remains available for accented characters except the window-number
+and tile-scale shortcuts above.
 Use F10 and letter mnemonics to operate the in-window menus.
 
 On Mac keyboards, hold Fn/Globe to send a function key, or enable “Use F1, F2,
@@ -124,7 +130,16 @@ The `skylighting` package and its bundled grammar set are GPL-2 licensed;
 
 Tools > Git diff shows staged, unstaged and untracked saved changes for the
 current repository. The status bar shows the branch (`*` means saved repository
-changes; buffer title stars indicate unsaved edits). Open or save refreshes it.
+changes; buffer title stars indicate unsaved edits), followed by green additions
+and red deletions. These counts cover saved changes, including untracked text.
+Open, save and Git operations refresh the badge.
+
+Right-click the branch badge for Fetch, Pull, or Merge. Pull accepts only a
+fast-forward; Merge asks which branch to merge. Operations run in the background
+and open a result window. Save changed buffers before Pull or Merge. Clean
+buffers are refreshed after files change; text edited while an operation runs
+is retained. Conflicts remain available to resolve in the editor and Git.
+The editor waits for a running Git operation before allowing Exit.
 
 Read the diff, then choose Tools > Approve changes and enter a commit message.
 This stages and commits **all reviewed saved changes in that repository**,
@@ -134,22 +149,64 @@ retrying. Git hooks run normally and may transform the committed contents; the e
 reports when the resulting tree differs from the staged review. Failed commits leave changes on disk and may
 leave them staged. Nothing is pushed. Submodule review is not supported.
 
+## Haskell language tools
+
+Install Haskell Language Server for the GHC used by your package. The editor starts
+`haskell-language-server-wrapper --lsp` in the detected project root and keeps
+open buffers synchronized, including unsaved edits. Set `THC_EDIT_HLS` to an
+alternate server executable if needed. HLS runs independently of the UI;
+Tools > Restart language server reconnects after a configuration change.
+
+Hover over source in a graphical window to show its type in the status bar.
+Pausing the text cursor does the same in either frontend. Shift+F1 requests a
+type explicitly, F12 goes to a definition, and Ctrl+Space opens completions.
+Right-click source for these actions and Rename. HLS rename edits are applied
+to buffers as one undo step per file; review and save those buffers to write
+them to disk. Changed buffer versions or intervening disk edits reject a rename.
+File creation/deletion operations and executable completion commands are not
+accepted. Completion snippets are disabled in the protocol capabilities.
+
+Errors appear as chevrons beside source lines and in a bottom Messages window.
+Click an entry to jump to it; the panel also supports arrow keys and Enter.
+Tools > Messages toggles it. Alt+F8 and Alt+F7 jump to the next or previous
+message, opening its source file when necessary. Editing clears diagnostics from older buffer
+versions while HLS checks the new text. Closing the panel leaves the source
+markers available.
+
+The side explorer opens the nearest enclosing Cabal package at startup, falling
+back to the current directory. An explicit directory argument takes precedence.
+Double-click an entry in the Open dialog to enter its directory or open its file.
+Dialog buttons highlight on hover and depress while held; releasing outside
+cancels the click. The focused button has white text; other buttons use black
+text with a white mnemonic. Ctrl or Alt plus that letter activates the button.
+Each editor and Messages window has a stable number in its title bar.
+Alt+1 through Alt+9 activate that window (Option+1 through Option+9 on macOS).
+Preferences includes a Blink cursor appearance option, enabled by default.
+The graphical insertion cursor blinks every half second; terminal cursor
+style follows this preference where DECSCUSR is supported.
+While moving or resizing a window, arrows move it, Shift+arrows resize it,
+Enter finishes, and Escape restores its original position and size. Menu
+navigation shows the highlighted command's description in the status bar. The graphical window uses a DOS text cursor that complements the colors of the cell under the mouse.
+
+## Buffer representation
+
+Each file uses a persistent finger tree of newline-inclusive lines, measured by
+character count and line count. Edits rebuild boundary lines and share unchanged
+subtrees. Up to 100 undo states retain these trees, rather than full text copies.
+Split windows share the buffer. Indexed line lookup drives cursor placement and
+navigation; a lazy text projection is cached per revision for syntax highlighting,
+file output, and HLS. Highlighting and LSP full-document synchronization still
+consume the whole document after an edit.
+
 ## Scope and limitations
 
-HLS tooling, Cabal-plan project browsing, compile/run/debug integration and
-persistent preferences are subsequent milestones.
-
-Haskell Language Server will supply diagnostics, completion, hover/type
-information and definition navigation. Runtime debugging will use THC's Truffle
-debugger when the program runs through THC: the Debug menu should expose its
-breakpoints, stepping, call stack and variable inspection. These are separate
-backends; HLS is not the runtime debugger.
+Cabal-plan source filtering, compile/run/debug integration and persistent
+preferences remain subsequent milestones. Runtime debugging will use THC's
+Truffle debugger when the program runs through THC.
 
 Unimplemented menu actions explain that they are unavailable. Directory arguments do not pretend to be projects.
 The terminal clipboard is editor-local; use bracketed paste for external text.
-Search is literal and case-sensitive. Undo uses up to 100 complete text
-snapshots; this first implementation targets ordinary source files, not huge
-logs. Combining marks and wide characters are handled, but complex emoji
+Search is literal and case-sensitive. Combining marks and wide characters are handled, but complex emoji
 clusters still depend on terminal rendering.
 
 Files must be valid UTF-8 without NUL bytes. Saves compare the original bytes,
@@ -175,6 +232,15 @@ Scenes: `desktop`, `menu`, `about`, `gallery`, `split`, `open`, `tree`, `help`, 
 the same pure desktop transitions used by the terminal application; file tests
 use real temporary files for conflict, permission, symlink and encoding cases.
 
-See the [design](docs/superpowers/specs/2026-09-30-thc-edit-design.md) and
-[implementation record](docs/superpowers/plans/2026-09-30-desktop-editor.md).
+See the [design](docs/design/2026-09-30-thc-edit-design.md) and
+[implementation record](docs/plans/2026-09-30-desktop-editor.md).
 Visual reference: [Ilya Birman's Turbo Pascal UI museum](https://ilyabirman.net/meanwhile/all/ui-museum-turbo-pascal-7-1/).
+
+Real-server checks (requires a compatible HLS and GHC in PATH):
+
+```sh
+cabal exec -- ghc -threaded -package thc-edit test/HLSLive.hs -o /tmp/thc-hls-live
+/tmp/thc-hls-live
+cabal exec -- ghc -threaded -package thc-edit test/EditorLive.hs -o /tmp/thc-editor-live
+/tmp/thc-editor-live
+```

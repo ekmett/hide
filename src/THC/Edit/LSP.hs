@@ -1,0 +1,263 @@
+{-# LANGUAGE OverloadedStrings #-}
+module THC.Edit.LSP
+  ( Client, Event(..), startClient, stopClient, syncDocuments, notifySaved, request, pollEvents
+  , fileUri, uriFilePath, offsetPosition, positionOffset, positionValue
+  ) where
+
+import Control.Concurrent
+import Control.Exception hiding (handle)
+import Control.Monad (forever, forM_, unless, void, when)
+import Data.Aeson hiding (decode)
+import Data.Aeson.Types (parseMaybe)
+import qualified Data.Aeson.Key
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Char8 as BC
+import qualified Data.ByteString.Lazy as BL
+import Data.Char ( isHexDigit, ord, toLower)
+import qualified Data.Map.Strict as Map
+import Data.Maybe (fromMaybe)
+import Data.Text (Text)
+import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
+import Data.Text.Encoding.Error (lenientDecode)
+import Numeric (readHex, showHex)
+import System.Environment (lookupEnv)
+import System.IO
+import System.Process
+import System.Timeout (timeout)
+import Text.Read (readMaybe)
+
+data Event = Response Int Value | Diagnostics FilePath (Maybe Int) Value | ServerError Text
+  deriving (Eq, Show)
+data Command = Documents [(FilePath,Int,Text)] | Request Int Text Value | Saved FilePath
+
+data Client = Client
+  { commands :: Chan Command, events :: MVar [Event], nextId :: MVar Int
+  , unavailable :: MVar (Maybe Text), lastDocuments :: MVar [(FilePath,Int,Text)]
+  , closeClient :: IO ()
+  }
+
+-- Initialization and all subsequent writes happen off the UI thread.
+startClient :: FilePath -> IO Client
+startClient root = mask $ \restore -> do
+  executable <- fromMaybe "haskell-language-server-wrapper" <$> lookupEnv "THC_EDIT_HLS"
+  (Just input, Just output, Just errors, process) <- createProcess
+    (proc executable ["--lsp"]) { cwd = Just root, std_in = CreatePipe, std_out = CreatePipe, std_err = CreatePipe }
+  let ignore action = void action `catch` (\(_ :: IOException) -> pure ())
+      cleanup = do
+        ignore (terminateProcess process)
+        ignore (hClose input)
+        ignore (hClose output)
+        ignore (hClose errors)
+        void (timeout 1000000 (waitForProcess process))
+  restore (do
+    mapM_ (`hSetBinaryMode` True) [input, output, errors]
+    queue <- newChan
+    inbox <- newMVar []
+    counter <- newMVar 1
+    writeLock <- newMVar ()
+    initialized <- newEmptyMVar
+    shutdown <- newEmptyMVar
+    stopped <- newMVar False
+    unavailableState <- newMVar Nothing
+    documentsState <- newMVar []
+    errorTail <- newMVar ""
+    writerThread <- newEmptyMVar
+    let emit event = modifyMVar_ inbox (pure . (event:))
+        send value = withMVar writeLock $ \_ -> do
+          let body = encode value
+          BC.hPutStr input (BC.pack ("Content-Length: " ++ show (BL.length body) ++ "\r\n\r\n"))
+          BL.hPutStr input body
+          hFlush input
+        notify method params = send (object ["jsonrpc" .= ("2.0" :: Text), "method" .= method, "params" .= params])
+        call ident method params = send (object ["jsonrpc" .= ("2.0" :: Text), "id" .= ident, "method" .= method, "params" .= params])
+        failed (exception :: IOException) = do
+          tailText <- readMVar errorTail
+          let message = "HLS: " <> T.pack (displayException exception) <> if T.null tailText then "" else "\n" <> tailText
+          first <- modifyMVar unavailableState (\previous -> pure (Just (fromMaybe message previous), previous == Nothing))
+          isStopped <- readMVar stopped
+          when (first && not isStopped) (emit (ServerError message))
+          void (tryPutMVar initialized False)
+          worker <- tryReadMVar writerThread
+          self <- myThreadId
+          forM_ worker (\thread -> when (thread /= self) (killThread thread))
+        folders = [object ["uri" .= fileUri root, "name" .= T.pack root]]
+        receive value = case field "method" value :: Maybe Text of
+          Just method -> case field "id" value :: Maybe Value of
+            Just ident -> do
+              let params = fromMaybe Null (field "params" value)
+                  result = case method of
+                    "workspace/configuration" -> Just (toJSON (replicate (length (fromMaybe [] (field "items" params :: Maybe [Value]))) Null))
+                    "workspace/workspaceFolders" -> Just (toJSON folders)
+                    _ -> Nothing
+              send $ object $ ["jsonrpc" .= ("2.0" :: Text), "id" .= ident] ++ case result of
+                Just response -> ["result" .= response]
+                Nothing -> ["error" .= object ["code" .= (-32601 :: Int), "message" .= ("Unsupported client request: " <> method)]]
+            Nothing -> when (method == "textDocument/publishDiagnostics") $ do
+              let params = fromMaybe Null (field "params" value)
+              case (field "uri" params >>= uriFilePath, field "diagnostics" params) of
+                (Just path, Just diagnostics) -> emit (Diagnostics path (field "version" params) diagnostics)
+                _ -> pure ()
+          Nothing -> case field "id" value :: Maybe Int of
+            Just 0 -> do
+              let success = case field "error" value :: Maybe Value of Nothing -> True; Just _ -> False
+              unless success (failed (userError ("Initialization failed: " ++ show value)))
+              void (tryPutMVar initialized success)
+            Just (-1) -> void (tryPutMVar shutdown ())
+            Just ident -> emit (Response ident value)
+            Nothing -> pure ()
+    reader <- forkIO (forever (readFrame output >>= receive) `catch` failed)
+    drainer <- forkIO ((let drain = BS.hGetSome errors 4096 >>= \chunk -> unless (BS.null chunk) (modifyMVar_ errorTail (pure . T.takeEnd 4096 . (<> TE.decodeUtf8With lenientDecode chunk)) >> drain) in drain) `catch` (\(_ :: IOException) -> pure ()))
+    writer <- forkIO $ (do
+      call (0 :: Int) ("initialize" :: Text) (object
+        [ "processId" .= Null, "rootUri" .= fileUri root, "workspaceFolders" .= folders
+        , "capabilities" .= object
+            [ "general" .= object ["positionEncodings" .= ["utf-16" :: Text]]
+            , "workspace" .= object ["configuration" .= True, "workspaceFolders" .= True, "workspaceEdit" .= object ["documentChanges" .= True]]
+            , "textDocument" .= object
+                [ "publishDiagnostics" .= object ["versionSupport" .= True]
+                , "hover" .= object ["contentFormat" .= ["plaintext" :: Text, "markdown"]]
+                , "completion" .= object ["completionItem" .= object ["snippetSupport" .= False]]
+                ]
+            ]
+        ])
+      ready <- timeout 20000000 (readMVar initialized)
+      case ready of
+        Just True -> notify ("initialized" :: Text) (object []) >> writeCommands notify call queue Map.empty
+        Just False -> pure ()
+        Nothing -> failed (userError "Initialization timed out")
+      ) `catch` failed
+    putMVar writerThread writer
+    let stop = do
+          already <- modifyMVar stopped (\previous -> pure (True,previous))
+          unless already $ do
+            modifyMVar_ unavailableState (pure . Just . fromMaybe "HLS: client stopped")
+            killThread writer
+            ready <- tryReadMVar initialized
+            when (ready == Just True) $ ignore $ do
+              void $ timeout 250000 $ do
+                call (-1 :: Int) ("shutdown" :: Text) Null
+                takeMVar shutdown
+              void $ timeout 250000 (notify ("exit" :: Text) Null)
+            killThread reader
+            killThread drainer
+            void (timeout 250000 (waitForProcess process))
+            cleanup
+    pure (Client queue inbox counter unavailableState documentsState stop)
+    ) `onException` cleanup
+
+stopClient :: Client -> IO ()
+stopClient = closeClient
+
+syncDocuments :: Client -> [(FilePath,Int,Text)] -> IO ()
+syncDocuments client docs = modifyMVar_ (lastDocuments client) $ \previous -> do
+  unless (previous == docs) $ withMVar (unavailable client) $ \failure ->
+    when (failure == Nothing) (writeChan (commands client) (Documents docs))
+  pure docs
+
+notifySaved :: Client -> FilePath -> IO ()
+notifySaved client path = withMVar (unavailable client) $ \failure ->
+  when (failure == Nothing) (writeChan (commands client) (Saved path))
+
+request :: Client -> Text -> Value -> IO Int
+request client method params = modifyMVar (nextId client) $ \ident -> do
+  withMVar (unavailable client) $ \failure -> case failure of
+    Nothing -> writeChan (commands client) (Request ident method params)
+    Just message -> modifyMVar_ (events client) (pure . (Response ident (object ["id" .= ident, "error" .= object ["code" .= (-32603 :: Int), "message" .= message]]):))
+  pure (ident+1, ident)
+
+pollEvents :: Client -> IO [Event]
+pollEvents client = modifyMVar (events client) (\pending -> pure ([], reverse pending))
+
+writeCommands :: (Text -> Value -> IO ()) -> (Int -> Text -> Value -> IO ()) -> Chan Command -> Map.Map FilePath (Int, Text) -> IO ()
+writeCommands notify call queue previous = do
+  command <- readChan queue
+  case command of
+    Saved path -> notify "textDocument/didSave" (object ["textDocument" .= object ["uri" .= fileUri path]]) >> writeCommands notify call queue previous
+    Request ident method params -> call ident method params >> writeCommands notify call queue previous
+    Documents docs -> do
+      let current = Map.fromList [(path,(version,contents)) | (path,version,contents) <- docs]
+      forM_ (Map.keys (previous `Map.difference` current)) $ \path ->
+        notify "textDocument/didClose" (object ["textDocument" .= object ["uri" .= fileUri path]])
+      forM_ (Map.toList current) $ \(path,(version,contents)) -> case Map.lookup path previous of
+        Nothing -> notify "textDocument/didOpen" (object ["textDocument" .= object
+          ["uri" .= fileUri path, "languageId" .= ("haskell" :: Text), "version" .= version, "text" .= contents]])
+        Just old -> when (old /= (version,contents)) $ notify "textDocument/didChange" (object
+          [ "textDocument" .= object ["uri" .= fileUri path, "version" .= version]
+          , "contentChanges" .= [object ["text" .= contents]]
+          ])
+      writeCommands notify call queue current
+
+field :: FromJSON a => Text -> Value -> Maybe a
+field name = parseMaybe (withObject "object" (\o -> o .: fromStringKey name))
+  where fromStringKey = Data.Aeson.Key.fromText
+
+-- Content-Length counts UTF-8 bytes, not characters. Bound frames from the server.
+readFrame :: Handle -> IO Value
+readFrame handle = do
+  size <- headers Nothing (0 :: Int)
+  body <- bytes size []
+  either (ioError . userError) pure (eitherDecodeStrict' body)
+  where
+    headers found total = do
+      line <- BC.hGetLine handle
+      let stripped = BC.filter (/= '\r') line
+          count = total + BS.length line
+      when (count > 8192) (ioError (userError "Oversized LSP header"))
+      if BS.null stripped then case found of
+        Just n | n >= 0 && n <= 16*1024*1024 -> pure n
+        _ -> ioError (userError "Invalid LSP Content-Length")
+      else case BC.break (== ':') stripped of
+        (name,value) | BC.map toLower name == "content-length" ->
+          case readMaybe (BC.unpack (BC.drop 1 value)) of
+            Just n | found == Nothing -> headers (Just n) count
+            _ -> ioError (userError "Invalid LSP Content-Length")
+        _ -> headers found count
+    bytes 0 chunks = pure (BS.concat (reverse chunks))
+    bytes remaining chunks = do
+      chunk <- BS.hGetSome handle remaining
+      when (BS.null chunk) (ioError (userError "Haskell language server closed stdout"))
+      bytes (remaining-BS.length chunk) (chunk:chunks)
+
+fileUri :: FilePath -> Text
+fileUri path = "file://" <> T.concatMap escape (TE.decodeLatin1 (TE.encodeUtf8 (T.pack path)))
+  where
+    escape c | c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c `elem` ("/-._~:" :: String) = T.singleton c
+             | otherwise = let hex = showHex (ord c) "" in T.pack ('%' : (if length hex == 1 then '0':hex else hex))
+
+uriFilePath :: Text -> Maybe FilePath
+uriFilePath uri = do
+  path <- T.stripPrefix "file://" uri
+  local <- if T.isPrefixOf "/" path then Just path else ("/" <>) <$> T.stripPrefix "localhost/" path
+  raw <- decode (T.unpack local)
+  either (const Nothing) (Just . T.unpack) (TE.decodeUtf8' (BS.pack raw))
+  where
+    decode [] = Just []
+    decode ('%':a:b:rest) | isHexDigit a && isHexDigit b = case readHex [a,b] of
+      [(n,"")] -> (fromIntegral (n :: Int):) <$> decode rest
+      _ -> Nothing
+    decode ('%':_) = Nothing
+    decode (c:rest) | c == '?' || c == '#' = Nothing
+                    | otherwise = (BS.unpack (TE.encodeUtf8 (T.singleton c)) ++) <$> decode rest
+
+-- Editor offsets count Unicode characters; LSP defaults to UTF-16 code units.
+offsetPosition :: Text -> Int -> (Int,Int)
+offsetPosition contents offset = T.foldl' step (0,0) (T.take (max 0 offset) contents)
+  where step (line,column) c | c == '\n' = (line+1,0)
+                            | otherwise = (line,column + if ord c > 0xffff then 2 else 1)
+
+positionOffset :: Text -> (Int,Int) -> Int
+positionOffset contents (line,column) = min (T.length contents) (prefix + units 0 (max 0 column) (T.unpack text))
+  where
+    rows = T.splitOn "\n" contents
+    prefix = sum (map ((+1) . T.length) (take (max 0 line) rows))
+    text = case drop (max 0 line) rows of row:_ -> T.dropWhileEnd (== '\r') row; [] -> ""
+    units count _ [] = count
+    units count remaining (c:cs)
+      | remaining < width = count
+      | otherwise = units (count+1) (remaining-width) cs
+      where width = if ord c > 0xffff then 2 else 1
+
+positionValue :: Text -> Int -> Value
+positionValue contents offset = let (line,column) = offsetPosition contents offset
+  in object ["line" .= line, "character" .= column]

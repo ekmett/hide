@@ -8,6 +8,10 @@ import qualified Graphics.Vty as V
 checks :: IO ()
 checks = do
   let check name ok = unless ok (error name)
+  check "tile scale defaults, environment, overrides and validation"
+    (chooseScale Nothing []==Right 0 && chooseScale (Just "3") []==Right 3 &&
+     chooseScale (Just "bad") ["1"]==Right 1 && chooseScale (Just "") []==Right 0 &&
+     all (either (const True) (const False)) [chooseScale (Just "0") [],chooseScale Nothing ["9"],chooseScale Nothing ["2","3"]])
   check "terminal remains default" (chooseBackend Nothing [] == Right Terminal)
   check "environment selects metal" (chooseBackend (Just "metal") [] == Right Metal)
   check "explicit terminal beats environment" (chooseBackend (Just "vulkan") [Terminal] == Right Terminal)
@@ -46,5 +50,5 @@ checks = do
      buffers tallerSplit == buffers split)
   let terminalPreferences = fst (runCommand EditorOptions (initialDesktop (80,25)))
   check "terminal preferences omit window modes"
-    (maybe False ((==1) . length . fields) (dialog terminalPreferences))
+    (maybe False (not . any (\field -> case field of Radio "Screen size" _ _ -> True; _ -> False) . fields) (dialog terminalPreferences))
   putStrLn "window input checks passed"

@@ -1,0 +1,144 @@
+{-# LANGUAGE OverloadedStrings #-}
+module LSPCheck (checks) where
+
+import Control.Concurrent (threadDelay)
+import Control.Exception (bracket)
+import Control.Monad (unless)
+import Data.Aeson
+import Data.Aeson.Types (parseMaybe)
+import qualified Data.Text as T
+import System.Directory
+import System.Environment (lookupEnv, setEnv, unsetEnv)
+import System.FilePath ((</>))
+import System.IO (hClose, openTempFile)
+import System.Timeout (timeout)
+import THC.Edit.LSP
+
+checks :: IO ()
+checks = do
+  let sample = "a😀b\r\nxλ"
+      path = "/tmp/λ space/#%?.hs"
+  check "URI Unicode and reserved characters round trip" (uriFilePath (fileUri path) == Just path)
+  check "reject nonlocal and malformed URI" (all ((== Nothing) . uriFilePath) ["https://host/x", "file://host/x", "file:///tmp/%xz", "file:///tmp/%ff", "file:///tmp/#x"])
+  check "localhost URI" (uriFilePath "file://localhost/tmp/a" == Just "/tmp/a")
+  check "UTF16 counts astral characters" (offsetPosition sample 2 == (0,3))
+  check "UTF16 newline round trip" (offsetPosition sample 6 == (1,1) && positionOffset sample (1,1) == 6)
+  check "UTF16 clamps halfway through surrogate pair" (positionOffset sample (0,2) == 1)
+  check "UTF16 clamps out of bounds" (positionOffset sample (90,90) == T.length sample && positionOffset sample (0,90) == 3)
+  bracket temporary removePathForcibly $ \root -> do
+    let server = root </> "fake-hls"
+        source = root </> "space λ.hs"
+    writeFile server fakeServer
+    permissions <- getPermissions server
+    setPermissions server (permissions { executable = True })
+    bracket (lookupEnv "THC_EDIT_HLS") (maybe (unsetEnv "THC_EDIT_HLS") (setEnv "THC_EDIT_HLS")) $ \_ -> do
+      setEnv "THC_EDIT_HLS" server
+      bracket (startClient root) stopClient $ \client -> do
+        syncDocuments client [(source,0,"module X where\nx = \"😀\"\n")]
+        notifySaved client source
+        first <- request client "test/state" Null
+        pending <- waitResponse client first
+        check "initialize then open queued document" (result pending == Just (object ["opens" .= (1 :: Int), "changes" .= (0 :: Int), "closes" .= (0 :: Int), "text" .= ("module X where\nx = \"😀\"\n" :: T.Text)]))
+        check "diagnostics decode URI and revision" (any (\event -> case event of Diagnostics file version _ -> file == source && version == Just 0; _ -> False) pending)
+        syncDocuments client [(source,0,"module X where\nx = \"😀\"\n")]
+        syncDocuments client [(source,1,"x = 2\n")]
+        second <- request client "test/state" Null
+        updated <- waitResponse client second
+        check "unchanged sync skipped and changed full text sent" (result updated == Just (object ["opens" .= (1 :: Int), "changes" .= (1 :: Int), "closes" .= (0 :: Int), "text" .= ("x = 2\n" :: T.Text)]))
+        syncDocuments client []
+        third <- request client "test/state" Null
+        closed <- waitResponse client third
+        check "removed document closes" (result closed == Just (object ["opens" .= (1 :: Int), "changes" .= (1 :: Int), "closes" .= (1 :: Int), "text" .= ("x = 2\n" :: T.Text)]))
+      lifecycle <- readFile (root </> "lifecycle")
+      check "shutdown response then exit" (lifecycle == "shutdown\nexit\n")
+      writeFile server "#!/usr/bin/env python3\nimport sys,time\nsys.stderr.write('x'*10000 + '\\ncompiler-version-unavailable\\n'); sys.stderr.flush()\ntime.sleep(0.1)\nsys.exit(1)\n"
+      bracket (startClient root) stopClient $ \client -> do
+        failure <- timeout 3000000 (waitFailure client)
+        check "failed server retains bounded stderr tail" (maybe False (\message -> "compiler-version-unavailable" `T.isInfixOf` message && T.length message < 4500) failure)
+        syncDocuments client [(source,0,"x = 1")]
+        syncDocuments client [(source,0,"x = 1")]
+        ident <- request client "textDocument/hover" Null
+        replies <- pollEvents client
+        check "request after failure receives error response" (any (\event -> case event of Response actual value -> actual == ident && parseMaybe (withObject "response" (.: "error")) value /= (Nothing :: Maybe Value); _ -> False) replies)
+        stopped <- timeout 2000000 (stopClient client)
+        check "failed server stops promptly and idempotently" (stopped == Just ())
+  putStrLn "LSP checks passed"
+  where
+    check label ok = unless ok (error label)
+    result events = case [value | Response _ response <- events, Just value <- [parseMaybe (withObject "response" (.: "result")) response]] of value:_ -> Just value; [] -> Nothing
+    temporary = do
+      root <- getTemporaryDirectory
+      (path, file) <- openTempFile root "thc-edit-lsp-check"
+      hClose file
+      removeFile path
+      createDirectory path
+      pure path
+
+waitFailure :: Client -> IO T.Text
+waitFailure client = do
+  pending <- pollEvents client
+  case [message | ServerError message <- pending] of
+    message:_ -> pure message
+    [] -> threadDelay 10000 >> waitFailure client
+
+waitResponse :: Client -> Int -> IO [Event]
+waitResponse client ident = do
+  answer <- timeout 5000000 (loop [])
+  maybe (error "Timed out waiting for fake HLS") pure answer
+  where
+    loop accumulated = do
+      pending <- pollEvents client
+      case [message | ServerError message <- pending] of
+        message:_ -> error (T.unpack message)
+        [] -> pure ()
+      let combined = accumulated ++ pending
+      if any (\event -> case event of Response actual _ -> actual == ident; _ -> False) combined
+        then pure combined
+        else threadDelay 10000 >> loop combined
+
+fakeServer :: String
+fakeServer = unlines
+  [ "#!/usr/bin/env python3"
+  , "import json, sys"
+  , "def recv():"
+  , "    headers = {}"
+  , "    while True:"
+  , "        line = sys.stdin.buffer.readline()"
+  , "        if not line: raise EOFError()"
+  , "        if line == b'\\r\\n': break"
+  , "        key, value = line.decode().split(':', 1)"
+  , "        headers[key.lower()] = value.strip()"
+  , "    return json.loads(sys.stdin.buffer.read(int(headers['content-length'])))"
+  , "def send(value):"
+  , "    body = json.dumps(dict(jsonrpc='2.0', **value), ensure_ascii=False).encode()"
+  , "    frame = ('Content-Type: application/vscode-jsonrpc; charset=utf-8\\r\\nContent-Length: %d\\r\\n\\r\\n' % len(body)).encode() + body"
+  , "    for part in [frame[:11], frame[11:47], frame[47:]]:"
+  , "        sys.stdout.buffer.write(part); sys.stdout.buffer.flush()"
+  , "init = recv()"
+  , "assert init['method'] == 'initialize'"
+  , "sys.stderr.write('server log\\n' * 12000); sys.stderr.flush()"
+  , "send(dict(id='config', method='workspace/configuration', params=dict(items=[{}, {}])))"
+  , "assert recv()['result'] == [None, None]"
+  , "send(dict(id='folders', method='workspace/workspaceFolders', params={}))"
+  , "assert recv()['result'] == init['params']['workspaceFolders']"
+  , "send(dict(id='unsupported', method='workspace/applyEdit', params={}))"
+  , "assert recv()['error']['code'] == -32601"
+  , "send(dict(id=init['id'], result=dict(capabilities={})))"
+  , "assert recv()['method'] == 'initialized'"
+  , "state = dict(opens=0, changes=0, closes=0, text='')"
+  , "while True:"
+  , "    message = recv(); method = message['method']; params = message.get('params')"
+  , "    if method == 'textDocument/didOpen':"
+  , "        doc = params['textDocument']; state['opens'] += 1; state['text'] = doc['text']"
+  , "        send(dict(method='textDocument/publishDiagnostics', params=dict(uri=doc['uri'], version=doc['version'], diagnostics=[dict(message='λ diagnostic')])))"
+  , "    elif method == 'textDocument/didChange':"
+  , "        state['changes'] += 1; state['text'] = params['contentChanges'][0]['text']"
+  , "    elif method == 'textDocument/didClose': state['closes'] += 1"
+  , "    elif method == 'textDocument/didSave': pass"
+  , "    elif method == 'test/state': send(dict(id=message['id'], result=state))"
+  , "    elif method == 'shutdown':"
+  , "        open('lifecycle', 'a').write('shutdown\\n'); send(dict(id=message['id'], result=None))"
+  , "    elif method == 'exit':"
+  , "        open('lifecycle', 'a').write('exit\\n'); break"
+  , "    else: raise RuntimeError(method)"
+  ]

@@ -15,9 +15,10 @@ import System.Exit (ExitCode(..))
 import System.FilePath
 import System.IO.Error (ioeGetErrorString, tryIOError)
 import System.Process (proc, readCreateProcessWithExitCode, cwd, env)
+import Text.Read (readMaybe)
 
 data RepoStatus = RepoStatus
-  { repoRoot :: FilePath, repoBranch :: Text, repoDirty :: Bool }
+  { repoRoot :: FilePath, repoBranch :: Text, repoDirty :: Bool, repoAdded :: Int, repoDeleted :: Int }
   deriving (Eq, Show)
 
 data GitReview = GitReview
@@ -31,7 +32,28 @@ repositoryStatus path = either (const Nothing) Just <$> result (do
   branch <- if code == ExitSuccess then pure (T.strip name)
     else ("detached@" <>) . T.strip <$> git root ["rev-parse", "--short", "HEAD"]
   dirty <- not . T.null <$> git root ["status", "--porcelain", "-z", "--untracked-files=all"]
-  pure (RepoStatus root branch dirty))
+  -- A failed count must not hide an otherwise valid branch and dirty indicator.
+  (added,deleted) <- if dirty then either (const (-1,-1)) id <$> result (lineCounts root) else pure (0,0)
+  pure (RepoStatus root branch dirty added deleted))
+
+lineCounts :: FilePath -> IO (Int,Int)
+lineCounts root = do
+  (headCode,headId,_)<-runGit root ["rev-parse","--verify","HEAD"]
+  base<-if headCode==ExitSuccess then pure (T.strip headId) else do
+    (code,emptyTree,err)<-runGitInput root ["hash-object","-t","tree","--stdin"] ""
+    if code==ExitSuccess then pure (T.strip emptyTree) else failGit err
+  tracked<-git root (diffArgs++["--numstat",T.unpack base,"--"])
+  untracked<-fileNames <$> git root ["ls-files","--others","--exclude-standard","-z"]
+  additions<-forM untracked $ \file -> do
+    (code,out,err)<-runGit root (diffArgs++["--numstat","--no-index","--","/dev/null",file])
+    unless (code==ExitSuccess || code==ExitFailure 1) (failGit err)
+    pure out
+  pure (foldl' count (0,0) (concatMap T.lines (tracked:additions)))
+  where
+    -- Git quotes newlines/tabs in names without -z; only the first two fields matter.
+    count (added,deleted) line = case T.splitOn "\t" line of
+      a:z:_ | Just plus<-readMaybe (T.unpack a),Just minus<-readMaybe (T.unpack z) -> (added+plus,deleted+minus)
+      _ -> (added,deleted) -- Binary entries use '-' for both counts.
 
 repositoryDiff :: FilePath -> Maybe FilePath -> IO (Either Text Text)
 repositoryDiff path selected = result $ do

@@ -1,0 +1,168 @@
+{-# LANGUAGE OverloadedStrings #-}
+module GitOperationsCheck (checks) where
+
+import Control.Concurrent (threadDelay)
+import Control.Exception (bracket)
+import Control.Monad (unless, void)
+import qualified Data.Map.Strict as M
+import qualified Data.Text as T
+import qualified Data.Text.IO as T
+import System.Directory
+import System.Exit (ExitCode(..))
+import System.FilePath ((</>))
+import System.IO (hClose, openTempFile)
+import System.Process (proc, readCreateProcessWithExitCode)
+import System.Timeout (timeout)
+import qualified THC.Edit.App as App
+import THC.Edit.Buffer
+import THC.Edit.Files
+import THC.Edit.Git
+import THC.Edit.GitOperations
+import THC.Edit.Model
+
+checks :: IO ()
+checks = bracket temporary removePathForcibly $ \base -> do
+  let upstream=base </> "upstream"
+      work=base </> "work"
+      source=work </> "Main.hs"
+      upstreamSource=upstream </> "Main.hs"
+      git dir args=do
+        (code,out,err)<-readCreateProcessWithExitCode (proc "git" (["-C",dir,"-c","user.name=Git Test","-c","user.email=test@example.invalid","-c","commit.gpgsign=false"]++args)) ""
+        unless (code==ExitSuccess) (error err)
+        pure out
+      commit dir name=void (git dir ["add","-A"]) >> void (git dir ["commit","-m",name])
+      open desktop=loadFile source >>= either error (\(file,b)->pure (addDocument (Just file) b desktop))
+      doc desktop=case [d | d<-M.elems (buffers desktop),fmap filePath (documentFile d)==Just source] of d:_ -> d; [] -> error "missing source buffer"
+      select desktop=case [windowId w | w<-windows desktop,Just d<-[M.lookup (bufferId w) (buffers desktop)],fmap filePath (documentFile d)==Just source] of i:_ -> focusWindow i desktop; [] -> error "missing source window"
+  createDirectory upstream
+  void (git upstream ["init","-b","main"])
+  T.writeFile upstreamSource "original\n"
+  commit upstream "initial"
+  void (git base ["clone",upstream,work])
+  initial<-open (initialDesktop (100,30))
+  (_,configured)<-core initial [RefreshGit work]
+  withGitOperations $ \runtime -> do
+    let effects=gitOperationEffects runtime core
+        tick=tickGitOperations runtime core
+        run action desktop=effects desktop [RunGit action] >>= await tick (\d -> " completed." `T.isInfixOf` status d || " failed" `T.isInfixOf` status d) . snd
+    fetched<-run FetchRemote configured
+    check "fetch reports success" (status fetched=="Fetch completed.")
+    T.writeFile upstreamSource "pulled\n"
+    commit upstream "upstream change"
+    let dirtyDesktop=insertText "unsaved " (select fetched)
+    refused<-run PullRemote dirtyDesktop
+    check "pull refuses existing dirty buffers" ("Save or discard" `T.isInfixOf` activeText refused && contents (documentBuffer (doc refused))=="unsaved original\n")
+    diskBefore<-T.readFile source
+    check "refused pull does not change disk" (diskBefore=="original\n")
+    cleanPull<-run PullRemote (fst (runCommand Undo (select refused)))
+    let reloaded=documentBuffer (doc cleanPull)
+    check "pull reloads clean buffer with increasing revision" (contents reloaded=="pulled\n" && not (dirty reloaded) && revision reloaded>0 && null (undoStack reloaded))
+    -- Pause the local upload-pack so an edit deterministically occurs during pull.
+    let upload=base </> "upload-pack"
+        marker=base </> "fetch-started"
+        gate=base </> "fetch-continue"
+    writeFile upload (unlines ["#!/bin/sh","touch '"++marker++"'","n=0","while [ ! -e '"++gate++"' ] && [ $n -lt 200 ]; do sleep 0.01; n=$((n+1)); done","exec git-upload-pack \"$@\""])
+    permissions<-getPermissions upload
+    setPermissions upload (permissions {executable=True})
+    void (git work ["config","remote.origin.uploadpack",upload])
+    T.writeFile upstreamSource "changed during operation\n"
+    commit upstream "another change"
+    (_,running)<-effects (select cleanPull) [RunGit PullRemote]
+    started<-timeout 5000000 (waitFile marker)
+    check "local Git operation runs asynchronously" (started==Just ())
+    (exited,waiting)<-effects running [Exit]
+    check "quit waits for active operation" (not exited && "Wait for" `T.isPrefixOf` status waiting)
+    (_,duplicate)<-effects waiting [RunGit FetchRemote]
+    check "concurrent Git operation refused" (status duplicate=="A Git operation is already running.")
+    let edited=insertText "keep " (select duplicate)
+    writeFile gate "continue"
+    preserved<-await tick (T.isInfixOf "completed." . status) edited
+    let retained=doc preserved
+    diskAfter<-T.readFile source
+    check "edits during pull survive disk updates" (contents (documentBuffer retained)=="keep pulled\n" && dirty (documentBuffer retained) && diskAfter=="changed during operation\n")
+    staleSave<-saveFile (maybe (error "no file") id (documentFile retained)) (documentBuffer retained)
+    check "preserved buffer retains disk conflict protection" (either (const True) (const False) staleSave)
+    removeFile marker
+    removeFile gate
+    (_,fetching)<-effects preserved [RunGit FetchRemote]
+    _<-timeout 5000000 (waitFile marker)
+    (_,savedDuringFetch)<-effects fetching [SaveDocument 0 Nothing Nothing]
+    check "fetch permits ordinary save effects" (status savedDuringFetch=="save delegated")
+    let savePath=work </> "save-then-quit.txt"
+    T.writeFile savePath "before\n"
+    (saveFileState,saveBuffer)<-loadFile savePath >>= either error pure
+    let saveDesktop=addDocument (Just saveFileState) (replaceSelection (Selection 0 (bufferLength saveBuffer)) "saved\n" saveBuffer) (initialDesktop (100,30))
+        saveBid=maybe (error "missing save window") bufferId (activeWindow saveDesktop)
+    (quitAfterSave,afterSave)<-gitOperationEffects runtime App.applyEffects saveDesktop [SaveDocument saveBid Nothing (Just Quit)]
+    savedText<-T.readFile savePath
+    check "real save-and-quit continuation cannot exit during fetch" (not quitAfterSave && savedText=="saved\n" && "Wait for" `T.isPrefixOf` status afterSave)
+    (otherFile,otherBuffer)<-loadFile upstreamSource >>= either error pure
+    switched<-tick (addDocument (Just otherFile) otherBuffer (initialDesktop (100,30)))
+    check "focused repository changes during fetch" (branchRoot switched==Just upstream)
+    writeFile gate "continue"
+    logged<-await tick (T.isInfixOf "completed." . status) switched
+    check "operation log identifies completed repository" (branchRoot logged==Just work)
+    returned<-tick (closeActive logged)
+    check "closing operation log restores focused repository badge" (branchRoot returned==Just upstream)
+    void (git work ["config","--unset","remote.origin.uploadpack"])
+    void (git work ["checkout","-b","topic"])
+    T.writeFile source "topic change\n"
+    commit work "topic change"
+    void (git work ["checkout","main"])
+    T.writeFile source "main change\n"
+    commit work "main change"
+    conflictBase<-open (initialDesktop (100,30))
+    (_,conflictRoot)<-core conflictBase [RefreshGit work]
+    (_,staleReading)<-effects conflictRoot [ReadMergeBranches]
+    staleBranches<-await tick (T.isPrefixOf "Repository changed" . status) (initialDesktop (100,30)) {branchRoot=Just upstream,status=status staleReading}
+    check "branch picker result cannot target a different repository" (dialog staleBranches==Nothing)
+    (_,reading)<-effects conflictRoot [ReadMergeBranches]
+    choices<-await tick (\d -> case purpose <$> dialog d of Just Merging{} -> True; _ -> False) reading
+    check "merge lists another branch" (case purpose <$> dialog choices of Just (Merging branches) -> "topic" `elem` branches && "main" `notElem` branches; _ -> False)
+    conflict<-run (MergeBranch "topic") choices {dialog=Nothing}
+    check "conflicting merge is reported and retained" ("Merge conflicts remain" `T.isInfixOf` activeText conflict && "<<<<<<<" `T.isInfixOf` contents (documentBuffer (doc conflict)))
+    merging<-doesFileExist (work </> ".git" </> "MERGE_HEAD")
+    check "conflicting merge remains available for resolution" merging
+    void (git work ["reset","--hard","HEAD"])
+    writeFile (upstream </> "remote.txt") "remote commit\n"
+    commit upstream "remote diverged"
+    diverged<-run PullRemote (select conflict)
+    check "pull refuses divergence instead of creating a merge" ("failed" `T.isInfixOf` status diverged)
+    noMerge<-not <$> doesFileExist (work </> ".git" </> "MERGE_HEAD")
+    check "fast-forward-only pull leaves no merge state" noMerge
+    void (git work ["reset","--hard","origin/main"])
+    deleteBase<-open (initialDesktop (100,30))
+    (_,deleteRoot)<-core deleteBase [RefreshGit work]
+    removeFile upstreamSource
+    commit upstream "delete source"
+    deleted<-run PullRemote deleteRoot
+    check "pull deletion preserves the previous buffer" (contents (documentBuffer (doc deleted))=="changed during operation\n" && "File was removed" `T.isInfixOf` activeText deleted)
+    missing<-not <$> doesFileExist source
+    check "deleted source stays deleted on disk" missing
+  putStrLn "Git operation checks passed"
+  where
+    check label ok=unless ok (error label)
+    waitFile path=doesFileExist path >>= \exists -> unless exists (threadDelay 10000 >> waitFile path)
+    temporary=do
+      base<-getTemporaryDirectory
+      (path,file)<-openTempFile base "thc-git-operations"
+      hClose file
+      removeFile path
+      createDirectory path
+      canonicalizePath path
+
+core :: Desktop -> [Effect] -> IO (Bool,Desktop)
+core desktop [RefreshGit path]=do
+  repo<-repositoryStatus path
+  pure (False,desktop {branchRoot=repoRoot <$> repo,branchStatus=maybe "" repoBranch repo})
+core desktop [Exit]=pure (True,desktop)
+core desktop [SaveDocument{}]=pure (False,desktop {status="save delegated"})
+core desktop _=pure (False,desktop)
+
+await :: (Desktop -> IO Desktop) -> (Desktop -> Bool) -> Desktop -> IO Desktop
+await tick ready initial=do
+  result<-timeout 10000000 (loop initial)
+  maybe (error ("Git operation timed out: "++T.unpack (status initial))) pure result
+  where loop desktop=do
+          updated<-tick desktop
+          if ready updated then pure updated else threadDelay 10000 >> loop updated

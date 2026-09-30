@@ -3,6 +3,10 @@ module THC.Edit.App (main, demoDesktop, applyEffects) where
 
 import Control.Exception (bracket)
 import Control.Monad (foldM, when)
+import System.Timeout (timeout)
+import System.IO (hFlush, stdout)
+import THC.Edit.Tooling
+import THC.Edit.GitOperations
 import qualified Data.Map.Strict as M
 import Data.List (find)
 import qualified Data.Text as T
@@ -10,15 +14,14 @@ import qualified Data.Text.IO as TIO
 import Graphics.Vty.CrossPlatform (mkVty)
 import qualified Graphics.Vty as V
 import System.Console.GetOpt
-import System.Directory (doesDirectoryExist, doesFileExist)
-import System.FilePath ((</>), isAbsolute, takeDirectory, takeFileName)
+import System.Directory (doesDirectoryExist, doesFileExist, getCurrentDirectory, listDirectory)
+import System.FilePath ((</>), isAbsolute, takeDirectory, takeFileName, takeExtension)
 import Control.Exception (try, IOException)
 import Paths_thc_edit (getDataFileName)
 import THC.Edit.Browser
 import THC.Edit.Help
 import THC.Edit.Git
 import System.Environment (getArgs, lookupEnv)
-import Text.Read (readMaybe)
 import THC.Edit.Frontend
 import THC.Edit.Window (runWindow)
 import System.Exit (die)
@@ -33,7 +36,7 @@ options = [Option [] ["metal"] (NoArg (Use Metal)) "Open a Metal window"
           ,Option [] ["vulkan"] (NoArg (Use Vulkan)) "Open a Vulkan window"
           ,Option [] ["window"] (NoArg (Use Auto)) "Open a window using the platform backend"
           ,Option [] ["terminal"] (NoArg (Use Terminal)) "Use the terminal (override THC_EDIT_BACKEND)"
-          ,Option [] ["scale"] (ReqArg Scale "N") "Integer window pixel scale, 1 to 8"
+          ,Option [] ["scale"] (ReqArg Scale "N") "Window pixel scale, 1 to 8 (default THC_EDIT_SCALE or display density)"
           ,Option [] ["mode"] (ReqArg Mode "NUMBER") "Window screen mode: 3 (80x25), 259 (80x50); default 3"
           ,Option [] ["vga50"] (NoArg (Mode "259")) "Alias for --mode 259 (window only)"
           ,Option [] ["size"] (ReqArg Size "COLSxROWS") "Initial character dimensions (override --mode dimensions)"
@@ -48,6 +51,7 @@ main :: IO ()
 main = do
   args<-getArgs
   backendDefault<-lookupEnv "THC_EDIT_BACKEND"
+  scaleDefault<-lookupEnv "THC_EDIT_SCALE"
   let (flags,paths,errors)=getOpt Permute options args
   if not (null errors) then die (concat errors)
   else if Usage `elem` flags then putStr (usageInfo "Usage: thc-edit [OPTIONS] [--] [FILE.hs ...]\n\nTurbo Haskell source editor.\nF2 Save, F3 Open, F10 Menu, Alt+X Exit.\n" options)
@@ -59,10 +63,7 @@ main = do
       _ -> die "Specify --mode or --vga50 only once."
     when (backend == Terminal && any isMode flags && Snapshot `notElem` flags && Html `notElem` flags) $
       die "--mode/--vga50 requires --window, --metal or --vulkan; terminal size is controlled by your terminal."
-    scale <- case [s | Scale s <- flags] of
-      [] -> pure 0
-      [s] | Just n <- readMaybe s, n >= 1, n <= 8 -> pure n
-      _ -> die "--scale needs one integer from 1 to 8."
+    scale <- either die pure (chooseScale scaleDefault [s | Scale s <- flags])
     dimensions <- case [s | Size s <- flags] of
       [] -> pure (modeSize screenMode)
       [s] -> either die pure (parseWindowSize s)
@@ -70,16 +71,25 @@ main = do
     let initial=if Demo `elem` flags then addDocument Nothing (newBuffer (activeText demoDesktop)) (initialDesktop dimensions) else initialDesktop dimensions
         configured=(fst (handleEvent (uncurry V.EvResize dimensions) initial)) {wordStar=WordStar `elem` flags,videoMode=if backend == Terminal then Nothing else Just screenMode}
     (_,loaded)<-applyEffects configured (map ReadPath paths)
-    (_,withGit)<-applyEffects loaded [RefreshGit (startingDirectory loaded)]
+    cwd<-getCurrentDirectory
+    base<-packageDirectory cwd
+    (_,browsing)<-if sideTree loaded/=Nothing || Demo `elem` flags || Snapshot `elem` flags || Html `elem` flags then pure (False,loaded)
+      else applyEffects loaded [ReadTree base]
+    let focused=browsing {sideTree=fmap (\tree -> tree {treeFocused=null (windows browsing)}) (sideTree browsing)}
+    (_,withGit)<-applyEffects focused [RefreshGit (startingDirectory focused)]
     staged<-foldM stageScene withGit [scene | Scene scene<-flags]
     if Html `elem` flags then TIO.putStr (snapshotHtml staged)
     else if Snapshot `elem` flags then TIO.putStr (snapshot staged)
-    else if backend /= Terminal then runWindow backend scale applyEffects staged
-    else bracket (mkVty V.defaultConfig) V.shutdown $ \vty -> do
-      when (V.supportsMode (V.outputIface vty) V.Mouse) (V.setMode (V.outputIface vty) V.Mouse True)
-      when (V.supportsMode (V.outputIface vty) V.BracketedPaste) (V.setMode (V.outputIface vty) V.BracketedPaste True)
-      size<-V.displayBounds (V.outputIface vty)
-      loop vty (fst (handleEvent (uncurry V.EvResize size) staged))
+    else withTooling $ \tooling -> withGitOperations $ \gitOperations -> do
+      let effects=gitOperationEffects gitOperations (toolingEffects tooling applyEffects)
+          tick d=tickGitOperations gitOperations applyEffects d >>= tickTooling tooling applyEffects
+      if backend /= Terminal then runWindow backend scale effects tick staged
+      else bracket (mkVty V.defaultConfig) (\vty -> V.shutdown vty >> cursorStyle Nothing) $ \vty -> do
+        when (V.supportsMode (V.outputIface vty) V.Mouse) (V.setMode (V.outputIface vty) V.Mouse True)
+        when (V.supportsMode (V.outputIface vty) V.BracketedPaste) (V.setMode (V.outputIface vty) V.BracketedPaste True)
+        size<-V.displayBounds (V.outputIface vty)
+        cursorStyle (Just (blinkCursor staged))
+        loop effects tick vty (fst (handleEvent (uncurry V.EvResize size) staged))
   where
     isMode Mode{} = True
     isMode _ = False
@@ -103,18 +113,27 @@ demoDesktop :: Desktop
 demoDesktop = addDocument Nothing (newBuffer sample) (initialDesktop (80,25))
   where sample=T.unlines ["module Main where","", "factorial :: Integer -> Integer", "factorial n = product [1 .. n]", "", "main :: IO ()", "main = do", "  putStrLn \"Enter a number:\"", "  input <- getLine", "  print (factorial (read input))"]
 
-loop :: V.Vty -> Desktop -> IO ()
-loop vty d = do
+loop :: (Desktop -> [Effect] -> IO (Bool,Desktop)) -> (Desktop -> IO Desktop) -> V.Vty -> Desktop -> IO ()
+loop effects tick vty d = do
   V.update vty (renderDesktop d)
-  event<-V.nextEvent vty
-  let (next,effects)=handleEvent event d
-  (exit,updated)<-applyEffects next effects
-  if exit then pure () else loop vty updated
+  event<-timeout 100000 (V.nextEvent vty)
+  let (next,requests)=maybe (d,[]) (`handleEvent` d) event
+  (exit,updated)<-effects next requests
+  when (blinkCursor updated /= blinkCursor d) (cursorStyle (Just (blinkCursor updated)))
+  if exit then pure () else tick updated >>= loop effects tick vty
+
+-- DECSCUSR leaves the terminal responsible for its cursor cadence.
+cursorStyle :: Maybe Bool -> IO ()
+cursorStyle blinking = putStr (case blinking of Just True -> "\ESC[3 q"; Just False -> "\ESC[4 q"; Nothing -> "\ESC[0 q") >> hFlush stdout
 
 applyEffects :: Desktop -> [Effect] -> IO (Bool,Desktop)
 applyEffects = foldM apply . (False,)
   where
     apply state@(True,_) _=pure state
+    apply (_,d) LanguageRequest{}=pure (False,d {status="Language tools are unavailable in this preview."})
+    apply (_,d) JumpTo{}=pure (False,d)
+    apply (_,d) RunGit{}=pure (False,d {status="Git operations are unavailable in this preview."})
+    apply (_,d) ReadMergeBranches=pure (False,d {status="Git operations are unavailable in this preview."})
     apply (_,d) Exit=pure (True,d)
     apply (_,d) SetScreenMode{}=pure (False,d {status="Screen modes are available in a graphical window."})
     apply (_,d) (ReadPath path)=do
@@ -157,7 +176,7 @@ applyEffects = foldM apply . (False,)
       pure (False,case result of Left err -> message "Cannot open Help" (wrapMessage (T.pack (show err))) d; Right text -> addHelp (layoutMarkdown (max 20 (min 76 (fst (screenSize d)-treeWidthOf d-4))) text) d)
     apply (_,d) (RefreshGit path)=do
       repo<-repositoryStatus path
-      pure (False,d {branchStatus=maybe "" (\r -> repoBranch r <> if repoDirty r then "*" else "") repo,gitReview=case gitReview d of Just review | fmap repoRoot repo == Just (reviewRoot review) -> Just review; _ -> Nothing})
+      pure (False,d {branchStatus=maybe "" (\r -> repoBranch r <> if repoDirty r then "*" else "") repo,branchAdded=maybe 0 repoAdded repo,branchDeleted=maybe 0 repoDeleted repo,branchRoot=fmap repoRoot repo,gitReview=case gitReview d of Just review | fmap repoRoot repo == Just (reviewRoot review) -> Just review; _ -> Nothing})
     apply (_,d) ReadGitDiff=do
       reviewed<-reviewRepository (gitDirectory d)
       case reviewed of
@@ -217,3 +236,12 @@ gitDirectory :: Desktop -> FilePath
 gitDirectory d = case activeDocument d >>= documentFile of
   Just file -> takeDirectory (filePath file)
   Nothing -> maybe (startingDirectory d) reviewRoot (gitReview d)
+
+-- Start with the nearest enclosing Cabal package, without invoking a build.
+packageDirectory :: FilePath -> IO FilePath
+packageDirectory start = search start
+  where
+    search path = do
+      entries<-either (const []) id <$> (try (listDirectory path) :: IO (Either IOException [FilePath]))
+      if any ((==".cabal") . takeExtension) entries then pure path
+        else if takeDirectory path==path then pure start else search (takeDirectory path)

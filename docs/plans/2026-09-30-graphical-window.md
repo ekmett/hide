@@ -1,13 +1,12 @@
 # Graphical Window Implementation Plan
 
-> Use superpowers:executing-plans for integration. The font asset task is independent and can be delegated under dispatching-parallel-agents.
 
 Goal: `thc-edit --window` presents the existing editor on Metal/macOS and Vulkan/Linux with tightly rendered IBM VGA cells.
-Spec: ../specs/2026-09-30-graphical-window-design.md
+Spec: ../design/2026-09-30-graphical-window-design.md
 Constraints: optional Cabal flag, no changes to THC, preserve terminal behavior, plain UI copy, real selected GPU driver, included font licensing.
 Review focus: HiDPI pointer alignment; double-inserted text; dirty window close; clipping at tiny window dimensions; resource cleanup and backend errors.
 
-- [x] Font: bundle credited IBM VGA bitmap and Unicode fallback with deterministic glyph lookup. Own `src/THC/Edit/Font.hs`, `assets/`, `tools/` and `test/FontCheck.hs`. Interface `loadFont :: IO Font`, `glyph :: Font -> Char -> Glyph`, `Glyph { glyphWidth :: Int, glyphRows :: [Word16] }` with bit 15 the leftmost pixel, 16 rows, width 8 or 16. Tests check representative glyphs, box-edge joins and missing-glyph fallback.
+- [x] Font: bundle credited IBM VGA bitmap and Unicode fallback with deterministic glyph lookup. Interface `loadFont :: IO Font`, `glyph :: Font -> Char -> Glyph`, `Glyph { glyphWidth :: Int, glyphRows :: [Word16] }` with bit 15 the leftmost pixel, 16 rows, width 8 or 16. Tests check representative glyphs, box-edge joins and missing-glyph fallback.
 - [x] Backend: add optional SDL3 C bridge for window/resource lifecycle, frame upload, input polling and pixel-aligned geometry. Keep event ABI explicit and bounded. Native checks cover rendering geometry and resource errors; runtime checks report renderer name and capture a frame.
 - [x] Haskell integration: consume actual Vty spans; translate input to existing events; preserve file effects and close confirmation; expose `--window`, `--scale`. Test translation and frame cursor/clipping without requiring a display.
 - [x] Validate both flag configurations, macOS Metal runtime and Linux build/runtime where available. Fresh whole-branch review, fix consequential findings, document invocation and limits, sync durable checkout and notify coordination chats.
@@ -30,10 +29,7 @@ may transform the commit, with a visible report if the committed tree differs.
 This intentionally follows Git hook semantics rather than replacing hooks.
 HLS and Cabal-plan component browsing remain the next backend milestones.
 
-Coordination: “thc mba” owns THC repository/interface decisions; “thc linux”
-is a worker for delegated implementation and validation. The editor stays in
-its own repository. Runtime Debug actions will eventually use THC's Truffle
-debugger; HLS supplies static editor tooling.
+Runtime Debug actions will eventually use THC's Truffle debugger; HLS supplies static editor tooling.
 
 The final Linux frame revealed a startup resize race despite a successful render
 return code: X11 had not completed the requested window resize. Calling
@@ -55,3 +51,17 @@ in Preferences and --mode. Per the user's preference, both retain the existing
 8x16 bitmap and change its vertical aspect ratio. Native tests cover geometry,
 cursor/mouse placement, runtime changes, custom dimensions and failed resize
 rollback; mode changes preserve buffers and scale the existing pane layout.
+
+HLS integration now runs asynchronously in both frontends, with versioned
+buffer synchronization, status-bar types, completion, definition, diagnostics
+and rename. Real HLS 2.15 with GHC 9.14.1 verified these actions through the
+editor model. Rename snapshots closed project source files before requesting
+edits, validates all affected files, and leaves changes in undoable buffers.
+The Problems dock and source chevrons track current diagnostics.
+
+Buffers now use measured line finger trees with persistent undo states and a
+cached text projection. Mouse controls include Open-dialog double-click,
+button hover/pressed feedback, and a source context menu. Startup opens the
+current package in the file explorer. Desktop dither and scrollbars use their
+distinct colors; dragging uses a cyan single-line frame. The graphical mouse
+uses the DOS text-cursor color mask rather than a graphical arrow.

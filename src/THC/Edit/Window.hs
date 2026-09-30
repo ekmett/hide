@@ -23,6 +23,7 @@ import THC.Edit.Render
 
 foreign import ccall unsafe "thc_open" c_open :: CString -> CInt -> CInt -> CInt -> CInt -> IO CInt
 foreign import ccall unsafe "thc_mode" c_mode :: CInt -> CInt -> CInt -> IO CInt
+foreign import ccall unsafe "thc_scale" c_scale :: CInt -> IO CInt
 foreign import ccall unsafe "thc_close" c_close :: IO ()
 foreign import ccall unsafe "thc_error" c_error :: IO CString
 foreign import ccall unsafe "thc_backend" c_backend :: IO CString
@@ -30,6 +31,7 @@ foreign import ccall unsafe "thc_size" c_size :: Ptr CInt -> Ptr CInt -> IO ()
 foreign import ccall unsafe "thc_begin" c_begin :: IO CInt
 foreign import ccall unsafe "thc_glyph" c_glyph :: CInt -> CInt -> CInt -> CInt -> Ptr Word16 -> Word32 -> Word32 -> IO ()
 foreign import ccall unsafe "thc_cursor" c_cursor :: CInt -> CInt -> IO ()
+foreign import ccall unsafe "thc_cursor_blink" c_cursor_blink :: CInt -> IO ()
 foreign import ccall unsafe "thc_present" c_present :: IO CInt
 foreign import ccall safe "thc_wait" c_wait :: Ptr Int32 -> IO CInt
 foreign import ccall unsafe "thc_text" c_text :: IO CString
@@ -79,11 +81,10 @@ nativeMenus = pure ()
 updateMenus :: Desktop -> IO ()
 #ifdef darwin_HOST_OS
 updateMenus d = forM_ (zip [0..] nativeCommands) $ \(i,cmd) ->
-  c_menu_enabled i (if canInvoke cmd then 1 else 0)
+  c_menu_enabled i (if commandEnabled d cmd && canInvoke cmd then 1 else 0)
   where
-    canInvoke Disabled{} = False
     canInvoke Paste = not (maybe False treeFocused (sideTree d)) || dialog d /= Nothing
-    canInvoke cmd = dialog d == Nothing && (activeWindow d /= Nothing || cmd `elem` [New,Open,Quit,Help,About,Gallery,EditorOptions,ToggleTree,GitDiff,GitCommit])
+    canInvoke cmd = dialog d == Nothing && (activeWindow d /= Nothing || cmd `elem` [New,Open,Quit,Help,About,Gallery,EditorOptions,ToggleTree,GitDiff,GitCommit,Problems,NextMessage,PreviousMessage])
 #else
 updateMenus _ = pure ()
 #endif
@@ -91,6 +92,7 @@ updateMenus _ = pure ()
 -- The same Vty picture used by the terminal is flattened into bitmap cells.
 draw :: Font -> Desktop -> IO ()
 draw font d = do
+  c_cursor_blink (if blinkCursor d then 1 else 0)
   check "Allocate window frame" c_begin
   let picture = renderDesktop d
   forM_ (zip [0::Int ..] (toList (displayOpsForPic picture (screenSize d)))) $ \(y,spans) -> go y 0 (toList spans)
@@ -117,8 +119,8 @@ draw font d = do
     rgb (V.SetTo (V.ISOColor n)) = [0,0xaa0000,0x00aa00,0xaa5500,0x0000aa,0xaa00aa,0x00aaaa,0xaaaaaa,0x555555,0xff5555,0x55ff55,0xffff55,0x5555ff,0xff55ff,0x55ffff,0xffffff] !! (fromIntegral n `mod` 16)
     rgb _ = 0
 
-runWindow :: Backend -> Int -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> IO ()
-runWindow backend scale effects initial = do
+runWindow :: Backend -> Int -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> (Desktop -> IO Desktop) -> Desktop -> IO ()
+runWindow backend scale effects tick initial = do
   font <- loadFont
   let driver = case backend of Metal -> "metal"; Vulkan -> "vulkan"; _ -> if os == "darwin" then "metal" else "vulkan"
   -- SDL must stay on the main OS thread; GHC's main action is a bound thread.
@@ -132,17 +134,20 @@ runWindow backend scale effects initial = do
       h <- fromIntegral <$> peek hp
       pure ((fst (handleEvent (V.EvResize w h) initial {nativeMac=os == "darwin"})) {menu=menu initial})
     captureOnly <- (== Just "1") <$> lookupEnv "THC_EDIT_CAPTURE_EXIT"
-    if captureOnly then draw font sized else loop font sized
+    if captureOnly then draw font sized else tick sized >>= loop font Nothing
   where
-    loop font d = do
-      updateMenus d
-      draw font d
+    loop font previous d = do
+      when (previous /= Just d) $ do
+        updateMenus d
+        draw font d
       event <- allocaArray 6 $ \p -> check "Read window event" (c_wait p) >> map fromIntegral <$> peekArray 6 p
       (next,requests) <- dispatch event d
       (exit,updated) <- foldM windowEffect (False,next) requests
-      unless exit (loop font updated)
+      let displayed = case event of kind:_ | kind `elem` [3,4,5,7,8,9,12] -> Nothing; _ -> Just d
+      unless exit (tick updated >>= loop font displayed)
     windowEffect state@(True,_) _ = pure state
-    windowEffect (_,d) (SetScreenMode mode) = do
+    windowEffect (_,d) request = applyWindowEffect d request
+    applyWindowEffect d (SetScreenMode mode) = do
       let (cols,rows) = modeSize mode
       ok <- c_mode (fromIntegral (modeHeight mode)) (fromIntegral cols) (fromIntegral rows)
       err <- if ok == 0 then c_error >>= peekCString else pure ""
@@ -153,8 +158,10 @@ runWindow backend scale effects initial = do
         pure (False, if ok == 0
           then message "Cannot change screen mode" [T.pack err] (fst (handleEvent (V.EvResize w h) d))
           else (resizeScreenMode (w,h) d) {videoMode=Just mode})
-    windowEffect (_,d) request = effects d [request]
+    applyWindowEffect d request = effects d [request]
     dispatch (1:key:mods:_) d
+      | key == fromEnum '0', mods .&. 4 /= 0 = changeScale 0 d
+      | key `elem` map fromEnum ['+','=','-'], mods .&. 6 /= 0 = changeScale (if key == fromEnum '-' then -1 else 1) d
       | key == fromEnum 'v' && mods .&. 10 /= 0 && (not (wordStar d) || mods .&. 8 /= 0) = paste d
       | otherwise = case decodeKey key mods of
           Nothing -> pure (d,[])
@@ -164,18 +171,28 @@ runWindow backend scale effects initial = do
       case TE.decodeUtf8' bytes of
         Left _ -> pure (d,[])
         Right text -> clipboardResult (any (\c -> copies (V.EvKey (V.KChar c) []) d) (T.unpack text)) d (foldText (T.unpack text) d)
-    dispatch (3:x:y:_:mods:_) d = pure (handleEvent (V.EvMouseDown x y V.BLeft (keyMods mods)) d)
+    dispatch (3:x:y:clicks:mods:button:_) d
+      | button == 3 = pure (handleEvent (V.EvMouseDown x y V.BRight (keyMods mods)) d)
+      | clicks == 0, dialog d /= Nothing || drag d == Nothing = pure (hoverAt x y d)
+      | clicks >= 2 = pure (handleDoubleClick x y d)
+      | otherwise = pure (handleEvent (V.EvMouseDown x y V.BLeft (keyMods mods)) d)
     dispatch (4:x:y:_) d = pure (handleEvent (V.EvMouseUp x y (Just V.BLeft)) d)
     dispatch (5:w:h:_) d = pure (handleEvent (V.EvResize w h) d)
     dispatch (6:_) d | dialog d /= Nothing = pure (d,[])
                     | otherwise = pure (runCommand Quit d)
-    dispatch (7:_) d = pure (d {drag=Nothing,prefix=Nothing},[])
+    dispatch (7:_) d = pure (hoverAt (-1) (-1) d {drag=Nothing,dragOriginal=Nothing,prefix=Nothing,buttonPressed=Nothing})
     dispatch (9:x:y:direction:mods:_) d = pure (handleEvent (V.EvMouseDown x y (if direction>0 then V.BScrollUp else V.BScrollDown) (keyMods mods)) d)
     dispatch (11:i:_) d | i >= 0, cmd:_ <- drop i nativeCommands =
       if cmd == Paste then paste d
       else if dialog d == Nothing then clipboardResult (cmd `elem` [Copy,Cut]) d (runCommand cmd d)
       else pure (d,[])
+    dispatch (12:x:y:_) d = pure (hoverAt x y d)
     dispatch _ d = pure (d,[])
+    changeScale direction d = do
+      ok <- c_scale direction
+      if ok /= 0 then pure (d,[]) else do
+        err <- c_error >>= peekCString
+        pure (message "Cannot resize character tiles" [T.pack err] d,[])
     keyMods m = case decodeKey 0 m of Just (V.EvKey _ ms) -> ms; _ -> []
     paste d = do bytes <- c_clipboard >>= BS.packCString; pure (handleEvent (V.EvPaste bytes) d)
     clipboardResult force before result@(after,_) = do
@@ -191,6 +208,6 @@ runWindow backend scale effects initial = do
     foldText (c:cs) d = let (d',fx)=handleEvent (V.EvKey (V.KChar c) []) d
                        in if null fx then foldText cs d' else (d',fx)
 #else
-runWindow :: Backend -> Int -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> IO ()
-runWindow _ _ _ _ = ioError (userError "Graphical support is not built. Install SDL3 and rebuild with: cabal build -fwindow")
+runWindow :: Backend -> Int -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> (Desktop -> IO Desktop) -> Desktop -> IO ()
+runWindow _ _ _ _ _ = ioError (userError "Graphical support is not built. Install SDL3 and rebuild with: cabal build -fwindow")
 #endif

@@ -6,6 +6,11 @@ import qualified FontCheck
 import Control.Monad (unless)
 import qualified Data.Text as T
 import THC.Edit.App (demoDesktop)
+import qualified BufferTreeCheck
+import qualified LSPCheck
+import qualified ToolingCheck
+import qualified DialogMouseCheck
+import qualified GitOperationsCheck
 import qualified GitCheck
 import qualified HelpCheck
 import qualified BrowserCheck
@@ -76,6 +81,8 @@ main = do
   check "resize keeps frames inside desktop" (all (\w -> let Rect x y width height = bounds w in x >= 0 && y >= 1 && x+width <= 30 && y+height <= 9) (windows small))
   check "snapshot keeps 25 rows" (length (T.lines (snapshot d)) == 25)
   check "snapshot has menu" ("File" `T.isInfixOf` snapshot d)
+  let dragging=case activeWindow demoDesktop of Just w -> demoDesktop {drag=Just (Moving (windowId w) 0 0)}; Nothing -> demoDesktop
+  check "moving frame becomes cyan and single line" ("┌" `T.isInfixOf` snapshot dragging && "color:rgb(85,255,255);background:rgb(0,0,170)" `T.isInfixOf` snapshotHtml dragging)
   check "source text survives zero horizontal scroll" ("factorial" `T.isInfixOf` snapshot demoDesktop)
   check "CRLF moves as one newline" (nextCharacter "a\r\nb" 1 == 3 && previousCharacter "a\r\nb" 3 == 1)
   check "word-left crosses punctuation" (wordLeft "foo.bar" 4 == 3)
@@ -98,6 +105,7 @@ main = do
   let resizeClick = fst (handleEvent (V.EvMouseDown 78 23 V.BLeft []) n)
   check "visible resize grip captures drag" (case drag resizeClick of Just Resizing{} -> True; _ -> False)
   let abc = moveTo False 1 (addDocument Nothing (newBuffer "abc") d)
+  check "undo without history preserves cursor" (fmap selection (activeWindow (fst (runCommand Undo abc)))==fmap selection (activeWindow abc))
   check "wrapped search spans old cursor" (maybe False ((== (0,3)) . ordered . selection) (activeWindow (findText "abc" abc)))
   check "control placeholders use one column" (displayColumn "a\SOHb" 2 == 2 && columnOffset "a\SOHb" 2 == 2)
   let crowded = iterate (fst . runCommand New) d !! 6
@@ -121,6 +129,11 @@ main = do
       undoneTree=fst (runCommand Undo focusedTree)
   check "tree focus blocks background paste" (buffers pastedTree == buffers focusedTree)
   check "tree focus blocks background undo" (buffers undoneTree == buffers focusedTree)
+  BufferTreeCheck.checks
+  LSPCheck.checks
+  ToolingCheck.checks
+  DialogMouseCheck.checks
+  GitOperationsCheck.checks
   GitCheck.checks
   WindowCheck.checks
 #ifdef WITH_WINDOW

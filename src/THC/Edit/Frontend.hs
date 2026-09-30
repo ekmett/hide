@@ -1,4 +1,4 @@
-module THC.Edit.Frontend (Backend(..), chooseBackend, parseWindowSize, parseScreenMode, modeSize, modeHeight, decodeKey) where
+module THC.Edit.Frontend (Backend(..), chooseBackend, chooseScale, parseWindowSize, parseScreenMode, modeSize, modeHeight, decodeKey) where
 import Data.Bits ((.&.))
 import Data.Char (chr, isDigit)
 import Text.Read (readMaybe)
@@ -48,3 +48,14 @@ parseWindowSize value = case break (== 'x') value of
               Just cols <- readMaybe w, Just rows <- readMaybe h,
               cols >= 40, cols <= 512, rows >= 12, rows <= 256 -> Right (cols,rows)
   _ -> Left "--size needs COLSxROWS (40..512 columns, 12..256 rows), e.g. 80x25."
+
+-- Explicit flags override the environment, including an invalid environment value.
+chooseScale :: Maybe String -> [String] -> Either String Int
+chooseScale env explicit = case explicit of
+  [] -> maybe (Right 0) parse (env >>= \s -> if null s then Nothing else Just s)
+  [value] -> parse value
+  _ -> Left "Specify --scale only once."
+  where
+    parse value = case readMaybe value of
+      Just n | n>=1 && n<=8 -> Right n
+      _ -> Left "--scale or THC_EDIT_SCALE needs an integer from 1 to 8."
