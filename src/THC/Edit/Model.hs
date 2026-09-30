@@ -40,7 +40,7 @@ data Desktop = Desktop
   { screenSize :: (Int,Int), windows :: [Window], buffers :: M.Map Int Document
   , nextId :: Int, menu :: Maybe (Int,Int), dialog :: Maybe Dialog, drag :: Maybe Drag
   , clipboard :: Text, wordStar :: Bool, prefix :: Maybe Char, status :: Text
-  , lastFind :: Text
+  , blockStart :: Maybe (Int,Int), lastFind :: Text
   } deriving (Eq,Show)
 
 data MenuItem = MenuItem Text Text Command deriving (Eq,Show)
@@ -73,7 +73,7 @@ menuRect d i = Rect (min x (max 0 (sw-w))) 1 w (length (menuItems i)+2)
         w = min sw (maximum [T.length t + T.length key + 5 | MenuItem t key _ <- menuItems i])
 
 initialDesktop :: (Int,Int) -> Desktop
-initialDesktop size = Desktop size [] M.empty 1 Nothing Nothing Nothing "" False Nothing "640K ought to be enough for any thunk." ""
+initialDesktop size = Desktop size [] M.empty 1 Nothing Nothing Nothing "" False Nothing "" Nothing ""
 
 activeWindow :: Desktop -> Maybe Window
 activeWindow = listToMaybe . windows
@@ -118,10 +118,9 @@ editActive f cursor d = case (activeWindow d, activeDocument d) of
       bid = bufferId active
       original = documentBuffer doc
       changed = f (selection active) original
-      old = contents original; new = contents changed
-      common = maybe 0 (T.length . (\(a,_,_) -> a)) (T.commonPrefixes old new)
-      suffix = maybe 0 (T.length . (\(a,_,_) -> a)) (T.commonPrefixes (T.reverse (T.drop common old)) (T.reverse (T.drop common new)))
-      oldEnd = T.length old-suffix; newEnd = T.length new-suffix
+      new = contents changed
+      (common,oldEnd,inserted) = fromMaybe (0,0,0) (lastChange changed)
+      newEnd = common+inserted
       rebase p | p <= common = p
                | p >= oldEnd = p + newEnd-oldEnd
                | otherwise = newEnd
@@ -223,6 +222,7 @@ tileWindows vertical d = d {windows = zipWith place [0..] (windows d)}
 splitWindow :: Bool -> Desktop -> (Desktop,[Effect])
 splitWindow vertical d = case activeWindow d of
   Nothing -> (d,[])
+  Just _ | (if vertical then fst (screenSize d) `div` (length (windows d)+1) < 16 else (snd (screenSize d)-2) `div` (length (windows d)+1) < 5) -> (d {status="Not enough room to split; enlarge the terminal."},[])
   Just w -> (tileWindows vertical d {windows = w {windowId = nextId d} : windows d, nextId = nextId d+1},[])
 
 findText :: Text -> Desktop -> Desktop
@@ -235,10 +235,10 @@ findText needle d = case activeWindow d of
   where
     t = activeText d
     locate start source = let (before,after) = T.breakOn needle source in if T.null after then Nothing else Just (start+T.length before)
-    searchFrom p = case locate p (T.drop p t) of Just x -> Just x; Nothing -> locate 0 (T.take p t)
+    searchFrom p = case locate p (T.drop p t) of Just x -> Just x; Nothing -> locate 0 t
 
 helpLines :: [Text]
-helpLines = ["F1 Help   F2 Save   F3 Open   F5 Zoom", "F6 Next window   F10 Menu   Alt+X Exit", "Alt+F3 Close   Ctrl+Z Undo   Ctrl+Y Redo", "Shift+arrows Select   Ctrl+arrows Words", "Ctrl+C/X/V Copy/Cut/Paste (internal clipboard)", "Ctrl+F Find   Ctrl+R Replace   Ctrl+L Next", "Ctrl+G Go to line   Ctrl+A Select all", "Mouse: title drag, bottom-right resize", "Window menu: tile, cascade, shared splits", "", "WordStar (Options > Editor):", "Ctrl+E/S/D/X Up/Left/Right/Down", "Ctrl+A/F Word left/right   Ctrl+Y Delete line", "Ctrl+K B/K Block start/end   C/V Copy/Move", "Ctrl+K Y Delete block   S Save   D Close", "Ctrl+Q S/D Line start/end   R/C File top/end", "Ctrl+Q F Find   Ctrl+Q A Replace", "Escape cancels a command prefix.", "", "HLS and Cabal browsing are not connected yet."]
+helpLines = ["F1 Help   F2 Save   F3 Open   F5 Zoom", "F6 Next window   F10 Menu   Alt+X Exit", "Alt+F3 Close   Ctrl+Z Undo   Ctrl+Y Redo", "Shift+arrows Select   Ctrl+arrows Words", "Ctrl+C/X/V Copy/Cut/Paste (internal clipboard)", "Ctrl+F Find   Ctrl+R Replace   Ctrl+L Next", "Ctrl+G Go to line   Ctrl+A Select all", "Mouse: title drag, bottom-right resize", "Window menu: tile, cascade, shared splits", "", "WordStar (Options > Editor):", "Ctrl+E/S/D/X Up/Left/Right/Down", "Ctrl+A/F Word left/right   Ctrl+Y Delete line", "Ctrl+K B/K Block start/end   C/V Copy/Cut", "Ctrl+K Y Delete block   S Save   D Close", "Ctrl+Q S/D Line start/end   R/C File top/end", "Ctrl+Q F Find   Ctrl+Q A Replace", "Escape cancels a command prefix.", "", "HLS and Cabal browsing are not connected yet."]
 
 fieldHeight :: Field -> Int
 fieldHeight Input{} = 3
@@ -258,7 +258,10 @@ fieldRects d dg = zipWith make starts (fields dg)
   where
     Rect x y w _ = dialogRect d dg
     starts = scanl (+) (y+2+length (body dg)) (map fieldHeight (fields dg))
-    make row f = Rect (x+3) row (max 1 (w-6)) (fieldHeight f)
+    make row f = Rect (x+3) (row-offset) (max 1 (w-6)) (fieldHeight f)
+    offset = case drop (focus dg) (zip starts (fields dg)) of
+      (row,f):_ -> max 0 (min (row-y-2) (row+fieldHeight f-(top (dialogRect d dg)+height (dialogRect d dg)-3)))
+      _ -> 0
 
 buttonRects :: Desktop -> Dialog -> [Rect]
 buttonRects d dg = zipWith (\bx label -> Rect bx (y+h-2) (T.length label+4) 1) starts (buttons dg)
@@ -316,7 +319,7 @@ mouseEvent x y button mods d = case find (\w -> inside (bounds w) x y) (windows 
       | y==t && x>=l+2 && x<=l+4 -> runCommand Close focused
       | y==t && x>=l+ww-5 -> runCommand Zoom focused
       | y==t -> (focused {drag=Just (Moving (windowId w) (x-l) (y-t))},[])
-      | x==l+ww-1 && y==t+hh-1 -> (focused {drag=Just (Resizing (windowId w) 1 1)},[])
+      | x>=l+ww-2 && y==t+hh-1 -> (focused {drag=Just (Resizing (windowId w) (l+ww-x) (t+hh-y))},[])
       | x==l+ww-1 -> let { total = max 0 (length (textLines (activeText focused))-1); row = max 0 (min total ((y-t-1)*total `div` max 1 (hh-3))) }
                     in (modifyActive (\v -> v {scrollRow=row}) focused,[])
       | y==t+hh-1 -> (modifyActive (\v -> v {scrollColumn=max 0 ((x-l-1)*8)}) focused,[])
@@ -399,8 +402,10 @@ starKey c d = case lookup c [('e',V.KUp),('s',V.KLeft),('d',V.KRight),('x',V.KDo
 
 starPrefix :: Char -> Char -> Desktop -> (Desktop,[Effect])
 starPrefix 'k' c d = case c of
-  'b' -> (modifyActive (\w -> w {selection=Selection (caret (selection w)) (caret (selection w))}) d,[])
-  'k' -> (d,[])
+  'b' -> (d {blockStart=(\w -> (bufferId w,caret (selection w))) <$> activeWindow d},[])
+  'k' -> (case (blockStart d,activeWindow d) of
+    (Just (bid,p),Just w) | bid==bufferId w -> modifyActive (\v -> v {selection=Selection (min p (T.length (activeText d))) (caret (selection v))}) d
+    _ -> d,[])
   'c' -> runCommand Copy d
   'v' -> runCommand Cut d
   'y' -> (insertText "" d,[])
@@ -435,7 +440,7 @@ dialogEvent ev dg d = case ev of
     Nothing -> case findIndex (\r -> inside r x y && y < top (dialogRect d dg)+height (dialogRect d dg)-3) (fieldRects d dg) of
       Nothing -> (d,[])
       Just i -> let Rect l t _ _ = fieldRects d dg !! i
-                    click (Input label value _) = Input label value (columnOffset value (max 0 (x-l)))
+                    click (Input label value pos) = Input label value (columnOffset value (max 0 (x-l)+max 0 (displayColumn value pos-width (fieldRects d dg !! i)+1)))
                     click (CheckBox label b) = CheckBox label (not b)
                     click (Radio label xs _) = Radio label xs (max 0 (min (length xs-1) (y-t-1)))
                     click (ListBox label xs selected) = ListBox label xs (max 0 (min (length xs-1) (max 0 (selected-3)+y-t-1)))
@@ -486,7 +491,10 @@ submitDialog button dg original
       Just n | n>0 -> (moveTo False (lineOffset (activeText d) (n-1)) d,[])
       _ -> (original {status="Enter a positive line number."},[])
     Confirm cmd | button==0 -> saveRequest (Just cmd) d
-                | button==1 -> runCommand cmd (markClean d)
+                | button==1 -> case cmd of
+                    Close -> (closeActive d,[])
+                    Quit -> runCommand Quit (discardActive d)
+                    _ -> (d,[])
                 | otherwise -> (d,[])
     Settings -> (d {wordStar=any (\f -> case f of Radio _ _ 1 -> True; _ -> False) (fields dg),status="Editor options updated."},[])
     Widgets -> (d {status="Widget test complete. Laziness remains enabled."},[])
@@ -495,6 +503,6 @@ submitDialog button dg original
     d=original {dialog=Nothing}
     values=[value | Input _ value _ <- fields dg]
     first=fromMaybe "" (listToMaybe values); second=fromMaybe "" (listToMaybe (drop 1 values))
-    markClean s = case activeWindow s of
+    discardActive s = case activeWindow s of
       Nothing -> s
-      Just w -> s {buffers=M.adjust (\doc -> doc {documentBuffer=(documentBuffer doc) {saved=contents (documentBuffer doc)}}) (bufferId w) (buffers s)}
+      Just w -> s {windows=filter ((/=bufferId w) . bufferId) (windows s), buffers=M.delete (bufferId w) (buffers s)}

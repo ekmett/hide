@@ -129,7 +129,7 @@ dialogLayers d dg =
     title=" "<>dialogTitle dg<>" "
     fieldLayer i (Rect fx fy fw _) field
       | fy>=y+h-3 = []
-      | otherwise = [place fx fy (V.cropBottom (max 0 (y+h-3-fy)) image)]
+      | otherwise = [place fx (max (y+2) fy) (V.cropBottom (max 0 (y+h-3-max (y+2) fy)) (V.translateY (min 0 (fy-y-2)) image))]
       where
         a=if focus dg==i then selected else paper
         image=case field of
@@ -147,7 +147,7 @@ snapshot d = T.unlines [T.concat (map plain (toList ops)) | ops<-toList (display
 
 -- Headless preview uses the actual Vty output spans, not a second UI renderer.
 snapshotHtml :: Desktop -> Text
-snapshotHtml d = "<!doctype html><meta charset='utf-8'><title>Turbo Haskell</title><style>body{background:#111;margin:24px;display:grid;place-content:center;min-height:90vh}pre{font:20px/1.15 'Courier New',monospace;margin:0;box-shadow:0 0 0 2px #333;white-space:pre}span{font-weight:normal}</style><pre>" <> T.intercalate "\n" rows <> "</pre>"
+snapshotHtml d = "<!doctype html><meta charset='utf-8'><title>Turbo Haskell</title><style>body{background:#111;margin:24px;display:grid;place-content:center;min-height:90vh}pre{background:#0000aa;font:min(20px,calc((100vw - 48px)/48))/1.066667 'Courier New',monospace;margin:0;box-shadow:0 0 0 2px #333;white-space:pre}span{font-weight:normal}</style><pre>" <> T.intercalate "\n" rows <> "</pre>"
   where
     rows=[T.concat (map spanHtml (toList ops)) | ops<-toList (displayOpsForPic (renderDesktop d) (screenSize d))]
     spanHtml TextSpan{textSpanAttr=a,textSpanText=t}="<span style='color:"<>color (V.attrForeColor a)<>";background:"<>color (V.attrBackColor a)<>"'>"<>escape (TL.toStrict t)<>"</span>"

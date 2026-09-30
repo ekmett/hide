@@ -55,5 +55,28 @@ main = do
   check "snapshot keeps 25 rows" (length (T.lines (snapshot d)) == 25)
   check "snapshot has menu" ("File" `T.isInfixOf` snapshot d)
   check "source text survives zero horizontal scroll" ("factorial" `T.isInfixOf` snapshot demoDesktop)
+  check "CRLF moves as one newline" (nextCharacter "a\r\nb" 1 == 3 && previousCharacter "a\r\nb" 3 == 1)
+  check "word-left crosses punctuation" (wordLeft "foo.bar" 4 == 3)
+  let twoDirty = insertText "second" (fst (runCommand New shared))
+      asked = fst (runCommand Quit twoDirty)
+      discarded = case dialog asked of Just dg -> fst (submitDialog 1 dg asked); Nothing -> asked
+      cancelled = key V.KEsc [] discarded
+  check "discard then cancel cannot bless unsaved text" (all (dirty . documentBuffer) (M.elems (buffers cancelled)))
+  let star = key (V.KChar 'b') [] (key (V.KChar 'k') [V.MCtrl] changed {wordStar=True})
+      starMoved = key (V.KChar 's') [V.MCtrl] star
+      starBlock = key (V.KChar 'k') [] (key (V.KChar 'k') [V.MCtrl] starMoved)
+  check "WordStar block marker survives movement" (maybe False ((== (0,1)) . ordered . selection) (activeWindow starBlock))
+  let repeated = addDocument Nothing (newBuffer "aaaa") d
+      repSplit = fst (runCommand SplitVertical repeated)
+      positioned = repSplit {windows=case windows repSplit of w:v:rest -> w:v {selection=Selection 2 2}:rest; ws -> ws}
+      inserted = insertText "a" positioned
+  check "repeated text rebase uses actual edit" (map (caret . selection) (windows inserted) == [1,3])
+  let undone = fst (runCommand Undo inserted)
+  check "undo rebases other split cursor" (map (caret . selection) (windows undone) == [0,2])
+  let resizeClick = fst (handleEvent (V.EvMouseDown 78 23 V.BLeft []) n)
+  check "visible resize grip captures drag" (case drag resizeClick of Just Resizing{} -> True; _ -> False)
+  let abc = moveTo False 1 (addDocument Nothing (newBuffer "abc") d)
+  check "wrapped search spans old cursor" (maybe False ((== (0,3)) . ordered . selection) (activeWindow (findText "abc" abc)))
+  check "control placeholders use one column" (displayColumn "a\SOHb" 2 == 2 && columnOffset "a\SOHb" 2 == 2)
   FilesCheck.checks
   putStrLn "editor checks passed"
