@@ -65,12 +65,18 @@ checks = bracket temporary removeFile $ \path -> do
   let image=snapshot opened
   check "grid includes offset bytes ASCII and mode" (all (`T.isInfixOf` image) ["00000000","00 FF 41 0A 80 C3 A9","..A....","[HEX]"])
   let cellAt d x y=T.index (T.lines (snapshot d) !! y) x
-      narrow=modifyActive (\w -> w {bounds=(bounds w) {width=70}}) opened
+      narrow=modifyActive (\w -> w {bounds=(bounds w) {width=42}}) opened
       narrowDoc=maybe (error "no document") id (activeDocument narrow)
       narrowWindow=maybe (error "no window") id (activeWindow narrow)
       bar=scrollbarRect False narrowDoc narrowWindow
       scrolled=fst (handleEvent (V.EvMouseDown (left bar+width bar-1) (top bar) V.BLeft []) narrow)
       widened=key (V.KFun 5) scrolled
+  let compact=modifyActive (\w -> w {bounds=(bounds w) {width=56}}) (desktop (newByteBuffer (BS.pack (take 512 (cycle [0..255])))))
+      compactWindow=maybe (error "no compact window") id (activeWindow compact)
+      compactDoc=maybe (error "no compact document") id (activeDocument compact)
+  check "eight-byte rows fit beside Files with both panes visible"
+    ("00000008" `T.isInfixOf` snapshot compact && "│........" `T.isInfixOf` snapshot compact &&
+     scrollbarLimit False compactDoc compactWindow==0 && not ("◄" `T.isInfixOf` snapshot compact))
   check "hex dividers join both borders and continue below EOF"
     (and [cellAt opened x 1=='╤' && cellAt opened x 23=='╧' && all (\y -> cellAt opened x y=='│') [2..22] | x<-[9,61]])
   check "no divider beside the scrollbar" (all (\y -> cellAt opened 78 y/='│') [2..22])
@@ -83,7 +89,39 @@ checks = bracket temporary removeFile $ \path -> do
     ("◄" `T.isInfixOf` snapshot narrow && fmap scrollColumn (activeWindow scrolled)==Just 1)
   check "widening hex resets horizontal scrolling and hides scrollbar"
     (fmap scrollColumn (activeWindow widened)==Just 0 && not ("◄" `T.isInfixOf` snapshot widened) && cellAt widened 61 2=='│')
-  check "hex cells match hit geometry" (and [hexHit (hexColumn i)==(i,False,False) && hexHit (hexColumn i+1)==(i,False,True) && hexHit (61+i)==(i,True,False) | i<-[0..15]])
+  check "hex cells match hit geometry" (and [hexHit 16 (hexColumn i)==(i,False,False) && hexHit 16 (hexColumn i+1)==(i,False,True) && hexHit 16 (61+i)==(i,True,False) | i<-[0..15]])
+  check "both layouts share exact row and hit geometry"
+    (and [length (hexRow count 0 (contents (buffer compact)))==hexWidth count &&
+      and [hexHit count (hexColumn i)==(i,False,False) && hexHit count (hexColumn i+1)==(i,False,True) &&
+           hexHit count (hexAsciiColumn count+i)==(i,True,False) | i<-[0..count-1]] | count<-[8,16]])
+  check "sixteen-byte layout switches only when the entire row fits"
+    (windowHexBytes compactWindow {bounds=(bounds compactWindow) {width=78}}==8 &&
+     windowHexBytes compactWindow {bounds=(bounds compactWindow) {width=79}}==16)
+  let at10=moveTo False 10 compact
+      position=fmap (caret.selection) . activeWindow
+      clickCompact=fst (handleEvent (V.EvMouseDown 44 3 V.BLeft []) compact)
+      editCompact=key (V.KChar 'Z') clickCompact
+      shiftDown=fst (handleEvent (V.EvKey V.KDown [V.MShift]) at10)
+  check "compact navigation moves by eight-byte rows"
+    (map (position . (`key` at10)) [V.KUp,V.KDown,V.KHome,V.KEnd,V.KPageDown]==map Just [2,18,8,15,170] &&
+     fmap selection (activeWindow shiftDown)==Just (Selection 10 18))
+  check "compact ASCII click and edit address the correct byte"
+    (position clickCompact==Just 15 && BS.index (bufferBytes (buffer editCompact)) 15==90 && position editCompact==Just 16)
+  check "compact vertical extent includes every byte and EOF insertion row"
+    (documentRows compactDoc compactWindow==65 && scrollbarLimit True compactDoc compactWindow==44)
+  let wide=moveTo False 300 (desktop (buffer compact))
+      docked=installTree "/tmp" [] wide
+      undocked=setTree Nothing docked
+      cursorVisible d=case activeWindow d of
+        Just w -> let (r,c)=windowCursorCell (buffer d) w in r>=scrollRow w && r<scrollRow w+height (bounds w)-2 && c>=scrollColumn w && c<scrollColumn w+width (bounds w)-2
+        Nothing -> False
+      split=command SplitVertical wide
+  check "docking reflows without moving the byte caret or losing its viewport"
+    (map position [wide,docked,undocked]==replicate 3 (Just 300) && all cursorVisible [wide,docked,undocked] &&
+     fmap windowHexBytes (activeWindow docked)==Just 8 && fmap windowHexBytes (activeWindow undocked)==Just 16 &&
+     buffers docked==buffers wide && buffers undocked==buffers wide)
+  check "split views choose their own hex row size without changing bytes"
+    (all ((==8).windowHexBytes) (windows split) && bufferBytes (buffer split)==bufferBytes (buffer wide))
   check "hex paste accepts only complete byte pairs" (parseHex "00 FF\n41"==Right "\0\255A" && case parseHex "0xFF" of Left _ -> True; _ -> False)
   let pasted=fst (handleEvent (V.EvPaste "FE 00") (moveTo False 0 opened))
   check "external hex paste inserts exact bytes" (BS.take 3 (bufferBytes (buffer pasted))==BS.pack [254,0,0])

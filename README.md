@@ -333,7 +333,10 @@ clusters still depend on terminal rendering.
 
 Files containing NUL bytes or invalid UTF-8 open in hex mode. **Edit > Text / hex
 mode** toggles valid text files without changing their bytes. The display has
-16 bytes per row, hexadecimal offsets and an ASCII column. Type hex pairs to
+16 bytes per row when the complete row fits (79 window columns including the
+frame), or 8 bytes per row in narrower windows, with hexadecimal offsets and
+an ASCII column. Each split chooses its layout independently; resizing preserves
+the selected byte. Type hex pairs to
 replace bytes; Tab switches to ASCII entry. Insert adds a zero byte, Delete and
 Backspace remove bytes, and Undo/Redo retain exact bytes across mode changes.
 Copy/Paste use hexadecimal byte pairs. Files with NUL or invalid UTF-8 cannot

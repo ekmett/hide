@@ -33,7 +33,7 @@ newDocument b file = restyle (Document b file Nothing [] 0 True)
 
 -- ponytail: retokenize the buffer after edits; use an incremental engine if large-file latency warrants it.
 restyle :: Document -> Document
-restyle doc | byteMode (documentBuffer doc) = doc {documentHighlight=[],documentWidth=77}
+restyle doc | byteMode (documentBuffer doc) = doc {documentHighlight=[],documentWidth=hexWidth 16}
 restyle doc = doc {documentHighlight=highlightFor (maybe "Main.hs" filePath (documentFile doc)) text,
   documentWidth=maximum (0:[displayColumn line (T.length line) | raw<-textLines text,let line=T.dropWhileEnd (=='\r') raw])}
   where text=contents (documentBuffer doc)
@@ -359,7 +359,7 @@ prompt title p fs d = d {dialog = Just (Dialog title p fs 0 ["OK","Cancel"] []),
 
 runCommand :: Command -> Desktop -> (Desktop,[Effect])
 runCommand cmd source | composerActive source, cmd `elem` [Undo,Redo,Copy,Cut,Paste,SelectAll] = (composerCommand cmd source,[])
-runCommand cmd source = Bifunctor.first clampHexScroll $ go cmd (source {menu = Nothing, contextMenu=Nothing, buttonHover=Nothing, buttonPressed=Nothing, prefix = Nothing, drag = Nothing,dragOriginal=Nothing})
+runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source {menu = Nothing, contextMenu=Nothing, buttonHover=Nothing, buttonPressed=Nothing, prefix = Nothing, drag = Nothing,dragOriginal=Nothing})
   where
     go New d = (addDocument Nothing (newBuffer "") d,[])
     go Open d = (d,[BrowsePath (startingDirectory d) "*.hs"])
@@ -533,7 +533,7 @@ buttonMnemonics dg = snd (mapAccumL choose [] (buttons dg))
 
 -- A screen-mode change scales the desktop layout to use the new row count.
 resizeScreenMode :: (Int,Int) -> Desktop -> Desktop
-resizeScreenMode (sw,sh) d = ensureVisible resized {windows=map stretch (windows d)}
+resizeScreenMode (sw,sh) d = ensureVisible (clampHexScroll d resized {windows=map stretch (windows d)})
   where
     resized = fst (handleEvent (V.EvResize sw sh) d)
     (oldW,oldH) = screenSize d
@@ -550,7 +550,7 @@ handleEvent (V.EvMouseDown x y V.BLeft _) d | y==snd (screenSize d)-1 =
     Just (_,_,Left cmd) -> runCommand cmd d
     Just (_,_,Right event) -> handleEvent event (if activeConversation d then d {composerFocused=True} else d)
     Nothing -> (d,[])
-handleEvent event d = Bifunctor.first clampHexScroll $ dispatchEvent event (case event of
+handleEvent event d = Bifunctor.first (clampHexScroll d) $ dispatchEvent event (case event of
   V.EvKey{} -> d {hoverTarget=Nothing,typeHint="",buttonHover=Nothing,buttonPressed=Nothing,statusHover=Nothing}
   V.EvMouseDown{} -> d {hoverTarget=Nothing,typeHint=""}
   V.EvPaste{} -> d {hoverTarget=Nothing,typeHint=""}
@@ -857,15 +857,24 @@ scrollbarRect vertical doc w
   where Rect x y ww hh=bounds w
 
 scrollbarLimit :: Bool -> Document -> Window -> Int
-scrollbarLimit vertical doc w = max 0 (if vertical then documentRows doc-max 1 (windowContentRows doc w)
-  else documentWidth doc-max 1 (width (bounds w)-2)+(if byteMode (documentBuffer doc) then 0 else 1))
+scrollbarLimit vertical doc w = max 0 (if vertical then documentRows doc w-max 1 (windowContentRows doc w)
+  else windowDocumentWidth doc w-max 1 (width (bounds w)-2)+(if byteMode (documentBuffer doc) then 0 else 1))
 
--- Window resize, zoom, and layout changes can make a scrolled hex row fit again.
-clampHexScroll :: Desktop -> Desktop
-clampHexScroll d = d {windows=map clamp (windows d)}
+-- Each split chooses its own layout. Keep the byte viewport and a visible caret
+-- anchored when resizing or docking Files changes the number of bytes per row.
+clampHexScroll :: Desktop -> Desktop -> Desktop
+clampHexScroll before d = d {windows=map clamp (windows d)}
   where
     clamp w | Just doc<-M.lookup (bufferId w) (buffers d), byteMode (documentBuffer doc) =
-      w {scrollColumn=max 0 (min (scrollbarLimit False doc w) (scrollColumn w))}
+      let old=fromMaybe w (find ((==windowId w).windowId) (windows before))
+          changed=windowHexBytes old/=windowHexBytes w
+          row=if changed then scrollRow old*windowHexBytes old `div` windowHexBytes w else scrollRow w
+          oldCursor=caret (selection old) `div` windowHexBytes old
+          visible=oldCursor>=scrollRow old && oldCursor<scrollRow old+height (bounds old)-2
+          cursor=caret (selection w) `div` windowHexBytes w
+          anchored=if changed && visible then max (cursor-height (bounds w)+3) (min cursor row) else row
+      in w {scrollRow=max 0 (min (scrollbarLimit True doc w) anchored),
+            scrollColumn=max 0 (min (scrollbarLimit False doc w) (if changed then 0 else scrollColumn w))}
     clamp w = w
 
 scrollbarThumb :: Int -> Int -> Int -> Int
@@ -905,8 +914,8 @@ selectAt extend x y d = case activeWindow d of
   Nothing -> d
   Just w | activeHex d -> let { col=max 0 (x-left (bounds w)-1+scrollColumn w)
                              ; row=max 0 (y-top (bounds w)-1+scrollRow w)
-                             ; (offset,ascii,low)=hexHit col }
-                            in modifyActive (\v -> v {windowHexAscii=ascii,windowHexLow=low}) (moveTo extend (row*16+offset) d)
+                             ; (offset,ascii,low)=hexHit (windowHexBytes w) col }
+                            in modifyActive (\v -> v {windowHexAscii=ascii,windowHexLow=low}) (moveTo extend (row*windowHexBytes w+offset) d)
   Just w -> moveTo extend pos d where
     b = maybe (newBuffer "") documentBuffer (activeDocument d)
     row = max 0 (min (bufferLineCount b-1) (y-top (bounds w)-1+scrollRow w))
@@ -1213,7 +1222,7 @@ fitWindow :: Desktop -> Rect -> Rect
 fitWindow d r = let offset=treeWidthOf d; (sw,sh)=screenSize d; fitted=fitRect (max 1 (sw-offset),sh-problemsHeight d) r {left=left r-offset} in fitted {left=left fitted+offset}
 
 setTree :: Maybe Sidebar -> Desktop -> Desktop
-setTree tree d = next {windows=map move (windows d)}
+setTree tree d = clampHexScroll d next {windows=map move (windows d)}
   where
     next=d {sideTree=tree,drag=Nothing,dragOriginal=Nothing}
     old=treeWidthOf d; new=treeWidthOf next
@@ -1354,14 +1363,21 @@ applyCompletion edits d
 activeHex :: Desktop -> Bool
 activeHex = maybe False (byteMode . documentBuffer) . activeDocument
 
-documentRows :: Document -> Int
-documentRows doc | byteMode b = bufferLength b `div` 16+1
+windowHexBytes :: Window -> Int
+windowHexBytes = hexBytesPerRow . subtract 2 . width . bounds
+
+windowDocumentWidth :: Document -> Window -> Int
+windowDocumentWidth doc w | byteMode (documentBuffer doc) = hexWidth (windowHexBytes w)
+                          | otherwise = documentWidth doc
+
+documentRows :: Document -> Window -> Int
+documentRows doc w | byteMode b = bufferLength b `div` windowHexBytes w+1
                  | otherwise = bufferLineCount b
   where b=documentBuffer doc
 
 windowCursorCell :: Buffer -> Window -> (Int,Int)
 windowCursorCell b w
-  | byteMode b = (p `div` 16, if windowHexAscii w then 61+p `mod` 16 else hexColumn (p `mod` 16)+if windowHexLow w then 1 else 0)
+  | byteMode b = (p `div` windowHexBytes w, if windowHexAscii w then hexAsciiColumn (windowHexBytes w)+p `mod` windowHexBytes w else hexColumn (p `mod` windowHexBytes w)+if windowHexLow w then 1 else 0)
   | otherwise = let (row,col)=bufferLineColumn b p in (row,displayColumn (bufferLineAt b row) col)
   where p=caret (selection w)
 
@@ -1393,16 +1409,17 @@ hexKey key mods d = case (activeWindow d,activeDocument d) of
           (Just (if low then fst (ordered sel) else fst (ordered sel)+1)) d
       start=fst (ordered sel)
       old=if start<size then ord (T.index (contents b) start) else 0
-      page=max 1 (height (bounds w)-3)*16
+      count=windowHexBytes w
+      page=max 1 (height (bounds w)-3)*count
     in case key of
       V.KLeft -> move (p-1)
       V.KRight -> move (p+1)
-      V.KUp -> move (p-16)
-      V.KDown -> move (p+16)
+      V.KUp -> move (p-count)
+      V.KDown -> move (p+count)
       V.KPageUp -> move (p-page)
       V.KPageDown -> move (p+page)
-      V.KHome -> move (if ctrl then 0 else p-p `mod` 16)
-      V.KEnd -> move (if ctrl then size else min size (p-p `mod` 16+15))
+      V.KHome -> move (if ctrl then 0 else p-p `mod` count)
+      V.KEnd -> move (if ctrl then size else min size (p-p `mod` count+count-1))
       V.KBS -> erase (max 0 (p-1)) p
       V.KDel -> erase p (min size (p+1))
       V.KIns -> editActive (\_ -> replaceSelection (Selection p p) "\0") (Just p) d

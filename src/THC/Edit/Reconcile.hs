@@ -126,8 +126,8 @@ reload bid file bytes raw desktop = case M.lookup bid (buffers desktop) of
         clamp n=max 0 (min (bufferLength fresh) n)
         adjust window | bufferId window/=bid = window
                       | otherwise = window {selection=let Selection a c=selection window in Selection (clamp a) (clamp c),
-                          scrollRow=max 0 (min (documentRows updated-1) (scrollRow window)),
-                          scrollColumn=max 0 (min (documentWidth updated) (scrollColumn window))}
+                          scrollRow=max 0 (min (documentRows updated window-1) (scrollRow window)),
+                          scrollColumn=max 0 (min (windowDocumentWidth updated window) (scrollColumn window))}
     in ensureVisible desktop {buffers=M.insert bid updated (buffers desktop),windows=map adjust (windows desktop),
       status="Reloaded "<>T.pack (filePath file)<>"; Undo restores the previous buffer.",hoverTarget=Nothing,typeHint=""}
 

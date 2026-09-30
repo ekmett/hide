@@ -152,14 +152,15 @@ windowLayers d active w =
     hexDividerLayers =
       [place (x+1+column) y (V.vertCat [V.char frame (if active && not moving then '╤' else '┬'),
         V.charFill frame '│' 1 contentHeight,V.char frame (if active && not moving then '╧' else '┴')])
-      | byteMode b, divider<-hexDividers, let column=divider-scrollColumn w, column>=0, column<contentWidth]
+      | byteMode b, divider<-hexDividers (windowHexBytes w), let column=divider-scrollColumn w, column>=0, column<contentWidth]
     contentWidth=max 0 (ww-2); contentHeight=windowContentRows doc w
     textImage=V.vertCat [renderLine n | n<-[scrollRow w..scrollRow w+contentHeight-1]]
-    renderLine n | byteMode b && n>=documentRows doc = V.charFill edit ' ' contentWidth 1
+    renderLine n | byteMode b && n>=documentRows doc w = V.charFill edit ' ' contentWidth 1
     renderLine n | byteMode b = V.cropRight contentWidth (V.translateX (negate (scrollColumn w)) (V.horizCat
-      [V.char (if active && maybe False highlighted offset then selected else if ch=='.' && maybe False (\i -> T.index bytes (i-n*16)/='.') offset then attr gray blue else edit) ch | (ch,offset)<-hexRow n t]) V.<|> V.charFill edit ' ' contentWidth 1)
+      [V.char (if active && maybe False highlighted offset then selected else if ch=='.' && maybe False (\i -> T.index bytes (i-n*count)/='.') offset then attr gray blue else edit) ch | (ch,offset)<-hexRow count n t]) V.<|> V.charFill edit ' ' contentWidth 1)
       where
-        bytes=T.take 16 (T.drop (n*16) t)
+        count=windowHexBytes w
+        bytes=T.take count (T.drop (n*count) t)
         highlighted offset = offset==caret (selection w) || let (a,z)=ordered (selection w) in offset>=a && offset<z
     renderLine n=V.cropRight contentWidth (V.translateX (negate (scrollColumn w)) (styledImage (lineColor n) active (selection w) (bufferLineOffset b n) (fromMaybe [] (atMay styledLines n))) V.<|> V.charFill edit ' ' contentWidth 1)
 
