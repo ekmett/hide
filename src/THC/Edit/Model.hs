@@ -199,6 +199,10 @@ activateWindowNumber number d
   | otherwise = d
   where ready=d {menu=Nothing,contextMenu=Nothing,drag=Nothing,dragOriginal=Nothing,prefix=Nothing}
 
+windowFocused :: Desktop -> Window -> Bool
+windowFocused d w = not (problemsFocused d) && not (maybe False treeFocused (sideTree d)) &&
+  fmap windowId (activeWindow d)==Just (windowId w)
+
 focusWindow :: Int -> Desktop -> Desktop
 focusWindow i d = d { problemsFocused=False, sideTree=fmap (\tree -> tree {treeFocused=False}) (sideTree d), windows = filter ((==i) . windowId) (windows d) ++ filter ((/=i) . windowId) (windows d) }
 
@@ -559,6 +563,7 @@ mouseEvent x y button mods d = case find (\w -> inside (bounds w) x y) (windows 
                maybe False ((==Nothing) . documentLabel) (activeDocument focused) ->
       (openContext SourceContext x y (selectAt False x y focused),[])
     V.BLeft
+      | not (windowFocused d w), x==l || x==l+ww-1 || y==t || y==t+hh-1 -> (focused,[])
       | y==t && x>=l+2 && x<=l+4 -> runCommand Close focused
       | y==t && x>=l+ww-6 && x<l+ww-3 -> runCommand Zoom focused
       | y==t -> (focused {drag=Just (Moving (windowId w) (x-l) (y-t)),dragOriginal=Just (windowId w,bounds w,restoredBounds w)},[])
@@ -893,7 +898,7 @@ navigateMessage delta d
 
 problemsMouse :: Int -> Int -> V.Button -> Desktop -> (Desktop,[Effect])
 problemsMouse x y button d = case button of
-  V.BLeft | y==top r && x>=width r-5 -> (setProblemsVisible False d,[])
+  V.BLeft | problemsFocused d && y==top r && x>=width r-5 -> (setProblemsVisible False d,[])
           | y>top r && y<top r+height r-1 && selected<length (diagnostics d) -> jumpProblem (chooseProblem selected focused)
           | otherwise -> (focused,[])
   V.BScrollUp -> (chooseProblem (problemsSelected d-3) focused,[])

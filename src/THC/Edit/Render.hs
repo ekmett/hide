@@ -59,8 +59,8 @@ renderDesktop d = (V.picForLayers layers) {V.picCursor=cursor}
     base = [place 0 0 menuBar, place 0 (sh-1) statusBar]
       ++ problemsLayers d
       ++ maybe [] (treeLayers d) (sideTree d)
-      ++ foldr stackWindow [V.charFill (attr blue gray) '░' sw sh] (zip [0::Int ..] (windows d))
-    stackWindow (i,w) below = windowLayers d (i==0) w ++ [castShadow (screenSize d) (bounds w) below] ++ below
+      ++ foldr stackWindow [V.charFill (attr blue gray) '░' sw sh] (windows d)
+    stackWindow w below = windowLayers d (windowFocused d w) w ++ [castShadow (screenSize d) (bounds w) below] ++ below
     menuBar = V.cropRight sw (V.char paper ' ' V.<|> V.horizCat
       [V.char normal ' ' V.<|> label (attr red bg) (T.take 1 title) V.<|> label normal (T.drop 1 title<>" ")
        | (i,(title,_,_))<-zip [0..] menus,let bg=if fmap fst (menu d)==Just i then green else gray,let normal=attr black bg]
@@ -104,12 +104,13 @@ windowLayers :: Desktop -> Bool -> Window -> [V.Image]
 windowLayers d active w =
   [place x (y+1+diagnosticRow issue-scrollRow w) (label (attr (if diagnosticSeverity issue==1 then V.RGBColor 255 85 85 else yellow) blue) "▶")
     | issue<-diagnostics d, Just (diagnosticPath issue)==fmap filePath (documentFile doc), diagnosticRow issue>=scrollRow w, diagnosticRow issue<scrollRow w+hh-2]
-  ++ [place (x+2) y (label frame "[" V.<|> label (attr (V.RGBColor 85 255 85) blue) "■" V.<|> label frame "]"),place (x+ww-6) y (label frame "[" V.<|> label (attr cyan blue) "↑" V.<|> label frame "]")
-  ,place (x+ww-7-T.length number) y (label frame number)
+  ++ (if active then
+    [place (x+2) y (label frame "[" V.<|> label (attr (V.RGBColor 85 255 85) blue) "■" V.<|> label frame "]"),place (x+ww-6) y (label frame "[" V.<|> label (attr cyan blue) "↑" V.<|> label frame "]")
+    ,place (x+2) (y+hh-1) (label frame (T.take (max 0 (ww-4)) (windowPositionText doc w)))
+    ,place (x+ww-2) (y+hh-1) (label frame "◢")
+    ,scrollbarImage True,scrollbarImage False] else [])
+  ++ [place (x+ww-7-T.length number) y (label frame number)
   ,place (x+max 6 ((ww-T.length title) `div` 2)) y (label frame (T.take (max 0 (ww-17-T.length number)) title))
-  ,place (x+2) (y+hh-1) (label frame (T.take (max 0 (ww-4)) (windowPositionText doc w)))
-  ,place (x+ww-2) (y+hh-1) (label frame "◢")
-  ,scrollbarImage True,scrollbarImage False
   ,place (x+1) (y+1) textImage
   ,place x y (box frame (active && not moving) ww hh)]
   where
@@ -195,14 +196,15 @@ menuLayers d (i,j) = [place x y contents']
 problemsLayers :: Desktop -> [V.Image]
 problemsLayers d
   | not (problemsVisible d) || h<2 = []
-  | otherwise = [place (x+max 1 ((w-10) `div` 2)) y (label frame " Messages "),place (x+w-5) y (label frame "[×]"),place (x+w-7-T.length number) y (label frame number)]
-      ++ [place (x+1) (y+1+i) (row (if index==problemsSelected d then attr white blue else bodyColor) (w-2) (format issue))
+  | otherwise = [place (x+max 1 ((w-10) `div` 2)) y (label frame " Messages "),place (x+w-7-T.length number) y (label frame number)]
+      ++ [place (x+w-5) y (label frame "[×]") | problemsFocused d]
+      ++ [place (x+1) (y+1+i) (row (if problemsFocused d && index==problemsSelected d then attr white blue else bodyColor) (w-2) (format issue))
          | (i,(index,issue))<-zip [0..] (take (h-2) (drop (problemsScroll d) (zip [0..] (diagnostics d))))]
       ++ [place (x+1) (y+1) (row bodyColor (w-2) " No messages reported.") | null (diagnostics d)]
       ++ [place x y (box frame (problemsFocused d) w h)]
   where
     Rect x y w h=problemsRect d
-    frame=attr white scrollCyan
+    frame=attr (if problemsFocused d then white else blue) scrollCyan
     bodyColor=attr black scrollCyan
     number=maybe "" (T.pack . show) (messagesNumber d)
     format issue=" "<>(case diagnosticSeverity issue of 1 -> "Error "; 2 -> "Warning "; 3 -> "Info "; _ -> "Hint ")<>T.pack (takeFileName (diagnosticPath issue))<>":"<>T.pack (show (diagnosticRow issue+1))<>":"<>T.pack (show (diagnosticColumn issue+1))<>" "<>T.unwords (T.words (diagnosticMessage issue))

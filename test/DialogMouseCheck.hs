@@ -107,6 +107,18 @@ checks = do
   check "window shadow preserves desktop dither" ("color:rgb(170,170,170);background:rgb(0,0,0)'>░" `T.isInfixOf` snapshotHtml scrolling)
   let overlapping=scrolling {windows=[sw,sw {windowId=windowId sw+1,bounds=Rect 0 1 70 22}]}
   check "window shadow preserves lower window text" ("color:rgb(170,170,170);background:rgb(0,0,0)'>xx" `T.isInfixOf` snapshotHtml overlapping)
+  let behind=sw {windowId=windowId sw+1,windowNumber=2,bounds=Rect 40 2 30 18}
+      separated=scrolling {windows=[sw,behind]}
+      behindRect=bounds behind
+      (focusedBehind,behindEffects)=handleEvent (V.EvMouseDown (left behindRect+width behindRect-1) (top behindRect+5) V.BLeft []) separated
+      (focusedTitle,titleEffects)=handleEvent (V.EvMouseDown (left behindRect+3) (top behindRect) V.BLeft []) separated
+  check "only foreground window has scrollbars and frame controls"
+    (all (\glyph -> T.count glyph (snapshot separated)==1) ["▲","▼","◄","►","■","↑","◢"])
+  check "inactive scrollbar region only focuses window"
+    (fmap windowId (activeWindow focusedBehind)==Just (windowId behind) && drag focusedBehind==Nothing && null behindEffects && fmap scrollRow (activeWindow focusedBehind)==Just (scrollRow behind))
+  check "inactive close region cannot close the window"
+    (length (windows focusedTitle)==2 && fmap windowId (activeWindow focusedTitle)==Just (windowId behind) && null titleEffects)
+  check "Messages focus removes editor scrollbars" (not ("▲" `T.isInfixOf` snapshot separated {problemsFocused=True}))
   let menuState=desktop {menu=Just (0,0),status="old status",typeHint="old type"}
       menuNext=fst (handleEvent (V.EvKey V.KDown []) menuState)
   check "menu status follows highlighted command" (commandDescription New `T.isInfixOf` snapshot menuState && commandDescription Open `T.isInfixOf` snapshot menuNext)
@@ -126,7 +138,7 @@ checks = do
   check "Messages shares the window number pool" (messagesNumber withMessages==Just 3 && fmap windowNumber (activeWindow numberedAgain)==Just 4)
   check "Alt number activates Messages and then source" (problemsFocused messagesActivated && not (problemsFocused sourceActivated) && fmap windowNumber (activeWindow sourceActivated)==Just 2)
   check "hiding Messages releases its number" (messagesNumber (setProblemsVisible False withMessages)==Nothing && nextWindowNumber (setProblemsVisible False withMessages)==3)
-  check "Messages uses white frame on cyan" ("color:rgb(255,255,255);background:rgb(0,170,170)'> Messages " `T.isInfixOf` snapshotHtml withMessages)
+  check "focused Messages uses white frame on cyan" ("color:rgb(255,255,255);background:rgb(0,170,170)'> Messages " `T.isInfixOf` snapshotHtml messagesActivated)
   let secondProblem=Diagnostic "/project/Other.hs" Nothing 0 0 1 "Other error"
       messages=source {diagnostics=[problem,secondProblem]}
       (_,firstMessage)=handleEvent (V.EvKey (V.KFun 8) [V.MAlt]) messages
