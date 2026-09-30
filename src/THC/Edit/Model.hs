@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module THC.Edit.Model where
 
+import qualified Data.Bifunctor as Bifunctor
 import qualified Graphics.Vty as V
 import qualified Data.Text as T
 import Data.Text (Text)
@@ -306,7 +307,7 @@ prompt :: Text -> Purpose -> [Field] -> Desktop -> Desktop
 prompt title p fs d = d {dialog = Just (Dialog title p fs 0 ["OK","Cancel"] []), menu = Nothing, drag = Nothing,dragOriginal=Nothing}
 
 runCommand :: Command -> Desktop -> (Desktop,[Effect])
-runCommand cmd source = go cmd (source {menu = Nothing, contextMenu=Nothing, buttonHover=Nothing, buttonPressed=Nothing, prefix = Nothing, drag = Nothing,dragOriginal=Nothing})
+runCommand cmd source = Bifunctor.first clampHexScroll $ go cmd (source {menu = Nothing, contextMenu=Nothing, buttonHover=Nothing, buttonPressed=Nothing, prefix = Nothing, drag = Nothing,dragOriginal=Nothing})
   where
     go New d = (addDocument Nothing (newBuffer "") d,[])
     go Open d = (d,[BrowsePath (startingDirectory d) "*.hs"])
@@ -490,7 +491,7 @@ resizeScreenMode (sw,sh) d = ensureVisible resized {windows=map stretch (windows
     stretch w = w {bounds=stretchRect (bounds w),restoredBounds=fmap stretchRect (restoredBounds w)}
 
 handleEvent :: V.Event -> Desktop -> (Desktop,[Effect])
-handleEvent event d = dispatchEvent event (case event of
+handleEvent event d = Bifunctor.first clampHexScroll $ dispatchEvent event (case event of
   V.EvKey{} -> d {hoverTarget=Nothing,typeHint="",buttonHover=Nothing,buttonPressed=Nothing}
   V.EvMouseDown{} -> d {hoverTarget=Nothing,typeHint=""}
   V.EvPaste{} -> d {hoverTarget=Nothing,typeHint=""}
@@ -692,12 +693,21 @@ windowPositionText doc w = let (r,c)=bufferLineColumn (documentBuffer doc) (care
 scrollbarRect :: Bool -> Document -> Window -> Rect
 scrollbarRect vertical doc w
   | vertical = Rect (x+ww-1) (y+1) 1 (max 0 (hh-2))
+  | byteMode (documentBuffer doc) && scrollbarLimit False doc w==0 = Rect x (y+hh-1) 0 1
   | otherwise = let start=2+T.length (windowPositionText doc w) in Rect (x+start) (y+hh-1) (max 0 (ww-start-2)) 1
   where Rect x y ww hh=bounds w
 
 scrollbarLimit :: Bool -> Document -> Window -> Int
 scrollbarLimit vertical doc w = max 0 (if vertical then documentRows doc-max 1 (height (bounds w)-2)
-  else documentWidth doc-max 1 (width (bounds w)-2)+1)
+  else documentWidth doc-max 1 (width (bounds w)-2)+(if byteMode (documentBuffer doc) then 0 else 1))
+
+-- Window resize, zoom, and layout changes can make a scrolled hex row fit again.
+clampHexScroll :: Desktop -> Desktop
+clampHexScroll d = d {windows=map clamp (windows d)}
+  where
+    clamp w | Just doc<-M.lookup (bufferId w) (buffers d), byteMode (documentBuffer doc) =
+      w {scrollColumn=max 0 (min (scrollbarLimit False doc w) (scrollColumn w))}
+    clamp w = w
 
 scrollbarThumb :: Int -> Int -> Int -> Int
 scrollbarThumb len limit position = 1+min limit (max 0 position)*max 0 (len-3) `div` max 1 limit

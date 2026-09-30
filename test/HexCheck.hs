@@ -64,6 +64,21 @@ checks = bracket temporary removeFile $ \path -> do
   check "ACP rejects even valid text opened in hex mode" (case capture of Left _ -> True; _ -> False)
   let image=snapshot opened
   check "grid includes offset bytes ASCII and mode" (all (`T.isInfixOf` image) ["00000000","00 FF 41 0A 80 C3 A9","..A....","[HEX]"])
+  let cellAt d x y=T.index (T.lines (snapshot d) !! y) x
+      narrow=modifyActive (\w -> w {bounds=(bounds w) {width=70}}) opened
+      narrowDoc=maybe (error "no document") id (activeDocument narrow)
+      narrowWindow=maybe (error "no window") id (activeWindow narrow)
+      bar=scrollbarRect False narrowDoc narrowWindow
+      scrolled=fst (handleEvent (V.EvMouseDown (left bar+width bar-1) (top bar) V.BLeft []) narrow)
+      widened=key (V.KFun 5) scrolled
+  check "hex dividers join both borders and continue below EOF"
+    (and [cellAt opened x 1=='╤' && cellAt opened x 23=='╧' && all (\y -> cellAt opened x y=='│') [2..22] | x<-[61,78]])
+  check "full width hex has no horizontal scrollbar or scrollable blank column"
+    (not ("◄" `T.isInfixOf` image) && maybe False (\w -> scrollbarLimit False narrowDoc w==0 && width (scrollbarRect False narrowDoc w)==0) (activeWindow opened))
+  check "narrow hex retains working horizontal scrollbar"
+    ("◄" `T.isInfixOf` snapshot narrow && fmap scrollColumn (activeWindow scrolled)==Just 1)
+  check "widening hex resets horizontal scrolling and hides scrollbar"
+    (fmap scrollColumn (activeWindow widened)==Just 0 && not ("◄" `T.isInfixOf` snapshot widened) && cellAt widened 61 2=='│')
   check "hex cells match hit geometry" (and [hexHit (hexColumn i)==(i,False,False) && hexHit (hexColumn i+1)==(i,False,True) && hexHit (61+i)==(i,True,False) | i<-[0..15]])
   check "hex paste accepts only complete byte pairs" (parseHex "00 FF\n41"==Right "\0\255A" && case parseHex "0xFF" of Left _ -> True; _ -> False)
   let pasted=fst (handleEvent (V.EvPaste "FE 00") (moveTo False 0 opened))

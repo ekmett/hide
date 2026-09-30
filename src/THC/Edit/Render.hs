@@ -112,6 +112,7 @@ windowLayers d active w =
     [place (x+2) y (label frame "[" V.<|> label (attr (V.RGBColor 85 255 85) blue) (if videoMode d==Nothing then "x" else "■") V.<|> label frame "]"),place (x+ww-6) y (label frame "[" V.<|> label (attr cyan blue) "↑" V.<|> label frame "]")
     ,place (x+2) (y+hh-1) (label frame (T.take (max 0 (ww-4)) (windowPositionText doc w)))
     ,scrollbarImage True,scrollbarImage False] else [])
+  ++ hexDividerLayers
   ++ [place (x+ww-7-T.length number) y (label frame number)
   ,place (x+max 6 ((ww-T.length title) `div` 2)) y (label frame (T.take (max 0 (ww-17-T.length number)) title))
   ,place (x+1) (y+1) textImage
@@ -133,6 +134,10 @@ windowLayers d active w =
           cell n=V.char (if n==0 || n==len-1 then attr blue scrollCyan else attr scrollCyan blue)
             (if n==0 then if vertical then '▲' else '◄' else if n==len-1 then if vertical then '▼' else '►' else if n==thumb then '█' else '░')
       in place sx sy ((if vertical then V.vertCat else V.horizCat) [cell n | n<-[0..len-1]])
+    hexDividerLayers =
+      [place (x+1+column) y (V.vertCat [V.char frame (if active && not moving then '╤' else '┬'),
+        V.charFill frame '│' 1 contentHeight,V.char frame (if active && not moving then '╧' else '┴')])
+      | byteMode b, divider<-hexDividers, let column=divider-scrollColumn w, column>=0, column<contentWidth]
     contentWidth=max 0 (ww-2); contentHeight=max 0 (hh-2)
     textImage=V.vertCat [renderLine n | n<-[scrollRow w..scrollRow w+contentHeight-1]]
     renderLine n | byteMode b && n>=documentRows doc = V.charFill edit ' ' contentWidth 1

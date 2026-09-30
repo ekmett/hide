@@ -1,5 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
-module THC.Edit.Hex (hexNumber, hexColumn, hexRow, hexHit, parseHex) where
+module THC.Edit.Hex (hexNumber, hexColumn, hexDividers, hexRow, hexHit, parseHex) where
 
 import Data.Char (ord, chr, isHexDigit, digitToInt, isSpace, toUpper)
 import qualified Data.Text as T
@@ -12,9 +12,12 @@ hexNumber width value = T.justifyRight width '0' (T.pack (map toUpper (showHex v
 hexColumn :: Int -> Int
 hexColumn index = 10+3*index+if index>=8 then 1 else 0
 
+hexDividers :: [Int]
+hexDividers = [60,77]
+
 -- Each cell carries its byte offset, so both panes highlight the same selection.
 hexRow :: Int -> Text -> [(Char,Maybe Int)]
-hexRow row bytes = plain (hexNumber 8 start<>"  ") ++ concatMap cell [0..15] ++ plain " |" ++ concatMap ascii [0..15] ++ plain "|"
+hexRow row bytes = plain (hexNumber 8 start<>"  ") ++ concatMap cell [0..15] ++ plain " │" ++ concatMap ascii [0..15] ++ plain "│"
   where
     start=row*16
     chunk=T.take 16 (T.drop start bytes)
