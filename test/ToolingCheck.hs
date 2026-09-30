@@ -34,6 +34,9 @@ checks = do
   check "workspace edit rejects resource operations" (case workspaceEdits (object ["documentChanges" .= [object ["kind" .= ("delete"::String),"uri" .= ("file:///tmp/A.hs"::String)]]]) of Left _ -> True; _ -> False)
   check "workspace edit handles versioned document" (workspaceEdits (object ["documentChanges" .= [object ["textDocument" .= object ["uri" .= ("file:///tmp/A.hs"::String),"version" .= (7::Int)],"edits" .= [edit 0 1 "a"]]]])==Right [("/tmp/A.hs",Just 7,[edit 0 1 "a"])])
   check "hover markdown fits status" (hoverText (object ["contents" .= object ["kind" .= ("markdown"::String),"value" .= ("```haskell\nfoo :: Int\n```\n"::String)]])=="foo :: Int")
+  let hover text=hoverText (object ["contents" .= (text::T.Text)])
+  check "hover types use Unicode syntax" (hover "f :: forall a. Eq a => a->a"=="f :: ∀ a. Eq a ⇒ a→a")
+  check "hover keeps identifiers and quoted arrows" (hover "forallValue :: Proxy \"->\" -> a"=="forallValue :: Proxy \"->\" → a")
   check "unversioned diagnostics cannot masquerade as current edits" (not (diagnosticsCurrent Nothing [1]) && diagnosticsCurrent Nothing [0] && not (diagnosticsCurrent (Just 0) [1]))
   check "split buffer count unaffected" (M.size (buffers applied)==1)
   bracket temporary removePathForcibly $ \root -> do

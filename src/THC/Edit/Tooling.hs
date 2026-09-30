@@ -6,6 +6,7 @@ import Control.Concurrent (ThreadId, forkIO, killThread, MVar, newEmptyMVar, put
 import Control.Monad (foldM, forM, forM_, unless)
 import Data.Aeson
 import Data.Aeson.Types (parseMaybe, Parser)
+import Data.Char (isSpace)
 import qualified Data.Aeson.KeyMap as K
 import qualified Data.Aeson.Key as Key
 import qualified Data.Map.Strict as M
@@ -219,12 +220,25 @@ singleLine :: T.Text -> T.Text
 singleLine=T.unwords . T.words
 
 hoverText :: Value -> T.Text
-hoverText result = singleLine (T.unlines (filter useful (T.lines (flatten (fromMaybe Null (member "contents" result))))))
+hoverText result = unicodeTypes (singleLine (T.unlines (filter useful (T.lines (flatten (fromMaybe Null (member "contents" result)))))))
   where
     flatten (String text)=text
     flatten (Array xs)=T.intercalate "\n" (map flatten (Vector.toList xs))
     flatten obj=fromMaybe "" (member "value" obj >>= stringValue)
     useful line=not ("```" `T.isPrefixOf` T.stripStart line) && not (T.null (T.strip line))
+
+-- Display only: keep identifiers and quoted literals intact, and never alter edits.
+unicodeTypes :: T.Text -> T.Text
+unicodeTypes = T.pack . go . T.unpack
+  where
+    go [] = []
+    go input = let (spaces,rest)=span isSpace input in spaces ++ case lex rest of
+      [(token,remaining)] | not (null token) -> pretty token ++ go remaining
+      _ -> rest
+    pretty "forall" = "∀"
+    pretty "->" = "→"
+    pretty "=>" = "⇒"
+    pretty token = token
 
 applyResult :: (Desktop -> [Effect] -> IO (Bool,Desktop)) -> LanguageAction -> Target -> FilePath -> M.Map FilePath (Int,T.Text) -> Value -> Desktop -> IO Desktop
 applyResult core action (bid,version,pos) _ snapshot result d = case action of
