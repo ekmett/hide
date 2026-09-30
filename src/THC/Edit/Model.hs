@@ -88,6 +88,7 @@ data Desktop = Desktop
   , dragOriginal :: Maybe (Int,Rect,Maybe Rect)
   , branchAdded :: Int, branchDeleted :: Int, branchRoot :: Maybe FilePath, contextKind :: ContextKind
   , messagesNumber :: Maybe Int
+  , composerBuffer :: Buffer, composerSelection :: Selection, composerFocused :: Bool, agentSteering :: Bool, agentReplying :: Bool, agentQueued :: Int
   , blinkCursor :: Bool
   } deriving (Eq,Show)
 
@@ -207,7 +208,7 @@ menuRect d i = Rect (min x (max 0 (sw-w))) 1 w (length (menuItems i)+2)
         w = min sw (maximum [T.length t + T.length (menuShortcut d entry) + 5 | entry@(MenuItem t _ _) <- menuItems i])
 
 initialDesktop :: (Int,Int) -> Desktop
-initialDesktop size = Desktop size [] M.empty 1 Nothing Nothing Nothing "" False Nothing "" Nothing "" Nothing "" False Nothing Nothing Nothing "" Nothing Nothing Nothing [] False 0 0 False Nothing 0 0 Nothing SourceContext Nothing True
+initialDesktop size = Desktop size [] M.empty 1 Nothing Nothing Nothing "" False Nothing "" Nothing "" Nothing "" False Nothing Nothing Nothing "" Nothing Nothing Nothing [] False 0 0 False Nothing 0 0 Nothing SourceContext Nothing (newBuffer "") (Selection 0 0) True False False 0 True
 
 activeWindow :: Desktop -> Maybe Window
 activeWindow = listToMaybe . windows
@@ -254,7 +255,7 @@ ensureVisible d = case (activeWindow d, activeDocument d) of
     where
       b = documentBuffer doc
       (row,dc) = windowCursorCell b w
-      rows = max 1 (height (bounds w)-2); cols = max 1 (width (bounds w)-2)
+      rows = max 1 (windowContentRows doc w); cols = max 1 (width (bounds w)-2)
       row' = if row < scrollRow w then row else if row >= scrollRow w+rows then row-rows+1 else scrollRow w
       col' = if dc < scrollColumn w then dc else if dc >= scrollColumn w+cols then dc-cols+1 else scrollColumn w
   _ -> d
@@ -307,6 +308,7 @@ prompt :: Text -> Purpose -> [Field] -> Desktop -> Desktop
 prompt title p fs d = d {dialog = Just (Dialog title p fs 0 ["OK","Cancel"] []), menu = Nothing, drag = Nothing,dragOriginal=Nothing}
 
 runCommand :: Command -> Desktop -> (Desktop,[Effect])
+runCommand cmd source | composerActive source, cmd `elem` [Undo,Redo,Copy,Cut,Paste,SelectAll] = (composerCommand cmd source,[])
 runCommand cmd source = Bifunctor.first clampHexScroll $ go cmd (source {menu = Nothing, contextMenu=Nothing, buttonHover=Nothing, buttonPressed=Nothing, prefix = Nothing, drag = Nothing,dragOriginal=Nothing})
   where
     go New d = (addDocument Nothing (newBuffer "") d,[])
@@ -509,6 +511,7 @@ dispatchEvent (V.EvKey key mods) d | Just _ <- dragOriginal d = dragKey key mods
 dispatchEvent (V.EvKey key mods) d | problemsVisible d && problemsFocused d = problemsKey key mods d
 dispatchEvent (V.EvKey (V.KFun key) mods) d
   | Just action <- lookup (key,mods) [((4,[]),"continue"),((7,[]),"stepIn"),((8,[]),"next"),((7,[V.MCtrl]),"stepOut"),((8,[V.MCtrl]),"breakpoint")] = runCommand (DebugCommand action) d
+dispatchEvent ev d | activeConversation d, Just result<-composerEvent ev d = result
 dispatchEvent ev d | Just ident<-activeTerminal d,Just text<-terminalInput ev = (d,[AgentAction "terminal-input" [ident,text]])
 dispatchEvent (V.EvMouseUp _ _ _) d = (d {drag = Nothing,dragOriginal=Nothing},[])
 dispatchEvent (V.EvMouseDown x y button mods) d = mouseEvent x y button mods d
@@ -519,6 +522,88 @@ dispatchEvent (V.EvPaste bytes) d = case TE.decodeUtf8' bytes of
 dispatchEvent (V.EvKey key mods) d | Just tree <- sideTree d, treeFocused tree = treeKey key mods tree d
 dispatchEvent (V.EvKey key mods) d = keyEvent key mods d
 dispatchEvent _ d = (d,[])
+
+activeConversation :: Desktop -> Bool
+activeConversation d = maybe False (windowFocused d) (activeWindow d) && maybe False ((==Just "Conversation").documentLabel) (activeDocument d)
+
+composerActive :: Desktop -> Bool
+composerActive d = activeConversation d && composerFocused d
+
+composerRect :: Window -> Rect
+composerRect w = let Rect x y ww hh=bounds w; rows=min 3 (max 0 (hh-4))
+                 in Rect (x+1) (y+hh-1-rows) (max 0 (ww-12)) rows
+
+composerButtons :: Window -> [(Rect,Text)]
+composerButtons w = [(Rect (left r+width r+2) (top r) 8 1,"OK"),(Rect (left r+width r+2) (top r+2) 8 1,"Cancel")]
+  where r=composerRect w
+
+composerButtonEnabled :: Desktop -> Text -> Bool
+composerButtonEnabled d "OK" = not (T.null (T.strip (contents (composerBuffer d))))
+composerButtonEnabled d "Cancel" = agentReplying d
+composerButtonEnabled _ _ = False
+
+windowContentRows :: Document -> Window -> Int
+windowContentRows doc w = max 0 (height (bounds w)-2-if documentLabel doc==Just "Conversation" then height (composerRect w)+1 else 0)
+
+composerScroll :: Desktop -> Window -> (Int,Int)
+composerScroll d w = (max 0 (r-height rect+1),max 0 (displayColumn (bufferLineAt b r) c-width rect+1))
+  where b=composerBuffer d; (r,c)=bufferLineColumn b (caret (composerSelection d)); rect=composerRect w
+
+composerClick :: Int -> Int -> [V.Modifier] -> Window -> Desktop -> Desktop
+composerClick x y mods w d = d {composerFocused=True,composerSelection=Selection (if V.MShift `elem` mods then anchor (composerSelection d) else p) p}
+  where
+    Rect l t _ _=composerRect w; (sr,sc)=composerScroll d w; b=composerBuffer d
+    r=min (bufferLineCount b-1) (max 0 (y-t+sr))
+    p=bufferLineOffset b r+columnOffset (bufferLineAt b r) (max 0 (x-l+sc))
+
+composerInsert :: Text -> Desktop -> Desktop
+composerInsert text d = d {composerBuffer=replaceSelection sel text (composerBuffer d),composerSelection=Selection p p,composerFocused=True}
+  where sel=composerSelection d; p=fst (ordered sel)+T.length text
+
+composerCommand :: Command -> Desktop -> Desktop
+composerCommand cmd d = case cmd of
+  Copy -> d {clipboard=selectedText sel b}
+  Cut -> composerInsert "" d {clipboard=selectedText sel b}
+  Paste -> composerInsert (clipboard d) d
+  SelectAll -> d {composerSelection=Selection 0 (bufferLength b)}
+  Undo -> history undo
+  Redo -> history redo
+  _ -> d
+  where
+    b=composerBuffer d; sel=composerSelection d
+    history f=let changed=f b; p=min (bufferLength changed) (caret sel)
+              in d {composerBuffer=changed,composerSelection=Selection p p}
+
+composerEvent :: V.Event -> Desktop -> Maybe (Desktop,[Effect])
+composerEvent (V.EvPaste bytes) d = Just (either (const d) (\text -> composerInsert (T.filter (\c -> isPrint c || c `elem` ['\n','\r','\t']) text) d) (TE.decodeUtf8' bytes),[])
+composerEvent (V.EvKey key mods) d
+  | key==V.KEsc, composerFocused d, agentReplying d = Just (d,[AgentAction "cancel" []])
+  | key==V.KChar '\t', null mods = Just (d {composerFocused=not (composerFocused d)},[])
+  | key==V.KEnter, composerFocused d, V.MCtrl `elem` mods = Just (d,[AgentAction "steer-draft" []])
+  | key==V.KEnter, composerFocused d, V.MShift `elem` mods = done (composerInsert "\n" d)
+  | key==V.KEnter, composerFocused d, null mods = Just (d,[AgentAction "send-draft" []])
+  | V.KChar c<-key, isPrint c, null mods || mods==[V.MShift] = done (composerInsert (T.singleton c) d)
+  | not (composerFocused d) || V.MAlt `elem` mods || V.MMeta `elem` mods = Nothing
+  | ctrl, V.KChar c<-key, Just cmd<-lookup (toLower c) [('c',Copy),('x',Cut),('v',Paste),('a',SelectAll),('z',Undo),('y',Redo)] = done (composerCommand cmd d)
+  | otherwise = case key of
+      V.KLeft -> move (if ctrl then wordLeft text p else previousCharacter text p)
+      V.KRight -> move (if ctrl then wordRight text p else nextCharacter text p)
+      V.KUp -> vertical (-1)
+      V.KDown -> vertical 1
+      V.KHome -> move (if ctrl then 0 else bufferLineOffset b r)
+      V.KEnd -> move (if ctrl then bufferLength b else bufferLineOffset b r+T.length (bufferLineAt b r))
+      V.KBS -> erase (if ctrl then wordLeft text p else previousCharacter text p) p
+      V.KDel -> erase p (if ctrl then wordRight text p else nextCharacter text p)
+      _ -> Nothing
+  where
+    done next=Just (next,[])
+    b=composerBuffer d; text=contents b; sel=composerSelection d; p=caret sel
+    (r,column)=bufferLineColumn b p; ctrl=V.MCtrl `elem` mods
+    move n=let q=max 0 (min (bufferLength b) n) in done d {composerSelection=Selection (if V.MShift `elem` mods then anchor sel else q) q}
+    vertical delta=let row=max 0 (min (bufferLineCount b-1) (r+delta))
+                   in move (bufferLineOffset b row+columnOffset (bufferLineAt b row) (displayColumn (bufferLineAt b r) column))
+    erase a z=done (composerInsert "" d {composerSelection=if anchor sel/=p then sel else Selection a z})
+composerEvent _ _ = Nothing
 
 activeTerminal :: Desktop -> Maybe Text
 activeTerminal d = do
@@ -667,7 +752,11 @@ mouseEvent x y button mods d = case find (\w -> inside (bounds w) x y) (windows 
       | Just doc<-activeDocument focused, inside (scrollbarRect True doc w) x y -> (scrollClick True x y focused,[])
       | Just doc<-activeDocument focused, inside (scrollbarRect False doc w) x y -> (scrollClick False x y focused,[])
       | y==t+hh-1 -> (focused,[])
-      | otherwise -> (selectAt (V.MShift `elem` mods) x y focused {drag=Just (Selecting (windowId w))},[])
+      | activeConversation focused, Just name<-lookup True [(inside rect x y,name) | (rect,name)<-composerButtons w] ->
+          if composerButtonEnabled focused name then (focused,[AgentAction (if name=="OK" then "send-draft" else "cancel") []]) else (focused,[])
+      | activeConversation focused, inside (composerRect w) x y -> (composerClick x y mods w focused,[])
+      | activeConversation focused, y>=top (composerRect w) -> (focused,[])
+      | otherwise -> (selectAt (V.MShift `elem` mods) x y focused {drag=Just (Selecting (windowId w)),composerFocused=if activeConversation focused then False else composerFocused focused},[])
     _ -> (focused,[])
 
 mapWindow :: Int -> (Window -> Window) -> Desktop -> Desktop
@@ -695,13 +784,13 @@ windowPositionColumn doc = if byteMode (documentBuffer doc) then 10 else 2
 
 scrollbarRect :: Bool -> Document -> Window -> Rect
 scrollbarRect vertical doc w
-  | vertical = Rect (x+ww-1) (y+1) 1 (max 0 (hh-2))
+  | vertical = Rect (x+ww-1) (y+1) 1 (windowContentRows doc w)
   | byteMode (documentBuffer doc) && scrollbarLimit False doc w==0 = Rect x (y+hh-1) 0 1
   | otherwise = let start=windowPositionColumn doc+T.length (windowPositionText doc w) in Rect (x+start) (y+hh-1) (max 0 (ww-start-2)) 1
   where Rect x y ww hh=bounds w
 
 scrollbarLimit :: Bool -> Document -> Window -> Int
-scrollbarLimit vertical doc w = max 0 (if vertical then documentRows doc-max 1 (height (bounds w)-2)
+scrollbarLimit vertical doc w = max 0 (if vertical then documentRows doc-max 1 (windowContentRows doc w)
   else documentWidth doc-max 1 (width (bounds w)-2)+(if byteMode (documentBuffer doc) then 0 else 1))
 
 -- Window resize, zoom, and layout changes can make a scrolled hex row fit again.

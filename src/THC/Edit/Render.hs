@@ -74,10 +74,11 @@ renderDesktop d = (V.picForLayers layers) {V.picCursor=cursor}
       | Just text <- menuHelp d = " "<>text
       | Just c <- prefix d = " Ctrl+"<>T.singleton c<>"-  (Esc cancels)"
       | dialog d/=Nothing = " Tab Next  Enter Select  Esc Cancel"
+      | activeConversation d = " Enter "<>(if agentReplying d then "Queue query" else "Query")<>"  Shift+Enter Newline"<>(if agentSteering d then "  Ctrl+Enter Steer" else "")<>(if agentReplying d then "  Esc Cancel" else "")
       | not (T.null (typeHint d)) = " "<>typeHint d
       | not (T.null (status d)) = " F1 Help | "<>status d
       | otherwise = " F1 Help  F2 Save  F3 Open  F5 Zoom  F6 Next  F10 Menu"
-    badge = gitBadgeText d
+    badge = if activeConversation d then "" else gitBadgeText d
     badgeImage = if T.null badge then V.emptyImage else label paper (" │ "<>gitBranchText d<>" ")
       V.<|> label (attr green gray) ("+"<>gitCountText (branchAdded d)) V.<|> label paper " "
       V.<|> label (attr red gray) ("-"<>gitCountText (branchDeleted d)) V.<|> label paper " "
@@ -88,9 +89,13 @@ renderDesktop d = (V.picForLayers layers) {V.picCursor=cursor}
         _ -> V.NoCursor
       Nothing | menu d/=Nothing || contextMenu d/=Nothing || problemsFocused d || maybe False treeFocused (sideTree d) -> V.NoCursor
       Nothing -> case (activeWindow d,activeDocument d) of
+        (Just w,_) | composerActive d -> let
+          b=composerBuffer d; (r,c)=bufferLineColumn b (caret (composerSelection d)); (sr,sc)=composerScroll d w
+          rect=composerRect w
+          in if height rect>0 && width rect>0 then V.Cursor (left rect+displayColumn (bufferLineAt b r) c-sc) (top rect+r-sr) else V.NoCursor
         (_,Just doc) | not (documentCursorVisible doc) -> V.NoCursor
         (Just w,Just doc) -> let { (r,c)=windowCursorCell (documentBuffer doc) w; x=left (bounds w)+1+c-scrollColumn w; y=top (bounds w)+1+r-scrollRow w }
-                            in if inside (Rect (left (bounds w)+1) (top (bounds w)+1) (width (bounds w)-2) (height (bounds w)-2)) x y then V.Cursor x y else V.NoCursor
+                            in if inside (Rect (left (bounds w)+1) (top (bounds w)+1) (width (bounds w)-2) (windowContentRows doc w)) x y then V.Cursor x y else V.NoCursor
         _ -> V.NoCursor
 
 -- A DOS shadow changes the underlying cell attributes, preserving its glyph.
@@ -112,6 +117,7 @@ windowLayers d active w =
     [place (x+2) y (label frame "[" V.<|> label (attr (V.RGBColor 85 255 85) blue) (if videoMode d==Nothing then "x" else "■") V.<|> label frame "]"),place (x+ww-6) y (label frame "[" V.<|> label (attr cyan blue) "↑" V.<|> label frame "]")
     ,place (x+windowPositionColumn doc) (y+hh-1) (label frame (T.take (max 0 (ww-windowPositionColumn doc-2)) (windowPositionText doc w)))
     ,scrollbarImage True,scrollbarImage False] else [])
+  ++ composerLayers
   ++ hexDividerLayers
   ++ [place (x+ww-7-T.length number) y (label frame number)
   ,place (x+max 6 ((ww-T.length title) `div` 2)) y (label frame (T.take (max 0 (ww-17-T.length number)) title))
@@ -134,11 +140,24 @@ windowLayers d active w =
           cell n=V.char (if n==0 || n==len-1 then attr blue scrollCyan else attr scrollCyan blue)
             (if n==0 then if vertical then '▲' else '◄' else if n==len-1 then if vertical then '▼' else '►' else if n==thumb then '█' else '░')
       in place sx sy ((if vertical then V.vertCat else V.horizCat) [cell n | n<-[0..len-1]])
+    composerLayers
+      | documentLabel doc/=Just "Conversation" = []
+      | otherwise = [place x (top rect-1) divider,place (left rect) (top rect) inputImage] ++
+          [place (left r) (top r) (row (attr (if composerButtonEnabled d name then black else gray) (if composerButtonEnabled d name then green else blue)) (width r) (" "<>name))
+          | (r,name)<-composerButtons w, top r<y+hh-1]
+      where
+        rect=composerRect w; draft=composerBuffer d; (sr,sc)=composerScroll d w
+        legend=" Query"<>(if agentQueued d>0 then " ("<>T.pack (show (agentQueued d))<>" queued)" else "")<>" "
+        divider=V.char frame (if active && not moving then '╟' else '├') V.<|>
+          V.cropRight (max 0 (ww-2)) (label frame legend V.<|> V.charFill frame '─' ww 1) V.<|> V.char frame (if active && not moving then '╢' else '┤')
+        inputImage=V.vertCat [V.cropRight (width rect) (V.translateX (negate sc)
+          (styledImage Nothing (active && composerFocused d) (composerSelection d) (bufferLineOffset draft n) [(c,Plain) | c<-T.unpack (bufferLineAt draft n)]) V.<|> V.charFill edit ' ' (width rect) 1)
+          | n<-[sr..sr+height rect-1]]
     hexDividerLayers =
       [place (x+1+column) y (V.vertCat [V.char frame (if active && not moving then '╤' else '┬'),
         V.charFill frame '│' 1 contentHeight,V.char frame (if active && not moving then '╧' else '┴')])
       | byteMode b, divider<-hexDividers, let column=divider-scrollColumn w, column>=0, column<contentWidth]
-    contentWidth=max 0 (ww-2); contentHeight=max 0 (hh-2)
+    contentWidth=max 0 (ww-2); contentHeight=windowContentRows doc w
     textImage=V.vertCat [renderLine n | n<-[scrollRow w..scrollRow w+contentHeight-1]]
     renderLine n | byteMode b && n>=documentRows doc = V.charFill edit ' ' contentWidth 1
     renderLine n | byteMode b = V.cropRight contentWidth (V.translateX (negate (scrollColumn w)) (V.horizCat

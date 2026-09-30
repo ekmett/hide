@@ -34,7 +34,7 @@ import System.Environment (lookupEnv)
 import THC.Edit.Syntax (Style(..))
 
 -- One configured stdio provider; its protocol supplies models and tools.
-data Phase = Initializing (Maybe Text) | Starting (Maybe Text) | Prompting deriving Eq
+data Phase = Initializing (Maybe Text) | Starting (Maybe Text) | Prompting | Steering Text deriving Eq
 data Record = Reply Text Text | Activity Text Value deriving (Eq,Show)
 data Approval = Permission Value [(Text,Text)] Value | Write Value Snapshot Text | Execute Value Terminal.TerminalConfig Int
 
@@ -42,6 +42,7 @@ data State = State
   { provider :: A.Launch, connection :: Maybe A.Client, session :: Maybe Text, project :: FilePath
   , pending :: M.Map Int Phase, queuedPrompt :: Maybe Text, transcript :: [Record]
   , reads :: M.Map FilePath Snapshot, approvals :: [(Int,Approval)], presented :: Maybe Int, deferredApproval :: Bool, nextApproval :: Int
+  , queuedQueries :: [Text]
   , ownedTerminals :: S.Set Text
   , terminalWaiters :: M.Map Text [Value]
   , lastRender :: (Int,Maybe Text,[Record]), lastSession :: Maybe (A.Launch,FilePath,Text)
@@ -60,7 +61,7 @@ withConversation action = C.withConsoles $ \consoles -> do
   let remembered=either (const Nothing) (\bytes -> decodeStrict' bytes >>= parseMaybe (withObject "session" $ \o -> do
         (raw::Value)<-o .: "provider"; config<-either fail pure (decodeLaunch (BL.toStrict (encode raw)))
         (,,) config <$> o .: "cwd" <*> o .: "sessionId")) previous
-  bracket (do ref<-newIORef (State launch Nothing Nothing "." M.empty Nothing [] M.empty [] Nothing False 1 S.empty M.empty (0,Nothing,[]) remembered); pure (ConversationState directory ref consoles)) closeConversation action
+  bracket (do ref<-newIORef (State launch Nothing Nothing "." M.empty Nothing [] M.empty [] Nothing False 1 [] S.empty M.empty (0,Nothing,[]) remembered); pure (ConversationState directory ref consoles)) closeConversation action
 
 closeConversation :: ConversationState -> IO ()
 closeConversation (ConversationState _ ref _) = readIORef ref >>= mapM_ A.stopClient . connection
@@ -142,7 +143,7 @@ perform runtime@(ConversationState directory ref consoles) action values d = do
           Right () -> do
             mapM_ (C.releaseConsole consoles) (S.toList (ownedTerminals s))
             mapM_ A.stopClient (connection s)
-            writeIORef ref s {provider=config,connection=Nothing,session=Nothing,pending=M.empty,queuedPrompt=Nothing,approvals=[],presented=Nothing,deferredApproval=False,ownedTerminals=S.empty,terminalWaiters=M.empty}
+            writeIORef ref s {provider=config,connection=Nothing,session=Nothing,pending=M.empty,queuedPrompt=Nothing,queuedQueries=[],approvals=[],presented=Nothing,deferredApproval=False,ownedTerminals=S.empty,terminalWaiters=M.empty}
             pure d {status="Agent configuration saved."}
     ("show",_) -> do
       modifyIORef' ref (\state -> state {deferredApproval=False})
@@ -152,6 +153,19 @@ perform runtime@(ConversationState directory ref consoles) action values d = do
     ("prompt",_) -> pure d {dialog=Just (Dialog "Prompt" (AgentDialog "send")
       [input "Message" "",CheckBox "Include selection" True,CheckBox "Include current file" False,CheckBox "Include diagnostics" False] 0 ["Send","Cancel"]
       ["Context includes the editor's unsaved contents."])}
+    ("send-draft",_) | busy s, let text=contents (composerBuffer d), not (T.null (T.strip text)) -> do
+      let next=s {queuedQueries=queuedQueries s++[text],transcript=transcript s++[Reply "You" text]}
+      writeIORef ref next
+      pure (paint True next d) {composerBuffer=newBuffer "",composerSelection=Selection 0 0,composerFocused=True,agentQueued=length (queuedQueries next),status="Query queued."}
+    ("send-draft",_) | not (T.null (T.strip (contents (composerBuffer d)))) -> do
+      next<-perform runtime "send" ["0",contents (composerBuffer d),"false","false","false"] d
+      latest<-readIORef ref
+      pure (if isNothing (connection latest) then next else next {agentReplying=busy latest,composerBuffer=newBuffer "",composerSelection=Selection 0 0,composerFocused=True})
+    ("steer-draft",_) | not (agentSteering d) -> pure d {status="This provider does not advertise steering support."}
+    ("steer-draft",_) | Just client<-connection s, Just sid<-session s, let text=contents (composerBuffer d), not (T.null (T.strip text)) -> do
+      ident<-A.request client "_session/steering" (object ["sessionId" .= sid,"prompt" .= [object ["type" .= ("text"::Text),"text" .= text]]])
+      writeIORef ref s {pending=M.insert ident (Steering text) (pending s),transcript=transcript s++[Reply "You" text]}
+      pure d {composerBuffer=newBuffer "",composerSelection=Selection 0 0,composerFocused=True,status="Steering request sent."}
     ("send",_:prompt:selectionFlag:fileFlag:diagnosticFlag:_) | not (T.null (T.strip prompt)), not (busy s) -> do
       let context=contextText (selectionFlag=="true") (fileFlag=="true") (diagnosticFlag=="true") d
           full=prompt<>(if T.null context then "" else "\n\n"<>context)
@@ -171,7 +185,7 @@ perform runtime@(ConversationState directory ref consoles) action values d = do
     ("new",_) -> do
       mapM_ (C.releaseConsole consoles) (S.toList (ownedTerminals s))
       mapM_ A.stopClient (connection s)
-      writeIORef ref s {connection=Nothing,session=Nothing,pending=M.empty,queuedPrompt=Nothing,transcript=[],reads=M.empty,approvals=[],presented=Nothing,deferredApproval=False,ownedTerminals=S.empty,terminalWaiters=M.empty}
+      writeIORef ref s {connection=Nothing,session=Nothing,pending=M.empty,queuedPrompt=Nothing,queuedQueries=[],transcript=[],reads=M.empty,approvals=[],presented=Nothing,deferredApproval=False,ownedTerminals=S.empty,terminalWaiters=M.empty}
       start runtime Nothing d
     ("resume",_) | busy s -> pure d {status="Cancel the current reply before resuming a session."}
     ("resume",_) -> pure d {dialog=Just (Dialog "Resume conversation" (AgentDialog "load")
@@ -180,7 +194,7 @@ perform runtime@(ConversationState directory ref consoles) action values d = do
     ("load",_:sid:_) | not (T.null (T.strip sid)), not (busy s) -> do
       mapM_ (C.releaseConsole consoles) (S.toList (ownedTerminals s))
       mapM_ A.stopClient (connection s)
-      writeIORef ref s {connection=Nothing,session=Nothing,pending=M.empty,queuedPrompt=Nothing,transcript=[],reads=sourceSnapshots d,approvals=[],presented=Nothing,deferredApproval=False,ownedTerminals=S.empty,terminalWaiters=M.empty}
+      writeIORef ref s {connection=Nothing,session=Nothing,pending=M.empty,queuedPrompt=Nothing,queuedQueries=[],transcript=[],reads=sourceSnapshots d,approvals=[],presented=Nothing,deferredApproval=False,ownedTerminals=S.empty,terminalWaiters=M.empty}
       start runtime (Just (T.strip sid)) d
     _ | Just suffix<-T.stripPrefix "approval:" action, Just token<-readMaybe (T.unpack suffix) -> decide runtime token values d
     _ -> pure d
@@ -204,7 +218,7 @@ start (ConversationState _ ref _) resume d = do
       pure (message "Cannot start agent" (wrapMessage (T.pack (show err))) d)
     Right (root,client,ident) -> do
       writeIORef ref s {connection=Just client,project=root,pending=M.singleton ident (Initializing resume)}
-      pure d {status="Connecting to ACP provider..."}
+      pure d {status="Connecting to ACP provider...",agentSteering=False,agentReplying=True}
 
 sendQueued :: ConversationState -> Desktop -> IO Desktop
 sendQueued (ConversationState _ ref _) d = do
@@ -213,7 +227,7 @@ sendQueued (ConversationState _ ref _) d = do
     (Just client,Just sid,Just prompt) -> do
       ident<-A.request client "session/prompt" (object ["sessionId" .= sid,"prompt" .= [object ["type" .= ("text"::Text),"text" .= prompt]]])
       writeIORef ref s {queuedPrompt=Nothing,pending=M.insert ident Prompting (pending s)}
-      pure d {status="Agent is replying..."}
+      pure d {status="Agent is replying...",agentReplying=True}
     _ -> pure d
 
 tickConversation :: ConversationState -> Desktop -> IO Desktop
@@ -223,17 +237,23 @@ tickConversation runtime@(ConversationState _ ref consoles) initial = do
   s<-readIORef ref
   events<-maybe (pure []) A.pollEvents (connection s)
   updated<-foldM (receive runtime) d events
+  afterEvents<-readIORef ref
+  advanced<-case queuedQueries afterEvents of
+    text:rest | not (busy afterEvents), not (isNothing (connection afterEvents)), session afterEvents/=Nothing -> do
+      writeIORef ref afterEvents {queuedQueries=rest,queuedPrompt=Just text,reads=sourceSnapshots updated}
+      sendQueued runtime updated
+    _ -> pure updated
   current<-readIORef ref
   -- Esc/Cancel of a permission dialog denies it; it must never leave the peer waiting.
   case presented current of
-    Just token | not (isApprovalDialog token updated) -> do
+    Just token | not (isApprovalDialog token advanced) -> do
       forM_ (lookup token (approvals current)) $ \approval -> mapM_ (\client -> cancelApproval client approval) (connection current)
       modifyIORef' ref (\state -> state {approvals=filter ((/=token).fst) (approvals state),presented=Nothing})
     _ -> pure ()
   afterDismiss<-readIORef ref
-  let widthNow=conversationWidth updated
+  let widthNow=conversationWidth advanced
       redraw=lastRender afterDismiss/=(widthNow,session afterDismiss,transcript afterDismiss)
-      rendered=if redraw then paint False afterDismiss updated else updated
+      rendered=(if redraw then paint False afterDismiss advanced else advanced) {agentReplying=busy afterDismiss,agentQueued=length (queuedQueries afterDismiss)}
   when redraw (modifyIORef' ref (\state -> state {lastRender=(widthNow,session state,transcript state)}))
   present runtime rendered
 
@@ -243,16 +263,18 @@ receive runtime@(ConversationState directory ref consoles) d event = do
   case event of
     A.Disconnected reason -> do
       mapM_ (C.releaseConsole consoles) (S.toList (ownedTerminals s))
-      writeIORef ref s {connection=Nothing,session=Nothing,pending=M.empty,queuedPrompt=Nothing,approvals=[],presented=Nothing,deferredApproval=False,ownedTerminals=S.empty,terminalWaiters=M.empty,
+      writeIORef ref s {connection=Nothing,session=Nothing,pending=M.empty,queuedPrompt=Nothing,queuedQueries=[],approvals=[],presented=Nothing,deferredApproval=False,ownedTerminals=S.empty,terminalWaiters=M.empty,
         transcript=transcript s++[Activity "Connection closed" (object ["message" .= reason])]}
-      pure (dismissPermission d) {status="Agent disconnected."}
+      pure (dismissPermission d) {status="Agent disconnected.",agentSteering=False}
     A.Response ident result -> do
       writeIORef ref s {pending=M.delete ident (pending s)}
       case (M.lookup ident (pending s),result,connection s) of
         (Nothing,_,_) -> pure d
         (_,Left err,_) -> do
           modifyIORef' ref (\state -> state {queuedPrompt=Nothing,transcript=transcript state++[Activity "Request failed" err]})
-          pure d {status="Agent request failed; see Conversation."}
+          pure d {status="Agent request failed; see Conversation.",composerBuffer=case M.lookup ident (pending s) of
+            Just (Steering text) | T.null (contents (composerBuffer d)) -> newBuffer text
+            _ -> composerBuffer d}
         (Just (Initializing resume),Right value,Just client)
           | field "protocolVersion" value /= Just (1::Int) -> do
               A.stopClient client
@@ -267,13 +289,17 @@ receive runtime@(ConversationState directory ref consoles) d event = do
               else do
                 requestId<-A.request client method (object (["cwd" .= project s,"mcpServers" .= ([]::[Value])]++maybe [] (\sid->["sessionId" .= sid]) resume))
                 modifyIORef' ref (\state -> state {pending=M.insert requestId (Starting resume) (pending state),session=resume})
-                pure d {status="Opening agent session..."}
+                pure d {status="Opening agent session...",agentSteering=(field "_meta" value >>= field "steering" >>= field "supported")==Just True}
         (Just (Starting resumed),Right value,_) -> case field "sessionId" value <|> resumed of
           Nothing -> pure d {status="Agent returned no session ID."}
           Just sid -> do
             modifyIORef' ref (\state -> state {session=Just sid,lastSession=Just (provider state,project state,sid)})
             savedId<-persist (directory </> "agent-session.json") (object ["provider" .= launchValue (provider s),"cwd" .= project s,"sessionId" .= sid])
             sendQueued runtime d {status=either ("Session opened; could not save ID: "<>) (const ("Session "<>sid)) savedId}
+        (Just (Steering text),Right value,_) -> case field "outcome" value :: Maybe Text of
+          Just "injected" -> pure d {status="Follow-up added to the active turn."}
+          Just "startedNewTurn" -> pure d {status="Follow-up started a new turn."}
+          _ -> pure d {status="Steering failed; the follow-up remains in Conversation.",composerBuffer=if T.null (contents (composerBuffer d)) then newBuffer text else composerBuffer d}
         (Just Prompting,Right value,_) -> pure d {status="Agent: "<>fromMaybe "finished" (field "stopReason" value)}
         _ -> pure d
     A.Notification "session/update" params
@@ -472,7 +498,7 @@ paint force s d
   | not force && not (any ((==Just "Conversation").documentLabel) (M.elems (buffers d))) = d
   | otherwise = let
       width=conversationWidth d
-      header="Session: "<>fromMaybe "not connected" (session s)<>"\nTools > Prompt to send; Cancel reply to stop.\n\n"
+      header="Session: "<>fromMaybe "not connected" (session s)<>"\n\n"
       styled=plain Comment header++concatMap (renderRecord width) (transcript s)
       text=T.pack (map fst styled)
       existing=find (\(_,doc)->documentLabel doc==Just "Conversation") (M.toList (buffers d))
@@ -482,7 +508,7 @@ paint force s d
       bid=maybe (nextId d) fst existing
       adjust w | bufferId w/=bid = w
                | otherwise =
-                   let rows=max 1 (height (bounds w)-2)
+                   let rows=max 1 (windowContentRows (fromMaybe (newDocument (newBuffer "") Nothing) (M.lookup bid (buffers opened))) w)
                        oldLines=maybe 0 (bufferLineCount . documentBuffer . snd) existing
                        newLines=length (T.splitOn "\n" text)
                        atEnd=scrollRow w>=max 0 (oldLines-rows)
@@ -490,7 +516,7 @@ paint force s d
                    in w {scrollRow=if atEnd then max 0 (newLines-rows) else min (max 0 (newLines-rows)) (scrollRow w),
                          selection=Selection (bounded (anchor (selection w))) (bounded (caret (selection w)))}
       colored=opened {buffers=M.adjust (\doc -> doc {documentHighlight=styled}) bid (buffers opened),windows=map adjust (windows opened)}
-      focused=case find ((==bid).bufferId) (windows colored) of Just w | force -> focusWindow (windowId w) colored; _ -> colored
+      focused=case find ((==bid).bufferId) (windows colored) of Just w | force -> focusWindow (windowId w) colored {composerFocused=True}; _ -> colored
     in focused
   where
     plain style=map (,style).T.unpack

@@ -220,6 +220,15 @@ select an existing Codex executable. Authenticate with the provider's own CLI
 before starting it here. The adapter and model credentials are separate from
 this repository.
 
+The **Conversation** window has a three-line query pane below the transcript.
+**Enter** or **OK** submits the draft; while a reply is active it queues the query
+for the next turn. **Shift+Enter** inserts a newline. **Ctrl+Enter** steers the
+active turn when the provider advertises that extension. **Cancel** (or Esc in
+the query pane) stops the active reply; queued queries then proceed in order.
+OK is enabled for a nonempty draft, and Cancel only while a request is active.
+Click the transcript or press Tab to browse/copy replies; typing returns to the
+draft. Drafts retain undo/redo and are preserved while replies stream.
+
 **Tools > Prompt** sends a message with optional selection, current-file and
 Messages context, including unsaved text. **Conversation** opens its numbered
 window; **Cancel reply** cancels the current turn. Markdown uses CommonMark,

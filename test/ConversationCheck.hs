@@ -21,6 +21,7 @@ import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.FilePath ((</>))
 import System.IO (hClose, openTempFile)
 import System.Timeout (timeout)
+import THC.Edit.Render (snapshot)
 import THC.Edit.Buffer
 import THC.Edit.Conversation
 import THC.Edit.Files
@@ -74,6 +75,7 @@ checks = bracket temporary removePathForcibly $ \root ->
       let initParams=[params | entry<-entries,field "method" entry==Just ("initialize"::T.Text),Just params<-[field "params" entry]]
       check "initialize advertises actual terminal capability" (case initParams of p:_ -> (field "clientCapabilities" p >>= field "terminal")==Just terminalAvailable; [] -> False)
       check "new session handshake" (any ((==Just ("session/new"::T.Text)).field "method") entries)
+      check "conversation has an inline composer" ("Shift+Enter Newline" `T.isInfixOf` snapshot streamed)
       check "conversation renders streamed Markdown" ("Hello" `T.isInfixOf` conversationText streamed && not ("**bold" `T.isInfixOf` conversationText streamed))
       check "conversation preserves Markdown styling" (any ((==Keyword).snd) (conversationHighlight streamed))
       check "tool update merges pending record" (T.count "[completed] Local tool" (conversationText streamed)==1 && not ("[pending] Local tool" `T.isInfixOf` conversationText streamed))
@@ -128,7 +130,37 @@ checks = bracket temporary removePathForcibly $ \root ->
       cancelling<-send runtime "cancel" [] waiting
       cancelled<-await runtime "cancel response" ((=="Agent: cancelled").status) cancelling
       check "session cancellation notification sent" . any ((==Just ("session/cancel"::T.Text)).field "method") =<< logged
-      disconnected<-prompt runtime "disconnect" cancelled >>= await runtime "provider EOF" ((=="Agent disconnected.").status)
+      let pasteDraft text=fst . handleEvent (V.EvPaste (TE.encodeUtf8 text))
+          press key mods=fst . handleEvent (V.EvKey key mods)
+          draft=pasteDraft "λ" cancelled
+          multiline=pasteDraft "next" (press V.KEnter [V.MShift] draft)
+          selected=press (V.KChar 'a') [V.MCtrl] multiline
+          copiedDraft=press (V.KChar 'c') [V.MCtrl] selected
+          window=fromMaybe (error "conversation window") (activeWindow multiline)
+          [(okRect,_),(cancelRect,_)]=composerButtons window
+          click rect desktop=handleEvent (V.EvMouseDown (left rect) (top rect) V.BLeft []) desktop
+          applyEvent event desktop=let (next,effects)=handleEvent event desktop in snd <$> conversationEffects runtime fallback next effects
+      check "composer supports Unicode, newline, and clipboard without changing transcript"
+        (contents (composerBuffer multiline)=="λ\nnext" && clipboard copiedDraft=="λ\nnext" && conversationText multiline==conversationText cancelled)
+      check "composer buttons follow draft and reply state"
+        (composerButtonEnabled multiline "OK" && not (composerButtonEnabled cancelled "OK") && not (composerButtonEnabled cancelled "Cancel") && null (snd (click cancelRect cancelled)))
+      submitted<-uncurry (conversationEffects runtime fallback) (click okRect (pasteDraft "stream" cancelled)) >>= done runtime . snd
+      check "OK posts draft into transcript and clears input" (T.null (contents (composerBuffer submitted)) && not (agentReplying submitted))
+      busyDraft<-prompt runtime "wait" submitted >>= await runtime "composer busy" agentReplying
+      preserved<-tickConversation runtime (pasteDraft "stream" busyDraft)
+      queued<-applyEvent (V.EvKey V.KEnter []) preserved
+      check "Enter queues a query while replying and retains input during ticks"
+        (contents (composerBuffer preserved)=="stream" && agentQueued queued==1 && T.null (contents (composerBuffer queued)) && "Enter Queue query" `T.isInfixOf` snapshot queued)
+      drained<-uncurry (conversationEffects runtime fallback) (click cancelRect queued) >>= done runtime . snd
+      check "Cancel stops current response then queued query runs" (agentQueued drained==0 && not (agentReplying drained) && "Enter Query" `T.isInfixOf` snapshot drained)
+      steeringWait<-prompt runtime "wait" drained >>= await runtime "steering active" agentReplying
+      check "steering hint requires negotiated support" (agentSteering steeringWait && "Ctrl+Enter Steer" `T.isInfixOf` snapshot steeringWait)
+      refused<-applyEvent (V.EvKey V.KEnter [V.MCtrl]) (pasteDraft "direction" steeringWait {agentSteering=False})
+      check "unsupported steering retains draft" (contents (composerBuffer refused)=="direction")
+      steered<-applyEvent (V.EvKey V.KEnter [V.MCtrl]) (pasteDraft "direction" steeringWait) >>= await runtime "steering delivered" (not . agentReplying)
+      check "steering uses adapter extension and clears submitted draft" . any ((==Just ("_session/steering"::T.Text)).field "method") =<< logged
+      check "steering does not edit source or retain sent draft" (T.null (contents (composerBuffer steered)) && documentBuffer (sourceDocument steered)==documentBuffer (sourceDocument cancelled))
+      disconnected<-prompt runtime "disconnect" steered >>= await runtime "provider EOF" ((=="Agent disconnected.").status)
       reconnected<-prompt runtime "stream" disconnected >>= done runtime
       resumed<-send runtime "load" ["0","saved-id"] reconnected >>= await runtime "resume session" ((=="Session saved-id").status)
       check "conversation header follows resumed session" ("Session: saved-id" `T.isInfixOf` conversationText resumed)
@@ -216,10 +248,11 @@ providerScript=unlines
   , "for line in sys.stdin:"
   , "  msg=json.loads(line); log.write(json.dumps(msg,ensure_ascii=False)+'\\n')"
   , "  method=msg.get('method'); ident=msg.get('id'); params=msg.get('params',{})"
-  , "  if method=='initialize': reply(ident,{'protocolVersion':1,'agentCapabilities':{'loadSession':os.environ['THC_RESUME']=='yes'}})"
+  , "  if method=='initialize': reply(ident,{'protocolVersion':1,'agentCapabilities':{'loadSession':os.environ['THC_RESUME']=='yes'},'_meta':{'steering':{'supported':os.environ['THC_RESUME']=='yes'}}})"
   , "  elif method=='session/new': sid='fixture-session'; reply(ident,{'sessionId':sid})"
   , "  elif method=='session/load': sid=params['sessionId']; reply(ident,{})"
   , "  elif method=='session/cancel': finish('cancelled')"
+  , "  elif method=='_session/steering': reply(ident,{'outcome':'injected'}); finish()"
   , "  elif method=='session/prompt':"
   , "    prompt=ident; scenario=params['prompt'][0]['text'].splitlines()[0]"
   , "    if scenario=='stream':"
