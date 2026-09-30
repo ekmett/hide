@@ -102,10 +102,10 @@ recordDisk (Reconciliation _ ref) bid bytes desktop = case M.lookup bid (buffers
     let forget s = s {changedDisk=M.delete bid (changedDisk s),announced=M.delete bid (announced s)}
     if bytes==diskBytes file then modifyIORef' ref forget >> pure desktop else do
       modifyIORef' ref (\s -> s {changedDisk=M.insert bid (Right bytes) (changedDisk s)})
-      case bytes >>= either (const Nothing) Just . decode of
-        Just text | not (dirty (documentBuffer doc)) -> do
+      case bytes of
+        Just raw | not (dirty (documentBuffer doc)) -> do
           modifyIORef' ref forget
-          pure (reload bid file bytes text desktop)
+          pure (reload bid file bytes raw desktop)
         _ -> pure desktop
   _ -> pure desktop
 
@@ -114,18 +114,19 @@ decode bytes
   | BS.elem 0 bytes = Left "Binary text contains NUL bytes; the buffer was preserved."
   | otherwise = either (const (Left "The file is not valid UTF-8; the buffer was preserved.")) Right (TE.decodeUtf8' bytes)
 
-reload :: Int -> FileState -> Maybe BS.ByteString -> T.Text -> Desktop -> Desktop
-reload bid file bytes text desktop = case M.lookup bid (buffers desktop) of
+reload :: Int -> FileState -> Maybe BS.ByteString -> BS.ByteString -> Desktop -> Desktop
+reload bid file bytes raw desktop = case M.lookup bid (buffers desktop) of
   Nothing -> desktop
   Just doc ->
     let original=documentBuffer doc
-        replaced=replaceSelection (Selection 0 (bufferLength original)) text original
-        fresh=replaced {saved=text,revision=max (revision original+1) (revision replaced)}
+        loaded=case decode raw of Right text | not (byteMode original) -> newBuffer text; _ -> newByteBuffer raw
+        replaced=replaceBuffer (byteMode loaded) (contents loaded) original
+        fresh=markSaved replaced {revision=max (revision original+1) (revision replaced)}
         updated=restyle doc {documentFile=Just file {diskBytes=bytes},documentBuffer=fresh}
         clamp n=max 0 (min (bufferLength fresh) n)
         adjust window | bufferId window/=bid = window
                       | otherwise = window {selection=let Selection a c=selection window in Selection (clamp a) (clamp c),
-                          scrollRow=max 0 (min (bufferLineCount fresh-1) (scrollRow window)),
+                          scrollRow=max 0 (min (documentRows updated-1) (scrollRow window)),
                           scrollColumn=max 0 (min (documentWidth updated) (scrollColumn window))}
     in ensureVisible desktop {buffers=M.insert bid updated (buffers desktop),windows=map adjust (windows desktop),
       status="Reloaded "<>T.pack (filePath file)<>"; Undo restores the previous buffer.",hoverTarget=Nothing,typeHint=""}
@@ -185,9 +186,7 @@ resolve runtime@(Reconciliation watcher ref) conflict action desktop = case M.lo
           (comparison file (documentBuffer doc) bytes) desktop) {status="File > Disk changes returns to the resolution choices."})
         SaveConflictAs -> pure (prompt "Save local buffer as" (Saving bid Nothing)
           [Input "Name" (T.pack (filePath file<>".local")) (length (filePath file)+6)] desktop)
-        ReloadDisk -> case maybe (Right "") decode bytes of
-          Left err -> pure (message "Cannot reload file" [err,"Compare or Save as keeps your current text."] desktop)
-          Right text -> pure (reload bid file bytes text desktop)
+        ReloadDisk -> pure (reload bid file bytes (fromMaybe BS.empty bytes) desktop)
   _ -> do
     modifyIORef' ref (\s -> s {announced=M.delete bid (announced s)})
     forceCheck watcher
@@ -213,7 +212,7 @@ readCurrent path = either (Left . T.pack . show) Right <$> tryIOError (do
 comparison :: FileState -> Buffer -> Maybe BS.ByteString -> T.Text
 comparison file buffer disk = T.concat
   ["Disk change review: ",T.pack (filePath file),"\n\n",section "BASE — last loaded or saved" (render (diskBytes file)),
-   section "LOCAL — current editor buffer" (contents buffer),section "DISK — observed external version" (render disk)]
+   section "LOCAL — current editor buffer" (render (Just (bufferBytes buffer))),section "DISK — observed external version" (render disk)]
   where
     section title text="===== "<>title<>" =====\n"<>text<>"\n===== END "<>title<>" =====\n\n"
     render Nothing="[File does not exist]"

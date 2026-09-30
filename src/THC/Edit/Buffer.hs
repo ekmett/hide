@@ -1,7 +1,8 @@
 {-# LANGUAGE MultiParamTypeClasses, OverloadedStrings #-}
 module THC.Edit.Buffer
-  ( Buffer(saved,undoStack,redoStack,revision,lastChange), Selection(..)
-  , newBuffer, contents, dirty, ordered, replaceSelection, undo, redo, selectedText
+  ( Buffer(saved,undoStack,redoStack,revision,lastChange,byteMode,savedByteMode), Selection(..)
+  , newBuffer, newByteBuffer, bufferBytes, markSaved, toggleByteMode, replaceBuffer, textBuffer
+  , contents, dirty, ordered, replaceSelection, undo, redo, selectedText
   , bufferLength, bufferLineCount, bufferLineColumn, bufferLineOffset, bufferLineAt
   , lineColumn, textLines, lineOffset, lineAt, displayColumn, columnOffset
   , combining, nextCharacter, previousCharacter, wordLeft, wordRight, wordChar, characterWidth
@@ -9,6 +10,9 @@ module THC.Edit.Buffer
 
 import qualified Data.Text as T
 import Data.Text (Text)
+import qualified Data.Text.Encoding as TE
+import qualified Data.ByteString as BS
+import Data.Char (ord)
 import Data.Char (GeneralCategory(..), generalCategory, isAlphaNum, isSpace)
 import Data.Foldable (toList)
 import qualified Data.FingerTree as FT
@@ -28,13 +32,47 @@ type LineTree = FT.FingerTree LineMeasure Line
 
 data Buffer = Buffer
   { bufferLines :: !LineTree, cachedContents :: Text, saved :: Text
-  , undoStack :: [(LineTree,(Int,Int,Int))], redoStack :: [(LineTree,(Int,Int,Int))]
-  , revision :: !Int, lastChange :: Maybe (Int,Int,Int)
+  , undoStack :: [(LineTree,Bool,(Int,Int,Int))], redoStack :: [(LineTree,Bool,(Int,Int,Int))]
+  , revision :: !Int, lastChange :: Maybe (Int,Int,Int), byteMode :: Bool, savedByteMode :: Bool
   } deriving (Eq, Show)
 data Selection = Selection { anchor :: Int, caret :: Int } deriving (Eq, Show)
 
 newBuffer :: Text -> Buffer
-newBuffer t = Buffer (linesFromText t) t t [] [] 0 Nothing
+newBuffer t = Buffer (linesFromText t) t t [] [] 0 Nothing False False
+
+-- Byte buffers use one Latin-1 code point per byte; text never passes through a lossy decoder.
+newByteBuffer :: BS.ByteString -> Buffer
+newByteBuffer bytes = (newBuffer (TE.decodeLatin1 bytes)) {byteMode=True,savedByteMode=True}
+
+encodeContents :: Bool -> Text -> BS.ByteString
+encodeContents False = TE.encodeUtf8
+encodeContents True = BS.pack . map (fromIntegral . ord) . T.unpack
+
+bufferBytes :: Buffer -> BS.ByteString
+bufferBytes b = encodeContents (byteMode b) (contents b)
+
+markSaved :: Buffer -> Buffer
+markSaved b = b {saved=contents b,savedByteMode=byteMode b}
+
+textBuffer :: Buffer -> Bool
+textBuffer b = not (byteMode b) && not (T.any (=='\0') (contents b))
+
+toggleByteMode :: Buffer -> Either Text Buffer
+toggleByteMode b
+  | not (byteMode b) = Right (replaceBuffer True (TE.decodeLatin1 (bufferBytes b)) b)
+  | BS.elem 0 bytes = Left "This file contains NUL bytes; keep using hex mode."
+  | otherwise = either (const (Left "These bytes are not valid UTF-8; keep using hex mode."))
+      (\text -> Right (replaceBuffer False text b)) (TE.decodeUtf8' bytes)
+  where bytes=bufferBytes b
+
+-- Reload and mode changes retain both the representation and contents in undo.
+replaceBuffer :: Bool -> Text -> Buffer -> Buffer
+replaceBuffer mode text b
+  | mode && T.any ((>255) . ord) text = b {lastChange=Nothing}
+  | mode==byteMode b = replaceSelection (Selection 0 (bufferLength b)) text b
+  | otherwise = b {bufferLines=linesFromText text,cachedContents=text,byteMode=mode,
+      undoStack=take 100 ((bufferLines b,byteMode b,(0,T.length text,bufferLength b)):undoStack b),
+      redoStack=[],revision=revision b+1,lastChange=Just (0,bufferLength b,T.length text)}
 
 -- The lazy projection is shared by rendering, highlighting and language tooling.
 -- Undo retains only trees, so old flattened documents are not retained by history.
@@ -97,16 +135,18 @@ rangeText a z tree
       _ -> middle
 
 dirty :: Buffer -> Bool
-dirty b = contents b /= saved b
+dirty b | byteMode b==savedByteMode b = contents b /= saved b
+        | otherwise = bufferBytes b /= encodeContents (savedByteMode b) (saved b)
 
 ordered :: Selection -> (Int,Int)
 ordered (Selection a c) = (min a c, max a c)
 
 replaceSelection :: Selection -> Text -> Buffer -> Buffer
 replaceSelection sel inserted b@Buffer{bufferLines=tree,undoStack=history,revision=version}
+  | byteMode b && T.any ((>255) . ord) inserted = b {lastChange=Nothing}
   | insertedLength == z-a && rangeText a z tree == inserted = b {lastChange=Nothing}
   | otherwise = b { bufferLines = updated, cachedContents = treeText updated
-                  , undoStack = take 100 ((tree,(a,a+insertedLength,z-a)) : history)
+                  , undoStack = take 100 ((tree,byteMode b,(a,a+insertedLength,z-a)) : history)
                   , redoStack = [], revision = version + 1, lastChange = Just (a,z,insertedLength) }
   where
     (rawA,rawZ) = ordered sel
@@ -123,10 +163,10 @@ replaceSelection sel inserted b@Buffer{bufferLines=tree,undoStack=history,revisi
 undo, redo :: Buffer -> Buffer
 undo b@Buffer{bufferLines=current,undoStack=history,redoStack=future,revision=version} = case history of
   [] -> b {lastChange=Nothing}
-  (t,change@(a,z,n)):ts -> b { bufferLines = t, cachedContents = treeText t, undoStack = ts, redoStack = (current,(a,a+n,z-a)) : future, revision = version + 1, lastChange = Just change }
+  (t,mode,change@(a,z,n)):ts -> b { bufferLines = t, byteMode=mode, cachedContents = treeText t, undoStack = ts, redoStack = (current,byteMode b,(a,a+n,z-a)) : future, revision = version + 1, lastChange = Just change }
 redo b@Buffer{bufferLines=current,undoStack=history,redoStack=future,revision=version} = case future of
   [] -> b {lastChange=Nothing}
-  (t,change@(a,z,n)):ts -> b { bufferLines = t, cachedContents = treeText t, redoStack = ts, undoStack = (current,(a,a+n,z-a)) : history, revision = version + 1, lastChange = Just change }
+  (t,mode,change@(a,z,n)):ts -> b { bufferLines = t, byteMode=mode, cachedContents = treeText t, redoStack = ts, undoStack = (current,byteMode b,(a,a+n,z-a)) : history, revision = version + 1, lastChange = Just change }
 
 lineColumn :: Text -> Int -> (Int,Int)
 lineColumn t p = (T.count "\n" before, T.length (last (T.splitOn "\n" before)))

@@ -49,7 +49,7 @@ cancelPreparation t = do
   forM_ previous $ \(Preparing _ _ _ _ worker _) -> killThread worker
 
 sourceDocuments :: Desktop -> [(Int,FilePath,Int,T.Text)]
-sourceDocuments d = [(bid,filePath f,revision b,contents b) | (bid,doc)<-M.toList (buffers d), documentLabel doc==Nothing,
+sourceDocuments d = [(bid,filePath f,revision b,contents b) | (bid,doc)<-M.toList (buffers d), documentLabel doc==Nothing, textBuffer (documentBuffer doc),
   Just f<-[documentFile doc], takeExtension (filePath f) `elem` [".hs",".lhs"], let b=documentBuffer doc]
 
 projectRoot :: FilePath -> IO FilePath
@@ -100,7 +100,7 @@ cursorTarget d = do
   w<-activeWindow d
   doc<-activeDocument d
   _<-documentFile doc
-  if documentLabel doc/=Nothing || problemsFocused d || maybe False treeFocused (sideTree d) then Nothing
+  if not (textBuffer (documentBuffer doc)) || documentLabel doc/=Nothing || problemsFocused d || maybe False treeFocused (sideTree d) then Nothing
     else Just (bufferId w,revision (documentBuffer doc),caret (selection w))
 
 currentTarget :: Desktop -> Maybe Target
@@ -111,7 +111,7 @@ targetDocument :: Target -> Desktop -> Maybe (FilePath,T.Text)
 targetDocument (bid,version,_) d = do
   doc<-M.lookup bid (buffers d)
   file<-documentFile doc
-  if documentLabel doc/=Nothing || revision (documentBuffer doc)/=version || takeExtension (filePath file) `notElem` [".hs",".lhs"] then Nothing
+  if not (textBuffer (documentBuffer doc)) || documentLabel doc/=Nothing || revision (documentBuffer doc)/=version || takeExtension (filePath file) `notElem` [".hs",".lhs"] then Nothing
     else Just (filePath file,contents (documentBuffer doc))
 
 sendRequest :: Tooling -> LanguageAction -> Target -> Desktop -> IO Desktop
@@ -342,6 +342,7 @@ applyRename snapshot result d = case workspaceEdits result of
           if not exists then pure (Left "Rename refers to a missing file.") else fmap (\(file,b) -> (Nothing,file,b)) <$> loadFile path
       pure $ do
         (bid,file,b)<-either (Left . T.pack) Right loaded
+        unless (textBuffer b) (Left "Cannot apply text edits to a hex buffer.")
         case M.lookup path snapshot of
           Just (oldVersion,oldText) | (bid/=Nothing && oldVersion/=revision b) || oldText/=contents b -> Left "A buffer changed during rename; request it again."
           Nothing -> Left "Rename refers to a file outside the checked project; no files changed."
@@ -391,7 +392,7 @@ toolingEffects t core d effects = foldM apply (False,d) effects
     apply (_,desktop) effect@(SaveDocument bid _ _) = do
       result@(_,updated)<-core desktop [effect]
       case M.lookup bid (buffers updated) of
-        Just doc | not (dirty (documentBuffer doc)), Just file<-documentFile doc -> do
+        Just doc | textBuffer (documentBuffer doc), not (dirty (documentBuffer doc)), Just file<-documentFile doc -> do
           sync t updated
           session<-sessionFor t (filePath file)
           case session of Right (Session client _) -> L.notifySaved client (filePath file); Left _ -> pure ()
@@ -410,7 +411,10 @@ sourceSnapshot root = do
     if linked then pure M.empty else if directory then sourceSnapshot path
     else if takeExtension path `elem` [".hs",".lhs"] then do
       loaded<-loadFile path
-      case loaded of Right (file,b) -> pure (M.singleton (filePath file) (-1,contents b)); Left err -> ioError (userError err)
+      case loaded of
+        Right (file,b) | textBuffer b -> pure (M.singleton (filePath file) (-1,contents b))
+        Right _ -> ioError (userError "Cannot snapshot binary Haskell source for rename.")
+        Left err -> ioError (userError err)
     else pure M.empty)
 
 refreshProblems :: Tooling -> Desktop -> IO Desktop

@@ -63,11 +63,11 @@ checks = bracket makeDirectory removePathForcibly $ \dir -> do
 
   let invalid = dir </> "invalid.hs"
   BS.writeFile invalid (BS.pack [0xff])
-  badUTF8 <- loadFile invalid
-  check "invalid UTF-8 is rejected" (isLeft badUTF8)
+  (_,badUTF8) <- loadFile invalid >>= right "load invalid UTF-8 as bytes"
+  check "invalid UTF-8 opens in hex mode" (byteMode badUTF8 && bufferBytes badUTF8==BS.pack [255])
   BS.writeFile invalid (BS.pack [97,0,98])
-  binary <- loadFile invalid
-  check "NUL input is rejected" (isLeft binary)
+  (_,binary) <- loadFile invalid >>= right "load NUL as bytes"
+  check "NUL input opens in hex mode" (byteMode binary && bufferBytes binary==BS.pack [97,0,98])
   folder <- loadFile dir
   check "directory read is rejected" (isLeft folder)
   invalidPermissions <- getPermissions invalid

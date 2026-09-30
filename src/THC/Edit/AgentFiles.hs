@@ -32,7 +32,7 @@ textTooLarge text = T.length text>fileLimit || BS.length (TE.encodeUtf8 text)>fi
 
 sourceSnapshots :: Desktop -> M.Map FilePath Snapshot
 sourceSnapshots d = M.fromList [(filePath file,Snapshot file (Just (bid,revision b)) (contents b)) |
-  (bid,doc)<-M.toList (buffers d),documentLabel doc==Nothing,Just file<-[documentFile doc],let b=documentBuffer doc]
+  (bid,doc)<-M.toList (buffers d),documentLabel doc==Nothing,textBuffer (documentBuffer doc),Just file<-[documentFile doc],let b=documentBuffer doc]
 
 -- ACP paths are absolute and bounded by the session's canonical project root.
 -- Resolving both endpoints also rejects symlinks which escape that root.
@@ -44,6 +44,8 @@ captureFile root path d = do
     base <- canonicalizePath root
     let relative=makeRelative base resolved
     when (isAbsolute relative || ".." `elem` splitDirectories relative) (ioError (userError "File is outside this session's project."))
+    when (any (\doc -> fmap filePath (documentFile doc)==Just resolved && not (textBuffer (documentBuffer doc))) (M.elems (buffers d)))
+      (ioError (userError "Hex buffers are not available through ACP text file APIs."))
     captured <- case M.lookup resolved (sourceSnapshots d) of
       Just captured -> pure captured
       Nothing -> do
@@ -76,14 +78,14 @@ acceptWrite (Snapshot file expected oldText) text d
         pure $ case savedFile of
           Left err -> Left (T.pack err)
           Right latest -> Right opened
-            {buffers=M.adjust (\doc -> restyle doc {documentBuffer=edited {saved=text},documentFile=Just latest}) bid (buffers opened)
+            {buffers=M.adjust (\doc -> restyle doc {documentBuffer=markSaved edited,documentFile=Just latest}) bid (buffers opened)
             ,windows=map (clamp bid (bufferLength edited)) (windows opened)
             ,status="Agent edit saved; Undo restores the previous buffer."}
   where
     matching=find (\(_,doc) -> fmap filePath (documentFile doc)==Just (filePath file)) (M.toList (buffers d))
     current=case (expected,matching) of
       (Just (bid,version),Just (now,doc))
-        | bid==now,documentLabel doc==Nothing,revision (documentBuffer doc)==version,
+        | bid==now,documentLabel doc==Nothing,textBuffer (documentBuffer doc),revision (documentBuffer doc)==version,
           contents (documentBuffer doc)==oldText,documentFile doc==Just file -> Right (bid,documentBuffer doc,d)
       (Nothing,Nothing) -> let opened=addDocument (Just file) (newBuffer oldText) d
         in Right (nextId d,newBuffer oldText,opened)
@@ -95,7 +97,7 @@ contextText :: Bool -> Bool -> Bool -> Desktop -> Text
 contextText selectionOnly wholeFile includeDiagnostics d = T.intercalate "\n\n" (fileContext++problemContext)
   where
     fileContext=case (activeWindow d,activeDocument d) of
-      (Just w,Just doc) | documentLabel doc==Nothing ->
+      (Just w,Just doc) | documentLabel doc==Nothing, textBuffer (documentBuffer doc) ->
         let b=documentBuffer doc; Selection a z=selection w
             path=maybe "Unsaved buffer" (T.pack . filePath) (documentFile doc)
             selected=T.take (abs (z-a)) (T.drop (min a z) (contents b))

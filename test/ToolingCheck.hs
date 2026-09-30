@@ -53,6 +53,9 @@ checks = do
     bracket (lookupEnv "THC_EDIT_HLS") (maybe (unsetEnv "THC_EDIT_HLS") (setEnv "THC_EDIT_HLS")) $ \_ -> do
       setEnv "THC_EDIT_HLS" server
       withTooling $ \tooling -> do
+        let binary=desktop {buffers=M.map (\doc -> restyle doc {documentBuffer=newByteBuffer "a\0b"}) (buffers desktop)}
+        (_,blocked)<-toolingEffects tooling core binary [LanguageRequest TypeInfo]
+        check "hex buffers do not reach HLS text requests" (buffers blocked==buffers binary && status blocked=="Open a saved Haskell source file first.")
         began<-timeout 1000000 (toolingEffects tooling core desktop [LanguageRequest (RenameAt "bar")])
         (_,preparing)<-maybe (error "rename preparation blocked dispatch") pure began
         check "rename preparation returns before disk result" (status preparing=="Preparing rename...")

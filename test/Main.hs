@@ -3,6 +3,9 @@ module Main where
 #ifdef WITH_WINDOW
 import qualified FontCheck
 #endif
+import qualified HexCheck
+import qualified DAPCheck
+import qualified DebuggerCheck
 import qualified RunCheck
 import qualified ConversationCheck
 import qualified AgentFilesCheck
@@ -39,6 +42,9 @@ check name ok = unless ok (error name)
 
 main :: IO ()
 main = do
+  HexCheck.checks
+  DAPCheck.checks
+  DebuggerCheck.checks
   RunCheck.checks
   ConversationCheck.checks
   AgentFilesCheck.checks

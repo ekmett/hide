@@ -103,6 +103,7 @@ checks = bracket temporary removePathForcibly $ \dir -> withReconciliation $ \ru
   check "agent commands route generic effects" (all (\(command,action) -> snd (runCommand command restored)==[AgentAction action []]) commands)
   let agentDialog = Dialog "Agent" (AgentDialog "permission") [Input "Value" "x" 1,CheckBox "Allowed" True,ListBox "Choice" ["a","b"] 1] 3 ["Allow","Deny"] []
   check "agent dialog submits button and field values" (snd (handleEvent (V.EvKey V.KEnter []) restored {dialog=Just agentDialog})==[AgentAction "permission" ["0","x","true","1"]])
+  binaryReload dir
   mapM_ (queuedSave dir) [False,True]
   putStrLn "external reconciliation checks passed"
   where
@@ -114,6 +115,33 @@ checks = bracket temporary removePathForcibly $ \dir -> withReconciliation $ \ru
       removeFile path
       createDirectory path
       canonicalizePath path
+
+-- External binary replacements use the same baseline and conflict protocol as text.
+binaryReload :: FilePath -> IO ()
+binaryReload dir = withReconciliation $ \runtime -> do
+  let path=dir </> "binary.dat"
+      tick=tickReconciliation runtime
+      effects=reconciliationEffects runtime applyEffects
+      check name ok=unless ok (error name)
+      buffer=maybe (error "missing binary buffer") documentBuffer . activeDocument
+      raw=BS.pack [0,255,65]
+  BS.writeFile path "text"
+  (file,b)<-loadFile path >>= either error pure
+  opened<-tick (addDocument (Just file) b (initialDesktop (80,25)))
+  BS.writeFile path raw
+  reloaded<-await tick ((==raw) . bufferBytes . buffer) opened
+  check "binary external reload is clean lossless and undoable" (byteMode (buffer reloaded) && not (dirty (buffer reloaded)) && bufferBytes (undo (buffer reloaded))=="text" && not (byteMode (undo (buffer reloaded))))
+  let edited=fst (handleEvent (V.EvKey (V.KChar '1') []) reloaded)
+      local=bufferBytes (buffer edited)
+      changed=BS.pack [255,0,128]
+  BS.writeFile path changed
+  conflicted<-await tick (\d -> case purpose <$> dialog d of Just DiskConflict{} -> True; _ -> False) edited
+  check "dirty binary reload retains local bytes" (bufferBytes (buffer conflicted)==local)
+  case purpose <$> dialog conflicted of
+    Just (DiskConflict conflict) -> do
+      (_,resolved)<-effects conflicted {dialog=Nothing} [ResolveConflict conflict ReloadDisk]
+      check "explicit binary reload updates baseline and undo bytes" (bufferBytes (buffer resolved)==changed && not (dirty (buffer resolved)) && bufferBytes (undo (buffer resolved))==local && (activeDocument resolved >>= documentFile >>= diskBytes)==Just changed)
+    _ -> error "missing binary conflict"
 
 -- Register without polling, leaving the worker's initial old-byte observation
 -- queued while the save updates the baseline. ACP writes bypass the ordinary

@@ -5,6 +5,7 @@ import Control.Exception (bracket)
 import Control.Monad (foldM, when)
 import System.Timeout (timeout)
 import System.IO (hFlush, stdout)
+import THC.Edit.Debugger
 import THC.Edit.Conversation
 import THC.Edit.Tooling
 import THC.Edit.GitOperations
@@ -82,9 +83,9 @@ main = do
     staged<-foldM stageScene withGit [scene | Scene scene<-flags]
     if Html `elem` flags then TIO.putStr (snapshotHtml staged)
     else if Snapshot `elem` flags then TIO.putStr (snapshot staged)
-    else withConversation $ \conversation -> withTooling $ \tooling -> withGitOperations $ \gitOperations -> withReconciliation $ \reconciliation -> do
-      let effects=gitOperationEffects gitOperations (conversationEffects conversation (reconciliationEffects reconciliation (toolingEffects tooling applyEffects)))
-          tick d=tickGitOperations gitOperations applyEffects d >>= tickTooling tooling applyEffects >>= tickReconciliation reconciliation >>= tickConversation conversation
+    else withDebugger $ \debugger -> withConversation $ \conversation -> withTooling $ \tooling -> withGitOperations $ \gitOperations -> withReconciliation $ \reconciliation -> do
+      let effects=gitOperationEffects gitOperations (debuggerEffects debugger (conversationEffects conversation (reconciliationEffects reconciliation (toolingEffects tooling applyEffects))))
+          tick d=tickGitOperations gitOperations applyEffects d >>= tickTooling tooling applyEffects >>= tickReconciliation reconciliation >>= tickConversation conversation >>= tickDebugger debugger (toolingEffects tooling applyEffects)
       if backend /= Terminal then runWindow backend scale effects tick staged
       else bracket (mkVty V.defaultConfig) (\vty -> V.shutdown vty >> cursorStyle Nothing) $ \vty -> do
         when (V.supportsMode (V.outputIface vty) V.Mouse) (V.setMode (V.outputIface vty) V.Mouse True)
@@ -138,6 +139,7 @@ applyEffects = foldM apply . (False,)
     apply (_,d) ReadMergeBranches=pure (False,d {status="Git operations are unavailable in this preview."})
     apply (_,d) ReviewExternal=pure (False,d {status="Disk change monitoring is unavailable in this preview."})
     apply (_,d) ResolveConflict{}=pure (False,d {status="Disk change monitoring is unavailable in this preview."})
+    apply (_,d) DebugAction{}=pure (False,d {status="Debugger unavailable in this preview."})
     apply (_,d) AgentAction{}=pure (False,d {status="Agents are unavailable in this preview."})
     apply (_,d) Exit=pure (True,d)
     apply (_,d) SetScreenMode{}=pure (False,d {status="Screen modes are available in a graphical window."})
@@ -223,7 +225,7 @@ applyEffects = foldM apply . (False,)
           Left err->pure (False,message "Cannot save file" (wrapMessage (T.pack err)) d)
           Right file->do
             let b=documentBuffer doc
-                clean=restyle doc {documentFile=Just file,documentBuffer=b {saved=contents b}}
+                clean=restyle doc {documentFile=Just file,documentBuffer=markSaved b}
                 updated=d {buffers=M.insert bid clean (buffers d),status="File saved."}
             (_,refreshed)<-apply (False,updated) (RefreshGit (takeDirectory (filePath file)))
             case after of

@@ -15,6 +15,7 @@ import Data.Maybe (fromMaybe)
 import System.FilePath (takeFileName, (</>))
 import Data.Bits ((.&.), shiftR)
 import Data.Time (formatTime, defaultTimeLocale)
+import THC.Edit.Hex
 import THC.Edit.Buffer
 import THC.Edit.Model
 import THC.Edit.Syntax
@@ -88,7 +89,7 @@ renderDesktop d = (V.picForLayers layers) {V.picCursor=cursor}
       Nothing | menu d/=Nothing || contextMenu d/=Nothing || problemsFocused d || maybe False treeFocused (sideTree d) -> V.NoCursor
       Nothing -> case (activeWindow d,activeDocument d) of
         (_,Just doc) | not (documentCursorVisible doc) -> V.NoCursor
-        (Just w,Just doc) -> let { (r,c)=bufferLineColumn (documentBuffer doc) (caret (selection w)); x=left (bounds w)+1+displayColumn (bufferLineAt (documentBuffer doc) r) c-scrollColumn w; y=top (bounds w)+1+r-scrollRow w }
+        (Just w,Just doc) -> let { (r,c)=windowCursorCell (documentBuffer doc) w; x=left (bounds w)+1+c-scrollColumn w; y=top (bounds w)+1+r-scrollRow w }
                             in if inside (Rect (left (bounds w)+1) (top (bounds w)+1) (width (bounds w)-2) (height (bounds w)-2)) x y then V.Cursor x y else V.NoCursor
         _ -> V.NoCursor
 
@@ -106,7 +107,7 @@ castShadow size (Rect x y w h) below =
 windowLayers :: Desktop -> Bool -> Window -> [V.Image]
 windowLayers d active w =
   [place x (y+1+diagnosticRow issue-scrollRow w) (label (attr (if diagnosticSeverity issue==1 then V.RGBColor 255 85 85 else yellow) blue) "▶")
-    | issue<-diagnostics d, Just (diagnosticPath issue)==fmap filePath (documentFile doc), diagnosticRow issue>=scrollRow w, diagnosticRow issue<scrollRow w+hh-2]
+    | not (byteMode (documentBuffer doc)), issue<-diagnostics d, Just (diagnosticPath issue)==fmap filePath (documentFile doc), diagnosticRow issue>=scrollRow w, diagnosticRow issue<scrollRow w+hh-2]
   ++ (if active then
     [place (x+2) y (label frame "[" V.<|> label (attr (V.RGBColor 85 255 85) blue) (if videoMode d==Nothing then "x" else "■") V.<|> label frame "]"),place (x+ww-6) y (label frame "[" V.<|> label (attr cyan blue) "↑" V.<|> label frame "]")
     ,place (x+2) (y+hh-1) (label frame (T.take (max 0 (ww-4)) (windowPositionText doc w)))
@@ -120,7 +121,7 @@ windowLayers d active w =
     doc=fromMaybe (newDocument (newBuffer "") Nothing) (M.lookup (bufferId w) (buffers d))
     b=documentBuffer doc; t=contents b
     file=maybe ("NONAME"<>T.pack (show (bufferId w))<>".HS") (T.pack . takeFileName . filePath) (documentFile doc)
-    title=" "<>fromMaybe file (documentLabel doc)<>(if dirty b then " * " else " ")
+    title=" "<>fromMaybe file (documentLabel doc)<>(if byteMode b then " [HEX]" else "")<>(if dirty b then " * " else " ")
     number=T.pack (show (windowNumber w))
     moving=case drag d of Just (Moving wid _ _) -> wid==windowId w; Just (Resizing wid _ _) -> wid==windowId w; _ -> False
     frame=attr (if moving then cyan else if active then white else gray) blue
@@ -134,6 +135,10 @@ windowLayers d active w =
       in place sx sy ((if vertical then V.vertCat else V.horizCat) [cell n | n<-[0..len-1]])
     contentWidth=max 0 (ww-2); contentHeight=max 0 (hh-2)
     textImage=V.vertCat [renderLine n | n<-[scrollRow w..scrollRow w+contentHeight-1]]
+    renderLine n | byteMode b && n>=documentRows doc = V.charFill edit ' ' contentWidth 1
+    renderLine n | byteMode b = V.cropRight contentWidth (V.translateX (negate (scrollColumn w)) (V.horizCat
+      [V.char (if active && maybe False highlighted offset then selected else edit) ch | (ch,offset)<-hexRow n t]) V.<|> V.charFill edit ' ' contentWidth 1)
+      where highlighted offset = offset==caret (selection w) || let (a,z)=ordered (selection w) in offset>=a && offset<z
     renderLine n=V.cropRight contentWidth (V.translateX (negate (scrollColumn w)) (styledImage (lineColor n) active (selection w) (bufferLineOffset b n) (fromMaybe [] (atMay styledLines n))) V.<|> V.charFill edit ' ' contentWidth 1)
 
     lineColor n = case documentLabel doc of

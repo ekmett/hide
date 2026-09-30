@@ -7,14 +7,16 @@ import Data.Text (Text)
 import qualified Data.Text.Encoding as TE
 import qualified Data.Map.Strict as M
 import Data.ByteString (ByteString)
+import qualified Data.ByteString as BS
 import Data.Maybe (listToMaybe, fromMaybe)
 import Data.List (find, findIndex, sortOn, mapAccumL)
-import Data.Char (toLower, isPrint, isAlphaNum, chr, ord, toUpper)
+import Data.Char (toLower, isPrint, isAlphaNum, chr, ord, toUpper, isHexDigit, digitToInt)
 import Text.Read (readMaybe)
 import System.FilePath ((</>), takeDirectory)
 import THC.Edit.Browser (Entry(..))
 import THC.Edit.Git (GitReview)
 import THC.Edit.Syntax (Style, highlightFor)
+import THC.Edit.Hex
 import THC.Edit.Buffer
 import THC.Edit.Files (FileState(..))
 
@@ -30,6 +32,7 @@ newDocument b file = restyle (Document b file Nothing [] 0 True)
 
 -- ponytail: retokenize the buffer after edits; use an incremental engine if large-file latency warrants it.
 restyle :: Document -> Document
+restyle doc | byteMode (documentBuffer doc) = doc {documentHighlight=[],documentWidth=78}
 restyle doc = doc {documentHighlight=highlightFor (maybe "Main.hs" filePath (documentFile doc)) text,
   documentWidth=maximum (0:[displayColumn line (T.length line) | raw<-textLines text,let line=T.dropWhileEnd (=='\r') raw])}
   where text=contents (documentBuffer doc)
@@ -37,6 +40,7 @@ restyle doc = doc {documentHighlight=highlightFor (maybe "Main.hs" filePath (doc
 data Window = Window
   { windowId :: Int, bufferId :: Int, bounds :: Rect, selection :: Selection
   , scrollRow :: Int, scrollColumn :: Int, restoredBounds :: Maybe Rect
+  , windowHexLow :: Bool, windowHexAscii :: Bool
   , windowNumber :: Int
   } deriving (Eq,Show)
 data Command = New | Open | Save | SaveAs | Close | Quit | Undo | Redo | Cut | Copy | Paste
@@ -46,6 +50,8 @@ data Command = New | Open | Save | SaveAs | Close | Quit | Undo | Redo | Cut | C
   | ToggleTree | GitDiff | GitCommit | GitFetch | GitPull | GitMerge | ReviewDisk
   | RunTarget | RunOptions | OpenTerminal | StopTerminal
   | AgentOptions | Conversation | AgentPrompt | AgentCancel | AgentResume | AgentCopyRaw | AgentNew
+  | ToggleHex
+  | DebugCommand Text
   | Disabled Text deriving (Eq,Show)
 data ConflictAction = CompareDisk | ReloadDisk | KeepBuffer | SaveConflictAs deriving (Eq,Show)
 data Conflict = Conflict { conflictBuffer :: Int, conflictRevision :: Int, conflictBaseline :: FileState, conflictDisk :: Maybe ByteString } deriving (Eq,Show)
@@ -53,11 +59,11 @@ data GitAction = FetchRemote | PullRemote | MergeBranch Text deriving (Eq,Show)
 data ContextKind = SourceContext | GitContext deriving (Eq,Show)
 data LanguageAction = TypeInfo | FindDefinition | Completions | ShowProblems | RestartLanguage | RenameAt Text deriving (Eq,Show)
 data Completion = Completion Text [(Int,Int,Text)] deriving (Eq,Show)
-data Effect = LanguageRequest LanguageAction | RunGit GitAction | ReadMergeBranches | JumpTo FilePath Int Int | ReadPath FilePath | BrowsePath FilePath Text | OpenChoice FilePath Text Text | ReadTree FilePath | ExpandTree Int | ReadHelp | RefreshGit FilePath | ReadGitDiff | AskGitCommit | WriteGitCommit Text | SaveDocument Int (Maybe FilePath) (Maybe Command) | ReviewExternal | ResolveConflict Conflict ConflictAction | AgentAction Text [Text] | SetScreenMode Int | Exit deriving (Eq,Show)
+data Effect = LanguageRequest LanguageAction | RunGit GitAction | ReadMergeBranches | JumpTo FilePath Int Int | ReadPath FilePath | BrowsePath FilePath Text | OpenChoice FilePath Text Text | ReadTree FilePath | ExpandTree Int | ReadHelp | RefreshGit FilePath | ReadGitDiff | AskGitCommit | WriteGitCommit Text | SaveDocument Int (Maybe FilePath) (Maybe Command) | ReviewExternal | ResolveConflict Conflict ConflictAction | AgentAction Text [Text] | DebugAction Text [Text] | SetScreenMode Int | Exit deriving (Eq,Show)
 data Field = Input Text Text Int | CheckBox Text Bool | Radio Text [Text] Int | ListBox Text [Text] Int | FileList [Entry] Int deriving (Eq,Show)
 data Purpose = Opening FilePath Text [Entry] | Committing | Saving Int (Maybe Command) | Finding | Replacing | GoingTo | Renaming
   | Completing Int Int Int [Completion] | Locations [(FilePath,Int,Int)] | Merging [Text]
-  | DiskConflict Conflict | AgentDialog Text
+  | DiskConflict Conflict | AgentDialog Text | DebugDialog Text
   | Confirm Command | Information | Settings | Widgets deriving (Eq,Show)
 data Dialog = Dialog
   { dialogTitle :: Text, purpose :: Purpose, fields :: [Field], focus :: Int
@@ -88,11 +94,16 @@ data MenuItem = MenuItem Text Text Command deriving (Eq,Show)
 menus :: [(Text,Char,[MenuItem])]
 menus =
   [("File",'f',[mi "New" "" New, mi "Open..." "F3" Open, mi "Save" "F2" Save, mi "Save as..." "" SaveAs, mi "Disk changes..." "" ReviewDisk, mi "Close" "Alt+F3" Close, mi "Exit" "Alt+X" Quit])
-  ,("Edit",'e',[mi "Undo" "Ctrl+Z" Undo, mi "Redo" "Ctrl+Y" Redo, mi "Cut" "Shift+Del" Cut, mi "Copy" "Ctrl+Ins" Copy, mi "Paste" "Shift+Ins" Paste, mi "Select all" "Ctrl+A" SelectAll,mi "Complete identifier..." "Ctrl+Space" Complete])
+  ,("Edit",'e',[mi "Undo" "Ctrl+Z" Undo, mi "Redo" "Ctrl+Y" Redo, mi "Cut" "Shift+Del" Cut, mi "Copy" "Ctrl+Ins" Copy, mi "Paste" "Shift+Ins" Paste, mi "Select all" "Ctrl+A" SelectAll,mi "Text / hex mode" "" ToggleHex,mi "Complete identifier..." "Ctrl+Space" Complete])
   ,("Search",'s',[mi "Find..." "Ctrl+F" Find, mi "Replace..." "Ctrl+R" Replace, mi "Search again" "Ctrl+L" FindNext, mi "Go to line..." "Ctrl+G" GoTo,mi "Go to definition" "F12" Definition])
   ,("Run",'r',[mi "Run" "Ctrl+F9" RunTarget,mi "Target..." "" RunOptions,mi "Terminal" "" OpenTerminal,mi "Stop terminal" "" StopTerminal])
   ,("Compile",'c',[off "Compile" "Alt+F9" "THC compilation is not connected yet.",off "Make" "F9" "Cabal project integration is a later milestone."])
-  ,("Debug",'d',[off "Inspect..." "" "THC Truffle debugging is not connected yet."])
+  ,("Debug",'d',[mi "Attach..." "" (DebugCommand "attach"),off "Launch" "" "THC debugger launch options are not available yet; attach to a running DAP endpoint.",
+      mi "Toggle breakpoint" "Ctrl+F8" (DebugCommand "breakpoint"),mi "Breakpoints..." "" (DebugCommand "breakpoints"),
+      mi "Continue" "F4" (DebugCommand "continue"),mi "Pause" "" (DebugCommand "pause"),
+      mi "Trace into" "F7" (DebugCommand "stepIn"),mi "Step over" "F8" (DebugCommand "next"),mi "Step out" "Ctrl+F7" (DebugCommand "stepOut"),
+      mi "Threads..." "" (DebugCommand "threads"),mi "Call stack..." "" (DebugCommand "stack"),mi "Scopes..." "" (DebugCommand "scopes"),
+      mi "Exceptions..." "" (DebugCommand "exceptions"),mi "Output" "" (DebugCommand "output"),mi "Disconnect" "" (DebugCommand "disconnect")])
   ,("Tools",'t',[mi "File tree" "Ctrl+B" ToggleTree,mi "Git diff..." "" GitDiff,mi "Approve changes..." "" GitCommit,mi "Inspect type" "Shift+F1" InspectType,mi "Messages" "" Problems,mi "Go to next" "Alt+F8" NextMessage,mi "Go to previous" "Alt+F7" PreviousMessage,mi "Restart language server" "" RestartHLS,mi "Conversation" "" Conversation,mi "Prompt..." "" AgentPrompt,mi "Cancel reply" "" AgentCancel,mi "Resume session..." "" AgentResume,mi "New session" "" AgentNew,mi "Copy raw conversation" "" AgentCopyRaw,mi "Widget gallery..." "" Gallery,off "Project browser..." "" "Cabal component browsing is a later milestone."])
   ,("Options",'o',[mi "Preferences..." "" EditorOptions,mi "Agents..." "" AgentOptions])
   ,("Window",'w',[mi "Tile" "" Tile,mi "Cascade" "" Cascade,mi "Split vertically" "" SplitVertical,mi "Split horizontally" "" SplitHorizontal,mi "Zoom" "F5" Zoom,mi "Next" "F6" NextWindow,mi "Close" "Alt+F3" Close])
@@ -118,11 +129,19 @@ commandDescription :: Command -> Text
 commandDescription cmd = case cmd of
   New -> "Create a new source buffer."; Open -> "Browse directories and open a file."
   Save -> "Save the active file."; SaveAs -> "Save the active buffer under a new filename."
+  ToggleHex -> "Switch between UTF-8 text and editable hexadecimal bytes."
   ReviewDisk -> "Review an external change without discarding unsaved text."
   RunTarget -> "Run the selected Cabal executable through thc run."
   RunOptions -> "Choose the Cabal executable and THC installation."
   OpenTerminal -> "Open a project shell in a terminal window."
   StopTerminal -> "Stop the selected terminal process."
+  DebugCommand action -> case action of
+    "attach" -> "Attach to a loopback Debug Adapter Protocol endpoint."
+    "breakpoint" -> "Toggle a breakpoint at the current source line."
+    "breakpoints" -> "Inspect breakpoint verification and remove breakpoints."
+    "scopes" -> "Inspect scopes; expand variables explicitly without evaluation."
+    "disconnect" -> "Detach the debugger and leave the program running."
+    _ -> "Debugger: " <> action
   AgentOptions -> "Configure agents and their executable commands."
   Conversation -> "Show the agent conversation."
   AgentPrompt -> "Send a prompt to the selected agent."
@@ -204,7 +223,7 @@ addDocument file b d = d { windows = w : windows d, buffers = M.insert i (newDoc
     i = nextId d
     offset = length (windows d) `mod` 5
     (sw,sh) = screenSize d
-    w = Window i i (fitWindow d (Rect offset (1+offset) (sw-offset) (sh-2-offset))) (Selection 0 0) 0 0 Nothing (nextWindowNumber d)
+    w = Window i i (fitWindow d (Rect offset (1+offset) (sw-offset) (sh-2-offset))) (Selection 0 0) 0 0 Nothing False False (nextWindowNumber d)
 
 nextWindowNumber :: Desktop -> Int
 nextWindowNumber d = choose 1
@@ -233,8 +252,7 @@ ensureVisible d = case (activeWindow d, activeDocument d) of
   (Just w, Just doc) -> modifyActive (const w { scrollRow = max 0 row', scrollColumn = max 0 col' }) d
     where
       b = documentBuffer doc
-      (row,col) = bufferLineColumn b (caret (selection w))
-      dc = displayColumn (bufferLineAt b row) col
+      (row,dc) = windowCursorCell b w
       rows = max 1 (height (bounds w)-2); cols = max 1 (width (bounds w)-2)
       row' = if row < scrollRow w then row else if row >= scrollRow w+rows then row-rows+1 else scrollRow w
       col' = if dc < scrollColumn w then dc else if dc >= scrollColumn w+cols then dc-cols+1 else scrollColumn w
@@ -255,11 +273,12 @@ editActive f cursor d = case (activeWindow d, activeDocument d) of
       new = contents changed
       (common,oldEnd,inserted) = fromMaybe (0,0,0) (lastChange changed)
       newEnd = common+inserted
-      rebase p | p <= common = p
+      rebase p | byteMode original/=byteMode changed = min (bufferLength changed) (modeOffset original p)
+               | p <= common = p
                | p >= oldEnd = p + newEnd-oldEnd
                | otherwise = newEnd
       adjust w | bufferId w /= bid = w
-               | windowId w == windowId active = w {selection = Selection target target}
+               | windowId w == windowId active = w {selection = Selection target target,windowHexLow=False}
                | otherwise = w {selection = let Selection a c = selection w in Selection (rebase a) (rebase c)}
       target = max 0 (min (T.length new) (fromMaybe newEnd cursor))
   _ -> d
@@ -274,7 +293,7 @@ moveTo extend pos d = ensureVisible (modifyActive update d)
   where
     len = maybe 0 (bufferLength . documentBuffer) (activeDocument d)
     p = max 0 (min len pos)
-    update w = w {selection = Selection (if extend then anchor (selection w) else p) p}
+    update w = w {windowHexLow=False,selection = Selection (if extend then anchor (selection w) else p) p}
 
 wrapMessage :: T.Text -> [T.Text]
 wrapMessage text | T.null text=[]
@@ -293,6 +312,7 @@ runCommand cmd source = go cmd (source {menu = Nothing, contextMenu=Nothing, but
     go Open d = (d,[BrowsePath (startingDirectory d) "*.hs"])
     go Save d = saveRequest Nothing d
     go ReviewDisk d = (d,[ReviewExternal])
+    go (DebugCommand action) d = (d,[DebugAction action []])
     go RunTarget d = (d,[AgentAction "run" []])
     go RunOptions d = (d,[AgentAction "run-options" []])
     go OpenTerminal d = (d,[AgentAction "terminal" []])
@@ -315,13 +335,19 @@ runCommand cmd source = go cmd (source {menu = Nothing, contextMenu=Nothing, but
     go Close d = case (activeWindow d, activeDocument d) of
       (Just w, Just doc) | dirty (documentBuffer doc) && length (filter ((==bufferId w) . bufferId) (windows d)) == 1 -> confirm Close d
       _ -> (closeActive d,[])
+    go ToggleHex d = (toggleHex d,[])
     go Undo d = (editActive (const undo) Nothing d,[])
     go Redo d = (editActive (const redo) Nothing d,[])
+    go Copy d | activeHex d = (d {clipboard=T.unwords (map (hexNumber 2 . ord) (T.unpack (selected d))),status="Hex bytes copied."},[])
     go Copy d = (d {clipboard = selected d, status = "Block copied."},[])
+    go Cut d | activeHex d = let copied=fst (go Copy d) in (insertText "" copied,[])
     go Cut d = (insertText "" d {clipboard = selected d},[])
     go Paste d | Just ident<-activeTerminal d = (d,[AgentAction "terminal-input" [ident,clipboard d]])
+    go Paste d | activeHex d = (pasteHex (clipboard d) d,[])
     go Paste d = (insertText (clipboard d) d,[])
     go SelectAll d = (modifyActive (\w -> w {selection = Selection 0 (T.length (activeText d))}) d,[])
+    go action d | activeHex d, action `elem` [Find,Replace,FindNext] = (d {status="Text search is unavailable in hex mode."},[])
+    go GoTo d | activeHex d = (prompt "Go to byte" GoingTo [Input "Byte offset (decimal)" "0" 1] d,[])
     go Find d = (prompt "Find" Finding [Input "Text to find" (lastFind d) (T.length (lastFind d))] d,[])
     go Replace d = (prompt "Replace" Replacing [Input "Text to find" (lastFind d) (T.length (lastFind d)),Input "Replace with" "" 0] d,[])
     go FindNext d = (findText (lastFind d) d,[])
@@ -480,9 +506,12 @@ dispatchEvent ev d | Just popup <- contextMenu d = contextEvent ev popup d
 dispatchEvent ev d | Just m <- menu d = menuEvent ev m d
 dispatchEvent (V.EvKey key mods) d | Just _ <- dragOriginal d = dragKey key mods d
 dispatchEvent (V.EvKey key mods) d | problemsVisible d && problemsFocused d = problemsKey key mods d
+dispatchEvent (V.EvKey (V.KFun key) mods) d
+  | Just action <- lookup (key,mods) [((4,[]),"continue"),((7,[]),"stepIn"),((8,[]),"next"),((7,[V.MCtrl]),"stepOut"),((8,[V.MCtrl]),"breakpoint")] = runCommand (DebugCommand action) d
 dispatchEvent ev d | Just ident<-activeTerminal d,Just text<-terminalInput ev = (d,[AgentAction "terminal-input" [ident,text]])
 dispatchEvent (V.EvMouseUp _ _ _) d = (d {drag = Nothing,dragOriginal=Nothing},[])
 dispatchEvent (V.EvMouseDown x y button mods) d = mouseEvent x y button mods d
+dispatchEvent (V.EvPaste bytes) d | activeHex d = (either (const (d {status="Paste hexadecimal text."})) (`pasteHex` d) (TE.decodeUtf8' bytes),[])
 dispatchEvent (V.EvPaste bytes) d = case TE.decodeUtf8' bytes of
   Left _ -> (message "Paste failed" ["The pasted text is not valid UTF-8."] d,[])
   Right t -> (insertText (T.filter (\c -> isPrint c || c `elem` ['\n','\r','\t']) t) d,[])
@@ -656,6 +685,7 @@ dragKey key mods d = case dragOriginal d of
   where done=d {drag=Nothing,dragOriginal=Nothing}
 
 windowPositionText :: Document -> Window -> Text
+windowPositionText doc w | byteMode (documentBuffer doc) = " HEX "<>hexNumber 8 (caret (selection w))<>" "<>(if windowHexAscii w then "ASCII" else "HEX")<>" "
 windowPositionText doc w = let (r,c)=bufferLineColumn (documentBuffer doc) (caret (selection w))
   in " "<>T.pack (show (r+1))<>":"<>T.pack (show (c+1))<>" "
 
@@ -666,7 +696,7 @@ scrollbarRect vertical doc w
   where Rect x y ww hh=bounds w
 
 scrollbarLimit :: Bool -> Document -> Window -> Int
-scrollbarLimit vertical doc w = max 0 (if vertical then bufferLineCount (documentBuffer doc)-max 1 (height (bounds w)-2)
+scrollbarLimit vertical doc w = max 0 (if vertical then documentRows doc-max 1 (height (bounds w)-2)
   else documentWidth doc-max 1 (width (bounds w)-2)+1)
 
 scrollbarThumb :: Int -> Int -> Int -> Int
@@ -704,6 +734,10 @@ scrollTrack vertical x y d = case (activeWindow d,activeDocument d) of
 selectAt :: Bool -> Int -> Int -> Desktop -> Desktop
 selectAt extend x y d = case activeWindow d of
   Nothing -> d
+  Just w | activeHex d -> let { col=max 0 (x-left (bounds w)-1+scrollColumn w)
+                             ; row=max 0 (y-top (bounds w)-1+scrollRow w)
+                             ; (offset,ascii,low)=hexHit col }
+                            in modifyActive (\v -> v {windowHexAscii=ascii,windowHexLow=low}) (moveTo extend (row*16+offset) d)
   Just w -> moveTo extend pos d where
     b = maybe (newBuffer "") documentBuffer (activeDocument d)
     row = max 0 (min (bufferLineCount b-1) (y-top (bounds w)-1+scrollRow w))
@@ -729,12 +763,13 @@ keyEvent key mods d
   | key==V.KIns && V.MCtrl `elem` mods = runCommand Copy d
   | key==V.KIns && V.MShift `elem` mods = runCommand Paste d
   | key==V.KDel && V.MShift `elem` mods = runCommand Cut d
-  | ctrl, wordStar d, V.KChar c <- key = starKey (toLower c) d
+  | ctrl, wordStar d, not (activeHex d), V.KChar c <- key = starKey (toLower c) d
   | ctrl, V.KChar c <- key, Just cmd <- lookup (toLower c) [('b',ToggleTree),('s',Save),('o',Open),('n',New),('z',Undo),('y',Redo),('c',Copy),('x',Cut),('v',Paste),('a',SelectAll),('f',Find),('r',Replace),('g',GoTo),('l',FindNext),('q',Quit)] = runCommand cmd d
   | otherwise = (editorKey key mods d,[])
   where ctrl = V.MCtrl `elem` mods
 
 editorKey :: V.Key -> [V.Modifier] -> Desktop -> Desktop
+editorKey key mods d | activeHex d = hexKey key mods d
 editorKey key mods d = case key of
   V.KLeft -> move (if ctrl then wordLeft t p else previousCharacter t p)
   V.KRight -> move (if ctrl then wordRight t p else nextCharacter t p)
@@ -891,6 +926,9 @@ submitDialog button dg original
     Renaming -> if T.null (T.strip first) then (original {status="Enter a new name."},[]) else (d,[LanguageRequest (RenameAt (T.strip first))])
     Saving bid after -> if T.null first then (original,[]) else (d,[SaveDocument bid (Just (T.unpack first)) after])
     DiskConflict conflict -> (d,[ResolveConflict conflict ([CompareDisk,ReloadDisk,KeepBuffer,SaveConflictAs] !! button)])
+    DebugDialog action -> (d,[DebugAction action (T.pack (show button) : values ++
+      [if value then "true" else "false" | CheckBox _ value <- fields dg] ++
+      [T.pack (show i) | ListBox _ _ i <- fields dg])])
     AgentDialog action -> (d,[AgentAction action (T.pack (show button) : values ++
       [if value then "true" else "false" | CheckBox _ value <- fields dg] ++
       [T.pack (show i) | ListBox _ _ i <- fields dg])])
@@ -898,6 +936,9 @@ submitDialog button dg original
     Replacing -> let found = findText first d
                  in if T.null first || status found=="Search text not found." then (found,[])
                     else (insertText second found,[])
+    GoingTo | activeHex d -> case readMaybe (T.unpack first) of
+      Just n | n>=0 -> (moveTo False n d,[])
+      _ -> (original {status="Enter a nonnegative byte offset."},[])
     GoingTo -> case readMaybe (T.unpack first) of
       Just n | n>0 -> (moveTo False (lineOffset (activeText d) (n-1)) d,[])
       _ -> (original {status="Enter a positive line number."},[])
@@ -1089,7 +1130,7 @@ hoverAt x y d = (d {hoverTarget=target,typeHint=if target==hoverTarget d then ty
         let Rect l t ww hh=bounds w
         if x<=l || x>=l+ww-1 || y<=t || y>=t+hh-1 then Nothing else do
           doc <- M.lookup (bufferId w) (buffers d)
-          if documentLabel doc/=Nothing then Nothing else do
+          if documentLabel doc/=Nothing || not (textBuffer (documentBuffer doc)) then Nothing else do
             let b=documentBuffer doc
                 row=y-t-1+scrollRow w
                 col=x-l-1+scrollColumn w
@@ -1101,6 +1142,7 @@ hoverAt x y d = (d {hoverTarget=target,typeHint=if target==hoverTarget d then ty
 -- A completion (including imports) is a single undoable transaction.
 applyCompletion :: [(Int,Int,Text)] -> Desktop -> Desktop
 applyCompletion edits d
+  | activeHex d = d {status="Text completion is unavailable in hex mode."}
   | null edits || not valid = d {status="Invalid completion edits; buffer unchanged."}
   | otherwise = editActive (\_ -> replaceSelection (Selection 0 (T.length original)) changed) (Just cursor) d
   where
@@ -1112,3 +1154,73 @@ applyCompletion edits d
     cursor=case edits of
       (a,_,text):_ -> a+T.length text+sum [T.length t-(z'-a') | (a',z',t)<-drop 1 edits,z'<=a]
       _ -> 0
+
+activeHex :: Desktop -> Bool
+activeHex = maybe False (byteMode . documentBuffer) . activeDocument
+
+documentRows :: Document -> Int
+documentRows doc | byteMode b = bufferLength b `div` 16+1
+                 | otherwise = bufferLineCount b
+  where b=documentBuffer doc
+
+windowCursorCell :: Buffer -> Window -> (Int,Int)
+windowCursorCell b w
+  | byteMode b = (p `div` 16, if windowHexAscii w then 61+p `mod` 16 else hexColumn (p `mod` 16)+if windowHexLow w then 1 else 0)
+  | otherwise = let (row,col)=bufferLineColumn b p in (row,displayColumn (bufferLineAt b row) col)
+  where p=caret (selection w)
+
+toggleHex :: Desktop -> Desktop
+toggleHex d = case (activeWindow d,activeDocument d) of
+  (Just w,Just doc) | documentLabel doc==Nothing -> case toggleByteMode b of
+    Left err -> d {status=err}
+    Right changed -> let position=modeOffset b p
+                    in (editActive (\_ _ -> changed) (Just position) d)
+                       {status=if byteMode changed then "Hex mode: type hex pairs; Tab switches ASCII; Insert adds a zero byte." else "Text mode."}
+    where b=documentBuffer doc; p=caret (selection w)
+  _ -> d
+
+pasteHex :: Text -> Desktop -> Desktop
+pasteHex text d = case parseHex text of
+  Left err -> d {status=err}
+  Right bytes -> insertText bytes d
+
+hexKey :: V.Key -> [V.Modifier] -> Desktop -> Desktop
+hexKey key mods d = case (activeWindow d,activeDocument d) of
+  (Just w,Just doc) -> let
+      b=documentBuffer doc; sel=selection w; p=caret sel; size=bufferLength b
+      shift=V.MShift `elem` mods; ctrl=V.MCtrl `elem` mods
+      move n=moveTo shift n d
+      erase a z=let range=if anchor sel/=p then sel else Selection a z
+                in editActive (\_ -> replaceSelection range "") (Just (fst (ordered range))) d
+      write value low=ensureVisible $ modifyActive (\v -> v {windowHexLow=low}) $
+        editActive (\_ -> replaceSelection (if anchor sel/=p then sel else Selection p (min size (p+1))) (T.singleton (chr value)))
+          (Just (if low then fst (ordered sel) else fst (ordered sel)+1)) d
+      start=fst (ordered sel)
+      old=if start<size then ord (T.index (contents b) start) else 0
+      page=max 1 (height (bounds w)-3)*16
+    in case key of
+      V.KLeft -> move (p-1)
+      V.KRight -> move (p+1)
+      V.KUp -> move (p-16)
+      V.KDown -> move (p+16)
+      V.KPageUp -> move (p-page)
+      V.KPageDown -> move (p+page)
+      V.KHome -> move (if ctrl then 0 else p-p `mod` 16)
+      V.KEnd -> move (if ctrl then size else min size (p-p `mod` 16+15))
+      V.KBS -> erase (max 0 (p-1)) p
+      V.KDel -> erase p (min size (p+1))
+      V.KIns -> editActive (\_ -> replaceSelection (Selection p p) "\0") (Just p) d
+      V.KChar '\t' -> ensureVisible (modifyActive (\v -> v {windowHexAscii=not (windowHexAscii v),windowHexLow=False}) d)
+      V.KChar c | null mods || mods==[V.MShift]
+        , windowHexAscii w, c>=' ', c<='~' -> write (ord c) False
+        | null mods || mods==[V.MShift]
+        , not (windowHexAscii w), isHexDigit c ->
+          if windowHexLow w then write (old `div` 16*16+digitToInt c) False
+          else write (16*digitToInt c+old `mod` 16) True
+      _ -> d
+  _ -> d
+
+modeOffset :: Buffer -> Int -> Int
+modeOffset b p
+  | byteMode b = T.length (TE.decodeUtf8With (\_ _ -> Nothing) (BS.take p (bufferBytes b)))
+  | otherwise = BS.length (TE.encodeUtf8 (T.take p (contents b)))

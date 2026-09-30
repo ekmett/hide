@@ -154,7 +154,8 @@ tickGitOperations (GitOperations ref focused) core initial = do
             | diskBytes file==diskBytes oldFile -> state
             | dirty original -> note "Changed on disk while you edited; unsaved buffer preserved."
             | otherwise ->
-                let fresh=(replaceSelection (Selection 0 (bufferLength original)) (contents b) original) {saved=contents b}
+                let loaded=if byteMode original then newByteBuffer (bufferBytes b) else b
+                    fresh=markSaved (replaceBuffer (byteMode loaded) (contents loaded) original)
                     clamp n=max 0 (min (bufferLength fresh) n)
                     adjust w=if bufferId w==bid then w {selection=let Selection a c=selection w in Selection (clamp a) (clamp c)} else w
                 in (ensureVisible d {buffers=M.insert bid (restyle doc {documentFile=Just file,documentBuffer=fresh}) (buffers d),windows=map adjust (windows d)},notes)

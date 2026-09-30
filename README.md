@@ -289,16 +289,36 @@ Save-time checks remain authoritative, including after Git and ACP operations.
 ## Scope and limitations
 
 Cabal-plan source filtering, compilation controls and persistent appearance
-preferences remain subsequent milestones. THC's current runtime has source
-attribution but does not yet expose stepping or breakpoints; Debug remains disabled
-until that runtime contract exists.
+preferences remain subsequent milestones. The editor can attach to a loopback DAP
+server through **Debug > Attach**. THC launcher forwarding and runtime debugger
+hooks are still separate integration work; **Debug > Launch** remains unavailable.
+The stock Graal server uses Content-Length DAP over TCP, separate from program I/O.
+Breakpoints, continue/pause, trace into/step over/out, threads, call stack, scopes,
+explicit variable expansion and advertised exception filters are available.
+Source references open read-only source windows when no disk file is available.
+Variables show the runtime's supplied values; the editor never automatically
+requests evaluation or changes a variable. Frame and variable handles expire when
+execution resumes. Disconnect detaches without requesting program termination.
+The default endpoint is 127.0.0.1:4711; only loopback endpoints are accepted.
+See [Graal DAP](https://www.graalvm.org/latest/tools/dap/) for stock-server options;
+those options are not yet claimed to work through thc run.
 
 Unimplemented menu actions explain that they are unavailable. Directory arguments do not pretend to be projects.
 The terminal clipboard is editor-local; use bracketed paste for external text.
 Search is literal and case-sensitive. Combining marks and wide characters are handled, but complex emoji
 clusters still depend on terminal rendering.
 
-Files must be valid UTF-8 without NUL bytes. Saves compare the original bytes,
+Files containing NUL bytes or invalid UTF-8 open in hex mode. **Edit > Text / hex
+mode** toggles valid text files without changing their bytes. The display has
+16 bytes per row, hexadecimal offsets and an ASCII column. Type hex pairs to
+replace bytes; Tab switches to ASCII entry. Insert adds a zero byte, Delete and
+Backspace remove bytes, and Undo/Redo retain exact bytes across mode changes.
+Copy/Paste use hexadecimal byte pairs. Files with NUL or invalid UTF-8 cannot
+switch to text mode until their contents are valid text. HLS and ACP text file
+operations exclude hex buffers. Numeric reinterpretation and endian previews
+are not part of this first mode.
+
+Saves compare the original bytes,
 write a sibling temporary file, preserve permissions, check for conflicts again
 and rename. Loaded symlinks resolve to their targets. Unresolved external conflicts preserve the editor buffer and disk file; an unavoidable race remains
 between the final comparison and rename if another process writes concurrently.
