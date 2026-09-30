@@ -113,7 +113,12 @@ checks = do
       (focusedBehind,behindEffects)=handleEvent (V.EvMouseDown (left behindRect+width behindRect-1) (top behindRect+5) V.BLeft []) separated
       (focusedTitle,titleEffects)=handleEvent (V.EvMouseDown (left behindRect+3) (top behindRect) V.BLeft []) separated
   check "only foreground window has scrollbars and frame controls"
-    (all (\glyph -> T.count glyph (snapshot separated)==1) ["▲","▼","◄","►","■","↑","◢"])
+    (all (\glyph -> T.count glyph (snapshot separated {videoMode=Just 3})==1) ["▲","▼","◄","►","■","↑"])
+  check "terminal close button uses ASCII x" ("[x]" `T.isInfixOf` snapshot desktop && not ("■" `T.isInfixOf` snapshot desktop))
+  check "resize grip is an ordinary frame corner" (not ("◢" `T.isInfixOf` snapshot separated) && "═╝" `T.isInfixOf` snapshot separated)
+  let compactTree=installTree "/project" [Entry "src" True Nothing Nothing,Entry "Main.hs" False Nothing Nothing] desktop
+  check "dock buttons indicate collapse direction" ("[←]" `T.isInfixOf` snapshot compactTree && "[↓]" `T.isInfixOf` snapshot (setProblemsVisible True desktop) {problemsFocused=True})
+  check "tree directories use one-column markers" ("+src" `T.isInfixOf` snapshot compactTree && not ("[+]" `T.isInfixOf` snapshot compactTree))
   check "inactive scrollbar region only focuses window"
     (fmap windowId (activeWindow focusedBehind)==Just (windowId behind) && drag focusedBehind==Nothing && null behindEffects && fmap scrollRow (activeWindow focusedBehind)==Just (scrollRow behind))
   check "inactive close region cannot close the window"
