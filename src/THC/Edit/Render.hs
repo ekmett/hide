@@ -136,7 +136,7 @@ windowLayers d active w =
     composerLayers
       | documentLabel doc/=Just "Conversation" = []
       | otherwise = [place x (top rect-1) divider,place (left rect) (top rect) inputImage] ++
-          concat [ [place (left r) (top r) (row (if composerButtonEnabled d name then selected else attr (V.RGBColor 85 85 85) gray) (width r) (" "<>name))]
+          concat [ [place (left r) (top r) (row (if composerButtonEnabled d name then selected else attr (V.RGBColor 85 85 85) gray) (width r) (" "<>composerButtonLabel d name))]
             ++ (if top r+1<y+hh-1 then
                 [place (left r+width r) (top r) (V.char (attr black blue) '▄'),
                  place (left r+1) (top r+1) (V.charFill (attr black blue) '▀' (width r) 1)] else [])

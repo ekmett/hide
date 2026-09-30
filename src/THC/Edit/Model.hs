@@ -89,7 +89,7 @@ data Desktop = Desktop
   , branchAdded :: Int, branchDeleted :: Int, branchRoot :: Maybe FilePath, contextKind :: ContextKind
   , messagesNumber :: Maybe Int
   , composerBuffer :: Buffer, composerSelection :: Selection, composerFocused :: Bool, agentSteering :: Bool, agentReplying :: Bool, agentQueued :: Int
-  , blinkCursor :: Bool, crtFilter :: Bool, defaultDirectory :: Maybe FilePath, statusHover :: Maybe Int
+  , blinkCursor :: Bool, crtFilter :: Bool, defaultDirectory :: Maybe FilePath, statusHover :: Maybe Int, heldModifiers :: [V.Modifier]
   } deriving (Eq,Show)
 
 data MenuItem = MenuItem Text Text Command deriving (Eq,Show)
@@ -232,7 +232,7 @@ menuRect d i = Rect (min x (max 0 (sw-w))) 1 w (length (menuItems i)+2)
         w = min sw (maximum [T.length t + T.length (menuShortcut d entry) + 5 | entry@(MenuItem t _ _) <- menuItems i])
 
 initialDesktop :: (Int,Int) -> Desktop
-initialDesktop size = Desktop size [] M.empty 1 Nothing Nothing Nothing "" False Nothing "" Nothing "" Nothing "" False Nothing Nothing Nothing "" Nothing Nothing Nothing [] False 0 0 False Nothing 0 0 Nothing SourceContext Nothing (newBuffer "") (Selection 0 0) True False False 0 True False Nothing Nothing
+initialDesktop size = Desktop size [] M.empty 1 Nothing Nothing Nothing "" False Nothing "" Nothing "" Nothing "" False Nothing Nothing Nothing "" Nothing Nothing Nothing [] False 0 0 False Nothing 0 0 Nothing SourceContext Nothing (newBuffer "") (Selection 0 0) True False False 0 True False Nothing Nothing []
 
 activeWindow :: Desktop -> Maybe Window
 activeWindow = listToMaybe . windows
@@ -602,9 +602,28 @@ composerButtons w = [(Rect (left r+width r+2) (top r) 8 1,"OK"),(Rect (left r+wi
   where r=composerRect w
 
 composerButtonEnabled :: Desktop -> Text -> Bool
-composerButtonEnabled d "OK" = not (T.null (T.strip (contents (composerBuffer d))))
+composerButtonEnabled d "OK"
+  | V.MCtrl `elem` heldModifiers d = agentSteering d && hasDraft
+  | V.MShift `elem` heldModifiers d = True
+  | otherwise = hasDraft
+  where hasDraft=not (T.null (T.strip (contents (composerBuffer d))))
 composerButtonEnabled d "Cancel" = agentReplying d
 composerButtonEnabled _ _ = False
+
+-- Keep the displayed action and mouse/keyboard submission on the same path.
+composerButtonLabel :: Desktop -> Text -> Text
+composerButtonLabel d "OK"
+  | V.MCtrl `elem` heldModifiers d = "Steer"
+  | V.MShift `elem` heldModifiers d = "Enter"
+  | agentReplying d = "Queue"
+  | otherwise = "Query"
+composerButtonLabel _ name = name
+
+composerSubmit :: [V.Modifier] -> Desktop -> (Desktop,[Effect])
+composerSubmit mods d
+  | V.MCtrl `elem` mods = (d,[AgentAction "steer-draft" []])
+  | V.MShift `elem` mods = (composerInsert "\n" d,[])
+  | otherwise = (d,[AgentAction "send-draft" []])
 
 windowContentRows :: Document -> Window -> Int
 windowContentRows doc w = max 0 (height (bounds w)-2-if documentLabel doc==Just "Conversation" then height (composerRect w)+1 else 0)
@@ -643,9 +662,7 @@ composerEvent (V.EvPaste bytes) d = Just (either (const d) (\text -> composerIns
 composerEvent (V.EvKey key mods) d
   | key==V.KEsc, composerFocused d, agentReplying d = Just (d,[AgentAction "cancel" []])
   | key==V.KChar '\t', null mods = Just (d {composerFocused=not (composerFocused d)},[])
-  | key==V.KEnter, composerFocused d, V.MCtrl `elem` mods = Just (d,[AgentAction "steer-draft" []])
-  | key==V.KEnter, composerFocused d, V.MShift `elem` mods = done (composerInsert "\n" d)
-  | key==V.KEnter, composerFocused d, null mods = Just (d,[AgentAction "send-draft" []])
+  | key==V.KEnter, composerFocused d, all (`elem` [V.MCtrl,V.MShift]) mods = Just (composerSubmit mods d)
   | V.KChar c<-key, isPrint c, null mods || mods==[V.MShift] = done (composerInsert (T.singleton c) d)
   | not (composerFocused d) || V.MAlt `elem` mods || V.MMeta `elem` mods = Nothing
   | ctrl, V.KChar c<-key, Just cmd<-lookup (toLower c) [('c',Copy),('x',Cut),('v',Paste),('a',SelectAll),('z',Undo),('y',Redo)] = done (composerCommand cmd d)
@@ -820,7 +837,9 @@ mouseEvent x y button mods d = case find (\w -> inside (bounds w) x y) (windows 
       | Just doc<-activeDocument focused, inside (scrollbarRect False doc w) x y -> (scrollClick False x y focused,[])
       | y==t+hh-1 -> (focused,[])
       | activeConversation focused, Just name<-lookup True [(inside rect x y,name) | (rect,name)<-composerButtons w] ->
-          if composerButtonEnabled focused name then (focused,[AgentAction (if name=="OK" then "send-draft" else "cancel") []]) else (focused,[])
+          if composerButtonEnabled (focused {heldModifiers=mods}) name
+          then if name=="OK" then composerSubmit mods focused else (focused,[AgentAction "cancel" []])
+          else (focused,[])
       | activeConversation focused, inside (composerRect w) x y -> (composerClick x y mods w focused,[])
       | activeConversation focused, y>=top (composerRect w) -> (focused,[])
       | otherwise -> (selectAt (V.MShift `elem` mods) x y focused {drag=Just (Selecting (windowId w)),composerFocused=if activeConversation focused then False else composerFocused focused},[])

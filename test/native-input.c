@@ -282,6 +282,18 @@ static void check_fractional_zoom(void) {
 
 int main(void) {
     assert(SDL_Init(SDL_INIT_EVENTS));
+    check(SDLK_LSHIFT, SDL_KMOD_LSHIFT, NULL, 13);
+    check(SDLK_RCTRL, SDL_KMOD_RCTRL, NULL, 13);
+    SDL_FlushEvents(SDL_EVENT_FIRST, SDL_EVENT_LAST);
+    SDL_Event modifier; SDL_zero(modifier);
+    modifier.type = SDL_EVENT_KEY_UP; modifier.key.key = SDLK_RCTRL;
+    modifier.key.mod = SDL_KMOD_LSHIFT;
+    assert(SDL_PushEvent(&modifier));
+    int32_t modifier_event[6];
+    assert(thc_wait(modifier_event) && modifier_event[0] == 13 && modifier_event[1] == 1);
+    modifier.key.key = SDLK_LSHIFT; modifier.key.mod = SDL_KMOD_NONE;
+    assert(SDL_PushEvent(&modifier));
+    assert(thc_wait(modifier_event) && modifier_event[0] == 13 && modifier_event[1] == 0);
     check(SDLK_A, SDL_KMOD_NONE, "a", 2);
     check(SDLK_A, SDL_KMOD_SHIFT, "A", 2);
     check(SDLK_K, SDL_KMOD_CTRL, NULL, 1); /* WordStar prefix */

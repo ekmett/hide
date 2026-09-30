@@ -253,6 +253,9 @@ static int modifiers(SDL_Keymod m) {
     return ((m & SDL_KMOD_SHIFT) ? 1 : 0) | ((m & SDL_KMOD_CTRL) ? 2 : 0) |
            ((m & SDL_KMOD_ALT) ? 4 : 0) | ((m & SDL_KMOD_GUI) ? 8 : 0);
 }
+static bool modifier_key(SDL_Keycode key) {
+    return key >= SDLK_LCTRL && key <= SDLK_RGUI;
+}
 static int keycode(SDL_Keycode key) {
     if (key >= SDLK_F1 && key <= SDLK_F12) return -101 - (int)(key - SDLK_F1);
     if (key >= SDLK_F13 && key <= SDLK_F24) return -113 - (int)(key - SDLK_F13);
@@ -303,6 +306,8 @@ int thc_wait(int32_t *out) {
         case SDL_EVENT_WINDOW_MOUSE_LEAVE:
             clear_pointer();
             out[0] = 12; out[1] = out[2] = -1; return 1;
+        case SDL_EVENT_WINDOW_FOCUS_GAINED:
+            out[0] = 13; out[1] = modifiers(SDL_GetModState()); return 1;
         case SDL_EVENT_WINDOW_FOCUS_LOST:
             clear_pointer(); left_down = false; suppress_option_text = false;
             SDL_CaptureMouse(false); out[0] = 7; return 1;
@@ -310,6 +315,7 @@ int thc_wait(int32_t *out) {
             suppress_option_text = false;
             cursor_epoch = SDL_GetTicks();
             int key = keycode(e.key.key), mods = modifiers(e.key.mod);
+            if (modifier_key(e.key.key)) { out[0] = 13; out[1] = mods; return 1; }
             /* Printable unmodified keys arrive only through TEXT_INPUT (IME/layout aware). */
             if (key == INT_MIN || (key >= 0 && !(mods & 14))) break;
             if (key >= 0) {
@@ -327,7 +333,9 @@ int thc_wait(int32_t *out) {
             out[0] = 1; out[1] = key; out[2] = mods; return 1;
         }
         case SDL_EVENT_KEY_UP:
-            suppress_option_text = false; break;
+            suppress_option_text = false;
+            if (modifier_key(e.key.key)) { out[0] = 13; out[1] = modifiers(e.key.mod); return 1; }
+            break;
         case SDL_EVENT_TEXT_INPUT:
             if (suppress_option_text) { suppress_option_text = false; break; }
             cursor_epoch = SDL_GetTicks();

@@ -78,7 +78,7 @@ checks = bracket temporary removeFile $ \path -> do
     ("00000008" `T.isInfixOf` snapshot compact && "│........" `T.isInfixOf` snapshot compact &&
      scrollbarLimit False compactDoc compactWindow==0 && not ("◄" `T.isInfixOf` snapshot compact))
   check "hex dividers join both borders and continue below EOF"
-    (and [cellAt opened x 1=='╤' && cellAt opened x 23=='╧' && all (\y -> cellAt opened x y=='│') [2..22] | x<-[9,61]])
+    (and [cellAt opened x 1=='╤' && cellAt opened x 23=='╧' && all (\y -> cellAt opened x y=='│') [2..22] | x<-[9,58]])
   check "no divider beside the scrollbar" (all (\y -> cellAt opened 78 y/='│') [2..22])
   let dots=snapshotHtml (desktop (newByteBuffer (BS.pack [65,0,46,255,66])))
   check "placeholder dots are gray but literal periods stay yellow"
@@ -88,18 +88,20 @@ checks = bracket temporary removeFile $ \path -> do
   check "narrow hex retains working horizontal scrollbar"
     ("◄" `T.isInfixOf` snapshot narrow && fmap scrollColumn (activeWindow scrolled)==Just 1)
   check "widening hex resets horizontal scrolling and hides scrollbar"
-    (fmap scrollColumn (activeWindow widened)==Just 0 && not ("◄" `T.isInfixOf` snapshot widened) && cellAt widened 61 2=='│')
-  check "hex cells match hit geometry" (and [hexHit 16 (hexColumn i)==(i,False,False) && hexHit 16 (hexColumn i+1)==(i,False,True) && hexHit 16 (61+i)==(i,True,False) | i<-[0..15]])
+    (fmap scrollColumn (activeWindow widened)==Just 0 && not ("◄" `T.isInfixOf` snapshot widened) && cellAt widened 58 2=='│')
+  check "hex digits touch their dividers without spare padding"
+    ("│00 FF 41 0A 80 C3 A9" `T.isInfixOf` image && hexWidth 16==74 && hexWidth 8==41)
+  check "hex cells match hit geometry" (and [hexHit 16 (hexColumn i)==(i,False,False) && hexHit 16 (hexColumn i+1)==(i,False,True) && hexHit 16 (58+i)==(i,True,False) | i<-[0..15]])
   check "both layouts share exact row and hit geometry"
     (and [length (hexRow count 0 (contents (buffer compact)))==hexWidth count &&
       and [hexHit count (hexColumn i)==(i,False,False) && hexHit count (hexColumn i+1)==(i,False,True) &&
            hexHit count (hexAsciiColumn count+i)==(i,True,False) | i<-[0..count-1]] | count<-[8,16]])
   check "sixteen-byte layout switches only when the entire row fits"
-    (windowHexBytes compactWindow {bounds=(bounds compactWindow) {width=78}}==8 &&
-     windowHexBytes compactWindow {bounds=(bounds compactWindow) {width=79}}==16)
+    (windowHexBytes compactWindow {bounds=(bounds compactWindow) {width=75}}==8 &&
+     windowHexBytes compactWindow {bounds=(bounds compactWindow) {width=76}}==16)
   let at10=moveTo False 10 compact
       position=fmap (caret.selection) . activeWindow
-      clickCompact=fst (handleEvent (V.EvMouseDown 44 3 V.BLeft []) compact)
+      clickCompact=fst (handleEvent (V.EvMouseDown 41 3 V.BLeft []) compact)
       editCompact=key (V.KChar 'Z') clickCompact
       shiftDown=fst (handleEvent (V.EvKey V.KDown [V.MShift]) at10)
   check "compact navigation moves by eight-byte rows"
@@ -125,7 +127,7 @@ checks = bracket temporary removeFile $ \path -> do
   check "hex paste accepts only complete byte pairs" (parseHex "00 FF\n41"==Right "\0\255A" && case parseHex "0xFF" of Left _ -> True; _ -> False)
   let pasted=fst (handleEvent (V.EvPaste "FE 00") (moveTo False 0 opened))
   check "external hex paste inserts exact bytes" (BS.take 3 (bufferBytes (buffer pasted))==BS.pack [254,0,0])
-  let clicked=fst (handleEvent (V.EvMouseDown 62 2 V.BLeft []) opened)
+  let clicked=fst (handleEvent (V.EvMouseDown 59 2 V.BLeft []) opened)
   check "mouse chooses ASCII byte" (fmap (\w -> (caret (selection w),windowHexAscii w)) (activeWindow clicked)==Just (0,True))
   BS.writeFile path (TE.encodeUtf8 "λ")
   (unicodeFile,unicodeBuffer)<-loadFile path >>= either error pure

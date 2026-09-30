@@ -17,7 +17,7 @@ void thc_cursor_blink(int enabled);
 void thc_crt_filter(int enabled);
 int thc_present(void);
 /* Six integers; kind 0 is a 100ms idle wake, kind 8 requests a redraw (also blink),
- * and kind 12 is hover at cell x,y.
+ * kind 12 is hover at cell x,y, and kind 13 carries held modifier bits in slot 1.
  * Button-down kind 3 has click count in slot 3 and SDL button number in slot 5.
  * Hover (-1,-1) leaves the window. A zero return indicates an SDL error. */
 int thc_wait(int32_t *event);

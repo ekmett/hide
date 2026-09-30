@@ -149,6 +149,24 @@ checks = bracket temporary removePathForcibly $ \root ->
         (contents (composerBuffer multiline)=="λ\nnext" && clipboard copiedDraft=="λ\nnext" && conversationText multiline==conversationText cancelled)
       check "composer buttons follow draft and reply state"
         (composerButtonEnabled multiline "OK" && not (composerButtonEnabled cancelled "OK") && not (composerButtonEnabled cancelled "Cancel") && null (snd (click cancelRect cancelled)))
+      let shifted=cancelled {heldModifiers=[V.MShift]}
+          controlled=multiline {heldModifiers=[V.MCtrl],agentSteering=True}
+          modifiedClick mods=handleEvent (V.EvMouseDown (left okRect) (top okRect) V.BLeft mods)
+      check "composer label follows held modifiers and reply state"
+        (composerButtonLabel multiline "OK"=="Query" &&
+         composerButtonLabel (multiline {agentReplying=True}) "OK"=="Queue" &&
+         composerButtonLabel shifted "OK"=="Enter" && composerButtonLabel controlled "OK"=="Steer" &&
+         composerButtonLabel (controlled {heldModifiers=[V.MShift,V.MCtrl]}) "OK"=="Steer" &&
+         " Enter " `T.isInfixOf` snapshot shifted && " Steer " `T.isInfixOf` snapshot controlled)
+      check "Shift-click inserts newline even in an empty draft"
+        (composerButtonEnabled shifted "OK" &&
+         contents (composerBuffer (fst (modifiedClick [V.MShift] cancelled)))=="\n" &&
+         null (snd (modifiedClick [V.MShift] cancelled)))
+      check "Control-click steers only when supported and preserves the draft otherwise"
+        (case snd (modifiedClick [V.MCtrl] controlled) of [AgentAction "steer-draft" []]->True; _->False)
+      check "unsupported steering button is disabled"
+        (not (composerButtonEnabled (controlled {agentSteering=False}) "OK") &&
+         null (snd (modifiedClick [V.MCtrl] (controlled {agentSteering=False}))))
       submitted<-uncurry (conversationEffects runtime fallback) (click okRect (pasteDraft "stream" cancelled)) >>= done runtime . snd
       check "OK posts draft into transcript and clears input" (T.null (contents (composerBuffer submitted)) && not (agentReplying submitted))
       busyDraft<-prompt runtime "wait" submitted >>= await runtime "composer busy" agentReplying

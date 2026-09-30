@@ -181,13 +181,14 @@ runWindow backend scale effects tick initial = do
     dispatch (5:w:h:_) d = pure (handleEvent (V.EvResize w h) d)
     dispatch (6:_) d | dialog d /= Nothing = pure (d,[])
                     | otherwise = pure (runCommand Quit d)
-    dispatch (7:_) d = pure (hoverAt (-1) (-1) d {drag=Nothing,dragOriginal=Nothing,prefix=Nothing,buttonPressed=Nothing})
+    dispatch (7:_) d = pure (hoverAt (-1) (-1) d {drag=Nothing,dragOriginal=Nothing,prefix=Nothing,buttonPressed=Nothing,heldModifiers=[]})
     dispatch (9:x:y:direction:mods:_) d = pure (handleEvent (V.EvMouseDown x y (if direction>0 then V.BScrollUp else V.BScrollDown) (keyMods mods)) d)
     dispatch (11:i:_) d | i >= 0, cmd:_ <- drop i nativeCommands =
       if cmd == Paste then paste d
       else if dialog d == Nothing then clipboardResult (cmd `elem` [Copy,Cut]) d (runCommand cmd d)
       else pure (d,[])
     dispatch (12:x:y:_) d = pure (hoverAt x y d)
+    dispatch (13:mods:_) d = pure (d {heldModifiers=keyMods mods},[])
     dispatch _ d = pure (d,[])
     changeScale direction d = do
       ok <- c_scale direction

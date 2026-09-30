@@ -235,11 +235,16 @@ before starting it here. The adapter and model credentials are separate from
 this repository.
 
 The **Conversation** window has a four-line query pane below the transcript.
-**Enter** or **OK** submits the draft; while a reply is active it queues the query
+**Enter** or **Query** submits the draft; while a reply is active it queues the query
 for the next turn. **Shift+Enter** inserts a newline. **Ctrl+Enter** steers the
 active turn when the provider advertises that extension. **Cancel** (or Esc in
 the query pane) stops the active reply; queued queries then proceed in order.
-OK is enabled for a nonempty draft, and Cancel only while a request is active.
+The submit button reads Query or Queue, changing to Enter while Shift is held
+and Steer while Ctrl is held in the graphical frontend. Clicking performs the
+shown action. Query/Queue needs a nonempty draft; Steer also needs provider
+support. Enter inserts a newline even in an empty draft. Cancel is enabled only
+while a request is active. Standard terminals cannot report standalone modifier
+presses/releases; modified Enter and clicks still perform the same actions.
 Click the transcript or press Tab to browse/copy replies; typing returns to the
 draft. Drafts retain undo/redo and are preserved while replies stream.
 
@@ -333,7 +338,7 @@ clusters still depend on terminal rendering.
 
 Files containing NUL bytes or invalid UTF-8 open in hex mode. **Edit > Text / hex
 mode** toggles valid text files without changing their bytes. The display has
-16 bytes per row when the complete row fits (79 window columns including the
+16 bytes per row when the complete row fits (76 window columns including the
 frame), or 8 bytes per row in narrower windows, with hexadecimal offsets and
 an ASCII column. Each split chooses its layout independently; resizing preserves
 the selected byte. Type hex pairs to
