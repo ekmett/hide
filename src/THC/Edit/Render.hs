@@ -165,9 +165,9 @@ treeLayers d tree = [place 0 1 image]
     w=treeWidth tree; h=max 0 (snd (screenSize d)-2)
     visible=max 0 (h-3)
     listing=take visible (drop (treeScroll tree) (zip [0..] (treeRows tree)))
-    title=row paper (w-1) (" Files"<>T.replicate (max 0 (w-10)) " "<>"[←]") V.<|> label paper "│"
+    title=V.cropRight (w-1) (label paper (" Files"<>T.replicate (max 0 (w-10)) " "<>"[") V.<|> label (attr cyan gray) "←" V.<|> label paper "]") V.<|> label paper "│"
     root=row paper (w-1) (T.pack (treeRoot tree)) V.<|> label paper "│"
-    line (i,node)=row (if treeFocused tree && i==treeSelected tree then selected else edit) (w-1) (T.replicate (2*nodeDepth node) " "<>(if nodeDirectory node then if nodeExpanded node then "-" else "+" else " ")<>nodeName node) V.<|> label paper "│"
+    line (i,node)=row (if treeFocused tree && i==treeSelected tree then selected else edit) (w-1) (T.replicate (2*nodeDepth node) " "<>(if nodeDirectory node then if nodeExpanded node then "- " else "+ " else "  ")<>nodeName node) V.<|> label paper "│"
     blank=row edit (w-1) "" V.<|> label paper "│"
     image=V.crop w h (V.vertCat ([title,root] ++ map line listing ++ replicate (max 0 (h-2-length listing)) blank))
 
@@ -197,7 +197,7 @@ problemsLayers :: Desktop -> [V.Image]
 problemsLayers d
   | not (problemsVisible d) || h<2 = []
   | otherwise = [place (x+max 1 ((w-10) `div` 2)) y (label frame " Messages "),place (x+w-7-T.length number) y (label frame number)]
-      ++ [place (x+w-5) y (label frame "[↓]") | problemsFocused d]
+      ++ [place (x+w-5) y (label frame "[" V.<|> label (attr cyan scrollCyan) "↓" V.<|> label frame "]") | problemsFocused d]
       ++ [place (x+1) (y+1+i) (row (if problemsFocused d && index==problemsSelected d then attr white blue else bodyColor) (w-2) (format issue))
          | (i,(index,issue))<-zip [0..] (take (h-2) (drop (problemsScroll d) (zip [0..] (diagnostics d))))]
       ++ [place (x+1) (y+1) (row bodyColor (w-2) " No messages reported.") | null (diagnostics d)]
