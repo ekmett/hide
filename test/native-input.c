@@ -65,6 +65,33 @@ static void wait_cursor_blink(void) {
     assert(out[0] == 8); /* An idle phase transition requests a repaint. */
 }
 
+static void check_crt(SDL_Renderer *renderer, int lines) {
+    SDL_FlushEvents(SDL_EVENT_FIRST, SDL_EVENT_LAST);
+    SDL_Event leave; SDL_zero(leave); leave.type = SDL_EVENT_WINDOW_MOUSE_LEAVE;
+    assert(SDL_PushEvent(&leave));
+    int32_t event[6]; assert(thc_wait(event) && event[0] == 12);
+    uint16_t solid[16];
+    for (int i = 0; i < 16; ++i) solid[i] = 0xffff;
+    assert(thc_begin());
+    for (int y = 0; y < lines; ++y) for (int x = 0; x < 80; ++x)
+        thc_glyph(x, y, 1, 8, solid, 0xffffff, 0);
+    for (int enabled = 0; enabled < 3; ++enabled) {
+        thc_crt_filter(enabled == 1);
+        for (int repeat = 0; repeat < 2; ++repeat) {
+            assert(thc_present());
+            SDL_Surface *frame = SDL_RenderReadPixels(renderer, NULL);
+            assert(frame);
+            Uint8 center, edge, scanline, g, b, a;
+            assert(SDL_ReadSurfacePixel(frame, 640, 400, &center, &g, &b, &a));
+            assert(SDL_ReadSurfacePixel(frame, 0, 0, &edge, &g, &b, &a));
+            assert(SDL_ReadSurfacePixel(frame, 640, 401, &scanline, &g, &b, &a));
+            if (enabled == 1) assert(center >= 250 && edge < center - 50 && scanline < center - 30);
+            else assert(center == 255 && edge == 255 && scanline == 255);
+            SDL_DestroySurface(frame);
+        }
+    }
+}
+
 static void check_geometry(int lines, int cell_height) {
     assert(SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "dummy"));
     if (!thc_open("software", 2, 80, lines, cell_height)) {
@@ -78,6 +105,7 @@ static void check_geometry(int lines, int cell_height) {
     assert(width == 1280 && height == 800);
     thc_size(&cols, &rows);
     assert(cols == 80 && rows == lines);
+    check_crt(SDL_GetRenderer(windows[0]), lines);
     assert(thc_begin());
     uint16_t glyph[16];
     for (int i = 0; i < 16; ++i) glyph[i] = 0xffff;
@@ -182,7 +210,8 @@ static void check_geometry(int lines, int cell_height) {
     assert(!thc_mode(12, 80, 25));
     assert(!thc_mode(cell_height == 16 ? 8 : 16, 0, 25));
     thc_size(&cols, &rows);
-    assert(cols == 80 && rows == lines); /* Rejection and failed resize preserve the grid. */
+    assert(cols == 80 && rows == lines);
+    /* Rejection and failed resize preserve the grid. */
     assert(thc_mode(cell_height == 16 ? 8 : 16, 80, lines == 25 ? 50 : 25));
     thc_size(&cols, &rows);
     assert(cols == 80 && rows == (lines == 25 ? 50 : 25));

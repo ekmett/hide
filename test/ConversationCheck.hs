@@ -21,7 +21,7 @@ import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.FilePath ((</>))
 import System.IO (hClose, openTempFile)
 import System.Timeout (timeout)
-import THC.Edit.Render (snapshot)
+import THC.Edit.Render (snapshot, snapshotHtml)
 import THC.Edit.Buffer
 import THC.Edit.Conversation
 import THC.Edit.Files
@@ -140,6 +140,11 @@ checks = bracket temporary removePathForcibly $ \root ->
           [(okRect,_),(cancelRect,_)]=composerButtons window
           click rect desktop=handleEvent (V.EvMouseDown (left rect) (top rect) V.BLeft []) desktop
           applyEvent event desktop=let (next,effects)=handleEvent event desktop in snd <$> conversationEffects runtime fallback next effects
+      check "composer has four rows and half-height button shadows"
+        (height (composerRect window)==4 && top cancelRect+1<top (bounds window)+height (bounds window)-1 &&
+         "▀" `T.isInfixOf` snapshot multiline && "▄" `T.isInfixOf` snapshot multiline)
+      check "disabled composer buttons retain gray faces"
+        ("color:rgb(85,85,85);background:rgb(170,170,170)" `T.isInfixOf` snapshotHtml cancelled)
       check "composer supports Unicode, newline, and clipboard without changing transcript"
         (contents (composerBuffer multiline)=="λ\nnext" && clipboard copiedDraft=="λ\nnext" && conversationText multiline==conversationText cancelled)
       check "composer buttons follow draft and reply state"

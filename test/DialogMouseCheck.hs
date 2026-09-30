@@ -118,7 +118,15 @@ checks = do
   check "resize grip is an ordinary frame corner" (not ("◢" `T.isInfixOf` snapshot separated) && "═╝" `T.isInfixOf` snapshot separated)
   let compactTree=installTree "/project" [Entry "src" True Nothing Nothing,Entry "Main.hs" False Nothing Nothing] desktop
   check "dock buttons indicate collapse direction" ("[←]" `T.isInfixOf` snapshot compactTree && "[↓]" `T.isInfixOf` snapshot (setProblemsVisible True desktop) {problemsFocused=True})
-  check "dock arrows match editor cyan" ("color:rgb(85,255,255);background:rgb(170,170,170)'>←" `T.isInfixOf` snapshotHtml compactTree && "color:rgb(85,255,255);background:rgb(0,170,170)'>↓" `T.isInfixOf` snapshotHtml (setProblemsVisible True desktop) {problemsFocused=True})
+  check "dock arrows match editor cyan" ("color:rgb(85,255,255);background:rgb(0,0,170)'>←" `T.isInfixOf` snapshotHtml compactTree && "color:rgb(85,255,255);background:rgb(0,170,170)'>↓" `T.isInfixOf` snapshotHtml (setProblemsVisible True desktop) {problemsFocused=True})
+  check "Files has a window frame without a path row"
+    (not ("/project" `T.isInfixOf` snapshot compactTree) && "╔" `T.isInfixOf` snapshot compactTree &&
+     "▲" `T.isInfixOf` snapshot compactTree && "▼" `T.isInfixOf` snapshot compactTree &&
+     snd (handleEvent (V.EvMouseDown 3 2 V.BLeft []) compactTree)==[ExpandTree 0])
+  let longTree=installTree "/project" [Entry (T.pack (show i)<>".hs") False Nothing Nothing | i<-[1::Int ..100]] desktop
+      scrolled=fst (handleEvent (V.EvMouseDown 4 4 V.BScrollDown []) longTree)
+      barClicked=fst (handleEvent (V.EvMouseDown (treeWidthOf longTree-1) (snd (screenSize longTree)-3) V.BLeft []) longTree)
+  check "Files scrollbar and wheel scroll rows" (fmap treeScroll (sideTree scrolled)==Just 3 && fmap treeScroll (sideTree barClicked)==Just 1)
   check "tree markers have a separating space" ("+ src" `T.isInfixOf` snapshot compactTree && not ("[+]" `T.isInfixOf` snapshot compactTree))
   check "inactive scrollbar region only focuses window"
     (fmap windowId (activeWindow focusedBehind)==Just (windowId behind) && drag focusedBehind==Nothing && null behindEffects && fmap scrollRow (activeWindow focusedBehind)==Just (scrollRow behind))
@@ -129,6 +137,23 @@ checks = do
       menuNext=fst (handleEvent (V.EvKey V.KDown []) menuState)
   check "menu status follows highlighted command" (commandDescription New `T.isInfixOf` snapshot menuState && commandDescription Open `T.isInfixOf` snapshot menuNext)
   check "context menu status explains highlighted action" (commandDescription RenameSymbol `T.isInfixOf` snapshot popup)
+  let statusDesktop=desktop {status="",typeHint=""}
+      statusY=snd (screenSize statusDesktop)-1
+      openStatus=case [r | (r,_,Left Open)<-statusItemRects statusDesktop] of r:_ -> r; _ -> error "Missing Open status action"
+      hoveredStatus=fst (hoverAt (left openStatus+3) statusY statusDesktop)
+      clickedStatus=handleEvent (V.EvMouseDown (left openStatus+3) statusY V.BLeft []) statusDesktop
+  check "status labels highlight green and invoke their menu command"
+    ("background:rgb(0,170,0)" `T.isInfixOf` snapshotHtml hoveredStatus && snd clickedStatus==snd (runCommand Open statusDesktop))
+  let statusModal=fst (runCommand EditorOptions statusDesktop)
+      escapeRect=case [r | (r,_,Right (V.EvKey V.KEsc []))<-statusItemRects statusModal] of r:_ -> r; _ -> error "Missing modal Cancel status action"
+  check "status bar Cancel works through modal input"
+    (dialog (fst (handleEvent (V.EvMouseDown (left escapeRect+3) statusY V.BLeft []) statusModal))==Nothing)
+  let withHint=statusDesktop {typeHint="a :: Int"}
+  check "clicking type information does not invoke a hidden status shortcut"
+    (handleEvent (V.EvMouseDown 3 statusY V.BLeft []) withHint==(withHint,[]))
+  let narrow=statusDesktop {screenSize=(40,25),branchStatus="main",branchRoot=Just "/tmp"}
+  check "status hit rectangles stop at Git badge"
+    (all (\(r,_,_)->left r+width r<=left (gitBadgeRect narrow)) (statusItemRects narrow))
   let numbered=fst (runCommand New desktop)
       splitNumbered=fst (runCommand SplitVertical numbered)
       closedNumbered=fst (runCommand Close numbered)

@@ -51,4 +51,31 @@ checks = do
   let terminalPreferences = fst (runCommand EditorOptions (initialDesktop (80,25)))
   check "terminal preferences omit window modes"
     (maybe False (not . any (\field -> case field of Radio "Screen size" _ _ -> True; _ -> False) . fields) (dialog terminalPreferences))
+  check "CRT defaults off and appears only in window preferences"
+    (not (crtFilter desktop) && maybe False (elem (CheckBox "CRT filter" False) . fields) (dialog preferences) &&
+     maybe False (not . any (\f -> case f of CheckBox "CRT filter" _ -> True; _ -> False) . fields) (dialog terminalPreferences))
+  let toggle dg=dg {fields=map (\f -> case f of CheckBox "CRT filter" _ -> CheckBox "CRT filter" True; _ -> f) (fields dg)}
+      changed=preferences {dialog=fmap toggle (dialog preferences)}
+  check "CRT applies on OK and cancels without changing buffers"
+    (crtFilter (fst (handleEvent (V.EvKey V.KEnter []) changed)) &&
+     not (crtFilter (fst (handleEvent (V.EvKey V.KEsc []) changed))) && buffers changed==buffers desktop)
+  check "File menu contains Terminal and Change dir"
+    (all (`elem` [cmd | (name,_,items)<-menus,name=="File",MenuItem _ _ cmd<-items]) [OpenTerminal,ChangeDir] &&
+     OpenTerminal `notElem` [cmd | (name,_,items)<-menus,name=="Run",MenuItem _ _ cmd<-items])
+  let two=fst (runCommand New desktop)
+      controlTab=fst (handleEvent (V.EvKey (V.KChar '\t') [V.MCtrl]) two)
+      controlBack=fst (handleEvent (V.EvKey V.KBackTab [V.MCtrl,V.MShift]) controlTab)
+      tree=installTree "/tmp" [] two
+      altTab=fst . handleEvent (V.EvKey (V.KChar '\t') [V.MAlt])
+      menuFocused=tree {menu=Just (0,0)}
+      treeFocusedAgain=altTab menuFocused
+      fileFocused=altTab treeFocusedAgain
+  check "Ctrl Tab cycles windows and Shift reverses without editing"
+    (fmap windowId (activeWindow controlTab)/=fmap windowId (activeWindow two) &&
+     fmap windowId (activeWindow controlBack)==fmap windowId (activeWindow two) && buffers controlTab==buffers two)
+  check "Alt Tab moves menu to Files to editor and arrows stay in the selected region"
+    (maybe False treeFocused (sideTree treeFocusedAgain) && menu treeFocusedAgain==Nothing &&
+     maybe False (windowFocused fileFocused) (activeWindow fileFocused) && buffers fileFocused==buffers tree)
+  check "Alt Tab cycles dialog fields"
+    (fmap focus (dialog (altTab preferences))==fmap ((+1).focus) (dialog preferences))
   putStrLn "window input checks passed"

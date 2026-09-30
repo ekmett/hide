@@ -13,7 +13,7 @@ import Data.Maybe (listToMaybe, fromMaybe)
 import Data.List (find, findIndex, sortOn, mapAccumL)
 import Data.Char (toLower, isPrint, isAlphaNum, chr, ord, toUpper, isHexDigit, digitToInt)
 import Text.Read (readMaybe)
-import System.FilePath ((</>), takeDirectory)
+import System.FilePath ((</>), takeDirectory, isAbsolute)
 import THC.Edit.Browser (Entry(..))
 import THC.Edit.Git (GitReview)
 import THC.Edit.Syntax (Style, highlightFor)
@@ -44,7 +44,7 @@ data Window = Window
   , windowHexLow :: Bool, windowHexAscii :: Bool
   , windowNumber :: Int
   } deriving (Eq,Show)
-data Command = New | Open | Save | SaveAs | Close | Quit | Undo | Redo | Cut | Copy | Paste
+data Command = New | Open | ChangeDir | Save | SaveAs | Close | Quit | Undo | Redo | Cut | Copy | Paste
   | Find | FindNext | Replace | GoTo | SelectAll | Zoom | NextWindow | Cascade | Tile
   | SplitVertical | SplitHorizontal | About | Help | EditorOptions | Gallery
   | InspectType | Definition | Complete | Problems | NextMessage | PreviousMessage | RestartHLS | RenameSymbol
@@ -60,9 +60,9 @@ data GitAction = FetchRemote | PullRemote | MergeBranch Text deriving (Eq,Show)
 data ContextKind = SourceContext | GitContext deriving (Eq,Show)
 data LanguageAction = TypeInfo | FindDefinition | Completions | ShowProblems | RestartLanguage | RenameAt Text deriving (Eq,Show)
 data Completion = Completion Text [(Int,Int,Text)] deriving (Eq,Show)
-data Effect = LanguageRequest LanguageAction | RunGit GitAction | ReadMergeBranches | JumpTo FilePath Int Int | ReadPath FilePath | BrowsePath FilePath Text | OpenChoice FilePath Text Text | ReadTree FilePath | ExpandTree Int | ReadHelp | RefreshGit FilePath | ReadGitDiff | AskGitCommit | WriteGitCommit Text | SaveDocument Int (Maybe FilePath) (Maybe Command) | ReviewExternal | ResolveConflict Conflict ConflictAction | AgentAction Text [Text] | DebugAction Text [Text] | SetScreenMode Int | Exit deriving (Eq,Show)
+data Effect = LanguageRequest LanguageAction | RunGit GitAction | ReadMergeBranches | JumpTo FilePath Int Int | ReadPath FilePath | BrowsePath FilePath Text | BrowseDirectories FilePath | ChangeDirectory FilePath | OpenChoice FilePath Text Text | ReadTree FilePath | ExpandTree Int | ReadHelp | RefreshGit FilePath | ReadGitDiff | AskGitCommit | WriteGitCommit Text | SaveDocument Int (Maybe FilePath) (Maybe Command) | ReviewExternal | ResolveConflict Conflict ConflictAction | AgentAction Text [Text] | DebugAction Text [Text] | SetScreenMode Int | Exit deriving (Eq,Show)
 data Field = Input Text Text Int | CheckBox Text Bool | Radio Text [Text] Int | ListBox Text [Text] Int | FileList [Entry] Int deriving (Eq,Show)
-data Purpose = Opening FilePath Text [Entry] | Committing | Saving Int (Maybe Command) | Finding | Replacing | GoingTo | Renaming
+data Purpose = Opening FilePath Text [Entry] | ChangingDirectory FilePath [Entry] | Committing | Saving Int (Maybe Command) | Finding | Replacing | GoingTo | Renaming
   | Completing Int Int Int [Completion] | Locations [(FilePath,Int,Int)] | Merging [Text]
   | DiskConflict Conflict | AgentDialog Text | DebugDialog Text
   | Confirm Command | Information | Settings | Widgets deriving (Eq,Show)
@@ -76,7 +76,7 @@ data Diagnostic = Diagnostic
   , diagnosticColumn :: Int, diagnosticSeverity :: Int, diagnosticMessage :: Text
   } deriving (Eq,Show)
 data Sidebar = Sidebar { treeRoot :: FilePath, treeRows :: [TreeRow], treeSelected :: Int, treeScroll :: Int, treeWidth :: Int, treeFocused :: Bool } deriving (Eq,Show)
-data Drag = DockSizing | Moving Int Int Int | Resizing Int Int Int | Selecting Int | Scrolling Int Bool deriving (Eq,Show)
+data Drag = DockSizing | TreeScrolling | Moving Int Int Int | Resizing Int Int Int | Selecting Int | Scrolling Int Bool deriving (Eq,Show)
 data Desktop = Desktop
   { screenSize :: (Int,Int), windows :: [Window], buffers :: M.Map Int Document
   , nextId :: Int, menu :: Maybe (Int,Int), dialog :: Maybe Dialog, drag :: Maybe Drag
@@ -89,16 +89,16 @@ data Desktop = Desktop
   , branchAdded :: Int, branchDeleted :: Int, branchRoot :: Maybe FilePath, contextKind :: ContextKind
   , messagesNumber :: Maybe Int
   , composerBuffer :: Buffer, composerSelection :: Selection, composerFocused :: Bool, agentSteering :: Bool, agentReplying :: Bool, agentQueued :: Int
-  , blinkCursor :: Bool
+  , blinkCursor :: Bool, crtFilter :: Bool, defaultDirectory :: Maybe FilePath, statusHover :: Maybe Int
   } deriving (Eq,Show)
 
 data MenuItem = MenuItem Text Text Command deriving (Eq,Show)
 menus :: [(Text,Char,[MenuItem])]
 menus =
-  [("File",'f',[mi "New" "" New, mi "Open..." "F3" Open, mi "Save" "F2" Save, mi "Save as..." "" SaveAs, mi "Disk changes..." "" ReviewDisk, mi "Close" "Alt+F3" Close, mi "Exit" "Alt+X" Quit])
+  [("File",'f',[mi "New" "" New, mi "Open..." "F3" Open, mi "Save" "F2" Save, mi "Save as..." "" SaveAs, mi "Disk changes..." "" ReviewDisk, mi "Close" "Alt+F3" Close, mi "Change dir..." "" ChangeDir, mi "Terminal" "" OpenTerminal, mi "Exit" "Alt+X" Quit])
   ,("Edit",'e',[mi "Undo" "Ctrl+Z" Undo, mi "Redo" "Ctrl+Y" Redo, mi "Cut" "Shift+Del" Cut, mi "Copy" "Ctrl+Ins" Copy, mi "Paste" "Shift+Ins" Paste, mi "Select all" "Ctrl+A" SelectAll,mi "Text / hex mode" "" ToggleHex,mi "Complete identifier..." "Ctrl+Space" Complete])
   ,("Search",'s',[mi "Find..." "Ctrl+F" Find, mi "Replace..." "Ctrl+R" Replace, mi "Search again" "Ctrl+L" FindNext, mi "Go to line..." "Ctrl+G" GoTo,mi "Go to definition" "F12" Definition])
-  ,("Run",'r',[mi "Run" "Ctrl+F9" RunTarget,mi "Target..." "" RunOptions,mi "Terminal" "" OpenTerminal,mi "Stop terminal" "" StopTerminal])
+  ,("Run",'r',[mi "Run" "Ctrl+F9" RunTarget,mi "Target..." "" RunOptions,mi "Stop terminal" "" StopTerminal])
   ,("Compile",'c',[off "Compile" "Alt+F9" "THC compilation is not connected yet.",off "Make" "F9" "Cabal project integration is a later milestone."])
   ,("Debug",'d',[mi "Attach..." "" (DebugCommand "attach"),off "Launch" "" "THC debugger launch options are not available yet; attach to a running DAP endpoint.",
       mi "Toggle breakpoint" "Ctrl+F8" (DebugCommand "breakpoint"),mi "Breakpoints..." "" (DebugCommand "breakpoints"),
@@ -130,6 +130,7 @@ menuShortcut d (MenuItem _ key cmd)
 commandDescription :: Command -> Text
 commandDescription cmd = case cmd of
   New -> "Create a new source buffer."; Open -> "Browse directories and open a file."
+  ChangeDir -> "Choose a new default directory."
   Save -> "Save the active file."; SaveAs -> "Save the active buffer under a new filename."
   ToggleHex -> "Switch between UTF-8 text and editable hexadecimal bytes."
   ReviewDisk -> "Review an external change without discarding unsaved text."
@@ -189,6 +190,29 @@ menuHelp d = case contextMenu d of
     MenuItem _ _ cmd<-listToMaybe (drop j (menuItems i))
     pure (commandDescription cmd)
 
+-- Labels, hit rectangles and actions share one source, including modal hints.
+statusItems :: Desktop -> [(Text,Maybe (Either Command V.Event))]
+statusItems d
+  | dragOriginal d/=Nothing = [(" ↑↓→← Move  Shift+↑↓→← Resize",Nothing),key "  ↵ Done" V.KEnter [],key "  Esc Cancel" V.KEsc []]
+  | Just text<-menuHelp d = [command " F1 Help" Help,(" | "<>text,Nothing)]
+  | Just c<-prefix d = [(" Ctrl+"<>T.singleton c<>"- ",Nothing),key " Esc Cancel" V.KEsc []]
+  | dialog d/=Nothing = [key " Tab Next" (V.KChar '\t') [],key "  Enter Select" V.KEnter [],key "  Esc Cancel" V.KEsc []]
+  | activeConversation d =
+      [key (" Enter "<>(if agentReplying d then "Queue query" else "Query")) V.KEnter [],key "  Shift+Enter Newline" V.KEnter [V.MShift]] ++
+      [key "  Ctrl+Enter Steer" V.KEnter [V.MCtrl] | agentSteering d] ++ [key "  Esc Cancel" V.KEsc [] | agentReplying d]
+  | not (T.null (typeHint d)) = [(" "<>typeHint d,Nothing)]
+  | not (T.null (status d)) = [command " F1 Help" Help,(" | "<>status d,Nothing)]
+  | otherwise = [command " F1 Help" Help,command "  F2 Save" Save,command "  F3 Open" Open,
+      command "  F5 Zoom" Zoom,command "  F6 Next" NextWindow,key "  F10 Menu" (V.KFun 10) []]
+  where command label cmd=(label,Just (Left cmd)); key label k mods=(label,Just (Right (V.EvKey k mods)))
+
+statusItemRects :: Desktop -> [(Rect,Int,Either Command V.Event)]
+statusItemRects d = [(Rect x (snd (screenSize d)-1) (min (T.length text) (limit-x)) 1,i,action)
+  | (i,(x,(text,Just action)))<-zip [0..] (zip starts items), x<limit]
+  where
+    items=statusItems d; starts=scanl (+) 0 (map (T.length . fst) items)
+    limit=fst (screenSize d)-if activeConversation d then 0 else T.length (gitBadgeText d)
+
 menuPositions :: [(Int,Int)]
 menuPositions = zip starts widths
   where widths = [T.length title+2 | (title,_,_) <- menus]
@@ -208,7 +232,7 @@ menuRect d i = Rect (min x (max 0 (sw-w))) 1 w (length (menuItems i)+2)
         w = min sw (maximum [T.length t + T.length (menuShortcut d entry) + 5 | entry@(MenuItem t _ _) <- menuItems i])
 
 initialDesktop :: (Int,Int) -> Desktop
-initialDesktop size = Desktop size [] M.empty 1 Nothing Nothing Nothing "" False Nothing "" Nothing "" Nothing "" False Nothing Nothing Nothing "" Nothing Nothing Nothing [] False 0 0 False Nothing 0 0 Nothing SourceContext Nothing (newBuffer "") (Selection 0 0) True False False 0 True
+initialDesktop size = Desktop size [] M.empty 1 Nothing Nothing Nothing "" False Nothing "" Nothing "" Nothing "" False Nothing Nothing Nothing "" Nothing Nothing Nothing [] False 0 0 False Nothing 0 0 Nothing SourceContext Nothing (newBuffer "") (Selection 0 0) True False False 0 True False Nothing Nothing
 
 activeWindow :: Desktop -> Maybe Window
 activeWindow = listToMaybe . windows
@@ -245,6 +269,32 @@ windowFocused d w = not (problemsFocused d) && not (maybe False treeFocused (sid
 
 focusWindow :: Int -> Desktop -> Desktop
 focusWindow i d = d { problemsFocused=False, sideTree=fmap (\tree -> tree {treeFocused=False}) (sideTree d), windows = filter ((==i) . windowId) (windows d) ++ filter ((/=i) . windowId) (windows d) }
+
+cycleEditorWindow :: Bool -> Desktop -> Desktop
+cycleEditorWindow backwards d = case windows d of
+  [] -> d
+  ws@(w:rest) -> let rotated=if backwards then last ws:init ws else rest++[w]
+                in case rotated of
+                  next:_ -> focusWindow (windowId next) d {windows=rotated,menu=Nothing,contextMenu=Nothing}
+                  [] -> d
+
+cycleUIFocus :: Bool -> Desktop -> Desktop
+cycleUIFocus backwards d = case targets of
+  [] -> d
+  _ -> let index=fromMaybe 0 (findIndex (==current) targets)
+           target=targets !! ((index+if backwards then -1 else 1) `mod` length targets)
+           ready=d {menu=Nothing,contextMenu=Nothing,problemsFocused=False,sideTree=fmap (\tree -> tree {treeFocused=False}) (sideTree d)}
+       in case target of
+         0 -> ready {menu=Just (0,0)}
+         -1 -> ready {sideTree=fmap (\tree -> tree {treeFocused=True}) (sideTree ready)}
+         -2 -> ready {problemsFocused=True}
+         ident -> focusWindow ident ready
+  where
+    targets=[0]++[-1 | sideTree d/=Nothing]++map windowId (sortOn windowNumber (windows d))++[-2 | problemsVisible d]
+    current | menu d/=Nothing = 0
+            | maybe False treeFocused (sideTree d) = -1
+            | problemsFocused d = -2
+            | otherwise = maybe 0 windowId (activeWindow d)
 
 modifyActive :: (Window -> Window) -> Desktop -> Desktop
 modifyActive f d = d { windows = case windows d of [] -> []; w:ws -> f w : ws }
@@ -313,6 +363,7 @@ runCommand cmd source = Bifunctor.first clampHexScroll $ go cmd (source {menu = 
   where
     go New d = (addDocument Nothing (newBuffer "") d,[])
     go Open d = (d,[BrowsePath (startingDirectory d) "*.hs"])
+    go ChangeDir d = (d,[BrowseDirectories (startingDirectory d)])
     go Save d = saveRequest Nothing d
     go ReviewDisk d = (d,[ReviewExternal])
     go (DebugCommand action) d = (d,[DebugAction action []])
@@ -359,7 +410,7 @@ runCommand cmd source = Bifunctor.first clampHexScroll $ go cmd (source {menu = 
       zoom w = case restoredBounds w of
         Just r -> w {bounds = fitWindow d r, restoredBounds = Nothing}
         Nothing -> w {bounds = let (sw,sh) = screenSize d in Rect (treeWidthOf d) 1 (sw-treeWidthOf d) (sh-2-problemsHeight d), restoredBounds = Just (bounds w)}
-    go NextWindow d = (d {windows = case windows d of [] -> []; w:ws -> ws++[w]},[])
+    go NextWindow d = (cycleEditorWindow False d,[])
     go Cascade d = (d {windows = zipWith cascade [0..] (windows d)},[]) where
       (sw,sh) = screenSize d
       cascade i w = w {bounds = fitWindow d (Rect (treeWidthOf d+i `mod` 6) (1+i `mod` 6) (sw-treeWidthOf d-6) (sh-8)), restoredBounds = Nothing}
@@ -385,7 +436,8 @@ runCommand cmd source = Bifunctor.first clampHexScroll $ go cmd (source {menu = 
     go EditorOptions d = (prompt "Preferences" Settings
       ([Radio "Key bindings" ["Modern","WordStar"] (if wordStar d then 1 else 0)] ++
        [Radio "Screen size" ["Mode 3 (80x25)","Mode 259 (80x50)"] (if mode == 259 then 1 else 0) | Just mode <- [videoMode d]] ++
-       [CheckBox "Blinking cursor" (blinkCursor d)]) d,[])
+       [CheckBox "Blinking cursor" (blinkCursor d)] ++
+       [CheckBox "CRT filter" (crtFilter d) | videoMode d/=Nothing]) d,[])
     go Gallery d = (prompt "Dialog controls" Widgets [Input "Module name" "Main" 4,CheckBox "Auto indent" True,Radio "Tab width" ["4 columns","8 columns"] 1,ListBox "Source files" ["Main.hs","Types.hs","Parser.hs","Syntax.hs","Eval.hs"] 0] d,[])
     go (Disabled reason) d = (d {status = reason},[])
     confirm action d = (d {dialog = Just (Dialog "Save changes?" (Confirm action) [] 0 ["Save","Discard","Cancel"] ["Save changes to " <> documentTitle d <> "?"])},[])
@@ -493,14 +545,26 @@ resizeScreenMode (sw,sh) d = ensureVisible resized {windows=map stretch (windows
     stretch w = w {bounds=stretchRect (bounds w),restoredBounds=fmap stretchRect (restoredBounds w)}
 
 handleEvent :: V.Event -> Desktop -> (Desktop,[Effect])
+handleEvent (V.EvMouseDown x y V.BLeft _) d | y==snd (screenSize d)-1 =
+  case find (\(rect,_,_)->inside rect x y) (statusItemRects d) of
+    Just (_,_,Left cmd) -> runCommand cmd d
+    Just (_,_,Right event) -> handleEvent event (if activeConversation d then d {composerFocused=True} else d)
+    Nothing -> (d,[])
 handleEvent event d = Bifunctor.first clampHexScroll $ dispatchEvent event (case event of
-  V.EvKey{} -> d {hoverTarget=Nothing,typeHint="",buttonHover=Nothing,buttonPressed=Nothing}
+  V.EvKey{} -> d {hoverTarget=Nothing,typeHint="",buttonHover=Nothing,buttonPressed=Nothing,statusHover=Nothing}
   V.EvMouseDown{} -> d {hoverTarget=Nothing,typeHint=""}
   V.EvPaste{} -> d {hoverTarget=Nothing,typeHint=""}
   _ -> d)
 
 dispatchEvent :: V.Event -> Desktop -> (Desktop,[Effect])
 dispatchEvent (V.EvResize sw sh) d = let resized=d {screenSize=(max 1 sw,max 3 sh),sideTree=fmap (\t -> t {treeWidth=min (treeWidth t) (max 0 (sw-16))}) (sideTree d)} in (resized {windows=map (\w -> w {bounds=fitWindow resized (bounds w)}) (windows d),drag=Nothing,dragOriginal=Nothing,menu=Nothing,contextMenu=Nothing,buttonHover=Nothing,buttonPressed=Nothing},[])
+dispatchEvent (V.EvKey key mods) d | key `elem` [V.KChar '\t',V.KBackTab], V.MAlt `elem` mods =
+  case dialog d of
+    Just dg -> dialogEvent (V.EvKey (V.KChar '\t') [V.MShift | backwards]) dg d
+    Nothing -> (cycleUIFocus backwards d,[])
+  where backwards=key==V.KBackTab || V.MShift `elem` mods
+dispatchEvent (V.EvKey key mods) d | dialog d==Nothing, key `elem` [V.KChar '\t',V.KBackTab], V.MCtrl `elem` mods =
+  (cycleEditorWindow (key==V.KBackTab || V.MShift `elem` mods) d,[])
 dispatchEvent (V.EvKey (V.KChar c) mods) d | dialog d==Nothing, V.MAlt `elem` mods, c>='1', c<='9' = (activateWindowNumber (fromEnum c-fromEnum '0') d,[])
 dispatchEvent (V.EvKey (V.KFun key) mods) d | dialog d==Nothing, V.MAlt `elem` mods, key `elem` [7,8] = runCommand (if key==8 then NextMessage else PreviousMessage) d
 dispatchEvent (V.EvKey (V.KFun 9) [V.MCtrl]) d | dialog d==Nothing = runCommand RunTarget d
@@ -530,8 +594,8 @@ composerActive :: Desktop -> Bool
 composerActive d = activeConversation d && composerFocused d
 
 composerRect :: Window -> Rect
-composerRect w = let Rect x y ww hh=bounds w; rows=min 3 (max 0 (hh-4))
-                 in Rect (x+1) (y+hh-1-rows) (max 0 (ww-12)) rows
+composerRect w = let Rect x y ww hh=bounds w; rows=min 4 (max 0 (hh-4))
+                 in Rect (x+1) (y+hh-1-rows) (max 0 (ww-13)) rows
 
 composerButtons :: Window -> [(Rect,Text)]
 composerButtons w = [(Rect (left r+width r+2) (top r) 8 1,"OK"),(Rect (left r+width r+2) (top r+2) 8 1,"Cancel")]
@@ -727,6 +791,9 @@ fileEntryAt x y d dg = listToMaybe
 mouseEvent :: Int -> Int -> V.Button -> [V.Modifier] -> Desktop -> (Desktop,[Effect])
 mouseEvent x y V.BLeft _ d | Just capture <- drag d = (case capture of
   DockSizing -> resizeTree x d
+  TreeScrolling -> case sideTree d of
+    Just tree -> scrollTreeTo ((y-3)*treeScrollLimit d tree `div` max 1 (treeContentRows d-3)) tree d
+    Nothing -> d
   Moving i dx dy -> mapWindow i (\w -> w {bounds = fitWindow d (bounds w) {left=x-dx,top=y-dy},restoredBounds=Nothing}) d
   Resizing i dx dy -> mapWindow i (\w -> w {bounds = fitWindow d (bounds w) {width=x-left (bounds w)+dx,height=y-top (bounds w)+dy},restoredBounds=Nothing}) d
   Scrolling i vertical -> scrollTrack vertical x y (focusWindow i d)
@@ -1014,6 +1081,11 @@ submitDialog button dg original
       | focus dg `elem` [1,length (fields dg)], FileList _ selectedFile:_ <- drop 1 (fields dg), selectedFile>=0, entry:_ <- drop selectedFile entries ->
           if entryDirectory entry then (original,[BrowsePath (base </> T.unpack (entryName entry)) pattern]) else (d,[ReadPath (base </> T.unpack (entryName entry))])
       | otherwise -> (original,[OpenChoice base first pattern])
+    ChangingDirectory base entries
+      | focus dg==1, FileList _ index:_<-drop 1 (fields dg), index>=0, entry:_<-drop index entries ->
+          (original,[BrowseDirectories (base </> T.unpack (entryName entry))])
+      | otherwise -> (original,[if button==1 then BrowseDirectories chosenPath else ChangeDirectory chosenPath])
+      where chosenPath=if isAbsolute (T.unpack first) then T.unpack first else base </> T.unpack first
     Completing bid version pos choices -> case (activeWindow d,activeDocument d,drop selected choices) of
       (Just w,Just doc,Completion _ edits:_) | bufferId w==bid, revision (documentBuffer doc)==version, caret (selection w)==pos ->
         (applyCompletion edits d,[])
@@ -1051,7 +1123,8 @@ submitDialog button dg original
                     _ -> (d,[])
                 | otherwise -> (d,[])
     Settings -> (d {wordStar=any (\f -> case f of Radio "Key bindings" _ 1 -> True; _ -> False) (fields dg),
-      blinkCursor=fromMaybe (blinkCursor d) (listToMaybe [value | CheckBox "Blinking cursor" value<-fields dg]),status="Preferences updated."},
+      blinkCursor=fromMaybe (blinkCursor d) (listToMaybe [value | CheckBox "Blinking cursor" value<-fields dg]),
+      crtFilter=fromMaybe (crtFilter d) (listToMaybe [value | CheckBox "CRT filter" value<-fields dg]),status="Preferences updated."},
       [SetScreenMode mode | Radio "Screen size" _ chosen <- fields dg,
        let mode = if chosen == 1 then 259 else 3, Just mode /= videoMode d])
     Widgets -> (d {status="Dialog test complete."},[])
@@ -1067,7 +1140,7 @@ submitDialog button dg original
 
 
 startingDirectory :: Desktop -> FilePath
-startingDirectory d = maybe (maybe "." treeRoot (sideTree d)) (takeDirectory . filePath) (activeDocument d >>= documentFile)
+startingDirectory d = fromMaybe (maybe (maybe "." treeRoot (sideTree d)) (takeDirectory . filePath) (activeDocument d >>= documentFile)) (defaultDirectory d)
 
 treeWidthOf :: Desktop -> Int
 treeWidthOf = maybe 0 treeWidth . sideTree
@@ -1195,17 +1268,37 @@ treeKey key mods tree d = case key of
   _ -> keyEvent key mods d
   where
     move delta=moveToNode (treeSelected tree+delta)
-    moveToNode i = let chosen=max 0 (min (length (treeRows tree)-1) i); visible=max 1 (snd (screenSize d)-5); scroll=max 0 (min chosen (max (treeScroll tree) (chosen-visible+1))) in (d {sideTree=Just tree {treeSelected=chosen,treeScroll=scroll}},[])
+    moveToNode i = let chosen=max 0 (min (length (treeRows tree)-1) i); visible=max 1 (treeContentRows d); scroll=max 0 (min chosen (max (treeScroll tree) (chosen-visible+1))) in (d {sideTree=Just tree {treeSelected=chosen,treeScroll=scroll}},[])
     leave=(d {sideTree=Just tree {treeFocused=False}},[])
+
+treeContentRows :: Desktop -> Int
+treeContentRows d = max 0 (snd (screenSize d)-4)
+
+treeScrollLimit :: Desktop -> Sidebar -> Int
+treeScrollLimit d tree = max 0 (length (treeRows tree)-treeContentRows d)
+
+scrollTreeTo :: Int -> Sidebar -> Desktop -> Desktop
+scrollTreeTo position tree d = d {sideTree=Just tree {treeScroll=max 0 (min (treeScrollLimit d tree) position)}}
 
 treeMouse :: Int -> Int -> V.Button -> Sidebar -> Desktop -> (Desktop,[Effect])
 treeMouse x y button tree d = case button of
-  V.BLeft | x==treeWidth tree-1 -> (d {drag=Just DockSizing},[])
-          | y==1 && x>=treeWidth tree-5 -> (setTree Nothing d,[])
-          | y>=3 && y<snd (screenSize d)-2 -> activateTree False (treeScroll tree+y-3) d
-  V.BScrollUp -> (d {sideTree=Just tree {treeScroll=max 0 (treeScroll tree-3)}},[])
-  V.BScrollDown -> (d {sideTree=Just tree {treeScroll=min (max 0 (length (treeRows tree)-1)) (treeScroll tree+3)}},[])
+  V.BLeft | y==1 && x>=treeWidth tree-5 && x<treeWidth tree-1 -> (setTree Nothing d,[])
+          | x==treeWidth tree-1 && y>=2 && y<sh-2 && treeFocused tree && treeContentRows d>=3 ->
+              let offset=y-2; len=treeContentRows d; thumb=scrollbarThumb len (treeScrollLimit d tree) (treeScroll tree)
+                  step | offset==0 = -1 | offset==len-1 = 1 | offset<thumb = negate len | otherwise = len
+              in if offset==thumb then (d {drag=Just TreeScrolling},[]) else (scrollTreeTo (treeScroll tree+step) tree d,[])
+          | x==treeWidth tree-1 -> (d {drag=Just DockSizing},[])
+          | x>0 && y>=2 && y<sh-2 -> activateTree False (treeScroll tree+y-2) d
+          | otherwise -> (d {sideTree=Just tree {treeFocused=True},problemsFocused=False},[])
+  V.BScrollUp -> (scrollTreeTo (treeScroll tree-3) tree d,[])
+  V.BScrollDown -> (scrollTreeTo (treeScroll tree+3) tree d,[])
   _ -> (d,[])
+  where sh=snd (screenSize d)
+
+openDirectoryBrowser :: FilePath -> [Entry] -> Desktop -> Desktop
+openDirectoryBrowser base entries d = d {dialog=Just (Dialog "Change directory" (ChangingDirectory base dirs)
+  [Input "Directory" (T.pack base) (length base),FileList dirs 0] 1 ["OK","Browse","Cancel"] []),menu=Nothing,drag=Nothing,dragOriginal=Nothing}
+  where dirs=filter entryDirectory entries
 
 openBrowser :: FilePath -> Text -> [Entry] -> Desktop -> Desktop
 openBrowser base pattern entries d = d {dialog=Just (Dialog "Open a file" (Opening base pattern entries) [Input "Name" pattern (T.length pattern),FileList entries 0] 1 ["Open","Cancel"] []),menu=Nothing,drag=Nothing,dragOriginal=Nothing}
@@ -1220,8 +1313,9 @@ addReadOnly title text d = case [(bid,w) | (bid,doc)<-M.toList (buffers d),docum
 
 -- Hit testing uses the same cell geometry as selection, including tabs and wide glyphs.
 hoverAt :: Int -> Int -> Desktop -> (Desktop,[Effect])
-hoverAt x y d = (d {hoverTarget=target,typeHint=if target==hoverTarget d then typeHint d else "",buttonHover=hovered,contextMenu=popup},[])
+hoverAt x y d = (d {hoverTarget=target,typeHint=if target==hoverTarget d then typeHint d else "",buttonHover=hovered,contextMenu=popup,statusHover=highlight},[])
   where
+    highlight = (\(_,i,_)->i) <$> find (\(rect,_,_)->inside rect x y) (statusItemRects d)
     hovered = dialog d >>= \dg -> findIndex (\r -> inside r x y) (buttonRects d dg)
     popup = fmap (\(r,i) -> (r,if inside r x y && y>top r && y<top r+height r-1 then y-top r-1 else i)) (contextMenu d)
     target | dialog d/=Nothing || menu d/=Nothing || contextMenu d/=Nothing || drag d/=Nothing = Nothing

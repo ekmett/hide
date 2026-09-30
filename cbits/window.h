@@ -14,6 +14,7 @@ int thc_begin(void);
 void thc_glyph(int x, int y, int cells, int glyph_width, const uint16_t *rows, uint32_t fg, uint32_t bg);
 void thc_cursor(int x, int y);
 void thc_cursor_blink(int enabled);
+void thc_crt_filter(int enabled);
 int thc_present(void);
 /* Six integers; kind 0 is a 100ms idle wake, kind 8 requests a redraw (also blink),
  * and kind 12 is hover at cell x,y.

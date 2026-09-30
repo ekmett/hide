@@ -68,16 +68,9 @@ renderDesktop d = (V.picForLayers layers) {V.picCursor=cursor}
       [V.char normal ' ' V.<|> label (attr red bg) (T.take 1 title) V.<|> label normal (T.drop 1 title<>" ")
        | (i,(title,_,_))<-zip [0..] menus,let bg=if fmap fst (menu d)==Just i then green else gray,let normal=attr black bg]
       V.<|> V.charFill paper ' ' sw 1)
-    statusBar = V.cropRight (max 0 (sw-T.length badge)) (keyLegend statusText V.<|> V.charFill paper ' ' sw 1) V.<|> badgeImage
-    statusText
-      | Just _ <- dragOriginal d = " ↑↓→← Move  Shift+↑↓→← Resize  ↵ Done  Esc Cancel"
-      | Just text <- menuHelp d = " "<>text
-      | Just c <- prefix d = " Ctrl+"<>T.singleton c<>"-  (Esc cancels)"
-      | dialog d/=Nothing = " Tab Next  Enter Select  Esc Cancel"
-      | activeConversation d = " Enter "<>(if agentReplying d then "Queue query" else "Query")<>"  Shift+Enter Newline"<>(if agentSteering d then "  Ctrl+Enter Steer" else "")<>(if agentReplying d then "  Esc Cancel" else "")
-      | not (T.null (typeHint d)) = " "<>typeHint d
-      | not (T.null (status d)) = " F1 Help | "<>status d
-      | otherwise = " F1 Help  F2 Save  F3 Open  F5 Zoom  F6 Next  F10 Menu"
+    statusBar = V.cropRight (max 0 (sw-T.length badge)) (V.horizCat
+      [keyLegendOn (if statusHover d==Just i && action/=Nothing then green else gray) text
+      | (i,(text,action))<-zip [0..] (statusItems d)] V.<|> V.charFill paper ' ' sw 1) V.<|> badgeImage
     badge = if activeConversation d then "" else gitBadgeText d
     badgeImage = if T.null badge then V.emptyImage else label paper (" │ "<>gitBranchText d<>" ")
       V.<|> label (attr green gray) ("+"<>gitCountText (branchAdded d)) V.<|> label paper " "
@@ -143,7 +136,10 @@ windowLayers d active w =
     composerLayers
       | documentLabel doc/=Just "Conversation" = []
       | otherwise = [place x (top rect-1) divider,place (left rect) (top rect) inputImage] ++
-          [place (left r) (top r) (row (attr (if composerButtonEnabled d name then black else gray) (if composerButtonEnabled d name then green else blue)) (width r) (" "<>name))
+          concat [ [place (left r) (top r) (row (if composerButtonEnabled d name then selected else attr (V.RGBColor 85 85 85) gray) (width r) (" "<>name))]
+            ++ (if top r+1<y+hh-1 then
+                [place (left r+width r) (top r) (V.char (attr black blue) '▄'),
+                 place (left r+1) (top r+1) (V.charFill (attr black blue) '▀' (width r) 1)] else [])
           | (r,name)<-composerButtons w, top r<y+hh-1]
       where
         rect=composerRect w; draft=composerBuffer d; (sr,sc)=composerScroll d w
@@ -197,19 +193,23 @@ styledImage override active sel start chars = V.horizCat [label a (T.pack (map s
     syntaxAttr style=attr (case style of Plain->yellow; Keyword->white; Comment->cyan; Literal->V.RGBColor 85 255 85; Number->V.RGBColor 255 85 255; Constructor->yellow; Pragma->gray) blue
 
 treeLayers :: Desktop -> Sidebar -> [V.Image]
-treeLayers d tree = [place 0 1 image]
+treeLayers d tree =
+  [place (max 2 ((w-11) `div` 2)) 1 (label frame " Files "),
+   place (w-5) 1 (label frame "[" V.<|> label (attr cyan blue) "←" V.<|> label frame "]")]
+  ++ [place (w-1) 2 (V.vertCat [scrollCell n | n<-[0..visible-1]]) | treeFocused tree, visible>=3]
+  ++ [place 1 2 (V.vertCat (map line listing)),place 0 1 (box frame (treeFocused tree) w h)]
   where
-    w=treeWidth tree; h=max 0 (snd (screenSize d)-2)
-    visible=max 0 (h-3)
+    w=treeWidth tree; h=max 0 (snd (screenSize d)-2); visible=treeContentRows d
+    frame=attr white blue
     listing=take visible (drop (treeScroll tree) (zip [0..] (treeRows tree)))
-    title=V.cropRight (w-1) (label paper (" Files"<>T.replicate (max 0 (w-10)) " "<>"[") V.<|> label (attr cyan gray) "←" V.<|> label paper "]") V.<|> label paper "│"
-    root=row paper (w-1) (T.pack (treeRoot tree)) V.<|> label paper "│"
-    line (i,node)=row (if treeFocused tree && i==treeSelected tree then selected else edit) (w-1) (T.replicate (2*nodeDepth node) " "<>(if nodeDirectory node then if nodeExpanded node then "- " else "+ " else "  ")<>nodeName node) V.<|> label paper "│"
-    blank=row edit (w-1) "" V.<|> label paper "│"
-    image=V.crop w h (V.vertCat ([title,root] ++ map line listing ++ replicate (max 0 (h-2-length listing)) blank))
+    line (i,node)=row (if treeFocused tree && i==treeSelected tree then selected else edit) (w-2)
+      (T.replicate (2*nodeDepth node) " "<>(if nodeDirectory node then if nodeExpanded node then "- " else "+ " else "  ")<>nodeName node)
+    thumb=scrollbarThumb visible (treeScrollLimit d tree) (treeScroll tree)
+    scrollCell n=V.char (if n==0 || n==visible-1 then attr blue scrollCyan else attr scrollCyan blue)
+      (if n==0 then '▲' else if n==visible-1 then '▼' else if n==thumb then '█' else '░')
 
-keyLegend :: Text -> V.Image
-keyLegend text = V.horizCat [label (if shortcut token then attr red gray else paper) token | token <- T.groupBy (\a b -> isSpace a == isSpace b) text]
+keyLegendOn :: V.Color -> Text -> V.Image
+keyLegendOn bg text = V.horizCat [label (attr (if shortcut token then red else black) bg) token | token <- T.groupBy (\a b -> isSpace a == isSpace b) text]
   where shortcut t = t `elem` ["Tab","Enter","Esc","↑↓→←","↵"] || any (`T.isPrefixOf` t) ["F1","F2","F3","F5","F6","Ctrl+","Alt+","Shift+","Cmd+"]
 
 menuLayers :: Desktop -> (Int,Int) -> [V.Image]
@@ -278,7 +278,7 @@ dialogLayers d dg =
       | otherwise = [place fx (max (y+2) fy) (V.cropBottom (max 0 (y+h-3-max (y+2) fy)) (V.translateY (min 0 (fy-y-2)) image))]
       where
         a=if focus dg==i then selected else paper
-        inputColor=case purpose dg of Opening{} -> attr white blue; _ -> attr black scrollCyan
+        inputColor=case purpose dg of Opening{} -> attr white blue; ChangingDirectory{} -> attr white blue; _ -> attr black scrollCyan
         image=case field of
           Input name value p -> let offset=if focus dg==i then max 0 (displayColumn value p-fw+1) else 0
                                in V.vertCat [row paper fw name,V.cropRight fw (V.translateX (negate offset) (label inputColor value) V.<|> V.charFill inputColor ' ' fw 1)]
@@ -293,7 +293,7 @@ dialogLayers d dg =
                   _ -> row listColor cw ""
                 bar=label borderColor "┌" V.<|> V.charFill borderColor '─' cw 1 V.<|> label borderColor "┬" V.<|> V.charFill borderColor '─' cw 1 V.<|> label borderColor "┐"
                 line r=label borderColor "│" V.<|> item (page+r) V.<|> label borderColor "│" V.<|> item (page+8+r) V.<|> label borderColor "│"
-                path=case purpose dg of Opening base pattern _ -> T.pack (base </> T.unpack pattern); _ -> ""
+                path=case purpose dg of Opening base pattern _ -> T.pack (base </> T.unpack pattern); ChangingDirectory base _ -> T.pack base; _ -> ""
                 details=case drop chosen entries of
                   entry:_ | chosen>=0 ->
                     let size=if entryDirectory entry then "<DIR>" else maybe "?" (T.pack . show) (entryBytes entry)<>" bytes"
@@ -301,7 +301,7 @@ dialogLayers d dg =
                         suffix="  "<>size<>"  "<>stamp
                     in T.take (max 0 (fw-T.length suffix)) (entryName entry)<>suffix
                   _ -> ""
-            in V.vertCat ([row paper fw "Files",bar] ++ [line r | r<-[0..7]] ++ [label borderColor "└" V.<|> V.charFill borderColor '─' cw 1 V.<|> label borderColor "┴" V.<|> V.charFill borderColor '─' cw 1 V.<|> label borderColor "┘",row (attr scrollCyan blue) fw path,row (attr scrollCyan blue) fw details])
+            in V.vertCat ([row paper fw (case purpose dg of ChangingDirectory{} -> "Directories"; _ -> "Files"),bar] ++ [line r | r<-[0..7]] ++ [label borderColor "└" V.<|> V.charFill borderColor '─' cw 1 V.<|> label borderColor "┴" V.<|> V.charFill borderColor '─' cw 1 V.<|> label borderColor "┘",row (attr scrollCyan blue) fw path,row (attr scrollCyan blue) fw details])
           ListBox name values chosen -> V.vertCat (row paper fw name:[row (if n==chosen then a else paper) fw (" "<>v) | (n,v)<-take 4 (drop (max 0 (chosen-3)) (zip [0..] values))])
 
 snapshot :: Desktop -> Text

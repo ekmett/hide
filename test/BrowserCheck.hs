@@ -9,6 +9,7 @@ import System.Directory
 import System.FilePath ((</>), takeDirectory, takeFileName)
 import System.IO (hClose, openBinaryTempFile)
 import Data.Maybe (isJust)
+import qualified Graphics.Vty as V
 import qualified THC.Edit.App as App
 import THC.Edit.Model
 import THC.Edit.Files (filePath)
@@ -71,6 +72,19 @@ checks = do
     BS.writeFile namesake "name: namesake\n"
     preferred<-packageFile dir
     check "directory namesake Cabal file takes precedence" (preferred==Just namesake)
+    (_,chooser)<-App.applyEffects project (snd (runCommand ChangeDir project))
+    check "Change dir lists directories only"
+      (case dialog chooser of Just Dialog{purpose=ChangingDirectory _ ds} -> all entryDirectory ds; _ -> False)
+    let cancelled=fst (handleEvent (V.EvKey V.KEsc []) chooser)
+    check "Change dir cancel preserves explorer and buffers" (sideTree cancelled==sideTree project && buffers cancelled==buffers project)
+    bracket getCurrentDirectory setCurrentDirectory $ \_ -> do
+      (_,changed)<-App.applyEffects chooser [ChangeDirectory (canonical </> "nested")]
+      cwd<-getCurrentDirectory
+      check "Change dir updates default directory and explorer without replacing buffers"
+        (cwd==canonical </> "nested" && startingDirectory changed==cwd && fmap treeRoot (sideTree changed)==Just cwd && buffers changed==buffers project && dialog changed==Nothing)
+      (_,failed)<-App.applyEffects changed [ChangeDirectory (canonical </> "missing")]
+      still<-getCurrentDirectory
+      check "failed directory change preserves context" (still==cwd && defaultDirectory failed==defaultDirectory changed && sideTree failed==sideTree changed)
     after <- getCurrentDirectory
     check "browsing does not change working directory" (before == after)
   putStrLn "browser checks passed"

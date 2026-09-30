@@ -189,6 +189,17 @@ text with a white mnemonic. Ctrl or Alt plus that letter activates the button.
 Each editor and Messages window has a stable number in its title bar.
 Alt+1 through Alt+9 activate that window (Option+1 through Option+9 on macOS).
 Preferences includes a Blink cursor appearance option, enabled by default.
+Start with `--metal --crt` (or `--vulkan --crt`) to enable the effect immediately.
+In SDL windows, **CRT filter** adds subtle scanlines and a vignette; it is off by
+default. At the smallest tile scale only the vignette is applied to keep text legible.
+**File > Change dir...** selects a new working directory and refreshes the Files
+window without closing your buffers. Enter on a directory browses into it;
+OK accepts the displayed directory, and Browse opens a typed path.
+The Files window has its own frame and scrollbar; drag its bottom-right corner
+to resize the dock. Status-bar key labels are clickable shortcuts and highlight
+green under the pointer. Ctrl+Tab cycles windows; Alt+Tab cycles the menu,
+Files, windows, and Messages. Shift reverses either cycle. Dialogs cycle their
+controls with Alt+Tab. OS-reserved Alt+Tab may not reach the editor.
 The graphical insertion cursor blinks every half second; terminal cursor
 style follows this preference where DECSCUSR is supported.
 While moving or resizing a window, arrows move it, Shift+arrows resize it,
@@ -220,7 +231,7 @@ select an existing Codex executable. Authenticate with the provider's own CLI
 before starting it here. The adapter and model credentials are separate from
 this repository.
 
-The **Conversation** window has a three-line query pane below the transcript.
+The **Conversation** window has a four-line query pane below the transcript.
 **Enter** or **OK** submits the draft; while a reply is active it queues the query
 for the next turn. **Shift+Enter** inserts a newline. **Ctrl+Enter** steers the
 active turn when the provider advertises that extension. **Cancel** (or Esc in
@@ -251,7 +262,7 @@ replay depends on whether it supports load or only resume.
 ## Embedded terminals and Run
 
 Build with **`-fterminal`** to enable the optional
-[libghostty-vt](https://github.com/ghostty-org/ghostty) backend. Both **Run > Terminal**
+[libghostty-vt](https://github.com/ghostty-org/ghostty) backend. Both **File > Terminal**
 and ACP terminal requests use the same parser, character grid and PTY implementation.
 ACP requests ask before executing commands and support output, wait, kill and release.
 Closing a terminal window leaves its command running; **Run > Stop terminal** stops

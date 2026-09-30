@@ -32,6 +32,7 @@ foreign import ccall unsafe "thc_begin" c_begin :: IO CInt
 foreign import ccall unsafe "thc_glyph" c_glyph :: CInt -> CInt -> CInt -> CInt -> Ptr Word16 -> Word32 -> Word32 -> IO ()
 foreign import ccall unsafe "thc_cursor" c_cursor :: CInt -> CInt -> IO ()
 foreign import ccall unsafe "thc_cursor_blink" c_cursor_blink :: CInt -> IO ()
+foreign import ccall unsafe "thc_crt_filter" c_crt_filter :: CInt -> IO ()
 foreign import ccall unsafe "thc_present" c_present :: IO CInt
 foreign import ccall safe "thc_wait" c_wait :: Ptr Int32 -> IO CInt
 foreign import ccall unsafe "thc_text" c_text :: IO CString
@@ -84,7 +85,7 @@ updateMenus d = forM_ (zip [0..] nativeCommands) $ \(i,cmd) ->
   c_menu_enabled i (if commandEnabled d cmd && canInvoke cmd then 1 else 0)
   where
     canInvoke Paste = not (maybe False treeFocused (sideTree d)) || dialog d /= Nothing
-    canInvoke cmd = dialog d == Nothing && (activeWindow d /= Nothing || cmd `elem` [New,Open,Quit,Help,About,Gallery,EditorOptions,RunTarget,RunOptions,OpenTerminal,StopTerminal,AgentOptions,Conversation,AgentPrompt,AgentCancel,AgentResume,AgentNew,AgentCopyRaw,ToggleTree,GitDiff,GitCommit,Problems,NextMessage,PreviousMessage])
+    canInvoke cmd = dialog d == Nothing && (activeWindow d /= Nothing || cmd `elem` [New,Open,ChangeDir,Quit,Help,About,Gallery,EditorOptions,RunTarget,RunOptions,OpenTerminal,StopTerminal,AgentOptions,Conversation,AgentPrompt,AgentCancel,AgentResume,AgentNew,AgentCopyRaw,ToggleTree,GitDiff,GitCommit,Problems,NextMessage,PreviousMessage])
 #else
 updateMenus _ = pure ()
 #endif
@@ -93,6 +94,7 @@ updateMenus _ = pure ()
 draw :: Font -> Desktop -> IO ()
 draw font d = do
   c_cursor_blink (if blinkCursor d then 1 else 0)
+  c_crt_filter (if crtFilter d then 1 else 0)
   check "Allocate window frame" c_begin
   let picture = renderDesktop d
   forM_ (zip [0::Int ..] (toList (displayOpsForPic picture (screenSize d)))) $ \(y,spans) -> go y 0 (toList spans)

@@ -16,7 +16,7 @@ import qualified Data.Text.IO as TIO
 import Graphics.Vty.CrossPlatform (mkVty)
 import qualified Graphics.Vty as V
 import System.Console.GetOpt
-import System.Directory (doesDirectoryExist, doesFileExist, getCurrentDirectory, listDirectory)
+import System.Directory (doesDirectoryExist, doesFileExist, getCurrentDirectory, setCurrentDirectory, listDirectory)
 import System.FilePath ((</>), isAbsolute, takeDirectory, takeFileName, takeExtension)
 import Control.Exception (try, IOException)
 import Paths_thc_edit (getDataFileName)
@@ -33,12 +33,13 @@ import THC.Edit.Render
 import THC.Edit.Files
 import THC.Edit.Reconcile
 
-data Option = Use Backend | Scale String | Size String | Mode String | Demo | WordStar | Snapshot | Html | Scene String | Usage deriving Eq
+data Option = Use Backend | Scale String | Size String | Mode String | Demo | CRT | WordStar | Snapshot | Html | Scene String | Usage deriving Eq
 options :: [OptDescr Option]
 options = [Option [] ["metal"] (NoArg (Use Metal)) "Open a Metal window"
           ,Option [] ["vulkan"] (NoArg (Use Vulkan)) "Open a Vulkan window"
           ,Option [] ["window"] (NoArg (Use Auto)) "Open a window using the platform backend"
           ,Option [] ["terminal"] (NoArg (Use Terminal)) "Use the terminal (override THC_EDIT_BACKEND)"
+          ,Option [] ["crt"] (NoArg CRT) "Enable CRT scanlines and vignetting (window only)"
           ,Option [] ["scale"] (ReqArg Scale "N") "Window pixel scale, 1 to 8 (default THC_EDIT_SCALE or display density)"
           ,Option [] ["mode"] (ReqArg Mode "NUMBER") "Window screen mode: 3 (80x25), 259 (80x50); default 3"
           ,Option [] ["vga50"] (NoArg (Mode "259")) "Alias for --mode 259 (window only)"
@@ -72,7 +73,7 @@ main = do
       [s] -> either die pure (parseWindowSize s)
       _ -> die "Specify --size only once."
     let initial=if Demo `elem` flags then addDocument Nothing (newBuffer (activeText demoDesktop)) (initialDesktop dimensions) else initialDesktop dimensions
-        configured=(fst (handleEvent (uncurry V.EvResize dimensions) initial)) {wordStar=WordStar `elem` flags,videoMode=if backend == Terminal then Nothing else Just screenMode}
+        configured=(fst (handleEvent (uncurry V.EvResize dimensions) initial)) {wordStar=WordStar `elem` flags,crtFilter=CRT `elem` flags,videoMode=if backend == Terminal then Nothing else Just screenMode}
     (_,loaded)<-applyEffects configured (map ReadPath paths)
     cwd<-getCurrentDirectory
     base<-packageDirectory cwd
@@ -160,6 +161,18 @@ applyEffects = foldM apply . (False,)
     apply (_,d) (BrowsePath path pattern)=do
       result<-readDirectory path pattern
       pure (False,case result of Left err -> browserError (T.pack err) d; Right (base,entries) -> openBrowser base pattern entries d)
+    apply (_,d) (BrowseDirectories path)=do
+      result<-readDirectory path "*"
+      pure (False,case result of Left err -> browserError (T.pack err) d; Right (base,entries) -> openDirectoryBrowser base entries d)
+    apply (_,d) (ChangeDirectory path)=do
+      result<-readDirectory path "*"
+      case result of
+        Left err -> pure (False,browserError (T.pack err) d)
+        Right (base,entries) -> do
+          changed<-try (setCurrentDirectory base) :: IO (Either IOException ())
+          case changed of
+            Left err -> pure (False,browserError (T.pack (show err)) d)
+            Right () -> apply (False,installTree base entries d {defaultDirectory=Just base,dialog=Nothing,status="Directory changed."}) (RefreshGit base)
     apply (_,d) (OpenChoice base input pattern)=do
       let chosen=if T.null input then pattern else input
           path=if isAbsolute (T.unpack chosen) then T.unpack chosen else base </> T.unpack chosen

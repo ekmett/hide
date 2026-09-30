@@ -7,7 +7,8 @@
 
 static SDL_Window *window;
 static SDL_Renderer *renderer;
-static SDL_Texture *texture;
+static SDL_Texture *texture, *vignette;
+static bool crt_filter;
 static uint32_t *pixels;
 static int cols, rows, scale, cell_height, origin_x, origin_y, pixel_w, pixel_h;
 static int mouse_x = -1, mouse_y = -1;
@@ -43,6 +44,7 @@ void thc_close(void) {
     cursor_present = false; cursor_x = cursor_y = -1;
     SDL_StopTextInput(window);
     SDL_DestroyTexture(texture); texture = NULL;
+    SDL_DestroyTexture(vignette); vignette = NULL;
     SDL_DestroyRenderer(renderer); renderer = NULL;
     SDL_DestroyWindow(window); window = NULL;
     free(pixels); pixels = NULL;
@@ -69,6 +71,7 @@ static void refresh_pointer(void) {
 
 int thc_open(const char *backend, int requested_scale, int requested_cols, int requested_rows, int height) {
     if (!SDL_Init(SDL_INIT_VIDEO)) return 0;
+    crt_filter = false;
     blink_cursor = true; cursor_epoch = SDL_GetTicks();
     command_event = SDL_RegisterEvents(1);
     window = SDL_CreateWindow("Turbo Haskell", 1280, 800, SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
@@ -183,6 +186,36 @@ static uint32_t mouse_color(uint32_t pixel) {
         if (rgb == palette[i]) return (pixel & 0xff000000) | palette[i ^ 7];
     return pixel ^ 0x00aaaaaa;
 }
+void thc_crt_filter(int enabled) { crt_filter = enabled != 0; }
+
+static bool draw_crt(const SDL_FRect *target) {
+    if (!vignette) {
+        SDL_Surface *surface = SDL_CreateSurface(64, 64, SDL_PIXELFORMAT_ARGB8888);
+        if (!surface) return false;
+        for (int y = 0; y < 64; ++y) for (int x = 0; x < 64; ++x) {
+            float nx = (x - 31.5f) / 31.5f, ny = (y - 31.5f) / 31.5f;
+            float radius = (nx * nx + ny * ny) / 2;
+            ((Uint32 *)((Uint8 *)surface->pixels + y * surface->pitch))[x] =
+                (Uint32)(100 * radius * radius) << 24;
+        }
+        vignette = SDL_CreateTextureFromSurface(renderer, surface);
+        SDL_DestroySurface(surface);
+        if (!vignette || !SDL_SetTextureBlendMode(vignette, SDL_BLENDMODE_BLEND) ||
+            !SDL_SetTextureScaleMode(vignette, SDL_SCALEMODE_LINEAR)) return false;
+    }
+    /* Scanlines follow physical raster rows in either character-height mode.
+     * At 1:1 there is no subpixel room: retain the vignette without obscuring ink. */
+    if (scale > 1) {
+        SDL_FRect lines[4096];
+        int count = rows * cell_height;
+        for (int y = 0; y < count; ++y)
+            lines[y] = (SDL_FRect){target->x, target->y + (y + 1) * scale - 1, target->w, 1};
+        if (!SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND) ||
+            !SDL_SetRenderDrawColor(renderer, 0, 0, 0, 48) ||
+            !SDL_RenderFillRects(renderer, lines, count)) return false;
+    }
+    return SDL_RenderTexture(renderer, vignette, NULL, target);
+}
 int thc_present(void) {
     uint32_t saved_cell[128];
     bool hovered = mouse_x >= 0 && mouse_x < cols && mouse_y >= 0 && mouse_y < rows;
@@ -199,6 +232,7 @@ int thc_present(void) {
     if (!SDL_RenderClear(renderer)) return 0;
     SDL_FRect target = {(float)origin_x, (float)origin_y, (float)(cols * 8 * scale), (float)(rows * cell_height * scale)};
     if (!SDL_RenderTexture(renderer, texture, NULL, &target)) return 0;
+    if (crt_filter && !draw_crt(&target)) return 0;
     const char *capture = SDL_getenv("THC_EDIT_CAPTURE");
     if (capture && *capture && !thc_capture(capture)) return 0;
     return SDL_RenderPresent(renderer);
