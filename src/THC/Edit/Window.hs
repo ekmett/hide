@@ -21,7 +21,7 @@ import System.IO (hPutStrLn, stderr)
 import THC.Edit.Font
 import THC.Edit.Render
 
-foreign import ccall unsafe "thc_open" c_open :: CString -> CInt -> CInt -> CInt -> CInt -> IO CInt
+foreign import ccall unsafe "thc_open" c_open :: CString -> CDouble -> CInt -> CInt -> CInt -> IO CInt
 foreign import ccall unsafe "thc_mode" c_mode :: CInt -> CInt -> CInt -> IO CInt
 foreign import ccall unsafe "thc_scale" c_scale :: CInt -> IO CInt
 foreign import ccall unsafe "thc_close" c_close :: IO ()
@@ -121,13 +121,13 @@ draw font d = do
     rgb (V.SetTo (V.ISOColor n)) = [0,0xaa0000,0x00aa00,0xaa5500,0x0000aa,0xaa00aa,0x00aaaa,0xaaaaaa,0x555555,0xff5555,0x55ff55,0xffff55,0x5555ff,0xff55ff,0x55ffff,0xffffff] !! (fromIntegral n `mod` 16)
     rgb _ = 0
 
-runWindow :: Backend -> Int -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> (Desktop -> IO Desktop) -> Desktop -> IO ()
+runWindow :: Backend -> Double -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> (Desktop -> IO Desktop) -> Desktop -> IO ()
 runWindow backend scale effects tick initial = do
   font <- loadFont
   let driver = case backend of Metal -> "metal"; Vulkan -> "vulkan"; _ -> if os == "darwin" then "metal" else "vulkan"
   -- SDL must stay on the main OS thread; GHC's main action is a bound thread.
   bracket_ (pure ()) c_close $ do
-    withCString driver $ \name -> check ("Cannot start " ++ driver ++ " window") (c_open name (fromIntegral scale) (fromIntegral (fst (screenSize initial))) (fromIntegral (snd (screenSize initial))) (fromIntegral (modeHeight (maybe 3 id (videoMode initial)))))
+    withCString driver $ \name -> check ("Cannot start " ++ driver ++ " window") (c_open name (realToFrac scale) (fromIntegral (fst (screenSize initial))) (fromIntegral (snd (screenSize initial))) (fromIntegral (modeHeight (maybe 3 id (videoMode initial)))))
     c_backend >>= peekCString >>= hPutStrLn stderr . ("Turbo Haskell renderer: " ++)
     nativeMenus
     sized <- alloca $ \wp -> alloca $ \hp -> do
@@ -162,8 +162,7 @@ runWindow backend scale effects tick initial = do
           else (resizeScreenMode (w,h) d) {videoMode=Just mode})
     applyWindowEffect d request = effects d [request]
     dispatch (1:key:mods:_) d
-      | key == fromEnum '0', mods .&. 4 /= 0 = changeScale 0 d
-      | key `elem` map fromEnum ['+','=','-'], mods .&. 6 /= 0 = changeScale (if key == fromEnum '-' then -1 else 1) d
+      | Just direction <- zoomDirection key mods = changeScale (fromIntegral direction) d
       | key == fromEnum 'v' && mods .&. 10 /= 0 && (not (wordStar d) || mods .&. 8 /= 0) = paste d
       | otherwise = case decodeKey key mods of
           Nothing -> pure (d,[])
@@ -210,6 +209,6 @@ runWindow backend scale effects tick initial = do
     foldText (c:cs) d = let (d',fx)=handleEvent (V.EvKey (V.KChar c) []) d
                        in if null fx then foldText cs d' else (d',fx)
 #else
-runWindow :: Backend -> Int -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> (Desktop -> IO Desktop) -> Desktop -> IO ()
+runWindow :: Backend -> Double -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> (Desktop -> IO Desktop) -> Desktop -> IO ()
 runWindow _ _ _ _ _ = ioError (userError "Graphical support is not built. Install SDL3 and rebuild with: cabal build -fwindow")
 #endif

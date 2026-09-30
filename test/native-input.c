@@ -65,7 +65,7 @@ static void wait_cursor_blink(void) {
     assert(out[0] == 8); /* An idle phase transition requests a repaint. */
 }
 
-static void check_crt(SDL_Renderer *renderer, int lines) {
+static void check_crt(SDL_Renderer *renderer, int lines, double pitch) {
     SDL_FlushEvents(SDL_EVENT_FIRST, SDL_EVENT_LAST);
     SDL_Event leave; SDL_zero(leave); leave.type = SDL_EVENT_WINDOW_MOUSE_LEAVE;
     assert(SDL_PushEvent(&leave));
@@ -82,10 +82,14 @@ static void check_crt(SDL_Renderer *renderer, int lines) {
             SDL_Surface *frame = SDL_RenderReadPixels(renderer, NULL);
             assert(frame);
             Uint8 center, edge, scanline, g, b, a;
-            assert(SDL_ReadSurfacePixel(frame, 640, 400, &center, &g, &b, &a));
+            assert(SDL_ReadSurfacePixel(frame, frame->w/2, frame->h/2, &center, &g, &b, &a));
             assert(SDL_ReadSurfacePixel(frame, 0, 0, &edge, &g, &b, &a));
-            assert(SDL_ReadSurfacePixel(frame, 640, 401, &scanline, &g, &b, &a));
-            if (enabled == 1) assert(center >= 250 && edge < center - 50 && scanline < center - 30);
+            assert(SDL_ReadSurfacePixel(frame, frame->w/2, frame->h/2 + (pitch >= 2 ? (int)pitch-1 : 1), &scanline, &g, &b, &a));
+            if (enabled == 1) {
+                assert(center >= 250 && edge < center - 50);
+                if (pitch < 2) assert(scanline >= center - 1); /* One pixel per glyph row: vignette only. */
+                else assert(scanline >= center - 28 && scanline < center - 16);
+            }
             else assert(center == 255 && edge == 255 && scanline == 255);
             SDL_DestroySurface(frame);
         }
@@ -105,7 +109,7 @@ static void check_geometry(int lines, int cell_height) {
     assert(width == 1280 && height == 800);
     thc_size(&cols, &rows);
     assert(cols == 80 && rows == lines);
-    check_crt(SDL_GetRenderer(windows[0]), lines);
+    check_crt(SDL_GetRenderer(windows[0]), lines, cell_height/8.0);
     assert(thc_begin());
     uint16_t glyph[16];
     for (int i = 0; i < 16; ++i) glyph[i] = 0xffff;
@@ -228,21 +232,50 @@ static void check_geometry(int lines, int cell_height) {
     assert(cols == 100 && rows == 32);
     windows = SDL_GetWindows(&count);
     assert(windows && count == 1 && SDL_GetWindowSizeInPixels(windows[0], &width, &height));
-    assert(width == 2400 && height == 768); /* Larger physical tiles, same character grid. */
+    assert(width == 1700 && height == 544); /* Larger physical tiles, same character grid. */
     assert(thc_scale(0) && thc_scale(-1));
     assert(SDL_GetWindowSizeInPixels(windows[0], &width, &height));
-    assert(width == 800 && height == 256);
+    assert(width == 1500 && height == 480);
     thc_size(&cols, &rows);
     assert(cols == 100 && rows == 32);
     assert(thc_mode(8, 40, 12));
-    for (int i = 0; i < 10; ++i) assert(thc_scale(1));
+    for (int i = 0; i < 64; ++i) assert(thc_scale(1));
     assert(SDL_GetWindowSizeInPixels(windows[0], &width, &height) && width == 2560 && height == 768);
-    for (int i = 0; i < 10; ++i) assert(thc_scale(-1));
+    for (int i = 0; i < 64; ++i) assert(thc_scale(-1));
     assert(SDL_GetWindowSizeInPixels(windows[0], &width, &height) && width == 320 && height == 96);
     assert(thc_scale(0));
     assert(SDL_GetWindowSizeInPixels(windows[0], &width, &height) && width == 640 && height == 192);
     thc_size(&cols, &rows);
     assert(cols == 40 && rows == 12);
+    SDL_free(windows);
+    thc_close();
+}
+
+static void check_fractional_zoom(void) {
+    assert(SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "dummy"));
+    assert(thc_open("software", 1.125, 81, 25, 16));
+    int count, width, height, cols, rows;
+    SDL_Window **windows = SDL_GetWindows(&count);
+    assert(windows && count == 1);
+    assert(SDL_GetWindowSizeInPixels(windows[0], &width, &height) && width == 729 && height == 450);
+    thc_size(&cols, &rows); assert(cols == 81 && rows == 25);
+    SDL_FlushEvents(SDL_EVENT_FIRST, SDL_EVENT_LAST);
+    SDL_Event e; SDL_zero(e); e.type = SDL_EVENT_MOUSE_BUTTON_DOWN;
+    e.button.button = SDL_BUTTON_LEFT; e.button.x = 18.5f; e.button.y = 36.5f;
+    assert(SDL_PushEvent(&e));
+    int32_t event[6]; assert(thc_wait(event) && event[0] == 3 && event[1] == 2 && event[2] == 2);
+    assert(thc_scale(1));
+    assert(SDL_GetWindowSizeInPixels(windows[0], &width, &height) && width == 810 && height == 500);
+    thc_size(&cols, &rows); assert(cols == 81 && rows == 25);
+    assert(thc_scale(0));
+    assert(SDL_GetWindowSizeInPixels(windows[0], &width, &height) && width == 1296 && height == 800);
+    SDL_free(windows);
+    thc_close();
+    assert(SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "dummy"));
+    assert(thc_open("software", 4, 80, 50, 8));
+    windows = SDL_GetWindows(&count);
+    assert(windows && count == 1);
+    check_crt(SDL_GetRenderer(windows[0]), 50, 2); /* Compressed mode at Retina default size. */
     SDL_free(windows);
     thc_close();
 }
@@ -293,6 +326,7 @@ int main(void) {
     SDL_Quit();
     check_geometry(25, 16);
     check_geometry(50, 8);
+    check_fractional_zoom();
     puts("native input checks passed");
     return 0;
 }

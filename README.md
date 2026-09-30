@@ -51,11 +51,13 @@ not change your terminal's font or dimensions.
 cabal run -fwindow thc-edit -- --metal --mode 259 Main.hs
 ```
 
-`--scale 1` through `--scale 8` sets the pixel scale independently.
+`--scale 1` through `--scale 8` sets the pixel scale independently. Fractions
+such as `--scale 2.5` work; values round to the nearest 1/8 step.
 `THC_EDIT_SCALE` supplies the default; an explicit `--scale` takes precedence. In Mode 259,
 scale 2 or higher retains every bitmap row; scale 1 downsamples vertically.
-Ctrl or Alt plus `+`/`-` changes tile scale while preserving the character grid;
-`=` also increases it. Alt+0 restores the display-aware default (2 on standard displays, 4 on
+Ctrl or Alt plus `+`/`-` changes tile width by one physical pixel (1/8 scale)
+while preserving the character grid;
+`=` also increases it. Ctrl+0 or Alt+0 restores the display-aware default (2 on standard displays, 4 on
 Retina displays at 2× density). Tiles use physical drawable pixels with nearest
 neighbor scaling; the graphical window requests high-density rendering.
 Resizing the window changes the character grid. SDL3 is an optional build
@@ -191,7 +193,8 @@ Alt+1 through Alt+9 activate that window (Option+1 through Option+9 on macOS).
 Preferences includes a Blink cursor appearance option, enabled by default.
 Start with `--metal --crt` (or `--vulkan --crt`) to enable the effect immediately.
 In SDL windows, **CRT filter** adds subtle scanlines and a vignette; it is off by
-default. At the smallest tile scale only the vignette is applied to keep text legible.
+default. When glyph rows are less than two physical pixels tall, only the vignette is
+applied to keep text legible (below scale 2 in Mode 3 or scale 4 in Mode 259).
 **File > Change dir...** selects a new working directory and refreshes the Files
 window without closing your buffers. Enter on a directory browses into it;
 OK accepts the displayed directory, and Browse opens a typed path.

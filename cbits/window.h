@@ -2,7 +2,7 @@
 #define THC_WINDOW_H
 #include <stdint.h>
 void thc_post_command(int command);
-int thc_open(const char *backend, int scale, int cols, int rows, int cell_height);
+int thc_open(const char *backend, double scale, int cols, int rows, int cell_height);
 int thc_mode(int cell_height, int cols, int rows);
 /* Grow/shrink tiles without changing the grid; zero restores the density-aware default. */
 int thc_scale(int direction);

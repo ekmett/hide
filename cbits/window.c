@@ -10,7 +10,8 @@ static SDL_Renderer *renderer;
 static SDL_Texture *texture, *vignette;
 static bool crt_filter;
 static uint32_t *pixels;
-static int cols, rows, scale, cell_height, origin_x, origin_y, pixel_w, pixel_h;
+static double scale;
+static int cols, rows, cell_height, origin_x, origin_y, pixel_w, pixel_h;
 static int mouse_x = -1, mouse_y = -1;
 static char *input_text;
 static char *clipboard_text;
@@ -69,7 +70,9 @@ static void refresh_pointer(void) {
     } else clear_pointer();
 }
 
-int thc_open(const char *backend, int requested_scale, int requested_cols, int requested_rows, int height) {
+int thc_open(const char *backend, double requested_scale, int requested_cols, int requested_rows, int height) {
+    if (!isfinite(requested_scale) || (requested_scale != 0 && (requested_scale < 1 || requested_scale > 8)))
+        return SDL_SetError("Tile scale must be between 1 and 8");
     if (!SDL_Init(SDL_INIT_VIDEO)) return 0;
     crt_filter = false;
     blink_cursor = true; cursor_epoch = SDL_GetTicks();
@@ -83,7 +86,7 @@ int thc_open(const char *backend, int requested_scale, int requested_cols, int r
     SDL_GetWindowSizeInPixels(window, &pw, &ph);
     SDL_GetWindowSize(window, &ww, &wh);
     double density = (double)pw / SDL_max(1, ww);
-    scale = requested_scale ? requested_scale : SDL_max(1, (int)lround(2 * density));
+    scale = requested_scale ? round(requested_scale * 8) / 8 : SDL_max(1, (int)lround(2 * density));
     if (!thc_mode(height, requested_cols, requested_rows)) return 0;
     return SDL_StartTextInput(window);
 }
@@ -98,7 +101,7 @@ int thc_mode(int height, int requested_cols, int requested_rows) {
     /* Lower the old minimum before switching a small custom-size window. */
     /* X11/Wayland resize requests can complete after SetWindowSize returns. */
     if (!SDL_SetWindowMinimumSize(window, (int)ceil(40 * 8 * scale / density), (int)ceil(12 * height * scale / density)) ||
-        !SDL_SetWindowSize(window, (int)lround(requested_cols * 8 * scale / density), (int)lround(requested_rows * height * scale / density)) ||
+        !SDL_SetWindowSize(window, (int)ceil(requested_cols * 8 * scale / density), (int)ceil(requested_rows * height * scale / density)) ||
         !SDL_SyncWindow(window)) {
         char error[1024]; SDL_strlcpy(error, SDL_GetError(), sizeof(error));
         SDL_SetWindowMinimumSize(window, min_w, min_h);
@@ -114,12 +117,13 @@ int thc_mode(int height, int requested_cols, int requested_rows) {
 
 int thc_scale(int direction) {
     geometry();
-    int previous = scale, width = cols, height = rows;
+    double previous = scale;
+    int width = cols, height = rows;
     int pw, ph, ww, wh;
     SDL_GetWindowSizeInPixels(window, &pw, &ph);
     SDL_GetWindowSize(window, &ww, &wh);
     int default_scale = (int)lround(2.0 * pw / SDL_max(1, ww));
-    scale = SDL_clamp(direction == 0 ? default_scale : scale + (direction > 0 ? 1 : -1), 1, 8);
+    scale = SDL_clamp(direction == 0 ? default_scale : scale + (direction > 0 ? 0.125 : -0.125), 1, 8);
     if (scale == previous || thc_mode(cell_height, width, height)) return 1;
     scale = previous;
     geometry();
@@ -203,15 +207,16 @@ static bool draw_crt(const SDL_FRect *target) {
         if (!vignette || !SDL_SetTextureBlendMode(vignette, SDL_BLENDMODE_BLEND) ||
             !SDL_SetTextureScaleMode(vignette, SDL_SCALEMODE_LINEAR)) return false;
     }
-    /* Scanlines follow physical raster rows in either character-height mode.
-     * At 1:1 there is no subpixel room: retain the vignette without obscuring ink. */
-    if (scale > 1) {
+    /* Follow all 16 bitmap rows even in the compressed 80x50 mode. Do not
+     * darken single-pixel strokes when there is no room between glyph rows. */
+    double glyph_pitch = cell_height * scale / 16;
+    if (glyph_pitch >= 2) {
         SDL_FRect lines[4096];
-        int count = rows * cell_height;
+        int count = rows * 16;
         for (int y = 0; y < count; ++y)
-            lines[y] = (SDL_FRect){target->x, target->y + (y + 1) * scale - 1, target->w, 1};
+            lines[y] = (SDL_FRect){target->x, target->y + (float)floor((y + 1) * glyph_pitch) - 1, target->w, 1};
         if (!SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND) ||
-            !SDL_SetRenderDrawColor(renderer, 0, 0, 0, 48) ||
+            !SDL_SetRenderDrawColor(renderer, 0, 0, 0, 24) ||
             !SDL_RenderFillRects(renderer, lines, count)) return false;
     }
     return SDL_RenderTexture(renderer, vignette, NULL, target);

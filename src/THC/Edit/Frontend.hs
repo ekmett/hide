@@ -1,4 +1,4 @@
-module THC.Edit.Frontend (Backend(..), chooseBackend, chooseScale, parseWindowSize, parseScreenMode, modeSize, modeHeight, decodeKey) where
+module THC.Edit.Frontend (Backend(..), chooseBackend, chooseScale, parseWindowSize, parseScreenMode, modeSize, modeHeight, decodeKey, zoomDirection) where
 import Data.Bits ((.&.))
 import Data.Char (chr, isDigit)
 import Text.Read (readMaybe)
@@ -50,12 +50,21 @@ parseWindowSize value = case break (== 'x') value of
   _ -> Left "--size needs COLSxROWS (40..512 columns, 12..256 rows), e.g. 80x25."
 
 -- Explicit flags override the environment, including an invalid environment value.
-chooseScale :: Maybe String -> [String] -> Either String Int
+chooseScale :: Maybe String -> [String] -> Either String Double
 chooseScale env explicit = case explicit of
   [] -> maybe (Right 0) parse (env >>= \s -> if null s then Nothing else Just s)
   [value] -> parse value
   _ -> Left "Specify --scale only once."
   where
     parse value = case readMaybe value of
-      Just n | n>=1 && n<=8 -> Right n
-      _ -> Left "--scale or THC_EDIT_SCALE needs an integer from 1 to 8."
+      Just n | n>=1 && n<=8 -> Right (fromIntegral (round (n*8) :: Int)/8)
+      _ -> Left "--scale or THC_EDIT_SCALE needs a number from 1 to 8 (rounded to 1/8 steps)."
+
+-- Raw SDL modifier bits: Control or Alt, matching zoom in/out and reset.
+zoomDirection :: Int -> Int -> Maybe Int
+zoomDirection key mask
+  | mask .&. 6 == 0 = Nothing
+  | key==fromEnum '0' = Just 0
+  | key `elem` map fromEnum ['+','='] = Just 1
+  | key==fromEnum '-' = Just (-1)
+  | otherwise = Nothing

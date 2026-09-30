@@ -12,6 +12,13 @@ checks = do
     (chooseScale Nothing []==Right 0 && chooseScale (Just "3") []==Right 3 &&
      chooseScale (Just "bad") ["1"]==Right 1 && chooseScale (Just "") []==Right 0 &&
      all (either (const True) (const False)) [chooseScale (Just "0") [],chooseScale Nothing ["9"],chooseScale Nothing ["2","3"]])
+  check "fractional scales work through flags and environment"
+    (chooseScale (Just "1.125") []==Right 1.125 && chooseScale Nothing ["2.5"]==Right 2.5 &&
+     chooseScale Nothing ["1.3"]==Right 1.25 &&
+     all (either (const True) (const False)) [chooseScale Nothing ["NaN"],chooseScale Nothing ["Infinity"],chooseScale Nothing ["0.9"]])
+  check "Control and Alt zoom reset use the same modifiers as zoom in and out"
+    (all (\mods -> map (\key -> zoomDirection (fromEnum key) mods) "0+=-"==map Just [0,1,1,-1]) [2,4,3,5] &&
+     zoomDirection (fromEnum '0') 0==Nothing && zoomDirection (fromEnum 'a') 2==Nothing)
   check "terminal remains default" (chooseBackend Nothing [] == Right Terminal)
   check "environment selects metal" (chooseBackend (Just "metal") [] == Right Metal)
   check "explicit terminal beats environment" (chooseBackend (Just "vulkan") [Terminal] == Right Terminal)
