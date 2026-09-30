@@ -74,7 +74,7 @@ main = do
     cwd<-getCurrentDirectory
     base<-packageDirectory cwd
     (_,browsing)<-if sideTree loaded/=Nothing || Demo `elem` flags || Snapshot `elem` flags || Html `elem` flags then pure (False,loaded)
-      else applyEffects loaded [ReadTree base]
+      else applyEffects loaded [if null paths then ReadPath base else ReadTree base]
     let focused=browsing {sideTree=fmap (\tree -> tree {treeFocused=null (windows browsing)}) (sideTree browsing)}
     (_,withGit)<-applyEffects focused [RefreshGit (startingDirectory focused)]
     staged<-foldM stageScene withGit [scene | Scene scene<-flags]
@@ -138,7 +138,10 @@ applyEffects = foldM apply . (False,)
     apply (_,d) SetScreenMode{}=pure (False,d {status="Screen modes are available in a graphical window."})
     apply (_,d) (ReadPath path)=do
       directory<-doesDirectoryExist path
-      if directory then apply (False,d) (ReadTree path)
+      if directory then do
+        (_,browsed)<-apply (False,d) (ReadTree path)
+        package<-packageFile path
+        maybe (pure (False,browsed)) (\file -> apply (False,browsed) (ReadPath file)) package
       else do
         result<-loadFile path
         let opened=case result of

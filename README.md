@@ -84,7 +84,8 @@ Shortcuts > Function Keys. Command+O/S/W/Q also opens, saves, closes and exits.
   and commits from Tools > Approve changes.
 - Modal text inputs, checkboxes, radio buttons, lists and buttons. Try
   **Tools > Widget gallery** to exercise the dialog controls.
-- UTF-8 files, filename-selected syntax highlighting from Skylighting,
+- UTF-8 files, filename-selected syntax highlighting from Skylighting (including C, C++,
+  Cabal package files and `cabal.project`),
   selections, undo/redo, internal clipboard, bracketed terminal paste,
   find/replace-one and go-to-line.
 - Checked saves, dirty-close prompts, CRLF preservation, and optional WordStar
@@ -175,7 +176,13 @@ markers available.
 
 The side explorer opens the nearest enclosing Cabal package at startup, falling
 back to the current directory. An explicit directory argument takes precedence.
+When launched without a filename, or with a package directory, the editor opens
+its `.cabal` file too. With multiple package files, it prefers the directory
+namesake, then the first alphabetically. Explicit source-file arguments keep
+those files selected.
 Double-click an entry in the Open dialog to enter its directory or open its file.
+The file list uses green selection on cyan and displays the path/filter, byte
+count and local modification date/time.
 Dialog buttons highlight on hover and depress while held; releasing outside
 cancels the click. The focused button has white text; other buttons use black
 text with a white mnemonic. Ctrl or Alt plus that letter activates the button.

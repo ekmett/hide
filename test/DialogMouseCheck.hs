@@ -41,7 +41,7 @@ checks = do
   check "focused dialog button has white text on green" ("color:rgb(255,255,255);background:rgb(0,170,0)'>  Commit" `T.isInfixOf` snapshotHtml focusedButton)
   check "dialog button shadows are black" ("color:rgb(0,0,0);background:rgb(0,0,0)'>" `T.isInfixOf` snapshotHtml committing)
   check "dialog frames are white on gray" ("color:rgb(255,255,255);background:rgb(170,170,170)'>╔" `T.isInfixOf` snapshotHtml committing)
-  let browser=openBrowser "/project" "*" [Entry "folder" True Nothing,Entry "Main.hs" False Nothing] desktop
+  let browser=openBrowser "/project" "*" [Entry "folder" True Nothing Nothing,Entry "Main.hs" False Nothing Nothing] desktop
       fileDialog=fromMaybe (error "missing file dialog") (dialog browser)
       Rect fx fy _ _=at 1 (fieldRects browser fileDialog)
       (selected,singleEffects)=handleEvent (V.EvMouseDown (fx+2) (fy+3) V.BLeft []) browser

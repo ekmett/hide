@@ -46,6 +46,10 @@ main = do
   check "apostrophe identifiers" (map snd (highlight "foldl' x") == replicate 6 Plain ++ [Plain,Plain])
   check "highlight preserves all characters" (T.pack (map fst (highlight "x = \"hi\" -- ok\n")) == "x = \"hi\" -- ok\n")
   check "Python uses maintained language definition" (all ((== Keyword) . snd) (take 3 (highlightFor "test.py" "def f():\n    return 42\n")))
+  mapM_ (\(path,source) -> let tokens=highlightFor path source in
+    check ("maintained syntax for "++path) (any ((/=Plain) . snd) tokens && T.pack (map fst tokens)==source))
+    [("test.c","int main(void) { return 42; }\n"),("test.cpp","class Thing { public: int value = 42; };\n"),
+     ("test.cabal","name: example\nversion: 0.1\nlibrary\n  build-depends: base\n"),("cabal.project","packages: .\n")]
   check "unknown extension remains plain" (all ((== Plain) . snd) (highlightFor "notes.unknown" "module x = 42"))
   mapM_ (\text -> check "tokenizer preserves source positions" (T.pack (map fst (highlight text)) == text))
     ["", "\n", "\n\n", "module Main where\r\n\tmain = print \"λ界\"\r\n", "x = '\\x03bb'", "x = [1..10] -- unfinished", "{- open comment\n"]
@@ -124,7 +128,7 @@ main = do
       normalLine=T.lines (snapshot shadowBase) !! (my+1)
   check "menu shadow retains underlying characters" (T.take 2 (T.drop (mx+mw) shadowLine) == T.take 2 (T.drop (mx+mw) normalLine))
   check "shadow text is gray on black" ("color:rgb(170,170,170);background:rgb(0,0,0)'>xx" `T.isInfixOf` snapshotHtml shadowMenu)
-  let focusedTree=installTree "/tmp" [Entry "test.hs" False Nothing] demoDesktop
+  let focusedTree=installTree "/tmp" [Entry "test.hs" False Nothing Nothing] demoDesktop
       pastedTree=fst (handleEvent (V.EvPaste "oops") focusedTree)
       undoneTree=fst (runCommand Undo focusedTree)
   check "tree focus blocks background paste" (buffers pastedTree == buffers focusedTree)
@@ -143,9 +147,11 @@ main = do
   check "File Exit mnemonic is X" (snd (handleEvent (V.EvKey (V.KChar 'x') []) fileMenu) == [Exit])
   check "File Save as mnemonic is A" (case dialog (key (V.KChar 'a') [] fileMenu) of Just dg -> dialogTitle dg == "Save file as"; _ -> False)
   check "status shortcut is red" ("color:rgb(170,0,0);background:rgb(170,170,170)'>F1" `T.isInfixOf` snapshotHtml d)
-  let entries = [Entry "src" True Nothing, Entry "Main.hs" False (Just 12)]
+  let entries = [Entry "src" True Nothing Nothing, Entry "Main.hs" False (Just 12) (Just (read "1992-10-30 08:00:00"))]
       browsing = openBrowser "/tmp" "*.hs" entries d
       chosen = browsing {dialog=fmap (\dg -> dg {focus=1,fields=[Input "Name" "*.hs" 4,FileList entries 1]}) (dialog browsing)}
+  check "file browser selection is white on green" ("color:rgb(255,255,255);background:rgb(0,170,0)'> Main.hs" `T.isInfixOf` snapshotHtml chosen)
+  check "file browser shows path size and local timestamp" (all (`T.isInfixOf` snapshot chosen) ["/tmp/*.hs","Main.hs","12 bytes","Oct 30, 1992 08:00"])
   check "browser enter opens selected file" (snd (handleEvent (V.EvKey V.KEnter []) chosen) == [ReadPath "/tmp/Main.hs"])
   let naming=browsing {dialog=fmap (\dg -> dg {focus=0}) (dialog browsing)}
       erased=key (V.KChar 'u') [V.MCtrl] naming

@@ -381,7 +381,7 @@ fieldHeight Input{} = 3
 fieldHeight CheckBox{} = 2
 fieldHeight (Radio _ xs _) = length xs+2
 fieldHeight ListBox{} = 6
-fieldHeight FileList{} = 11
+fieldHeight FileList{} = 13
 
 dialogRect :: Desktop -> Dialog -> Rect
 dialogRect d dg = Rect ((sw-w) `div` 2) (max 1 ((sh-h) `div` 2)) w h
@@ -995,7 +995,7 @@ treeMouse x y button tree d = case button of
   _ -> (d,[])
 
 openBrowser :: FilePath -> Text -> [Entry] -> Desktop -> Desktop
-openBrowser base pattern entries d = d {dialog=Just (Dialog "Open a file" (Opening base pattern entries) [Input "Name" pattern (T.length pattern),FileList entries 0] 1 ["Open","Cancel"] [T.pack base]),menu=Nothing,drag=Nothing,dragOriginal=Nothing}
+openBrowser base pattern entries d = d {dialog=Just (Dialog "Open a file" (Opening base pattern entries) [Input "Name" pattern (T.length pattern),FileList entries 0] 1 ["Open","Cancel"] []),menu=Nothing,drag=Nothing,dragOriginal=Nothing}
 
 addHelp :: Text -> Desktop -> Desktop
 addHelp text d = addReadOnly "Turbo Haskell Help" text d

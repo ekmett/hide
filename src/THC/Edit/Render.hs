@@ -12,7 +12,8 @@ import Data.Foldable (toList)
 import Data.List (groupBy)
 import Data.Char (isSpace, toLower)
 import Data.Maybe (fromMaybe)
-import System.FilePath (takeFileName)
+import System.FilePath (takeFileName, (</>))
+import Data.Time (formatTime, defaultTimeLocale)
 import THC.Edit.Buffer
 import THC.Edit.Model
 import THC.Edit.Syntax
@@ -241,19 +242,30 @@ dialogLayers d dg =
       | otherwise = [place fx (max (y+2) fy) (V.cropBottom (max 0 (y+h-3-max (y+2) fy)) (V.translateY (min 0 (fy-y-2)) image))]
       where
         a=if focus dg==i then selected else paper
+        inputColor=case purpose dg of Opening{} -> attr white blue; _ -> attr black scrollCyan
         image=case field of
           Input name value p -> let offset=if focus dg==i then max 0 (displayColumn value p-fw+1) else 0
-                               in V.vertCat [row paper fw name,V.cropRight fw (V.translateX (negate offset) (label (attr black (V.RGBColor 0 170 170)) value) V.<|> V.charFill (attr black (V.RGBColor 0 170 170)) ' ' fw 1)]
+                               in V.vertCat [row paper fw name,V.cropRight fw (V.translateX (negate offset) (label inputColor value) V.<|> V.charFill inputColor ' ' fw 1)]
           CheckBox name checked -> row a fw ((if checked then "[X] " else "[ ] ")<>name)
           Radio name values chosen -> V.vertCat (row paper fw name:[row (if focus dg==i && n==chosen then selected else paper) fw ((if n==chosen then "(●) " else "( ) ")<>v) | (n,v)<-zip [0..] values])
           FileList entries chosen ->
             let cw=max 1 ((fw-3) `div` 2); page=(max 0 chosen `div` 16)*16
+                listColor=attr black scrollCyan
+                borderColor=attr blue scrollCyan
                 item idx=case drop idx entries of
-                  e:_ -> row (if idx==chosen then selected else paper) cw (" "<>entryName e<>(if entryDirectory e then "/" else ""))
-                  _ -> row paper cw ""
-                bar=label paper "┌" V.<|> V.charFill paper '─' cw 1 V.<|> label paper "┬" V.<|> V.charFill paper '─' cw 1 V.<|> label paper "┐"
-                line r=label paper "│" V.<|> item (page+r) V.<|> label paper "│" V.<|> item (page+8+r) V.<|> label paper "│"
-            in V.vertCat ([row paper fw "Files",bar] ++ [line r | r<-[0..7]] ++ [label paper "└" V.<|> V.charFill paper '─' cw 1 V.<|> label paper "┴" V.<|> V.charFill paper '─' cw 1 V.<|> label paper "┘"])
+                  e:_ -> row (if idx==chosen then attr (if focus dg==i then white else black) green else listColor) cw (" "<>entryName e<>(if entryDirectory e then "/" else ""))
+                  _ -> row listColor cw ""
+                bar=label borderColor "┌" V.<|> V.charFill borderColor '─' cw 1 V.<|> label borderColor "┬" V.<|> V.charFill borderColor '─' cw 1 V.<|> label borderColor "┐"
+                line r=label borderColor "│" V.<|> item (page+r) V.<|> label borderColor "│" V.<|> item (page+8+r) V.<|> label borderColor "│"
+                path=case purpose dg of Opening base pattern _ -> T.pack (base </> T.unpack pattern); _ -> ""
+                details=case drop chosen entries of
+                  entry:_ | chosen>=0 ->
+                    let size=if entryDirectory entry then "<DIR>" else maybe "?" (T.pack . show) (entryBytes entry)<>" bytes"
+                        stamp=maybe "" (T.pack . formatTime defaultTimeLocale "%b %e, %Y %H:%M") (entryModified entry)
+                        suffix="  "<>size<>"  "<>stamp
+                    in T.take (max 0 (fw-T.length suffix)) (entryName entry)<>suffix
+                  _ -> ""
+            in V.vertCat ([row paper fw "Files",bar] ++ [line r | r<-[0..7]] ++ [label borderColor "└" V.<|> V.charFill borderColor '─' cw 1 V.<|> label borderColor "┴" V.<|> V.charFill borderColor '─' cw 1 V.<|> label borderColor "┘",row (attr scrollCyan blue) fw path,row (attr scrollCyan blue) fw details])
           ListBox name values chosen -> V.vertCat (row paper fw name:[row (if n==chosen then a else paper) fw (" "<>v) | (n,v)<-take 4 (drop (max 0 (chosen-3)) (zip [0..] values))])
 
 snapshot :: Desktop -> Text
