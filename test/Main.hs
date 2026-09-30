@@ -78,5 +78,14 @@ main = do
   let abc = moveTo False 1 (addDocument Nothing (newBuffer "abc") d)
   check "wrapped search spans old cursor" (maybe False ((== (0,3)) . ordered . selection) (activeWindow (findText "abc" abc)))
   check "control placeholders use one column" (displayColumn "a\SOHb" 2 == 2 && columnOffset "a\SOHb" 2 == 2)
+  let crowded = iterate (fst . runCommand New) d !! 6
+      tiled = fst (runCommand Tile crowded)
+  check "tile refuses unusably short windows" (map bounds (windows tiled) == map bounds (windows crowded))
+  let gallery = fst (runCommand Gallery (initialDesktop (80,12)))
+      scrolled = iterate (key (V.KChar '\t') []) gallery !! 3
+      borderClick = case dialog scrolled of
+        Just dg -> let Rect x y _ _ = dialogRect scrolled dg in fst (handleEvent (V.EvMouseDown (x+4) y V.BLeft []) scrolled)
+        Nothing -> scrolled
+  check "clipped dialog fields cannot receive border clicks" (dialog borderClick == dialog scrolled)
   FilesCheck.checks
   putStrLn "editor checks passed"

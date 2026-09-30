@@ -1,6 +1,7 @@
 # THC Edit: Turbo Haskell's editor
 
-Status: proposed design for review; implementation has not started.
+Status: approved. The desktop and local-file editing milestone is implemented.
+HLS and Cabal project browsing remain planned; see the implementation record.
 
 ## Intent and decisions
 

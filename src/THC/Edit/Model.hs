@@ -213,7 +213,9 @@ closeActive d = case windows d of
   w:ws -> d {windows = ws, buffers = if any ((==bufferId w) . bufferId) ws then buffers d else M.delete (bufferId w) (buffers d)}
 
 tileWindows :: Bool -> Desktop -> Desktop
-tileWindows vertical d = d {windows = zipWith place [0..] (windows d)}
+tileWindows vertical d
+  | extent `div` n < (if vertical then 16 else 5) = d {status="Not enough room to tile; enlarge the terminal."}
+  | otherwise = d {windows = zipWith place [0..] (windows d)}
   where
     n = max 1 (length (windows d)); (sw,sh) = screenSize d; extent = if vertical then sw else sh-2
     place i w = w {bounds = if vertical then Rect start 1 size (sh-2) else Rect 0 (1+start) sw size, restoredBounds = Nothing}
@@ -437,7 +439,7 @@ dialogEvent ev dg d = case ev of
     Left _ -> (d,[])
   V.EvMouseDown x y V.BLeft _ -> case findIndex (\r -> inside r x y) (buttonRects d dg) of
     Just i -> submitDialog i dg d
-    Nothing -> case findIndex (\r -> inside r x y && y < top (dialogRect d dg)+height (dialogRect d dg)-3) (fieldRects d dg) of
+    Nothing -> case findIndex (\r -> inside r x y && y >= top (dialogRect d dg)+2 && y < top (dialogRect d dg)+height (dialogRect d dg)-3) (fieldRects d dg) of
       Nothing -> (d,[])
       Just i -> let Rect l t _ _ = fieldRects d dg !! i
                     click (Input label value pos) = Input label value (columnOffset value (max 0 (x-l)+max 0 (displayColumn value pos-width (fieldRects d dg !! i)+1)))
