@@ -1,8 +1,12 @@
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE CPP, OverloadedStrings #-}
 module Main where
+#ifdef WITH_WINDOW
+import qualified FontCheck
+#endif
 import Control.Monad (unless)
 import qualified Data.Text as T
 import THC.Edit.App (demoDesktop)
+import qualified WindowCheck
 import qualified FilesCheck
 import THC.Edit.Render
 import THC.Edit.Buffer
@@ -87,5 +91,9 @@ main = do
         Just dg -> let Rect x y _ _ = dialogRect scrolled dg in fst (handleEvent (V.EvMouseDown (x+4) y V.BLeft []) scrolled)
         Nothing -> scrolled
   check "clipped dialog fields cannot receive border clicks" (dialog borderClick == dialog scrolled)
+  WindowCheck.checks
+#ifdef WITH_WINDOW
+  FontCheck.checks
+#endif
   FilesCheck.checks
   putStrLn "editor checks passed"

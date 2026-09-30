@@ -11,16 +11,24 @@ import Graphics.Vty.CrossPlatform (mkVty)
 import qualified Graphics.Vty as V
 import System.Console.GetOpt
 import System.Directory (doesDirectoryExist)
-import System.Environment (getArgs)
+import System.Environment (getArgs, lookupEnv)
+import Text.Read (readMaybe)
+import THC.Edit.Frontend
+import THC.Edit.Window (runWindow)
 import System.Exit (die)
 import THC.Edit.Buffer
 import THC.Edit.Model
 import THC.Edit.Render
 import THC.Edit.Files
 
-data Option = Demo | WordStar | Snapshot | Html | Scene String | Usage deriving Eq
+data Option = Use Backend | Scale String | Demo | WordStar | Snapshot | Html | Scene String | Usage deriving Eq
 options :: [OptDescr Option]
-options = [Option [] ["demo"] (NoArg Demo) "Open a sample Haskell buffer"
+options = [Option [] ["metal"] (NoArg (Use Metal)) "Open a Metal window"
+          ,Option [] ["vulkan"] (NoArg (Use Vulkan)) "Open a Vulkan window"
+          ,Option [] ["window"] (NoArg (Use Auto)) "Open a window using the platform backend"
+          ,Option [] ["terminal"] (NoArg (Use Terminal)) "Use the terminal (override THC_EDIT_BACKEND)"
+          ,Option [] ["scale"] (ReqArg Scale "N") "Integer window pixel scale, 1 to 8"
+          ,Option [] ["demo"] (NoArg Demo) "Open a sample Haskell buffer"
           ,Option [] ["wordstar"] (NoArg WordStar) "Use WordStar editing keys"
           ,Option [] ["snapshot"] (NoArg Snapshot) "Print an 80x25 text snapshot and exit"
           ,Option [] ["snapshot-html"] (NoArg Html) "Print an HTML preview of actual Vty output and exit"
@@ -30,16 +38,23 @@ options = [Option [] ["demo"] (NoArg Demo) "Open a sample Haskell buffer"
 main :: IO ()
 main = do
   args<-getArgs
+  backendDefault<-lookupEnv "THC_EDIT_BACKEND"
   let (flags,paths,errors)=getOpt Permute options args
   if not (null errors) then die (concat errors)
   else if Usage `elem` flags then putStr (usageInfo "Usage: thc-edit [OPTIONS] [--] [FILE.hs ...]\n\nTurbo Haskell source editor.\nF2 Save, F3 Open, F10 Menu, Alt+X Exit.\n" options)
   else do
+    backend <- either die pure (chooseBackend backendDefault [b | Use b <- flags])
+    scale <- case [s | Scale s <- flags] of
+      [] -> pure 0
+      [s] | Just n <- readMaybe s, n >= 1, n <= 8 -> pure n
+      _ -> die "--scale needs one integer from 1 to 8."
     let initial=if Demo `elem` flags then demoDesktop else initialDesktop (80,25)
         configured=initial {wordStar=WordStar `elem` flags}
     (_,loaded)<-applyEffects configured (map ReadPath paths)
     let staged=foldl setScene loaded [scene | Scene scene<-flags]
     if Html `elem` flags then TIO.putStr (snapshotHtml staged)
     else if Snapshot `elem` flags then TIO.putStr (snapshot staged)
+    else if backend /= Terminal then runWindow backend scale applyEffects staged
     else bracket (mkVty V.defaultConfig) V.shutdown $ \vty -> do
       when (V.supportsMode (V.outputIface vty) V.Mouse) (V.setMode (V.outputIface vty) V.Mouse True)
       when (V.supportsMode (V.outputIface vty) V.BracketedPaste) (V.setMode (V.outputIface vty) V.BracketedPaste True)
