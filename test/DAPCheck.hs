@@ -64,9 +64,10 @@ checks = do
       after <- DAP.request client "threads" Null
       afterEvents <- DAP.pollEvents client
       check "request after stop receives correlated error" (any (failed after) afterEvents)
-  withServer drain $ \port ->
+  withServer (\handle -> receive handle >> putMVar received () >> drain handle) $ \port ->
     bracket (DAP.startClient "127.0.0.1" port) DAP.stopClient $ \client -> do
       results <- mapM (\_ -> try (DAP.request client "threads" Null) :: IO (Either IOException Int)) [1..200 :: Int]
+      takeMVar received -- Ensure the server accepted before cancellation can stop the client.
       check "pending queue is bounded with prompt rejection" (any (either (const True) (const False)) results)
   withServer drain $ \port ->
     bracket (DAP.startClient "127.0.0.1" port) DAP.stopClient $ \client -> do
