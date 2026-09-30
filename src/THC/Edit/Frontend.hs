@@ -1,6 +1,7 @@
-module THC.Edit.Frontend (Backend(..), chooseBackend, decodeKey) where
+module THC.Edit.Frontend (Backend(..), chooseBackend, parseWindowSize, decodeKey) where
 import Data.Bits ((.&.))
-import Data.Char (chr)
+import Data.Char (chr, isDigit)
+import Text.Read (readMaybe)
 import Data.List (nub)
 import qualified Graphics.Vty as V
 
@@ -28,3 +29,10 @@ decodeKey key mask = fmap (`V.EvKey` mods) decoded
       | key >= 0 && key <= 0x10ffff && not (key >= 0xd800 && key <= 0xdfff) = Just (V.KChar (chr key))
       | key <= -101 && key >= -124 = Just (V.KFun (-key-100))
       | otherwise = lookup key [(-1,V.KUp),(-2,V.KDown),(-3,V.KLeft),(-4,V.KRight),(-5,V.KHome),(-6,V.KEnd),(-7,V.KPageUp),(-8,V.KPageDown),(-9,if mask .&. 1 /= 0 then V.KBackTab else V.KChar '\t'),(-10,V.KEnter),(-11,V.KEsc),(-12,V.KBS),(-13,V.KDel),(-14,V.KIns)]
+
+parseWindowSize :: String -> Either String (Int,Int)
+parseWindowSize value = case break (== 'x') value of
+  (w,'x':h) | all isDigit w && all isDigit h,
+              Just cols <- readMaybe w, Just rows <- readMaybe h,
+              cols >= 40, cols <= 512, rows >= 12, rows <= 256 -> Right (cols,rows)
+  _ -> Left "--size needs COLSxROWS (40..512 columns, 12..256 rows), e.g. 80x25."

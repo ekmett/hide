@@ -10,12 +10,14 @@ import qualified Data.Text.Lazy as TL
 import qualified Data.Map.Strict as M
 import Data.Foldable (toList)
 import Data.List (groupBy)
+import Data.Char (isSpace, toLower)
 import Data.Maybe (fromMaybe)
 import System.FilePath (takeFileName)
 import THC.Edit.Buffer
 import THC.Edit.Model
 import THC.Edit.Syntax
 import THC.Edit.Files (filePath)
+import THC.Edit.Browser (Entry(..))
 
 blue, gray, black, white, yellow, cyan, green, red :: V.Color
 blue=V.RGBColor 0 0 170; gray=V.RGBColor 170 170 170; black=V.RGBColor 0 0 0
@@ -24,7 +26,7 @@ green=V.RGBColor 0 170 0; red=V.RGBColor 170 0 0
 attr :: V.Color -> V.Color -> V.Attr
 attr fg bg = V.defAttr `V.withForeColor` fg `V.withBackColor` bg
 paper, edit, selected, shadow :: V.Attr
-paper=attr black gray; edit=attr yellow blue; selected=attr black green; shadow=attr black black
+paper=attr black gray; edit=attr yellow blue; selected=attr black green; shadow=attr gray black
 
 label :: V.Attr -> Text -> V.Image
 label = V.text'
@@ -43,16 +45,23 @@ renderDesktop :: Desktop -> V.Picture
 renderDesktop d = (V.picForLayers layers) {V.picCursor=cursor}
   where
     (sw,sh)=screenSize d
-    layers = maybe [] (dialogLayers d) (dialog d) ++ maybe [] (menuLayers d) (menu d)
-      ++ [place 0 0 menuBar, place 0 (sh-1) statusBar]
+    layers = case dialog d of
+      Nothing -> withMenu
+      Just dg -> dialogLayers d dg ++ [castShadow (screenSize d) (dialogRect d dg) withMenu] ++ withMenu
+    withMenu = case menu d of
+      Nothing -> base
+      Just m@(i,_) -> menuLayers d m ++ [castShadow (screenSize d) (menuRect d i) base] ++ base
+    base = [place 0 0 menuBar, place 0 (sh-1) statusBar]
+      ++ maybe [] (treeLayers d) (sideTree d)
       ++ concat [windowLayers d (i==0) w | (i,w)<-zip [0::Int ..] (windows d)]
       ++ [V.charFill (attr gray blue) '░' sw sh]
     menuBar = V.cropRight sw (V.char paper ' ' V.<|> V.horizCat [V.char paper ' ' V.<|> label (attr red gray) (T.take 1 title) V.<|> label paper (T.drop 1 title<>" ") | (title,_,_)<-menus] V.<|> V.charFill paper ' ' sw 1)
-    statusBar = row paper sw (case prefix d of
+    statusBar = V.cropRight (max 0 (sw-T.length badge)) (keyLegend (case prefix d of
       Just c -> " Ctrl+"<>T.singleton c<>"-  (Esc cancels)"
       Nothing -> if dialog d/=Nothing then " Tab Next  Enter Select  Esc Cancel"
                  else if not (T.null (status d)) then " F1 Help | "<>status d
-                 else " F1 Help  F2 Save  F3 Open  F5 Zoom  F6 Next  F10 Menu")
+                 else " F1 Help  F2 Save  F3 Open  F5 Zoom  F6 Next  F10 Menu") V.<|> V.charFill paper ' ' sw 1) V.<|> label paper badge
+    badge = if T.null (branchStatus d) then "" else " │ "<>branchStatus d<>" "
     cursor = case dialog d of
       Just dg -> case drop (focus dg) (zip (fieldRects d dg) (fields dg)) of
         (Rect x y w _,Input _ value p):_ -> let offset=max 0 (displayColumn value p-w+1)
@@ -63,6 +72,17 @@ renderDesktop d = (V.picForLayers layers) {V.picCursor=cursor}
         (Just w,Just doc) -> let { (r,c)=lineColumn (contents (documentBuffer doc)) (caret (selection w)); x=left (bounds w)+1+displayColumn (lineAt (contents (documentBuffer doc)) r) c-scrollColumn w; y=top (bounds w)+1+r-scrollRow w }
                             in if inside (Rect (left (bounds w)+1) (top (bounds w)+1) (width (bounds w)-2) (height (bounds w)-2)) x y then V.Cursor x y else V.NoCursor
         _ -> V.NoCursor
+
+-- A DOS shadow changes the underlying cell attributes, preserving its glyph.
+-- Flatten only the layers below the popup, so stacked popups shadow correctly.
+castShadow :: (Int,Int) -> Rect -> [V.Image] -> V.Image
+castShadow size (Rect x y w h) below =
+  place (x+2) (y+1) (V.crop w h (V.translate (negate (x+2)) (negate (y+1)) dimmed))
+  where
+    dimmed = V.vertCat [V.horizCat (map dim (toList spans)) | spans <- toList (displayOpsForPic (V.picForLayers below) size)]
+    dim TextSpan{textSpanText=t} = label shadow (TL.toStrict t)
+    dim (Skip n) = V.charFill shadow ' ' n 1
+    dim (RowEnd n) = V.charFill shadow ' ' n 1
 
 windowLayers :: Desktop -> Bool -> Window -> [V.Image]
 windowLayers d active w =
@@ -75,17 +95,22 @@ windowLayers d active w =
   ,place x y (box frame active ww hh)]
   where
     Rect x y ww hh=bounds w
-    doc=fromMaybe (Document (newBuffer "") Nothing) (M.lookup (bufferId w) (buffers d))
+    doc=fromMaybe (Document (newBuffer "") Nothing Nothing) (M.lookup (bufferId w) (buffers d))
     b=documentBuffer doc; t=contents b
     file=maybe ("NONAME"<>T.pack (show (bufferId w))<>".HS") (T.pack . takeFileName . filePath) (documentFile doc)
-    title=" "<>file<>(if dirty b then " * " else " ")
+    title=" "<>fromMaybe file (documentLabel doc)<>(if dirty b then " * " else " ")
     frame=attr (if active then white else gray) blue
     (r,c)=lineColumn t (caret (selection w))
-    styledLines=splitStyled (highlight t)
+    styledLines=splitStyled (if documentLabel doc /= Nothing then [(ch,Plain) | ch<-T.unpack t] else highlight t)
     thumb=1+scrollRow w*max 1 (hh-5) `div` max 1 (length styledLines-1)
     contentWidth=max 0 (ww-2); contentHeight=max 0 (hh-2)
     textImage=V.vertCat [renderLine n | n<-[scrollRow w..scrollRow w+contentHeight-1]]
-    renderLine n=V.cropRight contentWidth (V.translateX (negate (scrollColumn w)) (styledImage active (selection w) (lineOffset t n) (fromMaybe [] (atMay styledLines n))) V.<|> V.charFill edit ' ' contentWidth 1)
+    renderLine n=V.cropRight contentWidth (V.translateX (negate (scrollColumn w)) (styledImage (lineColor n) active (selection w) (lineOffset t n) (fromMaybe [] (atMay styledLines n))) V.<|> V.charFill edit ' ' contentWidth 1)
+
+    lineColor n = case documentLabel doc of
+      Just "Git diff" -> let line=lineAt t n in Just (attr (if "+" `T.isPrefixOf` line then V.RGBColor 85 255 85 else if "-" `T.isPrefixOf` line then V.RGBColor 255 85 85 else if "@@" `T.isPrefixOf` line then cyan else yellow) blue)
+      Just _ -> Just (attr yellow blue)
+      Nothing -> Nothing
 
 atMay :: [a] -> Int -> Maybe a
 atMay xs n = case drop n xs of a:_ -> Just a; [] -> Nothing
@@ -94,8 +119,8 @@ splitStyled :: [(Char,Style)] -> [[(Char,Style)]]
 splitStyled []=[[]]
 splitStyled xs=let (a,b)=break ((=='\n').fst) xs in a:case b of []->[]; _:rest->splitStyled rest
 
-styledImage :: Bool -> Selection -> Int -> [(Char,Style)] -> V.Image
-styledImage active sel start chars = V.horizCat [label a (T.pack (map snd group)) | group@((a,_):_) <- groupBy (\a b -> fst a==fst b) (expand 0 start chars)]
+styledImage :: Maybe V.Attr -> Bool -> Selection -> Int -> [(Char,Style)] -> V.Image
+styledImage override active sel start chars = V.horizCat [label a (T.pack (map snd group)) | group@((a,_):_) <- groupBy (\a b -> fst a==fst b) (expand 0 start chars)]
   where
     (lo,hi)=ordered sel
     expand _ _ []=[]
@@ -104,18 +129,42 @@ styledImage active sel start chars = V.horizCat [label a (T.pack (map snd group)
       | c=='\t' = replicate (8-col `mod` 8) (a,' ') ++ expand (col+8-col `mod` 8) (offset+1) rest
       | c<' ' || c=='\DEL' = (a,'·'):expand (col+1) (offset+1) rest
       | otherwise = (a,c):expand (col+V.safeWcwidth c) (offset+1) rest
-      where a=if active && offset>=lo && offset<hi then attr blue gray else syntaxAttr style
+      where a=if active && offset>=lo && offset<hi then attr blue gray else fromMaybe (syntaxAttr style) override
     syntaxAttr style=attr (case style of Plain->yellow; Keyword->white; Comment->cyan; Literal->V.RGBColor 85 255 85; Number->V.RGBColor 255 85 255; Constructor->yellow; Pragma->gray) blue
 
-menuLayers :: Desktop -> (Int,Int) -> [V.Image]
-menuLayers d (i,j) = [place x y contents',place (x+2) (y+1) (V.charFill shadow ' ' w h)]
+treeLayers :: Desktop -> Sidebar -> [V.Image]
+treeLayers d tree = [place 0 1 image]
   where
-    Rect x y w h=menuRect d i
+    w=treeWidth tree; h=max 0 (snd (screenSize d)-2)
+    visible=max 0 (h-3)
+    listing=take visible (drop (treeScroll tree) (zip [0..] (treeRows tree)))
+    title=row paper (w-1) (" Files"<>T.replicate (max 0 (w-10)) " "<>"[×]") V.<|> label paper "│"
+    root=row paper (w-1) (T.pack (treeRoot tree)) V.<|> label paper "│"
+    line (i,node)=row (if treeFocused tree && i==treeSelected tree then selected else edit) (w-1) (T.replicate (2*nodeDepth node) " "<>(if nodeDirectory node then if nodeExpanded node then "[-] " else "[+] " else "    ")<>nodeName node) V.<|> label paper "│"
+    blank=row edit (w-1) "" V.<|> label paper "│"
+    image=V.crop w h (V.vertCat ([title,root] ++ map line listing ++ replicate (max 0 (h-2-length listing)) blank))
+
+keyLegend :: Text -> V.Image
+keyLegend text = V.horizCat [label (if shortcut token then attr red gray else paper) token | token <- T.groupBy (\a b -> isSpace a == isSpace b) text]
+  where shortcut t = t `elem` ["Tab","Enter","Esc"] || any (`T.isPrefixOf` t) ["F1","F2","F3","F5","F6","Ctrl+","Alt+","Shift+","Cmd+"]
+
+menuLayers :: Desktop -> (Int,Int) -> [V.Image]
+menuLayers d (i,j) = [place x y contents']
+  where
+    Rect x y w _=menuRect d i
     items=menuItems i
     contents'=V.vertCat [border '┌' '┐',V.vertCat (zipWith item [0..] items),border '└' '┘']
     border a b=V.char paper a V.<|> V.charFill paper '─' (max 0 (w-2)) 1 V.<|> V.char paper b
-    item n (MenuItem title key cmd)=V.char paper '│' V.<|> row a (w-2) (" "<>title<>T.replicate (max 1 (w-4-T.length title-T.length key)) " "<>key<>" ") V.<|> V.char paper '│'
-      where a=case cmd of Disabled _ -> attr (V.RGBColor 85 85 85) gray; _->if n==j then selected else paper
+    item n entry@(MenuItem title _ cmd) = V.char paper '│' V.<|> V.cropRight (w-2) content V.<|> V.char paper '│'
+      where
+        key = menuShortcut d entry
+        disabled = case cmd of Disabled _ -> True; _ -> False
+        bg = if n == j then green else gray
+        a = attr (if disabled then V.RGBColor 85 85 85 else black) bg
+        hot = attr red bg
+        pos = fromMaybe 0 (T.findIndex ((==menuMnemonic entry) . toLower) title)
+        name = label a (T.take pos title) V.<|> label (if disabled then a else hot) (T.take 1 (T.drop pos title)) V.<|> label a (T.drop (pos+1) title)
+        content = label a " " V.<|> name V.<|> label a (T.replicate (max 1 (w-4-T.length title-T.length key)) " ") V.<|> label hot key V.<|> label a " "
 
 dialogLayers :: Desktop -> Dialog -> [V.Image]
 dialogLayers d dg =
@@ -123,7 +172,7 @@ dialogLayers d dg =
   ++ [place bx by (row a bw ("[ "<>name<>" ]")) | (i,(Rect bx by bw _,name))<-zip [0..] (zip (buttonRects d dg) (buttons dg)),let a=if focus dg==length (fields dg)+i then attr white green else attr black (V.RGBColor 0 170 170)]
   ++ concat [fieldLayer i r f | (i,(r,f))<-zip [0..] (zip (fieldRects d dg) (fields dg))]
   ++ [place (x+3) (y+2+i) (row paper (w-6) line) | (i,line)<-zip [0..] (body dg),y+2+i<y+h-3]
-  ++ [place x y (box paper True w h),place (x+2) (y+1) (V.charFill shadow ' ' w h)]
+  ++ [place x y (box paper True w h)]
   where
     Rect x y w h=dialogRect d dg
     title=" "<>dialogTitle dg<>" "
@@ -137,6 +186,14 @@ dialogLayers d dg =
                                in V.vertCat [row paper fw name,V.cropRight fw (V.translateX (negate offset) (label (attr black (V.RGBColor 0 170 170)) value) V.<|> V.charFill (attr black (V.RGBColor 0 170 170)) ' ' fw 1)]
           CheckBox name checked -> row a fw ((if checked then "[X] " else "[ ] ")<>name)
           Radio name values chosen -> V.vertCat (row paper fw name:[row (if focus dg==i && n==chosen then selected else paper) fw ((if n==chosen then "(●) " else "( ) ")<>v) | (n,v)<-zip [0..] values])
+          FileList entries chosen ->
+            let cw=max 1 ((fw-3) `div` 2); page=(max 0 chosen `div` 16)*16
+                item idx=case drop idx entries of
+                  e:_ -> row (if idx==chosen then selected else paper) cw (" "<>entryName e<>(if entryDirectory e then "/" else ""))
+                  _ -> row paper cw ""
+                bar=label paper "┌" V.<|> V.charFill paper '─' cw 1 V.<|> label paper "┬" V.<|> V.charFill paper '─' cw 1 V.<|> label paper "┐"
+                line r=label paper "│" V.<|> item (page+r) V.<|> label paper "│" V.<|> item (page+8+r) V.<|> label paper "│"
+            in V.vertCat ([row paper fw "Files",bar] ++ [line r | r<-[0..7]] ++ [label paper "└" V.<|> V.charFill paper '─' cw 1 V.<|> label paper "┴" V.<|> V.charFill paper '─' cw 1 V.<|> label paper "┘"])
           ListBox name values chosen -> V.vertCat (row paper fw name:[row (if n==chosen then a else paper) fw (" "<>v) | (n,v)<-take 4 (drop (max 0 (chosen-3)) (zip [0..] values))])
 
 snapshot :: Desktop -> Text

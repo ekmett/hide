@@ -10,6 +10,9 @@ import Data.Maybe (listToMaybe, fromMaybe)
 import Data.List (find, findIndex)
 import Data.Char (toLower, isPrint)
 import Text.Read (readMaybe)
+import System.FilePath ((</>), takeDirectory)
+import THC.Edit.Browser (Entry(..))
+import THC.Edit.Git (GitReview)
 import THC.Edit.Buffer
 import THC.Edit.Files (FileState(..))
 
@@ -18,7 +21,7 @@ data Rect = Rect { left :: Int, top :: Int, width :: Int, height :: Int } derivi
 inside :: Rect -> Int -> Int -> Bool
 inside (Rect x y w h) a b = a >= x && a < x+w && b >= y && b < y+h
 
-data Document = Document { documentBuffer :: Buffer, documentFile :: Maybe FileState } deriving (Eq,Show)
+data Document = Document { documentBuffer :: Buffer, documentFile :: Maybe FileState, documentLabel :: Maybe Text } deriving (Eq,Show)
 data Window = Window
   { windowId :: Int, bufferId :: Int, bounds :: Rect, selection :: Selection
   , scrollRow :: Int, scrollColumn :: Int, restoredBounds :: Maybe Rect
@@ -26,21 +29,23 @@ data Window = Window
 data Command = New | Open | Save | SaveAs | Close | Quit | Undo | Redo | Cut | Copy | Paste
   | Find | FindNext | Replace | GoTo | SelectAll | Zoom | NextWindow | Cascade | Tile
   | SplitVertical | SplitHorizontal | About | Help | EditorOptions | Gallery
-  | Disabled Text deriving (Eq,Show)
-data Effect = ReadPath FilePath | SaveDocument Int (Maybe FilePath) (Maybe Command) | Exit deriving (Eq,Show)
-data Field = Input Text Text Int | CheckBox Text Bool | Radio Text [Text] Int | ListBox Text [Text] Int deriving (Eq,Show)
-data Purpose = Opening | Saving Int (Maybe Command) | Finding | Replacing | GoingTo
+  | ToggleTree | GitDiff | GitCommit | Disabled Text deriving (Eq,Show)
+data Effect = ReadPath FilePath | BrowsePath FilePath Text | OpenChoice FilePath Text Text | ReadTree FilePath | ExpandTree Int | ReadHelp | RefreshGit FilePath | ReadGitDiff | AskGitCommit | WriteGitCommit Text | SaveDocument Int (Maybe FilePath) (Maybe Command) | Exit deriving (Eq,Show)
+data Field = Input Text Text Int | CheckBox Text Bool | Radio Text [Text] Int | ListBox Text [Text] Int | FileList [Entry] Int deriving (Eq,Show)
+data Purpose = Opening FilePath Text [Entry] | Committing | Saving Int (Maybe Command) | Finding | Replacing | GoingTo
   | Confirm Command | Information | Settings | Widgets deriving (Eq,Show)
 data Dialog = Dialog
   { dialogTitle :: Text, purpose :: Purpose, fields :: [Field], focus :: Int
   , buttons :: [Text], body :: [Text]
   } deriving (Eq,Show)
-data Drag = Moving Int Int Int | Resizing Int Int Int | Selecting Int deriving (Eq,Show)
+data TreeRow = TreeRow { nodeName :: Text, nodePath :: FilePath, nodeDepth :: Int, nodeDirectory :: Bool, nodeExpanded :: Bool } deriving (Eq,Show)
+data Sidebar = Sidebar { treeRoot :: FilePath, treeRows :: [TreeRow], treeSelected :: Int, treeScroll :: Int, treeWidth :: Int, treeFocused :: Bool } deriving (Eq,Show)
+data Drag = DockSizing | Moving Int Int Int | Resizing Int Int Int | Selecting Int deriving (Eq,Show)
 data Desktop = Desktop
   { screenSize :: (Int,Int), windows :: [Window], buffers :: M.Map Int Document
   , nextId :: Int, menu :: Maybe (Int,Int), dialog :: Maybe Dialog, drag :: Maybe Drag
   , clipboard :: Text, wordStar :: Bool, prefix :: Maybe Char, status :: Text
-  , blockStart :: Maybe (Int,Int), lastFind :: Text
+  , blockStart :: Maybe (Int,Int), lastFind :: Text, sideTree :: Maybe Sidebar, branchStatus :: Text, nativeMac :: Bool, gitReview :: Maybe GitReview
   } deriving (Eq,Show)
 
 data MenuItem = MenuItem Text Text Command deriving (Eq,Show)
@@ -52,12 +57,25 @@ menus =
   ,("Run",'r',[off "Run" "Ctrl+F9" "THC execution is not connected yet."])
   ,("Compile",'c',[off "Compile" "Alt+F9" "THC compilation is not connected yet.",off "Make" "F9" "Cabal project integration is a later milestone."])
   ,("Debug",'d',[off "Inspect type..." "" "HLS is not connected yet.",off "Go to definition" "" "HLS is not connected yet."])
-  ,("Tools",'t',[mi "Widget gallery..." "" Gallery,off "Project browser..." "" "Cabal component browsing is not connected yet."])
+  ,("Tools",'t',[mi "File tree" "Ctrl+B" ToggleTree,mi "Git diff..." "" GitDiff,mi "Approve changes..." "" GitCommit,mi "Widget gallery..." "" Gallery,off "Project browser..." "" "Cabal component browsing is not connected yet."])
   ,("Options",'o',[mi "Editor..." "" EditorOptions])
   ,("Window",'w',[mi "Tile" "" Tile,mi "Cascade" "" Cascade,mi "Split vertically" "" SplitVertical,mi "Split horizontally" "" SplitHorizontal,mi "Zoom" "F5" Zoom,mi "Next" "F6" NextWindow,mi "Close" "Alt+F3" Close])
   ,("Help",'h',[mi "Contents" "F1" Help,mi "About Turbo Haskell..." "" About])]
   where mi = MenuItem
         off title key reason = mi title key (Disabled reason)
+
+menuMnemonic :: MenuItem -> Char
+menuMnemonic (MenuItem title _ cmd) = case cmd of
+  ToggleTree -> 'f'; GitDiff -> 'g'; GitCommit -> 'a'
+  SaveAs -> 'a'; Quit -> 'x'; Cut -> 't'; SelectAll -> 'a'
+  SplitVertical -> 'v'; SplitHorizontal -> 'h'
+  Close -> 'l'
+  _ -> toLower (T.head title)
+
+menuShortcut :: Desktop -> MenuItem -> Text
+menuShortcut d (MenuItem _ key cmd)
+  | nativeMac d = fromMaybe key (lookup cmd [(New,"Cmd+N"),(Open,"Cmd+O"),(Save,"Cmd+S"),(SaveAs,"Cmd+Shift+S"),(Close,"Cmd+W"),(Quit,"Cmd+Q"),(Undo,"Cmd+Z"),(Redo,"Cmd+Shift+Z"),(Copy,"Cmd+C"),(Cut,"Cmd+X"),(Paste,"Cmd+V"),(SelectAll,"Cmd+A"),(Find,"Cmd+F"),(FindNext,"Cmd+G")])
+  | otherwise = key
 
 menuPositions :: [(Int,Int)]
 menuPositions = zip starts widths
@@ -70,10 +88,10 @@ menuRect :: Desktop -> Int -> Rect
 menuRect d i = Rect (min x (max 0 (sw-w))) 1 w (length (menuItems i)+2)
   where x = fst (menuPositions !! i)
         sw = fst (screenSize d)
-        w = min sw (maximum [T.length t + T.length key + 5 | MenuItem t key _ <- menuItems i])
+        w = min sw (maximum [T.length t + T.length (menuShortcut d entry) + 5 | entry@(MenuItem t _ _) <- menuItems i])
 
 initialDesktop :: (Int,Int) -> Desktop
-initialDesktop size = Desktop size [] M.empty 1 Nothing Nothing Nothing "" False Nothing "" Nothing ""
+initialDesktop size = Desktop size [] M.empty 1 Nothing Nothing Nothing "" False Nothing "" Nothing "" Nothing "" False Nothing
 
 activeWindow :: Desktop -> Maybe Window
 activeWindow = listToMaybe . windows
@@ -85,15 +103,15 @@ fitRect (sw,sh) (Rect x y w h) = Rect (max 0 (min x (sw-w'))) (max 1 (min y (sh-
   where w' = max 1 (min sw (max 16 w)); h' = max 1 (min (max 1 (sh-2)) (max 5 h))
 
 addDocument :: Maybe FileState -> Buffer -> Desktop -> Desktop
-addDocument file b d = d { windows = w : windows d, buffers = M.insert i (Document b file) (buffers d), nextId = i+1 }
+addDocument file b d = d { windows = w : windows d, buffers = M.insert i (Document b file Nothing) (buffers d), nextId = i+1, sideTree=fmap (\tree -> tree {treeFocused=False}) (sideTree d) }
   where
     i = nextId d
     offset = length (windows d) `mod` 5
     (sw,sh) = screenSize d
-    w = Window i i (fitRect (screenSize d) (Rect offset (1+offset) (sw-offset) (sh-2-offset))) (Selection 0 0) 0 0 Nothing
+    w = Window i i (fitWindow d (Rect offset (1+offset) (sw-offset) (sh-2-offset))) (Selection 0 0) 0 0 Nothing
 
 focusWindow :: Int -> Desktop -> Desktop
-focusWindow i d = d { windows = filter ((==i) . windowId) (windows d) ++ filter ((/=i) . windowId) (windows d) }
+focusWindow i d = d { sideTree=fmap (\tree -> tree {treeFocused=False}) (sideTree d), windows = filter ((==i) . windowId) (windows d) ++ filter ((/=i) . windowId) (windows d) }
 
 modifyActive :: (Window -> Window) -> Desktop -> Desktop
 modifyActive f d = d { windows = case windows d of [] -> []; w:ws -> f w : ws }
@@ -112,7 +130,9 @@ ensureVisible d = case (activeWindow d, activeDocument d) of
 
 -- Map other view positions through the changed character interval.
 editActive :: (Selection -> Buffer -> Buffer) -> Maybe Int -> Desktop -> Desktop
+editActive _ _ d | maybe False treeFocused (sideTree d) = d
 editActive f cursor d = case (activeWindow d, activeDocument d) of
+  (Just _, Just doc) | documentLabel doc /= Nothing -> d {status="This window is read-only."}
   (Just active, Just doc) -> ensureVisible d { buffers = M.insert bid doc {documentBuffer = changed} (buffers d), windows = map adjust (windows d) }
     where
       bid = bufferId active
@@ -152,10 +172,11 @@ runCommand :: Command -> Desktop -> (Desktop,[Effect])
 runCommand cmd source = go cmd (source {menu = Nothing, prefix = Nothing, drag = Nothing})
   where
     go New d = (addDocument Nothing (newBuffer "") d,[])
-    go Open d = (prompt "Open" Opening [Input "Name" "" 0] d,[])
+    go Open d = (d,[BrowsePath (startingDirectory d) "*.hs"])
     go Save d = saveRequest Nothing d
     go SaveAs d = case activeWindow d of
       Nothing -> (d,[])
+      Just _ | maybe False ((/=Nothing) . documentLabel) (activeDocument d) -> (d {status="This window is read-only."},[])
       Just w -> (prompt "Save file as" (Saving (bufferId w) Nothing) [Input "Name" (currentPath d) (T.length (currentPath d))] d,[])
     go Quit d = case find (dirty . documentBuffer . snd) (M.toList (buffers d)) of
       Nothing -> (d,[Exit])
@@ -176,17 +197,20 @@ runCommand cmd source = go cmd (source {menu = Nothing, prefix = Nothing, drag =
     go GoTo d = (prompt "Go to line" GoingTo [Input "Line number" "1" 1] d,[])
     go Zoom d = (modifyActive zoom d,[]) where
       zoom w = case restoredBounds w of
-        Just r -> w {bounds = fitRect (screenSize d) r, restoredBounds = Nothing}
-        Nothing -> w {bounds = let (sw,sh) = screenSize d in Rect 0 1 sw (sh-2), restoredBounds = Just (bounds w)}
+        Just r -> w {bounds = fitWindow d r, restoredBounds = Nothing}
+        Nothing -> w {bounds = let (sw,sh) = screenSize d in Rect (treeWidthOf d) 1 (sw-treeWidthOf d) (sh-2), restoredBounds = Just (bounds w)}
     go NextWindow d = (d {windows = case windows d of [] -> []; w:ws -> ws++[w]},[])
     go Cascade d = (d {windows = zipWith cascade [0..] (windows d)},[]) where
       (sw,sh) = screenSize d
-      cascade i w = w {bounds = fitRect (screenSize d) (Rect (i `mod` 6) (1+i `mod` 6) (sw-6) (sh-8)), restoredBounds = Nothing}
+      cascade i w = w {bounds = fitWindow d (Rect (treeWidthOf d+i `mod` 6) (1+i `mod` 6) (sw-treeWidthOf d-6) (sh-8)), restoredBounds = Nothing}
     go Tile d = (tileWindows False d,[])
     go SplitVertical d = splitWindow True d
     go SplitHorizontal d = splitWindow False d
     go About d = (message "About Turbo Haskell" ["Turbo Haskell  0.1", "Copyright (c) 2026 Edward Kmett", "", "Haskell source editor"] d,[])
-    go Help d = (prompt "Turbo Help" Information [ListBox "Keyboard reference" helpLines 0] d,[])
+    go Help d = (d,[ReadHelp])
+    go ToggleTree d = case sideTree d of Just _ -> (setTree Nothing d,[]); Nothing -> (d,[ReadTree (startingDirectory d)])
+    go GitDiff d = (d,[ReadGitDiff])
+    go GitCommit d = (d,[AskGitCommit])
     go EditorOptions d = (prompt "Editor options" Settings [Radio "Key bindings" ["Modern","WordStar"] (if wordStar d then 1 else 0)] d,[])
     go Gallery d = (prompt "Dialog controls" Widgets [Input "Module name" "Main" 4,CheckBox "Auto indent" True,Radio "Tab width" ["4 columns","8 columns"] 1,ListBox "Source files" ["Main.hs","Types.hs","Parser.hs","Syntax.hs","Eval.hs"] 0] d,[])
     go (Disabled reason) d = (d {status = reason},[])
@@ -202,6 +226,7 @@ documentTitle d = if T.null (currentPath d) then "NONAME.HS" else currentPath d
 
 saveRequest :: Maybe Command -> Desktop -> (Desktop,[Effect])
 saveRequest after d = case (activeWindow d,activeDocument d) of
+  (Just _,Just doc) | documentLabel doc /= Nothing -> (d {status="This window is read-only."},[])
   (Just w,Just doc) -> case documentFile doc of
     Nothing -> (prompt "Save file as" (Saving (bufferId w) after) [Input "Name" "" 0] d,[])
     Just _ -> (d,[SaveDocument (bufferId w) Nothing after])
@@ -217,14 +242,14 @@ tileWindows vertical d
   | extent `div` n < (if vertical then 16 else 5) = d {status="Not enough room to tile; enlarge the terminal."}
   | otherwise = d {windows = zipWith place [0..] (windows d)}
   where
-    n = max 1 (length (windows d)); (sw,sh) = screenSize d; extent = if vertical then sw else sh-2
-    place i w = w {bounds = if vertical then Rect start 1 size (sh-2) else Rect 0 (1+start) sw size, restoredBounds = Nothing}
+    n = max 1 (length (windows d)); (sw,sh) = screenSize d; areaWidth=sw-treeWidthOf d; extent = if vertical then areaWidth else sh-2
+    place i w = w {bounds = if vertical then Rect (treeWidthOf d+start) 1 size (sh-2) else Rect (treeWidthOf d) (1+start) areaWidth size, restoredBounds = Nothing}
       where start = i*extent `div` n; size = (i+1)*extent `div` n-start
 
 splitWindow :: Bool -> Desktop -> (Desktop,[Effect])
 splitWindow vertical d = case activeWindow d of
   Nothing -> (d,[])
-  Just _ | (if vertical then fst (screenSize d) `div` (length (windows d)+1) < 16 else (snd (screenSize d)-2) `div` (length (windows d)+1) < 5) -> (d {status="Not enough room to split; enlarge the terminal."},[])
+  Just _ | (if vertical then (fst (screenSize d)-treeWidthOf d) `div` (length (windows d)+1) < 16 else (snd (screenSize d)-2) `div` (length (windows d)+1) < 5) -> (d {status="Not enough room to split; enlarge the terminal."},[])
   Just w -> (tileWindows vertical d {windows = w {windowId = nextId d} : windows d, nextId = nextId d+1},[])
 
 findText :: Text -> Desktop -> Desktop
@@ -247,6 +272,7 @@ fieldHeight Input{} = 3
 fieldHeight CheckBox{} = 2
 fieldHeight (Radio _ xs _) = length xs+2
 fieldHeight ListBox{} = 6
+fieldHeight FileList{} = 11
 
 dialogRect :: Desktop -> Dialog -> Rect
 dialogRect d dg = Rect ((sw-w) `div` 2) (max 1 ((sh-h) `div` 2)) w h
@@ -274,7 +300,7 @@ buttonRects d dg = zipWith (\bx label -> Rect bx (y+h-2) (T.length label+4) 1) s
     starts = scanl (\a b -> a+b+2) (x+max 1 ((w-total) `div` 2)) widths
 
 handleEvent :: V.Event -> Desktop -> (Desktop,[Effect])
-handleEvent (V.EvResize sw sh) d = (d {screenSize = (sw,sh),windows = map (\w -> w {bounds = fitRect (sw,sh) (bounds w)}) (windows d),drag = Nothing,menu = Nothing},[])
+handleEvent (V.EvResize sw sh) d = let resized=d {screenSize=(max 1 sw,max 3 sh),sideTree=fmap (\t -> t {treeWidth=min (treeWidth t) (max 0 (sw-16))}) (sideTree d)} in (resized {windows=map (\w -> w {bounds=fitWindow resized (bounds w)}) (windows d),drag=Nothing,menu=Nothing},[])
 handleEvent ev d | Just dg <- dialog d = dialogEvent ev dg d
 handleEvent ev d | Just m <- menu d = menuEvent ev m d
 handleEvent (V.EvMouseUp _ _ _) d = (d {drag = Nothing},[])
@@ -282,6 +308,7 @@ handleEvent (V.EvMouseDown x y button mods) d = mouseEvent x y button mods d
 handleEvent (V.EvPaste bytes) d = case TE.decodeUtf8' bytes of
   Left _ -> (message "Paste failed" ["The pasted text is not valid UTF-8."] d,[])
   Right t -> (insertText (T.filter (\c -> isPrint c || c `elem` ['\n','\r','\t']) t) d,[])
+handleEvent (V.EvKey key mods) d | Just tree <- sideTree d, treeFocused tree = treeKey key mods tree d
 handleEvent (V.EvKey key mods) d = keyEvent key mods d
 handleEvent _ d = (d,[])
 
@@ -293,7 +320,7 @@ menuEvent ev (i,j) d = case ev of
   V.EvKey V.KUp _ -> choose i (j-1)
   V.EvKey V.KDown _ -> choose i (j+1)
   V.EvKey V.KEnter _ -> invoke j
-  V.EvKey (V.KChar c) _ -> case findIndex (\(MenuItem t _ _) -> toLower c == toLower (T.head t)) (menuItems i) of
+  V.EvKey (V.KChar c) _ -> case findIndex (\item -> toLower c == menuMnemonic item) (menuItems i) of
     Just k -> invoke k
     _ -> (d,[])
   V.EvMouseDown x 0 V.BLeft _ -> case menuAt x of Just k -> choose k 0; _ -> (d {menu=Nothing},[])
@@ -308,13 +335,15 @@ menuAt x = findIndex (\(start,w) -> x >= start && x < start+w) menuPositions
 
 mouseEvent :: Int -> Int -> V.Button -> [V.Modifier] -> Desktop -> (Desktop,[Effect])
 mouseEvent x y V.BLeft _ d | Just capture <- drag d = (case capture of
-  Moving i dx dy -> mapWindow i (\w -> w {bounds = fitRect (screenSize d) (bounds w) {left=x-dx,top=y-dy},restoredBounds=Nothing}) d
-  Resizing i dx dy -> mapWindow i (\w -> w {bounds = fitRect (screenSize d) (bounds w) {width=x-left (bounds w)+dx,height=y-top (bounds w)+dy},restoredBounds=Nothing}) d
+  DockSizing -> resizeTree x d
+  Moving i dx dy -> mapWindow i (\w -> w {bounds = fitWindow d (bounds w) {left=x-dx,top=y-dy},restoredBounds=Nothing}) d
+  Resizing i dx dy -> mapWindow i (\w -> w {bounds = fitWindow d (bounds w) {width=x-left (bounds w)+dx,height=y-top (bounds w)+dy},restoredBounds=Nothing}) d
   Selecting i -> selectAt True x y (focusWindow i d),[])
 mouseEvent x 0 V.BLeft _ d = (d {menu = (\i -> (i,0)) <$> menuAt x},[])
+mouseEvent x y button _ d | Just tree <- sideTree d, x < treeWidth tree = treeMouse x y button tree d
 mouseEvent x y button mods d = case find (\w -> inside (bounds w) x y) (windows d) of
   Nothing -> (d,[])
-  Just w -> let focused = focusWindow (windowId w) d; Rect l t ww hh = bounds w in case button of
+  Just w -> let focused = focusWindow (windowId w) d {sideTree=fmap (\sidebar -> sidebar {treeFocused=False}) (sideTree d)}; Rect l t ww hh = bounds w in case button of
     V.BScrollUp -> (modifyActive (\v -> v {scrollRow=max 0 (scrollRow v-3)}) focused,[])
     V.BScrollDown -> (modifyActive (\v -> v {scrollRow=min (max 0 (length (textLines (activeText focused))-1)) (scrollRow v+3)}) focused,[])
     V.BLeft
@@ -357,7 +386,7 @@ keyEvent key mods d
   | key==V.KIns && V.MShift `elem` mods = runCommand Paste d
   | key==V.KDel && V.MShift `elem` mods = runCommand Cut d
   | ctrl, wordStar d, V.KChar c <- key = starKey (toLower c) d
-  | ctrl, V.KChar c <- key, Just cmd <- lookup (toLower c) [('s',Save),('o',Open),('n',New),('z',Undo),('y',Redo),('c',Copy),('x',Cut),('v',Paste),('a',SelectAll),('f',Find),('r',Replace),('g',GoTo),('l',FindNext),('q',Quit)] = runCommand cmd d
+  | ctrl, V.KChar c <- key, Just cmd <- lookup (toLower c) [('b',ToggleTree),('s',Save),('o',Open),('n',New),('z',Undo),('y',Redo),('c',Copy),('x',Cut),('v',Paste),('a',SelectAll),('f',Find),('r',Replace),('g',GoTo),('l',FindNext),('q',Quit)] = runCommand cmd d
   | otherwise = (editorKey key mods d,[])
   where ctrl = V.MCtrl `elem` mods
 
@@ -442,6 +471,7 @@ dialogEvent ev dg d = case ev of
     Nothing -> case findIndex (\r -> inside r x y && y >= top (dialogRect d dg)+2 && y < top (dialogRect d dg)+height (dialogRect d dg)-3) (fieldRects d dg) of
       Nothing -> (d,[])
       Just i -> let Rect l t _ _ = fieldRects d dg !! i
+                    click (FileList xs selected) = FileList xs (max 0 (min (length xs-1) ((max 0 selected `div` 16)*16+max 0 (y-t-2)+if x-l >= width (fieldRects d dg !! i) `div` 2 then 8 else 0)))
                     click (Input label value pos) = Input label value (columnOffset value (max 0 (x-l)+max 0 (displayColumn value pos-width (fieldRects d dg !! i)+1)))
                     click (CheckBox label b) = CheckBox label (not b)
                     click (Radio label xs _) = Radio label xs (max 0 (min (length xs-1) (y-t-1)))
@@ -454,7 +484,14 @@ dialogEvent ev dg d = case ev of
     count=length (fields dg)
     setFocus i = updateDialog dg {focus=i `mod` (count+length (buttons dg))}
     updateDialog new = (d {dialog=Just new},[])
-    updateField f | focus dg<count = updateDialog dg {fields=replaceAt (focus dg) (f (fields dg !! focus dg)) (fields dg)}
+    updateField f | focus dg<count =
+                    let old=fields dg !! focus dg
+                        changed=f old
+                        updated=replaceAt (focus dg) changed (fields dg)
+                        clear (FileList entries _) = FileList entries (-1)
+                        clear field = field
+                        typed = case (old,changed) of (Input _ a _,Input _ b _) -> a/=b; _ -> False
+                    in updateDialog dg {fields=if typed then map clear updated else updated}
                   | otherwise = (d,[])
 
 replaceAt :: Int -> a -> [a] -> [a]
@@ -474,6 +511,7 @@ fieldKey key mods field = case field of
     _ -> field
   CheckBox label value | key==V.KChar ' ' -> CheckBox label (not value)
   Radio label values chosen -> Radio label values (choose values chosen)
+  FileList values chosen -> FileList values (max 0 (min (length values-1) (case key of V.KLeft -> chosen-8; V.KRight -> chosen+8; V.KPageUp -> chosen-16; V.KPageDown -> chosen+16; V.KHome -> 0; V.KEnd -> length values-1; _ -> choose values chosen)))
   ListBox label values chosen -> ListBox label values (choose values chosen)
   _ -> field
   where choose xs n = max 0 (min (length xs-1) (n + case key of V.KUp -> -1; V.KDown -> 1; V.KLeft -> -1; V.KRight -> 1; V.KChar ' ' -> 1; _ -> 0))
@@ -483,7 +521,11 @@ submitDialog button dg original
   | button<0 || button>=length (buttons dg) = (original,[])
   | buttons dg !! button == "Cancel" = (d,[])
   | otherwise = case purpose dg of
-    Opening -> if T.null first then (original,[]) else (d,[ReadPath (T.unpack first)])
+    Opening base pattern entries
+      | focus dg `elem` [1,length (fields dg)], FileList _ selected:_ <- drop 1 (fields dg), selected>=0, entry:_ <- drop selected entries ->
+          if entryDirectory entry then (original,[BrowsePath (base </> T.unpack (entryName entry)) pattern]) else (d,[ReadPath (base </> T.unpack (entryName entry))])
+      | otherwise -> (original,[OpenChoice base first pattern])
+    Committing -> if T.null (T.strip first) then (original {status="Enter a commit message."},[]) else (original,[WriteGitCommit first])
     Saving bid after -> if T.null first then (original,[]) else (d,[SaveDocument bid (Just (T.unpack first)) after])
     Finding -> (findText first d,[])
     Replacing -> let found = findText first d
@@ -508,3 +550,92 @@ submitDialog button dg original
     discardActive s = case activeWindow s of
       Nothing -> s
       Just w -> s {windows=filter ((/=bufferId w) . bufferId) (windows s), buffers=M.delete (bufferId w) (buffers s)}
+
+
+startingDirectory :: Desktop -> FilePath
+startingDirectory d = maybe (maybe "." treeRoot (sideTree d)) (takeDirectory . filePath) (activeDocument d >>= documentFile)
+
+treeWidthOf :: Desktop -> Int
+treeWidthOf = maybe 0 treeWidth . sideTree
+
+fitWindow :: Desktop -> Rect -> Rect
+fitWindow d r = let offset=treeWidthOf d; (sw,sh)=screenSize d; fitted=fitRect (max 1 (sw-offset),sh) r {left=left r-offset} in fitted {left=left fitted+offset}
+
+setTree :: Maybe Sidebar -> Desktop -> Desktop
+setTree tree d = next {windows=map move (windows d)}
+  where
+    next=d {sideTree=tree,drag=Nothing}
+    old=treeWidthOf d; new=treeWidthOf next
+    available=max 1 (fst (screenSize d)-old); target=max 1 (fst (screenSize d)-new)
+    move w = w {bounds=let r=bounds w in fitWindow next r {left=new+(left r-old)*target `div` available,width=width r*target `div` available},restoredBounds=Nothing}
+
+resizeTree :: Int -> Desktop -> Desktop
+resizeTree x d = case sideTree d of
+  Nothing -> d
+  Just tree -> (setTree (Just tree {treeWidth=max 16 (min (fst (screenSize d)-20) (x+1))}) d) {drag=Just DockSizing}
+
+installTree :: FilePath -> [Entry] -> Desktop -> Desktop
+installTree root entries d = setTree (Just (Sidebar root (nodes root 0 entries) 0 0 (min 24 (max 0 (fst (screenSize d)-20))) True)) d
+
+nodes :: FilePath -> Int -> [Entry] -> [TreeRow]
+nodes base depth entries = [TreeRow (entryName e) (base </> T.unpack (entryName e)) depth (entryDirectory e) False | e<-entries,entryName e/=".."]
+
+expandTree :: Int -> [Entry] -> Desktop -> Desktop
+expandTree i entries d = d {sideTree=fmap expand (sideTree d)}
+  where expand t = case drop i (treeRows t) of
+          node:rest -> t {treeRows=take i (treeRows t) ++ [node {nodeExpanded=True}] ++ nodes (nodePath node) (nodeDepth node+1) entries ++ rest}
+          _ -> t
+
+activateTree :: Bool -> Int -> Desktop -> (Desktop,[Effect])
+activateTree forceOpen i d = case sideTree d of
+  Just tree | i>=0, node:rest <- drop i (treeRows tree) ->
+    let selected=d {sideTree=Just tree {treeSelected=i,treeFocused=True}} in
+    if nodeDirectory node then
+      if nodeExpanded node && not forceOpen then (selected {sideTree=Just tree {treeSelected=i,treeFocused=True,treeRows=take i (treeRows tree) ++ [node {nodeExpanded=False}] ++ dropWhile ((>nodeDepth node) . nodeDepth) rest}},[])
+      else if nodeExpanded node then (selected,[]) else (selected,[ExpandTree i])
+    else (selected {sideTree=Just tree {treeSelected=i,treeFocused=False}},[ReadPath (nodePath node)])
+  _ -> (d,[])
+
+treeKey :: V.Key -> [V.Modifier] -> Sidebar -> Desktop -> (Desktop,[Effect])
+treeKey key mods tree d = case key of
+  V.KUp -> move (-1)
+  V.KDown -> move 1
+  V.KPageUp -> move (-10)
+  V.KPageDown -> move 10
+  V.KEnter -> activateTree False (treeSelected tree) d
+  V.KRight -> activateTree True (treeSelected tree) d
+  V.KLeft -> case drop (treeSelected tree) (treeRows tree) of
+    node:_ | nodeExpanded node -> activateTree False (treeSelected tree) d
+    node:_ -> let ancestors=[i | (i,n)<-zip [0..] (take (treeSelected tree) (treeRows tree)),nodeDepth n < nodeDepth node] in moveToNode (if null ancestors then 0 else last ancestors)
+    _ -> (d,[])
+  V.KEsc -> leave
+  V.KChar '\t' -> leave
+  V.KFun 6 -> leave
+  V.KChar _ | null mods || mods == [V.MShift] -> (d,[])
+  V.KBS -> (d,[])
+  V.KDel -> (d,[])
+  _ -> keyEvent key mods d
+  where
+    move delta=moveToNode (treeSelected tree+delta)
+    moveToNode i = let chosen=max 0 (min (length (treeRows tree)-1) i); visible=max 1 (snd (screenSize d)-5); scroll=max 0 (min chosen (max (treeScroll tree) (chosen-visible+1))) in (d {sideTree=Just tree {treeSelected=chosen,treeScroll=scroll}},[])
+    leave=(d {sideTree=Just tree {treeFocused=False}},[])
+
+treeMouse :: Int -> Int -> V.Button -> Sidebar -> Desktop -> (Desktop,[Effect])
+treeMouse x y button tree d = case button of
+  V.BLeft | x==treeWidth tree-1 -> (d {drag=Just DockSizing},[])
+          | y==1 && x>=treeWidth tree-5 -> (setTree Nothing d,[])
+          | y>=3 && y<snd (screenSize d)-2 -> activateTree False (treeScroll tree+y-3) d
+  V.BScrollUp -> (d {sideTree=Just tree {treeScroll=max 0 (treeScroll tree-3)}},[])
+  V.BScrollDown -> (d {sideTree=Just tree {treeScroll=min (max 0 (length (treeRows tree)-1)) (treeScroll tree+3)}},[])
+  _ -> (d,[])
+
+openBrowser :: FilePath -> Text -> [Entry] -> Desktop -> Desktop
+openBrowser base pattern entries d = d {dialog=Just (Dialog "Open a file" (Opening base pattern entries) [Input "Name" pattern (T.length pattern),FileList entries 0] 1 ["Open","Cancel"] [T.pack base]),menu=Nothing,drag=Nothing}
+
+addHelp :: Text -> Desktop -> Desktop
+addHelp text d = addReadOnly "Turbo Haskell Help" text d
+
+addReadOnly :: Text -> Text -> Desktop -> Desktop
+addReadOnly title text d = case [(bid,w) | (bid,doc)<-M.toList (buffers d),documentLabel doc==Just title,w<-windows d,bufferId w==bid] of
+  (bid,w):_ -> focusWindow (windowId w) d {buffers=M.adjust (\doc -> doc {documentBuffer=newBuffer text}) bid (buffers d)}
+  [] -> let new=addDocument Nothing (newBuffer text) d in new {buffers=M.adjust (\doc -> doc {documentLabel=Just title}) (nextId d) (buffers new)}

@@ -6,6 +6,10 @@ import qualified FontCheck
 import Control.Monad (unless)
 import qualified Data.Text as T
 import THC.Edit.App (demoDesktop)
+import qualified GitCheck
+import qualified HelpCheck
+import qualified BrowserCheck
+import THC.Edit.Browser (Entry(..))
 import qualified WindowCheck
 import qualified FilesCheck
 import THC.Edit.Render
@@ -91,9 +95,42 @@ main = do
         Just dg -> let Rect x y _ _ = dialogRect scrolled dg in fst (handleEvent (V.EvMouseDown (x+4) y V.BLeft []) scrolled)
         Nothing -> scrolled
   check "clipped dialog fields cannot receive border clicks" (dialog borderClick == dialog scrolled)
+  let shadowBase=addDocument Nothing (newBuffer (T.unlines (replicate 24 (T.replicate 78 "x")))) d
+      shadowMenu=shadowBase {menu=Just (0,0)}
+      Rect mx my mw _=menuRect shadowMenu 0
+      shadowLine=T.lines (snapshot shadowMenu) !! (my+1)
+      normalLine=T.lines (snapshot shadowBase) !! (my+1)
+  check "menu shadow retains underlying characters" (T.take 2 (T.drop (mx+mw) shadowLine) == T.take 2 (T.drop (mx+mw) normalLine))
+  check "shadow text is gray on black" ("color:rgb(170,170,170);background:rgb(0,0,0)'>xx" `T.isInfixOf` snapshotHtml shadowMenu)
+  let focusedTree=installTree "/tmp" [Entry "test.hs" False Nothing] demoDesktop
+      pastedTree=fst (handleEvent (V.EvPaste "oops") focusedTree)
+      undoneTree=fst (runCommand Undo focusedTree)
+  check "tree focus blocks background paste" (buffers pastedTree == buffers focusedTree)
+  check "tree focus blocks background undo" (buffers undoneTree == buffers focusedTree)
+  GitCheck.checks
   WindowCheck.checks
 #ifdef WITH_WINDOW
   FontCheck.checks
 #endif
+  let fileMenu = n {menu=Just (0,0)}
+  check "File Exit mnemonic is X" (snd (handleEvent (V.EvKey (V.KChar 'x') []) fileMenu) == [Exit])
+  check "File Save as mnemonic is A" (case dialog (key (V.KChar 'a') [] fileMenu) of Just dg -> dialogTitle dg == "Save file as"; _ -> False)
+  check "status shortcut is red" ("color:rgb(170,0,0);background:rgb(170,170,170)'>F1" `T.isInfixOf` snapshotHtml d)
+  let entries = [Entry "src" True Nothing, Entry "Main.hs" False (Just 12)]
+      browsing = openBrowser "/tmp" "*.hs" entries d
+      chosen = browsing {dialog=fmap (\dg -> dg {focus=1,fields=[Input "Name" "*.hs" 4,FileList entries 1]}) (dialog browsing)}
+  check "browser enter opens selected file" (snd (handleEvent (V.EvKey V.KEnter []) chosen) == [ReadPath "/tmp/Main.hs"])
+  let naming=browsing {dialog=fmap (\dg -> dg {focus=0}) (dialog browsing)}
+      erased=key (V.KChar 'u') [V.MCtrl] naming
+      named=foldl (\state ch -> key (V.KChar ch) [] state) erased ("Other.hs" :: String)
+      openButton=iterate (key (V.KChar '\t') []) named !! 2
+  check "keyboard Open honors typed filename" (snd (handleEvent (V.EvKey V.KEnter []) openButton) == [OpenChoice "/tmp" "Other.hs" "*.hs"])
+  let docked = installTree "/tmp" entries n
+  check "tree reserves editor space" (all ((>=treeWidthOf docked) . left . bounds) (windows docked))
+  check "closing tree returns full editor width" (map bounds (windows (fst (runCommand ToggleTree docked))) == map bounds (windows n))
+  let help = addHelp "Documentation" n
+  check "help text cannot be edited" (activeText (insertText "x" help) == "Documentation")
+  HelpCheck.checks
+  BrowserCheck.checks
   FilesCheck.checks
   putStrLn "editor checks passed"

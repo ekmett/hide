@@ -44,7 +44,7 @@ static void geometry(void) {
     origin_y = (pixel_h - rows * 16 * scale) / 2;
 }
 
-int thc_open(const char *backend, int requested_scale) {
+int thc_open(const char *backend, int requested_scale, int requested_cols, int requested_rows) {
     if (!SDL_Init(SDL_INIT_VIDEO)) return 0;
     command_event = SDL_RegisterEvents(1);
     window = SDL_CreateWindow("Turbo Haskell", 1280, 800, SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
@@ -57,7 +57,7 @@ int thc_open(const char *backend, int requested_scale) {
     SDL_GetWindowSize(window, &ww, &wh);
     double density = (double)pw / SDL_max(1, ww);
     scale = requested_scale ? requested_scale : SDL_max(1, (int)lround(2 * density));
-    SDL_SetWindowSize(window, (int)lround(80 * 8 * scale / density), (int)lround(25 * 16 * scale / density));
+    SDL_SetWindowSize(window, (int)lround(requested_cols * 8 * scale / density), (int)lround(requested_rows * 16 * scale / density));
     SDL_SetWindowMinimumSize(window, (int)ceil(40 * 8 * scale / density), (int)ceil(12 * 16 * scale / density));
     geometry();
     return SDL_StartTextInput(window);
@@ -159,6 +159,17 @@ int thc_wait(int32_t *out) {
             int key = keycode(e.key.key), mods = modifiers(e.key.mod);
             /* Printable unmodified keys arrive only through TEXT_INPUT (IME/layout aware). */
             if (key == INT_MIN || (key >= 0 && !(mods & 14))) break;
+            if (key >= 0) {
+#ifdef SDL_PLATFORM_MACOS
+                /* Cocoa menus own Command shortcuts; Option composes text.
+                 * Keep Control/WordStar and modified function/navigation keys. */
+                if ((mods & 8) || ((mods & 4) && !(mods & 2))) break;
+#else
+                /* AltGr produces TEXT_INPUT, not Alt menu/Control shortcuts.
+                 * Left Alt remains available for editor menu shortcuts. */
+                if (e.key.mod & (SDL_KMOD_MODE | SDL_KMOD_RALT)) break;
+#endif
+            }
             out[0] = 1; out[1] = key; out[2] = mods; return 1;
         }
         case SDL_EVENT_TEXT_INPUT:

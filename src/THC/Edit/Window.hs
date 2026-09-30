@@ -21,7 +21,7 @@ import System.IO (hPutStrLn, stderr)
 import THC.Edit.Font
 import THC.Edit.Render
 
-foreign import ccall unsafe "thc_open" c_open :: CString -> CInt -> IO CInt
+foreign import ccall unsafe "thc_open" c_open :: CString -> CInt -> CInt -> CInt -> IO CInt
 foreign import ccall unsafe "thc_close" c_close :: IO ()
 foreign import ccall unsafe "thc_error" c_error :: IO CString
 foreign import ccall unsafe "thc_backend" c_backend :: IO CString
@@ -81,7 +81,8 @@ updateMenus d = forM_ (zip [0..] nativeCommands) $ \(i,cmd) ->
   c_menu_enabled i (if canInvoke cmd then 1 else 0)
   where
     canInvoke Disabled{} = False
-    canInvoke cmd = dialog d == Nothing && (activeWindow d /= Nothing || cmd `elem` [New,Open,Quit,Help,About,Gallery,EditorOptions])
+    canInvoke Paste = not (maybe False treeFocused (sideTree d)) || dialog d /= Nothing
+    canInvoke cmd = dialog d == Nothing && (activeWindow d /= Nothing || cmd `elem` [New,Open,Quit,Help,About,Gallery,EditorOptions,ToggleTree,GitDiff,GitCommit])
 #else
 updateMenus _ = pure ()
 #endif
@@ -121,14 +122,14 @@ runWindow backend scale effects initial = do
   let driver = case backend of Metal -> "metal"; Vulkan -> "vulkan"; _ -> if os == "darwin" then "metal" else "vulkan"
   -- SDL must stay on the main OS thread; GHC's main action is a bound thread.
   bracket_ (pure ()) c_close $ do
-    withCString driver $ \name -> check ("Cannot start " ++ driver ++ " window") (c_open name (fromIntegral scale))
+    withCString driver $ \name -> check ("Cannot start " ++ driver ++ " window") (c_open name (fromIntegral scale) (fromIntegral (fst (screenSize initial))) (fromIntegral (snd (screenSize initial))))
     c_backend >>= peekCString >>= hPutStrLn stderr . ("Turbo Haskell renderer: " ++)
     nativeMenus
     sized <- alloca $ \wp -> alloca $ \hp -> do
       c_size wp hp
       w <- fromIntegral <$> peek wp
       h <- fromIntegral <$> peek hp
-      pure (fst (handleEvent (V.EvResize w h) initial))
+      pure ((fst (handleEvent (V.EvResize w h) initial {nativeMac=os == "darwin"})) {menu=menu initial})
     captureOnly <- (== Just "1") <$> lookupEnv "THC_EDIT_CAPTURE_EXIT"
     if captureOnly then draw font sized else loop font sized
   where
@@ -156,8 +157,10 @@ runWindow backend scale effects initial = do
                     | otherwise = pure (runCommand Quit d)
     dispatch (7:_) d = pure (d {drag=Nothing,prefix=Nothing},[])
     dispatch (9:x:y:direction:mods:_) d = pure (handleEvent (V.EvMouseDown x y (if direction>0 then V.BScrollUp else V.BScrollDown) (keyMods mods)) d)
-    dispatch (11:i:_) d | dialog d == Nothing, i >= 0, cmd:_ <- drop i nativeCommands =
-      if cmd == Paste then paste d else clipboardResult (cmd `elem` [Copy,Cut]) d (runCommand cmd d)
+    dispatch (11:i:_) d | i >= 0, cmd:_ <- drop i nativeCommands =
+      if cmd == Paste then paste d
+      else if dialog d == Nothing then clipboardResult (cmd `elem` [Copy,Cut]) d (runCommand cmd d)
+      else pure (d,[])
     dispatch _ d = pure (d,[])
     keyMods m = case decodeKey 0 m of Just (V.EvKey _ ms) -> ms; _ -> []
     paste d = do bytes <- c_clipboard >>= BS.packCString; pure (handleEvent (V.EvPaste bytes) d)

@@ -15,4 +15,7 @@ checks = do
   check "shift-tab" (decodeKey (-9) 1 == Just (V.EvKey V.KBackTab [V.MShift]))
   check "command maps to control" (decodeKey 115 8 == Just (V.EvKey (V.KChar 's') [V.MCtrl]))
   check "unknown key ignored" (decodeKey (-999) 0 == Nothing)
+  check "character dimensions" (parseWindowSize "100x32" == Right (100,32))
+  check "reject tiny dimensions" (case parseWindowSize "1x2" of Left _ -> True; _ -> False)
+  check "reject malformed dimensions" (case parseWindowSize "80.5x25" of Left _ -> True; _ -> False)
   putStrLn "window input checks passed"
