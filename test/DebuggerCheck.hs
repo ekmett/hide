@@ -103,7 +103,8 @@ checks = mapM_ session ["basic", "frame", "choices", "breakpoints", "reconnect"]
             virtual<-send "breakpoint" [] stopped
             let local=addDocument (Just (FileState (logPath<>".hs") Nothing)) (newBuffer "local = 1\n") virtual
             both<-send "breakpoint" [] local
-            reattached<-connect both >>= waitFor "second session source" (T.isInfixOf "session = 2" . activeText)
+            drained<-send "threads" [] both >>= waitFor "breakpoints delivered before reconnect" (hasDialog "Threads")
+            reattached<-connect drained >>= waitFor "second session source" (T.isInfixOf "session = 2" . activeText)
             entries<-logEntries
             let configured :: Int -> [Value]
                 configured n=[args | entry<-entries,field "session" entry==Just (n::Int),Just req<-[field "request" entry],field "command" req==Just ("setBreakpoints"::T.Text),Just args<-[field "arguments" req]]
