@@ -48,7 +48,7 @@ Interfaces: UTF-8 load, identity-aware checked save; terminal loop executes `Eff
 Files: `README.md`, design status, plan checklist.
 - [x] Review whole branch, fix meaningful defects with regression checks, run the full suite.
 - [x] Document actual commands, supported keys, terminal limitations and currently disabled capabilities.
-- [ ] Synchronize tested commits into `/Users/ekmett/thc-edit` and coordinate Linux smoke testing.
+- [x] Synchronize tested commits into `/Users/ekmett/thc-edit` and coordinate Linux smoke testing (Linux transfer blocked pending user approval).
 
 ## Subsequent milestone
 
@@ -75,3 +75,5 @@ HLS transport/tooling and Cabal component browsing get a separate implementation
   Verified exact disk contents and normal terminal shutdown (exit 0).
 - Linux source transfer awaits explicit destination approval after automatic
   approval review blocked copying the private bundle to castlemeadow.
+- Durable repository synchronized through `776385c`; a clean first build and
+  full test suite passed there. Both `thc mba` and `thc linux` received status.
