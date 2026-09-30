@@ -113,7 +113,7 @@ windowLayers d active w =
   ++ composerLayers
   ++ hexDividerLayers
   ++ [place (x+ww-7-T.length number) y (label frame number)
-  ,place (x+max 6 ((ww-T.length title) `div` 2)) y (label frame (T.take (max 0 (ww-17-T.length number)) title))
+  ,place (x+titleColumn) y (label frame shownTitle)
   ,place (x+1) (y+1) textImage
   ,place x y (box frame (active && not moving) ww hh)]
   where
@@ -121,7 +121,13 @@ windowLayers d active w =
     doc=fromMaybe (newDocument (newBuffer "") Nothing) (M.lookup (bufferId w) (buffers d))
     b=documentBuffer doc; t=contents b
     file=maybe ("NONAME"<>T.pack (show (bufferId w))<>".HS") (T.pack . takeFileName . filePath) (documentFile doc)
-    title=" "<>fromMaybe file (documentLabel doc)<>(if byteMode b then " [HEX]" else "")<>(if dirty b then " * " else " ")
+    title=" "<>fromMaybe file (documentLabel doc)<>(if dirty b then " * " else " ")
+    (titleColumn,shownTitle)
+      | byteMode b = let start=max 6 (1+hexColumn 0-scrollColumn w)
+                         end=min (ww-8-T.length number) (hexAsciiColumn (windowHexBytes w)-scrollColumn w)
+                         clipped=T.take (max 0 (end-start)) title
+                     in (start+max 0 ((end-start-T.length clipped) `div` 2),clipped)
+      | otherwise = (max 6 ((ww-T.length title) `div` 2),T.take (max 0 (ww-17-T.length number)) title)
     number=T.pack (show (windowNumber w))
     moving=case drag d of Just (Moving wid _ _) -> wid==windowId w; Just (Resizing wid _ _) -> wid==windowId w; _ -> False
     frame=attr (if moving then cyan else if active then white else gray) blue

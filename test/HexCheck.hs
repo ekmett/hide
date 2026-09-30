@@ -63,7 +63,15 @@ checks = bracket temporary removeFile $ \path -> do
   capture<-A.captureFile root path hex
   check "ACP rejects even valid text opened in hex mode" (case capture of Left _ -> True; _ -> False)
   let image=snapshot opened
-  check "grid includes offset bytes ASCII and mode" (all (`T.isInfixOf` image) ["00000000","00 FF 41 0A 80 C3 A9","..A....","[HEX]"])
+  check "grid includes offset bytes and ASCII without a HEX title tag" (all (`T.isInfixOf` image) ["00000000","00 FF 41 0A 80 C3 A9","..A...."] && not ("[HEX]" `T.isInfixOf` image))
+  let named=addDocument (Just (FileState "/tmp/firmware.bin" Nothing)) b (initialDesktop (80,25))
+      titleLine d=T.lines (snapshot d) !! 1
+      sized n=modifyActive (\w -> w {bounds=(bounds w) {width=n}}) named
+      title=" firmware.bin "
+  check "hex filename is centered between value-pane dividers in both layouts"
+    (and [T.take (T.length title) (T.drop (10+(hexAsciiColumn count-10-T.length title) `div` 2) (titleLine (sized n)))==title
+          | (n,count)<-[(80,16),(56,8)]] &&
+     all (\n -> T.index (titleLine (sized n)) 9=='╤') [80,56])
   let cellAt d x y=T.index (T.lines (snapshot d) !! y) x
       narrow=modifyActive (\w -> w {bounds=(bounds w) {width=42}}) opened
       narrowDoc=maybe (error "no document") id (activeDocument narrow)
