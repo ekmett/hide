@@ -1,0 +1,30 @@
+cabal-version: 3.0
+name: thc-edit
+version: 0.1.0.0
+synopsis: Turbo Haskell's terminal editor
+build-type: Simple
+
+common settings
+  default-language: GHC2021
+  ghc-options: -Wall
+  build-depends: base >=4.18 && <4.23, text, containers, bytestring, directory, filepath, time, vty >=6.0, vty-crossplatform
+
+library
+  import: settings
+  hs-source-dirs: src
+  exposed-modules: THC.Edit.Buffer, THC.Edit.Syntax, THC.Edit.Model, THC.Edit.Render, THC.Edit.Files, THC.Edit.App
+
+executable thc-edit
+  import: settings
+  hs-source-dirs: app
+  main-is: Main.hs
+  build-depends: thc-edit
+  ghc-options: -threaded -rtsopts
+
+test-suite editor-tests
+  import: settings
+  other-modules: FilesCheck
+  type: exitcode-stdio-1.0
+  hs-source-dirs: test
+  main-is: Main.hs
+  build-depends: thc-edit
