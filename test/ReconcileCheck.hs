@@ -2,15 +2,16 @@
 module ReconcileCheck (checks) where
 
 import Control.Concurrent (threadDelay)
-import Control.Exception (bracket)
+import Control.Exception (bracket, finally)
 import Control.Monad (foldM, unless)
 import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as M
 import qualified Data.Text as T
 import qualified Graphics.Vty as V
 import System.Directory
-import System.FilePath ((</>))
+import System.FilePath ((</>), takeDirectory)
 import System.IO (hClose, openBinaryTempFile)
+import System.IO.Error (catchIOError, isDoesNotExistError)
 import System.Timeout (timeout)
 import THC.Edit.App (applyEffects)
 import THC.Edit.Buffer
@@ -34,12 +35,12 @@ checks = bracket temporary removePathForcibly $ \dir -> withReconciliation $ \ru
         _ -> error "missing disk conflict"
       choose action desktop = apply desktop {dialog=Nothing} [ResolveConflict (conflict desktop) action]
       isConflict desktop = case purpose <$> dialog desktop of Just DiskConflict{} -> True; _ -> False
-  BS.writeFile path "original\n"
+  externalWrite path "original\n"
   (file, buffer) <- loadFile path >>= either error pure
   let initial = fst (runCommand SplitVertical (addDocument (Just file) buffer (initialDesktop (100,30))))
       selected = initial {windows=map (\w -> w {selection=Selection 2 8,scrollRow=20,scrollColumn=20}) (windows initial)}
   registered <- tick selected
-  BS.writeFile path "new\n"
+  externalWrite path "new\n"
   clean <- await tick ((== "new\n") . contents . sourceBuffer) registered
   check "clean buffer reloads with exact disk baseline" (disk clean==Just "new\n" && not (dirty (sourceBuffer clean)))
   check "reload preserves undo and increases revision" (contents (undo (sourceBuffer clean))=="original\n" && revision (sourceBuffer clean)>revision buffer)
@@ -47,7 +48,7 @@ checks = bracket temporary removePathForcibly $ \dir -> withReconciliation $ \ru
   check "reload rebuilds highlight cache" (T.pack (map fst (documentHighlight (source clean)))=="new\n")
   let dirtyDesktop = insertText "local " (moveTo False 0 clean)
       local = contents (sourceBuffer dirtyDesktop)
-  BS.writeFile path "disk version\n"
+  externalWrite path "disk version\n"
   prompted <- await tick isConflict dirtyDesktop
   check "dirty external change retains local text and baseline" (contents (sourceBuffer prompted)==local && disk prompted==Just "new\n")
   compared <- choose CompareDisk prompted
@@ -64,14 +65,14 @@ checks = bracket temporary removePathForcibly $ \dir -> withReconciliation $ \ru
   check "explicit reload is undoable and clean" (contents (sourceBuffer reloaded)=="disk version\n" && contents (undo (sourceBuffer reloaded))==local && not (dirty (sourceBuffer reloaded)))
   let afterUndo = fst (runCommand Undo (focusWindow 1 reloaded))
   check "undo after reload keeps newer disk baseline" (disk afterUndo==Just "disk version\n" && dirty (sourceBuffer afterUndo))
-  BS.writeFile path "second disk version\n"
+  externalWrite path "second disk version\n"
   newConflict <- await tick isConflict afterUndo
   let captured = conflict newConflict
       edited = insertText "more " newConflict {dialog=Nothing}
   staleEdit <- apply edited [ResolveConflict captured ReloadDisk]
   check "stale action cannot discard a subsequent edit" (contents (sourceBuffer staleEdit)==contents (sourceBuffer edited))
   current <- apply staleEdit {dialog=Nothing} [ReviewExternal]
-  BS.writeFile path "changed after prompt\n"
+  externalWrite path "changed after prompt\n"
   staleDisk <- choose ReloadDisk current
   check "stale action cannot reload a different disk snapshot" (contents (sourceBuffer staleDisk)==contents (sourceBuffer edited))
   latest <- apply staleDisk {dialog=Nothing} [ReviewExternal]
@@ -90,11 +91,11 @@ checks = bracket temporary removePathForcibly $ \dir -> withReconciliation $ \ru
   let tree = installTree dir [Entry "nested" True Nothing Nothing,Entry "source.hs" False Nothing Nothing] restored
       nested = dir </> "nested"
   createDirectory nested
-  BS.writeFile (nested </> "a.hs") "a"
+  externalWrite (nested </> "a.hs") "a"
   let expanded = expandTree 0 [Entry "a.hs" False Nothing Nothing] tree
       focused = expanded {sideTree=fmap (\s -> s {treeSelected=1,treeFocused=False}) (sideTree expanded)}
   browsing <- tick focused
-  BS.writeFile (nested </> "b.hs") "b"
+  externalWrite (nested </> "b.hs") "b"
   refreshed <- await tick (\d -> maybe False (any ((=="b.hs") . nodeName) . treeRows) (sideTree d)) browsing
   check "tree refresh preserves expansion focus and selection" (case sideTree refreshed of
     Just sidebar -> not (treeFocused sidebar) && any (\row -> nodePath row==nested && nodeExpanded row) (treeRows sidebar) && nodeName (treeRows sidebar !! treeSelected sidebar)=="a.hs"
@@ -125,16 +126,16 @@ binaryReload dir = withReconciliation $ \runtime -> do
       check name ok=unless ok (error name)
       buffer=maybe (error "missing binary buffer") documentBuffer . activeDocument
       raw=BS.pack [0,255,65]
-  BS.writeFile path "text"
+  externalWrite path "text"
   (file,b)<-loadFile path >>= either error pure
   opened<-tick (addDocument (Just file) b (initialDesktop (80,25)))
-  BS.writeFile path raw
+  externalWrite path raw
   reloaded<-await tick ((==raw) . bufferBytes . buffer) opened
   check "binary external reload is clean lossless and undoable" (byteMode (buffer reloaded) && not (dirty (buffer reloaded)) && bufferBytes (undo (buffer reloaded))=="text" && not (byteMode (undo (buffer reloaded))))
   let edited=fst (handleEvent (V.EvKey (V.KChar '1') []) reloaded)
       local=bufferBytes (buffer edited)
       changed=BS.pack [255,0,128]
-  BS.writeFile path changed
+  externalWrite path changed
   conflicted<-await tick (\d -> case purpose <$> dialog d of Just DiskConflict{} -> True; _ -> False) edited
   check "dirty binary reload retains local bytes" (bufferBytes (buffer conflicted)==local)
   case purpose <$> dialog conflicted of
@@ -152,7 +153,7 @@ queuedSave dir agent = withReconciliation $ \runtime -> do
       tick=tickReconciliation runtime
       effects=reconciliationEffects runtime applyEffects
       check label condition=unless condition (error label)
-  BS.writeFile path "old baseline\n"
+  externalWrite path "old baseline\n"
   (file,buffer)<-loadFile path >>= either error pure
   let edited=insertText "new " (addDocument (Just file) buffer (initialDesktop (100,30)))
       version=maybe (error "missing buffer") (revision . documentBuffer) (activeDocument edited)
@@ -182,3 +183,15 @@ await tick ready desktop = do
     go current = do
       next <- tick current
       if ready next then pure next else threadDelay 10000 >> go next
+
+-- A separate editor can replace a file while our watcher is reading it. Using
+-- another handle in this process instead hits GHC's process-local file lock.
+externalWrite :: FilePath -> BS.ByteString -> IO ()
+externalWrite path bytes = bracket
+  (openBinaryTempFile (takeDirectory path) ".reconcile-write-")
+  (\(temporary, handle) -> hClose handle `finally`
+    catchIOError (removeFile temporary) (\err -> unless (isDoesNotExistError err) (ioError err))) $
+  \(temporary, handle) -> do
+    BS.hPut handle bytes
+    hClose handle
+    renameFile temporary path
