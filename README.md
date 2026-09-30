@@ -1,8 +1,8 @@
 # thc-edit
 
-Turbo Haskell's terminal editor: a strongly typed trip to 1990.
+Turbo Haskell's source editor.
 
-A standalone Haskell/Vty homage to the Borland Turbo Pascal 6/7 desktop.
+A standalone Haskell/Vty editor with menus, overlapping windows and split views.
 Editor dependencies stay out of THC's compiler and runtime build. The proposed
 THC external-command dispatch will expose this executable as `thc edit` when
 `thc-edit` is on `PATH`; direct invocation already works.
@@ -32,7 +32,7 @@ cabal install exe:thc-edit --installdir="$HOME/.local/bin"
 - Borland palette, menu bar and dropdowns, active/inactive window borders,
   shadows, title dragging, resize handles, zoom, cascade, tile and shared splits.
 - Modal text inputs, checkboxes, radio buttons, lists and buttons. Try
-  **Tools > Widget gallery**; excessive laziness is enabled by default.
+  **Tools > Widget gallery** to exercise the dialog controls.
 - UTF-8 files, Haskell lexical highlighting including nested comments,
   selections, undo/redo, internal clipboard, bracketed terminal paste,
   find/replace-one and go-to-line.

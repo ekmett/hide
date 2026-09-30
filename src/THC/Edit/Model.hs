@@ -185,10 +185,10 @@ runCommand cmd source = go cmd (source {menu = Nothing, prefix = Nothing, drag =
     go Tile d = (tileWindows False d,[])
     go SplitVertical d = splitWindow True d
     go SplitHorizontal d = splitWindow False d
-    go About d = (message "About Turbo Haskell" ["Turbo Haskell  0.1", "Copyright (c) 2026 Edward Kmett", "", "Now with fewer assignment statements.", "Destination: Weak Head Normal Form", "", "An affectionate Borland-era homage.", "Written in Haskell. Naturally."] d,[])
+    go About d = (message "About Turbo Haskell" ["Turbo Haskell  0.1", "Copyright (c) 2026 Edward Kmett", "", "Haskell source editor"] d,[])
     go Help d = (prompt "Turbo Help" Information [ListBox "Keyboard reference" helpLines 0] d,[])
     go EditorOptions d = (prompt "Editor options" Settings [Radio "Key bindings" ["Modern","WordStar"] (if wordStar d then 1 else 0)] d,[])
-    go Gallery d = (prompt "Turbo widget laboratory" Widgets [Input "Unit name" "Prelude" 7,CheckBox "Enable excessive laziness" True,Radio "Evaluation" ["Normal order","Weak head normal form"] 1,ListBox "Installed abstractions" ["Functor","Applicative","Monad","Comonad","A monad is a monoid..."] 0] d,[])
+    go Gallery d = (prompt "Dialog controls" Widgets [Input "Module name" "Main" 4,CheckBox "Auto indent" True,Radio "Tab width" ["4 columns","8 columns"] 1,ListBox "Source files" ["Main.hs","Types.hs","Parser.hs","Syntax.hs","Eval.hs"] 0] d,[])
     go (Disabled reason) d = (d {status = reason},[])
     confirm action d = (d {dialog = Just (Dialog "Save changes?" (Confirm action) [] 0 ["Save","Discard","Cancel"] ["Save changes to " <> documentTitle d <> "?"])},[])
     selected d = case (activeWindow d,activeDocument d) of (Just w,Just doc) -> selectedText (selection w) (documentBuffer doc); _ -> ""
@@ -499,7 +499,7 @@ submitDialog button dg original
                     _ -> (d,[])
                 | otherwise -> (d,[])
     Settings -> (d {wordStar=any (\f -> case f of Radio _ _ 1 -> True; _ -> False) (fields dg),status="Editor options updated."},[])
-    Widgets -> (d {status="Widget test complete. Laziness remains enabled."},[])
+    Widgets -> (d {status="Dialog test complete."},[])
     Information -> (d,[])
   where
     d=original {dialog=Nothing}

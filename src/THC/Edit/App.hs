@@ -32,7 +32,7 @@ main = do
   args<-getArgs
   let (flags,paths,errors)=getOpt Permute options args
   if not (null errors) then die (concat errors)
-  else if Usage `elem` flags then putStr (usageInfo "Usage: thc-edit [OPTIONS] [--] [FILE.hs ...]\n\nTurbo Haskell: now with fewer assignment statements.\nF2 Save, F3 Open, F10 Menu, Alt+X Exit.\n" options)
+  else if Usage `elem` flags then putStr (usageInfo "Usage: thc-edit [OPTIONS] [--] [FILE.hs ...]\n\nTurbo Haskell source editor.\nF2 Save, F3 Open, F10 Menu, Alt+X Exit.\n" options)
   else do
     let initial=if Demo `elem` flags then demoDesktop else initialDesktop (80,25)
         configured=initial {wordStar=WordStar `elem` flags}
@@ -57,7 +57,7 @@ setScene d scene=case scene of
 
 demoDesktop :: Desktop
 demoDesktop = addDocument Nothing (newBuffer sample) (initialDesktop (80,25))
-  where sample=T.unlines ["{-# LANGUAGE LambdaCase #-}","module Main where","", "-- Turbo Haskell: a strongly typed trip to 1990.", "-- 640K ought to be enough for any thunk.", "", "data Evaluation = Lazy | ExtremelyLazy", "  deriving (Eq, Show)", "", "factorial :: Integer -> Integer", "factorial n = product [1 .. n]", "", "main :: IO ()", "main = do", "  putStrLn \"Welcome to Turbo Haskell!\"", "  print (factorial 10)", "", "-- F10: menus   Tools: widget gallery", "-- Window: split this buffer into shared views"]
+  where sample=T.unlines ["module Main where","", "factorial :: Integer -> Integer", "factorial n = product [1 .. n]", "", "main :: IO ()", "main = do", "  putStrLn \"Enter a number:\"", "  input <- getLine", "  print (factorial (read input))"]
 
 loop :: V.Vty -> Desktop -> IO ()
 loop vty d = do
