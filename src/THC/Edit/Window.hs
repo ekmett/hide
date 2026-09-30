@@ -84,7 +84,7 @@ updateMenus d = forM_ (zip [0..] nativeCommands) $ \(i,cmd) ->
   c_menu_enabled i (if commandEnabled d cmd && canInvoke cmd then 1 else 0)
   where
     canInvoke Paste = not (maybe False treeFocused (sideTree d)) || dialog d /= Nothing
-    canInvoke cmd = dialog d == Nothing && (activeWindow d /= Nothing || cmd `elem` [New,Open,Quit,Help,About,Gallery,EditorOptions,ToggleTree,GitDiff,GitCommit,Problems,NextMessage,PreviousMessage])
+    canInvoke cmd = dialog d == Nothing && (activeWindow d /= Nothing || cmd `elem` [New,Open,Quit,Help,About,Gallery,EditorOptions,RunTarget,RunOptions,OpenTerminal,StopTerminal,AgentOptions,Conversation,AgentPrompt,AgentCancel,AgentResume,AgentNew,AgentCopyRaw,ToggleTree,GitDiff,GitCommit,Problems,NextMessage,PreviousMessage])
 #else
 updateMenus _ = pure ()
 #endif

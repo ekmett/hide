@@ -56,7 +56,7 @@ checks = bracket temporary removePathForcibly $ \base -> do
     check "refused pull does not change disk" (diskBefore=="original\n")
     cleanPull<-run PullRemote (fst (runCommand Undo (select refused)))
     let reloaded=documentBuffer (doc cleanPull)
-    check "pull reloads clean buffer with increasing revision" (contents reloaded=="pulled\n" && not (dirty reloaded) && revision reloaded>0 && null (undoStack reloaded))
+    check "pull reloads clean buffer with increasing revision" (contents reloaded=="pulled\n" && not (dirty reloaded) && revision reloaded>0 && contents (undo reloaded)=="original\n")
     -- Pause the local upload-pack so an edit deterministically occurs during pull.
     let upload=base </> "upload-pack"
         marker=base </> "fetch-started"
@@ -72,6 +72,12 @@ checks = bracket temporary removePathForcibly $ \base -> do
     check "local Git operation runs asynchronously" (started==Just ())
     (exited,waiting)<-effects running [Exit]
     check "quit waits for active operation" (not exited && "Wait for" `T.isPrefixOf` status waiting)
+    (_,blockedApproval)<-effects waiting [AgentAction "approval:1" ["0"]]
+    check "mutating Git blocks agent approvals before they reach the writer" ("Wait for" `T.isPrefixOf` status blockedApproval)
+    (_,blockedRun)<-effects waiting [AgentAction "run" []]
+    check "mutating Git blocks starting a terminal run" ("Wait for" `T.isPrefixOf` status blockedRun)
+    (_,cancelledAgent)<-effects waiting [AgentAction "cancel" []]
+    check "mutating Git still delegates agent cancellation" (status cancelledAgent=="agent action delegated")
     (_,duplicate)<-effects waiting [RunGit FetchRemote]
     check "concurrent Git operation refused" (status duplicate=="A Git operation is already running.")
     let edited=insertText "keep " (select duplicate)
@@ -88,6 +94,8 @@ checks = bracket temporary removePathForcibly $ \base -> do
     _<-timeout 5000000 (waitFile marker)
     (_,savedDuringFetch)<-effects fetching [SaveDocument 0 Nothing Nothing]
     check "fetch permits ordinary save effects" (status savedDuringFetch=="save delegated")
+    (_,approvedDuringFetch)<-effects fetching [AgentAction "approval:2" ["0"]]
+    check "read-only fetch permits agent approvals" (status approvedDuringFetch=="agent action delegated")
     let savePath=work </> "save-then-quit.txt"
     T.writeFile savePath "before\n"
     (saveFileState,saveBuffer)<-loadFile savePath >>= either error pure
@@ -139,6 +147,16 @@ checks = bracket temporary removePathForcibly $ \base -> do
     check "pull deletion preserves the previous buffer" (contents (documentBuffer (doc deleted))=="changed during operation\n" && "File was removed" `T.isInfixOf` activeText deleted)
     missing<-not <$> doesFileExist source
     check "deleted source stays deleted on disk" missing
+    let target=base </> "symlink-target.hs"
+    T.writeFile target "outside symlink target\n"
+    createFileLink target upstreamSource
+    commit upstream "replace source with symbolic link"
+    linked<-run PullRemote (select deleted)
+    check "pull symlink replacement preserves original path and buffer"
+      (contents (documentBuffer (doc linked))=="changed during operation\n" &&
+       documentFile (doc linked)==documentFile (doc deleted) && "reopen" `T.isInfixOf` activeText linked)
+    targetBytes<-T.readFile target
+    check "pull symlink target remains unchanged" (targetBytes=="outside symlink target\n")
   putStrLn "Git operation checks passed"
   where
     check label ok=unless ok (error label)
@@ -157,6 +175,7 @@ core desktop [RefreshGit path]=do
   pure (False,desktop {branchRoot=repoRoot <$> repo,branchStatus=maybe "" repoBranch repo})
 core desktop [Exit]=pure (True,desktop)
 core desktop [SaveDocument{}]=pure (False,desktop {status="save delegated"})
+core desktop [AgentAction{}]=pure (False,desktop {status="agent action delegated"})
 core desktop _=pure (False,desktop)
 
 await :: (Desktop -> IO Desktop) -> (Desktop -> Bool) -> Desktop -> IO Desktop

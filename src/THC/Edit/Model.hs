@@ -6,9 +6,10 @@ import qualified Data.Text as T
 import Data.Text (Text)
 import qualified Data.Text.Encoding as TE
 import qualified Data.Map.Strict as M
+import Data.ByteString (ByteString)
 import Data.Maybe (listToMaybe, fromMaybe)
 import Data.List (find, findIndex, sortOn, mapAccumL)
-import Data.Char (toLower, isPrint, isAlphaNum)
+import Data.Char (toLower, isPrint, isAlphaNum, chr, ord, toUpper)
 import Text.Read (readMaybe)
 import System.FilePath ((</>), takeDirectory)
 import THC.Edit.Browser (Entry(..))
@@ -22,10 +23,10 @@ data Rect = Rect { left :: Int, top :: Int, width :: Int, height :: Int } derivi
 inside :: Rect -> Int -> Int -> Bool
 inside (Rect x y w h) a b = a >= x && a < x+w && b >= y && b < y+h
 
-data Document = Document { documentBuffer :: Buffer, documentFile :: Maybe FileState, documentLabel :: Maybe Text, documentHighlight :: [(Char,Style)], documentWidth :: Int } deriving (Eq,Show)
+data Document = Document { documentBuffer :: Buffer, documentFile :: Maybe FileState, documentLabel :: Maybe Text, documentHighlight :: [(Char,Style)], documentWidth :: Int, documentCursorVisible :: Bool } deriving (Eq,Show)
 -- Shared by split views; cursor movement and repaint reuse the lazy token cache.
 newDocument :: Buffer -> Maybe FileState -> Document
-newDocument b file = restyle (Document b file Nothing [] 0)
+newDocument b file = restyle (Document b file Nothing [] 0 True)
 
 -- ponytail: retokenize the buffer after edits; use an incremental engine if large-file latency warrants it.
 restyle :: Document -> Document
@@ -42,15 +43,21 @@ data Command = New | Open | Save | SaveAs | Close | Quit | Undo | Redo | Cut | C
   | Find | FindNext | Replace | GoTo | SelectAll | Zoom | NextWindow | Cascade | Tile
   | SplitVertical | SplitHorizontal | About | Help | EditorOptions | Gallery
   | InspectType | Definition | Complete | Problems | NextMessage | PreviousMessage | RestartHLS | RenameSymbol
-  | ToggleTree | GitDiff | GitCommit | GitFetch | GitPull | GitMerge | Disabled Text deriving (Eq,Show)
+  | ToggleTree | GitDiff | GitCommit | GitFetch | GitPull | GitMerge | ReviewDisk
+  | RunTarget | RunOptions | OpenTerminal | StopTerminal
+  | AgentOptions | Conversation | AgentPrompt | AgentCancel | AgentResume | AgentCopyRaw | AgentNew
+  | Disabled Text deriving (Eq,Show)
+data ConflictAction = CompareDisk | ReloadDisk | KeepBuffer | SaveConflictAs deriving (Eq,Show)
+data Conflict = Conflict { conflictBuffer :: Int, conflictRevision :: Int, conflictBaseline :: FileState, conflictDisk :: Maybe ByteString } deriving (Eq,Show)
 data GitAction = FetchRemote | PullRemote | MergeBranch Text deriving (Eq,Show)
 data ContextKind = SourceContext | GitContext deriving (Eq,Show)
 data LanguageAction = TypeInfo | FindDefinition | Completions | ShowProblems | RestartLanguage | RenameAt Text deriving (Eq,Show)
 data Completion = Completion Text [(Int,Int,Text)] deriving (Eq,Show)
-data Effect = LanguageRequest LanguageAction | RunGit GitAction | ReadMergeBranches | JumpTo FilePath Int Int | ReadPath FilePath | BrowsePath FilePath Text | OpenChoice FilePath Text Text | ReadTree FilePath | ExpandTree Int | ReadHelp | RefreshGit FilePath | ReadGitDiff | AskGitCommit | WriteGitCommit Text | SaveDocument Int (Maybe FilePath) (Maybe Command) | SetScreenMode Int | Exit deriving (Eq,Show)
+data Effect = LanguageRequest LanguageAction | RunGit GitAction | ReadMergeBranches | JumpTo FilePath Int Int | ReadPath FilePath | BrowsePath FilePath Text | OpenChoice FilePath Text Text | ReadTree FilePath | ExpandTree Int | ReadHelp | RefreshGit FilePath | ReadGitDiff | AskGitCommit | WriteGitCommit Text | SaveDocument Int (Maybe FilePath) (Maybe Command) | ReviewExternal | ResolveConflict Conflict ConflictAction | AgentAction Text [Text] | SetScreenMode Int | Exit deriving (Eq,Show)
 data Field = Input Text Text Int | CheckBox Text Bool | Radio Text [Text] Int | ListBox Text [Text] Int | FileList [Entry] Int deriving (Eq,Show)
 data Purpose = Opening FilePath Text [Entry] | Committing | Saving Int (Maybe Command) | Finding | Replacing | GoingTo | Renaming
   | Completing Int Int Int [Completion] | Locations [(FilePath,Int,Int)] | Merging [Text]
+  | DiskConflict Conflict | AgentDialog Text
   | Confirm Command | Information | Settings | Widgets deriving (Eq,Show)
 data Dialog = Dialog
   { dialogTitle :: Text, purpose :: Purpose, fields :: [Field], focus :: Int
@@ -80,14 +87,14 @@ data Desktop = Desktop
 data MenuItem = MenuItem Text Text Command deriving (Eq,Show)
 menus :: [(Text,Char,[MenuItem])]
 menus =
-  [("File",'f',[mi "New" "" New, mi "Open..." "F3" Open, mi "Save" "F2" Save, mi "Save as..." "" SaveAs, mi "Close" "Alt+F3" Close, mi "Exit" "Alt+X" Quit])
+  [("File",'f',[mi "New" "" New, mi "Open..." "F3" Open, mi "Save" "F2" Save, mi "Save as..." "" SaveAs, mi "Disk changes..." "" ReviewDisk, mi "Close" "Alt+F3" Close, mi "Exit" "Alt+X" Quit])
   ,("Edit",'e',[mi "Undo" "Ctrl+Z" Undo, mi "Redo" "Ctrl+Y" Redo, mi "Cut" "Shift+Del" Cut, mi "Copy" "Ctrl+Ins" Copy, mi "Paste" "Shift+Ins" Paste, mi "Select all" "Ctrl+A" SelectAll,mi "Complete identifier..." "Ctrl+Space" Complete])
   ,("Search",'s',[mi "Find..." "Ctrl+F" Find, mi "Replace..." "Ctrl+R" Replace, mi "Search again" "Ctrl+L" FindNext, mi "Go to line..." "Ctrl+G" GoTo,mi "Go to definition" "F12" Definition])
-  ,("Run",'r',[off "Run" "Ctrl+F9" "THC execution is not connected yet."])
+  ,("Run",'r',[mi "Run" "Ctrl+F9" RunTarget,mi "Target..." "" RunOptions,mi "Terminal" "" OpenTerminal,mi "Stop terminal" "" StopTerminal])
   ,("Compile",'c',[off "Compile" "Alt+F9" "THC compilation is not connected yet.",off "Make" "F9" "Cabal project integration is a later milestone."])
   ,("Debug",'d',[off "Inspect..." "" "THC Truffle debugging is not connected yet."])
-  ,("Tools",'t',[mi "File tree" "Ctrl+B" ToggleTree,mi "Git diff..." "" GitDiff,mi "Approve changes..." "" GitCommit,mi "Inspect type" "Shift+F1" InspectType,mi "Messages" "" Problems,mi "Go to next" "Alt+F8" NextMessage,mi "Go to previous" "Alt+F7" PreviousMessage,mi "Restart language server" "" RestartHLS,mi "Widget gallery..." "" Gallery,off "Project browser..." "" "Cabal component browsing is a later milestone."])
-  ,("Options",'o',[mi "Preferences..." "" EditorOptions])
+  ,("Tools",'t',[mi "File tree" "Ctrl+B" ToggleTree,mi "Git diff..." "" GitDiff,mi "Approve changes..." "" GitCommit,mi "Inspect type" "Shift+F1" InspectType,mi "Messages" "" Problems,mi "Go to next" "Alt+F8" NextMessage,mi "Go to previous" "Alt+F7" PreviousMessage,mi "Restart language server" "" RestartHLS,mi "Conversation" "" Conversation,mi "Prompt..." "" AgentPrompt,mi "Cancel reply" "" AgentCancel,mi "Resume session..." "" AgentResume,mi "New session" "" AgentNew,mi "Copy raw conversation" "" AgentCopyRaw,mi "Widget gallery..." "" Gallery,off "Project browser..." "" "Cabal component browsing is a later milestone."])
+  ,("Options",'o',[mi "Preferences..." "" EditorOptions,mi "Agents..." "" AgentOptions])
   ,("Window",'w',[mi "Tile" "" Tile,mi "Cascade" "" Cascade,mi "Split vertically" "" SplitVertical,mi "Split horizontally" "" SplitHorizontal,mi "Zoom" "F5" Zoom,mi "Next" "F6" NextWindow,mi "Close" "Alt+F3" Close])
   ,("Help",'h',[mi "Contents" "F1" Help,mi "About Turbo Haskell..." "" About])]
   where mi = MenuItem
@@ -111,6 +118,18 @@ commandDescription :: Command -> Text
 commandDescription cmd = case cmd of
   New -> "Create a new source buffer."; Open -> "Browse directories and open a file."
   Save -> "Save the active file."; SaveAs -> "Save the active buffer under a new filename."
+  ReviewDisk -> "Review an external change without discarding unsaved text."
+  RunTarget -> "Run the selected Cabal executable through thc run."
+  RunOptions -> "Choose the Cabal executable and THC installation."
+  OpenTerminal -> "Open a project shell in a terminal window."
+  StopTerminal -> "Stop the selected terminal process."
+  AgentOptions -> "Configure agents and their executable commands."
+  Conversation -> "Show the agent conversation."
+  AgentPrompt -> "Send a prompt to the selected agent."
+  AgentCancel -> "Cancel the active agent reply."
+  AgentResume -> "Resume an agent session."
+  AgentNew -> "Start a new agent session."
+  AgentCopyRaw -> "Copy the raw conversation text."
   Close -> "Close this window; ask before discarding unsaved changes."
   Quit -> "Exit the editor; ask before discarding unsaved changes."
   Undo -> "Undo the last edit."; Redo -> "Redo the last undone edit."
@@ -257,6 +276,10 @@ moveTo extend pos d = ensureVisible (modifyActive update d)
     p = max 0 (min len pos)
     update w = w {selection = Selection (if extend then anchor (selection w) else p) p}
 
+wrapMessage :: T.Text -> [T.Text]
+wrapMessage text | T.null text=[]
+wrapMessage text=T.take 54 text:wrapMessage (T.drop 54 text)
+
 message :: Text -> [Text] -> Desktop -> Desktop
 message title lines' d = d {dialog = Just (Dialog title Information [] 0 ["OK"] lines'), menu = Nothing, drag = Nothing,dragOriginal=Nothing}
 
@@ -269,6 +292,18 @@ runCommand cmd source = go cmd (source {menu = Nothing, contextMenu=Nothing, but
     go New d = (addDocument Nothing (newBuffer "") d,[])
     go Open d = (d,[BrowsePath (startingDirectory d) "*.hs"])
     go Save d = saveRequest Nothing d
+    go ReviewDisk d = (d,[ReviewExternal])
+    go RunTarget d = (d,[AgentAction "run" []])
+    go RunOptions d = (d,[AgentAction "run-options" []])
+    go OpenTerminal d = (d,[AgentAction "terminal" []])
+    go StopTerminal d = (d,[AgentAction "terminal-stop" []])
+    go AgentOptions d = (d,[AgentAction "options" []])
+    go Conversation d = (d,[AgentAction "show" []])
+    go AgentPrompt d = (d,[AgentAction "prompt" []])
+    go AgentCancel d = (d,[AgentAction "cancel" []])
+    go AgentResume d = (d,[AgentAction "resume" []])
+    go AgentNew d = (d,[AgentAction "new" []])
+    go AgentCopyRaw d = (d,[AgentAction "copy" []])
     go SaveAs d = case activeWindow d of
       Nothing -> (d,[])
       Just _ | maybe False ((/=Nothing) . documentLabel) (activeDocument d) -> (d {status="This window is read-only."},[])
@@ -284,6 +319,7 @@ runCommand cmd source = go cmd (source {menu = Nothing, contextMenu=Nothing, but
     go Redo d = (editActive (const redo) Nothing d,[])
     go Copy d = (d {clipboard = selected d, status = "Block copied."},[])
     go Cut d = (insertText "" d {clipboard = selected d},[])
+    go Paste d | Just ident<-activeTerminal d = (d,[AgentAction "terminal-input" [ident,clipboard d]])
     go Paste d = (insertText (clipboard d) d,[])
     go SelectAll d = (modifyActive (\w -> w {selection = Selection 0 (T.length (activeText d))}) d,[])
     go Find d = (prompt "Find" Finding [Input "Text to find" (lastFind d) (T.length (lastFind d))] d,[])
@@ -438,11 +474,13 @@ dispatchEvent :: V.Event -> Desktop -> (Desktop,[Effect])
 dispatchEvent (V.EvResize sw sh) d = let resized=d {screenSize=(max 1 sw,max 3 sh),sideTree=fmap (\t -> t {treeWidth=min (treeWidth t) (max 0 (sw-16))}) (sideTree d)} in (resized {windows=map (\w -> w {bounds=fitWindow resized (bounds w)}) (windows d),drag=Nothing,dragOriginal=Nothing,menu=Nothing,contextMenu=Nothing,buttonHover=Nothing,buttonPressed=Nothing},[])
 dispatchEvent (V.EvKey (V.KChar c) mods) d | dialog d==Nothing, V.MAlt `elem` mods, c>='1', c<='9' = (activateWindowNumber (fromEnum c-fromEnum '0') d,[])
 dispatchEvent (V.EvKey (V.KFun key) mods) d | dialog d==Nothing, V.MAlt `elem` mods, key `elem` [7,8] = runCommand (if key==8 then NextMessage else PreviousMessage) d
+dispatchEvent (V.EvKey (V.KFun 9) [V.MCtrl]) d | dialog d==Nothing = runCommand RunTarget d
 dispatchEvent ev d | Just dg <- dialog d = dialogEvent ev dg d
 dispatchEvent ev d | Just popup <- contextMenu d = contextEvent ev popup d
 dispatchEvent ev d | Just m <- menu d = menuEvent ev m d
 dispatchEvent (V.EvKey key mods) d | Just _ <- dragOriginal d = dragKey key mods d
 dispatchEvent (V.EvKey key mods) d | problemsVisible d && problemsFocused d = problemsKey key mods d
+dispatchEvent ev d | Just ident<-activeTerminal d,Just text<-terminalInput ev = (d,[AgentAction "terminal-input" [ident,text]])
 dispatchEvent (V.EvMouseUp _ _ _) d = (d {drag = Nothing,dragOriginal=Nothing},[])
 dispatchEvent (V.EvMouseDown x y button mods) d = mouseEvent x y button mods d
 dispatchEvent (V.EvPaste bytes) d = case TE.decodeUtf8' bytes of
@@ -451,6 +489,34 @@ dispatchEvent (V.EvPaste bytes) d = case TE.decodeUtf8' bytes of
 dispatchEvent (V.EvKey key mods) d | Just tree <- sideTree d, treeFocused tree = treeKey key mods tree d
 dispatchEvent (V.EvKey key mods) d = keyEvent key mods d
 dispatchEvent _ d = (d,[])
+
+activeTerminal :: Desktop -> Maybe Text
+activeTerminal d = do
+  w<-activeWindow d
+  if not (windowFocused d w) then Nothing else activeDocument d >>= documentLabel >>= T.stripPrefix "Terminal "
+
+-- Window/menu shortcuts stay with the editor; ordinary keys go to the PTY.
+terminalInput :: V.Event -> Maybe Text
+terminalInput (V.EvPaste bytes)=either (const Nothing) Just (TE.decodeUtf8' bytes)
+terminalInput (V.EvKey key mods)
+  | V.MAlt `elem` mods || V.MMeta `elem` mods = Nothing
+  | key `elem` [V.KFun 5,V.KFun 6,V.KFun 10] = Nothing
+  | otherwise = case key of
+      V.KChar c | V.MCtrl `elem` mods, c==' ' -> Just "\0"
+                | V.MCtrl `elem` mods, let upper=toUpper c,upper>='@' && upper<='_' -> Just (T.singleton (chr (ord upper-64)))
+                | V.MCtrl `notElem` mods -> Just (T.singleton c)
+      V.KEnter -> Just "\r"
+      V.KBS -> Just "\DEL"
+      V.KEsc -> Just "\ESC"
+      V.KBackTab -> Just "\ESC[Z"
+      V.KUp -> arrow "A"; V.KDown -> arrow "B"; V.KRight -> arrow "C"; V.KLeft -> arrow "D"
+      V.KHome -> arrow "H"; V.KEnd -> arrow "F"
+      V.KDel -> Just "\ESC[3~"; V.KIns -> Just "\ESC[2~"
+      V.KPageUp -> Just "\ESC[5~"; V.KPageDown -> Just "\ESC[6~"
+      V.KFun n -> lookup n [(1,"\ESCOP"),(2,"\ESCOQ"),(3,"\ESCOR"),(4,"\ESCOS"),(7,"\ESC[18~"),(8,"\ESC[19~"),(9,"\ESC[20~"),(11,"\ESC[23~"),(12,"\ESC[24~")]
+      _ -> Nothing
+  where arrow suffix=Just ("\ESC["<>(if V.MCtrl `elem` mods then "1;5" else if V.MShift `elem` mods then "1;2" else "")<>suffix)
+terminalInput _=Nothing
 
 menuEvent :: V.Event -> (Int,Int) -> Desktop -> (Desktop,[Effect])
 menuEvent ev (i,j) d = case ev of
@@ -824,6 +890,10 @@ submitDialog button dg original
     Committing -> if T.null (T.strip first) then (original {status="Enter a commit message."},[]) else (original,[WriteGitCommit first])
     Renaming -> if T.null (T.strip first) then (original {status="Enter a new name."},[]) else (d,[LanguageRequest (RenameAt (T.strip first))])
     Saving bid after -> if T.null first then (original,[]) else (d,[SaveDocument bid (Just (T.unpack first)) after])
+    DiskConflict conflict -> (d,[ResolveConflict conflict ([CompareDisk,ReloadDisk,KeepBuffer,SaveConflictAs] !! button)])
+    AgentDialog action -> (d,[AgentAction action (T.pack (show button) : values ++
+      [if value then "true" else "false" | CheckBox _ value <- fields dg] ++
+      [T.pack (show i) | ListBox _ _ i <- fields dg])])
     Finding -> (findText first d,[])
     Replacing -> let found = findText first d
                  in if T.null first || status found=="Search text not found." then (found,[])

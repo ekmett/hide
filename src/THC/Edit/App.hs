@@ -5,6 +5,7 @@ import Control.Exception (bracket)
 import Control.Monad (foldM, when)
 import System.Timeout (timeout)
 import System.IO (hFlush, stdout)
+import THC.Edit.Conversation
 import THC.Edit.Tooling
 import THC.Edit.GitOperations
 import qualified Data.Map.Strict as M
@@ -29,6 +30,7 @@ import THC.Edit.Buffer
 import THC.Edit.Model
 import THC.Edit.Render
 import THC.Edit.Files
+import THC.Edit.Reconcile
 
 data Option = Use Backend | Scale String | Size String | Mode String | Demo | WordStar | Snapshot | Html | Scene String | Usage deriving Eq
 options :: [OptDescr Option]
@@ -80,9 +82,9 @@ main = do
     staged<-foldM stageScene withGit [scene | Scene scene<-flags]
     if Html `elem` flags then TIO.putStr (snapshotHtml staged)
     else if Snapshot `elem` flags then TIO.putStr (snapshot staged)
-    else withTooling $ \tooling -> withGitOperations $ \gitOperations -> do
-      let effects=gitOperationEffects gitOperations (toolingEffects tooling applyEffects)
-          tick d=tickGitOperations gitOperations applyEffects d >>= tickTooling tooling applyEffects
+    else withConversation $ \conversation -> withTooling $ \tooling -> withGitOperations $ \gitOperations -> withReconciliation $ \reconciliation -> do
+      let effects=gitOperationEffects gitOperations (conversationEffects conversation (reconciliationEffects reconciliation (toolingEffects tooling applyEffects)))
+          tick d=tickGitOperations gitOperations applyEffects d >>= tickTooling tooling applyEffects >>= tickReconciliation reconciliation >>= tickConversation conversation
       if backend /= Terminal then runWindow backend scale effects tick staged
       else bracket (mkVty V.defaultConfig) (\vty -> V.shutdown vty >> cursorStyle Nothing) $ \vty -> do
         when (V.supportsMode (V.outputIface vty) V.Mouse) (V.setMode (V.outputIface vty) V.Mouse True)
@@ -134,6 +136,9 @@ applyEffects = foldM apply . (False,)
     apply (_,d) JumpTo{}=pure (False,d)
     apply (_,d) RunGit{}=pure (False,d {status="Git operations are unavailable in this preview."})
     apply (_,d) ReadMergeBranches=pure (False,d {status="Git operations are unavailable in this preview."})
+    apply (_,d) ReviewExternal=pure (False,d {status="Disk change monitoring is unavailable in this preview."})
+    apply (_,d) ResolveConflict{}=pure (False,d {status="Disk change monitoring is unavailable in this preview."})
+    apply (_,d) AgentAction{}=pure (False,d {status="Agents are unavailable in this preview."})
     apply (_,d) Exit=pure (True,d)
     apply (_,d) SetScreenMode{}=pure (False,d {status="Screen modes are available in a graphical window."})
     apply (_,d) (ReadPath path)=do
@@ -224,10 +229,6 @@ applyEffects = foldM apply . (False,)
             case after of
               Nothing->pure (False,refreshed)
               Just cmd->uncurry applyEffects (runCommand cmd refreshed)
-
-wrapMessage :: T.Text -> [T.Text]
-wrapMessage text | T.null text=[]
-wrapMessage text=T.take 54 text:wrapMessage (T.drop 54 text)
 
 
 browserError :: T.Text -> Desktop -> Desktop

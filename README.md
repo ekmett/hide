@@ -205,11 +205,93 @@ navigation; a lazy text projection is cached per revision for syntax highlightin
 file output, and HLS. Highlighting and LSP full-document synchronization still
 consume the whole document after an edit.
 
+## Agents
+
+**Options > Agents** configures an ACP stdio executable, a JSON array of arguments,
+and a JSON object of environment overrides. Commands are launched directly,
+without shell interpolation. Settings live in the user configuration directory
+(`$XDG_CONFIG_HOME/thc-edit`, normally `~/.config/thc-edit`).
+
+For local Codex, install the published
+[codex-acp adapter](https://github.com/agentclientprotocol/codex-acp), then use
+`codex-acp` as the executable. The tested adapter is
+`@agentclientprotocol/codex-acp@2.0.1`; its `CODEX_PATH` environment override can
+select an existing Codex executable. Authenticate with the provider's own CLI
+before starting it here. The adapter and model credentials are separate from
+this repository.
+
+**Tools > Prompt** sends a message with optional selection, current-file and
+Messages context, including unsaved text. **Conversation** opens its numbered
+window; **Cancel reply** cancels the current turn. Markdown uses CommonMark,
+with Skylighting for fenced code, and raw text remains available through
+**Copy raw conversation**. Tool activity is displayed separately from replies.
+
+Permission dialogs show the provider's actual choices. Review opens the request
+in a read-only window; **Tools > Conversation** returns to the pending choice.
+Escape denies the request. Editor-mediated file writes require approval, use the
+normal checked save path, and preserve the old buffer in Undo. Intervening editor
+or disk changes reject a stale write. File access is bounded by the session's
+project directory. This boundary does not sandbox the provider subprocess or its
+own tools; configure those permissions in the provider.
+
+**New session** starts a fresh conversation. **Resume session** accepts a saved
+session ID, and uses only capabilities advertised by the provider. The latest ID
+is saved across editor restarts. Loading requires provider support; transcript
+replay depends on whether it supports load or only resume.
+
+## Embedded terminals and Run
+
+Build with **`-fterminal`** to enable the optional
+[libghostty-vt](https://github.com/ghostty-org/ghostty) backend. Both **Run > Terminal**
+and ACP terminal requests use the same parser, character grid and PTY implementation.
+ACP requests ask before executing commands and support output, wait, kill and release.
+Closing a terminal window leaves its command running; **Run > Stop terminal** stops
+the selected process. Leaving the editor cleans up its terminal processes.
+
+Ordinary keys and paste go to the focused terminal. F5/F6/F10, Alt window-number
+keys and menu shortcuts remain editor controls. Terminal windows resize their PTYs
+and render truecolor, attributes and Unicode through the existing grid.
+
+**Run > Run** (Ctrl+F9) invokes `thc run --project-dir DIR`. THC selects the current
+package's runnable component. **Run > Target** optionally selects a Cabal target
+such as `package:exe:program`, a THC executable, source/build root and runtime.
+Modified source buffers must be saved first. Target settings are saved in the user
+configuration directory. This uses the current THC CLI; older builds with the
+former `--exe` interface need updating.
+
+The Ghostty C API is currently unstable. The verified source revision is
+`76895d97b74ff6b24c2b1543bcd69ccc18048a4d`, built with Zig 0.16.0:
+
+```sh
+git clone https://github.com/ghostty-org/ghostty /tmp/thc-ghostty
+cd /tmp/thc-ghostty
+git checkout 76895d97b74ff6b24c2b1543bcd69ccc18048a4d
+zig build -Demit-lib-vt=true -Demit-xcframework=false -Doptimize=ReleaseFast --prefix /tmp/thc-ghostty-install
+cd /path/to/thc-edit
+export PKG_CONFIG_PATH=/tmp/thc-ghostty-install/share/pkgconfig:$PKG_CONFIG_PATH
+cabal run -fwindow -fterminal --ghc-options=-optl-Wl,-rpath,/tmp/thc-ghostty-install/lib thc-edit -- --metal
+```
+
+Use `--vulkan` on Linux. The terminal backend is optional independently of SDL;
+without it, the editor reports embedded terminals unavailable and does not advertise
+terminal support to ACP providers. No alternative escape-sequence parser is used.
+
+## External changes
+
+The editor observes open files and expanded tree directories in a background worker.
+Clean files reload with Undo preserved. Dirty or deleted files retain the editor,
+last-saved and disk versions and offer Compare, Reload, Keep and Save as.
+**File > Disk changes** reopens an acknowledged conflict. Keep retains the old disk
+baseline, so a later Save cannot silently overwrite the external version.
+Repeated observations of the same conflict do not repeatedly interrupt editing.
+Save-time checks remain authoritative, including after Git and ACP operations.
+
 ## Scope and limitations
 
-Cabal-plan source filtering, compile/run/debug integration and persistent
-preferences remain subsequent milestones. Runtime debugging will use THC's
-Truffle debugger when the program runs through THC.
+Cabal-plan source filtering, compilation controls and persistent appearance
+preferences remain subsequent milestones. THC's current runtime has source
+attribution but does not yet expose stepping or breakpoints; Debug remains disabled
+until that runtime contract exists.
 
 Unimplemented menu actions explain that they are unavailable. Directory arguments do not pretend to be projects.
 The terminal clipboard is editor-local; use bracketed paste for external text.
@@ -218,8 +300,7 @@ clusters still depend on terminal rendering.
 
 Files must be valid UTF-8 without NUL bytes. Saves compare the original bytes,
 write a sibling temporary file, preserve permissions, check for conflicts again
-and rename. Loaded symlinks resolve to their targets. Detected external changes
-leave the buffer dirty and the disk file untouched; an unavoidable race remains
+and rename. Loaded symlinks resolve to their targets. Unresolved external conflicts preserve the editor buffer and disk file; an unavoidable race remains
 between the final comparison and rename if another process writes concurrently.
 Save As refuses an existing destination. Atomic replacement is not a promise
 of power-loss durability.

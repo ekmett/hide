@@ -2,11 +2,12 @@
 module THC.Edit.Syntax (Style(..), highlight, highlightFor) where
 
 import Data.List (intercalate)
+import Data.Word (Word32)
 import qualified Data.Text as T
 import qualified Skylighting as S
 import System.FilePath (takeFileName)
 
-data Style = Plain | Keyword | Comment | Literal | Number | Constructor | Pragma deriving (Eq,Show)
+data Style = Plain | Keyword | Comment | Literal | Number | Constructor | Pragma | TerminalStyle Word32 Word32 Word32 deriving (Eq,Show)
 
 highlight :: T.Text -> [(Char,Style)]
 highlight = highlightFor "Main.hs"

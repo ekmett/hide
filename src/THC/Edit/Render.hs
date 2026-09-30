@@ -13,6 +13,7 @@ import Data.List (groupBy)
 import Data.Char (isSpace, toLower)
 import Data.Maybe (fromMaybe)
 import System.FilePath (takeFileName, (</>))
+import Data.Bits ((.&.), shiftR)
 import Data.Time (formatTime, defaultTimeLocale)
 import THC.Edit.Buffer
 import THC.Edit.Model
@@ -32,7 +33,7 @@ paper, edit, selected, shadow :: V.Attr
 paper=attr black gray; edit=attr yellow blue; selected=attr black green; shadow=attr gray black
 
 label :: V.Attr -> Text -> V.Image
-label = V.text'
+label a = V.text' a . T.map (\c -> if c<' ' || c=='\DEL' then '·' else c)
 row :: V.Attr -> Int -> Text -> V.Image
 row a w t = V.cropRight (max 0 w) (label a t V.<|> V.charFill a ' ' (max 0 w) 1)
 place :: Int -> Int -> V.Image -> V.Image
@@ -86,6 +87,7 @@ renderDesktop d = (V.picForLayers layers) {V.picCursor=cursor}
         _ -> V.NoCursor
       Nothing | menu d/=Nothing || contextMenu d/=Nothing || problemsFocused d || maybe False treeFocused (sideTree d) -> V.NoCursor
       Nothing -> case (activeWindow d,activeDocument d) of
+        (_,Just doc) | not (documentCursorVisible doc) -> V.NoCursor
         (Just w,Just doc) -> let { (r,c)=bufferLineColumn (documentBuffer doc) (caret (selection w)); x=left (bounds w)+1+displayColumn (bufferLineAt (documentBuffer doc) r) c-scrollColumn w; y=top (bounds w)+1+r-scrollRow w }
                             in if inside (Rect (left (bounds w)+1) (top (bounds w)+1) (width (bounds w)-2) (height (bounds w)-2)) x y then V.Cursor x y else V.NoCursor
         _ -> V.NoCursor
@@ -122,7 +124,7 @@ windowLayers d active w =
     number=T.pack (show (windowNumber w))
     moving=case drag d of Just (Moving wid _ _) -> wid==windowId w; Just (Resizing wid _ _) -> wid==windowId w; _ -> False
     frame=attr (if moving then cyan else if active then white else gray) blue
-    styledLines=splitStyled (if documentLabel doc /= Nothing then [(ch,Plain) | ch<-T.unpack t] else documentHighlight doc)
+    styledLines=splitStyled (if documentLabel doc /= Nothing && documentLabel doc /= Just "Conversation" && not (maybe False (T.isPrefixOf "Terminal ") (documentLabel doc)) then [(ch,Plain) | ch<-T.unpack t] else documentHighlight doc)
     scrollbarImage vertical =
       let Rect sx sy bw bh=scrollbarRect vertical doc w
           len=if vertical then bh else bw
@@ -136,6 +138,8 @@ windowLayers d active w =
 
     lineColor n = case documentLabel doc of
       Just "Git diff" -> let line=bufferLineAt b n in Just (attr (if "+" `T.isPrefixOf` line then V.RGBColor 85 255 85 else if "-" `T.isPrefixOf` line then V.RGBColor 255 85 85 else if "@@" `T.isPrefixOf` line then cyan else yellow) blue)
+      Just "Conversation" -> Nothing
+      Just name | "Terminal " `T.isPrefixOf` name -> Nothing
       Just _ -> Just (attr yellow blue)
       Nothing -> Nothing
 
@@ -157,6 +161,8 @@ styledImage override active sel start chars = V.horizCat [label a (T.pack (map s
       | c<' ' || c=='\DEL' = (a,'·'):expand (col+1) (offset+1) rest
       | otherwise = (a,c):expand (col+V.safeWcwidth c) (offset+1) rest
       where a=if active && offset>=lo && offset<hi then attr blue gray else fromMaybe (syntaxAttr style) override
+    syntaxAttr (TerminalStyle fg bg flags)=foldl V.withStyle (attr (rgb fg) (rgb bg)) [style | (bit,style)<-[(1,V.bold),(2,V.italic),(4,V.underline),(8,V.strikethrough),(16,V.dim)], flags .&. bit /= 0]
+      where rgb value=V.RGBColor (fromIntegral (value `shiftR` 16 .&. 255)) (fromIntegral (value `shiftR` 8 .&. 255)) (fromIntegral (value .&. 255))
     syntaxAttr style=attr (case style of Plain->yellow; Keyword->white; Comment->cyan; Literal->V.RGBColor 85 255 85; Number->V.RGBColor 255 85 255; Constructor->yellow; Pragma->gray) blue
 
 treeLayers :: Desktop -> Sidebar -> [V.Image]

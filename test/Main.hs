@@ -3,6 +3,11 @@ module Main where
 #ifdef WITH_WINDOW
 import qualified FontCheck
 #endif
+import qualified RunCheck
+import qualified ConversationCheck
+import qualified AgentFilesCheck
+import qualified TerminalCheck
+import qualified ConsolesCheck
 import Control.Monad (unless)
 import qualified Data.Text as T
 import THC.Edit.App (demoDesktop)
@@ -17,6 +22,10 @@ import qualified BrowserCheck
 import THC.Edit.Browser (Entry(..))
 import qualified WindowCheck
 import qualified FilesCheck
+import qualified ExternalCheck
+import qualified ReconcileCheck
+import qualified ACPCheck
+import qualified MarkdownCheck
 import THC.Edit.Render
 import THC.Edit.Buffer
 import THC.Edit.Syntax
@@ -30,6 +39,11 @@ check name ok = unless ok (error name)
 
 main :: IO ()
 main = do
+  RunCheck.checks
+  ConversationCheck.checks
+  AgentFilesCheck.checks
+  TerminalCheck.checks
+  ConsolesCheck.checks
   let b = newBuffer "hello\nworld"
       edited = replaceSelection (Selection 0 5) "λ" b
   check "selection replacement" (contents edited == "λ\nworld")
@@ -84,6 +98,7 @@ main = do
   let small = fst (handleEvent (V.EvResize 30 10) split)
   check "resize keeps frames inside desktop" (all (\w -> let Rect x y width height = bounds w in x >= 0 && y >= 1 && x+width <= 30 && y+height <= 9) (windows small))
   check "snapshot keeps 25 rows" (length (T.lines (snapshot d)) == 25)
+  check "dialog labels cannot inject terminal controls" (not (T.any (<' ') (T.filter (/='\n') (snapshot (message "Provider" ["\ESC[31m"] d)))))
   check "snapshot has menu" ("File" `T.isInfixOf` snapshot d)
   let dragging=case activeWindow demoDesktop of Just w -> demoDesktop {drag=Just (Moving (windowId w) 0 0)}; Nothing -> demoDesktop
   check "moving frame becomes cyan and single line" ("┌" `T.isInfixOf` snapshot dragging && "color:rgb(85,255,255);background:rgb(0,0,170)" `T.isInfixOf` snapshotHtml dragging)
@@ -166,4 +181,8 @@ main = do
   HelpCheck.checks
   BrowserCheck.checks
   FilesCheck.checks
+  ExternalCheck.checks
+  ReconcileCheck.checks
+  ACPCheck.checks
+  MarkdownCheck.checks
   putStrLn "editor checks passed"

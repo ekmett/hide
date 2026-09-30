@@ -93,6 +93,8 @@ gitOperationEffects (GitOperations ref _) core = foldM apply . (False,)
       case effect of
         Exit | busy -> pure (False,desktop {status="Wait for the Git operation to finish before quitting."})
         SaveDocument{} | mutating -> pure (False,desktop {status="Wait for the Git operation to finish before saving."})
+        AgentAction action _ | mutating, action=="run" || "approval:" `T.isPrefixOf` action ->
+          pure (False,desktop {status="Wait for the Git operation to finish before approving agent actions or running commands."})
         WriteGitCommit{} | busy -> pure (False,desktop {status="Wait for the Git operation to finish before committing."})
         RunGit action -> start busy (action/=FetchRemote) desktop (label action) (\root -> runOperation root action desktop)
         ReadMergeBranches -> start busy False desktop "Reading merge branches" readBranches
@@ -148,10 +150,11 @@ tickGitOperations (GitOperations ref focused) core initial = do
         in case result of
           Left err -> note err
           Right (file,b)
+            | filePath file/=filePath oldFile -> note "File path was replaced by a symbolic link; reopen it explicitly. Buffer preserved."
             | diskBytes file==diskBytes oldFile -> state
             | dirty original -> note "Changed on disk while you edited; unsaved buffer preserved."
             | otherwise ->
-                let fresh=b {revision=revision original+1}
+                let fresh=(replaceSelection (Selection 0 (bufferLength original)) (contents b) original) {saved=contents b}
                     clamp n=max 0 (min (bufferLength fresh) n)
                     adjust w=if bufferId w==bid then w {selection=let Selection a c=selection w in Selection (clamp a) (clamp c)} else w
                 in (ensureVisible d {buffers=M.insert bid (restyle doc {documentFile=Just file,documentBuffer=fresh}) (buffers d),windows=map adjust (windows d)},notes)
