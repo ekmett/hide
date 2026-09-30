@@ -1171,7 +1171,8 @@ startingDirectory :: Desktop -> FilePath
 startingDirectory d = fromMaybe (maybe (maybe "." treeRoot (sideTree d)) (takeDirectory . filePath) (activeDocument d >>= documentFile)) (defaultDirectory d)
 
 treeWidthOf :: Desktop -> Int
-treeWidthOf = maybe 0 treeWidth . sideTree
+-- The dock's right frame is also the editor area's left frame.
+treeWidthOf = maybe 0 (max 0 . subtract 1 . treeWidth) . sideTree
 
 problemsHeight :: Desktop -> Int
 problemsHeight d = if problemsVisible d then min 8 (max 0 (snd (screenSize d)-7)) else 0
@@ -1245,8 +1246,11 @@ setTree tree d = clampHexScroll d next {windows=map move (windows d)}
   where
     next=d {sideTree=tree,drag=Nothing,dragOriginal=Nothing}
     old=treeWidthOf d; new=treeWidthOf next
-    available=max 1 (fst (screenSize d)-old); target=max 1 (fst (screenSize d)-new)
-    move w = w {bounds=let r=bounds w in fitWindow next r {left=new+(left r-old)*target `div` available,width=width r*target `div` available},restoredBounds=Nothing}
+    sw=fst (screenSize d); delta=new-old
+    move w = w {bounds=fitWindow next r {left=x,width=right-x},restoredBounds=Nothing}
+      where r=bounds w
+            x=left r+delta
+            right=if left r+width r>=sw then sw else min sw (x+width r)
 
 resizeTree :: Int -> Desktop -> Desktop
 resizeTree x d = case sideTree d of

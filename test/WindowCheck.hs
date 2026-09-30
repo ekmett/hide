@@ -85,4 +85,21 @@ checks = do
      maybe False (windowFocused fileFocused) (activeWindow fileFocused) && buffers fileFocused==buffers tree)
   check "Alt Tab cycles dialog fields"
     (fmap focus (dialog (altTab preferences))==fmap ((+1).focus) (dialog preferences))
+  let docked=installTree "/tmp" [] desktop
+      edge=maybe (error "no Files") ((subtract 1).treeWidth) (sideTree docked)
+      floating=modifyActive (\w -> w {bounds=Rect edge 3 30 10}) docked
+      rect=fmap bounds . activeWindow
+      leftward=resizeTree 19 floating
+      rightward=resizeTree 35 floating
+      touching=resizeTree 55 rightward
+      stuck=resizeTree 35 touching
+      movedByMouse=fst (handleEvent (V.EvMouseDown 35 23 V.BLeft [])
+        (fst (handleEvent (V.EvMouseDown edge 23 V.BLeft []) floating)))
+  check "Files and the adjacent editor share one border column"
+    (edge==23 && fmap (left.bounds) (activeWindow docked)==Just edge)
+  check "dock resizing carries a floating window without scaling it"
+    (rect leftward==Just (Rect 19 3 30 10) && rect rightward==Just (Rect 35 3 30 10) && rect movedByMouse==rect rightward)
+  check "editor right edge sticks to the screen once reached"
+    (rect touching==Just (Rect 55 3 25 10) && rect stuck==Just (Rect 35 3 45 10) &&
+     rect (resizeTree 19 docked)==Just (Rect 19 1 61 23) && buffers stuck==buffers floating)
   putStrLn "window input checks passed"

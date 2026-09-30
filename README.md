@@ -198,8 +198,10 @@ applied to keep text legible (below scale 2 in Mode 3 or scale 4 in Mode 259).
 **File > Change dir...** selects a new working directory and refreshes the Files
 window without closing your buffers. Enter on a directory browses into it;
 OK accepts the displayed directory, and Browse opens a typed path.
-The Files window has its own frame and scrollbar; drag its bottom-right corner
-to resize the dock. Status-bar key labels are clickable shortcuts and highlight
+The Files window has a double frame and scrollbar, sharing its right edge with
+adjacent editor windows. Drag its bottom-right corner to resize the dock; editors
+move with it until their right edge reaches the screen, then stay attached there
+and resize as the divider moves. Status-bar key labels are clickable shortcuts and highlight
 green under the pointer. Ctrl+Tab cycles windows; Alt+Tab cycles the menu,
 Files, windows, and Messages. Shift reverses either cycle. Dialogs cycle their
 controls with Alt+Tab. OS-reserved Alt+Tab may not reach the editor.

@@ -125,7 +125,17 @@ checks = do
      snd (handleEvent (V.EvMouseDown 3 2 V.BLeft []) compactTree)==[ExpandTree 0])
   let longTree=installTree "/project" [Entry (T.pack (show i)<>".hs") False Nothing Nothing | i<-[1::Int ..100]] desktop
       scrolled=fst (handleEvent (V.EvMouseDown 4 4 V.BScrollDown []) longTree)
-      barClicked=fst (handleEvent (V.EvMouseDown (treeWidthOf longTree-1) (snd (screenSize longTree)-3) V.BLeft []) longTree)
+      barClicked=fst (handleEvent (V.EvMouseDown (treeWidthOf longTree) (snd (screenSize longTree)-3) V.BLeft []) longTree)
+  let unfocusedTree=compactTree {sideTree=fmap (\t -> t {treeFocused=False}) (sideTree compactTree)}
+      glyphAt d x y=T.index (T.lines (snapshot d) !! y) x
+      shared=treeWidthOf unfocusedTree
+      smallNeighbor=modifyActive (\w -> w {bounds=Rect shared 4 30 10}) unfocusedTree
+  check "Files keeps its double outline when the editor is focused"
+    (glyphAt unfocusedTree 0 1=='╔' && glyphAt unfocusedTree 0 2=='║' && glyphAt unfocusedTree 0 23=='╚')
+  check "shared borders join neighboring top and bottom frames"
+    (glyphAt unfocusedTree shared 1=='╦' && glyphAt unfocusedTree shared 23=='╩' &&
+     glyphAt smallNeighbor shared 4=='╠' && glyphAt smallNeighbor shared 13=='╠' &&
+     glyphAt smallNeighbor shared 1=='╗')
   check "Files scrollbar and wheel scroll rows" (fmap treeScroll (sideTree scrolled)==Just 3 && fmap treeScroll (sideTree barClicked)==Just 1)
   check "tree markers have a separating space" ("+ src" `T.isInfixOf` snapshot compactTree && not ("[+]" `T.isInfixOf` snapshot compactTree))
   check "inactive scrollbar region only focuses window"

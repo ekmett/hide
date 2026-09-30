@@ -9,7 +9,7 @@ import Data.Text (Text)
 import qualified Data.Text.Lazy as TL
 import qualified Data.Map.Strict as M
 import Data.Foldable (toList)
-import Data.List (groupBy)
+import Data.List (groupBy, find)
 import Data.Char (isSpace, toLower)
 import Data.Maybe (fromMaybe)
 import System.FilePath (takeFileName, (</>))
@@ -197,10 +197,17 @@ treeLayers :: Desktop -> Sidebar -> [V.Image]
 treeLayers d tree =
   [place (max 2 ((w-11) `div` 2)) 1 (label frame " Files "),
    place (w-5) 1 (label frame "[" V.<|> label (attr cyan blue) "←" V.<|> label frame "]")]
+  ++ [place (w-1) y (V.char frame (junction y neighbor))
+     | y<-[1..h], Just neighbor<-[find (\win -> inside (bounds win) (w-1) y) (windows d)],
+       let r=bounds neighbor, y==top r || y==top r+height r-1]
   ++ [place (w-1) 2 (V.vertCat [scrollCell n | n<-[0..visible-1]]) | treeFocused tree, visible>=3]
-  ++ [place 1 2 (V.vertCat (map line listing)),place 0 1 (box frame (treeFocused tree) w h)]
+  ++ [place 1 2 (V.vertCat (map line listing)),place 0 1 (box frame True w h)]
   where
     w=treeWidth tree; h=max 0 (snd (screenSize d)-2); visible=treeContentRows d
+    junction y neighbor | y==1 = '╦'
+                        | y==h = '╩'
+                        | windowFocused d neighbor = '╠'
+                        | otherwise = '╟'
     frame=attr white blue
     listing=take visible (drop (treeScroll tree) (zip [0..] (treeRows tree)))
     line (i,node)=row (if treeFocused tree && i==treeSelected tree then selected else edit) (w-2)
