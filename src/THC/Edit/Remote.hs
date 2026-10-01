@@ -116,6 +116,17 @@ runRemoteRelay args = handle report $ do
       throwIO err
     relay source destination = readPacket source >>= maybe (pure ()) (\packet -> writePacket destination packet >> relay source destination)
 
+-- GHC's Windows Handle readiness wait can remain inside a foreign call after
+-- socket shutdown. Bound that wait so cancellation can run between polls.
+awaitInspectionEOF :: Handle -> IO ()
+#ifdef mingw32_HOST_OS
+awaitInspectionEOF connection = do
+  ready <- hWaitForInput connection 100
+  if ready then void (BS.hGetSome connection 1) else awaitInspectionEOF connection
+#else
+awaitInspectionEOF connection = void (BS.hGetSome connection 1)
+#endif
+
 -- Run the wakeup before withAsync joins a blocked socket reader on Windows.
 raceWithShutdown :: IO () -> IO a -> IO b -> IO ()
 raceWithShutdown shutdown left right = mask $ \restore ->
@@ -268,7 +279,7 @@ runRemoteDaemonWithStartup owned session scale effects tick inspect initial = do
                     pure (s {desktop=updated,stopped=stopped s || exited},(exited,reply))
                   -- Start deferred work masked before accepting cancellation. Its
                   -- interruptible waits install their cleanup before EOF can stop it.
-                  withAsync finish $ \response -> withAsync (restore (BS.hGetSome connection 1)) $ \eof ->
+                  withAsync finish $ \response -> withAsync (restore (awaitInspectionEOF connection)) $ \eof ->
                     flip finally (do
                       shutdown
                       when exited $ do
