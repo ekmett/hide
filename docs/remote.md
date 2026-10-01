@@ -110,3 +110,8 @@ disconnect, but not a daemon crash or host reboot; save files normally.
 [Sessions](sessions.md) covers detachment and frontend switching.
 The [architecture reference](architecture.md#sessions-and-remote-editing)
 describes the transport and host-local endpoint.
+
+Native menus use named commands negotiated with the server. When either side
+predates named-menu support, native menu items are disabled rather than mapped
+to a different command. Keyboard shortcuts and the editor menus drawn in the
+remote screen remain available, and existing sessions can still be resumed.

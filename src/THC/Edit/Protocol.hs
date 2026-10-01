@@ -29,7 +29,7 @@ import THC.Edit.Render (renderDesktop)
 import THC.Edit.Unicode (displayOpsForPic, graphemes, clusterWidth)
 
 data WebInput = Key T.Text [V.Modifier] | Paste T.Text | Mouse T.Text Int Int Int Int [V.Modifier]
-              | SystemTheme Bool | BrowserCommand Command | MenuCommand Int | UploadFile T.Text BS.ByteString | Frontend (Maybe Int) | OpenPath FilePath | Resize Int Int | Blur | Modifiers [V.Modifier] deriving (Eq,Show)
+              | SystemTheme Bool | BrowserCommand Command | MenuCommand (Maybe Command) | UploadFile T.Text BS.ByteString | Frontend (Maybe Int) | OpenPath FilePath | Resize Int Int | Blur | Modifiers [V.Modifier] deriving (Eq,Show)
 
 parseInput :: Value -> Parser WebInput
 parseInput = withObject "browser event" $ \o -> do
@@ -39,9 +39,12 @@ parseInput = withObject "browser event" $ \o -> do
         traverse (\v -> case v of "shift" -> pure V.MShift; "ctrl" -> pure V.MCtrl; "alt" -> pure V.MAlt; _ -> fail "Unknown modifier") values
   case kind of
     "menu" -> do
-      index <- o .: "index"
-      unless (index>=0 && index<length protocolCommands) (fail "Invalid menu command")
-      pure (MenuCommand index)
+      name <- o .:? "command"
+      case name of
+        -- Legacy indices depend on the sender's menu layout. Never reinterpret
+        -- them using this executable's possibly different layout.
+        Nothing -> pure (MenuCommand Nothing)
+        Just ident -> maybe (fail "Unknown menu command") (pure . MenuCommand . Just) (lookup ident protocolMenuCommands)
     "theme" -> SystemTheme <$> o .: "dark"
     "command" -> do
       name <- o .: "command"
@@ -85,9 +88,8 @@ applyInput input d = case input of
   SystemTheme value -> (d {systemDark=value},[])
   BrowserCommand cmd | dialog d/=Nothing -> (d,[WriteBrowserClipboard "" | cmd `elem` [Copy,Cut]])
                      | otherwise -> runCommand cmd d
-  MenuCommand index -> case drop index protocolCommands of
-    cmd:_ | index>=0 && dialog d==Nothing && commandEnabled d cmd -> runCommand cmd d
-    _ -> (d,[])
+  MenuCommand (Just cmd) | dialog d==Nothing && commandEnabled d cmd -> runCommand cmd d
+  MenuCommand _ -> (d,[])
   UploadFile name bytes ->
     let b=case TE.decodeUtf8' bytes of
           Right text | not (BS.elem 0 bytes) -> newBuffer text
@@ -176,6 +178,11 @@ protocolVersion = 1
 protocolCommands :: [Command]
 protocolCommands = [cmd | (_,_,items)<-menus, MenuItem _ _ cmd<-items]
 
+-- Constructor spellings are wire identifiers; new menu entries cannot shift
+-- existing commands. Resolve only this whitelist, never arbitrary Read input.
+protocolMenuCommands :: [(T.Text,Command)]
+protocolMenuCommands = [(T.pack (show cmd),cmd) | cmd<-protocolCommands]
+
 frameMetadata :: FilePath -> Desktop -> [Pair]
 frameMetadata cwd d =
   ["title" .= applicationTitle cwd d,"size" .= screenSize d,"mode" .= videoMode d,
@@ -183,11 +190,12 @@ frameMetadata cwd d =
    "crt" .= crtFilter d,"pixelated" .= pixelateUnicode d,
    "selection" .= (if dialog d/=Nothing then "" else clipboard (fst (runCommand Copy d {browserFrontend=False}))),
    "terminal" .= (activeTerminal d/=Nothing && dialog d==Nothing && menu d==Nothing),
-   "wordstar" .= wordStar d,"menus" .= [(dialog d==Nothing || cmd==Model.Paste) && commandEnabled d cmd | cmd<-protocolCommands]]
+   "wordstar" .= wordStar d,"menus" .= replicate (length protocolCommands) False,
+   "menuState" .= [(ident,(dialog d==Nothing || cmd==Model.Paste) && commandEnabled d cmd) | (ident,cmd)<-protocolMenuCommands]]
   where cursor=case V.picCursor (renderDesktop d) of V.Cursor x y -> Just (x,y); _ -> Nothing
 
 assetsPacket :: Font -> Double -> Value
-assetsPacket font scale = object ["type" .= ("assets"::T.Text),"version" .= protocolVersion,"scale" .= scale,
+assetsPacket font scale = object ["type" .= ("assets"::T.Text),"version" .= protocolVersion,"scale" .= scale,"menuCommands" .= map fst protocolMenuCommands,
   "glyphs" .= [(T.singleton c,glyphWidth g,glyphRows g) | (c,g)<-bitmapAtlas font]]
 
 maxPacketSize :: Int

@@ -12,6 +12,7 @@ import qualified Data.Text.Encoding as TE
 import qualified Data.Text as T
 import qualified Graphics.Vty as V
 import THC.Edit.Frontend
+import THC.Edit.Model (MenuItem(..), menus)
 import THC.Edit.Remote (RemotePeer)
 import THC.Edit.Unicode (clusterWidth, graphemes)
 #if defined(WITH_WINDOW) && defined(WITH_REMOTE)
@@ -60,8 +61,10 @@ parseRemoteFrame metadata rows = parseEither (withObject "frame metadata" $ \o -
   pixelated <- o .:? "pixelated" .!= False
   terminal <- o .:? "terminal" .!= False
   wordstar <- o .:? "wordstar" .!= False
-  enabled <- o .:? "menus" .!= []
-  unless (length enabled<=256) (fail "Invalid menu state")
+  supported <- o .:? "menuCommands" .!= [] :: Parser [T.Text]
+  states <- o .:? "menuState" .!= [] :: Parser [(T.Text,Bool)]
+  unless (length supported<=256 && length states<=256 && all ((<=256).T.length) (supported++map fst states)) (fail "Invalid menu state")
+  let enabled=[ident `elem` supported && lookup ident states==Just True | ident<-nativeMenuNames]
   cells <- concat <$> sequence [parseRow cols y row | (y,row) <- zip [0..] rows]
   pure (RemoteFrame size mode title cursor blink crt pixelated terminal wordstar enabled cells)) metadata
   where
@@ -111,7 +114,7 @@ nativeEventInput event = case event of
   6:_ -> Just (object ["type" .= ("command"::T.Text),"command" .= ("quit"::T.Text)])
   7:_ -> Just (object ["type" .= ("blur"::T.Text)])
   9:x:y:direction:mods:_ -> mouse (if direction>0 then "wheel-up" else "wheel-down") x y 1 1 mods
-  11:i:_ | i>=0 -> Just (object ["type" .= ("menu"::T.Text),"index" .= i])
+  11:i:_ | i>=0, ident:_ <- drop i nativeMenuNames -> Just (object ["type" .= ("menu"::T.Text),"command" .= ident])
   12:x:y:_ -> mouse "move" x y 1 0 0
   13:mods:_ -> Just (object ["type" .= ("modifiers"::T.Text),"mods" .= modifierNames mods])
   _ -> Nothing
@@ -120,6 +123,9 @@ nativeEventInput event = case event of
     mouse action x y button clicks mods = Just (object ["type" .= ("mouse"::T.Text),"action" .= (action::T.Text),
       "x" .= max (-1) (min 511 x),"y" .= max (-1) (min 255 y),"button" .= (if button==3 then 2 else 0::Int),
       "clicks" .= max 0 (min 3 clicks),"mods" .= modifierNames mods])
+nativeMenuNames :: [T.Text]
+nativeMenuNames = [T.pack (show cmd) | (_,_,items)<-menus, MenuItem _ _ cmd<-items]
+
 remoteDetachShortcut :: [Int] -> Bool
 remoteDetachShortcut event = case event of
   1:key:mods:_ -> key==fromEnum ']' && mods .&. 15==2
@@ -159,8 +165,10 @@ receiveFrames peer queue = go [] (object []) Nothing
               unless (length glyphs<=65536) (fail "Oversized glyph atlas")
               forM_ glyphs $ \(text,w,bits) -> unless (T.length text==1 && w `elem` [8,16] && length bits==16 && all (\n -> n>=0 && n<=65535) bits) (fail "Invalid glyph")
               pure (M.fromList [(text,Glyph w (map fromIntegral bits)) | (text,w,bits)<-glyphs])) value
+            supported <- parseIO (withObject "assets" (\o -> o .:? "menuCommands" .!= [])) value :: IO [T.Text]
+            unless (length supported<=256 && all ((<=256).T.length) supported) (ioError (userError "Invalid menu commands"))
             emit (Assets atlas)
-            go [] (object []) Nothing
+            go [] (object ["menuCommands" .= supported]) Nothing
           "download" -> do
             name <- parseIO (withObject "download" (.: "name")) value
             go rows metadata (Just name)
@@ -235,7 +243,8 @@ runRemoteWindow backend scale (cols,rows) mode host peer = do
           case TE.decodeUtf8' bytes of
             Right text -> forM_ (T.unpack text) $ \c -> sendEvent [1,fromEnum c,0]
             Left _ -> pure ()
-        11:i:_ | i>=0, Paste:_ <- drop i nativeCommands -> paste
+        11:i:_ | i<0 || not (maybe False (\value -> case drop i (remoteMenus value) of enabled:_ -> enabled; _ -> False) frame) -> pure ()
+               | Paste:_ <- drop i nativeCommands -> paste
         14:_ | null host -> do
           bytes <- c_text >>= BS.packCString
           case TE.decodeUtf8' bytes of

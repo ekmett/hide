@@ -3,6 +3,7 @@ module ProtocolCheck (checks) where
 import Control.Exception (SomeException, bracket, try)
 import Control.Monad (unless, forM_)
 import Data.Aeson
+import Data.Aeson.Types (parseEither, parseMaybe)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.Text as T
@@ -30,6 +31,11 @@ checks = do
       rejects "truncated, oversized and unknown-kind packets fail" (readPacket h >> pure ())
   let d=addDocument Nothing (newBuffer "λ\nhello") (initialDesktop (80,25))
       screens=map frameRows [d,insertText "world " d,d {screenSize=(100,30)}]
+  let menu fields=parseEither parseInput (object (["type" .= ("menu"::T.Text)]++fields))
+  check "named menu ignores a stale positional index" (menu ["command" .= ("New"::T.Text),"index" .= (999::Int)]==Right (MenuCommand (Just New)))
+  check "unknown named menu is rejected" (either (const True) (const False) (menu ["command" .= ("future-command"::T.Text)]))
+  check "legacy positional menus cannot execute a different command" (case menu ["index" .= (0::Int)] of Right input -> applyInput input d==(d,[]); _ -> False)
+  check "legacy menu enabled flags stay disabled" (parseMaybe (withObject "metadata" (.: "menus")) (object (frameMetadata "/" d))==Just (replicate (length protocolCommands) False))
   _<-foldFrames check [] screens
   rejects "unknown display encoding rejected" (decodeFrame [] (BS.pack [9]) >> pure ())
   rejects "bad compressed stream rejected" (decodeFrame [] (BS.pack [0,255,255]) >> pure ())

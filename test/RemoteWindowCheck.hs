@@ -22,6 +22,12 @@ checks = do
       rows = row : replicate 24 (toJSON ([]::[Value]))
       valid = either (const False) (const True) . parseRemoteFrame meta
   check "remote Unicode rows validate" (valid rows)
+  let menuMeta fields=object (["size" .= ([80,25]::[Int]) ]++fields)
+      states metadata=either (const []) remoteMenus (parseRemoteFrame metadata rows)
+  check "legacy menus are disabled without named metadata" (not (or (states (menuMeta ["menus" .= ([True,True]::[Bool])]))))
+  check "menu state requires advertised command capability" (not (or (states (menuMeta ["menuState" .= [("New"::T.Text,True)]]))))
+  check "menu enable state maps by command name across reordered layouts" (take 1 (states (menuMeta ["menuCommands" .= (["Quit","New"]::[T.Text]),"menuState" .= [("Quit"::T.Text,False),("New",True)]]))==[True])
+  check "native menus send names rather than positions" (nativeEventInput [11,0]==Just (object ["type" .= ("menu"::T.Text),"command" .= ("New"::T.Text)]))
   check "remote rows must match height" (not (valid (take 24 rows)))
   check "remote span overflow rejected" (not (valid (toJSON [(79::Int,0::Int,0::Int,[String "ab"])] : drop 1 rows)))
   check "remote colors bounded" (not (valid (toJSON [(0::Int,-1::Int,0::Int,[String "a"])] : drop 1 rows)))
