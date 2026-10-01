@@ -177,7 +177,7 @@ killTerminal :: Terminal -> IO ()
 killTerminal (Terminal state) = withMVar state $ maybe (pure ()) c_kill
 
 closeTerminal :: Terminal -> IO ()
-closeTerminal (Terminal state) = modifyMVar_ state $ \current -> do
+closeTerminal (Terminal state) = mask_ $ modifyMVar_ state $ \current -> do
   maybe (pure ()) c_free current
   pure Nothing
 #else
