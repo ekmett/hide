@@ -60,9 +60,10 @@ and daemon agent polling continues while no frontend is attached.
   was made.
 
   `test/interrupt-session.py` owns its resumed daemon and relay processes, retains
-  failed fixture directories and relay stderr, and checks actual daemon exit,
+  failed fixture directories, relay stderr, failure stage and relay exit status
+  before and after cleanup, and checks actual daemon exit,
   SIGTERM detachment, and recovery/save of an unsaved edit. On the next failure,
-  retain relay exit status alongside both logs and distinguish relay stdin/socket
+  use the retained relay status alongside both logs to distinguish relay stdin/socket
   EOF, daemon input failure, frame/output failure, and the enclosing attachment
   exception. A cancellation recorded only in the losing worker is insufficient;
   identify the first terminating worker and whether its exception propagates to

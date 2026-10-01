@@ -36,6 +36,7 @@ try:
         try:
             return wire['control'](p, kind)
         except BaseException:
+            record_relay(p, 'waiting for ' + kind)
             if p.poll() is not None:
                 error = p.stderr.read()
                 with open(root / ('relay-' + str(relays.index(p)) + '.log'), 'ab') as log:
@@ -43,6 +44,9 @@ try:
                 print('Relay error:', error.decode(errors='replace'), file=sys.stderr)
             raise
     relays = []
+    def record_relay(p, stage):
+        with open(root / ('relay-' + str(relays.index(p)) + '.status'), 'a') as log:
+            log.write(f'{time.monotonic():.6f} {stage}: exit={p.poll()!r}\n')
     def attach():
         p = subprocess.Popen([binary, '--remote'], cwd=root, env=env,
                              stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -54,6 +58,7 @@ try:
         control(p, 'assets')
         return p
     def finish(p):
+        record_relay(p, 'before closing stdin')
         try:
             p.stdin.close()
         except (BrokenPipeError, OSError):
@@ -61,8 +66,10 @@ try:
         try:
             p.wait(timeout=5)
         except subprocess.TimeoutExpired:
+            record_relay(p, 'cleanup timeout; killing fixture relay')
             p.kill()
             p.wait()
+        record_relay(p, 'after cleanup')
         p.stdout.close()
         if not p.stderr.closed:
             with open(root / ("relay-" + str(relays.index(p)) + ".log"), "ab") as log:
