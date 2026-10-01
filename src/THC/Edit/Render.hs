@@ -161,7 +161,7 @@ windowLayers d active w =
             let shape=if height rect==1 then if leftSide then 4 else 5
                       else (if n==0 then 0 else 2)+(if leftSide then 0 else 1)]
         inputImage=V.vertCat [V.cropRight (width rect) (V.translateX (negate sc)
-          (styledImage Nothing (active && composerFocused d) (composerSelection d) (bufferLineOffset draft n) [(c,BubbleStyle True Plain) | c<-T.unpack (bufferLineAt draft n)]) V.<|> V.charFill (attr black scrollCyan) ' ' (width rect) 1)
+          (styledImage (const True) Nothing (active && composerFocused d) (composerSelection d) (bufferLineOffset draft n) [(c,BubbleStyle True Plain) | c<-T.unpack (bufferLineAt draft n)]) V.<|> V.charFill (attr black scrollCyan) ' ' (width rect) 1)
           | n<-[sr..sr+height rect-1]]
     hexDividerLayers =
       [place (x+1+column) y (V.vertCat [V.char frame (if active && not moving then '╤' else '┬'),
@@ -169,6 +169,8 @@ windowLayers d active w =
       | byteMode b, divider<-hexDividers (windowHexBytes w), let column=divider-scrollColumn w, column>=0, column<contentWidth]
     contentWidth=max 0 (ww-2); contentHeight=windowContentRows d doc w
     textImage=V.vertCat [renderLine n | n<-[scrollRow w..scrollRow w+contentHeight-1]]
+    selectable style | documentLabel doc==Just "Conversation" = case style of BubbleText{} -> True; _ -> False
+                     | otherwise = True
     renderLine n | byteMode b && n>=documentRows doc w = V.charFill edit ' ' contentWidth 1
     renderLine n | byteMode b = V.cropRight contentWidth (V.translateX (negate (scrollColumn w)) (V.horizCat
       [V.char (if active && maybe False highlighted offset then selected else if ch=='.' && maybe False (\i -> T.index bytes (i-n*count)/='.') offset then attr gray blue else edit) ch | (ch,offset)<-hexRow count n t]) V.<|> V.charFill edit ' ' contentWidth 1)
@@ -176,7 +178,7 @@ windowLayers d active w =
         count=windowHexBytes w
         bytes=T.take count (T.drop (n*count) t)
         highlighted offset = offset==caret (selection w) || let (a,z)=ordered (selection w) in offset>=a && offset<z
-    renderLine n=V.cropRight contentWidth (V.translateX (negate (scrollColumn w)) (styledImage (lineColor n) active (selection w) (bufferLineOffset b n) (fromMaybe [] (atMay styledLines n))) V.<|> V.charFill edit ' ' contentWidth 1)
+    renderLine n=V.cropRight contentWidth (V.translateX (negate (scrollColumn w)) (styledImage selectable (lineColor n) active (selection w) (bufferLineOffset b n) (fromMaybe [] (atMay styledLines n))) V.<|> V.charFill edit ' ' contentWidth 1)
 
     lineColor n = case documentLabel doc of
       Just "Git diff" -> let line=bufferLineAt b n in Just (attr (if "+" `T.isPrefixOf` line then V.RGBColor 85 255 85 else if "-" `T.isPrefixOf` line then V.RGBColor 255 85 85 else if "@@" `T.isPrefixOf` line then cyan else yellow) blue)
@@ -192,8 +194,8 @@ splitStyled :: [(Char,Style)] -> [[(Char,Style)]]
 splitStyled []=[[]]
 splitStyled xs=let (a,b)=break ((=='\n').fst) xs in a:case b of []->[]; _:rest->splitStyled rest
 
-styledImage :: Maybe V.Attr -> Bool -> Selection -> Int -> [(Char,Style)] -> V.Image
-styledImage override active sel start chars = V.horizCat [label a (T.pack (map snd group)) | group@((a,_):_) <- groupBy (\a b -> fst a==fst b) (expand 0 start chars)]
+styledImage :: (Style -> Bool) -> Maybe V.Attr -> Bool -> Selection -> Int -> [(Char,Style)] -> V.Image
+styledImage selectable override active sel start chars = V.horizCat [label a (T.pack (map snd group)) | group@((a,_):_) <- groupBy (\a b -> fst a==fst b) (expand 0 start chars)]
   where
     (lo,hi)=ordered sel
     expand _ _ []=[]
@@ -202,7 +204,8 @@ styledImage override active sel start chars = V.horizCat [label a (T.pack (map s
       | c=='\t' = replicate (8-col `mod` 8) (a,' ') ++ expand (col+8-col `mod` 8) (offset+1) rest
       | c<' ' || c=='\DEL' = (a,'·'):expand (col+1) (offset+1) rest
       | otherwise = (a,c):expand (col+V.safeWcwidth c) (offset+1) rest
-      where a=if active && offset>=lo && offset<hi then attr blue gray else fromMaybe (syntaxAttr style) override
+      where a=if active && selectable style && offset>=lo && offset<hi then attr blue gray else fromMaybe (syntaxAttr style) override
+    syntaxAttr (BubbleText _ outgoing style)=syntaxAttr (BubbleStyle outgoing style)
     syntaxAttr (BubbleStyle outgoing style)=attr foreground (if outgoing then scrollCyan else gray)
       where foreground | outgoing = black
                        | otherwise = case style of

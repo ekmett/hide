@@ -8,7 +8,7 @@ import qualified Data.Text as T
 import qualified Skylighting as S
 import System.FilePath (takeFileName)
 
-data Style = Plain | Keyword | Comment | Literal | Number | Constructor | Pragma | BubbleStyle Bool Style | TerminalStyle Word32 Word32 Word32 deriving (Eq,Show)
+data Style = Plain | Keyword | Comment | Literal | Number | Constructor | Pragma | BubbleStyle Bool Style | BubbleText Int Bool Style | TerminalStyle Word32 Word32 Word32 deriving (Eq,Show)
 
 highlight :: T.Text -> [(Char,Style)]
 highlight = highlightFor "Main.hs"

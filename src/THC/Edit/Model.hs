@@ -10,13 +10,13 @@ import qualified Data.Map.Strict as M
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import Data.Maybe (listToMaybe, fromMaybe)
-import Data.List (find, findIndex, sortOn, mapAccumL)
+import Data.List (find, findIndex, sortOn, mapAccumL, groupBy)
 import Data.Char (toLower, isPrint, isAlphaNum, chr, ord, toUpper, isHexDigit, digitToInt)
 import Text.Read (readMaybe)
 import System.FilePath ((</>), takeDirectory, isAbsolute)
 import THC.Edit.Browser (Entry(..))
 import THC.Edit.Git (GitReview)
-import THC.Edit.Syntax (Style, highlightFor)
+import THC.Edit.Syntax (Style(..), highlightFor)
 import THC.Edit.Hex
 import THC.Edit.Buffer
 import THC.Edit.Files (FileState(..))
@@ -370,6 +370,8 @@ prompt title p fs d = d {dialog = Just (Dialog title p fs 0 ["OK","Cancel"] []),
 
 runCommand :: Command -> Desktop -> (Desktop,[Effect])
 runCommand cmd source | problemsVisible source && problemsFocused source, cmd `elem` [Undo,Redo,Cut,Paste,SelectAll] = (source {menu=Nothing,contextMenu=Nothing},[])
+runCommand Copy source | activeConversation source, Just w<-activeWindow source, anchor (selection w)/=caret (selection w) =
+  (source {clipboard=conversationSelection source,status="Conversation text copied.",menu=Nothing,contextMenu=Nothing},[])
 runCommand cmd source | not (problemsFocused source), composerActive source, cmd `elem` [Undo,Redo,Copy,Cut,Paste,SelectAll] = (composerCommand cmd source,[])
 runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source {menu = Nothing, contextMenu=Nothing, buttonHover=Nothing, buttonPressed=Nothing, prefix = Nothing, drag = Nothing,dragOriginal=Nothing})
   where
@@ -458,6 +460,7 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
     go Gallery d = (prompt "Dialog controls" Widgets [Input "Module name" "Main" 4,CheckBox "Auto indent" True,Radio "Tab width" ["4 columns","8 columns"] 1,ListBox "Source files" ["Main.hs","Types.hs","Parser.hs","Syntax.hs","Eval.hs"] 0] d,[])
     go (Disabled reason) d = (d {status = reason},[])
     confirm action d = (d {dialog = Just (Dialog "Save changes?" (Confirm action) [] 0 ["Save","Discard","Cancel"] ["Save changes to " <> documentTitle d <> "?"])},[])
+    selected d | activeConversation d = conversationSelection d
     selected d = case (activeWindow d,activeDocument d) of (Just w,Just doc) -> selectedText (selection w) (documentBuffer doc); _ -> ""
 
 activeText :: Desktop -> Text
@@ -607,6 +610,23 @@ dispatchEvent _ d = (d,[])
 activeConversation :: Desktop -> Bool
 activeConversation d = maybe False (windowFocused d) (activeWindow d) && maybe False ((==Just "Conversation").documentLabel) (activeDocument d)
 
+-- Rendered cells carry message identity only for text, never bubble furniture.
+conversationSelection :: Desktop -> Text
+conversationSelection d = case (activeWindow d,activeDocument d) of
+  (Just w,Just doc) | documentLabel doc==Just "Conversation" ->
+    let (a,z)=ordered (selection w)
+        cells=[(ident,outgoing,c) | (c,BubbleText ident outgoing _)<-take (z-a) (drop a (documentHighlight doc))]
+        groups=groupBy (\(i,_,_) (j,_,_) -> i==j) cells
+        render group@((_,outgoing,_):_)=
+          (if length groups>1 then if outgoing then "User: " else "Bot: " else "")<>
+          T.pack [c | (_,_,c)<-group]
+        render []=""
+    in T.intercalate "\n\n" (map render groups)
+  _ -> ""
+
+clearReplySelection :: Desktop -> Desktop
+clearReplySelection d = if activeConversation d then modifyActive (\w -> w {selection=Selection 0 0}) d else d
+
 composerActive :: Desktop -> Bool
 composerActive d = activeConversation d && composerFocused d
 
@@ -623,8 +643,13 @@ layoutComposer before after = after {windows=map adjust (windows after)}
     adjust w=w
 
 composerRect :: Desktop -> Window -> Rect
-composerRect d w = let Rect x y ww hh=bounds w; rows=min (min 12 (bufferLineCount (composerBuffer d))) (max 0 (hh-6))
-                 in Rect (x+2) (y+hh-1-rows) (max 0 (ww-6)) rows
+composerRect d w = Rect (x+ww-4-columns) (y+hh-1-rows) columns rows
+  where
+    Rect x y ww hh=bounds w
+    draft=composerBuffer d
+    rows=min (min 12 (bufferLineCount draft)) (max 0 (hh-6))
+    columns=min (max 0 (ww-6)) (max 12 (longest+1))
+    longest=maximum (0:[displayColumn line (T.length line) | line<-textLines (contents draft)])
 
 composerSubmit :: [V.Modifier] -> Desktop -> (Desktop,[Effect])
 composerSubmit mods d
@@ -640,14 +665,14 @@ composerScroll d w = (max 0 (r-height rect+1),max 0 (displayColumn (bufferLineAt
   where b=composerBuffer d; (r,c)=bufferLineColumn b (caret (composerSelection d)); rect=composerRect d w
 
 composerClick :: Int -> Int -> [V.Modifier] -> Window -> Desktop -> Desktop
-composerClick x y mods w d = d {composerFocused=True,composerSelection=Selection (if V.MShift `elem` mods then anchor (composerSelection d) else p) p}
+composerClick x y mods w d = clearReplySelection d {composerFocused=True,composerSelection=Selection (if V.MShift `elem` mods then anchor (composerSelection d) else p) p}
   where
     Rect l t _ _=composerRect d w; (sr,sc)=composerScroll d w; b=composerBuffer d
     r=min (bufferLineCount b-1) (max 0 (y-t+sr))
     p=bufferLineOffset b r+columnOffset (bufferLineAt b r) (max 0 (x-l+sc))
 
 composerInsert :: Text -> Desktop -> Desktop
-composerInsert text d = d {composerBuffer=replaceSelection sel text (composerBuffer d),composerSelection=Selection p p,composerFocused=True}
+composerInsert text d = clearReplySelection d {composerBuffer=replaceSelection sel text (composerBuffer d),composerSelection=Selection p p,composerFocused=True}
   where sel=composerSelection d; p=fst (ordered sel)+T.length text
 
 composerCommand :: Command -> Desktop -> Desktop
@@ -655,7 +680,7 @@ composerCommand cmd d = case cmd of
   Copy -> d {clipboard=selectedText sel b}
   Cut -> composerInsert "" d {clipboard=selectedText sel b}
   Paste -> composerInsert (clipboard d) d
-  SelectAll -> d {composerSelection=Selection 0 (bufferLength b)}
+  SelectAll -> clearReplySelection d {composerSelection=Selection 0 (bufferLength b)}
   Undo -> history undo
   Redo -> history redo
   _ -> d
@@ -672,7 +697,7 @@ composerEvent (V.EvKey key mods) d
   | key==V.KEnter, composerFocused d, all (`elem` [V.MCtrl,V.MShift]) mods = Just (composerSubmit mods d)
   | V.KChar c<-key, isPrint c, null mods || mods==[V.MShift] = done (composerInsert (T.singleton c) d)
   | not (composerFocused d) || V.MAlt `elem` mods || V.MMeta `elem` mods = Nothing
-  | ctrl, V.KChar c<-key, Just cmd<-lookup (toLower c) [('c',Copy),('x',Cut),('v',Paste),('a',SelectAll),('z',Undo),('y',Redo)] = done (composerCommand cmd d)
+  | ctrl, V.KChar c<-key, Just cmd<-lookup (toLower c) [('c',Copy),('x',Cut),('v',Paste),('a',SelectAll),('z',Undo),('y',Redo)] = Just (runCommand cmd d)
   | otherwise = case key of
       V.KLeft -> move (if ctrl then wordLeft text p else previousCharacter text p)
       V.KRight -> move (if ctrl then wordRight text p else nextCharacter text p)
@@ -884,7 +909,7 @@ mouseEvent x y button mods d = case find (\w -> inside (bounds w) x y) (windows 
       | y==t+hh-1 -> (focused,[])
       | activeConversation focused, inside (composerRect focused w) x y -> (composerClick x y mods w focused,[])
       | activeConversation focused, y>=top (composerRect focused w) -> (focused,[])
-      | otherwise -> (selectAt (V.MShift `elem` mods) x y focused {drag=Just (Selecting (windowId w)),composerFocused=if activeConversation focused then False else composerFocused focused},[])
+      | otherwise -> (selectAt (V.MShift `elem` mods) x y focused {drag=Just (Selecting (windowId w)),composerFocused=if activeConversation focused then True else composerFocused focused},[])
     _ -> (focused,[])
 
 mapWindow :: Int -> (Window -> Window) -> Desktop -> Desktop

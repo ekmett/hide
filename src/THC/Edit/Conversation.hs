@@ -1,5 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
-module THC.Edit.Conversation (withConversation, conversationEffects, tickConversation, parseLaunch, renderReply) where
+module THC.Edit.Conversation (withConversation, conversationEffects, tickConversation, parseLaunch, renderReply, pauseLabel, renderTimestamp) where
 
 import Prelude hiding (reads)
 import Control.Exception (IOException, bracket, try, onException)
@@ -10,6 +10,7 @@ import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
+import Data.Time (UTCTime, TimeZone, getCurrentTime, getCurrentTimeZone, diffUTCTime, utcToLocalTime, formatTime, defaultTimeLocale)
 import Data.IORef
 import Data.List (find, sortOn, intercalate)
 import qualified Data.Map.Strict as M
@@ -35,7 +36,7 @@ import THC.Edit.Syntax (Style(..), bubbleTile)
 
 -- One configured stdio provider; its protocol supplies models and tools.
 data Phase = Initializing (Maybe Text) | Starting (Maybe Text) | Prompting | Steering Text | Setting deriving Eq
-data Record = Reply Text Text | Activity Text Value deriving (Eq,Show)
+data Record = Reply Text Text | Activity Text Value | Pause Text deriving (Eq,Show)
 data Approval = Permission Value [(Text,Text)] Value | Write Value Snapshot Text | Execute Value Terminal.TerminalConfig Int
 
 data State = State
@@ -45,6 +46,7 @@ data State = State
   , queuedQueries :: [Text]
   , ownedTerminals :: S.Set Text
   , terminalWaiters :: M.Map Text [Value]
+  , lastMessageAt :: Maybe UTCTime
   , lastRender :: (Int,Maybe Text,[Record]), lastSession :: Maybe (A.Launch,FilePath,Text)
   }
 data ConversationState = ConversationState FilePath (IORef State) C.Consoles
@@ -61,7 +63,7 @@ withConversation action = C.withConsoles $ \consoles -> do
   let remembered=either (const Nothing) (\bytes -> decodeStrict' bytes >>= parseMaybe (withObject "session" $ \o -> do
         (raw::Value)<-o .: "provider"; config<-either fail pure (decodeLaunch (BL.toStrict (encode raw)))
         (,,) config <$> o .: "cwd" <*> o .: "sessionId")) previous
-  bracket (do ref<-newIORef (State launch Nothing Nothing "." M.empty Nothing [] M.empty [] Nothing False 1 [] S.empty M.empty (0,Nothing,[]) remembered); pure (ConversationState directory ref consoles)) closeConversation action
+  bracket (do ref<-newIORef (State launch Nothing Nothing "." M.empty Nothing [] M.empty [] Nothing False 1 [] S.empty M.empty Nothing (0,Nothing,[]) remembered); pure (ConversationState directory ref consoles)) closeConversation action
 
 closeConversation :: ConversationState -> IO ()
 closeConversation (ConversationState _ ref _) = readIORef ref >>= mapM_ A.stopClient . connection
@@ -108,7 +110,10 @@ conversationEffects runtime fallback = foldM apply . (False,)
 
 perform :: ConversationState -> Text -> [Text] -> Desktop -> IO Desktop
 perform runtime@(ConversationState directory ref consoles) action values d = do
-  s<-readIORef ref
+  previous<-readIORef ref
+  now<-getCurrentTime
+  zone<-getCurrentTimeZone
+  let s=if action `elem` ["send","send-draft","steer-draft"] then stampReply now zone previous else previous
   case (action,values) of
     ("terminal",_) -> do
       shell<-fromMaybe "/bin/sh" <$> lookupEnv "SHELL"
@@ -193,7 +198,7 @@ perform runtime@(ConversationState directory ref consoles) action values d = do
     ("new",_) -> do
       mapM_ (C.releaseConsole consoles) (S.toList (ownedTerminals s))
       mapM_ A.stopClient (connection s)
-      writeIORef ref s {connection=Nothing,session=Nothing,pending=M.empty,queuedPrompt=Nothing,queuedQueries=[],transcript=[],reads=M.empty,approvals=[],presented=Nothing,deferredApproval=False,ownedTerminals=S.empty,terminalWaiters=M.empty}
+      writeIORef ref s {connection=Nothing,session=Nothing,pending=M.empty,queuedPrompt=Nothing,queuedQueries=[],transcript=[],lastMessageAt=Nothing,reads=M.empty,approvals=[],presented=Nothing,deferredApproval=False,ownedTerminals=S.empty,terminalWaiters=M.empty}
       start runtime Nothing d
     ("resume",_) | busy s -> pure d {status="Cancel the current reply before resuming a session."}
     ("resume",_) -> pure d {dialog=Just (Dialog "Resume conversation" (AgentDialog "load")
@@ -202,7 +207,7 @@ perform runtime@(ConversationState directory ref consoles) action values d = do
     ("load",_:sid:_) | not (T.null (T.strip sid)), not (busy s) -> do
       mapM_ (C.releaseConsole consoles) (S.toList (ownedTerminals s))
       mapM_ A.stopClient (connection s)
-      writeIORef ref s {connection=Nothing,session=Nothing,pending=M.empty,queuedPrompt=Nothing,queuedQueries=[],transcript=[],reads=sourceSnapshots d,approvals=[],presented=Nothing,deferredApproval=False,ownedTerminals=S.empty,terminalWaiters=M.empty}
+      writeIORef ref s {connection=Nothing,session=Nothing,pending=M.empty,queuedPrompt=Nothing,queuedQueries=[],transcript=[],lastMessageAt=Nothing,reads=sourceSnapshots d,approvals=[],presented=Nothing,deferredApproval=False,ownedTerminals=S.empty,terminalWaiters=M.empty}
       start runtime (Just (T.strip sid)) d
     _ | Just suffix<-T.stripPrefix "approval:" action, Just token<-readMaybe (T.unpack suffix) -> decide runtime token values d
     _ -> pure d
@@ -336,10 +341,26 @@ receive runtime@(ConversationState directory ref consoles) d event = do
   where
     isStarting Starting{}=True; isStarting _=False
     appendReply role update = case field "content" update of
-      Just content | field "type" content==Just ("text"::Text),Just text<-field "text" content ->
-        modifyIORef' ref (\state -> state {transcript=appendChunk role text (transcript state)})
+      Just content | field "type" content==Just ("text"::Text),Just text<-field "text" content, not (T.null text) -> do
+        now<-getCurrentTime
+        zone<-getCurrentTimeZone
+        modifyIORef' ref (\state -> let timed=stampReply now zone state in timed {transcript=appendChunk role text (transcript timed)})
       _ -> pure ()
-    recordTool update=modifyIORef' ref (\state -> state {transcript=mergeTool update (transcript state)})
+    recordTool update=do
+      now<-getCurrentTime
+      modifyIORef' ref (\state -> state {lastMessageAt=Just now,transcript=mergeTool update (transcript state)})
+
+pauseLabel :: Maybe UTCTime -> UTCTime -> TimeZone -> Maybe Text
+pauseLabel previous now zone = case previous of
+  Just before | diffUTCTime now before>=300 -> Just (T.pack (formatTime defaultTimeLocale "%b %-d, %H:%M" (utcToLocalTime zone now)))
+  _ -> Nothing
+
+stampReply :: UTCTime -> TimeZone -> State -> State
+stampReply now zone s = s {lastMessageAt=Just now,
+  transcript=transcript s++maybe [] (\label -> [Pause label]) (pauseLabel (lastMessageAt s) now zone)}
+
+renderTimestamp :: Int -> Text -> [(Char,Style)]
+renderTimestamp width label = map (,Comment) (T.unpack (T.replicate (max 0 ((width-T.length label) `div` 2)) " "<>T.take (max 0 width) label))
 
 -- Tool records never pass through the Markdown parser.
 appendChunk :: Text -> Text -> [Record] -> [Record]
@@ -512,7 +533,7 @@ paint force s d
   | otherwise = let
       width=conversationWidth d
       header="Session: "<>fromMaybe "not connected" (session s)<>"\n"
-      styled=if null (transcript s) then plain Comment header else renderRecords width (transcript s)
+      styled=if null (transcript s) then plain Comment header else renderRecords width (zip [0..] (transcript s))
       text=T.pack (map fst styled)
       existing=find (\(_,doc)->documentLabel doc==Just "Conversation") (M.toList (buffers d))
       opened=case existing of
@@ -528,7 +549,7 @@ paint force s d
                        bounded n=max 0 (min (T.length text) n)
                    in w {scrollRow=if atEnd then max 0 (newLines-rows) else min (max 0 (newLines-rows)) (scrollRow w),
                          selection=Selection (bounded (anchor (selection w))) (bounded (caret (selection w)))}
-      colored=opened {buffers=M.adjust (\doc -> doc {documentHighlight=styled}) bid (buffers opened),windows=map adjust (windows opened)}
+      colored=opened {buffers=M.adjust (\doc -> doc {documentHighlight=styled,documentCursorVisible=False}) bid (buffers opened),windows=map adjust (windows opened)}
       focused=case find ((==bid).bufferId) (windows colored) of Just w | force -> focusWindow (windowId w) colored {composerFocused=True}; _ -> colored
     in focused
   where
@@ -536,11 +557,12 @@ paint force s d
     renderRecords _ []=[]
     renderRecords width (record:rest)=renderRecord width record++case rest of
       [] -> []
-      next:_ -> plain Plain (if sameSpeaker record next then "\n" else "\n\n")++renderRecords width rest
+      next:_ -> plain Plain (if sameSpeaker (snd record) (snd next) then "\n" else "\n\n")++renderRecords width rest
     sameSpeaker (Reply a _) (Reply b _)=a==b
     sameSpeaker _ _=False
-    renderRecord width record=case record of
-      Reply role text -> renderReply (videoMode d/=Nothing) width (role=="You") text
+    renderRecord width (recordId,record)=case record of
+      Pause label -> renderTimestamp width label
+      Reply role text -> map (\(c,style) -> (c,case style of BubbleText _ outgoing base -> BubbleText recordId outgoing base; _ -> style)) (renderReply (videoMode d/=Nothing) width (role=="You") text)
       Activity ident value -> plain Pragma ("["<>fromMaybe "activity" (field "status" value)<>"] "<>fromMaybe ident (field "title" value))
         ++plain Plain (let detail=activityText value in if T.null detail then "" else "\n"<>detail)
 
@@ -549,7 +571,7 @@ paint force s d
 renderReply :: Bool -> Int -> Bool -> Text -> [(Char,Style)]
 renderReply graphical requested outgoing text
   | width<6 = recolor (renderMarkdown width text)
-  | otherwise = intercalate [('\n',Plain)] (zipWith line [0::Int ..] rows)
+  | otherwise = intercalate [('\n',BubbleText 0 outgoing Plain)] (zipWith line [0::Int ..] rows)
   where
     width=max 1 requested
     rows=splitRows (recolor (renderMarkdown (width-5) text))
@@ -557,7 +579,7 @@ renderReply graphical requested outgoing text
     bubbleWidth=maximum (0:map columns rows)
     background=BubbleStyle outgoing Plain
     edge=TerminalStyle (if outgoing then 0x00aaaa else 0xaaaaaa) 0x0000aa 0
-    recolor=map (\(c,style)->(c,BubbleStyle outgoing style))
+    recolor=map (\(c,style)->(c,BubbleText 0 outgoing style))
     spaces style n=replicate (max 0 n) (' ',style)
     tile n=(bubbleTile graphical n,edge)
     side first lastRow leftSide
@@ -595,7 +617,7 @@ parseAgentSettings value=mapMaybe parseOption (fromMaybe [] (field "configOption
       _ -> concatMap choice (fromMaybe [] (field "options" option))
 
 rawTranscript :: [Record] -> Text
-rawTranscript=T.intercalate "\n\n" . map (\record -> case record of Reply role text -> role<>"\n"<>text; Activity ident value -> ident<>"\n"<>jsonText value)
+rawTranscript=T.intercalate "\n\n" . mapMaybe (\record -> case record of Reply role text -> Just (role<>"\n"<>text); Activity ident value -> Just (ident<>"\n"<>jsonText value); Pause _ -> Nothing)
 
 field :: FromJSON a => Text -> Value -> Maybe a
 field name=parseMaybe (withObject "object" (.: K.fromText name))

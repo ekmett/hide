@@ -246,14 +246,19 @@ straight top edge into the speaker's tail. SDL uses single-cell bitmap tiles;
 terminal fonts use block-character approximations. Code keeps syntax colors,
 and **Copy raw conversation** preserves the original Markdown.
 
-The draft is a cyan thought bubble with an `o.` trail on the right. It starts
+The draft is a cyan thought bubble anchored on the right with an `o.` trail.
+Its width follows the longest line, with room for the caret and a twelve-column
+minimum, capped by the window width. It starts
 at one line, grows with newlines up to twelve visible rows, and scrolls beyond that,
 without a divider or buttons. Click the status-bar actions or use their shortcuts: **Enter** submits
 (or queues while a reply is active), **Shift+Enter** inserts a newline, and
 **Ctrl+Enter** steers when the provider supports it. **Esc Cancel** appears while
 replying and stops the active response; queued queries then proceed in order.
-Click the transcript or press Tab to browse/copy replies; typing returns to the
-draft. Drafts retain undo/redo and are preserved while replies stream.
+Clicks in the conversation keep the draft caret in place. Drag across reply
+text to select it: copying within one bubble gives plain text; copying across
+bubbles adds `User:` / `Bot:` labels. Bubble shapes and timestamp separators
+are excluded. Pauses of five minutes or more get a centered local timestamp.
+Press Tab to browse replies with the keyboard; typing returns to the draft. Drafts retain undo/redo and are preserved while replies stream.
 Click the conversation title to choose its model and reasoning effort from the
 provider-advertised options. The title updates after confirmation; choices are
 disabled during a reply. Providers without these options keep a plain title.

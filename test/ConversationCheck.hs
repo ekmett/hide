@@ -12,6 +12,7 @@ import qualified Data.ByteString.Char8 as B8
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.Map.Strict as M
 import Data.Maybe (mapMaybe, fromMaybe)
+import Data.Time (UTCTime(..), fromGregorian, secondsToDiffTime, minutesToTimeZone, addUTCTime)
 import Data.List (findIndex)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -64,13 +65,41 @@ checks = bracket temporary removePathForcibly $ \root ->
     check "token counts use compact rounded SI units"
       (map formatTokenCount [0,999,1000,1234,9999,12345,148000,999500,1234567,2400000000]
         ==["0","999","1k","1.2k","10k","12k","148k","1M","1.2M","2.4G"])
+    do
+      let noon=UTCTime (fromGregorian 2026 9 30) (secondsToDiffTime (16*3600))
+          zone=minutesToTimeZone (-240)
+      check "timestamps appear only after five-minute gaps, in local time"
+        (pauseLabel Nothing noon zone==Nothing && pauseLabel (Just noon) (addUTCTime 299 noon) zone==Nothing &&
+         pauseLabel (Just noon) (addUTCTime 300 noon) zone==Just "Sep 30, 12:05")
+      check "timestamps are centered and clipped to narrow windows"
+        (T.pack (map fst (renderTimestamp 20 "12:05"))=="       12:05" && length (renderTimestamp 3 "12:05")==3)
+      let tag ident=map (\(c,s) -> (c,case s of BubbleText _ out base -> BubbleText ident out base; _ -> s))
+          cells=renderReply False 54 True "one"++[('\n',Plain),('\n',Plain)]++renderTimestamp 54 "12:05"++[('\n',Plain)]++tag 1 (renderReply False 54 False "two")
+          base=addReadOnly "Conversation" (T.pack (map fst cells)) (initialDesktop (60,18))
+          chat=base {buffers=M.map (\doc -> doc {documentHighlight=cells}) (buffers base),composerFocused=True,composerBuffer=newBuffer "draft",composerSelection=Selection 2 2}
+          positions ident=[i | (i,(_,BubbleText j _ _))<-zip [0..] cells,j==ident]
+          a=head (positions 0); z=last (positions 1)+1
+          selectedReply lo hi=modifyActive (\w -> w {selection=Selection lo hi}) chat
+          copiedReply lo hi=clipboard (fst (runCommand Copy (selectedReply lo hi)))
+      check "single-bubble copies omit speaker names and decoration"
+        (copiedReply a (a+3)=="one" && copiedReply (a+1) (a+3)=="ne")
+      check "cross-bubble copies label speakers and omit timestamps and furniture"
+        (copiedReply 0 (length cells)=="User: one\n\nBot: two" && copiedReply z a=="User: one\n\nBot: two")
+      let w=fromMaybe (error "conversation window") (activeWindow chat)
+          b=fromMaybe (newBuffer "") (documentBuffer <$> activeDocument chat)
+          clickAt p state=let (row,col)=bufferLineColumn b p in fst (handleEvent (V.EvMouseDown (left (bounds w)+1+col) (top (bounds w)+1+row) V.BLeft []) state)
+          dragging=clickAt z (clickAt a chat)
+          released=fst (handleEvent (V.EvMouseUp 0 0 (Just V.BLeft)) dragging)
+          keyCopied=fst (handleEvent (V.EvKey (V.KChar 'c') [V.MCtrl]) released)
+      check "dragging across bubbles preserves the draft caret and copies only message text"
+        (composerFocused released && composerSelection released==Selection 2 2 && clipboard keyCopied=="User: one\n\nBot: two")
     let reply width outgoing=T.pack . map fst . renderReply False width outgoing
     check "short bubbles occupy one row with outward tails"
       (reply 30 True "hello"==T.replicate 22 " "<>"▐hello▛◤" && reply 30 False "hello"=="◥▜hello▌")
     check "outgoing bubble is black on VGA cyan"
-      (('h',BubbleStyle True Plain) `elem` renderReply False 30 True "hello")
+      (('h',BubbleText 0 True Plain) `elem` renderReply False 30 True "hello")
     check "agent prose and code retain their styles inside bubbles"
-      (('h',BubbleStyle False Plain) `elem` renderReply False 30 False "hello" && ('4',BubbleStyle False Number) `elem` renderReply False 30 False "```haskell\nx = 42\n```")
+      (('h',BubbleText 0 False Plain) `elem` renderReply False 30 False "hello" && ('4',BubbleText 0 False Number) `elem` renderReply False 30 False "```haskell\nx = 42\n```")
     forM_ [1,2,5,6,8,30,80] $ \width -> forM_ [False,True] $ \outgoing -> do
       let rendered=reply width outgoing "Wide 界 words é and more words"
       check "bubbles wrap within the window width"
@@ -96,7 +125,7 @@ checks = bracket temporary removePathForcibly $ \root ->
       check "conversation renders streamed Markdown" ("Hello" `T.isInfixOf` conversationText streamed && not ("**bold" `T.isInfixOf` conversationText streamed))
       check "conversation omits speaker headings and session banner once chatting"
         (not (any (`elem` T.lines (conversationText streamed)) ["You","Agent"]) && not ("Session:" `T.isInfixOf` conversationText streamed))
-      check "conversation preserves Markdown styling" (any ((==BubbleStyle False Keyword).snd) (conversationHighlight streamed))
+      check "conversation preserves Markdown styling" (any ((==BubbleText 1 False Keyword).snd) (conversationHighlight streamed))
       check "tool update merges pending record" (T.count "[completed] Local tool" (conversationText streamed)==1 && not ("[pending] Local tool" `T.isInfixOf` conversationText streamed))
       check "provider settings appear in the title" (conversationTitle streamed=="fixture-model (high) ▼")
       let conversationWindow=fromMaybe (error "conversation window") (activeWindow streamed)
@@ -181,9 +210,22 @@ checks = bracket temporary removePathForcibly $ \root ->
             r:_ -> handleEvent (V.EvMouseDown (left r) (top r) V.BLeft []) desktop
             [] -> error ("missing status action: "++T.unpack needle)
           applyEvent event desktop=let (next,effects)=handleEvent event desktop in snd <$> conversationEffects runtime fallback next effects
-      check "composer is a full-width thought bubble without buttons or divider"
-        (height (composerRect cancelled window)==1 && height (composerRect multiline window)==2 && width (composerRect multiline window)==width (bounds window)-6 &&
+      check "composer is a compact thought bubble without buttons or divider"
+        (height (composerRect cancelled window)==1 && height (composerRect multiline window)==2 && width (composerRect multiline window)==12 &&
          "o." `T.isInfixOf` snapshot multiline && not (" Query " `T.isInfixOf` T.intercalate "\n" (init (T.lines (snapshot multiline)))))
+      let sized text=composerRect (cancelled {composerBuffer=newBuffer text}) window
+          edge r=left r+width r
+          available=width (bounds window)-6
+          wide=T.replicate 10 "界"<>"\nshort"
+          wideDesktop=cancelled {composerBuffer=newBuffer wide,composerSelection=Selection 0 0,composerFocused=True}
+          wideRect=composerRect wideDesktop window
+          clicked=fst (handleEvent (V.EvMouseDown (left wideRect+6) (top wideRect) V.BLeft []) wideDesktop)
+      check "draft width follows the longest display line and keeps its right edge fixed"
+        (width (sized wide)==21 && width (sized "\t123456789")==18 &&
+         edge (sized wide)==edge (sized "") && edge (sized wide)==left (bounds window)+width (bounds window)-4 &&
+         width (sized (T.replicate 200 "x"))==available && width (sized "tiny")==12)
+      check "clicking a right-aligned draft locates the Unicode caret"
+        (caret (composerSelection clicked)==3)
       let tall=foldl (\d _ -> press V.KEnter [V.MShift] d) multiline [1..15::Int]
           shrunk=press (V.KChar 'z') [V.MCtrl] (press (V.KChar 'z') [V.MCtrl] multiline)
       check "thought bubble caps at twelve rows and scrolls to the caret"
