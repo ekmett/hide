@@ -20,6 +20,12 @@ checks = do
   check "Control and Alt zoom reset use the same modifiers as zoom in and out"
     (all (\mods -> map (\key -> zoomDirection (fromEnum key) mods) "0+=-"==map Just [0,1,1,-1]) [2,4,3,5] &&
      zoomDirection (fromEnum '0') 0==Nothing && zoomDirection (fromEnum 'a') 2==Nothing)
+  check "remote targets retain the exact remote path"
+    (parseRemoteTarget "user@eak-pc.local:some-path"==Just ("user@eak-pc.local","some-path") &&
+     parseRemoteTarget "host:/tmp/a b;$(x)"==Just ("host","/tmp/a b;$(x)") &&
+     parseRemoteTarget "host:"==Just ("host",".") &&
+     parseRemoteTarget "C:\\Users\\test"==Nothing && parseRemoteTarget "D:/src"==Nothing &&
+     parseRemoteTarget "./local:name"==Nothing && parseRemoteTarget "/tmp/local:name"==Nothing)
   check "terminal remains default" (chooseBackend Nothing [] == Right Terminal)
   check "environment selects metal" (chooseBackend (Just "metal") [] == Right Metal)
   check "explicit terminal beats environment" (chooseBackend (Just "vulkan") [Terminal] == Right Terminal)

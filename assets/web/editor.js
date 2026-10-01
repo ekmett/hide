@@ -50,6 +50,7 @@ const uniforms=Object.fromEntries(['resolution','grid','mouse','caret','crt','ca
 const surface=document.createElement('canvas'); const ctx=surface.getContext('2d',{alpha:false});
 let glyphs=new Map(), tiles=new Map(), rows=[], frame=null, scale=2, initialScale=2, cols=80, lines=25, mode=3;
 let socket, ready=false, closed=false, mouse=[-1,-1], cursorEpoch=performance.now(), blinkPhase=-1, dirty=true, composing=false, clipboard='', lastSize='';
+let remoteHost="";
 let downloadName=null, clipboardRequest=null, nativeCopies=[];
 let unsaved=false, serial=0, pendingEdit=0, acknowledged=0;
 function beforeLeave(event){event.preventDefault();event.returnValue=true;}
@@ -176,13 +177,16 @@ function connect(){
      }
      message=await decodeFrame(new Uint8Array(e.data),wireRows);
    }else message=JSON.parse(e.data);
-   if(message.type==='assets'){
+   if(message.type==='remote'){remoteHost=message.host;
+   }else if(message.type==='connection'){
+     ready=message.connected&&glyphs.size>0;status.textContent=message.message|| (ready?'Connected':'Reconnecting…');
+   }else if(message.type==='assets'){
      glyphs=new Map(message.glyphs.map(([c,w,rs])=>[c,[w,rs]]));tiles.clear();scale=initialScale=message.scale||2;ready=true;status.textContent='Connected';lastSize='';send({type:'theme',dark:systemTheme.matches});
    }else if(message.type==='frame'){
      message.rows=message.rows.map(([y,spans])=>[y,spans.map(([x,fg,bg,runs])=>[x,fg,bg,runs.flatMap(run=>typeof run==='string'?Array.from(run,c=>[c,1]):[run])])]);
      const oldCursor=JSON.stringify(frame?.cursor);
      const changedMode=Object.hasOwn(message,'mode')&&mode!==message.mode;
-     frame={...frame,...message};document.title=frame.title;unsaved=frame.dirty;guardLeave();[cols,lines]=frame.size;mode=frame.mode||3;clipboard=frame.selection;
+     frame={...frame,...message};document.title=remoteHost?frame.title.replace(/^th(?: |$)/,`th ${remoteHost}:`):frame.title;unsaved=frame.dirty;guardLeave();[cols,lines]=frame.size;mode=frame.mode||3;clipboard=frame.selection;
      if(message.reset){rows=Array(lines).fill(null);tiles.clear();}
      for(const [y,r] of message.rows)rows[y]=r;
      if(oldCursor!==JSON.stringify(frame.cursor))cursorEpoch=performance.now();
@@ -195,7 +199,7 @@ function connect(){
    }else if(message.type==='paste-request'){
      systemClipboard(message);
    }else if(message.type==='ack'){
-     acknowledged=Math.max(acknowledged,message.seq);unsaved=message.dirty;guardLeave();
+     acknowledged=Math.max(acknowledged,message.seq);if(Object.hasOwn(message,"dirty"))unsaved=message.dirty;guardLeave();
    }else if(message.type==='closed'){
      closed=true;ready=false;guardLeave();fullscreen.disabled=true;
      status.textContent='Editor closed. You can close this tab.';

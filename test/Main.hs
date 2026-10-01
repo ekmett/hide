@@ -9,6 +9,10 @@ import qualified FontCheck
 #ifdef WITH_PROTOCOL
 import qualified ProtocolCheck
 #endif
+#ifdef WITH_REMOTE
+import qualified RemoteCheck
+import qualified RemoteWindowCheck
+#endif
 import qualified UnicodeCheck
 import qualified HexCheck
 import qualified DAPCheck
@@ -49,6 +53,10 @@ check name ok = unless ok (error name)
 
 main :: IO ()
 main = do
+#ifdef WITH_REMOTE
+  RemoteCheck.checks
+  RemoteWindowCheck.checks
+#endif
 #ifdef WITH_PROTOCOL
   ProtocolCheck.checks
 #endif

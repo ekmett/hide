@@ -1,11 +1,11 @@
-module THC.Edit.Frontend (Backend(..), chooseBackend, chooseScale, parseWindowSize, parseScreenMode, modeSize, modeHeight, decodeKey, zoomDirection) where
+module THC.Edit.Frontend (Backend(..), chooseBackend, chooseScale, parseWindowSize, parseScreenMode, modeSize, modeHeight, parseRemoteTarget, decodeKey, zoomDirection) where
 import Data.Bits ((.&.))
 import Data.Char (chr, isDigit)
 import Text.Read (readMaybe)
 import Data.List (nub)
 import qualified Graphics.Vty as V
 
-data Backend = Terminal | Auto | Metal | Vulkan | Web deriving (Eq,Show)
+data Backend = Terminal | Auto | Metal | Vulkan | Web | Remote deriving (Eq,Show)
 
 -- Borland TextMode constants: C80 (3), C80 + Font8x8 (259).
 parseScreenMode :: String -> Either String Int
@@ -30,8 +30,9 @@ chooseBackend env explicit = case nub explicit of
     Just "metal" -> Right Metal
     Just "vulkan" -> Right Vulkan
     Just "web" -> Right Web
-    Just _ -> Left "THC_EDIT_BACKEND must be terminal, auto, metal, vulkan or web."
-  _ -> Left "Choose only one of --terminal, --window, --metal, --vulkan or --web."
+    Just "remote" -> Right Remote
+    Just _ -> Left "THC_EDIT_BACKEND must be terminal, auto, metal, vulkan, web or remote."
+  _ -> Left "Choose only one of --terminal, --window, --metal, --vulkan, --web or --remote."
 
 -- Stable, small ABI shared with cbits/window.c; no SDL structure layout in Haskell.
 decodeKey :: Int -> Int -> Maybe V.Event
@@ -69,3 +70,10 @@ zoomDirection key mask
   | key `elem` map fromEnum ['+','='] = Just 1
   | key==fromEnum '-' = Just (-1)
   | otherwise = Nothing
+
+-- A leading ./ disambiguates local names containing a colon, as with scp.
+parseRemoteTarget :: FilePath -> Maybe (String,FilePath)
+parseRemoteTarget (_:':':slash:_) | slash `elem` "/\\" = Nothing
+parseRemoteTarget target = case break (==':') target of
+  (host,':':path) | not (null host) && all (`notElem` "/\\") host -> Just (host,if null path then "." else path)
+  _ -> Nothing

@@ -1,5 +1,15 @@
 {-# LANGUAGE CPP, ForeignFunctionInterface, OverloadedStrings #-}
-module THC.Edit.Window (runWindow) where
+module THC.Edit.Window (runWindow
+#ifdef WITH_WINDOW
+  , check, utf8, nativeMenus, nativeCommands
+  , c_system_dark, c_open, c_mode, c_scale, c_title, c_close, c_size
+  , c_begin, c_glyph, c_unicode, c_pixelate_unicode, c_cursor, c_cursor_blink
+  , c_crt_filter, c_present, c_wait, c_text, c_clipboard, c_set_clipboard
+#ifdef darwin_HOST_OS
+  , c_menu_enabled
+#endif
+#endif
+  ) where
 import THC.Edit.Frontend
 import THC.Edit.Model
 #ifdef WITH_WINDOW

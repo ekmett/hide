@@ -1,7 +1,7 @@
 {-# LANGUAGE CPP, OverloadedStrings #-}
 module THC.Edit.Protocol where
 
-import Data.Aeson (Value)
+import Data.Aeson (Value(..))
 import qualified Data.ByteString as BS
 #if defined(WITH_WEB) || defined(WITH_REMOTE)
 import qualified Codec.Compression.Zlib.Raw as Z
@@ -173,7 +173,7 @@ frameMetadata cwd d =
    "crt" .= crtFilter d,"pixelated" .= pixelateUnicode d,
    "selection" .= (if dialog d/=Nothing then "" else clipboard (fst (runCommand Copy d {browserFrontend=False}))),
    "terminal" .= (activeTerminal d/=Nothing && dialog d==Nothing && menu d==Nothing),
-   "wordstar" .= wordStar d,"menus" .= [dialog d==Nothing && commandEnabled d cmd | cmd<-protocolCommands]]
+   "wordstar" .= wordStar d,"menus" .= [(dialog d==Nothing || cmd==Model.Paste) && commandEnabled d cmd | cmd<-protocolCommands]]
   where cursor=case V.picCursor (renderDesktop d) of V.Cursor x y -> Just (x,y); _ -> Nothing
 
 assetsPacket :: Font -> Double -> Value

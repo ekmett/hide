@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE CPP, OverloadedStrings #-}
 module THC.Edit.App (main, demoDesktop, applyEffects) where
 
 import Control.Exception (bracket)
@@ -16,7 +16,7 @@ import qualified Data.Text.IO as TIO
 import Graphics.Vty.CrossPlatform (mkVty)
 import qualified Graphics.Vty as V
 import System.Console.GetOpt
-import System.Directory (doesDirectoryExist, doesFileExist, getCurrentDirectory, setCurrentDirectory, listDirectory)
+import System.Directory (doesDirectoryExist, doesFileExist, getCurrentDirectory, getHomeDirectory, setCurrentDirectory, listDirectory)
 import System.FilePath ((</>), isAbsolute, takeDirectory, takeFileName, takeExtension)
 import Control.Exception (try, IOException)
 import Paths_thc_edit (getDataFileName)
@@ -27,6 +27,9 @@ import System.Environment (getArgs, lookupEnv)
 import THC.Edit.Frontend
 import THC.Edit.Window (runWindow)
 import THC.Edit.Web (runWeb)
+import THC.Edit.Remote
+import THC.Edit.RemoteWindow (runRemoteWindow)
+import THC.Edit.RemoteWeb (runRemoteWeb)
 import System.Exit (die)
 import THC.Edit.Buffer
 import THC.Edit.Model
@@ -35,11 +38,14 @@ import THC.Edit.Render
 import THC.Edit.Files
 import THC.Edit.Reconcile
 
-data Option = Use Backend | Scale String | Size String | Mode String | ColorMode String | Demo | CRT | MaterialIcons | WordStar | Snapshot | Html | Scene String | Usage deriving Eq
+data Option = SSH String | RemoteSession String | RemoteDaemon String | Use Backend | Scale String | Size String | Mode String | ColorMode String | Demo | CRT | MaterialIcons | WordStar | Snapshot | Html | Scene String | Usage deriving Eq
 options :: [OptDescr Option]
 options = [Option [] ["appearance"] (ReqArg ColorMode "light|dark|system") "Document/terminal colors (default THC_EDIT_APPEARANCE or system)"
           ,Option [] ["metal"] (NoArg (Use Metal)) "Open a Metal window"
           ,Option [] ["vulkan"] (NoArg (Use Vulkan)) "Open a Vulkan window"
+          ,Option [] ["remote"] (NoArg (Use Remote)) "Serve the remote editing protocol on stdin/stdout"
+          ,Option [] ["ssh"] (ReqArg SSH "HOST") "Connect to a remote thc-edit (also HOST:PATH)"
+          ,Option [] ["remote-session"] (ReqArg RemoteSession "ID") "Reattach to an existing remote session"
           ,Option [] ["web"] (NoArg (Use Web)) "Open the local WebGL browser frontend"
           ,Option [] ["window"] (NoArg (Use Auto)) "Open a window using the platform backend"
           ,Option [] ["terminal"] (NoArg (Use Terminal)) "Use the terminal (override THC_EDIT_BACKEND)"
@@ -63,11 +69,23 @@ main = do
   scaleDefault<-lookupEnv "THC_EDIT_SCALE"
   appearanceDefault<-lookupEnv "THC_EDIT_APPEARANCE"
   terminalColors<-lookupEnv "COLORFGBG"
-  let (flags,paths,errors)=getOpt Permute options args
+  let (flags,paths,errors)=getOpt Permute (options++[Option [] ["remote-daemon"] (ReqArg RemoteDaemon "ID") "Internal remote session process"]) args
   if not (null errors) then die (concat errors)
   else if Usage `elem` flags then putStr (usageInfo "Usage: thc-edit [OPTIONS] [--] [FILE.hs ...]\n\nTurbo Haskell source editor.\nF2 Save, F3 Open, F10 Menu, Alt+X Exit.\n" options)
   else do
-    backend <- either die pure (chooseBackend backendDefault [b | Use b <- flags])
+    daemon <- case [sid | RemoteDaemon sid<-flags] of []->pure Nothing; [sid]->pure (Just sid); _->die "Specify --remote-daemon once."
+    let serving=Use Remote `elem` flags || daemon/=Nothing || (null [b | Use b<-flags] && backendDefault==Just "remote")
+    target <- if serving then pure Nothing else case ([host | SSH host<-flags],paths) of
+      ([],[path]) | Just remote<-parseRemoteTarget path -> pure (Just remote)
+      ([],_) | any (maybe False (const True) . parseRemoteTarget) paths -> die "Open one remote project at a time; do not mix local and remote paths."
+             | otherwise -> pure Nothing
+      ([host],[]) -> pure (Just (host,"."))
+      ([host],[path]) -> pure (Just (host,path))
+      _ -> die "Specify one SSH host and one remote file or project path."
+    backend <- if daemon/=Nothing then pure Remote else either die pure (chooseBackend (if target/=Nothing && backendDefault==Nothing then Just "auto" else backendDefault) [b | Use b<-flags])
+    when (length [sid | RemoteSession sid<-flags]>1) (die "Specify --remote-session once.")
+    when (target==Nothing && any isSession flags) (die "--remote-session requires HOST:PATH or --ssh HOST.")
+    when (serving && (Snapshot `elem` flags || Html `elem` flags || any isSSH flags)) (die "--remote cannot be combined with snapshots or --ssh.")
     colorMode <- case [s | ColorMode s<-flags] of
       [] -> parseAppearance (maybe "system" id appearanceDefault)
       [s] -> parseAppearance s
@@ -83,33 +101,81 @@ main = do
       [] -> pure (modeSize screenMode)
       [s] -> either die pure (parseWindowSize s)
       _ -> die "Specify --size only once."
-    let initial=if Demo `elem` flags then addDocument Nothing (newBuffer (activeText demoDesktop)) (initialDesktop dimensions) else initialDesktop dimensions
-        configured=(fst (handleEvent (uncurry V.EvResize dimensions) initial)) {appearance=colorMode,systemDark=maybe True (not . (`elem` ["7","15"]) . reverse . takeWhile (/=';') . reverse) terminalColors,wordStar=WordStar `elem` flags,crtFilter=CRT `elem` flags,materialIcons=MaterialIcons `elem` flags,videoMode=if backend == Terminal then Nothing else Just screenMode}
-    (_,loaded)<-applyEffects configured (map ReadPath paths)
-    cwd<-getCurrentDirectory
-    base<-packageDirectory cwd
-    (_,browsing)<-if sideTree loaded/=Nothing || Demo `elem` flags || Snapshot `elem` flags || Html `elem` flags then pure (False,loaded)
-      else applyEffects loaded [if null paths then ReadPath base else ReadTree base]
-    let focused=browsing {sideTree=fmap (\tree -> tree {treeFocused=null (windows browsing)}) (sideTree browsing)}
-    (_,withGit)<-applyEffects focused [RefreshGit (startingDirectory focused)]
-    staged<-foldM stageScene withGit [scene | Scene scene<-flags]
-    if Html `elem` flags then TIO.putStr (snapshotHtml staged)
-    else if Snapshot `elem` flags then TIO.putStr (snapshot staged)
-    else withDebugger $ \debugger -> withConversation $ \conversation -> withTooling $ \tooling -> withGitOperations $ \gitOperations -> withReconciliation $ \reconciliation -> do
-      let effects=gitOperationEffects gitOperations (debuggerEffects debugger (conversationEffects conversation (reconciliationEffects reconciliation (toolingEffects tooling applyEffects))))
-          tick d=tickGitOperations gitOperations applyEffects d >>= tickTooling tooling applyEffects >>= tickReconciliation reconciliation >>= tickConversation conversation >>= tickDebugger debugger (toolingEffects tooling applyEffects)
-      if backend == Web then runWeb scale effects tick staged
-      else if backend /= Terminal then runWindow backend scale effects tick staged
-      else bracket (mkVty V.defaultConfig) (\vty -> V.shutdown vty >> cursorStyle Nothing) $ \vty -> do
-        when (V.supportsMode (V.outputIface vty) V.Mouse) (V.setMode (V.outputIface vty) V.Mouse True)
-        when (V.supportsMode (V.outputIface vty) V.BracketedPaste) (V.setMode (V.outputIface vty) V.BracketedPaste True)
-        size<-V.displayBounds (V.outputIface vty)
-        cursorStyle (Just (blinkCursor staged))
-        loop effects tick vty (fst (handleEvent (uncurry V.EvResize size) staged))
+    if backend==Remote && daemon==Nothing then runRemoteRelay (remoteArguments flags paths)
+    else case target of
+      Just (host,path) -> do
+        when (backend==Terminal) (die "Choose --window, --metal, --vulkan or --web for SSH editing; ordinary terminal editing works with ssh -t HOST thc-edit PATH.")
+#ifndef WITH_REMOTE
+        die "Remote support is not built. Rebuild with cabal build -fremote."
+#else
+#ifndef WITH_WINDOW
+        when (backend/=Web) (die "Graphical support is not built. Rebuild with -fwindow -fremote.")
+#endif
+#ifndef WITH_WEB
+        when (backend==Web) (die "Browser support is not built. Rebuild with -fweb -fremote.")
+#endif
+        withSSHPeer host (remoteArguments flags [path]) $ \peer ->
+          if backend==Web then runRemoteWeb scale host peer
+          else runRemoteWindow backend scale dimensions screenMode host peer
+#endif
+      Nothing -> do
+        let initial=if Demo `elem` flags then addDocument Nothing (newBuffer (activeText demoDesktop)) (initialDesktop dimensions) else initialDesktop dimensions
+            configured=(fst (handleEvent (uncurry V.EvResize dimensions) initial)) {appearance=colorMode,systemDark=maybe True (not . (`elem` ["7","15"]) . reverse . takeWhile (/=';') . reverse) terminalColors,wordStar=WordStar `elem` flags,crtFilter=CRT `elem` flags,materialIcons=MaterialIcons `elem` flags,videoMode=if backend == Terminal then Nothing else Just screenMode}
+        localPaths<-if daemon/=Nothing then mapM expandRemoteHome paths else pure paths
+        (_,loaded)<-applyEffects configured (map ReadPath localPaths)
+        cwd<-getCurrentDirectory
+        base<-packageDirectory cwd
+        (_,browsing)<-if sideTree loaded/=Nothing || Demo `elem` flags || Snapshot `elem` flags || Html `elem` flags then pure (False,loaded)
+          else applyEffects loaded [if null paths then ReadPath base else ReadTree base]
+        let focused=browsing {sideTree=fmap (\tree -> tree {treeFocused=null (windows browsing)}) (sideTree browsing)}
+        (_,withGit)<-applyEffects focused [RefreshGit (startingDirectory focused)]
+        staged<-foldM stageScene withGit [scene | Scene scene<-flags]
+        if Html `elem` flags then TIO.putStr (snapshotHtml staged)
+        else if Snapshot `elem` flags then TIO.putStr (snapshot staged)
+        else withDebugger $ \debugger -> withConversation $ \conversation -> withTooling $ \tooling -> withGitOperations $ \gitOperations -> withReconciliation $ \reconciliation -> do
+          let effects=gitOperationEffects gitOperations (debuggerEffects debugger (conversationEffects conversation (reconciliationEffects reconciliation (toolingEffects tooling applyEffects))))
+              tick d=tickGitOperations gitOperations applyEffects d >>= tickTooling tooling applyEffects >>= tickReconciliation reconciliation >>= tickConversation conversation >>= tickDebugger debugger (toolingEffects tooling applyEffects)
+          case daemon of
+            Just sid -> runRemoteDaemon sid scale effects tick staged
+            Nothing ->
+              if backend == Web then runWeb scale effects tick staged
+              else if backend /= Terminal then runWindow backend scale effects tick staged
+              else bracket (mkVty V.defaultConfig) (\vty -> V.shutdown vty >> cursorStyle Nothing) $ \vty -> do
+                when (V.supportsMode (V.outputIface vty) V.Mouse) (V.setMode (V.outputIface vty) V.Mouse True)
+                when (V.supportsMode (V.outputIface vty) V.BracketedPaste) (V.setMode (V.outputIface vty) V.BracketedPaste True)
+                size<-V.displayBounds (V.outputIface vty)
+                cursorStyle (Just (blinkCursor staged))
+                loop effects tick vty (fst (handleEvent (uncurry V.EvResize size) staged))
   where
     parseAppearance s = maybe (die "Appearance must be light, dark, or system.") pure (lookup s [("light",LightMode),("dark",DarkMode),("system",SystemMode)])
     isMode Mode{} = True
     isMode _ = False
+    isSession RemoteSession{} = True
+    isSession _ = False
+    isSSH SSH{} = True
+    isSSH _ = False
+
+-- Rebuild arguments rather than reinterpreting their shell spelling. Paths after
+-- -- are passed verbatim to the remote process, including spaces and metacharacters.
+remoteArguments :: [Option] -> [FilePath] -> [String]
+remoteArguments flags paths = concatMap option flags++["--"]++paths
+  where
+    option (Scale s)=["--scale",s]
+    option (Size s)=["--size",s]
+    option (Mode s)=["--mode",s]
+    option (ColorMode s)=["--appearance",s]
+    option (RemoteSession s)=["--remote-session",s]
+    option (Scene s)=["--scene",s]
+    option Demo=["--demo"]
+    option CRT=["--crt"]
+    option MaterialIcons=["--material-icons"]
+    option WordStar=["--wordstar"]
+    option _=[]
+
+expandRemoteHome :: FilePath -> IO FilePath
+expandRemoteHome "~" = getHomeDirectory
+expandRemoteHome ('~':'/':path) = (</> path) <$> getHomeDirectory
+expandRemoteHome path = pure path
 
 stageScene :: Desktop -> String -> IO Desktop
 stageScene d scene = case lookup scene [("open",Open),("tree",ToggleTree),("help",Help),("diff",GitDiff)] of

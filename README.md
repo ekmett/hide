@@ -75,6 +75,49 @@ with modified buffers or an unsent query uses the browser's native confirmation;
 choose Stay to save in the editor. File > Exit uses the editor's save dialogs and
 attempts to close the tab; browsers may refuse to close tabs opened manually.
 
+## Remote editing over SSH
+
+Install `thc-edit` on both machines. The remote host needs the `remote` build
+flag; it does not need the THC compiler, SDL, a browser, or a graphical session:
+
+```sh
+cabal install exe:thc-edit -fremote -f-web -f-window -f-terminal
+```
+
+Build the local client with `-fremote -fwindow` for Metal/Vulkan, or
+`-fremote -fweb` for the browser. Connect using your normal SSH host or alias:
+
+```sh
+thc-edit --metal username@eak-pc.local:some-path
+thc-edit --web username@eak-quartus.local:some-path
+```
+
+When THC's external-command dispatcher is installed, `thc edit` accepts the same
+arguments. The client runs `ssh -T HOST "thc-edit --remote"`; `thc-edit` must be
+on the remote SSH command's `PATH`. File paths and startup options travel inside
+the protocol, so spaces and shell punctuation in a path are not shell commands.
+`--ssh HOST PATH` is an alternative. Prefix a local filename containing a colon
+with `./` to distinguish it from a remote target.
+
+Files, Git, HLS, builds, debugger and conversation processes run on the remote
+host. Drawing, clipboard access and downloaded files stay on the local client.
+Dropped local files are uploaded into new, unsaved remote buffers. Uploads are
+limited to 16 MiB each. Remote terminal support additionally requires that host's
+optional `terminal` build; the embedded terminal currently requires POSIX.
+
+A dropped connection leaves the remote session running and the client attempts
+to reconnect. The session identifier is printed on stderr; use
+`--remote-session ID` with the same host to attach from a new client. Only one
+client controls a session at a time. File > Exit closes the session through the
+normal save prompts. Closing a disconnected client detaches it. Sessions survive
+SSH disconnects, but not a daemon crash or host reboot; save important changes.
+
+The server uses bounded, length-prefixed JSON/binary packets on stdin/stdout,
+with diagnostics on stderr. Both clients share the browser's adaptive display
+compression. Reattachment sends a full display reset, and sequenced input avoids
+repeating acknowledged edits. POSIX hosts use a private Unix socket; Windows
+hosts use an authenticated loopback endpoint with an owner-only descriptor.
+
 ## Markdown
 
 Markdown source headings have distinct colors while retaining their `#` markers.
