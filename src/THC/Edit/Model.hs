@@ -92,6 +92,14 @@ data ChatQuestion = ChatQuestion
   , questionFocused :: Bool
   } deriving (Eq,Show)
 
+-- Transcript documents remain in the normal buffer store when another agent is
+-- selected; only the shared conversation window and composer change target.
+data ConversationView = ConversationView
+  { conversationBufferId :: Int, conversationName :: Text
+  , conversationDraft :: Buffer, conversationDraftSelection :: Selection
+  , conversationScroll :: (Int,Int), conversationReplySelection :: Selection
+  } deriving (Eq,Show)
+
 data Desktop = Desktop
   { screenSize :: (Int,Int), windows :: [Window], buffers :: M.Map Int Document
   , nextId :: Int, menu :: Maybe (Int,Int), dialog :: Maybe Dialog, drag :: Maybe Drag
@@ -106,6 +114,7 @@ data Desktop = Desktop
   , composerBuffer :: Buffer, composerSelection :: Selection, composerFocused :: Bool, agentSteering :: Bool, agentReplying :: Bool, agentQueued :: Int
   , blinkCursor :: Bool, crtFilter :: Bool, pixelateUnicode :: Bool, materialIcons :: Bool, defaultDirectory :: Maybe FilePath, statusHover :: Maybe Int, heldModifiers :: [V.Modifier], problemsPreferredHeight :: Int, agentContextUsage :: Maybe (Integer,Integer), agentSettings :: [AgentSetting], browserFrontend :: Bool, appearance :: Appearance, systemDark :: Bool, buildDiagnostics :: [Diagnostic]
   , chatQuestion :: Maybe ChatQuestion, chatActions :: [(Int,Int,Text,[Text])], chatInputOffset :: Maybe Int
+  , conversationTarget :: Text, conversationViews :: M.Map Text ConversationView
   , streamerMode :: Bool, clipboardExport :: (Int,Maybe Text), guestPrivatePaths :: [FilePath]
   } deriving (Eq,Show)
 
@@ -201,6 +210,7 @@ commandDescription cmd = case cmd of
   NextMessage -> "Go to the next diagnostic, opening its file if needed."
   PreviousMessage -> "Go to the previous diagnostic, opening its file if needed."
   RestartHLS -> "Restart the Haskell language server."
+  CodeActions -> "List HLS quick fixes and refactorings for the selected source range."
   RenameSymbol -> "Rename this symbol with HLS; review and save the changed buffers."
   ToggleTree -> "Show or hide the file tree."
   GitDiff -> "Review saved Git changes, including untracked files."
@@ -210,7 +220,6 @@ commandDescription cmd = case cmd of
   GitMerge -> "Choose a branch to merge into the current branch."
   Disabled reason -> reason
 
-  CodeActions -> "List HLS quick fixes and refactorings for the selected source range."
 menuHelp :: Desktop -> Maybe Text
 menuHelp d = case contextMenu d of
   Just (_,i) -> commandDescription . snd <$> listToMaybe (drop i (contextItems (contextKind d)))
@@ -230,7 +239,7 @@ statusItems d
   | questionActive d = [key " Enter Answer" V.KEnter [],key "  Tab Choices" (V.KChar '\t') [],key "  Esc Cancel" V.KEsc []]
   | activeConversation d =
       [key (" Enter "<>(if agentReplying d then "Queue query" else "Query")) V.KEnter [],key "  Shift+Enter Newline" V.KEnter [V.MShift]] ++
-      [key "  Ctrl+Enter Steer" V.KEnter [V.MCtrl] | agentSteering d] ++ [key "  Esc Cancel" V.KEsc [] | agentReplying d]
+      [key "  Ctrl+Enter Steer" V.KEnter [V.MCtrl] | T.null (conversationTarget d), agentSteering d] ++ [key "  Esc Cancel" V.KEsc [] | agentReplying d]
   | not (T.null (typeHint d)) = [(" "<>typeHint d,Nothing)]
   | not (T.null (status d)) = [command " F1 Help" Help,(" | "<>status d,Nothing)]
   | otherwise = [command " F1 Help" Help,command "  F2 Save" Save,command "  F3 Open" Open,
@@ -261,8 +270,8 @@ menuItemsFor d i
 commandEnabled :: Desktop -> Command -> Bool
 commandEnabled d Download = browserFrontend d && maybe False ((==Nothing) . documentLabel) (activeDocument d)
 commandEnabled _ Disabled{} = False
-commandEnabled d (AgentChoose _) = not (null (agentSettings d))
-commandEnabled d (AgentSet _ _) = not (agentReplying d)
+commandEnabled d (AgentChoose _) = T.null (conversationTarget d) && not (null (agentSettings d))
+commandEnabled d (AgentSet _ _) = T.null (conversationTarget d) && not (agentReplying d)
 commandEnabled d cmd | cmd `elem` [GoToMessage,CopyAllMessages,NextMessage,PreviousMessage] = not (null (diagnostics d))
 commandEnabled d Copy | problemsVisible d && problemsFocused d = not (null (diagnostics d))
 commandEnabled d cmd | problemsVisible d && problemsFocused d, cmd `elem` [Undo,Redo,Cut,Paste,SelectAll] = False
@@ -274,7 +283,7 @@ menuRect d i = Rect (min x (max 0 (sw-w))) 1 w (length (menuItemsFor d i)+2)
         w = min sw (maximum [T.length t + T.length (menuShortcut d entry) + 5 | entry@(MenuItem t _ _) <- menuItemsFor d i])
 
 initialDesktop :: (Int,Int) -> Desktop
-initialDesktop size = Desktop size [] M.empty 1 Nothing Nothing Nothing "" False Nothing "" Nothing "" Nothing "" False Nothing Nothing Nothing "" Nothing Nothing Nothing [] False 0 0 False Nothing 0 0 Nothing SourceContext Nothing (newBuffer "") (Selection 0 0) True False False 0 True False False False Nothing Nothing [] 8 Nothing [] False SystemMode True [] Nothing [] Nothing False (0,Nothing) []
+initialDesktop size = Desktop size [] M.empty 1 Nothing Nothing Nothing "" False Nothing "" Nothing "" Nothing "" False Nothing Nothing Nothing "" Nothing Nothing Nothing [] False 0 0 False Nothing 0 0 Nothing SourceContext Nothing (newBuffer "") (Selection 0 0) True False False 0 True False False False Nothing Nothing [] 8 Nothing [] False SystemMode True [] Nothing [] Nothing "" M.empty False (0,Nothing) []
 
 activeWindow :: Desktop -> Maybe Window
 activeWindow = listToMaybe . windows
@@ -456,7 +465,7 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
       Just _ | maybe False ((/=Nothing) . documentLabel) (activeDocument d) -> (d {status="This window is read-only."},[])
       Just w -> (prompt "Save file as" (Saving (bufferId w) Nothing) [Input "Name" (currentPath d) (T.length (currentPath d))] d,[])
     go Quit d = case find (dirty . documentBuffer . snd) (M.toList (buffers d)) of
-      Nothing | not (T.null (contents (composerBuffer d))) -> (d {dialog=Just (Dialog "Unsent query" DiscardDraft [] 0 ["Discard","Cancel"] ["Discard the unsent conversation query?"])},[])
+      Nothing | conversationHasDraft d -> (d {dialog=Just (Dialog "Unsent query" DiscardDraft [] 0 ["Discard","Cancel"] ["Discard the unsent conversation query?"])},[])
               | otherwise -> (d,[Exit])
       Just (bid,_) -> let focused = maybe d (\w -> focusWindow (windowId w) d) (find ((==bid) . bufferId) (windows d))
                      in confirm Quit focused
@@ -497,6 +506,7 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
     go SplitHorizontal d = splitWindow False d
     go About d = (message "About Turbo Haskell" ["Turbo Haskell  0.1", "Copyright (c) 2026 Edward Kmett", "", "Haskell source editor"] d,[])
     go InspectType d = (d,[LanguageRequest TypeInfo])
+    go CodeActions d = (d,[LanguageRequest RequestCodeActions])
     go RenameSymbol d = (prompt "Rename symbol" Renaming [Input "New name" "" 0] d,[])
     go Definition d = (d,[LanguageRequest FindDefinition])
     go Complete d = (d,[LanguageRequest Completions])
@@ -506,7 +516,6 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
     go RestartHLS d = (d,[LanguageRequest RestartLanguage])
     go Help d = (d,[ReadHelp])
     go ToggleTree d = case sideTree d of Just _ -> (setTree Nothing d,[]); Nothing -> (d,[ReadTree (startingDirectory d)])
-    go CodeActions d = (d,[LanguageRequest RequestCodeActions])
     go GitDiff d = (d,[ReadGitDiff])
     go GitCommit d = (d,[AskGitCommit])
     go GitFetch d = (d,[RunGit FetchRemote])
@@ -541,7 +550,7 @@ saveRequest after d = case (activeWindow d,activeDocument d) of
 closeActive :: Desktop -> Desktop
 closeActive d = case windows d of
   [] -> d
-  w:ws -> d {windows = ws, buffers = if any ((==bufferId w) . bufferId) ws then buffers d else M.delete (bufferId w) (buffers d)}
+  w:ws -> (rememberConversationView d) {windows = ws, buffers = if any ((==bufferId w) . bufferId) ws || maybe False ((==Just "Conversation").documentLabel) (M.lookup (bufferId w) (buffers d)) then buffers d else M.delete (bufferId w) (buffers d)}
 
 tileWindows :: Bool -> Desktop -> Desktop
 tileWindows vertical d
@@ -694,6 +703,57 @@ dispatchEvent (V.EvKey key mods) d | Just tree <- sideTree d, treeFocused tree =
 dispatchEvent (V.EvKey key mods) d = keyEvent key mods d
 dispatchEvent _ d = (d,[])
 
+conversationDocument :: Text -> Desktop -> Maybe (Int,Document)
+conversationDocument target d = case M.lookup target (conversationViews d) of
+  Just view -> (conversationBufferId view,) <$> M.lookup (conversationBufferId view) (buffers d)
+  Nothing | T.null target -> find (\(bid,doc)->documentLabel doc==Just "Conversation" && all ((/=bid).conversationBufferId) (M.elems (conversationViews d))) (M.toList (buffers d))
+          | otherwise -> Nothing
+
+rememberConversationView :: Desktop -> Desktop
+rememberConversationView d = case conversationDocument (conversationTarget d) d of
+  Nothing -> d
+  Just (bid,_) ->
+    let old=M.lookup (conversationTarget d) (conversationViews d)
+        win=find ((==bid).bufferId) (windows d)
+        view=ConversationView bid (maybe "Primary" conversationName old) (composerBuffer d) (composerSelection d)
+          (maybe (maybe (0,0) conversationScroll old) (\w->(scrollRow w,scrollColumn w)) win)
+          (maybe (maybe (Selection 0 0) conversationReplySelection old) selection win)
+    in d {conversationViews=M.insert (conversationTarget d) view (conversationViews d)}
+
+addConversationDocument :: Desktop -> Desktop
+addConversationDocument d=let added=addDocument Nothing (newBuffer "") d in
+  added {buffers=M.adjust (\doc->doc {documentLabel=Just "Conversation",documentCursorVisible=False}) (nextId d) (buffers added)}
+
+selectConversationView :: Text -> Text -> Desktop -> Desktop
+selectConversationView target name original =
+  let saved=rememberConversationView original
+      existingWindow=find (\w->maybe False ((==Just "Conversation").documentLabel) (M.lookup (bufferId w) (buffers saved))) (windows saved)
+      (bid,prepared0)=case conversationDocument target saved of
+        Just (ident,_) -> (ident,saved)
+        Nothing -> let added=addConversationDocument saved in (nextId saved,added)
+      prepared=case existingWindow of
+        Nothing | not (any ((==bid).bufferId) (windows prepared0)) ->
+          let added=addConversationDocument prepared0
+          in added {buffers=M.delete (nextId prepared0) (buffers added),windows=case windows added of
+            new:rest -> new {bufferId=bid}:rest
+            [] -> []}
+        _ -> prepared0
+      old=M.lookup target (conversationViews prepared)
+      view=maybe (ConversationView bid name (newBuffer "") (Selection 0 0) (0,0) (Selection 0 0)) (\v->v {conversationName=name}) old
+      adjusted w=w {bufferId=bid,scrollRow=fst (conversationScroll view),scrollColumn=snd (conversationScroll view),selection=conversationReplySelection view}
+      oldWindows=case existingWindow of
+        Just _ -> windows saved
+        Nothing -> windows prepared
+      views=map (\w->if maybe False ((==Just "Conversation").documentLabel) (M.lookup (bufferId w) (buffers prepared)) then adjusted w else w) oldWindows
+      result=prepared {windows=views,conversationTarget=target,conversationViews=M.insert target view (conversationViews prepared),
+        composerBuffer=conversationDraft view,composerSelection=conversationDraftSelection view,composerFocused=True,
+        chatActions=[],chatInputOffset=Nothing,contextMenu=Nothing,menu=Nothing}
+  in maybe result (\w->focusWindow (windowId w) result) (find ((==bid).bufferId) views)
+
+conversationHasDraft :: Desktop -> Bool
+conversationHasDraft d=not (T.null (contents (composerBuffer d))) ||
+  any (\(target,view)->target/=conversationTarget d && not (T.null (contents (conversationDraft view)))) (M.toList (conversationViews d))
+
 activeConversation :: Desktop -> Bool
 activeConversation d = maybe False (windowFocused d) (activeWindow d) && maybe False ((==Just "Conversation").documentLabel) (activeDocument d)
 
@@ -705,7 +765,7 @@ conversationSelection d = case (activeWindow d,activeDocument d) of
         cells=[(ident,outgoing,c) | (c,BubbleText ident outgoing _)<-take (z-a) (drop a (documentHighlight doc))]
         groups=groupBy (\(i,_,_) (j,_,_) -> i==j) cells
         render group@((_,outgoing,_):_)=
-          (if length groups>1 then if outgoing then "User: " else "Bot: " else "")<>
+          (if length groups>1 && T.null (conversationTarget d) then if outgoing then "User: " else "Bot: " else "")<>
           T.pack [c | (_,_,c)<-group]
         render []=""
     in T.intercalate "\n\n" (map render groups)
@@ -808,7 +868,7 @@ composerEvent _ _ = Nothing
 -- Inline questions have their own editing state; the ordinary draft is never
 -- borrowed or cleared while a tool waits for a human response.
 questionActive :: Desktop -> Bool
-questionActive d=activeConversation d && maybe False questionFocused (chatQuestion d)
+questionActive d=T.null (conversationTarget d) && activeConversation d && maybe False questionFocused (chatQuestion d)
 
 questionEdit :: (Desktop -> Desktop) -> Desktop -> Desktop
 questionEdit edit d=case chatQuestion d of
@@ -921,6 +981,7 @@ contextItems (AgentContext items) = items
 contextItems GitContext = [("Pull",GitPull),("Fetch",GitFetch),("Merge...",GitMerge)]
 
 conversationTitle :: Desktop -> Text
+conversationTitle d | not (T.null (conversationTarget d)) = maybe "Agent conversation" conversationName (M.lookup (conversationTarget d) (conversationViews d))
 conversationTitle d = case [settingCurrent option | option<-agentSettings d,settingCategory option=="model"] of
   model:_ -> model<>case [settingCurrent option | option<-agentSettings d,settingCategory option=="thought_level"] of
     effort:_ -> " ("<>effort<>") ▼"
@@ -936,6 +997,7 @@ agentTitleRect d w = Rect (x+max 6 ((ww-T.length title) `div` 2)) y (max 0 (min 
 
 openAgentChoices :: Text -> Desktop -> Desktop
 openAgentChoices category d
+  | not (T.null (conversationTarget d)) = d {status="Child model settings are shown in its conversation; switch to Primary to change primary settings."}
   | null items = d {status="The provider has not advertised model settings."}
   | otherwise = openContext (AgentContext items) x (y+1) d
   where
@@ -1158,6 +1220,7 @@ resizeEdge vertical leading position (desktopLow,desktopHigh) source views = (ol
         in w {bounds=if vertical then r {top=a,height=b-a} else r {left=a,width=b-a},restoredBounds=Nothing}
 
 windowPositionText :: Desktop -> Document -> Window -> Text
+windowPositionText d doc _ | documentLabel doc==Just "Conversation", not (T.null (conversationTarget d)) = " Context unknown "
 windowPositionText d doc _ | documentLabel doc==Just "Conversation" = " "<>case agentContextUsage d of
   Just (used,size) | used>=0 && size>0 -> T.pack (show (used*100 `div` size))<>"% · "<>formatTokenCount used<>"/"<>formatTokenCount size<>" "
   _ -> "-- "
@@ -1466,7 +1529,7 @@ submitDialog button dg original
     GoingTo -> case readMaybe (T.unpack first) of
       Just n | n>0 -> (moveTo False (lineOffset (activeText d) (n-1)) d,[])
       _ -> (original {status="Enter a positive line number."},[])
-    DiscardDraft | button==0 -> runCommand Quit d {composerBuffer=newBuffer "",composerSelection=Selection 0 0}
+    DiscardDraft | button==0 -> runCommand Quit d {composerBuffer=newBuffer "",composerSelection=Selection 0 0,conversationViews=M.map (\view->view {conversationDraft=newBuffer "",conversationDraftSelection=Selection 0 0}) (conversationViews d)}
                  | otherwise -> (d,[])
     Confirm cmd | button==0 -> saveRequest (Just cmd) d
                 | button==1 -> case cmd of

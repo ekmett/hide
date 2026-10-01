@@ -284,10 +284,14 @@ primary) and `max_subagents` (default 4, range 0–64 direct children per agent)
 Project `thc.toml` may lower these ceilings; agents cannot raise them. Both limits
 are checked at spawn. See [configuration](configuration.md#agent-limits).
 
-**Tools > Agents** or **Window > Agents** opens the directory. History is a
-read-only view of the latest retained events; Workspace opens the associated
-editor. The directory currently provides browsing, not a child conversation
-composer or child-provider reconnect control.
+**Tools > Agents** or **Window > Agents** opens the directory. Conversation shows
+live child messages, retained tool details and a protected human composer.
+Human messages to parent-controlled children retain peer attribution. Drafts,
+transcripts and view positions survive switching and editor recovery. Workspace
+opens the associated editor; Reconnect explicitly loads a recovered provider
+without replaying queued work. Child model/effort values are read-only.
+`agent_settings` reports Primary's configuration and labels that scope, even
+when a child conversation is selected.
 
 ## Conversation and settings
 

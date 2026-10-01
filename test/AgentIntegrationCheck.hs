@@ -19,7 +19,9 @@ import qualified THC.Edit.AgentHub as AH
 import THC.Edit.GuestAccess (guestKeyboardAllowed,guestCommandAllowed,sanitizedBuffer)
 import qualified Data.Map.Strict as M
 import Data.List (findIndex)
-import THC.Edit.Buffer (contents)
+import Data.IORef
+import THC.Edit.Buffer (contents,newBuffer,Selection(..),snapshotBuffer)
+import THC.Edit.Recovery (writeCheckpoint,readCheckpoint)
 import qualified THC.Edit.Font as Font
 import THC.Edit.ScreenCapture (capture)
 import THC.Edit.Session
@@ -63,8 +65,9 @@ checks=bracket temporary removePathForcibly $ \root ->
       nested<-send "nested-private" split >>= tickUntil (\desktop->publicSafe desktop >> pure (status desktop=="Agent: end_turn"))
       expanded<-snd <$> conversationEffects conversation (\x _->pure (False,x)) nested [AgentAction "copy" []]
       ensure "raw tool and plan details never retain bearer values" (all (not . (`T.isInfixOf` clipboard expanded)) ("private-main-key":tokens))
+      peerCancels<-newIORef (0::Int)
       peer<-AH.registerAgent hub "Peer" root (AH.AgentDriver root "private-peer-key" (AH.Capabilities False False [])
-        (\_ ->pure (Right (AH.Capabilities False False []))) (\_ ->pure (Right Null)) (pure ()) (pure ())) >>= right
+        (\_ ->pure (Right (AH.Capabilities False False []))) (\_ ->pure (Right Null)) (modifyIORef' peerCancels (+1)) (pure ())) >>= right
       ticket<-AH.sendAgent hub (AH.Agent peer) primary "Count files" >>= right
       finished<-tickUntil (\_ ->do result<-AH.waitAgent hub AH.Human primary ticket 0 >>= right; pure (field "status" result==Just ("completed"::T.Text))) connected
       result<-AH.waitAgent hub AH.Human primary ticket 0 >>= right
@@ -82,17 +85,115 @@ checks=bracket temporary removePathForcibly $ \root ->
       ensure "cancel removes stale human approval" (dialog cleared==Nothing)
       peerTicket<-AH.sendAgent hub (AH.Agent primary) peer "Peer attribution fixture" >>= right
       _<-AH.waitAgent hub AH.Human peer peerTicket 1000 >>= right
-      directoryView<-snd <$> conversationEffects conversation (\x _->pure (False,x)) cleared [AgentAction "directory" []]
+      let primaryDrafted=cleared {composerBuffer=newBuffer "primary unsent",composerSelection=Selection 3 7}
+          primaryText=maybe "" (contents.documentBuffer.snd) (conversationDocument "" primaryDrafted)
+          ui action values d=snd <$> conversationEffects conversation (\x _->pure (False,x)) d [AgentAction action values]
+      directoryView<-ui "directory" [] primaryDrafted
       directory<-AH.listAgents hub AH.Human >>= right
       let listed=maybe [] id (field "agents" directory :: Maybe [Value])
           index=maybe (error "Peer absent from directory") id (findIndex ((==Just (AH.agentIdText peer)) . field "id") listed)
       history<-snd <$> conversationEffects conversation (\x _->pure (False,x)) directoryView {dialog=Nothing} [AgentAction "directory-select" ["0",T.pack (show index)]]
-      let historyText=T.concat [contents (documentBuffer doc) | doc<-M.elems (buffers history),documentLabel doc==Just "Agent: Peer"]
+      ensure "child opens in the existing protected conversation composer" (activeConversation history && not (guestKeyboardAllowed history))
+      let historyText=activeText history
       ensure "history preserves peer identity instead of assigning the human seat" (("Agent "<>AH.agentIdText primary<>" (peer message)") `T.isInfixOf` historyText)
+      let childDrafted=history {composerBuffer=newBuffer "child unsent",composerSelection=Selection 2 5}
+      primaryAgain<-ui "show" [] childDrafted
+      ensure "switching restores primary draft caret and transcript" (T.null (conversationTarget primaryAgain) && contents (composerBuffer primaryAgain)=="primary unsent" && composerSelection primaryAgain==Selection 3 7 && activeText primaryAgain==primaryText)
+      childAgain<-ui "directory-select" ["0",T.pack (show index)] primaryAgain
+      ensure "switching restores child draft caret" (contents (composerBuffer childAgain)=="child unsent" && composerSelection childAgain==Selection 2 5)
+      let largeTool=object ["title" .= ("Large tool"::T.Text),"payload" .= T.replicate 600000 "x"]
+      AH.recordAgentEvent hub peer "tool" largeTool
+      AH.recordAgentEvent hub peer "tool" largeTool
+      AH.recordAgentEvent hub peer "output" (object ["text" .= ("latest reply after paged tools"::T.Text)])
+      paged<-tickConversation conversation childAgain
+      ensure "live child reaches newest reply past history byte cap" ("latest reply after paged tools" `T.isInfixOf` activeText paged)
+      _<-AH.cancelAgent hub AH.Human primary >>= right
+      afterPrimaryCancel<-tickConversation conversation childAgain
+      ensure "primary mailbox cancellation does not cancel selected child" . (==0) =<< readIORef peerCancels
+      ensure "primary cancellation preserves child target and draft" (conversationTarget afterPrimaryCancel==AH.agentIdText peer && contents (composerBuffer afterPrimaryCancel)=="child unsent")
+      let primaryMetadata=childAgain {agentReplying=True,agentSteering=True,agentContextUsage=Just (42,84),agentSettings=[AgentSetting "model" "Model" "model" "primary-model" [("primary-model","Primary")]]}
+      ensure "child view never advertises primary steering or editable model settings" (not (any (T.isInfixOf "Steer" . fst) (statusItems primaryMetadata)) && not (commandEnabled primaryMetadata (AgentChoose "")) && not (commandEnabled primaryMetadata (AgentSet "model" "primary-model")))
+      ensure "child view does not show primary context usage" (case (activeDocument primaryMetadata,activeWindow primaryMetadata) of (Just doc,Just win)->windowPositionText primaryMetadata doc win==" Context unknown "; _->False)
+      (_,settingsReply)<-chatTool conversation primaryMetadata "agent_settings" (object [])
+      settingsInfo<-settingsReply >>= right
+      ensure "settings snapshot identifies primary scope and does not mix child busy state" (field "scope" settingsInfo==Just ("primary"::T.Text) && field "replying" settingsInfo==Just False)
+      cancellingPeer<-ui "cancel" [] afterPrimaryCancel
+      _<-tickUntil (\_->(==1) <$> readIORef peerCancels) cancellingPeer
+      ensure "child setters cannot reconfigure the primary" . (T.isPrefixOf "Switch to Primary" . status) =<< ui "set-config" ["model","invented"] childAgain
+      liveChild<-AH.spawnAgent hub (AH.Agent primary) (AH.SpawnSpec "Live child" "Inspect source" root AH.Shared AH.Fresh Nothing Nothing) >>= right
+      parentTicket<-AH.sendAgent hub (AH.Agent primary) liveChild "parent instruction" >>= right
+      _<-AH.waitAgent hub AH.Human liveChild parentTicket 3000 >>= right
+      refreshedDirectory<-ui "directory" [] childAgain
+      listedNow<-AH.listAgents hub AH.Human >>= right
+      let liveIndex=maybe (error "Live child absent") id (findIndex ((==Just (AH.agentIdText liveChild)) . field "id") (maybe [] id (field "agents" listedNow::Maybe [Value])))
+      liveView<-ui "directory-select" ["0",T.pack (show liveIndex)] refreshedDirectory {dialog=Nothing}
+      ensure "parent-owned child shows controlling-parent attribution" ("controlling parent" `T.isInfixOf` activeText liveView)
+      humanSent<-ui "send-draft" [] liveView {composerBuffer=newBuffer "human followup",composerSelection=Selection 14 14}
+      replied<-tickUntil (pure . T.isInfixOf "Human (peer message)" . activeText) humanSent
+      ensure "accepted human message clears only its own composer" (T.null (contents (composerBuffer replied)) && maybe False ((=="primary unsent").contents.conversationDraft) (M.lookup "" (conversationViews replied)))
+      ensure "child transcript carries no provider keys" (not ("private-main-key" `T.isInfixOf` activeText replied))
+      firstQueued<-ui "send-draft" [] replied {composerBuffer=newBuffer "permission"}
+      secondQueued<-ui "send-draft" [] firstQueued {composerBuffer=newBuffer "must-not-replay"}
+      awaiting<-tickUntil (pure . maybe False (T.isPrefixOf "Agent permission:" . dialogTitle) . dialog) secondQueued
+      ensure "human can queue a followup while child is running" (agentQueued awaiting>=1)
+      _<-AH.cancelAgent hub AH.Human primary >>= right
+      childStillWaiting<-tickConversation conversation awaiting
+      ensure "primary cancellation leaves child approval pending" (maybe False (T.isPrefixOf "Agent permission:" . dialogTitle) (dialog childStillWaiting))
+      cancelledChild<-ui "cancel" [] childStillWaiting
+      afterChildCancel<-tickUntil (\desktop->do entry<-AH.statusAgent hub AH.Human liveChild >>= right; pure (field "status" entry==Just ("idle"::T.Text) && field "queued" entry==Just (0::Int) && dialog desktop==Nothing)) cancelledChild
+      let finalDraft=afterChildCancel {composerBuffer=newBuffer "recover child draft",composerSelection=Selection 4 9}
+          recovery=root </> "conversation-views.checkpoint"
+      writeCheckpoint recovery finalDraft >>= right
+      recovered<-readCheckpoint recovery initial >>= right
+      ensure "selected child and active draft survive recovery" (conversationTarget recovered==AH.agentIdText liveChild && snapshotBuffer (composerBuffer recovered)==snapshotBuffer (composerBuffer finalDraft) && composerSelection recovered==Selection 4 9)
+      let restoredPrimary=selectConversationView "" "Primary" recovered
+      ensure "hidden primary transcript and draft survive recovery" (activeText restoredPrimary==primaryText && contents (composerBuffer restoredPrimary)=="primary unsent")
+      ensure "hidden unsent drafts still prevent quiet Exit" (conversationHasDraft recovered && not (null (conversationViews recovered)))
+      recoveredShown<-ui "show" [] recovered
+      ensure "show after switching does not lose primary transcript" (activeText recoveredShown==primaryText)
+      (questionView,_)<-chatTool conversation recoveredShown "ask_user" (object ["question" .= ("Choose privately"::T.Text)])
+      let privateAnswer=questionView {chatQuestion=fmap (\q->q {questionBuffer=newBuffer "unsent secret answer",questionSelection=Selection 20 20}) (chatQuestion questionView)}
+      paintedAnswer<-tickConversation conversation privateAnswer
+      hiddenQuestion<-ui "directory-select" ["0",T.pack (show liveIndex)] paintedAnswer
+      ensure "hidden primary question answer never becomes readable transcript" (all (maybe True (not . T.isInfixOf "unsent secret answer") . sanitizedBuffer hiddenQuestion) (M.keys (buffers hiddenQuestion)))
+      writeCheckpoint recovery hiddenQuestion >>= right
+      questionCheckpoint<-readCheckpoint recovery initial >>= right
+      ensure "hidden transient answer is omitted from recovery" (all (not . T.isInfixOf "unsent secret answer" . contents . documentBuffer) (M.elems (buffers questionCheckpoint)))
+      returnedQuestion<-ui "show" [] hiddenQuestion
+      ensure "switching preserves the live primary answer without sending it" (maybe False ((=="unsent secret answer").contents.questionBuffer) (chatQuestion returnedQuestion))
       _<-AH.endAgent hub AH.Human primary >>= right
       _<-tickConversation conversation finished
       invalid<-AH.statusAgent hub (AH.Agent primary) primary
       ensure "ended primary loses orchestration authority" (case invalid of Left _->True; _->False)
+    recoveryRecord<-newSessionRecord Nothing ["--",root]
+    rememberSession recoveryRecord
+    let recoveredPath=root </> "newer-child.checkpoint"
+        fakeDriver=AH.AgentDriver root "private-recovery-child" (AH.Capabilities False False [])
+          (\_ ->pure (Right (AH.Capabilities False False []))) (\_ ->pure (Right Null)) (pure ()) (pure ())
+    recoveredChild<-environment "THC_EDIT_SESSION" (Just (sessionId recoveryRecord)) $ withConversationAt root $ \conversation -> do
+      let agents=conversationAgents conversation
+          hub=AR.agentHub agents
+      child<-AH.registerAgent hub "Recovered child" root fakeDriver >>= right
+      AH.recordAgentEvent hub child "output" (object ["text" .= ("older Hub history"::T.Text)])
+      let selected=selectConversationView (AH.agentIdText child) "Recovered child" (selectConversationView "" "Primary" (initialDesktop (80,25)))
+          bid=maybe (error "missing child view") bufferId (activeWindow selected)
+          newer=selected {buffers=M.adjust (\doc->doc {documentBuffer=newBuffer "newer Desktop child transcript"}) bid (buffers selected),composerBuffer=newBuffer "recovered draft",agentReplying=True,agentQueued=5}
+      writeCheckpoint recoveredPath newer >>= right
+      AR.activateAgentCheckpoint agents
+      AR.checkpointAgents agents >>= right
+      pure child
+    environment "THC_EDIT_SESSION" (Just (sessionId recoveryRecord)) $ withConversationAt root $ \conversation -> do
+      recovered<-readCheckpoint recoveredPath (initialDesktop (80,25)) >>= right
+      retained<-tickConversation conversation recovered
+      ensure "stale recovered Hub history cannot overwrite newer Desktop transcript" (activeText retained=="newer Desktop child transcript" && contents (composerBuffer retained)=="recovered draft")
+      ensure "recovered child projects current status while retaining text" (not (agentReplying retained) && agentQueued retained==0)
+      (_,copied)<-conversationEffects conversation (\d _->pure (False,d)) retained [AgentAction "copy" []]
+      ensure "recovered transcript remains copyable before reconnect" (clipboard copied=="newer Desktop child transcript")
+      let hub=AR.agentHub (conversationAgents conversation)
+      AH.updateExternalAgent hub recoveredChild fakeDriver >>= right
+      AH.recordAgentEvent hub recoveredChild "output" (object ["text" .= ("new live child output"::T.Text)])
+      refreshed<-tickConversation conversation retained
+      ensure "live output replaces frozen recovered presentation" ("new live child output" `T.isInfixOf` activeText refreshed)
     corrupt<-newSessionRecord Nothing ["--",root]
     rememberSession corrupt
     checkpoint<-(++".agents.json") <$> checkpointPath (sessionId corrupt)

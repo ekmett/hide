@@ -439,7 +439,12 @@ checks = bracket temporary removePathForcibly $ \root ->
       check "steering receives saved context updates" ("Steering guidance marker" `T.isInfixOf` json lastSteer)
       rejectionWait<-prompt runtime "wait" steered >>= await runtime "rejected context steering wait" agentReplying
       writeFile (root </> "thc.toml") "[editor.agent]\ncontext = 'Retry context marker'\n"
-      rejectedSteer<-send runtime "steer-draft" [] rejectionWait {composerBuffer=newBuffer "reject-context"} >>= await runtime "rejected steering completed" (not . agentReplying)
+      pendingSteer<-send runtime "steer-draft" [] rejectionWait {composerBuffer=newBuffer "reject-context"}
+      let childWaiting=(selectConversationView "fixture-child" "Child" pendingSteer) {composerBuffer=newBuffer "child draft",composerSelection=Selection 2 4}
+      hiddenRestored<-await runtime "hidden primary steering restoration" (\d->maybe False ((=="reject-context").contents.conversationDraft) (M.lookup "" (conversationViews d))) childWaiting
+      check "failed primary steering preserves selected child draft" (conversationTarget hiddenRestored=="fixture-child" && contents (composerBuffer hiddenRestored)=="child draft" && composerSelection hiddenRestored==Selection 2 4)
+      rejectedSteer<-send runtime "show" [] hiddenRestored
+      check "switching back restores rejected primary steering draft" (contents (composerBuffer rejectedSteer)=="reject-context")
       afterRejection<-prompt runtime "stream" rejectedSteer >>= done runtime
       retryLog<-logged
       let retryPrompt=last [params | entry<-retryLog,field "method" entry==Just ("session/prompt"::T.Text),Just params<-[field "params" entry::Maybe Value]]

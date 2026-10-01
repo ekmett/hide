@@ -9,8 +9,9 @@ import System.Process (createProcess, proc, waitForProcess)
 import System.Environment (getExecutablePath)
 #endif
 import THC.Edit.Session (SessionRecord(..))
+import Control.Concurrent.Async (Async, async, cancel, poll)
 import Control.Concurrent.MVar (MVar, newEmptyMVar, readMVar, tryPutMVar, isEmptyMVar)
-import Control.Monad (foldM, filterM, forM_, void, when, unless)
+import Control.Monad (foldM, filterM, forM, forM_, void, when, unless)
 import Data.Aeson
 import Data.Aeson.Types (parseMaybe, parseEither)
 import qualified Data.Aeson.Key as K
@@ -73,6 +74,8 @@ data State = State
   , agentInitialized :: Value, agentConfig :: Value
   , streamTails :: M.Map Text Text
   , lastAgentSync :: Maybe (FilePath,Text,AH.Capabilities,Bool)
+  , childRecords :: M.Map Text [Record], childRender :: Maybe (Text,Int,Value)
+  , childCancels :: M.Map Text (Async (Either Text ()))
   , resumeRecordPath :: FilePath
   }
 data ConversationState = ConversationState FilePath (IORef State) C.Consoles Jobs.BuildJobs AR.AgentRuntime
@@ -103,7 +106,7 @@ withConversationAt root action = C.withConsoles $ \consoles -> Jobs.withBuildJob
     , ownedTerminals=S.empty,terminalWaiters=M.empty,lastMessageAt=Nothing
     , lastRender=(0,Nothing,[]),lastSession=remembered,waitingQuestion=Nothing,lastQuestion=Nothing
     , deliveredContext=Nothing,resumeRecordPath=resumePath,directoryAgents=[],agentDelivery=Nothing
-    , agentInitialized=Null,agentConfig=Null,streamTails=M.empty,lastAgentSync=Nothing }
+    , agentInitialized=Null,agentConfig=Null,streamTails=M.empty,lastAgentSync=Nothing,childRecords=M.empty,childRender=Nothing,childCancels=M.empty }
   AR.withAgentRuntime root (provider <$> readIORef ref) $ \agents ->
     bracket (pure (ConversationState directory ref consoles jobs agents)) closeConversation action
 
@@ -120,6 +123,7 @@ closeConversation (ConversationState _ ref _ _ _) = do
   forM_ (waitingQuestion s) $ \(_,reply)->void (tryPutMVar reply (Left "Editor session closed."))
   finishAgentDelivery ref (Left "Editor session closed.")
   mapM_ denyChild (map snd (approvals s))
+  mapM_ cancel (childCancels s)
   mapM_ A.stopClient (connection s)
 
 launchValue :: A.Launch -> Value
@@ -178,7 +182,13 @@ conversationEffects runtime@(ConversationState _ ref _ _ _) fallback = foldM app
     apply (_,d) effect = fallback d [effect]
 
 perform :: ConversationState -> Text -> [Text] -> Desktop -> IO Desktop
-perform runtime@(ConversationState directory ref consoles jobs _) action values original = do
+perform runtime action values d
+  | action=="show" = performPrimary runtime action values (selectConversationView "" "Primary" d)
+  | not (T.null (conversationTarget d)) && action `elem` ["send","send-draft","steer-draft","cancel","copy","toggle-activity","new","resume","load","set-config"] = performChild runtime action values d
+  | otherwise = performPrimary runtime action values d
+
+performPrimary :: ConversationState -> Text -> [Text] -> Desktop -> IO Desktop
+performPrimary runtime@(ConversationState directory ref consoles jobs _) action values original = do
   d<-if action `elem` ["cancel","new","load","configure"] then cancelQuestion runtime "Question cancelled." original else pure original
   previous<-readIORef ref
   now<-getCurrentTime
@@ -334,13 +344,16 @@ perform runtime@(ConversationState directory ref consoles jobs _) action values 
       latest<-readIORef ref
       pure (paint True latest opened)
     ("cancel",_) -> do
-      mapM_ denyChild (map snd (approvals s))
+      let child (_,ChildPermission{})=True
+          child _=False
+          retained=filter child (approvals s)
+          keepDialog=maybe False (`elem` map fst retained) (presented s)
       mapM_ (C.killConsole consoles) (S.toList (ownedTerminals s))
       forM_ (connection s) $ \client -> do
         forM_ (session s) $ \sid -> A.notify client "session/cancel" (object ["sessionId" .= sid])
-        mapM_ (cancelApproval client . snd) (approvals s)
-      writeIORef ref s {queuedPrompt=Nothing,approvals=[],presented=Nothing,deferredApproval=False}
-      pure (dismissPermission d) {status="Cancellation requested."}
+        mapM_ (cancelApproval client . snd) (filter (not . child) (approvals s))
+      writeIORef ref s {queuedPrompt=Nothing,approvals=retained,presented=if keepDialog then presented s else Nothing,deferredApproval=False}
+      pure (if keepDialog then d else dismissPermission d) {status="Cancellation requested."}
     ("new",_) | busy s -> pure d {status="Cancel the current reply before starting a new session."}
     ("new",_) -> do
       mapM_ (C.releaseConsole consoles) (S.toList (ownedTerminals s))
@@ -383,6 +396,19 @@ start (ConversationState _ ref _ _ _) resume d = do
       writeIORef ref s {provider=launch,connection=Just client,project=root,deliveredContext=Nothing,agentInitialized=Null,agentConfig=Null,streamTails=M.empty,lastAgentSync=Nothing,pending=M.singleton ident (Initializing resume)}
       pure d {status="Connecting to ACP provider...",agentSteering=False,agentReplying=True,agentContextUsage=Nothing,agentSettings=[]}
 
+restorePrimaryDraft :: Text -> Desktop -> Desktop
+restorePrimaryDraft text d
+  | T.null (conversationTarget d) = d {composerBuffer=newBuffer text,composerSelection=selected}
+  | otherwise = d {conversationViews=M.adjust (\view->view {conversationDraft=newBuffer text,conversationDraftSelection=selected}) "" (conversationViews d)}
+  where selected=Selection (T.length text) (T.length text)
+
+restoreEmptyPrimaryDraft :: Text -> Desktop -> Desktop
+restoreEmptyPrimaryDraft text d
+  | maybe False (T.null . contents) draft = restorePrimaryDraft text d
+  | otherwise = d
+  where draft=if T.null (conversationTarget d) then Just (composerBuffer d)
+              else conversationDraft <$> M.lookup "" (conversationViews d)
+
 sendQueued :: ConversationState -> Desktop -> IO Desktop
 sendQueued (ConversationState _ ref _ _ _) d = do
   s<-readIORef ref
@@ -393,7 +419,7 @@ sendQueued (ConversationState _ ref _ _ _) d = do
         Left err -> do
           finishAgentDelivery ref (Left err)
           modifyIORef' ref (\state -> state {queuedPrompt=Nothing})
-          pure d {status=err,agentReplying=False,composerBuffer=newBuffer prompt,composerSelection=Selection (T.length prompt) (T.length prompt)}
+          pure (restorePrimaryDraft prompt d) {status=err,agentReplying=False}
         Right (blocks,context) -> do
           ident<-A.request client "session/prompt" (object ["sessionId" .= sid,"prompt" .= blocks])
           writeIORef ref s {queuedPrompt=Nothing,pending=M.insert ident Prompting (pending s),deliveredContext=Just context}
@@ -453,7 +479,8 @@ tickConversation runtime@(ConversationState _ ref consoles jobs _) original = do
       rendered=(if redraw then paint False afterDismiss advanced else advanced) {agentReplying=busy afterDismiss,agentQueued=length (queuedQueries afterDismiss)}
   when redraw (modifyIORef' ref (\state -> state {lastRender=(widthNow,session state,transcript state),lastQuestion=chatQuestion rendered}))
   syncConversationAgent runtime
-  shown<-present runtime rendered
+  visible<-refreshChildConversation runtime rendered
+  shown<-present runtime visible
   notice<-AR.runtimeNotice (conversationAgents runtime)
   pure (maybe shown (\text -> shown {status=text}) notice)
 
@@ -479,9 +506,8 @@ receive runtime@(ConversationState _ ref consoles _ _) d event = do
           redact<-conversationRedactor runtime s
           when (M.lookup ident (pending s)==Just Prompting) (completeConversationDelivery runtime (Left "Agent prompt failed."))
           modifyIORef' ref (\state -> state {queuedPrompt=Nothing,deliveredContext=Nothing,transcript=transcript state++[activity "Request failed" (redactValue redact err)]})
-          pure d {status="Agent request failed; see Conversation.",composerBuffer=case M.lookup ident (pending s) of
-            Just (Steering text) | T.null (contents (composerBuffer d)) -> newBuffer text
-            _ -> composerBuffer d}
+          let restored=case M.lookup ident (pending s) of Just (Steering text) -> restoreEmptyPrimaryDraft text d; _ -> d
+          pure restored {status="Agent request failed; see Conversation."}
         (Just (Initializing resume),Right value,Just client)
           | field "protocolVersion" value /= Just (1::Int) -> do
               A.stopClient client
@@ -512,7 +538,7 @@ receive runtime@(ConversationState _ ref consoles _ _) d event = do
           Just "startedNewTurn" -> pure d {status="Follow-up started a new turn."}
           _ -> do
             modifyIORef' ref (\state -> state {deliveredContext=Nothing})
-            pure d {status="Steering failed; the follow-up remains in Conversation.",composerBuffer=if T.null (contents (composerBuffer d)) then newBuffer text else composerBuffer d}
+            pure (restoreEmptyPrimaryDraft text d) {status="Steering failed; the follow-up remains in Conversation."}
         (Just Prompting,Right value,_) -> do
           current<-readIORef ref
           let text=case reverse (transcript current) of Reply "Agent" body:_ -> body; _ -> ""
@@ -760,11 +786,14 @@ dismissPermission d=case dialog d of
   _ -> d
 
 paint :: Bool -> State -> Desktop -> Desktop
-paint force s d
-  | not force && not (any ((==Just "Conversation").documentLabel) (M.elems (buffers d))) = d
+paint=paintView ""
+
+paintView :: Text -> Bool -> State -> Desktop -> Desktop
+paintView target force s original
+  | not force && isNothing (conversationDocument target d) = original
   | otherwise = let
       width=conversationWidth d
-      header="Session: "<>fromMaybe "not connected" (session s)<>"\n"
+      header=if T.null target then "Session: "<>fromMaybe "not connected" (session s)<>"\n" else "No messages yet.\n"
       records=zip [0..] (transcript s)
       chunks=if null records then [(plain Comment header,Nothing) | isNothing (chatQuestion d)] else renderRecords width records
       questionChunks=maybe [] (renderQuestion width (length records)) (chatQuestion d)
@@ -780,9 +809,9 @@ paint force s d
             Nothing -> inputOffset
             Just index -> case [a | (a,_,action,values)<-actions,action=="question-choice",values==[T.pack (show (questionToken q)),T.pack (show index)]] of a:_->Just a; _->Nothing
           pure (fst (lineColumn text offset)+if isNothing (questionChoice q) then 1 else 0)
-      existing=find (\(_,doc)->documentLabel doc==Just "Conversation") (M.toList (buffers d))
+      existing=conversationDocument target d
       opened=case existing of
-        Nothing -> addReadOnly "Conversation" text d
+        Nothing -> let added=addConversationDocument d in added {buffers=M.adjust (\doc->restyle doc {documentBuffer=newBuffer text}) (nextId d) (buffers added)}
         Just (existingId,_) -> d {buffers=M.adjust (\doc->restyle doc {documentBuffer=newBuffer text}) existingId (buffers d)}
       bid=maybe (nextId d) fst existing
       adjust w | bufferId w/=bid = w
@@ -796,10 +825,13 @@ paint force s d
                        visibleRow=maybe previousRow (\r->max 0 (if r<previousRow then r else if r>=previousRow+rows then r-rows+1 else previousRow)) questionRow
                    in w {scrollRow=visibleRow,
                          selection=Selection (bounded (anchor (selection w))) (bounded (caret (selection w)))}
-      colored=opened {chatActions=actions,chatInputOffset=inputOffset,buffers=M.adjust (\doc -> doc {documentHighlight=styled,documentCursorVisible=False}) bid (buffers opened),windows=map adjust (windows opened)}
-      focused=case find ((==bid).bufferId) (windows colored) of Just w | force -> focusWindow (windowId w) colored {composerFocused=True}; _ -> colored
+      visible=target==conversationTarget original
+      view=M.findWithDefault (ConversationView bid "Primary" (newBuffer "") (Selection 0 0) (0,0) (Selection 0 0)) target (conversationViews opened)
+      colored=opened {conversationViews=M.insert target view {conversationBufferId=bid,conversationReplySelection=let Selection a c=conversationReplySelection view in Selection (min (T.length text) a) (min (T.length text) c)} (conversationViews opened),chatQuestion=chatQuestion original,chatActions=if visible then actions else chatActions original,chatInputOffset=if visible then inputOffset else chatInputOffset original,buffers=M.adjust (\doc -> doc {documentHighlight=styled,documentCursorVisible=False}) bid (buffers opened),windows=map adjust (windows opened)}
+      focused=case find ((==bid).bufferId) (windows colored) of Just w | force && visible -> focusWindow (windowId w) colored {composerFocused=True}; _ -> colored
     in focused
   where
+    d=if T.null target && T.null (conversationTarget original) then original else original {chatQuestion=Nothing}
     plain style=map (,style).T.unpack
     renderRecords _ []=[]
     renderRecords width (record:rest)=renderRecord width record++case rest of
@@ -1001,7 +1033,8 @@ chatTool (ConversationState _ ref _ _ _) d name args
                  "choices" .= [object ["value" .= value,"name" .= title] | (value,title)<-settingChoices option,not secret],"redacted" .= secret]
       pure (d,pure (Right (object ["executable" .= A.executable launch,"argumentCount" .= length (A.arguments launch),
         "environmentNames" .= map fst (A.environment launch),"connected" .= not (isNothing (connection s)),
-        "replying" .= agentReplying d,"steering" .= agentSteering d,"contextUsage" .= agentContextUsage d,
+        "scope" .= ("primary"::Text),"selectedAgent" .= (if T.null (conversationTarget d) then Nothing else Just (conversationTarget d)),
+        "replying" .= busy s,"steering" .= agentSteering d,"contextUsage" .= agentContextUsage d,
         "settings" .= map setting (agentSettings d),"context" .= either (const Null) id context,
         "contextError" .= either Just (const (Nothing::Maybe Text)) context,"sessionKeysRedacted" .= True])))
   | name/="ask_user"=pure (d,pure (Left "Unknown chat tool."))
@@ -1017,7 +1050,7 @@ chatTool (ConversationState _ ref _ _ _) d name args
                 q=ChatQuestion token question choices Nothing (newBuffer "") (Selection 0 0) True
                 next=s {waitingQuestion=Just (token,reply),nextApproval=token+1}
             writeIORef ref next
-            let shown=clearReplySelection (paint True next d {chatQuestion=Just q,status="A question is waiting in Conversation."})
+            let shown=clearReplySelection (paint True next (selectConversationView "" "Primary" d) {chatQuestion=Just q,status="A question is waiting in Conversation."})
             pure (shown,readMVar reply `onException` void (tryPutMVar reply (Left "Question requester disconnected.")))
   where
     parse=withObject "ask_user" $ \o->do
@@ -1087,7 +1120,7 @@ drainConversationAgents runtime@(ConversationState _ ref _ _ agents) d=do
         writeIORef ref s {agentDelivery=Just (msg,reply),queuedPrompt=Just (attribution<>"\n\n"<>AH.messageText msg),
           transcript=transcript s++[Reply author (AH.messageText msg)],reads=sourceSnapshots desktop}
         sendQueued runtime desktop
-    apply desktop AR.CancelPrimary=perform runtime "cancel" [] desktop
+    apply desktop AR.CancelPrimary=performPrimary runtime "cancel" [] desktop
     apply desktop AR.EndPrimary=do
       s<-readIORef ref
       mapM_ denyChild (map snd (approvals s))
@@ -1118,43 +1151,134 @@ showAgentDirectory (ConversationState _ ref _ _ agents) d=do
             maybe "" ("  ← "<>) (field "parentName" entry)
       modifyIORef' ref (\s->s {directoryAgents=ids})
       pure d {dialog=Just (Dialog "Agents" (AgentDialog "directory-select")
-        [ListBox "Sessions" (map label entries) 0] 0 ["History","Workspace","Reconnect","Refresh","Close"]
-        ["Reconnect explicitly loads a recovered child; no task is replayed.","Workspace opens the agent's files, terminals and debugger."])}
+        [ListBox "Sessions" (map label entries) 0] 0 ["Conversation","Workspace","Reconnect","Refresh","Close"]
+        ["Conversation shows live messages and a human composer.","Reconnect explicitly loads a saved child without replaying work.","Workspace opens its files, terminals and debugger."])}
 
 showAgentHistory :: ConversationState -> AH.AgentId -> Desktop -> IO Desktop
-showAgentHistory runtime ident d=do
-  let hub=AR.agentHub (conversationAgents runtime)
-  selected<-AH.statusAgent hub AH.Human ident
+showAgentHistory runtime@(ConversationState _ ref _ _ agents) ident d=do
+  selected<-AH.statusAgent (AR.agentHub agents) AH.Human ident
   case selected of
     Left err -> pure d {status=err}
     Right entry -> do
-      let after=max 0 (fromMaybe 1 (field "nextEvent" entry)-101)
-          name=fromMaybe (AH.agentIdText ident) (field "name" entry)
-      result<-AH.historyAgent hub AH.Human ident after 100
+      state<-readIORef ref
+      -- Remove transient question rendering before its document becomes hidden;
+      -- the private answer remains in chatQuestion and returns with Primary.
+      let primary=if isNothing (chatQuestion d) then d else paint False state d {chatQuestion=Nothing}
+          withPrimary=if isNothing (conversationDocument "" primary) then paint True state primary else primary
+          target=AH.agentIdText ident
+          name=fromMaybe target (field "name" entry)
+          selectedView=selectConversationView target name withPrimary {chatQuestion=chatQuestion d}
+      modifyIORef' ref (\s->s {childRender=Nothing})
+      refreshChildConversation runtime selectedView
+
+performChild :: ConversationState -> Text -> [Text] -> Desktop -> IO Desktop
+performChild runtime@(ConversationState _ ref _ _ agents) action values d=do
+  state<-readIORef ref
+  let target=conversationTarget d
+      ident=AH.AgentId target
+      hub=AR.agentHub agents
+      records=M.findWithDefault [] target (childRecords state)
+      text=if action=="send" then case values of _:body:_->body; _->"" else contents (composerBuffer d)
+  case action of
+    "send" -> send hub ident text
+    "send-draft" -> send hub ident text
+    "steer-draft" -> pure d {status="Child steering is unavailable. Enter queues a human message."}
+    "cancel" -> case M.lookup target (childCancels state) of
+      Just _ -> pure d {status="Cancellation requested."}
+      Nothing -> do
+        worker<-async (AH.cancelAgent hub AH.Human ident)
+        modifyIORef' ref (\s->s {childCancels=M.insert target worker (childCancels s)})
+        pure d {status="Cancellation requested."}
+    "copy" -> pure d {clipboard=if M.member target (childRecords state) then rawTranscript records else maybe "" (contents.documentBuffer.snd) (conversationDocument target d),status="Conversation copied with sender attribution."}
+    "toggle-activity" | [index]<-values,Just chosen<-readMaybe (T.unpack index) -> do
+      let toggle (i,Activity title value history expanded) | i==chosen=Activity title value history (not expanded)
+          toggle (_,record)=record
+          changed=map toggle (zip [0::Int ..] records)
+      modifyIORef' ref (\s->s {childRecords=M.insert target changed (childRecords s)})
+      pure (paintView target False state {transcript=changed} d)
+    _ -> pure d {status="Switch to Primary for provider settings or session controls; use Agents to reconnect a child."}
+  where
+    send hub ident text = do
+      result<-AH.sendAgent hub AH.Human ident text
       case result of
         Left err -> pure d {status=err}
-        Right history -> do
-          let events=fromMaybe [] (field "events" history :: Maybe [Value])
-              records=foldl historyRecord [] events
-              styled=concat [renderRecord record++map (,Plain) "\n\n" | record<-records]
-              renderRecord (Reply role text)=renderReply (videoMode d/=Nothing) (max 1 (fst (screenSize d)-treeWidthOf d-6)) (role=="You") text
-              renderRecord (Activity label _ _ _)=map (,Comment) (T.unpack ("▸ "<>label))
-              renderRecord (Pause label)=map (,Comment) (T.unpack label)
-              opened=addReadOnly ("Agent: "<>name) (T.pack (map fst styled)) d
-          pure opened {buffers=M.adjust (\doc -> doc {documentHighlight=styled,documentCursorVisible=False}) (maybe (nextId d) bufferId (activeWindow opened)) (buffers opened),
-            status="Latest 100 events. Tools > Agents refreshes history or opens its workspace."}
+        Right _ -> refreshChildConversation runtime d {composerBuffer=newBuffer "",composerSelection=Selection 0 0,status="Human message queued."}
+
+refreshChildConversation :: ConversationState -> Desktop -> IO Desktop
+refreshChildConversation (ConversationState _ ref _ _ agents) d=do
+  state<-readIORef ref
+  completed<-forM (M.toList (childCancels state)) $ \(target,worker)->do
+    result<-poll worker
+    pure (target,result)
+  let finished=[target | (target,Just _)<-completed]
+      cancellation=[either (const "Child cancellation failed.") (either id (const "Child reply cancelled.")) result | (target,Just result)<-completed,target==conversationTarget d]
+      original=case cancellation of text:_->d {status=text}; _->d
+  modifyIORef' ref (\s->s {childCancels=foldr M.delete (childCancels s) finished})
+  if T.null (conversationTarget original) then pure original else do
+    let target=conversationTarget original
+        hub=AR.agentHub agents
+    selected<-AH.statusAgent hub AH.Human (AH.AgentId target)
+    case selected of
+      Left err -> pure original {status=err,agentReplying=False,agentQueued=0}
+      Right entry -> do
+        let signature=(target,conversationWidth original,entry)
+            name=fromMaybe target (field "name" entry)
+            busyChild=field "status" entry `elem` [Just ("running"::Text),Just "cancelling",Just "starting"]
+            projected=original {agentReplying=busyChild,agentQueued=fromMaybe 0 (field "queued" entry),
+              conversationViews=M.adjust (\v->v {conversationName=name}) target (conversationViews original)}
+        current<-readIORef ref
+        -- Desktop and Hub checkpoints are independent. Keep a recovered view
+        -- until a live/reconnected child owns its transcript again.
+        let frozen=M.notMember target (childRecords current) &&
+              field "status" entry `elem` [Just ("recovered"::Text),Just "ended"] &&
+              maybe False (not . T.null . contents . documentBuffer . snd) (conversationDocument target projected)
+        if frozen || childRender current==Just signature then pure projected else do
+          history<-recentChildHistory hub (AH.AgentId target) (fromMaybe 1 (field "nextEvent" entry))
+          case history of
+            Left err -> pure projected {status=err}
+            Right (events,dropped) -> do
+              let settings=fromMaybe [] (field "capabilities" entry >>= field "configOptions" :: Maybe [Value])
+                  models=[category<>": "<>value | option<-settings,Just category<-[field "category" option],Just value<-[field "currentValue" option]]
+                  trimmed=fromMaybe (0::Int) (field "nextEvent" entry)>101 || dropped
+                  metadata=T.intercalate " · " ([fromMaybe "" (field "status" entry)]++
+                    maybe [] (\parent->["parent: "<>parent]) (field "parentName" entry)++models++["recent history" | trimmed])
+                  records=Pause metadata:foldl (childHistoryRecord name) [] events
+              modifyIORef' ref (\s->s {childRecords=M.insert target records (childRecords s),childRender=Just signature})
+              pure (paintView target False current {transcript=records} projected)
+
+-- The Hub caps each page by bytes as well as count. Follow pages within the
+-- captured event range so a large tool event cannot hide the newest reply.
+recentChildHistory :: AH.AgentHub -> AH.AgentId -> Int -> IO (Either Text ([Value],Bool))
+recentChildHistory hub ident next=go (max 0 (next-101)) [] False
   where
-    historyRecord records value=let detail=fromMaybe Null (field "detail" value) in case field "kind" value :: Maybe Text of
-      Just "message_queued" ->
-        let author=fromMaybe Null (field "author" value)
-            human=field "kind" author==Just ("human"::Text)
-            who=if human then "Human" else "Agent "<>fromMaybe "unknown" (field "id" author)
-            seat=if field "userSeat" detail==Just True then if human then "human user seat" else "controlling parent" else "peer message"
-        in records++[Reply (if human then "You" else "Peer") (who<>" ("<>seat<>")\n\n"<>fromMaybe "" (field "text" detail))]
-      Just "output" -> appendChunk "Agent" (fromMaybe "" (field "text" detail)) records
-      Just "tool" -> records++[activity (fromMaybe "Tool call" (field "title" detail)) Null]
-      Just "message_finished" | field "status" detail/=Just ("completed"::Text) -> records++[Pause (fromMaybe "Stopped" (field "error" detail))]
-      _ -> records
+    go after accumulated dropped=do
+      page<-AH.historyAgent hub AH.Human ident after (100-length accumulated)
+      case page of
+        Left err -> pure (Left err)
+        Right value -> do
+          let events=filter (\event->fromMaybe next (field "index" event)<next) (fromMaybe [] (field "events" value))
+              combined=accumulated++events
+              omitted=dropped || fromMaybe (0::Int) (field "dropped" value)>0
+              cursor=fromMaybe after (field "nextAfter" value)
+              more=field "hasMore" value==Just True && cursor<next-1 && length combined<100
+          if more && cursor>after then go cursor combined omitted
+          else pure (Right (combined,omitted || more))
+
+childHistoryRecord :: Text -> [Record] -> Value -> [Record]
+childHistoryRecord name records value=let detail=fromMaybe Null (field "detail" value) in case field "kind" value :: Maybe Text of
+  Just "message_queued" ->
+    let author=fromMaybe Null (field "author" value)
+        human=field "kind" author==Just ("human"::Text)
+        who=if human then "Human" else "Agent "<>fromMaybe "unknown" (field "id" author)
+        seat=if field "userSeat" detail==Just True then if human then "human user seat" else "controlling parent" else "peer message"
+    in records++[Reply (if human then "You" else "Peer") (who<>" ("<>seat<>")\n\n"<>fromMaybe "" (field "text" detail))]
+  Just "output" -> appendChunk "Agent" (if lastRole records==Just "Agent" then chunk else name<>"\n\n"<>chunk) records
+    where chunk=fromMaybe "" (field "text" detail)
+  Just "thought" -> records -- Thoughts stay in the bounded history API.
+  Just "tool" -> records++[Activity (fromMaybe "Tool call" (field "title" detail)) detail [detail] False]
+  Just "message_finished" | field "status" detail/=Just ("completed"::Text) -> records++[Pause (fromMaybe "Stopped" (field "error" detail))]
+  _ -> records
+  where lastRole xs=case reverse xs of Reply role _:_->Just role; _->Nothing
 
 -- Publish the next human turn before releasing the Hub ticket. Otherwise its
 -- worker can dequeue another peer in the gap before the editor's next tick.

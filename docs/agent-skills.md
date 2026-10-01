@@ -203,9 +203,11 @@ A recovered directory is not proof that its providers are running again.
 The primary agent uses its authenticated `editor` server. Children use their
 workspace's `editor` server for editor operations and `agents` for coordination.
 A shared child uses the parent's editor; a worktree child has a separate hidden
-editor session. **Tools > Agents** / **Window > Agents** lets the person inspect
-read-only retained history and open a workspace. It does not yet offer a live
-child composer or child-provider reconnect action.
+editor session. **Tools > Agents** / **Window > Agents** lets the person open a
+live child conversation, send or queue a human message, cancel its reply, open
+its workspace, or explicitly reconnect a recovered provider. The human remains
+a peer when the child's user seat belongs to its parent. Drafts stay private to
+the person and survive switching conversations.
 
 ## Consult the user
 

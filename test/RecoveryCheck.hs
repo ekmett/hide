@@ -78,6 +78,28 @@ checks=bracket temporary removePathForcibly $ \root->do
   check "project sidebar dock geometry and display preferences survive"
     (defaultDirectory recovered==Just root && sideTree recovered==sideTree desktop && screenSize recovered==(100,35) && problemsVisible recovered && problemsPreferredHeight recovered==9 &&
      wordStar recovered && not (blinkCursor recovered) && pixelateUnicode recovered && materialIcons recovered && appearance recovered==DarkMode && streamerMode recovered)
+  let viewsPath=root </> "views.checkpoint"
+      primaryChat=modifyActive (\w->w {scrollRow=12,selection=Selection 1 6})
+        (addReadOnly "Conversation" (T.replicate 80 "primary transcript\n") (initialDesktop (80,25)))
+        {composerBuffer=newBuffer "primary draft",composerSelection=Selection 2 5}
+      childChat=selectConversationView "agent-2" "Child" primaryChat
+      childBid=bufferId (fromJust (activeWindow childChat))
+      populated=modifyActive (\w->w {scrollRow=8,selection=Selection 2 7}) childChat
+        {buffers=M.adjust (\doc->restyle doc {documentBuffer=newBuffer (T.replicate 80 "child transcript\n")}) childBid (buffers childChat),
+         composerBuffer=newBuffer "child draft",composerSelection=Selection 1 4}
+  writeCheckpoint viewsPath populated >>= right
+  restoredViews<-readCheckpoint viewsPath fresh >>= right
+  let restoredPrimary=selectConversationView "" "Primary" restoredViews
+      restoredChild=selectConversationView "agent-2" "Child" restoredPrimary
+  check "each conversation retains its document draft selection and scroll"
+    (activeText restoredPrimary==T.replicate 80 "primary transcript\n" && contents (composerBuffer restoredPrimary)=="primary draft" &&
+     composerSelection restoredPrimary==Selection 2 5 && scrollRow (fromJust (activeWindow restoredPrimary))==12 &&
+     activeText restoredChild==T.replicate 80 "child transcript\n" && contents (composerBuffer restoredChild)=="child draft" &&
+     composerSelection restoredChild==Selection 1 4 && scrollRow (fromJust (activeWindow restoredChild))==8)
+  let reopened=selectConversationView "" "Primary" (closeActive restoredChild)
+  check "closing and reopening a conversation retains transcript with valid IDs" (activeText reopened==activeText restoredPrimary && all ((<nextId reopened).windowId) (windows reopened))
+  writeCheckpoint viewsPath reopened >>= right
+  check "recovered background drafts still require discard confirmation" (conversationHasDraft restoredViews && maybe False ((==DiscardDraft).purpose) (dialog (fst (runCommand Quit restoredViews))))
   BS.writeFile sourcePath "external disk edit"
   let baseline=fromJust (documentFile (buffers recovered M.! sourceId))
   check "source disk baseline survives independently of current disk" (diskBytes baseline==Just (bufferBytes original))
@@ -96,6 +118,7 @@ checks=bracket temporary removePathForcibly $ \root->do
         check "malformed recovery state is rejected without leaking contents" (case result of Left err->T.length err<256 && not ("private draft" `T.isInfixOf` err); _->False)
       set key value (Object fields)=Object (KM.insert key value fields)
       set _ _ value=value
+  mutate (set "conversationTarget" (toJSON ("unknown-agent"::T.Text)))
   mutate (set "schemaVersion" (toJSON (2::Int)))
   mutate (set "nextId" (toJSON (0::Int)))
   mutate (set "screen" (toJSON ((maxBound::Int),25::Int)))

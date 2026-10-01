@@ -24,7 +24,7 @@ import System.IO (Handle, hFlush)
 import THC.Edit.GuestAccess
 import THC.Edit.Model hiding (Paste)
 import qualified THC.Edit.Model as Model
-import THC.Edit.Buffer (dirty, contents, newBuffer, newByteBuffer)
+import THC.Edit.Buffer (dirty, newBuffer, newByteBuffer)
 import THC.Edit.Font
 import THC.Edit.Render (renderDesktop)
 import THC.Edit.Unicode (displayOpsForPic, graphemes, clusterWidth)
@@ -198,7 +198,7 @@ framePacket reset old rows metadata = foldl1 smaller (frameCandidates reset old 
   where smaller a b=if BL.length b<BL.length a then b else a
 
 webDirty :: Desktop -> Bool
-webDirty d = any (dirty . documentBuffer) (M.elems (buffers d)) || not (T.null (contents (composerBuffer d)))
+webDirty d = any (dirty . documentBuffer) (M.elems (buffers d)) || conversationHasDraft d
 
 
 protocolVersion :: Int

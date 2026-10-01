@@ -36,6 +36,10 @@ checks = do
   check "unknown named menu is rejected" (either (const True) (const False) (menu ["command" .= ("future-command"::T.Text)]))
   check "legacy positional menus cannot execute a different command" (case menu ["index" .= (0::Int)] of Right input -> applyInput input d==(d,[]); _ -> False)
   check "legacy menu enabled flags stay disabled" (parseMaybe (withObject "metadata" (.: "menus")) (object (frameMetadata "/" d))==Just (replicate (length protocolCommands) False))
+  let primary=selectConversationView "" "Primary" (initialDesktop (80,25))
+      drafted=primary {composerBuffer=newBuffer "unsent",composerSelection=Selection 6 6}
+      child=selectConversationView "child" "Worker" drafted
+  check "browser exit protects an inactive conversation draft" (webDirty child)
   _<-foldFrames check [] screens
   rejects "unknown display encoding rejected" (decodeFrame [] (BS.pack [9]) >> pure ())
   rejects "bad compressed stream rejected" (decodeFrame [] (BS.pack [0,255,255]) >> pure ())

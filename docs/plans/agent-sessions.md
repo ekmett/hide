@@ -37,9 +37,10 @@ Implemented surfaces (integration validation remains separate below):
 - Worktree children have separate headless editor sessions for buffers, builds,
   terminals and debugging. Shared children use their parent's session. Background
   startup does not focus a display; checkout contents survive agent shutdown.
-- Tools/Window > Agents supplies directory browsing, recent read-only history,
-  workspace opening, explicit recovered-child reconnect and refresh. This is not
-  a live child conversation composer.
+- Tools/Window > Agents supplies directory browsing, live child conversations,
+  workspace opening, explicit recovered-child reconnect and refresh. Conversation
+  views share the existing renderer and retain separate transcript documents,
+  drafts and scroll positions.
 - Agent Permissions registers the nine coordination tools. User documentation
   describes discovery, task tickets, attribution, limits and workspace isolation.
 
@@ -50,8 +51,10 @@ Remaining work:
   bearer capabilities. Publish checkpoints only after owning the session lock.
 - [x] Provide explicit child-provider reconnect with capability/policy checks,
   restoring the exact owned editor session before loading its provider.
-- [ ] Add a live child conversation composer and interaction view, preserving
+- [x] Add a live child conversation composer and interaction view, preserving
   the distinction between the human and parent-controlled user seats.
+- [ ] Add checked child model/effort changes and provider-advertised steering;
+  show unavailable child context usage honestly until the Hub records it.
 - [x] Validate shared/worktree routing, cancellation and permission cleanup,
   primary busy handoff, bearer redaction and protected recovery.
 
@@ -78,3 +81,9 @@ replaying a prompt.
 
 Native Windows pending-inspector shutdown is verified; remaining platform work
 is tracked in the [recovery plan](session-recovery.md#remaining-platform-qualification).
+
+Focused conversation/recovery fixtures cover live child send/queue/cancel,
+primary mailbox cancellation while a child is selected, independent drafts and
+view positions, hidden primary transcript recovery, and private pending answers.
+The first child UI increment reuses Hub history and the existing provider workers;
+recovery never resubmits a draft or queued task.

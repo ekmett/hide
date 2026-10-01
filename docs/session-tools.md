@@ -74,7 +74,16 @@ preserves the checkout for review. Separate worktree sessions can build or debug
 at the same time; shared children use the same editor job slots.
 
 Open **Tools > Agents** or **Window > Agents** to browse names, status and parent
-relationships. **History** opens a read-only view of recent retained events;
+relationships. **Conversation** opens that agent's live messages in the existing
+conversation window. Enter sends or queues a human message; Escape cancels its
+reply. For a parent-controlled child, your message is attributed as a human peer
+message, not as its parent's instructions. Each conversation keeps its own draft
+and scroll position, including across editor recovery. **Tools > Conversation**
+switches back to Primary. Model and effort values come from the child's provider
+and are currently read-only; child steering and context usage are not inferred
+from Primary. Expand a tool row to inspect its retained details. The view shows
+the latest 100 events; history tools can read older retained events.
+
 **Workspace** opens the associated editor. After recovery, select a child and
 choose **Reconnect** to load its saved provider conversation. This keeps its
 identity, history, workspace and editor session, issues a fresh connection token,
@@ -83,7 +92,6 @@ restores that editor checkpoint first; it never substitutes an empty session.
 Current limits and provider load/resume support are checked again; failed
 attempts leave the child available to retry.
 Recovery itself never starts child providers. Ended children cannot reconnect.
-The child history view does not yet offer a live composer.
 
 Workspace windows open on the editor host. A build without native windows shows
 `thc-edit --resume SESSION_ID` to run in a terminal instead. When the editor runs

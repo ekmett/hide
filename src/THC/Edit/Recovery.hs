@@ -98,7 +98,7 @@ documentValue desktop (ident,doc)=object ["id" .= ident,"buffer" .= bufferValue 
     -- interaction spans must not become public transcript when actions reset.
     privateSpans=[(a,z) | (a,z,action,_)<-chatActions desktop,"question-" `T.isPrefixOf` action]
     recoveredBuffer
-      | documentLabel doc==Just "Conversation",not (null privateSpans)=newBuffer (T.pack
+      | documentLabel doc==Just "Conversation",fmap fst (conversationDocument "" desktop)==Just ident,T.null (conversationTarget desktop),not (null privateSpans)=newBuffer (T.pack
           [if c/='\n' && c/='\r' && any (\(a,z)->index>=a && index<z) privateSpans then ' ' else c
           | (index,c)<-zip [0..] (T.unpack (contents (documentBuffer doc)))])
       | otherwise=documentBuffer doc
@@ -106,14 +106,39 @@ documentValue desktop (ident,doc)=object ["id" .= ident,"buffer" .= bufferValue 
     recoveredLabel label=label
 
 desktopValue :: Desktop -> Value
-desktopValue d=object ["schemaVersion" .= (1::Int),"screen" .= screenSize d,"buffers" .= map (documentValue d) (M.toAscList documents),
+desktopValue=desktopValueSaved . rememberConversationView
+
+desktopValueSaved :: Desktop -> Value
+desktopValueSaved d=object ["schemaVersion" .= (1::Int),"screen" .= screenSize d,"buffers" .= map (documentValue d) (M.toAscList documents),
   "windows" .= map windowValue [w | w<-windows d,M.member (bufferId w) documents],"nextId" .= nextId d,
+  "conversationTarget" .= conversationTarget d,"conversationViews" .= map conversationViewValue (M.toList (conversationViews d)),
   "composer" .= bufferValue (composerBuffer d),"composerSelection" .= selectionValue (composerSelection d),"composerFocused" .= composerFocused d,
   "directory" .= defaultDirectory d,"sidebar" .= fmap sidebarValue (sideTree d),"preferences" .= object
     ["wordStar" .= wordStar d,"blinkCursor" .= blinkCursor d,"crtFilter" .= crtFilter d,"pixelateUnicode" .= pixelateUnicode d,
      "materialIcons" .= materialIcons d,"streamerMode" .= streamerMode d,"appearance" .= fromEnum (appearance d),"videoMode" .= videoMode d,
      "problemsVisible" .= problemsVisible d,"problemsHeight" .= problemsPreferredHeight d,"messagesNumber" .= messagesNumber d]]
   where documents=M.filter keptDocument (buffers d)
+
+conversationViewValue :: (Text,ConversationView) -> Value
+conversationViewValue (target,view)=object ["target" .= target,"bufferId" .= conversationBufferId view,"name" .= conversationName view,
+  "draft" .= bufferValue (conversationDraft view),"selection" .= selectionValue (conversationDraftSelection view),
+  "scroll" .= conversationScroll view,"replySelection" .= selectionValue (conversationReplySelection view)]
+
+conversationViewParser :: M.Map Int Document -> Value -> Parser (Text,ConversationView)
+conversationViewParser documents=withObject "conversation view" $ \o->do
+  target<-o .: "target"
+  unless (T.length target<=128 && not (T.any (<' ') target)) (fail "Invalid conversation target")
+  bid<-o .: "bufferId"
+  doc<-maybe (fail "Missing conversation document") pure (M.lookup bid documents)
+  unless (documentLabel doc==Just "Conversation") (fail "Not a conversation document")
+  name<-o .: "name"
+  unless (T.length name<=256 && not (T.any (<' ') name)) (fail "Invalid conversation name")
+  draft<-o .: "draft" >>= bufferParser
+  selected<-o .: "selection" >>= selectionParser (bufferLength draft)
+  (row,col)<-o .: "scroll"
+  unless (row>=0 && col>=0 && row<=1000000000 && col<=1000000000) (fail "Invalid conversation scroll")
+  replySelection<-o .: "replySelection" >>= selectionParser (bufferLength (documentBuffer doc))
+  pure (target,ConversationView bid name draft selected (row,col) replySelection)
 
 windowValue :: Window -> Value
 windowValue w=object ["id" .= windowId w,"bufferId" .= bufferId w,"number" .= windowNumber w,"bounds" .= rectValue (bounds w),
@@ -148,6 +173,13 @@ desktopParser baseline=withObject "checkpoint" $ \o->do
   composer<-o .: "composer" >>= bufferParser
   composerSelection'<-o .: "composerSelection" >>= selectionParser (bufferLength composer)
   composerFocused'<-o .: "composerFocused"
+  selectedTarget<-o .:? "conversationTarget" .!= ""
+  encodedViews<-o .:? "conversationViews" .!= []
+  unless (length encodedViews<=1024) (fail "Too many conversation views")
+  parsedViews<-mapM (conversationViewParser documents) encodedViews
+  let conversationViews'=M.fromList parsedViews
+  unless (length parsedViews==M.size conversationViews' && S.size (S.fromList (map (conversationBufferId.snd) parsedViews))==length parsedViews) (fail "Duplicate conversation views")
+  unless (T.null selectedTarget || M.member selectedTarget conversationViews') (fail "Unknown selected conversation")
   directory<-o .: "directory" >>= traverse (checkedPath True)
   sidebar<-o .: "sidebar" >>= traverse sidebarParser
   prefs<-o .: "preferences"
@@ -159,7 +191,7 @@ desktopParser baseline=withObject "checkpoint" $ \o->do
   problems<-prefs .: "problemsVisible"; preferred<-prefs .: "problemsHeight" >>= boundedInt 0 4096
   messages<-prefs .: "messagesNumber" >>= traverse positive
   pure baseline {screenSize=size,buffers=documents,windows=views,nextId=ident,composerBuffer=composer,composerSelection=composerSelection',composerFocused=composerFocused',
-    defaultDirectory=directory,sideTree=sidebar,wordStar=wordStar',blinkCursor=blink,crtFilter=crt,pixelateUnicode=pixelate,materialIcons=icons,streamerMode=streamer,
+    conversationTarget=selectedTarget,conversationViews=conversationViews',defaultDirectory=directory,sideTree=sidebar,wordStar=wordStar',blinkCursor=blink,crtFilter=crt,pixelateUnicode=pixelate,materialIcons=icons,streamerMode=streamer,
     appearance=toEnum look,videoMode=mode,problemsVisible=problems,problemsPreferredHeight=preferred,messagesNumber=messages,
     menu=Nothing,dialog=Nothing,drag=Nothing,dragOriginal=Nothing,clipboard="",clipboardExport=(0,Nothing),prefix=Nothing,blockStart=Nothing,
     status="Recovered session. Background processes ended; reconnect agents as needed.",lastFind="",branchStatus="",branchAdded=0,branchDeleted=0,branchRoot=Nothing,
