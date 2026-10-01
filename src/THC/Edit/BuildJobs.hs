@@ -43,6 +43,8 @@ startBuildJob (BuildJobs ref) label root commands desktop = do
       let emit=atomically . writeTBQueue queue
           run []=pure ExitSuccess
           run ((command,args):rest)=do
+            stopping<-readIORef cleanup
+            case stopping of Nothing -> throwIO ThreadKilled; Just _ -> pure ()
             emit (Output ("$ "<>T.replace "\n" "\\n" (T.pack (showCommandForUser command args))<>"\n"))
             result<-capture cleanup root command args (emit . Output)
             if result==ExitSuccess then run rest else pure result

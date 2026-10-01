@@ -3,7 +3,7 @@ module BuildCheck (checks) where
 
 import Control.Concurrent (threadDelay)
 import Control.Exception (bracket)
-import Control.Monad (unless, forM_)
+import Control.Monad (unless, forM_, when)
 import qualified Data.Map.Strict as M
 import qualified Data.Text as T
 import qualified Graphics.Vty as V
@@ -63,6 +63,16 @@ checks = bracket temporary removePathForcibly $ \root -> do
       threadDelay 100000
       stopBuildJob jobs running
     check "stop cannot deadlock with full output queue" (maybe False (T.isInfixOf "Stopped." . status) stopped)
+    -- POSIX process groups remain addressable after the group leader exits.
+    when (os/="mingw32") $ do
+      let sideEffect=root </> "must-not-run"
+          parent="import subprocess,sys; subprocess.Popen([sys.executable,'-u','-c',sys.argv[1]])"
+          child="import time; print('descendant-ready',flush=True); time.sleep(60)"
+      chain<-startBuildJob jobs "Make" root
+        [(command,["-u","-c",parent,child]),(command,["-c","import pathlib,sys; pathlib.Path(sys.argv[1]).write_text('ran')",sideEffect])] initial
+      ready<-await jobs chain (T.isInfixOf "\ndescendant-ready\n" . output)
+      _<-stopBuildJob jobs ready
+      check "Stop does not advance to the next command after draining inherited output" . not =<< doesFileExist sideEffect
     missing<-startBuildJob jobs "Compile" root [(root </> "absent-compiler",[])] initial
     result<-await jobs missing finished
     check "missing compiler is reported" ("Compile:" `T.isPrefixOf` status result)
