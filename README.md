@@ -170,7 +170,11 @@ File creation/deletion operations and executable completion commands are not
 accepted. Completion snippets are disabled in the protocol capabilities.
 
 Errors appear as chevrons beside source lines and in a bottom Messages window.
-Click an entry to jump to it; the panel also supports arrow keys and Enter.
+Click to select a message; double-click or Enter jumps to its source. Copy
+(Cmd+C on Mac, Ctrl+C or Ctrl+Insert) copies its full text and source location.
+Right-click offers Go to source, Copy message, Copy all messages, and Hide Messages.
+Drag the Messages title bar vertically to resize it. Adjacent editors follow its
+edge, resizing once they reach the menu bar; Files ends above Messages too.
 Tools > Messages toggles it. Alt+F8 and Alt+F7 jump to the next or previous
 message, opening its source file when necessary. Editing clears diagnostics from older buffer
 versions while HLS checks the new text. Closing the panel leaves the source

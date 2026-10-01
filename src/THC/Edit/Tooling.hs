@@ -432,7 +432,7 @@ refreshProblems t d = do
       (row,col)<-o .: "range" >>= rangeStart
       severity<-o .:? "severity" .!= (1::Int)
       msg<-o .: "message"
-      pure (row,col,severity,singleLine msg)
+      pure (row,col,severity,msg)
 
 -- A versionless notification cannot safely describe an edited open buffer.
 diagnosticsCurrent :: Maybe Int -> [Int] -> Bool

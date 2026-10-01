@@ -51,13 +51,13 @@ data Command = New | Open | ChangeDir | Save | SaveAs | Close | Quit | Undo | Re
   | ToggleTree | GitDiff | GitCommit | GitFetch | GitPull | GitMerge | ReviewDisk
   | RunTarget | RunOptions | OpenTerminal | StopTerminal
   | AgentOptions | Conversation | AgentPrompt | AgentCancel | AgentResume | AgentCopyRaw | AgentNew
-  | ToggleHex
+  | ToggleHex | GoToMessage | CopyAllMessages
   | DebugCommand Text
   | Disabled Text deriving (Eq,Show)
 data ConflictAction = CompareDisk | ReloadDisk | KeepBuffer | SaveConflictAs deriving (Eq,Show)
 data Conflict = Conflict { conflictBuffer :: Int, conflictRevision :: Int, conflictBaseline :: FileState, conflictDisk :: Maybe ByteString } deriving (Eq,Show)
 data GitAction = FetchRemote | PullRemote | MergeBranch Text deriving (Eq,Show)
-data ContextKind = SourceContext | GitContext deriving (Eq,Show)
+data ContextKind = SourceContext | GitContext | MessagesContext deriving (Eq,Show)
 data LanguageAction = TypeInfo | FindDefinition | Completions | ShowProblems | RestartLanguage | RenameAt Text deriving (Eq,Show)
 data Completion = Completion Text [(Int,Int,Text)] deriving (Eq,Show)
 data Effect = LanguageRequest LanguageAction | RunGit GitAction | ReadMergeBranches | JumpTo FilePath Int Int | ReadPath FilePath | BrowsePath FilePath Text | BrowseDirectories FilePath | ChangeDirectory FilePath | OpenChoice FilePath Text Text | ReadTree FilePath | ExpandTree Int | ReadHelp | RefreshGit FilePath | ReadGitDiff | AskGitCommit | WriteGitCommit Text | SaveDocument Int (Maybe FilePath) (Maybe Command) | ReviewExternal | ResolveConflict Conflict ConflictAction | AgentAction Text [Text] | DebugAction Text [Text] | SetScreenMode Int | Exit deriving (Eq,Show)
@@ -76,7 +76,7 @@ data Diagnostic = Diagnostic
   , diagnosticColumn :: Int, diagnosticSeverity :: Int, diagnosticMessage :: Text
   } deriving (Eq,Show)
 data Sidebar = Sidebar { treeRoot :: FilePath, treeRows :: [TreeRow], treeSelected :: Int, treeScroll :: Int, treeWidth :: Int, treeFocused :: Bool } deriving (Eq,Show)
-data Drag = DockSizing | TreeScrolling | Moving Int Int Int | Resizing Int Int Int | Selecting Int | Scrolling Int Bool deriving (Eq,Show)
+data Drag = DockSizing | MessagesSizing | TreeScrolling | Moving Int Int Int | Resizing Int Int Int | Selecting Int | Scrolling Int Bool deriving (Eq,Show)
 data Desktop = Desktop
   { screenSize :: (Int,Int), windows :: [Window], buffers :: M.Map Int Document
   , nextId :: Int, menu :: Maybe (Int,Int), dialog :: Maybe Dialog, drag :: Maybe Drag
@@ -89,7 +89,7 @@ data Desktop = Desktop
   , branchAdded :: Int, branchDeleted :: Int, branchRoot :: Maybe FilePath, contextKind :: ContextKind
   , messagesNumber :: Maybe Int
   , composerBuffer :: Buffer, composerSelection :: Selection, composerFocused :: Bool, agentSteering :: Bool, agentReplying :: Bool, agentQueued :: Int
-  , blinkCursor :: Bool, crtFilter :: Bool, defaultDirectory :: Maybe FilePath, statusHover :: Maybe Int, heldModifiers :: [V.Modifier]
+  , blinkCursor :: Bool, crtFilter :: Bool, defaultDirectory :: Maybe FilePath, statusHover :: Maybe Int, heldModifiers :: [V.Modifier], problemsPreferredHeight :: Int
   } deriving (Eq,Show)
 
 data MenuItem = MenuItem Text Text Command deriving (Eq,Show)
@@ -132,6 +132,8 @@ commandDescription cmd = case cmd of
   New -> "Create a new source buffer."; Open -> "Browse directories and open a file."
   ChangeDir -> "Choose a new default directory."
   Save -> "Save the active file."; SaveAs -> "Save the active buffer under a new filename."
+  GoToMessage -> "Jump to the selected message in its source file."
+  CopyAllMessages -> "Copy all messages with their source locations."
   ToggleHex -> "Switch between UTF-8 text and editable hexadecimal bytes."
   ReviewDisk -> "Review an external change without discarding unsaved text."
   RunTarget -> "Run the selected Cabal executable through thc run."
@@ -197,6 +199,7 @@ statusItems d
   | Just text<-menuHelp d = [command " F1 Help" Help,(" | "<>text,Nothing)]
   | Just c<-prefix d = [(" Ctrl+"<>T.singleton c<>"- ",Nothing),key " Esc Cancel" V.KEsc []]
   | dialog d/=Nothing = [key " Tab Next" (V.KChar '\t') [],key "  Enter Select" V.KEnter [],key "  Esc Cancel" V.KEsc []]
+  | problemsVisible d && problemsFocused d = [key " Enter Source" V.KEnter [],command (if nativeMac d then "  Cmd+C Copy" else "  Ctrl+C Copy") Copy,command "  Copy all" CopyAllMessages]
   | activeConversation d =
       [key (" Enter "<>(if agentReplying d then "Queue query" else "Query")) V.KEnter [],key "  Shift+Enter Newline" V.KEnter [V.MShift]] ++
       [key "  Ctrl+Enter Steer" V.KEnter [V.MCtrl] | agentSteering d] ++ [key "  Esc Cancel" V.KEsc [] | agentReplying d]
@@ -223,7 +226,9 @@ menuItems i = let (_,_,xs) = menus !! (i `mod` length menus) in xs
 
 commandEnabled :: Desktop -> Command -> Bool
 commandEnabled _ Disabled{} = False
-commandEnabled d cmd | cmd `elem` [NextMessage,PreviousMessage] = not (null (diagnostics d))
+commandEnabled d cmd | cmd `elem` [GoToMessage,CopyAllMessages,NextMessage,PreviousMessage] = not (null (diagnostics d))
+commandEnabled d Copy | problemsVisible d && problemsFocused d = not (null (diagnostics d))
+commandEnabled d cmd | problemsVisible d && problemsFocused d, cmd `elem` [Undo,Redo,Cut,Paste,SelectAll] = False
 commandEnabled _ _ = True
 menuRect :: Desktop -> Int -> Rect
 menuRect d i = Rect (min x (max 0 (sw-w))) 1 w (length (menuItems i)+2)
@@ -232,7 +237,7 @@ menuRect d i = Rect (min x (max 0 (sw-w))) 1 w (length (menuItems i)+2)
         w = min sw (maximum [T.length t + T.length (menuShortcut d entry) + 5 | entry@(MenuItem t _ _) <- menuItems i])
 
 initialDesktop :: (Int,Int) -> Desktop
-initialDesktop size = Desktop size [] M.empty 1 Nothing Nothing Nothing "" False Nothing "" Nothing "" Nothing "" False Nothing Nothing Nothing "" Nothing Nothing Nothing [] False 0 0 False Nothing 0 0 Nothing SourceContext Nothing (newBuffer "") (Selection 0 0) True False False 0 True False Nothing Nothing []
+initialDesktop size = Desktop size [] M.empty 1 Nothing Nothing Nothing "" False Nothing "" Nothing "" Nothing "" False Nothing Nothing Nothing "" Nothing Nothing Nothing [] False 0 0 False Nothing 0 0 Nothing SourceContext Nothing (newBuffer "") (Selection 0 0) True False False 0 True False Nothing Nothing [] 8
 
 activeWindow :: Desktop -> Maybe Window
 activeWindow = listToMaybe . windows
@@ -358,7 +363,8 @@ prompt :: Text -> Purpose -> [Field] -> Desktop -> Desktop
 prompt title p fs d = d {dialog = Just (Dialog title p fs 0 ["OK","Cancel"] []), menu = Nothing, drag = Nothing,dragOriginal=Nothing}
 
 runCommand :: Command -> Desktop -> (Desktop,[Effect])
-runCommand cmd source | composerActive source, cmd `elem` [Undo,Redo,Copy,Cut,Paste,SelectAll] = (composerCommand cmd source,[])
+runCommand cmd source | problemsVisible source && problemsFocused source, cmd `elem` [Undo,Redo,Cut,Paste,SelectAll] = (source {menu=Nothing,contextMenu=Nothing},[])
+runCommand cmd source | not (problemsFocused source), composerActive source, cmd `elem` [Undo,Redo,Copy,Cut,Paste,SelectAll] = (composerCommand cmd source,[])
 runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source {menu = Nothing, contextMenu=Nothing, buttonHover=Nothing, buttonPressed=Nothing, prefix = Nothing, drag = Nothing,dragOriginal=Nothing})
   where
     go New d = (addDocument Nothing (newBuffer "") d,[])
@@ -392,6 +398,9 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
     go ToggleHex d = (toggleHex d,[])
     go Undo d = (editActive (const undo) Nothing d,[])
     go Redo d = (editActive (const redo) Nothing d,[])
+    go GoToMessage d = jumpProblem d
+    go CopyAllMessages d = copyMessages (diagnostics d) d
+    go Copy d | problemsVisible d && problemsFocused d = copyMessages (take 1 (drop (problemsSelected d) (diagnostics d))) d
     go Copy d | activeHex d = (d {clipboard=T.unwords (map (hexNumber 2 . ord) (T.unpack (selected d))),status="Hex bytes copied."},[])
     go Copy d = (d {clipboard = selected d, status = "Block copied."},[])
     go Cut d | activeHex d = let copied=fst (go Copy d) in (insertText "" copied,[])
@@ -737,6 +746,7 @@ menuAt x = findIndex (\(start,w) -> x >= start && x < start+w) menuPositions
 
 contextItems :: ContextKind -> [(Text,Command)]
 contextItems SourceContext = [("Rename symbol...",RenameSymbol),("Go to definition",Definition),("Inspect type",InspectType),("Complete identifier",Complete)]
+contextItems MessagesContext = [("Go to source",GoToMessage),("Copy message",Copy),("Copy all messages",CopyAllMessages),("Hide Messages",Problems)]
 contextItems GitContext = [("Pull",GitPull),("Fetch",GitFetch),("Merge...",GitMerge)]
 
 openContext :: ContextKind -> Int -> Int -> Desktop -> Desktop
@@ -780,7 +790,7 @@ contextEvent ev (r,chosen) d = case ev of
   where
     close=(d {contextMenu=Nothing},[])
     choose i=(d {contextMenu=Just (r,i `mod` length items)},[])
-    invoke i=case drop i items of (_,cmd):_ -> runCommand cmd d; _ -> close
+    invoke i=case drop i items of (_,cmd):_ | commandEnabled d cmd -> runCommand cmd d; _ -> close
     items=contextItems (contextKind d)
 
 -- SDL supplies click counts; terminal clicks retain the same selection and Enter path.
@@ -792,6 +802,10 @@ handleDoubleClick x y d = case dialog d of
         select f=f
         selected=dg {focus=i,fields=replaceAt i (select (fs !! i)) fs}
     in submitDialog 0 selected d {dialog=Just selected}
+  Nothing | menu d==Nothing, contextMenu d==Nothing, problemsVisible d,
+            let r=problemsRect d, inside r x y, y>top r, y<top r+height r-1,
+            problemsScroll d+y-top r-1<length (diagnostics d) ->
+    jumpProblem (fst (problemsMouse x y V.BLeft d))
   _ -> handleEvent (V.EvMouseDown x y V.BLeft []) d
 
 fileEntryAt :: Int -> Int -> Desktop -> Dialog -> Maybe (Int,Int)
@@ -808,6 +822,7 @@ fileEntryAt x y d dg = listToMaybe
 mouseEvent :: Int -> Int -> V.Button -> [V.Modifier] -> Desktop -> (Desktop,[Effect])
 mouseEvent x y V.BLeft _ d | Just capture <- drag d = (case capture of
   DockSizing -> resizeTree x d
+  MessagesSizing -> resizeProblems y d
   TreeScrolling -> case sideTree d of
     Just tree -> scrollTreeTo ((y-3)*treeScrollLimit d tree `div` max 1 (treeContentRows d-3)) tree d
     Nothing -> d
@@ -1175,19 +1190,38 @@ treeWidthOf :: Desktop -> Int
 treeWidthOf = maybe 0 (max 0 . subtract 1 . treeWidth) . sideTree
 
 problemsHeight :: Desktop -> Int
-problemsHeight d = if problemsVisible d then min 8 (max 0 (snd (screenSize d)-7)) else 0
+problemsHeight d = if problemsVisible d then min (max 3 (problemsPreferredHeight d)) (max 0 (snd (screenSize d)-7)) else 0
 
 problemsRect :: Desktop -> Rect
 problemsRect d = let (sw,sh)=screenSize d; h=problemsHeight d in Rect 0 (sh-h-1) sw h
 
 setProblemsVisible :: Bool -> Desktop -> Desktop
-setProblemsVisible visible d = ensureVisible next {windows=map resize (windows d)}
+setProblemsVisible visible d = layoutProblems d next
+  where next=d {problemsVisible=visible,problemsFocused=False,drag=Nothing,dragOriginal=Nothing,
+          messagesNumber=if visible then Just (fromMaybe (nextWindowNumber d) (messagesNumber d)) else Nothing}
+
+resizeProblems :: Int -> Desktop -> Desktop
+resizeProblems y d = layoutProblems d d {problemsPreferredHeight=max 3 (min (sh-7) (sh-y-1)),drag=Just MessagesSizing}
+  where sh=snd (screenSize d)
+
+layoutProblems :: Desktop -> Desktop -> Desktop
+layoutProblems before after = clampHexScroll before (ensureVisible fitted)
   where
-    next=d {problemsVisible=visible,problemsFocused=False,drag=Nothing,dragOriginal=Nothing,
-      messagesNumber=if visible then Just (fromMaybe (nextWindowNumber d) (messagesNumber d)) else Nothing}
-    oldHeight=max 1 (snd (screenSize d)-2-problemsHeight d)
-    newHeight=max 1 (snd (screenSize d)-2-problemsHeight next)
-    resize w=let r=bounds w in w {bounds=fitWindow next r {top=1+(top r-1)*newHeight `div` oldHeight,height=height r*newHeight `div` oldHeight},restoredBounds=Nothing}
+    oldEdge=top (problemsRect before); newEdge=top (problemsRect after)
+    fitted=after {windows=map resize (windows before),
+      sideTree=fmap (\t -> t {treeScroll=min (treeScroll t) (treeScrollLimit after t)}) (sideTree after)}
+    resize w
+      | bottom==oldEdge || bottom>newEdge =
+          let y=if top r<=1 then 1 else max 1 (newEdge-height r)
+          in w {bounds=fitWindow after r {top=y,height=newEdge-y},restoredBounds=Nothing}
+      | otherwise = w
+      where r=bounds w; bottom=top r+height r
+
+copyMessages :: [Diagnostic] -> Desktop -> (Desktop,[Effect])
+copyMessages [] d = (d {status="No messages to copy."},[])
+copyMessages issues d = (d {clipboard=T.intercalate "\n\n" (map format issues),status="Messages copied."},[])
+  where format issue=(case diagnosticSeverity issue of 1 -> "Error "; 2 -> "Warning "; 3 -> "Info "; _ -> "Hint ")<>
+          T.pack (diagnosticPath issue)<>":"<>T.pack (show (diagnosticRow issue+1))<>":"<>T.pack (show (diagnosticColumn issue+1))<>" "<>diagnosticMessage issue
 
 chooseProblem :: Int -> Desktop -> Desktop
 chooseProblem index d = d {problemsSelected=chosen,problemsScroll=max 0 (min chosen (max (problemsScroll d) (chosen-visible+1)))}
@@ -1214,27 +1248,31 @@ navigateMessage delta d
 problemsMouse :: Int -> Int -> V.Button -> Desktop -> (Desktop,[Effect])
 problemsMouse x y button d = case button of
   V.BLeft | problemsFocused d && y==top r && x>=width r-5 -> (setProblemsVisible False d,[])
-          | y>top r && y<top r+height r-1 && selected<length (diagnostics d) -> jumpProblem (chooseProblem selected focused)
+          | y==top r -> (focused {drag=Just MessagesSizing},[])
+          | y>top r && y<top r+height r-1 && selected<length (diagnostics d) -> (chooseProblem selected focused,[])
           | otherwise -> (focused,[])
+  V.BRight -> (openContext MessagesContext x y (if y>top r && y<top r+height r-1 && selected<length (diagnostics d) then chooseProblem selected focused else focused),[])
   V.BScrollUp -> (chooseProblem (problemsSelected d-3) focused,[])
   V.BScrollDown -> (chooseProblem (problemsSelected d+3) focused,[])
   _ -> (d,[])
-  where r=problemsRect d; selected=problemsScroll d+y-top r-1; focused=d {problemsFocused=True}
+  where r=problemsRect d; selected=problemsScroll d+y-top r-1; focused=d {problemsFocused=True,sideTree=fmap (\t -> t {treeFocused=False}) (sideTree d)}
 
 problemsKey :: V.Key -> [V.Modifier] -> Desktop -> (Desktop,[Effect])
-problemsKey key mods d = case key of
-  V.KUp -> move (-1)
-  V.KDown -> move 1
-  V.KPageUp -> move (negate (max 1 (problemsHeight d-2)))
-  V.KPageDown -> move (max 1 (problemsHeight d-2))
-  V.KEnter -> jumpProblem d
-  V.KEsc -> leave
-  V.KChar '\t' -> leave
-  V.KFun 6 -> leave
-  V.KChar _ | null mods || mods==[V.MShift] -> (d,[])
-  V.KBS -> (d,[])
-  V.KDel -> (d,[])
-  _ -> keyEvent key mods d
+problemsKey key mods d
+  | V.MCtrl `elem` mods, key `elem` [V.KChar 'c',V.KChar 'C',V.KIns] = runCommand Copy d
+  | otherwise = case key of
+    V.KUp -> move (-1)
+    V.KDown -> move 1
+    V.KPageUp -> move (negate (max 1 (problemsHeight d-2)))
+    V.KPageDown -> move (max 1 (problemsHeight d-2))
+    V.KEnter -> jumpProblem d
+    V.KEsc -> leave
+    V.KChar '\t' -> leave
+    V.KFun 6 -> leave
+    V.KChar _ | null mods || mods==[V.MShift] -> (d,[])
+    V.KBS -> (d,[])
+    V.KDel -> (d,[])
+    _ -> keyEvent key mods d
   where move delta=(chooseProblem (problemsSelected d+delta) d,[])
         leave=(d {problemsFocused=False},[])
 
@@ -1304,7 +1342,7 @@ treeKey key mods tree d = case key of
     leave=(d {sideTree=Just tree {treeFocused=False}},[])
 
 treeContentRows :: Desktop -> Int
-treeContentRows d = max 0 (snd (screenSize d)-4)
+treeContentRows d = max 0 (snd (screenSize d)-4-problemsHeight d)
 
 treeScrollLimit :: Desktop -> Sidebar -> Int
 treeScrollLimit d tree = max 0 (length (treeRows tree)-treeContentRows d)
@@ -1325,7 +1363,7 @@ treeMouse x y button tree d = case button of
   V.BScrollUp -> (scrollTreeTo (treeScroll tree-3) tree d,[])
   V.BScrollDown -> (scrollTreeTo (treeScroll tree+3) tree d,[])
   _ -> (d,[])
-  where sh=snd (screenSize d)
+  where sh=snd (screenSize d)-problemsHeight d
 
 openDirectoryBrowser :: FilePath -> [Entry] -> Desktop -> Desktop
 openDirectoryBrowser base entries d = d {dialog=Just (Dialog "Change directory" (ChangingDirectory base dirs)

@@ -85,7 +85,7 @@ updateMenus d = forM_ (zip [0..] nativeCommands) $ \(i,cmd) ->
   c_menu_enabled i (if commandEnabled d cmd && canInvoke cmd then 1 else 0)
   where
     canInvoke Paste = not (maybe False treeFocused (sideTree d)) || dialog d /= Nothing
-    canInvoke cmd = dialog d == Nothing && (activeWindow d /= Nothing || cmd `elem` [New,Open,ChangeDir,Quit,Help,About,Gallery,EditorOptions,RunTarget,RunOptions,OpenTerminal,StopTerminal,AgentOptions,Conversation,AgentPrompt,AgentCancel,AgentResume,AgentNew,AgentCopyRaw,ToggleTree,GitDiff,GitCommit,Problems,NextMessage,PreviousMessage])
+    canInvoke cmd = dialog d == Nothing && (activeWindow d /= Nothing || (problemsVisible d && problemsFocused d && cmd==Copy) || cmd `elem` [New,Open,ChangeDir,Quit,Help,About,Gallery,EditorOptions,RunTarget,RunOptions,OpenTerminal,StopTerminal,AgentOptions,Conversation,AgentPrompt,AgentCancel,AgentResume,AgentNew,AgentCopyRaw,ToggleTree,GitDiff,GitCommit,Problems,NextMessage,PreviousMessage])
 #else
 updateMenus _ = pure ()
 #endif
@@ -145,6 +145,7 @@ runWindow backend scale effects tick initial = do
       event <- allocaArray 6 $ \p -> check "Read window event" (c_wait p) >> map fromIntegral <$> peekArray 6 p
       (next,requests) <- dispatch event d
       (exit,updated) <- foldM windowEffect (False,next) requests
+      when (clipboard updated /= clipboard d) (utf8 (clipboard updated) c_set_clipboard)
       let displayed = case event of kind:_ | kind `elem` [3,4,5,7,8,9,12] -> Nothing; _ -> Just d
       unless exit (tick updated >>= loop font displayed)
     windowEffect state@(True,_) _ = pure state
@@ -176,7 +177,7 @@ runWindow backend scale effects tick initial = do
       | button == 3 = pure (handleEvent (V.EvMouseDown x y V.BRight (keyMods mods)) d)
       | clicks == 0, dialog d /= Nothing || drag d == Nothing = pure (hoverAt x y d)
       | clicks >= 2 = pure (handleDoubleClick x y d)
-      | otherwise = pure (handleEvent (V.EvMouseDown x y V.BLeft (keyMods mods)) d)
+      | otherwise = clipboardResult (copyClick x y d) d (handleEvent (V.EvMouseDown x y V.BLeft (keyMods mods)) d)
     dispatch (4:x:y:_) d = pure (handleEvent (V.EvMouseUp x y (Just V.BLeft)) d)
     dispatch (5:w:h:_) d = pure (handleEvent (V.EvResize w h) d)
     dispatch (6:_) d | dialog d /= Nothing = pure (d,[])
@@ -200,8 +201,12 @@ runWindow backend scale effects tick initial = do
     clipboardResult force before result@(after,_) = do
       when (force || clipboard before /= clipboard after) (utf8 (clipboard after) c_set_clipboard)
       pure result
+    copyClick x y d = case contextMenu d of
+      Just (r,_) | inside r x y, y>top r, y<top r+height r-1 ->
+        case drop (y-top r-1) (contextItems (contextKind d)) of (_,cmd):_ -> cmd `elem` [Copy,CopyAllMessages]; _ -> False
+      _ -> any (\(r,_,action) -> inside r x y && action `elem` [Left Copy,Left CopyAllMessages]) (statusItemRects d)
     copies (V.EvKey key ms) d =
-      (V.MCtrl `elem` ms && not (wordStar d) && key `elem` [V.KChar 'c',V.KChar 'x']) ||
+      (V.MCtrl `elem` ms && (not (wordStar d) || problemsFocused d) && key `elem` [V.KChar 'c',V.KChar 'x']) ||
       (key == V.KIns && V.MCtrl `elem` ms) || (key == V.KDel && V.MShift `elem` ms) ||
       (prefix d == Just 'k' && key `elem` [V.KChar 'c',V.KChar 'v'])
     copies _ _ = False

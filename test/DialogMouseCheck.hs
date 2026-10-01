@@ -65,14 +65,50 @@ checks = do
       problem=Diagnostic "/project/Main.hs" Nothing 1 2 1 "Not in scope"
       pane=setProblemsVisible True source {diagnostics=[problem]}
       Rect px py _ _=problemsRect pane
-      (_,jumpEffects)=handleEvent (V.EvMouseDown (px+3) (py+1) V.BLeft []) pane
+      (selectedPane,clickEffects)=handleEvent (V.EvMouseDown (px+3) (py+1) V.BLeft []) pane
+      (_,jumpEffects)=handleDoubleClick (px+3) (py+1) pane
       focusedPane=fst (handleEvent (V.EvMouseDown (px+3) py V.BLeft []) pane)
       (_,keyJump)=handleEvent (V.EvKey V.KEnter []) focusedPane
       pasted=fst (handleEvent (V.EvPaste "overwrite") focusedPane)
   check "problems reserve editor area" (all (\w -> top (bounds w)+height (bounds w)<=py) (windows pane))
   check "problems preserve documents" (buffers pane==buffers source && not (problemsFocused pane))
-  check "problem click and Enter jump to diagnostic" (jumpEffects==[JumpTo "/project/Main.hs" 1 2] && keyJump==jumpEffects)
+  check "problem click selects; double click and Enter jump to diagnostic"
+    (null clickEffects && problemsFocused selectedPane && jumpEffects==[JumpTo "/project/Main.hs" 1 2] && keyJump==jumpEffects)
+  let copiedMessage=fst (handleEvent (V.EvKey (V.KChar 'c') [V.MCtrl]) selectedPane)
+      copiedInsert=fst (handleEvent (V.EvKey V.KIns [V.MCtrl]) selectedPane)
+      copiedMenu=fst (runCommand Copy selectedPane)
+      expected="Error /project/Main.hs:2:3 Not in scope"
+  check "all Copy routes use the selected diagnostic rather than source text"
+    (all ((==expected).clipboard) [copiedMessage,copiedInsert,copiedMenu] && buffers copiedMessage==buffers pane)
+  let messagePopup=fst (handleEvent (V.EvMouseDown (px+3) (py+1) V.BRight []) pane)
+      copyPopup=fst (handleEvent (V.EvKey V.KEnter []) (fst (handleEvent (V.EvKey V.KDown []) messagePopup)))
+  check "Messages right click offers and invokes Copy message"
+    (contextMenu messagePopup/=Nothing && "Copy all messages" `T.isInfixOf` snapshot messagePopup && clipboard copyPopup==expected && contextMenu copyPopup==Nothing)
+
   check "problems focus does not edit background" (buffers pasted==buffers pane)
+  let another=problem {diagnosticPath="/project/Other.hs",diagnosticMessage="Long first line\n  full second line"}
+      allPane=selectedPane {diagnostics=[problem,another]}
+      allCopied=fst (runCommand CopyAllMessages allPane)
+      emptyCopied=fst (runCommand Copy (selectedPane {diagnostics=[],clipboard="keep me"}))
+      protected=fst (runCommand Cut selectedPane)
+      noSource=selectedPane {windows=[],buffers=mempty}
+  check "Copy all includes full multiline messages and source paths"
+    ("/project/Other.hs:2:3 Long first line\n  full second line" `T.isInfixOf` clipboard allCopied && expected `T.isPrefixOf` clipboard allCopied)
+  check "empty Messages preserves clipboard and disables copy"
+    (clipboard emptyCopied=="keep me" && not (commandEnabled (selectedPane {diagnostics=[]}) CopyAllMessages))
+  check "Messages copy works without an editor and editing commands preserve source"
+    (clipboard (fst (runCommand Copy noSource))==expected && buffers protected==buffers selectedPane)
+  let resizeMessagesTo y d=fst (handleEvent (V.EvMouseDown 10 y V.BLeft [])
+        (fst (handleEvent (V.EvMouseDown 10 (top (problemsRect d)) V.BLeft []) d)))
+      floatingMessage=modifyActive (\w -> w {bounds=Rect 0 6 80 10}) pane
+      pushed=resizeMessagesTo 12 floatingMessage
+      pinned=resizeMessagesTo 8 pushed
+      pulled=resizeMessagesTo 14 pinned
+      untouched=modifyActive (\w -> w {bounds=Rect 0 3 80 5}) pane
+  check "Messages title drag pushes and pulls abutting windows without sharing borders"
+    (top (problemsRect pushed)==12 && fmap bounds (activeWindow pushed)==Just (Rect 0 2 80 10) &&
+     fmap bounds (activeWindow pinned)==Just (Rect 0 1 80 7) && fmap bounds (activeWindow pulled)==Just (Rect 0 1 80 13) &&
+     fmap bounds (activeWindow (resizeMessagesTo 14 untouched))==Just (Rect 0 3 80 5) && buffers pulled==buffers pane)
   check "diagnostic chevron and message render" (all (`T.isInfixOf` snapshotHtml pane) ["▶","Not in scope"])
   check "closing pane preserves documents" (buffers (setProblemsVisible False pane)==buffers source)
   let scrolling=modifyActive (\w -> w {bounds=Rect 5 5 30 10,scrollRow=10,scrollColumn=4})
@@ -136,6 +172,12 @@ checks = do
     (glyphAt unfocusedTree shared 1=='╦' && glyphAt unfocusedTree shared 23=='╩' &&
      glyphAt smallNeighbor shared 4=='╠' && glyphAt smallNeighbor shared 13=='╠' &&
      glyphAt smallNeighbor shared 1=='╗')
+  let raisedFiles=setProblemsVisible True unfocusedTree
+      bottomFiles=top (problemsRect raisedFiles)-1
+      resizedFiles=resizeMessagesTo 10 raisedFiles
+  check "Messages raises Files bottom frame and its scroll area"
+    (glyphAt raisedFiles 0 bottomFiles=='╚' && treeContentRows raisedFiles==bottomFiles-2 &&
+     glyphAt resizedFiles 0 9=='╚' && treeContentRows resizedFiles==7)
   check "Files scrollbar and wheel scroll rows" (fmap treeScroll (sideTree scrolled)==Just 3 && fmap treeScroll (sideTree barClicked)==Just 1)
   check "tree markers have a separating space" ("+ src" `T.isInfixOf` snapshot compactTree && not ("[+]" `T.isInfixOf` snapshot compactTree))
   check "inactive scrollbar region only focuses window"

@@ -28,6 +28,16 @@ main = bracket temporary removePathForcibly $ \root -> do
       bad = good <> "\nbroken :: Int\nbroken = True\n"
       useOffset = lineOffset good 6
   writeFile (root </> "hie.yaml") "cradle:\n  direct:\n    arguments:\n      - Live.hs\n"
+  let warning="{-# OPTIONS_GHC -Wtype-defaults #-}\nmodule Live where\nwarn :: String\nwarn = show (read \"1\" + 1)\n"
+  T.writeFile file warning
+  (_,existing)<-applyEffects (initialDesktop (120,40)) [ReadPath file]
+  withTooling $ \tooling -> do
+    warned<-await "warning in pre-existing file without saving" (tickTooling tooling applyEffects)
+      (any ((==2).diagnosticSeverity) . diagnostics) existing
+    check "initial warnings do not need an editor save" (not (dirty (buffer warned)) && revision (buffer warned)==0)
+    check "diagnostic copy retains original line breaks" (any (T.isInfixOf "\n" . diagnosticMessage) (diagnostics warned))
+    disk<-T.readFile file
+    check "initial diagnostics leave disk unchanged" (disk==warning)
   T.writeFile file bad
   (_,loaded) <- applyEffects (initialDesktop (120,40)) [ReadPath file]
   check "fixture loaded through App" (activeText loaded == bad)

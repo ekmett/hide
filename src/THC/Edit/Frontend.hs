@@ -56,7 +56,7 @@ chooseScale env explicit = case explicit of
   [value] -> parse value
   _ -> Left "Specify --scale only once."
   where
-    parse value = case readMaybe value of
+    parse value = case readMaybe value :: Maybe Double of
       Just n | n>=1 && n<=8 -> Right (fromIntegral (round (n*8) :: Int)/8)
       _ -> Left "--scale or THC_EDIT_SCALE needs a number from 1 to 8 (rounded to 1/8 steps)."
 

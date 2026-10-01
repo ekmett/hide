@@ -209,7 +209,7 @@ treeLayers d tree =
   ++ [place (w-1) 2 (V.vertCat [scrollCell n | n<-[0..visible-1]]) | treeFocused tree, visible>=3]
   ++ [place 1 2 (V.vertCat (map line listing)),place 0 1 (box frame True w h)]
   where
-    w=treeWidth tree; h=max 0 (snd (screenSize d)-2); visible=treeContentRows d
+    w=treeWidth tree; h=max 0 (snd (screenSize d)-2-problemsHeight d); visible=treeContentRows d
     junction y neighbor | y==1 = '╦'
                         | y==h = '╩'
                         | windowFocused d neighbor = '╠'
@@ -262,7 +262,7 @@ problemsLayers d
 
 contextLayers :: Desktop -> (Rect,Int) -> [V.Image]
 contextLayers d (Rect x y w h,chosen) =
-  [place (x+1) (y+i+1) (row (if i==chosen then selected else paper) (w-2) (" "<>title)) | (i,(title,_))<-zip [0..] (contextItems (contextKind d))]
+  [place (x+1) (y+i+1) (row (attr (if commandEnabled d cmd then black else V.RGBColor 85 85 85) (if i==chosen then green else gray)) (w-2) (" "<>title)) | (i,(title,cmd))<-zip [0..] (contextItems (contextKind d))]
   ++ [place x y (box paper False w h)]
 
 dialogLayers :: Desktop -> Dialog -> [V.Image]
