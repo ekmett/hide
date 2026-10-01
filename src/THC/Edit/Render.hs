@@ -89,6 +89,14 @@ renderDesktop d = flattenPicture (screenSize d) ((V.picForLayers layers) {V.picC
         _ -> V.NoCursor
       Nothing | menu d/=Nothing || contextMenu d/=Nothing || problemsFocused d || maybe False treeFocused (sideTree d) -> V.NoCursor
       Nothing -> case (activeWindow d,activeDocument d) of
+        (Just w,Just doc) | questionActive d,Just q<-chatQuestion d,questionChoice q==Nothing,Just offset<-chatInputOffset d -> let
+          (inputRow,column)=bufferLineColumn (documentBuffer doc) offset
+          text=contents (questionBuffer q)
+          shownWidth=max 1 (width (bounds w)-2)
+          delta=displayColumn text (caret (questionSelection q))-displayColumn text (questionInputStart shownWidth q)
+          cx=left (bounds w)+1+column+delta-scrollColumn w
+          cy=top (bounds w)+1+inputRow-scrollRow w
+          in if inside (Rect (left (bounds w)+1) (top (bounds w)+1) (width (bounds w)-2) (windowContentRows d doc w)) cx cy then V.Cursor cx cy else V.NoCursor
         (Just w,_) | composerActive d -> let
           b=composerBuffer d; (r,c)=bufferLineColumn b (caret (composerSelection d)); (sr,sc)=composerScroll d w
           rect=composerRect d w

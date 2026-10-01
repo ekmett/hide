@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
-module THC.Edit.BuildJobs (BuildJobs, withBuildJobs, startBuildJob, tickBuildJobs, stopBuildJob, parseBuildDiagnostic) where
+module THC.Edit.BuildJobs (BuildJobs, withBuildJobs, startBuildJob, tickBuildJobs, stopBuildJob, buildJobStatus, parseBuildDiagnostic) where
 
+import Data.Aeson
 import Control.Concurrent.Async
 import Control.Concurrent.STM
 import Control.Exception
@@ -25,14 +26,14 @@ import THC.Edit.Model
 -- The session, rather than its attached display, owns this worker.
 data Event = Output Text | Finished (Either Text ExitCode)
 data Job = Job Int Text FilePath (IO ()) (TBQueue Event) Text
-newtype BuildJobs = BuildJobs (IORef (Maybe Job))
+data BuildJobs = BuildJobs (IORef (Maybe Job)) (IORef (Maybe (Int,Text,FilePath,Maybe (Either Text ExitCode))))
 
 withBuildJobs :: (BuildJobs -> IO a) -> IO a
-withBuildJobs = bracket (BuildJobs <$> newIORef Nothing) close
-  where close (BuildJobs ref)=readIORef ref >>= mapM_ (\(Job _ _ _ stop _ _) -> stop)
+withBuildJobs = bracket (BuildJobs <$> newIORef Nothing <*> newIORef Nothing) close
+  where close (BuildJobs ref _)=readIORef ref >>= mapM_ (\(Job _ _ _ stop _ _) -> stop)
 
 startBuildJob :: BuildJobs -> Text -> FilePath -> [(FilePath,[String])] -> Desktop -> IO Desktop
-startBuildJob (BuildJobs ref) label root commands desktop = do
+startBuildJob (BuildJobs ref report) label root commands desktop = do
   current<-readIORef ref
   case current of
     Just _ -> pure desktop {status="A build or run is already active; stop it before starting another."}
@@ -61,6 +62,7 @@ startBuildJob (BuildJobs ref) label root commands desktop = do
           bid=maybe (nextId desktop) bufferId (activeWindow opened)
           old=buildDiagnostics desktop
       writeIORef ref (Just (Job bid label root stop queue ""))
+      writeIORef report (Just (bid,label,root,Nothing))
       pure opened {status=label<>"…",buildDiagnostics=[],diagnostics=filter (`notElem` old) (diagnostics opened)}
 
 capture :: IORef (Maybe (IO ())) -> FilePath -> FilePath -> [String] -> (Text -> IO ()) -> IO ExitCode
@@ -88,7 +90,7 @@ pump emit stream=loop (TE.streamDecodeUtf8With lenientDecode) BS.empty
         TE.Some text remaining next -> emit text >> loop next remaining
 
 stopBuildJob :: BuildJobs -> Desktop -> IO Desktop
-stopBuildJob runtime@(BuildJobs ref) desktop = do
+stopBuildJob runtime@(BuildJobs ref _) desktop = do
   current<-readIORef ref
   case current of
     Nothing -> pure desktop {status="No build or captured run is active."}
@@ -102,7 +104,7 @@ stopBuildJob runtime@(BuildJobs ref) desktop = do
       tickBuildJobs runtime updated
 
 tickBuildJobs :: BuildJobs -> Desktop -> IO Desktop
-tickBuildJobs (BuildJobs ref) desktop = do
+tickBuildJobs (BuildJobs ref report) desktop = do
   current<-readIORef ref
   case current of
     Nothing -> pure desktop
@@ -128,6 +130,9 @@ tickBuildJobs (BuildJobs ref) desktop = do
               [] -> shown
               outcome:_ -> (if null problems then shown else setProblemsVisible True shown) {status=summary outcome}
         writeIORef ref (if null outcomes then Just (Job bid label root stop queue output) else Nothing)
+        case outcomes of
+          outcome:_ -> writeIORef report (Just (bid,label,root,Just outcome))
+          [] -> pure ()
         pure result
       where
         summary (Left err)=label<>": "<>err
@@ -151,3 +156,14 @@ parseBuildDiagnostic root input = scan [] (T.splitOn ":" input)
     scan path (part:rest)=scan (part:path) rest
     scan _ []=Nothing
     number text=readMaybe (T.unpack (T.takeWhile (\c -> c>='0' && c<='9') text))
+
+-- Completion metadata survives worker exit; output remains an editor buffer.
+buildJobStatus :: BuildJobs -> IO Value
+buildJobStatus (BuildJobs ref report)=do
+  active<-maybe False (const True) <$> readIORef ref
+  recent<-readIORef report
+  pure (object (["active" .= active]++case recent of
+    Nothing -> []
+    Just (bid,label,root,outcome) -> ["bufferId" .= bid,"action" .= label,"root" .= root,
+      "exitCode" .= (case outcome of Just (Right ExitSuccess) -> Just (0::Int); Just (Right (ExitFailure code)) -> Just code; _ -> Nothing),
+      "error" .= (case outcome of Just (Left err) -> Just err; _ -> Nothing)]))

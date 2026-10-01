@@ -40,7 +40,6 @@ import THC.Edit.Model hiding (Paste, message)
 import THC.Edit.Protocol
 import THC.Edit.RemoteEndpoint
 import THC.Edit.Session
-import THC.Edit.EditorMCP (editorResponse)
 import System.Directory (getCurrentDirectory)
 
 #endif
@@ -161,8 +160,8 @@ data Session = Session
   , stopped :: Bool
   }
 
-runRemoteDaemon :: String -> Double -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> (Desktop -> IO Desktop) -> Desktop -> IO ()
-runRemoteDaemon session scale effects tick initial = do
+runRemoteDaemon :: String -> Double -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> (Desktop -> IO Desktop) -> (Desktop -> Value -> IO (Bool, Desktop, IO (Maybe Value))) -> Desktop -> IO ()
+runRemoteDaemon session scale effects tick inspect initial = do
   path <- sessionEndpoint session
   epoch <- randomIdentity
   font <- loadFont
@@ -198,13 +197,25 @@ runRemoteDaemon session scale effects tick initial = do
         modifyMVar_ state $ \s -> if stopped s then pure s else do
           d <- tick (desktop s)
           pure s {desktop=d}
-      serve connection = flip finally (quietClose connection) $ handle (\(err::IOException) -> writePacket connection (json "error" ["message" .= show err])) $ do
+      serve shutdown connection = flip finally (quietClose connection) $ handle (\(err::IOException) -> writePacket connection (json "error" ["message" .= show err])) $ do
         first <- readFirstPacket connection
         case first of
           JsonPacket value | packetType first==Just "inspect" -> do
             request <- decodeValue (withObject "editor inspection" (\o -> o .: "request")) value
-            snapshot <- desktop <$> readMVar state
-            writePacket connection (JsonPacket (fromMaybe Null (editorResponse snapshot request)))
+            mask $ \restore -> do
+              (exited,finish) <- modifyMVar state $ \s -> do
+                (exited,updated,reply) <- inspect (desktop s) request
+                pure (s {desktop=updated,stopped=stopped s || exited},(exited,reply))
+              -- Start deferred work masked before accepting cancellation. Its
+              -- interruptible waits install their cleanup before EOF can stop it.
+              withAsync finish $ \response -> withAsync (restore (BS.hGetSome connection 1)) $ \eof ->
+                flip finally (shutdown >> when exited (void (tryPutMVar done ()))) $ do
+                  completed <- restore (waitEither response eof)
+                  case completed of
+                    -- Send before waking the Windows reader: shutdown closes
+                    -- both directions, and cancellation alone cannot wake it.
+                    Left value -> writePacket connection (JsonPacket (fromMaybe Null value))
+                    Right _ -> pure ()
           _ -> do
             Hello requested client clientAck _ _ <- parseHelloPacket first
             unless (requested==session) (failure "Wrong remote session")
@@ -291,10 +302,9 @@ runRemoteDaemon session scale effects tick initial = do
     rememberSession record {sessionId=session}
     let acceptLoop = forever $ do
           (sock,_) <- N.accept socket
-          connection <- N.socketToHandle sock ReadWriteMode
-          hSetBinaryMode connection True; hSetBuffering connection NoBuffering
+          (connection,shutdown) <- socketToEndpoint sock
           void (forkIO (finally
-            ((authenticate connection >> serve connection) `catch` \(_::IOException) -> pure ())
+            ((authenticate connection >> serve shutdown connection) `catch` \(_::IOException) -> pure ())
             (quietClose connection)))
     withAsync commandLoop $ \inputs -> withAsync tickLoop $ \ticks -> withAsync acceptLoop $ \accepts ->
       -- Windows accept is a blocking foreign call: close its socket before
@@ -556,6 +566,6 @@ withSSHPeer :: String -> [String] -> (RemotePeer -> IO ()) -> IO ()
 withSSHPeer _ _ _ = ioError (userError "Remote support is not built. Rebuild with cabal build -fremote")
 runRemoteRelay :: [String] -> IO ()
 runRemoteRelay _ = ioError (userError "Remote support is not built. Rebuild with cabal build -fremote")
-runRemoteDaemon :: String -> Double -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> (Desktop -> IO Desktop) -> Desktop -> IO ()
-runRemoteDaemon _ _ _ _ _ = ioError (userError "Remote support is not built. Rebuild with cabal build -fremote")
+runRemoteDaemon :: String -> Double -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> (Desktop -> IO Desktop) -> (Desktop -> Value -> IO (Bool, Desktop, IO (Maybe Value))) -> Desktop -> IO ()
+runRemoteDaemon _ _ _ _ _ _ = ioError (userError "Remote support is not built. Rebuild with cabal build -fremote")
 #endif

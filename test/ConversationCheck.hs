@@ -2,6 +2,7 @@
 module ConversationCheck (checks) where
 
 import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async (withAsync, cancel, poll, wait)
 import Control.Exception (bracket)
 import Control.Monad (unless, when, forM_)
 import Data.Aeson hiding (Number)
@@ -117,6 +118,73 @@ checks = bracket temporary removePathForcibly $ \root ->
       check "bubbles wrap within the window width"
         (all (\row -> displayColumn row (T.length row)<=width || width==1 && displayColumn row (T.length row)==2) (T.lines rendered))
       check "bubble wrapping retains combining marks" (not ("\ń" `T.isInfixOf` rendered))
+    let permissionBase=initialDesktop (80,25)
+        permissionMenu=[title | ("Options",_,items)<-menus,MenuItem title _ AgentPermissions<-items]
+        chooser=Dialog "Agent Permissions" (PermissionDialog "settings") [ListBox "Tool" ["tool"<>T.pack (show n) | n<-[0..39::Int]] 0] 0 ["Edit","Close"] []
+        chooseLast=foldl (\d _->fst (handleEvent (V.EvKey V.KDown []) d)) permissionBase {dialog=Just chooser} [1..39::Int]
+        approval=Dialog "Allow tool?" (PermissionDialog "approve:fixture") [] 0 ["Allow once","Deny"] ["Tool: editor_file"]
+    check "Options menu uses exact Agent Permissions label" (permissionMenu==["Agent Permissions"] && snd (runCommand AgentPermissions permissionBase)==[PermissionAction "show" []])
+    check "permission tool chooser paginates all entries" ("tool39" `T.isInfixOf` snapshot chooseLast && snd (handleEvent (V.EvKey V.KEnter []) chooseLast)==[PermissionAction "settings" ["0","39"]])
+    check "Escape explicitly denies permission requests" (snd (handleEvent (V.EvKey V.KEsc []) permissionBase {dialog=Just approval})==[PermissionAction "approve:fixture" ["1"]])
+    let modeDialog=Dialog "Agent Permissions" (PermissionDialog "set:editor_file") [Radio "Permission" ["Enable","Prompt","Disable"] 2] 0 ["Save","Back"] []
+    check "permission mode submission includes selected radio" (snd (submitDialog 0 modeDialog permissionBase {dialog=Just modeDialog})==[PermissionAction "set:editor_file" ["0","2"]])
+    let draftBase=addReadOnly "Conversation" "" (initialDesktop (90,30))
+        savedDraft=draftBase {composerBuffer=newBuffer "existing draft",composerSelection=Selection 4 4}
+        isLeft (Left _)=True
+        isLeft _=False
+        clickAction runtime action desktop=case [(a,values) | (a,_,name,values)<-chatActions desktop,name==action] of
+          (offset,_):_ -> do
+            let win=fromMaybe (error "question window") (activeWindow desktop)
+                buffer=maybe (newBuffer "") documentBuffer (activeDocument desktop)
+                (row,column)=bufferLineColumn buffer offset
+                (changed,effects)=handleEvent (V.EvMouseDown (left (bounds win)+1+column) (top (bounds win)+1+row-scrollRow win) V.BLeft []) desktop
+            next<-snd <$> conversationEffects runtime fallback changed effects
+            tickConversation runtime next
+          _ -> error ("Missing inline action "++T.unpack action)
+    withConversation $ \runtime -> do
+      (asked,answer)<-chatTool runtime savedDraft "ask_user" (object ["question" .= ("Pick a direction"::T.Text),"choices" .= (["Left","Right"]::[T.Text])])
+      check "ask_user renders inline choices and custom entry without a modal" (dialog asked==Nothing && chatQuestion asked/=Nothing && all (`T.isInfixOf` conversationText asked) ["Pick a direction","Left","Right","Other:","Submit answer","Cancel"])
+      check "question footer describes answer actions" ("Enter Answer" `T.isInfixOf` snapshot asked && not ("Session: not connected" `T.isInfixOf` conversationText asked))
+      check "ask_user preserves the existing draft and caret" (composerBuffer asked==composerBuffer savedDraft && composerSelection asked==composerSelection savedDraft)
+      (duplicate,refused)<-chatTool runtime asked "ask_user" (object ["question" .= ("Another?"::T.Text)])
+      check "only one human question can wait" . (&& (duplicate==asked)) . isLeft =<< refused
+      withAsync answer $ \pendingAnswer -> do
+        threadDelay 10000
+        pendingResult<-poll pendingAnswer
+        check "question registration returns while the human answer waits" (case pendingResult of Nothing->True; _->False)
+        selected<-clickAction runtime "question-choice" asked
+        check "choice click waits for explicit submit" (maybe False ((==Just 0).questionChoice) (chatQuestion selected))
+        submitted<-clickAction runtime "question-submit" selected
+        choiceReply<-wait pendingAnswer
+        check "choice response reaches waiting tool" (case choiceReply of Right value->field "answer" value==Just ("Left"::T.Text) && field "custom" value==Just False; _->False)
+        check "answer removes the inline form and preserves draft" (chatQuestion submitted==Nothing && composerBuffer submitted==composerBuffer savedDraft && composerSelection submitted==composerSelection savedDraft)
+      (custom,customReply)<-chatTool runtime savedDraft "ask_user" (object ["question" .= ("Your answer?"::T.Text)])
+      let typed=foldl (\desktop c->fst (handleEvent (V.EvKey (V.KChar c) []) desktop)) custom ("custom λ"::String)
+          (sending,effects)=handleEvent (V.EvKey V.KEnter []) typed
+      sent<-snd <$> conversationEffects runtime fallback sending effects
+      result<-customReply
+      check "free text answers preserve Unicode and the ordinary draft" (case result of Right value->field "answer" value==Just ("custom λ"::T.Text) && composerBuffer sent==composerBuffer savedDraft; _->False)
+      (cancelledQuestion,cancelledReply)<-chatTool runtime savedDraft "ask_user" (object ["question" .= ("Cancel me"::T.Text)])
+      cancelledDesktop<-clickAction runtime "question-cancel" cancelledQuestion
+      check "inline Cancel resolves the pending request" . (&& (chatQuestion cancelledDesktop==Nothing)) . isLeft =<< cancelledReply
+      (disconnected,disconnectedReply)<-chatTool runtime savedDraft "ask_user" (object ["question" .= ("Requester leaves"::T.Text)])
+      withAsync disconnectedReply $ \worker->threadDelay 10000 >> cancel worker
+      cleaned<-tickConversation runtime disconnected
+      check "requester cancellation clears the pending question on tick" (chatQuestion cleaned==Nothing)
+      let narrow=addReadOnly "Conversation" "" (initialDesktop (40,12))
+      (manyChoices,_)<-chatTool runtime narrow "ask_user" (object ["question" .= ("Choose"::T.Text),"choices" .= (T.replicate 100 "z":["Option "<>T.pack (show n) | n<-[1..11::Int]])])
+      visibleChoice<-tickConversation runtime (fst (handleEvent (V.EvKey V.KDown []) manyChoices))
+      let active=fromMaybe (error "question window") (activeWindow visibleChoice)
+          document=fromMaybe (error "question document") (activeDocument visibleChoice)
+          choiceRows=[fst (bufferLineColumn (documentBuffer document) a) | (a,_,action,values)<-chatActions visibleChoice,action=="question-choice",last values=="0"]
+      check "keyboard choices stay visible in a small conversation window" (case choiceRows of row:_->row>=scrollRow active && row<scrollRow active+windowContentRows visibleChoice document active; _->False)
+      check "long choice labels wrap without being discarded" (T.count "z" (conversationText visibleChoice)==100)
+      smallCancelled<-clickAction runtime "question-cancel" =<< tickConversation runtime (fst (handleEvent (V.EvKey V.KUp []) visibleChoice))
+      check "small-window custom input leaves Cancel reachable" (chatQuestion smallCancelled==Nothing)
+      (_,invalid)<-chatTool runtime savedDraft "ask_user" (object ["question" .= ("Unsupported"::T.Text),"allowMultiple" .= True])
+      check "unsupported multi-select is explicit" . isLeft =<< invalid
+    closingReply<-withConversation $ \runtime->snd <$> chatTool runtime savedDraft "ask_user" (object ["question" .= ("Session closes"::T.Text)])
+    check "session shutdown resolves a waiting question" . isLeft =<< closingReply
     writeFile server providerScript
     BS.writeFile source "disk original\n"
     BS.writeFile secondSource "second original\n"
@@ -139,6 +207,15 @@ checks = bracket temporary removePathForcibly $ \root ->
         (not (any (`elem` T.lines (conversationText streamed)) ["You","Agent"]) && not ("Session:" `T.isInfixOf` conversationText streamed))
       check "conversation preserves Markdown styling" (any ((==BubbleText 1 False Keyword).snd) (conversationHighlight streamed))
       check "tool update merges pending record" (T.count "[completed] Local tool" (conversationText streamed)==1 && not ("[pending] Local tool" `T.isInfixOf` conversationText streamed))
+      check "tool activity starts collapsed without raw arguments" (not ("rawInput" `T.isInfixOf` conversationText streamed) && "▸" `T.isInfixOf` conversationText streamed)
+      let activityAction=case [values | (_,_,name,values)<-chatActions streamed,name=="toggle-activity"] of values:_->values; _->error "missing activity action"
+      expanded<-clickAction runtime "toggle-activity" streamed
+      check "expanded activity retains original request and response JSON" (all (`T.isInfixOf` conversationText expanded) ["rawInput","rawOutput","original argument","exact response"])
+      let selectedActivity=modifyActive (\w->w {selection=Selection 0 (maybe 0 (bufferLength.documentBuffer) (activeDocument expanded))}) expanded
+          selectedTextOnly=clipboard (fst (runCommand Copy selectedActivity))
+      check "conversation copies omit activity chevrons and raw JSON" (not ("rawInput" `T.isInfixOf` selectedTextOnly) && not ("▾" `T.isInfixOf` selectedTextOnly) && "Hello" `T.isInfixOf` selectedTextOnly)
+      collapsed<-send runtime "toggle-activity" activityAction expanded
+      check "activity collapses without changing prose" (conversationText collapsed==conversationText streamed)
       check "provider settings appear in the title" (conversationTitle streamed=="fixture-model (high) ▼")
       let conversationWindow=fromMaybe (error "conversation window") (activeWindow streamed)
           titleRect=agentTitleRect streamed conversationWindow
@@ -371,8 +448,8 @@ providerScript=unlines
   , "    if scenario=='stream':"
   , "      update({'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'# Hello\\n\\n**bold'}})"
   , "      update({'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':' text**\\n'}})"
-  , "      update({'sessionUpdate':'tool_call','toolCallId':'fixture-tool','title':'Local tool','status':'pending'})"
-  , "      update({'sessionUpdate':'tool_call_update','toolCallId':'fixture-tool','status':'completed'})"
+  , "      update({'sessionUpdate':'tool_call','toolCallId':'fixture-tool','title':'Local tool','status':'pending','rawInput':{'argument':'original argument'}})"
+  , "      update({'sessionUpdate':'tool_call_update','toolCallId':'fixture-tool','status':'completed','rawOutput':{'answer':'exact response'}})"
   , "      update({'sessionUpdate':'usage_update','used':300000,'size':400000})"
   , "      update({'sessionUpdate':'usage_update','used':148000,'size':400000})"
   , "      update({'sessionUpdate':'usage_update','used':-1,'size':0})"

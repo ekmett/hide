@@ -1,11 +1,13 @@
 {-# LANGUAGE OverloadedStrings #-}
-module THC.Edit.Tooling (withTooling, tickTooling, toolingEffects, completionItems, workspaceEdits, hoverText, diagnosticsCurrent) where
+module THC.Edit.Tooling (Tooling, toolingTool, toolingTools, toolingToolNames, withTooling, tickTooling, toolingEffects, completionItems, workspaceEdits, hoverText, diagnosticsCurrent) where
 
-import Control.Exception (bracket, try, IOException)
+import Control.Exception (bracket, try, IOException, onException)
+import Control.Concurrent.STM
+import System.Timeout (timeout)
 import Control.Concurrent (ThreadId, forkIO, killThread, MVar, newEmptyMVar, putMVar, tryReadMVar)
-import Control.Monad (foldM, forM, forM_, unless)
+import Control.Monad (foldM, forM, forM_, unless, when, void)
 import Data.Aeson
-import Data.Aeson.Types (parseMaybe, Parser)
+import Data.Aeson.Types (parseMaybe, parseEither, Parser)
 import Data.Char (isSpace)
 import qualified Data.Aeson.KeyMap as K
 import qualified Data.Aeson.Key as Key
@@ -24,9 +26,14 @@ import THC.Edit.Model
 import qualified THC.Edit.LSP as L
 
 type Target = (Int,Int,Int)
-data Pending = Pending LanguageAction Target FilePath (M.Map FilePath (Int,T.Text))
+data Pending = Pending LanguageAction Target FilePath (M.Map FilePath (Int,T.Text)) | ToolPending ToolQuery
+data ToolQuery = ToolQuery
+  { queryName :: T.Text, queryTarget :: Target, queryPath :: FilePath, queryArguments :: Value
+  , querySnapshot :: M.Map FilePath (Int,T.Text), queryDeadline :: Integer
+  , queryReply :: TMVar (Either T.Text Value) }
 data Session = Session L.Client (IORef (M.Map Int Pending))
 data Preparing = Preparing Target FilePath T.Text (M.Map FilePath (Int,T.Text)) ThreadId (MVar (Either IOException (M.Map FilePath (Int,T.Text))))
+  | ToolPreparing ToolQuery ThreadId (MVar (Either IOException (M.Map FilePath (Int,T.Text))))
 data Tooling = Tooling
   { sessions :: IORef (M.Map FilePath (Either T.Text Session))
   , roots :: IORef (M.Map FilePath FilePath)
@@ -41,12 +48,129 @@ withTooling = bracket (Tooling <$> newIORef M.empty <*> newIORef M.empty <*> new
 closeTooling :: Tooling -> IO ()
 closeTooling t = do
   cancelPreparation t
-  readIORef (sessions t) >>= mapM_ (either (const (pure ())) (\(Session c _) -> L.stopClient c)) . M.elems
+  readIORef (sessions t) >>= mapM_ (either (const (pure ())) (\(Session c pending) -> do
+    readIORef pending >>= mapM_ (failPending "HLS stopped") . M.elems
+    L.stopClient c)) . M.elems
 
 cancelPreparation :: Tooling -> IO ()
 cancelPreparation t = do
   previous<-atomicModifyIORef' (preparing t) (\p -> (Nothing,p))
-  forM_ previous $ \(Preparing _ _ _ _ worker _) -> killThread worker
+  forM_ previous $ \job -> case job of
+    Preparing _ _ _ _ worker _ -> killThread worker
+    ToolPreparing query worker _ -> completeTool query (Left "Rename preparation cancelled") >> killThread worker
+
+-- These calls share the session's HLS client and response pump. The returned
+-- wait action must run outside the desktop lock, so tickTooling can resolve it.
+toolingToolNames :: [T.Text]
+toolingToolNames = ["lsp_hover","lsp_definition","lsp_type_definition","lsp_references","lsp_document_symbols","lsp_rename"]
+
+toolingTools :: [Value]
+toolingTools = map descriptor toolingToolNames
+  where
+    integer minimumValue=object ["type" .= ("integer"::T.Text),"minimum" .= (minimumValue::Int)]
+    descriptor name=object
+      ["name" .= name,"description" .= (description name<>" Uses live unsaved Haskell source. Input line/column are 1-based Unicode codepoints; raw LSP result coordinates are 0-based UTF-16."),
+       "inputSchema" .= object ["type" .= ("object"::T.Text),"additionalProperties" .= False,
+         "properties" .= object (["bufferId" .= integer 0,"revision" .= integer 0]++
+           (if name=="lsp_document_symbols" then [] else ["line" .= integer 1,"column" .= integer 1])++
+           ["newName" .= object ["type" .= ("string"::T.Text),"minLength" .= (1::Int),"maxLength" .= (256::Int)] | name=="lsp_rename"]++
+           ["includeDeclaration" .= object ["type" .= ("boolean"::T.Text),"default" .= True] | name=="lsp_references"]),
+         "required" .= (["bufferId"]++(if name=="lsp_document_symbols" then [] else ["line","column"])++["revision" | name=="lsp_rename"]++["newName" | name=="lsp_rename"]::[T.Text])],
+       "annotations" .= object ["readOnlyHint" .= (name/="lsp_rename"),"destructiveHint" .= False,"idempotentHint" .= (name/="lsp_rename"),"openWorldHint" .= False]]
+    description :: T.Text -> T.Text
+    description name=case name of
+      "lsp_hover" -> "Return HLS hover/type information."
+      "lsp_definition" -> "Find HLS definitions."
+      "lsp_type_definition" -> "Find HLS type definitions."
+      "lsp_references" -> "Find HLS references."
+      "lsp_document_symbols" -> "List HLS document symbols."
+      _ -> "Rename through HLS, requiring the current revision; edits change buffers, never saved files."
+
+toolingTool :: Tooling -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> T.Text -> Value -> IO (Desktop, IO (Either T.Text Value))
+toolingTool t _ d name arguments = case parseEither parameters arguments of
+  Left err -> pure (d,pure (Left (T.pack err)))
+  Right (target,path,text) -> do
+    active<-readIORef (sessions t)
+    counts<-forM (M.elems active) $ \session -> case session of
+      Left _ -> pure 0
+      Right (Session _ pending) -> length . filter isTool . M.elems <$> readIORef pending
+    preparation<-readIORef (preparing t)
+    if sum counts+(case preparation of Just ToolPreparing{} -> 1; _ -> 0)>=32 then pure (d,pure (Left "Too many pending HLS tools"))
+    else if name=="lsp_rename" && maybe False (const True) preparation then pure (d,pure (Left "A rename is already being prepared"))
+    else do
+      sync t d
+      available<-sessionFor t path
+      case available of
+        Left err -> pure (d,pure (Left err))
+        Right session -> do
+          promise<-newEmptyTMVarIO
+          now<-toInteger <$> getMonotonicTimeNSec
+          let query=ToolQuery name target path arguments (M.fromList [(p,(v,src)) | (_,p,v,src)<-sourceDocuments d]) (now+30000000000) promise
+          if name=="lsp_rename" then do
+            root<-rootFor t path
+            result<-newEmptyMVar
+            worker<-forkIO (try (sourceSnapshot root) >>= putMVar result)
+            writeIORef (preparing t) (Just (ToolPreparing query worker result))
+          else queueTool session query text
+          pure (d,waitTool query)
+  where
+    isTool (ToolPending _) = True
+    isTool _ = False
+    parameters=withObject "HLS tool arguments" $ \o -> do
+      unless (name `elem` toolingToolNames) (fail "Unknown HLS tool")
+      bid<-o .: "bufferId"
+      doc<-maybe (fail "Unknown bufferId") pure (M.lookup bid (buffers d))
+      let b=documentBuffer doc; text=contents b
+      unless (textBuffer b && documentLabel doc==Nothing) (fail "HLS requires a source text buffer")
+      file<-maybe (fail "Save this buffer with a Haskell filename first") pure (documentFile doc)
+      unless (takeExtension (filePath file) `elem` [".hs",".lhs"]) (fail "HLS requires a Haskell source file")
+      expected<-if name=="lsp_rename" then Just <$> o .: "revision" else o .:? "revision"
+      unless (maybe True (==revision b) expected) (fail "Buffer revision changed")
+      pos<-if name=="lsp_document_symbols" then pure 0 else do
+        row<-o .: "line"; col<-o .: "column"
+        unless (row>=1 && row<=bufferLineCount b) (fail "Line is outside the buffer")
+        let line=T.dropWhileEnd (=='\r') (bufferLineAt b (row-1))
+        unless (col>=1 && col<=T.length line+1) (fail "Column is outside the line")
+        pure (bufferLineOffset b (row-1)+col-1)
+      when (name=="lsp_rename") $ do
+        newName<-o .: "newName"
+        unless (not (T.null newName) && T.length newName<=256 && not (T.any (\c -> isSpace c || c<' ') newName)) (fail "Invalid rename identifier")
+      when (name=="lsp_references") (void (o .:? "includeDeclaration" :: Parser (Maybe Bool)))
+      pure ((bid,revision b,pos),filePath file,text)
+
+completeTool :: ToolQuery -> Either T.Text Value -> IO ()
+completeTool query result = void (atomically (tryPutTMVar (queryReply query) result))
+
+waitTool :: ToolQuery -> IO (Either T.Text Value)
+waitTool query = (do
+  now<-toInteger <$> getMonotonicTimeNSec
+  result<-timeout (fromInteger (max 1 ((queryDeadline query-now) `div` 1000))) (atomically (readTMVar (queryReply query)))
+  case result of
+    Just answer -> pure answer
+    Nothing -> completeTool query (Left "HLS request timed out") >> atomically (readTMVar (queryReply query)))
+  `onException` completeTool query (Left "HLS request cancelled")
+
+failPending :: T.Text -> Pending -> IO ()
+failPending err (ToolPending query)=completeTool query (Left err)
+failPending _ _=pure ()
+
+toolActive :: ToolQuery -> IO Bool
+toolActive query = do
+  now<-toInteger <$> getMonotonicTimeNSec
+  when (now>=queryDeadline query) (completeTool query (Left "HLS request timed out"))
+  atomically (isEmptyTMVar (queryReply query))
+
+queueTool :: Session -> ToolQuery -> T.Text -> IO ()
+queueTool (Session client pending) query text = do
+  let name=queryName query
+      (_,_,pos)=queryTarget query
+      method=fromMaybe "textDocument/hover" (lookup name [("lsp_definition","textDocument/definition"),("lsp_type_definition","textDocument/typeDefinition"),("lsp_references","textDocument/references"),("lsp_document_symbols","textDocument/documentSymbol"),("lsp_rename","textDocument/rename")])
+      fields=["textDocument" .= object ["uri" .= L.fileUri (queryPath query)]]++
+        ["position" .= L.positionValue text pos | name/="lsp_document_symbols"]++
+        ["newName" .= fromMaybe Null (member "newName" (queryArguments query)) | name=="lsp_rename"]++
+        ["context" .= object ["includeDeclaration" .= fromMaybe True (parseMaybe (withObject "references" (\o -> o .:? "includeDeclaration" .!= True)) (queryArguments query))] | name=="lsp_references"]
+  ident<-L.request client method (object fields)
+  modifyIORef' pending (M.insert ident (ToolPending query))
 
 sourceDocuments :: Desktop -> [(Int,FilePath,Int,T.Text)]
 sourceDocuments d = [(bid,filePath f,revision b,contents b) | (bid,doc)<-M.toList (buffers d), documentLabel doc==Nothing, textBuffer (documentBuffer doc),
@@ -148,6 +272,28 @@ finishPreparation t d = do
   pending<-readIORef (preparing t)
   case pending of
     Nothing -> pure d
+    Just (ToolPreparing query worker result) -> do
+      active<-toolActive query
+      if not active || fmap fst (targetDocument (queryTarget query) d)/=Just (queryPath query) then do
+        completeTool query (Left "Buffer changed while preparing rename")
+        killThread worker
+        writeIORef (preparing t) Nothing
+        pure d
+      else do
+        completed<-tryReadMVar result
+        case completed of
+          Nothing -> pure d
+          Just answer -> do
+            writeIORef (preparing t) Nothing
+            case answer of
+              Left err -> completeTool query (Left ("Cannot prepare rename: "<>T.pack (show err)))
+              Right disk -> do
+                available<-sessionFor t (queryPath query)
+                case (available,targetDocument (queryTarget query) d) of
+                  (Right session,Just (_,text)) -> queueTool session query {querySnapshot=M.union (querySnapshot query) disk} text
+                  (Left err,_) -> completeTool query (Left err)
+                  _ -> completeTool query (Left "Rename target changed")
+            pure d
     Just (Preparing target path name snapshot _ result)
       | cursorTarget d/=Just target || fmap fst (targetDocument target d)/=Just path ->
           cancelPreparation t >> pure d {status="Rename target changed; request it again."}
@@ -187,9 +333,15 @@ tickTooling t core d = do
   where
     collect desktop (Left _) = pure desktop
     collect desktop (Right (Session client pending)) = do
+      requests<-readIORef pending
+      live<-forM (M.toList requests) $ \(ident,request) -> do
+        active<-case request of ToolPending query -> toolActive query; _ -> pure True
+        pure [(ident,request) | active]
+      writeIORef pending (M.fromList (concat live))
       events<-L.pollEvents client
       foldM (receive pending) desktop events
     receive pending desktop (L.ServerError err) = do
+      readIORef pending >>= mapM_ (failPending err) . M.elems
       writeIORef pending M.empty
       pure desktop {status="HLS: "<>singleLine err,typeHint=""}
     receive _ desktop (L.Diagnostics path version values) = do
@@ -201,6 +353,7 @@ tickTooling t core d = do
       modifyIORef' pending (M.delete ident)
       case M.lookup ident requests of
         Nothing -> pure desktop
+        Just (ToolPending query) -> finishTool query response desktop
         Just (Pending action target path snapshot)
           | fmap fst (targetDocument target desktop)/=Just path -> pure desktop
           | action==TypeInfo && currentTarget desktop/=Just target -> pure desktop
@@ -209,6 +362,32 @@ tickTooling t core d = do
           | otherwise -> case member "result" response of
               Nothing -> pure desktop
               Just result -> applyResult core action target path snapshot result desktop
+
+finishTool :: ToolQuery -> Value -> Desktop -> IO Desktop
+finishTool query response d = do
+  active<-toolActive query
+  if not active then pure d else
+    if fmap fst (targetDocument (queryTarget query) d)/=Just (queryPath query) then completeTool query (Left "Buffer changed while awaiting HLS") >> pure d
+    else case member "error" response of
+      Just err -> completeTool query (Left (fromMaybe "HLS request failed" (member "message" err >>= stringValue))) >> pure d
+      Nothing -> case member "result" response of
+        Nothing -> completeTool query (Left "HLS returned no result") >> pure d
+        Just result -> do
+          let (bid,version,_)=queryTarget query
+          if queryName query=="lsp_rename" then do
+            changed<-renameBuffers (querySnapshot query) result d
+            case changed of
+              Left err -> completeTool query (Left err) >> pure d
+              Right updated -> do
+                let edited=[object ["bufferId" .= ident,"revision" .= revision (documentBuffer doc)] | (ident,doc)<-M.toList (buffers updated), M.lookup ident (buffers d)/=Just doc]
+                -- Cancellation wins atomically against committing the immutable
+                -- desktop value. Late replies can never apply a timed-out edit.
+                stillActive<-toolActive query
+                accepted<-if stillActive then atomically (tryPutTMVar (queryReply query) (Right (object ["bufferId" .= bid,"applied" .= True,"buffers" .= edited]))) else pure False
+                pure (if accepted then updated else d)
+          else do
+            completeTool query (Right (object (["bufferId" .= bid,"revision" .= version,"result" .= result]++["text" .= hoverText result | queryName query=="lsp_hover"])))
+            pure d
 
 member :: T.Text -> Value -> Maybe Value
 member key (Object obj)=K.lookup (Key.fromText key) obj
@@ -329,9 +508,12 @@ workspaceEdits result = maybe (Left "Unsupported workspace edit; no files change
       pure (direct++versioned)
 
 applyRename :: M.Map FilePath (Int,T.Text) -> Value -> Desktop -> IO Desktop
-applyRename snapshot result d = case workspaceEdits result of
-  Left err -> pure (message "Cannot rename" [err] d)
-  Right [] -> pure d {status="No rename edits returned."}
+applyRename snapshot result d = either (\err -> message "Cannot rename" [err] d) id <$> renameBuffers snapshot result d
+
+renameBuffers :: M.Map FilePath (Int,T.Text) -> Value -> Desktop -> IO (Either T.Text Desktop)
+renameBuffers snapshot result d = case workspaceEdits result of
+  Left err -> pure (Left err)
+  Right [] -> pure (Right d {status="No rename edits returned."})
   Right changes -> do
     prepared<-forM changes $ \(path,version,values) -> do
       let opened=find (\(_,doc) -> fmap filePath (documentFile doc)==Just path) (M.toList (buffers d))
@@ -354,8 +536,8 @@ applyRename snapshot result d = case workspaceEdits result of
         unless (and [z<=a' && a/=a' | ((a,z,_),(a',_,_))<-zip sorted (drop 1 sorted)]) (Left "Overlapping rename edits.")
         pure (bid,file,b,sorted)
     case sequence prepared of
-      Left err -> pure (message "Cannot rename" [err] d)
-      Right edits -> pure $ (foldl apply d edits) {status="Rename applied to buffers. Review and save the changed files."}
+      Left err -> pure (Left err)
+      Right edits -> pure $ Right (foldl apply d edits) {status="Rename applied to buffers. Review and save the changed files."}
   where
     apply desktop (existing,file,b,edits) =
       let opened=case existing of Nothing -> addDocument (Just file) b desktop; Just _ -> desktop

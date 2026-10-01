@@ -1,7 +1,9 @@
 {-# LANGUAGE OverloadedStrings #-}
-module THC.Edit.EditorMCP (editorResponse, editorServers, runEditorMCP, readMCPLine) where
+module THC.Edit.EditorMCP (editorResponse, editorResponseWith, builtinTools, builtinTool, debugTools, editorServers, runEditorMCP, runEditorMCPWithHandles, readMCPLine) where
 
-import Control.Exception (bracket)
+import Control.Exception (bracket, try, IOException, finally, catch, mask, throwIO)
+import Control.Concurrent.Async (async, cancel, AsyncCancelled(..))
+import Control.Concurrent.MVar
 import Control.Monad (unless)
 import Data.Aeson
 import qualified Data.Aeson.Key
@@ -12,8 +14,11 @@ import qualified Data.ByteString.Char8 as B8
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.Map.Strict as M
 import Data.Maybe (fromMaybe)
+import Data.List (find)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
+import qualified Data.Text.IO as TIO
+import Paths_thc_edit (getDataFileName)
 import Numeric (showHex)
 import System.Environment (lookupEnv, getExecutablePath)
 import System.IO (Handle, stdin, stdout, hClose, hFlush, hSetBinaryMode)
@@ -21,7 +26,7 @@ import THC.Edit.Buffer
 import THC.Edit.Files (filePath)
 import THC.Edit.Model
 import THC.Edit.Protocol (WirePacket(..), readPacket, writePacket)
-import THC.Edit.RemoteEndpoint (sessionEndpoint, connectEndpoint)
+import THC.Edit.RemoteEndpoint (sessionEndpoint, connectEndpointWithShutdown)
 
 -- ACP starts this small stdio bridge beside its provider. The private session
 -- endpoint supplies a current snapshot without taking over the display.
@@ -33,27 +38,61 @@ editorServers = do
     "args" .= ["--mcp-editor",ident],"env" .= ([]::[Value])] | Just ident<- [session]]
 
 runEditorMCP :: String -> IO ()
-runEditorMCP ident = do
+runEditorMCP ident = runEditorMCPWithHandles ident stdin stdout
+
+runEditorMCPWithHandles :: String -> Handle -> Handle -> IO ()
+runEditorMCPWithHandles ident input outputHandle = do
   path <- sessionEndpoint ident
-  hSetBinaryMode stdin True
-  hSetBinaryMode stdout True
-  let loop pending = do
-        incoming <- readMCPLine stdin pending
+  hSetBinaryMode input True
+  hSetBinaryMode outputHandle True
+  outputLock<-newMVar ()
+  pendingCalls<-newMVar M.empty
+  let output value=withMVar outputLock $ \_ -> BL.hPut outputHandle (encode value<>"\n") >> hFlush outputHandle
+      -- A cancellation can precede connection setup. The latch prevents a
+      -- late connection from starting work, and serializes wakeup with close.
+      invoke active request=mask $ \restore ->
+        let close (connection,_)=do
+              modifyMVar_ active (\(stopped,_) -> pure (stopped,pure ()))
+              hClose connection
+        in bracket (connectEndpointWithShutdown path) close $ \(connection,shutdown) -> do
+          stopped<-modifyMVar active (\(stopped,_) -> pure ((stopped,shutdown),stopped))
+          if stopped then shutdown >> throwIO AsyncCancelled else restore $ do
+            writePacket connection (JsonPacket (object ["type" .= ("inspect"::T.Text),"request" .= request]))
+            reply <- readPacket connection
+            case reply of
+              Just (JsonPacket Null) -> pure ()
+              Just (JsonPacket response) -> output response
+              _ -> ioError (userError "Editor connection ended")
+      stop (worker,active)=do
+        modifyMVar_ active (\(_,shutdown) -> shutdown >> pure (True,pure ()))
+        cancel worker
+      dispatch request@(Object fields)
+        | KM.lookup "method" fields==Just (String "notifications/cancelled") = do
+            let wanted=KM.lookup "params" fields >>= \params -> case params of Object o -> KM.lookup "requestId" o; _ -> Nothing
+            worker<-maybe (pure Nothing) (\key -> M.lookup (encode key) <$> readMVar pendingCalls) wanted
+            mapM_ stop worker
+        | Just requestId<-KM.lookup "id" fields = do
+            let key=encode requestId
+            accepted<-modifyMVar pendingCalls $ \calls ->
+              if M.member key calls || M.size calls>=32 then pure (calls,False) else do
+                active<-newMVar (False,pure ())
+                worker<-async $ (invoke active request `catch` (\(err::IOException) -> do
+                    stopped<-fst <$> readMVar active
+                    unless stopped (output (rpcError requestId (-32603) (T.pack (show err))))))
+                  `finally` modifyMVar_ pendingCalls (pure . M.delete key)
+                pure (M.insert key (worker,active) calls,True)
+            unless accepted (output (rpcError requestId (-32600) "Duplicate request ID or more than 32 pending requests"))
+        | KM.lookup "jsonrpc" fields==Just (String "2.0"), Just (String _)<-KM.lookup "method" fields = pure ()
+      dispatch request=newMVar (False,pure ()) >>= \active -> invoke active request
+      loop pending=do
+        incoming<-readMCPLine input pending
         case incoming of
           Nothing -> pure ()
           Just (line,rest) -> do
-            case eitherDecodeStrict' line of
-              Left _ -> output (rpcError Null (-32700) "Invalid JSON")
-              Right request -> bracket (connectEndpoint path) hClose $ \connection -> do
-                writePacket connection (JsonPacket (object ["type" .= ("inspect"::T.Text),"request" .= (request::Value)]))
-                reply <- readPacket connection
-                case reply of
-                  Just (JsonPacket Null) -> pure ()
-                  Just (JsonPacket response) -> output response
-                  _ -> ioError (userError "Editor introspection connection ended")
+            either (const (output (rpcError Null (-32700) "Invalid JSON"))) dispatch (eitherDecodeStrict' line)
             loop rest
-      output value=BL.hPut stdout (encode value<>"\n") >> hFlush stdout
-  loop BS.empty
+      cleanup=readMVar pendingCalls >>= mapM_ stop . M.elems
+  loop BS.empty `finally` cleanup
 
 -- Enforce the limit while reading, including requests without a terminating
 -- newline. Keep bytes after a newline for the next JSON-RPC message.
@@ -76,7 +115,10 @@ rpcError :: Value -> Int -> T.Text -> Value
 rpcError ident code text=object ["jsonrpc" .= ("2.0"::T.Text),"id" .= ident,"error" .= object ["code" .= code,"message" .= text]]
 
 editorResponse :: Desktop -> Value -> Maybe Value
-editorResponse desktop request = case request of
+editorResponse = responseWithTools []
+
+responseWithTools :: [Value] -> Desktop -> Value -> Maybe Value
+responseWithTools extra desktop request = case request of
   Object fields | KM.lookup "jsonrpc" fields==Just (String "2.0"), Just (String method)<-KM.lookup "method" fields ->
     case KM.lookup "id" fields of
       Nothing -> Nothing
@@ -88,19 +130,31 @@ editorResponse desktop request = case request of
     dispatch "initialize" params = do
       requested <- parameters (withObject "initialize" (.: "protocolVersion")) params
       let version=if requested `elem` (["2024-11-05","2025-03-26","2025-06-18","2025-11-25"]::[T.Text]) then requested else "2025-11-25"
-      pure (object ["protocolVersion" .= version,"capabilities" .= object ["tools" .= object []],
+      pure (object ["protocolVersion" .= version,"capabilities" .= object ["tools" .= object [],"resources" .= object []],
         "serverInfo" .= object ["name" .= ("thc-edit"::T.Text),"version" .= ("0.1.0"::T.Text)],
-        "instructions" .= ("Read the editor's live windows and buffers. Buffer contents include unsaved edits; IDs are stable for this editor session. Line numbers start at 1. These tools do not modify files."::T.Text)])
+        "instructions" .= ("Work with the live editor session. Buffers include unsaved edits; IDs belong to this session. Lines and columns start at 1; byte offsets start at 0. Discover tool schemas before use. Debugging guidance is available at thc-edit://debugging. Execution and navigation tools change the live session; inspect their annotations."::T.Text)])
     dispatch "ping" _=Right (object [])
-    dispatch "tools/list" _=Right (object ["tools" .= tools])
+    dispatch "tools/list" _=Right (object ["tools" .= (filter (\entry -> not (any (sameTool entry) extra)) tools++extra)])
+    dispatch "resources/list" _=Right (object ["resources" .= [object ["uri" .= skillURI,"name" .= ("Debugging with the editor"::T.Text),"mimeType" .= ("text/markdown"::T.Text),"description" .= ("A workflow for source breakpoints, stepping, stack and variable inspection."::T.Text)]]])
     dispatch "tools/call" params = do
       (name,args)<-parameters (withObject "tool call" $ \o -> (,) <$> o .: "name" <*> o .:? "arguments" .!= object []) params
-      case tool name args of
+      case builtinTool desktop name args of
         Left err -> pure (result True (String err))
         Right value -> pure (result False value)
     dispatch _ _=Left (-32601,"Method not found")
     parameters parser = either (Left . (-32602,) . T.pack) Right . parseEither parser
     result failed value=object ["isError" .= failed,"content" .= [object ["type" .= ("text"::T.Text),"text" .= TE.decodeUtf8 (BL.toStrict (encode value))]]]
+    sameTool (Object a) (Object b)=KM.lookup "name" a==KM.lookup "name" b
+    sameTool _ _=False
+
+builtinTools :: [Value]
+builtinTools=tools
+
+-- Exposed separately so session permission policy can wrap built-in reads just
+-- like runtime tools, without decoding a JSON-RPC response back into a value.
+builtinTool :: Desktop -> T.Text -> Value -> Either T.Text Value
+builtinTool desktop=tool
+  where
     tool :: T.Text -> Value -> Either T.Text Value
     tool "list_windows" _=Right (object ["windows" .= (map window (windows desktop)++panels)])
     tool "list_buffers" _=Right (object ["buffers" .= [bufferInfo ident doc | (ident,doc)<-M.toAscList (buffers desktop)]])
@@ -141,6 +195,88 @@ editorResponse desktop request = case request of
     title doc=fromMaybe (maybe "Untitled" (T.pack . filePath) (documentFile doc)) (documentLabel doc)
     bufferInfo ident doc=object ["bufferId" .= ident,"title" .= title doc,"path" .= fmap filePath (documentFile doc),
       "modified" .= dirty (documentBuffer doc),"binary" .= byteMode (documentBuffer doc),"revision" .= revision (documentBuffer doc)]
+
+-- Initiation runs with the desktop locked. Waiting for protocol replies must
+-- happen afterwards so the same session can continue polling HLS and DAP.
+editorResponseWith :: [Value]
+  -> (Desktop -> T.Text -> Value -> IO (Desktop, IO (Either T.Text Value)))
+  -> Desktop -> Value -> IO (Desktop, IO (Maybe Value))
+editorResponseWith extra execute desktop request = case request of
+  Object fields | KM.lookup "jsonrpc" fields==Just (String "2.0")
+    , Just ident<-KM.lookup "id" fields
+    , Just (String method)<-KM.lookup "method" fields ->
+      let params=fromMaybe (object []) (KM.lookup "params" fields)
+          reply value=Just (object ["jsonrpc" .= ("2.0"::T.Text),"id" .= ident,"result" .= value])
+          bad err=pure (desktop,pure (Just (rpcError ident (-32602) (T.pack err))))
+      in case method of
+        "tools/call" -> case parseEither (withObject "tool call" $ \o -> (,) <$> o .: "name" <*> o .:? "arguments" .!= object []) params of
+          Left err -> bad err
+          Right (name,args) | Just descriptor<-find (named name) extra
+            , Left err<-validateArguments descriptor args -> pure (desktop,pure (reply (toolResult (Left err))))
+          Right (name,args) | any (named name) extra -> do
+            started<-try (execute desktop name args)
+            case started of
+              Left (err::IOException) -> pure (desktop,pure (reply (toolResult (Left (T.pack (show err))))))
+              Right (updated,finish) -> pure (updated, do
+                result<-try finish
+                pure (reply (case either (Left . T.pack . show) id (result::Either IOException (Either T.Text Value)) of
+                  Right value | name=="editor_screen" -> value
+                  outcome -> toolResult outcome)))
+          _ -> fallback
+        "resources/read" -> case parseEither (withObject "resource" (.: "uri")) params of
+          Left err -> bad err
+          Right uri | uri==skillURI -> pure (desktop,do
+            loaded<-try (getDataFileName "skills/debug-editor/SKILL.md" >>= TIO.readFile)
+            pure $ case loaded of
+              Left (err::IOException) -> Just (rpcError ident (-32603) (T.pack (show err)))
+              Right content -> reply (object ["contents" .= [object ["uri" .= skillURI,"mimeType" .= ("text/markdown"::T.Text),"text" .= content]]]))
+          Right _ -> pure (desktop,pure (Just (rpcError ident (-32002) "Resource not found")))
+        _ -> fallback
+  _ -> fallback
+  where
+    fallback=pure (desktop,pure (responseWithTools extra desktop request))
+    named name (Object fields)=KM.lookup "name" fields==Just (String name)
+    named _ _=False
+
+-- The schema is also enforced at dispatch, so misspelled optional arguments
+-- cannot silently turn a requested operation into a different one.
+validateArguments :: Value -> Value -> Either T.Text ()
+validateArguments (Object descriptor) (Object args)=case KM.lookup "inputSchema" descriptor of
+  Just (Object schema) -> do
+    case KM.lookup "properties" schema of
+      Just (Object properties) -> unless (all (`KM.member` properties) (KM.keys args)) (Left "Unknown tool argument")
+      _ -> pure ()
+    case KM.lookup "required" schema of
+      Just (Array required) -> unless (all (\item -> case item of String key -> KM.member (Data.Aeson.Key.fromText key) args; _ -> False) required) (Left "Missing required tool argument")
+      _ -> pure ()
+  _ -> Right ()
+validateArguments _ _=Left "Tool arguments must be an object"
+
+skillURI :: T.Text
+skillURI="thc-edit://debugging"
+
+toolResult :: Either T.Text Value -> Value
+toolResult (Right value) | BL.length (encode value)>4194304=toolResult (Left "Tool result exceeds 4 MiB; request a smaller page.")
+toolResult outcome=object ["isError" .= either (const True) (const False) outcome,
+  "content" .= [object ["type" .= ("text"::T.Text),"text" .= TE.decodeUtf8 (BL.toStrict (encode (either String id outcome)))]]]
+
+debugTools :: [Value]
+debugTools =
+  [ describe "debug_status" "Read connection, stop state, generation, selected frame, capabilities, breakpoints and recent output." True [] []
+  , describe "debug_launch" "Launch the configured THC target, or a general DAP adapter JSON configuration. Fails if a session is already active." False [] [("adapterConfig",str),("port",integer)]
+  , describe "debug_attach" "Attach to a loopback DAP adapter (127.0.0.1:4711 by default)." False [] [("host",str),("port",integer)]
+  , describe "debug_control" "Continue, step, pause or disconnect the current debug generation. Accepted does not mean the next stop has occurred; inspect status afterwards." False ["generation","command"] [("generation",integer),("command",enum ["continue","next","stepIn","stepOut","pause","disconnect"])]
+  , describe "debug_set_breakpoints" "Replace source breakpoints for an open buffer, using 1-based lines. Reports pending/verified state; unsaved buffers are marked sourceModified." False ["generation","bufferId","lines"] [("generation",integer),("bufferId",integer),("lines",object ["type" .= ("array"::T.Text),"items" .= object ["type" .= ("integer"::T.Text),"minimum" .= (1::Int)],"maxItems" .= (1000::Int)])]
+  , describe "debug_inspect" "Inspect threads, stackTrace, scopes, variables or source using generation-scoped handles. Stack and variables require a stopped target. start/count page results (100 default, 1000 max)." True ["generation","request"] ([("generation",integer),("request",enum ["threads","stackTrace","scopes","variables","source"]) ]++[(key,integer) | key<-["threadId","frameId","variablesReference","sourceReference","start","count"]])
+  ]
+  where
+    str=object ["type" .= ("string"::T.Text)]
+    integer=object ["type" .= ("integer"::T.Text)]
+    enum values=object ["type" .= ("string"::T.Text),"enum" .= (values::[T.Text])]
+    describe :: T.Text -> T.Text -> Bool -> [T.Text] -> [(T.Text,Value)] -> Value
+    describe name description readOnly required properties=object ["name" .= name,"description" .= description,
+      "inputSchema" .= object ["type" .= ("object"::T.Text),"properties" .= object [Data.Aeson.Key.fromText key .= value | (key,value)<-properties],"required" .= required,"additionalProperties" .= False],
+      "annotations" .= object ["readOnlyHint" .= readOnly,"destructiveHint" .= not readOnly,"openWorldHint" .= not readOnly]]
 
 tools :: [Value]
 tools =

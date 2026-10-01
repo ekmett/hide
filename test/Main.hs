@@ -13,7 +13,17 @@ import qualified ProtocolCheck
 import qualified RemoteCheck
 import qualified RemoteWindowCheck
 import qualified RemoteTerminalCheck
+import qualified DocsMCPCheck
+import qualified ControlMCPCheck
+import qualified DefaultsCheck
+import qualified MCPPermissionsCheck
 import qualified EditorMCPCheck
+import qualified HistoryMCPCheck
+import qualified RuntimeMCPCheck
+import qualified ScreenCaptureCheck
+import qualified WorkspaceMCPCheck
+import qualified WorkspaceFilesMCPCheck
+import qualified TestsMCPCheck
 #endif
 import qualified UnicodeCheck
 import qualified HexCheck
@@ -61,7 +71,17 @@ main = do
   RemoteCheck.checks
   RemoteWindowCheck.checks
   RemoteTerminalCheck.checks
+  DocsMCPCheck.checks
+  ControlMCPCheck.checks
+  DefaultsCheck.checks
+  MCPPermissionsCheck.checks
   EditorMCPCheck.checks
+  HistoryMCPCheck.checks
+  RuntimeMCPCheck.checks
+  ScreenCaptureCheck.checks
+  WorkspaceMCPCheck.checks
+  WorkspaceFilesMCPCheck.checks
+  TestsMCPCheck.checks
 #endif
 #ifdef WITH_PROTOCOL
   ProtocolCheck.checks

@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module EditorMCPCheck (checks) where
 import Control.Monad (unless)
+import Data.IORef
 import Control.Exception (bracket, try, IOException)
 import System.Directory (getTemporaryDirectory, removeFile)
 import System.IO (openBinaryTempFile, hClose, hSeek, SeekMode(AbsoluteSeek))
@@ -41,6 +42,35 @@ checks = do
   check "MCP invalid request is protocol error" (case editorResponse edited Null of Just (Object fields)->KM.member "error" fields; _->False)
   let decoded=content >>= parseMaybe (withObject "reply" (.: "result")) :: Maybe Value
   check "MCP tool result envelope exists" (decoded/=Nothing)
+  invoked<-newIORef (0::Int)
+  completed<-newIORef False
+  let execute d _ _=do
+        modifyIORef' invoked (+1)
+        pure (d {status="initiated"},writeIORef completed True >> pure (Right (object ["ready" .= True])))
+      request name args=rpc "tools/call" (object ["name" .= (name::T.Text),"arguments" .= args])
+  (updated,finish)<-editorResponseWith debugTools execute edited (request "debug_status" (object []))
+  check "MCP initiation updates desktop before deferred completion" (status updated=="initiated")
+  check "MCP does not wait while initializing tool" . not =<< readIORef completed
+  reply<-finish
+  check "MCP deferred result wraps JSON response" (maybe False (T.isInfixOf "ready" . text) reply)
+  (_,ignored)<-editorResponseWith debugTools execute edited (request "not_a_tool" (object []))
+  _<-ignored
+  check "MCP unknown tool never dispatches controller" . (==1) =<< readIORef invoked
+  (_,notification)<-editorResponseWith debugTools execute edited (object ["jsonrpc" .= ("2.0"::T.Text),"method" .= ("tools/call"::T.Text),"params" .= object ["name" .= ("debug_launch"::T.Text)]])
+  check "MCP notifications never initiate a mutation" . (==Nothing) =<< notification
+  check "MCP mutation notification leaves controller untouched" . (==1) =<< readIORef invoked
+  check "built-in read operation can be called through permission wrapper" (case builtinTool edited "list_buffers" (object []) of Right (Object fields) -> KM.member "buffers" fields; _ -> False)
+  (_,gatedRead)<-editorResponseWith builtinTools execute edited (request "list_buffers" (object []))
+  _<-gatedRead
+  check "registered built-in reads use controller callback" . (==2) =<< readIORef invoked
+  (_,registered)<-editorResponseWith builtinTools execute edited (rpc "tools/list" (object []))
+  listed<-registered
+  check "built-in descriptors registered for permissions are not duplicated" (case listed of
+    Just (Object fields) -> KM.lookup "result" fields==Just (object ["tools" .= builtinTools])
+    _ -> False)
+  (_,readSkill)<-editorResponseWith debugTools execute edited (rpc "resources/read" (object ["uri" .= ("thc-edit://debugging"::T.Text)]))
+  skill<-readSkill
+  check "MCP packaged skill readable" (maybe False (T.isInfixOf "name: debug-editor" . text) skill)
   temp<-getTemporaryDirectory
   bracket (openBinaryTempFile temp "thc-mcp-line") (\(path,h)->hClose h >> removeFile path) $ \(_,h) -> do
     BS.hPut h "first\nsecond\n"

@@ -1,14 +1,28 @@
 {-# LANGUAGE CPP, OverloadedStrings #-}
 module THC.Edit.App (main, demoDesktop, applyEffects) where
 
+import Control.Applicative ((<|>))
+import Data.Maybe (fromMaybe)
+import THC.Edit.DocsMCP
+import THC.Edit.Defaults
+import THC.Edit.MCPPermissions
+import THC.Edit.ControlMCP
 import Control.Exception (bracket, finally, catch, AsyncException(UserInterrupt), throwIO)
 import Control.Concurrent (myThreadId, throwTo)
 #ifndef mingw32_HOST_OS
 import System.Posix.Signals (installHandler, Handler(Catch), sigTERM, sigHUP)
 #endif
-import Data.Aeson (object, (.=))
+import Data.Aeson (object, (.=), withObject, (.:?), (.!=))
 import THC.Edit.Protocol (WirePacket(..))
-import THC.Edit.EditorMCP (runEditorMCP)
+import Data.Aeson.Types (parseEither)
+import qualified THC.Edit.Font as Font
+import THC.Edit.ScreenCapture (capture, screenTool)
+import THC.Edit.TestsMCP
+import THC.Edit.WorkspaceFilesMCP
+import THC.Edit.HistoryMCP
+import THC.Edit.RuntimeMCP
+import THC.Edit.WorkspaceMCP
+import THC.Edit.EditorMCP (runEditorMCP, editorResponseWith, debugTools, builtinTools, builtinTool)
 import THC.Edit.Session
 import THC.Edit.Completion (bashCompletion)
 import THC.Edit.RemoteTerminal (runRemoteTerminal)
@@ -45,7 +59,7 @@ import THC.Edit.Render
 import THC.Edit.Files
 import THC.Edit.Reconcile
 
-data Option = MCPBridge String | Resume (Maybe String) | SSH String | RemoteSession String | RemoteDaemon String | Use Backend | Scale String | Size String | Mode String | ColorMode String | Demo | CRT | MaterialIcons | WordStar | Snapshot | Html | Scene String | Usage deriving Eq
+data Option = MCPBridge String | Resume (Maybe String) | SSH String | RemoteSession String | RemoteDaemon String | Use Backend | Scale String | Size String | Mode String | ColorMode String | Demo | CRT | NoCRT | MaterialIcons | ClassicIcons | WordStar | StandardKeys | CursorBlink Bool | Pixelate Bool | Snapshot | Html | Scene String | Usage deriving Eq
 options :: [OptDescr Option]
 options = [Option [] ["appearance"] (ReqArg ColorMode "light|dark|system") "Document/terminal colors (default THC_EDIT_APPEARANCE or system)"
           ,Option [] ["metal"] (NoArg (Use Metal)) "Open a Metal window"
@@ -58,6 +72,13 @@ options = [Option [] ["appearance"] (ReqArg ColorMode "light|dark|system") "Docu
           ,Option [] ["window"] (NoArg (Use Auto)) "Open a window using the platform backend"
           ,Option [] ["terminal"] (NoArg (Use Terminal)) "Use the terminal (override THC_EDIT_BACKEND)"
           ,Option [] ["crt"] (NoArg CRT) "Enable CRT scanlines and vignetting (window only)"
+          ,Option [] ["no-crt"] (NoArg NoCRT) "Disable CRT filtering"
+          ,Option [] ["classic-icons"] (NoArg ClassicIcons) "Use standard folder icons"
+          ,Option [] ["standard-keys"] (NoArg StandardKeys) "Use standard editing keys"
+          ,Option [] ["blink-cursor"] (NoArg (CursorBlink True)) "Blink the editing cursor"
+          ,Option [] ["no-blink-cursor"] (NoArg (CursorBlink False)) "Keep the editing cursor steady"
+          ,Option [] ["pixelate-unicode"] (NoArg (Pixelate True)) "Pixelate Unicode glyphs"
+          ,Option [] ["no-pixelate-unicode"] (NoArg (Pixelate False)) "Render Unicode glyphs smoothly"
           ,Option [] ["material-icons"] (NoArg MaterialIcons) "Use Material folder icons (terminal requires a compatible Nerd Font)"
           ,Option [] ["scale"] (ReqArg Scale "FACTOR") "Window pixel scale, 1 to 8 in 1/8 steps (default THC_EDIT_SCALE or display density)"
           ,Option [] ["mode"] (ReqArg Mode "NUMBER") "Window screen mode: 3 (80x25), 259 (80x50); default 3"
@@ -79,9 +100,9 @@ main = do
 
 runEditor :: [String] -> IO ()
 runEditor args = do
-  backendDefault<-lookupEnv "THC_EDIT_BACKEND"
-  scaleDefault<-lookupEnv "THC_EDIT_SCALE"
-  appearanceDefault<-lookupEnv "THC_EDIT_APPEARANCE"
+  backendEnvironment<-lookupEnv "THC_EDIT_BACKEND"
+  scaleEnvironment<-lookupEnv "THC_EDIT_SCALE"
+  appearanceEnvironment<-lookupEnv "THC_EDIT_APPEARANCE"
   terminalColors<-lookupEnv "COLORFGBG"
   let (flags,paths,errors)=getOpt Permute (options++[Option [] ["mcp-editor"] (ReqArg MCPBridge "ID") "Internal editor introspection bridge",Option [] ["remote-daemon"] (ReqArg RemoteDaemon "ID") "Internal remote session process"]) (resumeArguments args)
   if not (null errors) then die (concat errors)
@@ -90,6 +111,12 @@ runEditor args = do
     [MCPBridge ident] | null paths -> runEditorMCP ident
     _ -> die "--mcp-editor accepts only a session ID."
   else do
+    defaultsJSON<-readEditorDefaults >>= either (die . T.unpack) pure
+    defaults<-either die pure (parseEither parseDefaults defaultsJSON)
+    let backendDefault=backendEnvironment <|> defaultBackend defaults
+        scaleDefault=scaleEnvironment <|> (show <$> defaultScale defaults)
+        appearanceDefault=appearanceEnvironment <|> defaultAppearance defaults
+        flagBool yes no fallback=fromMaybe fallback (lastMaybe [value | flag<-flags, Just value<-[if flag==yes then Just True else if flag==no then Just False else Nothing]])
     daemon <- case [sid | RemoteDaemon sid<-flags] of []->pure Nothing; [sid]->pure (Just sid); _->die "Specify --remote-daemon once."
     resume <- case [ident | Resume ident<-flags] of
       [] -> pure Nothing
@@ -116,14 +143,14 @@ runEditor args = do
       [s] -> parseAppearance s
       _ -> die "Specify --appearance only once."
     screenMode <- case [s | Mode s <- flags] of
-      [] -> pure 3
+      [] -> pure (fromMaybe 3 (defaultScreenMode defaults))
       [s] -> either die pure (parseScreenMode s)
       _ -> die "Specify --mode or --vga50 only once."
     when (backend == Terminal && any isMode flags && Snapshot `notElem` flags && Html `notElem` flags) $
       die "--mode/--vga50 requires --window, --metal or --vulkan; terminal size is controlled by your terminal."
     scale <- either die pure (chooseScale scaleDefault [s | Scale s <- flags])
     dimensions <- case [s | Size s <- flags] of
-      [] -> pure (modeSize screenMode)
+      [] -> let (cols,rows)=modeSize screenMode in pure (if any isMode flags then (cols,rows) else (fromMaybe cols (defaultColumns defaults),fromMaybe rows (defaultRows defaults)))
       [s] -> either die pure (parseWindowSize s)
       _ -> die "Specify --size only once."
     if backend==Remote && daemon==Nothing then runRemoteRelay (remoteArguments flags paths)
@@ -163,7 +190,7 @@ runEditor args = do
       (withDetachSignals (attach display) `catch` (\err -> writeIORef wasInterrupted True >> interrupted err)) `finally` report
     else do
         let initial=if Demo `elem` flags then addDocument Nothing (newBuffer (activeText demoDesktop)) (initialDesktop dimensions) else initialDesktop dimensions
-            configured=(fst (handleEvent (uncurry V.EvResize dimensions) initial)) {appearance=colorMode,systemDark=maybe True (not . (`elem` ["7","15"]) . reverse . takeWhile (/=';') . reverse) terminalColors,wordStar=WordStar `elem` flags,crtFilter=CRT `elem` flags,materialIcons=MaterialIcons `elem` flags,videoMode=if backend == Terminal then Nothing else Just screenMode}
+            configured=(fst (handleEvent (uncurry V.EvResize dimensions) initial)) {appearance=colorMode,systemDark=maybe True (not . (`elem` ["7","15"]) . reverse . takeWhile (/=';') . reverse) terminalColors,wordStar=flagBool WordStar StandardKeys (fromMaybe (wordStar initial) (defaultWordStar defaults)),crtFilter=flagBool CRT NoCRT (fromMaybe (crtFilter initial) (defaultCRT defaults)),materialIcons=flagBool MaterialIcons ClassicIcons (fromMaybe (materialIcons initial) (defaultMaterialIcons defaults)),blinkCursor=fromMaybe (fromMaybe (blinkCursor initial) (defaultBlinkCursor defaults)) (lastMaybe [value | CursorBlink value<-flags]),pixelateUnicode=fromMaybe (fromMaybe (pixelateUnicode initial) (defaultPixelateUnicode defaults)) (lastMaybe [value | Pixelate value<-flags]),videoMode=if backend == Terminal then Nothing else Just screenMode}
         localPaths<-if daemon/=Nothing then mapM expandRemoteHome paths else pure paths
         (_,loaded)<-applyEffects configured (map ReadPath localPaths)
         cwd<-getCurrentDirectory
@@ -177,13 +204,52 @@ runEditor args = do
         else if Snapshot `elem` flags then TIO.putStr (snapshot staged)
         else do
           mapM_ (setEnv "THC_EDIT_SESSION") daemon
-          withDebugger $ \debugger -> withConversation $ \conversation -> withTooling $ \tooling -> withGitOperations $ \gitOperations -> withReconciliation $ \reconciliation -> do
-            let effects=gitOperationEffects gitOperations (debuggerEffects debugger (conversationEffects conversation (reconciliationEffects reconciliation (toolingEffects tooling applyEffects))))
-                tick d=tickGitOperations gitOperations applyEffects d >>= tickTooling tooling applyEffects >>= tickReconciliation reconciliation >>= tickConversation conversation >>= tickDebugger debugger (toolingEffects tooling applyEffects)
+          font<-Font.loadFont
+          let specs=builtinTools++debugTools++chatTools++toolingTools++workspaceTools++fileTools++testsTools++historyTools++runtimeTools++controlTools++docsTools++[screenTool]
+          withPermissions specs $ \permissions -> withDebugger $ \debugger -> withConversation $ \conversation -> withTooling $ \tooling -> withGitOperations $ \gitOperations -> withReconciliation $ \reconciliation -> do
+            exiting<-newIORef False
+            let runtimeEffects=gitOperationEffects gitOperations (debuggerEffects debugger (conversationEffects conversation (reconciliationEffects reconciliation (toolingEffects tooling applyEffects))))
+                core d pending=foldM step (False,d) pending
+                  where
+                    step result@(True,_) _=pure result
+                    step (_,current) (SetScreenMode mode)=pure (False,(resizeScreenMode (modeSize mode) current) {videoMode=Just mode})
+                    step (_,current) effect=do
+                      result@(quit,_)<-runtimeEffects current [effect]
+                      when quit (writeIORef exiting True)
+                      pure result
+                effects d pending=do
+                  writeIORef exiting False
+                  (quit,updated)<-policyEffects permissions core d pending
+                  approvedExit<-readIORef exiting
+                  pure (quit || approvedExit,updated)
+                tick d=tickGitOperations gitOperations applyEffects d >>= tickTooling tooling applyEffects >>= tickReconciliation reconciliation >>= tickConversation conversation >>= tickDebugger debugger (toolingEffects tooling applyEffects) >>= tickPermissions permissions
+                inspectTool d name parameters
+                  | name `elem` ["list_windows","list_buffers","read_buffer","read_selection"] = pure (d,pure (builtinTool d name parameters))
+                  | name `elem` chatToolNames = chatTool conversation d name parameters
+                  | name `elem` toolingToolNames = toolingTool tooling core d name parameters
+                  | name `elem` workspaceToolNames = workspaceTool core d name parameters
+                  | name `elem` fileToolNames = fileTool core d name parameters
+                  | name `elem` testsToolNames = testsTool conversation d name parameters
+                  | name `elem` historyToolNames = historyTool d name parameters
+                  | name `elem` runtimeToolNames = runtimeTool conversation d name parameters
+                  | name `elem` docsToolNames = docsTool d name parameters
+                  | name `elem` controlToolNames = controlTool core d name parameters
+                  | name=="editor_screen" = pure (d,case parseEither (withObject "screen" (\o -> o .:? "image" .!= False)) parameters of
+                      Left err -> pure (Left (T.pack err))
+                      Right image -> capture font d image)
+                  | otherwise = debuggerTool debugger core d name parameters
+                inspect d request=do
+                  writeIORef exiting False
+                  (updated,finish)<-editorResponseWith specs (permissionCall permissions inspectTool) d request
+                  quit<-readIORef exiting
+                  pure (quit,updated,finish)
             case daemon of
-              Just sid -> runRemoteDaemon sid scale effects tick staged
+              Just sid -> runRemoteDaemon sid scale effects tick inspect staged
               Nothing -> die "Missing session process identity."
+
   where
+    lastMaybe []=Nothing
+    lastMaybe values=Just (last values)
     parseAppearance s = maybe (die "Appearance must be light, dark, or system.") pure (lookup s [("light",LightMode),("dark",DarkMode),("system",SystemMode)])
     isMode Mode{} = True
     isMode _ = False
@@ -251,6 +317,11 @@ remoteArguments flags paths = concatMap option flags++["--"]++paths
     option (Scene s)=["--scene",s]
     option Demo=["--demo"]
     option CRT=["--crt"]
+    option NoCRT=["--no-crt"]
+    option ClassicIcons=["--classic-icons"]
+    option StandardKeys=["--standard-keys"]
+    option (CursorBlink yes)=[if yes then "--blink-cursor" else "--no-blink-cursor"]
+    option (Pixelate yes)=[if yes then "--pixelate-unicode" else "--no-pixelate-unicode"]
     option MaterialIcons=["--material-icons"]
     option WordStar=["--wordstar"]
     option _=[]
@@ -290,6 +361,7 @@ applyEffects = foldM apply . (False,)
     apply (_,d) ReviewExternal=pure (False,d {status="Disk change monitoring is unavailable in this preview."})
     apply (_,d) ResolveConflict{}=pure (False,d {status="Disk change monitoring is unavailable in this preview."})
     apply (_,d) DebugAction{}=pure (False,d {status="Debugger unavailable in this preview."})
+    apply (_,d) PermissionAction{}=pure (False,d {status="Agent permissions are unavailable in this preview."})
     apply (_,d) AgentAction{}=pure (False,d {status="Agents are unavailable in this preview."})
     apply (_,d) DownloadDocument{}=pure (False,d)
     apply (_,d) ReadBrowserClipboard=pure (False,d)

@@ -2,6 +2,7 @@
 module DebuggerCheck (checks) where
 
 import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async (withAsync, poll, wait)
 import Control.Exception (bracket)
 import Control.Monad (unless, when)
 import Data.Aeson
@@ -9,7 +10,7 @@ import Data.IORef
 import qualified Data.ByteString.Lazy as BL
 import Data.Aeson.Types (parseMaybe)
 import qualified Data.Map.Strict as M
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isJust)
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
 import System.Directory
@@ -24,7 +25,7 @@ import THC.Edit.Files (FileState(..))
 import THC.Edit.Model
 
 checks :: IO ()
-checks = startupDeadlineCheck >> launchChecks >> mapM_ session ["basic", "frame", "choices", "breakpoints", "reconnect"] >> putStrLn "Debugger checks passed"
+checks = startupDeadlineCheck >> launchChecks >> mapM_ session ["basic", "frame", "choices", "breakpoints", "reconnect", "mcp"] >> putStrLn "Debugger checks passed"
   where
     session mode = bracket (fixture mode) cleanup $ \(port,logPath,process) -> withDebugger $ \runtime -> do
       let core d _=pure (False,d)
@@ -102,6 +103,73 @@ checks = startupDeadlineCheck >> launchChecks >> mapM_ session ["basic", "frame"
             let changes=[fromMaybe [] (field "breakpoints" args) | req<-requests, field "command" req==Just ("setBreakpoints"::T.Text),Just args<-[field "arguments" req]] :: [[Value]]
             check "fixture exercised different snapshots and repeated original list" (map (map (field "line")) changes==[[Just (2::Int)],[Just 2,Just 1],[Just 2]])
             pure shown
+          "mcp" -> do
+            let tool name args desktop=do
+                  (updated,result)<-debuggerTool runtime core desktop name (object args)
+                  value<-result
+                  pure (updated,value)
+                success name args desktop=do
+                  (updated,result)<-tool name args desktop
+                  either (error . T.unpack) (pure . (updated,)) result
+                rejected name args desktop=do
+                  (updated,result)<-tool name args desktop
+                  check ("MCP rejects "<>T.unpack name) (either (const True) (const False) result && updated==desktop)
+                current desktop=snd <$> success "debug_status" [] desktop
+                epoch value=fromMaybe (error "missing debugger generation") (field "generation" value) :: Int
+                inspect args desktop=do
+                  (updated,result)<-debuggerTool runtime core desktop "debug_inspect" (object args)
+                  withAsync result $ \pending -> do
+                    drained<-waitForIO "MCP inspection reply" (\_ -> isJust <$> poll pending) updated
+                    value<-wait pending >>= either (error . T.unpack) pure
+                    check "MCP inspection leaves UI unchanged" (drained==desktop)
+                    pure value
+            snapshot<-current stopped
+            let gen=epoch snapshot
+                virtualId=maybe (error "missing debugger source buffer") bufferId (activeWindow stopped)
+            check "MCP reports connected, stopped selection" (field "connected" snapshot==Just True && field "stopped" snapshot==Just True && field "threadId" snapshot==Just (7::Int))
+            rejected "debug_attach" ["port" .= (read port::Int)] stopped
+            rejected "debug_launch" [] stopped
+            rejected "debug_control" ["generation" .= (gen-1),"command" .= ("continue"::T.Text)] stopped
+            rejected "debug_control" ["generation" .= gen,"command" .= ("pause"::T.Text)] stopped
+            rejected "debug_inspect" ["generation" .= gen,"request" .= ("evaluate"::T.Text)] stopped
+            rejected "debug_inspect" ["generation" .= gen,"request" .= ("variables"::T.Text),"variablesReference" .= (0::Int)] stopped
+            rejected "debug_inspect" ["generation" .= gen,"request" .= ("threads"::T.Text),"count" .= (1001::Int)] stopped
+            rejected "debug_status" ["unknown" .= True] stopped
+            rejected "debug_set_breakpoints" ["generation" .= gen,"bufferId" .= virtualId,"lines" .= ([0]::[Int])] stopped
+            rejected "debug_set_breakpoints" ["generation" .= gen,"bufferId" .= virtualId,"lines" .= replicate 1001 (1::Int)] stopped
+            rejected "debug_set_breakpoints" ["generation" .= gen,"bufferId" .= (999999::Int),"lines" .= ([]::[Int])] stopped
+            scopesResult<-inspect ["generation" .= gen,"request" .= ("scopes"::T.Text)] stopped
+            check "MCP receives scope body" ((field "body" scopesResult >>= field "scopes" :: Maybe [Value])/=Nothing)
+            vars<-inspect ["generation" .= gen,"request" .= ("variables"::T.Text),"variablesReference" .= (21::Int),"start" .= (0::Int),"count" .= (3::Int)] stopped
+            check "MCP returns non-evaluating variable inspection" ("<thunk>" `T.isInfixOf` T.pack (show vars))
+            _<-inspect ["generation" .= gen,"request" .= ("stackTrace"::T.Text)] stopped
+            sourceResult<-inspect ["generation" .= gen,"request" .= ("source"::T.Text)] stopped
+            check "MCP source reply uses selected sourceReference" ((field "body" sourceResult >>= field "content" :: Maybe T.Text)==Just (activeText stopped))
+            let local=addDocument (Just (FileState (logPath<>".hs") Nothing)) (replaceBuffer False "dirty = 2\n" (newBuffer "local = 1\n")) stopped
+                localId=maybe (error "missing local buffer") bufferId (activeWindow local)
+                points bid requested=["generation" .= gen,"bufferId" .= bid,"lines" .= (requested::[Int])]
+            (virtual,_)<-success "debug_set_breakpoints" (points virtualId [2,1,2]) local
+            check "MCP breakpoint changes do not select their buffer" (virtual==local)
+            (dirtyLocal,_)<-success "debug_set_breakpoints" (points localId [1]) virtual
+            (same,_)<-success "debug_set_breakpoints" (points localId [1]) dirtyLocal
+            _<-inspect ["generation" .= gen,"request" .= ("threads"::T.Text)] same
+            requests<-commands
+            let changes=[args | req<-requests,field "command" req==Just ("setBreakpoints"::T.Text),Just args<-[field "arguments" req]]
+            check "MCP breakpoint replacement sorts and deduplicates, remains idempotent, and marks dirty source"
+              (case changes of [virtualChange,localChange] -> (field "breakpoints" virtualChange :: Maybe [Value])==Just [object ["line" .= (1::Int)],object ["line" .= (2::Int)]] && field "sourceModified" localChange==Just True; _ -> False)
+            verified<-current same
+            let bps=fromMaybe [] (field "breakpoints" verified) :: [Value]
+            check "MCP status exposes verified breakpoints" (length bps==3 && all ((==Just True) . field "verified") bps)
+            before<-length . filter ((==Just ("threads"::T.Text)) . field "command") <$> commands
+            (waiting,pending)<-debuggerTool runtime core same "debug_inspect" (object ["generation" .= gen,"request" .= ("variables"::T.Text),"variablesReference" .= (22::Int)])
+            (resumed,accepted)<-success "debug_control" ["generation" .= gen,"command" .= ("continue"::T.Text)] waiting
+            check "MCP control advances generation" (epoch accepted>gen)
+            expired<-timeout 1000000 pending
+            check "MCP pending inspection expires promptly on resume without ticking" (case expired of Just (Left _) -> True; _ -> False)
+            rejected "debug_inspect" ["generation" .= gen,"request" .= ("scopes"::T.Text)] resumed
+            drained<-waitForIO "MCP stale reply barrier" (\_ -> (>before) . length . filter ((==Just ("threads"::T.Text)) . field "command") <$> commands) resumed
+            check "MCP stale variables never open a picker" (dialog drained==Nothing)
+            send "pause" [] drained >>= waitFor "MCP pause" (T.isInfixOf "Stopped" . status)
           "reconnect" -> do
             virtual<-send "breakpoint" [] stopped
             let local=addDocument (Just (FileState (logPath<>".hs") Nothing)) (newBuffer "local = 1\n") virtual

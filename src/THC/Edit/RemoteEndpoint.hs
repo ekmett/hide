@@ -1,6 +1,6 @@
 {-# LANGUAGE CPP, ForeignFunctionInterface, ScopedTypeVariables #-}
 module THC.Edit.RemoteEndpoint
-  (sessionEndpoint, connectEndpoint, connectEndpointWithShutdown, endpointExists, withEndpointListener, randomIdentity, spawnDetached) where
+  (sessionEndpoint, connectEndpoint, connectEndpointWithShutdown, socketToEndpoint, endpointExists, withEndpointListener, randomIdentity, spawnDetached) where
 import Control.Exception
 import Control.Monad (unless)
 import qualified Data.ByteString as BS
@@ -12,6 +12,7 @@ import System.FilePath ((</>))
 import System.IO
 import System.Process (ProcessHandle)
 #ifdef mingw32_HOST_OS
+import Control.Concurrent.Async (withAsync, wait)
 import Data.Bits ((.|.), xor)
 import qualified Data.ByteString.Char8 as B8
 import Data.Word (Word8, Word32)
@@ -59,12 +60,21 @@ sessionEndpoint session = do
 connectEndpoint :: FilePath -> IO Handle
 connectEndpoint path = fst <$> connectEndpointWithShutdown path
 
-socketHandle :: N.Socket -> IO Handle
-socketHandle sock = do
+-- The Socket transfers ownership to the Handle. Keep the wakeup only until
+-- that Handle closes; calling it afterwards could target a reused descriptor.
+socketToEndpoint :: N.Socket -> IO (Handle, IO ())
+socketToEndpoint sock = mask_ $ do
+#ifdef mingw32_HOST_OS
+  descriptorNumber <- N.withFdSocket sock pure
+  let shutdown=c_shutdown (fromIntegral descriptorNumber)
+#else
+  let shutdown=pure ()
+#endif
   h <- N.socketToHandle sock ReadWriteMode
-  hSetBinaryMode h True
-  hSetBuffering h NoBuffering
-  pure h
+  flip onException (hClose h) $ do
+    hSetBinaryMode h True
+    hSetBuffering h NoBuffering
+    pure (h,shutdown)
 
 #ifdef mingw32_HOST_OS
 foreign import ccall unsafe "thc_remote_shutdown" c_shutdown :: Word32 -> IO ()
@@ -128,18 +138,20 @@ connectEndpointWithShutdown path = do
     _ -> failure "Invalid private remote endpoint descriptor"
   bracketOnError (N.socket N.AF_INET N.Stream N.defaultProtocol) N.close $ \sock -> do
     N.connect sock (N.SockAddrInet (fromIntegral port) (N.tupleToHostAddress (127,0,0,1)))
-    descriptorNumber <- N.withFdSocket sock pure
-    h <- socketHandle sock
+    (h,shutdown) <- socketToEndpoint sock
     flip onException (hClose h) $ do
-      boundedAuthentication $ do
-        challenge <- randomBytes 24
-        BS.hPut h challenge
-        reply <- readExact h 56
-        let (nonce,proof)=BS.splitAt 24 reply
-        expected <- mac "server" token challenge nonce
-        unless (sameBytes proof expected) (failure "Remote endpoint server authentication failed")
-        mac "client" token challenge nonce >>= BS.hPut h
-      pure (h,c_shutdown (fromIntegral descriptorNumber))
+      let authenticate=do
+            challenge <- randomBytes 24
+            BS.hPut h challenge
+            reply <- readExact h 56
+            let (nonce,proof)=BS.splitAt 24 reply
+            expected <- mac "server" token challenge nonce
+            unless (sameBytes proof expected) (failure "Remote endpoint server authentication failed")
+            mac "client" token challenge nonce >>= BS.hPut h
+      -- The callback is not published until authentication completes. Wake
+      -- this private reader on timeout/cancellation before joining it too.
+      withAsync authenticate $ \worker -> boundedAuthentication (wait worker) `onException` shutdown
+      pure (h,shutdown)
 
 withEndpointListener :: FilePath -> (N.Socket -> (Handle -> IO ()) -> IO a) -> IO a
 withEndpointListener path action = bracket (N.socket N.AF_INET N.Stream N.defaultProtocol) N.close $ \sock -> do
@@ -178,8 +190,7 @@ endpointExists path = do
 connectEndpointWithShutdown :: FilePath -> IO (Handle, IO ())
 connectEndpointWithShutdown path = bracketOnError (N.socket N.AF_UNIX N.Stream N.defaultProtocol) N.close $ \sock -> do
   N.connect sock (N.SockAddrUnix path)
-  h <- socketHandle sock
-  pure (h,pure ())
+  socketToEndpoint sock
 withEndpointListener :: FilePath -> (N.Socket -> (Handle -> IO ()) -> IO a) -> IO a
 withEndpointListener path action = bracket (N.socket N.AF_UNIX N.Stream N.defaultProtocol) N.close $ \sock -> do
   N.bind sock (N.SockAddrUnix path)

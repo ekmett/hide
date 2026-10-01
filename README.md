@@ -105,6 +105,8 @@ shows repository status; right-click it for Fetch, Pull and Merge. The
 Configure an ACP provider under **Options > Agents**, then open
 **Tools > Conversation**. The provider can inspect live window titles, buffer
 contents and selections through the editor’s MCP tools, including unsaved text.
+It can also use [session tools](docs/session-tools.md) for HLS, window layout,
+checked edits, build/run/test, shared terminals and source debugging.
 **Enter** sends a query,
 **Shift+Enter** adds a line and **Escape** cancels an active reply. Queries sent
 while a reply is running are queued; **Ctrl+Enter** steers when supported by the

@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 module THC.Edit.Build
-  (Toolchain(..), BuildAction(..), BuildConfig(..), loadBuildConfig, resolveBuildRoot, buildSource, buildPlan, buildConfigValue, parseBuildConfig) where
+  (Toolchain(..), BuildAction(..), BuildConfig(..), loadBuildConfig, resolveBuildRoot, buildSource, buildPlan, testPlan, buildConfigValue, parseBuildConfig) where
 
 import Control.Exception (IOException, try)
 import Data.Aeson
@@ -105,3 +105,15 @@ buildPlan action config root source = do
           Make -> [(exe,["--make","-fdiagnostics-color=never",file])]
           Run -> [("runghc",["-f",exe,file]++args)]
       _ -> pure (Left "Choose a saved Haskell source file or a Cabal project.")
+
+-- Cabal owns the test runner. THC currently exposes acquire/run, not a test
+-- command, so never present a successful compile as a successful test run.
+testPlan :: BuildConfig -> FilePath -> IO (Either Text [(FilePath,[String])])
+testPlan config root
+  | buildToolchain config/=GHC = pure (Left "THC has no configured test runner. Select GHC to run Cabal tests.")
+  | null (buildExecutable config) || any (elem '\0') [buildExecutable config,T.unpack (buildTarget config)] = pure (Left "Invalid test compiler or target.")
+  | "-" `T.isPrefixOf` buildTarget config = pure (Left "A test target cannot start with '-'.")
+  | otherwise = do
+      project<-isProject root
+      pure $ if not project then Left "Tests require a Cabal project." else
+        Right [("cabal",["test","--with-compiler="++buildExecutable config,"--test-show-details=direct"]++[T.unpack (buildTarget config) | not (T.null (buildTarget config))])]

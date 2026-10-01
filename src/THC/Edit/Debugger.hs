@@ -1,22 +1,25 @@
 {-# LANGUAGE OverloadedStrings #-}
-module THC.Edit.Debugger (withDebugger, withDebuggerClock, debuggerEffects, tickDebugger) where
+module THC.Edit.Debugger (Debugger, Core, withDebugger, withDebuggerClock, debuggerEffects, tickDebugger, debuggerTool) where
 
+import Control.Concurrent (MVar, newEmptyMVar, tryPutMVar, tryReadMVar, threadDelay)
 import Control.Exception (IOException, bracket, try)
 import Control.Monad (foldM, forM_, unless, when)
 import Data.Aeson
 import Data.Aeson.Types (Parser, parseEither, parseMaybe)
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as BL
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
 import Data.IORef
 import qualified Data.Map.Strict as M
-import Data.Maybe (fromMaybe, listToMaybe)
+import Data.Maybe (fromMaybe, isJust, listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import GHC.Clock (getMonotonicTimeNSec)
 import System.Directory (XdgDirectory(XdgConfig), canonicalizePath, doesFileExist, getXdgDirectory)
 import System.IO (IOMode(ReadMode), withBinaryFile)
 import System.FilePath (isAbsolute, (</>))
+import System.Timeout (timeout)
 import Text.Read (readMaybe)
 import qualified THC.Edit.Build as Build
 import THC.Edit.Build (resolveBuildRoot)
@@ -31,10 +34,11 @@ type Core = Desktop -> [Effect] -> IO (Bool,Desktop)
 data Debugger = Debugger (IORef State) (IO Integer)
 data Pending = Init | Attach | Configure | Breaks Text [Int] | Exceptions | Threads Bool
   | Stack Bool | Scopes | Variables | Source Value | Control Bool | Detach
-  deriving (Eq,Show)
+  | Inspection (MVar (Either Text Value))
+  deriving (Eq)
 data Breakpoint = Breakpoint { bpLine :: Int, bpResult :: Value } deriving (Eq,Show)
 data State = State
-  { client :: Maybe D.Client, capabilities :: Value, ready :: Bool, configured :: Bool
+  { client :: Maybe D.Client, connected :: Bool, capabilities :: Value, ready :: Bool, configured :: Bool
   , pending :: M.Map Int (Pending,Int,Integer), generation :: Int
   , stopped :: Bool, thread :: Maybe Int, frame :: Maybe Value
   , exceptionFilters :: [Text]
@@ -43,13 +47,14 @@ data State = State
   , startRequest :: (Text,Value), managed :: Bool, adapterId :: Text
   , failure :: Maybe Text, disconnectAt :: Maybe Integer
   , choices :: M.Map Text [Value], choiceId :: Int, breakRequests :: M.Map Text Int
+  , breakModified :: M.Map Text Bool
   }
 
 emptyState :: State
-emptyState = State {client=Nothing,capabilities=Null,ready=False,configured=False,pending=M.empty,generation=0,
+emptyState = State {client=Nothing,connected=False,capabilities=Null,ready=False,configured=False,pending=M.empty,generation=0,
   stopped=False,thread=Nothing,frame=Nothing,exceptionFilters=[],breakpoints=M.empty,sources=M.empty,
   root=".",endpoint=("127.0.0.1",4711),output="",failure=Nothing,disconnectAt=Nothing,
-  choices=M.empty,choiceId=0,breakRequests=M.empty,startRequest=("attach",object []),managed=False,adapterId=""}
+  choices=M.empty,choiceId=0,breakRequests=M.empty,breakModified=M.empty,startRequest=("attach",object []),managed=False,adapterId=""}
 
 withDebugger :: (Debugger -> IO a) -> IO a
 withDebugger = withDebuggerClock (toInteger <$> getMonotonicTimeNSec)
@@ -65,6 +70,175 @@ debuggerEffects runtime fallback = foldM apply . (False,)
     apply result@(True,_) _=pure result
     apply (_,d) (DebugAction action values) = (False,) <$> perform runtime fallback action values d
     apply (_,d) effect=fallback d [effect]
+
+-- The first action runs under the desktop lock; its continuation must run outside
+-- that lock so the normal editor tick can receive the adapter's response.
+debuggerTool :: Debugger -> Core -> Desktop -> Text -> Value -> IO (Desktop, IO (Either Text Value))
+debuggerTool runtime@(Debugger ref _) core d name arguments = do
+  s<-readIORef ref
+  case parseEither (parseTool s name) arguments of
+    Left err -> pure (d,pure (Left (T.pack err)))
+    Right request -> do
+      result<-try (run request)
+      pure $ either (\(err::IOException) -> (d,pure (Left ("DAP: "<>T.pack (show err))))) id result
+  where
+    immediate desktop result=pure (desktop,pure (result >>= boundedResult))
+    snapshot desktop=do
+      current<-readIORef ref
+      immediate desktop $ maybe (Right (merge (object ["accepted" .= True]) (debuggerStatus current))) Left (failure current)
+    run ToolStatus=readIORef ref >>= immediate d . Right . debuggerStatus
+    run (ToolStart action values)=do
+      desktop<-perform runtime core action values d
+      current<-readIORef ref
+      if isJust (client current) then snapshot desktop else immediate desktop (Left (status desktop))
+    run (ToolControl command)=perform runtime core command [] d >>= snapshot
+    run (ToolBreakpoints bid rows)=case M.lookup bid (buffers d) of
+      Nothing -> immediate d (Left "Unknown bufferId.")
+      Just doc | byteMode (documentBuffer doc) -> immediate d (Left "Breakpoints require a source text buffer.")
+      Just doc -> do
+        s<-readIORef ref
+        source<-case documentFile doc of
+          Just file -> Just . object . (:[]) . ("path" .=) <$> canonicalizePath (filePath file)
+          Nothing -> pure (M.lookup bid (sources s))
+        case source of
+          Nothing -> immediate d (Left "Buffer has no file or debugger source.")
+          Just src -> do
+            let key=sourceKey src
+                linesRequested=M.keys (M.fromList [(row,()) | row<-rows])
+                old=maybe [] snd (M.lookup key (breakpoints s))
+                modified=dirty (documentBuffer doc)
+                unchanged=map bpLine old==linesRequested && M.findWithDefault False key (breakModified s)==modified
+                points=if unchanged then old else [Breakpoint row Null | row<-linesRequested]
+            unless unchanged $ do
+              modifyIORef' ref (\state -> state {breakpoints=M.insert key (src,points) (breakpoints state),
+                breakModified=M.insert key modified (breakModified state)})
+              when (configured s) (sendBreakpoints runtime key src points)
+            snapshot d
+    run (ToolInspect command args)=do
+      s<-readIORef ref
+      reply<-newEmptyMVar
+      send runtime (Inspection reply) command args
+      pure (d,do
+        result<-timeout 16000000 (awaitInspection ref (generation s) reply)
+        pure $ case result of
+          Nothing -> Left "Debugger inspection timed out; refresh debug_status."
+          Just value -> value >>= \body -> boundedResult (object
+            ["generation" .= generation s,"request" .= command,"body" .= body]))
+
+data ToolRequest = ToolStatus | ToolStart Text [Text] | ToolControl Text
+  | ToolBreakpoints Int [Int] | ToolInspect Text Value
+
+parseTool :: State -> Text -> Value -> Parser ToolRequest
+parseTool s name = withObject "debugger tool arguments" $ \o -> do
+  let fieldsAllowed names=unless (all ((`elem` names) . K.toText) (KM.keys o)) (fail "Unknown debugger argument")
+      epoch=do
+        expected<-o .: "generation"
+        unless (expected==generation s) (fail "Debugger generation expired; refresh debug_status")
+      live=unless (isJust (client s) && disconnectAt s==Nothing) (fail "No active debugger session")
+      idle=when (isJust (client s)) (fail "Disconnect the existing debugger session first")
+      portNumber=do
+        port<-o .:? "port" .!= (4711::Int)
+        unless (port>0 && port<=65535) (fail "port must be between 1 and 65535")
+        pure port
+      positive key=do
+        value<-o .:? key
+        forM_ value (\n -> unless (n>0) (fail (T.unpack (K.toText key)<>" must be positive")))
+        pure (value :: Maybe Int)
+      required key selected=positive key >>= maybe (maybe (fail (T.unpack (K.toText key)<>" is required")) pure selected) pure
+  case name of
+    "debug_status" -> fieldsAllowed [] >> pure ToolStatus
+    "debug_launch" -> do
+      fieldsAllowed ["adapterConfig","port"]
+      idle
+      port<-portNumber
+      config<-o .:? "adapterConfig"
+      case config of
+        Just path | T.null path || T.any (=='\0') path -> fail "adapterConfig must be a nonempty path without NUL bytes"
+        Just path -> pure (ToolStart "launch-config" ["1",path])
+        Nothing -> pure (ToolStart "launch-config" ["0","",tshow port])
+    "debug_attach" -> do
+      fieldsAllowed ["host","port"]
+      idle
+      host<-o .:? "host" .!= "127.0.0.1"
+      unless (host `elem` ["localhost","127.0.0.1","::1"]) (fail "host must be loopback")
+      port<-portNumber
+      pure (ToolStart "connect" ["0",host,tshow port])
+    "debug_control" -> do
+      fieldsAllowed ["generation","command"]
+      epoch
+      live
+      command<-o .: "command"
+      unless (command `elem` ["continue","next","stepIn","stepOut","pause","disconnect"]) (fail "Unsupported debugger control")
+      unless (command=="disconnect" || (ready s && configured s && isJust (thread s) &&
+        if command=="pause" then not (stopped s) else stopped s)) (fail "Debugger is not ready for this control")
+      pure (ToolControl command)
+    "debug_set_breakpoints" -> do
+      fieldsAllowed ["generation","bufferId","lines"]
+      epoch
+      bid<-o .: "bufferId"
+      rows<-o .: "lines"
+      unless (bid>=0 && length rows<=1000 && all (>0) rows) (fail "bufferId must be nonnegative and lines must contain at most 1000 positive integers")
+      pure (ToolBreakpoints bid rows)
+    "debug_inspect" -> do
+      fieldsAllowed ["generation","request","threadId","frameId","variablesReference","sourceReference","start","count"]
+      epoch
+      live
+      unless (ready s && configured s) (fail "Debugger is not ready for inspection")
+      command<-o .: "request"
+      unless (command `elem` ["threads","stackTrace","scopes","variables","source"]) (fail "Unsupported debugger inspection")
+      when (command `elem` ["stackTrace","scopes","variables"] && not (stopped s)) (fail "Debugger must be stopped for this inspection")
+      -- Validate even unused optional fields: malformed handles are never ignored.
+      mapM_ positive ["threadId","frameId","variablesReference","sourceReference"]
+      start<-o .:? "start" .!= (0::Int)
+      count<-o .:? "count" .!= (100::Int)
+      unless (start>=0 && count>0 && count<=1000) (fail "start must be nonnegative and count must be between 1 and 1000")
+      args<-case command of
+        "threads" -> pure (object [])
+        "stackTrace" -> do
+          tid<-required "threadId" (thread s)
+          pure (object ["threadId" .= tid,"startFrame" .= start,"levels" .= count])
+        "scopes" -> do
+          ident<-required "frameId" (frame s >>= field "id")
+          pure (object ["frameId" .= ident])
+        "variables" -> do
+          ident<-required "variablesReference" Nothing
+          pure (object ["variablesReference" .= ident,"start" .= start,"count" .= count])
+        _ -> do
+          let selected=frame s >>= field "source"
+              reference=selected >>= field "sourceReference" >>= \n -> if n>0 then Just n else Nothing
+          ident<-required "sourceReference" reference
+          pure (object ["sourceReference" .= ident])
+      pure (ToolInspect command args)
+    _ -> fail "Unknown debugger tool"
+
+debuggerStatus :: State -> Value
+debuggerStatus s=object
+  ["generation" .= generation s,"active" .= isJust (client s),"connected" .= connected s,
+   "ready" .= ready s,"configured" .= configured s,"stopped" .= stopped s,
+   "threadId" .= thread s,"frame" .= frame s,"source" .= (frame s >>= (field "source" :: Value -> Maybe Value)),
+   "capabilities" .= capabilities s,"breakpoints" .=
+     [object ["source" .= src,"line" .= bpLine bp,"verified" .= flag "verified" (bpResult bp),
+       "pending" .= (bpResult bp==Null),"result" .= bpResult bp,
+       "sourceModified" .= M.findWithDefault False key (breakModified s)] | (key,src,bp)<-allBreakpoints s],
+   "output" .= output s,"error" .= failure s]
+
+boundedResult :: Value -> Either Text Value
+boundedResult value | BL.length (encode value)>=1024*1024 = Left "Debugger response exceeds 1 MiB; request a smaller page."
+                    | otherwise = Right value
+
+completeInspection :: Pending -> Either Text Value -> IO ()
+completeInspection (Inspection reply) result=tryPutMVar reply result >> pure ()
+completeInspection _ _=pure ()
+
+awaitInspection :: IORef State -> Int -> MVar (Either Text Value) -> IO (Either Text Value)
+awaitInspection ref epoch reply=do
+  result<-tryReadMVar reply
+  s<-readIORef ref
+  if generation s/=epoch || not (isJust (client s)) || disconnectAt s/=Nothing
+    then pure (Left "Debugger inspection expired; refresh debug_status.")
+    else case failure s of
+      Just err -> pure (Left err)
+      Nothing -> maybe (threadDelay 10000 >> awaitInspection ref epoch reply) pure result
 
 perform :: Debugger -> Core -> Text -> [Text] -> Desktop -> IO Desktop
 perform runtime@(Debugger ref clock) core action values d = do
@@ -185,7 +359,7 @@ initializeSession (Debugger ref _) directory c address requestName arguments ada
   s<-readIORef ref
   mapM_ D.stopClient (client s)
   writeIORef ref emptyState {client=Just c,generation=generation s+1,root=directory,endpoint=address,
-    breakpoints=persistentBreakpoints s,startRequest=(requestName,arguments),managed=owned,adapterId=adapter}
+    breakpoints=persistentBreakpoints s,breakModified=breakModified s,startRequest=(requestName,arguments),managed=owned,adapterId=adapter}
   pure (clearDialog d) {status="Connecting debugger..."}
 
 -- Frame and variable handles are scoped to a suspended execution state.
@@ -215,7 +389,7 @@ tickDebugger runtime@(Debugger ref clock) core original = do
       timedOut=not (M.null expired)
   if not timedOut && not detachExpired && failure current==Nothing then pure updated else do
     mapM_ D.stopClient (client current)
-    modifyIORef' ref (\state -> (invalidate state) {client=Nothing,pending=M.empty,ready=False,configured=False,disconnectAt=Nothing,failure=Nothing})
+    modifyIORef' ref (\state -> (invalidate state) {client=Nothing,connected=False,pending=M.empty,ready=False,configured=False,disconnectAt=Nothing,failure=Nothing})
     pure (clearDialog updated) {status=fromMaybe (if detachExpired then "Debugger disconnected." else "DAP request timed out; debugger disconnected.") (failure current)}
 
 receive :: Debugger -> Core -> Desktop -> D.Event -> IO Desktop
@@ -224,6 +398,7 @@ receive runtime@(Debugger ref _) core d event = do
   case event of
     _ | Nothing<-client s -> pure d
     D.Connected -> do
+      modifyIORef' ref (\state -> state {connected=True})
       -- Managed THC may still be compiling until the transport becomes ready.
       unless (disconnectAt s/=Nothing) $ do
         send runtime Init "initialize" (object
@@ -234,7 +409,7 @@ receive runtime@(Debugger ref _) core d event = do
       pure d
     D.Disconnected reason -> do
       mapM_ D.stopClient (client s)
-      modifyIORef' ref (\state -> (invalidate state) {client=Nothing,pending=M.empty,ready=False,configured=False,disconnectAt=Nothing,failure=Nothing})
+      modifyIORef' ref (\state -> (invalidate state) {client=Nothing,connected=False,pending=M.empty,ready=False,configured=False,disconnectAt=Nothing,failure=Nothing})
       pure (clearDialog d) {status="DAP: "<>reason}
     D.Notification "initialized" _ -> do
       modifyIORef' ref (\state -> state {ready=True})
@@ -254,7 +429,7 @@ receive runtime@(Debugger ref _) core d event = do
     D.Notification "thread" _ -> when (configured s) (send runtime (Threads False) "threads" (object [])) >> pure d
     D.Notification "terminated" _ -> do
       mapM_ D.stopClient (client s)
-      modifyIORef' ref (\state -> (invalidate state) {client=Nothing,pending=M.empty,ready=False,configured=False,disconnectAt=Nothing,failure=Nothing})
+      modifyIORef' ref (\state -> (invalidate state) {client=Nothing,connected=False,pending=M.empty,ready=False,configured=False,disconnectAt=Nothing,failure=Nothing})
       pure (clearDialog d) {status="Debug session ended."}
     D.Notification "output" body -> do
       modifyIORef' ref (\state -> state {output=T.takeEnd 16384 (output state<>text "output" body)})
@@ -268,20 +443,27 @@ receive runtime@(Debugger ref _) core d event = do
       Nothing -> pure d
       Just (kind,epoch,_) -> do
         modifyIORef' ref (\state -> state {pending=M.delete ident (pending state)})
-        if (stale kind && epoch/=generation s) || (case kind of Breaks key _ -> M.lookup key (breakRequests s)/=Just ident; _ -> False) then pure d else case result of
-          Left err -> do
-            when (kind==Init || kind==Attach || kind==Configure) $ do
-              mapM_ D.stopClient (client s)
-              modifyIORef' ref (\state -> (invalidate state) {client=Nothing,pending=M.empty,ready=False,configured=False,disconnectAt=Nothing,failure=Nothing})
-            case kind of
-              Control wasStopped | wasStopped -> do
-                modifyIORef' ref (\state -> state {stopped=True})
-                forM_ (thread s) (\tid -> send runtime (Stack False) "stackTrace" (stackArguments tid))
-              _ -> pure ()
-            pure (clearDialog d) {status="DAP: "<>err}
-          Right body -> response runtime core kind body d
+        if (stale kind && epoch/=generation s) || (case kind of Breaks key _ -> M.lookup key (breakRequests s)/=Just ident; _ -> False) then do
+          completeInspection kind (Left "Debugger inspection expired; refresh debug_status.")
+          pure d
+        else case kind of
+          Inspection reply -> do
+            _<-tryPutMVar reply (result >>= boundedResult)
+            pure d
+          _ -> case result of
+           Left err -> do
+             when (kind==Init || kind==Attach || kind==Configure) $ do
+               mapM_ D.stopClient (client s)
+               modifyIORef' ref (\state -> (invalidate state) {client=Nothing,connected=False,pending=M.empty,ready=False,configured=False,disconnectAt=Nothing,failure=Nothing})
+             case kind of
+               Control wasStopped | wasStopped -> do
+                 modifyIORef' ref (\state -> state {stopped=True})
+                 forM_ (thread s) (\tid -> send runtime (Stack False) "stackTrace" (stackArguments tid))
+               _ -> pure ()
+             pure (clearDialog d) {status="DAP: "<>err}
+           Right body -> response runtime core kind body d
   where
-    stale kind=case kind of Threads{} -> True; Control{} -> True; Stack{} -> True; Scopes -> True; Variables -> True; Source{} -> True; _ -> False
+    stale kind=case kind of Threads{} -> True; Control{} -> True; Stack{} -> True; Scopes -> True; Variables -> True; Source{} -> True; Inspection{} -> True; _ -> False
 
 configure :: Debugger -> IO ()
 configure runtime@(Debugger ref _) = do
@@ -342,9 +524,10 @@ response runtime@(Debugger ref _) core kind body d = do
         modifyIORef' ref (\state -> state {sources=M.insert bid source (sources state)})
         pure (position selected styled) {status="Stopped in "<>frameLabel selected}
     Control _ -> pure d
+    Inspection reply -> tryPutMVar reply (boundedResult body) >> pure d
     Detach -> do
       mapM_ D.stopClient (client s)
-      modifyIORef' ref (\state -> (invalidate state) {client=Nothing,pending=M.empty,ready=False,configured=False,disconnectAt=Nothing})
+      modifyIORef' ref (\state -> (invalidate state) {client=Nothing,connected=False,pending=M.empty,ready=False,configured=False,disconnectAt=Nothing})
       pure (clearDialog d) {status=if managed s || fst (startRequest s)=="launch" then "Debugger disconnected; launched session stopped." else "Debugger disconnected; attached program is not terminated."}
 
 select :: Debugger -> Core -> Text -> Text -> [Text] -> Desktop -> IO Desktop
@@ -417,14 +600,17 @@ toggleBreakpoint runtime@(Debugger ref _) d = do
               old=maybe [] snd (M.lookup key (breakpoints s))
               removing=any ((==row).bpLine) old
               points=if removing then filter ((/=row).bpLine) old else old++[Breakpoint row Null]
-          modifyIORef' ref (\state -> state {breakpoints=M.insert key (src,points) (breakpoints state)})
+          modifyIORef' ref (\state -> state {breakpoints=M.insert key (src,points) (breakpoints state),breakModified=M.insert key (dirty (documentBuffer doc)) (breakModified state)})
           when (configured s) (sendBreakpoints runtime key src points)
           pure d {status=if removing then "Breakpoint removed." else "Breakpoint requested at line "<>tshow row<>if dirty (documentBuffer doc) then "; source has unsaved changes." else "."}
     _ -> pure d {status="Choose a source file first."}
 
 sendBreakpoints :: Debugger -> Text -> Value -> [Breakpoint] -> IO ()
-sendBreakpoints runtime key source points = send runtime (Breaks key (map bpLine points)) "setBreakpoints"
-  (object ["source" .= source,"breakpoints" .= [object ["line" .= bpLine p] | p<-points],"sourceModified" .= False])
+sendBreakpoints runtime@(Debugger ref _) key source points = do
+  s<-readIORef ref
+  send runtime (Breaks key (map bpLine points)) "setBreakpoints"
+    (object ["source" .= source,"breakpoints" .= [object ["line" .= bpLine p] | p<-points],
+      "sourceModified" .= M.findWithDefault False key (breakModified s)])
 
 allBreakpoints :: State -> [(Text,Value,Breakpoint)]
 allBreakpoints s=[(key,source,bp) | (key,(source,points))<-M.toList (breakpoints s),bp<-points]

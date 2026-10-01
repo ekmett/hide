@@ -1,11 +1,12 @@
 {-# LANGUAGE OverloadedStrings #-}
-module THC.Edit.Conversation (withConversation, conversationEffects, tickConversation, parseLaunch, renderReply, pauseLabel, renderTimestamp) where
+module THC.Edit.Conversation (ConversationState, conversationServices, chatTools, chatToolNames, chatTool, withConversation, conversationEffects, tickConversation, parseLaunch, renderReply, pauseLabel, renderTimestamp) where
 
 import Prelude hiding (reads)
 import Control.Exception (IOException, bracket, try, onException)
-import Control.Monad (foldM, forM_, void, when)
+import Control.Concurrent.MVar (MVar, newEmptyMVar, readMVar, tryPutMVar, isEmptyMVar)
+import Control.Monad (foldM, forM_, void, when, unless)
 import Data.Aeson
-import Data.Aeson.Types (parseMaybe)
+import Data.Aeson.Types (parseMaybe, parseEither)
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString as BS
@@ -39,7 +40,10 @@ import THC.Edit.Syntax (Style(..), bubbleTile)
 
 -- One configured stdio provider; its protocol supplies models and tools.
 data Phase = Initializing (Maybe Text) | Starting (Maybe Text) | Prompting | Steering Text | Setting deriving Eq
-data Record = Reply Text Text | Activity Text Value | Pause Text deriving (Eq,Show)
+data Record = Reply Text Text | Activity Text Value [Value] Bool | Pause Text deriving (Eq,Show)
+
+activity :: Text -> Value -> Record
+activity ident value=Activity ident value [value] False
 data Approval = Permission Value [(Text,Text)] Value | Write Value Snapshot Text | Execute Value Terminal.TerminalConfig Int
 
 data State = State
@@ -51,6 +55,7 @@ data State = State
   , terminalWaiters :: M.Map Text [Value]
   , lastMessageAt :: Maybe UTCTime
   , lastRender :: (Int,Maybe Text,[Record]), lastSession :: Maybe (A.Launch,FilePath,Text)
+  , waitingQuestion :: Maybe (Int,MVar (Either Text Value)), lastQuestion :: Maybe ChatQuestion
   }
 data ConversationState = ConversationState FilePath (IORef State) C.Consoles Jobs.BuildJobs
 
@@ -66,10 +71,13 @@ withConversation action = C.withConsoles $ \consoles -> Jobs.withBuildJobs $ \jo
   let remembered=either (const Nothing) (\bytes -> decodeStrict' bytes >>= parseMaybe (withObject "session" $ \o -> do
         (raw::Value)<-o .: "provider"; config<-either fail pure (decodeLaunch (BL.toStrict (encode raw)))
         (,,) config <$> o .: "cwd" <*> o .: "sessionId")) previous
-  bracket (do ref<-newIORef (State launch Nothing Nothing "." M.empty Nothing [] M.empty [] Nothing False 1 [] S.empty M.empty Nothing (0,Nothing,[]) remembered); pure (ConversationState directory ref consoles jobs)) closeConversation action
+  bracket (do ref<-newIORef (State launch Nothing Nothing "." M.empty Nothing [] M.empty [] Nothing False 1 [] S.empty M.empty Nothing (0,Nothing,[]) remembered Nothing Nothing); pure (ConversationState directory ref consoles jobs)) closeConversation action
 
 closeConversation :: ConversationState -> IO ()
-closeConversation (ConversationState _ ref _ _) = readIORef ref >>= mapM_ A.stopClient . connection
+closeConversation (ConversationState _ ref _ _) = do
+  s<-readIORef ref
+  forM_ (waitingQuestion s) $ \(_,reply)->void (tryPutMVar reply (Left "Editor session closed."))
+  mapM_ A.stopClient (connection s)
 
 launchValue :: A.Launch -> Value
 launchValue launch=object ["executable" .= A.executable launch,"arguments" .= A.arguments launch,"environment" .= M.fromList (A.environment launch)]
@@ -112,12 +120,43 @@ conversationEffects runtime fallback = foldM apply . (False,)
     apply (_,d) effect = fallback d [effect]
 
 perform :: ConversationState -> Text -> [Text] -> Desktop -> IO Desktop
-perform runtime@(ConversationState directory ref consoles jobs) action values d = do
+perform runtime@(ConversationState directory ref consoles jobs) action values original = do
+  d<-if action `elem` ["cancel","new","load","configure"] then cancelQuestion runtime "Question cancelled." original else pure original
   previous<-readIORef ref
   now<-getCurrentTime
   zone<-getCurrentTimeZone
   let s=if action `elem` ["send","send-draft","steer-draft"] then stampReply now zone previous else previous
   case (action,values) of
+    ("toggle-activity",[index]) | Just ident<-readMaybe (T.unpack index) -> do
+      let toggle (i,Activity title value history expanded) | i==ident=Activity title value history (not expanded)
+          toggle (_,record)=record
+          next=s {transcript=map toggle (zip [0::Int ..] (transcript s))}
+      writeIORef ref next
+      let painted=paint False next d
+          keepPosition w=case (find ((==windowId w).windowId) (windows d),M.lookup (bufferId w) (buffers painted)) of
+            (Just old,Just doc) | documentLabel doc==Just "Conversation" -> w {scrollRow=min (scrollRow old) (scrollbarLimit painted True doc w),scrollColumn=0,selection=Selection 0 0}
+            _ -> w
+      pure painted {windows=map keepPosition (windows painted)}
+    ("question-choice",[token,index]) | Just ident<-readMaybe (T.unpack token),Just chosen<-readMaybe (T.unpack index),
+        Just q<-chatQuestion d,questionToken q==ident,chosen>=0,chosen<length (questionChoices q) ->
+      pure (clearReplySelection (paint False s d {chatQuestion=Just q {questionChoice=Just chosen,questionFocused=True}}))
+    ("question-input",token:rest) | Just q<-chatQuestion d,token==T.pack (show (questionToken q)) ->
+      let p=case rest of
+            offset:_ | Just n<-readMaybe (T.unpack offset) -> min (bufferLength (questionBuffer q)) (questionInputStart (conversationWidth d) q+max 0 n)
+            _ -> caret (questionSelection q)
+      in pure (clearReplySelection (paint False s d {chatQuestion=Just q {questionChoice=Nothing,questionSelection=Selection p p,questionFocused=True}}))
+    ("question-submit",[token]) | Just q<-chatQuestion d,token==T.pack (show (questionToken q)),
+        Just (ident,reply)<-waitingQuestion s,ident==questionToken q -> do
+      let answer=case questionChoice q of
+            Just index -> fromMaybe "" (case drop index (questionChoices q) of value:_->Just value; _->Nothing)
+            Nothing -> contents (questionBuffer q)
+      if T.null (T.strip answer) then pure d {status="Choose an option or enter an answer."} else do
+        accepted<-tryPutMVar reply (Right (object ["answer" .= answer,"choiceIndex" .= questionChoice q,"custom" .= isNothing (questionChoice q)]))
+        let next=s {waitingQuestion=Nothing,transcript=transcript s++[record | accepted,record<-[Reply "Agent" (questionText q),Reply "You" answer]]}
+        writeIORef ref next
+        pure (paint False next d {chatQuestion=Nothing,chatInputOffset=Nothing,status=if accepted then "Answer sent." else "Question request ended; answer was not sent."})
+    ("question-cancel",[token]) | Just q<-chatQuestion d,token==T.pack (show (questionToken q)) ->
+      cancelQuestion runtime "Question cancelled by user." d
     ("terminal",_) -> do
       shell<-fromMaybe "/bin/sh" <$> lookupEnv "SHELL"
       root<-canonicalizePath (maybe (startingDirectory d) treeRoot (sideTree d))
@@ -245,7 +284,13 @@ sendQueued (ConversationState _ ref _ _) d = do
 
 tickConversation :: ConversationState -> Desktop -> IO Desktop
 tickConversation runtime@(ConversationState _ ref consoles jobs) initial = do
-  d<-C.tickConsoles consoles initial >>= Jobs.tickBuildJobs jobs
+  currentQuestion<-readIORef ref
+  ready<-case waitingQuestion currentQuestion of
+    Nothing -> pure initial
+    Just (_,reply) -> do
+      waiting<-isEmptyMVar reply
+      if waiting then pure initial else cancelQuestion runtime "Question request ended." initial
+  d<-C.tickConsoles consoles ready >>= Jobs.tickBuildJobs jobs
   flushTerminalWaiters runtime
   s<-readIORef ref
   events<-maybe (pure []) A.pollEvents (connection s)
@@ -265,9 +310,9 @@ tickConversation runtime@(ConversationState _ ref consoles jobs) initial = do
     _ -> pure ()
   afterDismiss<-readIORef ref
   let widthNow=conversationWidth advanced
-      redraw=lastRender afterDismiss/=(widthNow,session afterDismiss,transcript afterDismiss)
+      redraw=lastRender afterDismiss/=(widthNow,session afterDismiss,transcript afterDismiss) || lastQuestion afterDismiss/=chatQuestion advanced
       rendered=(if redraw then paint False afterDismiss advanced else advanced) {agentReplying=busy afterDismiss,agentQueued=length (queuedQueries afterDismiss)}
-  when redraw (modifyIORef' ref (\state -> state {lastRender=(widthNow,session state,transcript state)}))
+  when redraw (modifyIORef' ref (\state -> state {lastRender=(widthNow,session state,transcript state),lastQuestion=chatQuestion rendered}))
   present runtime rendered
 
 receive :: ConversationState -> Desktop -> A.Event -> IO Desktop
@@ -277,14 +322,14 @@ receive runtime@(ConversationState directory ref consoles _) d event = do
     A.Disconnected reason -> do
       mapM_ (C.releaseConsole consoles) (S.toList (ownedTerminals s))
       writeIORef ref s {connection=Nothing,session=Nothing,pending=M.empty,queuedPrompt=Nothing,queuedQueries=[],approvals=[],presented=Nothing,deferredApproval=False,ownedTerminals=S.empty,terminalWaiters=M.empty,
-        transcript=transcript s++[Activity "Connection closed" (object ["message" .= reason])]}
+        transcript=transcript s++[activity "Connection closed" (object ["message" .= reason])]}
       pure (dismissPermission d) {status="Agent disconnected.",agentSteering=False}
     A.Response ident result -> do
       writeIORef ref s {pending=M.delete ident (pending s)}
       case (M.lookup ident (pending s),result,connection s) of
         (Nothing,_,_) -> pure d
         (_,Left err,_) -> do
-          modifyIORef' ref (\state -> state {queuedPrompt=Nothing,transcript=transcript state++[Activity "Request failed" err]})
+          modifyIORef' ref (\state -> state {queuedPrompt=Nothing,transcript=transcript state++[activity "Request failed" err]})
           pure d {status="Agent request failed; see Conversation.",composerBuffer=case M.lookup ident (pending s) of
             Just (Steering text) | T.null (contents (composerBuffer d)) -> newBuffer text
             _ -> composerBuffer d}
@@ -326,7 +371,7 @@ receive runtime@(ConversationState directory ref consoles _) d event = do
             "user_message_chunk" -> appendReply "You" update
             "tool_call" -> recordTool update
             "tool_call_update" -> recordTool update
-            "plan" -> modifyIORef' ref (\state -> state {transcript=transcript state++[Activity "Plan" update]})
+            "plan" -> modifyIORef' ref (\state -> state {transcript=transcript state++[activity "Plan" update]})
             _ -> pure ()
           pure $ if kind=="config_option_update" then d {agentSettings=parseAgentSettings update,contextMenu=Nothing}
             else if kind=="usage_update" then case (field "used" update,field "size" update) of
@@ -373,11 +418,11 @@ mergeTool :: Value -> [Record] -> [Record]
 mergeTool update records = case field "toolCallId" update :: Maybe Text of
   Nothing -> records
   Just ident ->
-    let merge (Activity old (Object previous))
-          | old==ident, Object new<-update = Activity old (Object (KM.union (KM.filter (/=Null) new) previous))
+    let merge (Activity old (Object previous) history expanded)
+          | old==ident, Object new<-update = Activity old (Object (KM.union (KM.filter (/=Null) new) previous)) (history++[update]) expanded
         merge other=other
-    in if any (\record -> case record of Activity old _ -> old==ident; _ -> False) records
-       then map merge records else records++[Activity ident update]
+    in if any (\record -> case record of Activity old _ _ _ -> old==ident; _ -> False) records
+       then map merge records else records++[activity ident update]
 
 incoming :: ConversationState -> A.Client -> Value -> Text -> Value -> Desktop -> IO Desktop
 incoming runtime@(ConversationState _ ref consoles _) client ident method params d = do
@@ -534,8 +579,21 @@ paint force s d
   | otherwise = let
       width=conversationWidth d
       header="Session: "<>fromMaybe "not connected" (session s)<>"\n"
-      styled=if null (transcript s) then plain Comment header else renderRecords width (zip [0..] (transcript s))
+      records=zip [0..] (transcript s)
+      chunks=if null records then [(plain Comment header,Nothing) | isNothing (chatQuestion d)] else renderRecords width records
+      questionChunks=maybe [] (renderQuestion width (length records)) (chatQuestion d)
+      allChunks=chunks++[ (plain Plain "\n\n",Nothing) | not (null chunks) && not (null questionChunks)]++questionChunks
+      styled=concatMap fst allChunks
+      (_,actions)=foldl (\(offset,found) (cells,action)->(offset+length cells,found++maybe [] (\(name,values)->[(offset,offset+length cells,name,values)]) action)) (0,[]) allChunks
+      inputOffset=case [a+7 | (a,_,action,_)<-actions,action=="question-input"] of offset:_->Just offset; _->Nothing
       text=T.pack (map fst styled)
+      questionRow=do
+        q<-chatQuestion d
+        if not (questionFocused q) || lastQuestion s==Just q then Nothing else do
+          offset<-case questionChoice q of
+            Nothing -> inputOffset
+            Just index -> case [a | (a,_,action,values)<-actions,action=="question-choice",values==[T.pack (show (questionToken q)),T.pack (show index)]] of a:_->Just a; _->Nothing
+          pure (fst (lineColumn text offset)+if isNothing (questionChoice q) then 1 else 0)
       existing=find (\(_,doc)->documentLabel doc==Just "Conversation") (M.toList (buffers d))
       opened=case existing of
         Nothing -> addReadOnly "Conversation" text d
@@ -548,9 +606,11 @@ paint force s d
                        newLines=length (T.splitOn "\n" text)
                        atEnd=scrollRow w>=max 0 (oldLines-rows)
                        bounded n=max 0 (min (T.length text) n)
-                   in w {scrollRow=if atEnd then max 0 (newLines-rows) else min (max 0 (newLines-rows)) (scrollRow w),
+                       previousRow=if atEnd then max 0 (newLines-rows) else min (max 0 (newLines-rows)) (scrollRow w)
+                       visibleRow=maybe previousRow (\r->max 0 (if r<previousRow then r else if r>=previousRow+rows then r-rows+1 else previousRow)) questionRow
+                   in w {scrollRow=visibleRow,
                          selection=Selection (bounded (anchor (selection w))) (bounded (caret (selection w)))}
-      colored=opened {buffers=M.adjust (\doc -> doc {documentHighlight=styled,documentCursorVisible=False}) bid (buffers opened),windows=map adjust (windows opened)}
+      colored=opened {chatActions=actions,chatInputOffset=inputOffset,buffers=M.adjust (\doc -> doc {documentHighlight=styled,documentCursorVisible=False}) bid (buffers opened),windows=map adjust (windows opened)}
       focused=case find ((==bid).bufferId) (windows colored) of Just w | force -> focusWindow (windowId w) colored {composerFocused=True}; _ -> colored
     in focused
   where
@@ -558,14 +618,38 @@ paint force s d
     renderRecords _ []=[]
     renderRecords width (record:rest)=renderRecord width record++case rest of
       [] -> []
-      next:_ -> plain Plain (if sameSpeaker (snd record) (snd next) then "\n" else "\n\n")++renderRecords width rest
+      next:_ -> [(plain Plain (if sameSpeaker (snd record) (snd next) then "\n" else "\n\n"),Nothing)]++renderRecords width rest
     sameSpeaker (Reply a _) (Reply b _)=a==b
     sameSpeaker _ _=False
     renderRecord width (recordId,record)=case record of
-      Pause label -> renderTimestamp width label
-      Reply role text -> map (\(c,style) -> (c,case style of BubbleText _ outgoing base -> BubbleText recordId outgoing base; _ -> style)) (renderReply (videoMode d/=Nothing) width (role=="You") text)
-      Activity ident value -> plain Pragma ("["<>fromMaybe "activity" (field "status" value)<>"] "<>fromMaybe ident (field "title" value))
-        ++plain Plain (let detail=activityText value in if T.null detail then "" else "\n"<>detail)
+      Pause label -> [(renderTimestamp width label,Nothing)]
+      Reply role text -> [(map (\(c,style) -> (c,case style of BubbleText _ outgoing base -> BubbleText recordId outgoing base; _ -> style)) (renderReply (videoMode d/=Nothing) width (role=="You") text),Nothing)]
+      Activity ident value history expanded ->
+        let title=T.unwords (T.words ("["<>fromMaybe "activity" (field "status" value)<>"] "<>fromMaybe ident (field "title" value)))
+            heading=(if expanded then "▾ " else "▸ ")<>clipCells (max 1 (width-2)) title
+        in [(plain Pragma heading,Just ("toggle-activity",[T.pack (show recordId)]))]++
+          [(plain Plain ("\n"<>T.intercalate "\n" (map jsonText history)),Nothing) | expanded]
+    renderQuestion width recordId q=
+      [(map (\(c,style)->(c,case style of BubbleText _ outgoing base->BubbleText recordId outgoing base; _->style)) (renderReply (videoMode d/=Nothing) width False (questionText q)),Nothing)]++
+      concat [[(plain Plain "\n",Nothing),(plain (if questionChoice q==Just index then Keyword else Plain)
+        (choiceLines width (questionChoice q==Just index) text),Just ("question-choice",[token,T.pack (show index)]))] | (index,text)<-zip [0::Int ..] (questionChoices q)]++
+      [(plain Plain "\n",Nothing),(plain (if isNothing (questionChoice q) then Literal else Plain)
+        ("Other: "<>questionVisibleInput width q<>" "),Just ("question-input",[token])),
+       (plain Plain "\n",Nothing),(plain Keyword "[Submit answer]",Just ("question-submit",[token])),
+       (plain Plain "  ",Nothing),(plain Comment "[Cancel]",Just ("question-cancel",[token]))]
+      where token=T.pack (show (questionToken q))
+
+choiceLines :: Int -> Bool -> Text -> Text
+choiceLines width selected text=T.intercalate "\n" (zipWith (<>) ((if selected then "(*) " else "( ) "):repeat "    ") (wrap text))
+  where
+    wrap remaining
+      | T.null remaining=[]
+      | otherwise=let count=max 1 (columnOffset remaining (max 1 (width-4)))
+                  in T.take count remaining:wrap (T.drop count remaining)
+
+clipCells :: Int -> Text -> Text
+clipCells count text=T.take (columnOffset text (max 0 count)) text
+
 
 -- Corner cells share the text rows. The spiked corner stays square, so the
 -- top edge runs continuously into the tail. Terminal fonts use block fallbacks.
@@ -625,7 +709,7 @@ parseAgentSettings value=mapMaybe parseOption (fromMaybe [] (field "configOption
       _ -> concatMap choice (fromMaybe [] (field "options" option))
 
 rawTranscript :: [Record] -> Text
-rawTranscript=T.intercalate "\n\n" . mapMaybe (\record -> case record of Reply role text -> Just (role<>"\n"<>text); Activity ident value -> Just (ident<>"\n"<>jsonText value); Pause _ -> Nothing)
+rawTranscript=T.intercalate "\n\n" . mapMaybe (\record -> case record of Reply role text -> Just (role<>"\n"<>text); Activity ident _ history _ -> Just (ident<>"\n"<>T.intercalate "\n" (map jsonText history)); Pause _ -> Nothing)
 
 field :: FromJSON a => Text -> Value -> Maybe a
 field name=parseMaybe (withObject "object" (.: K.fromText name))
@@ -700,13 +784,56 @@ conversationWidth d = max 1 $ case [width (bounds w)-2 | w<-windows d,Just doc<-
   size:_ -> size
   [] -> fst (screenSize d)-treeWidthOf d-4
 
-activityText :: Value -> Text
-activityText value=T.intercalate "\n" (maybe [] (\input->["Input: "<>jsonText (input::Value)]) (field "rawInput" value)
-  ++map renderContent (fromMaybe [] (field "content" value))
-  ++maybe [] (\msg->[msg]) (field "message" value))
+conversationServices :: ConversationState -> (FilePath,C.Consoles,Jobs.BuildJobs)
+conversationServices (ConversationState directory _ consoles jobs)=(directory,consoles,jobs)
+
+
+chatToolNames :: [Text]
+chatToolNames=["ask_user"]
+
+chatTools :: [Value]
+chatTools=[object ["name" .= ("ask_user"::Text),"description" .= ("Ask one inline question in the editor conversation. Supply optional single-choice answers; a custom text answer is always available. Waits for the human without a time limit. Only one question may be pending."::Text),
+  "inputSchema" .= object ["type" .= ("object"::Text),"required" .= ["question"::Text],"additionalProperties" .= False,
+    "properties" .= object ["question" .= object ["type" .= ("string"::Text),"minLength" .= (1::Int),"maxLength" .= (4096::Int)],
+      "choices" .= object ["type" .= ("array"::Text),"maxItems" .= (12::Int),"items" .= object ["type" .= ("string"::Text),"minLength" .= (1::Int),"maxLength" .= (256::Int)]],
+      "allowMultiple" .= object ["type" .= ("boolean"::Text),"enum" .= [False]]]],
+  "annotations" .= object ["readOnlyHint" .= False,"destructiveHint" .= False,"openWorldHint" .= False]]]
+
+chatTool :: ConversationState -> Desktop -> Text -> Value -> IO (Desktop,IO (Either Text Value))
+chatTool (ConversationState _ ref _ _) d name args
+  | name/="ask_user"=pure (d,pure (Left "Unknown chat tool."))
+  | otherwise=case parseEither parse args of
+      Left err -> pure (d,pure (Left (T.pack err)))
+      Right (question,choices) -> do
+        s<-readIORef ref
+        case waitingQuestion s of
+          Just _ -> pure (d,pure (Left "A question is already waiting for the user."))
+          Nothing -> do
+            reply<-newEmptyMVar
+            let token=nextApproval s
+                q=ChatQuestion token question choices Nothing (newBuffer "") (Selection 0 0) True
+                next=s {waitingQuestion=Just (token,reply),nextApproval=token+1}
+            writeIORef ref next
+            let shown=clearReplySelection (paint True next d {chatQuestion=Just q,status="A question is waiting in Conversation."})
+            pure (shown,readMVar reply `onException` void (tryPutMVar reply (Left "Question requester disconnected.")))
   where
-    renderContent item=case field "type" item :: Maybe Text of
-      Just "content" -> fromMaybe "[non-text content]" (field "content" item >>= field "text")
-      Just "diff" -> "File: "<>fromMaybe "" (field "path" item)<>"\nPrevious:\n"<>fromMaybe "[new file]" (field "oldText" item)<>"\nProposed:\n"<>fromMaybe "" (field "newText" item)
-      Just "terminal" -> "Terminal "<>fromMaybe "" (field "terminalId" item)
-      _ -> jsonText item
+    parse=withObject "ask_user" $ \o->do
+      unless (all (`elem` ["question","choices","allowMultiple"]) (KM.keys o)) (fail "Unknown question argument.")
+      question<-o .: "question"
+      choices<-o .:? "choices" .!= []
+      multiple<-o .:? "allowMultiple" .!= False
+      when multiple (fail "Only single-choice questions are supported; custom text is always available.")
+      unless (not (T.null (T.strip question)) && T.length question<=4096 && not (T.any (\c->c<' ' && c `notElem` ['\n','\t']) question)) (fail "Question must contain 1..4096 characters.")
+      unless (length choices<=12 && all (\text->not (T.null (T.strip text)) && T.length text<=256 && not (T.any (\c->c<' ' || c=='\DEL') text)) choices) (fail "Supply at most 12 nonempty single-line choices of at most 256 characters.")
+      pure (question,choices)
+
+cancelQuestion :: ConversationState -> Text -> Desktop -> IO Desktop
+cancelQuestion (ConversationState _ ref _ _) reason d=do
+  s<-readIORef ref
+  case waitingQuestion s of
+    Nothing -> pure d
+    Just (_,reply) -> do
+      void (tryPutMVar reply (Left reason))
+      let next=s {waitingQuestion=Nothing}
+      writeIORef ref next
+      pure (paint False next d {chatQuestion=Nothing,chatInputOffset=Nothing,status=reason})

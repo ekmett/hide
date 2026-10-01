@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module THC.Edit.Consoles
   ( Consoles, withConsoles, startConsole, tickConsoles, consoleOutput
-  , inputConsole, killConsole, releaseConsole
+  , listConsoles, inputConsole, killConsole, releaseConsole
   ) where
 
 import Control.Concurrent.MVar
@@ -170,3 +170,6 @@ snapshotStyles snapshot = intercalate [('\n',Plain)] (map (concatMap cell) (rows
       | cellWidth value == 0 = []
       | otherwise = [(char,TerminalStyle (cellForeground value) (cellBackground value) (cellAttributes value))
                     | char <- T.unpack (if T.null (cellText value) then " " else cellText value)]
+
+listConsoles :: Consoles -> IO [(Text,Int,Maybe Int)]
+listConsoles (Consoles state)=withMVar state $ \(_,consoles) -> pure [(ident,consoleBuffer c,snapshotExitCode (latestSnapshot c)) | (ident,c)<-M.toAscList consoles]

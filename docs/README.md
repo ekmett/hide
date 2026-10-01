@@ -34,3 +34,5 @@ in the terminal, a native window and the browser.
 remote transport. The [design records](design/) and [implementation plans](plans/)
 explain how the pieces were developed; use the guides above for the current
 commands and workflow.
+
+[Configuration](configuration.md) sets startup defaults and per-tool Agent Permissions.

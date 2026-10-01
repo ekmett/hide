@@ -1,6 +1,7 @@
 {-# LANGUAGE CPP, OverloadedStrings, ScopedTypeVariables #-}
 module RemoteCheck (checks) where
 import Control.Concurrent (threadDelay)
+import Control.Concurrent.MVar
 import Control.Concurrent.Async (withAsync, wait, link)
 import Control.Exception hiding (assert)
 import Control.Monad (unless, void, replicateM, replicateM_)
@@ -8,6 +9,8 @@ import Data.Aeson
 import Data.Aeson.Types (parseMaybe)
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as BL
+import qualified Network.Socket as N
 import Data.IORef
 import qualified Data.Text as T
 import System.IO
@@ -21,6 +24,7 @@ import Data.List (isInfixOf)
 import System.Timeout (timeout)
 import THC.Edit.Buffer (newBuffer, markSaved)
 import qualified Data.Map.Strict as M
+import THC.Edit.EditorMCP (editorResponse, runEditorMCPWithHandles, readMCPLine)
 import THC.Edit.Model
 import THC.Edit.Protocol
 import THC.Edit.Remote
@@ -29,6 +33,7 @@ import qualified THC.Edit.Session as S
 checks :: IO ()
 checks = do
   localPeerCheck
+  inspectionExitCheck
   sshFailureCheck
   let assert label ok=unless ok (error label)
   session <- randomIdentity
@@ -38,8 +43,17 @@ checks = do
   observed <- newIORef initial
   ticks <- newIORef (0::Int)
   replayed <- newIORef []
+  inspectionStarted<-newEmptyMVar
+  inspectionRelease<-newEmptyMVar
+  inspectionFinished<-newEmptyMVar
   let tick d=writeIORef observed d >> modifyIORef' ticks (+1) >> pure d
       effects d requests=pure (Exit `elem` requests,d {buffers=M.map (\doc -> doc {documentBuffer=markSaved (documentBuffer doc)}) (buffers d)})
+      deferred d=do
+        putMVar inspectionStarted ()
+        pure (False,d,(takeMVar inspectionRelease >> pure (Just (String "done"))) `finally` void (tryPutMVar inspectionFinished ()))
+      inspectLive d (String "deferred")=deferred d
+      inspectLive d (Object fields) | KM.lookup "method" fields==Just (String "test/deferred")=deferred d
+      inspectLive d request=inspect d request
       open = connectEndpoint path
       awaitOpen attempts=open `catch` \(err::IOException) -> if attempts<=0 then throwIO err else threadDelay 50000 >> awaitOpen (attempts-1)
       receive h=timeout 3000000 (readPacket h) >>= maybe (error "Remote test packet timeout") pure
@@ -64,7 +78,7 @@ checks = do
       ack h serial=do
         value <- control h "ack"
         assert "remote acknowledgement tracks committed sequence" (KM.lookup "seq" value==Just (toJSON (serial::Int)))
-  withAsync (runRemoteDaemon session 1 effects tick initial) $ \daemon -> do
+  withAsync (runRemoteDaemon session 1 effects tick inspectLive initial) $ \daemon -> do
     link daemon
     first <- awaitOpen (100::Int)
     writePacket first (JsonPacket (object ["type" .= ("hello"::T.Text),"version" .= (999::Int),"session" .= session,"client" .= client]))
@@ -78,6 +92,41 @@ checks = do
       assert "inspection works while an editor owns the writer slot" (case inspected of
         Just (JsonPacket (Object fields)) -> KM.lookup "id" fields==Just (toJSON (41::Int)) && KM.member "result" fields
         _ -> False)
+    inspector<-open
+    writePacket inspector (JsonPacket (object ["type" .= ("inspect"::T.Text),"request" .= ("deferred"::T.Text)]))
+    began<-timeout 3000000 (takeMVar inspectionStarted)
+    assert "deferred tool starts" (began==Just ())
+    ticksBefore<-readIORef ticks
+    threadDelay 150000
+    ticksAfter<-readIORef ticks
+    assert "deferred MCP wait never holds desktop lock" (ticksAfter>ticksBefore)
+    hClose inspector
+    cancelled<-timeout 3000000 (takeMVar inspectionFinished)
+    assert "closing MCP connection cancels deferred tool" (cancelled==Just ())
+    -- Keep bridge input open across cancellation and a subsequent request.
+    -- On Windows both socket readers require shutdown before cancellation.
+    withBridgeHandles $ \bridgeHandle shutdownBridge clientHandle ->
+      withAsync (runEditorMCPWithHandles session bridgeHandle bridgeHandle) $ \bridge ->
+        flip finally shutdownBridge $ do
+          let send value=BL.hPut clientHandle (encode value<>"\n") >> hFlush clientHandle
+              rpc number method=object ["jsonrpc" .= ("2.0"::T.Text),"id" .= (number::Int),"method" .= (method::T.Text)]
+              started=timeout 3000000 (takeMVar inspectionStarted) >>= assert "bridge deferred call starts" . (==Just ())
+              finished=timeout 3000000 (takeMVar inspectionFinished) >>= assert "bridge cancellation reaches deferred call" . (==Just ())
+          send (rpc 101 "test/deferred")
+          started
+          send (object ["jsonrpc" .= ("2.0"::T.Text),"method" .= ("notifications/cancelled"::T.Text),"params" .= object ["requestId" .= (101::Int)]])
+          finished
+          send (rpc 102 "ping")
+          response<-timeout 3000000 (readMCPLine clientHandle BS.empty)
+          assert "bridge responds after cancelling a request" (case response of
+            Just (Just (line,_)) -> case eitherDecodeStrict' line of Right (Object fields) -> KM.lookup "id" fields==Just (toJSON (102::Int)); _ -> False
+            _ -> False)
+          send (rpc 103 "test/deferred")
+          started
+          hClose clientHandle
+          finished
+          exited<-timeout 3000000 (wait bridge)
+          assert "bridge EOF cancels and joins pending calls" (exited==Just ())
     input connected 1
     ack connected 1
     bracket open hClose $ \other -> do
@@ -199,7 +248,7 @@ localPeerCheck = do
     assert "missing local endpoints are omitted" (not (record `elem` records))
     loaded <- S.loadSession (S.sessionId offline)
     assert "catalog round-trips Unicode arguments" (loaded==Just offline)
-    withAsync (runRemoteDaemon session 1 effects tick initial) $ \daemon -> do
+    withAsync (runRemoteDaemon session 1 effects tick inspect initial) $ \daemon -> do
       link daemon
       awaitReady (100::Int)
       withLocalPeer session True [] $ \peer -> do
@@ -225,3 +274,43 @@ localPeerCheck = do
       assert "explicit Exit ends local daemon" (ended==Just ())
       exists' <- S.loadSession session
       assert "explicit Exit removes session catalog" (exists'==Nothing)
+
+inspect :: Desktop -> Value -> IO (Bool, Desktop, IO (Maybe Value))
+inspect d request=pure (False,d,pure (editorResponse d request))
+
+-- Use a fresh loopback pair so the bridge regression runs on native Windows
+-- without POSIX pipes or replacing the test process's standard handles.
+withBridgeHandles :: (Handle -> IO () -> Handle -> IO a) -> IO a
+withBridgeHandles action=bracket (N.socket N.AF_INET N.Stream N.defaultProtocol) N.close $ \listener -> do
+  N.bind listener (N.SockAddrInet 0 (N.tupleToHostAddress (127,0,0,1)))
+  N.listen listener 1
+  address<-N.getSocketName listener
+  bracketOnError (N.socket N.AF_INET N.Stream N.defaultProtocol) N.close $ \client -> do
+    N.connect client address
+    (server,_)<-N.accept listener
+    (clientHandle,_)<-socketToEndpoint client
+    (serverHandle,shutdown)<-socketToEndpoint server
+    action serverHandle shutdown clientHandle `finally` do
+      shutdown
+      hClose serverHandle
+      hClose clientHandle
+
+inspectionExitCheck :: IO ()
+inspectionExitCheck=do
+  session<-randomIdentity
+  path<-sessionEndpoint session
+  let initial=initialDesktop (80,25)
+      effects d _=pure (False,d)
+      inspectExit d _=pure (True,d,pure (Just (String "exiting")))
+      open attempts=connectEndpoint path `catch` \(err::IOException) ->
+        if attempts<=0 then throwIO err else threadDelay 10000 >> open (attempts-1)
+  withAsync (runRemoteDaemon session 1 effects pure inspectExit initial) $ \daemon -> do
+    link daemon
+    bracket (open (100::Int)) hClose $ \connection -> do
+      writePacket connection (JsonPacket (object ["type" .= ("inspect"::T.Text),"request" .= Null]))
+      reply<-timeout 3000000 (readPacket connection)
+      unless (case reply of Just (Just (JsonPacket (String "exiting"))) -> True; _ -> False) (error "MCP Exit must deliver its reply before ending the daemon")
+    ended<-timeout 3000000 (wait daemon)
+    unless (ended==Just ()) (error "MCP Exit must end daemon")
+    retained<-S.loadSession session
+    unless (retained==Nothing) (error "MCP Exit must remove session catalog")

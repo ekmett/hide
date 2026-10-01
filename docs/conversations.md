@@ -58,7 +58,7 @@ usage, such as `37% · 148k/400k`, or `--` until those values are available.
 The editor automatically supplies its built-in MCP server to the ACP provider
 when starting or resuming a conversation. There is no separate context picker
 to configure. Ask the provider to look at a named file, the source selection or
-the open windows; its tools read the editor's current state when called.
+the open windows; its tools use the editor's current state when called.
 
 | Tool | Available context |
 | --- | --- |
@@ -67,10 +67,11 @@ the open windows; its tools read the editor's current state when called.
 | `read_buffer` | Current text, including unsaved edits, or bytes from a hex buffer |
 | `read_selection` | Selected text and cursor offsets in a chosen window |
 
-These tools read live buffers without saving them or changing files. The
-provider decides when to call them; you can still paste text directly into the
-composer when you want to provide a particular excerpt. File changes requested
-through the editor follow the review workflow below.
+The guest can also use HLS, inspect diagnostics, arrange windows, navigate text
+and hex buffers, preview/apply undo history, build/run/test, and work with shared
+terminals. [Session tools](session-tools.md) describe the full interface, including
+screenshots, checked diffs and source debugging. Mutating tools work on this live
+session; buffer edits and saves are separate actions.
 
 ## Read and copy
 
@@ -81,7 +82,12 @@ Markdown instead. Pauses of five minutes or more get a local timestamp separator
 
 Replies use CommonMark, including highlighted fenced code, lists and tables.
 Tables wrap to the available width and become labeled cells when columns no
-longer fit. Tool activity is displayed separately from reply text.
+longer fit. Tool calls appear as compact chevron rows. Click one to expand its
+full request/update JSON; click again to collapse it.
+
+A guest can ask a question inline with suggested choices and a free-text answer.
+Choose an option or enter your own reply, then submit. Cancel dismisses the
+question. Your unfinished conversation draft is retained separately.
 
 ## Review requested work
 
@@ -89,7 +95,7 @@ Permission dialogs show the provider's actual choices. **Review** opens a
 read-only view of the request; **Tools > Conversation** returns to the pending
 choice. Escape denies it.
 
-Editor-mediated file writes ask for approval, preserve the old buffer in Undo
+ACP file-write requests ask for approval, preserve the old buffer in Undo
 and use the normal checked save path. If the editor or disk version changed
 while the request was pending, the stale write is rejected. These file requests
 are bounded by the conversation's project directory.
