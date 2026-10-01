@@ -26,9 +26,10 @@ renderer. Keep optional runtime programs outside the compiler's dependency graph
 - [x] Add an optional libghostty-vt C shim and Haskell wrapper, with a terminal window
   and process lifecycle shared by ACP terminal requests and Run.
 - [x] Run invokes the current `thc run [TARGET] --project-dir DIR` interface.
-- [ ] Debug is blocked by the runtime: current upstream `docs/debug-locations.md`
-  explicitly says stepping and breakpoints remain unimplemented. Keep the menu
-  disabled until an actual debugger contract exists.
+- [x] DAP launch/attach, source breakpoints and stepping share the editor debugger
+  and agent tools. THC launches with `--dap-port`; other adapters use a DAP
+  configuration. Runtime lexical scopes and lazy-value inspection remain separate
+  compiler work; see the [current debugger guide](../running.md#launch-or-attach-a-debugger).
 
 ## File boundaries
 
