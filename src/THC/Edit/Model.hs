@@ -619,21 +619,26 @@ fieldHeight (Radio _ xs _) = length xs+2
 fieldHeight ListBox{} = 6
 fieldHeight FileList{} = 13
 
+-- Keep the appearance controls visible together in the standard 80x25 mode.
+dialogFieldHeight :: Dialog -> Field -> Int
+dialogFieldHeight dg CheckBox{} | purpose dg==Settings = 1
+dialogFieldHeight _ field = fieldHeight field
+
 dialogRect :: Desktop -> Dialog -> Rect
 dialogRect d dg = Rect ((sw-w) `div` 2) (max 1 ((sh-h) `div` 2)) w h
   where
     (sw,sh) = screenSize d
     w = min sw 62
-    h = min (sh-2) (max 7 (5+length (body dg)+sum (map fieldHeight (fields dg))))
+    h = min (sh-2) (max 7 (5+length (body dg)+sum (map (dialogFieldHeight dg) (fields dg))))
 
 fieldRects :: Desktop -> Dialog -> [Rect]
 fieldRects d dg = zipWith make starts (fields dg)
   where
     Rect x y w _ = dialogRect d dg
-    starts = scanl (+) (y+2+length (body dg)) (map fieldHeight (fields dg))
-    make row f = Rect (x+3) (row-offset) (max 1 (w-6)) (fieldHeight f)
+    starts = scanl (+) (y+2+length (body dg)) (map (dialogFieldHeight dg) (fields dg))
+    make row f = Rect (x+3) (row-offset) (max 1 (w-6)) (dialogFieldHeight dg f)
     offset = case drop (focus dg) (zip starts (fields dg)) of
-      (row,f):_ -> max 0 (min (row-y-2) (row+fieldHeight f-(top (dialogRect d dg)+height (dialogRect d dg)-3)))
+      (row,f):_ -> max 0 (min (row-y-2) (row+dialogFieldHeight dg f-(top (dialogRect d dg)+height (dialogRect d dg)-3)))
       _ -> 0
 
 buttonRects :: Desktop -> Dialog -> [Rect]

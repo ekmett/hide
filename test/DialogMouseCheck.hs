@@ -287,6 +287,16 @@ checks = do
       keyboardToggled=fst (handleEvent (V.EvKey (V.KChar ' ') []) keyboardFocused)
       cancelledPreferences=fst (handleEvent (V.EvKey V.KEsc []) keyboardToggled)
       reopened=fst (runCommand EditorOptions savedPreferences)
+  let graphicalPreferences=fst (runCommand EditorOptions desktop {videoMode=Just 3})
+      graphicalDialog=fromMaybe (error "missing graphical preferences") (dialog graphicalPreferences)
+      pixelIndex=fromMaybe (error "missing pixelation checkbox") (findIndex (\field -> case field of CheckBox "Pixelate Unicode" _ -> True; _ -> False) (fields graphicalDialog))
+      pixelRect=at pixelIndex (fieldRects graphicalPreferences graphicalDialog)
+      toggledPixel=fst (handleEvent (V.EvMouseDown (left pixelRect+1) (top pixelRect) V.BLeft []) graphicalPreferences)
+      savedPixel=fst (handleEvent (V.EvKey V.KEnter []) toggledPixel)
+  check "80x25 Preferences shows every appearance option without scrolling"
+    (all (`T.isInfixOf` snapshot graphicalPreferences) ["CRT filter","Pixelate Unicode","Streamer mode"] &&
+     all (\r -> top r+height r<=minimum (map top (buttonRects graphicalPreferences graphicalDialog))) (fieldRects graphicalPreferences graphicalDialog))
+  check "Pixelate Unicode can be clicked immediately at 80x25" (pixelateUnicode savedPixel)
   check "focused Messages hides source caret" (V.picCursor (renderDesktop desktop {problemsFocused=True})==V.NoCursor)
   check "cursor blinking defaults on" (blinkCursor desktop)
   check "cursor appearance checkbox uses shared mouse geometry" (not (blinkCursor savedPreferences) && buffers savedPreferences==buffers desktop)
