@@ -149,6 +149,40 @@ checks=do
     ensure "cancel resolves both active and queued tickets" (field "status" firstResult==Just ("cancelled"::T.Text) && field "status" secondResult==Just ("cancelled"::T.Text))
     seen<-readTVarIO deliveries
     ensure "cancelled queued prompt was not delivered" (not (any ((=="Queued delivery").messageText.snd) seen))
+  -- A human prompt can start while the previous hub delivery is completing.
+  -- Its independent busy state must survive completion and cancellation alike.
+  forM_ [False,True] $ \cancelCurrent -> do
+    deliveryStarted<-newEmptyMVar
+    releaseDelivery<-newEmptyMVar
+    delivered<-newTVarIO (0::Int)
+    let externalDriver=(driver (AgentId "external-race"))
+          {driverDeliver= \_->do
+             atomically (modifyTVar' delivered (+1))
+             void (tryPutMVar deliveryStarted ())
+             readMVar releaseDelivery
+             pure (Right Null)
+          ,driverCancel=void (tryPutMVar releaseDelivery ())}
+    bracket (newAgentHub (HubLimits 1 0) launch) closeAgentHub $ \hub->do
+      ident<-registerAgent hub "Human prompt race" directory externalDriver >>= right
+      current<-sendAgent hub Human ident "First delivery" >>= right
+      takeMVar deliveryStarted
+      setExternalAgentBusy hub ident True
+      if cancelCurrent then void (cancelAgent hub Human ident >>= right) else putMVar releaseDelivery ()
+      completed<-waitAgent hub Human ident current 1000 >>= right
+      ensure "in-flight external delivery settles" (field "status" completed==Just (if cancelCurrent then "cancelled" else "completed"::T.Text))
+      let awaitSettled=do
+            currentState<-statusAgent hub Human ident >>= right
+            if field "currentTicket" currentState==Just Null && field "status" currentState==Just ("running"::T.Text)
+              then pure () else threadDelay 1000 >> awaitSettled
+      settled<-timeout 1000000 awaitSettled
+      ensure "settled external agent still reports its human prompt running" (settled==Just ())
+      queued<-sendAgent hub Human ident "After human prompt began" >>= right
+      pending<-waitAgent hub Human ident queued 30 >>= right
+      ensure "human busy update during delivery survives finish and cancel" (field "status" pending==Just ("running"::T.Text))
+      ensure "next external delivery cannot overlap the human prompt" . (==1) =<< readTVarIO delivered
+      setExternalAgentBusy hub ident False
+      released<-waitAgent hub Human ident queued 1000 >>= right
+      ensure "external delivery resumes only after human busy clears" (field "status" released==Just ("completed"::T.Text))
   -- Provider cancellation is a barrier, including when no prompt was running.
   cancelStarted <- newEmptyMVar
   cancelRelease <- newEmptyMVar

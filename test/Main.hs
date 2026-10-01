@@ -29,6 +29,9 @@ import qualified WorkspaceMCPCheck
 import qualified WorkspaceFilesMCPCheck
 import qualified TestsMCPCheck
 #endif
+import qualified AgentIntegrationCheck
+import qualified AgentAccessCheck
+import qualified AgentRuntimeCheck
 import qualified AgentHubCheck
 import qualified AgentACPCheck
 import qualified AgentMCPCheck
@@ -75,6 +78,9 @@ check name ok = unless ok (error name)
 
 main :: IO ()
 main = do
+  AgentIntegrationCheck.checks
+  AgentAccessCheck.checks
+  AgentRuntimeCheck.checks
   AgentHubCheck.checks
   AgentACPCheck.checks
   AgentMCPCheck.checks

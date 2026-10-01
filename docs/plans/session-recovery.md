@@ -32,3 +32,12 @@ Reject malformed/unknown-version checkpoints safely. Exercise startup/discovery,
 SIGKILL after unsaved edit, resume with another frontend and disk-conflict save.
 Check clean exit removes recovery, concurrent resume does not split ownership,
 and daemon agent polling continues while no frontend is attached.
+
+## Remaining platform qualification
+
+- [ ] Native Windows: while an MCP inspection is waiting for a user answer or
+  other deferred reply, close its stdio client and exercise editor shutdown.
+  Verify EOF cancels the wait, retires approvals, releases the desktop/endpoint
+  and exits without a blocked socket or pipe reader. Repeat with a display
+  attached and detached. Earlier Windows display detach/Exit checks do not
+  establish this pending-inspector shutdown behavior.

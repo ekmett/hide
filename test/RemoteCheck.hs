@@ -24,7 +24,7 @@ import Data.List (isInfixOf)
 import System.Timeout (timeout)
 import THC.Edit.Buffer (newBuffer, markSaved)
 import qualified Data.Map.Strict as M
-import THC.Edit.EditorMCP (editorResponse, runEditorMCPWithHandles, readMCPLine)
+import THC.Edit.EditorMCP (editorResponse, runEditorMCPWithHandles, runEditorMCPWithToken, readMCPLine)
 import THC.Edit.Model
 import THC.Edit.Protocol
 import THC.Edit.Remote
@@ -65,11 +65,13 @@ checks = isolatedStore $ do
       deferred d=do
         putMVar inspectionStarted ()
         pure (False,d,(takeMVar inspectionRelease >> pure (Just (String "done"))) `finally` void (tryPutMVar inspectionFinished ()))
-      inspectLive d (String "deferred")=deferred d
-      inspectLive d (String "clipboard-export")=pure (False,d {clipboardExport=(fst (clipboardExport d)+1,Just "synthetic fixture λ")},pure (Just (String "queued")))
-      inspectLive d (String "clipboard-status")=pure (False,d,pure (Just (toJSON (clipboardExport d))))
-      inspectLive d (Object fields) | KM.lookup "method" fields==Just (String "test/deferred")=deferred d
-      inspectLive d request=inspect d request
+      inspectLive d token (Object fields) | KM.lookup "method" fields==Just (String "test/token")=
+        pure (False,d,pure (Just (object ["jsonrpc" .= ("2.0"::T.Text),"id" .= KM.lookup "id" fields,"result" .= token])))
+      inspectLive d _ (String "deferred")=deferred d
+      inspectLive d _ (String "clipboard-export")=pure (False,d {clipboardExport=(fst (clipboardExport d)+1,Just "synthetic fixture λ")},pure (Just (String "queued")))
+      inspectLive d _ (String "clipboard-status")=pure (False,d,pure (Just (toJSON (clipboardExport d))))
+      inspectLive d _ (Object fields) | KM.lookup "method" fields==Just (String "test/deferred")=deferred d
+      inspectLive d token request=inspect d token request
       open = connectEndpoint path
       awaitOpen attempts=open `catch` \(err::IOException) -> if attempts<=0 then throwIO err else threadDelay 50000 >> awaitOpen (attempts-1)
       receive h=timeout 3000000 (readPacket h) >>= maybe (error "Remote test packet timeout") pure
@@ -94,9 +96,11 @@ checks = isolatedStore $ do
       ack h serial=do
         value <- control h "ack"
         assert "remote acknowledgement tracks committed sequence" (KM.lookup "seq" value==Just (toJSON (serial::Int)))
-  withAsync (runRemoteDaemon session 1 effects tick inspectLive initial) $ \daemon -> do
+  ownership<-newIORef False
+  withAsync (runRemoteDaemonWithStartup (writeIORef ownership True) session 1 effects tick inspectLive initial) $ \daemon -> do
     link daemon
     first <- awaitOpen (100::Int)
+    assert "session ownership hook runs before serving" =<< readIORef ownership
     writePacket first (JsonPacket (object ["type" .= ("hello"::T.Text),"version" .= (999::Int),"session" .= session,"client" .= client]))
     void (control first "error")
     hClose first
@@ -108,6 +112,33 @@ checks = isolatedStore $ do
       assert "inspection works while an editor owns the writer slot" (case inspected of
         Just (JsonPacket (Object fields)) -> KM.lookup "id" fields==Just (toJSON (41::Int)) && KM.member "result" fields
         _ -> False)
+    let rpcToken number=object ["jsonrpc" .= ("2.0"::T.Text),"id" .= (number::Int),"method" .= ("test/token"::T.Text),
+          "agentToken" .= ("spoofed-top-level"::T.Text),"params" .= object ["agentToken" .= ("spoofed-param"::T.Text)]]
+        credential=T.replicate 48 "e"
+        inspectToken :: Maybe T.Text -> IO (Maybe WirePacket)
+        inspectToken outer=bracket open hClose $ \h -> do
+          writePacket h (JsonPacket (object (["type" .= ("inspect"::T.Text),"request" .= rpcToken 51]++["agentToken" .= token | Just token<-[outer]])))
+          receive h
+    forwarded<-inspectToken (Just credential)
+    assert "daemon forwards only the outer authenticated token" (case forwarded of
+      Just (JsonPacket (Object fields))->KM.lookup "result" fields==Just (String credential); _->False)
+    tokenless<-inspectToken Nothing
+    assert "inner RPC fields cannot impersonate an outer agent identity" (case tokenless of
+      Just (JsonPacket (Object fields))->KM.lookup "result" fields==Just Null; _->False)
+    mapM_ (\invalid -> do
+      rejected<-inspectToken (Just invalid)
+      assert "daemon rejects empty or oversized bearer values before dispatch" (case rejected of
+        Just (JsonPacket (Object fields))->KM.lookup "type" fields==Just (String "error"); _->False)) ["",T.replicate 257 "x"]
+    let bridgeTokenCheck credential' expected=withBridgeHandles $ \bridgeHandle shutdownBridge clientHandle ->
+          withAsync (maybe (runEditorMCPWithHandles session) (\token->runEditorMCPWithToken session (Just token)) credential' bridgeHandle bridgeHandle) $ \_ ->
+            flip finally shutdownBridge $ do
+              BL.hPut clientHandle (encode (rpcToken 52)<>"\n") >> hFlush clientHandle
+              response<-timeout 3000000 (readMCPLine clientHandle BS.empty)
+              assert "bridge token binding ignores caller-supplied RPC identities" (case response of
+                Just (Just (line,_))->case eitherDecodeStrict' line of Right (Object fields)->KM.lookup "result" fields==Just expected; _->False
+                _->False)
+    bridgeTokenCheck (Just credential) (String credential)
+    bridgeTokenCheck Nothing Null
     bracket open hClose $ \clipboardInspector -> do
       writePacket clipboardInspector (JsonPacket (object ["type" .= ("inspect"::T.Text),"request" .= ("clipboard-export"::T.Text)]))
       reply<-receive clipboardInspector
@@ -305,8 +336,8 @@ localPeerCheck = do
       exists' <- S.loadSession session
       assert "explicit Exit removes session catalog" (exists'==Nothing)
 
-inspect :: Desktop -> Value -> IO (Bool, Desktop, IO (Maybe Value))
-inspect d request=pure (False,d,pure (editorResponse d request))
+inspect :: Desktop -> Maybe T.Text -> Value -> IO (Bool, Desktop, IO (Maybe Value))
+inspect d _ request=pure (False,d,pure (editorResponse d request))
 
 -- Use a fresh loopback pair so the bridge regression runs on native Windows
 -- without POSIX pipes or replacing the test process's standard handles.
@@ -331,7 +362,7 @@ inspectionExitCheck=do
   path<-sessionEndpoint session
   let initial=initialDesktop (80,25)
       effects d _=pure (False,d)
-      inspectExit d _=pure (True,d,pure (Just (String "exiting")))
+      inspectExit d _ _=pure (True,d,pure (Just (String "exiting")))
       open attempts=connectEndpoint path `catch` \(err::IOException) ->
         if attempts<=0 then throwIO err else threadDelay 10000 >> open (attempts-1)
   withAsync (runRemoteDaemon session 1 effects pure inspectExit initial) $ \daemon -> do
@@ -364,13 +395,13 @@ promptedExitCheck=do
         whenExit requests (void (tryPutMVar approved ()))
         pure (Exit `elem` requests,d)
       whenExit requests action=if Exit `elem` requests then action else pure ()
-      inspectPrompt d (String "exit-after-approval")=do
+      inspectPrompt d _ (String "exit-after-approval")=do
         putMVar started ()
         pure (False,d,readMVar approved >> putMVar ready () >> takeMVar releaseReply >> pure (Just (String "approved-exit")))
-      inspectPrompt d (String "unapproved")=do
+      inspectPrompt d _ (String "unapproved")=do
         putMVar pendingStarted ()
         pure (False,d,(takeMVar never >> pure Nothing) `finally` putMVar pendingCancelled ())
-      inspectPrompt d value=inspect d value
+      inspectPrompt d token value=inspect d token value
       open attempts=connectEndpoint path `catch` \(err::IOException) ->
         if attempts<=0 then throwIO err else threadDelay 10000 >> open (attempts-1)
       receive h=timeout 3000000 (readPacket h) >>= maybe (error "Prompted Exit packet timed out") pure
@@ -420,7 +451,7 @@ inspectionViewerExitCheck=do
       tick d=do
         if activeText d=="accepted input" then void (tryPutMVar committed ()) else pure ()
         pure d
-      inspectExit d _=pure (True,d,pure (Just (String "exiting")))
+      inspectExit d _ _=pure (True,d,pure (Just (String "exiting")))
       open attempts=connectEndpoint path `catch` \(err::IOException) ->
         if attempts<=0 then throwIO err else threadDelay 10000 >> open (attempts-1)
       receive h=timeout 3000000 (readPacket h) >>= maybe (error "Inspect Exit viewer response timed out") pure

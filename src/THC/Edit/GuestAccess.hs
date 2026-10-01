@@ -72,6 +72,7 @@ guestCommandAllowed cmd=case cmd of
   GitCommit -> False
   AgentChoose{} -> False
   AgentSet{} -> False
+  AgentDirectory -> False
   AgentOptions -> False
   AgentPermissions -> False
   AgentGuidance -> False

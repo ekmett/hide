@@ -15,6 +15,7 @@ The [operation reference](agent-tools.md) describes each call.
 | [Debug a program](#debug-a-program) | Investigate execution with THC or another DAP adapter | Observed stop, stack or variable evidence |
 | [Review repository changes](#review-repository-changes) | Understand saved changes alongside live edits | Disk diff and unsaved changes accounted for separately |
 | [Organize and operate the desktop](#organize-and-operate-the-desktop) | Show source, Messages, hex data or a particular layout | Returned geometry/mode and a fresh screen snapshot |
+| [Coordinate agents](#coordinate-agents) | Delegate work or inspect another agent’s progress | Attributed task ticket, actual completion and reviewed workspace changes |
 | [Consult the user](#consult-the-user) | A decision needs the person’s answer | Submitted answer, not a draft or guessed choice |
 | [Consult documentation and settings](#consult-documentation-and-settings) | Learn a feature or inspect/configure the editor | Cited documentation or confirmed settings |
 
@@ -167,6 +168,38 @@ The screen PNG represents the editor grid, not OS chrome or the native CRT pass.
 inspect `appliedEvents` and the current screen before continuing. Human authority
 controls cannot be operated by agent input. Text mode refuses invalid UTF-8 or
 NUL-containing bytes; stay in hex mode for those files.
+
+## Coordinate agents
+
+**Use:** delegate a scoped task, work on a separate feature branch, or inspect
+another agent's progress without taking the person's display focus.
+
+**Do:** read `agent_directory` for IDs, workspace paths, limits and advertised
+model/effort choices. Call `agent_spawn` with a provisional `name` and concrete
+`task`. Choose a shared workspace for intentional shared edits, or
+`workspace: {"mode":"worktree"}` for a separate checkout, build jobs and debugger.
+Use a fresh context unless the provider supports a real fork and the source is
+yours to fork. After understanding a task, choose a descriptive name with
+`agent_rename`; names can also be assigned to other agents without changing IDs.
+
+**Check:** wait on the returned ticket with `agent_wait`; a timeout is still
+running. Inspect `agent_history` or `agent_search`, then review the actual file
+changes and build/test results in that agent's workspace. Use `agent_message`
+for follow-ups. Sender attribution is host-controlled: a peer message does not
+occupy the human or controlling parent's user seat.
+
+**Recover:** refresh the directory when a name or state changes. Only the human
+or an ancestor can cancel/end a session. `agent_end` also ends descendants and
+preserves their worktrees; it does not merge their edits. Spawn limits come from
+`[editor.agents]` in global/project TOML and cannot be raised through tools.
+A recovered directory is not proof that its providers are running again.
+
+The primary agent uses its authenticated `editor` server. Children use their
+workspace's `editor` server for editor operations and `agents` for coordination.
+A shared child uses the parent's editor; a worktree child has a separate hidden
+editor session. **Tools > Agents** / **Window > Agents** lets the person inspect
+read-only retained history and open a workspace. It does not yet offer a live
+child composer or child-provider reconnect action.
 
 ## Consult the user
 

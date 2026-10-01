@@ -4,6 +4,7 @@ import Control.Monad (unless)
 import Data.IORef
 import Control.Exception (bracket, try, IOException)
 import System.Directory (getTemporaryDirectory, removeFile)
+import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.IO (openBinaryTempFile, hClose, hSeek, SeekMode(AbsoluteSeek))
 import qualified Data.ByteString as BS
 import Data.Aeson
@@ -89,9 +90,44 @@ checks = do
   check "built-in descriptors registered for permissions are not duplicated" (case listed of
     Just (Object fields) -> KM.lookup "result" fields==Just (object ["tools" .= builtinTools])
     _ -> False)
+  let agentSpec=object ["name" .= ("agents_list"::T.Text),"inputSchema" .= object ["type" .= ("object"::T.Text),"properties" .= object []]]
+      strict specs req=editorResponseOnly specs execute edited req >>= snd
+  emptyList<-strict [] (rpc "tools/list" (object []))
+  check "strict empty server lists no built-in tools" (case emptyList of
+    Just (Object fields)->KM.lookup "result" fields==Just (object ["tools" .= ([]::[Value])]); _->False)
+  agentList<-strict [agentSpec] (rpc "tools/list" (object []))
+  check "strict server lists only actor tool descriptors" (case agentList of
+    Just (Object fields)->KM.lookup "result" fields==Just (object ["tools" .= [agentSpec]]); _->False)
+  mapM_ (\specs->mapM_ (\name->do
+    denied<-strict specs (request name (object []))
+    check "strict server cannot fall back to workspace reads" (maybe False (T.isInfixOf "Unknown tool" . text) denied
+      && not (maybe False (T.isInfixOf "unsaved λ" . text) denied))) ["read_buffer","list_buffers","list_windows","read_selection"]) [[],[agentSpec]]
+  check "strict rejected calls never reach controller" . (==2) =<< readIORef invoked
+  allowed<-strict [agentSpec] (request "agents_list" (object []))
+  check "strict registered tool reaches controller" (maybe False (T.isInfixOf "ready" . text) allowed)
+  check "strict registered tool dispatched once" . (==3) =<< readIORef invoked
   (_,readSkill)<-editorResponseWith debugTools execute edited (rpc "resources/read" (object ["uri" .= ("thc-edit://debugging"::T.Text)]))
   skill<-readSkill
   check "MCP packaged skill readable" (maybe False (T.isInfixOf "name: debug-editor" . text) skill)
+  let token=T.replicate 48 "a"
+      session=replicate 48 'b'
+      envScoped name value action=bracket (lookupEnv name <* maybe (unsetEnv name) (setEnv name) value)
+        (maybe (unsetEnv name) (setEnv name)) (const action)
+  envScoped "THC_EDIT_SESSION" (Just session) $ envScoped "THC_EDIT_MCP_TOKEN" (Just "inherited-token") $ do
+    legacy<-editorServers
+    explicit<-editorServersFor (Just token)
+    check "legacy MCP descriptors remain tokenless despite inherited credentials" (case legacy of
+      [Object fields]->KM.lookup "env" fields==Just (toJSON ([]::[Value])); _->False)
+    check "actor credential appears only in descriptor environment, never arguments" (case explicit of
+      [Object fields]->KM.lookup "args" fields==Just (toJSON ["--mcp-editor",session]) &&
+        KM.lookup "env" fields==Just (toJSON [object ["name" .= ("THC_EDIT_MCP_TOKEN"::T.Text),"value" .= token]])
+      _->False)
+  envScoped "THC_EDIT_SESSION" Nothing $ do
+    absent<-editorServersFor (Just token)
+    selected<-editorServersAt session (Just token)
+    check "implicit MCP descriptor needs a host session" (null absent)
+    check "explicit session descriptor does not depend on process session environment" (case selected of
+      [Object fields]->KM.lookup "args" fields==Just (toJSON ["--mcp-editor",session]); _->False)
   temp<-getTemporaryDirectory
   bracket (openBinaryTempFile temp "thc-mcp-line") (\(path,h)->hClose h >> removeFile path) $ \(_,h) -> do
     BS.hPut h "first\nsecond\n"

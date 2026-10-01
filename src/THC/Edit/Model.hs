@@ -52,7 +52,7 @@ data Command = New | Open | Download | ChangeDir | Save | SaveAs | Close | Quit 
   | ToggleTree | GitDiff | GitCommit | GitFetch | GitPull | GitMerge | ReviewDisk
   | CompileTarget | MakeTarget | StopBuild | RunTarget | RunOptions | OpenTerminal | StopTerminal
   | AgentChoose Text | AgentSet Text Text
-  | AgentOptions | AgentPermissions | AgentGuidance | Conversation | AgentCancel | AgentResume | AgentCopyRaw | AgentNew
+  | AgentDirectory | AgentOptions | AgentPermissions | AgentGuidance | Conversation | AgentCancel | AgentResume | AgentCopyRaw | AgentNew
   | ToggleHex | GoToMessage | CopyAllMessages
   | DebugCommand Text
   | Disabled Text deriving (Eq,Show)
@@ -122,9 +122,9 @@ menus =
       mi "Trace into" "F7" (DebugCommand "stepIn"),mi "Step over" "F8" (DebugCommand "next"),mi "Step out" "Ctrl+F7" (DebugCommand "stepOut"),
       mi "Threads..." "" (DebugCommand "threads"),mi "Call stack..." "" (DebugCommand "stack"),mi "Scopes..." "" (DebugCommand "scopes"),
       mi "Exceptions..." "" (DebugCommand "exceptions"),mi "Output" "" (DebugCommand "output"),mi "Disconnect" "" (DebugCommand "disconnect")])
-  ,("Tools",'t',[mi "File tree" "Ctrl+B" ToggleTree,mi "Git diff..." "" GitDiff,mi "Approve changes..." "" GitCommit,mi "Inspect type" "Shift+F1" InspectType,mi "Messages" "" Problems,mi "Go to next" "Alt+F8" NextMessage,mi "Go to previous" "Alt+F7" PreviousMessage,mi "Restart language server" "" RestartHLS,mi "Conversation" "" Conversation,mi "Conversation model..." "" (AgentChoose ""),mi "Cancel reply" "" AgentCancel,mi "Resume session..." "" AgentResume,mi "New session" "" AgentNew,mi "Copy raw conversation" "" AgentCopyRaw,mi "Widget gallery..." "" Gallery,off "Project browser..." "" "Cabal component browsing is a later milestone."])
+  ,("Tools",'t',[mi "File tree" "Ctrl+B" ToggleTree,mi "Git diff..." "" GitDiff,mi "Approve changes..." "" GitCommit,mi "Inspect type" "Shift+F1" InspectType,mi "Messages" "" Problems,mi "Go to next" "Alt+F8" NextMessage,mi "Go to previous" "Alt+F7" PreviousMessage,mi "Restart language server" "" RestartHLS,mi "Conversation" "" Conversation,mi "Agents..." "" AgentDirectory,mi "Conversation model..." "" (AgentChoose ""),mi "Cancel reply" "" AgentCancel,mi "Resume session..." "" AgentResume,mi "New session" "" AgentNew,mi "Copy raw conversation" "" AgentCopyRaw,mi "Widget gallery..." "" Gallery,off "Project browser..." "" "Cabal component browsing is a later milestone."])
   ,("Options",'o',[mi "Preferences..." "" EditorOptions,mi "Agents..." "" AgentOptions,mi "Agent Permissions" "" AgentPermissions,mi "Agent Context..." "" AgentGuidance])
-  ,("Window",'w',[mi "Tile" "" Tile,mi "Cascade" "" Cascade,mi "Split vertically" "" SplitVertical,mi "Split horizontally" "" SplitHorizontal,mi "Zoom" "F5" Zoom,mi "Next" "F6" NextWindow,mi "Close" "Alt+F3" Close])
+  ,("Window",'w',[mi "Agents..." "" AgentDirectory,mi "Tile" "" Tile,mi "Cascade" "" Cascade,mi "Split vertically" "" SplitVertical,mi "Split horizontally" "" SplitHorizontal,mi "Zoom" "F5" Zoom,mi "Next" "F6" NextWindow,mi "Close" "Alt+F3" Close])
   ,("Help",'h',[mi "Contents" "F1" Help,mi "About Turbo Haskell..." "" About])]
   where mi = MenuItem
         off title key reason = mi title key (Disabled reason)
@@ -168,6 +168,7 @@ commandDescription cmd = case cmd of
     _ -> "Debugger: " <> action
   AgentChoose _ -> "Choose the conversation model or reasoning effort."
   AgentSet _ _ -> "Apply this choice to the conversation."
+  AgentDirectory -> "Inspect agents, their history and workspaces."
   AgentOptions -> "Configure agents and their executable commands."
   AgentPermissions -> "Set each agent tool to Enable, Prompt, or Disable."
   AgentGuidance -> "Edit global or project context supplied to the conversation agent."
@@ -437,6 +438,7 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
     go RunOptions d = (d,[AgentAction "run-options" []])
     go OpenTerminal d = (d,[AgentAction "terminal" []])
     go StopTerminal d = (d,[AgentAction "terminal-stop" []])
+    go AgentDirectory d = (d,[AgentAction "directory" []])
     go AgentOptions d = (d,[AgentAction "options" []])
     go AgentPermissions d = (d,[PermissionAction "show" []])
     go AgentGuidance d = (d,[AgentAction "context" []])

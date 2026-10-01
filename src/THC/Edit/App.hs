@@ -14,9 +14,9 @@ import Control.Concurrent (myThreadId, throwTo, threadDelay)
 #ifndef mingw32_HOST_OS
 import System.Posix.Signals (installHandler, Handler(Catch), sigTERM, sigHUP)
 #endif
-import Data.Aeson (Value, object, (.=), withObject, (.:?), (.!=))
+import Data.Aeson (Value(..), object, (.=), withObject, (.:), (.:?), (.!=))
 import THC.Edit.Protocol (WirePacket(..))
-import Data.Aeson.Types (parseEither, Parser)
+import Data.Aeson.Types (parseEither, parseMaybe, Parser)
 import qualified THC.Edit.Font as Font
 import THC.Edit.ScreenCapture (capture, screenTool)
 import THC.Edit.TestsMCP
@@ -24,7 +24,11 @@ import THC.Edit.WorkspaceFilesMCP
 import THC.Edit.HistoryMCP
 import THC.Edit.RuntimeMCP
 import THC.Edit.WorkspaceMCP
-import THC.Edit.EditorMCP (runEditorMCP, editorResponseWith, debugTools, builtinTools, builtinTool)
+import qualified THC.Edit.AgentRuntime as AR
+import qualified THC.Edit.AgentHub as AH
+import THC.Edit.AgentAccess (resolveAgentAccess)
+import THC.Edit.AgentMCP (agentTools, agentToolNames, agentTool)
+import THC.Edit.EditorMCP (runEditorMCP, editorResponseOnly, rpcError, editorResponseWith, debugTools, builtinTools, builtinTool)
 import THC.Edit.RemoteEndpoint (sessionEndpoint)
 import THC.Edit.Session
 import THC.Edit.Completion (bashCompletion)
@@ -229,7 +233,7 @@ runEditor args = do
           mapM_ (setEnv "THC_EDIT_SESSION") daemon
           font<-Font.loadFont
           let specs=builtinTools++debugTools++chatTools++toolingTools++workspaceTools++fileTools++testsTools++historyTools++runtimeTools++controlTools++clipboardTools++docsTools++[screenTool]
-          withPermissions specs $ \permissions -> withDebugger $ \debugger -> withConversation $ \conversation -> withTooling $ \tooling -> withGitOperations $ \gitOperations -> withReconciliation $ \reconciliation -> do
+          withPermissions (specs++agentTools) $ \permissions -> withDebugger $ \debugger -> withConversationAt (startingDirectory protectedDesktop) $ \conversation -> withTooling $ \tooling -> withGitOperations $ \gitOperations -> withReconciliation $ \reconciliation -> do
             exiting<-newIORef False
             let runtimeEffects=gitOperationEffects gitOperations (debuggerEffects debugger (conversationEffects conversation (reconciliationEffects reconciliation (toolingEffects tooling applyEffects))))
                 core d pending=foldM step (False,d) pending
@@ -263,13 +267,34 @@ runEditor args = do
                       Left err -> pure (Left (T.pack err))
                       Right image -> capture font d image)
                   | otherwise = debuggerTool debugger guestCore d name parameters
-                inspect d request=do
+                inspect d token request=do
                   writeIORef exiting False
-                  (updated,finish)<-editorResponseWith specs (permissionCall permissions inspectTool) d request
+                  let agents=conversationAgents conversation
+                      hub=AR.agentHub agents
+                      reject=pure (d,pure (Just (rpcError (fromMaybe Null (parseMaybe (withObject "request" (.: "id")) request)) (-32600) "Invalid or inactive agent connection.")))
+                  response<-case token of
+                    Nothing -> editorResponseWith specs (permissionCall permissions inspectTool) d request
+                    Just secret -> do
+                      bound<-resolveAgentAccess (AR.agentAccess agents) secret
+                      case bound of
+                        Nothing -> reject
+                        Just ident -> do
+                          active<-AH.statusAgent hub (AH.Agent ident) ident
+                          case active >>= maybe (Left "Unknown workspace.") Right . parseMaybe (withObject "agent" (.: "cwd")) of
+                            Left _ -> reject
+                            Right root -> do
+                              let dispatch current name parameters
+                                    | name `elem` agentToolNames = pure (current,agentTool hub (AH.Agent ident) root name parameters)
+                                    | otherwise = inspectTool current name parameters
+                                  -- Worktree agents reach this endpoint only for
+                                  -- coordination. Their editor tools use their own session.
+                                  visible=if ident==AR.primaryAgent agents then specs++agentTools else agentTools
+                              editorResponseOnly visible (permissionCall permissions dispatch) d request
+                  let (updated,finish)=response
                   quit<-readIORef exiting
                   pure (quit,updated,finish)
             case daemon of
-              Just sid -> runRemoteDaemon sid scale effects tick inspect protectedDesktop
+              Just sid -> runRemoteDaemonWithStartup (AR.activateAgentCheckpoint (conversationAgents conversation)) sid scale effects tick inspect protectedDesktop
               Nothing -> die "Missing session process identity."
 
   where

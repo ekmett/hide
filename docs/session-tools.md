@@ -57,6 +57,52 @@ The [debugging skill](../skills/debug-editor/SKILL.md) is also available to MCP 
 
 The PNG uses the bundled bitmap fonts and the current screen-mode aspect ratio. It includes the editor cursor but excludes OS window chrome, CRT effects and platform font shaping; complex Unicode clusters use a bitmap approximation.
 
+## Work with several agents
+
+Ask the main conversation to delegate a task to a named child. Agents can list
+sessions with `agent_directory`, spawn a child with `agent_spawn`, rename
+sessions, queue attributed messages, wait for a task ticket, and read or search
+retained history. A child takes instructions from its parent; another agent's
+message remains a peer message. Only you or an ancestor can cancel or end it.
+Names help locate work, while stable IDs keep messages routed correctly.
+
+A shared child uses the parent's editor. A worktree child starts from committed
+Git source in a separate checkout and editor session, with its own buffers,
+builds, terminals and debugger. Parent changes that have not been committed are
+not copied. The new editor stays hidden until you open it, and ending the agent
+preserves the checkout for review. Separate worktree sessions can build or debug
+at the same time; shared children use the same editor job slots.
+
+Open **Tools > Agents** or **Window > Agents** to browse names, status and parent
+relationships. **History** opens a read-only view of recent retained events;
+**Workspace** opens the associated editor. These controls currently browse work;
+they do not provide a live child composer or reconnect a stopped child provider.
+
+Workspace windows open on the editor host. A build without native windows shows
+`thc-edit --resume SESSION_ID` to run in a terminal instead. When the editor runs
+over SSH, use a display attachment from your SSH client; launching a window on
+the remote host does not open one on your local desktop.
+
+The main conversation receives the authenticated `editor` MCP server. Children
+receive an `editor` server for their workspace and a separate `agents` server
+for coordination. The host supplies their identities; they cannot impersonate
+you or another agent through tool arguments. Model/effort choices come from the
+provider, and context forks require actual provider support.
+
+Set limits in the shared configuration:
+
+```toml
+[editor.agents]
+max_agents = 8
+max_subagents = 4
+```
+
+The total includes the main conversation; the second limit counts direct
+children per agent. Project `thc.toml` can lower either ceiling. Lowering limits
+does not end existing work, and agents cannot raise them. See
+[agent limits](configuration.md#agent-limits) and the
+[coordination tool reference](agent-tools.md#agent-sessions-and-coordination).
+
 ## Questions and tool activity
 
 An agent can use `ask_user` to ask a question with choices and a free-text answer inside the conversation. Your draft stays where you left it. Tool activity appears as a compact chevron and description; expand it to inspect the complete request and reply JSON.

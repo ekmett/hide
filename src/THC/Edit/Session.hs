@@ -92,7 +92,7 @@ forgetSession ident = do
   checkpoint <- checkpointPath ident
   legacy <- (++".json") <$> sessionEndpoint ident
   mapM_ (\target -> removeFile target `catch` \(err::IOException) ->
-    unless (isDoesNotExistError err) (ioError err)) [path,checkpoint,checkpoint++".agent.json",legacy]
+    unless (isDoesNotExistError err) (ioError err)) [path,checkpoint,checkpoint++".agent.json",checkpoint++".agents.json",legacy]
 
 loadSession :: String -> IO (Maybe SessionRecord)
 loadSession ident = do

@@ -5,7 +5,7 @@ import Control.Concurrent.Async (withAsync, poll, wait)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar
 import Control.Exception (bracket)
-import Control.Monad (unless)
+import Control.Monad (unless, forM_)
 import Data.Aeson
 import Data.Aeson.Types (parseMaybe)
 import qualified Data.ByteString.Char8 as BS
@@ -27,7 +27,9 @@ checks=bracket temporary removePathForcibly $ \root -> do
       launch=A.Launch "python3" [script] [("LOG",logPath)]
       spec=SpawnSpec "worker" "Inspect parser" root Shared Fresh Nothing Nothing
       request=StartRequest (AgentId "agent-1") Human spec Nothing
-      server=object ["name" .= ("editor"::T.Text),"command" .= ("/bridge"::T.Text),"args" .= ["private-actor-token"::T.Text],"env" .= ([]::[Value])]
+      bearer=T.replicate 12 "ab19"
+      server=object ["name" .= ("editor"::T.Text),"command" .= ("/bridge"::T.Text),"args" .= (["--mcp-editor","session"]::[T.Text]),
+        "env" .= [object ["name" .= ("THC_EDIT_MCP_TOKEN"::T.Text),"value" .= bearer]]]
       logs=mapMaybe decodeStrict' . BS.lines <$> BS.readFile logPath
       check label ok=unless ok (error label)
       right label result=either (error . ((label++": ")++) . T.unpack) pure result
@@ -72,6 +74,16 @@ checks=bracket temporary removePathForcibly $ \root -> do
     splitEvents<-readIORef events
     let joined=T.concat [text | ("output",value)<-splitEvents,Just text<-[field "text" value]]
     check "streamed session reference stays private across chunk boundaries" (not ("private-child-key" `T.isInfixOf` joined) && field "text" split==Just ("Output [private] suffix"::T.Text))
+    forM_ ["whole","split"] $ \mode->do
+      writeIORef events []
+      credentialResult<-driverDeliver running (prompt ("credentials "<>mode)) >>= right "credential echo"
+      echoed<-readIORef events
+      let texts kind=T.concat [text | (label,value)<-echoed,label==kind,Just text<-[field "text" value]]
+      check "MCP bearer is redacted from whole and split output and thought streams"
+        (all (\kind->not (bearer `T.isInfixOf` texts kind) && "[private]" `T.isInfixOf` texts kind) ["output","thought"]
+          && not (bearer `T.isInfixOf` T.pack (show credentialResult)))
+      check "MCP bearer is redacted from echoed tool descriptors"
+        (not (bearer `T.isInfixOf` T.pack (show echoed)) && any ((=="tool").fst) echoed)
     large<-driverDeliver running (prompt "large") >>= right "large output"
     check "large provider output is bounded" (maybe False ((<=131072).T.length) (field "text" large) && field "truncated" large==Just True)
     entries<-logs
@@ -82,7 +94,7 @@ checks=bracket temporary removePathForcibly $ \root -> do
     withAsync (driverDeliver running (prompt "permission")) $ \pending -> do
       shown<-timeout 2000000 (takeMVar asked)
       check "provider permission is forwarded to human callback" (maybe False ((=="Write file").permissionTitle) shown)
-      check "human sees bounded tool details without private reference" (maybe False (\value->"/proposed.txt" `T.isInfixOf` permissionDetails value && not ("private-child-key" `T.isInfixOf` permissionDetails value) && T.length (permissionDetails value)<=8192) shown)
+      check "human sees bounded tool details without private reference" (maybe False (\value->"/proposed.txt" `T.isInfixOf` permissionDetails value && not ("private-child-key" `T.isInfixOf` permissionDetails value) && not (bearer `T.isInfixOf` permissionDetails value) && T.length (permissionDetails value)<=8192) shown)
       check "provider cannot approve its own request" . maybe True (const False) =<< poll pending
       putMVar decision (Just "allow-once")
       check "approved callback releases the provider" . either (const False) (const True) =<< wait pending
@@ -140,7 +152,7 @@ checks=bracket temporary removePathForcibly $ \root -> do
 fixture :: String
 fixture=unlines
   [ "import json,os,sys"
-  , "log=open(os.environ['LOG'],'a',buffering=1); sid='private-child-key'; active=None; selected={'model-id':'model-a','effort-id':'low'}"
+  , "log=open(os.environ['LOG'],'a',buffering=1); sid='private-child-key'; servers=[]; active=None; selected={'model-id':'model-a','effort-id':'low'}"
   , "def send(v): print(json.dumps(dict(jsonrpc='2.0',**v)),flush=True)"
   , "def reply(i,v): send({'id':i,'result':v})"
   , "def options(): return [{'id':'model-id','name':'Model','category':'model','type':'select','currentValue':selected['model-id'],'options':[{'value':'model-a','name':'A'},{'value':'model-b','name':'B'}]},{'id':'effort-id','name':'Effort','category':'thought_level','type':'select','currentValue':selected['effort-id'],'options':[{'value':'low','name':'Low'},{'value':'high','name':'High'}]}]"
@@ -148,14 +160,20 @@ fixture=unlines
   , "for line in sys.stdin:"
   , " m=json.loads(line); log.write(json.dumps(m)+'\\n'); method=m.get('method'); p=m.get('params',{}); i=m.get('id')"
   , " if method=='initialize': reply(i,{'protocolVersion':1,'agentCapabilities':{'sessionCapabilities':{'fork':{}} if os.environ.get('FORK')=='yes' else {}}})"
-  , " elif method=='session/new': reply(i,{'sessionId':sid,'configOptions':options()})"
+  , " elif method=='session/new': servers=p['mcpServers']; reply(i,{'sessionId':sid,'configOptions':options()})"
   , " elif method=='session/fork': sid=p['sessionId'] if os.environ.get('REUSE')=='yes' else 'private-fork-key'; reply(i,{'sessionId':sid,'configOptions':options()})"
   , " elif method=='session/set_config_option': selected[p['configId']]=p['value']; reply(i,{'configOptions':options()})"
   , " elif method=='session/prompt':"
   , "  active=i; text=p['prompt'][-1]['text']"
   , "  if 'disconnect' in text: sys.exit(0)"
   , "  elif 'stall' in text: pass"
-  , "  elif 'permission' in text: send({'id':'permission','method':'session/request_permission','params':{'sessionId':sid,'toolCall':{'title':'Write file','rawInput':{'path':'/proposed.txt','sessionId':sid}},'options':[{'optionId':'allow-once','name':'Allow once','kind':'allow_once'},{'optionId':'reject','name':'Reject','kind':'reject_once'}]}})"
+  , "  elif 'permission' in text: send({'id':'permission','method':'session/request_permission','params':{'sessionId':sid,'toolCall':{'title':'Write file','rawInput':{'path':'/proposed.txt','sessionId':sid,'servers':servers}},'options':[{'optionId':'allow-once','name':'Allow once','kind':'allow_once'},{'optionId':'reject','name':'Reject','kind':'reject_once'}]}})"
+  , "  elif 'credentials' in text:"
+  , "   tokens=[entry['value'] for server in servers for entry in server.get('env',[]) if entry.get('name')=='THC_EDIT_MCP_TOKEN']"
+  , "   parts=[json.dumps(servers)] if 'whole' in text else [part for token in tokens for part in [token[:17],token[17:31],token[31:]]]"
+  , "   for kind in ['agent_message_chunk','agent_thought_chunk']:"
+  , "    for part in parts: update({'sessionUpdate':kind,'content':{'type':'text','text':part}}); reply(999,{})"
+  , "   update({'sessionUpdate':'tool_call','title':json.dumps(servers),'status':'completed'}); reply(i,{'stopReason':'end_turn'})"
   , "  elif 'split' in text:"
   , "   for part in ['Output private-','child-','key suffix']: update({'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':part}}); reply(999,{})"
   , "   reply(i,{'stopReason':'end_turn'})"

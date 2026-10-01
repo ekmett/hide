@@ -31,12 +31,14 @@ startACPDriver launch servers context permission request emit=safely $ mask $ \r
   root<-canonicalizePath (spawnDirectory (startSpec request))
   client<-A.startClient launch root
   runtime<-Runtime client <$> newMVar M.empty <*> newTVarIO True <*> newTVarIO False <*> newIORef False
-    <*> newIORef Nothing <*> pure (sourceSessionKey <$> startSource request) <*> pure emit <*> pure permission
+    <*> newIORef Nothing <*> pure (sourceSessionKey <$> startSource request) <*> pure bearerKeys <*> pure emit <*> pure permission
     <*> newMVar Nothing <*> newEmptyMVar <*> newIORef Null <*> newMVar () <*> newIORef True <*> newIORef ("",False) <*> newIORef M.empty
   worker<-async (pump runtime `finally` (publish runtime ProviderClosed >> failPending runtime "ACP connection closed."))
   putMVar (pumpWorker runtime) worker
   restore (setup runtime root) `onException` close runtime
   where
+    bearerKeys=[key | server<-servers,entry<-fromMaybe [] (field "env" server),
+      field "name" entry==Just ("THC_EDIT_MCP_TOKEN"::Text),Just key<-[field "value" entry],not (T.null key)]
     setup runtime root=do
       initialized<-rpc runtime (Just 30000000) "initialize" (object
         ["protocolVersion" .= (1::Int),"clientInfo" .= object ["name" .= ("thc-edit-agent"::Text),"version" .= ("0.1.0.0"::Text)],
@@ -64,7 +66,7 @@ startACPDriver launch servers context permission request emit=safely $ mask $ \r
 data Runtime = Runtime
   { client :: A.Client, pending :: MVar (M.Map Int (Text, TMVar (Either Text Value)))
   , live :: TVar Bool, cancelled :: TVar Bool, closed :: IORef Bool
-  , sessionKey :: IORef (Maybe Text), parentKey :: Maybe Text
+  , sessionKey :: IORef (Maybe Text), parentKey :: Maybe Text, mcpKeys :: [Text]
   , publish :: DriverEvent -> IO (), askPermission :: ACPPermission -> IO (Maybe Text)
   , permissionWorker :: MVar (Maybe (Async ())), pumpWorker :: MVar (Async ())
   , configuration :: IORef Value, serial :: MVar (), firstPrompt :: IORef Bool
@@ -237,7 +239,7 @@ emitChunk runtime kind text truncated=unless (T.null text && not truncated) $ do
 privateKeys :: Runtime -> IO [Text]
 privateKeys runtime=do
   sid<-readIORef (sessionKey runtime)
-  pure [key | Just key<-[sid,parentKey runtime],not (T.null key)]
+  pure ([key | Just key<-[sid,parentKey runtime],not (T.null key)]++mcpKeys runtime)
 
 scrub :: Runtime -> Text -> IO Text
 scrub runtime value=do

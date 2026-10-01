@@ -1,10 +1,12 @@
 {-# LANGUAGE CPP, OverloadedStrings, ScopedTypeVariables #-}
 module THC.Edit.Remote
-  ( RemotePeer(..), withLocalPeer, withSSHPeer, withSSHSession, runRemoteRelay, runRemoteDaemon ) where
+  ( RemotePeer(..), withLocalPeer, withSSHPeer, withSSHSession, runRemoteRelay, runRemoteDaemon, runRemoteDaemonWithStartup ) where
 
 #ifndef WITH_REMOTE
 import THC.Edit.Model (Desktop, Effect)
 import THC.Edit.Protocol (WirePacket(..))
+import qualified Data.Text as T
+import Data.Aeson (Value)
 #endif
 
 #ifdef WITH_REMOTE
@@ -170,8 +172,8 @@ data Session = Session
   , stopped :: Bool
   }
 
-runRemoteDaemon :: String -> Double -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> (Desktop -> IO Desktop) -> (Desktop -> Value -> IO (Bool, Desktop, IO (Maybe Value))) -> Desktop -> IO ()
-runRemoteDaemon session scale effects tick inspect initial = do
+runRemoteDaemonWithStartup :: IO () -> String -> Double -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> (Desktop -> IO Desktop) -> (Desktop -> Maybe T.Text -> Value -> IO (Bool, Desktop, IO (Maybe Value))) -> Desktop -> IO ()
+runRemoteDaemonWithStartup owned session scale effects tick inspect initial = do
   checkpoint <- checkpointPath session
   withSessionLock (checkpoint++".lock") $ runOwned checkpoint
  where
@@ -186,6 +188,7 @@ runRemoteDaemon session scale effects tick inspect initial = do
       case connected of
         Right () -> failure "Editor session already has a listener"
         Left (_::IOException) -> if recoverable then removeFile path else failure "Refusing to replace an unknown session endpoint"
+    owned
     runState checkpoint recovered path
   runState checkpoint recovered path = do
     epoch <- randomIdentity
@@ -237,7 +240,10 @@ runRemoteDaemon session scale effects tick inspect initial = do
                 ["attached" .= attached,"agentReplying" .= agentReplying d,"agentQueued" .= agentQueued d,
                  "waiting" .= (dialog d/=Nothing || chatQuestion d/=Nothing),"dirty" .= webDirty d])
             JsonPacket value | packetType first==Just "inspect" -> do
-              request <- decodeValue (withObject "editor inspection" (\o -> o .: "request")) value
+              (agentToken,request) <- decodeValue (withObject "editor inspection" (\o -> do
+                token <- o .:? "agentToken"
+                unless (maybe True (\credential -> not (T.null credential) && T.length credential<=256) token) (fail "Invalid editor MCP token")
+                (token,) <$> o .: "request")) value
               mask $ \restore -> do
                 thread<-myThreadId
                 wake<-newMVar shutdown
@@ -252,7 +258,7 @@ runRemoteDaemon session scale effects tick inspect initial = do
                     -- Registration and initiation share the desktop lock with
                     -- approval/Exit, so accepted replies cannot miss the drain.
                     atomically (modifyTVar' inspections (M.insert thread stop))
-                    (exited,updated,reply) <- inspect (desktop s) request
+                    (exited,updated,reply) <- inspect (desktop s) agentToken request
                     pure (s {desktop=updated,stopped=stopped s || exited},(exited,reply))
                   -- Start deferred work masked before accepting cancellation. Its
                   -- interruptible waits install their cleanup before EOF can stop it.
@@ -683,6 +689,9 @@ withSSHPeer :: String -> [String] -> (RemotePeer -> IO ()) -> IO ()
 withSSHPeer _ _ _ = ioError (userError "Remote support is not built. Rebuild with cabal build -fremote")
 runRemoteRelay :: [String] -> IO ()
 runRemoteRelay _ = ioError (userError "Remote support is not built. Rebuild with cabal build -fremote")
-runRemoteDaemon :: String -> Double -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> (Desktop -> IO Desktop) -> (Desktop -> Value -> IO (Bool, Desktop, IO (Maybe Value))) -> Desktop -> IO ()
-runRemoteDaemon _ _ _ _ _ _ = ioError (userError "Remote support is not built. Rebuild with cabal build -fremote")
+runRemoteDaemonWithStartup :: IO () -> String -> Double -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> (Desktop -> IO Desktop) -> (Desktop -> Maybe T.Text -> Value -> IO (Bool, Desktop, IO (Maybe Value))) -> Desktop -> IO ()
+runRemoteDaemonWithStartup _ _ _ _ _ _ _ = ioError (userError "Remote support is not built. Rebuild with cabal build -fremote")
 #endif
+
+runRemoteDaemon :: String -> Double -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> (Desktop -> IO Desktop) -> (Desktop -> Maybe T.Text -> Value -> IO (Bool, Desktop, IO (Maybe Value))) -> Desktop -> IO ()
+runRemoteDaemon=runRemoteDaemonWithStartup (pure ())

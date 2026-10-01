@@ -170,6 +170,53 @@ bundled bitmap font, excluding OS chrome, CRT and native Unicode shaping.
 Clipboard text is capped at 1 MiB UTF-8 with no NUL; frontend permission can
 prevent OS export even after queueing succeeds.
 
+## Agent sessions and coordination
+
+The primary conversation receives these tools through its authenticated `editor`
+server. Children receive an `editor` server for their own workspace and an
+`agents` server for coordination. Caller identity is assigned by the host; tool
+arguments cannot select another sender or redirect editor calls to another
+workspace.
+
+| Tool | Kind | Arguments | Result / contract |
+| --- | --- | --- | --- |
+| `agent_directory` | R | `{}` | Named agents, stable IDs, parents, state, workspace, limits and advertised model/effort choices |
+| `agent_spawn` | X | `name`, `task`, `context?`, `sourceAgentId?`, `model?`, `effort?`, `workspace?` | Create child, queue its task, return metadata and message ticket; no display focus change |
+| `agent_rename` | W | `agentId`, `name` | Rename self or another agent; stable ID and rename attribution remain |
+| `agent_message` | X | `agentId`, `text` | Queue attributed message; return ticket |
+| `agent_wait` | R | `agentId`, `ticket`, `timeoutMs?` | Wait 0–60,000 ms, default 30,000; timeout reports running without cancelling |
+| `agent_cancel` | X | `agentId` | Cancel current/queued messages; human or ancestor only; keep session |
+| `agent_end` | X | `agentId` | End session and descendants; human or ancestor only; retain history and worktrees |
+| `agent_history` | R | `agentId`, `after?`, `limit?` | Retained events; `nextAfter` continues, `dropped` counts discarded older events |
+| `agent_search` | R | `agentId`, `query`, `after?`, `limit?` | Literal, case-insensitive search of retained events |
+
+Names are unique ignoring case, at most 80 characters without controls. Tasks
+and messages accept at most 65,536 characters. History pages default to 50
+entries, maximum 100; search queries accept at most 4096 characters. Agent IDs
+remain stable when names change. A parent occupies its child's user seat;
+messages from other agents remain peer messages, not human instructions.
+
+`context` defaults to `fresh`. `fork` requires `sourceAgentId`, caller ownership
+and actual provider fork support; it never silently starts a fresh conversation.
+Choose `model` and `effort` only from provider-advertised choices.
+
+`workspace` defaults to `{"mode":"shared"}`. Use `{"mode":"worktree"}` with
+optional `ref`, `branch` and `name` for a separate Git checkout from committed
+source. Unsaved/uncommitted parent edits are not copied. Its editor runs without
+a display until opened, with separate buffers, build jobs, terminals and debugger.
+Shared children use their parent's editor and its existing job slots. Ending an
+agent does not delete its worktree.
+
+Global `[editor.agents]` sets `max_agents` (default 8, range 1–64, including the
+primary) and `max_subagents` (default 4, range 0–64 direct children per agent).
+Project `thc.toml` may lower these ceilings; agents cannot raise them. Both limits
+are checked at spawn. See [configuration](configuration.md#agent-limits).
+
+**Tools > Agents** or **Window > Agents** opens the directory. History is a
+read-only view of the latest retained events; Workspace opens the associated
+editor. The directory currently provides browsing, not a child conversation
+composer or child-provider reconnect control.
+
 ## Conversation and settings
 
 | Tool | Kind | Arguments | Result / contract |

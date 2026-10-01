@@ -66,7 +66,7 @@ data Entry = Entry
   , entryQueue :: Q.Seq HubMessage, entryCurrent :: Maybe HubMessage
   , entryResults :: M.Map Int (Either Text Value), entryNextTicket :: Int
   , entryHistory :: Q.Seq HistoryEvent, entryHistoryBytes :: Int, entryNextEvent :: Int
-  , entryDropped :: Int, entryExternal :: Bool, entryCancelPending :: Bool }
+  , entryDropped :: Int, entryExternal :: Bool, entryCancelPending :: Bool, entryExternalBusy :: Bool }
 data HubState = HubState { hubEntries :: M.Map AgentId Entry, hubNextId :: Int, hubClosed :: Bool, hubLastLimits :: HubLimits }
 data AgentHub = AgentHub (FilePath -> IO (Either Text HubLimits)) StartProvider (TVar HubState)
 
@@ -146,7 +146,7 @@ reserve (AgentHub _ _ ref) limits actor raw external=do
     Right (spec,source)->do
       let ident=AgentId ("agent-"<>T.pack (show (hubNextId state)))
           entry=appendEvent "created" actor (object ["name" .= spawnName spec,"task" .= spawnTask spec])
-            (Entry ident (case actor of Human->Nothing; Agent parent->Just parent) spec Starting Nothing Nothing emptyCaps Q.empty Nothing M.empty 1 Q.empty 0 1 0 external False)
+            (Entry ident (case actor of Human->Nothing; Agent parent->Just parent) spec Starting Nothing Nothing emptyCaps Q.empty Nothing M.empty 1 Q.empty 0 1 0 external False False)
       writeTVar ref state {hubEntries=M.insert ident entry (hubEntries state),hubNextId=hubNextId state+1,hubLastLimits=limits}
       pure (Right (entry,source))
   where
@@ -223,8 +223,18 @@ updateExternalAgent hub@(AgentHub readLimits _ ref) ident driver=mask $ \restore
       pure (Right ())
 
 setExternalAgentBusy :: AgentHub -> AgentId -> Bool -> IO ()
-setExternalAgentBusy (AgentHub _ _ ref) ident busy=atomically $ modifyTVar' ref $ \state->state {hubEntries=M.adjust
-  (\entry->if entryExternal entry && entryPhase entry `elem` [Idle,Running] && entryCurrent entry==Nothing then entry {entryPhase=if busy then Running else Idle} else entry) ident (hubEntries state)}
+setExternalAgentBusy (AgentHub _ _ ref) ident busy=atomically $ modifyTVar' ref $ \state->state {hubEntries=M.adjust update ident (hubEntries state)}
+  where
+    update entry
+      | entryExternal entry && entryPhase entry `elem` [Idle,Running,Cancelling] =
+          let updated=entry {entryExternalBusy=busy}
+          in if entryCurrent entry==Nothing && entryPhase entry/=Cancelling
+             then updated {entryPhase=restingPhase updated} else updated
+      | otherwise=entry
+
+-- The host's prompt seat outlives individual hub deliveries and cancellations.
+restingPhase :: Entry -> Phase
+restingPhase entry=if entryExternalBusy entry then Running else Idle
 
 configureDriver :: SpawnSpec -> AgentDriver -> IO (Either Text AgentDriver)
 configureDriver spec driver
@@ -266,7 +276,7 @@ worker hub@(AgentHub _ _ ref) ident = do
         | not (active entry) -> pure Nothing
         | entryPhase entry == Cancelling -> retry
         -- The primary conversation owns its prompt until its host releases it.
-        | entryExternal entry && entryPhase entry == Running -> retry
+        | entryExternalBusy entry -> retry
         | otherwise -> case Q.viewl (entryQueue entry) of
             Q.EmptyL -> retry
             message Q.:< rest -> do
@@ -288,7 +298,7 @@ worker hub@(AgentHub _ _ ref) ident = do
       | otherwise=let completed=if entryPhase entry==Cancelling then Left "Agent prompt cancelled." else fmap boundedValue result
                       results=M.insert (messageTicket message) (either (Left . boundedError) Right completed) (entryResults entry)
                   in appendEvent "message_finished" (Agent ident) (ticketValue (messageTicket message) completed)
-                    entry {entryPhase=if entryCancelPending entry then Cancelling else Idle,entryCurrent=Nothing,entryResults=trimResults results}
+                    entry {entryPhase=if entryCancelPending entry then Cancelling else restingPhase entry,entryCurrent=Nothing,entryResults=trimResults results}
 
 sendAgent :: AgentHub -> Actor -> AgentId -> Text -> IO (Either Text Int)
 sendAgent (AgentHub _ _ ref) actor ident body=atomically $ do
@@ -382,7 +392,7 @@ cancelAgent (AgentHub _ _ ref) actor ident = mask $ \restore -> do
       {hubEntries = M.adjust release ident (hubEntries state)}
     release entry
       | entryPhase entry == Cancelling = entry
-          {entryCancelPending = False, entryPhase = if entryCurrent entry == Nothing then Idle else Cancelling}
+          {entryCancelPending = False, entryPhase = if entryCurrent entry == Nothing then restingPhase entry else Cancelling}
       | otherwise = entry
 
 endAgent :: AgentHub -> Actor -> AgentId -> IO (Either Text ())
@@ -564,7 +574,7 @@ restoreHub limits launcher value=case parseEither persisted value of
       unless (ticket>0 && ticket<=1000000000 && index>0 && index<=1000000000 && dropped>=0 && dropped<index) (fail "Counters")
       history<-o .: "history" >>= mapM eventParser
       unless (length history<=1024 && sum (map eventSize history)<=4*1024*1024 && strictlyIncreasing [n | HistoryEvent n _ _ _<-history] && all (\(HistoryEvent n _ _ _)->n>0 && n<index) history) (fail "History")
-      pure (Entry ident parent checked (if ended then Ended else Recovered) Nothing key caps Q.empty Nothing M.empty ticket (Q.fromList history) (sum (map eventSize history)) index dropped external False)
+      pure (Entry ident parent checked (if ended then Ended else Recovered) Nothing key caps Q.empty Nothing M.empty ticket (Q.fromList history) (sum (map eventSize history)) index dropped external False False)
     eventParser=withObject "event" $ \o->HistoryEvent <$> o .: "index" <*> (o .: "kind" >>= shortText) <*> (o .: "author" >>= actorParser) <*> o .: "detail"
     actorParser=withObject "actor" $ \o->do
       kind<-o .: "kind"::Parser Text

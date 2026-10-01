@@ -1,5 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
-module THC.Edit.EditorMCP (editorResponse, editorResponseWith, builtinTools, builtinTool, debugTools, editorServers, runEditorMCP, runEditorMCPWithHandles, readMCPLine) where
+module THC.Edit.EditorMCP (editorResponse, editorResponseWith, editorResponseOnly, rpcError, builtinTools, builtinTool, debugTools, editorServers, editorServersFor, editorServersAt, runEditorMCP, runEditorMCPWithHandles, runEditorMCPWithToken, readMCPLine) where
 
 import Control.Exception (bracket, try, IOException, finally, catch, mask, throwIO)
 import Control.Concurrent.Async (async, cancel, AsyncCancelled(..))
@@ -32,17 +32,30 @@ import THC.Edit.RemoteEndpoint (sessionEndpoint, connectEndpointWithShutdown)
 -- ACP starts this small stdio bridge beside its provider. The private session
 -- endpoint supplies a current snapshot without taking over the display.
 editorServers :: IO [Value]
-editorServers = do
-  session <- lookupEnv "THC_EDIT_SESSION"
+editorServers = editorServersFor Nothing
+
+editorServersFor :: Maybe T.Text -> IO [Value]
+editorServersFor token = lookupEnv "THC_EDIT_SESSION" >>= maybe (pure []) (\ident -> editorServersAt ident token)
+
+editorServersAt :: String -> Maybe T.Text -> IO [Value]
+editorServersAt ident token = do
   executable <- getExecutablePath
   pure [object ["name" .= ("editor"::T.Text),"command" .= executable,
-    "args" .= ["--mcp-editor",ident],"env" .= ([]::[Value])] | Just ident<- [session]]
+    "args" .= ["--mcp-editor",ident],"env" .=
+      [object ["name" .= ("THC_EDIT_MCP_TOKEN"::T.Text),"value" .= value] | Just value <- [token]]]]
 
 runEditorMCP :: String -> IO ()
-runEditorMCP ident = runEditorMCPWithHandles ident stdin stdout
+runEditorMCP ident = do
+  token <- fmap T.pack <$> lookupEnv "THC_EDIT_MCP_TOKEN"
+  runEditorMCPWithToken ident token stdin stdout
 
 runEditorMCPWithHandles :: String -> Handle -> Handle -> IO ()
-runEditorMCPWithHandles ident input outputHandle = do
+runEditorMCPWithHandles ident = runEditorMCPWithToken ident Nothing
+
+runEditorMCPWithToken :: String -> Maybe T.Text -> Handle -> Handle -> IO ()
+runEditorMCPWithToken ident token input outputHandle = do
+  unless (maybe True (\value -> not (T.null value) && T.length value<=256) token)
+    (ioError (userError "Invalid editor MCP token"))
   path <- sessionEndpoint ident
   hSetBinaryMode input True
   hSetBinaryMode outputHandle True
@@ -58,7 +71,7 @@ runEditorMCPWithHandles ident input outputHandle = do
         in bracket (connectEndpointWithShutdown path) close $ \(connection,shutdown) -> do
           stopped<-modifyMVar active (\(stopped,_) -> pure ((stopped,shutdown),stopped))
           if stopped then shutdown >> throwIO AsyncCancelled else restore $ do
-            writePacket connection (JsonPacket (object ["type" .= ("inspect"::T.Text),"request" .= request]))
+            writePacket connection (JsonPacket (object (["type" .= ("inspect"::T.Text),"request" .= request]++["agentToken" .= value | Just value<-[token]])))
             reply <- readPacket connection
             case reply of
               Just (JsonPacket Null) -> pure ()
@@ -119,7 +132,10 @@ editorResponse :: Desktop -> Value -> Maybe Value
 editorResponse = responseWithTools []
 
 responseWithTools :: [Value] -> Desktop -> Value -> Maybe Value
-responseWithTools extra desktop request = case request of
+responseWithTools = responseTools True
+
+responseTools :: Bool -> [Value] -> Desktop -> Value -> Maybe Value
+responseTools includeBuiltins extra desktop request = case request of
   Object fields | KM.lookup "jsonrpc" fields==Just (String "2.0"), Just (String method)<-KM.lookup "method" fields ->
     case KM.lookup "id" fields of
       Nothing -> Nothing
@@ -135,11 +151,11 @@ responseWithTools extra desktop request = case request of
         "serverInfo" .= object ["name" .= ("thc-edit"::T.Text),"version" .= ("0.1.0"::T.Text)],
         "instructions" .= ("Work with the live editor session. Buffers include unsaved edits; IDs belong to this session. Lines and columns start at 1; byte offsets start at 0. Discover tool schemas before use. Load docs/agent-skills.md with docs_read for task workflows; docs/agent-tools.md lists operations by category. Debugging guidance is also available at thc-edit://debugging. Execution and navigation tools change the live session; inspect their annotations."::T.Text)])
     dispatch "ping" _=Right (object [])
-    dispatch "tools/list" _=Right (object ["tools" .= (filter (\entry -> not (any (sameTool entry) extra)) tools++extra)])
+    dispatch "tools/list" _=Right (object ["tools" .= (filter (\entry -> includeBuiltins && not (any (sameTool entry) extra)) tools++extra)])
     dispatch "resources/list" _=Right (object ["resources" .= [object ["uri" .= skillURI,"name" .= ("Debugging with the editor"::T.Text),"mimeType" .= ("text/markdown"::T.Text),"description" .= ("A workflow for source breakpoints, stepping, stack and variable inspection."::T.Text)]]])
     dispatch "tools/call" params = do
       (name,args)<-parameters (withObject "tool call" $ \o -> (,) <$> o .: "name" <*> o .:? "arguments" .!= object []) params
-      case builtinTool desktop name args of
+      case if includeBuiltins then builtinTool desktop name args else Left "Unknown tool" of
         Left err -> pure (result True (String err))
         Right value -> pure (result False value)
     dispatch _ _=Left (-32601,"Method not found")
@@ -207,7 +223,19 @@ builtinTool desktop=tool
 editorResponseWith :: [Value]
   -> (Desktop -> T.Text -> Value -> IO (Desktop, IO (Either T.Text Value)))
   -> Desktop -> Value -> IO (Desktop, IO (Maybe Value))
-editorResponseWith extra execute desktop request = case request of
+editorResponseWith = editorResponseUsing True
+
+-- Actor-bound orchestration bridges expose only explicitly supplied tools.
+-- In particular, an unknown call must never reach the desktop read fallback.
+editorResponseOnly :: [Value]
+  -> (Desktop -> T.Text -> Value -> IO (Desktop, IO (Either T.Text Value)))
+  -> Desktop -> Value -> IO (Desktop, IO (Maybe Value))
+editorResponseOnly = editorResponseUsing False
+
+editorResponseUsing :: Bool -> [Value]
+  -> (Desktop -> T.Text -> Value -> IO (Desktop, IO (Either T.Text Value)))
+  -> Desktop -> Value -> IO (Desktop, IO (Maybe Value))
+editorResponseUsing includeBuiltins extra execute desktop request = case request of
   Object fields | KM.lookup "jsonrpc" fields==Just (String "2.0")
     , Just ident<-KM.lookup "id" fields
     , Just (String method)<-KM.lookup "method" fields ->
@@ -240,7 +268,7 @@ editorResponseWith extra execute desktop request = case request of
         _ -> fallback
   _ -> fallback
   where
-    fallback=pure (desktop,pure (responseWithTools extra desktop request))
+    fallback=pure (desktop,pure (responseTools includeBuiltins extra desktop request))
     named name (Object fields)=KM.lookup "name" fields==Just (String name)
     named _ _=False
 

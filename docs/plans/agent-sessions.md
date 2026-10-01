@@ -23,23 +23,35 @@ terminals, and debug sessions separate from the shared project.
 - [x] Checkpoint serialization; recovered records stay inert until reconnected.
 - [x] Normal Cabal build and test registration for all four modules.
 
-The foundation is a library boundary. The interactive application does not yet
-advertise these orchestration tools.
-
 ## Application integration
 
-- [ ] Bind each MCP bridge to an authenticated agent identity; reject supplied
-  actor IDs and prevent cross-workspace routing.
-- [ ] Connect the main conversation and child providers to the shared directory,
-  global/project limits, context, and existing human permission queue.
-- [ ] Give worktree agents separate editor sessions for buffers, builds,
-  terminals and debugging; keep them hidden until explicitly revealed.
-- [ ] Add the compact agent directory and transcript drill-down, reusing the
-  current conversation renderer and Window menu.
-- [ ] Persist the directory and editor-session mapping with protected recovery
-  state; reconnect explicitly rather than replaying pending work.
-- [ ] Publish the tools through Agent Permissions and the docs service after
-  live shared/worktree isolation and recovery checks pass.
+Implemented surfaces (integration validation remains separate below):
+
+- Per-agent in-memory bearer bindings for MCP. The primary's authenticated
+  `editor` server exposes editor and coordination tools; child coordination
+  bridges expose only the nine agent tools. Child editor services target their
+  associated workspace, with no caller-supplied actor or directory override.
+- Primary and child ACP lifecycles connected to the directory, limits, user
+  context, and human permission queue. Model/effort choices remain advertised
+  provider choices; fork requires actual provider support.
+- Worktree children have separate headless editor sessions for buffers, builds,
+  terminals and debugging. Shared children use their parent's session. Background
+  startup does not focus a display; checkout contents survive agent shutdown.
+- Tools/Window > Agents supplies directory browsing, recent read-only history,
+  workspace opening and refresh. This is not a live child conversation composer.
+- Agent Permissions registers the nine coordination tools. User documentation
+  describes discovery, task tickets, attribution, limits and workspace isolation.
+
+Remaining work:
+
+- [x] Protected directory/editor-session mapping persistence and recovery.
+  Restore records without replaying tasks or starting providers; issue fresh
+  bearer capabilities. Publish checkpoints only after owning the session lock.
+- [ ] Provide explicit child-provider reconnect with capability/policy checks.
+- [ ] Add a live child conversation composer and interaction view, preserving
+  the distinction between the human and parent-controlled user seats.
+- [x] Validate shared/worktree routing, cancellation and permission cleanup,
+  primary busy handoff, bearer redaction and protected recovery.
 
 ## Verification
 
@@ -48,3 +60,14 @@ Regressions cover a busy primary conversation, cancellation while provider IO is
 pending, async cancellation, reconnect workspace changes, provider exits,
 configuration results, and private references split across text chunks with
 unmatched replies interleaved. No dependencies are added for orchestration.
+
+The full editor suite and documentation build/check pass. A live executable
+smoke test created a real worktree and separate editor process, exercised primary
+and child MCP connections, rejected root-buffer access through the coordination
+connection, revoked an ended agent, checked public output/checkpoints for bearer
+credentials, and closed both sessions cleanly. Recovery fixtures verify stable
+identities/history/workspace mappings, fresh tokens, no task replay, corrupt-file
+retention and ownership-gated checkpoint writes.
+
+Native Windows qualification still needs pending-inspector EOF/shutdown repair;
+see the [recovery plan](session-recovery.md#remaining-platform-qualification).
