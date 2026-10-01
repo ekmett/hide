@@ -78,8 +78,10 @@ relationships. **History** opens a read-only view of recent retained events;
 **Workspace** opens the associated editor. After recovery, select a child and
 choose **Reconnect** to load its saved provider conversation. This keeps its
 identity, history, workspace and editor session, issues a fresh connection token,
-and sends no task or queued message. Current limits and provider load/resume
-support are checked again; failed attempts leave the child available to retry.
+and sends no task or queued message. If its workspace daemon died, Reconnect
+restores that editor checkpoint first; it never substitutes an empty session.
+Current limits and provider load/resume support are checked again; failed
+attempts leave the child available to retry.
 Recovery itself never starts child providers. Ended children cannot reconnect.
 The child history view does not yet offer a live composer.
 

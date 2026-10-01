@@ -42,7 +42,7 @@ checks = bracket temporary removePathForcibly $ \root -> do
   writeFile logPath ""
   writeFile policy "[broken\n"
   withEnvironment [("XDG_CONFIG_HOME",config),("XDG_DATA_HOME",root </> "data"),("THC_EDIT_SESSION",session)] $
-    withAgentRuntimeUsing startEditor project launch $ \runtime -> do
+    withAgentRuntimeUsing startEditor (const (error "Unexpected editor reconnect")) project launch $ \runtime -> do
       let hub = agentHub runtime
           primary = primaryAgent runtime
           spec = SpawnSpec "child" "Inspect code" project Shared Fresh Nothing Nothing
@@ -142,7 +142,7 @@ persistenceChecks root = do
     let record = fresh {sessionId=sid,sessionDirectory=project}
     rememberSession record
     path <- (++".agents.json") <$> checkpointPath sid
-    (primary,child,workspace,oldToken,oldChildToken,oldAccess) <- withAgentRuntimeUsing startEditor project launch $ \runtime -> do
+    (primary,child,workspace,oldToken,oldChildToken,oldAccess) <- withAgentRuntimeUsing startEditor (const (error "Unexpected editor reconnect")) project launch $ \runtime -> do
       activateAgentCheckpoint runtime
       let hub = agentHub runtime
       token <- primaryServers runtime >>= serverToken
@@ -162,7 +162,7 @@ persistenceChecks root = do
             Just params <- [field "params" entry :: Maybe Value], Just xs <- [field "mcpServers" params :: Maybe [Value]]]
       childToken <- serverToken servers
       assert "checkpoint omits child bearer" (not (T.unpack childToken `isIn` BS.unpack bytes))
-      withAgentRuntimeUsing (const (error "Competing startup must not launch editors")) project launch $ \competing -> do
+      withAgentRuntimeUsing (const (error "Competing startup must not launch editors")) (const (error "Competing startup must not resume editors")) project launch $ \competing -> do
         recordAgentEvent (agentHub competing) (primaryAgent competing) "losing-startup" Null
         _ <- checkpointAgents competing >>= right
         pure ()
@@ -171,7 +171,13 @@ persistenceChecks root = do
     assert "closing runtime invalidates old bearer" . (==Nothing) =<< resolveAgentAccess oldAccess oldToken
     before <- BS.readFile logPath
     writeFile (config </> "thc" </> "config.toml") "[broken\n"
-    withAgentRuntimeUsing (const (error "Recovery must not start an editor")) project launch $ \runtime -> do
+    resumedEditors <- newIORef []
+    editorAvailable <- newIORef False
+    let resumeEditor record = do
+          modifyIORef' resumedEditors (++[record])
+          available <- readIORef editorAvailable
+          unless available (ioError (userError "Saved editor is unavailable"))
+    withAgentRuntimeUsing (const (error "Recovery must not start a new editor")) resumeEditor project launch $ \runtime -> do
       activateAgentCheckpoint runtime
       assert "restored primary identity is stable" (primaryAgent runtime==primary)
       token <- primaryServers runtime >>= serverToken
@@ -191,6 +197,10 @@ persistenceChecks root = do
       writeFile (config </> "thc" </> "config.toml") "[editor.agents]\nmax_agents = 1\nmax_subagents = 2\n"
       rejected "reconnect counts the existing primary toward current capacity" (reconnectAgent hub child)
       writeFile (config </> "thc" </> "config.toml") "[editor.agents]\nmax_agents = 4\nmax_subagents = 2\n"
+      rejected "editor restore failure prevents provider reconnect" (reconnectAgent hub child)
+      assert "failed editor restore starts no provider" . (==before) =<< BS.readFile logPath
+      assert "editor restore keeps exact saved session and workspace" . (==[workspace]) =<< readIORef resumedEditors
+      writeIORef editorAvailable True
       writeFile (logPath++".load") "unsupported"
       rejected "reconnect rechecks current provider capabilities" (reconnectAgent hub child)
       unsupported <- statusAgent hub Human child >>= right
@@ -206,6 +216,8 @@ persistenceChecks root = do
       _ <- requestAgentReconnect runtime child >>= right
       reconnected <- waitRequests runtime
       assert "host reconnect completes asynchronously" (any (\request -> case request of AgentReconnected who (Right ()) -> who==child; _ -> False) reconnected)
+      restoredEditors <- readIORef resumedEditors
+      assert "each explicit retry restores only the saved editor identity" (length restoredEditors==4 && all (==workspace) restoredEditors)
       current <- statusAgent hub Human child >>= right
       assert "reconnected child keeps name and identity and starts idle"
         (field "id" current==Just (agentIdText child) && field "name" current==Just ("recover-child"::T.Text) && field "status" current==Just ("idle"::T.Text))
@@ -231,7 +243,7 @@ persistenceChecks root = do
     assert "runtime teardown does not recreate sidecar after Exit" . not =<< doesFileExist path
     rememberSession record
     writeFile path "broken-checkpoint"
-    withAgentRuntimeUsing startEditor project launch $ \runtime -> do
+    withAgentRuntimeUsing startEditor (const (error "Unexpected editor reconnect")) project launch $ \runtime -> do
       activateAgentCheckpoint runtime
       notice <- runtimeNotice runtime
       assert "invalid checkpoint is reported without preventing editor startup" (maybe False (T.isInfixOf "checkpoint") notice)

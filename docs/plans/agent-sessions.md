@@ -48,7 +48,8 @@ Remaining work:
 - [x] Protected directory/editor-session mapping persistence and recovery.
   Restore records without replaying tasks or starting providers; issue fresh
   bearer capabilities. Publish checkpoints only after owning the session lock.
-- [x] Provide explicit child-provider reconnect with capability/policy checks.
+- [x] Provide explicit child-provider reconnect with capability/policy checks,
+  restoring the exact owned editor session before loading its provider.
 - [ ] Add a live child conversation composer and interaction view, preserving
   the distinction between the human and parent-controlled user seats.
 - [x] Validate shared/worktree routing, cancellation and permission cleanup,

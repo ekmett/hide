@@ -62,12 +62,12 @@ data RuntimeState = RuntimeState
   , closed :: Bool, notice :: Maybe Text, checkpointActive :: Bool }
 
 withAgentRuntime :: FilePath -> IO ACP.Launch -> (AgentRuntime -> IO a) -> IO a
-withAgentRuntime = withAgentRuntimeUsing startEditor
+withAgentRuntime = withAgentRuntimeUsing startEditor resumeEditor
 
--- Only editor startup is replaceable: tests use the real Hub, ACP process and
--- worktree code without recursively launching their own test executable.
-withAgentRuntimeUsing :: (FilePath -> IO SessionRecord) -> FilePath -> IO ACP.Launch -> (AgentRuntime -> IO a) -> IO a
-withAgentRuntimeUsing openEditor directory getLaunch action = bracket acquire release $ \runtime ->
+-- Only editor acquisition is replaceable: tests use the real Hub, ACP process
+-- and worktree code without recursively launching their own test executable.
+withAgentRuntimeUsing :: (FilePath -> IO SessionRecord) -> (SessionRecord -> IO ()) -> FilePath -> IO ACP.Launch -> (AgentRuntime -> IO a) -> IO a
+withAgentRuntimeUsing openEditor restoreEditor directory getLaunch action = bracket acquire release $ \runtime ->
   withAsync (forever (threadDelay 2000000 >> void (checkpointAgents runtime))) (const (action runtime))
   where
     acquire = mask $ \restore -> do
@@ -91,7 +91,7 @@ withAgentRuntimeUsing openEditor directory getLaunch action = bracket acquire re
             fault <- readMVar recoveryFault
             pure $ if starting then either (const (Right (HubLimits 8 4))) Right result else
               case fault of Just _ -> Left "Agent recovery checkpoint is invalid; spawning is disabled until it is repaired."; _ -> result
-          starter = startChild openEditor getLaunch root access state
+          starter = startChild openEditor restoreEditor getLaunch root access state
       restored <- case saved of
         Right (Just checkpoint) -> restoreHubWithLimits limits starter (savedHub checkpoint)
         _ -> Right <$> newAgentHubWithLimits limits starter
@@ -263,8 +263,8 @@ cancelPermissions state ident = modifyMVar_ state $ \s -> do
   where keep (ProviderPermission other _ _) = other/=ident
         keep _ = True
 
-startChild :: (FilePath -> IO SessionRecord) -> IO ACP.Launch -> Maybe SessionRecord -> AgentAccess -> MVar RuntimeState -> StartProvider
-startChild openEditor getLaunch root access state request emit = mask $ \restore -> do
+startChild :: (FilePath -> IO SessionRecord) -> (SessionRecord -> IO ()) -> IO ACP.Launch -> Maybe SessionRecord -> AgentAccess -> MVar RuntimeState -> StartProvider
+startChild openEditor restoreEditor getLaunch root access state request emit = mask $ \restore -> do
   let ident = startAgent request
       spec = startSpec request
       retire = revokeAgentAccess access ident >> cancelPermissions state ident
@@ -301,7 +301,13 @@ startChild openEditor getLaunch root access state request emit = mask $ \restore
               pure (Left "The recovered workspace has changed location.")
             Right _ -> do
               contexts <- readAgentContexts (sessionDirectory record)
-              pure ((\context -> (record,launch,contextText context)) <$> contexts)
+              case contexts of
+                Left err -> pure (Left err)
+                Right context -> do
+                  -- Shared children already use this running editor. Other
+                  -- saved workspaces may need their checkpoint restored first.
+                  unless (Just (sessionId record)==fmap sessionId root) (restoreEditor record)
+                  pure (Right (record,launch,contextText context))
         _ -> pure (Left "The saved provider or editor workspace is unavailable.")
     prepare spec = do
       owner <- case startOwner request of
@@ -348,12 +354,22 @@ startEditor directory = do
   fresh <- newSessionRecord Nothing ["--",directory]
   let record = fresh {sessionDirectory=directory}
   rememberSession record
-  withLocalPeer (sessionId record) False (sessionArguments record) $ \peer -> do
+  attachEditor False record
+  pure record
+
+resumeEditor :: SessionRecord -> IO ()
+resumeEditor record = do
+  activity <- sessionActivity record
+  -- A status probe does not take the display from an attached human.
+  when (activity==Nothing) (attachEditor True record)
+
+attachEditor :: Bool -> SessionRecord -> IO ()
+attachEditor resume record = do
+  withLocalPeer (sessionId record) resume (sessionArguments record) $ \peer -> do
     ready <- timeout 75000000 (awaitReady peer False)
     unless (ready==Just ()) (ioError (userError "Agent editor did not become ready within 75 seconds."))
   detached <- timeout 5000000 (awaitDetached record)
   unless (detached==Just ()) (ioError (userError "Agent editor started but detach could not be confirmed."))
-  pure record
   where
     awaitReady peer assets = peerReceive peer >>= \packet -> case packet of
       Nothing -> ioError (userError "Agent editor ended before becoming ready.")
