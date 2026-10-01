@@ -41,3 +41,10 @@ and daemon agent polling continues while no frontend is attached.
   and exits without a blocked socket or pipe reader. Repeat with a display
   attached and detached. Earlier Windows display detach/Exit checks do not
   establish this pending-inspector shutdown behavior.
+
+- [ ] Investigate intermittent macOS stdio relay closure during rapid reattachment.
+  The Ctrl-C regression twice received EOF before the first input acknowledgement;
+  the daemon remained alive and logged `AsyncCancelled`. Eight traced reruns and
+  the final uninstrumented run passed. Do not treat this as a diagnosed/fixed
+  transport issue. `test/interrupt-session.py` now checks actual daemon exit,
+  SIGTERM detachment, and recovery/save of an unsaved edit.

@@ -42,7 +42,9 @@ including over SSH. Detaching the display leaves an active build or run intact.
 ## Shells and output
 
 **File > Terminal** opens the configured shell in the project directory.
-Ordinary keys and paste go to the focused terminal. F5, F6, F10, numbered-window
+Ordinary keys and paste go to the focused terminal. **Ctrl+C** interrupts its
+foreground job; raw-mode programs receive the control byte themselves.
+F5, F6, F10, numbered-window
 shortcuts and menu controls stay with the editor. Resizing the terminal window
 resizes its PTY; output supports colors, attributes and Unicode.
 
