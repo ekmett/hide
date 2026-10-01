@@ -364,7 +364,7 @@ checks = bracket temporary removePathForcibly $ \root ->
       check "status newline works even with an empty draft"
         (contents (composerBuffer (fst (clickStatus "Newline" cancelled)))=="\n" && null (snd (clickStatus "Newline" cancelled)))
       check "status steering sends the advertised action"
-        (snd (clickStatus "Steer" (multiline {agentSteering=True}))==[AgentAction "steer-draft" []])
+        (snd (clickStatus "Steer" (multiline {agentSteering=True,agentReplying=True}))==[AgentAction "steer-draft" []])
       submitted<-uncurry (conversationEffects runtime fallback) (clickStatus "Query" (pasteDraft "stream" cancelled)) >>= done runtime . snd
       check "status Query posts draft into transcript and clears input" (T.null (contents (composerBuffer submitted)) && not (agentReplying submitted))
       busyDraft<-prompt runtime "wait" submitted >>= await runtime "composer busy" agentReplying
@@ -381,7 +381,14 @@ checks = bracket temporary removePathForcibly $ \root ->
       steered<-applyEvent (V.EvKey V.KEnter [V.MCtrl]) (pasteDraft "direction" steeringWait) >>= await runtime "steering delivered" (not . agentReplying)
       check "steering uses adapter extension and clears submitted draft" . any ((==Just ("_session/steering"::T.Text)).field "method") =<< logged
       check "steering does not edit source or retain sent draft" (T.null (contents (composerBuffer steered)) && documentBuffer (sourceDocument steered)==documentBuffer (sourceDocument cancelled))
-      disconnected<-prompt runtime "disconnect" steered >>= await runtime "provider EOF" ((=="Agent disconnected.").status)
+      idleRace<-prompt runtime "wait" steered >>= await runtime "idle race active" agentReplying
+      rejectedSteer<-send runtime "steer-draft" [] idleRace {composerBuffer=newBuffer "idle-race"} >>= await runtime "idle race response" (not . agentReplying)
+      check "primary idle race leaves steering draft unsent" (contents (composerBuffer rejectedSteer)=="idle-race")
+      legacyWait<-prompt runtime "wait" rejectedSteer >>= await runtime "legacy steer active" agentReplying
+      legacy<-send runtime "steer-draft" [] legacyWait {composerBuffer=newBuffer "legacy-steer"} >>= await runtime "legacy steering retires provider" (T.isInfixOf "provider stopped" . status)
+      check "primary legacy detached steering stops safely and retains the draft" (contents (composerBuffer legacy)=="legacy-steer" && not (agentSteering legacy))
+      restarted<-prompt runtime "stream" legacy >>= done runtime
+      disconnected<-prompt runtime "disconnect" restarted >>= await runtime "provider EOF" ((=="Agent disconnected.").status)
       reconnected<-prompt runtime "stream" disconnected >>= done runtime
       resumed<-send runtime "load" ["0","saved-id"] reconnected >>= await runtime "resume session" ((=="Session saved-id").status)
       check "new session clears stale context usage" (agentContextUsage resumed==Nothing && " -- " `T.isInfixOf` snapshot resumed)
@@ -457,12 +464,19 @@ checks = bracket temporary removePathForcibly $ \root ->
       steered<-send runtime "steer-draft" [] waiting {composerBuffer=newBuffer "direction"} >>= await runtime "context steering completion" (not . agentReplying)
       steeringLog<-logged
       let lastSteer=last [params | entry<-steeringLog,field "method" entry==Just ("_session/steering"::T.Text),Just params<-[field "params" entry::Maybe Value]]
+      check "primary steering requests host-owned idle handling" ((field "_meta" lastSteer >>= field "steering" >>= field "idleBehavior")==Just ("promptRequired"::T.Text))
       check "steering receives saved context updates" ("Steering guidance marker" `T.isInfixOf` json lastSteer)
       rejectionWait<-prompt runtime "wait" steered >>= await runtime "rejected context steering wait" agentReplying
       writeFile (root </> "thc.toml") "[editor.agent]\ncontext = 'Retry context marker'\n"
       pendingSteer<-send runtime "steer-draft" [] rejectionWait {composerBuffer=newBuffer "reject-context"}
       let childWaiting=(selectConversationView "fixture-child" "Child" pendingSteer) {composerBuffer=newBuffer "child draft",composerSelection=Selection 2 4}
-      hiddenRestored<-await runtime "hidden primary steering restoration" (\d->maybe False ((=="reject-context").contents.conversationDraft) (M.lookup "" (conversationViews d))) childWaiting
+      let settleHidden d=do
+            next<-tickConversation runtime d
+            (_,answer)<-chatTool runtime next "agent_settings" (object [])
+            settingsResult<-answer
+            if either (const False) ((==Just False).field "replying") settingsResult
+              then pure next else threadDelay 10000 >> settleHidden next
+      hiddenRestored<-timeout 8000000 (settleHidden childWaiting) >>= maybe (error "Hidden primary steering did not settle") pure
       check "failed primary steering preserves selected child draft" (conversationTarget hiddenRestored=="fixture-child" && contents (composerBuffer hiddenRestored)=="child draft" && composerSelection hiddenRestored==Selection 2 4)
       rejectedSteer<-send runtime "show" [] hiddenRestored
       check "switching back restores rejected primary steering draft" (contents (composerBuffer rejectedSteer)=="reject-context")
@@ -582,7 +596,7 @@ providerScript=unlines
   , "    else: effort=params['value']"
   , "    reply(ident,{'configOptions':settings()})"
   , "  elif method=='session/cancel': finish('cancelled')"
-  , "  elif method=='_session/steering': reply(ident,{'outcome':'rejected' if params['prompt'][0]['text']=='reject-context' else 'injected'}); finish()"
+  , "  elif method=='_session/steering': reply(ident,{'outcome':'failed' if params['prompt'][0]['text']=='reject-context' else 'promptRequired' if params['prompt'][0]['text']=='idle-race' else 'startedNewTurn' if params['prompt'][0]['text']=='legacy-steer' else 'injected'}); finish()"
   , "  elif method=='session/prompt':"
   , "    prompt=ident; scenario=params['prompt'][0]['text'].splitlines()[0]"
   , "    if scenario=='stream':"

@@ -76,6 +76,7 @@ data State = State
   , lastAgentSync :: Maybe (FilePath,Text,AH.Capabilities,Bool)
   , childRecords :: M.Map Text [Record], childRender :: Maybe (Text,Int,Value)
   , expandedToolRuns :: S.Set (Text,Text)
+  , childControls :: M.Map Text (Maybe Text,Async (Either Text ()))
   , childCancels :: M.Map Text (Async (Either Text ()))
   , resumeRecordPath :: FilePath
   }
@@ -107,7 +108,7 @@ withConversationAt root action = C.withConsoles $ \consoles -> Jobs.withBuildJob
     , ownedTerminals=S.empty,terminalWaiters=M.empty,lastMessageAt=Nothing
     , lastRender=(0,Nothing,[]),lastSession=remembered,waitingQuestion=Nothing,lastQuestion=Nothing
     , deliveredContext=Nothing,resumeRecordPath=resumePath,directoryAgents=[],agentDelivery=Nothing
-    , agentInitialized=Null,agentConfig=Null,streamTails=M.empty,lastAgentSync=Nothing,childRecords=M.empty,childRender=Nothing,childCancels=M.empty,expandedToolRuns=S.empty }
+    , agentInitialized=Null,agentConfig=Null,streamTails=M.empty,lastAgentSync=Nothing,childRecords=M.empty,childRender=Nothing,childCancels=M.empty,childControls=M.empty,expandedToolRuns=S.empty }
   AR.withAgentRuntime root (provider <$> readIORef ref) $ \agents ->
     bracket (pure (ConversationState directory ref consoles jobs agents)) closeConversation action
 
@@ -125,6 +126,7 @@ closeConversation (ConversationState _ ref _ _ _) = do
   finishAgentDelivery ref (Left "Editor session closed.")
   mapM_ denyChild (map snd (approvals s))
   mapM_ cancel (childCancels s)
+  mapM_ (cancel . snd) (childControls s)
   mapM_ A.stopClient (connection s)
 
 launchValue :: A.Launch -> Value
@@ -324,6 +326,7 @@ performPrimary runtime@(ConversationState directory ref consoles jobs _) action 
           pure d {status="Updating conversation settings...",agentReplying=True}
       | otherwise -> pure d {status="This conversation setting is unavailable."}
     ("copy",_) -> pure d {clipboard=rawTranscript (transcript s),status="Raw conversation copied."}
+    ("send-draft",_) | any isSteering (M.elems (pending s)) -> pure d {status="Wait for the steering result before sending another message."}
     ("send-draft",_) | busy s, let text=contents (composerBuffer d), not (T.null (T.strip text)) -> do
       let next=s {queuedQueries=queuedQueries s++[text],transcript=transcript s++[Reply "You" text]}
       writeIORef ref next
@@ -333,14 +336,16 @@ performPrimary runtime@(ConversationState directory ref consoles jobs _) action 
       latest<-readIORef ref
       pure (if isNothing (connection latest) || not (busy latest) then next else next {agentReplying=busy latest,composerBuffer=newBuffer "",composerSelection=Selection 0 0,composerFocused=True})
     ("steer-draft",_) | not (agentSteering d) -> pure d {status="This provider does not advertise steering support."}
+    ("steer-draft",_) | Prompting `notElem` M.elems (pending s) -> pure d {status="No active turn to steer; use Enter to send the draft."}
+    ("steer-draft",_) | any isSteering (M.elems (pending s)) -> pure d {status="A steering request is already pending."}
     ("steer-draft",_) | Just client<-connection s, Just sid<-session s, let text=contents (composerBuffer d), not (T.null (T.strip text)) -> do
       prepared<-preparePrompt s text
       case prepared of
         Left err -> pure d {status=err}
         Right (blocks,context) -> do
-          ident<-A.request client "_session/steering" (object ["sessionId" .= sid,"prompt" .= blocks])
-          writeIORef ref s {pending=M.insert ident (Steering text) (pending s),transcript=transcript s++[Reply "You" text],deliveredContext=Just context}
-          pure d {composerBuffer=newBuffer "",composerSelection=Selection 0 0,composerFocused=True,status="Steering request sent."}
+          ident<-A.request client "_session/steering" (object ["sessionId" .= sid,"prompt" .= blocks,"_meta" .= object ["steering" .= object ["idleBehavior" .= ("promptRequired"::Text)]]])
+          writeIORef ref s {pending=M.insert ident (Steering text) (pending s),deliveredContext=Just context}
+          pure d {status="Steering request sent; draft kept until accepted."}
     ("send",_:prompt:selectionFlag:fileFlag:diagnosticFlag:_) | not (T.null (T.strip prompt)), not (busy s) -> do
       let context=contextText (selectionFlag=="true") (fileFlag=="true") (diagnosticFlag=="true") d
           full=prompt<>(if T.null context then "" else "\n\n"<>context)
@@ -378,6 +383,10 @@ performPrimary runtime@(ConversationState directory ref consoles jobs _) action 
     _ | Just suffix<-T.stripPrefix "approval:" action, Just token<-readMaybe (T.unpack suffix) -> decide runtime token values d
     _ -> pure d
   where input label text=Input label text (T.length text)
+
+isSteering :: Phase -> Bool
+isSteering Steering{}=True
+isSteering _=False
 
 busy :: State -> Bool
 busy s=not (M.null (pending s)) || queuedPrompt s/=Nothing
@@ -535,16 +544,23 @@ receive runtime@(ConversationState _ ref consoles _ _) d event = do
           Just sid -> do
             modifyIORef' ref (\state -> state {session=Just sid,agentConfig=value,lastSession=Just (provider state,project state,sid)})
             savedId<-persist (resumeRecordPath s) (object ["provider" .= launchValue (provider s),"cwd" .= project s,"sessionId" .= sid])
-            sendQueued runtime d {agentSettings=parseAgentSettings value,status=either ("Session opened; could not save ID: "<>) (const ("Session "<>sid)) savedId}
+            safeSettings<-publicAgentSettings runtime value
+            sendQueued runtime d {agentSettings=safeSettings,status=either ("Session opened; could not save ID: "<>) (const ("Session "<>sid)) savedId}
         (Just Setting,Right value,_) -> do
           modifyIORef' ref (\state -> state {agentConfig=value})
-          pure d {agentSettings=parseAgentSettings value,contextMenu=Nothing,status="Conversation settings updated."}
+          safeSettings<-publicAgentSettings runtime value
+          pure d {agentSettings=safeSettings,contextMenu=Nothing,status="Conversation settings updated."}
         (Just (Steering text),Right value,_) -> case field "outcome" value :: Maybe Text of
-          Just "injected" -> pure d {status="Follow-up added to the active turn."}
-          Just "startedNewTurn" -> pure d {status="Follow-up started a new turn."}
+          Just "injected" -> do
+            modifyIORef' ref (\state->state {transcript=transcript state++[Reply "You" text]})
+            pure (clearSubmittedDraft "" text d) {status="Follow-up added to the active turn."}
+          Just outcome | outcome `elem` ["promptRequired","failed"] -> do
+            modifyIORef' ref (\state->state {deliveredContext=Nothing})
+            pure d {status="Steering was not applied; the draft remains. Use Enter to send it."}
           _ -> do
-            modifyIORef' ref (\state -> state {deliveredContext=Nothing})
-            pure (restoreEmptyPrimaryDraft text d) {status="Steering failed; the follow-up remains in Conversation."}
+            mapM_ A.stopClient (connection s)
+            stopped<-receive runtime d (A.Disconnected "Provider started an unowned steering turn or returned an unknown outcome.")
+            pure stopped {status="Steering ownership was not confirmed; provider stopped. Draft kept; queued turns cancelled without replay."}
         (Just Prompting,Right value,_) -> do
           current<-readIORef ref
           let text=case reverse (transcript current) of Reply "Agent" body:_ -> body; _ -> ""
@@ -566,7 +582,8 @@ receive runtime@(ConversationState _ ref consoles _ _) d event = do
               modifyIORef' ref (\state -> state {transcript=transcript state++[activity "Plan" (redactValue redact update)]})
             _ -> pure ()
           when (kind=="config_option_update") (modifyIORef' ref (\state -> state {agentConfig=update}))
-          pure $ if kind=="config_option_update" then d {agentSettings=parseAgentSettings update,contextMenu=Nothing}
+          safeSettings<-if kind=="config_option_update" then publicAgentSettings runtime update else pure []
+          pure $ if kind=="config_option_update" then d {agentSettings=safeSettings,contextMenu=Nothing}
             else if kind=="usage_update" then case (field "used" update,field "size" update) of
             (Just used,Just size) | used>=0 && size>0 -> d {agentContextUsage=Just (used,size)}
             _ -> d
@@ -944,6 +961,21 @@ renderReply graphical requested outgoing text
       (row,[]) -> [row]
       (row,_:rest) -> row:splitRows rest
 
+publicAgentSettings :: ConversationState -> Value -> IO [AgentSetting]
+publicAgentSettings runtime@(ConversationState _ ref _ _ _) value=do
+  current<-readIORef ref
+  keys<-conversationKeys runtime current
+  let public option=not (any (\text->any (`T.isInfixOf` text) keys)
+        ([settingId option,settingName option,settingCategory option,settingCurrent option]++concatMap (\(ident,label)->[ident,label]) (settingChoices option)))
+  pure (filter public (parseAgentSettings value))
+
+clearSubmittedDraft :: Text -> Text -> Desktop -> Desktop
+clearSubmittedDraft target submitted d
+  | target==conversationTarget d = if contents (composerBuffer d)==submitted then d {composerBuffer=newBuffer "",composerSelection=Selection 0 0} else d
+  | otherwise = d {conversationViews=M.adjust clear target (conversationViews d)}
+  where clear view | contents (conversationDraft view)==submitted=view {conversationDraft=newBuffer "",conversationDraftSelection=Selection 0 0}
+                   | otherwise=view
+
 parseAgentSettings :: Value -> [AgentSetting]
 parseAgentSettings value=mapMaybe parseOption (fromMaybe [] (field "configOptions" value))
   where
@@ -1113,8 +1145,9 @@ cancelQuestion (ConversationState _ ref _ _ _) reason d=do
 syncConversationAgent :: ConversationState -> IO ()
 syncConversationAgent runtime@(ConversationState _ ref _ _ _) = do
   s<-readIORef ref
+  keys<-conversationKeys runtime s
   let key=fromMaybe "" (session s)
-      caps=AH.parseCapabilities (agentInitialized s) (agentConfig s)
+      caps=AH.filterPrivateCapabilities keys (AH.parseCapabilities (agentInitialized s) (agentConfig s))
       externallyBusy=busy s && isNothing (agentDelivery s)
       signature=(project s,key,caps,externallyBusy)
   when (lastAgentSync s/=Just signature) $ do
@@ -1214,9 +1247,12 @@ performChild runtime@(ConversationState _ ref _ _ agents) action values d=do
       records=M.findWithDefault [] target (childRecords state)
       text=if action=="send" then case values of _:body:_->body; _->"" else contents (composerBuffer d)
   case action of
+    "send" | M.member target (childControls state) -> pure d {status="Wait for the child operation before sending."}
     "send" -> send hub ident text
+    "send-draft" | M.member target (childControls state) -> pure d {status="Wait for the child operation before sending."}
     "send-draft" -> send hub ident text
-    "steer-draft" -> pure d {status="Child steering is unavailable. Enter queues a human message."}
+    "steer-draft" -> startControl (Just text) (fmap (fmap (const ())) (AH.steerAgent hub ident text))
+    "set-config" | [option,value]<-values -> startControl Nothing (AH.configureAgent hub ident option value)
     "cancel" -> case M.lookup target (childCancels state) of
       Just _ -> pure d {status="Cancellation requested."}
       Nothing -> do
@@ -1232,6 +1268,13 @@ performChild runtime@(ConversationState _ ref _ _ agents) action values d=do
       pure (keepConversationPosition d (paintView target False state {transcript=changed} d))
     _ -> pure d {status="Switch to Primary for provider settings or session controls; use Agents to reconnect a child."}
   where
+    startControl submitted operation=do
+      state<-readIORef ref
+      let target=conversationTarget d
+      if M.member target (childControls state) then pure d {status="A child operation is already pending."} else do
+        worker<-async operation
+        modifyIORef' ref (\current->current {childControls=M.insert target (submitted,worker) (childControls current)})
+        pure d {agentReplying=True,contextMenu=Nothing,status=if submitted==Nothing then "Updating child settings..." else "Steering child; draft kept until accepted."}
     send hub ident text = do
       result<-AH.sendAgent hub AH.Human ident text
       case result of
@@ -1241,24 +1284,41 @@ performChild runtime@(ConversationState _ ref _ _ agents) action values d=do
 refreshChildConversation :: ConversationState -> Desktop -> IO Desktop
 refreshChildConversation (ConversationState _ ref _ _ agents) d=do
   state<-readIORef ref
+  controls<-forM (M.toList (childControls state)) $ \(target,(submitted,worker))->do
+    result<-poll worker
+    pure (target,submitted,result)
+  let controlsDone=[target | (target,_,Just _)<-controls]
+      applyControl desktop (target,submitted,Just outcome)=
+        let result=either (const (Left "Child operation interrupted.")) id outcome
+            cleared=case (submitted,result) of (Just text,Right ())->clearSubmittedDraft target text desktop; _->desktop
+            notice=either id (const (if submitted==Nothing then "Child settings updated." else "Follow-up added to child's active turn.")) result
+        in if target==conversationTarget desktop then cleared {status=notice} else cleared
+      applyControl desktop _=desktop
+      controlled=foldl applyControl d controls
+  modifyIORef' ref (\current->current {childControls=foldr M.delete (childControls current) controlsDone})
   completed<-forM (M.toList (childCancels state)) $ \(target,worker)->do
     result<-poll worker
     pure (target,result)
   let finished=[target | (target,Just _)<-completed]
       cancellation=[either (const "Child cancellation failed.") (either id (const "Child reply cancelled.")) result | (target,Just result)<-completed,target==conversationTarget d]
-      original=case cancellation of text:_->d {status=text}; _->d
+      original=case cancellation of text:_->controlled {status=text}; _->controlled
   modifyIORef' ref (\s->s {childCancels=foldr M.delete (childCancels s) finished})
   if T.null (conversationTarget original) then pure original else do
     let target=conversationTarget original
         hub=AR.agentHub agents
     selected<-AH.statusAgent hub AH.Human (AH.AgentId target)
     case selected of
-      Left err -> pure original {status=err,agentReplying=False,agentQueued=0}
+      Left err -> pure original {status=err,agentReplying=False,agentQueued=0,childAgentSettings=[],childAgentSteering=False,childAgentContextUsage=Nothing}
       Right entry -> do
         let signature=(target,conversationWidth original,entry)
             name=fromMaybe target (field "name" entry)
-            busyChild=field "status" entry `elem` [Just ("running"::Text),Just "cancelling",Just "starting"]
-            projected=original {agentReplying=busyChild,agentQueued=fromMaybe 0 (field "queued" entry),
+            busyChild=field "status" entry `elem` [Just ("running"::Text),Just "cancelling",Just "starting",Just "configuring"]
+            live=field "status" entry `elem` [Just ("idle"::Text),Just "running",Just "cancelling",Just "configuring"]
+            capabilities=fromMaybe Null (field "capabilities" entry)
+            usage=do value<-field "contextUsage" entry; (,) <$> field "used" value <*> field "size" value
+            projected=original {childAgentSettings=if live then parseAgentSettings capabilities else [],
+              childAgentSteering=live && field "steering" capabilities==Just True,childAgentContextUsage=if live then usage else Nothing,
+              agentReplying=busyChild || M.member target (childControls state) && target `notElem` controlsDone,agentQueued=fromMaybe 0 (field "queued" entry),
               conversationViews=M.adjust (\v->v {conversationName=name}) target (conversationViews original)}
         current<-readIORef ref
         -- Desktop and Hub checkpoints are independent. Keep a recovered view
@@ -1303,7 +1363,7 @@ recentChildHistory hub ident next=go (max 0 (next-101)) [] False
 
 childHistoryRecord :: Text -> [Record] -> Value -> [Record]
 childHistoryRecord name records value=let detail=fromMaybe Null (field "detail" value) in case field "kind" value :: Maybe Text of
-  Just "message_queued" ->
+  Just kind | kind `elem` ["message_queued","steered"] ->
     let author=fromMaybe Null (field "author" value)
         human=field "kind" author==Just ("human"::Text)
         who=if human then "Human" else "Agent "<>fromMaybe "unknown" (field "id" author)

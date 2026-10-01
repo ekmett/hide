@@ -79,9 +79,11 @@ conversation window. Enter sends or queues a human message; Escape cancels its
 reply. For a parent-controlled child, your message is attributed as a human peer
 message, not as its parent's instructions. Each conversation keeps its own draft
 and scroll position, including across editor recovery. **Tools > Conversation**
-switches back to Primary. Model and effort values come from the child's provider
-and are currently read-only; child steering and context usage are not inferred
-from Primary. Expand a tool row to inspect its retained details. The view shows
+switches back to Primary. Click the child conversation title to change its
+advertised model or effort while it is idle and has no queued messages. These
+settings belong to that child. Ctrl+Enter steers an active reply only when its
+provider advertises support; rejected steering keeps the draft. Reported child
+context usage appears in the lower-left frame; otherwise it shows `--`. Expand a tool row to inspect its retained details. The view shows
 the latest 100 events; history tools can read older retained events.
 
 **Workspace** opens the associated editor. After recovery, select a child and

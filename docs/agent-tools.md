@@ -338,7 +338,10 @@ live child messages, retained tool details and a protected human composer.
 Human messages to parent-controlled children retain peer attribution. Drafts,
 transcripts and view positions survive switching and editor recovery. Workspace
 opens the associated editor; Reconnect explicitly loads a recovered provider
-without replaying queued work. Child model/effort values are read-only.
+without replaying queued work. The human can change an idle child's advertised
+model/effort through its title menu and steer a reply when supported. Context
+usage is shown only when supplied by that child. These controls do not add a
+writable agent-settings MCP tool.
 `agent_settings` reports Primary's configuration and labels that scope, even
 when a child conversation is selected.
 

@@ -51,7 +51,7 @@ checks = bracket temporary removePathForcibly $ \root -> do
       rejected <- spawnAgent hub Human spec
       assert "malformed policy blocks spawning but not editor startup" (either (const True) (const False) rejected)
       writeFile policy "[editor.agents]\nmax_agents = 4\nmax_subagents = 2\n[editor.agent]\ncontext = 'global context marker'\n"
-      _ <- syncPrimary runtime project "private-primary" (Capabilities True True []) False >>= right
+      _ <- syncPrimary runtime project "private-primary" (Capabilities True True False []) False >>= right
       ticket <- sendAgent hub Human primary "inspect" >>= right
       requests <- waitRequests runtime
       reply <- case [cell | DeliverPrimary _ cell <- requests] of
@@ -99,12 +99,12 @@ checks = bracket temporary removePathForcibly $ \root -> do
       assert "ending child retains editor mapping" . maybe False ((==session).sessionId) =<< agentSession runtime child
       let otherProject = root </> "other-project"
       createDirectory otherProject
-      _ <- syncPrimary runtime otherProject "private-primary" (Capabilities True True []) False >>= right
+      _ <- syncPrimary runtime otherProject "private-primary" (Capabilities True True False []) False >>= right
       assert "primary editor mapping follows changed project" . maybe False ((==otherProject).sessionDirectory) =<< agentSession runtime primary
       moved <- spawnAgent hub (Agent primary) spec {spawnName="moved",spawnDirectory=otherProject} >>= right
       assert "shared child follows trusted current project" . maybe False (\r -> sessionDirectory r==otherProject && sessionId r==session) =<< agentSession runtime moved
       _ <- endAgent hub Human moved >>= right
-      _ <- syncPrimary runtime project "private-primary" (Capabilities True True []) False >>= right
+      _ <- syncPrimary runtime project "private-primary" (Capabilities True True False []) False >>= right
       callProcess "git" ["-C",project,"init","-q","-b","main"]
       writeFile (project </> "source.txt") "committed\n"
       callProcess "git" ["-C",project,"add","source.txt"]
@@ -146,7 +146,7 @@ persistenceChecks root = do
       activateAgentCheckpoint runtime
       let hub = agentHub runtime
       token <- primaryServers runtime >>= serverToken
-      _ <- syncPrimary runtime project "primary-private" (Capabilities False True []) False >>= right
+      _ <- syncPrimary runtime project "primary-private" (Capabilities False True False []) False >>= right
       child <- spawnAgent hub Human spec >>= right
       workspace <- agentSession runtime child >>= maybe (error "Missing recoverable workspace") pure
       ticket <- sendAgent hub Human child "permission" >>= right

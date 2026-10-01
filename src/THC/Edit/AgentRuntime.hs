@@ -101,7 +101,7 @@ withAgentRuntimeUsing openEditor restoreEditor directory getLaunch action = brac
           fresh <- newAgentHubWithLimits limits starter
           pure (fresh,Nothing,Just err)
       let cleanup = closeAgentHub hub
-          driver = primaryDriver state access (tryReadMVar identity) directory "" (Capabilities False False [])
+          driver = primaryDriver state access (tryReadMVar identity) directory "" (Capabilities False False False [])
       ident <- (case recovered of
         Nothing -> restore (registerAgent hub "Primary" directory driver) >>= either (ioError . userError . T.unpack) pure
         Just checkpoint -> do
@@ -207,6 +207,7 @@ readLimits directory = fmap (uncurry HubLimits) <$> readAgentLimitsFor directory
 primaryDriver :: MVar RuntimeState -> AgentAccess -> IO (Maybe AgentId) -> FilePath -> Text -> Capabilities -> AgentDriver
 primaryDriver state access identity directory key caps = AgentDriver
   { driverDirectory=directory,driverSessionKey=key,driverCapabilities=caps
+  , driverSteer=const (pure (Left "Steer the primary through the conversation UI."))
   , driverConfigure=const (pure (Left "Configure the primary provider through the conversation UI."))
   , driverDeliver= \message -> mask $ \restore -> do
       cell <- newEmptyMVar

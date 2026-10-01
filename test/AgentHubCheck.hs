@@ -23,12 +23,13 @@ checks=do
   deliveries<-newTVarIO []
   stops<-newTVarIO (0::Int)
   gate<-newTVarIO True
-  let caps=Capabilities True True [ConfigChoice "model-id" "model" "small" [("small","Small"),("large","Large")],ConfigChoice "effort-id" "thought_level" "low" [("low","Low"),("high","High")]]
+  let caps=Capabilities True True False [ConfigChoice "model-id" "model" "small" [("small","Small"),("large","Large")],ConfigChoice "effort-id" "thought_level" "low" [("low","Low"),("high","High")]]
       driver ident=AgentDriver directory ("private-provider-key-"<>agentIdText ident) caps
         (\_->pure (Right caps))
         (\message->do atomically (modifyTVar' deliveries (++[(ident,message)])); atomically (readTVar gate >>= check); pure (Right (String (messageText message))))
         (atomically (writeTVar gate True))
         (atomically (modifyTVar' stops (+1) >> writeTVar gate True))
+        (\_ ->pure (Left "Unsupported steering"))
       launch request emit=emit (ProviderUpdate "provider" (object ["connected" .= True])) >> pure (Right (driver (startAgent request)))
       spec name=SpawnSpec name "Test task" directory Shared Fresh Nothing Nothing
       ensure label value=unless value (error label)
@@ -155,7 +156,7 @@ checks=do
     blocked<-spawnAgent hub Human (spec "Two")
     ensure "updated limits affect future spawn" (isLeft blocked)
   bracket (newAgentHub (HubLimits 3 2) launch) closeAgentHub $ \hub->do
-    owner<-registerAgent hub "Unconnected" directory ((driver (AgentId "placeholder")) {driverSessionKey="",driverCapabilities=Capabilities False False []}) >>= right
+    owner<-registerAgent hub "Unconnected" directory ((driver (AgentId "placeholder")) {driverSessionKey="",driverCapabilities=Capabilities False False False []}) >>= right
     placeholderSnap<-snapshotHub hub
     restoredPlaceholder<-restoreHub (HubLimits 3 2) launch placeholderSnap >>= right
     _<-updateExternalAgent restoredPlaceholder owner (driver owner) >>= right
@@ -263,4 +264,86 @@ checks=do
   ensure "actual advertised nested choices and fork supported" (supportsFork (parseCapabilities initialized options) && length (configChoices (parseCapabilities initialized options))==1)
   finished<-timeout 1000000 (pure ())
   ensure "test completes" (finished==Just ())
+  controlChecks directory
   putStrLn "agent hub checks passed"
+
+controlChecks :: FilePath -> IO ()
+controlChecks directory=do
+  configGate<-newTVarIO False
+  promptGate<-newTVarIO False
+  configuring<-newEmptyMVar
+  prompting<-newEmptyMVar
+  callback<-newEmptyMVar
+  steers<-newIORef []
+  let initial=Capabilities False True True [ConfigChoice "model" "model" "a" [("a","A"),("b","B")]]
+      updated=initial {configChoices=[ConfigChoice "model" "model" "b" [("a","A"),("b","B")]]}
+      driver=AgentDriver directory "private-control-key" initial
+        (\settings->if null settings then pure (Right initial) else do
+          putMVar configuring (); atomically (readTVar configGate >>= check . not); pure (Right updated))
+        (\_->do putMVar prompting (); atomically (readTVar promptGate >>= check . not); pure (Right Null))
+        (atomically (writeTVar promptGate False)) (atomically (writeTVar promptGate False))
+        (\message->modifyIORef' steers (++[message]) >> pure (Right (object ["outcome" .= ("injected"::T.Text)])))
+      launch _ emit=putMVar callback emit >> pure (Right driver)
+      right=either (error.T.unpack) pure
+      ensure label condition=unless condition (error label)
+      field key value=parseMaybe (withObject "field" (.:key)) value
+      left (Left _)=True; left _=False
+      waitSignal cell=timeout 2000000 (takeMVar cell) >>= maybe (error "Child control fixture timed out") pure
+  bracket (newAgentHub (HubLimits 2 1) launch) closeAgentHub $ \hub->do
+    parent<-registerAgent hub "Parent" directory driver >>= right
+    child<-spawnAgent hub (Agent parent) (SpawnSpec "Child" "Test" directory Shared Fresh Nothing Nothing) >>= right
+    emit<-takeMVar callback
+    unknown<-configureAgent hub child "permission" "allow"
+    ensure "host child configuration rejects authority/unadvertised choices" (left unknown)
+    atomically (writeTVar configGate True)
+    withAsync (configureAgent hub child "model" "b") $ \setting->do
+      waitSignal configuring
+      ticket<-sendAgent hub Human child "queued during configuration" >>= right
+      blocked<-statusAgent hub Human child >>= right
+      ensure "configuration reserves the child before queued delivery" (field "queued" blocked==Just (1::Int) && field "currentTicket" blocked==Just Null && field "status" blocked==Just ("configuring"::T.Text))
+      atomically (writeTVar configGate False)
+      ensure "configuration completes" . (==Right ()) =<< wait setting
+      _<-waitAgent hub Human child ticket 2000 >>= right
+      waitSignal prompting
+    emit (ProviderUsage 42 100)
+    emit (ProviderUsage (-1) 0)
+    usage<-statusAgent hub Human child >>= right
+    ensure "only valid live context usage is retained" ((field "contextUsage" usage >>= field "used")==Just (42::Integer))
+    atomically (writeTVar promptGate True)
+    ticket<-sendAgent hub (Agent parent) child "parent task" >>= right
+    waitSignal prompting
+    busy<-configureAgent hub child "model" "a"
+    ensure "busy child rejects model changes" (left busy)
+    _<-steerAgent hub child "human correction" >>= right
+    observed<-readIORef steers
+    ensure "human child steer preserves parent user-seat ownership" (case observed of [m]->messageAuthor m==Human && not (messageIsUserSeat m); _->False)
+    atomically (writeTVar promptGate False)
+    _<-waitAgent hub Human child ticket 2000 >>= right
+    idleSteer<-steerAgent hub child "must remain a draft"
+    ensure "idle steering never creates an unowned prompt" (left idleSteer)
+    atomically (writeTVar configGate True)
+    withAsync (configureAgent hub child "model" "a") $ \setting->do
+      waitSignal configuring
+      cancel setting
+    recoveredSlot<-statusAgent hub Human child >>= right
+    ensure "asynchronous cancellation releases the configuration reservation" (field "status" recoveredSlot==Just ("idle"::T.Text))
+    withAsync (configureAgent hub child "model" "a") $ \setting->do
+      waitSignal configuring
+      _<-endAgent hub Human child >>= right
+      atomically (writeTVar configGate False)
+      outcome<-wait setting
+      ensure "configuration completion cannot revive an ended driver" (left outcome)
+    top<-spawnAgent hub Human (SpawnSpec "Human controlled" "Test" directory Shared Fresh Nothing Nothing) >>= right
+    _<-takeMVar callback
+    atomically (writeTVar promptGate True)
+    topTicket<-sendAgent hub Human top "human task" >>= right
+    waitSignal prompting
+    _<-steerAgent hub top "human user-seat correction" >>= right
+    allSteers<-readIORef steers
+    ensure "top-level steering keeps the human user seat" (case reverse allSteers of m:_->messageAuthor m==Human && messageIsUserSeat m; _->False)
+    atomically (writeTVar promptGate False)
+    _<-waitAgent hub Human top topTicket 2000 >>= right
+    emit (ProviderCapabilities initial)
+    emit (ProviderUsage 99 100)
+    ended<-statusAgent hub Human child >>= right
+    ensure "late capabilities and usage from ended providers are ignored" (field "status" ended==Just ("ended"::T.Text) && field "contextUsage" ended==Just Null)

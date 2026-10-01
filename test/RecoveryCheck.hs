@@ -61,7 +61,7 @@ checks=bracket temporary removePathForcibly $ \root->do
   permissions<-fileMode <$> getFileStatus path
   check "checkpoint is owner-private" (permissions .&. 0o077==0)
 #endif
-  recovered<-readCheckpoint path fresh >>= right
+  recovered<-readCheckpoint path fresh {childAgentSettings=[AgentSetting "model" "Model" "model" "old" [("old","Old")]],childAgentSteering=True,childAgentContextUsage=Just (1,2)} >>= right
   check "recovery preserves exact text state and both history stacks" (snapshotBuffer (get recovered sourceId)==snapshotBuffer edited)
   check "recovered undo and redo behave exactly like the original"
     (snapshotBuffer (undo (get recovered sourceId))==snapshotBuffer (undo edited) && snapshotBuffer (redo (get recovered sourceId))==snapshotBuffer (redo edited))
@@ -74,7 +74,7 @@ checks=bracket temporary removePathForcibly $ \root->do
   check "fresh runtime privacy/frontend values survive and transient controls reset"
     (guestPrivatePaths recovered==guestPrivatePaths fresh && nativeMac recovered && browserFrontend recovered && agentSettings recovered==agentSettings fresh &&
      dialog recovered==Nothing && menu recovered==Nothing && drag recovered==Nothing && clipboard recovered=="" && clipboardExport recovered==(0,Nothing) &&
-     not (agentReplying recovered) && agentQueued recovered==0 && agentContextUsage recovered==Nothing && null (chatActions recovered) && null (diagnostics recovered))
+     null (childAgentSettings recovered) && not (childAgentSteering recovered) && childAgentContextUsage recovered==Nothing && not (agentReplying recovered) && agentQueued recovered==0 && agentContextUsage recovered==Nothing && null (chatActions recovered) && null (diagnostics recovered))
   check "project sidebar dock geometry and display preferences survive"
     (defaultDirectory recovered==Just root && sideTree recovered==sideTree desktop && screenSize recovered==(100,35) && problemsVisible recovered && problemsPreferredHeight recovered==9 &&
      wordStar recovered && not (blinkCursor recovered) && pixelateUnicode recovered && materialIcons recovered && appearance recovered==DarkMode && streamerMode recovered)

@@ -116,6 +116,7 @@ data Desktop = Desktop
   , composerBuffer :: Buffer, composerSelection :: Selection, composerFocused :: Bool, agentSteering :: Bool, agentReplying :: Bool, agentQueued :: Int
   , blinkCursor :: Bool, crtFilter :: Bool, pixelateUnicode :: Bool, materialIcons :: Bool, defaultDirectory :: Maybe FilePath, statusHover :: Maybe Int, heldModifiers :: [V.Modifier], problemsPreferredHeight :: Int, agentContextUsage :: Maybe (Integer,Integer), agentSettings :: [AgentSetting], browserFrontend :: Bool, appearance :: Appearance, systemDark :: Bool, buildDiagnostics :: [Diagnostic]
   , chatQuestion :: Maybe ChatQuestion, chatActions :: [(Int,Int,Text,[Text])], chatInputOffset :: Maybe Int
+  , childAgentSettings :: [AgentSetting], childAgentSteering :: Bool, childAgentContextUsage :: Maybe (Integer,Integer)
   , conversationTarget :: Text, conversationViews :: M.Map Text ConversationView
   , streamerMode :: Bool, clipboardExport :: (Int,Maybe Text), guestPrivatePaths :: [FilePath]
   , dockedTerminals :: M.Map Int (Rect,Maybe Rect), bottomTerminal :: Maybe Int
@@ -244,7 +245,7 @@ statusItems d
   | questionActive d = [key " Enter Answer" V.KEnter [],key "  Tab Choices" (V.KChar '\t') [],key "  Esc Cancel" V.KEsc []]
   | activeConversation d =
       [key (" Enter "<>(if agentReplying d then "Queue query" else "Query")) V.KEnter [],key "  Shift+Enter Newline" V.KEnter [V.MShift]] ++
-      [key "  Ctrl+Enter Steer" V.KEnter [V.MCtrl] | T.null (conversationTarget d), agentSteering d] ++ [key "  Esc Cancel" V.KEsc [] | agentReplying d]
+      [key "  Ctrl+Enter Steer" V.KEnter [V.MCtrl] | conversationSteering d, agentReplying d] ++ [key "  Esc Cancel" V.KEsc [] | agentReplying d]
   | not (T.null (typeHint d)) = [(" "<>typeHint d,Nothing)]
   | not (T.null (status d)) = [command " F1 Help" Help,(" | "<>status d,Nothing)]
   | otherwise = [command " F1 Help" Help,command "  F2 Save" Save,command "  F3 Open" Open,
@@ -277,8 +278,8 @@ commandEnabled d Download = browserFrontend d && maybe False ((==Nothing) . docu
 commandEnabled _ Disabled{} = False
 commandEnabled d ToggleTerminalPin = maybe False (terminalWindow d) (activeWindow d)
 commandEnabled d cmd | cmd `elem` [Zoom,SplitVertical,SplitHorizontal], maybe False (windowPinned d) (activeWindow d) = False
-commandEnabled d (AgentChoose _) = T.null (conversationTarget d) && not (null (agentSettings d))
-commandEnabled d (AgentSet _ _) = T.null (conversationTarget d) && not (agentReplying d)
+commandEnabled d (AgentChoose _) = not (null (conversationSettings d))
+commandEnabled d (AgentSet _ _) = not (agentReplying d) && not (null (conversationSettings d))
 commandEnabled d cmd | cmd `elem` [GoToMessage,CopyAllMessages,NextMessage,PreviousMessage] = not (null (diagnostics d))
 commandEnabled d Copy | problemsVisible d && problemsFocused d = not (null (diagnostics d))
 commandEnabled d cmd | problemsVisible d && problemsFocused d, cmd `elem` [Undo,Redo,Cut,Paste,SelectAll] = False
@@ -290,7 +291,7 @@ menuRect d i = Rect (min x (max 0 (sw-w))) 1 w (length (menuItemsFor d i)+2)
         w = min sw (maximum [T.length t + T.length (menuShortcut d entry) + 5 | entry@(MenuItem t _ _) <- menuItemsFor d i])
 
 initialDesktop :: (Int,Int) -> Desktop
-initialDesktop size = Desktop size [] M.empty 1 Nothing Nothing Nothing "" False Nothing "" Nothing "" Nothing "" False Nothing Nothing Nothing "" Nothing Nothing Nothing [] False 0 0 False Nothing 0 0 Nothing SourceContext Nothing (newBuffer "") (Selection 0 0) True False False 0 True False False False Nothing Nothing [] 8 Nothing [] False SystemMode True [] Nothing [] Nothing "" M.empty False (0,Nothing) [] M.empty Nothing
+initialDesktop size = Desktop size [] M.empty 1 Nothing Nothing Nothing "" False Nothing "" Nothing "" Nothing "" False Nothing Nothing Nothing "" Nothing Nothing Nothing [] False 0 0 False Nothing 0 0 Nothing SourceContext Nothing (newBuffer "") (Selection 0 0) True False False 0 True False False False Nothing Nothing [] 8 Nothing [] False SystemMode True [] Nothing [] Nothing [] False Nothing "" M.empty False (0,Nothing) [] M.empty Nothing
 
 activeWindow :: Desktop -> Maybe Window
 activeWindow d = listToMaybe (filter (windowVisible d) (windows d))
@@ -768,7 +769,7 @@ selectConversationView target name original =
         Just _ -> windows saved
         Nothing -> windows prepared
       views=map (\w->if maybe False ((==Just "Conversation").documentLabel) (M.lookup (bufferId w) (buffers prepared)) then adjusted w else w) oldWindows
-      result=prepared {windows=views,conversationTarget=target,conversationViews=M.insert target view (conversationViews prepared),
+      result=prepared {windows=views,childAgentSettings=[],childAgentSteering=False,childAgentContextUsage=Nothing,conversationTarget=target,conversationViews=M.insert target view (conversationViews prepared),
         composerBuffer=conversationDraft view,composerSelection=conversationDraftSelection view,composerFocused=True,
         chatActions=[],chatInputOffset=Nothing,contextMenu=Nothing,menu=Nothing}
   in maybe result (\w->focusWindow (windowId w) result) (find ((==bid).bufferId) views)
@@ -1003,13 +1004,24 @@ contextItems MessagesContext = [("Go to source",GoToMessage),("Copy message",Cop
 contextItems (AgentContext items) = items
 contextItems GitContext = [("Pull",GitPull),("Fetch",GitFetch),("Merge...",GitMerge)]
 
+conversationSettings :: Desktop -> [AgentSetting]
+conversationSettings d=if T.null (conversationTarget d) then agentSettings d else childAgentSettings d
+conversationSteering :: Desktop -> Bool
+conversationSteering d=if T.null (conversationTarget d) then agentSteering d else childAgentSteering d
+conversationContextUsage :: Desktop -> Maybe (Integer,Integer)
+conversationContextUsage d=if T.null (conversationTarget d) then agentContextUsage d else childAgentContextUsage d
+
 conversationTitle :: Desktop -> Text
-conversationTitle d | not (T.null (conversationTarget d)) = maybe "Agent conversation" conversationName (M.lookup (conversationTarget d) (conversationViews d))
-conversationTitle d = case [settingCurrent option | option<-agentSettings d,settingCategory option=="model"] of
-  model:_ -> model<>case [settingCurrent option | option<-agentSettings d,settingCategory option=="thought_level"] of
+conversationTitle d = prefix<>case [settingCurrent option | option<-settings,settingCategory option=="model"] of
+  model:_ -> model<>case [settingCurrent option | option<-settings,settingCategory option=="thought_level"] of
     effort:_ -> " ("<>effort<>") ▼"
     [] -> " ▼"
-  [] -> if null (agentSettings d) then "Conversation" else "Conversation ▼"
+  [] -> if T.null target then if null settings then "Conversation" else "Conversation ▼" else if null settings then name else "Settings ▼"
+  where
+    target=conversationTarget d
+    settings=conversationSettings d
+    name=maybe "Agent conversation" conversationName (M.lookup target (conversationViews d))
+    prefix=if T.null target || null settings then "" else name<>" · "
 
 agentTitleRect :: Desktop -> Window -> Rect
 agentTitleRect d w = Rect (x+max 6 ((ww-T.length title) `div` 2)) y (max 0 (min (T.length title) (ww-17-count))) 1
@@ -1020,14 +1032,13 @@ agentTitleRect d w = Rect (x+max 6 ((ww-T.length title) `div` 2)) y (max 0 (min 
 
 openAgentChoices :: Text -> Desktop -> Desktop
 openAgentChoices category d
-  | not (T.null (conversationTarget d)) = d {status="Child model settings are shown in its conversation; switch to Primary to change primary settings."}
   | null items = d {status="The provider has not advertised model settings."}
   | otherwise = openContext (AgentContext items) x (y+1) d
   where
     Rect x y _ _=maybe (Rect 1 1 0 0) (agentTitleRect d) (activeWindow d)
-    items | T.null category = [(settingName option<>"  "<>settingCurrent option<>" ►",AgentChoose (settingId option)) | option<-agentSettings d]
+    items | T.null category = [(settingName option<>"  "<>settingCurrent option<>" ►",AgentChoose (settingId option)) | option<-conversationSettings d]
           | otherwise = [(if value==settingCurrent option then "✓ "<>name else "  "<>name,AgentSet category value)
-                        | option<-agentSettings d,settingId option==category,(value,name)<-settingChoices option]
+                        | option<-conversationSettings d,settingId option==category,(value,name)<-settingChoices option]
 
 contextOffset :: Rect -> Int -> Int
 contextOffset r chosen = let count=max 1 (height r-2) in chosen `div` count*count
@@ -1141,7 +1152,7 @@ windowMouse x y button mods d = case find (\w -> windowVisible d w && inside (bo
       | y==t && terminalWindow focused w && x>=l+6 && x<=l+8 -> runCommand ToggleTerminalPin focused
       | windowPinned d w && (x==l || x==l+ww-1 || y==t || y==t+hh-1) -> (focused,[])
       | y==t && x>=l+ww-6 && x<l+ww-3 -> runCommand Zoom focused
-      | y==t, activeConversation focused, not (null (agentSettings focused)), inside (agentTitleRect focused w) x y -> runCommand (AgentChoose "") focused
+      | y==t, activeConversation focused, not (null (conversationSettings focused)), inside (agentTitleRect focused w) x y -> runCommand (AgentChoose "") focused
       | y==t && (x==l || x==l+ww-1) -> (beginWindowDrag (EdgeSizing (windowId w) True True 0) focused,[])
       | y==t -> (beginWindowDrag (Moving (windowId w) (x-l) (y-t)) focused,[])
       | x>=l+ww-2 && y==t+hh-1 -> (beginWindowDrag (Resizing (windowId w) (l+ww-x) (t+hh-y)) focused,[])
@@ -1250,8 +1261,7 @@ resizeEdge vertical leading position (desktopLow,desktopHigh) source views = (ol
         in w {bounds=if vertical then r {top=a,height=b-a} else r {left=a,width=b-a},restoredBounds=Nothing}
 
 windowPositionText :: Desktop -> Document -> Window -> Text
-windowPositionText d doc _ | documentLabel doc==Just "Conversation", not (T.null (conversationTarget d)) = " Context unknown "
-windowPositionText d doc _ | documentLabel doc==Just "Conversation" = " "<>case agentContextUsage d of
+windowPositionText d doc _ | documentLabel doc==Just "Conversation" = " "<>case conversationContextUsage d of
   Just (used,size) | used>=0 && size>0 -> T.pack (show (used*100 `div` size))<>"% · "<>formatTokenCount used<>"/"<>formatTokenCount size<>" "
   _ -> "-- "
 windowPositionText _ doc w | byteMode (documentBuffer doc) = " HEX "<>hexNumber 8 (caret (selection w))<>" "<>(if windowHexAscii w then "ASCII" else "HEX")<>" "

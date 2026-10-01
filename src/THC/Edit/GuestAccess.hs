@@ -126,7 +126,8 @@ guestTransitionAllowed :: Desktop -> Desktop -> [Effect] -> Bool
 guestTransitionAllowed before after effects=guestEffectsAllowed effects && not (guestModalBlocked after) &&
   streamerMode before==streamerMode after && privateFieldsUnchanged before after && composerBuffer before==composerBuffer after &&
   composerSelection before==composerSelection after && chatQuestion before==chatQuestion after &&
-  agentSettings before==agentSettings after &&
+  agentSettings before==agentSettings after && childAgentSettings before==childAgentSettings after &&
+  childAgentSteering before==childAgentSteering after && childAgentContextUsage before==childAgentContextUsage after &&
   all (\(bid,doc)->not (protectedBuffer before bid) || M.lookup bid (buffers after)==Just doc) (M.toList (buffers before))
 
 privateField :: Field -> Bool
@@ -237,10 +238,10 @@ sensitiveLabel label=any (`T.isInfixOf` lower) ["password","token","secret","cre
 privateAgentChoice :: Desktop -> Int -> Int -> Bool
 privateAgentChoice d x y=case (contextMenu d,contextKind d) of
   (Just (r,chosen),AgentContext items) | inside r x y -> case at items (contextOffset r chosen+y-top r-1) of
-    Just (_,AgentChoose ident) -> case find ((==ident).settingId) (agentSettings d) of
+    Just (_,AgentChoose ident) -> case find ((==ident).settingId) (conversationSettings d) of
       Just option | secret option -> x>=left r+2+displayColumn (settingName option) (T.length (settingName option))+2
       _ -> False
-    Just (_,AgentSet ident _) -> maybe False secret (find ((==ident).settingId) (agentSettings d)) && x>=left r+2
+    Just (_,AgentSet ident _) -> maybe False secret (find ((==ident).settingId) (conversationSettings d)) && x>=left r+2
     _ -> False
   _ -> False
   where secret option=any sensitiveLabel [settingId option,settingName option,settingCategory option]

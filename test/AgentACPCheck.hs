@@ -1,11 +1,11 @@
 {-# LANGUAGE OverloadedStrings #-}
 module AgentACPCheck (checks) where
 
-import Control.Concurrent.Async (withAsync, poll, wait)
+import Control.Concurrent.Async (withAsync, poll, wait, cancel)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar
 import Control.Exception (bracket)
-import Control.Monad (unless, forM_)
+import Control.Monad (unless, forM_, when)
 import Data.Aeson
 import Data.Aeson.Types (parseMaybe)
 import qualified Data.ByteString.Char8 as BS
@@ -40,6 +40,8 @@ checks=bracket temporary removePathForcibly $ \root -> do
   decision<-newEmptyMVar
   let permission value=putMVar asked value >> takeMVar decision
       emit (ProviderUpdate kind value)=modifyIORef' events (++[(kind,value)])
+      emit (ProviderUsage used size)=modifyIORef' events (++[("usage",object ["used" .= used,"size" .= size])])
+      emit (ProviderCapabilities caps)=modifyIORef' events (++[("capabilities",String (T.pack (show caps)))])
       emit ProviderClosed=pure ()
   let launcher = startACPDriver launch [] "" (const (pure Nothing))
   (currentChoices, releasesCapacity) <- bracket (newAgentHub (HubLimits 1 0) launcher) closeAgentHub $ \hub -> do
@@ -69,6 +71,7 @@ checks=bracket temporary removePathForcibly $ \root -> do
     check "provider completion reaches driver caller" (case completed of Right value->field "stopReason" value==Just ("end_turn"::T.Text); _->False)
     observed<-readIORef events
     check "public updates include bounded text and tools without provider keys" (any ((=="output").fst) observed && any ((=="tool").fst) observed && not ("private-child-key" `T.isInfixOf` T.pack (show observed)))
+    check "provider context usage reaches child updates" (any (\(kind,value)->kind=="usage" && field "used" value==Just (120::Integer) && field "size" value==Just (1000::Integer)) observed)
     let toolUpdates=[value | ("tool",value)<-observed]
     check "child tool updates retain call identity and omit absent titles"
       (length toolUpdates==2 && all ((==Just ("inspect-1"::T.Text)).field "toolCallId") toolUpdates &&
@@ -88,6 +91,13 @@ checks=bracket temporary removePathForcibly $ \root -> do
           && not (bearer `T.isInfixOf` T.pack (show credentialResult)))
       check "MCP bearer is redacted from echoed tool descriptors"
         (not (bearer `T.isInfixOf` T.pack (show echoed)) && any ((=="tool").fst) echoed)
+    writeIORef events []
+    _<-driverDeliver running (prompt "configuration") >>= right "configuration update"
+    configEvents<-readIORef events
+    check "dynamic capability labels and values cannot expose private references or MCP credentials"
+      (any ((=="capabilities").fst) configEvents && not (bearer `T.isInfixOf` T.pack (show configEvents)) && not ("private-child-key" `T.isInfixOf` T.pack (show configEvents)))
+    unsupportedSteer<-driverSteer running (prompt "not sent")
+    check "unadvertised steering is rejected before RPC" (case unsupportedSteer of Left _->True; _->False)
     large<-driverDeliver running (prompt "large") >>= right "large output"
     check "large provider output is bounded" (maybe False ((<=131072).T.length) (field "text" large) && field "truncated" large==Just True)
     entries<-logs
@@ -163,6 +173,47 @@ checks=bracket temporary removePathForcibly $ \root -> do
     check "unresponsive cancellation closes driver within bound" (case stopped of Just (Left _)->True; _->False)
     closed<-driverDeliver running (prompt "ordinary")
     check "unresponsive provider cannot receive subsequent prompts" (case closed of Left _->True; _->False)
+  forM_ ["accepted","idle-race","legacy"] $ \mode->do
+    writeFile logPath ""
+    steering<-startACPDriver launch {A.environment=("STEER","yes"):A.environment launch} [] "" (const (pure Nothing)) request emit >>= right "steering provider"
+    bracket (pure steering) driverStop $ \running->withAsync (driverDeliver running (prompt "stall")) $ \turn->do
+      let awaitPrompt=do entries<-logs; if any ((==Just ("session/prompt"::T.Text)).field "method") entries then pure () else threadDelay 1000 >> awaitPrompt
+      _<-timeout 2000000 awaitPrompt >>= maybe (error "steer prompt missing") pure
+      result<-driverSteer running (HubMessage 0 Human mode False)
+      entries<-logs
+      let requests=[value | entry<-entries,field "method" entry==Just ("_session/steering"::T.Text),Just value<-[field "params" entry::Maybe Value]]
+      check "steer opts into host-owned idle handling and preserves human-peer attribution" (case requests of
+        [value]->(field "_meta" value >>= field "steering" >>= field "idleBehavior")==Just ("promptRequired"::T.Text) && "not the human user seat" `T.isInfixOf` T.pack (show value)
+        _->False)
+      check "only injected steering is accepted" (either (const (mode/="accepted")) (const (mode=="accepted")) result)
+      when (mode=="idle-race") (driverCancel running)
+      _<-timeout 4000000 (wait turn) >>= maybe (error "steering fixture left a prompt alive") pure
+      after<-logs
+      check "rejected steering never automatically replays a prompt" (length [() | entry<-after,field "method" entry==Just ("session/prompt"::T.Text)]==1)
+      when (mode=="legacy") $ do
+        closed<-driverDeliver running (prompt "ordinary")
+        check "legacy detached-turn response retires the provider" (case closed of Left _->True; _->False)
+  writeFile logPath ""
+  interrupted<-startACPDriver launch {A.environment=("STEER","yes"):A.environment launch} [] "" (const (pure Nothing)) request emit >>= right "cancelled steering provider"
+  bracket (pure interrupted) driverStop $ \running->withAsync (driverDeliver running (prompt "stall")) $ \turn->do
+    let awaitMethod method=do entries<-logs; if any ((==Just (method::T.Text)).field "method") entries then pure () else threadDelay 1000 >> awaitMethod method
+    _<-timeout 2000000 (awaitMethod "session/prompt") >>= maybe (error "cancel-steer prompt missing") pure
+    withAsync (driverSteer running (HubMessage 0 Human "withhold" False)) $ \pending->do
+      _<-timeout 2000000 (awaitMethod "_session/steering") >>= maybe (error "cancel-steer request missing") pure
+      cancel pending
+    _<-timeout 4000000 (wait turn) >>= maybe (error "cancel-steer left provider alive") pure
+    stopped<-driverDeliver running (prompt "must not replay")
+    check "cancelled unknown steering retires its provider" (case stopped of Left _->True; _->False)
+  let startup=startACPDriver launch {A.environment=("STARTUP_UPDATES","yes"):A.environment launch} [] "" (const (pure Nothing))
+  bracket (newAgentHub (HubLimits 1 0) startup) closeAgentHub $ \hub->do
+    ident<-spawnAgent hub Human spec >>= right "startup updates"
+    let awaitUpdated=do
+          current<-statusAgent hub Human ident >>= right "startup status"
+          let options=maybe [] id (field "capabilities" current >>= field "configOptions"::Maybe [Value])
+          if any ((==Just ("model-b"::T.Text)).field "currentValue") options && (field "contextUsage" current >>= field "used")==Just (42::Int)
+            then pure () else threadDelay 1000 >> awaitUpdated
+    result<-timeout 2000000 awaitUpdated
+    check "adjacent opening capabilities and usage updates survive installation" (result==Just ())
   putStrLn "agent ACP checks passed"
   where
     field :: FromJSON a => Key -> Value -> Maybe a
@@ -185,16 +236,25 @@ fixture=unlines
   , "def update(v): send({'method':'session/update','params':{'sessionId':sid,'update':v}})"
   , "for line in sys.stdin:"
   , " m=json.loads(line); log.write(json.dumps(m)+'\\n'); method=m.get('method'); p=m.get('params',{}); i=m.get('id')"
-  , " if method=='initialize': reply(i,{'protocolVersion':1,'agentCapabilities':{'loadSession':os.environ.get('RESUME')=='load','sessionCapabilities':dict(([('fork',{})] if os.environ.get('FORK')=='yes' else [])+([('resume',{})] if os.environ.get('RESUME')=='resume' else []))}})"
-  , " elif method=='session/new': servers=p['mcpServers']; reply(i,{'sessionId':sid,'configOptions':options()})"
+  , " if method=='initialize': reply(i,{'protocolVersion':1,'_meta':{'steering':{'supported':os.environ.get('STEER')=='yes'}},'agentCapabilities':{'loadSession':os.environ.get('RESUME')=='load','sessionCapabilities':dict(([('fork',{})] if os.environ.get('FORK')=='yes' else [])+([('resume',{})] if os.environ.get('RESUME')=='resume' else []))}})"
+  , " elif method=='session/new':"
+  , "  servers=p['mcpServers']; reply(i,{'sessionId':sid,'configOptions':options()})"
+  , "  if os.environ.get('STARTUP_UPDATES')=='yes': selected['model-id']='model-b'; update({'sessionUpdate':'config_option_update','configOptions':options()}); update({'sessionUpdate':'usage_update','used':42,'size':100})"
   , " elif method=='session/fork': sid=p['sessionId'] if os.environ.get('REUSE')=='yes' else 'private-fork-key'; reply(i,{'sessionId':sid,'configOptions':options()})"
   , " elif method in ['session/load','session/resume']: sid=p['sessionId']; servers=p['mcpServers']; update({'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'old provider history'}}); reply(i,{'sessionId':'replacement'} if os.environ.get('CHANGED')=='yes' else {'configOptions':options()})"
+  , " elif method=='_session/steering':"
+  , "  text=p['prompt'][-1]['text']"
+  , "  if 'withhold' in text: continue"
+  , "  outcome='promptRequired' if 'idle-race' in text else 'startedNewTurn' if 'legacy' in text else 'injected'; reply(i,{'outcome':outcome})"
+  , "  if outcome=='injected': reply(active,{'stopReason':'end_turn'})"
   , " elif method=='session/set_config_option': selected[p['configId']]=p['value']; reply(i,{'configOptions':options()})"
   , " elif method=='session/prompt':"
   , "  active=i; text=p['prompt'][-1]['text']"
   , "  if 'disconnect' in text: sys.exit(0)"
   , "  elif 'stall' in text: pass"
   , "  elif 'permission' in text: send({'id':'permission','method':'session/request_permission','params':{'sessionId':sid,'toolCall':{'title':'Write file','rawInput':{'path':'/proposed.txt','sessionId':sid,'servers':servers}},'options':[{'optionId':'allow-once','name':'Allow once','kind':'allow_once'},{'optionId':'reject','name':'Reject','kind':'reject_once'}]}})"
+  , "  elif 'configuration' in text:"
+  , "   values=options(); values[0]['options'][0]['name']=sid+str(servers); update({'sessionUpdate':'config_option_update','configOptions':values}); reply(i,{'stopReason':'end_turn'})"
   , "  elif 'credentials' in text:"
   , "   tokens=[entry['value'] for server in servers for entry in server.get('env',[]) if entry.get('name')=='THC_EDIT_MCP_TOKEN']"
   , "   parts=[json.dumps(servers)] if 'whole' in text else [part for token in tokens for part in [token[:17],token[17:31],token[31:]]]"
@@ -208,7 +268,7 @@ fixture=unlines
   , "   for n in range(24): update({'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'x'*9000}})"
   , "   reply(i,{'stopReason':'end_turn'})"
   , "  else:"
-  , "   update({'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'Output '+sid}}); update({'sessionUpdate':'tool_call','toolCallId':'inspect-1','title':'Inspect source','status':'pending','rawInput':{'sessionId':sid}}); update({'sessionUpdate':'tool_call_update','toolCallId':'inspect-1','status':'completed'}); reply(i,{'stopReason':'end_turn'})"
+  , "   update({'sessionUpdate':'usage_update','used':120,'size':1000}); update({'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'Output '+sid}}); update({'sessionUpdate':'tool_call','toolCallId':'inspect-1','title':'Inspect source','status':'pending','rawInput':{'sessionId':sid}}); update({'sessionUpdate':'tool_call_update','toolCallId':'inspect-1','status':'completed'}); reply(i,{'stopReason':'end_turn'})"
   , " elif method=='session/cancel' and os.environ.get('IGNORE_CANCEL')!='yes': reply(active,{'stopReason':'cancelled'})"
   , " elif i=='permission':"
   , "  if m.get('result',{}).get('outcome',{}).get('outcome')=='selected': send({'id':'native-read','method':'fs/read_text_file','params':{'sessionId':sid,'path':'/secret'}})"

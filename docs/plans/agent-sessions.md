@@ -53,8 +53,8 @@ Remaining work:
   restoring the exact owned editor session before loading its provider.
 - [x] Add a live child conversation composer and interaction view, preserving
   the distinction between the human and parent-controlled user seats.
-- [ ] Add checked child model/effort changes and provider-advertised steering;
-  show unavailable child context usage honestly until the Hub records it.
+- [x] Add checked child model/effort changes and provider-advertised steering;
+  show each child's reported context usage, or `--` when unavailable.
 - [x] Validate shared/worktree routing, cancellation and permission cleanup,
   primary busy handoff, bearer redaction and protected recovery.
 
@@ -87,3 +87,14 @@ primary mailbox cancellation while a child is selected, independent drafts and
 view positions, hidden primary transcript recovery, and private pending answers.
 The first child UI increment reuses Hub history and the existing provider workers;
 recovery never resubmits a draft or queued task.
+
+Focused child-control fixtures cover idle configuration reservation, queue and
+cancellation races, late provider callbacks, startup-adjacent configuration and
+usage notifications, human/parent attribution, and private provider references
+inside configuration values. Conversation fixtures cover independent primary
+metadata, draft retention until steering acknowledgement, rejected/legacy idle
+steering, live title choices and context display, and origin-protected controls.
+Recovery resets these live controls rather than restoring authority from disk.
+Steering uses the advertised `_meta.steering.supported` extension and requests
+`idleBehavior: promptRequired`; no test claims support from providers that do
+not advertise this extension.

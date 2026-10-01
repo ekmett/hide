@@ -16,7 +16,7 @@ import System.Timeout (timeout)
 import THC.Edit.Conversation
 import qualified THC.Edit.AgentRuntime as AR
 import qualified THC.Edit.AgentHub as AH
-import THC.Edit.GuestAccess (guestKeyboardAllowed,guestCommandAllowed,sanitizedBuffer)
+import THC.Edit.GuestAccess (guestKeyboardAllowed,guestCommandAllowed,sanitizedBuffer,guestTransitionAllowed)
 import qualified Data.Map.Strict as M
 import Data.List (findIndex)
 import Data.IORef
@@ -66,8 +66,8 @@ checks=bracket temporary removePathForcibly $ \root ->
       expanded<-snd <$> conversationEffects conversation (\x _->pure (False,x)) nested [AgentAction "copy" []]
       ensure "raw tool and plan details never retain bearer values" (all (not . (`T.isInfixOf` clipboard expanded)) ("private-main-key":tokens))
       peerCancels<-newIORef (0::Int)
-      peer<-AH.registerAgent hub "Peer" root (AH.AgentDriver root "private-peer-key" (AH.Capabilities False False [])
-        (\_ ->pure (Right (AH.Capabilities False False []))) (\_ ->pure (Right Null)) (modifyIORef' peerCancels (+1)) (pure ())) >>= right
+      peer<-AH.registerAgent hub "Peer" root (AH.AgentDriver root "private-peer-key" (AH.Capabilities False False False [])
+        (\_ ->pure (Right (AH.Capabilities False False False []))) (\_ ->pure (Right Null)) (modifyIORef' peerCancels (+1)) (pure ()) (\_ ->pure (Left "unsupported"))) >>= right
       ticket<-AH.sendAgent hub (AH.Agent peer) primary "Count files" >>= right
       finished<-tickUntil (\_ ->do result<-AH.waitAgent hub AH.Human primary ticket 0 >>= right; pure (field "status" result==Just ("completed"::T.Text))) connected
       result<-AH.waitAgent hub AH.Human primary ticket 0 >>= right
@@ -96,6 +96,7 @@ checks=bracket temporary removePathForcibly $ \root ->
       ensure "child opens in the existing protected conversation composer" (activeConversation history && not (guestKeyboardAllowed history))
       let historyText=activeText history
       ensure "history preserves peer identity instead of assigning the human seat" (("Agent "<>AH.agentIdText primary<>" (peer message)") `T.isInfixOf` historyText)
+      ensure "agent input cannot manufacture selected-child authority or usage" (all (\changed->not (guestTransitionAllowed history changed [])) [history {childAgentSteering=True},history {childAgentContextUsage=Just (1,2)},history {childAgentSettings=agentSettings connected}])
       let childDrafted=history {composerBuffer=newBuffer "child unsent",composerSelection=Selection 2 5}
       primaryAgain<-ui "show" [] childDrafted
       ensure "switching restores primary draft caret and transcript" (T.null (conversationTarget primaryAgain) && contents (composerBuffer primaryAgain)=="primary unsent" && composerSelection primaryAgain==Selection 3 7 && activeText primaryAgain==primaryText)
@@ -149,13 +150,15 @@ checks=bracket temporary removePathForcibly $ \root ->
       ensure "primary cancellation preserves child target and draft" (conversationTarget afterPrimaryCancel==AH.agentIdText peer && contents (composerBuffer afterPrimaryCancel)=="child unsent")
       let primaryMetadata=childAgain {agentReplying=True,agentSteering=True,agentContextUsage=Just (42,84),agentSettings=[AgentSetting "model" "Model" "model" "primary-model" [("primary-model","Primary")]]}
       ensure "child view never advertises primary steering or editable model settings" (not (any (T.isInfixOf "Steer" . fst) (statusItems primaryMetadata)) && not (commandEnabled primaryMetadata (AgentChoose "")) && not (commandEnabled primaryMetadata (AgentSet "model" "primary-model")))
-      ensure "child view does not show primary context usage" (case (activeDocument primaryMetadata,activeWindow primaryMetadata) of (Just doc,Just win)->windowPositionText primaryMetadata doc win==" Context unknown "; _->False)
+      ensure "child view does not show primary context usage" (case (activeDocument primaryMetadata,activeWindow primaryMetadata) of (Just doc,Just win)->windowPositionText primaryMetadata doc win==" -- "; _->False)
       (_,settingsReply)<-chatTool conversation primaryMetadata "agent_settings" (object [])
       settingsInfo<-settingsReply >>= right
       ensure "settings snapshot identifies primary scope and does not mix child busy state" (field "scope" settingsInfo==Just ("primary"::T.Text) && field "replying" settingsInfo==Just False)
       cancellingPeer<-ui "cancel" [] afterPrimaryCancel
       _<-tickUntil (\_->(==1) <$> readIORef peerCancels) cancellingPeer
-      ensure "child setters cannot reconfigure the primary" . (T.isPrefixOf "Switch to Primary" . status) =<< ui "set-config" ["model","invented"] childAgain
+      settingPeer<-ui "set-config" ["model","invented"] childAgain
+      rejectedPeer<-tickUntil (pure . T.isInfixOf "Select a connected child agent" . status) settingPeer
+      ensure "child setters cannot reconfigure the primary" (conversationTarget rejectedPeer==AH.agentIdText peer)
       liveChild<-AH.spawnAgent hub (AH.Agent primary) (AH.SpawnSpec "Live child" "Inspect source" root AH.Shared AH.Fresh Nothing Nothing) >>= right
       parentTicket<-AH.sendAgent hub (AH.Agent primary) liveChild "parent instruction" >>= right
       _<-AH.waitAgent hub AH.Human liveChild parentTicket 3000 >>= right
@@ -164,7 +167,18 @@ checks=bracket temporary removePathForcibly $ \root ->
       let liveIndex=maybe (error "Live child absent") id (findIndex ((==Just (AH.agentIdText liveChild)) . field "id") (maybe [] id (field "agents" listedNow::Maybe [Value])))
       liveView<-ui "directory-select" ["0",T.pack (show liveIndex)] refreshedDirectory {dialog=Nothing}
       ensure "parent-owned child shows controlling-parent attribution" ("controlling parent" `T.isInfixOf` activeText liveView)
-      humanSent<-ui "send-draft" [] liveView {composerBuffer=newBuffer "human followup",composerSelection=Selection 14 14}
+      ensure "live child title/dropdown use advertised child model choices" ("small" `T.isInfixOf` conversationTitle liveView && commandEnabled liveView (AgentChoose ""))
+      changedChild<-ui "set-config" ["model","large"] liveView
+      configuredChild<-tickUntil (pure . any ((=="large").settingCurrent) . childAgentSettings) changedChild
+      ensure "child configuration does not replace primary provider settings" (agentSettings configuredChild==agentSettings liveView && "large" `T.isInfixOf` conversationTitle configuredChild)
+      waitingChild<-ui "send-draft" [] configuredChild {composerBuffer=newBuffer "steer-wait"}
+      steerReady<-tickUntil (pure . (==Just (120,1000)) . childAgentContextUsage) waitingChild
+      ensure "child usage has the same context display and advertised steering hint" (conversationContextUsage steerReady==Just (120,1000) && any (T.isInfixOf "Steer" . fst) (statusItems steerReady))
+      steeringChild<-ui "steer-draft" [] steerReady {composerBuffer=newBuffer "human direction"}
+      ensure "pending child steering keeps the draft until acknowledged" (contents (composerBuffer steeringChild)=="human direction")
+      steeredChild<-tickUntil (pure . (\d->not (agentReplying d) && T.null (contents (composerBuffer d)))) steeringChild
+      ensure "child steering retains human peer attribution" ("Human (peer message)" `T.isInfixOf` activeText steeredChild && "human direction" `T.isInfixOf` activeText steeredChild)
+      humanSent<-ui "send-draft" [] steeredChild {composerBuffer=newBuffer "human followup",composerSelection=Selection 14 14}
       replied<-tickUntil (pure . T.isInfixOf "Human (peer message)" . activeText) humanSent
       ensure "accepted human message clears only its own composer" (T.null (contents (composerBuffer replied)) && maybe False ((=="primary unsent").contents.conversationDraft) (M.lookup "" (conversationViews replied)))
       ensure "child transcript carries no provider keys" (not ("private-main-key" `T.isInfixOf` activeText replied))
@@ -177,7 +191,14 @@ checks=bracket temporary removePathForcibly $ \root ->
       ensure "primary cancellation leaves child approval pending" (maybe False (T.isPrefixOf "Agent permission:" . dialogTitle) (dialog childStillWaiting))
       cancelledChild<-ui "cancel" [] childStillWaiting
       afterChildCancel<-tickUntil (\desktop->do entry<-AH.statusAgent hub AH.Human liveChild >>= right; pure (field "status" entry==Just ("idle"::T.Text) && field "queued" entry==Just (0::Int) && dialog desktop==Nothing)) cancelledChild
-      let finalDraft=afterChildCancel {composerBuffer=newBuffer "recover child draft",composerSelection=Selection 4 9}
+      privateConfig<-ui "send-draft" [] afterChildCancel {composerBuffer=newBuffer "private-configuration"}
+      redactedConfig<-tickUntil (pure . (\d->not (agentReplying d) && null (childAgentSettings d))) privateConfig
+      let private="private-main-key":tokens
+      publicDirectory<-AH.listAgents hub AH.Human >>= right
+      publicCapture<-capture font redactedConfig True >>= right
+      ensure "child capability keys never reach directory/title or screen text/image input"
+        (all (not . (`T.isInfixOf` T.pack (show publicDirectory))) private && all (not . (`T.isInfixOf` T.pack (show (agentSettings redactedConfig)))) private && all (not . (`T.isInfixOf` T.pack (show publicCapture))) private)
+      let finalDraft=redactedConfig {composerBuffer=newBuffer "recover child draft",composerSelection=Selection 4 9}
           recovery=root </> "conversation-views.checkpoint"
       writeCheckpoint recovery finalDraft >>= right
       recovered<-readCheckpoint recovery initial >>= right
@@ -204,8 +225,8 @@ checks=bracket temporary removePathForcibly $ \root ->
     recoveryRecord<-newSessionRecord Nothing ["--",root]
     rememberSession recoveryRecord
     let recoveredPath=root </> "newer-child.checkpoint"
-        fakeDriver=AH.AgentDriver root "private-recovery-child" (AH.Capabilities False False [])
-          (\_ ->pure (Right (AH.Capabilities False False []))) (\_ ->pure (Right Null)) (pure ()) (pure ())
+        fakeDriver=AH.AgentDriver root "private-recovery-child" (AH.Capabilities False False False [])
+          (\_ ->pure (Right (AH.Capabilities False False False []))) (\_ ->pure (Right Null)) (pure ()) (pure ()) (\_ ->pure (Left "unsupported"))
     recoveredChild<-environment "THC_EDIT_SESSION" (Just (sessionId recoveryRecord)) $ withConversationAt root $ \conversation -> do
       let agents=conversationAgents conversation
           hub=AR.agentHub agents
@@ -253,16 +274,25 @@ temporary=do root<-getTemporaryDirectory; (path,h)<-openTempFile root "agent-int
 fixture :: String
 fixture=unlines
   ["import sys,json,time"
-  ,"tokens=[]; pending=None"
+  ,"tokens=[]; pending=None; chosen={'model':'small','effort':'low'}"
+  ,"def options(): return [{'id':'model','name':'Model','category':'model','type':'select','currentValue':chosen['model'],'options':[{'value':'small','name':'Small'},{'value':'large','name':'Large'}]},{'id':'effort','name':'Effort','category':'thought_level','type':'select','currentValue':chosen['effort'],'options':[{'value':'low','name':'Low'},{'value':'high','name':'High'}]}]"
   ,"def send(x): print(json.dumps(x),flush=True)"
   ,"for line in sys.stdin:"
   ," r=json.loads(line); m=r.get('method'); p=r.get('params',{}); v={}"
-  ," if m=='initialize': v={'protocolVersion':1,'agentCapabilities':{'loadSession':True}}"
+  ," if m=='initialize': v={'protocolVersion':1,'_meta':{'steering':{'supported':True}},'agentCapabilities':{'loadSession':True}}"
   ," elif m in ('session/new','session/load'):"
   ,"  tokens=[e['value'] for s in p.get('mcpServers',[]) for e in s.get('env',[]) if e['name']=='THC_EDIT_MCP_TOKEN']"
-  ,"  v={'sessionId':'private-main-key'}"
+  ,"  v={'sessionId':'private-main-key','configOptions':options()}"
+  ," elif m=='session/set_config_option': chosen[p['configId']]=p['value']; v={'configOptions':options()}"
+  ," elif m=='_session/steering':"
+  ,"  v={'outcome':'injected'}"
+  ,"  if pending is not None: send({'jsonrpc':'2.0','id':pending,'result':{'stopReason':'end_turn'}}); pending=None"
   ," elif m=='session/prompt':"
   ,"  text=\"\\n\".join(block['text'] for block in p['prompt'])+' private-main-key '+str(tokens)"
+  ,"  if any(block['text'].strip().endswith('steer-wait') for block in p['prompt']):"
+  ,"   pending=r['id']; send({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'private-main-key','update':{'sessionUpdate':'usage_update','used':120,'size':1000}}}); continue"
+  ,"  if 'private-configuration' in text:"
+  ,"   cfg=options(); cfg[0]['currentValue']='private-main-key'; cfg[1]['options'][0]['name']=str(tokens); send({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'private-main-key','update':{'sessionUpdate':'config_option_update','configOptions':cfg}}})"
   ,"  if 'split-private' in text:"
   ,"   for kind in ['agent_message_chunk','user_message_chunk']:"
   ,"    for secret in ['private-main-key']+tokens:"

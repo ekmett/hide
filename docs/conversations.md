@@ -52,6 +52,14 @@ from the provider's advertised models and reasoning settings. Choices are
 disabled during a reply and take effect after confirmation. Providers without
 these options keep a plain title. The lower-left frame shows reported context
 usage, such as `37% · 148k/400k`, or `--` until those values are available.
+Child conversations use their own advertised settings and usage; model changes
+also wait until their message queue is empty.
+
+Steering keeps the draft until the provider accepts it into the active turn.
+If that turn has already finished, use Enter to send the retained draft. The
+editor does not automatically replay it. A legacy provider that starts an
+unowned turn, or fails to confirm the outcome, is stopped; inspect the retained
+history before deciding whether to resend.
 
 ## Work with live editor context
 
