@@ -3,8 +3,8 @@ module ConversationCheck (checks) where
 
 import Control.Concurrent (threadDelay)
 import Control.Exception (bracket)
-import Control.Monad (unless, when)
-import Data.Aeson
+import Control.Monad (unless, when, forM_)
+import Data.Aeson hiding (Number)
 import Data.Aeson.Types (parseMaybe)
 import qualified Data.Aeson.Key as K
 import qualified Data.ByteString as BS
@@ -61,6 +61,18 @@ checks = bracket temporary removePathForcibly $ \root ->
         focusSource desktop=case [w | w<-windows desktop,Just doc<-[M.lookup (bufferId w) (buffers desktop)],fmap filePath (documentFile doc)==Just source] of
           w:_ -> focusWindow (windowId w) desktop
           [] -> error "Source window missing"
+    let reply width outgoing=T.pack . map fst . renderReply False width outgoing
+    check "short bubbles occupy one row with outward tails"
+      (reply 30 True "hello"==T.replicate 22 " "<>"▐hello▛◤" && reply 30 False "hello"=="◥▜hello▌")
+    check "outgoing bubble is black on VGA cyan"
+      (('h',BubbleStyle True Plain) `elem` renderReply False 30 True "hello")
+    check "agent prose and code retain their styles inside bubbles"
+      (('h',BubbleStyle False Plain) `elem` renderReply False 30 False "hello" && ('4',BubbleStyle False Number) `elem` renderReply False 30 False "```haskell\nx = 42\n```")
+    forM_ [1,2,5,6,8,30,80] $ \width -> forM_ [False,True] $ \outgoing -> do
+      let rendered=reply width outgoing "Wide 界 words é and more words"
+      check "bubbles wrap within the window width"
+        (all (\row -> displayColumn row (T.length row)<=width || width==1 && displayColumn row (T.length row)==2) (T.lines rendered))
+      check "bubble wrapping retains combining marks" (not ("\ń" `T.isInfixOf` rendered))
     writeFile server providerScript
     BS.writeFile source "disk original\n"
     BS.writeFile secondSource "second original\n"
@@ -77,7 +89,9 @@ checks = bracket temporary removePathForcibly $ \root ->
       check "new session handshake" (any ((==Just ("session/new"::T.Text)).field "method") entries)
       check "conversation has an inline composer" ("Shift+Enter Newline" `T.isInfixOf` snapshot streamed)
       check "conversation renders streamed Markdown" ("Hello" `T.isInfixOf` conversationText streamed && not ("**bold" `T.isInfixOf` conversationText streamed))
-      check "conversation preserves Markdown styling" (any ((==Keyword).snd) (conversationHighlight streamed))
+      check "conversation omits speaker headings and session banner once chatting"
+        (not (any (`elem` T.lines (conversationText streamed)) ["You","Agent"]) && not ("Session:" `T.isInfixOf` conversationText streamed))
+      check "conversation preserves Markdown styling" (any ((==BubbleStyle False Keyword).snd) (conversationHighlight streamed))
       check "tool update merges pending record" (T.count "[completed] Local tool" (conversationText streamed)==1 && not ("[pending] Local tool" `T.isInfixOf` conversationText streamed))
       copied<-send runtime "copy" [] streamed
       check "copy retains raw Markdown" ("**bold text**" `T.isInfixOf` clipboard copied)
@@ -137,44 +151,27 @@ checks = bracket temporary removePathForcibly $ \root ->
           selected=press (V.KChar 'a') [V.MCtrl] multiline
           copiedDraft=press (V.KChar 'c') [V.MCtrl] selected
           window=fromMaybe (error "conversation window") (activeWindow multiline)
-          [(okRect,_),(cancelRect,_)]=composerButtons window
-          click rect desktop=handleEvent (V.EvMouseDown (left rect) (top rect) V.BLeft []) desktop
+          clickStatus needle desktop=case [r | (r,i,_)<-statusItemRects desktop,needle `T.isInfixOf` fst (statusItems desktop !! i)] of
+            r:_ -> handleEvent (V.EvMouseDown (left r) (top r) V.BLeft []) desktop
+            [] -> error ("missing status action: "++T.unpack needle)
           applyEvent event desktop=let (next,effects)=handleEvent event desktop in snd <$> conversationEffects runtime fallback next effects
-      check "composer has four rows and half-height button shadows"
-        (height (composerRect window)==4 && top cancelRect+1<top (bounds window)+height (bounds window)-1 &&
-         "▀" `T.isInfixOf` snapshot multiline && "▄" `T.isInfixOf` snapshot multiline)
-      check "disabled composer buttons retain gray faces"
-        ("color:rgb(85,85,85);background:rgb(170,170,170)" `T.isInfixOf` snapshotHtml cancelled)
+      check "composer is a full-width thought bubble without buttons or divider"
+        (height (composerRect window)==4 && width (composerRect window)==width (bounds window)-6 &&
+         ".o" `T.isInfixOf` snapshot multiline && not (" Query " `T.isInfixOf` T.intercalate "\n" (init (T.lines (snapshot multiline)))))
       check "composer supports Unicode, newline, and clipboard without changing transcript"
         (contents (composerBuffer multiline)=="λ\nnext" && clipboard copiedDraft=="λ\nnext" && conversationText multiline==conversationText cancelled)
-      check "composer buttons follow draft and reply state"
-        (composerButtonEnabled multiline "OK" && not (composerButtonEnabled cancelled "OK") && not (composerButtonEnabled cancelled "Cancel") && null (snd (click cancelRect cancelled)))
-      let shifted=cancelled {heldModifiers=[V.MShift]}
-          controlled=multiline {heldModifiers=[V.MCtrl],agentSteering=True}
-          modifiedClick mods=handleEvent (V.EvMouseDown (left okRect) (top okRect) V.BLeft mods)
-      check "composer label follows held modifiers and reply state"
-        (composerButtonLabel multiline "OK"=="Query" &&
-         composerButtonLabel (multiline {agentReplying=True}) "OK"=="Queue" &&
-         composerButtonLabel shifted "OK"=="Enter" && composerButtonLabel controlled "OK"=="Steer" &&
-         composerButtonLabel (controlled {heldModifiers=[V.MShift,V.MCtrl]}) "OK"=="Steer" &&
-         " Enter " `T.isInfixOf` snapshot shifted && " Steer " `T.isInfixOf` snapshot controlled)
-      check "Shift-click inserts newline even in an empty draft"
-        (composerButtonEnabled shifted "OK" &&
-         contents (composerBuffer (fst (modifiedClick [V.MShift] cancelled)))=="\n" &&
-         null (snd (modifiedClick [V.MShift] cancelled)))
-      check "Control-click steers only when supported and preserves the draft otherwise"
-        (case snd (modifiedClick [V.MCtrl] controlled) of [AgentAction "steer-draft" []]->True; _->False)
-      check "unsupported steering button is disabled"
-        (not (composerButtonEnabled (controlled {agentSteering=False}) "OK") &&
-         null (snd (modifiedClick [V.MCtrl] (controlled {agentSteering=False}))))
-      submitted<-uncurry (conversationEffects runtime fallback) (click okRect (pasteDraft "stream" cancelled)) >>= done runtime . snd
-      check "OK posts draft into transcript and clears input" (T.null (contents (composerBuffer submitted)) && not (agentReplying submitted))
+      check "status newline works even with an empty draft"
+        (contents (composerBuffer (fst (clickStatus "Newline" cancelled)))=="\n" && null (snd (clickStatus "Newline" cancelled)))
+      check "status steering sends the advertised action"
+        (snd (clickStatus "Steer" (multiline {agentSteering=True}))==[AgentAction "steer-draft" []])
+      submitted<-uncurry (conversationEffects runtime fallback) (clickStatus "Query" (pasteDraft "stream" cancelled)) >>= done runtime . snd
+      check "status Query posts draft into transcript and clears input" (T.null (contents (composerBuffer submitted)) && not (agentReplying submitted))
       busyDraft<-prompt runtime "wait" submitted >>= await runtime "composer busy" agentReplying
       preserved<-tickConversation runtime (pasteDraft "stream" busyDraft)
       queued<-applyEvent (V.EvKey V.KEnter []) preserved
       check "Enter queues a query while replying and retains input during ticks"
         (contents (composerBuffer preserved)=="stream" && agentQueued queued==1 && T.null (contents (composerBuffer queued)) && "Enter Queue query" `T.isInfixOf` snapshot queued)
-      drained<-uncurry (conversationEffects runtime fallback) (click cancelRect queued) >>= done runtime . snd
+      drained<-uncurry (conversationEffects runtime fallback) (clickStatus "Cancel" queued) >>= done runtime . snd
       check "Cancel stops current response then queued query runs" (agentQueued drained==0 && not (agentReplying drained) && "Enter Query" `T.isInfixOf` snapshot drained)
       steeringWait<-prompt runtime "wait" drained >>= await runtime "steering active" agentReplying
       check "steering hint requires negotiated support" (agentSteering steeringWait && "Ctrl+Enter Steer" `T.isInfixOf` snapshot steeringWait)

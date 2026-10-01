@@ -33,4 +33,10 @@ checks = do
       check "vertical border reaches top and bottom" (listToMaybe (rows v) == Just (last (rows v)) && last (rows v) /= 0)
       check "left corners meet vertical border" (Just (last (rows tl)) == listToMaybe (rows v) && Just (last (rows v)) == listToMaybe (rows bl))
       check "right corners meet vertical border" (Just (last (rows tr)) == listToMaybe (rows v) && Just (last (rows v)) == listToMaybe (rows br))
+  check "bubble tails join the top edge without a notch"
+    (all (\c -> head (rows c)==0xff00 && last (rows c)==0) ['\xe006','\xe007'])
+  check "bubble corners join their interior edges"
+    (last (rows '\xe000')==0xff00 && head (rows '\xe002')==0xff00 && all id (right '\xe000') && all id (left '\xe001'))
+  forM_ ['\xe000'..'\xe007'] $ \c -> check "bubble tile occupies one VGA cell"
+    (glyphWidth (glyph font c)==8 && length (rows c)==16)
   putStrLn "font checks passed"

@@ -47,6 +47,15 @@ loadFont = do
       _ -> Nothing
 
 glyph :: Font -> Char -> Glyph
-glyph (Font font) c = IM.findWithDefault missing (ord c) font
+glyph (Font font) c
+  | ord c>=0xe000 && ord c<=0xe007 = Glyph 8 (map (*256) (corners !! (ord c-0xe000)))
+  | otherwise = IM.findWithDefault missing (ord c) font
   where
+    -- Rounded half-cell corners, mirrored vertically for the bottom edges.
+    tl=[7,31,63,127,127,255,255,255]++replicate 8 255
+    tr=[224,248,252,254,254,255,255,255]++replicate 8 255
+    bl=reverse tl; br=reverse tr
+    corners=[tl,tr,bl,br,zipWith min tl bl,zipWith min tr br,
+             [255,127,63,31,15,7,3,1]++replicate 8 0,
+             [255,254,252,248,240,224,192,128]++replicate 8 0]
     missing = IM.findWithDefault (Glyph 8 (replicate 16 0xff00)) 0xfffd font

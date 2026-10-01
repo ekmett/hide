@@ -240,17 +240,17 @@ select an existing Codex executable. Authenticate with the provider's own CLI
 before starting it here. The adapter and model credentials are separate from
 this repository.
 
-The **Conversation** window has a four-line query pane below the transcript.
-**Enter** or **Query** submits the draft; while a reply is active it queues the query
-for the next turn. **Shift+Enter** inserts a newline. **Ctrl+Enter** steers the
-active turn when the provider advertises that extension. **Cancel** (or Esc in
-the query pane) stops the active reply; queued queries then proceed in order.
-The submit button reads Query or Queue, changing to Enter while Shift is held
-and Steer while Ctrl is held in the graphical frontend. Clicking performs the
-shown action. Query/Queue needs a nonempty draft; Steer also needs provider
-support. Enter inserts a newline even in an empty draft. Cancel is enabled only
-while a request is active. Standard terminals cannot report standalone modifier
-presses/releases; modified Enter and clicks still perform the same actions.
+The **Conversation** window uses compact speech bubbles: yours align right in
+cyan, replies align left in gray. Rounded corners share the text rows, with a
+straight top edge into the speaker's tail. SDL uses single-cell bitmap tiles;
+terminal fonts use block-character approximations. Code keeps syntax colors,
+and **Copy raw conversation** preserves the original Markdown.
+
+The four-line draft is a cyan thought bubble, led by `.o`, without a divider or
+buttons. Click the status-bar actions or use their shortcuts: **Enter** submits
+(or queues while a reply is active), **Shift+Enter** inserts a newline, and
+**Ctrl+Enter** steers when the provider supports it. **Esc Cancel** appears while
+replying and stops the active response; queued queries then proceed in order.
 Click the transcript or press Tab to browse/copy replies; typing returns to the
 draft. Drafts retain undo/redo and are preserved while replies stream.
 

@@ -604,29 +604,7 @@ composerActive d = activeConversation d && composerFocused d
 
 composerRect :: Window -> Rect
 composerRect w = let Rect x y ww hh=bounds w; rows=min 4 (max 0 (hh-4))
-                 in Rect (x+1) (y+hh-1-rows) (max 0 (ww-13)) rows
-
-composerButtons :: Window -> [(Rect,Text)]
-composerButtons w = [(Rect (left r+width r+2) (top r) 8 1,"OK"),(Rect (left r+width r+2) (top r+2) 8 1,"Cancel")]
-  where r=composerRect w
-
-composerButtonEnabled :: Desktop -> Text -> Bool
-composerButtonEnabled d "OK"
-  | V.MCtrl `elem` heldModifiers d = agentSteering d && hasDraft
-  | V.MShift `elem` heldModifiers d = True
-  | otherwise = hasDraft
-  where hasDraft=not (T.null (T.strip (contents (composerBuffer d))))
-composerButtonEnabled d "Cancel" = agentReplying d
-composerButtonEnabled _ _ = False
-
--- Keep the displayed action and mouse/keyboard submission on the same path.
-composerButtonLabel :: Desktop -> Text -> Text
-composerButtonLabel d "OK"
-  | V.MCtrl `elem` heldModifiers d = "Steer"
-  | V.MShift `elem` heldModifiers d = "Enter"
-  | agentReplying d = "Queue"
-  | otherwise = "Query"
-composerButtonLabel _ name = name
+                 in Rect (x+4) (y+hh-1-rows) (max 0 (ww-6)) rows
 
 composerSubmit :: [V.Modifier] -> Desktop -> (Desktop,[Effect])
 composerSubmit mods d
@@ -851,10 +829,6 @@ mouseEvent x y button mods d = case find (\w -> inside (bounds w) x y) (windows 
       | Just doc<-activeDocument focused, inside (scrollbarRect True doc w) x y -> (scrollClick True x y focused,[])
       | Just doc<-activeDocument focused, inside (scrollbarRect False doc w) x y -> (scrollClick False x y focused,[])
       | y==t+hh-1 -> (focused,[])
-      | activeConversation focused, Just name<-lookup True [(inside rect x y,name) | (rect,name)<-composerButtons w] ->
-          if composerButtonEnabled (focused {heldModifiers=mods}) name
-          then if name=="OK" then composerSubmit mods focused else (focused,[AgentAction "cancel" []])
-          else (focused,[])
       | activeConversation focused, inside (composerRect w) x y -> (composerClick x y mods w focused,[])
       | activeConversation focused, y>=top (composerRect w) -> (focused,[])
       | otherwise -> (selectAt (V.MShift `elem` mods) x y focused {drag=Just (Selecting (windowId w)),composerFocused=if activeConversation focused then False else composerFocused focused},[])

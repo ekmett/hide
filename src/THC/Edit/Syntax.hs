@@ -1,13 +1,14 @@
 {-# LANGUAGE OverloadedStrings #-}
-module THC.Edit.Syntax (Style(..), highlight, highlightFor) where
+module THC.Edit.Syntax (Style(..), highlight, highlightFor, bubbleTile) where
 
 import Data.List (intercalate)
+import Data.Char (chr)
 import Data.Word (Word32)
 import qualified Data.Text as T
 import qualified Skylighting as S
 import System.FilePath (takeFileName)
 
-data Style = Plain | Keyword | Comment | Literal | Number | Constructor | Pragma | TerminalStyle Word32 Word32 Word32 deriving (Eq,Show)
+data Style = Plain | Keyword | Comment | Literal | Number | Constructor | Pragma | BubbleStyle Bool Style | TerminalStyle Word32 Word32 Word32 deriving (Eq,Show)
 
 highlight :: T.Text -> [(Char,Style)]
 highlight = highlightFor "Main.hs"
@@ -36,3 +37,10 @@ highlightFor path source = case S.syntaxesByFilename S.defaultSyntaxMap (takeFil
       S.DataTypeTok -> Constructor; S.ConstantTok -> Constructor
       S.PreprocessorTok -> Pragma; S.ExtensionTok -> Pragma
       _ -> Plain
+
+-- Top-left/right, bottom-left/right, single-row caps, left/right tails.
+bubbleTile :: Bool -> Int -> Char
+bubbleTile graphical n
+  | n<0 || n>7 = ' '
+  | graphical = chr (0xe000+n)
+  | otherwise = "▟▙▜▛▐▌◥◤" !! n

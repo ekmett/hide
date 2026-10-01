@@ -1,5 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
-module THC.Edit.Conversation (withConversation, conversationEffects, tickConversation, parseLaunch) where
+module THC.Edit.Conversation (withConversation, conversationEffects, tickConversation, parseLaunch, renderReply) where
 
 import Prelude hiding (reads)
 import Control.Exception (IOException, bracket, try, onException)
@@ -11,7 +11,7 @@ import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
 import Data.IORef
-import Data.List (find, sortOn)
+import Data.List (find, sortOn, intercalate)
 import qualified Data.Map.Strict as M
 import qualified Data.Set as S
 import Data.Maybe (fromMaybe, mapMaybe, isNothing)
@@ -31,7 +31,7 @@ import THC.Edit.Buffer
 import THC.Edit.Markdown (renderMarkdown)
 import THC.Edit.Model hiding (prompt)
 import System.Environment (lookupEnv)
-import THC.Edit.Syntax (Style(..))
+import THC.Edit.Syntax (Style(..), bubbleTile)
 
 -- One configured stdio provider; its protocol supplies models and tools.
 data Phase = Initializing (Maybe Text) | Starting (Maybe Text) | Prompting | Steering Text deriving Eq
@@ -498,8 +498,8 @@ paint force s d
   | not force && not (any ((==Just "Conversation").documentLabel) (M.elems (buffers d))) = d
   | otherwise = let
       width=conversationWidth d
-      header="Session: "<>fromMaybe "not connected" (session s)<>"\n\n"
-      styled=plain Comment header++concatMap (renderRecord width) (transcript s)
+      header="Session: "<>fromMaybe "not connected" (session s)<>"\n"
+      styled=if null (transcript s) then plain Comment header else renderRecords width (transcript s)
       text=T.pack (map fst styled)
       existing=find (\(_,doc)->documentLabel doc==Just "Conversation") (M.toList (buffers d))
       opened=case existing of
@@ -520,10 +520,50 @@ paint force s d
     in focused
   where
     plain style=map (,style).T.unpack
+    renderRecords _ []=[]
+    renderRecords width (record:rest)=renderRecord width record++case rest of
+      [] -> []
+      next:_ -> plain Plain (if sameSpeaker record next then "\n" else "\n\n")++renderRecords width rest
+    sameSpeaker (Reply a _) (Reply b _)=a==b
+    sameSpeaker _ _=False
     renderRecord width record=case record of
-      Reply role text -> plain Keyword (role<>"\n")++renderMarkdown width text++plain Plain "\n\n"
-      Activity ident value -> plain Comment ("["<>fromMaybe "activity" (field "status" value)<>"] "<>fromMaybe ident (field "title" value)<>"\n")
-        ++plain Plain (activityText value<>"\n\n")
+      Reply role text -> renderReply (videoMode d/=Nothing) width (role=="You") text
+      Activity ident value -> plain Pragma ("["<>fromMaybe "activity" (field "status" value)<>"] "<>fromMaybe ident (field "title" value))
+        ++plain Plain (let detail=activityText value in if T.null detail then "" else "\n"<>detail)
+
+-- Corner cells share the text rows. The spiked corner stays square, so the
+-- top edge runs continuously into the tail. Terminal fonts use block fallbacks.
+renderReply :: Bool -> Int -> Bool -> Text -> [(Char,Style)]
+renderReply graphical requested outgoing text
+  | width<6 = recolor (renderMarkdown width text)
+  | otherwise = intercalate [('\n',Plain)] (zipWith line [0::Int ..] rows)
+  where
+    width=max 1 requested
+    rows=splitRows (recolor (renderMarkdown (width-5) text))
+    columns chars=let t=T.pack (map fst chars) in displayColumn t (T.length t)
+    bubbleWidth=maximum (0:map columns rows)
+    background=BubbleStyle outgoing Plain
+    edge=TerminalStyle (if outgoing then 0x00aaaa else 0xaaaaaa) 0x0000aa 0
+    recolor=map (\(c,style)->(c,BubbleStyle outgoing style))
+    spaces style n=replicate (max 0 n) (' ',style)
+    tile n=(bubbleTile graphical n,edge)
+    side first lastRow leftSide
+      | first && lastRow = if leftSide then if outgoing then tile 4 else tile 2
+                                            else if outgoing then tile 3 else tile 5
+      | first = if leftSide then if outgoing then tile 0 else (' ',background)
+                             else if outgoing then (' ',background) else tile 1
+      | lastRow = tile (if leftSide then 2 else 3)
+      | otherwise = (' ',background)
+    lastIndex=length rows-1
+    line i chars =
+      let first=i==0; lastRow=i==lastIndex
+          body=side first lastRow True:chars++spaces background (bubbleWidth-columns chars)++[side first lastRow False]
+          tailCell=if first then tile (if outgoing then 7 else 6) else (' ',Plain)
+      in if outgoing then spaces Plain (width-bubbleWidth-3)++body++[tailCell]
+                     else tailCell:body
+    splitRows chars=case break ((=='\n').fst) chars of
+      (row,[]) -> [row]
+      (row,_:rest) -> row:splitRows rest
 
 rawTranscript :: [Record] -> Text
 rawTranscript=T.intercalate "\n\n" . map (\record -> case record of Reply role text -> role<>"\n"<>text; Activity ident value -> ident<>"\n"<>jsonText value)

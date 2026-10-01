@@ -146,18 +146,22 @@ windowLayers d active w =
       in place sx sy ((if vertical then V.vertCat else V.horizCat) [cell n | n<-[0..len-1]])
     composerLayers
       | documentLabel doc/=Just "Conversation" = []
-      | otherwise = [place x (top rect-1) divider,place (left rect) (top rect) inputImage] ++
-          concat [ [place (left r) (top r) (row (if composerButtonEnabled d name then selected else attr (V.RGBColor 85 85 85) gray) (width r) (" "<>composerButtonLabel d name))]
-            ++ (if top r+1<y+hh-1 then
-                buttonShadow blue r else [])
-          | (r,name)<-composerButtons w, top r<y+hh-1]
+      | otherwise = [place (left rect) (top rect) inputImage] ++ thoughtEdges
       where
         rect=composerRect w; draft=composerBuffer d; (sr,sc)=composerScroll d w
-        legend=" Query"<>(if agentQueued d>0 then " ("<>T.pack (show (agentQueued d))<>" queued)" else "")<>" "
-        divider=V.char frame (if active && not moving then '╟' else '├') V.<|>
-          V.cropRight (max 0 (ww-2)) (label frame legend V.<|> V.charFill frame '─' ww 1) V.<|> V.char frame (if active && not moving then '╢' else '┤')
+        thoughtEdges
+          | width rect<=0 || height rect<=0 = []
+          | otherwise = [place (left rect-1) (top rect) (edgeImage True),
+                         place (left rect+width rect) (top rect) (edgeImage False),
+                         place (left rect-3) (top rect) (label (attr scrollCyan blue) ".o")]
+        edgeImage leftSide=V.vertCat
+          [V.char (if corner then attr scrollCyan blue else attr black scrollCyan)
+            (if corner then bubbleTile (videoMode d/=Nothing) shape else ' ')
+          | n<-[0..height rect-1], let corner=n==0 || n==height rect-1,
+            let shape=if height rect==1 then if leftSide then 4 else 5
+                      else (if n==0 then 0 else 2)+(if leftSide then 0 else 1)]
         inputImage=V.vertCat [V.cropRight (width rect) (V.translateX (negate sc)
-          (styledImage Nothing (active && composerFocused d) (composerSelection d) (bufferLineOffset draft n) [(c,Plain) | c<-T.unpack (bufferLineAt draft n)]) V.<|> V.charFill edit ' ' (width rect) 1)
+          (styledImage Nothing (active && composerFocused d) (composerSelection d) (bufferLineOffset draft n) [(c,BubbleStyle True Plain) | c<-T.unpack (bufferLineAt draft n)]) V.<|> V.charFill (attr black scrollCyan) ' ' (width rect) 1)
           | n<-[sr..sr+height rect-1]]
     hexDividerLayers =
       [place (x+1+column) y (V.vertCat [V.char frame (if active && not moving then '╤' else '┬'),
@@ -199,6 +203,12 @@ styledImage override active sel start chars = V.horizCat [label a (T.pack (map s
       | c<' ' || c=='\DEL' = (a,'·'):expand (col+1) (offset+1) rest
       | otherwise = (a,c):expand (col+V.safeWcwidth c) (offset+1) rest
       where a=if active && offset>=lo && offset<hi then attr blue gray else fromMaybe (syntaxAttr style) override
+    syntaxAttr (BubbleStyle outgoing style)=attr foreground (if outgoing then scrollCyan else gray)
+      where foreground | outgoing = black
+                       | otherwise = case style of
+                           Keyword -> blue; Comment -> V.RGBColor 85 85 85
+                           Literal -> V.RGBColor 0 85 0; Number -> V.RGBColor 170 0 170
+                           Constructor -> blue; Pragma -> V.RGBColor 85 85 85; _ -> black
     syntaxAttr (TerminalStyle fg bg flags)=foldl V.withStyle (attr (rgb fg) (rgb bg)) [style | (bit,style)<-[(1,V.bold),(2,V.italic),(4,V.underline),(8,V.strikethrough),(16,V.dim)], flags .&. bit /= 0]
       where rgb value=V.RGBColor (fromIntegral (value `shiftR` 16 .&. 255)) (fromIntegral (value `shiftR` 8 .&. 255)) (fromIntegral (value .&. 255))
     syntaxAttr style=attr (case style of Plain->yellow; Keyword->white; Comment->cyan; Literal->V.RGBColor 85 255 85; Number->V.RGBColor 255 85 255; Constructor->yellow; Pragma->gray) blue
