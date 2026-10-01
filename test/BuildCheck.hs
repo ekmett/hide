@@ -10,6 +10,7 @@ import qualified Graphics.Vty as V
 import System.Directory
 import System.FilePath ((</>))
 import System.IO (openTempFile, hClose)
+import System.Info (os)
 import System.Timeout (timeout)
 import qualified THC.Edit.Build as B
 import THC.Edit.BuildJobs
@@ -57,7 +58,7 @@ checks = bracket temporary removePathForcibly $ \root -> do
     rebuilt<-await jobs repeated finished
     check "repeated build refreshes existing output window" ("second invocation" `T.isInfixOf` output rebuilt)
 
-    stopped<-timeout 3000000 $ do
+    stopped<-timeout (if os=="mingw32" then 8000000 else 3000000) $ do
       running<-startBuildJob jobs "Run" root [(command,["-u","-c","import time\nwhile True: print('busy',flush=True)"])] completed
       threadDelay 100000
       stopBuildJob jobs running

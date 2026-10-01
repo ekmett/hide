@@ -14,6 +14,7 @@ import qualified Data.Text.IO as TIO
 import System.Directory
 import System.Exit (ExitCode(..))
 import System.IO
+import System.Info (os)
 import System.Process
 import System.Timeout (timeout)
 import THC.Edit.Buffer
@@ -29,7 +30,7 @@ checks = launchChecks >> mapM_ session ["basic", "frame", "choices", "breakpoint
           send action values d=snd <$> debuggerEffects runtime core d [DebugAction action values]
           tick=tickDebugger runtime core
           waitForIO label predicate d=do
-            result<-timeout 5000000 (loop d)
+            result<-timeout debuggerTimeout (loop d)
             maybe (error (label++": timed out")) pure result
             where loop state=do
                     updated<-tick state
@@ -155,7 +156,7 @@ launchChecks = do
         config mode requestName=object ["command" .= (["python3",directory<>"/test/dap-session.py",logs,"stdio-"<>mode] :: [String]),
           "request" .= (requestName :: T.Text),"arguments" .= object ["program" .= ("space λ.hs" :: T.Text)]]
         core d _=pure (False,d)
-        waitFor runtime predicate d=timeout 5000000 (loop d) >>= maybe (error "launch fixture timed out") pure
+        waitFor runtime predicate d=timeout debuggerTimeout (loop d) >>= maybe (error "launch fixture timed out") pure
           where loop state=do
                   updated<-tickDebugger runtime core state
                   if predicate updated then pure updated else threadDelay 1000 >> loop updated
@@ -183,3 +184,7 @@ launchChecks = do
       (_,d)<-debuggerEffects runtime core (initialDesktop (80,25)) [DebugAction "launch-config" ["1",T.pack path]]
       check "invalid launch arguments rejected before spawning" ("arguments" `T.isInfixOf` status d)
     removeFile logs
+
+-- A Windows-owned adapter can require the bounded taskkill /T grace on stop.
+debuggerTimeout :: Int
+debuggerTimeout=if os=="mingw32" then 10000000 else 5000000

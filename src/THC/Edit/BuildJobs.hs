@@ -24,12 +24,12 @@ import THC.Edit.Model
 
 -- The session, rather than its attached display, owns this worker.
 data Event = Output Text | Finished (Either Text ExitCode)
-data Job = Job Int Text FilePath (Async ()) (TBQueue Event) Text
+data Job = Job Int Text FilePath (IO ()) (TBQueue Event) Text
 newtype BuildJobs = BuildJobs (IORef (Maybe Job))
 
 withBuildJobs :: (BuildJobs -> IO a) -> IO a
 withBuildJobs = bracket (BuildJobs <$> newIORef Nothing) close
-  where close (BuildJobs ref)=readIORef ref >>= mapM_ (\(Job _ _ _ worker _ _) -> cancel worker)
+  where close (BuildJobs ref)=readIORef ref >>= mapM_ (\(Job _ _ _ stop _ _) -> stop)
 
 startBuildJob :: BuildJobs -> Text -> FilePath -> [(FilePath,[String])] -> Desktop -> IO Desktop
 startBuildJob (BuildJobs ref) label root commands desktop = do
@@ -38,29 +38,40 @@ startBuildJob (BuildJobs ref) label root commands desktop = do
     Just _ -> pure desktop {status="A build or run is already active; stop it before starting another."}
     Nothing -> do
       queue<-newTBQueueIO 128
+      -- Nothing records a stop requested before or during process creation.
+      cleanup<-newIORef (Just (pure ()))
       let emit=atomically . writeTBQueue queue
           run []=pure ExitSuccess
           run ((command,args):rest)=do
             emit (Output ("$ "<>T.replace "\n" "\\n" (T.pack (showCommandForUser command args))<>"\n"))
-            result<-capture root command args (emit . Output)
+            result<-capture cleanup root command args (emit . Output)
             if result==ExitSuccess then run rest else pure result
       worker<-async $ do
         result<-try (run commands)
         case result of
           Left (err::SomeException) | Just (_::SomeAsyncException)<-fromException err -> throwIO err
           _ -> emit (Finished (either (Left . T.pack . displayException) Right result))
-      let opened=addReadOnly (label<>" output") "" desktop
+      let stop=do
+            release<-atomicModifyIORef' cleanup (\pending -> (Nothing,maybe (pure ()) id pending))
+            release
+            cancel worker
+          opened=addReadOnly (label<>" output") "" desktop
           bid=maybe (nextId desktop) bufferId (activeWindow opened)
           old=buildDiagnostics desktop
-      writeIORef ref (Just (Job bid label root worker queue ""))
+      writeIORef ref (Just (Job bid label root stop queue ""))
       pure opened {status=label<>"…",buildDiagnostics=[],diagnostics=filter (`notElem` old) (diagnostics opened)}
 
-capture :: FilePath -> FilePath -> [String] -> (Text -> IO ()) -> IO ExitCode
-capture root command args emit =
+capture :: IORef (Maybe (IO ())) -> FilePath -> FilePath -> [String] -> (Text -> IO ()) -> IO ExitCode
+capture cleanup root command args emit =
   withCreateProcess ((proc command args) {cwd=Just root,std_in=NoStream,std_out=CreatePipe,std_err=CreatePipe,create_group=True}) $ \_ out err child ->
     mask $ \restore -> do
       stop<-processCleanup child
-      withAsync (restore (maybe (pure ()) (pump emit) out)) $ \reader ->
+      release<-atomicModifyIORef' cleanup (\pending -> case pending of
+        Nothing -> (Nothing,stop)
+        Just _ -> (Just stop,pure ()))
+      release
+      let unregister=atomicModifyIORef' cleanup (\pending -> (fmap (const (pure ())) pending,()))
+      flip finally unregister $ withAsync (restore (maybe (pure ()) (pump emit) out)) $ \reader ->
         withAsync (restore (maybe (pure ()) (pump emit) err)) $ \errors ->
           restore (do code<-waitForProcess child; wait reader; wait errors; pure code)
             `onException` stop
@@ -79,8 +90,10 @@ stopBuildJob runtime@(BuildJobs ref) desktop = do
   current<-readIORef ref
   case current of
     Nothing -> pure desktop {status="No build or captured run is active."}
-    Just (Job _ _ _ worker queue _) -> do
-      cancel worker
+    Just (Job _ _ _ stop queue _) -> do
+      -- Windows process waits may not accept cancellation until the child exits.
+      -- Release its process tree before joining the worker and its pipe readers.
+      stop
       -- Drain pending output before inserting the completion marker.
       updated<-tickBuildJobs runtime desktop
       atomically (writeTBQueue queue (Finished (Left "Stopped.")))
@@ -91,7 +104,7 @@ tickBuildJobs (BuildJobs ref) desktop = do
   current<-readIORef ref
   case current of
     Nothing -> pure desktop
-    Just (Job bid label root worker queue previous) -> do
+    Just (Job bid label root stop queue previous) -> do
       events<-atomically (flushTBQueue queue)
       if null events then pure desktop else do
         let appended=T.concat [text | Output text<-events]
@@ -112,7 +125,7 @@ tickBuildJobs (BuildJobs ref) desktop = do
             result=case outcomes of
               [] -> shown
               outcome:_ -> (if null problems then shown else setProblemsVisible True shown) {status=summary outcome}
-        writeIORef ref (if null outcomes then Just (Job bid label root worker queue output) else Nothing)
+        writeIORef ref (if null outcomes then Just (Job bid label root stop queue output) else Nothing)
         pure result
       where
         summary (Left err)=label<>": "<>err

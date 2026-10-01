@@ -46,15 +46,16 @@ data Client = Client
 
 -- The UI only enqueues requests. Connection, framing and socket IO run here.
 startClient :: Text -> Int -> IO Client
-startClient host port = startTransport $ \_ _ communicate -> withConnection host port communicate
+startClient host port = startTransport $ \_ register communicate -> withConnection host port $ \connection -> do
+  register (closeConnection connection)
+  communicate (Socket.recv connection) (Socket.sendAll connection)
 
-withConnection :: Text -> Int -> ((Int -> IO BS.ByteString) -> (BS.ByteString -> IO ()) -> IO a) -> IO a
-withConnection host port communicate = do
+withConnection :: Text -> Int -> (Socket -> IO a) -> IO a
+withConnection host port action = do
   unless (host `elem` ["localhost", "127.0.0.1", "::1"] && port > 0 && port <= 65535)
     (ioError (userError "DAP endpoint must be localhost, 127.0.0.1 or ::1 with a port in 1..65535"))
   -- Never resolve hostnames: the actual destination is always loopback.
-  bracket (openConnection host port) close $ \connection ->
-    communicate (Socket.recv connection) (Socket.sendAll connection)
+  bracket (openConnection host port) closeConnection action
 
 -- The adapter and its private process group belong to the daemon, not a frontend.
 -- argv is passed directly to the OS; configuration never invokes a shell.
@@ -70,7 +71,7 @@ startManaged :: FilePath -> [String] -> FilePath -> Text -> Int -> IO Client
 startManaged executable arguments directory host port = startTransport $ \emit register communicate -> do
   unless (host `elem` ["localhost","127.0.0.1","::1"] && port>0 && port<=65535)
     (ioError (userError "Invalid managed DAP loopback endpoint"))
-  occupied <- try (withConnection host port (\_ _ -> pure ())) :: IO (Either IOException ())
+  occupied <- try (withConnection host port (\_ -> pure ())) :: IO (Either IOException ())
   case occupied of
     Right () -> ioError (userError "DAP port is already in use; choose an unused port")
     Left _ -> pure ()
@@ -82,12 +83,22 @@ startManaged executable arguments directory host port = startTransport $ \emit r
         let connectReady = do
               opened <- try (openConnection host port) :: IO (Either IOException Socket)
               case opened of Right connection -> pure connection; Left _ -> threadDelay 100000 >> connectReady
+            exited = getProcessExitCode process >>= maybe (threadDelay 100000 >> exited) pure
             acquire = do
-              result<-race (waitForProcess process) (bounded 300000000 "THC debugger startup timed out; see Debug / Output" connectReady)
+              result<-race exited (bounded 300000000 "THC debugger startup timed out; see Debug / Output" connectReady)
               case result of
                 Left code -> ioError (userError ("THC debugger process exited: "++show code++"; see Debug / Output"))
                 Right connection -> pure connection
-        bracket acquire close $ \connection -> communicate (Socket.recv connection) (Socket.sendAll connection)
+        bracket acquire closeConnection $ \connection -> do
+          register (closeConnection connection >> release)
+          communicate (Socket.recv connection) (Socket.sendAll connection)
+
+-- Windows socket reads must be woken before their workers are cancelled.
+closeConnection :: Socket -> IO ()
+closeConnection connection = do
+  ignore (shutdown connection ShutdownBoth)
+  ignore (close connection)
+  where ignore operation=void operation `catch` (\(_::IOException) -> pure ())
 
 openConnection :: Text -> Int -> IO Socket
 openConnection host port = do
@@ -132,8 +143,11 @@ drainOutput emit category stream = loop (TE.streamDecodeUtf8With lenientDecode) 
 
 startTransport :: ((Int -> Event -> STM ()) -> (IO () -> IO ()) -> ((Int -> IO BS.ByteString) -> (BS.ByteString -> IO ()) -> IO ()) -> IO ()) -> IO Client
 startTransport transport = mask $ \restore -> do
-  shutdownAction <- newIORef (pure ())
-  let release=readIORef shutdownAction >>= id
+  shutdownAction <- newIORef (False,pure ())
+  let release=atomicModifyIORef' shutdownAction (\(_,cleanup) -> ((True,cleanup),cleanup)) >>= id
+      register cleanup=mask_ $ do
+        stopping<-atomicModifyIORef' shutdownAction (\(stopping,_) -> ((stopping,cleanup),stopping))
+        when stopping cleanup
   out <- newTBQueueIO 64
   inbox <- newTBQueueIO 128
   bytes <- newTVarIO 0
@@ -171,7 +185,7 @@ startTransport transport = mask $ \restore -> do
           Nothing -> ioError (userError "Malformed DAP event")
         -- Reverse requests require capabilities we do not advertise.
         _ -> ioError (userError "Unsupported DAP message type")
-      run = transport emit (writeIORef shutdownAction) $ \readBytes writeBytes -> do
+      run = transport emit register $ \readBytes writeBytes -> do
           rest <- newIORef BS.empty
           race_
             (forever (readFrame readBytes rest >>= uncurry receive) `finally` release)

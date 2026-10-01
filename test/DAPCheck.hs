@@ -15,6 +15,7 @@ import Data.Maybe (fromJust)
 import qualified Data.Text as T
 import Network.Socket
 import System.IO
+import System.Info (os)
 import System.Process (CreateProcess(..), StdStream(..), proc, readProcessWithExitCode, withCreateProcess)
 import Text.Read (readMaybe)
 import THC.Edit.Process (processCleanup)
@@ -32,7 +33,7 @@ checks = do
   bracket (DAP.startAdapter "python3" ["-u", "-c", "import sys,time; sys.stdin.buffer.readline(); sys.stderr.write('ready'); sys.stderr.flush(); time.sleep(60)"] ".") DAP.stopClient $ \client -> do
     ident <- DAP.request client "launch" Null
     _ <- await client (any notification)
-    stopped <- timeout 2000000 (DAP.stopClient client)
+    stopped <- timeout processStopTimeout (DAP.stopClient client)
     check "stalled stdio adapter stops promptly" (stopped == Just ())
     events <- DAP.pollEvents client
     check "stopping stdio adapter fails in-flight request" (any (failed ident) events)
@@ -65,7 +66,7 @@ checks = do
   bracket (DAP.startManaged "python3" ["-u","-c","import time; print('waiting',flush=True); time.sleep(60)"] "." "127.0.0.1" managedPort) DAP.stopClient $ \client -> do
     ident<-DAP.request client "initialize" Null
     _<-await client (any notification)
-    stopped<-timeout 2000000 (DAP.stopClient client)
+    stopped<-timeout processStopTimeout (DAP.stopClient client)
     check "managed startup cancellation stops process before joining output readers" (stopped==Just ())
     events<-DAP.pollEvents client
     check "managed startup cancellation fails initialize" (any (failed ident) events)
@@ -155,7 +156,7 @@ failed ident (DAP.Response actual (Left _)) = ident == actual
 failed _ _ = False
 
 await :: DAP.Client -> ([DAP.Event] -> Bool) -> IO [DAP.Event]
-await client done = timeout 3000000 (loop []) >>= maybe (error "Timed out waiting for DAP") pure
+await client done = timeout (if os=="mingw32" then 8000000 else 3000000) (loop []) >>= maybe (error "Timed out waiting for DAP") pure
   where
     loop previous = do
       events <- (previous ++) <$> DAP.pollEvents client
@@ -249,8 +250,13 @@ processTreeCheck = do
         ready<-timeout 3000000 (hGetLine stream)
         pid<-maybe (error "process cleanup fixture did not start") pure (ready >>= readMaybe :: Maybe Int)
         flip onException (emergency pid) $ do
-          ended<-timeout 3000000 (concurrently_ stop stop)
+          ended<-timeout (if os=="mingw32" then processStopTimeout else 3000000) (concurrently_ stop stop)
           check "concurrent process-tree cleanup completes promptly" (ended==Just ())
           eof<-timeout 1000000 (hIsEOF stream)
           check "cleanup kills signal-resistant descendants retaining pipe handles" (eof==Just True)
           stop
+
+-- taskkill /T takes 2-5 seconds on native Windows; cleanup grants it five seconds
+-- plus bounded helper/child reaping. Socket-only cancellation keeps its 0.5s check.
+processStopTimeout :: Int
+processStopTimeout=if os=="mingw32" then 8000000 else 2000000
