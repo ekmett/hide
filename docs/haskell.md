@@ -50,11 +50,19 @@ The chooser lists HLS quick fixes and refactorings for that range. Select an
 action and press Enter to apply its text edits to buffers; review and save them
 when ready. HLS may resolve an action lazily when you select it.
 
-Only edit-based actions are supported. Command-only actions, actions combining
-an edit and command, and file creation/deletion operations are not applied;
-the chooser explains why they are unavailable. No attached command is silently
-skipped. Changed source or affected files reject the entire edit. Actions from
-an older list expire when you request another list or restart HLS.
+Actions can supply text edits, an advertised HLS command, or both. A supplied
+edit runs before its command. For example, HLS's **Evaluate...** action evaluates
+a doctest comment and inserts its result. Commands may have server-side effects;
+only text edits are confined to unsaved editor buffers.
+
+Each edit batch rejects changed source, private or unrelated files, and file
+creation/deletion operations as a whole. A later command failure or cancellation
+keeps earlier accepted edits; review the status and changed buffers before saving.
+Only one command runs at a time per project. Every completed, failed, or canceled
+command retires that HLS process, so its late edits cannot affect another action.
+The next command needs a fresh action list and may incur HLS startup time;
+edit-only actions keep the existing server. Actions from an older list expire
+when you request another list or restart HLS.
 
 ## Diagnostics
 

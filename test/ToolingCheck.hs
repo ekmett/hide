@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 module ToolingCheck (checks) where
-import Control.Monad (unless, forM_, replicateM)
+import Control.Monad (unless, when, forM_, replicateM)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (withAsync, poll, wait)
 import Data.Aeson.Types (parseMaybe)
@@ -80,6 +80,7 @@ checks = do
     (all (`elem` toolingToolNames) ["lsp_code_actions","lsp_apply_code_action"])
   mcpChecks
   codeActionChecks
+  commandChecks
   putStrLn "tooling checks passed"
   where
     temporary = do
@@ -417,3 +418,187 @@ mcpServer = unlines
   , " if method=='textDocument/rename': pathlib.Path(params['newName']+'.replied').touch()"
   , " if method=='codeAction/resolve': pathlib.Path('resolve.replied').touch()"
   ]
+
+commandChecks :: IO ()
+commandChecks = bracket temporary removePathForcibly $ \root -> do
+  let source=root </> "Main.hs"
+      secret=root </> "Secret.hs"
+      server=root </> "fake-command-hls"
+      base=(addDocument (Just (FileState source Nothing)) (newBuffer "foo = 1\n") (initialDesktop (80,25))) {guestPrivatePaths=[secret]}
+      bid=maybe (error "missing source") bufferId (activeWindow base)
+      version d=revision (documentBuffer (buffers d M.! bid))
+      args d=object ["bufferId" .= bid,"revision" .= version d,"line" .= (1::Int),"column" .= (1::Int)]
+      core d _=pure (False,d)
+      check label ok=unless ok (error label)
+      field key=parseMaybe (withObject "value" (.:key))
+      isLeft (Left _)=True; isLeft _=False
+      right=either (error . T.unpack) pure
+      finish tooling d answer=withAsync answer $ \worker->do
+        let pump current=do
+              next<-tickTooling tooling core current
+              result<-poll worker
+              case result of Just _->(next,) <$> wait worker; Nothing->threadDelay 1000 >> pump next
+        timeout 5000000 (pump d) >>= maybe (error "Command test timed out") pure
+      list tooling d=do
+        (next,answer)<-toolingTool tooling core d "lsp_code_actions" (args d)
+        (_,result)<-finish tooling next answer
+        right result
+      action :: T.Text -> Value -> T.Text
+      action title value=case [key | item<-fromMaybeList (field "actions" value),field "title" item==Just title,Just key<-[field "actionId" item]] of key:_->key; _->error "Missing command action"
+      begin tooling d title listing=toolingTool tooling core d "lsp_apply_code_action" (object ["bufferId" .= bid,"revision" .= version d,"actionId" .= action title listing])
+      apply tooling d title=do
+        listing<-list tooling d
+        (next,answer)<-begin tooling d title listing
+        finish tooling next answer
+      marker tooling d name=do
+        let loop current=do
+              next<-tickTooling tooling core current
+              exists<-doesFileExist (root </> name)
+              if exists then pure next else threadDelay 1000 >> loop next
+        timeout 5000000 (loop d) >>= maybe (error ("Missing command marker "++name)) pure
+      cleanMarkers=forM_ ["held","release","late-replied","command-finished"] $ \name->do
+        exists<-doesFileExist (root </> name)
+        when exists (removeFile (root </> name))
+  writeFile source "foo = 1\n"
+  writeFile secret "secret = 2\n"
+  writeFile (root </> "hie.yaml") "cradle: {direct: {arguments: []}}\n"
+  createDirectory (root </> "nested")
+  writeFile (root </> "nested" </> "hie.yaml") "cradle: {direct: {arguments: []}}\n"
+  writeFile (root </> "nested" </> "Other.hs") "other = 3\n"
+  writeFile server commandServer
+  permissions<-getPermissions server
+  setPermissions server permissions {executable=True}
+  bracket (lookupEnv "THC_EDIT_HLS") (maybe (unsetEnv "THC_EDIT_HLS") (setEnv "THC_EDIT_HLS")) $ \_->do
+    setEnv "THC_EDIT_HLS" server
+    withTooling $ \tooling->do
+      (normal,reply)<-apply tooling base "normal"
+      result<-right reply
+      check "offered legacy command applies owned edits" (activeText normal=="bar = 1\n" && field "succeeded" result==Just True && field "appliedBatches" result==Just (1::Int))
+      -- Command A has completed. Command B must use a different process even
+      -- when A's server delays its unsolicited edit until B starts.
+      beforeNext<-BS.readFile (root </> "last-executor")
+      (nextAction,nextAnswer)<-apply tooling normal "normal"
+      _<-right nextAnswer
+      afterNext<-BS.readFile (root </> "last-executor")
+      check "successful command retires ownership before the next command" (afterNext/=beforeNext && activeText nextAction=="bar = 1\n")
+      check "command does not save disk" . (=="foo = 1\n") =<< readFile source
+      check "command edits retain undo" (activeText (fst (runCommand Undo normal))=="foo = 1\n")
+      (twice,twiceReply)<-apply tooling base "twice"
+      twiceResult<-right twiceReply
+      check "second owned batch uses updated revision baseline" (activeText twice=="baz = 1\n" && field "appliedBatches" twiceResult==Just (2::Int))
+      forM_ ["rejected","private","version","resource","nested"] $ \title->do
+        (unchanged,answer)<-apply tooling base title
+        refused<-right answer
+        check ("command rejects invalid edit: "++T.unpack title) (buffers unchanged==buffers base && field "succeeded" refused==Just False && field "commandSucceeded" refused==Just True && field "applied" refused==Just False)
+      forM_ [("failed","bar = 1\n"),("literal-failed","lit = 1\n")] $ \(title,expected)->do
+        (partial,answer)<-apply tooling base title
+        resultValue<-right answer
+        check "failed command preserves and reports preceding edit" (activeText partial==expected && field "partial" resultValue==Just True && field "commandSucceeded" resultValue==Just False && field "appliedBatches" resultValue==Just (1::Int))
+      cleanMarkers
+      listing<-list tooling base
+      (held,answer)<-begin tooling base "held" listing
+      ready<-marker tooling held "held"
+      (_,second)<-begin tooling ready "normal" listing
+      check "one command per HLS session" . isLeft =<< second
+      let changed=insertText "x" ready
+      writeFile (root </> "release") ""
+      (stale,staleReply)<-finish tooling changed answer
+      staleResult<-right staleReply
+      check "source changed during command prevents server edits" (buffers stale==buffers changed && field "succeeded" staleResult==Just False)
+      cleanMarkers
+      cancelListing<-list tooling base
+      (cancelStart,cancelReply)<-begin tooling base "held-after" cancelListing
+      applied<-marker tooling cancelStart "held"
+      check "held command already applied first batch" (activeText applied=="bar = 1\n")
+      writeFile (root </> "release") ""
+      let awaitFinished=do
+            finished<-doesFileExist (root </> "command-finished")
+            unless finished (threadDelay 1000 >> awaitFinished)
+      timeout 3000000 awaitFinished >>= maybe (error "Command did not finish before cancellation") pure
+      -- The response is already in flight, but the desktop has not polled it.
+      _<-timeout 1000 cancelReply
+      cancelled<-tickTooling tooling core applied
+      check "late completion cannot overwrite cancellation status" (not ("HLS command completed" `T.isPrefixOf` status cancelled))
+      cancelledResult<-right =<< cancelReply
+      check "cancellation reports retained partial edits" (activeText cancelled=="bar = 1\n" && field "partial" cancelledResult==Just True && field "appliedBatches" cancelledResult==Just (1::Int))
+      writeFile (root </> "release") ""
+      newListing<-list tooling cancelled
+      (_,oldReply)<-begin tooling cancelled "normal" cancelListing
+      check "retiring command transport invalidates old action IDs" . isLeft =<< oldReply
+      (restarted,nextReply)<-begin tooling cancelled "normal" newListing
+      (fresh,done)<-finish tooling restarted nextReply
+      _<-right done
+      check "retired server cannot edit replacement command" (activeText fresh=="bar = 1\n")
+      starts<-lines <$> readFile (root </> "started")
+      check "cancelled command requires a new HLS process" (length starts>=2)
+  where
+    fromMaybeList Nothing=[]
+    fromMaybeList (Just xs)=xs
+    temporary=do
+      base<-getTemporaryDirectory
+      (path,h)<-openTempFile base "thc-command-check"
+      hClose h;removeFile path;createDirectory path
+      canonicalizePath path
+
+commandServer :: String
+commandServer = unlines
+  ["#!/usr/bin/env python3"
+  ,"import sys,json,pathlib,time"
+  ,"root=pathlib.Path.cwd()"
+  ,"with open('started','a') as f:f.write('server\\n')"
+  ,"generation=len(pathlib.Path('started').read_text().splitlines())"
+  ,"docs={}; serial=0; deferred=[]"
+  ,"def send(value):"
+  ," body=json.dumps(dict(jsonrpc='2.0',**value)).encode();sys.stdout.buffer.write(('Content-Length: %d\\r\\n\\r\\n'%len(body)).encode()+body);sys.stdout.buffer.flush()"
+  ,"def recv():"
+  ," line=sys.stdin.buffer.readline()"
+  ," if not line: raise EOFError()"
+  ," n=int(line.split(b':')[1]);sys.stdin.buffer.readline();x=json.loads(sys.stdin.buffer.read(n));p=x.get('params',{});m=x.get('method')"
+  ," if m=='textDocument/didOpen': docs[p['textDocument']['uri']]=p['textDocument']['text']"
+  ," if m=='textDocument/didChange': docs[p['textDocument']['uri']]=p['contentChanges'][0]['text']"
+  ," return x"
+  ,"def edit(uri,text='bar',version=None,resource=False):"
+  ," global serial"
+  ," serial+=1;i='edit-'+str(serial)"
+  ," edits=[dict(range=dict(start=dict(line=0,character=0),end=dict(line=0,character=3)),newText=text)]"
+  ," body=dict(changes={uri:edits}) if version is None else dict(documentChanges=[dict(textDocument=dict(uri=uri,version=version),edits=edits)])"
+  ," if resource:body=dict(documentChanges=[dict(kind='delete',uri=uri)])"
+  ," send(dict(id=i,method='workspace/applyEdit',params=dict(edit=body)))"
+  ," while True:"
+  ,"  r=recv()"
+  ,"  if r.get('id')==i:"
+  ,"   pathlib.Path('last-edit.json').write_text(json.dumps(r['result']));return r['result']"
+  ,"  if 'method' in r and 'id' in r: deferred.append(r)"
+  ,"def hold():"
+  ," pathlib.Path('held').touch()"
+  ," while not pathlib.Path('release').exists():time.sleep(.002)"
+  ,"while True:"
+  ," x=deferred.pop(0) if deferred else recv();m=x.get('method');p=x.get('params',{});i=x.get('id')"
+  ," if m=='exit':break"
+  ," if m=='initialize':send(dict(id=i,result=dict(capabilities=dict(codeActionProvider=dict(resolveProvider=True),executeCommandProvider=dict(commands=['fixture'])))));continue"
+  ," if m=='shutdown':send(dict(id=i,result=None));continue"
+  ," if m=='textDocument/codeAction':"
+  ,"  uri=p['textDocument']['uri'];actions=[dict(title=mode,command='fixture',arguments=[mode,uri]) for mode in ['normal','twice','rejected','failed','held','held-after','private','version','resource','nested']]"
+  ,"  literal=dict(changes={uri:[dict(range=dict(start=dict(line=0,character=0),end=dict(line=0,character=3)),newText='lit')]})"
+  ,"  actions += [dict(title='literal-failed',edit=literal,command=dict(title='fail',command='fixture',arguments=['fail-only',uri]))]"
+  ,"  send(dict(id=i,result=actions));continue"
+  ," if m=='workspace/executeCommand':"
+  ,"  mode,uri=p['arguments']"
+  ,"  pathlib.Path('last-executor').write_text(str(generation))"
+  ,"  pathlib.Path('execute.json').write_text(json.dumps(p))"
+  ,"  if mode=='held':hold()"
+  ,"  if mode!='fail-only':"
+  ,"   target=(root.parent/'Outside.hs').as_uri() if mode=='rejected' else (root/'Secret.hs').as_uri() if mode=='private' else (root/'nested'/'Other.hs').as_uri() if mode=='nested' else uri"
+  ,"   edit(target,version=99 if mode=='version' else None,resource=mode=='resource')"
+  ,"  if mode=='twice':edit(uri,'baz')"
+  ,"  if mode=='held-after':hold()"
+  ,"  if mode in ['failed','fail-only']:send(dict(id=i,error=dict(code=-32603,message='fixture command failed')))"
+  ,"  else:send(dict(id=i,result=None))"
+  ,"  pathlib.Path('command-finished').touch()"
+  ,"  # Delay A's edit until another server has started for B."
+  ,"  while len(pathlib.Path('started').read_text().splitlines())<=generation: time.sleep(.002)"
+  ,"  # Intentionally after executeCommand response: no active command owns this."
+  ,"  edit(uri,'BAD')"
+  ,"  pathlib.Path('late-replied').touch()"
+  ,"  continue"
+  ," if i is not None:send(dict(id=i,result={}))"]

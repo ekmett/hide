@@ -49,6 +49,21 @@ checks = do
         third <- request client "test/state" Null
         closed <- waitResponse client third
         check "removed document closes" (result closed == Just (object ["opens" .= (1 :: Int), "changes" .= (1 :: Int), "closes" .= (1 :: Int), "text" .= ("x = 2\n" :: T.Text)]))
+        execution<-executeCommand client "fixture" (toJSON ([]::[Value])) >>= either (error . T.unpack) pure
+        concurrent<-executeCommand client "fixture" (toJSON ([]::[Value]))
+        check "command ownership is exclusive until response" (case concurrent of Left _->True; _->False)
+        let awaitEdit=do
+              batch<-pollEvents client
+              case [(owner,ident) | ApplyEdit owner ident _<-batch] of
+                value:_->pure value
+                _->threadDelay 1000 >> awaitEdit
+        owned<-timeout 3000000 awaitEdit >>= maybe (error "Missing owned applyEdit") pure
+        check "server request carries receipt-time execution owner" (fst owned==execution)
+        replyEdit client (snd owned) True Nothing
+        _<-waitResponse client execution
+        barrier<-request client "test/state" Null
+        after<-waitResponse client barrier
+        check "post-response applyEdit never acquires completed owner" (not (any (\event->case event of ApplyEdit{}->True; _->False) after))
       lifecycle <- readFile (root </> "lifecycle")
       check "shutdown response then exit" (lifecycle == "shutdown\nexit\n")
       writeFile server "#!/usr/bin/env python3\nimport sys,time\nsys.stderr.write('x'*10000 + '\\ncompiler-version-unavailable\\n'); sys.stderr.flush()\ntime.sleep(0.1)\nsys.exit(1)\n"
@@ -123,7 +138,7 @@ fakeServer = unlines
   , "send(dict(id='folders', method='workspace/workspaceFolders', params={}))"
   , "assert recv()['result'] == init['params']['workspaceFolders']"
   , "send(dict(id='unsupported', method='workspace/applyEdit', params={}))"
-  , "assert recv()['error']['code'] == -32601"
+  , "assert recv()['result']['applied'] == False"
   , "send(dict(id=init['id'], result=dict(capabilities={})))"
   , "assert recv()['method'] == 'initialized'"
   , "state = dict(opens=0, changes=0, closes=0, text='')"
@@ -137,6 +152,14 @@ fakeServer = unlines
   , "    elif method == 'textDocument/didClose': state['closes'] += 1"
   , "    elif method == 'textDocument/didSave': pass"
   , "    elif method == 'test/state': send(dict(id=message['id'], result=state))"
+  , "    elif method == 'workspace/executeCommand':"
+  , "        send(dict(id='owned',method='workspace/applyEdit',params=dict(edit={})))"
+  , "        assert recv()['result']['applied'] == True"
+  , "        send(dict(id=message['id'],result=None))"
+  , "        send(dict(id='late',method='workspace/applyEdit',params=dict(edit={})))"
+  , "        late=recv()"
+  , "        if late.get('method')=='test/state': send(dict(id=late['id'],result=state)); late=recv()"
+  , "        assert late['result']['applied'] == False"
   , "    elif method == 'shutdown':"
   , "        open('lifecycle', 'a').write('shutdown\\n'); send(dict(id=message['id'], result=None))"
   , "    elif method == 'exit':"

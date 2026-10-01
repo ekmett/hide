@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module THC.Edit.LSP
   ( Client, Event(..), startClient, stopClient, syncDocuments, notifySaved, request, pollEvents, serverCapabilities
+  , executeCommand, replyEdit, retireClient
   , fileUri, uriFilePath, offsetPosition, positionOffset, positionValue
   ) where
 
@@ -27,14 +28,15 @@ import System.Process
 import System.Timeout (timeout)
 import Text.Read (readMaybe)
 
-data Event = Response Int Value | Diagnostics FilePath (Maybe Int) Value | ServerError Text
+data Event = Response Int Value | ApplyEdit Int Value Value | Diagnostics FilePath (Maybe Int) Value | ServerError Text
   deriving (Eq, Show)
-data Command = Documents [(FilePath,Int,Text)] | Request Int Text Value | Saved FilePath
+data Command = Documents [(FilePath,Int,Text)] | Request Int Text Value | Saved FilePath | Reply Value
 
 data Client = Client
   { commands :: Chan Command, events :: MVar [Event], nextId :: MVar Int
   , unavailable :: MVar (Maybe Text), lastDocuments :: MVar [(FilePath,Int,Text)]
   , serverCapabilities :: IO Value, closeClient :: IO ()
+  , commandOwner :: MVar (Maybe Int), replyEdit :: Value -> Bool -> Maybe Text -> IO (), retireClient :: IO (MVar ())
   }
 
 -- Initialization and all subsequent writes happen off the UI thread.
@@ -59,6 +61,9 @@ startClient root = mask $ \restore -> do
     initialized <- newEmptyMVar
     shutdown <- newEmptyMVar
     stopped <- newMVar False
+    stopDone <- newEmptyMVar
+    ownerState <- newMVar Nothing
+    replyQueue <- newChan
     unavailableState <- newMVar Nothing
     documentsState <- newMVar []
     capabilitiesState <- newMVar Null
@@ -87,13 +92,17 @@ startClient root = mask $ \restore -> do
           Just method -> case field "id" value :: Maybe Value of
             Just ident -> do
               let params = fromMaybe Null (field "params" value)
-                  result = case method of
-                    "workspace/configuration" -> Just (toJSON (replicate (length (fromMaybe [] (field "items" params :: Maybe [Value]))) Null))
-                    "workspace/workspaceFolders" -> Just (toJSON folders)
-                    _ -> Nothing
-              send $ object $ ["jsonrpc" .= ("2.0" :: Text), "id" .= ident] ++ case result of
-                Just response -> ["result" .= response]
-                Nothing -> ["error" .= object ["code" .= (-32601 :: Int), "message" .= ("Unsupported client request: " <> method)]]
+                  respond response = writeChan replyQueue (object ["jsonrpc" .= ("2.0" :: Text), "id" .= ident, "result" .= response])
+              if method == "workspace/applyEdit" then do
+                owner <- readMVar ownerState
+                case owner of
+                  Just execution -> emit (ApplyEdit execution ident params)
+                  Nothing -> respond (object ["applied" .= False,"failureReason" .= ("No active editor command owns this edit." :: Text)])
+              else writeChan replyQueue $ object $ ["jsonrpc" .= ("2.0" :: Text), "id" .= ident] ++ case method of
+                "workspace/configuration" -> ["result" .= toJSON (replicate (length (fromMaybe [] (field "items" params :: Maybe [Value]))) Null)]
+                "workspace/workspaceFolders" -> ["result" .= folders]
+                "window/workDoneProgress/create" -> ["result" .= Null]
+                _ -> ["error" .= object ["code" .= (-32601 :: Int), "message" .= ("Unsupported client request: " <> method)]]
             Nothing -> when (method == "textDocument/publishDiagnostics") $ do
               let params = fromMaybe Null (field "params" value)
               case (field "uri" params >>= uriFilePath, field "diagnostics" params) of
@@ -106,8 +115,11 @@ startClient root = mask $ \restore -> do
               when success (modifyMVar_ capabilitiesState (const (pure (fromMaybe Null (field "result" value >>= field "capabilities")))))
               void (tryPutMVar initialized success)
             Just (-1) -> void (tryPutMVar shutdown ())
-            Just ident -> emit (Response ident value)
+            Just ident -> do
+              modifyMVar_ ownerState (pure . (\owner -> if owner == Just ident then Nothing else owner))
+              emit (Response ident value)
             Nothing -> pure ()
+    responder <- forkIO (forever (readChan replyQueue >>= send) `catch` failed)
     reader <- forkIO (forever (readFrame output >>= receive) `catch` failed)
     drainer <- forkIO ((let drain = BS.hGetSome errors 4096 >>= \chunk -> unless (BS.null chunk) (modifyMVar_ errorTail (pure . T.takeEnd 4096 . (<> TE.decodeUtf8With lenientDecode chunk)) >> drain) in drain) `catch` (\(_ :: IOException) -> pure ()))
     writer <- forkIO $ (do
@@ -115,7 +127,7 @@ startClient root = mask $ \restore -> do
         [ "processId" .= Null, "rootUri" .= fileUri root, "workspaceFolders" .= folders
         , "capabilities" .= object
             [ "general" .= object ["positionEncodings" .= ["utf-16" :: Text]]
-            , "workspace" .= object ["configuration" .= True, "workspaceFolders" .= True, "workspaceEdit" .= object ["documentChanges" .= True]]
+            , "workspace" .= object ["applyEdit" .= True,"configuration" .= True, "workspaceFolders" .= True, "workspaceEdit" .= object ["documentChanges" .= True,"failureHandling" .= ("transactional" :: Text)]]
             , "textDocument" .= object
                 [ "codeAction" .= object ["codeActionLiteralSupport" .= object ["codeActionKind" .= object ["valueSet" .= (["", "quickfix", "refactor", "refactor.extract", "refactor.inline", "refactor.rewrite", "source", "source.organizeImports"] :: [Text])]], "dataSupport" .= True, "disabledSupport" .= True, "isPreferredSupport" .= True, "resolveSupport" .= object ["properties" .= (["edit"] :: [Text])]]
                 , "publishDiagnostics" .= object ["versionSupport" .= True]
@@ -126,14 +138,14 @@ startClient root = mask $ \restore -> do
         ])
       ready <- timeout 20000000 (readMVar initialized)
       case ready of
-        Just True -> notify ("initialized" :: Text) (object []) >> writeCommands notify call queue Map.empty
+        Just True -> notify ("initialized" :: Text) (object []) >> writeCommands notify call send queue Map.empty
         Just False -> pure ()
         Nothing -> failed (userError "Initialization timed out")
       ) `catch` failed
     putMVar writerThread writer
-    let stop = do
+    let stop = mask_ $ do
           already <- modifyMVar stopped (\previous -> pure (True,previous))
-          unless already $ do
+          if already then readMVar stopDone else (do
             modifyMVar_ unavailableState (pure . Just . fromMaybe "HLS: client stopped")
             killThread writer
             ready <- tryReadMVar initialized
@@ -143,10 +155,19 @@ startClient root = mask $ \restore -> do
                 takeMVar shutdown
               void $ timeout 250000 (notify ("exit" :: Text) Null)
             killThread reader
+            killThread responder
             killThread drainer
             void (timeout 250000 (waitForProcess process))
-            cleanup
-    pure (Client queue inbox counter unavailableState documentsState (readMVar capabilitiesState) stop)
+            cleanup) `finally` putMVar stopDone ()
+        reply ident applied reason = writeChan queue (Reply (object
+          ["jsonrpc" .= ("2.0" :: Text),"id" .= ident,"result" .= object
+            (["applied" .= applied] ++ maybe [] (\text -> ["failureReason" .= text]) reason)]))
+        retire = mask_ $ do
+          modifyMVar_ unavailableState (const (pure (Just "HLS command transport retired; starting a fresh server.")))
+          modifyMVar_ ownerState (const (pure Nothing))
+          void (forkIO stop)
+          pure stopDone
+    pure (Client queue inbox counter unavailableState documentsState (readMVar capabilitiesState) stop ownerState reply retire)
     ) `onException` cleanup
 
 stopClient :: Client -> IO ()
@@ -169,15 +190,30 @@ request client method params = modifyMVar (nextId client) $ \ident -> do
     Just message -> modifyMVar_ (events client) (pure . (Response ident (object ["id" .= ident, "error" .= object ["code" .= (-32603 :: Int), "message" .= message]]):))
   pure (ident+1, ident)
 
+-- Reserve ownership before the request can reach the server. Incoming applyEdit
+-- messages keep this receipt-time ID even if the UI polls after completion.
+executeCommand :: Client -> Text -> Value -> IO (Either Text Int)
+executeCommand client name arguments = modifyMVar (nextId client) $ \ident -> do
+  outcome <- modifyMVar (commandOwner client) $ \owner -> case owner of
+    Just _ -> pure (owner,Left "An HLS command is already running.")
+    Nothing -> withMVar (unavailable client) $ \failure -> case failure of
+      Just err -> pure (Nothing,Left err)
+      Nothing -> do
+        writeChan (commands client) (Request ident "workspace/executeCommand"
+          (object ["command" .= name,"arguments" .= arguments]))
+        pure (Just ident,Right ident)
+  pure (ident+1,outcome)
+
 pollEvents :: Client -> IO [Event]
 pollEvents client = modifyMVar (events client) (\pending -> pure ([], reverse pending))
 
-writeCommands :: (Text -> Value -> IO ()) -> (Int -> Text -> Value -> IO ()) -> Chan Command -> Map.Map FilePath (Int, Text) -> IO ()
-writeCommands notify call queue previous = do
+writeCommands :: (Text -> Value -> IO ()) -> (Int -> Text -> Value -> IO ()) -> (Value -> IO ()) -> Chan Command -> Map.Map FilePath (Int, Text) -> IO ()
+writeCommands notify call send queue previous = do
   command <- readChan queue
   case command of
-    Saved path -> notify "textDocument/didSave" (object ["textDocument" .= object ["uri" .= fileUri path]]) >> writeCommands notify call queue previous
-    Request ident method params -> call ident method params >> writeCommands notify call queue previous
+    Reply value -> send value >> writeCommands notify call send queue previous
+    Saved path -> notify "textDocument/didSave" (object ["textDocument" .= object ["uri" .= fileUri path]]) >> writeCommands notify call send queue previous
+    Request ident method params -> call ident method params >> writeCommands notify call send queue previous
     Documents docs -> do
       let current = Map.fromList [(path,(version,contents)) | (path,version,contents) <- docs]
       forM_ (Map.keys (previous `Map.difference` current)) $ \path ->
@@ -189,7 +225,7 @@ writeCommands notify call queue previous = do
           [ "textDocument" .= object ["uri" .= fileUri path, "version" .= version]
           , "contentChanges" .= [object ["text" .= contents]]
           ])
-      writeCommands notify call queue current
+      writeCommands notify call send queue current
 
 field :: FromJSON a => Text -> Value -> Maybe a
 field name = parseMaybe (withObject "object" (\o -> o .: fromStringKey name))

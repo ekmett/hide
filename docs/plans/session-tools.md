@@ -41,7 +41,7 @@ Debugger follow/reveal behavior is exercised with a real fake-DAP transport.
 - [ ] Dedicated Git pull/merge operations with protected-path checks.
 - [x] Edit-based HLS quick fixes/refactorings: chooser, bounded opaque handles,
   current diagnostics, advertised lazy resolution and checked atomic buffer edits.
-- [ ] Command-based HLS actions and scoped workspace/executeCommand application.
+- [x] Command-based HLS actions and scoped workspace/executeCommand application.
 - [x] Cabal component/dependency graph context from the existing generated plan.
 - [x] Individual top-level TAP 13 test results from stdout, with planned/observed counts,
   skip/TODO outcomes, failure precedence and explicit truncation/completeness.

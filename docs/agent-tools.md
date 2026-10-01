@@ -74,7 +74,7 @@ fails without edits. Binary previews describe byte changes.
 | `lsp_document_symbols` | R | `bufferId`, `revision?` | Document symbol structure |
 | `lsp_rename` | W | `bufferId`, `revision`, `line`, `column`, `newName` | Apply HLS rename to live buffers; reject stale source; no save |
 | `lsp_code_actions` | R | `bufferId`, `revision`, `line`, `column`, `endLine?`, `endColumn?` | List up to 128 action IDs with title/kind/preference and disabled reason; includes current intersecting diagnostics |
-| `lsp_apply_code_action` | W | `bufferId`, `revision`, `actionId` | Consume a listed action once; resolve advertised text edits, then apply atomically to buffers; no save |
+| `lsp_apply_code_action` | W | `bufferId`, `revision`, `actionId` | Consume a listed action once; apply checked edits and advertised HLS commands; report partial command results |
 
 Calls synchronize unsaved Haskell text. Editor input positions use 1-based
 Unicode code points; raw LSP results use 0-based UTF-16. Responses identify the
@@ -82,9 +82,23 @@ source revision. Diagnostic messages are capped at 8192 characters. Code-action
 ranges default to the cursor; supply both end coordinates for a selection.
 A new action list expires previous IDs. Application requires the original source
 revision and unchanged affected files, excludes protected files and other
-projects, and never accepts caller-supplied edits or commands. Command-only and
-edit-plus-command actions are listed disabled; resource operations are refused.
-`workspace/executeCommand` and unsolicited `workspace/applyEdit` are unsupported.
+projects, and never accepts caller-supplied edits or commands. Commands must be
+returned by the chosen action and advertised by that HLS process. A literal edit
+is applied before its command. HLS text edits affect buffers without saving;
+commands themselves can have server-side effects, such as evaluating doctests.
+File creation/deletion operations and unsolicited edits are refused.
+
+Each command result includes `succeeded`, `commandSucceeded`, `applied`,
+`appliedBatches`, `partial`, `error`, and changed buffer revisions. A successful
+command response does not override a rejected edit. Each accepted edit batch is
+atomic; the whole command is not. Earlier accepted edits remain if a later batch,
+the command, or the waiting client fails. Every completed, failed, or canceled
+command retires that HLS process and invalidates its action IDs before another
+command can run. Relist actions on the new process; edit-only actions keep using
+the existing process. At most one command runs per project client, with at most
+128 accepted edit batches and the existing 30-second request deadline.
+`appliedBatches` counts accepted batches, including empty or no-op batches;
+`buffers` lists only changed buffer revisions.
 
 ## Build, test and execution
 

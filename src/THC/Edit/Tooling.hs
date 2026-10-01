@@ -1,11 +1,11 @@
 {-# LANGUAGE OverloadedStrings #-}
 module THC.Edit.Tooling (Tooling, toolingTool, toolingTools, toolingToolNames, withTooling, tickTooling, toolingEffects, completionItems, workspaceEdits, hoverText, diagnosticsCurrent) where
 
-import Control.Exception (bracket, try, IOException, onException)
+import Control.Exception (bracket, try, IOException, onException, mask_)
 import Control.Concurrent.STM
 import System.Timeout (timeout)
-import Control.Concurrent (ThreadId, forkIO, killThread, MVar, newEmptyMVar, putMVar, tryReadMVar)
-import Control.Monad (foldM, forM, forM_, unless, when, void)
+import Control.Concurrent (ThreadId, forkIO, killThread, MVar, newEmptyMVar, putMVar, readMVar, tryReadMVar)
+import Control.Monad (filterM, foldM, forM, forM_, unless, when, void)
 import Data.Aeson
 import Data.Aeson.Types (parseMaybe, parseEither, Parser)
 import Data.Char (isSpace)
@@ -27,11 +27,12 @@ import THC.Edit.Model
 import qualified THC.Edit.LSP as L
 
 type Target = (Int,Int,Int)
-data Pending = Pending LanguageAction Target FilePath (M.Map FilePath (Int,T.Text)) | ToolPending ToolQuery
+data Pending = Pending LanguageAction Target FilePath (M.Map FilePath (Int,T.Text)) | ToolPending ToolQuery | CommandPending ToolQuery (Maybe T.Text)
 data ToolQuery = ToolQuery
   { queryName :: T.Text, queryTarget :: Target, queryPath :: FilePath, queryArguments :: Value
   , querySnapshot :: M.Map FilePath (Int,T.Text), queryDeadline :: Integer
-  , queryReply :: TMVar (Either T.Text Value), queryHuman :: Bool }
+  , queryReply :: TMVar (Either T.Text Value), queryHuman :: Bool
+  , queryProgress :: TVar (Int,M.Map Int Int) }
 data CachedAction = CachedAction ToolQuery Value Bool
 data Session = Session L.Client (IORef (M.Map Int Pending))
 data Preparing = Preparing Target FilePath T.Text (M.Map FilePath (Int,T.Text)) ThreadId (MVar (Either IOException (M.Map FilePath (Int,T.Text))))
@@ -42,15 +43,18 @@ data Tooling = Tooling
   , problems :: IORef (M.Map FilePath (Maybe Int,[Value]))
   , hovered :: IORef (Maybe Target, Integer, Bool)
   , actions :: IORef (M.Map T.Text CachedAction), nextAction :: IORef Int
+  , retiring :: IORef [MVar ()]
   , preparing :: IORef (Maybe Preparing)
   }
 
 withTooling :: (Tooling -> IO a) -> IO a
-withTooling = bracket (Tooling <$> newIORef M.empty <*> newIORef M.empty <*> newIORef M.empty <*> newIORef (Nothing,0,False) <*> newIORef M.empty <*> newIORef 1 <*> newIORef Nothing) closeTooling
+withTooling = bracket (Tooling <$> newIORef M.empty <*> newIORef M.empty <*> newIORef M.empty <*> newIORef (Nothing,0,False) <*> newIORef M.empty <*> newIORef 1 <*> newIORef [] <*> newIORef Nothing) closeTooling
 
 closeTooling :: Tooling -> IO ()
 closeTooling t = do
   cancelPreparation t
+  readIORef (retiring t) >>= mapM_ readMVar
+  writeIORef (retiring t) []
   writeIORef (actions t) M.empty
   readIORef (sessions t) >>= mapM_ (either (const (pure ())) (\(Session c pending) -> do
     readIORef pending >>= mapM_ (failPending "HLS stopped") . M.elems
@@ -82,7 +86,7 @@ toolingTools = map descriptor toolingToolNames
            ["newName" .= object ["type" .= ("string"::T.Text),"minLength" .= (1::Int),"maxLength" .= (256::Int)] | name=="lsp_rename"]++
            ["includeDeclaration" .= object ["type" .= ("boolean"::T.Text),"default" .= True] | name=="lsp_references"]),
          "required" .= (["bufferId"]++(if name `elem` ["lsp_document_symbols","lsp_apply_code_action"] then [] else ["line","column"])++["revision" | name `elem` ["lsp_rename","lsp_code_actions","lsp_apply_code_action"]]++["newName" | name=="lsp_rename"]++["actionId" | name=="lsp_apply_code_action"]::[T.Text])],
-       "annotations" .= object ["readOnlyHint" .= (name `notElem` ["lsp_rename","lsp_apply_code_action"]),"destructiveHint" .= False,"idempotentHint" .= (name `notElem` ["lsp_rename","lsp_code_actions","lsp_apply_code_action"]),"openWorldHint" .= False]]
+       "annotations" .= object ["readOnlyHint" .= (name `notElem` ["lsp_rename","lsp_apply_code_action"]),"destructiveHint" .= False,"idempotentHint" .= (name `notElem` ["lsp_rename","lsp_code_actions","lsp_apply_code_action"]),"openWorldHint" .= (name=="lsp_apply_code_action")]]
     description :: T.Text -> T.Text
     description name=case name of
       "lsp_hover" -> "Return HLS hover/type information."
@@ -90,8 +94,8 @@ toolingTools = map descriptor toolingToolNames
       "lsp_type_definition" -> "Find HLS type definitions."
       "lsp_references" -> "Find HLS references."
       "lsp_document_symbols" -> "List HLS document symbols."
-      "lsp_code_actions" -> "List edit-based HLS code actions with opaque action IDs; optional endLine/endColumn select a range. A new list expires previous IDs. Command actions are listed disabled."
-      "lsp_apply_code_action" -> "Apply a listed action ID once at its original source revision, resolving its edit when advertised. Edits change buffers only; commands and resource operations are rejected."
+      "lsp_code_actions" -> "List HLS code actions with opaque action IDs; optional endLine/endColumn select a range. A new list expires previous IDs. Only advertised server commands can execute."
+      "lsp_apply_code_action" -> "Apply a listed action once at its original revision. Checked text edits change buffers only; advertised commands run in HLS and may have server-side effects. Command results report succeeded, commandSucceeded, appliedBatches, partial and changed buffers. Earlier accepted edits remain after failure/cancellation. Resource operations are rejected."
       _ -> "Rename through HLS, requiring the current revision; edits change buffers, never saved files."
 
 toolingTool :: Tooling -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> T.Text -> Value -> IO (Desktop, IO (Either T.Text Value))
@@ -118,7 +122,8 @@ startTool human t _ d name arguments = case parseEither parameters arguments of
           promise<-newEmptyTMVarIO
           now<-toInteger <$> getMonotonicTimeNSec
           snapshot<-openSnapshot d path
-          let query=ToolQuery name target path arguments snapshot (now+30000000000) promise human
+          progress<-newTVarIO (0,M.empty)
+          let query=ToolQuery name target path arguments snapshot (now+30000000000) promise human progress
           if name `elem` ["lsp_rename","lsp_code_actions"] then do
             root<-projectRoot path
             result<-newEmptyMVar
@@ -129,6 +134,7 @@ startTool human t _ d name arguments = case parseEither parameters arguments of
   where
     reject err=pure (if human then d {status=err} else d,pure (Left err))
     isTool (ToolPending _) = True
+    isTool CommandPending{} = True
     isTool _ = False
     parameters=withObject "HLS tool arguments" $ \o -> do
       unless (name `elem` toolingToolNames) (fail "Unknown HLS tool")
@@ -165,7 +171,16 @@ startTool human t _ d name arguments = case parseEither parameters arguments of
       pure ((bid,revision b,pos),filePath file,text)
 
 completeTool :: ToolQuery -> Either T.Text Value -> IO ()
-completeTool query result = void (atomically (tryPutTMVar (queryReply query) result))
+completeTool query result = atomically $ do
+  progress@(count,_)<-readTVar (queryProgress query)
+  let answer=case result of Left err | count>0 -> Right (commandResult query progress False (Just err)); _->result
+  void (tryPutTMVar (queryReply query) answer)
+
+commandResult :: ToolQuery -> (Int,M.Map Int Int) -> Bool -> Maybe T.Text -> Value
+commandResult query (count,changed) success failure = object
+  ["bufferId" .= (let (bid,_,_)=queryTarget query in bid),"applied" .= (count>0),
+   "appliedBatches" .= count,"commandSucceeded" .= success,"succeeded" .= (success && failure==Nothing),"partial" .= (count>0 && (not success || failure/=Nothing)),
+   "error" .= failure,"buffers" .= [object ["bufferId" .= bid,"revision" .= version] | (bid,version)<-M.toList changed]]
 
 waitTool :: ToolQuery -> IO (Either T.Text Value)
 waitTool query = (do
@@ -178,6 +193,7 @@ waitTool query = (do
 
 failPending :: T.Text -> Pending -> IO ()
 failPending err (ToolPending query)=completeTool query (Left err)
+failPending err (CommandPending query _)=completeTool query (Left err)
 failPending _ _=pure ()
 
 toolActive :: ToolQuery -> IO Bool
@@ -225,13 +241,36 @@ openSnapshot d path = do
     pure [(file,(version,text)) | owner==root]
   pure (M.fromList (concat entries))
 
-actionDisabled :: Bool -> Value -> Maybe T.Text
-actionDisabled canResolve value
+advertisedCommands :: Value -> [T.Text]
+advertisedCommands caps = fromMaybe [] (member "executeCommandProvider" caps >>= member "commands" >>= parseMaybe parseJSON)
+
+-- Keep both LSP action shapes opaque to callers. Arguments only come from the
+-- offered action (or its advertised resolver), never from tool input.
+actionCommand :: Value -> Either T.Text (Maybe (T.Text,Value))
+actionCommand value = case member "command" value of
+  Nothing -> Right Nothing
+  Just Null -> Right Nothing
+  Just (String name) -> command name value
+  Just commandValue@(Object _) -> case member "command" commandValue >>= stringValue of
+    Just name -> command name commandValue
+    Nothing -> Left "Invalid HLS command."
+  _ -> Left "Invalid HLS command."
+  where
+    command name objectValue
+      | T.null name || T.length name>1024 = Left "Invalid HLS command name."
+      | otherwise = case fromMaybe (toJSON ([]::[Value])) (member "arguments" objectValue) of
+          args@(Array _) -> Right (Just (name,args))
+          _ -> Left "Invalid HLS command arguments."
+
+actionDisabled :: Bool -> [T.Text] -> Value -> Maybe T.Text
+actionDisabled canResolve commands value
   | Just disabled<-member "disabled" value,disabled/=Null = Just (T.take 512 (fromMaybe "Disabled by HLS" (member "reason" disabled >>= stringValue)))
-  | Just command<-member "command" value,command/=Null = Just "Command-based actions are not supported; no edits will be applied."
+  | Left err<-actionCommand value = Just err
+  | Right (Just (command,_))<-actionCommand value,command `notElem` commands = Just "Command is not advertised by this HLS server."
   | Just edit<-member "edit" value,edit/=Null = either Just (const Nothing) (workspaceEdits edit)
+  | Right (Just _)<-actionCommand value = Nothing
   | canResolve = Nothing
-  | otherwise = Just "No text edit or advertised code-action resolver is available."
+  | otherwise = Just "No text edit, command or advertised code-action resolver is available."
 
 cacheCodeActions :: Tooling -> Session -> ToolQuery -> Value -> Desktop -> IO Desktop
 cacheCodeActions t (Session client _) query result d = do
@@ -242,7 +281,7 @@ cacheCodeActions t (Session client _) query result d = do
       (bid,version,_)=queryTarget query
   cached<-forM choices $ \(value,title)->do
     ident<-atomicModifyIORef' (nextAction t) (\n->(n+1,"action-"<>T.pack (show n)))
-    let disabled=actionDisabled resolve value
+    let disabled=actionDisabled resolve (advertisedCommands caps) value
         description=object ["actionId" .= ident,"title" .= title,"kind" .= (T.take 128 <$> (member "kind" value >>= stringValue)),
           "preferred" .= (member "isPreferred" value==Just (Bool True)),"disabledReason" .= disabled]
         label=title<>maybe "" (" — "<>) disabled
@@ -266,27 +305,78 @@ applyCodeAction human t d target path arguments = do
     Just (CachedAction original value resolve)
       | let (bid,version,_)=target; (oldBid,oldVersion,_)=queryTarget original,
         bid/=oldBid || version/=oldVersion || path/=queryPath original -> reject "Code action source changed; list actions again."
-      | Just reason<-actionDisabled resolve value -> reject reason
       | otherwise->do
-          now<-toInteger <$> getMonotonicTimeNSec
-          reply<-newEmptyTMVarIO
-          let query=original {queryName="lsp_apply_code_action",queryArguments=value,queryDeadline=now+30000000000,queryReply=reply,queryHuman=human}
-          case member "edit" value of
-            Just edit | edit/=Null -> do
-              updated<-finishCodeAction query value d
-              pure (updated,waitTool query)
-            _->do
-              available<-sessionFor t path
-              case available of
-                Left err->reject err
-                Right session->do
-                  queueTool t session query ""
-                  pure (d {status=if human then "Resolving code action..." else status d},waitTool query)
+          available<-sessionFor t path
+          case available of
+            Left err->reject err
+            Right session@(Session client _) -> do
+              caps<-L.serverCapabilities client
+              case actionDisabled resolve (advertisedCommands caps) value of
+                Just reason->reject reason
+                Nothing->do
+                  now<-toInteger <$> getMonotonicTimeNSec
+                  reply<-newEmptyTMVarIO
+                  progress<-newTVarIO (0,M.empty)
+                  let query=original {queryName="lsp_apply_code_action",queryArguments=value,queryDeadline=now+30000000000,queryReply=reply,queryHuman=human,queryProgress=progress}
+                  if maybe False (/=Null) (member "edit" value) || either (const False) (/=Nothing) (actionCommand value)
+                    then do
+                      updated<-finishCodeAction t session query value d
+                      pure (updated,waitTool query)
+                    else do
+                      queueTool t session query ""
+                      pure (d {status=if human then "Resolving code action..." else status d},waitTool query)
 
-finishCodeAction :: ToolQuery -> Value -> Desktop -> IO Desktop
-finishCodeAction query value d = case actionDisabled False value of
-  Just err->completeTool query (Left err) >> pure (if queryHuman query then d {status=err} else d)
-  Nothing->commitToolEdit query (fromMaybe Null (member "edit" value)) d
+finishCodeAction :: Tooling -> Session -> ToolQuery -> Value -> Desktop -> IO Desktop
+finishCodeAction t (Session client pending) query value d = do
+  caps<-L.serverCapabilities client
+  case actionDisabled False (advertisedCommands caps) value of
+    Just err->completeTool query (Left err) >> pure (if queryHuman query then d {status=err} else d)
+    Nothing -> case actionCommand value of
+      Right (Just (command,arguments))->do
+        running<-any isCommand . M.elems <$> readIORef pending
+        if running then completeTool query (Left "An HLS command is already running.") >> pure d else do
+          prepared<-case member "edit" value of
+            Just edit | edit/=Null -> applyCommandEdit query edit d
+            _ -> pure (Right (query,d))
+          case prepared of
+            Left err->completeTool query (Left err) >> pure d
+            Right (current,updated)->do
+              active<-toolActive current
+              if not active then pure updated else do
+                sync t updated
+                requested<-L.executeCommand client command arguments
+                case requested of
+                  Left err->completeTool current (Left err) >> pure updated {status=err}
+                  Right ident->do
+                    modifyIORef' pending (M.insert ident (CommandPending current Nothing))
+                    pure updated {status="Executing HLS code action..."}
+      _ -> commitToolEdit query (fromMaybe Null (member "edit" value)) d
+  where isCommand CommandPending{}=True; isCommand _=False
+
+-- Each server batch commits as one checked edit; successful earlier batches are
+-- retained if a later batch or the command fails. Cancellation and this commit
+-- compete in STM, so a canceled waiter cannot authorize a later mutation.
+applyCommandEdit :: ToolQuery -> Value -> Desktop -> IO (Either T.Text (ToolQuery,Desktop))
+applyCommandEdit query edit d = do
+  progress<-readTVarIO (queryProgress query)
+  if protectedPath d (queryPath query) || protectedBuffer d (let (bid,_,_)=queryTarget query in bid) then pure (Left "HLS command source is private.")
+  else if fmap fst (targetDocument (queryTarget query) d)/=Just (queryPath query) then pure (Left "Code action source changed during execution.")
+  else if fst progress>=128 then pure (Left "HLS command exceeded 128 edit batches.") else do
+    changed<-renameBuffers (querySnapshot query) edit d
+    case changed of
+      Left err->pure (Left err)
+      Right updated->do
+        let edits=[(ident,doc) | (ident,doc)<-M.toList (buffers updated),M.lookup ident (buffers d)/=Just doc]
+            replacements=M.fromList [(filePath file,(revision (documentBuffer doc),contents (documentBuffer doc))) | (_,doc)<-edits,Just file<-[documentFile doc]]
+            (bid,version,pos)=queryTarget query
+            current=query {querySnapshot=M.union replacements (querySnapshot query),queryTarget=(bid,maybe version (revision.documentBuffer) (M.lookup bid (buffers updated)),pos)}
+        active<-toolActive query
+        accepted<-if not active then pure False else atomically $ do
+          cancelled<-not <$> isEmptyTMVar (queryReply query)
+          if cancelled then pure False else do
+            modifyTVar' (queryProgress query) (\(count,previous)->(count+1,M.union (M.fromList [(ident,revision (documentBuffer doc)) | (ident,doc)<-edits]) previous))
+            pure True
+        pure (if accepted then Right (current,updated) else Left "HLS command cancelled before applying this edit.")
 
 commitToolEdit :: ToolQuery -> Value -> Desktop -> IO Desktop
 commitToolEdit query edit d = do
@@ -455,13 +545,29 @@ finishPreparationResult t d = do
                       pure d {status="Renaming symbol..."}
                     _ -> pure d
 
+-- applyEdit has no originating executeCommand ID. A client that executed one
+-- command is never allowed to own another, including after successful replies.
+-- Cleanup is asynchronous, but remains owned by closeTooling.
+retireSession :: Tooling -> FilePath -> Session -> IO ()
+retireSession t root (Session client pending) = mask_ $ do
+  -- Register cleanup before removing the old session's ownership.
+  stopped<-L.retireClient client
+  modifyIORef' (retiring t) (stopped:)
+  readIORef pending >>= mapM_ (failPending "HLS command transport retired; retry on the fresh server.") . M.elems
+  writeIORef pending M.empty
+  writeIORef (actions t) M.empty
+  modifyIORef' (sessions t) (M.delete root)
+
 -- Idle hover is debounced; no request is issued for every mouse pixel or keystroke.
 tickTooling :: Tooling -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> IO Desktop
 tickTooling t core d = do
+  retired<-readIORef (retiring t)
+  remaining<-filterM (fmap (==Nothing) . tryReadMVar) retired
+  writeIORef (retiring t) remaining
   sync t d
   prepared<-finishPreparation t d
   active<-readIORef (sessions t)
-  received<-foldM collect prepared (M.elems active)
+  received<-foldM collect prepared (M.toList active)
   updated<-refreshProblems t received
   now<-fromIntegral <$> getMonotonicTimeNSec
   (old,since,sent)<-readIORef (hovered t)
@@ -472,22 +578,50 @@ tickTooling t core d = do
     maybe (pure updated) (\p -> sendRequest t TypeInfo p updated) target
   else pure updated
   where
-    collect desktop (Left _) = pure desktop
-    collect desktop (Right (Session client pending)) = do
+    collect desktop (_,Left _) = pure desktop
+    collect desktop (root,Right session@(Session client pending)) = do
       requests<-readIORef pending
-      (live,updated)<-foldM (\(kept,view) (ident,request) -> do
-        active<-case request of ToolPending query -> toolActive query; _ -> pure True
-        if active then pure (M.insert ident request kept,view) else do
-          result<-case request of
-            ToolPending query | queryHuman query -> atomically (tryReadTMVar (queryReply query))
-            _ -> pure Nothing
-          pure (kept,case result of Just (Left err)->view {status=err}; _->view)) (M.empty,desktop) (M.toList requests)
-      writeIORef pending live
-      events<-L.pollEvents client
-      foldM (receive (Session client pending)) updated events
-    receive (Session _ pending) desktop (L.ServerError err) = do
-      readIORef pending >>= mapM_ (failPending err) . M.elems
-      writeIORef pending M.empty
+      cancelled<-or <$> forM (M.elems requests) (\entry->case entry of CommandPending query _->not <$> toolActive query; _->pure False)
+      if cancelled then do
+        retireSession t root session
+        applied<-or <$> forM (M.elems requests) (\entry->case entry of CommandPending query _->(>0) . fst <$> readTVarIO (queryProgress query); _->pure False)
+        pure desktop {status=if applied then "HLS command cancelled. Earlier applied edits remain; review buffers." else "HLS command cancelled; server restarted."}
+      else do
+        (live,updated)<-foldM (\(kept,view) (ident,entry) -> do
+          activeRequest<-case entry of ToolPending query -> toolActive query; _ -> pure True
+          if activeRequest then pure (M.insert ident entry kept,view) else do
+            result<-case entry of ToolPending query | queryHuman query -> atomically (tryReadTMVar (queryReply query)); _ -> pure Nothing
+            pure (kept,case result of Just (Left err)->view {status=err}; _->view)) (M.empty,desktop) (M.toList requests)
+        writeIORef pending live
+        events<-L.pollEvents client
+        foldM (receive session) updated events
+    receive (Session client pending) desktop (L.ApplyEdit execution ident params) = do
+      requests<-readIORef pending
+      case M.lookup execution requests of
+        Just (CommandPending query failure)->do
+          activeRequest<-toolActive query
+          answer<-if not activeRequest then pure (Left "HLS command cancelled.") else case failure of
+            Just err->pure (Left err)
+            Nothing->case member "edit" params of
+              Nothing->pure (Left "HLS supplied no workspace edit.")
+              Just edit->applyCommandEdit query edit desktop
+          case answer of
+            Left err->do
+              L.replyEdit client ident False (Just err)
+              modifyIORef' pending (M.insert execution (CommandPending query (Just err)))
+              pure desktop
+            Right (current,updated)->do
+              sync t updated
+              L.replyEdit client ident True Nothing
+              modifyIORef' pending (M.insert execution (CommandPending current Nothing))
+              pure updated
+        _->L.replyEdit client ident False (Just "No active editor command owns this edit.") >> pure desktop
+    receive session@(Session _ pending) desktop (L.ServerError err) = do
+      requests<-readIORef pending
+      mapM_ (failPending err) (M.elems requests)
+      case [query | CommandPending query _<-M.elems requests] of
+        query:_->rootFor t (queryPath query) >>= \root->retireSession t root session
+        _->writeIORef pending M.empty
       pure desktop {status="HLS: "<>singleLine err,typeHint=""}
     receive _ desktop (L.Diagnostics path version values) = do
       let diagnostics=case values of Array xs -> Vector.toList xs; _ -> []
@@ -498,6 +632,17 @@ tickTooling t core d = do
       modifyIORef' pending (M.delete ident)
       case M.lookup ident requests of
         Nothing -> pure desktop
+        Just (CommandPending query failure) -> do
+          activeRequest<-toolActive query
+          let succeeded=activeRequest && member "error" response==Nothing && member "result" response/=Nothing
+              err=if not activeRequest then Just "HLS command cancelled." else case member "error" response of
+                Just detail->Just (T.take 512 (fromMaybe "HLS command failed" (member "message" detail >>= stringValue)))
+                Nothing | member "result" response==Nothing -> Just "HLS returned no command result."
+                        | otherwise -> failure
+          progress<-readTVarIO (queryProgress query)
+          completeTool query (Right (commandResult query progress succeeded err))
+          rootFor t (queryPath query) >>= \root->retireSession t root session
+          pure desktop {status=if err==Nothing then "HLS command completed. Review and save changed buffers." else "HLS command failed. Earlier applied edits remain; review buffers."}
         Just (ToolPending query) -> finishTool t session query response desktop
         Just (Pending action target path snapshot)
           | fmap fst (targetDocument target desktop)/=Just path -> pure desktop
@@ -527,7 +672,7 @@ finishToolResult t session query response d = do
         Just result -> do
           let (bid,version,_)=queryTarget query
           if queryName query=="lsp_code_actions" then cacheCodeActions t session query result d
-          else if queryName query=="lsp_apply_code_action" then finishCodeAction query result d
+          else if queryName query=="lsp_apply_code_action" then finishCodeAction t session query result d
           else if queryName query=="lsp_rename" then commitToolEdit query result d
           else do
             completeTool query (Right (object (["bufferId" .= bid,"revision" .= version,"result" .= result]++["text" .= hoverText result | queryName query=="lsp_hover"])))
