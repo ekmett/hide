@@ -35,12 +35,15 @@ and daemon agent polling continues while no frontend is attached.
 
 ## Remaining platform qualification
 
-- [ ] Native Windows: while an MCP inspection is waiting for a user answer or
-  other deferred reply, close its stdio client and exercise editor shutdown.
-  Verify EOF cancels the wait, retires approvals, releases the desktop/endpoint
-  and exits without a blocked socket or pipe reader. Repeat with a display
-  attached and detached. Earlier Windows display detach/Exit checks do not
-  establish this pending-inspector shutdown behavior.
+- [x] Native Windows pending-inspector shutdown: verified at `57cc730` with
+  native GHC 9.12.4. `RemoteCheck` covers deferred client EOF, cancellation while
+  bridge input remains open, a subsequent request, and explicit Exit with an
+  attached display and pending inspections. Bound the inspector's native Handle
+  readiness wait to 100 ms so cancellation can run even when successful local
+  socket shutdown does not wake that foreign call. Token bridge fixtures close
+  their owned input peer before joining the reader. All assertions retain their
+  original deadlines. Native headless build and real SSH crash/recovery checks
+  also pass; this does not qualify the Windows embedded-terminal backend.
 
 - [ ] Investigate intermittent macOS stdio relay closure during rapid reattachment.
   The Ctrl-C regression twice received EOF before the first input acknowledgement;

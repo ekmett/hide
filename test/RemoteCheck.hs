@@ -131,7 +131,8 @@ checks = isolatedStore $ do
         Just (JsonPacket (Object fields))->KM.lookup "type" fields==Just (String "error"); _->False)) ["",T.replicate 257 "x"]
     let bridgeTokenCheck credential' expected=withBridgeHandles $ \bridgeHandle shutdownBridge clientHandle ->
           withAsync (maybe (runEditorMCPWithHandles session) (\token->runEditorMCPWithToken session (Just token)) credential' bridgeHandle bridgeHandle) $ \_ ->
-            flip finally shutdownBridge $ do
+            -- Finish the simulated stdio client before joining its input reader.
+            flip finally (hClose clientHandle >> shutdownBridge) $ do
               BL.hPut clientHandle (encode (rpcToken 52)<>"\n") >> hFlush clientHandle
               response<-timeout 3000000 (readMCPLine clientHandle BS.empty)
               assert "bridge token binding ignores caller-supplied RPC identities" (case response of

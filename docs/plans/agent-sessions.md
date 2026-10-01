@@ -72,5 +72,5 @@ retention and ownership-gated checkpoint writes. Reconnect checks cover current
 limits and advertised load/resume support, failed-load retry and bearer revocation,
 no task or transcript replay, and ending an agent while its load is pending.
 
-Native Windows qualification still needs pending-inspector EOF/shutdown repair;
-see the [recovery plan](session-recovery.md#remaining-platform-qualification).
+Native Windows pending-inspector shutdown is verified; remaining platform work
+is tracked in the [recovery plan](session-recovery.md#remaining-platform-qualification).
