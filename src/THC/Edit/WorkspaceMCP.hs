@@ -1,19 +1,23 @@
 {-# LANGUAGE OverloadedStrings #-}
 module THC.Edit.WorkspaceMCP (workspaceTools, workspaceToolNames, workspaceTool) where
 
-import Control.Monad (unless, when)
+import Control.Monad (unless, when, forM, filterM)
 import Data.Aeson
-import Data.Aeson.Types (Parser, parseEither)
+import Data.Aeson.Types (Parser, Pair, parseEither, parseMaybe)
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString as BS
-import Data.List (find)
+import Data.List (find, nub, partition)
+import Data.Char (isAscii, isAlphaNum)
+import qualified Data.ByteString.Lazy as BL
+import Data.Time.Clock (UTCTime, getCurrentTime, diffUTCTime)
 import qualified Data.Map.Strict as M
-import Data.Maybe (isJust, fromMaybe)
+import Data.Maybe (isJust, fromMaybe, mapMaybe, catMaybes)
 import Data.Text (Text)
 import qualified Data.Text as T
-import System.Directory (canonicalizePath, doesFileExist)
-import System.FilePath ((</>), isAbsolute)
+import System.Directory (canonicalizePath, doesFileExist, getModificationTime, listDirectory)
+import System.IO (withBinaryFile, IOMode(ReadMode))
+import System.FilePath ((</>), isAbsolute, makeRelative, splitDirectories, takeExtension)
 import System.IO.Error (tryIOError)
 import THC.Edit.Buffer
 import THC.Edit.Browser (packageFile)
@@ -46,7 +50,7 @@ definitions =
   ,("editor_panels","Show/hide the files tree or messages panel and resize their docks in character cells.",[("files",boolean),("messages",boolean),("filesWidth",integer),("messagesHeight",integer)],[],False)
   ,("editor_mode","Select text or hex mode for a buffer. Conversion preserves bytes and refuses invalid UTF-8 or NUL-containing text.",targets++[("mode",choice ["text","hex"])],["mode"],False)
   ,("editor_file","Open an existing file, save a buffer, or close one window. Save/close require the current buffer revision. Dirty close requires dirtyAction save or discard; discard only removes this view, retaining a buffer shared by other windows. Save uses the editor's disk-conflict checks; no implicit overwrite.",targets++[("action",choice ["open","save","close"]),("path",field "string" "Existing path to open, or destination for an untitled save."),("revision",integer),("dirtyAction",choice ["save","discard"])],["action"],False)
-  ,("workspace_project","Read the enclosing project root, Cabal package file, active source, and live unsaved buffers. File/project metadata comes from disk.",[],[],True)
+  ,("workspace_project","Read project metadata, unsaved buffers and the existing canonical Cabal plan component/dependency graph. No build is started. Paths and plan fields are filtered; bounded graphs report omissions. Freshness is unknown unless known manifests changed.",[],[],True)
   ,("workspace_diagnostics","Read the live HLS/build/messages snapshot. Entries include reported versions and current buffer revisions, so stale diagnostics are distinguishable. Messages are truncated to 8192 characters.",[("offset",integer),("limit",integer)],[],True)
   ,("workspace_git","Read Git status or disk/worktree diff. Unsaved editor changes are listed separately and are not included in the Git diff. Diff response is capped at 128 Ki characters.",[("view",choice ["status","diff"]),("path",field "string" "Optional file filter for diff, relative to the workspace directory.")],["view"],True)]
   where
@@ -108,8 +112,12 @@ workspaceTool apply desktop name args = case parseEither parse args of
         fileAction apply desktop action wid bid path rev decision
       "workspace_project" -> pure (desktop,ioResult $ do
         root<-resolveBuildRoot desktop
-        package<-packageFile root
-        pure (object ["root" .= root,"packageFile" .= package,"source" .= (if maybe False (protectedBuffer desktop . bufferId) (activeWindow desktop) then Nothing else buildSource desktop >>= \p->if protectedPath desktop p then Nothing else Just p),"unsavedBuffers" .= unsaved desktop]))
+        package<-packageFile root >>= maybe (pure Nothing) (publicProjectPath desktop root)
+        source<-if maybe False (protectedBuffer desktop . bufferId) (activeWindow desktop) then pure Nothing else maybe (pure Nothing) (publicProjectPath desktop root) (buildSource desktop)
+        plan<-cabalPlan desktop root
+        let result=object ["root" .= root,"packageFile" .= package,"source" .= source,"unsavedBuffers" .= unsaved desktop,"cabalPlan" .= plan]
+        when (BL.length (encode result)>1048576) (ioError (userError "Project context exceeds 1 MiB."))
+        pure result)
       "workspace_diagnostics" -> parsed desktop ((,) <$> o .:? "offset" .!= 0 <*> o .:? "limit" .!= 100) $ \(offset,limit) ->
         if offset<0 || limit<1 || limit>200 then failure desktop "Use offset >= 0 and limit 1..200."
         else pure (desktop,pure (Right (object ["total" .= length (diagnostics desktop),"offset" .= offset,
@@ -310,3 +318,118 @@ diagnosticValue :: Desktop -> Diagnostic -> Value
 diagnosticValue d entry=object ["path" .= diagnosticPath entry,"line" .= (diagnosticRow entry+1),"column" .= (diagnosticColumn entry+1),
   "severity" .= diagnosticSeverity entry,"message" .= T.take 8192 (diagnosticMessage entry),"truncated" .= (T.length (diagnosticMessage entry)>8192),
   "reportedVersion" .= diagnosticVersion entry,"liveRevisions" .= [revision (documentBuffer doc) | doc<-M.elems (buffers d),fmap filePath (documentFile doc)==Just (diagnosticPath entry)]]
+
+-- Only Cabal's canonical, already-generated plan is consulted. No repository
+-- URLs, compiler arguments, flags, environment or raw parse errors are returned.
+cabalPlan :: Desktop -> FilePath -> IO Value
+cabalPlan desktop root=do
+  attempted<-tryIOError $ do
+    let relative="dist-newstyle/cache/plan.json"
+        original=root </> relative
+        unavailable state=pure (object ["status" .= (state::Text),"path" .= relative])
+    checked<-publicProjectPath desktop root original
+    case checked of
+      Nothing -> unavailable "unavailable"
+      Just path -> do
+        exists<-doesFileExist path
+        if not exists then unavailable "missing" else do
+          bytes<-withBinaryFile path ReadMode (\handle->BS.hGet handle (8*1024*1024+1))
+          if BS.length bytes>8*1024*1024 then unavailable "too-large" else
+            case eitherDecodeStrict' bytes >>= parseEither (withObject "Cabal plan" (\o->(o,) <$> o .: "install-plan")) of
+              Left _ -> unavailable "invalid"
+              Right (header,rows) -> do
+                modified<-getModificationTime path
+                now<-getCurrentTime
+                let (localRows,otherRows)=partition (\value->parseMaybe (withObject "unit" (.:? "style")) value==Just (Just ("local"::Text))) rows
+                    inspectedRows=take 4096 (localRows++otherRows)
+                    validUnits=mapMaybe (either (const Nothing) Just . parseEither planUnit) inspectedRows
+                normalized<-mapM (\(fields,local,source,components)->do
+                  safe<-if local then maybe (pure Nothing) (publicProjectPath desktop root . (root </>)) source else pure Nothing
+                  let relativeSource=makeRelative root <$> safe
+                  pure (object (fields++["sourceRoot" .= relativeSource]),components,safe)) validUnits
+                freshness<-planFreshness desktop root modified (mapMaybe (\(_,_,source)->source) normalized)
+                let omitted=length inspectedRows-length validUnits
+                    metadata=[key .= (fromMaybe Nothing (parseMaybe (\_ -> optionalPlanText source header) Null))
+                      | (key,source)<-[("compilerId","compiler-id"),("cabalVersion","cabal-version"),("os","os"),("arch","arch")]]
+                    result selected=object (metadata++
+                      ["status" .= ("available"::Text),"path" .= relative,"provenance" .= ("Cabal install-plan"::Text),
+                       "modifiedAt" .= modified,"ageSeconds" .= (max 0 (realToFrac (diffUTCTime now modified))::Double),
+                       "freshness" .= freshness,"totalUnits" .= length rows,"omittedUnits" .= omitted,
+                       "truncatedUnits" .= (length rows-omitted-length selected),
+                       "graphComplete" .= (length rows==length selected),
+                       "units" .= [unit | (unit,_,_)<-selected],"localComponents" .= concat [components | (_,components,_)<-selected]])
+                    bounded selected=let value=result selected in if BL.length (encode value)<=524288
+                      then value else if null selected then object ["status" .= ("too-large"::Text),"path" .= relative]
+                      else bounded (take (length selected `div` 2) selected)
+                pure (bounded normalized)
+  pure (either (const (object ["status" .= ("unavailable"::Text)])) id attempted)
+
+-- Plan paths may be absolute or relative, but output source roots remain inside
+-- this workspace. Check both spellings so symlinks cannot hide private inputs.
+publicProjectPath :: Desktop -> FilePath -> FilePath -> IO (Maybe FilePath)
+publicProjectPath desktop root raw
+  | null raw || length raw>32768 || any (< ' ') raw || protectedPath desktop raw=pure Nothing
+  | otherwise=do
+      result<-tryIOError (canonicalizePath raw)
+      pure $ case result of
+        Right path | within path && not (protectedPath desktop path) -> Just path
+        _ -> Nothing
+  where within path=let relative=makeRelative root path in not (isAbsolute relative) && ".." `notElem` splitDirectories relative
+
+optionalPlanText :: K.Key -> Object -> Parser (Maybe Text)
+optionalPlanText key fields=do
+  value<-fields .:? key
+  mapM_ validPlanText value
+  pure value
+validPlanText :: Text -> Parser ()
+validPlanText text=unless (not (T.null text) && T.length text<=512 && T.all (\c->isAscii c && (isAlphaNum c || c `elem` ("-_.:+"::String))) text)
+  (fail "Invalid plan identifier")
+
+planUnit :: Value -> Parser ([Pair],Bool,Maybe FilePath,[Value])
+planUnit=withObject "Cabal unit" $ \o -> do
+  ident<-o .: "id"; validPlanText ident
+  name<-optionalPlanText "pkg-name" o
+  version<-optionalPlanText "pkg-version" o
+  kind<-optionalPlanText "type" o
+  style<-optionalPlanText "style" o
+  component<-optionalPlanText "component-name" o
+  dependencies<-planDependencies o
+  nested<-o .:? "components" .!= KM.empty
+  components<-mapM (\(key,value)->do
+    let label=K.toText key
+    validPlanText label
+    fields<-withObject "Cabal component" planDependencies value
+    pure (label,object ("name" .= label:fields))) (KM.toList nested)
+  source<-o .:? "pkg-src" >>= maybe (pure Nothing) (withObject "Cabal source" $ \src->do
+    sourceType<-src .:? "type" :: Parser (Maybe Text)
+    if sourceType==Just "local" then src .:? "path" else pure Nothing)
+  let local=style==Just "local"
+      references=[object ["unitId" .= ident,"component" .= label] | local,label<-maybe [] (:[]) component++map fst components]
+  pure (["id" .= ident,"package" .= name,"version" .= version,"type" .= kind,"style" .= style,
+    "local" .= local,"component" .= component,"components" .= map snd components]++dependencies,local,source,references)
+
+planDependencies :: Object -> Parser [Pair]
+planDependencies fields=do
+  depends<-fields .:? "depends" .!= []
+  executables<-fields .:? "exe-depends" .!= []
+  mapM_ validPlanText (depends++executables)
+  pure ["depends" .= (depends::[Text]),"exeDepends" .= (executables::[Text]),"dependenciesKnown" .= KM.member "depends" fields]
+
+planFreshness :: Desktop -> FilePath -> UTCTime -> [FilePath] -> IO Value
+planFreshness desktop root modified sources=do
+  let directories=nub (root:sources)
+  listings<-forM (take 64 directories) $ \directory -> do
+    entries<-either (const []) id <$> tryIOError (listDirectory directory)
+    pure ([directory </> name | name<-take 4096 entries,takeExtension name==".cabal" || directory==root && name `elem` ["cabal.project","cabal.project.local","cabal.project.freeze"]],length entries>4096)
+  let candidates=concatMap fst listings
+  safe<-catMaybes <$> mapM (publicProjectPath desktop root) (take 1024 candidates)
+  newer<-filterM (\path->either (const False) (>modified) <$> tryIOError (getModificationTime path)) safe
+  dirtyInputs<-fmap catMaybes $ forM (M.toList (buffers desktop)) $ \(ident,doc)->case documentFile doc of
+    Just file | dirty (documentBuffer doc),not (privateDocument desktop doc) -> do
+      path<-publicProjectPath desktop root (filePath file)
+      pure (if maybe False (`elem` safe) path then Just ident else Nothing)
+    _ -> pure Nothing
+  pure (object ["status" .= (if null newer && null dirtyInputs then "unknown" else "stale"::Text),
+    "basis" .= ("Known manifest timestamps and live unsaved manifests; unchanged timestamps do not prove the plan current."::Text),
+    "newerInputs" .= map (makeRelative root) (take 128 newer),"unsavedBufferIds" .= take 128 dirtyInputs,
+    "checkedInputCount" .= length safe,"inputsTruncated" .= (length directories>64 || any snd listings || length candidates>1024 || length newer>128 || length dirtyInputs>128)])

@@ -2,14 +2,18 @@
 module WorkspaceMCPCheck (checks) where
 
 import Control.Exception (bracket)
-import Control.Monad (unless, foldM)
+import Control.Monad (unless, foldM, when)
 import Data.Aeson
 import Data.Aeson.Types (parseMaybe)
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as BL
+import Data.Time.Clock (getCurrentTime, addUTCTime)
 import qualified Data.Map.Strict as M
 import Data.Maybe (fromJust)
+import Data.List (find)
+import System.Info (os)
 import qualified Data.Text as T
-import System.Directory (canonicalizePath, getTemporaryDirectory, removeFile, createDirectory, removePathForcibly)
+import System.Directory (canonicalizePath, getTemporaryDirectory, removeFile, createDirectory, removePathForcibly, createDirectoryIfMissing, createFileLink, setModificationTime)
 import System.IO (openBinaryTempFile, hClose)
 import System.FilePath ((</>))
 import System.Process (readProcessWithExitCode)
@@ -180,6 +184,7 @@ checks=do
       _->False)
     (_,missingDiff)<-call privateProject "workspace_git" ["view" .= ("diff"::T.Text),"path" .= ("absent/subdir"::T.Text)]
     ok "selected missing path is a safe empty diff" (case missingDiff of Right value->parseMaybe (withObject "diff" (.: "diff")) value==Just ("No changes.\n"::T.Text); _->False)
+    planChecks root project
   putStrLn "workspace MCP checks passed"
 
 -- Use the same file primitives as the application; unsupported effects fail
@@ -202,3 +207,82 @@ effects desktop requests=(True,) <$> foldM apply desktop requests
             Right state -> d {buffers=M.insert ident document {documentFile=Just state,documentBuffer=markSaved (documentBuffer document)} (buffers d)}
         _ -> error "unsupported test save"
     apply _ request=error ("Unexpected workspace test effect: "++show request)
+
+-- These are Cabal-emitted flat and Custom Setup component shapes, rather than
+-- a second Cabal package-description parser.
+planChecks :: FilePath -> Desktop -> IO ()
+planChecks root desktop=do
+  let call d=do (_,reply)<-workspaceTool effects d "workspace_project" (object []); reply
+      valueField key value=parseMaybe (withObject "value" (.: key)) value
+      plan result=case result of Right value->valueField "cabalPlan" value; _->Nothing
+      status result=plan result >>= valueField "status" :: Maybe T.Text
+      ok label condition=unless condition (error label)
+      file=root </> "dist-newstyle/cache/plan.json"
+      unit ident name component dependencies=object
+        ["id" .= (ident::T.Text),"pkg-name" .= (name::T.Text),"pkg-version" .= ("1.0"::T.Text),
+         "type" .= ("configured"::T.Text),"style" .= ("local"::T.Text),"component-name" .= (component::T.Text),
+         "depends" .= (dependencies::[T.Text]),"exe-depends" .= ["build-tool-unit"::T.Text],"pkg-src" .= object ["type" .= ("local"::T.Text),"path" .= root]]
+      flat=unit "sample-unit" "sample" "exe:sample" ["base-unit"]
+      nested=object ["id" .= ("custom-unit"::T.Text),"pkg-name" .= ("custom"::T.Text),"pkg-version" .= ("2"::T.Text),
+        "style" .= ("local"::T.Text),"components" .= object
+          ["lib" .= object ["depends" .= ["base-unit"::T.Text]],"setup" .= object ["depends" .= ["Cabal-unit"::T.Text]]]]
+      base=object ["id" .= ("base-unit"::T.Text),"pkg-name" .= ("base"::T.Text),"pkg-version" .= ("4.22.0.0"::T.Text),"type" .= ("pre-existing"::T.Text)]
+      fixture=object ["compiler-id" .= ("ghc-9.14.1"::T.Text),"cabal-version" .= ("3.16"::T.Text),
+        "install-plan" .= [flat,nested,base],"repository-url" .= ("https://user:private-secret@invalid/"::T.Text)]
+      write value=BL.writeFile file (encode value)
+  missing<-call desktop
+  ok "project reports a missing Cabal plan without generating one" (status missing==Just "missing")
+  createDirectoryIfMissing True (root </> "dist-newstyle/cache")
+  write fixture
+  found<-call desktop
+  let graph=plan found
+      units=graph >>= valueField "units" :: Maybe [Value]
+  ok "Cabal plan exposes emitted units and provenance" (status found==Just "available" && maybe False ((==3).length) units && (graph >>= valueField "compilerId") == Just ("ghc-9.14.1"::T.Text))
+  let pick ident=units >>= find (\entry->valueField "id" entry==Just (ident::T.Text))
+      nestedComponents=pick "custom-unit" >>= valueField "components" :: Maybe [Value]
+      setup=nestedComponents >>= find (\entry->valueField "name" entry==Just ("setup"::T.Text))
+  ok "Cabal graph retains exact unit/component dependency and build-tool edges" ((pick "sample-unit" >>= valueField "depends")==Just ["base-unit"::T.Text] &&
+    (pick "sample-unit" >>= valueField "exeDepends")==Just ["build-tool-unit"::T.Text] && (setup >>= valueField "depends")==Just ["Cabal-unit"::T.Text])
+  ok "local package roots are relative and absent dependency data remains unknown" ((pick "sample-unit" >>= valueField "sourceRoot")==Just (Just "."::Maybe FilePath) &&
+    (pick "base-unit" >>= valueField "dependenciesKnown")==Just False)
+  ok "plan raw fields and credential URLs are never returned" (not ("private-secret" `T.isInfixOf` T.pack (show found)))
+  ok "plan existence alone never claims freshness" ((graph >>= valueField "freshness" >>= valueField "status") == Just ("unknown"::T.Text))
+  now<-getCurrentTime
+  setModificationTime file (addUTCTime (-60) now)
+  stale<-call desktop
+  ok "newer manifest marks the plan stale" ((plan stale >>= valueField "freshness" >>= valueField "status") == Just ("stale"::T.Text))
+  write fixture
+  let manifest=addDocument (Just (FileState (root </> "sample.cabal") (Just "disk"))) (replaceSelection (Selection 0 0) "live" (newBuffer "disk")) desktop
+  unsaved<-call manifest
+  ok "unsaved package manifest marks plan stale" ((plan unsaved >>= valueField "freshness" >>= valueField "status") == Just ("stale"::T.Text))
+  let private=desktop {guestPrivatePaths=[root </> "sample.cabal",file]}
+  hidden<-call private
+  ok "protected plan and package paths stay hidden" (status hidden==Just "unavailable" && case hidden of Right value->valueField "packageFile" value==Just (Nothing::Maybe FilePath); _->False)
+  let external=object ["id" .= ("outside"::T.Text),"style" .= ("local"::T.Text),"pkg-src" .= object ["type" .= ("local"::T.Text),"path" .= (root </> "../private-source-root")]]
+      authority=object ["id" .= ("private"::T.Text),"style" .= ("local"::T.Text),"pkg-src" .= object ["type" .= ("local"::T.Text),"path" .= (root </> "authority-source")]]
+      malformed=object ["id" .= ("https://private-credential@invalid/"::T.Text)]
+  write (object ["install-plan" .= [flat,external,authority,malformed]])
+  paths<-call desktop {guestPrivatePaths=[root </> "authority-source"]}
+  ok "external and protected source roots and malformed identities are omitted" (case plan paths of
+    Just value->valueField "omittedUnits" value==Just (1::Int) && valueField "graphComplete" value==Just False && not (any (`T.isInfixOf` T.pack (show value)) ["private-source-root","authority-source","private-credential"])
+    _->False)
+  write (object ["install-plan" .= [unit ("unit-"<>T.pack (show n)) "sample" "lib" ["outside-subset"] | n<-[1..4200::Int]]])
+  truncated<-call desktop
+  ok "large graphs expose truncation without dropping retained dependency edges" (case plan truncated of
+    Just value->valueField "totalUnits" value==Just (4200::Int) && maybe False (>0) (valueField "truncatedUnits" value :: Maybe Int) && valueField "graphComplete" value==Just False && BL.length (encode value)<=524288 &&
+      maybe False (all (\u->valueField "depends" u==Just ["outside-subset"::T.Text])) (valueField "units" value :: Maybe [Value])
+    _->False)
+  BS.writeFile file "not JSON private-secret"
+  invalid<-call desktop
+  ok "malformed plan errors omit raw contents" (status invalid==Just "invalid" && not ("private-secret" `T.isInfixOf` T.pack (show invalid)))
+  BS.writeFile file (BS.replicate (8*1024*1024+1) 32)
+  oversized<-call desktop
+  ok "plan reads are bounded" (status oversized==Just "too-large")
+  removeFile file
+  when (os/="mingw32") $ do
+    let secret=root </> "authority-plan.json"
+    BL.writeFile secret (encode fixture)
+    createFileLink secret file
+    linked<-call desktop {guestPrivatePaths=[secret]}
+    ok "plan symlink cannot bypass source protection" (status linked==Just "unavailable")
+    removeFile file

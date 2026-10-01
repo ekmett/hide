@@ -20,7 +20,7 @@ uses that tool’s policy.
 | `list_windows` | R | `{}` | Window IDs, titles, buffer IDs, rectangles, active window and panels |
 | `read_buffer` | R | `bufferId?`, `startLine?`, `lineCount?`, `byteOffset?` | Live text; 200 lines default, 1000 maximum. Binary: up to 4096 hex bytes. Defaults to active buffer |
 | `read_selection` | R | `windowId?` | Selected content and cursor offsets; defaults to active window |
-| `workspace_project` | R | `{}` | Project root, Cabal package file, active source, unsaved buffers |
+| `workspace_project` | R | `{}` | Project root, Cabal package file, active source, unsaved buffers, existing Cabal component/dependency graph |
 | `workspace_search` | R | `query`, `trackedOnly?`, `offset?`, `limit?` | Literal line matches with live-buffer substitution; tracked-only or ignore-respecting workspace search |
 | `editor_file` | W | `action`, `bufferId?`, `windowId?`, `path?`, `revision?`, `dirtyAction?` | `open`, `save`, `close`; save/close require current revision. Dirty close requires `save` or `discard` |
 | `buffer_apply_diff` | W | `bufferId`, `revision`, `diff` | Strict unified diff, atomic and undoable, no save; returns new revision |
@@ -33,6 +33,23 @@ project, refuse overwrite/dirty descendants, protect Git metadata and symlink
 endpoints, and do not recursively delete directories. Save uses disk-conflict
 checks. Private authority files and protected conversation contents are excluded
 or redacted across these surfaces.
+
+`workspace_project.cabalPlan` reads only `dist-newstyle/cache/plan.json`; it does
+not invoke Cabal. `status` distinguishes `available`, `missing`, `invalid`,
+`too-large`, and `unavailable`. Available results include compiler/Cabal versions,
+plan modification time and age, package unit IDs/names/versions/type/style,
+local component references, and Cabal's `depends`/`exeDepends` edges. Nested
+Custom Setup components retain their separate dependencies. Package source roots are
+workspace-relative; external/protected paths, repository URLs, flags and compiler
+arguments are omitted.
+
+`freshness.status` is `stale` when known manifests are newer or have unsaved
+edits, otherwise `unknown`: timestamps do not establish that a plan matches the
+current source or configuration. Check `dependenciesKnown`, `graphComplete`,
+`omittedUnits` and `truncatedUnits` before treating the result as complete. Reads
+stop at 8 MiB and inspect at most 4096 units; graph output is capped at 512 KiB
+and the full response at 1 MiB. Truncation removes whole units, retaining every
+reported unit's emitted dependency edges, which may refer to omitted units.
 
 ## History
 
