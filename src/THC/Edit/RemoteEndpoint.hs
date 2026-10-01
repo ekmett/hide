@@ -70,12 +70,12 @@ foreign import ccall unsafe "thc_remote_random" c_random :: Ptr Word8 -> Word32 
 foreign import ccall unsafe "thc_remote_hmac" c_hmac :: Ptr Word8 -> Ptr Word8 -> Word32 -> Ptr Word8 -> IO Word32
 
 spawnDetached :: FilePath -> [String] -> FilePath -> IO ProcessHandle
-spawnDetached executable args logfile = withCWString executable $ \application ->
+spawnDetached executable args logfile = mask_ $ withCWString executable $ \application ->
   withCWString (unwords (map translate (executable:args))) $ \command ->
   withCWString logfile $ \logPath -> alloca $ \result -> do
     c_spawn application command logPath result >>= checkWindows "Start persistent remote process outside SSH job"
-    handle <- peek result
-    mkProcessHandle handle False nullPtr
+    childHandle <- peek result
+    mkProcessHandle childHandle False nullPtr
 
 checkWindows :: String -> Word32 -> IO ()
 checkWindows context code = unless (code==0) (failure (context++": Windows error "++show code))
