@@ -2,7 +2,7 @@
 
 ## Design
 
-Run the editor and all project tooling beside the remote filesystem. Local Metal/Vulkan and browser displays use the same protocol. `thc edit PATH --remote` serves length-framed packets on stdin/stdout, diagnostics only on stderr, no PTY. `thc-edit USER@HOST:PATH --metal` and `--web` launch the installed OpenSSH client and attach locally. Honor SSH configuration and host authentication; do not forward credentials or install software automatically.
+Run the editor and all project tooling beside the remote filesystem. Local Metal/Vulkan and browser displays use the same protocol. `thc-edit PATH --remote` serves length-framed packets on stdin/stdout, diagnostics only on stderr, no PTY. `thc-edit USER@HOST:PATH --metal` and `--web` launch the installed OpenSSH client and attach locally. Honor SSH configuration and host authentication; do not forward credentials or install software automatically.
 
 The SSH bootstrap runs `thc-edit --remote` directly, without requiring the full thc project. Startup arguments travel in the protocol hello, avoiding Unix/cmd.exe shell quoting differences. Native Windows remote servers are required alongside macOS/Linux.
 
@@ -12,12 +12,12 @@ Protocol version 1 uses existing WebInput JSON, assets/control JSON, and unchang
 
 The browser uses a local authenticated WebSocket bridge to SSH. Browser assets and visual processing stay local. Local clipboard and uploads/downloads bridge explicitly; remote File/Open and Save continue using the remote filesystem. Local window titles identify the host. Cursor blink, mouse pointer, CRT and zoom remain local.
 
-Remote code is behind a manual `remote` Cabal flag, alongside existing `web`, `window`, and `terminal` flags. Share encoding and input semantics rather than implementing another editor. No repository content refers to coding agents; keep the current working branch.
+Remote code is behind a manual `remote` Cabal flag, alongside existing `web`, `window`, and `terminal` flags. Share encoding and input semantics rather than implementing another editor.
 
 ## Interfaces
 
 - `THC.Edit.Protocol` owns `WebInput`, parsing/application, display rows and compression, metadata/assets, framing (`WirePacket = JsonPacket Value | BinaryPacket ByteString`, `readPacket`, `writePacket`) and bounded display decoding.
-- `THC.Edit.Remote` owns `RemotePeer {peerSend :: WirePacket -> IO (), peerReceive :: IO (Maybe WirePacket)}`, `withSSHPeer :: String -> [String] -> (RemotePeer -> IO ()) -> IO ()`, and remote daemon/attachment helpers. Persistent execution receives the existing effects and tick callbacks.
+- `THC.Edit.Remote` owns `RemotePeer {peerSend :: WirePacket -> IO (), peerSendBatch :: [WirePacket] -> IO (), peerReceive :: IO (Maybe WirePacket)}`, `withSSHPeer :: String -> [String] -> (RemotePeer -> IO ()) -> IO ()`, and remote daemon/attachment helpers. Persistent execution receives the existing effects and tick callbacks.
 - `THC.Edit.RemoteWindow` exports `runRemoteWindow :: Backend -> Double -> (Int,Int) -> Int -> String -> RemotePeer -> IO ()`.
 - Web retains public protocol reexports for compatibility; the local browser bridge consumes RemotePeer. App selects server, SSH client or existing local execution before opening files locally.
 
