@@ -78,3 +78,75 @@ int thc_unicode_bitmap(const char *utf8, int w, int h, uint32_t fg, uint32_t *pi
 }
 #endif
 #endif
+
+#ifdef WITH_WINDOW
+#include <math.h>
+#include <stdlib.h>
+
+static double linear_channel(double s) {
+    return s<=0.04045 ? s/12.92 : pow((s+0.055)/1.055,2.4);
+}
+static unsigned display_channel(double linear) {
+    linear=fmax(0,fmin(1,linear));
+    double s=linear<=0.0031308 ? linear*12.92 : 1.055*pow(linear,1/2.4)-0.055;
+    return (unsigned)lround(255*s);
+}
+
+int thc_unicode_downsample(const uint32_t *source, int w, int h, uint32_t *pixels) {
+    if (w<1 || h<1 || w>1024 || h>1024) return 0;
+    size_t stride=(size_t)(w+2)*4;
+    double *errors=calloc(2*stride,sizeof(double));
+    if (!errors) return 0;
+    double *current=errors, *next=errors+stride;
+    for (int y=0;y<h;++y) {
+        for (int x=0;x<w;++x) {
+            double value[4]={0};
+            /* Average premultiplied linear-light color and coverage, so
+             * transparent edges neither darken colors nor erase thin strokes. */
+            for (int dy=0;dy<4;++dy) for (int dx=0;dx<4;++dx) {
+                uint32_t p=source[(y*4+dy)*w*4+x*4+dx];
+                double a=(p>>24)/255.0;
+                value[3]+=a/16;
+                if (a>0) for (int c=0;c<3;++c)
+                    value[c]+=a*linear_channel(fmin(1,((p>>(16-8*c))&255)/(255*a)))/16;
+            }
+            for (int c=0;c<4;++c) value[c]+=current[(x+1)*4+c];
+            double chosen[4]={0};
+            uint32_t p=0;
+            /* Four coverage levels keep thin text connected; binary coverage
+             * makes small CJK and combining marks unnecessarily speckled. */
+            double alpha=fmax(0,fmin(3,round(value[3]*3)))/3;
+            if (alpha>0) {
+                p=(uint32_t)lround(alpha*255)<<24; chosen[3]=alpha;
+                for (int c=0;c<3;++c) {
+                    unsigned channel=(unsigned)lround(display_channel(value[c]/value[3])*alpha);
+                    p|=channel<<(16-8*c);
+                    chosen[c]=alpha*linear_channel(channel/(255*alpha));
+                }
+            }
+            pixels[y*w+x]=p;
+            /* Floyd–Steinberg: right, below-left, below, below-right. */
+            for (int c=0;c<4;++c) {
+                double error=(value[c]-chosen[c])/16;
+                current[(x+2)*4+c]+=error*7;
+                next[x*4+c]+=error*3;
+                next[(x+1)*4+c]+=error*5;
+                next[(x+2)*4+c]+=error;
+            }
+        }
+        double *swap=current; current=next; next=swap;
+        memset(next,0,stride*sizeof(double));
+    }
+    free(errors);
+    return 1;
+}
+
+int thc_unicode_pixelated(const char *text, int w, int h, uint32_t fg, uint32_t *pixels) {
+    if (w<1 || h<1 || w>1024 || h>1024) return 0;
+    uint32_t *source=calloc((size_t)w*h*16,sizeof(uint32_t));
+    if (!source) return 0;
+    int ok=thc_unicode_bitmap(text,w*4,h*4,fg,source) && thc_unicode_downsample(source,w,h,pixels);
+    free(source);
+    return ok;
+}
+#endif

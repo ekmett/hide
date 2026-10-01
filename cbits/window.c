@@ -15,7 +15,7 @@ static int cell_height;
 static uint32_t *pixels;
 static int frame_w, frame_h;
 static bool pixelate_unicode;
-typedef struct { char *text; int w, h; uint32_t fg, *pixels; } UnicodeTile;
+typedef struct { char *text; int w, h; bool pixelated; uint32_t fg, *pixels; } UnicodeTile;
 static UnicodeTile unicode_tiles[512];
 static unsigned tile_next;
 static void clear_unicode(void) {
@@ -188,14 +188,14 @@ int thc_unicode(int x, int y, int cells, const char *text, uint32_t fg, uint32_t
     UnicodeTile *tile=NULL;
     for (int i=0;i<512;++i) {
         UnicodeTile *candidate=&unicode_tiles[i];
-        if (candidate->text && candidate->w==w && candidate->h==h && candidate->fg==fg && !strcmp(candidate->text,text)) { tile=candidate; break; }
+        if (candidate->text && candidate->w==w && candidate->h==h && candidate->pixelated==pixelate_unicode && candidate->fg==fg && !strcmp(candidate->text,text)) { tile=candidate; break; }
     }
     if (!tile) {
         tile=&unicode_tiles[tile_next++%512];
         free(tile->text); free(tile->pixels); *tile=(UnicodeTile){0};
         tile->text=strdup(text); tile->pixels=calloc((size_t)w*h,sizeof(uint32_t));
-        tile->w=w; tile->h=h; tile->fg=fg;
-        if (!tile->text || !tile->pixels || !thc_unicode_bitmap(text,w,h,fg,tile->pixels)) {
+        tile->w=w; tile->h=h; tile->fg=fg; tile->pixelated=pixelate_unicode;
+        if (!tile->text || !tile->pixels || !(pixelate_unicode ? thc_unicode_pixelated(text,w,h,fg,tile->pixels) : thc_unicode_bitmap(text,w,h,fg,tile->pixels))) {
             free(tile->text); free(tile->pixels); *tile=(UnicodeTile){0};
             return SDL_SetError("Cannot rasterize Unicode text");
         }

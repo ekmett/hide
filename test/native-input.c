@@ -2,6 +2,7 @@
  * Uses SDL's event queue and dummy video driver; no real window or user input.
  */
 #include "../cbits/window.h"
+#include "../cbits/unicode.h"
 #include <SDL3/SDL.h>
 #include <assert.h>
 #include <stdio.h>
@@ -94,10 +95,32 @@ static void check_crt(SDL_Renderer *renderer, int lines, double pitch) {
     }
 }
 
+static void check_diffusion(void) {
+    uint32_t source[64*64], output[16*16], repeated[16*16];
+    for (int i=0;i<64*64;++i) source[i]=0x80800000; /* Half-covered red. */
+    assert(thc_unicode_downsample(source,16,16,output));
+    assert(thc_unicode_downsample(source,16,16,repeated));
+    assert(!memcmp(output,repeated,sizeof(output)));
+    int coverage=0, lower=0, upper=0;
+    for (int i=0;i<16*16;++i) {
+        unsigned alpha=output[i]>>24;
+        assert(alpha%85==0 && ((output[i]>>16)&255)==alpha && !(output[i]&0xffff));
+        coverage+=alpha; lower+=alpha==85; upper+=alpha==170;
+    }
+    assert(coverage>=127*256 && coverage<=129*256 && lower && upper);
+    /* Preserve average coverage instead of rounding every cell the same way. */
+    memset(source,0,sizeof(source));
+    assert(thc_unicode_downsample(source,16,16,output));
+    for (int i=0;i<16*16;++i) assert(!output[i]);
+    for (int i=0;i<64*64;++i) source[i]=0xff5599cc;
+    assert(thc_unicode_downsample(source,16,16,output));
+    for (int i=0;i<16*16;++i) assert(output[i]==0xff5599cc);
+}
+
 static void check_unicode(SDL_Renderer *renderer) {
-    uint64_t hashes[2]={0};
-    for (int mode=0;mode<2;++mode) {
-        assert(thc_begin()); thc_pixelate_unicode(mode);
+    uint64_t hashes[3]={0};
+    for (int mode=0;mode<3;++mode) {
+        assert(thc_begin()); thc_pixelate_unicode(mode==1);
         assert(thc_unicode(1,1,2,"👩🏽‍💻",0xffffff,0x0000aa));
         assert(thc_unicode(3,1,1,"é",0xffff55,0x0000aa));
         assert(thc_present());
@@ -111,7 +134,7 @@ static void check_unicode(SDL_Renderer *renderer) {
         }
         assert(drawn>10); SDL_DestroySurface(image);
     }
-    assert(hashes[0]!=hashes[1]);
+    assert(hashes[0]!=hashes[1] && hashes[0]==hashes[2]);
     thc_pixelate_unicode(0);
 }
 
@@ -356,6 +379,12 @@ int main(void) {
     check(SDLK_Q, SDL_KMOD_RALT | SDL_KMOD_CTRL, "@", 2);
 #endif
     SDL_Quit();
+    check_diffusion();
+    assert(SDL_SetHint(SDL_HINT_VIDEO_DRIVER,"dummy"));
+    assert(thc_open("software",1,80,25,16));
+    int count; SDL_Window **single=SDL_GetWindows(&count); assert(single && count==1);
+    check_unicode(SDL_GetRenderer(single[0])); /* Cache keys differ even at equal tile sizes. */
+    SDL_free(single); thc_close();
     check_geometry(25, 16);
     check_geometry(50, 8);
     check_fractional_zoom();

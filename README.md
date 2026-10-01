@@ -74,7 +74,9 @@ Joined emoji, skin tones, flags and combining sequences are edited and clipped
 as complete graphemes in documents, conversations and filenames. Wide glyphs
 partially covered by a border or another window become blank cells.
 **Options > Preferences > Pixelate Unicode** reduces each shaped cluster to an
-8×16 or 16×16 tile before enlargement; leave it off for full-resolution rendering.
+8×16 or 16×16 tile before enlargement. It uses four-times oversampling, linear-light
+area filtering and Floyd–Steinberg error diffusion with four coverage levels.
+Leave it off for full-resolution rendering.
 The terminal frontend uses the same layout, with glyph appearance supplied by
 your terminal emulator. The window has a system clipboard and, on macOS, native menus
 with Command shortcuts. Option remains available for accented characters except the window-number
