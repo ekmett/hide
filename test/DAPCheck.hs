@@ -53,6 +53,7 @@ checks = do
   bracket (DAP.startManaged "python3" ["-u","-c",managedPeer,show managedPort] "." "127.0.0.1" managedPort) DAP.stopClient $ \client -> do
     ident <- DAP.request client "initialize" (object [])
     events <- await client (\es -> DAP.Response ident (Right (object [])) `elem` es)
+    check "managed readiness precedes replies exactly once" ([e | e<-events,case e of DAP.Notification _ _ -> False; _ -> True]==[DAP.Connected,DAP.Response ident (Right (object []))])
     check "managed launch connects after process startup" (DAP.Response ident (Right (object [])) `elem` events)
   withServer drain $ \occupiedPort ->
     bracket (DAP.startManaged "/nonexistent/should-not-start" [] "." "127.0.0.1" occupiedPort) DAP.stopClient $ \client -> do
@@ -65,7 +66,8 @@ checks = do
     check "failed THC startup reports exit status" (any (\e -> case e of DAP.Disconnected reason -> "23" `T.isInfixOf` reason; _ -> False) events)
   bracket (DAP.startManaged "python3" ["-u","-c","import time; print('waiting',flush=True); time.sleep(60)"] "." "127.0.0.1" managedPort) DAP.stopClient $ \client -> do
     ident<-DAP.request client "initialize" Null
-    _<-await client (any notification)
+    waiting<-await client (any notification)
+    check "managed build is not connected while waiting for its listener" (DAP.Connected `notElem` waiting)
     stopped<-timeout processStopTimeout (DAP.stopClient client)
     check "managed startup cancellation stops process before joining output readers" (stopped==Just ())
     events<-DAP.pollEvents client
@@ -135,7 +137,7 @@ checks = do
       void (DAP.request client "threads" Null)
       takeMVar sent
       events <- await client (\es -> length [() | DAP.Notification "output" Null <- es] == 300)
-      check "event backpressure loses no messages" (length events == 300)
+      check "event backpressure loses no messages" (length events == 301 && length (filter (==DAP.Connected) events)==1)
   putStrLn "DAP checks passed"
   where
     notification (DAP.Notification _ _) = True

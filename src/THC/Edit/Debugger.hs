@@ -1,5 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
-module THC.Edit.Debugger (withDebugger, debuggerEffects, tickDebugger) where
+module THC.Edit.Debugger (withDebugger, withDebuggerClock, debuggerEffects, tickDebugger) where
 
 import Control.Exception (IOException, bracket, try)
 import Control.Monad (foldM, forM_, unless, when)
@@ -28,7 +28,7 @@ import THC.Edit.Model
 import THC.Edit.Syntax (highlightFor)
 
 type Core = Desktop -> [Effect] -> IO (Bool,Desktop)
-newtype Debugger = Debugger (IORef State)
+data Debugger = Debugger (IORef State) (IO Integer)
 data Pending = Init | Attach | Configure | Breaks Text [Int] | Exceptions | Threads Bool
   | Stack Bool | Scopes | Variables | Source Value | Control Bool | Detach
   deriving (Eq,Show)
@@ -40,7 +40,7 @@ data State = State
   , exceptionFilters :: [Text]
   , breakpoints :: M.Map Text (Value,[Breakpoint]), sources :: M.Map Int Value
   , root :: FilePath, endpoint :: (Text,Int), output :: Text
-  , startRequest :: (Text,Value), managed :: Bool
+  , startRequest :: (Text,Value), managed :: Bool, adapterId :: Text
   , failure :: Maybe Text, disconnectAt :: Maybe Integer
   , choices :: M.Map Text [Value], choiceId :: Int, breakRequests :: M.Map Text Int
   }
@@ -49,10 +49,15 @@ emptyState :: State
 emptyState = State {client=Nothing,capabilities=Null,ready=False,configured=False,pending=M.empty,generation=0,
   stopped=False,thread=Nothing,frame=Nothing,exceptionFilters=[],breakpoints=M.empty,sources=M.empty,
   root=".",endpoint=("127.0.0.1",4711),output="",failure=Nothing,disconnectAt=Nothing,
-  choices=M.empty,choiceId=0,breakRequests=M.empty,startRequest=("attach",object []),managed=False}
+  choices=M.empty,choiceId=0,breakRequests=M.empty,startRequest=("attach",object []),managed=False,adapterId=""}
 
 withDebugger :: (Debugger -> IO a) -> IO a
-withDebugger = bracket (Debugger <$> newIORef emptyState) $ \(Debugger ref) -> readIORef ref >>= mapM_ D.stopClient . client
+withDebugger = withDebuggerClock (toInteger <$> getMonotonicTimeNSec)
+
+-- Clock values are monotonic nanoseconds, also allowing deterministic deadline checks.
+withDebuggerClock :: IO Integer -> (Debugger -> IO a) -> IO a
+withDebuggerClock clock = bracket ((\ref -> Debugger ref clock) <$> newIORef emptyState) $ \(Debugger ref _) ->
+  readIORef ref >>= mapM_ D.stopClient . client
 
 debuggerEffects :: Debugger -> Core -> Core
 debuggerEffects runtime fallback = foldM apply . (False,)
@@ -62,7 +67,7 @@ debuggerEffects runtime fallback = foldM apply . (False,)
     apply (_,d) effect=fallback d [effect]
 
 perform :: Debugger -> Core -> Text -> [Text] -> Desktop -> IO Desktop
-perform runtime@(Debugger ref) core action values d = do
+perform runtime@(Debugger ref clock) core action values d = do
   s<-readIORef ref
   case (action,values) of
     ("output",_) -> pure (addReadOnly "Debugger output" (output s) d)
@@ -97,7 +102,7 @@ perform runtime@(Debugger ref) core action values d = do
         pure $ either (\(err::IOException) -> d {status="DAP: "<>T.pack (show err)}) id result
       _ -> pure d {status="Enter a port between 1 and 65535."}
     ("disconnect",_) -> do
-      now<-toInteger <$> getMonotonicTimeNSec
+      now<-clock
       modifyIORef' ref (\state -> (invalidate state) {ready=False,configured=False,pending=M.empty,disconnectAt=Just now})
       send runtime Detach "disconnect" (object ["terminateDebuggee" .= (managed s || fst (startRequest s)=="launch")])
       pure (clearDialog d) {status="Disconnecting debugger..."}
@@ -153,7 +158,7 @@ startSession runtime directory (LaunchConfig command host port requestName argum
   initializeSession runtime directory c (host,port) requestName arguments adapter False d
 
 launchTHC :: Debugger -> Int -> Desktop -> IO Desktop
-launchTHC runtime@(Debugger ref) port d
+launchTHC runtime@(Debugger ref _) port d
   | any (\doc -> documentLabel doc==Nothing && dirty (documentBuffer doc)) (M.elems (buffers d)) =
       pure d {status="Save modified source files before launching the disk build."}
   | otherwise = do
@@ -176,16 +181,11 @@ launchTHC runtime@(Debugger ref) port d
           _ -> pure d {status="THC debugger requires a single runtime launch command."}
 
 initializeSession :: Debugger -> FilePath -> D.Client -> (Text,Int) -> Text -> Value -> Text -> Bool -> Desktop -> IO Desktop
-initializeSession runtime@(Debugger ref) directory c address requestName arguments adapter owned d = do
+initializeSession (Debugger ref _) directory c address requestName arguments adapter owned d = do
   s<-readIORef ref
   mapM_ D.stopClient (client s)
   writeIORef ref emptyState {client=Just c,generation=generation s+1,root=directory,endpoint=address,
-    breakpoints=persistentBreakpoints s,startRequest=(requestName,arguments),managed=owned}
-  send runtime Init "initialize" (object
-    ["clientID" .= ("thc-edit"::Text),"clientName" .= ("Turbo Haskell"::Text),"adapterID" .= adapter,
-     "pathFormat" .= ("path"::Text),"linesStartAt1" .= True,"columnsStartAt1" .= True,
-     "supportsVariableType" .= True,"supportsRunInTerminalRequest" .= False,
-     "supportsVariablePaging" .= False,"supportsMemoryReferences" .= False])
+    breakpoints=persistentBreakpoints s,startRequest=(requestName,arguments),managed=owned,adapterId=adapter}
   pure (clearDialog d) {status="Connecting debugger..."}
 
 -- Frame and variable handles are scoped to a suspended execution state.
@@ -193,24 +193,24 @@ invalidate :: State -> State
 invalidate s=s {generation=generation s+1,stopped=False,frame=Nothing,choices=M.empty}
 
 send :: Debugger -> Pending -> Text -> Value -> IO ()
-send (Debugger ref) kind command arguments = do
+send (Debugger ref clock) kind command arguments = do
   s<-readIORef ref
   forM_ (client s) $ \c -> do
     result<-try (D.request c command arguments)
-    now<-toInteger <$> getMonotonicTimeNSec
+    now<-clock
     case result of
       Left (err::IOException) -> modifyIORef' ref (\state -> state {failure=Just ("DAP: "<>T.pack (show err))})
       Right ident -> modifyIORef' ref (\state -> state {pending=M.insert ident (kind,generation state,now) (pending state),
         breakRequests=case kind of Breaks key _ -> M.insert key ident (breakRequests state); _ -> breakRequests state})
 
 tickDebugger :: Debugger -> Core -> Desktop -> IO Desktop
-tickDebugger runtime@(Debugger ref) core original = do
+tickDebugger runtime@(Debugger ref clock) core original = do
   s<-readIORef ref
   events<-maybe (pure []) D.pollEvents (client s)
   updated<-foldM (receive runtime core) original events
-  now<-toInteger <$> getMonotonicTimeNSec
+  now<-clock
   current<-readIORef ref
-  let expired=M.filter (\(kind,_,sent) -> now-sent>if managed current && kind==Init then 300000000000 else 15000000000) (pending current)
+  let expired=M.filter (\(_,_,sent) -> now-sent>15000000000) (pending current)
   let detachExpired=maybe False (\sent -> now-sent>1000000000) (disconnectAt current)
       timedOut=not (M.null expired)
   if not timedOut && not detachExpired && failure current==Nothing then pure updated else do
@@ -219,10 +219,19 @@ tickDebugger runtime@(Debugger ref) core original = do
     pure (clearDialog updated) {status=fromMaybe (if detachExpired then "Debugger disconnected." else "DAP request timed out; debugger disconnected.") (failure current)}
 
 receive :: Debugger -> Core -> Desktop -> D.Event -> IO Desktop
-receive runtime@(Debugger ref) core d event = do
+receive runtime@(Debugger ref _) core d event = do
   s<-readIORef ref
   case event of
     _ | Nothing<-client s -> pure d
+    D.Connected -> do
+      -- Managed THC may still be compiling until the transport becomes ready.
+      unless (disconnectAt s/=Nothing) $ do
+        send runtime Init "initialize" (object
+          ["clientID" .= ("thc-edit"::Text),"clientName" .= ("Turbo Haskell"::Text),"adapterID" .= adapterId s,
+           "pathFormat" .= ("path"::Text),"linesStartAt1" .= True,"columnsStartAt1" .= True,
+           "supportsVariableType" .= True,"supportsRunInTerminalRequest" .= False,
+           "supportsVariablePaging" .= False,"supportsMemoryReferences" .= False])
+      pure d
     D.Disconnected reason -> do
       mapM_ D.stopClient (client s)
       modifyIORef' ref (\state -> (invalidate state) {client=Nothing,pending=M.empty,ready=False,configured=False,disconnectAt=Nothing,failure=Nothing})
@@ -275,7 +284,7 @@ receive runtime@(Debugger ref) core d event = do
     stale kind=case kind of Threads{} -> True; Control{} -> True; Stack{} -> True; Scopes -> True; Variables -> True; Source{} -> True; _ -> False
 
 configure :: Debugger -> IO ()
-configure runtime@(Debugger ref) = do
+configure runtime@(Debugger ref _) = do
   s<-readIORef ref
   when (ready s && capabilities s/=Null && not (configured s)) $ do
     modifyIORef' ref (\state -> state {configured=True})
@@ -286,7 +295,7 @@ configure runtime@(Debugger ref) = do
       send runtime Configure "configurationDone" (object [])
 
 response :: Debugger -> Core -> Pending -> Value -> Desktop -> IO Desktop
-response runtime@(Debugger ref) core kind body d = do
+response runtime@(Debugger ref _) core kind body d = do
   s<-readIORef ref
   case kind of
     Init -> do
@@ -339,7 +348,7 @@ response runtime@(Debugger ref) core kind body d = do
       pure (clearDialog d) {status=if managed s || fst (startRequest s)=="launch" then "Debugger disconnected; launched session stopped." else "Debugger disconnected; attached program is not terminated."}
 
 select :: Debugger -> Core -> Text -> Text -> [Text] -> Desktop -> IO Desktop
-select runtime@(Debugger ref) core fullToken action values d = do
+select runtime@(Debugger ref _) core fullToken action values d = do
   s<-readIORef ref
   let rows=fromMaybe [] (M.lookup fullToken (choices s))
       selected=case values of _:index:_ -> readMaybe (T.unpack index); _ -> Nothing
@@ -367,7 +376,7 @@ select runtime@(Debugger ref) core fullToken action values d = do
     _ -> pure d {status="No expandable debugger value selected."}
 
 openFrame :: Debugger -> Core -> Desktop -> Value -> IO Desktop
-openFrame runtime@(Debugger ref) core d selected = do
+openFrame runtime@(Debugger ref _) core d selected = do
   s<-readIORef ref
   let source=fromMaybe Null (field "source" selected)
       reference=integer "sourceReference" source
@@ -392,7 +401,7 @@ position selected d
   where row=integer "line" selected
 
 toggleBreakpoint :: Debugger -> Desktop -> IO Desktop
-toggleBreakpoint runtime@(Debugger ref) d = do
+toggleBreakpoint runtime@(Debugger ref _) d = do
   s<-readIORef ref
   case (activeWindow d,activeDocument d) of
     (Just _,Just doc) | byteMode (documentBuffer doc) -> pure d {status="Breakpoints require source text; leave hex mode first."}
@@ -428,7 +437,7 @@ persistentBreakpoints = M.map (\(src,points) -> (src,map (\bp -> bp {bpResult=Nu
   M.filter (\(src,_) -> integer "sourceReference" src==0 && not (T.null (text "path" src))) . breakpoints
 
 showChoices :: Debugger -> Text -> Text -> [Value] -> [Text] -> Desktop -> IO Desktop
-showChoices (Debugger ref) title action rows labels d = do
+showChoices (Debugger ref _) title action rows labels d = do
   s<-readIORef ref
   let key=token s action
       shown=chooser title key labels d

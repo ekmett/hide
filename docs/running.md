@@ -58,7 +58,17 @@ uses the THC installation and package selected in **Run > Target**. Choose an
 unused loopback port (default `4711`); the editor starts `thc run --dap-port PORT`,
 waits for its debugger, and configures your breakpoints before execution.
 This requires a THC build with the DAP instrument and `--dap-port` support.
-Build output is available in **Debug > Output** while it starts.
+Build output is available in **Debug > Output** while it starts. The first
+launch can spend several minutes building and capturing dependencies.
+**Debug > Disconnect** stops that work; protocol response timing starts when
+the debugger connects.
+
+THC initially stops at an instrumented source location. Embedded source opens
+read-only, where **Ctrl+F8** sets a breakpoint in the running program. Both
+the AST and bytecode runtimes carry source locations; optimized Core can
+repeat or combine locations, so a step need not advance to a different line.
+Scopes and values depend on the runtime: THC source stepping is available,
+while lexical scopes and value inspection remain runtime work.
 
 For another debugger, put its command and DAP arguments in `.thc-debug.json`
 in the project directory, or choose another configuration path:
@@ -81,7 +91,9 @@ defaulting to `127.0.0.1:4711`. The debugger protocol stays separate from progra
 output. Disconnecting an attached session leaves its program running;
 disconnecting an editor-launched session requests termination and releases its
 owned adapter. Detaching the editor display preserves the debugger, so `--resume`
-returns to the same breakpoints and stopped state.
+returns to the same breakpoints and stopped state. With THC, continuing to
+normal termination avoids a known early-detach shutdown race in the Graal DAP
+instrument.
 
 | Action | Keys or menu |
 | --- | --- |

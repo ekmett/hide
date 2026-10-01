@@ -30,7 +30,7 @@ import System.Timeout (timeout)
 import Text.Read (readMaybe)
 import THC.Edit.Process (processCleanup)
 
-data Event = Response Int (Either Text Value) | Notification Text Value | Disconnected Text
+data Event = Connected | Response Int (Either Text Value) | Notification Text Value | Disconnected Text
   deriving (Eq, Show)
 
 data Client = Client
@@ -85,7 +85,7 @@ startManaged executable arguments directory host port = startTransport $ \emit r
               case opened of Right connection -> pure connection; Left _ -> threadDelay 100000 >> connectReady
             exited = getProcessExitCode process >>= maybe (threadDelay 100000 >> exited) pure
             acquire = do
-              result<-race exited (bounded 300000000 "THC debugger startup timed out; see Debug / Output" connectReady)
+              result<-race exited connectReady
               case result of
                 Left code -> ioError (userError ("THC debugger process exited: "++show code++"; see Debug / Output"))
                 Right connection -> pure connection
@@ -186,6 +186,7 @@ startTransport transport = mask $ \restore -> do
         -- Reverse requests require capabilities we do not advertise.
         _ -> ioError (userError "Unsupported DAP message type")
       run = transport emit register $ \readBytes writeBytes -> do
+          atomically (emit 0 Connected)
           rest <- newIORef BS.empty
           race_
             (forever (readFrame readBytes rest >>= uncurry receive) `finally` release)

@@ -3,8 +3,9 @@ module DebuggerCheck (checks) where
 
 import Control.Concurrent (threadDelay)
 import Control.Exception (bracket)
-import Control.Monad (unless)
+import Control.Monad (unless, when)
 import Data.Aeson
+import Data.IORef
 import qualified Data.ByteString.Lazy as BL
 import Data.Aeson.Types (parseMaybe)
 import qualified Data.Map.Strict as M
@@ -23,7 +24,7 @@ import THC.Edit.Files (FileState(..))
 import THC.Edit.Model
 
 checks :: IO ()
-checks = launchChecks >> mapM_ session ["basic", "frame", "choices", "breakpoints", "reconnect"] >> putStrLn "Debugger checks passed"
+checks = startupDeadlineCheck >> launchChecks >> mapM_ session ["basic", "frame", "choices", "breakpoints", "reconnect"] >> putStrLn "Debugger checks passed"
   where
     session mode = bracket (fixture mode) cleanup $ \(port,logPath,process) -> withDebugger $ \runtime -> do
       let core d _=pure (False,d)
@@ -184,6 +185,37 @@ launchChecks = do
       (_,d)<-debuggerEffects runtime core (initialDesktop (80,25)) [DebugAction "launch-config" ["1",T.pack path]]
       check "invalid launch arguments rejected before spawning" ("arguments" `T.isInfixOf` status d)
     removeFile logs
+
+-- Six minutes pass before the UI sees transport readiness. The request clock
+-- must start at that event, and still expire an unresponsive initialize afterward.
+startupDeadlineCheck :: IO ()
+startupDeadlineCheck = do
+  temp<-getTemporaryDirectory
+  bracket (openTempFile temp "dap-deadline.json")
+    (\(path,h) -> hClose h >> mapM_ (\file -> doesFileExist file >>= \exists -> when exists (removeFile file)) [path,path<>".ready",path<>".received"]) $ \(path,h) -> do
+    hClose h
+    clock<-newIORef 0
+    let script="import pathlib,sys,time; p=sys.argv[1]; pathlib.Path(p+'.ready').touch(); sys.stdin.buffer.readline(); pathlib.Path(p+'.received').touch(); time.sleep(60)"
+        core d _=pure (False,d)
+        waitFor label action=timeout debuggerTimeout (loop action) >>= maybe (error label) pure
+        loop action=action >>= \done -> unless done (threadDelay 1000 >> loop action)
+    BL.writeFile path (encode (object ["command" .= (["python3","-u","-c",script,path] :: [String]),
+      "request" .= ("launch" :: T.Text),"arguments" .= object []]))
+    withDebuggerClock (readIORef clock) $ \runtime -> do
+      (_,started)<-debuggerEffects runtime core (initialDesktop (80,25)) [DebugAction "launch-config" ["1",T.pack path]]
+      waitFor "deadline adapter did not start" (doesFileExist (path<>".ready"))
+      sentEarly<-doesFileExist (path<>".received")
+      check "initialize waits for transport readiness event" (not sentEarly)
+      writeIORef clock 360000000000
+      let awaitInitialize d=do
+            updated<-tickDebugger runtime core d
+            check "startup elapsed time does not consume initialize deadline" (not ("timed out" `T.isInfixOf` status updated))
+            received<-doesFileExist (path<>".received")
+            if received then pure updated else threadDelay 1000 >> awaitInitialize updated
+      connected<-timeout debuggerTimeout (awaitInitialize started) >>= maybe (error "initialize was not sent after readiness") pure
+      writeIORef clock 376000000000
+      expired<-tickDebugger runtime core connected
+      check "connected initialize retains a bounded request deadline" ("DAP request timed out" `T.isInfixOf` status expired)
 
 -- A Windows-owned adapter can require the bounded taskkill /T grace on stop.
 debuggerTimeout :: Int
