@@ -6,6 +6,9 @@ import qualified WebCheck
 #ifdef WITH_WINDOW
 import qualified FontCheck
 #endif
+#ifdef WITH_PROTOCOL
+import qualified ProtocolCheck
+#endif
 import qualified UnicodeCheck
 import qualified HexCheck
 import qualified DAPCheck
@@ -46,6 +49,9 @@ check name ok = unless ok (error name)
 
 main :: IO ()
 main = do
+#ifdef WITH_PROTOCOL
+  ProtocolCheck.checks
+#endif
 #ifdef WITH_WEB
   WebCheck.checks
 #endif
