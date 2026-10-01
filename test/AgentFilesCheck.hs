@@ -35,6 +35,15 @@ checks = bracket temporary removePathForcibly $ \base -> do
   let dirtyDesktop=insertText "local " original
       oldText=contents (bufferOf dirtyDesktop)
       originalFile=maybe (error "missing FileState") id (documentFile (document dirtyDesktop))
+  let protected=dirtyDesktop {guestPrivatePaths=[path]}
+  hidden<-captureFile root path protected
+  check "ACP cannot read authority files through disk or a live buffer" (isLeft hidden && M.null (sourceSnapshots protected) && T.null (contextText True True False protected))
+  prior<-capture path dirtyDesktop
+  assertRejected "ACP cannot write a snapshot that became protected" prior "changed authority" protected
+  let projectConfig=root </> "thc.toml"
+  BS.writeFile projectConfig "[editor.agent]\ncontext = 'user guidance'\n"
+  hiddenProject<-captureFile root projectConfig dirtyDesktop
+  check "project authority config is protected before registration" (isLeft hiddenProject)
   local<-capture path dirtyDesktop
   check "agent reads current unsaved text" (snapshotText local==oldText)
   before<-BS.readFile path

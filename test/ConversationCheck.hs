@@ -25,6 +25,8 @@ import System.IO (hClose, openTempFile)
 import System.Timeout (timeout)
 import THC.Edit.Render (snapshot, snapshotHtml)
 import THC.Edit.Buffer
+import qualified THC.Edit.App as App
+import THC.Edit.GuestAccess (guestCommandAllowed, protectedBuffer)
 import THC.Edit.Conversation
 import THC.Edit.Files
 import THC.Edit.Model hiding (prompt)
@@ -377,6 +379,62 @@ checks = bracket temporary removePathForcibly $ \root ->
       check "resume is capability-gated" (countBefore==countAfter)
       _<-send runtime "options" [] gated
       pure ()
+    -- User guidance reaches ACP as context, without changing the visible query.
+    createDirectoryIfMissing True (root </> "config/thc")
+    writeFile (root </> "config/thc/config.toml") "[editor.agent]\ncontext = 'Global guidance marker'\n"
+    writeFile (root </> "thc.toml") "[editor.agent]\ncontext = 'Project guidance marker'\n"
+    withConversation $ \runtime -> do
+      configured<-configure runtime ("yes"::T.Text) desktop
+      guided<-prompt runtime "stream" configured >>= done runtime
+      entries<-logged
+      let prompts=[params | entry<-entries,field "method" entry==Just ("session/prompt"::T.Text),Just params<-[field "params" entry::Maybe Value]]
+          sent=json (last prompts)
+      check "ACP receives global and project guidance with skill discovery"
+        (all (`T.isInfixOf` sent) ["Global guidance marker","Project guidance marker","docs/agent-skills.md"])
+      check "guidance is not repeated as a user chat bubble" (not ("Global guidance marker" `T.isInfixOf` conversationText guided))
+      (_,public)<-chatTool runtime guided "agent_settings" (object [])
+      info<-public
+      check "public agent settings expose effective context" (case info of Right value->"Project guidance marker" `T.isInfixOf` json value; _->False)
+      again<-prompt runtime "stream" guided >>= done runtime
+      repeated<-logged
+      let latestPrompt=last [params | entry<-repeated,field "method" entry==Just ("session/prompt"::T.Text),Just params<-[field "params" entry::Maybe Value]]
+      check "unchanged guidance does not consume context again" (not ("Global guidance marker" `T.isInfixOf` json latestPrompt))
+      let otherProject=root </> "other-project"
+      createDirectory otherProject
+      writeFile (otherProject </> "thc.toml") "[editor.agent]\ncontext = 'Not this conversation'\n"
+      scope<-send runtime "context" [] again {sideTree=fmap (\tree->tree {treeRoot=otherProject}) (sideTree again)}
+      check "context UI is a human-only command" (not (guestCommandAllowed AgentGuidance))
+      case dialog scope of
+        Just dg -> do
+          let (next,effects)=submitDialog 0 dg scope
+          (_,opened)<-conversationEffects runtime App.applyEffects next effects
+          check "context UI opens protected project config for normal editing"
+            (fmap (fmap filePath . documentFile) (activeDocument opened)==Just (Just (root </> "thc.toml")) && maybe False (protectedBuffer opened . bufferId) (activeWindow opened))
+        Nothing -> error "Missing Agent Context scope chooser"
+      writeFile (root </> "thc.toml") "[editor.agent]\ncontext = 'Updated project guidance'\n"
+      updated<-prompt runtime "stream" guided >>= done runtime
+      messages<-logged
+      let latest=last [params | entry<-messages,field "method" entry==Just ("session/prompt"::T.Text),Just params<-[field "params" entry::Maybe Value]]
+      check "saved project context reaches the next query without reconnecting" ("Updated project guidance" `T.isInfixOf` json latest)
+      waiting<-prompt runtime "wait" updated >>= await runtime "context steering wait" agentReplying
+      writeFile (root </> "thc.toml") "[editor.agent]\ncontext = 'Steering guidance marker'\n"
+      steered<-send runtime "steer-draft" [] waiting {composerBuffer=newBuffer "direction"} >>= await runtime "context steering completion" (not . agentReplying)
+      steeringLog<-logged
+      let lastSteer=last [params | entry<-steeringLog,field "method" entry==Just ("_session/steering"::T.Text),Just params<-[field "params" entry::Maybe Value]]
+      check "steering receives saved context updates" ("Steering guidance marker" `T.isInfixOf` json lastSteer)
+      rejectionWait<-prompt runtime "wait" steered >>= await runtime "rejected context steering wait" agentReplying
+      writeFile (root </> "thc.toml") "[editor.agent]\ncontext = 'Retry context marker'\n"
+      rejectedSteer<-send runtime "steer-draft" [] rejectionWait {composerBuffer=newBuffer "reject-context"} >>= await runtime "rejected steering completed" (not . agentReplying)
+      afterRejection<-prompt runtime "stream" rejectedSteer >>= done runtime
+      retryLog<-logged
+      let retryPrompt=last [params | entry<-retryLog,field "method" entry==Just ("session/prompt"::T.Text),Just params<-[field "params" entry::Maybe Value]]
+      check "rejected steering does not mark new context delivered" ("Retry context marker" `T.isInfixOf` json retryPrompt)
+      writeFile (root </> "thc.toml") "[broken\n"
+      failed<-prompt runtime "stream" afterRejection
+      check "invalid context retains query for repair without sending" (not (agentReplying failed) && contents (composerBuffer failed)=="stream")
+      writeFile (root </> "thc.toml") "[editor.agent]\ncontext = ''\n"
+      _<-prompt runtime "stream" failed >>= done runtime
+      pure ()
     -- A new runtime reads the saved provider configuration, without reconfiguring it.
     withConversation $ \runtime -> do
       restored<-send runtime "new" [] desktop >>= await runtime "persisted provider configuration" ((=="Session fixture-session").status)
@@ -442,7 +500,7 @@ providerScript=unlines
   , "    else: effort=params['value']"
   , "    reply(ident,{'configOptions':settings()})"
   , "  elif method=='session/cancel': finish('cancelled')"
-  , "  elif method=='_session/steering': reply(ident,{'outcome':'injected'}); finish()"
+  , "  elif method=='_session/steering': reply(ident,{'outcome':'rejected' if params['prompt'][0]['text']=='reject-context' else 'injected'}); finish()"
   , "  elif method=='session/prompt':"
   , "    prompt=ident; scenario=params['prompt'][0]['text'].splitlines()[0]"
   , "    if scenario=='stream':"

@@ -2,7 +2,7 @@
 module GitCheck (checks) where
 
 import Control.Exception (bracket)
-import Control.Monad (unless, void)
+import Control.Monad (unless, void, forM_)
 import qualified Data.Text as T
 import qualified Data.ByteString as BS
 import System.Directory
@@ -145,6 +145,7 @@ checks = bracket temporary removePathForcibly $ \base -> do
     missing <- repositoryStatus dir
     failed <- repositoryDiff dir Nothing
     check "missing git returns errors without crashing" (missing == Nothing && isLeft failed)
+  filteredChecks base
   putStrLn "git checks passed"
   where
     counts repo=(repoAdded repo,repoDeleted repo)
@@ -159,3 +160,57 @@ checks = bracket temporary removePathForcibly $ \base -> do
     right = either (error . T.unpack) pure
     isLeft (Left _) = True
     isLeft _ = False
+
+-- Privacy fixtures are confined to a disposable repository and never use the
+-- caller's Git identity, hooks, configuration files or session data.
+filteredChecks :: FilePath -> IO ()
+filteredChecks base=do
+  root<-canonicalizePath (base </> "filtered")
+  createDirectory root
+  let git args=do
+        (code,_,err)<-readCreateProcessWithExitCode ((proc "git" (["-c","user.name=Git Test","-c","user.email=test@example.invalid","-c","commit.gpgsign=false"]++args)) {cwd=Just root}) ""
+        unless (code==ExitSuccess) (error err)
+      names=["thc.toml","removed-private.txt","moved-private.txt","copied-private.txt","untracked-private.txt","working-move-private.txt"]
+      private path=path `elem` map (root </>) names
+      readFiltered=repositoryDiffFiltered root private >>= either (error . T.unpack) pure
+      check label ok=unless ok (error label)
+  git ["init","--quiet"]
+  git ["config","core.hooksPath",root </> ".git/hooks"]
+  writeFile (root </> "visible.txt") "visible addition\n"
+  (initial,initialCount)<-readFiltered
+  check "absent protected configuration paths do not block whole diff" ("visible addition" `T.isInfixOf` initial && initialCount==0)
+  removeFile (root </> "visible.txt")
+  writeFile (root </> "thc.toml") "private-untracked-only\n"
+  (empty,emptyCount)<-readFiltered
+  check "empty allowed path list never expands to the whole repository" (empty=="No changes.\n" && emptyCount==1)
+  forM_ [("thc.toml","private-tracked-before"),("removed-private.txt","private-deleted-before"),
+         ("moved-private.txt","private-renamed-before"),("copied-private.txt","private-copied-before"),("working-move-private.txt","private-working-move"),
+         ("ordinary-deleted.txt","ordinary deleted content")] $ \(name,contents)->writeFile (root </> name) (contents<>"\n")
+  git ["add","--all"]
+  git ["commit","--quiet","-m","private diff fixture"]
+  writeFile (root </> "thc.toml") "private-tracked-after\n"
+  git ["rm","--quiet","--","removed-private.txt","ordinary-deleted.txt"]
+  git ["mv","--","moved-private.txt","apparently-public.txt"]
+  copyFile (root </> "copied-private.txt") (root </> "apparently-public-copy.txt")
+  git ["add","--","apparently-public-copy.txt"]
+  renameFile (root </> "working-move-private.txt") (root </> "working-public.txt")
+  copyFile (root </> "copied-private.txt") (root </> "working-public-copy.txt")
+  git ["add","--intent-to-add","--","working-public.txt","working-public-copy.txt"]
+  writeFile (root </> "untracked-private.txt") "private-untracked-after\n"
+  writeFile (root </> "visible.txt") "visible addition\n"
+  (filtered,omitted)<-readFiltered
+  check "filtered diff retains ordinary staged deletions and untracked changes"
+    ("-ordinary deleted content" `T.isInfixOf` filtered && "+visible addition" `T.isInfixOf` filtered)
+  check "tracked deleted renamed copied and untracked private files are omitted"
+    (omitted>=10 && not (any (`T.isInfixOf` filtered) ["private-tracked","private-deleted","private-renamed","private-copied","private-untracked","private-working-move","working-public","apparently-public", "rename from", "copy from"]))
+  forM_ ["apparently-public.txt","apparently-public-copy.txt","working-public.txt","working-public-copy.txt"] $ \selected->do
+    (hidden,count)<-repositoryDiffFilteredAt root (Just selected) private >>= either (error . T.unpack) pure
+    check "selected private-origin rename and copy destinations stay filtered" (hidden=="No changes.\n" && count==1)
+  (ordinary,ordinaryCount)<-repositoryDiffFilteredAt root (Just "ordinary-deleted.txt") private >>= either (error . T.unpack) pure
+  check "selected deleted ordinary files retain their baseline diff" ("-ordinary deleted content" `T.isInfixOf` ordinary && ordinaryCount==0 && not ("visible addition" `T.isInfixOf` ordinary))
+  (missing,missingCount)<-repositoryDiffFilteredAt root (Just "not-present") private >>= either (error . T.unpack) pure
+  check "selected absent file yields no changes instead of an unrestricted diff" (missing=="No changes.\n" && missingCount==0)
+  writeFile (root </> "literal[1].txt") "literal bracket path\n"
+  writeFile (root </> "literal1.txt") "different unselected file\n"
+  (literal,_)<-repositoryDiffFilteredAt root (Just "literal[1].txt") private >>= either (error . T.unpack) pure
+  check "filtered selection treats pathspec metacharacters literally" ("literal bracket path" `T.isInfixOf` literal && not ("different unselected file" `T.isInfixOf` literal))

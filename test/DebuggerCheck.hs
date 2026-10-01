@@ -4,7 +4,7 @@ module DebuggerCheck (checks) where
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (withAsync, poll, wait)
 import Control.Exception (bracket)
-import Control.Monad (unless, when)
+import Control.Monad (unless, when, forM_)
 import Data.Aeson
 import Data.IORef
 import qualified Data.ByteString.Lazy as BL
@@ -25,7 +25,7 @@ import THC.Edit.Files (FileState(..))
 import THC.Edit.Model
 
 checks :: IO ()
-checks = startupDeadlineCheck >> launchChecks >> mapM_ session ["basic", "frame", "choices", "breakpoints", "reconnect", "mcp"] >> putStrLn "Debugger checks passed"
+checks = presentationCheck >> pendingPresentationCheck >> startupDeadlineCheck >> launchChecks >> mapM_ session ["basic", "frame", "choices", "breakpoints", "reconnect", "mcp"] >> putStrLn "Debugger checks passed"
   where
     session mode = bracket (fixture mode) cleanup $ \(port,logPath,process) -> withDebugger $ \runtime -> do
       let core d _=pure (False,d)
@@ -288,3 +288,96 @@ startupDeadlineCheck = do
 -- A Windows-owned adapter can require the bounded taskkill /T grace on stop.
 debuggerTimeout :: Int
 debuggerTimeout=if os=="mingw32" then 10000000 else 5000000
+
+presentationCheck :: IO ()
+presentationCheck=bracket (fixture "basic") cleanup $ \(port,_,_) -> withDebugger $ \runtime -> do
+  let core d _=pure (False,d)
+      tool name args d=do
+        (updated,finish)<-debuggerTool runtime core d name (object args)
+        result<-finish >>= either (error . T.unpack) pure
+        pure (updated,result)
+      current d=snd <$> tool "debug_status" [] d
+      epoch value=fromMaybe (error "missing debugger generation") (field "generation" value) :: Int
+      waitFor label predicate d=timeout debuggerTimeout (loop d) >>= maybe (error (label<>" timed out")) pure
+        where loop state=do
+                updated<-tickDebugger runtime core state
+                snapshot<-current updated
+                if predicate updated snapshot then pure updated else threadDelay 1000 >> loop updated
+      reveal view gen d=tool "debug_present" ["generation" .= gen,"view" .= (view::T.Text)] d
+      base=(addDocument Nothing (newBuffer "my editor work") (initialDesktop (80,25)))
+        {dialog=Just (Dialog "Existing debugger view" (DebugDialog "existing") [] 0 ["Close"] [])}
+  (quiet,configured)<-tool "debug_present" ["follow" .= False] base
+  check "background preference can be set before connecting without changing UI" (quiet==base && field "follow" configured==Just False)
+  (attached,_)<-tool "debug_attach" ["port" .= (read port::Int)] quiet
+  -- Preserve an existing modal while asynchronous adapter events arrive.
+  let working=attached {dialog=dialog base}
+  stopped<-waitFor "background frame" (\_ s -> field "stopped" s==Just True && (field "frame" s >>= field "id")==Just (11::Int)) working
+  snapshot<-current stopped
+  let gen=epoch snapshot
+  check "background stop keeps windows, focus, buffers and modal"
+    (windows stopped==windows working && buffers stopped==buffers working && dialog stopped==dialog working && field "follow" snapshot==Just False)
+  (stale,staleReply)<-debuggerTool runtime core stopped "debug_present" (object ["generation" .= (gen-1),"follow" .= True,"view" .= ("source"::T.Text)])
+  rejected<-staleReply
+  afterRejected<-current stale
+  check "stale reveal rejects preference changes atomically" (stale==stopped && either (const True) (const False) rejected && field "follow" afterRejected==Just False)
+  forM_ [object ["view" .= ("source"::T.Text)],object ["generation" .= gen,"view" .= ("unknown"::T.Text)],object ["follow" .= ("no"::T.Text)]] $ \args -> do
+    (unchanged,finish)<-debuggerTool runtime core stopped "debug_present" args
+    result<-finish
+    check "presentation arguments reject missing generation/unknown view/wrong type" (unchanged==stopped && either (const True) (const False) result)
+  (requested,_)<-reveal "source" gen stopped
+  shown<-waitFor "explicit source reveal" (\d _ -> "value = λ" `T.isInfixOf` activeText d) requested
+  shownStatus<-current shown
+  check "explicit reveal opens source without changing stopped generation or follow mode"
+    (epoch shownStatus==gen && field "follow" shownStatus==Just False && dialog shown==dialog stopped)
+  (stack,stackStatus)<-reveal "stack" gen shown {dialog=Nothing}
+  check "cached stack is explicitly visible without resuming" (hasDialog "Call stack" stack && epoch stackStatus==gen)
+  (loading,_)<-reveal "scopes" gen stack {dialog=Nothing}
+  scopes<-waitFor "explicit scopes reveal" (\d _ -> hasDialog "Scopes" d) loading
+  (output,_)<-reveal "output" gen scopes {dialog=Nothing}
+  check "explicit output uses existing debugger session" (fmap documentLabel (activeDocument output)==Just (Just "Debugger output"))
+  (following,_)<-tool "debug_present" ["follow" .= True] output
+  (running,_)<-tool "debug_control" ["generation" .= gen,"command" .= ("continue"::T.Text)] following
+  ready<-waitFor "resume processed" (\d _ -> status d=="Running...") running
+  runningStatus<-current ready
+  (pausing,_)<-tool "debug_control" ["generation" .= epoch runningStatus,"command" .= ("pause"::T.Text)] ready
+  followed<-waitFor "follow restored" (\d s -> field "stopped" s==Just True && "value = λ" `T.isInfixOf` activeText d) pausing
+  followedStatus<-current followed
+  check "reenabling follow restores automatic source reveal on later stop" (field "follow" followedStatus==Just True && epoch followedStatus>gen)
+  _<-tool "debug_control" ["generation" .= epoch followedStatus,"command" .= ("disconnect"::T.Text)] followed
+  pure ()
+
+-- The adapter's source reply is queued after the stack tick. Turning off follow
+-- between those ticks must suppress an automatic reveal already in flight.
+pendingPresentationCheck :: IO ()
+pendingPresentationCheck=bracket (fixture "basic") cleanup $ \(port,_,_) -> withDebugger $ \runtime -> do
+  let core d _=pure (False,d)
+      tool name args d=do
+        (updated,finish)<-debuggerTool runtime core d name (object args)
+        result<-finish >>= either (error . T.unpack) pure
+        pure (updated,result)
+      current d=snd <$> tool "debug_status" [] d
+      tick=tickDebugger runtime core
+      base=addDocument Nothing (newBuffer "unchanged foreground") (initialDesktop (80,25))
+      waitUntil label predicate d=timeout debuggerTimeout (loop d) >>= maybe (error (label<>" timed out")) pure
+        where loop desktop=do
+                updated<-tick desktop
+                done<-predicate updated
+                if done then pure updated else threadDelay 1000 >> loop updated
+  (attached,_)<-tool "debug_attach" ["port" .= (read port::Int)] base
+  awaitingSource<-waitUntil "automatic source request" (\d->do
+    s<-current d
+    pure ((field "frame" s >>= field "id")==Just (11::Int))) attached
+  check "fixture exposes a source request before its response is processed" (activeText awaitingSource=="unchanged foreground")
+  (quiet,_)<-tool "debug_present" ["follow" .= False] awaitingSource
+  snapshot<-current quiet
+  let gen=fromMaybe (error "missing generation") (field "generation" snapshot) :: Int
+  (pending,finish)<-debuggerTool runtime core quiet "debug_inspect" (object ["generation" .= gen,"request" .= ("threads"::T.Text)])
+  drained<-withAsync finish $ \reply -> do
+    after<-waitUntil "source reply barrier" (\_ -> isJust <$> poll reply) pending
+    result<-wait reply
+    check "structured response remains available in background" (either (const False) (const True) result)
+    pure after
+  check "late automatic source reply cannot steal focus after follow is disabled"
+    (windows drained==windows quiet && buffers drained==buffers quiet && dialog drained==dialog quiet)
+  _<-tool "debug_control" ["generation" .= gen,"command" .= ("disconnect"::T.Text)] drained
+  pure ()

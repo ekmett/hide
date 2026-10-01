@@ -24,6 +24,7 @@ import System.Environment (lookupEnv, getExecutablePath)
 import System.IO (Handle, stdin, stdout, hClose, hFlush, hSetBinaryMode)
 import THC.Edit.Buffer
 import THC.Edit.Files (filePath)
+import THC.Edit.GuestAccess (protectedBuffer, privateDocument, sanitizedBuffer)
 import THC.Edit.Model
 import THC.Edit.Protocol (WirePacket(..), readPacket, writePacket)
 import THC.Edit.RemoteEndpoint (sessionEndpoint, connectEndpointWithShutdown)
@@ -132,7 +133,7 @@ responseWithTools extra desktop request = case request of
       let version=if requested `elem` (["2024-11-05","2025-03-26","2025-06-18","2025-11-25"]::[T.Text]) then requested else "2025-11-25"
       pure (object ["protocolVersion" .= version,"capabilities" .= object ["tools" .= object [],"resources" .= object []],
         "serverInfo" .= object ["name" .= ("thc-edit"::T.Text),"version" .= ("0.1.0"::T.Text)],
-        "instructions" .= ("Work with the live editor session. Buffers include unsaved edits; IDs belong to this session. Lines and columns start at 1; byte offsets start at 0. Discover tool schemas before use. Debugging guidance is available at thc-edit://debugging. Execution and navigation tools change the live session; inspect their annotations."::T.Text)])
+        "instructions" .= ("Work with the live editor session. Buffers include unsaved edits; IDs belong to this session. Lines and columns start at 1; byte offsets start at 0. Discover tool schemas before use. Load docs/agent-skills.md with docs_read for task workflows; docs/agent-tools.md lists operations by category. Debugging guidance is also available at thc-edit://debugging. Execution and navigation tools change the live session; inspect their annotations."::T.Text)])
     dispatch "ping" _=Right (object [])
     dispatch "tools/list" _=Right (object ["tools" .= (filter (\entry -> not (any (sameTool entry) extra)) tools++extra)])
     dispatch "resources/list" _=Right (object ["resources" .= [object ["uri" .= skillURI,"name" .= ("Debugging with the editor"::T.Text),"mimeType" .= ("text/markdown"::T.Text),"description" .= ("A workflow for source breakpoints, stepping, stack and variable inspection."::T.Text)]]])
@@ -162,7 +163,10 @@ builtinTool desktop=tool
       ident <- maybe (maybe (Left "No active buffer") (Right . bufferId) (activeWindow desktop)) Right wanted
       doc <- maybe (Left "Buffer not found") Right (M.lookup ident (buffers desktop))
       unless (start>=1 && count>=1 && count<=1000 && offset>=0) (Left "Use startLine >= 1, lineCount 1..1000, and byteOffset >= 0")
-      let b=documentBuffer doc
+      safeText<-maybe (Left "This buffer contains private user or approval content.") Right (sanitizedBuffer desktop ident)
+      let original=documentBuffer doc
+          redacted=safeText/=contents original
+          b=if redacted then newBuffer safeText else original
       if byteMode b then
         let bytes=BS.take 4096 (BS.drop offset (bufferBytes b))
             hex n=let s=showHex n "" in T.pack (replicate (2-length s) '0'++s)
@@ -173,11 +177,12 @@ builtinTool desktop=tool
             text=T.intercalate "\n" [bufferLineAt b (start-1+row) | row<-[0..available-1]]
             limited=T.take 131072 text
         in Right (object ["buffer" .= bufferInfo ident doc,"startLine" .= start,"lineCount" .= available,
-          "totalLines" .= bufferLineCount b,"text" .= limited,"truncated" .= (T.length limited<T.length text)])
+          "totalLines" .= bufferLineCount b,"text" .= limited,"redacted" .= redacted,"truncated" .= (T.length limited<T.length text)])
     tool "read_selection" args = parseArgs (withObject "read_selection" (.:? "windowId")) args >>= \wanted -> do
       w <- maybe (maybe (Left "No active window") Right (activeWindow desktop))
         (\ident -> maybe (Left "Window not found") Right (findWindow ident)) wanted
       doc <- maybe (Left "Buffer not found") Right (M.lookup (bufferId w) (buffers desktop))
+      unless (not (protectedBuffer desktop (bufferId w))) (Left "Selections from private conversation or approval buffers are unavailable.")
       let b=documentBuffer doc
           text=selectedText (selection w) b
       Right (object ["windowId" .= windowId w,"bufferId" .= bufferId w,"anchor" .= anchor (selection w),
@@ -192,8 +197,9 @@ builtinTool desktop=tool
     panels=[object ["kind" .= ("files"::T.Text),"title" .= ("Files"::T.Text),"path" .= treeRoot tree] | Just tree<-[sideTree desktop]]
       ++[object ["kind" .= ("messages"::T.Text),"title" .= ("Messages"::T.Text),"bounds" .= rect (problemsRect desktop)] | problemsVisible desktop]
     rect (Rect x y w h)=object ["x" .= x,"y" .= y,"width" .= w,"height" .= h]
-    title doc=fromMaybe (maybe "Untitled" (T.pack . filePath) (documentFile doc)) (documentLabel doc)
-    bufferInfo ident doc=object ["bufferId" .= ident,"title" .= title doc,"path" .= fmap filePath (documentFile doc),
+    title doc | privateDocument desktop doc="[private]"
+              | otherwise=fromMaybe (maybe "Untitled" (T.pack . filePath) (documentFile doc)) (documentLabel doc)
+    bufferInfo ident doc=object ["bufferId" .= ident,"title" .= title doc,"path" .= (if privateDocument desktop doc then Nothing else fmap filePath (documentFile doc)),
       "modified" .= dirty (documentBuffer doc),"binary" .= byteMode (documentBuffer doc),"revision" .= revision (documentBuffer doc)]
 
 -- Initiation runs with the desktop locked. Waiting for protocol replies must
@@ -262,7 +268,8 @@ toolResult outcome=object ["isError" .= either (const True) (const False) outcom
 
 debugTools :: [Value]
 debugTools =
-  [ describe "debug_status" "Read connection, stop state, generation, selected frame, capabilities, breakpoints and recent output." True [] []
+  [ describe "debug_status" "Read connection, stop state, generation, selected frame, follow mode, capabilities, breakpoints and recent output." True [] []
+  , describe "debug_present" "Set automatic source following (initially true), or reveal source/stack/scopes/output from the shared session. Omitted follow is unchanged; false keeps asynchronous stops in the background. Any view requires the current generation; source/stack/scopes also require a stopped target. follow=true resumes future automatic following; use view=source to reveal now. Presentation does not resume, relaunch or advance generation." False [] [("follow",object ["type" .= ("boolean"::T.Text)]),("view",enum ["source","stack","scopes","output"]),("generation",integer)]
   , describe "debug_launch" "Launch the configured THC target, or a general DAP adapter JSON configuration. Fails if a session is already active." False [] [("adapterConfig",str),("port",integer)]
   , describe "debug_attach" "Attach to a loopback DAP adapter (127.0.0.1:4711 by default)." False [] [("host",str),("port",integer)]
   , describe "debug_control" "Continue, step, pause or disconnect the current debug generation. Accepted does not mean the next stop has occurred; inspect status afterwards." False ["generation","command"] [("generation",integer),("command",enum ["continue","next","stepIn","stepOut","pause","disconnect"])]
@@ -275,14 +282,15 @@ debugTools =
     enum values=object ["type" .= ("string"::T.Text),"enum" .= (values::[T.Text])]
     describe :: T.Text -> T.Text -> Bool -> [T.Text] -> [(T.Text,Value)] -> Value
     describe name description readOnly required properties=object ["name" .= name,"description" .= description,
-      "inputSchema" .= object ["type" .= ("object"::T.Text),"properties" .= object [Data.Aeson.Key.fromText key .= value | (key,value)<-properties],"required" .= required,"additionalProperties" .= False],
+      "inputSchema" .= object (["type" .= ("object"::T.Text),"properties" .= object [Data.Aeson.Key.fromText key .= value | (key,value)<-properties],"required" .= required,"additionalProperties" .= False]++
+        ["dependentRequired" .= object ["view" .= ["generation"::T.Text]] | name=="debug_present"]),
       "annotations" .= object ["readOnlyHint" .= readOnly,"destructiveHint" .= not readOnly,"openWorldHint" .= not readOnly]]
 
 tools :: [Value]
 tools =
   [ describe "list_windows" "List editor window IDs, titles, buffer IDs, geometry, active window and side panels." []
   , describe "list_buffers" "List open buffers with paths and unsaved-change state, including untitled buffers." []
-  , describe "read_buffer" "Read live buffer contents including unsaved edits. Text is paged by 1-based lines (200 default, 1000 maximum); binary buffers return up to 4096 hex bytes from byteOffset." [("bufferId","integer"),("startLine","integer"),("lineCount","integer"),("byteOffset","integer")]
+  , describe "read_buffer" "Read live buffer contents including unsaved edits; private conversation fields are redacted and approval buffers are unavailable. Text is paged by 1-based lines (200 default, 1000 maximum); binary buffers return up to 4096 hex bytes from byteOffset." [("bufferId","integer"),("startLine","integer"),("lineCount","integer"),("byteOffset","integer")]
   , describe "read_selection" "Read selection and cursor offsets in an editor window (defaults to the active window)." [("windowId","integer")]
   ]
   where

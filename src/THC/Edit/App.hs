@@ -4,8 +4,10 @@ module THC.Edit.App (main, demoDesktop, applyEffects) where
 import Control.Applicative ((<|>))
 import Data.Maybe (fromMaybe)
 import THC.Edit.DocsMCP
+import THC.Edit.GuestAccess (protectedPath, protectedBuffer)
 import THC.Edit.Defaults
 import THC.Edit.MCPPermissions
+import THC.Edit.ClipboardMCP
 import THC.Edit.ControlMCP
 import Control.Exception (bracket, finally, catch, AsyncException(UserInterrupt), throwIO)
 import Control.Concurrent (myThreadId, throwTo)
@@ -23,6 +25,7 @@ import THC.Edit.HistoryMCP
 import THC.Edit.RuntimeMCP
 import THC.Edit.WorkspaceMCP
 import THC.Edit.EditorMCP (runEditorMCP, editorResponseWith, debugTools, builtinTools, builtinTool)
+import THC.Edit.RemoteEndpoint (sessionEndpoint)
 import THC.Edit.Session
 import THC.Edit.Completion (bashCompletion)
 import THC.Edit.RemoteTerminal (runRemoteTerminal)
@@ -40,7 +43,7 @@ import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
 import qualified Graphics.Vty as V
 import System.Console.GetOpt
-import System.Directory (doesDirectoryExist, doesFileExist, getCurrentDirectory, getHomeDirectory, setCurrentDirectory, listDirectory)
+import System.Directory (XdgDirectory(..), getXdgDirectory, canonicalizePath, doesDirectoryExist, doesFileExist, getCurrentDirectory, getHomeDirectory, setCurrentDirectory, listDirectory)
 import System.FilePath ((</>), isAbsolute, takeDirectory, takeFileName, takeExtension)
 import Control.Exception (try, IOException)
 import Paths_thc_edit (getDataFileName)
@@ -59,7 +62,7 @@ import THC.Edit.Render
 import THC.Edit.Files
 import THC.Edit.Reconcile
 
-data Option = MCPBridge String | Resume (Maybe String) | SSH String | RemoteSession String | RemoteDaemon String | Use Backend | Scale String | Size String | Mode String | ColorMode String | Demo | CRT | NoCRT | MaterialIcons | ClassicIcons | WordStar | StandardKeys | CursorBlink Bool | Pixelate Bool | Snapshot | Html | Scene String | Usage deriving Eq
+data Option = MCPBridge String | Resume (Maybe String) | SSH String | RemoteSession String | RemoteDaemon String | Use Backend | Scale String | Size String | Mode String | ColorMode String | Demo | CRT | NoCRT | MaterialIcons | ClassicIcons | WordStar | StandardKeys | CursorBlink Bool | Pixelate Bool | Streamer Bool | Snapshot | Html | Scene String | Usage deriving Eq
 options :: [OptDescr Option]
 options = [Option [] ["appearance"] (ReqArg ColorMode "light|dark|system") "Document/terminal colors (default THC_EDIT_APPEARANCE or system)"
           ,Option [] ["metal"] (NoArg (Use Metal)) "Open a Metal window"
@@ -72,6 +75,8 @@ options = [Option [] ["appearance"] (ReqArg ColorMode "light|dark|system") "Docu
           ,Option [] ["window"] (NoArg (Use Auto)) "Open a window using the platform backend"
           ,Option [] ["terminal"] (NoArg (Use Terminal)) "Use the terminal (override THC_EDIT_BACKEND)"
           ,Option [] ["crt"] (NoArg CRT) "Enable CRT scanlines and vignetting (window only)"
+          ,Option [] ["streamer"] (NoArg (Streamer True)) "Hide sensitive fields and session keys on screen"
+          ,Option [] ["no-streamer"] (NoArg (Streamer False)) "Show sensitive fields on the human display"
           ,Option [] ["no-crt"] (NoArg NoCRT) "Disable CRT filtering"
           ,Option [] ["classic-icons"] (NoArg ClassicIcons) "Use standard folder icons"
           ,Option [] ["standard-keys"] (NoArg StandardKeys) "Use standard editing keys"
@@ -111,7 +116,10 @@ runEditor args = do
     [MCPBridge ident] | null paths -> runEditorMCP ident
     _ -> die "--mcp-editor accepts only a session ID."
   else do
-    defaultsJSON<-readEditorDefaults >>= either (die . T.unpack) pure
+    configBase<-case paths of
+      path:_ | not (any isSSH flags), parseRemoteTarget path==Nothing -> expandRemoteHome path
+      _ -> getCurrentDirectory
+    defaultsJSON<-readEditorDefaultsFor configBase >>= either (die . T.unpack) pure
     defaults<-either die pure (parseEither parseDefaults defaultsJSON)
     let backendDefault=backendEnvironment <|> defaultBackend defaults
         scaleDefault=scaleEnvironment <|> (show <$> defaultScale defaults)
@@ -190,7 +198,7 @@ runEditor args = do
       (withDetachSignals (attach display) `catch` (\err -> writeIORef wasInterrupted True >> interrupted err)) `finally` report
     else do
         let initial=if Demo `elem` flags then addDocument Nothing (newBuffer (activeText demoDesktop)) (initialDesktop dimensions) else initialDesktop dimensions
-            configured=(fst (handleEvent (uncurry V.EvResize dimensions) initial)) {appearance=colorMode,systemDark=maybe True (not . (`elem` ["7","15"]) . reverse . takeWhile (/=';') . reverse) terminalColors,wordStar=flagBool WordStar StandardKeys (fromMaybe (wordStar initial) (defaultWordStar defaults)),crtFilter=flagBool CRT NoCRT (fromMaybe (crtFilter initial) (defaultCRT defaults)),materialIcons=flagBool MaterialIcons ClassicIcons (fromMaybe (materialIcons initial) (defaultMaterialIcons defaults)),blinkCursor=fromMaybe (fromMaybe (blinkCursor initial) (defaultBlinkCursor defaults)) (lastMaybe [value | CursorBlink value<-flags]),pixelateUnicode=fromMaybe (fromMaybe (pixelateUnicode initial) (defaultPixelateUnicode defaults)) (lastMaybe [value | Pixelate value<-flags]),videoMode=if backend == Terminal then Nothing else Just screenMode}
+            configured=(fst (handleEvent (uncurry V.EvResize dimensions) initial)) {appearance=colorMode,systemDark=maybe True (not . (`elem` ["7","15"]) . reverse . takeWhile (/=';') . reverse) terminalColors,wordStar=flagBool WordStar StandardKeys (fromMaybe (wordStar initial) (defaultWordStar defaults)),crtFilter=flagBool CRT NoCRT (fromMaybe (crtFilter initial) (defaultCRT defaults)),materialIcons=flagBool MaterialIcons ClassicIcons (fromMaybe (materialIcons initial) (defaultMaterialIcons defaults)),blinkCursor=fromMaybe (fromMaybe (blinkCursor initial) (defaultBlinkCursor defaults)) (lastMaybe [value | CursorBlink value<-flags]),pixelateUnicode=fromMaybe (fromMaybe (pixelateUnicode initial) (defaultPixelateUnicode defaults)) (lastMaybe [value | Pixelate value<-flags]),streamerMode=fromMaybe (fromMaybe False (defaultStreamerMode defaults)) (lastMaybe [value | Streamer value<-flags]),videoMode=if backend == Terminal then Nothing else Just screenMode}
         localPaths<-if daemon/=Nothing then mapM expandRemoteHome paths else pure paths
         (_,loaded)<-applyEffects configured (map ReadPath localPaths)
         cwd<-getCurrentDirectory
@@ -200,12 +208,18 @@ runEditor args = do
         let focused=browsing {sideTree=fmap (\tree -> tree {treeFocused=null (windows browsing)}) (sideTree browsing)}
         (_,withGit)<-applyEffects focused [RefreshGit (startingDirectory focused)]
         staged<-foldM stageScene withGit [scene | Scene scene<-flags]
-        if Html `elem` flags then TIO.putStr (snapshotHtml staged)
-        else if Snapshot `elem` flags then TIO.putStr (snapshot staged)
+        configPath<-permissionConfigPath
+        localConfigPath<-projectConfigPath configBase
+        agentDirectory<-getXdgDirectory XdgConfig "thc-edit"
+        endpoints<-maybe (pure []) (\sid -> do endpoint<-sessionEndpoint sid; pure [takeDirectory endpoint]) daemon
+        privatePaths<-mapM canonicalizePath ([configPath,localConfigPath,agentDirectory </> "agents.json",agentDirectory </> "agent-session.json"]++endpoints)
+        let protectedDesktop=staged {guestPrivatePaths=privatePaths}
+        if Html `elem` flags then TIO.putStr (snapshotHtml protectedDesktop)
+        else if Snapshot `elem` flags then TIO.putStr (snapshot protectedDesktop)
         else do
           mapM_ (setEnv "THC_EDIT_SESSION") daemon
           font<-Font.loadFont
-          let specs=builtinTools++debugTools++chatTools++toolingTools++workspaceTools++fileTools++testsTools++historyTools++runtimeTools++controlTools++docsTools++[screenTool]
+          let specs=builtinTools++debugTools++chatTools++toolingTools++workspaceTools++fileTools++testsTools++historyTools++runtimeTools++controlTools++clipboardTools++docsTools++[screenTool]
           withPermissions specs $ \permissions -> withDebugger $ \debugger -> withConversation $ \conversation -> withTooling $ \tooling -> withGitOperations $ \gitOperations -> withReconciliation $ \reconciliation -> do
             exiting<-newIORef False
             let runtimeEffects=gitOperationEffects gitOperations (debuggerEffects debugger (conversationEffects conversation (reconciliationEffects reconciliation (toolingEffects tooling applyEffects))))
@@ -217,6 +231,7 @@ runEditor args = do
                       result@(quit,_)<-runtimeEffects current [effect]
                       when quit (writeIORef exiting True)
                       pure result
+                guestCore d pending=validateGuestEffects d pending >> core d pending
                 effects d pending=do
                   writeIORef exiting False
                   (quit,updated)<-policyEffects permissions core d pending
@@ -226,25 +241,26 @@ runEditor args = do
                 inspectTool d name parameters
                   | name `elem` ["list_windows","list_buffers","read_buffer","read_selection"] = pure (d,pure (builtinTool d name parameters))
                   | name `elem` chatToolNames = chatTool conversation d name parameters
-                  | name `elem` toolingToolNames = toolingTool tooling core d name parameters
-                  | name `elem` workspaceToolNames = workspaceTool core d name parameters
-                  | name `elem` fileToolNames = fileTool core d name parameters
+                  | name `elem` toolingToolNames = toolingTool tooling guestCore d name parameters
+                  | name `elem` workspaceToolNames = workspaceTool guestCore d name parameters
+                  | name `elem` fileToolNames = fileTool guestCore d name parameters
                   | name `elem` testsToolNames = testsTool conversation d name parameters
                   | name `elem` historyToolNames = historyTool d name parameters
                   | name `elem` runtimeToolNames = runtimeTool conversation d name parameters
+                  | name=="clipboard_write" = clipboardTool d parameters
                   | name `elem` docsToolNames = docsTool d name parameters
-                  | name `elem` controlToolNames = controlTool core d name parameters
+                  | name `elem` controlToolNames = controlTool guestCore d name parameters
                   | name=="editor_screen" = pure (d,case parseEither (withObject "screen" (\o -> o .:? "image" .!= False)) parameters of
                       Left err -> pure (Left (T.pack err))
                       Right image -> capture font d image)
-                  | otherwise = debuggerTool debugger core d name parameters
+                  | otherwise = debuggerTool debugger guestCore d name parameters
                 inspect d request=do
                   writeIORef exiting False
                   (updated,finish)<-editorResponseWith specs (permissionCall permissions inspectTool) d request
                   quit<-readIORef exiting
                   pure (quit,updated,finish)
             case daemon of
-              Just sid -> runRemoteDaemon sid scale effects tick inspect staged
+              Just sid -> runRemoteDaemon sid scale effects tick inspect protectedDesktop
               Nothing -> die "Missing session process identity."
 
   where
@@ -321,6 +337,7 @@ remoteArguments flags paths = concatMap option flags++["--"]++paths
     option ClassicIcons=["--classic-icons"]
     option StandardKeys=["--standard-keys"]
     option (CursorBlink yes)=[if yes then "--blink-cursor" else "--no-blink-cursor"]
+    option (Streamer yes)=[if yes then "--streamer" else "--no-streamer"]
     option (Pixelate yes)=[if yes then "--pixelate-unicode" else "--no-pixelate-unicode"]
     option MaterialIcons=["--material-icons"]
     option WordStar=["--wordstar"]
@@ -488,3 +505,21 @@ packageDirectory start = search start
       entries<-either (const []) id <$> (try (listDirectory path) :: IO (Either IOException [FilePath]))
       if any ((==".cabal") . takeExtension) entries then pure path
         else if takeDirectory path==path then pure start else search (takeDirectory path)
+
+-- The guest input route may produce filesystem effects through ordinary dialogs.
+-- Check their resolved targets before any effect runs; human input uses core
+-- directly and retains normal access to these files.
+validateGuestEffects :: Desktop -> [Effect] -> IO ()
+validateGuestEffects d = mapM_ check
+  where
+    denied=ioError (userError "Guest tools cannot access editor authority or session-key files.")
+    path name=canonicalizePath name >>= \resolved -> when (protectedPath d resolved) denied
+    buffer ident=when (protectedBuffer d ident) denied
+    check effect=case effect of
+      ReadPath name -> path name
+      JumpTo name _ _ -> path name
+      OpenChoice base input pattern -> let chosen=T.unpack (if T.null input then pattern else input) in path (if isAbsolute chosen then chosen else base </> chosen)
+      SaveDocument ident target _ -> buffer ident >> maybe (pure ()) path target
+      DownloadDocument ident -> buffer ident
+      ResolveConflict conflict _ -> buffer (conflictBuffer conflict)
+      _ -> pure ()

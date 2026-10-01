@@ -14,6 +14,7 @@ import qualified Data.Text.IO as TIO
 import qualified Graphics.Vty as V
 import System.Directory
 import System.FilePath ((</>))
+import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.IO (hClose, openTempFile)
 import System.Timeout (timeout)
 import THC.Edit.Buffer
@@ -23,6 +24,7 @@ import THC.Edit.Model
 checks :: IO ()
 checks=do
   configChecks
+  projectConfigChecks
   bracket temporary removePathForcibly $ \directory -> do
     let path=directory </> "config.toml"
         specs=[object ["name" .= name,"annotations" .= object ["readOnlyHint" .= readonly]] | (name,readonly)<-[("mutate"::T.Text,False),("read",True)]]
@@ -146,6 +148,107 @@ configChecks=bracket temporary removePathForcibly $ \directory -> do
   check "invalid TOML is not overwritten or leaked" (unchanged==malformed && case refused of Left err->not ("hidden" `T.isInfixOf` err); _->False)
   bad<-writeEditorDefaultsAt path (object ["notASetting" .= True])
   check "unknown editor defaults are rejected" (case bad of Left _->True; _->False)
+
+projectConfigChecks :: IO ()
+projectConfigChecks=bracket temporary removePathForcibly $ \directory -> do
+  let root=directory </> "project"
+      nested=root </> "nested"
+      deep=nested </> "src"
+      source=deep </> "Main.hs"
+      projectPath=root </> "thc.toml"
+      localPath=nested </> "thc.toml"
+      globalDirectory=directory </> "global"
+      globalPath=globalDirectory </> "thc/config.toml"
+      absentPath=directory </> "absent.toml"
+      isLeft (Left _)=True
+      isLeft _=False
+  createDirectoryIfMissing True deep
+  createDirectory (root </> ".git")
+  TIO.writeFile source "main = pure ()\n"
+  TIO.writeFile (directory </> "thc.toml") "[editor.defaults]\nscale = 99\n"
+  fallback<-projectConfigPath source
+  check "project discovery stops at a Git boundary before outer settings" (fallback==projectPath)
+  TIO.writeFile projectPath "[editor.defaults]\nscale = 2\nrows = 40\n"
+  inherited<-projectConfigPath source
+  check "nested file paths discover enclosing project settings" (inherited==projectPath)
+  TIO.writeFile localPath "[editor.defaults]\ncolumns = 100\n"
+  nearest<-projectConfigPath deep
+  check "nearest existing local config wins within a project" (nearest==localPath)
+  removeFile localPath
+  TIO.writeFile (nested </> "package.cabal") "name: nested\n"
+  packageBoundary<-projectConfigPath source
+  check "nested Cabal package stops inherited settings at its own boundary" (packageBoundary==localPath)
+  removeFile (nested </> "package.cabal")
+  TIO.writeFile (nested </> "cabal.project") "packages: .\n"
+  cabalBoundary<-projectConfigPath source
+  check "cabal.project also defines the local settings boundary" (cabalBoundary==localPath)
+  removeFile (nested </> "cabal.project")
+  removeDirectory (root </> ".git")
+  TIO.writeFile (root </> ".git") "gitdir: elsewhere\n"
+  removeFile projectPath
+  worktreeBoundary<-projectConfigPath source
+  check "Git worktree marker files define settings boundaries" (worktreeBoundary==projectPath)
+  removeFile (directory </> "thc.toml")
+  let orphan=directory </> "orphan"
+  createDirectory orphan
+  orphanPath<-projectConfigPath orphan
+  check "unmarked directories fall back to their original directory" (orphanPath==orphan </> "thc.toml")
+  absentContext<-readAgentContextAt absentPath
+  check "missing agent context is empty" (absentContext==Right "")
+  let context="Use local conventions.\nKeep \"quoted\" names and \\ paths.\nλ documentation\n"
+      original="# preserve context comments\n[compiler]\noptimization = 3 # unchanged\n\n[editor.agent]\ncontext = \"\"\"old\nmultiline\"\"\" # context note\nother = 'keep'\n\n[editor.mcp.permissions]\nmutate = 'disable'\n"
+  TIO.writeFile absentPath original
+  savedContext<-writeAgentContextAt absentPath context
+  rereadContext<-readAgentContextAt absentPath
+  preserved<-TIO.readFile absentPath
+  check "multiline context updates roundtrip valid TOML and preserve unrelated comments/tables"
+    (savedContext==Right () && rereadContext==Right context && "optimization = 3 # unchanged" `T.isInfixOf` preserved && "# context note\nother = 'keep'" `T.isInfixOf` preserved && "mutate = 'disable'" `T.isInfixOf` preserved)
+  oversized<-writeAgentContextAt absentPath (T.replicate 16385 "x")
+  afterOversize<-TIO.readFile absentPath
+  check "oversized context writes are rejected without changing configuration" (isLeft oversized && afterOversize==preserved)
+  TIO.writeFile absentPath ("[editor.agent]\ncontext = '"<>T.replicate 16385 "x"<>"'\n")
+  oversizedRead<-readAgentContextAt absentPath
+  check "oversized contexts on disk are rejected" (isLeft oversizedRead)
+  TIO.writeFile absentPath "[editor.agent]\ncontext = 12\n"
+  wrongType<-readAgentContextAt absentPath
+  check "agent context requires a string" (isLeft wrongType)
+  TIO.writeFile absentPath "[broken\ncontext = 'private-context-value'\n"
+  malformedRead<-readAgentContextAt absentPath
+  malformedWrite<-writeAgentContextAt absentPath "replacement"
+  malformedDisk<-TIO.readFile absentPath
+  check "malformed agent config is neither exposed nor overwritten" (all (\result->case result of Left err->T.length err<256 && not ("private-context-value" `T.isInfixOf` err); _->False) [fmap (const ()) malformedRead,malformedWrite] && "private-context-value" `T.isInfixOf` malformedDisk)
+  bracket (lookupEnv "XDG_CONFIG_HOME" <* setEnv "XDG_CONFIG_HOME" globalDirectory)
+    (maybe (unsetEnv "XDG_CONFIG_HOME") (setEnv "XDG_CONFIG_HOME")) $ \_ -> do
+      _<-writeEditorDefaults (object ["backend" .= ("terminal"::T.Text),"scale" .= (1::Int),"wordStar" .= True])
+      _<-writeAgentContextAt globalPath "Global guidance"
+      TIO.writeFile projectPath "[editor.defaults]\nscale = 2\nrows = 40\n[editor.agent]\ncontext = 'Project guidance'\n[editor.mcp.permissions]\nmutate = 'enable'\n"
+      merged<-readEditorDefaultsFor source
+      globalOnly<-readEditorDefaults
+      check "project defaults override global keys while inheriting omitted keys"
+        (merged==Right (object ["backend" .= ("terminal"::T.Text),"scale" .= (2::Int),"rows" .= (40::Int),"wordStar" .= True]) && globalOnly==Right (object ["backend" .= ("terminal"::T.Text),"scale" .= (1::Int),"wordStar" .= True]))
+      contexts<-readAgentContexts source
+      check "agent contexts return separate global/project text and resolved paths"
+        (contexts==Right (object ["global" .= object ["path" .= globalPath,"text" .= ("Global guidance"::T.Text)],"project" .= object ["path" .= projectPath,"text" .= ("Project guidance"::T.Text)]]))
+      calls<-newIORef (0::Int)
+      let execute d _ _=modifyIORef' calls (+1) >> pure (d,pure (Right Null))
+          spec=object ["name" .= ("mutate"::T.Text),"annotations" .= object ["readOnlyHint" .= False]]
+          base=(initialDesktop (80,25)) {defaultDirectory=Just root}
+      TIO.appendFile globalPath "\n[editor.mcp.permissions]\nmutate = 'disable'\n"
+      withPermissions [spec] $ \runtime -> do
+        (_,reply)<-permissionCall runtime execute base "mutate" (object [])
+        result<-reply
+        count<-readIORef calls
+        check "project permissions never override global permissions" (isLeft result && count==0)
+      TIO.writeFile projectPath "[editor.defaults]\n[editor.agent]\ncontext = ''\n"
+      emptyDefaults<-readEditorDefaultsFor source
+      emptyContexts<-readAgentContexts source
+      check "empty project defaults inherit global settings while empty context remains explicit"
+        (emptyDefaults==globalOnly && case emptyContexts of Right value->(field "project" value >>= field "text"::Maybe T.Text)==Just ""; _->False)
+      TIO.writeFile projectPath "[invalid\nsecret = 'private-project-value'\n"
+      malformedDefaults<-readEditorDefaultsFor source
+      malformedContexts<-readAgentContexts source
+      check "malformed project errors are bounded and do not reveal configuration contents"
+        (all (\result->case result of Left err->T.length err<256 && not ("private-project-value" `T.isInfixOf` err); _->False) [malformedDefaults,malformedContexts])
 
 field :: FromJSON a => Key -> Value -> Maybe a
 field key=parseMaybe (withObject "object" (.:key))

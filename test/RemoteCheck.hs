@@ -34,6 +34,8 @@ checks :: IO ()
 checks = do
   localPeerCheck
   inspectionExitCheck
+  inspectionViewerExitCheck
+  promptedExitCheck
   sshFailureCheck
   let assert label ok=unless ok (error label)
   session <- randomIdentity
@@ -52,6 +54,8 @@ checks = do
         putMVar inspectionStarted ()
         pure (False,d,(takeMVar inspectionRelease >> pure (Just (String "done"))) `finally` void (tryPutMVar inspectionFinished ()))
       inspectLive d (String "deferred")=deferred d
+      inspectLive d (String "clipboard-export")=pure (False,d {clipboardExport=(fst (clipboardExport d)+1,Just "synthetic fixture λ")},pure (Just (String "queued")))
+      inspectLive d (String "clipboard-status")=pure (False,d,pure (Just (toJSON (clipboardExport d))))
       inspectLive d (Object fields) | KM.lookup "method" fields==Just (String "test/deferred")=deferred d
       inspectLive d request=inspect d request
       open = connectEndpoint path
@@ -92,6 +96,20 @@ checks = do
       assert "inspection works while an editor owns the writer slot" (case inspected of
         Just (JsonPacket (Object fields)) -> KM.lookup "id" fields==Just (toJSON (41::Int)) && KM.member "result" fields
         _ -> False)
+    bracket open hClose $ \clipboardInspector -> do
+      writePacket clipboardInspector (JsonPacket (object ["type" .= ("inspect"::T.Text),"request" .= ("clipboard-export"::T.Text)]))
+      reply<-receive clipboardInspector
+      assert "explicit clipboard output is queued" (case reply of Just (JsonPacket (String "queued")) -> True; _ -> False)
+    copied<-control connected "copy"
+    assert "explicit clipboard output reaches attached frontend" (KM.lookup "text" copied==Just (String "synthetic fixture λ"))
+    let awaitClipboardClear=do
+          cleared<-bracket open hClose $ \clipboardInspector -> do
+            writePacket clipboardInspector (JsonPacket (object ["type" .= ("inspect"::T.Text),"request" .= ("clipboard-status"::T.Text)]))
+            reply<-receive clipboardInspector
+            pure (case reply of Just (JsonPacket value) -> value==toJSON ((1::Int),Nothing::Maybe T.Text); _ -> False)
+          unless cleared (threadDelay 1000 >> awaitClipboardClear)
+    cleared<-timeout 3000000 awaitClipboardClear
+    assert "successful clipboard output clears its queued export" (cleared==Just ())
     inspector<-open
     writePacket inspector (JsonPacket (object ["type" .= ("inspect"::T.Text),"request" .= ("deferred"::T.Text)]))
     began<-timeout 3000000 (takeMVar inspectionStarted)
@@ -314,3 +332,111 @@ inspectionExitCheck=do
     unless (ended==Just ()) (error "MCP Exit must end daemon")
     retained<-S.loadSession session
     unless (retained==Nothing) (error "MCP Exit must remove session catalog")
+
+-- The approval connection can request Exit before the inspecting thread has
+-- resumed its continuation. The daemon must join the accepted reply, not just
+-- the connection that delivered approval.
+promptedExitCheck :: IO ()
+promptedExitCheck=do
+  session<-randomIdentity
+  path<-sessionEndpoint session
+  started<-newEmptyMVar
+  approved<-newEmptyMVar
+  ready<-newEmptyMVar
+  releaseReply<-newEmptyMVar
+  pendingStarted<-newEmptyMVar
+  pendingCancelled<-newEmptyMVar
+  never<-newEmptyMVar
+  let initial=initialDesktop (80,25)
+      effects d requests=do
+        whenExit requests (void (tryPutMVar approved ()))
+        pure (Exit `elem` requests,d)
+      whenExit requests action=if Exit `elem` requests then action else pure ()
+      inspectPrompt d (String "exit-after-approval")=do
+        putMVar started ()
+        pure (False,d,readMVar approved >> putMVar ready () >> takeMVar releaseReply >> pure (Just (String "approved-exit")))
+      inspectPrompt d (String "unapproved")=do
+        putMVar pendingStarted ()
+        pure (False,d,(takeMVar never >> pure Nothing) `finally` putMVar pendingCancelled ())
+      inspectPrompt d value=inspect d value
+      open attempts=connectEndpoint path `catch` \(err::IOException) ->
+        if attempts<=0 then throwIO err else threadDelay 10000 >> open (attempts-1)
+      receive h=timeout 3000000 (readPacket h) >>= maybe (error "Prompted Exit packet timed out") pure
+      control h wanted=do
+        packet<-receive h
+        case packet of
+          Just (JsonPacket (Object fields)) | KM.lookup "type" fields==Just (String wanted) -> pure ()
+          Just _ -> control h wanted
+          Nothing -> error "Prompted Exit connection ended early"
+      await label barrier=timeout 3000000 (takeMVar barrier) >>= \result -> unless (result==Just ()) (error label)
+  withAsync (runRemoteDaemon session 1 effects pure inspectPrompt initial) $ \daemon -> do
+    link daemon
+    bracket (open (100::Int)) hClose $ \inspector -> bracket (open (0::Int)) hClose $ \pending -> bracket (open (0::Int)) hClose $ \display -> do
+      writePacket inspector (JsonPacket (object ["type" .= ("inspect"::T.Text),"request" .= ("exit-after-approval"::T.Text)]))
+      await "Prompted Exit inspection did not start" started
+      writePacket pending (JsonPacket (object ["type" .= ("inspect"::T.Text),"request" .= ("unapproved"::T.Text)]))
+      await "Unapproved inspection did not start" pendingStarted
+      writePacket display (JsonPacket (object ["type" .= ("hello"::T.Text),"version" .= (1::Int),"session" .= session,"client" .= replicate 48 'e',"ack" .= (0::Int)]))
+      control display "hello"
+      control display "assets"
+      writePacket display (JsonPacket (object ["type" .= ("command"::T.Text),"seq" .= (1::Int),"command" .= ("quit"::T.Text)]))
+      writePacket display (JsonPacket (object ["type" .= ("paste"::T.Text),"seq" .= (2::Int),"text" .= ("must not reopen session"::T.Text)]))
+      control display "closed"
+      bracket (open (0::Int)) hClose $ \late -> do
+        writePacket late (JsonPacket (object ["type" .= ("inspect"::T.Text),"request" .= ("late request"::T.Text)]))
+        denied<-receive late
+        unless (case denied of Just (JsonPacket (Object fields)) -> KM.lookup "type" fields==Just (String "error"); _ -> False) (error "Closing session admitted a new inspection")
+      await "Approved Exit continuation never became ready" ready
+      premature<-timeout 50000 (wait daemon)
+      unless (premature==Nothing) (error "Daemon exited before approved inspection reply was released")
+      putMVar releaseReply ()
+      reply<-receive inspector
+      unless (case reply of Just (JsonPacket (String "approved-exit")) -> True; _ -> False) (error "Approved Exit response lost")
+      await "Daemon did not cancel unapproved inspection" pendingCancelled
+    ended<-timeout 3000000 (wait daemon)
+    unless (ended==Just ()) (error "Prompted Exit daemon did not finish after draining replies")
+    retained<-S.loadSession session
+    unless (retained==Nothing) (error "Prompted Exit left session catalog")
+
+inspectionViewerExitCheck :: IO ()
+inspectionViewerExitCheck=do
+  session<-randomIdentity
+  path<-sessionEndpoint session
+  committed<-newEmptyMVar
+  let initial=addDocument Nothing (newBuffer "") (initialDesktop (80,25))
+      effects d _=pure (False,d)
+      tick d=do
+        if activeText d=="accepted input" then void (tryPutMVar committed ()) else pure ()
+        pure d
+      inspectExit d _=pure (True,d,pure (Just (String "exiting")))
+      open attempts=connectEndpoint path `catch` \(err::IOException) ->
+        if attempts<=0 then throwIO err else threadDelay 10000 >> open (attempts-1)
+      receive h=timeout 3000000 (readPacket h) >>= maybe (error "Inspect Exit viewer response timed out") pure
+      control h wanted=do
+        packet<-receive h
+        case packet of
+          Just (JsonPacket (Object fields)) | KM.lookup "type" fields==Just (String wanted) -> pure ()
+          Just _ -> control h wanted
+          Nothing -> error "Viewer received EOF instead of a close notification"
+      closed h acknowledged=do
+        packet<-receive h
+        case packet of
+          Just (JsonPacket (Object fields)) | KM.lookup "type" fields==Just (String "ack") -> closed h (acknowledged || KM.lookup "seq" fields==Just (toJSON (1::Int)))
+          Just (JsonPacket (Object fields)) | KM.lookup "type" fields==Just (String "closed") -> unless acknowledged (error "MCP Exit lost the viewer's accepted input acknowledgement")
+          Just _ -> closed h acknowledged
+          Nothing -> error "MCP Exit looked like a reconnectable EOF to its viewer"
+  withAsync (runRemoteDaemon session 1 effects tick inspectExit initial) $ \daemon -> do
+    link daemon
+    bracket (open (100::Int)) hClose $ \display -> bracket (open (0::Int)) hClose $ \inspector -> do
+      writePacket display (JsonPacket (object ["type" .= ("hello"::T.Text),"version" .= (1::Int),"session" .= session,"client" .= replicate 48 'f',"ack" .= (0::Int)]))
+      control display "hello"
+      control display "assets"
+      writePacket display (JsonPacket (object ["type" .= ("paste"::T.Text),"seq" .= (1::Int),"text" .= ("accepted input"::T.Text)]))
+      accepted<-timeout 3000000 (takeMVar committed)
+      unless (accepted==Just ()) (error "Viewer input did not commit before MCP Exit")
+      writePacket inspector (JsonPacket (object ["type" .= ("inspect"::T.Text),"request" .= Null]))
+      reply<-receive inspector
+      unless (case reply of Just (JsonPacket (String "exiting")) -> True; _ -> False) (error "Attached MCP Exit lost its response")
+      closed display False
+    ended<-timeout 3000000 (wait daemon)
+    unless (ended==Just ()) (error "MCP Exit with attached viewer did not finish")

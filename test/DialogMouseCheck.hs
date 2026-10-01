@@ -2,6 +2,7 @@
 module DialogMouseCheck (checks) where
 
 import Control.Monad (unless)
+import Data.List (findIndex)
 import Data.Maybe (fromMaybe)
 import THC.Edit.Model
 import THC.Edit.Render (snapshotHtml, snapshot, renderDesktop)
@@ -259,7 +260,7 @@ checks = do
   check "empty message navigation is disabled and harmless" (not (commandEnabled desktop NextMessage) && not (commandEnabled desktop PreviousMessage) && null emptyNavigation)
   let preferences=fst (runCommand EditorOptions desktop)
       preferencesDialog=fromMaybe (error "missing preferences") (dialog preferences)
-      checkboxIndex=length (fields preferencesDialog)-1
+      checkboxIndex=fromMaybe (error "missing cursor checkbox") (findIndex (\field -> case field of CheckBox "Blinking cursor" _ -> True; _ -> False) (fields preferencesDialog))
       checkboxRect=at checkboxIndex (fieldRects preferences preferencesDialog)
       mouseToggled=fst (handleEvent (V.EvMouseDown (left checkboxRect+1) (top checkboxRect) V.BLeft []) preferences)
       savedPreferences=fst (handleEvent (V.EvKey V.KEnter []) mouseToggled)

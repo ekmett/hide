@@ -20,6 +20,7 @@ import THC.Edit.Browser (packageFile)
 import THC.Edit.Build (resolveBuildRoot, buildSource)
 import THC.Edit.Files (filePath)
 import THC.Edit.Git
+import THC.Edit.GuestAccess (protectedBuffer, protectedPath, protectedPathParent, privateDocument, sanitizedStatus)
 import THC.Edit.Model
 
 workspaceToolNames :: [Text]
@@ -108,12 +109,12 @@ workspaceTool apply desktop name args = case parseEither parse args of
       "workspace_project" -> pure (desktop,ioResult $ do
         root<-resolveBuildRoot desktop
         package<-packageFile root
-        pure (object ["root" .= root,"packageFile" .= package,"source" .= buildSource desktop,"unsavedBuffers" .= unsaved desktop]))
+        pure (object ["root" .= root,"packageFile" .= package,"source" .= (if maybe False (protectedBuffer desktop . bufferId) (activeWindow desktop) then Nothing else buildSource desktop >>= \p->if protectedPath desktop p then Nothing else Just p),"unsavedBuffers" .= unsaved desktop]))
       "workspace_diagnostics" -> parsed desktop ((,) <$> o .:? "offset" .!= 0 <*> o .:? "limit" .!= 100) $ \(offset,limit) ->
         if offset<0 || limit<1 || limit>200 then failure desktop "Use offset >= 0 and limit 1..200."
         else pure (desktop,pure (Right (object ["total" .= length (diagnostics desktop),"offset" .= offset,
           "diagnostics" .= map (diagnosticValue desktop) (take limit (drop offset (diagnostics desktop))),
-          "buildDiagnosticCount" .= length (buildDiagnostics desktop),"status" .= T.take 8192 (status desktop)])))
+          "buildDiagnosticCount" .= length (buildDiagnostics desktop),"status" .= T.take 8192 (sanitizedStatus desktop)])))
       "workspace_git" -> parsed desktop ((,) <$> o .: "view" <*> o .:? "path") $ \(view,path) ->
         if view/=("status"::Text) && view/="diff" then failure desktop "Unknown Git view."
         else if maybe False invalidPath path then failure desktop "Invalid path."
@@ -125,7 +126,10 @@ workspaceTool apply desktop name args = case parseEither parse args of
               Nothing -> Left "Git repository unavailable."
               Just r -> Right (object ["root" .= repoRoot r,"branch" .= repoBranch r,"diskDirty" .= repoDirty r,
                 "added" .= repoAdded r,"deleted" .= repoDeleted r,"unsavedBuffers" .= unsaved desktop])
-            else fmap (fmap (\text->object ["diff" .= T.take 131072 text,"truncated" .= (T.length text>131072),"includesUnsaved" .= False,"unsavedBuffers" .= unsaved desktop])) (repositoryDiff (startingDirectory desktop) path)
+            else do
+              let renderDiff (text,omitted)=object ["diff" .= T.take 131072 text,"truncated" .= (T.length text>131072),"includesUnsaved" .= False,
+                    "unsavedBuffers" .= unsaved desktop,"omittedFiles" .= omitted]
+              fmap (fmap renderDiff) (repositoryDiffFilteredAt (startingDirectory desktop) path (protectedPath desktop))
           pure (either (Left . T.pack . show) id result))
       _ -> failure desktop "Unknown workspace tool"
     target d wid bid Nothing=pure (selectTarget d wid bid)
@@ -149,6 +153,7 @@ selectTarget d wid bid = do
     (Just ident,_) -> maybe (Left "Window not found.") Right (find ((==ident).windowId) (windows d))
     (_,Just ident) -> maybe (Left "Buffer has no open window.") Right (find ((==ident).bufferId) (windows d))
     _ -> maybe (Left "No active window.") Right (activeWindow d)
+  when (protectedBuffer d (bufferId w)) (Left "This conversation or approval window is controlled by the user.")
   pure (focusWindow (windowId w) d)
 
 invalidPath :: FilePath -> Bool
@@ -160,6 +165,7 @@ openPath apply d path
   | otherwise=do
       checked<-tryIOError $ do
         absolute<-canonicalizePath (if isAbsolute path then path else startingDirectory d </> path)
+        when (protectedPath d absolute) (ioError (userError "This path contains private editor configuration or session data."))
         exists<-doesFileExist absolute
         pure (absolute,exists)
       case checked of
@@ -234,7 +240,10 @@ arrange action wid x y w h original=do
       unless (a>=16 && b>=5) (Left "Windows require width >= 16 and height >= 5.")
       pure (resizeWindowBounds (windowId v) ((bounds v) {width=a,height=b}) d,[])
     _ -> Left "Unknown arrangement action."
-  where needWindow=maybe (Left "No active window.") Right . activeWindow
+  where needWindow d=do
+          window<-maybe (Left "No active window.") Right (activeWindow d)
+          when (protectedBuffer d (bufferId window)) (Left "This conversation or approval window is controlled by the user.")
+          pure window
 
 fileAction :: Apply -> Desktop -> Text -> Maybe Int -> Maybe Int -> Maybe FilePath -> Maybe Int -> Maybe Text -> IO Reply
 fileAction apply original action wid bid path rev decision
@@ -255,12 +264,18 @@ fileAction apply original action wid bid path rev decision
           else if isJust (documentLabel doc) then failure original "This buffer is read-only."
           else if documentFile doc==Nothing && path==Nothing then failure original "Untitled buffer: save with a destination path first."
           else do
-            let destination=fmap (\p->if isAbsolute p then p else startingDirectory d </> p) path
-            (_,savedDesktop)<-apply d [SaveDocument (bufferId window) destination Nothing]
-            case M.lookup (bufferId window) (buffers savedDesktop) of
-              Just savedDoc | not (dirty (documentBuffer savedDoc)),isJust (documentFile savedDoc),dialog savedDesktop==Nothing ->
-                success (if action=="close" then closeActive (focusWindow (windowId window) savedDesktop) else savedDesktop)
-              _ -> failure savedDesktop ("Save did not complete: "<>failureDetail savedDesktop)
+            destinationResult<-tryIOError $ traverse (\p->do
+              absolute<-canonicalizePath (if isAbsolute p then p else startingDirectory d </> p)
+              when (protectedPathParent d absolute) (ioError (userError "This path contains private editor configuration or session data."))
+              pure absolute) path
+            case destinationResult of
+              Left err -> failure original (T.pack (show err))
+              Right destination -> do
+                (_,savedDesktop)<-apply d [SaveDocument (bufferId window) destination Nothing]
+                case M.lookup (bufferId window) (buffers savedDesktop) of
+                  Just savedDoc | not (dirty (documentBuffer savedDoc)),isJust (documentFile savedDoc),dialog savedDesktop==Nothing ->
+                    success (if action=="close" then closeActive (focusWindow (windowId window) savedDesktop) else savedDesktop)
+                  _ -> failure savedDesktop ("Save did not complete: "<>failureDetail savedDesktop)
         _ -> failure original "No active buffer."
 
 failureDetail :: Desktop -> Text
@@ -274,18 +289,21 @@ layout d=object ["screen" .= object ["columns" .= fst (screenSize d),"rows" .= s
   "windowCount" .= length (windows d),"windows" .= map windowValue (take 256 (windows d)),"windowsTruncated" .= (length (windows d)>256),
   "files" .= object ["visible" .= isJust (sideTree d),"width" .= maybe 0 treeWidth (sideTree d),"root" .= fmap treeRoot (sideTree d)],
   "messages" .= object ["visible" .= problemsVisible d,"height" .= problemsHeight d,"bounds" .= rectValue (problemsRect d)],
-  "status" .= T.take 8192 (status d)]
+  "status" .= T.take 8192 (sanitizedStatus d)]
   where
     windowValue w=object (["windowId" .= windowId w,"bufferId" .= bufferId w,"focused" .= (fmap windowId (activeWindow d)==Just (windowId w)),"bounds" .= rectValue (bounds w)]++
       case M.lookup (bufferId w) (buffers d) of
         Nothing -> []
         Just doc -> let b=documentBuffer doc; (row,column)=bufferLineColumn b (caret (selection w)) in
-          ["path" .= fmap filePath (documentFile doc),"label" .= documentLabel doc,"dirty" .= dirty b,"revision" .= revision b,
+          ["path" .= visiblePath d doc,"label" .= (if privateDocument d doc then Just "[private]" else documentLabel doc),"dirty" .= dirty b,"revision" .= revision b,
            "mode" .= (if byteMode b then "hex" else "text"::Text),"line" .= (row+1),"column" .= (column+1),
            "byteOffset" .= (if byteMode b then Just (caret (selection w)) else Nothing),"readOnly" .= isJust (documentLabel doc)])
 
+visiblePath :: Desktop -> Document -> Maybe FilePath
+visiblePath d doc=if privateDocument d doc then Nothing else fmap filePath (documentFile doc)
+
 unsaved :: Desktop -> [Value]
-unsaved d=take 256 [object ["bufferId" .= ident,"path" .= fmap filePath (documentFile doc),"revision" .= revision b,"byteLength" .= BS.length (bufferBytes b)]
+unsaved d=take 256 [object ["bufferId" .= ident,"path" .= visiblePath d doc,"revision" .= revision b,"byteLength" .= BS.length (bufferBytes b)]
   | (ident,doc)<-M.toAscList (buffers d),let b=documentBuffer doc,dirty b]
 
 diagnosticValue :: Desktop -> Diagnostic -> Value

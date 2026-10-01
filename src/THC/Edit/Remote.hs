@@ -8,7 +8,7 @@ import THC.Edit.Protocol (WirePacket(..))
 #endif
 
 #ifdef WITH_REMOTE
-import Control.Concurrent (threadDelay, forkIO)
+import Control.Concurrent (threadDelay, forkIO, myThreadId, killThread)
 import Control.Concurrent.Async (race_, withAsync, wait, waitEither)
 import Control.Concurrent.MVar
 import Control.Concurrent.STM
@@ -168,6 +168,9 @@ runRemoteDaemon session scale effects tick inspect initial = do
   state <- newMVar (Session initial {browserFrontend=True} Nothing 0 [] 0 False)
   writer <- newMVar ()
   done <- newEmptyMVar
+  inspections <- newTVarIO M.empty
+  inspectionClosing <- newTVarIO False
+  activeDisplay <- newTVarIO False
   commands <- newTBQueueIO 128
   let commandLoop = forever $ do
         (serial,received,input,reply) <- atomically (readTBQueue commands)
@@ -175,6 +178,7 @@ runRemoteDaemon session scale effects tick inspect initial = do
           unless (serial>=0 && serial<=acknowledged original+1 && received>=0 && received<=acknowledged original) (failure "Remote input sequence gap")
           let s=if serial==0 then original else original {savedReplies=filter ((>received).fst) (savedReplies original)}
           if serial==0 then pure (s {desktop=fst (applyInput Blur (desktop s))},([],stopped s,acknowledged s,webDirty (desktop s)))
+          else if stopped s then pure (s,([],True,acknowledged s,webDirty (desktop s)))
           else if serial<=acknowledged s then pure (s,(concatMap snd (savedReplies s),stopped s,acknowledged s,webDirty (desktop s))) else do
             let (next,requests)=applyInput input (desktop s)
                 anticipated=concatMap (responsePackets next) requests
@@ -203,19 +207,38 @@ runRemoteDaemon session scale effects tick inspect initial = do
           JsonPacket value | packetType first==Just "inspect" -> do
             request <- decodeValue (withObject "editor inspection" (\o -> o .: "request")) value
             mask $ \restore -> do
-              (exited,finish) <- modifyMVar state $ \s -> do
-                (exited,updated,reply) <- inspect (desktop s) request
-                pure (s {desktop=updated,stopped=stopped s || exited},(exited,reply))
-              -- Start deferred work masked before accepting cancellation. Its
-              -- interruptible waits install their cleanup before EOF can stop it.
-              withAsync finish $ \response -> withAsync (restore (BS.hGetSome connection 1)) $ \eof ->
-                flip finally (shutdown >> when exited (void (tryPutMVar done ()))) $ do
-                  completed <- restore (waitEither response eof)
-                  case completed of
-                    -- Send before waking the Windows reader: shutdown closes
-                    -- both directions, and cancellation alone cannot wake it.
-                    Left value -> writePacket connection (JsonPacket (fromMaybe Null value))
-                    Right _ -> pure ()
+              thread<-myThreadId
+              wake<-newMVar shutdown
+              let stop=withMVar wake id >> killThread thread
+                  release=do
+                    -- Exclude a late shutdown from a closed/reused descriptor.
+                    modifyMVar_ wake (const (pure (pure ())))
+                    atomically (modifyTVar' inspections (M.delete thread))
+              flip finally release $ do
+                (exited,finish) <- modifyMVar state $ \s -> do
+                  when (stopped s) (failure "Editor session is closing")
+                  -- Registration and initiation share the desktop lock with
+                  -- approval/Exit, so accepted replies cannot miss the drain.
+                  atomically (modifyTVar' inspections (M.insert thread stop))
+                  (exited,updated,reply) <- inspect (desktop s) request
+                  pure (s {desktop=updated,stopped=stopped s || exited},(exited,reply))
+                -- Start deferred work masked before accepting cancellation. Its
+                -- interruptible waits install their cleanup before EOF can stop it.
+                withAsync finish $ \response -> withAsync (restore (BS.hGetSome connection 1)) $ \eof ->
+                  flip finally (do
+                    shutdown
+                    when exited $ do
+                      attached<-atomically (writeTVar inspectionClosing True >> readTVar activeDisplay)
+                      when attached $ do
+                        flushed<-timeout 2000000 (readMVar done)
+                        when (flushed==Nothing) (hPutStrLn stderr "Attached display did not finish its close notification.")
+                      void (tryPutMVar done ())) $ do
+                    completed <- restore (waitEither response eof)
+                    case completed of
+                      -- Send before waking the Windows reader: shutdown closes
+                      -- both directions, and cancellation alone cannot wake it.
+                      Left responseValue -> writePacket connection (JsonPacket (fromMaybe Null responseValue))
+                      Right _ -> pure ()
           _ -> do
             Hello requested client clientAck _ _ <- parseHelloPacket first
             unless (requested==session) (failure "Wrong remote session")
@@ -223,6 +246,8 @@ runRemoteDaemon session scale effects tick inspect initial = do
             case available of
               Nothing -> writePacket connection (json "error" ["message" .= ("Remote editor already has a writer"::T.Text)])
               Just () -> finally (attachment connection client clientAck) (do
+                closing<-atomically (writeTVar activeDisplay False >> readTVar inspectionClosing)
+                when closing (void (tryPutMVar done ()))
                 -- Wait behind accepted commands before another writer can attach.
                 barrier <- newEmptyTMVarIO
                 atomically (writeTBQueue commands (0,0,Blur,barrier))
@@ -230,16 +255,19 @@ runRemoteDaemon session scale effects tick inspect initial = do
                 putMVar writer ())
       attachment connection client clientAck = do
         (ack,attachmentEpoch,replay) <- modifyMVar state $ \s -> do
+          when (stopped s) (failure "Editor session is closing")
           let switched=owner s/=Just client
               ack=if switched then 0 else acknowledged s
               gen=generation s+if switched then 1 else 0
               saved=if switched then [(1,concatMap snd (savedReplies s)) | not (null (savedReplies s))] else filter ((>clientAck).fst) (savedReplies s)
           unless (clientAck<=ack) (failure "Remote server lost acknowledged input")
+          atomically (writeTVar activeDisplay True)
           pure (s {owner=Just client,acknowledged=ack,generation=gen,savedReplies=saved},(ack,epoch++"-"++show gen,concatMap snd saved))
         writePacket connection (json "hello" ["version" .= protocolVersion,"session" .= session,"epoch" .= attachmentEpoch,"ack" .= ack,"replay" .= length replay])
         writePacket connection (JsonPacket (assetsPacket font scale))
         mapM_ (writePacket connection) replay
         outgoing <- newTBQueueIO 1
+        inflight <- newTVarIO (0::Int)
         let receive = forever $ do
               packet <- readPacket connection >>= maybe (failure "Remote client detached") pure
               value <- case packet of JsonPacket v -> pure v; _ -> failure "Unexpected remote binary input"
@@ -250,11 +278,14 @@ runRemoteDaemon session scale effects tick inspect initial = do
                   payload <- timeout 30000000 (readPacket connection)
                   case payload of Just (Just (BinaryPacket bytes)) -> pure (UploadFile name bytes); _ -> failure "Expected upload bytes"
                 _ -> pure input
-              reply <- newEmptyTMVarIO
-              atomically (writeTBQueue commands (serial,received,complete,reply))
-              (responses,exit,committed,isDirty) <- atomically (takeTMVar reply) >>= either throwIO pure
-              -- State and sequence are committed before any fallible socket write.
-              atomically $ writeTBQueue outgoing (responses++[json "ack" ["seq" .= committed,"dirty" .= isDirty]]++[json "closed" [] | exit])
+              bracket_
+                (atomically (readTVar inspectionClosing >>= check . not >> modifyTVar' inflight (+1)))
+                (atomically (modifyTVar' inflight (subtract 1))) $ do
+                  reply <- newEmptyTMVarIO
+                  atomically (writeTBQueue commands (serial,received,complete,reply))
+                  (responses,exit,committed,isDirty) <- atomically (takeTMVar reply) >>= either throwIO pure
+                  -- State and sequence are committed before any fallible socket write.
+                  atomically $ writeTBQueue outgoing (responses++[json "ack" ["seq" .= committed,"dirty" .= isDirty]]++[json "closed" [] | exit])
             send previous = do
               s <- readMVar state
               cwd <- getCurrentDirectory
@@ -264,13 +295,34 @@ runRemoteDaemon session scale effects tick inspect initial = do
                   rows=if fmap (\(old,_,_)->old) previous==Just d then oldRows else frameRows d
                   metadata=frameMetadata cwd d
                   reset=maybe True (\(old,_,_)->screenSize old/=screenSize d || videoMode old/=videoMode d || pixelateUnicode old/=pixelateUnicode d) previous
+              case clipboardExport d of
+                (serial,Just text) -> do
+                  writePacket connection (json "copy" ["text" .= text])
+                  -- This is explicit clipboard_write output, never clipboard
+                  -- capture. Preserve any newer export, even identical text.
+                  modifyMVar_ state $ \current ->
+                    let latest=desktop current
+                    in pure $ if fst (clipboardExport latest)==serial
+                      then current {desktop=latest {clipboardExport=(serial,Nothing)}} else current
+                _ -> pure ()
               when (reset || rows/=oldRows || metadata/=oldMeta) $
                 writePacket connection (BinaryPacket (BL.toStrict (framePacket reset oldRows rows (if reset then metadata else filter (`notElem` oldMeta) metadata))))
-              next <- timeout 50000 (atomically (readTBQueue outgoing))
+              next <- timeout 50000 $ atomically $
+                (Just <$> readTBQueue outgoing) `orElse` (do
+                  readTVar inspectionClosing >>= check
+                  readTVar inflight >>= check . (==0)
+                  pure Nothing)
               case next of
-                Just packets -> do
+                Just (Just packets) -> do
                   mapM_ (writePacket connection) packets
                   if any ((==Just "closed") . packetType) packets then void (tryPutMVar done ()) else send (Just (d,rows,metadata))
+                Just Nothing -> do
+                  -- An MCP Exit has no display input to carry its close. Flush
+                  -- accepted input replies first, then acknowledge and close.
+                  final<-readMVar state
+                  writePacket connection (json "ack" ["seq" .= acknowledged final,"dirty" .= webDirty (desktop final)])
+                  writePacket connection (json "closed" [])
+                  void (tryPutMVar done ())
                 Nothing -> send (Just (d,rows,metadata))
         race_ receive (send Nothing) `finally` do
           s <- readMVar state
@@ -306,10 +358,21 @@ runRemoteDaemon session scale effects tick inspect initial = do
           void (forkIO (finally
             ((authenticate connection >> serve shutdown connection) `catch` \(_::IOException) -> pure ())
             (quietClose connection)))
+        drainInspections=do
+          let empty=atomically (readTVar inspections >>= check . M.null)
+          -- Exit may have been approved through another connection. Wait for
+          -- actual reply completion, then cancel unapproved/unresponsive calls.
+          settled<-timeout 2000000 empty
+          case settled of
+            Just () -> pure ()
+            Nothing -> do
+              pendingStops<-M.elems <$> readTVarIO inspections
+              cancelled<-timeout 2000000 (sequence_ pendingStops >> empty)
+              when (cancelled==Nothing) (hPutStrLn stderr "Editor closed with an unfinished MCP reply.")
     withAsync commandLoop $ \inputs -> withAsync tickLoop $ \ticks -> withAsync acceptLoop $ \accepts ->
       -- Windows accept is a blocking foreign call: close its socket before
       -- withAsync waits for cancellation, rather than in the outer bracket.
-      race_ (takeMVar done) (race_ (wait inputs) (race_ (wait ticks) (wait accepts))) `finally` N.close socket
+      race_ (readMVar done >> drainInspections) (race_ (wait inputs) (race_ (wait ticks) (wait accepts))) `finally` N.close socket
 
   where
     withoutDaemon args@("--":_)=args

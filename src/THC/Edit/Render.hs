@@ -19,6 +19,7 @@ import Data.Time (formatTime, defaultTimeLocale)
 import THC.Edit.Hex
 import THC.Edit.Buffer
 import THC.Edit.Unicode (graphemes, clusterWidth, textImage, flattenPicture)
+import THC.Edit.GuestAccess (streamerReadableAt)
 import THC.Edit.Model
 import THC.Edit.Syntax
 import THC.Edit.Files (filePath)
@@ -54,9 +55,22 @@ box a double w h
         line l m r=V.char a l V.<|> V.charFill a m (w-2) 1 V.<|> V.char a r
 
 renderDesktop :: Desktop -> V.Picture
-renderDesktop d = flattenPicture (screenSize d) ((V.picForLayers layers) {V.picCursor=cursor})
+renderDesktop d = flattenPicture (screenSize d) ((V.picForLayers (privacyLayers++layers)) {V.picCursor=visibleCursor})
   where
     (sw,sh)=screenSize d
+    privacyLayers
+      | not (streamerMode d) = []
+      | otherwise = [place x y (V.charFill (attr gray blue) '*' n 1)
+          | y<-[0..sh-1],(x,n)<-hiddenRuns 0 [streamerReadableAt d x y | x<-[0..sw-1]]]
+    hiddenRuns _ []=[]
+    hiddenRuns x cells=
+      let (shown,rest)=span id cells
+          (hidden,tailCells)=span not rest
+          start=x+length shown
+      in [(start,length hidden) | not (null hidden)]++hiddenRuns (start+length hidden) tailCells
+    visibleCursor=case cursor of
+      V.Cursor x y | streamerMode d && not (streamerReadableAt d x y) -> V.NoCursor
+      _ -> cursor
     layers = case dialog d of
       Nothing -> withMenu
       Just dg -> dialogLayers d dg ++ [castShadow (screenSize d) (dialogRect d dg) withMenu] ++ withMenu

@@ -15,6 +15,7 @@ import Data.Maybe (fromJust)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import THC.Edit.EditorMCP
+import THC.Edit.Files (FileState(..))
 import THC.Edit.Buffer
 import THC.Edit.Model
 
@@ -42,6 +43,26 @@ checks = do
   check "MCP invalid request is protocol error" (case editorResponse edited Null of Just (Object fields)->KM.member "error" fields; _->False)
   let decoded=content >>= parseMaybe (withObject "reply" (.: "result")) :: Maybe Value
   check "MCP tool result envelope exists" (decoded/=Nothing)
+  let privateConversation=addReadOnly "Conversation" "Session: provider-secret\nPublic assistant response\nOther: unsent-secret" (initialDesktop (80,25))
+      privateWindow=fromJust (activeWindow privateConversation)
+      answerStart=T.length "Session: provider-secret\nPublic assistant response\n"
+      withPrivateInput=privateConversation {chatActions=[(answerStart,answerStart+T.length "Other: unsent-secret","question-input",["1"])]}
+      privateRead=builtinTool withPrivateInput "read_buffer" (object ["bufferId" .= bufferId privateWindow])
+      encodedRead=case privateRead of Right value->text value; Left err->err
+  check "MCP conversation reads redact session identifiers and unsent answers" (not ("provider-secret" `T.isInfixOf` encodedRead) && not ("unsent-secret" `T.isInfixOf` encodedRead) && "Public assistant response" `T.isInfixOf` encodedRead)
+  check "MCP conversation selections cannot bypass private redaction" (case builtinTool (modifyActive (\w->w {selection=Selection 0 200}) withPrivateInput) "read_selection" (object []) of Left _->True; _->False)
+  let binaryConversation=privateConversation {buffers=M.adjust (\doc->doc {documentBuffer=newByteBuffer "Session: binary-session-secret"}) (bufferId privateWindow) (buffers privateConversation)}
+  check "MCP binary conversation cannot bypass session redaction" (case builtinTool binaryConversation "read_buffer" (object []) of Left _->True; _->False)
+  let privateReview=addReadOnly "Agent request" "private-review-token" (initialDesktop (80,25))
+  check "MCP private approval buffers refuse content reads" (case builtinTool privateReview "read_buffer" (object []) of Left _->True; _->False)
+  check "MCP still lists non-secret internal buffer identifiers" (case builtinTool privateReview "list_buffers" (object []) of Right value->"bufferId" `T.isInfixOf` text value && not ("private-review-token" `T.isInfixOf` text value); _->False)
+  let normalSource=addDocument Nothing (newBuffer "Session: normal source text\nEnvironment: ordinary example") (initialDesktop (80,25))
+  check "MCP source files are not redacted by secret-like labels" (case builtinTool normalSource "read_buffer" (object []) of Right value->"normal source text" `T.isInfixOf` text value && "ordinary example" `T.isInfixOf` text value; _->False)
+  let authorityPath="/authority/private-session-key.json"
+      authority=addDocument (Just (FileState authorityPath Nothing)) (newBuffer "secret config") edited {guestPrivatePaths=[authorityPath]}
+  check "MCP private file metadata hides secret-bearing filenames" (all (\name->case builtinTool authority name (object []) of Right value->not ("private-session-key" `T.isInfixOf` text value) && "[private]" `T.isInfixOf` text value; _->False) ["list_buffers","list_windows"])
+  let diskReview=addReadOnly ("Disk changes: "<>T.pack authorityPath) "private review" edited {guestPrivatePaths=[authorityPath]}
+  check "MCP disk review metadata hides protected source filenames" (all (\name->case builtinTool diskReview name (object []) of Right value->not ("private-session-key" `T.isInfixOf` text value) && "[private]" `T.isInfixOf` text value; _->False) ["list_buffers","list_windows"])
   invoked<-newIORef (0::Int)
   completed<-newIORef False
   let execute d _ _=do

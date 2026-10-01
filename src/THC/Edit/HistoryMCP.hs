@@ -12,6 +12,7 @@ import Data.List (find)
 import qualified Data.Text as T
 import Numeric (showHex)
 import THC.Edit.Buffer
+import THC.Edit.GuestAccess (protectedBuffer)
 import THC.Edit.Model
 
 historyToolNames :: [T.Text]
@@ -31,6 +32,7 @@ historyTool d name args=pure $ case parseEither parse args of
   Left err -> (d,pure (Left (T.pack err)))
   Right (bid,direction,offset,count,wanted) -> case M.lookup bid (buffers d) of
     Nothing -> bad "Buffer not found."
+    Just _ | protectedBuffer d bid -> bad "This buffer is private to the user."
     Just doc | documentLabel doc/=Nothing -> bad "This buffer is read-only."
     Just doc ->
       let b=documentBuffer doc

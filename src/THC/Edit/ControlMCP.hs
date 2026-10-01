@@ -7,6 +7,7 @@ import qualified Data.Aeson.KeyMap as KM
 import qualified Data.Text as T
 import THC.Edit.Defaults (parseDefaults)
 import THC.Edit.MCPPermissions (readEditorDefaults,writeEditorDefaults)
+import THC.Edit.GuestAccess
 import THC.Edit.Model
 import qualified THC.Edit.Protocol as P
 import THC.Edit.Frontend (modeSize)
@@ -15,7 +16,7 @@ controlToolNames :: [T.Text]
 controlToolNames=["editor_input","editor_settings"]
 controlTools :: [Value]
 controlTools=
-  [object ["name" .= ("editor_input"::T.Text),"description" .= ("Operate the editor using up to 64 mouse/key/paste events through its normal input path. Coordinates are 0-based character cells. Mouse actions: down/up/move/wheel-up/wheel-down; button0 left,2 right. Keys include characters, Enter, Escape, Tab, ArrowUp/Down/Left/Right, F1..F24, Home/End/PageUp/PageDown/Backspace/Delete/Insert. mods is an array of ctrl/alt/shift. Events may edit, save or run commands; applied sequentially, not transactionally. Agent Permissions controls cannot be operated by this tool. Copy/paste uses the editor clipboard, not the OS clipboard."::T.Text),
+  [object ["name" .= ("editor_input"::T.Text),"description" .= ("Operate the editor using up to 64 mouse/key/paste events through its normal input path. Coordinates are 0-based character cells. Mouse actions: down/up/move/wheel-up/wheel-down; button0 left,2 right. Keys include characters, Enter, Escape, Tab, ArrowUp/Down/Left/Right, F1..F24, Home/End/PageUp/PageDown/Backspace/Delete/Insert. mods is an array of ctrl/alt/shift. Events may edit, save or run commands; applied sequentially, not transactionally. Conversation input, agent settings, approvals and Streamer mode require human input. Copy/paste uses an isolated clipboard for this batch, never the human clipboard."::T.Text),
    "inputSchema" .= object ["type" .= ("object"::T.Text),"required" .= ["events"::T.Text],"additionalProperties" .= False,"properties" .= object ["events" .= object ["type" .= ("array"::T.Text),"minItems" .= (1::Int),"maxItems" .= (64::Int),"items" .= object ["type" .= ("object"::T.Text)]]]],"annotations" .= annotations False],
    object ["name" .= ("editor_settings"::T.Text),"description" .= ("Read session display/editing settings as JSON, or apply a validated settings object. Fields: appearance(light/dark/system), screenMode(3/259), columns(40..512), rows(12..256), wordStar, blinkCursor, crtFilter, pixelateUnicode, materialIcons. Omitted fields remain unchanged; selecting screenMode defaults to its 80x25/80x50 grid unless dimensions supplied. Backend/window pixel scale and agent configuration are not changed. Changes remain with the resumable session. The optional defaults object merges startup settings into global [editor.defaults]; it accepts these fields plus backend(terminal/auto/metal/vulkan/web/remote) and scale(1..8). Defaults affect future sessions. Responses include startupDefaults."::T.Text),
     "inputSchema" .= object ["type" .= ("object"::T.Text),"additionalProperties" .= False,"properties" .= object ["settings" .= object ["type" .= ("object"::T.Text)],"defaults" .= object ["type" .= ("object"::T.Text)]]],"annotations" .= annotations False]]
@@ -37,14 +38,16 @@ controlTool apply d name args=case parseEither parse args of
             Left err -> pure (d,pure (Left err))
             Right value -> pure (updated,pure (Right (case settingsValue updated of Object o -> Object (KM.insert "startupDefaults" value o); result -> result)))
   Right (Right events) -> do
-    (updated,count,stopped,err)<-foldM run (d,0::Int,False,Nothing) events
-    pure (updated,pure (Right (object ["appliedEvents" .= count,"exitRequested" .= stopped,"error" .= err,"clipboard" .= T.take 131072 (clipboard updated),"settings" .= settingsValue updated])))
+    (updated,count,stopped,err)<-foldM run (beginGuestInput d,0::Int,False,Nothing) events
+    pure (if count==0 then d else endGuestInput d updated,pure (Right (object ["appliedEvents" .= count,"exitRequested" .= stopped,"error" .= err,"clipboard" .= T.take 131072 (clipboard updated),"settings" .= settingsValue updated])))
   where
     parse :: Value -> Parser (Either (Value,Maybe Value) [P.WebInput])
     parse=withObject "controls" $ \o -> case name of
       "editor_settings" -> do
         unless (all (`elem` ["settings","defaults"]) (KM.keys o)) (fail "Unknown argument")
-        Left <$> ((,) <$> o .:? "settings" .!= object [] <*> o .:? "defaults")
+        defaults<-o .:? "defaults"
+        case defaults of Just (Object values) | KM.member "streamerMode" values -> fail "Streamer mode requires human input"; _ -> pure ()
+        Left . (,defaults) <$> o .:? "settings" .!= object []
       "editor_input" -> do
         unless (all (`elem` ["events"]) (KM.keys o)) (fail "Unknown argument")
         events<-o .: "events"
@@ -69,24 +72,11 @@ controlTool apply d name args=case parseEither parse args of
       _ -> ["type"]
     run state@(_,_,True,_) _=pure state
     run state@(_,_,_,Just _) _=pure state
-    run (current,count,False,Nothing) input
-      | protected current = pure (current,count,False,Just ("Agent Permissions requires human input."::T.Text))
-      | otherwise = do
-          let (changed,effects)=P.applyInput input current {browserFrontend=False}
-          if protected changed || any permission effects
-            then pure (current,count,False,Just "Agent Permissions requires human input.")
-            else do
-              (stopped,updated)<-apply changed {browserFrontend=browserFrontend current} effects
-              pure (updated,count+1,stopped,Nothing)
-    protected current=case dialog current of
-      Just dg -> case purpose dg of
-        PermissionDialog{} -> True
-        AgentDialog action -> "approval:" `T.isPrefixOf` action
-        _ -> False
-      Nothing -> False
-    permission PermissionAction{}=True
-    permission (AgentAction action _)="approval:" `T.isPrefixOf` action
-    permission _=False
+    run (current,count,False,Nothing) input=case P.applyGuestInput input current {browserFrontend=False} of
+      Left err -> pure (current,count,False,Just err)
+      Right (changed,effects) -> do
+        (stopped,updated)<-apply changed {browserFrontend=browserFrontend current} effects
+        pure (updated,count+1,stopped,Nothing)
 
 parseSettings :: Desktop -> Value -> Parser Desktop
 parseSettings d=withObject "settings" $ \o -> do
@@ -110,7 +100,7 @@ parseSettings d=withObject "settings" $ \o -> do
 
 settingsValue :: Desktop -> Value
 settingsValue d=object ["appearance" .= themeName (appearance d),"screenMode" .= videoMode d,"columns" .= fst (screenSize d),"rows" .= snd (screenSize d),
-  "wordStar" .= wordStar d,"blinkCursor" .= blinkCursor d,"crtFilter" .= crtFilter d,"pixelateUnicode" .= pixelateUnicode d,"materialIcons" .= materialIcons d]
+  "streamerMode" .= streamerMode d,"wordStar" .= wordStar d,"blinkCursor" .= blinkCursor d,"crtFilter" .= crtFilter d,"pixelateUnicode" .= pixelateUnicode d,"materialIcons" .= materialIcons d]
 themeName :: Appearance -> T.Text
 themeName LightMode="light"
 themeName DarkMode="dark"

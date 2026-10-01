@@ -33,14 +33,14 @@ import THC.Edit.Syntax (highlightFor)
 type Core = Desktop -> [Effect] -> IO (Bool,Desktop)
 data Debugger = Debugger (IORef State) (IO Integer)
 data Pending = Init | Attach | Configure | Breaks Text [Int] | Exceptions | Threads Bool
-  | Stack Bool | Scopes | Variables | Source Value | Control Bool | Detach
+  | Stack Bool | Scopes | Variables | Source Bool Value | Control Bool | Detach
   | Inspection (MVar (Either Text Value))
   deriving (Eq)
 data Breakpoint = Breakpoint { bpLine :: Int, bpResult :: Value } deriving (Eq,Show)
 data State = State
   { client :: Maybe D.Client, connected :: Bool, capabilities :: Value, ready :: Bool, configured :: Bool
   , pending :: M.Map Int (Pending,Int,Integer), generation :: Int
-  , stopped :: Bool, thread :: Maybe Int, frame :: Maybe Value
+  , stopped :: Bool, thread :: Maybe Int, frame :: Maybe Value, frames :: [Value], followSource :: Bool
   , exceptionFilters :: [Text]
   , breakpoints :: M.Map Text (Value,[Breakpoint]), sources :: M.Map Int Value
   , root :: FilePath, endpoint :: (Text,Int), output :: Text
@@ -52,7 +52,7 @@ data State = State
 
 emptyState :: State
 emptyState = State {client=Nothing,connected=False,capabilities=Null,ready=False,configured=False,pending=M.empty,generation=0,
-  stopped=False,thread=Nothing,frame=Nothing,exceptionFilters=[],breakpoints=M.empty,sources=M.empty,
+  stopped=False,thread=Nothing,frame=Nothing,frames=[],followSource=True,exceptionFilters=[],breakpoints=M.empty,sources=M.empty,
   root=".",endpoint=("127.0.0.1",4711),output="",failure=Nothing,disconnectAt=Nothing,
   choices=M.empty,choiceId=0,breakRequests=M.empty,breakModified=M.empty,startRequest=("attach",object []),managed=False,adapterId=""}
 
@@ -92,6 +92,15 @@ debuggerTool runtime@(Debugger ref _) core d name arguments = do
       current<-readIORef ref
       if isJust (client current) then snapshot desktop else immediate desktop (Left (status desktop))
     run (ToolControl command)=perform runtime core command [] d >>= snapshot
+    run (ToolPresent following view)=do
+      forM_ following (\enabled->modifyIORef' ref (\state->state {followSource=enabled}))
+      current<-readIORef ref
+      shown<-case view of
+        Nothing -> pure d
+        Just "source" -> maybe (pure d) (openFrame runtime core True d) (frame current)
+        Just "stack" -> showChoices runtime "Call stack" "frame" (frames current) (map frameLabel (frames current)) d
+        Just command -> perform runtime core command [] d
+      snapshot shown
     run (ToolBreakpoints bid rows)=case M.lookup bid (buffers d) of
       Nothing -> immediate d (Left "Unknown bufferId.")
       Just doc | byteMode (documentBuffer doc) -> immediate d (Left "Breakpoints require a source text buffer.")
@@ -126,7 +135,7 @@ debuggerTool runtime@(Debugger ref _) core d name arguments = do
             ["generation" .= generation s,"request" .= command,"body" .= body]))
 
 data ToolRequest = ToolStatus | ToolStart Text [Text] | ToolControl Text
-  | ToolBreakpoints Int [Int] | ToolInspect Text Value
+  | ToolBreakpoints Int [Int] | ToolInspect Text Value | ToolPresent (Maybe Bool) (Maybe Text)
 
 parseTool :: State -> Text -> Value -> Parser ToolRequest
 parseTool s name = withObject "debugger tool arguments" $ \o -> do
@@ -147,6 +156,18 @@ parseTool s name = withObject "debugger tool arguments" $ \o -> do
       required key selected=positive key >>= maybe (maybe (fail (T.unpack (K.toText key)<>" is required")) pure selected) pure
   case name of
     "debug_status" -> fieldsAllowed [] >> pure ToolStatus
+    "debug_present" -> do
+      fieldsAllowed ["follow","view","generation"]
+      following<-o .:? "follow"
+      view<-o .:? "view"
+      when (KM.member "generation" o || isJust view) epoch
+      forM_ view $ \choice -> do
+        unless (choice `elem` ["source","stack","scopes","output"]) (fail "view must be source, stack, scopes or output")
+        when (choice/="output") $ do
+          live
+          unless (ready s && configured s && stopped s) (fail "Debugger must be ready and stopped to reveal this view")
+          when (choice `elem` ["source","scopes"] && frame s==Nothing) (fail "No selected debugger frame; inspect debug_status after the stack arrives")
+      pure (ToolPresent following view)
     "debug_launch" -> do
       fieldsAllowed ["adapterConfig","port"]
       idle
@@ -214,7 +235,7 @@ parseTool s name = withObject "debugger tool arguments" $ \o -> do
 debuggerStatus :: State -> Value
 debuggerStatus s=object
   ["generation" .= generation s,"active" .= isJust (client s),"connected" .= connected s,
-   "ready" .= ready s,"configured" .= configured s,"stopped" .= stopped s,
+   "ready" .= ready s,"configured" .= configured s,"stopped" .= stopped s,"follow" .= followSource s,
    "threadId" .= thread s,"frame" .= frame s,"source" .= (frame s >>= (field "source" :: Value -> Maybe Value)),
    "capabilities" .= capabilities s,"breakpoints" .=
      [object ["source" .= src,"line" .= bpLine bp,"verified" .= flag "verified" (bpResult bp),
@@ -359,12 +380,12 @@ initializeSession (Debugger ref _) directory c address requestName arguments ada
   s<-readIORef ref
   mapM_ D.stopClient (client s)
   writeIORef ref emptyState {client=Just c,generation=generation s+1,root=directory,endpoint=address,
-    breakpoints=persistentBreakpoints s,breakModified=breakModified s,startRequest=(requestName,arguments),managed=owned,adapterId=adapter}
-  pure (clearDialog d) {status="Connecting debugger..."}
+    followSource=followSource s,breakpoints=persistentBreakpoints s,breakModified=breakModified s,startRequest=(requestName,arguments),managed=owned,adapterId=adapter}
+  pure (automaticDesktop s d) {status="Connecting debugger..."}
 
 -- Frame and variable handles are scoped to a suspended execution state.
 invalidate :: State -> State
-invalidate s=s {generation=generation s+1,stopped=False,frame=Nothing,choices=M.empty}
+invalidate s=s {generation=generation s+1,stopped=False,frame=Nothing,frames=[],choices=M.empty}
 
 send :: Debugger -> Pending -> Text -> Value -> IO ()
 send (Debugger ref clock) kind command arguments = do
@@ -390,7 +411,7 @@ tickDebugger runtime@(Debugger ref clock) core original = do
   if not timedOut && not detachExpired && failure current==Nothing then pure updated else do
     mapM_ D.stopClient (client current)
     modifyIORef' ref (\state -> (invalidate state) {client=Nothing,connected=False,pending=M.empty,ready=False,configured=False,disconnectAt=Nothing,failure=Nothing})
-    pure (clearDialog updated) {status=fromMaybe (if detachExpired then "Debugger disconnected." else "DAP request timed out; debugger disconnected.") (failure current)}
+    pure (automaticDesktop current updated) {status=fromMaybe (if detachExpired then "Debugger disconnected." else "DAP request timed out; debugger disconnected.") (failure current)}
 
 receive :: Debugger -> Core -> Desktop -> D.Event -> IO Desktop
 receive runtime@(Debugger ref _) core d event = do
@@ -410,7 +431,7 @@ receive runtime@(Debugger ref _) core d event = do
     D.Disconnected reason -> do
       mapM_ D.stopClient (client s)
       modifyIORef' ref (\state -> (invalidate state) {client=Nothing,connected=False,pending=M.empty,ready=False,configured=False,disconnectAt=Nothing,failure=Nothing})
-      pure (clearDialog d) {status="DAP: "<>reason}
+      pure (automaticDesktop s d) {status="DAP: "<>reason}
     D.Notification "initialized" _ -> do
       modifyIORef' ref (\state -> state {ready=True})
       configure runtime
@@ -424,13 +445,13 @@ receive runtime@(Debugger ref _) core d event = do
       when (configured s) $ do
         send runtime (Threads False) "threads" (object [])
         forM_ tid (\ident -> send runtime (Stack False) "stackTrace" (stackArguments ident))
-      pure (clearDialog d) {status="Stopped: "<>text "reason" body}
-    D.Notification "continued" _ -> modifyIORef' ref invalidate >> pure (clearDialog d) {status="Running..."}
+      pure (automaticDesktop s d) {status="Stopped: "<>text "reason" body}
+    D.Notification "continued" _ -> modifyIORef' ref invalidate >> pure (automaticDesktop s d) {status="Running..."}
     D.Notification "thread" _ -> when (configured s) (send runtime (Threads False) "threads" (object [])) >> pure d
     D.Notification "terminated" _ -> do
       mapM_ D.stopClient (client s)
       modifyIORef' ref (\state -> (invalidate state) {client=Nothing,connected=False,pending=M.empty,ready=False,configured=False,disconnectAt=Nothing,failure=Nothing})
-      pure (clearDialog d) {status="Debug session ended."}
+      pure (automaticDesktop s d) {status="Debug session ended."}
     D.Notification "output" body -> do
       modifyIORef' ref (\state -> state {output=T.takeEnd 16384 (output state<>text "output" body)})
       pure d
@@ -460,7 +481,7 @@ receive runtime@(Debugger ref _) core d event = do
                  modifyIORef' ref (\state -> state {stopped=True})
                  forM_ (thread s) (\tid -> send runtime (Stack False) "stackTrace" (stackArguments tid))
                _ -> pure ()
-             pure (clearDialog d) {status="DAP: "<>err}
+             pure (automaticDesktop s d) {status="DAP: "<>err}
            Right body -> response runtime core kind body d
   where
     stale kind=case kind of Threads{} -> True; Control{} -> True; Stack{} -> True; Scopes -> True; Variables -> True; Source{} -> True; Inspection{} -> True; _ -> False
@@ -504,16 +525,18 @@ response runtime@(Debugger ref _) core kind body d = do
       if showPicker then showChoices runtime "Threads" "thread" rows (map (text "name") rows) d else pure d
     Stack showPicker -> do
       let rows=items "stackFrames" body
-      modifyIORef' ref (\state -> state {frame=listToMaybe rows})
+      modifyIORef' ref (\state -> state {frame=listToMaybe rows,frames=rows})
       if showPicker then showChoices runtime "Call stack" "frame" rows (map frameLabel rows) d
-      else maybe (pure d {status="Stopped; no source frame supplied."}) (openFrame runtime core d) (listToMaybe rows)
+      else if not (followSource s) then pure d
+      else maybe (pure d {status="Stopped; no source frame supplied."}) (openFrame runtime core False d) (listToMaybe rows)
     Scopes -> do
       let rows=items "scopes" body
       showChoices runtime "Scopes" "expand" rows (map (text "name") rows) d
     Variables -> do
       let rows=items "variables" body
       showChoices runtime "Variables" "expand" rows (map variableLabel rows) d
-    Source selected -> case field "content" body of
+    Source explicit _ | not explicit && not (followSource s) -> pure d
+    Source _ selected -> case field "content" body of
       Nothing -> pure d {status="DAP source response has no content."}
       Just content -> do
         let source=fromMaybe Null (field "source" selected)
@@ -547,7 +570,7 @@ select runtime@(Debugger ref _) core fullToken action values d = do
       pure d
     "frame" | stopped s,Just chosen<-selected >>= at rows -> do
       modifyIORef' ref (\state -> state {frame=Just chosen,generation=generation state+1,choices=M.empty})
-      openFrame runtime core d chosen
+      openFrame runtime core True d chosen
     "expand" | stopped s,Just chosen<-selected >>= at rows,let ident=integer "variablesReference" chosen,ident>0 ->
       send runtime Variables "variables" (object ["variablesReference" .= ident]) >> pure d {status="Loading variables..."}
     "exceptions" -> do
@@ -558,14 +581,14 @@ select runtime@(Debugger ref _) core fullToken action values d = do
       pure d {status="Exception breakpoints updated."}
     _ -> pure d {status="No expandable debugger value selected."}
 
-openFrame :: Debugger -> Core -> Desktop -> Value -> IO Desktop
-openFrame runtime@(Debugger ref _) core d selected = do
+openFrame :: Debugger -> Core -> Bool -> Desktop -> Value -> IO Desktop
+openFrame runtime@(Debugger ref _) core explicit d selected = do
   s<-readIORef ref
   let source=fromMaybe Null (field "source" selected)
       reference=integer "sourceReference" source
       path=text "path" source
       local=if isAbsolute (T.unpack path) then T.unpack path else root s </> T.unpack path
-  if reference>0 then send runtime (Source selected) "source" (object ["source" .= source,"sourceReference" .= reference]) >> pure d
+  if reference>0 then send runtime (Source explicit selected) "source" (object ["source" .= source,"sourceReference" .= reference]) >> pure d
   else do
     exists<-if T.null path then pure False else doesFileExist local
     if not exists then pure d {status="Stopped: source is unavailable ("<>sourceLabel source<>")."}
@@ -636,6 +659,11 @@ chooser title action rows d
   | null rows = d {status=title<>" is empty."}
   | dialog d/=Nothing = d {status=title<>" ready; close the current dialog and request it again."}
   | otherwise = d {dialog=Just (Dialog title (DebugDialog action) [ListBox title rows 0] 0 ["Open","Cancel"] [])}
+-- Background protocol events keep the editor's existing modal and focus.
+-- Explicit view requests still use the normal source/picker presentation path.
+automaticDesktop :: State -> Desktop -> Desktop
+automaticDesktop s d=if followSource s then clearDialog d else d
+
 clearDialog :: Desktop -> Desktop
 clearDialog d = case dialog d of Just dg | DebugDialog{}<-purpose dg -> d {dialog=Nothing}; _ -> d
 sourceKey :: Value -> Text

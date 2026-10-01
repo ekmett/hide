@@ -115,6 +115,31 @@ checks=do
     check "tracked search includes only Git tracked paths with live content" (texts tracked==["live needle"])
     (_,page)<-success "workspace_search" ["query" .= ("needle"::T.Text),"offset" .= (1::Int),"limit" .= (1::Int)] live
     check "workspace search pages deterministic results" (length (texts page)==1 && (field "total" page::Maybe Int)==field "total" found)
+    createDirectory (root </> "authority")
+    TIO.writeFile (root </> "authority/config.toml") "private needle\n"
+    secretPath<-canonicalizePath (root </> "authority/config.toml")
+    let protected=initial {guestPrivatePaths=[secretPath,root </> "future/session.json"]}
+        privateLive=addDocument (Just (FileState secretPath (Just "private needle\n"))) (newBuffer "unsaved private needle\n") protected
+        privateBid=maybe (error "missing private buffer") bufferId (activeWindow privateLive)
+    callProcess "git" ["-C",root,"add","authority/config.toml"]
+    (_,privateSearch)<-success "workspace_search" ["query" .= ("private needle"::T.Text)] privateLive
+    (_,privateTracked)<-success "workspace_search" ["query" .= ("private needle"::T.Text),"trackedOnly" .= True] privateLive
+    check "workspace search excludes private disk and live contents" (null (texts privateSearch) && null (texts privateTracked))
+    rejected "buffer_apply_diff" ["bufferId" .= privateBid,"revision" .= (0::Int),"diff" .= ("@@ -1 +1 @@\n-unsaved private needle\n+changed\n"::T.Text)] privateLive
+    mapM_ (\path->rejected "workspace_files" (operation "delete" path) protected) ["authority/config.toml","authority"]
+    rejected "workspace_files" (operation "rename" "authority"++["to" .= ("moved-authority"::T.Text)]) protected
+    rejected "workspace_files" (operation "rename" "untracked.hs"++["to" .= ("future"::T.Text)]) protected
+    rejected "workspace_files" (operation "mkdir" "future") protected
+    rejected "workspace_files" (operation "create_file" "future/session.json") protected
+    when (os/="mingw32") $ do
+      createDirectoryLink (root </> "authority") (root </> "authority-alias")
+      rejected "workspace_files" (operation "delete" "authority-alias/config.toml") protected
+      createFileLink secretPath (root </> "key-alias.txt")
+      callProcess "git" ["-C",root,"add","key-alias.txt"]
+      (_,aliasSearch)<-success "workspace_search" ["query" .= ("private needle"::T.Text),"trackedOnly" .= True] protected
+      check "search resolves private symlink aliases before reading" (null (texts aliasSearch))
+    preservedSecret<-TIO.readFile secretPath
+    check "rejected operations leave authority files unchanged" (preservedSecret=="private needle\n")
   putStrLn "workspace filesystem checks passed"
 
 patchChecks :: IO ()

@@ -22,6 +22,7 @@ import System.Directory (doesFileExist, doesDirectoryExist, listDirectory, pathI
 import System.FilePath (takeDirectory, takeExtension, (</>))
 import THC.Edit.Buffer
 import THC.Edit.Files
+import THC.Edit.GuestAccess (protectedBuffer)
 import THC.Edit.Model
 import qualified THC.Edit.LSP as L
 
@@ -119,6 +120,7 @@ toolingTool t _ d name arguments = case parseEither parameters arguments of
     parameters=withObject "HLS tool arguments" $ \o -> do
       unless (name `elem` toolingToolNames) (fail "Unknown HLS tool")
       bid<-o .: "bufferId"
+      when (protectedBuffer d bid) (fail "This buffer is private to the user.")
       doc<-maybe (fail "Unknown bufferId") pure (M.lookup bid (buffers d))
       let b=documentBuffer doc; text=contents b
       unless (textBuffer b && documentLabel doc==Nothing) (fail "HLS requires a source text buffer")

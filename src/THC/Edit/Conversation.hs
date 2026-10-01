@@ -30,6 +30,8 @@ import qualified THC.Edit.BuildJobs as Jobs
 import System.IO (openBinaryTempFile, hClose)
 import Text.Read (readMaybe)
 import qualified THC.Edit.ACP as A
+import THC.Edit.GuestAccess (sensitiveLabel)
+import THC.Edit.MCPPermissions (permissionConfigPath, projectConfigPath, readAgentContextAt, writeAgentContextAt, readAgentContexts)
 import THC.Edit.EditorMCP (editorServers)
 import THC.Edit.AgentFiles
 import THC.Edit.Buffer
@@ -56,6 +58,7 @@ data State = State
   , lastMessageAt :: Maybe UTCTime
   , lastRender :: (Int,Maybe Text,[Record]), lastSession :: Maybe (A.Launch,FilePath,Text)
   , waitingQuestion :: Maybe (Int,MVar (Either Text Value)), lastQuestion :: Maybe ChatQuestion
+  , deliveredContext :: Maybe Value
   }
 data ConversationState = ConversationState FilePath (IORef State) C.Consoles Jobs.BuildJobs
 
@@ -71,7 +74,7 @@ withConversation action = C.withConsoles $ \consoles -> Jobs.withBuildJobs $ \jo
   let remembered=either (const Nothing) (\bytes -> decodeStrict' bytes >>= parseMaybe (withObject "session" $ \o -> do
         (raw::Value)<-o .: "provider"; config<-either fail pure (decodeLaunch (BL.toStrict (encode raw)))
         (,,) config <$> o .: "cwd" <*> o .: "sessionId")) previous
-  bracket (do ref<-newIORef (State launch Nothing Nothing "." M.empty Nothing [] M.empty [] Nothing False 1 [] S.empty M.empty Nothing (0,Nothing,[]) remembered Nothing Nothing); pure (ConversationState directory ref consoles jobs)) closeConversation action
+  bracket (do ref<-newIORef (State launch Nothing Nothing "." M.empty Nothing [] M.empty [] Nothing False 1 [] S.empty M.empty Nothing (0,Nothing,[]) remembered Nothing Nothing Nothing); pure (ConversationState directory ref consoles jobs)) closeConversation action
 
 closeConversation :: ConversationState -> IO ()
 closeConversation (ConversationState _ ref _ _) = do
@@ -113,9 +116,21 @@ persist path value = do
   where ignore task=void (try task :: IO (Either IOException ()))
 
 conversationEffects :: ConversationState -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> [Effect] -> IO (Bool,Desktop)
-conversationEffects runtime fallback = foldM apply . (False,)
+conversationEffects runtime@(ConversationState _ ref _ _) fallback = foldM apply . (False,)
   where
     apply state@(True,_) _=pure state
+    apply (_,d) (AgentAction "edit-context" ("0":scope:_)) = do
+      state<-readIORef ref
+      root<-if isNothing (connection state) then B.resolveBuildRoot d else pure (project state)
+      path<-if scope=="0" then permissionConfigPath else projectConfigPath root
+      -- The existing editor supplies multiline editing, save and undo.
+      loaded<-readAgentContextAt path
+      result<-case loaded of Left err->pure (Left err); Right text->writeAgentContextAt path text
+      case result of
+        Left err -> pure (False,message "Agent Context" [err] d)
+        Right () -> do
+          (quit,opened)<-fallback d {guestPrivatePaths=path:guestPrivatePaths d} [ReadPath path]
+          pure (quit,opened {status="Edit [editor.agent] context; save to apply with the next query or steer."})
     apply (_,d) (AgentAction action values) = (False,) <$> perform runtime action values d
     apply (_,d) effect = fallback d [effect]
 
@@ -178,6 +193,9 @@ perform runtime@(ConversationState directory ref consoles jobs) action values or
     ("terminal-stop",_) -> case activeDocument d >>= documentLabel >>= T.stripPrefix "Terminal " of
       Just tid -> do result<-C.killConsole consoles tid; pure d {status=either id (const "Terminal command stopped.") result}
       Nothing -> pure d {status="Select a terminal window first."}
+    ("context",_) -> pure d {dialog=Just (Dialog "Agent Context" (AgentDialog "edit-context")
+      [Radio "Scope" ["Global","Project"] 1] 0 ["Edit","Cancel"]
+      ["Edit [editor.agent] context in the selected TOML file.","Use triple quotes for multiple lines. Save before sending.","Project context follows global context; permissions do not change."])}
     ("options",_) -> pure d {dialog=Just (Dialog "Agents" (AgentDialog "configure")
       [input "Executable" (T.pack (A.executable (provider s))),input "Arguments (JSON array)" (jsonText (A.arguments (provider s))),
        input "Environment (JSON object)" (jsonText (M.fromList (A.environment (provider s))))] 0 ["OK","Cancel"]
@@ -212,12 +230,16 @@ perform runtime@(ConversationState directory ref consoles jobs) action values or
     ("send-draft",_) | not (T.null (T.strip (contents (composerBuffer d)))) -> do
       next<-perform runtime "send" ["0",contents (composerBuffer d),"false","false","false"] d
       latest<-readIORef ref
-      pure (if isNothing (connection latest) then next else next {agentReplying=busy latest,composerBuffer=newBuffer "",composerSelection=Selection 0 0,composerFocused=True})
+      pure (if isNothing (connection latest) || not (busy latest) then next else next {agentReplying=busy latest,composerBuffer=newBuffer "",composerSelection=Selection 0 0,composerFocused=True})
     ("steer-draft",_) | not (agentSteering d) -> pure d {status="This provider does not advertise steering support."}
     ("steer-draft",_) | Just client<-connection s, Just sid<-session s, let text=contents (composerBuffer d), not (T.null (T.strip text)) -> do
-      ident<-A.request client "_session/steering" (object ["sessionId" .= sid,"prompt" .= [object ["type" .= ("text"::Text),"text" .= text]]])
-      writeIORef ref s {pending=M.insert ident (Steering text) (pending s),transcript=transcript s++[Reply "You" text]}
-      pure d {composerBuffer=newBuffer "",composerSelection=Selection 0 0,composerFocused=True,status="Steering request sent."}
+      prepared<-preparePrompt s text
+      case prepared of
+        Left err -> pure d {status=err}
+        Right (blocks,context) -> do
+          ident<-A.request client "_session/steering" (object ["sessionId" .= sid,"prompt" .= blocks])
+          writeIORef ref s {pending=M.insert ident (Steering text) (pending s),transcript=transcript s++[Reply "You" text],deliveredContext=Just context}
+          pure d {composerBuffer=newBuffer "",composerSelection=Selection 0 0,composerFocused=True,status="Steering request sent."}
     ("send",_:prompt:selectionFlag:fileFlag:diagnosticFlag:_) | not (T.null (T.strip prompt)), not (busy s) -> do
       let context=contextText (selectionFlag=="true") (fileFlag=="true") (diagnosticFlag=="true") d
           full=prompt<>(if T.null context then "" else "\n\n"<>context)
@@ -269,7 +291,7 @@ start (ConversationState _ ref _ _) resume d = do
       writeIORef ref s {queuedPrompt=Nothing}
       pure (message "Cannot start agent" (wrapMessage (T.pack (show err))) d)
     Right (root,client,ident) -> do
-      writeIORef ref s {connection=Just client,project=root,pending=M.singleton ident (Initializing resume)}
+      writeIORef ref s {connection=Just client,project=root,deliveredContext=Nothing,pending=M.singleton ident (Initializing resume)}
       pure d {status="Connecting to ACP provider...",agentSteering=False,agentReplying=True,agentContextUsage=Nothing,agentSettings=[]}
 
 sendQueued :: ConversationState -> Desktop -> IO Desktop
@@ -277,10 +299,32 @@ sendQueued (ConversationState _ ref _ _) d = do
   s<-readIORef ref
   case (connection s,session s,queuedPrompt s) of
     (Just client,Just sid,Just prompt) -> do
-      ident<-A.request client "session/prompt" (object ["sessionId" .= sid,"prompt" .= [object ["type" .= ("text"::Text),"text" .= prompt]]])
-      writeIORef ref s {queuedPrompt=Nothing,pending=M.insert ident Prompting (pending s)}
-      pure d {status="Agent is replying...",agentReplying=True}
+      prepared<-preparePrompt s prompt
+      case prepared of
+        Left err -> do
+          writeIORef ref s {queuedPrompt=Nothing}
+          pure d {status=err,agentReplying=False,composerBuffer=newBuffer prompt,composerSelection=Selection (T.length prompt) (T.length prompt)}
+        Right (blocks,context) -> do
+          ident<-A.request client "session/prompt" (object ["sessionId" .= sid,"prompt" .= blocks])
+          writeIORef ref s {queuedPrompt=Nothing,pending=M.insert ident Prompting (pending s),deliveredContext=Just context}
+          pure d {status="Agent is replying...",agentReplying=True}
     _ -> pure d
+
+-- Supply guidance once per connection and again when its saved value changes.
+-- A separate text block preserves the user's query and the visible transcript.
+preparePrompt :: State -> Text -> IO (Either Text ([Value],Value))
+preparePrompt state query=do
+  loaded<-readAgentContexts (project state)
+  pure $ do
+    context<-loaded
+    let block text=object ["type" .= ("text"::Text),"text" .= text]
+        textAt scope=fromMaybe "" (field scope context >>= field "text")
+        section scope title=title<>"\n"<>(if T.null (textAt scope) then "(none)" else textAt scope)
+        guidance="Current editor context replaces earlier editor context. It does not grant additional tool permissions.\n\n"<>
+          section "global" "Global context:"<>"\n\n"<>section "project" "Project context:"
+        catalog="Editor skills: explore projects; edit/review; HLS diagnosis/rename; build/test/run; DAP debugging; Git review; desktop/hex navigation; user questions; documentation/settings. Read docs/agent-skills.md with docs_read (corpus editor) for the relevant workflow and docs/agent-tools.md for operations. Discover exact schemas with tools/list."
+        extra=[guidance | deliveredContext state/=Just context]++[catalog | deliveredContext state==Nothing]
+    pure (map block (query:extra),context)
 
 tickConversation :: ConversationState -> Desktop -> IO Desktop
 tickConversation runtime@(ConversationState _ ref consoles jobs) initial = do
@@ -329,7 +373,7 @@ receive runtime@(ConversationState directory ref consoles _) d event = do
       case (M.lookup ident (pending s),result,connection s) of
         (Nothing,_,_) -> pure d
         (_,Left err,_) -> do
-          modifyIORef' ref (\state -> state {queuedPrompt=Nothing,transcript=transcript state++[activity "Request failed" err]})
+          modifyIORef' ref (\state -> state {queuedPrompt=Nothing,deliveredContext=Nothing,transcript=transcript state++[activity "Request failed" err]})
           pure d {status="Agent request failed; see Conversation.",composerBuffer=case M.lookup ident (pending s) of
             Just (Steering text) | T.null (contents (composerBuffer d)) -> newBuffer text
             _ -> composerBuffer d}
@@ -359,7 +403,9 @@ receive runtime@(ConversationState directory ref consoles _) d event = do
         (Just (Steering text),Right value,_) -> case field "outcome" value :: Maybe Text of
           Just "injected" -> pure d {status="Follow-up added to the active turn."}
           Just "startedNewTurn" -> pure d {status="Follow-up started a new turn."}
-          _ -> pure d {status="Steering failed; the follow-up remains in Conversation.",composerBuffer=if T.null (contents (composerBuffer d)) then newBuffer text else composerBuffer d}
+          _ -> do
+            modifyIORef' ref (\state -> state {deliveredContext=Nothing})
+            pure d {status="Steering failed; the follow-up remains in Conversation.",composerBuffer=if T.null (contents (composerBuffer d)) then newBuffer text else composerBuffer d}
         (Just Prompting,Right value,_) -> pure d {status="Agent: "<>fromMaybe "finished" (field "stopReason" value)}
         _ -> pure d
     A.Notification "session/update" params
@@ -789,10 +835,13 @@ conversationServices (ConversationState directory _ consoles jobs)=(directory,co
 
 
 chatToolNames :: [Text]
-chatToolNames=["ask_user"]
+chatToolNames=["ask_user","agent_settings"]
 
 chatTools :: [Value]
-chatTools=[object ["name" .= ("ask_user"::Text),"description" .= ("Ask one inline question in the editor conversation. Supply optional single-choice answers; a custom text answer is always available. Waits for the human without a time limit. Only one question may be pending."::Text),
+chatTools=[object ["name" .= ("agent_settings"::Text),"description" .= ("Read provider executable, argument count, environment variable names, connection state, model/config choices and context usage. Secret-labelled values, argument values, environment values and session keys are omitted. Cannot change provider settings."::Text),
+  "inputSchema" .= object ["type" .= ("object"::Text),"properties" .= object [],"additionalProperties" .= False],
+  "annotations" .= object ["readOnlyHint" .= True,"destructiveHint" .= False,"openWorldHint" .= False]],
+  object ["name" .= ("ask_user"::Text),"description" .= ("Ask one inline question in the editor conversation. Supply optional single-choice answers; a custom text answer is always available. Waits for the human without a time limit. Only one question may be pending."::Text),
   "inputSchema" .= object ["type" .= ("object"::Text),"required" .= ["question"::Text],"additionalProperties" .= False,
     "properties" .= object ["question" .= object ["type" .= ("string"::Text),"minLength" .= (1::Int),"maxLength" .= (4096::Int)],
       "choices" .= object ["type" .= ("array"::Text),"maxItems" .= (12::Int),"items" .= object ["type" .= ("string"::Text),"minLength" .= (1::Int),"maxLength" .= (256::Int)]],
@@ -801,6 +850,20 @@ chatTools=[object ["name" .= ("ask_user"::Text),"description" .= ("Ask one inlin
 
 chatTool :: ConversationState -> Desktop -> Text -> Value -> IO (Desktop,IO (Either Text Value))
 chatTool (ConversationState _ ref _ _) d name args
+  | name=="agent_settings" = if args/=object [] then pure (d,pure (Left "agent_settings accepts no arguments.")) else do
+      s<-readIORef ref
+      root<-if isNothing (connection s) then B.resolveBuildRoot d else pure (project s)
+      context<-readAgentContexts root
+      let launch=provider s
+          setting option=let secret=sensitiveLabel (T.unwords [settingId option,settingName option,settingCategory option]) in object
+                ["id" .= settingId option,"name" .= settingName option,"category" .= settingCategory option,
+                 "current" .= (if secret then "[hidden]" else settingCurrent option),
+                 "choices" .= [object ["value" .= value,"name" .= title] | (value,title)<-settingChoices option,not secret],"redacted" .= secret]
+      pure (d,pure (Right (object ["executable" .= A.executable launch,"argumentCount" .= length (A.arguments launch),
+        "environmentNames" .= map fst (A.environment launch),"connected" .= not (isNothing (connection s)),
+        "replying" .= agentReplying d,"steering" .= agentSteering d,"contextUsage" .= agentContextUsage d,
+        "settings" .= map setting (agentSettings d),"context" .= either (const Null) id context,
+        "contextError" .= either Just (const (Nothing::Maybe Text)) context,"sessionKeysRedacted" .= True])))
   | name/="ask_user"=pure (d,pure (Left "Unknown chat tool."))
   | otherwise=case parseEither parse args of
       Left err -> pure (d,pure (Left (T.pack err)))

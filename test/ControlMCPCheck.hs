@@ -66,7 +66,7 @@ checks=bracket temporary removePathForcibly $ \root ->
     check "raw input uses ordinary edit and undo behavior" (activeText typed=="old" && success typedReply && browserFrontend typed)
     (copied,copiedReply)<-input base [key "a" ["ctrl"],key "c" ["ctrl"],key "End" [],key "v" ["ctrl"]]
     effects<-readIORef observed
-    check "raw clipboard uses editor clipboard in browser sessions" (activeText copied=="oldold" && clipboard copied=="old" && success copiedReply && browserFrontend copied && not (any browserClipboard effects))
+    check "raw clipboard uses editor clipboard in browser sessions" (activeText copied=="oldold" && clipboard copied==clipboard base && success copiedReply && browserFrontend copied && not (any browserClipboard effects))
     forM_ [PermissionDialog "approve:1",AgentDialog "approval:1"] $ \purposeValue -> do
       let protected=base {dialog=Just (Dialog "Agent permission" purposeValue [] 0 ["Allow once","Deny"] [])}
       forM_ [key "Enter" [],key "Escape" [],paste "yes",object ["type" .= ("blur"::T.Text)],object ["type" .= ("mouse"::T.Text),"action" .= ("down"::T.Text),"x" .= (4::Int),"y" .= (4::Int)]] $ \event -> do
@@ -89,6 +89,20 @@ checks=bracket temporary removePathForcibly $ \root ->
     let modified=insertText "x" base
     (confirm,confirmReply)<-input modified [key "q" ["ctrl"]]
     check "dirty Quit retains normal save confirmation" (dialog confirm/=Nothing && activeText confirm==activeText modified && either (const False) ((==Just False).field "exitRequested") confirmReply)
+    let conversation=addReadOnly "Conversation" "Public reply" base
+        privateDraft=conversation {composerBuffer=newBuffer "private draft",composerFocused=True,clipboard="private clipboard"}
+    (blockedDraft,draftReply)<-input privateDraft [paste "guest text",key "Enter" []]
+    check "guest input cannot edit or submit the human conversation draft" (blockedDraft==privateDraft && either (const False) ((==Just (0::Int)).field "appliedEvents") draftReply)
+    (noClipboard,clipboardReply)<-input base {clipboard="private clipboard"} [key "v" ["ctrl"]]
+    check "guest paste cannot inherit or return the human clipboard" (activeText noClipboard=="old" && clipboard noClipboard=="private clipboard" && either (const False) ((==Just (""::T.Text)).field "clipboard") clipboardReply)
+    (_,streamerWrite)<-settings base ["streamerMode" .= True]
+    (_,streamerDefaults)<-call base "editor_settings" (object ["defaults" .= object ["streamerMode" .= True]])
+    check "guest cannot change Streamer mode through session or startup settings" (rejected streamerWrite && rejected streamerDefaults)
+    (_,privateRead)<-input base {clipboard="secret"} [object ["type" .= ("blur"::T.Text)]]
+    check "no-op guest events do not expose the human clipboard" (either (const False) ((==Just (""::T.Text)).field "clipboard") privateRead)
+    let humanPrefix=base {wordStar=True,prefix=Just 'k',heldModifiers=[]}
+    (plainCharacter,_)<-input humanPrefix [key "y" []]
+    check "guest characters do not complete a human WordStar prefix" (activeText plainCharacter=="yold" && prefix plainCharacter==Nothing)
     putStrLn "editor control MCP checks passed"
   where
     browserClipboard ReadBrowserClipboard=True

@@ -21,6 +21,7 @@ import qualified Data.Text.Lazy as TL
 import qualified Graphics.Vty as V
 import Graphics.Vty.Span (SpanOp(..))
 import System.IO (Handle, hFlush)
+import THC.Edit.GuestAccess
 import THC.Edit.Model hiding (Paste)
 import qualified THC.Edit.Model as Model
 import THC.Edit.Buffer (dirty, contents, newBuffer, newByteBuffer)
@@ -84,7 +85,33 @@ parseInput = withObject "browser event" $ \o -> do
     _ -> fail "Unknown event"
 
 applyInput :: WebInput -> Desktop -> (Desktop,[Effect])
-applyInput input d = case input of
+applyInput = applyInputFrom HumanInput
+
+-- The host brackets each locked guest batch with begin/endGuestInput; origin
+-- is never parsed from JSON. applyGuestInput also reports policy refusals.
+applyInputFrom :: InputOrigin -> WebInput -> Desktop -> (Desktop,[Effect])
+applyInputFrom HumanInput input d=applyInputUnchecked input d
+applyInputFrom GuestInput input d=either (const (d,[])) id (applyGuestInput input d)
+
+applyGuestInput :: WebInput -> Desktop -> Either T.Text (Desktop,[Effect])
+applyGuestInput input d
+  | not allowed = Left "This editor control requires human input."
+  | not (guestTransitionAllowed d updated effects) = Left "This editor action requires human input."
+  | otherwise = Right (updated,effects)
+  where
+    (updated,effects)=applyInputUnchecked input d
+    allowed=not (guestModalBlocked d) && case input of
+      Key name mods -> maybe False (\key->guestKeyAllowed d key mods) (inputKey name mods)
+      Paste _ -> guestKeyboardAllowed d
+      Mouse _ x y _ _ _ -> pointerAllowedAt d x y
+      Blur -> True
+      Modifiers _ -> guestKeyboardAllowed d
+      BrowserCommand cmd -> guestKeyboardAllowed d && guestCommandAllowed cmd
+      MenuCommand (Just cmd) -> guestKeyboardAllowed d && guestCommandAllowed cmd
+      _ -> False
+
+applyInputUnchecked :: WebInput -> Desktop -> (Desktop,[Effect])
+applyInputUnchecked input d = case input of
   SystemTheme value -> (d {systemDark=value},[])
   BrowserCommand cmd | dialog d/=Nothing -> (d,[WriteBrowserClipboard "" | cmd `elem` [Copy,Cut]])
                      | otherwise -> runCommand cmd d
@@ -96,7 +123,7 @@ applyInput input d = case input of
           _ -> newByteBuffer bytes
         opened=addDocument Nothing b d
     in (opened {buffers=M.adjust (\doc -> restyle doc {documentSuggestedName=Just (T.unpack name)}) (nextId d) (buffers opened),status="Dropped file opened; Download exports changes."},[])
-  Key name mods -> maybe (d,[]) (\key -> handleEvent (V.EvKey key mods) d) (keyName name)
+  Key name mods -> maybe (d,[]) (\key -> handleEvent (V.EvKey key mods) d) (inputKey name mods)
   Paste text -> handleEvent (V.EvPaste (TE.encodeUtf8 text)) d
   Frontend mode -> (d {videoMode=mode},[])
   OpenPath path -> (d,[ReadPath path])
@@ -112,15 +139,15 @@ applyInput input d = case input of
     "wheel-up" -> handleEvent (V.EvMouseDown x y V.BScrollUp mods) d
     "wheel-down" -> handleEvent (V.EvMouseDown x y V.BScrollDown mods) d
     _ -> (d,[])
-  where
-    keyName name = case T.unpack name of
-      [ch] -> Just (V.KChar (if V.MCtrl `elem` keyMods || V.MAlt `elem` keyMods then toLower ch else ch))
-      _ -> lookup name ([ ("F"<>T.pack (show n),V.KFun n) | n<-[1..24]] ++
-        [("ArrowUp",V.KUp),("ArrowDown",V.KDown),("ArrowLeft",V.KLeft),("ArrowRight",V.KRight),
-         ("Home",V.KHome),("End",V.KEnd),("PageUp",V.KPageUp),("PageDown",V.KPageDown),
-         ("Enter",V.KEnter),("Escape",V.KEsc),("Backspace",V.KBS),("Delete",V.KDel),
-         ("Insert",V.KIns),("Tab",if V.MShift `elem` keyMods then V.KBackTab else V.KChar '\t')])
-    keyMods=case input of Key _ ms -> ms; _ -> []
+
+inputKey :: T.Text -> [V.Modifier] -> Maybe V.Key
+inputKey name keyMods = case T.unpack name of
+  [ch] -> Just (V.KChar (if V.MCtrl `elem` keyMods || V.MAlt `elem` keyMods then toLower ch else ch))
+  _ -> lookup name ([ ("F"<>T.pack (show n),V.KFun n) | n<-[1..24]] ++
+    [("ArrowUp",V.KUp),("ArrowDown",V.KDown),("ArrowLeft",V.KLeft),("ArrowRight",V.KRight),
+     ("Home",V.KHome),("End",V.KEnd),("PageUp",V.KPageUp),("PageDown",V.KPageDown),
+     ("Enter",V.KEnter),("Escape",V.KEsc),("Backspace",V.KBS),("Delete",V.KDel),
+     ("Insert",V.KIns),("Tab",if V.MShift `elem` keyMods then V.KBackTab else V.KChar '\t')])
 
 -- Complete row-major snapshots feed DEFLATE in a stable order, refreshing its
 -- history with unchanged cells as well as edits. No application-level move search.

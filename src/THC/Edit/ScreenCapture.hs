@@ -1,5 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
-module THC.Edit.ScreenCapture (capture, screenTool) where
+module THC.Edit.ScreenCapture (capture, screenTool, redactCluster) where
 
 import Codec.Picture (PixelRGB8(..), encodePng, generateImage)
 import Data.Aeson
@@ -8,6 +8,7 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Base64 as B64
 import qualified Data.ByteString.Lazy as BL
 import Data.Foldable (toList)
+import Data.List (mapAccumL, groupBy)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -18,14 +19,16 @@ import qualified Graphics.Vty as V
 import Graphics.Vty.Span (SpanOp(..))
 import THC.Edit.Font
 import THC.Edit.Frontend (modeHeight)
-import THC.Edit.Model (Desktop(..))
+import THC.Edit.Model (Desktop(..), MenuItem(..), menus, commandEnabled)
+import THC.Edit.GuestAccess (CellAccess(..), cellAccess, guestKeyboardAllowed, beginGuestInput, guestKeyCombinations)
+import qualified THC.Edit.Protocol as P
 import THC.Edit.Render (renderDesktop)
 import THC.Edit.Unicode (clusterWidth, displayOpsForPic, graphemes)
 
 screenTool :: Value
 screenTool=object
   ["name" .= ("editor_screen"::Text),
-   "description" .= ("Capture the complete editor frame as colorless text, with an optional PNG bitmap preview from that same frame. Includes cursor and grid geometry; excludes OS chrome, CRT effects and native Unicode shaping."::Text),
+   "description" .= ("Capture the guest-readable editor frame as colorless text and optional PNG. Private cells are redacted in both outputs. Includes independent readable/clickable cell masks, key combinations and command permissions; excludes OS chrome, CRT effects and native Unicode shaping."::Text),
    "inputSchema" .= object ["type" .= ("object"::Text),"properties" .= object
      ["image" .= object ["type" .= ("boolean"::Text),"default" .= False]],"additionalProperties" .= False],
    "annotations" .= object ["readOnlyHint" .= True,"destructiveHint" .= False,"openWorldHint" .= False]]
@@ -45,16 +48,54 @@ capture font desktop includeImage
     cellHeight=modeHeight (fromMaybe 3 (videoMode desktop))
     picture=renderDesktop desktop
     spans=map toList (toList (displayOpsForPic picture (cols,rows)))
-    plain=T.unlines [T.concat (map plainSpan line) | line<-spans]
-    plainSpan TextSpan{textSpanText=t}=TL.toStrict t
-    plainSpan (Skip n)=T.replicate n " "
-    plainSpan (RowEnd n)=T.replicate n " "
+    maskedRows=[maskRow y line | (y,line)<-zip [0..] spans]
+    maskRow y line=snd (mapAccumL (maskCluster y) 0 padded)
+      where
+        chunks=concatMap spanClusters line
+        occupied=sum [clusterWidth text | (text,_)<-chunks]
+        padded=chunks++replicate (max 0 (cols-occupied)) (" ",V.defAttr)
+    spanClusters TextSpan{textSpanAttr=attr,textSpanText=t}=[(text,attr) | text<-graphemes (TL.toStrict t)]
+    spanClusters (Skip n)=replicate n (" ",V.defAttr)
+    spanClusters (RowEnd n)=replicate n (" ",V.defAttr)
+    maskCluster y x (text,attr)=
+      let width=clusterWidth text
+          access=[cellAccess desktop column y | column<-[x..x+width-1]]
+          (shown,safeAccess)=redactCluster text access
+          readable=all cellReadable safeAccess
+          shownAttr=if readable then attr else V.defAttr `V.withForeColor` V.RGBColor 0 0 0 `V.withBackColor` V.RGBColor 0 0 0
+      in (x+width,(shown,shownAttr,safeAccess))
+    plain=T.unlines [T.concat [text | (text,_,_)<-line] | line<-maskedRows]
+    accessGrid=Vec.fromList (concatMap (concatMap (\(_,_,access)->access)) maskedRows)
+    readableCell x y=cellReadable (accessGrid Vec.! (y*cols+x))
+    accessRows=[object ["y" .= y,"runs" .= runs (concatMap (\(_,_,access)->access) line)] | (y,line)<-zip [0::Int ..] maskedRows]
+    runs entries=snd (mapAccumL run 0 (groupBy same entries))
+      where
+        same a b=cellReadable a==cellReadable b && cellClickable a==cellClickable b
+        run x group=let n=length group
+                        access=case group of a:_->a; _->CellAccess False False
+                    in (x+n,object ["x" .= x,"length" .= n,"readable" .= cellReadable access,"clickable" .= cellClickable access])
     cursor=case V.picCursor picture of
-      V.Cursor x y | x>=0 && x<cols && y>=0 && y<rows -> Just (x,y)
+      V.Cursor x y | x>=0 && x<cols && y>=0 && y<rows && readableCell x y -> Just (x,y)
       _ -> Nothing
+    inputAllowed input=case P.applyGuestInput input (beginGuestInput desktop) of
+      Left _->False
+      Right _->True
+    modifierName modifier=case modifier of
+      V.MCtrl->"ctrl"::Text
+      V.MAlt->"alt"
+      V.MShift->"shift"
+      _->T.pack (show modifier)
     metadata=object ["cols" .= cols,"rows" .= rows,"text" .= plain,
       "cursor" .= fmap (\(x,y) -> object ["x" .= x,"y" .= y]) cursor,
-      "cursorPolicy" .= ("visible underline; blink phase fixed on"::Text),
+      "cursorPolicy" .= ("visible underline; blink phase fixed on; hidden in private cells"::Text),
+      "accessRows" .= accessRows,"keyboardAllowed" .= guestKeyboardAllowed desktop,
+      "keyPermissions" .= [object ["key" .= key,"mods" .= map modifierName modifiers,
+        "allowed" .= inputAllowed (P.Key key modifiers)] | (key,modifiers)<-guestKeyCombinations],
+      "commandPermissions" .= [object ["menu" .= menuName,"label" .= label,"command" .= show command,
+        "allowed" .= inputAllowed (P.MenuCommand (Just command)),"enabled" .= commandEnabled desktop command]
+        | (menuName,_,items)<-menus,MenuItem label _ command<-items],
+      "redactedCells" .= Vec.length (Vec.filter (not . cellReadable) accessGrid),
+      "redaction" .= ("Unreadable graphemes become spaces and solid black pixels; whole wide graphemes are hidden if any covered cell is private. Cell coordinates are preserved."::Text),
       "cellWidth" .= (8::Int),"cellHeight" .= cellHeight,"pixelWidth" .= (cols*8),"pixelHeight" .= (rows*cellHeight),
       "videoMode" .= fromMaybe 3 (videoMode desktop),"imageIncluded" .= includeImage,
       "renderer" .= ("canonical IBM/Unicode bitmap approximation; multi-codepoint graphemes use their first code point"::Text),
@@ -64,10 +105,7 @@ capture font desktop includeImage
         [object ["type" .= ("image"::Text),"mimeType" .= ("image/png"::Text),
           "data" .= TE.decodeUtf8 (B64.encode (BL.toStrict png))] | includeImage])]
     blank=(glyph font ' ',PixelRGB8 0 0 0,PixelRGB8 0 0 0,0)
-    cells=Vec.fromList (concatMap (take cols . (++repeat blank) . concatMap tiles) spans)
-    tiles TextSpan{textSpanAttr=attr,textSpanText=t}=concatMap (cluster attr) (graphemes (TL.toStrict t))
-    tiles (Skip n)=replicate n blank
-    tiles (RowEnd n)=replicate n blank
+    cells=Vec.fromList (concatMap (take cols . (++repeat blank) . concatMap (\(text,attr,_)->concatMap (cluster attr) (graphemes text))) maskedRows)
     cluster attr text=case T.uncons text of
       Nothing -> []
       Just (c,_) -> let tile=glyph font c
@@ -81,6 +119,13 @@ capture font desktop includeImage
               in if cursor==Just (x `div` 8,y `div` cellHeight) && y `mod` cellHeight>=cellHeight*14 `div` 16
                    then invert base else base
     invert (PixelRGB8 r g b)=PixelRGB8 (255-r) (255-g) (255-b)
+
+-- Access belongs to physical cells, while text belongs to graphemes. Hiding
+-- just the tail of a wide glyph would still expose its code point in text.
+redactCluster :: Text -> [CellAccess] -> (Text,[CellAccess])
+redactCluster text access
+  | all cellReadable access=(text,access)
+  | otherwise=(T.replicate (clusterWidth text) " ",[entry {cellReadable=False} | entry<-access])
 
 color :: V.MaybeDefault V.Color -> PixelRGB8
 color (V.SetTo (V.RGBColor r g b))=PixelRGB8 r g b

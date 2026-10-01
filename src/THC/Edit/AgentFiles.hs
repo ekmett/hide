@@ -15,6 +15,7 @@ import System.IO (IOMode(ReadMode), withBinaryFile)
 import System.IO.Error (catchIOError, isDoesNotExistError)
 import THC.Edit.Buffer
 import THC.Edit.Files
+import THC.Edit.GuestAccess (protectedPath, protectedBuffer)
 import THC.Edit.Model
 
 data Snapshot = Snapshot FileState (Maybe (Int,Int)) Text deriving (Eq,Show)
@@ -32,7 +33,7 @@ textTooLarge text = T.length text>fileLimit || BS.length (TE.encodeUtf8 text)>fi
 
 sourceSnapshots :: Desktop -> M.Map FilePath Snapshot
 sourceSnapshots d = M.fromList [(filePath file,Snapshot file (Just (bid,revision b)) (contents b)) |
-  (bid,doc)<-M.toList (buffers d),documentLabel doc==Nothing,textBuffer (documentBuffer doc),Just file<-[documentFile doc],let b=documentBuffer doc]
+  (bid,doc)<-M.toList (buffers d),not (protectedBuffer d bid),documentLabel doc==Nothing,textBuffer (documentBuffer doc),Just file<-[documentFile doc],let b=documentBuffer doc]
 
 -- ACP paths are absolute and bounded by the session's canonical project root.
 -- Resolving both endpoints also rejects symlinks which escape that root.
@@ -41,6 +42,7 @@ captureFile root path d = do
   result <- try $ do
     unless (isAbsolute path && '\0' `notElem` path) (ioError (userError "Expected an absolute file path."))
     resolved <- canonicalizePath path
+    when (protectedPath d resolved) (ioError (userError "Agent authority files are private; use agent_settings for public context."))
     base <- canonicalizePath root
     let relative=makeRelative base resolved
     when (isAbsolute relative || ".." `elem` splitDirectories relative) (ioError (userError "File is outside this session's project."))
@@ -68,6 +70,7 @@ captureFile root path d = do
 -- contents in the ordinary undo tree and use the normal checked atomic save.
 acceptWrite :: Snapshot -> Text -> Desktop -> IO (Either Text Desktop)
 acceptWrite (Snapshot file expected oldText) text d
+  | protectedPath d (filePath file) = pure (Left "Agent authority files require human input.")
   | T.any (=='\0') text = pure (Left "Text contains NUL bytes.")
   | textTooLarge text = pure (Left "ACP text files are limited to 16 MiB.")
   | otherwise = case current of
@@ -97,7 +100,7 @@ contextText :: Bool -> Bool -> Bool -> Desktop -> Text
 contextText selectionOnly wholeFile includeDiagnostics d = T.intercalate "\n\n" (fileContext++problemContext)
   where
     fileContext=case (activeWindow d,activeDocument d) of
-      (Just w,Just doc) | documentLabel doc==Nothing, textBuffer (documentBuffer doc) ->
+      (Just w,Just doc) | not (protectedBuffer d (bufferId w)), documentLabel doc==Nothing, textBuffer (documentBuffer doc) ->
         let b=documentBuffer doc; Selection a z=selection w
             path=maybe "Unsaved buffer" (T.pack . filePath) (documentFile doc)
             selected=T.take (abs (z-a)) (T.drop (min a z) (contents b))

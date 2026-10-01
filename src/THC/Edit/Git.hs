@@ -1,11 +1,12 @@
 {-# LANGUAGE OverloadedStrings #-}
 module THC.Edit.Git
-  ( RepoStatus(..), repositoryStatus, repositoryDiff
+  ( RepoStatus(..), repositoryStatus, repositoryDiff, repositoryDiffFiltered, repositoryDiffFilteredAt
   , GitReview(..), reviewRepository, commitReview
   ) where
 
-import Control.Monad (forM, unless, when)
+import Control.Monad (forM, forM_, unless, when)
 import qualified Data.Set as Set
+import qualified Data.Map.Strict as Map
 import Data.Maybe (catMaybes)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -71,6 +72,71 @@ repositoryDiff path selected = result $ do
       pure [relative]
   diffText root paths
 
+-- The predicate receives both lexical and canonical absolute paths. Include
+-- staged deletion names: they no longer appear in ls-files, but their old bytes
+-- still belong to the diff. Never interpret an empty filtered list as all files.
+repositoryDiffFiltered :: FilePath -> (FilePath -> Bool) -> IO (Either Text (Text,Int))
+repositoryDiffFiltered path=repositoryDiffFilteredAt path Nothing
+
+-- Selection narrows the output only after whole-repository private lineage is
+-- classified, so selecting an innocent-looking rename destination is not a bypass.
+repositoryDiffFilteredAt :: FilePath -> Maybe FilePath -> (FilePath -> Bool) -> IO (Either Text (Text,Int))
+repositoryDiffFilteredAt path selected excluded=do
+  prepared<-result $ do
+    directory<-pathDirectory path
+    root<-repositoryRoot directory
+    selection<-traverse (\file->do
+      let absolute=normalise (if isAbsolute file then file else directory </> file)
+      canonical<-canonicalizePath absolute
+      unless (within root canonical && not (excluded absolute || excluded canonical)) (failGit "Selected diff path is private or outside this repository.")
+      pure canonical) selected
+    listed<-fileNames <$> git root ["ls-files","--cached","--others","--exclude-standard","-z"]
+    before<-renameChanges root
+    (changed,renames)<-either failGit pure (parseChanges (fst before<>snd before))
+    let files=Set.toAscList (Set.fromList (listed++changed))
+    when (length files>10000) (failGit "Filtered diff exceeds 10000 files; select a file instead.")
+    checked<-forM files $ \file->do
+      let absolute=normalise (root </> file)
+      canonical<-canonicalizePath absolute
+      let relative=makeRelative root canonical
+      pure (file,canonical,excluded absolute || excluded canonical || isAbsolute relative || ".." `elem` splitDirectories relative)
+    let links=Map.fromListWith (++) [(source,[destination]) | (source,destination)<-renames]
+        initial=Set.fromList [file | (file,_,True)<-checked]
+        omitted=closeRenames links initial (Set.toList initial)
+        selectedRows=[row | row@(file,_,_)<-checked,maybe True (\base->within base (normalise (root </> file))) selection]
+        allowed=[file | (file,_,_)<-selectedRows,Set.notMember file omitted]
+    text<-if null allowed then pure "No changes.\n" else diffTextWith ["--no-renames","--submodule=short"] root allowed
+    after<-renameChanges root
+    unless (before==after) (failGit "Repository changed while preparing the filtered diff; retry.")
+    forM_ [row | row@(file,_,_)<-selectedRows,Set.notMember file omitted] $ \(file,canonical,_)->do
+      current<-canonicalizePath (root </> file)
+      unless (current==canonical && not (excluded current)) (failGit "A filtered diff path changed; retry.")
+    pure (text,length [() | (file,_,_)<-selectedRows,Set.member file omitted])
+  -- Git failures may mention filenames; a private path must not escape in errors.
+  pure (either (const (Left "Could not prepare a stable filtered Git diff; retry or select a safe file.")) Right prepared)
+  where
+    within root file=let relative=makeRelative root file in not (isAbsolute relative) && ".." `notElem` splitDirectories relative
+    closeRenames _ omitted []=omitted
+    closeRenames links omitted (source:rest)=
+      let fresh=filter (`Set.notMember` omitted) (Map.findWithDefault [] source links)
+      in closeRenames links (foldr Set.insert omitted fresh) (fresh++rest)
+    -- Bound exhaustive similarity matching, including copies from unchanged
+    -- sources. Exact Git-detected moves/copies are still propagated above.
+    renameChanges root=(,) <$> git root (diffArgs++["--cached","--name-status","-z","-M","-C","--find-copies-harder","-l256","--"])
+                           <*> git root (diffArgs++["--name-status","-z","-M","-C","--find-copies-harder","-l256","--"])
+    parseChanges input=go (filter (not . T.null) (T.splitOn "\NUL" input))
+      where
+        go []=Right ([],[])
+        go (status:rest) | T.take 1 status `elem` ["R","C"]=case rest of
+          source:destination:remaining->do
+            (files,renames)<-go remaining
+            pure (T.unpack source:T.unpack destination:files,(T.unpack source,T.unpack destination):renames)
+          _->Left "Invalid Git rename listing"
+        go (_:file:remaining)=do
+          (files,renames)<-go remaining
+          pure (T.unpack file:files,renames)
+        go _=Left "Invalid Git change listing"
+
 reviewRepository :: FilePath -> IO (Either Text GitReview)
 reviewRepository path = result $ do
   root <- repositoryRoot path
@@ -128,12 +194,16 @@ snapshot root = do
 -- Keep staged and unstaged changes distinct, including on an unborn branch.
 -- New files get a no-index diff so the approval screen shows their contents.
 diffText :: FilePath -> [FilePath] -> IO Text
-diffText root paths = do
-  staged <- git root (diffArgs ++ ["--cached", "--"] ++ paths)
-  working <- git root (diffArgs ++ ["--"] ++ paths)
+diffText=diffTextWith []
+
+diffTextWith :: [String] -> FilePath -> [FilePath] -> IO Text
+diffTextWith options root paths = do
+  let arguments=diffArgs++options
+  staged <- git root (arguments ++ ["--cached", "--"] ++ paths)
+  working <- git root (arguments ++ ["--"] ++ paths)
   untracked <- fileNames <$> git root (["ls-files", "--others", "--exclude-standard", "-z", "--"] ++ paths)
   newFiles <- forM untracked $ \file -> do
-    (code, out, err) <- runGit root (diffArgs ++ ["--no-index", "--", "/dev/null", file])
+    (code, out, err) <- runGit root (arguments ++ ["--no-index", "--", "/dev/null", file])
     unless (code == ExitSuccess || code == ExitFailure 1) (failGit err)
     symbolic <- pathIsSymbolicLink (root </> file)
     digest <- if symbolic then do

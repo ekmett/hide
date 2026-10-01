@@ -2,6 +2,7 @@
 module THC.Edit.MCPPermissions
   ( Permissions, withPermissions, withPermissionsAt, permissionCall, policyEffects, tickPermissions
   , permissionConfigPath, readEditorDefaults, writeEditorDefaults, readEditorDefaultsAt, writeEditorDefaultsAt
+  , projectConfigPath, readEditorDefaultsFor, readAgentContextAt, writeAgentContextAt, readAgentContexts
   , updateConfigTable
   ) where
 
@@ -23,9 +24,9 @@ import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import System.Directory (canonicalizePath, createDirectoryIfMissing, getHomeDirectory)
+import System.Directory (canonicalizePath, createDirectoryIfMissing, getHomeDirectory, doesDirectoryExist, doesFileExist, listDirectory)
 import System.Environment (lookupEnv)
-import System.FilePath ((</>), isAbsolute, takeDirectory)
+import System.FilePath ((</>), isAbsolute, takeDirectory, takeExtension)
 import System.IO (IOMode(ReadMode), withBinaryFile)
 import System.IO.Error (catchIOError, isDoesNotExistError)
 import System.IO.Unsafe (unsafePerformIO)
@@ -210,6 +211,74 @@ readPolicies path=do
 
 readEditorDefaults :: IO (Either Text Value)
 readEditorDefaults=permissionConfigPath >>= readEditorDefaultsAt
+
+-- A nearer package/repository boundary keeps settings in a containing project
+-- from silently configuring an independent nested project.
+projectConfigPath :: FilePath -> IO FilePath
+projectConfigPath input=do
+  absolute<-canonicalizePath input
+  directory<-doesDirectoryExist absolute
+  let start=if directory then absolute else takeDirectory absolute
+  search start start
+  where
+    search fallback directory=do
+      let config=directory </> "thc.toml"
+      exists<-doesFileExist config
+      if exists then canonicalizePath config else do
+        entries<-listDirectory directory
+        let boundary=".git" `elem` entries || "cabal.project" `elem` entries || any ((==".cabal").takeExtension) entries
+            parent=takeDirectory directory
+        if boundary then canonicalizePath config
+          else if parent==directory then canonicalizePath (fallback </> "thc.toml")
+          else search fallback parent
+
+readEditorDefaultsFor :: FilePath -> IO (Either Text Value)
+readEditorDefaultsFor directory=configIO $ do
+  global<-readEditorDefaults
+  project<-projectConfigPath directory >>= readEditorDefaultsAt
+  pure $ do
+    globalValue<-global
+    projectValue<-project
+    case (globalValue,projectValue) of
+      (Object globalEntries,Object projectEntries)->Right (Object (KM.union projectEntries globalEntries))
+      _->Left "Editor defaults must be a table"
+
+readAgentContextAt :: FilePath -> IO (Either Text Text)
+readAgentContextAt path=do
+  config<-readConfig path
+  pure $ do
+    (_,_,table)<-config
+    agent<-lookupTable ["editor","agent"] table
+    case agent >>= M.lookup "context" . tableMap of
+      Nothing->Right ""
+      Just (_,Toml.Text' _ context) | T.length context<=16384->Right context
+                                   | otherwise->Left "Agent context exceeds 16384 characters"
+      _->Left "Agent context must be a TOML string"
+
+writeAgentContextAt :: FilePath -> Text -> IO (Either Text ())
+writeAgentContextAt path context
+  | T.length context>16384=pure (Left "Agent context exceeds 16384 characters")
+  | otherwise=writeTable path ["editor","agent"] (object ["context" .= context])
+
+readAgentContexts :: FilePath -> IO (Either Text Value)
+readAgentContexts directory=configIO $ do
+  globalPath<-permissionConfigPath
+  projectPath<-projectConfigPath directory
+  global<-readAgentContextAt globalPath
+  project<-readAgentContextAt projectPath
+  pure $ do
+    globalText<-global
+    projectText<-project
+    Right (object ["global" .= object ["path" .= globalPath,"text" .= globalText],
+      "project" .= object ["path" .= projectPath,"text" .= projectText]])
+
+configIO :: IO (Either Text a) -> IO (Either Text a)
+configIO action=do
+  result<-try action
+  pure $ case result of
+    Left (_::IOException)->Left "Could not locate editor configuration"
+    Right value->value
+
 writeEditorDefaults :: Value -> IO (Either Text ())
 writeEditorDefaults values=permissionConfigPath >>= \path->writeEditorDefaultsAt path values
 readEditorDefaultsAt :: FilePath -> IO (Either Text Value)
@@ -225,7 +294,7 @@ writeEditorDefaultsAt path values=case values of
   Object entries | all (`elem` allowed) (KM.keys entries),all scalar (KM.elems entries) -> writeTable path ["editor","defaults"] values
   _ -> pure (Left "Editor defaults must contain only supported primitive settings")
   where
-    allowed=["backend","scale","screenMode","columns","rows","appearance","wordStar","blinkCursor","crtFilter","pixelateUnicode","materialIcons"]
+    allowed=["backend","scale","screenMode","columns","rows","appearance","wordStar","blinkCursor","crtFilter","pixelateUnicode","materialIcons","streamerMode"]
     scalar String{}=True; scalar Number{}=True; scalar Bool{}=True; scalar _=False
 
 primitive :: Toml.Value' a -> Either Text Value
@@ -256,7 +325,7 @@ readConfig path=do
       table<-either (const (Left "Invalid TOML in thc/config.toml; existing configuration was not changed")) Right (Toml.parse text)
       pure (bytes,text,table)
 
--- Serialize our two writers in this process. saveFile also checks the freshly
+-- Serialize configuration writers in this process. saveFile also checks the freshly
 -- read disk baseline before its atomic rename, preserving other settings.
 configWriteLock :: MVar ()
 configWriteLock=unsafePerformIO (newMVar ())

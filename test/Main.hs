@@ -13,6 +13,9 @@ import qualified ProtocolCheck
 import qualified RemoteCheck
 import qualified RemoteWindowCheck
 import qualified RemoteTerminalCheck
+import qualified GuestAccessCheck
+import qualified StreamerCheck
+import qualified ClipboardMCPCheck
 import qualified DocsMCPCheck
 import qualified ControlMCPCheck
 import qualified DefaultsCheck
@@ -71,6 +74,9 @@ main = do
   RemoteCheck.checks
   RemoteWindowCheck.checks
   RemoteTerminalCheck.checks
+  GuestAccessCheck.checks
+  StreamerCheck.checks
+  ClipboardMCPCheck.checks
   DocsMCPCheck.checks
   ControlMCPCheck.checks
   DefaultsCheck.checks

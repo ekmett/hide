@@ -35,6 +35,11 @@ checks=do
       cursor=caret . selection . fromJust . activeWindow
       doc=fromJust . activeDocument
   ok "workspace schemas declare all tools" (length workspaceTools==length workspaceToolNames && "editor_file" `elem` workspaceToolNames)
+  let privateReview=addReadOnly "Disk changes: /authority/private-session-key.json" "private review" original {guestPrivatePaths=["/authority/private-session-key.json"]}
+  (_,reviewLayout)<-call privateReview "editor_layout" []
+  ok "workspace layout hides protected filenames in disk review labels" (case reviewLayout of
+    Right value->not ("private-session-key" `T.isInfixOf` T.pack (show value)) && "[private]" `T.isInfixOf` T.pack (show value)
+    _->False)
   (navigated,result)<-call original "editor_navigate" ["line" .= (2::Int),"column" .= (3::Int)]
   ok "navigation uses live Unicode buffer offsets" (succeeded result && cursor navigated==5)
   (unchanged,outOfRange)<-call original "editor_navigate" ["line" .= (maxBound::Int)]
@@ -87,6 +92,25 @@ checks=do
     absolute<-canonicalizePath path
     (opened,openResult)<-call original "editor_file" ["action" .= ("open"::T.Text),"path" .= absolute]
     ok "file open uses editor effects" (succeeded openResult && fmap filePath (documentFile (doc opened))==Just absolute)
+    let private=original {guestPrivatePaths=[absolute]}
+    (privateOpen,privateOpenResult)<-call private "editor_file" ["action" .= ("open"::T.Text),"path" .= absolute]
+    ok "file open refuses authority files" (rejected privateOpenResult && privateOpen==private)
+    (_,privateNavigate)<-call private "editor_navigate" ["path" .= absolute]
+    ok "navigation cannot open authority files" (rejected privateNavigate)
+    (privateSave,privateSaveResult)<-call private "editor_file" ["action" .= ("save"::T.Text),"path" .= absolute,"revision" .= revision (documentBuffer (doc private))]
+    privateDisk<-BS.readFile path
+    ok "save-as cannot overwrite authority files" (rejected privateSaveResult && privateSave==private && privateDisk=="disk")
+    let privateOpened=opened {guestPrivatePaths=[absolute]}
+    (_,privateCloseResult)<-call privateOpened "editor_file" ["action" .= ("close"::T.Text),"revision" .= revision (documentBuffer (doc privateOpened))]
+    ok "human-open authority buffer cannot be closed by guest" (rejected privateCloseResult)
+    (_,privateLayout)<-call privateOpened "editor_layout" []
+    ok "private workspace layout suppresses secret-bearing file paths" (case privateLayout of
+      Right value->case parseMaybe (withObject "layout" (.: "windows")) value of
+        Just entries->all (\entry->parseMaybe (withObject "window" (.: "path")) entry/=Just (Just absolute)) (entries::[Value])
+        _->False
+      _->False)
+    (_,privateProject)<-call privateOpened "workspace_project" []
+    ok "private active file is not exposed as project source" (case privateProject of Right value->parseMaybe (withObject "project" (.: "source")) value==Just (Nothing::Maybe FilePath); _->False)
     let edited=insertText "live " opened
         editedRevision=revision (documentBuffer (doc edited))
     (reopened,reopenResult)<-call edited "editor_file" ["action" .= ("open"::T.Text),"path" .= absolute]
@@ -124,6 +148,38 @@ checks=do
       Right value->parseMaybe (withObject "git" (.: "includesUnsaved")) value==Just False &&
         maybe False (T.isInfixOf "sample") (parseMaybe (withObject "git" (.: "diff")) value)
       _->False)
+    (_,absentConfigDiff)<-call (project {guestPrivatePaths=[root </> "thc.toml",root </> "missing-global.toml"]}) "workspace_git" ["view" .= ("diff"::T.Text)]
+    ok "default absent private configuration does not disable whole repository diff" (succeeded absentConfigDiff)
+    BS.writeFile (root </> "authority.toml") "private-git-secret"
+    let privateProject=project {guestPrivatePaths=[root </> "authority.toml"]}
+    (_,privateWholeDiff)<-call privateProject "workspace_git" ["view" .= ("diff"::T.Text)]
+    (_,privateFileDiff)<-call privateProject "workspace_git" ["view" .= ("diff"::T.Text),"path" .= ("authority.toml"::T.Text)]
+    (_,wildcardDiff)<-call privateProject "workspace_git" ["view" .= ("diff"::T.Text),"path" .= ("*.toml"::T.Text)]
+    (_,magicDiff)<-call privateProject "workspace_git" ["view" .= ("diff"::T.Text),"path" .= (":(glob)*"::T.Text)]
+    (_,safeFileDiff)<-call privateProject "workspace_git" ["view" .= ("diff"::T.Text),"path" .= ("sample.cabal"::T.Text)]
+    ok "Git diffs omit private files while whole and explicit safe diffs work" (succeeded privateWholeDiff && rejected privateFileDiff && succeeded wildcardDiff && succeeded magicDiff && succeeded safeFileDiff)
+    ok "whole diff reports omission without private paths or contents" (case privateWholeDiff of
+      Right value->maybe False (\text->"sample" `T.isInfixOf` text && not ("authority.toml" `T.isInfixOf` text) && not ("private-git-secret" `T.isInfixOf` text)) (parseMaybe (withObject "diff" (.: "diff")) value) && parseMaybe (withObject "diff" (.: "omittedFiles")) value==Just (1::Int)
+      _->False)
+    createDirectory (root </> "nested")
+    BS.writeFile (root </> "nested/thc.toml") "private nested context"
+    BS.writeFile (root </> "nested/public.hs") "ordinary nested source"
+    (_,directoryDiff)<-call privateProject "workspace_git" ["view" .= ("diff"::T.Text),"path" .= ("nested"::T.Text)]
+    ok "selected directories filter unregistered nested project configuration" (case directoryDiff of
+      Right value->maybe False (\text->"ordinary nested source" `T.isInfixOf` text && not ("private nested context" `T.isInfixOf` text) && not ("thc.toml" `T.isInfixOf` text) && not ("sample.cabal" `T.isInfixOf` text)) (parseMaybe (withObject "diff" (.: "diff")) value)
+      _->False)
+    let fixtureGit args=do
+          (gitCode,_,gitError)<-readProcessWithExitCode "git" (["-C",root,"-c","user.name=Git Test","-c","user.email=test@example.invalid","-c","commit.gpgsign=false","-c","core.hooksPath="<>root </> ".git/hooks"]++args) ""
+          unless (gitCode==ExitSuccess) (error gitError)
+    fixtureGit ["add","--","nested/thc.toml"]
+    fixtureGit ["commit","--quiet","-m","private source fixture"]
+    fixtureGit ["mv","--","nested/thc.toml","nested/ordinary-name.txt"]
+    (_,renamedSelection)<-call privateProject "workspace_git" ["view" .= ("diff"::T.Text),"path" .= ("nested/ordinary-name.txt"::T.Text)]
+    ok "selected rename destination cannot bypass private source filtering" (case renamedSelection of
+      Right value->parseMaybe (withObject "diff" (.: "diff")) value==Just ("No changes.\n"::T.Text) && parseMaybe (withObject "diff" (.: "omittedFiles")) value==Just (1::Int)
+      _->False)
+    (_,missingDiff)<-call privateProject "workspace_git" ["view" .= ("diff"::T.Text),"path" .= ("absent/subdir"::T.Text)]
+    ok "selected missing path is a safe empty diff" (case missingDiff of Right value->parseMaybe (withObject "diff" (.: "diff")) value==Just ("No changes.\n"::T.Text); _->False)
   putStrLn "workspace MCP checks passed"
 
 -- Use the same file primitives as the application; unsupported effects fail

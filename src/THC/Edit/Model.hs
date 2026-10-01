@@ -13,7 +13,7 @@ import Data.Maybe (listToMaybe, fromMaybe)
 import Data.List (find, findIndex, sortOn, mapAccumL, groupBy)
 import Data.Char (toLower, isAlphaNum, chr, ord, toUpper, isHexDigit, digitToInt)
 import Text.Read (readMaybe)
-import System.FilePath ((</>), takeDirectory, isAbsolute, splitDirectories, joinPath, normalise)
+import System.FilePath ((</>), takeDirectory, isAbsolute, equalFilePath, splitDirectories, joinPath, normalise)
 import THC.Edit.Browser (Entry(..))
 import THC.Edit.Git (GitReview)
 import THC.Edit.Syntax (Style(..), highlightFor)
@@ -52,7 +52,7 @@ data Command = New | Open | Download | ChangeDir | Save | SaveAs | Close | Quit 
   | ToggleTree | GitDiff | GitCommit | GitFetch | GitPull | GitMerge | ReviewDisk
   | CompileTarget | MakeTarget | StopBuild | RunTarget | RunOptions | OpenTerminal | StopTerminal
   | AgentChoose Text | AgentSet Text Text
-  | AgentOptions | AgentPermissions | Conversation | AgentCancel | AgentResume | AgentCopyRaw | AgentNew
+  | AgentOptions | AgentPermissions | AgentGuidance | Conversation | AgentCancel | AgentResume | AgentCopyRaw | AgentNew
   | ToggleHex | GoToMessage | CopyAllMessages
   | DebugCommand Text
   | Disabled Text deriving (Eq,Show)
@@ -105,6 +105,7 @@ data Desktop = Desktop
   , composerBuffer :: Buffer, composerSelection :: Selection, composerFocused :: Bool, agentSteering :: Bool, agentReplying :: Bool, agentQueued :: Int
   , blinkCursor :: Bool, crtFilter :: Bool, pixelateUnicode :: Bool, materialIcons :: Bool, defaultDirectory :: Maybe FilePath, statusHover :: Maybe Int, heldModifiers :: [V.Modifier], problemsPreferredHeight :: Int, agentContextUsage :: Maybe (Integer,Integer), agentSettings :: [AgentSetting], browserFrontend :: Bool, appearance :: Appearance, systemDark :: Bool, buildDiagnostics :: [Diagnostic]
   , chatQuestion :: Maybe ChatQuestion, chatActions :: [(Int,Int,Text,[Text])], chatInputOffset :: Maybe Int
+  , streamerMode :: Bool, clipboardExport :: (Int,Maybe Text), guestPrivatePaths :: [FilePath]
   } deriving (Eq,Show)
 
 data MenuItem = MenuItem Text Text Command deriving (Eq,Show)
@@ -122,7 +123,7 @@ menus =
       mi "Threads..." "" (DebugCommand "threads"),mi "Call stack..." "" (DebugCommand "stack"),mi "Scopes..." "" (DebugCommand "scopes"),
       mi "Exceptions..." "" (DebugCommand "exceptions"),mi "Output" "" (DebugCommand "output"),mi "Disconnect" "" (DebugCommand "disconnect")])
   ,("Tools",'t',[mi "File tree" "Ctrl+B" ToggleTree,mi "Git diff..." "" GitDiff,mi "Approve changes..." "" GitCommit,mi "Inspect type" "Shift+F1" InspectType,mi "Messages" "" Problems,mi "Go to next" "Alt+F8" NextMessage,mi "Go to previous" "Alt+F7" PreviousMessage,mi "Restart language server" "" RestartHLS,mi "Conversation" "" Conversation,mi "Conversation model..." "" (AgentChoose ""),mi "Cancel reply" "" AgentCancel,mi "Resume session..." "" AgentResume,mi "New session" "" AgentNew,mi "Copy raw conversation" "" AgentCopyRaw,mi "Widget gallery..." "" Gallery,off "Project browser..." "" "Cabal component browsing is a later milestone."])
-  ,("Options",'o',[mi "Preferences..." "" EditorOptions,mi "Agents..." "" AgentOptions,mi "Agent Permissions" "" AgentPermissions])
+  ,("Options",'o',[mi "Preferences..." "" EditorOptions,mi "Agents..." "" AgentOptions,mi "Agent Permissions" "" AgentPermissions,mi "Agent Context..." "" AgentGuidance])
   ,("Window",'w',[mi "Tile" "" Tile,mi "Cascade" "" Cascade,mi "Split vertically" "" SplitVertical,mi "Split horizontally" "" SplitHorizontal,mi "Zoom" "F5" Zoom,mi "Next" "F6" NextWindow,mi "Close" "Alt+F3" Close])
   ,("Help",'h',[mi "Contents" "F1" Help,mi "About Turbo Haskell..." "" About])]
   where mi = MenuItem
@@ -169,6 +170,7 @@ commandDescription cmd = case cmd of
   AgentSet _ _ -> "Apply this choice to the conversation."
   AgentOptions -> "Configure agents and their executable commands."
   AgentPermissions -> "Set each agent tool to Enable, Prompt, or Disable."
+  AgentGuidance -> "Edit global or project context supplied to the conversation agent."
   Conversation -> "Show the agent conversation."
   AgentCancel -> "Cancel the active agent reply."
   AgentResume -> "Resume an agent session."
@@ -269,7 +271,7 @@ menuRect d i = Rect (min x (max 0 (sw-w))) 1 w (length (menuItemsFor d i)+2)
         w = min sw (maximum [T.length t + T.length (menuShortcut d entry) + 5 | entry@(MenuItem t _ _) <- menuItemsFor d i])
 
 initialDesktop :: (Int,Int) -> Desktop
-initialDesktop size = Desktop size [] M.empty 1 Nothing Nothing Nothing "" False Nothing "" Nothing "" Nothing "" False Nothing Nothing Nothing "" Nothing Nothing Nothing [] False 0 0 False Nothing 0 0 Nothing SourceContext Nothing (newBuffer "") (Selection 0 0) True False False 0 True False False False Nothing Nothing [] 8 Nothing [] False SystemMode True [] Nothing [] Nothing
+initialDesktop size = Desktop size [] M.empty 1 Nothing Nothing Nothing "" False Nothing "" Nothing "" Nothing "" False Nothing Nothing Nothing "" Nothing Nothing Nothing [] False 0 0 False Nothing 0 0 Nothing SourceContext Nothing (newBuffer "") (Selection 0 0) True False False 0 True False False False Nothing Nothing [] 8 Nothing [] False SystemMode True [] Nothing [] Nothing False (0,Nothing) []
 
 activeWindow :: Desktop -> Maybe Window
 activeWindow = listToMaybe . windows
@@ -279,6 +281,7 @@ activeDocument d = activeWindow d >>= (\w -> M.lookup (bufferId w) (buffers d))
 applicationTitle :: FilePath -> Desktop -> Text
 applicationTitle cwd d = case activeDocument d of
   Nothing -> "th"
+  Just doc | streamerMode d, Just file<-documentFile doc, any (equalFilePath (filePath file)) (guestPrivatePaths d) -> "th [private]"
   Just doc -> "th "<>fromMaybe name (documentLabel doc)
     where
       root=fromMaybe (maybe cwd treeRoot (sideTree d)) (defaultDirectory d)
@@ -436,6 +439,7 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
     go StopTerminal d = (d,[AgentAction "terminal-stop" []])
     go AgentOptions d = (d,[AgentAction "options" []])
     go AgentPermissions d = (d,[PermissionAction "show" []])
+    go AgentGuidance d = (d,[AgentAction "context" []])
     go Conversation d = (d,[AgentAction "show" []])
     go AgentCancel d = (d,[AgentAction "cancel" []])
     go AgentResume d = (d,[AgentAction "resume" []])
@@ -506,7 +510,7 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
     go EditorOptions d = (prompt "Preferences" Settings
       ([Radio "Key bindings" ["Modern","WordStar"] (if wordStar d then 1 else 0)] ++
        [Radio "Screen size" ["Mode 3 (80x25)","Mode 259 (80x50)"] (if mode == 259 then 1 else 0) | Just mode <- [videoMode d]] ++
-       [Radio "Appearance" ["Light","Dark","System"] (fromEnum (appearance d)),CheckBox "Blinking cursor" (blinkCursor d)] ++
+       [Radio "Appearance" ["Light","Dark","System"] (fromEnum (appearance d)),CheckBox "Blinking cursor" (blinkCursor d),CheckBox "Streamer mode" (streamerMode d)] ++
        [field | videoMode d/=Nothing,field<-[CheckBox "CRT filter" (crtFilter d),CheckBox "Pixelate Unicode" (pixelateUnicode d)]]) d,[])
     go Gallery d = (prompt "Dialog controls" Widgets [Input "Module name" "Main" 4,CheckBox "Auto indent" True,Radio "Tab width" ["4 columns","8 columns"] 1,ListBox "Source files" ["Main.hs","Types.hs","Parser.hs","Syntax.hs","Eval.hs"] 0] d,[])
     go (Disabled reason) d = (d {status = reason},[])
@@ -1442,6 +1446,7 @@ submitDialog button dg original
       [T.pack (show i) | ListBox _ _ i <- fields dg])])
     AgentDialog action -> (d,[AgentAction action (T.pack (show button) : values ++
       [if value then "true" else "false" | CheckBox _ value <- fields dg] ++
+      [T.pack (show i) | Radio _ _ i <- fields dg] ++
       [T.pack (show i) | ListBox _ _ i <- fields dg])])
     Finding -> (findText first d,[])
     Replacing -> let found = findText first d
@@ -1463,6 +1468,7 @@ submitDialog button dg original
                 | otherwise -> (d,[])
     Settings -> (d {wordStar=any (\f -> case f of Radio "Key bindings" _ 1 -> True; _ -> False) (fields dg),
       appearance=fromMaybe (appearance d) (listToMaybe [toEnum (max 0 (min 2 value)) | Radio "Appearance" _ value<-fields dg]),
+      streamerMode=fromMaybe (streamerMode d) (listToMaybe [value | CheckBox "Streamer mode" value<-fields dg]),
       blinkCursor=fromMaybe (blinkCursor d) (listToMaybe [value | CheckBox "Blinking cursor" value<-fields dg]),
       pixelateUnicode=fromMaybe (pixelateUnicode d) (listToMaybe [value | CheckBox "Pixelate Unicode" value<-fields dg]),
       crtFilter=fromMaybe (crtFilter d) (listToMaybe [value | CheckBox "CRT filter" value<-fields dg]),status="Preferences updated."},

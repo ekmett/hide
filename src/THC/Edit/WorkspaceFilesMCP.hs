@@ -25,6 +25,7 @@ import Text.Read (readMaybe)
 import THC.Edit.Buffer
 import THC.Edit.Build (resolveBuildRoot)
 import THC.Edit.Files (FileState(..), saveFile)
+import THC.Edit.GuestAccess (protectedBuffer, protectedPath, protectedPathParent)
 import THC.Edit.Model
 import THC.Edit.Process (processCleanup)
 
@@ -128,6 +129,7 @@ fileOperation :: Core -> Desktop -> Text -> FilePath -> Maybe FilePath -> IO (De
 fileOperation core desktop operation raw target=do
   root<-resolveBuildRoot desktop >>= canonicalizePath
   path<-operationPath root raw
+  rejectPrivate path
   affected<-fmap catMaybes $ forM (M.toList (buffers desktop)) $ \(bid,doc) -> case documentFile doc of
     Nothing -> pure Nothing
     Just file -> do canonical<-canonicalizePath (filePath file)
@@ -154,6 +156,7 @@ fileOperation core desktop operation raw target=do
     _ -> do
       unless exists (ioError (userError "Path does not exist"))
       destination<-maybe (ioError (userError "rename requires to")) (operationPath root) target
+      rejectPrivate destination
       destinationExists<-doesPathExist destination
       destinationLink<-catchIOError (pathIsSymbolicLink destination) (\err -> if isDoesNotExistError err then pure False else ioError err)
       when (destinationExists || destinationLink || within path destination) (ioError (userError "Rename destination exists or is inside the source"))
@@ -168,10 +171,12 @@ fileOperation core desktop operation raw target=do
         defaultDirectory=fmap remap (defaultDirectory desktop),sideTree=fmap (\tree->tree {treeRoot=remap (treeRoot tree)}) (sideTree desktop)}
   refreshed<-case sideTree updated of Nothing -> pure updated; Just tree -> catchIOError (snd <$> core updated [ReadTree (treeRoot tree)]) (\err->pure updated {status="Filesystem operation completed; tree refresh failed: "<>T.pack (show err)})
   pure (refreshed,Right (object ["operation" .= operation,"path" .= path,"to" .= target,"savedBuffers" .= False]))
+  where rejectPrivate path=when (protectedPathParent desktop path) (ioError (userError "This path contains private editor configuration or session data"))
 
 applyPatch :: Desktop -> Int -> Int -> Text -> Either Text Desktop
 applyPatch desktop bid expected patch=do
   doc<-maybe (Left "Unknown bufferId") Right (M.lookup bid (buffers desktop))
+  unless (not (protectedBuffer desktop bid)) (Left "This buffer contains private user or editor configuration data")
   let old=documentBuffer doc
   unless (revision old==expected) (Left "Buffer revision changed; read the buffer again")
   unless (textBuffer old && documentLabel doc==Nothing) (Left "Diff edits require an editable text buffer")
@@ -256,11 +261,11 @@ searchWorkspace desktop query tracked offset count=do
       live<-fmap M.fromList $ fmap catMaybes $ forM (M.toList (buffers desktop)) $ \(bid,doc) -> case documentFile doc of
         Just file -> do
           path<-canonicalizePath (filePath file)
-          pure $ if within root path then Just (path,(bid,doc)) else Nothing
+          pure $ if within root path && not (protectedBuffer desktop bid) then Just (path,(bid,doc)) else Nothing
         Nothing -> pure Nothing
       let candidates=sort (nub (paths++[path | path<-M.keys live,not tracked]))
           untitled=[(Nothing,Just (bid,revision (documentBuffer doc)),contents (documentBuffer doc)) | (bid,doc)<-M.toList (buffers desktop),not tracked,documentFile doc==Nothing,textBuffer (documentBuffer doc),documentLabel doc==Nothing]
-      (loaded,truncated,skipped)<-loadCandidates root live 33554432 (take 10000 candidates)
+      (loaded,truncated,skipped)<-loadCandidates desktop root live 33554432 (take 10000 candidates)
       let (inputs,liveTruncated)=boundInputs 33554432 (take 10000 (loaded++untitled))
           allMatches=take 10001 (concatMap matches inputs)
           limited=take 10000 allMatches
@@ -278,13 +283,14 @@ searchWorkspace desktop query tracked offset count=do
       "line" .= row,"column" .= (T.length prefix+1),"text" .= T.take 1024 line,"textTruncated" .= (T.length line>1024)]
       | (row,line)<-zip [1::Int ..] (T.lines text),let (prefix,suffix)=T.breakOn query line,not (T.null suffix)]
 
-loadCandidates :: FilePath -> M.Map FilePath (Int,Document) -> Int -> [FilePath] -> IO ([(Maybe FilePath,Maybe (Int,Int),Text)],Bool,Int)
-loadCandidates _ _ _ []=pure ([],False,0)
-loadCandidates _ _ budget _ | budget<=0=pure ([],True,0)
-loadCandidates root live budget (path:rest)=do
+loadCandidates :: Desktop -> FilePath -> M.Map FilePath (Int,Document) -> Int -> [FilePath] -> IO ([(Maybe FilePath,Maybe (Int,Int),Text)],Bool,Int)
+loadCandidates _ _ _ _ []=pure ([],False,0)
+loadCandidates _ _ _ budget _ | budget<=0=pure ([],True,0)
+loadCandidates desktop root live budget (path:rest)=do
   checked<-try (checkedPath root path)
   case checked of
     Left (_::IOException) -> skip
+    Right canonical | protectedPath desktop canonical -> skip
     Right canonical -> do
       loaded<-case M.lookup canonical live of
         Just (bid,doc) | textBuffer (documentBuffer doc) -> pure (Just (Just (bid,revision (documentBuffer doc)),contents (documentBuffer doc)))
@@ -300,9 +306,9 @@ loadCandidates root live budget (path:rest)=do
                          | otherwise -> do
           let used=BS.length (TE.encodeUtf8 text)
           if used>budget then pure ([],True,0) else do
-            (others,truncated,skipped)<-loadCandidates root live (budget-used) rest
+            (others,truncated,skipped)<-loadCandidates desktop root live (budget-used) rest
             pure ((Just canonical,ident,text):others,truncated,skipped)
-  where skip=do (others,truncated,skipped)<-loadCandidates root live budget rest
+  where skip=do (others,truncated,skipped)<-loadCandidates desktop root live budget rest
                 pure (others,truncated,skipped+1)
 
 listFiles :: FilePath -> Bool -> IO (Either Text [FilePath])
