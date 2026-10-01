@@ -2,9 +2,12 @@
 module THC.Edit.Git
   ( RepoStatus(..), repositoryStatus, repositoryDiff, repositoryDiffFiltered, repositoryDiffFilteredAt
   , GitReview(..), reviewRepository, commitReview
+  , GitCommit(..), reviewRepositoryChecked, commitReviewChecked
   ) where
 
 import Control.Monad (forM, forM_, unless, when)
+import qualified Data.ByteString as BS
+import qualified Data.Text.Encoding as TE
 import qualified Data.Set as Set
 import qualified Data.Map.Strict as Map
 import Data.Maybe (catMaybes)
@@ -24,6 +27,11 @@ data RepoStatus = RepoStatus
 
 data GitReview = GitReview
   { reviewRoot :: FilePath, reviewText :: Text, reviewToken :: Text }
+  deriving (Eq, Show)
+
+-- Structured facts are separate from human-facing Git/hook output.
+data GitCommit = GitCommit
+  { commitExitCode :: ExitCode, commitTreeMatched :: Maybe Bool, commitOutput :: Text }
   deriving (Eq, Show)
 
 repositoryStatus :: FilePath -> IO (Maybe RepoStatus)
@@ -90,78 +98,125 @@ repositoryDiffFilteredAt path selected excluded=do
       canonical<-canonicalizePath absolute
       unless (within root canonical && not (excluded absolute || excluded canonical)) (failGit "Selected diff path is private or outside this repository.")
       pure canonical) selected
-    listed<-fileNames <$> git root ["ls-files","--cached","--others","--exclude-standard","-z"]
-    before<-renameChanges root
-    (changed,renames)<-either failGit pure (parseChanges (fst before<>snd before))
-    let files=Set.toAscList (Set.fromList (listed++changed))
-    when (length files>10000) (failGit "Filtered diff exceeds 10000 files; select a file instead.")
-    checked<-forM files $ \file->do
-      let absolute=normalise (root </> file)
-      canonical<-canonicalizePath absolute
-      let relative=makeRelative root canonical
-      pure (file,canonical,excluded absolute || excluded canonical || isAbsolute relative || ".." `elem` splitDirectories relative)
-    let links=Map.fromListWith (++) [(source,[destination]) | (source,destination)<-renames]
-        initial=Set.fromList [file | (file,_,True)<-checked]
-        omitted=closeRenames links initial (Set.toList initial)
-        selectedRows=[row | row@(file,_,_)<-checked,maybe True (\base->within base (normalise (root </> file))) selection]
-        allowed=[file | (file,_,_)<-selectedRows,Set.notMember file omitted]
+    (checked,before,_)<-classifyChanges root excluded
+    let selectedRows=[row | row@(file,_,_)<-checked,maybe True (\base->within base (normalise (root </> file))) selection]
+        allowed=[file | (file,_,False)<-selectedRows]
     text<-if null allowed then pure "No changes.\n" else diffTextWith ["--no-renames","--submodule=short"] root allowed
     after<-renameChanges root
     unless (before==after) (failGit "Repository changed while preparing the filtered diff; retry.")
-    forM_ [row | row@(file,_,_)<-selectedRows,Set.notMember file omitted] $ \(file,canonical,_)->do
+    forM_ [row | row@(_,_,False)<-selectedRows] $ \(file,canonical,_)->do
       current<-canonicalizePath (root </> file)
       unless (current==canonical && not (excluded current)) (failGit "A filtered diff path changed; retry.")
-    pure (text,length [() | (file,_,_)<-selectedRows,Set.member file omitted])
+    pure (text,length [() | (_,_,True)<-selectedRows])
   -- Git failures may mention filenames; a private path must not escape in errors.
   pure (either (const (Left "Could not prepare a stable filtered Git diff; retry or select a safe file.")) Right prepared)
+
+within :: FilePath -> FilePath -> Bool
+within root file=let relative=makeRelative root file in not (isAbsolute relative) && ".." `notElem` splitDirectories relative
+
+-- Include unchanged sources when classifying rename/copy lineage, but keep the
+-- changed set separate: an unchanged private configuration does not veto review.
+classifyChanges :: FilePath -> (FilePath -> Bool) -> IO ([(FilePath,FilePath,Bool)],(Text,Text),Set.Set FilePath)
+classifyChanges root excluded=do
+  listed<-fileNames <$> git root ["ls-files","--cached","--others","--exclude-standard","-z"]
+  untracked<-fileNames <$> git root ["ls-files","--others","--exclude-standard","-z"]
+  before<-renameChanges root
+  (changed,renames)<-either failGit pure (parseChanges (fst before<>snd before))
+  let files=Set.toAscList (Set.fromList (listed++changed))
+  when (length files>10000) (failGit "Git review exceeds 10000 files.")
+  checked<-forM files $ \file->do
+    let absolute=normalise (root </> file)
+    canonical<-canonicalizePath absolute
+    pure (file,canonical,excluded absolute || excluded canonical || not (within root canonical))
+  let links=Map.fromListWith (++) [(source,[destination]) | (source,destination)<-renames]
+      initial=Set.fromList [file | (file,_,True)<-checked]
+      omitted=closeRenames links initial (Set.toList initial)
+  pure ([(file,canonical,Set.member file omitted) | (file,canonical,_)<-checked],before,Set.fromList (changed++untracked))
   where
-    within root file=let relative=makeRelative root file in not (isAbsolute relative) && ".." `notElem` splitDirectories relative
     closeRenames _ omitted []=omitted
     closeRenames links omitted (source:rest)=
       let fresh=filter (`Set.notMember` omitted) (Map.findWithDefault [] source links)
       in closeRenames links (foldr Set.insert omitted fresh) (fresh++rest)
-    -- Bound exhaustive similarity matching, including copies from unchanged
-    -- sources. Exact Git-detected moves/copies are still propagated above.
-    renameChanges root=(,) <$> git root (diffArgs++["--cached","--name-status","-z","-M","-C","--find-copies-harder","-l256","--"])
-                           <*> git root (diffArgs++["--name-status","-z","-M","-C","--find-copies-harder","-l256","--"])
-    parseChanges input=go (filter (not . T.null) (T.splitOn "\NUL" input))
-      where
-        go []=Right ([],[])
-        go (status:rest) | T.take 1 status `elem` ["R","C"]=case rest of
-          source:destination:remaining->do
-            (files,renames)<-go remaining
-            pure (T.unpack source:T.unpack destination:files,(T.unpack source,T.unpack destination):renames)
-          _->Left "Invalid Git rename listing"
-        go (_:file:remaining)=do
-          (files,renames)<-go remaining
-          pure (T.unpack file:files,renames)
-        go _=Left "Invalid Git change listing"
+
+-- Bound exhaustive similarity matching, including copies from unchanged sources.
+renameChanges :: FilePath -> IO (Text,Text)
+renameChanges root=(,) <$> git root (diffArgs++["--cached","--name-status","-z","-M","-C","--find-copies-harder","-l256","--"])
+                      <*> git root (diffArgs++["--name-status","-z","-M","-C","--find-copies-harder","-l256","--"])
+
+parseChanges :: Text -> Either Text ([FilePath],[(FilePath,FilePath)])
+parseChanges input=go (filter (not . T.null) (T.splitOn "\NUL" input))
+  where
+    go []=Right ([],[])
+    go (status:rest) | T.take 1 status `elem` ["R","C"]=case rest of
+      source:destination:remaining->do
+        (files,renames)<-go remaining
+        pure (T.unpack source:T.unpack destination:files,(T.unpack source,T.unpack destination):renames)
+      _->Left "Invalid Git rename listing"
+    go (_:file:remaining)=do
+      (files,renames)<-go remaining
+      pure (T.unpack file:files,renames)
+    go _=Left "Invalid Git change listing"
+
+checkChanges :: (FilePath -> Bool) -> FilePath -> IO ()
+checkChanges excluded root=do
+  (files,_,changed)<-classifyChanges root excluded
+  when (any (\(file,_,private)->private && Set.member file changed) files)
+    (failGit "Protected changes cannot be approved through an agent review.")
 
 reviewRepository :: FilePath -> IO (Either Text GitReview)
-reviewRepository path = result $ do
+reviewRepository=reviewWith (const (pure ()))
+
+reviewRepositoryChecked :: FilePath -> (FilePath -> Bool) -> IO (Either Text GitReview)
+reviewRepositoryChecked path excluded=do
+  reviewed<-reviewWith (checkChanges excluded) path
+  pure $ reviewed >>= \review ->
+    if T.length (reviewText review)>131072 || BS.length (TE.encodeUtf8 (reviewToken review))>1024*1024
+      then Left "Complete Git review exceeds the review limit."
+      else Right review
+
+reviewWith :: (FilePath -> IO ()) -> FilePath -> IO (Either Text GitReview)
+reviewWith check path = result $ do
   root <- repositoryRoot path
   before <- snapshot root
+  check root
   rendered <- diffText root []
+  check root
   after <- snapshot root
   unless (before == after) (failGit "Repository changed while preparing the review; refresh the diff.")
   pure (GitReview root rendered before)
 
 commitReview :: GitReview -> Text -> IO (Either Text Text)
-commitReview review message = result $ do
+commitReview review message=do
+  committed<-commitWith (const (pure ())) review message
+  pure $ committed >>= \outcome ->
+    if commitExitCode outcome/=ExitSuccess then Left (commitOutput outcome)
+    else Right ((case commitTreeMatched outcome of
+      Just True -> ""
+      Just False -> "Committed; Git hooks changed the reviewed tree. Inspect HEAD.\n"
+      Nothing -> "Committed; the reviewed tree could not be verified. Inspect HEAD.\n")<>commitOutput outcome)
+
+commitReviewChecked :: GitReview -> Text -> (FilePath -> Bool) -> IO (Either Text GitCommit)
+commitReviewChecked review message excluded=commitWith (checkChanges excluded) review message
+
+-- Keep the ordinary whole-repository staging and hook semantics for both callers.
+commitWith :: (FilePath -> IO ()) -> GitReview -> Text -> IO (Either Text GitCommit)
+commitWith check review message = result $ do
   when (T.null (T.strip message)) (failGit "Enter a nonempty commit message.")
   let root = reviewRoot review
+  check root
   current <- snapshot root
   unless (current == reviewToken review)
     (failGit "Repository changed since this review; refresh the diff before approving.")
   _ <- git root ["add", "-A", "--", "."]
+  check root
   staged <- snapshot root
   unless (fst (T.breakOn indexSeparator current) == fst (T.breakOn indexSeparator staged))
     (failGit "Repository changed while staging; review again. Changes remain on disk and in the index.")
   expectedTree <- T.strip <$> git root ["write-tree"]
-  summary <- git root ["commit", "-m", T.unpack message]
-  committedTree <- T.strip <$> git root ["rev-parse", "HEAD^{tree}"]
-  pure (if committedTree == expectedTree then summary
-        else "Committed; Git hooks changed the reviewed tree. Inspect HEAD.\n" <> summary)
+  (code,out,err) <- runGit root ["commit", "-m", T.unpack message]
+  tree <- tryIOError (runGit root ["rev-parse", "HEAD^{tree}"])
+  let matched=case tree of Right (ExitSuccess,committedTree,_) | code==ExitSuccess -> Just (T.strip committedTree==expectedTree); _ -> Nothing
+  pure (GitCommit code matched (out<>err))
 
 indexSeparator :: Text
 indexSeparator = "\NULINDEX\NUL"

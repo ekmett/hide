@@ -145,17 +145,19 @@ Breakpoints use 1-based lines, at most 1000. See the
 | --- | --- | --- | --- |
 | `workspace_git` | R | `view`, `path?` | `status` or `diff`; disk changes and unsaved buffers reported separately |
 | `git_fetch` | W | — | Fetch the selected repository’s configured default remote; returns `accepted` and `jobId` |
-| `git_operation_status` | R | `jobId?` | `busy` and the requested fetch job’s `running`, `succeeded`, or `failed` state and actual `exitCode` |
+| `git_review` | R | — | Start a complete saved-change review; poll for `diff`, `complete`, and a one-time `reviewId` |
+| `git_commit` | W | `reviewId`, `message` | Commit all reviewed saved changes using ordinary Git staging and hooks |
+| `git_operation_status` | R | `jobId?` | `busy`, job state/exit code, complete review, or commit `head` and `reviewedTreeMatched` |
 
 Diff text is capped at 128 Ki characters. A path filter is a literal file path,
 not a Git glob/magic pathspec. Whole-repository diffs omit private authority files and Git-detected rename/copy
 destinations derived from them; `omittedFiles` reports a count without their names. Agent mouse/key input cannot
 open the unrestricted human Git review or commit dialog; use `workspace_git`
 for filtered review. `workspace_search` with
-`trackedOnly: true` searches tracked source. Pull, merge, commit, and commit-history
-search are not exposed as agent tools.
+`trackedOnly: true` searches tracked source. Pull, merge and commit-history search
+are not exposed as agent tools.
 
-`git_fetch` and `git_operation_status` have separate permission policies. Fetch
+Each Git tool has its own permission policy. Fetch
 shares the human Git operation slot, permits unsaved editor changes, and does not
 change working files. It accepts no remote URL, refspec, shell, or configuration
 overrides. Acceptance does not imply success: poll status for completion. The
@@ -163,7 +165,31 @@ latest 16 agent jobs remain queryable for this session; omit `jobId` for the lat
 `busy` also includes human Git operations. A launch failure has `state: "failed"`
 and a null exit code; a process exit reports its actual code. Transport output,
 URLs, and raw errors are not returned or placed in agent fetch output buffers.
-Closing the session cancels and reaps the active Git process.
+Normal Quit waits for the active operation; session teardown cancels and reaps
+the active Git process.
+
+`git_review` and `git_commit` also return acceptance and a job ID first. A review
+is a composite read operation: its successful `exitCode: 0` denotes a completed
+review, not a single subprocess exit. Fetch and commit report actual process
+exit codes. A review
+covers staged, unstaged and untracked **saved** changes, with the same binary
+notices and content hashes as the human Git review. There is no partial commit
+or separate staging requirement. Both tools refuse dirty editor buffers. A
+review is refused if private changes (including Git-detected rename/copy
+lineage) would be omitted, its text exceeds 128 Ki characters, its private
+snapshot exceeds 1 MiB, or classification exceeds 10,000 files. An unchanged
+tracked private configuration does not block a safe review. No truncated or
+omitted review receives a committable ID; a clean repository has no commit ID.
+
+Only the most recent complete review ID is valid. A commit attempt consumes it,
+rechecks the current privacy policy, and refuses changed HEAD, index or file
+contents. Raw snapshots remain server-side. Commit uses the existing whole-repo
+`git add -A` and normal Git hooks. Failure can leave reviewed changes staged;
+files are not rolled back. Ordinary hooks can alter files or the committed tree:
+`reviewedTreeMatched: false` reports a mismatch, and `null` means no successful
+comparison. `head` reports the observed resulting commit when available, including
+after a failed commit. A successful exit is retained even if that follow-up
+inspection fails. Hook output and raw errors are suppressed.
 
 ## Windows, panels and binary navigation
 

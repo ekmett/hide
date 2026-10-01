@@ -207,6 +207,7 @@ checks = bracket temporary removePathForcibly $ \base -> do
        documentFile (doc linked)==documentFile (doc deleted) && "reopen" `T.isInfixOf` activeText linked)
     targetBytes<-T.readFile target
     check "pull symlink target remains unchanged" (targetBytes=="outside symlink target\n")
+  reviewCommitChecks base
   unless (os=="mingw32") (cancellationCheck base work)
   putStrLn "Git operation checks passed"
   where
@@ -262,3 +263,141 @@ cancellationCheck base work=do
   pid<-T.unpack . T.strip <$> T.readFile marker
   (code,_,_)<-readCreateProcessWithExitCode (proc "/bin/kill" ["-0",pid]) ""
   unless (code/=ExitSuccess) (error "Git subprocess survived controller close")
+
+reviewCommitChecks :: FilePath -> IO ()
+reviewCommitChecks base=do
+  let root=base </> "review-commit"
+      source=root </> "safe.txt"
+      private=root </> "thc.toml"
+      hook=root </> ".git" </> "hooks" </> "pre-commit"
+      git args=do
+        (code,out,err)<-readCreateProcessWithExitCode (proc "git" (["-C",root]++args)) ""
+        unless (code==ExitSuccess) (error err)
+        pure (T.pack out)
+      check label ok=unless ok (error label)
+      field key value=parseMaybe (withObject "object" (.: key)) value
+      textField key value=field key value :: Maybe T.Text
+      left (Left _)=True
+      left _=False
+      script body=do
+        writeFile hook ("#!/bin/sh\n"++body)
+        permissions<-getPermissions hook
+        setPermissions hook (permissions {executable=True})
+  createDirectory root
+  _<-git ["init","-b","main"]
+  _<-git ["config","user.name","Git Test"]
+  _<-git ["config","user.email","test@example.invalid"]
+  _<-git ["config","commit.gpgsign","false"]
+  _<-git ["config","core.hooksPath",root </> ".git" </> "hooks"]
+  T.writeFile source "before\n"
+  T.writeFile private "authority-secret-marker\n"
+  _<-git ["add","-A"]
+  _<-git ["commit","-m","initial"]
+  withGitOperations $ \runtime -> do
+    let initial=(initialDesktop (80,25)) {defaultDirectory=Just root,branchRoot=Just root}
+        call d name args=do
+          (next,pending)<-gitTool runtime d name args
+          response<-pending
+          pure (next,response)
+        run d name args=do
+          (next,accepted)<-call d name args
+          receipt<-either (error . T.unpack) pure accepted
+          check "Git request explicitly accepted" (field "accepted" receipt==Just True)
+          waited<-timeout 10000000 (poll next)
+          maybe (error "review/commit operation timed out") pure waited
+        poll d=do
+          next<-tickGitOperations runtime core d
+          (_,response)<-call next "git_operation_status" (object [])
+          value<-either (error . T.unpack) pure response
+          case field "operation" value of
+            Just operation | field "active" operation==Just False -> pure (next,operation)
+            _ -> threadDelay 10000 >> poll next
+        review d=do
+          (next,result)<-run d "git_review" (object [])
+          check "complete safe review succeeded" (textField "state" result==Just "succeeded" && field "complete" result==Just True && field "exitCode" result==Just (0::Int))
+          ident<-maybe (error "missing opaque review id") pure (textField "reviewId" result)
+          check "review id contains no raw snapshot" (T.length ident<=128 && not ("INDEX" `T.isInfixOf` ident) && not (T.any (=='\0') ident))
+          pure (next,ident,result)
+        commit d ident=run d "git_commit" (object ["reviewId" .= ident,"message" .= ("approved saved changes"::T.Text)])
+        failedReview d=do
+          (next,result)<-run d "git_review" (object [])
+          check "incomplete private review cannot grant commit id" (textField "state" result==Just "failed" && field "complete" result==Just False && field "reviewId" result==Just Null)
+          check "refused review never returns partial diff text" ((field "diff" result :: Maybe Value)==Nothing)
+          check "private review failure does not expose contents" (not ("authority-secret-marker" `T.isInfixOf` T.pack (BL.unpack (encode result))))
+          pure next
+    T.writeFile source "working edit\n"
+    (reviewed,token,description)<-review initial
+    check "unchanged private configuration permits full public review"
+      (maybe False (T.isInfixOf "+working edit") (textField "diff" description) && not ("authority-secret-marker" `T.isInfixOf` T.pack (BL.unpack (encode description))))
+    let dirtyDesktop=insertText "unsaved" reviewed
+    (_,dirtyRefused)<-call dirtyDesktop "git_commit" (object ["reviewId" .= token,"message" .= ("must refuse"::T.Text)])
+    check "commit refuses unsaved buffers" (left dirtyRefused)
+    (_,dirtyReview)<-call dirtyDesktop "git_review" (object [])
+    check "review refuses unsaved buffers" (left dirtyReview)
+    T.writeFile source "later edit\n"
+    (stale,result)<-commit reviewed token
+    check "changed file invalidates reviewed commit" (textField "state" result==Just "failed")
+    (_,reused)<-call stale "git_commit" (object ["reviewId" .= token,"message" .= ("must refuse"::T.Text)])
+    check "failed commit consumes review id" (left reused)
+    (policyReview,policyToken,_)<-review stale
+    (_,policyResult)<-commit policyReview {guestPrivatePaths=[source]} policyToken
+    check "commit rechecks current private-path policy" (textField "state" policyResult==Just "failed")
+    (again,stagingToken,_)<-review stale
+    _<-git ["add","safe.txt"]
+    (staged,staleIndex)<-commit again stagingToken
+    check "changed index invalidates reviewed commit" (textField "state" staleIndex==Just "failed")
+    (headReview,headToken,_)<-review staged
+    _<-git ["commit","--allow-empty","-m","external commit"]
+    (headChanged,staleHead)<-commit headReview headToken
+    check "changed HEAD invalidates reviewed commit" (textField "state" staleHead==Just "failed")
+    T.writeFile source "approved edit\n"
+    T.writeFile (root </> "new.txt") "untracked addition\n"
+    (ready,commitToken,_)<-review headChanged
+    (committed,success)<-commit ready commitToken
+    actualHead<-T.strip <$> git ["rev-parse","HEAD"]
+    clean<-git ["status","--porcelain"]
+    check "whole working-tree review commits tracked and untracked changes"
+      (textField "state" success==Just "succeeded" && field "exitCode" success==Just (0::Int) && field "reviewedTreeMatched" success==Just True && textField "head" success==Just actualHead && T.null clean)
+    createDirectory (root </> "nested")
+    T.writeFile (root </> "nested" </> "thc.toml") "untracked authority-secret-marker\n"
+    privateUntracked<-failedReview committed
+    removeFile (root </> "nested" </> "thc.toml")
+    removeDirectory (root </> "nested")
+    T.writeFile (root </> "authority-parent") "authority-secret-marker\n"
+    ancestor<-failedReview privateUntracked {guestPrivatePaths=[root </> "authority-parent" </> "session.key"]}
+    removeFile (root </> "authority-parent")
+    T.writeFile private "changed authority-secret-marker\n"
+    privateChanged<-failedReview ancestor {guestPrivatePaths=[]}
+    _<-git ["add","thc.toml"]
+    T.writeFile private "authority-secret-marker\n"
+    privateStaged<-failedReview privateChanged
+    _<-git ["reset","--","thc.toml"]
+    _<-git ["mv","thc.toml","apparently-public.txt"]
+    renamed<-failedReview privateStaged
+    _<-git ["reset","--hard","HEAD"]
+    copyFile private (root </> "copied-public.txt")
+    _<-git ["add","copied-public.txt"]
+    copied<-failedReview renamed
+    _<-git ["reset","--","copied-public.txt"]
+    removeFile (root </> "copied-public.txt")
+    createFileLink private (root </> "private-alias")
+    linked<-failedReview copied
+    removeFile (root </> "private-alias")
+    T.writeFile source (T.replicate 131073 "x")
+    oversized<-failedReview linked
+    T.writeFile source "hook change\n"
+    (beforeHook,hookToken,_)<-review oversized
+    script "echo authority-secret-marker >&2\nexit 7\n"
+    (hookFailed,hookFailure)<-commit beforeHook hookToken
+    preserved<-T.readFile source
+    stagedNames<-git ["diff","--cached","--name-only"]
+    check "failed normal hook preserves bytes and staged changes"
+      (textField "state" hookFailure==Just "failed" && maybe False (/=0) (field "exitCode" hookFailure :: Maybe Int) && textField "head" hookFailure==Just actualHead && preserved=="hook change\n" && "safe.txt" `T.isInfixOf` stagedNames)
+    check "raw hook output is not returned or opened"
+      (not ("authority-secret-marker" `T.isInfixOf` T.pack (BL.unpack (encode hookFailure))) && all (not . T.isInfixOf "authority-secret-marker" . contents . documentBuffer) (M.elems (buffers hookFailed)))
+    script "printf 'hook output\\n' > hook-output.txt\ngit add -- hook-output.txt\n"
+    (transformReview,transformToken,_)<-review hookFailed
+    (_,transformed)<-commit transformReview transformToken
+    check "ordinary transforming hook reports changed committed tree"
+      (textField "state" transformed==Just "succeeded" && field "reviewedTreeMatched" transformed==Just False && maybe False (T.isInfixOf "hooks changed") (textField "message" transformed))
+    removeFile hook

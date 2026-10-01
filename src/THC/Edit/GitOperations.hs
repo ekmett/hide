@@ -7,6 +7,7 @@ import Control.Monad (foldM, forM, forM_, unless, void)
 import Data.Aeson hiding (Result)
 import Data.Aeson.Types (Pair,parseEither)
 import qualified Data.Aeson.KeyMap as KM
+import Data.Char (isHexDigit)
 import Data.IORef
 import qualified Data.Map.Strict as M
 import Data.Maybe (catMaybes)
@@ -19,15 +20,21 @@ import System.Process (proc, readCreateProcessWithExitCode, cwd, env)
 import THC.Edit.Buffer
 import THC.Edit.Files
 import THC.Edit.Model
+import THC.Edit.Git (GitReview(..),GitCommit(..),reviewRepositoryChecked,commitReviewChecked)
+import THC.Edit.GuestAccess (protectedPathParent)
+import THC.Edit.RemoteEndpoint (randomIdentity)
 
-data Result = Branches FilePath [T.Text] | Finished ExitCode FilePath T.Text [(Int,FileState,Either T.Text (FileState,Buffer))]
+data Result = Branches FilePath [T.Text]
+  | Finished ExitCode FilePath T.Text [(Int,FileState,Either T.Text (FileState,Buffer))]
+  | Reviewed T.Text [FilePath] (Either T.Text GitReview)
+  | Committed FilePath (Either T.Text GitCommit) (Maybe T.Text)
 data Worker = Worker Bool (Maybe Integer) ThreadId (MVar (Either SomeException Result))
-data GitOperations = GitOperations (IORef (Maybe Worker)) (IORef (Maybe FilePath)) (IORef (Integer,M.Map Integer Value))
+data GitOperations = GitOperations (IORef (Maybe Worker)) (IORef (Maybe FilePath)) (IORef (Integer,M.Map Integer Value)) (IORef (Maybe (T.Text,GitReview)))
 
 withGitOperations :: (GitOperations -> IO a) -> IO a
-withGitOperations = bracket (GitOperations <$> newIORef Nothing <*> newIORef Nothing <*> newIORef (0,M.empty)) close
+withGitOperations = bracket (GitOperations <$> newIORef Nothing <*> newIORef Nothing <*> newIORef (0,M.empty) <*> newIORef Nothing) close
   where
-    close (GitOperations ref _ _) = readIORef ref >>= mapM_ (\(Worker _ _ thread done) -> killThread thread >> void (readMVar done))
+    close (GitOperations ref _ _ _) = readIORef ref >>= mapM_ (\(Worker _ _ thread done) -> killThread thread >> void (readMVar done))
 
 -- readCreateProcessWithExitCode owns and closes its pipes and terminates its child
 -- on cancellation; a normal Quit is deferred until the Git operation completes.
@@ -86,7 +93,7 @@ readBranches root = do
   pure (Branches root [name | line<-T.lines refs, let (name,symbolic)=T.breakOn "\t" line, T.null (T.drop 1 symbolic), name/=current, not (T.null name)])
 
 gitOperationEffects :: GitOperations -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> [Effect] -> IO (Bool,Desktop)
-gitOperationEffects runtime@(GitOperations ref _ _) core = foldM apply . (False,)
+gitOperationEffects runtime@(GitOperations ref _ _ _) core = foldM apply . (False,)
   where
     apply state@(True,_) _ = pure state
     apply (_,desktop) effect = do
@@ -116,7 +123,7 @@ gitOperationEffects runtime@(GitOperations ref _ _) core = foldM apply . (False,
 -- Applying results happens on the UI thread. Any buffer edited while Git ran is
 -- kept with its old disk baseline, so a later Save detects the disk conflict.
 tickGitOperations :: GitOperations -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> IO Desktop
-tickGitOperations (GitOperations ref focused jobs) core initial = do
+tickGitOperations (GitOperations ref focused jobs reviews) core initial = do
   previous <- readIORef focused
   desktop <- case activeDocument initial of
     Just doc | documentLabel doc==Nothing, Just file<-documentFile doc, let directory=takeDirectory (filePath file), previous/=Just directory -> do
@@ -132,10 +139,22 @@ tickGitOperations (GitOperations ref focused jobs) core initial = do
         Nothing -> pure desktop
         Just finished -> do
           writeIORef ref Nothing
+          let usable=case finished of
+                Right (Reviewed token paths outcome)
+                  | paths/=guestPrivatePaths desktop || unsaved desktop -> Right (Reviewed token paths (Left "Review context changed."))
+                  | otherwise -> Right (Reviewed token paths outcome)
+                _ -> finished
           forM_ jobId $ \ident -> modifyIORef' jobs $ \(latest,history) ->
-            (latest,M.insert ident (jobValue ident False (case finished of Right (Finished code _ _ _) -> Just code; _ -> Nothing)) history)
-          case finished of
-            Left _ | Just _<-jobId -> pure desktop {status="Fetch failed; see git_operation_status.",gitReview=Nothing}
+            (latest,M.insert ident (extend (M.findWithDefault Null ident history) (completion ident usable)) history)
+          case usable of
+            Right (Reviewed token _ (Right review)) -> do
+              writeIORef reviews (if reviewText review=="No changes.\n" then Nothing else Just (token,review))
+              pure desktop {status="Git review completed; read git_operation_status."}
+            Right (Reviewed _ _ (Left _)) -> pure desktop {status="Git review refused; see git_operation_status."}
+            Right (Committed root outcome _) -> do
+              (_,updated)<-core desktop {gitReview=Nothing} [RefreshGit root]
+              pure updated {status=case outcome of Right commit | commitExitCode commit==ExitSuccess -> "Git commit completed; see git_operation_status."; _ -> "Git commit failed; see git_operation_status."}
+            Left _ | Just _<-jobId -> pure desktop {status="Git operation failed; see git_operation_status.",gitReview=Nothing}
             Left err -> pure ((addReadOnly "Git operations" (T.pack (displayException err)) desktop) {status="Git operation failed; see Git operations.",gitReview=Nothing})
             Right (Branches root _) | branchRoot desktop/=Just root -> pure desktop {status="Repository changed; request the merge branches again."}
             Right (Branches _ []) -> pure desktop {status="No other branches are available to merge."}
@@ -168,48 +187,84 @@ tickGitOperations (GitOperations ref focused jobs) core initial = do
 -- Both entry points run under the desktop lock and reserve the same worker slot.
 -- Mask registration so session shutdown always owns the started subprocess.
 startWorker :: GitOperations -> Bool -> Maybe Integer -> IO Result -> IO ()
-startWorker (GitOperations ref _ _) mutates ident action=mask_ $ do
+startWorker (GitOperations ref _ _ _) mutates ident action=mask_ $ do
   done<-newEmptyMVar
   thread<-forkIOWithUnmask $ \unmask -> try (unmask action) >>= putMVar done
   writeIORef ref (Just (Worker mutates ident thread done))
 
 gitToolNames :: [T.Text]
-gitToolNames=["git_fetch","git_operation_status"]
+gitToolNames=["git_fetch","git_review","git_commit","git_operation_status"]
 
 gitTools :: [Value]
-gitTools=[spec "git_fetch" "Fetch the selected repository's configured default remote. Returns accepted and jobId, not completion. Poll git_operation_status. Does not change working files or expose transport output." False [],
-  spec "git_operation_status" "Read a Git fetch job's actual completion and exit code. Omit jobId for the latest job. Retains the latest 16 agent jobs; busy includes human Git operations." True [("jobId",object ["type" .= ("integer"::T.Text),"minimum" .= (1::Int)])]]
+gitTools=
+  [spec "git_fetch" "Fetch the selected repository's configured default remote. Returns accepted and jobId, not completion. Poll git_operation_status. Does not change working files or expose transport output." False [] [],
+   spec "git_review" "Review all saved staged, unstaged and untracked changes. Poll git_operation_status for the complete diff and one-time reviewId. Protected or incomplete reviews cannot be committed. Requires no dirty buffers." True [] [],
+   spec "git_commit" "Commit ALL saved changes from a complete git_review using ordinary Git staging and hooks. Requires unchanged HEAD, index and files, and no dirty buffers. Consumes reviewId; poll git_operation_status for actual HEAD, exit code and reviewedTreeMatched. Failure may leave reviewed changes staged." False ["reviewId","message"] [("reviewId",string 128),("message",string 8192)],
+   spec "git_operation_status" "Read a Git job's completion, review or commit result. Fetch/commit report actual process exit codes; review exitCode=0 denotes a completed composite review. Omit jobId for the latest. Retains the latest 16 agent jobs; busy includes human Git operations. Only the latest complete review ID can be committed." True [] [("jobId",object ["type" .= ("integer"::T.Text),"minimum" .= (1::Int)])]]
   where
-    spec :: T.Text -> T.Text -> Bool -> [Pair] -> Value
-    spec name description readOnly props=object ["name" .= name,"description" .= description,
-      "inputSchema" .= object ["type" .= ("object"::T.Text),"properties" .= object props,"required" .= ([]::[T.Text]),"additionalProperties" .= False],
-      "annotations" .= object ["readOnlyHint" .= readOnly,"destructiveHint" .= False,"openWorldHint" .= not readOnly]]
+    string :: Int -> Value
+    string limit=object ["type" .= ("string"::T.Text),"minLength" .= (1::Int),"maxLength" .= limit]
+    spec :: T.Text -> T.Text -> Bool -> [T.Text] -> [Pair] -> Value
+    spec name description readOnly required props=object ["name" .= name,"description" .= description,
+      "inputSchema" .= object ["type" .= ("object"::T.Text),"properties" .= object props,"required" .= required,"additionalProperties" .= False],
+      "annotations" .= object ["readOnlyHint" .= readOnly,"destructiveHint" .= (name=="git_commit"),"openWorldHint" .= not readOnly]]
 
 jobValue :: Integer -> Bool -> Maybe ExitCode -> Value
 jobValue ident active code=object ["jobId" .= ident,"active" .= active,
   "state" .= (if active then "running" else case code of Just ExitSuccess -> "succeeded"; _ -> "failed" :: T.Text),
   "exitCode" .= fmap (\value -> case value of ExitSuccess -> 0; ExitFailure n -> n) code]
 
+extend :: Value -> Value -> Value
+extend (Object old) (Object new)=Object (KM.union new old)
+extend _ new=new
+
+completion :: Integer -> Either SomeException Result -> Value
+completion ident result=case result of
+  Right (Finished code _ _ _) -> jobValue ident False (Just code)
+  Right (Reviewed token _ (Right review)) -> extend (jobValue ident False (Just ExitSuccess)) (object
+    ["complete" .= True,"diff" .= reviewText review,"reviewId" .= (if reviewText review=="No changes.\n" then Nothing else Just token)])
+  Right (Reviewed _ _ (Left _)) -> extend failed (object ["complete" .= False,"reviewId" .= Null,
+    "error" .= ("Complete review unavailable: check for protected changes, unsaved buffers, conflicts, stale files, or the review size limit."::T.Text)])
+  Right (Committed _ outcome headId) -> extend (jobValue ident False (either (const Nothing) (Just . commitExitCode) outcome)) (object
+    ["head" .= headId,"reviewedTreeMatched" .= either (const Nothing) commitTreeMatched outcome,
+     "message" .= (case outcome of
+       Right commit | commitExitCode commit==ExitSuccess -> if commitTreeMatched commit==Just True then "Committed the reviewed tree." else "Committed; Git hooks changed the reviewed tree or it could not be verified. Inspect HEAD."
+       _ -> "Commit refused or failed. Review again; changes may remain staged." :: T.Text)])
+  _ -> extend failed (object ["error" .= ("Git operation failed; raw process output is private."::T.Text)])
+  where failed=jobValue ident False Nothing
+
+unsaved :: Desktop -> Bool
+unsaved=any (dirty . documentBuffer) . M.elems . buffers
+
 gitTool :: GitOperations -> Desktop -> T.Text -> Value -> IO (Desktop,IO (Either T.Text Value))
-gitTool runtime@(GitOperations ref _ jobs) desktop name args=case parseEither (withObject "arguments" pure) args of
+gitTool runtime@(GitOperations ref _ jobs reviews) desktop name args=case parseEither (withObject "arguments" pure) args of
   Left _ -> reply desktop (Left "Expected an arguments object.")
   Right fields | any (`notElem` allowed) (KM.keys fields) -> reply desktop (Left "Unexpected Git tool argument.")
   Right fields -> case name of
-    "git_fetch" -> do
-      worker<-readIORef ref
-      case worker of
-        Just _ -> reply desktop (Left "A Git operation is already running.")
-        Nothing -> mask_ $ do
-          (previous,history)<-readIORef jobs
-          let ident=previous+1
-              kept=M.filterWithKey (\key _ -> key>ident-16) history
-              directory=maybe (startingDirectory desktop) id (branchRoot desktop)
-              fetch=do
-                root<-checkedGit directory ["rev-parse","--show-toplevel"] >>= canonicalizePath . T.unpack . T.stripEnd
-                runOperation True root FetchRemote desktop
-          startWorker runtime False (Just ident) fetch
-          writeIORef jobs (ident,M.insert ident (jobValue ident True Nothing) kept)
-          reply desktop {status="Fetch…",gitReview=Nothing} (Right (object ["accepted" .= True,"jobId" .= ident]))
+    "git_fetch" -> start False (pure ()) $ do
+      root<-selectedRoot
+      runOperation True root FetchRemote desktop
+    "git_review" | unsaved desktop -> reply desktop (Left "Save changed buffers before reviewing a commit.")
+                 | otherwise -> start False (writeIORef reviews Nothing) $ do
+                     root<-selectedRoot
+                     token<-T.pack <$> randomIdentity
+                     Reviewed token (guestPrivatePaths desktop) <$> reviewRepositoryChecked root (protectedPathParent desktop)
+    "git_commit" -> case parseEither (\_ -> (,) <$> fields .: "reviewId" <*> fields .: "message") args of
+      Left _ -> reply desktop (Left "Expected reviewId and message strings.")
+      Right (token,commitMessage)
+        | T.null token || T.length token>128 || T.null (T.strip commitMessage) || T.length commitMessage>8192 || T.any (=='\0') commitMessage -> reply desktop (Left "Use a valid reviewId and a nonempty commit message of at most 8192 characters.")
+        | unsaved desktop -> reply desktop (Left "Save changed buffers before approving a commit.")
+        | otherwise -> do
+            reviewed<-readIORef reviews
+            case reviewed of
+              Just (expected,review) | token==expected -> start True (writeIORef reviews Nothing) $ do
+                outcome<-commitReviewChecked review commitMessage (protectedPathParent desktop)
+                headResult<-try (runGit (reviewRoot review) ["rev-parse","--verify","HEAD"]) :: IO (Either IOException (ExitCode,T.Text,T.Text))
+                let headId=case headResult of
+                      Right (ExitSuccess,text,_) | let value=T.strip text,T.length value `elem` [40,64],T.all isHexDigit value -> Just value
+                      _ -> Nothing
+                pure (Committed (reviewRoot review) outcome headId)
+              _ -> reply desktop (Left "Review ID is unknown, replaced or already consumed; request git_review.")
     "git_operation_status" -> case parseEither (\_ -> fields .:? "jobId") args of
       Left _ -> reply desktop (Left "jobId must be a positive integer.")
       Right wanted -> do
@@ -222,5 +277,18 @@ gitTool runtime@(GitOperations ref _ jobs) desktop name args=case parseEither (w
           result -> reply desktop (Right (object ["busy" .= maybe False (const True) worker,"operation" .= result]))
     _ -> reply desktop (Left "Unknown Git tool.")
   where
-    allowed=if name=="git_operation_status" then ["jobId"] else []
+    allowed=case name of "git_operation_status" -> ["jobId"]; "git_commit" -> ["reviewId","message"]; _ -> []
     reply updated result=pure (updated,pure result)
+    selectedRoot=checkedGit (maybe (startingDirectory desktop) id (branchRoot desktop)) ["rev-parse","--show-toplevel"] >>= canonicalizePath . T.unpack . T.stripEnd
+    start mutates prepare action=do
+      worker<-readIORef ref
+      case worker of
+        Just _ -> reply desktop (Left "A Git operation is already running.")
+        Nothing -> mask_ $ do
+          (previous,history)<-readIORef jobs
+          let ident=previous+1
+              kept=M.filterWithKey (\key _ -> key>ident-16) history
+          _<-prepare
+          startWorker runtime mutates (Just ident) action
+          writeIORef jobs (ident,M.insert ident (extend (jobValue ident True Nothing) (object ["kind" .= name])) kept)
+          reply desktop {status="Git operation started…",gitReview=Nothing} (Right (object ["accepted" .= True,"jobId" .= ident]))

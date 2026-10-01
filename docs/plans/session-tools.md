@@ -37,7 +37,8 @@ Debugger follow/reveal behavior is exercised with a real fake-DAP transport.
 - [x] Secret redaction for agent views, plus optional human-facing Streamer mode.
 - [x] Explicit clipboard write without reading the user's clipboard.
 - [x] Dedicated read-only agent settings snapshot.
-- [ ] Dedicated Git fetch/pull/merge/commit operations with checked review state.
+- [x] Dedicated Git fetch, complete review and one-time checked commit operations.
+- [ ] Dedicated Git pull/merge operations with protected-path checks.
 - [x] Edit-based HLS quick fixes/refactorings: chooser, bounded opaque handles,
   current diagnostics, advertised lazy resolution and checked atomic buffer edits.
 - [ ] Command-based HLS actions and scoped workspace/executeCommand application.
