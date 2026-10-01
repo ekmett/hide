@@ -127,14 +127,26 @@ Breakpoints use 1-based lines, at most 1000. See the
 | Tool | Kind | Arguments | Result / contract |
 | --- | --- | --- | --- |
 | `workspace_git` | R | `view`, `path?` | `status` or `diff`; disk changes and unsaved buffers reported separately |
+| `git_fetch` | W | — | Fetch the selected repository’s configured default remote; returns `accepted` and `jobId` |
+| `git_operation_status` | R | `jobId?` | `busy` and the requested fetch job’s `running`, `succeeded`, or `failed` state and actual `exitCode` |
 
 Diff text is capped at 128 Ki characters. A path filter is a literal file path,
 not a Git glob/magic pathspec. Whole-repository diffs omit private authority files and Git-detected rename/copy
 destinations derived from them; `omittedFiles` reports a count without their names. Agent mouse/key input cannot
 open the unrestricted human Git review or commit dialog; use `workspace_git`
 for filtered review. `workspace_search` with
-`trackedOnly: true` searches tracked source. Dedicated Git mutations and
-commit-history search are not part of this tool.
+`trackedOnly: true` searches tracked source. Pull, merge, commit, and commit-history
+search are not exposed as agent tools.
+
+`git_fetch` and `git_operation_status` have separate permission policies. Fetch
+shares the human Git operation slot, permits unsaved editor changes, and does not
+change working files. It accepts no remote URL, refspec, shell, or configuration
+overrides. Acceptance does not imply success: poll status for completion. The
+latest 16 agent jobs remain queryable for this session; omit `jobId` for the latest.
+`busy` also includes human Git operations. A launch failure has `state: "failed"`
+and a null exit code; a process exit reports its actual code. Transport output,
+URLs, and raw errors are not returned or placed in agent fetch output buffers.
+Closing the session cancels and reaps the active Git process.
 
 ## Windows, panels and binary navigation
 

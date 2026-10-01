@@ -4,11 +4,16 @@ module GitOperationsCheck (checks) where
 import Control.Concurrent (threadDelay)
 import Control.Exception (bracket)
 import Control.Monad (unless, void)
+import Data.Aeson
+import Data.Aeson.Types (parseMaybe)
+import qualified Data.ByteString.Lazy.Char8 as BL
 import qualified Data.Map.Strict as M
 import qualified Data.Text as T
 import qualified Data.Text.IO as T
 import System.Directory
 import System.Exit (ExitCode(..))
+import System.Environment (lookupEnv,setEnv,unsetEnv)
+import System.Info (os)
 import System.FilePath ((</>))
 import System.IO (hClose, openTempFile)
 import System.Process (proc, readCreateProcessWithExitCode)
@@ -47,6 +52,38 @@ checks = bracket temporary removePathForcibly $ \base -> do
         run action desktop=effects desktop [RunGit action] >>= await tick (\d -> " completed." `T.isInfixOf` status d || " failed" `T.isInfixOf` status d) . snd
     fetched<-run FetchRemote configured
     check "fetch reports success" (status fetched=="Fetch completed.")
+    let call d name args=do
+          (updated,pending)<-gitTool runtime d name args
+          result<-pending
+          pure (updated,result)
+        stateOf value=parseMaybe (withObject "status" (\o -> o .: "operation" >>= withObject "job" (.: "state"))) value :: Maybe T.Text
+        codeOf value=parseMaybe (withObject "status" (\o -> o .: "operation" >>= withObject "job" (.: "exitCode"))) value :: Maybe Int
+        identOf value=parseMaybe (withObject "job" (.: "jobId")) value :: Maybe Integer
+    (_,emptyStatus)<-call fetched "git_operation_status" (object [])
+    check "no invented job before fetch" (either (const False) ((==Just Null) . parseMaybe (withObject "status" (.: "operation"))) emptyStatus)
+    (accepted,receipt)<-call fetched "git_fetch" (object [])
+    check "fetch returns acceptance before completion" (either (const False) ((==Just True) . parseMaybe (withObject "receipt" (.: "accepted"))) receipt)
+    let firstId=either (const Nothing) identOf receipt
+    (_,runningStatus)<-call accepted "git_operation_status" (object ["jobId" .= firstId])
+    check "accepted job starts running" (either (const False) ((==Just "running") . stateOf) runningStatus)
+    completed<-await tick (T.isInfixOf "completed." . status) accepted
+    (_,completedStatus)<-call completed "git_operation_status" (object ["jobId" .= firstId])
+    check "fetch completion reports actual zero exit" (either (const False) (\v -> stateOf v==Just "succeeded" && codeOf v==Just 0) completedStatus)
+    (_,badArgs)<-call completed "git_fetch" (object ["remote" .= ("https://private.invalid/secret"::T.Text)])
+    check "fetch refuses arbitrary remote arguments" (either (const True) (const False) badArgs)
+    (_,badId)<-call completed "git_operation_status" (object ["jobId" .= ("1"::T.Text)])
+    check "status rejects mistyped job identifier" (either (const True) (const False) badId)
+    let secret="credential-secret-marker"
+    void (git work ["config","remote.origin.url",base </> secret])
+    (failedStart,_)<-call completed "git_fetch" (object [])
+    failed<-await tick (T.isInfixOf "failed" . status) failedStart
+    (_,failedStatus)<-call failed "git_operation_status" (object [])
+    check "fetch failure retains actual nonzero exit" (either (const False) (\v -> stateOf v==Just "failed" && maybe False (/=0) (codeOf v)) failedStatus)
+    check "fetch output cannot leak through status or editor buffers"
+      (not (T.pack secret `T.isInfixOf` T.pack (BL.unpack (encode failedStatus))) && all (not . T.isInfixOf (T.pack secret) . contents . documentBuffer) (M.elems (buffers failed)))
+    (_,retainedStatus)<-call failed "git_operation_status" (object ["jobId" .= firstId])
+    check "earlier completion remains queryable" (either (const False) ((==Just "succeeded") . stateOf) retainedStatus)
+    void (git work ["config","remote.origin.url",upstream])
     T.writeFile upstreamSource "pulled\n"
     commit upstream "upstream change"
     let dirtyDesktop=insertText "unsaved " (select fetched)
@@ -70,6 +107,10 @@ checks = bracket temporary removePathForcibly $ \base -> do
     (_,running)<-effects (select cleanPull) [RunGit PullRemote]
     started<-timeout 5000000 (waitFile marker)
     check "local Git operation runs asynchronously" (started==Just ())
+    (_,busyTool)<-call running "git_fetch" (object [])
+    check "agent fetch shares human operation serialization" (either (T.isInfixOf "already running") (const False) busyTool)
+    (_,humanBusy)<-call running "git_operation_status" (object [])
+    check "status reports human operation busy" (either (const False) ((==Just True) . parseMaybe (withObject "status" (.: "busy"))) humanBusy)
     (exited,waiting)<-effects running [Exit]
     check "quit waits for active operation" (not exited && "Wait for" `T.isPrefixOf` status waiting)
     (_,blockedApproval)<-effects waiting [AgentAction "approval:1" ["0"]]
@@ -112,6 +153,15 @@ checks = bracket temporary removePathForcibly $ \base -> do
     check "operation log identifies completed repository" (branchRoot logged==Just work)
     returned<-tick (closeActive logged)
     check "closing operation log restores focused repository badge" (branchRoot returned==Just upstream)
+    removeFile marker
+    removeFile gate
+    (agentRunning,_)<-call returned {branchRoot=Just work} "git_fetch" (object [])
+    agentStarted<-timeout 5000000 (waitFile marker)
+    check "agent fetch uses configured transport" (agentStarted==Just ())
+    (_,busyHuman)<-effects agentRunning [RunGit FetchRemote]
+    check "human action shares agent operation serialization" (status busyHuman=="A Git operation is already running.")
+    writeFile gate "continue"
+    _<-await tick (T.isInfixOf "completed." . status) busyHuman
     void (git work ["config","--unset","remote.origin.uploadpack"])
     void (git work ["checkout","-b","topic"])
     T.writeFile source "topic change\n"
@@ -157,6 +207,7 @@ checks = bracket temporary removePathForcibly $ \base -> do
        documentFile (doc linked)==documentFile (doc deleted) && "reopen" `T.isInfixOf` activeText linked)
     targetBytes<-T.readFile target
     check "pull symlink target remains unchanged" (targetBytes=="outside symlink target\n")
+  unless (os=="mingw32") (cancellationCheck base work)
   putStrLn "Git operation checks passed"
   where
     check label ok=unless ok (error label)
@@ -185,3 +236,29 @@ await tick ready initial=do
   where loop desktop=do
           updated<-tick desktop
           if ready updated then pure updated else threadDelay 10000 >> loop updated
+
+-- The wrapper becomes the owned Git process, rather than leaving a sleeping
+-- grandchild behind. Closing the controller must terminate and reap it.
+cancellationCheck :: FilePath -> FilePath -> IO ()
+cancellationCheck base work=do
+  realGit<-findExecutable "git" >>= maybe (error "git unavailable") pure
+  let directory=base </> "cancellation-bin"
+      wrapper=directory </> "git"
+      marker=base </> "cancelled-git.pid"
+      quote value="'"++concatMap (\c -> if c=='\'' then "'\\''" else [c]) value++"'"
+  createDirectory directory
+  writeFile wrapper (unlines ["#!/bin/sh","for arg do", "if [ \"$arg\" = fetch ]; then", "echo $$ > "++quote marker,"exec /bin/sleep 60","fi","done","exec "++quote realGit++" \"$@\""])
+  permissions<-getPermissions wrapper
+  setPermissions wrapper (permissions {executable=True})
+  bracket (lookupEnv "PATH") (maybe (unsetEnv "PATH") (setEnv "PATH")) $ \oldPath -> do
+    setEnv "PATH" (directory++maybe "" (":"++) oldPath)
+    ended<-timeout 5000000 $ withGitOperations $ \runtime -> do
+      (_,receipt)<-gitTool runtime (initialDesktop (80,25)) {defaultDirectory=Just work} "git_fetch" (object [])
+      accepted<-receipt
+      unless (either (const False) (const True) accepted) (error "cancellation fixture fetch rejected")
+      let wait=doesFileExist marker >>= \exists -> unless exists (threadDelay 10000 >> wait)
+      wait
+    unless (ended==Just ()) (error "closing Git controller did not reap fetch promptly")
+  pid<-T.unpack . T.strip <$> T.readFile marker
+  (code,_,_)<-readCreateProcessWithExitCode (proc "/bin/kill" ["-0",pid]) ""
+  unless (code/=ExitSuccess) (error "Git subprocess survived controller close")

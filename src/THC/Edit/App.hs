@@ -242,7 +242,7 @@ runEditor args = do
         else do
           mapM_ (setEnv "THC_EDIT_SESSION") daemon
           font<-Font.loadFont
-          let specs=builtinTools++debugTools++chatTools++toolingTools++workspaceTools++fileTools++testsTools++historyTools++runtimeTools++controlTools++clipboardTools++docsTools++[screenTool]
+          let specs=builtinTools++debugTools++chatTools++toolingTools++workspaceTools++fileTools++testsTools++historyTools++runtimeTools++gitTools++controlTools++clipboardTools++docsTools++[screenTool]
           withPermissions (specs++agentTools) $ \permissions -> withDebugger $ \debugger -> withConversationAt (startingDirectory protectedDesktop) $ \conversation -> withTooling $ \tooling -> withGitOperations $ \gitOperations -> withReconciliation $ \reconciliation -> do
             exiting<-newIORef False
             let runtimeEffects=gitOperationEffects gitOperations (debuggerEffects debugger (conversationEffects conversation (reconciliationEffects reconciliation (toolingEffects tooling applyEffects))))
@@ -270,6 +270,7 @@ runEditor args = do
                   | name `elem` testsToolNames = testsTool conversation d name parameters
                   | name `elem` historyToolNames = historyTool d name parameters
                   | name `elem` runtimeToolNames = runtimeTool conversation d name parameters
+                  | name `elem` gitToolNames = gitTool gitOperations d name parameters
                   | name=="clipboard_write" = clipboardTool d parameters
                   | name `elem` docsToolNames = docsTool d name parameters
                   | name `elem` controlToolNames = controlTool guestCore d name parameters
