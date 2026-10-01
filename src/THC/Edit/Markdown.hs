@@ -2,7 +2,9 @@
 module THC.Edit.Markdown (renderMarkdown) where
 
 import qualified Commonmark as C
+import Commonmark.Extensions.PipeTable
 import Commonmark.Entity (lookupEntity)
+import Data.Functor.Identity (runIdentity)
 import Data.Char (isSpace)
 import Data.List (intercalate)
 import Data.Maybe (fromMaybe, listToMaybe)
@@ -15,7 +17,7 @@ import THC.Edit.Syntax (Style(..), highlightFor)
 type Styled = [(Char,Style)]
 newtype Inline = Inline Styled deriving (Show, Semigroup, Monoid)
 newtype Blocks = Blocks [Block] deriving (Show, Semigroup, Monoid)
-data Block = Flow Styled | Pre Styled | Indent T.Text Blocks | Gap deriving Show
+data Block = Table [ColAlignment] [Styled] [[Styled]] | Code Bool Styled | Flow Styled | Pre Styled | Indent T.Text Blocks | Gap deriving Show
 
 instance C.Rangeable Inline where ranged _ = id
 instance C.HasAttributes Inline where addAttributes _ = id
@@ -44,8 +46,8 @@ instance C.IsBlock Inline Blocks where
   plain (Inline chars) = Blocks [Flow chars]
   thematicBreak = Blocks [Flow (paint Comment "───"), Gap]
   blockQuote blocks = Blocks [Indent "> " (trim blocks), Gap]
-  codeBlock info source = Blocks [Pre (codeStyles info source), Gap]
-  heading _ content = let Inline chars = tint Keyword content in Blocks [Flow chars,Gap]
+  codeBlock info source = Blocks [Code (shellBlock info) (codeStyles info source), Gap]
+  heading level content = let Inline chars = tint (Heading level) content in Blocks [Flow chars,Gap]
   rawBlock _ source = Blocks [Pre (paint Plain source),Gap]
   referenceLinkDefinition _ _ = mempty
   list kind spacing items = Blocks (concat (zipWith item [first..] items) ++ [Gap])
@@ -56,11 +58,15 @@ instance C.IsBlock Inline Blocks where
         C.BulletList _ -> "• "
         C.OrderedList _ _ delimiter -> T.pack (show n) <> if delimiter == C.Period then ". " else ") "
 
+instance HasPipeTable Inline Blocks where
+  pipeTable aligns header body = Blocks [Table aligns (map unInline header) (map (map unInline) body),Gap]
+    where unInline (Inline chars)=chars
+
 -- CommonMark handles incomplete input too, so streaming callers keep ownership
 -- of the raw source and may simply render each new accumulated chunk.
 renderMarkdown :: Int -> T.Text -> Styled
 renderMarkdown requested source = intercalate [('\n',Plain)] $ render width $ trim $
-  either (const (Blocks [Pre (paint Plain source)])) id (C.commonmark "" source)
+  either (const (Blocks [Pre (paint Plain source)])) id (runIdentity (C.commonmarkWith (pipeTableSpec <> C.defaultSyntaxSpec) "" source))
   where width = max 1 requested
 
 paint :: Style -> T.Text -> Styled
@@ -83,6 +89,17 @@ render :: Int -> Blocks -> [Styled]
 render width (Blocks blocks) = concatMap block blocks
   where
     block (Flow chars) = concatMap (wrapWords width) (rows chars)
+    block (Code shell chars) =
+      let margin=if width>=8 then 2 else 0
+          panelWidth=width-margin
+          padding=if panelWidth>=3 then 1 else 0
+          inner=max 1 (panelWidth-2*padding)
+          base=CodeStyle shell Plain
+          line xs=paint Plain (T.replicate margin " ") ++ paint base (T.replicate padding " ") ++
+            [(c,CodeStyle shell style) | (c,style)<-xs] ++ paint base (T.replicate (max 0 (panelWidth-padding-columns xs)) " ")
+          content=concatMap (wrapExact inner) (rows (stripFinalNewline (expandTabs chars)))
+      in map line ([]:content++[[]])
+    block (Table aligns header body)=renderTable width aligns header body
     block (Pre chars) = concatMap (wrapExact width) (rows (stripFinalNewline (expandTabs chars)))
     block Gap = [[]]
     block (Indent prefix content)
@@ -92,6 +109,30 @@ render width (Blocks blocks) = concatMap block blocks
         indent = T.length prefix
         attach [] = [paint Comment (T.stripEnd prefix)]
         attach (first:rest) = (paint Comment prefix ++ first) : map (paint Plain (T.replicate indent " ") ++) rest
+
+renderTable :: Int -> [ColAlignment] -> [Styled] -> [[Styled]] -> [Styled]
+renderTable width aligns header body
+  | count==0 = []
+  | width < count*4+1 = concat [concat [wrapWords width (h++paint Comment ": "++value) | (h,value)<-zip header row] ++ [[]] | row<-body]
+  | otherwise = [rule '┌' '┬' '┐'] ++ rowLines True header ++ [rule '├' '┼' '┤'] ++ concatMap (rowLines False) body ++ [rule '└' '┴' '┘']
+  where
+    count=length header
+    budget=width-3*count-1
+    natural=[maximum (1:[columns cell | row<-header:body,cell<-take 1 (drop i row)]) | i<-[0..count-1]]
+    shrink widths | sum widths<=budget = widths
+                  | otherwise = let biggest=maximum widths; (before,after)=break (==biggest) widths
+                               in shrink (before++[biggest-1]++drop 1 after)
+    sizes=shrink natural
+    rule a b c=paint Comment (T.singleton a<>T.intercalate (T.singleton b) [T.replicate (n+2) "─" | n<-sizes]<>T.singleton c)
+    rowLines isHeader cells=
+      let wrapped=zipWith wrapWords sizes (take count (cells++repeat []))
+          height=maximum (1:map length wrapped)
+          line j=paint Comment "│"++concat [paint Plain " "++pad alignment n (if isHeader then [(c,Heading 2) | (c,_)<-part] else part)++paint Comment " │"
+            | (n,alignment,parts)<-zip3 sizes (aligns++repeat DefaultAlignedCol) wrapped, let part=case drop j parts of x:_->x; _->[]]
+      in map line [0..height-1]
+    pad alignment n chars=paint Plain (T.replicate left " ")++chars++paint Plain (T.replicate (extra-left) " ")
+      where extra=max 0 (n-columns chars)
+            left=case alignment of RightAlignedCol->extra; CenterAlignedCol->extra `div` 2; _->0
 
 rows :: Styled -> [Styled]
 rows chars = let (line,rest) = break ((== '\n') . fst) chars in line : case rest of [] -> []; _:more -> rows more
@@ -137,6 +178,11 @@ expandTabs chars = go 0 (graphemes (textOf chars)) chars
         next | g=="\n"=0
              | g=="\t"=col+count
              | otherwise=col+clusterWidth g
+
+shellBlock :: T.Text -> Bool
+shellBlock info = case T.words (T.toLower info) of
+  language:_ -> language `elem` ["sh","bash","shell","shellsession","console","terminal","zsh","fish","powershell","pwsh","ps1","cmd","bat","batch","dos"]
+  [] -> False
 
 codeStyles :: T.Text -> T.Text -> Styled
 codeStyles info source = case T.words info of

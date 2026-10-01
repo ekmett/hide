@@ -27,15 +27,15 @@ data Rect = Rect { left :: Int, top :: Int, width :: Int, height :: Int } derivi
 inside :: Rect -> Int -> Int -> Bool
 inside (Rect x y w h) a b = a >= x && a < x+w && b >= y && b < y+h
 
-data Document = Document { documentBuffer :: Buffer, documentFile :: Maybe FileState, documentLabel :: Maybe Text, documentHighlight :: [(Char,Style)], documentWidth :: Int, documentCursorVisible :: Bool } deriving (Eq,Show)
+data Document = Document { documentBuffer :: Buffer, documentFile :: Maybe FileState, documentLabel :: Maybe Text, documentHighlight :: [(Char,Style)], documentWidth :: Int, documentCursorVisible :: Bool, documentSuggestedName :: Maybe FilePath } deriving (Eq,Show)
 -- Shared by split views; cursor movement and repaint reuse the lazy token cache.
 newDocument :: Buffer -> Maybe FileState -> Document
-newDocument b file = restyle (Document b file Nothing [] 0 True)
+newDocument b file = restyle (Document b file Nothing [] 0 True Nothing)
 
 -- ponytail: retokenize the buffer after edits; use an incremental engine if large-file latency warrants it.
 restyle :: Document -> Document
 restyle doc | byteMode (documentBuffer doc) = doc {documentHighlight=[],documentWidth=hexWidth 16}
-restyle doc = doc {documentHighlight=highlightFor (maybe "Main.hs" filePath (documentFile doc)) text,
+restyle doc = doc {documentHighlight=highlightFor (maybe (fromMaybe "Main.hs" (documentSuggestedName doc)) filePath (documentFile doc)) text,
   documentWidth=maximum (0:[displayColumn line (T.length line) | raw<-textLines text,let line=T.dropWhileEnd (=='\r') raw])}
   where text=contents (documentBuffer doc)
 
@@ -45,8 +45,8 @@ data Window = Window
   , windowHexLow :: Bool, windowHexAscii :: Bool
   , windowNumber :: Int
   } deriving (Eq,Show)
-data Command = New | Open | ChangeDir | Save | SaveAs | Close | Quit | Undo | Redo | Cut | Copy | Paste
-  | Find | FindNext | Replace | GoTo | SelectAll | Zoom | NextWindow | Cascade | Tile
+data Command = New | Open | Download | ChangeDir | Save | SaveAs | Close | Quit | Undo | Redo | Cut | Copy | Paste
+  | Find | FindNext | FindPrevious | Replace | GoTo | SelectAll | Zoom | NextWindow | Cascade | Tile
   | SplitVertical | SplitHorizontal | About | Help | EditorOptions | Gallery
   | InspectType | Definition | Complete | Problems | NextMessage | PreviousMessage | RestartHLS | RenameSymbol
   | ToggleTree | GitDiff | GitCommit | GitFetch | GitPull | GitMerge | ReviewDisk
@@ -62,12 +62,12 @@ data GitAction = FetchRemote | PullRemote | MergeBranch Text deriving (Eq,Show)
 data ContextKind = SourceContext | GitContext | MessagesContext | AgentContext [(Text,Command)] deriving (Eq,Show)
 data LanguageAction = TypeInfo | FindDefinition | Completions | ShowProblems | RestartLanguage | RenameAt Text deriving (Eq,Show)
 data Completion = Completion Text [(Int,Int,Text)] deriving (Eq,Show)
-data Effect = LanguageRequest LanguageAction | RunGit GitAction | ReadMergeBranches | JumpTo FilePath Int Int | ReadPath FilePath | BrowsePath FilePath Text | BrowseDirectories FilePath | ChangeDirectory FilePath | OpenChoice FilePath Text Text | ReadTree FilePath | ExpandTree Int | ReadHelp | RefreshGit FilePath | ReadGitDiff | AskGitCommit | WriteGitCommit Text | SaveDocument Int (Maybe FilePath) (Maybe Command) | ReviewExternal | ResolveConflict Conflict ConflictAction | AgentAction Text [Text] | DebugAction Text [Text] | SetScreenMode Int | Exit deriving (Eq,Show)
+data Effect = DownloadDocument Int | ReadBrowserClipboard | WriteBrowserClipboard Text | LanguageRequest LanguageAction | RunGit GitAction | ReadMergeBranches | JumpTo FilePath Int Int | ReadPath FilePath | BrowsePath FilePath Text | BrowseDirectories FilePath | ChangeDirectory FilePath | OpenChoice FilePath Text Text | ReadTree FilePath | ExpandTree Int | ReadHelp | RefreshGit FilePath | ReadGitDiff | AskGitCommit | WriteGitCommit Text | SaveDocument Int (Maybe FilePath) (Maybe Command) | ReviewExternal | ResolveConflict Conflict ConflictAction | AgentAction Text [Text] | DebugAction Text [Text] | SetScreenMode Int | Exit deriving (Eq,Show)
 data Field = Input Text Text Int | CheckBox Text Bool | Radio Text [Text] Int | ListBox Text [Text] Int | FileList [Entry] Int deriving (Eq,Show)
 data Purpose = Opening FilePath Text [Entry] | ChangingDirectory FilePath [Entry] | Committing | Saving Int (Maybe Command) | Finding | Replacing | GoingTo | Renaming
   | Completing Int Int Int [Completion] | Locations [(FilePath,Int,Int)] | Merging [Text]
   | DiskConflict Conflict | AgentDialog Text | DebugDialog Text
-  | Confirm Command | Information | Settings | Widgets deriving (Eq,Show)
+  | DiscardDraft | Confirm Command | Information | Settings | Widgets deriving (Eq,Show)
 data Dialog = Dialog
   { dialogTitle :: Text, purpose :: Purpose, fields :: [Field], focus :: Int
   , buttons :: [Text], body :: [Text]
@@ -80,6 +80,11 @@ data Diagnostic = Diagnostic
 data Sidebar = Sidebar { treeRoot :: FilePath, treeRows :: [TreeRow], treeSelected :: Int, treeScroll :: Int, treeWidth :: Int, treeFocused :: Bool } deriving (Eq,Show)
 data Drag = DockSizing | MessagesSizing | TreeScrolling | Moving Int Int Int | Resizing Int Int Int | Selecting Int | Scrolling Int Bool deriving (Eq,Show)
 data AgentSetting = AgentSetting { settingId :: Text, settingName :: Text, settingCategory :: Text, settingCurrent :: Text, settingChoices :: [(Text,Text)] } deriving (Eq,Show)
+data Appearance = LightMode | DarkMode | SystemMode deriving (Eq,Show,Enum,Bounded)
+
+darkAppearance :: Desktop -> Bool
+darkAppearance d = case appearance d of LightMode -> False; DarkMode -> True; SystemMode -> systemDark d
+
 data Desktop = Desktop
   { screenSize :: (Int,Int), windows :: [Window], buffers :: M.Map Int Document
   , nextId :: Int, menu :: Maybe (Int,Int), dialog :: Maybe Dialog, drag :: Maybe Drag
@@ -92,7 +97,7 @@ data Desktop = Desktop
   , branchAdded :: Int, branchDeleted :: Int, branchRoot :: Maybe FilePath, contextKind :: ContextKind
   , messagesNumber :: Maybe Int
   , composerBuffer :: Buffer, composerSelection :: Selection, composerFocused :: Bool, agentSteering :: Bool, agentReplying :: Bool, agentQueued :: Int
-  , blinkCursor :: Bool, crtFilter :: Bool, pixelateUnicode :: Bool, materialIcons :: Bool, defaultDirectory :: Maybe FilePath, statusHover :: Maybe Int, heldModifiers :: [V.Modifier], problemsPreferredHeight :: Int, agentContextUsage :: Maybe (Integer,Integer), agentSettings :: [AgentSetting]
+  , blinkCursor :: Bool, crtFilter :: Bool, pixelateUnicode :: Bool, materialIcons :: Bool, defaultDirectory :: Maybe FilePath, statusHover :: Maybe Int, heldModifiers :: [V.Modifier], problemsPreferredHeight :: Int, agentContextUsage :: Maybe (Integer,Integer), agentSettings :: [AgentSetting], browserFrontend :: Bool, appearance :: Appearance, systemDark :: Bool
   } deriving (Eq,Show)
 
 data MenuItem = MenuItem Text Text Command deriving (Eq,Show)
@@ -122,7 +127,7 @@ menuMnemonic (MenuItem title _ cmd) = case cmd of
   Problems -> 'm'; NextMessage -> 'n'; PreviousMessage -> 'p'
   SaveAs -> 'a'; Quit -> 'x'; Cut -> 't'; SelectAll -> 'a'
   SplitVertical -> 'v'; SplitHorizontal -> 'h'
-  Close -> 'l'
+  Close -> 'l'; Download -> 'w'
   _ -> toLower (T.head title)
 
 menuShortcut :: Desktop -> MenuItem -> Text
@@ -159,6 +164,8 @@ commandDescription cmd = case cmd of
   AgentResume -> "Resume an agent session."
   AgentNew -> "Start a new agent session."
   AgentCopyRaw -> "Copy the raw conversation text."
+  Download -> "Download the current buffer, including unsaved changes."
+  FindPrevious -> "Find the previous match."
   Close -> "Close this window; ask before discarding unsaved changes."
   Quit -> "Exit the editor; ask before discarding unsaved changes."
   Undo -> "Undo the last edit."; Redo -> "Redo the last undone edit."
@@ -194,7 +201,7 @@ menuHelp d = case contextMenu d of
   Just (_,i) -> commandDescription . snd <$> listToMaybe (drop i (contextItems (contextKind d)))
   Nothing -> do
     (i,j)<-menu d
-    MenuItem _ _ cmd<-listToMaybe (drop j (menuItems i))
+    MenuItem _ _ cmd<-listToMaybe (drop j (menuItemsFor d i))
     pure (commandDescription cmd)
 
 -- Labels, hit rectangles and actions share one source, including modal hints.
@@ -229,7 +236,14 @@ menuPositions = zip starts widths
 menuItems :: Int -> [MenuItem]
 menuItems i = let (_,_,xs) = menus !! (i `mod` length menus) in xs
 
+menuItemsFor :: Desktop -> Int -> [MenuItem]
+menuItemsFor d i
+  | browserFrontend d && i==0 = take 4 items ++ [MenuItem "Download" "" Download] ++ drop 4 items
+  | otherwise = items
+  where items=menuItems i
+
 commandEnabled :: Desktop -> Command -> Bool
+commandEnabled d Download = browserFrontend d && maybe False ((==Nothing) . documentLabel) (activeDocument d)
 commandEnabled _ Disabled{} = False
 commandEnabled d (AgentChoose _) = not (null (agentSettings d))
 commandEnabled d (AgentSet _ _) = not (agentReplying d)
@@ -238,13 +252,13 @@ commandEnabled d Copy | problemsVisible d && problemsFocused d = not (null (diag
 commandEnabled d cmd | problemsVisible d && problemsFocused d, cmd `elem` [Undo,Redo,Cut,Paste,SelectAll] = False
 commandEnabled _ _ = True
 menuRect :: Desktop -> Int -> Rect
-menuRect d i = Rect (min x (max 0 (sw-w))) 1 w (length (menuItems i)+2)
+menuRect d i = Rect (min x (max 0 (sw-w))) 1 w (length (menuItemsFor d i)+2)
   where x = fst (menuPositions !! i)
         sw = fst (screenSize d)
-        w = min sw (maximum [T.length t + T.length (menuShortcut d entry) + 5 | entry@(MenuItem t _ _) <- menuItems i])
+        w = min sw (maximum [T.length t + T.length (menuShortcut d entry) + 5 | entry@(MenuItem t _ _) <- menuItemsFor d i])
 
 initialDesktop :: (Int,Int) -> Desktop
-initialDesktop size = Desktop size [] M.empty 1 Nothing Nothing Nothing "" False Nothing "" Nothing "" Nothing "" False Nothing Nothing Nothing "" Nothing Nothing Nothing [] False 0 0 False Nothing 0 0 Nothing SourceContext Nothing (newBuffer "") (Selection 0 0) True False False 0 True False False False Nothing Nothing [] 8 Nothing []
+initialDesktop size = Desktop size [] M.empty 1 Nothing Nothing Nothing "" False Nothing "" Nothing "" Nothing "" False Nothing Nothing Nothing "" Nothing Nothing Nothing [] False 0 0 False Nothing 0 0 Nothing SourceContext Nothing (newBuffer "") (Selection 0 0) True False False 0 True False False False Nothing Nothing [] 8 Nothing [] False SystemMode True
 
 activeWindow :: Desktop -> Maybe Window
 activeWindow = listToMaybe . windows
@@ -370,12 +384,17 @@ prompt :: Text -> Purpose -> [Field] -> Desktop -> Desktop
 prompt title p fs d = d {dialog = Just (Dialog title p fs 0 ["OK","Cancel"] []), menu = Nothing, drag = Nothing,dragOriginal=Nothing}
 
 runCommand :: Command -> Desktop -> (Desktop,[Effect])
+runCommand cmd source | browserFrontend source, cmd `elem` [Copy,Cut,CopyAllMessages] =
+  let (next,requests)=runCommand cmd source {browserFrontend=False}
+  in (next {browserFrontend=True},requests++[WriteBrowserClipboard (clipboard next)])
+runCommand Paste source | browserFrontend source = (source {menu=Nothing,contextMenu=Nothing},[ReadBrowserClipboard])
 runCommand cmd source | problemsVisible source && problemsFocused source, cmd `elem` [Undo,Redo,Cut,Paste,SelectAll] = (source {menu=Nothing,contextMenu=Nothing},[])
 runCommand Copy source | activeConversation source, Just w<-activeWindow source, anchor (selection w)/=caret (selection w) =
   (source {clipboard=conversationSelection source,status="Conversation text copied.",menu=Nothing,contextMenu=Nothing},[])
 runCommand cmd source | not (problemsFocused source), composerActive source, cmd `elem` [Undo,Redo,Copy,Cut,Paste,SelectAll] = (composerCommand cmd source,[])
 runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source {menu = Nothing, contextMenu=Nothing, buttonHover=Nothing, buttonPressed=Nothing, prefix = Nothing, drag = Nothing,dragOriginal=Nothing})
   where
+    go Download d = (d,[DownloadDocument (bufferId w) | commandEnabled d Download, Just w<-[activeWindow d]])
     go New d = (addDocument Nothing (newBuffer "") d,[])
     go Open d = (d,[BrowsePath (startingDirectory d) "*.hs"])
     go ChangeDir d = (d,[BrowseDirectories (startingDirectory d)])
@@ -400,7 +419,8 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
       Just _ | maybe False ((/=Nothing) . documentLabel) (activeDocument d) -> (d {status="This window is read-only."},[])
       Just w -> (prompt "Save file as" (Saving (bufferId w) Nothing) [Input "Name" (currentPath d) (T.length (currentPath d))] d,[])
     go Quit d = case find (dirty . documentBuffer . snd) (M.toList (buffers d)) of
-      Nothing -> (d,[Exit])
+      Nothing | not (T.null (contents (composerBuffer d))) -> (d {dialog=Just (Dialog "Unsent query" DiscardDraft [] 0 ["Discard","Cancel"] ["Discard the unsent conversation query?"])},[])
+              | otherwise -> (d,[Exit])
       Just (bid,_) -> let focused = maybe d (\w -> focusWindow (windowId w) d) (find ((==bid) . bufferId) (windows d))
                      in confirm Quit focused
     go Close d = case (activeWindow d, activeDocument d) of
@@ -424,6 +444,7 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
     go GoTo d | activeHex d = (prompt "Go to byte" GoingTo [Input "Byte offset (decimal)" "0" 1] d,[])
     go Find d = (prompt "Find" Finding [Input "Text to find" (lastFind d) (T.length (lastFind d))] d,[])
     go Replace d = (prompt "Replace" Replacing [Input "Text to find" (lastFind d) (T.length (lastFind d)),Input "Replace with" "" 0] d,[])
+    go FindPrevious d = (findPrevious d,[])
     go FindNext d = (findText (lastFind d) d,[])
     go GoTo d = (prompt "Go to line" GoingTo [Input "Line number" "1" 1] d,[])
     go Zoom d = (modifyActive zoom d,[]) where
@@ -456,7 +477,7 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
     go EditorOptions d = (prompt "Preferences" Settings
       ([Radio "Key bindings" ["Modern","WordStar"] (if wordStar d then 1 else 0)] ++
        [Radio "Screen size" ["Mode 3 (80x25)","Mode 259 (80x50)"] (if mode == 259 then 1 else 0) | Just mode <- [videoMode d]] ++
-       [CheckBox "Blinking cursor" (blinkCursor d)] ++
+       [Radio "Appearance" ["Light","Dark","System"] (fromEnum (appearance d)),CheckBox "Blinking cursor" (blinkCursor d)] ++
        [field | videoMode d/=Nothing,field<-[CheckBox "CRT filter" (crtFilter d),CheckBox "Pixelate Unicode" (pixelateUnicode d)]]) d,[])
     go Gallery d = (prompt "Dialog controls" Widgets [Input "Module name" "Main" 4,CheckBox "Auto indent" True,Radio "Tab width" ["4 columns","8 columns"] 1,ListBox "Source files" ["Main.hs","Types.hs","Parser.hs","Syntax.hs","Eval.hs"] 0] d,[])
     go (Disabled reason) d = (d {status = reason},[])
@@ -467,7 +488,7 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
 activeText :: Desktop -> Text
 activeText = maybe "" (contents . documentBuffer) . activeDocument
 currentPath :: Desktop -> Text
-currentPath d = maybe "" (T.pack . filePath) (activeDocument d >>= documentFile)
+currentPath d = maybe "" (\doc -> T.pack (maybe (fromMaybe "" (documentSuggestedName doc)) filePath (documentFile doc))) (activeDocument d)
 documentTitle :: Desktop -> Text
 documentTitle d = if T.null (currentPath d) then "NONAME.HS" else currentPath d
 
@@ -475,7 +496,7 @@ saveRequest :: Maybe Command -> Desktop -> (Desktop,[Effect])
 saveRequest after d = case (activeWindow d,activeDocument d) of
   (Just _,Just doc) | documentLabel doc /= Nothing -> (d {status="This window is read-only."},[])
   (Just w,Just doc) -> case documentFile doc of
-    Nothing -> (prompt "Save file as" (Saving (bufferId w) after) [Input "Name" "" 0] d,[])
+    Nothing -> (prompt "Save file as" (Saving (bufferId w) after) [Input "Name" (currentPath d) (T.length (currentPath d))] d,[])
     Just _ -> (d,[SaveDocument (bufferId w) Nothing after])
   _ -> (d,[])
 
@@ -510,6 +531,18 @@ findText needle d = case activeWindow d of
     t = activeText d
     locate start source = let (before,after) = T.breakOn needle source in if T.null after then Nothing else Just (start+T.length before)
     searchFrom p = case locate p (T.drop p t) of Just x -> Just x; Nothing -> locate 0 t
+
+findPrevious :: Desktop -> Desktop
+findPrevious d | T.null (lastFind d) = d {status="Enter search text first."}
+findPrevious d = case activeWindow d of
+  Nothing -> d
+  Just w -> case candidates of
+    [] -> d {status="Search text not found."}
+    _ -> let before=filter (<fst (ordered (selection w))) candidates
+             p=last (if null before then candidates else before)
+         in ensureVisible (modifyActive (\v -> v {selection=Selection p (p+T.length needle)}) d {status="Search match."})
+  where needle=lastFind d; text=activeText d
+        candidates=[p | p<-[0..T.length text-T.length needle],needle `T.isPrefixOf` T.drop p text]
 
 helpLines :: [Text]
 helpLines = ["F1 Help   F2 Save   F3 Open   F5 Zoom", "F6 Next window   F10 Menu   Alt+X Exit", "Alt+F3 Close   Ctrl+Z Undo   Ctrl+Y Redo", "Shift+arrows Select   Ctrl+arrows Words", "Ctrl+C/X/V Copy/Cut/Paste (internal clipboard)", "Ctrl+F Find   Ctrl+R Replace   Ctrl+L Next", "Ctrl+G Go to line   Ctrl+A Select all", "Mouse: title drag, bottom-right resize", "Window menu: tile, cascade, shared splits", "", "WordStar (Options > Editor):", "Ctrl+E/S/D/X Up/Left/Right/Down", "Ctrl+A/F Word left/right   Ctrl+Y Delete line", "Ctrl+K B/K Block start/end   C/V Copy/Cut", "Ctrl+K Y Delete block   S Save   D Close", "Ctrl+Q S/D Line start/end   R/C File top/end", "Ctrl+Q F Find   Ctrl+Q A Replace", "Escape cancels a command prefix.", "", "HLS and Cabal browsing are not connected yet."]
@@ -755,15 +788,15 @@ menuEvent ev (i,j) d = case ev of
   V.EvKey V.KUp _ -> choose i (j-1)
   V.EvKey V.KDown _ -> choose i (j+1)
   V.EvKey V.KEnter _ -> invoke j
-  V.EvKey (V.KChar c) _ -> case findIndex (\item -> toLower c == menuMnemonic item) (menuItems i) of
+  V.EvKey (V.KChar c) _ -> case findIndex (\item -> toLower c == menuMnemonic item) (menuItemsFor d i) of
     Just k -> invoke k
     _ -> (d,[])
   V.EvMouseDown x 0 V.BLeft _ -> case menuAt x of Just k -> choose k 0; _ -> (d {menu=Nothing},[])
   V.EvMouseDown x y V.BLeft _ -> let r = menuRect d i in if inside r x y && y>top r && y<top r+height r-1 then invoke (y-top r-1) else (d {menu=Nothing},[])
   _ -> (d,[])
   where
-    choose a b = let a' = a `mod` length menus in (d {menu = Just (a',b `mod` length (menuItems a'))},[])
-    invoke k = let MenuItem _ _ command = menuItems i !! k in runCommand command d
+    choose a b = let a' = a `mod` length menus in (d {menu = Just (a',b `mod` length (menuItemsFor d a'))},[])
+    invoke k = let MenuItem _ _ command = menuItemsFor d i !! k in runCommand command d
 
 menuAt :: Int -> Maybe Int
 menuAt x = findIndex (\(start,w) -> x >= start && x < start+w) menuPositions
@@ -1229,6 +1262,8 @@ submitDialog button dg original
     GoingTo -> case readMaybe (T.unpack first) of
       Just n | n>0 -> (moveTo False (lineOffset (activeText d) (n-1)) d,[])
       _ -> (original {status="Enter a positive line number."},[])
+    DiscardDraft | button==0 -> runCommand Quit d {composerBuffer=newBuffer "",composerSelection=Selection 0 0}
+                 | otherwise -> (d,[])
     Confirm cmd | button==0 -> saveRequest (Just cmd) d
                 | button==1 -> case cmd of
                     Close -> (closeActive d,[])
@@ -1236,6 +1271,7 @@ submitDialog button dg original
                     _ -> (d,[])
                 | otherwise -> (d,[])
     Settings -> (d {wordStar=any (\f -> case f of Radio "Key bindings" _ 1 -> True; _ -> False) (fields dg),
+      appearance=fromMaybe (appearance d) (listToMaybe [toEnum (max 0 (min 2 value)) | Radio "Appearance" _ value<-fields dg]),
       blinkCursor=fromMaybe (blinkCursor d) (listToMaybe [value | CheckBox "Blinking cursor" value<-fields dg]),
       pixelateUnicode=fromMaybe (pixelateUnicode d) (listToMaybe [value | CheckBox "Pixelate Unicode" value<-fields dg]),
       crtFilter=fromMaybe (crtFilter d) (listToMaybe [value | CheckBox "CRT filter" value<-fields dg]),status="Preferences updated."},
@@ -1443,6 +1479,12 @@ openDirectoryBrowser base entries d = d {dialog=Just (Dialog "Change directory" 
 
 openBrowser :: FilePath -> Text -> [Entry] -> Desktop -> Desktop
 openBrowser base pattern entries d = d {dialog=Just (Dialog "Open a file" (Opening base pattern entries) [Input "Name" pattern (T.length pattern),FileList entries 0] 1 ["Open","Cancel"] []),menu=Nothing,drag=Nothing,dragOriginal=Nothing}
+
+addHelpStyled :: [(Char,Style)] -> Desktop -> Desktop
+addHelpStyled chars d = let opened=addHelp (T.pack (map fst chars)) d
+                       in case activeWindow opened of
+                         Nothing -> opened
+                         Just w -> opened {buffers=M.adjust (\doc -> doc {documentHighlight=[(c,ProseStyle style) | (c,style)<-chars]}) (bufferId w) (buffers opened)}
 
 addHelp :: Text -> Desktop -> Desktop
 addHelp text d = addReadOnly "Turbo Haskell Help" text d

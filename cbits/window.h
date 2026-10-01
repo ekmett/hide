@@ -27,4 +27,5 @@ const char *thc_text(void);
 const char *thc_clipboard(void);
 void thc_set_clipboard(const char *text);
 int thc_capture(const char *path);
+int thc_system_dark(void);
 #endif

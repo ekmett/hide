@@ -1,4 +1,4 @@
-module THC.Edit.Font (Font, Glyph(..), loadFont, glyph, bitmapGlyph) where
+module THC.Edit.Font (Font, Glyph(..), loadFont, glyph, bitmapGlyph, bitmapAtlas) where
 
 import Data.Word (Word16)
 import Control.Monad (unless)
@@ -65,3 +65,6 @@ glyph (Font font _) c
 -- Interface geometry and the original IBM repertoire retain their exact pixels.
 bitmapGlyph :: Font -> Char -> Bool
 bitmapGlyph (Font _ ibm) c = IM.member (ord c) ibm || ord c>=0x2500 && ord c<=0x259f || ord c>=0xe000 && ord c<=0xe007
+
+bitmapAtlas :: Font -> [(Char,Glyph)]
+bitmapAtlas font@(Font _ bitmap) = [(toEnum point, tile) | (point,tile)<-IM.toList bitmap] ++ [(c,glyph font c) | c<-['\xe000'..'\xe007']]

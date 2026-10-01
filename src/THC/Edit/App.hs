@@ -21,11 +21,12 @@ import System.FilePath ((</>), isAbsolute, takeDirectory, takeFileName, takeExte
 import Control.Exception (try, IOException)
 import Paths_thc_edit (getDataFileName)
 import THC.Edit.Browser
-import THC.Edit.Help
+import THC.Edit.Markdown (renderMarkdown)
 import THC.Edit.Git
 import System.Environment (getArgs, lookupEnv)
 import THC.Edit.Frontend
 import THC.Edit.Window (runWindow)
+import THC.Edit.Web (runWeb)
 import System.Exit (die)
 import THC.Edit.Buffer
 import THC.Edit.Model
@@ -34,10 +35,12 @@ import THC.Edit.Render
 import THC.Edit.Files
 import THC.Edit.Reconcile
 
-data Option = Use Backend | Scale String | Size String | Mode String | Demo | CRT | MaterialIcons | WordStar | Snapshot | Html | Scene String | Usage deriving Eq
+data Option = Use Backend | Scale String | Size String | Mode String | ColorMode String | Demo | CRT | MaterialIcons | WordStar | Snapshot | Html | Scene String | Usage deriving Eq
 options :: [OptDescr Option]
-options = [Option [] ["metal"] (NoArg (Use Metal)) "Open a Metal window"
+options = [Option [] ["appearance"] (ReqArg ColorMode "light|dark|system") "Document/terminal colors (default THC_EDIT_APPEARANCE or system)"
+          ,Option [] ["metal"] (NoArg (Use Metal)) "Open a Metal window"
           ,Option [] ["vulkan"] (NoArg (Use Vulkan)) "Open a Vulkan window"
+          ,Option [] ["web"] (NoArg (Use Web)) "Open the local WebGL browser frontend"
           ,Option [] ["window"] (NoArg (Use Auto)) "Open a window using the platform backend"
           ,Option [] ["terminal"] (NoArg (Use Terminal)) "Use the terminal (override THC_EDIT_BACKEND)"
           ,Option [] ["crt"] (NoArg CRT) "Enable CRT scanlines and vignetting (window only)"
@@ -58,11 +61,17 @@ main = do
   args<-getArgs
   backendDefault<-lookupEnv "THC_EDIT_BACKEND"
   scaleDefault<-lookupEnv "THC_EDIT_SCALE"
+  appearanceDefault<-lookupEnv "THC_EDIT_APPEARANCE"
+  terminalColors<-lookupEnv "COLORFGBG"
   let (flags,paths,errors)=getOpt Permute options args
   if not (null errors) then die (concat errors)
   else if Usage `elem` flags then putStr (usageInfo "Usage: thc-edit [OPTIONS] [--] [FILE.hs ...]\n\nTurbo Haskell source editor.\nF2 Save, F3 Open, F10 Menu, Alt+X Exit.\n" options)
   else do
     backend <- either die pure (chooseBackend backendDefault [b | Use b <- flags])
+    colorMode <- case [s | ColorMode s<-flags] of
+      [] -> parseAppearance (maybe "system" id appearanceDefault)
+      [s] -> parseAppearance s
+      _ -> die "Specify --appearance only once."
     screenMode <- case [s | Mode s <- flags] of
       [] -> pure 3
       [s] -> either die pure (parseScreenMode s)
@@ -75,7 +84,7 @@ main = do
       [s] -> either die pure (parseWindowSize s)
       _ -> die "Specify --size only once."
     let initial=if Demo `elem` flags then addDocument Nothing (newBuffer (activeText demoDesktop)) (initialDesktop dimensions) else initialDesktop dimensions
-        configured=(fst (handleEvent (uncurry V.EvResize dimensions) initial)) {wordStar=WordStar `elem` flags,crtFilter=CRT `elem` flags,materialIcons=MaterialIcons `elem` flags,videoMode=if backend == Terminal then Nothing else Just screenMode}
+        configured=(fst (handleEvent (uncurry V.EvResize dimensions) initial)) {appearance=colorMode,systemDark=maybe True (not . (`elem` ["7","15"]) . reverse . takeWhile (/=';') . reverse) terminalColors,wordStar=WordStar `elem` flags,crtFilter=CRT `elem` flags,materialIcons=MaterialIcons `elem` flags,videoMode=if backend == Terminal then Nothing else Just screenMode}
     (_,loaded)<-applyEffects configured (map ReadPath paths)
     cwd<-getCurrentDirectory
     base<-packageDirectory cwd
@@ -89,7 +98,8 @@ main = do
     else withDebugger $ \debugger -> withConversation $ \conversation -> withTooling $ \tooling -> withGitOperations $ \gitOperations -> withReconciliation $ \reconciliation -> do
       let effects=gitOperationEffects gitOperations (debuggerEffects debugger (conversationEffects conversation (reconciliationEffects reconciliation (toolingEffects tooling applyEffects))))
           tick d=tickGitOperations gitOperations applyEffects d >>= tickTooling tooling applyEffects >>= tickReconciliation reconciliation >>= tickConversation conversation >>= tickDebugger debugger (toolingEffects tooling applyEffects)
-      if backend /= Terminal then runWindow backend scale effects tick staged
+      if backend == Web then runWeb scale effects tick staged
+      else if backend /= Terminal then runWindow backend scale effects tick staged
       else bracket (mkVty V.defaultConfig) (\vty -> V.shutdown vty >> cursorStyle Nothing) $ \vty -> do
         when (V.supportsMode (V.outputIface vty) V.Mouse) (V.setMode (V.outputIface vty) V.Mouse True)
         when (V.supportsMode (V.outputIface vty) V.BracketedPaste) (V.setMode (V.outputIface vty) V.BracketedPaste True)
@@ -97,6 +107,7 @@ main = do
         cursorStyle (Just (blinkCursor staged))
         loop effects tick vty (fst (handleEvent (uncurry V.EvResize size) staged))
   where
+    parseAppearance s = maybe (die "Appearance must be light, dark, or system.") pure (lookup s [("light",LightMode),("dark",DarkMode),("system",SystemMode)])
     isMode Mode{} = True
     isMode _ = False
 
@@ -144,6 +155,9 @@ applyEffects = foldM apply . (False,)
     apply (_,d) ResolveConflict{}=pure (False,d {status="Disk change monitoring is unavailable in this preview."})
     apply (_,d) DebugAction{}=pure (False,d {status="Debugger unavailable in this preview."})
     apply (_,d) AgentAction{}=pure (False,d {status="Agents are unavailable in this preview."})
+    apply (_,d) DownloadDocument{}=pure (False,d)
+    apply (_,d) ReadBrowserClipboard=pure (False,d)
+    apply (_,d) WriteBrowserClipboard{}=pure (False,d)
     apply (_,d) Exit=pure (True,d)
     apply (_,d) SetScreenMode{}=pure (False,d {status="Screen modes are available in a graphical window."})
     apply (_,d) (ReadPath path)=do
@@ -198,7 +212,7 @@ applyEffects = foldM apply . (False,)
     apply (_,d) ReadHelp=do
       path<-getDataFileName "README.md"
       result<-try (TIO.readFile path) :: IO (Either IOException T.Text)
-      pure (False,case result of Left err -> message "Cannot open Help" (wrapMessage (T.pack (show err))) d; Right text -> addHelp (layoutMarkdown (max 20 (min 76 (fst (screenSize d)-treeWidthOf d-4))) text) d)
+      pure (False,case result of Left err -> message "Cannot open Help" (wrapMessage (T.pack (show err))) d; Right text -> addHelpStyled (renderMarkdown (max 20 (min 76 (fst (screenSize d)-treeWidthOf d-4))) text) d)
     apply (_,d) (RefreshGit path)=do
       repo<-repositoryStatus path
       pure (False,d {branchStatus=maybe "" (\r -> repoBranch r <> if repoDirty r then "*" else "") repo,branchAdded=maybe 0 repoAdded repo,branchDeleted=maybe 0 repoDeleted repo,branchRoot=fmap repoRoot repo,gitReview=case gitReview d of Just review | fmap repoRoot repo == Just (reviewRoot review) -> Just review; _ -> Nothing})

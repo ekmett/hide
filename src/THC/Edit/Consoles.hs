@@ -36,6 +36,7 @@ startConsole (Consoles state) config limit desktop = mask_ $ do
   case started of
     Left message -> pure (Left message)
     Right terminal -> (do
+      _ <- setTerminalAppearance terminal (darkAppearance desktop)
       polled <- pollTerminal terminal
       case polled of
         Left message -> closeTerminal terminal >> pure (Left message)
@@ -50,7 +51,11 @@ startConsole (Consoles state) config limit desktop = mask_ $ do
 
 tickConsoles :: Consoles -> Desktop -> IO Desktop
 tickConsoles (Consoles state) desktop = modifyMVar state $ \(counter,consoles) -> do
-  updated <- mapM (\console -> resizeFor desktop console >>= refresh) consoles
+  updated <- mapM (\console -> do
+    result<-setTerminalAppearance (consoleTerminal console) (darkAppearance desktop)
+    case result of
+      Left message -> pure console {consoleError=Just message}
+      Right () -> resizeFor desktop console >>= refresh) consoles
   let shown = foldr showConsole desktop updated
       errors = [message | (ident,console) <- M.toList updated, Just message <- [consoleError console]
                         , maybe True ((== Nothing) . consoleError) (M.lookup ident consoles)]

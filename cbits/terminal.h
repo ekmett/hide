@@ -11,6 +11,7 @@ int thc_terminal_spawn(thc_terminal *, const char *executable, char *const argv[
                        char *const env[], const char *directory);
 int thc_terminal_write(thc_terminal *, const uint8_t *, size_t);
 int thc_terminal_resize(thc_terminal *, int columns, int rows);
+int thc_terminal_appearance(thc_terminal *, int dark);
 int thc_terminal_poll(thc_terminal *);
 /* Parser-only entry point also supports deterministic native tests. */
 void thc_terminal_feed(thc_terminal *, const uint8_t *, size_t);

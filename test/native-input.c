@@ -378,6 +378,10 @@ int main(void) {
     check(SDLK_Q, SDL_KMOD_MODE, "@", 2);
     check(SDLK_Q, SDL_KMOD_RALT | SDL_KMOD_CTRL, "@", 2);
 #endif
+    SDL_Event dropped; SDL_zero(dropped); dropped.type=SDL_EVENT_DROP_FILE;
+    dropped.drop.data="/tmp/a file.hs"; assert(SDL_PushEvent(&dropped));
+    int32_t drop_event[6]; assert(thc_wait(drop_event) && drop_event[0]==14);
+    assert(strcmp(thc_text(),"/tmp/a file.hs")==0);
     SDL_Quit();
     check_diffusion();
     assert(SDL_SetHint(SDL_HINT_VIDEO_DRIVER,"dummy"));

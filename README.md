@@ -31,6 +31,70 @@ To install the executable on your path:
 cabal install exe:thc-edit --installdir="$HOME/.local/bin"
 ```
 
+## Browser mode
+
+```sh
+cabal run -fweb thc-edit -- --web --crt --scale 1.5 .
+```
+
+The optional browser frontend requires no SDL installation. `THC_EDIT_BACKEND=web`
+selects it by default. It opens a local WebGL page on an ephemeral loopback port;
+`THC_EDIT_WEB_OPEN=0` prints the URL without opening it. Keep the editor process
+running: reloading/reconnecting preserves buffers in that process.
+
+The browser uses the bundled bitmap font, Material folder tiles, DOS cell cursor,
+Retina canvas and CRT shader. Mode 3/259 and scale options also work here. Native
+Unicode fallback uses browser canvas shaping; its pixelated mode does not yet use
+the native frontend's error-diffusion filter.
+
+Frames use UTF-8 color runs, with explicit cell widths for complex graphemes.
+For each changed display the server compresses both a full screen and changed
+rows, sends the smaller result, and prefixes one byte: 0 for a reset/full frame,
+1 for a full frame using the previous screen, or 2 for changed rows. Both
+candidates use the last reconstructed screen's final 32 KiB as their dictionary;
+unchanged metadata is omitted. Switching formats does not lose screen history.
+The browser seeds its built-in raw DEFLATE decoder locally with that dictionary;
+no second WebSocket compression layer or downloaded decoder is needed.
+
+File > Download exports the current buffer, including unsaved edits and binary
+bytes. It does not mark a local file saved. Dropping browser files opens separate
+editable buffers (up to 16 MiB each); their names are suggestions, never server
+paths. In Metal/Vulkan, dropping a file opens its actual filesystem path.
+
+Copy, Cut and Paste use the browser clipboard. If clipboard permission requires
+a fresh gesture, a toolbar button lets you retry; ordinary browser clipboard
+shortcuts also work. Ctrl/Cmd+A selects all; Ctrl/Cmd+Z undoes; Ctrl/Cmd+Shift+Z or
+Ctrl/Cmd+Y redoes. Browser `beforeinput` history commands are handled where emitted,
+but some browsers disable native Undo/Redo menus for a canvas-backed editor.
+Ctrl/Cmd+F opens editor Find; Ctrl/Cmd+G and Shift+Ctrl/Cmd+G find next/previous.
+Browser-native Find menu items cannot be redirected through a standard web API.
+
+Click **Fullscreen / capture keys** to request fullscreen and Keyboard Lock where
+available. OS/browser-reserved shortcuts may still be intercepted. Leaving a page
+with modified buffers or an unsent query uses the browser's native confirmation;
+choose Stay to save in the editor. File > Exit uses the editor's save dialogs and
+attempts to close the tab; browsers may refuse to close tabs opened manually.
+
+## Markdown
+
+Markdown source headings have distinct colors while retaining their `#` markers.
+Help uses the CommonMark renderer shared with conversations: colored headings,
+bulleted/numbered/nested lists, hanging indents, padded code panels with language
+highlighting, and GitHub-style pipe tables. Tables wrap to the available width
+and use stacked labeled cells when the window is too narrow for columns.
+
+Options > Preferences > Appearance selects **Light**, **Dark**, or **System**.
+Dark Help stays blue with bright text and black code panels. Light Help uses
+cyan, blue code panels, and black-on-gray shell blocks. Embedded terminals use
+white-on-black in Dark mode and black-on-gray in Light mode; explicitly colored
+terminal output and application color overrides are preserved.
+
+Use `--appearance light|dark|system` or `THC_EDIT_APPEARANCE`; System is the default.
+Metal/Vulkan follow SDL's OS appearance and the browser follows
+`prefers-color-scheme`, including changes while running. Text terminals use
+`COLORFGBG` at startup, falling back to Dark when unavailable. Classic menu,
+window-frame, and editor colors stay unchanged.
+
 ## Window mode
 
 Build with SDL3 installed (`brew install sdl3` on macOS), then run:

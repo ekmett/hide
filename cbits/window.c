@@ -383,6 +383,10 @@ int thc_wait(int32_t *out) {
             suppress_option_text = false;
             if (modifier_key(e.key.key)) { out[0] = 13; out[1] = modifiers(e.key.mod); return 1; }
             break;
+        case SDL_EVENT_DROP_FILE:
+            SDL_free(input_text); input_text = SDL_strdup(e.drop.data);
+            if (!input_text) return 0;
+            out[0] = 14; return 1;
         case SDL_EVENT_TEXT_INPUT:
             if (suppress_option_text) { suppress_option_text = false; break; }
             cursor_epoch = SDL_GetTicks();
@@ -415,3 +419,5 @@ int thc_wait(int32_t *out) {
         }
     }
 }
+
+int thc_system_dark(void) { return SDL_GetSystemTheme() != SDL_SYSTEM_THEME_LIGHT; }

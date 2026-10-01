@@ -3,11 +3,16 @@ name: thc-edit
 version: 0.1.0.0
 synopsis: Turbo Haskell's terminal editor
 build-type: Simple
-data-files: README.md, assets/fonts/*.hex, assets/fonts/*.txt, assets/fonts/README.md
-extra-source-files: assets/icons/*.svg, tools/convert-material-icons.py, cbits/window.h, cbits/unicode.h, tools/convert-font.py, tools/check-native.sh, test/native-input.c, cbits/terminal.h, test/native-terminal.c, test/HighlightBench.hs, test/HLSLive.hs, test/EditorLive.hs, test/dap-session.py
+data-files: assets/web/*.html, assets/web/*.js, README.md, assets/fonts/*.hex, assets/fonts/*.txt, assets/fonts/README.md
+extra-source-files: tools/web-wire-trial.hs, test/web-wire.mjs, tools/web-bandwidth.hs, tools/web-bandwidth.py, assets/icons/*.svg, tools/convert-material-icons.py, cbits/window.h, cbits/unicode.h, tools/convert-font.py, tools/check-native.sh, test/native-input.c, cbits/terminal.h, test/native-terminal.c, test/HighlightBench.hs, test/HLSLive.hs, test/EditorLive.hs, test/dap-session.py
 
 flag window
   description: Build the optional SDL3 Metal/Vulkan frontend
+  default: False
+  manual: True
+
+flag web
+  description: Build the optional local browser/WebGL frontend
   default: False
   manual: True
 
@@ -23,14 +28,19 @@ common settings
 
 library
   import: settings
-  build-depends: blaze-builder, network, async, stm, skylighting >=0.15 && <0.16, aeson, vector, fingertree >=0.1.5 && <0.2, commonmark >=0.3 && <0.4
+  build-depends: blaze-builder, network, async, stm, skylighting >=0.15 && <0.16, aeson, vector, fingertree >=0.1.5 && <0.2, commonmark >=0.3 && <0.4, commonmark-extensions >=0.2 && <0.3
   c-sources: cbits/unicode.c
   include-dirs: cbits
   pkgconfig-depends: libutf8proc >=2.10
   hs-source-dirs: src
   other-modules: Paths_thc_edit
   autogen-modules: Paths_thc_edit
-  exposed-modules: THC.Edit.Unicode, THC.Edit.Buffer, THC.Edit.Syntax, THC.Edit.Model, THC.Edit.Render, THC.Edit.Files, THC.Edit.App, THC.Edit.Frontend, THC.Edit.Window, THC.Edit.Browser, THC.Edit.Help, THC.Edit.Git, THC.Edit.GitOperations, THC.Edit.LSP, THC.Edit.Tooling, THC.Edit.External, THC.Edit.Reconcile, THC.Edit.ACP, THC.Edit.AgentFiles, THC.Edit.Conversation, THC.Edit.Markdown, THC.Edit.Terminal, THC.Edit.Consoles, THC.Edit.DAP, THC.Edit.Debugger, THC.Edit.Hex
+  exposed-modules: THC.Edit.Web, THC.Edit.Unicode, THC.Edit.Buffer, THC.Edit.Syntax, THC.Edit.Model, THC.Edit.Render, THC.Edit.Files, THC.Edit.App, THC.Edit.Frontend, THC.Edit.Window, THC.Edit.Browser, THC.Edit.Help, THC.Edit.Git, THC.Edit.GitOperations, THC.Edit.LSP, THC.Edit.Tooling, THC.Edit.External, THC.Edit.Reconcile, THC.Edit.ACP, THC.Edit.AgentFiles, THC.Edit.Conversation, THC.Edit.Markdown, THC.Edit.Terminal, THC.Edit.Consoles, THC.Edit.DAP, THC.Edit.Debugger, THC.Edit.Hex
+  if flag(web)
+    cpp-options: -DWITH_WEB
+    build-depends: wai, warp, wai-websockets, websockets >=0.13, http-types, zlib
+  if flag(window) || flag(web)
+    exposed-modules: THC.Edit.Font
   if flag(terminal)
     cpp-options: -DWITH_TERMINAL
     c-sources: cbits/terminal.c
@@ -41,7 +51,6 @@ library
   if flag(window)
     cpp-options: -DWITH_WINDOW
     cc-options: -DWITH_WINDOW
-    exposed-modules: THC.Edit.Font
     c-sources: cbits/window.c
     include-dirs: cbits
     pkgconfig-depends: sdl3 >=3.2
@@ -62,6 +71,10 @@ executable thc-edit
 
 test-suite editor-tests
   import: settings
+  if flag(web)
+    cpp-options: -DWITH_WEB
+    other-modules: WebCheck
+    build-depends: zlib
   ghc-options: -threaded
   other-modules: UnicodeCheck, HexCheck, DAPCheck, DebuggerCheck, RunCheck, ConversationCheck, AgentFilesCheck, TerminalCheck, ConsolesCheck, FilesCheck, WindowCheck, BrowserCheck, HelpCheck, GitCheck, GitOperationsCheck, LSPCheck, ToolingCheck, DialogMouseCheck, BufferTreeCheck, ExternalCheck, ReconcileCheck, ACPCheck, MarkdownCheck
   if flag(window)

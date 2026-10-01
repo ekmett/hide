@@ -2,7 +2,7 @@
 module THC.Edit.Terminal
   ( Terminal, TerminalConfig(..), TerminalCell(..), TerminalSnapshot(..)
   , terminalAvailable, startTerminal, withTerminal, writeTerminal, resizeTerminal
-  , pollTerminal, killTerminal, closeTerminal
+  , setTerminalAppearance, pollTerminal, killTerminal, closeTerminal
   ) where
 
 import Control.Exception (bracket)
@@ -60,6 +60,7 @@ withTerminal config action = bracket (startTerminal config) release use
 data NativeTerminal
 data Terminal = Terminal (MVar (Maybe (Ptr NativeTerminal)))
 
+foreign import ccall unsafe "thc_terminal_appearance" c_appearance :: Ptr NativeTerminal -> CInt -> IO CInt
 foreign import ccall unsafe "thc_terminal_new" c_new :: CInt -> CInt -> IO (Ptr NativeTerminal)
 foreign import ccall safe "thc_terminal_spawn" c_spawn :: Ptr NativeTerminal -> CString -> Ptr CString -> Ptr CString -> CString -> IO CInt
 foreign import ccall unsafe "thc_terminal_write" c_write :: Ptr NativeTerminal -> Ptr Word8 -> CSize -> IO CInt
@@ -72,6 +73,11 @@ foreign import ccall unsafe "thc_terminal_info" c_info :: Ptr NativeTerminal -> 
 foreign import ccall unsafe "thc_terminal_error" c_error :: Ptr NativeTerminal -> IO CString
 foreign import ccall safe "thc_terminal_kill" c_kill :: Ptr NativeTerminal -> IO ()
 foreign import ccall safe "thc_terminal_free" c_free :: Ptr NativeTerminal -> IO ()
+
+setTerminalAppearance :: Terminal -> Bool -> IO (Either Text ())
+setTerminalAppearance terminal dark = withOpen terminal $ \ptr -> do
+  ok<-c_appearance ptr (if dark then 1 else 0)
+  if ok==0 then Left <$> nativeError ptr else pure (Right ())
 
 terminalAvailable :: Bool
 terminalAvailable = True
@@ -175,6 +181,9 @@ closeTerminal (Terminal state) = modifyMVar_ state $ \current -> do
   maybe (pure ()) c_free current
   pure Nothing
 #else
+setTerminalAppearance :: Terminal -> Bool -> IO (Either Text ())
+setTerminalAppearance _ _ = pure (Right ())
+
 data Terminal
 
 terminalAvailable :: Bool

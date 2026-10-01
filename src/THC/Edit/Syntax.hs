@@ -8,7 +8,7 @@ import qualified Data.Text as T
 import qualified Skylighting as S
 import System.FilePath (takeFileName)
 
-data Style = Plain | Keyword | Comment | Literal | Number | Constructor | Pragma | BubbleStyle Bool Style | BubbleText Int Bool Style | TerminalStyle Word32 Word32 Word32 deriving (Eq,Show)
+data Style = Plain | Heading Int | CodeStyle Bool Style | ProseStyle Style | Keyword | Comment | Literal | Number | Constructor | Pragma | BubbleStyle Bool Style | BubbleText Int Bool Style | TerminalStyle Word32 Word32 Word32 deriving (Eq,Show)
 
 highlight :: T.Text -> [(Char,Style)]
 highlight = highlightFor "Main.hs"
@@ -27,7 +27,8 @@ highlightFor path source = case S.syntaxesByFilename S.defaultSyntaxMap (takeFil
   [] -> plain
   where
     plain = map (,Plain) (T.unpack source)
-    paint (token,text) = map (,style token) (T.unpack text)
+    paint (token,text) = map (,if markdown && token==S.FunctionTok then Heading (max 1 (min 6 (T.length (T.takeWhile (=='#') (T.stripStart text))))) else style token) (T.unpack text)
+    markdown = any ((=="Markdown") . S.sName) (S.syntaxesByFilename S.defaultSyntaxMap (takeFileName path))
     style token = case token of
       S.KeywordTok -> Keyword; S.ControlFlowTok -> Keyword; S.ImportTok -> Keyword
       S.CommentTok -> Comment; S.DocumentationTok -> Comment; S.AnnotationTok -> Comment; S.CommentVarTok -> Comment

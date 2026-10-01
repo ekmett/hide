@@ -49,8 +49,8 @@ int thc_unicode_bitmap(const char *utf8, int w, int h, uint32_t fg, uint32_t *pi
 }
 #endif
 #else
-#include <pango/pango.h>
 #ifdef WITH_WINDOW
+#include <pango/pango.h>
 #include <pango/pangocairo.h>
 #endif
 #ifdef WITH_WINDOW

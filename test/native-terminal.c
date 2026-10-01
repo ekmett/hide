@@ -23,6 +23,13 @@ int main(void) {
     text_at(t, 0, "A"); text_at(t, 1, "\xc3\xa9"); text_at(t, 2, "\xe7\x95\x8c");
     assert(cells[2] == 0x0c2238 && cells[3] == 0x412b15 && (cells[4] & 1));
     assert(cells[2*6+5] == 2 && cells[3*6+5] == 0);
+    assert(thc_terminal_appearance(t, 0));
+    feed(t, ""); cells = thc_terminal_cells(t);
+    assert(cells[6+2] == 0 && cells[6+3] == 0xaaaaaa);
+    assert(cells[2] == 0x0c2238 && cells[3] == 0x412b15);
+    assert(thc_terminal_appearance(t, 1));
+    feed(t, ""); cells = thc_terminal_cells(t);
+    assert(cells[6+2] == 0xffffff && cells[6+3] == 0);
     int info[6]; thc_terminal_info(t, info);
     assert(info[2] == 4 && info[3] == 0);
     feed(t, "\033[2;3HZ\033[?25l");

@@ -99,7 +99,7 @@ checks = bracket temporary removePathForcibly $ \root ->
     check "outgoing bubble is black on VGA cyan"
       (('h',BubbleText 0 True Plain) `elem` renderReply False 30 True "hello")
     check "agent prose and code retain their styles inside bubbles"
-      (('h',BubbleText 0 False Plain) `elem` renderReply False 30 False "hello" && ('4',BubbleText 0 False Number) `elem` renderReply False 30 False "```haskell\nx = 42\n```")
+      (('h',BubbleText 0 False Plain) `elem` renderReply False 30 False "hello" && ('4',BubbleText 0 False (CodeStyle False Number)) `elem` renderReply False 30 False "```haskell\nx = 42\n```")
     forM_ [1,2,5,6,8,30,80] $ \width -> forM_ [False,True] $ \outgoing -> do
       let rendered=reply width outgoing "Wide 界 words é and more words"
       check "bubbles wrap within the window width"

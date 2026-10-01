@@ -31,6 +31,7 @@ struct thc_terminal {
     uint8_t output[OUTPUT_LIMIT];
     size_t output_length;
     int cursor_x, cursor_y;
+    int appearance;
     char error[256];
 };
 
@@ -45,6 +46,16 @@ static int vt_check(thc_terminal *t, GhosttyResult result) {
     if (result == GHOSTTY_SUCCESS) return 1;
     snprintf(t->error, sizeof(t->error), "libghostty-vt error %d", (int)result);
     return 0;
+}
+int thc_terminal_appearance(thc_terminal *t, int dark) {
+    int appearance = dark ? 2 : 1;
+    if (t->appearance == appearance) return 1;
+    GhosttyColorRgb fg = dark ? (GhosttyColorRgb){255,255,255} : (GhosttyColorRgb){0,0,0};
+    GhosttyColorRgb bg = dark ? (GhosttyColorRgb){0,0,0} : (GhosttyColorRgb){170,170,170};
+    if (!vt_check(t, ghostty_terminal_set(t->terminal, GHOSTTY_TERMINAL_OPT_COLOR_FOREGROUND, &fg)) ||
+        !vt_check(t, ghostty_terminal_set(t->terminal, GHOSTTY_TERMINAL_OPT_COLOR_BACKGROUND, &bg))) return 0;
+    t->appearance = appearance;
+    return 1;
 }
 static int flush_input(thc_terminal *t) {
     while (t->master >= 0 && t->input_length) {

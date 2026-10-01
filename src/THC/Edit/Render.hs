@@ -125,7 +125,7 @@ windowLayers d active w =
     Rect x y ww hh=bounds w
     doc=fromMaybe (newDocument (newBuffer "") Nothing) (M.lookup (bufferId w) (buffers d))
     b=documentBuffer doc; t=contents b
-    file=maybe ("NONAME"<>T.pack (show (bufferId w))<>".HS") (T.pack . takeFileName . filePath) (documentFile doc)
+    file=maybe (maybe ("NONAME"<>T.pack (show (bufferId w))<>".HS") T.pack (documentSuggestedName doc)) (T.pack . takeFileName . filePath) (documentFile doc)
     title=" "<>(if documentLabel doc==Just "Conversation" then conversationTitle d else fromMaybe file (documentLabel doc))<>(if dirty b then " * " else " ")
     (titleColumn,shownTitle)
       | byteMode b = let start=max 6 (1+hexColumn 0-scrollColumn w)
@@ -136,8 +136,11 @@ windowLayers d active w =
                     in (max 6 ((ww-displayColumn clipped (T.length clipped)) `div` 2),clipped)
     number=T.pack (show (windowNumber w))
     moving=case drag d of Just (Moving wid _ _) -> wid==windowId w; Just (Resizing wid _ _) -> wid==windowId w; _ -> False
-    frame=attr (if moving then cyan else if active then white else gray) blue
-    styledLines=splitStyled (if documentLabel doc /= Nothing && documentLabel doc /= Just "Conversation" && not (maybe False (T.isPrefixOf "Terminal ") (documentLabel doc)) then [(ch,Plain) | ch<-T.unpack t] else documentHighlight doc)
+    helpWindow=documentLabel doc==Just "Turbo Haskell Help"
+    background=if helpWindow && not (darkAppearance d) then scrollCyan else blue
+    base=if helpWindow then attr (if darkAppearance d then white else black) background else edit
+    frame=attr (if moving then cyan else if active then white else gray) background
+    styledLines=splitStyled (if documentLabel doc /= Nothing && documentLabel doc /= Just "Conversation" && documentLabel doc /= Just "Turbo Haskell Help" && not (maybe False (T.isPrefixOf "Terminal ") (documentLabel doc)) then [(ch,Plain) | ch<-T.unpack t] else documentHighlight doc)
     scrollbarImage vertical =
       let Rect sx sy bw bh=scrollbarRect d vertical doc w
           len=if vertical then bh else bw
@@ -162,7 +165,7 @@ windowLayers d active w =
             let shape=if height rect==1 then if leftSide then 4 else 5
                       else (if n==0 then 0 else 2)+(if leftSide then 0 else 1)]
         inputImage=V.vertCat [V.cropRight (width rect) (V.translateX (negate sc)
-          (styledImage (const True) Nothing (active && composerFocused d) (composerSelection d) (bufferLineOffset draft n) [(c,BubbleStyle True Plain) | c<-T.unpack (bufferLineAt draft n)]) V.<|> V.charFill (attr black scrollCyan) ' ' (width rect) 1)
+          (styledImage (darkAppearance d) (const True) Nothing (active && composerFocused d) (composerSelection d) (bufferLineOffset draft n) [(c,BubbleStyle True Plain) | c<-T.unpack (bufferLineAt draft n)]) V.<|> V.charFill (attr black scrollCyan) ' ' (width rect) 1)
           | n<-[sr..sr+height rect-1]]
     hexDividerLayers =
       [place (x+1+column) y (V.vertCat [V.char frame (if active && not moving then '╤' else '┬'),
@@ -172,18 +175,19 @@ windowLayers d active w =
     documentImage=V.vertCat [renderLine n | n<-[scrollRow w..scrollRow w+contentHeight-1]]
     selectable style | documentLabel doc==Just "Conversation" = case style of BubbleText{} -> True; _ -> False
                      | otherwise = True
-    renderLine n | byteMode b && n>=documentRows doc w = V.charFill edit ' ' contentWidth 1
+    renderLine n | byteMode b && n>=documentRows doc w = V.charFill base ' ' contentWidth 1
     renderLine n | byteMode b = V.cropRight contentWidth (V.translateX (negate (scrollColumn w)) (V.horizCat
-      [V.char (if active && maybe False highlighted offset then selected else if maybe False (\i -> let byte=T.index bytes (i-n*count) in byte<' ' || byte>'~') offset then attr gray blue else edit) ch | (ch,offset)<-hexRow count n t]) V.<|> V.charFill edit ' ' contentWidth 1)
+      [V.char (if active && maybe False highlighted offset then selected else if maybe False (\i -> let byte=T.index bytes (i-n*count) in byte<' ' || byte>'~') offset then attr gray blue else edit) ch | (ch,offset)<-hexRow count n t]) V.<|> V.charFill base ' ' contentWidth 1)
       where
         count=windowHexBytes w
         bytes=T.take count (T.drop (n*count) t)
         highlighted offset = offset==caret (selection w) || let (a,z)=ordered (selection w) in offset>=a && offset<z
-    renderLine n=V.cropRight contentWidth (V.translateX (negate (scrollColumn w)) (styledImage selectable (lineColor n) active (selection w) (bufferLineOffset b n) (fromMaybe [] (atMay styledLines n))) V.<|> V.charFill edit ' ' contentWidth 1)
+    renderLine n=V.cropRight contentWidth (V.translateX (negate (scrollColumn w)) (styledImage (darkAppearance d) selectable (lineColor n) active (selection w) (bufferLineOffset b n) (fromMaybe [] (atMay styledLines n))) V.<|> V.charFill base ' ' contentWidth 1)
 
     lineColor n = case documentLabel doc of
       Just "Git diff" -> let line=bufferLineAt b n in Just (attr (if "+" `T.isPrefixOf` line then V.RGBColor 85 255 85 else if "-" `T.isPrefixOf` line then V.RGBColor 255 85 85 else if "@@" `T.isPrefixOf` line then cyan else yellow) blue)
       Just "Conversation" -> Nothing
+      Just "Turbo Haskell Help" -> Nothing
       Just name | "Terminal " `T.isPrefixOf` name -> Nothing
       Just _ -> Just (attr yellow blue)
       Nothing -> Nothing
@@ -195,8 +199,8 @@ splitStyled :: [(Char,Style)] -> [[(Char,Style)]]
 splitStyled []=[[]]
 splitStyled xs=let (a,b)=break ((=='\n').fst) xs in a:case b of []->[]; _:rest->splitStyled rest
 
-styledImage :: (Style -> Bool) -> Maybe V.Attr -> Bool -> Selection -> Int -> [(Char,Style)] -> V.Image
-styledImage selectable override active sel start chars = V.horizCat (expand 0 start (graphemes (T.pack (map fst chars))) chars)
+styledImage :: Bool -> (Style -> Bool) -> Maybe V.Attr -> Bool -> Selection -> Int -> [(Char,Style)] -> V.Image
+styledImage dark selectable override active sel start chars = V.horizCat (expand 0 start (graphemes (T.pack (map fst chars))) chars)
   where
     (lo,hi)=ordered sel
     expand _ _ [] _=[]
@@ -209,16 +213,26 @@ styledImage selectable override active sel start chars = V.horizCat (expand 0 st
              | otherwise=T.map (\c -> if c<' ' || c=='\DEL' then '·' else c) g
         width=sum (map clusterWidth (graphemes text))
         image=label a text
+    syntaxAttr (ProseStyle (CodeStyle shell style))=syntaxAttr (CodeStyle shell style)
+    syntaxAttr (ProseStyle style) | dark = V.withForeColor (syntaxAttr style) (case style of Plain->white; _->foreground style)
+    syntaxAttr (ProseStyle style)=attr (case style of Heading 1->white; Heading 2->blue; Heading _->V.RGBColor 170 0 170; Keyword->blue; Literal->V.RGBColor 0 85 0; Comment->V.RGBColor 85 85 85; _->black) scrollCyan
+    syntaxAttr (CodeStyle shell style)
+      | dark = attr (foreground style) black
+      | shell = attr (lightForeground style) gray
+      | otherwise = attr (foreground style) blue
+    syntaxAttr (BubbleStyle _ (CodeStyle shell style))=syntaxAttr (CodeStyle shell style)
     syntaxAttr (BubbleText _ outgoing style)=syntaxAttr (BubbleStyle outgoing style)
-    syntaxAttr (BubbleStyle outgoing style)=attr foreground (if outgoing then scrollCyan else gray)
-      where foreground | outgoing = black
+    syntaxAttr (BubbleStyle outgoing style)=attr bubbleForeground (if outgoing then scrollCyan else gray)
+      where bubbleForeground | outgoing = black
                        | otherwise = case style of
-                           Keyword -> blue; Comment -> V.RGBColor 85 85 85
+                           Heading 1 -> blue; Heading _ -> V.RGBColor 170 0 170; Keyword -> blue; Comment -> V.RGBColor 85 85 85
                            Literal -> V.RGBColor 0 85 0; Number -> V.RGBColor 170 0 170
                            Constructor -> blue; Pragma -> V.RGBColor 85 85 85; _ -> black
     syntaxAttr (TerminalStyle fg bg flags)=foldl V.withStyle (attr (rgb fg) (rgb bg)) [style | (bit,style)<-[(1,V.bold),(2,V.italic),(4,V.underline),(8,V.strikethrough),(16,V.dim)], flags .&. bit /= 0]
       where rgb value=V.RGBColor (fromIntegral (value `shiftR` 16 .&. 255)) (fromIntegral (value `shiftR` 8 .&. 255)) (fromIntegral (value .&. 255))
-    syntaxAttr style=attr (case style of Plain->yellow; Keyword->white; Comment->cyan; Literal->V.RGBColor 85 255 85; Number->V.RGBColor 255 85 255; Constructor->yellow; Pragma->gray) blue
+    syntaxAttr style=attr (foreground style) blue
+    foreground style=case style of Heading 1->white; Heading 2->cyan; Heading _->V.RGBColor 85 255 85; Plain->yellow; Keyword->white; Comment->cyan; Literal->V.RGBColor 85 255 85; Number->V.RGBColor 255 85 255; Constructor->yellow; _->gray
+    lightForeground style=case style of Keyword->blue; Comment->V.RGBColor 85 85 85; Literal->V.RGBColor 0 85 0; Number->V.RGBColor 170 0 170; _->black
 
 treeLayers :: Desktop -> Sidebar -> [V.Image]
 treeLayers d tree =
@@ -255,7 +269,7 @@ menuLayers :: Desktop -> (Int,Int) -> [V.Image]
 menuLayers d (i,j) = [place x y contents']
   where
     Rect x y w _=menuRect d i
-    items=menuItems i
+    items=menuItemsFor d i
     contents'=V.vertCat [border '┌' '┐',V.vertCat (zipWith item [0..] items),border '└' '┘']
     border a b=V.char paper a V.<|> V.charFill paper '─' (max 0 (w-2)) 1 V.<|> V.char paper b
     item n entry@(MenuItem title _ cmd) = V.char paper '│' V.<|> V.cropRight (w-2) content V.<|> V.char paper '│'

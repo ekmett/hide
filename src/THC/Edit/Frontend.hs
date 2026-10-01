@@ -5,7 +5,7 @@ import Text.Read (readMaybe)
 import Data.List (nub)
 import qualified Graphics.Vty as V
 
-data Backend = Terminal | Auto | Metal | Vulkan deriving (Eq,Show)
+data Backend = Terminal | Auto | Metal | Vulkan | Web deriving (Eq,Show)
 
 -- Borland TextMode constants: C80 (3), C80 + Font8x8 (259).
 parseScreenMode :: String -> Either String Int
@@ -29,8 +29,9 @@ chooseBackend env explicit = case nub explicit of
     Just "auto" -> Right Auto
     Just "metal" -> Right Metal
     Just "vulkan" -> Right Vulkan
-    Just _ -> Left "THC_EDIT_BACKEND must be terminal, auto, metal or vulkan."
-  _ -> Left "Choose only one of --terminal, --window, --metal or --vulkan."
+    Just "web" -> Right Web
+    Just _ -> Left "THC_EDIT_BACKEND must be terminal, auto, metal, vulkan or web."
+  _ -> Left "Choose only one of --terminal, --window, --metal, --vulkan or --web."
 
 -- Stable, small ABI shared with cbits/window.c; no SDL structure layout in Haskell.
 decodeKey :: Int -> Int -> Maybe V.Event

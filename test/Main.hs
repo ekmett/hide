@@ -1,5 +1,8 @@
 {-# LANGUAGE CPP, OverloadedStrings #-}
 module Main where
+#ifdef WITH_WEB
+import qualified WebCheck
+#endif
 #ifdef WITH_WINDOW
 import qualified FontCheck
 #endif
@@ -43,6 +46,9 @@ check name ok = unless ok (error name)
 
 main :: IO ()
 main = do
+#ifdef WITH_WEB
+  WebCheck.checks
+#endif
   HexCheck.checks
   DAPCheck.checks
   DebuggerCheck.checks

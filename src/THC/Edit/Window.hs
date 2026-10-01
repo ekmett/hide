@@ -22,6 +22,7 @@ import THC.Edit.Unicode (graphemes, clusterWidth)
 import THC.Edit.Font
 import THC.Edit.Render
 
+foreign import ccall unsafe "thc_system_dark" c_system_dark :: IO CInt
 foreign import ccall unsafe "thc_open" c_open :: CString -> CDouble -> CInt -> CInt -> CInt -> IO CInt
 foreign import ccall unsafe "thc_mode" c_mode :: CInt -> CInt -> CInt -> IO CInt
 foreign import ccall unsafe "thc_scale" c_scale :: CInt -> IO CInt
@@ -143,8 +144,9 @@ runWindow backend scale effects tick initial = do
       h <- fromIntegral <$> peek hp
       pure ((fst (handleEvent (V.EvResize w h) initial {nativeMac=os == "darwin"})) {menu=menu initial})
     captureOnly <- (== Just "1") <$> lookupEnv "THC_EDIT_CAPTURE_EXIT"
-    if captureOnly then draw font sized else tick sized >>= loop font Nothing
+    if captureOnly then systemTheme sized >>= draw font else systemTheme sized >>= tick >>= loop font Nothing
   where
+    systemTheme d = do value<-c_system_dark; pure d {systemDark=value/=0}
     loop font previous d = do
       when (previous /= Just d) $ do
         updateMenus d
@@ -154,7 +156,7 @@ runWindow backend scale effects tick initial = do
       (exit,updated) <- foldM windowEffect (False,next) requests
       when (clipboard updated /= clipboard d) (utf8 (clipboard updated) c_set_clipboard)
       let displayed = case event of kind:_ | kind `elem` [3,4,5,7,8,9,12] -> Nothing; _ -> Just d
-      unless exit (tick updated >>= loop font displayed)
+      unless exit (systemTheme updated >>= tick >>= loop font displayed)
     windowEffect state@(True,_) _ = pure state
     windowEffect (_,d) request = applyWindowEffect d request
     applyWindowEffect d (SetScreenMode mode) = do
@@ -175,6 +177,9 @@ runWindow backend scale effects tick initial = do
       | otherwise = case decodeKey key mods of
           Nothing -> pure (d,[])
           Just ev -> clipboardResult (copies ev d) d (handleEvent ev d)
+    dispatch (14:_) d = do
+      path <- c_text >>= BS.packCString
+      pure (d,[ReadPath (T.unpack (TE.decodeUtf8 path))])
     dispatch (2:_) d = do
       bytes <- c_text >>= BS.packCString
       case TE.decodeUtf8' bytes of
