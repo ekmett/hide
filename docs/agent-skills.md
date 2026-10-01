@@ -70,20 +70,24 @@ view requires an explicit save/discard choice; another view may share its buffer
 
 ## Diagnose and refactor Haskell
 
-**Use:** explain a type, locate an error, or rename a symbol across the package.
+**Use:** explain a type, fix a diagnostic, or refactor source across the package.
 
 **Do:** `workspace_diagnostics` → read/navigate the relevant source → `lsp_hover`
 or symbol/location tools. For rename, call `lsp_rename` with `bufferId`, current
-`revision`, `line`, `column`, and `newName`; review the changed buffers.
+`revision`, `line`, `column`, and `newName`. For a quick fix or refactoring, call
+`lsp_code_actions` for the current source range, inspect titles and disabled
+reasons, then pass the chosen ID and original source revision to
+`lsp_apply_code_action`. Review the changed buffers.
 
 **Check:** distinguish the diagnostic’s reported version from the current
-buffer revision. HLS receives unsaved source. Rename changes live buffers;
+buffer revision. HLS receives unsaved source. Rename and code actions change live buffers;
 saving and rebuilding remain separate steps.
 
 **Recover:** if source changes while HLS works, refresh and retry against the new
 revision. If HLS is unavailable, report its result and inspect build output.
-General code actions, including extracting/inserting type signatures where HLS
-supports them, are planned; hover/type lookup is available now.
+Refresh expired or consumed action IDs with another list. Only edit-based actions
+are available, including lazy resolution when HLS advertises it. Actions requiring
+commands or file operations are explicitly unsupported.
 
 ## Build, test and run
 

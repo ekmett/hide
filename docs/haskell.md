@@ -31,6 +31,7 @@ interface; language requests do not stop you editing.
 | Follow a definition | F12 or Search > Go to definition |
 | Complete an identifier | Ctrl+Space or Edit > Complete identifier |
 | Rename a symbol | Right-click source, then Rename |
+| Quick fixes and refactorings | Tools > Code actions or right-click source, then Code actions |
 
 Pausing the text cursor shows type information in the status bar. In graphical
 frontends, hovering over source does the same. The source context menu also
@@ -41,6 +42,19 @@ Review those buffers and save them to write the result to disk. If a buffer or
 disk file changed while the request was pending, the editor rejects the stale
 edit. Text edits are supported; HLS file creation/deletion operations and
 executable completion commands are not applied. Completion snippets are disabled.
+
+## Code actions
+
+Select source or place the cursor at a diagnostic, then choose **Code actions**.
+The chooser lists HLS quick fixes and refactorings for that range. Select an
+action and press Enter to apply its text edits to buffers; review and save them
+when ready. HLS may resolve an action lazily when you select it.
+
+Only edit-based actions are supported. Command-only actions, actions combining
+an edit and command, and file creation/deletion operations are not applied;
+the chooser explains why they are unavailable. No attached command is silently
+skipped. Changed source or affected files reject the entire edit. Actions from
+an older list expire when you request another list or restart HLS.
 
 ## Diagnostics
 

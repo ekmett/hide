@@ -6,6 +6,8 @@ import Control.Concurrent.Async (withAsync, poll, wait)
 import Data.Aeson.Types (parseMaybe)
 import Control.Exception (bracket)
 import Data.Aeson
+import qualified Data.ByteString as BS
+import Data.List (findIndex)
 import qualified Data.Map.Strict as M
 import qualified Data.Text as T
 import System.Directory
@@ -74,7 +76,10 @@ checks = do
         let moved=beforeSaveAs {buffers=M.map (\doc -> doc {documentFile=Just (FileState (root </> "Elsewhere.hs") Nothing)}) (buffers beforeSaveAs)}
         renamedPath<-tickTooling tooling core moved
         check "Save As while preparing cancels original target" (status renamedPath=="Rename target changed; request it again." && buffers renamedPath==buffers moved)
+  check "HLS exposes code action discovery and checked application"
+    (all (`elem` toolingToolNames) ["lsp_code_actions","lsp_apply_code_action"])
   mcpChecks
+  codeActionChecks
   putStrLn "tooling checks passed"
   where
     temporary = do
@@ -197,6 +202,172 @@ mcpChecks = bracket temporary removePathForcibly $ \root -> do
       hClose h; removeFile path; createDirectory path
       canonicalizePath path
 
+-- Real stdio fixtures keep handles, resolution, and edits on the normal pump.
+codeActionChecks :: IO ()
+codeActionChecks = bracket temporary removePathForcibly $ \root -> do
+  let source=root </> "Main.hs"; other=root </> "Util.hs"; private=root </> "Secret.hs"
+      server=root </> "fake-hls"
+      live=addDocument (Just (FileState source Nothing)) (newBuffer "😀 foo = 1\n") (initialDesktop (80,25))
+      bid=maybe (error "missing source") bufferId (activeWindow live)
+      rev d=revision (documentBuffer (buffers d M.! bid))
+      core d _=pure (False,d)
+      args d=object ["bufferId" .= bid,"revision" .= rev d,"line" .= (1::Int),"column" .= (3::Int),"endLine" .= (1::Int),"endColumn" .= (6::Int)]
+      applyArgs d key=object ["bufferId" .= bid,"revision" .= rev d,"actionId" .= key]
+      field key=parseMaybe (withObject "value" (.:key))
+      right=either (error . T.unpack) pure
+      check label condition=unless condition (error label)
+      isLeft (Left _)=True; isLeft _=False
+      finish tooling d answer=withAsync answer $ \worker -> do
+        let pump current=do
+              next<-tickTooling tooling core current
+              result<-poll worker
+              case result of Just _->(next,) <$> wait worker; _->threadDelay 1000 >> pump next
+        timeout 4000000 (pump d) >>= maybe (error "Code action response timed out") pure
+      list tooling d=do
+        (pending,answer)<-toolingTool tooling core d "lsp_code_actions" (args d)
+        (_,result)<-finish tooling pending answer
+        right result
+      action title result=case [v | v<-maybe [] id (field "actions" result),field "title" v==Just (title::T.Text)] of
+        value:_->value
+        _->error ("Missing action "++T.unpack title)
+      ident title result=maybe (error "Missing action ID") id (field "actionId" (action title result)::Maybe T.Text)
+      apply tooling d key=do
+        (pending,answer)<-toolingTool tooling core d "lsp_apply_code_action" (applyArgs d key)
+        finish tooling pending answer
+      awaitFile tooling d path=do
+        let loop current=do
+              next<-tickTooling tooling core current
+              exists<-doesFileExist path
+              if exists then pure next else threadDelay 1000 >> loop next
+        timeout 3000000 (loop d) >>= maybe (error "Resolve never reached server") pure
+  writeFile source "😀 foo = 1\n"; writeFile other "foo = 2\n"; writeFile private "secret = 3\n"
+  writeFile server mcpServer
+  permissions<-getPermissions server; setPermissions server permissions {executable=True}
+  bracket (lookupEnv "THC_EDIT_HLS") (maybe (unsetEnv "THC_EDIT_HLS") (setEnv "THC_EDIT_HLS")) $ \_ -> do
+    setEnv "THC_EDIT_HLS" server
+    withTooling $ \tooling -> do
+      (waiting,answer)<-toolingTool tooling core live "lsp_hover" (args live)
+      _<-finish tooling waiting answer
+      offered<-list tooling live
+      requested<-eitherDecodeStrict' <$> BS.readFile (root </> "actions-request.json") >>= either error pure
+      check "code actions include current intersecting diagnostics"
+        (maybe False ((==1).length) (field "context" requested >>= field "diagnostics" :: Maybe [Value]))
+      check "code action range uses UTF16"
+        ((field "range" requested >>= field "start")==Just (object ["line" .= (0::Int),"character" .= (3::Int)]) &&
+         (field "range" requested >>= field "end")==Just (object ["line" .= (0::Int),"character" .= (6::Int)]))
+      forM_ ["Command only","Edit and command","Disabled"] $ \title->do
+        check "unsupported and server-disabled actions remain visible with reasons" (maybe False (const True) (field "disabledReason" (action title offered)::Maybe T.Text))
+        (unchanged,result)<-apply tooling live (ident title offered)
+        check "disabled action cannot partially apply edits" (isLeft result && buffers unchanged==buffers live)
+      (fixed,done)<-apply tooling live (ident "Fix source" offered)
+      check "literal action edits both open and closed buffers" (not (isLeft done) && activeText fixed=="fixed = 2\n" && any ((=="😀 fixed = 1\n").contents.documentBuffer) (M.elems (buffers fixed)))
+      (_,replayed)<-apply tooling live (ident "Fix source" offered)
+      check "action handles are single use" (isLeft replayed)
+      check "code actions never save files" . (=="😀 foo = 1\n") =<< readFile source
+      check "closed-file action changes also remain unsaved" . (=="foo = 2\n") =<< readFile other
+      stale<-list tooling live
+      (untouched,badRevision)<-apply tooling (insertText "x" live) (ident "Fix source" stale)
+      check "action rejects a changed source even when caller supplies its new revision" (isLeft badRevision && activeText untouched==activeText (insertText "x" live))
+      diskActions<-list tooling live
+      writeFile other "changed on disk\n"
+      (unchangedDisk,badDisk)<-apply tooling live (ident "Fix source" diskActions)
+      check "changed closed file rejects the entire action" (isLeft badDisk && buffers unchangedDisk==buffers live)
+      writeFile other "foo = 2\n"
+      let openedOther=addDocument (Just (FileState other Nothing)) (newBuffer "foo = 2\n") live
+      openActions<-list tooling openedOther
+      let editedOther=insertText "changed " openedOther
+      (unchangedOther,badOther)<-apply tooling editedOther (ident "Fix source" openActions)
+      check "changed other buffer rejects the entire action" (isLeft badOther && buffers unchangedOther==buffers editedOther)
+      resolvedActions<-list tooling live
+      (resolved,resolvedReply)<-apply tooling live (ident "Resolve" resolvedActions)
+      check "advertised resolver produces checked text edits" (not (isLeft resolvedReply) && any ((=="😀 fixed = 1\n").contents.documentBuffer) (M.elems (buffers resolved)))
+      commandActions<-list tooling live
+      (noCommand,commandReply)<-apply tooling live (ident "Resolve command" commandActions)
+      check "resolver adding a command applies none of its edits" (isLeft commandReply && buffers noCommand==buffers live)
+      let nested=root </> "nested"
+          nestedSource=nested </> "Other.hs"
+      createDirectory nested
+      writeFile nestedSource "other = 3\n"
+      -- A parent marker makes the nested source share its root until a nearer
+      -- marker appears. Prime ownership first, then require fresh snapshots.
+      writeFile (root </> "hie.yaml") "cradle: {direct: {arguments: []}}\n"
+      let nestedOpen=addDocument (Just (FileState nestedSource Nothing)) (newBuffer "other = 3\n") live
+      _<-tickTooling tooling core nestedOpen
+      forM_ ["hie.yaml","cabal.project","stack.yaml","nested.cabal",".git"] $ \markerName->do
+        writeFile (nested </> markerName) "boundary\n"
+        forM_ [live,nestedOpen] $ \view->do
+          nestedActions<-list tooling view
+          (unchanged,nestedReply)<-apply tooling view (ident "Nested project" nestedActions)
+          check "independent nested project is excluded whether its file is open or closed"
+            (isLeft nestedReply && buffers unchanged==buffers view)
+        removeFile (nested </> markerName)
+      createDirectory (nested </> ".git")
+      nestedDirectoryActions<-list tooling live
+      (_,nestedDirectoryReply)<-apply tooling live (ident "Nested project" nestedDirectoryActions)
+      check "nested Git directory is a project boundary" (isLeft nestedDirectoryReply)
+      removeDirectory (nested </> ".git")
+      let protected=live {guestPrivatePaths=[private]}
+      privateActions<-list tooling protected
+      (privateUnchanged,privateReply)<-apply tooling protected (ident "Private file" privateActions)
+      check "actions cannot change a protected closed file" (isLeft privateReply && buffers privateUnchanged==buffers protected)
+      check "protected file stays unchanged" . (=="secret = 3\n") =<< readFile private
+      cancellationActions<-list tooling live
+      (pending,cancelled)<-toolingTool tooling core live "lsp_apply_code_action" (applyArgs live (ident "Hold resolve" cancellationActions))
+      ready<-awaitFile tooling pending (root </> "resolve.requested")
+      _<-timeout 1000 cancelled
+      writeFile (root </> "resolve.release") ""
+      _<-awaitFile tooling ready (root </> "resolve.replied")
+      (barrier,barrierReply)<-toolingTool tooling core ready "lsp_hover" (args ready)
+      (afterCancel,_)<-finish tooling barrier barrierReply
+      check "cancelled resolve never applies a late edit" (buffers afterCancel==buffers live)
+      expired<-list tooling live
+      writeFile (root </> "many-actions") ""
+      many<-list tooling live
+      check "action cache and response are bounded" ((length <$> (field "actions" many::Maybe [Value]))==Just 128 && field "truncated" many==Just True)
+      (_,expiredReply)<-apply tooling live (ident "Fix source" expired)
+      check "new list expires previous handles" (isLeft expiredReply)
+      removeFile (root </> "many-actions")
+      (_,uiStart)<-toolingEffects tooling core live [LanguageRequest RequestCodeActions]
+      let awaitDialog d=do
+            next<-tickTooling tooling core d
+            case dialog next of Just dg | CodeActionChoices{}<-purpose dg ->pure next; _->threadDelay 1000 >> awaitDialog next
+      ui<-timeout 3000000 (awaitDialog uiStart) >>= maybe (error "No code-action chooser") pure
+      dg<-maybe (error "Missing code-action chooser") pure (dialog ui)
+      let (chosen,effects)=submitDialog 0 dg ui
+      (_,uiApplied)<-toolingEffects tooling core chosen effects
+      check "human chooser applies the same checked action" (buffers uiApplied/=buffers live && dialog uiApplied==Nothing)
+      forM_ ["resolve.requested","resolve.replied","resolve.release"] (removeFile . (root </>))
+      (_,timeoutStart)<-toolingEffects tooling core live [LanguageRequest RequestCodeActions]
+      timeoutChoices<-timeout 3000000 (awaitDialog timeoutStart) >>= maybe (error "No timeout chooser") pure
+      timeoutDialog<-maybe (error "Missing timeout chooser") pure (dialog timeoutChoices)
+      timeoutIndex<-case fields timeoutDialog of
+        [ListBox _ labels _]->maybe (error "Missing held action") pure (findIndex (=="Hold resolve") labels)
+        _->error "Unexpected action chooser"
+      let selected=timeoutDialog {fields=[case fieldValue of ListBox title labels _->ListBox title labels timeoutIndex; otherField->otherField | fieldValue<-fields timeoutDialog]}
+          (timeoutChosen,timeoutEffects)=submitDialog 0 selected timeoutChoices
+      (_,resolving)<-toolingEffects tooling core timeoutChosen timeoutEffects
+      requestedTimeout<-awaitFile tooling resolving (root </> "resolve.requested")
+      let awaitTimeout view=do
+            next<-tickTooling tooling core view
+            if status next=="HLS request timed out" then pure next else threadDelay 10000 >> awaitTimeout next
+      timedOut<-timeout 34000000 (awaitTimeout requestedTimeout)
+      check "human sees the resolver timeout with unchanged buffers" (maybe False (\view->buffers view==buffers live) timedOut)
+      writeFile (root </> "resolve.release") ""
+      timeoutReplied<-awaitFile tooling (maybe requestedTimeout id timedOut) (root </> "resolve.replied")
+      (timeoutBarrier,timeoutBarrierReply)<-toolingTool tooling core timeoutReplied "lsp_hover" (args timeoutReplied)
+      (afterTimeout,_)<-finish tooling timeoutBarrier timeoutBarrierReply
+      check "timed-out human resolve never applies a late edit" (buffers afterTimeout==buffers live)
+      writeFile (root </> "no-resolve") ""
+    withTooling $ \tooling -> do
+      unsupported<-list tooling live
+      check "unadvertised resolution stays disabled" (maybe False (const True) (field "disabledReason" (action "Resolve" unsupported)::Maybe T.Text))
+  where
+    temporary=do
+      base<-getTemporaryDirectory
+      (path,h)<-openTempFile base "thc-code-actions"
+      hClose h; removeFile path; createDirectory path
+      canonicalizePath path
+
 mcpServer :: String
 mcpServer = unlines
   [ "#!/usr/bin/env python3"
@@ -211,8 +382,19 @@ mcpServer = unlines
   , " if method=='exit': break"
   , " if method=='textDocument/didOpen': docs[params['textDocument']['uri']]=params['textDocument']['text']"
   , " if method=='textDocument/didChange': docs[params['textDocument']['uri']]=params['contentChanges'][0]['text']"
+  , " if method=='textDocument/didOpen': send(dict(method='textDocument/publishDiagnostics',params=dict(uri=params['textDocument']['uri'],version=params['textDocument']['version'],diagnostics=[dict(range=dict(start=dict(line=0,character=3),end=dict(line=0,character=6)),message='fix me',severity=1)])))"
+
   , " if 'id' not in msg: continue"
   , " result={}"
+  , " if method=='initialize': result=dict(capabilities=dict(codeActionProvider=dict(resolveProvider=not pathlib.Path('no-resolve').exists())))"
+  , " if method=='codeAction/resolve':"
+  , "  data=params['data']; uri=data['uri']; edit=data['edit']"
+  , "  if data['kind']=='hold':"
+  , "   pathlib.Path('resolve.requested').touch()"
+  , "   while not pathlib.Path('resolve.release').exists(): time.sleep(.001)"
+  , "  result=dict(title=params['title'],edit=edit)"
+  , "  if data['kind']=='command': result['command']=dict(title='unsafe',command='unsafe')"
+
   , " if method.startswith('textDocument/'):"
   , "  uri=params['textDocument']['uri']; text=docs[uri]"
   , "  if method=='textDocument/rename':"
@@ -222,7 +404,16 @@ mcpServer = unlines
   , "    while not pathlib.Path(name+'.release').exists(): time.sleep(.001)"
   , "   def edit(start,end): return dict(range=dict(start=dict(line=0,character=start),end=dict(line=0,character=end)),newText=name)"
   , "   result=dict(changes={uri:[edit(3,6)],pathlib.Path('Util.hs').resolve().as_uri():[edit(0,3)]})"
+  , "  elif method=='textDocument/codeAction':"
+  , "   pathlib.Path('actions-request.json').write_text(json.dumps(params))"
+  , "   def change(a,z): return dict(range=dict(start=dict(line=0,character=a),end=dict(line=0,character=z)),newText='fixed')"
+  , "   edit=dict(changes={uri:[change(3,6)],pathlib.Path('Util.hs').resolve().as_uri():[change(0,3)]})"
+  , "   command=dict(title='Run command',command='unsafe')"
+  , "   result=[dict(title='Fix source',kind='quickfix',isPreferred=True,edit=edit),dict(title='Command only',command='unsafe'),dict(title='Edit and command',edit=edit,command=command),dict(title='Disabled',disabled=dict(reason='Not applicable'),edit=edit),dict(title='Private file',edit=dict(changes={pathlib.Path('Secret.hs').resolve().as_uri():[change(0,6)]})),dict(title='Nested project',edit=dict(changes={pathlib.Path('nested/Other.hs').resolve().as_uri():[change(0,5)]}))]"
+  , "   result += [dict(title=title,data=dict(uri=uri,edit=edit,kind=kind)) for title,kind in [('Resolve','normal'),('Resolve command','command'),('Hold resolve','hold')]]"
+  , "   if pathlib.Path('many-actions').exists(): result=[dict(title='Action '+str(n),edit=edit) for n in range(140)]"
   , "  else: result=dict(method=method,text=text,position=params.get('position'),contents=text,context=params.get('context'))"
   , " send(dict(jsonrpc='2.0',id=msg['id'],result=result))"
   , " if method=='textDocument/rename': pathlib.Path(params['newName']+'.replied').touch()"
+  , " if method=='codeAction/resolve': pathlib.Path('resolve.replied').touch()"
   ]

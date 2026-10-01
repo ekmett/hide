@@ -73,11 +73,18 @@ fails without edits. Binary previews describe byte changes.
 | `lsp_references` | R | `bufferId`, `line`, `column`, `revision?`, `includeDeclaration?` | Reference locations; declarations included by default |
 | `lsp_document_symbols` | R | `bufferId`, `revision?` | Document symbol structure |
 | `lsp_rename` | W | `bufferId`, `revision`, `line`, `column`, `newName` | Apply HLS rename to live buffers; reject stale source; no save |
+| `lsp_code_actions` | R | `bufferId`, `revision`, `line`, `column`, `endLine?`, `endColumn?` | List up to 128 action IDs with title/kind/preference and disabled reason; includes current intersecting diagnostics |
+| `lsp_apply_code_action` | W | `bufferId`, `revision`, `actionId` | Consume a listed action once; resolve advertised text edits, then apply atomically to buffers; no save |
 
 Calls synchronize unsaved Haskell text. Editor input positions use 1-based
 Unicode code points; raw LSP results use 0-based UTF-16. Responses identify the
-source revision. Diagnostic messages are capped at 8192 characters. Hover/types
-and rename are available; general code actions are a planned extension.
+source revision. Diagnostic messages are capped at 8192 characters. Code-action
+ranges default to the cursor; supply both end coordinates for a selection.
+A new action list expires previous IDs. Application requires the original source
+revision and unchanged affected files, excludes protected files and other
+projects, and never accepts caller-supplied edits or commands. Command-only and
+edit-plus-command actions are listed disabled; resource operations are refused.
+`workspace/executeCommand` and unsolicited `workspace/applyEdit` are unsupported.
 
 ## Build, test and execution
 

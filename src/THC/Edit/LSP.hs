@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 module THC.Edit.LSP
-  ( Client, Event(..), startClient, stopClient, syncDocuments, notifySaved, request, pollEvents
+  ( Client, Event(..), startClient, stopClient, syncDocuments, notifySaved, request, pollEvents, serverCapabilities
   , fileUri, uriFilePath, offsetPosition, positionOffset, positionValue
   ) where
 
@@ -34,7 +34,7 @@ data Command = Documents [(FilePath,Int,Text)] | Request Int Text Value | Saved 
 data Client = Client
   { commands :: Chan Command, events :: MVar [Event], nextId :: MVar Int
   , unavailable :: MVar (Maybe Text), lastDocuments :: MVar [(FilePath,Int,Text)]
-  , closeClient :: IO ()
+  , serverCapabilities :: IO Value, closeClient :: IO ()
   }
 
 -- Initialization and all subsequent writes happen off the UI thread.
@@ -61,6 +61,7 @@ startClient root = mask $ \restore -> do
     stopped <- newMVar False
     unavailableState <- newMVar Nothing
     documentsState <- newMVar []
+    capabilitiesState <- newMVar Null
     errorTail <- newMVar ""
     writerThread <- newEmptyMVar
     let emit event = modifyMVar_ inbox (pure . (event:))
@@ -102,6 +103,7 @@ startClient root = mask $ \restore -> do
             Just 0 -> do
               let success = case field "error" value :: Maybe Value of Nothing -> True; Just _ -> False
               unless success (failed (userError ("Initialization failed: " ++ show value)))
+              when success (modifyMVar_ capabilitiesState (const (pure (fromMaybe Null (field "result" value >>= field "capabilities")))))
               void (tryPutMVar initialized success)
             Just (-1) -> void (tryPutMVar shutdown ())
             Just ident -> emit (Response ident value)
@@ -115,7 +117,8 @@ startClient root = mask $ \restore -> do
             [ "general" .= object ["positionEncodings" .= ["utf-16" :: Text]]
             , "workspace" .= object ["configuration" .= True, "workspaceFolders" .= True, "workspaceEdit" .= object ["documentChanges" .= True]]
             , "textDocument" .= object
-                [ "publishDiagnostics" .= object ["versionSupport" .= True]
+                [ "codeAction" .= object ["codeActionLiteralSupport" .= object ["codeActionKind" .= object ["valueSet" .= (["", "quickfix", "refactor", "refactor.extract", "refactor.inline", "refactor.rewrite", "source", "source.organizeImports"] :: [Text])]], "dataSupport" .= True, "disabledSupport" .= True, "isPreferredSupport" .= True, "resolveSupport" .= object ["properties" .= (["edit"] :: [Text])]]
+                , "publishDiagnostics" .= object ["versionSupport" .= True]
                 , "hover" .= object ["contentFormat" .= ["plaintext" :: Text, "markdown"]]
                 , "completion" .= object ["completionItem" .= object ["snippetSupport" .= False]]
                 ]
@@ -143,7 +146,7 @@ startClient root = mask $ \restore -> do
             killThread drainer
             void (timeout 250000 (waitForProcess process))
             cleanup
-    pure (Client queue inbox counter unavailableState documentsState stop)
+    pure (Client queue inbox counter unavailableState documentsState (readMVar capabilitiesState) stop)
     ) `onException` cleanup
 
 stopClient :: Client -> IO ()

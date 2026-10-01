@@ -1,6 +1,6 @@
 # Session tools
 
-The conversation guest should work with the same files, windows and running programs as the person using the editor. Tools use stable session IDs, live buffer revisions and the existing editor commands. Long-running replies must not block the display or language/debug protocol polling.
+The conversation agent should work with the same files, windows and running programs as the person using the editor. Tools use stable session IDs, live buffer revisions and the existing editor commands. Long-running replies must not block the display or language/debug protocol polling.
 
 ## Work list
 
@@ -33,13 +33,15 @@ Debugger follow/reveal behavior is exercised with a real fake-DAP transport.
 
 ## Further hooks
 
-- [x] Origin-aware guest input, readable/clickable cell masks, and protected conversation/approval/settings controls.
-- [x] Secret redaction for guest views, plus optional human-facing Streamer mode.
+- [x] Origin-aware agent input, readable/clickable cell masks, and protected conversation/approval/settings controls.
+- [x] Secret redaction for agent views, plus optional human-facing Streamer mode.
 - [x] Explicit clipboard write without reading the user's clipboard.
 - [x] Dedicated read-only agent settings snapshot.
 - [ ] Dedicated Git fetch/pull/merge/commit operations with checked review state.
-- [ ] General HLS code actions and refactorings.
-- [ ] Cabal component/dependency graph context.
+- [x] Edit-based HLS quick fixes/refactorings: chooser, bounded opaque handles,
+  current diagnostics, advertised lazy resolution and checked atomic buffer edits.
+- [ ] Command-based HLS actions and scoped workspace/executeCommand application.
+- [x] Cabal component/dependency graph context from the existing generated plan.
 - [ ] Individual-test results for supported test-runner formats.
 
 - [x] Shared/background debugger presentation from the same stopped DAP session.

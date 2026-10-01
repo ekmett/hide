@@ -116,6 +116,7 @@ fakeServer = unlines
   , "        sys.stdout.buffer.write(part); sys.stdout.buffer.flush()"
   , "init = recv()"
   , "assert init['method'] == 'initialize'"
+  , "assert init['params']['capabilities']['textDocument']['codeAction']['resolveSupport']['properties']==['edit']"
   , "sys.stderr.write('server log\\n' * 12000); sys.stderr.flush()"
   , "send(dict(id='config', method='workspace/configuration', params=dict(items=[{}, {}])))"
   , "assert recv()['result'] == [None, None]"

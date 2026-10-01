@@ -18,11 +18,11 @@ import Data.Maybe (mapMaybe, fromMaybe)
 import qualified Data.Text as T
 import qualified Data.Vector as Vector
 import GHC.Clock (getMonotonicTimeNSec)
-import System.Directory (doesFileExist, doesDirectoryExist, listDirectory, pathIsSymbolicLink)
+import System.Directory (canonicalizePath, doesFileExist, doesDirectoryExist, listDirectory, pathIsSymbolicLink)
 import System.FilePath (takeDirectory, takeExtension, (</>))
 import THC.Edit.Buffer
 import THC.Edit.Files
-import THC.Edit.GuestAccess (protectedBuffer)
+import THC.Edit.GuestAccess (protectedBuffer, protectedPath)
 import THC.Edit.Model
 import qualified THC.Edit.LSP as L
 
@@ -31,7 +31,8 @@ data Pending = Pending LanguageAction Target FilePath (M.Map FilePath (Int,T.Tex
 data ToolQuery = ToolQuery
   { queryName :: T.Text, queryTarget :: Target, queryPath :: FilePath, queryArguments :: Value
   , querySnapshot :: M.Map FilePath (Int,T.Text), queryDeadline :: Integer
-  , queryReply :: TMVar (Either T.Text Value) }
+  , queryReply :: TMVar (Either T.Text Value), queryHuman :: Bool }
+data CachedAction = CachedAction ToolQuery Value Bool
 data Session = Session L.Client (IORef (M.Map Int Pending))
 data Preparing = Preparing Target FilePath T.Text (M.Map FilePath (Int,T.Text)) ThreadId (MVar (Either IOException (M.Map FilePath (Int,T.Text))))
   | ToolPreparing ToolQuery ThreadId (MVar (Either IOException (M.Map FilePath (Int,T.Text))))
@@ -40,15 +41,17 @@ data Tooling = Tooling
   , roots :: IORef (M.Map FilePath FilePath)
   , problems :: IORef (M.Map FilePath (Maybe Int,[Value]))
   , hovered :: IORef (Maybe Target, Integer, Bool)
+  , actions :: IORef (M.Map T.Text CachedAction), nextAction :: IORef Int
   , preparing :: IORef (Maybe Preparing)
   }
 
 withTooling :: (Tooling -> IO a) -> IO a
-withTooling = bracket (Tooling <$> newIORef M.empty <*> newIORef M.empty <*> newIORef M.empty <*> newIORef (Nothing,0,False) <*> newIORef Nothing) closeTooling
+withTooling = bracket (Tooling <$> newIORef M.empty <*> newIORef M.empty <*> newIORef M.empty <*> newIORef (Nothing,0,False) <*> newIORef M.empty <*> newIORef 1 <*> newIORef Nothing) closeTooling
 
 closeTooling :: Tooling -> IO ()
 closeTooling t = do
   cancelPreparation t
+  writeIORef (actions t) M.empty
   readIORef (sessions t) >>= mapM_ (either (const (pure ())) (\(Session c pending) -> do
     readIORef pending >>= mapM_ (failPending "HLS stopped") . M.elems
     L.stopClient c)) . M.elems
@@ -63,7 +66,7 @@ cancelPreparation t = do
 -- These calls share the session's HLS client and response pump. The returned
 -- wait action must run outside the desktop lock, so tickTooling can resolve it.
 toolingToolNames :: [T.Text]
-toolingToolNames = ["lsp_hover","lsp_definition","lsp_type_definition","lsp_references","lsp_document_symbols","lsp_rename"]
+toolingToolNames = ["lsp_hover","lsp_definition","lsp_type_definition","lsp_references","lsp_document_symbols","lsp_rename","lsp_code_actions","lsp_apply_code_action"]
 
 toolingTools :: [Value]
 toolingTools = map descriptor toolingToolNames
@@ -73,11 +76,13 @@ toolingTools = map descriptor toolingToolNames
       ["name" .= name,"description" .= (description name<>" Uses live unsaved Haskell source. Input line/column are 1-based Unicode codepoints; raw LSP result coordinates are 0-based UTF-16."),
        "inputSchema" .= object ["type" .= ("object"::T.Text),"additionalProperties" .= False,
          "properties" .= object (["bufferId" .= integer 0,"revision" .= integer 0]++
-           (if name=="lsp_document_symbols" then [] else ["line" .= integer 1,"column" .= integer 1])++
+           (if name `elem` ["lsp_document_symbols","lsp_apply_code_action"] then [] else ["line" .= integer 1,"column" .= integer 1])++
+           ["actionId" .= object ["type" .= ("string"::T.Text)] | name=="lsp_apply_code_action"]++
+           (if name=="lsp_code_actions" then ["endLine" .= integer 1,"endColumn" .= integer 1] else [])++
            ["newName" .= object ["type" .= ("string"::T.Text),"minLength" .= (1::Int),"maxLength" .= (256::Int)] | name=="lsp_rename"]++
            ["includeDeclaration" .= object ["type" .= ("boolean"::T.Text),"default" .= True] | name=="lsp_references"]),
-         "required" .= (["bufferId"]++(if name=="lsp_document_symbols" then [] else ["line","column"])++["revision" | name=="lsp_rename"]++["newName" | name=="lsp_rename"]::[T.Text])],
-       "annotations" .= object ["readOnlyHint" .= (name/="lsp_rename"),"destructiveHint" .= False,"idempotentHint" .= (name/="lsp_rename"),"openWorldHint" .= False]]
+         "required" .= (["bufferId"]++(if name `elem` ["lsp_document_symbols","lsp_apply_code_action"] then [] else ["line","column"])++["revision" | name `elem` ["lsp_rename","lsp_code_actions","lsp_apply_code_action"]]++["newName" | name=="lsp_rename"]++["actionId" | name=="lsp_apply_code_action"]::[T.Text])],
+       "annotations" .= object ["readOnlyHint" .= (name `notElem` ["lsp_rename","lsp_apply_code_action"]),"destructiveHint" .= False,"idempotentHint" .= (name `notElem` ["lsp_rename","lsp_code_actions","lsp_apply_code_action"]),"openWorldHint" .= False]]
     description :: T.Text -> T.Text
     description name=case name of
       "lsp_hover" -> "Return HLS hover/type information."
@@ -85,36 +90,44 @@ toolingTools = map descriptor toolingToolNames
       "lsp_type_definition" -> "Find HLS type definitions."
       "lsp_references" -> "Find HLS references."
       "lsp_document_symbols" -> "List HLS document symbols."
+      "lsp_code_actions" -> "List edit-based HLS code actions with opaque action IDs; optional endLine/endColumn select a range. A new list expires previous IDs. Command actions are listed disabled."
+      "lsp_apply_code_action" -> "Apply a listed action ID once at its original source revision, resolving its edit when advertised. Edits change buffers only; commands and resource operations are rejected."
       _ -> "Rename through HLS, requiring the current revision; edits change buffers, never saved files."
 
 toolingTool :: Tooling -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> T.Text -> Value -> IO (Desktop, IO (Either T.Text Value))
-toolingTool t _ d name arguments = case parseEither parameters arguments of
-  Left err -> pure (d,pure (Left (T.pack err)))
+toolingTool = startTool False
+
+startTool :: Bool -> Tooling -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> T.Text -> Value -> IO (Desktop, IO (Either T.Text Value))
+startTool human t _ d name arguments = case parseEither parameters arguments of
+  Left err -> reject (T.pack err)
   Right (target,path,text) -> do
     active<-readIORef (sessions t)
     counts<-forM (M.elems active) $ \session -> case session of
       Left _ -> pure 0
       Right (Session _ pending) -> length . filter isTool . M.elems <$> readIORef pending
     preparation<-readIORef (preparing t)
-    if sum counts+(case preparation of Just ToolPreparing{} -> 1; _ -> 0)>=32 then pure (d,pure (Left "Too many pending HLS tools"))
-    else if name=="lsp_rename" && maybe False (const True) preparation then pure (d,pure (Left "A rename is already being prepared"))
+    if sum counts+(case preparation of Just ToolPreparing{} -> 1; _ -> 0)>=32 then reject "Too many pending HLS tools"
+    else if name `elem` ["lsp_rename","lsp_code_actions"] && maybe False (const True) preparation then reject "An HLS edit snapshot is already being prepared"
+    else if name=="lsp_apply_code_action" then applyCodeAction human t d target path arguments
     else do
       sync t d
       available<-sessionFor t path
       case available of
-        Left err -> pure (d,pure (Left err))
+        Left err -> reject err
         Right session -> do
           promise<-newEmptyTMVarIO
           now<-toInteger <$> getMonotonicTimeNSec
-          let query=ToolQuery name target path arguments (M.fromList [(p,(v,src)) | (_,p,v,src)<-sourceDocuments d]) (now+30000000000) promise
-          if name=="lsp_rename" then do
-            root<-rootFor t path
+          snapshot<-openSnapshot d path
+          let query=ToolQuery name target path arguments snapshot (now+30000000000) promise human
+          if name `elem` ["lsp_rename","lsp_code_actions"] then do
+            root<-projectRoot path
             result<-newEmptyMVar
-            worker<-forkIO (try (sourceSnapshot root) >>= putMVar result)
+            worker<-forkIO (try (sourceSnapshot d root) >>= putMVar result)
             writeIORef (preparing t) (Just (ToolPreparing query worker result))
-          else queueTool session query text
+          else queueTool t session query text
           pure (d,waitTool query)
   where
+    reject err=pure (if human then d {status=err} else d,pure (Left err))
     isTool (ToolPending _) = True
     isTool _ = False
     parameters=withObject "HLS tool arguments" $ \o -> do
@@ -126,14 +139,25 @@ toolingTool t _ d name arguments = case parseEither parameters arguments of
       unless (textBuffer b && documentLabel doc==Nothing) (fail "HLS requires a source text buffer")
       file<-maybe (fail "Save this buffer with a Haskell filename first") pure (documentFile doc)
       unless (takeExtension (filePath file) `elem` [".hs",".lhs"]) (fail "HLS requires a Haskell source file")
-      expected<-if name=="lsp_rename" then Just <$> o .: "revision" else o .:? "revision"
+      expected<-if name `elem` ["lsp_rename","lsp_code_actions","lsp_apply_code_action"] then Just <$> o .: "revision" else o .:? "revision"
       unless (maybe True (==revision b) expected) (fail "Buffer revision changed")
-      pos<-if name=="lsp_document_symbols" then pure 0 else do
+      pos<-if name `elem` ["lsp_document_symbols","lsp_apply_code_action"] then pure 0 else do
         row<-o .: "line"; col<-o .: "column"
         unless (row>=1 && row<=bufferLineCount b) (fail "Line is outside the buffer")
         let line=T.dropWhileEnd (=='\r') (bufferLineAt b (row-1))
         unless (col>=1 && col<=T.length line+1) (fail "Column is outside the line")
         pure (bufferLineOffset b (row-1)+col-1)
+      when (name=="lsp_code_actions") $ do
+        endRow<-o .:? "endLine"; endCol<-o .:? "endColumn"
+        case (endRow,endCol) of
+          (Nothing,Nothing)->pure ()
+          (Just row,Just col)->do
+            unless (row>=1 && row<=bufferLineCount b && col>=1 && col<=T.length (T.dropWhileEnd (=='\r') (bufferLineAt b (row-1)))+1) (fail "Invalid code action range")
+            unless (bufferLineOffset b (row-1)+col-1>=pos) (fail "Code action range ends before its start")
+          _->fail "Supply both endLine and endColumn"
+      when (name=="lsp_apply_code_action") $ do
+        void (o .: "actionId" :: Parser T.Text)
+        unless (all (`elem` ["bufferId","revision","actionId"]) (K.keys o)) (fail "Apply accepts only a returned actionId and current buffer revision")
       when (name=="lsp_rename") $ do
         newName<-o .: "newName"
         unless (not (T.null newName) && T.length newName<=256 && not (T.any (\c -> isSpace c || c<' ') newName)) (fail "Invalid rename identifier")
@@ -162,8 +186,8 @@ toolActive query = do
   when (now>=queryDeadline query) (completeTool query (Left "HLS request timed out"))
   atomically (isEmptyTMVar (queryReply query))
 
-queueTool :: Session -> ToolQuery -> T.Text -> IO ()
-queueTool (Session client pending) query text = do
+queueTool :: Tooling -> Session -> ToolQuery -> T.Text -> IO ()
+queueTool t (Session client pending) query text = do
   let name=queryName query
       (_,_,pos)=queryTarget query
       method=fromMaybe "textDocument/hover" (lookup name [("lsp_definition","textDocument/definition"),("lsp_type_definition","textDocument/typeDefinition"),("lsp_references","textDocument/references"),("lsp_document_symbols","textDocument/documentSymbol"),("lsp_rename","textDocument/rename")])
@@ -171,12 +195,115 @@ queueTool (Session client pending) query text = do
         ["position" .= L.positionValue text pos | name/="lsp_document_symbols"]++
         ["newName" .= fromMaybe Null (member "newName" (queryArguments query)) | name=="lsp_rename"]++
         ["context" .= object ["includeDeclaration" .= fromMaybe True (parseMaybe (withObject "references" (\o -> o .:? "includeDeclaration" .!= True)) (queryArguments query))] | name=="lsp_references"]
-  ident<-L.request client method (object fields)
+  diagnostics<-readIORef (problems t)
+  let start=L.positionValue text pos
+      endOffset=case (member "endLine" (queryArguments query),member "endColumn" (queryArguments query)) of
+        (Just row,Just col) | Just r<-parseMaybe parseJSON row,Just c<-parseMaybe parseJSON col ->
+          bufferLineOffset (newBuffer text) (r-1)+c-1
+        _->pos
+      end=L.positionValue text endOffset
+      intersects value=case parseMaybe (withObject "diagnostic" (\o->o .: "range" >>= rangeOffsets text)) value of
+        Just (a,z)->a<=endOffset && z>=pos
+        _->False
+      current=case M.lookup (queryPath query) diagnostics of
+        Just (version,values) | diagnosticsCurrent version [let (_,v,_)=queryTarget query in v] -> take 256 (filter intersects values)
+        _->[]
+      (operation,params)=case name of
+        "lsp_code_actions" -> ("textDocument/codeAction",object ["textDocument" .= object ["uri" .= L.fileUri (queryPath query)],"range" .= object ["start" .= start,"end" .= end],"context" .= object ["diagnostics" .= current]])
+        "lsp_apply_code_action" -> ("codeAction/resolve",queryArguments query)
+        _->(method,object fields)
+  ident<-L.request client operation params
   modifyIORef' pending (M.insert ident (ToolPending query))
+
+-- Open buffers from other projects and private authority files cannot enter an
+-- edit snapshot, even when they are visible in the same desktop.
+openSnapshot :: Desktop -> FilePath -> IO (M.Map FilePath (Int,T.Text))
+openSnapshot d path = do
+  root<-projectRoot path
+  entries<-forM (sourceDocuments d) $ \(_,file,version,text)->do
+    owner<-projectRoot file
+    pure [(file,(version,text)) | owner==root]
+  pure (M.fromList (concat entries))
+
+actionDisabled :: Bool -> Value -> Maybe T.Text
+actionDisabled canResolve value
+  | Just disabled<-member "disabled" value,disabled/=Null = Just (T.take 512 (fromMaybe "Disabled by HLS" (member "reason" disabled >>= stringValue)))
+  | Just command<-member "command" value,command/=Null = Just "Command-based actions are not supported; no edits will be applied."
+  | Just edit<-member "edit" value,edit/=Null = either Just (const Nothing) (workspaceEdits edit)
+  | canResolve = Nothing
+  | otherwise = Just "No text edit or advertised code-action resolver is available."
+
+cacheCodeActions :: Tooling -> Session -> ToolQuery -> Value -> Desktop -> IO Desktop
+cacheCodeActions t (Session client _) query result d = do
+  caps<-L.serverCapabilities client
+  let resolve=(member "codeActionProvider" caps >>= member "resolveProvider")==Just (Bool True)
+      offered=case result of Array values->Vector.toList values; _->[]
+      choices=take 128 [(value,T.take 512 title) | value<-offered,Just title<-[member "title" value >>= stringValue],not (T.null title)]
+      (bid,version,_)=queryTarget query
+  cached<-forM choices $ \(value,title)->do
+    ident<-atomicModifyIORef' (nextAction t) (\n->(n+1,"action-"<>T.pack (show n)))
+    let disabled=actionDisabled resolve value
+        description=object ["actionId" .= ident,"title" .= title,"kind" .= (T.take 128 <$> (member "kind" value >>= stringValue)),
+          "preferred" .= (member "isPreferred" value==Just (Bool True)),"disabledReason" .= disabled]
+        label=title<>maybe "" (" — "<>) disabled
+    pure (ident,CachedAction query value resolve,description,label)
+  active<-toolActive query
+  accepted<-if active then atomically (tryPutTMVar (queryReply query) (Right (object
+    ["bufferId" .= bid,"revision" .= version,"actions" .= [value | (_,_,value,_)<-cached],"truncated" .= (length offered>128)]))) else pure False
+  if not accepted then pure d else do
+    writeIORef (actions t) (M.fromList [(ident,entry) | (ident,entry,_,_)<-cached])
+    pure $ if not (queryHuman query) then d else if null cached then d {status="No code actions available."}
+      else prompt "HLS code actions" (CodeActionChoices bid version [ident | (ident,_,_,_)<-cached])
+        [ListBox "Action" [label | (_,_,_,label)<-cached] 0] d
+
+applyCodeAction :: Bool -> Tooling -> Desktop -> Target -> FilePath -> Value -> IO (Desktop,IO (Either T.Text Value))
+applyCodeAction human t d target path arguments = do
+  let ident=fromMaybe "" (member "actionId" arguments >>= stringValue)
+      reject err=pure (if human then d {status=err} else d,pure (Left err))
+  cached<-atomicModifyIORef' (actions t) (\entries->(M.delete ident entries,M.lookup ident entries))
+  case cached of
+    Nothing->reject "Code action expired or already used; list actions again."
+    Just (CachedAction original value resolve)
+      | let (bid,version,_)=target; (oldBid,oldVersion,_)=queryTarget original,
+        bid/=oldBid || version/=oldVersion || path/=queryPath original -> reject "Code action source changed; list actions again."
+      | Just reason<-actionDisabled resolve value -> reject reason
+      | otherwise->do
+          now<-toInteger <$> getMonotonicTimeNSec
+          reply<-newEmptyTMVarIO
+          let query=original {queryName="lsp_apply_code_action",queryArguments=value,queryDeadline=now+30000000000,queryReply=reply,queryHuman=human}
+          case member "edit" value of
+            Just edit | edit/=Null -> do
+              updated<-finishCodeAction query value d
+              pure (updated,waitTool query)
+            _->do
+              available<-sessionFor t path
+              case available of
+                Left err->reject err
+                Right session->do
+                  queueTool t session query ""
+                  pure (d {status=if human then "Resolving code action..." else status d},waitTool query)
+
+finishCodeAction :: ToolQuery -> Value -> Desktop -> IO Desktop
+finishCodeAction query value d = case actionDisabled False value of
+  Just err->completeTool query (Left err) >> pure (if queryHuman query then d {status=err} else d)
+  Nothing->commitToolEdit query (fromMaybe Null (member "edit" value)) d
+
+commitToolEdit :: ToolQuery -> Value -> Desktop -> IO Desktop
+commitToolEdit query edit d = do
+  changed<-renameBuffers (querySnapshot query) edit d
+  case changed of
+    Left err->completeTool query (Left err) >> pure (if queryHuman query then d {status=err} else d)
+    Right updated->do
+      let (bid,_,_)=queryTarget query
+          edited=[object ["bufferId" .= ident,"revision" .= revision (documentBuffer doc)] | (ident,doc)<-M.toList (buffers updated),M.lookup ident (buffers d)/=Just doc]
+      active<-toolActive query
+      accepted<-if active then atomically (tryPutTMVar (queryReply query) (Right (object ["bufferId" .= bid,"applied" .= True,"buffers" .= edited]))) else pure False
+      pure $ if not accepted then d else if queryName query=="lsp_apply_code_action"
+        then updated {status="Code action applied to buffers. Review and save the changed files."} else updated
 
 sourceDocuments :: Desktop -> [(Int,FilePath,Int,T.Text)]
 sourceDocuments d = [(bid,filePath f,revision b,contents b) | (bid,doc)<-M.toList (buffers d), documentLabel doc==Nothing, textBuffer (documentBuffer doc),
-  Just f<-[documentFile doc], takeExtension (filePath f) `elem` [".hs",".lhs"], let b=documentBuffer doc]
+  not (protectedBuffer d bid), Just f<-[documentFile doc], takeExtension (filePath f) `elem` [".hs",".lhs"], let b=documentBuffer doc]
 
 projectRoot :: FilePath -> IO FilePath
 projectRoot path = search (takeDirectory path)
@@ -184,9 +311,11 @@ projectRoot path = search (takeDirectory path)
     fallback=takeDirectory path
     search dir = do
       entries <- either (const []) id <$> (try (listDirectory dir) :: IO (Either IOException [FilePath]))
-      git <- doesDirectoryExist (dir </> ".git")
-      if git || any (`elem` entries) ["hie.yaml","cabal.project","stack.yaml",".git"] || any ((==".cabal") . takeExtension) entries
+      if projectBoundary entries
         then pure dir else if takeDirectory dir==dir then pure fallback else search (takeDirectory dir)
+
+projectBoundary :: [FilePath] -> Bool
+projectBoundary entries = any (`elem` entries) ["hie.yaml","cabal.project","stack.yaml",".git"] || any ((==".cabal") . takeExtension) entries
 
 rootFor :: Tooling -> FilePath -> IO FilePath
 rootFor t path = do
@@ -250,10 +379,10 @@ sendRequest t action target d = case targetDocument target d of
       Right session -> case action of
         RenameAt name -> do
           cancelPreparation t
-          root<-rootFor t path
+          root<-projectRoot path
           result<-newEmptyMVar
-          let snapshot=M.fromList [(p,(v,src)) | (_,p,v,src)<-sourceDocuments d]
-          worker<-forkIO (try (sourceSnapshot root) >>= putMVar result)
+          snapshot<-openSnapshot d path
+          worker<-forkIO (try (sourceSnapshot d root) >>= putMVar result)
           writeIORef (preparing t) (Just (Preparing target path name snapshot worker result))
           pure d {status="Preparing rename..."}
         _ -> queueRequest session action target path text M.empty >> pure d
@@ -271,6 +400,16 @@ queueRequest (Session client pending) action target@(_,_,pos) path text snapshot
 
 finishPreparation :: Tooling -> Desktop -> IO Desktop
 finishPreparation t d = do
+  previous<-readIORef (preparing t)
+  updated<-finishPreparationResult t d
+  case previous of
+    Just (ToolPreparing query _ _) | queryHuman query ->do
+      result<-atomically (tryReadTMVar (queryReply query))
+      pure $ case result of Just (Left err)->updated {status=err}; _->updated
+    _->pure updated
+
+finishPreparationResult :: Tooling -> Desktop -> IO Desktop
+finishPreparationResult t d = do
   pending<-readIORef (preparing t)
   case pending of
     Nothing -> pure d
@@ -292,7 +431,7 @@ finishPreparation t d = do
               Right disk -> do
                 available<-sessionFor t (queryPath query)
                 case (available,targetDocument (queryTarget query) d) of
-                  (Right session,Just (_,text)) -> queueTool session query {querySnapshot=M.union (querySnapshot query) disk} text
+                  (Right session,Just (_,text)) -> queueTool t session query {querySnapshot=M.union (querySnapshot query) disk} text
                   (Left err,_) -> completeTool query (Left err)
                   _ -> completeTool query (Left "Rename target changed")
             pure d
@@ -336,13 +475,17 @@ tickTooling t core d = do
     collect desktop (Left _) = pure desktop
     collect desktop (Right (Session client pending)) = do
       requests<-readIORef pending
-      live<-forM (M.toList requests) $ \(ident,request) -> do
+      (live,updated)<-foldM (\(kept,view) (ident,request) -> do
         active<-case request of ToolPending query -> toolActive query; _ -> pure True
-        pure [(ident,request) | active]
-      writeIORef pending (M.fromList (concat live))
+        if active then pure (M.insert ident request kept,view) else do
+          result<-case request of
+            ToolPending query | queryHuman query -> atomically (tryReadTMVar (queryReply query))
+            _ -> pure Nothing
+          pure (kept,case result of Just (Left err)->view {status=err}; _->view)) (M.empty,desktop) (M.toList requests)
+      writeIORef pending live
       events<-L.pollEvents client
-      foldM (receive pending) desktop events
-    receive pending desktop (L.ServerError err) = do
+      foldM (receive (Session client pending)) updated events
+    receive (Session _ pending) desktop (L.ServerError err) = do
       readIORef pending >>= mapM_ (failPending err) . M.elems
       writeIORef pending M.empty
       pure desktop {status="HLS: "<>singleLine err,typeHint=""}
@@ -350,12 +493,12 @@ tickTooling t core d = do
       let diagnostics=case values of Array xs -> Vector.toList xs; _ -> []
       modifyIORef' (problems t) (M.insert path (version,diagnostics))
       pure desktop
-    receive pending desktop (L.Response ident response) = do
+    receive session@(Session _ pending) desktop (L.Response ident response) = do
       requests<-readIORef pending
       modifyIORef' pending (M.delete ident)
       case M.lookup ident requests of
         Nothing -> pure desktop
-        Just (ToolPending query) -> finishTool query response desktop
+        Just (ToolPending query) -> finishTool t session query response desktop
         Just (Pending action target path snapshot)
           | fmap fst (targetDocument target desktop)/=Just path -> pure desktop
           | action==TypeInfo && currentTarget desktop/=Just target -> pure desktop
@@ -365,10 +508,17 @@ tickTooling t core d = do
               Nothing -> pure desktop
               Just result -> applyResult core action target path snapshot result desktop
 
-finishTool :: ToolQuery -> Value -> Desktop -> IO Desktop
-finishTool query response d = do
+finishTool :: Tooling -> Session -> ToolQuery -> Value -> Desktop -> IO Desktop
+finishTool t session query response d = do
+  updated<-finishToolResult t session query response d
+  result<-atomically (tryReadTMVar (queryReply query))
+  pure $ case result of Just (Left err) | queryHuman query -> updated {status=err}; _ -> updated
+
+finishToolResult :: Tooling -> Session -> ToolQuery -> Value -> Desktop -> IO Desktop
+finishToolResult t session query response d = do
   active<-toolActive query
   if not active then pure d else
+    if queryHuman query && queryName query=="lsp_code_actions" && (dialog d/=Nothing || fmap bufferId (activeWindow d)/=Just (let (bid,_,_)=queryTarget query in bid)) then completeTool query (Left "Code action selection changed") >> pure d else
     if fmap fst (targetDocument (queryTarget query) d)/=Just (queryPath query) then completeTool query (Left "Buffer changed while awaiting HLS") >> pure d
     else case member "error" response of
       Just err -> completeTool query (Left (fromMaybe "HLS request failed" (member "message" err >>= stringValue))) >> pure d
@@ -376,17 +526,9 @@ finishTool query response d = do
         Nothing -> completeTool query (Left "HLS returned no result") >> pure d
         Just result -> do
           let (bid,version,_)=queryTarget query
-          if queryName query=="lsp_rename" then do
-            changed<-renameBuffers (querySnapshot query) result d
-            case changed of
-              Left err -> completeTool query (Left err) >> pure d
-              Right updated -> do
-                let edited=[object ["bufferId" .= ident,"revision" .= revision (documentBuffer doc)] | (ident,doc)<-M.toList (buffers updated), M.lookup ident (buffers d)/=Just doc]
-                -- Cancellation wins atomically against committing the immutable
-                -- desktop value. Late replies can never apply a timed-out edit.
-                stillActive<-toolActive query
-                accepted<-if stillActive then atomically (tryPutTMVar (queryReply query) (Right (object ["bufferId" .= bid,"applied" .= True,"buffers" .= edited]))) else pure False
-                pure (if accepted then updated else d)
+          if queryName query=="lsp_code_actions" then cacheCodeActions t session query result d
+          else if queryName query=="lsp_apply_code_action" then finishCodeAction query result d
+          else if queryName query=="lsp_rename" then commitToolEdit query result d
           else do
             completeTool query (Right (object (["bufferId" .= bid,"revision" .= version,"result" .= result]++["text" .= hoverText result | queryName query=="lsp_hover"])))
             pure d
@@ -519,7 +661,11 @@ renameBuffers snapshot result d = case workspaceEdits result of
   Right changes -> do
     prepared<-forM changes $ \(path,version,values) -> do
       let opened=find (\(_,doc) -> fmap filePath (documentFile doc)==Just path) (M.toList (buffers d))
-      loaded<-case opened of
+      canonical<-either (const Nothing) Just <$> (try (canonicalizePath path) :: IO (Either IOException FilePath))
+      loaded<-if canonical==Nothing then pure (Left "Cannot inspect the HLS edit path.")
+        else if protectedPath d path || maybe False (protectedPath d) canonical || maybe False (protectedBuffer d . fst) opened then pure (Left "HLS edit refers to a private file.")
+        else if canonical/=Just path || M.notMember path snapshot then pure (Left "HLS edit refers to a file outside the checked project.")
+        else case opened of
         Just (bid,doc) -> pure (Right (Just bid,fromMaybe (FileState path Nothing) (documentFile doc),documentBuffer doc))
         Nothing -> do
           exists<-doesFileExist path
@@ -567,6 +713,20 @@ toolingEffects t core d effects = foldM apply (False,d) effects
       writeIORef (problems t) M.empty
       writeIORef (hovered t) (Nothing,0,False)
       pure (False,desktop {status="Restarting HLS.",typeHint=""})
+    apply (_,desktop) (LanguageRequest RequestCodeActions) = case (activeWindow desktop,activeDocument desktop) of
+      (Just window,Just doc)->do
+        let b=documentBuffer doc
+            Selection anchor cursor=selection window
+            coordinate offset=let prefix=T.take offset (contents b) in (1+T.count "\n" prefix,1+T.length (T.takeWhileEnd (/='\n') prefix))
+            (row,col)=coordinate (min anchor cursor)
+            (endRow,endCol)=coordinate (max anchor cursor)
+        (updated,_)<-startTool True t core desktop "lsp_code_actions" (object
+          ["bufferId" .= bufferId window,"revision" .= revision b,"line" .= row,"column" .= col,"endLine" .= endRow,"endColumn" .= endCol])
+        pure (False,updated)
+      _->pure (False,desktop {status="Open a saved Haskell source file first."})
+    apply (_,desktop) (LanguageRequest (ApplyCodeAction bid version ident)) = do
+      (updated,_)<-startTool True t core desktop "lsp_apply_code_action" (object ["bufferId" .= bid,"revision" .= version,"actionId" .= ident])
+      pure (False,updated)
     apply (_,desktop) (LanguageRequest ShowProblems) = (False,) <$> refreshProblems t desktop
     apply (_,desktop) (LanguageRequest action) = do
       sync t desktop
@@ -585,21 +745,26 @@ toolingEffects t core d effects = foldM apply (False,d) effects
     apply (_,desktop) effect = core desktop [effect]
 
 -- Snapshot closed source files before rename so returned ranges cannot overwrite intervening disk edits.
-sourceSnapshot :: FilePath -> IO (M.Map FilePath (Int,T.Text))
-sourceSnapshot root = do
-  entries<-listDirectory root
-  M.unions <$> forM (filter (\name -> name `notElem` ["dist-newstyle","dist",".stack-work"] && not ("." `T.isPrefixOf` T.pack name)) entries) (\name -> do
-    let path=root </> name
-    linked<-pathIsSymbolicLink path
-    directory<-doesDirectoryExist path
-    if linked then pure M.empty else if directory then sourceSnapshot path
-    else if takeExtension path `elem` [".hs",".lhs"] then do
-      loaded<-loadFile path
-      case loaded of
-        Right (file,b) | textBuffer b -> pure (M.singleton (filePath file) (-1,contents b))
-        Right _ -> ioError (userError "Cannot snapshot binary Haskell source for rename.")
-        Left err -> ioError (userError err)
-    else pure M.empty)
+sourceSnapshot :: Desktop -> FilePath -> IO (M.Map FilePath (Int,T.Text))
+sourceSnapshot d root = walk root
+  where
+    walk directory = do
+      entries<-listDirectory directory
+      if directory/=root && projectBoundary entries then pure M.empty else
+        M.unions <$> forM (filter (\name -> name `notElem` ["dist-newstyle","dist",".stack-work"] && not ("." `T.isPrefixOf` T.pack name)) entries) (\name -> do
+          let path=directory </> name
+          linked<-pathIsSymbolicLink path
+          childDirectory<-doesDirectoryExist path
+          if linked || protectedPath d path then pure M.empty else if childDirectory then walk path
+          else if takeExtension path `elem` [".hs",".lhs"] then do
+            owner<-projectRoot path
+            if owner/=root then pure M.empty else do
+              loaded<-loadFile path
+              case loaded of
+                Right (file,b) | textBuffer b -> pure (M.singleton (filePath file) (-1,contents b))
+                Right _ -> ioError (userError "Cannot snapshot binary Haskell source for rename.")
+                Left err -> ioError (userError err)
+          else pure M.empty)
 
 refreshProblems :: Tooling -> Desktop -> IO Desktop
 refreshProblems t d = do
