@@ -260,7 +260,7 @@ styledImage dark selectable override active sel start chars = V.horizCat (expand
 
 treeLayers :: Desktop -> Sidebar -> [V.Image]
 treeLayers d tree =
-  [place (max 2 ((w-11) `div` 2)) 1 (label frame " Files "),
+  [place (max 0 ((w-15) `div` 2)) 1 (label frame " Files "),
    place (w-5) 1 (label frame "[" V.<|> label (attr cyan blue) "←" V.<|> label frame "]")]
   ++ [place (w-1) y (V.char frame '│')
      | y<-[1..h], not (any (\win -> inside (bounds win) (w-1) y) (windows d))]
@@ -274,7 +274,7 @@ treeLayers d tree =
     branch following node =
       let depth=nodeDepth node
           prefix=T.pack [if IS.member level following then '│' else ' ' | level<-[0..depth-1]]
-            <> (if IS.member depth following then "├─" else "└─")
+            <> (if IS.member depth following then "├" else "└")
       in (IS.insert depth (fst (IS.split depth following)),(node,prefix))
     line (i,(node,prefix))=V.cropRight listWidth (label (if chosen then selected else frame) prefix
       V.<|> label iconColor marker V.<|> label a (" "<>nodeName node) V.<|> V.charFill a ' ' listWidth 1)

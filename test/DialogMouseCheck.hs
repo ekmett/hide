@@ -199,12 +199,12 @@ checks = do
     ("\xf024b src" `T.isInfixOf` snapshot compactTree {materialIcons=True})
   let branched=expandTree 1 [Entry "C.hs" False Nothing Nothing]
         (expandTree 0 [Entry "A" True Nothing Nothing,Entry "B.hs" False Nothing Nothing] compactTree)
-      branchLines=["├─📂 src","│├─📂 A","││└─📄 C.hs","│└─📄 B.hs","└─📄 Main.hs"]
+      branchLines=["├📂 src","│├📂 A","││└📄 C.hs","│└📄 B.hs","└📄 Main.hs"]
       scrolledBranches=branched {sideTree=fmap (\tree -> tree {treeScroll=2}) (sideTree branched)}
   check "Files draws connected branches with one-column depth steps"
     (all (`T.isInfixOf` snapshot branched) branchLines)
   check "tree branches preserve ancestry above the scrolled viewport"
-    ("││└─📄 C.hs" `T.isInfixOf` snapshot scrolledBranches)
+    ("││└📄 C.hs" `T.isInfixOf` snapshot scrolledBranches)
   check "inactive scrollbar region only focuses window"
     (fmap windowId (activeWindow focusedBehind)==Just (windowId behind) && drag focusedBehind==Nothing && null behindEffects && fmap scrollRow (activeWindow focusedBehind)==Just (scrollRow behind))
   check "inactive close region cannot close the window"
