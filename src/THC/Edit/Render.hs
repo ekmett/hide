@@ -272,8 +272,8 @@ contextLayers d (Rect x y w h,chosen) =
 dialogLayers :: Desktop -> Dialog -> [V.Image]
 dialogLayers d dg =
   [place (x+max 1 ((w-T.length title) `div` 2)) y (label (attr white gray) title)]
-  ++ [place bx by (V.cropRight bw (buttonImage i name)) | (i,(Rect bx by bw _,name))<-zip [0..] (zip (buttonRects d dg) (buttons dg))]
-  ++ concatMap (buttonShadow gray) (buttonRects d dg)
+  ++ [place (bx+if pushed i then 1 else 0) by (V.cropRight bw (buttonImage i name)) | (i,(Rect bx by bw _,name))<-zip [0..] (zip (buttonRects d dg) (buttons dg))]
+  ++ concat [buttonShadow gray r | (i,r)<-zip [0..] (buttonRects d dg), not (pushed i)]
   ++ concat [fieldLayer i r f | (i,(r,f))<-zip [0..] (zip (fieldRects d dg) (fields dg))]
   ++ [place (x+3) (y+2+i) (row paper (w-6) line) | (i,line)<-zip [0..] (body dg),y+2+i<y+h-3]
   ++ [place x y (box (attr white gray) True w h)]
@@ -281,9 +281,9 @@ dialogLayers d dg =
     Rect x y w h=dialogRect d dg
     title=" "<>dialogTitle dg<>" "
     pushed i=buttonPressed d==Just i && buttonHover d==Just i
-    buttonImage i name = label normal (if pushed i then "   " else "  ") V.<|> label normal (T.take pos name)
+    buttonImage i name = label normal "  " V.<|> label normal (T.take pos name)
       V.<|> label (attr white bg) (T.take 1 (T.drop pos name)) V.<|> label normal (T.drop (pos+1) name)
-      V.<|> label normal (if pushed i then " " else "  ")
+      V.<|> label normal "  "
       where
         bg | pushed i = V.RGBColor 0 85 0
            | buttonHover d==Just i = V.RGBColor 85 255 85

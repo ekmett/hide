@@ -26,6 +26,8 @@ checks = do
   check "button release activates" (dialog released == Nothing)
   check "release outside cancels button" (dialog cancelled /= Nothing)
   check "button press is visibly distinct" (snapshotHtml modal /= snapshotHtml pressed)
+  check "pressed button loses its raised shadow" (not ("▀" `T.isInfixOf` snapshot pressed || "▄" `T.isInfixOf` snapshot pressed))
+  check "pressed button moves its face without changing label padding" ("background:rgb(0,85,0)'>  O" `T.isInfixOf` snapshotHtml pressed)
   let hovered=fst (hoverAt bx by modal)
   check "button hover is visibly distinct" (snapshotHtml modal /= snapshotHtml hovered)
   check "hover leaving clears highlight" (buttonHover (fst (hoverAt 0 0 hovered))==Nothing)
