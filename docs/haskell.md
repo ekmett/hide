@@ -82,3 +82,17 @@ checks the new text.
 
 For commands that build from disk, save first. [Running and debugging](running.md)
 covers the THC target, terminals and debugger attachment.
+
+## Cabal project browser
+
+**Tools > Project browser** lists the local components in Cabal's existing
+`dist-newstyle/cache/plan.json`. Use Prev and Next to move between pages,
+then Details to open a read-only window with the package, component, source
+root and library/build-tool dependencies. Unresolved dependency IDs remain
+visible when their units are absent from the bounded graph.
+
+The chooser reports the plan's compiler, freshness and any omitted units.
+Changed manifests or unsaved manifest buffers mark it stale; unchanged
+timestamps do not prove it current. Refresh reads the plan again. If no plan
+exists, build with Cabal first. Browsing never starts a build, configures a
+project, or changes the run target.

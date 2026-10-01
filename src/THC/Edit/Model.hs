@@ -49,7 +49,7 @@ data Command = New | Open | Download | ChangeDir | Save | SaveAs | Close | Quit 
   | Find | FindNext | FindPrevious | Replace | GoTo | SelectAll | Zoom | NextWindow | Cascade | Tile
   | SplitVertical | SplitHorizontal | About | Help | EditorOptions | Gallery
   | InspectType | Definition | Complete | Problems | NextMessage | PreviousMessage | RestartHLS | RenameSymbol | CodeActions
-  | ToggleTree | GitDiff | GitCommit | GitFetch | GitPull | GitMerge | ReviewDisk
+  | ProjectBrowser | ToggleTree | GitDiff | GitCommit | GitFetch | GitPull | GitMerge | ReviewDisk
   | CompileTarget | MakeTarget | StopBuild | RunTarget | RunOptions | OpenTerminal | StopTerminal
   | AgentChoose Text | AgentSet Text Text
   | AgentDirectory | AgentOptions | AgentPermissions | AgentGuidance | Conversation | AgentCancel | AgentResume | AgentCopyRaw | AgentNew
@@ -62,9 +62,11 @@ data GitAction = FetchRemote | PullRemote | MergeBranch Text deriving (Eq,Show)
 data ContextKind = SourceContext | GitContext | MessagesContext | AgentContext [(Text,Command)] deriving (Eq,Show)
 data LanguageAction = TypeInfo | FindDefinition | Completions | ShowProblems | RestartLanguage | RenameAt Text | RequestCodeActions | ApplyCodeAction Int Int Text deriving (Eq,Show)
 data Completion = Completion Text [(Int,Int,Text)] deriving (Eq,Show)
-data Effect = DownloadDocument Int | ReadBrowserClipboard | WriteBrowserClipboard Text | LanguageRequest LanguageAction | RunGit GitAction | ReadMergeBranches | JumpTo FilePath Int Int | ReadPath FilePath | BrowsePath FilePath Text | BrowseDirectories FilePath | ChangeDirectory FilePath | OpenChoice FilePath Text Text | ReadTree FilePath | ExpandTree Int | ReadHelp | RefreshGit FilePath | ReadGitDiff | AskGitCommit | WriteGitCommit Text | SaveDocument Int (Maybe FilePath) (Maybe Command) | ReviewExternal | ResolveConflict Conflict ConflictAction | AgentAction Text [Text] | PermissionAction Text [Text] | DebugAction Text [Text] | SetScreenMode Int | Exit deriving (Eq,Show)
+data ProjectAction = LoadProject | ProjectPage Int Int | ProjectDetails Int Int deriving (Eq,Show)
+data Effect = ProjectRequest ProjectAction | DownloadDocument Int | ReadBrowserClipboard | WriteBrowserClipboard Text | LanguageRequest LanguageAction | RunGit GitAction | ReadMergeBranches | JumpTo FilePath Int Int | ReadPath FilePath | BrowsePath FilePath Text | BrowseDirectories FilePath | ChangeDirectory FilePath | OpenChoice FilePath Text Text | ReadTree FilePath | ExpandTree Int | ReadHelp | RefreshGit FilePath | ReadGitDiff | AskGitCommit | WriteGitCommit Text | SaveDocument Int (Maybe FilePath) (Maybe Command) | ReviewExternal | ResolveConflict Conflict ConflictAction | AgentAction Text [Text] | PermissionAction Text [Text] | DebugAction Text [Text] | SetScreenMode Int | Exit deriving (Eq,Show)
 data Field = Input Text Text Int | CheckBox Text Bool | Radio Text [Text] Int | ListBox Text [Text] Int | FileList [Entry] Int deriving (Eq,Show)
 data Purpose = Opening FilePath Text [Entry] | ChangingDirectory FilePath [Entry] | Committing | Saving Int (Maybe Command) | Finding | Replacing | GoingTo | Renaming
+  | ProjectLoading Int | ProjectChoices Int Int
   | CodeActionChoices Int Int [Text]
   | Completing Int Int Int [Completion] | Locations [(FilePath,Int,Int)] | Merging [Text]
   | DiskConflict Conflict | AgentDialog Text | PermissionDialog Text | DebugDialog Text
@@ -132,15 +134,15 @@ menus =
       mi "Trace into" "F7" (DebugCommand "stepIn"),mi "Step over" "F8" (DebugCommand "next"),mi "Step out" "Ctrl+F7" (DebugCommand "stepOut"),
       mi "Threads..." "" (DebugCommand "threads"),mi "Call stack..." "" (DebugCommand "stack"),mi "Scopes..." "" (DebugCommand "scopes"),
       mi "Exceptions..." "" (DebugCommand "exceptions"),mi "Output" "" (DebugCommand "output"),mi "Disconnect" "" (DebugCommand "disconnect")])
-  ,("Tools",'t',[mi "File tree" "Ctrl+B" ToggleTree,mi "Git diff..." "" GitDiff,mi "Approve changes..." "" GitCommit,mi "Inspect type" "Shift+F1" InspectType,mi "Code actions..." "" CodeActions,mi "Messages" "" Problems,mi "Go to next" "Alt+F8" NextMessage,mi "Go to previous" "Alt+F7" PreviousMessage,mi "Restart language server" "" RestartHLS,mi "Conversation" "" Conversation,mi "Agents..." "" AgentDirectory,mi "Conversation model..." "" (AgentChoose ""),mi "Cancel reply" "" AgentCancel,mi "Resume session..." "" AgentResume,mi "New session" "" AgentNew,mi "Copy raw conversation" "" AgentCopyRaw,mi "Widget gallery..." "" Gallery,off "Project browser..." "" "Cabal component browsing is a later milestone."])
+  ,("Tools",'t',[mi "File tree" "Ctrl+B" ToggleTree,mi "Git diff..." "" GitDiff,mi "Approve changes..." "" GitCommit,mi "Inspect type" "Shift+F1" InspectType,mi "Code actions..." "" CodeActions,mi "Messages" "" Problems,mi "Go to next" "Alt+F8" NextMessage,mi "Go to previous" "Alt+F7" PreviousMessage,mi "Restart language server" "" RestartHLS,mi "Conversation" "" Conversation,mi "Agents..." "" AgentDirectory,mi "Conversation model..." "" (AgentChoose ""),mi "Cancel reply" "" AgentCancel,mi "Resume session..." "" AgentResume,mi "New session" "" AgentNew,mi "Copy raw conversation" "" AgentCopyRaw,mi "Widget gallery..." "" Gallery,mi "Project browser..." "" ProjectBrowser])
   ,("Options",'o',[mi "Preferences..." "" EditorOptions,mi "Agents..." "" AgentOptions,mi "Agent Permissions" "" AgentPermissions,mi "Agent Context..." "" AgentGuidance])
   ,("Window",'w',[mi "Agents..." "" AgentDirectory,mi "Tile" "" Tile,mi "Cascade" "" Cascade,mi "Split vertically" "" SplitVertical,mi "Split horizontally" "" SplitHorizontal,mi "Zoom" "F5" Zoom,mi "Next" "F6" NextWindow,mi "Close" "Alt+F3" Close])
   ,("Help",'h',[mi "Contents" "F1" Help,mi "About Turbo Haskell..." "" About])]
   where mi = MenuItem
-        off title key reason = mi title key (Disabled reason)
 
 menuMnemonic :: MenuItem -> Char
 menuMnemonic (MenuItem title _ cmd) = case cmd of
+  ProjectBrowser -> 'b'
   ToggleTree -> 'f'; GitDiff -> 'g'; GitCommit -> 'a'
   Problems -> 'm'; NextMessage -> 'n'; PreviousMessage -> 'p'
   SaveAs -> 'a'; Quit -> 'x'; Cut -> 't'; SelectAll -> 'a'
@@ -160,6 +162,7 @@ commandDescription cmd = case cmd of
   Save -> "Save the active file."; SaveAs -> "Save the active buffer under a new filename."
   GoToMessage -> "Jump to the selected message in its source file."
   CopyAllMessages -> "Copy all messages with their source locations."
+  ProjectBrowser -> "Browse local Cabal components and their dependency graph without starting a build."
   ToggleHex -> "Switch between UTF-8 text and editable hexadecimal bytes."
   ReviewDisk -> "Review an external change without discarding unsaved text."
   CompileTarget -> "Compile the current source or selected project target."
@@ -520,6 +523,7 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
     go GitCommit d = (d,[AskGitCommit])
     go GitFetch d = (d,[RunGit FetchRemote])
     go GitPull d = (d,[RunGit PullRemote])
+    go ProjectBrowser d = (d,[ProjectRequest LoadProject])
     go GitMerge d = (d,[ReadMergeBranches])
     go EditorOptions d = (prompt "Preferences" Settings
       ([Radio "Key bindings" ["Modern","WordStar"] (if wordStar d then 1 else 0)] ++
@@ -592,7 +596,7 @@ findPrevious d = case activeWindow d of
         candidates=[p | p<-[0..T.length text-T.length needle],needle `T.isPrefixOf` T.drop p text]
 
 helpLines :: [Text]
-helpLines = ["F1 Help   F2 Save   F3 Open   F5 Zoom", "F6 Next window   F10 Menu   Alt+X Exit", "Alt+F3 Close   Ctrl+Z Undo   Ctrl+Y Redo", "Shift+arrows Select   Ctrl+arrows Words", "Ctrl+C/X/V Copy/Cut/Paste (internal clipboard)", "Ctrl+F Find   Ctrl+R Replace   Ctrl+L Next", "Ctrl+G Go to line   Ctrl+A Select all", "Mouse: title drag, bottom-right resize", "Window menu: tile, cascade, shared splits", "", "WordStar (Options > Editor):", "Ctrl+E/S/D/X Up/Left/Right/Down", "Ctrl+A/F Word left/right   Ctrl+Y Delete line", "Ctrl+K B/K Block start/end   C/V Copy/Cut", "Ctrl+K Y Delete block   S Save   D Close", "Ctrl+Q S/D Line start/end   R/C File top/end", "Ctrl+Q F Find   Ctrl+Q A Replace", "Escape cancels a command prefix.", "", "HLS and Cabal browsing are not connected yet."]
+helpLines = ["F1 Help   F2 Save   F3 Open   F5 Zoom", "F6 Next window   F10 Menu   Alt+X Exit", "Alt+F3 Close   Ctrl+Z Undo   Ctrl+Y Redo", "Shift+arrows Select   Ctrl+arrows Words", "Ctrl+C/X/V Copy/Cut/Paste (internal clipboard)", "Ctrl+F Find   Ctrl+R Replace   Ctrl+L Next", "Ctrl+G Go to line   Ctrl+A Select all", "Mouse: title drag, bottom-right resize", "Window menu: tile, cascade, shared splits", "", "WordStar (Options > Editor):", "Ctrl+E/S/D/X Up/Left/Right/Down", "Ctrl+A/F Word left/right   Ctrl+Y Delete line", "Ctrl+K B/K Block start/end   C/V Copy/Cut", "Ctrl+K Y Delete block   S Save   D Close", "Ctrl+Q S/D Line start/end   R/C File top/end", "Ctrl+Q F Find   Ctrl+Q A Replace", "Escape cancels a command prefix.", "", "Tools: HLS code actions and Cabal project browser."]
 
 fieldHeight :: Field -> Int
 fieldHeight Input{} = 3
@@ -1492,6 +1496,12 @@ submitDialog button dg original
           (original,[BrowseDirectories (base </> T.unpack (entryName entry))])
       | otherwise -> (original,[if button==1 then BrowseDirectories chosenPath else ChangeDirectory chosenPath])
       where chosenPath=if isAbsolute (T.unpack first) then T.unpack first else base </> T.unpack first
+    ProjectLoading _ -> (d,[])
+    ProjectChoices token page -> (d,[ProjectRequest (case button of
+      0 -> ProjectDetails token (page*32+selected)
+      1 -> ProjectPage token (page-1)
+      2 -> ProjectPage token (page+1)
+      _ -> LoadProject)])
     CodeActionChoices bid version choices -> case drop selected choices of
       ident:_ -> (d,[LanguageRequest (ApplyCodeAction bid version ident)])
       _ -> (d,[])

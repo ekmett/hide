@@ -42,6 +42,7 @@ import qualified DAPCheck
 import qualified DebuggerCheck
 import qualified CompletionCheck
 import qualified BuildCheck
+import qualified ProjectBrowserCheck
 import qualified RunCheck
 import qualified ConversationCheck
 import qualified AgentFilesCheck
@@ -260,6 +261,7 @@ main = do
   check "help text cannot be edited" (activeText (insertText "x" help) == "Documentation")
   HelpCheck.checks
   BrowserCheck.checks
+  ProjectBrowserCheck.checks
   FilesCheck.checks
   ExternalCheck.checks
   ReconcileCheck.checks

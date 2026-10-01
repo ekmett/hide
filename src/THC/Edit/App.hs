@@ -24,6 +24,7 @@ import THC.Edit.WorkspaceFilesMCP
 import THC.Edit.HistoryMCP
 import THC.Edit.RuntimeMCP
 import THC.Edit.WorkspaceMCP
+import THC.Edit.ProjectBrowser
 import qualified THC.Edit.AgentRuntime as AR
 import qualified THC.Edit.AgentHub as AH
 import THC.Edit.AgentAccess (resolveAgentAccess)
@@ -243,9 +244,9 @@ runEditor args = do
           mapM_ (setEnv "THC_EDIT_SESSION") daemon
           font<-Font.loadFont
           let specs=builtinTools++debugTools++chatTools++toolingTools++workspaceTools++fileTools++testsTools++historyTools++runtimeTools++gitTools++controlTools++clipboardTools++docsTools++[screenTool]
-          withPermissions (specs++agentTools) $ \permissions -> withDebugger $ \debugger -> withConversationAt (startingDirectory protectedDesktop) $ \conversation -> withTooling $ \tooling -> withGitOperations $ \gitOperations -> withReconciliation $ \reconciliation -> do
+          withPermissions (specs++agentTools) $ \permissions -> withDebugger $ \debugger -> withConversationAt (startingDirectory protectedDesktop) $ \conversation -> withTooling $ \tooling -> withGitOperations $ \gitOperations -> withReconciliation $ \reconciliation -> withProjectBrowser $ \projectBrowser -> do
             exiting<-newIORef False
-            let runtimeEffects=gitOperationEffects gitOperations (debuggerEffects debugger (conversationEffects conversation (reconciliationEffects reconciliation (toolingEffects tooling applyEffects))))
+            let runtimeEffects=projectBrowserEffects projectBrowser (gitOperationEffects gitOperations (debuggerEffects debugger (conversationEffects conversation (reconciliationEffects reconciliation (toolingEffects tooling applyEffects)))))
                 core d pending=foldM step (False,d) pending
                   where
                     step result@(True,_) _=pure result
@@ -260,7 +261,7 @@ runEditor args = do
                   (quit,updated)<-policyEffects permissions core d pending
                   approvedExit<-readIORef exiting
                   pure (quit || approvedExit,updated)
-                tick d=tickGitOperations gitOperations applyEffects d >>= tickTooling tooling applyEffects >>= tickReconciliation reconciliation >>= tickConversation conversation >>= tickDebugger debugger (toolingEffects tooling applyEffects) >>= tickPermissions permissions
+                tick d=tickProjectBrowser projectBrowser d >>= tickGitOperations gitOperations applyEffects >>= tickTooling tooling applyEffects >>= tickReconciliation reconciliation >>= tickConversation conversation >>= tickDebugger debugger (toolingEffects tooling applyEffects) >>= tickPermissions permissions
                 inspectTool d name parameters
                   | name `elem` ["list_windows","list_buffers","read_buffer","read_selection"] = pure (d,pure (builtinTool d name parameters))
                   | name `elem` chatToolNames = chatTool conversation d name parameters
@@ -498,6 +499,7 @@ applyEffects = foldM apply . (False,)
     apply (_,d) LanguageRequest{}=pure (False,d {status="Language tools are unavailable in this preview."})
     apply (_,d) JumpTo{}=pure (False,d)
     apply (_,d) RunGit{}=pure (False,d {status="Git operations are unavailable in this preview."})
+    apply (_,d) (ProjectRequest _)=pure (False,d {status="Project browser is unavailable in this preview."})
     apply (_,d) ReadMergeBranches=pure (False,d {status="Git operations are unavailable in this preview."})
     apply (_,d) ReviewExternal=pure (False,d {status="Disk change monitoring is unavailable in this preview."})
     apply (_,d) ResolveConflict{}=pure (False,d {status="Disk change monitoring is unavailable in this preview."})

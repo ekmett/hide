@@ -48,8 +48,9 @@ use `lsp_document_symbols`, `lsp_definition`, `lsp_type_definition` and
 unsaved buffer contents; its default search also includes untitled buffers.
 
 **Recover:** page results and inspect skipped/truncated counts before treating a
-missing match as absent. Project context identifies the root/package; a complete
-Cabal component/dependency graph is a separate planned extension.
+missing match as absent. Project context identifies the root/package. The existing
+Cabal component/dependency graph is available through `workspace_project` and
+**Tools > Project browser**.
 
 ## Edit and review
 
