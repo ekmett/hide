@@ -213,10 +213,12 @@ pump runtime=do
           Just "agent_message_chunk"->chunk "output" update
           Just "agent_thought_chunk"->chunk "thought" update
           Just kind | kind `elem` ["tool_call","tool_call_update"]->do
-            title<-scrub runtime (fromMaybe "Tool activity" (field "title" update))
+            title<-traverse (scrub runtime) (field "title" update)
+            ident<-traverse (fmap (T.take 512) . scrub runtime) (field "toolCallId" update)
             let status=fromMaybe "pending" (field "status" update)
                 safeStatus=if status `elem` ["pending","in_progress","completed","failed"] then status else "pending"::Text
-            publishUpdate runtime "tool" (object ["title" .= title,"status" .= safeStatus])
+            publishUpdate runtime "tool" (object (["status" .= safeStatus]++
+              maybe [] (\value->["title" .= value]) title++maybe [] (\value->["toolCallId" .= value]) ident))
           Just "config_option_update"->writeIORef (configuration runtime) update
           _->pure ()
     handle (A.Notification _ _)=pure ()
