@@ -1429,6 +1429,9 @@ submitDialog button dg original
           (original,[BrowseDirectories (base </> T.unpack (entryName entry))])
       | otherwise -> (original,[if button==1 then BrowseDirectories chosenPath else ChangeDirectory chosenPath])
       where chosenPath=if isAbsolute (T.unpack first) then T.unpack first else base </> T.unpack first
+    CodeActionChoices bid version choices -> case drop selected choices of
+      ident:_ -> (d,[LanguageRequest (ApplyCodeAction bid version ident)])
+      _ -> (d,[])
     Completing bid version pos choices -> case (activeWindow d,activeDocument d,drop selected choices) of
       (Just w,Just doc,Completion _ edits:_) | bufferId w==bid, revision (documentBuffer doc)==version, caret (selection w)==pos ->
         (applyCompletion edits d,[])
@@ -1487,9 +1490,6 @@ submitDialog button dg original
     values=[value | Input _ value _ <- fields dg]
     first=fromMaybe "" (listToMaybe values); second=fromMaybe "" (listToMaybe (drop 1 values))
     discardActive s = case activeWindow s of
-    CodeActionChoices bid version choices -> case drop selected choices of
-      ident:_ -> (d,[LanguageRequest (ApplyCodeAction bid version ident)])
-      _ -> (d,[])
       Nothing -> s
       Just w -> s {windows=filter ((/=bufferId w) . bufferId) (windows s), buffers=M.delete (bufferId w) (buffers s)}
 
