@@ -25,6 +25,7 @@ checks=do
       Rect x y _ _=bounds window
       draft=composerRect chat window
       denied d event=case P.applyGuestInput event d of Left _->True; _->False
+  check "agents cannot stop the editor session" (denied base P.SuspendSession)
   check "guest Git review uses filtered workspace tool, not unrestricted human review"
     (not (guestCommandAllowed GitDiff) && not (guestCommandAllowed GitCommit) &&
      all (not . guestEffectsAllowed . pure) [ReadGitDiff,AskGitCommit,WriteGitCommit "message"])

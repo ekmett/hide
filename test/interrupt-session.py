@@ -1,0 +1,126 @@
+#!/usr/bin/env python3
+"""Ctrl-C stops a browser session daemon, retaining unsaved work for resume.
+Usage: python3 test/interrupt-session.py /absolute/path/to/thc-edit
+Only creates, interrupts and closes its own temporary session.
+"""
+import os
+from pathlib import Path
+import runpy
+import secrets
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+
+wire = runpy.run_path(str(Path(__file__).with_name('remote-session.py')))
+binary = str(Path(sys.argv[1]).resolve())
+
+with tempfile.TemporaryDirectory(prefix='thc-interrupt-') as temporary:
+    root = Path(temporary)
+    source = root / 'sample.txt'
+    source.write_text('original\n')
+    env = dict(os.environ, XDG_DATA_HOME=str(root / 'data'),
+               XDG_CONFIG_HOME=str(root / 'config'), THC_EDIT_WEB_OPEN='0',
+               thc_edit_datadir=str(Path(__file__).resolve().parents[1]))
+    def run(*args):
+        return subprocess.check_output([binary, *args], cwd=root, env=env,
+                                       stdin=subprocess.DEVNULL, text=True, timeout=45)
+    ident = secrets.token_hex(24)
+    daemon_log = open(root / 'daemon.log', 'w+')
+    daemon = subprocess.Popen([binary, '--remote-daemon', ident, str(source)],
+        cwd=root, env=env, stdin=subprocess.DEVNULL, stdout=daemon_log, stderr=daemon_log)
+    def control(p, kind):
+        try:
+            return wire['control'](p, kind)
+        except BaseException:
+            if p.poll() is not None:
+                print('Relay error:', p.stderr.read().decode(errors='replace'), file=sys.stderr)
+            raise
+    def attach():
+        p = subprocess.Popen([binary, '--remote'], cwd=root, env=env,
+                             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, bufsize=0)
+        wire['send'](p, dict(type='hello', version=1, session=ident,
+                            client=secrets.token_hex(24), ack=0, resume=True, args=[]))
+        control(p, 'hello')
+        control(p, 'assets')
+        return p
+    def finish(p):
+        p.stdin.close()
+        try:
+            p.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            p.wait()
+        p.stdout.close()
+        p.stderr.close()
+    def await_state(state):
+        until = time.monotonic() + 15
+        while time.monotonic() < until:
+            listing = run('--sessions')
+            if ident + '  ' + state in listing:
+                return listing
+            time.sleep(.05)
+        raise AssertionError(listing)
+    frontend = None
+    try:
+        await_state('running detached')
+        p = attach()
+        wire['send'](p, dict(type='paste', text='unsaved ', seq=1))
+        control(p, 'ack')
+        finish(p)
+        await_state('running detached')
+        with open(root / 'frontend.log', 'w+') as log:
+            frontend = subprocess.Popen([binary, '--web', '--resume', ident],
+                cwd=root, env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=log)
+            await_state('running attached')
+            frontend.send_signal(signal.SIGTERM)
+            frontend.wait(timeout=20)
+            await_state('running detached')
+            frontend = subprocess.Popen([binary, '--web', '--resume', ident],
+                cwd=root, env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=log)
+            await_state('running attached')
+            frontend.send_signal(signal.SIGINT)
+            frontend.wait(timeout=20)
+            log.seek(0)
+            assert 'Resume: thc-edit --resume ' + ident in log.read()
+            await_state('recoverable')
+            assert daemon.wait(timeout=15) == 0
+        assert source.read_text() == 'original\n'
+        run('--daemon', '--resume', ident)
+        p = attach()
+        wire['send'](p, dict(type='key', key='s', mods=['ctrl'], seq=1))
+        control(p, 'ack')
+        assert source.read_text() == 'unsaved original\n'
+        wire['send'](p, dict(type='command', command='quit', seq=2))
+        control(p, 'closed')
+        finish(p)
+        print('Ctrl-C stops daemon; unsaved buffer resumes and saves correctly')
+    except BaseException:
+        daemon_log.seek(0)
+        print(daemon_log.read(), file=sys.stderr)
+        endpoint_log = Path('/tmp') / ('thc-edit-' + str(os.geteuid())) / (ident + '.log')
+        if endpoint_log.exists():
+            print(endpoint_log.read_text(), file=sys.stderr)
+        raise
+    finally:
+        if frontend and frontend.poll() is None:
+            frontend.kill()
+            frontend.wait()
+        # Finish only this fixture, including on a pre-fix assertion failure.
+        if daemon.poll() is None:
+            daemon.send_signal(signal.SIGINT)
+            try:
+                daemon.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                daemon.kill()
+                daemon.wait()
+        daemon_log.close()
+        if ident in run('--sessions'):
+            p = attach()
+            wire['send'](p, dict(type='key', key='s', mods=['ctrl'], seq=1))
+            control(p, 'ack')
+            wire['send'](p, dict(type='command', command='quit', seq=2))
+            control(p, 'closed')
+            finish(p)

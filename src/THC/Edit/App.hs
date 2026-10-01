@@ -9,7 +9,7 @@ import THC.Edit.Defaults
 import THC.Edit.MCPPermissions
 import THC.Edit.ClipboardMCP
 import THC.Edit.ControlMCP
-import Control.Exception (bracket, finally, catch, AsyncException(UserInterrupt), throwIO)
+import Control.Exception (bracket, finally, catch, AsyncException(UserInterrupt), Exception, throwIO)
 import Control.Concurrent (myThreadId, throwTo, threadDelay)
 #ifndef mingw32_HOST_OS
 import System.Posix.Signals (installHandler, Handler(Catch), sigTERM, sigHUP)
@@ -36,7 +36,7 @@ import THC.Edit.RemoteTerminal (runRemoteTerminal)
 import Text.Read (readMaybe)
 import Data.IORef (newIORef, readIORef, writeIORef)
 import Control.Monad (foldM, when)
-import System.IO (hFlush, stdout, stdin, hIsTerminalDevice)
+import System.IO (hPutStrLn, stderr, hFlush, stdout, stdin, hIsTerminalDevice)
 import THC.Edit.Debugger
 import THC.Edit.Conversation
 import THC.Edit.Tooling
@@ -194,6 +194,11 @@ runEditor args = do
           attach=case sessionHost record of
             Nothing -> withLocalPeer (sessionId record) reattach (sessionArguments record)
             Just host -> withSSHSession host (sessionId record) reattach (sessionArguments record)
+          interruptedDisplay peer = display peer `catch` (\err -> case err of
+            UserInterrupt -> do
+              writeIORef wasInterrupted True
+              suspendSession peer
+            other -> throwIO (other :: AsyncException))
           display peer | Daemon `elem` flags = awaitSessionReady peer
           display peer = do
             peerSend peer (JsonPacket (object ["type" .= ("frontend"::T.Text),"mode" .= (if backend==Terminal then Nothing else Just screenMode)]))
@@ -207,7 +212,12 @@ runEditor args = do
             when (saved/=Nothing || detached) $ putStrLn ("Session: "++sessionId record++"\nResume: thc-edit --resume "++sessionId record) >> hFlush stdout
       -- A local session starts beside the project that created it. Reattachment
       -- needs only its endpoint, so a removed/renamed working directory is fine.
-      (withDetachSignals (attach display >> when (Daemon `elem` flags) (awaitSessionDetached record)) `catch` (\err -> writeIORef wasInterrupted True >> interrupted err)) `finally` report
+      (withDetachSignals (do
+          attach interruptedDisplay
+          stopped <- readIORef wasInterrupted
+          when (Daemon `elem` flags && not stopped) (awaitSessionDetached record))
+        `catch` (\err -> writeIORef wasInterrupted True >> interrupted err)
+        `catch` (\FrontendDetached -> writeIORef wasInterrupted True)) `finally` report
     else do
         let initial=if Demo `elem` flags then addDocument Nothing (newBuffer (activeText demoDesktop)) (initialDesktop dimensions) else initialDesktop dimensions
             configured=(fst (handleEvent (uncurry V.EvResize dimensions) initial)) {appearance=colorMode,systemDark=maybe True (not . (`elem` ["7","15"]) . reverse . takeWhile (/=';') . reverse) terminalColors,wordStar=flagBool WordStar StandardKeys (fromMaybe (wordStar initial) (defaultWordStar defaults)),crtFilter=flagBool CRT NoCRT (fromMaybe (crtFilter initial) (defaultCRT defaults)),materialIcons=flagBool MaterialIcons ClassicIcons (fromMaybe (materialIcons initial) (defaultMaterialIcons defaults)),blinkCursor=fromMaybe (fromMaybe (blinkCursor initial) (defaultBlinkCursor defaults)) (lastMaybe [value | CursorBlink value<-flags]),pixelateUnicode=fromMaybe (fromMaybe (pixelateUnicode initial) (defaultPixelateUnicode defaults)) (lastMaybe [value | Pixelate value<-flags]),streamerMode=fromMaybe (fromMaybe False (defaultStreamerMode defaults)) (lastMaybe [value | Streamer value<-flags]),videoMode=if backend == Terminal then Nothing else Just screenMode}
@@ -401,13 +411,33 @@ interrupted :: AsyncException -> IO ()
 interrupted UserInterrupt=pure ()
 interrupted other=throwIO other
 
+-- Unlike detachment, a launcher interrupt stops the session after checkpointing.
+-- This travels through the active peer, so local and SSH sessions behave alike.
+suspendSession :: RemotePeer -> IO ()
+suspendSession peer = do
+  result <- timeout 15000000 $ do
+    peerSend peer (JsonPacket (object ["type" .= ("suspend"::T.Text)]))
+    wait
+  case result of
+    Just True -> pure ()
+    _ -> hPutStrLn stderr "Could not confirm daemon shutdown; the session may still be running."
+  where
+    wait = peerReceive peer >>= \packet -> case packet of
+      Just (JsonPacket value) | Just (("closed" :: T.Text),True) <- parseMaybe
+        (withObject "shutdown" (\o -> (,) <$> o .: "type" <*> o .:? "resumable" .!= False)) value -> pure True
+      Nothing -> pure False
+      _ -> wait
+
+data FrontendDetached = FrontendDetached deriving Show
+instance Exception FrontendDetached
+
 withDetachSignals :: IO a -> IO a
 #ifdef mingw32_HOST_OS
 withDetachSignals = id
 #else
 withDetachSignals action = do
   thread<-myThreadId
-  let install signal=installHandler signal (Catch (throwTo thread UserInterrupt)) Nothing
+  let install signal=installHandler signal (Catch (throwTo thread FrontendDetached)) Nothing
       restore signal handler=installHandler signal handler Nothing >> pure ()
   bracket (install sigTERM) (restore sigTERM) $ \_ ->
     bracket (install sigHUP) (restore sigHUP) (const action)

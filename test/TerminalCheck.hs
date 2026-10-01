@@ -45,6 +45,18 @@ checks = bracket temporary removePathForcibly $ \directory -> do
     (_,raw) <- waitFor terminal (maybe False (const True) . snapshotExitCode)
     check "VT query replies reach interactive process" ("\ESC[1;1R" `BS.isInfixOf` raw)
   either (error . T.unpack) pure query
+  interrupt <- withTerminal (config "trap 'printf interrupted; exit 0' INT; printf ready; read line") $ \terminal -> do
+    _ <- waitFor terminal (BS.isInfixOf "ready" . snapshotOutput)
+    writeTerminal terminal "\ETX" >>= requireRight
+    (_,raw) <- waitFor terminal (maybe False (const True) . snapshotExitCode)
+    check "Ctrl-C interrupts the PTY foreground process" ("interrupted" `BS.isInfixOf` raw)
+  either (error . T.unpack) pure interrupt
+  rawControl <- withTerminal (config "stty raw -echo; printf ready; dd bs=1 count=1 2>/dev/null") $ \terminal -> do
+    _ <- waitFor terminal (BS.isInfixOf "ready" . snapshotOutput)
+    writeTerminal terminal "\ETX" >>= requireRight
+    (_,raw) <- waitFor terminal (maybe False (const True) . snapshotExitCode)
+    check "raw terminal receives Ctrl-C as a byte" ("\ETX" `BS.isInfixOf` raw)
+  either (error . T.unpack) pure rawControl
   let foregroundFile=directory </> "foreground-pid"
       jobScript=directory </> "foreground.py"
       heartbeat=directory </> "heartbeat"

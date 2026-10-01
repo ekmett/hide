@@ -44,10 +44,15 @@ native window closes; the browser confirms detachment and stops reconnecting.
 The launching terminal prints the session ID and a command to resume it.
 Buffers, including unsaved changes, remain in the session process.
 
-On POSIX systems, sending SIGINT, SIGTERM or SIGHUP to the frontend also detaches
-and prints the resume command. This stops the display process while the editor
-session continues. In browser mode, closing a tab leaves the local frontend
-process running; use **Ctrl+]** in the page to release the session for another
+**Ctrl+C in the launching terminal** stops the display and its editor daemon,
+after checkpointing unsaved buffers. The printed resume command restores that
+checkpoint; running terminal jobs, agents and debugger connections stop with the
+daemon. Inside an embedded terminal, **Ctrl+C** instead goes to that terminal's
+foreground program. Use **Ctrl+]** when you want those programs to keep running.
+
+On POSIX systems, SIGTERM or SIGHUP sent to the frontend still detaches and prints
+the resume command while the editor session continues. In browser mode, closing
+a tab leaves the local frontend process running; use **Ctrl+]** in the page to release the session for another
 frontend.
 Reloading the page reconnects through the running frontend.
 

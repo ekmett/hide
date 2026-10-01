@@ -30,7 +30,7 @@ import THC.Edit.Render (renderDesktop)
 import THC.Edit.Unicode (displayOpsForPic, graphemes, clusterWidth)
 
 data WebInput = Key T.Text [V.Modifier] | Paste T.Text | Mouse T.Text Int Int Int Int [V.Modifier]
-              | SystemTheme Bool | BrowserCommand Command | MenuCommand (Maybe Command) | UploadFile T.Text BS.ByteString | Frontend (Maybe Int) | OpenPath FilePath | Resize Int Int | Blur | Modifiers [V.Modifier] deriving (Eq,Show)
+              | SystemTheme Bool | BrowserCommand Command | MenuCommand (Maybe Command) | UploadFile T.Text BS.ByteString | Frontend (Maybe Int) | OpenPath FilePath | Resize Int Int | SuspendSession | Blur | Modifiers [V.Modifier] deriving (Eq,Show)
 
 parseInput :: Value -> Parser WebInput
 parseInput = withObject "browser event" $ \o -> do
@@ -80,6 +80,7 @@ parseInput = withObject "browser event" $ \o -> do
       button <- o .:? "button" .!= 0; clicks <- o .:? "clicks" .!= 1
       unless (action `elem` ["down","up","move","wheel-up","wheel-down"] && x>=(-1) && x<512 && y>=(-1) && y<256 && button>=0 && button<=2 && clicks>=0 && clicks<=3) (fail "Invalid mouse event")
       Mouse action x y button clicks <$> mods
+    "suspend" -> pure SuspendSession
     "blur" -> pure Blur
     "modifiers" -> Modifiers <$> mods
     _ -> fail "Unknown event"
@@ -112,6 +113,7 @@ applyGuestInput input d
 
 applyInputUnchecked :: WebInput -> Desktop -> (Desktop,[Effect])
 applyInputUnchecked input d = case input of
+  SuspendSession -> (d,[]) -- The session owner checkpoints and stops, not the UI model.
   SystemTheme value -> (d {systemDark=value},[])
   BrowserCommand cmd | dialog d/=Nothing -> (d,[WriteBrowserClipboard "" | cmd `elem` [Copy,Cut]])
                      | otherwise -> runCommand cmd d

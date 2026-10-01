@@ -196,6 +196,7 @@ runRemoteDaemonWithStartup owned session scale effects tick inspect initial = do
     state <- newMVar (Session recovered {browserFrontend=True} Nothing 0 [] 0 False)
     writer <- newMVar ()
     done <- newEmptyMVar
+    preserveCheckpoint <- newTVarIO False
     inspections <- newTVarIO M.empty
     inspectionClosing <- newTVarIO False
     activeDisplay <- newTVarIO False
@@ -207,6 +208,11 @@ runRemoteDaemonWithStartup owned session scale effects tick inspect initial = do
             let s=if serial==0 then original else original {savedReplies=filter ((>received).fst) (savedReplies original)}
             if serial==0 then pure (s {desktop=fst (applyInput Blur (desktop s))},([],stopped s,acknowledged s,webDirty (desktop s)))
             else if stopped s then pure (s,([],True,acknowledged s,webDirty (desktop s)))
+            else if input==SuspendSession && serial>acknowledged s then do
+              -- A failed checkpoint must leave the daemon alive with its buffers.
+              writeCheckpoint checkpoint (desktop s) >>= either (failure . T.unpack) pure
+              atomically (writeTVar preserveCheckpoint True)
+              pure (s {stopped=True,acknowledged=serial},([],True,serial,webDirty (desktop s)))
             else if serial<=acknowledged s then pure (s,(concatMap snd (savedReplies s),stopped s,acknowledged s,webDirty (desktop s))) else do
               let (next,requests)=applyInput input (desktop s)
                   anticipated=concatMap (responsePackets next) requests
@@ -322,8 +328,9 @@ runRemoteDaemonWithStartup owned session scale effects tick inspect initial = do
                     reply <- newEmptyTMVarIO
                     atomically (writeTBQueue commands (serial,received,complete,reply))
                     (responses,exit,committed,isDirty) <- atomically (takeTMVar reply) >>= either throwIO pure
+                    resumable <- readTVarIO preserveCheckpoint
                     -- State and sequence are committed before any fallible socket write.
-                    atomically $ writeTBQueue outgoing (responses++[json "ack" ["seq" .= committed,"dirty" .= isDirty]]++[json "closed" [] | exit])
+                    atomically $ writeTBQueue outgoing (responses++[json "ack" ["seq" .= committed,"dirty" .= isDirty]]++[json "closed" ["resumable" .= resumable] | exit])
               send previous = do
                 s <- readMVar state
                 cwd <- getCurrentDirectory
@@ -404,7 +411,8 @@ runRemoteDaemonWithStartup owned session scale effects tick inspect initial = do
               checkpointLoop (either (const previous) (const snapshot) result)
         finishSession = do
           current <- readMVar state
-          if stopped current then forgetSession session
+          resumable <- readTVarIO preserveCheckpoint
+          if stopped current && not resumable then forgetSession session
             else void (checkpointNow (desktop current))
     void (checkpointNow recovered)
     args <- getArgs
@@ -639,7 +647,12 @@ withSessionPeer host session resume remoteArgs action = do
                         writeTBQueue incoming (Right (Just packet))
                         writeTBQueue incoming (Right (Just binary))
                       _ -> failure "SSH disconnected during download; request the download again after reconnecting"
-                  Just "closed" -> forgetSession session >> emit packet
+                  Just "closed" -> do
+                    resumable <- case packet of
+                      JsonPacket v -> decodeValue (withObject "closed" (\o -> o .:? "resumable" .!= False)) v
+                      _ -> pure False
+                    unless resumable (forgetSession session)
+                    emit packet
                   Just "error" -> case packet of
                     JsonPacket v -> decodeValue (withObject "error" (\o -> o .: "message")) v >>= fatal
                     _ -> failure "Remote protocol error"
