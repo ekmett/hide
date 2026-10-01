@@ -10,6 +10,10 @@ THC external-command dispatch will expose this executable as `thc edit` when
 ## Run
 
 Requires GHC 9.6 or newer and Cabal; tested with GHC 9.14.1 on macOS arm64.
+Grapheme segmentation and cell widths require utf8proc 2.10 or newer
+(`brew install utf8proc` on macOS). Linux window builds also require Pango/Cairo
+development headers (`libpango1.0-dev` on Debian/Ubuntu) and benefit from
+`fonts-noto-color-emoji`. macOS uses the system CoreText framework for fonts.
 Use a UTF-8 terminal, preferably at least 80 columns by 25 rows. Mouse support,
 modified keys and exact colors depend on the terminal's capabilities.
 
@@ -64,8 +68,15 @@ Resizing the window changes the character grid. SDL3 is an optional build
 dependency and is not needed for the terminal frontend or THC itself.
 
 Both frontends draw the same UI. The window uses a bundled IBM VGA bitmap font,
-with GNU Unifont for additional Unicode characters; see the licenses in
-`assets/fonts`. The window has a system clipboard and, on macOS, native menus
+for its original repertoire and interface geometry; see the licenses in
+`assets/fonts`. Other text uses system font fallback, including color emoji.
+Joined emoji, skin tones, flags and combining sequences are edited and clipped
+as complete graphemes in documents, conversations and filenames. Wide glyphs
+partially covered by a border or another window become blank cells.
+**Options > Preferences > Pixelate Unicode** reduces each shaped cluster to an
+8×16 or 16×16 tile before enlargement; leave it off for full-resolution rendering.
+The terminal frontend uses the same layout, with glyph appearance supplied by
+your terminal emulator. The window has a system clipboard and, on macOS, native menus
 with Command shortcuts. Option remains available for accented characters except the window-number
 and tile-scale shortcuts above.
 Use F10 and letter mnemonics to operate the in-window menus.

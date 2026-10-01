@@ -5,7 +5,7 @@ import Control.Monad (unless)
 import Data.Maybe (fromMaybe)
 import THC.Edit.Model
 import THC.Edit.Render (snapshotHtml, snapshot, renderDesktop)
-import THC.Edit.Buffer (newBuffer)
+import THC.Edit.Buffer (newBuffer, columnOffset)
 import THC.Edit.Browser (Entry(..))
 import THC.Edit.Files (FileState(..))
 import qualified Data.Text as T
@@ -155,33 +155,39 @@ checks = do
   check "terminal close button uses ASCII x" ("[x]" `T.isInfixOf` snapshot desktop && not ("■" `T.isInfixOf` snapshot desktop))
   check "resize grip is an ordinary frame corner" (not ("◢" `T.isInfixOf` snapshot separated) && "═╝" `T.isInfixOf` snapshot separated)
   let compactTree=installTree "/project" [Entry "src" True Nothing Nothing,Entry "Main.hs" False Nothing Nothing] desktop
+  let dirtyTree=installTree "/project" [Entry "Main.hs" False Nothing Nothing] (insertText "x" source)
+      cleanTree=installTree "/project" [Entry "Main.hs" False Nothing Nothing] (fst (runCommand Undo (insertText "x" source)))
+      redName="color:rgb(255,85,85);background:rgb(0,0,170)'> Main.hs"
+      unfocus d=d {sideTree=fmap (\t -> t {treeFocused=False}) (sideTree d)}
+  check "unsaved filenames are red and undo restores their normal color"
+    (redName `T.isInfixOf` snapshotHtml (unfocus dirtyTree) && not (redName `T.isInfixOf` snapshotHtml (unfocus cleanTree)))
   check "dock buttons indicate collapse direction" ("[←]" `T.isInfixOf` snapshot compactTree && "[↓]" `T.isInfixOf` snapshot (setProblemsVisible True desktop) {problemsFocused=True})
   check "dock arrows match editor cyan" ("color:rgb(85,255,255);background:rgb(0,0,170)'>←" `T.isInfixOf` snapshotHtml compactTree && "color:rgb(85,255,255);background:rgb(0,170,170)'>↓" `T.isInfixOf` snapshotHtml (setProblemsVisible True desktop) {problemsFocused=True})
-  check "Files has a window frame without a path row"
-    (not ("/project" `T.isInfixOf` snapshot compactTree) && "╔" `T.isInfixOf` snapshot compactTree &&
+  check "Files has a floating title and scrollbar without a path row"
+    (not ("/project" `T.isInfixOf` snapshot compactTree) && " Files " `T.isInfixOf` snapshot compactTree &&
      "▲" `T.isInfixOf` snapshot compactTree && "▼" `T.isInfixOf` snapshot compactTree &&
      snd (handleEvent (V.EvMouseDown 3 2 V.BLeft []) compactTree)==[ExpandTree 0])
   let longTree=installTree "/project" [Entry (T.pack (show i)<>".hs") False Nothing Nothing | i<-[1::Int ..100]] desktop
       scrolled=fst (handleEvent (V.EvMouseDown 4 4 V.BScrollDown []) longTree)
-      barClicked=fst (handleEvent (V.EvMouseDown (treeWidthOf longTree) (snd (screenSize longTree)-3) V.BLeft []) longTree)
+      barClicked=fst (handleEvent (V.EvMouseDown (treeWidthOf longTree-1) (snd (screenSize longTree)-3) V.BLeft []) longTree)
   let unfocusedTree=compactTree {sideTree=fmap (\t -> t {treeFocused=False}) (sideTree compactTree)}
-      glyphAt d x y=T.index (T.lines (snapshot d) !! y) x
+      glyphAt d x y=let line=T.lines (snapshot d) !! y in T.index line (columnOffset line x)
       shared=treeWidthOf unfocusedTree
       smallNeighbor=modifyActive (\w -> w {bounds=Rect shared 4 30 10}) unfocusedTree
-  check "Files keeps its double outline when the editor is focused"
-    (glyphAt unfocusedTree 0 1=='╔' && glyphAt unfocusedTree 0 2=='║' && glyphAt unfocusedTree 0 23=='╚')
-  check "shared borders join neighboring top and bottom frames"
-    (glyphAt unfocusedTree shared 1=='╦' && glyphAt unfocusedTree shared 23=='╩' &&
-     glyphAt smallNeighbor shared 4=='╠' && glyphAt smallNeighbor shared 13=='╠' &&
-     glyphAt smallNeighbor shared 1=='╗')
+  check "Files leaves its top, left and bottom edges unframed"
+    (glyphAt unfocusedTree 0 1==' ' && glyphAt unfocusedTree 0 2==' ' && glyphAt unfocusedTree 0 23==' ')
+  check "shared column yields to neighboring frames and stays single where exposed"
+    (glyphAt unfocusedTree shared 1=='╔' && glyphAt unfocusedTree shared 23=='╚' &&
+     glyphAt smallNeighbor shared 4=='╔' && glyphAt smallNeighbor shared 13=='╚' &&
+     glyphAt smallNeighbor shared 1=='│')
   let raisedFiles=setProblemsVisible True unfocusedTree
       bottomFiles=top (problemsRect raisedFiles)-1
       resizedFiles=resizeMessagesTo 10 raisedFiles
-  check "Messages raises Files bottom frame and its scroll area"
-    (glyphAt raisedFiles 0 bottomFiles=='╚' && treeContentRows raisedFiles==bottomFiles-2 &&
-     glyphAt resizedFiles 0 9=='╚' && treeContentRows resizedFiles==7)
+  check "Messages raises Files background and its scroll area"
+    (glyphAt raisedFiles 0 bottomFiles==' ' && treeContentRows raisedFiles==bottomFiles-2 &&
+     glyphAt resizedFiles 0 9==' ' && treeContentRows resizedFiles==7)
   check "Files scrollbar and wheel scroll rows" (fmap treeScroll (sideTree scrolled)==Just 3 && fmap treeScroll (sideTree barClicked)==Just 1)
-  check "tree markers have a separating space" ("+ src" `T.isInfixOf` snapshot compactTree && not ("[+]" `T.isInfixOf` snapshot compactTree))
+  check "tree markers have a separating space" ("📁 src" `T.isInfixOf` snapshot compactTree && not ("[+]" `T.isInfixOf` snapshot compactTree))
   check "inactive scrollbar region only focuses window"
     (fmap windowId (activeWindow focusedBehind)==Just (windowId behind) && drag focusedBehind==Nothing && null behindEffects && fmap scrollRow (activeWindow focusedBehind)==Just (scrollRow behind))
   check "inactive close region cannot close the window"

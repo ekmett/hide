@@ -11,13 +11,14 @@ import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import Data.Maybe (listToMaybe, fromMaybe)
 import Data.List (find, findIndex, sortOn, mapAccumL, groupBy)
-import Data.Char (toLower, isPrint, isAlphaNum, chr, ord, toUpper, isHexDigit, digitToInt)
+import Data.Char (toLower, isAlphaNum, chr, ord, toUpper, isHexDigit, digitToInt)
 import Text.Read (readMaybe)
 import System.FilePath ((</>), takeDirectory, isAbsolute)
 import THC.Edit.Browser (Entry(..))
 import THC.Edit.Git (GitReview)
 import THC.Edit.Syntax (Style(..), highlightFor)
 import THC.Edit.Hex
+import THC.Edit.Unicode (textInputChar)
 import THC.Edit.Buffer
 import THC.Edit.Files (FileState(..))
 
@@ -91,7 +92,7 @@ data Desktop = Desktop
   , branchAdded :: Int, branchDeleted :: Int, branchRoot :: Maybe FilePath, contextKind :: ContextKind
   , messagesNumber :: Maybe Int
   , composerBuffer :: Buffer, composerSelection :: Selection, composerFocused :: Bool, agentSteering :: Bool, agentReplying :: Bool, agentQueued :: Int
-  , blinkCursor :: Bool, crtFilter :: Bool, defaultDirectory :: Maybe FilePath, statusHover :: Maybe Int, heldModifiers :: [V.Modifier], problemsPreferredHeight :: Int, agentContextUsage :: Maybe (Integer,Integer), agentSettings :: [AgentSetting]
+  , blinkCursor :: Bool, crtFilter :: Bool, pixelateUnicode :: Bool, defaultDirectory :: Maybe FilePath, statusHover :: Maybe Int, heldModifiers :: [V.Modifier], problemsPreferredHeight :: Int, agentContextUsage :: Maybe (Integer,Integer), agentSettings :: [AgentSetting]
   } deriving (Eq,Show)
 
 data MenuItem = MenuItem Text Text Command deriving (Eq,Show)
@@ -243,7 +244,7 @@ menuRect d i = Rect (min x (max 0 (sw-w))) 1 w (length (menuItems i)+2)
         w = min sw (maximum [T.length t + T.length (menuShortcut d entry) + 5 | entry@(MenuItem t _ _) <- menuItems i])
 
 initialDesktop :: (Int,Int) -> Desktop
-initialDesktop size = Desktop size [] M.empty 1 Nothing Nothing Nothing "" False Nothing "" Nothing "" Nothing "" False Nothing Nothing Nothing "" Nothing Nothing Nothing [] False 0 0 False Nothing 0 0 Nothing SourceContext Nothing (newBuffer "") (Selection 0 0) True False False 0 True False Nothing Nothing [] 8 Nothing []
+initialDesktop size = Desktop size [] M.empty 1 Nothing Nothing Nothing "" False Nothing "" Nothing "" Nothing "" False Nothing Nothing Nothing "" Nothing Nothing Nothing [] False 0 0 False Nothing 0 0 Nothing SourceContext Nothing (newBuffer "") (Selection 0 0) True False False 0 True False False Nothing Nothing [] 8 Nothing []
 
 activeWindow :: Desktop -> Maybe Window
 activeWindow = listToMaybe . windows
@@ -456,7 +457,7 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
       ([Radio "Key bindings" ["Modern","WordStar"] (if wordStar d then 1 else 0)] ++
        [Radio "Screen size" ["Mode 3 (80x25)","Mode 259 (80x50)"] (if mode == 259 then 1 else 0) | Just mode <- [videoMode d]] ++
        [CheckBox "Blinking cursor" (blinkCursor d)] ++
-       [CheckBox "CRT filter" (crtFilter d) | videoMode d/=Nothing]) d,[])
+       [field | videoMode d/=Nothing,field<-[CheckBox "CRT filter" (crtFilter d),CheckBox "Pixelate Unicode" (pixelateUnicode d)]]) d,[])
     go Gallery d = (prompt "Dialog controls" Widgets [Input "Module name" "Main" 4,CheckBox "Auto indent" True,Radio "Tab width" ["4 columns","8 columns"] 1,ListBox "Source files" ["Main.hs","Types.hs","Parser.hs","Syntax.hs","Eval.hs"] 0] d,[])
     go (Disabled reason) d = (d {status = reason},[])
     confirm action d = (d {dialog = Just (Dialog "Save changes?" (Confirm action) [] 0 ["Save","Discard","Cancel"] ["Save changes to " <> documentTitle d <> "?"])},[])
@@ -602,7 +603,7 @@ dispatchEvent (V.EvMouseDown x y button mods) d = mouseEvent x y button mods d
 dispatchEvent (V.EvPaste bytes) d | activeHex d = (either (const (d {status="Paste hexadecimal text."})) (`pasteHex` d) (TE.decodeUtf8' bytes),[])
 dispatchEvent (V.EvPaste bytes) d = case TE.decodeUtf8' bytes of
   Left _ -> (message "Paste failed" ["The pasted text is not valid UTF-8."] d,[])
-  Right t -> (insertText (T.filter (\c -> isPrint c || c `elem` ['\n','\r','\t']) t) d,[])
+  Right t -> (insertText (T.filter (\c -> textInputChar c || c `elem` ['\n','\r','\t']) t) d,[])
 dispatchEvent (V.EvKey key mods) d | Just tree <- sideTree d, treeFocused tree = treeKey key mods tree d
 dispatchEvent (V.EvKey key mods) d = keyEvent key mods d
 dispatchEvent _ d = (d,[])
@@ -690,12 +691,12 @@ composerCommand cmd d = case cmd of
               in d {composerBuffer=changed,composerSelection=Selection p p}
 
 composerEvent :: V.Event -> Desktop -> Maybe (Desktop,[Effect])
-composerEvent (V.EvPaste bytes) d = Just (either (const d) (\text -> composerInsert (T.filter (\c -> isPrint c || c `elem` ['\n','\r','\t']) text) d) (TE.decodeUtf8' bytes),[])
+composerEvent (V.EvPaste bytes) d = Just (either (const d) (\text -> composerInsert (T.filter (\c -> textInputChar c || c `elem` ['\n','\r','\t']) text) d) (TE.decodeUtf8' bytes),[])
 composerEvent (V.EvKey key mods) d
   | key==V.KEsc, composerFocused d, agentReplying d = Just (d,[AgentAction "cancel" []])
   | key==V.KChar '\t', null mods = Just (d {composerFocused=not (composerFocused d)},[])
   | key==V.KEnter, composerFocused d, all (`elem` [V.MCtrl,V.MShift]) mods = Just (composerSubmit mods d)
-  | V.KChar c<-key, isPrint c, null mods || mods==[V.MShift] = done (composerInsert (T.singleton c) d)
+  | V.KChar c<-key, textInputChar c, null mods || mods==[V.MShift] = done (composerInsert (T.singleton c) d)
   | not (composerFocused d) || V.MAlt `elem` mods || V.MMeta `elem` mods = Nothing
   | ctrl, V.KChar c<-key, Just cmd<-lookup (toLower c) [('c',Copy),('x',Cut),('v',Paste),('a',SelectAll),('z',Undo),('y',Redo)] = Just (runCommand cmd d)
   | otherwise = case key of
@@ -1064,7 +1065,7 @@ editorKey key mods d = case key of
   V.KDel -> erase p (if ctrl then wordRight t p else nextCharacter t p)
   V.KEnter -> insertText (if "\r\n" `T.isInfixOf` t then "\r\n" else "\n") d
   V.KChar '\t' -> insertText "  " d
-  V.KChar c | null mods || mods==[V.MShift], isPrint c -> insertText (T.singleton c) d
+  V.KChar c | null mods || mods==[V.MShift], textInputChar c -> insertText (T.singleton c) d
   _ -> d
   where
     b = maybe (newBuffer "") documentBuffer (activeDocument d)
@@ -1127,7 +1128,7 @@ dialogEvent ev dg d = case ev of
   V.EvKey V.KLeft _ -> setFocus (focus dg-1)
   V.EvKey V.KRight _ -> setFocus (focus dg+1)
   V.EvPaste bytes | focus dg<count -> case TE.decodeUtf8' bytes of
-    Right text -> updateField (\f -> case f of Input label value pos -> let clean=T.filter isPrint text in Input label (T.take pos value<>clean<>T.drop pos value) (pos+T.length clean); _ -> f)
+    Right text -> updateField (\f -> case f of Input label value pos -> let clean=T.filter textInputChar text in Input label (T.take pos value<>clean<>T.drop pos value) (pos+T.length clean); _ -> f)
     Left _ -> (d,[])
   V.EvMouseDown x y V.BLeft _ -> case findIndex (\r -> inside r x y) (buttonRects d dg) of
     Just i -> (d {buttonHover=Just i,buttonPressed=Just i},[])
@@ -1175,7 +1176,7 @@ fieldKey key mods field = case field of
     V.KBS -> let p=previousCharacter value pos in set (T.take p value<>T.drop pos value) p
     V.KDel -> set (T.take pos value<>T.drop (nextCharacter value pos) value) pos
     V.KChar 'u' | V.MCtrl `elem` mods -> set "" 0
-    V.KChar c | (null mods || mods==[V.MShift]) && isPrint c -> set (T.take pos value<>T.singleton c<>T.drop pos value) (pos+1)
+    V.KChar c | (null mods || mods==[V.MShift]) && textInputChar c -> set (T.take pos value<>T.singleton c<>T.drop pos value) (pos+1)
     _ -> field
   CheckBox label value | key==V.KChar ' ' -> CheckBox label (not value)
   Radio label values chosen -> Radio label values (choose values chosen)
@@ -1236,6 +1237,7 @@ submitDialog button dg original
                 | otherwise -> (d,[])
     Settings -> (d {wordStar=any (\f -> case f of Radio "Key bindings" _ 1 -> True; _ -> False) (fields dg),
       blinkCursor=fromMaybe (blinkCursor d) (listToMaybe [value | CheckBox "Blinking cursor" value<-fields dg]),
+      pixelateUnicode=fromMaybe (pixelateUnicode d) (listToMaybe [value | CheckBox "Pixelate Unicode" value<-fields dg]),
       crtFilter=fromMaybe (crtFilter d) (listToMaybe [value | CheckBox "CRT filter" value<-fields dg]),status="Preferences updated."},
       [SetScreenMode mode | Radio "Screen size" _ chosen <- fields dg,
        let mode = if chosen == 1 then 259 else 3, Just mode /= videoMode d])
@@ -1422,7 +1424,7 @@ scrollTreeTo position tree d = d {sideTree=Just tree {treeScroll=max 0 (min (tre
 treeMouse :: Int -> Int -> V.Button -> Sidebar -> Desktop -> (Desktop,[Effect])
 treeMouse x y button tree d = case button of
   V.BLeft | y==1 && x>=treeWidth tree-5 && x<treeWidth tree-1 -> (setTree Nothing d,[])
-          | x==treeWidth tree-1 && y>=2 && y<sh-2 && treeFocused tree && treeContentRows d>=3 ->
+          | x==treeWidth tree-2 && y>=2 && y<sh-2 && treeFocused tree && treeContentRows d>=3 ->
               let offset=y-2; len=treeContentRows d; thumb=scrollbarThumb len (treeScrollLimit d tree) (treeScroll tree)
                   step | offset==0 = -1 | offset==len-1 = 1 | offset<thumb = negate len | otherwise = len
               in if offset==thumb then (d {drag=Just TreeScrolling},[]) else (scrollTreeTo (treeScroll tree+step) tree d,[])

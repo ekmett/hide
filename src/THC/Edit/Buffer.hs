@@ -17,6 +17,7 @@ import Data.Char (GeneralCategory(..), generalCategory, isAlphaNum, isSpace)
 import Data.Foldable (toList)
 import qualified Data.FingerTree as FT
 import Graphics.Vty (safeWcwidth)
+import THC.Edit.Unicode (graphemes, clusterWidth)
 
 data LineMeasure = LineMeasure { characterCount :: !Int, lineCount :: !Int } deriving (Eq,Show)
 instance Semigroup LineMeasure where
@@ -182,28 +183,44 @@ lineAt :: Text -> Int -> Text
 lineAt t row = case drop (max 0 row) (textLines t) of x:_ -> T.dropWhileEnd (== '\r') x; [] -> ""
 
 displayColumn :: Text -> Int -> Int
-displayColumn t p = T.foldl' advance 0 (T.take p t)
-  where advance n '\t' = n + 8 - n `mod` 8
-        advance n c = n + characterWidth c
+displayColumn t p = go 0 0 (graphemes t)
+  where
+    go _ col [] = col
+    go offset col (g:gs)
+      | offset+T.length g>p = col
+      | otherwise = go (offset+T.length g) (col+width col g) gs
+    width col "\t"=8-col `mod` 8
+    width _ "\r"=0
+    width _ g | T.any (<' ') g=1
+              | otherwise=clusterWidth g
 
 columnOffset :: Text -> Int -> Int
-columnOffset t goal = go 0 0 (T.unpack t)
+columnOffset t goal = go 0 0 (graphemes t)
   where
     go i _ [] = i
-    go i col (c:cs)
-      | col >= goal && characterWidth c > 0 = i
-      | col + width > goal = i
-      | otherwise = go (i+1) (col+width) cs
-      where width = if c == '\t' then 8-col `mod` 8 else characterWidth c
+    go i col (g:gs)
+      | col>=goal && width>0 = i
+      | col+width>goal = i
+      | otherwise = go (i+T.length g) (col+width) gs
+      where width | g=="\t"=8-col `mod` 8
+                  | g=="\r"=0
+                  | T.any (<' ') g=1
+                  | otherwise=clusterWidth g
 
 combining :: Char -> Bool
 combining c = generalCategory c `elem` [NonSpacingMark, SpacingCombiningMark, EnclosingMark]
 
 nextCharacter, previousCharacter :: Text -> Int -> Int
-nextCharacter t p | T.take 2 (T.drop p t) == "\r\n" = p+2
-nextCharacter t p = min (T.length t) (p + 1 + T.length (T.takeWhile combining (T.drop (p+1) t)))
-previousCharacter t p | T.take 2 (T.drop (p-2) t) == "\r\n" && p>=2 = p-2
-previousCharacter t p = max 0 (p - 1 - T.length (T.takeWhile combining (T.reverse (T.take p t))))
+nextCharacter t p
+  | "\r\n" `T.isPrefixOf` rest = p+2
+  | "\n" `T.isPrefixOf` rest = p+1
+  | otherwise = p + case graphemes (T.takeWhile (/='\n') rest) of []->0; g:_->T.length g
+  where rest=T.drop p t
+previousCharacter t p
+  | "\r\n" `T.isSuffixOf` before = p-2
+  | "\n" `T.isSuffixOf` before = p-1
+  | otherwise = p - maybe 0 T.length (case reverse (graphemes (T.takeWhileEnd (/='\n') before)) of []->Nothing; g:_->Just g)
+  where before=T.take p t
 
 wordLeft, wordRight :: Text -> Int -> Int
 wordLeft t p = case T.unsnoc before of

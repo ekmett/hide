@@ -2,14 +2,13 @@
 module THC.Edit.Render (renderDesktop, snapshot, snapshotHtml) where
 
 import qualified Graphics.Vty as V
-import Graphics.Vty.PictureToSpans (displayOpsForPic)
+import THC.Edit.Unicode (displayOpsForPic)
 import Graphics.Vty.Span (SpanOp(..))
 import qualified Data.Text as T
 import Data.Text (Text)
 import qualified Data.Text.Lazy as TL
 import qualified Data.Map.Strict as M
 import Data.Foldable (toList)
-import Data.List (groupBy, find)
 import Data.Char (isSpace, toLower)
 import Data.Maybe (fromMaybe)
 import System.FilePath (takeFileName, (</>))
@@ -17,6 +16,7 @@ import Data.Bits ((.&.), shiftR)
 import Data.Time (formatTime, defaultTimeLocale)
 import THC.Edit.Hex
 import THC.Edit.Buffer
+import THC.Edit.Unicode (graphemes, clusterWidth, textImage, flattenPicture)
 import THC.Edit.Model
 import THC.Edit.Syntax
 import THC.Edit.Files (filePath)
@@ -34,7 +34,7 @@ paper, edit, selected, shadow :: V.Attr
 paper=attr black gray; edit=attr yellow blue; selected=attr black green; shadow=attr gray black
 
 label :: V.Attr -> Text -> V.Image
-label a = V.text' a . T.map (\c -> if c<' ' || c=='\DEL' then '·' else c)
+label a = textImage a . T.map (\c -> if c<' ' || c=='\DEL' then '·' else c)
 row :: V.Attr -> Int -> Text -> V.Image
 row a w t = V.cropRight (max 0 w) (label a t V.<|> V.charFill a ' ' (max 0 w) 1)
 place :: Int -> Int -> V.Image -> V.Image
@@ -52,7 +52,7 @@ box a double w h
         line l m r=V.char a l V.<|> V.charFill a m (w-2) 1 V.<|> V.char a r
 
 renderDesktop :: Desktop -> V.Picture
-renderDesktop d = (V.picForLayers layers) {V.picCursor=cursor}
+renderDesktop d = flattenPicture (screenSize d) ((V.picForLayers layers) {V.picCursor=cursor})
   where
     (sw,sh)=screenSize d
     layers = case dialog d of
@@ -102,7 +102,7 @@ castShadow :: (Int,Int) -> Rect -> [V.Image] -> V.Image
 castShadow size (Rect x y w h) below =
   place (x+2) (y+1) (V.crop w h (V.translate (negate (x+2)) (negate (y+1)) dimmed))
   where
-    dimmed = V.vertCat [V.horizCat (map dim (toList spans)) | spans <- toList (displayOpsForPic (V.picForLayers below) size)]
+    dimmed = V.vertCat [V.horizCat (map dim (toList spans)) | spans <- toList (displayOpsForPic (flattenPicture size (V.picForLayers below)) size)]
     dim TextSpan{textSpanText=t} = label shadow (TL.toStrict t)
     dim (Skip n) = V.charFill shadow ' ' n 1
     dim (RowEnd n) = V.charFill shadow ' ' n 1
@@ -119,7 +119,7 @@ windowLayers d active w =
   ++ hexDividerLayers
   ++ [place (x+ww-7-T.length number) y (label frame number)
   ,place (x+titleColumn) y (label frame shownTitle)
-  ,place (x+1) (y+1) textImage
+  ,place (x+1) (y+1) documentImage
   ,place x y (box frame (active && not moving) ww hh)]
   where
     Rect x y ww hh=bounds w
@@ -130,9 +130,10 @@ windowLayers d active w =
     (titleColumn,shownTitle)
       | byteMode b = let start=max 6 (1+hexColumn 0-scrollColumn w)
                          end=min (ww-8-T.length number) (hexAsciiColumn (windowHexBytes w)-scrollColumn w)
-                         clipped=T.take (max 0 (end-start)) title
-                     in (start+max 0 ((end-start-T.length clipped) `div` 2),clipped)
-      | otherwise = (max 6 ((ww-T.length title) `div` 2),T.take (max 0 (ww-17-T.length number)) title)
+                         clipped=T.take (columnOffset title (max 0 (end-start))) title
+                     in (start+max 0 ((end-start-displayColumn clipped (T.length clipped)) `div` 2),clipped)
+      | otherwise = let clipped=T.take (columnOffset title (max 0 (ww-17-T.length number))) title
+                    in (max 6 ((ww-displayColumn clipped (T.length clipped)) `div` 2),clipped)
     number=T.pack (show (windowNumber w))
     moving=case drag d of Just (Moving wid _ _) -> wid==windowId w; Just (Resizing wid _ _) -> wid==windowId w; _ -> False
     frame=attr (if moving then cyan else if active then white else gray) blue
@@ -168,7 +169,7 @@ windowLayers d active w =
         V.charFill frame '│' 1 contentHeight,V.char frame (if active && not moving then '╧' else '┴')])
       | byteMode b, divider<-hexDividers (windowHexBytes w), let column=divider-scrollColumn w, column>=0, column<contentWidth]
     contentWidth=max 0 (ww-2); contentHeight=windowContentRows d doc w
-    textImage=V.vertCat [renderLine n | n<-[scrollRow w..scrollRow w+contentHeight-1]]
+    documentImage=V.vertCat [renderLine n | n<-[scrollRow w..scrollRow w+contentHeight-1]]
     selectable style | documentLabel doc==Just "Conversation" = case style of BubbleText{} -> True; _ -> False
                      | otherwise = True
     renderLine n | byteMode b && n>=documentRows doc w = V.charFill edit ' ' contentWidth 1
@@ -195,16 +196,19 @@ splitStyled []=[[]]
 splitStyled xs=let (a,b)=break ((=='\n').fst) xs in a:case b of []->[]; _:rest->splitStyled rest
 
 styledImage :: (Style -> Bool) -> Maybe V.Attr -> Bool -> Selection -> Int -> [(Char,Style)] -> V.Image
-styledImage selectable override active sel start chars = V.horizCat [label a (T.pack (map snd group)) | group@((a,_):_) <- groupBy (\a b -> fst a==fst b) (expand 0 start chars)]
+styledImage selectable override active sel start chars = V.horizCat (expand 0 start (graphemes (T.pack (map fst chars))) chars)
   where
     (lo,hi)=ordered sel
-    expand _ _ []=[]
-    expand col offset ((c,style):rest)
-      | c=='\r' = expand col (offset+1) rest
-      | c=='\t' = replicate (8-col `mod` 8) (a,' ') ++ expand (col+8-col `mod` 8) (offset+1) rest
-      | c<' ' || c=='\DEL' = (a,'·'):expand (col+1) (offset+1) rest
-      | otherwise = (a,c):expand (col+V.safeWcwidth c) (offset+1) rest
-      where a=if active && selectable style && offset>=lo && offset<hi then attr blue gray else fromMaybe (syntaxAttr style) override
+    expand _ _ [] _=[]
+    expand col offset (g:gs) styled = image : expand (col+width) (offset+T.length g) gs (drop (T.length g) styled)
+      where
+        style=case styled of (_,s):_->s; _->Plain
+        a=if active && selectable style && offset<hi && offset+T.length g>lo then attr blue gray else fromMaybe (syntaxAttr style) override
+        text | g=="\r"=""
+             | g=="\t"=T.replicate (8-col `mod` 8) " "
+             | otherwise=T.map (\c -> if c<' ' || c=='\DEL' then '·' else c) g
+        width=sum (map clusterWidth (graphemes text))
+        image=label a text
     syntaxAttr (BubbleText _ outgoing style)=syntaxAttr (BubbleStyle outgoing style)
     syntaxAttr (BubbleStyle outgoing style)=attr foreground (if outgoing then scrollCyan else gray)
       where foreground | outgoing = black
@@ -220,21 +224,24 @@ treeLayers :: Desktop -> Sidebar -> [V.Image]
 treeLayers d tree =
   [place (max 2 ((w-11) `div` 2)) 1 (label frame " Files "),
    place (w-5) 1 (label frame "[" V.<|> label (attr cyan blue) "←" V.<|> label frame "]")]
-  ++ [place (w-1) y (V.char frame (junction y neighbor))
-     | y<-[1..h], Just neighbor<-[find (\win -> inside (bounds win) (w-1) y) (windows d)],
-       let r=bounds neighbor, y==top r || y==top r+height r-1]
-  ++ [place (w-1) 2 (V.vertCat [scrollCell n | n<-[0..visible-1]]) | treeFocused tree, visible>=3]
-  ++ [place 1 2 (V.vertCat (map line listing)),place 0 1 (box frame True w h)]
+  ++ [place (w-1) y (V.char frame '│')
+     | y<-[1..h], not (any (\win -> inside (bounds win) (w-1) y) (windows d))]
+  ++ [place (w-2) 2 (V.vertCat [scrollCell n | n<-[0..visible-1]]) | treeFocused tree, visible>=3]
+  ++ [place 1 2 (V.vertCat (map line listing)),place 0 1 (V.charFill frame ' ' (max 0 (w-1)) h)]
   where
     w=treeWidth tree; h=max 0 (snd (screenSize d)-2-problemsHeight d); visible=treeContentRows d
-    junction y neighbor | y==1 = '╦'
-                        | y==h = '╩'
-                        | windowFocused d neighbor = '╠'
-                        | otherwise = '╟'
     frame=attr white blue
     listing=take visible (drop (treeScroll tree) (zip [0..] (treeRows tree)))
-    line (i,node)=row (if treeFocused tree && i==treeSelected tree then selected else edit) (w-2)
-      (T.replicate (2*nodeDepth node) " "<>(if nodeDirectory node then if nodeExpanded node then "- " else "+ " else "  ")<>nodeName node)
+    line (i,node)=V.cropRight listWidth (label a (T.replicate (2*nodeDepth node) " ")
+      V.<|> label iconColor marker V.<|> label a (" "<>nodeName node) V.<|> V.charFill a ' ' listWidth 1)
+      where
+        listWidth=max 0 (w-if treeFocused tree then 3 else 2)
+        chosen=treeFocused tree && i==treeSelected tree
+        changed=any (\doc -> dirty (documentBuffer doc) && maybe False ((==nodePath node).filePath) (documentFile doc)) (M.elems (buffers d))
+        a=if changed then attr (V.RGBColor 255 85 85) (if chosen then green else blue) else if chosen then selected else edit
+        iconColor=if chosen then selected else attr (if nodeDirectory node then yellow else white) blue
+        marker | nodeDirectory node = if nodeExpanded node then "📂" else "📁"
+               | otherwise = "📄"
     thumb=scrollbarThumb visible (treeScrollLimit d tree) (treeScroll tree)
     scrollCell n=V.char (if n==0 || n==visible-1 then attr blue scrollCyan else attr scrollCyan blue)
       (if n==0 then '▲' else if n==visible-1 then '▼' else if n==thumb then '█' else '░')
@@ -330,7 +337,7 @@ dialogLayers d dg =
                     let size=if entryDirectory entry then "<DIR>" else maybe "?" (T.pack . show) (entryBytes entry)<>" bytes"
                         stamp=maybe "" (T.pack . formatTime defaultTimeLocale "%b %e, %Y %H:%M") (entryModified entry)
                         suffix="  "<>size<>"  "<>stamp
-                    in T.take (max 0 (fw-T.length suffix)) (entryName entry)<>suffix
+                    in T.take (columnOffset (entryName entry) (max 0 (fw-T.length suffix))) (entryName entry)<>suffix
                   _ -> ""
             in V.vertCat ([row paper fw (case purpose dg of ChangingDirectory{} -> "Directories"; _ -> "Files"),bar] ++ [line r | r<-[0..7]] ++ [label borderColor "└" V.<|> V.charFill borderColor '─' cw 1 V.<|> label borderColor "┴" V.<|> V.charFill borderColor '─' cw 1 V.<|> label borderColor "┘",row (attr scrollCyan blue) fw path,row (attr scrollCyan blue) fw details])
           ListBox name values chosen -> V.vertCat (row paper fw name:[row (if n==chosen then a else paper) fw (" "<>v) | (n,v)<-take 4 (drop (max 0 (chosen-3)) (zip [0..] values))])

@@ -1,4 +1,4 @@
-module THC.Edit.Font (Font, Glyph(..), loadFont, glyph) where
+module THC.Edit.Font (Font, Glyph(..), loadFont, glyph, bitmapGlyph) where
 
 import Data.Word (Word16)
 import Control.Monad (unless)
@@ -9,7 +9,7 @@ import qualified Data.IntMap.Strict as IM
 import Numeric (readHex)
 import Paths_thc_edit (getDataFileName)
 
-newtype Font = Font (IM.IntMap Glyph)
+data Font = Font (IM.IntMap Glyph) (IM.IntMap Glyph)
 data Glyph = Glyph { glyphWidth :: Int, glyphRows :: [Word16] }
   deriving (Eq, Show)
 
@@ -17,7 +17,7 @@ loadFont :: IO Font
 loadFont = do
   ibm <- load "assets/fonts/ibm-vga-8x16.hex"
   unicode <- load "assets/fonts/unifont-18.0.01.hex"
-  pure (Font (IM.union ibm unicode))
+  pure (Font (IM.union ibm unicode) ibm)
   where
     load name = do
       path <- getDataFileName name
@@ -47,7 +47,7 @@ loadFont = do
       _ -> Nothing
 
 glyph :: Font -> Char -> Glyph
-glyph (Font font) c
+glyph (Font font _) c
   | ord c>=0xe000 && ord c<=0xe007 = Glyph 8 (map (*256) (corners !! (ord c-0xe000)))
   | otherwise = IM.findWithDefault missing (ord c) font
   where
@@ -59,3 +59,7 @@ glyph (Font font) c
              [255,127,63,31,15,7,3,1]++replicate 8 0,
              [255,254,252,248,240,224,192,128]++replicate 8 0]
     missing = IM.findWithDefault (Glyph 8 (replicate 16 0xff00)) 0xfffd font
+
+-- Interface geometry and the original IBM repertoire retain their exact pixels.
+bitmapGlyph :: Font -> Char -> Bool
+bitmapGlyph (Font _ ibm) c = IM.member (ord c) ibm || ord c>=0x2500 && ord c<=0x259f || ord c>=0xe000 && ord c<=0xe007

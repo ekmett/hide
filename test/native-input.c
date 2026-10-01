@@ -1,6 +1,4 @@
-/* Run from the repository root:
- * cc -Wall -Wextra $(pkg-config --cflags sdl3) cbits/window.c test/native-input.c \
- *   $(pkg-config --libs sdl3) -lm -o /tmp/thc-native-input && /tmp/thc-native-input
+/* Run tools/check-native.sh from the repository root.
  * Uses SDL's event queue and dummy video driver; no real window or user input.
  */
 #include "../cbits/window.h"
@@ -96,6 +94,27 @@ static void check_crt(SDL_Renderer *renderer, int lines, double pitch) {
     }
 }
 
+static void check_unicode(SDL_Renderer *renderer) {
+    uint64_t hashes[2]={0};
+    for (int mode=0;mode<2;++mode) {
+        assert(thc_begin()); thc_pixelate_unicode(mode);
+        assert(thc_unicode(1,1,2,"👩🏽‍💻",0xffffff,0x0000aa));
+        assert(thc_unicode(3,1,1,"é",0xffff55,0x0000aa));
+        assert(thc_present());
+        SDL_Surface *image=SDL_RenderReadPixels(renderer,NULL);
+        assert(image);
+        unsigned drawn=0;
+        for (int y=0;y<image->h;++y) for (int x=0;x<image->w;++x) {
+            Uint8 r,g,b,a; assert(SDL_ReadSurfacePixel(image,x,y,&r,&g,&b,&a));
+            if (r || g) ++drawn;
+            hashes[mode]=hashes[mode]*33+r*65536u+g*256u+b;
+        }
+        assert(drawn>10); SDL_DestroySurface(image);
+    }
+    assert(hashes[0]!=hashes[1]);
+    thc_pixelate_unicode(0);
+}
+
 static void check_geometry(int lines, int cell_height) {
     assert(SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "dummy"));
     if (!thc_open("software", 2, 80, lines, cell_height)) {
@@ -110,6 +129,7 @@ static void check_geometry(int lines, int cell_height) {
     thc_size(&cols, &rows);
     assert(cols == 80 && rows == lines);
     check_crt(SDL_GetRenderer(windows[0]), lines, cell_height/8.0);
+    check_unicode(SDL_GetRenderer(windows[0]));
     assert(thc_begin());
     uint16_t glyph[16];
     for (int i = 0; i < 16; ++i) glyph[i] = 0xffff;

@@ -29,6 +29,7 @@ import THC.Edit.Window (runWindow)
 import System.Exit (die)
 import THC.Edit.Buffer
 import THC.Edit.Model
+import THC.Edit.Unicode (updatePicture)
 import THC.Edit.Render
 import THC.Edit.Files
 import THC.Edit.Reconcile
@@ -119,7 +120,7 @@ demoDesktop = addDocument Nothing (newBuffer sample) (initialDesktop (80,25))
 
 loop :: (Desktop -> [Effect] -> IO (Bool,Desktop)) -> (Desktop -> IO Desktop) -> V.Vty -> Desktop -> IO ()
 loop effects tick vty d = do
-  V.update vty (renderDesktop d)
+  updatePicture vty (renderDesktop d)
   event<-timeout 100000 (V.nextEvent vty)
   let (next,requests)=maybe (d,[]) (`handleEvent` d) event
   (exit,updated)<-effects next requests

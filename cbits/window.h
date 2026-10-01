@@ -12,6 +12,8 @@ const char *thc_backend(void);
 void thc_size(int *cols, int *rows);
 int thc_begin(void);
 void thc_glyph(int x, int y, int cells, int glyph_width, const uint16_t *rows, uint32_t fg, uint32_t bg);
+void thc_pixelate_unicode(int enabled);
+int thc_unicode(int x, int y, int cells, const char *text, uint32_t fg, uint32_t bg);
 void thc_cursor(int x, int y);
 void thc_cursor_blink(int enabled);
 void thc_crt_filter(int enabled);

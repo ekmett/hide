@@ -5,7 +5,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Char (isAlphaNum, isDigit, isSpace)
 import Data.Maybe (isJust)
-import THC.Edit.Buffer (columnOffset, displayColumn)
+import THC.Edit.Buffer (columnOffset, displayColumn, nextCharacter)
 
 -- A small README renderer: no HTML, reference links, escapes, block quotes,
 -- or nested inline markup. Fenced code stays verbatim and may scroll sideways.
@@ -53,7 +53,7 @@ wrap width = go "" . T.words
           else current : go "" wordsLeft
       | columns word <= width = go word rest
       | otherwise =
-          let (part, remaining) = T.splitAt (max 1 (columnOffset word width)) word
+          let (part, remaining) = T.splitAt (max (nextCharacter word 0) (columnOffset word width)) word
           in part : go "" ([remaining | not (T.null remaining)] ++ rest)
 
 heading :: Text -> Maybe Text

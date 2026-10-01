@@ -13,11 +13,12 @@ import qualified Data.Text.Lazy as TL
 import Foreign
 import Foreign.C
 import qualified Graphics.Vty as V
-import Graphics.Vty.PictureToSpans (displayOpsForPic)
+import THC.Edit.Unicode (displayOpsForPic)
 import Graphics.Vty.Span (SpanOp(..))
 import System.Environment (lookupEnv)
 import System.Info (os)
 import System.IO (hPutStrLn, stderr)
+import THC.Edit.Unicode (graphemes, clusterWidth)
 import THC.Edit.Font
 import THC.Edit.Render
 
@@ -30,6 +31,8 @@ foreign import ccall unsafe "thc_backend" c_backend :: IO CString
 foreign import ccall unsafe "thc_size" c_size :: Ptr CInt -> Ptr CInt -> IO ()
 foreign import ccall unsafe "thc_begin" c_begin :: IO CInt
 foreign import ccall unsafe "thc_glyph" c_glyph :: CInt -> CInt -> CInt -> CInt -> Ptr Word16 -> Word32 -> Word32 -> IO ()
+foreign import ccall unsafe "thc_unicode" c_unicode :: CInt -> CInt -> CInt -> CString -> Word32 -> Word32 -> IO CInt
+foreign import ccall unsafe "thc_pixelate_unicode" c_pixelate_unicode :: CInt -> IO ()
 foreign import ccall unsafe "thc_cursor" c_cursor :: CInt -> CInt -> IO ()
 foreign import ccall unsafe "thc_cursor_blink" c_cursor_blink :: CInt -> IO ()
 foreign import ccall unsafe "thc_crt_filter" c_crt_filter :: CInt -> IO ()
@@ -95,6 +98,7 @@ draw :: Font -> Desktop -> IO ()
 draw font d = do
   c_cursor_blink (if blinkCursor d then 1 else 0)
   c_crt_filter (if crtFilter d then 1 else 0)
+  c_pixelate_unicode (if pixelateUnicode d then 1 else 0)
   check "Allocate window frame" c_begin
   let picture = renderDesktop d
   forM_ (zip [0::Int ..] (toList (displayOpsForPic picture (screenSize d)))) $ \(y,spans) -> go y 0 (toList spans)
@@ -106,16 +110,19 @@ draw font d = do
     go _ _ [] = pure ()
     go y x (op:ops) = case op of
       TextSpan {textSpanAttr=a,textSpanText=t} -> do
-        end <- chars y x a (TL.unpack t)
+        end <- chars y x a (graphemes (TL.toStrict t))
         go y end ops
       Skip n -> go y (x+n) ops
       RowEnd _ -> pure ()
     chars _ x _ [] = pure x
-    chars y x a (ch:rest) = do
-      let width = max 0 (V.safeWcwidth ch)
-          gx = if width == 0 then max 0 (x-1) else x
-          Glyph gw bitmap = glyph font ch
-      withArray bitmap $ \bits -> c_glyph (fromIntegral gx) (fromIntegral y) (fromIntegral width) (fromIntegral gw) bits (rgb (V.attrForeColor a)) (rgb (V.attrBackColor a))
+    chars y x a (cluster:rest) = do
+      let width=clusterWidth cluster
+          fg=rgb (V.attrForeColor a); bg=rgb (V.attrBackColor a)
+      case T.unpack cluster of
+        [ch] | bitmapGlyph font ch -> do
+          let Glyph gw bitmap=glyph font ch
+          withArray bitmap $ \bits -> c_glyph (fromIntegral x) (fromIntegral y) (fromIntegral width) (fromIntegral gw) bits fg bg
+        _ -> utf8 cluster $ \text -> check "Draw Unicode" (c_unicode (fromIntegral x) (fromIntegral y) (fromIntegral width) text fg bg)
       chars y (x+width) a rest
     rgb (V.SetTo (V.RGBColor r g b)) = fromIntegral r `shiftL` 16 .|. fromIntegral g `shiftL` 8 .|. fromIntegral b
     rgb (V.SetTo (V.ISOColor n)) = [0,0xaa0000,0x00aa00,0xaa5500,0x0000aa,0xaa00aa,0x00aaaa,0xaaaaaa,0x555555,0xff5555,0x55ff55,0xffff55,0x5555ff,0xff55ff,0x55ffff,0xffffff] !! (fromIntegral n `mod` 16)

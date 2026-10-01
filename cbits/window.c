@@ -1,4 +1,5 @@
 #include "window.h"
+#include "unicode.h"
 #include <SDL3/SDL.h>
 #include <limits.h>
 #include <math.h>
@@ -9,9 +10,23 @@ static SDL_Window *window;
 static SDL_Renderer *renderer;
 static SDL_Texture *texture, *vignette;
 static bool crt_filter;
-static uint32_t *pixels;
 static double scale;
-static int cols, rows, cell_height, origin_x, origin_y, pixel_w, pixel_h;
+static int cell_height;
+static uint32_t *pixels;
+static int frame_w, frame_h;
+static bool pixelate_unicode;
+typedef struct { char *text; int w, h; uint32_t fg, *pixels; } UnicodeTile;
+static UnicodeTile unicode_tiles[512];
+static unsigned tile_next;
+static void clear_unicode(void) {
+    for (int i=0;i<512;++i) { free(unicode_tiles[i].text); free(unicode_tiles[i].pixels); unicode_tiles[i]=(UnicodeTile){0}; }
+    tile_next=0;
+}
+static int cell_x(int x) { return (int)floor(x*8*scale); }
+static int cell_y(int y) { return (int)floor(y*cell_height*scale); }
+
+
+static int cols, rows, origin_x, origin_y, pixel_w, pixel_h;
 static int mouse_x = -1, mouse_y = -1;
 static char *input_text;
 static char *clipboard_text;
@@ -49,6 +64,7 @@ void thc_close(void) {
     SDL_DestroyRenderer(renderer); renderer = NULL;
     SDL_DestroyWindow(window); window = NULL;
     free(pixels); pixels = NULL;
+    clear_unicode();
     SDL_free(input_text); input_text = NULL;
     SDL_free(clipboard_text); clipboard_text = NULL;
     SDL_Quit();
@@ -134,7 +150,8 @@ void thc_size(int *w, int *h) { geometry(); *w = cols; *h = rows; }
 int thc_begin(void) {
     geometry();
     cursor_present = false;
-    int w = cols * 8, h = rows * 16;
+    int w = cell_x(cols), h = cell_y(rows);
+    frame_w=w; frame_h=h;
     float tw = 0, th = 0;
     if (texture) SDL_GetTextureSize(texture, &tw, &th);
     if (!texture || tw != w || th != h) {
@@ -154,14 +171,44 @@ int thc_begin(void) {
 /* Bitmap composition keeps all glyph/background edges on the same cell grid.
  * ponytail: upload one small frame per event; use an atlas if profiling demands it. */
 void thc_glyph(int x, int y, int cells, int glyph_width, const uint16_t *bits, uint32_t fg, uint32_t bg) {
-    int width = cols * 8;
     if (!pixels || y < 0 || y >= rows) return;
-    for (int dy = 0; dy < 16; ++dy) for (int dx = 0; dx < SDL_max(cells * 8, glyph_width); ++dx) {
-        int px = x * 8 + dx;
-        if (px < 0 || px >= width) continue;
-        bool ink = dx < glyph_width && dx < 16 && (bits[dy] & (0x8000u >> dx));
-        if (ink || cells) pixels[(y * 16 + dy) * width + px] = 0xff000000 | (ink ? fg : bg);
+    int x0=cell_x(x), x1=cell_x(x+SDL_max(cells,(glyph_width+7)/8));
+    int y0=cell_y(y), y1=cell_y(y+1);
+    for (int py=y0;py<y1;++py) for (int px=SDL_max(0,x0);px<SDL_min(frame_w,x1);++px) {
+        int dx=(int)((px-x0)/scale), dy=(py-y0)*16/SDL_max(1,y1-y0);
+        bool ink=dx<glyph_width && dx<16 && (bits[dy] & (0x8000u>>dx));
+        if (ink || cells) pixels[py*frame_w+px]=0xff000000 | (ink?fg:bg);
     }
+}
+void thc_pixelate_unicode(int enabled) { pixelate_unicode=enabled!=0; }
+int thc_unicode(int x, int y, int cells, const char *text, uint32_t fg, uint32_t bg) {
+    if (!pixels || x<0 || y<0 || x+cells>cols || y>=rows || cells<1) return 1;
+    int x0=cell_x(x), y0=cell_y(y), width=cell_x(x+cells)-x0, height=cell_y(y+1)-y0;
+    int w=pixelate_unicode?8*cells:width, h=pixelate_unicode?16:height;
+    UnicodeTile *tile=NULL;
+    for (int i=0;i<512;++i) {
+        UnicodeTile *candidate=&unicode_tiles[i];
+        if (candidate->text && candidate->w==w && candidate->h==h && candidate->fg==fg && !strcmp(candidate->text,text)) { tile=candidate; break; }
+    }
+    if (!tile) {
+        tile=&unicode_tiles[tile_next++%512];
+        free(tile->text); free(tile->pixels); *tile=(UnicodeTile){0};
+        tile->text=strdup(text); tile->pixels=calloc((size_t)w*h,sizeof(uint32_t));
+        tile->w=w; tile->h=h; tile->fg=fg;
+        if (!tile->text || !tile->pixels || !thc_unicode_bitmap(text,w,h,fg,tile->pixels)) {
+            free(tile->text); free(tile->pixels); *tile=(UnicodeTile){0};
+            return SDL_SetError("Cannot rasterize Unicode text");
+        }
+    }
+    for (int dy=0;dy<height;++dy) for (int dx=0;dx<width;++dx) {
+        uint32_t ink=tile->pixels[(dy*h/height)*w+dx*w/width];
+        unsigned alpha=ink>>24, inverse=255-alpha;
+        unsigned r=((ink>>16)&255)+((bg>>16)&255)*inverse/255;
+        unsigned g=((ink>>8)&255)+((bg>>8)&255)*inverse/255;
+        unsigned b=(ink&255)+(bg&255)*inverse/255;
+        pixels[(y0+dy)*frame_w+x0+dx]=0xff000000|(r<<16)|(g<<8)|b;
+    }
+    return 1;
 }
 static bool cursor_phase(void) {
     return !blink_cursor || ((SDL_GetTicks() - cursor_epoch) / 500) % 2 == 0;
@@ -176,8 +223,9 @@ void thc_cursor(int x, int y) {
     cursor_x = x; cursor_y = y; cursor_present = true;
     cursor_drawn = cursor_phase();
     if (!cursor_drawn) return;
-    for (int dy = 14; dy < 16; ++dy) for (int dx = 0; dx < 8; ++dx)
-        pixels[(y * 16 + dy) * cols * 8 + x * 8 + dx] ^= 0x00ffffff;
+    int y0=cell_y(y), y1=cell_y(y+1);
+    for (int py=y0+(y1-y0)*14/16;py<y1;++py) for (int px=cell_x(x);px<cell_x(x+1);++px)
+        pixels[py*frame_w+px]^=0x00ffffff;
 }
 static uint32_t mouse_color(uint32_t pixel) {
     /* DOS text mouse: screen mask FFFF, cursor mask 7700. Keep glyph/intensity. */
@@ -221,17 +269,16 @@ static bool draw_crt(const SDL_FRect *target) {
     }
     return SDL_RenderTexture(renderer, vignette, NULL, target);
 }
+static void invert_pointer(void) {
+    if (mouse_x<0 || mouse_x>=cols || mouse_y<0 || mouse_y>=rows) return;
+    for (int y=cell_y(mouse_y);y<cell_y(mouse_y+1);++y)
+        for (int x=cell_x(mouse_x);x<cell_x(mouse_x+1);++x)
+            pixels[y*frame_w+x]=mouse_color(pixels[y*frame_w+x]);
+}
 int thc_present(void) {
-    uint32_t saved_cell[128];
-    bool hovered = mouse_x >= 0 && mouse_x < cols && mouse_y >= 0 && mouse_y < rows;
-    if (hovered) for (int y = 0; y < 16; ++y) {
-        uint32_t *row = pixels + (mouse_y * 16 + y) * cols * 8 + mouse_x * 8;
-        memcpy(saved_cell + y * 8, row, 8 * sizeof(*row));
-        for (int x = 0; x < 8; ++x) row[x] = mouse_color(row[x]);
-    }
-    bool uploaded = SDL_UpdateTexture(texture, NULL, pixels, cols * 8 * sizeof(*pixels));
-    if (hovered) for (int y = 0; y < 16; ++y)
-        memcpy(pixels + (mouse_y * 16 + y) * cols * 8 + mouse_x * 8, saved_cell + y * 8, 8 * sizeof(*pixels));
+    invert_pointer();
+    bool uploaded = SDL_UpdateTexture(texture, NULL, pixels, frame_w * sizeof(*pixels));
+    invert_pointer();
     if (!uploaded) return 0;
     SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
     if (!SDL_RenderClear(renderer)) return 0;

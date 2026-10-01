@@ -8,7 +8,8 @@ import Data.List (intercalate)
 import Data.Maybe (fromMaybe, listToMaybe)
 import qualified Data.Text as T
 import qualified Skylighting as S
-import THC.Edit.Buffer (columnOffset, displayColumn)
+import THC.Edit.Unicode (graphemes, clusterWidth)
+import THC.Edit.Buffer (columnOffset, displayColumn, nextCharacter)
 import THC.Edit.Syntax (Style(..), highlightFor)
 
 type Styled = [(Char,Style)]
@@ -117,19 +118,25 @@ wrapExact width chars = go (textOf chars) chars
   where
     go _ [] = [[]]
     go text remaining =
-      let offset = max 1 (columnOffset text width)
+      let offset = max (nextCharacter text 0) (columnOffset text width)
           (part,rest) = splitAt offset remaining
           (marks,after) = span (\(c,_) -> displayColumn (T.singleton c) 1 == 0) rest
           row = part ++ marks
       in row : [line | not (null after), line <- go (T.drop (length row) text) after]
 
 expandTabs :: Styled -> Styled
-expandTabs = go 0
+expandTabs chars = go 0 (graphemes (textOf chars)) chars
   where
-    go _ [] = []
-    go _ (('\n',style):rest) = ('\n',style) : go 0 rest
-    go col (('\t',style):rest) = let count = 8-col `mod` 8 in replicate count (' ',style) ++ go (col+count) rest
-    go col (char@(c,_):rest) = char : go (col + displayColumn (T.singleton c) 1) rest
+    go _ [] _=[]
+    go col (g:gs) remaining = expanded ++ go next gs rest
+      where
+        (part,rest)=splitAt (T.length g) remaining
+        style=case part of (_,s):_->s; _->Plain
+        count=8-col `mod` 8
+        expanded=if g=="\t" then replicate count (' ',style) else part
+        next | g=="\n"=0
+             | g=="\t"=col+count
+             | otherwise=col+clusterWidth g
 
 codeStyles :: T.Text -> T.Text -> Styled
 codeStyles info source = case T.words info of

@@ -3,6 +3,7 @@ module Main where
 #ifdef WITH_WINDOW
 import qualified FontCheck
 #endif
+import qualified UnicodeCheck
 import qualified HexCheck
 import qualified DAPCheck
 import qualified DebuggerCheck
@@ -154,6 +155,7 @@ main = do
       undoneTree=fst (runCommand Undo focusedTree)
   check "tree focus blocks background paste" (buffers pastedTree == buffers focusedTree)
   check "tree focus blocks background undo" (buffers undoneTree == buffers focusedTree)
+  UnicodeCheck.checks
   BufferTreeCheck.checks
   LSPCheck.checks
   ToolingCheck.checks
