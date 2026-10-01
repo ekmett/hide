@@ -173,8 +173,8 @@ persistenceChecks root = do
     writeFile (config </> "thc" </> "config.toml") "[broken\n"
     resumedEditors <- newIORef []
     editorAvailable <- newIORef False
-    let resumeEditor record = do
-          modifyIORef' resumedEditors (++[record])
+    let resumeEditor savedEditor = do
+          modifyIORef' resumedEditors (++[savedEditor])
           available <- readIORef editorAvailable
           unless available (ioError (userError "Saved editor is unavailable"))
     withAgentRuntimeUsing (const (error "Recovery must not start a new editor")) resumeEditor project launch $ \runtime -> do

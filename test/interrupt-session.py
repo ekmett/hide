@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import runpy
 import secrets
+import shutil
 import signal
 import subprocess
 import sys
@@ -16,8 +17,9 @@ import time
 wire = runpy.run_path(str(Path(__file__).with_name('remote-session.py')))
 binary = str(Path(sys.argv[1]).resolve())
 
-with tempfile.TemporaryDirectory(prefix='thc-interrupt-') as temporary:
-    root = Path(temporary)
+root = Path(tempfile.mkdtemp(prefix='thc-interrupt-'))
+succeeded = False
+try:
     source = root / 'sample.txt'
     source.write_text('original\n')
     env = dict(os.environ, XDG_DATA_HOME=str(root / 'data'),
@@ -37,24 +39,31 @@ with tempfile.TemporaryDirectory(prefix='thc-interrupt-') as temporary:
             if p.poll() is not None:
                 print('Relay error:', p.stderr.read().decode(errors='replace'), file=sys.stderr)
             raise
+    relays = []
     def attach():
         p = subprocess.Popen([binary, '--remote'], cwd=root, env=env,
                              stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                              stderr=subprocess.PIPE, bufsize=0)
+        relays.append(p)
         wire['send'](p, dict(type='hello', version=1, session=ident,
                             client=secrets.token_hex(24), ack=0, resume=True, args=[]))
         control(p, 'hello')
         control(p, 'assets')
         return p
     def finish(p):
-        p.stdin.close()
+        try:
+            p.stdin.close()
+        except (BrokenPipeError, OSError):
+            pass
         try:
             p.wait(timeout=5)
         except subprocess.TimeoutExpired:
             p.kill()
             p.wait()
         p.stdout.close()
-        p.stderr.close()
+        if not p.stderr.closed:
+            (root / ("relay-" + str(relays.index(p)) + ".log")).write_bytes(p.stderr.read())
+            p.stderr.close()
     def await_state(state):
         until = time.monotonic() + 15
         while time.monotonic() < until:
@@ -88,7 +97,10 @@ with tempfile.TemporaryDirectory(prefix='thc-interrupt-') as temporary:
             await_state('recoverable')
             assert daemon.wait(timeout=15) == 0
         assert source.read_text() == 'original\n'
-        run('--daemon', '--resume', ident)
+        # Own the recovered process too, so a failing attachment cannot leak it.
+        daemon = subprocess.Popen([binary, '--remote-daemon', ident, str(source)],
+            cwd=root, env=env, stdin=subprocess.DEVNULL, stdout=daemon_log, stderr=daemon_log)
+        await_state('running detached')
         p = attach()
         wire['send'](p, dict(type='key', key='s', mods=['ctrl'], seq=1))
         control(p, 'ack')
@@ -96,6 +108,8 @@ with tempfile.TemporaryDirectory(prefix='thc-interrupt-') as temporary:
         wire['send'](p, dict(type='command', command='quit', seq=2))
         control(p, 'closed')
         finish(p)
+        assert daemon.wait(timeout=15) == 0
+        succeeded = True
         print('Ctrl-C stops daemon; unsaved buffer resumes and saves correctly')
     except BaseException:
         daemon_log.seek(0)
@@ -108,6 +122,9 @@ with tempfile.TemporaryDirectory(prefix='thc-interrupt-') as temporary:
         if frontend and frontend.poll() is None:
             frontend.kill()
             frontend.wait()
+        for relay in relays:
+            if not relay.stdout.closed:
+                finish(relay)
         # Finish only this fixture, including on a pre-fix assertion failure.
         if daemon.poll() is None:
             daemon.send_signal(signal.SIGINT)
@@ -117,10 +134,8 @@ with tempfile.TemporaryDirectory(prefix='thc-interrupt-') as temporary:
                 daemon.kill()
                 daemon.wait()
         daemon_log.close()
-        if ident in run('--sessions'):
-            p = attach()
-            wire['send'](p, dict(type='key', key='s', mods=['ctrl'], seq=1))
-            control(p, 'ack')
-            wire['send'](p, dict(type='command', command='quit', seq=2))
-            control(p, 'closed')
-            finish(p)
+finally:
+    if succeeded:
+        shutil.rmtree(root)
+    else:
+        print('Failed fixture evidence retained in ' + str(root), file=sys.stderr)
