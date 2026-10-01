@@ -1,5 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
-module THC.Edit.BuildJobs (BuildJobs, withBuildJobs, startBuildJob, tickBuildJobs, stopBuildJob, buildJobStatus, parseBuildDiagnostic) where
+module THC.Edit.BuildJobs (BuildJobs, withBuildJobs, startBuildJob, tickBuildJobs, stopBuildJob, buildJobStatus, buildJobStdout, parseBuildDiagnostic) where
 
 import Data.Aeson
 import Control.Concurrent.Async
@@ -24,16 +24,16 @@ import THC.Edit.Process (processCleanup)
 import THC.Edit.Model
 
 -- The session, rather than its attached display, owns this worker.
-data Event = Output Text | Finished (Either Text ExitCode)
+data Event = Output Bool Text | Finished (Either Text ExitCode)
 data Job = Job Int Text FilePath (IO ()) (TBQueue Event) Text
-data BuildJobs = BuildJobs (IORef (Maybe Job)) (IORef (Maybe (Int,Text,FilePath,Maybe (Either Text ExitCode))))
+data BuildJobs = BuildJobs (IORef (Maybe Job)) (IORef (Maybe (Int,Text,FilePath,Maybe (Either Text ExitCode)))) (IORef (Text,Bool))
 
 withBuildJobs :: (BuildJobs -> IO a) -> IO a
-withBuildJobs = bracket (BuildJobs <$> newIORef Nothing <*> newIORef Nothing) close
-  where close (BuildJobs ref _)=readIORef ref >>= mapM_ (\(Job _ _ _ stop _ _) -> stop)
+withBuildJobs = bracket (BuildJobs <$> newIORef Nothing <*> newIORef Nothing <*> newIORef ("",False)) close
+  where close (BuildJobs ref _ _)=readIORef ref >>= mapM_ (\(Job _ _ _ stop _ _) -> stop)
 
 startBuildJob :: BuildJobs -> Text -> FilePath -> [(FilePath,[String])] -> Desktop -> IO Desktop
-startBuildJob (BuildJobs ref report) label root commands desktop = do
+startBuildJob (BuildJobs ref report stdoutReport) label root commands desktop = do
   current<-readIORef ref
   case current of
     Just _ -> pure desktop {status="A build or run is already active; stop it before starting another."}
@@ -46,8 +46,8 @@ startBuildJob (BuildJobs ref report) label root commands desktop = do
           run ((command,args):rest)=do
             stopping<-readIORef cleanup
             case stopping of Nothing -> throwIO ThreadKilled; Just _ -> pure ()
-            emit (Output ("$ "<>T.replace "\n" "\\n" (T.pack (showCommandForUser command args))<>"\n"))
-            result<-capture cleanup root command args (emit . Output)
+            emit (Output False ("$ "<>T.replace "\n" "\\n" (T.pack (showCommandForUser command args))<>"\n"))
+            result<-capture cleanup root command args (\isStdout -> emit . Output isStdout)
             if result==ExitSuccess then run rest else pure result
       worker<-async $ do
         result<-try (run commands)
@@ -63,9 +63,10 @@ startBuildJob (BuildJobs ref report) label root commands desktop = do
           old=buildDiagnostics desktop
       writeIORef ref (Just (Job bid label root stop queue ""))
       writeIORef report (Just (bid,label,root,Nothing))
+      writeIORef stdoutReport ("",False)
       pure opened {status=label<>"…",buildDiagnostics=[],diagnostics=filter (`notElem` old) (diagnostics opened)}
 
-capture :: IORef (Maybe (IO ())) -> FilePath -> FilePath -> [String] -> (Text -> IO ()) -> IO ExitCode
+capture :: IORef (Maybe (IO ())) -> FilePath -> FilePath -> [String] -> (Bool -> Text -> IO ()) -> IO ExitCode
 capture cleanup root command args emit =
   withCreateProcess ((proc command args) {cwd=Just root,std_in=NoStream,std_out=CreatePipe,std_err=CreatePipe,create_group=True}) $ \_ out err child ->
     mask $ \restore -> do
@@ -75,8 +76,8 @@ capture cleanup root command args emit =
         Just _ -> (Just stop,pure ()))
       release
       let unregister=atomicModifyIORef' cleanup (\pending -> (fmap (const (pure ())) pending,()))
-      flip finally unregister $ withAsync (restore (maybe (pure ()) (pump emit) out)) $ \reader ->
-        withAsync (restore (maybe (pure ()) (pump emit) err)) $ \errors ->
+      flip finally unregister $ withAsync (restore (maybe (pure ()) (pump (emit True)) out)) $ \reader ->
+        withAsync (restore (maybe (pure ()) (pump (emit False)) err)) $ \errors ->
           restore (do code<-waitForProcess child; wait reader; wait errors; pure code)
             `onException` stop
 
@@ -90,7 +91,7 @@ pump emit stream=loop (TE.streamDecodeUtf8With lenientDecode) BS.empty
         TE.Some text remaining next -> emit text >> loop next remaining
 
 stopBuildJob :: BuildJobs -> Desktop -> IO Desktop
-stopBuildJob runtime@(BuildJobs ref _) desktop = do
+stopBuildJob runtime@(BuildJobs ref _ _) desktop = do
   current<-readIORef ref
   case current of
     Nothing -> pure desktop {status="No build or captured run is active."}
@@ -104,14 +105,14 @@ stopBuildJob runtime@(BuildJobs ref _) desktop = do
       tickBuildJobs runtime updated
 
 tickBuildJobs :: BuildJobs -> Desktop -> IO Desktop
-tickBuildJobs (BuildJobs ref report) desktop = do
+tickBuildJobs (BuildJobs ref report stdoutReport) desktop = do
   current<-readIORef ref
   case current of
     Nothing -> pure desktop
     Just (Job bid label root stop queue previous) -> do
       events<-atomically (flushTBQueue queue)
       if null events then pure desktop else do
-        let appended=T.concat [text | Output text<-events]
+        let appended=T.concat [text | Output _ text<-events]
             outcomes=[outcome | Finished outcome<-events]
             ending=case outcomes of [] -> ""; outcome:_ -> "\n"<>summary outcome<>"\n"
             output=T.takeEnd (1024*1024) (previous<>appended<>ending)
@@ -129,6 +130,9 @@ tickBuildJobs (BuildJobs ref report) desktop = do
             result=case outcomes of
               [] -> shown
               outcome:_ -> (if null problems then shown else setProblemsVisible True shown) {status=summary outcome}
+        modifyIORef' stdoutReport $ \(previousStdout,wasTruncated) ->
+          let text=previousStdout<>T.concat [part | Output True part<-events]
+          in (T.takeEnd (1024*1024) text,wasTruncated || T.length text>1024*1024)
         writeIORef ref (if null outcomes then Just (Job bid label root stop queue output) else Nothing)
         case outcomes of
           outcome:_ -> writeIORef report (Just (bid,label,root,Just outcome))
@@ -159,7 +163,7 @@ parseBuildDiagnostic root input = scan [] (T.splitOn ":" input)
 
 -- Completion metadata survives worker exit; output remains an editor buffer.
 buildJobStatus :: BuildJobs -> IO Value
-buildJobStatus (BuildJobs ref report)=do
+buildJobStatus (BuildJobs ref report _)=do
   active<-maybe False (const True) <$> readIORef ref
   recent<-readIORef report
   pure (object (["active" .= active]++case recent of
@@ -167,3 +171,8 @@ buildJobStatus (BuildJobs ref report)=do
     Just (bid,label,root,outcome) -> ["bufferId" .= bid,"action" .= label,"root" .= root,
       "exitCode" .= (case outcome of Just (Right ExitSuccess) -> Just (0::Int); Just (Right (ExitFailure code)) -> Just code; _ -> Nothing),
       "error" .= (case outcome of Just (Left err) -> Just err; _ -> Nothing)]))
+
+-- Machine-readable test reports consume stdout only. Stderr and the command
+-- echo still appear in the human output buffer, but cannot forge test points.
+buildJobStdout :: BuildJobs -> IO (Text,Bool)
+buildJobStdout (BuildJobs _ _ output)=readIORef output

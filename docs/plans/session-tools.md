@@ -42,7 +42,8 @@ Debugger follow/reveal behavior is exercised with a real fake-DAP transport.
   current diagnostics, advertised lazy resolution and checked atomic buffer edits.
 - [ ] Command-based HLS actions and scoped workspace/executeCommand application.
 - [x] Cabal component/dependency graph context from the existing generated plan.
-- [ ] Individual-test results for supported test-runner formats.
+- [x] Individual top-level TAP 13 test results from stdout, with planned/observed counts,
+  skip/TODO outcomes, failure precedence and explicit truncation/completeness.
 
 - [x] Shared/background debugger presentation from the same stopped DAP session.
 - [x] Global/project agent context, UI editing and on-demand workflow catalog.

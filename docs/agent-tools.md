@@ -94,7 +94,7 @@ edit-plus-command actions are listed disabled; resource operations are refused.
 | `build_start` | X | `action`, `toolchain?`, `target?`, `arguments?`, `terminal?` | `compile`, `make`, `run`; `THC` or `GHC`; overrides apply to this job |
 | `build_stop` | X | `{}` | Stop captured build/run; keep output and completion status |
 | `test_start` | X | `target?`, `toolchain?` | Cabal test job; supported toolchain `GHC` |
-| `test_status` | R | `{}` | Explicit suite outcomes, process status and compiler diagnostics |
+| `test_status` | R | `{}` | Cabal suite outcomes, explicit TAP 13 test points, process status and compiler diagnostics |
 | `terminal_list` | R | `{}` | Shared Ghostty terminal IDs, buffer IDs and exit codes |
 | `terminal_start` | X | `command`, `args?`, `cwd?`, `outputByteLimit?` | Executable plus argument array; no implicit shell; opens window and returns terminal ID |
 | `terminal_output` | R | `terminalId`, `offset?`, `limit?` | Retained output and exit code; at most 128 KiB per call |
@@ -105,6 +105,16 @@ Builds require saved source buffers. Build/tests share one job slot. Read build
 output through `read_buffer`. Terminal output offsets refer to the retained tail;
 `truncated` reports discarded earlier output. Execution runs with the editor
 account’s access. UI privacy masks are not an OS execution sandbox.
+
+`test_status` recognizes [TAP 13](https://testanything.org/tap-version-13-specification.html)
+on stdout beginning with `TAP version 13`. It reports top-level test numbers,
+names, pass/fail, skip reasons, TODOs, and unexpected TODO successes. Each stream
+reports its planned and observed counts and whether it is complete, incomplete,
+invalid, or bailed out. Nested subtests and YAML diagnostics remain in the output
+buffer. Stderr never supplies test points. At most 500 cases and streams are
+returned, with truncation flags; failures beyond the case limit still fail the
+run. Missing/truncated output cannot establish completeness, and process failure
+always wins. Other runners retain suite-level results without guessed cases.
 
 ## Debugging
 

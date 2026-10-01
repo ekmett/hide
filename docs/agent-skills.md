@@ -96,11 +96,13 @@ commands or file operations are explicitly unsupported.
 **Do:** inspect unsaved buffers; save the intended source changes.
 `build_start` chooses `compile`, `make` or `run`, with optional job-local
 `toolchain`, `target` and `arguments`. Poll `build_status`; read its output buffer.
-Use `test_start` for GHC/Cabal tests and `test_status` for suite outcomes. For an
+Use `test_start` for GHC/Cabal tests and `test_status` for suite outcomes and explicit TAP 13 cases. For an
 interactive program, use a shared terminal: `terminal_start`, `terminal_input`,
 `terminal_output`; `terminal_list` finds existing terminals.
 
-**Check:** report the exit code, explicit suite outcomes and relevant diagnostics.
+**Check:** report the exit code, explicit suite/case outcomes and relevant diagnostics.
+For TAP output, check stream completeness and result truncation before claiming
+that every case was observed.
 A successful process with no parsed test results is not evidence that individual
 tests passed. Build and test jobs share a slot.
 
