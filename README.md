@@ -86,12 +86,13 @@ The editor starts it in the project and sends unsaved edits as you work.
 * **Tools > Messages** shows diagnostics. Enter or double-click takes you to
   the source; **Alt+F8** and **Alt+F7** visit the next and previous message.
 
-**Run > Run** (**Ctrl+F9**) runs the package through THC in an embedded terminal.
-Use **Run > Target** to choose an executable. This needs the optional terminal
-build and a current THC installation. **Debug > Attach** connects to a running
-DAP server so you can set breakpoints, step and inspect the stack and variables.
+**Compile > Make** (**F9**) builds the selected THC or GHC target.
+**Run > Run** (**Ctrl+F9**) runs it, with an embedded terminal for interactive programs.
+Use **Run > Target** to choose the toolchain and executable. **Debug > Launch**
+starts a debugger; **Debug > Attach** connects to a running DAP server. Set
+breakpoints, step, and inspect the stack and variables alongside the source.
 The [Haskell guide](docs/haskell.md) covers language tools; [running and
-debugging](docs/running.md) covers setup and the attach workflow.
+debugging](docs/running.md) covers setup and the build/debug workflow.
 
 ## Review and conversation
 

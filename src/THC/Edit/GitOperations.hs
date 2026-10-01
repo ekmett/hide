@@ -93,7 +93,7 @@ gitOperationEffects (GitOperations ref _) core = foldM apply . (False,)
       case effect of
         Exit | busy -> pure (False,desktop {status="Wait for the Git operation to finish before quitting."})
         SaveDocument{} | mutating -> pure (False,desktop {status="Wait for the Git operation to finish before saving."})
-        AgentAction action _ | mutating, action=="run" || "approval:" `T.isPrefixOf` action ->
+        AgentAction action _ | mutating, action `elem` ["run","compile","make"] || "approval:" `T.isPrefixOf` action ->
           pure (False,desktop {status="Wait for the Git operation to finish before approving agent actions or running commands."})
         WriteGitCommit{} | busy -> pure (False,desktop {status="Wait for the Git operation to finish before committing."})
         RunGit action -> start busy (action/=FetchRemote) desktop (label action) (\root -> runOperation root action desktop)

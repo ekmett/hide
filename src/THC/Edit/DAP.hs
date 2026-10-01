@@ -1,10 +1,11 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 module THC.Edit.DAP
-  ( Client, Event(..), startClient, stopClient, request, pollEvents
+  ( Client, Event(..), startClient, startAdapter, startManaged, stopClient, request, pollEvents
   ) where
 
-import Control.Concurrent.Async (async, cancel, race_)
+import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async (async, cancel, race, race_, withAsync)
 import Control.Concurrent.STM
 import Control.Exception
 import Control.Monad (forever, unless, void, when)
@@ -19,10 +20,15 @@ import qualified Data.IntSet as Set
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
+import Data.Text.Encoding.Error (lenientDecode)
 import Network.Socket
+import System.IO (Handle, hClose, hFlush, hSetBinaryMode)
+import System.Process
 import qualified Network.Socket.ByteString as Socket
 import System.Timeout (timeout)
 import Text.Read (readMaybe)
+import THC.Edit.Process (processCleanup)
 
 data Event = Response Int (Either Text Value) | Notification Text Value | Disconnected Text
   deriving (Eq, Show)
@@ -40,7 +46,94 @@ data Client = Client
 
 -- The UI only enqueues requests. Connection, framing and socket IO run here.
 startClient :: Text -> Int -> IO Client
-startClient host port = mask $ \restore -> do
+startClient host port = startTransport $ \_ _ communicate -> withConnection host port communicate
+
+withConnection :: Text -> Int -> ((Int -> IO BS.ByteString) -> (BS.ByteString -> IO ()) -> IO a) -> IO a
+withConnection host port communicate = do
+  unless (host `elem` ["localhost", "127.0.0.1", "::1"] && port > 0 && port <= 65535)
+    (ioError (userError "DAP endpoint must be localhost, 127.0.0.1 or ::1 with a port in 1..65535"))
+  -- Never resolve hostnames: the actual destination is always loopback.
+  bracket (openConnection host port) close $ \connection ->
+    communicate (Socket.recv connection) (Socket.sendAll connection)
+
+-- The adapter and its private process group belong to the daemon, not a frontend.
+-- argv is passed directly to the OS; configuration never invokes a shell.
+startAdapter :: FilePath -> [String] -> FilePath -> IO Client
+startAdapter executable arguments directory = startTransport $ \emit register communicate ->
+  withAdapter register executable arguments directory $ \input output errors _ release ->
+    withAsync (drainOutput emit "stderr" errors) $ \_ ->
+      communicate (BS.hGetSome output) (\bytes -> BS.hPut input bytes >> hFlush input) `finally` release
+
+-- THC builds and starts its guest before opening DAP. Keep that work off the UI
+-- thread, and never attach to a listener which was already using the chosen port.
+startManaged :: FilePath -> [String] -> FilePath -> Text -> Int -> IO Client
+startManaged executable arguments directory host port = startTransport $ \emit register communicate -> do
+  unless (host `elem` ["localhost","127.0.0.1","::1"] && port>0 && port<=65535)
+    (ioError (userError "Invalid managed DAP loopback endpoint"))
+  occupied <- try (withConnection host port (\_ _ -> pure ())) :: IO (Either IOException ())
+  case occupied of
+    Right () -> ioError (userError "DAP port is already in use; choose an unused port")
+    Left _ -> pure ()
+  withAdapter register executable arguments directory $ \input output errors process release -> do
+    hClose input
+    withAsync (drainOutput emit "stdout" output) $ \_ ->
+      withAsync (drainOutput emit "stderr" errors) $ \_ -> flip finally release $ do
+        -- Retry only connection establishment, never an established session.
+        let connectReady = do
+              opened <- try (openConnection host port) :: IO (Either IOException Socket)
+              case opened of Right connection -> pure connection; Left _ -> threadDelay 100000 >> connectReady
+            acquire = do
+              result<-race (waitForProcess process) (bounded 300000000 "THC debugger startup timed out; see Debug / Output" connectReady)
+              case result of
+                Left code -> ioError (userError ("THC debugger process exited: "++show code++"; see Debug / Output"))
+                Right connection -> pure connection
+        bracket acquire close $ \connection -> communicate (Socket.recv connection) (Socket.sendAll connection)
+
+openConnection :: Text -> Int -> IO Socket
+openConnection host port = do
+  let ipv6=host=="::1"
+      address=if ipv6 then SockAddrInet6 (fromIntegral port) 0 (0,0,0,1) 0
+        else SockAddrInet (fromIntegral port) (tupleToHostAddress (127,0,0,1))
+  bracketOnError (socket (if ipv6 then AF_INET6 else AF_INET) Stream defaultProtocol) close $ \connection -> do
+    bounded 5000000 "DAP connection timed out" (connect connection address)
+    pure connection
+
+withAdapter :: (IO () -> IO ()) -> FilePath -> [String] -> FilePath -> (Handle -> Handle -> Handle -> ProcessHandle -> IO () -> IO a) -> IO a
+withAdapter register executable arguments directory action =
+  bracket (do
+    handles@(_,_,_,process)<-createProcess (proc executable arguments)
+      {cwd=Just directory,std_in=CreatePipe,std_out=CreatePipe,std_err=CreatePipe,create_group=True}
+    stop<-processCleanup process
+    let release=do
+          stop
+          let (input,output,errors,_)=handles
+          mapM_ (mapM_ (ignore . hClose)) [input,output,errors]
+    register release
+    pure (handles,release))
+    snd $ \(handles,release) -> case handles of
+      (Just input,Just output,Just errors,process) -> do
+        mapM_ (`hSetBinaryMode` True) [input,output,errors]
+        action input output errors process release
+      _ -> ioError (userError "DAP adapter pipes unavailable")
+  where
+    ignore operation = void operation `catch` (\(_ :: IOException) -> pure ())
+
+drainOutput :: (Int -> Event -> STM ()) -> Text -> Handle -> IO ()
+drainOutput emit category stream = loop (TE.streamDecodeUtf8With lenientDecode) BS.empty
+  where
+    publish value = unless (T.null value) $ atomically
+      (emit (BS.length (TE.encodeUtf8 value)) (Notification "output" (object ["category" .= category,"output" .= value])))
+    loop decodeChunk pendingBytes = do
+      part<-BS.hGetSome stream 4096
+      if BS.null part then publish (TE.decodeUtf8With lenientDecode pendingBytes) else do
+        let TE.Some value remaining next=decodeChunk part
+        publish value
+        loop next remaining
+
+startTransport :: ((Int -> Event -> STM ()) -> (IO () -> IO ()) -> ((Int -> IO BS.ByteString) -> (BS.ByteString -> IO ()) -> IO ()) -> IO ()) -> IO Client
+startTransport transport = mask $ \restore -> do
+  shutdownAction <- newIORef (pure ())
+  let release=readIORef shutdownAction >>= id
   out <- newTBQueueIO 64
   inbox <- newTBQueueIO 128
   bytes <- newTVarIO 0
@@ -78,31 +171,23 @@ startClient host port = mask $ \restore -> do
           Nothing -> ioError (userError "Malformed DAP event")
         -- Reverse requests require capabilities we do not advertise.
         _ -> ioError (userError "Unsupported DAP message type")
-      run = do
-        unless (host `elem` ["localhost", "127.0.0.1", "::1"] && port > 0 && port <= 65535)
-          (ioError (userError "DAP endpoint must be localhost, 127.0.0.1 or ::1 with a port in 1..65535"))
-        let ipv6 = host == "::1"
-            address = if ipv6 then SockAddrInet6 (fromIntegral port) 0 (0,0,0,1) 0
-              else SockAddrInet (fromIntegral port) (tupleToHostAddress (127,0,0,1))
-        -- Never resolve hostnames: the actual destination is always loopback.
-        bracket (socket (if ipv6 then AF_INET6 else AF_INET) Stream defaultProtocol) close $ \connection -> do
-          bounded 5000000 "DAP connection timed out" (connect connection address)
+      run = transport emit (writeIORef shutdownAction) $ \readBytes writeBytes -> do
           rest <- newIORef BS.empty
           race_
-            (forever (readFrame connection rest >>= uncurry receive))
-            (forever $ do
+            (forever (readFrame readBytes rest >>= uncurry receive) `finally` release)
+            ((forever $ do
               (ident, command, arguments) <- atomically (readTBQueue out)
               let body = encode (object ["seq" .= ident, "type" .= ("request" :: Text), "command" .= command, "arguments" .= arguments])
                   size = BL.length (BL.take (fromIntegral maxFrame + 1) body)
               when (size > fromIntegral maxFrame) (ioError (userError "Oversized outgoing DAP frame"))
               bounded 5000000 "DAP write timed out" $ do
-                Socket.sendAll connection (BC.pack ("Content-Length: " ++ show size ++ "\r\n\r\n"))
-                Socket.sendAll connection (BL.toStrict body))
+                writeBytes (BC.pack ("Content-Length: " ++ show size ++ "\r\n\r\n"))
+                writeBytes (BL.toStrict body)) `finally` release)
   thread <- async ((restore run `catch` (\(err :: SomeException) -> finish ("DAP: " <> T.pack (displayException err))))
-    `finally` finish "DAP connection closed")
-  pure (Client out inbox bytes awaiting counter unavailable finalEvents (mask_ (finish "DAP client stopped" >> cancel thread)))
+    `finally` (release >> finish "DAP connection closed"))
+  pure (Client out inbox bytes awaiting counter unavailable finalEvents (mask_ (finish "DAP client stopped" >> release >> cancel thread)))
 
--- Cancels connecting, reading or writing workers and closes the socket.
+-- Cancels IO workers and closes the connection or owned adapter process.
 stopClient :: Client -> IO ()
 stopClient = closeClient
 
@@ -145,8 +230,8 @@ bounded micros message action = timeout micros action >>= maybe (ioError (userEr
 
 -- Keep surplus bytes for coalesced frames, and limit the header before reading
 -- another chunk. Idle connections may wait; a partial frame gets ten seconds.
-readFrame :: Socket -> IORef BS.ByteString -> IO (Int, Value)
-readFrame connection rest = do
+readFrame :: (Int -> IO BS.ByteString) -> IORef BS.ByteString -> IO (Int, Value)
+readFrame readBytes rest = do
   initial <- readIORef rest
   first <- if BS.null initial then chunk 4096 else pure initial
   bounded 10000000 "DAP frame timed out" $ do
@@ -158,7 +243,7 @@ readFrame connection rest = do
     pure (size, value)
   where
     chunk n = do
-      part <- Socket.recv connection n
+      part <- readBytes n
       when (BS.null part) (ioError (userError "DAP peer disconnected"))
       pure part
     headers buffer = case BS.breakSubstring "\r\n\r\n" buffer of

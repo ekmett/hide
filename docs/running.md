@@ -3,30 +3,41 @@
 Keep program output beside the source, use a shell for project commands, and
 attach a debugger when you need to stop and inspect execution.
 
-## Run the package
+## Compile, make, run
 
-Save modified source buffers, then choose **Run > Run** or press **Ctrl+F9**.
-The editor runs `thc run --project-dir DIR` in an embedded terminal. THC selects
-the package's runnable component.
+Choose **Run > Target** (also **Compile > Target**) to select **THC** or **GHC**,
+the compiler executable, and an optional Cabal target such as
+`package:exe:program`. Save your source files, then use:
 
-**Run > Target** lets you choose:
+| Action | Shortcut | What it does |
+| --- | --- | --- |
+| Compile | Alt+F9 | Compile the selected package target; check a standalone GHC source file |
+| Make | F9 | Build the selected package target or standalone executable |
+| Run | Ctrl+F9 | Build and run the selected program |
 
-| Field | Purpose |
-| --- | --- |
-| THC executable | The command to run; defaults to `thc` |
-| Cabal target | An optional target such as `package:exe:program` |
-| THC root | An optional THC source/build root; defaults from `THC_ROOT` |
-| Runtime | An optional runtime path |
+These actions are also clickable in the ordinary status bar. Compile and Make
+open an output window; output arrives while you keep editing. Compiler errors
+and warnings appear in **Messages**, where **Alt+F8** and **Alt+F7** move between
+source locations. **Compile > Stop build** stops the current job.
 
-The target is associated with the project directory. Settings are saved in the
-user configuration directory. This command uses the current THC CLI with a
-positional Cabal target and `--project-dir`; installations using the older
-`--exe` interface need updating. Which programs can run is determined by the
-installed THC compiler and runtime.
+For THC, Compile and Make invoke `thc acquire`: Cabal builds the component and
+THC captures its dependency closure. Run invokes `thc run`. For GHC projects,
+the editor uses `cabal build` and `cabal run` with the selected compiler.
+Outside a Cabal project, Compile checks the current `.hs` or `.lhs` file with
+`ghc --make -fno-code`, Make compiles the module (and links an executable for
+`Main`), and Run uses
+`runghc` with the selected GHC.
 
-Run needs the optional [terminal build](install.md#embedded-terminal). The
-Compile and Make menu entries are reserved for the integrated build workflow;
-use Run or project commands in a terminal for the working paths.
+The target dialog also accepts an optional THC root and runtime path, and
+program arguments as a JSON array, for example `["input.txt", "--verbose"]`.
+Arguments go directly to the process; shell syntax is not interpreted. Settings
+live in the user configuration directory. The Cabal target belongs to the
+selected project, while the compiler installation is shared.
+
+Run uses an embedded terminal when the [terminal build](install.md#embedded-terminal)
+is available. Basic builds capture output without interactive input; **Run >
+Stop build/run** stops a captured run. All commands execute on the session host,
+including over SSH. Detaching the display leaves an active build or run intact.
 
 ## Shells and output
 
@@ -40,16 +51,37 @@ stops the selected process. **File > Exit** cleans up the session's terminal
 processes. Detaching the frontend leaves them running; return with `--resume`.
 ACP terminal requests use the same backend, with approval before execution.
 
-## Attach a debugger
+## Launch or attach a debugger
 
-Start a compatible DAP server, then choose **Debug > Attach**. Enter its loopback
-host and TCP port; the default is `127.0.0.1:4711`. The editor uses Content-Length
-DAP over TCP, separate from the program's input and output.
+**Debug > Launch** offers **THC target** and **Adapter config**. THC target
+uses the THC installation and package selected in **Run > Target**. Choose an
+unused loopback port (default `4711`); the editor starts `thc run --dap-port PORT`,
+waits for its debugger, and configures your breakpoints before execution.
+This requires a THC build with the DAP instrument and `--dap-port` support.
+Build output is available in **Debug > Output** while it starts.
 
-Attachment is the current debugger entry point. **Debug > Launch** is reserved
-for the THC launch integration. A stock Graal DAP server can provide the protocol,
-but forwarding its options through `thc run` requires the corresponding runtime
-integration.
+For another debugger, put its command and DAP arguments in `.thc-debug.json`
+in the project directory, or choose another configuration path:
+
+```json
+{
+  "command": ["lldb-dap"],
+  "request": "launch",
+  "arguments": {"program": "/absolute/path/to/program", "args": []}
+}
+```
+
+The adapter owns the meaning of `arguments`. Use `"request": "attach"` for an
+adapter-specific attach configuration. A TCP configuration replaces `command`
+with `"host": "127.0.0.1", "port": 4711`; only loopback endpoints are accepted.
+Adapter commands and arguments are passed without a shell.
+
+**Debug > Attach** connects directly to an already-running DAP endpoint,
+defaulting to `127.0.0.1:4711`. The debugger protocol stays separate from program
+output. Disconnecting an attached session leaves its program running;
+disconnecting an editor-launched session requests termination and releases its
+owned adapter. Detaching the editor display preserves the debugger, so `--resume`
+returns to the same breakpoints and stopped state.
 
 | Action | Keys or menu |
 | --- | --- |
@@ -64,7 +96,7 @@ integration.
 | Inspect frames and variables | Debug > Call stack, then Scopes |
 | Choose advertised exception filters | Debug > Exceptions |
 | Read debugger output | Debug > Output |
-| Detach | Debug > Disconnect |
+| Disconnect | Debug > Disconnect |
 
 Choose a frame to inspect its scopes and expand variables explicitly. Values
 come from the runtime; the editor does not automatically evaluate expressions
@@ -72,6 +104,5 @@ or change variables. Frame and variable selections expire when execution
 resumes. Source supplied by the server opens read-only if no disk file is
 available.
 
-Disconnect detaches without asking the program to terminate. Only loopback
-endpoints are accepted. In a [remote editor session](remote.md), loopback is the
-remote host, so its debugger stays beside the running program.
+In a [remote editor session](remote.md), loopback is the remote host, so the
+debugger stays beside the running program.

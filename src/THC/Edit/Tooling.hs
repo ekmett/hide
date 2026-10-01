@@ -424,7 +424,7 @@ refreshProblems t d = do
         let current=[v | (_,p,v,_)<-sourceDocuments d,p==path],
         diagnosticsCurrent version current,
         value<-ds, Just (row,col,severity,msg)<-[parseMaybe parseDiagnostic value]]
-      updated=chooseProblem (problemsSelected d) (d {diagnostics=sortOn (\p -> (diagnosticPath p,diagnosticRow p,diagnosticColumn p)) shown})
+      updated=chooseProblem (problemsSelected d) (d {diagnostics=sortOn (\p -> (diagnosticPath p,diagnosticRow p,diagnosticColumn p)) (shown++buildDiagnostics d)})
       newErrors=null [p | p<-diagnostics d,diagnosticSeverity p==1] && any ((==1) . diagnosticSeverity) shown
   pure (if newErrors && not (problemsVisible d) then setProblemsVisible True updated else updated)
   where

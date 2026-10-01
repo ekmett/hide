@@ -77,7 +77,7 @@ the URL without opening a browser automatically.
 | Repository review and operations | Git on the editor host's `PATH` |
 | Conversations | An ACP stdio provider under Options > Agents; see [conversations](conversations.md) |
 | Shells and program output | The `terminal` build described below |
-| Run a Haskell program through THC | A current THC executable plus the terminal build; see [running](running.md) |
+| Compile, build, or run Haskell | THC, or GHC and Cabal; add the terminal build for interactive programs. See [running](running.md). |
 | Remote editing | `thc-edit` on both machines; see [remote editing](remote.md) |
 
 Sessions and SSH editing are part of the default build. The optional flags select
@@ -106,6 +106,17 @@ cabal run -fwindow -fterminal --ghc-options=-optl-Wl,-rpath,/tmp/thc-ghostty-ins
 Keep the installed Ghostty library available at runtime, or use your system's
 normal library installation path. A build without `terminal` can still edit,
 use HLS, review Git changes and hold conversations.
+
+## Bash completion
+
+With current `thc` and `thc-edit` on your `PATH`, enable Bash completion with:
+
+```bash
+source <(thc --bash-completion-script)
+```
+
+This completes `thc edit` options and file paths, including names with spaces.
+Add the command to your Bash startup file to enable it in future shells.
 
 ## Defaults
 

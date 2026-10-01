@@ -3,7 +3,7 @@
 module DAPCheck (checks) where
 
 import Control.Concurrent (threadDelay, newEmptyMVar, putMVar, takeMVar)
-import Control.Concurrent.Async (withAsync, wait)
+import Control.Concurrent.Async (concurrently_, withAsync, wait)
 import Control.Exception hiding (handle)
 import Control.Monad (forM_, unless, void)
 import Data.Aeson
@@ -15,11 +15,60 @@ import Data.Maybe (fromJust)
 import qualified Data.Text as T
 import Network.Socket
 import System.IO
+import System.Process (CreateProcess(..), StdStream(..), proc, readProcessWithExitCode, withCreateProcess)
+import Text.Read (readMaybe)
+import THC.Edit.Process (processCleanup)
 import System.Timeout (timeout)
 import qualified THC.Edit.DAP as DAP
 
 checks :: IO ()
 checks = do
+  processTreeCheck
+  bracket (DAP.startAdapter "python3" ["-u", "-c", stdioPeer] ".") DAP.stopClient $ \client -> do
+    ident <- DAP.request client "launch" (object ["program" .= ("λ spaced.hs" :: T.Text)])
+    events <- await client (\es -> any (\e -> case e of DAP.Response _ _ -> True; _ -> False) es && any notification es)
+    check "stdio launch response correlates" (DAP.Response ident (Right (object ["program" .= ("λ spaced.hs" :: T.Text)])) `elem` events)
+    check "stdio stderr is drained and reported" (any (\e -> case e of DAP.Notification "output" body -> field "category" body==Just ("stderr" :: T.Text); _ -> False) events)
+  bracket (DAP.startAdapter "python3" ["-u", "-c", "import sys,time; sys.stdin.buffer.readline(); sys.stderr.write('ready'); sys.stderr.flush(); time.sleep(60)"] ".") DAP.stopClient $ \client -> do
+    ident <- DAP.request client "launch" Null
+    _ <- await client (any notification)
+    stopped <- timeout 2000000 (DAP.stopClient client)
+    check "stalled stdio adapter stops promptly" (stopped == Just ())
+    events <- DAP.pollEvents client
+    check "stopping stdio adapter fails in-flight request" (any (failed ident) events)
+  bracket (DAP.startAdapter "python3" ["-u", "-c", "import sys; sys.stderr.buffer.write(('λ😀'*4000).encode()); sys.stderr.flush()\n"++stdioPeer] ".") DAP.stopClient $ \client -> do
+    _ <- DAP.request client "threads" Null
+    let stderrText es=T.concat [value | DAP.Notification "output" body<-es,Just value<-[field "output" body]]
+    events<-await client (T.isInfixOf "adapter diagnostic" . stderrText)
+    check "stdio output preserves UTF8 across pipe read boundaries" (T.replicate 4000 "λ😀" `T.isPrefixOf` stderrText events)
+  bracket (DAP.startAdapter "/nonexistent/thc-dap-adapter" [] ".") DAP.stopClient $ \client -> do
+    ident <- DAP.request client "launch" Null
+    events <- await client (any disconnected)
+    check "failed adapter spawn fails launch promptly" (any (failed ident) events)
+  managedPort <- bracket (socket AF_INET Stream defaultProtocol) close $ \listener -> do
+    bind listener (SockAddrInet 0 (tupleToHostAddress (127,0,0,1)))
+    SockAddrInet number _ <- getSocketName listener
+    pure (fromIntegral number)
+  bracket (DAP.startManaged "python3" ["-u","-c",managedPeer,show managedPort] "." "127.0.0.1" managedPort) DAP.stopClient $ \client -> do
+    ident <- DAP.request client "initialize" (object [])
+    events <- await client (\es -> DAP.Response ident (Right (object [])) `elem` es)
+    check "managed launch connects after process startup" (DAP.Response ident (Right (object [])) `elem` events)
+  withServer drain $ \occupiedPort ->
+    bracket (DAP.startManaged "/nonexistent/should-not-start" [] "." "127.0.0.1" occupiedPort) DAP.stopClient $ \client -> do
+      events <- await client (any disconnected)
+      check "managed launch rejects occupied port before spawning" (any (\e -> case e of DAP.Disconnected reason -> "already in use" `T.isInfixOf` reason; _ -> False) events)
+  bracket (DAP.startManaged "python3" ["-c","raise SystemExit(23)"] "." "127.0.0.1" managedPort) DAP.stopClient $ \client -> do
+    ident <- DAP.request client "initialize" Null
+    events <- await client (any disconnected)
+    check "failed THC startup fails queued initialize" (any (failed ident) events)
+    check "failed THC startup reports exit status" (any (\e -> case e of DAP.Disconnected reason -> "23" `T.isInfixOf` reason; _ -> False) events)
+  bracket (DAP.startManaged "python3" ["-u","-c","import time; print('waiting',flush=True); time.sleep(60)"] "." "127.0.0.1" managedPort) DAP.stopClient $ \client -> do
+    ident<-DAP.request client "initialize" Null
+    _<-await client (any notification)
+    stopped<-timeout 2000000 (DAP.stopClient client)
+    check "managed startup cancellation stops process before joining output readers" (stopped==Just ())
+    events<-DAP.pollEvents client
+    check "managed startup cancellation fails initialize" (any (failed ident) events)
   withServer protocol $ \port -> bracket (DAP.startClient "localhost" port) DAP.stopClient $ \client -> do
     first <- DAP.request client "threads" (object ["text" .= ("λ😀" :: T.Text)])
     second <- DAP.request client "stackTrace" Null
@@ -163,3 +212,45 @@ receive handle = do
         check "client header terminator" (blank == "\r")
         pure count
       else error "Missing client Content-Length"
+
+stdioPeer :: String
+stdioPeer = unlines
+  [ "import sys,json"
+  , "sys.stderr.write('adapter diagnostic\\n'); sys.stderr.flush()"
+  , "n=int(sys.stdin.buffer.readline().split(b':')[1]); sys.stdin.buffer.readline()"
+  , "req=json.loads(sys.stdin.buffer.read(n))"
+  , "body=json.dumps(dict(seq=1,type='response',request_seq=req['seq'],success=True,body=req['arguments'])).encode()"
+  , "sys.stdout.buffer.write(('Content-Length: %d\\r\\n\\r\\n'%len(body)).encode()+body); sys.stdout.buffer.flush()"
+  , "sys.stdin.buffer.read()"
+  ]
+
+managedPeer :: String
+managedPeer = unlines
+  [ "import socket,sys,types"
+  , "print('managed startup output',flush=True)"
+  , "server=socket.socket(); server.bind(('127.0.0.1',int(sys.argv[1]))); server.listen(1)"
+  , "conn,_=server.accept(); stream=conn.makefile('rwb',buffering=0)"
+  , "sys.stdin=types.SimpleNamespace(buffer=stream); sys.stdout=types.SimpleNamespace(buffer=stream)"
+  ] ++ stdioPeer
+
+-- The descendant ignores graceful signals and keeps the output pipe open. Merely
+-- terminating its parent must fail this check on both POSIX and Windows.
+processTreeCheck :: IO ()
+processTreeCheck = do
+  let child="import os,signal,time; signal.signal(signal.SIGINT,signal.SIG_IGN); signal.signal(signal.SIGTERM,signal.SIG_IGN); print(os.getpid(),flush=True); time.sleep(10)"
+      parent="import subprocess,sys,time; subprocess.Popen([sys.executable,'-u','-c',sys.argv[1]]); time.sleep(10)"
+      emergency pid=void $ timeout 2000000 $ readProcessWithExitCode "python3" ["-c",
+        "import os,signal,sys\ntry: os.kill(int(sys.argv[1]),signal.SIGTERM if sys.platform=='win32' else signal.SIGKILL)\nexcept ProcessLookupError: pass",show pid] ""
+  withCreateProcess (proc "python3" ["-u","-c",parent,child]) {create_group=True,std_out=CreatePipe} $ \_ outputHandle _ process -> do
+    stop<-processCleanup process
+    flip finally stop $ case outputHandle of
+      Nothing -> error "process cleanup fixture output unavailable"
+      Just stream -> do
+        ready<-timeout 3000000 (hGetLine stream)
+        pid<-maybe (error "process cleanup fixture did not start") pure (ready >>= readMaybe :: Maybe Int)
+        flip onException (emergency pid) $ do
+          ended<-timeout 3000000 (concurrently_ stop stop)
+          check "concurrent process-tree cleanup completes promptly" (ended==Just ())
+          eof<-timeout 1000000 (hIsEOF stream)
+          check "cleanup kills signal-resistant descendants retaining pipe handles" (eof==Just True)
+          stop

@@ -58,14 +58,21 @@ checks = do
       withConversation $ \runtime -> do
         options<-send runtime "run-options" [] desktop
         check "Run options default to thc with optional empty settings" (case dialog options of
-          Just dg -> [value | Input _ value _<-fields dg]==["thc","","",""]
+          Just dg -> [value | Input _ value _<-fields dg]==["thc","","","","[]"]
           Nothing -> False)
         configured<-save runtime [target,compilerRoot,runtimePath] options {dialog=Nothing}
         check "Run configuration saved under isolated XDG" =<< doesFileExist (root </> "config" </> "thc-edit" </> "run.json")
         reopened<-send runtime "run-options" [] configured
         check "Run options preserve literal configured arguments" (case dialog reopened of
-          Just dg -> [value | Input _ value _<-fields dg]==[T.pack command,target,compilerRoot,runtimePath]
+          Just dg -> [value | Input _ value _<-fields dg]==[T.pack command,target,compilerRoot,runtimePath,"[]"]
           Nothing -> False)
+        let ghcDialog=case dialog reopened of
+              Just dg -> dg {fields=[case item of ListBox name choices _ -> ListBox name choices 1; _ -> item | item<-fields dg]}
+              Nothing -> error "missing target dialog"
+            (_,submitted)=submitDialog 0 ghcDialog reopened
+        check "dialog passes toolchain after text inputs" (case submitted of
+          [AgentAction "run-config" values] -> last values=="1" && values !! 5=="[]"
+          _ -> False)
         let dirtyDesktop=insertText "unsaved source" (addDocument Nothing (newBuffer "") configured)
         refused<-send runtime "run" [] dirtyDesktop
         check "Run rejects dirty source buffers" (maybe False ((=="Save before running").dialogTitle) (dialog refused))

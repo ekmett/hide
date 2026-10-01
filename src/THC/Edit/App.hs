@@ -10,6 +10,7 @@ import Data.Aeson (object, (.=))
 import THC.Edit.Protocol (WirePacket(..))
 import THC.Edit.EditorMCP (runEditorMCP)
 import THC.Edit.Session
+import THC.Edit.Completion (bashCompletion)
 import THC.Edit.RemoteTerminal (runRemoteTerminal)
 import Text.Read (readMaybe)
 import Data.IORef (newIORef, readIORef, writeIORef)
@@ -72,6 +73,12 @@ options = [Option [] ["appearance"] (ReqArg ColorMode "light|dark|system") "Docu
 main :: IO ()
 main = do
   args<-getArgs
+  case args of
+    "--bash-completion":request -> bashCompletion options request >>= mapM_ putStrLn
+    _ -> runEditor args
+
+runEditor :: [String] -> IO ()
+runEditor args = do
   backendDefault<-lookupEnv "THC_EDIT_BACKEND"
   scaleDefault<-lookupEnv "THC_EDIT_SCALE"
   appearanceDefault<-lookupEnv "THC_EDIT_APPEARANCE"

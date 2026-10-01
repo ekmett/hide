@@ -1,15 +1,22 @@
 # Deterministic DAP peers. Replies are released by requests, never by timers.
 import json, socket, sys
 
-server = socket.socket()
-server.bind(('127.0.0.1', 0))
-server.listen(2)
-print(server.getsockname()[1], flush=True)
 mode = sys.argv[2] if len(sys.argv) > 2 else 'basic'
+stdio = mode.startswith('stdio-')
+if stdio:
+    mode = mode[6:]
+else:
+    server = socket.socket()
+    server.bind(('127.0.0.1', 0))
+    server.listen(2)
+    print(server.getsockname()[1], flush=True)
 
 for session in range(1, 3 if mode == 'reconnect' else 2):
-    conn, _ = server.accept()
-    stream = conn.makefile('rb')
+    if stdio:
+        stream = sys.stdin.buffer
+    else:
+        conn, _ = server.accept()
+        stream = conn.makefile('rb')
     seq = 0
     pending_attach = pending_variables = pending_source = pending_scopes = None
     configured, breakpoint_requests = [], []
@@ -20,7 +27,12 @@ for session in range(1, 3 if mode == 'reconnect' else 2):
         seq += 1
         value['seq'] = seq
         body = json.dumps(value, ensure_ascii=False).encode('utf8')
-        conn.sendall(('Content-Length: %d\r\n\r\n' % len(body)).encode() + body)
+        framed = ('Content-Length: %d\r\n\r\n' % len(body)).encode() + body
+        if stdio:
+            sys.stdout.buffer.write(framed)
+            sys.stdout.buffer.flush()
+        else:
+            conn.sendall(framed)
 
     def reply(req, body=None, success=True):
         send(dict(type='response', request_seq=req['seq'], command=req['command'], success=success,
@@ -55,8 +67,11 @@ for session in range(1, 3 if mode == 'reconnect' else 2):
                 event('initialized')
                 reply(req, dict(supportsConfigurationDoneRequest=True,
                       exceptionBreakpointFilters=[dict(filter='uncaught', label='Uncaught exceptions', default=True)]))
-            elif cmd == 'attach':
-                pending_attach = req
+            elif cmd in ('attach', 'launch'):
+                if mode == 'launch-fail':
+                    reply(req, success=False)
+                else:
+                    pending_attach = req
             elif cmd == 'setBreakpoints':
                 configured.append(cmd)
                 if mode == 'breakpoints':
@@ -72,6 +87,8 @@ for session in range(1, 3 if mode == 'reconnect' else 2):
                 configured.append(cmd)
                 reply(req)
             elif cmd == 'configurationDone':
+                if mode == 'launch-fail':
+                    continue
                 assert pending_attach and 'setExceptionBreakpoints' in configured
                 reply(req)
                 reply(pending_attach)
@@ -134,5 +151,7 @@ for session in range(1, 3 if mode == 'reconnect' else 2):
             raise
     finally:
         stream.close()
-        conn.close()
-server.close()
+        if not stdio:
+            conn.close()
+if not stdio:
+    server.close()

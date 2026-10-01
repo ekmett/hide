@@ -19,6 +19,8 @@ import qualified UnicodeCheck
 import qualified HexCheck
 import qualified DAPCheck
 import qualified DebuggerCheck
+import qualified CompletionCheck
+import qualified BuildCheck
 import qualified RunCheck
 import qualified ConversationCheck
 import qualified AgentFilesCheck
@@ -70,6 +72,8 @@ main = do
   HexCheck.checks
   DAPCheck.checks
   DebuggerCheck.checks
+  CompletionCheck.checks
+  BuildCheck.checks
   RunCheck.checks
   ConversationCheck.checks
   AgentFilesCheck.checks

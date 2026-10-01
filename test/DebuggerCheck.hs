@@ -5,6 +5,7 @@ import Control.Concurrent (threadDelay)
 import Control.Exception (bracket)
 import Control.Monad (unless)
 import Data.Aeson
+import qualified Data.ByteString.Lazy as BL
 import Data.Aeson.Types (parseMaybe)
 import qualified Data.Map.Strict as M
 import Data.Maybe (fromMaybe)
@@ -21,7 +22,7 @@ import THC.Edit.Files (FileState(..))
 import THC.Edit.Model
 
 checks :: IO ()
-checks = mapM_ session ["basic", "frame", "choices", "breakpoints", "reconnect"] >> putStrLn "Debugger checks passed"
+checks = launchChecks >> mapM_ session ["basic", "frame", "choices", "breakpoints", "reconnect"] >> putStrLn "Debugger checks passed"
   where
     session mode = bracket (fixture mode) cleanup $ \(port,logPath,process) -> withDebugger $ \runtime -> do
       let core d _=pure (False,d)
@@ -143,3 +144,42 @@ hasDialog title=maybe False ((==title).dialogTitle) . dialog
 
 check :: String -> Bool -> IO ()
 check label ok=unless ok (error label)
+
+launchChecks :: IO ()
+launchChecks = do
+  directory <- getCurrentDirectory
+  temp <- getTemporaryDirectory
+  bracket (openTempFile temp "dap-launch.json") (\(path,h) -> hClose h >> removeFile path) $ \(path,h) -> do
+    hClose h
+    let logs=path<>".log"
+        config mode requestName=object ["command" .= (["python3",directory<>"/test/dap-session.py",logs,"stdio-"<>mode] :: [String]),
+          "request" .= (requestName :: T.Text),"arguments" .= object ["program" .= ("space λ.hs" :: T.Text)]]
+        core d _=pure (False,d)
+        waitFor runtime predicate d=timeout 5000000 (loop d) >>= maybe (error "launch fixture timed out") pure
+          where loop state=do
+                  updated<-tickDebugger runtime core state
+                  if predicate updated then pure updated else threadDelay 1000 >> loop updated
+    mapM_ (\(mode,requestName) -> withDebugger $ \runtime -> do
+      writeFile logs ""
+      BL.writeFile path (encode (config mode requestName))
+      let send action values d=snd <$> debuggerEffects runtime core d [DebugAction action values]
+      started<-send "launch-config" ["1",T.pack path] (initialDesktop (80,25))
+      if mode=="launch-fail" then do
+        failed<-waitFor runtime (T.isInfixOf "fixture refused" . status) started
+        after<-send "threads" [] failed
+        check "failed launch closes session" (status after=="Debugger is not ready for this command.")
+      else do
+        stopped<-waitFor runtime (T.isInfixOf "value = λ" . activeText) started
+        disconnected<-send "disconnect" [] stopped >>= waitFor runtime (T.isInfixOf "Debugger disconnected" . status)
+        check "stdio launch disconnect clears dialog" (dialog disconnected==Nothing)
+      entries<-map (fromMaybe (error "bad launch log") . decodeStrictText) . T.lines <$> TIO.readFile logs
+      let requests=[r | e<-entries,Just r<-[field "request" e]]
+      unless (mode=="launch-fail") $ check "disconnect terminates launches and preserves attached programs"
+        (any (\r -> field "command" r==Just ("disconnect"::T.Text) && (field "arguments" r >>= field "terminateDebuggee")==Just (requestName=="launch")) requests)
+      check "launch forwards request and arguments" (any (\r -> field "command" r==Just requestName && (field "arguments" r >>= field "program")==Just ("space λ.hs" :: T.Text)) requests)
+      ) [("basic","launch"),("basic","attach"),("launch-fail","launch")]
+    withDebugger $ \runtime -> do
+      TIO.writeFile path "{\"command\":[\"python3\"],\"request\":\"launch\",\"arguments\":[]}"
+      (_,d)<-debuggerEffects runtime core (initialDesktop (80,25)) [DebugAction "launch-config" ["1",T.pack path]]
+      check "invalid launch arguments rejected before spawning" ("arguments" `T.isInfixOf` status d)
+    removeFile logs

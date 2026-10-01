@@ -50,7 +50,7 @@ data Command = New | Open | Download | ChangeDir | Save | SaveAs | Close | Quit 
   | SplitVertical | SplitHorizontal | About | Help | EditorOptions | Gallery
   | InspectType | Definition | Complete | Problems | NextMessage | PreviousMessage | RestartHLS | RenameSymbol
   | ToggleTree | GitDiff | GitCommit | GitFetch | GitPull | GitMerge | ReviewDisk
-  | RunTarget | RunOptions | OpenTerminal | StopTerminal
+  | CompileTarget | MakeTarget | StopBuild | RunTarget | RunOptions | OpenTerminal | StopTerminal
   | AgentChoose Text | AgentSet Text Text
   | AgentOptions | Conversation | AgentCancel | AgentResume | AgentCopyRaw | AgentNew
   | ToggleHex | GoToMessage | CopyAllMessages
@@ -97,7 +97,7 @@ data Desktop = Desktop
   , branchAdded :: Int, branchDeleted :: Int, branchRoot :: Maybe FilePath, contextKind :: ContextKind
   , messagesNumber :: Maybe Int
   , composerBuffer :: Buffer, composerSelection :: Selection, composerFocused :: Bool, agentSteering :: Bool, agentReplying :: Bool, agentQueued :: Int
-  , blinkCursor :: Bool, crtFilter :: Bool, pixelateUnicode :: Bool, materialIcons :: Bool, defaultDirectory :: Maybe FilePath, statusHover :: Maybe Int, heldModifiers :: [V.Modifier], problemsPreferredHeight :: Int, agentContextUsage :: Maybe (Integer,Integer), agentSettings :: [AgentSetting], browserFrontend :: Bool, appearance :: Appearance, systemDark :: Bool
+  , blinkCursor :: Bool, crtFilter :: Bool, pixelateUnicode :: Bool, materialIcons :: Bool, defaultDirectory :: Maybe FilePath, statusHover :: Maybe Int, heldModifiers :: [V.Modifier], problemsPreferredHeight :: Int, agentContextUsage :: Maybe (Integer,Integer), agentSettings :: [AgentSetting], browserFrontend :: Bool, appearance :: Appearance, systemDark :: Bool, buildDiagnostics :: [Diagnostic]
   } deriving (Eq,Show)
 
 data MenuItem = MenuItem Text Text Command deriving (Eq,Show)
@@ -106,9 +106,9 @@ menus =
   [("File",'f',[mi "New" "" New, mi "Open..." "F3" Open, mi "Save" "F2" Save, mi "Save as..." "" SaveAs, mi "Disk changes..." "" ReviewDisk, mi "Close" "Alt+F3" Close, mi "Change dir..." "" ChangeDir, mi "Terminal" "" OpenTerminal, mi "Exit" "Alt+X" Quit])
   ,("Edit",'e',[mi "Undo" "Ctrl+Z" Undo, mi "Redo" "Ctrl+Y" Redo, mi "Cut" "Shift+Del" Cut, mi "Copy" "Ctrl+Ins" Copy, mi "Paste" "Shift+Ins" Paste, mi "Select all" "Ctrl+A" SelectAll,mi "Text / hex mode" "" ToggleHex,mi "Complete identifier..." "Ctrl+Space" Complete])
   ,("Search",'s',[mi "Find..." "Ctrl+F" Find, mi "Replace..." "Ctrl+R" Replace, mi "Search again" "Ctrl+L" FindNext, mi "Go to line..." "Ctrl+G" GoTo,mi "Go to definition" "F12" Definition])
-  ,("Run",'r',[mi "Run" "Ctrl+F9" RunTarget,mi "Target..." "" RunOptions,mi "Stop terminal" "" StopTerminal])
-  ,("Compile",'c',[off "Compile" "Alt+F9" "THC compilation is not connected yet.",off "Make" "F9" "Cabal project integration is a later milestone."])
-  ,("Debug",'d',[mi "Attach..." "" (DebugCommand "attach"),off "Launch" "" "THC debugger launch options are not available yet; attach to a running DAP endpoint.",
+  ,("Run",'r',[mi "Run" "Ctrl+F9" RunTarget,mi "Target..." "" RunOptions,mi "Stop build/run" "" StopBuild,mi "Stop terminal" "" StopTerminal])
+  ,("Compile",'c',[mi "Compile" "Alt+F9" CompileTarget,mi "Make" "F9" MakeTarget,mi "Target..." "" RunOptions,mi "Stop build" "" StopBuild])
+  ,("Debug",'d',[mi "Attach..." "" (DebugCommand "attach"),mi "Launch..." "" (DebugCommand "launch"),
       mi "Toggle breakpoint" "Ctrl+F8" (DebugCommand "breakpoint"),mi "Breakpoints..." "" (DebugCommand "breakpoints"),
       mi "Continue" "F4" (DebugCommand "continue"),mi "Pause" "" (DebugCommand "pause"),
       mi "Trace into" "F7" (DebugCommand "stepIn"),mi "Step over" "F8" (DebugCommand "next"),mi "Step out" "Ctrl+F7" (DebugCommand "stepOut"),
@@ -144,8 +144,11 @@ commandDescription cmd = case cmd of
   CopyAllMessages -> "Copy all messages with their source locations."
   ToggleHex -> "Switch between UTF-8 text and editable hexadecimal bytes."
   ReviewDisk -> "Review an external change without discarding unsaved text."
-  RunTarget -> "Run the selected Cabal executable through thc run."
-  RunOptions -> "Choose the Cabal executable and THC installation."
+  CompileTarget -> "Compile the current source or selected project target."
+  MakeTarget -> "Build the selected project target."
+  StopBuild -> "Stop the current build or captured run."
+  RunTarget -> "Run the selected target with THC or GHC."
+  RunOptions -> "Choose THC or GHC, the executable and project target."
   OpenTerminal -> "Open a project shell in a terminal window."
   StopTerminal -> "Stop the selected terminal process."
   DebugCommand action -> case action of
@@ -217,7 +220,7 @@ statusItems d
   | not (T.null (typeHint d)) = [(" "<>typeHint d,Nothing)]
   | not (T.null (status d)) = [command " F1 Help" Help,(" | "<>status d,Nothing)]
   | otherwise = [command " F1 Help" Help,command "  F2 Save" Save,command "  F3 Open" Open,
-      command "  F5 Zoom" Zoom,command "  F6 Next" NextWindow,key "  F10 Menu" (V.KFun 10) []]
+      command "  Alt+F9 Compile" CompileTarget,command "  F9 Make" MakeTarget,command "  Ctrl+F9 Run" RunTarget]
   where command label cmd=(label,Just (Left cmd)); key label k mods=(label,Just (Right (V.EvKey k mods)))
 
 statusItemRects :: Desktop -> [(Rect,Int,Either Command V.Event)]
@@ -257,7 +260,7 @@ menuRect d i = Rect (min x (max 0 (sw-w))) 1 w (length (menuItemsFor d i)+2)
         w = min sw (maximum [T.length t + T.length (menuShortcut d entry) + 5 | entry@(MenuItem t _ _) <- menuItemsFor d i])
 
 initialDesktop :: (Int,Int) -> Desktop
-initialDesktop size = Desktop size [] M.empty 1 Nothing Nothing Nothing "" False Nothing "" Nothing "" Nothing "" False Nothing Nothing Nothing "" Nothing Nothing Nothing [] False 0 0 False Nothing 0 0 Nothing SourceContext Nothing (newBuffer "") (Selection 0 0) True False False 0 True False False False Nothing Nothing [] 8 Nothing [] False SystemMode True
+initialDesktop size = Desktop size [] M.empty 1 Nothing Nothing Nothing "" False Nothing "" Nothing "" Nothing "" False Nothing Nothing Nothing "" Nothing Nothing Nothing [] False 0 0 False Nothing 0 0 Nothing SourceContext Nothing (newBuffer "") (Selection 0 0) True False False 0 True False False False Nothing Nothing [] 8 Nothing [] False SystemMode True []
 
 activeWindow :: Desktop -> Maybe Window
 activeWindow = listToMaybe . windows
@@ -414,6 +417,9 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
     go Save d = saveRequest Nothing d
     go ReviewDisk d = (d,[ReviewExternal])
     go (DebugCommand action) d = (d,[DebugAction action []])
+    go CompileTarget d = (d,[AgentAction "compile" []])
+    go MakeTarget d = (d,[AgentAction "make" []])
+    go StopBuild d = (d,[AgentAction "build-stop" []])
     go RunTarget d = (d,[AgentAction "run" []])
     go RunOptions d = (d,[AgentAction "run-options" []])
     go OpenTerminal d = (d,[AgentAction "terminal" []])
@@ -645,6 +651,8 @@ dispatchEvent (V.EvKey key mods) d | dialog d==Nothing, key `elem` [V.KChar '\t'
   (cycleEditorWindow (key==V.KBackTab || V.MShift `elem` mods) d,[])
 dispatchEvent (V.EvKey (V.KChar c) mods) d | dialog d==Nothing, V.MAlt `elem` mods, c>='1', c<='9' = (activateWindowNumber (fromEnum c-fromEnum '0') d,[])
 dispatchEvent (V.EvKey (V.KFun key) mods) d | dialog d==Nothing, V.MAlt `elem` mods, key `elem` [7,8] = runCommand (if key==8 then NextMessage else PreviousMessage) d
+dispatchEvent (V.EvKey (V.KFun 9) []) d | dialog d==Nothing = runCommand MakeTarget d
+dispatchEvent (V.EvKey (V.KFun 9) [V.MAlt]) d | dialog d==Nothing = runCommand CompileTarget d
 dispatchEvent (V.EvKey (V.KFun 9) [V.MCtrl]) d | dialog d==Nothing = runCommand RunTarget d
 dispatchEvent ev d | Just dg <- dialog d = dialogEvent ev dg d
 dispatchEvent ev d | Just popup <- contextMenu d = contextEvent ev popup d

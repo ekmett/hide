@@ -24,6 +24,8 @@ import System.FilePath ((</>), takeDirectory, isAbsolute, makeRelative, splitDir
 import Data.Text.Encoding.Error (lenientDecode)
 import qualified THC.Edit.Terminal as Terminal
 import qualified THC.Edit.Consoles as C
+import qualified THC.Edit.Build as B
+import qualified THC.Edit.BuildJobs as Jobs
 import System.IO (openBinaryTempFile, hClose)
 import Text.Read (readMaybe)
 import qualified THC.Edit.ACP as A
@@ -50,13 +52,13 @@ data State = State
   , lastMessageAt :: Maybe UTCTime
   , lastRender :: (Int,Maybe Text,[Record]), lastSession :: Maybe (A.Launch,FilePath,Text)
   }
-data ConversationState = ConversationState FilePath (IORef State) C.Consoles
+data ConversationState = ConversationState FilePath (IORef State) C.Consoles Jobs.BuildJobs
 
 defaultLaunch :: A.Launch
 defaultLaunch = A.Launch "codex-acp" [] []
 
 withConversation :: (ConversationState -> IO a) -> IO a
-withConversation action = C.withConsoles $ \consoles -> do
+withConversation action = C.withConsoles $ \consoles -> Jobs.withBuildJobs $ \jobs -> do
   directory<-getXdgDirectory XdgConfig "thc-edit"
   loaded<-try (BS.readFile (directory </> "agents.json")) :: IO (Either IOException BS.ByteString)
   let launch=either (const defaultLaunch) (either (const defaultLaunch) id . decodeLaunch) loaded
@@ -64,10 +66,10 @@ withConversation action = C.withConsoles $ \consoles -> do
   let remembered=either (const Nothing) (\bytes -> decodeStrict' bytes >>= parseMaybe (withObject "session" $ \o -> do
         (raw::Value)<-o .: "provider"; config<-either fail pure (decodeLaunch (BL.toStrict (encode raw)))
         (,,) config <$> o .: "cwd" <*> o .: "sessionId")) previous
-  bracket (do ref<-newIORef (State launch Nothing Nothing "." M.empty Nothing [] M.empty [] Nothing False 1 [] S.empty M.empty Nothing (0,Nothing,[]) remembered); pure (ConversationState directory ref consoles)) closeConversation action
+  bracket (do ref<-newIORef (State launch Nothing Nothing "." M.empty Nothing [] M.empty [] Nothing False 1 [] S.empty M.empty Nothing (0,Nothing,[]) remembered); pure (ConversationState directory ref consoles jobs)) closeConversation action
 
 closeConversation :: ConversationState -> IO ()
-closeConversation (ConversationState _ ref _) = readIORef ref >>= mapM_ A.stopClient . connection
+closeConversation (ConversationState _ ref _ _) = readIORef ref >>= mapM_ A.stopClient . connection
 
 launchValue :: A.Launch -> Value
 launchValue launch=object ["executable" .= A.executable launch,"arguments" .= A.arguments launch,"environment" .= M.fromList (A.environment launch)]
@@ -110,7 +112,7 @@ conversationEffects runtime fallback = foldM apply . (False,)
     apply (_,d) effect = fallback d [effect]
 
 perform :: ConversationState -> Text -> [Text] -> Desktop -> IO Desktop
-perform runtime@(ConversationState directory ref consoles) action values d = do
+perform runtime@(ConversationState directory ref consoles jobs) action values d = do
   previous<-readIORef ref
   now<-getCurrentTime
   zone<-getCurrentTimeZone
@@ -120,16 +122,17 @@ perform runtime@(ConversationState directory ref consoles) action values d = do
       shell<-fromMaybe "/bin/sh" <$> lookupEnv "SHELL"
       root<-canonicalizePath (maybe (startingDirectory d) treeRoot (sideTree d))
       openConsole consoles (Terminal.TerminalConfig shell [] [] root 80 24) d
-    ("run",_) -> runTarget directory consoles False d
-    ("run-options",_) -> runTarget directory consoles True d
-    ("run-config",_:command:target:compilerRoot:runtimePath:_) -> do
-      root<-canonicalizePath (maybe (startingDirectory d) treeRoot (sideTree d))
-      let config=object ["cwd" .= root,"command" .= command,"target" .= target,"thcRoot" .= compilerRoot,"runtime" .= runtimePath]
-      if T.null (T.strip command) || any (T.any (=='\0')) [command,target,compilerRoot,runtimePath]
-        then pure (message "Run target" ["Enter a THC executable command. Target and roots are optional."] d)
-        else do
-          result<-persist (directory </> "run.json") config
-          pure d {status=either id (const "Run target saved. Ctrl+F9 runs it.") result}
+    ("run",_) -> runTarget directory consoles jobs (Just B.Run) d
+    ("compile",_) -> runTarget directory consoles jobs (Just B.Compile) d
+    ("make",_) -> runTarget directory consoles jobs (Just B.Make) d
+    ("build-stop",_) -> Jobs.stopBuildJob jobs d
+    ("run-options",_) -> runTarget directory consoles jobs Nothing d
+    ("run-config",_:settings) -> case B.parseBuildConfig settings of
+      Left err -> pure (message "Build target" [err] d)
+      Right config -> do
+        root<-B.resolveBuildRoot d
+        result<-persist (directory </> "run.json") (B.buildConfigValue root config)
+        pure d {status=either id (const "Target saved. F9 builds; Ctrl+F9 runs.") result}
     ("terminal-input",[tid,text]) -> do
       result<-C.inputConsole consoles tid (TE.encodeUtf8 text)
       pure (either (\err -> d {status=err}) (const d) result)
@@ -214,7 +217,7 @@ busy :: State -> Bool
 busy s=not (M.null (pending s)) || queuedPrompt s/=Nothing
 
 start :: ConversationState -> Maybe Text -> Desktop -> IO Desktop
-start (ConversationState _ ref _) resume d = do
+start (ConversationState _ ref _ _) resume d = do
   s<-readIORef ref
   result<-try $ do
     root<-canonicalizePath (maybe (startingDirectory d) treeRoot (sideTree d))
@@ -231,7 +234,7 @@ start (ConversationState _ ref _) resume d = do
       pure d {status="Connecting to ACP provider...",agentSteering=False,agentReplying=True,agentContextUsage=Nothing,agentSettings=[]}
 
 sendQueued :: ConversationState -> Desktop -> IO Desktop
-sendQueued (ConversationState _ ref _) d = do
+sendQueued (ConversationState _ ref _ _) d = do
   s<-readIORef ref
   case (connection s,session s,queuedPrompt s) of
     (Just client,Just sid,Just prompt) -> do
@@ -241,8 +244,8 @@ sendQueued (ConversationState _ ref _) d = do
     _ -> pure d
 
 tickConversation :: ConversationState -> Desktop -> IO Desktop
-tickConversation runtime@(ConversationState _ ref consoles) initial = do
-  d<-C.tickConsoles consoles initial
+tickConversation runtime@(ConversationState _ ref consoles jobs) initial = do
+  d<-C.tickConsoles consoles initial >>= Jobs.tickBuildJobs jobs
   flushTerminalWaiters runtime
   s<-readIORef ref
   events<-maybe (pure []) A.pollEvents (connection s)
@@ -268,7 +271,7 @@ tickConversation runtime@(ConversationState _ ref consoles) initial = do
   present runtime rendered
 
 receive :: ConversationState -> Desktop -> A.Event -> IO Desktop
-receive runtime@(ConversationState directory ref consoles) d event = do
+receive runtime@(ConversationState directory ref consoles _) d event = do
   s<-readIORef ref
   case event of
     A.Disconnected reason -> do
@@ -377,7 +380,7 @@ mergeTool update records = case field "toolCallId" update :: Maybe Text of
        then map merge records else records++[Activity ident update]
 
 incoming :: ConversationState -> A.Client -> Value -> Text -> Value -> Desktop -> IO Desktop
-incoming runtime@(ConversationState _ ref consoles) client ident method params d = do
+incoming runtime@(ConversationState _ ref consoles _) client ident method params d = do
   s<-readIORef ref
   case method of
     "session/request_permission" -> case permissionOptions params of
@@ -453,10 +456,10 @@ permissionOptions params=map (\(_,ident,name)->(ident,name)) . sortOn (\(kind,_,
   mapMaybe (parseMaybe (withObject "permission" $ \o -> (,,) <$> o .: "kind" <*> o .: "optionId" <*> o .: "name")) (fromMaybe [] (field "options" params))
 
 enqueueApproval :: ConversationState -> Approval -> IO ()
-enqueueApproval (ConversationState _ ref _) approval=modifyIORef' ref (\s -> s {approvals=approvals s++[(nextApproval s,approval)],nextApproval=nextApproval s+1})
+enqueueApproval (ConversationState _ ref _ _) approval=modifyIORef' ref (\s -> s {approvals=approvals s++[(nextApproval s,approval)],nextApproval=nextApproval s+1})
 
 present :: ConversationState -> Desktop -> IO Desktop
-present (ConversationState _ ref _) d = do
+present (ConversationState _ ref _ _) d = do
   s<-readIORef ref
   case (dialog d,presented s,approvals s) of
     (Nothing,Nothing,(token,approval):_) | not (deferredApproval s) -> do
@@ -474,7 +477,7 @@ present (ConversationState _ ref _) d = do
     _ -> pure d
 
 decide :: ConversationState -> Int -> [Text] -> Desktop -> IO Desktop
-decide (ConversationState _ ref consoles) token values d = do
+decide (ConversationState _ ref consoles _) token values d = do
   s<-readIORef ref
   case (connection s,lookup token (approvals s)) of
     (Just _,Just approval) | take 1 values==["1"],not (isExecute approval) -> do
@@ -654,7 +657,7 @@ exitStatus :: Int -> Value
 exitStatus code=object ["exitCode" .= code,"signal" .= Null]
 
 flushTerminalWaiters :: ConversationState -> IO ()
-flushTerminalWaiters (ConversationState _ ref consoles) = do
+flushTerminalWaiters (ConversationState _ ref consoles _) = do
   s<-readIORef ref
   forM_ (connection s) $ \client -> forM_ (M.toList (terminalWaiters s)) $ \(tid,waiters) -> do
     result<-C.consoleOutput consoles tid
@@ -668,24 +671,29 @@ openConsole consoles config d = do
   result<-C.startConsole consoles config (1024*1024) d
   pure (either (\err -> message "Cannot start terminal" (wrapMessage err) d) snd result)
 
-runTarget :: FilePath -> C.Consoles -> Bool -> Desktop -> IO Desktop
-runTarget directory consoles configure d = do
-  root<-canonicalizePath (maybe (startingDirectory d) treeRoot (sideTree d))
-  loaded<-try (BS.readFile (directory </> "run.json")) :: IO (Either IOException BS.ByteString)
-  defaultRoot<-fromMaybe "" <$> lookupEnv "THC_ROOT"
-  let value=either (const Null) (fromMaybe Null . decodeStrict') loaded
-      command=fromMaybe "thc" (field "command" value)
-      target=if field "cwd" value==Just root then fromMaybe "" (field "target" value) else ""
-      compilerRoot=fromMaybe (T.pack defaultRoot) (field "thcRoot" value)
-      runtimePath=fromMaybe "" (field "runtime" value)
-      setting label text=Input label text (T.length text)
+runTarget :: FilePath -> C.Consoles -> Jobs.BuildJobs -> Maybe B.BuildAction -> Desktop -> IO Desktop
+runTarget directory consoles jobs action d = do
+  root<-B.resolveBuildRoot d
+  config<-B.loadBuildConfig directory root
+  let setting label text=Input label text (T.length text)
       unsaved=any (\doc -> documentLabel doc==Nothing && dirty (documentBuffer doc)) (M.elems (buffers d))
-  if configure then pure d {dialog=Just (Dialog "Run target" (AgentDialog "run-config")
-    [setting "THC executable" command,setting "Cabal target (optional)" target,setting "THC root (optional)" compilerRoot,setting "Runtime (optional)" runtimePath]
-    0 ["OK","Cancel"] ["Run invokes thc run for this project.",T.pack root])}
-  else if unsaved then pure (message "Save before running" ["Save modified source files before running the disk build."] d)
-  else openConsole consoles (Terminal.TerminalConfig (T.unpack command)
-    (["run"]++[T.unpack target | not (T.null target)]++["--project-dir",root]++[arg | not (T.null compilerRoot),arg<-["--thc-root",T.unpack compilerRoot]]++[arg | not (T.null runtimePath),arg<-["--runtime",T.unpack runtimePath]]) [] root 80 24) d
+      source=B.buildSource d
+  case action of
+    Nothing -> pure d {dialog=Just (Dialog "Build target" (AgentDialog "run-config")
+      [setting "Compiler executable" (T.pack (B.buildExecutable config)),setting "Cabal target (optional)" (B.buildTarget config),
+       setting "THC root (optional)" (B.buildTHCRoot config),setting "Runtime (THC only)" (B.buildRuntime config),
+       ListBox "Toolchain" ["THC","GHC"] (if B.buildToolchain config==B.THC then 0 else 1),
+       setting "Program arguments (JSON)" (jsonText (B.buildArguments config))]
+      0 ["OK","Cancel"] ["F9 Make   Alt+F9 Compile   Ctrl+F9 Run",T.pack root])}
+    Just task | unsaved -> pure (message (if task==B.Run then "Save before running" else "Save before building")
+      ["Save modified source files before building the files on disk."] d)
+    Just task -> do
+      plan<-B.buildPlan task config root source
+      case plan of
+        Left err -> pure (message "Build target" [err] d)
+        Right [(command,args)] | task==B.Run && Terminal.terminalAvailable ->
+          openConsole consoles (Terminal.TerminalConfig command args [] root 80 24) d
+        Right commands -> Jobs.startBuildJob jobs (T.pack (show task)) root commands d
 
 conversationWidth :: Desktop -> Int
 conversationWidth d = max 1 $ case [width (bounds w)-2 | w<-windows d,Just doc<-[M.lookup (bufferId w) (buffers d)],documentLabel doc==Just "Conversation"] of

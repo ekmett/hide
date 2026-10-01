@@ -2,9 +2,10 @@
 module THC.Edit.Debugger (withDebugger, debuggerEffects, tickDebugger) where
 
 import Control.Exception (IOException, bracket, try)
-import Control.Monad (foldM, forM_, when)
+import Control.Monad (foldM, forM_, unless, when)
 import Data.Aeson
-import Data.Aeson.Types (parseMaybe)
+import Data.Aeson.Types (Parser, parseEither, parseMaybe)
+import qualified Data.ByteString as BS
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
 import Data.IORef
@@ -13,9 +14,12 @@ import Data.Maybe (fromMaybe, listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import GHC.Clock (getMonotonicTimeNSec)
-import System.Directory (canonicalizePath, doesFileExist)
+import System.Directory (XdgDirectory(XdgConfig), canonicalizePath, doesFileExist, getXdgDirectory)
+import System.IO (IOMode(ReadMode), withBinaryFile)
 import System.FilePath (isAbsolute, (</>))
 import Text.Read (readMaybe)
+import qualified THC.Edit.Build as Build
+import THC.Edit.Build (resolveBuildRoot)
 import THC.Edit.Buffer
 import qualified THC.Edit.DAP as D
 import THC.Edit.Files (filePath)
@@ -36,6 +40,7 @@ data State = State
   , exceptionFilters :: [Text]
   , breakpoints :: M.Map Text (Value,[Breakpoint]), sources :: M.Map Int Value
   , root :: FilePath, endpoint :: (Text,Int), output :: Text
+  , startRequest :: (Text,Value), managed :: Bool
   , failure :: Maybe Text, disconnectAt :: Maybe Integer
   , choices :: M.Map Text [Value], choiceId :: Int, breakRequests :: M.Map Text Int
   }
@@ -44,7 +49,7 @@ emptyState :: State
 emptyState = State {client=Nothing,capabilities=Null,ready=False,configured=False,pending=M.empty,generation=0,
   stopped=False,thread=Nothing,frame=Nothing,exceptionFilters=[],breakpoints=M.empty,sources=M.empty,
   root=".",endpoint=("127.0.0.1",4711),output="",failure=Nothing,disconnectAt=Nothing,
-  choices=M.empty,choiceId=0,breakRequests=M.empty}
+  choices=M.empty,choiceId=0,breakRequests=M.empty,startRequest=("attach",object []),managed=False}
 
 withDebugger :: (Debugger -> IO a) -> IO a
 withDebugger = bracket (Debugger <$> newIORef emptyState) $ \(Debugger ref) -> readIORef ref >>= mapM_ D.stopClient . client
@@ -61,31 +66,40 @@ perform runtime@(Debugger ref) core action values d = do
   s<-readIORef ref
   case (action,values) of
     ("output",_) -> pure (addReadOnly "Debugger output" (output s) d)
+    ("launch",_) -> pure d {dialog=Just (Dialog "Launch debugger" (DebugDialog "launch-config")
+      [Input "Adapter configuration" ".thc-debug.json" 15,Input "THC DAP port" "4711" 4] 0 ["THC target","Adapter config","Cancel"]
+      ["THC target uses the selected build target and compiler settings.",
+       "Adapter config reads a JSON file relative to the project root."])}
+    ("launch-config","0":_:portText:_) -> case readMaybe (T.unpack portText) of
+      Just port | port>0 && port<=65535 -> do
+        result<-try $ launchTHC runtime port d
+        pure $ either (\(err::IOException) -> d {status="THC debugger: "<>T.pack (show err)}) id result
+      _ -> pure d {status="Enter a DAP port between 1 and 65535."}
+    ("launch-config","1":configPath:_) -> do
+      result<-try $ do
+        directory<-resolveBuildRoot d
+        let path=if isAbsolute (T.unpack configPath) then T.unpack configPath else directory </> T.unpack configPath
+        bytes<-withBinaryFile path ReadMode (\h -> BS.hGet h (1024*1024+1))
+        if BS.length bytes>1024*1024 then pure (Left "Debugger configuration exceeds 1 MiB.") else
+          case eitherDecodeStrict' bytes >>= parseEither parseLaunch of
+            Left err -> pure (Left (T.pack err))
+            Right config -> Right <$> startSession runtime directory config d
+      pure $ either (\(err::IOException) -> d {status="DAP: "<>T.pack (show err)})
+        (either (\err -> d {status="DAP configuration: "<>err}) id) result
     ("attach",_) -> let (host,port)=endpoint s in pure d {dialog=Just (Dialog "Attach debugger" (DebugDialog "connect")
       [Input "Host" host (T.length host),Input "Port" (tshow port) (length (show port))] 0 ["Attach","Cancel"]
-      ["Connect to a running loopback DAP server.","THC runtime debugger hooks are being integrated separately."])}
+      ["Connect to a running loopback DAP server.","Use Launch / Adapter config for custom attach arguments."])}
     ("connect",_:host:portText:_) -> case readMaybe (T.unpack portText) of
       Just port | port>0 && port<=65535 -> do
         result<-try $ do
-          directory<-canonicalizePath (maybe (startingDirectory d) treeRoot (sideTree d))
-          c<-D.startClient host port
-          pure (directory,c)
-        case result of
-          Left (err::IOException) -> pure d {status="DAP: "<>T.pack (show err)}
-          Right (directory,c) -> do
-            mapM_ D.stopClient (client s)
-            writeIORef ref emptyState {client=Just c,generation=generation s+1,root=directory,endpoint=(host,port),breakpoints=persistentBreakpoints s}
-            send runtime Init "initialize" (object
-              ["clientID" .= ("thc-edit"::Text),"clientName" .= ("Turbo Haskell"::Text),"adapterID" .= ("graalvm"::Text),
-               "pathFormat" .= ("path"::Text),"linesStartAt1" .= True,"columnsStartAt1" .= True,
-               "supportsVariableType" .= True,"supportsRunInTerminalRequest" .= False,
-               "supportsVariablePaging" .= False,"supportsMemoryReferences" .= False])
-            pure (clearDialog d) {status="Connecting debugger..."}
+          directory<-resolveBuildRoot d
+          startSession runtime directory (LaunchConfig Nothing host port "attach" (object []) "thc") d
+        pure $ either (\(err::IOException) -> d {status="DAP: "<>T.pack (show err)}) id result
       _ -> pure d {status="Enter a port between 1 and 65535."}
     ("disconnect",_) -> do
       now<-toInteger <$> getMonotonicTimeNSec
       modifyIORef' ref (\state -> (invalidate state) {ready=False,configured=False,pending=M.empty,disconnectAt=Just now})
-      send runtime Detach "disconnect" (object ["terminateDebuggee" .= False])
+      send runtime Detach "disconnect" (object ["terminateDebuggee" .= (managed s || fst (startRequest s)=="launch")])
       pure (clearDialog d) {status="Disconnecting debugger..."}
     ("breakpoint",_) -> toggleBreakpoint runtime d
     ("breakpoints",_) -> do
@@ -111,6 +125,69 @@ perform runtime@(Debugger ref) core action values d = do
       | "select:" `T.isPrefixOf` action -> pure (clearDialog d) {status="Debugger selection expired."}
       | otherwise -> pure d {status="Debugger is not ready for this command."}
 
+data LaunchConfig = LaunchConfig (Maybe [String]) Text Int Text Value Text
+
+parseLaunch :: Value -> Parser LaunchConfig
+parseLaunch = withObject "debugger configuration" $ \o -> do
+  command<-o .:? "command"
+  host<-o .:? "host" .!= "127.0.0.1"
+  port<-o .:? "port" .!= 4711
+  requestName<-o .:? "request" .!= "launch"
+  arguments<-o .:? "arguments" .!= object []
+  adapter<-o .:? "adapterId" .!= "thc-edit"
+  unless (requestName `elem` ["launch","attach"]) (fail "request must be launch or attach")
+  case arguments of Object _ -> pure (); _ -> fail "arguments must be a JSON object"
+  case command of
+    Just (exe:args) | not (null exe),all (notElem '\0') (exe:args) ->
+      when (KM.member "host" o || KM.member "port" o) (fail "choose command or host/port, not both")
+    Just _ -> fail "command must be a nonempty argv array without NUL bytes"
+    Nothing -> unless (host `elem` ["localhost","127.0.0.1","::1"] && port>0 && port<=65535)
+      (fail "host/port must name a loopback DAP endpoint")
+  pure (LaunchConfig command host port requestName arguments adapter)
+
+startSession :: Debugger -> FilePath -> LaunchConfig -> Desktop -> IO Desktop
+startSession runtime directory (LaunchConfig command host port requestName arguments adapter) d = do
+  c<-case command of
+    Just (exe:args) -> D.startAdapter exe args directory
+    _ -> D.startClient host port
+  initializeSession runtime directory c (host,port) requestName arguments adapter False d
+
+launchTHC :: Debugger -> Int -> Desktop -> IO Desktop
+launchTHC runtime@(Debugger ref) port d
+  | any (\doc -> documentLabel doc==Nothing && dirty (documentBuffer doc)) (M.elems (buffers d)) =
+      pure d {status="Save modified source files before launching the disk build."}
+  | otherwise = do
+      directory<-resolveBuildRoot d
+      settings<-getXdgDirectory XdgConfig "thc-edit"
+      config<-Build.loadBuildConfig settings directory
+      if Build.buildToolchain config/=Build.THC then pure d {status="Select the THC toolchain in Build target, or choose Adapter config for GHC debugging."}
+      else do
+        plan<-Build.buildPlan Build.Run config directory (filePath <$> (activeDocument d >>= documentFile))
+        case plan of
+          Right [(exe,args)] -> do
+            let (compilerArgs,guestArgs)=break (=="--") args
+                flags=["--dap-port",show port]
+            -- Release an earlier managed session before testing its port again.
+            readIORef ref >>= mapM_ D.stopClient . client
+            c<-D.startManaged exe (compilerArgs++flags++guestArgs) directory "127.0.0.1" port
+            started<-initializeSession runtime directory c ("127.0.0.1",port) "attach" (object []) "graalvm" True d
+            pure started {status="Starting THC debugger; build output is in Debug / Output..."}
+          Left err -> pure d {status=err}
+          _ -> pure d {status="THC debugger requires a single runtime launch command."}
+
+initializeSession :: Debugger -> FilePath -> D.Client -> (Text,Int) -> Text -> Value -> Text -> Bool -> Desktop -> IO Desktop
+initializeSession runtime@(Debugger ref) directory c address requestName arguments adapter owned d = do
+  s<-readIORef ref
+  mapM_ D.stopClient (client s)
+  writeIORef ref emptyState {client=Just c,generation=generation s+1,root=directory,endpoint=address,
+    breakpoints=persistentBreakpoints s,startRequest=(requestName,arguments),managed=owned}
+  send runtime Init "initialize" (object
+    ["clientID" .= ("thc-edit"::Text),"clientName" .= ("Turbo Haskell"::Text),"adapterID" .= adapter,
+     "pathFormat" .= ("path"::Text),"linesStartAt1" .= True,"columnsStartAt1" .= True,
+     "supportsVariableType" .= True,"supportsRunInTerminalRequest" .= False,
+     "supportsVariablePaging" .= False,"supportsMemoryReferences" .= False])
+  pure (clearDialog d) {status="Connecting debugger..."}
+
 -- Frame and variable handles are scoped to a suspended execution state.
 invalidate :: State -> State
 invalidate s=s {generation=generation s+1,stopped=False,frame=Nothing,choices=M.empty}
@@ -133,7 +210,7 @@ tickDebugger runtime@(Debugger ref) core original = do
   updated<-foldM (receive runtime core) original events
   now<-toInteger <$> getMonotonicTimeNSec
   current<-readIORef ref
-  let expired=M.filter (\(_,_,sent) -> now-sent>15000000000) (pending current)
+  let expired=M.filter (\(kind,_,sent) -> now-sent>if managed current && kind==Init then 300000000000 else 15000000000) (pending current)
   let detachExpired=maybe False (\sent -> now-sent>1000000000) (disconnectAt current)
       timedOut=not (M.null expired)
   if not timedOut && not detachExpired && failure current==Nothing then pure updated else do
@@ -215,9 +292,10 @@ response runtime@(Debugger ref) core kind body d = do
     Init -> do
       let filters=[text "filter" f | f<-items "exceptionBreakpointFilters" body,flag "default" f]
       modifyIORef' ref (\state -> state {capabilities=body,exceptionFilters=filters})
-      send runtime Attach "attach" (object [])
+      let (command,arguments)=startRequest s
+      send runtime Attach command arguments
       configure runtime
-      pure d {status="Attaching debugger..."}
+      pure d {status=if fst (startRequest s)=="launch" then "Launching debugger..." else "Attaching debugger..."}
     Attach -> do
       send runtime (Threads False) "threads" (object [])
       when (stopped s) $ forM_ (thread s) (\tid -> send runtime (Stack False) "stackTrace" (stackArguments tid))
@@ -258,7 +336,7 @@ response runtime@(Debugger ref) core kind body d = do
     Detach -> do
       mapM_ D.stopClient (client s)
       modifyIORef' ref (\state -> (invalidate state) {client=Nothing,pending=M.empty,ready=False,configured=False,disconnectAt=Nothing})
-      pure (clearDialog d) {status="Debugger disconnected; attached program is not terminated."}
+      pure (clearDialog d) {status=if managed s || fst (startRequest s)=="launch" then "Debugger disconnected; launched session stopped." else "Debugger disconnected; attached program is not terminated."}
 
 select :: Debugger -> Core -> Text -> Text -> [Text] -> Desktop -> IO Desktop
 select runtime@(Debugger ref) core fullToken action values d = do
