@@ -39,7 +39,7 @@ checks = do
   check "Ctrl mnemonic accepts from input" (committed==[WriteGitCommit "commit message"])
   check "Alt mnemonic activates cancel" (dialog cancelledMnemonic==Nothing)
   check "focused dialog button has white text on green" ("color:rgb(255,255,255);background:rgb(0,170,0)'>  Commit" `T.isInfixOf` snapshotHtml focusedButton)
-  check "dialog button shadows are black" ("color:rgb(0,0,0);background:rgb(0,0,0)'>" `T.isInfixOf` snapshotHtml committing)
+  check "dialog button shadows use half blocks on gray" (all (`T.isInfixOf` snapshotHtml committing) ["color:rgb(0,0,0);background:rgb(170,170,170)'>▄", "color:rgb(0,0,0);background:rgb(170,170,170)'>▀"])
   check "dialog frames are white on gray" ("color:rgb(255,255,255);background:rgb(170,170,170)'>╔" `T.isInfixOf` snapshotHtml committing)
   let browser=openBrowser "/project" "*" [Entry "folder" True Nothing Nothing,Entry "Main.hs" False Nothing Nothing] desktop
       fileDialog=fromMaybe (error "missing file dialog") (dialog browser)

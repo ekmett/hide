@@ -39,6 +39,11 @@ row :: V.Attr -> Int -> Text -> V.Image
 row a w t = V.cropRight (max 0 w) (label a t V.<|> V.charFill a ' ' (max 0 w) 1)
 place :: Int -> Int -> V.Image -> V.Image
 place x y = V.translate (max 0 x) (max 0 y)
+buttonShadow :: V.Color -> Rect -> [V.Image]
+buttonShadow bg (Rect x y w _) =
+  [place (x+w) y (V.char (attr black bg) '▄'),
+   place (x+1) (y+1) (V.charFill (attr black bg) '▀' w 1)]
+
 box :: V.Attr -> Bool -> Int -> Int -> V.Image
 box a double w h
   | w<2 || h<2 = V.charFill a ' ' (max 0 w) (max 0 h)
@@ -144,8 +149,7 @@ windowLayers d active w =
       | otherwise = [place x (top rect-1) divider,place (left rect) (top rect) inputImage] ++
           concat [ [place (left r) (top r) (row (if composerButtonEnabled d name then selected else attr (V.RGBColor 85 85 85) gray) (width r) (" "<>composerButtonLabel d name))]
             ++ (if top r+1<y+hh-1 then
-                [place (left r+width r) (top r) (V.char (attr black blue) '▄'),
-                 place (left r+1) (top r+1) (V.charFill (attr black blue) '▀' (width r) 1)] else [])
+                buttonShadow blue r else [])
           | (r,name)<-composerButtons w, top r<y+hh-1]
       where
         rect=composerRect w; draft=composerBuffer d; (sr,sc)=composerScroll d w
@@ -269,7 +273,7 @@ dialogLayers :: Desktop -> Dialog -> [V.Image]
 dialogLayers d dg =
   [place (x+max 1 ((w-T.length title) `div` 2)) y (label (attr white gray) title)]
   ++ [place bx by (V.cropRight bw (buttonImage i name)) | (i,(Rect bx by bw _,name))<-zip [0..] (zip (buttonRects d dg) (buttons dg))]
-  ++ [place (bx+1) (by+1) (V.charFill (attr black black) ' ' bw 1) | Rect bx by bw _<-buttonRects d dg]
+  ++ concatMap (buttonShadow gray) (buttonRects d dg)
   ++ concat [fieldLayer i r f | (i,(r,f))<-zip [0..] (zip (fieldRects d dg) (fields dg))]
   ++ [place (x+3) (y+2+i) (row paper (w-6) line) | (i,line)<-zip [0..] (body dg),y+2+i<y+h-3]
   ++ [place x y (box (attr white gray) True w h)]
