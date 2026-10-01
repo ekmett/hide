@@ -12,6 +12,7 @@ in the terminal, a native window and the browser.
 | Open files, navigate, search and arrange windows | [Editing](editing.md) |
 | Detach, return later or change frontends | [Sessions](sessions.md) |
 | Choose a frontend, change appearance or use the clipboard | [Display and frontends](display.md) |
+| Set startup defaults and tool permissions | [Configuration](configuration.md) |
 | Inspect and change binary files | [Hex editing](hex.md) |
 
 [F1 Help](../README.md) is the short guide bundled with the editor. The command
@@ -24,6 +25,9 @@ in the terminal, a native window and the browser.
 | Inspect types, follow definitions, rename and handle diagnostics | [Haskell language tools](haskell.md) |
 | Run a program, use a shell, attach a debugger | [Running and debugging](running.md) |
 | Review, commit, fetch, pull and merge | [Git](git.md) |
+| Give a guest access to the live editor and its tools | [Session tools](session-tools.md) |
+| Choose a task workflow for the guest | [Agent skills](agent-skills.md) |
+| Look up calls by category | [Agent operation reference](agent-tools.md) |
 | Discuss code, provide context and review proposed changes | [Conversations](conversations.md) |
 | Work on another machine with a local display | [Remote editing](remote.md) |
 
@@ -34,5 +38,3 @@ in the terminal, a native window and the browser.
 remote transport. The [design records](design/) and [implementation plans](plans/)
 explain how the pieces were developed; use the guides above for the current
 commands and workflow.
-
-[Configuration](configuration.md) sets startup defaults and per-tool Agent Permissions.

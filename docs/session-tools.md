@@ -10,6 +10,10 @@ Try requests such as:
 - “Show what the last two undo steps would change.”
 - “Break at this line, run, and inspect the caller.”
 
+For task recipes, use the [agent skills catalog](agent-skills.md). The
+[operation reference](agent-tools.md) lists arguments, results and constraints by
+category. Both are also available through `docs_read` in the `editor` corpus.
+
 ## Files, windows and history
 
 `list_windows`, `list_buffers`, `read_buffer` and `read_selection` expose live contents, paths, dirty flags and revisions. `workspace_project` identifies the project root and package file. `workspace_search` searches disk files and substitutes unsaved buffer contents; `trackedOnly` limits it to Git-tracked files. `workspace_git` reports disk changes separately from unsaved buffers.
@@ -54,11 +58,33 @@ A guest can use `ask_user` to ask a question with choices and a free-text answer
 
 ## Controls, settings and documentation
 
-`editor_input` operates the editor through mouse, key and paste events in character-cell coordinates. It follows the same menus and editing rules as direct input. It cannot operate Agent Permissions or answer its own permission prompts.
+`editor_input` operates the editor through mouse, key and paste events in character-cell coordinates. It follows the same menus and editing rules as direct input. Its input origin is assigned by the host. It cannot type as you in a conversation,
+answer its own questions or approvals, change agent settings or permissions,
+or turn off Streamer mode. Each batch starts without your clipboard, key prefix
+or drag state; guest gestures can span events within that batch.
 
-`editor_settings` reads current display/editing settings as JSON. Supply `settings` to change this session or `defaults` to save startup defaults for future sessions. These cover appearance, screen mode and dimensions, WordStar keys, cursor blinking, CRT filtering and Unicode/icon rendering; startup defaults also include backend and scale. Agent/provider configuration is separate.
+`editor_settings` reads current display/editing settings as JSON. Supply `settings` to change this session or `defaults` to save startup defaults for future sessions. These cover appearance, screen mode and dimensions, WordStar keys, cursor blinking, CRT filtering and Unicode/icon rendering; startup defaults also include backend and scale. `streamerMode` is reported read-only. `agent_settings` exposes the provider
+executable, environment variable names, model choices and context usage;
+argument values, environment values and session keys are omitted.
 
 `docs_list`, `docs_search` and `docs_read` provide the editor manual and Turbo Haskell compiler documentation. Select the `editor` or `thc` corpus. Compiler documentation comes from the configured THC checkout (`THC_ROOT` or the project's THC build configuration). Reads return line numbers and heading information, so the guest can cite a particular section.
+
+## What the guest can see and control
+
+`editor_screen` includes separate readable/clickable cell masks and current
+command/key permissions. Conversation drafts and unanswered input, sensitive
+fields and session keys are redacted from text and image views. Agent settings
+can be read but not changed. Generic buffer/selection reads follow the same
+privacy rules, so switching tools does not reveal hidden values.
+
+`clipboard_write` copies text supplied by the guest into the editor clipboard
+and queues a copy for the attached frontend. It never reads your existing
+clipboard. Browser or terminal clipboard permissions can prevent that final
+system copy; the tool reports that it was queued rather than claiming the OS
+accepted it.
+
+These are boundaries on editor services. A separately enabled terminal execution
+tool still runs programs with the editor account's access.
 
 ## Agent Permissions
 
