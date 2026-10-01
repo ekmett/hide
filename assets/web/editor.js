@@ -182,7 +182,7 @@ function connect(){
      message.rows=message.rows.map(([y,spans])=>[y,spans.map(([x,fg,bg,runs])=>[x,fg,bg,runs.flatMap(run=>typeof run==='string'?Array.from(run,c=>[c,1]):[run])])]);
      const oldCursor=JSON.stringify(frame?.cursor);
      const changedMode=Object.hasOwn(message,'mode')&&mode!==message.mode;
-     frame={...frame,...message};unsaved=frame.dirty;guardLeave();[cols,lines]=frame.size;mode=frame.mode||3;clipboard=frame.selection;
+     frame={...frame,...message};document.title=frame.title;unsaved=frame.dirty;guardLeave();[cols,lines]=frame.size;mode=frame.mode||3;clipboard=frame.selection;
      if(message.reset){rows=Array(lines).fill(null);tiles.clear();}
      for(const [y,r] of message.rows)rows[y]=r;
      if(oldCursor!==JSON.stringify(frame.cursor))cursorEpoch=performance.now();

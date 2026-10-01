@@ -38,6 +38,7 @@ import Numeric (showHex)
 import Paths_thc_edit (getDataFileName)
 import System.Info (os)
 import System.Environment (lookupEnv)
+import System.Directory (getCurrentDirectory)
 import System.IO (withBinaryFile, IOMode(ReadMode), hPutStrLn, stderr)
 import System.Process (callProcess)
 import System.Timeout (timeout)
@@ -232,12 +233,13 @@ runWeb scale effects tick initial = do
             readIORef state >>= loop conn send queue disconnected Nothing
         loop conn send queue disconnected previous d = do
           current<-tick d
+          cwd<-getCurrentDirectory
           writeIORef state current
           let oldDesktop=fmap (\(old,_,_) -> old) previous
               oldRows=maybe [] (\(_,cached,_) -> cached) previous
               oldMetadata=maybe [] (\(_,_,meta) -> meta) previous
               rows=if oldDesktop==Just current then oldRows else frameRows current
-              metadata=["size" .= screenSize current,"mode" .= videoMode current,
+              metadata=["title" .= applicationTitle cwd current,"size" .= screenSize current,"mode" .= videoMode current,
                 "dirty" .= webDirty current,"cursor" .= cursor,"blink" .= blinkCursor current,
                 "crt" .= crtFilter current,"pixelated" .= pixelateUnicode current,
                 "selection" .= (if dialog current/=Nothing then "" else clipboard (fst (runCommand THC.Edit.Model.Copy current {browserFrontend=False}))),

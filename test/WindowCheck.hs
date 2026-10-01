@@ -4,6 +4,7 @@ import Control.Monad (unless)
 import THC.Edit.Frontend
 import THC.Edit.Model
 import THC.Edit.Buffer (newBuffer)
+import THC.Edit.Files (FileState(..))
 import qualified Graphics.Vty as V
 checks :: IO ()
 checks = do
@@ -124,4 +125,34 @@ checks = do
      fmap treeWidth (sideTree grownMessages)==Just 24)
   check "zoom restores bounds with their original edge attachments"
     (rect (grow zoomed)==Just (Rect 0 1 100 38) && rect restored==rect (grow rightOnly))
+  let mouse x y=fst . handleEvent (V.EvMouseDown x y V.BLeft [])
+      grabbed=mouse 10 1 desktop
+      dragged=mouse 20 6 grabbed
+      minimumWindow=mouse 150 100 dragged
+      released=fst (handleEvent (V.EvMouseUp 150 100 (Just V.BLeft)) minimumWindow)
+      cancelled=fst (handleEvent (V.EvKey V.KEsc []) minimumWindow)
+      floatingMove=mouse 20 6 (mouse 15 3 unattached)
+      dockGrab=mouse 33 1 (dockedMessages {sideTree=fmap (\t->t {treeFocused=False}) (sideTree dockedMessages)})
+      dockMove=mouse 43 6 dockGrab
+      keyboardMove=fst (handleEvent (V.EvKey V.KRight []) grabbed)
+  check "title dragging shrinks a full-size window against both edges"
+    (rect dragged==Just (Rect 10 6 70 18) && buffers dragged==buffers desktop)
+  check "title dragging stops at the window minimum size"
+    (rect minimumWindow==Just (Rect 64 19 16 5) && rect released==rect minimumWindow && drag released==Nothing)
+  check "Escape restores the window before movement and shrinkage" (rect cancelled==rect desktop)
+  check "title dragging preserves size when there is room" (rect floatingMove==Just (Rect 10 6 30 10))
+  check "title dragging shrinks within dock boundaries" (rect dockMove==Just (Rect 33 6 47 10))
+  check "keyboard movement uses the same edge shrink behavior" (rect keyboardMove==Just (Rect 1 1 79 23))
   putStrLn "window input checks passed"
+
+  let named=addDocument (Just (FileState "/project/src/Main.hs" Nothing)) (newBuffer "") desktop
+      other=addDocument (Just (FileState "/project/test/Spec.hs" Nothing)) (newBuffer "") named
+  check "outer title includes the relative file path"
+    (applicationTitle "/project" named=="th src/Main.hs")
+  check "outer title follows the active file and project directory"
+    (applicationTitle "/project" other=="th test/Spec.hs" &&
+     applicationTitle "/elsewhere" (installTree "/project" [] named)=="th src/Main.hs" &&
+     applicationTitle "/project" named {defaultDirectory=Just "/project/test"}=="th ../src/Main.hs")
+  check "outer title handles empty desktops and unnamed files"
+    (applicationTitle "/project" (initialDesktop (80,25))=="th" &&
+     applicationTitle "/project" desktop=="th NONAME1.HS")

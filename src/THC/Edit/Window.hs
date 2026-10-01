@@ -16,6 +16,7 @@ import qualified Graphics.Vty as V
 import THC.Edit.Unicode (displayOpsForPic)
 import Graphics.Vty.Span (SpanOp(..))
 import System.Environment (lookupEnv)
+import System.Directory (getCurrentDirectory)
 import System.Info (os)
 import System.IO (hPutStrLn, stderr)
 import THC.Edit.Unicode (graphemes, clusterWidth)
@@ -26,6 +27,7 @@ foreign import ccall unsafe "thc_system_dark" c_system_dark :: IO CInt
 foreign import ccall unsafe "thc_open" c_open :: CString -> CDouble -> CInt -> CInt -> CInt -> IO CInt
 foreign import ccall unsafe "thc_mode" c_mode :: CInt -> CInt -> CInt -> IO CInt
 foreign import ccall unsafe "thc_scale" c_scale :: CInt -> IO CInt
+foreign import ccall unsafe "thc_title" c_title :: CString -> IO ()
 foreign import ccall unsafe "thc_close" c_close :: IO ()
 foreign import ccall unsafe "thc_error" c_error :: IO CString
 foreign import ccall unsafe "thc_backend" c_backend :: IO CString
@@ -149,6 +151,9 @@ runWindow backend scale effects tick initial = do
     systemTheme d = do value<-c_system_dark; pure d {systemDark=value/=0}
     loop font previous d = do
       when (previous /= Just d) $ do
+        when (fmap (applicationTitle "") previous /= Just (applicationTitle "" d)) $ do
+          cwd <- getCurrentDirectory
+          utf8 (applicationTitle cwd d) c_title
         updateMenus d
         draw font d
       event <- allocaArray 6 $ \p -> check "Read window event" (c_wait p) >> map fromIntegral <$> peekArray 6 p

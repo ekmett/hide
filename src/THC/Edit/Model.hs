@@ -13,7 +13,7 @@ import Data.Maybe (listToMaybe, fromMaybe)
 import Data.List (find, findIndex, sortOn, mapAccumL, groupBy)
 import Data.Char (toLower, isAlphaNum, chr, ord, toUpper, isHexDigit, digitToInt)
 import Text.Read (readMaybe)
-import System.FilePath ((</>), takeDirectory, isAbsolute)
+import System.FilePath ((</>), takeDirectory, isAbsolute, splitDirectories, joinPath, normalise)
 import THC.Edit.Browser (Entry(..))
 import THC.Edit.Git (GitReview)
 import THC.Edit.Syntax (Style(..), highlightFor)
@@ -264,6 +264,20 @@ activeWindow :: Desktop -> Maybe Window
 activeWindow = listToMaybe . windows
 activeDocument :: Desktop -> Maybe Document
 activeDocument d = activeWindow d >>= (\w -> M.lookup (bufferId w) (buffers d))
+
+applicationTitle :: FilePath -> Desktop -> Text
+applicationTitle cwd d = case activeDocument d of
+  Nothing -> "th"
+  Just doc -> "th "<>fromMaybe name (documentLabel doc)
+    where
+      root=fromMaybe (maybe cwd treeRoot (sideTree d)) (defaultDirectory d)
+      name=case documentFile doc of
+        Just file -> T.pack (relative (filePath file))
+        Nothing -> T.pack (fromMaybe ("NONAME"++maybe "" (show . bufferId) (activeWindow d)++".HS") (documentSuggestedName doc))
+      relative path | not (isAbsolute path) = path
+                    | otherwise = joinPath (stripCommon (splitDirectories (normalise root)) (splitDirectories (normalise path)))
+      stripCommon (a:as) (b:bs) | a==b = stripCommon as bs
+      stripCommon as bs = replicate (length as) ".."++bs
 
 fitRect :: (Int,Int) -> Rect -> Rect
 fitRect (sw,sh) (Rect x y w h) = Rect (max 0 (min x (sw-w'))) (max 1 (min y (sh-1-h'))) w' h'
@@ -927,7 +941,7 @@ mouseEvent x y V.BLeft _ d | Just capture <- drag d = (case capture of
   TreeScrolling -> case sideTree d of
     Just tree -> scrollTreeTo ((y-3)*treeScrollLimit d tree `div` max 1 (treeContentRows d-3)) tree d
     Nothing -> d
-  Moving i dx dy -> mapWindow i (\w -> w {bounds = fitWindow d (bounds w) {left=x-dx,top=y-dy},restoredBounds=Nothing}) d
+  Moving i dx dy -> mapWindow i (\w -> w {bounds = fitMovingWindow d (bounds w) {left=x-dx,top=y-dy},restoredBounds=Nothing}) d
   Resizing i dx dy -> mapWindow i (\w -> w {bounds = fitWindow d (bounds w) {width=x-left (bounds w)+dx,height=y-top (bounds w)+dy},restoredBounds=Nothing}) d
   Scrolling i vertical -> scrollTrack vertical x y (focusWindow i d)
   Selecting i -> selectAt True x y (focusWindow i d),[])
@@ -969,7 +983,7 @@ dragKey key mods d = case dragOriginal d of
     V.KEnter -> (done,[])
     _ | Just (dx,dy)<-lookup key [(V.KLeft,(-1,0)),(V.KRight,(1,0)),(V.KUp,(0,-1)),(V.KDown,(0,1))] ->
       (mapWindow wid (\w -> let { r=bounds w; changed=if V.MShift `elem` mods then r {width=width r+dx,height=height r+dy} else r {left=left r+dx,top=top r+dy} }
-                           in w {bounds=fitWindow d changed,restoredBounds=Nothing}) d,[])
+                           in w {bounds=(if V.MShift `elem` mods then fitWindow else fitMovingWindow) d changed,restoredBounds=Nothing}) d,[])
       | otherwise -> (d,[])
   where done=d {drag=Nothing,dragOriginal=Nothing}
 
@@ -1397,6 +1411,12 @@ problemsKey key mods d
 
 fitWindow :: Desktop -> Rect -> Rect
 fitWindow d r = let offset=treeWidthOf d; (sw,sh)=screenSize d; fitted=fitRect (max 1 (sw-offset),sh-problemsHeight d) r {left=left r-offset} in fitted {left=left fitted+offset}
+
+-- Make room for the requested position before enforcing minimum dimensions.
+fitMovingWindow :: Desktop -> Rect -> Rect
+fitMovingWindow d r = fitWindow d (r
+  {width=min (width r) (fst (screenSize d)-left r),
+   height=min (height r) (top (problemsRect d)-top r)})
 
 setTree :: Maybe Sidebar -> Desktop -> Desktop
 setTree tree d = clampHexScroll d next {windows=map move (windows d)}

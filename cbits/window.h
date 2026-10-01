@@ -6,6 +6,7 @@ int thc_open(const char *backend, double scale, int cols, int rows, int cell_hei
 int thc_mode(int cell_height, int cols, int rows);
 /* Grow/shrink tiles without changing the grid; zero restores the density-aware default. */
 int thc_scale(int direction);
+void thc_title(const char *text);
 void thc_close(void);
 const char *thc_error(void);
 const char *thc_backend(void);

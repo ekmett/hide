@@ -51,6 +51,7 @@ const char *thc_clipboard(void) {
     clipboard_text = SDL_GetClipboardText();
     return clipboard_text ? clipboard_text : "";
 }
+void thc_title(const char *s) { SDL_SetWindowTitle(window, s); }
 void thc_set_clipboard(const char *s) { SDL_SetClipboardText(s); }
 
 void thc_close(void) {
