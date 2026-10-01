@@ -91,6 +91,10 @@ checks = bracket temporary removeFile $ \path -> do
   let dots=snapshotHtml (desktop (newByteBuffer (BS.pack [65,0,46,255,66])))
   check "placeholder dots are gray but literal periods stay yellow"
     (all (`T.isInfixOf` dots) ["color:rgb(170,170,170);background:rgb(0,0,170)'>.</span>","color:rgb(255,255,85);background:rgb(0,0,170)'>.</span>"])
+  check "placeholder bytes have gray hex digits while printable periods stay yellow"
+    (all (`T.isInfixOf` dots) ["color:rgb(170,170,170);background:rgb(0,0,170)'>00</span>",
+                             "color:rgb(170,170,170);background:rgb(0,0,170)'>FF</span>",
+                             "color:rgb(255,255,85);background:rgb(0,0,170)'> 2E </span>"])
   check "full width hex has no horizontal scrollbar or scrollable blank column"
     (not ("◄" `T.isInfixOf` image) && maybe False (\w -> scrollbarLimit narrow False narrowDoc w==0 && width (scrollbarRect narrow False narrowDoc w)==0) (activeWindow opened))
   check "narrow hex retains working horizontal scrollbar"

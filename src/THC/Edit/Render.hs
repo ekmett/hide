@@ -174,7 +174,7 @@ windowLayers d active w =
                      | otherwise = True
     renderLine n | byteMode b && n>=documentRows doc w = V.charFill edit ' ' contentWidth 1
     renderLine n | byteMode b = V.cropRight contentWidth (V.translateX (negate (scrollColumn w)) (V.horizCat
-      [V.char (if active && maybe False highlighted offset then selected else if ch=='.' && maybe False (\i -> T.index bytes (i-n*count)/='.') offset then attr gray blue else edit) ch | (ch,offset)<-hexRow count n t]) V.<|> V.charFill edit ' ' contentWidth 1)
+      [V.char (if active && maybe False highlighted offset then selected else if maybe False (\i -> let byte=T.index bytes (i-n*count) in byte<' ' || byte>'~') offset then attr gray blue else edit) ch | (ch,offset)<-hexRow count n t]) V.<|> V.charFill edit ' ' contentWidth 1)
       where
         count=windowHexBytes w
         bytes=T.take count (T.drop (n*count) t)
