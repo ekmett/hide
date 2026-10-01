@@ -72,6 +72,9 @@ identities/history/workspace mappings, fresh tokens, no task replay, corrupt-fil
 retention and ownership-gated checkpoint writes. Reconnect checks cover current
 limits and advertised load/resume support, failed-load retry and bearer revocation,
 no task or transcript replay, and ending an agent while its load is pending.
+A live crash/reconnect check also restores both the parent and worktree editor,
+preserves an unsaved child buffer, and loads the same provider session without
+replaying a prompt.
 
 Native Windows pending-inspector shutdown is verified; remaining platform work
 is tracked in the [recovery plan](session-recovery.md#remaining-platform-qualification).

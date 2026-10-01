@@ -37,7 +37,10 @@ try:
             return wire['control'](p, kind)
         except BaseException:
             if p.poll() is not None:
-                print('Relay error:', p.stderr.read().decode(errors='replace'), file=sys.stderr)
+                error = p.stderr.read()
+                with open(root / ('relay-' + str(relays.index(p)) + '.log'), 'ab') as log:
+                    log.write(error)
+                print('Relay error:', error.decode(errors='replace'), file=sys.stderr)
             raise
     relays = []
     def attach():
@@ -62,7 +65,8 @@ try:
             p.wait()
         p.stdout.close()
         if not p.stderr.closed:
-            (root / ("relay-" + str(relays.index(p)) + ".log")).write_bytes(p.stderr.read())
+            with open(root / ("relay-" + str(relays.index(p)) + ".log"), "ab") as log:
+                log.write(p.stderr.read())
             p.stderr.close()
     def await_state(state):
         until = time.monotonic() + 15

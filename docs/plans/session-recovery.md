@@ -45,9 +45,28 @@ and daemon agent polling continues while no frontend is attached.
   original deadlines. Native headless build and real SSH crash/recovery checks
   also pass; this does not qualify the Windows embedded-terminal backend.
 
-- [ ] Investigate intermittent macOS stdio relay closure during rapid reattachment.
-  The Ctrl-C regression twice received EOF before the first input acknowledgement;
-  the daemon remained alive and logged `AsyncCancelled`. Eight traced reruns and
-  the final uninstrumented run passed. Do not treat this as a diagnosed/fixed
-  transport issue. `test/interrupt-session.py` now checks actual daemon exit,
-  SIGTERM detachment, and recovery/save of an unsaved edit.
+- [ ] Investigate intermittent macOS stdio relay closure after attachment.
+  The Ctrl-C regression twice received EOF after hello/assets and before its
+  first input acknowledgement; the daemon remained alive. The retained first
+  failure occurred on the initial attachment, so rapid reattachment is not a
+  necessary trigger. Its daemon log matches the failed harness timestamp and
+  contains two uncaught `AsyncCancelled` exceptions, without a connection stage.
+  Cancellation also occurs normally when `race_` stops the losing receive/send
+  worker; this log alone does not establish that cancellation caused the EOF.
+  Seven subsequent runs with exception-stage tracing, twelve fresh-daemon input
+  runs, and 120 rapid attachments passed. A bounded shared-render cancellation
+  probe did not reproduce an exception on subsequent evaluation. These negative
+  results do not diagnose or fix the failure; no speculative transport change
+  was made.
+
+  `test/interrupt-session.py` owns its resumed daemon and relay processes, retains
+  failed fixture directories and relay stderr, and checks actual daemon exit,
+  SIGTERM detachment, and recovery/save of an unsaved edit. On the next failure,
+  retain relay exit status alongside both logs and distinguish relay stdin/socket
+  EOF, daemon input failure, frame/output failure, and the enclosing attachment
+  exception. A cancellation recorded only in the losing worker is insufficient;
+  identify the first terminating worker and whether its exception propagates to
+  the attachment before changing cleanup or shared rendering. Temporary stage
+  evidence from this investigation is indexed by `/tmp/interrupt-trace-2.log`
+  through `/tmp/interrupt-trace-8.log`; the original failure is retained in
+  `/tmp/thc-interrupt-green.log` (2026-10-01 14:01:57).
