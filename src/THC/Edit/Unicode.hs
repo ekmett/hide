@@ -46,6 +46,7 @@ graphemes t
 
 clusterWidth :: T.Text -> Int
 clusterWidth t
+  | T.any (`elem` ['\xf024b','\xf0770']) t = 2 -- Two-cell Material folder tiles, including terminal cursor correction.
   | T.any (`elem` ['\xfe0f','\x20e3']) t = 2
   | T.any (\c -> c>='\x1f1e6' && c<='\x1f1ff') t = 2
   | otherwise = maximum (0:map (max 0 . fromIntegral . c_width . fromIntegral . fromEnum) (T.unpack t))

@@ -39,4 +39,6 @@ checks = do
     (last (rows '\xe000')==0xff00 && head (rows '\xe002')==0xff00 && all id (right '\xe000') && all id (left '\xe001'))
   forM_ ['\xe000'..'\xe007'] $ \c -> check "bubble tile occupies one VGA cell"
     (glyphWidth (glyph font c)==8 && length (rows c)==16)
+  check "Material folders are distinct bundled two-cell bitmaps"
+    (rows '\xf024b' /= rows '\xf0770' && all (\c -> bitmapGlyph font c && glyphWidth (glyph font c)==16 && any (/=0) (rows c)) ['\xf024b','\xf0770'])
   putStrLn "font checks passed"

@@ -240,7 +240,8 @@ treeLayers d tree =
         changed=any (\doc -> dirty (documentBuffer doc) && maybe False ((==nodePath node).filePath) (documentFile doc)) (M.elems (buffers d))
         a=if changed then attr (V.RGBColor 255 85 85) (if chosen then green else blue) else if chosen then selected else edit
         iconColor=if chosen then selected else attr (if nodeDirectory node then yellow else white) blue
-        marker | nodeDirectory node = if nodeExpanded node then "📂" else "📁"
+        marker | nodeDirectory node, videoMode d/=Nothing || materialIcons d = if nodeExpanded node then "\xf0770" else "\xf024b"
+               | nodeDirectory node = if nodeExpanded node then "📂" else "📁"
                | otherwise = "📄"
     thumb=scrollbarThumb visible (treeScrollLimit d tree) (treeScroll tree)
     scrollCell n=V.char (if n==0 || n==visible-1 then attr blue scrollCyan else attr scrollCyan blue)

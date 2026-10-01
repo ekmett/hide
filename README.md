@@ -415,3 +415,9 @@ cabal exec -- ghc -threaded -package thc-edit test/HLSLive.hs -o /tmp/thc-hls-li
 cabal exec -- ghc -threaded -package thc-edit test/EditorLive.hs -o /tmp/thc-editor-live
 /tmp/thc-editor-live
 ```
+
+The windowed Files pane uses bundled Material Design folder icons.
+For the same symbols in a terminal, use `thc-edit --terminal --material-icons`
+with a Nerd Font supporting Material Design Icons (U+F024B and U+F0770).
+Without the flag, terminals retain their standard Unicode folder symbols.
+Icons reserve two columns, with explicit cursor correction after each glyph.

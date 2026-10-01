@@ -79,3 +79,17 @@ gzip -dc unifont-18.0.01.hex.gz > assets/fonts/unifont-18.0.01.hex
 This bitmap fallback provides individual code point glyphs, without complex
 script shaping or supplementary-plane coverage. Those code points remain
 intact in the editor buffer even when a replacement glyph is displayed.
+
+## Material Design folder icons
+
+`material-icons.hex` contains 16×16 monochrome adaptations of the `folder`
+and `folder-open` icons from [Material Design Icons](https://github.com/Templarian/MaterialDesign-SVG).
+The original SVGs are retained in `assets/icons/`. Converted on 2026-09-30:
+4× area sampling, then 50% coverage threshold, encoded at the MDI code points
+U+F024B and U+F0770. Each occupies two character cells. The window renderer
+uses these tiles directly, without platform emoji styling.
+
+The original distribution notice and Apache 2.0 license are in
+`MATERIAL-LICENSE.txt` and `MATERIAL-APACHE-2.0.txt`.
+Regenerate with `python3 tools/convert-material-icons.py` (librsvg and
+ImageMagick are conversion tools only, not editor dependencies).

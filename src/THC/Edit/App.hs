@@ -34,13 +34,14 @@ import THC.Edit.Render
 import THC.Edit.Files
 import THC.Edit.Reconcile
 
-data Option = Use Backend | Scale String | Size String | Mode String | Demo | CRT | WordStar | Snapshot | Html | Scene String | Usage deriving Eq
+data Option = Use Backend | Scale String | Size String | Mode String | Demo | CRT | MaterialIcons | WordStar | Snapshot | Html | Scene String | Usage deriving Eq
 options :: [OptDescr Option]
 options = [Option [] ["metal"] (NoArg (Use Metal)) "Open a Metal window"
           ,Option [] ["vulkan"] (NoArg (Use Vulkan)) "Open a Vulkan window"
           ,Option [] ["window"] (NoArg (Use Auto)) "Open a window using the platform backend"
           ,Option [] ["terminal"] (NoArg (Use Terminal)) "Use the terminal (override THC_EDIT_BACKEND)"
           ,Option [] ["crt"] (NoArg CRT) "Enable CRT scanlines and vignetting (window only)"
+          ,Option [] ["material-icons"] (NoArg MaterialIcons) "Use Material folder icons in the terminal (requires a compatible Nerd Font)"
           ,Option [] ["scale"] (ReqArg Scale "FACTOR") "Window pixel scale, 1 to 8 in 1/8 steps (default THC_EDIT_SCALE or display density)"
           ,Option [] ["mode"] (ReqArg Mode "NUMBER") "Window screen mode: 3 (80x25), 259 (80x50); default 3"
           ,Option [] ["vga50"] (NoArg (Mode "259")) "Alias for --mode 259 (window only)"
@@ -74,7 +75,7 @@ main = do
       [s] -> either die pure (parseWindowSize s)
       _ -> die "Specify --size only once."
     let initial=if Demo `elem` flags then addDocument Nothing (newBuffer (activeText demoDesktop)) (initialDesktop dimensions) else initialDesktop dimensions
-        configured=(fst (handleEvent (uncurry V.EvResize dimensions) initial)) {wordStar=WordStar `elem` flags,crtFilter=CRT `elem` flags,videoMode=if backend == Terminal then Nothing else Just screenMode}
+        configured=(fst (handleEvent (uncurry V.EvResize dimensions) initial)) {wordStar=WordStar `elem` flags,crtFilter=CRT `elem` flags,materialIcons=MaterialIcons `elem` flags,videoMode=if backend == Terminal then Nothing else Just screenMode}
     (_,loaded)<-applyEffects configured (map ReadPath paths)
     cwd<-getCurrentDirectory
     base<-packageDirectory cwd

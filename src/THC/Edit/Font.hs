@@ -17,7 +17,9 @@ loadFont :: IO Font
 loadFont = do
   ibm <- load "assets/fonts/ibm-vga-8x16.hex"
   unicode <- load "assets/fonts/unifont-18.0.01.hex"
-  pure (Font (IM.union ibm unicode) ibm)
+  icons <- load "assets/fonts/material-icons.hex"
+  let bitmap=IM.union icons ibm
+  pure (Font (IM.union bitmap unicode) bitmap)
   where
     load name = do
       path <- getDataFileName name

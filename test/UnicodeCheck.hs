@@ -43,4 +43,8 @@ checks = do
       (output,end)=terminalText position 3 "A🇯🇵B"
   check "terminal reserves two cells and corrects its cursor after wide glyphs"
     (writeToByteString output==TE.encodeUtf8 "A  <4>🇯🇵<6>B" && end==7)
+  forM_ ["\xf024b","\xf0770"] $ \icon -> do
+    let (drawn,next)=terminalText position 3 (icon<>" x")
+    check "Material icons reserve two columns with terminal cursor correction"
+      (clusterWidth icon==2 && next==7 && writeToByteString drawn==TE.encodeUtf8 ("  <3>"<>icon<>"<5> x"))
   putStrLn "Unicode grapheme/layout checks passed"

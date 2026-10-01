@@ -192,6 +192,8 @@ checks = do
      glyphAt resizedFiles 0 9==' ' && treeContentRows resizedFiles==7)
   check "Files scrollbar and wheel scroll rows" (fmap treeScroll (sideTree scrolled)==Just 3 && fmap treeScroll (sideTree barClicked)==Just 1)
   check "tree markers have a separating space" ("📁 src" `T.isInfixOf` snapshot compactTree && not ("[+]" `T.isInfixOf` snapshot compactTree))
+  check "Material folders are automatic in windows and opt-in in terminals"
+    (all (T.isInfixOf "\xf024b src" . snapshot) [compactTree {videoMode=Just 3},compactTree {materialIcons=True}])
   check "inactive scrollbar region only focuses window"
     (fmap windowId (activeWindow focusedBehind)==Just (windowId behind) && drag focusedBehind==Nothing && null behindEffects && fmap scrollRow (activeWindow focusedBehind)==Just (scrollRow behind))
   check "inactive close region cannot close the window"
