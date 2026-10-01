@@ -27,6 +27,8 @@ checks = do
   check "remote colors bounded" (not (valid (toJSON [(0::Int,-1::Int,0::Int,[String "a"])] : drop 1 rows)))
   check "remote clusters cannot contain NUL" (not (valid (toJSON [(0::Int,0::Int,0::Int,[toJSON ("a\0"::T.Text,1::Int)])] : drop 1 rows)))
   check "remote invalid dimensions rejected" (either (const True) (const False) (parseRemoteFrame (object ["size" .= ([999999,25]::[Int])]) rows))
+  check "Control bracket detaches locally" (remoteDetachShortcut [1,fromEnum ']',2] && nativeEventInput [1,fromEnum ']',2]==Nothing)
+  check "other bracket shortcuts remain editor input" (all (not . remoteDetachShortcut . (\mods -> [1,fromEnum ']',mods])) [0,1,3,6,8])
   check "native close requests checked remote quit" (nativeEventInput [6] == Just (object ["type" .= ("command"::T.Text),"command" .= ("quit"::T.Text)]))
   check "offline closes detach without queuing remote quit" (remoteCloseDetaches False [6] && not (remoteCloseDetaches True [6]))
   check "offline user input is ignored" (all (not . remoteInputAllowed False) [[1,97,0],[2],[3,1,1,1,0,1],[11,0],[14]])

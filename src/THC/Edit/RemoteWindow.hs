@@ -2,7 +2,7 @@
 module THC.Edit.RemoteWindow
   (runRemoteWindow, RemoteFrame(..), RemoteCell(..), parseRemoteFrame
   , nativeKeyInput, nativeEventInput, pasteShortcut, sanitizeDownloadName
-  , remoteInputAllowed, remoteCloseDetaches) where
+  , remoteInputAllowed, remoteCloseDetaches, remoteDetachShortcut) where
 import Control.Monad (unless)
 import Data.Aeson hiding (withArray)
 import Data.Aeson.Types (Parser, parseEither)
@@ -104,7 +104,7 @@ pasteShortcut terminal wordstar key mask = key==fromEnum 'v' && mask .&. 10/=0
   && (not wordstar || mask .&. 8/=0 || terminal && mask .&. 1/=0) && not (terminal && mask .&. 15==2)
 nativeEventInput :: [Int] -> Maybe Value
 nativeEventInput event = case event of
-  1:key:mods:_ -> nativeKeyInput key mods
+  1:key:mods:_ | not (remoteDetachShortcut event) -> nativeKeyInput key mods
   3:x:y:clicks:mods:button:_ -> mouse (if clicks==0 then "move" else "down") x y button clicks mods
   4:x:y:_ -> mouse "up" x y 1 1 0
   5:w:h:_ -> Just (object ["type" .= ("resize"::T.Text),"width" .= max 40 (min 512 w),"height" .= max 12 (min 256 h)])
@@ -120,6 +120,11 @@ nativeEventInput event = case event of
     mouse action x y button clicks mods = Just (object ["type" .= ("mouse"::T.Text),"action" .= (action::T.Text),
       "x" .= max (-1) (min 511 x),"y" .= max (-1) (min 255 y),"button" .= (if button==3 then 2 else 0::Int),
       "clicks" .= max 0 (min 3 clicks),"mods" .= modifierNames mods])
+remoteDetachShortcut :: [Int] -> Bool
+remoteDetachShortcut event = case event of
+  1:key:mods:_ -> key==fromEnum ']' && mods .&. 15==2
+  _ -> False
+
 -- During an outage only local zoom operates. Closing detaches without queuing
 -- a Quit command that could unexpectedly replay after reconnection.
 remoteInputAllowed :: Bool -> [Int] -> Bool
@@ -294,7 +299,7 @@ runRemoteWindow backend scale (cols,rows) mode host peer = do
           dark <- (/=0) <$> c_system_dark
           when (previousTheme/=Just dark && (connected || previousTheme==Nothing)) (sendJSON (object ["type" .= ("theme"::T.Text),"dark" .= dark]))
           event <- allocaArray 6 $ \p -> check "Read remote window event" (c_wait p) >> map fromIntegral <$> peekArray 6 p
-          unless (remoteCloseDetaches connected event) $ do
+          unless (remoteDetachShortcut event || remoteCloseDetaches connected event) $ do
             when (remoteInputAllowed connected event) (dispatch connected current event)
             loop receiver sender current glyphs status (if connected || previousTheme==Nothing then Just dark else previousTheme) (case event of n:_ -> n `elem` [3,4,5,7,8,9,12]; _ -> False)
   bracket_ (pure ()) c_close $ do

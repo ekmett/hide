@@ -152,11 +152,14 @@ with tempfile.TemporaryDirectory(prefix='thc-editor-session-') as directory:
             bridge.stdout.close()
             bridge.stderr.close()
 
-    def terminal(ident):
+    def terminal(ident, *, choose=False, prefix=None, typed=b'!'):
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 25, 80, 0, 0))
         before = termios.tcgetattr(slave)
-        process = subprocess.Popen([binary, '--resume', ident, '--terminal'], env=env,
+        arguments = [binary, '--terminal', '--resume']
+        if not choose:
+            arguments.append(prefix or ident)
+        process = subprocess.Popen(arguments, env=env,
                                    stdin=slave, stdout=slave, stderr=slave)
         processes.append(process)
         output = bytearray()
@@ -167,9 +170,20 @@ with tempfile.TemporaryDirectory(prefix='thc-editor-session-') as directory:
                 raise AssertionError(bytes(output).decode(errors='replace'))
             return b'persistent unsaved' in output
         try:
+            if choose:
+                def offered():
+                    if select.select([master], [], [], .05)[0]:
+                        output.extend(os.read(master, 65536))
+                    if process.poll() is not None:
+                        raise AssertionError(bytes(output).decode(errors='replace'))
+                    return b'Resume session number (empty to cancel):' in output
+                wait_for(offered)
+                selected = re.search(rb'(?:^|\n)([0-9]+)\) ' + ident.encode() + rb' ', output)
+                assert selected, bytes(output)
+                os.write(master, selected.group(1) + b'\n')
             wait_for(painted)
             # Detach immediately after typing: the frontend must flush input.
-            os.write(master, b'!\x1d')
+            os.write(master, typed + b'\x1d')
             def detached():
                 if select.select([master], [], [], .05)[0]:
                     output.extend(os.read(master, 65536))
@@ -210,24 +224,46 @@ with tempfile.TemporaryDirectory(prefix='thc-editor-session-') as directory:
         assert first_id in listing and second_id in listing, listing
         assert 'Choose one with --resume ID.' in listing, listing
 
-        terminal(first_id)
+        terminal(first_id, choose=True)
+        listed_ids = set(re.findall(r'[a-f0-9]{48}', listing))
+        prefix = next(first_id[:length] for length in range(1, 48)
+                      if sum(ident.startswith(first_id[:length]) for ident in listed_ids) == 1)
+        terminal(first_id, prefix=prefix, typed=b'')
         assert source.read_text() == 'original\n', 'Terminal detached by saving unexpectedly'
         process, ws, display = web(['--resume=' + first_id])
         expect_text(display, 'persistent unsaved λ!')
+        # The browser shortcut uses a frontend-only control, after queued input.
+        ws.send(dict(type='paste', text='+', seq=1))
+        ws.send(dict(type='detach'))
+        display.until('detached')
+        output = process.communicate(timeout=10)[0].decode()
+        assert process.returncode == 0 and 'Session: ' + first_id in output, output
+        assert (catalog / (first_id + '.json')).exists()
+        ws.close()
+        process, ws, display = web(['--resume=' + first_id])
+        expect_text(display, 'persistent unsaved λ!+')
         event(ws, display, 1, type='command', command='undo')
+        if 'persistent unsaved λ!+' in display_text(display):
+            display.until('frame', lambda _: 'persistent unsaved λ!+' not in display_text(display))
+        expect_text(display, 'persistent unsaved λ!')
+        event(ws, display, 2, type='command', command='undo')
         if 'persistent unsaved λ!' in display_text(display):
             display.until('frame', lambda _: 'persistent unsaved λ!' not in display_text(display))
         expect_text(display, 'persistent unsaved λ')
-        event(ws, display, 2, type='command', command='redo')
+        event(ws, display, 3, type='command', command='redo')
         expect_text(display, 'persistent unsaved λ!')
-        event(ws, display, 3, type='key', key='F2')
+        event(ws, display, 4, type='key', key='F2')
         assert source.read_text() == 'persistent unsaved λ!'
-        event(ws, display, 4, type='command', command='quit')
+        event(ws, display, 5, type='command', command='quit')
         display.until('closed')
         process.wait(timeout=10)
         wait_for(lambda: not (catalog / (first_id + '.json')).exists())
         sessions.discard(first_id)
-        print('Local browser→terminal→browser sessions preserve unsaved edits and undo; SIGINT/SIGTERM detach, chooser, explicit resume, save/Exit cleanup and live read-only MCP passed')
+        ended = subprocess.run([binary, '--terminal', '--resume=' + first_id], env=env,
+                               stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
+        assert ended.returncode != 0 and 'No unfinished session matches' in ended.stderr, ended
+        assert not (catalog / (first_id + '.json')).exists(), 'Ended session was restarted'
+        print('Local browser→terminal→browser sessions preserve unsaved edits and undo; SIGINT/SIGTERM and browser shortcut detach, interactive/nonTTY chooser, unique prefix and explicit resume, save/Exit cleanup and live read-only MCP passed')
     finally:
         for ws in sockets:
             ws.close()

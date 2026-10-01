@@ -118,6 +118,6 @@ and attempts to close the tab. A browser can refuse to close a tab opened
 manually, in which case close it after the editor reports that it has exited.
 
 Closing the tab leaves the frontend process running. To release the session
-for another display, detach that process and return with `--resume`; see
+for another display, press **Ctrl+]** in the page and return with `--resume`; see
 [sessions](sessions.md). [Remote editing](remote.md) keeps the display local
 while files and tools run on another machine.

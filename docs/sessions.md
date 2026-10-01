@@ -40,14 +40,16 @@ the new frontend supplies its display and dimensions.
 
 ## Detach or finish
 
-In the terminal frontend, **Ctrl+]** detaches and returns to the shell. The
-frontend prints the session ID and a command to resume it. Buffers, including
-unsaved changes, remain in the session process.
+**Ctrl+]** detaches in the terminal, native window and browser frontends. The
+native window closes; the browser confirms detachment and stops reconnecting.
+The launching terminal prints the session ID and a command to resume it.
+Buffers, including unsaved changes, remain in the session process.
 
 On POSIX systems, sending SIGINT, SIGTERM or SIGHUP to the frontend also detaches
 and prints the resume command. This stops the display process while the editor
 session continues. In browser mode, closing a tab leaves the local frontend
-process running; stop that process to release the session for another frontend.
+process running; use **Ctrl+]** in the page to release the session for another
+frontend.
 Reloading the page reconnects through the running frontend.
 
 **File > Exit** finishes the session through the normal save prompts. Closing a

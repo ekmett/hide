@@ -62,7 +62,8 @@ connection reports that `thc-edit` is missing. SSH host aliases, authentication
 and host-key handling use your normal SSH configuration.
 
 `--terminal` uses the same session connection as the graphical frontends; it
-does not require an SSH PTY. **Ctrl+]** detaches to your local shell.
+does not require an SSH PTY. **Ctrl+]** detaches in all three frontends,
+including while the remote connection is recovering.
 
 ## Work where the project lives
 
@@ -71,10 +72,15 @@ operates on that repository, and **Run**, terminals, debugger attachment and
 conversation processes execute there. A loopback debugger address refers to the
 remote machine.
 
-Copy and Paste use the local clipboard. Dropping a local file uploads it into a
-new unsaved remote buffer, with a limit of 16 MiB per file. Choose a remote
-location with Save as. Browser **File > Download** brings the current buffer,
-including unsaved changes, back to the client machine.
+The native and browser displays use the local clipboard. In the terminal
+display, Copy writes to the clipboard through OSC 52 when the terminal permits
+it. Use your terminal's paste shortcut for text from other applications; the
+editor's Paste command reuses the last text copied in that frontend.
+
+Dropping a local file into a graphical display uploads it into a new unsaved
+remote buffer, with a limit of 16 MiB per file. Choose a remote location with
+Save as. Browser **File > Download** brings the current buffer, including
+unsaved changes, back to the client machine.
 
 ## Reconnect to the same session
 

@@ -122,6 +122,9 @@ runRemoteWeb scale host peer = do
             incoming=forever $ do
               bytes<-WS.receiveData conn :: IO BL.ByteString
               value<-either (ioError . userError) pure (eitherDecode bytes)
+              when (messageType value==Just "detach") $ do
+                atomically (writeTBQueue queue (JsonPacket (object ["type" .= ("detached"::T.Text)])))
+                atomically retry
               input<-either (ioError . userError) pure (parseEither parseInput value)
               case input of
                 UploadFile _ _ -> do
@@ -146,7 +149,7 @@ runRemoteWeb scale host peer = do
                   pure (JsonPacket Null)
                 Right p->sendPacket conn p >> pure p
               case packet of
-                JsonPacket value | messageType value==Just "closed" -> void (tryPutMVar done ())
+                JsonPacket value | messageType value `elem` [Just "closed",Just "detached"] -> void (tryPutMVar done ())
                 _->pure ()
         finally (do
           sendPacket conn (JsonPacket (object ["type" .= ("remote"::T.Text),"host" .= host]))

@@ -50,7 +50,7 @@ const uniforms=Object.fromEntries(['resolution','grid','mouse','caret','crt','ca
 const surface=document.createElement('canvas'); const ctx=surface.getContext('2d',{alpha:false});
 let glyphs=new Map(), tiles=new Map(), rows=[], frame=null, scale=2, initialScale=2, cols=80, lines=25, mode=3;
 let socket, ready=false, closed=false, mouse=[-1,-1], cursorEpoch=performance.now(), blinkPhase=-1, dirty=true, composing=false, clipboard='', lastSize='';
-let remoteHost="";
+let remoteHost="", sessionFrontend=false, detaching=false, detached=false;
 let downloadName=null, clipboardRequest=null, nativeCopies=[];
 let unsaved=false, serial=0, pendingEdit=0, acknowledged=0;
 function beforeLeave(event){event.preventDefault();event.returnValue=true;}
@@ -61,7 +61,7 @@ function guardLeave(){
 }
 const rgb=n=>`#${n.toString(16).padStart(6,'0')}`;
 function send(value){
- if(socket?.readyState!==WebSocket.OPEN||!ready)return;
+ if(socket?.readyState!==WebSocket.OPEN||!ready||detaching)return;
  value.seq=++serial;
  if(['key','paste','command','upload','mouse'].includes(value.type)){pendingEdit=serial;guardLeave();}
  socket.send(JSON.stringify(value));
@@ -162,6 +162,7 @@ async function decodeFrame(bytes, previous){
 const systemTheme=matchMedia('(prefers-color-scheme: dark)');
 systemTheme.addEventListener('change',()=>send({type:'theme',dark:systemTheme.matches}));
 function connect(){
+ if(closed)return;
  socket=new WebSocket(new URL('socket',location.href).href.replace(/^http/,'ws'));
  socket.binaryType='arraybuffer';
  const wireRows=[];let incoming=Promise.resolve();
@@ -177,7 +178,7 @@ function connect(){
      }
      message=await decodeFrame(new Uint8Array(e.data),wireRows);
    }else message=JSON.parse(e.data);
-   if(message.type==='remote'){remoteHost=message.host;
+   if(message.type==='remote'){remoteHost=message.host;sessionFrontend=true;
    }else if(message.type==='connection'){
      ready=message.connected&&glyphs.size>0;status.textContent=message.message|| (ready?'Connected':'Reconnecting…');
    }else if(message.type==='assets'){
@@ -200,13 +201,17 @@ function connect(){
      systemClipboard(message);
    }else if(message.type==='ack'){
      acknowledged=Math.max(acknowledged,message.seq);if(Object.hasOwn(message,"dirty"))unsaved=message.dirty;guardLeave();
+   }else if(message.type==='detached'){
+     detached=true;closed=true;ready=false;guardLeave();fullscreen.disabled=true;
+     status.textContent='Session detached. Resume from your terminal with thc-edit --resume.';
+     navigator.keyboard?.unlock?.();socket.close();
    }else if(message.type==='closed'){
      closed=true;ready=false;guardLeave();fullscreen.disabled=true;
      status.textContent='Editor closed. You can close this tab.';
      navigator.keyboard?.unlock?.();socket.close();window.close();
    }
  };
- socket.onclose=event=>{console.info('Editor connection closed',event.code,event.reason);ready=false;mouse=[-1,-1];dirty=true;if(!closed){status.textContent='Disconnected — reconnecting…';setTimeout(connect,1000);}};
+ socket.onclose=event=>{console.info('Editor connection closed',event.code,event.reason);ready=false;mouse=[-1,-1];dirty=true;if(!closed){detaching=false;status.textContent='Disconnected — reconnecting…';setTimeout(connect,1000);}};
  socket.onerror=()=>{status.textContent='Connection unavailable';};
 }
 connect();
@@ -223,6 +228,14 @@ function release(){send({type:'blur'});mouse=[-1,-1];dirty=true;}
 window.addEventListener('blur',release);document.addEventListener('visibilitychange',()=>{if(document.hidden)release();});
 window.addEventListener('resize',resize);new ResizeObserver(resize).observe(screen);
 window.addEventListener('keydown',e=>{
+ if(sessionFrontend&&e.key===']'&&e.ctrlKey&&!e.metaKey&&!e.altKey&&!e.shiftKey){
+   e.preventDefault();
+   if(!closed&&!detaching&&socket?.readyState===WebSocket.OPEN){
+     socket.send(JSON.stringify({type:'detach'}));detaching=true;ready=false;
+     status.textContent='Detaching session…';
+   }
+   return;
+ }
  if(e.target instanceof HTMLButtonElement)return;
  send({type:'modifiers',mods:mods(e)});
  if(composing||e.isComposing||e.key==='Process'||e.key==='Dead')return;
@@ -282,6 +295,6 @@ fullscreen.addEventListener('click',async()=>{
  }catch(error){status.textContent=`Keyboard capture unavailable: ${error.message}`;}
  input.focus({preventScroll:true});
 });
-document.addEventListener('fullscreenchange',()=>{if(!document.fullscreenElement){navigator.keyboard?.unlock?.();status.textContent=closed?'Editor closed. You can close this tab.':ready?'Connected':'Disconnected';}resize();});
+document.addEventListener('fullscreenchange',()=>{if(!document.fullscreenElement){navigator.keyboard?.unlock?.();status.textContent=detached?'Session detached. Resume with thc-edit --resume.':closed?'Editor closed. You can close this tab.':ready?'Connected':'Disconnected';}resize();});
 canvas.addEventListener('webglcontextlost',e=>{e.preventDefault();status.textContent='WebGL context lost — reload to reconnect; buffers stay in the editor.';});
 input.focus({preventScroll:true});
