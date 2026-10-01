@@ -291,7 +291,9 @@ runRemoteDaemon session scale effects tick initial = do
             ((authenticate connection >> serve connection) `catch` \(_::IOException) -> pure ())
             (quietClose connection)))
     withAsync commandLoop $ \inputs -> withAsync tickLoop $ \ticks -> withAsync acceptLoop $ \accepts ->
-      race_ (takeMVar done) (race_ (wait inputs) (race_ (wait ticks) (wait accepts)))
+      -- Windows accept is a blocking foreign call: close its socket before
+      -- withAsync waits for cancellation, rather than in the outer bracket.
+      race_ (takeMVar done) (race_ (wait inputs) (race_ (wait ticks) (wait accepts))) `finally` N.close socket
 
   where
     withoutDaemon args@("--":_)=args
