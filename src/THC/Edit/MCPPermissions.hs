@@ -3,7 +3,7 @@ module THC.Edit.MCPPermissions
   ( Permissions, withPermissions, withPermissionsAt, permissionCall, policyEffects, tickPermissions
   , permissionConfigPath, readEditorDefaults, writeEditorDefaults, readEditorDefaultsAt, writeEditorDefaultsAt
   , projectConfigPath, readEditorDefaultsFor, readAgentContextAt, writeAgentContextAt, readAgentContexts
-  , updateConfigTable
+  , readAgentLimitsFor, updateConfigTable
   ) where
 
 import Control.Concurrent (MVar, newEmptyMVar, newMVar, readMVar, tryPutMVar, withMVar)
@@ -242,6 +242,30 @@ readEditorDefaultsFor directory=configIO $ do
     case (globalValue,projectValue) of
       (Object globalEntries,Object projectEntries)->Right (Object (KM.union projectEntries globalEntries))
       _->Left "Editor defaults must be a table"
+
+-- A project may tighten the human's global ceilings, never raise them. Read
+-- both files before each spawn; malformed limits must not restore permissive defaults.
+readAgentLimitsFor :: FilePath -> IO (Either Text (Int,Int))
+readAgentLimitsFor directory=configIO $ do
+  globalPath<-permissionConfigPath
+  projectPath<-projectConfigPath directory
+  global<-readConfig globalPath
+  project<-readConfig projectPath
+  pure $ do
+    (_,_,globalTable)<-global
+    (_,_,projectTable)<-project
+    globalLimits<-limits (8,4) globalTable
+    projectLimits<-limits globalLimits projectTable
+    pure (min (fst globalLimits) (fst projectLimits),min (snd globalLimits) (snd projectLimits))
+  where
+    limits (agents,subagents) table=do
+      settings<-lookupTable ["editor","agents"] table
+      let entries=maybe M.empty tableMap settings
+          limit name lower fallback=case M.lookup name entries of
+            Nothing->Right fallback
+            Just (_,Toml.Integer' _ value) | value>=lower && value<=64->Right (fromInteger value)
+            _->Left ("editor.agents."<>name<>" must be an integer from "<>T.pack (show lower)<>" to 64")
+      (,) <$> limit "max_agents" 1 agents <*> limit "max_subagents" 0 subagents
 
 readAgentContextAt :: FilePath -> IO (Either Text Text)
 readAgentContextAt path=do

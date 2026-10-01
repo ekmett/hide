@@ -1,6 +1,7 @@
 {-# LANGUAGE MultiParamTypeClasses, OverloadedStrings #-}
 module THC.Edit.Buffer
   ( Buffer(saved,undoStack,redoStack,revision,lastChange,byteMode,savedByteMode), Selection(..)
+  , BufferSnapshot(..), snapshotBuffer, restoreBuffer
   , newBuffer, newByteBuffer, bufferBytes, markSaved, toggleByteMode, replaceBuffer, textBuffer
   , contents, dirty, ordered, replaceSelection, undo, redo, selectedText
   , bufferLength, bufferLineCount, bufferLineColumn, bufferLineOffset, bufferLineAt
@@ -36,6 +37,38 @@ data Buffer = Buffer
   , undoStack :: [(LineTree,Bool,(Int,Int,Int))], redoStack :: [(LineTree,Bool,(Int,Int,Int))]
   , revision :: !Int, lastChange :: Maybe (Int,Int,Int), byteMode :: Bool, savedByteMode :: Bool
   } deriving (Eq, Show)
+-- Recovery flattens each persistent history tree explicitly; its edit metadata
+-- and representation mode must travel with it for lossless undo and redo.
+data BufferSnapshot = BufferSnapshot
+  { snapshotContents :: Text, snapshotSaved :: Text
+  , snapshotUndo :: [(Text,Bool,(Int,Int,Int))], snapshotRedo :: [(Text,Bool,(Int,Int,Int))]
+  , snapshotRevision :: Int, snapshotLastChange :: Maybe (Int,Int,Int)
+  , snapshotByteMode :: Bool, snapshotSavedByteMode :: Bool
+  } deriving (Eq,Show)
+
+snapshotBuffer :: Buffer -> BufferSnapshot
+snapshotBuffer b=BufferSnapshot (contents b) (saved b) (map flatten (undoStack b)) (map flatten (redoStack b))
+  (revision b) (lastChange b) (byteMode b) (savedByteMode b)
+  where flatten (tree,mode,change)=(treeText tree,mode,change)
+
+restoreBuffer :: BufferSnapshot -> Either Text Buffer
+restoreBuffer s
+  | snapshotRevision s<0 || snapshotRevision s>1073741823=Left "Invalid buffer revision"
+  | not (validText (snapshotByteMode s) (snapshotContents s) && validText (snapshotSavedByteMode s) (snapshotSaved s))=Left "Invalid byte buffer representation"
+  | any ((>100).length) [snapshotUndo s,snapshotRedo s]=Left "Invalid buffer history length"
+  | not (validHistory (T.length (snapshotContents s)) (snapshotUndo s) && validHistory (T.length (snapshotContents s)) (snapshotRedo s))=Left "Invalid buffer history"
+  | maybe False (not . validChange (T.length (snapshotContents s))) (snapshotLastChange s)=Left "Invalid last buffer change"
+  | otherwise=Right (Buffer (linesFromText (snapshotContents s)) (snapshotContents s) (snapshotSaved s)
+      (map inflate (snapshotUndo s)) (map inflate (snapshotRedo s)) (snapshotRevision s) (snapshotLastChange s)
+      (snapshotByteMode s) (snapshotSavedByteMode s))
+  where
+    validText mode text=not mode || T.all ((<=255).ord) text
+    validChange size (a,z,n)=a>=0 && z>=a && n>=0 && toInteger a+toInteger n<=toInteger size
+    validHistory _ []=True
+    validHistory size ((text,mode,change@(a,z,n)):rest)=validText mode text && validChange (T.length text) change && z<=size &&
+      toInteger size-toInteger (z-a)+toInteger n==toInteger (T.length text) && validHistory (T.length text) rest
+    inflate (text,mode,change)=(linesFromText text,mode,change)
+
 data Selection = Selection { anchor :: Int, caret :: Int } deriving (Eq, Show)
 
 newBuffer :: Text -> Buffer

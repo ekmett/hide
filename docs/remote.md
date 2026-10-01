@@ -101,7 +101,8 @@ thc-edit --window --ssh buildbox --remote-session ID
 
 Only one client controls a session at a time. **File > Exit** ends it through
 the normal save prompts. Detaching leaves it running. A session survives an SSH
-disconnect, but not a daemon crash or host reboot; save files normally.
+disconnect; after a daemon crash, resume restores its last complete checkpoint.
+Live terminal processes and debugger connections cannot be restored. Save files normally.
 
 [Sessions](sessions.md) covers detachment and frontend switching.
 The [architecture reference](architecture.md#sessions-and-remote-editing)

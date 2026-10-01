@@ -4,7 +4,7 @@ version: 0.1.0.0
 synopsis: Turbo Haskell's terminal editor
 build-type: Simple
 data-files: docs/*.md, docs/design/*.md, docs/plans/*.md, skills/debug-editor/SKILL.md, assets/web/*.html, assets/web/*.js, README.md, assets/fonts/*.hex, assets/fonts/*.txt, assets/fonts/README.md
-extra-source-files: docs/*.md, docs/design/*.md, docs/plans/*.md, cbits/remote.h, test/editor-session.py, test/remote-browser.py, test/remote-session.py, tools/web-wire-trial.hs, test/web-wire.mjs, tools/web-bandwidth.hs, tools/web-bandwidth.py, assets/icons/*.svg, tools/convert-material-icons.py, cbits/window.h, cbits/unicode.h, tools/convert-font.py, tools/check-native.sh, test/native-input.c, cbits/terminal.h, test/native-terminal.c, test/HighlightBench.hs, test/HLSLive.hs, test/EditorLive.hs, test/dap-session.py
+extra-source-files: docs/*.md, docs/design/*.md, docs/plans/*.md, cbits/remote.h, test/editor-session.py, test/daemon-session.py, test/session-recovery.py, test/remote-browser.py, test/remote-session.py, tools/web-wire-trial.hs, test/web-wire.mjs, tools/web-bandwidth.hs, tools/web-bandwidth.py, assets/icons/*.svg, tools/convert-material-icons.py, cbits/window.h, cbits/unicode.h, tools/convert-font.py, tools/check-native.sh, test/native-input.c, cbits/terminal.h, test/native-terminal.c, test/HighlightBench.hs, test/HLSLive.hs, test/EditorLive.hs, test/dap-session.py
 
 flag window
   description: Build the optional SDL3 Metal/Vulkan frontend
@@ -46,7 +46,7 @@ library
     other-modules: THC.Edit.BrowserServer
     build-depends: wai, warp, wai-websockets, websockets >=0.13, http-types
   cpp-options: -DWITH_REMOTE
-  exposed-modules: THC.Edit.GuestAccess, THC.Edit.ClipboardMCP, THC.Edit.DocsMCP, THC.Edit.Defaults, THC.Edit.ControlMCP, THC.Edit.MCPPermissions, THC.Edit.RemoteEndpoint, THC.Edit.EditorMCP, THC.Edit.WorkspaceFilesMCP, THC.Edit.TestsMCP, THC.Edit.HistoryMCP, THC.Edit.RuntimeMCP, THC.Edit.ScreenCapture, THC.Edit.WorkspaceMCP, THC.Edit.Session, THC.Edit.Font, THC.Edit.RemoteTerminal
+  exposed-modules: THC.Edit.GuestAccess, THC.Edit.ClipboardMCP, THC.Edit.DocsMCP, THC.Edit.Defaults, THC.Edit.ControlMCP, THC.Edit.MCPPermissions, THC.Edit.RemoteEndpoint, THC.Edit.EditorMCP, THC.Edit.WorkspaceFilesMCP, THC.Edit.TestsMCP, THC.Edit.HistoryMCP, THC.Edit.RuntimeMCP, THC.Edit.ScreenCapture, THC.Edit.WorkspaceMCP, THC.Edit.Session, THC.Edit.Recovery, THC.Edit.Font, THC.Edit.RemoteTerminal
   build-depends: zlib
   if os(windows)
     c-sources: cbits/remote.c
@@ -88,7 +88,7 @@ test-suite editor-tests
     other-modules: WebCheck
     build-depends: zlib
   cpp-options: -DWITH_REMOTE -DWITH_PROTOCOL -DWITH_FONT
-  other-modules: GuestAccessCheck, StreamerCheck, ClipboardMCPCheck, DocsMCPCheck, ControlMCPCheck, DefaultsCheck, MCPPermissionsCheck, RemoteCheck, RemoteWindowCheck, RemoteTerminalCheck, ProtocolCheck, FontCheck, EditorMCPCheck, HistoryMCPCheck, RuntimeMCPCheck, ScreenCaptureCheck, WorkspaceMCPCheck, WorkspaceFilesMCPCheck, TestsMCPCheck
+  other-modules: RecoveryCheck, GuestAccessCheck, StreamerCheck, ClipboardMCPCheck, DocsMCPCheck, ControlMCPCheck, DefaultsCheck, MCPPermissionsCheck, RemoteCheck, RemoteWindowCheck, RemoteTerminalCheck, ProtocolCheck, FontCheck, EditorMCPCheck, HistoryMCPCheck, RuntimeMCPCheck, ScreenCaptureCheck, WorkspaceMCPCheck, WorkspaceFilesMCPCheck, TestsMCPCheck
   build-depends: zlib
   if !os(windows)
     build-depends: unix
@@ -101,4 +101,4 @@ test-suite editor-tests
   type: exitcode-stdio-1.0
   hs-source-dirs: test
   main-is: Main.hs
-  build-depends: JuicyPixels, base64-bytestring, blaze-builder, thc-edit, aeson, network, async, stm
+  build-depends: JuicyPixels, base64-bytestring, blaze-builder, thc-edit, aeson, vector, network, async, stm

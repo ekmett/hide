@@ -33,6 +33,7 @@ import qualified THC.Edit.ACP as A
 import THC.Edit.GuestAccess (sensitiveLabel)
 import THC.Edit.MCPPermissions (permissionConfigPath, projectConfigPath, readAgentContextAt, writeAgentContextAt, readAgentContexts)
 import THC.Edit.EditorMCP (editorServers)
+import THC.Edit.Session (checkpointPath)
 import THC.Edit.AgentFiles
 import THC.Edit.Buffer
 import THC.Edit.Markdown (renderMarkdown)
@@ -59,6 +60,7 @@ data State = State
   , lastRender :: (Int,Maybe Text,[Record]), lastSession :: Maybe (A.Launch,FilePath,Text)
   , waitingQuestion :: Maybe (Int,MVar (Either Text Value)), lastQuestion :: Maybe ChatQuestion
   , deliveredContext :: Maybe Value
+  , resumeRecordPath :: FilePath
   }
 data ConversationState = ConversationState FilePath (IORef State) C.Consoles Jobs.BuildJobs
 
@@ -70,11 +72,19 @@ withConversation action = C.withConsoles $ \consoles -> Jobs.withBuildJobs $ \jo
   directory<-getXdgDirectory XdgConfig "thc-edit"
   loaded<-try (BS.readFile (directory </> "agents.json")) :: IO (Either IOException BS.ByteString)
   let launch=either (const defaultLaunch) (either (const defaultLaunch) id . decodeLaunch) loaded
-  previous<-try (BS.readFile (directory </> "agent-session.json")) :: IO (Either IOException BS.ByteString)
+  resumePath<-conversationSessionPath directory
+  previous<-try (BS.readFile resumePath) :: IO (Either IOException BS.ByteString)
   let remembered=either (const Nothing) (\bytes -> decodeStrict' bytes >>= parseMaybe (withObject "session" $ \o -> do
         (raw::Value)<-o .: "provider"; config<-either fail pure (decodeLaunch (BL.toStrict (encode raw)))
         (,,) config <$> o .: "cwd" <*> o .: "sessionId")) previous
-  bracket (do ref<-newIORef (State launch Nothing Nothing "." M.empty Nothing [] M.empty [] Nothing False 1 [] S.empty M.empty Nothing (0,Nothing,[]) remembered Nothing Nothing Nothing); pure (ConversationState directory ref consoles jobs)) closeConversation action
+  bracket (do ref<-newIORef (State launch Nothing Nothing "." M.empty Nothing [] M.empty [] Nothing False 1 [] S.empty M.empty Nothing (0,Nothing,[]) remembered Nothing Nothing Nothing resumePath); pure (ConversationState directory ref consoles jobs)) closeConversation action
+
+-- Provider configuration remains global, but a recovered editor must resume
+-- its own conversation. Standalone/legacy callers retain their existing file.
+conversationSessionPath :: FilePath -> IO FilePath
+conversationSessionPath directory=lookupEnv "THC_EDIT_SESSION" >>= maybe
+  (pure (directory </> "agent-session.json"))
+  (fmap (++".agent.json") . checkpointPath)
 
 closeConversation :: ConversationState -> IO ()
 closeConversation (ConversationState _ ref _ _) = do
@@ -213,7 +223,15 @@ perform runtime@(ConversationState directory ref consoles jobs) action values or
             pure d {status="Agent configuration saved."}
     ("show",_) -> do
       modifyIORef' ref (\state -> state {deferredApproval=False})
-      pure (paint True s d)
+      -- A recovered transcript belongs to the checkpoint until a provider
+      -- connects. Opening its window must not repaint it from empty state.
+      let recoveredWindow=do
+            (bid,_)<-find ((==Just "Conversation") . documentLabel . snd) (M.toList (buffers d))
+            find ((==bid) . bufferId) (windows d)
+      pure $ case recoveredWindow of
+        Just win | isNothing (connection s), null (transcript s), isNothing (chatQuestion d) ->
+          focusWindow (windowId win) d {composerFocused=True}
+        _ -> paint True s d
     ("set-config",[ident,value])
       | busy s -> pure d {status="Wait for the current reply before changing its model."}
       | Just client<-connection s, Just sid<-session s,
@@ -280,9 +298,12 @@ busy s=not (M.null (pending s)) || queuedPrompt s/=Nothing
 start :: ConversationState -> Maybe Text -> Desktop -> IO Desktop
 start (ConversationState _ ref _ _) resume d = do
   s<-readIORef ref
+  let (launch,directory)=case (resume,lastSession s) of
+        (Just wanted,Just (savedProvider,savedDirectory,savedId)) | wanted==savedId -> (savedProvider,savedDirectory)
+        _ -> (provider s,maybe (startingDirectory d) treeRoot (sideTree d))
   result<-try $ do
-    root<-canonicalizePath (maybe (startingDirectory d) treeRoot (sideTree d))
-    client<-A.startClient (provider s) root
+    root<-canonicalizePath directory
+    client<-A.startClient launch root
     ident<-A.request client "initialize" (object ["protocolVersion" .= (1::Int),"clientInfo" .= object ["name" .= ("thc-edit"::Text),"version" .= ("0.1.0.0"::Text)],
       "clientCapabilities" .= object ["fs" .= object ["readTextFile" .= True,"writeTextFile" .= True],"terminal" .= Terminal.terminalAvailable]]) `onException` A.stopClient client
     pure (root,client,ident)
@@ -291,7 +312,7 @@ start (ConversationState _ ref _ _) resume d = do
       writeIORef ref s {queuedPrompt=Nothing}
       pure (message "Cannot start agent" (wrapMessage (T.pack (show err))) d)
     Right (root,client,ident) -> do
-      writeIORef ref s {connection=Just client,project=root,deliveredContext=Nothing,pending=M.singleton ident (Initializing resume)}
+      writeIORef ref s {provider=launch,connection=Just client,project=root,deliveredContext=Nothing,pending=M.singleton ident (Initializing resume)}
       pure d {status="Connecting to ACP provider...",agentSteering=False,agentReplying=True,agentContextUsage=Nothing,agentSettings=[]}
 
 sendQueued :: ConversationState -> Desktop -> IO Desktop
@@ -354,13 +375,16 @@ tickConversation runtime@(ConversationState _ ref consoles jobs) initial = do
     _ -> pure ()
   afterDismiss<-readIORef ref
   let widthNow=conversationWidth advanced
-      redraw=lastRender afterDismiss/=(widthNow,session afterDismiss,transcript afterDismiss) || lastQuestion afterDismiss/=chatQuestion advanced
+      -- A fresh runtime does not own the recovered transcript. Keep that view
+      -- and its draft until a human connects, or a new question needs painting.
+      ownsView=not (isNothing (connection afterDismiss)) || not (null (transcript afterDismiss)) || chatQuestion advanced/=Nothing || lastQuestion afterDismiss/=Nothing
+      redraw=ownsView && (lastRender afterDismiss/=(widthNow,session afterDismiss,transcript afterDismiss) || lastQuestion afterDismiss/=chatQuestion advanced)
       rendered=(if redraw then paint False afterDismiss advanced else advanced) {agentReplying=busy afterDismiss,agentQueued=length (queuedQueries afterDismiss)}
   when redraw (modifyIORef' ref (\state -> state {lastRender=(widthNow,session state,transcript state),lastQuestion=chatQuestion rendered}))
   present runtime rendered
 
 receive :: ConversationState -> Desktop -> A.Event -> IO Desktop
-receive runtime@(ConversationState directory ref consoles _) d event = do
+receive runtime@(ConversationState _ ref consoles _) d event = do
   s<-readIORef ref
   case event of
     A.Disconnected reason -> do
@@ -397,7 +421,7 @@ receive runtime@(ConversationState directory ref consoles _) d event = do
           Nothing -> pure d {status="Agent returned no session ID."}
           Just sid -> do
             modifyIORef' ref (\state -> state {session=Just sid,lastSession=Just (provider state,project state,sid)})
-            savedId<-persist (directory </> "agent-session.json") (object ["provider" .= launchValue (provider s),"cwd" .= project s,"sessionId" .= sid])
+            savedId<-persist (resumeRecordPath s) (object ["provider" .= launchValue (provider s),"cwd" .= project s,"sessionId" .= sid])
             sendQueued runtime d {agentSettings=parseAgentSettings value,status=either ("Session opened; could not save ID: "<>) (const ("Session "<>sid)) savedId}
         (Just Setting,Right value,_) -> pure d {agentSettings=parseAgentSettings value,contextMenu=Nothing,status="Conversation settings updated."}
         (Just (Steering text),Right value,_) -> case field "outcome" value :: Maybe Text of

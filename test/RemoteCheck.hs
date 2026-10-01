@@ -30,8 +30,20 @@ import THC.Edit.Protocol
 import THC.Edit.Remote
 import THC.Edit.RemoteEndpoint
 import qualified THC.Edit.Session as S
+isolatedStore :: IO a -> IO a
+#ifndef mingw32_HOST_OS
+isolatedStore action=do
+  temp<-getTemporaryDirectory
+  old<-lookupEnv "XDG_DATA_HOME"
+  bracket (do (path,h)<-openTempFile temp "thc-session-tests"; hClose h; removeFile path; createDirectory path; pure path)
+    removePathForcibly $ \path -> bracket_ (setEnv "XDG_DATA_HOME" path)
+      (maybe (unsetEnv "XDG_DATA_HOME") (setEnv "XDG_DATA_HOME") old) action
+#else
+isolatedStore action=action
+#endif
+
 checks :: IO ()
-checks = do
+checks = isolatedStore $ do
   localPeerCheck
   inspectionExitCheck
   inspectionViewerExitCheck

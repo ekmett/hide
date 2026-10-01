@@ -33,10 +33,13 @@ import THC.Edit.Model hiding (prompt)
 import THC.Edit.Markdown (renderMarkdown)
 import THC.Edit.Syntax (Style(..))
 import THC.Edit.Terminal (terminalAvailable)
+import THC.Edit.Session (checkpointPath)
 
 checks :: IO ()
 checks = bracket temporary removePathForcibly $ \root ->
-  bracket (lookupEnv "XDG_CONFIG_HOME" <* setEnv "XDG_CONFIG_HOME" (root </> "config")) restore $ \_ -> do
+  bracket (lookupEnv "XDG_CONFIG_HOME" <* setEnv "XDG_CONFIG_HOME" (root </> "config")) restore $ \_ ->
+  bracket (lookupEnv "XDG_DATA_HOME" <* setEnv "XDG_DATA_HOME" (root </> "data")) (restoreEnvironment "XDG_DATA_HOME") $ \_ ->
+  bracket (lookupEnv "THC_EDIT_SESSION" <* unsetEnv "THC_EDIT_SESSION") (restoreEnvironment "THC_EDIT_SESSION") $ \_ -> do
     let server=root </> "provider.py"
         logPath=root </> "messages.jsonl"
         source=root </> "Source.hs"
@@ -143,6 +146,15 @@ checks = bracket temporary removePathForcibly $ \root ->
             next<-snd <$> conversationEffects runtime fallback changed effects
             tickConversation runtime next
           _ -> error ("Missing inline action "++T.unpack action)
+    withConversation $ \runtime -> do
+      let recovered=addReadOnly "Conversation" "Recovered user and agent transcript" savedDraft
+      idle<-tickConversation runtime recovered
+      resized<-tickConversation runtime idle {screenSize=(100,35)}
+      check "idle fresh conversation runtime preserves recovered transcript and draft"
+        (buffers resized==buffers recovered && composerBuffer resized==composerBuffer recovered && composerSelection resized==composerSelection recovered)
+      shown<-send runtime "show" [] resized
+      check "opening a recovered conversation preserves its transcript and draft"
+        (buffers shown==buffers recovered && composerBuffer shown==composerBuffer recovered && composerSelection shown==composerSelection recovered && composerFocused shown)
     withConversation $ \runtime -> do
       (asked,answer)<-chatTool runtime savedDraft "ask_user" (object ["question" .= ("Pick a direction"::T.Text),"choices" .= (["Left","Right"]::[T.Text])])
       check "ask_user renders inline choices and custom entry without a modal" (dialog asked==Nothing && chatQuestion asked/=Nothing && all (`T.isInfixOf` conversationText asked) ["Pick a direction","Left","Right","Other:","Submit answer","Cancel"])
@@ -440,8 +452,49 @@ checks = bracket temporary removePathForcibly $ \root ->
       restored<-send runtime "new" [] desktop >>= await runtime "persisted provider configuration" ((=="Session fixture-session").status)
       _<-send runtime "resume" [] restored
       pure ()
+    let editorSessions=[(replicate 48 'a',"resume-a"::T.Text,root),(replicate 48 'b',"resume-b",root </> "other-project")]
+        withEditor ident action=bracket (lookupEnv "THC_EDIT_SESSION" <* setEnv "THC_EDIT_SESSION" ident) (restoreEnvironment "THC_EDIT_SESSION") (const action)
+        resumeId d=case [value | Just dg<-[dialog d],Input "Session ID" value _<-fields dg] of value:_->Just value; _->Nothing
+    forM_ editorSessions $ \(ident,providerId,providerRoot) -> withEditor ident $ withConversation $ \runtime -> do
+      offered<-send runtime "resume" [] desktop
+      check "new editor session does not inherit another session resume ID" (resumeId offered==Just "")
+      configured<-configure runtime ("yes"::T.Text) desktop {sideTree=fmap (\tree->tree {treeRoot=providerRoot}) (sideTree desktop)}
+      _<-send runtime "load" ["0",providerId] configured >>= await runtime "per-editor resume record" ((==("Session "<>providerId)).status)
+      sidecar<-(++".agent.json") <$> checkpointPath ident
+      saved<-decodeStrict' <$> BS.readFile sidecar
+      check "provider resume record is saved beside its editor checkpoint"
+        ((saved >>= field "sessionId")==Just providerId && (saved >>= field "cwd")==Just providerRoot)
+    withConversation $ \runtime -> do
+      _<-send runtime "configure" ["0","not-the-saved-provider", "[]", "{}"] desktop
+      pure ()
+    beforeRecovery<-logged
+    forM_ editorSessions $ \(ident,providerId,_) -> withEditor ident $ withConversation $ \runtime -> do
+      let recovered=addReadOnly "Conversation" "Retained conversation after a daemon crash" savedDraft
+      idle<-tickConversation runtime recovered
+      offered<-send runtime "resume" [] idle
+      check "recovered editor selects its own provider resume ID" (resumeId offered==Just providerId)
+      check "reading resume metadata leaves recovered transcript and draft intact"
+        (buffers offered==buffers recovered && composerBuffer offered==composerBuffer recovered)
+    afterRecovery<-logged
+    check "recovery never starts a provider or sends a prompt automatically" (afterRecovery==beforeRecovery)
+    forM_ editorSessions $ \(ident,providerId,providerRoot) -> withEditor ident $ withConversation $ \runtime -> do
+      unrelated<-send runtime "load" ["0","unrelated-session-id"] desktop
+      check "an unrelated resume ID does not select another saved provider"
+        (maybe False ((=="Cannot start agent").dialogTitle) (dialog unrelated))
+      loaded<-send runtime "load" ["0",providerId] desktop >>= await runtime "saved provider and project" ((==("Session "<>providerId)).status)
+      entries<-logged
+      let loads=[params | entry<-entries,field "method" entry==Just ("session/load"::T.Text),Just params<-[field "params" entry::Maybe Value]]
+      check "explicit resume selects saved provider and working directory"
+        (field "cwd" (last loads)==Just providerRoot)
+      configured<-send runtime "options" [] loaded
+      check "saved provider selection is local to the resumed editor"
+        (case dialog configured of Just dg->Input "Executable" "python3" 7 `elem` fields dg; _->False)
+    globalProvider<-decodeStrict' <$> BS.readFile (settings </> "agents.json")
+    check "resuming a saved provider does not rewrite global configuration"
+      ((globalProvider >>= field "executable")==Just ("not-the-saved-provider"::T.Text))
   where
     restore=maybe (unsetEnv "XDG_CONFIG_HOME") (setEnv "XDG_CONFIG_HOME")
+    restoreEnvironment name=maybe (unsetEnv name) (setEnv name)
     fallback desktop _=pure (False,desktop)
     chooseAllowOption (ListBox label options _) = ListBox label options (fromMaybe (error "Allow choice missing") (findIndex (=="Allow once") options))
     chooseAllowOption other = other

@@ -10,13 +10,13 @@ import THC.Edit.MCPPermissions
 import THC.Edit.ClipboardMCP
 import THC.Edit.ControlMCP
 import Control.Exception (bracket, finally, catch, AsyncException(UserInterrupt), throwIO)
-import Control.Concurrent (myThreadId, throwTo)
+import Control.Concurrent (myThreadId, throwTo, threadDelay)
 #ifndef mingw32_HOST_OS
 import System.Posix.Signals (installHandler, Handler(Catch), sigTERM, sigHUP)
 #endif
-import Data.Aeson (object, (.=), withObject, (.:?), (.!=))
+import Data.Aeson (Value, object, (.=), withObject, (.:?), (.!=))
 import THC.Edit.Protocol (WirePacket(..))
-import Data.Aeson.Types (parseEither)
+import Data.Aeson.Types (parseEither, Parser)
 import qualified THC.Edit.Font as Font
 import THC.Edit.ScreenCapture (capture, screenTool)
 import THC.Edit.TestsMCP
@@ -56,19 +56,22 @@ import THC.Edit.Remote
 import THC.Edit.RemoteWindow (runRemoteWindow)
 import THC.Edit.RemoteWeb (runRemoteWeb)
 import System.Exit (die)
+import System.Timeout (timeout)
 import THC.Edit.Buffer
 import THC.Edit.Model
 import THC.Edit.Render
 import THC.Edit.Files
 import THC.Edit.Reconcile
 
-data Option = MCPBridge String | Resume (Maybe String) | SSH String | RemoteSession String | RemoteDaemon String | Use Backend | Scale String | Size String | Mode String | ColorMode String | Demo | CRT | NoCRT | MaterialIcons | ClassicIcons | WordStar | StandardKeys | CursorBlink Bool | Pixelate Bool | Streamer Bool | Snapshot | Html | Scene String | Usage deriving Eq
+data Option = Daemon | Sessions | MCPBridge String | Resume (Maybe String) | SSH String | RemoteSession String | RemoteDaemon String | Use Backend | Scale String | Size String | Mode String | ColorMode String | Demo | CRT | NoCRT | MaterialIcons | ClassicIcons | WordStar | StandardKeys | CursorBlink Bool | Pixelate Bool | Streamer Bool | Snapshot | Html | Scene String | Usage deriving Eq
 options :: [OptDescr Option]
 options = [Option [] ["appearance"] (ReqArg ColorMode "light|dark|system") "Document/terminal colors (default THC_EDIT_APPEARANCE or system)"
           ,Option [] ["metal"] (NoArg (Use Metal)) "Open a Metal window"
           ,Option [] ["vulkan"] (NoArg (Use Vulkan)) "Open a Vulkan window"
           ,Option [] ["remote"] (NoArg (Use Remote)) "Serve the remote editing protocol on stdin/stdout"
           ,Option [] ["ssh"] (ReqArg SSH "HOST") "Connect to a remote thc-edit (also HOST:PATH)"
+          ,Option [] ["daemon"] (NoArg Daemon) "Start a session without a display; print its ID when ready"
+          ,Option [] ["sessions"] (NoArg Sessions) "List running, recoverable and remote sessions"
           ,Option [] ["resume"] (OptArg Resume "ID") "Resume an unfinished editor session (choose if several exist)"
           ,Option [] ["remote-session"] (ReqArg RemoteSession "ID") "Reattach to an existing remote session"
           ,Option [] ["web"] (NoArg (Use Web)) "Open the local WebGL browser frontend"
@@ -115,7 +118,11 @@ runEditor args = do
   else if [ident | MCPBridge ident<-flags]/=[] then case flags of
     [MCPBridge ident] | null paths -> runEditorMCP ident
     _ -> die "--mcp-editor accepts only a session ID."
+  else if Sessions `elem` flags then
+    if flags==[Sessions] && null paths then printSessions else die "--sessions does not accept other options or paths."
   else do
+    when (Daemon `elem` flags && (Use Remote `elem` flags || any isDaemon flags || Snapshot `elem` flags || Html `elem` flags)) $
+      die "--daemon cannot be combined with --remote, --remote-daemon, or snapshots."
     configBase<-case paths of
       path:_ | not (any isSSH flags), parseRemoteTarget path==Nothing -> expandRemoteHome path
       _ -> getCurrentDirectory
@@ -132,7 +139,7 @@ runEditor args = do
         when (not (null paths) || any isSSH flags || any isSession flags || daemon/=Nothing || Use Remote `elem` flags || Snapshot `elem` flags || Html `elem` flags) (die "--resume cannot be combined with paths, --ssh, --remote, or snapshots.")
         Just <$> chooseSession ident
       _ -> die "Specify --resume only once."
-    let serving=Use Remote `elem` flags || daemon/=Nothing || (null [b | Use b<-flags] && backendDefault==Just "remote")
+    let serving=Use Remote `elem` flags || daemon/=Nothing || (Daemon `notElem` flags && null [b | Use b<-flags] && backendDefault==Just "remote")
     when (resume/=Nothing && serving) (die "--resume requires a display backend, not --remote.")
     target <- if serving then pure Nothing else case ([host | SSH host<-flags],paths) of
       ([],[path]) | Just remote<-parseRemoteTarget path -> pure (Just remote)
@@ -141,7 +148,7 @@ runEditor args = do
       ([host],[]) -> pure (Just (host,"."))
       ([host],[path]) -> pure (Just (host,path))
       _ -> die "Specify one SSH host and one remote file or project path."
-    backend <- if daemon/=Nothing then pure Remote else either die pure (chooseBackend backendDefault [b | Use b<-flags])
+    backend <- if daemon/=Nothing then pure Remote else if Daemon `elem` flags then pure Terminal else either die pure (chooseBackend backendDefault [b | Use b<-flags])
     when (target/=Nothing && (Snapshot `elem` flags || Html `elem` flags)) (die "Snapshots require local paths.")
     when (length [sid | RemoteSession sid<-flags]>1) (die "Specify --remote-session once.")
     when (target==Nothing && any isSession flags) (die "--remote-session requires HOST:PATH or --ssh HOST.")
@@ -154,7 +161,7 @@ runEditor args = do
       [] -> pure (fromMaybe 3 (defaultScreenMode defaults))
       [s] -> either die pure (parseScreenMode s)
       _ -> die "Specify --mode or --vga50 only once."
-    when (backend == Terminal && any isMode flags && Snapshot `notElem` flags && Html `notElem` flags) $
+    when (Daemon `notElem` flags && backend == Terminal && any isMode flags && Snapshot `notElem` flags && Html `notElem` flags) $
       die "--mode/--vga50 requires --window, --metal or --vulkan; terminal size is controlled by your terminal."
     scale <- either die pure (chooseScale scaleDefault [s | Scale s <- flags])
     dimensions <- case [s | Size s <- flags] of
@@ -183,6 +190,7 @@ runEditor args = do
           attach=case sessionHost record of
             Nothing -> withLocalPeer (sessionId record) reattach (sessionArguments record)
             Just host -> withSSHSession host (sessionId record) reattach (sessionArguments record)
+          display peer | Daemon `elem` flags = awaitSessionReady peer
           display peer = do
             peerSend peer (JsonPacket (object ["type" .= ("frontend"::T.Text),"mode" .= (if backend==Terminal then Nothing else Just screenMode)]))
             case backend of
@@ -195,7 +203,7 @@ runEditor args = do
             when (saved/=Nothing || detached) $ putStrLn ("Session: "++sessionId record++"\nResume: thc-edit --resume "++sessionId record) >> hFlush stdout
       -- A local session starts beside the project that created it. Reattachment
       -- needs only its endpoint, so a removed/renamed working directory is fine.
-      (withDetachSignals (attach display) `catch` (\err -> writeIORef wasInterrupted True >> interrupted err)) `finally` report
+      (withDetachSignals (attach display >> when (Daemon `elem` flags) (awaitSessionDetached record)) `catch` (\err -> writeIORef wasInterrupted True >> interrupted err)) `finally` report
     else do
         let initial=if Demo `elem` flags then addDocument Nothing (newBuffer (activeText demoDesktop)) (initialDesktop dimensions) else initialDesktop dimensions
             configured=(fst (handleEvent (uncurry V.EvResize dimensions) initial)) {appearance=colorMode,systemDark=maybe True (not . (`elem` ["7","15"]) . reverse . takeWhile (/=';') . reverse) terminalColors,wordStar=flagBool WordStar StandardKeys (fromMaybe (wordStar initial) (defaultWordStar defaults)),crtFilter=flagBool CRT NoCRT (fromMaybe (crtFilter initial) (defaultCRT defaults)),materialIcons=flagBool MaterialIcons ClassicIcons (fromMaybe (materialIcons initial) (defaultMaterialIcons defaults)),blinkCursor=fromMaybe (fromMaybe (blinkCursor initial) (defaultBlinkCursor defaults)) (lastMaybe [value | CursorBlink value<-flags]),pixelateUnicode=fromMaybe (fromMaybe (pixelateUnicode initial) (defaultPixelateUnicode defaults)) (lastMaybe [value | Pixelate value<-flags]),streamerMode=fromMaybe (fromMaybe False (defaultStreamerMode defaults)) (lastMaybe [value | Streamer value<-flags]),videoMode=if backend == Terminal then Nothing else Just screenMode}
@@ -212,7 +220,8 @@ runEditor args = do
         localConfigPath<-projectConfigPath configBase
         agentDirectory<-getXdgDirectory XdgConfig "thc-edit"
         endpoints<-maybe (pure []) (\sid -> do endpoint<-sessionEndpoint sid; pure [takeDirectory endpoint]) daemon
-        privatePaths<-mapM canonicalizePath ([configPath,localConfigPath,agentDirectory </> "agents.json",agentDirectory </> "agent-session.json"]++endpoints)
+        sessionStore<-sessionStoreDirectory
+        privatePaths<-mapM canonicalizePath ([configPath,localConfigPath,sessionStore,agentDirectory </> "agents.json",agentDirectory </> "agent-session.json"]++endpoints)
         let protectedDesktop=staged {guestPrivatePaths=privatePaths}
         if Html `elem` flags then TIO.putStr (snapshotHtml protectedDesktop)
         else if Snapshot `elem` flags then TIO.putStr (snapshot protectedDesktop)
@@ -267,12 +276,71 @@ runEditor args = do
     lastMaybe []=Nothing
     lastMaybe values=Just (last values)
     parseAppearance s = maybe (die "Appearance must be light, dark, or system.") pure (lookup s [("light",LightMode),("dark",DarkMode),("system",SystemMode)])
+    isDaemon RemoteDaemon{} = True
+    isDaemon _ = False
     isMode Mode{} = True
     isMode _ = False
     isSession RemoteSession{} = True
     isSession _ = False
     isSSH SSH{} = True
     isSSH _ = False
+
+-- The connected notification follows both the assets handshake and catalog write.
+-- Do not print a resumable ID before the peer has completed those steps.
+awaitSessionReady :: RemotePeer -> IO ()
+awaitSessionReady peer = do
+  result<-timeout 75000000 (loop False)
+  maybe (die "Session did not become ready within 75 seconds.") pure result
+  where
+    loop assets=peerReceive peer >>= \packet -> case packet of
+      Nothing -> die "Session ended before becoming ready."
+      Just (JsonPacket value) -> case parseEither readiness value of
+        Right (kind,connected,detail)
+          | kind=="assets" -> loop True
+          | kind=="connection" && connected && assets -> pure ()
+          | kind `elem` ["closed","error"] -> die ("Session startup failed: "++T.unpack detail)
+        _ -> loop assets
+      _ -> loop assets
+    readiness=withObject "session startup" $ \o -> (,,) <$> o .:? "type" .!= (""::T.Text)
+      <*> o .:? "connected" .!= False <*> o .:? "message" .!= ("Session closed"::T.Text)
+
+-- Socket close and the daemon's writer cleanup run on different threads. Wait
+-- for the read-only status to confirm local detach before a rapid next resume.
+awaitSessionDetached :: SessionRecord -> IO ()
+awaitSessionDetached record | sessionHost record/=Nothing = pure ()
+awaitSessionDetached record = do
+  result<-timeout 5000000 loop
+  maybe (die "Session started, but local detach could not be confirmed within 5 seconds.") pure result
+  where
+    loop=do
+      activity<-sessionActivity record
+      case activity >>= either (const Nothing) Just . parseEither
+        (withObject "session activity" (\o -> o .:? "attached" .!= True)) of
+        Just False -> pure ()
+        _ -> threadDelay 20000 >> loop
+
+printSessions :: IO ()
+printSessions = do
+  records<-listSessions
+  if null records then putStrLn "No unfinished editor sessions."
+  else mapM_ printRecord records
+  where
+    printRecord record=do
+      state<-sessionState record
+      activity<-if state=="running" then sessionActivity record else pure Nothing
+      putStrLn (sessionId record++"  "++state++activityLabel activity++"  "++
+        maybe "local" id (sessionHost record)++"  "++sessionDirectory record)
+    activityLabel Nothing=""
+    activityLabel (Just value)=case parseEither activityFields value of
+      Left _ -> ""
+      Right (attached,replying,queued,waiting,unsaved) -> concat
+        [if attached then " attached" else " detached", if replying then " replying" else "",
+         if queued>0 then " queued="++show queued else "", if waiting then " waiting" else "",
+         if unsaved then " unsaved" else ""]
+    activityFields :: Value -> Parser (Bool,Bool,Int,Bool,Bool)
+    activityFields=withObject "session activity" $ \o -> (,,,,) <$> o .:? "attached" .!= False
+      <*> o .:? "agentReplying" .!= False <*> o .:? "agentQueued" .!= 0
+      <*> o .:? "waiting" .!= False <*> o .:? "dirty" .!= False
 
 -- GetOpt optional arguments normally require '='. Also accept --resume ID.
 resumeArguments :: [String] -> [String]

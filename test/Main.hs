@@ -10,6 +10,7 @@ import qualified FontCheck
 import qualified ProtocolCheck
 #endif
 #ifdef WITH_REMOTE
+import qualified RecoveryCheck
 import qualified RemoteCheck
 import qualified RemoteWindowCheck
 import qualified RemoteTerminalCheck
@@ -210,6 +211,9 @@ main = do
   check "tree focus blocks background paste" (buffers pastedTree == buffers focusedTree)
   check "tree focus blocks background undo" (buffers undoneTree == buffers focusedTree)
   UnicodeCheck.checks
+#ifdef WITH_REMOTE
+  RecoveryCheck.checks
+#endif
   BufferTreeCheck.checks
   LSPCheck.checks
   ToolingCheck.checks

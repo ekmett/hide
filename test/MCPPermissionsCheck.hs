@@ -25,6 +25,7 @@ checks :: IO ()
 checks=do
   configChecks
   projectConfigChecks
+  agentLimitChecks
   bracket temporary removePathForcibly $ \directory -> do
     let path=directory </> "config.toml"
         specs=[object ["name" .= name,"annotations" .= object ["readOnlyHint" .= readonly]] | (name,readonly)<-[("mutate"::T.Text,False),("read",True)]]
@@ -249,6 +250,50 @@ projectConfigChecks=bracket temporary removePathForcibly $ \directory -> do
       malformedContexts<-readAgentContexts source
       check "malformed project errors are bounded and do not reveal configuration contents"
         (all (\result->case result of Left err->T.length err<256 && not ("private-project-value" `T.isInfixOf` err); _->False) [malformedDefaults,malformedContexts])
+
+agentLimitChecks :: IO ()
+agentLimitChecks=bracket temporary removePathForcibly $ \directory -> do
+  let root=directory </> "project"
+      globalDirectory=directory </> "global"
+      globalPath=globalDirectory </> "thc/config.toml"
+      projectPath=root </> "thc.toml"
+      expect label expected=readAgentLimitsFor root >>= check label . (==Right expected)
+      rejected label=readAgentLimitsFor root >>= check label . either (const True) (const False)
+      limits="[editor.agents]\n"
+  createDirectory root
+  createDirectory (root </> ".git")
+  createDirectoryIfMissing True (globalDirectory </> "thc")
+  bracket (lookupEnv "XDG_CONFIG_HOME" <* setEnv "XDG_CONFIG_HOME" globalDirectory)
+    (maybe (unsetEnv "XDG_CONFIG_HOME") (setEnv "XDG_CONFIG_HOME")) $ \_ -> do
+      expect "agent limits default to eight total and four direct children" (8,4)
+      TIO.writeFile globalPath (limits<>"max_agents = 12\nmax_subagents = 6\nfuture = 'preserve'\n")
+      expect "global agent limits can replace built-in defaults" (12,6)
+      TIO.writeFile projectPath (limits<>"max_agents = 3\n")
+      expect "project limits lower supplied fields and inherit omitted global fields" (3,6)
+      TIO.writeFile projectPath (limits<>"max_agents = 64\nmax_subagents = 64\n")
+      expect "project limits cannot raise global ceilings" (12,6)
+      TIO.writeFile projectPath (limits<>"max_subagents = 0\n")
+      expect "zero direct subagents disables further delegation" (12,0)
+      _<-writeEditorDefaultsAt globalPath (object ["scale" .= (2::Int)])
+      _<-writeAgentContextAt globalPath "Human guidance"
+      preserved<-TIO.readFile globalPath
+      check "existing config writers preserve limits and unknown agent fields"
+        ("max_agents = 12\nmax_subagents = 6\nfuture = 'preserve'\n" `T.isInfixOf` preserved)
+      mapM_ (\bad->TIO.writeFile projectPath (limits<>bad<>"\n") >> rejected "invalid project agent limits fail closed")
+        ["max_agents = 0","max_agents = 65","max_subagents = -1","max_subagents = 65",
+         "max_agents = '3'","max_subagents = 2.0","max_agents = true","max_subagents = []"]
+      TIO.writeFile projectPath "[editor]\nagents = false\n"
+      rejected "agent limit namespace must be a table"
+      TIO.writeFile projectPath (limits<>"max_agents = 1\nmax_subagents = 0\n")
+      TIO.writeFile globalPath (limits<>"max_agents = 999999999999999999\n")
+      rejected "a restrictive project cannot hide an invalid global ceiling"
+      TIO.writeFile globalPath "[editor.agents\nprivate = 'hidden-value'\n"
+      malformed<-readAgentLimitsFor root
+      check "malformed agent config errors do not expose source values"
+        (case malformed of Left err->not ("hidden-value" `T.isInfixOf` err); _->False)
+      removeFile globalPath
+      TIO.writeFile projectPath (limits<>"max_agents = 64\nmax_subagents = 64\n")
+      expect "absent global config still imposes built-in ceilings on projects" (8,4)
 
 field :: FromJSON a => Key -> Value -> Maybe a
 field key=parseMaybe (withObject "object" (.:key))

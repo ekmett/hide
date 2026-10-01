@@ -33,8 +33,7 @@ thc-edit --window --resume
 thc-edit --web --resume
 ```
 
-`--metal` and `--vulkan` also work. The native and browser displays need their
-usual build flags. Only one frontend controls a session at a time, so detach
+`--metal` and `--vulkan` also work. The native and browser displays are included unless disabled at build time. Only one frontend controls a session at a time, so detach
 the current one before opening another. Resuming keeps the existing desktop;
 the new frontend supplies its display and dimensions.
 
@@ -56,9 +55,47 @@ Reloading the page reconnects through the running frontend.
 connected native window follows that same exit workflow. Closing a native window
 while disconnected detaches without queuing an Exit for later delivery.
 
-The session process owns the working state. It survives detachment or a lost frontend or
-SSH connection, but not its own crash or a host reboot. Save files
-normally; session reattachment is a way to continue a running editor.
+## Run without a display
+
+```sh
+thc-edit --daemon .
+thc-edit --sessions
+thc-edit --window --resume ID
+```
+
+`--daemon` starts the desktop, waits until it is ready, prints its ID and returns.
+Agents, HLS, builds and debugger polling continue while detached. Human permission
+requests remain pending until you attach; being headless grants no permissions.
+Use `--daemon --resume ID` to continue an existing or recoverable session without
+opening a display. `--sessions` lists running, recoverable and remote sessions;
+live local entries also show attachment, replies, queued work and waiting state.
+
+## Recover after a process dies
+
+The editor checkpoints its desktop once per second after changes. `--resume`
+reattaches to a live daemon or restores its last complete checkpoint after a
+crash. Recovery includes unsaved text and hex buffers, saved disk baselines,
+undo/redo history, split views, window placement, Files, display preferences and
+the conversation draft. Source files are never overwritten during recovery.
+If a file changed on disk, the usual conflict checks still apply when saving.
+
+Conversation transcripts and their provider resume IDs are retained per editor
+session. Resume the provider explicitly to reconnect. Terminal output is restored
+as an ended view; live terminal processes and debugger connections are not
+recreated. Pending questions and approvals are not restored or accepted.
+
+Checkpoints and the session catalog live under the private
+`$XDG_DATA_HOME/thc-edit/sessions` directory (normally `~/.local/share/thc-edit/sessions`
+on Unix; the platform application-data directory on Windows). Atomic replacement
+keeps a partial write from replacing the previous checkpoint. Up to a second of
+recent work can be lost on abrupt termination; this is process-crash recovery,
+not a guarantee against power loss. A checkpoint over 256 MiB reports an error
+and retains the previous complete version rather than trimming your history.
+Save important files normally.
+
+**File > Exit** removes the completed session's checkpoint. A crash or lost
+frontend leaves it available. Session ownership uses an OS-held lock so concurrent
+resume attempts cannot start independent daemons for the same desktop.
 
 These editor sessions are separate from a provider's conversation sessions.
 **Tools > New session** and **Tools > Resume session** manage the latter; see

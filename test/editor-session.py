@@ -52,9 +52,9 @@ with tempfile.TemporaryDirectory(prefix='thc-editor-session-') as directory:
     source.write_text('original\n')
     second.write_text('second\n')
     env = dict(os.environ, THC_EDIT_WEB_OPEN='0', TERM='xterm-256color',
-               thc_edit_datadir=str(pathlib.Path(__file__).resolve().parents[1]))
+               thc_edit_datadir=str(pathlib.Path(__file__).resolve().parents[1]), XDG_DATA_HOME=str(root/'data'))
     processes, sockets, logs, sessions = [], [], [], set()
-    catalog = pathlib.Path(f'/tmp/thc-edit-{os.geteuid()}')
+    catalog = root/'data/thc-edit/sessions'
 
     def discover():
         if catalog.exists():

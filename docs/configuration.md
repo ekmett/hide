@@ -77,6 +77,31 @@ sent to the provider, so use it for guidance rather than credentials. Tool
 permissions remain global: a project file cannot enable tools or override
 **Agent Permissions**.
 
+## Agent limits
+
+Set the maximum active agents in the session and the maximum direct subagents
+per agent in the global configuration:
+
+```toml
+[editor.agents]
+max_agents = 8
+max_subagents = 4
+```
+
+These are the defaults. `max_agents` accepts integers from 1 to 64 and includes
+the main human-managed agent. `max_subagents` accepts integers from 0 to 64;
+zero prevents agents from spawning direct subagents. Both limits must allow a
+spawn: a free child slot does not bypass the session total.
+
+The discovered project `thc.toml` may lower either global ceiling. Omitted fields
+inherit the global value; larger project values do not raise it. Limits are
+checked for future spawns. Lowering a limit does not kill agents already running,
+but further spawns are blocked until both limits permit them. Invalid types,
+out-of-range values or malformed configuration block new spawns until repaired.
+Existing configuration writers preserve these settings and unknown sections;
+there is no agent tool for changing the limits. `[editor.agent]` remains the
+separate namespace for conversation context.
+
 ## Streamer mode
 
 Turn on **Options > Preferences > Streamer mode** before sharing your screen,

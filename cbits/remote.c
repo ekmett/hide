@@ -87,6 +87,26 @@ uint32_t thc_remote_private_directory(const wchar_t *path) {
     return error;
 }
 
+/* An exclusive non-inherited file handle is the daemon lifetime lock. */
+uint32_t thc_remote_lock(const wchar_t *path, void **lock) {
+    PrivateSecurity security;
+    DWORD error = private_security(&security);
+    *lock = NULL;
+    if (!error) {
+        HANDLE handle = CreateFileW(path, GENERIC_READ | GENERIC_WRITE | READ_CONTROL,
+            0, &security.attributes, OPEN_ALWAYS,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+        if (handle == INVALID_HANDLE_VALUE) error = GetLastError();
+        else {
+            error = check_private(handle, security.user->User.Sid, 0);
+            if (error) CloseHandle(handle); else *lock = handle;
+        }
+    }
+    free_security(&security);
+    return error;
+}
+void thc_remote_unlock(void *lock) { if (lock) CloseHandle((HANDLE)lock); }
+
 uint32_t thc_remote_descriptor_write(const wchar_t *path, const uint8_t *bytes, uint32_t count) {
     PrivateSecurity security;
     DWORD error = private_security(&security), written;
@@ -167,7 +187,7 @@ uint32_t thc_remote_hmac(const uint8_t *key48, const uint8_t *message, uint32_t 
 
 /* A daemon must leave the SSH job and inherit only its private log/null handles.
  * Merely detaching the console leaves it subject to SSH's kill-on-close job. */
-uint32_t thc_remote_spawn(const wchar_t *application, wchar_t *command, const wchar_t *log_path, void **process) {
+uint32_t thc_remote_spawn(const wchar_t *application, wchar_t *command, const wchar_t *log_path, const wchar_t *directory, void **process) {
     PrivateSecurity security;
     DWORD error = private_security(&security);
     HANDLE null_handle = INVALID_HANDLE_VALUE, log_handle = INVALID_HANDLE_VALUE;
@@ -204,7 +224,7 @@ uint32_t thc_remote_spawn(const wchar_t *application, wchar_t *command, const wc
     startup.StartupInfo.hStdError = log_handle;
     if (!CreateProcessW(application, command, NULL, NULL, TRUE,
                          CREATE_BREAKAWAY_FROM_JOB | DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | EXTENDED_STARTUPINFO_PRESENT,
-                         NULL, NULL, &startup.StartupInfo, &child)) { error = GetLastError(); goto done; }
+                         NULL, directory, &startup.StartupInfo, &child)) { error = GetLastError(); goto done; }
     CloseHandle(child.hThread);
     *process = child.hProcess;
 done:

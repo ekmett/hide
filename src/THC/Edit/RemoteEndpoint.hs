@@ -1,14 +1,14 @@
 {-# LANGUAGE CPP, ForeignFunctionInterface, ScopedTypeVariables #-}
 module THC.Edit.RemoteEndpoint
-  (sessionEndpoint, connectEndpoint, connectEndpointWithShutdown, socketToEndpoint, endpointExists, withEndpointListener, randomIdentity, spawnDetached) where
+  (sessionEndpoint, connectEndpoint, connectEndpointWithShutdown, socketToEndpoint, endpointExists, withEndpointListener, randomIdentity, spawnDetached, privateDirectory, withSessionLock) where
 import Control.Exception
 import Control.Monad (unless)
 import qualified Data.ByteString as BS
 import Data.Char (isHexDigit, isDigit, isLower)
 import qualified Network.Socket as N
 import Numeric (showHex)
-import System.Directory (removeFile)
-import System.FilePath ((</>))
+import System.Directory (removeFile, createDirectoryIfMissing)
+import System.FilePath ((</>), takeDirectory)
 import System.IO
 import System.Process (ProcessHandle)
 #ifdef mingw32_HOST_OS
@@ -25,6 +25,7 @@ import Text.Read (readMaybe)
 #else
 import System.IO.Error (isAlreadyExistsError, isDoesNotExistError)
 import System.Process (createProcess, proc, CreateProcess(..), StdStream(UseHandle))
+import qualified System.Posix.IO as PI
 import qualified System.Posix.Directory as P
 import System.Posix.Files
 import System.Posix.User (getEffectiveUserID)
@@ -44,16 +45,47 @@ sessionEndpoint session = do
   unless (validIdentity session) (failure "Invalid remote session identifier")
 #ifdef mingw32_HOST_OS
   directory <- (</> ".thc-edit-remote") <$> getHomeDirectory
-  withCWString directory $ \path -> c_privateDirectory path >>= checkWindows "Secure remote session directory"
 #else
   uid <- getEffectiveUserID
   let directory="/tmp/thc-edit-"++show uid
+#endif
+  privateDirectory directory
+  pure (directory </> session)
+
+-- Final directories must be owned by this account and never redirected.
+privateDirectory :: FilePath -> IO ()
+privateDirectory directory = do
+  createDirectoryIfMissing True (takeDirectory directory)
+#ifdef mingw32_HOST_OS
+  withCWString directory $ \path -> c_privateDirectory path >>= checkWindows "Secure session directory"
+#else
+  uid <- getEffectiveUserID
   P.createDirectory directory ownerModes `catch` \e -> unless (isAlreadyExistsError e) (throwIO e)
   st <- getSymbolicLinkStatus directory
-  unless (isDirectory st && fileOwner st==uid) (failure "Unsafe remote session directory")
+  unless (isDirectory st && fileOwner st==uid) (failure "Unsafe session directory")
   setFileMode directory ownerModes
 #endif
-  pure (directory </> session)
+
+-- A kernel-held lifetime lock is released even on SIGKILL. Keep its file in
+-- place: unlinking a locked inode would allow a second independent owner.
+withSessionLock :: FilePath -> IO a -> IO a
+#ifdef mingw32_HOST_OS
+withSessionLock path action = bracket acquire c_unlock (const action)
+  where
+    acquire=withCWString path $ \name -> alloca $ \result -> do
+      c_lock name result >>= checkWindows "Session is already running or locked"
+      peek result
+#else
+withSessionLock path action=bracket acquire PI.closeFd (const action)
+  where
+    acquire=bracketOnError
+#if MIN_VERSION_unix(2,8,0)
+      (PI.openFd path PI.ReadWrite PI.defaultFileFlags {PI.creat=Just (ownerReadMode `unionFileModes` ownerWriteMode),PI.cloexec=True,PI.nofollow=True})
+#else
+      (PI.openFd path PI.ReadWrite (Just (ownerReadMode `unionFileModes` ownerWriteMode)) PI.defaultFileFlags)
+#endif
+      PI.closeFd (\fd -> PI.setLock fd (PI.WriteLock,AbsoluteSeek,0,0) >> pure fd)
+#endif
 
 -- The shutdown action must run while its Handle is still open. It wakes the
 -- peer reader before Windows waits for a blocked local reader to be cancelled.
@@ -78,18 +110,20 @@ socketToEndpoint sock = mask_ $ do
 
 #ifdef mingw32_HOST_OS
 foreign import ccall unsafe "thc_remote_shutdown" c_shutdown :: Word32 -> IO ()
-foreign import ccall unsafe "thc_remote_spawn" c_spawn :: CWString -> CWString -> CWString -> Ptr (Ptr ()) -> IO Word32
+foreign import ccall unsafe "thc_remote_spawn" c_spawn :: CWString -> CWString -> CWString -> CWString -> Ptr (Ptr ()) -> IO Word32
 foreign import ccall unsafe "thc_remote_private_directory" c_privateDirectory :: CWString -> IO Word32
+foreign import ccall unsafe "thc_remote_lock" c_lock :: CWString -> Ptr (Ptr ()) -> IO Word32
+foreign import ccall unsafe "thc_remote_unlock" c_unlock :: Ptr () -> IO ()
 foreign import ccall unsafe "thc_remote_descriptor_write" c_writeDescriptor :: CWString -> Ptr Word8 -> Word32 -> IO Word32
 foreign import ccall unsafe "thc_remote_descriptor_read" c_readDescriptor :: CWString -> Ptr Word8 -> Word32 -> Ptr Word32 -> IO Word32
 foreign import ccall unsafe "thc_remote_random" c_random :: Ptr Word8 -> Word32 -> IO Word32
 foreign import ccall unsafe "thc_remote_hmac" c_hmac :: Ptr Word8 -> Ptr Word8 -> Word32 -> Ptr Word8 -> IO Word32
 
-spawnDetached :: FilePath -> [String] -> FilePath -> IO ProcessHandle
-spawnDetached executable args logfile = mask_ $ withCWString executable $ \application ->
+spawnDetached :: FilePath -> [String] -> FilePath -> FilePath -> IO ProcessHandle
+spawnDetached executable args logfile directory = mask_ $ withCWString executable $ \application ->
   withCWString (unwords (map translate (executable:args))) $ \command ->
-  withCWString logfile $ \logPath -> alloca $ \result -> do
-    c_spawn application command logPath result >>= checkWindows "Start persistent remote process outside SSH job"
+  withCWString logfile $ \logPath -> withCWString directory $ \workingDirectory -> alloca $ \result -> do
+    c_spawn application command logPath workingDirectory result >>= checkWindows "Start persistent remote process outside SSH job"
     childHandle <- peek result
     mkProcessHandle childHandle False nullPtr
 
@@ -171,11 +205,11 @@ withEndpointListener path action = bracket (N.socket N.AF_INET N.Stream N.defaul
         unless (sameBytes response expected) (failure "Remote endpoint client authentication failed")
   action sock authenticate `finally` removeFile path
 #else
-spawnDetached :: FilePath -> [String] -> FilePath -> IO ProcessHandle
-spawnDetached executable args logfile = withBinaryFile "/dev/null" ReadWriteMode $ \nullHandle ->
+spawnDetached :: FilePath -> [String] -> FilePath -> FilePath -> IO ProcessHandle
+spawnDetached executable args logfile directory = withBinaryFile "/dev/null" ReadWriteMode $ \nullHandle ->
   withBinaryFile logfile WriteMode $ \logHandle -> do
     (_,_,_,child) <- createProcess (proc executable args)
-      {std_in=UseHandle nullHandle,std_out=UseHandle nullHandle,std_err=UseHandle logHandle,close_fds=True,new_session=True}
+      {std_in=UseHandle nullHandle,std_out=UseHandle nullHandle,std_err=UseHandle logHandle,close_fds=True,new_session=True,cwd=Just directory}
     pure child
 
 randomBytes :: Int -> IO BS.ByteString
