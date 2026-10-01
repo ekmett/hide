@@ -9,7 +9,7 @@ import THC.Edit.Protocol (WirePacket(..))
 
 #ifdef WITH_REMOTE
 import Control.Concurrent (threadDelay, forkIO)
-import Control.Concurrent.Async (race_, withAsync, wait)
+import Control.Concurrent.Async (race_, withAsync, wait, waitEither)
 import Control.Concurrent.MVar
 import Control.Concurrent.STM
 import Control.Exception
@@ -106,19 +106,25 @@ runRemoteRelay args = handle report $ do
   hSetBinaryMode stdin True; hSetBinaryMode stdout True
   hSetBuffering stdout NoBuffering
   (greeting,hello) <- readHello stdin
-  h <- openSession args greeting
-  finally (writePacket h hello >> race_ (relay stdin h) (relay h stdout)) (quietClose h)
+  (h,shutdown) <- openSession args greeting
+  finally (writePacket h hello >> raceWithShutdown shutdown (relay stdin h) (relay h stdout)) (quietClose h)
   where
     report (err::IOException) = do
       writePacket stdout (json "error" ["message" .= show err]) `catch` \(_::IOException) -> pure ()
       throwIO err
     relay source destination = readPacket source >>= maybe (pure ()) (\packet -> writePacket destination packet >> relay source destination)
 
+-- Run the wakeup before withAsync joins a blocked socket reader on Windows.
+raceWithShutdown :: IO () -> IO a -> IO b -> IO ()
+raceWithShutdown shutdown left right = mask $ \restore ->
+  withAsync (restore left) $ \a -> withAsync (restore right) $ \b ->
+    restore (void (waitEither a b)) `finally` shutdown
+
 -- Opening a local peer and a stdio relay share daemon startup and diagnostics.
-openSession :: [String] -> Hello -> IO Handle
+openSession :: [String] -> Hello -> IO (Handle,IO ())
 openSession args (Hello session _ _ startup resume) = do
   path <- sessionEndpoint session
-  existing <- try (connectEndpoint path)
+  existing <- try (connectEndpointWithShutdown path)
   case existing of
     Right connection -> pure connection
     Left (_::IOException) -> do
@@ -138,7 +144,7 @@ openSession args (Hello session _ _ startup resume) = do
               hSeek logHandle AbsoluteSeek (max 0 (size-8192))
               B8.unpack <$> BS.hGet logHandle 8192) `catch` \(_::IOException) -> pure ""
             failure (reason++"; remote log: "++logfile++"\n"++detail)
-          awaitSocket remaining = connectEndpoint path `catch` \(_::IOException) -> do
+          awaitSocket remaining = connectEndpointWithShutdown path `catch` \(_::IOException) -> do
             exited <- getProcessExitCode process
             case exited of
               Just code -> startupFailure ("Remote editor failed to start ("++show code++")")
@@ -350,7 +356,11 @@ withSessionPeer host session resume remoteArgs action = do
   client <- randomIdentity
   journal <- newTVarIO (Journal 1 0 [] M.empty Nothing Nothing Nothing)
   incoming <- newTBQueueIO 8
-  let emit packet=atomically (writeTBQueue incoming (Right (Just packet)))
+  -- The callback borrows the Handle's socket descriptor. Clear it under this
+  -- lock before closing handles, so it can never act on a reused descriptor.
+  activeShutdown <- newMVar (pure ())
+  let shutdown = withMVar activeShutdown id
+      emit packet=atomically (writeTBQueue incoming (Right (Just packet)))
       status connected message=emit (json "connection" ["connected" .= connected,"message" .= (message::T.Text)])
       send packet = sendBatch [packet]
       sendBatch packets = do
@@ -400,18 +410,25 @@ withSessionPeer host session resume remoteArgs action = do
       fatal message=atomically (modifyTVar' journal (\j -> j {terminalError=Just message})) >> failure message
       connect handshook = do
         greeting <- hello
-        let open = case host of
-              Nothing -> do
-                parsed <- case greeting of JsonPacket value -> decodeValue helloParser value; _ -> failure "Invalid local hello"
-                connection <- openSession remoteArgs parsed `catch` \(err::IOException) -> fatal (show err)
-                pure (Just connection,Just connection,Nothing,Nothing)
-              Just name -> do
-                -- Dynamic paths travel in the framed hello, never through a login shell.
-                let command="thc-edit --remote"
-                    sshArgs=["-T","-a","-x","-oForwardAgent=no","-oClearAllForwardings=yes","-oRequestTTY=no","-oServerAliveInterval=15","-oServerAliveCountMax=3","-oConnectTimeout=10","--",name,command]
-                (input,output,errors,process) <- createProcess (proc "ssh" sshArgs) {std_in=CreatePipe,std_out=CreatePipe,std_err=Inherit,close_fds=True}
-                pure (input,output,errors,Just process)
-        bracket open cleanup $ \(inputPipe,outputPipe,_,process) -> do
+        let open = do
+              connection <- case host of
+                Nothing -> do
+                  parsed <- case greeting of JsonPacket value -> decodeValue helloParser value; _ -> failure "Invalid local hello"
+                  (connectionHandle,stop) <- openSession remoteArgs parsed `catch` \(err::IOException) -> fatal (show err)
+                  pure (Just connectionHandle,Just connectionHandle,Nothing,Nothing,stop)
+                Just name -> do
+                  -- Dynamic paths travel in the framed hello, never through a login shell.
+                  let command="thc-edit --remote"
+                      sshArgs=["-T","-a","-x","-oForwardAgent=no","-oClearAllForwardings=yes","-oRequestTTY=no","-oServerAliveInterval=15","-oServerAliveCountMax=3","-oConnectTimeout=10","--",name,command]
+                  (input,output,errors,process) <- createProcess (proc "ssh" sshArgs) {std_in=CreatePipe,std_out=CreatePipe,std_err=Inherit,close_fds=True}
+                  pure (input,output,errors,Just process,pure ())
+              let (_,_,_,_,stop)=connection
+              modifyMVar_ activeShutdown (const (pure stop))
+              pure connection
+            close connection = do
+              modifyMVar_ activeShutdown (const (pure (pure ())))
+              cleanup connection
+        bracket open close $ \(inputPipe,outputPipe,_,process,_) -> do
           input <- maybe (failure "Transport did not create its input pipe") pure inputPipe
           output <- maybe (failure "Transport did not create its output pipe") pure outputPipe
           hSetBinaryMode input True; hSetBinaryMode output True; hSetBuffering input NoBuffering
@@ -495,7 +512,7 @@ withSessionPeer host session resume remoteArgs action = do
                     _ -> failure "Remote protocol error"
                   _ -> emit packet
                 if packetType packet==Just "closed" then atomically (writeTBQueue incoming (Right Nothing)) else receiver
-          race_ (sender ack) receiver
+          raceWithShutdown shutdown (sender ack) receiver
       reconnect attempts = do
         handshook <- newIORef False
         result <- try (connect handshook)
@@ -522,9 +539,10 @@ withSessionPeer host session resume remoteArgs action = do
         remaining <- pending <$> readTVarIO journal
         unless (null remaining) $ hPutStrLn stderr
           ("Detached with "++show (length remaining)++" unacknowledged input events; their application could not be confirmed.")
-  withAsync worker $ \_ -> action peer `finally` drain
+  mask $ \restore -> withAsync (restore worker) $ \_ ->
+    restore (action peer) `finally` (drain `finally` shutdown)
   where
-    cleanup (input,output,_,process) = do
+    cleanup (input,output,_,process,_) = do
       mapM_ quietClose input; mapM_ quietClose output
       forM_ process $ \child -> do
         terminateProcess child `catch` \(_::IOException) -> pure ()

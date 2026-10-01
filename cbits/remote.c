@@ -3,6 +3,7 @@
 #ifndef _WIN32_WINNT
 #define _WIN32_WINNT 0x0601
 #endif
+#include <winsock2.h>
 #include <windows.h>
 #include <aclapi.h>
 #include <wincrypt.h>
@@ -213,4 +214,9 @@ done:
     if (log_handle != INVALID_HANDLE_VALUE) CloseHandle(log_handle);
     free_security(&security);
     return error;
+}
+
+/* Keep ownership with the Haskell Handle; only end the TCP conversation. */
+void thc_remote_shutdown(uint32_t socket) {
+    shutdown((SOCKET)socket, SD_BOTH);
 }

@@ -50,7 +50,7 @@ library
   build-depends: zlib
   if os(windows)
     c-sources: cbits/remote.c
-    extra-libraries: advapi32
+    extra-libraries: advapi32, ws2_32
   else
     build-depends: unix
   if flag(terminal)

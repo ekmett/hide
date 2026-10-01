@@ -1,6 +1,6 @@
 {-# LANGUAGE CPP, ForeignFunctionInterface, ScopedTypeVariables #-}
 module THC.Edit.RemoteEndpoint
-  (sessionEndpoint, connectEndpoint, endpointExists, withEndpointListener, randomIdentity, spawnDetached) where
+  (sessionEndpoint, connectEndpoint, connectEndpointWithShutdown, endpointExists, withEndpointListener, randomIdentity, spawnDetached) where
 import Control.Exception
 import Control.Monad (unless)
 import qualified Data.ByteString as BS
@@ -54,6 +54,11 @@ sessionEndpoint session = do
 #endif
   pure (directory </> session)
 
+-- The shutdown action must run while its Handle is still open. It wakes the
+-- peer reader before Windows waits for a blocked local reader to be cancelled.
+connectEndpoint :: FilePath -> IO Handle
+connectEndpoint path = fst <$> connectEndpointWithShutdown path
+
 socketHandle :: N.Socket -> IO Handle
 socketHandle sock = do
   h <- N.socketToHandle sock ReadWriteMode
@@ -62,6 +67,7 @@ socketHandle sock = do
   pure h
 
 #ifdef mingw32_HOST_OS
+foreign import ccall unsafe "thc_remote_shutdown" c_shutdown :: Word32 -> IO ()
 foreign import ccall unsafe "thc_remote_spawn" c_spawn :: CWString -> CWString -> CWString -> Ptr (Ptr ()) -> IO Word32
 foreign import ccall unsafe "thc_remote_private_directory" c_privateDirectory :: CWString -> IO Word32
 foreign import ccall unsafe "thc_remote_descriptor_write" c_writeDescriptor :: CWString -> Ptr Word8 -> Word32 -> IO Word32
@@ -114,14 +120,15 @@ readExact h n = do
 boundedAuthentication :: IO () -> IO ()
 boundedAuthentication action = timeout 5000000 action >>= maybe (failure "Remote endpoint authentication timed out") pure
 
-connectEndpoint :: FilePath -> IO Handle
-connectEndpoint path = do
+connectEndpointWithShutdown :: FilePath -> IO (Handle, IO ())
+connectEndpointWithShutdown path = do
   descriptor <- readDescriptor path >>= maybe (failure "Remote endpoint is not ready") pure
   (port,token) <- case B8.words descriptor of
     [p,key] | Just number <- readMaybe (B8.unpack p), number>0, number<=65535, validIdentity (B8.unpack key) -> pure (number::Int,key)
     _ -> failure "Invalid private remote endpoint descriptor"
   bracketOnError (N.socket N.AF_INET N.Stream N.defaultProtocol) N.close $ \sock -> do
     N.connect sock (N.SockAddrInet (fromIntegral port) (N.tupleToHostAddress (127,0,0,1)))
+    descriptorNumber <- N.withFdSocket sock pure
     h <- socketHandle sock
     flip onException (hClose h) $ do
       boundedAuthentication $ do
@@ -132,7 +139,7 @@ connectEndpoint path = do
         expected <- mac "server" token challenge nonce
         unless (sameBytes proof expected) (failure "Remote endpoint server authentication failed")
         mac "client" token challenge nonce >>= BS.hPut h
-      pure h
+      pure (h,c_shutdown (fromIntegral descriptorNumber))
 
 withEndpointListener :: FilePath -> (N.Socket -> (Handle -> IO ()) -> IO a) -> IO a
 withEndpointListener path action = bracket (N.socket N.AF_INET N.Stream N.defaultProtocol) N.close $ \sock -> do
@@ -168,10 +175,11 @@ endpointExists :: FilePath -> IO Bool
 endpointExists path = do
   result <- try (getSymbolicLinkStatus path)
   case result of Right _ -> pure True; Left e | isDoesNotExistError e -> pure False; Left e -> throwIO e
-connectEndpoint :: FilePath -> IO Handle
-connectEndpoint path = bracketOnError (N.socket N.AF_UNIX N.Stream N.defaultProtocol) N.close $ \sock -> do
+connectEndpointWithShutdown :: FilePath -> IO (Handle, IO ())
+connectEndpointWithShutdown path = bracketOnError (N.socket N.AF_UNIX N.Stream N.defaultProtocol) N.close $ \sock -> do
   N.connect sock (N.SockAddrUnix path)
-  socketHandle sock
+  h <- socketHandle sock
+  pure (h,pure ())
 withEndpointListener :: FilePath -> (N.Socket -> (Handle -> IO ()) -> IO a) -> IO a
 withEndpointListener path action = bracket (N.socket N.AF_UNIX N.Stream N.defaultProtocol) N.close $ \sock -> do
   N.bind sock (N.SockAddrUnix path)
