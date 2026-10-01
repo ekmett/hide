@@ -101,6 +101,42 @@ checks=bracket temporary removePathForcibly $ \root ->
       ensure "switching restores primary draft caret and transcript" (T.null (conversationTarget primaryAgain) && contents (composerBuffer primaryAgain)=="primary unsent" && composerSelection primaryAgain==Selection 3 7 && activeText primaryAgain==primaryText)
       childAgain<-ui "directory-select" ["0",T.pack (show index)] primaryAgain
       ensure "switching restores child draft caret" (contents (composerBuffer childAgain)=="child unsent" && composerSelection childAgain==Selection 2 5)
+      let childTool ident state details=object
+            ["toolCallId" .= (ident::T.Text),"title" .= ident,"status" .= (state::T.Text),"rawInput" .= (details::T.Text)]
+          actions name desktop=[values | (_,_,action,values)<-chatActions desktop,action==name]
+          childGroupText=activeText
+      AH.recordAgentEvent hub peer "tool" (childTool "child-first" "pending" "first arguments")
+      AH.recordAgentEvent hub peer "tool" (childTool "child-second" "pending" "second arguments")
+      groupedChild<-tickConversation conversation childAgain
+      ensure "child tools form one collapsed run" (length (actions "toggle-tool-run" groupedChild)==1 &&
+        null (actions "toggle-activity" groupedChild) && "2 tool calls" `T.isInfixOf` childGroupText groupedChild)
+      let groupValues=case actions "toggle-tool-run" groupedChild of values:_->values; _->error "Missing child run action"
+      openChildRun<-ui "toggle-tool-run" groupValues groupedChild
+      let firstCall=case actions "toggle-activity" openChildRun of values:_->values; _->error "Missing child call action"
+      openChildCall<-ui "toggle-activity" firstCall openChildRun
+      ensure "child call exposes its raw arguments" ("first arguments" `T.isInfixOf` childGroupText openChildCall)
+      AH.recordAgentEvent hub peer "tool" (object ["toolCallId" .= ("child-first"::T.Text),"status" .= ("completed"::T.Text),"rawOutput" .= ("first result"::T.Text)])
+      AH.recordAgentEvent hub peer "tool" (childTool "child-third" "in_progress" "third arguments")
+      streamedChild<-tickConversation conversation openChildCall
+      ensure "child updates count calls rather than events and preserve the open run" (actions "toggle-tool-run" streamedChild==[groupValues] &&
+        length (actions "toggle-activity" streamedChild)==3 && "3 tool calls" `T.isInfixOf` childGroupText streamedChild &&
+        "2 running" `T.isInfixOf` childGroupText streamedChild)
+      ensure "child refresh preserves open call input and all streamed raw output" (all (`T.isInfixOf` childGroupText streamedChild) ["first arguments","first result"])
+      switchedPrimary<-ui "show" [] streamedChild
+      switchedChild<-ui "directory-select" ["0",T.pack (show index)] switchedPrimary
+      ensure "child run and call expansion survive switching through Primary" (childGroupText switchedChild==childGroupText streamedChild &&
+        actions "toggle-tool-run" switchedChild==[groupValues] && length (actions "toggle-activity" switchedChild)==3)
+      collapsedChild<-ui "toggle-tool-run" groupValues switchedChild
+      copiedChild<-ui "copy" [] collapsedChild
+      ensure "collapsed child run retains all raw call updates for copying" (all (`T.isInfixOf` clipboard copiedChild)
+        ["first arguments","first result","second arguments","third arguments"])
+      reopenedChild<-ui "toggle-tool-run" groupValues collapsedChild
+      ensure "child per-call expansion survives collapsing its run" (childGroupText reopenedChild==childGroupText streamedChild)
+      AH.recordAgentEvent hub peer "output" (object ["text" .= ("Reply between child tool runs"::T.Text)])
+      AH.recordAgentEvent hub peer "tool" (childTool "child-isolated" "completed" "isolated arguments")
+      separatedChild<-tickConversation conversation reopenedChild
+      ensure "child reply ends a tool run and leaves the next isolated call visible" (actions "toggle-tool-run" separatedChild==[groupValues] &&
+        length (actions "toggle-activity" separatedChild)==4 && "Reply between child tool runs" `T.isInfixOf` childGroupText separatedChild)
       let largeTool=object ["title" .= ("Large tool"::T.Text),"payload" .= T.replicate 600000 "x"]
       AH.recordAgentEvent hub peer "tool" largeTool
       AH.recordAgentEvent hub peer "tool" largeTool

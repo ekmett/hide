@@ -233,6 +233,27 @@ checks = bracket temporary removePathForcibly $ \root ->
       check "conversation copies omit activity chevrons and raw JSON" (not ("rawInput" `T.isInfixOf` selectedTextOnly) && not ("▾" `T.isInfixOf` selectedTextOnly) && "Hello" `T.isInfixOf` selectedTextOnly)
       collapsed<-send runtime "toggle-activity" activityAction expanded
       check "activity collapses without changing prose" (conversationText collapsed==conversationText streamed)
+      grouped<-prompt runtime "tool-run" collapsed >>= done runtime
+      let groupActions d=[values | (_,_,name,values)<-chatActions d,name=="toggle-tool-run"]
+          singleActions d=[values | (_,_,name,values)<-chatActions d,name=="toggle-activity"]
+      check "consecutive calls collapse to one double chevron with visible failures"
+        (length (groupActions grouped)==1 && "▸▸ 3 tool calls · 1 failed" `T.isInfixOf` conversationText grouped &&
+         length (singleActions grouped)==2 && not ("run argument" `T.isInfixOf` conversationText grouped))
+      openedGroup<-clickAction runtime "toggle-tool-run" grouped
+      check "expanding a run reveals tightly stacked individual calls"
+        (length (singleActions openedGroup)==5 && "▾▾ 3 tool calls" `T.isInfixOf` conversationText openedGroup &&
+         "[completed] Read files\n  ▸ [completed] Run tests\n  ▸ [failed] Check output" `T.isInfixOf` conversationText openedGroup)
+      let firstRunCall=case drop 1 (singleActions openedGroup) of values:_->values; _->error "missing grouped call"
+          runAction d=case groupActions d of values:_->values; _->error "missing run toggle"
+      detailGroup<-send runtime "toggle-activity" firstRunCall openedGroup
+      check "group members still expose exact request and reply details"
+        (all (`T.isInfixOf` conversationText detailGroup) ["run argument","run result"])
+      foldedGroup<-send runtime "toggle-tool-run" (runAction detailGroup) detailGroup
+      check "folding a run hides every member and its expanded JSON"
+        (conversationText foldedGroup==conversationText grouped)
+      reopenedGroup<-send runtime "toggle-tool-run" (runAction foldedGroup) foldedGroup
+      check "unfolding restores individual detail state"
+        (conversationText reopenedGroup==conversationText detailGroup)
       check "provider settings appear in the title" (conversationTitle streamed=="fixture-model (high) ▼")
       let conversationWindow=fromMaybe (error "conversation window") (activeWindow streamed)
           titleRect=agentTitleRect streamed conversationWindow
@@ -572,6 +593,13 @@ providerScript=unlines
   , "      update({'sessionUpdate':'usage_update','used':300000,'size':400000})"
   , "      update({'sessionUpdate':'usage_update','used':148000,'size':400000})"
   , "      update({'sessionUpdate':'usage_update','used':-1,'size':0})"
+  , "      finish()"
+  , "    elif scenario=='tool-run':"
+  , "      for n,title in enumerate(['Read files','Run tests','Check output']):"
+  , "        update({'sessionUpdate':'tool_call','toolCallId':'run-'+str(n),'title':title,'status':'pending','rawInput':'run argument'})"
+  , "        update({'sessionUpdate':'tool_call_update','toolCallId':'run-'+str(n),'status':'failed' if n==2 else 'completed','rawOutput':'run result'})"
+  , "      update({'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'Between tool runs.'}})"
+  , "      update({'sessionUpdate':'tool_call','toolCallId':'isolated','title':'Isolated call','status':'completed'})"
   , "      finish()"
   , "    elif scenario=='permission':"
   , "      serial+=1; call('permission-'+str(serial),'session/request_permission',{'toolCall':{'title':'Fixture action'},'options':[{'optionId':'allow','name':'Allow once','kind':'allow_once'},{'optionId':'deny','name':'Reject','kind':'reject_once'}]})"

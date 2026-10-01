@@ -75,6 +75,7 @@ data State = State
   , streamTails :: M.Map Text Text
   , lastAgentSync :: Maybe (FilePath,Text,AH.Capabilities,Bool)
   , childRecords :: M.Map Text [Record], childRender :: Maybe (Text,Int,Value)
+  , expandedToolRuns :: S.Set (Text,Text)
   , childCancels :: M.Map Text (Async (Either Text ()))
   , resumeRecordPath :: FilePath
   }
@@ -106,7 +107,7 @@ withConversationAt root action = C.withConsoles $ \consoles -> Jobs.withBuildJob
     , ownedTerminals=S.empty,terminalWaiters=M.empty,lastMessageAt=Nothing
     , lastRender=(0,Nothing,[]),lastSession=remembered,waitingQuestion=Nothing,lastQuestion=Nothing
     , deliveredContext=Nothing,resumeRecordPath=resumePath,directoryAgents=[],agentDelivery=Nothing
-    , agentInitialized=Null,agentConfig=Null,streamTails=M.empty,lastAgentSync=Nothing,childRecords=M.empty,childRender=Nothing,childCancels=M.empty }
+    , agentInitialized=Null,agentConfig=Null,streamTails=M.empty,lastAgentSync=Nothing,childRecords=M.empty,childRender=Nothing,childCancels=M.empty,expandedToolRuns=S.empty }
   AR.withAgentRuntime root (provider <$> readIORef ref) $ \agents ->
     bracket (pure (ConversationState directory ref consoles jobs agents)) closeConversation action
 
@@ -182,6 +183,15 @@ conversationEffects runtime@(ConversationState _ ref _ _ _) fallback = foldM app
     apply (_,d) effect = fallback d [effect]
 
 perform :: ConversationState -> Text -> [Text] -> Desktop -> IO Desktop
+perform (ConversationState _ ref _ _ _) "toggle-tool-run" [ident] d=do
+  state<-readIORef ref
+  let target=conversationTarget d
+      key=(target,ident)
+      expanded=expandedToolRuns state
+      next=state {expandedToolRuns=if S.member key expanded then S.delete key expanded else S.insert key expanded}
+      records=if T.null target then transcript next else M.findWithDefault [] target (childRecords next)
+  writeIORef ref next
+  pure (keepConversationPosition d (paintView target False next {transcript=records} d))
 perform runtime action values d
   | action=="show" = performPrimary runtime action values (selectConversationView "" "Primary" d)
   | not (T.null (conversationTarget d)) && action `elem` ["send","send-draft","steer-draft","cancel","copy","toggle-activity","new","resume","load","set-config"] = performChild runtime action values d
@@ -232,11 +242,7 @@ performPrimary runtime@(ConversationState directory ref consoles jobs _) action 
           toggle (_,record)=record
           next=s {transcript=map toggle (zip [0::Int ..] (transcript s))}
       writeIORef ref next
-      let painted=paint False next d
-          keepPosition w=case (find ((==windowId w).windowId) (windows d),M.lookup (bufferId w) (buffers painted)) of
-            (Just old,Just doc) | documentLabel doc==Just "Conversation" -> w {scrollRow=min (scrollRow old) (scrollbarLimit painted True doc w),scrollColumn=0,selection=Selection 0 0}
-            _ -> w
-      pure painted {windows=map keepPosition (windows painted)}
+      pure (keepConversationPosition d (paint False next d))
     ("question-choice",[token,index]) | Just ident<-readMaybe (T.unpack token),Just chosen<-readMaybe (T.unpack index),
         Just q<-chatQuestion d,questionToken q==ident,chosen>=0,chosen<length (questionChoices q) ->
       pure (clearReplySelection (paint False s d {chatQuestion=Just q {questionChoice=Just chosen,questionFocused=True}}))
@@ -358,7 +364,7 @@ performPrimary runtime@(ConversationState directory ref consoles jobs _) action 
     ("new",_) -> do
       mapM_ (C.releaseConsole consoles) (S.toList (ownedTerminals s))
       mapM_ A.stopClient (connection s)
-      writeIORef ref s {connection=Nothing,session=Nothing,agentDelivery=Nothing,streamTails=M.empty,pending=M.empty,queuedPrompt=Nothing,queuedQueries=[],transcript=[],lastMessageAt=Nothing,reads=M.empty,approvals=[],presented=Nothing,deferredApproval=False,ownedTerminals=S.empty,terminalWaiters=M.empty}
+      writeIORef ref s {connection=Nothing,session=Nothing,agentDelivery=Nothing,streamTails=M.empty,pending=M.empty,queuedPrompt=Nothing,queuedQueries=[],transcript=[],expandedToolRuns=S.filter ((/="").fst) (expandedToolRuns s),lastMessageAt=Nothing,reads=M.empty,approvals=[],presented=Nothing,deferredApproval=False,ownedTerminals=S.empty,terminalWaiters=M.empty}
       start runtime Nothing d
     ("resume",_) | busy s -> pure d {status="Cancel the current reply before resuming a session."}
     ("resume",_) -> pure d {dialog=Just (Dialog "Resume conversation" (AgentDialog "load")
@@ -367,7 +373,7 @@ performPrimary runtime@(ConversationState directory ref consoles jobs _) action 
     ("load",_:sid:_) | not (T.null (T.strip sid)), not (busy s) -> do
       mapM_ (C.releaseConsole consoles) (S.toList (ownedTerminals s))
       mapM_ A.stopClient (connection s)
-      writeIORef ref s {connection=Nothing,session=Nothing,agentDelivery=Nothing,streamTails=M.empty,pending=M.empty,queuedPrompt=Nothing,queuedQueries=[],transcript=[],lastMessageAt=Nothing,reads=sourceSnapshots d,approvals=[],presented=Nothing,deferredApproval=False,ownedTerminals=S.empty,terminalWaiters=M.empty}
+      writeIORef ref s {connection=Nothing,session=Nothing,agentDelivery=Nothing,streamTails=M.empty,pending=M.empty,queuedPrompt=Nothing,queuedQueries=[],transcript=[],expandedToolRuns=S.filter ((/="").fst) (expandedToolRuns s),lastMessageAt=Nothing,reads=sourceSnapshots d,approvals=[],presented=Nothing,deferredApproval=False,ownedTerminals=S.empty,terminalWaiters=M.empty}
       start runtime (Just (T.strip sid)) d
     _ | Just suffix<-T.stripPrefix "approval:" action, Just token<-readMaybe (T.unpack suffix) -> decide runtime token values d
     _ -> pure d
@@ -785,6 +791,18 @@ dismissPermission d=case dialog d of
   Just dg | AgentDialog action<-purpose dg,"approval:" `T.isPrefixOf` action -> d {dialog=Nothing}
   _ -> d
 
+keepConversationPosition :: Desktop -> Desktop -> Desktop
+keepConversationPosition before after=after {windows=map keep (windows after)}
+  where
+    keep w=case (find ((==windowId w).windowId) (windows before),M.lookup (bufferId w) (buffers after)) of
+      (Just old,Just doc) | documentLabel doc==Just "Conversation" -> w {scrollRow=min (scrollRow old) (scrollbarLimit after True doc w),scrollColumn=0,selection=Selection 0 0}
+      _ -> w
+
+isToolRecord :: Record -> Bool
+isToolRecord (Activity _ value _ _)=field "status" value `elem`
+  [Just ("pending"::Text),Just "in_progress",Just "completed",Just "failed"]
+isToolRecord _=False
+
 paint :: Bool -> State -> Desktop -> Desktop
 paint=paintView ""
 
@@ -834,9 +852,25 @@ paintView target force s original
     d=if T.null target && T.null (conversationTarget original) then original else original {chatQuestion=Nothing}
     plain style=map (,style).T.unpack
     renderRecords _ []=[]
-    renderRecords width (record:rest)=renderRecord width record++case rest of
-      [] -> []
-      next:_ -> [(plain Plain (if sameSpeaker (snd record) (snd next) then "\n" else "\n\n"),Nothing)]++renderRecords width rest
+    renderRecords width rows@(record:rest)
+      | (calls@(_:_:_),after)<-span (isToolRecord.snd) rows = renderRun width calls++continue (last calls) after
+      | otherwise = renderRecord width record++continue record rest
+      where
+        continue _ []=[]
+        continue previous remaining@(next:_)=
+          [(plain Plain (if sameSpeaker (snd previous) (snd next) then "\n" else "\n\n"),Nothing)]++renderRecords width remaining
+    renderRun width calls=case calls of
+      (_,Activity ident _ _ _):_ ->
+        let expanded=S.member (target,ident) (expandedToolRuns s)
+            titles=[fromMaybe label (field "title" value) | (_,Activity label value _ _)<-calls]
+            running=length [() | (_,Activity _ value _ _)<-calls,field "status" value `elem` [Just ("pending"::Text),Just "in_progress"]]
+            failed=length [() | (_,Activity _ value _ _)<-calls,field "status" value==Just ("failed"::Text)]
+            count n label=[T.pack (show n)<>label | n>0]
+            summary=T.intercalate " · " (T.pack (show (length calls))<>" tool calls":count running " running"++count failed " failed"++[T.intercalate ", " (take 3 titles)])
+            heading=clipCells width ((if expanded then "▾▾ " else "▸▸ ")<>T.unwords (T.words summary))
+        in [(plain Pragma heading,Just ("toggle-tool-run",[ident]))]++
+           (if expanded then concatMap (\call->(plain Plain "\n  ",Nothing):renderRecord (max 1 (width-2)) call) calls else [])
+      _ -> []
     sameSpeaker (Reply a _) (Reply b _)=a==b
     sameSpeaker _ _=False
     renderRecord width (recordId,record)=case record of
@@ -1195,7 +1229,7 @@ performChild runtime@(ConversationState _ ref _ _ agents) action values d=do
           toggle (_,record)=record
           changed=map toggle (zip [0::Int ..] records)
       modifyIORef' ref (\s->s {childRecords=M.insert target changed (childRecords s)})
-      pure (paintView target False state {transcript=changed} d)
+      pure (keepConversationPosition d (paintView target False state {transcript=changed} d))
     _ -> pure d {status="Switch to Primary for provider settings or session controls; use Agents to reconnect a child."}
   where
     send hub ident text = do
@@ -1242,7 +1276,10 @@ refreshChildConversation (ConversationState _ ref _ _ agents) d=do
                   trimmed=fromMaybe (0::Int) (field "nextEvent" entry)>101 || dropped
                   metadata=T.intercalate " · " ([fromMaybe "" (field "status" entry)]++
                     maybe [] (\parent->["parent: "<>parent]) (field "parentName" entry)++models++["recent history" | trimmed])
-                  records=Pause metadata:foldl (childHistoryRecord name) [] events
+                  oldExpanded=S.fromList [ident | Activity ident _ _ True<-M.findWithDefault [] target (childRecords current)]
+                  retain (Activity ident value updates _)=Activity ident value updates (S.member ident oldExpanded)
+                  retain record=record
+                  records=Pause metadata:map retain (foldl (childHistoryRecord name) [] events)
               modifyIORef' ref (\s->s {childRecords=M.insert target records (childRecords s),childRender=Just signature})
               pure (paintView target False current {transcript=records} projected)
 
@@ -1275,7 +1312,9 @@ childHistoryRecord name records value=let detail=fromMaybe Null (field "detail" 
   Just "output" -> appendChunk "Agent" (if lastRole records==Just "Agent" then chunk else name<>"\n\n"<>chunk) records
     where chunk=fromMaybe "" (field "text" detail)
   Just "thought" -> records -- Thoughts stay in the bounded history API.
-  Just "tool" -> records++[Activity (fromMaybe "Tool call" (field "title" detail)) detail [detail] False]
+  Just "tool" -> case field "toolCallId" detail :: Maybe Text of
+    Just _ -> mergeTool detail records
+    Nothing -> records++[Activity ("event-"<>T.pack (show (fromMaybe (length records) (field "index" value)::Int))) detail [detail] False]
   Just "message_finished" | field "status" detail/=Just ("completed"::Text) -> records++[Pause (fromMaybe "Stopped" (field "error" detail))]
   _ -> records
   where lastRole xs=case reverse xs of Reply role _:_->Just role; _->Nothing

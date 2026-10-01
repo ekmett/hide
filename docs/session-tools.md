@@ -120,7 +120,7 @@ does not end existing work, and agents cannot raise them. See
 
 ## Questions and tool activity
 
-An agent can use `ask_user` to ask a question with choices and a free-text answer inside the conversation. Your draft stays where you left it. Tool activity appears as a compact chevron and description; expand it to inspect the complete request and reply JSON.
+An agent can use `ask_user` to ask a question with choices and a free-text answer inside the conversation. Your draft stays where you left it. A single tool call has a chevron and description. Consecutive calls share a double-chevron row with their count and any running or failed calls. Expand the run to see individual calls, then expand a call to inspect its retained request and reply JSON. Collapsing the run keeps your individual expansions.
 
 ## Controls, settings and documentation
 
