@@ -9,6 +9,8 @@ import Data.Text (Text)
 import qualified Data.Text.Lazy as TL
 import qualified Data.Map.Strict as M
 import Data.Foldable (toList)
+import Data.List (mapAccumR)
+import qualified Data.IntSet as IS
 import Data.Char (isSpace, toLower)
 import Data.Maybe (fromMaybe)
 import System.FilePath (takeFileName, (</>))
@@ -245,8 +247,14 @@ treeLayers d tree =
   where
     w=treeWidth tree; h=max 0 (snd (screenSize d)-2-problemsHeight d); visible=treeContentRows d
     frame=attr white blue
-    listing=take visible (drop (treeScroll tree) (zip [0..] (treeRows tree)))
-    line (i,node)=V.cropRight listWidth (label a (T.replicate (2*nodeDepth node) " ")
+    listing=take visible (drop (treeScroll tree) (zip [0..] decorated))
+    decorated=snd (mapAccumR branch IS.empty (treeRows tree))
+    branch following node =
+      let depth=nodeDepth node
+          prefix=T.pack [if IS.member level following then '│' else ' ' | level<-[0..depth-1]]
+            <> (if IS.member depth following then "├─" else "└─")
+      in (IS.insert depth (fst (IS.split depth following)),(node,prefix))
+    line (i,(node,prefix))=V.cropRight listWidth (label (if chosen then selected else frame) prefix
       V.<|> label iconColor marker V.<|> label a (" "<>nodeName node) V.<|> V.charFill a ' ' listWidth 1)
       where
         listWidth=max 0 (w-if treeFocused tree then 3 else 2)
@@ -254,7 +262,7 @@ treeLayers d tree =
         changed=any (\doc -> dirty (documentBuffer doc) && maybe False ((==nodePath node).filePath) (documentFile doc)) (M.elems (buffers d))
         a=if changed then attr (V.RGBColor 255 85 85) (if chosen then green else blue) else if chosen then selected else edit
         iconColor=if chosen then selected else attr (if nodeDirectory node then yellow else white) blue
-        marker | nodeDirectory node, videoMode d/=Nothing || materialIcons d = if nodeExpanded node then "\xf0770" else "\xf024b"
+        marker | nodeDirectory node, materialIcons d = if nodeExpanded node then "\xf0770" else "\xf024b"
                | nodeDirectory node = if nodeExpanded node then "📂" else "📁"
                | otherwise = "📄"
     thumb=scrollbarThumb visible (treeScrollLimit d tree) (treeScroll tree)
