@@ -1,6 +1,6 @@
 {-# LANGUAGE CPP, ForeignFunctionInterface, ScopedTypeVariables #-}
 module THC.Edit.RemoteEndpoint
-  (sessionEndpoint, connectEndpoint, endpointExists, withEndpointListener, randomIdentity) where
+  (sessionEndpoint, connectEndpoint, endpointExists, withEndpointListener, randomIdentity, spawnDetached) where
 import Control.Exception
 import Control.Monad (unless)
 import qualified Data.ByteString as BS
@@ -10,17 +10,20 @@ import Numeric (showHex)
 import System.Directory (removeFile)
 import System.FilePath ((</>))
 import System.IO
+import System.Process (ProcessHandle)
 #ifdef mingw32_HOST_OS
 import Data.Bits ((.|.), xor)
 import qualified Data.ByteString.Char8 as B8
 import Data.Word (Word8, Word32)
-import Foreign (Ptr, alloca, allocaBytes, castPtr, peek)
+import Foreign (Ptr, alloca, allocaBytes, castPtr, peek, nullPtr)
 import Foreign.C.String (CWString, withCWString)
 import System.Directory (getHomeDirectory)
 import System.Timeout (timeout)
+import System.Process.Internals (mkProcessHandle, translate)
 import Text.Read (readMaybe)
 #else
 import System.IO.Error (isAlreadyExistsError, isDoesNotExistError)
+import System.Process (createProcess, proc, CreateProcess(..), StdStream(UseHandle))
 import qualified System.Posix.Directory as P
 import System.Posix.Files
 import System.Posix.User (getEffectiveUserID)
@@ -59,11 +62,20 @@ socketHandle sock = do
   pure h
 
 #ifdef mingw32_HOST_OS
+foreign import ccall unsafe "thc_remote_spawn" c_spawn :: CWString -> CWString -> CWString -> Ptr (Ptr ()) -> IO Word32
 foreign import ccall unsafe "thc_remote_private_directory" c_privateDirectory :: CWString -> IO Word32
 foreign import ccall unsafe "thc_remote_descriptor_write" c_writeDescriptor :: CWString -> Ptr Word8 -> Word32 -> IO Word32
 foreign import ccall unsafe "thc_remote_descriptor_read" c_readDescriptor :: CWString -> Ptr Word8 -> Word32 -> Ptr Word32 -> IO Word32
 foreign import ccall unsafe "thc_remote_random" c_random :: Ptr Word8 -> Word32 -> IO Word32
 foreign import ccall unsafe "thc_remote_hmac" c_hmac :: Ptr Word8 -> Ptr Word8 -> Word32 -> Ptr Word8 -> IO Word32
+
+spawnDetached :: FilePath -> [String] -> FilePath -> IO ProcessHandle
+spawnDetached executable args logfile = withCWString executable $ \application ->
+  withCWString (unwords (map translate (executable:args))) $ \command ->
+  withCWString logfile $ \logPath -> alloca $ \result -> do
+    c_spawn application command logPath result >>= checkWindows "Start persistent remote process outside SSH job"
+    handle <- peek result
+    mkProcessHandle handle False nullPtr
 
 checkWindows :: String -> Word32 -> IO ()
 checkWindows context code = unless (code==0) (failure (context++": Windows error "++show code))
@@ -140,6 +152,13 @@ withEndpointListener path action = bracket (N.socket N.AF_INET N.Stream N.defaul
         unless (sameBytes response expected) (failure "Remote endpoint client authentication failed")
   action sock authenticate `finally` removeFile path
 #else
+spawnDetached :: FilePath -> [String] -> FilePath -> IO ProcessHandle
+spawnDetached executable args logfile = withBinaryFile "/dev/null" ReadWriteMode $ \nullHandle ->
+  withBinaryFile logfile WriteMode $ \logHandle -> do
+    (_,_,_,child) <- createProcess (proc executable args)
+      {std_in=UseHandle nullHandle,std_out=UseHandle nullHandle,std_err=UseHandle logHandle,close_fds=True,new_session=True}
+    pure child
+
 randomBytes :: Int -> IO BS.ByteString
 randomBytes n = withBinaryFile "/dev/urandom" ReadMode $ \h -> do
   bytes <- BS.hGet h n

@@ -106,22 +106,7 @@ runRemoteRelay args = handle report $ do
       let (options,paths)=break (=="--") (if null startup then args else startup)
           daemonArgs=options++["--remote-daemon",session]++paths
       let logfile=path++".log"
-#ifdef mingw32_HOST_OS
-          nullDevice="NUL"
-#else
-          nullDevice="/dev/null"
-#endif
-      process <- withBinaryFile nullDevice ReadWriteMode $ \nullHandle ->
-        withBinaryFile logfile WriteMode $ \logHandle -> do
-          (_,_,_,child) <- createProcess (proc executable daemonArgs)
-            {std_in=UseHandle nullHandle,std_out=UseHandle nullHandle,std_err=UseHandle logHandle,close_fds=True,
-#ifdef mingw32_HOST_OS
-             create_group=True,detach_console=True
-#else
-             new_session=True
-#endif
-            }
-          pure child
+      process <- spawnDetached executable daemonArgs logfile
       void (forkWait process)
       let startupFailure reason = do
             detail <- (withBinaryFile logfile ReadMode $ \logHandle -> do

@@ -163,3 +163,54 @@ uint32_t thc_remote_hmac(const uint8_t *key48, const uint8_t *message, uint32_t 
     CryptReleaseContext(provider, 0);
     return error;
 }
+
+/* A daemon must leave the SSH job and inherit only its private log/null handles.
+ * Merely detaching the console leaves it subject to SSH's kill-on-close job. */
+uint32_t thc_remote_spawn(const wchar_t *application, wchar_t *command, const wchar_t *log_path, void **process) {
+    PrivateSecurity security;
+    DWORD error = private_security(&security);
+    HANDLE null_handle = INVALID_HANDLE_VALUE, log_handle = INVALID_HANDLE_VALUE;
+    STARTUPINFOEXW startup;
+    PROCESS_INFORMATION child;
+    SIZE_T attribute_size = 0;
+    int attributes_ready = 0;
+    *process = NULL;
+    memset(&startup, 0, sizeof(startup));
+    memset(&child, 0, sizeof(child));
+    if (error) goto done;
+    security.attributes.bInheritHandle = TRUE;
+    null_handle = CreateFileW(L"\\\\.\\NUL", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                              &security.attributes, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (null_handle == INVALID_HANDLE_VALUE) { error = GetLastError(); goto done; }
+    log_handle = CreateFileW(log_path, GENERIC_WRITE | READ_CONTROL, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                             &security.attributes, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    if (log_handle == INVALID_HANDLE_VALUE) { error = GetLastError(); goto done; }
+    error = check_private(log_handle, security.user->User.Sid, 0);
+    if (error) goto done;
+    LARGE_INTEGER beginning; beginning.QuadPart = 0;
+    if (!SetFilePointerEx(log_handle, beginning, NULL, FILE_BEGIN) || !SetEndOfFile(log_handle)) { error = GetLastError(); goto done; }
+    InitializeProcThreadAttributeList(NULL, 1, 0, &attribute_size);
+    startup.lpAttributeList = malloc(attribute_size);
+    if (!startup.lpAttributeList) { error = ERROR_NOT_ENOUGH_MEMORY; goto done; }
+    if (!InitializeProcThreadAttributeList(startup.lpAttributeList, 1, 0, &attribute_size)) { error = GetLastError(); goto done; }
+    attributes_ready = 1;
+    HANDLE inherited[] = {null_handle, log_handle};
+    if (!UpdateProcThreadAttribute(startup.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+                                    inherited, sizeof(inherited), NULL, NULL)) { error = GetLastError(); goto done; }
+    startup.StartupInfo.cb = sizeof(startup);
+    startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    startup.StartupInfo.hStdInput = startup.StartupInfo.hStdOutput = null_handle;
+    startup.StartupInfo.hStdError = log_handle;
+    if (!CreateProcessW(application, command, NULL, NULL, TRUE,
+                         CREATE_BREAKAWAY_FROM_JOB | DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | EXTENDED_STARTUPINFO_PRESENT,
+                         NULL, NULL, &startup.StartupInfo, &child)) { error = GetLastError(); goto done; }
+    CloseHandle(child.hThread);
+    *process = child.hProcess;
+done:
+    if (attributes_ready) DeleteProcThreadAttributeList(startup.lpAttributeList);
+    free(startup.lpAttributeList);
+    if (null_handle != INVALID_HANDLE_VALUE) CloseHandle(null_handle);
+    if (log_handle != INVALID_HANDLE_VALUE) CloseHandle(log_handle);
+    free_security(&security);
+    return error;
+}
