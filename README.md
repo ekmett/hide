@@ -261,7 +261,7 @@ straight top edge into the speaker's tail. SDL uses single-cell bitmap tiles;
 terminal fonts use block-character approximations. Code keeps syntax colors,
 and **Copy raw conversation** preserves the original Markdown.
 
-The draft is a cyan thought bubble anchored on the right with an `o.` trail.
+The draft is a cyan thought bubble anchored on the right with an `•.` trail.
 Its width follows the longest line, with room for the caret and a twelve-column
 minimum, capped by the window width. It starts
 at one line, grows with newlines up to twelve visible rows, and scrolls beyond that,

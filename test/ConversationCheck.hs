@@ -212,7 +212,7 @@ checks = bracket temporary removePathForcibly $ \root ->
           applyEvent event desktop=let (next,effects)=handleEvent event desktop in snd <$> conversationEffects runtime fallback next effects
       check "composer is a compact thought bubble without buttons or divider"
         (height (composerRect cancelled window)==1 && height (composerRect multiline window)==2 && width (composerRect multiline window)==12 &&
-         "o." `T.isInfixOf` snapshot multiline && not (" Query " `T.isInfixOf` T.intercalate "\n" (init (T.lines (snapshot multiline)))))
+         "•." `T.isInfixOf` snapshot multiline && not (" Query " `T.isInfixOf` T.intercalate "\n" (init (T.lines (snapshot multiline)))))
       let sized text=composerRect (cancelled {composerBuffer=newBuffer text}) window
           edge r=left r+width r
           available=width (bounds window)-6

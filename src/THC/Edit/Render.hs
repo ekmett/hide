@@ -154,7 +154,7 @@ windowLayers d active w =
           | width rect<=0 || height rect<=0 = []
           | otherwise = [place (left rect-1) (top rect) (edgeImage True),
                          place (left rect+width rect) (top rect) (edgeImage False),
-                         place (left rect+width rect+1) (top rect) (label (attr scrollCyan blue) "o.")]
+                         place (left rect+width rect+1) (top rect) (label (attr scrollCyan blue) "•.")]
         edgeImage leftSide=V.vertCat
           [V.char (if corner then attr scrollCyan blue else attr black scrollCyan)
             (if corner then bubbleTile (videoMode d/=Nothing) shape else ' ')
