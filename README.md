@@ -213,8 +213,10 @@ applied to keep text legible (below scale 2 in Mode 3 or scale 4 in Mode 259).
 **File > Change dir...** selects a new working directory and refreshes the Files
 window without closing your buffers. Enter on a directory browses into it;
 OK accepts the displayed directory, and Browse opens a typed path.
-The Files window has a double frame and scrollbar, sharing its right edge with
-adjacent editor windows. Drag its bottom-right corner to resize the dock; editors
+The Files pane has a floating title and collapse arrow, with an internal scrollbar.
+Its right edge belongs to adjacent windows; uncovered portions use a single white
+line on blue. Unsaved filenames are red and return to normal after save or undo.
+Drag the shared edge to resize the dock; editors
 move with it until their right edge reaches the screen, then stay attached there
 and resize as the divider moves. Status-bar key labels are clickable shortcuts and highlight
 green under the pointer. Ctrl+Tab cycles windows; Alt+Tab cycles the menu,

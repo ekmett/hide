@@ -10,6 +10,10 @@ import THC.Edit.Browser (Entry(..))
 import THC.Edit.Files (FileState(..))
 import qualified Data.Text as T
 import qualified Graphics.Vty as V
+import THC.Edit.Unicode (displayOpsForPic)
+import Graphics.Vty.Span (SpanOp(..))
+import Data.Foldable (toList)
+import qualified Data.Text.Lazy as TL
 
 checks :: IO ()
 checks = do
@@ -229,7 +233,7 @@ checks = do
   check "Messages shares the window number pool" (messagesNumber withMessages==Just 3 && fmap windowNumber (activeWindow numberedAgain)==Just 4)
   check "Alt number activates Messages and then source" (problemsFocused messagesActivated && not (problemsFocused sourceActivated) && fmap windowNumber (activeWindow sourceActivated)==Just 2)
   check "hiding Messages releases its number" (messagesNumber (setProblemsVisible False withMessages)==Nothing && nextWindowNumber (setProblemsVisible False withMessages)==3)
-  check "focused Messages uses white frame on cyan" ("color:rgb(255,255,255);background:rgb(0,170,170)'> Messages " `T.isInfixOf` snapshotHtml messagesActivated)
+  check "focused Messages uses white frame on cyan" (or [" Messages " `T.isInfixOf` TL.toStrict text && V.attrForeColor a==V.SetTo (V.RGBColor 255 255 255) && V.attrBackColor a==V.SetTo (V.RGBColor 0 170 170) | row<-toList (displayOpsForPic (renderDesktop messagesActivated) (screenSize messagesActivated)),TextSpan{textSpanAttr=a,textSpanText=text}<-toList row])
   let secondProblem=Diagnostic "/project/Other.hs" Nothing 0 0 1 "Other error"
       messages=source {diagnostics=[problem,secondProblem]}
       (_,firstMessage)=handleEvent (V.EvKey (V.KFun 8) [V.MAlt]) messages
