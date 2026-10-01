@@ -15,8 +15,8 @@ thc-edit --web .
 ```
 
 `--window` selects Metal on macOS and Vulkan elsewhere. `--metal` and `--vulkan`
-choose explicitly. `THC_EDIT_BACKEND` sets the default; without it, the editor
-uses the terminal. Native and browser builds need their respective
+choose explicitly. `THC_EDIT_BACKEND` overrides the backend in
+[configuration](configuration.md); without either, the editor uses the terminal. Native and browser builds need their respective
 [installation flags](install.md).
 
 The native window and browser use the bundled bitmap font for its repertoire

@@ -121,3 +121,16 @@ resumes may continue the session without replaying its earlier messages.
 
 See [Git](git.md) to review the resulting saved changes and [running](running.md)
 to use the terminal alongside the conversation.
+
+## Give the agent standing context
+
+Use **Options > Agent Context** to edit global or project guidance in TOML. Global
+context applies across projects; a project's `thc.toml` adds its own instructions.
+Save before sending a query or steering message. The editor supplies changed
+context without adding it as a visible user bubble. The guest can read the
+effective guidance but cannot rewrite it. See [Agent context](configuration.md#agent-context)
+for the format and precedence.
+
+Agents receive a small [skill catalog](agent-skills.md) on their first query and
+can load task workflows through the documentation tools. The
+[operation reference](agent-tools.md) gives the corresponding calls by category.

@@ -9,3 +9,6 @@ __pycache__/
 .env
 .env.*
 !.env.example
+
+# Generated documentation and its independent Cabal build.
+build/

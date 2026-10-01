@@ -86,12 +86,18 @@ account’s access. UI privacy masks are not an OS execution sandbox.
 
 | Tool | Kind | Arguments | Result / contract |
 | --- | --- | --- | --- |
-| `debug_status` | R | `{}` | Adapter readiness, stopped state, generation, selected frame, capabilities, breakpoints, recent output |
+| `debug_status` | R | `{}` | Adapter readiness, stopped state, generation, selected frame, follow mode, capabilities, breakpoints, recent output |
+| `debug_present` | W | `follow?`, `view?`, `generation?` | Set automatic UI following; reveal `source`, `stack`, `scopes` or `output` from the shared session |
 | `debug_launch` | X | `adapterConfig?`, `port?` | Configured THC target or general DAP JSON config; refuses an already active session |
 | `debug_attach` | X | `host?`, `port?` | Loopback adapter; defaults to `127.0.0.1:4711` |
 | `debug_control` | X | `generation`, `command` | `continue`, `next`, `stepIn`, `stepOut`, `pause`, `disconnect`; acceptance is not a stop |
 | `debug_set_breakpoints` | W | `generation`, `bufferId`, `lines` | Replace that buffer’s source breakpoint set; pending/verified state, `sourceModified` |
 | `debug_inspect` | R | `generation`, `request`, `threadId?`, `frameId?`, `variablesReference?`, `sourceReference?`, `start?`, `count?` | `threads`, `stackTrace`, `scopes`, `variables`, `source`; handles depend on request |
+
+`follow: false` keeps automatic stops in the background. `follow: true` follows
+future stops. An explicit `view` requires current `generation`; source/stack/scopes
+require a stopped, configured session. Reveal a view without changing follow
+mode by omitting `follow`. This does not launch or resume a separate debugger.
 
 Refresh generation after execution changes. Stack/variable inspection requires
 a stopped target. Inspection pages default to 100 entries, maximum 1000.
@@ -106,8 +112,10 @@ Breakpoints use 1-based lines, at most 1000. See the
 | `workspace_git` | R | `view`, `path?` | `status` or `diff`; disk changes and unsaved buffers reported separately |
 
 Diff text is capped at 128 Ki characters. A path filter is a literal file path,
-not a Git glob/magic pathspec. Whole-repository diffs containing private authority
-paths are refused; choose safe files individually. `workspace_search` with
+not a Git glob/magic pathspec. Whole-repository diffs omit private authority files and Git-detected rename/copy
+destinations derived from them; `omittedFiles` reports a count without their names. Guest mouse/key input cannot
+open the unrestricted human Git review or commit dialog; use `workspace_git`
+for filtered review. `workspace_search` with
 `trackedOnly: true` searches tracked source. Dedicated Git mutations and
 commit-history search are not part of this tool.
 
@@ -167,7 +175,7 @@ prevent OS export even after queueing succeeds.
 | Tool | Kind | Arguments | Result / contract |
 | --- | --- | --- | --- |
 | `ask_user` | Q | `question`, `choices?`, `allowMultiple?` | One inline question, optional single-choice answers, always free text; waits for human |
-| `agent_settings` | R | `{}` | Public provider/model/config choices, connection/steering state and context usage |
+| `agent_settings` | R | `{}` | Public provider/model/config choices, connection/steering state, context usage and global/project guidance |
 | `editor_settings` | W | `settings?`, `defaults?` | Read current state, change session settings or merge future startup defaults |
 
 Questions: 1–4096 characters; up to 12 choices of 1–256 characters;
@@ -204,7 +212,9 @@ The host applies Enable/Prompt/Disable per invocation, including previously
 discovered tools. Policies live in `[editor.mcp.permissions]` in
 `$XDG_CONFIG_HOME/thc/config.toml`, falling back to `~/.config/thc/config.toml`.
 Startup defaults use `[editor.defaults]`; precedence is CLI → environment →
-configuration. See [configuration](configuration.md).
+project defaults → global configuration. Project `thc.toml` can set defaults
+and agent context, but cannot override global permissions. See
+[configuration](configuration.md).
 
 A pending approval can be cancelled; cancellation does not undo an operation
 already executed. Long-running questions, HLS and debugger replies release the

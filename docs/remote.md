@@ -7,28 +7,24 @@ provider run on the project host. Display, clipboard and downloads stay local.
 ## Install on both machines
 
 The remote host needs `thc-edit` on the `PATH` used by SSH commands. Sessions
-and remote editing are included in the default build:
+and remote editing are always included. A minimal server installation omits
+client frontends and embedded terminals:
 
 ```sh
-cabal install exe:thc-edit
+cabal install exe:thc-edit -f-window -f-web -f-terminal
 ```
 
 It does not need SDL, a browser, a graphical session or the THC compiler for
 editing. Install HLS, Git, THC and a conversation provider there for the
 corresponding workflows.
 
-The default local build includes the terminal client. For a native window:
-
-```sh
-cabal install exe:thc-edit -fwindow
-```
-
-For a browser client, replace `-fwindow` with `-fweb`. Keep the two installations
-on compatible revisions of the remote protocol.
+The default local build includes terminal, native-window and browser clients.
+Keep both installations on compatible revisions of the remote protocol.
 
 The remote endpoint has POSIX and native Windows implementations. Native window
-and browser frontend dependencies belong to the client. Embedded terminals on
-the server additionally need `-fterminal` and the current POSIX PTY backend.
+and browser frontend dependencies belong to the client. For embedded terminals
+on a POSIX server, keep `terminal` enabled and install libghostty-vt; omit only
+`window` and `web`. Native Windows builds omit the POSIX PTY backend.
 
 ## Open a project
 

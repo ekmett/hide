@@ -44,6 +44,11 @@ Editor positions are 1-based Unicode character positions. Raw LSP results retain
 
 Use `debug_set_breakpoints`, `debug_control` and `debug_inspect` to set source breakpoints, continue/step/pause, and inspect threads, stack frames, scopes, variables and adapter-owned source. Handles belong to a debug generation; the tool rejects them after execution advances. An accepted control command does not imply that the program has reached its next stop.
 
+`debug_present` controls visibility independently of execution. Set `follow: false`
+for background stops, then reveal `source`, `stack`, `scopes` or `output` using
+the current generation. Set `follow: true` to follow future stops. The user and
+guest share the same debugger; revealing a stop does not restart the program.
+
 The [debugging skill](../skills/debug-editor/SKILL.md) is also available to MCP clients through `resources/read` at `thc-edit://debugging`.
 
 ## See what is on screen
@@ -65,7 +70,10 @@ or drag state; guest gestures can span events within that batch.
 
 `editor_settings` reads current display/editing settings as JSON. Supply `settings` to change this session or `defaults` to save startup defaults for future sessions. These cover appearance, screen mode and dimensions, WordStar keys, cursor blinking, CRT filtering and Unicode/icon rendering; startup defaults also include backend and scale. `streamerMode` is reported read-only. `agent_settings` exposes the provider
 executable, environment variable names, model choices and context usage;
-argument values, environment values and session keys are omitted.
+argument values, environment values and session keys are omitted. It also reports
+the global/project context supplied by the user. **Options > Agent Context** opens
+the selected TOML for editing; saved changes reach the next query or steering
+message. See [configuration](configuration.md#agent-context).
 
 `docs_list`, `docs_search` and `docs_read` provide the editor manual and Turbo Haskell compiler documentation. Select the `editor` or `thc` corpus. Compiler documentation comes from the configured THC checkout (`THC_ROOT` or the project's THC build configuration). Reads return line numbers and heading information, so the guest can cite a particular section.
 

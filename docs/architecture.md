@@ -89,7 +89,7 @@ editor state. Clients share the adaptive display compression above.
 
 POSIX hosts use a private Unix socket; Windows uses an authenticated loopback
 endpoint with an owner-only descriptor. One frontend controls a session at a
-time. Read-only editor introspection uses separate connections without taking
+time. MCP requests use separate connections without taking
 over the display. Reattachment resets the display, and sequenced input avoids
 repeating acknowledged edits.
 
@@ -101,9 +101,11 @@ or host reboot. [Sessions](sessions.md) explains resumption and frontend switchi
 ## Integration boundaries
 
 HLS, ACP providers and DAP servers use their existing protocols. ACP sessions
-receive the built-in editor MCP server automatically. Its read-only tools inspect
-windows, buffers and selections directly from the live desktop, including
-unsaved text and hex buffers. Rename and
+receive the built-in editor MCP server automatically. Its [session tools](session-tools.md)
+read and edit live buffers, arrange windows, inspect language/debug state, and
+share build and terminal services. Per-tool policies apply before dispatch.
+Initiation runs under the desktop lock; protocol replies and user questions wait
+outside it. Rename and
 editor-mediated conversation writes check the buffer and disk versions before
 applying changes. Git review fingerprints the saved repository and index before
 staging and committing. Embedded shells and ACP terminal requests share the

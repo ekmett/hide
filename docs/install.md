@@ -1,15 +1,17 @@
 # Installation
 
-Build the frontend you want to use. The editor is a standalone executable;
+All supported frontends are enabled by default. The editor is a standalone executable;
 editing, HLS, Git and conversations do not require the THC compiler or runtime.
 
 ## Build the editor
 
 You need GHC 9.6 or newer, Cabal, `pkg-config` and the development files for
-utf8proc 2.10 or newer. On macOS:
+utf8proc 2.10 or newer, SDL3 3.2 or newer, and libghostty-vt on POSIX.
+Set up Ghostty using the [embedded terminal instructions](#embedded-terminal)
+below before building, or omit it with `-f-terminal`. On macOS:
 
 ```sh
-brew install utf8proc
+brew install utf8proc sdl3
 ```
 
 On Debian/Ubuntu, the package is `libutf8proc-dev`; check that your distribution
@@ -22,7 +24,8 @@ cabal build all
 cabal run thc-edit -- .
 ```
 
-The default build runs in a UTF-8 terminal. An 80-column, 25-row terminal is a
+The default build includes terminal, native-window and browser displays.
+Without a display option, the editor runs in a UTF-8 terminal. An 80-column, 25-row terminal is a
 useful starting size. Mouse support, modified keys and exact colors follow the
 terminal's capabilities.
 
@@ -38,11 +41,11 @@ appropriate build flags before `thc-edit`.
 
 ## Native window
 
-Enable the `window` flag and install SDL3 3.2 or newer. On macOS:
+Native windows are enabled by default. Install SDL3 3.2 or newer. On macOS:
 
 ```sh
 brew install sdl3
-cabal run -fwindow thc-edit -- --window .
+cabal run thc-edit -- --window .
 ```
 
 `--window` chooses Metal on macOS and Vulkan elsewhere. `--metal` and `--vulkan`
@@ -50,18 +53,18 @@ select them explicitly. Linux window builds also need Pango/Cairo development
 headers (`libpango1.0-dev` on Debian/Ubuntu). `fonts-noto-color-emoji` supplies
 color emoji where a fallback font is needed. macOS uses CoreText.
 
-To keep this frontend in an installed build:
+An installed build includes this frontend too:
 
 ```sh
-cabal install exe:thc-edit -fwindow --installdir="$HOME/.local/bin"
+cabal install exe:thc-edit --installdir="$HOME/.local/bin"
 ```
 
 ## Browser
 
-The browser frontend needs the `web` flag and no SDL installation:
+The browser frontend is enabled by default:
 
 ```sh
-cabal run -fweb thc-edit -- --web .
+cabal run thc-edit -- --web .
 ```
 
 It opens a WebGL page served by the editor on an ephemeral loopback port. Keep
@@ -80,14 +83,22 @@ the URL without opening a browser automatically.
 | Compile, build, or run Haskell | THC, or GHC and Cabal; add the terminal build for interactive programs. See [running](running.md). |
 | Remote editing | `thc-edit` on both machines; see [remote editing](remote.md) |
 
-Sessions and SSH editing are part of the default build. The optional flags select
-native windows (`-fwindow`), the browser (`-fweb`) and embedded terminals
-(`-fterminal`) independently.
+Build flags are opt-out: `-f-window` omits SDL/native windows, `-f-web` omits
+the browser server, and `-f-terminal` omits Ghostty/embedded terminals. For a
+minimal terminal-display or remote-server build:
+
+```sh
+cabal build all -f-window -f-web -f-terminal
+```
+
+This still includes sessions, SSH editing, HLS, Git and conversations. A
+browser-only build can use `-f-window -f-terminal`, avoiding both native libraries.
 
 ## Embedded terminal
 
-The optional `terminal` flag enables **File > Terminal**, **Run > Run** and ACP
-terminal requests through libghostty-vt. The current PTY backend requires POSIX.
+Embedded terminals enable **File > Terminal**, **Run > Run** and ACP
+terminal requests through libghostty-vt. They are enabled by default on POSIX;
+native Windows builds omit this POSIX PTY backend.
 It works independently of SDL.
 
 The Ghostty C API is evolving. The verified source revision is
@@ -100,11 +111,11 @@ git checkout 76895d97b74ff6b24c2b1543bcd69ccc18048a4d
 zig build -Demit-lib-vt=true -Demit-xcframework=false -Doptimize=ReleaseFast --prefix /tmp/thc-ghostty-install
 cd /path/to/thc-edit
 export PKG_CONFIG_PATH=/tmp/thc-ghostty-install/share/pkgconfig:$PKG_CONFIG_PATH
-cabal run -fwindow -fterminal --ghc-options=-optl-Wl,-rpath,/tmp/thc-ghostty-install/lib thc-edit -- --window .
+cabal run --ghc-options=-optl-Wl,-rpath,/tmp/thc-ghostty-install/lib thc-edit -- --window .
 ```
 
 Keep the installed Ghostty library available at runtime, or use your system's
-normal library installation path. A build without `terminal` can still edit,
+normal library installation path. A build with `-f-terminal` can still edit,
 use HLS, review Git changes and hold conversations.
 
 ## Bash completion
@@ -129,7 +140,9 @@ Add the command to your Bash startup file to enable it in future shells.
 | `THC_EDIT_HLS` | Alternate HLS executable |
 | `THC_ROOT` | Default source/build root in Run > Target |
 
-Explicit frontend, scale and appearance options override these defaults.
+Environment variables override `[editor.defaults]` in the shared
+[configuration file](configuration.md). Explicit frontend, scale and appearance
+options override both.
 For example, `thc-edit --terminal .` overrides a configured graphical frontend.
 `thc-edit --help` lists the command-line options. [Display and frontends](display.md)
 covers screen modes and interactive preferences.
@@ -137,5 +150,6 @@ covers screen modes and interactive preferences.
 Provider and Run target settings are stored in the user's `thc-edit`
 configuration directory, normally `$XDG_CONFIG_HOME/thc-edit` or
 `~/.config/thc-edit` on Unix. Appearance and key preferences can be changed for
-the running editor under **Options > Preferences**; use startup flags or the
-environment variables above for repeatable launches.
+the running editor under **Options > Preferences**. Shared startup defaults and
+Agent Permissions live separately in `thc/config.toml`; use that file for
+repeatable launches across projects.

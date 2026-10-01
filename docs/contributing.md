@@ -12,15 +12,14 @@ cabal build all
 cabal test
 ```
 
-Use the same flags for the optional components you are changing:
+Native windows, browser support and POSIX embedded terminals are enabled by
+default. [Installation](install.md) covers their native dependencies. To omit
+components, use the same opt-out flags for build and test:
 
 ```sh
-cabal build all -fwindow -fweb
-cabal test -fwindow -fweb
+cabal build all -f-window -f-web -f-terminal
+cabal test -f-window -f-web -f-terminal
 ```
-
-Add `-fterminal` when libghostty-vt is available. [Installation](install.md)
-covers the native dependencies.
 
 The test suite replays the desktop's pure transitions and checks files using
 real temporary directories, including encoding, permissions, symlinks and
@@ -80,6 +79,20 @@ The module filenames above are under `src/THC/Edit/` unless a directory is shown
 [Architecture](architecture.md) explains how they fit together.
 
 ## Documentation and attribution
+
+Build the documentation site with Pandoc and the separate Haskell generator:
+
+```sh
+make docs
+make docs-check
+```
+
+The site is written to `build/site`. The generator builds independently of the
+editor and checks local links, fragments and revision-pinned source links.
+The Documentation workflow rebuilds and publishes every push to `main` at
+[ekmett.github.io/thc-edit](https://ekmett.github.io/thc-edit/). It can also be
+started manually from GitHub Actions.
+
 
 Keep the [README](../README.md) useful both on GitHub and as F1 Help. Put detailed
 workflows in the [user guide](README.md), and keep design history in `design/`

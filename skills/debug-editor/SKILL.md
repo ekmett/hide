@@ -14,6 +14,12 @@ The `editor` MCP server controls the live editor session. Its tools share the us
 5. While stopped, use `debug_inspect` to read threads, stack traces, scopes and variables. Page large results with `start` and `count`. Inspect the selected frame by default, or use a frame returned by the current stack trace. Source references can identify adapter-owned source buffers without a filesystem path.
 6. Use `debug_control` to continue, step over (`next`), step in, step out, pause or disconnect. Compare the next stopped state and stack with the question being investigated.
 
+To investigate without automatic source navigation, use `debug_present` with
+`follow: false`. At the stop you want to show, request `view: "source"` with the
+current `generation`, or reveal `stack`, `scopes` or `output`. Omit `follow` to
+reveal once without changing mode; set it true to follow future stops. There is
+one shared debugger session, so no state translation or relaunch is necessary.
+
 Live buffers may contain unsaved changes. Breakpoints report `sourceModified`, but this does not rebuild a running program. Save/build deliberately before debugging changed code. THC source stepping may stop more than once on the same line after optimization. An empty scopes result means the adapter supplied no lexical values; do not invent them.
 
 If an inspection times out or becomes stale, refresh status and inspect again. After an uncertain transport failure, check state before retrying a launch or execution command: it may already have run.

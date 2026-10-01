@@ -114,6 +114,12 @@ A breakpoint call replaces the entire set for its source buffer: retain desired
 existing lines. Once stopped, inspect threads → stack trace → scopes → variables.
 Use `debug_control` to continue, step, pause or disconnect, then refresh status.
 
+**Present:** use `debug_present` with `follow: false` to investigate without
+moving the person's source window on each stop. At an interesting stop, send
+`view: "source"` and the current `generation`; `stack`, `scopes` and `output`
+reveal those views. Set `follow: true` to follow future stops automatically.
+The guest and the UI share one debugger, breakpoints and stopped state.
+
 **Check:** accepted execution commands are submissions. Wait for the next
 observed stop before drawing conclusions. Report pending versus verified
 breakpoints and actual values returned by the adapter.
@@ -183,8 +189,8 @@ it does not read the person’s clipboard or confirm frontend permission.
 **Use:** learn the editor/compiler workflow or inspect the current environment.
 
 **Do:** `docs_list` → `docs_search` → `docs_read`, with `corpus: "editor"` or
-`"thc"`. Read `agent_settings` for public provider/model choices and context
-usage. Read `editor_settings` for display/editing state; change `settings` for
+`"thc"`. Read `agent_settings` for public provider/model choices, context
+usage and the global/project guidance supplied by the person. Read `editor_settings` for display/editing state; change `settings` for
 this session or `defaults` for future launches when requested.
 
 **Check:** cite the document and relevant section. Public agent settings are
@@ -207,7 +213,9 @@ that source. The editor corpus indexes its headings and searches its text.
 Use `docs_list` for heading line numbers, then `docs_read` with `startLine` and
 `lineCount` to load one category. Exact calls are in `docs/agent-tools.md`.
 
-A host can include the small “Choose a skill” catalog in initial context and
-fetch the chosen playbook on demand. Merely listing an MCP resource does not
+The ACP conversation supplies a compact skill catalog with the first query on
+each connection, including resumed conversations. Agents fetch the chosen
+playbook on demand. External MCP clients receive a catalog pointer in server
+initialization instructions. Merely listing an MCP resource does not
 ensure the host loads it. Explicit user-selected workflows can also be exposed
 as MCP prompts. Neither mechanism changes the tool permission policy.

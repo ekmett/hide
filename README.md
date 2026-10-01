@@ -1,6 +1,6 @@
 # thc-edit
 
-Turbo Haskell's source editor.
+Turbo Haskell's source editor. [Read the documentation](https://ekmett.github.io/thc-edit/).
 
 I'm building a Haskell environment where source, types, diagnostics, conversations
 and running programs live in the same place. Open a package, follow a definition,
@@ -134,31 +134,27 @@ sessions. The [remote guide](docs/remote.md) covers installation and paths.
 
 ## Build and run
 
-You need GHC 9.6 or newer, Cabal, `pkg-config` and utf8proc 2.10 or newer. On
-macOS, `brew install utf8proc` supplies the latter. From the repository root:
+The default build includes native windows, the browser and embedded terminals
+(on POSIX), along with terminal display and SSH sessions. You need GHC 9.6 or
+newer, Cabal, `pkg-config`, utf8proc 2.10+, SDL3 3.2+ and libghostty-vt.
+[Installation](docs/install.md) covers these dependencies and the Linux font stack.
 
 ```sh
-cabal run thc-edit -- .
-```
-
-For a native window, install SDL3 (`brew install sdl3` on macOS) and enable the
-`window` flag. The browser frontend uses the `web` flag and needs no SDL:
-
-```sh
-cabal run -fwindow thc-edit -- --window .
-cabal run -fweb thc-edit -- --web .
-```
-
-`--window` selects Metal on macOS and Vulkan elsewhere. To install the executable
-on your path:
-
-```sh
+cabal run thc-edit -- --window .
+cabal run thc-edit -- --web .
 cabal install exe:thc-edit --installdir="$HOME/.local/bin"
 ```
 
-Add `-fwindow` or `-fweb` for those displays. Sessions and SSH editing are included
-in the default build. [Installation](docs/install.md) covers Linux dependencies,
-optional tools and the embedded terminal.
+`--window` selects Metal on macOS and Vulkan elsewhere. Build flags are opt-out:
+`-f-window`, `-f-web` and `-f-terminal` omit individual components. A minimal
+terminal-display or remote-server build is:
+
+```sh
+cabal install exe:thc-edit -f-window -f-web -f-terminal
+```
+
+It needs utf8proc but neither SDL nor Ghostty. Sessions and SSH editing remain
+available in every build.
 
 ## Finding your way around
 
