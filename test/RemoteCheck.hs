@@ -100,6 +100,13 @@ checks = do
       writePacket second (JsonPacket (object ["type" .= ("command"::T.Text),"seq" .= (2::Int),"command" .= ("selectAll"::T.Text)]))
       ack second 2
       writePacket second (JsonPacket (object ["type" .= ("command"::T.Text),"seq" .= (3::Int),"command" .= ("cut"::T.Text)]))
+      -- Lose the reply after commitment, not the input before acceptance. An
+      -- immediate full-duplex close may discard the write on some platforms.
+      let cutCommitted = do
+            current <- readIORef observed
+            unless (T.null (activeText current)) (threadDelay 1000 >> cutCommitted)
+      committed <- timeout 3000000 cutCommitted
+      assert "Cut commits before its unread reply is dropped" (committed==Just ())
     threadDelay 100000
     bracket open hClose $ \recovered -> do
       resumed <- attach recovered client 0

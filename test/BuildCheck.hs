@@ -45,7 +45,7 @@ checks = bracket temporary removePathForcibly $ \root -> do
   writeFile (root </> "fixture.cabal") "name: fixture\n"
   check "Cabal project builds with selected compiler" . (==Right [("cabal",["build","--with-compiler=ghc"])]) =<< B.buildPlan B.Make ghc root (Just file)
   removeFile (root </> "fixture.cabal")
-  check "path spaces and warning location" (parseBuildDiagnostic root "src/My File.hs:12:3: warning: unused name" == Just (Diagnostic (root </> "src/My File.hs") Nothing 11 2 2 "warning: unused name"))
+  check "path spaces and warning location" (parseBuildDiagnostic root "src/My File.hs:12:3: warning: unused name" == Just (Diagnostic (root </> "src" </> "My File.hs") Nothing 11 2 2 "warning: unused name"))
   python<-findExecutable "python3" >>= maybe (findExecutable "python") (pure . Just)
   forM_ python $ \command -> withBuildJobs $ \jobs -> do
     started<-startBuildJob jobs "Make" root [(command,["-u","-c","import sys,time; print('live λ',flush=True); time.sleep(.25); print('Main.hs:2:1: error: fixture',file=sys.stderr); sys.exit(3)"])] initial
