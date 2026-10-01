@@ -3,7 +3,7 @@ module THC.Edit.AgentHub
   ( AgentHub, AgentId(..), Actor(..), HubLimits(..), SpawnSpec(..), Context(..), Workspace(..)
   , AgentDriver(..), DriverEvent(..), StartProvider, StartRequest(..), PrivateSource(..), HubMessage(..)
   , Capabilities(..), ConfigChoice(..), parseCapabilities
-  , newAgentHub, newAgentHubWithLimits, closeAgentHub, spawnAgent, registerAgent, updateExternalAgent, setExternalAgentBusy, renameAgent
+  , newAgentHub, newAgentHubWithLimits, closeAgentHub, spawnAgent, reconnectAgent, registerAgent, updateExternalAgent, setExternalAgentBusy, renameAgent
   , listAgents, statusAgent, sendAgent, waitAgent, cancelAgent, endAgent
   , historyAgent, searchAgentHistory, recordAgentEvent, snapshotHub, restoreHub, restoreHubWithLimits
   ) where
@@ -45,7 +45,7 @@ data Capabilities = Capabilities { supportsFork :: Bool, supportsResume :: Bool,
 -- Only the trusted launcher and protected persistence see provider session keys.
 data PrivateSource = PrivateSource { sourceAgent :: AgentId, sourceSessionKey :: Text } deriving (Eq,Show)
 data StartRequest = StartRequest
-  { startAgent :: AgentId, startOwner :: Actor, startSpec :: SpawnSpec, startSource :: Maybe PrivateSource }
+  { startAgent :: AgentId, startOwner :: Actor, startSpec :: SpawnSpec, startSource :: Maybe PrivateSource, startResume :: Maybe Text }
   deriving (Eq,Show)
 data HubMessage = HubMessage
   { messageTicket :: Int, messageAuthor :: Actor, messageText :: Text, messageIsUserSeat :: Bool }
@@ -178,7 +178,7 @@ spawnAgent hub@(AgentHub readLimits launcher _) actor spec=mask $ \restore->do
     Right (entry,source)->do
       let ident=entryId entry
           abort=failStart hub ident "Agent startup cancelled."
-      started<-restore (safeCall (launcher (StartRequest ident actor (entrySpec entry) source) (recordDriverEvent hub ident))) `onException` abort
+      started<-restore (safeCall (launcher (StartRequest ident actor (entrySpec entry) source Nothing) (recordDriverEvent hub ident))) `onException` abort
       case started of
         Left err->failStart hub ident err >> pure (Left err)
         Right driver->do
@@ -188,6 +188,52 @@ spawnAgent hub@(AgentHub readLimits launcher _) actor spec=mask $ \restore->do
             Right configuredDriver->do
               accepted<-installDriver hub ident configuredDriver
               if not accepted then stopQuiet driver >> pure (Left "Agent ended during startup.") else pure (Right ident)
+
+-- Only the human-facing host calls this hook; it is absent from agent tools.
+-- Reserve under the same STM lock as spawn, retaining identity and history.
+reconnectAgent :: AgentHub -> AgentId -> IO (Either Text ())
+reconnectAgent hub@(AgentHub readLimits launcher ref) ident=mask $ \restore->do
+  previous<-M.lookup ident . hubEntries <$> readTVarIO ref
+  loaded<-case previous of
+    Just entry->restore (safeCall (readLimits (spawnDirectory (entrySpec entry))))
+    Nothing->pure (Left "Unknown agent.")
+  reserved<-atomically $ do
+    state<-readTVar ref
+    case loaded >>= checkedLimits >>= \limits->do
+      unless (not (hubClosed state)) (Left "Agent directory is closed.")
+      entry<-maybe (Left "Unknown agent.") Right (M.lookup ident (hubEntries state))
+      unless (entryPhase entry==Recovered && not (entryExternal entry)) (Left "Select a recovered child agent to reconnect.")
+      key<-maybe (Left "No saved provider session is available.") Right (entryKey entry)
+      unless (supportsResume (entryCaps entry)) (Left "The saved provider does not support session loading.")
+      unless (length (filter active (M.elems (hubEntries state)))<totalActiveAgents limits) (Left "Total active-agent limit reached.")
+      forM_ (entryParent entry) $ \parent->
+        unless (length [() | other<-M.elems (hubEntries state),entryParent other==Just parent,active other]<directSubagents limits) (Left "Direct sub-agent limit reached.")
+      pure (entry,key,limits) of
+        Left err->pure (Left err)
+        Right (entry,key,limits)->do
+          writeTVar ref state {hubEntries=M.insert ident (appendEvent "reconnecting" Human Null entry {entryPhase=Starting}) (hubEntries state),hubLastLimits=limits}
+          pure (Right (entry,key))
+  case reserved of
+    Left err->pure (Left err)
+    Right (entry,key)->do
+      let failed reason=atomically $ modifyTVar' ref $ \state->state {hubEntries=M.adjust
+            (\current->if entryPhase current `elem` [Starting,Failed] then
+              appendEvent "reconnect_failed" Human (String (boundedError reason)) current {entryPhase=Recovered} else current) ident (hubEntries state)}
+          request=StartRequest ident Human (entrySpec entry) Nothing (Just key)
+      started<-restore (safeCall (launcher request (recordDriverEvent hub ident))) `onException` failed "Agent reconnect cancelled."
+      case started of
+        Left err->failed err >> pure (Left err)
+        Right driver
+          | driverSessionKey driver/=key || driverDirectory driver/=spawnDirectory (entrySpec entry)->do
+              stopQuiet driver
+              failed "Provider changed the recovered session or workspace."
+              pure (Left "Provider changed the recovered session or workspace.")
+          | otherwise->do
+              accepted<-installDriver hub ident driver
+              if accepted then pure (Right ()) else do
+                stopQuiet driver
+                failed "Agent ended or disconnected during reconnect."
+                pure (Left "Agent ended or disconnected during reconnect.")
 
 registerAgent :: AgentHub -> Text -> FilePath -> AgentDriver -> IO (Either Text AgentId)
 registerAgent hub@(AgentHub readLimits _ _) name directory driver=mask $ \restore ->do
@@ -445,7 +491,7 @@ entryValue state entry=object ["id" .= agentIdText (entryId entry),"name" .= spa
   "parentId" .= fmap agentIdText (entryParent entry),"parentName" .= (entryParent entry >>= (fmap (spawnName.entrySpec) . (`M.lookup` hubEntries state))),
   "workspace" .= workspaceValue (spawnWorkspace spec),"status" .= T.toLower (T.pack (show (entryPhase entry))),"cwd" .= spawnDirectory spec,"queued" .= Q.length (entryQueue entry),
   "currentTicket" .= fmap messageTicket (entryCurrent entry),"capabilities" .= capabilitiesValue (entryCaps entry),
-  "reconnectable" .= (entryPhase entry==Recovered && entryKey entry/=Nothing && supportsResume (entryCaps entry)),"historyDropped" .= entryDropped entry,"nextEvent" .= entryNextEvent entry,"humanSeat" .= (entryParent entry==Nothing)]
+  "reconnectable" .= (entryPhase entry==Recovered && not (entryExternal entry) && entryKey entry/=Nothing && supportsResume (entryCaps entry)),"historyDropped" .= entryDropped entry,"nextEvent" .= entryNextEvent entry,"humanSeat" .= (entryParent entry==Nothing)]
   where spec=entrySpec entry
 workspaceValue :: Workspace -> Value
 workspaceValue Shared=object ["mode" .= ("shared"::Text)]

@@ -142,7 +142,7 @@ persistenceChecks root = do
     let record = fresh {sessionId=sid,sessionDirectory=project}
     rememberSession record
     path <- (++".agents.json") <$> checkpointPath sid
-    (primary,child,workspace,oldToken,oldAccess) <- withAgentRuntimeUsing startEditor project launch $ \runtime -> do
+    (primary,child,workspace,oldToken,oldChildToken,oldAccess) <- withAgentRuntimeUsing startEditor project launch $ \runtime -> do
       activateAgentCheckpoint runtime
       let hub = agentHub runtime
       token <- primaryServers runtime >>= serverToken
@@ -167,7 +167,7 @@ persistenceChecks root = do
         _ <- checkpointAgents competing >>= right
         pure ()
       assert "unactivated competing runtime cannot overwrite checkpoint on release" . (==bytes) =<< BS.readFile path
-      pure (primaryAgent runtime,child,workspace,token,agentAccess runtime)
+      pure (primaryAgent runtime,child,workspace,token,childToken,agentAccess runtime)
     assert "closing runtime invalidates old bearer" . (==Nothing) =<< resolveAgentAccess oldAccess oldToken
     before <- BS.readFile logPath
     writeFile (config </> "thc" </> "config.toml") "[broken\n"
@@ -183,6 +183,48 @@ persistenceChecks root = do
       history <- historyAgent (agentHub runtime) Human child 0 100 >>= right
       assert "history survives recovery" ("do-not-replay" `T.isInfixOf` T.pack (show history))
       assert "recovery starts no provider or queued prompt" . (==before) =<< BS.readFile logPath
+      let hub = agentHub runtime
+          rejected label action = action >>= assert label . either (const True) (const False)
+          logged = mapM (either error pure . eitherDecodeStrict') . BS.lines =<< BS.readFile logPath
+      rejected "malformed current policy blocks explicit reconnect" (reconnectAgent hub child)
+      assert "policy rejection starts no provider" . (==before) =<< BS.readFile logPath
+      writeFile (config </> "thc" </> "config.toml") "[editor.agents]\nmax_agents = 1\nmax_subagents = 2\n"
+      rejected "reconnect counts the existing primary toward current capacity" (reconnectAgent hub child)
+      writeFile (config </> "thc" </> "config.toml") "[editor.agents]\nmax_agents = 4\nmax_subagents = 2\n"
+      writeFile (logPath++".load") "unsupported"
+      rejected "reconnect rechecks current provider capabilities" (reconnectAgent hub child)
+      unsupported <- statusAgent hub Human child >>= right
+      assert "unsupported provider leaves child recoverable" (field "status" unsupported==Just ("recovered"::T.Text))
+      writeFile (logPath++".load") "reject"
+      rejected "load failure remains retryable" (reconnectAgent hub child)
+      failedLog <- logged
+      failedToken <- serverToken (concat [servers | entry <- failedLog,field "method" entry==Just ("session/load"::T.Text),
+        Just params <- [field "params" entry :: Maybe Value],Just servers <- [field "mcpServers" params :: Maybe [Value]]])
+      assert "failed load revokes its fresh bearer" . (==Nothing) =<< resolveAgentAccess (agentAccess runtime) failedToken
+      writeFile (logPath++".load") "ok"
+      beforeLoad <- length <$> logged
+      _ <- requestAgentReconnect runtime child >>= right
+      reconnected <- waitRequests runtime
+      assert "host reconnect completes asynchronously" (any (\request -> case request of AgentReconnected who (Right ()) -> who==child; _ -> False) reconnected)
+      current <- statusAgent hub Human child >>= right
+      assert "reconnected child keeps name and identity and starts idle"
+        (field "id" current==Just (agentIdText child) && field "name" current==Just ("recover-child"::T.Text) && field "status" current==Just ("idle"::T.Text))
+      assert "reconnect keeps owned editor and worktree" . (==Just workspace) =<< agentSession runtime child
+      loaded <- drop beforeLoad <$> logged
+      assert "reconnect sends only initialize/load; queued work is not replayed"
+        (map (field "method") loaded==[Just ("initialize"::T.Text),Just "session/load"])
+      freshToken <- serverToken (concat [servers | entry <- loaded,Just params <- [field "params" entry :: Maybe Value],Just servers <- [field "mcpServers" params :: Maybe [Value]]])
+      assert "reconnected child gets a fresh scoped bearer"
+        (freshToken/=oldChildToken && freshToken/=failedToken && freshToken/=token)
+      assert "fresh reconnect bearer maps to original child" . (==Just child) =<< resolveAgentAccess (agentAccess runtime) freshToken
+      assert "old child bearer remains invalid" . (==Nothing) =<< resolveAgentAccess (agentAccess runtime) oldChildToken
+      afterHistory <- historyAgent hub Human child 0 100 >>= right
+      assert "reconnect retains history without provider replay"
+        ("do-not-replay" `T.isInfixOf` T.pack (show afterHistory) && not ("replayed-provider-history" `T.isInfixOf` T.pack (show afterHistory)))
+      rejected "already active child cannot reconnect again" (reconnectAgent hub child)
+      _ <- endAgent hub Human child >>= right
+      assert "ending reconnected child revokes fresh bearer" . (==Nothing) =<< resolveAgentAccess (agentAccess runtime) freshToken
+      rejected "ended child cannot be reconnected" (reconnectAgent hub child)
       forgetSession sid
       _ <- checkpointAgents runtime >>= right
       assert "explicit Exit removes agent sidecar" . not =<< doesFileExist path
@@ -245,8 +287,12 @@ fixture = unlines
   , " q=json.loads(line)"
   , " with open(os.environ['PROBE_LOG'],'a') as f: f.write(json.dumps(q)+'\\n')"
   , " m=q.get('method'); i=q.get('id'); p=q.get('params',{})"
-  , " if m=='initialize': reply(i,{'protocolVersion':1,'agentCapabilities':{}})"
+  , " if m=='initialize': reply(i,{'protocolVersion':1,'agentCapabilities':{'loadSession':not (os.path.exists(os.environ['PROBE_LOG']+'.load') and open(os.environ['PROBE_LOG']+'.load').read()=='unsupported')}})"
   , " elif m=='session/new': reply(i,{'sessionId':sid})"
+  , " elif m=='session/load':"
+  , "  sid=p['sessionId']"
+  , "  if os.path.exists(os.environ['PROBE_LOG']+'.load') and open(os.environ['PROBE_LOG']+'.load').read()=='reject': send({'jsonrpc':'2.0','id':i,'error':{'code':-32000,'message':'Load rejected'}})"
+  , "  else: send({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':sid,'update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'replayed-provider-history'}}}}); reply(i,{})"
   , " elif m=='session/prompt':"
   , "  active=i"
   , "  if 'permission' in json.dumps(p):"

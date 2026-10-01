@@ -147,6 +147,9 @@ checks = bracket temporary removePathForcibly $ \root ->
             tickConversation runtime next
           _ -> error ("Missing inline action "++T.unpack action)
     withConversation $ \runtime -> do
+      agents <- send runtime "directory" [] savedDraft
+      check "Agents directory exposes an explicit reconnect action"
+        (maybe False (elem "Reconnect" . buttons) (dialog agents))
       let recovered=addReadOnly "Conversation" "Recovered user and agent transcript" savedDraft
       idle<-tickConversation runtime recovered
       resized<-tickConversation runtime idle {screenSize=(100,35)}

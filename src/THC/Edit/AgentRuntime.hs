@@ -2,12 +2,12 @@
 module THC.Edit.AgentRuntime
   ( AgentRuntime, AgentRequest(..), withAgentRuntime, withAgentRuntimeUsing
   , agentHub, agentAccess, primaryAgent, primaryServers, drainAgentRequests
-  , syncPrimary, failPendingPrimary, agentSession, checkpointAgents, activateAgentCheckpoint, runtimeNotice
+  , syncPrimary, failPendingPrimary, agentSession, checkpointAgents, activateAgentCheckpoint, runtimeNotice, requestAgentReconnect
   ) where
 
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar
-import Control.Concurrent.Async (withAsync)
+import Control.Concurrent.Async (Async, async, cancel, poll, withAsync)
 import Control.Exception (IOException, bracket, finally, mask, onException, try)
 import Control.Monad (filterM, forM_, forever, unless, void, when)
 import Data.Aeson
@@ -42,12 +42,13 @@ import THC.Edit.Session
 data AgentRequest = DeliverPrimary HubMessage (MVar (Either Text Value))
   | CancelPrimary | EndPrimary
   | ProviderPermission AgentId ACPPermission (MVar (Maybe Text))
+  | AgentReconnected AgentId (Either Text ())
 data AgentRuntime = AgentRuntime
   { agentHub :: AgentHub, agentAccess :: AgentAccess, primaryAgent :: AgentId
   , runtimeState :: MVar RuntimeState, primaryToken :: Text
   , rootSession :: Maybe SessionRecord, configuredLaunch :: IO ACP.Launch
   , checkpointFile :: Maybe FilePath, checkpointWritable :: Bool
-  , checkpointLock :: MVar () }
+  , checkpointLock :: MVar (), reconnectWorkers :: MVar (M.Map AgentId (Async ())) }
 
 -- Reply cells stay filled after consumption so a UI callback can reject a stale
 -- request even when cancellation raced with draining the mailbox.
@@ -116,7 +117,8 @@ withAgentRuntimeUsing openEditor directory getLaunch action = bracket acquire re
         , launches=maybe M.empty savedLaunches recovered
         , notice=(<>" The original checkpoint was retained; agent spawning is disabled.") <$> fault }
       lock <- newMVar ()
-      pure (AgentRuntime hub access ident state token root getLaunch path (fault==Nothing) lock)
+      workers <- newMVar M.empty
+      pure (AgentRuntime hub access ident state token root getLaunch path (fault==Nothing) lock workers)
     release runtime =
       -- The periodic worker is already joined by withAsync. Capture live phases
       -- before driver shutdown; an explicit session Exit removed its catalog.
@@ -126,6 +128,7 @@ withAgentRuntimeUsing openEditor directory getLaunch action = bracket acquire re
         forM_ (deliveries s) (\cell -> void (tryPutMVar cell (Left "Editor closed.")))
         forM_ (concat (M.elems (permissions s))) (\cell -> void (tryPutMVar cell Nothing))
         pure s {closed=True,requests=[]}
+      withMVar (reconnectWorkers runtime) (mapM_ cancel)
       closeAgentHub (agentHub runtime) `finally` do
         ids <- M.keys . sessions <$> readMVar (runtimeState runtime)
         mapM_ (revokeAgentAccess (agentAccess runtime)) (primaryAgent runtime:ids)
@@ -170,6 +173,23 @@ failPendingPrimary runtime = failDeliveries (runtimeState runtime)
 
 agentSession :: AgentRuntime -> AgentId -> IO (Maybe SessionRecord)
 agentSession runtime ident = M.lookup ident . sessions <$> readMVar (runtimeState runtime)
+
+-- Provider initialization runs off the UI thread. Closing the host joins these
+-- workers, so a delayed load cannot outlive its runtime or leave a bearer behind.
+requestAgentReconnect :: AgentRuntime -> AgentId -> IO (Either Text ())
+requestAgentReconnect runtime ident = modifyMVar (reconnectWorkers runtime) $ \workers -> do
+  liveWorkers <- M.filter isRunning <$> traverse (\worker -> (worker,) <$> poll worker) workers
+  stopped <- closed <$> readMVar (runtimeState runtime)
+  let retained = M.map fst liveWorkers
+  if stopped then pure (retained,Left "Editor closed.")
+  else if M.member ident retained then pure (retained,Left "This agent is already reconnecting.")
+  else do
+    worker <- async $ do
+      result <- reconnectAgent (agentHub runtime) ident
+      enqueue (runtimeState runtime) (AgentReconnected ident result)
+    pure (M.insert ident worker retained,Right ())
+  where isRunning (_,Nothing) = True
+        isRunning _ = False
 
 -- A one-shot host notice keeps checkpoint failures out of provider events.
 runtimeNotice :: AgentRuntime -> IO (Maybe Text)
@@ -270,6 +290,19 @@ startChild openEditor getLaunch root access state request emit = mask $ \restore
           {driverCancel=cancelPermissions state ident >> driverCancel driver
           ,driverStop=driverStop driver `finally` retire})
   where
+    prepare spec | startResume request/=Nothing = do
+      saved <- readMVar state
+      case (M.lookup (startAgent request) (sessions saved),M.lookup (startAgent request) (launches saved)) of
+        (Just record,Just launch) | sessionDirectory record==spawnDirectory spec -> do
+          workspace <- Workspace.sharedAgentWorkspace (sessionDirectory record)
+          case workspace of
+            Left err -> pure (Left err)
+            Right selected | Workspace.workspacePath selected/=sessionDirectory record ->
+              pure (Left "The recovered workspace has changed location.")
+            Right _ -> do
+              contexts <- readAgentContexts (sessionDirectory record)
+              pure ((\context -> (record,launch,contextText context)) <$> contexts)
+        _ -> pure (Left "The saved provider or editor workspace is unavailable.")
     prepare spec = do
       owner <- case startOwner request of
         Human -> pure root

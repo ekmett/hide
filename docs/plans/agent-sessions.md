@@ -38,7 +38,8 @@ Implemented surfaces (integration validation remains separate below):
   terminals and debugging. Shared children use their parent's session. Background
   startup does not focus a display; checkout contents survive agent shutdown.
 - Tools/Window > Agents supplies directory browsing, recent read-only history,
-  workspace opening and refresh. This is not a live child conversation composer.
+  workspace opening, explicit recovered-child reconnect and refresh. This is not
+  a live child conversation composer.
 - Agent Permissions registers the nine coordination tools. User documentation
   describes discovery, task tickets, attribution, limits and workspace isolation.
 
@@ -47,7 +48,7 @@ Remaining work:
 - [x] Protected directory/editor-session mapping persistence and recovery.
   Restore records without replaying tasks or starting providers; issue fresh
   bearer capabilities. Publish checkpoints only after owning the session lock.
-- [ ] Provide explicit child-provider reconnect with capability/policy checks.
+- [x] Provide explicit child-provider reconnect with capability/policy checks.
 - [ ] Add a live child conversation composer and interaction view, preserving
   the distinction between the human and parent-controlled user seats.
 - [x] Validate shared/worktree routing, cancellation and permission cleanup,
@@ -67,7 +68,9 @@ and child MCP connections, rejected root-buffer access through the coordination
 connection, revoked an ended agent, checked public output/checkpoints for bearer
 credentials, and closed both sessions cleanly. Recovery fixtures verify stable
 identities/history/workspace mappings, fresh tokens, no task replay, corrupt-file
-retention and ownership-gated checkpoint writes.
+retention and ownership-gated checkpoint writes. Reconnect checks cover current
+limits and advertised load/resume support, failed-load retry and bearer revocation,
+no task or transcript replay, and ending an agent while its load is pending.
 
 Native Windows qualification still needs pending-inspector EOF/shutdown repair;
 see the [recovery plan](session-recovery.md#remaining-platform-qualification).

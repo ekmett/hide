@@ -26,7 +26,7 @@ checks=bracket temporary removePathForcibly $ \root -> do
       logPath=root </> "requests.jsonl"
       launch=A.Launch "python3" [script] [("LOG",logPath)]
       spec=SpawnSpec "worker" "Inspect parser" root Shared Fresh Nothing Nothing
-      request=StartRequest (AgentId "agent-1") Human spec Nothing
+      request=StartRequest (AgentId "agent-1") Human spec Nothing Nothing
       bearer=T.replicate 12 "ab19"
       server=object ["name" .= ("editor"::T.Text),"command" .= ("/bridge"::T.Text),"args" .= (["--mcp-editor","session"]::[T.Text]),
         "env" .= [object ["name" .= ("THC_EDIT_MCP_TOKEN"::T.Text),"value" .= bearer]]]
@@ -126,6 +126,28 @@ checks=bracket temporary removePathForcibly $ \root -> do
   bracket (pure forkDriver) driverStop $ \running -> check "fork gets a distinct private provider session" (supportsFork (driverCapabilities running) && driverSessionKey running=="private-fork-key")
   reused<-startACPDriver launch {A.environment=[("FORK","yes"),("REUSE","yes")]++A.environment launch} [] "" (const (pure Nothing)) forked emit
   check "fork may not silently reuse source session" (case reused of Left _->True; _->False)
+  let resumed=request {startResume=Just "private-saved-key"}
+  beforeUnsupported<-length <$> logs
+  unavailable<-startACPDriver launch [] "" (const (pure Nothing)) resumed emit
+  check "unadvertised resume fails without new/fork/load" (case unavailable of Left _->True; _->False)
+  unsupportedLog<-drop beforeUnsupported <$> logs
+  check "unsupported resume performs only initialization" (map (field "method") unsupportedLog==[Just ("initialize"::T.Text)])
+  forM_ ["load","resume"] $ \mode->do
+    beforeLoad<-length <$> logs
+    writeIORef events []
+    loaded<-startACPDriver launch {A.environment=("RESUME",mode):A.environment launch} [server] "Do not replay context" (const (pure Nothing)) resumed emit >>= right "load saved session"
+    bracket (pure loaded) driverStop $ \running->do
+      opened<-drop beforeLoad <$> logs
+      let methods=map (field "method") opened
+      check "resume uses exactly the advertised load operation, without prompts"
+        (methods==[Just ("initialize"::T.Text),Just ("session/"<>T.pack mode)] && driverSessionKey running=="private-saved-key")
+      check "provider history replay does not duplicate local history" . null =<< readIORef events
+      _<-driverDeliver running (prompt "after reconnect") >>= right "resumed prompt"
+      delivered<-drop beforeLoad <$> logs
+      check "first resumed prompt does not replay startup instructions or context"
+        (not ("Do not replay context" `T.isInfixOf` T.pack (show delivered)) && not ("agent_rename" `T.isInfixOf` T.pack (show delivered)))
+  changed<-startACPDriver launch {A.environment=[("RESUME","load"),("CHANGED","yes")]++A.environment launch} [] "" (const (pure Nothing)) resumed emit
+  check "load rejects a replacement session identity" (case changed of Left _->True; _->False)
   stubborn<-startACPDriver launch {A.environment=("IGNORE_CANCEL","yes"):A.environment launch} [] "" (const (pure Nothing)) request emit >>= right "unresponsive provider"
   bracket (pure stubborn) driverStop $ \running -> withAsync (driverDeliver running (prompt "stall")) $ \pending -> do
     let awaitPrompt=do
@@ -159,9 +181,10 @@ fixture=unlines
   , "def update(v): send({'method':'session/update','params':{'sessionId':sid,'update':v}})"
   , "for line in sys.stdin:"
   , " m=json.loads(line); log.write(json.dumps(m)+'\\n'); method=m.get('method'); p=m.get('params',{}); i=m.get('id')"
-  , " if method=='initialize': reply(i,{'protocolVersion':1,'agentCapabilities':{'sessionCapabilities':{'fork':{}} if os.environ.get('FORK')=='yes' else {}}})"
+  , " if method=='initialize': reply(i,{'protocolVersion':1,'agentCapabilities':{'loadSession':os.environ.get('RESUME')=='load','sessionCapabilities':dict(([('fork',{})] if os.environ.get('FORK')=='yes' else [])+([('resume',{})] if os.environ.get('RESUME')=='resume' else []))}})"
   , " elif method=='session/new': servers=p['mcpServers']; reply(i,{'sessionId':sid,'configOptions':options()})"
   , " elif method=='session/fork': sid=p['sessionId'] if os.environ.get('REUSE')=='yes' else 'private-fork-key'; reply(i,{'sessionId':sid,'configOptions':options()})"
+  , " elif method in ['session/load','session/resume']: sid=p['sessionId']; servers=p['mcpServers']; update({'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'old provider history'}}); reply(i,{'sessionId':'replacement'} if os.environ.get('CHANGED')=='yes' else {'configOptions':options()})"
   , " elif method=='session/set_config_option': selected[p['configId']]=p['value']; reply(i,{'configOptions':options()})"
   , " elif method=='session/prompt':"
   , "  active=i; text=p['prompt'][-1]['text']"

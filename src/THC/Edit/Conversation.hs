@@ -212,7 +212,10 @@ perform runtime@(ConversationState directory ref consoles jobs _) action values 
 #else
             pure fallback
 #endif
-      "2" -> showAgentDirectory runtime d
+      "2" -> do
+        result<-AR.requestAgentReconnect (conversationAgents runtime) ident
+        pure d {status=either id (const "Reconnecting saved agent session...") result}
+      "3" -> showAgentDirectory runtime d
       _ -> pure d
     ("toggle-activity",[index]) | Just ident<-readMaybe (T.unpack index) -> do
       let toggle (i,Activity title value history expanded) | i==ident=Activity title value history (not expanded)
@@ -1093,6 +1096,11 @@ drainConversationAgents runtime@(ConversationState _ ref _ _ agents) d=do
       AR.failPendingPrimary agents "Agent session ended."
       modifyIORef' ref (\state -> state {connection=Nothing,session=Nothing,agentDelivery=Nothing,streamTails=M.empty,pending=M.empty,queuedPrompt=Nothing,queuedQueries=[],approvals=[],presented=Nothing})
       pure desktop {status="Agent session ended."}
+    apply desktop (AR.AgentReconnected ident result)=do
+      refreshed<-case dialog desktop of
+        Just dg | purpose dg==AgentDialog "directory-select" -> showAgentDirectory runtime desktop
+        _ -> pure desktop
+      pure refreshed {status=either id (const ("Reconnected "<>AH.agentIdText ident<>"; no task was replayed.")) result}
     apply desktop (AR.ProviderPermission ident request reply)=do
       waiting<-isEmptyMVar reply
       when waiting (enqueueApproval runtime (ChildPermission ident request reply))
@@ -1110,8 +1118,8 @@ showAgentDirectory (ConversationState _ ref _ _ agents) d=do
             maybe "" ("  ← "<>) (field "parentName" entry)
       modifyIORef' ref (\s->s {directoryAgents=ids})
       pure d {dialog=Just (Dialog "Agents" (AgentDialog "directory-select")
-        [ListBox "Sessions" (map label entries) 0] 0 ["History","Workspace","Refresh","Close"]
-        ["Work continues without taking focus.","Workspace opens the agent's files, terminals and debugger."])}
+        [ListBox "Sessions" (map label entries) 0] 0 ["History","Workspace","Reconnect","Refresh","Close"]
+        ["Reconnect explicitly loads a recovered child; no task is replayed.","Workspace opens the agent's files, terminals and debugger."])}
 
 showAgentHistory :: ConversationState -> AH.AgentId -> Desktop -> IO Desktop
 showAgentHistory runtime ident d=do

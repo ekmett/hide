@@ -89,6 +89,44 @@ checks=do
     endedRecovered<-statusAgent restored Human first >>= right
     ensure "explicitly ended agents remain ended on restore" (field "status" endedRecovered==Just ("ended"::T.Text) && field "reconnectable" endedRecovered==Just False)
     closeAgentHub restored
+    reconnectLimits<-newIORef (HubLimits 2 0)
+    resumed<-restoreHubWithLimits (const (Right <$> readIORef reconnectLimits)) launch snap >>= right
+    deniedDirect<-reconnectAgent resumed forked
+    ensure "reconnect honors current direct-child limit" (isLeft deniedDirect)
+    _<-reconnectAgent resumed chosen >>= right
+    deniedExternal<-reconnectAgent resumed root
+    ensure "child reconnect cannot claim the external primary" (isLeft deniedExternal)
+    writeIORef reconnectLimits (HubLimits 1 2)
+    deniedCapacity<-reconnectAgent resumed forked
+    ensure "reconnect honors current total active limit" (isLeft deniedCapacity)
+    writeIORef reconnectLimits (HubLimits 2 2)
+    beforeReconnect<-readTVarIO deliveries
+    _<-reconnectAgent resumed forked >>= right
+    ensure "reconnect does not replay saved task" . (==beforeReconnect) =<< readTVarIO deliveries
+    duplicateReconnect<-reconnectAgent resumed forked
+    ensure "active child cannot be loaded twice" (isLeft duplicateReconnect)
+    closeAgentHub resumed
+    reconnectStarted<-newEmptyMVar
+    reconnectRelease<-newEmptyMVar
+    let loading request _=putMVar reconnectStarted request >> readMVar reconnectRelease >> pure (Right (driver (startAgent request)))
+    loadingHub<-restoreHub (HubLimits 1 2) loading snap >>= right
+    withAsync (reconnectAgent loadingHub forked) $ \pendingReconnect->do
+      request<-takeMVar reconnectStarted
+      ensure "host reconnect supplies saved reference without fork source"
+        (startResume request==Just ("private-provider-key-"<>agentIdText forked) && startSource request==Nothing)
+      raced<-reconnectAgent loadingHub chosen
+      ensure "pending reconnect atomically reserves capacity" (isLeft raced)
+      _<-endAgent loadingHub Human forked >>= right
+      putMVar reconnectRelease ()
+      endedLoad<-wait pendingReconnect
+      ensure "ending child during load prevents resurrection" (isLeft endedLoad)
+    closeAgentHub loadingHub
+    failedHub<-restoreHub (HubLimits 1 2) (\_ emit->emit ProviderClosed >> pure (Left "load failed")) snap >>= right
+    loadFailed<-reconnectAgent failedHub forked
+    failedStatus<-statusAgent failedHub Human forked >>= right
+    ensure "provider failure while loading releases capacity and permits retry"
+      (isLeft loadFailed && field "status" failedStatus==Just ("recovered"::T.Text) && field "reconnectable" failedStatus==Just True)
+    closeAgentHub failedHub
     let wrongVersion=case snap of Object o->Object (KM.insert "schemaVersion" (Number 2) o); _->Null
     invalid<-restoreHub (HubLimits 4 2) launch wrongVersion
     ensure "unknown persistence schema rejected" (isLeft invalid)

@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module THC.Edit.AgentACP (ACPPermission(..), startACPDriver) where
 
+import Control.Applicative ((<|>))
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (Async, async, cancel, poll)
 import Control.Concurrent.MVar
@@ -31,8 +32,8 @@ startACPDriver launch servers context permission request emit=safely $ mask $ \r
   root<-canonicalizePath (spawnDirectory (startSpec request))
   client<-A.startClient launch root
   runtime<-Runtime client <$> newMVar M.empty <*> newTVarIO True <*> newTVarIO False <*> newIORef False
-    <*> newIORef Nothing <*> pure (sourceSessionKey <$> startSource request) <*> pure bearerKeys <*> pure emit <*> pure permission
-    <*> newMVar Nothing <*> newEmptyMVar <*> newIORef Null <*> newMVar () <*> newIORef True <*> newIORef ("",False) <*> newIORef M.empty
+    <*> newIORef Nothing <*> pure (startResume request <|> (sourceSessionKey <$> startSource request)) <*> pure bearerKeys <*> pure emit <*> pure permission
+    <*> newMVar Nothing <*> newEmptyMVar <*> newIORef Null <*> newMVar () <*> newIORef (startResume request==Nothing) <*> newIORef ("",False) <*> newIORef M.empty
   worker<-async (pump runtime `finally` (publish runtime ProviderClosed >> failPending runtime "ACP connection closed."))
   putMVar (pumpWorker runtime) worker
   restore (setup runtime root) `onException` close runtime
@@ -45,14 +46,25 @@ startACPDriver launch servers context permission request emit=safely $ mask $ \r
          "clientCapabilities" .= object ["fs" .= object ["readTextFile" .= False,"writeTextFile" .= False],"terminal" .= False]]) >>= require
       unless (field "protocolVersion" initialized==Just (1::Int)) (raise "Unsupported ACP protocol version.")
       let source=startSource request
-          method=maybe "session/new" (const "session/fork") source
-      when (source/=Nothing && not (supportsFork (parseCapabilities initialized Null)))
+          resumed=startResume request
+          caps=parseCapabilities initialized Null
+          loadSupported=(field "agentCapabilities" initialized >>= field "loadSession")==Just True
+          method=case resumed of
+            Just _ | loadSupported->"session/load"
+                   | otherwise->"session/resume"
+            Nothing->maybe "session/new" (const "session/fork") source
+          key=resumed <|> (sourceSessionKey <$> source)
+      when (source/=Nothing && resumed/=Nothing) (raise "Cannot fork and load the same session.")
+      when (source/=Nothing && not (supportsFork caps))
         (raise "The provider does not advertise session/fork.")
+      when (resumed/=Nothing && not (supportsResume caps))
+        (raise "The provider does not advertise session loading.")
       opened<-rpc runtime (Just 30000000) method (object
-        (["cwd" .= root,"mcpServers" .= servers]++maybe [] (\value->["sessionId" .= sourceSessionKey value]) source)) >>= require
-      sid<-maybe (raise "Provider returned no valid session reference.") pure (field "sessionId" opened)
+        (["cwd" .= root,"mcpServers" .= servers]++maybe [] (\value->["sessionId" .= value]) key)) >>= require
+      sid<-maybe (raise "Provider returned no valid session reference.") pure (field "sessionId" opened <|> resumed)
       unless (not (T.null sid) && T.length sid<=4096 && not (T.any (<' ') sid)) (raise "Provider returned no valid session reference.")
-      when (Just sid==parentKey runtime) (raise "Provider fork reused the source session reference.")
+      when (source/=Nothing && Just sid==parentKey runtime) (raise "Provider fork reused the source session reference.")
+      when (resumed/=Nothing && Just sid/=resumed) (raise "Provider load changed the saved session reference.")
       writeIORef (sessionKey runtime) (Just sid)
       writeIORef (configuration runtime) opened
       pure AgentDriver
