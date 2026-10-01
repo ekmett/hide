@@ -61,6 +61,9 @@ checks = bracket temporary removePathForcibly $ \root ->
         focusSource desktop=case [w | w<-windows desktop,Just doc<-[M.lookup (bufferId w) (buffers desktop)],fmap filePath (documentFile doc)==Just source] of
           w:_ -> focusWindow (windowId w) desktop
           [] -> error "Source window missing"
+    check "token counts use compact rounded SI units"
+      (map formatTokenCount [0,999,1000,1234,9999,12345,148000,999500,1234567,2400000000]
+        ==["0","999","1k","1.2k","10k","12k","148k","1M","1.2M","2.4G"])
     let reply width outgoing=T.pack . map fst . renderReply False width outgoing
     check "short bubbles occupy one row with outward tails"
       (reply 30 True "hello"==T.replicate 22 " "<>"▐hello▛◤" && reply 30 False "hello"=="◥▜hello▌")
@@ -86,6 +89,8 @@ checks = bracket temporary removePathForcibly $ \root ->
       entries<-logged
       let initParams=[params | entry<-entries,field "method" entry==Just ("initialize"::T.Text),Just params<-[field "params" entry]]
       check "initialize advertises actual terminal capability" (case initParams of p:_ -> (field "clientCapabilities" p >>= field "terminal")==Just terminalAvailable; [] -> False)
+      check "context footer uses latest provider usage and capacity"
+        (agentContextUsage streamed==Just (148000,400000) && "37% · 148k/400k" `T.isInfixOf` snapshot streamed)
       check "new session handshake" (any ((==Just ("session/new"::T.Text)).field "method") entries)
       check "conversation has an inline composer" ("Shift+Enter Newline" `T.isInfixOf` snapshot streamed)
       check "conversation renders streamed Markdown" ("Hello" `T.isInfixOf` conversationText streamed && not ("**bold" `T.isInfixOf` conversationText streamed))
@@ -93,7 +98,28 @@ checks = bracket temporary removePathForcibly $ \root ->
         (not (any (`elem` T.lines (conversationText streamed)) ["You","Agent"]) && not ("Session:" `T.isInfixOf` conversationText streamed))
       check "conversation preserves Markdown styling" (any ((==BubbleStyle False Keyword).snd) (conversationHighlight streamed))
       check "tool update merges pending record" (T.count "[completed] Local tool" (conversationText streamed)==1 && not ("[pending] Local tool" `T.isInfixOf` conversationText streamed))
-      copied<-send runtime "copy" [] streamed
+      check "provider settings appear in the title" (conversationTitle streamed=="fixture-model (high) ▼")
+      let conversationWindow=fromMaybe (error "conversation window") (activeWindow streamed)
+          titleRect=agentTitleRect streamed conversationWindow
+          titleMenu=fst (handleEvent (V.EvMouseDown (left titleRect) (top titleRect) V.BLeft []) streamed)
+          modelMenu=fst (handleEvent (V.EvKey V.KEnter []) titleMenu)
+          chosen=fst (handleEvent (V.EvKey V.KDown []) modelMenu)
+          (changing,changeEffects)=handleEvent (V.EvKey V.KEnter []) chosen
+      let many=streamed {screenSize=(90,12),agentSettings=[AgentSetting "model" "Model" "model" "0" [(T.pack (show n),"Model "<>T.pack (show n)) | n<-[0..29::Int]]]}
+          paged=foldl (\d _ -> fst (handleEvent (V.EvKey V.KDown []) d)) (openAgentChoices "model" many) [1..25::Int]
+      check "long provider menus remain on screen and select by absolute index"
+        (maybe False (\(r,_) -> top r+height r<12) (contextMenu paged) && snd (handleEvent (V.EvKey V.KEnter []) paged)==[AgentAction "set-config" ["model","25"]])
+      check "title click opens settings without moving the window" (contextMenu titleMenu/=Nothing && drag titleMenu==Nothing)
+      check "model selection waits for confirmation" (conversationTitle changing==conversationTitle streamed && changeEffects==[AgentAction "set-config" ["model","fixture-other"]])
+      changed<-snd <$> conversationEffects runtime fallback changing changeEffects
+      updated<-await runtime "model selection" ((=="Conversation settings updated.").status) changed
+      check "model acknowledgement updates title and choices" (conversationTitle updated=="fixture-other (high) ▼")
+      effortPending<-send runtime "set-config" ["reasoning_effort","ultra"] updated
+      effortChanged<-await runtime "effort selection" ((=="Conversation settings updated.").status) effortPending
+      check "effort acknowledgement updates title" (conversationTitle effortChanged=="fixture-other (ultra) ▼")
+      unavailable<-send runtime "set-config" ["model","not-advertised"] effortChanged
+      check "unadvertised options are rejected locally" (status unavailable=="This conversation setting is unavailable." && agentSettings unavailable==agentSettings effortChanged)
+      copied<-send runtime "copy" [] effortChanged
       check "copy retains raw Markdown" ("**bold text**" `T.isInfixOf` clipboard copied)
       savedSession<-BS.readFile (settings </> "agent-session.json")
       check "session ID persisted" ((decodeStrict' savedSession >>= field "sessionId")==Just ("fixture-session"::T.Text))
@@ -156,8 +182,14 @@ checks = bracket temporary removePathForcibly $ \root ->
             [] -> error ("missing status action: "++T.unpack needle)
           applyEvent event desktop=let (next,effects)=handleEvent event desktop in snd <$> conversationEffects runtime fallback next effects
       check "composer is a full-width thought bubble without buttons or divider"
-        (height (composerRect window)==4 && width (composerRect window)==width (bounds window)-6 &&
-         ".o" `T.isInfixOf` snapshot multiline && not (" Query " `T.isInfixOf` T.intercalate "\n" (init (T.lines (snapshot multiline)))))
+        (height (composerRect cancelled window)==1 && height (composerRect multiline window)==2 && width (composerRect multiline window)==width (bounds window)-6 &&
+         "o." `T.isInfixOf` snapshot multiline && not (" Query " `T.isInfixOf` T.intercalate "\n" (init (T.lines (snapshot multiline)))))
+      let tall=foldl (\d _ -> press V.KEnter [V.MShift] d) multiline [1..15::Int]
+          shrunk=press (V.KChar 'z') [V.MCtrl] (press (V.KChar 'z') [V.MCtrl] multiline)
+      check "thought bubble caps at twelve rows and scrolls to the caret"
+        (height (composerRect tall window)==12 && fst (composerScroll tall window)>0)
+      check "undoing newlines shrinks the thought bubble"
+        (height (composerRect shrunk window)==1)
       check "composer supports Unicode, newline, and clipboard without changing transcript"
         (contents (composerBuffer multiline)=="λ\nnext" && clipboard copiedDraft=="λ\nnext" && conversationText multiline==conversationText cancelled)
       check "status newline works even with an empty draft"
@@ -183,6 +215,7 @@ checks = bracket temporary removePathForcibly $ \root ->
       disconnected<-prompt runtime "disconnect" steered >>= await runtime "provider EOF" ((=="Agent disconnected.").status)
       reconnected<-prompt runtime "stream" disconnected >>= done runtime
       resumed<-send runtime "load" ["0","saved-id"] reconnected >>= await runtime "resume session" ((=="Session saved-id").status)
+      check "new session clears stale context usage" (agentContextUsage resumed==Nothing && " -- " `T.isInfixOf` snapshot resumed)
       check "conversation header follows resumed session" ("Session: saved-id" `T.isInfixOf` conversationText resumed)
       check "capability selects session/load" . any ((==Just ("session/load"::T.Text)).field "method") =<< logged
       when terminalAvailable $ do
@@ -257,6 +290,8 @@ providerScript=unlines
   [ "import json,os,sys"
   , "log=open(os.environ['THC_LOG'],'a',buffering=1)"
   , "sid='fixture-session'; prompt=None; serial=0; terminal_serial=0; scenario=''"
+  , "model='fixture-model'; effort='high'"
+  , "def settings(): return [{'id':'model','name':'Model','category':'model','type':'select','currentValue':model,'options':[{'value':m,'name':m} for m in ['fixture-model','fixture-other']]},{'id':'reasoning_effort','name':'Reasoning effort','category':'thought_level','type':'select','currentValue':effort,'options':[{'value':e,'name':e} for e in ['high','ultra']]}]"
   , "def send(value):"
   , "  value['jsonrpc']='2.0'; print(json.dumps(value,ensure_ascii=False),flush=True)"
   , "def reply(ident,result): send({'id':ident,'result':result})"
@@ -269,8 +304,12 @@ providerScript=unlines
   , "  msg=json.loads(line); log.write(json.dumps(msg,ensure_ascii=False)+'\\n')"
   , "  method=msg.get('method'); ident=msg.get('id'); params=msg.get('params',{})"
   , "  if method=='initialize': reply(ident,{'protocolVersion':1,'agentCapabilities':{'loadSession':os.environ['THC_RESUME']=='yes'},'_meta':{'steering':{'supported':os.environ['THC_RESUME']=='yes'}}})"
-  , "  elif method=='session/new': sid='fixture-session'; reply(ident,{'sessionId':sid})"
+  , "  elif method=='session/new': sid='fixture-session'; reply(ident,{'sessionId':sid,'configOptions':settings()})"
   , "  elif method=='session/load': sid=params['sessionId']; reply(ident,{})"
+  , "  elif method=='session/set_config_option':"
+  , "    if params['configId']=='model': model=params['value']"
+  , "    else: effort=params['value']"
+  , "    reply(ident,{'configOptions':settings()})"
   , "  elif method=='session/cancel': finish('cancelled')"
   , "  elif method=='_session/steering': reply(ident,{'outcome':'injected'}); finish()"
   , "  elif method=='session/prompt':"
@@ -280,6 +319,9 @@ providerScript=unlines
   , "      update({'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':' text**\\n'}})"
   , "      update({'sessionUpdate':'tool_call','toolCallId':'fixture-tool','title':'Local tool','status':'pending'})"
   , "      update({'sessionUpdate':'tool_call_update','toolCallId':'fixture-tool','status':'completed'})"
+  , "      update({'sessionUpdate':'usage_update','used':300000,'size':400000})"
+  , "      update({'sessionUpdate':'usage_update','used':148000,'size':400000})"
+  , "      update({'sessionUpdate':'usage_update','used':-1,'size':0})"
   , "      finish()"
   , "    elif scenario=='permission':"
   , "      serial+=1; call('permission-'+str(serial),'session/request_permission',{'toolCall':{'title':'Fixture action'},'options':[{'optionId':'allow','name':'Allow once','kind':'allow_once'},{'optionId':'deny','name':'Reject','kind':'reject_once'}]})"

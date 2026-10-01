@@ -50,6 +50,7 @@ data Command = New | Open | ChangeDir | Save | SaveAs | Close | Quit | Undo | Re
   | InspectType | Definition | Complete | Problems | NextMessage | PreviousMessage | RestartHLS | RenameSymbol
   | ToggleTree | GitDiff | GitCommit | GitFetch | GitPull | GitMerge | ReviewDisk
   | RunTarget | RunOptions | OpenTerminal | StopTerminal
+  | AgentChoose Text | AgentSet Text Text
   | AgentOptions | Conversation | AgentPrompt | AgentCancel | AgentResume | AgentCopyRaw | AgentNew
   | ToggleHex | GoToMessage | CopyAllMessages
   | DebugCommand Text
@@ -57,7 +58,7 @@ data Command = New | Open | ChangeDir | Save | SaveAs | Close | Quit | Undo | Re
 data ConflictAction = CompareDisk | ReloadDisk | KeepBuffer | SaveConflictAs deriving (Eq,Show)
 data Conflict = Conflict { conflictBuffer :: Int, conflictRevision :: Int, conflictBaseline :: FileState, conflictDisk :: Maybe ByteString } deriving (Eq,Show)
 data GitAction = FetchRemote | PullRemote | MergeBranch Text deriving (Eq,Show)
-data ContextKind = SourceContext | GitContext | MessagesContext deriving (Eq,Show)
+data ContextKind = SourceContext | GitContext | MessagesContext | AgentContext [(Text,Command)] deriving (Eq,Show)
 data LanguageAction = TypeInfo | FindDefinition | Completions | ShowProblems | RestartLanguage | RenameAt Text deriving (Eq,Show)
 data Completion = Completion Text [(Int,Int,Text)] deriving (Eq,Show)
 data Effect = LanguageRequest LanguageAction | RunGit GitAction | ReadMergeBranches | JumpTo FilePath Int Int | ReadPath FilePath | BrowsePath FilePath Text | BrowseDirectories FilePath | ChangeDirectory FilePath | OpenChoice FilePath Text Text | ReadTree FilePath | ExpandTree Int | ReadHelp | RefreshGit FilePath | ReadGitDiff | AskGitCommit | WriteGitCommit Text | SaveDocument Int (Maybe FilePath) (Maybe Command) | ReviewExternal | ResolveConflict Conflict ConflictAction | AgentAction Text [Text] | DebugAction Text [Text] | SetScreenMode Int | Exit deriving (Eq,Show)
@@ -77,6 +78,7 @@ data Diagnostic = Diagnostic
   } deriving (Eq,Show)
 data Sidebar = Sidebar { treeRoot :: FilePath, treeRows :: [TreeRow], treeSelected :: Int, treeScroll :: Int, treeWidth :: Int, treeFocused :: Bool } deriving (Eq,Show)
 data Drag = DockSizing | MessagesSizing | TreeScrolling | Moving Int Int Int | Resizing Int Int Int | Selecting Int | Scrolling Int Bool deriving (Eq,Show)
+data AgentSetting = AgentSetting { settingId :: Text, settingName :: Text, settingCategory :: Text, settingCurrent :: Text, settingChoices :: [(Text,Text)] } deriving (Eq,Show)
 data Desktop = Desktop
   { screenSize :: (Int,Int), windows :: [Window], buffers :: M.Map Int Document
   , nextId :: Int, menu :: Maybe (Int,Int), dialog :: Maybe Dialog, drag :: Maybe Drag
@@ -89,7 +91,7 @@ data Desktop = Desktop
   , branchAdded :: Int, branchDeleted :: Int, branchRoot :: Maybe FilePath, contextKind :: ContextKind
   , messagesNumber :: Maybe Int
   , composerBuffer :: Buffer, composerSelection :: Selection, composerFocused :: Bool, agentSteering :: Bool, agentReplying :: Bool, agentQueued :: Int
-  , blinkCursor :: Bool, crtFilter :: Bool, defaultDirectory :: Maybe FilePath, statusHover :: Maybe Int, heldModifiers :: [V.Modifier], problemsPreferredHeight :: Int
+  , blinkCursor :: Bool, crtFilter :: Bool, defaultDirectory :: Maybe FilePath, statusHover :: Maybe Int, heldModifiers :: [V.Modifier], problemsPreferredHeight :: Int, agentContextUsage :: Maybe (Integer,Integer), agentSettings :: [AgentSetting]
   } deriving (Eq,Show)
 
 data MenuItem = MenuItem Text Text Command deriving (Eq,Show)
@@ -106,7 +108,7 @@ menus =
       mi "Trace into" "F7" (DebugCommand "stepIn"),mi "Step over" "F8" (DebugCommand "next"),mi "Step out" "Ctrl+F7" (DebugCommand "stepOut"),
       mi "Threads..." "" (DebugCommand "threads"),mi "Call stack..." "" (DebugCommand "stack"),mi "Scopes..." "" (DebugCommand "scopes"),
       mi "Exceptions..." "" (DebugCommand "exceptions"),mi "Output" "" (DebugCommand "output"),mi "Disconnect" "" (DebugCommand "disconnect")])
-  ,("Tools",'t',[mi "File tree" "Ctrl+B" ToggleTree,mi "Git diff..." "" GitDiff,mi "Approve changes..." "" GitCommit,mi "Inspect type" "Shift+F1" InspectType,mi "Messages" "" Problems,mi "Go to next" "Alt+F8" NextMessage,mi "Go to previous" "Alt+F7" PreviousMessage,mi "Restart language server" "" RestartHLS,mi "Conversation" "" Conversation,mi "Prompt..." "" AgentPrompt,mi "Cancel reply" "" AgentCancel,mi "Resume session..." "" AgentResume,mi "New session" "" AgentNew,mi "Copy raw conversation" "" AgentCopyRaw,mi "Widget gallery..." "" Gallery,off "Project browser..." "" "Cabal component browsing is a later milestone."])
+  ,("Tools",'t',[mi "File tree" "Ctrl+B" ToggleTree,mi "Git diff..." "" GitDiff,mi "Approve changes..." "" GitCommit,mi "Inspect type" "Shift+F1" InspectType,mi "Messages" "" Problems,mi "Go to next" "Alt+F8" NextMessage,mi "Go to previous" "Alt+F7" PreviousMessage,mi "Restart language server" "" RestartHLS,mi "Conversation" "" Conversation,mi "Conversation model..." "" (AgentChoose ""),mi "Prompt..." "" AgentPrompt,mi "Cancel reply" "" AgentCancel,mi "Resume session..." "" AgentResume,mi "New session" "" AgentNew,mi "Copy raw conversation" "" AgentCopyRaw,mi "Widget gallery..." "" Gallery,off "Project browser..." "" "Cabal component browsing is a later milestone."])
   ,("Options",'o',[mi "Preferences..." "" EditorOptions,mi "Agents..." "" AgentOptions])
   ,("Window",'w',[mi "Tile" "" Tile,mi "Cascade" "" Cascade,mi "Split vertically" "" SplitVertical,mi "Split horizontally" "" SplitHorizontal,mi "Zoom" "F5" Zoom,mi "Next" "F6" NextWindow,mi "Close" "Alt+F3" Close])
   ,("Help",'h',[mi "Contents" "F1" Help,mi "About Turbo Haskell..." "" About])]
@@ -147,6 +149,8 @@ commandDescription cmd = case cmd of
     "scopes" -> "Inspect scopes; expand variables explicitly without evaluation."
     "disconnect" -> "Detach the debugger and leave the program running."
     _ -> "Debugger: " <> action
+  AgentChoose _ -> "Choose the conversation model or reasoning effort."
+  AgentSet _ _ -> "Apply this choice to the conversation."
   AgentOptions -> "Configure agents and their executable commands."
   Conversation -> "Show the agent conversation."
   AgentPrompt -> "Send a prompt to the selected agent."
@@ -226,6 +230,8 @@ menuItems i = let (_,_,xs) = menus !! (i `mod` length menus) in xs
 
 commandEnabled :: Desktop -> Command -> Bool
 commandEnabled _ Disabled{} = False
+commandEnabled d (AgentChoose _) = not (null (agentSettings d))
+commandEnabled d (AgentSet _ _) = not (agentReplying d)
 commandEnabled d cmd | cmd `elem` [GoToMessage,CopyAllMessages,NextMessage,PreviousMessage] = not (null (diagnostics d))
 commandEnabled d Copy | problemsVisible d && problemsFocused d = not (null (diagnostics d))
 commandEnabled d cmd | problemsVisible d && problemsFocused d, cmd `elem` [Undo,Redo,Cut,Paste,SelectAll] = False
@@ -237,7 +243,7 @@ menuRect d i = Rect (min x (max 0 (sw-w))) 1 w (length (menuItems i)+2)
         w = min sw (maximum [T.length t + T.length (menuShortcut d entry) + 5 | entry@(MenuItem t _ _) <- menuItems i])
 
 initialDesktop :: (Int,Int) -> Desktop
-initialDesktop size = Desktop size [] M.empty 1 Nothing Nothing Nothing "" False Nothing "" Nothing "" Nothing "" False Nothing Nothing Nothing "" Nothing Nothing Nothing [] False 0 0 False Nothing 0 0 Nothing SourceContext Nothing (newBuffer "") (Selection 0 0) True False False 0 True False Nothing Nothing [] 8
+initialDesktop size = Desktop size [] M.empty 1 Nothing Nothing Nothing "" False Nothing "" Nothing "" Nothing "" False Nothing Nothing Nothing "" Nothing Nothing Nothing [] False 0 0 False Nothing 0 0 Nothing SourceContext Nothing (newBuffer "") (Selection 0 0) True False False 0 True False Nothing Nothing [] 8 Nothing []
 
 activeWindow :: Desktop -> Maybe Window
 activeWindow = listToMaybe . windows
@@ -310,7 +316,7 @@ ensureVisible d = case (activeWindow d, activeDocument d) of
     where
       b = documentBuffer doc
       (row,dc) = windowCursorCell b w
-      rows = max 1 (windowContentRows doc w); cols = max 1 (width (bounds w)-2)
+      rows = max 1 (windowContentRows d doc w); cols = max 1 (width (bounds w)-2)
       row' = if row < scrollRow w then row else if row >= scrollRow w+rows then row-rows+1 else scrollRow w
       col' = if dc < scrollColumn w then dc else if dc >= scrollColumn w+cols then dc-cols+1 else scrollColumn w
   _ -> d
@@ -383,6 +389,8 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
     go AgentCancel d = (d,[AgentAction "cancel" []])
     go AgentResume d = (d,[AgentAction "resume" []])
     go AgentNew d = (d,[AgentAction "new" []])
+    go (AgentChoose category) d = (openAgentChoices category d,[])
+    go (AgentSet ident value) d = (d,[AgentAction "set-config" [ident,value]])
     go AgentCopyRaw d = (d,[AgentAction "copy" []])
     go SaveAs d = case activeWindow d of
       Nothing -> (d,[])
@@ -559,7 +567,7 @@ handleEvent (V.EvMouseDown x y V.BLeft _) d | y==snd (screenSize d)-1 =
     Just (_,_,Left cmd) -> runCommand cmd d
     Just (_,_,Right event) -> handleEvent event (if activeConversation d then d {composerFocused=True} else d)
     Nothing -> (d,[])
-handleEvent event d = Bifunctor.first (clampHexScroll d) $ dispatchEvent event (case event of
+handleEvent event d = Bifunctor.first (layoutComposer d . clampHexScroll d) $ dispatchEvent event (case event of
   V.EvKey{} -> d {hoverTarget=Nothing,typeHint="",buttonHover=Nothing,buttonPressed=Nothing,statusHover=Nothing}
   V.EvMouseDown{} -> d {hoverTarget=Nothing,typeHint=""}
   V.EvPaste{} -> d {hoverTarget=Nothing,typeHint=""}
@@ -602,9 +610,21 @@ activeConversation d = maybe False (windowFocused d) (activeWindow d) && maybe F
 composerActive :: Desktop -> Bool
 composerActive d = activeConversation d && composerFocused d
 
-composerRect :: Window -> Rect
-composerRect w = let Rect x y ww hh=bounds w; rows=min 4 (max 0 (hh-4))
-                 in Rect (x+4) (y+hh-1-rows) (max 0 (ww-6)) rows
+-- Preserve the last visible reply when the draft grows; browsing older replies
+-- keeps its position. Every viewport calculation uses the same draft height.
+layoutComposer :: Desktop -> Desktop -> Desktop
+layoutComposer before after = after {windows=map adjust (windows after)}
+  where
+    adjust w | Just doc<-M.lookup (bufferId w) (buffers after), documentLabel doc==Just "Conversation",
+               height (composerRect before w)/=height (composerRect after w) =
+      let oldLimit=scrollbarLimit before True doc w
+          newLimit=scrollbarLimit after True doc w
+      in w {scrollRow=if scrollRow w>=oldLimit then newLimit else min newLimit (scrollRow w)}
+    adjust w=w
+
+composerRect :: Desktop -> Window -> Rect
+composerRect d w = let Rect x y ww hh=bounds w; rows=min (min 12 (bufferLineCount (composerBuffer d))) (max 0 (hh-6))
+                 in Rect (x+2) (y+hh-1-rows) (max 0 (ww-6)) rows
 
 composerSubmit :: [V.Modifier] -> Desktop -> (Desktop,[Effect])
 composerSubmit mods d
@@ -612,17 +632,17 @@ composerSubmit mods d
   | V.MShift `elem` mods = (composerInsert "\n" d,[])
   | otherwise = (d,[AgentAction "send-draft" []])
 
-windowContentRows :: Document -> Window -> Int
-windowContentRows doc w = max 0 (height (bounds w)-2-if documentLabel doc==Just "Conversation" then height (composerRect w)+1 else 0)
+windowContentRows :: Desktop -> Document -> Window -> Int
+windowContentRows d doc w = max 0 (height (bounds w)-2-if documentLabel doc==Just "Conversation" then height (composerRect d w)+1 else 0)
 
 composerScroll :: Desktop -> Window -> (Int,Int)
 composerScroll d w = (max 0 (r-height rect+1),max 0 (displayColumn (bufferLineAt b r) c-width rect+1))
-  where b=composerBuffer d; (r,c)=bufferLineColumn b (caret (composerSelection d)); rect=composerRect w
+  where b=composerBuffer d; (r,c)=bufferLineColumn b (caret (composerSelection d)); rect=composerRect d w
 
 composerClick :: Int -> Int -> [V.Modifier] -> Window -> Desktop -> Desktop
 composerClick x y mods w d = d {composerFocused=True,composerSelection=Selection (if V.MShift `elem` mods then anchor (composerSelection d) else p) p}
   where
-    Rect l t _ _=composerRect w; (sr,sc)=composerScroll d w; b=composerBuffer d
+    Rect l t _ _=composerRect d w; (sr,sc)=composerScroll d w; b=composerBuffer d
     r=min (bufferLineCount b-1) (max 0 (y-t+sr))
     p=bufferLineOffset b r+columnOffset (bufferLineAt b r) (max 0 (x-l+sc))
 
@@ -725,14 +745,44 @@ menuAt x = findIndex (\(start,w) -> x >= start && x < start+w) menuPositions
 contextItems :: ContextKind -> [(Text,Command)]
 contextItems SourceContext = [("Rename symbol...",RenameSymbol),("Go to definition",Definition),("Inspect type",InspectType),("Complete identifier",Complete)]
 contextItems MessagesContext = [("Go to source",GoToMessage),("Copy message",Copy),("Copy all messages",CopyAllMessages),("Hide Messages",Problems)]
+contextItems (AgentContext items) = items
 contextItems GitContext = [("Pull",GitPull),("Fetch",GitFetch),("Merge...",GitMerge)]
+
+conversationTitle :: Desktop -> Text
+conversationTitle d = case [settingCurrent option | option<-agentSettings d,settingCategory option=="model"] of
+  model:_ -> model<>case [settingCurrent option | option<-agentSettings d,settingCategory option=="thought_level"] of
+    effort:_ -> " ("<>effort<>") ▼"
+    [] -> " ▼"
+  [] -> if null (agentSettings d) then "Conversation" else "Conversation ▼"
+
+agentTitleRect :: Desktop -> Window -> Rect
+agentTitleRect d w = Rect (x+max 6 ((ww-T.length title) `div` 2)) y (max 0 (min (T.length title) (ww-17-count))) 1
+  where
+    Rect x y ww _=bounds w
+    title=" "<>conversationTitle d<>" "
+    count=T.length (T.pack (show (windowNumber w)))
+
+openAgentChoices :: Text -> Desktop -> Desktop
+openAgentChoices category d
+  | null items = d {status="The provider has not advertised model settings."}
+  | otherwise = openContext (AgentContext items) x (y+1) d
+  where
+    Rect x y _ _=maybe (Rect 1 1 0 0) (agentTitleRect d) (activeWindow d)
+    items | T.null category = [(settingName option<>"  "<>settingCurrent option<>" ►",AgentChoose (settingId option)) | option<-agentSettings d]
+          | otherwise = [(if value==settingCurrent option then "✓ "<>name else "  "<>name,AgentSet category value)
+                        | option<-agentSettings d,settingId option==category,(value,name)<-settingChoices option]
+
+contextOffset :: Rect -> Int -> Int
+contextOffset r chosen = let count=max 1 (height r-2) in chosen `div` count*count
 
 openContext :: ContextKind -> Int -> Int -> Desktop -> Desktop
 openContext kind x y d = d {contextKind=kind,contextMenu=Just (popup,0),drag=Nothing,dragOriginal=Nothing,menu=Nothing}
   where
     (sw,sh)=screenSize d
-    h=length (contextItems kind)+2
-    popup=Rect (max 0 (min x (sw-24))) (max 1 (min y (sh-h-1))) (min sw 24) h
+    items=contextItems kind
+    h=max 3 (min (sh-2) (length items+2))
+    w=min sw (max 24 (maximum (0:map (T.length . fst) items)+4))
+    popup=Rect (max 0 (min x (sw-w))) (max 1 (min y (sh-h-1))) w h
 
 gitCountText :: Int -> Text
 gitCountText n = if n<0 then "?" else T.pack (show n)
@@ -760,8 +810,10 @@ contextEvent ev (r,chosen) d = case ev of
   V.EvKey V.KUp _ -> choose (chosen-1)
   V.EvKey V.KDown _ -> choose (chosen+1)
   V.EvKey V.KEnter _ -> invoke chosen
+  V.EvKey V.KPageDown _ -> choose (chosen+max 1 (height r-2))
+  V.EvKey V.KPageUp _ -> choose (chosen-max 1 (height r-2))
   V.EvMouseDown x y V.BLeft _
-    | inside r x y && y>top r && y<top r+height r-1 -> invoke (y-top r-1)
+    | inside r x y && y>top r && y<top r+height r-1 -> invoke (contextOffset r chosen+y-top r-1)
     | otherwise -> close
   V.EvMouseDown x y V.BRight mods -> mouseEvent x y V.BRight mods d {contextMenu=Nothing}
   _ -> (d,[])
@@ -824,13 +876,14 @@ mouseEvent x y button mods d = case find (\w -> inside (bounds w) x y) (windows 
       | not (windowFocused d w), x==l || x==l+ww-1 || y==t || y==t+hh-1 -> (focused,[])
       | y==t && x>=l+2 && x<=l+4 -> runCommand Close focused
       | y==t && x>=l+ww-6 && x<l+ww-3 -> runCommand Zoom focused
+      | y==t, activeConversation focused, not (null (agentSettings focused)), inside (agentTitleRect focused w) x y -> runCommand (AgentChoose "") focused
       | y==t -> (focused {drag=Just (Moving (windowId w) (x-l) (y-t)),dragOriginal=Just (windowId w,bounds w,restoredBounds w)},[])
       | x>=l+ww-2 && y==t+hh-1 -> (focused {drag=Just (Resizing (windowId w) (l+ww-x) (t+hh-y)),dragOriginal=Just (windowId w,bounds w,restoredBounds w)},[])
-      | Just doc<-activeDocument focused, inside (scrollbarRect True doc w) x y -> (scrollClick True x y focused,[])
-      | Just doc<-activeDocument focused, inside (scrollbarRect False doc w) x y -> (scrollClick False x y focused,[])
+      | Just doc<-activeDocument focused, inside (scrollbarRect focused True doc w) x y -> (scrollClick True x y focused,[])
+      | Just doc<-activeDocument focused, inside (scrollbarRect focused False doc w) x y -> (scrollClick False x y focused,[])
       | y==t+hh-1 -> (focused,[])
-      | activeConversation focused, inside (composerRect w) x y -> (composerClick x y mods w focused,[])
-      | activeConversation focused, y>=top (composerRect w) -> (focused,[])
+      | activeConversation focused, inside (composerRect focused w) x y -> (composerClick x y mods w focused,[])
+      | activeConversation focused, y>=top (composerRect focused w) -> (focused,[])
       | otherwise -> (selectAt (V.MShift `elem` mods) x y focused {drag=Just (Selecting (windowId w)),composerFocused=if activeConversation focused then False else composerFocused focused},[])
     _ -> (focused,[])
 
@@ -849,23 +902,40 @@ dragKey key mods d = case dragOriginal d of
       | otherwise -> (d,[])
   where done=d {drag=Nothing,dragOriginal=Nothing}
 
-windowPositionText :: Document -> Window -> Text
-windowPositionText doc w | byteMode (documentBuffer doc) = " HEX "<>hexNumber 8 (caret (selection w))<>" "<>(if windowHexAscii w then "ASCII" else "HEX")<>" "
-windowPositionText doc w = let (r,c)=bufferLineColumn (documentBuffer doc) (caret (selection w))
+windowPositionText :: Desktop -> Document -> Window -> Text
+windowPositionText d doc _ | documentLabel doc==Just "Conversation" = " "<>case agentContextUsage d of
+  Just (used,size) | used>=0 && size>0 -> T.pack (show (used*100 `div` size))<>"% · "<>formatTokenCount used<>"/"<>formatTokenCount size<>" "
+  _ -> "-- "
+windowPositionText _ doc w | byteMode (documentBuffer doc) = " HEX "<>hexNumber 8 (caret (selection w))<>" "<>(if windowHexAscii w then "ASCII" else "HEX")<>" "
+windowPositionText _ doc w = let (r,c)=bufferLineColumn (documentBuffer doc) (caret (selection w))
   in " "<>T.pack (show (r+1))<>":"<>T.pack (show (c+1))<>" "
+
+formatTokenCount :: Integer -> Text
+formatTokenCount value
+  | value<1000 = T.pack (show (max 0 value))
+  | otherwise = compact 1000 ["k","M","G","T","P","E"]
+  where
+    compact unit (suffix:rest)
+      | rounded>=1000, not (null rest) = compact (unit*1000) rest
+      | value<10*unit = T.pack (show (tenths `div` 10))<>
+          (if tenths `mod` 10==0 then "" else "."<>T.pack (show (tenths `mod` 10)))<>suffix
+      | otherwise = T.pack (show rounded)<>suffix
+      where rounded=(value+unit `div` 2) `div` unit
+            tenths=(value*10+unit `div` 2) `div` unit
+    compact _ []=T.pack (show value)
 
 windowPositionColumn :: Document -> Int
 windowPositionColumn doc = if byteMode (documentBuffer doc) then 10 else 2
 
-scrollbarRect :: Bool -> Document -> Window -> Rect
-scrollbarRect vertical doc w
-  | vertical = Rect (x+ww-1) (y+1) 1 (windowContentRows doc w)
-  | byteMode (documentBuffer doc) && scrollbarLimit False doc w==0 = Rect x (y+hh-1) 0 1
-  | otherwise = let start=windowPositionColumn doc+T.length (windowPositionText doc w) in Rect (x+start) (y+hh-1) (max 0 (ww-start-2)) 1
+scrollbarRect :: Desktop -> Bool -> Document -> Window -> Rect
+scrollbarRect d vertical doc w
+  | vertical = Rect (x+ww-1) (y+1) 1 (windowContentRows d doc w)
+  | byteMode (documentBuffer doc) && scrollbarLimit d False doc w==0 = Rect x (y+hh-1) 0 1
+  | otherwise = let start=windowPositionColumn doc+T.length (windowPositionText d doc w) in Rect (x+start) (y+hh-1) (max 0 (ww-start-2)) 1
   where Rect x y ww hh=bounds w
 
-scrollbarLimit :: Bool -> Document -> Window -> Int
-scrollbarLimit vertical doc w = max 0 (if vertical then documentRows doc w-max 1 (windowContentRows doc w)
+scrollbarLimit :: Desktop -> Bool -> Document -> Window -> Int
+scrollbarLimit d vertical doc w = max 0 (if vertical then documentRows doc w-max 1 (windowContentRows d doc w)
   else windowDocumentWidth doc w-max 1 (width (bounds w)-2)+(if byteMode (documentBuffer doc) then 0 else 1))
 
 -- Each split chooses its own layout. Keep the byte viewport and a visible caret
@@ -881,8 +951,8 @@ clampHexScroll before d = d {windows=map clamp (windows d)}
           visible=oldCursor>=scrollRow old && oldCursor<scrollRow old+height (bounds old)-2
           cursor=caret (selection w) `div` windowHexBytes w
           anchored=if changed && visible then max (cursor-height (bounds w)+3) (min cursor row) else row
-      in w {scrollRow=max 0 (min (scrollbarLimit True doc w) anchored),
-            scrollColumn=max 0 (min (scrollbarLimit False doc w) (if changed then 0 else scrollColumn w))}
+      in w {scrollRow=max 0 (min (scrollbarLimit d True doc w) anchored),
+            scrollColumn=max 0 (min (scrollbarLimit d False doc w) (if changed then 0 else scrollColumn w))}
     clamp w = w
 
 scrollbarThumb :: Int -> Int -> Int -> Int
@@ -890,17 +960,17 @@ scrollbarThumb len limit position = 1+min limit (max 0 position)*max 0 (len-3) `
 
 changeScroll :: Bool -> Int -> Desktop -> Desktop
 changeScroll vertical delta d = case (activeWindow d,activeDocument d) of
-  (Just w,Just doc) -> let value=max 0 (min (scrollbarLimit vertical doc w) ((if vertical then scrollRow w else scrollColumn w)+delta))
+  (Just w,Just doc) -> let value=max 0 (min (scrollbarLimit d vertical doc w) ((if vertical then scrollRow w else scrollColumn w)+delta))
     in modifyActive (\v -> if vertical then v {scrollRow=value} else v {scrollColumn=value}) d
   _ -> d
 
 scrollClick :: Bool -> Int -> Int -> Desktop -> Desktop
 scrollClick vertical x y d = case (activeWindow d,activeDocument d) of
   (Just w,Just doc) ->
-    let r=scrollbarRect vertical doc w
+    let r=scrollbarRect d vertical doc w
         len=if vertical then height r else width r
         offset=if vertical then y-top r else x-left r
-        thumb=scrollbarThumb len (scrollbarLimit vertical doc w) (if vertical then scrollRow w else scrollColumn w)
+        thumb=scrollbarThumb len (scrollbarLimit d vertical doc w) (if vertical then scrollRow w else scrollColumn w)
         page=max 1 ((if vertical then height else width) (bounds w)-2)
     in if offset==0 then changeScroll vertical (-1) d
        else if offset==len-1 then changeScroll vertical 1 d
@@ -910,10 +980,10 @@ scrollClick vertical x y d = case (activeWindow d,activeDocument d) of
 
 scrollTrack :: Bool -> Int -> Int -> Desktop -> Desktop
 scrollTrack vertical x y d = case (activeWindow d,activeDocument d) of
-  (Just w,Just doc) -> let { r=scrollbarRect vertical doc w
+  (Just w,Just doc) -> let { r=scrollbarRect d vertical doc w
                          ; len=if vertical then height r else width r
                          ; offset=if vertical then y-top r else x-left r
-                         ; value=max 0 (min (scrollbarLimit vertical doc w) ((offset-1)*scrollbarLimit vertical doc w `div` max 1 (len-3))) }
+                         ; value=max 0 (min (scrollbarLimit d vertical doc w) ((offset-1)*scrollbarLimit d vertical doc w `div` max 1 (len-3))) }
                      in modifyActive (\v -> if vertical then v {scrollRow=value} else v {scrollColumn=value}) d
   _ -> d
 
@@ -1361,7 +1431,7 @@ hoverAt x y d = (d {hoverTarget=target,typeHint=if target==hoverTarget d then ty
   where
     highlight = (\(_,i,_)->i) <$> find (\(rect,_,_)->inside rect x y) (statusItemRects d)
     hovered = dialog d >>= \dg -> findIndex (\r -> inside r x y) (buttonRects d dg)
-    popup = fmap (\(r,i) -> (r,if inside r x y && y>top r && y<top r+height r-1 then y-top r-1 else i)) (contextMenu d)
+    popup = fmap (\(r,i) -> (r,if inside r x y && y>top r && y<top r+height r-1 then contextOffset r i+y-top r-1 else i)) (contextMenu d)
     target | dialog d/=Nothing || menu d/=Nothing || contextMenu d/=Nothing || drag d/=Nothing = Nothing
            | problemsVisible d && inside (problemsRect d) x y = Nothing
            | x<treeWidthOf d = Nothing

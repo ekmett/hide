@@ -89,11 +89,11 @@ renderDesktop d = (V.picForLayers layers) {V.picCursor=cursor}
       Nothing -> case (activeWindow d,activeDocument d) of
         (Just w,_) | composerActive d -> let
           b=composerBuffer d; (r,c)=bufferLineColumn b (caret (composerSelection d)); (sr,sc)=composerScroll d w
-          rect=composerRect w
+          rect=composerRect d w
           in if height rect>0 && width rect>0 then V.Cursor (left rect+displayColumn (bufferLineAt b r) c-sc) (top rect+r-sr) else V.NoCursor
         (_,Just doc) | not (documentCursorVisible doc) -> V.NoCursor
         (Just w,Just doc) -> let { (r,c)=windowCursorCell (documentBuffer doc) w; x=left (bounds w)+1+c-scrollColumn w; y=top (bounds w)+1+r-scrollRow w }
-                            in if inside (Rect (left (bounds w)+1) (top (bounds w)+1) (width (bounds w)-2) (windowContentRows doc w)) x y then V.Cursor x y else V.NoCursor
+                            in if inside (Rect (left (bounds w)+1) (top (bounds w)+1) (width (bounds w)-2) (windowContentRows d doc w)) x y then V.Cursor x y else V.NoCursor
         _ -> V.NoCursor
 
 -- A DOS shadow changes the underlying cell attributes, preserving its glyph.
@@ -113,7 +113,7 @@ windowLayers d active w =
     | not (byteMode (documentBuffer doc)), issue<-diagnostics d, Just (diagnosticPath issue)==fmap filePath (documentFile doc), diagnosticRow issue>=scrollRow w, diagnosticRow issue<scrollRow w+hh-2]
   ++ (if active then
     [place (x+2) y (label frame "[" V.<|> label (attr (V.RGBColor 85 255 85) blue) (if videoMode d==Nothing then "x" else "■") V.<|> label frame "]"),place (x+ww-6) y (label frame "[" V.<|> label (attr cyan blue) "↑" V.<|> label frame "]")
-    ,place (x+windowPositionColumn doc) (y+hh-1) (label frame (T.take (max 0 (ww-windowPositionColumn doc-2)) (windowPositionText doc w)))
+    ,place (x+windowPositionColumn doc) (y+hh-1) (label frame (T.take (max 0 (ww-windowPositionColumn doc-2)) (windowPositionText d doc w)))
     ,scrollbarImage True,scrollbarImage False] else [])
   ++ composerLayers
   ++ hexDividerLayers
@@ -126,7 +126,7 @@ windowLayers d active w =
     doc=fromMaybe (newDocument (newBuffer "") Nothing) (M.lookup (bufferId w) (buffers d))
     b=documentBuffer doc; t=contents b
     file=maybe ("NONAME"<>T.pack (show (bufferId w))<>".HS") (T.pack . takeFileName . filePath) (documentFile doc)
-    title=" "<>fromMaybe file (documentLabel doc)<>(if dirty b then " * " else " ")
+    title=" "<>(if documentLabel doc==Just "Conversation" then conversationTitle d else fromMaybe file (documentLabel doc))<>(if dirty b then " * " else " ")
     (titleColumn,shownTitle)
       | byteMode b = let start=max 6 (1+hexColumn 0-scrollColumn w)
                          end=min (ww-8-T.length number) (hexAsciiColumn (windowHexBytes w)-scrollColumn w)
@@ -138,9 +138,9 @@ windowLayers d active w =
     frame=attr (if moving then cyan else if active then white else gray) blue
     styledLines=splitStyled (if documentLabel doc /= Nothing && documentLabel doc /= Just "Conversation" && not (maybe False (T.isPrefixOf "Terminal ") (documentLabel doc)) then [(ch,Plain) | ch<-T.unpack t] else documentHighlight doc)
     scrollbarImage vertical =
-      let Rect sx sy bw bh=scrollbarRect vertical doc w
+      let Rect sx sy bw bh=scrollbarRect d vertical doc w
           len=if vertical then bh else bw
-          thumb=scrollbarThumb len (scrollbarLimit vertical doc w) (if vertical then scrollRow w else scrollColumn w)
+          thumb=scrollbarThumb len (scrollbarLimit d vertical doc w) (if vertical then scrollRow w else scrollColumn w)
           cell n=V.char (if n==0 || n==len-1 then attr blue scrollCyan else attr scrollCyan blue)
             (if n==0 then if vertical then '▲' else '◄' else if n==len-1 then if vertical then '▼' else '►' else if n==thumb then '█' else '░')
       in place sx sy ((if vertical then V.vertCat else V.horizCat) [cell n | n<-[0..len-1]])
@@ -148,12 +148,12 @@ windowLayers d active w =
       | documentLabel doc/=Just "Conversation" = []
       | otherwise = [place (left rect) (top rect) inputImage] ++ thoughtEdges
       where
-        rect=composerRect w; draft=composerBuffer d; (sr,sc)=composerScroll d w
+        rect=composerRect d w; draft=composerBuffer d; (sr,sc)=composerScroll d w
         thoughtEdges
           | width rect<=0 || height rect<=0 = []
           | otherwise = [place (left rect-1) (top rect) (edgeImage True),
                          place (left rect+width rect) (top rect) (edgeImage False),
-                         place (left rect-3) (top rect) (label (attr scrollCyan blue) ".o")]
+                         place (left rect+width rect+1) (top rect) (label (attr scrollCyan blue) "o.")]
         edgeImage leftSide=V.vertCat
           [V.char (if corner then attr scrollCyan blue else attr black scrollCyan)
             (if corner then bubbleTile (videoMode d/=Nothing) shape else ' ')
@@ -167,7 +167,7 @@ windowLayers d active w =
       [place (x+1+column) y (V.vertCat [V.char frame (if active && not moving then '╤' else '┬'),
         V.charFill frame '│' 1 contentHeight,V.char frame (if active && not moving then '╧' else '┴')])
       | byteMode b, divider<-hexDividers (windowHexBytes w), let column=divider-scrollColumn w, column>=0, column<contentWidth]
-    contentWidth=max 0 (ww-2); contentHeight=windowContentRows doc w
+    contentWidth=max 0 (ww-2); contentHeight=windowContentRows d doc w
     textImage=V.vertCat [renderLine n | n<-[scrollRow w..scrollRow w+contentHeight-1]]
     renderLine n | byteMode b && n>=documentRows doc w = V.charFill edit ' ' contentWidth 1
     renderLine n | byteMode b = V.cropRight contentWidth (V.translateX (negate (scrollColumn w)) (V.horizCat
@@ -275,8 +275,8 @@ problemsLayers d
     format issue=" "<>(case diagnosticSeverity issue of 1 -> "Error "; 2 -> "Warning "; 3 -> "Info "; _ -> "Hint ")<>T.pack (takeFileName (diagnosticPath issue))<>":"<>T.pack (show (diagnosticRow issue+1))<>":"<>T.pack (show (diagnosticColumn issue+1))<>" "<>T.unwords (T.words (diagnosticMessage issue))
 
 contextLayers :: Desktop -> (Rect,Int) -> [V.Image]
-contextLayers d (Rect x y w h,chosen) =
-  [place (x+1) (y+i+1) (row (attr (if commandEnabled d cmd then black else V.RGBColor 85 85 85) (if i==chosen then green else gray)) (w-2) (" "<>title)) | (i,(title,cmd))<-zip [0..] (contextItems (contextKind d))]
+contextLayers d (r@(Rect x y w h),chosen) =
+  [place (x+1) (y+i-contextOffset r chosen+1) (row (attr (if commandEnabled d cmd then black else V.RGBColor 85 85 85) (if i==chosen then green else gray)) (w-2) (" "<>title)) | (i,(title,cmd))<-take (max 0 (h-2)) (drop (contextOffset r chosen) (zip [0..] (contextItems (contextKind d))))]
   ++ [place x y (box paper False w h)]
 
 dialogLayers :: Desktop -> Dialog -> [V.Image]

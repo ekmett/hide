@@ -246,13 +246,19 @@ straight top edge into the speaker's tail. SDL uses single-cell bitmap tiles;
 terminal fonts use block-character approximations. Code keeps syntax colors,
 and **Copy raw conversation** preserves the original Markdown.
 
-The four-line draft is a cyan thought bubble, led by `.o`, without a divider or
-buttons. Click the status-bar actions or use their shortcuts: **Enter** submits
+The draft is a cyan thought bubble with an `o.` trail on the right. It starts
+at one line, grows with newlines up to twelve visible rows, and scrolls beyond that,
+without a divider or buttons. Click the status-bar actions or use their shortcuts: **Enter** submits
 (or queues while a reply is active), **Shift+Enter** inserts a newline, and
 **Ctrl+Enter** steers when the provider supports it. **Esc Cancel** appears while
 replying and stops the active response; queued queries then proceed in order.
 Click the transcript or press Tab to browse/copy replies; typing returns to the
 draft. Drafts retain undo/redo and are preserved while replies stream.
+Click the conversation title to choose its model and reasoning effort from the
+provider-advertised options. The title updates after confirmation; choices are
+disabled during a reply. Providers without these options keep a plain title.
+The lower-left frame shows the provider-reported context usage, for example
+`37% · 148k/400k`; it shows `--` until usage and capacity are available.
 
 **Tools > Prompt** sends a message with optional selection, current-file and
 Messages context, including unsaved text. **Conversation** opens its numbered

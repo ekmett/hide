@@ -148,8 +148,8 @@ showConsole console desktop = case M.lookup bid (buffers desktop) of
               { selection=let Selection a c = selection window in case cursor of
                   Just pos | a == c -> Selection (clamp pos) (clamp pos)
                   _ -> Selection (clamp a) (clamp c)
-              , scrollRow=max 0 (min (scrollbarLimit True document window) (scrollRow window))
-              , scrollColumn=max 0 (min (scrollbarLimit False document window) (scrollColumn window)) }
+              , scrollRow=max 0 (min (scrollbarLimit desktop True document window) (scrollRow window))
+              , scrollColumn=max 0 (min (scrollbarLimit desktop False document window) (scrollColumn window)) }
     in desktop {buffers=M.insert bid document (buffers desktop),windows=map adjust (windows desktop)}
   where
     bid = consoleBuffer console

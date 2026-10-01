@@ -34,7 +34,7 @@ import System.Environment (lookupEnv)
 import THC.Edit.Syntax (Style(..), bubbleTile)
 
 -- One configured stdio provider; its protocol supplies models and tools.
-data Phase = Initializing (Maybe Text) | Starting (Maybe Text) | Prompting | Steering Text deriving Eq
+data Phase = Initializing (Maybe Text) | Starting (Maybe Text) | Prompting | Steering Text | Setting deriving Eq
 data Record = Reply Text Text | Activity Text Value deriving (Eq,Show)
 data Approval = Permission Value [(Text,Text)] Value | Write Value Snapshot Text | Execute Value Terminal.TerminalConfig Int
 
@@ -148,6 +148,14 @@ perform runtime@(ConversationState directory ref consoles) action values d = do
     ("show",_) -> do
       modifyIORef' ref (\state -> state {deferredApproval=False})
       pure (paint True s d)
+    ("set-config",[ident,value])
+      | busy s -> pure d {status="Wait for the current reply before changing its model."}
+      | Just client<-connection s, Just sid<-session s,
+        any (\option -> settingId option==ident && value `elem` map fst (settingChoices option)) (agentSettings d) -> do
+          requestId<-A.request client "session/set_config_option" (object ["sessionId" .= sid,"configId" .= ident,"value" .= value])
+          modifyIORef' ref (\state -> state {pending=M.insert requestId Setting (pending state)})
+          pure d {status="Updating conversation settings...",agentReplying=True}
+      | otherwise -> pure d {status="This conversation setting is unavailable."}
     ("copy",_) -> pure d {clipboard=rawTranscript (transcript s),status="Raw conversation copied."}
     ("prompt",_) | busy s -> pure d {status="A reply is in progress; cancel it before sending another prompt."}
     ("prompt",_) -> pure d {dialog=Just (Dialog "Prompt" (AgentDialog "send")
@@ -218,7 +226,7 @@ start (ConversationState _ ref _) resume d = do
       pure (message "Cannot start agent" (wrapMessage (T.pack (show err))) d)
     Right (root,client,ident) -> do
       writeIORef ref s {connection=Just client,project=root,pending=M.singleton ident (Initializing resume)}
-      pure d {status="Connecting to ACP provider...",agentSteering=False,agentReplying=True}
+      pure d {status="Connecting to ACP provider...",agentSteering=False,agentReplying=True,agentContextUsage=Nothing,agentSettings=[]}
 
 sendQueued :: ConversationState -> Desktop -> IO Desktop
 sendQueued (ConversationState _ ref _) d = do
@@ -295,7 +303,8 @@ receive runtime@(ConversationState directory ref consoles) d event = do
           Just sid -> do
             modifyIORef' ref (\state -> state {session=Just sid,lastSession=Just (provider state,project state,sid)})
             savedId<-persist (directory </> "agent-session.json") (object ["provider" .= launchValue (provider s),"cwd" .= project s,"sessionId" .= sid])
-            sendQueued runtime d {status=either ("Session opened; could not save ID: "<>) (const ("Session "<>sid)) savedId}
+            sendQueued runtime d {agentSettings=parseAgentSettings value,status=either ("Session opened; could not save ID: "<>) (const ("Session "<>sid)) savedId}
+        (Just Setting,Right value,_) -> pure d {agentSettings=parseAgentSettings value,contextMenu=Nothing,status="Conversation settings updated."}
         (Just (Steering text),Right value,_) -> case field "outcome" value :: Maybe Text of
           Just "injected" -> pure d {status="Follow-up added to the active turn."}
           Just "startedNewTurn" -> pure d {status="Follow-up started a new turn."}
@@ -313,7 +322,11 @@ receive runtime@(ConversationState directory ref consoles) d event = do
             "tool_call_update" -> recordTool update
             "plan" -> modifyIORef' ref (\state -> state {transcript=transcript state++[Activity "Plan" update]})
             _ -> pure ()
-          pure d
+          pure $ if kind=="config_option_update" then d {agentSettings=parseAgentSettings update,contextMenu=Nothing}
+            else if kind=="usage_update" then case (field "used" update,field "size" update) of
+            (Just used,Just size) | used>=0 && size>0 -> d {agentContextUsage=Just (used,size)}
+            _ -> d
+            else d
       | otherwise -> pure d
     A.Request ident method params -> case connection s of
       Nothing -> pure d
@@ -508,7 +521,7 @@ paint force s d
       bid=maybe (nextId d) fst existing
       adjust w | bufferId w/=bid = w
                | otherwise =
-                   let rows=max 1 (windowContentRows (fromMaybe (newDocument (newBuffer "") Nothing) (M.lookup bid (buffers opened))) w)
+                   let rows=max 1 (windowContentRows opened (fromMaybe (newDocument (newBuffer "") Nothing) (M.lookup bid (buffers opened))) w)
                        oldLines=maybe 0 (bufferLineCount . documentBuffer . snd) existing
                        newLines=length (T.splitOn "\n" text)
                        atEnd=scrollRow w>=max 0 (oldLines-rows)
@@ -564,6 +577,22 @@ renderReply graphical requested outgoing text
     splitRows chars=case break ((=='\n').fst) chars of
       (row,[]) -> [row]
       (row,_:rest) -> row:splitRows rest
+
+parseAgentSettings :: Value -> [AgentSetting]
+parseAgentSettings value=mapMaybe parseOption (fromMaybe [] (field "configOptions" value))
+  where
+    parseOption option=do
+      ident<-field "id" option
+      name<-field "name" option
+      category<-field "category" option
+      if category `notElem` ["model","thought_level"] then Nothing else do
+        current<-field "currentValue" option
+        choices<-field "options" option :: Maybe [Value]
+        let values=concatMap choice choices
+        if null values then Nothing else Just (AgentSetting ident name category current values)
+    choice option=case (field "value" option,field "name" option) of
+      (Just value,Just name) -> [(value,name)]
+      _ -> concatMap choice (fromMaybe [] (field "options" option))
 
 rawTranscript :: [Record] -> Text
 rawTranscript=T.intercalate "\n\n" . map (\record -> case record of Reply role text -> role<>"\n"<>text; Activity ident value -> ident<>"\n"<>jsonText value)

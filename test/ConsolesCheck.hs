@@ -48,7 +48,7 @@ nativeChecks consoles desktop = do
       terminalWindow = case [w | w <- windows painted,bufferId w == bid] of w:_ -> w; [] -> error "missing terminal window"
   check "truecolor and attributes reach document" (('A',TerminalStyle 0x0c2238 0x412b15 1) `elem` documentHighlight doc)
   check "wide continuation omitted and blank cells preserved" ("A界" `T.isPrefixOf` screen && T.length (T.takeWhile (/= '\n') screen) == 19 && length (T.lines screen) == 4)
-  check "terminal selection and scrolling clamped" (caret (selection terminalWindow) <= T.length screen && scrollRow terminalWindow <= scrollbarLimit True doc terminalWindow && scrollColumn terminalWindow <= scrollbarLimit False doc terminalWindow)
+  check "terminal selection and scrolling clamped" (caret (selection terminalWindow) <= T.length screen && scrollRow terminalWindow <= scrollbarLimit painted True doc terminalWindow && scrollColumn terminalWindow <= scrollbarLimit painted False doc terminalWindow)
   check "collapsed selection follows terminal cursor across wide glyph" (caret (selection terminalWindow) == 2)
   selecting <- tickConsoles consoles painted {windows=map (\w -> if bufferId w == bid then w {selection=Selection 0 2} else w) (windows painted)}
   check "tick preserves selected terminal text" (all ((== Selection 0 2) . selection) [w | w <- windows selecting,bufferId w == bid])

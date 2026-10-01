@@ -76,7 +76,7 @@ checks = bracket temporary removeFile $ \path -> do
       narrow=modifyActive (\w -> w {bounds=(bounds w) {width=42}}) opened
       narrowDoc=maybe (error "no document") id (activeDocument narrow)
       narrowWindow=maybe (error "no window") id (activeWindow narrow)
-      bar=scrollbarRect False narrowDoc narrowWindow
+      bar=scrollbarRect narrow False narrowDoc narrowWindow
       scrolled=fst (handleEvent (V.EvMouseDown (left bar+width bar-1) (top bar) V.BLeft []) narrow)
       widened=key (V.KFun 5) scrolled
   let compact=modifyActive (\w -> w {bounds=(bounds w) {width=56}}) (desktop (newByteBuffer (BS.pack (take 512 (cycle [0..255])))))
@@ -84,7 +84,7 @@ checks = bracket temporary removeFile $ \path -> do
       compactDoc=maybe (error "no compact document") id (activeDocument compact)
   check "eight-byte rows fit beside Files with both panes visible"
     ("00000008" `T.isInfixOf` snapshot compact && "│........" `T.isInfixOf` snapshot compact &&
-     scrollbarLimit False compactDoc compactWindow==0 && not ("◄" `T.isInfixOf` snapshot compact))
+     scrollbarLimit compact False compactDoc compactWindow==0 && not ("◄" `T.isInfixOf` snapshot compact))
   check "hex dividers join both borders and continue below EOF"
     (and [cellAt opened x 1=='╤' && cellAt opened x 23=='╧' && all (\y -> cellAt opened x y=='│') [2..22] | x<-[9,58]])
   check "no divider beside the scrollbar" (all (\y -> cellAt opened 78 y/='│') [2..22])
@@ -92,7 +92,7 @@ checks = bracket temporary removeFile $ \path -> do
   check "placeholder dots are gray but literal periods stay yellow"
     (all (`T.isInfixOf` dots) ["color:rgb(170,170,170);background:rgb(0,0,170)'>.</span>","color:rgb(255,255,85);background:rgb(0,0,170)'>.</span>"])
   check "full width hex has no horizontal scrollbar or scrollable blank column"
-    (not ("◄" `T.isInfixOf` image) && maybe False (\w -> scrollbarLimit False narrowDoc w==0 && width (scrollbarRect False narrowDoc w)==0) (activeWindow opened))
+    (not ("◄" `T.isInfixOf` image) && maybe False (\w -> scrollbarLimit narrow False narrowDoc w==0 && width (scrollbarRect narrow False narrowDoc w)==0) (activeWindow opened))
   check "narrow hex retains working horizontal scrollbar"
     ("◄" `T.isInfixOf` snapshot narrow && fmap scrollColumn (activeWindow scrolled)==Just 1)
   check "widening hex resets horizontal scrolling and hides scrollbar"
@@ -118,7 +118,7 @@ checks = bracket temporary removeFile $ \path -> do
   check "compact ASCII click and edit address the correct byte"
     (position clickCompact==Just 15 && BS.index (bufferBytes (buffer editCompact)) 15==90 && position editCompact==Just 16)
   check "compact vertical extent includes every byte and EOF insertion row"
-    (documentRows compactDoc compactWindow==65 && scrollbarLimit True compactDoc compactWindow==44)
+    (documentRows compactDoc compactWindow==65 && scrollbarLimit compact True compactDoc compactWindow==44)
   let wide=moveTo False 300 (desktop (buffer compact))
       docked=installTree "/tmp" [] wide
       undocked=setTree Nothing docked

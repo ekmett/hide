@@ -119,16 +119,16 @@ checks = do
   check "vertical scroll arrow moves one row" (fmap scrollRow (activeWindow up)==Just 9)
   let sw=fromMaybe (error "missing scroll window") (activeWindow scrolling)
       sd=fromMaybe (error "missing scroll document") (activeDocument scrolling)
-      hr=scrollbarRect False sd sw
-      vr=scrollbarRect True sd sw
+      hr=scrollbarRect scrolling False sd sw
+      vr=scrollbarRect scrolling True sd sw
       right=fst (handleEvent (V.EvMouseDown (left hr+width hr-1) (top hr) V.BLeft []) scrolling)
       page=fst (handleEvent (V.EvMouseDown (left vr) (top vr+height vr-2) V.BLeft []) scrolling)
-      thumb=scrollbarThumb (height vr) (scrollbarLimit True sd sw) (scrollRow sw)
+      thumb=scrollbarThumb (height vr) (scrollbarLimit scrolling True sd sw) (scrollRow sw)
       grabbed=fst (handleEvent (V.EvMouseDown (left vr) (top vr+thumb) V.BLeft []) scrolling)
       bottom=fst (handleEvent (V.EvMouseDown (left vr) (top vr+height vr-2) V.BLeft []) grabbed)
   check "horizontal arrow moves one column" (fmap scrollColumn (activeWindow right)==Just 5)
   check "vertical track pages by viewport" (fmap scrollRow (activeWindow page)==Just 18)
-  check "dragging thumb reaches final page" (fmap scrollRow (activeWindow bottom)==Just (scrollbarLimit True sd sw))
+  check "dragging thumb reaches final page" (fmap scrollRow (activeWindow bottom)==Just (scrollbarLimit scrolling True sd sw))
   check "horizontal scrollbar retains position readout" (all (`T.isInfixOf` snapshot scrolling) ["1:1","◄","►"])
   check "scrollbars use dark cyan" ("rgb(0,170,170)" `T.isInfixOf` snapshotHtml scrolling)
   let resizing=fst (handleEvent (V.EvMouseDown 33 14 V.BLeft []) scrolling)
