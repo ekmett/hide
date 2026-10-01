@@ -38,6 +38,19 @@ checks=do
       rejected _=False
       cursor=caret . selection . fromJust . activeWindow
       doc=fromJust . activeDocument
+  let terminal=addReadOnly "Terminal fixture" "hello" original
+      terminalId=windowId (fromJust (activeWindow terminal))
+  (pinned,pinResult)<-call terminal "editor_arrange" ["action" .= ("pin"::T.Text)]
+  ok "workspace arrange pins the same terminal and reports panel membership" (succeeded pinResult && maybe False (windowPinned pinned) (activeWindow pinned))
+  mapM_ (\action->do
+    (_,reply)<-call pinned "editor_arrange" (["action" .= (action::T.Text)]++case action of "move"->["x" .= (0::Int),"y" .= (1::Int)];"resize"->["width" .= (50::Int),"height" .= (10::Int)];_->[])
+    ok "workspace rejects direct geometry changes on pinned terminals" (rejected reply)) ["move","resize","zoom","split_vertical","split_horizontal"]
+  (messages,_)<-call pinned "editor_panels" ["messages" .= True]
+  (focused,focusResult)<-call messages "editor_arrange" ["action" .= ("focus"::T.Text),"windowId" .= terminalId]
+  (unpinned,unpinResult)<-call focused "editor_arrange" ["action" .= ("unpin"::T.Text)]
+  ok "workspace focus selects hidden terminal tab and unpin restores its original window" (succeeded focusResult && bottomTerminal focused==Just terminalId && succeeded unpinResult && not (maybe False (windowPinned unpinned) (activeWindow unpinned)))
+  (_,badPin)<-call original "editor_arrange" ["action" .= ("pin"::T.Text)]
+  ok "workspace refuses pinning an ordinary source window" (rejected badPin)
   ok "workspace schemas declare all tools" (length workspaceTools==length workspaceToolNames && "editor_file" `elem` workspaceToolNames)
   let privateReview=addReadOnly "Disk changes: /authority/private-session-key.json" "private review" original {guestPrivatePaths=["/authority/private-session-key.json"]}
   (_,reviewLayout)<-call privateReview "editor_layout" []

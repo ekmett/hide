@@ -110,6 +110,8 @@ desktopValue=desktopValueSaved . rememberConversationView
 
 desktopValueSaved :: Desktop -> Value
 desktopValueSaved d=object ["schemaVersion" .= (1::Int),"screen" .= screenSize d,"buffers" .= map (documentValue d) (M.toAscList documents),
+  "dockedTerminals" .= [object ["windowId" .= ident,"bounds" .= rectValue rectangle,"restoredBounds" .= fmap rectValue saved] | (ident,(rectangle,saved))<-M.toList (dockedTerminals d),any ((==ident).windowId) (windows d)],
+  "bottomTerminal" .= bottomTerminal d,
   "windows" .= map windowValue [w | w<-windows d,M.member (bufferId w) documents],"nextId" .= nextId d,
   "conversationTarget" .= conversationTarget d,"conversationViews" .= map conversationViewValue (M.toList (conversationViews d)),
   "composer" .= bufferValue (composerBuffer d),"composerSelection" .= selectionValue (composerSelection d),"composerFocused" .= composerFocused d,
@@ -168,6 +170,17 @@ desktopParser baseline=withObject "checkpoint" $ \o->do
   unless (length encodedWindows<=4096) (fail "Too many recovered windows")
   views<-mapM (windowParser documents) encodedWindows
   unless (S.size (S.fromList (map windowId views))==length views) (fail "Duplicate window IDs")
+  encodedDock<-o .:? "dockedTerminals" .!= []
+  unless (length encodedDock<=length views) (fail "Too many docked terminals")
+  pinned<-mapM (withObject "docked terminal" $ \entry->do
+    wid<-entry .: "windowId"
+    unless (any (\w->windowId w==wid && terminalWindow baseline {buffers=documents} w) views) (fail "Dock references missing terminal")
+    rectangle<-entry .: "bounds" >>= rectParser
+    restored<-entry .: "restoredBounds" >>= traverse rectParser
+    pure (wid,(rectangle,restored))) encodedDock
+  unless (M.size (M.fromList pinned)==length pinned) (fail "Duplicate docked terminal")
+  selectedTerminal<-o .:? "bottomTerminal"
+  unless (maybe True (`M.member` M.fromList pinned) selectedTerminal) (fail "Unknown selected terminal")
   ident<-o .: "nextId" >>= positive
   unless (all (<ident) (M.keys documents++map windowId views)) (fail "Invalid next ID")
   composer<-o .: "composer" >>= bufferParser
@@ -190,14 +203,14 @@ desktopParser baseline=withObject "checkpoint" $ \o->do
   mode<-prefs .: "videoMode" >>= traverse (boundedInt 0 65535)
   problems<-prefs .: "problemsVisible"; preferred<-prefs .: "problemsHeight" >>= boundedInt 0 4096
   messages<-prefs .: "messagesNumber" >>= traverse positive
-  pure baseline {screenSize=size,buffers=documents,windows=views,nextId=ident,composerBuffer=composer,composerSelection=composerSelection',composerFocused=composerFocused',
+  pure (layoutBottomWindows (normalizeBottom baseline {dockedTerminals=M.fromList pinned,bottomTerminal=selectedTerminal,screenSize=size,buffers=documents,windows=views,nextId=ident,composerBuffer=composer,composerSelection=composerSelection',composerFocused=composerFocused',
     conversationTarget=selectedTarget,conversationViews=conversationViews',defaultDirectory=directory,sideTree=sidebar,wordStar=wordStar',blinkCursor=blink,crtFilter=crt,pixelateUnicode=pixelate,materialIcons=icons,streamerMode=streamer,
     appearance=toEnum look,videoMode=mode,problemsVisible=problems,problemsPreferredHeight=preferred,messagesNumber=messages,
     menu=Nothing,dialog=Nothing,drag=Nothing,dragOriginal=Nothing,clipboard="",clipboardExport=(0,Nothing),prefix=Nothing,blockStart=Nothing,
     status="Recovered session. Background processes ended; reconnect agents as needed.",lastFind="",branchStatus="",branchAdded=0,branchDeleted=0,branchRoot=Nothing,
     gitReview=Nothing,hoverTarget=Nothing,typeHint="",buttonHover=Nothing,buttonPressed=Nothing,contextMenu=Nothing,contextKind=SourceContext,
     diagnostics=[],buildDiagnostics=[],problemsSelected=0,problemsScroll=0,problemsFocused=False,statusHover=Nothing,heldModifiers=[],
-    agentSteering=False,agentReplying=False,agentQueued=0,agentContextUsage=Nothing,chatQuestion=Nothing,chatActions=[],chatInputOffset=Nothing}
+    agentSteering=False,agentReplying=False,agentQueued=0,agentContextUsage=Nothing,chatQuestion=Nothing,chatActions=[],chatInputOffset=Nothing}))
 
 documentParser :: Value -> Parser (Int,Document)
 documentParser=withObject "document" $ \o->do

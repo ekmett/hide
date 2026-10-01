@@ -47,7 +47,7 @@ data Window = Window
   } deriving (Eq,Show)
 data Command = New | Open | Download | ChangeDir | Save | SaveAs | Close | Quit | Undo | Redo | Cut | Copy | Paste
   | Find | FindNext | FindPrevious | Replace | GoTo | SelectAll | Zoom | NextWindow | Cascade | Tile
-  | SplitVertical | SplitHorizontal | About | Help | EditorOptions | Gallery
+  | SplitVertical | SplitHorizontal | ToggleTerminalPin | About | Help | EditorOptions | Gallery
   | InspectType | Definition | Complete | Problems | NextMessage | PreviousMessage | RestartHLS | RenameSymbol | CodeActions
   | ProjectBrowser | ToggleTree | GitDiff | GitCommit | GitFetch | GitPull | GitMerge | ReviewDisk
   | CompileTarget | MakeTarget | StopBuild | RunTarget | RunOptions | OpenTerminal | StopTerminal
@@ -118,6 +118,7 @@ data Desktop = Desktop
   , chatQuestion :: Maybe ChatQuestion, chatActions :: [(Int,Int,Text,[Text])], chatInputOffset :: Maybe Int
   , conversationTarget :: Text, conversationViews :: M.Map Text ConversationView
   , streamerMode :: Bool, clipboardExport :: (Int,Maybe Text), guestPrivatePaths :: [FilePath]
+  , dockedTerminals :: M.Map Int (Rect,Maybe Rect), bottomTerminal :: Maybe Int
   } deriving (Eq,Show)
 
 data MenuItem = MenuItem Text Text Command deriving (Eq,Show)
@@ -136,7 +137,7 @@ menus =
       mi "Exceptions..." "" (DebugCommand "exceptions"),mi "Output" "" (DebugCommand "output"),mi "Disconnect" "" (DebugCommand "disconnect")])
   ,("Tools",'t',[mi "File tree" "Ctrl+B" ToggleTree,mi "Git diff..." "" GitDiff,mi "Approve changes..." "" GitCommit,mi "Inspect type" "Shift+F1" InspectType,mi "Code actions..." "" CodeActions,mi "Messages" "" Problems,mi "Go to next" "Alt+F8" NextMessage,mi "Go to previous" "Alt+F7" PreviousMessage,mi "Restart language server" "" RestartHLS,mi "Conversation" "" Conversation,mi "Agents..." "" AgentDirectory,mi "Conversation model..." "" (AgentChoose ""),mi "Cancel reply" "" AgentCancel,mi "Resume session..." "" AgentResume,mi "New session" "" AgentNew,mi "Copy raw conversation" "" AgentCopyRaw,mi "Widget gallery..." "" Gallery,mi "Project browser..." "" ProjectBrowser])
   ,("Options",'o',[mi "Preferences..." "" EditorOptions,mi "Agents..." "" AgentOptions,mi "Agent Permissions" "" AgentPermissions,mi "Agent Context..." "" AgentGuidance])
-  ,("Window",'w',[mi "Agents..." "" AgentDirectory,mi "Tile" "" Tile,mi "Cascade" "" Cascade,mi "Split vertically" "" SplitVertical,mi "Split horizontally" "" SplitHorizontal,mi "Zoom" "F5" Zoom,mi "Next" "F6" NextWindow,mi "Close" "Alt+F3" Close])
+  ,("Window",'w',[mi "Agents..." "" AgentDirectory,mi "Tile" "" Tile,mi "Cascade" "" Cascade,mi "Split vertically" "" SplitVertical,mi "Split horizontally" "" SplitHorizontal,mi "Zoom" "F5" Zoom,mi "Pin / unpin terminal" "" ToggleTerminalPin,mi "Next" "F6" NextWindow,mi "Close" "Alt+F3" Close])
   ,("Help",'h',[mi "Contents" "F1" Help,mi "About Turbo Haskell..." "" About])]
   where mi = MenuItem
 
@@ -172,6 +173,7 @@ commandDescription cmd = case cmd of
   RunOptions -> "Choose THC or GHC, the executable and project target."
   OpenTerminal -> "Open a project shell in a terminal window."
   StopTerminal -> "Stop the selected terminal process."
+  ToggleTerminalPin -> "Pin the terminal in the bottom panel or restore its floating window."
   DebugCommand action -> case action of
     "attach" -> "Attach to a loopback Debug Adapter Protocol endpoint."
     "breakpoint" -> "Toggle a breakpoint at the current source line."
@@ -273,6 +275,8 @@ menuItemsFor d i
 commandEnabled :: Desktop -> Command -> Bool
 commandEnabled d Download = browserFrontend d && maybe False ((==Nothing) . documentLabel) (activeDocument d)
 commandEnabled _ Disabled{} = False
+commandEnabled d ToggleTerminalPin = maybe False (terminalWindow d) (activeWindow d)
+commandEnabled d cmd | cmd `elem` [Zoom,SplitVertical,SplitHorizontal], maybe False (windowPinned d) (activeWindow d) = False
 commandEnabled d (AgentChoose _) = T.null (conversationTarget d) && not (null (agentSettings d))
 commandEnabled d (AgentSet _ _) = T.null (conversationTarget d) && not (agentReplying d)
 commandEnabled d cmd | cmd `elem` [GoToMessage,CopyAllMessages,NextMessage,PreviousMessage] = not (null (diagnostics d))
@@ -286,10 +290,10 @@ menuRect d i = Rect (min x (max 0 (sw-w))) 1 w (length (menuItemsFor d i)+2)
         w = min sw (maximum [T.length t + T.length (menuShortcut d entry) + 5 | entry@(MenuItem t _ _) <- menuItemsFor d i])
 
 initialDesktop :: (Int,Int) -> Desktop
-initialDesktop size = Desktop size [] M.empty 1 Nothing Nothing Nothing "" False Nothing "" Nothing "" Nothing "" False Nothing Nothing Nothing "" Nothing Nothing Nothing [] False 0 0 False Nothing 0 0 Nothing SourceContext Nothing (newBuffer "") (Selection 0 0) True False False 0 True False False False Nothing Nothing [] 8 Nothing [] False SystemMode True [] Nothing [] Nothing "" M.empty False (0,Nothing) []
+initialDesktop size = Desktop size [] M.empty 1 Nothing Nothing Nothing "" False Nothing "" Nothing "" Nothing "" False Nothing Nothing Nothing "" Nothing Nothing Nothing [] False 0 0 False Nothing 0 0 Nothing SourceContext Nothing (newBuffer "") (Selection 0 0) True False False 0 True False False False Nothing Nothing [] 8 Nothing [] False SystemMode True [] Nothing [] Nothing "" M.empty False (0,Nothing) [] M.empty Nothing
 
 activeWindow :: Desktop -> Maybe Window
-activeWindow = listToMaybe . windows
+activeWindow d = listToMaybe (filter (windowVisible d) (windows d))
 activeDocument :: Desktop -> Maybe Document
 activeDocument d = activeWindow d >>= (\w -> M.lookup (bufferId w) (buffers d))
 
@@ -327,7 +331,7 @@ nextWindowNumber d = choose 1
 
 activateWindowNumber :: Int -> Desktop -> Desktop
 activateWindowNumber number d
-  | Just number==messagesNumber d, problemsVisible d = ready {problemsFocused=True,sideTree=fmap (\tree -> tree {treeFocused=False}) (sideTree d)}
+  | Just number==messagesNumber d, problemsVisible d = ready {bottomTerminal=Nothing,problemsFocused=True,sideTree=fmap (\tree -> tree {treeFocused=False}) (sideTree d)}
   | Just w<-find ((==number) . windowNumber) (windows d) = focusWindow (windowId w) ready
   | otherwise = d
   where ready=d {menu=Nothing,contextMenu=Nothing,drag=Nothing,dragOriginal=Nothing,prefix=Nothing}
@@ -337,15 +341,19 @@ windowFocused d w = not (problemsFocused d) && not (maybe False treeFocused (sid
   fmap windowId (activeWindow d)==Just (windowId w)
 
 focusWindow :: Int -> Desktop -> Desktop
-focusWindow i d = d { problemsFocused=False, sideTree=fmap (\tree -> tree {treeFocused=False}) (sideTree d), windows = filter ((==i) . windowId) (windows d) ++ filter ((/=i) . windowId) (windows d) }
+focusWindow i d = d { bottomTerminal=if M.member i (dockedTerminals d) then Just i else bottomTerminal d, problemsFocused=False, sideTree=fmap (\tree -> tree {treeFocused=False}) (sideTree d), windows = filter ((==i) . windowId) (windows d) ++ filter ((/=i) . windowId) (windows d) }
 
 cycleEditorWindow :: Bool -> Desktop -> Desktop
-cycleEditorWindow backwards d = case windows d of
+cycleEditorWindow backwards d = case orderedWindows of
   [] -> d
   ws@(w:rest) -> let rotated=if backwards then last ws:init ws else rest++[w]
                 in case rotated of
                   next:_ -> focusWindow (windowId next) d {windows=rotated,menu=Nothing,contextMenu=Nothing}
                   [] -> d
+  where
+    orderedWindows=case activeWindow d of
+      Nothing -> windows d
+      Just active -> let (before,after)=break ((==windowId active).windowId) (windows d) in after++before
 
 cycleUIFocus :: Bool -> Desktop -> Desktop
 cycleUIFocus backwards d = case targets of
@@ -356,7 +364,7 @@ cycleUIFocus backwards d = case targets of
        in case target of
          0 -> ready {menu=Just (0,0)}
          -1 -> ready {sideTree=fmap (\tree -> tree {treeFocused=True}) (sideTree ready)}
-         -2 -> ready {problemsFocused=True}
+         -2 -> ready {bottomTerminal=Nothing,problemsFocused=True}
          ident -> focusWindow ident ready
   where
     targets=[0]++[-1 | sideTree d/=Nothing]++map windowId (sortOn windowNumber (windows d))++[-2 | problemsVisible d]
@@ -366,7 +374,7 @@ cycleUIFocus backwards d = case targets of
             | otherwise = maybe 0 windowId (activeWindow d)
 
 modifyActive :: (Window -> Window) -> Desktop -> Desktop
-modifyActive f d = d { windows = case windows d of [] -> []; w:ws -> f w : ws }
+modifyActive f d = maybe d (\w -> mapWindow (windowId w) f d) (activeWindow d)
 
 ensureVisible :: Desktop -> Desktop
 ensureVisible d = case (activeWindow d, activeDocument d) of
@@ -496,12 +504,14 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
     go FindPrevious d = (findPrevious d,[])
     go FindNext d = (findText (lastFind d) d,[])
     go GoTo d = (prompt "Go to line" GoingTo [Input "Line number" "1" 1] d,[])
+    go ToggleTerminalPin d = (maybe d (\w -> setTerminalPinned (not (windowPinned d w)) (windowId w) d) (activeWindow d),[])
+    go action d | action `elem` [Zoom,SplitVertical,SplitHorizontal], maybe False (windowPinned d) (activeWindow d) = (d {status="Unpin the terminal before changing its window geometry."},[])
     go Zoom d = (modifyActive zoom d,[]) where
       zoom w = case restoredBounds w of
         Just r -> w {bounds = fitWindow d r, restoredBounds = Nothing}
         Nothing -> w {bounds = let (sw,sh) = screenSize d in Rect (treeWidthOf d) 1 (sw-treeWidthOf d) (sh-2-problemsHeight d), restoredBounds = Just (bounds w)}
     go NextWindow d = (cycleEditorWindow False d,[])
-    go Cascade d = (d {windows = zipWith cascade [0..] (windows d)},[]) where
+    go Cascade d = (replaceFloating (zipWith cascade [0..] (floatingWindows d)) d,[]) where
       (sw,sh) = screenSize d
       cascade i w = w {bounds = fitWindow d (Rect (treeWidthOf d+i `mod` 6) (1+i `mod` 6) (sw-treeWidthOf d-6) (sh-8)), restoredBounds = Nothing}
     go Tile d = (tileWindows False d,[])
@@ -513,7 +523,7 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
     go RenameSymbol d = (prompt "Rename symbol" Renaming [Input "New name" "" 0] d,[])
     go Definition d = (d,[LanguageRequest FindDefinition])
     go Complete d = (d,[LanguageRequest Completions])
-    go Problems d = ((setProblemsVisible (not (problemsVisible d)) d) {problemsFocused=not (problemsVisible d)},[LanguageRequest ShowProblems])
+    go Problems d = ((setProblemsVisible (not (messagesDisplayed d)) d) {problemsFocused=not (messagesDisplayed d)},[LanguageRequest ShowProblems])
     go NextMessage d = navigateMessage 1 d
     go PreviousMessage d = navigateMessage (-1) d
     go RestartHLS d = (d,[LanguageRequest RestartLanguage])
@@ -552,23 +562,27 @@ saveRequest after d = case (activeWindow d,activeDocument d) of
   _ -> (d,[])
 
 closeActive :: Desktop -> Desktop
-closeActive d = case windows d of
-  [] -> d
-  w:ws -> (rememberConversationView d) {windows = ws, buffers = if any ((==bufferId w) . bufferId) ws || maybe False ((==Just "Conversation").documentLabel) (M.lookup (bufferId w) (buffers d)) then buffers d else M.delete (bufferId w) (buffers d)}
+closeActive d = case activeWindow d of
+  Nothing -> d
+  Just w -> layoutProblems d (normalizeBottom (rememberConversationView d)
+    {windows=ws,dockedTerminals=M.delete (windowId w) (dockedTerminals d),
+     buffers=if any ((==bufferId w) . bufferId) ws || maybe False ((==Just "Conversation").documentLabel) (M.lookup (bufferId w) (buffers d)) then buffers d else M.delete (bufferId w) (buffers d)})
+    where ws=filter ((/=windowId w).windowId) (windows d)
 
 tileWindows :: Bool -> Desktop -> Desktop
 tileWindows vertical d
   | extent `div` n < (if vertical then 16 else 5) = d {status="Not enough room to tile; enlarge the terminal."}
-  | otherwise = d {windows = zipWith place [0..] (windows d)}
+  | otherwise = replaceFloating (zipWith place [0..] (floatingWindows d)) d
   where
-    n = max 1 (length (windows d)); (sw,sh) = screenSize d; areaWidth=sw-treeWidthOf d; areaHeight=sh-2-problemsHeight d; extent = if vertical then areaWidth else areaHeight
+    n = max 1 (length (floatingWindows d)); (sw,sh) = screenSize d; areaWidth=sw-treeWidthOf d; areaHeight=sh-2-problemsHeight d; extent = if vertical then areaWidth else areaHeight
     place i w = w {bounds = if vertical then Rect (treeWidthOf d+start) 1 size areaHeight else Rect (treeWidthOf d) (1+start) areaWidth size, restoredBounds = Nothing}
       where start = i*extent `div` n; size = (i+1)*extent `div` n-start
 
 splitWindow :: Bool -> Desktop -> (Desktop,[Effect])
 splitWindow vertical d = case activeWindow d of
   Nothing -> (d,[])
-  Just _ | (if vertical then (fst (screenSize d)-treeWidthOf d) `div` (length (windows d)+1) < 16 else (snd (screenSize d)-2-problemsHeight d) `div` (length (windows d)+1) < 5) -> (d {status="Not enough room to split; enlarge the terminal."},[])
+  Just w | windowPinned d w -> (d {status="Unpin the terminal before splitting."},[])
+  Just _ | (if vertical then (fst (screenSize d)-treeWidthOf d) `div` (length (floatingWindows d)+1) < 16 else (snd (screenSize d)-2-problemsHeight d) `div` (length (floatingWindows d)+1) < 5) -> (d {status="Not enough room to split; enlarge the terminal."},[])
   Just w -> (tileWindows vertical d {windows = w {windowId = nextId d,windowNumber=nextWindowNumber d} : windows d, nextId = nextId d+1},[])
 
 findText :: Text -> Desktop -> Desktop
@@ -638,7 +652,7 @@ buttonMnemonics dg = snd (mapAccumL choose [] (buttons dg))
 
 -- A screen-mode change scales the desktop layout to use the new row count.
 resizeScreenMode :: (Int,Int) -> Desktop -> Desktop
-resizeScreenMode (sw,sh) d = ensureVisible (clampHexScroll d resized {windows=map stretch (windows d)})
+resizeScreenMode (sw,sh) d = layoutBottomWindows (ensureVisible (clampHexScroll d resized {windows=map stretch (windows d)}))
   where
     resized = fst (handleEvent (V.EvResize sw sh) d)
     (oldW,oldH) = screenSize d
@@ -663,7 +677,7 @@ handleEvent event d = Bifunctor.first (layoutComposer d . clampHexScroll d) $ di
 
 dispatchEvent :: V.Event -> Desktop -> (Desktop,[Effect])
 dispatchEvent (V.EvResize sw sh) d =
-  (resized {windows=map resize (windows d),drag=Nothing,dragOriginal=Nothing,
+  (layoutBottomWindows resized {windows=map resize (windows d),drag=Nothing,dragOriginal=Nothing,
     menu=Nothing,contextMenu=Nothing,buttonHover=Nothing,buttonPressed=Nothing},[])
   where
     resized=d {screenSize=(max 1 sw,max 3 sh),
@@ -1070,7 +1084,7 @@ handleDoubleClick x y d = case dialog d of
         select f=f
         selected=dg {focus=i,fields=replaceAt i (select (fs !! i)) fs}
     in submitDialog 0 selected d {dialog=Just selected}
-  Nothing | menu d==Nothing, contextMenu d==Nothing, problemsVisible d,
+  Nothing | menu d==Nothing, contextMenu d==Nothing, messagesDisplayed d,
             let r=problemsRect d, inside r x y, y>top r, y<top r+height r-1,
             problemsScroll d+y-top r-1<length (diagnostics d) ->
     jumpProblem (fst (problemsMouse x y V.BLeft d))
@@ -1103,9 +1117,12 @@ mouseEvent x y V.BLeft _ d | Just capture <- drag d = (case capture of
   Selecting i -> selectAt True x y (focusWindow i d),[])
 mouseEvent x 0 V.BLeft _ d = (d {menu = (\i -> (i,0)) <$> menuAt x},[])
 mouseEvent x y V.BRight _ d | inside (gitBadgeRect d) x y = (openContext GitContext x y d,[])
-mouseEvent x y button _ d | problemsVisible d, inside (problemsRect d) x y = problemsMouse x y button d
+mouseEvent x y button mods d | bottomVisible d, inside (problemsRect d) x y = bottomMouse x y button mods d
 mouseEvent x y button _ d | Just tree <- sideTree d, x < treeWidth tree = treeMouse x y button tree d {problemsFocused=False}
-mouseEvent x y button mods d = case find (\w -> inside (bounds w) x y) (windows d) of
+mouseEvent x y button mods d = windowMouse x y button mods d
+
+windowMouse :: Int -> Int -> V.Button -> [V.Modifier] -> Desktop -> (Desktop,[Effect])
+windowMouse x y button mods d = case find (\w -> windowVisible d w && inside (bounds w) x y) (windows d) of
   Nothing -> (d,[])
   Just w -> let focused = focusWindow (windowId w) d {sideTree=fmap (\sidebar -> sidebar {treeFocused=False}) (sideTree d)}; Rect l t ww hh = bounds w in case button of
     V.BScrollUp -> (changeScroll True (-3) focused,[])
@@ -1116,6 +1133,8 @@ mouseEvent x y button mods d = case find (\w -> inside (bounds w) x y) (windows 
     V.BLeft
       | not (windowFocused d w), x==l || x==l+ww-1 || y==t || y==t+hh-1 -> (focused,[])
       | y==t && x>=l+2 && x<=l+4 -> runCommand Close focused
+      | y==t && terminalWindow focused w && x>=l+6 && x<=l+8 -> runCommand ToggleTerminalPin focused
+      | windowPinned d w && (x==l || x==l+ww-1 || y==t || y==t+hh-1) -> (focused,[])
       | y==t && x>=l+ww-6 && x<l+ww-3 -> runCommand Zoom focused
       | y==t, activeConversation focused, not (null (agentSettings focused)), inside (agentTitleRect focused w) x y -> runCommand (AgentChoose "") focused
       | y==t && (x==l || x==l+ww-1) -> (beginWindowDrag (EdgeSizing (windowId w) True True 0) focused,[])
@@ -1160,6 +1179,7 @@ dragKey key mods d = case dragOriginal d of
 -- A diagonal corner gesture deliberately breaks contacts. A single moving edge
 -- uses the same rule whether it came from a frame, corner or Shift-arrow drag.
 resizeWindowBounds :: Int -> Rect -> Desktop -> Desktop
+resizeWindowBounds wid _ d | M.member wid (dockedTerminals d) = d
 resizeWindowBounds wid requested d = case find ((==wid).windowId) (windows d) of
   Just w | top old==top requested && height old==height requested ->
              resizeWindowEdge wid False False (left requested+width requested) d
@@ -1173,10 +1193,11 @@ axisBounds :: Bool -> Rect -> (Int,Int)
 axisBounds vertical r = if vertical then (top r,top r+height r) else (left r,left r+width r)
 
 resizeWindowEdge :: Int -> Bool -> Bool -> Int -> Desktop -> Desktop
+resizeWindowEdge wid _ _ _ d | M.member wid (dockedTerminals d) = d
 resizeWindowEdge wid vertical leading position d = case find ((==wid).windowId) (windows d) of
   Nothing -> d
-  Just source -> let (_,moved)=resizeEdge vertical leading position area (wid,bounds source) (windows d)
-                 in d {windows=moved}
+  Just source -> let (_,moved)=resizeEdge vertical leading position area (wid,bounds source) (floatingWindows d)
+                 in replaceFloating moved d
   where area=if vertical then (1,top (problemsRect d)) else (treeWidthOf d,fst (screenSize d))
 
 -- Docks seed the same contact walk with a rectangle outside the window list.
@@ -1574,15 +1595,94 @@ treeWidthOf :: Desktop -> Int
 -- The dock's right frame is also the editor area's left frame.
 treeWidthOf = maybe 0 (max 0 . subtract 1 . treeWidth) . sideTree
 
+-- Pinning changes only view placement. Console processes remain owned by Consoles.
+terminalWindow :: Desktop -> Window -> Bool
+terminalWindow d w = maybe False terminal (M.lookup (bufferId w) (buffers d) >>= documentLabel)
+  where terminal label=any (`T.isPrefixOf` label) ["Terminal ","Ended Terminal "]
+
+windowPinned :: Desktop -> Window -> Bool
+windowPinned d w = M.member (windowId w) (dockedTerminals d)
+
+floatingWindows :: Desktop -> [Window]
+floatingWindows d = filter (not . windowPinned d) (windows d)
+
+windowVisible :: Desktop -> Window -> Bool
+windowVisible d w = not (windowPinned d w) || bottomTerminal d==Just (windowId w)
+
+bottomVisible :: Desktop -> Bool
+bottomVisible d = problemsVisible d || not (M.null (dockedTerminals d))
+
+messagesDisplayed :: Desktop -> Bool
+messagesDisplayed d = problemsVisible d && bottomTerminal d==Nothing
+
+replaceFloating :: [Window] -> Desktop -> Desktop
+replaceFloating views d = d {windows=map (\w -> fromMaybe w (find ((==windowId w).windowId) views)) (windows d)}
+
+layoutBottomWindows :: Desktop -> Desktop
+layoutBottomWindows d = d {windows=map (\w -> if windowPinned d w then w {bounds=problemsRect d,restoredBounds=Nothing} else w) (windows d)}
+
+normalizeBottom :: Desktop -> Desktop
+normalizeBottom d = d {bottomTerminal=chosen,problemsFocused=problemsFocused d && chosen==Nothing && problemsVisible d}
+  where chosen=case bottomTerminal d of
+          Just ident | M.member ident (dockedTerminals d) -> Just ident
+          _ | problemsVisible d -> Nothing
+            | otherwise -> listToMaybe (M.keys (dockedTerminals d))
+
+setTerminalPinned :: Bool -> Int -> Desktop -> Desktop
+setTerminalPinned pinned ident d = case find ((==ident).windowId) (windows d) of
+  Just w | terminalWindow d w, pinned, not (windowPinned d w) ->
+    focusWindow ident (layoutProblems d d {dockedTerminals=M.insert ident (bounds w,restoredBounds w) (dockedTerminals d),bottomTerminal=Just ident,drag=Nothing,dragOriginal=Nothing})
+  Just _ | not pinned, Just (rectangle,saved)<-M.lookup ident (dockedTerminals d) ->
+    let next=layoutProblems d (normalizeBottom d {dockedTerminals=M.delete ident (dockedTerminals d),drag=Nothing,dragOriginal=Nothing})
+    in focusWindow ident (mapWindow ident (\w -> w {bounds=fitWindow next rectangle,restoredBounds=fmap (fitWindow next) saved}) next)
+  _ -> d
+
+-- Tab positions are shared by drawing and hit testing. When crowded, scroll the
+-- strip to include the selected tab; Alt-number/F6 still reaches every window.
+bottomTabs :: Desktop -> [(Rect,Maybe Int,Text)]
+bottomTabs d = placeTabs 1 visible
+  where
+    available=max 0 (fst (screenSize d)-12)
+    tabs=[(Nothing,"Messages "<>maybe "" (T.pack.show) (messagesNumber d)) | problemsVisible d]++
+      [(Just (windowId w),"Terminal "<>T.pack (show (windowNumber w))) | w<-sortOn windowNumber (windows d),windowPinned d w]
+    selected=fromMaybe 0 (findIndex ((==bottomTerminal d).fst) tabs)
+    tabWidth (_,name)=min available (T.length name+2)
+    prefix=take (selected+1) tabs
+    skip=length prefix-length (takeFitting (reverse prefix))
+    takeFitting=go 0
+      where go _ []=[]
+            go used (t:ts) | used+tabWidth t<=available = t:go (used+tabWidth t) ts
+                           | otherwise = []
+    visible=drop skip tabs
+    placeTabs _ []=[]
+    placeTabs x ((ident,name):rest)
+      | x>available = []
+      | otherwise = let n=min (available-x+1) (T.length name+2)
+                    in (Rect x (top (problemsRect d)) n 1,ident,T.take n (" "<>name<>" ")):placeTabs (x+n) rest
+
+bottomMouse :: Int -> Int -> V.Button -> [V.Modifier] -> Desktop -> (Desktop,[Effect])
+bottomMouse x y button mods d
+  | M.null (dockedTerminals d) = problemsMouse x y button d
+  | y==top r, button==V.BLeft = case () of
+      _ | Just (_,ident,_)<-find (\(tab,_,_)->inside tab x y) (bottomTabs d) ->
+            (case ident of Just wid -> focusWindow wid d; Nothing -> d {bottomTerminal=Nothing,problemsFocused=True,sideTree=fmap (\t->t {treeFocused=False}) (sideTree d)},[])
+        | Just wid<-bottomTerminal d, x>=width r-9, x<width r-6 -> (setTerminalPinned False wid d,[])
+        | Just wid<-bottomTerminal d, x>=width r-5 -> runCommand Close (focusWindow wid d)
+        | messagesDisplayed d, x>=width r-5 -> (setProblemsVisible False d,[])
+        | otherwise -> (d {drag=Just MessagesSizing},[])
+  | messagesDisplayed d = problemsMouse x y button d
+  | otherwise = windowMouse x y button mods d
+  where r=problemsRect d
+
 problemsHeight :: Desktop -> Int
-problemsHeight d = if problemsVisible d then min (max 3 (problemsPreferredHeight d)) (max 0 (snd (screenSize d)-7)) else 0
+problemsHeight d = if bottomVisible d then min (max 3 (problemsPreferredHeight d)) (max 0 (snd (screenSize d)-7)) else 0
 
 problemsRect :: Desktop -> Rect
 problemsRect d = let (sw,sh)=screenSize d; h=problemsHeight d in Rect 0 (sh-h-1) sw h
 
 setProblemsVisible :: Bool -> Desktop -> Desktop
 setProblemsVisible visible d = layoutProblems d next
-  where next=d {problemsVisible=visible,problemsFocused=False,drag=Nothing,dragOriginal=Nothing,
+  where next=normalizeBottom d {problemsVisible=visible,bottomTerminal=if visible then Nothing else bottomTerminal d,problemsFocused=False,drag=Nothing,dragOriginal=Nothing,
           messagesNumber=if visible then Just (fromMaybe (nextWindowNumber d) (messagesNumber d)) else Nothing}
 
 resizeProblems :: Int -> Desktop -> Desktop
@@ -1590,18 +1690,19 @@ resizeProblems y d = clampHexScroll d (ensureVisible fitted)
   where
     sh=snd (screenSize d)
     requested=sh-max 3 (min (sh-7) (sh-y-1))-1
-    (edge,moved)=resizeEdge True True requested (1,sh-1) (-2,problemsRect d) (windows d)
+    (edge,moved)=resizeEdge True True requested (1,sh-1) (-2,problemsRect d) (floatingWindows d)
     next=d {problemsPreferredHeight=sh-edge-1,drag=Just MessagesSizing}
-    fitted=next {windows=map (fitDockWindow next) moved,
+    fitted=layoutBottomWindows (replaceFloating (map (fitDockWindow next) moved) next) {
       sideTree=fmap (\t -> t {treeScroll=min (treeScroll t) (treeScrollLimit next t)}) (sideTree next)}
 
 layoutProblems :: Desktop -> Desktop -> Desktop
 layoutProblems before after = clampHexScroll before (ensureVisible fitted)
   where
     oldEdge=top (problemsRect before); newEdge=top (problemsRect after)
-    fitted=after {windows=map resize (windows before),
+    fitted=layoutBottomWindows after {windows=map resize (windows after),
       sideTree=fmap (\t -> t {treeScroll=min (treeScroll t) (treeScrollLimit after t)}) (sideTree after)}
     resize w
+      | windowPinned after w || oldEdge==newEdge = w
       | bottom==oldEdge || bottom>newEdge =
           let y=if top r<=1 then 1 else max 1 (newEdge-height r)
           in w {bounds=fitWindow after r {top=y,height=newEdge-y},restoredBounds=Nothing}
@@ -1646,7 +1747,7 @@ problemsMouse x y button d = case button of
   V.BScrollUp -> (chooseProblem (problemsSelected d-3) focused,[])
   V.BScrollDown -> (chooseProblem (problemsSelected d+3) focused,[])
   _ -> (d,[])
-  where r=problemsRect d; selected=problemsScroll d+y-top r-1; focused=d {problemsFocused=True,sideTree=fmap (\t -> t {treeFocused=False}) (sideTree d)}
+  where r=problemsRect d; selected=problemsScroll d+y-top r-1; focused=d {bottomTerminal=Nothing,problemsFocused=True,sideTree=fmap (\t -> t {treeFocused=False}) (sideTree d)}
 
 problemsKey :: V.Key -> [V.Modifier] -> Desktop -> (Desktop,[Effect])
 problemsKey key mods d
@@ -1677,11 +1778,12 @@ fitMovingWindow d r = fitWindow d (r
    height=min (height r) (top (problemsRect d)-top r)})
 
 setTree :: Maybe Sidebar -> Desktop -> Desktop
-setTree tree d = clampHexScroll d next {windows=map move (windows d)}
+setTree tree d = layoutBottomWindows (clampHexScroll d next {windows=map move (windows d)})
   where
     next=d {sideTree=tree,drag=Nothing,dragOriginal=Nothing}
     old=treeWidthOf d; new=treeWidthOf next
     sw=fst (screenSize d); delta=new-old
+    move w | windowPinned d w = w
     move w = w {bounds=fitWindow next r {left=x,width=right-x},restoredBounds=Nothing}
       where r=bounds w
             x=left r+delta
@@ -1690,6 +1792,7 @@ setTree tree d = clampHexScroll d next {windows=map move (windows d)}
 -- Detached windows stay put unless the growing dock reaches their rectangle.
 fitDockWindow :: Desktop -> Window -> Window
 fitDockWindow d w
+  | windowPinned d w = w {bounds=problemsRect d}
   | fitted==bounds w = w
   | otherwise = w {bounds=fitted,restoredBounds=Nothing}
   where fitted=fitWindow d (bounds w)
@@ -1697,12 +1800,12 @@ fitDockWindow d w
 resizeTree :: Int -> Desktop -> Desktop
 resizeTree x d = case sideTree d of
   Nothing -> d
-  Just tree -> clampHexScroll d next {windows=map (fitDockWindow next) moved}
+  Just tree -> layoutBottomWindows (clampHexScroll d (replaceFloating (map (fitDockWindow next) moved) next))
     where
       sw=fst (screenSize d)
       source=Rect 0 1 (treeWidthOf d) (top (problemsRect d)-1)
       requested=max 16 (min (sw-20) (x+1))-1
-      (edge,moved)=resizeEdge False False requested (0,sw) (-1,source) (windows d)
+      (edge,moved)=resizeEdge False False requested (0,sw) (-1,source) (floatingWindows d)
       next=d {sideTree=Just tree {treeWidth=edge+1},drag=Just DockSizing,dragOriginal=Nothing}
 
 installTree :: FilePath -> [Entry] -> Desktop -> Desktop
@@ -1799,16 +1902,19 @@ addReadOnly title text d = case [(bid,w) | (bid,doc)<-M.toList (buffers d),docum
 
 -- Hit testing uses the same cell geometry as selection, including tabs and wide glyphs.
 hoverAt :: Int -> Int -> Desktop -> (Desktop,[Effect])
-hoverAt x y d = (d {hoverTarget=target,typeHint=if target==hoverTarget d then typeHint d else "",buttonHover=hovered,contextMenu=popup,statusHover=highlight},[])
+hoverAt x y d = (d {hoverTarget=target,typeHint=fromMaybe (if target==hoverTarget d && typeHint d `notElem` ["Unpin window","Dock window at bottom"] then typeHint d else "") pinHint,buttonHover=hovered,contextMenu=popup,statusHover=highlight},[])
   where
+    pinHint | Just _<-bottomTerminal d, y==top (problemsRect d), x>=fst (screenSize d)-9, x<fst (screenSize d)-6 = Just "Unpin window"
+            | Just w<-find (\w->windowVisible d w && terminalWindow d w && not (windowPinned d w) && y==top (bounds w) && x>=left (bounds w)+6 && x<=left (bounds w)+8) (windows d), windowFocused d w = Just "Dock window at bottom"
+            | otherwise = Nothing
     highlight = (\(_,i,_)->i) <$> find (\(rect,_,_)->inside rect x y) (statusItemRects d)
     hovered = dialog d >>= \dg -> findIndex (\r -> inside r x y) (buttonRects d dg)
     popup = fmap (\(r,i) -> (r,if inside r x y && y>top r && y<top r+height r-1 then contextOffset r i+y-top r-1 else i)) (contextMenu d)
     target | dialog d/=Nothing || menu d/=Nothing || contextMenu d/=Nothing || drag d/=Nothing = Nothing
-           | problemsVisible d && inside (problemsRect d) x y = Nothing
+           | bottomVisible d && inside (problemsRect d) x y = Nothing
            | x<treeWidthOf d = Nothing
            | otherwise = do
-        w <- find (\w -> inside (bounds w) x y) (windows d)
+        w <- find (\w -> windowVisible d w && inside (bounds w) x y) (windows d)
         let Rect l t ww hh=bounds w
         if x<=l || x>=l+ww-1 || y<=t || y>=t+hh-1 then Nothing else do
           doc <- M.lookup (bufferId w) (buffers d)

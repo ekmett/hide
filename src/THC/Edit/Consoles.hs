@@ -96,7 +96,7 @@ updateConsole (Consoles state) ident action = modifyMVar state $ \(counter,conso
 resizeFor :: Desktop -> Console -> IO Console
 resizeFor desktop console
   | consoleError console /= Nothing = pure console
-  | Just window <- find ((== consoleBuffer console) . bufferId) (windows desktop)
+  | Just window <- find ((== consoleBuffer console) . bufferId) (filter (windowVisible desktop) (windows desktop)++windows desktop)
   , let columns = max 1 (min 1000 (width (bounds window)-2))
         rows = max 1 (min 1000 (height (bounds window)-2))
   , (columns,rows) /= (snapshotColumns snapshot,snapshotRows snapshot) = do

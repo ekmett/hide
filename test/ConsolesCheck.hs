@@ -45,11 +45,11 @@ nativeChecks consoles desktop = do
   check "tick never steals focus" (fmap windowId (activeWindow painted) == fmap windowId (activeWindow other))
   let doc = buffers painted M.! bid
       screen = contents (documentBuffer doc)
-      terminalWindow = case [w | w <- windows painted,bufferId w == bid] of w:_ -> w; [] -> error "missing terminal window"
+      terminalView = case [w | w <- windows painted,bufferId w == bid] of w:_ -> w; [] -> error "missing terminal window"
   check "truecolor and attributes reach document" (('A',TerminalStyle 0x0c2238 0x412b15 1) `elem` documentHighlight doc)
   check "wide continuation omitted and blank cells preserved" ("A界" `T.isPrefixOf` screen && T.length (T.takeWhile (/= '\n') screen) == 19 && length (T.lines screen) == 4)
-  check "terminal selection and scrolling clamped" (caret (selection terminalWindow) <= T.length screen && scrollRow terminalWindow <= scrollbarLimit painted True doc terminalWindow && scrollColumn terminalWindow <= scrollbarLimit painted False doc terminalWindow)
-  check "collapsed selection follows terminal cursor across wide glyph" (caret (selection terminalWindow) == 2)
+  check "terminal selection and scrolling clamped" (caret (selection terminalView) <= T.length screen && scrollRow terminalView <= scrollbarLimit painted True doc terminalView && scrollColumn terminalView <= scrollbarLimit painted False doc terminalView)
+  check "collapsed selection follows terminal cursor across wide glyph" (caret (selection terminalView) == 2)
   selecting <- tickConsoles consoles painted {windows=map (\w -> if bufferId w == bid then w {selection=Selection 0 2} else w) (windows painted)}
   check "tick preserves selected terminal text" (all ((== Selection 0 2) . selection) [w | w <- windows selecting,bufferId w == bid])
   let closed = painted {windows=filter ((/=bid) . bufferId) (windows painted),buffers=M.delete bid (buffers painted)}
@@ -84,6 +84,29 @@ nativeChecks consoles desktop = do
   (discarded,wasTruncated,_) <- waitOutput consoles sixth (\(_,_,code) -> code /= Nothing)
   check "late continuation never revives a truncated UTF-8 character" (wasTruncated && BS.null discarded)
   releaseConsole consoles sixth >>= requireRight
+  (docking,dockDesktop) <- startConsole consoles (config "stty -echo; printf '%s\\n' $$; while IFS= read -r line; do printf '%s:%s\\n' $$ \"$line\"; done") 4096 desktop >>= requireRight
+  (started,_,_) <- waitOutput consoles docking (\(bytes,_,_) -> "\n" `BS.isInfixOf` bytes)
+  let dockView=case activeWindow dockDesktop of Just w->w; Nothing->error "missing dock terminal"
+      dockId=windowId dockView
+      dockBuffer=bufferId dockView
+      processId=B8.takeWhile (\c->c/='\r' && c/='\n') started
+      pinned=setTerminalPinned True dockId dockDesktop
+      concealed=setProblemsVisible True pinned
+  inputConsole consoles docking "hidden\n" >>= requireRight
+  _ <- waitOutput consoles docking (\(bytes,_,_) -> (processId<>":hidden") `BS.isInfixOf` bytes)
+  hiddenTick <- tickConsoles consoles concealed
+  check "hidden terminal tab keeps polling without replacing its console window or buffer"
+    (not (windowVisible hiddenTick dockView) && any ((==dockId).windowId) (windows hiddenTick) &&
+     maybe False (T.isInfixOf ":hidden" . contents . documentBuffer) (M.lookup dockBuffer (buffers hiddenTick)))
+  let floated=setTerminalPinned False dockId (focusWindow dockId hiddenTick)
+  inputConsole consoles docking "floating\n" >>= requireRight
+  (afterDock,_,_) <- waitOutput consoles docking (\(bytes,_,_) -> (processId<>":floating") `BS.isInfixOf` bytes)
+  floatedTick <- tickConsoles consoles floated
+  check "docking and undocking retain the same live process and input route"
+    (activeTerminal floatedTick==Just docking && not (windowPinned floatedTick dockView) &&
+     (processId<>":hidden") `BS.isInfixOf` afterDock && (processId<>":floating") `BS.isInfixOf` afterDock &&
+     fmap bufferId (activeWindow floatedTick)==Just dockBuffer && fmap windowNumber (activeWindow floatedTick)==Just (windowNumber dockView))
+  releaseConsole consoles docking >>= requireRight
   (resizing,resizeDesktop) <- startConsole consoles (config "stty -echo; printf ready; read line; printf '\\033[?25l'; read line; stty size; printf '\\033[?25h'; read line") 4096 desktop >>= requireRight
   _ <- waitOutput consoles resizing (\(bytes,_,_) -> "ready" `BS.isInfixOf` bytes)
   beforeHide <- tickConsoles consoles resizeDesktop

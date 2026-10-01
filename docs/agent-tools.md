@@ -237,7 +237,7 @@ inspection fails. Hook output and raw errors are suppressed.
 | --- | --- | --- | --- |
 | `editor_layout` | R | `{}` | Character-cell resolution, window rectangles, modes, cursors and docks |
 | `editor_navigate` | W | `windowId?`, `bufferId?`, `path?`, `line?`, `column?`, `byteOffset?` | Focus/open and navigate; no save; byte offsets require hex mode |
-| `editor_arrange` | W | `action`, `windowId?`, `x?`, `y?`, `width?`, `height?` | `tile`, `cascade`, `split_vertical`, `split_horizontal`, `focus`, `move`, `resize`, `zoom` |
+| `editor_arrange` | W | `action`, `windowId?`, `x?`, `y?`, `width?`, `height?` | `tile`, `cascade`, `split_vertical`, `split_horizontal`, `focus`, `move`, `resize`, `zoom`, `pin`, `unpin` |
 | `editor_panels` | W | `files?`, `messages?`, `filesWidth?`, `messagesHeight?` | Set visibility/dock dimensions; panel must be visible to resize |
 | `editor_mode` | W | `mode`, `windowId?`, `bufferId?` | `text` or `hex`; preserve bytes; refuse invalid UTF-8/NUL in text mode |
 
@@ -245,6 +245,15 @@ Coordinates are 0-based character cells, text locations 1-based, byte offsets
 0-based. Geometry obeys screen limits and docking; use returned rectangles.
 Files width is at least 16 cells; Messages height at least 3, within available
 screen space. Split windows share their buffer and undo history.
+
+`pin` and `unpin` apply to terminal windows. Pinned terminals and Messages share
+one bottom panel; `messagesHeight` resizes it even when the Messages tab is
+hidden. `editor_layout` reports each window's `pinned`, `visible` and `focused`
+state and the panel's `selectedWindowId` (null for Messages). Focusing a hidden
+terminal selects its tab. Unpin before moving, resizing, zooming or splitting
+that window; tile/cascade leave pinned terminals in place. These operations
+preserve the running terminal and its IDs.
+
 
 ## Screen and input
 

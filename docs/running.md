@@ -48,6 +48,19 @@ F5, F6, F10, numbered-window
 shortcuts and menu controls stay with the editor. Resizing the terminal window
 resizes its PTY; output supports colors, attributes and Unicode.
 
+Click the terminal title bar's cyan **[ ]** control, or choose **Window >
+Pin / unpin terminal**, to dock it at the bottom. Messages and pinned terminals
+share one panel with tabs. Click a tab or use the existing numbered-window/F6
+shortcuts to focus a terminal; hidden tabs keep receiving output. Drag an unused
+part of the panel's top border to resize the shared panel. The cyan **[P]**
+control restores the terminal's floating window, constrained to the current
+screen and Files panel. Pinning preserves the process, window number, buffer
+and selection. Tile and Cascade arrange the floating windows only.
+
+The Messages collapse arrow hides its tab; pinned terminals keep the panel
+open. A recovered checkpoint retains these tabs as **Ended Terminal** views
+without restarting their processes.
+
 Closing a terminal window leaves its command running. **Run > Stop terminal**
 stops the selected process. **File > Exit** cleans up the session's terminal
 processes. Detaching the frontend leaves them running; return with `--resume`.

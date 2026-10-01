@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module THC.Edit.Render (renderDesktop, snapshot, snapshotHtml) where
 
+import Data.List (find)
 import qualified Graphics.Vty as V
 import THC.Edit.Unicode (displayOpsForPic)
 import Graphics.Vty.Span (SpanOp(..))
@@ -81,9 +82,9 @@ renderDesktop d = flattenPicture (screenSize d) ((V.picForLayers (privacyLayers+
       Nothing -> base
       Just m@(i,_) -> menuLayers d m ++ [castShadow (screenSize d) (menuRect d i) base] ++ base
     base = [place 0 0 menuBar, place 0 (sh-1) statusBar]
-      ++ problemsLayers d
+      ++ bottomLayers d
       ++ maybe [] (treeLayers d) (sideTree d)
-      ++ foldr stackWindow [V.charFill (attr blue gray) '░' sw sh] (windows d)
+      ++ foldr stackWindow [V.charFill (attr blue gray) '░' sw sh] (floatingWindows d)
     stackWindow w below = windowLayers d (windowFocused d w) w ++ [castShadow (screenSize d) (bounds w) below] ++ below
     menuBar = V.cropRight sw (V.char paper ' ' V.<|> V.horizCat
       [V.char normal ' ' V.<|> label (attr red bg) (T.take 1 title) V.<|> label normal (T.drop 1 title<>" ")
@@ -139,6 +140,7 @@ windowLayers d active w =
     [place (x+2) y (label frame "[" V.<|> label (attr (V.RGBColor 85 255 85) blue) (if videoMode d==Nothing then "x" else "■") V.<|> label frame "]"),place (x+ww-6) y (label frame "[" V.<|> label (attr cyan blue) "↑" V.<|> label frame "]")
     ,place (x+windowPositionColumn doc) (y+hh-1) (label frame (T.take (max 0 (ww-windowPositionColumn doc-2)) (windowPositionText d doc w)))
     ,scrollbarImage True,scrollbarImage False] else [])
+  ++ [place (x+6) y (label frame "[" V.<|> label (attr cyan blue) " " V.<|> label frame "]") | active,terminalWindow d w,not (windowPinned d w)]
   ++ composerLayers
   ++ hexDividerLayers
   ++ [place (x+ww-7-T.length number) y (label frame number)
@@ -157,7 +159,7 @@ windowLayers d active w =
                          clipped=T.take (columnOffset title (max 0 (end-start))) title
                      in (start+max 0 ((end-start-displayColumn clipped (T.length clipped)) `div` 2),clipped)
       | otherwise = let clipped=T.take (columnOffset title (max 0 (ww-17-T.length number))) title
-                    in (max 6 ((ww-displayColumn clipped (T.length clipped)) `div` 2),clipped)
+                    in (max (if terminalWindow d w then 10 else 6) ((ww-displayColumn clipped (T.length clipped)) `div` 2),clipped)
     number=T.pack (show (windowNumber w))
     moving=case drag d of Just (Moving wid _ _) -> wid==windowId w; Just (Resizing wid _ _) -> wid==windowId w; _ -> False
     helpWindow=documentLabel doc==Just "Turbo Haskell Help"
@@ -312,6 +314,24 @@ menuLayers d (i,j) = [place x y contents']
         pos = fromMaybe 0 (T.findIndex ((==menuMnemonic entry) . toLower) title)
         name = label a (T.take pos title) V.<|> label (if disabled then a else hot) (T.take 1 (T.drop pos title)) V.<|> label a (T.drop (pos+1) title)
         content = label a " " V.<|> name V.<|> label a (T.replicate (max 1 (w-4-T.length title-T.length key)) " ") V.<|> label (if disabled then a else hot) key V.<|> label a " "
+
+bottomLayers :: Desktop -> [V.Image]
+bottomLayers d
+  | not (bottomVisible d) || height r<2 = []
+  | M.null (dockedTerminals d) = problemsLayers d
+  | otherwise = tabs++controls++[place 0 y (label frame (T.replicate (width r) "═"))]++content
+  where
+    r=problemsRect d; y=top r
+    frame=attr white blue
+    tabs=[place (left tab) y (label (if ident==bottomTerminal d then attr black cyan else frame) title)
+         | (tab,ident,title)<-bottomTabs d]
+    controls=case bottomTerminal d of
+      Just _ -> [place (width r-9) y (label frame "[" V.<|> label (attr cyan blue) "P" V.<|> label frame "]"),
+                 place (width r-5) y (label frame "[" V.<|> label (attr (V.RGBColor 85 255 85) blue) "x" V.<|> label frame "]")]
+      Nothing -> [place (width r-5) y (label frame "[" V.<|> label (attr cyan blue) "↓" V.<|> label frame "]")]
+    content=case bottomTerminal d >>= (\ident -> find ((==ident).windowId) (windows d)) of
+      Just w -> windowLayers d (windowFocused d w) w
+      Nothing -> problemsLayers d
 
 problemsLayers :: Desktop -> [V.Image]
 problemsLayers d

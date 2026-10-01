@@ -12,7 +12,7 @@ The conversation agent should work with the same files, windows and running prog
 - [x] Git status/diff and workspace/Git file search, including live unsaved text.
 - [x] Open/save/close files, checked diff edits, create/rename/delete files and directories.
 - [x] Window geometry, focus, movement, resize, tile/cascade/split and Files/Messages visibility.
-- [ ] Terminal pin/unpin and a shared Messages/terminal bottom panel with tabs.
+- [x] Terminal pin/unpin and a shared Messages/terminal bottom panel with tabs.
   Preserve terminal processes and numbered window identity across both layouts.
 - [x] Text/hex mode and byte-offset navigation.
 - [x] Undo/redo history as diff-style previews and revision-checked application.

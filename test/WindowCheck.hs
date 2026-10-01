@@ -2,14 +2,81 @@
 module WindowCheck (checks) where
 import Control.Monad (unless)
 import Data.Maybe (fromMaybe)
+import qualified Data.Map.Strict as M
+import Data.List (find)
 import THC.Edit.Frontend
 import THC.Edit.Model
-import THC.Edit.Buffer (newBuffer)
+import THC.Edit.Buffer (newBuffer, Selection(..))
 import THC.Edit.Files (FileState(..))
 import qualified Graphics.Vty as V
 checks :: IO ()
 checks = do
   let check name ok = unless ok (error name)
+  let terminal=modifyActive (\w->w {bounds=Rect 3 4 50 12,selection=Selection 1 4})
+        (addReadOnly "Terminal 1" "terminal text" (addDocument Nothing (newBuffer "source") (initialDesktop (100,35))))
+      view=fromMaybe (error "terminal missing") (activeWindow terminal)
+      ident=windowId view
+      pin=fst (runCommand ToggleTerminalPin terminal)
+      unpinnedOriginal=fst (runCommand ToggleTerminalPin pin)
+      get wid d=fromMaybe (error "window missing") (find ((==wid).windowId) (windows d))
+      sameIdentity a b=windowId a==windowId b && bufferId a==bufferId b && windowNumber a==windowNumber b && selection a==selection b
+  check "terminal pin retains window buffer number selection and restores floating bounds"
+    (windowPinned pin (get ident pin) && bounds (get ident pin)==problemsRect pin &&
+     sameIdentity view (get ident pin) && sameIdentity view (get ident unpinnedOriginal) &&
+     bounds (get ident unpinnedOriginal)==bounds view && buffers unpinnedOriginal==buffers terminal && M.null (dockedTerminals unpinnedOriginal))
+  let clicked=fst (handleEvent (V.EvMouseDown 9 4 V.BLeft []) terminal)
+  check "terminal frame pin control docks the existing view" (windowPinned clicked (get ident clicked))
+  let second=addReadOnly "Terminal 2" "second" pin
+      secondView=fromMaybe (error "second missing") (activeWindow second)
+      twoPins=setTerminalPinned True (windowId secondView) second
+      withPanelMessages=setProblemsVisible True twoPins
+      focused=activateWindowNumber (windowNumber view) withPanelMessages
+      cycled=cycleEditorWindow False focused
+  check "one shared panel reserves one height and selecting a tab reveals only its terminal"
+    (problemsHeight withPanelMessages==problemsHeight pin && messagesDisplayed withPanelMessages &&
+     not (windowVisible withPanelMessages (get ident withPanelMessages)) && bottomTerminal focused==Just ident &&
+     activeTerminal focused==Just "1" && activeTerminal cycled/=Just "1" &&
+     length (filter (windowVisible focused) (filter (windowPinned focused) (windows focused)))==1)
+  let resized=fst (handleEvent (V.EvResize 120 45) focused)
+      files=resizeTree 31 (installTree "/tmp" [] resized)
+      panel=resizeProblems 30 files
+      tiled=fst (runCommand Tile panel)
+      cascaded=fst (runCommand Cascade tiled)
+      resizedPins=[w | w<-windows cascaded,windowPinned cascaded w]
+      undocked=setTerminalPinned False ident cascaded
+      closed=closeActive (focusWindow ident twoPins)
+  check "screen files panel tile and cascade keep pinned views in the same bottom rectangle"
+    (all ((==problemsRect cascaded).bounds) resizedPins && all (\w->top (bounds w)+height (bounds w)<=top (problemsRect cascaded)) (floatingWindows cascaded) &&
+     bounds (get ident undocked)==fitWindow undocked (bounds view) && sameIdentity view (get ident undocked))
+  check "closing a pinned view removes only its tab and preserves the remaining terminal"
+    (M.notMember ident (dockedTerminals closed) && M.member (windowId secondView) (dockedTerminals closed) &&
+     bottomTerminal closed==Just (windowId secondView) && length (windows closed)==length (windows twoPins)-1)
+  check "docked terminal geometry cannot be changed through normal zoom split or resize"
+    (bounds (get ident (fst (runCommand Zoom focused)))==problemsRect focused &&
+     length (windows (fst (runCommand SplitVertical focused)))==length (windows focused) &&
+     resizeWindowBounds ident (Rect 0 1 40 10) focused==focused)
+  let source=modifyActive (\w->w {bounds=Rect 4 3 42 12}) (addDocument Nothing (newBuffer "source") (initialDesktop (100,35)))
+      zoomedSource=fst (runCommand Zoom source)
+      closeOther=closeActive (addDocument Nothing (newBuffer "other") zoomedSource)
+      sourceRestored=fst (runCommand Zoom closeOther)
+      sourceWithPanel=setProblemsVisible True source
+      zoomedWithPanel=fst (runCommand Zoom sourceWithPanel)
+      terminalWithPanel=addReadOnly "Terminal zoom" "output" zoomedWithPanel
+      pinWithPanel=fst (runCommand ToggleTerminalPin terminalWithPanel)
+      sourceId=maybe (error "source missing") windowId (activeWindow source)
+      restoredAfterPin=fst (runCommand Zoom (focusWindow sourceId pinWithPanel))
+  check "unrelated close and pin in an existing panel preserve zoom restore bounds"
+    (fmap bounds (activeWindow sourceRestored)==fmap bounds (activeWindow source) &&
+     fmap bounds (activeWindow restoredAfterPin)==fmap bounds (activeWindow sourceWithPanel))
+  let escapedMessages=fst (handleEvent (V.EvKey V.KEsc []) (setProblemsVisible True pin) {problemsFocused=True})
+      nextAfterEscape=cycleEditorWindow False escapedMessages
+  check "F6 cycles from the visible active window after leaving Messages"
+    (fmap windowId (activeWindow nextAfterEscape)/=fmap windowId (activeWindow escapedMessages))
+  let pinHover=fst (hoverAt 9 4 terminal)
+      unpinHover=fst (hoverAt (fst (screenSize pin)-8) (top (problemsRect pin)) pin)
+  check "terminal pin hints are exact and clear when leaving the control"
+    (typeHint pinHover=="Dock window at bottom" && typeHint unpinHover=="Unpin window" &&
+     typeHint (fst (hoverAt 50 0 unpinHover))=="")
   check "tile scale defaults, environment, overrides and validation"
     (chooseScale Nothing []==Right 0 && chooseScale (Just "3") []==Right 3 &&
      chooseScale (Just "bad") ["1"]==Right 1 && chooseScale (Just "") []==Right 0 &&

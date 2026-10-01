@@ -25,6 +25,21 @@ checks=do
       Rect x y _ _=bounds window
       draft=composerRect chat window
       denied d event=case P.applyGuestInput event d of Left _->True; _->False
+  let terminal=addReadOnly "Terminal hidden" "old output" base
+      terminalId=maybe (error "terminal missing") windowId (activeWindow terminal)
+      docked=setTerminalPinned True terminalId terminal
+      withMessages=setProblemsVisible True docked
+      protected=addReadOnly "Agent request" "private body" withMessages
+      approvalId=maybe (error "approval missing") windowId (activeWindow protected)
+      -- A stale hidden view must not participate in privacy hit testing even
+      -- when its old rectangle overlaps a visible approval/source window.
+      overlap=protected {windows=map (\w->if windowId w==terminalId then w {bounds=Rect 0 1 100 25} else w) (windows protected)}
+      hiddenFirst=overlap {windows=filter ((==terminalId).windowId) (windows overlap)++filter ((/=terminalId).windowId) (windows overlap)}
+      approvalWindow=maybe (error "approval missing") id (activeWindow hiddenFirst)
+      approvalX=left (bounds approvalWindow)+2; approvalY=top (bounds approvalWindow)+2
+  check "hidden pinned terminal cannot mask approval privacy or intercept its coordinates"
+    (windowId approvalWindow==approvalId && not (readableAt hiddenFirst approvalX approvalY) && not (pointerAllowedAt hiddenFirst approvalX approvalY) &&
+     denied hiddenFirst (P.Mouse "down" approvalX approvalY 0 1 []))
   check "agents cannot stop the editor session" (denied base P.SuspendSession)
   check "guest Git review uses filtered workspace tool, not unrestricted human review"
     (not (guestCommandAllowed GitDiff) && not (guestCommandAllowed GitCommit) &&

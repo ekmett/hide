@@ -20,7 +20,7 @@ category. Both are also available through `docs_read` in the `editor` corpus.
 
 `editor_file` opens, saves or closes files. Save and close require the current revision. Closing a dirty buffer requires an explicit save or discard choice. `buffer_apply_diff` checks a unified diff against that revision and applies it as one undoable edit, without saving. `workspace_files` creates files/directories, renames paths, or deletes files and empty directories inside the project.
 
-`editor_layout` reports screen and panel dimensions in character cells. `editor_arrange` focuses, moves, resizes, tiles, cascades, splits or zooms windows through the normal window manager. `editor_panels` shows, hides and resizes Files and Messages. `editor_mode` selects text or hex; `editor_navigate` jumps to a line/column or a hex byte offset.
+`editor_layout` reports screen and panel dimensions in character cells. `editor_arrange` focuses, moves, resizes, tiles, cascades, splits or zooms windows through the normal window manager. Its `pin`/`unpin` actions move the same terminal window into or out of the shared Messages/terminal bottom panel; focusing a hidden terminal selects its tab. `editor_panels` shows, hides and resizes Files and Messages. `editor_mode` selects text or hex; `editor_navigate` jumps to a line/column or a hex byte offset.
 
 `editor_history` previews undo or redo steps as diffs, including hex changes. `editor_undo` applies the requested number of steps after checking the buffer revision. It changes the live buffer; saving remains a separate action.
 

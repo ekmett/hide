@@ -27,6 +27,25 @@ checks = do
       (pressed,requests) = handleEvent (V.EvMouseDown bx by V.BLeft []) modal
       (released,_) = handleEvent (V.EvMouseUp bx by (Just V.BLeft)) pressed
       (cancelled,_) = handleEvent (V.EvMouseUp 0 0 (Just V.BLeft)) pressed
+  let terminal=addReadOnly "Terminal draw" "visible terminal content" desktop
+      terminalId=maybe (error "missing terminal") windowId (activeWindow terminal)
+      pinnedTerminal=setTerminalPinned True terminalId terminal
+      shown=setProblemsVisible True pinnedTerminal
+      showTerminal=focusWindow terminalId shown
+      atTop d=T.lines (snapshot d) !! top (problemsRect d)
+      clickedMessages=case [r | (r,Nothing,_)<-bottomTabs showTerminal] of
+        r:_ -> fst (handleEvent (V.EvMouseDown (left r) (top r) V.BLeft []) showTerminal)
+        _ -> error "missing messages tab"
+      unpinned=fst (handleEvent (V.EvMouseDown (fst (screenSize pinnedTerminal)-8) (top (problemsRect pinnedTerminal)) V.BLeft []) pinnedTerminal)
+  let withDiagnostic=showTerminal {diagnostics=[Diagnostic "/tmp/example.hs" Nothing 0 0 1 "problem"]}
+      (doubleClicked,doubleEffects)=handleDoubleClick 2 (top (problemsRect withDiagnostic)+1) withDiagnostic
+  check "double clicking a terminal tab never activates a hidden Messages diagnostic"
+    (bottomTerminal doubleClicked==bottomTerminal withDiagnostic && null doubleEffects && not (problemsFocused doubleClicked))
+  check "bottom panel renders tabs and cyan pin fallback without hidden terminal content"
+    ("Messages" `T.isInfixOf` atTop showTerminal && "Terminal" `T.isInfixOf` atTop showTerminal &&
+     "[P]" `T.isInfixOf` atTop showTerminal && "visible terminal content" `T.isInfixOf` snapshot showTerminal &&
+     not ("visible terminal content" `T.isInfixOf` snapshot shown) && messagesDisplayed clickedMessages &&
+     not (maybe False (windowPinned unpinned) (activeWindow unpinned)))
   check "button press waits for release" (dialog pressed /= Nothing && null requests)
   check "button release activates" (dialog released == Nothing)
   check "release outside cancels button" (dialog cancelled /= Nothing)

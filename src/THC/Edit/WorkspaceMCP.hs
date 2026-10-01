@@ -44,7 +44,7 @@ definitions :: [(Text,Text,[(K.Key,Value)],[Text],Bool)]
 definitions =
   [("editor_layout","Read screen resolution in character cells, window rectangles, cursor positions, modes and docked panels.",[],[],True)
   ,("editor_navigate","Focus an open window/buffer or open a file, then navigate. Lines/columns are 1-based Unicode code points; byteOffset is 0-based and requires hex mode. Never saves a file.",targets++[("path",field "string" "Existing file relative to the workspace directory."),("line",integer),("column",integer),("byteOffset",integer)],[],False)
-  ,("editor_arrange","Arrange editor windows through normal docking rules. Geometry is in character cells, x/y start at 0. Result reports actual constrained geometry.",[("action",choice ["tile","cascade","split_vertical","split_horizontal","focus","move","resize","zoom"]),("windowId",integer),("x",integer),("y",integer),("width",integer),("height",integer)],["action"],False)
+  ,("editor_arrange","Arrange editor windows through normal docking rules. Geometry is in character cells, x/y start at 0. Result reports actual constrained geometry. Pin/unpin a terminal in the shared bottom panel; unpin before move, resize, zoom or split.",[("action",choice ["tile","cascade","split_vertical","split_horizontal","focus","move","resize","zoom","pin","unpin"]),("windowId",integer),("x",integer),("y",integer),("width",integer),("height",integer)],["action"],False)
   ,("editor_panels","Show/hide the files tree or messages panel and resize their docks in character cells.",[("files",boolean),("messages",boolean),("filesWidth",integer),("messagesHeight",integer)],[],False)
   ,("editor_mode","Select text or hex mode for a buffer. Conversion preserves bytes and refuses invalid UTF-8 or NUL-containing text.",targets++[("mode",choice ["text","hex"])],["mode"],False)
   ,("editor_file","Open an existing file, save a buffer, or close one window. Save/close require the current buffer revision. Dirty close requires dirtyAction save or discard; discard only removes this view, retaining a buffer shared by other windows. Save uses the editor's disk-conflict checks; no implicit overwrite.",targets++[("action",choice ["open","save","close"]),("path",field "string" "Existing path to open, or destination for an untitled save."),("revision",integer),("dirtyAction",choice ["save","discard"])],["action"],False)
@@ -93,7 +93,7 @@ workspaceTool apply desktop name args = case parseEither parse args of
       "editor_panels" -> parsed desktop ((,,,) <$> o .:? "files" <*> o .:? "messages" <*> o .:? "filesWidth" <*> o .:? "messagesHeight") $ \(files,messages,fw,mh) ->
         if maybe False (\n->n<16 || n>fst (screenSize desktop)-20) fw || maybe False (\n->n<3 || n>snd (screenSize desktop)-7) mh
         then failure desktop "Panel sizes exceed the available screen; filesWidth >= 16 and messagesHeight >= 3."
-        else if (isJust fw && not (fromMaybe (isJust (sideTree desktop)) files)) || (isJust mh && not (fromMaybe (problemsVisible desktop) messages))
+        else if (isJust fw && not (fromMaybe (isJust (sideTree desktop)) files)) || (isJust mh && not (fromMaybe (problemsVisible desktop) messages || not (M.null (dockedTerminals desktop))))
         then failure desktop "Show a panel before setting its size."
         else do
           d<-case files of
@@ -103,7 +103,7 @@ workspaceTool apply desktop name args = case parseEither parse args of
           let shown=maybe d (`setProblemsVisible` d) messages
               sized=maybe shown (\n->resizeTree (n-1) shown) fw
               next=maybe sized (\n->resizeProblems (snd (screenSize sized)-n-1) sized) mh
-          if (isJust fw && not (isJust (sideTree next))) || (isJust mh && not (problemsVisible next))
+          if (isJust fw && not (isJust (sideTree next))) || (isJust mh && not (bottomVisible next))
             then failure d "Show a panel before setting its size."
             else success next {drag=Nothing,dragOriginal=Nothing}
       "editor_file" -> parsed desktop ((,,,,,) <$> o .: "action" <*> o .:? "windowId" <*> o .:? "bufferId" <*> o .:? "path" <*> o .:? "revision" <*> o .:? "dirtyAction") $ \(action,wid,bid,path,rev,decision) ->
@@ -230,23 +230,31 @@ arrange action wid x y w h original=do
   case action of
     "tile" -> Right (runCommand Tile d)
     "cascade" -> Right (runCommand Cascade d)
-    "split_vertical" -> needWindow d >> Right (runCommand SplitVertical d)
-    "split_horizontal" -> needWindow d >> Right (runCommand SplitHorizontal d)
+    "split_vertical" -> floatingWindow d >> Right (runCommand SplitVertical d)
+    "split_horizontal" -> floatingWindow d >> Right (runCommand SplitHorizontal d)
     "focus" -> needWindow d >> Right (d,[])
-    "zoom" -> needWindow d >> Right (runCommand Zoom d)
-    "move" -> do
+    _ | action `elem` ["pin","unpin"] -> do
       v<-needWindow d
+      unless (terminalWindow d v) (Left "Only terminal windows can be pinned.")
+      Right (setTerminalPinned (action=="pin") (windowId v) d,[])
+    "zoom" -> floatingWindow d >> Right (runCommand Zoom d)
+    "move" -> do
+      v<-floatingWindow d
       a<-maybe (Left "move requires x and y.") Right x
       b<-maybe (Left "move requires x and y.") Right y
       pure (mapWindow (windowId v) (\window->window {bounds=fitMovingWindow d ((bounds window) {left=a,top=b}),restoredBounds=Nothing}) d,[])
     "resize" -> do
-      v<-needWindow d
+      v<-floatingWindow d
       a<-maybe (Left "resize requires width and height.") Right w
       b<-maybe (Left "resize requires width and height.") Right h
       unless (a>=16 && b>=5) (Left "Windows require width >= 16 and height >= 5.")
       pure (resizeWindowBounds (windowId v) ((bounds v) {width=a,height=b}) d,[])
     _ -> Left "Unknown arrangement action."
-  where needWindow d=do
+  where floatingWindow d=do
+          window<-needWindow d
+          when (windowPinned d window) (Left "Unpin the terminal before changing its window geometry.")
+          pure window
+        needWindow d=do
           window<-maybe (Left "No active window.") Right (activeWindow d)
           when (protectedBuffer d (bufferId window)) (Left "This conversation or approval window is controlled by the user.")
           pure window
@@ -294,10 +302,11 @@ layout :: Desktop -> Value
 layout d=object ["screen" .= object ["columns" .= fst (screenSize d),"rows" .= snd (screenSize d),"videoMode" .= videoMode d],
   "windowCount" .= length (windows d),"windows" .= map windowValue (take 256 (windows d)),"windowsTruncated" .= (length (windows d)>256),
   "files" .= object ["visible" .= isJust (sideTree d),"width" .= maybe 0 treeWidth (sideTree d),"root" .= fmap treeRoot (sideTree d)],
-  "messages" .= object ["visible" .= problemsVisible d,"height" .= problemsHeight d,"bounds" .= rectValue (problemsRect d)],
+  "bottomPanel" .= object ["visible" .= bottomVisible d,"selectedWindowId" .= bottomTerminal d,"height" .= problemsHeight d,"bounds" .= rectValue (problemsRect d)],
+  "messages" .= object ["visible" .= problemsVisible d,"selected" .= messagesDisplayed d,"height" .= problemsHeight d,"bounds" .= rectValue (problemsRect d)],
   "status" .= T.take 8192 (sanitizedStatus d)]
   where
-    windowValue w=object (["windowId" .= windowId w,"bufferId" .= bufferId w,"focused" .= (fmap windowId (activeWindow d)==Just (windowId w)),"bounds" .= rectValue (bounds w)]++
+    windowValue w=object (["windowId" .= windowId w,"bufferId" .= bufferId w,"focused" .= windowFocused d w,"pinned" .= windowPinned d w,"visible" .= windowVisible d w,"bounds" .= rectValue (bounds w)]++
       case M.lookup (bufferId w) (buffers d) of
         Nothing -> []
         Just doc -> let b=documentBuffer doc; (row,column)=bufferLineColumn b (caret (selection w)) in

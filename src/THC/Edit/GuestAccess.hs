@@ -257,9 +257,9 @@ pointerAllowedAt d x y
 onScreen :: Desktop -> Int -> Int -> Bool
 onScreen d=inside (uncurry (Rect 0 0) (screenSize d))
 overlayAt :: Desktop -> Int -> Int -> Bool
-overlayAt d x y=y==0 || y==snd (screenSize d)-1 || (problemsVisible d && inside (problemsRect d) x y) || maybe False (\tree->x<treeWidth tree) (sideTree d) || maybe False (\(r,_)->inside r x y) (contextMenu d) || maybe False (\(index,_)->inside (menuRect d index) x y) (menu d)
+overlayAt d x y=y==0 || y==snd (screenSize d)-1 || (messagesDisplayed d && inside (problemsRect d) x y) || maybe False (\tree->x<treeWidth tree) (sideTree d) || maybe False (\(r,_)->inside r x y) (contextMenu d) || maybe False (\(index,_)->inside (menuRect d index) x y) (menu d)
 topWindow :: Desktop -> Int -> Int -> Maybe Window
-topWindow d x y=find (\w->inside (bounds w) x y) (windows d)
+topWindow d x y=find (\w->windowVisible d w && inside (bounds w) x y) (windows d)
 contentPrivate :: (Desktop -> Text -> Int -> Bool) -> Desktop -> Document -> Window -> Int -> Int -> Bool
 contentPrivate predicate d doc w x y
   | x<=left r || x>=left r+width r-1 || y<=top r || y>=top r+1+windowContentRows d doc w=False

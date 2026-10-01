@@ -78,6 +78,15 @@ checks=bracket temporary removePathForcibly $ \root->do
   check "project sidebar dock geometry and display preferences survive"
     (defaultDirectory recovered==Just root && sideTree recovered==sideTree desktop && screenSize recovered==(100,35) && problemsVisible recovered && problemsPreferredHeight recovered==9 &&
      wordStar recovered && not (blinkCursor recovered) && pixelateUnicode recovered && materialIcons recovered && appearance recovered==DarkMode && streamerMode recovered)
+  let pinnedPath=root </> "pinned.checkpoint"
+      terminalWindowId=maybe (error "missing terminal") windowId (activeWindow terminal)
+      pinned=setTerminalPinned True terminalWindowId terminal
+  writeCheckpoint pinnedPath pinned >>= right
+  recoveredPinned<-readCheckpoint pinnedPath fresh >>= right
+  check "recovered terminal tabs preserve identity and layout without restarting or routing input"
+    (dockedTerminals recoveredPinned==dockedTerminals pinned && bottomTerminal recoveredPinned==Just terminalWindowId &&
+     bounds (fromJust (activeWindow recoveredPinned))==problemsRect recoveredPinned &&
+     documentLabel (buffers recoveredPinned M.! terminalId)==Just "Ended Terminal 7" && activeTerminal recoveredPinned==Nothing)
   let viewsPath=root </> "views.checkpoint"
       primaryChat=modifyActive (\w->w {scrollRow=12,selection=Selection 1 6})
         (addReadOnly "Conversation" (T.replicate 80 "primary transcript\n") (initialDesktop (80,25)))
