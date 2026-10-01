@@ -29,6 +29,10 @@ import qualified WorkspaceMCPCheck
 import qualified WorkspaceFilesMCPCheck
 import qualified TestsMCPCheck
 #endif
+import qualified AgentHubCheck
+import qualified AgentACPCheck
+import qualified AgentMCPCheck
+import qualified AgentWorkspaceCheck
 import qualified UnicodeCheck
 import qualified HexCheck
 import qualified DAPCheck
@@ -71,6 +75,10 @@ check name ok = unless ok (error name)
 
 main :: IO ()
 main = do
+  AgentHubCheck.checks
+  AgentACPCheck.checks
+  AgentMCPCheck.checks
+  AgentWorkspaceCheck.checks
 #ifdef WITH_REMOTE
   RemoteCheck.checks
   RemoteWindowCheck.checks

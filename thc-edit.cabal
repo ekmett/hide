@@ -40,7 +40,7 @@ library
   hs-source-dirs: src
   other-modules: Paths_thc_edit
   autogen-modules: Paths_thc_edit
-  exposed-modules: THC.Edit.Process, THC.Edit.Completion, THC.Edit.Build, THC.Edit.BuildJobs, THC.Edit.Protocol, THC.Edit.Remote, THC.Edit.RemoteWeb, THC.Edit.RemoteWindow, THC.Edit.Web, THC.Edit.Unicode, THC.Edit.Buffer, THC.Edit.Syntax, THC.Edit.Model, THC.Edit.Render, THC.Edit.Files, THC.Edit.App, THC.Edit.Frontend, THC.Edit.Window, THC.Edit.Browser, THC.Edit.Help, THC.Edit.Git, THC.Edit.GitOperations, THC.Edit.LSP, THC.Edit.Tooling, THC.Edit.External, THC.Edit.Reconcile, THC.Edit.ACP, THC.Edit.AgentFiles, THC.Edit.Conversation, THC.Edit.Markdown, THC.Edit.Terminal, THC.Edit.Consoles, THC.Edit.DAP, THC.Edit.Debugger, THC.Edit.Hex
+  exposed-modules: THC.Edit.AgentHub, THC.Edit.AgentACP, THC.Edit.AgentMCP, THC.Edit.AgentWorkspace, THC.Edit.Process, THC.Edit.Completion, THC.Edit.Build, THC.Edit.BuildJobs, THC.Edit.Protocol, THC.Edit.Remote, THC.Edit.RemoteWeb, THC.Edit.RemoteWindow, THC.Edit.Web, THC.Edit.Unicode, THC.Edit.Buffer, THC.Edit.Syntax, THC.Edit.Model, THC.Edit.Render, THC.Edit.Files, THC.Edit.App, THC.Edit.Frontend, THC.Edit.Window, THC.Edit.Browser, THC.Edit.Help, THC.Edit.Git, THC.Edit.GitOperations, THC.Edit.LSP, THC.Edit.Tooling, THC.Edit.External, THC.Edit.Reconcile, THC.Edit.ACP, THC.Edit.AgentFiles, THC.Edit.Conversation, THC.Edit.Markdown, THC.Edit.Terminal, THC.Edit.Consoles, THC.Edit.DAP, THC.Edit.Debugger, THC.Edit.Hex
   if flag(web)
     cpp-options: -DWITH_WEB
     other-modules: THC.Edit.BrowserServer
@@ -93,7 +93,7 @@ test-suite editor-tests
   if !os(windows)
     build-depends: unix
   ghc-options: -threaded
-  other-modules: CompletionCheck, BuildCheck, UnicodeCheck, HexCheck, DAPCheck, DebuggerCheck, RunCheck, ConversationCheck, AgentFilesCheck, TerminalCheck, ConsolesCheck, FilesCheck, WindowCheck, BrowserCheck, HelpCheck, GitCheck, GitOperationsCheck, LSPCheck, ToolingCheck, DialogMouseCheck, BufferTreeCheck, ExternalCheck, ReconcileCheck, ACPCheck, MarkdownCheck
+  other-modules: AgentHubCheck, AgentACPCheck, AgentMCPCheck, AgentWorkspaceCheck, CompletionCheck, BuildCheck, UnicodeCheck, HexCheck, DAPCheck, DebuggerCheck, RunCheck, ConversationCheck, AgentFilesCheck, TerminalCheck, ConsolesCheck, FilesCheck, WindowCheck, BrowserCheck, HelpCheck, GitCheck, GitOperationsCheck, LSPCheck, ToolingCheck, DialogMouseCheck, BufferTreeCheck, ExternalCheck, ReconcileCheck, ACPCheck, MarkdownCheck
   if flag(window)
     cpp-options: -DWITH_WINDOW
   if flag(terminal) && !os(windows)
