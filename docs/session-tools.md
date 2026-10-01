@@ -1,6 +1,6 @@
 # Work with the editor
 
-The guest in a conversation can use the same editor you do: read an unsaved buffer, ask HLS for its type, rename a symbol, move a window, inspect a stopped program, or run a build and read the result. The built-in `editor` MCP server is supplied automatically when an ACP conversation starts or resumes.
+The agent in a conversation can use the same editor you do: read an unsaved buffer, ask HLS for its type, rename a symbol, move a window, inspect a stopped program, or run a build and read the result. The built-in `editor` MCP server is supplied automatically when an ACP conversation starts or resumes.
 
 Try requests such as:
 
@@ -47,26 +47,26 @@ Use `debug_set_breakpoints`, `debug_control` and `debug_inspect` to set source b
 `debug_present` controls visibility independently of execution. Set `follow: false`
 for background stops, then reveal `source`, `stack`, `scopes` or `output` using
 the current generation. Set `follow: true` to follow future stops. The user and
-guest share the same debugger; revealing a stop does not restart the program.
+agent share the same debugger; revealing a stop does not restart the program.
 
 The [debugging skill](../skills/debug-editor/SKILL.md) is also available to MCP clients through `resources/read` at `thc-edit://debugging`.
 
 ## See what is on screen
 
-`editor_screen` returns the full character grid without colors. Set `image: true` to include a PNG of the same frame. This gives the guest a small text representation for navigation and a visual representation for borders, colors and overlapping windows.
+`editor_screen` returns the full character grid without colors. Set `image: true` to include a PNG of the same frame. This gives the agent a small text representation for navigation and a visual representation for borders, colors and overlapping windows.
 
 The PNG uses the bundled bitmap fonts and the current screen-mode aspect ratio. It includes the editor cursor but excludes OS window chrome, CRT effects and platform font shaping; complex Unicode clusters use a bitmap approximation.
 
 ## Questions and tool activity
 
-A guest can use `ask_user` to ask a question with choices and a free-text answer inside the conversation. Your draft stays where you left it. Tool activity appears as a compact chevron and description; expand it to inspect the complete request and reply JSON.
+An agent can use `ask_user` to ask a question with choices and a free-text answer inside the conversation. Your draft stays where you left it. Tool activity appears as a compact chevron and description; expand it to inspect the complete request and reply JSON.
 
 ## Controls, settings and documentation
 
 `editor_input` operates the editor through mouse, key and paste events in character-cell coordinates. It follows the same menus and editing rules as direct input. Its input origin is assigned by the host. It cannot type as you in a conversation,
 answer its own questions or approvals, change agent settings or permissions,
 or turn off Streamer mode. Each batch starts without your clipboard, key prefix
-or drag state; guest gestures can span events within that batch.
+or drag state; agent gestures can span events within that batch.
 
 `editor_settings` reads current display/editing settings as JSON. Supply `settings` to change this session or `defaults` to save startup defaults for future sessions. These cover appearance, screen mode and dimensions, WordStar keys, cursor blinking, CRT filtering and Unicode/icon rendering; startup defaults also include backend and scale. `streamerMode` is reported read-only. `agent_settings` exposes the provider
 executable, environment variable names, model choices and context usage;
@@ -75,9 +75,9 @@ the global/project context supplied by the user. **Options > Agent Context** ope
 the selected TOML for editing; saved changes reach the next query or steering
 message. See [configuration](configuration.md#agent-context).
 
-`docs_list`, `docs_search` and `docs_read` provide the editor manual and Turbo Haskell compiler documentation. Select the `editor` or `thc` corpus. Compiler documentation comes from the configured THC checkout (`THC_ROOT` or the project's THC build configuration). Reads return line numbers and heading information, so the guest can cite a particular section.
+`docs_list`, `docs_search` and `docs_read` provide the editor manual and Turbo Haskell compiler documentation. Select the `editor` or `thc` corpus. Compiler documentation comes from the configured THC checkout (`THC_ROOT` or the project's THC build configuration). Reads return line numbers and heading information, so the agent can cite a particular section.
 
-## What the guest can see and control
+## What the agent can see and control
 
 `editor_screen` includes separate readable/clickable cell masks and current
 command/key permissions. Conversation drafts and unanswered input, sensitive
@@ -85,7 +85,7 @@ fields and session keys are redacted from text and image views. Agent settings
 can be read but not changed. Generic buffer/selection reads follow the same
 privacy rules, so switching tools does not reveal hidden values.
 
-`clipboard_write` copies text supplied by the guest into the editor clipboard
+`clipboard_write` copies text supplied by the agent into the editor clipboard
 and queues a copy for the attached frontend. It never reads your existing
 clipboard. Browser or terminal clipboard permissions can prevent that final
 system copy; the tool reports that it was queued rather than claiming the OS
@@ -98,11 +98,11 @@ tool still runs programs with the editor account's access.
 
 Open **Options > Agent Permissions** to choose each tool's policy:
 
-- **Enable** lets the guest use it directly.
+- **Enable** lets the agent use it directly.
 - **Prompt** asks you before each invocation.
 - **Disable** refuses the invocation.
 
-Read-only tools start enabled; tools that can change the session or execute programs start with Prompt. Policies apply to every call, including tools a guest discovered before you disabled them. Cancelling a pending approval removes the request; approval does not revive a cancelled call. Tools that already ran are not reversed by cancellation.
+Read-only tools start enabled; tools that can change the session or execute programs start with Prompt. Policies apply to every call, including tools an agent discovered before you disabled them. Cancelling a pending approval removes the request; approval does not revive a cancelled call. Tools that already ran are not reversed by cancellation.
 
 Policies live in `[editor.mcp.permissions]` in the shared [configuration file](configuration.md). They apply to all editor sessions using that file. The editor preserves other sections, including future compiler configuration.
 

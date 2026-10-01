@@ -118,7 +118,7 @@ Use `debug_control` to continue, step, pause or disconnect, then refresh status.
 moving the person's source window on each stop. At an interesting stop, send
 `view: "source"` and the current `generation`; `stack`, `scopes` and `output`
 reveal those views. Set `follow: true` to follow future stops automatically.
-The guest and the UI share one debugger, breakpoints and stopped state.
+The agent and the UI share one debugger, breakpoints and stopped state.
 
 **Check:** accepted execution commands are submissions. Wait for the next
 observed stop before drawing conclusions. Report pending versus verified
@@ -165,7 +165,7 @@ The screen PNG represents the editor grid, not OS chrome or the native CRT pass.
 
 **Recover:** input events are sequential, not transactional. On a partial failure,
 inspect `appliedEvents` and the current screen before continuing. Human authority
-controls cannot be operated by guest input. Text mode refuses invalid UTF-8 or
+controls cannot be operated by agent input. Text mode refuses invalid UTF-8 or
 NUL-containing bytes; stay in hex mode for those files.
 
 ## Consult the user
@@ -195,7 +195,7 @@ this session or `defaults` for future launches when requested.
 
 **Check:** cite the document and relevant section. Public agent settings are
 read-only; argument/environment values and session keys are withheld. Streamer
-mode is readable by the guest but only the person can change it.
+mode is readable by the agent but only the person can change it.
 
 **Recover:** compiler documentation needs the configured THC checkout. Refresh
 `docs_list` as compiler sections are added. Settings merges preserve omitted

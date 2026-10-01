@@ -119,11 +119,11 @@ available.
 In a [remote editor session](remote.md), loopback is the remote host, so the
 debugger stays beside the running program.
 
-## Debugging with a guest
+## Debugging with an agent
 
-The conversation guest uses the same DAP session as the Debug menu. Its tools
+The conversation agent uses the same DAP session as the Debug menu. Its tools
 control the debugger directly and return structured results. Automatic source
-following starts enabled. The guest can set `debug_present` to `follow: false`
+following starts enabled. The agent can set `debug_present` to `follow: false`
 to investigate without moving your source window at each stop, then reveal a
 source frame, stack, scopes or output view when there is something to show.
 Changing presentation does not resume or restart the program.

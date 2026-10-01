@@ -25,8 +25,8 @@ in the terminal, a native window and the browser.
 | Inspect types, follow definitions, rename and handle diagnostics | [Haskell language tools](haskell.md) |
 | Run a program, use a shell, attach a debugger | [Running and debugging](running.md) |
 | Review, commit, fetch, pull and merge | [Git](git.md) |
-| Give a guest access to the live editor and its tools | [Session tools](session-tools.md) |
-| Choose a task workflow for the guest | [Agent skills](agent-skills.md) |
+| Give an agent access to the live editor and its tools | [Session tools](session-tools.md) |
+| Choose a task workflow for the agent | [Agent skills](agent-skills.md) |
 | Look up calls by category | [Agent operation reference](agent-tools.md) |
 | Discuss code, provide context and review proposed changes | [Conversations](conversations.md) |
 | Work on another machine with a local display | [Remote editing](remote.md) |

@@ -22,7 +22,7 @@ Use `terminal`, `auto`, `metal`, `vulkan`, or `web` for the display backend. `re
 
 Command-line options override environment variables, which override project defaults, which override global defaults. For example, `THC_EDIT_BACKEND=web` overrides `backend = "metal"`, and `--terminal` overrides both. `--mode` selects its usual dimensions unless `--size` is also supplied. `--no-crt`, `--classic-icons`, `--standard-keys`, `--no-blink-cursor` and `--no-pixelate-unicode` override enabled defaults.
 
-Startup defaults apply when a session is created. Resuming keeps that session's editing state; the frontend can still use your chosen backend and scale. To change a running session, use **Options > Preferences**. A guest can read and update non-agent settings through `editor_settings`; its `defaults` object updates the startup section without changing the current session.
+Startup defaults apply when a session is created. Resuming keeps that session's editing state; the frontend can still use your chosen backend and scale. To change a running session, use **Options > Preferences**. An agent can read and update non-agent settings through `editor_settings`; its `defaults` object updates the startup section without changing the current session.
 
 ## Project configuration
 
@@ -50,7 +50,7 @@ Only one project file is loaded; parent projects are not recursively merged.
 
 `[editor.defaults]` is merged key by key over global defaults. Omitted values
 inherit; project `false` overrides global `true`. Project defaults apply at
-startup. The guest's `editor_settings.defaults` writer still edits the global
+startup. The agent's `editor_settings.defaults` writer still edits the global
 file; it does not rewrite the project file.
 
 ## Agent context
@@ -72,7 +72,7 @@ interrupt a running response by itself. Invalid configuration stops submission
 and retains the query for repair.
 
 Agents can read the effective text and its source paths through `agent_settings`.
-They cannot edit this configuration through guest file/input tools. Context is
+They cannot edit this configuration through file or input tools. Context is
 sent to the provider, so use it for guidance rather than credentials. Tool
 permissions remain global: a project file cannot enable tools or override
 **Agent Permissions**.
@@ -82,10 +82,10 @@ permissions remain global: a project file cannot enable tools or override
 Turn on **Options > Preferences > Streamer mode** before sharing your screen,
 or start with `--streamer`. Sensitive input values and session keys are masked
 on every frontend; their stored values are unchanged. `--no-streamer` turns it
-off. This is a user-controlled preference: guests can read its state but cannot
+off. This is a user-controlled preference: agents can read its state but cannot
 change it through input or settings tools.
 
-Guest views always redact sensitive values, whether or not Streamer mode is on.
+Views supplied to agents always redact sensitive values, whether or not Streamer mode is on.
 Source files are not scanned for secrets by this display option.
 
 ## Agent Permissions

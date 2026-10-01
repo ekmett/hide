@@ -113,7 +113,7 @@ Breakpoints use 1-based lines, at most 1000. See the
 
 Diff text is capped at 128 Ki characters. A path filter is a literal file path,
 not a Git glob/magic pathspec. Whole-repository diffs omit private authority files and Git-detected rename/copy
-destinations derived from them; `omittedFiles` reports a count without their names. Guest mouse/key input cannot
+destinations derived from them; `omittedFiles` reports a count without their names. Agent mouse/key input cannot
 open the unrestricted human Git review or commit dialog; use `workspace_git`
 for filtered review. `workspace_search` with
 `trackedOnly: true` searches tracked source. Dedicated Git mutations and
@@ -139,7 +139,7 @@ screen space. Split windows share their buffer and undo history.
 | Tool | Kind | Arguments | Result / contract |
 | --- | --- | --- | --- |
 | `editor_screen` | R | `image?` | Colorless text grid, optional PNG, readable/clickable cell masks, command/key permissions |
-| `editor_input` | W/X | `events` | 1–64 sequential input events; returns applied count, exit flag, error, guest-copy text and settings |
+| `editor_input` | W/X | `events` | 1–64 sequential input events; returns applied count, exit flag, error, text copied by the agent and settings |
 | `clipboard_write` | W | `text` | Write supplied text and queue frontend copy; never read existing clipboard |
 
 Input event forms:
@@ -159,8 +159,8 @@ Mouse actions: `down`, `up`, `move`, `wheel-up`, `wheel-down`; button 0 left,
 `Delete`, `Insert`, `F1`–`F24`. Paste is capped at 64 Ki characters per event.
 Input is not transactional: inspect partial results before retrying.
 
-Guest origin is assigned by the host. Each batch starts without human clipboard,
-drag or key-prefix state; gestures may span events within the batch. Guest input
+The host identifies input from an agent. Each batch starts without human clipboard,
+drag or key-prefix state; gestures may span events within the batch. Agent input
 cannot submit chat as the person, answer its own questions/approvals, modify agent
 settings/permissions or toggle Streamer mode. Generic reads and screen captures
 also protect drafts, authority files and session keys.

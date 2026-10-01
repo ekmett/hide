@@ -39,10 +39,10 @@ covers build targets, tests, shared terminals, breakpoints and stack inspection.
 The [Git guide](../git.md) describes reviewing and committing saved changes.
 For binary files, use the [hex editor](../hex.md).
 
-## Bring a guest into the editor
+## Bring an agent into the editor
 
 [Conversations](../conversations.md) explains provider setup, context, permissions
-and reviewing proposed changes. [Session tools](../session-tools.md) gives a guest
+and reviewing proposed changes. [Session tools](../session-tools.md) gives an agent
 access to the live desktop, including unsaved edits, language tools and running
 programs. Choose a workflow with [agent skills](../agent-skills.md), and find the
 available calls in the [agent operation reference](../agent-tools.md).

@@ -67,7 +67,7 @@ the open windows; its tools use the editor's current state when called.
 | `read_buffer` | Current text, including unsaved edits, or bytes from a hex buffer |
 | `read_selection` | Selected text and cursor offsets in a chosen window |
 
-The guest can also use HLS, inspect diagnostics, arrange windows, navigate text
+The agent can also use HLS, inspect diagnostics, arrange windows, navigate text
 and hex buffers, preview/apply undo history, build/run/test, and work with shared
 terminals. [Session tools](session-tools.md) describe the full interface, including
 screenshots, checked diffs and source debugging. Mutating tools work on this live
@@ -85,7 +85,7 @@ Tables wrap to the available width and become labeled cells when columns no
 longer fit. Tool calls appear as compact chevron rows. Click one to expand its
 full request/update JSON; click again to collapse it.
 
-A guest can ask a question inline with suggested choices and a free-text answer.
+An agent can ask a question inline with suggested choices and a free-text answer.
 Choose an option or enter your own reply, then submit. Cancel dismisses the
 question. Your unfinished conversation draft is retained separately.
 
@@ -127,7 +127,7 @@ to use the terminal alongside the conversation.
 Use **Options > Agent Context** to edit global or project guidance in TOML. Global
 context applies across projects; a project's `thc.toml` adds its own instructions.
 Save before sending a query or steering message. The editor supplies changed
-context without adding it as a visible user bubble. The guest can read the
+context without adding it as a visible user bubble. The agent can read the
 effective guidance but cannot rewrite it. See [Agent context](configuration.md#agent-context)
 for the format and precedence.
 
