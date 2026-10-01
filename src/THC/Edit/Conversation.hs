@@ -12,7 +12,7 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
 import Data.Time (UTCTime, TimeZone, getCurrentTime, getCurrentTimeZone, diffUTCTime, utcToLocalTime, formatTime, defaultTimeLocale)
 import Data.IORef
-import Data.List (find, sortOn, intercalate)
+import Data.List (find, sortOn)
 import qualified Data.Map.Strict as M
 import qualified Data.Set as S
 import Data.Maybe (fromMaybe, mapMaybe, isNothing)
@@ -571,10 +571,14 @@ paint force s d
 renderReply :: Bool -> Int -> Bool -> Text -> [(Char,Style)]
 renderReply graphical requested outgoing text
   | width<6 = recolor (renderMarkdown width text)
-  | otherwise = intercalate [('\n',BubbleText 0 outgoing Plain)] (zipWith line [0::Int ..] rows)
+  | otherwise = concat (zipWith renderLine [0::Int ..] rows)
   where
     width=max 1 requested
-    rows=splitRows (recolor (renderMarkdown (width-5) text))
+    contentRows=splitRows (recolor (renderMarkdown (width-5) text))
+    leadingCode=case contentRows of
+      first:_ -> any (\(_,style)->case style of BubbleText _ _ (CodeStyle _ _)->True; _->False) first
+      [] -> False
+    rows=if leadingCode then []:contentRows else contentRows
     columns chars=let t=T.pack (map fst chars) in displayColumn t (T.length t)
     bubbleWidth=maximum (0:map columns rows)
     background=BubbleStyle outgoing Plain
@@ -590,6 +594,9 @@ renderReply graphical requested outgoing text
       | lastRow = tile (if leftSide then 2 else 3)
       | otherwise = (' ',background)
     lastIndex=length rows-1
+    -- The top margin belongs to the bubble, so copying still starts at its text.
+    renderLine i chars =
+      [('\n',if leadingCode && i==1 then background else BubbleText 0 outgoing Plain) | i>0] ++ line i chars
     line i chars =
       let first=i==0; lastRow=i==lastIndex
           body=side first lastRow True:chars++spaces background (bubbleWidth-columns chars)++[side first lastRow False]
