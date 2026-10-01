@@ -103,6 +103,8 @@ test-suite editor-tests
   other-modules: UnicodeCheck, HexCheck, DAPCheck, DebuggerCheck, RunCheck, ConversationCheck, AgentFilesCheck, TerminalCheck, ConsolesCheck, FilesCheck, WindowCheck, BrowserCheck, HelpCheck, GitCheck, GitOperationsCheck, LSPCheck, ToolingCheck, DialogMouseCheck, BufferTreeCheck, ExternalCheck, ReconcileCheck, ACPCheck, MarkdownCheck
   if flag(window)
     cpp-options: -DWITH_WINDOW
+  if flag(window) || flag(web) || flag(remote)
+    cpp-options: -DWITH_FONT
     other-modules: FontCheck
   if flag(terminal)
     cpp-options: -DWITH_TERMINAL

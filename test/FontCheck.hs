@@ -1,5 +1,11 @@
 module FontCheck (checks) where
 
+import Control.Exception (bracket, bracket_)
+import qualified Data.ByteString.Char8 as BS
+import System.Directory
+import System.Environment (lookupEnv, setEnv, unsetEnv)
+import System.FilePath ((</>))
+import System.IO (hClose, openBinaryTempFile)
 import Control.Monad (forM_, unless)
 import Data.Bits (testBit)
 import Data.Maybe (listToMaybe)
@@ -41,4 +47,21 @@ checks = do
     (glyphWidth (glyph font c)==8 && length (rows c)==16)
   check "Material folders are distinct bundled two-cell bitmaps"
     (rows '\xf024b' /= rows '\xf0770' && all (\c -> bitmapGlyph font c && glyphWidth (glyph font c)==16 && any (/=0) (rows c)) ['\xf024b','\xf0770'])
+  bracket temporaryFonts removePathForcibly $ \directory -> do
+    createDirectoryIfMissing True (directory </> "assets/fonts")
+    forM_ ["ibm-vga-8x16.hex", "unifont-18.0.01.hex", "material-icons.hex"] $ \name ->
+      BS.writeFile (directory </> "assets/fonts" </> name) (BS.pack ("0041:" ++ replicate 32 'F' ++ "\r\n0042:" ++ replicate 32 '0' ++ "\n"))
+    previous <- lookupEnv "thc_edit_datadir"
+    bracket_ (setEnv "thc_edit_datadir" directory) (maybe (unsetEnv "thc_edit_datadir") (setEnv "thc_edit_datadir") previous) $ do
+      mixed <- loadFont
+      check "font loading accepts mixed CRLF and LF lines"
+        (glyph mixed 'A' == Glyph 8 (replicate 16 0xff00) && glyph mixed 'B' == Glyph 8 (replicate 16 0))
   putStrLn "font checks passed"
+  where
+    temporaryFonts = do
+      base <- getTemporaryDirectory
+      (path, handle) <- openBinaryTempFile base "thc-font-check"
+      hClose handle
+      removeFile path
+      createDirectory path
+      pure path

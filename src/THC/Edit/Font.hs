@@ -29,7 +29,7 @@ loadFont = do
         ioError (userError ("Invalid bitmap font order: " ++ path))
       pure (IM.fromDistinctAscList pairs)
     strictlyAscending xs = and (zipWith (<) xs (drop 1 xs))
-    parse path line = case BS.split ':' line of
+    parse path line = case BS.split ':' (BS.dropWhileEnd (== '\r') line) of
       [code, bits]
         | BS.length code >= 4 && BS.length code <= 6
         , BS.length bits `elem` [32,64]

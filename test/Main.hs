@@ -3,7 +3,7 @@ module Main where
 #ifdef WITH_WEB
 import qualified WebCheck
 #endif
-#ifdef WITH_WINDOW
+#ifdef WITH_FONT
 import qualified FontCheck
 #endif
 #ifdef WITH_PROTOCOL
@@ -183,7 +183,7 @@ main = do
   GitOperationsCheck.checks
   GitCheck.checks
   WindowCheck.checks
-#ifdef WITH_WINDOW
+#ifdef WITH_FONT
   FontCheck.checks
 #endif
   let fileMenu = n {menu=Just (0,0)}
