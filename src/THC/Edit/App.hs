@@ -1,19 +1,28 @@
 {-# LANGUAGE CPP, OverloadedStrings #-}
 module THC.Edit.App (main, demoDesktop, applyEffects) where
 
-import Control.Exception (bracket)
+import Control.Exception (bracket, finally, catch, AsyncException(UserInterrupt), throwIO)
+import Control.Concurrent (myThreadId, throwTo)
+#ifndef mingw32_HOST_OS
+import System.Posix.Signals (installHandler, Handler(Catch), sigTERM, sigHUP)
+#endif
+import Data.Aeson (object, (.=))
+import THC.Edit.Protocol (WirePacket(..))
+import THC.Edit.EditorMCP (runEditorMCP)
+import THC.Edit.Session
+import THC.Edit.RemoteTerminal (runRemoteTerminal)
+import Text.Read (readMaybe)
+import Data.IORef (newIORef, readIORef, writeIORef)
 import Control.Monad (foldM, when)
-import System.Timeout (timeout)
-import System.IO (hFlush, stdout)
+import System.IO (hFlush, stdout, stdin, hIsTerminalDevice)
 import THC.Edit.Debugger
 import THC.Edit.Conversation
 import THC.Edit.Tooling
 import THC.Edit.GitOperations
 import qualified Data.Map.Strict as M
-import Data.List (find)
+import Data.List (find, isPrefixOf)
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
-import Graphics.Vty.CrossPlatform (mkVty)
 import qualified Graphics.Vty as V
 import System.Console.GetOpt
 import System.Directory (doesDirectoryExist, doesFileExist, getCurrentDirectory, getHomeDirectory, setCurrentDirectory, listDirectory)
@@ -23,34 +32,32 @@ import Paths_thc_edit (getDataFileName)
 import THC.Edit.Browser
 import THC.Edit.Markdown (renderMarkdown)
 import THC.Edit.Git
-import System.Environment (getArgs, lookupEnv)
+import System.Environment (getArgs, lookupEnv, setEnv)
 import THC.Edit.Frontend
-import THC.Edit.Window (runWindow)
-import THC.Edit.Web (runWeb)
 import THC.Edit.Remote
 import THC.Edit.RemoteWindow (runRemoteWindow)
 import THC.Edit.RemoteWeb (runRemoteWeb)
 import System.Exit (die)
 import THC.Edit.Buffer
 import THC.Edit.Model
-import THC.Edit.Unicode (updatePicture)
 import THC.Edit.Render
 import THC.Edit.Files
 import THC.Edit.Reconcile
 
-data Option = SSH String | RemoteSession String | RemoteDaemon String | Use Backend | Scale String | Size String | Mode String | ColorMode String | Demo | CRT | MaterialIcons | WordStar | Snapshot | Html | Scene String | Usage deriving Eq
+data Option = MCPBridge String | Resume (Maybe String) | SSH String | RemoteSession String | RemoteDaemon String | Use Backend | Scale String | Size String | Mode String | ColorMode String | Demo | CRT | MaterialIcons | WordStar | Snapshot | Html | Scene String | Usage deriving Eq
 options :: [OptDescr Option]
 options = [Option [] ["appearance"] (ReqArg ColorMode "light|dark|system") "Document/terminal colors (default THC_EDIT_APPEARANCE or system)"
           ,Option [] ["metal"] (NoArg (Use Metal)) "Open a Metal window"
           ,Option [] ["vulkan"] (NoArg (Use Vulkan)) "Open a Vulkan window"
           ,Option [] ["remote"] (NoArg (Use Remote)) "Serve the remote editing protocol on stdin/stdout"
           ,Option [] ["ssh"] (ReqArg SSH "HOST") "Connect to a remote thc-edit (also HOST:PATH)"
+          ,Option [] ["resume"] (OptArg Resume "ID") "Resume an unfinished editor session (choose if several exist)"
           ,Option [] ["remote-session"] (ReqArg RemoteSession "ID") "Reattach to an existing remote session"
           ,Option [] ["web"] (NoArg (Use Web)) "Open the local WebGL browser frontend"
           ,Option [] ["window"] (NoArg (Use Auto)) "Open a window using the platform backend"
           ,Option [] ["terminal"] (NoArg (Use Terminal)) "Use the terminal (override THC_EDIT_BACKEND)"
           ,Option [] ["crt"] (NoArg CRT) "Enable CRT scanlines and vignetting (window only)"
-          ,Option [] ["material-icons"] (NoArg MaterialIcons) "Use Material folder icons in the terminal (requires a compatible Nerd Font)"
+          ,Option [] ["material-icons"] (NoArg MaterialIcons) "Use Material folder icons (terminal requires a compatible Nerd Font)"
           ,Option [] ["scale"] (ReqArg Scale "FACTOR") "Window pixel scale, 1 to 8 in 1/8 steps (default THC_EDIT_SCALE or display density)"
           ,Option [] ["mode"] (ReqArg Mode "NUMBER") "Window screen mode: 3 (80x25), 259 (80x50); default 3"
           ,Option [] ["vga50"] (NoArg (Mode "259")) "Alias for --mode 259 (window only)"
@@ -69,12 +76,22 @@ main = do
   scaleDefault<-lookupEnv "THC_EDIT_SCALE"
   appearanceDefault<-lookupEnv "THC_EDIT_APPEARANCE"
   terminalColors<-lookupEnv "COLORFGBG"
-  let (flags,paths,errors)=getOpt Permute (options++[Option [] ["remote-daemon"] (ReqArg RemoteDaemon "ID") "Internal remote session process"]) args
+  let (flags,paths,errors)=getOpt Permute (options++[Option [] ["mcp-editor"] (ReqArg MCPBridge "ID") "Internal editor introspection bridge",Option [] ["remote-daemon"] (ReqArg RemoteDaemon "ID") "Internal remote session process"]) (resumeArguments args)
   if not (null errors) then die (concat errors)
   else if Usage `elem` flags then putStr (usageInfo "Usage: thc-edit [OPTIONS] [--] [FILE.hs ...]\n\nTurbo Haskell source editor.\nF2 Save, F3 Open, F10 Menu, Alt+X Exit.\n" options)
+  else if [ident | MCPBridge ident<-flags]/=[] then case flags of
+    [MCPBridge ident] | null paths -> runEditorMCP ident
+    _ -> die "--mcp-editor accepts only a session ID."
   else do
     daemon <- case [sid | RemoteDaemon sid<-flags] of []->pure Nothing; [sid]->pure (Just sid); _->die "Specify --remote-daemon once."
+    resume <- case [ident | Resume ident<-flags] of
+      [] -> pure Nothing
+      [ident] -> do
+        when (not (null paths) || any isSSH flags || any isSession flags || daemon/=Nothing || Use Remote `elem` flags || Snapshot `elem` flags || Html `elem` flags) (die "--resume cannot be combined with paths, --ssh, --remote, or snapshots.")
+        Just <$> chooseSession ident
+      _ -> die "Specify --resume only once."
     let serving=Use Remote `elem` flags || daemon/=Nothing || (null [b | Use b<-flags] && backendDefault==Just "remote")
+    when (resume/=Nothing && serving) (die "--resume requires a display backend, not --remote.")
     target <- if serving then pure Nothing else case ([host | SSH host<-flags],paths) of
       ([],[path]) | Just remote<-parseRemoteTarget path -> pure (Just remote)
       ([],_) | any (maybe False (const True) . parseRemoteTarget) paths -> die "Open one remote project at a time; do not mix local and remote paths."
@@ -82,7 +99,8 @@ main = do
       ([host],[]) -> pure (Just (host,"."))
       ([host],[path]) -> pure (Just (host,path))
       _ -> die "Specify one SSH host and one remote file or project path."
-    backend <- if daemon/=Nothing then pure Remote else either die pure (chooseBackend (if target/=Nothing && backendDefault==Nothing then Just "auto" else backendDefault) [b | Use b<-flags])
+    backend <- if daemon/=Nothing then pure Remote else either die pure (chooseBackend backendDefault [b | Use b<-flags])
+    when (target/=Nothing && (Snapshot `elem` flags || Html `elem` flags)) (die "Snapshots require local paths.")
     when (length [sid | RemoteSession sid<-flags]>1) (die "Specify --remote-session once.")
     when (target==Nothing && any isSession flags) (die "--remote-session requires HOST:PATH or --ssh HOST.")
     when (serving && (Snapshot `elem` flags || Html `elem` flags || any isSSH flags)) (die "--remote cannot be combined with snapshots or --ssh.")
@@ -102,23 +120,41 @@ main = do
       [s] -> either die pure (parseWindowSize s)
       _ -> die "Specify --size only once."
     if backend==Remote && daemon==Nothing then runRemoteRelay (remoteArguments flags paths)
-    else case target of
-      Just (host,path) -> do
-        when (backend==Terminal) (die "Choose --window, --metal, --vulkan or --web for SSH editing; ordinary terminal editing works with ssh -t HOST thc-edit PATH.")
-#ifndef WITH_REMOTE
-        die "Remote support is not built. Rebuild with cabal build -fremote."
-#else
+    else if daemon==Nothing && Snapshot `notElem` flags && Html `notElem` flags then do
 #ifndef WITH_WINDOW
-        when (backend/=Web) (die "Graphical support is not built. Rebuild with -fwindow -fremote.")
+      when (backend `elem` [Auto,Metal,Vulkan]) (die "Graphical support is not built. Rebuild with -fwindow.")
 #endif
 #ifndef WITH_WEB
-        when (backend==Web) (die "Browser support is not built. Rebuild with -fweb -fremote.")
+      when (backend==Web) (die "Browser support is not built. Rebuild with -fweb.")
 #endif
-        withSSHPeer host (remoteArguments flags [path]) $ \peer ->
-          if backend==Web then runRemoteWeb scale host peer
-          else runRemoteWindow backend scale dimensions screenMode host peer
-#endif
-      Nothing -> do
+      record <- case resume of
+        Just saved -> pure saved
+        Nothing -> do
+          let host=fmap fst target
+              arguments=remoteArguments (filter (not . isSession) flags) (maybe paths (pure . snd) target)
+          fresh<-newSessionRecord host arguments
+          pure $ case [ident | RemoteSession ident<-flags] of
+            [ident] -> fresh {sessionId=ident}
+            _ -> fresh
+      wasInterrupted<-newIORef False
+      let reattach=resume/=Nothing || any isSession flags
+          attach=case sessionHost record of
+            Nothing -> withLocalPeer (sessionId record) reattach (sessionArguments record)
+            Just host -> withSSHSession host (sessionId record) reattach (sessionArguments record)
+          display peer = do
+            peerSend peer (JsonPacket (object ["type" .= ("frontend"::T.Text),"mode" .= (if backend==Terminal then Nothing else Just screenMode)]))
+            case backend of
+              Terminal -> runRemoteTerminal peer
+              Web -> runRemoteWeb scale (maybe "" id (sessionHost record)) peer
+              _ -> runRemoteWindow backend scale dimensions screenMode (maybe "" id (sessionHost record)) peer
+          report = do
+            saved<-loadSession (sessionId record)
+            detached<-readIORef wasInterrupted
+            when (saved/=Nothing || detached) $ putStrLn ("Session: "++sessionId record++"\nResume: thc-edit --resume "++sessionId record) >> hFlush stdout
+      -- A local session starts beside the project that created it. Reattachment
+      -- needs only its endpoint, so a removed/renamed working directory is fine.
+      (withDetachSignals (attach display) `catch` (\err -> writeIORef wasInterrupted True >> interrupted err)) `finally` report
+    else do
         let initial=if Demo `elem` flags then addDocument Nothing (newBuffer (activeText demoDesktop)) (initialDesktop dimensions) else initialDesktop dimensions
             configured=(fst (handleEvent (uncurry V.EvResize dimensions) initial)) {appearance=colorMode,systemDark=maybe True (not . (`elem` ["7","15"]) . reverse . takeWhile (/=';') . reverse) terminalColors,wordStar=WordStar `elem` flags,crtFilter=CRT `elem` flags,materialIcons=MaterialIcons `elem` flags,videoMode=if backend == Terminal then Nothing else Just screenMode}
         localPaths<-if daemon/=Nothing then mapM expandRemoteHome paths else pure paths
@@ -132,20 +168,14 @@ main = do
         staged<-foldM stageScene withGit [scene | Scene scene<-flags]
         if Html `elem` flags then TIO.putStr (snapshotHtml staged)
         else if Snapshot `elem` flags then TIO.putStr (snapshot staged)
-        else withDebugger $ \debugger -> withConversation $ \conversation -> withTooling $ \tooling -> withGitOperations $ \gitOperations -> withReconciliation $ \reconciliation -> do
-          let effects=gitOperationEffects gitOperations (debuggerEffects debugger (conversationEffects conversation (reconciliationEffects reconciliation (toolingEffects tooling applyEffects))))
-              tick d=tickGitOperations gitOperations applyEffects d >>= tickTooling tooling applyEffects >>= tickReconciliation reconciliation >>= tickConversation conversation >>= tickDebugger debugger (toolingEffects tooling applyEffects)
-          case daemon of
-            Just sid -> runRemoteDaemon sid scale effects tick staged
-            Nothing ->
-              if backend == Web then runWeb scale effects tick staged
-              else if backend /= Terminal then runWindow backend scale effects tick staged
-              else bracket (mkVty V.defaultConfig) (\vty -> V.shutdown vty >> cursorStyle Nothing) $ \vty -> do
-                when (V.supportsMode (V.outputIface vty) V.Mouse) (V.setMode (V.outputIface vty) V.Mouse True)
-                when (V.supportsMode (V.outputIface vty) V.BracketedPaste) (V.setMode (V.outputIface vty) V.BracketedPaste True)
-                size<-V.displayBounds (V.outputIface vty)
-                cursorStyle (Just (blinkCursor staged))
-                loop effects tick vty (fst (handleEvent (uncurry V.EvResize size) staged))
+        else do
+          mapM_ (setEnv "THC_EDIT_SESSION") daemon
+          withDebugger $ \debugger -> withConversation $ \conversation -> withTooling $ \tooling -> withGitOperations $ \gitOperations -> withReconciliation $ \reconciliation -> do
+            let effects=gitOperationEffects gitOperations (debuggerEffects debugger (conversationEffects conversation (reconciliationEffects reconciliation (toolingEffects tooling applyEffects))))
+                tick d=tickGitOperations gitOperations applyEffects d >>= tickTooling tooling applyEffects >>= tickReconciliation reconciliation >>= tickConversation conversation >>= tickDebugger debugger (toolingEffects tooling applyEffects)
+            case daemon of
+              Just sid -> runRemoteDaemon sid scale effects tick staged
+              Nothing -> die "Missing session process identity."
   where
     parseAppearance s = maybe (die "Appearance must be light, dark, or system.") pure (lookup s [("light",LightMode),("dark",DarkMode),("system",SystemMode)])
     isMode Mode{} = True
@@ -154,6 +184,52 @@ main = do
     isSession _ = False
     isSSH SSH{} = True
     isSSH _ = False
+
+-- GetOpt optional arguments normally require '='. Also accept --resume ID.
+resumeArguments :: [String] -> [String]
+resumeArguments ("--":rest)="--":rest
+resumeArguments ("--resume":ident:rest) | not ("-" `isPrefixOf` ident) = ("--resume="++ident):resumeArguments rest
+resumeArguments (arg:rest)=arg:resumeArguments rest
+resumeArguments []=[]
+
+chooseSession :: Maybe String -> IO SessionRecord
+chooseSession wanted = do
+  sessions<-listSessions
+  case wanted of
+    Just ident -> case filter (isPrefixOf ident . sessionId) sessions of
+      [record] | not (null ident) -> pure record
+      [] -> die ("No unfinished session matches "++ident++".")
+      _ -> die "Session ID is ambiguous; use a longer ID."
+    Nothing -> case sessions of
+      [] -> die "No unfinished editor sessions."
+      [record] -> pure record
+      _ -> do
+        putStrLn "Unfinished editor sessions:"
+        mapM_ (\(n,record) -> putStrLn (show n++") "++sessionId record++"  "++maybe "local" id (sessionHost record)++"  "++sessionDirectory record)) (zip [1::Int ..] sessions)
+        interactive<-hIsTerminalDevice stdin
+        if not interactive then die "Choose one with --resume ID."
+        else do
+          putStr "Resume session number (empty to cancel): "; hFlush stdout
+          answer<-getLine
+          case readMaybe answer of
+            Just n | n>=1, record:_<-drop (n-1) sessions -> pure record
+            _ -> die "No session selected."
+
+interrupted :: AsyncException -> IO ()
+interrupted UserInterrupt=pure ()
+interrupted other=throwIO other
+
+withDetachSignals :: IO a -> IO a
+#ifdef mingw32_HOST_OS
+withDetachSignals = id
+#else
+withDetachSignals action = do
+  thread<-myThreadId
+  let install signal=installHandler signal (Catch (throwTo thread UserInterrupt)) Nothing
+      restore signal handler=installHandler signal handler Nothing >> pure ()
+  bracket (install sigTERM) (restore sigTERM) $ \_ ->
+    bracket (install sigHUP) (restore sigHUP) (const action)
+#endif
 
 -- Rebuild arguments rather than reinterpreting their shell spelling. Paths after
 -- -- are passed verbatim to the remote process, including spaces and metacharacters.
@@ -195,19 +271,6 @@ setScene d scene=case scene of
 demoDesktop :: Desktop
 demoDesktop = addDocument Nothing (newBuffer sample) (initialDesktop (80,25))
   where sample=T.unlines ["module Main where","", "factorial :: Integer -> Integer", "factorial n = product [1 .. n]", "", "main :: IO ()", "main = do", "  putStrLn \"Enter a number:\"", "  input <- getLine", "  print (factorial (read input))"]
-
-loop :: (Desktop -> [Effect] -> IO (Bool,Desktop)) -> (Desktop -> IO Desktop) -> V.Vty -> Desktop -> IO ()
-loop effects tick vty d = do
-  updatePicture vty (renderDesktop d)
-  event<-timeout 100000 (V.nextEvent vty)
-  let (next,requests)=maybe (d,[]) (`handleEvent` d) event
-  (exit,updated)<-effects next requests
-  when (blinkCursor updated /= blinkCursor d) (cursorStyle (Just (blinkCursor updated)))
-  if exit then pure () else tick updated >>= loop effects tick vty
-
--- DECSCUSR leaves the terminal responsible for its cursor cadence.
-cursorStyle :: Maybe Bool -> IO ()
-cursorStyle blinking = putStr (case blinking of Just True -> "\ESC[3 q"; Just False -> "\ESC[4 q"; Nothing -> "\ESC[0 q") >> hFlush stdout
 
 applyEffects :: Desktop -> [Effect] -> IO (Bool,Desktop)
 applyEffects = foldM apply . (False,)

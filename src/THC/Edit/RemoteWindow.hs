@@ -17,7 +17,7 @@ import THC.Edit.Unicode (clusterWidth, graphemes)
 #if defined(WITH_WINDOW) && defined(WITH_REMOTE)
 import Control.Concurrent.Async (withAsync, poll)
 import Control.Concurrent.STM hiding (check)
-import Control.Exception (bracket, bracket_, throwIO, IOException, catch)
+import Control.Exception (bracket, bracket_, throwIO, IOException, catch, finally)
 import Control.Monad (forM_, forever, when, foldM)
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString.Lazy as BL
@@ -27,6 +27,7 @@ import Foreign.C
 import System.Directory (getHomeDirectory, createDirectoryIfMissing)
 import System.FilePath ((</>), takeFileName)
 import System.Info (os)
+import System.Timeout (timeout)
 import System.IO (withBinaryFile, IOMode(ReadMode), hFileSize, openBinaryTempFile, hClose, hPutStrLn, stderr)
 import THC.Edit.Font
 import THC.Edit.Model (Command(Paste))
@@ -230,6 +231,11 @@ runRemoteWindow backend scale (cols,rows) mode host peer = do
             Right text -> forM_ (T.unpack text) $ \c -> sendEvent [1,fromEnum c,0]
             Left _ -> pure ()
         11:i:_ | i>=0, Paste:_ <- drop i nativeCommands -> paste
+        14:_ | null host -> do
+          bytes <- c_text >>= BS.packCString
+          case TE.decodeUtf8' bytes of
+            Right path -> sendJSON (object ["type" .= ("open"::T.Text),"path" .= path])
+            Left _ -> pure ()
         14:_ -> do
           bytes <- c_text >>= BS.packCString
           case TE.decodeUtf8' bytes of
@@ -244,7 +250,7 @@ runRemoteWindow backend scale (cols,rows) mode host peer = do
                   when (BS.length payload<=16777216) (send [JsonPacket (object ["type" .= ("upload"::T.Text),"name" .= name]),BinaryPacket payload]))
                 `catch` \(e::IOException) -> hPutStrLn stderr ("Cannot upload dropped file: "++show e)
         _ -> when connected (sendEvent event)
-      title connection frame = utf8 ((maybe "Turbo Haskell" remoteTitle frame)<>" — "<>T.pack host<>connection) c_title
+      title connection frame = utf8 ((maybe "Turbo Haskell" remoteTitle frame)<>(if null host then "" else " — "<>T.pack host)<>connection) c_title
       controls (frame,atlas,connection,changed,closed) item = case item of
         Assets glyphs -> pure (frame,glyphs,connection,True,closed)
         Frame value -> do
@@ -304,7 +310,9 @@ runRemoteWindow backend scale (cols,rows) mode host peer = do
         (size,packets) <- atomically (readTBQueue outgoing)
         peerSendBatch peer packets
         atomically (modifyTVar' queuedBytes (subtract size))) $ \sender ->
-        loop receiver sender Nothing M.empty " (connecting)" Nothing True
+        loop receiver sender Nothing M.empty " (connecting)" Nothing True `finally` do
+          sent <- timeout 2000000 (atomically (readTVar queuedBytes >>= \bytes -> when (bytes/=0) retry))
+          when (sent==Nothing) (hPutStrLn stderr "Some window input could not be handed to the session before detaching.")
   where
     drain queue = do
       item <- tryReadTBQueue queue

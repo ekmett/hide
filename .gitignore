@@ -3,3 +3,9 @@ dist-newstyle/
 *.o
 .deps/
 cabal.project.local
+
+__pycache__/
+*.pyc
+.env
+.env.*
+!.env.example

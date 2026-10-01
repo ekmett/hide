@@ -100,7 +100,7 @@ checks = bracket temporary removePathForcibly $ \dir -> withReconciliation $ \ru
   check "tree refresh preserves expansion focus and selection" (case sideTree refreshed of
     Just sidebar -> not (treeFocused sidebar) && any (\row -> nodePath row==nested && nodeExpanded row) (treeRows sidebar) && nodeName (treeRows sidebar !! treeSelected sidebar)=="a.hs"
     _ -> False)
-  let commands = [(AgentOptions,"options"),(Conversation,"show"),(AgentPrompt,"prompt"),(AgentCancel,"cancel"),(AgentResume,"resume"),(AgentNew,"new"),(AgentCopyRaw,"copy")]
+  let commands = [(AgentOptions,"options"),(Conversation,"show"),(AgentCancel,"cancel"),(AgentResume,"resume"),(AgentNew,"new"),(AgentCopyRaw,"copy")]
   check "agent commands route generic effects" (all (\(command,action) -> snd (runCommand command restored)==[AgentAction action []]) commands)
   let agentDialog = Dialog "Agent" (AgentDialog "permission") [Input "Value" "x" 1,CheckBox "Allowed" True,ListBox "Choice" ["a","b"] 1] 3 ["Allow","Deny"] []
   check "agent dialog submits button and field values" (snd (handleEvent (V.EvKey V.KEnter []) restored {dialog=Just agentDialog})==[AgentAction "permission" ["0","x","true","1"]])

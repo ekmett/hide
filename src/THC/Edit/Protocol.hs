@@ -29,7 +29,7 @@ import THC.Edit.Render (renderDesktop)
 import THC.Edit.Unicode (displayOpsForPic, graphemes, clusterWidth)
 
 data WebInput = Key T.Text [V.Modifier] | Paste T.Text | Mouse T.Text Int Int Int Int [V.Modifier]
-              | SystemTheme Bool | BrowserCommand Command | MenuCommand Int | UploadFile T.Text BS.ByteString | Resize Int Int | Blur | Modifiers [V.Modifier] deriving (Eq,Show)
+              | SystemTheme Bool | BrowserCommand Command | MenuCommand Int | UploadFile T.Text BS.ByteString | Frontend (Maybe Int) | OpenPath FilePath | Resize Int Int | Blur | Modifiers [V.Modifier] deriving (Eq,Show)
 
 parseInput :: Value -> Parser WebInput
 parseInput = withObject "browser event" $ \o -> do
@@ -59,6 +59,14 @@ parseInput = withObject "browser event" $ \o -> do
       text <- o .: "text"
       unless (T.length text<=1048576) (fail "Paste too large")
       pure (Paste text)
+    "frontend" -> do
+      mode <- o .:? "mode"
+      unless (maybe True (`elem` [3,259]) mode) (fail "Invalid screen mode")
+      pure (Frontend mode)
+    "open" -> do
+      path <- o .: "path"
+      unless (not (null path) && length path<=8192 && all (>=' ') path) (fail "Invalid file path")
+      pure (OpenPath path)
     "resize" -> do
       w <- o .: "width"; h <- o .: "height"
       unless (w>=40 && w<=512 && h>=12 && h<=256) (fail "Invalid dimensions")
@@ -88,6 +96,8 @@ applyInput input d = case input of
     in (opened {buffers=M.adjust (\doc -> restyle doc {documentSuggestedName=Just (T.unpack name)}) (nextId d) (buffers opened),status="Dropped file opened; Download exports changes."},[])
   Key name mods -> maybe (d,[]) (\key -> handleEvent (V.EvKey key mods) d) (keyName name)
   Paste text -> handleEvent (V.EvPaste (TE.encodeUtf8 text)) d
+  Frontend mode -> (d {videoMode=mode},[])
+  OpenPath path -> (d,[ReadPath path])
   Resize w h -> handleEvent (V.EvResize w h) d
   Blur -> hoverAt (-1) (-1) d {drag=Nothing,dragOriginal=Nothing,prefix=Nothing,buttonPressed=Nothing,heldModifiers=[]}
   Modifiers mods -> (d {heldModifiers=mods},[])

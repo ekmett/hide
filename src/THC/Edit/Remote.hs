@@ -1,6 +1,6 @@
 {-# LANGUAGE CPP, OverloadedStrings, ScopedTypeVariables #-}
 module THC.Edit.Remote
-  ( RemotePeer(..), withSSHPeer, runRemoteRelay, runRemoteDaemon ) where
+  ( RemotePeer(..), withLocalPeer, withSSHPeer, withSSHSession, runRemoteRelay, runRemoteDaemon ) where
 
 #ifndef WITH_REMOTE
 import THC.Edit.Model (Desktop, Effect)
@@ -22,10 +22,11 @@ import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString.Char8 as B8
 import Data.Char (isHexDigit, isLower, isDigit, isSpace)
 import Data.IORef
+import Data.Maybe (fromMaybe)
 import qualified Data.Map.Strict as M
 import qualified Data.Text as T
 import qualified Network.Socket as N
-import System.Environment (getExecutablePath)
+import System.Environment (getExecutablePath, getArgs)
 import System.Exit (ExitCode(..))
 import System.FilePath (takeFileName)
 import System.IO
@@ -38,6 +39,8 @@ import THC.Edit.Frontend (modeSize)
 import THC.Edit.Model hiding (Paste, message)
 import THC.Edit.Protocol
 import THC.Edit.RemoteEndpoint
+import THC.Edit.Session
+import THC.Edit.EditorMCP (editorResponse)
 import System.Directory (getCurrentDirectory)
 
 #endif
@@ -72,17 +75,27 @@ helloParser = withObject "remote hello" $ \o -> do
   args <- o .:? "args" .!= []
   unless (length args<=128 && sum (map length args)<=65536 && all (all (/='\0')) args) (fail "Invalid remote startup arguments")
   let options=takeWhile (/="--") args
-  unless (all (`notElem` ["--remote","--remote-daemon","--ssh","--remote-session","--snapshot","--snapshot-html","--help","-h"]) options &&
-    all (\arg -> not (any (`T.isPrefixOf` T.pack arg) ["--remote-daemon=","--ssh=","--remote-session="])) options) (fail "Invalid remote startup mode")
+  unless (all (`notElem` ["--remote","--remote-daemon","--ssh","--remote-session","--resume","--mcp-editor","--snapshot","--snapshot-html","--help","-h"]) options &&
+    all (\arg -> not (any (`T.isPrefixOf` T.pack arg) ["--remote-daemon=","--ssh=","--remote-session=","--resume=","--mcp-editor="])) options) (fail "Invalid remote startup mode")
   resume <- o .:? "resume" .!= False
   pure (Hello session client ack args resume)
 
-readHello :: Handle -> IO (Hello, WirePacket)
-readHello h = do
+readFirstPacket :: Handle -> IO WirePacket
+readFirstPacket h = do
   packet <- timeout 15000000 (readPacket h)
   case packet of
-    Just (Just p@(JsonPacket value)) -> (,p) <$> decodeValue helloParser value
-    _ -> failure "Expected remote protocol hello within 15 seconds"
+    Just (Just p) -> pure p
+    _ -> failure "Expected protocol packet within 15 seconds"
+
+parseHelloPacket :: WirePacket -> IO Hello
+parseHelloPacket (JsonPacket value) = decodeValue helloParser value
+parseHelloPacket _ = failure "Expected remote protocol hello"
+
+readHello :: Handle -> IO (Hello, WirePacket)
+readHello h = do
+  packet <- readFirstPacket h
+  greeting <- parseHelloPacket packet
+  pure (greeting,packet)
 
 quietClose :: Handle -> IO ()
 quietClose h = hClose h `catch` \(_::IOException) -> pure ()
@@ -92,10 +105,21 @@ runRemoteRelay :: [String] -> IO ()
 runRemoteRelay args = handle report $ do
   hSetBinaryMode stdin True; hSetBinaryMode stdout True
   hSetBuffering stdout NoBuffering
-  (Hello session _ _ startup resume,hello) <- readHello stdin
+  (greeting,hello) <- readHello stdin
+  h <- openSession args greeting
+  finally (writePacket h hello >> race_ (relay stdin h) (relay h stdout)) (quietClose h)
+  where
+    report (err::IOException) = do
+      writePacket stdout (json "error" ["message" .= show err]) `catch` \(_::IOException) -> pure ()
+      throwIO err
+    relay source destination = readPacket source >>= maybe (pure ()) (\packet -> writePacket destination packet >> relay source destination)
+
+-- Opening a local peer and a stdio relay share daemon startup and diagnostics.
+openSession :: [String] -> Hello -> IO Handle
+openSession args (Hello session _ _ startup resume) = do
   path <- sessionEndpoint session
   existing <- try (connectEndpoint path)
-  h <- case existing of
+  case existing of
     Right connection -> pure connection
     Left (_::IOException) -> do
       -- An existing socket must never be replaced: that could split one session.
@@ -107,7 +131,7 @@ runRemoteRelay args = handle report $ do
           daemonArgs=options++["--remote-daemon",session]++paths
       let logfile=path++".log"
       process <- spawnDetached executable daemonArgs logfile
-      void (forkWait process)
+      void (forkIO (void (waitForProcess process)))
       let startupFailure reason = do
             detail <- (withBinaryFile logfile ReadMode $ \logHandle -> do
               size <- hFileSize logHandle
@@ -121,13 +145,6 @@ runRemoteRelay args = handle report $ do
               Nothing | remaining<=0 -> startupFailure "Remote editor did not become ready within 60 seconds"
                       | otherwise -> threadDelay 100000 >> awaitSocket (remaining-1)
       awaitSocket (600::Int)
-  finally (writePacket h hello >> race_ (relay stdin h) (relay h stdout)) (quietClose h)
-  where
-    report (err::IOException) = do
-      writePacket stdout (json "error" ["message" .= show err]) `catch` \(_::IOException) -> pure ()
-      throwIO err
-    relay source destination = readPacket source >>= maybe (pure ()) (\packet -> writePacket destination packet >> relay source destination)
-    forkWait p = forkIO (void (waitForProcess p))
 
 data Session = Session
   { desktop :: Desktop
@@ -176,17 +193,24 @@ runRemoteDaemon session scale effects tick initial = do
           d <- tick (desktop s)
           pure s {desktop=d}
       serve connection = flip finally (quietClose connection) $ handle (\(err::IOException) -> writePacket connection (json "error" ["message" .= show err])) $ do
-        (Hello requested client clientAck _ _,_) <- readHello connection
-        unless (requested==session) (failure "Wrong remote session")
-        available <- tryTakeMVar writer
-        case available of
-          Nothing -> writePacket connection (json "error" ["message" .= ("Remote editor already has a writer"::T.Text)])
-          Just () -> finally (attachment connection client clientAck) (do
-            -- Wait behind accepted commands before another writer can attach.
-            barrier <- newEmptyTMVarIO
-            atomically (writeTBQueue commands (0,0,Blur,barrier))
-            void (atomically (takeTMVar barrier))
-            putMVar writer ())
+        first <- readFirstPacket connection
+        case first of
+          JsonPacket value | packetType first==Just "inspect" -> do
+            request <- decodeValue (withObject "editor inspection" (\o -> o .: "request")) value
+            snapshot <- desktop <$> readMVar state
+            writePacket connection (JsonPacket (fromMaybe Null (editorResponse snapshot request)))
+          _ -> do
+            Hello requested client clientAck _ _ <- parseHelloPacket first
+            unless (requested==session) (failure "Wrong remote session")
+            available <- tryTakeMVar writer
+            case available of
+              Nothing -> writePacket connection (json "error" ["message" .= ("Remote editor already has a writer"::T.Text)])
+              Just () -> finally (attachment connection client clientAck) (do
+                -- Wait behind accepted commands before another writer can attach.
+                barrier <- newEmptyTMVarIO
+                atomically (writeTBQueue commands (0,0,Blur,barrier))
+                void (atomically (takeTMVar barrier))
+                putMVar writer ())
       attachment connection client clientAck = do
         (ack,attachmentEpoch,replay) <- modifyMVar state $ \s -> do
           let switched=owner s/=Just client
@@ -255,7 +279,10 @@ runRemoteDaemon session scale effects tick initial = do
               else pure (False,d,replies++[json "download" ["name" .= name],BinaryPacket bytes])
         SetScreenMode mode -> pure (False,(resizeScreenMode (modeSize mode) d) {videoMode=Just mode},replies)
         _ -> do (exited,updated) <- effects d [request]; pure (exited,updated,replies)
-  withEndpointListener path $ \socket authenticate -> do
+  args <- getArgs
+  record <- newSessionRecord Nothing (withoutDaemon args)
+  withEndpointListener path $ \socket authenticate -> flip finally (forgetSession session) $ do
+    rememberSession record {sessionId=session}
     let acceptLoop = forever $ do
           (sock,_) <- N.accept socket
           connection <- N.socketToHandle sock ReadWriteMode
@@ -265,6 +292,12 @@ runRemoteDaemon session scale effects tick initial = do
             (quietClose connection)))
     withAsync commandLoop $ \inputs -> withAsync tickLoop $ \ticks -> withAsync acceptLoop $ \accepts ->
       race_ (takeMVar done) (race_ (wait inputs) (race_ (wait ticks) (wait accepts)))
+
+  where
+    withoutDaemon args@("--":_)=args
+    withoutDaemon ("--remote-daemon":_:rest)=withoutDaemon rest
+    withoutDaemon (arg:rest)=arg:withoutDaemon rest
+    withoutDaemon []=[]
 
 packetSize :: WirePacket -> Int
 packetSize (BinaryPacket bytes)=BS.length bytes
@@ -286,14 +319,33 @@ data Journal = Journal
 
 withSSHPeer :: String -> [String] -> (RemotePeer -> IO ()) -> IO ()
 withSSHPeer host args action = do
-  unless ((case host of [] -> False; '-':_ -> False; _ -> True) && all (\c -> c>' ' && not (isSpace c)) host && all (all (/='\0')) args) (failure "Invalid SSH host or argument")
   let (sessionOptions,remoteArgs)=extractSession args
   session <- case sessionOptions of
     [] -> randomIdentity
     [value] | validIdentity value -> pure value
     _ -> failure "Specify one --remote-session followed by a 48-character session ID"
-  client <- randomIdentity
   hPutStrLn stderr ("Remote session: "++session++" (resume with --remote-session "++session++")")
+  withSSHSession host session (not (null sessionOptions)) remoteArgs action
+  where
+    extractSession []=([],[])
+    extractSession allArgs@("--":_)=([],allArgs)
+    extractSession ("--remote-session":value:rest)=let (ids,remaining)=extractSession rest in (value:ids,remaining)
+    extractSession (value:rest)=let (ids,remaining)=extractSession rest in (ids,value:remaining)
+
+withSSHSession :: String -> String -> Bool -> [String] -> (RemotePeer -> IO ()) -> IO ()
+withSSHSession host = withSessionPeer (Just host)
+
+withLocalPeer :: String -> Bool -> [String] -> (RemotePeer -> IO ()) -> IO ()
+withLocalPeer = withSessionPeer Nothing
+
+withSessionPeer :: Maybe String -> String -> Bool -> [String] -> (RemotePeer -> IO ()) -> IO ()
+withSessionPeer host session resume remoteArgs action = do
+  unless (validIdentity session && all (all (/='\0')) remoteArgs) (failure "Invalid session identity or argument")
+  forM_ host $ \name -> unless ((case name of [] -> False; '-':_ -> False; _ -> True) && all (\c -> c>' ' && not (isSpace c)) name) (failure "Invalid SSH host")
+  record <- loadSession session >>= maybe (do
+    fresh <- newSessionRecord host remoteArgs
+    pure fresh {sessionId=session}) pure
+  client <- randomIdentity
   journal <- newTVarIO (Journal 1 0 [] M.empty Nothing Nothing Nothing)
   incoming <- newTBQueueIO 8
   let emit packet=atomically (writeTBQueue incoming (Right (Just packet)))
@@ -334,7 +386,7 @@ withSSHPeer host args action = do
       peer=RemotePeer send sendBatch receive
       hello = do
         j <- readTVarIO journal
-        pure (json "hello" ["version" .= protocolVersion,"session" .= session,"client" .= client,"ack" .= lastAck j,"args" .= remoteArgs,"resume" .= (serverEpoch j/=Nothing || not (null sessionOptions))])
+        pure (json "hello" ["version" .= protocolVersion,"session" .= session,"client" .= client,"ack" .= lastAck j,"args" .= remoteArgs,"resume" .= (serverEpoch j/=Nothing || resume)])
       retire serial dirtyState = do
         forwarded <- atomically $ do
           j <- readTVar journal
@@ -345,19 +397,28 @@ withSSHPeer host args action = do
         mapM_ (\value -> emit (json "ack" (["seq" .= value]++maybe [] (\dirty -> ["dirty" .= (dirty::Bool)]) dirtyState))) forwarded
       fatal message=atomically (modifyTVar' journal (\j -> j {terminalError=Just message})) >> failure message
       connect handshook = do
-        -- Dynamic paths travel in the framed hello, never through a login shell.
-        let command="thc-edit --remote"
-            sshArgs=["-T","-a","-x","-oForwardAgent=no","-oClearAllForwardings=yes","-oRequestTTY=no","-oServerAliveInterval=15","-oServerAliveCountMax=3","-oConnectTimeout=10","--",host,command]
-        bracket (createProcess (proc "ssh" sshArgs) {std_in=CreatePipe,std_out=CreatePipe,std_err=Inherit,close_fds=True}) cleanup $ \(inputPipe,outputPipe,_,process) -> do
-          input <- maybe (failure "SSH did not create its input pipe") pure inputPipe
-          output <- maybe (failure "SSH did not create its output pipe") pure outputPipe
+        greeting <- hello
+        let open = case host of
+              Nothing -> do
+                parsed <- case greeting of JsonPacket value -> decodeValue helloParser value; _ -> failure "Invalid local hello"
+                connection <- openSession remoteArgs parsed `catch` \(err::IOException) -> fatal (show err)
+                pure (Just connection,Just connection,Nothing,Nothing)
+              Just name -> do
+                -- Dynamic paths travel in the framed hello, never through a login shell.
+                let command="thc-edit --remote"
+                    sshArgs=["-T","-a","-x","-oForwardAgent=no","-oClearAllForwardings=yes","-oRequestTTY=no","-oServerAliveInterval=15","-oServerAliveCountMax=3","-oConnectTimeout=10","--",name,command]
+                (input,output,errors,process) <- createProcess (proc "ssh" sshArgs) {std_in=CreatePipe,std_out=CreatePipe,std_err=Inherit,close_fds=True}
+                pure (input,output,errors,Just process)
+        bracket open cleanup $ \(inputPipe,outputPipe,_,process) -> do
+          input <- maybe (failure "Transport did not create its input pipe") pure inputPipe
+          output <- maybe (failure "Transport did not create its output pipe") pure outputPipe
           hSetBinaryMode input True; hSetBinaryMode output True; hSetBuffering input NoBuffering
-          responseResult <- try (hello >>= writePacket input >> timeout 20000000 (readPacket output))
+          responseResult <- try (writePacket input greeting >> timeout 20000000 (readPacket output))
           let response=either (const Nothing) id (responseResult :: Either IOException (Maybe (Maybe WirePacket)))
           value <- case response of
             Just (Just (JsonPacket v)) -> pure v
             _ -> do
-              exited <- timeout 1000000 (waitForProcess process)
+              exited <- maybe (pure Nothing) (timeout 1000000 . waitForProcess) process
               j <- readTVarIO journal
               case exited of
                 Just (ExitFailure 127) -> fatal "thc-edit is not installed or not on PATH on the remote host"
@@ -395,6 +456,7 @@ withSSHPeer host args action = do
                 else emit packet >> receiveReplay (n-1)
           receiveReplay replayCount
           retire ack Nothing
+          rememberSession record {sessionHost=host}
           writeIORef handshook True
           status True "Connected"
           let sender sent = do
@@ -425,6 +487,7 @@ withSSHPeer host args action = do
                         writeTBQueue incoming (Right (Just packet))
                         writeTBQueue incoming (Right (Just binary))
                       _ -> failure "SSH disconnected during download; request the download again after reconnecting"
+                  Just "closed" -> forgetSession session >> emit packet
                   Just "error" -> case packet of
                     JsonPacket v -> decodeValue (withObject "error" (\o -> o .: "message")) v >>= fatal
                     _ -> failure "Remote protocol error"
@@ -450,17 +513,25 @@ withSSHPeer host args action = do
       worker = reconnect (0::Int) `catch` \(err::IOException) -> do
         atomically $ modifyTVar' journal (\j -> j {terminalError=Just (show err)})
         atomically (writeTBQueue incoming (Left (show err)))
-  withAsync worker $ \_ -> action peer
+      drain = do
+        void $ timeout 2000000 $ atomically $ do
+          j <- readTVar journal
+          check (null (pending j) || terminalError j/=Nothing)
+        remaining <- pending <$> readTVarIO journal
+        unless (null remaining) $ hPutStrLn stderr
+          ("Detached with "++show (length remaining)++" unacknowledged input events; their application could not be confirmed.")
+  withAsync worker $ \_ -> action peer `finally` drain
   where
-    extractSession []=([],[])
-    extractSession allArgs@("--":_)=([],allArgs)
-    extractSession ("--remote-session":value:rest)=let (ids,remaining)=extractSession rest in (value:ids,remaining)
-    extractSession (value:rest)=let (ids,remaining)=extractSession rest in (ids,value:remaining)
     cleanup (input,output,_,process) = do
       mapM_ quietClose input; mapM_ quietClose output
-      terminateProcess process `catch` \(_::IOException) -> pure ()
-      void (waitForProcess process)
+      forM_ process $ \child -> do
+        terminateProcess child `catch` \(_::IOException) -> pure ()
+        void (waitForProcess child)
 #else
+withLocalPeer :: String -> Bool -> [String] -> (RemotePeer -> IO ()) -> IO ()
+withLocalPeer _ _ _ _ = ioError (userError "Persistent sessions are not built")
+withSSHSession :: String -> String -> Bool -> [String] -> (RemotePeer -> IO ()) -> IO ()
+withSSHSession _ _ _ _ _ = ioError (userError "Persistent sessions are not built")
 withSSHPeer :: String -> [String] -> (RemotePeer -> IO ()) -> IO ()
 withSSHPeer _ _ _ = ioError (userError "Remote support is not built. Rebuild with cabal build -fremote")
 runRemoteRelay :: [String] -> IO ()

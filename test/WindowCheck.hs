@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module WindowCheck (checks) where
 import Control.Monad (unless)
+import Data.Maybe (fromMaybe)
 import THC.Edit.Frontend
 import THC.Edit.Model
 import THC.Edit.Buffer (newBuffer)
@@ -149,6 +150,103 @@ checks = do
   check "title dragging preserves size when there is room" (rect floatingMove==Just (Rect 10 6 30 10))
   check "title dragging shrinks within dock boundaries" (rect dockMove==Just (Rect 33 6 47 10))
   check "keyboard movement uses the same edge shrink behavior" (rect keyboardMove==Just (Rect 1 1 79 23))
+  let arranged rs=let base=addDocument Nothing (newBuffer "geometry") (initialDesktop (100,40))
+                      original=fromMaybe (error "missing geometry window") (activeWindow base)
+                  in base {windows=zipWith (\i r -> original {windowId=i,windowNumber=i,bounds=r}) [1..] rs}
+      rectangles=map bounds . windows
+      corner dx dy state=let r=bounds (fromMaybe (error "missing geometry window") (activeWindow state)); x=left r+width r-2; y=top r+height r-1
+                         in mouse (x+dx) (y+dy) (mouse x y state)
+      release=fst . handleEvent (V.EvMouseUp 0 0 (Just V.BLeft))
+      largeAndSmall=arranged [Rect 0 1 40 30,Rect 40 5 20 10]
+      carried=corner 10 0 largeAndSmall
+      atRight=corner 40 0 largeAndSmall
+      pulledBack=corner (-30) 0 (release atRight)
+      equalSides=arranged [Rect 0 1 40 30,Rect 40 1 60 30]
+      rows=arranged [Rect 0 1 80 15,Rect 20 16 30 8]
+      rowAtBottom=corner 0 15 rows
+      rowPulled=corner 0 (-10) (release rowAtBottom)
+  check "edge resize carries a fully touching shorter neighbor"
+    (rectangles carried==[Rect 0 1 50 30,Rect 50 5 20 10] && buffers carried==buffers largeAndSmall)
+  check "carried window sticks after reaching the right desktop edge"
+    (rectangles atRight==[Rect 0 1 80 30,Rect 80 5 20 10] &&
+     rectangles pulledBack==[Rect 0 1 50 30,Rect 50 5 50 10])
+  check "equal touching sides move only their shared divider"
+    (rectangles (corner 10 0 equalSides)==[Rect 0 1 50 30,Rect 50 1 50 30])
+  check "horizontal contacts carry smaller windows and stick at the bottom"
+    (rectangles (corner 0 5 rows)==[Rect 0 1 80 20,Rect 20 21 30 8] &&
+     rectangles rowAtBottom==[Rect 0 1 80 30,Rect 20 31 30 8] &&
+     rectangles rowPulled==[Rect 0 1 80 20,Rect 20 21 30 18])
+  check "diagonal corner resize breaks contact instead of carrying neighbors"
+    (rectangles (corner 10 (-3) largeAndSmall)==[Rect 0 1 50 27,Rect 40 5 20 10])
+  check "partial side overlap does not attach a window"
+    (rectangles (corner 10 0 (arranged [Rect 0 1 40 20,Rect 40 15 20 10]))==
+     [Rect 0 1 50 20,Rect 40 15 20 10])
+  check "edge propagation continues through a chain of smaller neighbors"
+    (rectangles (corner 5 0 (arranged [Rect 0 1 30 30,Rect 30 5 25 20,Rect 55 8 20 10]))==
+     [Rect 0 1 35 30,Rect 35 5 25 20,Rect 60 8 20 10])
+  check "shared divider stops before either window crosses minimum size"
+    (rectangles (corner 80 0 equalSides)==[Rect 0 1 84 30,Rect 84 1 16 30] &&
+     rectangles (corner (-80) 0 equalSides)==[Rect 0 1 16 30,Rect 16 1 84 30])
+  check "Escape restores all geometry affected by a sticky drag"
+    (rectangles (fst (handleEvent (V.EvKey V.KEsc []) carried))==rectangles largeAndSmall)
+  let leftSource=arranged [Rect 60 1 40 30,Rect 40 5 20 10]
+      leftGrab=mouse 60 10 leftSource
+      leftPull=mouse 50 10 leftGrab
+      bottomGrab=mouse 6 15 rows
+      bottomPull=mouse 6 20 bottomGrab
+  check "plain left frame supports sticky edge dragging"
+    (rectangles leftPull==[Rect 50 1 50 30,Rect 30 5 20 10])
+  let topSource=arranged [Rect 0 20 80 19,Rect 20 10 30 10]
+      topGrab=mouse 0 20 topSource
+      topPull=mouse 0 15 topGrab
+      atTop=mouse 0 6 topGrab
+      fromTop=mouse 0 15 atTop
+      atLeft=mouse 16 10 leftGrab
+      fromLeft=mouse 40 10 atLeft
+  check "plain top corner resizes the top edge and carries an upper neighbor"
+    (rectangles topPull==[Rect 0 15 80 24,Rect 20 5 30 10])
+  check "carried windows stick at the top and left desktop bounds"
+    (rectangles atTop==[Rect 0 6 80 33,Rect 20 1 30 5] &&
+     rectangles fromTop==[Rect 0 15 80 24,Rect 20 1 30 14] &&
+     rectangles atLeft==[Rect 16 1 84 30,Rect 0 5 16 10] &&
+     rectangles fromLeft==[Rect 40 1 60 30,Rect 0 5 40 10])
+  check "a single large drag clips the carried far edge before shrinking"
+    (rectangles (corner 50 0 largeAndSmall)==[Rect 0 1 84 30,Rect 84 5 16 10])
+  check "plain bottom frame supports sticky edge dragging"
+    (rectangles bottomPull==[Rect 0 1 80 20,Rect 20 21 30 8])
+  check "Shift arrows resize with the same sticky edge rule"
+    (rectangles (fst (handleEvent (V.EvKey V.KRight [V.MShift]) (mouse 38 30 largeAndSmall)))==
+     [Rect 0 1 41 30,Rect 41 5 20 10])
+  let withFiles rs=(arranged rs) {sideTree=Just (Sidebar "/tmp" [] 0 0 24 False)}
+      withMessages rs=(arranged rs) {problemsVisible=True,problemsPreferredHeight=8}
+      equalFiles=withFiles [Rect 23 1 30 38]
+      fileChain=withFiles [Rect 23 5 25 20,Rect 48 8 20 10]
+      detachedFile=withFiles [Rect 50 5 25 10]
+      equalMessages=withMessages [Rect 0 21 100 10]
+      messageChain=withMessages [Rect 20 21 60 10,Rect 30 13 30 8]
+      detachedMessage=withMessages [Rect 20 3 30 8]
+  check "equal-height Files neighbor keeps its opposite edge stationary"
+    (rectangles (resizeTree 30 equalFiles)==[Rect 30 1 23 38] &&
+     rectangles (resizeTree 19 equalFiles)==[Rect 19 1 34 38])
+  check "Files edge carries shorter contacts through a window chain"
+    (rectangles (resizeTree 30 fileChain)==[Rect 30 5 25 20,Rect 55 8 20 10])
+  check "Files drag leaves detached windows alone until the dock reaches them"
+    (rectangles (resizeTree 30 detachedFile)==[Rect 50 5 25 10] &&
+     rectangles (resizeTree 60 detachedFile)==[Rect 60 5 25 10])
+  check "Files divider respects the minimum size of a chained neighbor"
+    (treeWidthOf (resizeTree 79 fileChain)==59 &&
+     rectangles (resizeTree 79 fileChain)==[Rect 59 5 25 20,Rect 84 8 16 10])
+  check "equal-width Messages neighbor keeps its top stationary"
+    (rectangles (resizeProblems 26 equalMessages)==[Rect 0 21 100 5] &&
+     rectangles (resizeProblems 36 equalMessages)==[Rect 0 21 100 15])
+  check "Messages edge carries shorter contacts through a window chain"
+    (rectangles (resizeProblems 26 messageChain)==[Rect 20 16 60 10,Rect 30 8 30 8])
+  check "Messages drag leaves detached windows alone and fits new overlap"
+    (rectangles (resizeProblems 26 detachedMessage)==[Rect 20 3 30 8] &&
+     rectangles (resizeProblems 23 (withMessages [Rect 20 21 30 5]))==[Rect 20 18 30 5])
+  check "Messages divider respects the minimum size of a chained neighbor"
+    (top (problemsRect (resizeProblems 7 messageChain))==16 &&
+     rectangles (resizeProblems 7 messageChain)==[Rect 20 6 60 10,Rect 30 1 30 5])
   putStrLn "window input checks passed"
 
   let named=addDocument (Just (FileState "/project/src/Main.hs" Nothing)) (newBuffer "") desktop

@@ -27,6 +27,7 @@ import qualified THC.Edit.Consoles as C
 import System.IO (openBinaryTempFile, hClose)
 import Text.Read (readMaybe)
 import qualified THC.Edit.ACP as A
+import THC.Edit.EditorMCP (editorServers)
 import THC.Edit.AgentFiles
 import THC.Edit.Buffer
 import THC.Edit.Markdown (renderMarkdown)
@@ -162,10 +163,6 @@ perform runtime@(ConversationState directory ref consoles) action values d = do
           pure d {status="Updating conversation settings...",agentReplying=True}
       | otherwise -> pure d {status="This conversation setting is unavailable."}
     ("copy",_) -> pure d {clipboard=rawTranscript (transcript s),status="Raw conversation copied."}
-    ("prompt",_) | busy s -> pure d {status="A reply is in progress; cancel it before sending another prompt."}
-    ("prompt",_) -> pure d {dialog=Just (Dialog "Prompt" (AgentDialog "send")
-      [input "Message" "",CheckBox "Include selection" True,CheckBox "Include current file" False,CheckBox "Include diagnostics" False] 0 ["Send","Cancel"]
-      ["Context includes the editor's unsaved contents."])}
     ("send-draft",_) | busy s, let text=contents (composerBuffer d), not (T.null (T.strip text)) -> do
       let next=s {queuedQueries=queuedQueries s++[text],transcript=transcript s++[Reply "You" text]}
       writeIORef ref next
@@ -300,7 +297,8 @@ receive runtime@(ConversationState directory ref consoles) d event = do
                   method=case resume of Nothing -> "session/new"; Just _ | loadSupported -> "session/load"; _ -> "session/resume"
               if resume/=Nothing && not loadSupported && not resumeSupported then pure d {status="This provider cannot resume sessions."}
               else do
-                requestId<-A.request client method (object (["cwd" .= project s,"mcpServers" .= ([]::[Value])]++maybe [] (\sid->["sessionId" .= sid]) resume))
+                servers<-editorServers
+                requestId<-A.request client method (object (["cwd" .= project s,"mcpServers" .= servers]++maybe [] (\sid->["sessionId" .= sid]) resume))
                 modifyIORef' ref (\state -> state {pending=M.insert requestId (Starting resume) (pending state),session=resume})
                 pure d {status="Opening agent session...",agentSteering=(field "_meta" value >>= field "steering" >>= field "supported")==Just True}
         (Just (Starting resumed),Right value,_) -> case field "sessionId" value <|> resumed of

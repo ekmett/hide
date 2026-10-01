@@ -52,7 +52,7 @@ data Command = New | Open | Download | ChangeDir | Save | SaveAs | Close | Quit 
   | ToggleTree | GitDiff | GitCommit | GitFetch | GitPull | GitMerge | ReviewDisk
   | RunTarget | RunOptions | OpenTerminal | StopTerminal
   | AgentChoose Text | AgentSet Text Text
-  | AgentOptions | Conversation | AgentPrompt | AgentCancel | AgentResume | AgentCopyRaw | AgentNew
+  | AgentOptions | Conversation | AgentCancel | AgentResume | AgentCopyRaw | AgentNew
   | ToggleHex | GoToMessage | CopyAllMessages
   | DebugCommand Text
   | Disabled Text deriving (Eq,Show)
@@ -78,7 +78,7 @@ data Diagnostic = Diagnostic
   , diagnosticColumn :: Int, diagnosticSeverity :: Int, diagnosticMessage :: Text
   } deriving (Eq,Show)
 data Sidebar = Sidebar { treeRoot :: FilePath, treeRows :: [TreeRow], treeSelected :: Int, treeScroll :: Int, treeWidth :: Int, treeFocused :: Bool } deriving (Eq,Show)
-data Drag = DockSizing | MessagesSizing | TreeScrolling | Moving Int Int Int | Resizing Int Int Int | Selecting Int | Scrolling Int Bool deriving (Eq,Show)
+data Drag = DockSizing | MessagesSizing | TreeScrolling | Moving Int Int Int | Resizing Int Int Int | EdgeSizing Int Bool Bool Int | Selecting Int | Scrolling Int Bool deriving (Eq,Show)
 data AgentSetting = AgentSetting { settingId :: Text, settingName :: Text, settingCategory :: Text, settingCurrent :: Text, settingChoices :: [(Text,Text)] } deriving (Eq,Show)
 data Appearance = LightMode | DarkMode | SystemMode deriving (Eq,Show,Enum,Bounded)
 
@@ -93,7 +93,7 @@ data Desktop = Desktop
   , hoverTarget :: Maybe (Int,Int,Int), typeHint :: Text
   , buttonHover :: Maybe Int, buttonPressed :: Maybe Int, contextMenu :: Maybe (Rect,Int)
   , diagnostics :: [Diagnostic], problemsVisible :: Bool, problemsSelected :: Int, problemsScroll :: Int, problemsFocused :: Bool
-  , dragOriginal :: Maybe (Int,Rect,Maybe Rect)
+  , dragOriginal :: Maybe [(Int,Rect,Maybe Rect)]
   , branchAdded :: Int, branchDeleted :: Int, branchRoot :: Maybe FilePath, contextKind :: ContextKind
   , messagesNumber :: Maybe Int
   , composerBuffer :: Buffer, composerSelection :: Selection, composerFocused :: Bool, agentSteering :: Bool, agentReplying :: Bool, agentQueued :: Int
@@ -114,7 +114,7 @@ menus =
       mi "Trace into" "F7" (DebugCommand "stepIn"),mi "Step over" "F8" (DebugCommand "next"),mi "Step out" "Ctrl+F7" (DebugCommand "stepOut"),
       mi "Threads..." "" (DebugCommand "threads"),mi "Call stack..." "" (DebugCommand "stack"),mi "Scopes..." "" (DebugCommand "scopes"),
       mi "Exceptions..." "" (DebugCommand "exceptions"),mi "Output" "" (DebugCommand "output"),mi "Disconnect" "" (DebugCommand "disconnect")])
-  ,("Tools",'t',[mi "File tree" "Ctrl+B" ToggleTree,mi "Git diff..." "" GitDiff,mi "Approve changes..." "" GitCommit,mi "Inspect type" "Shift+F1" InspectType,mi "Messages" "" Problems,mi "Go to next" "Alt+F8" NextMessage,mi "Go to previous" "Alt+F7" PreviousMessage,mi "Restart language server" "" RestartHLS,mi "Conversation" "" Conversation,mi "Conversation model..." "" (AgentChoose ""),mi "Prompt..." "" AgentPrompt,mi "Cancel reply" "" AgentCancel,mi "Resume session..." "" AgentResume,mi "New session" "" AgentNew,mi "Copy raw conversation" "" AgentCopyRaw,mi "Widget gallery..." "" Gallery,off "Project browser..." "" "Cabal component browsing is a later milestone."])
+  ,("Tools",'t',[mi "File tree" "Ctrl+B" ToggleTree,mi "Git diff..." "" GitDiff,mi "Approve changes..." "" GitCommit,mi "Inspect type" "Shift+F1" InspectType,mi "Messages" "" Problems,mi "Go to next" "Alt+F8" NextMessage,mi "Go to previous" "Alt+F7" PreviousMessage,mi "Restart language server" "" RestartHLS,mi "Conversation" "" Conversation,mi "Conversation model..." "" (AgentChoose ""),mi "Cancel reply" "" AgentCancel,mi "Resume session..." "" AgentResume,mi "New session" "" AgentNew,mi "Copy raw conversation" "" AgentCopyRaw,mi "Widget gallery..." "" Gallery,off "Project browser..." "" "Cabal component browsing is a later milestone."])
   ,("Options",'o',[mi "Preferences..." "" EditorOptions,mi "Agents..." "" AgentOptions])
   ,("Window",'w',[mi "Tile" "" Tile,mi "Cascade" "" Cascade,mi "Split vertically" "" SplitVertical,mi "Split horizontally" "" SplitHorizontal,mi "Zoom" "F5" Zoom,mi "Next" "F6" NextWindow,mi "Close" "Alt+F3" Close])
   ,("Help",'h',[mi "Contents" "F1" Help,mi "About Turbo Haskell..." "" About])]
@@ -159,7 +159,6 @@ commandDescription cmd = case cmd of
   AgentSet _ _ -> "Apply this choice to the conversation."
   AgentOptions -> "Configure agents and their executable commands."
   Conversation -> "Show the agent conversation."
-  AgentPrompt -> "Send a prompt to the selected agent."
   AgentCancel -> "Cancel the active agent reply."
   AgentResume -> "Resume an agent session."
   AgentNew -> "Start a new agent session."
@@ -421,7 +420,6 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
     go StopTerminal d = (d,[AgentAction "terminal-stop" []])
     go AgentOptions d = (d,[AgentAction "options" []])
     go Conversation d = (d,[AgentAction "show" []])
-    go AgentPrompt d = (d,[AgentAction "prompt" []])
     go AgentCancel d = (d,[AgentAction "cancel" []])
     go AgentResume d = (d,[AgentAction "resume" []])
     go AgentNew d = (d,[AgentAction "new" []])
@@ -942,7 +940,10 @@ mouseEvent x y V.BLeft _ d | Just capture <- drag d = (case capture of
     Just tree -> scrollTreeTo ((y-3)*treeScrollLimit d tree `div` max 1 (treeContentRows d-3)) tree d
     Nothing -> d
   Moving i dx dy -> mapWindow i (\w -> w {bounds = fitMovingWindow d (bounds w) {left=x-dx,top=y-dy},restoredBounds=Nothing}) d
-  Resizing i dx dy -> mapWindow i (\w -> w {bounds = fitWindow d (bounds w) {width=x-left (bounds w)+dx,height=y-top (bounds w)+dy},restoredBounds=Nothing}) d
+  Resizing i dx dy -> case find ((==i).windowId) (windows d) of
+    Just w -> resizeWindowBounds i (bounds w) {width=x-left (bounds w)+dx,height=y-top (bounds w)+dy} d
+    Nothing -> d
+  EdgeSizing i vertical leading offset -> resizeWindowEdge i vertical leading ((if vertical then y else x)+offset) d
   Scrolling i vertical -> scrollTrack vertical x y (focusWindow i d)
   Selecting i -> selectAt True x y (focusWindow i d),[])
 mouseEvent x 0 V.BLeft _ d = (d {menu = (\i -> (i,0)) <$> menuAt x},[])
@@ -962,11 +963,14 @@ mouseEvent x y button mods d = case find (\w -> inside (bounds w) x y) (windows 
       | y==t && x>=l+2 && x<=l+4 -> runCommand Close focused
       | y==t && x>=l+ww-6 && x<l+ww-3 -> runCommand Zoom focused
       | y==t, activeConversation focused, not (null (agentSettings focused)), inside (agentTitleRect focused w) x y -> runCommand (AgentChoose "") focused
-      | y==t -> (focused {drag=Just (Moving (windowId w) (x-l) (y-t)),dragOriginal=Just (windowId w,bounds w,restoredBounds w)},[])
-      | x>=l+ww-2 && y==t+hh-1 -> (focused {drag=Just (Resizing (windowId w) (l+ww-x) (t+hh-y)),dragOriginal=Just (windowId w,bounds w,restoredBounds w)},[])
+      | y==t && (x==l || x==l+ww-1) -> (beginWindowDrag (EdgeSizing (windowId w) True True 0) focused,[])
+      | y==t -> (beginWindowDrag (Moving (windowId w) (x-l) (y-t)) focused,[])
+      | x>=l+ww-2 && y==t+hh-1 -> (beginWindowDrag (Resizing (windowId w) (l+ww-x) (t+hh-y)) focused,[])
       | Just doc<-activeDocument focused, inside (scrollbarRect focused True doc w) x y -> (scrollClick True x y focused,[])
       | Just doc<-activeDocument focused, inside (scrollbarRect focused False doc w) x y -> (scrollClick False x y focused,[])
-      | y==t+hh-1 -> (focused,[])
+      | x==l -> (beginWindowDrag (EdgeSizing (windowId w) False True 0) focused,[])
+      | x==l+ww-1 -> (beginWindowDrag (EdgeSizing (windowId w) False False 1) focused,[])
+      | y==t+hh-1 -> (beginWindowDrag (EdgeSizing (windowId w) True False 1) focused,[])
       | activeConversation focused, inside (composerRect focused w) x y -> (composerClick x y mods w focused,[])
       | activeConversation focused, y>=top (composerRect focused w) -> (focused,[])
       | otherwise -> (selectAt (V.MShift `elem` mods) x y focused {drag=Just (Selecting (windowId w)),composerFocused=if activeConversation focused then True else composerFocused focused},[])
@@ -975,17 +979,93 @@ mouseEvent x y button mods d = case find (\w -> inside (bounds w) x y) (windows 
 mapWindow :: Int -> (Window -> Window) -> Desktop -> Desktop
 mapWindow i f d = d {windows = map (\w -> if windowId w==i then f w else w) (windows d)}
 
+beginWindowDrag :: Drag -> Desktop -> Desktop
+beginWindowDrag capture d = d {drag=Just capture,
+  dragOriginal=Just [(windowId w,bounds w,restoredBounds w) | w<-windows d]}
+
 dragKey :: V.Key -> [V.Modifier] -> Desktop -> (Desktop,[Effect])
 dragKey key mods d = case dragOriginal d of
-  Nothing -> (d,[])
-  Just (wid,original,restored) -> case key of
-    V.KEsc -> (mapWindow wid (\w -> w {bounds=original,restoredBounds=restored}) done,[])
+  Just originals@((wid,_,_):_) -> case key of
+    V.KEsc -> (done {windows=map restore (windows d)},[])
+      where restore w=case find (\(i,_,_)->i==windowId w) originals of
+              Just (_,r,savedBounds) -> w {bounds=r,restoredBounds=savedBounds}
+              Nothing -> w
     V.KEnter -> (done,[])
-    _ | Just (dx,dy)<-lookup key [(V.KLeft,(-1,0)),(V.KRight,(1,0)),(V.KUp,(0,-1)),(V.KDown,(0,1))] ->
-      (mapWindow wid (\w -> let { r=bounds w; changed=if V.MShift `elem` mods then r {width=width r+dx,height=height r+dy} else r {left=left r+dx,top=top r+dy} }
-                           in w {bounds=(if V.MShift `elem` mods then fitWindow else fitMovingWindow) d changed,restoredBounds=Nothing}) d,[])
+    _ | Just (dx,dy)<-lookup key [(V.KLeft,(-1,0)),(V.KRight,(1,0)),(V.KUp,(0,-1)),(V.KDown,(0,1))],
+        Just w<-find ((==wid).windowId) (windows d) ->
+      let r=bounds w in
+      (if V.MShift `elem` mods
+        then resizeWindowBounds wid r {width=width r+dx,height=height r+dy} d
+        else mapWindow wid (\v -> v {bounds=fitMovingWindow d r {left=left r+dx,top=top r+dy},restoredBounds=Nothing}) d,[])
       | otherwise -> (d,[])
+  _ -> (d,[])
   where done=d {drag=Nothing,dragOriginal=Nothing}
+
+-- A diagonal corner gesture deliberately breaks contacts. A single moving edge
+-- uses the same rule whether it came from a frame, corner or Shift-arrow drag.
+resizeWindowBounds :: Int -> Rect -> Desktop -> Desktop
+resizeWindowBounds wid requested d = case find ((==wid).windowId) (windows d) of
+  Just w | top old==top requested && height old==height requested ->
+             resizeWindowEdge wid False False (left requested+width requested) d
+         | left old==left requested && width old==width requested ->
+             resizeWindowEdge wid True False (top requested+height requested) d
+         | otherwise -> mapWindow wid (\v -> v {bounds=fitWindow d requested,restoredBounds=Nothing}) d
+    where old=bounds w
+  Nothing -> d
+
+axisBounds :: Bool -> Rect -> (Int,Int)
+axisBounds vertical r = if vertical then (top r,top r+height r) else (left r,left r+width r)
+
+resizeWindowEdge :: Int -> Bool -> Bool -> Int -> Desktop -> Desktop
+resizeWindowEdge wid vertical leading position d = case find ((==wid).windowId) (windows d) of
+  Nothing -> d
+  Just source -> let (_,moved)=resizeEdge vertical leading position area (wid,bounds source) (windows d)
+                 in d {windows=moved}
+  where area=if vertical then (1,top (problemsRect d)) else (treeWidthOf d,fst (screenSize d))
+
+-- Docks seed the same contact walk with a rectangle outside the window list.
+-- The returned edge can stop short of the pointer to preserve every minimum size.
+resizeEdge :: Bool -> Bool -> Int -> (Int,Int) -> (Int,Rect) -> [Window] -> (Int,[Window])
+resizeEdge vertical leading position (desktopLow,desktopHigh) source views = (oldEdge+delta,map apply views)
+  where
+    (sourceLow,sourceHigh)=axisBounds vertical (snd source)
+    oldEdge=if leading then sourceLow else sourceHigh
+    requested=position-oldEdge
+    minimumSize=min (if vertical then 5 else 16) (desktopHigh-desktopLow)
+    seed=(source,leading,not leading)
+    planned=propagate [seed] [seed]
+    -- ponytail: list scans are cubic in window count; index touching edges only
+    -- if desktops with hundreds of windows make this visible during dragging.
+    propagate seen []=seen
+    propagate seen ((moving,lowMoves,highMoves):pending)=propagate (seen++neighbors) (pending++neighbors)
+      where
+        r=snd moving
+        (lo,hi)=axisBounds vertical r
+        (start,end)=axisBounds (not vertical) r
+        neighbors=[((windowId w,other),moveLow,moveHigh) | w<-views,
+          not (any (\((ident,_),_,_)->ident==windowId w) seen),
+          let other=bounds w
+              (a,b)=axisBounds vertical other
+              (s,e)=axisBounds (not vertical) other
+              equal=start==s && end==e,
+          start<=s && e<=end,
+          (moveLow,moveHigh)<-if lowMoves && b==lo then [(not equal && a>desktopLow,True)]
+            else if highMoves && a==hi then [(True,not equal && b<desktopHigh)] else []]
+    limits ((_,r),moveLow,moveHigh)
+      | moveLow && moveHigh = (desktopLow+minimumSize-hi,desktopHigh-minimumSize-lo)
+      | moveLow = (desktopLow-lo,hi-lo-minimumSize)
+      | otherwise = (minimumSize-(hi-lo),desktopHigh-hi)
+      where (lo,hi)=axisBounds vertical r
+    allowed=[limits entry | entry@((ident,_),_,_)<-planned,any ((==ident).windowId) views]
+    delta=foldl (\n (a,b)->max a (min b n)) requested allowed
+    apply w=case find (\((ident,_),_,_)->ident==windowId w) planned of
+      Nothing -> w
+      Just (_,moveLow,moveHigh) ->
+        let r=bounds w
+            (lo,hi)=axisBounds vertical r
+            a=if moveLow then max desktopLow (lo+delta) else lo
+            b=if moveHigh then min desktopHigh (hi+delta) else hi
+        in w {bounds=if vertical then r {top=a,height=b-a} else r {left=a,width=b-a},restoredBounds=Nothing}
 
 windowPositionText :: Desktop -> Document -> Window -> Text
 windowPositionText d doc _ | documentLabel doc==Just "Conversation" = " "<>case agentContextUsage d of
@@ -1334,8 +1414,14 @@ setProblemsVisible visible d = layoutProblems d next
           messagesNumber=if visible then Just (fromMaybe (nextWindowNumber d) (messagesNumber d)) else Nothing}
 
 resizeProblems :: Int -> Desktop -> Desktop
-resizeProblems y d = layoutProblems d d {problemsPreferredHeight=max 3 (min (sh-7) (sh-y-1)),drag=Just MessagesSizing}
-  where sh=snd (screenSize d)
+resizeProblems y d = clampHexScroll d (ensureVisible fitted)
+  where
+    sh=snd (screenSize d)
+    requested=sh-max 3 (min (sh-7) (sh-y-1))-1
+    (edge,moved)=resizeEdge True True requested (1,sh-1) (-2,problemsRect d) (windows d)
+    next=d {problemsPreferredHeight=sh-edge-1,drag=Just MessagesSizing}
+    fitted=next {windows=map (fitDockWindow next) moved,
+      sideTree=fmap (\t -> t {treeScroll=min (treeScroll t) (treeScrollLimit next t)}) (sideTree next)}
 
 layoutProblems :: Desktop -> Desktop -> Desktop
 layoutProblems before after = clampHexScroll before (ensureVisible fitted)
@@ -1429,10 +1515,23 @@ setTree tree d = clampHexScroll d next {windows=map move (windows d)}
             x=left r+delta
             right=if left r+width r>=sw then sw else min sw (x+width r)
 
+-- Detached windows stay put unless the growing dock reaches their rectangle.
+fitDockWindow :: Desktop -> Window -> Window
+fitDockWindow d w
+  | fitted==bounds w = w
+  | otherwise = w {bounds=fitted,restoredBounds=Nothing}
+  where fitted=fitWindow d (bounds w)
+
 resizeTree :: Int -> Desktop -> Desktop
 resizeTree x d = case sideTree d of
   Nothing -> d
-  Just tree -> (setTree (Just tree {treeWidth=max 16 (min (fst (screenSize d)-20) (x+1))}) d) {drag=Just DockSizing}
+  Just tree -> clampHexScroll d next {windows=map (fitDockWindow next) moved}
+    where
+      sw=fst (screenSize d)
+      source=Rect 0 1 (treeWidthOf d) (top (problemsRect d)-1)
+      requested=max 16 (min (sw-20) (x+1))-1
+      (edge,moved)=resizeEdge False False requested (0,sw) (-1,source) (windows d)
+      next=d {sideTree=Just tree {treeWidth=edge+1},drag=Just DockSizing,dragOriginal=Nothing}
 
 installTree :: FilePath -> [Entry] -> Desktop -> Desktop
 installTree root entries d = setTree (Just (Sidebar root (nodes root 0 entries) 0 0 (min 24 (max 0 (fst (screenSize d)-20))) True)) d {problemsFocused=False}

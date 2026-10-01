@@ -12,6 +12,8 @@ import qualified ProtocolCheck
 #ifdef WITH_REMOTE
 import qualified RemoteCheck
 import qualified RemoteWindowCheck
+import qualified RemoteTerminalCheck
+import qualified EditorMCPCheck
 #endif
 import qualified UnicodeCheck
 import qualified HexCheck
@@ -56,6 +58,8 @@ main = do
 #ifdef WITH_REMOTE
   RemoteCheck.checks
   RemoteWindowCheck.checks
+  RemoteTerminalCheck.checks
+  EditorMCPCheck.checks
 #endif
 #ifdef WITH_PROTOCOL
   ProtocolCheck.checks

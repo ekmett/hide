@@ -106,14 +106,14 @@ checks = do
     (clipboard (fst (runCommand Copy noSource))==expected && buffers protected==buffers selectedPane)
   let resizeMessagesTo y d=fst (handleEvent (V.EvMouseDown 10 y V.BLeft [])
         (fst (handleEvent (V.EvMouseDown 10 (top (problemsRect d)) V.BLeft []) d)))
-      floatingMessage=modifyActive (\w -> w {bounds=Rect 0 6 80 10}) pane
+      floatingMessage=modifyActive (\w -> w {bounds=Rect 10 6 60 10}) pane
       pushed=resizeMessagesTo 12 floatingMessage
       pinned=resizeMessagesTo 8 pushed
       pulled=resizeMessagesTo 14 pinned
       untouched=modifyActive (\w -> w {bounds=Rect 0 3 80 5}) pane
   check "Messages title drag pushes and pulls abutting windows without sharing borders"
-    (top (problemsRect pushed)==12 && fmap bounds (activeWindow pushed)==Just (Rect 0 2 80 10) &&
-     fmap bounds (activeWindow pinned)==Just (Rect 0 1 80 7) && fmap bounds (activeWindow pulled)==Just (Rect 0 1 80 13) &&
+    (top (problemsRect pushed)==12 && fmap bounds (activeWindow pushed)==Just (Rect 10 2 60 10) &&
+     fmap bounds (activeWindow pinned)==Just (Rect 10 1 60 7) && fmap bounds (activeWindow pulled)==Just (Rect 10 1 60 13) &&
      fmap bounds (activeWindow (resizeMessagesTo 14 untouched))==Just (Rect 0 3 80 5) && buffers pulled==buffers pane)
   check "diagnostic chevron and message render" (all (`T.isInfixOf` snapshotHtml pane) ["▶","Not in scope"])
   check "closing pane preserves documents" (buffers (setProblemsVisible False pane)==buffers source)

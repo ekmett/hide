@@ -25,8 +25,10 @@ import THC.Edit.Model
 import THC.Edit.Protocol
 import THC.Edit.Remote
 import THC.Edit.RemoteEndpoint
+import qualified THC.Edit.Session as S
 checks :: IO ()
 checks = do
+  localPeerCheck
   sshFailureCheck
   let assert label ok=unless ok (error label)
   session <- randomIdentity
@@ -70,6 +72,12 @@ checks = do
     hClose first
     connected <- open
     greeting <- attach connected client 0
+    bracket open hClose $ \inspector -> do
+      writePacket inspector (JsonPacket (object ["type" .= ("inspect"::T.Text),"request" .= object ["jsonrpc" .= ("2.0"::T.Text),"id" .= (41::Int),"method" .= ("initialize"::T.Text),"params" .= object ["protocolVersion" .= ("2025-11-25"::T.Text)]]]))
+      inspected <- receive inspector
+      assert "inspection works while an editor owns the writer slot" (case inspected of
+        Just (JsonPacket (Object fields)) -> KM.lookup "id" fields==Just (toJSON (41::Int)) && KM.member "result" fields
+        _ -> False)
     input connected 1
     ack connected 1
     bracket open hClose $ \other -> do
@@ -154,3 +162,59 @@ sshFailureCheck = do
 
 
 #endif
+
+-- A local frontend uses the same journal and keeps its desktop when detached.
+localPeerCheck :: IO ()
+localPeerCheck = do
+  let assert label ok=unless ok (error label)
+  record <- S.newSessionRecord Nothing ["--demo"]
+  offline <- S.newSessionRecord (Just "offline-test-host") ["--","project λ"]
+  let session=S.sessionId record
+  path <- sessionEndpoint session
+  let initial=addDocument Nothing (newBuffer "") (initialDesktop (80,25))
+  observed <- newIORef initial
+  let tick d=writeIORef observed d >> pure d
+      effects d requests=pure (Exit `elem` requests,d {buffers=M.map (\doc -> doc {documentBuffer=markSaved (documentBuffer doc)}) (buffers d)})
+      awaitReady attempts=bracket (connectEndpoint path) hClose (const (pure ())) `catch` \(err::IOException) ->
+        if attempts<=0 then throwIO err else threadDelay 50000 >> awaitReady (attempts-1)
+      receive peer expected=do
+        packet <- timeout 3000000 (peerReceive peer) >>= maybe (error ("Local peer timeout waiting for "++T.unpack expected)) pure
+        case packet of
+          Just (JsonPacket (Object fields)) | KM.lookup "type" fields==Just (String expected) -> pure fields
+          Just _ -> receive peer expected
+          Nothing -> error ("Local peer closed before "++T.unpack expected)
+      send peer fields=peerSend peer (JsonPacket (object fields))
+  flip finally (S.forgetSession session >> S.forgetSession (S.sessionId offline)) $ do
+    S.rememberSession record
+    S.rememberSession offline
+    records <- S.listSessions
+    assert "offline remote sessions remain discoverable" (offline `elem` records)
+    assert "missing local endpoints are omitted" (not (record `elem` records))
+    loaded <- S.loadSession (S.sessionId offline)
+    assert "catalog round-trips Unicode arguments" (loaded==Just offline)
+    withAsync (runRemoteDaemon session 1 effects tick initial) $ \daemon -> do
+      link daemon
+      awaitReady (100::Int)
+      withLocalPeer session True [] $ \peer -> do
+        void (receive peer "assets")
+        records' <- S.listSessions
+        assert "live local session listed while writer attached" (any ((==session).S.sessionId) records')
+        send peer ["type" .= ("frontend"::T.Text),"mode" .= (Nothing::Maybe Int)]
+        send peer ["type" .= ("paste"::T.Text),"text" .= ("persistent λ"::T.Text),"seq" .= (1::Int)]
+      threadDelay 150000
+      d <- readIORef observed
+      assert "local peer detach retains unsaved desktop" (activeText d=="persistent λ")
+      exists <- S.loadSession session
+      assert "detach retains session catalog" (maybe False (const True) exists)
+      withLocalPeer session True [] $ \peer -> do
+        void (receive peer "assets")
+        send peer ["type" .= ("command"::T.Text),"command" .= ("quit"::T.Text),"seq" .= (1::Int)]
+        void (receive peer "ack")
+        send peer ["type" .= ("key"::T.Text),"key" .= ("Tab"::T.Text),"seq" .= (2::Int)]
+        void (receive peer "ack")
+        send peer ["type" .= ("key"::T.Text),"key" .= ("Enter"::T.Text),"seq" .= (3::Int)]
+        void (receive peer "closed")
+      ended <- timeout 3000000 (wait daemon)
+      assert "explicit Exit ends local daemon" (ended==Just ())
+      exists' <- S.loadSession session
+      assert "explicit Exit removes session catalog" (exists'==Nothing)
