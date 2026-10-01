@@ -207,6 +207,7 @@ checks = bracket temporary removePathForcibly $ \base -> do
        documentFile (doc linked)==documentFile (doc deleted) && "reopen" `T.isInfixOf` activeText linked)
     targetBytes<-T.readFile target
     check "pull symlink target remains unchanged" (targetBytes=="outside symlink target\n")
+  integrationChecks base
   reviewCommitChecks base
   unless (os=="mingw32") (cancellationCheck base work)
   putStrLn "Git operation checks passed"
@@ -401,3 +402,187 @@ reviewCommitChecks base=do
     check "ordinary transforming hook reports changed committed tree"
       (textField "state" transformed==Just "succeeded" && field "reviewedTreeMatched" transformed==Just False && maybe False (T.isInfixOf "hooks changed") (textField "message" transformed))
     removeFile hook
+
+
+integrationChecks :: FilePath -> IO ()
+integrationChecks base=do
+  let upstream=base </> "integration-upstream"
+      work=base </> "integration-work"
+      git root args=do
+        (code,out,err)<-readCreateProcessWithExitCode (proc "git" (["-C",root]++args)) ""
+        unless (code==ExitSuccess) (error err)
+        pure (T.strip (T.pack out))
+      commit root text=void (git root ["add","-A"]) >> void (git root ["commit","-m",text])
+      check label ok=unless ok (error label)
+      field key value=parseMaybe (withObject "object" (.:key)) value
+      textField key value=field key value :: Maybe T.Text
+      left (Left _)=True; left _=False
+  createDirectory upstream
+  _<-git upstream ["init","-b","main"]
+  _<-git upstream ["config","user.name","Git Test"]
+  _<-git upstream ["config","user.email","test@example.invalid"]
+  _<-git upstream ["config","commit.gpgsign","false"]
+  T.writeFile (upstream </> "safe.txt") "base\n"
+  T.writeFile (upstream </> "thc.toml") "private-authority-marker\n"
+  commit upstream "initial"
+  _<-git base ["clone",upstream,work]
+  _<-git work ["config","user.name","Git Test"]
+  _<-git work ["config","user.email","test@example.invalid"]
+  _<-git work ["config","commit.gpgsign","false"]
+  withGitOperations $ \runtime->do
+    let initial=(initialDesktop (80,25)) {defaultDirectory=Just work,branchRoot=Just work}
+        call d name args=do (next,answer)<-gitTool runtime d name args; (next,) <$> answer
+        run d name args=do
+          (next,answer)<-call d name args
+          receipt<-either (error . T.unpack) pure answer
+          check "integration request accepted" (field "accepted" receipt==Just True)
+          timeout 10000000 (poll next) >>= maybe (error "Git integration timed out") pure
+        poll d=do
+          next<-tickGitOperations runtime core d
+          (_,answer)<-call next "git_operation_status" (object [])
+          value<-either (error . T.unpack) pure answer
+          case field "operation" value of
+            Just operation | field "active" operation==Just False -> pure (next,operation)
+            _ -> threadDelay 10000 >> poll next
+        merge d ref=run d "git_merge" (object ["ref" .= (ref::T.Text)])
+        failed value=textField "state" value==Just "failed"
+    T.writeFile (upstream </> "safe.txt") "upstream\n"
+    commit upstream "safe upstream"
+    upstreamHead<-git upstream ["rev-parse","HEAD"]
+    (pulled,pullResult)<-run initial "git_pull" (object [])
+    check "agent pull fast forwards configured upstream" (textField "state" pullResult==Just "succeeded" && textField "head" pullResult==Just upstreamHead && field "fetchExitCode" pullResult==Just (0::Int) && field "exitCode" pullResult==Just (0::Int))
+    check "unchanged private authority file permits safe pull" . (=="private-authority-marker\n") =<< T.readFile (work </> "thc.toml")
+    T.writeFile (upstream </> "after-fetch.txt") "incoming checked file\n"
+    commit upstream "after fetch guard"
+    let delayed variant=do
+          (started,receipt)<-call pulled "git_pull" (object [])
+          check "pull phase accepted" (either (const False) (const True) receipt)
+          (_,busyReply)<-call started "git_merge" (object ["ref" .= ("origin/main"::T.Text)])
+          check "pull shares its slot with agent merge" (left busyReply)
+          (_,busyUI)<-gitOperationEffects runtime core started [RunGit FetchRemote]
+          check "pull shares its slot with human fetch" (status busyUI=="A Git operation is already running.")
+          timeout 10000000 (poll (variant started)) >>= maybe (error "Delayed integration timed out") pure
+    (_,typedDuringFetch)<-delayed (insertText "unsaved while fetching")
+    check "typing before checkout refuses mutation after successful fetch" (failed typedDuringFetch && field "fetchExitCode" typedDuringFetch==Just (0::Int))
+    (_,policyDuringFetch)<-delayed (\d->d {guestPrivatePaths=[work </> "after-fetch.txt"]})
+    check "current authority policy is checked after fetching" (failed policyDuringFetch && field "fetchExitCode" policyDuringFetch==Just (0::Int))
+    (_,selectionDuringFetch)<-delayed (\d->d {branchRoot=Just upstream})
+    check "repository switch prevents applying prepared integration" (failed selectionDuringFetch)
+    check "rejected prepared pulls do not install incoming file" . not =<< doesFileExist (work </> "after-fetch.txt")
+    (_,afterFetchSuccess)<-run pulled "git_pull" (object [])
+    check "guard refusals leave a later clean pull usable" (textField "state" afterFetchSuccess==Just "succeeded")
+    (_,badRef)<-call pulled "git_merge" (object ["ref" .= ("--help"::T.Text)])
+    check "merge rejects option-like refs" (left badRef)
+    (_,badType)<-call pulled "git_merge" (object ["ref" .= (7::Int)])
+    check "merge rejects non-string refs" (left badType)
+    (_,badPull)<-call pulled "git_pull" (object ["remote" .= ("private://credential"::T.Text)])
+    check "pull accepts no remote override" (left badPull)
+    _<-git work ["checkout","-b","feature"]
+    T.writeFile (work </> "feature.txt") "feature\n"
+    commit work "feature"
+    _<-git work ["checkout","main"]
+    (merged,mergeResult)<-merge pulled "feature"
+    check "agent merges named local branch" (textField "state" mergeResult==Just "succeeded" && field "conflicts" mergeResult==Just (0::Int))
+    check "merge installs safe feature file" =<< doesFileExist (work </> "feature.txt")
+    T.writeFile (work </> "safe.txt") "saved local change\n"
+    (_,dirtyResult)<-merge merged "origin/main"
+    check "saved dirty working tree is refused without mutation" (failed dirtyResult)
+    check "saved dirty bytes preserved" . (=="saved local change\n") =<< T.readFile (work </> "safe.txt")
+    _<-git work ["restore","safe.txt"]
+    let dirtyDesktop=insertText "unsaved draft" merged
+    (_,dirtyReply)<-call dirtyDesktop "git_pull" (object [])
+    check "integration refuses dirty editor buffers immediately" (left dirtyReply)
+    _<-git work ["checkout","-b","private-change"]
+    T.writeFile (work </> "thc.toml") "incoming-private-marker\n"
+    commit work "private change"
+    _<-git work ["checkout","main"]
+    before<-git work ["rev-parse","HEAD"]
+    (refused,privateResult)<-merge merged "private-change"
+    after<-git work ["rev-parse","HEAD"]
+    check "incoming authority change is refused before checkout" (failed privateResult && before==after)
+    check "private refusal contains no paths or output" (all (not . (`T.isInfixOf` T.pack (BL.unpack (encode privateResult)))) ["thc.toml","incoming-private-marker"])
+    check "private refusal preserves authority bytes" . (=="private-authority-marker\n") =<< T.readFile (work </> "thc.toml")
+    _<-git work ["checkout","-b","head-rename-target"]
+    T.writeFile (work </> "safe.txt") "target edits public predecessor\n"
+    commit work "target edits old path"
+    _<-git work ["checkout","-b","head-rename-current","main"]
+    _<-git work ["mv","safe.txt","private.key"]
+    commit work "current branch makes source private"
+    privateBefore<-T.readFile (work </> "private.key")
+    (_,headRenameResult)<-merge refused {guestPrivatePaths=[work </> "private.key"]} "head-rename-target"
+    check "HEAD-side rename cannot route incoming edit into authority file" . (==privateBefore) =<< T.readFile (work </> "private.key")
+    check "HEAD-side protected divergence is conservatively refused" (failed headRenameResult)
+    _<-git work ["checkout","main"]
+    createDirectory (work </> "old")
+    T.writeFile (work </> "old" </> "safe.txt") "ordinary source\n"
+    commit work "directory base"
+    _<-git work ["checkout","-b","incoming-directory"]
+    _<-git work ["mv","old","new"]
+    commit work "directory move"
+    _<-git work ["checkout","main"]
+    T.writeFile (work </> "old" </> "secret.key") "protected branch-only bytes\n"
+    commit work "private current-branch addition"
+    (_,directoryResult)<-merge refused {guestPrivatePaths=[work </> "old" </> "secret.key"]} "incoming-directory"
+    check "directory rename cannot relocate protected current-branch file" =<< doesFileExist (work </> "old" </> "secret.key")
+    check "directory rename cannot create a public private-file copy" . not =<< doesFileExist (work </> "new" </> "secret.key")
+    check "directory rename retains protected bytes" . (=="protected branch-only bytes\n") =<< T.readFile (work </> "old" </> "secret.key")
+    check "protected directory divergence is conservatively refused" (failed directoryResult)
+    _<-git work ["checkout","-b","incoming-copy"]
+    copyFile (work </> "thc.toml") (work </> "copied-public.txt")
+    commit work "private copy"
+    _<-git work ["checkout","main"]
+    (_,copyResult)<-merge refused "incoming-copy"
+    check "incoming copy from unchanged authority file is refused" (failed copyResult)
+    check "incoming copy was not installed" . not =<< doesFileExist (work </> "copied-public.txt")
+    (_,revisionSyntax)<-merge refused "HEAD~1"
+    check "merge rejects caller revision expressions" (failed revisionSyntax)
+    (_,trackingResult)<-merge refused "refs/remotes/origin/main"
+    check "fully qualified tracking ref is accepted" (textField "state" trackingResult==Just "succeeded")
+    _<-git work ["checkout","-b","incoming-link"]
+    createFileLink (work </> "thc.toml") (work </> "public-alias")
+    commit work "incoming link"
+    _<-git work ["checkout","main"]
+    (_,linkResult)<-merge refused "incoming-link"
+    check "incoming symlink cannot expose authority file" (failed linkResult)
+    check "incoming link was not installed" . not =<< doesPathExist (work </> "public-alias")
+    _<-git work ["checkout","-b","incoming-parent"]
+    T.writeFile (work </> "authority-parent") "ordinary content\n"
+    commit work "authority ancestor"
+    _<-git work ["checkout","main"]
+    (_,parentResult)<-merge refused {guestPrivatePaths=[work </> "authority-parent" </> "key"]} "incoming-parent"
+    check "incoming ancestor replacement is protected" (failed parentResult)
+    _<-git work ["update-index","--skip-worktree","safe.txt"]
+    T.writeFile (work </> "safe.txt") "hidden local changes\n"
+    (_,hiddenResult)<-merge refused "origin/main"
+    check "hidden index files cannot bypass saved-state guard" (failed hiddenResult)
+    check "hidden bytes preserved" . (=="hidden local changes\n") =<< T.readFile (work </> "safe.txt")
+    _<-git work ["update-index","--no-skip-worktree","safe.txt"]
+    _<-git work ["restore","safe.txt"]
+    T.writeFile (work </> ".gitignore") "ignored.txt\n"
+    commit work "ignore local output"
+    _<-git work ["checkout","-b","incoming-ignored"]
+    T.writeFile (work </> "ignored.txt") "incoming output\n"
+    _<-git work ["add","-f","ignored.txt"]
+    commit work "tracked output"
+    _<-git work ["checkout","main"]
+    T.writeFile (work </> "ignored.txt") "precious ignored file\n"
+    (_,ignoredResult)<-merge refused "incoming-ignored"
+    check "merge does not overwrite ignored user files" (failed ignoredResult && maybe False (/=0) (field "exitCode" ignoredResult::Maybe Int))
+    check "ignored bytes preserved" . (=="precious ignored file\n") =<< T.readFile (work </> "ignored.txt")
+    T.writeFile (upstream </> "diverged.txt") "remote divergence\n"
+    commit upstream "diverged upstream"
+    divergentHead<-git work ["rev-parse","HEAD"]
+    (_,divergentResult)<-run refused "git_pull" (object [])
+    check "pull refuses divergence with real nonzero merge exit" (failed divergentResult && field "fetchExitCode" divergentResult==Just (0::Int) && maybe False (/=0) (field "exitCode" divergentResult::Maybe Int) && textField "head" divergentResult==Just divergentHead)
+    check "failed ff-only pull leaves no merge state" . not =<< doesFileExist (work </> ".git" </> "MERGE_HEAD")
+    _<-git work ["checkout","-b","conflict"]
+    T.writeFile (work </> "safe.txt") "theirs\n"
+    commit work "theirs"
+    _<-git work ["checkout","main"]
+    T.writeFile (work </> "safe.txt") "ours\n"
+    commit work "ours"
+    (conflicted,conflictResult)<-merge refused "conflict"
+    check "merge reports actual conflict without aborting" (failed conflictResult && field "conflicts" conflictResult==Just (1::Int) && maybe False (/=0) (field "exitCode" conflictResult::Maybe Int))
+    check "conflict state remains for human resolution" =<< doesFileExist (work </> ".git" </> "MERGE_HEAD")
+    (_,blocked)<-run conflicted "git_pull" (object [])
+    check "existing conflict blocks another integration" (failed blocked)

@@ -159,6 +159,8 @@ Breakpoints use 1-based lines, at most 1000. See the
 | --- | --- | --- | --- |
 | `workspace_git` | R | `view`, `path?` | `status` or `diff`; disk changes and unsaved buffers reported separately |
 | `git_fetch` | W | — | Fetch the selected repository’s configured default remote; returns `accepted` and `jobId` |
+| `git_pull` | W | — | Fetch configured upstream, check incoming changes, then fast-forward only |
+| `git_merge` | W | `ref` | Merge a named local or remote-tracking branch with checked incoming paths |
 | `git_review` | R | — | Start a complete saved-change review; poll for `diff`, `complete`, and a one-time `reviewId` |
 | `git_commit` | W | `reviewId`, `message` | Commit all reviewed saved changes using ordinary Git staging and hooks |
 | `git_operation_status` | R | `jobId?` | `busy`, job state/exit code, complete review, or commit `head` and `reviewedTreeMatched` |
@@ -168,8 +170,7 @@ not a Git glob/magic pathspec. Whole-repository diffs omit private authority fil
 destinations derived from them; `omittedFiles` reports a count without their names. Agent mouse/key input cannot
 open the unrestricted human Git review or commit dialog; use `workspace_git`
 for filtered review. `workspace_search` with
-`trackedOnly: true` searches tracked source. Pull, merge and commit-history search
-are not exposed as agent tools.
+`trackedOnly: true` searches tracked source. Commit-history search is not exposed as an agent tool.
 
 Each Git tool has its own permission policy. Fetch
 shares the human Git operation slot, permits unsaved editor changes, and does not
@@ -181,6 +182,31 @@ and a null exit code; a process exit reports its actual code. Transport output,
 URLs, and raw errors are not returned or placed in agent fetch output buffers.
 Normal Quit waits for the active operation; session teardown cancels and reaps
 the active Git process.
+
+`git_pull` and `git_merge` use the same job slot. Both require saved editor
+buffers and a clean index/worktree, and refuse unfinished Git operations or
+hidden/sparse index entries. Pull fetches the configured default remote, then
+checks the configured upstream and performs an explicit fast-forward-only merge;
+it does not rebase or honor an automatic stash setting. Merge accepts a local
+or remote-tracking branch name (or its full `refs/heads/` / `refs/remotes/` name),
+not arbitrary revisions, URLs, refspecs, or options. Ambiguous and symbolic names
+are refused. Both pin the target commit and recheck the selected repository,
+HEAD, and authority policy before mutation. Typing while fetching prevents the
+merge; typing while Git runs preserves the unsaved buffer during reload.
+
+Incoming protected paths, their ancestors, Git-detected private rename/copy
+sources, and changed symbolic links or submodules are refused. Unchanged tracked
+private configuration does not block safe changes. Protected differences between
+current HEAD and the target are also refused, even if a particular merge would
+leave them untouched; this prevents HEAD-side renames from redirecting incoming
+edits into private files. Agent merges disable Git's directory-rename propagation.
+Ignored local files are not overwritten. Normal configured Git hooks and merge drivers still execute; the
+path checks do not sandbox those programs. Status includes `phase`, `head`,
+`fetchExitCode` (pull only), and `conflicts` (count, or null if inspection failed).
+The ordinary `exitCode` is the merge exit, a failed fetch's exit, or null when
+preflight/launch prevented execution. A failed merge can leave conflict files
+and merge state; no automatic reset or abort discards them. A successful fetch
+remains effective even when the following merge is refused. No tool pushes.
 
 `git_review` and `git_commit` also return acceptance and a job ID first. A review
 is a composite read operation: its successful `exitCode: 0` denotes a completed

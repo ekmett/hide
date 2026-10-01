@@ -3,6 +3,7 @@ module THC.Edit.Git
   ( RepoStatus(..), repositoryStatus, repositoryDiff, repositoryDiffFiltered, repositoryDiffFilteredAt
   , GitReview(..), reviewRepository, commitReview
   , GitCommit(..), reviewRepositoryChecked, commitReviewChecked
+  , checkIntegrationState, checkIncomingChanges
   ) where
 
 import Control.Monad (forM, forM_, unless, when)
@@ -162,6 +163,51 @@ checkChanges excluded root=do
   (files,_,changed)<-classifyChanges root excluded
   when (any (\(file,_,private)->private && Set.member file changed) files)
     (failGit "Protected changes cannot be approved through an agent review.")
+
+-- Only saved, ordinary clean working trees can be changed through an agent.
+-- Git itself still owns checkout locking and protection against concurrent edits.
+checkIntegrationState :: FilePath -> Text -> IO (Either Text ())
+checkIntegrationState root expected=result $ do
+  current<-T.strip <$> git root ["rev-parse","--verify","HEAD"]
+  unless (current==expected) (failGit "Repository HEAD changed.")
+  status<-git root ["status","--porcelain","-z","--untracked-files=all"]
+  unless (T.null status) (failGit "Repository has saved changes or conflicts.")
+  flags<-git root ["ls-files","-v","-z"]
+  unless (all (T.isPrefixOf "H ") (filter (not . T.null) (T.splitOn "\NUL" flags)))
+    (failGit "Repository contains hidden or sparse index entries.")
+  forM_ ["MERGE_HEAD","CHERRY_PICK_HEAD","REVERT_HEAD","rebase-apply","rebase-merge","sequencer","BISECT_LOG"] $ \name->do
+    path<-T.stripEnd <$> git root ["rev-parse","--git-path",name]
+    active<-doesPathExist (root </> T.unpack path)
+    when active (failGit "Finish the current Git operation first.")
+
+-- Examine both sides of incoming path changes without rendering their content.
+-- Reject special entries conservatively rather than following newly added links.
+checkIncomingChanges :: FilePath -> Text -> Text -> (FilePath -> Bool) -> IO (Either Text ())
+checkIncomingChanges root expected target excluded=result $ do
+  checkIntegrationState root expected >>= either failGit pure
+  base<-T.strip <$> git root ["merge-base",T.unpack expected,T.unpack target]
+  raw<-git root ["diff","--raw","--no-ext-diff","--no-renames","-z",T.unpack base,T.unpack target,"--"]
+  rows<-either failGit pure (pairs (filter (not . T.null) (T.splitOn "\NUL" raw)))
+  let names from=git root ["diff","--name-status","--no-ext-diff","-z","-M","-C","--find-copies-harder","-l256",T.unpack from,T.unpack target,"--"]
+  lineage<-names base
+  -- HEAD-side renames can redirect incoming edits into protected destinations.
+  -- Refuse protected divergence instead of trying to predict Git's merge tree.
+  divergence<-names expected
+  (files,_)<-either failGit pure (parseChanges (lineage<>divergence))
+  when (length files>10000) (failGit "Incoming changes exceed 10000 paths.")
+  forM_ files $ \file->do
+    let absolute=normalise (root </> file)
+    canonical<-canonicalizePath absolute
+    unless (within root absolute && within root canonical && not (excluded absolute || excluded canonical))
+      (failGit "Incoming changes touch a protected path.")
+  forM_ rows $ \(header,_)->
+    when (any (`elem` ["120000","160000"]) (take 2 (T.words (T.drop 1 header))))
+      (failGit "Incoming symbolic links and submodules require human Git integration.")
+  checkIntegrationState root expected >>= either failGit pure
+  where
+    pairs []=Right []
+    pairs (header:file:rest) | ":" `T.isPrefixOf` header=( (header,file):) <$> pairs rest
+    pairs _=Left "Invalid incoming Git change listing."
 
 reviewRepository :: FilePath -> IO (Either Text GitReview)
 reviewRepository=reviewWith (const (pure ()))

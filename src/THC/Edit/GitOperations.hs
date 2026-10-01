@@ -20,12 +20,14 @@ import System.Process (proc, readCreateProcessWithExitCode, cwd, env)
 import THC.Edit.Buffer
 import THC.Edit.Files
 import THC.Edit.Model
-import THC.Edit.Git (GitReview(..),GitCommit(..),reviewRepositoryChecked,commitReviewChecked)
+import THC.Edit.Git (GitReview(..),GitCommit(..),reviewRepositoryChecked,commitReviewChecked,checkIntegrationState,checkIncomingChanges)
 import THC.Edit.GuestAccess (protectedPathParent)
 import THC.Edit.RemoteEndpoint (randomIdentity)
 
 data Result = Branches FilePath [T.Text]
-  | Finished ExitCode FilePath T.Text [(Int,FileState,Either T.Text (FileState,Buffer))]
+  | Finished ExitCode FilePath T.Text [(Int,FileState,Either T.Text (FileState,Buffer))] Value
+  | Prepared FilePath GitAction T.Text T.Text T.Text (Maybe ExitCode)
+  | IntegrationFailed FilePath (Maybe ExitCode) Value
   | Reviewed T.Text [FilePath] (Either T.Text GitReview)
   | Committed FilePath (Either T.Text GitCommit) (Maybe T.Text)
 data Worker = Worker Bool (Maybe Integer) ThreadId (MVar (Either SomeException Result))
@@ -63,7 +65,11 @@ label PullRemote = "Pull (fast-forward only)"
 label (MergeBranch name) = "Merge "<>name
 
 runOperation :: Bool -> FilePath -> GitAction -> Desktop -> IO Result
-runOperation privateOutput root action desktop = do
+runOperation privateOutput root action = runOperationArgs privateOutput root action arguments
+  where arguments=case action of FetchRemote -> ["fetch"]; PullRemote -> ["pull","--ff-only"]; MergeBranch branch -> ["merge","--no-edit","--",T.unpack branch]
+
+runOperationArgs :: Bool -> FilePath -> GitAction -> [String] -> Desktop -> IO Result
+runOperationArgs privateOutput root action args desktop = do
   documents <- fmap catMaybes $ forM (M.toList (buffers desktop)) $ \(bid,doc) -> case documentFile doc of
     Nothing -> pure Nothing
     Just file -> do
@@ -73,18 +79,77 @@ runOperation privateOutput root action desktop = do
       unnamedDirty = any (\doc -> documentFile doc==Nothing && documentLabel doc==Nothing && dirty (documentBuffer doc)) (M.elems (buffers desktop))
   unless (not mutates || (not unnamedDirty && all (not . dirty . third) documents))
     (ioError (userError "Save or discard unsaved buffers in this repository before pulling or merging."))
-  let args = case action of FetchRemote -> ["fetch"]; PullRemote -> ["pull","--ff-only"]; MergeBranch branch -> ["merge","--no-edit","--",T.unpack branch]
   (code,out,err) <- runGit root args
-  conflicts <- if mutates then checkedGit root ["diff","--name-only","--diff-filter=U","--"] else pure ""
+  conflicts <- if mutates && not privateOutput then checkedGit root ["diff","--name-only","--diff-filter=U","--"] else pure ""
   refreshed <- if not mutates then pure [] else forM documents $ \(bid,file,_) -> do
-    exists <- doesFileExist (filePath file)
-    loaded <- if not exists then pure (Left "File was removed on disk; its buffer was preserved.")
-      else either (Left . T.pack) Right <$> loadFile (filePath file)
+    inspected <- try $ do
+      exists <- doesFileExist (filePath file)
+      if not exists then pure (Left "File was removed on disk; its buffer was preserved.")
+        else either (Left . T.pack) Right <$> loadFile (filePath file)
+    let loaded=either (const (Left "Could not reload the changed file; its buffer was preserved.")) id (inspected :: Either IOException (Either T.Text (FileState,Buffer)))
     pure (bid,file,loaded)
   let outcome = if code==ExitSuccess then " completed.\n" else " failed ("<>T.pack (show code)<>").\n"
       conflictText = if T.null conflicts then "" else "\nMerge conflicts remain in these files; resolve them before committing:\n"<>conflicts
-  pure (Finished code root (label action<>outcome<>(if privateOutput then "" else out<>err<>conflictText)) refreshed)
+  pure (Finished code root (label action<>outcome<>(if privateOutput then "" else out<>err<>conflictText)) refreshed (object []))
   where third (_,_,b)=b
+
+observedHead :: FilePath -> IO (Maybe T.Text)
+observedHead root=do
+  result<-try (runGit root ["rev-parse","--verify","HEAD"]) :: IO (Either IOException (ExitCode,T.Text,T.Text))
+  pure $ case result of
+    Right (ExitSuccess,text,_) | let value=T.strip text,T.length value `elem` [40,64],T.all isHexDigit value -> Just value
+    _ -> Nothing
+
+integrationFacts :: FilePath -> T.Text -> Maybe ExitCode -> IO Value
+integrationFacts root phase fetched=do
+  headId<-observedHead root
+  conflicts<-try (checkedGit root ["diff","--name-only","--diff-filter=U","-z","--"]) :: IO (Either IOException T.Text)
+  pure (object ["phase" .= phase,"head" .= headId,"fetchExitCode" .= fmap exitNumber fetched,
+    "conflicts" .= either (const Nothing) (Just . length . filter (not . T.null) . T.splitOn "\NUL") conflicts])
+  where exitNumber ExitSuccess=0::Int; exitNumber (ExitFailure n)=n
+
+integrationFailure :: FilePath -> T.Text -> Maybe ExitCode -> Maybe ExitCode -> IO Result
+integrationFailure root phase fetched code=do
+  facts<-integrationFacts root phase fetched
+  pure (IntegrationFailed root code (extend facts (object ["error" .= ("Integration refused or failed; check clean saved files, configured upstream, named branch, and protected incoming changes. No automatic rollback was performed."::T.Text)])))
+
+-- Fetch never changes working files. Return to the desktop lock afterward so
+-- mutation uses current buffers and authority policy, not the pre-fetch copy.
+prepareIntegration :: FilePath -> GitAction -> IO Result
+prepareIntegration root action=do
+  branch<-T.strip <$> checkedGit root ["rev-parse","--symbolic-full-name","HEAD"]
+  headId<-observedHead root
+  case headId of
+    Nothing->integrationFailure root "preflight" Nothing Nothing
+    Just expected->do
+      clean<-checkIntegrationState root expected
+      case clean of
+        Left _->integrationFailure root "preflight" Nothing Nothing
+        Right ()->do
+          fetched<-if action==PullRemote then Just . (\(code,_,_)->code) <$> runGit root ["fetch"] else pure Nothing
+          if maybe False (/=ExitSuccess) fetched then integrationFailure root "fetch" fetched fetched else do
+            resolved<-try $ case action of
+              PullRemote->T.strip <$> checkedGit root ["rev-parse","--verify","@{upstream}^{commit}"]
+              MergeBranch wanted->do
+                listed<-checkedGit root ["for-each-ref","--format=%(refname)%09%(objectname)%09%(symref)","refs/heads","refs/remotes"]
+                let matches=[sha | line<-T.lines listed,[ref,sha,symbolic]<-[T.splitOn "\t" line],T.null symbolic,
+                      wanted `elem` ([ref]++[T.drop 11 ref | "refs/heads/" `T.isPrefixOf` ref])++[T.drop 13 ref | "refs/remotes/" `T.isPrefixOf` ref]]
+                case matches of [sha]->T.strip <$> checkedGit root ["rev-parse","--verify",T.unpack sha<>"^{commit}"]; _->ioError (userError "Unknown or ambiguous merge branch")
+              _->ioError (userError "Unsupported integration")
+            case (resolved :: Either IOException T.Text) of
+              Left _->integrationFailure root "preflight" fetched Nothing
+              Right target->pure (Prepared root action expected branch target fetched)
+
+integrate :: FilePath -> GitAction -> T.Text -> T.Text -> T.Text -> Maybe ExitCode -> Desktop -> IO Result
+integrate root action expected branch target fetched desktop=do
+  currentBranch<-T.strip <$> checkedGit root ["rev-parse","--symbolic-full-name","HEAD"]
+  safe<-if currentBranch/=branch then pure (Left "Selected branch changed.") else checkIncomingChanges root expected target (protectedPathParent desktop)
+  case safe of
+    Left _->integrationFailure root "preflight" fetched Nothing
+    Right ()->do
+      result<-runOperationArgs True root action (["-c","merge.directoryRenames=false","merge","--no-edit","--no-autostash","--no-overwrite-ignore"]++["--ff-only" | action==PullRemote]++["--",T.unpack target]) desktop
+      facts<-integrationFacts root "merge" fetched
+      pure $ case result of Finished code repo text reloads _->Finished code repo text reloads facts; other->other
 
 readBranches :: FilePath -> IO Result
 readBranches root = do
@@ -137,6 +202,13 @@ tickGitOperations (GitOperations ref focused jobs reviews) core initial = do
       result <- tryReadMVar done
       case result of
         Nothing -> pure desktop
+        Just (Right (Prepared root action expected branch target fetched)) -> do
+          selected<-try (selectedRepository desktop) :: IO (Either IOException FilePath)
+          let next=if unsaved desktop || either (const True) (/=root) selected
+                then integrationFailure root "preflight" fetched Nothing
+                else integrate root action expected branch target fetched desktop
+          startWorker (GitOperations ref focused jobs reviews) True jobId next
+          pure desktop {status="Checking Git integration…"}
         Just finished -> do
           writeIORef ref Nothing
           let usable=case finished of
@@ -159,7 +231,9 @@ tickGitOperations (GitOperations ref focused jobs reviews) core initial = do
             Right (Branches root _) | branchRoot desktop/=Just root -> pure desktop {status="Repository changed; request the merge branches again."}
             Right (Branches _ []) -> pure desktop {status="No other branches are available to merge."}
             Right (Branches _ branches) -> pure (prompt "Merge branch" (Merging branches) [ListBox "Branch" branches 0] desktop)
-            Right (Finished _ root logText reloads) -> do
+            Right (IntegrationFailed _ _ _) -> pure desktop {status="Git integration failed; see git_operation_status.",gitReview=Nothing}
+            Right Prepared{} -> pure desktop
+            Right (Finished _ root logText reloads _) -> do
               let (reloaded,notes) = foldl reload (desktop,[]) reloads
                   shown = if jobId/=Nothing then reloaded else addReadOnly "Git operations" (logText<>T.concat (reverse notes)) reloaded
               (_,updated) <- core shown {gitReview=Nothing} [RefreshGit root]
@@ -193,21 +267,23 @@ startWorker (GitOperations ref _ _ _) mutates ident action=mask_ $ do
   writeIORef ref (Just (Worker mutates ident thread done))
 
 gitToolNames :: [T.Text]
-gitToolNames=["git_fetch","git_review","git_commit","git_operation_status"]
+gitToolNames=["git_fetch","git_pull","git_merge","git_review","git_commit","git_operation_status"]
 
 gitTools :: [Value]
 gitTools=
   [spec "git_fetch" "Fetch the selected repository's configured default remote. Returns accepted and jobId, not completion. Poll git_operation_status. Does not change working files or expose transport output." False [] [],
+   spec "git_pull" "Fetch configured upstream, inspect incoming changes, then fast-forward only. Requires clean saved buffers/worktree. Returns acceptance; poll actual exit, HEAD and conflicts. Protected changes, changed symlinks and submodules are refused. Ordinary Git hooks/drivers execute." False [] [],
+   spec "git_merge" "Merge one named local or remote-tracking branch after checking incoming changes and clean saved files. No raw revision syntax, URL or options. Conflicts remain for resolution; no automatic abort. Poll actual exit, HEAD and conflict count." False ["ref"] [("ref",string 256)],
    spec "git_review" "Review all saved staged, unstaged and untracked changes. Poll git_operation_status for the complete diff and one-time reviewId. Protected or incomplete reviews cannot be committed. Requires no dirty buffers." True [] [],
    spec "git_commit" "Commit ALL saved changes from a complete git_review using ordinary Git staging and hooks. Requires unchanged HEAD, index and files, and no dirty buffers. Consumes reviewId; poll git_operation_status for actual HEAD, exit code and reviewedTreeMatched. Failure may leave reviewed changes staged." False ["reviewId","message"] [("reviewId",string 128),("message",string 8192)],
-   spec "git_operation_status" "Read a Git job's completion, review or commit result. Fetch/commit report actual process exit codes; review exitCode=0 denotes a completed composite review. Omit jobId for the latest. Retains the latest 16 agent jobs; busy includes human Git operations. Only the latest complete review ID can be committed." True [] [("jobId",object ["type" .= ("integer"::T.Text),"minimum" .= (1::Int)])]]
+   spec "git_operation_status" "Read a Git job's completion, review, commit or integration result. Integrations report phase, HEAD, fetchExitCode and conflict count. Fetch/commit/merge report actual process exit codes; review exitCode=0 denotes a completed composite review. Omit jobId for the latest. Retains the latest 16 agent jobs; busy includes human Git operations. Only the latest complete review ID can be committed." True [] [("jobId",object ["type" .= ("integer"::T.Text),"minimum" .= (1::Int)])]]
   where
     string :: Int -> Value
     string limit=object ["type" .= ("string"::T.Text),"minLength" .= (1::Int),"maxLength" .= limit]
     spec :: T.Text -> T.Text -> Bool -> [T.Text] -> [Pair] -> Value
     spec name description readOnly required props=object ["name" .= name,"description" .= description,
       "inputSchema" .= object ["type" .= ("object"::T.Text),"properties" .= object props,"required" .= required,"additionalProperties" .= False],
-      "annotations" .= object ["readOnlyHint" .= readOnly,"destructiveHint" .= (name=="git_commit"),"openWorldHint" .= not readOnly]]
+      "annotations" .= object ["readOnlyHint" .= readOnly,"destructiveHint" .= (name `elem` ["git_commit","git_pull","git_merge"]),"openWorldHint" .= not readOnly]]
 
 jobValue :: Integer -> Bool -> Maybe ExitCode -> Value
 jobValue ident active code=object ["jobId" .= ident,"active" .= active,
@@ -220,7 +296,8 @@ extend _ new=new
 
 completion :: Integer -> Either SomeException Result -> Value
 completion ident result=case result of
-  Right (Finished code _ _ _) -> jobValue ident False (Just code)
+  Right (Finished code _ _ _ facts) -> extend (jobValue ident False (Just code)) facts
+  Right (IntegrationFailed _ code facts) -> extend (jobValue ident False code) facts
   Right (Reviewed token _ (Right review)) -> extend (jobValue ident False (Just ExitSuccess)) (object
     ["complete" .= True,"diff" .= reviewText review,"reviewId" .= (if reviewText review=="No changes.\n" then Nothing else Just token)])
   Right (Reviewed _ _ (Left _)) -> extend failed (object ["complete" .= False,"reviewId" .= Null,
@@ -244,6 +321,13 @@ gitTool runtime@(GitOperations ref _ jobs reviews) desktop name args=case parseE
     "git_fetch" -> start False (pure ()) $ do
       root<-selectedRoot
       runOperation True root FetchRemote desktop
+    "git_pull" | unsaved desktop -> reply desktop (Left "Save changed buffers before pulling or merging.")
+               | otherwise -> start True (writeIORef reviews Nothing) (selectedRoot >>= \root->prepareIntegration root PullRemote)
+    "git_merge" -> case parseEither (\_ -> fields .: "ref") args of
+      Left _->reply desktop (Left "ref must name a local or remote-tracking branch.")
+      Right refName | T.null refName || T.length refName>256 || T.isPrefixOf "-" refName || T.any (<' ') refName -> reply desktop (Left "Invalid branch name.")
+                    | unsaved desktop -> reply desktop (Left "Save changed buffers before pulling or merging.")
+                    | otherwise -> start True (writeIORef reviews Nothing) (selectedRoot >>= \root->prepareIntegration root (MergeBranch refName))
     "git_review" | unsaved desktop -> reply desktop (Left "Save changed buffers before reviewing a commit.")
                  | otherwise -> start False (writeIORef reviews Nothing) $ do
                      root<-selectedRoot
@@ -277,9 +361,9 @@ gitTool runtime@(GitOperations ref _ jobs reviews) desktop name args=case parseE
           result -> reply desktop (Right (object ["busy" .= maybe False (const True) worker,"operation" .= result]))
     _ -> reply desktop (Left "Unknown Git tool.")
   where
-    allowed=case name of "git_operation_status" -> ["jobId"]; "git_commit" -> ["reviewId","message"]; _ -> []
+    allowed=case name of "git_operation_status" -> ["jobId"]; "git_commit" -> ["reviewId","message"]; "git_merge" -> ["ref"]; _ -> []
     reply updated result=pure (updated,pure result)
-    selectedRoot=checkedGit (maybe (startingDirectory desktop) id (branchRoot desktop)) ["rev-parse","--show-toplevel"] >>= canonicalizePath . T.unpack . T.stripEnd
+    selectedRoot=selectedRepository desktop
     start mutates prepare action=do
       worker<-readIORef ref
       case worker of
@@ -292,3 +376,6 @@ gitTool runtime@(GitOperations ref _ jobs reviews) desktop name args=case parseE
           startWorker runtime mutates (Just ident) action
           writeIORef jobs (ident,M.insert ident (extend (jobValue ident True Nothing) (object ["kind" .= name])) kept)
           reply desktop {status="Git operation started…",gitReview=Nothing} (Right (object ["accepted" .= True,"jobId" .= ident]))
+
+selectedRepository :: Desktop -> IO FilePath
+selectedRepository desktop=checkedGit (maybe (startingDirectory desktop) id (branchRoot desktop)) ["rev-parse","--show-toplevel"] >>= canonicalizePath . T.unpack . T.stripEnd
