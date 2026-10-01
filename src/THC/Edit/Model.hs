@@ -611,7 +611,19 @@ handleEvent event d = Bifunctor.first (layoutComposer d . clampHexScroll d) $ di
   _ -> d)
 
 dispatchEvent :: V.Event -> Desktop -> (Desktop,[Effect])
-dispatchEvent (V.EvResize sw sh) d = let resized=d {screenSize=(max 1 sw,max 3 sh),sideTree=fmap (\t -> t {treeWidth=min (treeWidth t) (max 0 (sw-16))}) (sideTree d)} in (resized {windows=map (\w -> w {bounds=fitWindow resized (bounds w)}) (windows d),drag=Nothing,dragOriginal=Nothing,menu=Nothing,contextMenu=Nothing,buttonHover=Nothing,buttonPressed=Nothing},[])
+dispatchEvent (V.EvResize sw sh) d =
+  (resized {windows=map resize (windows d),drag=Nothing,dragOriginal=Nothing,
+    menu=Nothing,contextMenu=Nothing,buttonHover=Nothing,buttonPressed=Nothing},[])
+  where
+    resized=d {screenSize=(max 1 sw,max 3 sh),
+      sideTree=fmap (\t -> t {treeWidth=min (treeWidth t) (max 0 (sw-16))}) (sideTree d)}
+    -- Attachment is to the usable desktop: Messages owns the bottom strip.
+    oldRight=fst (screenSize d); newRight=fst (screenSize resized)
+    oldBottom=top (problemsRect d); newBottom=top (problemsRect resized)
+    stretch r=fitWindow resized r
+      {width=if left r+width r==oldRight then newRight-left r else width r,
+       height=if top r+height r==oldBottom then newBottom-top r else height r}
+    resize w=w {bounds=stretch (bounds w),restoredBounds=fmap stretch (restoredBounds w)}
 dispatchEvent (V.EvKey key mods) d | key `elem` [V.KChar '\t',V.KBackTab], V.MAlt `elem` mods =
   case dialog d of
     Just dg -> dialogEvent (V.EvKey (V.KChar '\t') [V.MShift | backwards]) dg d

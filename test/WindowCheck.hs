@@ -102,4 +102,26 @@ checks = do
   check "editor right edge sticks to the screen once reached"
     (rect touching==Just (Rect 55 3 25 10) && rect stuck==Just (Rect 35 3 45 10) &&
      rect (resizeTree 19 docked)==Just (Rect 19 1 61 23) && buffers stuck==buffers floating)
+  let resize size=fst . handleEvent (uncurry V.EvResize size)
+      grow=resize (100,40)
+      withRect r=modifyActive (\w -> w {bounds=r}) desktop
+      bottomOnly=withRect (Rect 5 14 30 10)
+      rightOnly=withRect (Rect 40 3 40 10)
+      unattached=withRect (Rect 5 3 30 10)
+      dockedMessages=setProblemsVisible True docked
+      grownMessages=grow dockedMessages
+      zoomed=fst (runCommand Zoom rightOnly)
+      restored=fst (runCommand Zoom (grow zoomed))
+  check "screen growth stretches windows touching both outer edges"
+    (rect (grow desktop)==Just (Rect 0 1 100 38) && buffers (grow desktop)==buffers desktop)
+  check "screen growth stretches only the attached axis"
+    (rect (grow bottomOnly)==Just (Rect 5 14 30 25) && rect (grow rightOnly)==Just (Rect 40 3 60 10))
+  check "screen growth leaves floating windows in place" (rect (grow unattached)==rect unattached)
+  check "edge attachment survives shrinking and regrowing"
+    (rect (grow (resize (80,25) (grow desktop)))==rect (grow desktop))
+  check "screen growth respects Files and the bottom Messages dock"
+    (rect grownMessages==Just (Rect 23 1 77 30) && problemsRect grownMessages==Rect 0 31 100 8 &&
+     fmap treeWidth (sideTree grownMessages)==Just 24)
+  check "zoom restores bounds with their original edge attachments"
+    (rect (grow zoomed)==Just (Rect 0 1 100 38) && rect restored==rect (grow rightOnly))
   putStrLn "window input checks passed"
