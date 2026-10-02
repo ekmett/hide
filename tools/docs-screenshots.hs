@@ -13,7 +13,10 @@ import System.Environment (getArgs, lookupEnv, setEnv, unsetEnv)
 import System.FilePath ((</>))
 import THC.Edit.App (applyEffects)
 import THC.Edit.Conversation (withConversationAt, conversationEffects, tickConversation)
-import THC.Edit.Debugger (withDebugger, debuggerEffects, tickDebugger)
+import THC.Edit.Debugger (withDebugger, debuggerEffects, tickDebugger, hdbOfferDialog, downloadsDialog)
+import qualified THC.Edit.Compilers as Compilers
+import qualified THC.Edit.HdbAcquisition as Hdb
+import qualified THC.Edit.Downloads as Downloads
 import THC.Edit.Model
 import qualified EditorDriver as Driver
 
@@ -25,6 +28,10 @@ main = do
       output = root </> "docs/site/screenshots"
   createDirectoryIfMissing True scratch
   createDirectoryIfMissing True output
+  hdbPlan<-if any (`elem` requested) ["hdb-download","downloads"] then do
+    compiler<-Compilers.compilerInfo root False "ghc" >>= either (fail . T.unpack) pure
+    Just <$> (Hdb.prepareHdb compiler >>= either (fail . T.unpack) pure)
+    else pure Nothing
   -- Live conversations require an explicit, caller-supplied provider configuration.
   agentConfig <- lookupEnv "THC_DOCS_AGENT_CONFIG"
   when ("conversation" `elem` requested) $ case agentConfig of
@@ -84,7 +91,17 @@ main = do
     -- Start on a short source declaration, with the package visible behind it.
     let desktop = modifyActive (\w -> w {scrollRow=23}) loaded
         scenes =
-          [ ("find-replace", \d -> command Find d >>= typeText "bufferLineAt" >>= key (V.KChar 'h') [V.MCtrl] >>= typeText "lineAt")
+          [ ("hdb-download", \d -> case hdbPlan of
+              Just plan->pure d {dialog=Just (hdbOfferDialog 1 plan)}
+              Nothing->fail "Request hdb-download explicitly")
+          -- Render the runtime's actual Downloads view from a deterministic
+          -- progress snapshot; documentation capture never fetches an asset.
+          , ("downloads", \d -> case hdbPlan of
+              Just plan->pure d {dialog=Just (downloadsDialog [Downloads.Download 1
+                ("hdb for GHC "<>Compilers.compilerVersion (Hdb.hdbCompiler plan))
+                (Downloads.DownloadRunning (Downloads.DownloadProgress "Downloading hdb" 5242880 (Just (Hdb.hdbAssetSize (Hdb.hdbAsset plan)))))] 0 Nothing)}
+              Nothing->fail "Request downloads explicitly")
+          , ("find-replace", \d -> command Find d >>= typeText "bufferLineAt" >>= key (V.KChar 'h') [V.MCtrl] >>= typeText "lineAt")
           , ("permission-diff", permissionDiff)
           , ("conversation", chat)
           , ("debug-step", debug)
@@ -97,7 +114,7 @@ main = do
           , ("toolchain", command ToolchainOptions)
           , ("git-commit", \d -> command GitDiff d {streamerMode=False} >>= command GitCommit >>= typeText "Document editor dialogs")
           ]
-    forM_ scenes $ \(name, open) -> if (null requested && name `elem` ["conversation","debug-step"]) || (not (null requested) && name `notElem` requested) then pure () else do
+    forM_ scenes $ \(name, open) -> if (null requested && name `elem` ["conversation","debug-step","hdb-download","downloads"]) || (not (null requested) && name `notElem` requested) then pure () else do
       shown <- open desktop
       capture effects scratch output name shown
       when (name=="debug-step") $ do

@@ -68,6 +68,7 @@ sessionOffset text n="Session: " `T.isPrefixOf` text && n<T.length (T.takeWhile 
 
 guestCommandAllowed :: Command -> Bool
 guestCommandAllowed cmd=case cmd of
+  DebugCommand action | privateDownloadAction action -> False
   GitDiff -> False
   GitCommit -> False
   AgentChoose{} -> False
@@ -91,6 +92,7 @@ guestEffectsAllowed=all allowed
     allowed AskGitCommit=False
     allowed WriteGitCommit{}=False
     allowed PermissionAction{}=False
+    allowed (DebugAction action _)=not (privateDownloadAction action)
     allowed (AgentAction action _)=agentActionAllowed action
     allowed (SaveDocument _ _ follow)=maybe True guestCommandAllowed follow
     allowed ReadBrowserClipboard=False
@@ -99,10 +101,14 @@ guestEffectsAllowed=all allowed
 protectedPurpose :: Purpose -> Bool
 protectedPurpose p=case p of
   PermissionDialog{} -> True
+  DebugDialog action -> privateDownloadAction action
   AgentDialog action -> not (agentActionAllowed action)
   DiscardDraft -> True
   Confirm command -> not (guestCommandAllowed command)
   _ -> False
+privateDownloadAction :: Text -> Bool
+privateDownloadAction action=action=="downloads" || "hdb-" `T.isPrefixOf` action
+
 guestModalBlocked :: Desktop -> Bool
 guestModalBlocked d=maybe False (protectedPurpose . purpose) (dialog d) || case (contextMenu d,contextKind d) of
   (Just _,AgentContext{}) -> True
@@ -173,6 +179,8 @@ cellAccess :: Desktop -> Int -> Int -> CellAccess
 cellAccess d x y=CellAccess (readableAt d x y) (pointerAllowedAt d x y)
 readableAt :: Desktop -> Int -> Int -> Bool
 readableAt d x y
+  | Just dg<-dialog d, DebugDialog action<-purpose dg, privateDownloadAction action,
+    inside (dialogRect d dg) x y || y==snd (screenSize d)-1=False
   | Just dg<-dialog d, PermissionDialog{}<-purpose dg, inside (dialogRect d dg) x y || y==snd (screenSize d)-1=False
   | otherwise=onScreen d x y && streamerReadableAt d x y && case dialog d of
   Just dg | inside (dialogRect d dg) x y -> True

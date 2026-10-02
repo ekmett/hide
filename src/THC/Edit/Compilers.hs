@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 module THC.Edit.Compilers
-  (Compiler(..), installedCompilers, compilerInfo, nativeVersions, recognizedCompiler, debuggerCompiler) where
+  (Compiler(..), installedCompilers, compilerInfo, nativeVersions, recognizedCompiler, debuggerCompiler, debuggerCompilerInfo) where
 
 import Control.Concurrent.Async (withAsync, wait)
 import Control.Exception (IOException, bracket, finally, try, catch)
@@ -25,6 +25,7 @@ import System.Process
 import System.Timeout (timeout)
 import Text.Read (readMaybe)
 import THC.Edit.Process (processCleanup)
+import THC.Edit.Downloads (managedToolRoot)
 
 data Compiler = Compiler { compilerVersion :: T.Text, compilerPath :: FilePath } deriving (Eq,Show)
 
@@ -114,6 +115,14 @@ compilerInfo root project command
 -- hdb wrappers validate their own GHC ABI; hdb --version reports its package only.
 debuggerCompiler :: FilePath -> Bool -> FilePath -> IO (Either T.Text (FilePath,[(String,String)]))
 debuggerCompiler root project command = do
+  result<-debuggerCompilerInfo root project command
+  pure $ result >>= \(compiler,adapter)->case adapter of
+    Just found->Right found
+    Nothing->Left ("No hdb-"<>compilerVersion compiler<>" or hdb executable found; install a matching debugger or use Adapter config.")
+
+-- A missing adapter is a concrete acquisition opportunity, not a compiler error.
+debuggerCompilerInfo :: FilePath -> Bool -> FilePath -> IO (Either T.Text (Compiler,Maybe (FilePath,[(String,String)])))
+debuggerCompilerInfo root project command = do
   resolved<-compilerInfo root project command
   case resolved of
     Left err -> pure (Left err)
@@ -126,13 +135,15 @@ debuggerCompiler root project command = do
           let directory=T.unpack (T.strip (T.pack library))
           exists<-if isAbsolute directory && cleanPath directory then doesDirectoryExist directory else pure False
           versioned<-findExecutable ("hdb-"++T.unpack (compilerVersion compiler))
-          adapter<-maybe (findExecutable "hdb") (pure . Just) versioned
+          external<-maybe (findExecutable "hdb") (pure . Just) versioned
+          managed<-managedToolRoot
+          adapter<-case (external,managed) of
+            (Nothing,Right cache)->findExecutable (cache </> "bin" </> ("hdb-"++T.unpack (compilerVersion compiler)))
+            _->pure external
           path<-fromMaybe "" <$> lookupEnv "PATH"
           pure $ if not exists then Left "The selected GHC reported an invalid library directory." else
-            case adapter of
-              Nothing -> Left ("No hdb-"<>compilerVersion compiler<>" or hdb executable found; install a matching debugger or use Adapter config.")
-              Just binary -> Right (binary,[("GHC_BIN",executable),("GHC_LIBDIR",directory),
-                ("PATH",takeDirectory executable++[searchPathSeparator]++path)])
+            Right (compiler {compilerPath=executable},fmap (\binary->(binary,[("GHC_BIN",executable),("GHC_LIBDIR",directory),
+                ("PATH",takeDirectory executable++[searchPathSeparator]++path)])) adapter)
         (Left err,_) -> pure (Left err)
         (_,Left err) -> pure (Left err)
         _ -> pure (Left "The selected compiler changed version during debugger preparation; retry.")

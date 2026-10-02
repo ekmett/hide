@@ -75,6 +75,7 @@ uses the THC installation and package selected in **Run > Target**. Choose an
 unused loopback port (default `4711`); the editor starts `thc run --dap-port PORT`,
 waits for its debugger, and configures your breakpoints before execution.
 This requires a THC build with the DAP instrument and `--dap-port` support.
+THC's DAP launch defaults to waiting for attachment and suspending initially.
 Build output is available in **Debug > Output** while it starts. The first
 launch can spend several minutes building and capturing dependencies.
 **Debug > Disconnect** stops that work; protocol response timing starts when
@@ -160,8 +161,28 @@ Running sessions keep their current toolchain until you launch again.
 [![Status-bar toolchain selector with THC, GHC and Target settings.](site/screenshots/toolchain.png)](site/screenshots/toolchain.png)
 
 With **GHC** selected, open the saved Haskell entry file and choose **Selected
-target** to run its `main` through `hdb` on PATH. Program arguments come from
-Target settings. hdb uses that file's cradle/component and its own compiled-in
+target** to run its `main` through a matching `hdb`. Program arguments come from
+Target settings. Existing `hdb-<GHC version>` or `hdb` executables on PATH take
+precedence over the editor's managed installation. If none is available, a
+matching official binary is offered for supported platforms and GHC versions.
+
+The offer shows the compiler, version, release URL, download size and destination.
+**Download and launch** accepts this specific transfer; **Not now** or Escape
+downloads nothing. The checksum and compiler ABI are checked before installation.
+
+[![Concrete hdb download offer with compiler, source and destination.](site/screenshots/hdb-download.png)](site/screenshots/hdb-download.png)
+
+**Tools > Downloads** shows progress, received bytes and failures. **Cancel selected**
+stops a pending transfer; closing the window lets it continue. After installation,
+the accepted launch continues with its original source, project, arguments and
+port. Changing the source, project or compiler settings, starting another launch,
+or stopping the debugger invalidates that continuation. The installed tool
+remains available for a later launch. See [Installation](install.md#matching-haskell-debugger)
+for the cache location and supported binary releases.
+
+[![Downloads progress with received bytes and Cancel selected.](site/screenshots/downloads.png)](site/screenshots/downloads.png)
+
+hdb uses that file's cradle/component and its own compiled-in
 GHC version. A customized GHC executable requires explicit **Adapter config**,
 so Selected target cannot silently substitute another compiler. Use **Adapter config**
 for a different entry point or additional GHC options.

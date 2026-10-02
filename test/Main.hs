@@ -42,6 +42,9 @@ import qualified HexCheck
 import qualified DAPCheck
 import qualified DebuggerCheck
 import qualified CompletionCheck
+import qualified DownloadsCheck
+import qualified HdbAcquisitionCheck
+import qualified DebuggerAcquisitionCheck
 import qualified CompilersCheck
 import qualified BuildCheck
 import qualified ProjectBrowserCheck
@@ -118,6 +121,9 @@ main = do
   DAPCheck.checks
   DebuggerCheck.checks
   CompletionCheck.checks
+  DownloadsCheck.checks
+  HdbAcquisitionCheck.checks
+  DebuggerAcquisitionCheck.checks
   CompilersCheck.checks
   BuildCheck.checks
   RunCheck.checks

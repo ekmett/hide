@@ -94,6 +94,29 @@ cabal build all -f-window -f-web -f-terminal
 This still includes sessions, SSH editing, HLS, Git and conversations. A
 browser-only build can use `-f-window -f-terminal`, avoiding both native libraries.
 
+## Matching Haskell debugger
+
+When a selected GHC has no available hdb adapter, the editor can offer a matching
+[official hdb binary](https://github.com/well-typed/haskell-debugger/releases).
+Accept the concrete download offer to fetch it in the background. The Downloads
+window shows progress, failures and cancellation; declining downloads nothing.
+There is no automatic build from source.
+
+The current catalog contains hdb 0.14.0.0 for GHC **9.14.1**, on macOS Intel/Apple
+Silicon and the published Linux distributions. Other exact GHC versions,
+unlisted platforms and Windows currently require a separately installed adapter.
+The editor verifies the pinned SHA256 and retains the upstream wrapper, which
+checks the selected GHC's version and boot-library ABI before reporting ready.
+A matching version number alone does not guarantee ABI compatibility.
+
+Tools share THC's CBD storage root: an absolute `THC_CACHE_HOME` override,
+`~/Library/Caches/thc` on macOS, or the platform XDG cache directory's `thc`
+subdirectory elsewhere. Versioned launchers live in `bin/hdb-9.14.1`; complete
+bundles live under `tools/hdb/<release>/<platform>/`. Existing unmanaged launchers
+are never overwritten. These tools can be downloaded again if the cache is
+cleared. Acquisition needs `curl`, `tar`, and `shasum` on macOS or `sha256sum` on
+Linux; it does not change shell startup files or `PATH`.
+
 ## Embedded terminal
 
 Embedded terminals enable **File > Terminal**, **Run > Run** and ACP
