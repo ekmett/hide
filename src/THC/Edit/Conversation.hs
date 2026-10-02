@@ -83,7 +83,7 @@ data State = State
   , agentInitialized :: Value, agentConfig :: Value
   , streamTails :: M.Map Text Text
   , lastAgentSync :: Maybe (FilePath,Text,AH.Capabilities,Bool)
-  , childRecords :: M.Map Text [Record], childRender :: Maybe (Text,Int,Value)
+  , childRecords :: M.Map Text [Record], childRender :: Maybe (Text,Int,Value), childWidths :: M.Map Text Int
   , expandedToolRuns :: S.Set (Text,Text)
   , childControls :: M.Map Text (Maybe Text,Async (Either Text ()))
   , childCancels :: M.Map Text (Async (Either Text ()))
@@ -123,7 +123,7 @@ withConversationAt root action = C.withConsoles $ \consoles -> Jobs.withBuildJob
     , ownedTerminals=S.empty,terminalWaiters=M.empty,lastMessageAt=Nothing
     , lastRender=Nothing,lastSession=remembered,waitingQuestion=Nothing,lastQuestion=Nothing
     , deliveredContext=Nothing,compilerDiscovery=Nothing,fileCaptures=[],retiringRequests=[],promptPreparation=Nothing,buildSettingsCache=Nothing,buildSettingsVersion=0,buildSettingsWorker=Nothing,buildSettingsChecked=Nothing,resumeRecordPath=resumePath,shellLaunches=[],directoryAgents=[],agentDelivery=Nothing
-    , agentInitialized=Null,agentConfig=Null,streamTails=M.empty,lastAgentSync=Nothing,childRecords=M.empty,childRender=Nothing,childCancels=M.empty,childControls=M.empty,expandedToolRuns=S.empty }
+    , agentInitialized=Null,agentConfig=Null,streamTails=M.empty,lastAgentSync=Nothing,childRecords=M.empty,childRender=Nothing,childWidths=M.empty,childCancels=M.empty,childControls=M.empty,expandedToolRuns=S.empty }
   AR.withAgentRuntime root (provider <$> readIORef ref) $ \agents ->
     bracket (pure (ConversationState directory ref consoles jobs agents)) closeConversation action
 
@@ -260,7 +260,9 @@ compilerMenu preserve saved compilers d = opened {contextMenu=fmap (\(r,_) -> (r
     opened=openContext (ToolchainContext rows) x y d
 
 conversationEffects :: ConversationState -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> [Effect] -> IO (Bool,Desktop)
-conversationEffects runtime@(ConversationState _ ref _ _ _) fallback = foldM apply . (False,)
+conversationEffects runtime@(ConversationState _ ref _ _ _) fallback original effects = do
+  (quit,updated)<-foldM apply (False,original) effects
+  if quit then pure (True,updated) else (False,) <$> refreshConversationLayout runtime updated
   where
     apply state@(True,_) _=pure state
     apply (_,d) (AgentAction "edit-context" ("0":scope:_)) = do
@@ -673,23 +675,45 @@ tickConversation runtime@(ConversationState directory ref consoles jobs _) origi
       forM_ (lookup token (approvals current)) $ \approval -> denyChild approval >> mapM_ (\client -> cancelApproval client approval) (connection current)
       modifyIORef' ref (\state -> state {approvals=filter ((/=token).fst) (approvals state),presented=Nothing})
     _ -> pure ()
+  laidOut<-refreshConversationLayout runtime advanced
   afterDismiss<-readIORef ref
-  -- The transcript is immutable. Idle navigation need not compare every old
-  -- message and tool JSON value just to discover that it has not changed.
-  transcriptIdentity<-makeStableName =<< evaluate (transcript afterDismiss)
-  let widthNow=conversationWidth advanced
-      renderKey=(widthNow,session afterDismiss,transcriptIdentity)
-      -- A fresh runtime does not own the recovered transcript. Keep that view
-      -- and its draft until a human connects, or a new question needs painting.
-      ownsView=not (isNothing (connection afterDismiss)) || not (null (transcript afterDismiss)) || chatQuestion advanced/=Nothing || lastQuestion afterDismiss/=Nothing
-      redraw=ownsView && (lastRender afterDismiss/=Just renderKey || lastQuestion afterDismiss/=chatQuestion advanced)
-      rendered=(if redraw then paint False afterDismiss advanced else advanced) {agentReplying=busy afterDismiss,agentQueued=length (queuedQueries afterDismiss)}
-  when redraw (modifyIORef' ref (\state -> state {lastRender=Just renderKey,lastQuestion=chatQuestion rendered}))
+  let rendered=laidOut {agentReplying=busy afterDismiss,agentQueued=length (queuedQueries afterDismiss)}
   syncConversationAgent runtime
   visible<-refreshChildConversation runtime rendered
   shown<-present runtime visible
   notice<-AR.runtimeNotice (conversationAgents runtime)
   pure (maybe shown (\text -> shown {status=text}) notice)
+
+-- Window changes also arrive in effect batches with no protocol actions. Reflow
+-- before returning that desktop, so its bubbles and composer use the same bounds.
+-- The immutable transcript key keeps mouse motion and idle ticks parse-free.
+refreshConversationLayout :: ConversationState -> Desktop -> IO Desktop
+refreshConversationLayout (ConversationState _ ref _ _ _) original = do
+  state<-readIORef ref
+  transcriptIdentity<-makeStableName =<< evaluate (transcript state)
+  let widthNow=conversationWidthFor "" original
+      renderKey=(widthNow,session state,transcriptIdentity)
+      -- A recovered view has no raw transcript owned by this runtime yet.
+      ownsView=not (isNothing (connection state)) || not (null (transcript state)) || chatQuestion original/=Nothing || lastQuestion state/=Nothing
+      redraw=ownsView && (lastRender state/=Just renderKey || lastQuestion state/=chatQuestion original)
+      primary=if redraw then paint False state original else original
+  when redraw (modifyIORef' ref (\current -> current {lastRender=Just renderKey,lastQuestion=chatQuestion primary}))
+  -- Cached children can remain visible beside the selected conversation. Their
+  -- geometry is independent, and reflow needs no provider/history round trip.
+  foldM (reflowChild state) primary (M.toList (childRecords state))
+  where
+    reflowChild state desktop (target,records) =
+      case conversationDocument target desktop of
+        Just (bid,_) | any ((==bid).bufferId) (windows desktop),
+            let columns=conversationWidthFor target desktop,
+            M.lookup target (childWidths state)/=Just columns -> do
+          modifyIORef' ref (\current->current
+            { childWidths=M.insert target columns (childWidths current)
+            , childRender=case childRender current of
+                Just (shown,_,entry) | shown==target -> Just (shown,columns,entry)
+                other -> other })
+          pure (paintView target False state {transcript=records} desktop)
+        _ -> pure desktop
 
 -- Acquisition owns each child until the UI adopts it. Session teardown cancels
 -- pending launches and closes any completed child that has not been adopted.
@@ -1093,7 +1117,7 @@ paintView :: Text -> Bool -> State -> Desktop -> Desktop
 paintView target force s original
   | not force && isNothing (conversationDocument target d) = original
   | otherwise = let
-      width=conversationWidth d
+      width=conversationWidthFor target d
       header=if T.null target then "Session: "<>fromMaybe "not connected" (session s)<>"\n" else "No messages yet.\n"
       records=zip [0..] (transcript s)
       chunks=if null records then [(plain Comment header,Nothing,[]) | isNothing (chatQuestion d)] else renderRecords width records
@@ -1347,9 +1371,15 @@ runTarget directory consoles jobs action d = do
         Right commands -> Jobs.startBuildJob jobs (T.pack (show task)) root commands d
 
 conversationWidth :: Desktop -> Int
-conversationWidth d = max 1 $ case [width (bounds w)-2 | w<-windows d,Just doc<-[M.lookup (bufferId w) (buffers d)],documentLabel doc==Just "Conversation"] of
-  size:_ -> size
+conversationWidth d = conversationWidthFor (conversationTarget d) d
+
+conversationWidthFor :: Text -> Desktop -> Int
+conversationWidthFor target d = max 1 $ case matching++available of
+  w:_ -> width (bounds w)-2
   [] -> fst (screenSize d)-treeWidthOf d-4
+  where
+    matching=[w | Just (bid,_)<-[conversationDocument target d],w<-windows d,bufferId w==bid]
+    available=[w | w<-windows d,Just doc<-[M.lookup (bufferId w) (buffers d)],documentLabel doc==Just "Conversation"]
 
 conversationServices :: ConversationState -> (FilePath,C.Consoles,Jobs.BuildJobs)
 conversationServices (ConversationState directory _ consoles jobs _)=(directory,consoles,jobs)
@@ -1624,7 +1654,7 @@ refreshChildConversation (ConversationState _ ref _ _ agents) d=do
                   retain (Activity ident value updates _)=Activity ident value updates (S.member ident oldExpanded)
                   retain record=record
                   records=Pause metadata:map retain (foldl (childHistoryRecord name) [] events)
-              modifyIORef' ref (\s->s {childRecords=M.insert target records (childRecords s),childRender=Just signature})
+              modifyIORef' ref (\s->s {childRecords=M.insert target records (childRecords s),childRender=Just signature,childWidths=M.insert target (conversationWidthFor target projected) (childWidths s)})
               pure (paintView target False current {transcript=records} projected)
 
 -- The Hub caps each page by bytes as well as count. Follow pages within the

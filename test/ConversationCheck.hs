@@ -3,8 +3,8 @@ module ConversationCheck (checks) where
 
 import Control.Concurrent (threadDelay)
 
-import Control.Concurrent.Async (withAsync, cancel, poll, wait)
-import Control.Exception (bracket)
+import Control.Concurrent.Async (Async, withAsync, cancel, poll, wait)
+import Control.Exception (bracket, evaluate)
 import Control.Monad (unless, when, forM_, foldM)
 import Data.Aeson hiding (Number)
 import Data.Aeson.Types (parseMaybe)
@@ -13,7 +13,7 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as B8
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.Map.Strict as M
-import Data.Maybe (mapMaybe, fromMaybe)
+import Data.Maybe (mapMaybe, fromMaybe, listToMaybe)
 import Data.Time (UTCTime(..), fromGregorian, secondsToDiffTime, minutesToTimeZone, addUTCTime)
 import Data.List (findIndex)
 import qualified Data.Text as T
@@ -22,9 +22,11 @@ import qualified Graphics.Vty as V
 import System.Directory
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.FilePath ((</>))
-import System.IO (hClose, openTempFile)
+import System.IO (hClose, hFlush, openTempFile)
 #ifndef mingw32_HOST_OS
-import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar, isEmptyMVar)
+import Control.Concurrent.MVar (MVar, newEmptyMVar, putMVar, takeMVar, isEmptyMVar)
+import System.Process (withCreateProcess, proc, CreateProcess(..), StdStream(..), waitForProcess)
+import System.Exit (ExitCode(..))
 import System.Posix.Files (createNamedPipe)
 import qualified System.Posix.IO as Posix
 #endif
@@ -35,6 +37,9 @@ import THC.Edit.Buffer
 import qualified THC.Edit.App as App
 import THC.Edit.GuestAccess (guestCommandAllowed, protectedBuffer)
 import THC.Edit.Conversation
+import qualified THC.Edit.AgentHub as AH
+import qualified THC.Edit.AgentRuntime as AR
+import System.Mem.StableName (makeStableName)
 import THC.Edit.Files
 import THC.Edit.Model hiding (prompt)
 import THC.Edit.Markdown (renderMarkdown)
@@ -154,6 +159,38 @@ checks = bracket temporary removePathForcibly $ \root ->
             tickConversation runtime next
           _ -> error ("Missing inline action "++T.unpack action)
     withConversation $ \runtime -> do
+      let longReply=T.unwords (replicate 90 "window-width")
+          rawShell="printf '%s\\n' 'literal λ'\n\tprintf 'tail  '  \n"
+          question=longReply<>"\n\n```sh\n"<>rawShell<>"```"
+      (initial,_)<-chatTool runtime (initialDesktop (80,25)) "ask_user" (object ["question" .= question])
+      forM_ [150,32,120] $ \columns -> do
+        let resized=modifyActive (\w->w {bounds=Rect 0 1 columns 23}) initial {screenSize=(columns,25)}
+        (_,reflowed)<-conversationEffects runtime fallback resized []
+        let doc=fromMaybe (error "missing reflowed conversation") (activeDocument reflowed)
+            text=contents (documentBuffer doc)
+            bubbleRows=[T.pack [c | (c,BubbleText _ _ _) <- row] | row<-splitStyled (documentHighlight doc)]
+            nonempty=filter (not . T.null) bubbleRows
+            blockRows=[(i,c) | (i,(c,BubbleText _ _ (CodeStyle True _)))<-zip [0..] (documentHighlight doc)]
+            blocks=documentShellBlocks doc
+        check "chat reflows to the resized window before the next timer tick"
+          (maximum (0:map T.length nonempty)>columns-22 && all ((<=columns-2).T.length) nonempty)
+        check "reflow preserves the whole shell source and maps its decorated cells"
+          (map (\(_,_,dialect,raw)->(dialect,raw)) blocks==[("sh",rawShell)] &&
+           all (\(i,_)->any (\(start,end,_,_)->i>=start && i<end) blocks) blockRows)
+        let selected=modifyActive (\w->w {selection=Selection 0 (T.length text)}) reflowed {composerFocused=False}
+            copied=fst (runCommand Copy selected)
+        check "copy after chat reflow still excludes bubble furniture"
+          ("window-width" `T.isInfixOf` clipboard copied && not ("┌" `T.isInfixOf` clipboard copied) && not ("```" `T.isInfixOf` clipboard copied))
+        stable<-tickConversation runtime reflowed
+        check "timer tick keeps immediately reflowed layout stable" ((documentBuffer <$> activeDocument stable)==Just (documentBuffer doc))
+    forM_ [32,120,150] $ \columns -> do
+      let outgoing=renderReply False columns True (T.unwords (replicate 90 "window-width"))
+          incoming=renderReply False columns False (T.unwords (replicate 90 "window-width"))
+          firstRow=takeWhile ((/='\n').fst)
+      check "wide user bubbles anchor on the right and replies on the left"
+        (length (firstRow outgoing)==columns && maybe False (\(_,style)->case style of BubbleText _ False _->False; _->True) (listToMaybe incoming) &&
+         maximum (map (length . filter (\(_,style)->case style of BubbleText{}->True; _->False)) (splitStyled incoming))>columns-20)
+    withConversation $ \runtime -> do
       agents <- send runtime "directory" [] savedDraft
       check "Agents directory exposes an explicit reconnect action"
         (maybe False (elem "Reconnect" . buttons) (dialog agents))
@@ -221,17 +258,12 @@ checks = bracket temporary removePathForcibly $ \root ->
     -- made while its request was waiting behind that read.
     let pipe=root </> "slow-source"
     createNamedPipe pipe 0o600
-    opened<-newEmptyMVar
-    release<-newEmptyMVar
-    withAsync (bracket (Posix.openFd pipe Posix.ReadWrite Posix.defaultFileFlags >>= \fd -> Posix.setFdOption fd Posix.CloseOnExec True >> Posix.fdToHandle fd) hClose $ \handle -> do
-      putMVar opened ()
-      takeMVar release
-      BS.hPut handle "held read\n") $ \writer -> withConversation $ \runtime -> do
-        takeMVar opened
+    withHeldRead server pipe $ \opened release writer -> withConversation $ \runtime -> do
         configured<-configure runtime ("yes"::T.Text) desktop
         started<-prompt runtime "slow-files" configured
         responsive<-await runtime "provider update behind held file read"
           (T.isInfixOf "file requests sent" . conversationText) started
+        waitForReader opened
         let edited=insertText "during read " (focusSource responsive)
         composing<-send runtime "show" [] edited
         let typed=fst (handleEvent (V.EvPaste "draft stays responsive") composing {composerFocused=True})
@@ -251,16 +283,11 @@ checks = bracket temporary removePathForcibly $ \root ->
           (maybe False hasError writeResult && dialog completed==Nothing)
         check "stale asynchronous write leaves disk intact" . (=="disk original\n") =<< BS.readFile source
     forM_ ["slow-replaced","slow-private"] $ \scenario -> do
-      held<-newEmptyMVar
-      releaseCapture<-newEmptyMVar
-      withAsync (bracket (Posix.openFd pipe Posix.ReadWrite Posix.defaultFileFlags >>= \fd -> Posix.setFdOption fd Posix.CloseOnExec True >> Posix.fdToHandle fd) hClose $ \handle -> do
-        putMVar held ()
-        takeMVar releaseCapture
-        BS.hPut handle "held read\n") $ \writer -> withConversation $ \runtime -> do
-          takeMVar held
+      withHeldRead server pipe $ \held releaseCapture writer -> withConversation $ \runtime -> do
           configured<-configure runtime ("yes"::T.Text) desktop
           started<-prompt runtime scenario configured
           waiting<-await runtime "prepared read behind FIFO head" (T.isInfixOf "guarded requests sent" . conversationText) started
+          waitForReader held
           let guarded=if scenario=="slow-private" then waiting {guestPrivatePaths=source:guestPrivatePaths waiting}
                 else waiting {buffers=M.map (\doc->if fmap filePath (documentFile doc)==Just source
                   then doc {documentBuffer=(newBuffer "same revision replacement") {revision=revision (documentBuffer doc)}} else doc) (buffers waiting)}
@@ -671,6 +698,64 @@ checks = bracket temporary removePathForcibly $ \root ->
     globalProvider<-decodeStrict' <$> BS.readFile (settings </> "agents.json")
     check "resuming a saved provider does not rewrite global configuration"
       ((globalProvider >>= field "executable")==Just ("not-the-saved-provider"::T.Text))
+    withConversation $ \runtime -> do
+      configured<-configure runtime ("yes"::T.Text) desktop
+      answered<-prompt runtime ("wide\n"<>T.unwords (replicate 90 "user-width")) configured >>= done runtime
+      forM_ [150,36,120] $ \columns -> do
+        let resized=fst (handleEvent (V.EvResize columns 30) answered)
+            (zoomed,effects)=runCommand Zoom resized
+        (_,effected)<-conversationEffects runtime fallback zoomed effects
+        shown<-tickConversation runtime effected
+        let doc=fromMaybe (error "missing resized live conversation") (activeDocument shown)
+            win=fromMaybe (error "missing resized live window") (activeWindow shown)
+            available=width (bounds win)-2
+            rows=splitStyled (documentHighlight doc)
+            sent row=any (\(_,style)->case style of BubbleText _ True _->True; _->False) row
+            received row=any (\(_,style)->case style of BubbleText _ False _->True; _->False) row
+            columnsOf row=let text=T.pack (map fst row) in displayColumn text (T.length text)
+        check "resize then Zoom anchors live user bubbles at the right window edge"
+          (not (null (filter sent rows)) && all ((==available).columnsOf) (filter sent rows))
+        check "resize then Zoom lets long live replies span the available window"
+          (maximum (0:map columnsOf (filter received rows))>available-16 && all ((<=available).columnsOf) rows)
+        check "live reflow preserves exact shell payload"
+          (map (\(_,_,language,raw)->(language,raw)) (documentShellBlocks doc)==[("sh","printf 'live λ'\n")])
+
+      let hub=AR.agentHub (conversationAgents runtime)
+          caps=AH.Capabilities False False False []
+          driver=AH.AgentDriver root "layout-fixture" caps (const (pure (Right caps)))
+            (const (pure (Right Null))) (pure ()) (pure ()) (const (pure (Right Null)))
+      child<-AH.registerAgent hub "Layout child" root driver >>= either (error . T.unpack) pure
+      ticket<-AH.sendAgent hub AH.Human child (T.unwords (replicate 90 "child-user")) >>= either (error . T.unpack) pure
+      _<-AH.waitAgent hub AH.Human child ticket 2000 >>= either (error . T.unpack) pure
+      AH.recordAgentEvent hub child "output" (object ["text" .= (T.unwords (replicate 90 ("child-reply"::T.Text))<>"\n\n```sh\nprintf 'child λ'\n```" :: T.Text)])
+      childView<-tickConversation runtime (selectConversationView (AH.agentIdText child) "Layout child" answered)
+      let (primaryId,_)=fromMaybe (error "primary view missing") (conversationDocument "" childView)
+          (childId,_)=fromMaybe (error "child view missing") (conversationDocument (AH.agentIdText child) childView)
+          baseWindow=fromMaybe (error "child window missing") (activeWindow childView)
+          paired primaryColumns childColumns=childView
+            { conversationTarget=""
+            , windows=[baseWindow {bufferId=childId,bounds=(bounds baseWindow) {width=childColumns}},
+                baseWindow {windowId=windowId baseWindow+100,bufferId=primaryId,bounds=(bounds baseWindow) {width=primaryColumns}}] }
+          bufferIdentity bid d=makeStableName =<< evaluate (documentBuffer (fromMaybe (error "chat buffer missing") (M.lookup bid (buffers d))))
+      forM_ [(148,62),(43,126)] $ \(primaryColumns,childColumns) -> do
+        shown<-tickConversation runtime (paired primaryColumns childColumns)
+        forM_ [(primaryId,primaryColumns,"printf 'live λ'\n"),(childId,childColumns,"printf 'child λ'\n")] $ \(bid,columns,body) -> do
+          let doc=fromMaybe (error "visible chat missing") (M.lookup bid (buffers shown))
+              rows=splitStyled (documentHighlight doc)
+              sent row=any (\(_,style)->case style of BubbleText _ True _->True; _->False) row
+              received row=any (\(_,style)->case style of BubbleText _ False _->True; _->False) row
+              columnsOf row=let text=T.pack (map fst row) in displayColumn text (T.length text)
+          check "simultaneously visible chats anchor user bubbles to their own right edge"
+            (not (null (filter sent rows)) && all ((==columns-2).columnsOf) (filter sent rows))
+          check "inactive child and primary replies reflow at their own window width"
+            (maximum (0:map columnsOf (filter received rows))>columns-18 && all ((<=columns-2).columnsOf) rows)
+          check "each resized target retains its own exact executable shell body"
+            (map (\(_,_,_,raw)->raw) (documentShellBlocks doc)==[body])
+        before<-mapM (\bid->bufferIdentity bid shown) [primaryId,childId]
+        unchanged<-tickConversation runtime shown
+        after<-mapM (\bid->bufferIdentity bid unchanged) [primaryId,childId]
+        check "unchanged visible widths preserve rendered buffer identities" (before==after)
+
   where
     restore=maybe (unsetEnv "XDG_CONFIG_HOME") (setEnv "XDG_CONFIG_HOME")
     restoreEnvironment name=maybe (unsetEnv name) (setEnv name)
@@ -706,9 +791,44 @@ temporary=do
   createDirectory path
   canonicalizePath path
 
+#ifndef mingw32_HOST_OS
+-- A child process can block opening the write end without blocking a GHC
+-- capability. Its acknowledgement proves that the capture reader has opened;
+-- only the explicit gate releases the payload and EOF.
+withHeldRead :: FilePath -> FilePath -> (MVar () -> MVar () -> Async () -> IO a) -> IO a
+withHeldRead server pipe action =
+  withCreateProcess (proc "python3" [server,"held-pipe-writer",pipe])
+    {std_in=CreatePipe,std_out=CreatePipe} $ \input output _ child ->
+      case (input,output) of
+        (Just gate,Just ready) -> do
+          opened<-newEmptyMVar
+          release<-newEmptyMVar
+          withAsync (do
+            marker<-B8.hGetLine ready
+            check "held read child acknowledges actual reader" (marker=="reader-ready")
+            putMVar opened ()
+            takeMVar release
+            BS.hPut gate "!"
+            hFlush gate
+            code<-waitForProcess child
+            check "held read child exits successfully" (code==ExitSuccess)) $ action opened release
+        _ -> error "Held read child pipes missing"
+
+waitForReader :: MVar () -> IO ()
+waitForReader ready = do
+  result<-timeout 3000000 (takeMVar ready)
+  check "capture reader opens held FIFO before payload release" (result==Just ())
+#endif
+
 providerScript :: String
 providerScript=unlines
   [ "import json,os,sys"
+  , "if len(sys.argv)==3 and sys.argv[1]=='held-pipe-writer':"
+  , "  with open(sys.argv[2],'wb',buffering=0) as output:"
+  , "    print('reader-ready',flush=True)"
+  , "    assert sys.stdin.buffer.read(1)==b'!'"
+  , "    output.write(b'held read\\n')"
+  , "  sys.exit(0)"
   , "log=open(os.environ['THC_LOG'],'a',buffering=1)"
   , "sid='fixture-session'; prompt=None; serial=0; terminal_serial=0; scenario=''"
   , "model='fixture-model'; effort='high'"
@@ -743,6 +863,9 @@ providerScript=unlines
   , "      update({'sessionUpdate':'usage_update','used':300000,'size':400000})"
   , "      update({'sessionUpdate':'usage_update','used':148000,'size':400000})"
   , "      update({'sessionUpdate':'usage_update','used':-1,'size':0})"
+  , "      finish()"
+  , "    elif scenario=='wide':"
+  , "      update({'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':('reply-width '*90)+'\\n\\n```sh\\nprintf \\\'live λ\\\'\\n```'}})"
   , "      finish()"
   , "    elif scenario=='tool-run':"
   , "      for n,title in enumerate(['Read files','Run tests','Check output']):"
@@ -798,3 +921,8 @@ providerScript=unlines
   , "    elif ident.startswith('terminal-release-'): call('terminal-after-release-'+str(terminal_serial),'terminal/output',{'terminalId':tid})"
   , "    elif ident.startswith('terminal-after-release-'): finish()"
   ]
+
+splitStyled :: [(Char,Style)] -> [[(Char,Style)]]
+splitStyled cells=case break ((=='\n').fst) cells of
+  (row,[]) -> [row]
+  (row,_:rest) -> row:splitStyled rest
