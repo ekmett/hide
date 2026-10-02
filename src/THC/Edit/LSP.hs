@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module THC.Edit.LSP
   ( Client, Event(..), startClient, stopClient, syncDocuments, notifySaved, request, pollEvents, serverCapabilities
-  , executeCommand, replyEdit, retireClient
+  , executeCommand, replyEdit, retireClient, retireClientAfterReplies
   , fileUri, uriFilePath, offsetPosition, positionOffset, positionValue
   , bufferOffsetPosition, bufferPositionOffset, bufferPositionValue
   ) where
@@ -34,13 +34,13 @@ import THC.Edit.Buffer (Buffer, bufferLineColumn, bufferLineOffset, bufferLineAt
 
 data Event = Response Int Value | ApplyEdit Int Value Value | Diagnostics FilePath (Maybe Int) Value | ServerError Text
   deriving (Eq, Show)
-data Command = Documents [(FilePath,Int,Text)] | Request Int Text Value | Saved FilePath | Reply Value
+data Command = Documents [(FilePath,Int,Text)] | Request Int Text Value | Saved FilePath | Reply Value | Barrier (MVar ())
 
 data Client = Client
   { commands :: Chan Command, events :: MVar (Seq.Seq Event), nextId :: MVar Int
   , unavailable :: MVar (Maybe Text)
   , serverCapabilities :: IO Value, closeClient :: IO ()
-  , commandOwner :: MVar (Maybe Int), replyEdit :: Value -> Bool -> Maybe Text -> IO (), retireClient :: IO (MVar ())
+  , commandOwner :: MVar (Maybe Int), replyEdit :: Value -> Bool -> Maybe Text -> IO (), retireClient :: IO (MVar ()), retireClientAfterReplies :: IO (MVar ())
   }
 
 -- Initialization and all subsequent writes happen off the UI thread.
@@ -165,12 +165,17 @@ startClient root = mask $ \restore -> do
         reply ident applied reason = writeChan queue (Reply (object
           ["jsonrpc" .= ("2.0" :: Text),"id" .= ident,"result" .= object
             (["applied" .= applied] ++ maybe [] (\text -> ["failureReason" .= text]) reason)]))
-        retire = mask_ $ do
+        retire drainReplies = mask_ $ do
           modifyMVar_ unavailableState (const (pure (Just "HLS command transport retired; starting a fresh server.")))
           modifyMVar_ ownerState (const (pure Nothing))
-          void (forkIO stop)
+          drained<-newEmptyMVar
+          when drainReplies (writeChan queue (Barrier drained))
+          -- A final executeCommand response can arrive before the server reads
+          -- our preceding applyEdit replies. Flush that FIFO off the UI thread;
+          -- a broken or blocked writer still has a bounded retirement lifetime.
+          void (forkIO ((when drainReplies (void (timeout 250000 (readMVar drained)))) `finally` stop))
           pure stopDone
-    pure (Client queue inbox counter unavailableState (readMVar capabilitiesState) stop ownerState reply retire)
+    pure (Client queue inbox counter unavailableState (readMVar capabilitiesState) stop ownerState reply (retire False) (retire True))
     ) `onException` cleanup
 
 stopClient :: Client -> IO ()
@@ -217,6 +222,7 @@ writeCommands :: (Text -> Value -> IO ()) -> (Int -> Text -> Value -> IO ()) -> 
 writeCommands notify call send queue previous = do
   command <- readChan queue
   case command of
+    Barrier done -> putMVar done () >> writeCommands notify call send queue previous
     Reply value -> send value >> writeCommands notify call send queue previous
     Saved path -> notify "textDocument/didSave" (object ["textDocument" .= object ["uri" .= fileUri path]]) >> writeCommands notify call send queue previous
     Request ident method params -> call ident method params >> writeCommands notify call send queue previous

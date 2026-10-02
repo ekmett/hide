@@ -1,5 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
-module ToolingCheck (checks, diagnosticCacheChecks, startupChecks) where
+module ToolingCheck (checks, diagnosticCacheChecks, startupChecks, workspaceEditChecks, commandChecks) where
 import Control.Monad (unless, when, forM_, replicateM, foldM, void)
 import Control.Concurrent (threadDelay, newEmptyMVar, readMVar, putMVar, tryPutMVar, tryReadMVar)
 import Control.Concurrent.Async (withAsync, poll, wait, cancel)
@@ -19,7 +19,7 @@ import System.FilePath ((</>))
 import System.IO (openTempFile, hClose)
 import System.Timeout (timeout)
 import THC.Edit.Buffer
-import THC.Edit.Files (FileState(..))
+import THC.Edit.Files (FileState(..), loadFile, saveFile)
 import THC.Edit.Model
 import qualified THC.Edit.LSP as L
 import THC.Edit.Tooling
@@ -78,7 +78,7 @@ checks = do
         check "editing while preparing cancels rename" (status stale=="Rename target changed; request it again." && buffers stale==buffers changed)
       entered<-newEmptyMVar; release<-newEmptyMVar
       let holdSnapshot _ _=putMVar entered () >> readMVar release >> pure M.empty
-      withToolingUsing (const (pure root)) L.startClient holdSnapshot $ \tooling -> do
+      withToolingUsing (const (pure root)) L.startClient holdSnapshot loadFile $ \tooling -> do
         (_,requested)<-toolingEffects tooling core desktop [LanguageRequest (RenameAt "bar")]
         let awaitPreparation current=do
               next<-tickTooling tooling core current
@@ -92,6 +92,7 @@ checks = do
   check "HLS exposes code action discovery and checked application"
     (all (`elem` toolingToolNames) ["lsp_code_actions","lsp_apply_code_action"])
   startupChecks
+  workspaceEditChecks
   diagnosticCacheChecks
   mcpChecks
   codeActionChecks
@@ -147,7 +148,7 @@ startupChecks = bracket temporary removePathForcibly $ \root -> do
           putMVar started ()
           readMVar startupGate
           L.startClient path
-    withToolingUsing discover launch (\_ _->pure M.empty) $ \tooling -> do
+    withToolingUsing discover launch (\_ _->pure M.empty) loadFile $ \tooling -> do
       (queued,answer)<-bounded "cold HLS dispatch blocked" (toolingTool tooling core desktop "lsp_hover" arguments)
       bounded "discovery was not started" (readMVar discovered)
       ticked<-bounded "held discovery blocked tick" (tickTooling tooling core queued)
@@ -177,14 +178,14 @@ startupChecks = bracket temporary removePathForcibly $ \root -> do
           , base {buffers=M.empty,windows=[]}
           , base {guestPrivatePaths=[source]}] $ \changed->do
       gate<-newEmptyMVar
-      withToolingUsing (\_->readMVar gate >> pure root) L.startClient (\_ _->pure M.empty) $ \tooling->do
+      withToolingUsing (\_->readMVar gate >> pure root) L.startClient (\_ _->pure M.empty) loadFile $ \tooling->do
         (_,answer)<-toolingTool tooling core base "lsp_hover" arguments
         stale<-tickTooling tooling core changed
         reply<-bounded "stale deferred request did not fail" answer
         check "stale startup cannot dispatch or mutate" (isLeft reply && buffers stale==buffers changed)
     -- Overflow, waiter cancellation and restart all complete explicitly.
     gate<-newEmptyMVar; cancelled<-newEmptyMVar
-    withToolingUsing (\_->readMVar gate `finally` void (tryPutMVar cancelled ()) >> pure root) L.startClient (\_ _->pure M.empty) $ \tooling->do
+    withToolingUsing (\_->readMVar gate `finally` void (tryPutMVar cancelled ()) >> pure root) L.startClient (\_ _->pure M.empty) loadFile $ \tooling->do
       requests<-replicateM 32 (snd <$> toolingTool tooling core base "lsp_hover" arguments)
       (_,overflow)<-toolingTool tooling core base "lsp_hover" arguments
       check "startup queue overflow is explicit" . isLeft =<< bounded "overflow blocked" overflow
@@ -205,7 +206,7 @@ startupChecks = bracket temporary removePathForcibly $ \root -> do
           client<-L.startClient path
           when (count==0) (putMVar launched () >> uninterruptibleMask_ (readMVar release))
           pure client
-    withToolingUsing (const (pure root)) heldLaunch (\_ _->pure M.empty) $ \tooling->flip finally (void (tryPutMVar release ())) $ do
+    withToolingUsing (const (pure root)) heldLaunch (\_ _->pure M.empty) loadFile $ \tooling->flip finally (void (tryPutMVar release ())) $ do
       (_,firstReply)<-toolingTool tooling core base "lsp_hover" arguments
       pending<-pump tooling base (const (maybe False (const True) <$> tryReadMVar launched))
       (_,restarted)<-bounded "restart waited for held process operation" (toolingEffects tooling core pending [LanguageRequest RestartLanguage])
@@ -223,7 +224,7 @@ startupChecks = bracket temporary removePathForcibly $ \root -> do
           void (tryPutMVar entered ())
           uninterruptibleMask_ (readMVar releaseDiscovery)
           pure root
-    withToolingUsing heldDiscovery L.startClient (\_ _->pure M.empty) $ \tooling->flip finally (void (tryPutMVar releaseDiscovery ())) $ do
+    withToolingUsing heldDiscovery L.startClient (\_ _->pure M.empty) loadFile $ \tooling->flip finally (void (tryPutMVar releaseDiscovery ())) $ do
       (_,originalReply)<-toolingTool tooling core base "lsp_hover" arguments
       bounded "root discovery did not enter" (readMVar entered)
       forM_ [1..3::Int] $ \_->do
@@ -245,7 +246,7 @@ startupChecks = bracket temporary removePathForcibly $ \root -> do
           void (tryPutMVar preparingEntered ())
           uninterruptibleMask_ (readMVar releasePreparation)
           pure M.empty
-    withToolingUsing (const (pure root)) L.startClient heldSnapshot $ \tooling->flip finally (void (tryPutMVar releasePreparation ())) $ do
+    withToolingUsing (const (pure root)) L.startClient heldSnapshot loadFile $ \tooling->flip finally (void (tryPutMVar releasePreparation ())) $ do
       (_,warmReply)<-toolingTool tooling core base "lsp_hover" arguments
       _<-finish tooling base warmReply
       (_,first)<-toolingEffects tooling core base [LanguageRequest (RenameAt "first")]
@@ -271,7 +272,7 @@ startupChecks = bracket temporary removePathForcibly $ \root -> do
       check "one replacement snapshot starts after cleanup" . (==2) =<< readIORef preparations
     -- A process failure is cached until explicit restart, avoiding a spawn loop.
     attempts<-newIORef (0::Int)
-    withToolingUsing (const (pure root)) (\_->modifyIORef' attempts (+1) >> ioError (userError "held startup failed")) (\_ _->pure M.empty) $ \tooling->do
+    withToolingUsing (const (pure root)) (\_->modifyIORef' attempts (+1) >> ioError (userError "held startup failed")) (\_ _->pure M.empty) loadFile $ \tooling->do
       (_,answer)<-toolingTool tooling core base "lsp_hover" arguments
       (failed,reply)<-finish tooling base answer
       check "startup failure reaches original waiter" (isLeft reply)
@@ -395,6 +396,138 @@ mcpChecks = bracket temporary removePathForcibly $ \root -> do
       (path,h)<-openTempFile base "thc-hls-tools"
       hClose h; removeFile path; createDirectory path
       canonicalizePath path
+
+-- Hold an actual closed-file read after obtaining its bytes. The current
+-- desktop can change independently until the prepared all-file patch adopts.
+workspaceEditChecks :: IO ()
+workspaceEditChecks = bracket temporary removePathForcibly $ \root->do
+  let source=root </> "Main.hs"; other=root </> "Util.hs"; extra=root </> "Extra.hs"; server=root </> "fake-hls"
+      initial=addDocument (Just (FileState source Nothing)) (newBuffer "😀 foo = 1\n") (initialDesktop (80,25))
+      sourceId=maybe (error "missing source") bufferId (activeWindow initial)
+      withOther=addDocument (Just (FileState other Nothing)) (newBuffer "foo = 2\n") initial
+      otherId=maybe (error "missing other") bufferId (activeWindow withOther)
+      base=addDocument Nothing (newBuffer "scratch\n") withOther
+      scratchId=maybe (error "missing scratch") bufferId (activeWindow base)
+      snapshot d _=pure (M.union (M.fromList [(filePath file,(revision (documentBuffer doc),contents (documentBuffer doc))) | doc<-M.elems (buffers d),Just file<-[documentFile doc]]) (M.singleton extra (-1,"third = 3\n")))
+      args=object ["bufferId" .= sourceId,"revision" .= (0::Int),"line" .= (1::Int),"column" .= (3::Int)]
+      core d _=pure (False,d)
+      check label ok=unless ok (error label)
+      bounded label action=timeout 2000000 action >>= maybe (error label) pure
+      field key=parseMaybe (withObject "result" (.:key))
+      right=either (error . T.unpack) pure
+      isLeft (Left _)=True; isLeft _=False
+      pump tooling d predicate=bounded "workspace edit did not progress" (loop d)
+        where loop state=do
+                next<-tickTooling tooling core state
+                ready<-predicate next
+                if ready then pure next else threadDelay 1000 >> loop next
+      finish tooling d answer=withAsync answer $ \waiting->do
+        updated<-pump tooling d (const (maybe False (const True) <$> poll waiting))
+        (updated,) <$> wait waiting
+      begin tooling current=do
+        (listing,listed)<-toolingTool tooling core current "lsp_code_actions" args
+        (_,offered)<-finish tooling listing listed
+        value<-right offered
+        let identifiers=[key | item<-maybe [] id (field "actions" value),field "title" item==Just ("Fix source"::T.Text),Just key<-[field "actionId" item]]
+        key<-case identifiers of one:_->pure (one::T.Text); _->error "No prepared action"
+        toolingTool tooling core current "lsp_apply_code_action" (object ["bufferId" .= sourceId,"revision" .= (0::Int),"actionId" .= key])
+      withHeld action=do
+        entered<-newEmptyMVar; release<-newEmptyMVar
+        let readHeld path=do
+              loaded<-loadFile path
+              when (path==extra) (void (tryPutMVar entered ()) >> uninterruptibleMask_ (readMVar release))
+              pure loaded
+        withToolingUsing (const (pure root)) L.startClient snapshot readHeld $ \tooling->flip finally (void (tryPutMVar release ())) $ do
+          (queued,answer)<-begin tooling base
+          held<-pump tooling queued (const (maybe False (const True) <$> tryReadMVar entered))
+          ticked<-bounded "closed-file preparation blocked tick" (tickTooling tooling core held)
+          check "input progresses while workspace read is held" (activeText (insertText "typed " ticked)=="typed scratch\n")
+          action tooling ticked answer release
+      editOther f d=d {buffers=M.adjust (\doc->restyle doc {documentBuffer=f (documentBuffer doc)}) otherId (buffers d)}
+      textAt bid d=contents (documentBuffer (buffers d M.! bid))
+  writeFile source "😀 foo = 1\n"; writeFile other "foo = 2\n"; writeFile extra "third = 3\n"
+  writeFile server mcpServer
+  permissions<-getPermissions server; setPermissions server permissions {executable=True}
+  bracket (lookupEnv "THC_EDIT_HLS") (maybe (unsetEnv "THC_EDIT_HLS") (setEnv "THC_EDIT_HLS")) $ \_->do
+    setEnv "THC_EDIT_HLS" server
+    withHeld $ \tooling held answer release->do
+      let oldLength=bufferLength (documentBuffer (buffers held M.! sourceId))
+          moved=(insertText "typed " held) {windows=map (\w->if bufferId w==sourceId then w {selection=Selection oldLength oldLength,bounds=Rect 2 3 25 8} else w) (windows held)}
+      putMVar release ()
+      (adopted,reply)<-finish tooling moved answer
+      check "prepared batch succeeds" (not (isLeft reply) && textAt sourceId adopted=="😀 fixed = 1\n" && textAt otherId adopted=="fixed = 2\n")
+      check "adoption preserves unrelated input" (textAt scratchId adopted=="typed scratch\n")
+      let sourceWindows=[w | w<-windows adopted,bufferId w==sourceId]
+      check "adoption preserves moved windows and rebases current selection" (case sourceWindows of w:_->bounds w==Rect 2 3 25 8 && selection w==Selection (oldLength+2) (oldLength+2); _->False)
+      check "each affected live buffer gets one undo step" (contents (undo (documentBuffer (buffers adopted M.! sourceId)))==textAt sourceId base && contents (undo (documentBuffer (buffers adopted M.! otherId)))==textAt otherId base)
+      check "closed target becomes an unsaved buffer" (any (\doc->fmap filePath (documentFile doc)==Just extra && contents (documentBuffer doc)=="fixed = 3\n" && dirty (documentBuffer doc)) (M.elems (buffers adopted)))
+    forM_ [ ("edit",editOther (replaceSelection (Selection 0 0) "x"))
+          , ("equal-revision reload",editOther (const (newBuffer "reload\n")))
+          , ("save baseline",editOther markSaved)
+          , ("file baseline",\d->d {buffers=M.adjust (\doc->doc {documentFile=Just (FileState other (Just "new baseline"))}) otherId (buffers d)})
+          , ("Save As",\d->d {buffers=M.adjust (\doc->doc {documentFile=Just (FileState (root </> "Moved.hs") Nothing)}) otherId (buffers d)})
+          , ("close",\d->d {buffers=M.delete otherId (buffers d),windows=filter ((/=otherId) . bufferId) (windows d)})
+          , ("open closed target",addDocument (Just (FileState extra Nothing)) (newBuffer "new unsaved contents\n"))
+          , ("private target",\d->d {guestPrivatePaths=[extra]})] $ \(label,change)->
+      withHeld $ \tooling held answer release->do
+        let changed=change held
+        putMVar release ()
+        (rejected,reply)<-finish tooling changed answer
+        check ("workspace adoption rejects "++label++" atomically") (isLeft reply && buffers rejected==buffers changed)
+    withHeld $ \tooling held answer release->do
+      -- The checked read already completed. A subsequent external write must
+      -- remain protected by the FileState baseline when the user later saves.
+      writeFile extra "external update\n"
+      putMVar release ()
+      (adopted,reply)<-finish tooling held answer
+      check "prepared closed-file edit retains its checked bytes" (not (isLeft reply))
+      let targets=[(file,documentBuffer doc) | doc<-M.elems (buffers adopted),Just file<-[documentFile doc],filePath file==extra]
+      target<-case targets of one:_->pure one; _->error "Missing prepared closed-file buffer"
+      result<-uncurry saveFile target
+      check "save refuses a post-read external disk change" (isLeft result)
+      check "failed save preserves external bytes" . (=="external update\n") =<< readFile extra
+      writeFile extra "third = 3\n"
+    withHeld $ \tooling held answer release->do
+      withAsync answer $ \waiting->threadDelay 1000 >> cancel waiting
+      putMVar release ()
+      (unchanged,reply)<-finish tooling held answer
+      check "cancelled workspace adoption changes no buffers" (isLeft reply && buffers unchanged==buffers held)
+    withHeld $ \tooling held answer release->do
+      (_,restarted)<-bounded "restart blocked on workspace read" (toolingEffects tooling core held [LanguageRequest RestartLanguage])
+      putMVar release ()
+      reply<-bounded "restart stranded workspace waiter" answer
+      check "restart cancels prepared workspace edit" (isLeft reply && buffers restarted==buffers held)
+    entered<-newEmptyMVar; release<-newEmptyMVar; readCount<-newIORef (0::Int)
+    let heldRead path=do
+          loaded<-loadFile path
+          when (path==extra) $ do
+            modifyIORef' readCount (+1)
+            void (tryPutMVar entered ())
+            uninterruptibleMask_ (readMVar release)
+          pure loaded
+    withToolingUsing (const (pure root)) L.startClient snapshot heldRead $ \tooling->flip finally (void (tryPutMVar release ())) $ do
+      (queued,original)<-begin tooling base
+      _<-pump tooling queued (const (maybe False (const True) <$> tryReadMVar entered))
+      (_,restarted)<-bounded "restart waited for uninterruptible workspace read" (toolingEffects tooling core base [LanguageRequest RestartLanguage])
+      check "restart completes original workspace waiter" . isLeft =<< bounded "old workspace waiter stranded" original
+      forM_ [1..3::Int] $ \_->do
+        (pending,answer)<-begin tooling restarted
+        _<-tickTooling tooling core pending
+        threadDelay 1000
+        check "retiring workspace read reserves the sole worker" . (==1) =<< readIORef readCount
+        _<-bounded "repeated restart blocked workspace retirement" (toolingEffects tooling core pending [LanguageRequest RestartLanguage])
+        check "queued workspace cancellation is explicit" . isLeft =<< bounded "queued workspace waiter stranded" answer
+      putMVar release ()
+      (pending,answer)<-begin tooling base
+      (_,reply)<-finish tooling pending answer
+      check "workspace preparation resumes after retirement" (not (isLeft reply))
+      check "only one replacement workspace read starts" . (==2) =<< readIORef readCount
+  putStrLn "workspace edit checks passed"
+  where
+    temporary=do
+      base<-getTemporaryDirectory
+      (path,h)<-openTempFile base "thc-workspace-edit"
+      hClose h; removeFile path; createDirectory path; canonicalizePath path
 
 -- Real stdio fixtures keep handles, resolution, and edits on the normal pump.
 codeActionChecks :: IO ()
@@ -528,7 +661,11 @@ codeActionChecks = bracket temporary removePathForcibly $ \root -> do
       ui<-timeout 3000000 (awaitDialog uiStart) >>= maybe (error "No code-action chooser") pure
       dg<-maybe (error "Missing code-action chooser") pure (dialog ui)
       let (chosen,effects)=submitDialog 0 dg ui
-      (_,uiApplied)<-toolingEffects tooling core chosen effects
+      (_,uiPending)<-toolingEffects tooling core chosen effects
+      let awaitApplied current=do
+            next<-tickTooling tooling core current
+            if "Code action applied" `T.isPrefixOf` status next then pure next else threadDelay 1000 >> awaitApplied next
+      uiApplied<-timeout 3000000 (awaitApplied uiPending) >>= maybe (error "Human code action never adopted its prepared edit") pure
       check "human chooser applies the same checked action" (buffers uiApplied/=buffers live && dialog uiApplied==Nothing)
       forM_ ["resolve.requested","resolve.replied","resolve.release"] (removeFile . (root </>))
       (_,timeoutStart)<-toolingEffects tooling core live [LanguageRequest RequestCodeActions]
@@ -679,6 +816,7 @@ mcpServer = unlines
   , "   pathlib.Path('actions-request.json').write_text(json.dumps(params))"
   , "   def change(a,z): return dict(range=dict(start=dict(line=0,character=a),end=dict(line=0,character=z)),newText='fixed')"
   , "   edit=dict(changes={uri:[change(3,6)],pathlib.Path('Util.hs').resolve().as_uri():[change(0,3)]})"
+  , "   if pathlib.Path('Extra.hs').exists(): edit['changes'][pathlib.Path('Extra.hs').resolve().as_uri()]=[change(0,5)]"
   , "   command=dict(title='Run command',command='unsafe')"
   , "   result=[dict(title='Fix source',kind='quickfix',isPreferred=True,edit=edit),dict(title='Command only',command='unsafe'),dict(title='Edit and command',edit=edit,command=command),dict(title='Disabled',disabled=dict(reason='Not applicable'),edit=edit),dict(title='Private file',edit=dict(changes={pathlib.Path('Secret.hs').resolve().as_uri():[change(0,6)]})),dict(title='Nested project',edit=dict(changes={pathlib.Path('nested/Other.hs').resolve().as_uri():[change(0,5)]}))]"
   , "   result += [dict(title=title,data=dict(uri=uri,edit=edit,kind=kind)) for title,kind in [('Resolve','normal'),('Resolve command','command'),('Hold resolve','hold')]]"
@@ -756,6 +894,19 @@ commandChecks = bracket temporary removePathForcibly $ \root -> do
       (twice,twiceReply)<-apply tooling base "twice"
       twiceResult<-right twiceReply
       check "second owned batch uses updated revision baseline" (activeText twice=="baz = 1\n" && field "appliedBatches" twiceResult==Just (2::Int))
+      forM_ [("pipeline","baz = 1\n",True,True,2),("pipeline-drain","baz"<>T.replicate (256*1024) "x"<>" = 1\n",True,True,2),("pipeline-failed","baz = 1\n",False,False,2),("pipeline-invalid","bar = 1\n",False,True,1)] $ \(title,expected,success,commandSucceeded,batches)->do
+        (pipelined,pipelineReply)<-apply tooling base title
+        pipelineResult<-right pipelineReply
+        when (title=="pipeline-drain") $ do
+          -- The server has stopped reading while didChange fills its pipe.
+          -- Retirement must return promptly and retain queued replies meanwhile.
+          threadDelay 30000
+          writeFile (root </> "pipeline-drain-release") ""
+        check "pipelined command response follows all edit adoptions" (activeText pipelined==expected && field "succeeded" pipelineResult==Just success && field "commandSucceeded" pipelineResult==Just commandSucceeded && field "appliedBatches" pipelineResult==Just (batches::Int) && field "partial" pipelineResult==Just (not success))
+        do
+          _<-marker tooling pipelined (T.unpack title<>"-acks.json")
+          observed<-eitherDecodeStrict' <$> BS.readFile (root </> T.unpack title<>"-acks.json") >>= either error pure
+          check "server receives pipelined edit acknowledgments before retirement" (map (field "applied") (observed::[Value])==[Just True,Just (title/="pipeline-invalid")])
       forM_ ["rejected","private","version","resource","nested"] $ \title->do
         (unchanged,answer)<-apply tooling base title
         refused<-right answer
@@ -764,6 +915,7 @@ commandChecks = bracket temporary removePathForcibly $ \root -> do
         (partial,answer)<-apply tooling base title
         resultValue<-right answer
         check "failed command preserves and reports preceding edit" (activeText partial==expected && field "partial" resultValue==Just True && field "commandSucceeded" resultValue==Just False && field "appliedBatches" resultValue==Just (1::Int))
+        when (title=="literal-failed") $ check "server sees adopted literal edit before command starts" . (=="lit = 1\n") =<< readFile (root </> "execute-seen")
       cleanMarkers
       listing<-list tooling base
       (held,answer)<-begin tooling base "held" listing
@@ -827,13 +979,14 @@ commandServer = unlines
   ," if m=='textDocument/didOpen': docs[p['textDocument']['uri']]=p['textDocument']['text']"
   ," if m=='textDocument/didChange': docs[p['textDocument']['uri']]=p['contentChanges'][0]['text']"
   ," return x"
-  ,"def edit(uri,text='bar',version=None,resource=False):"
+  ,"def edit(uri,text='bar',version=None,resource=False,wait=True):"
   ," global serial"
   ," serial+=1;i='edit-'+str(serial)"
   ," edits=[dict(range=dict(start=dict(line=0,character=0),end=dict(line=0,character=3)),newText=text)]"
   ," body=dict(changes={uri:edits}) if version is None else dict(documentChanges=[dict(textDocument=dict(uri=uri,version=version),edits=edits)])"
   ," if resource:body=dict(documentChanges=[dict(kind='delete',uri=uri)])"
   ," send(dict(id=i,method='workspace/applyEdit',params=dict(edit=body)))"
+  ," if not wait:return i"
   ," while True:"
   ,"  r=recv()"
   ,"  if r.get('id')==i:"
@@ -848,14 +1001,30 @@ commandServer = unlines
   ," if m=='initialize':send(dict(id=i,result=dict(capabilities=dict(codeActionProvider=dict(resolveProvider=True),executeCommandProvider=dict(commands=['fixture'])))));continue"
   ," if m=='shutdown':send(dict(id=i,result=None));continue"
   ," if m=='textDocument/codeAction':"
-  ,"  uri=p['textDocument']['uri'];actions=[dict(title=mode,command='fixture',arguments=[mode,uri]) for mode in ['normal','twice','rejected','failed','held','held-after','private','version','resource','nested']]"
+  ,"  uri=p['textDocument']['uri'];actions=[dict(title=mode,command='fixture',arguments=[mode,uri]) for mode in ['normal','twice','pipeline','pipeline-drain','pipeline-failed','pipeline-invalid','rejected','failed','held','held-after','private','version','resource','nested']]"
   ,"  literal=dict(changes={uri:[dict(range=dict(start=dict(line=0,character=0),end=dict(line=0,character=3)),newText='lit')]})"
   ,"  actions += [dict(title='literal-failed',edit=literal,command=dict(title='fail',command='fixture',arguments=['fail-only',uri]))]"
   ,"  send(dict(id=i,result=actions));continue"
   ," if m=='workspace/executeCommand':"
   ,"  mode,uri=p['arguments']"
+  ,"  pathlib.Path('execute-seen').write_text(docs[uri])"
   ,"  pathlib.Path('last-executor').write_text(str(generation))"
   ,"  pathlib.Path('execute.json').write_text(json.dumps(p))"
+  ,"  if mode.startswith('pipeline'):"
+  ,"   first='bar'+'x'*(256*1024) if mode=='pipeline-drain' else 'bar'"
+  ,"   ids=[edit(uri,first,wait=False),edit(uri,'baz',version=99 if mode=='pipeline-invalid' else None,wait=False)]"
+  ,"   if mode=='pipeline-failed':send(dict(id=i,error=dict(code=-32603,message='pipeline failure')))"
+  ,"   else:send(dict(id=i,result=None))"
+  ,"   if mode=='pipeline-drain':"
+  ,"    while not pathlib.Path('pipeline-drain-release').exists():time.sleep(.001)"
+  ,"   replies=[]"
+  ,"   while len(replies)<2:"
+  ,"    response=recv()"
+  ,"    if response.get('id') in ids:replies.append(response['result'])"
+  ,"    elif response.get('method')=='shutdown':send(dict(id=response['id'],result=None));break"
+  ,"   if len(replies)==2:"
+  ,"    path=pathlib.Path(mode+'-acks.next');path.write_text(json.dumps(replies));path.replace(mode+'-acks.json')"
+  ,"   continue"
   ,"  if mode=='held':hold()"
   ,"  if mode!='fail-only':"
   ,"   target=(root.parent/'Outside.hs').as_uri() if mode=='rejected' else (root/'Secret.hs').as_uri() if mode=='private' else (root/'nested'/'Other.hs').as_uri() if mode=='nested' else uri"

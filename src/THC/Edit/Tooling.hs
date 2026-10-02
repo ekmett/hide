@@ -15,12 +15,12 @@ import qualified Data.Aeson.KeyMap as K
 import qualified Data.Aeson.Key as Key
 import qualified Data.Map.Strict as M
 import Data.IORef
-import Data.List (find, sortOn)
+import Data.List (find, sortOn, mapAccumL)
 import Data.Maybe (catMaybes, mapMaybe, fromMaybe)
 import qualified Data.Text as T
 import qualified Data.Vector as Vector
 import GHC.Clock (getMonotonicTimeNSec)
-import System.Directory (canonicalizePath, doesFileExist, doesDirectoryExist, listDirectory, pathIsSymbolicLink)
+import System.Directory (canonicalizePath, doesDirectoryExist, listDirectory, pathIsSymbolicLink)
 import System.FilePath (takeDirectory, takeExtension, (</>))
 import THC.Edit.Buffer
 import THC.Edit.Files
@@ -47,6 +47,17 @@ data Deferred = DeferredTool ToolQuery (StableName Buffer)
   | DeferredLanguage LanguageAction Target FilePath (StableName Buffer)
   | DeferredSaved Target FilePath (StableName Buffer)
 
+-- Workspace edits prepare immutable patches. Their owner remains live until
+-- adoption, and later events from that session cannot overtake the patch.
+data EditOwner = RenameEdit Target FilePath | ToolEdit ToolQuery
+  | CommandPrelude ToolQuery T.Text Value | CommandBatch ToolQuery Int Value
+data EditRequest = EditRequest
+  { editRoot :: FilePath, editSession :: Session, editOwner :: EditOwner
+  , editIdentity :: StableName Buffer, editSnapshotContents :: M.Map FilePath (Int,T.Text)
+  , editValue :: Value, editDesktop :: Desktop }
+data Editing = Editing EditRequest (Startup (Either T.Text [PreparedPatch])) | RetiringEdit (MVar ())
+data PreparedPatch = PreparedPatch FilePath (Maybe (Int,StableName Buffer,StableName FileState)) FileState Buffer (M.Map Int (Int,Int,Int)) Bool
+
 type ProblemKey = (Int,[(Int,FilePath,Int,StableName Buffer)],StableName [Diagnostic])
 data ProblemCache = ProblemCache ProblemKey [Diagnostic] Bool (StableName [Diagnostic])
 
@@ -67,14 +78,17 @@ data Tooling = Tooling
   , waitingRequests :: IORef [Deferred], discoveryFailures :: IORef (M.Map FilePath T.Text)
   , discoverRoot :: FilePath -> IO FilePath, launchSession :: FilePath -> IO L.Client
   , snapshotSources :: Desktop -> FilePath -> IO (M.Map FilePath (Int,T.Text))
+  , readEditFile :: FilePath -> IO (Either String (FileState,Buffer))
+  , editing :: IORef (Maybe Editing), editQueue :: IORef [EditRequest]
+  , heldEvents :: IORef (M.Map FilePath [L.Event])
   }
 
 withTooling :: (Tooling -> IO a) -> IO a
-withTooling = withToolingUsing projectRoot L.startClient editSnapshot
+withTooling = withToolingUsing projectRoot L.startClient editSnapshot loadFile
 
 -- | Override the filesystem/process operations, keeping their normal ownership.
-withToolingUsing :: (FilePath -> IO FilePath) -> (FilePath -> IO L.Client) -> (Desktop -> FilePath -> IO (M.Map FilePath (Int,T.Text))) -> (Tooling -> IO a) -> IO a
-withToolingUsing discover launch snapshot = bracket (Tooling <$> newIORef M.empty <*> newIORef M.empty <*> newIORef M.empty <*> newIORef 0 <*> newIORef Nothing <*> newIORef (Nothing,0,False) <*> newIORef M.empty <*> newIORef 1 <*> newIORef [] <*> newIORef Nothing <*> newIORef M.empty <*> newIORef Nothing <*> newIORef Nothing <*> newIORef M.empty <*> newIORef M.empty <*> newIORef [] <*> newIORef M.empty <*> pure discover <*> pure launch <*> pure snapshot) closeTooling
+withToolingUsing :: (FilePath -> IO FilePath) -> (FilePath -> IO L.Client) -> (Desktop -> FilePath -> IO (M.Map FilePath (Int,T.Text))) -> (FilePath -> IO (Either String (FileState,Buffer))) -> (Tooling -> IO a) -> IO a
+withToolingUsing discover launch snapshot load = bracket (Tooling <$> newIORef M.empty <*> newIORef M.empty <*> newIORef M.empty <*> newIORef 0 <*> newIORef Nothing <*> newIORef (Nothing,0,False) <*> newIORef M.empty <*> newIORef 1 <*> newIORef [] <*> newIORef Nothing <*> newIORef M.empty <*> newIORef Nothing <*> newIORef Nothing <*> newIORef M.empty <*> newIORef M.empty <*> newIORef [] <*> newIORef M.empty <*> pure discover <*> pure launch <*> pure snapshot <*> pure load <*> newIORef Nothing <*> newIORef [] <*> newIORef M.empty) closeTooling
 
 closeTooling :: Tooling -> IO ()
 closeTooling t = do
@@ -84,6 +98,8 @@ closeTooling t = do
 
 retireTooling :: Tooling -> IO ()
 retireTooling t = mask_ $ do
+  cancelEdits t (const True) "HLS stopped"
+  writeIORef (heldEvents t) M.empty
   cancelPreparation t
   discovery<-atomicModifyIORef' (discoveryWorker t) (\old->(Nothing,old))
   forM_ discovery $ \(_,worker)->do
@@ -183,7 +199,9 @@ startToolWith seed human t _ d name arguments = case parseEither parameters argu
       Right (Session _ pending) -> length . filter isTool . M.elems <$> readIORef pending
     preparation<-currentPreparation t
     waiting<-readIORef (waitingRequests t)
-    if sum counts+length waiting+(case preparation of Just ToolPreparing{} -> 1; _ -> 0)>=32 then reject "Too many pending HLS tools"
+    queuedEdits<-readIORef (editQueue t)
+    activeEdit<-readIORef (editing t)
+    if sum counts+length waiting+length queuedEdits+(case activeEdit of Just Editing{}->1; _->0)+(case preparation of Just ToolPreparing{} -> 1; _ -> 0)>=32 then reject "Too many pending HLS tools"
     else if name `elem` ["lsp_rename","lsp_code_actions"] && maybe False (const True) preparation then reject (case preparation of Just RetiringPreparation{}->"Previous HLS edit snapshot is still stopping; retry the request."; _->"An HLS edit snapshot is already being prepared")
     else do
       available<-lookupSession t path
@@ -418,69 +436,200 @@ applyCodeAction seed human t d target path arguments = do
                       pure (d {status=if human then "Resolving code action..." else status d},waitTool query)
 
 finishCodeAction :: Tooling -> Session -> ToolQuery -> Value -> Desktop -> IO Desktop
-finishCodeAction t (Session client pending) query value d = do
+finishCodeAction t session@(Session client pending) query value d = do
   caps<-L.serverCapabilities client
   case actionDisabled False (advertisedCommands caps) value of
     Just err->completeTool query (Left err) >> pure (if queryHuman query then d {status=err} else d)
     Nothing -> case actionCommand value of
       Right (Just (command,arguments))->do
         running<-any isCommand . M.elems <$> readIORef pending
-        if running then completeTool query (Left "An HLS command is already running.") >> pure d else do
-          prepared<-case member "edit" value of
-            Just edit | edit/=Null -> applyCommandEdit query edit d
-            _ -> pure (Right (query,d))
-          case prepared of
-            Left err->completeTool query (Left err) >> pure d
-            Right (current,updated)->do
-              active<-toolActive current
-              if not active then pure updated else do
-                sync t updated
-                requested<-L.executeCommand client command arguments
-                case requested of
-                  Left err->completeTool current (Left err) >> pure updated {status=err}
-                  Right ident->do
-                    modifyIORef' pending (M.insert ident (CommandPending current Nothing))
-                    pure updated {status="Executing HLS code action..."}
-      _ -> commitToolEdit query (fromMaybe Null (member "edit" value)) d
+        queued<-readIORef (editQueue t)
+        current<-readIORef (editing t)
+        let requests=queued++case current of Just (Editing request _)->[request]; _->[]
+            starting request=case (editOwner request,editSession request) of
+              (CommandPrelude{},Session _ ownerPending)->ownerPending==pending
+              _->False
+        if running || any starting requests then completeTool query (Left "An HLS command is already running.") >> pure d
+        else case member "edit" value of
+          Just edit | edit/=Null->queueEdit t session (CommandPrelude query command arguments) (querySnapshot query) edit d
+          _->executePreparedCommand t session query command arguments d
+      _->queueEdit t session (ToolEdit query) (querySnapshot query) (fromMaybe Null (member "edit" value)) d
   where isCommand CommandPending{}=True; isCommand _=False
 
--- Each server batch commits as one checked edit; successful earlier batches are
--- retained if a later batch or the command fails. Cancellation and this commit
--- compete in STM, so a canceled waiter cannot authorize a later mutation.
-applyCommandEdit :: ToolQuery -> Value -> Desktop -> IO (Either T.Text (ToolQuery,Desktop))
-applyCommandEdit query edit d = do
-  progress<-readTVarIO (queryProgress query)
-  if protectedPath d (queryPath query) || protectedBuffer d (let (bid,_,_)=queryTarget query in bid) then pure (Left "HLS command source is private.")
-  else if fmap fst (targetDocument (queryTarget query) d)/=Just (queryPath query) then pure (Left "Code action source changed during execution.")
-  else if fst progress>=128 then pure (Left "HLS command exceeded 128 edit batches.") else do
-    changed<-renameBuffers (querySnapshot query) edit d
-    case changed of
-      Left err->pure (Left err)
-      Right updated->do
-        let edits=[(ident,doc) | (ident,doc)<-M.toList (buffers updated),M.lookup ident (buffers d)/=Just doc]
-            replacements=M.fromList [(filePath file,(revision (documentBuffer doc),contents (documentBuffer doc))) | (_,doc)<-edits,Just file<-[documentFile doc]]
-            (bid,version,pos)=queryTarget query
-            current=query {querySnapshot=M.union replacements (querySnapshot query),queryTarget=(bid,maybe version (revision.documentBuffer) (M.lookup bid (buffers updated)),pos)}
-        active<-toolActive query
-        accepted<-if not active then pure False else atomically $ do
-          cancelled<-not <$> isEmptyTMVar (queryReply query)
-          if cancelled then pure False else do
-            modifyTVar' (queryProgress query) (\(count,previous)->(count+1,M.union (M.fromList [(ident,revision (documentBuffer doc)) | (ident,doc)<-edits]) previous))
-            pure True
-        pure (if accepted then Right (current,updated) else Left "HLS command cancelled before applying this edit.")
+ownerTarget :: EditOwner -> (Target,FilePath)
+ownerTarget (RenameEdit target path)=(target,path)
+ownerTarget owner=let query=ownerQuery owner in (queryTarget query,queryPath query)
 
-commitToolEdit :: ToolQuery -> Value -> Desktop -> IO Desktop
-commitToolEdit query edit d = do
-  changed<-renameBuffers (querySnapshot query) edit d
-  case changed of
-    Left err->completeTool query (Left err) >> pure (if queryHuman query then d {status=err} else d)
-    Right updated->do
-      let (bid,_,_)=queryTarget query
-          edited=[object ["bufferId" .= ident,"revision" .= revision (documentBuffer doc)] | (ident,doc)<-M.toList (buffers updated),M.lookup ident (buffers d)/=Just doc]
-      active<-toolActive query
-      accepted<-if active then atomically (tryPutTMVar (queryReply query) (Right (object ["bufferId" .= bid,"applied" .= True,"buffers" .= edited]))) else pure False
-      pure $ if not accepted then d else if queryName query=="lsp_apply_code_action"
-        then updated {status="Code action applied to buffers. Review and save the changed files."} else updated
+ownerQuery :: EditOwner -> ToolQuery
+ownerQuery (ToolEdit query)=query
+ownerQuery (CommandPrelude query _ _)=query
+ownerQuery (CommandBatch query _ _)=query
+ownerQuery RenameEdit{}=error "Human rename has no tool query"
+
+editRequestCurrent :: Tooling -> EditRequest -> Desktop -> IO Bool
+editRequestCurrent t request d = do
+  let owner=editOwner request; (target,path)=ownerTarget owner
+      Session _ pending=editSession request
+  active<-readIORef (sessions t)
+  identity<-sourceIdentity d target path
+  alive<-case owner of
+    RenameEdit{}->pure (cursorTarget d==Just target && dialog d==Nothing)
+    _->toolActive (ownerQuery owner)
+  pure (alive && identity==Just (editIdentity request) && case M.lookup (editRoot request) active of
+    Just (Right (Session _ current))->current==pending
+    _->False)
+
+finishEditFailure :: EditRequest -> T.Text -> Desktop -> IO Desktop
+finishEditFailure request err d = case editOwner request of
+  RenameEdit{}->pure (message "Cannot rename" [err] d)
+  CommandBatch query execution ident->do
+    let Session client pending=editSession request
+    L.replyEdit client ident False (Just err)
+    modifyIORef' pending (M.adjust (const (CommandPending query (Just err))) execution)
+    pure d
+  owner->do
+    let query=ownerQuery owner
+    completeTool query (Left err)
+    pure (if queryHuman query then d {status=err} else d)
+
+cancelEdits :: Tooling -> (EditRequest -> Bool) -> T.Text -> IO ()
+cancelEdits t matches reason = mask_ $ do
+  queued<-atomicModifyIORef' (editQueue t) (\old->(filter (not . matches) old,filter matches old))
+  forM_ queued (\request->void (finishEditFailure request reason (editDesktop request)))
+  current<-readIORef (editing t)
+  case current of
+    Just (Editing request worker) | matches request->do
+      void (finishEditFailure request reason (editDesktop request))
+      done<-retireStartup t worker (const (pure ()))
+      writeIORef (editing t) (Just (RetiringEdit done))
+    _->pure ()
+
+editRootBusy :: Tooling -> FilePath -> IO Bool
+editRootBusy t root = do
+  current<-readIORef (editing t)
+  queued<-readIORef (editQueue t)
+  pure (any ((==root) . editRoot) queued || case current of
+    Just (Editing request _)->editRoot request==root
+    _->False)
+
+queueEdit :: Tooling -> Session -> EditOwner -> M.Map FilePath (Int,T.Text) -> Value -> Desktop -> IO Desktop
+queueEdit t session owner snapshot value d = mask_ $ do
+  let (target,path)=ownerTarget owner
+  identity<-sourceIdentity d target path
+  root<-rootFor t path
+  case identity of
+    Nothing->case owner of
+      RenameEdit{}->pure d {status="Rename target changed or became private."}
+      CommandBatch query execution ident->do
+        let Session client pending=session
+            err="HLS edit source changed or became private."
+        L.replyEdit client ident False (Just err)
+        modifyIORef' pending (M.adjust (const (CommandPending query (Just err))) execution)
+        pure d
+      _->completeTool (ownerQuery owner) (Left "HLS edit source changed or became private.") >> pure d
+    Just stamp->do
+      let request=EditRequest root session owner stamp snapshot value d
+      queued<-readIORef (editQueue t)
+      current<-readIORef (editing t)
+      if length queued+(case current of Just Editing{}->1; _->0)>=32
+        then finishEditFailure request "Too many pending HLS workspace edits." d
+        else modifyIORef' (editQueue t) (++[request]) >> pure d
+
+advanceEdits :: Tooling -> Desktop -> IO Desktop
+advanceEdits t d = mask_ $ do
+  queued<-atomicModifyIORef' (editQueue t) (\old->([],old))
+  forM_ queued $ \request->do
+    valid<-editRequestCurrent t request d
+    if valid then modifyIORef' (editQueue t) (++[request])
+      else void (finishEditFailure request "HLS edit target changed, became private, or was cancelled." d)
+  current<-readIORef (editing t)
+  updated<-case current of
+    Nothing->pure d
+    Just (RetiringEdit done)->do
+      stopped<-tryReadMVar done
+      when (stopped==Just ()) (writeIORef (editing t) Nothing)
+      pure d
+    Just (Editing request worker@(Startup _ result))->do
+      valid<-editRequestCurrent t request d
+      if not valid then do
+        done<-retireStartup t worker (const (pure ()))
+        writeIORef (editing t) (Just (RetiringEdit done))
+        finishEditFailure request "HLS edit target changed, became private, or was cancelled." d
+      else do
+        completed<-tryReadMVar result
+        case completed of
+          Nothing->pure d
+          Just answer->do
+            writeIORef (editing t) Nothing
+            case either (Left . T.pack . displayException) id answer of
+              Left err->finishEditFailure request err d
+              Right patches->do
+                adopted<-adoptPatches patches d
+                case adopted of
+                  Left err->finishEditFailure request err d
+                  Right (next,changes)->finishPreparedEdit t request changes d next
+  startNext updated
+  where
+    startNext desktop=do
+      current<-readIORef (editing t)
+      queued<-readIORef (editQueue t)
+      case (current,queued) of
+        (Nothing,request:rest)->do
+          writeIORef (editQueue t) rest
+          valid<-editRequestCurrent t request desktop
+          if not valid then finishEditFailure request "HLS edit target changed, became private, or was cancelled." desktop >>= startNext
+          else do
+            worker<-startWorker (preparePatches t (editSnapshotContents request) (editValue request) (editDesktop request))
+            writeIORef (editing t) (Just (Editing request worker))
+            pure desktop
+        _->pure desktop
+
+finishPreparedEdit :: Tooling -> EditRequest -> [(Int,FileState,Buffer)] -> Desktop -> Desktop -> IO Desktop
+finishPreparedEdit t request changes previous updated = case editOwner request of
+  RenameEdit{}->pure updated
+  ToolEdit query->do
+    let (bid,_,_)=queryTarget query
+        edited=[object ["bufferId" .= ident,"revision" .= revision b] | (ident,_,b)<-changes]
+    active<-toolActive query
+    accepted<-if active then atomically (tryPutTMVar (queryReply query) (Right (object ["bufferId" .= bid,"applied" .= True,"buffers" .= edited]))) else pure False
+    pure $ if not accepted then previous else if queryName query=="lsp_apply_code_action"
+      then updated {status="Code action applied to buffers. Review and save the changed files."} else updated
+  owner->do
+    let query=ownerQuery owner
+        replacements=M.fromList [(filePath file,(revision b,contents b)) | (_,file,b)<-changes]
+        (bid,version,pos)=queryTarget query
+        next=query {querySnapshot=M.union replacements (querySnapshot query),queryTarget=(bid,maybe version (revision . documentBuffer) (M.lookup bid (buffers updated)),pos)}
+    active<-toolActive query
+    accepted<-if not active then pure False else atomically $ do
+      cancelled<-not <$> isEmptyTMVar (queryReply query)
+      (count,_)<-readTVar (queryProgress query)
+      if cancelled || count>=128 then pure False else do
+        modifyTVar' (queryProgress query) (\(n,prior)->(n+1,M.union (M.fromList [(ident,revision b) | (ident,_,b)<-changes]) prior))
+        pure True
+    if not accepted then finishEditFailure request "HLS command cancelled or exceeded its edit-batch limit." previous
+    else case owner of
+      CommandPrelude _ command arguments->executePreparedCommand t (editSession request) next command arguments updated
+      CommandBatch _ execution ident->do
+        let Session client pending=editSession request
+        sync t updated
+        modifyIORef' pending (M.adjust (const (CommandPending next Nothing)) execution)
+        L.replyEdit client ident True Nothing
+        pure updated
+
+executePreparedCommand :: Tooling -> Session -> ToolQuery -> T.Text -> Value -> Desktop -> IO Desktop
+executePreparedCommand t (Session client pending) query command arguments d = do
+  active<-toolActive query
+  running<-any isCommand . M.elems <$> readIORef pending
+  if not active || running then completeTool query (Left "HLS command cancelled or another command is running.") >> pure d
+  else do
+    sync t d
+    requested<-L.executeCommand client command arguments
+    case requested of
+      Left err->completeTool query (Left err) >> pure d {status=err}
+      Right ident->do
+        modifyIORef' pending (M.insert ident (CommandPending query Nothing))
+        pure d {status="Executing HLS code action..."}
+  where isCommand CommandPending{}=True; isCommand _=False
 
 sourceDocuments :: Desktop -> [(Int,FilePath,Int,T.Text)]
 sourceDocuments d = [(bid,filePath f,revision b,contents b) | (bid,doc)<-M.toList (buffers d), documentLabel doc==Nothing, textBuffer (documentBuffer doc),
@@ -766,10 +915,12 @@ finishPreparationResult t d = do
 -- applyEdit has no originating executeCommand ID. A client that executed one
 -- command is never allowed to own another, including after successful replies.
 -- Cleanup is asynchronous, but remains owned by closeTooling.
-retireSession :: Tooling -> FilePath -> Session -> IO ()
-retireSession t root (Session client pending) = mask_ $ do
+retireSession :: Bool -> Tooling -> FilePath -> Session -> IO ()
+retireSession drainReplies t root (Session client pending) = mask_ $ do
+  cancelEdits t ((==root) . editRoot) "HLS session retired"
+  modifyIORef' (heldEvents t) (M.delete root)
   -- Register cleanup before removing the old session's ownership.
-  stopped<-L.retireClient client
+  stopped<-if drainReplies then L.retireClientAfterReplies client else L.retireClient client
   modifyIORef' (retiring t) (stopped:)
   modifyIORef' (retiringRoots t) (M.insert root stopped)
   readIORef pending >>= mapM_ (failPending "HLS command transport retired; retry on the fresh server.") . M.elems
@@ -786,8 +937,9 @@ tickTooling t core d = do
   sync t d
   resumed<-resumeRequests t core d
   prepared<-finishPreparation t resumed
+  adopted<-advanceEdits t prepared
   active<-readIORef (sessions t)
-  received<-foldM collect prepared (M.toList active)
+  received<-foldM collect adopted (M.toList active)
   updated<-refreshProblems t received
   now<-fromIntegral <$> getMonotonicTimeNSec
   (old,since,sent)<-readIORef (hovered t)
@@ -803,7 +955,7 @@ tickTooling t core d = do
       requests<-readIORef pending
       cancelled<-or <$> forM (M.elems requests) (\entry->case entry of CommandPending query _->not <$> toolActive query; _->pure False)
       if cancelled then do
-        retireSession t root session
+        retireSession False t root session
         applied<-or <$> forM (M.elems requests) (\entry->case entry of CommandPending query _->(>0) . fst <$> readTVarIO (queryProgress query); _->pure False)
         pure desktop {status=if applied then "HLS command cancelled. Earlier applied edits remain; review buffers." else "HLS command cancelled; server restarted."}
       else do
@@ -813,34 +965,36 @@ tickTooling t core d = do
             result<-case entry of ToolPending query | queryHuman query -> atomically (tryReadTMVar (queryReply query)); _ -> pure Nothing
             pure (kept,case result of Just (Left err)->view {status=err}; _->view)) (M.empty,desktop) (M.toList requests)
         writeIORef pending live
-        events<-L.pollEvents client
-        foldM (receive session) updated events
-    receive (Session client pending) desktop (L.ApplyEdit execution ident params) = do
+        held<-M.findWithDefault [] root <$> readIORef (heldEvents t)
+        busy<-editRootBusy t root
+        if busy then pure updated else do
+          events<-if null held then L.pollEvents client else pure held
+          modifyIORef' (heldEvents t) (M.delete root)
+          consume root session updated events
+    consume _ _ desktop []=pure desktop
+    consume root session desktop events@(event:rest)=do
+      busy<-editRootBusy t root
+      if busy then modifyIORef' (heldEvents t) (M.insert root events) >> pure desktop
+      else receive session desktop event >>= \updated->consume root session updated rest
+    receive session@(Session client pending) desktop (L.ApplyEdit execution ident params) = do
       requests<-readIORef pending
       case M.lookup execution requests of
         Just (CommandPending query failure)->do
           activeRequest<-toolActive query
-          answer<-if not activeRequest then pure (Left "HLS command cancelled.") else case failure of
-            Just err->pure (Left err)
-            Nothing->case member "edit" params of
-              Nothing->pure (Left "HLS supplied no workspace edit.")
-              Just edit->applyCommandEdit query edit desktop
-          case answer of
-            Left err->do
+          let refusal=if not activeRequest then Just "HLS command cancelled." else failure
+          case (refusal,member "edit" params) of
+            (Nothing,Just edit)->queueEdit t session (CommandBatch query execution ident) (querySnapshot query) edit desktop
+            _->do
+              let err=fromMaybe "HLS supplied no workspace edit." refusal
               L.replyEdit client ident False (Just err)
               modifyIORef' pending (M.insert execution (CommandPending query (Just err)))
               pure desktop
-            Right (current,updated)->do
-              sync t updated
-              L.replyEdit client ident True Nothing
-              modifyIORef' pending (M.insert execution (CommandPending current Nothing))
-              pure updated
         _->L.replyEdit client ident False (Just "No active editor command owns this edit.") >> pure desktop
     receive session@(Session _ pending) desktop (L.ServerError err) = do
       requests<-readIORef pending
       mapM_ (failPending err) (M.elems requests)
       case [query | CommandPending query _<-M.elems requests] of
-        query:_->rootFor t (queryPath query) >>= \root->retireSession t root session
+        query:_->rootFor t (queryPath query) >>= \root->retireSession False t root session
         _->writeIORef pending M.empty
       pure desktop {status="HLS: "<>singleLine err,typeHint=""}
     receive _ desktop (L.Diagnostics path version values) = do
@@ -862,7 +1016,7 @@ tickTooling t core d = do
                         | otherwise -> failure
           progress<-readTVarIO (queryProgress query)
           completeTool query (Right (commandResult query progress succeeded err))
-          rootFor t (queryPath query) >>= \root->retireSession t root session
+          rootFor t (queryPath query) >>= \root->retireSession activeRequest t root session
           pure desktop {status=if err==Nothing then "HLS command completed. Review and save changed buffers." else "HLS command failed. Earlier applied edits remain; review buffers."}
         Just (ToolPending query) -> finishTool t session query response desktop
         Just (Pending action target path snapshot)
@@ -872,7 +1026,9 @@ tickTooling t core d = do
           | Just err<-member "error" response -> pure desktop {status="HLS: "<>singleLine (fromMaybe "Request failed" (member "message" err >>= stringValue))}
           | otherwise -> case member "result" response of
               Nothing -> pure desktop
-              Just result -> applyResult core action target path snapshot result desktop
+              Just result -> case action of
+                RenameAt{}->queueEdit t session (RenameEdit target path) snapshot result desktop
+                _->applyResult core action target path snapshot result desktop
 
 finishTool :: Tooling -> Session -> ToolQuery -> Value -> Desktop -> IO Desktop
 finishTool t session query response d = do
@@ -894,7 +1050,7 @@ finishToolResult t session query response d = do
           let (bid,version,_)=queryTarget query
           if queryName query=="lsp_code_actions" then cacheCodeActions t session query result d
           else if queryName query=="lsp_apply_code_action" then finishCodeAction t session query result d
-          else if queryName query=="lsp_rename" then commitToolEdit query result d
+          else if queryName query=="lsp_rename" then queueEdit t session (ToolEdit query) (querySnapshot query) result d
           else do
             completeTool query (Right (object (["bufferId" .= bid,"revision" .= version,"result" .= result]++["text" .= hoverText result | queryName query=="lsp_hover"])))
             pure d
@@ -930,7 +1086,7 @@ unicodeTypes = T.pack . go . T.unpack
     pretty token = token
 
 applyResult :: (Desktop -> [Effect] -> IO (Bool,Desktop)) -> LanguageAction -> Target -> FilePath -> M.Map FilePath (Int,T.Text) -> Value -> Desktop -> IO Desktop
-applyResult core action (bid,version,pos) _ snapshot result d = case action of
+applyResult core action (bid,version,pos) _ _ result d = case action of
   TypeInfo -> pure d {typeHint=hoverText result}
   FindDefinition -> case locations result of
     [] -> pure d {status="No definition found."}
@@ -940,7 +1096,6 @@ applyResult core action (bid,version,pos) _ snapshot result d = case action of
     let choices=completionItems (activeText d) pos result
     pure $ if null choices then d {status="No completions available."} else
       (prompt "Complete identifier" (Completing bid version pos choices) [ListBox "Completion" [label | Completion label _<-choices] 0] d)
-  RenameAt _ -> applyRename snapshot result d
   _ -> pure d
 
 locationLabel :: (FilePath,Int,Int) -> T.Text
@@ -1017,50 +1172,90 @@ workspaceEdits result = maybe (Left "Unsupported workspace edit; no files change
       unless (length paths==M.size (M.fromList [(p,()) | p<-paths])) (fail "duplicate document edits")
       pure (direct++versioned)
 
-applyRename :: M.Map FilePath (Int,T.Text) -> Value -> Desktop -> IO Desktop
-applyRename snapshot result d = either (\err -> message "Cannot rename" [err] d) id <$> renameBuffers snapshot result d
+bufferTextEdit :: Buffer -> Value -> Parser (Int,Int,T.Text)
+bufferTextEdit b=withObject "edit" $ \o->do
+  range<-o .:? "range" >>= maybe (o .: "replace") pure
+  (start,end)<-withObject "range" (\r->(,) <$> (r .: "start" >>= position) <*> (r .: "end" >>= position)) range
+  let a=L.bufferPositionOffset b start; z=L.bufferPositionOffset b end
+  unless (L.bufferOffsetPosition b a==start && L.bufferOffsetPosition b z==end && a<=z) (fail "invalid edit range")
+  inserted<-o .: "newText"
+  pure (a,z,inserted)
 
-renameBuffers :: M.Map FilePath (Int,T.Text) -> Value -> Desktop -> IO (Either T.Text Desktop)
-renameBuffers snapshot result d = case workspaceEdits result of
-  Left err -> pure (Left err)
-  Right [] -> pure (Right d {status="No rename edits returned."})
-  Right changes -> do
-    prepared<-forM changes $ \(path,version,values) -> do
-      let opened=find (\(_,doc) -> fmap filePath (documentFile doc)==Just path) (M.toList (buffers d))
-      canonical<-either (const Nothing) Just <$> (try (canonicalizePath path) :: IO (Either IOException FilePath))
-      loaded<-if canonical==Nothing then pure (Left "Cannot inspect the HLS edit path.")
-        else if protectedPath d path || maybe False (protectedPath d) canonical || maybe False (protectedBuffer d . fst) opened then pure (Left "HLS edit refers to a private file.")
-        else if canonical/=Just path || M.notMember path snapshot then pure (Left "HLS edit refers to a file outside the checked project.")
-        else case opened of
-        Just (bid,doc) -> pure (Right (Just bid,fromMaybe (FileState path Nothing) (documentFile doc),documentBuffer doc))
-        Nothing -> do
-          exists<-doesFileExist path
-          if not exists then pure (Left "Rename refers to a missing file.") else fmap (\(file,b) -> (Nothing,file,b)) <$> loadFile path
-      pure $ do
-        (bid,file,b)<-either (Left . T.pack) Right loaded
-        unless (textBuffer b) (Left "Cannot apply text edits to a hex buffer.")
-        case M.lookup path snapshot of
-          Just (oldVersion,oldText) | (bid/=Nothing && oldVersion/=revision b) || oldText/=contents b -> Left "A buffer changed during rename; request it again."
-          Nothing -> Left "Rename refers to a file outside the checked project; no files changed."
-          _ -> Right ()
-        -- HLS uses version 0 for closed files; the disk snapshot above is their guard.
-        unless (version==Nothing || version==Just (revision b)) (Left "Rename document version no longer matches.")
-        edits<-maybe (Left "Invalid rename edit range.") Right (mapM (parseMaybe (textEdit (contents b))) values)
-        let sorted=sortOn (\(a,z,_) -> (a,z)) edits
-        unless (and [z<=a' && a/=a' | ((a,z,_),(a',_,_))<-zip sorted (drop 1 sorted)]) (Left "Overlapping rename edits.")
-        pure (bid,file,b,sorted)
-    case sequence prepared of
-      Left err -> pure (Left err)
-      Right edits -> pure $ Right (foldl apply d edits) {status="Rename applied to buffers. Review and save the changed files."}
+-- This entire function runs in the owned edit worker, including Buffer/Text
+-- evaluation. UI adoption only validates identities and splices prepared values.
+preparePatches :: Tooling -> M.Map FilePath (Int,T.Text) -> Value -> Desktop -> IO (Either T.Text [PreparedPatch])
+preparePatches t snapshot result d = case workspaceEdits result of
+  Left err->pure (Left err)
+  Right changes->fmap sequence $ forM changes $ \(path,version,values)->do
+    let opened=find (\(_,doc)->fmap filePath (documentFile doc)==Just path) (M.toList (buffers d))
+    canonical<-either (const Nothing) Just <$> (try (canonicalizePath path) :: IO (Either IOException FilePath))
+    loaded<-if canonical==Nothing then pure (Left "Cannot inspect the HLS edit path.")
+      else if protectedPath d path || maybe False (protectedPath d) canonical || maybe False (protectedBuffer d . fst) opened then pure (Left "HLS edit refers to a private file.")
+      else if canonical/=Just path || M.notMember path snapshot then pure (Left "HLS edit refers to a file outside the checked project.")
+      else case opened of
+        Just (_,doc)->pure (Right (fromMaybe (FileState path Nothing) (documentFile doc),documentBuffer doc))
+        Nothing->readEditFile t path
+    case loaded of
+      Left err->pure (Left (T.pack err))
+      Right (file,b)->do
+        identity<-case opened of
+          Nothing->pure Nothing
+          Just (bid,_)->do
+            bufferIdentity<-makeStableName =<< evaluate b
+            fileIdentity<-makeStableName =<< evaluate file
+            pure (Just (bid,bufferIdentity,fileIdentity))
+        let prepared=do
+              unless (filePath file==path && (opened/=Nothing || diskBytes file/=Nothing)) (Left "HLS edit file moved or is missing.")
+              unless (textBuffer b) (Left "Cannot apply text edits to a hex buffer.")
+              case M.lookup path snapshot of
+                Just (oldVersion,oldText) | (opened/=Nothing && oldVersion/=revision b) || oldText/=contents b->Left "A buffer changed during rename; request it again."
+                Nothing->Left "Rename refers to a file outside the checked project; no files changed."
+                _->Right ()
+              unless (version==Nothing || version==Just (revision b)) (Left "Rename document version no longer matches.")
+              edits<-maybe (Left "Invalid rename edit range.") Right (mapM (parseMaybe (bufferTextEdit b)) values)
+              let sorted=sortOn (\(a,z,_)->(a,z)) edits
+              unless (and [z<=a' && a/=a' | ((a,z,_),(a',_,_))<-zip sorted (drop 1 sorted)]) (Left "Overlapping rename edits.")
+              updated<-replaceRanges sorted b
+              let (_,spans)=mapAccumL (\shift (a,z,text)->let n=T.length text in (shift+n-(z-a),(a,(z,n,shift)))) 0 sorted
+              pure (updated,M.fromDistinctAscList spans)
+        case prepared of
+          Left err->pure (Left err)
+          Right (updated,ranges)->do
+            _<-evaluate (prepareBuffer updated)
+            _<-evaluate (T.length (contents updated))
+            _<-evaluate (M.foldlWithKey' (\() a (z,n,shift)->a `seq` z `seq` n `seq` shift `seq` ()) () ranges)
+            pure (Right (PreparedPatch path identity file updated ranges (revision updated/=revision b)))
+
+adoptPatches :: [PreparedPatch] -> Desktop -> IO (Either T.Text (Desktop,[(Int,FileState,Buffer)]))
+adoptPatches patches d = do
+  let byPath=M.fromListWith (++) [(filePath file,[(bid,doc)]) | (bid,doc)<-M.toList (buffers d),Just file<-[documentFile doc]]
+  checks<-forM patches $ \(PreparedPatch path original _ _ _ _)->do
+    let opened=M.findWithDefault [] path byPath
+    if protectedPath d path || any (protectedBuffer d . fst) opened then pure False else case (original,opened) of
+      (Nothing,[])->pure True
+      (Just (bid,oldBuffer,oldFile),[(current,doc)]) | bid==current,Just file<-documentFile doc->do
+        bufferIdentity<-makeStableName =<< evaluate (documentBuffer doc)
+        fileIdentity<-makeStableName =<< evaluate file
+        pure (bufferIdentity==oldBuffer && fileIdentity==oldFile)
+      _->pure False
+  pure $ if not (and checks) then Left "An HLS edit target changed or became private; no files changed."
+    else let (updated,rebases,changed)=foldl' apply (d,M.empty,[]) patches
+             rebased=updated {status=if null patches then "No rename edits returned." else "Rename applied to buffers. Review and save the changed files.",
+               windows=map (\w->case M.lookup (bufferId w) rebases of
+                 Nothing->w
+                 Just ranges->w {selection=let Selection a c=selection w in Selection (rebase ranges a) (rebase ranges c)}) (windows updated)}
+         in Right (rebased,reverse changed)
   where
-    apply desktop (existing,file,b,edits) =
-      let opened=case existing of Nothing -> addDocument (Just file) b desktop; Just _ -> desktop
-          bid=fromMaybe (nextId desktop) existing
-          changed=foldr (\(a,z,text) rest -> T.take a rest<>text<>T.drop z rest) (contents b) edits
-          updated=replaceSelection (Selection 0 (T.length (contents b))) changed b
-          rebase p=foldl (\q (a,z,text) -> if p<a then q else if p>=z then q+T.length text-(z-a) else a+T.length text) p edits
-      in opened {buffers=M.adjust (\doc -> restyle doc {documentBuffer=updated}) bid (buffers opened),
-        windows=map (\w -> if bufferId w==bid then w {selection=let Selection a c=selection w in Selection (rebase a) (rebase c)} else w) (windows opened)}
+    apply (desktop,rebases,changed) (PreparedPatch _ original file b ranges modified)=
+      let bid=maybe (nextId desktop) (\(ident,_,_)->ident) original
+          updated=case original of
+            Nothing->addDocument (Just file) b desktop
+            Just _->desktop {buffers=M.adjust (\doc->restyle doc {documentBuffer=b}) bid (buffers desktop)}
+      in (updated,M.insert bid ranges rebases,if modified || maybe True (const False) original then (bid,file,b):changed else changed)
+    rebase edits offset=case M.lookupLE offset edits of
+      Nothing->offset
+      Just (a,(z,n,shift)) | offset<z->a+shift+n
+                         | otherwise->offset+shift+n-(z-a)
 
 jump :: (Desktop -> [Effect] -> IO (Bool,Desktop)) -> FilePath -> Int -> Int -> Desktop -> IO Desktop
 jump core path row col d = do

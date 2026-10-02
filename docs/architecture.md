@@ -19,7 +19,9 @@ Indexed line lookup serves navigation and cursor placement. A lazy text
 projection is cached per revision for highlighting, file output and HLS.
 Highlighting and LSP full-document synchronization consume the whole document
 after an edit. Cached syntax tokens are shared between split views and reused
-for cursor-only redraws.
+for cursor-only redraws. UTF-16 position conversion uses measured line lookup
+and scans only the prefix of the target line. Disjoint edit batches share
+untouched subtrees and create one undo step.
 
 Skylighting supplies the language definitions. The filename chooses the grammar
 and the editor maps token categories into its palette. Hex buffers preserve raw
@@ -62,9 +64,11 @@ native filter. Bundled bitmap glyphs retain nearest-neighbor scaling.
 
 ## Background work
 
-The Metal/Vulkan redraw gate compares window and control state with identities
-for immutable payloads. It does not walk source text, undo history, transcript
-cells or diagnostic bodies just to decide whether another frame is needed.
+Native and browser redraw gates compare explicit window and control metadata
+with identities for immutable payloads. Whole-desktop equality is forbidden in
+runtime change detection; render keys cannot contain Desktop or Buffer values.
+They do not walk source text, undo history, transcript cells or diagnostic bodies
+just to decide whether another frame is needed.
 Changed hidden buffers still invalidate native menu state.
 
 Build output is decoded, accumulated and parsed by an owned worker. It publishes
@@ -89,6 +93,11 @@ synchronization; edits, reloads, closing a file or making it private invalidate
 captured requests. Restart retires old workers asynchronously and reserves each
 root until its previous client has stopped. Rename and code-action snapshots
 classify project boundaries and read closed files in their preparation worker.
+Workspace edits also validate ranges and build replacement buffers in a worker.
+Adoption checks every target against its current identity and privacy before
+applying any patch, preserves intervening navigation and unrelated edits, and
+adds one undo step per affected buffer. Later server events wait behind each
+edit batch so a command result cannot overtake its edits.
 
 These boundaries keep routine tool output and held file reads out of navigation
 and rendering. Explicit save/configuration operations and some tool launch
