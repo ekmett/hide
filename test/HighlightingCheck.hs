@@ -30,12 +30,14 @@ checks = do
   releaseFirst<-newEmptyMVar
   releaseNext<-newEmptyMVar
   calls<-newIORef ([]::[T.Text])
-  let tokenizer path text=do
+  -- Scheduling uses a deterministic tokenizer; cold grammar initialization is
+  -- exercised separately through the production worker below.
+  let tokenizer _ text=do
         index<-atomicModifyIORef' calls (\old->(old++[text],length old))
         if index==0 then putMVar firstStarted () >> takeMVar releaseFirst
                     else putMVar nextStarted () >> takeMVar releaseNext
-        pure (highlightFor path text)
-  withHighlightingUsing tokenizer $ \worker -> do
+        pure (zipWith (\i c->(c,if i<3 then Keyword else Plain)) [0::Int ..] (T.unpack text))
+  withHighlightingUsing (pure ()) tokenizer $ \worker -> do
     first<-tickHighlighting worker initial
     bounded "first tokenizer starts" (takeMVar firstStarted)
     edited<-bounded "rapid edits never wait for the blocked tokenizer" $ foldM
@@ -47,25 +49,51 @@ checks = do
     stale<-tickHighlighting worker edited
     check "completed old identity cannot color a replacement with the same revision" (not (ready stale))
     putMVar releaseNext ()
-    colored<-await worker ready stale
+    colored<-await "latest running tokenizer result" worker ready stale
     requested<-readIORef calls
     check "rapid edits coalesce to first and newest requests" (length requested==2 && last requested==contents (documentBuffer (doc edited)))
     let rows=fromJust (documentSourceRows (doc colored))
-    check "accepted rows contain current source and language styles" (map fst (rows V.! 0)=="def newest20():" && take 3 (map snd (rows V.! 0))==replicate 3 Keyword)
+    check "accepted rows contain current source and injected styles" (map fst (rows V.! 0)=="def newest20():" && take 3 (map snd (rows V.! 0))==replicate 3 Keyword)
     before<-evaluate (buffers colored) >>= makeStableName
     unchanged<-tickHighlighting worker colored
     after<-evaluate (buffers unchanged) >>= makeStableName
     check "completed highlighting preserves unchanged document sharing" (before==after)
     let typed=insertText "x" colored
     check "editing invalidates accepted source rows immediately" (not (ready typed) && null (documentHighlight (doc typed)))
+  initializing<-newEmptyMVar
+  releaseInitialization<-newEmptyMVar
+  initializedCalls<-newIORef ([]::[T.Text])
+  withHighlightingUsing (putMVar initializing () >> takeMVar releaseInitialization)
+    (\_ text->modifyIORef' initializedCalls (++[text]) >> pure (map (,Plain) (T.unpack text))) $ \worker -> do
+      bounded "catalog initialization starts on its worker" (takeMVar initializing)
+      queued<-bounded "source updates remain responsive during catalog initialization" $ foldM
+        (\d n->tickHighlighting worker (replace ("newest "<>T.pack (show n)) d)) initial [1::Int ..20]
+      waiting<-readIORef initializedCalls
+      check "catalog initialization finishes before file tokenization starts" (null waiting)
+      putMVar releaseInitialization ()
+      colored<-await "newest request after catalog initialization" worker ready queued
+      requested<-readIORef initializedCalls
+      check "initialization coalesces all queued replacements to the newest source"
+        (requested==["newest 20"] && map fst (fromJust (documentSourceRows (doc colored)) V.! 0)=="newest 20")
+  initializingStopped<-newEmptyMVar
+  initializingEntered<-newEmptyMVar
+  neverInitialized<-newEmptyMVar
+  bounded "closing highlighting cancels catalog initialization" $ withHighlightingUsing
+    ((putMVar initializingEntered () >> takeMVar neverInitialized) `finally` putMVar initializingStopped ())
+    (\_ _->error "tokenizer ran before catalog initialization")
+    (\_ ->takeMVar initializingEntered)
+  bounded "catalog initialization cancellation cleanup completes" (takeMVar initializingStopped)
   withHighlighting $ \worker -> do
-    colored<-await worker ready initial
+    colored<-await "cold real Python grammar result" worker ready initial
+    let pythonRows=fromJust (documentSourceRows (doc colored))
+    check "production worker applies real Python grammar on its cold first request"
+      (map fst (pythonRows V.! 0)=="def old():" && take 3 (map snd (pythonRows V.! 0))==replicate 3 Keyword)
     let renamed=colored {buffers=M.map (\d->restyle d {documentFile=Just (FileState "example.unknown" Nothing)}) (buffers colored)}
-    plain<-await worker ready renamed
+    plain<-await "unknown filename result" worker ready renamed
     check "filename changes invalidate syntax selection" (all ((==Plain).snd) (V.concatMap V.fromList (fromJust (documentSourceRows (doc plain)))))
   attempts<-newIORef (0::Int)
   timedOut<-newEmptyMVar
-  withHighlightingUsing (\path text->do
+  withHighlightingUsing (pure ()) (\path text->do
     attempt<-atomicModifyIORef' attempts (\n->(n+1,n))
     if attempt==0 then (threadDelay 3000000 >> pure []) `finally` putMVar timedOut ()
       else pure (highlightFor path text)) $ \worker -> do
@@ -75,13 +103,13 @@ checks = do
     mapM_ (\_ -> tickHighlighting worker started >> threadDelay 1000) [1::Int ..30]
     count<-readIORef attempts
     check "timed out unchanged source is not rescheduled every tick" (count==1)
-    retried<-await worker ready (replace "def retry(): return 3" started)
+    retried<-await "edited source after tokenizer timeout" worker ready (replace "def retry(): return 3" started)
     retries<-readIORef attempts
     check "an edit retries highlighting after timeout" (ready retried && retries==2)
   entered<-newEmptyMVar
   stopped<-newEmptyMVar
   never<-newEmptyMVar
-  bounded "closing highlighting cancels its blocked worker" $ withHighlightingUsing
+  bounded "closing highlighting cancels its blocked worker" $ withHighlightingUsing (pure ())
     (\_ _->(putMVar entered () >> takeMVar never) `finally` putMVar stopped ())
     (\worker->tickHighlighting worker initial >> takeMVar entered)
   bounded "worker cancellation cleanup completes" (takeMVar stopped)
@@ -103,8 +131,8 @@ checks = do
 bounded :: String -> IO a -> IO a
 bounded label action=timeout 1000000 action >>= maybe (error label) pure
 
-await :: Highlighting -> (Desktop -> Bool) -> Desktop -> IO Desktop
-await worker done start=timeout 4000000 (loop start) >>= maybe (error "highlighting result timed out") pure
+await :: String -> Highlighting -> (Desktop -> Bool) -> Desktop -> IO Desktop
+await label worker done start=timeout 4000000 (loop start) >>= maybe (error (label++": highlighting result timed out")) pure
   where loop d=do
           next<-tickHighlighting worker d
           if done next then pure next else threadDelay 10000 >> loop next

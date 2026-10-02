@@ -13,6 +13,7 @@ import qualified Data.Map.Strict as M
 import qualified Data.Set as S
 import Data.Text (Text)
 import qualified Data.Vector as V
+import qualified Skylighting as Syntax
 import System.Mem.StableName
 import System.Timeout (timeout)
 import THC.Edit.Buffer
@@ -29,36 +30,57 @@ newtype Highlighting = Highlighting (TVar Work)
 -- | Own one worker for the session. Its cancellation/join happens outside the
 -- desktop lock when the session closes.
 withHighlighting :: (Highlighting -> IO a) -> IO a
-withHighlighting = withHighlightingUsing (\path text -> pure (highlightFor path text))
-
--- | Alternate tokenizer for deterministic lifecycle tests. The worker forces
--- every returned source cell before publishing it.
-withHighlightingUsing :: (FilePath -> Text -> IO [(Char,Style)]) -> (Highlighting -> IO a) -> IO a
-withHighlightingUsing tokenize action = do
-  state<-newTVarIO (Work [] Nothing M.empty)
-  withAsync (forever (work state)) (\_ -> action (Highlighting state))
+withHighlighting = withHighlightingUsing initializeSyntax (\path text -> pure (highlightFor path text))
   where
-    work state=do
+    -- Filename lookup traverses the shared catalog and decodes its embedded
+    -- grammars. Pay that one-time cost on the owned worker, before applying the
+    -- per-file tokenizer budget. Keep Skylighting's canonical map, not a cache.
+    initializeSyntax = evaluate (M.foldl' (\() syntax ->
+      foldl' (\() extension -> length extension `seq` ()) () (Syntax.sExtensions syntax))
+      () Syntax.defaultSyntaxMap)
+
+-- | Alternate initializer and tokenizer for deterministic lifecycle tests.
+-- Initialization has its own bounded worker phase; pending requests coalesce
+-- while it runs. The worker forces every source cell before publishing it.
+withHighlightingUsing :: IO () -> (FilePath -> Text -> IO [(Char,Style)]) -> (Highlighting -> IO a) -> IO a
+withHighlightingUsing initialize tokenize action = do
+  state<-newTVarIO (Work [] Nothing M.empty)
+  withAsync (do
+    initialized<-bounded 10000000 initialize
+    forever (work state initialized)) (\_ -> action (Highlighting state))
+  where
+    -- Failed initialization leaves sources plain for this session, just as a
+    -- failed file tokenizer leaves that source plain until an edit. Neither
+    -- failure is retried from the desktop tick.
+    work state initialized=do
       Request key@(Key ident _ path _) buffer<-atomically $ do
         Work pending _ done<-readTVar state
         case pending of
           [] -> retry
           request@(Request key _):rest -> writeTVar state (Work rest (Just key) done) >> pure request
-      outcome<-try $ timeout 2000000 $ do
-        let text=contents buffer
-        tokens<-tokenize path text
-        let rows=indexedHighlightRows tokens
-            width=measureDocumentWidth text
-        _<-evaluate (V.foldl' (\() row->foldl' (\() (c,style)->c `seq` style `seq` ()) () row) () rows)
-        _<-evaluate width
-        pure (rows,width)
-      result<-case (outcome :: Either SomeException (Maybe Result)) of
-        Right value -> pure value
-        Left exception | Just async<-(fromException exception :: Maybe SomeAsyncException) -> throwIO async
-                       | otherwise -> pure Nothing
+      result<-case initialized of
+        Nothing -> pure Nothing
+        Just () -> bounded 2000000 $ do
+          let text=contents buffer
+          tokens<-tokenize path text
+          let rows=indexedHighlightRows tokens
+              width=measureDocumentWidth text
+          _<-evaluate (V.foldl' (\() row->foldl' (\() (c,style)->c `seq` style `seq` ()) () row) () rows)
+          _<-evaluate width
+          pure (rows,width)
       atomically $ do
         Work pending _ done<-readTVar state
         writeTVar state (Work pending Nothing (M.insert ident (key,result) done))
+
+-- Preserve session cancellation; only synchronous failures and the operation's
+-- own timeout become a plain-text result.
+bounded :: Int -> IO a -> IO (Maybe a)
+bounded micros action = do
+  outcome<-try @SomeException (timeout micros action)
+  case outcome of
+    Right value -> pure value
+    Left exception | Just async<-(fromException exception :: Maybe SomeAsyncException) -> throwIO async
+                   | otherwise -> pure Nothing
 
 -- | Coalesce pending work to the newest visible buffers. At most eight requests
 -- wait behind one running tokenizer; timeouts leave plain text until an edit.
