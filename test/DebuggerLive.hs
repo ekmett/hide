@@ -40,7 +40,7 @@ main = do
         tick d = do
           next <- tickDebugger runtime effects d
           state <- current next
-          unless (flag "active" state || status next == "Debug session ended.") $ do
+          unless (flag "active" state || T.isPrefixOf "Debug session ended" (status next)) $ do
             _ <- report "failure" next
             fail (T.unpack (status next))
           pure next
@@ -95,9 +95,10 @@ main = do
       pure over
     outState <- current out
     done <- if flag "active" outState then advance "continue" True out else pure out
-    final <- report "terminated" done
+    settled <- waitFor "final exit information" (\_ s -> not (flag "finishing" s)) done
+    final <- report "terminated" settled
     check "program terminates and releases inspection state"
-      (not (flag "active" final) && not (flag "stopped" final) && field "frame" final == Just Null && status done=="Debug session ended.")
+      (not (flag "active" final) && not (flag "stopped" final) && field "frame" final == Just Null && T.isPrefixOf "Debug session ended" (status settled))
     hPutStrLn stderr "Live debugger checks passed: embedded source, breakpoint, step-in/over, termination (see trace for step-out)."
 
 field :: FromJSON a => Key -> Value -> Maybe a

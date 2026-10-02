@@ -1,5 +1,5 @@
 # Deterministic DAP peers. Replies are released by requests, never by timers.
-import json, os, socket, sys
+import json, os, socket, sys, time
 
 mode = sys.argv[2] if len(sys.argv) > 2 else 'basic'
 owned = mode.startswith('server-')
@@ -74,7 +74,9 @@ for session in range(1, 3 if mode == 'reconnect' else 2):
                       supportsExceptionInfoRequest=mode in ('exception', 'mcp'),
                       exceptionBreakpointFilters=[dict(filter='uncaught', label='Uncaught exceptions', default=True)]))
             elif cmd in ('attach', 'launch'):
-                if mode == 'launch-fail':
+                if mode in ('launch-fail', 'launch-fail-late'):
+                    if mode == 'launch-fail-late':
+                        event('terminated')
                     reply(req, success=False)
                 else:
                     pending_attach = req
@@ -97,7 +99,7 @@ for session in range(1, 3 if mode == 'reconnect' else 2):
                     reply(req)
                     event('output', dict(category='console', output='loading cradle'))
                     continue
-                if mode == 'launch-fail':
+                if mode in ('launch-fail', 'launch-fail-late'):
                     continue
                 assert pending_attach and 'setExceptionBreakpoints' in configured
                 reply(req)
@@ -152,6 +154,19 @@ for session in range(1, 3 if mode == 'reconnect' else 2):
                     pending_variables = req
             elif cmd in ('continue', 'next', 'stepIn', 'stepOut'):
                 reply(req, dict(allThreadsContinued=True))
+                if mode.startswith('exit-'):
+                    if mode == 'exit-first':
+                        event('exited', dict(exitCode=42))
+                    event('terminated')
+                    if mode in ('exit-first', 'exit-last'):
+                        # A file barrier proves the editor has processed terminated
+                        # before this final event is released, regardless of timing.
+                        while not os.path.exists(sys.argv[1] + '.release'):
+                            time.sleep(0.001)
+                        event('output', dict(category='stdout', output='final output'))
+                        if mode == 'exit-last':
+                            event('exited', dict(exitCode=42))
+                    continue
                 event('continued', dict(threadId=7, allThreadsContinued=True))
                 if pending_variables:
                     reply(pending_variables, dict(variables=[dict(name='STALE', value='must not display', variablesReference=0)]))

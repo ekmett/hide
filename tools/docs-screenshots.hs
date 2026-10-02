@@ -94,7 +94,7 @@ main = do
         stack <- await "call stack" (tickDebugger debugger effects) (maybe False ((=="Call stack") . dialogTitle) . dialog) pending
         capture effects scratch output "debug-stack" stack
         resumed <- command (DebugCommand "continue") shown
-        _ <- await "program termination" (tickDebugger debugger effects) ((=="Debug session ended.") . status) resumed
+        _ <- await "program termination" (tickDebugger debugger effects) (\d -> T.isPrefixOf "Debug session ended" (status d) && status d/="Debug session ended.") resumed
         pure ()
 
 capture :: (Desktop -> [Effect] -> IO (Bool,Desktop)) -> FilePath -> FilePath -> String -> Desktop -> IO ()

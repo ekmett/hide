@@ -46,6 +46,7 @@ data State = State
   , root :: FilePath, endpoint :: (Text,Int), output :: Text
   , startRequest :: (Text,Value), managed :: Bool, adapterId :: Text
   , failure :: Maybe Text, disconnectAt :: Maybe Integer
+  , endedAt :: Maybe Integer, programExitCode :: Maybe Int
   , choices :: M.Map Text [Value], choiceId :: Int, breakRequests :: M.Map Text Int
   , breakModified :: M.Map Text Bool, variableRefs :: M.Map Int Bool
   }
@@ -53,7 +54,7 @@ data State = State
 emptyState :: State
 emptyState = State {client=Nothing,connected=False,capabilities=Null,ready=False,configured=False,pending=M.empty,generation=0,
   stopped=False,thread=Nothing,frame=Nothing,frames=[],followSource=True,exceptionFilters=[],breakpoints=M.empty,sources=M.empty,
-  root=".",endpoint=("127.0.0.1",4711),output="",failure=Nothing,disconnectAt=Nothing,
+  root=".",endpoint=("127.0.0.1",4711),output="",failure=Nothing,disconnectAt=Nothing,endedAt=Nothing,programExitCode=Nothing,
   choices=M.empty,choiceId=0,breakRequests=M.empty,breakModified=M.empty,startRequest=("attach",object []),managed=False,adapterId="",variableRefs=M.empty}
 
 withDebugger :: (Debugger -> IO a) -> IO a
@@ -143,8 +144,8 @@ parseTool s name = withObject "debugger tool arguments" $ \o -> do
       epoch=do
         expected<-o .: "generation"
         unless (expected==generation s) (fail "Debugger generation expired; refresh debug_status")
-      live=unless (isJust (client s) && disconnectAt s==Nothing) (fail "No active debugger session")
-      idle=when (isJust (client s)) (fail "Disconnect the existing debugger session first")
+      live=unless (isJust (client s) && disconnectAt s==Nothing && endedAt s==Nothing) (fail "No active debugger session")
+      idle=when (isJust (client s) && endedAt s==Nothing) (fail "Disconnect the existing debugger session first")
       portNumber=do
         port<-o .:? "port" .!= (4711::Int)
         unless (port>0 && port<=65535) (fail "port must be between 1 and 65535")
@@ -242,7 +243,8 @@ parseTool s name = withObject "debugger tool arguments" $ \o -> do
 
 debuggerStatus :: State -> Value
 debuggerStatus s=object
-  ["generation" .= generation s,"active" .= isJust (client s),"connected" .= connected s,
+  ["generation" .= generation s,"active" .= (isJust (client s) && endedAt s==Nothing),"terminated" .= isJust (endedAt s),
+   "finishing" .= (isJust (client s) && isJust (endedAt s)),"exitCode" .= programExitCode s,"connected" .= connected s,
    "ready" .= ready s,"configured" .= configured s,"stopped" .= stopped s,"follow" .= followSource s,
    "threadId" .= thread s,"frame" .= frame s,"source" .= (frame s >>= (field "source" :: Value -> Maybe Value)),
    "capabilities" .= capabilities s,"breakpoints" .=
@@ -453,13 +455,19 @@ tickDebugger runtime@(Debugger ref clock) core original = do
       expired=M.filter (\(kind,_,sent) -> now-sent>deadline kind) (pending current)
   let detachExpired=maybe False (\sent -> now-sent>1000000000) (disconnectAt current)
       timedOut=not (M.null expired)
-  if not timedOut && not detachExpired && failure current==Nothing then pure updated else do
+      completionDue=isJust (client current) && maybe False
+        (\sent -> now-sent>1000000000) (endedAt current)
+  if completionDue then do
+    mapM_ D.stopClient (client current)
+    modifyIORef' ref (\state -> state {client=Nothing,connected=False,pending=M.empty})
+    pure updated {status=completionStatus current}
+  else if not timedOut && not detachExpired && failure current==Nothing then pure updated else do
     mapM_ D.stopClient (client current)
     modifyIORef' ref (\state -> (invalidate state) {client=Nothing,connected=False,pending=M.empty,ready=False,configured=False,disconnectAt=Nothing,failure=Nothing})
     pure (automaticDesktop current updated) {status=fromMaybe (if detachExpired then "Debugger disconnected." else "DAP request timed out; debugger disconnected.") (failure current)}
 
 receive :: Debugger -> Core -> Desktop -> D.Event -> IO Desktop
-receive runtime@(Debugger ref _) core d event = do
+receive runtime@(Debugger ref clock) core d event = do
   s<-readIORef ref
   case event of
     _ | Nothing<-client s -> pure d
@@ -476,7 +484,8 @@ receive runtime@(Debugger ref _) core d event = do
     D.Disconnected reason -> do
       mapM_ D.stopClient (client s)
       modifyIORef' ref (\state -> (invalidate state) {client=Nothing,connected=False,pending=M.empty,ready=False,configured=False,disconnectAt=Nothing,failure=Nothing})
-      pure (automaticDesktop s d) {status="DAP: "<>reason}
+      pure (automaticDesktop s d) {status=if isJust (endedAt s) then completionStatus s else "DAP: "<>reason}
+    D.Notification name _ | isJust (endedAt s), name `notElem` ["terminated","exited","output"] -> pure d
     D.Notification "initialized" _ -> do
       modifyIORef' ref (\state -> state {ready=True})
       configure runtime
@@ -506,9 +515,17 @@ receive runtime@(Debugger ref _) core d event = do
     D.Notification "continued" _ -> modifyIORef' ref invalidate >> pure (automaticDesktop s d) {status="Running..."}
     D.Notification "thread" _ -> when (configured s) (send runtime (Threads False) "threads" (object [])) >> pure d
     D.Notification "terminated" _ -> do
-      mapM_ D.stopClient (client s)
-      modifyIORef' ref (\state -> (invalidate state) {client=Nothing,connected=False,pending=M.empty,ready=False,configured=False,disconnectAt=Nothing,failure=Nothing})
+      now<-clock
+      mapM_ (\(kind,_,_) -> completeInspection kind (Left "Debug session ended.")) (M.elems (pending s))
+      -- Some adapters send exited (or a failed launch response) after terminated.
+      -- Stop accepting controls now, but drain those final facts for at most 1s.
+      modifyIORef' ref (\state -> (invalidate state) {endedAt=Just (fromMaybe now (endedAt state)),
+        pending=M.filter (\(kind,_,_) -> kind==Init || kind==Attach || kind==Configure) (pending state),
+        ready=False,configured=False,disconnectAt=Nothing,failure=Nothing})
       pure (automaticDesktop s d) {status="Debug session ended."}
+    D.Notification "exited" body -> do
+      modifyIORef' ref (\state -> state {programExitCode=field "exitCode" body})
+      pure d
     D.Notification "output" body -> do
       modifyIORef' ref (\state -> state {output=T.takeEnd 16384 (output state<>text "output" body)})
       pure d
@@ -540,7 +557,7 @@ receive runtime@(Debugger ref _) core d event = do
                  forM_ (thread s) (\tid -> send runtime (Stack False) "stackTrace" (stackArguments tid))
                _ -> pure ()
              pure (automaticDesktop s d) {status="DAP: "<>err}
-           Right body -> response runtime core kind body d
+           Right body -> if isJust (endedAt s) then pure d else response runtime core kind body d
   where
     stale kind=case kind of Threads{} -> True; Control{} -> True; Stack{} -> True; Scopes -> True; Variables -> True; ExceptionDetails -> True; Source{} -> True; Inspection{} -> True; _ -> False
 
@@ -775,6 +792,11 @@ tshow=T.pack.show
 merge :: Value -> Value -> Value
 merge (Object old) (Object new)=Object (KM.union new old)
 merge old _=old
+
+completionStatus :: State -> Text
+completionStatus s=case programExitCode s of
+  Just code -> "Debug session ended (exit "<>tshow code<>")."
+  Nothing -> "Debug session ended; exit status unavailable."
 
 -- DAP exception details remain useful as selectable text, including nested causes.
 exceptionText :: Value -> Text

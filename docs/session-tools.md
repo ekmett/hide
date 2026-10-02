@@ -40,7 +40,7 @@ Editor positions are 1-based Unicode character positions. Raw LSP results retain
 
 ## Debugging
 
-`debug_status` reports the adapter, stop state, frame, breakpoints and current generation. Launch the selected THC target with `debug_launch`, supply an adapter configuration for another DAP implementation, or attach to a loopback adapter with `debug_attach`.
+`debug_status` reports the adapter, stop state, frame, breakpoints and current generation. At termination, `active` becomes false immediately; `finishing` remains true while the editor drains final output for up to one second. `exitCode` is the adapter-reported program result, or null when unavailable. Launch the selected THC/GHC target with `debug_launch`, supply an adapter configuration for another DAP implementation, or attach to a loopback adapter with `debug_attach`.
 
 Use `debug_set_breakpoints`, `debug_control` and `debug_inspect` to set source breakpoints, continue/step/pause, and inspect threads, stack frames, scopes, variables, adapter-owned source and `exceptionInfo`. Exception inspection requires a stopped target and an adapter advertising `supportsExceptionInfoRequest`; its structured response includes nested causes when supplied. Handles belong to a debug generation; the tool rejects them after execution advances. An accepted control command does not imply that the program has reached its next stop. Variable references must come from current scopes/variables responses. Lazy handles are not expanded by read-only inspection: adapters such as hdb force the thunk when those handles are requested. Variable invalidation expires the old handles without moving the source selection.
 

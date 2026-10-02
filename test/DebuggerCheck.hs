@@ -27,7 +27,7 @@ import THC.Edit.Model
 import THC.Edit.Render (snapshotHtml)
 
 checks :: IO ()
-checks = presentationCheck >> pendingPresentationCheck >> startupDeadlineCheck >> launchDeadlineCheck >> launchChecks >> mapM_ session ["basic", "frame", "choices", "breakpoints", "reconnect", "mcp", "lazy", "exception"] >> putStrLn "Debugger checks passed"
+checks = completionChecks >> presentationCheck >> pendingPresentationCheck >> startupDeadlineCheck >> launchDeadlineCheck >> launchChecks >> mapM_ session ["basic", "frame", "choices", "breakpoints", "reconnect", "mcp", "lazy", "exception"] >> putStrLn "Debugger checks passed"
   where
     session mode = bracket (fixture mode) cleanup $ \(port,logPath,process) -> withDebugger $ \runtime -> do
       let core d _=pure (False,d)
@@ -293,7 +293,7 @@ launchChecks = do
       BL.writeFile path (encode (config transport mode requestName))
       let send action values d=snd <$> debuggerEffects runtime core d [DebugAction action values]
       started<-send "launch-config" ["1",T.pack path] (initialDesktop (80,25))
-      if mode=="launch-fail" then do
+      if mode `elem` ["launch-fail","launch-fail-late"] then do
         failed<-waitFor runtime (T.isInfixOf "fixture refused" . status) started
         after<-send "threads" [] failed
         check "failed launch closes session" (status after=="Debugger is not ready for this command.")
@@ -303,10 +303,10 @@ launchChecks = do
         check "stdio launch disconnect clears dialog" (dialog disconnected==Nothing)
       entries<-map (fromMaybe (error "bad launch log") . decodeStrictText) . T.lines <$> TIO.readFile logs
       let requests=[r | e<-entries,Just r<-[field "request" e]]
-      unless (mode=="launch-fail") $ check "disconnect terminates launches and preserves attached programs"
+      unless (mode `elem` ["launch-fail","launch-fail-late"]) $ check "disconnect terminates launches and preserves attached programs"
         (any (\r -> field "command" r==Just ("disconnect"::T.Text) && (field "arguments" r >>= field "terminateDebuggee")==Just (requestName=="launch" || transport=="server")) requests)
       check "launch forwards request and arguments" (any (\r -> field "command" r==Just requestName && (field "arguments" r >>= field "program")==Just ("space λ.hs" :: T.Text)) requests)
-      ) [("stdio","basic","launch"),("stdio","basic","attach"),("stdio","launch-fail","launch"),("server","basic","launch"),("server","basic","attach")]
+      ) [("stdio","basic","launch"),("stdio","basic","attach"),("stdio","launch-fail","launch"),("stdio","launch-fail-late","launch"),("server","basic","launch"),("server","basic","attach")]
     withDebugger $ \runtime -> do
       TIO.writeFile path "{\"command\":[\"python3\"],\"request\":\"launch\",\"arguments\":[]}"
       (_,d)<-debuggerEffects runtime core (initialDesktop (80,25)) [DebugAction "launch-config" ["1",T.pack path]]
@@ -476,3 +476,37 @@ pendingPresentationCheck=bracket (fixture "basic") cleanup $ \(port,_,_) -> with
     (windows drained==windows quiet && buffers drained==buffers quiet && dialog drained==dialog quiet)
   _<-tool "debug_control" ["generation" .= gen,"command" .= ("disconnect"::T.Text)] drained
   pure ()
+
+-- Completion and exit are distinct DAP events, and may arrive in either order.
+completionChecks :: IO ()
+completionChecks=forM_ ["exit-first","exit-last","exit-missing"] $ \mode ->
+  bracket (fixture mode) cleanup $ \(port,path,_) -> do
+    clock<-newIORef 0
+    withDebuggerClock (readIORef clock) $ \runtime -> do
+      let core d _=pure (False,d)
+          send action values d=snd <$> debuggerEffects runtime core d [DebugAction action values]
+          state d=do (_,finish)<-debuggerTool runtime core d "debug_status" (object []); finish >>= either (error . T.unpack) pure
+          awaitState label predicate d=timeout debuggerTimeout (loop d) >>= maybe (error label) pure
+            where loop current=do
+                    next<-tickDebugger runtime core current
+                    value<-state next
+                    if predicate value then pure next else threadDelay 1000 >> loop next
+      connected<-send "connect" ["0","127.0.0.1",T.pack port] (initialDesktop (80,25))
+      stopped<-awaitState "completion fixture stop" ((==Just True).field "stopped") connected
+      running<-send "continue" [] stopped
+      ended<-awaitState "termination event" ((==Just True).field "terminated") running
+      endedState<-state ended
+      check "terminated programs cannot be inspected as active" (field "active" endedState==Just False && field "frame" endedState==Just Null)
+      check "exit is not an end-of-stream marker" (field "finishing" endedState==Just True)
+      drained<-if mode=="exit-missing" then pure ended else do
+        writeFile (path<>".release") "release"
+        awaitState "output after termination and exit" (\value ->
+          maybe False (T.isInfixOf "final output") (field "output" value) && field "exitCode" value==Just (42::Int)) ended
+      writeIORef clock 2000000000
+      finished<-awaitState "bounded exit collection" ((==Just False).field "finishing") drained
+      result<-state finished
+      check "exit code survives both event orders; missing remains unknown"
+        ((field "exitCode" result :: Maybe Value)==Just (if mode=="exit-missing" then Null else toJSON (42::Int)))
+      when (mode/="exit-missing") $ do
+        check "final program output is drained" (maybe False (T.isInfixOf "final output") (field "output" result))
+        removeFile (path<>".release")

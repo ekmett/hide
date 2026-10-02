@@ -1,8 +1,9 @@
 # GHC debugging through hdb
 
 Date: 2026-10-02. Selected direction: use `hdb`, sharing the editor's DAP
-session, source windows and MCP tools. This is an integration design, not a
-claim of working GHC support. Upstream inspected:
+session, source windows and MCP tools. Saved-source launch, breakpoints,
+inspection and stepping have live qualification; the remaining work is listed
+below. Upstream inspected:
 [`af22571`](https://github.com/well-typed/haskell-debugger/tree/af22571abc9d4316ad592815f46d9b430f278014),
 package version 0.14.0.0. See the [options assessment](ghc-debugging-options.md)
 for alternatives and platform qualification.
@@ -39,17 +40,19 @@ never label unimplemented behavior as supported just because DAP has a request.
 
 ## The user experience
 
-Select **GHC** in Build target, choose the Cabal component, then **Debug >
-Launch**. Launch offers the source entry file, entry function (normally `main`),
-program arguments and compiler arguments. The editor starts the matching `hdb`
-server, shows loading/build output and installs the user's breakpoints before
-execution. A normal GHC native build remains available independently.
+Select **GHC** in the status-bar dropdown, then **Debug > Launch > Selected
+target**. This starts `hdb` from PATH using the saved source entry, canonical
+project root, `main` and configured program arguments. Use **Adapter config**
+for explicit cradle/entry arguments. The installed hdb owns its GHC version;
+a custom compiler command requires an explicit adapter configuration. Automatic
+Cabal component/cradle selection and richer launch fields remain planned.
+A normal GHC native build remains available independently.
 
 Use the same Breakpoints, Threads, Call stack and Scopes controls as THC.
 Expanding an ordinary value shows its children. An unevaluated value displays
-`<thunk>` and offers **Force**, clearly distinct from expansion. **Evaluate**
-opens a stopped expression console with history. Watches are saved expressions
-with an explicit Evaluate action, not expressions secretly rerun on every step.
+`<thunk>`; read-only expansion refuses to force it. Planned **Force** and
+**Evaluate** actions will be explicit execution operations with stopped-context
+history. Planned watches will require explicit evaluation on each stop.
 An agent can inspect in the background and reveal the same source/frame to the
 user with `debug_present`; it never gets a second hidden debugger state.
 
@@ -189,7 +192,7 @@ configuration, verified/hit a line-6 breakpoint, exposed Locals/Module/Globals,
 reported a lazy `[Int]` value, rejected a read-only attempt to expand that
 lazy handle, stepped, and terminated. No new debugger UI was
 needed for that sequence. This does not yet qualify Cabal component discovery,
-stdin, forcing, exception outcomes or other platforms.
+stdin, forcing, exception stops or other platforms.
 
 The first attempt used `/tmp` as projectRoot while GHC reported `/private/tmp`,
 and hdb failed to find the entry module. Canonical projectRoot fixed that
@@ -207,8 +210,8 @@ group on cancellation or completion. Readiness is bounded to five minutes and
 launch requests to two minutes; ordinary requests retain fifteen seconds.
 A real hdb run through this path repeated breakpoint, scopes, lazy inspection
 protection, stepping and termination, and left no listener on its selected port.
-The launch selector still uses Adapter config for GHC; component discovery and
-failed-cradle/exception qualification remain open items above.
+Component discovery and failed-cradle/exception-stop qualification remain open
+items above.
 
 The shared status bar now selects THC/GHC for build, run and Selected target
 debug launch. GHC Selected target starts hdb on PATH using the saved source
@@ -227,3 +230,13 @@ and an `exited` event after `terminated`. This does not qualify live exception
 stops/details; investigate the upstream filter behavior and preserve the exit
 code before claiming that path reliable. Fixture-backed exception presentation
 remains separate evidence.
+
+
+Completion retains the final output and adapter-reported exit code for up to
+one second after `terminated`, while rejecting further execution/inspection.
+Both event orders are covered, including output arriving after `exited`;
+missing codes remain null. Real selected-GHC runs qualified normal exit 0 and
+`error "demo exception"` exit 42 with the pinned hdb/GHC pair. These are program
+outcomes, not proof of exception-breakpoint behavior. The live checks used the
+same saved-source launch, breakpoint, scopes, protected lazy inspection, step
+and continue flow as the editor.
