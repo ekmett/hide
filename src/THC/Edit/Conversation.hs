@@ -1235,10 +1235,10 @@ renderReplyWithShellBlocks graphical requested outgoing text
           renderedRow=row+if leadingCode then 1 else 0
           prefix=if outgoing then max 0 (width-bubbleWidth-3)+1 else 2
       in sum (map length (take renderedRow rendered)) + (if renderedRow>0 then 1 else 0) + prefix + column
-    leadingCode=case contentRows of
-      first:_ -> any (\(_,style)->case style of BubbleText _ _ (CodeStyle _ _)->True; _->False) first
-      [] -> False
-    rows=if leadingCode then []:contentRows else contentRows
+    codeRow=any (\(_,style)->case style of BubbleText _ _ (CodeStyle _ _)->True; _->False)
+    leadingCode=case contentRows of first:_->codeRow first; []->False
+    trailingCode=case reverse contentRows of lastRow:_->codeRow lastRow; []->False
+    rows=[[] | leadingCode]++contentRows++[[] | trailingCode]
     columns chars=let t=T.pack (map fst chars) in displayColumn t (T.length t)
     bubbleWidth=maximum (0:map columns rows)
     background=BubbleStyle outgoing Plain
@@ -1254,9 +1254,9 @@ renderReplyWithShellBlocks graphical requested outgoing text
       | lastRow = tile (if leftSide then 2 else 3)
       | otherwise = (' ',background)
     lastIndex=length rows-1
-    -- The top margin belongs to the bubble, so copying still starts at its text.
+    -- Margins belong to the bubble, never to copied text or shell-block spans.
     renderLine i chars =
-      [('\n',if leadingCode && i==1 then background else BubbleText 0 outgoing Plain) | i>0] ++ line i chars
+      [('\n',if (leadingCode && i==1) || (trailingCode && i==lastIndex) then background else BubbleText 0 outgoing Plain) | i>0] ++ line i chars
     line i chars =
       let first=i==0; lastRow=i==lastIndex
           body=side first lastRow True:chars++spaces background (bubbleWidth-columns chars)++[side first lastRow False]

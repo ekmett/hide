@@ -130,6 +130,16 @@ checks = bracket temporary removePathForcibly $ \root ->
         (not (any codeCell firstRow) && any codeCell cells)
       check "leading code panel spacing is decoration, not copied text"
         (copied==map fst (renderMarkdown 35 sourceText))
+    forM_ [False,True] $ \graphical -> forM_ [False,True] $ \outgoing -> forM_ [8,40,100] $ \width ->
+      forM_ ["```haskell\nx = 42\n```","Before\n\n```sh\nprintf hello\n```"] $ \sourceText -> do
+        let cells=renderReply graphical width outgoing sourceText
+            lastRow=takeWhile ((/='\n').fst) (reverse cells)
+            codeCell (_,BubbleText _ _ (CodeStyle _ _))=True
+            codeCell _=False
+        check "trailing code panels leave the bubble bottom edge clear"
+          (not (any codeCell lastRow) && any codeCell cells)
+        check "code panel margins leave copied contents unchanged"
+          ([c | (c,BubbleText _ _ _)<-cells]==map fst (renderMarkdown (width-5) sourceText))
     forM_ [1,2,5,6,8,30,80] $ \width -> forM_ [False,True] $ \outgoing -> do
       let rendered=reply width outgoing "Wide 界 words é and more words"
       check "bubbles wrap within the window width"
