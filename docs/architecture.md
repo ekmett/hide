@@ -78,6 +78,13 @@ in bounded batches. Cursor-only ticks reuse buffer/client identity keys. The
 Messages projection reuses its parsed, sorted diagnostics until an HLS batch,
 source identity/version, or build diagnostic list changes.
 
+Project-root discovery and HLS process startup also run in bounded workers.
+MCP requests made during startup keep their original deadlines and wait for document
+synchronization; edits, reloads, closing a file or making it private invalidate
+captured requests. Restart retires old workers asynchronously and reserves each
+root until its previous client has stopped. Rename and code-action snapshots
+classify project boundaries and read closed files in their preparation worker.
+
 These boundaries keep routine tool output and held file reads out of navigation
 and rendering. Explicit save/configuration operations and some tool launch
 preparation still perform synchronous work; the desktop is not yet free of all

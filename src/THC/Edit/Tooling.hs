@@ -1,11 +1,12 @@
 {-# LANGUAGE OverloadedStrings #-}
-module THC.Edit.Tooling (Tooling, toolingTool, toolingTools, toolingToolNames, withTooling, tickTooling, toolingEffects, completionItems, workspaceEdits, hoverText, diagnosticsCurrent) where
+module THC.Edit.Tooling (Tooling, toolingTool, toolingTools, toolingToolNames, withTooling, withToolingUsing, tickTooling, toolingEffects, completionItems, workspaceEdits, hoverText, diagnosticsCurrent) where
 
-import Control.Exception (bracket, try, IOException, onException, mask_, evaluate)
+import Control.Exception (bracket, try, IOException, onException, mask_, evaluate, finally, displayException)
+import Control.Concurrent.Async (Async, async, cancel, waitCatch)
 import Control.Concurrent.STM
 import System.Timeout (timeout)
 import System.Mem.StableName (StableName, makeStableName)
-import Control.Concurrent (ThreadId, forkIO, killThread, MVar, newEmptyMVar, putMVar, readMVar, tryReadMVar)
+import Control.Concurrent (forkIO, MVar, newEmptyMVar, putMVar, readMVar, tryReadMVar)
 import Control.Monad (filterM, foldM, forM, forM_, unless, when, void)
 import Data.Aeson
 import Data.Aeson.Types (parseMaybe, parseEither, Parser)
@@ -36,8 +37,16 @@ data ToolQuery = ToolQuery
   , queryProgress :: TVar (Int,M.Map Int Int) }
 data CachedAction = CachedAction ToolQuery Value Bool
 data Session = Session L.Client (IORef (M.Map Int Pending))
-data Preparing = Preparing Target FilePath T.Text (M.Map FilePath (Int,T.Text)) ThreadId (MVar (Either IOException (M.Map FilePath (Int,T.Text))))
-  | ToolPreparing ToolQuery ThreadId (MVar (Either IOException (M.Map FilePath (Int,T.Text))))
+data Preparing = Preparing Target FilePath T.Text (M.Map FilePath (Int,T.Text)) (Async ()) (MVar (Either IOException (M.Map FilePath (Int,T.Text))))
+  | ToolPreparing ToolQuery (Async ()) (MVar (Either IOException (M.Map FilePath (Int,T.Text))))
+  | RetiringPreparation (MVar ())
+-- Startup publishes ownership before accepting cancellation; retirement always
+-- observes and closes a client even if cancellation races with completion.
+data Startup a = Startup (Async ()) (MVar (Either IOException a))
+data Deferred = DeferredTool ToolQuery (StableName Buffer)
+  | DeferredLanguage LanguageAction Target FilePath (StableName Buffer)
+  | DeferredSaved Target FilePath (StableName Buffer)
+
 type ProblemKey = (Int,[(Int,FilePath,Int,StableName Buffer)],StableName [Diagnostic])
 data ProblemCache = ProblemCache ProblemKey [Diagnostic] Bool (StableName [Diagnostic])
 
@@ -51,27 +60,80 @@ data Tooling = Tooling
   , retiring :: IORef [MVar ()]
   , preparing :: IORef (Maybe Preparing)
   , synchronized :: IORef (M.Map FilePath (StableName L.Client, [(Int,FilePath,Int,StableName Buffer)]))
+  , discoveryWorker :: IORef (Maybe ([FilePath],Startup (M.Map FilePath FilePath)))
+  , retiringDiscovery :: IORef (Maybe (MVar ()))
+  , startingClients :: IORef (M.Map FilePath (Startup L.Client))
+  , retiringRoots :: IORef (M.Map FilePath (MVar ()))
+  , waitingRequests :: IORef [Deferred], discoveryFailures :: IORef (M.Map FilePath T.Text)
+  , discoverRoot :: FilePath -> IO FilePath, launchSession :: FilePath -> IO L.Client
+  , snapshotSources :: Desktop -> FilePath -> IO (M.Map FilePath (Int,T.Text))
   }
 
 withTooling :: (Tooling -> IO a) -> IO a
-withTooling = bracket (Tooling <$> newIORef M.empty <*> newIORef M.empty <*> newIORef M.empty <*> newIORef 0 <*> newIORef Nothing <*> newIORef (Nothing,0,False) <*> newIORef M.empty <*> newIORef 1 <*> newIORef [] <*> newIORef Nothing <*> newIORef M.empty) closeTooling
+withTooling = withToolingUsing projectRoot L.startClient editSnapshot
+
+-- | Override the filesystem/process operations, keeping their normal ownership.
+withToolingUsing :: (FilePath -> IO FilePath) -> (FilePath -> IO L.Client) -> (Desktop -> FilePath -> IO (M.Map FilePath (Int,T.Text))) -> (Tooling -> IO a) -> IO a
+withToolingUsing discover launch snapshot = bracket (Tooling <$> newIORef M.empty <*> newIORef M.empty <*> newIORef M.empty <*> newIORef 0 <*> newIORef Nothing <*> newIORef (Nothing,0,False) <*> newIORef M.empty <*> newIORef 1 <*> newIORef [] <*> newIORef Nothing <*> newIORef M.empty <*> newIORef Nothing <*> newIORef Nothing <*> newIORef M.empty <*> newIORef M.empty <*> newIORef [] <*> newIORef M.empty <*> pure discover <*> pure launch <*> pure snapshot) closeTooling
 
 closeTooling :: Tooling -> IO ()
 closeTooling t = do
-  cancelPreparation t
+  retireTooling t
   readIORef (retiring t) >>= mapM_ readMVar
   writeIORef (retiring t) []
+
+retireTooling :: Tooling -> IO ()
+retireTooling t = mask_ $ do
+  cancelPreparation t
+  discovery<-atomicModifyIORef' (discoveryWorker t) (\old->(Nothing,old))
+  forM_ discovery $ \(_,worker)->do
+    done<-retireStartup t worker (const (pure ()))
+    writeIORef (retiringDiscovery t) (Just done)
+  starts<-atomicModifyIORef' (startingClients t) (\old->(M.empty,old))
+  forM_ (M.toList starts) $ \(root,worker)->do
+    done<-retireStartup t worker L.stopClient
+    modifyIORef' (retiringRoots t) (M.insert root done)
+  deferred<-atomicModifyIORef' (waitingRequests t) (\old->([],old))
+  forM_ deferred $ \entry->case entry of
+    DeferredTool query _->completeTool query (Left "HLS startup cancelled")
+    _->pure ()
   writeIORef (actions t) M.empty
-  readIORef (sessions t) >>= mapM_ (either (const (pure ())) (\(Session c pending) -> do
-    readIORef pending >>= mapM_ (failPending "HLS stopped") . M.elems
-    L.stopClient c)) . M.elems
+  active<-atomicModifyIORef' (sessions t) (\old->(M.empty,old))
+  forM_ (M.toList active) $ \(root,entry)->case entry of
+    Left _->pure ()
+    Right (Session client pending)->do
+      readIORef pending >>= mapM_ (failPending "HLS stopped") . M.elems
+      done<-L.retireClient client
+      modifyIORef' (retiring t) (done:)
+      modifyIORef' (retiringRoots t) (M.insert root done)
+
+retirePreparation :: Tooling -> Async () -> IO (MVar ())
+retirePreparation t worker = mask_ $ do
+  done<-newEmptyMVar
+  _<-forkIO ((cancel worker >> void (waitCatch worker)) `finally` putMVar done ())
+  modifyIORef' (retiring t) (done:)
+  pure done
+
+currentPreparation :: Tooling -> IO (Maybe Preparing)
+currentPreparation t = do
+  previous<-readIORef (preparing t)
+  case previous of
+    Just (RetiringPreparation done)->do
+      stopped<-tryReadMVar done
+      case stopped of
+        Just ()->writeIORef (preparing t) Nothing >> pure Nothing
+        Nothing->pure previous
+    _->pure previous
 
 cancelPreparation :: Tooling -> IO ()
-cancelPreparation t = do
-  previous<-atomicModifyIORef' (preparing t) (\p -> (Nothing,p))
+cancelPreparation t = mask_ $ do
+  previous<-currentPreparation t
   forM_ previous $ \job -> case job of
-    Preparing _ _ _ _ worker _ -> killThread worker
-    ToolPreparing query worker _ -> completeTool query (Left "Rename preparation cancelled") >> killThread worker
+    RetiringPreparation{}->pure ()
+    Preparing _ _ _ _ worker _ ->stop worker
+    ToolPreparing query worker _ ->completeTool query (Left "Rename preparation cancelled") >> stop worker
+  where
+    stop worker=retirePreparation t worker >>= writeIORef (preparing t) . Just . RetiringPreparation
 
 -- These calls share the session's HLS client and response pump. The returned
 -- wait action must run outside the desktop lock, so tickTooling can resolve it.
@@ -108,37 +170,48 @@ toolingTool :: Tooling -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop 
 toolingTool = startTool False
 
 startTool :: Bool -> Tooling -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> T.Text -> Value -> IO (Desktop, IO (Either T.Text Value))
-startTool human t _ d name arguments = case parseEither parameters arguments of
+startTool = startToolWith Nothing
+
+startToolWith :: Maybe ToolQuery -> Bool -> Tooling -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> T.Text -> Value -> IO (Desktop, IO (Either T.Text Value))
+startToolWith seed human t _ d name arguments = case parseEither parameters arguments of
   Left err -> reject (T.pack err)
   Right (target,path,text) -> do
+    sync t d
     active<-readIORef (sessions t)
     counts<-forM (M.elems active) $ \session -> case session of
       Left _ -> pure 0
       Right (Session _ pending) -> length . filter isTool . M.elems <$> readIORef pending
-    preparation<-readIORef (preparing t)
-    if sum counts+(case preparation of Just ToolPreparing{} -> 1; _ -> 0)>=32 then reject "Too many pending HLS tools"
-    else if name `elem` ["lsp_rename","lsp_code_actions"] && maybe False (const True) preparation then reject "An HLS edit snapshot is already being prepared"
-    else if name=="lsp_apply_code_action" then applyCodeAction human t d target path arguments
+    preparation<-currentPreparation t
+    waiting<-readIORef (waitingRequests t)
+    if sum counts+length waiting+(case preparation of Just ToolPreparing{} -> 1; _ -> 0)>=32 then reject "Too many pending HLS tools"
+    else if name `elem` ["lsp_rename","lsp_code_actions"] && maybe False (const True) preparation then reject (case preparation of Just RetiringPreparation{}->"Previous HLS edit snapshot is still stopping; retry the request."; _->"An HLS edit snapshot is already being prepared")
     else do
-      sync t d
-      available<-sessionFor t path
+      available<-lookupSession t path
+      discovering<-rootsPending t d
       case available of
-        Left err -> reject err
-        Right session -> do
-          promise<-newEmptyTMVarIO
-          now<-toInteger <$> getMonotonicTimeNSec
-          snapshot<-openSnapshot d path
-          progress<-newTVarIO (0,M.empty)
-          let query=ToolQuery name target path arguments snapshot (now+30000000000) promise human progress
-          if name `elem` ["lsp_rename","lsp_code_actions"] then do
-            root<-projectRoot path
-            result<-newEmptyMVar
-            worker<-forkIO (try (sourceSnapshot d root) >>= putMVar result)
-            writeIORef (preparing t) (Just (ToolPreparing query worker result))
-          else queueTool t session query text
-          pure (d,waitTool query)
+        Just (Left err) -> reject err
+        Just (Right session) | not (discovering && name `elem` ["lsp_rename","lsp_code_actions"]) ->
+          if name=="lsp_apply_code_action" then applyCodeAction seed human t d target path arguments else do
+            query<-newQuery seed human name target path arguments M.empty
+            if name `elem` ["lsp_rename","lsp_code_actions"] then mask_ $ do
+              result<-newEmptyMVar
+              worker<-async (try (snapshotSources t d path) >>= putMVar result)
+              writeIORef (preparing t) (Just (ToolPreparing query worker result))
+            else queueTool t session query text
+            pure (d,waitTool query)
+        _ -> do
+          identity<-sourceIdentity d target path
+          case identity of
+            Nothing->reject "HLS target changed or became private."
+            Just stamp->do
+              query<-newQuery seed human name target path arguments M.empty
+              accepted<-deferRequest t (DeferredTool query stamp)
+              if accepted then pure (if human then d {status="Starting HLS..."} else d,waitTool query)
+                else completeTool query (Left "Too many pending HLS startup requests") >> reject "Too many pending HLS startup requests"
   where
-    reject err=pure (if human then d {status=err} else d,pure (Left err))
+    reject err=do
+      forM_ seed (\query->completeTool query (Left err))
+      pure (if human then d {status=err} else d,pure (Left err))
     isTool (ToolPending _) = True
     isTool CommandPending{} = True
     isTool _ = False
@@ -175,6 +248,14 @@ startTool human t _ d name arguments = case parseEither parameters arguments of
         unless (not (T.null newName) && T.length newName<=256 && not (T.any (\c -> isSpace c || c<' ') newName)) (fail "Invalid rename identifier")
       when (name=="lsp_references") (void (o .:? "includeDeclaration" :: Parser (Maybe Bool)))
       pure ((bid,revision b,pos),filePath file,text)
+
+newQuery :: Maybe ToolQuery -> Bool -> T.Text -> Target -> FilePath -> Value -> M.Map FilePath (Int,T.Text) -> IO ToolQuery
+newQuery (Just query) _ _ _ _ _ snapshot = pure query {querySnapshot=snapshot}
+newQuery Nothing human name target path arguments snapshot = do
+  promise<-newEmptyTMVarIO
+  now<-toInteger <$> getMonotonicTimeNSec
+  progress<-newTVarIO (0,M.empty)
+  pure (ToolQuery name target path arguments snapshot (now+30000000000) promise human progress)
 
 completeTool :: ToolQuery -> Either T.Text Value -> IO ()
 completeTool query result = atomically $ do
@@ -239,13 +320,16 @@ queueTool t (Session client pending) query text = do
 
 -- Open buffers from other projects and private authority files cannot enter an
 -- edit snapshot, even when they are visible in the same desktop.
-openSnapshot :: Desktop -> FilePath -> IO (M.Map FilePath (Int,T.Text))
-openSnapshot d path = do
+-- Runs in the existing preparation worker: root markers can change while an
+-- HLS session is alive, so mutation snapshots must classify open files afresh.
+editSnapshot :: Desktop -> FilePath -> IO (M.Map FilePath (Int,T.Text))
+editSnapshot d path = do
   root<-projectRoot path
   entries<-forM (sourceDocuments d) $ \(_,file,version,text)->do
     owner<-projectRoot file
     pure [(file,(version,text)) | owner==root]
-  pure (M.fromList (concat entries))
+  disk<-sourceSnapshot d root
+  pure (M.union (M.fromList (concat entries)) disk)
 
 advertisedCommands :: Value -> [T.Text]
 advertisedCommands caps = fromMaybe [] (member "executeCommandProvider" caps >>= member "commands" >>= parseMaybe parseJSON)
@@ -301,10 +385,12 @@ cacheCodeActions t (Session client _) query result d = do
       else prompt "HLS code actions" (CodeActionChoices bid version [ident | (ident,_,_,_)<-cached])
         [ListBox "Action" [label | (_,_,_,label)<-cached] 0] d
 
-applyCodeAction :: Bool -> Tooling -> Desktop -> Target -> FilePath -> Value -> IO (Desktop,IO (Either T.Text Value))
-applyCodeAction human t d target path arguments = do
+applyCodeAction :: Maybe ToolQuery -> Bool -> Tooling -> Desktop -> Target -> FilePath -> Value -> IO (Desktop,IO (Either T.Text Value))
+applyCodeAction seed human t d target path arguments = do
   let ident=fromMaybe "" (member "actionId" arguments >>= stringValue)
-      reject err=pure (if human then d {status=err} else d,pure (Left err))
+      reject err=do
+        forM_ seed (\query->completeTool query (Left err))
+        pure (if human then d {status=err} else d,pure (Left err))
   cached<-atomicModifyIORef' (actions t) (\entries->(M.delete ident entries,M.lookup ident entries))
   case cached of
     Nothing->reject "Code action expired or already used; list actions again."
@@ -320,16 +406,15 @@ applyCodeAction human t d target path arguments = do
               case actionDisabled resolve (advertisedCommands caps) value of
                 Just reason->reject reason
                 Nothing->do
-                  now<-toInteger <$> getMonotonicTimeNSec
-                  reply<-newEmptyTMVarIO
-                  progress<-newTVarIO (0,M.empty)
-                  let query=original {queryName="lsp_apply_code_action",queryArguments=value,queryDeadline=now+30000000000,queryReply=reply,queryHuman=human,queryProgress=progress}
+                  query<-newQuery seed human "lsp_apply_code_action" (queryTarget original) path value (querySnapshot original)
+                  let resolved=query {queryArguments=value}
+
                   if maybe False (/=Null) (member "edit" value) || either (const False) (/=Nothing) (actionCommand value)
                     then do
-                      updated<-finishCodeAction t session query value d
+                      updated<-finishCodeAction t session resolved value d
                       pure (updated,waitTool query)
                     else do
-                      queueTool t session query ""
+                      queueTool t session resolved ""
                       pure (d {status=if human then "Resolving code action..." else status d},waitTool query)
 
 finishCodeAction :: Tooling -> Session -> ToolQuery -> Value -> Desktop -> IO Desktop
@@ -413,32 +498,138 @@ projectRoot path = search (takeDirectory path)
 projectBoundary :: [FilePath] -> Bool
 projectBoundary entries = any (`elem` entries) ["hie.yaml","cabal.project","stack.yaml",".git"] || any ((==".cabal") . takeExtension) entries
 
+startWorker :: IO a -> IO (Startup a)
+startWorker action = mask_ $ do
+  result<-newEmptyMVar
+  worker<-async (mask_ (try action >>= putMVar result))
+  pure (Startup worker result)
+
+retireStartup :: Tooling -> Startup a -> (a -> IO ()) -> IO (MVar ())
+retireStartup t (Startup worker result) dispose = mask_ $ do
+  done<-newEmptyMVar
+  _<-forkIO ((do
+    cancel worker
+    void (waitCatch worker)
+    answer<-tryReadMVar result
+    case answer of Just (Right value)->dispose value; _->pure ()) `finally` putMVar done ())
+  modifyIORef' (retiring t) (done:)
+  pure done
+
+advanceStartups :: Tooling -> Desktop -> IO ()
+advanceStartups t d = mask_ $ do
+  discovery<-readIORef (discoveryWorker t)
+  forM_ discovery $ \(paths,Startup _ result)->do
+    answer<-tryReadMVar result
+    forM_ answer $ \found->do
+      writeIORef (discoveryWorker t) Nothing
+      case found of
+        Right entries->modifyIORef' (roots t) (M.union entries)
+        Left err->modifyIORef' (discoveryFailures t) (M.union (M.fromList [(p,"HLS: "<>T.pack (displayException err)) | p<-paths]))
+  known<-readIORef (roots t)
+  failed<-readIORef (discoveryFailures t)
+  let paths=M.keys (M.fromList [(path,()) | (_,path,_,_)<-sourceDocuments d])
+      needed=M.fromList [(root,()) | path<-paths,Just root<-[M.lookup path known]]
+      missing=take 64 [path | path<-paths,M.notMember path known,M.notMember path failed]
+  discovering<-readIORef (discoveryWorker t)
+  oldDiscovery<-readIORef (retiringDiscovery t)
+  stopped<-maybe (pure True) (fmap (==Just ()) . tryReadMVar) oldDiscovery
+  when stopped (writeIORef (retiringDiscovery t) Nothing)
+  when (stopped && maybe True (const False) discovering && not (null missing)) $ do
+    worker<-startWorker (M.fromList <$> mapM (\path->(path,) <$> discoverRoot t path) missing)
+    writeIORef (discoveryWorker t) (Just (missing,worker))
+  starts<-readIORef (startingClients t)
+  forM_ (M.toList starts) $ \(root,worker@(Startup _ result))->
+    if M.notMember root needed then do
+      modifyIORef' (startingClients t) (M.delete root)
+      done<-retireStartup t worker L.stopClient
+      modifyIORef' (retiringRoots t) (M.insert root done)
+    else do
+      answer<-tryReadMVar result
+      forM_ answer $ \started->do
+        session<-case started of
+          Left err->pure (Left ("HLS: "<>T.pack (displayException err)))
+          Right client->Right . Session client <$> newIORef M.empty
+        modifyIORef' (sessions t) (M.insert root session)
+        modifyIORef' (startingClients t) (M.delete root)
+  active<-readIORef (sessions t)
+  pending<-readIORef (startingClients t)
+  retired<-readIORef (retiringRoots t)
+  stopping<-M.traverseMaybeWithKey (\_ done->do result<-tryReadMVar done; pure (case result of Nothing->Just done; Just ()->Nothing)) retired
+  writeIORef (retiringRoots t) stopping
+  forM_ (take (max 0 (4-M.size pending-M.size stopping)) [root | root<-M.keys needed,M.notMember root active,M.notMember root pending,M.notMember root stopping]) $ \root->do
+    worker<-startWorker (launchSession t root)
+    modifyIORef' (startingClients t) (M.insert root worker)
+
+lookupSession :: Tooling -> FilePath -> IO (Maybe (Either T.Text Session))
+lookupSession t path = do
+  failed<-readIORef (discoveryFailures t)
+  known<-readIORef (roots t)
+  active<-readIORef (sessions t)
+  pure $ case M.lookup path failed of
+    Just err->Just (Left err)
+    Nothing->M.lookup path known >>= (`M.lookup` active)
+
+rootsPending :: Tooling -> Desktop -> IO Bool
+rootsPending t d = do
+  known<-readIORef (roots t)
+  failed<-readIORef (discoveryFailures t)
+  pure (any (\(_,path,_,_)->M.notMember path known && M.notMember path failed) (sourceDocuments d))
+
+sourceIdentity :: Desktop -> Target -> FilePath -> IO (Maybe (StableName Buffer))
+sourceIdentity d target@(bid,_,_) path
+  | protectedBuffer d bid || protectedPath d path || fmap fst (targetDocument target d)/=Just path = pure Nothing
+  | otherwise = traverse (\doc->makeStableName =<< evaluate (documentBuffer doc)) (M.lookup bid (buffers d))
+
+deferRequest :: Tooling -> Deferred -> IO Bool
+deferRequest t entry = atomicModifyIORef' (waitingRequests t) $ \pending->
+  if length pending>=32 then (pending,False) else (pending++[entry],True)
+
+resumeRequests :: Tooling -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> IO Desktop
+resumeRequests t core d = mask_ $ do
+  deferred<-atomicModifyIORef' (waitingRequests t) (\old->([],old))
+  foldM resume d deferred
+  where
+    resume desktop entry = do
+      let (target,path,stamp)=case entry of
+            DeferredTool query identity->(queryTarget query,queryPath query,identity)
+            DeferredLanguage _ selected file identity->(selected,file,identity)
+            DeferredSaved selected file identity->(selected,file,identity)
+          failRequest err=case entry of
+            DeferredTool query _->completeTool query (Left err) >> pure (if queryHuman query then desktop {status=err} else desktop)
+            _->pure desktop {status=err}
+      active<-case entry of DeferredTool query _->toolActive query; _->pure True
+      fresh<-sourceIdentity desktop target path
+      if not active then pure desktop else if fresh/=Just stamp then failRequest "HLS startup target changed or became private."
+      else do
+        available<-lookupSession t path
+        discovering<-rootsPending t desktop
+        let needsRoots=case entry of
+              DeferredTool query _->queryName query `elem` ["lsp_rename","lsp_code_actions"]
+              DeferredLanguage (RenameAt _) _ _ _->True
+              _->False
+        case available of
+          Just (Left err)->failRequest err
+          Just (Right (Session client _)) | not (needsRoots && discovering)->case entry of
+            DeferredTool query _->fst <$> startToolWith (Just query) (queryHuman query) t core desktop (queryName query) (queryArguments query)
+            DeferredLanguage action _ _ _->sendRequest t action target desktop
+            DeferredSaved{}->L.notifySaved client path >> pure desktop
+          _->do
+            accepted<-deferRequest t entry
+            if accepted then pure desktop else failRequest "Too many pending HLS startup requests"
+
 rootFor :: Tooling -> FilePath -> IO FilePath
 rootFor t path = do
-  cached<-readIORef (roots t)
-  case M.lookup path cached of
-    Just root -> pure root
-    Nothing -> do root<-projectRoot path; modifyIORef' (roots t) (M.insert path root); pure root
+  known<-readIORef (roots t)
+  maybe (ioError (userError "HLS project root is not ready")) pure (M.lookup path known)
 
 sessionFor :: Tooling -> FilePath -> IO (Either T.Text Session)
-sessionFor t path = do
-  root<-rootFor t path
-  cached<-readIORef (sessions t)
-  case M.lookup root cached of
-    Just session -> pure session
-    Nothing -> do
-      started<-try (L.startClient root) :: IO (Either IOException L.Client)
-      session<-case started of
-        Left err -> pure (Left ("HLS: "<>T.pack (show err)))
-        Right client -> Right . Session client <$> newIORef M.empty
-      modifyIORef' (sessions t) (M.insert root session)
-      pure session
+sessionFor t path = fromMaybe (Left "HLS is starting.") <$> lookupSession t path
 
 sync :: Tooling -> Desktop -> IO ()
 sync t d = do
-  docs<-forM (sourceDocuments d) $ \(bid,path,version,text) -> do
-    root<-rootFor t path
-    _<-sessionFor t path
+  advanceStartups t d
+  known<-readIORef (roots t)
+  docs<-forM [(root,bid,path,version,text) | (bid,path,version,text)<-sourceDocuments d,Just root<-[M.lookup path known]] $ \(root,bid,path,version,text) -> do
     identity<-makeStableName =<< evaluate (documentBuffer (buffers d M.! bid))
     pure (root,[((bid,path,version,identity),(path,version,text))])
   active<-readIORef (sessions t)
@@ -479,19 +670,30 @@ sendRequest :: Tooling -> LanguageAction -> Target -> Desktop -> IO Desktop
 sendRequest t action target d = case targetDocument target d of
   Nothing -> pure d {status="Save this Haskell source file before requesting language tools."}
   Just (path,text) -> do
-    available<-sessionFor t path
-    case available of
-      Left err -> pure d {status=err}
-      Right session -> case action of
-        RenameAt name -> do
+    identity<-sourceIdentity d target path
+    available<-lookupSession t path
+    discovering<-rootsPending t d
+    case (identity,available) of
+      (Nothing,_)->pure d {status="HLS target changed or became private."}
+      (_,Just (Left err))->pure d {status=err}
+      (_,Just (Right session)) | not (discovering && isRename action)->case action of
+        RenameAt name -> mask_ $ do
           cancelPreparation t
-          root<-projectRoot path
-          result<-newEmptyMVar
-          snapshot<-openSnapshot d path
-          worker<-forkIO (try (sourceSnapshot d root) >>= putMVar result)
-          writeIORef (preparing t) (Just (Preparing target path name snapshot worker result))
-          pure d {status="Preparing rename..."}
+          previous<-currentPreparation t
+          case previous of
+            Just _->pure d {status="Previous HLS edit snapshot is still stopping; retry rename."}
+            Nothing->do
+              result<-newEmptyMVar
+              worker<-async (try (snapshotSources t d path) >>= putMVar result)
+              writeIORef (preparing t) (Just (Preparing target path name M.empty worker result))
+              pure d {status="Preparing rename..."}
         _ -> queueRequest session action target path text M.empty >> pure d
+      (Just stamp,_)->do
+        accepted<-deferRequest t (DeferredLanguage action target path stamp)
+        pure d {status=if accepted then "Starting HLS..." else "Too many pending HLS startup requests"}
+  where
+    isRename RenameAt{}=True
+    isRename _=False
 
 queueRequest :: Session -> LanguageAction -> Target -> FilePath -> T.Text -> M.Map FilePath (Int,T.Text) -> IO ()
 queueRequest (Session client pending) action target@(_,_,pos) path text snapshot = do
@@ -516,15 +718,15 @@ finishPreparation t d = do
 
 finishPreparationResult :: Tooling -> Desktop -> IO Desktop
 finishPreparationResult t d = do
-  pending<-readIORef (preparing t)
+  pending<-currentPreparation t
   case pending of
     Nothing -> pure d
-    Just (ToolPreparing query worker result) -> do
+    Just RetiringPreparation{} -> pure d
+    Just (ToolPreparing query _ result) -> do
       active<-toolActive query
       if not active || fmap fst (targetDocument (queryTarget query) d)/=Just (queryPath query) then do
         completeTool query (Left "Buffer changed while preparing rename")
-        killThread worker
-        writeIORef (preparing t) Nothing
+        cancelPreparation t
         pure d
       else do
         completed<-tryReadMVar result
@@ -569,6 +771,7 @@ retireSession t root (Session client pending) = mask_ $ do
   -- Register cleanup before removing the old session's ownership.
   stopped<-L.retireClient client
   modifyIORef' (retiring t) (stopped:)
+  modifyIORef' (retiringRoots t) (M.insert root stopped)
   readIORef pending >>= mapM_ (failPending "HLS command transport retired; retry on the fresh server.") . M.elems
   writeIORef pending M.empty
   writeIORef (actions t) M.empty
@@ -581,7 +784,8 @@ tickTooling t core d = do
   remaining<-filterM (fmap (==Nothing) . tryReadMVar) retired
   writeIORef (retiring t) remaining
   sync t d
-  prepared<-finishPreparation t d
+  resumed<-resumeRequests t core d
+  prepared<-finishPreparation t resumed
   active<-readIORef (sessions t)
   received<-foldM collect prepared (M.toList active)
   updated<-refreshProblems t received
@@ -870,8 +1074,10 @@ toolingEffects t core d effects = foldM apply (False,d) effects
     apply state@(True,_) _=pure state
     apply (_,desktop) (JumpTo path row col) = (False,) <$> jump core path row col desktop
     apply (_,desktop) (LanguageRequest RestartLanguage) = do
-      closeTooling t
-      writeIORef (sessions t) M.empty
+      retireTooling t
+      writeIORef (roots t) M.empty
+      writeIORef (discoveryFailures t) M.empty
+      writeIORef (synchronized t) M.empty
       writeIORef (problems t) M.empty
       modifyIORef' (problemGeneration t) (+1)
       writeIORef (hovered t) (Nothing,0,False)
@@ -897,14 +1103,21 @@ toolingEffects t core d effects = foldM apply (False,d) effects
         Nothing -> pure (False,desktop {status="Open a saved Haskell source file first."})
         Just target -> (False,) <$> sendRequest t action target desktop
     apply (_,desktop) effect@(SaveDocument bid _ _) = do
-      result@(_,updated)<-core desktop [effect]
-      case M.lookup bid (buffers updated) of
+      (quit,updated)<-core desktop [effect]
+      saved<-case M.lookup bid (buffers updated) of
         Just doc | textBuffer (documentBuffer doc), not (dirty (documentBuffer doc)), Just file<-documentFile doc -> do
           sync t updated
-          session<-sessionFor t (filePath file)
-          case session of Right (Session client _) -> L.notifySaved client (filePath file); Left _ -> pure ()
-        _ -> pure ()
-      pure result
+          let path=filePath file; target=(bid,revision (documentBuffer doc),0)
+          identity<-sourceIdentity updated target path
+          session<-lookupSession t path
+          case (identity,session) of
+            (Just _,Just (Right (Session client _)))->L.notifySaved client path >> pure updated
+            (Just stamp,Nothing)->do
+              accepted<-deferRequest t (DeferredSaved target path stamp)
+              pure $ if accepted then updated else updated {status="Saved; too many pending HLS startup requests to notify HLS."}
+            _->pure updated
+        _ -> pure updated
+      pure (quit,saved)
     apply (_,desktop) effect = core desktop [effect]
 
 -- Snapshot closed source files before rename so returned ranges cannot overwrite intervening disk edits.
