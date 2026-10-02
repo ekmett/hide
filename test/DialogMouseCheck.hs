@@ -184,6 +184,55 @@ checks = do
   check "dragging thumb reaches final page" (fmap scrollRow (activeWindow bottom)==Just (scrollbarLimit scrolling True sd sw))
   check "horizontal scrollbar retains position readout" (all (`T.isInfixOf` snapshot scrolling) ["1:1","◄","►"])
   check "scrollbars use dark cyan" ("rgb(0,170,170)" `T.isInfixOf` snapshotHtml scrolling)
+  -- Exercise the drawn horizontal controls, including terminal-cell widths.
+  let wideLine="\t界e\x0301"<>T.replicate 60 "x"<>"TAIL"
+      uncolored=modifyActive (\w -> w {bounds=Rect 5 5 30 10})
+        (addDocument Nothing (newBuffer wideLine) (initialDesktop (80,25)))
+      horizontal=uncolored {buffers=M.map highlightDocument (buffers uncolored)}
+      hw=fromMaybe (error "missing horizontal window") (activeWindow horizontal)
+      hd=fromMaybe (error "missing horizontal document") (activeDocument horizontal)
+      bar=scrollbarRect horizontal False hd hw
+      mouse x d=fst (handleEvent (V.EvMouseDown x (top bar) V.BLeft []) d)
+      release d=fst (handleEvent (V.EvMouseUp (left bar+width bar-2) (top bar) (Just V.BLeft)) d)
+      column=fmap scrollColumn . activeWindow
+      one=mouse (left bar+width bar-1) horizontal
+      back=mouse (left bar) one
+      paged=mouse (left bar+width bar-2) horizontal
+      held=mouse (left bar+1) horizontal
+      far=mouse (left bar+width bar-2) held
+      panned=release far
+      pannedMessages=setProblemsVisible True panned
+      afterLayout=resizeProblems 15 pannedMessages
+      pannedHover=fst (hoverAt 40 8 panned)
+  check "horizontal range counts tab stops, wide and combining characters"
+    (documentWidth hd==75 && scrollbarLimit horizontal False hd hw==48 &&
+     maybe False (\doc -> scrollbarLimit uncolored False doc hw==48) (activeDocument uncolored))
+  check "horizontal arrows and track page by one source viewport"
+    (column one==Just 1 && column back==Just 0 && column paged==Just 28)
+  check "horizontal thumb reaches both limits and releases without moving the caret"
+    (drag held==Just (Scrolling (windowId hw) False) && column panned==Just 48 &&
+     column (mouse (left bar+1) far)==Just 0 && drag panned==Nothing &&
+     fmap selection (activeWindow panned)==Just (Selection 0 0))
+  check "source rendering visibly pans and hides the offscreen caret"
+    (not ("TAIL" `T.isInfixOf` snapshot horizontal) && "TAIL" `T.isInfixOf` snapshot panned &&
+     not ("界" `T.isInfixOf` snapshot panned) && V.picCursor (renderDesktop panned)==V.NoCursor)
+  check "hover and diagnostics layout preserve manual horizontal browsing"
+    (all ((==Just 48).column) [pannedHover,pannedMessages,afterLayout,setProblemsVisible False afterLayout])
+  let expanded=resizeScreenMode (160,25) panned
+      ew=fromMaybe (error "missing expanded scroll window") (activeWindow expanded)
+      ed=fromMaybe (error "missing expanded scroll document") (activeDocument expanded)
+      offscreen=modifyActive (\w -> w {bounds=Rect 5 5 30 10})
+        (addDocument Nothing (newBuffer (T.unlines (replicate 20 "short"++[wideLine]))) (initialDesktop (80,25)))
+      ready=offscreen {buffers=M.map highlightDocument (buffers offscreen)}
+      widthLimit view=case (activeWindow view,activeDocument view) of
+        (Just window,Just doc) -> scrollbarLimit view False doc window
+        _ -> error "missing width fixture"
+  check "wider layout clamps manual pan to the shorter horizontal range"
+    (column expanded==Just (scrollbarLimit expanded False ed ew) && column expanded==Just 18)
+  check "background source width includes long lines outside the viewport"
+    (widthLimit ready==48 && widthLimit (modifyActive (\w -> w {scrollRow=20}) offscreen)==48)
+  check "keyboard caret movement deliberately returns the viewport to the caret"
+    (column (fst (handleEvent (V.EvKey V.KRight []) panned))==Just 8)
   let resizing=fst (handleEvent (V.EvMouseDown 33 14 V.BLeft []) scrolling)
       moved=fst (handleEvent (V.EvKey V.KRight []) resizing)
       taller=fst (handleEvent (V.EvKey V.KDown [V.MShift]) moved)

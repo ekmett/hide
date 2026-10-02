@@ -447,6 +447,21 @@ ensureVisible d = case (activeWindow d, activeDocument d) of
       col' = if textColumn < scrollColumn w then textColumn else if textColumn >= scrollColumn w+cols then textColumn-cols+1 else scrollColumn w
   _ -> d
 
+-- A layout change follows only caret axes that were visible beforehand.
+-- Manual scrollbar browsing must survive Messages appearing or being resized.
+ensureVisibleAfterLayout :: Desktop -> Desktop -> Desktop
+ensureVisibleAfterLayout before after = case (activeWindow after,activeDocument after) of
+  (Just current,Just doc) | Just previous<-find ((==windowId current).windowId) (windows before) ->
+    let (row,column)=windowCursorCell (documentBuffer doc) previous
+        textColumn=column-if bufferView previous==SideBySideView then fst (reviewPaneWidths previous)+1 else 0
+        columns=max 1 (if bufferView previous==SideBySideView then snd (reviewPaneWidths previous) else width (bounds previous)-2)
+        rowVisible=row>=scrollRow previous && row<scrollRow previous+windowContentRows before doc previous
+        columnVisible=textColumn>=scrollColumn previous && textColumn<scrollColumn previous+columns
+    in modifyActive (\shown -> shown
+      {scrollRow=if rowVisible then scrollRow shown else min (scrollbarLimit after True doc current) (scrollRow current),
+       scrollColumn=if columnVisible then scrollColumn shown else min (scrollbarLimit after False doc current) (scrollColumn current)}) (ensureVisible after)
+  _ -> after
+
 -- Map other view positions through the changed character interval.
 editActive :: (Selection -> Buffer -> Buffer) -> Maybe Int -> Desktop -> Desktop
 editActive _ _ d | maybe False treeFocused (sideTree d) || problemsFocused d = d
@@ -955,7 +970,7 @@ buttonMnemonics dg = snd (mapAccumL choose [] (buttons dg))
 
 -- A screen-mode change scales the desktop layout to use the new row count.
 resizeScreenMode :: (Int,Int) -> Desktop -> Desktop
-resizeScreenMode (sw,sh) d = layoutBottomWindows (ensureVisible (clampHexScroll d resized {windows=map stretch (windows d)}))
+resizeScreenMode (sw,sh) d = layoutBottomWindows (ensureVisibleAfterLayout d (clampHexScroll d resized {windows=map stretch (windows d)}))
   where
     resized = fst (handleEvent (V.EvResize sw sh) d)
     (oldW,oldH) = screenSize d
@@ -2104,7 +2119,7 @@ setProblemsVisible visible d = layoutProblems d next
           messagesNumber=if visible then Just (fromMaybe (nextWindowNumber d) (messagesNumber d)) else Nothing}
 
 resizeProblems :: Int -> Desktop -> Desktop
-resizeProblems y d = clampHexScroll d (ensureVisible fitted)
+resizeProblems y d = clampHexScroll d (ensureVisibleAfterLayout d fitted)
   where
     sh=snd (screenSize d)
     requested=sh-max 3 (min (sh-7) (sh-y-1))-1
@@ -2114,7 +2129,7 @@ resizeProblems y d = clampHexScroll d (ensureVisible fitted)
       sideTree=fmap (\t -> t {treeScroll=min (treeScroll t) (treeScrollLimit next t)}) (sideTree next)}
 
 layoutProblems :: Desktop -> Desktop -> Desktop
-layoutProblems before after = clampHexScroll before (ensureVisible fitted)
+layoutProblems before after = clampHexScroll before (ensureVisibleAfterLayout before fitted)
   where
     oldEdge=top (problemsRect before); newEdge=top (problemsRect after)
     fitted=layoutBottomWindows after {windows=map resize (windows after),
