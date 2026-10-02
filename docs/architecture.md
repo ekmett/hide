@@ -62,6 +62,11 @@ native filter. Bundled bitmap glyphs retain nearest-neighbor scaling.
 
 ## Background work
 
+The Metal/Vulkan redraw gate compares window and control state with identities
+for immutable payloads. It does not walk source text, undo history, transcript
+cells or diagnostic bodies just to decide whether another frame is needed.
+Changed hidden buffers still invalidate native menu state.
+
 Build output is decoded, accumulated and parsed by an owned worker. It publishes
 one coalesced, evaluated buffer/diagnostic snapshot; a desktop tick takes the
 latest snapshot instead of rebuilding the output history. Stop records a request,

@@ -1,21 +1,83 @@
 {-# LANGUAGE OverloadedStrings #-}
 module WindowCheck (checks) where
-import Control.Monad (unless)
+import Control.Monad (unless, forM_, foldM)
+import Control.Exception (evaluate)
 import Data.Maybe (fromMaybe)
 import qualified Data.Map.Strict as M
 import Data.List (find)
 import THC.Edit.Frontend
 import THC.Edit.Model
-import THC.Edit.Render (snapshot)
+import THC.Edit.Render (snapshot, renderKey)
 import qualified Data.Text as T
 import THC.Edit.Buffer (newBuffer, Selection(..))
 import qualified THC.Edit.Buffer as B
 import THC.Edit.BufferView
 import THC.Edit.Files (FileState(..))
+import THC.Edit.Syntax (Style(..))
+import qualified Data.Vector as Vec
 import qualified Graphics.Vty as V
 checks :: IO ()
 checks = do
   let check name ok = unless ok (error name)
+  let original=newBuffer "same revision source"
+      opaque=original {B.undoStack=error "redraw key forced Undo history",B.redoStack=error "redraw key forced Redo history"}
+      base=addDocument (Just (FileState "Fixture.hs" Nothing)) opaque (initialDesktop (80,25))
+      large=base {buffers=M.adjust (\doc->doc {documentHighlight=('x',Plain):error "redraw key forced highlight tail"}) 1 (buffers base),
+        diagnostics=Diagnostic "Fixture.hs" Nothing 0 0 1 "problem":error "redraw key forced diagnostics tail"}
+      changeDoc f d=d {buffers=M.adjust f 1 (buffers d)}
+  key<-renderKey large
+  same<-renderKey large {systemDark=systemDark large,buffers=M.map id (buffers large)}
+  check "redraw identity does not inspect histories, highlights or diagnostics" =<< evaluate (key==same)
+  baseKey<-renderKey base
+  forM_ [changeDoc (\doc->doc {documentBuffer=newBuffer "replacement with same revision"}) base,
+         changeDoc (\doc->doc {documentHighlight=[('x',Keyword)]}) base,
+         changeDoc (\doc->doc {documentSourceRows=Just (Vec.singleton [('x',Comment)])}) base,
+         changeDoc (\doc->doc {documentBuffer=B.markSaved original}) base,
+         base {composerBuffer=newBuffer "new draft"},
+         base {diagnostics=[Diagnostic "Fixture.hs" Nothing 0 0 1 "new problem"]},
+         base {systemDark=not (systemDark base)},
+         modifyActive (\w->w {selection=Selection 0 1}) base,
+         base {menu=Just (0,0)},
+         base {guestPrivatePaths=["Fixture.hs"]}] $ \changed -> do
+    changedKey<-renderKey changed
+    check "redraw key notices content, colors, saved state, diagnostics, theme and UI changes" (changedKey/=baseKey)
+  let textArea=base {dialog=Just (Dialog "Details" Information [TextArea "Text" True original (Selection 0 0) 0 0] 0 ["OK"] [])}
+      areaChanged=textArea {dialog=fmap (\dg->dg {fields=[TextArea "Text" True (newBuffer "other") (Selection 0 0) 0 0]}) (dialog textArea)}
+      areaWrapped=textArea {dialog=fmap (\dg->dg {fields=map id (fields dg)}) (dialog textArea)}
+      view=ConversationView 1 "Child" original (Selection 0 0) (0,0) (Selection 0 0)
+      child=base {conversationViews=M.singleton "child" view}
+      childChanged=child {conversationViews=M.singleton "child" view {conversationDraft=newBuffer "other draft"}}
+  areaKey<-renderKey textArea
+  areaWrappedKey<-renderKey areaWrapped
+  areaChangedKey<-renderKey areaChanged
+  check "dialog wrappers retain redraw identity while TextArea replacement invalidates it" (areaKey==areaWrappedKey && areaKey/=areaChangedKey)
+  childKey<-renderKey child
+  childChangedKey<-renderKey childChanged
+  check "hidden child draft changes invalidate native menus and rendering" (childKey/=childChangedKey)
+  let idle=child {dialog=dialog textArea,
+        chatQuestion=Just (ChatQuestion 7 "Question" ["One","Two"] Nothing original (Selection 0 0) True),
+        sideTree=Just (Sidebar "/project" [TreeRow "Fixture.hs" "Fixture.hs" 0 False False] 0 0 20 False)}
+      idleWrapper d=d {systemDark=systemDark d,
+        buffers=M.map (\doc->doc {documentFile=fmap (\f->f {filePath=filePath f}) (documentFile doc),documentSourceRows=fmap id (documentSourceRows doc)}) (buffers d),
+        conversationViews=M.map (\v->v {conversationDraft=conversationDraft v}) (conversationViews d),
+        chatQuestion=fmap (\q->q {questionFocused=questionFocused q}) (chatQuestion d),
+        dialog=fmap (\dg->dg {fields=map wrapField (fields dg)}) (dialog d),
+        sideTree=fmap (\tree->tree {treeSelected=treeSelected tree}) (sideTree d)}
+      wrapField (TextArea label editable b selection row column)=TextArea label editable b selection row column
+      wrapField field=field
+  idleKey<-renderKey idle
+  _<-foldM (\d _->do
+    let wrapped=idleWrapper d
+    next<-renderKey wrapped
+    check "100 idle wrapper rebuilds never trigger a redraw" (next==idleKey)
+    pure wrapped) idle [1..100::Int]
+  let dirtyBuffer=B.replaceSelection (Selection 0 0) "changed " original
+      dirtyDesktop=changeDoc (\doc->doc {documentBuffer=dirtyBuffer}) base
+      cleanDesktop=changeDoc (\doc->doc {documentBuffer=B.markSaved dirtyBuffer}) dirtyDesktop
+  dirtyKey<-renderKey dirtyDesktop
+  cleanKey<-renderKey cleanDesktop
+  check "markSaved invalidates redraw despite unchanged text and revision"
+    (dirtyKey/=cleanKey && B.dirty dirtyBuffer && not (B.dirty (B.markSaved dirtyBuffer)) && B.revision dirtyBuffer==B.revision (B.markSaved dirtyBuffer))
   let reviewedBuffer=B.replaceSelection (Selection 0 3) "new" (newBuffer "old\nkeep\n")
       reviewBase=addDocument Nothing reviewedBuffer (initialDesktop (80,25))
       reviewFull=setBufferView ChangesView reviewBase

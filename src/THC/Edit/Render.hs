@@ -1,6 +1,10 @@
-{-# LANGUAGE OverloadedStrings #-}
-module THC.Edit.Render (renderDesktop, snapshot, snapshotHtml) where
+{-# LANGUAGE OverloadedStrings, ExistentialQuantification #-}
+module THC.Edit.Render (renderDesktop, snapshot, snapshotHtml, RenderKey, renderKey) where
 
+import Control.Exception (evaluate)
+import Data.IORef
+import System.Mem.StableName (StableName, makeStableName, eqStableName)
+import qualified Data.ByteString as BS
 import Data.List (find)
 import qualified Graphics.Vty as V
 import THC.Edit.Unicode (displayOpsForPic)
@@ -25,8 +29,103 @@ import THC.Edit.Unicode (graphemes, clusterWidth, textImage, flattenPicture)
 import THC.Edit.GuestAccess (streamerReadableAt)
 import THC.Edit.Model
 import THC.Edit.Syntax
-import THC.Edit.Files (filePath)
+import THC.Edit.Files (FileState(..))
 import THC.Edit.Browser (Entry(..))
+
+-- The draw gate compares small UI state and immutable payload identities, never
+-- source lines, Undo history, transcript cells or diagnostic bodies. Keeping all
+-- documents also invalidates native menus when a hidden buffer changes.
+data RenderIdentity = forall a. RenderIdentity (StableName a)
+instance Eq RenderIdentity where
+  RenderIdentity a == RenderIdentity b = eqStableName a b
+
+data RenderKey = RenderKey Desktop Bool [RenderIdentity] deriving Eq
+
+emptyRenderBuffer :: Buffer
+emptyRenderBuffer = newBuffer ""
+{-# NOINLINE emptyRenderBuffer #-}
+
+-- | Capture a conservative redraw key. Rebuilt record/Map/Maybe wrappers do not
+-- invalidate it; replacing any large immutable payload does. The names do not
+-- retain the payloads and no content hashing or structural Buffer equality runs.
+renderKey :: Desktop -> IO RenderKey
+renderKey original = do
+  identities<-newIORef []
+  let payload value empty = do
+        evaluated<-evaluate value
+        identity<-makeStableName evaluated
+        modifyIORef' identities (RenderIdentity identity:)
+        pure empty
+      buffer value=payload value emptyRenderBuffer
+      file value=do
+        bytes<-traverse (\bytes->payload bytes BS.empty) (diskBytes value)
+        pure value {diskBytes=bytes}
+      document value=do
+        b<-buffer (documentBuffer value)
+        f<-traverse file (documentFile value)
+        cells<-payload (documentHighlight value) []
+        rows<-traverse (\rows->payload rows Vec.empty) (documentSourceRows value)
+        blocks<-payload (documentShellBlocks value) []
+        pure value {documentBuffer=b,documentFile=f,documentHighlight=cells,documentSourceRows=rows,documentShellBlocks=blocks}
+      view value=do
+        draft<-buffer (conversationDraft value)
+        pure value {conversationDraft=draft}
+      question value=do
+        text<-payload (questionText value) ""
+        choices<-payload (questionChoices value) []
+        input<-buffer (questionBuffer value)
+        pure value {questionText=text,questionChoices=choices,questionBuffer=input}
+      field value=case value of
+        Input label text cursor -> Input label <$> payload text "" <*> pure cursor
+        Radio label choices selected -> Radio label <$> payload choices [] <*> pure selected
+        ListBox label choices selected -> ListBox label <$> payload choices [] <*> pure selected
+        FileList entries selected -> FileList <$> payload entries [] <*> pure selected
+        ReadOnly label text -> ReadOnly label <$> payload text ""
+        TextArea label editable text selection row column ->
+          (\b->TextArea label editable b selection row column) <$> buffer text
+        CheckBox{} -> pure value
+      dialogPurpose value=case value of
+        Opening directory name entries -> Opening directory name <$> payload entries []
+        ChangingDirectory directory entries -> ChangingDirectory directory <$> payload entries []
+        CodeActionChoices bid rev choices -> CodeActionChoices bid rev <$> payload choices []
+        Completing bid rev offset entries -> Completing bid rev offset <$> payload entries []
+        Locations entries -> Locations <$> payload entries []
+        Merging entries -> Merging <$> payload entries []
+        DiskConflict conflict -> do
+          baseline<-file (conflictBaseline conflict)
+          bytes<-traverse (\bytes->payload bytes BS.empty) (conflictDisk conflict)
+          pure (DiskConflict conflict {conflictBaseline=baseline,conflictDisk=bytes})
+        _ -> pure value
+      dialogKey value=do
+        purpose'<-dialogPurpose (purpose value)
+        fields'<-mapM field (fields value)
+        body'<-payload (body value) []
+        pure value {purpose=purpose',fields=fields',body=body'}
+      sidebar value=do
+        rows<-payload (treeRows value) []
+        pure value {treeRows=rows}
+  documents<-mapM document (buffers original)
+  composer<-buffer (composerBuffer original)
+  views<-mapM view (conversationViews original)
+  question'<-traverse question (chatQuestion original)
+  dialog'<-traverse dialogKey (dialog original)
+  tree<-traverse sidebar (sideTree original)
+  diagnostics'<-payload (diagnostics original) []
+  buildDiagnostics'<-payload (buildDiagnostics original) []
+  actions<-payload (chatActions original) []
+  review<-traverse (\value->payload value ()) (gitReview original)
+  clipboard'<-payload (clipboard original) ""
+  export'<-traverse (\value->payload value "") (snd (clipboardExport original))
+  -- Context menus can contain complete executable shell bodies. Their immutable
+  -- command payload is authoritative; no equality walk through it is needed.
+  context<-payload (contextKind original) SourceContext
+  names<-readIORef identities
+  pure (RenderKey original
+    { buffers=documents,composerBuffer=composer,conversationViews=views,
+      chatQuestion=question',dialog=dialog',sideTree=tree,
+      diagnostics=diagnostics',buildDiagnostics=buildDiagnostics',chatActions=actions,
+      gitReview=Nothing,clipboard=clipboard',clipboardExport=(fst (clipboardExport original),export'),contextKind=context }
+    (maybe False (const True) review) names)
 
 blue, gray, black, white, yellow, cyan, green, red :: V.Color
 blue=V.RGBColor 0 0 170; gray=V.RGBColor 170 170 170; black=V.RGBColor 0 0 0

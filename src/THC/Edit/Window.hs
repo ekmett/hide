@@ -157,8 +157,9 @@ runWindow backend scale effects tick initial = do
   where
     systemTheme d = do value<-c_system_dark; pure d {systemDark=value/=0}
     loop font previous d = do
-      when (previous /= Just d) $ do
-        when (fmap (applicationTitle "") previous /= Just (applicationTitle "" d)) $ do
+      key<-renderKey d
+      when (fmap snd previous /= Just key) $ do
+        when (fmap fst previous /= Just (applicationTitle "" d)) $ do
           cwd <- getCurrentDirectory
           utf8 (applicationTitle cwd d) c_title
         updateMenus d
@@ -167,7 +168,7 @@ runWindow backend scale effects tick initial = do
       (next,requests) <- dispatch event d
       (exit,updated) <- foldM windowEffect (False,next) requests
       when (clipboard updated /= clipboard d) (utf8 (clipboard updated) c_set_clipboard)
-      let displayed = case event of kind:_ | kind `elem` [3,4,5,7,8,9,12] -> Nothing; _ -> Just d
+      let displayed = case event of kind:_ | kind `elem` [3,4,5,7,8,9,12] -> Nothing; _ -> Just (applicationTitle "" d,key)
       unless exit (systemTheme updated >>= tick >>= loop font displayed)
     windowEffect state@(True,_) _ = pure state
     windowEffect (_,d) request = applyWindowEffect d request
