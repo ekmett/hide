@@ -6,7 +6,7 @@ import qualified Data.Map.Strict as M
 import Data.Aeson (object, (.=))
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
-import THC.Edit.Buffer (newBuffer, Selection(..), revision, contents, replaceSelection, bufferLineOffset, bufferLineChanges)
+import THC.Edit.Buffer (newBuffer, Selection(..), revision, contents, replaceSelection, bufferLineOffset, bufferLineChanges, bufferLineColumn)
 import THC.Edit.BufferView (BufferView(SideBySideView))
 import THC.Edit.Files (FileState(..))
 import THC.Edit.MCPPermissions (withPermissionsAt, permissionCall, policyEffects)
@@ -89,6 +89,22 @@ main = do
             fst <$> permissionCall permissions (fileTool applyEffects) d "buffer_apply_diff"
               (object ["bufferId" .= bufferId w,"revision" .= revision (documentBuffer doc),"diff" .= patch])
           _ -> fail "Permission screenshot requires the open source buffer"
+        shellBlockMenu d = do
+          opened <- command Help (fst (handleEvent (V.EvResize 80 25) d {sideTree=Nothing}))
+          case (activeWindow opened,activeDocument opened) of
+            (Just w,Just doc) | block@(blockStart,_,_,raw):_<-documentShellBlocks doc -> do
+              unless (raw=="thc-edit .\n") (fail "Help shell screenshot source anchor changed")
+              let (row,_)=bufferLineColumn (documentBuffer doc) blockStart
+                  scroll=max 0 (row-2)
+                  positioned=modifyActive (\window -> window {bounds=Rect 1 1 78 11,scrollRow=scroll}) opened
+                  -- Open the real context menu, without invoking its command.
+                  (shown,pending)=handleEvent (V.EvMouseDown 26 (2+row-scroll+1) V.BRight []) positioned
+                  expected=ExecuteShellBlock (bufferId w) block
+              unless (null pending && contextKind shown==ShellContext expected &&
+                contextItems (contextKind shown)==[("Execute in terminal",expected)] && contextMenu shown/=Nothing)
+                (fail "Shell block context menu did not open without executing")
+              pure shown
+            _ -> fail "Help screenshot needs an executable shell fence"
         review d = do
           let file=root </> "src/THC/Edit/Frontend.hs"
           source <- TIO.readFile file
@@ -143,6 +159,7 @@ main = do
               Nothing->fail "Request downloads explicitly")
           , ("find-replace", \d -> command Find d >>= typeText "bufferLineAt" >>= key (V.KChar 'h') [V.MCtrl] >>= typeText "lineAt")
           , ("permission-diff", permissionDiff)
+          , ("shell-block-menu", shellBlockMenu)
           , ("side-by-side", review)
           , ("window-views-menu", reviewMenu)
           , ("conversation", chat)
@@ -175,6 +192,7 @@ capture effects scratch output name shown = do
   -- Crop exact rendered pixels, using the same cell rectangles as the UI.
   -- Include the actual shadow and eight pixels of context; menus retain their heading.
   let crop = case dialog shown of
+        _ | name=="shell-block-menu" -> bounds <$> activeWindow shown
         Just dg -> Just (dialogRect shown dg)
         Nothing | Just (r,_)<-contextMenu shown -> Just r
         Nothing -> case menu shown of
@@ -183,7 +201,7 @@ capture effects scratch output name shown = do
                   | otherwise -> Nothing
       pixels = case crop of
         Nothing -> Nothing
-        Just (Rect x y w h) | name=="side-by-side" ->
+        Just (Rect x y w h) | name `elem` ["side-by-side","shell-block-menu"] ->
           Just (Rect (max 0 (x*24-8)) (max 0 (y*48-8)) (w*24+16) (h*48+16))
         Just (Rect x y w h) ->
           let x0=max 0 (x*24-8); y0=if menu shown/=Nothing then 0 else max 0 (y*48-8)

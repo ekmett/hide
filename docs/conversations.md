@@ -105,6 +105,8 @@ project directory. The terminal shows output and accepts keyboard input and
 regardless of display wrapping. `console` and `shellsession` examples containing
 prompts or captured output are display-only. Empty blocks report an error.
 
+![Right-click a rendered shell block to execute it in a terminal.](site/screenshots/shell-block-menu.png)
+
 Replies use CommonMark, including highlighted fenced code, lists and tables.
 Tables wrap to the available width and become labeled cells when columns no
 longer fit. Tool calls appear as compact chevron rows. Click one to expand its

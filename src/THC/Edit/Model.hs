@@ -590,6 +590,7 @@ reviewHit x y b w=do
   pure (side,fullRow,changeLineOffset b fullRow+columnOffset (changeLineAt b fullRow) col)
   where projection=bufferViewProjection b
 
+-- Docs: tools/docs-screenshots.hs shell-block-menu -> docs/site/screenshots/shell-block-menu.png (docs/conversations.md).
 shellBlockAt :: Int -> Int -> Desktop -> Maybe Command
 shellBlockAt x y d=do
   w<-activeWindow d
