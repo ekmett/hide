@@ -18,6 +18,9 @@ import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.FilePath ((</>))
 import System.IO (hClose, openTempFile)
 import System.Timeout (timeout)
+import System.Info (os)
+import qualified THC.Edit.Consoles as C
+import THC.Edit.Markdown (renderMarkdownWithShellBlocks)
 import qualified THC.Edit.Build as B
 import THC.Edit.Buffer
 import THC.Edit.Debugger
@@ -27,6 +30,7 @@ import THC.Edit.Terminal (terminalAvailable)
 
 checks :: IO ()
 checks = do
+  shellBlockChecks
   compilerMenuChecks
   keyboardChecks
   bracket temporary removePathForcibly $ \root ->
@@ -50,6 +54,12 @@ checks = do
                     case value of
                       Just arguments | output -> pure (updated,arguments)
                       _ -> threadDelay 10000 >> loop updated
+          awaitToolchain runtime selected d=do
+            result<-timeout 5000000 (loop d)
+            maybe (error "Toolchain refresh timed out") pure result
+            where loop state=do
+                    updated<-tickConversation runtime state
+                    if toolchain updated==Just selected then pure updated else threadDelay 10000 >> loop updated
           save runtime values d=send runtime "run-config" ("0":T.pack command:values) d
       writeFile command $ unlines
         [ "#!/usr/bin/env python3"
@@ -60,19 +70,22 @@ checks = do
       permissions<-getPermissions command
       setPermissions command permissions {executable=True}
       withConversation $ \runtime -> do
+        loading<-tickConversation runtime desktop {toolchain=Just GHC}
+        check "pending settings refresh preserves the selected toolchain" (toolchain loading==Just GHC)
+      withConversation $ \runtime -> do
         initial<-tickConversation runtime desktop
         check "status starts with persisted toolchain" (toolchain initial==Just THC)
         ghc<-send runtime "toolchain" ["GHC"] initial
         stored<-B.loadBuildConfig (root </> "config/thc-edit") root
         check "status selector saves GHC and compiler together" (toolchain ghc==Just GHC && B.buildToolchain stored==GHC && B.buildExecutable stored=="ghc")
         withConversation $ \other -> do
-          stale<-tickConversation other desktop
+          stale<-awaitToolchain other GHC desktop
           _<-send runtime "toolchain" ["THC"] ghc
-          refreshed<-tickConversation other stale
+          refreshed<-awaitToolchain other THC stale
           check "another session refreshes global toolchain choice" (toolchain refreshed==Just THC)
           _<-send runtime "toolchain" ["GHC"] refreshed
           pure ()
-        reloaded<-tickConversation runtime desktop
+        reloaded<-awaitToolchain runtime GHC desktop
         check "status restores saved GHC choice" (toolchain reloaded==Just GHC)
         _<-send runtime "toolchain" ["THC"] ghc
         options<-send runtime "run-options" [] desktop
@@ -254,3 +267,49 @@ compilerMenuChecks=bracket temporary removePathForcibly $ \root -> do
         _<-open runtime desktop
         waitFile started
       check "conversation shutdown cancels pending discovery" (cleanup==Just ())
+
+shellBlockChecks :: IO ()
+shellBlockChecks = when (terminalAvailable && os/="mingw32") $ bracket temporary removePathForcibly $ \root ->
+  withEnv "XDG_CONFIG_HOME" (Just (root </> "config")) $ withConversationAt root $ \runtime -> do
+    expectedRoot<-canonicalizePath root
+    let body="printf '%s\\n' 'literal ; $(touch should-not-exist) λ'\npwd -P\nprintf 'ready\\n'\nIFS= read -r value\nprintf 'echo:%s\\n' \"$value\"\nprintf 'stderr-visible\\n' >&2\n"
+        (styled,blocks)=renderMarkdownWithShellBlocks 30 ("intro\n\n```sh\n"<>body<>"```\n\nafter")
+        base=(initialDesktop (80,25)) {sideTree=Just (Sidebar root [] 0 0 20 False)}
+        bid=nextId base
+        help=addHelpStyled styled base
+        desktop=help {buffers=M.adjust (\doc->doc {documentShellBlocks=blocks}) bid (buffers help)}
+        chosen=case blocks of block:_->block; _->error "missing shell block"
+        core d _=pure (False,d)
+        execute d block=let (updated,effects)=runCommand (ExecuteShellBlock bid block) d
+                       in snd <$> conversationEffects runtime core updated effects
+        (_,consoles,_)=conversationServices runtime
+        await label predicate d=do
+          result<-timeout 5000000 (loop d)
+          maybe (error ("shell block timed out: "++label)) pure result
+          where loop current=do
+                  updated<-tickConversation runtime current
+                  entries<-C.listConsoles consoles
+                  ready<-predicate entries
+                  if ready then pure updated else threadDelay 10000 >> loop updated
+        outputHas tid needle = do
+          output<-C.consoleOutput consoles tid
+          pure (case output of Right (bytes,_,_)->TE.encodeUtf8 needle `BS.isInfixOf` bytes; _->False)
+    queued<-execute desktop chosen
+    opened<-await "visible interactive terminal" (\entries->case entries of (tid,_,_):_->outputHas tid "ready"; _->pure False) queued
+    entries<-C.listConsoles consoles
+    let (tid,terminalBid,_)=head entries
+    check "explicit Markdown execution opens and focuses terminal" (fmap bufferId (activeWindow opened)==Just terminalBid)
+    check "whole shell body preserves literal arguments" =<< outputHas tid "literal ; $(touch should-not-exist) λ"
+    check "shell block runs in selected project cwd" =<< outputHas tid (T.pack expectedRoot)
+    check "quoted command substitution remains literal" . not =<< doesFileExist (root </> "should-not-exist")
+    _<-C.inputConsole consoles tid (TE.encodeUtf8 "typed λ\n")
+    finished<-await "stdin and exit" (\rows->pure (any (\(ident,_,code)->ident==tid && code==Just 0) rows)) opened
+    check "shell block terminal accepts stdin and captures stdout" =<< outputHas tid "echo:typed λ"
+    check "shell block terminal captures stderr" =<< outputHas tid "stderr-visible"
+    let stale=finished {buffers=M.adjust (\doc->doc {documentShellBlocks=[]}) bid (buffers finished)}
+    _<-execute stale chosen
+    check "stale shell action cannot launch another process" . (==1) . length =<< C.listConsoles consoles
+    let empty=(0,1,"sh","")
+        emptyDesktop=finished {buffers=M.adjust (\doc->doc {documentShellBlocks=[empty]}) bid (buffers finished)}
+    rejected<-execute emptyDesktop empty
+    check "empty shell block reports error" (maybe False ((=="Cannot execute shell block").dialogTitle) (dialog rejected))

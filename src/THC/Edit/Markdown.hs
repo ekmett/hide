@@ -1,5 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
-module THC.Edit.Markdown (renderMarkdown) where
+module THC.Edit.Markdown (renderMarkdown, renderMarkdownWithShellBlocks) where
 
 import qualified Commonmark as C
 import Commonmark.Extensions.PipeTable
@@ -19,7 +19,7 @@ import THC.Edit.Syntax (Style(..), highlightFor)
 type Styled = [(Char,Style)]
 newtype Inline = Inline (Seq.Seq (Char,Style)) deriving (Show, Semigroup, Monoid)
 newtype Blocks = Blocks [Block] deriving (Show, Semigroup, Monoid)
-data Block = Table [ColAlignment] [Styled] [[Styled]] | Code Bool Styled | Flow Styled | Pre Styled | Indent T.Text Blocks | Gap deriving Show
+data Block = Table [ColAlignment] [Styled] [[Styled]] | Code T.Text T.Text Styled | Flow Styled | Pre Styled | Indent T.Text Blocks | Gap deriving Show
 
 instance C.Rangeable Inline where ranged _ = id
 instance C.HasAttributes Inline where addAttributes _ = id
@@ -48,7 +48,7 @@ instance C.IsBlock Inline Blocks where
   plain (Inline chars) = Blocks [Flow (toList chars)]
   thematicBreak = Blocks [Flow (paint Comment "───"), Gap]
   blockQuote blocks = Blocks [Indent "> " (trim blocks), Gap]
-  codeBlock info source = Blocks [Code (shellBlock info) (codeStyles info source), Gap]
+  codeBlock info source = Blocks [Code info source (codeStyles info source), Gap]
   heading level content = let Inline chars = tint (Heading level) content in Blocks [Flow (toList chars),Gap]
   rawBlock _ source = Blocks [Pre (paint Plain source),Gap]
   referenceLinkDefinition _ _ = mempty
@@ -67,9 +67,32 @@ instance HasPipeTable Inline Blocks where
 -- CommonMark handles incomplete input too, so streaming callers keep ownership
 -- of the raw source and may simply render each new accumulated chunk.
 renderMarkdown :: Int -> T.Text -> Styled
-renderMarkdown requested source = intercalate [('\n',Plain)] $ render width $ trim $
-  either (const (Blocks [Pre (paint Plain source)])) id (runIdentity (C.commonmarkWith (pipeTableSpec <> C.defaultSyntaxSpec) "" source))
-  where width = max 1 requested
+renderMarkdown width = fst . renderMarkdownWithShellBlocks width
+
+-- Spans refer to displayed cells; their payload is the parser's original code
+-- body, before tabs, wrapping, syntax colors, or panel padding are applied.
+renderMarkdownWithShellBlocks :: Int -> T.Text -> (Styled,[(Int,Int,T.Text,T.Text)])
+renderMarkdownWithShellBlocks requested source =
+  (intercalate [('\n',Plain)] (map fst rendered), reverse (snd (foldl collect (0,[]) rendered)))
+  where
+    parsed=either (const (Blocks [Pre (paint Plain source)])) id
+      (runIdentity (C.commonmarkWith (pipeTableSpec <> C.defaultSyntaxSpec) "" source))
+    rendered=render (max 1 requested) (trim parsed)
+    collect (offset,found) (chars,payload)=
+      let end=offset+length chars
+          next=case payload of
+            Nothing -> found
+            Just (dialect,body) -> case found of
+              (start,previous,oldDialect,oldBody):rest
+                | previous+1==offset && oldDialect==dialect && oldBody==body -> (start,end,dialect,body):rest
+              _ -> (offset,end,dialect,body):found
+      in (end+1,next)
+
+executableShell :: T.Text -> Maybe T.Text
+executableShell info = case T.words (T.toLower info) of
+  language:_ | language `elem` ["sh","bash","zsh"] -> Just language
+  "shell":_ -> Just "sh"
+  _ -> Nothing
 
 paint :: Style -> T.Text -> Styled
 paint style = map (,style) . T.unpack
@@ -87,30 +110,32 @@ trim :: Blocks -> Blocks
 trim (Blocks blocks) = Blocks (reverse (dropWhile gap (reverse blocks)))
   where gap Gap = True; gap _ = False
 
-render :: Int -> Blocks -> [Styled]
+render :: Int -> Blocks -> [(Styled,Maybe (T.Text,T.Text))]
 render width (Blocks blocks) = concatMap block blocks
   where
-    block (Flow chars) = concatMap (wrapWords width) (rows chars)
-    block (Code shell chars) =
+    block (Flow chars) = plainRows (concatMap (wrapWords width) (rows chars))
+    block (Code info source chars) =
       let margin=if width>=8 then 2 else 0
           panelWidth=width-margin
           padding=if panelWidth>=3 then 1 else 0
           inner=max 1 (panelWidth-2*padding)
+          shell=shellBlock info
           base=CodeStyle shell Plain
           line xs=paint Plain (T.replicate margin " ") ++ paint base (T.replicate padding " ") ++
             [(c,CodeStyle shell style) | (c,style)<-xs] ++ paint base (T.replicate (max 0 (panelWidth-padding-columns xs)) " ")
           content=concatMap (wrapExact inner) (rows (stripFinalNewline (expandTabs chars)))
-      in map line ([]:content++[[]])
-    block (Table aligns header body)=renderTable width aligns header body
-    block (Pre chars) = concatMap (wrapExact width) (rows (stripFinalNewline (expandTabs chars)))
-    block Gap = [[]]
+      in [(line xs, (,source) <$> executableShell info) | xs<-[]:content++[[]]]
+    block (Table aligns header body)=plainRows (renderTable width aligns header body)
+    block (Pre chars) = plainRows (concatMap (wrapExact width) (rows (stripFinalNewline (expandTabs chars))))
+    block Gap = [([],Nothing)]
     block (Indent prefix content)
-      | indent >= width = concatMap (wrapExact width) (attach (render width content))
+      | indent >= width = concatMap (\(chars,payload)->map (,payload) (wrapExact width chars)) (attach (render width content))
       | otherwise = attach (render (width-indent) content)
       where
         indent = T.length prefix
-        attach [] = [paint Comment (T.stripEnd prefix)]
-        attach (first:rest) = (paint Comment prefix ++ first) : map (paint Plain (T.replicate indent " ") ++) rest
+        attach [] = [(paint Comment (T.stripEnd prefix),Nothing)]
+        attach ((first,payload):rest) = (paint Comment prefix ++ first,payload) : map (\(chars,tag)->(paint Plain (T.replicate indent " ") ++ chars,tag)) rest
+    plainRows=map (,Nothing)
 
 renderTable :: Int -> [ColAlignment] -> [Styled] -> [[Styled]] -> [Styled]
 renderTable width aligns header body

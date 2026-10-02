@@ -20,6 +20,10 @@ import System.IO
 import System.Info (os)
 import System.Process
 import System.Timeout (timeout)
+import qualified THC.Edit.Consoles as C
+import qualified Data.ByteString as BS
+import qualified Data.Text.Encoding as TE
+import qualified THC.Edit.Terminal as Terminal
 import THC.Edit.Buffer
 import THC.Edit.Debugger
 import THC.Edit.Files (FileState(..))
@@ -28,7 +32,7 @@ import THC.Edit.Highlighting (withHighlighting,tickHighlighting)
 import THC.Edit.Render (snapshotHtml)
 
 checks :: IO ()
-checks = completionChecks >> presentationCheck >> pendingPresentationCheck >> startupDeadlineCheck >> launchDeadlineCheck >> launchChecks >> mapM_ session ["basic", "frame", "choices", "breakpoints", "reconnect", "mcp", "lazy", "exception"] >> putStrLn "Debugger checks passed"
+checks = terminalLauncherCheck >> terminalCheck >> completionChecks >> presentationCheck >> pendingPresentationCheck >> startupDeadlineCheck >> launchDeadlineCheck >> launchChecks >> mapM_ session ["basic", "frame", "choices", "breakpoints", "reconnect", "mcp", "lazy", "exception"] >> putStrLn "Debugger checks passed"
   where
     session mode = bracket (fixture mode) cleanup $ \(port,logPath,process) -> withDebugger $ \runtime -> do
       let core d _=pure (False,d)
@@ -517,3 +521,92 @@ completionChecks=forM_ ["exit-first","exit-last","exit-missing"] $ \mode ->
       when (mode/="exit-missing") $ do
         check "final program output is drained" (maybe False (T.isInfixOf "final output") (field "output" result))
         removeFile (path<>".release")
+
+terminalCheck :: IO ()
+terminalCheck = when Terminal.terminalAvailable $ mapM_ session ["terminal","terminal-stop","terminal-shell","terminal-invalid","terminal-missing"]
+  where
+    session mode = bracket (fixture mode) cleanup $ \(port,logPath,_) -> C.withConsoles $ \consoles -> withDebuggerConsoles consoles $ \runtime -> do
+      let core d _=pure (False,d)
+          tick=tickDebugger runtime core
+          send action d=snd <$> debuggerEffects runtime core d [DebugAction action []]
+          terminalText d=T.concat [contents (documentBuffer doc) | doc<-M.elems (buffers d),maybe False (T.isPrefixOf "Terminal ") (documentLabel doc)]
+          outputText d=T.concat [contents (documentBuffer doc) | doc<-M.elems (buffers d),documentLabel doc==Just "Debugger output"]
+          await label predicate d=timeout debuggerTimeout (loop d) >>= maybe (error label) pure
+            where loop state=do n<-tick state; done<-predicate n; if done then pure n else threadDelay 1000 >> loop n
+          raw ident predicate _=C.consoleOutput consoles ident >>= pure . either (const False) predicate
+      (_,connected)<-debuggerEffects runtime core (initialDesktop (100,32)) [DebugAction "connect" ["0","127.0.0.1",T.pack port]]
+      if mode `elem` ["terminal-shell","terminal-invalid","terminal-missing"] then do
+        rejected<-await "reverse request failure was not returned" (pure . T.isInfixOf "reverse terminal rejected" . outputText) connected
+        entries<-C.listConsoles consoles
+        check "failed reverse terminal creates no terminal" (null entries)
+        _<-send "disconnect" rejected >>= await "failed-terminal disconnect" (pure . T.isInfixOf "Debugger disconnected" . status)
+        pure ()
+      else do
+        opened<-await "reverse terminal request opens live shared terminal" (pure . T.isInfixOf "terminal ready λ" . terminalText) connected
+        entries<-C.listConsoles consoles
+        (ident,bid)<-case entries of [(ident,bid,_)]->pure (ident,bid); _->error "expected one debugger terminal"
+        ready<-await "argv/env/cwd terminal output" (raw ident (\(bytes,_,_)->"unset=True" `BS.isInfixOf` bytes)) opened
+        captured<-C.consoleOutput consoles ident
+        check "terminal gets literal Unicode argv, cwd and environment overrides/unsets" (case captured of
+          Right (bytes,_,_)->all (`BS.isInfixOf` bytes) [TE.encodeUtf8 "argv=['literal ; λ']","env=value with spaces","cwd=","unset=True"]
+          _->False)
+        pid<-C.consoleProcessId consoles ident
+        check "terminal reports actual child process id" (either (const False) (>0) pid)
+        requests<-map (fromMaybe Null . decodeStrictText) . T.lines <$> TIO.readFile logPath
+        check "initialize advertises implemented terminal support" (any (\entry->
+          (field "request" entry >>= field "arguments" >>= field "supportsRunInTerminalRequest")==Just True) requests)
+        -- Frontend absence does not affect ownership. No tick consumes the output
+        -- until a resumed display polls the same console below.
+        C.inputConsole consoles ident (TE.encodeUtf8 "typed λ\n") >>= either (error . T.unpack) pure
+        echoed<-await "stdin and stderr appear after frontend resumes" (raw ident (\(bytes,_,_)->all (`BS.isInfixOf` bytes) [TE.encodeUtf8 "stdin=typed λ","stderr visible"])) ready
+        if mode=="terminal" && os/="mingw32" then do
+          C.inputConsole consoles ident (BS.singleton 3) >>= either (error . T.unpack) pure
+          ended<-await "Ctrl+C reaches the debugger terminal child" (raw ident (\(_,_,code)->code==Just 23)) echoed
+          let before=fmap windowId (activeWindow ended)
+          painted<-tick ended
+          check "live terminal ticks preserve focus" (fmap windowId (activeWindow painted)==before)
+          _<-send "disconnect" painted >>= await "terminal disconnect" (pure . T.isInfixOf "Debugger disconnected" . status)
+          pure ()
+        else do
+          ended<-send "disconnect" echoed >>= await "terminal stop disconnect" (pure . T.isInfixOf "Debugger disconnected" . status)
+          _<-await "disconnect kills owned terminal" (raw ident (\(_,_,code)->isJust code)) ended
+          check "completed terminal screen is retained" (M.member bid (buffers ended))
+
+-- The official bindist's reverse request names its inner binary, bypassing
+-- the launcher's loader environment. Only its known interpreter command uses
+-- the owned launcher; an ordinary reverse command must remain unchanged.
+terminalLauncherCheck :: IO ()
+terminalLauncherCheck = when (Terminal.terminalAvailable && os/="mingw32") $ do
+  directory<-getCurrentDirectory
+  temp<-getTemporaryDirectory
+  bracket (openTempFile temp "dap-terminal-wrapper") (\(path,h)->hClose h >> removeFile path) $ \(wrapper,h)->do
+    hPutStr h (unlines ["#!/usr/bin/env python3","import os, sys, runpy",
+      "if sys.argv[1] == 'external-interpreter':",
+      "    os.execv(sys.executable, [sys.executable] + sys.argv[2:])",
+      "else:","    sys.argv.pop(0)","    runpy.run_path(sys.argv[0], run_name='__main__')"])
+    hClose h
+    permissions<-getPermissions wrapper
+    setPermissions wrapper permissions {executable=True}
+    forM_ ["terminal-wrapper","terminal"] $ \mode ->
+      bracket (openTempFile temp "dap-wrapper-launch.json") (\(path,handle)->hClose handle >> removeFile path >> removeFile (path<>".log")) $ \(config,handle)->do
+        hClose handle
+        writeFile (config<>".log") ""
+        port<-bracket (Socket.socket Socket.AF_INET Socket.Stream Socket.defaultProtocol) Socket.close $ \listener -> do
+          Socket.bind listener (Socket.SockAddrInet 0 (Socket.tupleToHostAddress (127,0,0,1)))
+          Socket.SockAddrInet number _<-Socket.getSocketName listener
+          pure (fromIntegral number::Int)
+        BL.writeFile config (encode (object ["host" .= ("127.0.0.1"::T.Text),"port" .= port,"adapterId" .= ("hdb"::T.Text),
+          "request" .= ("launch"::T.Text),"arguments" .= object [],
+          "server" .= [wrapper,directory<>"/test/dap-session.py",config<>".log","server-"<>mode]]))
+        C.withConsoles $ \consoles -> withDebuggerConsoles consoles $ \runtime -> do
+          let core d _=pure (False,d)
+              tick=tickDebugger runtime core
+              await d=do
+                n<-tick d
+                entries<-C.listConsoles consoles
+                outputs<-mapM (\(ident,_,_)->C.consoleOutput consoles ident) entries
+                if any (either (const False) (\(bytes,_,_)->TE.encodeUtf8 "argv=['literal ; λ']" `BS.isInfixOf` bytes)) outputs
+                  then pure () else threadDelay 1000 >> await n
+          (_,started)<-debuggerEffects runtime core (initialDesktop (100,32)) [DebugAction "launch-config" ["1",T.pack config]]
+          result<-timeout debuggerTimeout (await started)
+          check ("owned hdb terminal launcher preserves argv: "<>mode) (result==Just ())

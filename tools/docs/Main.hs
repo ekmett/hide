@@ -62,7 +62,7 @@ site = "build/site"
 screenshotNames :: [FilePath]
 screenshotNames = map (<.> "png")
   ["find-replace","hdb-download","downloads", "permission-diff", "file-menu", "split", "preferences", "build-target", "debug-launch", "git-commit",
-   "conversation", "debug-step", "debug-menu", "debug-stack"]
+   "conversation", "debug-step", "debug-menu", "debug-stack", "side-by-side", "window-views-menu"]
 
 repo :: String
 repo = "https://github.com/ekmett/thc-edit"

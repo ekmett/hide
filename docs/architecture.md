@@ -8,8 +8,11 @@ debugging feed results back into that desktop.
 ## Buffers and views
 
 A text file uses a persistent finger tree of newline-inclusive lines, measured
-by character count and line count. Edits rebuild boundary lines and share
-unchanged subtrees. Up to 100 undo states retain trees rather than complete text
+by visible characters and lines, NUL/CRLF presence, and added/deleted lines.
+Deleted baseline lines remain as tombstones with zero visible width; inserted
+lines contribute to the addition count. Edits rebuild boundary lines and share
+unchanged subtrees. Window titles and Files read the change totals from the
+root measure. Saving normalizes changed leaves and establishes a new baseline. Up to 100 undo states retain trees rather than complete text
 copies. Split windows refer to the same buffer.
 
 Indexed line lookup serves navigation and cursor placement. A lazy text
@@ -56,6 +59,25 @@ The native Pixelate Unicode path shapes at four-times resolution, filters in
 linear light and applies Floyd–Steinberg error diffusion to four coverage
 levels before enlargement. The browser's pixelated fallback does not use that
 native filter. Bundled bitmap glyphs retain nearest-neighbor scaling.
+
+## Background work
+
+Build output is decoded, accumulated and parsed by an owned worker. It publishes
+one coalesced, evaluated buffer/diagnostic snapshot; a desktop tick takes the
+latest snapshot instead of rebuilding the output history. Stop records a request,
+then the supervisor releases and joins the child process outside the UI tick.
+
+Agent file capture and prompt-context preparation run in bounded owned workers.
+Completion checks current buffer/privacy state before applying a result; cancel
+and disconnect retire unfinished work. Idle compiler-setting reads also run in
+a worker. HLS synchronization queues immutable buffer references, with text
+comparison and encoding on the protocol writer; incoming events are consumed
+in bounded batches. Cursor-only ticks reuse buffer/client identity keys.
+
+These boundaries keep routine tool output and held file reads out of navigation
+and rendering. Explicit save/configuration operations and some tool launch
+preparation still perform synchronous work; the desktop is not yet free of all
+blocking effects.
 
 ## Browser display transport
 

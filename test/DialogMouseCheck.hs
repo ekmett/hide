@@ -6,14 +6,16 @@ import Control.Exception (evaluate)
 import System.Timeout (timeout)
 import Data.List (findIndex)
 import Data.Maybe (fromMaybe)
+import THC.Edit.BufferView
 import THC.Edit.Model
 import THC.Edit.Render (snapshotHtml, snapshot, renderDesktop)
-import THC.Edit.Buffer (newBuffer, columnOffset, contents, Selection(..))
+import THC.Edit.Buffer (newBuffer, columnOffset, contents, markSaved, replaceSelection, Selection(..))
 import THC.Edit.Window (nativeMenuShortcut)
 import qualified Data.Text.Encoding as TE
 import THC.Edit.Browser (Entry(..))
 import THC.Edit.Files (FileState(..))
 import qualified Data.Text as T
+import qualified Data.Map.Strict as M
 import qualified Graphics.Vty as V
 import THC.Edit.Unicode (displayOpsForPic)
 import Graphics.Vty.Span (SpanOp(..))
@@ -143,6 +145,27 @@ checks = do
      fmap bounds (activeWindow (resizeMessagesTo 14 untouched))==Just (Rect 0 3 80 5) && buffers pulled==buffers pane)
   check "diagnostic chevron and message render" (all (`T.isInfixOf` snapshotHtml pane) ["▶","Not in scope"])
   check "closing pane preserves documents" (buffers (setProblemsVisible False pane)==buffers source)
+  let editedTitle=insertText "new" (addDocument Nothing (newBuffer "") (initialDesktop (80,25)))
+      cleanTitle=editedTitle {buffers=M.map (\doc -> doc {documentBuffer=markSaved (documentBuffer doc)}) (buffers editedTitle)}
+      narrowTitle=modifyActive (\w -> w {bounds=Rect 1 2 28 10}) editedTitle
+      header desktop=T.lines (snapshot desktop) !! maybe 1 (top . bounds) (activeWindow desktop)
+  check "edited unnamed buffer shows line changes in top title" ("+1 -0" `T.isInfixOf` header editedTitle)
+  check "line counts retain green and red colors" (all (`T.isInfixOf` snapshotHtml editedTitle)
+    ["color:rgb(85,255,85);background:rgb(0,0,170)'>+1", "color:rgb(255,85,85);background:rgb(0,0,170)'>-0"])
+  check "saving clears title change counts" (not ("+1" `T.isInfixOf` header cleanTitle))
+  check "narrow title retains complete change counts" ("+1 -0" `T.isInfixOf` header narrowTitle)
+  let reviewBase=editActive (\_ -> replaceSelection (Selection 0 6) "after\nextra") Nothing
+        (addDocument Nothing (newBuffer "before\nsame\n") (initialDesktop (80,25)))
+      changes=setBufferView ChangesView reviewBase
+      side=setBufferView SideBySideView reviewBase
+      focusedChanges=setBufferView OnlyChangesView reviewBase
+  check "current view hides deleted text" (not ("before" `T.isInfixOf` snapshot reviewBase))
+  check "changes view shows red original and green replacement"
+    (all (`T.isInfixOf` snapshot changes) ["before","after","extra"] && all (`T.isInfixOf` snapshotHtml changes)
+      ["color:rgb(255,85,85);background:rgb(0,0,170)'>before","color:rgb(85,255,85);background:rgb(0,0,170)'>after"])
+  check "side by side retains source and insert padding"
+    (all (`T.isInfixOf` snapshot side) ["before","after","extra"] && "background:rgb(0,85,0)" `T.isInfixOf` snapshotHtml side)
+  check "filtered view displays change body" ("before" `T.isInfixOf` snapshot focusedChanges)
   let scrolling=modifyActive (\w -> w {bounds=Rect 5 5 30 10,scrollRow=10,scrollColumn=4})
         (addDocument Nothing (newBuffer (T.unlines (replicate 100 (T.replicate 100 "x")))) (initialDesktop (80,25)))
       up=fst (handleEvent (V.EvMouseDown 34 6 V.BLeft []) scrolling)
@@ -191,6 +214,11 @@ checks = do
       unfocus d=d {sideTree=fmap (\t -> t {treeFocused=False}) (sideTree d)}
   check "unsaved filenames are red and undo restores their normal color"
     (redName `T.isInfixOf` snapshotHtml (unfocus dirtyTree) && not (redName `T.isInfixOf` snapshotHtml (unfocus cleanTree)))
+  let treeLine d=T.lines (snapshot (unfocus d)) !! 2
+      savedTree=dirtyTree {buffers=M.map (\doc -> doc {documentBuffer=markSaved (documentBuffer doc)}) (buffers dirtyTree)}
+  check "Files shows the buffer's line counts after its dirty filename"
+    ("Main.hs +1 -1" `T.isInfixOf` treeLine dirtyTree &&
+     not ("+1" `T.isInfixOf` treeLine cleanTree) && not ("+1" `T.isInfixOf` treeLine savedTree))
   check "dock buttons indicate collapse direction" ("[←]" `T.isInfixOf` snapshot compactTree && "[↓]" `T.isInfixOf` snapshot (setProblemsVisible True desktop) {problemsFocused=True})
   check "dock arrows match editor cyan" ("color:rgb(85,255,255);background:rgb(0,0,170)'>←" `T.isInfixOf` snapshotHtml compactTree && "color:rgb(85,255,255);background:rgb(0,170,170)'>↓" `T.isInfixOf` snapshotHtml (setProblemsVisible True desktop) {problemsFocused=True})
   check "Files has a floating title and scrollbar without a path row"

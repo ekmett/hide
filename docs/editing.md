@@ -23,11 +23,43 @@ The list shows the file's size and local modification time.
 **Ctrl+B**, or **Tools > File tree**, toggles the Files pane. Expand directories
 to browse their contents and open files from the tree. Drag the divider to make
 room for long names; adjacent windows follow it. Unsaved filenames appear in
-red and return to normal after saving or undoing the change.
+red and return to normal after saving or undoing the change. Their names and
+buffer window titles show green `+n` and red `-n` counts for lines added and
+removed since opening or the last save. Changing an existing line counts as
+one removal and one addition. Split views share these counts; unnamed buffers
+show them in their titles too. Saving establishes a new baseline.
 
 **File > Change dir** changes the working directory and refreshes Files without
 closing open buffers. Enter browses into the selected directory, Browse opens
 a typed path, and OK accepts the displayed directory.
+
+## Buffer views
+
+The section at the bottom of **Window** changes how the selected source window
+shows unsaved edits:
+
+- **Current** shows the editable file with deleted text hidden.
+- **Changes** includes deleted originals in red and additions in green.
+- **Only Changes** keeps two unchanged lines around each changed region and
+  folds the rest behind omission markers.
+- **Side by Side** aligns saved text on the left and current text on the right.
+  Red and green blank regions show where the other side has no corresponding
+  line. Drag the center divider to give either side more room.
+
+Click a view name to change this window. Click its radio control, or highlight
+the row and press Space, to choose the default for newly opened buffers. The
+default is saved in the existing THC configuration; other open windows keep
+their views. Split views share edits and undo history but can use different views.
+
+[![Window menu with per-window view choices and a separate default radio control.](site/screenshots/window-views-menu.png)](site/screenshots/window-views-menu.png)
+
+[![Unsaved changes to Frontend.hs aligned side by side with a draggable divider.](site/screenshots/side-by-side.png)](site/screenshots/side-by-side.png)
+
+Deleted text and the saved side can be selected and copied. The editing caret
+stays in current text; Cut removes only selected live text and does not delete
+lines hidden by Only Changes. Right-click a changed region and choose
+**Revert this change** to restore its originals and remove its additions in one
+undoable operation. Saving establishes a new baseline and clears the change view.
 
 ## Text and selection
 

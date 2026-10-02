@@ -140,11 +140,14 @@ checks = bracket temporary removePathForcibly $ \directory -> do
       killTerminal jobTerminal
   either (error . T.unpack) pure foregroundResult
   let pidFile = directory </> "pid"
-  terminal <- startTerminal (config ("echo $$ > '" ++ pidFile ++ "'; sleep 30")) >>= requireRight
+  terminal <- startTerminal (config ("printf final-tail; echo $$ > '" ++ pidFile ++ "'; sleep 30")) >>= requireRight
   waitFile pidFile
   pid <- readPid pidFile
   killTerminal terminal
-  (killed,_) <- waitFor terminal (maybe False (const True) . snapshotExitCode)
+  (killed,tailOutput) <- waitFor terminal (maybe False (const True) . snapshotExitCode)
+  check "stop preserves output queued before the PTY master closes" ("final-tail" `BS.isInfixOf` tailOutput)
+  polledAgain<-pollTerminal terminal >>= requireRight
+  check "stopped terminal output tail is delivered once" (BS.null (snapshotOutput polledAgain))
   check "kill records signal exit" (snapshotExitCode killed == Just 137)
   closeTerminal terminal
   closeTerminal terminal

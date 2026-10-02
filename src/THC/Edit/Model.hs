@@ -21,6 +21,7 @@ import THC.Edit.Syntax (Style(..), highlightFor)
 import THC.Edit.Hex
 import THC.Edit.Unicode (textInputChar)
 import THC.Edit.Buffer
+import THC.Edit.BufferView
 import THC.Edit.Files (FileState(..))
 
 -- The same rectangles drive drawing and mouse dispatch.
@@ -28,13 +29,13 @@ data Rect = Rect { left :: Int, top :: Int, width :: Int, height :: Int } derivi
 inside :: Rect -> Int -> Int -> Bool
 inside (Rect x y w h) a b = a >= x && a < x+w && b >= y && b < y+h
 
-data Document = Document { documentBuffer :: Buffer, documentFile :: Maybe FileState, documentLabel :: Maybe Text, documentHighlight :: [(Char,Style)], documentWidth :: Int, documentCursorVisible :: Bool, documentSuggestedName :: Maybe FilePath, documentSourceRows :: Maybe (Vec.Vector [(Char,Style)]) } deriving (Eq,Show)
+data Document = Document { documentBuffer :: Buffer, documentFile :: Maybe FileState, documentLabel :: Maybe Text, documentHighlight :: [(Char,Style)], documentWidth :: Int, documentCursorVisible :: Bool, documentSuggestedName :: Maybe FilePath, documentSourceRows :: Maybe (Vec.Vector [(Char,Style)]), documentShellBlocks :: [(Int,Int,Text,Text)] } deriving (Eq,Show)
 -- Source colors are populated by the session worker, never forced by input or drawing.
 newDocument :: Buffer -> Maybe FileState -> Document
-newDocument b file = restyle (Document b file Nothing [] 0 True Nothing Nothing)
+newDocument b file = restyle (Document b file Nothing [] 0 True Nothing Nothing [])
 
 restyle :: Document -> Document
-restyle doc = doc {documentHighlight=[],documentSourceRows=Nothing,
+restyle doc = doc {documentHighlight=[],documentSourceRows=Nothing,documentShellBlocks=[],
   documentWidth=if byteMode (documentBuffer doc) then hexWidth 16 else documentWidth doc}
 
 syntaxDocument :: Document -> Bool
@@ -61,11 +62,15 @@ indexedHighlightRows = Vec.fromList . rows
 measureDocumentWidth :: Text -> Int
 measureDocumentWidth text=maximum (0:[displayColumn line (T.length line) | raw<-textLines text,let line=T.dropWhileEnd (=='\r') raw])
 
+data ReviewSelection = ReviewSelection
+  { reviewRevision :: Int, reviewCounts :: (Int,Int), reviewSide :: ReviewSide, reviewRange :: Selection
+  } deriving (Eq,Show)
+
 data Window = Window
   { windowId :: Int, bufferId :: Int, bounds :: Rect, selection :: Selection
   , scrollRow :: Int, scrollColumn :: Int, restoredBounds :: Maybe Rect
   , windowHexLow :: Bool, windowHexAscii :: Bool
-  , windowNumber :: Int
+  , windowNumber :: Int, bufferView :: BufferView, reviewSelection :: Maybe ReviewSelection, reviewSplit :: Int
   } deriving (Eq,Show)
 data Command = New | Open | Download | ChangeDir | Save | SaveAs | Close | Quit | Undo | Redo | Cut | Copy | Paste
   | Find | FindNext | FindPrevious | Replace | GoTo | SelectAll | Zoom | NextWindow | Cascade | Tile
@@ -75,6 +80,8 @@ data Command = New | Open | Download | ChangeDir | Save | SaveAs | Close | Quit 
   | CompileTarget | MakeTarget | StopBuild | RunTarget | RunOptions | OpenTerminal | StopTerminal
   | AgentChoose Text | AgentSet Text Text
   | AgentDirectory | AgentOptions | AgentPermissions | AgentGuidance | Conversation | AgentCancel | AgentResume | AgentCopyRaw | AgentNew
+  | ExecuteShellBlock Int (Int,Int,Text,Text)
+  | SetBufferView BufferView | SetDefaultBufferView BufferView | RevertChange Int Int (Int,Int) Int
   | ToggleHex | GoToMessage | CopyAllMessages
   | ToolchainOptions | SelectToolchain Toolchain | SelectCompiler Text
   | DebugCommand Text
@@ -83,11 +90,11 @@ data ConflictAction = CompareDisk | ReloadDisk | KeepBuffer | SaveConflictAs der
 data Conflict = Conflict { conflictBuffer :: Int, conflictRevision :: Int, conflictBaseline :: FileState, conflictDisk :: Maybe ByteString } deriving (Eq,Show)
 data GitAction = FetchRemote | PullRemote | MergeBranch Text deriving (Eq,Show)
 data Toolchain = THC | GHC deriving (Eq,Show)
-data ContextKind = ToolchainContext [(Text,Command)] | SourceContext | GitContext | MessagesContext | AgentContext [(Text,Command)] deriving (Eq,Show)
+data ContextKind = ToolchainContext [(Text,Command)] | ShellContext Command | ChangeContext Command | SourceContext | GitContext | MessagesContext | AgentContext [(Text,Command)] deriving (Eq,Show)
 data LanguageAction = TypeInfo | FindDefinition | Completions | ShowProblems | RestartLanguage | RenameAt Text | RequestCodeActions | ApplyCodeAction Int Int Text deriving (Eq,Show)
 data Completion = Completion Text [(Int,Int,Text)] deriving (Eq,Show)
 data ProjectAction = LoadProject | ProjectPage Int Int | ProjectDetails Int Int deriving (Eq,Show)
-data Effect = ProjectRequest ProjectAction | DownloadDocument Int | ReadBrowserClipboard | WriteBrowserClipboard Text | LanguageRequest LanguageAction | RunGit GitAction | ReadMergeBranches | JumpTo FilePath Int Int | ReadPath FilePath | BrowsePath FilePath Text | BrowseDirectories FilePath | ChangeDirectory FilePath | OpenChoice FilePath Text Text | ReadTree FilePath | ExpandTree Int | ReadHelp | RefreshGit FilePath | ReadGitDiff | AskGitCommit | WriteGitCommit Text | SaveDocument Int (Maybe FilePath) (Maybe Command) | ReviewExternal | ResolveConflict Conflict ConflictAction | AgentAction Text [Text] | PermissionAction Text [Text] | DebugAction Text [Text] | SetScreenMode Int | Exit deriving (Eq,Show)
+data Effect = SaveBufferViewDefault BufferView | ProjectRequest ProjectAction | DownloadDocument Int | ReadBrowserClipboard | WriteBrowserClipboard Text | LanguageRequest LanguageAction | RunGit GitAction | ReadMergeBranches | JumpTo FilePath Int Int | ReadPath FilePath | BrowsePath FilePath Text | BrowseDirectories FilePath | ChangeDirectory FilePath | OpenChoice FilePath Text Text | ReadTree FilePath | ExpandTree Int | ReadHelp | RefreshGit FilePath | ReadGitDiff | AskGitCommit | WriteGitCommit Text | SaveDocument Int (Maybe FilePath) (Maybe Command) | ReviewExternal | ResolveConflict Conflict ConflictAction | AgentAction Text [Text] | PermissionAction Text [Text] | DebugAction Text [Text] | SetScreenMode Int | Exit deriving (Eq,Show)
 data Field = Input Text Text Int | CheckBox Text Bool | Radio Text [Text] Int | ListBox Text [Text] Int | FileList [Entry] Int
   | ReadOnly Text Text
   | TextArea Text Bool Buffer Selection Int Int deriving (Eq,Show)
@@ -107,7 +114,7 @@ data Diagnostic = Diagnostic
   , diagnosticColumn :: Int, diagnosticSeverity :: Int, diagnosticMessage :: Text
   } deriving (Eq,Show)
 data Sidebar = Sidebar { treeRoot :: FilePath, treeRows :: [TreeRow], treeSelected :: Int, treeScroll :: Int, treeWidth :: Int, treeFocused :: Bool } deriving (Eq,Show)
-data Drag = DockSizing | MessagesSizing | TreeScrolling | Moving Int Int Int | Resizing Int Int Int | EdgeSizing Int Bool Bool Int | Selecting Int | Scrolling Int Bool deriving (Eq,Show)
+data Drag = ReviewSizing Int | DockSizing | MessagesSizing | TreeScrolling | Moving Int Int Int | Resizing Int Int Int | EdgeSizing Int Bool Bool Int | Selecting Int | Scrolling Int Bool deriving (Eq,Show)
 data AgentSetting = AgentSetting { settingId :: Text, settingName :: Text, settingCategory :: Text, settingCurrent :: Text, settingChoices :: [(Text,Text)] } deriving (Eq,Show)
 data Appearance = LightMode | DarkMode | SystemMode deriving (Eq,Show,Enum,Bounded)
 
@@ -146,12 +153,13 @@ data Desktop = Desktop
   , conversationTarget :: Text, conversationViews :: M.Map Text ConversationView
   , streamerMode :: Bool, clipboardExport :: (Int,Maybe Text), guestPrivatePaths :: [FilePath]
   , toolchain :: Maybe Toolchain
+  , defaultBufferView :: BufferView
   , dockedTerminals :: M.Map Int (Rect,Maybe Rect), bottomTerminal :: Maybe Int
   } deriving (Eq,Show)
 
 data MenuItem = MenuItem Text Text Command deriving (Eq,Show)
 menus :: [(Text,Char,[MenuItem])]
--- Docs: docs/site/screenshots/{file-menu,debug-menu}.png (docs/editing.md, docs/running.md).
+-- Docs: docs/site/screenshots/{file-menu,debug-menu,window-views-menu}.png (docs/editing.md, docs/running.md).
 -- Refresh the matching cropped popup after menu changes.
 menus =
   [("File",'f',[mi "New" "" New, mi "Open..." "F3" Open, mi "Save" "F2" Save, mi "Save as..." "" SaveAs, mi "Disk changes..." "" ReviewDisk, mi "Close" "Alt+F3" Close, mi "Change dir..." "" ChangeDir, mi "Terminal" "" OpenTerminal, mi "Exit" "Alt+X" Quit])
@@ -167,7 +175,7 @@ menus =
       mi "Exceptions..." "" (DebugCommand "exceptions"),mi "Exception details" "" (DebugCommand "exception-info"),mi "Output" "" (DebugCommand "output"),mi "Disconnect" "" (DebugCommand "disconnect")])
   ,("Tools",'t',[mi "File tree" "Ctrl+B" ToggleTree,mi "Git diff..." "" GitDiff,mi "Approve changes..." "" GitCommit,mi "Inspect type" "Shift+F1" InspectType,mi "Code actions..." "" CodeActions,mi "Messages" "" Problems,mi "Go to next" "Alt+F8" NextMessage,mi "Go to previous" "Alt+F7" PreviousMessage,mi "Restart language server" "" RestartHLS,mi "Conversation" "Ctrl+Shift+C" Conversation,mi "Agents..." "" AgentDirectory,mi "Conversation model..." "" (AgentChoose ""),mi "Cancel reply" "" AgentCancel,mi "Resume session..." "" AgentResume,mi "New conversation" "Ctrl+Shift+N" AgentNew,mi "Copy raw conversation" "" AgentCopyRaw,mi "Widget gallery..." "" Gallery,mi "Project browser..." "" ProjectBrowser,mi "Downloads..." "" (DebugCommand "downloads")])
   ,("Options",'o',[mi "Preferences..." "" EditorOptions,mi "Agents..." "" AgentOptions,mi "Agent Permissions" "" AgentPermissions,mi "Agent Context..." "" AgentGuidance])
-  ,("Window",'w',[mi "Agents..." "" AgentDirectory,mi "Tile" "" Tile,mi "Cascade" "" Cascade,mi "Split vertically" "" SplitVertical,mi "Split horizontally" "" SplitHorizontal,mi "Zoom" "F5" Zoom,mi "Pin / unpin terminal" "" ToggleTerminalPin,mi "Next" "F6" NextWindow,mi "Close" "Alt+F3" Close])
+  ,("Window",'w',[mi "Agents..." "" AgentDirectory,mi "Tile" "" Tile,mi "Cascade" "" Cascade,mi "Split vertically" "" SplitVertical,mi "Split horizontally" "" SplitHorizontal,mi "Zoom" "F5" Zoom,mi "Pin / unpin terminal" "" ToggleTerminalPin,mi "Next" "F6" NextWindow,mi "Close" "Alt+F3" Close,mi "" "" (Disabled ""),mi "Current" "" (SetBufferView CurrentView),mi "Changes" "" (SetBufferView ChangesView),mi "Only Changes" "" (SetBufferView OnlyChangesView),mi "Side by Side" "" (SetBufferView SideBySideView)])
   ,("Help",'h',[mi "Contents" "F1" Help,mi "About Turbo Haskell..." "" About])]
   where mi = MenuItem
 
@@ -179,7 +187,7 @@ menuMnemonic (MenuItem title _ cmd) = case cmd of
   SaveAs -> 'a'; Quit -> 'x'; Cut -> 't'; SelectAll -> 'a'
   SplitVertical -> 'v'; SplitHorizontal -> 'h'
   Close -> 'l'; Download -> 'w'
-  _ -> toLower (T.head title)
+  _ -> if T.null title then '\0' else toLower (T.head title)
 
 menuShortcut :: Desktop -> MenuItem -> Text
 menuShortcut d (MenuItem _ key cmd)
@@ -194,6 +202,10 @@ commandDescription cmd = case cmd of
   GoToMessage -> "Jump to the selected message in its source file."
   CopyAllMessages -> "Copy all messages with their source locations."
   ProjectBrowser -> "Browse local Cabal components and their dependency graph without starting a build."
+  ExecuteShellBlock{} -> "Run this shell code block in a new terminal."
+  SetBufferView _ -> "Change this window’s buffer view. Click the radio or press Space to choose the default for new buffers."
+  SetDefaultBufferView _ -> "Choose the default view for newly opened buffers."
+  RevertChange{} -> "Restore this changed block from the last load or save."
   ToggleHex -> "Switch between UTF-8 text and editable hexadecimal bytes."
   ReviewDisk -> "Review an external change without discarding unsaved text."
   CompileTarget -> "Compile the current source or selected project target."
@@ -316,6 +328,11 @@ commandEnabled :: Desktop -> Command -> Bool
 commandEnabled d cmd | dialogCommandAllowed cmd d = True
 commandEnabled d Download = browserFrontend d && maybe False ((==Nothing) . documentLabel) (activeDocument d)
 commandEnabled _ Disabled{} = False
+commandEnabled d (ExecuteShellBlock bid block) = maybe False (elem block . documentShellBlocks) (M.lookup bid (buffers d))
+commandEnabled d (SetBufferView _) = maybe False (\doc -> documentLabel doc==Nothing && textBuffer (documentBuffer doc)) (activeDocument d)
+commandEnabled d (RevertChange bid version counts _) = case activeDocument d of
+  Just doc -> documentLabel doc==Nothing && textBuffer (documentBuffer doc) && fmap bufferId (activeWindow d)==Just bid && revision (documentBuffer doc)==version && bufferLineChanges (documentBuffer doc)==counts
+  _ -> False
 commandEnabled d ToggleTerminalPin = maybe False (terminalWindow d) (activeWindow d)
 commandEnabled d cmd | cmd `elem` [Zoom,SplitVertical,SplitHorizontal], maybe False (windowPinned d) (activeWindow d) = False
 commandEnabled d (AgentChoose _) = not (null (conversationSettings d))
@@ -328,10 +345,10 @@ menuRect :: Desktop -> Int -> Rect
 menuRect d i = Rect (min x (max 0 (sw-w))) 1 w (length (menuItemsFor d i)+2)
   where x = fst (menuPositions !! i)
         sw = fst (screenSize d)
-        w = min sw (maximum [T.length t + T.length (menuShortcut d entry) + 5 | entry@(MenuItem t _ _) <- menuItemsFor d i])
+        w = min sw (maximum [T.length t + T.length (menuShortcut d entry) + 5 + (case command of SetBufferView _ -> 4; _ -> 0) | entry@(MenuItem t _ command) <- menuItemsFor d i])
 
 initialDesktop :: (Int,Int) -> Desktop
-initialDesktop size = Desktop size [] M.empty 1 Nothing Nothing Nothing "" False Nothing "" Nothing "" Nothing "" False Nothing Nothing Nothing "" Nothing Nothing Nothing [] False 0 0 False Nothing 0 0 Nothing SourceContext Nothing (newBuffer "") (Selection 0 0) True False False 0 True False False False Nothing Nothing [] 8 Nothing [] False SystemMode True [] Nothing [] Nothing [] False Nothing "" M.empty False (0,Nothing) [] Nothing M.empty Nothing
+initialDesktop size = Desktop size [] M.empty 1 Nothing Nothing Nothing "" False Nothing "" Nothing "" Nothing "" False Nothing Nothing Nothing "" Nothing Nothing Nothing [] False 0 0 False Nothing 0 0 Nothing SourceContext Nothing (newBuffer "") (Selection 0 0) True False False 0 True False False False Nothing Nothing [] 8 Nothing [] False SystemMode True [] Nothing [] Nothing [] False Nothing "" M.empty False (0,Nothing) [] Nothing CurrentView M.empty Nothing
 
 activeWindow :: Desktop -> Maybe Window
 activeWindow d = listToMaybe (filter (windowVisible d) (windows d))
@@ -363,7 +380,7 @@ addDocument file b d = d { windows = w : windows d, buffers = M.insert i (newDoc
     i = nextId d
     offset = length (windows d) `mod` 5
     (sw,sh) = screenSize d
-    w = Window i i (fitWindow d (Rect offset (1+offset) (sw-offset) (sh-2-offset))) (Selection 0 0) 0 0 Nothing False False (nextWindowNumber d)
+    w = Window i i (fitWindow d (Rect offset (1+offset) (sw-offset) (sh-2-offset))) (Selection 0 0) 0 0 Nothing False False (nextWindowNumber d) (if byteMode b then CurrentView else defaultBufferView d) Nothing 50
 
 nextWindowNumber :: Desktop -> Int
 nextWindowNumber d = choose 1
@@ -423,9 +440,11 @@ ensureVisible d = case (activeWindow d, activeDocument d) of
     where
       b = documentBuffer doc
       (row,dc) = windowCursorCell b w
-      rows = max 1 (windowContentRows d doc w); cols = max 1 (width (bounds w)-2)
+      rows = max 1 (windowContentRows d doc w); cols = max 1 (if bufferView w==SideBySideView then snd (reviewPaneWidths w) else width (bounds w)-2)
+      paneOffset=if bufferView w==SideBySideView then fst (reviewPaneWidths w)+1 else 0
+      textColumn=dc-paneOffset
       row' = if row < scrollRow w then row else if row >= scrollRow w+rows then row-rows+1 else scrollRow w
-      col' = if dc < scrollColumn w then dc else if dc >= scrollColumn w+cols then dc-cols+1 else scrollColumn w
+      col' = if textColumn < scrollColumn w then textColumn else if textColumn >= scrollColumn w+cols then textColumn-cols+1 else scrollColumn w
   _ -> d
 
 -- Map other view positions through the changed character interval.
@@ -434,8 +453,8 @@ editActive _ _ d | maybe False treeFocused (sideTree d) || problemsFocused d = d
 editActive f cursor d = case (activeWindow d, activeDocument d) of
   (Just _, Just doc) | documentLabel doc /= Nothing -> d {status="This window is read-only."}
   (Just active, Just doc)
-    | revision changed==revision original -> maybe d (\p -> moveTo False p d) cursor
-    | otherwise -> ensureVisible d { buffers = M.insert bid (restyle doc {documentBuffer = changed}) (buffers d), windows = map adjust (windows d) }
+    | revision changed==revision original -> maybe (modifyActive (\w -> w {reviewSelection=Nothing}) d) (\p -> moveTo False p d) cursor
+    | otherwise -> clampReviewWindows (ensureVisible d { buffers = M.insert bid (restyle doc {documentBuffer = changed}) (buffers d), windows = map adjust (windows d) })
     where
       bid = bufferId active
       original = documentBuffer doc
@@ -447,8 +466,8 @@ editActive f cursor d = case (activeWindow d, activeDocument d) of
                | p >= oldEnd = p + newEnd-oldEnd
                | otherwise = newEnd
       adjust w | bufferId w /= bid = w
-               | windowId w == windowId active = w {selection = Selection target target,windowHexLow=False}
-               | otherwise = w {selection = let Selection a c = selection w in Selection (rebase a) (rebase c)}
+               | windowId w == windowId active = w {selection = Selection target target,windowHexLow=False,reviewSelection=Nothing,bufferView=if byteMode changed then CurrentView else bufferView w}
+               | otherwise = w {selection = let Selection a c = selection w in Selection (rebase a) (rebase c),reviewSelection=Nothing,bufferView=if byteMode changed then CurrentView else bufferView w}
       target = max 0 (min (bufferLength changed) (fromMaybe newEnd cursor))
   _ -> d
 
@@ -461,8 +480,136 @@ moveTo :: Bool -> Int -> Desktop -> Desktop
 moveTo extend pos d = ensureVisible (modifyActive update d)
   where
     len = maybe 0 (bufferLength . documentBuffer) (activeDocument d)
-    p = max 0 (min len pos)
-    update w = w {windowHexLow=False,selection = Selection (if extend then anchor (selection w) else p) p}
+    raw = max 0 (min len pos)
+    p = case (activeWindow d,activeDocument d) of
+      (Just w,Just doc) -> visibleReviewPosition (documentBuffer doc) w raw
+      _ -> raw
+    update w = w {windowHexLow=False,reviewSelection=Nothing,selection = Selection (if extend then anchor (selection w) else p) p}
+
+-- Review selections use display offsets; editable selections always use live text.
+windowReviewSelection :: Buffer -> Window -> Maybe ReviewSelection
+windowReviewSelection b w = case reviewSelection w of
+  Just selected | bufferView w/=CurrentView, not (byteMode b),
+    reviewRevision selected==revision b, reviewCounts selected==bufferLineChanges b,
+    let (a,z)=ordered (reviewRange selected), a>=0, z<=changeLength b -> Just selected
+  _ -> Nothing
+
+windowReviewRange :: Buffer -> Window -> Maybe Selection
+windowReviewRange b w=reviewRange <$> windowReviewSelection b w
+
+windowChangeView :: Buffer -> Window -> Bool
+windowChangeView b w=bufferView w/=CurrentView && not (byteMode b)
+
+reviewVisibleRanges :: Buffer -> Window -> ReviewSelection -> [(Int,Int)]
+reviewVisibleRanges b w selected=
+  [(max a start,min z end) | (first,last')<-viewChangeRanges (bufferView w) (bufferViewProjection b) (reviewSide selected),
+    let start=changeLineOffset b first, let end=changeLineOffset b last',max a start<min z end]
+  where (a,z)=ordered (reviewRange selected)
+
+windowSelectedText :: Buffer -> Window -> Text
+windowSelectedText b w=case windowReviewSelection b w of
+  Nothing -> selectedText (selection w) b
+  Just selected | reviewSide selected==UnifiedSide -> T.concat [changeSlice b a (z-a) | (a,z)<-reviewVisibleRanges b w selected]
+  Just selected -> T.concat [rawSlice a z | (a,z)<-reviewVisibleRanges b w selected]
+  where
+    rawSlice a z=T.concat [T.take (min (T.length raw) (z-start)-max 0 (a-start)) (T.drop (max 0 (a-start)) raw)
+      | (row,(_,_,raw))<-zip [first..] (bufferChangeRows b first (last'-first+1)),let start=changeLineOffset b row,start<z]
+      where first=fst (changeLineColumn b a); last'=fst (changeLineColumn b z)
+
+cutReviewSelection :: Desktop -> Desktop
+cutReviewSelection d=case (activeWindow d,activeDocument d) of
+  (Just w,Just doc) | Just selected<-windowReviewSelection b w ->
+    if reviewSide selected==OriginalSide then copied else case intervals of
+      [] -> copied
+      (start,_):_ -> let { end=snd (last intervals); replacement=preserve start intervals end }
+                    in editActive (\_ -> replaceSelection (Selection start end) replacement) (Just start) copied
+    where
+      b=documentBuffer doc
+      copied=d {clipboard=windowSelectedText b w,status="Block copied."}
+      intervals=[(a,z) | selected'<-maybe [] pure (windowReviewSelection b w), (first,last')<-reviewVisibleRanges b w selected',
+        let a=changeToLiveOffset b first,let z=changeToLiveOffset b last',a<z]
+      preserve pos [] end=bufferSlice b pos (end-pos)
+      preserve pos ((a,z):rest) end=bufferSlice b pos (a-pos)<>preserve z rest end
+  _ -> insertText "" d {clipboard=maybe "" (\doc -> maybe "" (windowSelectedText (documentBuffer doc)) (activeWindow d)) (activeDocument d)}
+
+setBufferView :: BufferView -> Desktop -> Desktop
+setBufferView mode d
+  | not (commandEnabled d (SetBufferView mode))=d
+  | otherwise=case (activeWindow d,activeDocument d) of
+      (Just w,Just doc) -> ensureVisible (modifyActive update d)
+        where
+          update v=let changed=v {bufferView=mode,reviewSelection=Nothing,scrollRow=newRow}
+                       target=visibleReviewPosition b changed (caret (selection v))
+                   in if target==caret (selection v) then changed else changed {selection=Selection target target}
+          b=documentBuffer doc
+          projection=bufferViewProjection b
+          currentTop=fst (changeLineColumn b (liveToChangeOffset b (bufferLineOffset b (scrollRow w))))
+          oldFull | bufferView w==CurrentView=maybe currentTop fst (changeHunkAt b currentTop)
+                  | otherwise=fromMaybe (fst (changeLineColumn b (liveToChangeOffset b (caret (selection w))))) (viewRightRow (viewRowAt (bufferView w) projection (scrollRow w)))
+          newRow | mode==CurrentView=fst (bufferLineColumn b (changeToLiveOffset b (changeLineOffset b oldFull)))
+                 | otherwise=viewRowForChange mode projection CurrentSide oldFull
+      _ -> d
+
+clampReviewWindows :: Desktop -> Desktop
+clampReviewWindows d=d {windows=map clamp (windows d)}
+  where
+    clamp w | Just doc<-M.lookup (bufferId w) (buffers d),windowChangeView (documentBuffer doc) w =
+      w {reviewSelection=windowReviewSelection (documentBuffer doc) w,
+         scrollRow=max 0 (min (scrollbarLimit d True doc w) (scrollRow w))}
+    clamp w=w
+
+-- Arrow navigation crosses hidden unchanged ranges without placing a caret on a gap.
+visibleReviewPosition :: Buffer -> Window -> Int -> Int
+visibleReviewPosition b w pos
+  | bufferView w/=OnlyChangesView || byteMode b=pos
+  | viewOmittedRows entry==0=pos
+  | otherwise=fromMaybe pos (candidate direction `orElse` candidate (negate direction))
+  where
+    projection=bufferViewProjection b
+    full=fst (changeLineColumn b (liveToChangeOffset b pos))
+    row=viewRowForChange OnlyChangesView projection CurrentSide full
+    entry=viewRowAt OnlyChangesView projection row
+    direction=if pos<caret (selection w) then -1 else 1
+    candidate delta=do
+      source<-viewRightRow (viewRowAt OnlyChangesView projection (row+delta))
+      let offset=changeLineOffset b source+(if delta<0 then T.length (changeLineAt b source) else 0)
+      pure (changeToLiveOffset b offset)
+    orElse (Just value) _=Just value
+    orElse Nothing other=other
+
+-- A separator or padded alignment cell carries no selectable text.
+reviewHit :: Int -> Int -> Buffer -> Window -> Maybe (ReviewSide,Int,Int)
+reviewHit x y b w=do
+  let row=max 0 (min (viewRowCount (bufferView w) projection-1) (y-top (bounds w)-1+scrollRow w))
+      (leftWidth,_)=reviewPaneWidths w
+      local=x-left (bounds w)-1
+      side=if bufferView w/=SideBySideView then UnifiedSide else if local<leftWidth then OriginalSide else CurrentSide
+      col=max 0 (local-(if bufferView w==SideBySideView && side==CurrentSide then leftWidth+1 else 0)+scrollColumn w)
+      entry=viewRowAt (bufferView w) projection row
+  fullRow<-if side==OriginalSide then viewLeftRow entry else viewRightRow entry
+  pure (side,fullRow,changeLineOffset b fullRow+columnOffset (changeLineAt b fullRow) col)
+  where projection=bufferViewProjection b
+
+shellBlockAt :: Int -> Int -> Desktop -> Maybe Command
+shellBlockAt x y d=do
+  w<-activeWindow d
+  doc<-activeDocument d
+  let b=documentBuffer doc
+      row=y-top (bounds w)-1+scrollRow w
+      col=x-left (bounds w)-1+scrollColumn w
+      position=bufferLineOffset b row+columnOffset (bufferLineAt b row) col
+  if byteMode b || windowChangeView b w || row>=bufferLineCount b then Nothing else do
+    block<-find (\(start,end,_,raw)->position>=start && position<end && not (T.null (T.strip raw))) (documentShellBlocks doc)
+    pure (ExecuteShellBlock (bufferId w) block)
+
+reviewContext :: Int -> Int -> Desktop -> ContextKind
+reviewContext x y d=case (activeWindow d,activeDocument d) of
+  (Just w,Just doc) | windowChangeView b w,
+    let entry=viewRowAt (bufferView w) (bufferViewProjection b) (y-top (bounds w)-1+scrollRow w),
+    Just row<-case reviewHit x y b w of Just (_,r,_)->Just r; Nothing->case viewLeftRow entry of Just r->Just r; Nothing->viewRightRow entry,
+    Just _<-changeHunkAt b row -> ChangeContext (RevertChange (bufferId w) (revision b) (bufferLineChanges b) row)
+    where b=documentBuffer doc
+  _ -> SourceContext
 
 wrapMessage :: T.Text -> [T.Text]
 wrapMessage text | T.null text=[]
@@ -536,6 +683,14 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
     go Close d = case (activeWindow d, activeDocument d) of
       (Just w, Just doc) | dirty (documentBuffer doc) && length (filter ((==bufferId w) . bufferId) (windows d)) == 1 -> confirm Close d
       _ -> (closeActive d,[])
+    go command@(ExecuteShellBlock bid (start,end,dialect,raw)) d
+      | commandEnabled d command = (d,[AgentAction "execute-shell-block" [T.pack (show bid),T.pack (show start),T.pack (show end),dialect,raw]])
+      | otherwise = (d {status="The shell code block is no longer current."},[])
+    go (SetBufferView mode) d = (setBufferView mode d,[])
+    go (SetDefaultBufferView mode) d = (d {defaultBufferView=mode,status="Default buffer view updated."},[SaveBufferViewDefault mode])
+    go command@(RevertChange _ _ _ row) d
+      | commandEnabled d command = (editActive (\_ -> revertChangeHunk row) Nothing d,[])
+      | otherwise = (d {status="The change is no longer current."},[])
     go ToggleHex d = (toggleHex d,[])
     go Undo d = (editActive (const undo) Nothing d,[])
     go Redo d = (editActive (const redo) Nothing d,[])
@@ -545,11 +700,15 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
     go Copy d | activeHex d = (d {clipboard=T.unwords (map (hexNumber 2 . ord) (T.unpack (selected d))),status="Hex bytes copied."},[])
     go Copy d = (d {clipboard = selected d, status = "Block copied."},[])
     go Cut d | activeHex d = let copied=fst (go Copy d) in (insertText "" copied,[])
-    go Cut d = (insertText "" d {clipboard = selected d},[])
+    go Cut d = (cutReviewSelection d,[])
     go Paste d | Just ident<-activeTerminal d = (d,[AgentAction "terminal-input" [ident,clipboard d]])
     go Paste d | activeHex d = (pasteHex (clipboard d) d,[])
     go Paste d = (insertText (clipboard d) d,[])
-    go SelectAll d = (modifyActive (\w -> w {selection = Selection 0 (maybe 0 (bufferLength . documentBuffer) (activeDocument d))}) d,[])
+    go SelectAll d = (modifyActive (\w -> case activeDocument d of
+      Just doc -> let { b=documentBuffer doc; side=maybe (if bufferView w==SideBySideView then CurrentSide else UnifiedSide) reviewSide (windowReviewSelection b w) }
+                  in w {selection=if side==OriginalSide then selection w else Selection 0 (bufferLength b),
+                        reviewSelection=if windowChangeView b w then Just (ReviewSelection (revision b) (bufferLineChanges b) side (Selection 0 (changeLength b))) else Nothing}
+      Nothing -> w) d,[])
     go action d | activeHex d, action `elem` [Find,Replace,FindNext] = (d {status="Text search is unavailable in hex mode."},[])
     go GoTo d | activeHex d = (prompt "Go to byte" GoingTo [Input "Byte offset (decimal)" "0" 1] d,[])
     go Find d = (searchPrompt False d,[])
@@ -599,7 +758,7 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
     go (Disabled reason) d = (d {status = reason},[])
     confirm action d = (d {dialog = Just (Dialog "Save changes?" (Confirm action) [] 0 ["Save","Discard","Cancel"] (["Save changes to:"] ++ wrapMessage (documentTitle d <> "?")))},[])
     selected d | activeConversation d = conversationSelection d
-    selected d = case (activeWindow d,activeDocument d) of (Just w,Just doc) -> selectedText (selection w) (documentBuffer doc); _ -> ""
+    selected d = case (activeWindow d,activeDocument d) of (Just w,Just doc) -> windowSelectedText (documentBuffer doc) w; _ -> ""
 
 activeText :: Desktop -> Text
 activeText = maybe "" (contents . documentBuffer) . activeDocument
@@ -646,7 +805,7 @@ findText needle d = case activeWindow d of
   Nothing -> d
   Just w -> case searchFrom (snd (ordered (selection w))) of
     Nothing -> d {lastFind = needle,status = "Search text not found."}
-    Just p -> ensureVisible (modifyActive (\v -> v {selection = Selection p (p+T.length needle)}) d {lastFind = needle,status = "Search match."})
+    Just p -> ensureVisible (modifyActive (\v -> v {selection = Selection p (p+T.length needle),reviewSelection=Nothing}) d {lastFind = needle,status = "Search match."})
   where
     t = activeText d
     locate start source = let (before,after) = T.breakOn needle source in if T.null after then Nothing else Just (start+T.length before)
@@ -664,7 +823,7 @@ findPrevious d = case (activeWindow d,activeDocument d) of
         found=case before of Just p -> Just p; Nothing -> locate (contents b)
     in case found of
       Nothing -> d {status="Search text not found."}
-      Just p -> ensureVisible (modifyActive (\v -> v {selection=Selection p (p+size)}) d {status="Search match."})
+      Just p -> ensureVisible (modifyActive (\v -> v {selection=Selection p (p+size),reviewSelection=Nothing}) d {status="Search match."})
   _ -> d
   where
     needle=lastFind d
@@ -812,7 +971,7 @@ handleEvent (V.EvMouseDown x y V.BLeft _) d | y==snd (screenSize d)-1 =
     Just (_,_,Left cmd) -> runCommand cmd d
     Just (_,_,Right event) -> handleEvent event (if activeConversation d then d {composerFocused=True} else d)
     Nothing -> (d,[])
-handleEvent event d = Bifunctor.first (layoutComposer d . clampHexScroll d) $ dispatchEvent event (case event of
+handleEvent event d = Bifunctor.first (layoutComposer d . clampReviewWindows . clampHexScroll d) $ dispatchEvent event (case event of
   V.EvKey{} -> d {hoverTarget=Nothing,typeHint="",buttonHover=Nothing,buttonPressed=Nothing,statusHover=Nothing}
   V.EvMouseDown{} -> d {hoverTarget=Nothing,typeHint=""}
   V.EvPaste{} -> d {hoverTarget=Nothing,typeHint=""}
@@ -883,7 +1042,7 @@ rememberConversationView d = case conversationDocument (conversationTarget d) d 
 
 addConversationDocument :: Desktop -> Desktop
 addConversationDocument d=let added=addDocument Nothing (newBuffer "") d in
-  added {buffers=M.adjust (\doc->doc {documentLabel=Just "Conversation",documentCursorVisible=False}) (nextId d) (buffers added)}
+  (modifyActive (\w -> w {bufferView=CurrentView,reviewSelection=Nothing}) added) {buffers=M.adjust (\doc->doc {documentLabel=Just "Conversation",documentCursorVisible=False}) (nextId d) (buffers added)}
 
 selectConversationView :: Text -> Text -> Desktop -> Desktop
 selectConversationView target name original =
@@ -1123,11 +1282,17 @@ menuEvent ev (i,j) d = case ev of
   V.EvKey V.KUp _ -> choose i (j-1)
   V.EvKey V.KDown _ -> choose i (j+1)
   V.EvKey V.KEnter _ -> invoke j
+  V.EvKey (V.KChar ' ') _ -> case menuItemsFor d i !! j of
+    MenuItem _ _ (SetBufferView mode) -> runCommand (SetDefaultBufferView mode) d
+    _ -> invoke j
   V.EvKey (V.KChar c) _ -> case findIndex (\item -> toLower c == menuMnemonic item) (menuItemsFor d i) of
     Just k -> invoke k
     _ -> (d,[])
   V.EvMouseDown x 0 V.BLeft _ -> case menuAt x of Just k -> choose k 0; _ -> (d {menu=Nothing},[])
-  V.EvMouseDown x y V.BLeft _ -> let r = menuRect d i in if inside r x y && y>top r && y<top r+height r-1 then invoke (y-top r-1) else (d {menu=Nothing},[])
+  V.EvMouseDown x y V.BLeft _ -> let r = menuRect d i in if inside r x y && y>top r && y<top r+height r-1 then let k=y-top r-1 in case menuItemsFor d i !! k of
+      MenuItem _ _ (SetBufferView mode) | x<=left r+4 -> runCommand (SetDefaultBufferView mode) d
+      _ -> invoke k
+    else (d {menu=Nothing},[])
   _ -> (d,[])
   where
     choose a b = let a' = a `mod` length menus in (d {menu = Just (a',b `mod` length (menuItemsFor d a'))},[])
@@ -1138,6 +1303,8 @@ menuAt x = findIndex (\(start,w) -> x >= start && x < start+w) menuPositions
 
 contextItems :: ContextKind -> [(Text,Command)]
 contextItems (ToolchainContext items) = items
+contextItems (ShellContext command) = [("Execute in terminal",command)]
+contextItems (ChangeContext command) = ("Revert this change",command):contextItems SourceContext
 contextItems SourceContext = [("Rename symbol...",RenameSymbol),("Code actions...",CodeActions),("Go to definition",Definition),("Inspect type",InspectType),("Complete identifier",Complete)]
 contextItems MessagesContext = [("Go to source",GoToMessage),("Copy message",Copy),("Copy all messages",CopyAllMessages),("Hide Messages",Problems)]
 contextItems (AgentContext items) = items
@@ -1270,6 +1437,9 @@ fileEntryAt x y d dg = listToMaybe
 
 mouseEvent :: Int -> Int -> V.Button -> [V.Modifier] -> Desktop -> (Desktop,[Effect])
 mouseEvent x y V.BLeft _ d | Just capture <- drag d = (case capture of
+  ReviewSizing wid -> case find ((==wid).windowId) (windows d) of
+    Just w -> mapWindow wid (\v -> v {reviewSplit=max 0 (min 100 ((x-left (bounds w)-1)*100 `div` max 1 (width (bounds w)-3)))}) d
+    Nothing -> d
   DockSizing -> resizeTree x d
   MessagesSizing -> resizeProblems y d
   TreeScrolling -> case sideTree d of
@@ -1295,8 +1465,10 @@ windowMouse x y button mods d = case find (\w -> windowVisible d w && inside (bo
     V.BScrollUp -> (changeScroll True (-3) focused,[])
     V.BScrollDown -> (changeScroll True 3 focused,[])
     V.BRight | x>l && x<l+ww-1 && y>t && y<t+hh-1,
+               Just command<-shellBlockAt x y focused -> (openContext (ShellContext command) x y focused,[])
+    V.BRight | x>l && x<l+ww-1 && y>t && y<t+hh-1,
                maybe False ((==Nothing) . documentLabel) (activeDocument focused) ->
-      (openContext SourceContext x y (selectAt False x y focused),[])
+      (openContext (reviewContext x y focused) x y (selectAt False x y focused),[])
     V.BLeft
       | not (windowFocused d w), x==l || x==l+ww-1 || y==t || y==t+hh-1 -> (focused,[])
       | y==t && x>=l+2 && x<=l+4 -> runCommand Close focused
@@ -1312,6 +1484,7 @@ windowMouse x y button mods d = case find (\w -> windowVisible d w && inside (bo
       | x==l -> (beginWindowDrag (EdgeSizing (windowId w) False True 0) focused,[])
       | x==l+ww-1 -> (beginWindowDrag (EdgeSizing (windowId w) False False 1) focused,[])
       | y==t+hh-1 -> (beginWindowDrag (EdgeSizing (windowId w) True False 1) focused,[])
+      | bufferView w==SideBySideView, x==left (bounds w)+1+fst (reviewPaneWidths w) -> (focused {drag=Just (ReviewSizing (windowId w))},[])
       | activeConversation focused, Just action<-conversationClick x y w focused -> (focused {drag=Nothing},[action])
       | activeConversation focused, inside (composerRect focused w) x y -> (composerClick x y mods w focused,[])
       | activeConversation focused, y>=top (composerRect focused w) -> (focused,[])
@@ -1468,7 +1641,7 @@ scrollbarRect d vertical doc w
 
 scrollbarLimit :: Desktop -> Bool -> Document -> Window -> Int
 scrollbarLimit d vertical doc w = max 0 (if vertical then documentRows doc w-max 1 (windowContentRows d doc w)
-  else windowDocumentWidth doc w-max 1 (width (bounds w)-2)+(if byteMode (documentBuffer doc) then 0 else 1))
+  else windowDocumentWidth doc w-max 1 (if bufferView w==SideBySideView then min (fst (reviewPaneWidths w)) (snd (reviewPaneWidths w)) else width (bounds w)-2)+(if byteMode (documentBuffer doc) then 0 else 1))
 
 -- Each split chooses its own layout. Keep the byte viewport and a visible caret
 -- anchored when resizing or docking Files changes the number of bytes per row.
@@ -1526,6 +1699,11 @@ selectAt extend x y d = case activeWindow d of
                              ; row=max 0 (y-top (bounds w)-1+scrollRow w)
                              ; (offset,ascii,low)=hexHit (windowHexBytes w) col }
                             in modifyActive (\v -> v {windowHexAscii=ascii,windowHexLow=low}) (moveTo extend (row*windowHexBytes w+offset) d)
+  Just w | Just doc<-activeDocument d, let b=documentBuffer doc, windowChangeView b w -> case reviewHit x y b w of
+    Nothing -> d
+    Just (side,_,pos) -> let { start=if extend then maybe (liveToChangeOffset b (anchor (selection w))) (anchor . reviewRange) (windowReviewSelection b w >>= \r -> if reviewSide r==side then Just r else Nothing) else pos
+                           ; live=if side==OriginalSide then selection w else Selection (changeToLiveOffset b start) (changeToLiveOffset b pos) }
+                         in modifyActive (\v -> v {selection=live,reviewSelection=Just (ReviewSelection (revision b) (bufferLineChanges b) side (Selection start pos))}) d
   Just w -> moveTo extend pos d where
     b = maybe (newBuffer "") documentBuffer (activeDocument d)
     row = max 0 (min (bufferLineCount b-1) (y-top (bounds w)-1+scrollRow w))
@@ -2137,7 +2315,7 @@ addHelp text d = addReadOnly "Turbo Haskell Help" text d
 addReadOnly :: Text -> Text -> Desktop -> Desktop
 addReadOnly title text d = case [(bid,w) | (bid,doc)<-M.toList (buffers d),documentLabel doc==Just title,w<-windows d,bufferId w==bid] of
   (bid,w):_ -> focusWindow (windowId w) d {buffers=M.adjust (\doc -> restyle doc {documentBuffer=newBuffer text}) bid (buffers d)}
-  [] -> let new=addDocument Nothing (newBuffer text) d in new {buffers=M.adjust (\doc -> doc {documentLabel=Just title}) (nextId d) (buffers new)}
+  [] -> let new=modifyActive (\w -> w {bufferView=CurrentView,reviewSelection=Nothing}) (addDocument Nothing (newBuffer text) d) in new {buffers=M.adjust (\doc -> doc {documentLabel=Just title}) (nextId d) (buffers new)}
 
 -- Hit testing uses the same cell geometry as selection, including tabs and wide glyphs.
 hoverAt :: Int -> Int -> Desktop -> (Desktop,[Effect])
@@ -2159,12 +2337,18 @@ hoverAt x y d = (d {hoverTarget=target,typeHint=fromMaybe (if target==hoverTarge
           doc <- M.lookup (bufferId w) (buffers d)
           if documentLabel doc/=Nothing || not (textBuffer (documentBuffer doc)) then Nothing else do
             let b=documentBuffer doc
-                row=y-t-1+scrollRow w
-                col=x-l-1+scrollColumn w
-                line=bufferLineAt b row
-                offset=columnOffset line col
-            if row>=bufferLineCount b || col>=displayColumn line (T.length line) then Nothing
-              else Just (bufferId w,revision (documentBuffer doc),bufferLineOffset b row+offset)
+                visualRow=y-t-1+scrollRow w
+                normalRow=visualRow
+                normalColumn=x-l-1+scrollColumn w
+            if windowChangeView b w then do
+              (_,row,projected)<-reviewHit x y b w
+              case bufferChangeRows b row 1 of
+                (DeletedLine,_,_):_ -> Nothing
+                _ | projected<changeLineOffset b row+T.length (changeLineAt b row) -> Just (bufferId w,revision b,changeToLiveOffset b projected)
+                _ -> Nothing
+            else let line=bufferLineAt b normalRow; offset=columnOffset line normalColumn
+                 in if normalRow>=bufferLineCount b || normalColumn>=displayColumn line (T.length line) then Nothing
+                    else Just (bufferId w,revision b,bufferLineOffset b normalRow+offset)
 
 -- A completion (including imports) is a single undoable transaction.
 applyCompletion :: [(Int,Int,Text)] -> Desktop -> Desktop
@@ -2185,11 +2369,19 @@ applyCompletion edits d
 activeHex :: Desktop -> Bool
 activeHex = maybe False (byteMode . documentBuffer) . activeDocument
 
+reviewPaneWidths :: Window -> (Int,Int)
+reviewPaneWidths w = (leftWidth,available-leftWidth)
+  where available=max 0 (width (bounds w)-3)
+        minimumWidth=min 4 (available `div` 2)
+        leftWidth=max minimumWidth (min (available-minimumWidth) (available*reviewSplit w `div` 100))
+
 windowHexBytes :: Window -> Int
 windowHexBytes = hexBytesPerRow . subtract 2 . width . bounds
 
 windowDocumentWidth :: Document -> Window -> Int
 windowDocumentWidth doc w | byteMode (documentBuffer doc) = hexWidth (windowHexBytes w)
+                          | windowChangeView b w = maximum (documentWidth doc:[displayColumn line (T.length line) | visual<-[scrollRow w..min (documentRows doc w-1) (scrollRow w+max 0 (height (bounds w)-2))],
+                              let entry=viewRowAt (bufferView w) (bufferViewProjection b) visual, row<-maybe [] pure (viewLeftRow entry)++maybe [] pure (viewRightRow entry),let line=changeLineAt b row])
                           | documentSourceRows doc/=Nothing = documentWidth doc
                           | otherwise = maximum (documentWidth doc:caretColumn:
                               [displayColumn line (T.length line) | n<-[scrollRow w..min (bufferLineCount b-1) (scrollRow w+max 0 (height (bounds w)-2))],let line=bufferLineAt b n])
@@ -2198,12 +2390,17 @@ windowDocumentWidth doc w | byteMode (documentBuffer doc) = hexWidth (windowHexB
 
 documentRows :: Document -> Window -> Int
 documentRows doc w | byteMode b = bufferLength b `div` windowHexBytes w+1
+                 | windowChangeView b w = viewRowCount (bufferView w) (bufferViewProjection b)
                  | otherwise = bufferLineCount b
   where b=documentBuffer doc
 
 windowCursorCell :: Buffer -> Window -> (Int,Int)
 windowCursorCell b w
   | byteMode b = (p `div` windowHexBytes w, if windowHexAscii w then hexAsciiColumn (windowHexBytes w)+p `mod` windowHexBytes w else hexColumn (p `mod` windowHexBytes w)+if windowHexLow w then 1 else 0)
+  | windowChangeView b w = let { (row,col)=changeLineColumn b (liveToChangeOffset b p)
+                                ; visual=viewRowForChange (bufferView w) (bufferViewProjection b) CurrentSide row
+                                ; pane=if bufferView w==SideBySideView then fst (reviewPaneWidths w)+1 else 0 }
+                            in (visual,pane+displayColumn (changeLineAt b row) col)
   | otherwise = let (row,col)=bufferLineColumn b p in (row,displayColumn (bufferLineAt b row) col)
   where p=caret (selection w)
 

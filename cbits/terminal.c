@@ -39,7 +39,7 @@ struct thc_terminal {
     GhosttyRenderState render;
     GhosttyRenderStateRowIterator row;
     GhosttyRenderStateRowCells cell;
-    int columns, rows, master, exited, exit_code, drained, reaped;
+    int columns, rows, master, exited, exit_code, drained, reaped, preserve_output;
 #ifdef _WIN32
     HPCON console, closing_console;
     HANDLE child, job, input_pipe, output_pipe, reader, writer, closer;
@@ -497,7 +497,8 @@ int thc_terminal_poll(thc_terminal *t) {
 #ifdef _WIN32
     if (!poll_process(t)) return 0;
 #else
-    t->output_length = 0;
+    if (!t->preserve_output) t->output_length = 0;
+    t->preserve_output = 0;
     t->drained = 1;
     if (!flush_input(t)) {
         if (errno == EIO || errno == EPIPE) t->input_length = 0;
@@ -522,6 +523,13 @@ int thc_terminal_poll(thc_terminal *t) {
 const uint32_t *thc_terminal_cells(thc_terminal *t) { return t->cells; }
 const uint8_t *thc_terminal_text(thc_terminal *t, size_t *length) { *length = t->text_length; return t->text; }
 const uint8_t *thc_terminal_output(thc_terminal *t, size_t *length) { *length = t->output_length; return t->output; }
+int thc_terminal_pid(thc_terminal *t) {
+#ifdef _WIN32
+    return t->child ? (int)GetProcessId(t->child) : 0;
+#else
+    return (int)t->pid;
+#endif
+}
 void thc_terminal_info(thc_terminal *t, int info[6]) {
     info[0] = t->columns; info[1] = t->rows; info[2] = t->cursor_x; info[3] = t->cursor_y;
     info[4] = t->exited && t->drained; info[5] = t->exit_code;
@@ -538,6 +546,14 @@ void thc_terminal_kill(thc_terminal *t) {
         /* forkpty creates a session/process group for the command. */
         kill(-t->pid, SIGKILL);
         kill(t->pid, SIGKILL);
+        /* On macOS a dying PTY child can wait for the master's close. Drain
+         * its available tail first, then close before waiting for that exit. */
+        t->output_length = 0;
+        if (t->master >= 0 && fcntl(t->master, F_SETFL, O_NONBLOCK) == 0)
+            (void)read_output(t);
+        t->preserve_output = 1;
+        if (t->master >= 0) { close(t->master); t->master = -1; }
+        t->input_length = 0;
         int status;
         pid_t pid;
         do { pid = waitpid(t->pid, &status, 0); } while (pid < 0 && errno == EINTR);

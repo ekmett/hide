@@ -1,10 +1,11 @@
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE CPP, OverloadedStrings #-}
 module ConversationCheck (checks) where
 
 import Control.Concurrent (threadDelay)
+
 import Control.Concurrent.Async (withAsync, cancel, poll, wait)
 import Control.Exception (bracket)
-import Control.Monad (unless, when, forM_)
+import Control.Monad (unless, when, forM_, foldM)
 import Data.Aeson hiding (Number)
 import Data.Aeson.Types (parseMaybe)
 import qualified Data.Aeson.Key as K
@@ -22,6 +23,11 @@ import System.Directory
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.FilePath ((</>))
 import System.IO (hClose, openTempFile)
+#ifndef mingw32_HOST_OS
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar, isEmptyMVar)
+import System.Posix.Files (createNamedPipe)
+import qualified System.Posix.IO as Posix
+#endif
 import System.Info (os)
 import System.Timeout (timeout)
 import THC.Edit.Render (snapshot, snapshotHtml)
@@ -209,6 +215,110 @@ checks = bracket temporary removePathForcibly $ \root ->
     (secondFile,secondBuffer)<-loadFile secondSource >>= either error pure
     (file,b)<-loadFile source >>= either error pure
     let desktop=insertText "unsaved " (addDocument (Just file) b (addDocument (Just secondFile) secondBuffer (initialDesktop (90,28))) {sideTree=Just (Sidebar root [] 0 0 20 False)})
+#ifndef mingw32_HOST_OS
+    -- Hold an actual filesystem read open while the provider sends more work.
+    -- The desktop must keep ticking, and a later write cannot bless user edits
+    -- made while its request was waiting behind that read.
+    let pipe=root </> "slow-source"
+    createNamedPipe pipe 0o600
+    opened<-newEmptyMVar
+    release<-newEmptyMVar
+    withAsync (bracket (Posix.openFd pipe Posix.ReadWrite Posix.defaultFileFlags >>= \fd -> Posix.setFdOption fd Posix.CloseOnExec True >> Posix.fdToHandle fd) hClose $ \handle -> do
+      putMVar opened ()
+      takeMVar release
+      BS.hPut handle "held read\n") $ \writer -> withConversation $ \runtime -> do
+        takeMVar opened
+        configured<-configure runtime ("yes"::T.Text) desktop
+        started<-prompt runtime "slow-files" configured
+        responsive<-await runtime "provider update behind held file read"
+          (T.isInfixOf "file requests sent" . conversationText) started
+        let edited=insertText "during read " (focusSource responsive)
+        composing<-send runtime "show" [] edited
+        let typed=fst (handleEvent (V.EvPaste "draft stays responsive") composing {composerFocused=True})
+        ticked<-timeout 1000000 (tickConversation runtime typed)
+        progressed<-maybe (error "Desktop tick blocked on ACP file read") pure ticked
+        check "desktop input progresses while ACP filesystem read is held"
+          (contents (composerBuffer progressed)=="draft stays responsive" && "during read " `T.isInfixOf` contents (documentBuffer (sourceDocument progressed)))
+        check "file results are not delivered out of request order" . (==Nothing) =<< response "slow-write"
+        check "held read has not been released" =<< isEmptyMVar release
+        putMVar release ()
+        wait writer
+        completed<-await runtime "held file prompt completion" ((=="Agent: end_turn").status) progressed
+        readResult<-response "slow-read"
+        writeResult<-response "slow-write"
+        check "held read replies after release" ((readResult >>= field "result" >>= field "content")==Just ("held read\n"::T.Text))
+        check "captured write rejects intervening buffer edits without approval"
+          (maybe False hasError writeResult && dialog completed==Nothing)
+        check "stale asynchronous write leaves disk intact" . (=="disk original\n") =<< BS.readFile source
+    cancelOpened<-newEmptyMVar
+    cancelRelease<-newEmptyMVar
+    withAsync (bracket (Posix.openFd pipe Posix.ReadWrite Posix.defaultFileFlags >>= \fd -> Posix.setFdOption fd Posix.CloseOnExec True >> Posix.fdToHandle fd) hClose $ \_ -> do
+      putMVar cancelOpened ()
+      takeMVar cancelRelease) $ \writer -> do
+        closed<-timeout 3000000 $ withConversation $ \runtime -> do
+          takeMVar cancelOpened
+          configured<-configure runtime ("yes"::T.Text) desktop
+          started<-prompt runtime "slow-cancel" configured
+          ready<-await runtime "held cancellation request" (T.isInfixOf "cancel file sent" . conversationText) started
+          result<-timeout 1000000 (send runtime "cancel" [] ready)
+          cancelled<-maybe (error "Cancellation joined blocked ACP read") pure result
+          _<-await runtime "held read cancellation acknowledgement" ((=="Agent: cancelled").status) cancelled
+          answer<-timeout 1000000 $ let loop=do value<-response "cancel-read"; maybe (threadDelay 1000 >> loop) pure value in loop
+          check "cancellation responds to outstanding capture without approval" (maybe False hasError answer)
+          shutdown<-prompt runtime "slow-shutdown" cancelled
+          _<-await runtime "held shutdown request" (T.isInfixOf "shutdown file sent" . conversationText) shutdown
+          pure ()
+        check "conversation shutdown owns and stops cancelled file workers" (closed==Just ())
+        putMVar cancelRelease ()
+        wait writer
+    let runSettings=settings </> "run.json"
+    createNamedPipe runSettings 0o600
+    settingsOpened<-newEmptyMVar
+    settingsRelease<-newEmptyMVar
+    withAsync (bracket (Posix.openFd runSettings Posix.ReadWrite Posix.defaultFileFlags >>= \fd -> Posix.setFdOption fd Posix.CloseOnExec True >> Posix.fdToHandle fd) hClose $ \handle -> do
+      putMVar settingsOpened ()
+      takeMVar settingsRelease
+      BS.hPut handle "{\"toolchain\":\"GHC\"}") $ \writer -> withConversation $ \runtime -> do
+        takeMVar settingsOpened
+        ready<-timeout 1000000 (tickConversation runtime desktop)
+        responsive<-maybe (error "Idle tick blocked on build settings read") pure ready
+        next<-timeout 1000000 (tickConversation runtime responsive)
+        check "repeated ticks do not join or duplicate blocked settings discovery" (maybe False (const True) next)
+        putMVar settingsRelease ()
+        wait writer
+        _<-await runtime "asynchronous persisted toolchain" ((==Just GHC).toolchain) responsive
+        pure ()
+    removeFile runSettings
+    -- Context reads happen before enqueueing a prompt. Holding one must leave
+    -- the draft editable, and cancelling it must never send the stale prompt.
+    withConversation $ \runtime -> do
+      configured<-configure runtime ("yes"::T.Text) desktop
+      connected<-prompt runtime "stream" configured >>= done runtime
+      let contextPath=root </> "thc.toml"
+      createNamedPipe contextPath 0o600
+      contextOpened<-newEmptyMVar
+      contextRelease<-newEmptyMVar
+      withAsync (bracket (Posix.openFd contextPath Posix.ReadWrite Posix.defaultFileFlags >>= \fd -> Posix.setFdOption fd Posix.CloseOnExec True >> Posix.fdToHandle fd) hClose $ \handle -> do
+        putMVar contextOpened ()
+        takeMVar contextRelease
+        BS.hPut handle "[editor.agent]\ncontext = 'late guidance'\n") $ \writer -> do
+          takeMVar contextOpened
+          fast<-timeout 1000000 (send runtime "send-draft" [] connected {composerBuffer=newBuffer "cancel before send"})
+          preparing<-maybe (error "Context preparation blocked send/input") pure fast
+          check "draft remains while context is preparing" (contents (composerBuffer preparing)=="cancel before send")
+          next<-timeout 1000000 (tickConversation runtime preparing)
+          responsive<-maybe (error "Context preparation blocked tick") pure next
+          let edited=responsive {composerBuffer=newBuffer "newer human draft"}
+          cancelled<-send runtime "cancel" [] edited
+          check "cancelling context preparation preserves newer draft" (contents (composerBuffer cancelled)=="newer human draft")
+          putMVar contextRelease ()
+          wait writer
+          removeFile contextPath
+          settled<-foldM (\state _ -> threadDelay 1000 >> tickConversation runtime state) cancelled [1..20::Int]
+          entries<-logged
+          check "cancelled context result never sends a prompt"
+            (not (any (T.isInfixOf "cancel before send" . json) entries) && contents (composerBuffer settled)=="newer human draft")
+#endif
     withConversation $ \runtime -> do
       configured<-configure runtime ("yes"::T.Text) desktop
       check "configuration saved to isolated XDG directory" =<< doesFileExist (settings </> "agents.json")
@@ -368,24 +478,24 @@ checks = bracket temporary removePathForcibly $ \root ->
         (snd (clickStatus "Steer" (multiline {agentSteering=True,agentReplying=True}))==[AgentAction "steer-draft" []])
       submitted<-uncurry (conversationEffects runtime fallback) (clickStatus "Query" (pasteDraft "stream" cancelled)) >>= done runtime . snd
       check "status Query posts draft into transcript and clears input" (T.null (contents (composerBuffer submitted)) && not (agentReplying submitted))
-      busyDraft<-prompt runtime "wait" submitted >>= await runtime "composer busy" agentReplying
+      busyDraft<-prompt runtime "wait" submitted >>= await runtime "composer busy" ((=="Agent is replying...").status)
       preserved<-tickConversation runtime (pasteDraft "stream" busyDraft)
       queued<-applyEvent (V.EvKey V.KEnter []) preserved
       check "Enter queues a query while replying and retains input during ticks"
         (contents (composerBuffer preserved)=="stream" && agentQueued queued==1 && T.null (contents (composerBuffer queued)) && "Enter Queue query" `T.isInfixOf` snapshot queued)
       drained<-uncurry (conversationEffects runtime fallback) (clickStatus "Cancel" queued) >>= done runtime . snd
       check "Cancel stops current response then queued query runs" (agentQueued drained==0 && not (agentReplying drained) && "Enter Query" `T.isInfixOf` snapshot drained)
-      steeringWait<-prompt runtime "wait" drained >>= await runtime "steering active" agentReplying
+      steeringWait<-prompt runtime "wait" drained >>= await runtime "steering active" ((=="Agent is replying...").status)
       check "steering hint requires negotiated support" (agentSteering steeringWait && "Ctrl+Enter Steer" `T.isInfixOf` snapshot steeringWait)
       refused<-applyEvent (V.EvKey V.KEnter [V.MCtrl]) (pasteDraft "direction" steeringWait {agentSteering=False})
       check "unsupported steering retains draft" (contents (composerBuffer refused)=="direction")
       steered<-applyEvent (V.EvKey V.KEnter [V.MCtrl]) (pasteDraft "direction" steeringWait) >>= await runtime "steering delivered" (not . agentReplying)
       check "steering uses adapter extension and clears submitted draft" . any ((==Just ("_session/steering"::T.Text)).field "method") =<< logged
       check "steering does not edit source or retain sent draft" (T.null (contents (composerBuffer steered)) && documentBuffer (sourceDocument steered)==documentBuffer (sourceDocument cancelled))
-      idleRace<-prompt runtime "wait" steered >>= await runtime "idle race active" agentReplying
+      idleRace<-prompt runtime "wait" steered >>= await runtime "idle race active" ((=="Agent is replying...").status)
       rejectedSteer<-send runtime "steer-draft" [] idleRace {composerBuffer=newBuffer "idle-race"} >>= await runtime "idle race response" (not . agentReplying)
       check "primary idle race leaves steering draft unsent" (contents (composerBuffer rejectedSteer)=="idle-race")
-      legacyWait<-prompt runtime "wait" rejectedSteer >>= await runtime "legacy steer active" agentReplying
+      legacyWait<-prompt runtime "wait" rejectedSteer >>= await runtime "legacy steer active" ((=="Agent is replying...").status)
       legacy<-send runtime "steer-draft" [] legacyWait {composerBuffer=newBuffer "legacy-steer"} >>= await runtime "legacy steering retires provider" (T.isInfixOf "provider stopped" . status)
       check "primary legacy detached steering stops safely and retains the draft" (contents (composerBuffer legacy)=="legacy-steer" && not (agentSteering legacy))
       restarted<-prompt runtime "stream" legacy >>= done runtime
@@ -464,14 +574,14 @@ checks = bracket temporary removePathForcibly $ \root ->
       messages<-logged
       let latest=last [params | entry<-messages,field "method" entry==Just ("session/prompt"::T.Text),Just params<-[field "params" entry::Maybe Value]]
       check "saved project context reaches the next query without reconnecting" ("Updated project guidance" `T.isInfixOf` json latest)
-      waiting<-prompt runtime "wait" updated >>= await runtime "context steering wait" agentReplying
+      waiting<-prompt runtime "wait" updated >>= await runtime "context steering wait" ((=="Agent is replying...").status)
       writeFile (root </> "thc.toml") "[editor.agent]\ncontext = 'Steering guidance marker'\n"
       steered<-send runtime "steer-draft" [] waiting {composerBuffer=newBuffer "direction"} >>= await runtime "context steering completion" (not . agentReplying)
       steeringLog<-logged
       let lastSteer=last [params | entry<-steeringLog,field "method" entry==Just ("_session/steering"::T.Text),Just params<-[field "params" entry::Maybe Value]]
       check "primary steering requests host-owned idle handling" ((field "_meta" lastSteer >>= field "steering" >>= field "idleBehavior")==Just ("promptRequired"::T.Text))
       check "steering receives saved context updates" ("Steering guidance marker" `T.isInfixOf` json lastSteer)
-      rejectionWait<-prompt runtime "wait" steered >>= await runtime "rejected context steering wait" agentReplying
+      rejectionWait<-prompt runtime "wait" steered >>= await runtime "rejected context steering wait" ((=="Agent is replying...").status)
       writeFile (root </> "thc.toml") "[editor.agent]\ncontext = 'Retry context marker'\n"
       pendingSteer<-send runtime "steer-draft" [] rejectionWait {composerBuffer=newBuffer "reject-context"}
       let childWaiting=(selectConversationView "fixture-child" "Child" pendingSteer) {composerBuffer=newBuffer "child draft",composerSelection=Selection 2 4}
@@ -490,8 +600,8 @@ checks = bracket temporary removePathForcibly $ \root ->
       let retryPrompt=last [params | entry<-retryLog,field "method" entry==Just ("session/prompt"::T.Text),Just params<-[field "params" entry::Maybe Value]]
       check "rejected steering does not mark new context delivered" ("Retry context marker" `T.isInfixOf` json retryPrompt)
       writeFile (root </> "thc.toml") "[broken\n"
-      failed<-prompt runtime "stream" afterRejection
-      check "invalid context retains query for repair without sending" (not (agentReplying failed) && contents (composerBuffer failed)=="stream")
+      failed<-prompt runtime "stream" afterRejection >>= await runtime "invalid context preparation" (\d -> not (agentReplying d) && "TOML" `T.isInfixOf` status d)
+      check "invalid context preserves an existing draft without sending" (not (agentReplying failed) && contents (composerBuffer failed)==contents (composerBuffer afterRejection))
       writeFile (root </> "thc.toml") "[editor.agent]\ncontext = ''\n"
       _<-prompt runtime "stream" failed >>= done runtime
       pure ()
@@ -624,6 +734,16 @@ providerScript=unlines
   , "      serial+=1; call('permission-'+str(serial),'session/request_permission',{'toolCall':{'title':'Fixture action'},'options':[{'optionId':'allow','name':'Allow once','kind':'allow_once'},{'optionId':'deny','name':'Reject','kind':'reject_once'}]})"
   , "    elif scenario=='write':"
   , "      serial+=1; call('read-'+str(serial),'fs/read_text_file',{'path':os.environ['THC_SOURCE']})"
+  , "    elif scenario=='slow-shutdown':"
+  , "      call('shutdown-read','fs/read_text_file',{'path':os.path.join(os.path.dirname(os.environ['THC_SOURCE']),'slow-source')})"
+  , "      update({'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'shutdown file sent'}})"
+  , "    elif scenario=='slow-cancel':"
+  , "      call('cancel-read','fs/read_text_file',{'path':os.path.join(os.path.dirname(os.environ['THC_SOURCE']),'slow-source')})"
+  , "      update({'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'cancel file sent'}})"
+  , "    elif scenario=='slow-files':"
+  , "      call('slow-read','fs/read_text_file',{'path':os.path.join(os.path.dirname(os.environ['THC_SOURCE']),'slow-source')})"
+  , "      call('slow-write','fs/write_text_file',{'path':os.environ['THC_SOURCE'],'content':'must not overwrite'})"
+  , "      update({'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'file requests sent'}})"
   , "    elif scenario=='write-two': call('two-read-a','fs/read_text_file',{'path':os.environ['THC_SOURCE']})"
   , "    elif scenario=='wait': update({'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'waiting for cancellation'}})"
   , "    elif scenario=='disconnect': sys.exit(0)"
@@ -636,7 +756,8 @@ providerScript=unlines
   , "        command=\"import sys,time;print('0123456789',end='',flush=True);time.sleep(0.1);sys.exit(9)\" if scenario=='terminal' else (\"open('should-not-exist','w').close()\" if scenario=='terminal-reject' else 'import time;time.sleep(30)')"
   , "      call('terminal-create-'+str(terminal_serial),'terminal/create',{'command':executable,'args':['-c',command],'outputByteLimit':8})"
   , "  elif method is None and isinstance(ident,str):"
-  , "    if ident=='two-read-a': call('two-read-b','fs/read_text_file',{'path':os.environ['THC_SECOND']})"
+  , "    if ident=='slow-write': finish()"
+  , "    elif ident=='two-read-a': call('two-read-b','fs/read_text_file',{'path':os.environ['THC_SECOND']})"
   , "    elif ident=='two-read-b': call('two-write-a','fs/write_text_file',{'path':os.environ['THC_SOURCE'],'content':'first approved\\n'})"
   , "    elif ident=='two-write-a': call('two-write-b','fs/write_text_file',{'path':os.environ['THC_SECOND'],'content':'should be rejected\\n'})"
   , "    elif ident=='two-write-b': finish()"

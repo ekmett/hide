@@ -98,6 +98,13 @@ copying across bubbles adds `User:` and `Bot:` labels. Bubble borders and timest
 separators are excluded. **Tools > Copy raw conversation** copies the original
 Markdown instead. Pauses of five minutes or more get a local timestamp separator.
 
+Right-click a fenced `sh`, `bash`, `zsh` or `shell` code block in a conversation
+or Help and choose **Execute in terminal** to run the whole block in the current
+project directory. The terminal shows output and accepts keyboard input and
+**Ctrl+C**. Execution uses the original code, including tabs and line breaks,
+regardless of display wrapping. `console` and `shellsession` examples containing
+prompts or captured output are display-only. Empty blocks report an error.
+
 Replies use CommonMark, including highlighted fenced code, lists and tables.
 Tables wrap to the available width and become labeled cells when columns no
 longer fit. Tool calls appear as compact chevron rows. Click one to expand its

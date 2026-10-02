@@ -2,14 +2,14 @@
 module THC.Edit.Conversation (ConversationState, conversationServices, conversationAgents, withConversationAt, chatTools, chatToolNames, chatTool, withConversation, conversationEffects, tickConversation, parseLaunch, renderReply, pauseLabel, renderTimestamp) where
 
 import Prelude hiding (reads)
-import Control.Exception (IOException, bracket, try, onException, mask)
+import Control.Exception (IOException, bracket, try, onException, mask, mask_)
 #ifdef WITH_WINDOW
 import Control.Concurrent (forkIO)
 import System.Process (createProcess, proc, waitForProcess)
 import System.Environment (getExecutablePath)
 #endif
 import THC.Edit.Session (SessionRecord(..))
-import Control.Concurrent.Async (Async, async, cancel, poll)
+import Control.Concurrent.Async (Async, async, cancel, poll, wait, waitCatch)
 import Control.Concurrent.MVar (MVar, newEmptyMVar, readMVar, tryPutMVar, isEmptyMVar)
 import Control.Monad (foldM, filterM, forM, forM_, void, when, unless)
 import Data.Aeson
@@ -27,7 +27,7 @@ import Data.Maybe (fromMaybe, mapMaybe, isNothing, listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import System.Directory (XdgDirectory(..), getXdgDirectory, createDirectoryIfMissing, canonicalizePath, getCurrentDirectory, getModificationTime, renameFile, removeFile)
+import System.Directory (XdgDirectory(..), getXdgDirectory, createDirectoryIfMissing, canonicalizePath, getCurrentDirectory, renameFile, removeFile)
 import System.FilePath ((</>), takeDirectory, isAbsolute, makeRelative, splitDirectories)
 import Data.Text.Encoding.Error (lenientDecode)
 import qualified THC.Edit.Terminal as Terminal
@@ -39,7 +39,8 @@ import System.Info (os)
 import System.IO (openBinaryTempFile, hClose)
 import Text.Read (readMaybe)
 import qualified THC.Edit.ACP as A
-import THC.Edit.GuestAccess (sensitiveLabel)
+import THC.Edit.GuestAccess (sensitiveLabel, protectedPath, protectedBuffer)
+import THC.Edit.Files (filePath)
 import THC.Edit.MCPPermissions (permissionConfigPath, projectConfigPath, readAgentContextAt, writeAgentContextAt, readAgentContexts)
 import qualified THC.Edit.AgentRuntime as AR
 import qualified THC.Edit.AgentHub as AH
@@ -47,7 +48,7 @@ import qualified THC.Edit.AgentACP as AP
 import THC.Edit.Session (checkpointPath)
 import THC.Edit.AgentFiles
 import THC.Edit.Buffer
-import THC.Edit.Markdown (renderMarkdown)
+import THC.Edit.Markdown (renderMarkdownWithShellBlocks)
 import THC.Edit.Model hiding (prompt)
 import System.Environment (lookupEnv)
 import THC.Edit.Syntax (Style(..), bubbleTile)
@@ -59,6 +60,9 @@ data Record = Reply Text Text | Activity Text Value [Value] Bool | Pause Text de
 activity :: Text -> Value -> Record
 activity ident value=Activity ident value [value] False
 data Approval = ChildPermission AH.AgentId AP.ACPPermission (MVar (Maybe Text)) | Permission Value [(Text,Text)] Value | Write Value Snapshot Text | Execute Value Terminal.TerminalConfig Int
+
+data FileRequest = ReadFile Int (Maybe Int) | WriteFile Text
+data FileCapture = FileCapture Value FileRequest Desktop (Async (Either Text Snapshot))
 
 data State = State
   { provider :: A.Launch, connection :: Maybe A.Client, session :: Maybe Text, project :: FilePath
@@ -81,7 +85,11 @@ data State = State
   , childControls :: M.Map Text (Maybe Text,Async (Either Text ()))
   , childCancels :: M.Map Text (Async (Either Text ()))
   , compilerDiscovery :: Maybe (Async [Compilers.Compiler])
-  , buildSettingsCache :: Maybe (Maybe UTCTime,Toolchain)
+  , fileCaptures :: [FileCapture], retiringRequests :: [(Int,Async ())]
+  , promptPreparation :: Maybe (Bool,Text,Async (Either Text ([Value],Value)))
+  , buildSettingsCache :: Maybe Toolchain, buildSettingsVersion :: Int
+  , buildSettingsWorker :: Maybe (Int,Async Toolchain), buildSettingsChecked :: Maybe UTCTime
+  , shellLaunches :: [Async (Either Text C.PreparedConsole)]
   , resumeRecordPath :: FilePath
   }
 data ConversationState = ConversationState FilePath (IORef State) C.Consoles Jobs.BuildJobs AR.AgentRuntime
@@ -111,7 +119,7 @@ withConversationAt root action = C.withConsoles $ \consoles -> Jobs.withBuildJob
     , approvals=[],presented=Nothing,deferredApproval=False,nextApproval=1,queuedQueries=[]
     , ownedTerminals=S.empty,terminalWaiters=M.empty,lastMessageAt=Nothing
     , lastRender=(0,Nothing,[]),lastSession=remembered,waitingQuestion=Nothing,lastQuestion=Nothing
-    , deliveredContext=Nothing,compilerDiscovery=Nothing,buildSettingsCache=Nothing,resumeRecordPath=resumePath,directoryAgents=[],agentDelivery=Nothing
+    , deliveredContext=Nothing,compilerDiscovery=Nothing,fileCaptures=[],retiringRequests=[],promptPreparation=Nothing,buildSettingsCache=Nothing,buildSettingsVersion=0,buildSettingsWorker=Nothing,buildSettingsChecked=Nothing,resumeRecordPath=resumePath,shellLaunches=[],directoryAgents=[],agentDelivery=Nothing
     , agentInitialized=Null,agentConfig=Null,streamTails=M.empty,lastAgentSync=Nothing,childRecords=M.empty,childRender=Nothing,childCancels=M.empty,childControls=M.empty,expandedToolRuns=S.empty }
   AR.withAgentRuntime root (provider <$> readIORef ref) $ \agents ->
     bracket (pure (ConversationState directory ref consoles jobs agents)) closeConversation action
@@ -129,9 +137,17 @@ closeConversation (ConversationState _ ref _ _ _) = do
   forM_ (waitingQuestion s) $ \(_,reply)->void (tryPutMVar reply (Left "Editor session closed."))
   finishAgentDelivery ref (Left "Editor session closed.")
   mapM_ denyChild (map snd (approvals s))
+  mapM_ (cancel . snd) (buildSettingsWorker s)
+  mapM_ (\(_,_,worker) -> cancel worker) (promptPreparation s)
   mapM_ cancel (compilerDiscovery s)
+  mapM_ (\(FileCapture _ _ _ worker) -> cancel worker) (fileCaptures s)
+  mapM_ (wait . snd) (retiringRequests s)
   mapM_ cancel (childCancels s)
   mapM_ (cancel . snd) (childControls s)
+  forM_ (shellLaunches s) $ \worker -> do
+    cancel worker
+    result<-waitCatch worker
+    case result of Right (Right prepared)->C.closePreparedConsole prepared; _->pure ()
   mapM_ A.stopClient (connection s)
 
 launchValue :: A.Launch -> Value
@@ -275,6 +291,20 @@ perform (ConversationState _ ref _ _ _) "toggle-tool-run" [ident] d=do
       records=if T.null target then transcript next else M.findWithDefault [] target (childRecords next)
   writeIORef ref next
   pure (keepConversationPosition d (paintView target False next {transcript=records} d))
+perform (ConversationState _ ref _ _ _) "execute-shell-block" [bidText,startText,endText,dialect,body] d
+  | Just bid<-readMaybe (T.unpack bidText), Just start<-readMaybe (T.unpack startText), Just end<-readMaybe (T.unpack endText),
+    Just doc<-M.lookup bid (buffers d), (start,end,dialect,body) `elem` documentShellBlocks doc =
+      if not Terminal.terminalAvailable then pure (message "Cannot execute shell block" ["Embedded terminals are unavailable in this build."] d)
+      else if T.null (T.strip body) then pure (message "Cannot execute shell block" ["This shell block is empty."] d)
+      else if dialect `notElem` ["sh","bash","zsh"] then pure (message "Cannot execute shell block" ["This shell dialect is unavailable."] d)
+      else mask_ $ do
+        worker<-async $ mask_ $ do
+          root<-B.resolveBuildRoot d
+          C.prepareConsole [] (Terminal.TerminalConfig (T.unpack dialect) ["-c",T.unpack body] [] root 80 24) (1024*1024)
+        modifyIORef' ref (\state->state {shellLaunches=shellLaunches state++[worker]})
+        pure d {status="Starting shell block in terminal..."}
+perform _ "execute-shell-block" _ d = pure (message "Cannot execute shell block" ["The code block changed; open its context menu again."] d)
+
 perform runtime action values d
   | action=="show" = performPrimary runtime action values (selectConversationView "" "Primary" d)
   | not (T.null (conversationTarget d)) && action `elem` ["send","send-draft","steer-draft","cancel","copy","toggle-activity","new","resume","load","set-config"] = performChild runtime action values d
@@ -363,7 +393,8 @@ performPrimary runtime@(ConversationState directory ref consoles jobs _) action 
           previous=M.findWithDefault defaults choice (buildChoices saved)
           chosen=mergeSettings previous (object (["toolchain" .= choice]++["command" .= command | command<-commands]))
       result<-persist (directory </> "run.json") (rememberBuildChoices saved chosen)
-      modifyIORef' ref (\state -> state {buildSettingsCache=Nothing})
+      when (result==Right ()) $ modifyIORef' ref (\state -> state
+        {buildSettingsCache=Just selected,buildSettingsVersion=buildSettingsVersion state+1,buildSettingsChecked=Nothing})
       pure $ either (\err -> d {status=err}) (const d {toolchain=Just selected,status=choice<>" selected. F9 builds; Ctrl+F9 runs."}) result
     ("run-options",_) -> runTarget directory consoles jobs Nothing d
     ("run-config",_:settings) -> case B.parseBuildConfig settings of
@@ -372,7 +403,8 @@ performPrimary runtime@(ConversationState directory ref consoles jobs _) action 
         root<-B.resolveBuildRoot d
         saved<-readRunSettings directory
         result<-persist (directory </> "run.json") (rememberBuildChoices saved (B.buildConfigValue root config))
-        modifyIORef' ref (\state -> state {buildSettingsCache=Nothing})
+        when (result==Right ()) $ modifyIORef' ref (\state -> state
+          {buildSettingsCache=Just (B.buildToolchain config),buildSettingsVersion=buildSettingsVersion state+1,buildSettingsChecked=Nothing})
         pure $ either (\err -> d {status=err}) (const d {toolchain=Just (B.buildToolchain config),status="Target saved. F9 builds; Ctrl+F9 runs."}) result
     ("terminal-input",[tid,text]) -> do
       result<-C.inputConsole consoles tid (TE.encodeUtf8 text)
@@ -397,8 +429,9 @@ performPrimary runtime@(ConversationState directory ref consoles jobs _) action 
             mapM_ (C.releaseConsole consoles) (S.toList (ownedTerminals s))
             finishAgentDelivery ref (Left "Agent configuration changed.")
             mapM_ denyChild (map snd (approvals s))
+            retired<-retireRequests ref
             mapM_ A.stopClient (connection s)
-            writeIORef ref s {provider=config,connection=Nothing,session=Nothing,agentDelivery=Nothing,streamTails=M.empty,pending=M.empty,queuedPrompt=Nothing,queuedQueries=[],approvals=[],presented=Nothing,deferredApproval=False,ownedTerminals=S.empty,terminalWaiters=M.empty}
+            writeIORef ref retired {provider=config,connection=Nothing,session=Nothing,agentDelivery=Nothing,streamTails=M.empty,pending=M.empty,queuedPrompt=Nothing,queuedQueries=[],approvals=[],presented=Nothing,deferredApproval=False,ownedTerminals=S.empty,terminalWaiters=M.empty}
             pure d {status="Agent configuration saved."}
     ("show",_) -> do
       modifyIORef' ref (\state -> state {deferredApproval=False})
@@ -420,7 +453,8 @@ performPrimary runtime@(ConversationState directory ref consoles jobs _) action 
           pure d {status="Updating conversation settings...",agentReplying=True}
       | otherwise -> pure d {status="This conversation setting is unavailable."}
     ("copy",_) -> pure d {clipboard=rawTranscript (transcript s),status="Raw conversation copied."}
-    ("send-draft",_) | any isSteering (M.elems (pending s)) -> pure d {status="Wait for the steering result before sending another message."}
+    ("send-draft",_) | steeringPending s -> pure d {status="Wait for the steering result before sending another message."}
+    ("send-draft",_) | queuedPrompt s==Just (contents (composerBuffer d)) -> pure d {status="Preparing the submitted draft..."}
     ("send-draft",_) | busy s, let text=contents (composerBuffer d), not (T.null (T.strip text)) -> do
       let next=s {queuedQueries=queuedQueries s++[text],transcript=transcript s++[Reply "You" text]}
       writeIORef ref next
@@ -428,18 +462,12 @@ performPrimary runtime@(ConversationState directory ref consoles jobs _) action 
     ("send-draft",_) | not (T.null (T.strip (contents (composerBuffer d)))) -> do
       next<-perform runtime "send" ["0",contents (composerBuffer d),"false","false","false"] d
       latest<-readIORef ref
-      pure (if isNothing (connection latest) || not (busy latest) then next else next {agentReplying=busy latest,composerBuffer=newBuffer "",composerSelection=Selection 0 0,composerFocused=True})
+      pure next {agentReplying=busy latest,composerFocused=True}
     ("steer-draft",_) | not (agentSteering d) -> pure d {status="This provider does not advertise steering support."}
     ("steer-draft",_) | Prompting `notElem` M.elems (pending s) -> pure d {status="No active turn to steer; use Enter to send the draft."}
-    ("steer-draft",_) | any isSteering (M.elems (pending s)) -> pure d {status="A steering request is already pending."}
-    ("steer-draft",_) | Just client<-connection s, Just sid<-session s, let text=contents (composerBuffer d), not (T.null (T.strip text)) -> do
-      prepared<-preparePrompt s text
-      case prepared of
-        Left err -> pure d {status=err}
-        Right (blocks,context) -> do
-          ident<-A.request client "_session/steering" (object ["sessionId" .= sid,"prompt" .= blocks,"_meta" .= object ["steering" .= object ["idleBehavior" .= ("promptRequired"::Text)]]])
-          writeIORef ref s {pending=M.insert ident (Steering text) (pending s),deliveredContext=Just context}
-          pure d {status="Steering request sent; draft kept until accepted."}
+    ("steer-draft",_) | steeringPending s -> pure d {status="A steering request is already pending."}
+    ("steer-draft",_) | let text=contents (composerBuffer d), not (T.null (T.strip text)) ->
+      beginPromptPreparation ref True text d
     ("send",_:prompt:selectionFlag:fileFlag:diagnosticFlag:_) | not (T.null (T.strip prompt)), not (busy s) -> do
       let context=contextText (selectionFlag=="true") (fileFlag=="true") (diagnosticFlag=="true") d
           full=prompt<>(if T.null context then "" else "\n\n"<>context)
@@ -457,13 +485,15 @@ performPrimary runtime@(ConversationState directory ref consoles jobs _) action 
       forM_ (connection s) $ \client -> do
         forM_ (session s) $ \sid -> A.notify client "session/cancel" (object ["sessionId" .= sid])
         mapM_ (cancelApproval client . snd) (filter (not . child) (approvals s))
-      writeIORef ref s {queuedPrompt=Nothing,approvals=retained,presented=if keepDialog then presented s else Nothing,deferredApproval=False}
+      retired<-retireRequests ref
+      writeIORef ref retired {queuedPrompt=Nothing,approvals=retained,presented=if keepDialog then presented s else Nothing,deferredApproval=False}
       pure (if keepDialog then d else dismissPermission d) {status="Cancellation requested."}
     ("new",_) | busy s -> pure d {status="Cancel the current reply before starting a new session."}
     ("new",_) -> do
       mapM_ (C.releaseConsole consoles) (S.toList (ownedTerminals s))
+      retired<-retireRequests ref
       mapM_ A.stopClient (connection s)
-      writeIORef ref s {connection=Nothing,session=Nothing,agentDelivery=Nothing,streamTails=M.empty,pending=M.empty,queuedPrompt=Nothing,queuedQueries=[],transcript=[],expandedToolRuns=S.filter ((/="").fst) (expandedToolRuns s),lastMessageAt=Nothing,reads=M.empty,approvals=[],presented=Nothing,deferredApproval=False,ownedTerminals=S.empty,terminalWaiters=M.empty}
+      writeIORef ref retired {connection=Nothing,session=Nothing,agentDelivery=Nothing,streamTails=M.empty,pending=M.empty,queuedPrompt=Nothing,queuedQueries=[],transcript=[],expandedToolRuns=S.filter ((/="").fst) (expandedToolRuns s),lastMessageAt=Nothing,reads=M.empty,approvals=[],presented=Nothing,deferredApproval=False,ownedTerminals=S.empty,terminalWaiters=M.empty}
       start runtime Nothing d
     ("resume",_) | busy s -> pure d {status="Cancel the current reply before resuming a session."}
     ("resume",_) -> pure d {dialog=Just (Dialog "Resume conversation" (AgentDialog "load")
@@ -471,8 +501,9 @@ performPrimary runtime@(ConversationState directory ref consoles jobs _) action 
       ["The provider must support loading or resuming sessions."])}
     ("load",_:sid:_) | not (T.null (T.strip sid)), not (busy s) -> do
       mapM_ (C.releaseConsole consoles) (S.toList (ownedTerminals s))
+      retired<-retireRequests ref
       mapM_ A.stopClient (connection s)
-      writeIORef ref s {connection=Nothing,session=Nothing,agentDelivery=Nothing,streamTails=M.empty,pending=M.empty,queuedPrompt=Nothing,queuedQueries=[],transcript=[],expandedToolRuns=S.filter ((/="").fst) (expandedToolRuns s),lastMessageAt=Nothing,reads=sourceSnapshots d,approvals=[],presented=Nothing,deferredApproval=False,ownedTerminals=S.empty,terminalWaiters=M.empty}
+      writeIORef ref retired {connection=Nothing,session=Nothing,agentDelivery=Nothing,streamTails=M.empty,pending=M.empty,queuedPrompt=Nothing,queuedQueries=[],transcript=[],expandedToolRuns=S.filter ((/="").fst) (expandedToolRuns s),lastMessageAt=Nothing,reads=sourceSnapshots d,approvals=[],presented=Nothing,deferredApproval=False,ownedTerminals=S.empty,terminalWaiters=M.empty}
       start runtime (Just (T.strip sid)) d
     _ | Just suffix<-T.stripPrefix "approval:" action, Just token<-readMaybe (T.unpack suffix) -> decide runtime token values d
     _ -> pure d
@@ -482,8 +513,11 @@ isSteering :: Phase -> Bool
 isSteering Steering{}=True
 isSteering _=False
 
+steeringPending :: State -> Bool
+steeringPending s=any isSteering (M.elems (pending s)) || maybe False (\(steering,_,_) -> steering) (promptPreparation s)
+
 busy :: State -> Bool
-busy s=not (M.null (pending s)) || queuedPrompt s/=Nothing
+busy s=not (M.null (pending s)) || queuedPrompt s/=Nothing || not (isNothing (promptPreparation s))
 
 start :: ConversationState -> Maybe Text -> Desktop -> IO Desktop
 start (ConversationState _ ref _ _ _) resume d = do
@@ -522,18 +556,48 @@ sendQueued :: ConversationState -> Desktop -> IO Desktop
 sendQueued (ConversationState _ ref _ _ _) d = do
   s<-readIORef ref
   case (connection s,session s,queuedPrompt s) of
-    (Just client,Just sid,Just prompt) -> do
-      prepared<-preparePrompt s prompt
-      case prepared of
-        Left err -> do
-          finishAgentDelivery ref (Left err)
-          modifyIORef' ref (\state -> state {queuedPrompt=Nothing})
-          pure (restorePrimaryDraft prompt d) {status=err,agentReplying=False}
-        Right (blocks,context) -> do
-          ident<-A.request client "session/prompt" (object ["sessionId" .= sid,"prompt" .= blocks])
-          writeIORef ref s {queuedPrompt=Nothing,pending=M.insert ident Prompting (pending s),deliveredContext=Just context}
-          pure d {status="Agent is replying...",agentReplying=True}
+    (Just _,Just _,Just prompt) -> beginPromptPreparation ref False prompt d
     _ -> pure d
+
+beginPromptPreparation :: IORef State -> Bool -> Text -> Desktop -> IO Desktop
+beginPromptPreparation ref steering text d = mask $ \restore -> do
+  s<-readIORef ref
+  if not (isNothing (promptPreparation s)) || not (null (retiringRequests s))
+    then pure d {status="Waiting for the previous agent request to stop."}
+    else do
+      worker<-async (restore (preparePrompt s text))
+      modifyIORef' ref (\state -> state {promptPreparation=Just (steering,text,worker)})
+      pure d {status="Preparing agent context...",agentReplying=True}
+
+pollPromptPreparation :: ConversationState -> Desktop -> IO Desktop
+pollPromptPreparation runtime@(ConversationState _ ref _ _ _) d = do
+  s<-readIORef ref
+  case promptPreparation s of
+    Nothing -> sendQueued runtime d
+    Just (steering,text,worker) -> do
+      result<-poll worker
+      case result of
+        Nothing -> pure d
+        Just outcome -> do
+          modifyIORef' ref (\state -> state {promptPreparation=Nothing})
+          let prepared=either (const (Left "Could not prepare agent context.")) id outcome
+          case (connection s,session s,prepared) of
+            (_,_,Left err) -> do
+              unless steering $ do
+                finishAgentDelivery ref (Left err)
+                modifyIORef' ref (\state -> state {queuedPrompt=Nothing})
+              pure (if steering then d else restoreEmptyPrimaryDraft text d) {status=err}
+            (Just client,Just sid,Right (blocks,context))
+              | steering && Prompting `notElem` M.elems (pending s) -> pure d {status="The turn ended while preparing steering; draft kept."}
+              | otherwise -> do
+                let method=if steering then "_session/steering" else "session/prompt"
+                    meta=["_meta" .= object ["steering" .= object ["idleBehavior" .= ("promptRequired"::Text)]] | steering]
+                ident<-A.request client method (object (["sessionId" .= sid,"prompt" .= blocks]++meta))
+                modifyIORef' ref (\state -> state {queuedPrompt=if steering then queuedPrompt state else Nothing,
+                  pending=M.insert ident (if steering then Steering text else Prompting) (pending state),deliveredContext=Just context})
+                pure (if steering then d else clearSubmittedDraft "" text d)
+                  {status=if steering then "Steering request sent; draft kept until accepted." else "Agent is replying...",agentReplying=True}
+            _ -> pure d
 
 -- Supply guidance once per connection and again when its saved value changes.
 -- A separate text block preserves the user's query and the visible transcript.
@@ -551,21 +615,32 @@ preparePrompt state query=do
         extra=[guidance | deliveredContext state/=Just context]++[catalog | deliveredContext state==Nothing]
     pure (map block (query:extra),context)
 
+-- The badge uses only the global toolchain field, so it need not resolve a
+-- project or load its targets. One worker refreshes at most once per second.
+-- Explicit saves advance the version so an older read cannot undo that choice.
+pollBuildSettings :: FilePath -> IORef State -> Desktop -> IO Desktop
+pollBuildSettings directory ref d = mask $ \restore -> do
+  now<-getCurrentTime
+  s<-readIORef ref
+  forM_ (buildSettingsWorker s) $ \(version,worker) -> do
+    result<-poll worker
+    forM_ result $ \outcome -> modifyIORef' ref (\state -> state
+      {buildSettingsWorker=Nothing,
+       buildSettingsCache=if version==buildSettingsVersion state
+         then either (const (buildSettingsCache state)) Just outcome else buildSettingsCache state})
+  current<-readIORef ref
+  when (isNothing (buildSettingsWorker current) && maybe True (\checked -> diffUTCTime now checked>=1) (buildSettingsChecked current)) $ do
+    worker<-async (restore (B.buildToolchain <$> B.loadBuildConfig directory ""))
+    modifyIORef' ref (\state -> state {buildSettingsWorker=Just (buildSettingsVersion state,worker),buildSettingsChecked=Just now})
+  latest<-readIORef ref
+  pure d {toolchain=Just (fromMaybe (fromMaybe THC (toolchain d)) (buildSettingsCache latest))}
+
 -- Docs: docs/site/screenshots/conversation.png (docs/conversations.md and the site front page).
 -- Refresh the live capture when message bubbles, tool groups, model controls or composer change.
 tickConversation :: ConversationState -> Desktop -> IO Desktop
 tickConversation runtime@(ConversationState directory ref consoles jobs _) original = do
-  stamp<-either (const Nothing) Just <$> (try (getModificationTime (directory </> "run.json")) :: IO (Either IOException UTCTime))
-  cached<-buildSettingsCache <$> readIORef ref
-  selected<-case cached of
-    Just (previous,choice) | previous==stamp -> pure choice
-    _ -> do
-      root<-B.resolveBuildRoot original
-      config<-B.loadBuildConfig directory root
-      let choice=B.buildToolchain config
-      modifyIORef' ref (\state -> state {buildSettingsCache=Just (stamp,choice)})
-      pure choice
-  let loaded=original {toolchain=Just selected}
+  launched<-pollShellLaunches runtime original
+  loaded<-pollBuildSettings directory ref launched
   menuReady<-pollCompilerMenu runtime loaded
   fresh<-pruneChildApprovals runtime menuReady
   initial<-drainConversationAgents runtime fresh
@@ -579,7 +654,9 @@ tickConversation runtime@(ConversationState directory ref consoles jobs _) origi
   flushTerminalWaiters runtime
   s<-readIORef ref
   events<-maybe (pure []) A.pollEvents (connection s)
-  updated<-foldM (receive runtime) d events
+  received<-foldM (receive runtime) d events
+  captured<-pollFileCaptures runtime received
+  updated<-pollPromptPreparation runtime captured
   afterEvents<-readIORef ref
   advanced<-case queuedQueries afterEvents of
     text:rest | not (busy afterEvents), not (isNothing (connection afterEvents)), session afterEvents/=Nothing -> do
@@ -607,6 +684,19 @@ tickConversation runtime@(ConversationState directory ref consoles jobs _) origi
   notice<-AR.runtimeNotice (conversationAgents runtime)
   pure (maybe shown (\text -> shown {status=text}) notice)
 
+-- Acquisition owns each child until the UI adopts it. Session teardown cancels
+-- pending launches and closes any completed child that has not been adopted.
+pollShellLaunches :: ConversationState -> Desktop -> IO Desktop
+pollShellLaunches (ConversationState _ ref consoles _ _) original = mask_ $ do
+  state<-readIORef ref
+  results<-mapM (\worker->(worker,) <$> poll worker) (shellLaunches state)
+  modifyIORef' ref (\current->current {shellLaunches=[worker | (worker,Nothing)<-results]})
+  foldM adopt original [result | (_,Just result)<-results]
+  where
+    adopt d (Right (Right prepared)) = snd <$> C.adoptConsole consoles prepared d `onException` C.closePreparedConsole prepared
+    adopt d (Right (Left err)) = pure (message "Cannot execute shell block" (wrapMessage err) d)
+    adopt d (Left _) = pure (message "Cannot execute shell block" ["Terminal launch failed."] d)
+
 receive :: ConversationState -> Desktop -> A.Event -> IO Desktop
 receive runtime@(ConversationState _ ref consoles _ _) d event = do
   s<-readIORef ref
@@ -617,7 +707,8 @@ receive runtime@(ConversationState _ ref consoles _ _) d event = do
       AR.failPendingPrimary (conversationAgents runtime) "Agent disconnected."
       mapM_ denyChild (map snd (approvals s))
       mapM_ (C.releaseConsole consoles) (S.toList (ownedTerminals s))
-      writeIORef ref s {connection=Nothing,session=Nothing,agentDelivery=Nothing,streamTails=M.empty,pending=M.empty,queuedPrompt=Nothing,queuedQueries=[],approvals=[],presented=Nothing,deferredApproval=False,ownedTerminals=S.empty,terminalWaiters=M.empty,
+      retired<-retireRequests ref
+      writeIORef ref retired {connection=Nothing,session=Nothing,agentDelivery=Nothing,streamTails=M.empty,pending=M.empty,queuedPrompt=Nothing,queuedQueries=[],approvals=[],presented=Nothing,deferredApproval=False,ownedTerminals=S.empty,terminalWaiters=M.empty,
         transcript=transcript s++[activity "Connection closed" (object ["message" .= redact reason])]}
       pure (dismissPermission d) {status="Agent disconnected.",agentSteering=False}
     A.Response ident result -> do
@@ -765,32 +856,11 @@ incoming runtime@(ConversationState _ ref consoles _ _) client ident method para
         pure d
     "fs/read_text_file" -> case parseMaybe (withObject "read" $ \o -> (,,) <$> o .: "path" <*> o .:? "line" .!= (1::Int) <*> o .:? "limit") params of
       Nothing -> bad "Expected a path and optional integer line and limit."
-      Just (path,line,limit) -> do
-        captured<-captureFile (project s) path d
-        case captured of
-          Left err -> bad err
-          Right snap -> do
-            if line<1 || maybe False (<0) limit then bad "Invalid line range."
-            else do
-              let content=snapshotText snap
-                  buffer=newBuffer content
-                  startOffset=if line>bufferLineCount buffer then T.length content else bufferLineOffset buffer (line-1)
-                  endOffset=case limit of
-                    Nothing -> T.length content
-                    Just count | count>=bufferLineCount buffer-line+1 -> T.length content
-                               | otherwise -> bufferLineOffset buffer (line-1+count)
-                  chosen=T.take (max 0 (endOffset-startOffset)) (T.drop startOffset content)
-              modifyIORef' ref (\state -> state {reads=M.insert (snapshotPath snap) snap (reads state)})
-              A.respond client ident (Right (object ["content" .= chosen])); pure d
+      Just (path,line,limit)
+        | line<1 || maybe False (<0) limit -> bad "Invalid line range."
+        | otherwise -> queueFileCapture ref client ident (ReadFile line limit) (project s) path d
     "fs/write_text_file" -> case (field "path" params,field "content" params) of
-      (Just path,Just content) -> do
-        captured<-captureFile (project s) path d
-        case captured of
-          Left err -> bad err
-          Right current -> do
-            let snapshot=M.findWithDefault current (snapshotPath current) (reads s)
-            enqueueApproval runtime (Write ident snapshot content)
-            pure d
+      (Just path,Just content) -> queueFileCapture ref client ident (WriteFile content) (project s) path d
       _ -> bad "Expected path and content."
     "terminal/create" | Terminal.terminalAvailable -> case parseTerminal (project s) params of
       Left err -> bad err
@@ -827,6 +897,73 @@ incoming runtime@(ConversationState _ ref consoles _ _) client ident method para
         Just tid | S.member tid (ownedTerminals state) -> action tid
         _ -> bad "Unknown terminal ID for this session."
     replyUnit result=A.respond client ident (either (Left . failure) (const (Right (object []))) result) >> pure d
+
+-- Bound retained desktop snapshots and filesystem workers together, including
+-- cancellation still waiting on the OS. Completion stays in request order;
+-- workers never modify conversation state or grant an approval.
+queueFileCapture :: IORef State -> A.Client -> Value -> FileRequest -> FilePath -> FilePath -> Desktop -> IO Desktop
+queueFileCapture ref client ident request root path d = mask $ \restore -> do
+  s<-readIORef ref
+  if length (fileCaptures s)+sum (map fst (retiringRequests s))>=4
+    then A.respond client ident (Left (failure "Too many pending file requests."))
+    else do
+      worker<-async (restore (captureFile root path d))
+      modifyIORef' ref (\state -> state {fileCaptures=fileCaptures state++[FileCapture ident request d worker]})
+  pure d
+
+retireRequests :: IORef State -> IO State
+retireRequests ref = mask $ \restore -> do
+  s<-readIORef ref
+  let captures=fileCaptures s
+      workers=[cancel worker | FileCapture _ _ _ worker<-captures]++[cancel worker | (_,_,worker)<-maybe [] pure (promptPreparation s)]
+  if null workers then pure s else do
+    forM_ (connection s) $ \client -> forM_ captures $ \(FileCapture ident _ _ _) ->
+      A.respond client ident (Left (failure "File request cancelled."))
+    reaper<-async (restore (sequence_ workers))
+    let next=s {fileCaptures=[],promptPreparation=Nothing,retiringRequests=retiringRequests s++[(length workers,reaper)]}
+    writeIORef ref next
+    pure next
+
+pollFileCaptures :: ConversationState -> Desktop -> IO Desktop
+pollFileCaptures runtime@(ConversationState _ ref _ _ _) d = do
+  s<-readIORef ref
+  retiring<-filterM (fmap isNothing . poll . snd) (retiringRequests s)
+  modifyIORef' ref (\state -> state {retiringRequests=retiring})
+  drain
+  pure d
+  where
+    drain=do
+      s<-readIORef ref
+      case (connection s,fileCaptures s) of
+        (Just client,FileCapture ident request before worker:rest) -> do
+          ready<-poll worker
+          case ready of
+            Nothing -> pure ()
+            Just result -> do
+              modifyIORef' ref (\state -> state {fileCaptures=rest})
+              case either (const (Left "File request failed.")) id result of
+                Left err -> A.respond client ident (Left (failure err))
+                Right snap
+                  | protectedPath d (snapshotPath snap) || any (\(bid,doc) ->
+                      fmap filePath (documentFile doc)==Just (snapshotPath snap) && (protectedBuffer d bid || not (textBuffer (documentBuffer doc)))) (M.toList (buffers d)) ->
+                      A.respond client ident (Left (failure "Agent authority files require human input."))
+                  | M.lookup (snapshotPath snap) (sourceSnapshots before)/=M.lookup (snapshotPath snap) (sourceSnapshots d) ->
+                      A.respond client ident (Left (failure "File changed in the editor during capture; request a fresh read."))
+                  | otherwise -> case request of
+                      ReadFile line limit -> do
+                        let content=snapshotText snap
+                            buffer=newBuffer content
+                            startOffset=if line>bufferLineCount buffer then T.length content else bufferLineOffset buffer (line-1)
+                            endOffset=case limit of
+                              Nothing -> T.length content
+                              Just count | count>=bufferLineCount buffer-line+1 -> T.length content
+                                         | otherwise -> bufferLineOffset buffer (line-1+count)
+                            chosen=T.take (max 0 (endOffset-startOffset)) (T.drop startOffset content)
+                        modifyIORef' ref (\state -> state {reads=M.insert (snapshotPath snap) snap (reads state)})
+                        A.respond client ident (Right (object ["content" .= chosen]))
+                      WriteFile content -> enqueueApproval runtime (Write ident (M.findWithDefault snap (snapshotPath snap) (reads s)) content)
+              drain
+        _ -> pure ()
 
 permissionOptions :: Value -> [(Text,Text)]
 permissionOptions params=map (\(_,ident,name)->(ident,name)) . sortOn (\(kind,_,_)->not ("reject" `T.isPrefixOf` kind)) $
@@ -938,11 +1075,12 @@ paintView target force s original
       width=conversationWidth d
       header=if T.null target then "Session: "<>fromMaybe "not connected" (session s)<>"\n" else "No messages yet.\n"
       records=zip [0..] (transcript s)
-      chunks=if null records then [(plain Comment header,Nothing) | isNothing (chatQuestion d)] else renderRecords width records
+      chunks=if null records then [(plain Comment header,Nothing,[]) | isNothing (chatQuestion d)] else renderRecords width records
       questionChunks=maybe [] (renderQuestion width (length records)) (chatQuestion d)
-      allChunks=chunks++[ (plain Plain "\n\n",Nothing) | not (null chunks) && not (null questionChunks)]++questionChunks
-      styled=concatMap fst allChunks
-      (_,actions)=foldl (\(offset,found) (cells,action)->(offset+length cells,found++maybe [] (\(name,values)->[(offset,offset+length cells,name,values)]) action)) (0,[]) allChunks
+      allChunks=chunks++[ (plain Plain "\n\n",Nothing,[]) | not (null chunks) && not (null questionChunks)]++questionChunks
+      styled=concatMap (\(cells,_,_)->cells) allChunks
+      (_,shellBlocks)=foldl (\(offset,found) (cells,_,blocks)->(offset+length cells,found++[(offset+a,offset+b,dialect,body) | (a,b,dialect,body)<-blocks])) (0,[]) allChunks
+      (_,actions)=foldl (\(offset,found) (cells,action,_)->(offset+length cells,found++maybe [] (\(name,values)->[(offset,offset+length cells,name,values)]) action)) (0,[]) allChunks
       inputOffset=case [a+7 | (a,_,action,_)<-actions,action=="question-input"] of offset:_->Just offset; _->Nothing
       text=T.pack (map fst styled)
       questionRow=do
@@ -970,7 +1108,7 @@ paintView target force s original
                          selection=Selection (bounded (anchor (selection w))) (bounded (caret (selection w)))}
       visible=target==conversationTarget original
       view=M.findWithDefault (ConversationView bid "Primary" (newBuffer "") (Selection 0 0) (0,0) (Selection 0 0)) target (conversationViews opened)
-      colored=opened {conversationViews=M.insert target view {conversationBufferId=bid,conversationReplySelection=let Selection a c=conversationReplySelection view in Selection (min (T.length text) a) (min (T.length text) c)} (conversationViews opened),chatQuestion=chatQuestion original,chatActions=if visible then actions else chatActions original,chatInputOffset=if visible then inputOffset else chatInputOffset original,buffers=M.adjust (\doc -> doc {documentHighlight=styled,documentCursorVisible=False}) bid (buffers opened),windows=map adjust (windows opened)}
+      colored=opened {conversationViews=M.insert target view {conversationBufferId=bid,conversationReplySelection=let Selection a c=conversationReplySelection view in Selection (min (T.length text) a) (min (T.length text) c)} (conversationViews opened),chatQuestion=chatQuestion original,chatActions=if visible then actions else chatActions original,chatInputOffset=if visible then inputOffset else chatInputOffset original,buffers=M.adjust (\doc -> doc {documentHighlight=styled,documentCursorVisible=False,documentShellBlocks=shellBlocks}) bid (buffers opened),windows=map adjust (windows opened)}
       focused=case find ((==bid).bufferId) (windows colored) of Just w | force && visible -> focusWindow (windowId w) colored {composerFocused=True}; _ -> colored
     in focused
   where
@@ -983,7 +1121,7 @@ paintView target force s original
       where
         continue _ []=[]
         continue previous remaining@(next:_)=
-          [(plain Plain (if sameSpeaker (snd previous) (snd next) then "\n" else "\n\n"),Nothing)]++renderRecords width remaining
+          [(plain Plain (if sameSpeaker (snd previous) (snd next) then "\n" else "\n\n"),Nothing,[])]++renderRecords width remaining
     renderRun width calls=case calls of
       (_,Activity ident _ _ _):_ ->
         let expanded=S.member (target,ident) (expandedToolRuns s)
@@ -993,28 +1131,32 @@ paintView target force s original
             count n label=[T.pack (show n)<>label | n>0]
             summary=T.intercalate " · " (T.pack (show (length calls))<>" tool calls":count running " running"++count failed " failed"++[T.intercalate ", " (take 3 titles)])
             heading=clipCells width ((if expanded then "▾▾ " else "▸▸ ")<>T.unwords (T.words summary))
-        in [(plain Pragma heading,Just ("toggle-tool-run",[ident]))]++
-           (if expanded then concatMap (\call->(plain Plain "\n  ",Nothing):renderRecord (max 1 (width-2)) call) calls else [])
+        in [(plain Pragma heading,Just ("toggle-tool-run",[ident]),[])]++
+           (if expanded then concatMap (\call->(plain Plain "\n  ",Nothing,[]):renderRecord (max 1 (width-2)) call) calls else [])
       _ -> []
     sameSpeaker (Reply a _) (Reply b _)=a==b
     sameSpeaker _ _=False
     renderRecord width (recordId,record)=case record of
-      Pause label -> [(renderTimestamp width label,Nothing)]
-      Reply role text -> [(map (\(c,style) -> (c,case style of BubbleText _ outgoing base -> BubbleText recordId outgoing base; _ -> style)) (renderReply (videoMode d/=Nothing) width (role=="You") text),Nothing)]
+      Pause label -> [(renderTimestamp width label,Nothing,[])]
+      Reply role text -> [replyChunk width recordId (role=="You") text]
       Activity ident value history expanded ->
         let title=T.unwords (T.words ("["<>fromMaybe "activity" (field "status" value)<>"] "<>fromMaybe ident (field "title" value)))
             heading=(if expanded then "▾ " else "▸ ")<>clipCells (max 1 (width-2)) title
-        in [(plain Pragma heading,Just ("toggle-activity",[T.pack (show recordId)]))]++
-          [(plain Plain ("\n"<>T.intercalate "\n" (map jsonText history)),Nothing) | expanded]
+        in [(plain Pragma heading,Just ("toggle-activity",[T.pack (show recordId)]),[])]++
+          [(plain Plain ("\n"<>T.intercalate "\n" (map jsonText history)),Nothing,[]) | expanded]
     renderQuestion width recordId q=
-      [(map (\(c,style)->(c,case style of BubbleText _ outgoing base->BubbleText recordId outgoing base; _->style)) (renderReply (videoMode d/=Nothing) width False (questionText q)),Nothing)]++
-      concat [[(plain Plain "\n",Nothing),(plain (if questionChoice q==Just index then Keyword else Plain)
-        (choiceLines width (questionChoice q==Just index) text),Just ("question-choice",[token,T.pack (show index)]))] | (index,text)<-zip [0::Int ..] (questionChoices q)]++
-      [(plain Plain "\n",Nothing),(plain (if isNothing (questionChoice q) then Literal else Plain)
-        ("Other: "<>questionVisibleInput width q<>" "),Just ("question-input",[token])),
-       (plain Plain "\n",Nothing),(plain Keyword "[Submit answer]",Just ("question-submit",[token])),
-       (plain Plain "  ",Nothing),(plain Comment "[Cancel]",Just ("question-cancel",[token]))]
+      [replyChunk width recordId False (questionText q)]++
+      concat [[(plain Plain "\n",Nothing,[]),(plain (if questionChoice q==Just index then Keyword else Plain)
+        (choiceLines width (questionChoice q==Just index) text),Just ("question-choice",[token,T.pack (show index)]),[])] | (index,text)<-zip [0::Int ..] (questionChoices q)]++
+      [(plain Plain "\n",Nothing,[]),(plain (if isNothing (questionChoice q) then Literal else Plain)
+        ("Other: "<>questionVisibleInput width q<>" "),Just ("question-input",[token]),[]),
+       (plain Plain "\n",Nothing,[]),(plain Keyword "[Submit answer]",Just ("question-submit",[token]),[]),
+       (plain Plain "  ",Nothing,[]),(plain Comment "[Cancel]",Just ("question-cancel",[token]),[])]
       where token=T.pack (show (questionToken q))
+
+    replyChunk width recordId outgoing text =
+      let (cells,blocks)=renderReplyWithShellBlocks (videoMode d/=Nothing) width outgoing text
+      in (map (\(c,style)->(c,case style of BubbleText _ sent base->BubbleText recordId sent base; _->style)) cells,Nothing,blocks)
 
 choiceLines :: Int -> Bool -> Text -> Text
 choiceLines width selected text=T.intercalate "\n" (zipWith (<>) ((if selected then "(*) " else "( ) "):repeat "    ") (wrap text))
@@ -1031,12 +1173,23 @@ clipCells count text=T.take (columnOffset text (max 0 count)) text
 -- Corner cells share the text rows. The spiked corner stays square, so the
 -- top edge runs continuously into the tail. Terminal fonts use block fallbacks.
 renderReply :: Bool -> Int -> Bool -> Text -> [(Char,Style)]
-renderReply graphical requested outgoing text
-  | width<6 = recolor (renderMarkdown width text)
-  | otherwise = concat (zipWith renderLine [0::Int ..] rows)
+renderReply graphical width outgoing = fst . renderReplyWithShellBlocks graphical width outgoing
+
+renderReplyWithShellBlocks :: Bool -> Int -> Bool -> Text -> ([(Char,Style)],[(Int,Int,Text,Text)])
+renderReplyWithShellBlocks graphical requested outgoing text
+  | width<6 = (recolor markdown,blocks)
+  | otherwise = (concat rendered,[(position start,position end,dialect,body) | (start,end,dialect,body)<-blocks])
   where
     width=max 1 requested
-    contentRows=splitRows (recolor (renderMarkdown (width-5) text))
+    (markdown,blocks)=renderMarkdownWithShellBlocks (if width<6 then width else width-5) text
+    contentRows=splitRows (recolor markdown)
+    rendered=zipWith renderLine [0::Int ..] rows
+    -- Every source cell survives bubble decoration; only row prefixes change.
+    position offset =
+      let (row,column)=lineColumn (T.pack (map fst markdown)) offset
+          renderedRow=row+if leadingCode then 1 else 0
+          prefix=if outgoing then max 0 (width-bubbleWidth-3)+1 else 2
+      in sum (map length (take renderedRow rendered)) + (if renderedRow>0 then 1 else 0) + prefix + column
     leadingCode=case contentRows of
       first:_ -> any (\(_,style)->case style of BubbleText _ _ (CodeStyle _ _)->True; _->False) first
       [] -> False
@@ -1300,6 +1453,7 @@ drainConversationAgents runtime@(ConversationState _ ref _ _ agents) d=do
     apply desktop AR.EndPrimary=do
       s<-readIORef ref
       mapM_ denyChild (map snd (approvals s))
+      _<-retireRequests ref
       mapM_ A.stopClient (connection s)
       finishAgentDelivery ref (Left "Agent session ended.")
       AR.failPendingPrimary agents "Agent session ended."

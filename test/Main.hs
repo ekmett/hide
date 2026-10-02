@@ -56,6 +56,7 @@ import qualified ConsolesCheck
 import Control.Monad (unless)
 import qualified Data.Text as T
 import THC.Edit.App (demoDesktop)
+import qualified BufferViewCheck
 import qualified BufferTreeCheck
 import qualified LSPCheck
 import qualified ToolingCheck
@@ -239,6 +240,7 @@ main = do
 #ifdef WITH_REMOTE
   RecoveryCheck.checks
 #endif
+  BufferViewCheck.checks
   BufferTreeCheck.checks
   LSPCheck.checks
   ToolingCheck.checks

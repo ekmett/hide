@@ -9,11 +9,82 @@ import THC.Edit.Model
 import THC.Edit.Render (snapshot)
 import qualified Data.Text as T
 import THC.Edit.Buffer (newBuffer, Selection(..))
+import qualified THC.Edit.Buffer as B
+import THC.Edit.BufferView
 import THC.Edit.Files (FileState(..))
 import qualified Graphics.Vty as V
 checks :: IO ()
 checks = do
   let check name ok = unless ok (error name)
+  let reviewedBuffer=B.replaceSelection (Selection 0 3) "new" (newBuffer "old\nkeep\n")
+      reviewBase=addDocument Nothing reviewedBuffer (initialDesktop (80,25))
+      reviewFull=setBufferView ChangesView reviewBase
+      reviewWindow=fromMaybe (error "review window missing") (activeWindow reviewFull)
+      reviewRange'=Selection 0 (B.changeLineOffset reviewedBuffer 2)
+      selectedReview=modifyActive (\w -> w {reviewSelection=Just (ReviewSelection (B.revision reviewedBuffer) (B.bufferLineChanges reviewedBuffer) UnifiedSide reviewRange'),selection=Selection 0 4}) reviewFull
+      copiedReview=fst (runCommand Copy selectedReview)
+      cutReview=fst (runCommand Cut selectedReview)
+      revertedReview=fst (runCommand (RevertChange (bufferId reviewWindow) (B.revision reviewedBuffer) (B.bufferLineChanges reviewedBuffer) 0) reviewFull)
+      typedReview=insertText "x" selectedReview
+      savedReview=selectedReview {buffers=M.adjust (\doc -> doc {documentBuffer=B.markSaved (documentBuffer doc)}) (bufferId reviewWindow) (buffers selectedReview)}
+  check "review view is per window and names all view modes"
+    (bufferView reviewWindow==ChangesView && maybe False ((==CurrentView).bufferView) (activeWindow reviewBase) &&
+     any (\(MenuItem _ _ c)->c==SetBufferView ChangesView) (menuItems 8))
+  check "mixed review selection copies deleted and live rows but cut edits live text only"
+    (clipboard copiedReview=="old\nnew\n" && activeText cutReview=="keep\n" && activeText (fst (runCommand Undo cutReview))=="new\nkeep\n")
+  check "review hunk reversion is one undo step"
+    (activeText revertedReview=="old\nkeep\n" && activeText (fst (runCommand Undo revertedReview))=="new\nkeep\n")
+  check "typing clears review selection and save invalidates stale projected selection"
+    (maybe False ((==Nothing).reviewSelection) (activeWindow typedReview) && windowReviewRange (B.markSaved reviewedBuffer) reviewWindow {reviewSelection=reviewSelection (fromMaybe reviewWindow (activeWindow selectedReview))}==Nothing &&
+     clipboard (fst (runCommand Copy savedReview))/="old\nnew\n")
+  check "split preserves independent review mode and divider"
+    (all ((==ChangesView).bufferView) (windows (fst (runCommand SplitVertical reviewFull))) && reviewPaneWidths reviewWindow==(38,39))
+  let sideBuffer=B.replaceSelection (Selection 0 3) "new" (newBuffer "old")
+      sideDesktop=setBufferView SideBySideView (addDocument Nothing sideBuffer (initialDesktop (80,25)))
+      leftSelected=fst (runCommand SelectAll (selectAt False 1 2 sideDesktop))
+      leftCut=fst (runCommand Cut leftSelected)
+      rightSelected=fst (runCommand SelectAll (selectAt False 41 2 sideDesktop))
+      defaultsChanged=fst (runCommand (SetDefaultBufferView OnlyChangesView) reviewBase)
+      newDefault=addDocument Nothing (newBuffer "fresh") defaultsChanged
+      resizedDivider=fst (mouseEvent 65 3 V.BLeft [] sideDesktop {drag=Just (ReviewSizing 1)})
+  check "side-by-side original selection copies exact unterminated saved text and never cuts live text"
+    (clipboard leftCut=="old" && activeText leftCut=="new" && clipboard (fst (runCommand Copy rightSelected))=="new")
+  check "default view affects only new buffers and emits preference persistence"
+    (maybe False ((==CurrentView).bufferView) (activeWindow defaultsChanged) && maybe False ((==OnlyChangesView).bufferView) (activeWindow newDefault) &&
+     snd (runCommand (SetDefaultBufferView ChangesView) reviewBase)==[SaveBufferViewDefault ChangesView])
+  check "hex mode leaves review layout and clears projected selection"
+    (maybe False ((==CurrentView).bufferView) (activeWindow (fst (runCommand ToggleHex sideDesktop))))
+  check "side-by-side divider is independently draggable"
+    (maybe False ((>50).reviewSplit) (activeWindow resizedDivider) && all ((>=4).snd.reviewPaneWidths) (windows resizedDivider))
+  let originalContext=newBuffer (T.unlines (map (T.pack.show) [0..29::Int]))
+      firstContext=B.replaceSelection (Selection (B.bufferLineOffset originalContext 5) (B.bufferLineOffset originalContext 5+1)) "FIVE" originalContext
+      changedContext=B.replaceSelection (Selection (B.bufferLineOffset firstContext 25) (B.bufferLineOffset firstContext 25+2)) "TWENTYFIVE" firstContext
+      contextual=setBufferView OnlyChangesView (addDocument Nothing changedContext (initialDesktop (80,25)))
+      contextualAll=fst (runCommand SelectAll contextual)
+      contextualCut=fst (runCommand Cut contextualAll)
+      expectedHidden=T.unlines (map (T.pack.show) ([0..2]++[8..22]++[28..29::Int]))
+      navigation=moveTo False (B.bufferLineOffset changedContext 8) (modifyActive (\w->w {selection=Selection (B.bufferLineOffset changedContext 7) (B.bufferLineOffset changedContext 7)}) contextual)
+  check "context-only cut retains hidden originals and is one undo step"
+    (activeText contextualCut==expectedHidden && not ("10\n" `T.isInfixOf` clipboard contextualCut) &&
+     activeText (fst (runCommand Undo contextualCut))==B.contents changedContext)
+  check "keyboard navigation skips hidden context gaps to a visible live row"
+    (maybe False ((==B.bufferLineOffset changedContext 23).caret.selection) (activeWindow navigation))
+  let staleRevert=fst (runCommand (RevertChange (bufferId reviewWindow) (B.revision reviewedBuffer) (B.bufferLineChanges reviewedBuffer) 0) typedReview)
+      contextOpened=fst (windowMouse 1 2 V.BRight [] reviewFull)
+  check "hunk context action is available on red rows and rejects stale invocation"
+    (case contextKind contextOpened of ChangeContext RevertChange{} -> activeText staleRevert==activeText typedReview; _ -> False)
+  let shellRaw="printf \"a  b\\n\"\n"
+      shellTuple=(0,10,"bash",shellRaw)
+      shellDesktop=let opened=addReadOnly "Help" "printf abc" (initialDesktop (80,25))
+                   in opened {buffers=M.adjust (\doc->doc {documentShellBlocks=[shellTuple]}) 1 (buffers opened)}
+      shellMenu=fst (windowMouse 2 2 V.BRight [] shellDesktop)
+      shellCommand=ExecuteShellBlock 1 shellTuple
+      shellEffects=snd (runCommand shellCommand shellDesktop)
+      expiredShell=shellDesktop {buffers=M.adjust restyle 1 (buffers shellDesktop)}
+  check "shell code-block context forwards exact raw body and rejects stale renderer metadata"
+    (contextKind shellMenu==ShellContext shellCommand &&
+     shellEffects==[AgentAction "execute-shell-block" ["1","0","10","bash",shellRaw]] &&
+     null (snd (runCommand shellCommand expiredShell)))
   let terminal=modifyActive (\w->w {bounds=Rect 3 4 50 12,selection=Selection 1 4})
         (addReadOnly "Terminal 1" "terminal text" (addDocument Nothing (newBuffer "source") (initialDesktop (100,35))))
       view=fromMaybe (error "terminal missing") (activeWindow terminal)

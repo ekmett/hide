@@ -5,6 +5,7 @@ import Control.Applicative ((<|>))
 import Data.Maybe (fromMaybe)
 import THC.Edit.DocsMCP
 import THC.Edit.GuestAccess (protectedPath, protectedBuffer)
+import THC.Edit.BufferView
 import THC.Edit.Defaults
 import THC.Edit.MCPPermissions
 import THC.Edit.ClipboardMCP
@@ -53,7 +54,7 @@ import System.FilePath ((</>), isAbsolute, takeDirectory, takeFileName, takeExte
 import Control.Exception (try, IOException)
 import Paths_thc_edit (getDataFileName)
 import THC.Edit.Browser
-import THC.Edit.Markdown (renderMarkdown)
+import THC.Edit.Markdown (renderMarkdownWithShellBlocks)
 import THC.Edit.Git
 import System.Environment (getArgs, lookupEnv, setEnv)
 import THC.Edit.Frontend
@@ -222,7 +223,7 @@ runEditor args = do
         `catch` (\FrontendDetached -> writeIORef wasInterrupted True)) `finally` report
     else do
         let initial=if Demo `elem` flags then addDocument Nothing (newBuffer (activeText demoDesktop)) (initialDesktop dimensions) else initialDesktop dimensions
-            configured=(fst (handleEvent (uncurry V.EvResize dimensions) initial)) {appearance=colorMode,systemDark=maybe True (not . (`elem` ["7","15"]) . reverse . takeWhile (/=';') . reverse) terminalColors,wordStar=flagBool WordStar StandardKeys (fromMaybe (wordStar initial) (defaultWordStar defaults)),crtFilter=flagBool CRT NoCRT (fromMaybe (crtFilter initial) (defaultCRT defaults)),materialIcons=flagBool MaterialIcons ClassicIcons (fromMaybe (materialIcons initial) (defaultMaterialIcons defaults)),blinkCursor=fromMaybe (fromMaybe (blinkCursor initial) (defaultBlinkCursor defaults)) (lastMaybe [value | CursorBlink value<-flags]),pixelateUnicode=fromMaybe (fromMaybe (pixelateUnicode initial) (defaultPixelateUnicode defaults)) (lastMaybe [value | Pixelate value<-flags]),streamerMode=fromMaybe (fromMaybe False (defaultStreamerMode defaults)) (lastMaybe [value | Streamer value<-flags]),videoMode=if backend == Terminal then Nothing else Just screenMode}
+            configured=(fst (handleEvent (uncurry V.EvResize dimensions) initial)) {defaultBufferView=fromMaybe CurrentView (defaultView defaults),appearance=colorMode,systemDark=maybe True (not . (`elem` ["7","15"]) . reverse . takeWhile (/=';') . reverse) terminalColors,wordStar=flagBool WordStar StandardKeys (fromMaybe (wordStar initial) (defaultWordStar defaults)),crtFilter=flagBool CRT NoCRT (fromMaybe (crtFilter initial) (defaultCRT defaults)),materialIcons=flagBool MaterialIcons ClassicIcons (fromMaybe (materialIcons initial) (defaultMaterialIcons defaults)),blinkCursor=fromMaybe (fromMaybe (blinkCursor initial) (defaultBlinkCursor defaults)) (lastMaybe [value | CursorBlink value<-flags]),pixelateUnicode=fromMaybe (fromMaybe (pixelateUnicode initial) (defaultPixelateUnicode defaults)) (lastMaybe [value | Pixelate value<-flags]),streamerMode=fromMaybe (fromMaybe False (defaultStreamerMode defaults)) (lastMaybe [value | Streamer value<-flags]),videoMode=if backend == Terminal then Nothing else Just screenMode}
         localPaths<-if daemon/=Nothing then mapM expandRemoteHome paths else pure paths
         (_,loaded)<-applyEffects configured (map ReadPath localPaths)
         cwd<-getCurrentDirectory
@@ -245,7 +246,7 @@ runEditor args = do
           mapM_ (setEnv "THC_EDIT_SESSION") daemon
           font<-Font.loadFont
           let specs=builtinTools++debugTools++chatTools++toolingTools++workspaceTools++fileTools++testsTools++historyTools++runtimeTools++gitTools++controlTools++clipboardTools++docsTools++[screenTool]
-          withPermissions (specs++agentTools) $ \permissions -> withDebugger $ \debugger -> withConversationAt (startingDirectory protectedDesktop) $ \conversation -> withTooling $ \tooling -> withGitOperations $ \gitOperations -> withReconciliation $ \reconciliation -> withProjectBrowser $ \projectBrowser -> withHighlighting $ \highlighting -> do
+          withPermissions (specs++agentTools) $ \permissions -> withConversationAt (startingDirectory protectedDesktop) $ \conversation -> withDebuggerConsoles (let (_,consoles,_)=conversationServices conversation in consoles) $ \debugger -> withTooling $ \tooling -> withGitOperations $ \gitOperations -> withReconciliation $ \reconciliation -> withProjectBrowser $ \projectBrowser -> withHighlighting $ \highlighting -> do
             exiting<-newIORef False
             let runtimeEffects=projectBrowserEffects projectBrowser (gitOperationEffects gitOperations (debuggerEffects debugger (conversationEffects conversation (reconciliationEffects reconciliation (toolingEffects tooling applyEffects)))))
                 core d pending=foldM step (False,d) pending
@@ -511,6 +512,9 @@ applyEffects = foldM apply . (False,)
     apply (_,d) ReadBrowserClipboard=pure (False,d)
     apply (_,d) WriteBrowserClipboard{}=pure (False,d)
     apply (_,d) Exit=pure (True,d)
+    apply (_,d) (SaveBufferViewDefault mode)=do
+      result<-writeEditorDefaults (object ["bufferView" .= bufferViewName mode])
+      pure (False,d {status=either ("Default view changed for this session; could not save: "<>) (const "Default buffer view saved.") result})
     apply (_,d) SetScreenMode{}=pure (False,d {status="Screen modes are available in a graphical window."})
     apply (_,d) (ReadPath path)=do
       directory<-doesDirectoryExist path
@@ -564,7 +568,14 @@ applyEffects = foldM apply . (False,)
     apply (_,d) ReadHelp=do
       path<-getDataFileName "README.md"
       result<-try (TIO.readFile path) :: IO (Either IOException T.Text)
-      pure (False,case result of Left err -> message "Cannot open Help" (wrapMessage (T.pack (show err))) d; Right text -> addHelpStyled (renderMarkdown (max 20 (min 76 (fst (screenSize d)-treeWidthOf d-4))) text) d)
+      pure (False,case result of
+        Left err -> message "Cannot open Help" (wrapMessage (T.pack (show err))) d
+        Right text ->
+          let (styled,blocks)=renderMarkdownWithShellBlocks (max 20 (min 76 (fst (screenSize d)-treeWidthOf d-4))) text
+              opened=addHelpStyled styled d
+          in case activeWindow opened of
+            Just w -> opened {buffers=M.adjust (\doc -> doc {documentShellBlocks=blocks}) (bufferId w) (buffers opened)}
+            Nothing -> opened)
     apply (_,d) (RefreshGit path)=do
       repo<-repositoryStatus path
       pure (False,d {branchStatus=maybe "" (\r -> repoBranch r <> if repoDirty r then "*" else "") repo,branchAdded=maybe 0 repoAdded repo,branchDeleted=maybe 0 repoDeleted repo,branchRoot=fmap repoRoot repo,gitReview=case gitReview d of Just review | fmap repoRoot repo == Just (reviewRoot review) -> Just review; _ -> Nothing})
@@ -608,7 +619,7 @@ applyEffects = foldM apply . (False,)
           Right file->do
             let b=documentBuffer doc
                 clean=restyle doc {documentFile=Just file,documentBuffer=markSaved b}
-                updated=d {buffers=M.insert bid clean (buffers d),status="File saved."}
+                updated=clampReviewWindows d {buffers=M.insert bid clean (buffers d),status="File saved."}
             (_,refreshed)<-apply (False,updated) (RefreshGit (takeDirectory (filePath file)))
             case after of
               Nothing->pure (False,refreshed)

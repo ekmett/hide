@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 module THC.Edit.DAP
-  ( Client, Event(..), startClient, startAdapter, startManaged, startManagedWith, stopClient, request, pollEvents
+  ( Client, Event(..), startClientAfter, startAdapterAfter, startManagedWithAfter, startClient, startAdapter, startManaged, startManagedWith, stopClient, request, respond, pollEvents
   ) where
 
 import Control.Concurrent (threadDelay)
@@ -31,11 +31,11 @@ import System.Timeout (timeout)
 import Text.Read (readMaybe)
 import THC.Edit.Process (processCleanup)
 
-data Event = Connected | Response Int (Either Text Value) | Notification Text Value | Disconnected Text
+data Event = Connected | ReverseRequest Int Text Value | Response Int (Either Text Value) | Notification Text Value | Disconnected Text
   deriving (Eq, Show)
 
 data Client = Client
-  { outgoing :: TBQueue (Int, Text, Value)
+  { outgoing :: TBQueue Value
   , incoming :: TBQueue Event
   , incomingBytes :: TVar Int
   , pending :: TVar Set.IntSet
@@ -47,9 +47,14 @@ data Client = Client
 
 -- The UI only enqueues requests. Connection, framing and socket IO run here.
 startClient :: Text -> Int -> IO Client
-startClient host port = startTransport $ \_ register communicate -> withConnection host port $ \connection -> do
-  register (closeConnection connection)
-  communicate (Socket.recv connection) (Socket.sendAll connection)
+startClient = startClientAfter (pure ())
+
+startClientAfter :: IO () -> Text -> Int -> IO Client
+startClientAfter before host port = startTransport $ \_ register communicate -> do
+  before
+  withConnection host port $ \connection -> do
+    register (closeConnection connection)
+    communicate (Socket.recv connection) (Socket.sendAll connection)
 
 withConnection :: Text -> Int -> (Socket -> IO a) -> IO a
 withConnection host port action = do
@@ -61,7 +66,11 @@ withConnection host port action = do
 -- The adapter and its private process group belong to the daemon, not a frontend.
 -- argv is passed directly to the OS; configuration never invokes a shell.
 startAdapter :: FilePath -> [String] -> FilePath -> IO Client
-startAdapter executable arguments directory = startTransport $ \emit register communicate ->
+startAdapter = startAdapterAfter (pure ())
+
+startAdapterAfter :: IO () -> FilePath -> [String] -> FilePath -> IO Client
+startAdapterAfter before executable arguments directory = startTransport $ \emit register communicate -> do
+  before
   withAdapter register executable arguments directory Nothing $ \input output errors _ release ->
     withAsync (drainOutput emit "stderr" errors) $ \_ ->
       communicate (BS.hGetSome output) (\bytes -> BS.hPut input bytes >> hFlush input) `finally` release
@@ -74,7 +83,13 @@ startManaged executable arguments = startManagedWith (pure (executable,arguments
 -- Compiler/cradle discovery belongs to the transport worker too. Cancellation
 -- during preparation cannot leave a later adapter process running unowned.
 startManagedWith :: IO (FilePath,[String],[(String,String)]) -> FilePath -> Text -> Int -> IO Client
-startManagedWith prepare directory host port = startTransport $ \emit register communicate -> do
+startManagedWith = startManagedWithAfter (pure ())
+
+-- Retiring a previous owned session can wait here, without delaying the caller
+-- or racing its still-live listener when the same endpoint is reused.
+startManagedWithAfter :: IO () -> IO (FilePath,[String],[(String,String)]) -> FilePath -> Text -> Int -> IO Client
+startManagedWithAfter before prepare directory host port = startTransport $ \emit register communicate -> do
+  before
   unless (host `elem` ["localhost","127.0.0.1","::1"] && port>0 && port<=65535)
     (ioError (userError "Invalid managed DAP loopback endpoint"))
   occupied <- try (withConnection host port (\_ -> pure ())) :: IO (Either IOException ())
@@ -193,7 +208,9 @@ startTransport transport = mask $ \restore -> do
         Just "event" -> case field "event" value of
           Just name -> atomically (emit size (Notification name (fromMaybe Null (field "body" value))))
           Nothing -> ioError (userError "Malformed DAP event")
-        -- Reverse requests require capabilities we do not advertise.
+        Just "request" -> case (field "seq" value, field "command" value) of
+          (Just ident, Just command) -> atomically (emit size (ReverseRequest ident command (fromMaybe Null (field "arguments" value))))
+          _ -> ioError (userError "Malformed DAP reverse request")
         _ -> ioError (userError "Unsupported DAP message type")
       run = transport emit register $ \readBytes writeBytes -> do
           atomically (emit 0 Connected)
@@ -201,8 +218,8 @@ startTransport transport = mask $ \restore -> do
           race_
             (forever (readFrame readBytes rest >>= uncurry receive) `finally` release)
             ((forever $ do
-              (ident, command, arguments) <- atomically (readTBQueue out)
-              let body = encode (object ["seq" .= ident, "type" .= ("request" :: Text), "command" .= command, "arguments" .= arguments])
+              value <- atomically (readTBQueue out)
+              let body = encode value
                   size = BL.length (BL.take (fromIntegral maxFrame + 1) body)
               when (size > fromIntegral maxFrame) (ioError (userError "Oversized outgoing DAP frame"))
               bounded 5000000 "DAP write timed out" $ do
@@ -231,10 +248,26 @@ request client command arguments = atomically $ do
       outstanding <- readTVar (pending client)
       full <- isFullTBQueue (outgoing client)
       when (full || Set.size outstanding >= 64) (throwSTM (userError "DAP request queue is full"))
-      writeTBQueue (outgoing client) (ident, command, arguments)
+      writeTBQueue (outgoing client) (object ["seq" .= ident,"type" .= ("request"::Text),"command" .= command,"arguments" .= arguments])
       writeTVar (pending client) (Set.insert ident outstanding)
   writeTVar (nextId client) (ident+1)
   pure ident
+
+-- Reverse responses share the writer and sequence counter with client requests.
+respond :: Client -> Int -> Text -> Either Text Value -> IO ()
+respond client requestId command result = atomically $ do
+  failure <- readTVar (closed client)
+  case failure of
+    Just message -> throwSTM (userError (T.unpack message))
+    Nothing -> do
+      full <- isFullTBQueue (outgoing client)
+      when full (throwSTM (userError "DAP request queue is full"))
+      ident <- readTVar (nextId client)
+      writeTVar (nextId client) (ident+1)
+      writeTBQueue (outgoing client) (object
+        (["seq" .= ident,"type" .= ("response"::Text),"request_seq" .= requestId,"command" .= command]
+        ++ either (\message -> ["success" .= False,"message" .= message])
+          (\body -> ["success" .= True,"body" .= body]) result))
 
 pollEvents :: Client -> IO [Event]
 pollEvents client = atomically $ do

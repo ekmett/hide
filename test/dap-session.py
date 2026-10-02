@@ -68,7 +68,39 @@ for session in range(1, 3 if mode == 'reconnect' else 2):
             cmd, args = req['command'], req.get('arguments', {})
             with open(sys.argv[1], 'a') as log:
                 log.write(json.dumps(dict(session=session, request=req)) + '\n')
+            if req.get('type') == 'response':
+                assert cmd == 'runInTerminal' and req['request_seq'] == terminal_sequence, req
+                if mode in ('terminal-shell', 'terminal-invalid', 'terminal-missing'):
+                    assert not req['success'] and req['message'], req
+                    event('output', dict(category='stderr', output='reverse terminal rejected\n'))
+                    continue
+                assert req['success'] and req['body']['processId'] > 0, req
+                event('output', dict(category='stdout', output='reverse terminal accepted\n'))
+                continue
             if cmd == 'initialize':
+                if mode.startswith('terminal'):
+                    assert args['supportsRunInTerminalRequest']
+                    terminal_request=dict(type='request', command='runInTerminal', arguments=dict(
+                        kind='integrated', cwd=os.getcwd(),
+                        args=[sys.executable, '-u', '-c',
+                              'import os,sys,signal; signal.signal(signal.SIGINT, lambda *_: sys.exit(23)); print("terminal ready λ", flush=True); '
+                              'print("argv="+repr(sys.argv[1:]), flush=True); '
+                              'print("env="+os.environ["THC_DAP_ENV"], flush=True); '
+                              'print("cwd="+os.getcwd(), flush=True); '
+                              'print("unset="+str("HOME" not in os.environ), flush=True); '
+                              'print("stdin="+input(), flush=True); '
+                              'print("stderr visible", file=sys.stderr, flush=True); input()', 'literal ; λ'],
+                        env=dict(THC_DAP_ENV='value with spaces', HOME=None)))
+                    if mode == 'terminal-wrapper':
+                        terminal_request['arguments']['args'] = ['/nonexistent/bindist/bin/hdb', 'external-interpreter'] + terminal_request['arguments']['args'][1:]
+                    if mode == 'terminal-shell':
+                        terminal_request['arguments']['argsCanBeInterpretedByShell'] = True
+                    elif mode == 'terminal-invalid':
+                        terminal_request['arguments']['args'] = []
+                    elif mode == 'terminal-missing':
+                        terminal_request['arguments']['args'] = ['/nonexistent/thc-debug-terminal']
+                    send(terminal_request)
+                    terminal_sequence = seq
                 event('initialized')
                 reply(req, dict(supportsConfigurationDoneRequest=True,
                       supportsExceptionInfoRequest=mode in ('exception', 'mcp'),

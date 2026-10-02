@@ -2,8 +2,11 @@
 module BuildCheck (checks) where
 
 import Control.Concurrent (threadDelay)
-import Control.Exception (bracket)
+import Control.Exception (bracket, evaluate)
 import Control.Monad (unless, forM_, when)
+import Data.Aeson (withObject, (.:))
+import Data.Aeson.Types (parseMaybe)
+import GHC.Conc (getAllocationCounter)
 import qualified Data.Map.Strict as M
 import qualified Data.Text as T
 import qualified Graphics.Vty as V
@@ -60,11 +63,14 @@ checks = bracket temporary removePathForcibly $ \root -> do
     rebuilt<-await jobs repeated finished
     check "repeated build refreshes existing output window" ("second invocation" `T.isInfixOf` output rebuilt)
 
-    stopped<-timeout (if os=="mingw32" then 8000000 else 3000000) $ do
-      running<-startBuildJob jobs "Run" root [(command,["-u","-c","import time\nwhile True: print('busy',flush=True)"])] completed
-      threadDelay 100000
-      stopBuildJob jobs running
-    check "stop cannot deadlock with full output queue" (maybe False (T.isInfixOf "Stopped." . status) stopped)
+    running<-startBuildJob jobs "Run" root [(command,["-u","-c","import time\nwhile True: print('busy',flush=True)"])] completed
+    threadDelay 100000
+    stopped<-timeout 100000 $ stopBuildJob jobs running
+    stopping<-maybe (error "stop request blocked the UI") pure stopped
+    check "stop returns a request before joining" ("Stopping" `T.isInfixOf` status stopping)
+    active<-buildJobStatus jobs
+    check "stop retains worker ownership until completion" (parseMaybe (withObject "status" (.: "active")) active==Just True)
+    _<-await jobs stopping (T.isInfixOf "Stopped." . status)
     -- POSIX process groups remain addressable after the group leader exits.
     when (os/="mingw32") $ do
       let sideEffect=root </> "must-not-run"
@@ -73,8 +79,48 @@ checks = bracket temporary removePathForcibly $ \root -> do
       chain<-startBuildJob jobs "Make" root
         [(command,["-u","-c",parent,child]),(command,["-c","import pathlib,sys; pathlib.Path(sys.argv[1]).write_text('ran')",sideEffect])] initial
       ready<-await jobs chain (T.isInfixOf "\ndescendant-ready\n" . output)
-      _<-stopBuildJob jobs ready
+      stoppingChain<-stopBuildJob jobs ready
+      _<-await jobs stoppingChain (T.isInfixOf "Stopped." . status)
       check "Stop does not advance to the next command after draining inherited output" . not =<< doesFileExist sideEffect
+    -- Keep the process active after a large burst. The UI must be able to
+    -- consume prepared output and navigate while the next burst is held.
+    let release=root </> "release-output"
+        burst="import os,sys,time\nprint('x\\n'*600000,end='',flush=True)\nprint('Main.hs:2:1: warning: fixture\\n'*1200,end='',flush=True)\nprint('stderr-only',file=sys.stderr,flush=True)\nprint('held-ready',flush=True)\nwhile not os.path.exists(sys.argv[1]): time.sleep(.01)\nprint('final-stdout',flush=True)"
+        uiTick d=do
+          before<-getAllocationCounter
+          fresh<-tickBuildJobs jobs d
+          -- Demand the same fields rendering and diagnostic navigation use.
+          let visible=sum [bufferLineCount b+T.length (bufferLineAt b (bufferLineCount b `div` 2)) | doc<-M.elems (buffers fresh),let b=documentBuffer doc]
+              messages=sum [length (diagnosticPath p)+T.length (diagnosticMessage p) | p<-buildDiagnostics fresh]
+          _<-evaluate (visible+messages+sum (map scrollRow (windows fresh))+T.length (status fresh))
+          after<-getAllocationCounter
+          check "UI tick does not construct output buffers or parse diagnostics" (before-after<2*1024*1024)
+          pure fresh
+        awaitPrepared d done=do
+          answer<-timeout 15000000 (loop d)
+          maybe (error "prepared build output did not arrive") pure answer
+          where loop current=do fresh<-uiTick current; if done fresh then pure fresh else threadDelay 10000 >> loop fresh
+    loud<-startBuildJob jobs "Make" root [(command,["-u","-c",burst,release])] initial
+    held<-awaitPrepared loud (T.isInfixOf "held-ready\n" . output)
+    check "sustained output remains capped" (T.length (output held)==1024*1024)
+    check "diagnostics remain capped" (length (buildDiagnostics held)==1000)
+    (machine,truncated)<-buildJobStdout jobs
+    check "stdout report excludes stderr and retains truncation" (truncated && T.length machine==1024*1024 && not ("stderr-only" `T.isInfixOf` machine))
+    check "output follows bottom" (maybe False ((>0) . scrollRow) (activeWindow held))
+    let scrolled=held {windows=map (\w -> w {scrollRow=10}) (windows held)}
+    writeFile release "continue"
+    final<-awaitPrepared scrolled finished
+    check "completion includes final output" ("final-stdout\n\nMake completed.\n" `T.isSuffixOf` output final)
+    check "output preserves a user scroll away from bottom" (all ((==10) . scrollRow) (windows final))
+    (finalStdout,finalTruncated)<-buildJobStdout jobs
+    check "completion publishes final stdout too" (finalTruncated && "final-stdout\n" `T.isSuffixOf` finalStdout)
+    removeFile release
+    closing<-startBuildJob jobs "Run" root [(command,["-u","-c","import os,sys,time; print('close-ready',flush=True)\nwhile not os.path.exists(sys.argv[1]): time.sleep(.01)\nprint('closed-final')",release])] initial
+    closeReady<-await jobs closing (T.isInfixOf "close-ready\n" . output)
+    let closed=closeReady {windows=[],buffers=M.empty}
+    writeFile release "continue"
+    closedFinal<-await jobs closed finished
+    check "completion does not reopen a closed output window" (null (windows closedFinal) && M.null (buffers closedFinal))
     missing<-startBuildJob jobs "Compile" root [(root </> "absent-compiler",[])] initial
     result<-await jobs missing finished
     check "missing compiler is reported" ("Compile:" `T.isPrefixOf` status result)

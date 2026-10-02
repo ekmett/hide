@@ -1,13 +1,13 @@
 {-# LANGUAGE OverloadedStrings #-}
-module THC.Edit.Debugger (Debugger, Core, withDebugger, withDebuggerClock, withDebuggerHdb, hdbOfferDialog, downloadsDialog, debuggerEffects, tickDebugger, debuggerTool) where
+module THC.Edit.Debugger (Debugger, Core, withDebugger, withDebuggerConsoles, withDebuggerClock, withDebuggerHdb, hdbOfferDialog, downloadsDialog, debuggerEffects, tickDebugger, debuggerTool) where
 
 import Control.Concurrent (MVar, newEmptyMVar, tryPutMVar, tryReadMVar, threadDelay)
-import Control.Exception (IOException, bracket, try, evaluate, mask)
-import Control.Concurrent.Async (Async, async, cancel, poll, race)
+import Control.Exception (IOException, bracket, try, evaluate, mask, mask_, finally)
+import Control.Concurrent.Async (Async, async, cancel, poll, race, waitCatch)
 import Control.Concurrent.STM
 import qualified THC.Edit.Downloads as Downloads
 import qualified THC.Edit.HdbAcquisition as Hdb
-import Control.Monad (foldM, forM_, unless, when, void)
+import Control.Monad (foldM, filterM, forM_, unless, when, void)
 import Data.Aeson
 import Data.Aeson.Types (Parser, parseEither, parseMaybe)
 import qualified Data.ByteString as BS
@@ -31,6 +31,8 @@ import qualified THC.Edit.Compilers as Compilers
 import qualified THC.Edit.Build as Build
 import THC.Edit.Build (resolveBuildRoot)
 import THC.Edit.Buffer
+import qualified THC.Edit.Consoles as C
+import qualified THC.Edit.Terminal as Terminal
 import qualified THC.Edit.DAP as D
 import THC.Edit.Files (filePath)
 import qualified THC.Edit.LSP as L
@@ -51,6 +53,7 @@ data State = State
   , breakpoints :: M.Map Text (Value,[Breakpoint]), sources :: M.Map Int Value
   , root :: FilePath, endpoint :: (Text,Int), output :: Text
   , startRequest :: (Text,Value), managed :: Bool, adapterId :: Text
+  , hdbLauncher :: Maybe FilePath, debugEnvironment :: [(String,String)], debugConsoles :: [Text], terminalLaunch :: Maybe (Int,Text,Async (),TMVar (Either Text C.PreparedConsole)), outputShown :: Bool
   , failure :: Maybe Text, disconnectAt :: Maybe Integer
   , endedAt :: Maybe Integer, programExitCode :: Maybe Int
   , choices :: M.Map Text [Value], choiceId :: Int, breakRequests :: M.Map Text Int
@@ -61,10 +64,14 @@ emptyState :: State
 emptyState = State {client=Nothing,connected=False,capabilities=Null,ready=False,configured=False,pending=M.empty,generation=0,
   stopped=False,thread=Nothing,frame=Nothing,frames=[],followSource=True,exceptionFilters=[],breakpoints=M.empty,sources=M.empty,
   root=".",endpoint=("127.0.0.1",4711),output="",failure=Nothing,disconnectAt=Nothing,endedAt=Nothing,programExitCode=Nothing,
-  choices=M.empty,choiceId=0,breakRequests=M.empty,breakModified=M.empty,startRequest=("attach",object []),managed=False,adapterId="",variableRefs=M.empty}
+  hdbLauncher=Nothing,debugEnvironment=[],debugConsoles=[],terminalLaunch=Nothing,outputShown=False,choices=M.empty,choiceId=0,breakRequests=M.empty,breakModified=M.empty,startRequest=("attach",object []),managed=False,adapterId="",variableRefs=M.empty}
 
 withDebugger :: (Debugger -> IO a) -> IO a
-withDebugger = withDebuggerClock (toInteger <$> getMonotonicTimeNSec)
+withDebugger action = C.withConsoles (\consoles -> withDebuggerConsoles consoles action)
+
+-- Application wiring shares the same terminals as Run and conversation tools.
+withDebuggerConsoles :: C.Consoles -> (Debugger -> IO a) -> IO a
+withDebuggerConsoles consoles = withDebuggerHdbConsoles consoles (toInteger <$> getMonotonicTimeNSec) Hdb.prepareHdb Hdb.acquireHdb
 
 -- Clock values are monotonic nanoseconds, also allowing deterministic deadline checks.
 withDebuggerClock :: IO Integer -> (Debugger -> IO a) -> IO a
@@ -74,14 +81,22 @@ withDebuggerClock clock = withDebuggerHdb clock Hdb.prepareHdb Hdb.acquireHdb
 withDebuggerHdb :: IO Integer -> (Compilers.Compiler -> IO (Either Text Hdb.HdbPlan))
   -> (Hdb.HdbPlan -> (Downloads.DownloadProgress -> IO ()) -> IO (Either Text FilePath))
   -> (Debugger -> IO a) -> IO a
-withDebuggerHdb clock prepare acquire action = Downloads.withDownloads $ \downloads -> do
+withDebuggerHdb clock prepare acquire action = C.withConsoles $ \consoles ->
+  withDebuggerHdbConsoles consoles clock prepare acquire action
+
+withDebuggerHdbConsoles :: C.Consoles -> IO Integer -> (Compilers.Compiler -> IO (Either Text Hdb.HdbPlan))
+  -> (Hdb.HdbPlan -> (Downloads.DownloadProgress -> IO ()) -> IO (Either Text FilePath))
+  -> (Debugger -> IO a) -> IO a
+withDebuggerHdbConsoles consoles clock prepare acquire action = Downloads.withDownloads $ \downloads -> do
   jobs<-newIORef (HdbState 0 Nothing Nothing Nothing Nothing [])
-  let runtime=HdbRuntime downloads jobs prepare acquire
+  retired<-newIORef []
+  let runtime=HdbRuntime downloads jobs prepare acquire consoles retired
   bracket ((\ref -> Debugger ref clock runtime) <$> newIORef emptyState)
-    (\(Debugger ref _ _) -> do
+    (\debugger@(Debugger ref _ _) -> do
       h<-readIORef jobs
       mapM_ (\(_,_,_,task)->cancel task) (hdbPreparing h)
-      readIORef ref >>= mapM_ D.stopClient . client) action
+      readIORef ref >>= stopTransport debugger
+      readIORef retired >>= mapM_ waitCatch) action
 
 debuggerEffects :: Debugger -> Core -> Core
 debuggerEffects runtime fallback = foldM apply . (False,)
@@ -300,7 +315,7 @@ perform runtime@(Debugger ref clock _) core action values d = do
   case (action,values) of
     ("downloads",_) -> hdbDownloadsAction runtime values d
     _ | "hdb-accept:" `T.isPrefixOf` action -> acceptHdb runtime action values d
-    ("output",_) -> pure (addReadOnly "Debugger output" (output s) d)
+    ("output",_) -> modifyIORef' ref (\state -> state {outputShown=True}) >> pure (addReadOnly "Debugger output" (output s) d)
     -- Docs: docs/site/screenshots/debug-launch.png (docs/running.md).
     ("launch",_) -> pure d {dialog=Just (Dialog "Launch debugger" (DebugDialog "launch-config")
       [Input "Adapter configuration" ".thc-debug.json" 15,Input "DAP port" "4711" 4] 0 ["Selected target","Adapter config","Cancel"]
@@ -399,12 +414,15 @@ parseLaunch = withObject "debugger configuration" $ \o -> do
 startSession :: Debugger -> FilePath -> LaunchConfig -> Desktop -> IO Desktop
 startSession runtime@(Debugger ref _ _) directory (LaunchConfig transport requestName arguments adapter) d = do
   -- Release an earlier owned listener before testing its port for the new session.
-  readIORef ref >>= mapM_ D.stopClient . client
+  readIORef ref >>= stopTransport runtime
   (c,address,owned)<-case transport of
-    Stdio exe args -> (,,) <$> D.startAdapter exe args directory <*> pure ("127.0.0.1",4711) <*> pure False
-    TCP host port -> (,,) <$> D.startClient host port <*> pure (host,port) <*> pure False
-    Server exe args host port -> (,,) <$> D.startManaged exe args directory host port <*> pure (host,port) <*> pure True
-  initializeSession runtime directory c address requestName arguments adapter owned d
+    Stdio exe args -> (,,) <$> D.startAdapterAfter (awaitRetired runtime) exe args directory <*> pure ("127.0.0.1",4711) <*> pure False
+    TCP host port -> (,,) <$> D.startClientAfter (awaitRetired runtime) host port <*> pure (host,port) <*> pure False
+    Server exe args host port -> (,,) <$> D.startManagedWithAfter (awaitRetired runtime) (pure (exe,args,[])) directory host port <*> pure (host,port) <*> pure True
+  started<-initializeSession runtime directory c address requestName arguments adapter owned d
+  when (adapter=="hdb") $ modifyIORef' ref (\state -> state {hdbLauncher=case transport of
+    Server executable _ _ _ -> Just executable; _ -> Nothing})
+  pure started
 
 launchTarget :: Debugger -> Int -> Desktop -> IO Desktop
 launchTarget runtime@(Debugger ref _ _) port d
@@ -422,8 +440,8 @@ launchTarget runtime@(Debugger ref _ _) port d
             let (compilerArgs,guestArgs)=break (=="--") args
                 flags=["--dap-port",show port]
             -- Release an earlier managed session before testing its port again.
-            readIORef ref >>= mapM_ D.stopClient . client
-            c<-D.startManaged exe (compilerArgs++flags++guestArgs) directory "127.0.0.1" port
+            readIORef ref >>= stopTransport runtime
+            c<-D.startManagedWithAfter (awaitRetired runtime) (pure (exe,compilerArgs++flags++guestArgs,[])) directory "127.0.0.1" port
             started<-initializeSession runtime directory c ("127.0.0.1",port) "attach" (object []) "graalvm" True d
             pure started {status="Starting THC debugger; build output is in Debug / Output..."}
           Left err -> pure d {status=err}
@@ -444,12 +462,96 @@ launchGHC runtime directory config port d = case Build.buildSource d of
   _ -> pure d {status="Open the Haskell entry file for GHC debugging, or use Adapter config."}
 
 initializeSession :: Debugger -> FilePath -> D.Client -> (Text,Int) -> Text -> Value -> Text -> Bool -> Desktop -> IO Desktop
-initializeSession (Debugger ref _ _) directory c address requestName arguments adapter owned d = do
+initializeSession runtime@(Debugger ref _ _) directory c address requestName arguments adapter owned d = do
   s<-readIORef ref
-  mapM_ D.stopClient (client s)
+  stopTransport runtime s
   writeIORef ref emptyState {client=Just c,generation=generation s+1,root=directory,endpoint=address,
     followSource=followSource s,breakpoints=persistentBreakpoints s,breakModified=breakModified s,startRequest=(requestName,arguments),managed=owned,adapterId=adapter}
   pure (automaticDesktop s d) {status="Connecting debugger..."}
+
+debuggerConsoles :: Debugger -> C.Consoles
+debuggerConsoles (Debugger _ _ (HdbRuntime _ _ _ _ consoles _)) = consoles
+
+-- Session ownership survives frontend detach. Stop/replacement also retires a
+-- terminal still being prepared, so it cannot appear in a newer session.
+stopTransport :: Debugger -> State -> IO ()
+stopTransport runtime@(Debugger ref _ (HdbRuntime _ _ _ _ _ retired)) s = mask $ \restore -> do
+  -- No old worker can publish into the replacement session. Process cleanup is
+  -- joined only at daemon teardown, outside the desktop lock.
+  modifyIORef' ref (\state -> state {client=Nothing,terminalLaunch=Nothing,debugConsoles=[]})
+  cleanups<-mapM (C.retireConsole (debuggerConsoles runtime)) (debugConsoles s)
+  when (isJust (client s) || isJust (terminalLaunch s) || not (null cleanups)) $ do
+    task<-async $ restore $ flip finally (mapM_ D.stopClient (client s)) $ do
+      forM_ (terminalLaunch s) $ \(_,_,worker,result) -> do
+        cancel worker
+        completed<-atomically (tryTakeTMVar result)
+        forM_ completed (mapM_ C.closePreparedConsole)
+      mapM_ (either (const (pure ())) id) cleanups
+    modifyIORef' retired (task:)
+
+reapRetired :: Debugger -> IO ()
+reapRetired (Debugger _ _ (HdbRuntime _ _ _ _ _ retired)) = do
+  tasks<-readIORef retired
+  running<-filterM (fmap (not . isJust) . poll) tasks
+  writeIORef retired running
+
+awaitRetired :: Debugger -> IO ()
+awaitRetired (Debugger _ _ (HdbRuntime _ _ _ _ _ retired)) = readIORef retired >>= mapM_ waitCatch
+
+replyReverse :: Debugger -> Int -> Text -> Either Text Value -> IO ()
+replyReverse (Debugger ref _ _) ident command result = do
+  s<-readIORef ref
+  forM_ (client s) $ \connection -> do
+    sent<-try (D.respond connection ident command result)
+    case sent of
+      Left (err::IOException) -> modifyIORef' ref (\state -> state {failure=Just (T.pack (show err))})
+      Right () -> pure ()
+
+terminalArguments :: State -> Value -> Parser ([String],Terminal.TerminalConfig)
+terminalArguments s = withObject "runInTerminal" $ \o -> do
+  kind<-o .:? "kind" .!= ("integrated"::Text)
+  unless (kind=="integrated") (fail "Only integrated debugger terminals are supported")
+  shell<-o .:? "argsCanBeInterpretedByShell" .!= False
+  when shell (fail "Shell-interpreted debugger arguments are unsupported")
+  argv<-o .: "args"
+  (command,args)<-case argv of [] -> fail "Debugger terminal command is empty"; command:args -> pure (command,args)
+  directory<-o .: "cwd"
+  let cwd=if null directory then root s else if isAbsolute directory then directory else root s </> directory
+  requested<-o .:? "env" .!= M.empty :: Parser (M.Map String (Maybe String))
+  let environment=M.union requested (M.fromList [(key,Just value) | (key,value)<-debugEnvironment s])
+  -- hdb's reverse request names its inner binary via getExecutablePath. The
+  -- distributed launcher supplies GHC's shared-library paths and ABI checks;
+  -- launching that inner binary directly loses those on macOS/Linux.
+  let executable=case (hdbLauncher s,args) of
+        (Just launcher,subcommand:_) | managed s && adapterId s=="hdb" && subcommand `elem` ["external-interpreter","proxy"] -> launcher
+        _ -> command
+  pure ([key | (key,Nothing)<-M.toList environment],Terminal.TerminalConfig executable args
+    [(key,value) | (key,Just value)<-M.toList environment] cwd 80 24)
+
+tickTerminalLaunch :: Debugger -> Desktop -> IO Desktop
+tickTerminalLaunch runtime@(Debugger ref _ _) d = do
+  s<-readIORef ref
+  case terminalLaunch s of
+    _ | isJust (endedAt s) || isJust (disconnectAt s) -> pure d
+    Nothing -> pure d
+    Just (ident,command,task,result) -> do
+      finished<-poll task
+      case finished of
+        Nothing -> pure d
+        Just outcome -> do
+          modifyIORef' ref (\state -> state {terminalLaunch=Nothing})
+          prepared<-atomically (tryTakeTMVar result)
+          case prepared of
+            Just (Right console) -> do
+              (terminal,opened)<-C.adoptConsole (debuggerConsoles runtime) console d
+              modifyIORef' ref (\state -> state {debugConsoles=terminal:debugConsoles state})
+              pid<-C.consoleProcessId (debuggerConsoles runtime) terminal
+              replyReverse runtime ident command (fmap (\value -> object ["processId" .= value]) pid)
+              pure opened {status="Debugger program input and output: Terminal "<>terminal}
+            _ -> do
+              let detail=case prepared of Just (Left err) -> err; _ -> "Debugger terminal preparation failed: "<>T.pack (show outcome)
+              replyReverse runtime ident command (Left detail)
+              pure d {status=detail}
 
 -- Frame and variable handles are scoped to a suspended execution state.
 invalidate :: State -> State
@@ -468,10 +570,15 @@ send (Debugger ref clock _) kind command arguments = do
 
 tickDebugger :: Debugger -> Core -> Desktop -> IO Desktop
 tickDebugger runtime@(Debugger ref clock _) core original = do
-  starting<-tickHdb runtime original
+  reapRetired runtime
+  prepared<-tickTerminalLaunch runtime original
+  starting<-tickHdb runtime prepared >>= C.tickConsoles (debuggerConsoles runtime)
   s<-readIORef ref
   events<-maybe (pure []) D.pollEvents (client s)
-  updated<-foldM (receive runtime core) starting events
+  received<-foldM (receive runtime core) starting events
+  finalOutput<-output <$> readIORef ref
+  let updated=received {buffers=M.map (\doc -> if documentLabel doc==Just "Debugger output" && contents (documentBuffer doc)/=finalOutput
+        then doc {documentBuffer=newBuffer finalOutput} else doc) (buffers received)}
   now<-clock
   current<-readIORef ref
   let deadline kind=if kind==Attach && fst (startRequest current)=="launch" then 120000000000 else 15000000000
@@ -481,11 +588,11 @@ tickDebugger runtime@(Debugger ref clock _) core original = do
       completionDue=isJust (client current) && maybe False
         (\sent -> now-sent>1000000000) (endedAt current)
   if completionDue then do
-    mapM_ D.stopClient (client current)
+    stopTransport runtime current
     modifyIORef' ref (\state -> state {client=Nothing,connected=False,pending=M.empty})
     pure updated {status=completionStatus current}
   else if not timedOut && not detachExpired && failure current==Nothing then pure updated else do
-    mapM_ D.stopClient (client current)
+    stopTransport runtime current
     modifyIORef' ref (\state -> (invalidate state) {client=Nothing,connected=False,pending=M.empty,ready=False,configured=False,disconnectAt=Nothing,failure=Nothing})
     pure (automaticDesktop current updated) {status=fromMaybe (if detachExpired then "Debugger disconnected." else "DAP request timed out; debugger disconnected.") (failure current)}
 
@@ -501,11 +608,25 @@ receive runtime@(Debugger ref clock _) core d event = do
         send runtime Init "initialize" (object
           ["clientID" .= ("thc-edit"::Text),"clientName" .= ("Turbo Haskell"::Text),"adapterID" .= adapterId s,
            "pathFormat" .= ("path"::Text),"linesStartAt1" .= True,"columnsStartAt1" .= True,
-           "supportsVariableType" .= True,"supportsRunInTerminalRequest" .= False,
+           "supportsVariableType" .= True,"supportsRunInTerminalRequest" .= Terminal.terminalAvailable,
            "supportsVariablePaging" .= False,"supportsMemoryReferences" .= False,"supportsInvalidatedEvent" .= True])
       pure d
+    D.ReverseRequest ident command arguments ->
+      if command=="runInTerminal" && Terminal.terminalAvailable && not (isJust (endedAt s)) && disconnectAt s==Nothing
+      then case parseEither (terminalArguments s) arguments of
+        Left err -> replyReverse runtime ident command (Left (T.pack err)) >> pure d
+        Right (unset,config) -> case terminalLaunch s of
+          Just _ -> replyReverse runtime ident command (Left "A debugger terminal is already starting") >> pure d
+          Nothing -> do
+            result<-newEmptyTMVarIO
+            task<-async $ mask_ $ do
+              prepared<-C.prepareConsole unset config (1024*1024)
+              atomically (putTMVar result prepared)
+            modifyIORef' ref (\state -> state {terminalLaunch=Just (ident,command,task,result)})
+            pure d
+      else replyReverse runtime ident command (Left "Unsupported debugger reverse request") >> pure d
     D.Disconnected reason -> do
-      mapM_ D.stopClient (client s)
+      stopTransport runtime s
       modifyIORef' ref (\state -> (invalidate state) {client=Nothing,connected=False,pending=M.empty,ready=False,configured=False,disconnectAt=Nothing,failure=Nothing})
       pure (automaticDesktop s d) {status=if isJust (endedAt s) then completionStatus s else "DAP: "<>reason}
     D.Notification name _ | isJust (endedAt s), name `notElem` ["terminated","exited","output"] -> pure d
@@ -550,8 +671,10 @@ receive runtime@(Debugger ref clock _) core d event = do
       modifyIORef' ref (\state -> state {programExitCode=field "exitCode" body})
       pure d
     D.Notification "output" body -> do
-      modifyIORef' ref (\state -> state {output=T.takeEnd 16384 (output state<>text "output" body)})
-      pure d
+      let value=T.takeEnd 16384 (output s<>text "output" body)
+          showFirst=not (outputShown s) && null (debugConsoles s) && not (T.null value)
+      modifyIORef' ref (\state -> state {output=value,outputShown=outputShown state || showFirst})
+      pure (if showFirst then addReadOnly "Debugger output" value d else d)
     D.Notification "breakpoint" body -> do
       let bp=fromMaybe Null (field "breakpoint" body)
       modifyIORef' ref (\state -> state {breakpoints=M.map (\(source,points) -> (source,map (updateBreakpoint bp) points)) (breakpoints state)})
@@ -572,7 +695,7 @@ receive runtime@(Debugger ref clock _) core d event = do
           _ -> case result of
            Left err -> do
              when (kind==Init || kind==Attach || kind==Configure) $ do
-               mapM_ D.stopClient (client s)
+               stopTransport runtime s
                modifyIORef' ref (\state -> (invalidate state) {client=Nothing,connected=False,pending=M.empty,ready=False,configured=False,disconnectAt=Nothing,failure=Nothing})
              case kind of
                Control wasStopped | wasStopped -> do
@@ -661,7 +784,7 @@ response runtime@(Debugger ref _ _) core kind body d = do
     Control _ -> pure d
     Inspection command reply -> recordVariables ref command body >> tryPutMVar reply (boundedResult body) >> pure d
     Detach -> do
-      mapM_ D.stopClient (client s)
+      stopTransport runtime s
       modifyIORef' ref (\state -> (invalidate state) {client=Nothing,connected=False,pending=M.empty,ready=False,configured=False,disconnectAt=Nothing})
       pure (clearDialog d) {status=if managed s || fst (startRequest s)=="launch" then "Debugger disconnected; launched session stopped." else "Debugger disconnected; attached program is not terminated."}
 
@@ -838,7 +961,7 @@ data GhcLaunch=GhcLaunch FilePath Build.BuildConfig FilePath Int HdbContext
 data HdbPrepared=HdbReady FilePath [(String,String)] | HdbOffer Hdb.HdbPlan
 data HdbRuntime=HdbRuntime Downloads.Downloads (IORef HdbState)
   (Compilers.Compiler -> IO (Either Text Hdb.HdbPlan))
-  (Hdb.HdbPlan -> (Downloads.DownloadProgress -> IO ()) -> IO (Either Text FilePath))
+  (Hdb.HdbPlan -> (Downloads.DownloadProgress -> IO ()) -> IO (Either Text FilePath)) C.Consoles (IORef [Async ()])
 data HdbState=HdbState
   { hdbSerial :: Int, hdbWanted :: Maybe (Int,GhcLaunch,Bool)
   , hdbPreparing :: Maybe (Int,GhcLaunch,TMVar (),Async (Either () (Either Text HdbPrepared)))
@@ -857,20 +980,20 @@ hdbCurrent :: GhcLaunch -> HdbContext -> Bool
 hdbCurrent (GhcLaunch _ _ _ _ context) current@(_,_,_,_,identities)=context==current &&
   not (any (\(_,_,_,_,modified)->modified) identities)
 hdbPending :: Debugger -> IO Bool
-hdbPending (Debugger _ _ (HdbRuntime _ ref _ _))=do
+hdbPending (Debugger _ _ (HdbRuntime _ ref _ _ _ _))=do
   h<-readIORef ref
   pure (any (==hdbSerial h) ([ident | (ident,_,_)<-maybeToList (hdbWanted h)]++
     [ident | (ident,_,_,_)<-maybeToList (hdbPreparing h)]++[ident | (ident,_,_)<-maybeToList (hdbOffer h)]++
     [ident | (ident,_,_)<-maybeToList (hdbWaiting h)]))
 
 invalidateHdb :: Debugger -> IO ()
-invalidateHdb (Debugger _ _ (HdbRuntime _ ref _ _))=do
+invalidateHdb (Debugger _ _ (HdbRuntime _ ref _ _ _ _))=do
   h<-readIORef ref
   forM_ (hdbPreparing h) (\(_,_,stop,_)->atomically (void (tryPutTMVar stop ())))
   writeIORef ref h {hdbSerial=hdbSerial h+1,hdbWanted=Nothing,hdbOffer=Nothing}
 
 queueHdb :: Debugger -> GhcLaunch -> Desktop -> IO Desktop
-queueHdb runtime@(Debugger _ _ (HdbRuntime _ ref _ _)) request d=do
+queueHdb runtime@(Debugger _ _ (HdbRuntime _ ref _ _ _ _)) request d=do
   invalidateHdb runtime
   h<-readIORef ref
   writeIORef ref h {hdbWanted=Just (hdbSerial h,request,True)}
@@ -878,7 +1001,7 @@ queueHdb runtime@(Debugger _ _ (HdbRuntime _ ref _ _)) request d=do
   pure d {status="Resolving the selected GHC and its debugger..."}
 
 startHdbPreparation :: Debugger -> IO ()
-startHdbPreparation (Debugger _ _ (HdbRuntime _ ref prepare _))=mask $ \restore->do
+startHdbPreparation (Debugger _ _ (HdbRuntime _ ref prepare _ _ _))=mask $ \restore->do
   h<-readIORef ref
   case (hdbPreparing h,hdbWanted h) of
     (Nothing,Just (ident,request@(GhcLaunch directory config _ _ _),allowOffer))->do
@@ -901,11 +1024,12 @@ startHdbPreparation (Debugger _ _ (HdbRuntime _ ref prepare _))=mask $ \restore-
 
 startPreparedGhc :: Debugger -> GhcLaunch -> FilePath -> [(String,String)] -> Desktop -> IO Desktop
 startPreparedGhc runtime@(Debugger ref _ _) (GhcLaunch directory config file port _) executable environment d=do
-  readIORef ref >>= mapM_ D.stopClient . client
-  connection<-D.startManagedWith (pure (executable,["server","--port",show port],environment)) directory "127.0.0.1" port
+  readIORef ref >>= stopTransport runtime
+  connection<-D.startManagedWithAfter (awaitRetired runtime) (pure (executable,["server","--port",show port],environment)) directory "127.0.0.1" port
   let arguments=object ["projectRoot" .= directory,"entryFile" .= makeRelative directory file,
         "entryPoint" .= ("main"::Text),"entryArgs" .= Build.buildArguments config,"extraGhcArgs" .= ([]::[String])]
   started<-initializeSession runtime directory connection ("127.0.0.1",port) "launch" arguments "hdb" True d
+  modifyIORef' ref (\state -> state {debugEnvironment=environment,hdbLauncher=Just executable})
   pure started {status="Starting the selected GHC debugger..."}
 
 -- doc-artifact: tools/docs-screenshots.hs hdb-download -> docs/site/screenshots/hdb-download.png
@@ -921,7 +1045,7 @@ hdbOfferDialog ident plan=Dialog "Download Haskell debugger?" (DebugDialog ("hdb
     area name value=TextArea name False (newBuffer (T.intercalate "\n" (T.chunksOf 36 value))) (Selection 0 0) 0 0
 
 acceptHdb :: Debugger -> Text -> [Text] -> Desktop -> IO Desktop
-acceptHdb runtime@(Debugger _ _ (HdbRuntime downloads ref _ acquire)) action values d=do
+acceptHdb runtime@(Debugger _ _ (HdbRuntime downloads ref _ acquire _ _)) action values d=do
   h<-readIORef ref
   case hdbOffer h of
     Just (ident,request,plan) | action=="hdb-accept:"<>tshow ident,ident==hdbSerial h->do
@@ -939,7 +1063,7 @@ acceptHdb runtime@(Debugger _ _ (HdbRuntime downloads ref _ acquire)) action val
     _->pure d {status="This debugger download offer expired."}
 
 hdbDownloadsAction :: Debugger -> [Text] -> Desktop -> IO Desktop
-hdbDownloadsAction runtime@(Debugger _ _ (HdbRuntime downloads ref _ _)) values d=case values of
+hdbDownloadsAction runtime@(Debugger _ _ (HdbRuntime downloads ref _ _ _ _)) values d=case values of
   []->showDownloads runtime d
   "0":index:_->do
     h<-readIORef ref
@@ -952,7 +1076,7 @@ hdbDownloadsAction runtime@(Debugger _ _ (HdbRuntime downloads ref _ _)) values 
   _->pure d
 
 showDownloads :: Debugger -> Desktop -> IO Desktop
-showDownloads (Debugger _ _ (HdbRuntime downloads ref _ _)) d=do
+showDownloads (Debugger _ _ (HdbRuntime downloads ref _ _ _ _)) d=do
   rows<-Downloads.downloadSnapshot downloads
   h<-readIORef ref
   let oldIndex=case dialog d of Just dg | purpose dg==DebugDialog "downloads",ListBox _ _ n:_<-fields dg->n; _->0
@@ -990,7 +1114,7 @@ downloadsDialog rows index previous=Dialog "Downloads" (DebugDialog "downloads")
 -- Every poll is nonblocking. Cancellation cleanup and GHC/Cabal queries stay on
 -- the one preparation worker; a replacement waits for that worker to retire.
 tickHdb :: Debugger -> Desktop -> IO Desktop
-tickHdb runtime@(Debugger _ _ (HdbRuntime downloads ref _ _)) original=do
+tickHdb runtime@(Debugger _ _ (HdbRuntime downloads ref _ _ _ _)) original=do
   h<-readIORef ref
   let requests=[request | (ident,request,_)<-maybeToList (hdbWanted h),ident==hdbSerial h]++
         [request | (ident,request,_)<-maybeToList (hdbOffer h),ident==hdbSerial h]++

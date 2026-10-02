@@ -14,6 +14,7 @@ wordStar = false
 blinkCursor = true
 crtFilter = true
 pixelateUnicode = true
+bufferView = "current"
 materialIcons = false
 streamerMode = false
 ```
@@ -21,6 +22,9 @@ streamerMode = false
 Use `terminal`, `auto`, `metal`, `vulkan`, or `web` for the display backend. `remote` serves the protocol over standard input/output. Scale runs from 1 to 8 in eighth steps. Screen mode 3 defaults to 80×25; 259 defaults to 80×50. Explicit columns and rows override those dimensions. The terminal takes its size from the terminal window.
 
 Command-line options override environment variables, which override project defaults, which override global defaults. For example, `THC_EDIT_BACKEND=web` overrides `backend = "metal"`, and `--terminal` overrides both. `--mode` selects its usual dimensions unless `--size` is also supplied. `--no-crt`, `--classic-icons`, `--standard-keys`, `--no-blink-cursor` and `--no-pixelate-unicode` override enabled defaults.
+
+`bufferView` accepts `current`, `changes`, `only-changes`, or `side-by-side`.
+The radio controls in the Window menu save this default for newly opened buffers.
 
 Startup defaults apply when a session is created. Resuming keeps that session's editing state; the frontend can still use your chosen backend and scale. To change a running session, use **Options > Preferences**. An agent can read and update non-agent settings through `editor_settings`; its `defaults` object updates the startup section without changing the current session.
 

@@ -26,6 +26,7 @@ void thc_terminal_feed(thc_terminal *, const uint8_t *, size_t);
 const uint32_t *thc_terminal_cells(thc_terminal *);
 const uint8_t *thc_terminal_text(thc_terminal *, size_t *length);
 const uint8_t *thc_terminal_output(thc_terminal *, size_t *length);
+int thc_terminal_pid(thc_terminal *);
 /* columns, rows, cursor x/y (-1 hidden), exited, exit code */
 void thc_terminal_info(thc_terminal *, int info[6]);
 const char *thc_terminal_error(thc_terminal *);

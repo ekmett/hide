@@ -1,7 +1,7 @@
 {-# LANGUAGE CPP, ForeignFunctionInterface, OverloadedStrings #-}
 module THC.Edit.Terminal
   ( Terminal, TerminalConfig(..), TerminalCell(..), TerminalSnapshot(..)
-  , terminalAvailable, startTerminal, withTerminal, writeTerminal, resizeTerminal
+  , terminalAvailable, startTerminal, startTerminalUnsetting, terminalProcessId, withTerminal, writeTerminal, resizeTerminal
   , setTerminalAppearance, pollTerminal, killTerminal, closeTerminal
   ) where
 
@@ -79,6 +79,7 @@ foreign import ccall safe "thc_terminal_poll" c_poll :: Ptr NativeTerminal -> IO
 foreign import ccall unsafe "thc_terminal_cells" c_cells :: Ptr NativeTerminal -> IO (Ptr Word32)
 foreign import ccall unsafe "thc_terminal_text" c_text :: Ptr NativeTerminal -> Ptr CSize -> IO (Ptr Word8)
 foreign import ccall unsafe "thc_terminal_output" c_output :: Ptr NativeTerminal -> Ptr CSize -> IO (Ptr Word8)
+foreign import ccall unsafe "thc_terminal_pid" c_pid :: Ptr NativeTerminal -> IO CInt
 foreign import ccall unsafe "thc_terminal_info" c_info :: Ptr NativeTerminal -> Ptr CInt -> IO ()
 foreign import ccall unsafe "thc_terminal_error" c_error :: Ptr NativeTerminal -> IO CString
 foreign import ccall safe "thc_terminal_kill" c_kill :: Ptr NativeTerminal -> IO ()
@@ -99,10 +100,13 @@ validSize :: Int -> Int -> Bool
 validSize columns rows = columns > 0 && rows > 0 && columns <= 1000 && rows <= 1000
 
 startTerminal :: TerminalConfig -> IO (Either Text Terminal)
-startTerminal config
+startTerminal = startTerminalUnsetting []
+
+startTerminalUnsetting :: [String] -> TerminalConfig -> IO (Either Text Terminal)
+startTerminalUnsetting unset config
   | not (validSize (terminalColumns config) (terminalRows config)) = pure (Left "Terminal size must be between 1 and 1000 rows and columns")
-  | any (elem '\0') (terminalCommand config : terminalDirectory config : terminalArguments config ++ concatMap (\(k,v) -> [k,v]) (terminalEnvironment config)) = pure (Left "Terminal command contains a NUL byte")
-  | any (\(k,_) -> null k || '=' `elem` k) (terminalEnvironment config) = pure (Left "Invalid terminal environment variable name")
+  | any (elem '\0') (terminalCommand config : terminalDirectory config : terminalArguments config ++ unset ++ concatMap (\(k,v) -> [k,v]) (terminalEnvironment config)) = pure (Left "Terminal command contains a NUL byte")
+  | any (\k -> null k || '=' `elem` k) (unset ++ map fst (terminalEnvironment config)) = pure (Left "Invalid terminal environment variable name")
   | otherwise = do
       outcome <- try start
       pure $ either (Left . T.pack . show) id (outcome :: Either IOException (Either Text Terminal))
@@ -111,8 +115,8 @@ startTerminal config
       inherited <- getEnvironment
       cwd <- makeAbsolute (terminalDirectory config)
       let overrides = terminalEnvironment config
-          environment = overrides ++ [(k,v) | (k,v) <- inherited, variableKey k `notElem` map (variableKey . fst) overrides, variableKey k /= "TERM"]
-          withTerm = if "TERM" `elem` map (variableKey . fst) overrides then environment else ("TERM","xterm-256color") : environment
+          environment = overrides ++ [(k,v) | (k,v) <- inherited, variableKey k `notElem` map (variableKey . fst) overrides, variableKey k /= "TERM", variableKey k `notElem` map variableKey unset]
+          withTerm = if "TERM" `elem` (map (variableKey . fst) overrides ++ map variableKey unset) then environment else ("TERM","xterm-256color") : environment
           command = terminalCommand config
           absolute path = if isAbsolute path then path else cwd </> path
           paths = if isAbsolute command || any isPathSeparator command then [absolute command]
@@ -160,6 +164,9 @@ startTerminal config
     executablePaths path = [path]
     withStrings strings action = withMany withCString strings $ \pointers -> withArray0 nullPtr pointers action
 #endif
+
+terminalProcessId :: Terminal -> IO (Either Text Int)
+terminalProcessId terminal = withOpen terminal (fmap (Right . fromIntegral) . c_pid)
 
 withOpen :: Terminal -> (Ptr NativeTerminal -> IO (Either Text a)) -> IO (Either Text a)
 withOpen (Terminal state) action = withMVar state $ maybe (pure (Left "Terminal has been released")) action
@@ -231,6 +238,10 @@ unavailable = pure (Left "Terminal support is unavailable: rebuild with -ftermin
 
 startTerminal :: TerminalConfig -> IO (Either Text Terminal)
 startTerminal _ = unavailable
+startTerminalUnsetting :: [String] -> TerminalConfig -> IO (Either Text Terminal)
+startTerminalUnsetting _ _ = unavailable
+terminalProcessId :: Terminal -> IO (Either Text Int)
+terminalProcessId _ = unavailable
 writeTerminal :: Terminal -> ByteString -> IO (Either Text ())
 writeTerminal _ _ = unavailable
 resizeTerminal :: Terminal -> Int -> Int -> IO (Either Text ())

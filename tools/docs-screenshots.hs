@@ -1,10 +1,14 @@
 {-# LANGUAGE OverloadedStrings #-}
 -- Capture actual editor commands over this checkout through the Metal frontend.
 -- Run from the repository root; see docs/contributing.md#documentation-screenshots.
-import Control.Monad (forM_, when)
+import Control.Monad (forM_, unless, when)
+import qualified Data.Map.Strict as M
 import Data.Aeson (object, (.=))
 import qualified Data.Text as T
-import THC.Edit.Buffer (newBuffer, Selection(..), revision, contents)
+import qualified Data.Text.IO as TIO
+import THC.Edit.Buffer (newBuffer, Selection(..), revision, contents, replaceSelection, bufferLineOffset, bufferLineChanges)
+import THC.Edit.BufferView (BufferView(SideBySideView))
+import THC.Edit.Files (FileState(..))
 import THC.Edit.MCPPermissions (withPermissionsAt, permissionCall, policyEffects)
 import THC.Edit.WorkspaceFilesMCP (fileTools, fileTool)
 import qualified Graphics.Vty as V
@@ -85,6 +89,42 @@ main = do
             fst <$> permissionCall permissions (fileTool applyEffects) d "buffer_apply_diff"
               (object ["bufferId" .= bufferId w,"revision" .= revision (documentBuffer doc),"diff" .= patch])
           _ -> fail "Permission screenshot requires the open source buffer"
+        review d = do
+          let file=root </> "src/THC/Edit/Frontend.hs"
+          source <- TIO.readFile file
+          let replace before after buffer =
+                let (prefix,suffix)=T.breakOn before (contents buffer)
+                    offset=T.length prefix
+                in if T.null suffix then error "Review screenshot source anchor is missing"
+                   else replaceSelection (Selection offset (offset+T.length before)) after buffer
+              changed=replace "    Just \"web\" -> Right Web"
+                "    Just \"web\" -> Right Web\n    -- Accept a familiar browser alias.\n    Just \"browser\" -> Right Web"
+                (replace "    Just \"auto\" -> Right Auto" "    Just \"auto\" -> Right Metal" (newBuffer source))
+              resized=fst (handleEvent (V.EvResize 132 36) d)
+              opened=addDocument (Just (FileState file Nothing)) changed resized {sideTree=Nothing}
+              styled=opened {buffers=M.map highlightDocument (buffers opened)}
+              positioned=modifyActive (\w -> w {bounds=Rect 1 1 130 19,
+                selection=Selection (bufferLineOffset changed 29) (bufferLineOffset changed 29)}) styled
+          unless (bufferLineChanges changed==(3,1)) (fail "Unexpected review screenshot line counts")
+          side <- modifyActive (\w -> w {scrollRow=21}) <$> command (SetBufferView SideBySideView) positioned
+          case activeWindow side of
+            Nothing -> fail "Missing review screenshot window"
+            Just w -> do
+              let r=bounds w
+                  old=left r+1+fst (reviewPaneWidths w)
+                  target=left r+1+(width r-3)*40 `div` 100
+                  y=top r+5
+              dragged <- Driver.input effects (V.EvMouseDown old y V.BLeft []) side
+                >>= Driver.input effects (V.EvMouseDown target y V.BLeft [])
+                >>= Driver.input effects (V.EvMouseUp target y (Just V.BLeft))
+              unless (maybe False (\window -> reviewSplit window>=38 && reviewSplit window<=41) (activeWindow dragged))
+                (fail "Review screenshot divider drag did not apply")
+              pure dragged
+        reviewMenu d = do
+          shown <- review d
+          case [i | (i,(name,_,_))<-zip [0..] menus,name=="Window"] of
+            i:_ -> pure shown {menu=Just (i,13)}
+            [] -> fail "Missing Window menu"
         start = (initialDesktop (100,32))
           {videoMode=Just 3, crtFilter=True, pixelateUnicode=True, blinkCursor=False, streamerMode=True, nativeMac=True}
     (_, loaded) <- applyEffects start [ReadPath root, ReadPath (root </> "src/THC/Edit/Buffer.hs")]
@@ -103,6 +143,8 @@ main = do
               Nothing->fail "Request downloads explicitly")
           , ("find-replace", \d -> command Find d >>= typeText "bufferLineAt" >>= key (V.KChar 'h') [V.MCtrl] >>= typeText "lineAt")
           , ("permission-diff", permissionDiff)
+          , ("side-by-side", review)
+          , ("window-views-menu", reviewMenu)
           , ("conversation", chat)
           , ("debug-step", debug)
           , ("file-menu", pure . (\d -> d {menu=Just (0,1)}))
@@ -137,10 +179,12 @@ capture effects scratch output name shown = do
         Nothing | Just (r,_)<-contextMenu shown -> Just r
         Nothing -> case menu shown of
           Just (i,_) -> Just (menuRect shown i)
-          Nothing | name `elem` ["conversation","debug-step"] -> bounds <$> activeWindow shown
+          Nothing | name `elem` ["conversation","debug-step","side-by-side"] -> bounds <$> activeWindow shown
                   | otherwise -> Nothing
       pixels = case crop of
         Nothing -> Nothing
+        Just (Rect x y w h) | name=="side-by-side" ->
+          Just (Rect (max 0 (x*24-8)) (max 0 (y*48-8)) (w*24+16) (h*48+16))
         Just (Rect x y w h) ->
           let x0=max 0 (x*24-8); y0=if menu shown/=Nothing then 0 else max 0 (y*48-8)
               x1=min (fst (screenSize shown)*24) ((x+w+2)*24+8); y1=min (snd (screenSize shown)*48) ((y+h+1)*48+8)

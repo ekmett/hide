@@ -73,7 +73,7 @@ separately so upstream features are not confused with finished integration.
 | Exception filters and details | Implemented | Existing filters plus exception details panel/tool |
 | Valid breakpoint locations | Implemented | Resolve executable spans and show relocation/unverified state |
 | Value formatting | Advertised | Offer only formatting verified to affect actual output |
-| Program input | POSIX reverse terminal route; Windows route disabled | Existing owned terminal, subject to live qualification |
+| Program input | POSIX reverse terminal route; Windows route disabled | Shared owned terminal; macOS stdin, Unicode and Ctrl+C qualified |
 | Stop | Terminate and disconnect destroy debuggee | Stop; no misleading “detach and leave running” for hdb |
 | Pause, request cancellation | Pause handler is a no-op; cancel unsupported | Disable Pause for hdb; Stop/relaunch is recovery, not resumable cancellation |
 | Reverse step, restart frame, assign value, memory/disassembly | Unsupported | Do not offer these controls for hdb |
@@ -175,8 +175,10 @@ the socket closed”.
       stale/unknown handles, exceptions and a nonterminating evaluation.
 - [ ] Expose GHC launch selection, exception details, Evaluate/Force and rich
       breakpoints through the UI and MCP, sharing permission/state handling.
-- [ ] Add terminal reverse requests; qualify stdin, Unicode, Ctrl+C, resize,
-      failure cleanup and frontend reconnect. Test Windows separately.
+- [x] Add terminal reverse requests; qualify macOS stdin, Unicode, Ctrl+C and
+      owned cleanup. Shared terminal fixtures cover resize and retained output.
+- [ ] Qualify debugger terminal frontend reconnect end to end and test the
+      upstream Windows fallback separately.
 - [ ] Capture actual dialogs and stopped code in Metal, document workflows, and
       qualify both successful and exceptional exits plus agent background/reveal.
 
@@ -240,3 +242,29 @@ missing codes remain null. Real selected-GHC runs qualified normal exit 0 and
 outcomes, not proof of exception-breakpoint behavior. The live checks used the
 same saved-source launch, breakpoint, scopes, protected lazy inspection, step
 and continue flow as the editor.
+
+
+On 2026-10-02, the official hdb 0.14.0.0 bindist with GHC 9.14.1 on macOS
+arm64 passed interactive qualification through **Selected target**. An isolated
+direct-cradle program accepted `typed λ` through the editor's ordinary terminal
+keyboard effects, printed its Unicode echo and separate stderr output, then
+completed with DAP exit 0. A second run received Ctrl+C while waiting in
+`getLine`; hdb ended that session with exit 42. This establishes interruption,
+not a resumable exception stop. Both probe processes finished cleanup. A real
+Metal capture showed the source above its pinned terminal while awaiting input.
+Cabal component discovery, a complete display-detach/reconnect cycle and Windows
+input remain separate qualification items.
+
+The bindist's reverse request names its inner executable, bypassing the wrapper
+that locates matching GHC shared libraries. Owned hdb sessions therefore run
+only the known `external-interpreter`/`proxy` commands through the original
+launcher, retaining argv, cwd and environment. Generic adapter commands remain
+unchanged. A fixture covers both the launcher route and that negative control.
+Terminal preparation and process retirement run on owned workers; replacing a
+session waits for old listener cleanup on the transport worker. On macOS,
+terminal cleanup drains the available output tail and closes the PTY master
+before waiting for the killed process, avoiding an observed terminal-exit wait.
+Focused DAP, debugger, terminal and console checks cover literal argv, environment
+unsetting, process IDs, failed reverse requests, Unicode input, Ctrl+C, retained
+output and exactly-once delivery of the final drained tail. Output-only adapters
+also update the shared live Debugger output view.

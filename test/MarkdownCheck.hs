@@ -50,6 +50,21 @@ checks = do
       dark=snapshotHtml help {appearance=DarkMode}
   check "appearance resolves explicit and OS choices" (not (darkAppearance help {appearance=LightMode,systemDark=True}) && darkAppearance help {appearance=DarkMode,systemDark=False} && darkAppearance help {appearance=SystemMode,systemDark=True})
   check "Help backgrounds follow light and dark appearance" ("background:rgb(0,170,170)" `T.isInfixOf` light && "background:rgb(0,0,0)" `T.isInfixOf` dark && light/=dark)
+  let rawShell="printf '%s\\n' 'literal ; λ'\n\tprintf 'tail  '  \n"
+      shellSource="before\n\n```bash\n"<>rawShell<>"```\n\nafter\n\n```console\n$ echo ignored\nignored\n```\n\n```zsh\necho second\n```"
+  forM_ [7,20,80] $ \width -> do
+    let (cells,blocks)=renderMarkdownWithShellBlocks width shellSource
+    check "execution metadata preserves whole original shell body"
+      (map (\(_,_,dialect,body)->(dialect,body)) blocks==[("bash",rawShell),("zsh","echo second\n")])
+    check "execution spans cover shell panels only and exclude surrounding prose"
+      (all (\(start,end,_,_)->start>=0 && end>start && end<=length cells &&
+        any (\(_,style)->case style of CodeStyle True _->True; _->False) (take (end-start) (drop start cells)) &&
+        not ("before" `T.isInfixOf` T.pack (map fst (take (end-start) (drop start cells))))) blocks)
+    check "metadata does not change Markdown rendering" (cells==renderMarkdown width shellSource)
+  check "nested fenced code retains commands without Markdown list markers"
+    (map (\(_,_,dialect,body)->(dialect,body)) (snd (renderMarkdownWithShellBlocks 15 "- example\n\n  ```sh\n  echo nested\n  ```"))==[("sh","echo nested\n")])
+  check "empty shell block metadata is retained for clear execution errors"
+    (map (\(_,_,_,body)->body) (snd (renderMarkdownWithShellBlocks 40 "```sh\n```"))==[""])
   check "empty input" (null (renderMarkdown 80 ""))
   let paragraph=T.replicate 2000 "Ordinary message with some **bold** and code `abc`.\n"
       long=renderMarkdown 73 paragraph

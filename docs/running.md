@@ -187,6 +187,17 @@ GHC version. A customized GHC executable requires explicit **Adapter config**,
 so Selected target cannot silently substitute another compiler. Use **Adapter config**
 for a different entry point or additional GHC options.
 
+
+Debugged programs that request a terminal open an ordinary **Terminal** window
+beside the source. Focus that window to type program input or send **Ctrl+C**;
+its output, colors, Unicode and resize behavior use the same terminal as Run.
+The terminal survives detaching and resuming the editor display. **Debug > Disconnect**
+ends the owned debugger and its terminal process, retaining the displayed output.
+Adapters that send output without a terminal use the live **Debugger output**
+window, also available through **Debug > Output**. This output view does not
+accept program input. The inspected hdb release disables terminal requests on
+Windows; that platform's program input remains unqualified.
+
 ## Step through a program
 
 1. Launch or attach, then wait for the first stop. The editor opens the

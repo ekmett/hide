@@ -20,6 +20,7 @@ import System.Posix.Files (fileMode,getFileStatus)
 #endif
 import THC.Edit.Buffer
 import THC.Edit.Files
+import THC.Edit.BufferView
 import THC.Edit.Model
 import THC.Edit.Recovery
 
@@ -33,7 +34,7 @@ checks=bracket temporary removePathForcibly $ \root->do
       bytes=BS.pack [0,255,10,128]
       hex=undo (replaceSelection (Selection 0 0) "B" (replaceSelection (Selection 1 2) "A" (newByteBuffer bytes)))
       fresh=(initialDesktop (80,25)) {guestPrivatePaths=[root </> "fresh-config"],nativeMac=True,browserFrontend=True}
-      source=addDocument (Just (FileState sourcePath (Just (bufferBytes original)))) edited (initialDesktop (100,35))
+      source=modifyActive (\w -> w {bufferView=SideBySideView,reviewSplit=63}) (addDocument (Just (FileState sourcePath (Just (bufferBytes original)))) edited (initialDesktop (100,35)))
       sourceId=bufferId (fromJust (activeWindow source))
       split=fst (runCommand SplitVertical source)
       binary=addDocument Nothing hex split
@@ -117,6 +118,8 @@ checks=bracket temporary removePathForcibly $ \root->do
   disk<-BS.readFile sourcePath
   check "restored old baseline triggers existing save conflict checks" (case conflict of Left _->disk=="external disk edit"; _->False)
   encoded<-BS.readFile path
+  check "recovery preserves per-window buffer view and divider"
+    (all (\w -> bufferView w==SideBySideView && reviewSplit w==63) [w | w<-windows recovered,bufferId w==sourceId])
   check "checkpoint omits private pending answers and approval tokens" (not ("private pending answer" `BS.isInfixOf` encoded) && not ("pending-action-token" `BS.isInfixOf` encoded) && not ("pending approval body" `BS.isInfixOf` encoded))
   invalidWrite<-writeCheckpoint path desktop {nextId=0}
   preserved<-BS.readFile path

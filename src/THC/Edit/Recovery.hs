@@ -24,6 +24,7 @@ import System.IO.Error (catchIOError)
 import System.Posix.Files (setFileMode)
 #endif
 import THC.Edit.Buffer
+import THC.Edit.BufferView
 import THC.Edit.Files (FileState(..))
 import THC.Edit.Model
 
@@ -70,13 +71,13 @@ ignore action=catchIOError action (const (pure ()))
 bufferValue :: Buffer -> Value
 bufferValue buffer=let s=snapshotBuffer buffer in object
   ["contents" .= snapshotContents s,"saved" .= snapshotSaved s,"byteMode" .= snapshotByteMode s,"savedByteMode" .= snapshotSavedByteMode s,
-   "revision" .= snapshotRevision s,"lastChange" .= snapshotLastChange s,"undo" .= map history (snapshotUndo s),"redo" .= map history (snapshotRedo s)]
+   "revision" .= snapshotRevision s,"lastChange" .= snapshotLastChange s,"undo" .= map history (snapshotUndo s),"redo" .= map history (snapshotRedo s),"lineChanges" .= snapshotLineChanges s]
   where history (text,mode,change)=object ["contents" .= text,"byteMode" .= mode,"change" .= change]
 
 bufferParser :: Value -> Parser Buffer
 bufferParser=withObject "buffer" $ \o->do
   snapshot<-BufferSnapshot <$> o .: "contents" <*> o .: "saved" <*> (o .: "undo" >>= mapM history) <*> (o .: "redo" >>= mapM history)
-    <*> o .: "revision" <*> o .: "lastChange" <*> o .: "byteMode" <*> o .: "savedByteMode"
+    <*> o .: "revision" <*> o .: "lastChange" <*> o .: "byteMode" <*> o .: "savedByteMode" <*> o .:? "lineChanges"
   either (fail . T.unpack) pure (restoreBuffer snapshot)
   where history=withObject "history" $ \o->(,,) <$> o .: "contents" <*> o .: "byteMode" <*> o .: "change"
 
@@ -152,7 +153,7 @@ desktopValueWith buffer baseline desktop=do
     "composer" .= composer,"composerSelection" .= selectionValue (composerSelection d),"composerFocused" .= composerFocused d,
     "directory" .= defaultDirectory d,"sidebar" .= fmap sidebarValue (sideTree d),"preferences" .= object
       ["wordStar" .= wordStar d,"blinkCursor" .= blinkCursor d,"crtFilter" .= crtFilter d,"pixelateUnicode" .= pixelateUnicode d,
-       "materialIcons" .= materialIcons d,"streamerMode" .= streamerMode d,"appearance" .= fromEnum (appearance d),"videoMode" .= videoMode d,
+       "defaultBufferView" .= fromEnum (defaultBufferView d),"materialIcons" .= materialIcons d,"streamerMode" .= streamerMode d,"appearance" .= fromEnum (appearance d),"videoMode" .= videoMode d,
        "problemsVisible" .= problemsVisible d,"problemsHeight" .= problemsPreferredHeight d,"messagesNumber" .= messagesNumber d]])
   where d=rememberConversationView desktop
         documents=M.filter keptDocument (buffers d)
@@ -183,7 +184,7 @@ conversationViewParser documents=withObject "conversation view" $ \o->do
 windowValue :: Window -> Value
 windowValue w=object ["id" .= windowId w,"bufferId" .= bufferId w,"number" .= windowNumber w,"bounds" .= rectValue (bounds w),
   "selection" .= selectionValue (selection w),"scrollRow" .= scrollRow w,"scrollColumn" .= scrollColumn w,
-  "restoredBounds" .= fmap rectValue (restoredBounds w),"hexLow" .= windowHexLow w,"hexAscii" .= windowHexAscii w]
+  "restoredBounds" .= fmap rectValue (restoredBounds w),"hexLow" .= windowHexLow w,"hexAscii" .= windowHexAscii w,"bufferView" .= fromEnum (bufferView w),"reviewSplit" .= reviewSplit w]
 rectValue :: Rect -> Value
 rectValue (Rect x y w h)=toJSON (x,y,w,h)
 selectionValue :: Selection -> Value
@@ -236,6 +237,7 @@ desktopParser baseline=withObject "checkpoint" $ \o->do
   prefs<-o .: "preferences"
   wordStar'<-prefs .: "wordStar"; blink<-prefs .: "blinkCursor"; crt<-prefs .: "crtFilter"
   pixelate<-prefs .: "pixelateUnicode"; icons<-prefs .: "materialIcons"; streamer<-prefs .: "streamerMode"
+  defaultView<-prefs .:? "defaultBufferView" .!= 0 >>= boundedInt 0 (fromEnum (maxBound :: BufferView))
   look<-prefs .: "appearance"
   unless (look>=0 && look<=2) (fail "Invalid appearance")
   mode<-prefs .: "videoMode" >>= traverse (boundedInt 0 65535)
@@ -243,7 +245,7 @@ desktopParser baseline=withObject "checkpoint" $ \o->do
   messages<-prefs .: "messagesNumber" >>= traverse positive
   pure (layoutBottomWindows (normalizeBottom baseline {dockedTerminals=M.fromList pinned,bottomTerminal=selectedTerminal,screenSize=size,buffers=documents,windows=views,nextId=ident,composerBuffer=composer,composerSelection=composerSelection',composerFocused=composerFocused',
     conversationTarget=selectedTarget,conversationViews=conversationViews',defaultDirectory=directory,sideTree=sidebar,wordStar=wordStar',blinkCursor=blink,crtFilter=crt,pixelateUnicode=pixelate,materialIcons=icons,streamerMode=streamer,
-    appearance=toEnum look,videoMode=mode,problemsVisible=problems,problemsPreferredHeight=preferred,messagesNumber=messages,
+    defaultBufferView=toEnum defaultView,appearance=toEnum look,videoMode=mode,problemsVisible=problems,problemsPreferredHeight=preferred,messagesNumber=messages,
     menu=Nothing,dialog=Nothing,drag=Nothing,dragOriginal=Nothing,clipboard="",clipboardExport=(0,Nothing),prefix=Nothing,blockStart=Nothing,
     status="Recovered session. Background processes ended; reconnect agents as needed.",lastFind="",branchStatus="",branchAdded=0,branchDeleted=0,branchRoot=Nothing,
     gitReview=Nothing,hoverTarget=Nothing,typeHint="",buttonHover=Nothing,buttonPressed=Nothing,contextMenu=Nothing,contextKind=SourceContext,
@@ -270,7 +272,9 @@ windowParser documents=withObject "window" $ \o->do
   row<-o .: "scrollRow" >>= boundedInt 0 1073741823
   column<-o .: "scrollColumn" >>= boundedInt 0 1073741823
   restored<-o .: "restoredBounds" >>= traverse rectParser
-  Window ident bid rectangle selected row column restored <$> o .: "hexLow" <*> o .: "hexAscii" <*> pure number
+  viewIndex<-o .:? "bufferView" .!= 0 >>= boundedInt 0 (fromEnum (maxBound :: BufferView))
+  split<-o .:? "reviewSplit" .!= 50 >>= boundedInt 0 100
+  Window ident bid rectangle selected row column restored <$> o .: "hexLow" <*> o .: "hexAscii" <*> pure number <*> pure (if byteMode (documentBuffer doc) || documentLabel doc/=Nothing then CurrentView else toEnum viewIndex) <*> pure Nothing <*> pure split
 rectParser :: Value -> Parser Rect
 rectParser value=do
   (x,y,w,h)<-parseJSON value

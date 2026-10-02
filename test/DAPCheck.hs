@@ -26,6 +26,16 @@ import qualified THC.Edit.DAP as DAP
 checks :: IO ()
 checks = do
   processTreeCheck
+  retirement<-newEmptyMVar
+  waiting<-timeout 500000 (DAP.startAdapterAfter (takeMVar retirement) "python3" ["-u","-c",stdioPeer] ".")
+  check "prior-session retirement never blocks starting a replacement client" (case waiting of Just _ -> True; _ -> False)
+  forM_ waiting $ \client -> flip finally (DAP.stopClient client) $ do
+    ident<-DAP.request client "launch" (object ["program" .= ("retired"::T.Text)])
+    before<-DAP.pollEvents client
+    check "replacement cannot connect before retirement completes" (null before)
+    putMVar retirement ()
+    events<-await client (any (\event -> case event of DAP.Response requestId _ -> requestId==ident; _ -> False))
+    check "replacement starts after retirement without blocking polling" (DAP.Connected `elem` events)
   bracket (DAP.startAdapter "python3" ["-u", "-c", stdioPeer] ".") DAP.stopClient $ \client -> do
     ident <- DAP.request client "launch" (object ["program" .= ("λ spaced.hs" :: T.Text)])
     events <- await client (\es -> any (\e -> case e of DAP.Response _ _ -> True; _ -> False) es && any notification es)

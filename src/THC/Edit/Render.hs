@@ -20,6 +20,7 @@ import Data.Bits ((.&.), shiftR)
 import Data.Time (formatTime, defaultTimeLocale)
 import THC.Edit.Hex
 import THC.Edit.Buffer
+import THC.Edit.BufferView
 import THC.Edit.Unicode (graphemes, clusterWidth, textImage, flattenPicture)
 import THC.Edit.GuestAccess (streamerReadableAt)
 import THC.Edit.Model
@@ -123,8 +124,9 @@ renderDesktop d = flattenPicture (screenSize d) ((V.picForLayers (privacyLayers+
           rect=composerRect d w
           in if height rect>0 && width rect>0 then V.Cursor (left rect+displayColumn (bufferLineAt b r) c-sc) (top rect+r-sr) else V.NoCursor
         (_,Just doc) | not (documentCursorVisible doc) -> V.NoCursor
-        (Just w,Just doc) -> let { (r,c)=windowCursorCell (documentBuffer doc) w; x=left (bounds w)+1+c-scrollColumn w; y=top (bounds w)+1+r-scrollRow w }
-                            in if inside (Rect (left (bounds w)+1) (top (bounds w)+1) (width (bounds w)-2) (windowContentRows d doc w)) x y then V.Cursor x y else V.NoCursor
+        (Just w,Just doc) -> let { b=documentBuffer doc; (r,c)=windowCursorCell b w; x=left (bounds w)+1+c-scrollColumn w; y=top (bounds w)+1+r-scrollRow w;
+                                                  liveRow=not (windowChangeView b w) || viewRightRow (viewRowAt (bufferView w) (bufferViewProjection b) r)/=Nothing }
+                            in if liveRow && inside (Rect (left (bounds w)+1) (top (bounds w)+1) (width (bounds w)-2) (windowContentRows d doc w)) x y then V.Cursor x y else V.NoCursor
         _ -> V.NoCursor
 
 -- A DOS shadow changes the underlying cell attributes, preserving its glyph.
@@ -140,8 +142,8 @@ castShadow size (Rect x y w h) below =
 
 windowLayers :: Desktop -> Bool -> Window -> [V.Image]
 windowLayers d active w =
-  [place x (y+1+diagnosticRow issue-scrollRow w) (label (attr (if diagnosticSeverity issue==1 then V.RGBColor 255 85 85 else yellow) blue) "▶")
-    | not (byteMode (documentBuffer doc)), issue<-diagnostics d, Just (diagnosticPath issue)==fmap filePath (documentFile doc), diagnosticRow issue>=scrollRow w, diagnosticRow issue<scrollRow w+hh-2]
+  [place x (y+1+issueRow issue-scrollRow w) (label (attr (if diagnosticSeverity issue==1 then V.RGBColor 255 85 85 else yellow) blue) "▶")
+    | not (byteMode (documentBuffer doc)), issue<-diagnostics d, Just (diagnosticPath issue)==fmap filePath (documentFile doc), issueRow issue>=scrollRow w, issueRow issue<scrollRow w+hh-2]
   ++ (if active then
     [place (x+2) y (label frame "[" V.<|> label (attr (V.RGBColor 85 255 85) blue) (if videoMode d==Nothing then "x" else "■") V.<|> label frame "]"),place (x+ww-6) y (label frame "[" V.<|> label (attr cyan blue) "↑" V.<|> label frame "]")
     ,place (x+windowPositionColumn doc) (y+hh-1) (label frame (T.take (max 0 (ww-windowPositionColumn doc-2)) (windowPositionText d doc w)))
@@ -149,23 +151,38 @@ windowLayers d active w =
   ++ [place (x+6) y (label frame "[" V.<|> label (attr cyan blue) " " V.<|> label frame "]") | active,terminalWindow d w,not (windowPinned d w)]
   ++ composerLayers
   ++ hexDividerLayers
+  ++ reviewDividerLayers
   ++ [place (x+ww-7-T.length number) y (label frame number)
-  ,place (x+titleColumn) y (label frame shownTitle)
+  ,place (x+titleColumn) y (titleImage)
   ,place (x+1) (y+1) documentImage
   ,place x y (box frame (active && not moving) ww hh)]
   where
     Rect x y ww hh=bounds w
     doc=fromMaybe (newDocument (newBuffer "") Nothing) (M.lookup (bufferId w) (buffers d))
     b=documentBuffer doc
+    issueRow issue
+      | windowChangeView b w = viewRowForChange (bufferView w) (bufferViewProjection b) CurrentSide
+          (fst (changeLineColumn b (liveToChangeOffset b (bufferLineOffset b (diagnosticRow issue)))))
+      | otherwise = diagnosticRow issue
     file=maybe (maybe ("NONAME"<>T.pack (show (bufferId w))<>".HS") T.pack (documentSuggestedName doc)) (T.pack . takeFileName . filePath) (documentFile doc)
-    title=" "<>(if documentLabel doc==Just "Conversation" then conversationTitle d else fromMaybe file (documentLabel doc))<>(if dirty b then " * " else " ")
-    (titleColumn,shownTitle)
-      | byteMode b = let start=max 6 (1+hexColumn 0-scrollColumn w)
-                         end=min (ww-8-T.length number) (hexAsciiColumn (windowHexBytes w)-scrollColumn w)
-                         clipped=T.take (columnOffset title (max 0 (end-start))) title
-                     in (start+max 0 ((end-start-displayColumn clipped (T.length clipped)) `div` 2),clipped)
-      | otherwise = let clipped=T.take (columnOffset title (max 0 (ww-17-T.length number))) title
-                    in (max (if terminalWindow d w then 10 else 6) ((ww-displayColumn clipped (T.length clipped)) `div` 2),clipped)
+    -- Measured line changes are shared by all views; never diff text while drawing.
+    -- Docs: docs/editing.md (unsaved change counts in each buffer title).
+    name=(if documentLabel doc==Just "Conversation" then conversationTitle d else fromMaybe file (documentLabel doc))<>(if dirty b then " *" else "")
+    (added,deleted)=bufferLineChanges b
+    badge=if documentLabel doc==Nothing && (added/=0 || deleted/=0)
+      then [("+"<>T.pack (show added),attr (V.RGBColor 85 255 85) background),
+            (" ",frame),("-"<>T.pack (show deleted),attr (V.RGBColor 255 85 85) background)] else []
+    (titleStart,titleEnd)
+      | byteMode b = (max 6 (1+hexColumn 0-scrollColumn w),min (ww-8-T.length number) (hexAsciiColumn (windowHexBytes w)-scrollColumn w))
+      | otherwise = (if terminalWindow d w then 10 else 6,ww-8-T.length number)
+    titleWidth=max 0 (titleEnd-titleStart)
+    badgeWidth=sum [T.length text | (text,_)<-badge]
+    shownBadge=if badgeWidth+3<=titleWidth then badge else []
+    reserved=if null shownBadge then 0 else badgeWidth+1
+    clippedName=T.take (columnOffset name (max 0 (titleWidth-reserved-2))) name
+    titleImage=label frame (" "<>clippedName<>(if null shownBadge then "" else " "))
+      V.<|> V.horizCat [label color text | (text,color)<-shownBadge] V.<|> label frame " "
+    titleColumn=titleStart+max 0 ((titleWidth-V.imageWidth titleImage) `div` 2)
     number=T.pack (show (windowNumber w))
     moving=case drag d of Just (Moving wid _ _) -> wid==windowId w; Just (Resizing wid _ _) -> wid==windowId w; _ -> False
     helpWindow=documentLabel doc==Just "Turbo Haskell Help"
@@ -176,7 +193,7 @@ windowLayers d active w =
     -- Docs: docs/site/screenshots/debug-step.png (docs/running.md).
     useStyles=case documentLabel doc of
       Nothing -> True
-      Just name -> name `elem` ["Conversation","Turbo Haskell Help"] || any (`T.isPrefixOf` name) ["Terminal ","Source "]
+      Just title -> title `elem` ["Conversation","Turbo Haskell Help"] || any (`T.isPrefixOf` title) ["Terminal ","Source "]
     styledLines=splitStyled (documentHighlight doc)
     scrollbarImage vertical =
       let Rect sx sy bw bh=scrollbarRect d vertical doc w
@@ -209,7 +226,56 @@ windowLayers d active w =
         V.charFill frame '│' 1 contentHeight,V.char frame (if active && not moving then '╧' else '┴')])
       | byteMode b, divider<-hexDividers (windowHexBytes w), let column=divider-scrollColumn w, column>=0, column<contentWidth]
     contentWidth=max 0 (ww-2); contentHeight=windowContentRows d doc w
-    documentImage=V.vertCat [renderLine n | n<-[scrollRow w..scrollRow w+contentHeight-1]]
+    documentImage=V.vertCat [(if windowChangeView b w then renderReview else renderLine) n
+      | n<-[scrollRow w..scrollRow w+contentHeight-1]]
+    -- Docs: docs/editing.md (buffer views). Shared compact projections skip
+    -- unchanged subtrees; only these visible rows request source text.
+    projection=bufferViewProjection b
+    reviewDividerLayers
+      | not (windowChangeView b w) || bufferView w/=SideBySideView = []
+      | otherwise = [place (x+column) (y+1) (V.vertCat
+          [V.charFill frame '│' 1 contentHeight,V.char frame (if active && not moving then '╧' else '┴')])]
+          ++ [place (x+column) y (V.char frame (if active && not moving then '╤' else '┬'))
+             | column<titleColumn || column>=titleColumn+V.imageWidth titleImage]
+      where column=1+fst (reviewPaneWidths w)
+    renderReview n
+      | viewOmittedRows entry>0 = row (attr gray blue) contentWidth
+          ("  ⋯ "<>T.pack (show (viewOmittedRows entry))<>" unchanged lines ⋯")
+      | bufferView w==OnlyChangesView,viewRowCount OnlyChangesView projection==0,n==0 =
+          row (attr gray blue) contentWidth "  No unsaved changes."
+      -- Docs: docs/site/screenshots/side-by-side.png (docs/editing.md);
+      -- regenerate with tools/docs-screenshots.hs after changing this layout.
+      | bufferView w==SideBySideView =
+          reviewLine OriginalSide leftWidth (viewLeftRow entry) (viewRightRow entry/=Nothing)
+          V.<|> V.char frame '│'
+          V.<|> reviewLine CurrentSide rightWidth (viewRightRow entry) (viewLeftRow entry/=Nothing)
+      | otherwise = reviewLine UnifiedSide contentWidth (viewRightRow entry) False
+      where
+        entry=viewRowAt (bufferView w) projection n
+        (leftWidth,rightWidth)=reviewPaneWidths w
+    reviewLine side columns Nothing opposite=V.charFill
+      (if opposite then attr gray (if side==OriginalSide then V.RGBColor 0 85 0 else V.RGBColor 85 0 0) else base) ' ' columns 1
+    reviewLine side columns (Just fullRow) _=case bufferChangeRows b fullRow 1 of
+      (kind,liveRow,_):_ ->
+        let plain=[(ch,Plain) | ch<-T.unpack (changeLineAt b fullRow)]
+            tokens=case liveRow of
+              Just n | syntaxDocument doc -> maybe plain (\rows->fromMaybe plain (rows Vec.!? n)) (documentSourceRows doc)
+              _ -> plain
+            color=case kind of
+              OriginalLine -> Nothing
+              AddedLine -> Just (attr (V.RGBColor 85 255 85) blue)
+              DeletedLine -> Just (attr (V.RGBColor 255 85 85) blue)
+            selectedReview=windowReviewSelection b w >>= \chosen ->
+              if reviewSide chosen==side then Just (reviewRange chosen) else Nothing
+            (sel,start,canSelect)=case selectedReview of
+              Just chosen -> (chosen,changeLineOffset b fullRow,active)
+              Nothing -> case liveRow of
+                Just n | side/=OriginalSide -> (selection w,bufferLineOffset b n,active && windowReviewSelection b w==Nothing)
+                _ -> (Selection 0 0,0,False)
+        in V.cropRight columns (V.translateX (negate (scrollColumn w))
+          (styledImage (darkAppearance d) (const True) color canSelect sel start tokens)
+          V.<|> V.charFill base ' ' columns 1)
+      _ -> V.charFill base ' ' columns 1
     selectable style | documentLabel doc==Just "Conversation" = case style of BubbleText{} -> True; _ -> False
                      | otherwise = True
     renderLine n | byteMode b && n>=documentRows doc w = V.charFill base ' ' contentWidth 1
@@ -287,19 +353,33 @@ treeLayers d tree =
     w=treeWidth tree; h=max 0 (snd (screenSize d)-2-problemsHeight d); visible=treeContentRows d
     frame=attr white blue
     listing=take visible (drop (treeScroll tree) (zip [0..] decorated))
+    -- Use the same measured counts as the buffer title (docs/editing.md).
+    changedFiles=M.fromList [(filePath file,bufferLineChanges b)
+      | doc<-M.elems (buffers d), Just file<-[documentFile doc],
+        let b=documentBuffer doc, dirty b]
     decorated=snd (mapAccumR branch IS.empty (treeRows tree))
     branch following node =
       let depth=nodeDepth node
           prefix=T.pack [if IS.member level following then '│' else ' ' | level<-[0..depth-1]]
             <> (if IS.member depth following then "├" else "└")
       in (IS.insert depth (fst (IS.split depth following)),(node,prefix))
-    line (i,(node,prefix))=V.cropRight listWidth (label (if chosen then selected else frame) prefix
-      V.<|> label iconColor marker V.<|> label a (" "<>nodeName node) V.<|> V.charFill a ' ' listWidth 1)
+    line (i,(node,prefix))=V.cropRight listWidth (leading
+      V.<|> label a (" "<>shownName) V.<|> counts V.<|> V.charFill a ' ' listWidth 1)
       where
         listWidth=max 0 (w-if treeFocused tree then 3 else 2)
         chosen=treeFocused tree && i==treeSelected tree
-        changed=any (\doc -> dirty (documentBuffer doc) && maybe False ((==nodePath node).filePath) (documentFile doc)) (M.elems (buffers d))
-        a=if changed then attr (V.RGBColor 255 85 85) (if chosen then green else blue) else if chosen then selected else edit
+        changes=if nodeDirectory node then Nothing else M.lookup (nodePath node) changedFiles
+        bg=if chosen then green else blue
+        a=if changes/=Nothing then attr (V.RGBColor 255 85 85) bg else if chosen then selected else edit
+        leading=label (if chosen then selected else frame) prefix V.<|> label iconColor marker
+        available=max 0 (listWidth-V.imageWidth leading-1)
+        badge=case changes of
+          Just (added,deleted) | added/=0 || deleted/=0 ->
+            label a " " V.<|> label (attr (V.RGBColor 85 255 85) bg) ("+"<>T.pack (show added))
+            V.<|> label a " " V.<|> label (attr (V.RGBColor 255 85 85) bg) ("-"<>T.pack (show deleted))
+          _ -> V.emptyImage
+        counts=if V.imageWidth badge<available then badge else V.emptyImage
+        shownName=T.take (columnOffset (nodeName node) (available-V.imageWidth counts)) (nodeName node)
         iconColor=if chosen then selected else attr (if nodeDirectory node then yellow else white) blue
         marker | nodeDirectory node, materialIcons d = if nodeExpanded node then "\xf0770" else "\xf024b"
                | nodeDirectory node = if nodeExpanded node then "📂" else "📁"
@@ -319,7 +399,8 @@ menuLayers d (i,j) = [place x y contents']
     items=menuItemsFor d i
     contents'=V.vertCat [border '┌' '┐',V.vertCat (zipWith item [0..] items),border '└' '┘']
     border a b=V.char paper a V.<|> V.charFill paper '─' (max 0 (w-2)) 1 V.<|> V.char paper b
-    item n entry@(MenuItem title _ cmd) = V.char paper '│' V.<|> V.cropRight (w-2) content V.<|> V.char paper '│'
+    item _ (MenuItem "" _ (Disabled _)) = V.char paper '├' V.<|> V.charFill paper '─' (max 0 (w-2)) 1 V.<|> V.char paper '┤'
+    item n entry@(MenuItem title _ cmd) = V.char paper '│'  V.<|> V.cropRight (w-2) content V.<|> V.char paper '│'
       where
         key = menuShortcut d entry
         disabled = not (commandEnabled d cmd)
@@ -328,7 +409,8 @@ menuLayers d (i,j) = [place x y contents']
         hot = attr red bg
         pos = fromMaybe 0 (T.findIndex ((==menuMnemonic entry) . toLower) title)
         name = label a (T.take pos title) V.<|> label (if disabled then a else hot) (T.take 1 (T.drop pos title)) V.<|> label a (T.drop (pos+1) title)
-        content = label a " " V.<|> name V.<|> label a (T.replicate (max 1 (w-4-T.length title-T.length key)) " ") V.<|> label (if disabled then a else hot) key V.<|> label a " "
+        radio = case cmd of SetBufferView mode -> if defaultBufferView d==mode then "(●) " else "( ) "; _ -> ""
+        content = label a " " V.<|> label (attr black bg) radio V.<|> name V.<|> label a (T.replicate (max 1 (w-4-T.length radio-T.length title-T.length key)) " ") V.<|> label (if disabled then a else hot) key V.<|> label a " "
 
 bottomLayers :: Desktop -> [V.Image]
 bottomLayers d
