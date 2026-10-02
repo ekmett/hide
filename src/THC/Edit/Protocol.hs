@@ -50,7 +50,7 @@ parseInput = withObject "browser event" $ \o -> do
     "command" -> do
       name <- o .: "command"
       maybe (fail "Unknown browser command") (pure . BrowserCommand) (lookup (name::T.Text)
-        [("quit",Quit),("paste",Model.Paste),("download",Download),("copy",Copy),("cut",Cut),("selectAll",SelectAll),("undo",Undo),("redo",Redo),("find",Find),("findNext",FindNext),("findPrevious",FindPrevious)])
+        [("quit",Quit),("paste",Model.Paste),("download",Download),("copy",Copy),("cut",Cut),("selectAll",SelectAll),("undo",Undo),("redo",Redo),("find",Find),("replace",Replace),("conversation",Conversation),("newConversation",AgentNew),("findNext",FindNext),("findPrevious",FindPrevious)])
     "upload" -> do
       name <- o .: "name"
       unless (not (T.null name) && T.length name<=255 && T.all (\c -> c>=' ' && c/='/' && c/='\\') name && name/="." && name/="..") (fail "Invalid filename")
@@ -115,13 +115,12 @@ applyInputUnchecked :: WebInput -> Desktop -> (Desktop,[Effect])
 applyInputUnchecked input d = case input of
   SuspendSession -> (d,[]) -- The session owner checkpoints and stops, not the UI model.
   SystemTheme value -> (d {systemDark=value},[])
-  BrowserCommand Model.Paste | editableDialogField d/=Nothing -> (d,[ReadBrowserClipboard])
-  BrowserCommand cmd | editableDialogField d/=Nothing, Just key<-lookup cmd [(Copy,'c'),(Cut,'x'),(SelectAll,'a'),(Undo,'z'),(Redo,'y')] ->
-    let (next,effects)=handleEvent (V.EvKey (V.KChar key) [V.MCtrl]) d
-    in (next,effects++[WriteBrowserClipboard (clipboard next) | cmd `elem` [Copy,Cut]])
+  BrowserCommand cmd | dialogCommandAllowed cmd d ->
+    let (next,effects)=runCommand cmd d {browserFrontend=True}
+    in (next {browserFrontend=browserFrontend d},effects)
   BrowserCommand cmd | dialog d/=Nothing -> (d,[WriteBrowserClipboard "" | cmd `elem` [Copy,Cut]])
                      | otherwise -> runCommand cmd d
-  MenuCommand (Just cmd) | dialog d==Nothing && commandEnabled d cmd -> runCommand cmd d
+  MenuCommand (Just cmd) | (dialog d==Nothing || dialogCommandAllowed cmd d) && commandEnabled d cmd -> runCommand cmd d
   MenuCommand _ -> (d,[])
   UploadFile name bytes ->
     let b=case TE.decodeUtf8' bytes of
@@ -231,7 +230,7 @@ frameMetadata cwd d =
      _ -> if dialog d/=Nothing then "" else clipboard (fst (runCommand Copy d {browserFrontend=False}))),
    "terminal" .= (activeTerminal d/=Nothing && dialog d==Nothing && menu d==Nothing),
    "wordstar" .= wordStar d,"menus" .= replicate (length protocolCommands) False,
-   "menuState" .= [(ident,(dialog d==Nothing || cmd==Model.Paste) && commandEnabled d cmd) | (ident,cmd)<-protocolMenuCommands]]
+   "menuState" .= [(ident,(dialog d==Nothing || cmd==Model.Paste || dialogCommandAllowed cmd d) && commandEnabled d cmd) | (ident,cmd)<-protocolMenuCommands]]
   where cursor=case V.picCursor (renderDesktop d) of V.Cursor x y -> Just (x,y); _ -> Nothing
 
 assetsPacket :: Font -> Double -> Value

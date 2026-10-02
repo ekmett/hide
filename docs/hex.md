@@ -17,7 +17,7 @@ and resizing retains the selected byte.
 | Switch between hex and ASCII entry | Tab |
 | Insert a zero byte | Insert |
 | Remove bytes | Delete or Backspace |
-| Undo / redo | Ctrl+Z / Ctrl+Y |
+| Undo / redo | Ctrl+Z / Ctrl+Shift+Z (Ctrl+Y also works) |
 
 Copy and Paste use hexadecimal byte pairs. Undo and Redo preserve exact bytes,
 including across changes between text and hex mode. Save uses the same external

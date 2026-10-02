@@ -52,9 +52,9 @@ windows; **Alt+1** through **Alt+9** selects a numbered window directly.
 | Zoom / next window / menus | F5 / F6 / F10 |
 | Close / exit | Alt+F3 / Alt+X |
 | Select / move by word | Shift+arrows / Ctrl+arrows |
-| Undo / redo | Ctrl+Z / Ctrl+Y |
+| Undo / redo | Ctrl+Z / Ctrl+Shift+Z (Ctrl+Y also works) |
 | Copy / cut / paste | Ctrl+C / Ctrl+X / Ctrl+V |
-| Find / replace / search again | Ctrl+F / Ctrl+R / Ctrl+L |
+| Find / replace / search again | Ctrl+F / Ctrl+H (Ctrl+R alias) / Ctrl+L |
 | Go to line | Ctrl+G |
 | Dialog next / previous / accept / cancel | Tab / Shift+Tab / Enter / Escape |
 

@@ -31,7 +31,9 @@ project.
 
 ## Send a query
 
-Open **Tools > Conversation** and type in the draft at the bottom. Your messages
+Open **Tools > Conversation** (**Ctrl+Shift+C**, or **Cmd+Shift+C** on macOS)
+and type in the draft at the bottom. The command focuses the existing conversation
+without repainting its history or replacing its draft. Your messages
 align right in cyan; replies align left in gray. Code keeps its syntax colors.
 
 [![A live conversation about Buffer.hs, with model selection, a completed tool call, replies, context usage and an unsent follow-up.](site/screenshots/conversation.png)](site/screenshots/conversation.png)
@@ -127,7 +129,8 @@ Detach the editor and use `thc-edit --resume` to return to the running desktop,
 including its conversation. [Editor sessions](sessions.md) cover this workflow
 across native windows, the browser, terminals and SSH.
 
-**Tools > New session** starts a fresh conversation. **Tools > Resume session**
+**Tools > New conversation** (**Ctrl+Shift+N**, or **Cmd+Shift+N** on macOS)
+starts a fresh primary conversation directly, including from a child view. **Tools > Resume session**
 accepts a saved provider session ID; the latest ID is saved across editor restarts.
 These menu actions manage the provider's conversation, independently of the
 editor session selected by `--resume`.

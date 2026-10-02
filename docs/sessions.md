@@ -103,6 +103,6 @@ frontend leaves it available. Session ownership uses an OS-held lock so concurre
 resume attempts cannot start independent daemons for the same desktop.
 
 These editor sessions are separate from a provider's conversation sessions.
-**Tools > New session** and **Tools > Resume session** manage the latter; see
+**Tools > New conversation** and **Tools > Resume session** manage the latter; see
 [conversations](conversations.md). [Remote editing](remote.md) covers connecting
 to another machine for the first time.

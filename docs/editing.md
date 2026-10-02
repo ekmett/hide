@@ -36,7 +36,8 @@ mouse. Ctrl+arrows moves by word. **Edit > Select all** selects the buffer.
 Copy, Cut and Paste are available in the Edit menu and on Ctrl+C/X/V;
 Ctrl+Insert, Shift+Delete and Shift+Insert provide the other familiar bindings.
 
-**Ctrl+Z** undoes and **Ctrl+Y** redoes. Split views share text
+**Ctrl+Z** undoes and **Ctrl+Shift+Z** redoes (**Ctrl+Y** also works).
+On macOS, use Cmd for the Edit-menu shortcuts. Split views share text
 and undo history; each view keeps its own cursor and selection. UTF-8 text retains its line endings, including CRLF.
 Combining sequences and joined emoji move and delete as complete graphemes;
 your terminal or selected frontend supplies their appearance.
@@ -57,12 +58,20 @@ permissions.
 
 ## Search
 
-**Ctrl+F** opens Find, **Ctrl+R** opens Replace, and **Ctrl+L** searches again.
-Search matches literal text and is case-sensitive. Replace changes one match
-at a time. **Ctrl+G**, or **Search > Go to line**, goes to a line number.
+**Ctrl+F** opens Find and **Ctrl+H** opens Replace. On macOS, use **Cmd+F**
+and **Cmd+Option+F**; Cmd+H keeps its standard Hide action. Find and Replace
+share a dialog: click either tab or press **Ctrl+Tab** to switch without losing
+the search or replacement text. The corresponding Find/Replace shortcut also
+switches tabs. Search is literal and case-sensitive; Replace changes one match.
 
-In the browser, Ctrl/Cmd+F opens Find and Ctrl/Cmd+G finds the next match.
-Shift+Ctrl/Cmd+G finds the previous match. Use the menu for Go to line there.
+[![Find and Replace tabs with both search and replacement text.](site/screenshots/find-replace.png)](site/screenshots/find-replace.png)
+
+**Ctrl+L** finds the next match and **Ctrl+Shift+L** the previous match in native
+non-Mac and terminal frontends. **Ctrl+R** remains a Replace alias there, and
+**Ctrl+G**, or **Search > Go to line**, goes to a line number. F3 still opens files.
+On macOS, **Cmd+G** / **Cmd+Shift+G** find the next/previous match. In the browser,
+use Ctrl/Cmd+G and Shift+Ctrl/Cmd+G; use the menu for Go to line there. Embedded
+terminals retain their control keys while the terminal has focus.
 
 ## Windows
 

@@ -87,7 +87,7 @@ checks=do
   check "agent dropdown public labels stay readable but secret values do not"
     (readableAt dropdown 4 3 && not (readableAt dropdown 14 3) && not (pointerAllowedAt dropdown 4 3))
   check "ordinary preferences and build dialogs remain usable"
-    (not (denied base {dialog=Just (Dialog "Find" Finding [Input "Text" "" 0] 0 ["Find"] [])} (P.Paste "needle")) && guestEffectsAllowed [AgentAction "make" [],AgentAction "run-config" [],AgentAction "terminal-input" ["1","ls\n"]])
+    (not (denied base {dialog=Just (Dialog "Find" (Searching False "") [Input "Text" "" 0] 0 ["Find"] [])} (P.Paste "needle")) && guestEffectsAllowed [AgentAction "make" [],AgentAction "run-config" [],AgentAction "terminal-input" ["1","ls\n"]])
   check "agent lifecycle and permission effects are rejected"
     (not (guestEffectsAllowed [AgentAction "send-draft" []]) && not (guestEffectsAllowed [AgentAction "question-submit" []]) && not (guestEffectsAllowed [PermissionAction "show" []]))
   let sticky=base {prefix=Just 'k',heldModifiers=[V.MCtrl],drag=Just (Selecting 0),buttonPressed=Just 0,clipboard="human secret",blockStart=Just (0,0)}

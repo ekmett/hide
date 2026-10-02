@@ -6,7 +6,9 @@ import Data.List (findIndex)
 import Data.Maybe (fromMaybe)
 import THC.Edit.Model
 import THC.Edit.Render (snapshotHtml, snapshot, renderDesktop)
-import THC.Edit.Buffer (newBuffer, columnOffset)
+import THC.Edit.Buffer (newBuffer, columnOffset, contents, Selection(..))
+import THC.Edit.Window (nativeMenuShortcut)
+import qualified Data.Text.Encoding as TE
 import THC.Edit.Browser (Entry(..))
 import THC.Edit.Files (FileState(..))
 import qualified Data.Text as T
@@ -18,6 +20,7 @@ import qualified Data.Text.Lazy as TL
 
 checks :: IO ()
 checks = do
+  searchChecks
   let check name ok = unless ok (error name)
       at n xs = case drop n xs of value:_ -> value; _ -> error "missing test fixture"
       desktop = addDocument Nothing (newBuffer "hello world") (initialDesktop (80,25))
@@ -327,3 +330,51 @@ checks = do
   mapM_ (\size -> let small=fst (handleEvent (uncurry V.EvResize size) scrolling)
                   in check "small window rendering remains bounded" (length (T.lines (snapshot small))==snd size)) [(1,3),(8,6),(16,8),(40,12)]
   putStrLn "dialog mouse checks passed"
+
+searchChecks :: IO ()
+searchChecks=do
+  let check name ok=unless ok (error name)
+      base=addDocument Nothing (newBuffer "hello world") (initialDesktop (80,25))
+      key k mods=fst . handleEvent (V.EvKey k mods)
+      paste text=fst . handleEvent (V.EvPaste (TE.encodeUtf8 text))
+      view d=fromMaybe (error "search dialog missing") (dialog d)
+      texts d=[value | Input _ value _<-fields (view d)]
+      findOpen=key (V.KChar 'f') [V.MCtrl] base
+      findTyped=paste "world" findOpen
+      replaceOpen=key (V.KChar 'h') [V.MCtrl] findTyped
+      replaceTyped=paste "planet" replaceOpen
+      findAgain=key (V.KChar 'f') [V.MCtrl] replaceTyped
+      tab=fromMaybe (error "replace tab missing") (lookup True [(mode,r) | (r,mode)<-searchTabRects findAgain (view findAgain)])
+      clicked=fst (handleEvent (V.EvMouseDown (left tab+1) (top tab) V.BLeft []) findAgain)
+      toggled=key (V.KChar '\t') [V.MCtrl] clicked
+  check "Find and Replace share a stable dialog with text preserved across keyboard and mouse tabs"
+    (dialogTitle (view findOpen)=="Find and Replace" && texts findAgain==["world"] &&
+      purpose (view findAgain)==Searching False "planet" && texts clicked==["world","planet"] &&
+      dialogRect findOpen (view findOpen)==dialogRect replaceTyped (view replaceTyped) &&
+      purpose (view toggled)==Searching False "planet")
+  let (replaced,_)=submitDialog 0 (view clicked) clicked
+  check "tabbed Replace retains strict one-match editing behavior" (activeText replaced=="hello planet" && lastFind replaced=="world" && dialog replaced==Nothing)
+  check "legacy Replace alias opens the Replace tab" (case purpose (view (key (V.KChar 'r') [V.MCtrl] base)) of Searching True _->True; _->False)
+  let changed=key (V.KChar '!') [] base
+      undone=key (V.KChar 'z') [V.MCtrl] changed
+      redone=key (V.KChar 'z') [V.MCtrl,V.MShift] undone
+      legacy=key (V.KChar 'y') [V.MCtrl] undone
+      shortcut d cmd=fromMaybe "" (lookup cmd [(c,menuShortcut d item) | (_,_,items)<-menus,item@(MenuItem _ _ c)<-items])
+  check "modern redo and legacy alias both restore the edit" (activeText redone==activeText changed && activeText legacy==activeText changed && activeText (key (V.KChar 'Z') [V.MCtrl,V.MShift] undone)==activeText changed)
+  check "modern menu shortcuts match the native platform"
+    (shortcut base Copy=="Ctrl+C" && shortcut base Cut=="Ctrl+X" && shortcut base Paste=="Ctrl+V" && shortcut base Replace=="Ctrl+H" &&
+      shortcut base {nativeMac=True} Replace=="Cmd+Option+F" && shortcut base {nativeMac=True} Redo=="Cmd+Shift+Z" &&
+      nativeMenuShortcut Replace=="~f" && nativeMenuShortcut FindPrevious=="G")
+  let child=selectConversationView "child" "Worker" base
+      drafted=child {composerBuffer=newBuffer "keep draft",composerSelection=Selection 10 10}
+      (focused,focusEffects)=runCommand Conversation drafted
+      (new,newEffects)=runCommand AgentNew drafted
+  check "Conversation focuses the existing child view without repaint or replacing its draft"
+    (buffers focused==buffers drafted && length (windows focused)==length (windows drafted) &&
+      conversationTarget focused=="child" && contents (composerBuffer focused)=="keep draft" && focusEffects==[AgentAction "focus" []])
+  check "Conversation opens through the existing runtime when absent" (snd (runCommand Conversation base)==[AgentAction "show" []])
+  check "New conversation goes directly to the primary runtime session action" (conversationTarget new=="" && newEffects==[AgentAction "new" []])
+  check "conversation shortcuts invoke explicit actions" (snd (handleEvent (V.EvKey (V.KChar 'c') [V.MCtrl,V.MShift]) base)==[AgentAction "show" []] && snd (handleEvent (V.EvKey (V.KChar 'n') [V.MCtrl,V.MShift]) base)==[AgentAction "new" []])
+  let terminal=addReadOnly "Terminal 1" "" base
+  check "modern shortcuts do not consume PTY control bytes" (and [snd (handleEvent (V.EvKey (V.KChar c) mods) terminal)==[AgentAction "terminal-input" ["1",text]] |
+    (c,mods,text)<-[('h',[V.MCtrl],"\b"),('f',[V.MCtrl],"\x06"),('n',[V.MCtrl,V.MShift],"\x0e"),('c',[V.MCtrl,V.MShift],"\x03")]])

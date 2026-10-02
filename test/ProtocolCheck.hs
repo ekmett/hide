@@ -45,6 +45,14 @@ checks = do
   check "human browser cut changes only review text" (text cut==" diff" && activeText cut==activeText d && cutEffects==[WriteBrowserClipboard "private"])
   check "browser paste requests the system clipboard for the review" (applyInput (BrowserCommand THC.Edit.Model.Paste) review==(review,[ReadBrowserClipboard]))
   check "agent browser commands cannot inspect or edit human review" (all (\input->case applyGuestInput input review of Left _ -> True; _ -> False) [BrowserCommand Copy,BrowserCommand Cut,BrowserCommand SelectAll,THC.Edit.Protocol.Paste "bad"])
+  let search=fst (runCommand Find d)
+      typed=fst (applyInput (THC.Edit.Protocol.Paste "hello") search)
+      replacement=fst (applyInput (BrowserCommand Replace) typed)
+      filled=fst (applyInput (THC.Edit.Protocol.Paste "world") replacement)
+      back=fst (applyInput (BrowserCommand Find) filled)
+      again=fst (applyInput (BrowserCommand Replace) back)
+  check "browser Find and Replace commands switch tabs without losing text" (case dialog again of Just dg -> [value | Input _ value _<-fields dg]==["hello","world"]; _->False)
+  check "browser understands modern search and conversation commands" (and [parseEither parseInput (object ["type" .= ("command"::T.Text),"command" .= name])==Right (BrowserCommand cmd) | (name,cmd)<-[("replace"::T.Text,Replace),("conversation",Conversation),("newConversation",AgentNew)]])
   let primary=selectConversationView "" "Primary" (initialDesktop (80,25))
       drafted=primary {composerBuffer=newBuffer "unsent",composerSelection=Selection 6 6}
       child=selectConversationView "child" "Worker" drafted

@@ -263,6 +263,9 @@ conversationEffects runtime@(ConversationState _ ref _ _ _) fallback = foldM app
     apply (_,d) effect = fallback d [effect]
 
 perform :: ConversationState -> Text -> [Text] -> Desktop -> IO Desktop
+perform (ConversationState _ ref _ _ _) "focus" [] d=do
+  modifyIORef' ref (\state -> state {deferredApproval=False})
+  pure d
 perform (ConversationState _ ref _ _ _) "toggle-tool-run" [ident] d=do
   state<-readIORef ref
   let target=conversationTarget d

@@ -33,9 +33,11 @@ void thc_menu_add(const char *title) {
 }
 void thc_menu_item(const char *title, const char *key, int command, int enabled) {
     NSString *shortcut = [NSString stringWithUTF8String:key];
+    BOOL option = [shortcut hasPrefix:@"~"];
+    if (option) shortcut = [shortcut substringFromIndex:1];
     NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:[NSString stringWithUTF8String:title]
                                                      action:@selector(invoke:) keyEquivalent:[shortcut lowercaseString]];
-    [item setKeyEquivalentModifierMask:NSEventModifierFlagCommand | (![shortcut isEqualToString:[shortcut lowercaseString]] ? NSEventModifierFlagShift : 0)];
+    [item setKeyEquivalentModifierMask:NSEventModifierFlagCommand | (option ? NSEventModifierFlagOption : 0) | (![shortcut isEqualToString:[shortcut lowercaseString]] ? NSEventModifierFlagShift : 0)];
     [item setTarget:target]; [item setTag:command]; [item setEnabled:enabled];
     [current addItem:item]; items[@(command)] = item;
 }

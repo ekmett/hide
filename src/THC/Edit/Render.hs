@@ -374,6 +374,8 @@ contextLayers d (r@(Rect x y w h),chosen) =
 dialogLayers :: Desktop -> Dialog -> [V.Image]
 dialogLayers d dg =
   [place (x+max 1 ((w-T.length title) `div` 2)) y (label (attr white gray) title)]
+  ++ [place (left r) (top r) (row (if chosen==mode then selected else paper) (width r) (if mode then " Replace " else " Find "))
+      | Searching chosen _<-[purpose dg],(r,mode)<-searchTabRects d dg]
   ++ [place (left r) (top r) (label (attr white gray) "[x]") | approvalDialog dg,let r=dialogCloseRect d dg]
   ++ [place (bx+if pushed i then 1 else 0) by (V.cropRight bw (buttonImage i name)) | (i,(Rect bx by bw _,name))<-zip [0..] (zip (buttonRects d dg) (buttons dg))]
   ++ concat [buttonShadow gray r | (i,r)<-zip [0..] (buttonRects d dg), not (pushed i)]

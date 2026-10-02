@@ -91,7 +91,7 @@ data Effect = ProjectRequest ProjectAction | DownloadDocument Int | ReadBrowserC
 data Field = Input Text Text Int | CheckBox Text Bool | Radio Text [Text] Int | ListBox Text [Text] Int | FileList [Entry] Int
   | ReadOnly Text Text
   | TextArea Text Bool Buffer Selection Int Int deriving (Eq,Show)
-data Purpose = Opening FilePath Text [Entry] | ChangingDirectory FilePath [Entry] | Committing | Saving Int (Maybe Command) | Finding | Replacing | GoingTo | Renaming
+data Purpose = Opening FilePath Text [Entry] | ChangingDirectory FilePath [Entry] | Committing | Saving Int (Maybe Command) | Searching Bool Text | GoingTo | Renaming
   | ProjectLoading Int | ProjectChoices Int Int
   | CodeActionChoices Int Int [Text]
   | Completing Int Int Int [Completion] | Locations [(FilePath,Int,Int)] | Merging [Text]
@@ -155,8 +155,8 @@ menus :: [(Text,Char,[MenuItem])]
 -- Refresh the matching cropped popup after menu changes.
 menus =
   [("File",'f',[mi "New" "" New, mi "Open..." "F3" Open, mi "Save" "F2" Save, mi "Save as..." "" SaveAs, mi "Disk changes..." "" ReviewDisk, mi "Close" "Alt+F3" Close, mi "Change dir..." "" ChangeDir, mi "Terminal" "" OpenTerminal, mi "Exit" "Alt+X" Quit])
-  ,("Edit",'e',[mi "Undo" "Ctrl+Z" Undo, mi "Redo" "Ctrl+Y" Redo, mi "Cut" "Shift+Del" Cut, mi "Copy" "Ctrl+Ins" Copy, mi "Paste" "Shift+Ins" Paste, mi "Select all" "Ctrl+A" SelectAll,mi "Text / hex mode" "" ToggleHex,mi "Complete identifier..." "Ctrl+Space" Complete])
-  ,("Search",'s',[mi "Find..." "Ctrl+F" Find, mi "Replace..." "Ctrl+R" Replace, mi "Search again" "Ctrl+L" FindNext, mi "Go to line..." "Ctrl+G" GoTo,mi "Go to definition" "F12" Definition])
+  ,("Edit",'e',[mi "Undo" "Ctrl+Z" Undo, mi "Redo" "Ctrl+Shift+Z" Redo, mi "Cut" "Ctrl+X" Cut, mi "Copy" "Ctrl+C" Copy, mi "Paste" "Ctrl+V" Paste, mi "Select all" "Ctrl+A" SelectAll,mi "Text / hex mode" "" ToggleHex,mi "Complete identifier..." "Ctrl+Space" Complete])
+  ,("Search",'s',[mi "Find..." "Ctrl+F" Find, mi "Replace..." "Ctrl+H" Replace, mi "Find next" "Ctrl+L" FindNext, mi "Find previous" "Ctrl+Shift+L" FindPrevious, mi "Go to line..." "Ctrl+G" GoTo,mi "Go to definition" "F12" Definition])
   ,("Run",'r',[mi "Run" "Ctrl+F9" RunTarget,mi "Target..." "" RunOptions,mi "Stop build/run" "" StopBuild,mi "Stop terminal" "" StopTerminal])
   ,("Compile",'c',[mi "Compile" "Alt+F9" CompileTarget,mi "Make" "F9" MakeTarget,mi "Target..." "" RunOptions,mi "Stop build" "" StopBuild])
   ,("Debug",'d',[mi "Attach..." "" (DebugCommand "attach"),mi "Launch..." "" (DebugCommand "launch"),
@@ -165,7 +165,7 @@ menus =
       mi "Trace into" "F7" (DebugCommand "stepIn"),mi "Step over" "F8" (DebugCommand "next"),mi "Step out" "Ctrl+F7" (DebugCommand "stepOut"),
       mi "Threads..." "" (DebugCommand "threads"),mi "Call stack..." "" (DebugCommand "stack"),mi "Scopes..." "" (DebugCommand "scopes"),
       mi "Exceptions..." "" (DebugCommand "exceptions"),mi "Exception details" "" (DebugCommand "exception-info"),mi "Output" "" (DebugCommand "output"),mi "Disconnect" "" (DebugCommand "disconnect")])
-  ,("Tools",'t',[mi "File tree" "Ctrl+B" ToggleTree,mi "Git diff..." "" GitDiff,mi "Approve changes..." "" GitCommit,mi "Inspect type" "Shift+F1" InspectType,mi "Code actions..." "" CodeActions,mi "Messages" "" Problems,mi "Go to next" "Alt+F8" NextMessage,mi "Go to previous" "Alt+F7" PreviousMessage,mi "Restart language server" "" RestartHLS,mi "Conversation" "" Conversation,mi "Agents..." "" AgentDirectory,mi "Conversation model..." "" (AgentChoose ""),mi "Cancel reply" "" AgentCancel,mi "Resume session..." "" AgentResume,mi "New session" "" AgentNew,mi "Copy raw conversation" "" AgentCopyRaw,mi "Widget gallery..." "" Gallery,mi "Project browser..." "" ProjectBrowser])
+  ,("Tools",'t',[mi "File tree" "Ctrl+B" ToggleTree,mi "Git diff..." "" GitDiff,mi "Approve changes..." "" GitCommit,mi "Inspect type" "Shift+F1" InspectType,mi "Code actions..." "" CodeActions,mi "Messages" "" Problems,mi "Go to next" "Alt+F8" NextMessage,mi "Go to previous" "Alt+F7" PreviousMessage,mi "Restart language server" "" RestartHLS,mi "Conversation" "Ctrl+Shift+C" Conversation,mi "Agents..." "" AgentDirectory,mi "Conversation model..." "" (AgentChoose ""),mi "Cancel reply" "" AgentCancel,mi "Resume session..." "" AgentResume,mi "New conversation" "Ctrl+Shift+N" AgentNew,mi "Copy raw conversation" "" AgentCopyRaw,mi "Widget gallery..." "" Gallery,mi "Project browser..." "" ProjectBrowser])
   ,("Options",'o',[mi "Preferences..." "" EditorOptions,mi "Agents..." "" AgentOptions,mi "Agent Permissions" "" AgentPermissions,mi "Agent Context..." "" AgentGuidance])
   ,("Window",'w',[mi "Agents..." "" AgentDirectory,mi "Tile" "" Tile,mi "Cascade" "" Cascade,mi "Split vertically" "" SplitVertical,mi "Split horizontally" "" SplitHorizontal,mi "Zoom" "F5" Zoom,mi "Pin / unpin terminal" "" ToggleTerminalPin,mi "Next" "F6" NextWindow,mi "Close" "Alt+F3" Close])
   ,("Help",'h',[mi "Contents" "F1" Help,mi "About Turbo Haskell..." "" About])]
@@ -183,7 +183,7 @@ menuMnemonic (MenuItem title _ cmd) = case cmd of
 
 menuShortcut :: Desktop -> MenuItem -> Text
 menuShortcut d (MenuItem _ key cmd)
-  | nativeMac d = fromMaybe key (lookup cmd [(New,"Cmd+N"),(Open,"Cmd+O"),(Save,"Cmd+S"),(SaveAs,"Cmd+Shift+S"),(Close,"Cmd+W"),(Quit,"Cmd+Q"),(Undo,"Cmd+Z"),(Redo,"Cmd+Shift+Z"),(Copy,"Cmd+C"),(Cut,"Cmd+X"),(Paste,"Cmd+V"),(SelectAll,"Cmd+A"),(Find,"Cmd+F"),(FindNext,"Cmd+G")])
+  | nativeMac d = fromMaybe key (lookup cmd [(New,"Cmd+N"),(Open,"Cmd+O"),(Save,"Cmd+S"),(SaveAs,"Cmd+Shift+S"),(Close,"Cmd+W"),(Quit,"Cmd+Q"),(Undo,"Cmd+Z"),(Redo,"Cmd+Shift+Z"),(Copy,"Cmd+C"),(Cut,"Cmd+X"),(Paste,"Cmd+V"),(SelectAll,"Cmd+A"),(Find,"Cmd+F"),(Replace,"Cmd+Option+F"),(FindNext,"Cmd+G"),(FindPrevious,"Cmd+Shift+G"),(Conversation,"Cmd+Shift+C"),(AgentNew,"Cmd+Shift+N")])
   | otherwise = key
 
 commandDescription :: Command -> Text
@@ -277,6 +277,7 @@ statusHints d
   | Just text<-menuHelp d = [command " F1 Help" Help,(" | "<>text,Nothing)]
   | Just c<-prefix d = [(" Ctrl+"<>T.singleton c<>"- ",Nothing),key " Esc Cancel" V.KEsc []]
   | Just dg<-dialog d, approvalDialog dg = [key " Tab Next" (V.KChar '\t') [],key "  Alt+A Allow" (V.KChar 'a') [V.MAlt],key "  Alt+D Deny" (V.KChar 'd') [V.MAlt],key "  Esc Deny" V.KEsc []]
+  | Just dg<-dialog d, searching dg = [key " Ctrl+Tab Find/Replace" (V.KChar '\t') [V.MCtrl],key "  Tab Next" (V.KChar '\t') [],key "  Enter Apply" V.KEnter [],key "  Esc Cancel" V.KEsc []]
   | dialog d/=Nothing = [key " Tab Next" (V.KChar '\t') [],key "  Enter Select" V.KEnter [],key "  Esc Cancel" V.KEsc []]
   | problemsVisible d && problemsFocused d = [key " Enter Source" V.KEnter [],command (if nativeMac d then "  Cmd+C Copy" else "  Ctrl+C Copy") Copy,command "  Copy all" CopyAllMessages]
   | questionActive d = [key " Enter Answer" V.KEnter [],key "  Tab Choices" (V.KChar '\t') [],key "  Esc Cancel" V.KEsc []]
@@ -312,6 +313,7 @@ menuItemsFor d i
   where items=menuItems i
 
 commandEnabled :: Desktop -> Command -> Bool
+commandEnabled d cmd | dialogCommandAllowed cmd d = True
 commandEnabled d Download = browserFrontend d && maybe False ((==Nothing) . documentLabel) (activeDocument d)
 commandEnabled _ Disabled{} = False
 commandEnabled d ToggleTerminalPin = maybe False (terminalWindow d) (activeWindow d)
@@ -478,6 +480,10 @@ runCommand cmd source | browserFrontend source, cmd `elem` [Copy,Cut,CopyAllMess
   let (next,requests)=runCommand cmd source {browserFrontend=False}
   in (next {browserFrontend=True},requests++[WriteBrowserClipboard (clipboard next)])
 runCommand Paste source | browserFrontend source = (source {menu=Nothing,contextMenu=Nothing},[ReadBrowserClipboard])
+runCommand cmd source | dialogCommandAllowed cmd source = case cmd of
+  Find -> (searchPrompt False source,[])
+  Replace -> (searchPrompt True source,[])
+  _ -> handleEvent (V.EvKey (V.KChar (fromMaybe 'a' (lookup cmd [(Copy,'c'),(Cut,'x'),(Paste,'v'),(SelectAll,'a'),(Undo,'z'),(Redo,'y')]))) [V.MCtrl]) source
 runCommand cmd source | problemsVisible source && problemsFocused source, cmd `elem` [Undo,Redo,Cut,Paste,SelectAll] = (source {menu=Nothing,contextMenu=Nothing},[])
 runCommand Copy source | activeConversation source, Just w<-activeWindow source, anchor (selection w)/=caret (selection w) =
   (source {clipboard=conversationSelection source,status="Conversation text copied.",menu=Nothing,contextMenu=Nothing},[])
@@ -510,10 +516,12 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
     go AgentOptions d = (d,[AgentAction "options" []])
     go AgentPermissions d = (d,[PermissionAction "show" []])
     go AgentGuidance d = (d,[AgentAction "context" []])
-    go Conversation d = (d,[AgentAction "show" []])
+    go Conversation d = case find (\w -> maybe False ((==Just "Conversation").documentLabel) (M.lookup (bufferId w) (buffers d))) (windows d) of
+      Just w -> (focusWindow (windowId w) d {composerFocused=True},[AgentAction "focus" []])
+      Nothing -> (d,[AgentAction "show" []])
     go AgentCancel d = (d,[AgentAction "cancel" []])
     go AgentResume d = (d,[AgentAction "resume" []])
-    go AgentNew d = (d,[AgentAction "new" []])
+    go AgentNew d = (selectConversationView "" "Primary" d,[AgentAction "new" []])
     go (AgentChoose category) d = (openAgentChoices category d,[])
     go (AgentSet ident value) d = (d,[AgentAction "set-config" [ident,value]])
     go AgentCopyRaw d = (d,[AgentAction "copy" []])
@@ -545,8 +553,8 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
     go SelectAll d = (modifyActive (\w -> w {selection = Selection 0 (T.length (activeText d))}) d,[])
     go action d | activeHex d, action `elem` [Find,Replace,FindNext] = (d {status="Text search is unavailable in hex mode."},[])
     go GoTo d | activeHex d = (prompt "Go to byte" GoingTo [Input "Byte offset (decimal)" "0" 1] d,[])
-    go Find d = (prompt "Find" Finding [Input "Text to find" (lastFind d) (T.length (lastFind d))] d,[])
-    go Replace d = (prompt "Replace" Replacing [Input "Text to find" (lastFind d) (T.length (lastFind d)),Input "Replace with" "" 0] d,[])
+    go Find d = (searchPrompt False d,[])
+    go Replace d = (searchPrompt True d,[])
     go FindPrevious d = (findPrevious d,[])
     go FindNext d = (findText (lastFind d) d,[])
     go GoTo d = (prompt "Go to line" GoingTo [Input "Line number" "1" 1] d,[])
@@ -658,7 +666,36 @@ findPrevious d = case activeWindow d of
         candidates=[p | p<-[0..T.length text-T.length needle],needle `T.isPrefixOf` T.drop p text]
 
 helpLines :: [Text]
-helpLines = ["F1 Help   F2 Save   F3 Open   F5 Zoom", "F6 Next window   F10 Menu   Alt+X Exit", "Alt+F3 Close   Ctrl+Z Undo   Ctrl+Y Redo", "Shift+arrows Select   Ctrl+arrows Words", "Ctrl+C/X/V Copy/Cut/Paste (internal clipboard)", "Ctrl+F Find   Ctrl+R Replace   Ctrl+L Next", "Ctrl+G Go to line   Ctrl+A Select all", "Mouse: title drag, bottom-right resize", "Window menu: tile, cascade, shared splits", "", "WordStar (Options > Editor):", "Ctrl+E/S/D/X Up/Left/Right/Down", "Ctrl+A/F Word left/right   Ctrl+Y Delete line", "Ctrl+K B/K Block start/end   C/V Copy/Cut", "Ctrl+K Y Delete block   S Save   D Close", "Ctrl+Q S/D Line start/end   R/C File top/end", "Ctrl+Q F Find   Ctrl+Q A Replace", "Escape cancels a command prefix.", "", "Tools: HLS code actions and Cabal project browser."]
+helpLines = ["F1 Help   F2 Save   F3 Open   F5 Zoom", "F6 Next window   F10 Menu   Alt+X Exit", "Alt+F3 Close   Ctrl+Z Undo   Ctrl+Shift+Z Redo", "Shift+arrows Select   Ctrl+arrows Words", "Ctrl+C/X/V Copy/Cut/Paste (internal clipboard)", "Ctrl+F Find   Ctrl+H Replace   Ctrl+L Next", "Ctrl+G Go to line   Ctrl+A Select all", "Mouse: title drag, bottom-right resize", "Window menu: tile, cascade, shared splits", "", "WordStar (Options > Editor):", "Ctrl+E/S/D/X Up/Left/Right/Down", "Ctrl+A/F Word left/right   Ctrl+Y Delete line", "Ctrl+K B/K Block start/end   C/V Copy/Cut", "Ctrl+K Y Delete block   S Save   D Close", "Ctrl+Q S/D Line start/end   R/C File top/end", "Ctrl+Q F Find   Ctrl+Q A Replace", "Escape cancels a command prefix.", "", "Tools: HLS code actions and Cabal project browser."]
+
+searching :: Dialog -> Bool
+searching dg=case purpose dg of Searching{} -> True; _ -> False
+
+-- One dialog owns both texts. The inactive replacement is retained in its purpose.
+-- doc-artifact: tools/docs-screenshots.hs find-replace -> docs/site/screenshots/find-replace.png
+searchPrompt :: Bool -> Desktop -> Desktop
+searchPrompt replacing d = d {dialog=Just updated,menu=Nothing,contextMenu=Nothing}
+  where
+    initial=Dialog "Find and Replace" (Searching False "") [Input "Text to find" (lastFind d) (T.length (lastFind d))] 0 ["Find next","Cancel"] []
+    previous=case dialog d of Just dg | searching dg -> dg; _ -> initial
+    oldMode=case purpose previous of Searching mode _ -> mode; _ -> False
+    replacement=case fields previous of
+      _:Input _ value _:_->value
+      _ -> case purpose previous of Searching _ value -> value; _ -> ""
+    findField=case fields previous of f:_->f; _ -> Input "Text to find" "" 0
+    updated | oldMode==replacing = previous
+            | otherwise=previous {purpose=Searching replacing replacement,
+                fields=findField:[Input "Replace with" replacement (T.length replacement) | replacing],
+                focus=if replacing then 1 else 0,buttons=[if replacing then "Replace" else "Find next","Cancel"]}
+
+searchTabRects :: Desktop -> Dialog -> [(Rect,Bool)]
+searchTabRects d dg=let Rect x y _ _=dialogRect d dg in [(Rect (x+3) (y+2) 10 1,False),(Rect (x+14) (y+2) 12 1,True)]
+
+dialogCommandAllowed :: Command -> Desktop -> Bool
+dialogCommandAllowed cmd d=case dialog d of
+  Just dg | searching dg,cmd `elem` [Find,Replace] -> True
+          | f:_<-drop (focus dg) (fields dg),editableArea f -> cmd `elem` [Copy,Cut,Paste,SelectAll,Undo,Redo]
+  _ -> False
 
 fieldHeight :: Field -> Int
 fieldHeight Input{} = 3
@@ -684,7 +721,7 @@ dialogFieldLayout w available dg
     (before,after)=break (\f -> case f of Radio "Appearance" _ _ -> True; _ -> False) (fields dg)
     cw=(w-8) `div` 2
     column x fw fs=zipWith (\y f -> Rect x y fw (fieldRows f))
-      (scanl (+) (2+length (body dg)) (map fieldRows fs)) fs
+      (scanl (+) (2+length (body dg)+if searching dg then 2 else 0) (map fieldRows fs)) fs
     fieldRows (TextArea _ True _ _ _ _) = max 4 (available-5-length (body dg)-sum [dialogFieldHeight dg f | f<-fields dg,not (editableArea f)])
     fieldRows f = dialogFieldHeight dg f
 
@@ -693,7 +730,7 @@ dialogRect d dg = Rect ((sw-w) `div` 2) (max 1 ((sh-h) `div` 2)) w h
   where
     (sw,sh) = screenSize d
     w = if approvalDialog dg then min sw (min (max 20 (sw-4)) 110) else min sw 62
-    h = min (sh-2) (max 7 (3+maximum (2+length (body dg):[top r+height r | r<-dialogFieldLayout w (sh-2) dg])))
+    h = min (sh-2) (max (if searching dg then 13 else 7) (3+maximum (2+length (body dg):[top r+height r | r<-dialogFieldLayout w (sh-2) dg])))
 
 fieldRects :: Desktop -> Dialog -> [Rect]
 fieldRects d dg = [r {left=x+left r,top=y+top r-offset} | r<-layout]
@@ -961,6 +998,7 @@ composerEvent (V.EvKey key mods) d
   | key==V.KEnter, composerFocused d, all (`elem` [V.MCtrl,V.MShift]) mods = Just (composerSubmit mods d)
   | V.KChar c<-key, textInputChar c, null mods || mods==[V.MShift] = done (composerInsert (T.singleton c) d)
   | not (composerFocused d) || V.MAlt `elem` mods || V.MMeta `elem` mods = Nothing
+  | ctrl, V.KChar c<-key, toLower c=='z', V.MShift `elem` mods = Just (runCommand Redo d)
   | ctrl, V.KChar c<-key, Just cmd<-lookup (toLower c) [('c',Copy),('x',Cut),('v',Paste),('a',SelectAll),('z',Undo),('y',Redo)] = Just (runCommand cmd d)
   | otherwise = case key of
       V.KLeft -> move (if ctrl then wordLeft text p else previousCharacter text p)
@@ -1506,8 +1544,9 @@ keyEvent key mods d
   | key==V.KIns && V.MCtrl `elem` mods = runCommand Copy d
   | key==V.KIns && V.MShift `elem` mods = runCommand Paste d
   | key==V.KDel && V.MShift `elem` mods = runCommand Cut d
+  | ctrl, V.MShift `elem` mods, V.KChar c<-key, Just cmd<-lookup (toLower c) [('z',Redo),('l',FindPrevious),('c',Conversation),('n',AgentNew)] = runCommand cmd d
   | ctrl, wordStar d, not (activeHex d), V.KChar c <- key = starKey (toLower c) d
-  | ctrl, V.KChar c <- key, Just cmd <- lookup (toLower c) [('b',ToggleTree),('s',Save),('o',Open),('n',New),('z',Undo),('y',Redo),('c',Copy),('x',Cut),('v',Paste),('a',SelectAll),('f',Find),('r',Replace),('g',GoTo),('l',FindNext),('q',Quit)] = runCommand cmd d
+  | ctrl, V.KChar c <- key, Just cmd <- lookup (toLower c) [('b',ToggleTree),('s',Save),('o',Open),('n',New),('z',Undo),('y',Redo),('c',Copy),('x',Cut),('v',Paste),('a',SelectAll),('f',Find),('h',Replace),('r',Replace),('g',GoTo),('l',FindNext),('q',Quit)] = runCommand cmd d
   | otherwise = (editorKey key mods d,[])
   where ctrl = V.MCtrl `elem` mods
 
@@ -1578,6 +1617,9 @@ starPrefix _ _ d = (d,[])
 
 dialogEvent :: V.Event -> Dialog -> Desktop -> (Desktop,[Effect])
 dialogEvent ev dg d = case ev of
+  V.EvKey (V.KChar c) mods | searching dg,V.MCtrl `elem` mods,toLower c `elem` ['f','h','r'] -> runCommand (if toLower c=='f' then Find else Replace) d
+  V.EvKey (V.KChar '\t') mods | Searching mode _<-purpose dg,V.MCtrl `elem` mods -> (searchPrompt (not mode) d,[])
+  V.EvMouseDown x y V.BLeft _ | searching dg,Just (_,mode)<-find (\(r,_)->inside r x y) (searchTabRects d dg) -> (searchPrompt mode d,[])
   V.EvKey (V.KFun 3) mods | V.MAlt `elem` mods, PermissionDialog{}<-purpose dg -> dialogEvent (V.EvKey V.KEsc []) dg d
   V.EvKey V.KEsc _ | PermissionDialog action<-purpose dg -> (d {dialog=Nothing,buttonHover=Nothing,buttonPressed=Nothing},[PermissionAction action ["1"]])
   V.EvKey V.KEsc _ -> (d {dialog=Nothing,buttonHover=Nothing,buttonPressed=Nothing},[])
@@ -1637,7 +1679,7 @@ dialogEvent ev dg d = case ev of
       in (d {clipboard=if c=='v' then clipboard d else copied,dialog=Just dg {fields=replaceAt (focus dg) edited (fields dg)}},[])
     areaKey key mods = updateField $ \f -> if editableArea f
       then textAreaEdit focusedRect (case key of
-        V.KChar c | V.MCtrl `elem` mods, Just cmd<-lookup c [('z',Undo),('y',Redo),('a',SelectAll)] -> fst . runCommand cmd
+        V.KChar c | V.MCtrl `elem` mods, Just cmd<-lookup (toLower c) [('z',if V.MShift `elem` mods then Redo else Undo),('y',Redo),('a',SelectAll)] -> fst . runCommand cmd
         _ -> editorKey key mods) f
       else clampArea focusedRect (fieldKey key mods f)
     clampArea rect f@(TextArea name editable b sel row col) = TextArea name editable b sel (min row (max 0 (bufferLineCount b-height (textAreaRect rect f)))) col
@@ -1737,8 +1779,8 @@ submitDialog button dg original
       [if value then "true" else "false" | CheckBox _ value <- fields dg] ++
       [T.pack (show i) | Radio _ _ i <- fields dg] ++
       [T.pack (show i) | ListBox _ _ i <- fields dg])])
-    Finding -> (findText first d,[])
-    Replacing -> let found = findText first d
+    Searching False _ -> (findText first d,[])
+    Searching True _ -> let found = findText first d
                  in if T.null first || status found=="Search text not found." then (found,[])
                     else (insertText second found,[])
     GoingTo | activeHex d -> case readMaybe (T.unpack first) of

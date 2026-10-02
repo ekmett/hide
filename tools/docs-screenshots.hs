@@ -84,7 +84,8 @@ main = do
     -- Start on a short source declaration, with the package visible behind it.
     let desktop = modifyActive (\w -> w {scrollRow=23}) loaded
         scenes =
-          [ ("permission-diff", permissionDiff)
+          [ ("find-replace", \d -> command Find d >>= typeText "bufferLineAt" >>= key (V.KChar 'h') [V.MCtrl] >>= typeText "lineAt")
+          , ("permission-diff", permissionDiff)
           , ("conversation", chat)
           , ("debug-step", debug)
           , ("file-menu", pure . (\d -> d {menu=Just (0,1)}))

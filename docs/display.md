@@ -94,7 +94,7 @@ clipboard; if permission needs a fresh gesture, click the displayed Copy or
 Paste toolbar button to retry.
 
 Browser shortcuts include Ctrl/Cmd+A to select all, Ctrl/Cmd+Z to undo, and
-Ctrl/Cmd+Shift+Z or Ctrl/Cmd+Y to redo. Ctrl/Cmd+F opens editor Find;
+Ctrl/Cmd+Shift+Z or Ctrl/Cmd+Y to redo. Ctrl/Cmd+F opens editor Find; Ctrl+H (Cmd+Option+F on macOS) opens Replace;
 Ctrl/Cmd+G and Shift+Ctrl/Cmd+G find the next and previous matches. Browser menu
 items for native Find, Undo and Redo may act differently from these shortcuts.
 

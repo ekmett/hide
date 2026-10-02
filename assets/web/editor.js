@@ -244,9 +244,16 @@ window.addEventListener('keydown',e=>{
  if(frame?.terminal&&e.ctrlKey&&!e.metaKey&&!e.shiftKey&&!e.altKey){
    e.preventDefault();send({type:'key',key:e.key,mods:mods(e)});return;
  }
- if(control&&['f','g','a','z','y'].includes(e.key.toLowerCase())&&(!frame?.wordstar||e.metaKey)){
+ // Option+F produces ƒ on macOS; recognize the physical key for Replace.
+ if(e.metaKey&&e.altKey&&e.code==='KeyF'){e.preventDefault();command('replace');return;}
+ // Keep native Hide/Reload shortcuts, and never consume plain PTY control keys above.
+ if(e.metaKey&&e.key.toLowerCase()==='h'||control&&!e.altKey&&e.key.toLowerCase()==='r')return;
+ if(control&&e.shiftKey&&!e.altKey&&(!frame?.terminal||e.metaKey)&&['c','n'].includes(e.key.toLowerCase())){
+   e.preventDefault();command(e.key.toLowerCase()==='c'?'conversation':'newConversation');return;
+ }
+ if(control&&['f','h','g','a','z','y'].includes(e.key.toLowerCase())&&(!frame?.wordstar||e.metaKey)){
    e.preventDefault();const k=e.key.toLowerCase();
-   command(k==='f'?'find':k==='g'?(e.shiftKey?'findPrevious':'findNext'):k==='a'?'selectAll':k==='y'||e.shiftKey?'redo':'undo');return;
+   command(k==='h'||k==='f'&&e.altKey?'replace':k==='f'?'find':k==='g'?(e.shiftKey?'findPrevious':'findNext'):k==='a'?'selectAll':k==='y'||e.shiftKey?'redo':'undo');return;
  }
  if((control||e.altKey)&&['+','=','-','0'].includes(e.key)){
    e.preventDefault();scale=e.key==='0'?initialScale:Math.max(1,Math.min(8,scale+(e.key==='-'?-0.125:0.125)));tiles.clear();resize();return;

@@ -118,7 +118,7 @@ checks=do
         pure (next,results++[pending])) (base,[]) [1..32::Int]
       (_,overflow)<-permissionCall runtime execute desktop "mutate" (object [])
       check "permission queue is capped at 32 requests" . isLeft =<< overflow
-      let other=desktop {dialog=Just (Dialog "Other editor work" Finding [] 0 ["Close"] [])}
+      let other=desktop {dialog=Just (Dialog "Other editor work" (Searching False "") [] 0 ["Close"] [])}
       preserved<-tickPermissions runtime other
       check "queued approvals preserve unrelated editor dialogs" (dialog preserved==dialog other)
       pure requests

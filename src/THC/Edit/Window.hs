@@ -1,5 +1,5 @@
 {-# LANGUAGE CPP, ForeignFunctionInterface, OverloadedStrings #-}
-module THC.Edit.Window (runWindow
+module THC.Edit.Window (runWindow, nativeMenuShortcut
 #ifdef WITH_WINDOW
   , check, utf8, nativeMenus, nativeCommands
   , c_system_dark, c_open, c_mode, c_scale, c_title, c_close, c_size
@@ -82,13 +82,9 @@ nativeMenus = do
   forM_ numbered $ \((title,_,items),start) -> do
     utf8 title c_menu_add
     forM_ (zip [start..] items) $ \(i,MenuItem name _ cmd) ->
-      utf8 name $ \namePtr -> withCString (shortcut cmd) $ \keyPtr ->
+      utf8 name $ \namePtr -> withCString (nativeMenuShortcut cmd) $ \keyPtr ->
         c_menu_item namePtr keyPtr (fromIntegral i) (if enabled cmd then 1 else 0)
   where
-    shortcut cmd = case cmd of
-      New -> "n"; Open -> "o"; Save -> "s"; SaveAs -> "S"; Close -> "w"; Quit -> "q"
-      Undo -> "z"; Redo -> "Z"; Copy -> "c"; Cut -> "x"; Paste -> "v"; SelectAll -> "a"
-      Find -> "f"; FindNext -> "g"; _ -> ""
     enabled Disabled{} = False
     enabled _ = True
 #else
@@ -100,6 +96,7 @@ updateMenus :: Desktop -> IO ()
 updateMenus d = forM_ (zip [0..] nativeCommands) $ \(i,cmd) ->
   c_menu_enabled i (if commandEnabled d cmd && canInvoke cmd then 1 else 0)
   where
+    canInvoke cmd | dialogCommandAllowed cmd d = True
     canInvoke Paste = not (maybe False treeFocused (sideTree d)) || dialog d /= Nothing
     canInvoke cmd = dialog d == Nothing && (activeWindow d /= Nothing || (problemsVisible d && problemsFocused d && cmd==Copy) || cmd `elem` [New,Open,ChangeDir,Quit,Help,About,Gallery,EditorOptions,RunTarget,RunOptions,OpenTerminal,StopTerminal,AgentOptions,Conversation,AgentCancel,AgentResume,AgentNew,AgentCopyRaw,ToggleTree,GitDiff,GitCommit,Problems,NextMessage,PreviousMessage])
 #else
@@ -213,7 +210,7 @@ runWindow backend scale effects tick initial = do
     dispatch (9:x:y:direction:mods:_) d = pure (handleEvent (V.EvMouseDown x y (if direction>0 then V.BScrollUp else V.BScrollDown) (keyMods mods)) d)
     dispatch (11:i:_) d | i >= 0, cmd:_ <- drop i nativeCommands =
       if cmd == Paste then paste d
-      else if dialog d == Nothing then clipboardResult (cmd `elem` [Copy,Cut]) d (runCommand cmd d)
+      else if dialog d == Nothing || dialogCommandAllowed cmd d then clipboardResult (cmd `elem` [Copy,Cut]) d (runCommand cmd d)
       else pure (d,[])
     dispatch (12:x:y:_) d = pure (hoverAt x y d)
     dispatch (13:mods:_) d = pure (d {heldModifiers=keyMods mods},[])
@@ -245,3 +242,11 @@ runWindow backend scale effects tick initial = do
 runWindow :: Backend -> Double -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> (Desktop -> IO Desktop) -> Desktop -> IO ()
 runWindow _ _ _ _ _ = ioError (userError "Graphical support is not built. Install SDL3 and rebuild with: cabal build -fwindow")
 #endif
+
+-- Uppercase requests Shift; ~ requests Option in the Cocoa menu bridge.
+nativeMenuShortcut :: Command -> String
+nativeMenuShortcut cmd = case cmd of
+  New -> "n"; Open -> "o"; Save -> "s"; SaveAs -> "S"; Close -> "w"; Quit -> "q"
+  Undo -> "z"; Redo -> "Z"; Copy -> "c"; Cut -> "x"; Paste -> "v"; SelectAll -> "a"
+  Find -> "f"; Replace -> "~f"; FindNext -> "g"; FindPrevious -> "G"
+  Conversation -> "C"; AgentNew -> "N"; _ -> ""
