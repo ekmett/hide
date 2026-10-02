@@ -12,6 +12,8 @@ terminal, a native Metal/Vulkan window, or a browser. The same desktop can work
 on a remote machine over SSH, with the files and tools beside the project and
 the display in front of you.
 
+![Source editing, compiler output and an agent conversation sharing the Turbo Haskell desktop.](docs/site/screenshots/editor-conversation.png)
+
 ## Open a project
 
 ```sh

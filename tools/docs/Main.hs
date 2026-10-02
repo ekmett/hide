@@ -57,10 +57,11 @@ guides =
 site :: FilePath
 site = "build/site"
 
--- These are generated from the live dialog definitions through Metal.
--- Keep this list in sync with tools/docs-screenshots.hs.
+-- The README overview is a user-supplied capture. Other images are generated
+-- from live dialog definitions through Metal; keep those entries in sync with
+-- tools/docs-screenshots.hs.
 screenshotNames :: [FilePath]
-screenshotNames = map (<.> "png")
+screenshotNames = "editor-conversation.png" : map (<.> "png")
   ["find-replace","hdb-download","downloads", "permission-diff", "file-menu", "split", "preferences", "build-target", "debug-launch", "git-commit",
    "conversation", "debug-step", "debug-menu", "debug-stack", "side-by-side", "window-views-menu", "shell-block-menu"]
 
