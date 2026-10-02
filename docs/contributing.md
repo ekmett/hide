@@ -98,21 +98,27 @@ shows no window and starts no editor session. Personal provider settings are
 excluded from the default scenes; no source file is saved and no build or commit
 is submitted.
 
-The conversation and source-stepping illustrations use live sessions and must be
-requested explicitly:
+The conversation illustration replays a recorded exchange through the current
+renderer by default. Request it explicitly; an optional provider configuration
+selects a new live exchange instead. Source stepping requires a live session:
 
 ```sh
+build/docs-capture/screenshots conversation
+# Optional live exchange (contacts the configured provider):
 THC_DOCS_AGENT_CONFIG="$HOME/.config/thc-edit/agents.json" build/docs-capture/screenshots conversation
 THC_DOCS_DAP_PORT=4730 build/docs-capture/screenshots debug-step
 ```
 
-The conversation asks the configured provider to read `src/THC/Edit/Buffer.hs`
-and explain it, then asks a short follow-up about edit costs. Use a provider permitted to read this checkout; its configuration
-is copied only into ignored capture scratch space. The debugger attaches to an
+Set `THC_DOCS_CAPTURE_DIR` to a temporary directory to preview captures before
+replacing the site assets. Recorded replay does not read provider configuration
+or start an ACP connection. The optional live conversation asks the configured
+provider to read `src/THC/Edit/Buffer.hs` and explain it, then asks a short
+follow-up about edit costs. Use a provider permitted to read this checkout; its
+configuration is copied only into ignored capture scratch space. The debugger attaches to an
 already-running, suspended local DAP endpoint, steps into the program, captures
 the source, Debug menu and call-stack picker, then continues it to termination.
 Use a disposable toy program that terminates, not an interactive debugging
-session. Both modes close their connections on exit. Their compact desktops
+session. Live modes close their connections on exit. Their compact desktops
 keep the status-bar instructions visible. Never stage provider configuration or
 session records with the images.
 

@@ -6,6 +6,7 @@ import Data.Aeson
 import Data.Aeson.Types (Parser)
 import qualified Data.Aeson.KeyMap as KM
 import THC.Edit.BufferView
+import THC.Edit.Model (ChatSubmit,parseChatSubmit)
 import THC.Edit.Frontend (chooseBackend, chooseScale)
 
 data Defaults = Defaults
@@ -13,12 +14,12 @@ data Defaults = Defaults
   , defaultScreenMode :: Maybe Int, defaultColumns :: Maybe Int, defaultRows :: Maybe Int
   , defaultAppearance :: Maybe String, defaultWordStar :: Maybe Bool
   , defaultBlinkCursor :: Maybe Bool, defaultCRT :: Maybe Bool
-  , defaultPixelateUnicode :: Maybe Bool, defaultMaterialIcons :: Maybe Bool, defaultStreamerMode :: Maybe Bool, defaultView :: Maybe BufferView
+  , defaultPixelateUnicode :: Maybe Bool, defaultMaterialIcons :: Maybe Bool, defaultStreamerMode :: Maybe Bool, defaultView :: Maybe BufferView, defaultChatSubmit :: Maybe ChatSubmit, defaultMacKeySymbols :: Maybe Bool
   } deriving (Eq,Show)
 
 parseDefaults :: Value -> Parser Defaults
 parseDefaults=withObject "editor.defaults" $ \o -> do
-  unless (all (`elem` ["backend","scale","screenMode","columns","rows","appearance","wordStar","blinkCursor","crtFilter","pixelateUnicode","materialIcons","streamerMode","bufferView"]) (KM.keys o)) (fail "Unknown editor default")
+  unless (all (`elem` ["backend","scale","screenMode","columns","rows","appearance","wordStar","blinkCursor","crtFilter","pixelateUnicode","materialIcons","streamerMode","bufferView","chatSubmit","macKeySymbols"]) (KM.keys o)) (fail "Unknown editor default")
   backend<-o .:? "backend"
   either fail (const (pure ())) (chooseBackend backend [])
   scale<-o .:? "scale"
@@ -32,4 +33,6 @@ parseDefaults=withObject "editor.defaults" $ \o -> do
   unless (maybe True (`elem` ["light","dark","system"]) appearance) (fail "appearance must be light, dark or system")
   viewName<-o .:? "bufferView"
   view<-traverse (maybe (fail "bufferView must be current, changes, only-changes or side-by-side") pure . parseBufferView) viewName
-  Defaults backend scale mode columns rows appearance <$> o .:? "wordStar" <*> o .:? "blinkCursor" <*> o .:? "crtFilter" <*> o .:? "pixelateUnicode" <*> o .:? "materialIcons" <*> o .:? "streamerMode" <*> pure view
+  submitName<-o .:? "chatSubmit"
+  submit<-traverse (maybe (fail "chatSubmit must be query or steer") pure . parseChatSubmit) submitName
+  Defaults backend scale mode columns rows appearance <$> o .:? "wordStar" <*> o .:? "blinkCursor" <*> o .:? "crtFilter" <*> o .:? "pixelateUnicode" <*> o .:? "materialIcons" <*> o .:? "streamerMode" <*> pure view <*> pure submit <*> o .:? "macKeySymbols"

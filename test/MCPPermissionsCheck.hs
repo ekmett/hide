@@ -242,6 +242,9 @@ configChecks=bracket temporary removePathForcibly $ \directory -> do
   check "editor defaults create global-style parent directories" (saved==Right ())
   loaded<-readEditorDefaultsAt path
   check "editor defaults roundtrip primitive TOML values" (loaded==Right (object ["backend" .= ("terminal"::T.Text),"scale" .= (1.5::Double),"wordStar" .= True]))
+  submitSaved<-writeEditorDefaultsAt path (object ["chatSubmit" .= ("steer"::T.Text)])
+  submitLoaded<-readEditorDefaultsAt path
+  check "chat input default persists through the ordinary TOML writer" (submitSaved==Right () && case submitLoaded of Right value->field "chatSubmit" value==Just ("steer"::T.Text) && field "wordStar" value==Just True; _->False)
   TIO.writeFile path original
   _<-writeEditorDefaultsAt path (object ["scale" .= (2::Int),"blinkCursor" .= False])
   preserved<-TIO.readFile path
@@ -352,6 +355,13 @@ projectConfigChecks=bracket temporary removePathForcibly $ \directory -> do
       emptyContexts<-readAgentContexts source
       check "empty project defaults inherit global settings while empty context remains explicit"
         (emptyDefaults==globalOnly && case emptyContexts of Right value->(field "project" value >>= field "text"::Maybe T.Text)==Just ""; _->False)
+      _<-writeEditorDefaults (object ["chatSubmit" .= ("steer"::T.Text)])
+      inheritedSubmit<-readEditorDefaultsFor source
+      TIO.writeFile projectPath "[editor.defaults]\nchatSubmit = 'query'\n"
+      overriddenSubmit<-readEditorDefaultsFor source
+      check "project chat defaults override the global default and otherwise inherit it"
+        ((inheritedSubmit >>= maybe (Left "missing") Right . field "chatSubmit")==Right ("steer"::T.Text) &&
+         (overriddenSubmit >>= maybe (Left "missing") Right . field "chatSubmit")==Right ("query"::T.Text))
       TIO.writeFile projectPath "[invalid\nsecret = 'private-project-value'\n"
       malformedDefaults<-readEditorDefaultsFor source
       malformedContexts<-readAgentContexts source

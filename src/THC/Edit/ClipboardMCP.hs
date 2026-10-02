@@ -22,7 +22,7 @@ clipboardTool :: Desktop -> Value -> IO (Desktop,IO (Either T.Text Value))
 clipboardTool d args=case parseEither parse args of
   Left err -> pure (d,pure (Left (T.pack err)))
   Right text -> let (serial,_)=clipboardExport d in pure
-    (d {clipboard=text,clipboardExport=(serial+1,Just text)},pure (Right (object ["editorClipboardWritten" .= True,"frontendCopyQueued" .= True,"bytes" .= BS.length (TE.encodeUtf8 text)])))
+    (d {clipboard=text,clipboardCode=Nothing,clipboardExport=(serial+1,Just text)},pure (Right (object ["editorClipboardWritten" .= True,"frontendCopyQueued" .= True,"bytes" .= BS.length (TE.encodeUtf8 text)])))
   where
     parse=withObject "clipboard_write" $ \o -> do
       unless (KM.keys o==["text"]) (fail "Supply only text")

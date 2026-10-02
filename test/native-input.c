@@ -28,6 +28,22 @@ static void check(SDL_Keycode key, SDL_Keymod mods, const char *text, int expect
     if (expected == 2) assert(strcmp(thc_text(), text) == 0);
 }
 
+#ifdef SDL_PLATFORM_MACOS
+static void check_command_completion(SDL_Scancode scan, SDL_Keycode composed, const char *text, int shortcut) {
+    SDL_FlushEvents(SDL_EVENT_FIRST, SDL_EVENT_LAST);
+    SDL_Event e;
+    SDL_zero(e); e.type = SDL_EVENT_KEY_DOWN; e.key.key = composed;
+    e.key.scancode = scan; e.key.mod = SDL_KMOD_GUI;
+    assert(SDL_PushEvent(&e));
+    SDL_zero(e); e.type = SDL_EVENT_TEXT_INPUT; e.text.text = text;
+    assert(SDL_PushEvent(&e));
+    SDL_zero(e); e.type = SDL_EVENT_QUIT; assert(SDL_PushEvent(&e));
+    int32_t out[6]; assert(thc_wait(out));
+    assert(out[0] == 1 && out[1] == shortcut && out[2] == 8);
+    assert(thc_wait(out) && out[0] == 6); /* Paired composed text is consumed. */
+}
+#endif
+
 static void check_mouse_cell(SDL_Renderer *renderer, int row, int cell_height, bool hovered) {
     uint16_t glyph[16], accent[16], bright[16];
     for (int i = 0; i < 16; ++i) { glyph[i] = 0xc000; accent[i] = 0x3000; bright[i] = 0x0c00; }
@@ -370,6 +386,13 @@ int main(void) {
         check(scale_keys[i], SDL_KMOD_ALT, scale_text[i], 1);
         assert(thc_wait(out) && out[0] == 6);
     }
+    check_command_completion(SDL_SCANCODE_BACKSLASH, 0x00ab, "«", '\\');
+    check_command_completion(SDL_SCANCODE_LEFTBRACKET, 0x201c, "“", '[');
+    check_command_completion(SDL_SCANCODE_RIGHTBRACKET, 0x2018, "‘", ']');
+    check(SDLK_BACKSLASH, SDL_KMOD_ALT, "«", 2);
+    check(SDLK_LEFTBRACKET, SDL_KMOD_ALT, "“", 2);
+    check(SDLK_RIGHTBRACKET, SDL_KMOD_ALT, "‘", 2);
+    check(SDLK_BACKSLASH, SDL_KMOD_ALT | SDL_KMOD_SHIFT, "»", 2);
     check(SDLK_X, SDL_KMOD_ALT, "≈", 2);
     check(SDLK_F, SDL_KMOD_ALT, "ƒ", 2);
     check(SDLK_E, SDL_KMOD_ALT, NULL, 6); /* Dead key awaits composed text. */

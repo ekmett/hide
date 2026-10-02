@@ -11,7 +11,7 @@ terminals and conversations can stay open beside the code you are working on.
 The editor runs independently of the THC compiler; you can use GHC or THC for
 project builds and runs.
 
-[![A live agent conversation about the editor’s buffer, with tool calls and an unsent follow-up.](screenshots/conversation.png)](screenshots/conversation.png)
+[![A recorded agent conversation about the editor’s buffer, replayed with an unsent follow-up.](screenshots/conversation.png)](screenshots/conversation.png)
 
 The screenshots in these guides show the Metal frontend working in this project,
 with the CRT filter and Pixelate Unicode enabled. Click an image to view it at

@@ -178,7 +178,7 @@ function connect(){
  if(closed)return;
  socket=new WebSocket(new URL('socket',location.href).href.replace(/^http/,'ws'));
  socket.binaryType='arraybuffer';
- const wireRows=[];let incoming=Promise.resolve();
+ const wireRows=[];let incoming=Promise.resolve(),platformSent=false;
  socket.onmessage=e=>{incoming=incoming.then(()=>receive(e)).catch(error=>{status.textContent=`Display error: ${error.message}`;socket.close();});};
  async function receive(e){
    let message;
@@ -197,6 +197,7 @@ function connect(){
    }else if(message.type==='assets'){
      glyphs=new Map(message.glyphs.map(([c,w,rs])=>[c,[w,rs]]));tiles.clear();scale=initialScale=message.scale||2;ready=true;status.textContent='Connected';lastSize='';send({type:'theme',dark:systemTheme.matches});
    }else if(message.type==='frame'){
+     if(!platformSent){platformSent=true;send({type:'frontend',mode:message.mode||3,mac:navigator.platform.includes('Mac')});}
      message.rows=message.rows.map(([y,spans])=>[y,spans.map(([x,fg,bg,runs])=>[x,fg,bg,runs.flatMap(run=>typeof run==='string'?Array.from(run,c=>[c,1]):[run])])]);
      const oldCursor=JSON.stringify(frame?.cursor);
      const changedMode=Object.hasOwn(message,'mode')&&mode!==message.mode;
@@ -274,6 +275,11 @@ window.addEventListener('keydown',e=>{
  // Native clipboard events retain browser permission/user-activation semantics.
  if(control&&['c','x','v'].includes(e.key.toLowerCase())&&(!frame?.wordstar||e.metaKey))return;
  if(e.getModifierState('AltGraph'))return;
+ // Command owns these shortcuts on macOS; Option retains composed text.
+ if(e.metaKey&&!e.ctrlKey&&!e.altKey&&!e.shiftKey&&navigator.platform.includes('Mac')){
+   const shortcut={Backslash:'\\',BracketLeft:'[',BracketRight:']'}[e.code];
+   if(shortcut){e.preventDefault();cursorEpoch=performance.now();send({type:'key',key:shortcut,mods:['alt']});return;}
+ }
  if(e.altKey&&!control&&navigator.platform.includes('Mac')&&e.key.length===1&&!/^[a-z0-9]$/i.test(e.key))return;
  e.preventDefault();cursorEpoch=performance.now();send({type:'key',key:e.key,mods:mods(e)});
 });

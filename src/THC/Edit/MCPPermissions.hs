@@ -3,7 +3,7 @@ module THC.Edit.MCPPermissions
   ( Permissions, withPermissions, withPermissionsAt, permissionCall, policyEffects, tickPermissions
   , permissionConfigPath, readEditorDefaults, writeEditorDefaults, readEditorDefaultsAt, writeEditorDefaultsAt
   , projectConfigPath, readEditorDefaultsFor, readAgentContextAt, writeAgentContextAt, readAgentContexts
-  , readAgentLimitsFor, updateConfigTable
+  , readAgentLimitsFor, updateConfigTable, readAutocompleteFor, writeAutocomplete, writeAutocompleteFor
   ) where
 
 import Control.Concurrent (MVar, newEmptyMVar, newMVar, readMVar, tryPutMVar, withMVar)
@@ -279,6 +279,40 @@ readEditorDefaultsFor directory=configIO $ do
       (Object globalEntries,Object projectEntries)->Right (Object (KM.union projectEntries globalEntries))
       _->Left "Editor defaults must be a table"
 
+-- Autocomplete provider settings are human-owned, separate from display defaults.
+readAutocompleteFor :: FilePath -> IO (Either Text Value)
+readAutocompleteFor directory=configIO $ do
+  globalPath<-permissionConfigPath
+  projectPath<-projectConfigPath directory
+  global<-load globalPath
+  project<-load projectPath
+  pure $ do
+    a<-global; b<-project
+    pure (Object (KM.union b a))
+  where
+    load path=do
+      config<-readConfig path
+      pure $ do
+        (_,_,table)<-config
+        selected<-lookupTable ["editor","autocomplete"] table
+        values<-traverse (primitive . snd) (maybe M.empty tableMap selected)
+        pure (KM.fromList [(K.fromText key,value) | (key,value)<-M.toList values])
+
+writeAutocomplete :: Value -> IO (Either Text ())
+writeAutocomplete values=permissionConfigPath >>= \path->writeTable path ["editor","autocomplete"] values
+
+-- Update a project's existing override instead of saving an ineffective global
+-- value beneath it. Projects without this table continue to use global settings.
+writeAutocompleteFor :: FilePath -> Value -> IO (Either Text ())
+writeAutocompleteFor directory values=configIO $ do
+  path<-projectConfigPath directory
+  loaded<-readConfig path
+  case loaded >>= (\(_,_,table)->lookupTable ["editor","autocomplete"] table) of
+    Left err->pure (Left err)
+    Right (Just _)->writeTable path ["editor","autocomplete"] values
+    Right Nothing->writeAutocomplete values
+
+
 -- A project may tighten the human's global ceilings, never raise them. Read
 -- both files before each spawn; malformed limits must not restore permissive defaults.
 readAgentLimitsFor :: FilePath -> IO (Either Text (Int,Int))
@@ -354,7 +388,7 @@ writeEditorDefaultsAt path values=case values of
   Object entries | all (`elem` allowed) (KM.keys entries),all scalar (KM.elems entries) -> writeTable path ["editor","defaults"] values
   _ -> pure (Left "Editor defaults must contain only supported primitive settings")
   where
-    allowed=["backend","scale","screenMode","columns","rows","appearance","wordStar","blinkCursor","crtFilter","pixelateUnicode","materialIcons","streamerMode","bufferView"]
+    allowed=["backend","scale","screenMode","columns","rows","appearance","wordStar","blinkCursor","crtFilter","pixelateUnicode","materialIcons","streamerMode","bufferView","chatSubmit","macKeySymbols"]
     scalar String{}=True; scalar Number{}=True; scalar Bool{}=True; scalar _=False
 
 primitive :: Toml.Value' a -> Either Text Value

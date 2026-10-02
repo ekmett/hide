@@ -28,6 +28,7 @@ import System.FilePath (takeFileName)
 import THC.Edit.Files (filePath)
 import THC.Edit.Font
 import THC.Edit.Frontend (modeSize)
+import THC.Edit.Render (renderKey)
 
 runWeb :: Double -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> (Desktop -> IO Desktop) -> Desktop -> IO ()
 runWeb scale effects tick initial = do
@@ -56,16 +57,19 @@ runWeb scale effects tick initial = do
         current<-tick d
         cwd<-getCurrentDirectory
         writeIORef state current
-        let oldDesktop=fmap (\(old,_,_) -> old) previous
-            oldRows=maybe [] (\(_,cached,_) -> cached) previous
-            oldMetadata=maybe [] (\(_,_,meta) -> meta) previous
-            rows=if oldDesktop==Just current then oldRows else frameRows current
-            metadata=frameMetadata cwd current
-        when (oldDesktop/=Just current) $ do
-          let
-              reset=maybe True (\old -> screenSize old/=screenSize current || videoMode old/=videoMode current || pixelateUnicode old/=pixelateUnicode current) oldDesktop
-          when (reset || rows/=oldRows || metadata/=oldMetadata) $
-            WS.sendBinaryData conn (framePacket reset oldRows rows (if reset then metadata else filter (`notElem` oldMetadata) metadata))
+        -- Never compare desktops here: even idle equality would walk buffers
+        -- and undo history. Share the native frontend's bounded render key.
+        stateKey<-renderKey current
+        let key=(stateKey,cwd)
+            resetKey=(screenSize current,videoMode current,pixelateUnicode current)
+            oldRows=maybe [] (\(_,_,cached,_) -> cached) previous
+            oldMetadata=maybe [] (\(_,_,_,meta) -> meta) previous
+            sameFrame=maybe False (\(old,_,_,_)->old==key) previous
+            rows=if sameFrame then oldRows else frameRows current
+            metadata=if sameFrame then oldMetadata else frameMetadata cwd current
+            reset=maybe True (\(_,old,_,_)->old/=resetKey) previous
+        when (reset || (not sameFrame && (rows/=oldRows || metadata/=oldMetadata))) $
+          WS.sendBinaryData conn (framePacket reset oldRows rows (if reset then metadata else filter (`notElem` oldMetadata) metadata))
         event<-timeout 50000 (atomically ((readTMVar disconnected >> pure Nothing) `orElse` readTBQueue queue))
         case event of
           Just Nothing -> pure ()
@@ -77,7 +81,7 @@ runWeb scale effects tick initial = do
               Just (serial,_) -> send (object ["type" .= ("ack"::T.Text),"seq" .= serial,"dirty" .= webDirty updated])
               Nothing -> pure ()
             if exit then send (object ["type" .= ("closed"::T.Text)]) >> void (tryPutMVar done ())
-              else loop conn send queue disconnected (Just (current,rows,metadata)) updated
+              else loop conn send queue disconnected (Just (key,resetKey,rows,metadata)) updated
       effect _ _ result@(True,_) _ = pure result
       effect _ send (_,d) ReadBrowserClipboard = send (object ["type" .= ("paste-request"::T.Text)]) >> pure (False,d)
       effect _ send (_,d) (WriteBrowserClipboard text) = send (object ["type" .= ("copy"::T.Text),"text" .= text]) >> pure (False,d)

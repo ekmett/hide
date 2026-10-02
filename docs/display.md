@@ -64,6 +64,10 @@ System is the default. Preferences groups key bindings and screen modes on the
 left, appearance and rendering controls on the right. Narrow terminals stack
 the controls into one column.
 
+In text mode, **Mac key symbols** displays modifier symbols instead of key names.
+⌥ and ⌘ occupy two cells. This is a display preference; it does not change which
+keys the terminal sends.
+
 [![Preferences dialog showing key bindings, screen mode, appearance, CRT filter and Pixelate Unicode.](site/screenshots/preferences.png)](site/screenshots/preferences.png)
 
 Native windows follow the OS appearance, and the browser follows

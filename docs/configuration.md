@@ -11,6 +11,7 @@ columns = 120
 rows = 50
 appearance = "dark"
 wordStar = false
+macKeySymbols = false
 blinkCursor = true
 crtFilter = true
 pixelateUnicode = true
@@ -20,6 +21,14 @@ streamerMode = false
 ```
 
 Use `terminal`, `auto`, `metal`, `vulkan`, or `web` for the display backend. `remote` serves the protocol over standard input/output. Scale runs from 1 to 8 in eighth steps. Screen mode 3 defaults to 80×25; 259 defaults to 80×50. Explicit columns and rows override those dimensions. The terminal takes its size from the terminal window.
+
+In text mode, `macKeySymbols = true` uses ⌃, ⌥, ⇧ and ⌘ in key labels.
+You can also set **Options > Preferences > Mac key symbols**, which saves the
+choice to the global configuration. ⌥ and ⌘ reserve two character cells; the
+terminal cursor is repositioned after each glyph even if its font draws it
+narrower. This changes labels, not bindings: terminal shortcuts still use
+Control/Alt, and Command remains owned by your terminal application. Native Mac
+windows and Mac browsers use symbol labels automatically.
 
 Command-line options override environment variables, which override project defaults, which override global defaults. For example, `THC_EDIT_BACKEND=web` overrides `backend = "metal"`, and `--terminal` overrides both. `--mode` selects its usual dimensions unless `--size` is also supplied. `--no-crt`, `--classic-icons`, `--standard-keys`, `--no-blink-cursor` and `--no-pixelate-unicode` override enabled defaults.
 
@@ -131,3 +140,27 @@ terminal_start = "disable"
 Read-only tools default to Enable; other tools default to Prompt. Omitted tools retain that default. See [session tools](session-tools.md) for the available services.
 
 The editor preserves unrelated settings and comments when saving its own entries. Additional compiler sections can share this file as they are introduced.
+
+## Autocomplete
+
+Completion settings are independent of the main conversation. Choose them in
+**Options > Autocomplete**, or set global defaults and project overrides:
+
+```toml
+[editor.autocomplete]
+provider = "acp" # off, acp, or copilot
+executable = "codex-acp"
+arguments = "[]" # JSON array of arguments
+model = ""
+effort = ""
+copilotExecutable = "copilot-language-server"
+copilotArguments = '["--stdio"]'
+debug = false
+```
+
+An empty model or effort uses the ACP provider's default. Set `debug = true` to
+show the completion conversation in the bottom panel; ACP accepts intent hints
+there. Completion stays off until a provider is selected. The Options dialog
+updates the project table if it already exists, otherwise global settings. A
+project value in `thc.toml` takes precedence. Agents
+cannot change these settings or complete their own authentication.

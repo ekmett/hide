@@ -72,6 +72,14 @@ checks=do
       public=firstRect settings dg
   check "nonsensitive agent settings can be read but not edited"
     (readableAt settings (left public) (top public+1) && not (pointerAllowedAt settings (left public) (top public+1)))
+  let (chatPrefs,_)=runCommand ChatInputOptions base
+      chatDialog=maybe (error "missing chat input dialog") id (dialog chatPrefs)
+      chatRect=firstRect chatPrefs chatDialog
+  check "chat input defaults are public but human-controlled"
+    (readableAt chatPrefs (left chatRect) (top chatRect+1) && not (pointerAllowedAt chatPrefs (left chatRect) (top chatRect+1)) &&
+     not (guestCommandAllowed ChatInputOptions) && not (guestEffectsAllowed [SaveChatSubmit SteerSubmit]) &&
+     all (denied chatPrefs) [P.Key "Enter" [],P.Key "ArrowDown" [],P.Key "Escape" [],P.Blur] &&
+     not (guestTransitionAllowed base (base {chatSubmit=SteerSubmit}) []))
   let prefs=Dialog "Preferences" Settings [CheckBox "Streamer mode" False] 0 ["OK","Cancel"] []
       pd=base {dialog=Just prefs}
       pr=firstRect pd prefs
@@ -90,13 +98,13 @@ checks=do
     (not (denied base {dialog=Just (Dialog "Find" (Searching False "") [Input "Text" "" 0] 0 ["Find"] [])} (P.Paste "needle")) && guestEffectsAllowed [AgentAction "make" [],AgentAction "run-config" [],AgentAction "terminal-input" ["1","ls\n"]])
   check "agent lifecycle and permission effects are rejected"
     (not (guestEffectsAllowed [AgentAction "send-draft" []]) && not (guestEffectsAllowed [AgentAction "question-submit" []]) && not (guestEffectsAllowed [PermissionAction "show" []]))
-  let sticky=base {prefix=Just 'k',heldModifiers=[V.MCtrl],drag=Just (Selecting 0),buttonPressed=Just 0,clipboard="human secret",blockStart=Just (0,0)}
+  let sticky=base {prefix=Just 'k',heldModifiers=[V.MCtrl],drag=Just (Selecting 0),buttonPressed=Just 0,clipboard="human secret",clipboardCode=Just "human secret",blockStart=Just (0,0)}
       isolated=beginGuestInput sticky
   check "batch isolation removes human gestures and clipboard"
-    (prefix isolated==Nothing && heldModifiers isolated==[] && drag isolated==Nothing && buttonPressed isolated==Nothing && clipboard isolated=="" && blockStart isolated==Nothing)
+    (prefix isolated==Nothing && heldModifiers isolated==[] && drag isolated==Nothing && buttonPressed isolated==Nothing && clipboard isolated=="" && clipboardCode isolated==Nothing && blockStart isolated==Nothing)
   let finished=endGuestInput sticky isolated {clipboard="guest copy",prefix=Just 'q',drag=Just (Selecting 0)}
   check "guest gestures cannot carry into human input and human clipboard is retained"
-    (clipboard finished=="human secret" && prefix finished==Nothing && drag finished==Nothing)
+    (clipboard finished=="human secret" && clipboardCode finished==Just "human secret" && prefix finished==Nothing && drag finished==Nothing)
   check "known Session status is hidden independent of Streamer mode"
     (sanitizedStatus base {status="Session provider-secret"}=="Session [redacted]" && not (streamerReadableAt base {status="Session provider-secret"} 5 34))
   check "ordinary source text that looks like a Session header stays public"

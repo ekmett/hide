@@ -29,6 +29,12 @@ import qualified WorkspaceMCPCheck
 import qualified WorkspaceFilesMCPCheck
 import qualified TestsMCPCheck
 #endif
+import qualified HintComposerCheck
+import qualified AutocompleteCheck
+import qualified InlineCheck
+import qualified InlineRenderCheck
+import qualified AutocompleteACPCheck
+import qualified CopilotCheck
 import qualified HighlightingCheck
 import qualified AgentIntegrationCheck
 import qualified AgentAccessCheck
@@ -85,6 +91,12 @@ check name ok = unless ok (error name)
 
 main :: IO ()
 main = do
+  HintComposerCheck.checks
+  AutocompleteCheck.checks
+  InlineCheck.checks
+  InlineRenderCheck.checks
+  AutocompleteACPCheck.checks
+  CopilotCheck.checks
   HighlightingCheck.checks
   AgentIntegrationCheck.checks
   AgentAccessCheck.checks

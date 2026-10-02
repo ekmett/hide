@@ -1,5 +1,5 @@
 {-# LANGUAGE CPP, OverloadedStrings #-}
-module ConversationCheck (checks) where
+module ConversationCheck (checks, composerCodeChecks) where
 
 import Control.Concurrent (threadDelay)
 
@@ -47,8 +47,82 @@ import THC.Edit.Syntax (Style(..))
 import THC.Edit.Terminal (terminalAvailable)
 import THC.Edit.Session (checkpointPath)
 
+-- Draft code is ordinary Markdown carried by the existing Buffer. Exercise
+-- user edits and submitted/copy payloads, without depending on bubble artwork.
+composerCodeChecks :: IO ()
+composerCodeChecks=do
+  let check label ok=unless ok (error label)
+      press key mods=fst . handleEvent (V.EvKey key mods)
+      typeText text desktop=foldl (\d c->press (V.KChar c) [] d) desktop (T.unpack text)
+      paste text=fst . handleEvent (V.EvPaste (TE.encodeUtf8 text))
+      chat=selectConversationView "" "Primary" (initialDesktop (100,35))
+      block=typeText "> " chat
+      code=typeText "x = 1" block
+      extended=paste "  y = 2\nz = 3" (press V.KEnter [] code)
+      normal=typeText "Then explain it." (press V.KDown [] extended)
+      text d=contents (composerBuffer d)
+      isCodeChar (_,CodeStyle _ _)=True
+      isCodeChar _=False
+  check "greater-than-space creates code with a normal exit line" (composerInCode block && bufferLineCount (composerBuffer block)==2)
+  let codeWindow=maybe (error "missing conversation window") id (activeWindow code)
+      codeRect=composerRect code codeWindow
+      clickedCode=fst (handleEvent (V.EvMouseDown (left codeRect+1) (top codeRect) V.BLeft []) code)
+  check "clicking visible code edits its text rather than its hidden indentation"
+    (text (typeText "Z" clickedCode)=="    xZ = 1\n")
+  check "code creation is one undoable edit" (text (fst (runCommand Undo block))==">" && text (fst (runCommand Redo (fst (runCommand Undo block))))==text block)
+  check "Enter extends code while Down leaves it for normal prose"
+    ("    x = 1\n      y = 2\n    z = 3\nThen explain it."==text normal &&
+     not (composerInCode normal) && any isCodeChar (renderMarkdown 80 (text normal)))
+  let listCode=paste "line = 1" (typeText "> " (press V.KEnter [V.MShift] (typeText "- Inspect this:" chat)))
+      fenceCode="    before\n    ```\n    after\n"
+  check "submission preserves code after a list and embedded fence characters"
+    (any isCodeChar (renderMarkdown 80 (composerMarkdown (text listCode))) &&
+     "```" `T.isInfixOf` T.pack [c | pair@(c,_)<-renderMarkdown 80 (composerMarkdown fenceCode),isCodeChar pair] &&
+     composerMarkdown "```hs\n    original indentation\n```\n"=="```hs\n    original indentation\n```\n")
+  check "Control Enter keeps the configured opposite submit action inside code"
+    (snd (handleEvent (V.EvKey V.KEnter [V.MCtrl]) extended)==[AgentAction "steer-draft" []] &&
+     snd (handleEvent (V.EvKey V.KEnter [V.MCtrl]) extended {chatSubmit=SteerSubmit})==[AgentAction "send-draft" []])
+  let copied=fst (runCommand Copy (fst (runCommand SelectAll extended)))
+      unwrapped=press V.KBS [] (press V.KHome [] code)
+      backIn=press V.KBS [] (press V.KDown [] code)
+  check "composer copy removes only Markdown markers and keeps code indentation" (clipboard copied=="x = 1\n  y = 2\nz = 3\n")
+  check "backspace at code start unwraps and backspace from the exit line reenters" (text unwrapped=="x = 1\n" && composerInCode backIn && text backIn==text code)
+  let sourceText="main = 1\n  helper = 2\n"
+      source=fst (runCommand SelectAll (addDocument (Just (FileState "/project/Main.hs" Nothing)) (newBuffer sourceText) (initialDesktop (100,35))))
+      sourceCopy=fst (runCommand Copy source)
+      sourceCut=fst (runCommand Cut source)
+      pasted=fst (runCommand Paste (selectConversationView "" "Primary" sourceCopy))
+      nativePaste=paste sourceText (selectConversationView "" "Primary" sourceCopy)
+      browserPaste=runCommand Paste (selectConversationView "" "Primary" sourceCopy) {browserFrontend=True}
+      external=paste "plain replacement" (selectConversationView "" "Primary" sourceCopy)
+      prosePaste=paste sourceText (typeText "Please inspect:" (selectConversationView "" "Primary" sourceCopy))
+  check "copied and cut source paste as code through internal or native clipboard"
+    (composerInCode pasted && text pasted==text nativePaste && activeText sourceCut=="" &&
+     composerInCode (fst (runCommand Paste (selectConversationView "" "Primary" sourceCut))) &&
+     clipboard sourceCopy==sourceText && "      helper = 2" `T.isInfixOf` text pasted)
+  check "source paste is one undo step and separates existing prose"
+    (T.null (text (fst (runCommand Undo pasted))) && "Please inspect:\n\n    main" `T.isPrefixOf` text prosePaste)
+  check "browser paste still requests its clipboard and external text does not inherit code formatting"
+    (snd browserPaste==[ReadBrowserClipboard] && text external=="plain replacement" && not (composerInCode external))
+  let location=fst (runCommand CopyLocation (modifyActive (\w->w {selection=Selection 11 11}) (copyClipboard True "/project/Main.hs:2:3" sourceCopy)))
+      locationPaste=fst (runCommand Paste (selectConversationView "" "Primary" location))
+  check "Copy Location is one-based plain text even after copying source code"
+    (clipboard location=="/project/Main.hs:2:3" && text locationPaste==clipboard location && not (composerInCode locationPaste) && lookup "Copy Location" (contextItems SourceContext)==Just CopyLocation)
+  let child=selectConversationView "child" "Child" chat
+      childCode=typeText "child = 1" (typeText "> " child)
+      returned=selectConversationView "child" "Child" (selectConversationView "" "Primary" childCode)
+      question=chat {chatQuestion=Just (ChatQuestion 1 "Answer?" [] Nothing (newBuffer "") (Selection 0 0) True),clipboard=sourceText,clipboardCode=Just sourceText}
+      answered=typeText "> " question
+      questionPaste=fst (runCommand Paste question)
+  check "child code drafts survive switching conversations" (text returned==text childCode && composerInCode returned)
+  check "inline question input stays plain text" (fmap (contents.questionBuffer) (chatQuestion answered)==Just "> " && fmap (contents.questionBuffer) (chatQuestion questionPaste)==Just (T.map (\c->if c=='\n' then ' ' else c) sourceText))
+  let ignoredQuestion=fst (handleEvent (V.EvKey V.KEnter [V.MCtrl]) answered)
+  check "inline question Control Enter preserves answer and separate draft"
+    (chatQuestion ignoredQuestion==chatQuestion answered && composerBuffer ignoredQuestion==composerBuffer answered)
+  putStrLn "composer code checks passed"
+
 checks :: IO ()
-checks = bracket temporary removePathForcibly $ \root ->
+checks = (composerCodeChecks >>) $ bracket temporary removePathForcibly $ \root ->
   bracket (lookupEnv "XDG_CONFIG_HOME" <* setEnv "XDG_CONFIG_HOME" (root </> "config")) restore $ \_ ->
   bracket (lookupEnv "XDG_DATA_HOME" <* setEnv "XDG_DATA_HOME" (root </> "data")) (restoreEnvironment "XDG_DATA_HOME") $ \_ ->
   bracket (lookupEnv "THC_EDIT_SESSION" <* unsetEnv "THC_EDIT_SESSION") (restoreEnvironment "THC_EDIT_SESSION") $ \_ -> do
@@ -532,22 +606,64 @@ checks = bracket temporary removePathForcibly $ \root ->
         (contents (composerBuffer multiline)=="λ\nnext" && clipboard copiedDraft=="λ\nnext" && conversationText multiline==conversationText cancelled)
       check "status newline works even with an empty draft"
         (contents (composerBuffer (fst (clickStatus "Newline" cancelled)))=="\n" && null (snd (clickStatus "Newline" cancelled)))
+      forM_ [False,True] $ \replying -> forM_ [False,True] $ \supported -> do
+        let visible=multiline {agentSteering=supported,agentReplying=replying}
+        check "steering shortcut stays visible while idle or replying"
+          ("Ctrl+Enter Steer" `T.isInfixOf` snapshot visible)
+      let (options,_) = runCommand ChatInputOptions multiline
+          optionsDialog=maybe (error "missing chat input settings") id (dialog options)
+          selectedOptions=optionsDialog {fields=[Radio "Enter action" ["Query","Steer"] 1]}
+          (selectedInput,saveInput)=submitDialog 0 selectedOptions options
+          (cancelledInput,cancelEffects)=submitDialog 1 selectedOptions options
+      check "Options chat input selects and persists the human default"
+        (chatSubmit selectedInput==SteerSubmit && saveInput==[SaveChatSubmit SteerSubmit] && dialog selectedInput==Nothing &&
+         chatSubmit cancelledInput==QuerySubmit && null cancelEffects && any (\(_,_,items)->any (\(MenuItem label _ command)->label=="Chat input..." && command==ChatInputOptions) items) menus)
+      forM_ [QuerySubmit,SteerSubmit] $ \submitChoice -> forM_ [False,True] $ \replying -> forM_ ["","child-fixture"] $ \target -> do
+        let chatConfigured=(if T.null target then multiline else selectConversationView target "Child" multiline) {chatSubmit=submitChoice,agentReplying=replying,agentSteering=False,childAgentSteering=False}
+            queryMods=if submitChoice==QuerySubmit then [] else [V.MCtrl]
+            steerMods=if submitChoice==SteerSubmit then [] else [V.MCtrl]
+            queryHint=(if submitChoice==QuerySubmit then "Enter " else "Ctrl+Enter ")<>(if replying then "Queue query" else "Query")
+            steerHint=(if submitChoice==SteerSubmit then "Enter " else "Ctrl+Enter ")<>"Steer"
+        check "both shortcut labels follow the primary or child composer default"
+          (queryHint `T.isInfixOf` snapshot chatConfigured && steerHint `T.isInfixOf` snapshot chatConfigured)
+        check "Enter and Ctrl+Enter invoke the advertised opposite actions"
+          (snd (handleEvent (V.EvKey V.KEnter queryMods) chatConfigured)==[AgentAction "send-draft" []] &&
+           snd (handleEvent (V.EvKey V.KEnter steerMods) chatConfigured)==[AgentAction "steer-draft" []] &&
+           snd (clickStatus (if replying then "Queue query" else "Query") chatConfigured)==[AgentAction "send-draft" []] && snd (clickStatus "Steer" chatConfigured)==[AgentAction "steer-draft" []])
+        forM_ [[V.MShift],[V.MCtrl,V.MShift]] $ \mods -> do
+          let (newline,effects)=handleEvent (V.EvKey V.KEnter mods) chatConfigured
+          check "Shift+Enter always inserts newline without sending" (null effects && bufferLength (composerBuffer newline)==bufferLength (composerBuffer chatConfigured)+1)
       check "status steering sends the advertised action"
         (snd (clickStatus "Steer" (multiline {agentSteering=True,agentReplying=True}))==[AgentAction "steer-draft" []])
       submitted<-uncurry (conversationEffects runtime fallback) (clickStatus "Query" (pasteDraft "stream" cancelled)) >>= done runtime . snd
       check "status Query posts draft into transcript and clears input" (T.null (contents (composerBuffer submitted)) && not (agentReplying submitted))
-      busyDraft<-prompt runtime "wait" submitted >>= await runtime "composer busy" ((=="Agent is replying...").status)
+      let codeDraft=press V.KDown [] (pasteDraft "value = 42" (press (V.KChar ' ') [] (press (V.KChar '>') [] submitted)))
+      codeSubmitted<-applyEvent (V.EvKey V.KEnter []) codeDraft >>= await runtime "code prompt completion" ((=="Agent: end_turn").status)
+      codeMessages<-logged
+      let codePrompts=[params | entry<-codeMessages,field "method" entry==Just ("session/prompt"::T.Text),Just params<-[field "params" entry::Maybe Value]]
+          sentText=case reverse codePrompts of
+            params:_->case field "prompt" params :: Maybe [Value] of
+              Just (first:_)->field "text" first
+              _->Nothing
+            _->Nothing
+      check "submitting a code draft sends code Markdown and clears the accepted raw draft"
+        (sentText==Just (composerMarkdown (contents (composerBuffer codeDraft))) && T.null (contents (composerBuffer codeSubmitted)))
+      busyDraft<-prompt runtime "wait" codeSubmitted >>= await runtime "composer busy" ((=="Agent is replying...").status)
       preserved<-tickConversation runtime (pasteDraft "stream" busyDraft)
       queued<-applyEvent (V.EvKey V.KEnter []) preserved
       check "Enter queues a query while replying and retains input during ticks"
         (contents (composerBuffer preserved)=="stream" && agentQueued queued==1 && T.null (contents (composerBuffer queued)) && "Enter Queue query" `T.isInfixOf` snapshot queued)
       drained<-uncurry (conversationEffects runtime fallback) (clickStatus "Cancel" queued) >>= done runtime . snd
       check "Cancel stops current response then queued query runs" (agentQueued drained==0 && not (agentReplying drained) && "Enter Query" `T.isInfixOf` snapshot drained)
+      idleDefault<-applyEvent (V.EvKey V.KEnter []) ((pasteDraft "idle direction" drained) {chatSubmit=SteerSubmit,agentSteering=True})
+      check "default steering preserves idle draft and names Query" (contents (composerBuffer idleDefault)=="idle direction" && "Query" `T.isInfixOf` status idleDefault)
       steeringWait<-prompt runtime "wait" drained >>= await runtime "steering active" ((=="Agent is replying...").status)
-      check "steering hint requires negotiated support" (agentSteering steeringWait && "Ctrl+Enter Steer" `T.isInfixOf` snapshot steeringWait)
+      check "negotiated steering is available while replying" (agentSteering steeringWait && "Ctrl+Enter Steer" `T.isInfixOf` snapshot steeringWait)
       refused<-applyEvent (V.EvKey V.KEnter [V.MCtrl]) (pasteDraft "direction" steeringWait {agentSteering=False})
       check "unsupported steering retains draft" (contents (composerBuffer refused)=="direction")
-      steered<-applyEvent (V.EvKey V.KEnter [V.MCtrl]) (pasteDraft "direction" steeringWait) >>= await runtime "steering delivered" (not . agentReplying)
+      refusedDefault<-applyEvent (V.EvKey V.KEnter []) ((pasteDraft "direction" steeringWait) {chatSubmit=SteerSubmit,agentSteering=False})
+      check "default steering preserves unsupported draft" (contents (composerBuffer refusedDefault)=="direction")
+      steered<-applyEvent (V.EvKey V.KEnter []) ((pasteDraft "direction" steeringWait) {chatSubmit=SteerSubmit}) >>= await runtime "steering delivered" (not . agentReplying)
       check "steering uses adapter extension and clears submitted draft" . any ((==Just ("_session/steering"::T.Text)).field "method") =<< logged
       check "steering does not edit source or retain sent draft" (T.null (contents (composerBuffer steered)) && documentBuffer (sourceDocument steered)==documentBuffer (sourceDocument cancelled))
       idleRace<-prompt runtime "wait" steered >>= await runtime "idle race active" ((=="Agent is replying...").status)
@@ -874,6 +990,7 @@ providerScript=unlines
   , "      update({'sessionUpdate':'usage_update','used':148000,'size':400000})"
   , "      update({'sessionUpdate':'usage_update','used':-1,'size':0})"
   , "      finish()"
+  , "    elif scenario=='```': finish()"
   , "    elif scenario=='wide':"
   , "      update({'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':('reply-width '*90)+'\\n\\n```sh\\nprintf \\\'live λ\\\'\\n```'}})"
   , "      finish()"

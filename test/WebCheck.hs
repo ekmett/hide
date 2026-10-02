@@ -27,6 +27,11 @@ checks = do
   check "leave guard covers modified buffers and unsent conversation drafts"
     (not (webDirty base) && webDirty typed && webDirty base {composerBuffer=newBuffer "unsent thought"})
   check "web backend selection" (chooseBackend (Just "web") []==Right Web && chooseBackend Nothing [Web,Terminal]/=Right Web)
+  let platform=object ["type" .= ("frontend"::T.Text),"mode" .= (3::Int),"mac" .= True]
+      macFrontend=parseMaybe parseInput platform
+  check "client platform survives remote transport for native key labels"
+    (maybe False (nativeMac . fst . (`applyInput` base)) macFrontend &&
+     not (nativeMac (fst (applyInput (Frontend Nothing False) base {nativeMac=True}))))
   check "browser text and paste preserve Unicode" (activeText pasted=="λ\n👩🏽\x200d\&💻")
   check "browser blur releases drag and modifiers" (null (heldModifiers released) && drag released==Nothing)
   check "browser F2 matches existing Save event" (applyInput (Key "F2" []) pasted==handleEvent (V.EvKey (V.KFun 2) []) pasted)

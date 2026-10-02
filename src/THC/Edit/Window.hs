@@ -6,7 +6,7 @@ module THC.Edit.Window (runWindow, nativeMenuShortcut
   , c_begin, c_glyph, c_unicode, c_pixelate_unicode, c_cursor, c_cursor_blink
   , c_crt_filter, c_present, c_wait, c_text, c_clipboard, c_set_clipboard
 #ifdef darwin_HOST_OS
-  , c_menu_enabled
+  , c_menu_enabled, c_menu_prepare
 #endif
 #endif
   ) where
@@ -16,6 +16,7 @@ import THC.Edit.Model
 import Control.Exception (bracket_)
 import Control.Monad (forM_, when, unless, foldM)
 import Data.Foldable (toList)
+import Data.List (elemIndex)
 import qualified Data.ByteString as BS
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -55,7 +56,8 @@ foreign import ccall unsafe "thc_text" c_text :: IO CString
 foreign import ccall unsafe "thc_clipboard" c_clipboard :: IO CString
 foreign import ccall unsafe "thc_set_clipboard" c_set_clipboard :: CString -> IO ()
 #ifdef darwin_HOST_OS
-foreign import ccall unsafe "thc_menu_clear" c_menu_clear :: IO ()
+foreign import ccall unsafe "thc_menu_prepare" c_menu_prepare :: IO ()
+foreign import ccall unsafe "thc_menu_clear" c_menu_clear :: CInt -> CInt -> CInt -> IO ()
 foreign import ccall unsafe "thc_menu_add" c_menu_add :: CString -> IO ()
 foreign import ccall unsafe "thc_menu_item" c_menu_item :: CString -> CString -> CInt -> CInt -> IO ()
 foreign import ccall unsafe "thc_menu_enabled" c_menu_enabled :: CInt -> CInt -> IO ()
@@ -77,14 +79,15 @@ nativeCommands = [cmd | (_,_,items) <- menus, MenuItem _ _ cmd <- items]
 nativeMenus :: IO ()
 #ifdef darwin_HOST_OS
 nativeMenus = do
-  c_menu_clear
+  c_menu_clear (number About) (number EditorOptions) (number Quit)
   let numbered = zip menus (scanl (+) 0 [length items | (_,_,items) <- menus])
   forM_ numbered $ \((title,_,items),start) -> do
     utf8 title c_menu_add
     forM_ (zip [start..] items) $ \(i,MenuItem name _ cmd) ->
-      utf8 name $ \namePtr -> withCString (nativeMenuShortcut cmd) $ \keyPtr ->
+      unless (cmd `elem` [About,EditorOptions,Quit]) $ utf8 name $ \namePtr -> withCString (nativeMenuShortcut cmd) $ \keyPtr ->
         c_menu_item namePtr keyPtr (fromIntegral i) (if enabled cmd then 1 else 0)
   where
+    number cmd=maybe (error "Missing native application command") fromIntegral (elemIndex cmd nativeCommands)
     enabled Disabled{} = False
     enabled _ = True
 #else
@@ -141,6 +144,9 @@ draw font d = do
 runWindow :: Backend -> Double -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> (Desktop -> IO Desktop) -> Desktop -> IO ()
 runWindow backend scale effects tick initial = do
   font <- loadFont
+#ifdef darwin_HOST_OS
+  c_menu_prepare
+#endif
   let driver = case backend of Metal -> "metal"; Vulkan -> "vulkan"; _ -> if os == "darwin" then "metal" else "vulkan"
   -- SDL must stay on the main OS thread; GHC's main action is a bound thread.
   bracket_ (pure ()) c_close $ do
@@ -228,8 +234,8 @@ runWindow backend scale effects tick initial = do
       pure result
     copyClick x y d = case contextMenu d of
       Just (r,_) | inside r x y, y>top r, y<top r+height r-1 ->
-        case drop (y-top r-1) (contextItems (contextKind d)) of (_,cmd):_ -> cmd `elem` [Copy,CopyAllMessages]; _ -> False
-      _ -> any (\(r,_,action) -> inside r x y && action `elem` [Left Copy,Left CopyAllMessages]) (statusItemRects d)
+        case drop (y-top r-1) (contextItems (contextKind d)) of (_,cmd):_ -> cmd `elem` [Copy,CopyAllMessages,CopyLocation]; _ -> False
+      _ -> any (\(r,_,action) -> inside r x y && action `elem` [Left Copy,Left CopyAllMessages,Left CopyLocation]) (statusItemRects d)
     copies (V.EvKey key ms) d =
       (V.MCtrl `elem` ms && (not (wordStar d) || problemsFocused d) && key `elem` [V.KChar 'c',V.KChar 'x']) ||
       (key == V.KIns && V.MCtrl `elem` ms) || (key == V.KDel && V.MShift `elem` ms) ||
@@ -250,4 +256,5 @@ nativeMenuShortcut cmd = case cmd of
   New -> "n"; Open -> "o"; Save -> "s"; SaveAs -> "S"; Close -> "w"; Quit -> "q"
   Undo -> "z"; Redo -> "Z"; Copy -> "c"; Cut -> "x"; Paste -> "v"; SelectAll -> "a"
   Find -> "f"; Replace -> "~f"; FindNext -> "g"; FindPrevious -> "G"
+  EditorOptions -> ","
   Conversation -> "C"; AgentNew -> "N"; _ -> ""

@@ -47,4 +47,23 @@ checks = do
     let (drawn,next)=terminalText position 3 (icon<>" x")
     check "Material icons reserve two columns with terminal cursor correction"
       (clusterWidth icon==2 && next==7 && writeToByteString drawn==TE.encodeUtf8 ("  <3>"<>icon<>"<5> x"))
+  forM_ ["⌘","⌥"] $ \symbol -> do
+    let (drawn,next)=terminalText position 3 (symbol<>"X")
+    check "Mac modifiers reserve two cells and reposition terminal text"
+      (V.imageWidth (textImage V.defAttr (symbol<>"X"))==3 && next==6 &&
+       writeToByteString drawn==TE.encodeUtf8 ("  <3>"<>symbol<>"<5>X"))
+  let terminal=(initialDesktop (100,25)) {macKeySymbols=True}
+      mac=terminal {nativeMac=True,videoMode=Just 3}
+      save=MenuItem "Save" "Ctrl+S" Save
+      (enabled,effects)=handleEvent (V.EvKey V.KEnter [])
+        ((fst (runCommand EditorOptions (initialDesktop (80,25))))
+          {dialog=fmap (\dg -> dg {fields=[CheckBox "Mac key symbols" True]}) (dialog (fst (runCommand EditorOptions (initialDesktop (80,25)))))})
+  check "symbol labels distinguish native Command from terminal Control"
+    (menuShortcut terminal save=="⌃S" && menuShortcut mac save=="⌘S")
+  check "text preferences change labels and request persistence"
+    (macKeySymbols enabled && effects==[SaveMacKeySymbols True])
+  let hits=statusItemRects terminal
+      expected=scanl (+) 0 (map (keyLabelWidth . fst) (statusHints terminal))
+  check "status hit targets follow two-cell modifier labels"
+    (and [left rect==expected!!index | (rect,index,_)<-hits,index<length (statusHints terminal)])
   putStrLn "Unicode grapheme/layout checks passed"

@@ -36,21 +36,32 @@ and type in the draft at the bottom. The command focuses the existing conversati
 without repainting its history or replacing its draft. Your messages
 align right in cyan; replies align left in gray. Code keeps its syntax colors.
 
-[![A live conversation about Buffer.hs, with model selection, a completed tool call, replies, context usage and an unsent follow-up.](site/screenshots/conversation.png)](site/screenshots/conversation.png)
+[![A recorded conversation about Buffer.hs, replayed with model selection, replies, context usage and an unsent follow-up.](site/screenshots/conversation.png)](site/screenshots/conversation.png)
 
-This example asks the agent to explain the editor's own buffer implementation.
+This recorded exchange asks the agent to explain the editor's own buffer implementation.
+The screenshot replays the recorded replies and rounded context usage through the current renderer.
 The cyan bubble at the bottom is the next draft, not a sent message. Press
-**Enter** to send it. The title selects the model and effort; the lower-left
+**Enter** to send it with the default Query setting. The title selects the model and effort; the lower-left
 counter reports context usage. Click the double chevron beside a run of tool
 calls to see the individual calls, then expand a call to inspect its details.
 
 | Keys | Action |
 | --- | --- |
-| Enter | Send, or queue a query while a reply is active |
+| Enter | Query by default: send, or queue while a reply is active |
 | Shift+Enter | Insert a newline |
-| Ctrl+Enter | Steer the active reply, if the provider supports it |
+| Ctrl+Enter | Steer by default, if the provider supports it |
 | Escape | Cancel the active reply |
 | Tab | Browse replies with the keyboard |
+
+Choose **Options > Chat input** to make Enter **Query** or **Steer**;
+Ctrl+Enter always uses the other action. Both actions remain visible in the
+status bar, including when no reply is running. The setting also lives in the
+global or project configuration:
+
+```toml
+[editor.defaults]
+chatSubmit = "query" # or "steer"
+```
 
 Typing while browsing replies returns to the draft. The draft grows with its
 contents, then scrolls after twelve visible rows. Draft Undo and Redo remain
@@ -66,7 +77,7 @@ Child conversations use their own advertised settings and usage; model changes
 also wait until their message queue is empty.
 
 Steering keeps the draft until the provider accepts it into the active turn.
-If that turn has already finished, use Enter to send the retained draft. The
+If that turn has already finished, use Query to send the retained draft. The
 editor does not automatically replay it. A legacy provider that starts an
 unowned turn, or fails to confirm the outcome, is stopped; inspect the retained
 history before deciding whether to resend.
@@ -162,3 +173,39 @@ for the format and precedence.
 Agents receive a small [skill catalog](agent-skills.md) on their first query and
 can load task workflows through the documentation tools. The
 [operation reference](agent-tools.md) gives the corresponding calls by category.
+
+## Complete code while you edit
+
+Choose **Options > Autocomplete** and select **ACP** or **Copilot**. Completion
+has its own provider settings, so your main conversation can use a different
+model. Suggestions appear in gray without changing the buffer.
+
+| Windows/Linux | Mac window/browser | Action |
+| --- | --- | --- |
+| **Alt+\\** | **⌘\\** | Request a proposal at the cursor |
+| **Alt+[**, **Alt+]** | **⌘[**, **⌘]** | Browse alternatives; request another when you reach the end |
+| **Alt+Right** | **⌥→** | Accept the next word |
+| **Tab** | **Tab** | Accept the proposal |
+| **Escape** | **Escape** | Dismiss it |
+
+In the graphical and browser frontends, holding **Alt** (**⌥** on Mac) alone for a second also
+requests a proposal. Traditional terminals use the explicit shortcut. Moving or
+editing invalidates pending suggestions; accepted text goes into the normal undo
+history.
+
+ACP completion keeps a private conversation warm between requests. It receives
+nearby lines, the cursor position and short recent-edit excerpts, and can read
+more of the current file when needed. It receives acceptance feedback on later
+requests. Its tools can propose changes but cannot apply them, run programs or
+control the editor.
+
+The completion conversation is hidden by default. Enable **Show completion chat** to inspect it beside Messages and terminals. In ACP mode you
+can type hints there—such as “keep this allocation-free”—and discuss intent with
+the same completion agent. **Enter** sends a hint; **Shift+Enter** adds a newline.
+This draft is separate from your main conversation.
+
+Copilot uses GitHub's `copilot-language-server` executable. Choose **Sign in** in
+the autocomplete dialog, then **Continue** when ready to complete the device
+flow. The language server manages account credentials; the editor does not put
+them in TOML or session recovery. See [Configuration](configuration.md#autocomplete)
+for provider settings.

@@ -11,6 +11,7 @@ import qualified Data.Text as T
 import System.Directory
 import System.Environment (lookupEnv,setEnv,unsetEnv)
 import System.IO (openTempFile,hClose)
+import qualified THC.Edit.App as App
 import THC.Edit.Buffer
 import THC.Edit.ControlMCP
 import THC.Edit.MCPPermissions (readEditorDefaults,permissionConfigPath)
@@ -98,6 +99,21 @@ checks=bracket temporary removePathForcibly $ \root ->
     (_,streamerWrite)<-settings base ["streamerMode" .= True]
     (_,streamerDefaults)<-call base "editor_settings" (object ["defaults" .= object ["streamerMode" .= True]])
     check "guest cannot change Streamer mode through session or startup settings" (rejected streamerWrite && rejected streamerDefaults)
+    forM_ ["query","steer"] $ \action -> do
+      (unchangedAction,actionReply)<-settings base ["wordStar" .= True,"chatSubmit" .= (action::T.Text)]
+      (unchangedDefault,defaultReply)<-call base "editor_settings" (object ["settings" .= object ["wordStar" .= True],"defaults" .= object ["chatSubmit" .= action]])
+      check "guest cannot change chat behavior via current settings or persisted defaults" (unchangedAction==base && unchangedDefault==base && rejected actionReply && rejected defaultReply)
+    let (humanOptions,_) = runCommand ChatInputOptions base
+        humanDialog=maybe (error "missing chat input options") id (dialog humanOptions)
+        (humanChoice,humanEffects)=submitDialog 0 (humanDialog {fields=[Radio "Enter action" ["Query","Steer"] 1]}) humanOptions
+    (_,savedChoice)<-App.applyEffects humanChoice humanEffects
+    persistedChoice<-readEditorDefaults
+    check "human Options choice saves through the application effect" (chatSubmit savedChoice==SteerSubmit && case persistedChoice of Right value->field "chatSubmit" value==Just ("steer"::T.Text); _->False)
+    (_,blockedChoice)<-call savedChoice "editor_settings" (object ["defaults" .= object ["chatSubmit" .= ("query"::T.Text)]])
+    retainedChoice<-readEditorDefaults
+    check "blocked guest default write preserves persisted human choice" (rejected blockedChoice && retainedChoice==persistedChoice)
+    (_,chatRead)<-call base {chatSubmit=SteerSubmit} "editor_settings" (object [])
+    check "chat submit behavior remains readable" (either (const False) ((==Just ("steer"::T.Text)).field "chatSubmit") chatRead)
     (_,privateRead)<-input base {clipboard="secret"} [object ["type" .= ("blur"::T.Text)]]
     check "no-op guest events do not expose the human clipboard" (either (const False) ((==Just (""::T.Text)).field "clipboard") privateRead)
     let humanPrefix=base {wordStar=True,prefix=Just 'k',heldModifiers=[]}

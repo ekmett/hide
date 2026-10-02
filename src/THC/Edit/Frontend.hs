@@ -38,7 +38,10 @@ chooseBackend env explicit = case nub explicit of
 decodeKey :: Int -> Int -> Maybe V.Event
 decodeKey key mask = fmap (`V.EvKey` mods) decoded
   where
-    mods = [V.MShift | mask .&. 1 /= 0] ++ [V.MCtrl | mask .&. 10 /= 0] ++ [V.MAlt | mask .&. 4 /= 0]
+    -- The native macOS input path forwards these Command shortcuts only.
+    -- Keep one canonical editor binding shared with Alt on other platforms.
+    mods | mask==8 && key `elem` map fromEnum "\\[]" = [V.MAlt]
+         | otherwise = [V.MShift | mask .&. 1 /= 0] ++ [V.MCtrl | mask .&. 10 /= 0] ++ [V.MAlt | mask .&. 4 /= 0]
     decoded
       | key >= 0 && key <= 0x10ffff && not (key >= 0xd800 && key <= 0xdfff) = Just (V.KChar (chr key))
       | key <= -101 && key >= -124 = Just (V.KFun (-key-100))

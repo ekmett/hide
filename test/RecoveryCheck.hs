@@ -46,12 +46,12 @@ checks=bracket temporary removePathForcibly $ \root->do
       terminalId=bufferId (fromJust (activeWindow terminal))
       approval=addReadOnly "Agent request" "pending approval body" terminal
       approvalId=bufferId (fromJust (activeWindow approval))
-      draft=replaceSelection (Selection 0 0) "private draft λ" (newBuffer "")
+      draft=replaceSelection (Selection 0 0) "private draft λ\n\n    main = 1\n      continuation\n" (newBuffer "")
       desktop=approval {composerBuffer=draft,composerSelection=Selection 1 5,composerFocused=True,defaultDirectory=Just root,
         sideTree=Just (Sidebar root [TreeRow "source.hs" sourcePath 0 False False] 0 0 23 True),problemsVisible=True,problemsPreferredHeight=9,
-        wordStar=True,blinkCursor=False,pixelateUnicode=True,materialIcons=True,appearance=DarkMode,streamerMode=True,
+        wordStar=True,blinkCursor=False,pixelateUnicode=True,materialIcons=True,appearance=DarkMode,streamerMode=True,chatSubmit=SteerSubmit,
         dialog=Just (Dialog "Pending permission" (PermissionDialog "approve:secret") [] 0 ["Allow"] []),
-        menu=Just (0,0),drag=Just (Selecting sourceId),clipboard="transient clipboard",clipboardExport=(3,Just "export"),
+        menu=Just (0,0),drag=Just (Selecting sourceId),clipboard="transient clipboard",clipboardCode=Just "transient clipboard",clipboardExport=(3,Just "export"),
         chatActions=[(T.length "Session: old-provider-id\nPublic transcript\n",T.length transcript,"question-input",["pending-action-token"])],agentReplying=True,agentQueued=3,agentSettings=[AgentSetting "token" "Token" "private" "secret" []],
         agentContextUsage=Just (1,2),diagnostics=[Diagnostic sourcePath Nothing 0 0 1 "old diagnostic"]}
       get d ident=documentBuffer (buffers d M.! ident)
@@ -75,11 +75,11 @@ checks=bracket temporary removePathForcibly $ \root->do
     (documentLabel (buffers recovered M.! terminalId)==Just "Ended Terminal 7" && M.notMember approvalId (buffers recovered))
   check "fresh runtime privacy/frontend values survive and transient controls reset"
     (guestPrivatePaths recovered==guestPrivatePaths fresh && nativeMac recovered && browserFrontend recovered && agentSettings recovered==agentSettings fresh &&
-     dialog recovered==Nothing && menu recovered==Nothing && drag recovered==Nothing && clipboard recovered=="" && clipboardExport recovered==(0,Nothing) &&
+     dialog recovered==Nothing && menu recovered==Nothing && drag recovered==Nothing && clipboard recovered=="" && clipboardCode recovered==Nothing && clipboardExport recovered==(0,Nothing) &&
      null (childAgentSettings recovered) && not (childAgentSteering recovered) && childAgentContextUsage recovered==Nothing && not (agentReplying recovered) && agentQueued recovered==0 && agentContextUsage recovered==Nothing && null (chatActions recovered) && null (diagnostics recovered))
   check "project sidebar dock geometry and display preferences survive"
     (defaultDirectory recovered==Just root && sideTree recovered==sideTree desktop && screenSize recovered==(100,35) && problemsVisible recovered && problemsPreferredHeight recovered==9 &&
-     wordStar recovered && not (blinkCursor recovered) && pixelateUnicode recovered && materialIcons recovered && appearance recovered==DarkMode && streamerMode recovered)
+     wordStar recovered && not (blinkCursor recovered) && pixelateUnicode recovered && materialIcons recovered && appearance recovered==DarkMode && streamerMode recovered && chatSubmit recovered==SteerSubmit)
   let pinnedPath=root </> "pinned.checkpoint"
       terminalWindowId=maybe (error "missing terminal") windowId (activeWindow terminal)
       pinned=setTerminalPinned True terminalWindowId terminal

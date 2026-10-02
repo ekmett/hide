@@ -23,7 +23,7 @@ data InputOrigin = HumanInput | GuestInput deriving (Eq,Show)
 data CellAccess = CellAccess { cellReadable :: Bool, cellClickable :: Bool } deriving (Eq,Show)
 
 protectedBuffer :: Desktop -> Int -> Bool
-protectedBuffer d bid=maybe False (\doc -> privateDocument d doc || maybe False (`elem` ["Conversation","Agent request","Proposed agent edit"]) (documentLabel doc)) (M.lookup bid (buffers d))
+protectedBuffer d bid=maybe False (\doc -> privateDocument d doc || maybe False (`elem` ["Conversation","Autocomplete","Agent request","Proposed agent edit"]) (documentLabel doc)) (M.lookup bid (buffers d))
 
 -- Callers resolve filesystem paths before applying this pure policy. FileState
 -- paths and the host-provided private list are already canonical.
@@ -75,6 +75,9 @@ guestCommandAllowed cmd=case cmd of
   AgentSet{} -> False
   AgentDirectory -> False
   AgentOptions -> False
+  ChatInputOptions -> False
+  AutocompleteCommand{} -> False
+  SubmitChat{} -> False
   AgentPermissions -> False
   AgentGuidance -> False
   Conversation -> False
@@ -92,6 +95,8 @@ guestEffectsAllowed=all allowed
     allowed AskGitCommit=False
     allowed WriteGitCommit{}=False
     allowed PermissionAction{}=False
+    allowed SaveChatSubmit{}=False
+    allowed AutocompleteAction{}=False
     allowed (DebugAction action _)=not (privateDownloadAction action)
     allowed (AgentAction action _)=agentActionAllowed action
     allowed (SaveDocument _ _ follow)=maybe True guestCommandAllowed follow
@@ -101,6 +106,8 @@ guestEffectsAllowed=all allowed
 protectedPurpose :: Purpose -> Bool
 protectedPurpose p=case p of
   PermissionDialog{} -> True
+  ChatInputSettings -> True
+  AutocompleteDialog{} -> True
   DebugDialog action -> privateDownloadAction action
   AgentDialog action -> not (agentActionAllowed action)
   DiscardDraft -> True
@@ -130,8 +137,11 @@ guestKeyCombinations=[(key,mods) | key<-["Enter","Escape","Tab","ArrowUp","Arrow
 -- question choices, settings checkboxes and discard confirmation.
 guestTransitionAllowed :: Desktop -> Desktop -> [Effect] -> Bool
 guestTransitionAllowed before after effects=guestEffectsAllowed effects && not (guestModalBlocked after) &&
-  streamerMode before==streamerMode after && privateFieldsUnchanged before after && composerBuffer before==composerBuffer after &&
+  streamerMode before==streamerMode after && chatSubmit before==chatSubmit after && privateFieldsUnchanged before after && composerBuffer before==composerBuffer after &&
   composerSelection before==composerSelection after && chatQuestion before==chatQuestion after &&
+  autocompleteACPEnabled before==autocompleteACPEnabled after &&
+  revision (autocompleteDraft before)==revision (autocompleteDraft after) &&
+  autocompleteSelection before==autocompleteSelection after && autocompleteFocused before==autocompleteFocused after &&
   agentSettings before==agentSettings after && childAgentSettings before==childAgentSettings after &&
   childAgentSteering before==childAgentSteering after && childAgentContextUsage before==childAgentContextUsage after &&
   all (\(bid,doc)->not (protectedBuffer before bid) || M.lookup bid (buffers after)==Just doc) (M.toList (buffers before))
@@ -169,9 +179,9 @@ sanitizedStatus d | "Session " `T.isPrefixOf` status d="Session [redacted]"
 -- The host brackets a whole batch under the desktop lock. Guest gestures and
 -- clipboard may flow between its events, but never across the human boundary.
 beginGuestInput :: Desktop -> Desktop
-beginGuestInput d=(clearGestures d) {clipboard=""}
+beginGuestInput d=(clearGestures d) {clipboard="",clipboardCode=Nothing}
 endGuestInput :: Desktop -> Desktop -> Desktop
-endGuestInput original updated=(clearGestures updated) {clipboard=clipboard original}
+endGuestInput original updated=(clearGestures updated) {clipboard=clipboard original,clipboardCode=clipboardCode original}
 clearGestures :: Desktop -> Desktop
 clearGestures d=d {drag=Nothing,dragOriginal=Nothing,prefix=Nothing,heldModifiers=[],buttonPressed=Nothing,buttonHover=Nothing,blockStart=Nothing}
 
@@ -187,6 +197,7 @@ readableAt d x y
   _ | overlayAt d x y -> True
     | otherwise -> case topWindow d x y of
         Just w | protectedBuffer d (bufferId w) -> case M.lookup (bufferId w) (buffers d) of
+          Just doc | documentLabel doc==Just "Autocomplete" -> not (autocompletePane d w && inside (autocompleteComposerRect d w) x y)
           Just doc | documentLabel doc==Just "Conversation" -> not (byteMode (documentBuffer doc)) && not (inside (composerRect d w) x y) && not (contentPrivate privateOffset d doc w x y)
           _ -> False
         _ -> True

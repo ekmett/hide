@@ -4,7 +4,6 @@ module THC.Edit.Render (renderDesktop, snapshot, snapshotHtml, RenderKey, render
 import Control.Exception (evaluate)
 import Data.IORef
 import System.Mem.StableName (StableName, makeStableName, eqStableName)
-import qualified Data.ByteString as BS
 import Data.List (find)
 import qualified Graphics.Vty as V
 import THC.Edit.Unicode (displayOpsForPic)
@@ -28,6 +27,8 @@ import THC.Edit.BufferView
 import THC.Edit.Unicode (graphemes, clusterWidth, textImage, flattenPicture)
 import THC.Edit.GuestAccess (streamerReadableAt)
 import THC.Edit.Model
+import THC.Edit.InlineState
+import THC.Edit.InlineTypes (proposalEnd)
 import THC.Edit.Syntax
 import THC.Edit.Files (FileState(..))
 import THC.Edit.Browser (Entry(..))
@@ -39,93 +40,213 @@ data RenderIdentity = forall a. RenderIdentity (StableName a)
 instance Eq RenderIdentity where
   RenderIdentity a == RenderIdentity b = eqStableName a b
 
-data RenderKey = RenderKey Desktop Bool [RenderIdentity] deriving Eq
+-- HARD RULE: never compare whole Desktops, directly or through a sanitized
+-- Desktop/Document/Buffer carrier. This explicit metadata projection cannot
+-- acquire source contents or Undo history when those model records grow.
+data RenderState = RenderState
+  { keyScreenSize :: (Int,Int)
+  , keyWindows :: [Window]
+  , keyNextId :: Int
+  , keyMenu :: Maybe (Int,Int)
+  , keyDrag :: Maybe Drag
+  , keyWordStar :: Bool
+  , keyPrefix :: Maybe Char
+  , keyStatus :: Text
+  , keyBlockStart :: Maybe (Int,Int)
+  , keyLastFind :: Text
+  , keyBranchStatus :: Text
+  , keyNativeMac :: Bool
+  , keyMacKeySymbols :: Bool
+  , keyVideoMode :: Maybe Int
+  , keyHoverTarget :: Maybe (Int,Int,Int)
+  , keyTypeHint :: Text
+  , keyButtonHover :: Maybe Int
+  , keyButtonPressed :: Maybe Int
+  , keyContextMenu :: Maybe (Rect,Int)
+  , keyProblemsVisible :: Bool
+  , keyProblemsSelected :: Int
+  , keyProblemsScroll :: Int
+  , keyProblemsFocused :: Bool
+  , keyDragOriginal :: Maybe [(Int,Rect,Maybe Rect)]
+  , keyBranchAdded :: Int
+  , keyBranchDeleted :: Int
+  , keyBranchRoot :: Maybe FilePath
+  , keyMessagesNumber :: Maybe Int
+  , keyComposerSelection :: Selection
+  , keyComposerFocused :: Bool
+  , keyAgentSteering :: Bool
+  , keyAgentReplying :: Bool
+  , keyAgentQueued :: Int
+  , keyBlinkCursor :: Bool
+  , keyCrtFilter :: Bool
+  , keyPixelateUnicode :: Bool
+  , keyMaterialIcons :: Bool
+  , keyDefaultDirectory :: Maybe FilePath
+  , keyStatusHover :: Maybe Int
+  , keyHeldModifiers :: [V.Modifier]
+  , keyProblemsPreferredHeight :: Int
+  , keyAgentContextUsage :: Maybe (Integer,Integer)
+  , keyAgentSettings :: [AgentSetting]
+  , keyBrowserFrontend :: Bool
+  , keyAppearance :: Appearance
+  , keySystemDark :: Bool
+  , keyChatInputOffset :: Maybe Int
+  , keyChildAgentSettings :: [AgentSetting]
+  , keyChildAgentSteering :: Bool
+  , keyChildAgentContextUsage :: Maybe (Integer,Integer)
+  , keyConversationTarget :: Text
+  , keyStreamerMode :: Bool
+  , keyToolchain :: Maybe Toolchain
+  , keyDefaultBufferView :: BufferView
+  , keyChatSubmit :: ChatSubmit
+  , keyInlineEpoch :: Int
+  , keyAutocompleteACPEnabled :: Bool
+  , keyAutocompleteSelection :: Selection
+  , keyAutocompleteFocused :: Bool
+  , keyDockedTerminals :: M.Map Int (Rect,Maybe Rect)
+  , keyBottomTerminal :: Maybe Int
+  } deriving Eq
 
-emptyRenderBuffer :: Buffer
-emptyRenderBuffer = newBuffer ""
-{-# NOINLINE emptyRenderBuffer #-}
+data DocumentKey = DocumentKey (Maybe (FilePath,Bool)) (Maybe Text) Int Bool (Maybe FilePath) Bool deriving Eq
+data ViewKey = ViewKey Int Text Selection (Int,Int) Selection deriving Eq
+data QuestionKey = QuestionKey Int (Maybe Int) Selection Bool deriving Eq
+data FieldKey = InputKey Text Int | CheckBoxKey Text Bool | RadioKey Text Int
+  | ListBoxKey Text Int | FileListKey Int | ReadOnlyKey Text
+  | TextAreaKey Text Bool Selection Int Int deriving Eq
+data DialogKey = DialogKey Text Int [Text] [FieldKey] deriving Eq
+data SidebarKey = SidebarKey FilePath Int Int Int Bool deriving Eq
+data RenderKey = RenderKey RenderState (M.Map Int DocumentKey) (M.Map Text ViewKey)
+  (Maybe QuestionKey) (Maybe DialogKey) (Maybe SidebarKey) Bool (Int,Bool) [RenderIdentity] deriving Eq
 
--- | Capture a conservative redraw key. Rebuilt record/Map/Maybe wrappers do not
--- invalidate it; replacing any large immutable payload does. The names do not
--- retain the payloads and no content hashing or structural Buffer equality runs.
+-- | Capture a conservative redraw key from explicit metadata and immutable
+-- payload identities. No content hashing or structural Buffer equality runs.
 renderKey :: Desktop -> IO RenderKey
 renderKey original = do
   identities<-newIORef []
-  let payload value empty = do
+  let payload value = do
         evaluated<-evaluate value
         identity<-makeStableName evaluated
         modifyIORef' identities (RenderIdentity identity:)
-        pure empty
-      buffer value=payload value emptyRenderBuffer
+      present=maybe False (const True)
       file value=do
-        bytes<-traverse (\bytes->payload bytes BS.empty) (diskBytes value)
-        pure value {diskBytes=bytes}
+        mapM_ payload (diskBytes value)
+        pure (filePath value,present (diskBytes value))
       document value=do
-        b<-buffer (documentBuffer value)
+        payload (documentBuffer value)
         f<-traverse file (documentFile value)
-        cells<-payload (documentHighlight value) []
-        rows<-traverse (\rows->payload rows Vec.empty) (documentSourceRows value)
-        blocks<-payload (documentShellBlocks value) []
-        pure value {documentBuffer=b,documentFile=f,documentHighlight=cells,documentSourceRows=rows,documentShellBlocks=blocks}
+        payload (documentHighlight value)
+        mapM_ payload (documentSourceRows value)
+        payload (documentShellBlocks value)
+        pure (DocumentKey f (documentLabel value) (documentWidth value)
+          (documentCursorVisible value) (documentSuggestedName value) (present (documentSourceRows value)))
       view value=do
-        draft<-buffer (conversationDraft value)
-        pure value {conversationDraft=draft}
+        payload (conversationDraft value)
+        pure (ViewKey (conversationBufferId value) (conversationName value) (conversationDraftSelection value)
+          (conversationScroll value) (conversationReplySelection value))
       question value=do
-        text<-payload (questionText value) ""
-        choices<-payload (questionChoices value) []
-        input<-buffer (questionBuffer value)
-        pure value {questionText=text,questionChoices=choices,questionBuffer=input}
+        payload (questionText value)
+        payload (questionChoices value)
+        payload (questionBuffer value)
+        pure (QuestionKey (questionToken value) (questionChoice value) (questionSelection value) (questionFocused value))
       field value=case value of
-        Input label text cursor -> Input label <$> payload text "" <*> pure cursor
-        Radio label choices selected -> Radio label <$> payload choices [] <*> pure selected
-        ListBox label choices selected -> ListBox label <$> payload choices [] <*> pure selected
-        FileList entries selected -> FileList <$> payload entries [] <*> pure selected
-        ReadOnly label text -> ReadOnly label <$> payload text ""
-        TextArea label editable text selection row column ->
-          (\b->TextArea label editable b selection row column) <$> buffer text
-        CheckBox{} -> pure value
-      dialogPurpose value=case value of
-        Opening directory name entries -> Opening directory name <$> payload entries []
-        ChangingDirectory directory entries -> ChangingDirectory directory <$> payload entries []
-        CodeActionChoices bid rev choices -> CodeActionChoices bid rev <$> payload choices []
-        Completing bid rev offset entries -> Completing bid rev offset <$> payload entries []
-        Locations entries -> Locations <$> payload entries []
-        Merging entries -> Merging <$> payload entries []
-        DiskConflict conflict -> do
-          baseline<-file (conflictBaseline conflict)
-          bytes<-traverse (\bytes->payload bytes BS.empty) (conflictDisk conflict)
-          pure (DiskConflict conflict {conflictBaseline=baseline,conflictDisk=bytes})
-        _ -> pure value
+        Input caption text cursor -> payload text >> pure (InputKey caption cursor)
+        CheckBox caption checked -> pure (CheckBoxKey caption checked)
+        Radio caption choices choice -> payload choices >> pure (RadioKey caption choice)
+        ListBox caption choices choice -> payload choices >> pure (ListBoxKey caption choice)
+        FileList entries choice -> payload entries >> pure (FileListKey choice)
+        ReadOnly caption text -> payload text >> pure (ReadOnlyKey caption)
+        TextArea caption editable text selection firstRow column ->
+          payload text >> pure (TextAreaKey caption editable selection firstRow column)
       dialogKey value=do
-        purpose'<-dialogPurpose (purpose value)
+        payload (purpose value)
         fields'<-mapM field (fields value)
-        body'<-payload (body value) []
-        pure value {purpose=purpose',fields=fields',body=body'}
+        payload (body value)
+        pure (DialogKey (dialogTitle value) (focus value) (buttons value) fields')
       sidebar value=do
-        rows<-payload (treeRows value) []
-        pure value {treeRows=rows}
+        payload (treeRows value)
+        pure (SidebarKey (treeRoot value) (treeSelected value) (treeScroll value) (treeWidth value) (treeFocused value))
   documents<-mapM document (buffers original)
-  composer<-buffer (composerBuffer original)
+  payload (composerBuffer original)
+  mapM_ payload (inlinePreview original)
+  payload (autocompleteDraft original)
   views<-mapM view (conversationViews original)
   question'<-traverse question (chatQuestion original)
   dialog'<-traverse dialogKey (dialog original)
   tree<-traverse sidebar (sideTree original)
-  diagnostics'<-payload (diagnostics original) []
-  buildDiagnostics'<-payload (buildDiagnostics original) []
-  actions<-payload (chatActions original) []
-  review<-traverse (\value->payload value ()) (gitReview original)
-  clipboard'<-payload (clipboard original) ""
-  export'<-traverse (\value->payload value "") (snd (clipboardExport original))
-  -- Context menus can contain complete executable shell bodies. Their immutable
-  -- command payload is authoritative; no equality walk through it is needed.
-  context<-payload (contextKind original) SourceContext
+  payload (diagnostics original)
+  payload (buildDiagnostics original)
+  payload (chatActions original)
+  mapM_ payload (gitReview original)
+  payload (clipboard original)
+  mapM_ payload (snd (clipboardExport original))
+  payload (contextKind original)
+  payload (guestPrivatePaths original)
   names<-readIORef identities
-  pure (RenderKey original
-    { buffers=documents,composerBuffer=composer,conversationViews=views,
-      chatQuestion=question',dialog=dialog',sideTree=tree,
-      diagnostics=diagnostics',buildDiagnostics=buildDiagnostics',chatActions=actions,
-      gitReview=Nothing,clipboard=clipboard',clipboardExport=(fst (clipboardExport original),export'),contextKind=context }
-    (maybe False (const True) review) names)
+  let state=RenderState
+        { keyScreenSize=screenSize original
+        , keyWindows=windows original
+        , keyNextId=nextId original
+        , keyMenu=menu original
+        , keyDrag=drag original
+        , keyWordStar=wordStar original
+        , keyPrefix=prefix original
+        , keyStatus=status original
+        , keyBlockStart=blockStart original
+        , keyLastFind=lastFind original
+        , keyBranchStatus=branchStatus original
+        , keyNativeMac=nativeMac original
+        , keyMacKeySymbols=macKeySymbols original
+        , keyVideoMode=videoMode original
+        , keyHoverTarget=hoverTarget original
+        , keyTypeHint=typeHint original
+        , keyButtonHover=buttonHover original
+        , keyButtonPressed=buttonPressed original
+        , keyContextMenu=contextMenu original
+        , keyProblemsVisible=problemsVisible original
+        , keyProblemsSelected=problemsSelected original
+        , keyProblemsScroll=problemsScroll original
+        , keyProblemsFocused=problemsFocused original
+        , keyDragOriginal=dragOriginal original
+        , keyBranchAdded=branchAdded original
+        , keyBranchDeleted=branchDeleted original
+        , keyBranchRoot=branchRoot original
+        , keyMessagesNumber=messagesNumber original
+        , keyComposerSelection=composerSelection original
+        , keyComposerFocused=composerFocused original
+        , keyAgentSteering=agentSteering original
+        , keyAgentReplying=agentReplying original
+        , keyAgentQueued=agentQueued original
+        , keyBlinkCursor=blinkCursor original
+        , keyCrtFilter=crtFilter original
+        , keyPixelateUnicode=pixelateUnicode original
+        , keyMaterialIcons=materialIcons original
+        , keyDefaultDirectory=defaultDirectory original
+        , keyStatusHover=statusHover original
+        , keyHeldModifiers=heldModifiers original
+        , keyProblemsPreferredHeight=problemsPreferredHeight original
+        , keyAgentContextUsage=agentContextUsage original
+        , keyAgentSettings=agentSettings original
+        , keyBrowserFrontend=browserFrontend original
+        , keyAppearance=appearance original
+        , keySystemDark=systemDark original
+        , keyChatInputOffset=chatInputOffset original
+        , keyChildAgentSettings=childAgentSettings original
+        , keyChildAgentSteering=childAgentSteering original
+        , keyChildAgentContextUsage=childAgentContextUsage original
+        , keyConversationTarget=conversationTarget original
+        , keyStreamerMode=streamerMode original
+        , keyToolchain=toolchain original
+        , keyDefaultBufferView=defaultBufferView original
+        , keyChatSubmit=chatSubmit original
+        , keyInlineEpoch=inlineEpoch original
+        , keyAutocompleteACPEnabled=autocompleteACPEnabled original
+        , keyAutocompleteSelection=autocompleteSelection original
+        , keyAutocompleteFocused=autocompleteFocused original
+        , keyDockedTerminals=dockedTerminals original
+        , keyBottomTerminal=bottomTerminal original
+        }
+  pure (RenderKey state documents views question' dialog' tree
+    (present (gitReview original)) (fst (clipboardExport original),present (snd (clipboardExport original))) names)
 
 blue, gray, black, white, yellow, cyan, green, red :: V.Color
 blue=V.RGBColor 0 0 170; gray=V.RGBColor 170 170 170; black=V.RGBColor 0 0 0
@@ -218,10 +339,14 @@ renderDesktop d = flattenPicture (screenSize d) ((V.picForLayers (privacyLayers+
           cx=left (bounds w)+1+column+delta-scrollColumn w
           cy=top (bounds w)+1+inputRow-scrollRow w
           in if inside (Rect (left (bounds w)+1) (top (bounds w)+1) (width (bounds w)-2) (windowContentRows d doc w)) cx cy then V.Cursor cx cy else V.NoCursor
+        (Just w,_) | activeAutocomplete d && autocompleteFocused d -> let
+          b=autocompleteDraft d; (r,c)=bufferLineColumn b (caret (autocompleteSelection d)); (sr,sc)=autocompleteComposerScroll d w
+          rect=autocompleteComposerRect d w
+          in if height rect>0 && width rect>0 then V.Cursor (left rect+displayColumn (bufferLineAt b r) c-sc) (top rect+r-sr) else V.NoCursor
         (Just w,_) | composerActive d -> let
           b=composerBuffer d; (r,c)=bufferLineColumn b (caret (composerSelection d)); (sr,sc)=composerScroll d w
-          rect=composerRect d w
-          in if height rect>0 && width rect>0 then V.Cursor (left rect+displayColumn (bufferLineAt b r) c-sc) (top rect+r-sr) else V.NoCursor
+          rect=composerRect d w; (marker,line)=composerLine b r
+          in if height rect>0 && width rect>0 then V.Cursor (left rect+displayColumn line (max 0 (c-marker))-sc) (top rect+r-sr) else V.NoCursor
         (_,Just doc) | not (documentCursorVisible doc) -> V.NoCursor
         (Just w,Just doc) -> let { b=documentBuffer doc; (r,c)=windowCursorCell b w; x=left (bounds w)+1+c-scrollColumn w; y=top (bounds w)+1+r-scrollRow w;
                                                   liveRow=not (windowChangeView b w) || viewRightRow (viewRowAt (bufferView w) (bufferViewProjection b) r)/=Nothing }
@@ -262,7 +387,7 @@ windowLayers d active w =
     issueRow issue
       | windowChangeView b w = viewRowForChange (bufferView w) (bufferViewProjection b) CurrentSide
           (fst (changeLineColumn b (liveToChangeOffset b (bufferLineOffset b (diagnosticRow issue)))))
-      | otherwise = diagnosticRow issue
+      | otherwise = sourceDisplayRow (diagnosticRow issue)
     file=maybe (maybe ("NONAME"<>T.pack (show (bufferId w))<>".HS") T.pack (documentSuggestedName doc)) (T.pack . takeFileName . filePath) (documentFile doc)
     -- Measured line changes are shared by all views; never diff text while drawing.
     -- Docs: docs/editing.md (unsaved change counts in each buffer title).
@@ -302,10 +427,16 @@ windowLayers d active w =
             (if n==0 then if vertical then '▲' else '◄' else if n==len-1 then if vertical then '▼' else '►' else if n==thumb then '█' else '░')
       in place sx sy ((if vertical then V.vertCat else V.horizCat) [cell n | n<-[0..len-1]])
     composerLayers
-      | documentLabel doc/=Just "Conversation" = []
+      | documentLabel doc/=Just "Conversation" && not hintComposer = []
       | otherwise = [place (left rect) (top rect) inputImage] ++ thoughtEdges
       where
-        rect=composerRect d w; draft=composerBuffer d; (sr,sc)=composerScroll d w
+        hintComposer=autocompletePane d w
+        rect=if hintComposer then autocompleteComposerRect d w else composerRect d w
+        draft=if hintComposer then autocompleteDraft d else composerBuffer d
+        draftSelection=if hintComposer then autocompleteSelection d else composerSelection d
+        draftFocused=if hintComposer then autocompleteFocused d else composerFocused d
+        (sr,sc)=if hintComposer then autocompleteComposerScroll d w else composerScroll d w
+        draftLine n=if hintComposer then (0,bufferLineAt draft n) else composerLine draft n
         thoughtEdges
           | width rect<=0 || height rect<=0 = []
           | otherwise = [place (left rect-1) (top rect) (edgeImage True),
@@ -318,15 +449,49 @@ windowLayers d active w =
             let shape=if height rect==1 then if leftSide then 4 else 5
                       else (if n==0 then 0 else 2)+(if leftSide then 0 else 1)]
         inputImage=V.vertCat [V.cropRight (width rect) (V.translateX (negate sc)
-          (styledImage (darkAppearance d) (const True) Nothing (active && composerFocused d) (composerSelection d) (bufferLineOffset draft n) [(c,BubbleStyle True Plain) | c<-T.unpack (bufferLineAt draft n)]) V.<|> V.charFill (attr black scrollCyan) ' ' (width rect) 1)
-          | n<-[sr..sr+height rect-1]]
+          (styledImage (darkAppearance d) (const True) Nothing (active && draftFocused) draftSelection (bufferLineOffset draft n+marker) [(c,style) | c<-T.unpack line]) V.<|> V.charFill fill ' ' (width rect) 1)
+          | n<-[sr..sr+height rect-1],let (marker,line)=draftLine n,
+            let style=BubbleStyle True (if marker>0 then CodeStyle False Plain else Plain),
+            let fill=if marker>0 then attr yellow (if darkAppearance d then black else blue) else attr black scrollCyan]
     hexDividerLayers =
       [place (x+1+column) y (V.vertCat [V.char frame (if active && not moving then '╤' else '┬'),
         V.charFill frame '│' 1 contentHeight,V.char frame (if active && not moving then '╧' else '┴')])
       | byteMode b, divider<-hexDividers (windowHexBytes w), let column=divider-scrollColumn w, column>=0, column<contentWidth]
     contentWidth=max 0 (ww-2); contentHeight=windowContentRows d doc w
-    documentImage=V.vertCat [(if windowChangeView b w then renderReview else renderLine) n
+    documentImage=V.vertCat [(if windowChangeView b w then renderReview else renderPreview) n
       | n<-[scrollRow w..scrollRow w+contentHeight-1]]
+    -- Prepared rows are a bounded overlay, not a replacement Buffer. Preserve
+    -- source colors on the original chunks and map the remaining viewport back
+    -- to source rows; neither source contents nor Undo history is traversed.
+    inlineOption=case inlinePreview d of
+      Just view | active && inlineMatches d view -> selectedOption view
+      _ -> Nothing
+    sourceDisplayRow n=case inlineOption of
+      Just option | n>optionLastRow option -> n+inlineRowDelta option
+                  | n>=optionFirstRow option -> optionFirstRow option
+      _ -> n
+    inlineRowDelta option=Vec.length (optionRows option)-(optionLastRow option-optionFirstRow option+1)
+    renderPreview n=case inlineOption of
+      Just option | n>=optionFirstRow option ->
+        case optionRows option Vec.!? (n-optionFirstRow option) of
+          Just chunks -> V.cropRight contentWidth (V.translateX (negate (scrollColumn w))
+            (styledImage (darkAppearance d) (const True) Nothing False (Selection 0 0) 0
+              (concat [inlineChunk option (n-optionFirstRow option) i text changed
+                | (i,(text,changed))<-zip [0::Int ..] chunks])) V.<|> V.charFill base ' ' contentWidth 1)
+          Nothing -> renderLine (n-inlineRowDelta option)
+      _ -> renderLine n
+    inlineChunk _ _ _ text True=[(ch,TerminalStyle 0xaaaaaa 0x0000aa 0) | ch<-T.unpack text]
+    inlineChunk option rowIndex chunkIndex text False=
+      [(ch,if active && offset+i>=lo && offset+i<hi then TerminalStyle 0x0000aa 0xaaaaaa 0 else style)
+      | (i,(ch,style))<-zip [0..] (zip (T.unpack text) styles)]
+      where
+        offset | rowIndex==0 && chunkIndex==0 = bufferLineOffset b (optionFirstRow option)
+               | otherwise = proposalEnd (optionProposal option)
+        (sourceRow,sourceColumn)=bufferLineColumn b offset
+        styles=case documentSourceRows doc >>= (Vec.!? sourceRow) of
+          Just tokens -> map snd (drop sourceColumn tokens)++repeat Plain
+          Nothing -> repeat Plain
+        (lo,hi)=ordered (selection w)
     -- Docs: docs/editing.md (buffer views). Shared compact projections skip
     -- unchanged subtrees; only these visible rows request source text.
     projection=bufferViewProjection b
@@ -489,7 +654,7 @@ treeLayers d tree =
 
 keyLegendOn :: V.Color -> Text -> V.Image
 keyLegendOn bg text = V.horizCat [label (attr (if shortcut token then red else black) bg) token | token <- T.groupBy (\a b -> isSpace a == isSpace b) text]
-  where shortcut t = t `elem` ["Tab","Enter","Esc","↑↓→←","↵"] || any (`T.isPrefixOf` t) ["F1","F2","F3","F5","F6","Ctrl+","Alt+","Shift+","Cmd+"]
+  where shortcut t = t `elem` ["Tab","Enter","Esc","↑↓→←","↵"] || any (`T.isPrefixOf` t) ["F1","F2","F3","F5","F6","Ctrl+","Alt+","Shift+","Cmd+","⌘","⌥","⇧","⌃"]
 
 menuLayers :: Desktop -> (Int,Int) -> [V.Image]
 menuLayers d (i,j) = [place x y contents']
@@ -509,24 +674,27 @@ menuLayers d (i,j) = [place x y contents']
         pos = fromMaybe 0 (T.findIndex ((==menuMnemonic entry) . toLower) title)
         name = label a (T.take pos title) V.<|> label (if disabled then a else hot) (T.take 1 (T.drop pos title)) V.<|> label a (T.drop (pos+1) title)
         radio = case cmd of SetBufferView mode -> if defaultBufferView d==mode then "(●) " else "( ) "; _ -> ""
-        content = label a " " V.<|> label (attr black bg) radio V.<|> name V.<|> label a (T.replicate (max 1 (w-4-T.length radio-T.length title-T.length key)) " ") V.<|> label (if disabled then a else hot) key V.<|> label a " "
+        content = label a " " V.<|> label (attr black bg) radio V.<|> name V.<|> label a (T.replicate (max 1 (w-4-T.length radio-T.length title-keyLabelWidth key)) " ") V.<|> label (if disabled then a else hot) key V.<|> label a " "
 
 bottomLayers :: Desktop -> [V.Image]
 bottomLayers d
   | not (bottomVisible d) || height r<2 = []
   | M.null (dockedTerminals d) = problemsLayers d
-  | otherwise = tabs++controls++[place 0 y (label frame ("╔"<>T.replicate (max 0 (width r-2)) "═"<>"╗"))]++content
+  | otherwise = tabs++controls++[place 0 y (label frame (cornerLeft<>T.replicate (max 0 (width r-2)) horizontal<>cornerRight))]++content
   where
     r=problemsRect d; y=top r
-    frame=attr white blue
+    pane=bottomTerminal d >>= (\ident -> find ((==ident).windowId) (windows d))
+    focused=maybe (problemsFocused d) (windowFocused d) pane
+    (cornerLeft,horizontal,cornerRight)=if focused then ("╔","═","╗") else ("┌","─","┐")
+    frame=attr (if focused then white else gray) blue
     tabs=[place (left tab) y (label (if ident==bottomTerminal d then attr black cyan else frame) title)
          | (tab,ident,title)<-bottomTabs d]
     controls=case bottomTerminal d of
       Just _ -> [place (width r-9) y (label frame "[" V.<|> label (attr cyan blue) "P" V.<|> label frame "]"),
                  place (width r-5) y (label frame "[" V.<|> label (attr (V.RGBColor 85 255 85) blue) "x" V.<|> label frame "]")]
       Nothing -> [place (width r-5) y (label frame "[" V.<|> label (attr cyan blue) "↓" V.<|> label frame "]")]
-    content=case bottomTerminal d >>= (\ident -> find ((==ident).windowId) (windows d)) of
-      Just w -> windowLayers d (windowFocused d w) w
+    content=case pane of
+      Just w -> windowLayers d focused w
       Nothing -> problemsLayers d
 
 problemsLayers :: Desktop -> [V.Image]

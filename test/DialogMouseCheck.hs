@@ -87,7 +87,9 @@ checks = do
   check "double click enters directory" (directoryEffects==[BrowsePath "/project/folder" "*"])
   check "double click blank row does not open" (null blankEffects)
   let (popup,_) = handleEvent (V.EvMouseDown 3 2 V.BRight []) desktop
-      (rename,_) = handleEvent (V.EvKey V.KEnter []) popup
+      renameIndex=fromMaybe (error "missing Rename context action") (findIndex ((==RenameSymbol).snd) (contextItems (contextKind popup)))
+      selectedRename=popup {contextMenu=fmap (\(rect,_)->(rect,renameIndex)) (contextMenu popup)}
+      (rename,_) = handleEvent (V.EvKey V.KEnter []) selectedRename
       entered=foldl (\d c -> fst (handleEvent (V.EvKey (V.KChar c) []) d)) rename ("greeting" :: String)
       (_,renameEffects)=handleEvent (V.EvKey V.KEnter []) entered
       dismissed=fst (handleEvent (V.EvKey V.KEsc []) popup)
@@ -315,7 +317,7 @@ checks = do
   let menuState=desktop {menu=Just (0,0),status="old status",typeHint="old type"}
       menuNext=fst (handleEvent (V.EvKey V.KDown []) menuState)
   check "menu status follows highlighted command" (commandDescription New `T.isInfixOf` snapshot menuState && commandDescription Open `T.isInfixOf` snapshot menuNext)
-  check "context menu status explains highlighted action" (commandDescription RenameSymbol `T.isInfixOf` snapshot popup)
+  check "context menu status explains highlighted action" (commandDescription RenameSymbol `T.isInfixOf` snapshot selectedRename)
   let statusDesktop=desktop {status="",typeHint=""}
       statusY=snd (screenSize statusDesktop)-1
       openStatus=case [r | (r,_,Left Open)<-statusItemRects statusDesktop] of r:_ -> r; _ -> error "Missing Open status action"
@@ -328,8 +330,10 @@ checks = do
   check "status bar Cancel works through modal input"
     (dialog (fst (handleEvent (V.EvMouseDown (left escapeRect+3) statusY V.BLeft []) statusModal))==Nothing)
   let withHint=statusDesktop {typeHint="a :: Int"}
+      (afterHint,hintEffects)=handleEvent (V.EvMouseDown 3 statusY V.BLeft []) withHint
   check "clicking type information does not invoke a hidden status shortcut"
-    (handleEvent (V.EvMouseDown 3 statusY V.BLeft []) withHint==(withHint,[]))
+    (null hintEffects && dialog afterHint==Nothing &&
+     fmap selection (activeWindow afterHint)==fmap selection (activeWindow withHint) && activeText afterHint==activeText withHint)
   let narrow=statusDesktop {screenSize=(40,25),branchStatus="main",branchRoot=Just "/tmp"}
   check "status hit rectangles stop at Git badge"
     (all (\(r,_,_)->left r+width r<=left (gitBadgeRect narrow)) (statusItemRects narrow))
@@ -443,8 +447,8 @@ searchChecks=do
   check "modern redo and legacy alias both restore the edit" (activeText redone==activeText changed && activeText legacy==activeText changed && activeText (key (V.KChar 'Z') [V.MCtrl,V.MShift] undone)==activeText changed)
   check "modern menu shortcuts match the native platform"
     (shortcut base Copy=="Ctrl+C" && shortcut base Cut=="Ctrl+X" && shortcut base Paste=="Ctrl+V" && shortcut base Replace=="Ctrl+H" &&
-      shortcut base {nativeMac=True} Replace=="Cmd+Option+F" && shortcut base {nativeMac=True} Redo=="Cmd+Shift+Z" &&
-      nativeMenuShortcut Replace=="~f" && nativeMenuShortcut FindPrevious=="G")
+      shortcut base {nativeMac=True} Replace=="⌥⌘F" && shortcut base {nativeMac=True} Redo=="⇧⌘Z" &&
+      nativeMenuShortcut EditorOptions=="," && nativeMenuShortcut Replace=="~f" && nativeMenuShortcut FindPrevious=="G")
   let child=selectConversationView "child" "Worker" base
       drafted=child {composerBuffer=newBuffer "keep draft",composerSelection=Selection 10 10}
       (focused,focusEffects)=runCommand Conversation drafted

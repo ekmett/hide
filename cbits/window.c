@@ -90,6 +90,7 @@ static void refresh_pointer(void) {
 int thc_open(const char *backend, double requested_scale, int requested_cols, int requested_rows, int height) {
     if (!isfinite(requested_scale) || (requested_scale != 0 && (requested_scale < 1 || requested_scale > 8)))
         return SDL_SetError("Tile scale must be between 1 and 8");
+    SDL_SetAppMetadata("Turbo Haskell", "0.1.0.0", NULL);
     if (!SDL_Init(SDL_INIT_VIDEO)) return 0;
     crt_filter = false;
     blink_cursor = true; cursor_epoch = SDL_GetTicks();
@@ -368,13 +369,23 @@ int thc_wait(int32_t *out) {
             cursor_epoch = SDL_GetTicks();
             int key = keycode(e.key.key), mods = modifiers(e.key.mod);
             if (modifier_key(e.key.key)) { out[0] = 13; out[1] = mods; return 1; }
+#ifdef SDL_PLATFORM_MACOS
+            /* Resolve only the three unshifted Command completion shortcuts
+             * through the keymap; Option remains ordinary composed text. */
+            if (mods == 8) {
+                SDL_Keycode plain = SDL_GetKeyFromScancode(e.key.scancode, SDL_KMOD_NONE, false);
+                if (plain == SDLK_BACKSLASH || plain == SDLK_LEFTBRACKET || plain == SDLK_RIGHTBRACKET)
+                    key = keycode(plain);
+            }
+#endif
             /* Printable unmodified keys arrive only through TEXT_INPUT (IME/layout aware). */
             if (key == INT_MIN || (key >= 0 && !(mods & 14))) break;
             if (key >= 0) {
 #ifdef SDL_PLATFORM_MACOS
                 /* Cocoa menus own Command shortcuts; Option composes text.
-                 * Option digits and +/- are shortcuts, consuming only paired text. */
-                if ((mods & 14) == 4 && ((key >= '0' && key <= '9') || key == '+' || key == '=' || key == '-')) suppress_option_text = true;
+                 * Option digits/+/- and Command completion keys consume paired text. */
+                if (((mods & 14) == 4 && ((key >= '0' && key <= '9') || key == '+' || key == '=' || key == '-')) ||
+                    (mods == 8 && (key == '\\' || key == '[' || key == ']'))) suppress_option_text = true;
                 else if ((mods & 8) || ((mods & 4) && !(mods & 2))) break;
 #else
                 /* AltGr produces TEXT_INPUT, not Alt menu/Control shortcuts.

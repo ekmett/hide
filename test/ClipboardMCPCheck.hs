@@ -8,11 +8,11 @@ import THC.Edit.Model
 
 checks :: IO ()
 checks=do
-  let initial=(initialDesktop (80,25)) {clipboard="private old clipboard"}
+  let initial=(initialDesktop (80,25)) {clipboard="private old clipboard",clipboardCode=Just "private old clipboard"}
       check name good=unless good (error name)
   (written,finish)<-clipboardTool initial (object ["text" .= ("guest supplied text"::T.Text)])
   reply<-finish
-  check "clipboard write uses supplied text and sequences export" (clipboard written=="guest supplied text" && clipboardExport written==(1,Just "guest supplied text") && either (const False) (const True) reply)
+  check "clipboard write uses supplied text and sequences export" (clipboard written=="guest supplied text" && clipboardCode written==Nothing && clipboardExport written==(1,Just "guest supplied text") && either (const False) (const True) reply)
   (again,_)<-clipboardTool written (object ["text" .= ("guest supplied text"::T.Text)])
   check "equal text writes receive distinct export sequence" (clipboardExport again==(2,Just "guest supplied text"))
   (cleared,_)<-clipboardTool again (object ["text" .= (""::T.Text)])

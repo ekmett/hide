@@ -457,11 +457,11 @@ performPrimary runtime@(ConversationState directory ref consoles jobs _) action 
           modifyIORef' ref (\state -> state {pending=M.insert requestId Setting (pending state)})
           pure d {status="Updating conversation settings...",agentReplying=True}
       | otherwise -> pure d {status="This conversation setting is unavailable."}
-    ("copy",_) -> pure d {clipboard=rawTranscript (transcript s),status="Raw conversation copied."}
+    ("copy",_) -> pure d {clipboard=rawTranscript (transcript s),clipboardCode=Nothing,status="Raw conversation copied."}
     ("send-draft",_) | steeringPending s -> pure d {status="Wait for the steering result before sending another message."}
     ("send-draft",_) | queuedPrompt s==Just (contents (composerBuffer d)) -> pure d {status="Preparing the submitted draft..."}
     ("send-draft",_) | busy s, let text=contents (composerBuffer d), not (T.null (T.strip text)) -> do
-      let next=s {queuedQueries=queuedQueries s++[text],transcript=transcript s++[Reply "You" text]}
+      let next=s {queuedQueries=queuedQueries s++[text],transcript=transcript s++[Reply "You" (composerMarkdown text)]}
       writeIORef ref next
       pure (paint True next d) {composerBuffer=newBuffer "",composerSelection=Selection 0 0,composerFocused=True,agentQueued=length (queuedQueries next),status="Query queued."}
     ("send-draft",_) | not (T.null (T.strip (contents (composerBuffer d)))) -> do
@@ -469,14 +469,14 @@ performPrimary runtime@(ConversationState directory ref consoles jobs _) action 
       latest<-readIORef ref
       pure next {agentReplying=busy latest,composerFocused=True}
     ("steer-draft",_) | not (agentSteering d) -> pure d {status="This provider does not advertise steering support."}
-    ("steer-draft",_) | Prompting `notElem` M.elems (pending s) -> pure d {status="No active turn to steer; use Enter to send the draft."}
+    ("steer-draft",_) | Prompting `notElem` M.elems (pending s) -> pure d {status="No active turn to steer; use Query to send the draft."}
     ("steer-draft",_) | steeringPending s -> pure d {status="A steering request is already pending."}
     ("steer-draft",_) | let text=contents (composerBuffer d), not (T.null (T.strip text)) ->
       beginPromptPreparation ref True text d
     ("send",_:prompt:selectionFlag:fileFlag:diagnosticFlag:_) | not (T.null (T.strip prompt)), not (busy s) -> do
       let context=contextText (selectionFlag=="true") (fileFlag=="true") (diagnosticFlag=="true") d
           full=prompt<>(if T.null context then "" else "\n\n"<>context)
-          next=s {queuedPrompt=Just full,reads=sourceSnapshots d,transcript=transcript s++[Reply "You" prompt]}
+          next=s {queuedPrompt=Just full,reads=sourceSnapshots d,transcript=transcript s++[Reply "You" (composerMarkdown prompt)]}
       writeIORef ref next
       opened<-if isNothing (connection s) then start runtime Nothing d else sendQueued runtime d
       latest<-readIORef ref
@@ -618,7 +618,7 @@ preparePrompt state query=do
           section "global" "Global context:"<>"\n\n"<>section "project" "Project context:"
         catalog="Editor skills: explore projects; edit/review; HLS diagnosis/rename; build/test/run; DAP debugging; Git review; desktop/hex navigation; user questions; documentation/settings. Read docs/agent-skills.md with docs_read (corpus editor) for the relevant workflow and docs/agent-tools.md for operations. Discover exact schemas with tools/list."
         extra=[guidance | deliveredContext state/=Just context]++[catalog | deliveredContext state==Nothing]
-    pure (map block (query:extra),context)
+    pure (map block (composerMarkdown query:extra),context)
 
 -- The badge uses only the global toolchain field, so it need not resolve a
 -- project or load its targets. One worker refreshes at most once per second.
@@ -782,11 +782,11 @@ receive runtime@(ConversationState _ ref consoles _ _) d event = do
           pure d {agentSettings=safeSettings,contextMenu=Nothing,status="Conversation settings updated."}
         (Just (Steering text),Right value,_) -> case field "outcome" value :: Maybe Text of
           Just "injected" -> do
-            modifyIORef' ref (\state->state {transcript=transcript state++[Reply "You" text]})
+            modifyIORef' ref (\state->state {transcript=transcript state++[Reply "You" (composerMarkdown text)]})
             pure (clearSubmittedDraft "" text d) {status="Follow-up added to the active turn."}
           Just outcome | outcome `elem` ["promptRequired","failed"] -> do
             modifyIORef' ref (\state->state {deliveredContext=Nothing})
-            pure d {status="Steering was not applied; the draft remains. Use Enter to send it."}
+            pure d {status="Steering was not applied; the draft remains. Use Query to send it."}
           _ -> do
             mapM_ A.stopClient (connection s)
             stopped<-receive runtime d (A.Disconnected "Provider started an unowned steering turn or returned an unknown outcome.")
@@ -1565,7 +1565,7 @@ performChild runtime@(ConversationState _ ref _ _ agents) action values d=do
     "send" -> send hub ident text
     "send-draft" | M.member target (childControls state) -> pure d {status="Wait for the child operation before sending."}
     "send-draft" -> send hub ident text
-    "steer-draft" -> startControl (Just text) (fmap (fmap (const ())) (AH.steerAgent hub ident text))
+    "steer-draft" -> startControl (Just text) (fmap (fmap (const ())) (AH.steerAgent hub ident (composerMarkdown text)))
     "set-config" | [option,value]<-values -> startControl Nothing (AH.configureAgent hub ident option value)
     "cancel" -> case M.lookup target (childCancels state) of
       Just _ -> pure d {status="Cancellation requested."}
@@ -1573,7 +1573,7 @@ performChild runtime@(ConversationState _ ref _ _ agents) action values d=do
         worker<-async (AH.cancelAgent hub AH.Human ident)
         modifyIORef' ref (\s->s {childCancels=M.insert target worker (childCancels s)})
         pure d {status="Cancellation requested."}
-    "copy" -> pure d {clipboard=if M.member target (childRecords state) then rawTranscript records else maybe "" (contents.documentBuffer.snd) (conversationDocument target d),status="Conversation copied with sender attribution."}
+    "copy" -> pure d {clipboardCode=Nothing,clipboard=if M.member target (childRecords state) then rawTranscript records else maybe "" (contents.documentBuffer.snd) (conversationDocument target d),status="Conversation copied with sender attribution."}
     "toggle-activity" | [index]<-values,Just chosen<-readMaybe (T.unpack index) -> do
       let toggle (i,Activity title value history expanded) | i==chosen=Activity title value history (not expanded)
           toggle (_,record)=record
@@ -1590,7 +1590,7 @@ performChild runtime@(ConversationState _ ref _ _ agents) action values d=do
         modifyIORef' ref (\current->current {childControls=M.insert target (submitted,worker) (childControls current)})
         pure d {agentReplying=True,contextMenu=Nothing,status=if submitted==Nothing then "Updating child settings..." else "Steering child; draft kept until accepted."}
     send hub ident text = do
-      result<-AH.sendAgent hub AH.Human ident text
+      result<-AH.sendAgent hub AH.Human ident (composerMarkdown text)
       case result of
         Left err -> pure d {status=err}
         Right _ -> refreshChildConversation runtime d {composerBuffer=newBuffer "",composerSelection=Selection 0 0,status="Human message queued."}

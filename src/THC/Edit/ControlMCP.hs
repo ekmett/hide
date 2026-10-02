@@ -18,7 +18,7 @@ controlTools :: [Value]
 controlTools=
   [object ["name" .= ("editor_input"::T.Text),"description" .= ("Operate the editor using up to 64 mouse/key/paste events through its normal input path. Coordinates are 0-based character cells. Mouse actions: down/up/move/wheel-up/wheel-down; button0 left,2 right. Keys include characters, Enter, Escape, Tab, ArrowUp/Down/Left/Right, F1..F24, Home/End/PageUp/PageDown/Backspace/Delete/Insert. mods is an array of ctrl/alt/shift. Events may edit, save or run commands; applied sequentially, not transactionally. Conversation input, agent settings, approvals and Streamer mode require human input. Copy/paste uses an isolated clipboard for this batch, never the human clipboard."::T.Text),
    "inputSchema" .= object ["type" .= ("object"::T.Text),"required" .= ["events"::T.Text],"additionalProperties" .= False,"properties" .= object ["events" .= object ["type" .= ("array"::T.Text),"minItems" .= (1::Int),"maxItems" .= (64::Int),"items" .= object ["type" .= ("object"::T.Text)]]]],"annotations" .= annotations False],
-   object ["name" .= ("editor_settings"::T.Text),"description" .= ("Read session display/editing settings as JSON, or apply a validated settings object. Fields: appearance(light/dark/system), screenMode(3/259), columns(40..512), rows(12..256), wordStar, blinkCursor, crtFilter, pixelateUnicode, materialIcons. Omitted fields remain unchanged; selecting screenMode defaults to its 80x25/80x50 grid unless dimensions supplied. Backend/window pixel scale and agent configuration are not changed. Changes remain with the resumable session. The optional defaults object merges startup settings into global [editor.defaults]; it accepts these fields plus backend(terminal/auto/metal/vulkan/web/remote) and scale(1..8). Defaults affect future sessions. Responses include startupDefaults."::T.Text),
+   object ["name" .= ("editor_settings"::T.Text),"description" .= ("Read session display/editing settings as JSON, or apply a validated settings object. Fields: appearance(light/dark/system), screenMode(3/259), columns(40..512), rows(12..256), wordStar, blinkCursor, crtFilter, pixelateUnicode, materialIcons, macKeySymbols. Omitted fields remain unchanged; selecting screenMode defaults to its 80x25/80x50 grid unless dimensions supplied. Chat input defaults are readable but require human input to change. Backend/window pixel scale and agent configuration are not changed. Changes remain with the resumable session. The optional defaults object merges startup settings into global [editor.defaults]; it accepts these fields plus backend(terminal/auto/metal/vulkan/web/remote) and scale(1..8). Defaults affect future sessions. Responses include startupDefaults."::T.Text),
     "inputSchema" .= object ["type" .= ("object"::T.Text),"additionalProperties" .= False,"properties" .= object ["settings" .= object ["type" .= ("object"::T.Text)],"defaults" .= object ["type" .= ("object"::T.Text)]]],"annotations" .= annotations False]]
   where annotations readonly=object ["readOnlyHint" .= readonly,"destructiveHint" .= not readonly,"openWorldHint" .= not readonly]
 
@@ -46,7 +46,7 @@ controlTool apply d name args=case parseEither parse args of
       "editor_settings" -> do
         unless (all (`elem` ["settings","defaults"]) (KM.keys o)) (fail "Unknown argument")
         defaults<-o .:? "defaults"
-        case defaults of Just (Object values) | KM.member "streamerMode" values -> fail "Streamer mode requires human input"; _ -> pure ()
+        case defaults of Just (Object values) | any (`KM.member` values) ["streamerMode","chatSubmit"] -> fail "Streamer mode and chat input defaults require human input"; _ -> pure ()
         Left . (,defaults) <$> o .:? "settings" .!= object []
       "editor_input" -> do
         unless (all (`elem` ["events"]) (KM.keys o)) (fail "Unknown argument")
@@ -80,7 +80,7 @@ controlTool apply d name args=case parseEither parse args of
 
 parseSettings :: Desktop -> Value -> Parser Desktop
 parseSettings d=withObject "settings" $ \o -> do
-  unless (all (`elem` ["appearance","screenMode","columns","rows","wordStar","blinkCursor","crtFilter","pixelateUnicode","materialIcons"]) (KM.keys o)) (fail "Unknown setting")
+  unless (all (`elem` ["appearance","screenMode","columns","rows","wordStar","blinkCursor","crtFilter","pixelateUnicode","materialIcons","macKeySymbols"]) (KM.keys o)) (fail "Unknown setting")
   theme<-o .:? "appearance" .!= themeName (appearance d)
   selected<-maybe (fail "Expected light, dark or system") pure (lookup theme [("light",LightMode),("dark",DarkMode),("system",SystemMode)])
   mode<-o .:? "screenMode"
@@ -92,15 +92,16 @@ parseSettings d=withObject "settings" $ \o -> do
   wordstar<-o .:? "wordStar" .!= wordStar d
   blink<-o .:? "blinkCursor" .!= blinkCursor d
   crt<-o .:? "crtFilter" .!= crtFilter d
+  macSymbols<-o .:? "macKeySymbols" .!= macKeySymbols d
   pixelate<-o .:? "pixelateUnicode" .!= pixelateUnicode d
   material<-o .:? "materialIcons" .!= materialIcons d
   let resized=if (cols,rows)==screenSize d then d else resizeScreenMode (cols,rows) d
   pure resized {appearance=selected,videoMode=case mode of Nothing -> videoMode d; Just value -> Just value,
-    wordStar=wordstar,blinkCursor=blink,crtFilter=crt,pixelateUnicode=pixelate,materialIcons=material}
+    macKeySymbols=macSymbols,wordStar=wordstar,blinkCursor=blink,crtFilter=crt,pixelateUnicode=pixelate,materialIcons=material}
 
 settingsValue :: Desktop -> Value
 settingsValue d=object ["appearance" .= themeName (appearance d),"screenMode" .= videoMode d,"columns" .= fst (screenSize d),"rows" .= snd (screenSize d),
-  "streamerMode" .= streamerMode d,"wordStar" .= wordStar d,"blinkCursor" .= blinkCursor d,"crtFilter" .= crtFilter d,"pixelateUnicode" .= pixelateUnicode d,"materialIcons" .= materialIcons d]
+  "streamerMode" .= streamerMode d,"chatSubmit" .= chatSubmitName (chatSubmit d),"macKeySymbols" .= macKeySymbols d,"wordStar" .= wordStar d,"blinkCursor" .= blinkCursor d,"crtFilter" .= crtFilter d,"pixelateUnicode" .= pixelateUnicode d,"materialIcons" .= materialIcons d]
 themeName :: Appearance -> T.Text
 themeName LightMode="light"
 themeName DarkMode="dark"

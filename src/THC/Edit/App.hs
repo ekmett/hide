@@ -5,6 +5,8 @@ import Control.Applicative ((<|>))
 import Data.Maybe (fromMaybe)
 import THC.Edit.DocsMCP
 import THC.Edit.GuestAccess (protectedPath, protectedBuffer)
+import THC.Edit.Autocomplete
+import qualified THC.Edit.AutocompleteACP as CompletionACP
 import THC.Edit.BufferView
 import THC.Edit.Defaults
 import THC.Edit.MCPPermissions
@@ -223,7 +225,7 @@ runEditor args = do
         `catch` (\FrontendDetached -> writeIORef wasInterrupted True)) `finally` report
     else do
         let initial=if Demo `elem` flags then addDocument Nothing (newBuffer (activeText demoDesktop)) (initialDesktop dimensions) else initialDesktop dimensions
-            configured=(fst (handleEvent (uncurry V.EvResize dimensions) initial)) {defaultBufferView=fromMaybe CurrentView (defaultView defaults),appearance=colorMode,systemDark=maybe True (not . (`elem` ["7","15"]) . reverse . takeWhile (/=';') . reverse) terminalColors,wordStar=flagBool WordStar StandardKeys (fromMaybe (wordStar initial) (defaultWordStar defaults)),crtFilter=flagBool CRT NoCRT (fromMaybe (crtFilter initial) (defaultCRT defaults)),materialIcons=flagBool MaterialIcons ClassicIcons (fromMaybe (materialIcons initial) (defaultMaterialIcons defaults)),blinkCursor=fromMaybe (fromMaybe (blinkCursor initial) (defaultBlinkCursor defaults)) (lastMaybe [value | CursorBlink value<-flags]),pixelateUnicode=fromMaybe (fromMaybe (pixelateUnicode initial) (defaultPixelateUnicode defaults)) (lastMaybe [value | Pixelate value<-flags]),streamerMode=fromMaybe (fromMaybe False (defaultStreamerMode defaults)) (lastMaybe [value | Streamer value<-flags]),videoMode=if backend == Terminal then Nothing else Just screenMode}
+            configured=(fst (handleEvent (uncurry V.EvResize dimensions) initial)) {macKeySymbols=fromMaybe False (defaultMacKeySymbols defaults),defaultBufferView=fromMaybe CurrentView (defaultView defaults),chatSubmit=fromMaybe QuerySubmit (defaultChatSubmit defaults),appearance=colorMode,systemDark=maybe True (not . (`elem` ["7","15"]) . reverse . takeWhile (/=';') . reverse) terminalColors,wordStar=flagBool WordStar StandardKeys (fromMaybe (wordStar initial) (defaultWordStar defaults)),crtFilter=flagBool CRT NoCRT (fromMaybe (crtFilter initial) (defaultCRT defaults)),materialIcons=flagBool MaterialIcons ClassicIcons (fromMaybe (materialIcons initial) (defaultMaterialIcons defaults)),blinkCursor=fromMaybe (fromMaybe (blinkCursor initial) (defaultBlinkCursor defaults)) (lastMaybe [value | CursorBlink value<-flags]),pixelateUnicode=fromMaybe (fromMaybe (pixelateUnicode initial) (defaultPixelateUnicode defaults)) (lastMaybe [value | Pixelate value<-flags]),streamerMode=fromMaybe (fromMaybe False (defaultStreamerMode defaults)) (lastMaybe [value | Streamer value<-flags]),videoMode=if backend == Terminal then Nothing else Just screenMode}
         localPaths<-if daemon/=Nothing then mapM expandRemoteHome paths else pure paths
         (_,loaded)<-applyEffects configured (map ReadPath localPaths)
         cwd<-getCurrentDirectory
@@ -246,9 +248,9 @@ runEditor args = do
           mapM_ (setEnv "THC_EDIT_SESSION") daemon
           font<-Font.loadFont
           let specs=builtinTools++debugTools++chatTools++toolingTools++workspaceTools++fileTools++testsTools++historyTools++runtimeTools++gitTools++controlTools++clipboardTools++docsTools++[screenTool]
-          withPermissions (specs++agentTools) $ \permissions -> withConversationAt (startingDirectory protectedDesktop) $ \conversation -> withDebuggerConsoles (let (_,consoles,_)=conversationServices conversation in consoles) $ \debugger -> withTooling $ \tooling -> withGitOperations $ \gitOperations -> withReconciliation $ \reconciliation -> withProjectBrowser $ \projectBrowser -> withHighlighting $ \highlighting -> do
+          withPermissions (specs++agentTools) $ \permissions -> withConversationAt (startingDirectory protectedDesktop) $ \conversation -> withDebuggerConsoles (let (_,consoles,_)=conversationServices conversation in consoles) $ \debugger -> withTooling $ \tooling -> withGitOperations $ \gitOperations -> withReconciliation $ \reconciliation -> withProjectBrowser $ \projectBrowser -> withHighlighting $ \highlighting -> withAutocomplete (startingDirectory protectedDesktop) $ \autocomplete -> do
             exiting<-newIORef False
-            let runtimeEffects=projectBrowserEffects projectBrowser (gitOperationEffects gitOperations (debuggerEffects debugger (conversationEffects conversation (reconciliationEffects reconciliation (toolingEffects tooling applyEffects)))))
+            let runtimeEffects=autocompleteEffects autocomplete (projectBrowserEffects projectBrowser (gitOperationEffects gitOperations (debuggerEffects debugger (conversationEffects conversation (reconciliationEffects reconciliation (toolingEffects tooling applyEffects))))))
                 core d pending=foldM step (False,d) pending
                   where
                     step result@(True,_) _=pure result
@@ -263,7 +265,7 @@ runEditor args = do
                   (quit,updated)<-policyEffects permissions core d pending
                   approvedExit<-readIORef exiting
                   pure (quit || approvedExit,updated)
-                tick d=tickProjectBrowser projectBrowser d >>= tickGitOperations gitOperations applyEffects >>= tickTooling tooling applyEffects >>= tickReconciliation reconciliation >>= tickConversation conversation >>= tickDebugger debugger (toolingEffects tooling applyEffects) >>= tickPermissions permissions >>= tickHighlighting highlighting
+                tick d=tickProjectBrowser projectBrowser d >>= tickGitOperations gitOperations applyEffects >>= tickTooling tooling applyEffects >>= tickReconciliation reconciliation >>= tickConversation conversation >>= tickDebugger debugger (toolingEffects tooling applyEffects) >>= tickPermissions permissions >>= tickHighlighting highlighting >>= tickAutocomplete autocomplete
                 inspectTool d name parameters
                   | name `elem` ["list_windows","list_buffers","read_buffer","read_selection"] = pure (d,pure (builtinTool d name parameters))
                   | name `elem` chatToolNames = chatTool conversation d name parameters
@@ -288,6 +290,7 @@ runEditor args = do
                       reject=pure (d,pure (Just (rpcError (fromMaybe Null (parseMaybe (withObject "request" (.: "id")) request)) (-32600) "Invalid or inactive agent connection.")))
                   response<-case token of
                     Nothing -> editorResponseWith specs (permissionCall permissions inspectTool) d request
+                    Just secret | secret==autocompleteToken autocomplete -> editorResponseOnly CompletionACP.completionTools (\current name parameters -> pure (current,autocompleteTool autocomplete name parameters)) d request
                     Just secret -> do
                       bound<-resolveAgentAccess (AR.agentAccess agents) secret
                       case bound of
@@ -498,6 +501,7 @@ applyEffects :: Desktop -> [Effect] -> IO (Bool,Desktop)
 applyEffects = foldM apply . (False,)
   where
     apply state@(True,_) _=pure state
+    apply (_,d) AutocompleteAction{}=pure (False,d {status="Autocomplete is unavailable in this preview."})
     apply (_,d) LanguageRequest{}=pure (False,d {status="Language tools are unavailable in this preview."})
     apply (_,d) JumpTo{}=pure (False,d)
     apply (_,d) RunGit{}=pure (False,d {status="Git operations are unavailable in this preview."})
@@ -512,6 +516,12 @@ applyEffects = foldM apply . (False,)
     apply (_,d) ReadBrowserClipboard=pure (False,d)
     apply (_,d) WriteBrowserClipboard{}=pure (False,d)
     apply (_,d) Exit=pure (True,d)
+    apply (_,d) (SaveMacKeySymbols chosen)=do
+      result<-writeEditorDefaults (object ["macKeySymbols" .= chosen])
+      pure (False,d {status=either ("Key labels changed for this session; could not save: "<>) (const "Mac key symbol preference saved.") result})
+    apply (_,d) (SaveChatSubmit chosen)=do
+      result<-writeEditorDefaults (object ["chatSubmit" .= chatSubmitName chosen])
+      pure (False,d {status=either ("Chat input changed for this session; could not save: "<>) (const "Chat input default saved.") result})
     apply (_,d) (SaveBufferViewDefault mode)=do
       result<-writeEditorDefaults (object ["bufferView" .= bufferViewName mode])
       pure (False,d {status=either ("Default view changed for this session; could not save: "<>) (const "Default buffer view saved.") result})

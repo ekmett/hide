@@ -96,7 +96,7 @@ modifierNames :: Int -> [T.Text]
 modifierNames mask = ["shift" | mask .&. 1/=0] ++ ["ctrl" | mask .&. 10/=0] ++ ["alt" | mask .&. 4/=0]
 nativeKeyInput :: Int -> Int -> Maybe Value
 nativeKeyInput key mask = do
-  V.EvKey k _ <- decodeKey key mask
+  V.EvKey k decodedMods <- decodeKey key mask
   name <- case k of
     V.KChar '\t' -> Just "Tab"
     V.KChar c -> Just (T.singleton c)
@@ -104,7 +104,7 @@ nativeKeyInput key mask = do
     _ -> lookup k [(V.KUp,"ArrowUp"),(V.KDown,"ArrowDown"),(V.KLeft,"ArrowLeft"),(V.KRight,"ArrowRight"),
       (V.KHome,"Home"),(V.KEnd,"End"),(V.KPageUp,"PageUp"),(V.KPageDown,"PageDown"),
       (V.KBackTab,"Tab"),(V.KEnter,"Enter"),(V.KEsc,"Escape"),(V.KBS,"Backspace"),(V.KDel,"Delete"),(V.KIns,"Insert")]
-  pure (object ["type" .= ("key"::T.Text),"key" .= name,"mods" .= modifierNames mask])
+  pure (object ["type" .= ("key"::T.Text),"key" .= name,"mods" .= [label | (modifier,label)<-[(V.MShift,"shift"::T.Text),(V.MCtrl,"ctrl"),(V.MAlt,"alt")],modifier `elem` decodedMods]])
 pasteShortcut :: Bool -> Bool -> Int -> Int -> Bool
 pasteShortcut terminal wordstar key mask = key==fromEnum 'v' && mask .&. 10/=0
   && (not wordstar || mask .&. 8/=0 || terminal && mask .&. 1/=0) && not (terminal && mask .&. 15==2)
@@ -333,8 +333,12 @@ runRemoteWindow backend scale (cols,rows) mode host peer = do
             when (remoteInputAllowed connected event) (dispatch connected current event)
             loop receiver sender current glyphs status (if connected || previousTheme==Nothing then Just dark else previousTheme) (case event of n:_ -> n `elem` [3,4,5,7,8,9,12]; _ -> False)
   bracket_ (pure ()) c_close $ do
+#ifdef darwin_HOST_OS
+    c_menu_prepare
+#endif
     withCString driver $ \name -> check "Open remote window" (c_open name (realToFrac scale) (fromIntegral cols) (fromIntegral rows) (fromIntegral (modeHeight mode)))
     nativeMenus
+    sendJSON (object ["type" .= ("frontend"::T.Text),"mode" .= mode,"mac" .= (os=="darwin")])
 #ifdef darwin_HOST_OS
     forM_ (zip [0::Int ..] nativeCommands) $ \(i,_) -> c_menu_enabled (fromIntegral i) 0
 #endif

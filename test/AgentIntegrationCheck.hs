@@ -149,7 +149,7 @@ checks=bracket temporary removePathForcibly $ \root ->
       ensure "primary mailbox cancellation does not cancel selected child" . (==0) =<< readIORef peerCancels
       ensure "primary cancellation preserves child target and draft" (conversationTarget afterPrimaryCancel==AH.agentIdText peer && contents (composerBuffer afterPrimaryCancel)=="child unsent")
       let primaryMetadata=childAgain {agentReplying=True,agentSteering=True,agentContextUsage=Just (42,84),agentSettings=[AgentSetting "model" "Model" "model" "primary-model" [("primary-model","Primary")]]}
-      ensure "child view never advertises primary steering or editable model settings" (not (any (T.isInfixOf "Steer" . fst) (statusItems primaryMetadata)) && not (commandEnabled primaryMetadata (AgentChoose "")) && not (commandEnabled primaryMetadata (AgentSet "model" "primary-model")))
+      ensure "child capabilities do not inherit primary steering or model settings" (not (conversationSteering primaryMetadata) && not (commandEnabled primaryMetadata (AgentChoose "")) && not (commandEnabled primaryMetadata (AgentSet "model" "primary-model")))
       ensure "child view does not show primary context usage" (case (activeDocument primaryMetadata,activeWindow primaryMetadata) of (Just doc,Just win)->windowPositionText primaryMetadata doc win==" -- "; _->False)
       (_,settingsReply)<-chatTool conversation primaryMetadata "agent_settings" (object [])
       settingsInfo<-settingsReply >>= right
@@ -173,7 +173,7 @@ checks=bracket temporary removePathForcibly $ \root ->
       ensure "child configuration does not replace primary provider settings" (agentSettings configuredChild==agentSettings liveView && "large" `T.isInfixOf` conversationTitle configuredChild)
       waitingChild<-ui "send-draft" [] configuredChild {composerBuffer=newBuffer "steer-wait"}
       steerReady<-tickUntil (pure . (==Just (120,1000)) . childAgentContextUsage) waitingChild
-      ensure "child usage has the same context display and advertised steering hint" (conversationContextUsage steerReady==Just (120,1000) && any (T.isInfixOf "Steer" . fst) (statusItems steerReady))
+      ensure "child reports its own context usage" (conversationContextUsage steerReady==Just (120,1000))
       steeringChild<-ui "steer-draft" [] steerReady {composerBuffer=newBuffer "human direction"}
       ensure "pending child steering keeps the draft until acknowledged" (contents (composerBuffer steeringChild)=="human direction")
       steeredChild<-tickUntil (pure . (\d->not (agentReplying d) && T.null (contents (composerBuffer d)))) steeringChild

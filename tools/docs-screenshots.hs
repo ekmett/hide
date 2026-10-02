@@ -4,9 +4,11 @@
 import Control.Monad (forM_, unless, when)
 import qualified Data.Map.Strict as M
 import Data.Aeson (object, (.=))
+import Data.List (intersperse)
+import THC.Edit.Syntax (Style(Plain))
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
-import THC.Edit.Buffer (newBuffer, Selection(..), revision, contents, replaceSelection, bufferLineOffset, bufferLineChanges, bufferLineColumn)
+import THC.Edit.Buffer (newBuffer, Selection(..), revision, contents, replaceSelection, bufferLineOffset, bufferLineChanges, bufferLineColumn, displayColumn, bufferLineCount)
 import THC.Edit.BufferView (BufferView(SideBySideView))
 import THC.Edit.Files (FileState(..))
 import THC.Edit.MCPPermissions (withPermissionsAt, permissionCall, policyEffects)
@@ -16,7 +18,7 @@ import System.Directory
 import System.Environment (getArgs, lookupEnv, setEnv, unsetEnv)
 import System.FilePath ((</>))
 import THC.Edit.App (applyEffects)
-import THC.Edit.Conversation (withConversationAt, conversationEffects, tickConversation)
+import THC.Edit.Conversation (withConversationAt, conversationEffects, tickConversation, renderReply)
 import THC.Edit.Debugger (withDebugger, debuggerEffects, tickDebugger, hdbOfferDialog, downloadsDialog)
 import qualified THC.Edit.Compilers as Compilers
 import qualified THC.Edit.HdbAcquisition as Hdb
@@ -28,8 +30,9 @@ main :: IO ()
 main = do
   root <- getCurrentDirectory
   requested <- getArgs
-  let scratch = root </> "build/docs-capture"
-      output = root </> "docs/site/screenshots"
+  captureDirectory <- lookupEnv "THC_DOCS_CAPTURE_DIR"
+  let scratch = maybe (root </> "build/docs-capture") (</> "scratch") captureDirectory
+      output = maybe (root </> "docs/site/screenshots") (</> "screenshots") captureDirectory
   createDirectoryIfMissing True scratch
   createDirectoryIfMissing True output
   hdbPlan<-if any (`elem` requested) ["hdb-download","downloads"] then do
@@ -39,7 +42,7 @@ main = do
   -- Live conversations require an explicit, caller-supplied provider configuration.
   agentConfig <- lookupEnv "THC_DOCS_AGENT_CONFIG"
   when ("conversation" `elem` requested) $ case agentConfig of
-    Nothing -> fail "Set THC_DOCS_AGENT_CONFIG to an ACP provider configuration."
+    Nothing -> pure ()
     Just path -> do
       createDirectoryIfMissing True (scratch </> "config/thc-edit")
       copyFile path (scratch </> "config/thc-edit/agents.json")
@@ -50,28 +53,71 @@ main = do
   setEnv "thc_edit_datadir" root
   unsetEnv "THC_ROOT"
   setEnv "THC_EDIT_CAPTURE_EXIT" "1"
-  withConversationAt root $ \conversation -> withDebugger $ \debugger -> withPermissionsAt (scratch </> "permissions.toml") fileTools $ \permissions -> do
-    let effects = policyEffects permissions (debuggerEffects debugger (conversationEffects conversation applyEffects))
+  withDebugger $ \debugger -> withPermissionsAt (scratch </> "permissions.toml") fileTools $ \permissions -> do
+    let effects = policyEffects permissions (debuggerEffects debugger applyEffects)
         command = Driver.command effects
         key k mods = Driver.input effects (V.EvKey k mods)
         typeText = Driver.typeText effects
         await = Driver.await
-        chat d = do
-          sent <- snd <$> effects d [AgentAction "send" ["0",
-            "Read src/THC/Edit/Buffer.hs and explain its finger tree of lines in three short bullets (under 70 words). Read-only, please.",
-            "false","false","false"]]
-          reply <- await "agent reply" (tickConversation conversation) ((=="Agent: end_turn") . status) sent
-          followup <- snd <$> effects reply [AgentAction "send" ["0",
-            "Which operations avoid scanning the whole file? Two bullets, under 40 words; use what you just read.",
-            "false","false","false"]]
-          answered <- await "follow-up reply" (tickConversation conversation) ((=="Agent: end_turn") . status) followup
-          wide <- command ToggleTree answered
-          full <- command Zoom (fst (handleEvent (V.EvResize 100 24) wide))
-          let bottom = case activeDocument full of
-                Just doc -> modifyActive (\w -> w {scrollRow=scrollbarLimit full True doc w}) full
-                Nothing -> full
-              draft = "How would you benchmark edits to a large file?"
-          pure bottom {composerFocused=True,composerBuffer=newBuffer draft,composerSelection=Selection (T.length draft) (T.length draft)}
+        chat d = case agentConfig of
+          Nothing -> recordedChat d
+          Just _ -> withConversationAt root $ \conversation -> do
+            let liveEffects=conversationEffects conversation effects
+            sent <- snd <$> liveEffects d [AgentAction "send" ["0",
+              "Read src/THC/Edit/Buffer.hs and explain its finger tree of lines in three short bullets (under 70 words). Read-only, please.",
+              "false","false","false"]]
+            reply <- await "agent reply" (tickConversation conversation) ((=="Agent: end_turn") . status) sent
+            followup <- snd <$> liveEffects reply [AgentAction "send" ["0",
+              "Which operations avoid scanning the whole file? Two bullets, under 40 words; use what you just read.",
+              "false","false","false"]]
+            answered <- await "follow-up reply" (tickConversation conversation) ((=="Agent: end_turn") . status) followup
+            wide <- command ToggleTree answered
+            full <- command Zoom (fst (handleEvent (V.EvResize 100 24) wide))
+            reflowed <- tickConversation conversation full
+            let bottom = case activeDocument reflowed of
+                  Just doc -> modifyActive (\w -> w {scrollRow=scrollbarLimit reflowed True doc w}) reflowed
+                  Nothing -> reflowed
+                draft = "How would you benchmark edits to a large file?"
+            pure bottom {composerFocused=True,composerBuffer=newBuffer draft,composerSelection=Selection (T.length draft) (T.length draft)}
+        -- Visible messages transcribed from the original real capture's
+        -- build/docs-capture/conversation.txt. Tool output was truncated there,
+        -- so replay only the complete exchange, model and rounded usage.
+        recordedChat d = do
+          let resized=fst (handleEvent (V.EvResize 100 21) d {sideTree=Nothing})
+              opened=selectConversationView "" "Primary" resized
+          full <- command Zoom opened
+          case activeWindow full of
+            Nothing -> fail "Recorded conversation window is missing"
+            Just window -> do
+              let replies=
+                    [ (False,T.unlines
+                        [ "- Each leaf stores one line’s text and length, including its newline; the final leaf has no newline and may be empty."
+                        , "- Subtrees cache character and line counts, enabling measured splits to locate offsets, rows, and columns efficiently."
+                        , "- Edits rebuild affected lines and concatenate untouched trees. Undo/redo retain persistent trees with structural sharing; full text is flattened lazily and cached."
+                        ])
+                    , (True,"Which operations avoid scanning the whole file? Two bullets, under 40 words; use what you just read.")
+                    , (False,T.unlines
+                        [ "- Length and line count use cached measures; offset/row lookup and line access use measured tree searches."
+                        , "- Selection reads scan selected lines; replacements rebuild boundary lines plus inserted text. Undo/redo swap persistent trees; full-text flattening is deferred."
+                        ])
+                    ]
+                  contentWidth=width (bounds window)-2
+                  bubbles=[renderReply True contentWidth outgoing (T.stripEnd replyText) | (outgoing,replyText)<-replies]
+                  styled=concat (intersperse [('\n',Plain),('\n',Plain)] bubbles)
+                  text=T.pack (map fst styled)
+                  draft="How would you benchmark edits to a large file?"
+                  shown=full {buffers=M.adjust (\doc -> doc {documentBuffer=newBuffer text,documentHighlight=styled,documentCursorVisible=False}) (bufferId window) (buffers full)
+                    ,composerFocused=True,composerBuffer=newBuffer draft,composerSelection=Selection (T.length draft) (T.length draft)
+                    ,agentSettings=[AgentSetting "model" "Model" "model" "gpt-6-astra" [("gpt-6-astra","gpt-6-astra")],AgentSetting "effort" "Effort" "thought_level" "medium" [("medium","medium")]]
+                    ,agentContextUsage=Just (33000,258000),status="Recorded conversation"}
+              let rowWidths=[displayColumn row (T.length row) | cells<-bubbles,row<-T.lines (T.pack (map fst cells))]
+              unless (all (<=contentWidth) rowWidths && maximum (0:rowWidths)>=contentWidth-6)
+                (fail "Recorded conversation does not fit its current window width")
+              case activeDocument shown of
+                Just doc -> unless (bufferLineCount (documentBuffer doc)<=windowContentRows shown doc window)
+                  (fail "Recorded conversation does not fit its capture height")
+                Nothing -> fail "Recorded conversation document is missing"
+              pure shown
         debug d = do
           port <- maybe (fail "Set THC_DOCS_DAP_PORT to a suspended local THC program.") pure =<< lookupEnv "THC_DOCS_DAP_PORT"
           connected <- snd <$> effects d [DebugAction "connect" ["0","127.0.0.1",T.pack port]]

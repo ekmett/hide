@@ -153,7 +153,7 @@ desktopValueWith buffer baseline desktop=do
     "composer" .= composer,"composerSelection" .= selectionValue (composerSelection d),"composerFocused" .= composerFocused d,
     "directory" .= defaultDirectory d,"sidebar" .= fmap sidebarValue (sideTree d),"preferences" .= object
       ["wordStar" .= wordStar d,"blinkCursor" .= blinkCursor d,"crtFilter" .= crtFilter d,"pixelateUnicode" .= pixelateUnicode d,
-       "defaultBufferView" .= fromEnum (defaultBufferView d),"materialIcons" .= materialIcons d,"streamerMode" .= streamerMode d,"appearance" .= fromEnum (appearance d),"videoMode" .= videoMode d,
+       "defaultBufferView" .= fromEnum (defaultBufferView d),"chatSubmit" .= chatSubmitName (chatSubmit d),"macKeySymbols" .= macKeySymbols d,"materialIcons" .= materialIcons d,"streamerMode" .= streamerMode d,"appearance" .= fromEnum (appearance d),"videoMode" .= videoMode d,
        "problemsVisible" .= problemsVisible d,"problemsHeight" .= problemsPreferredHeight d,"messagesNumber" .= messagesNumber d]])
   where d=rememberConversationView desktop
         documents=M.filter keptDocument (buffers d)
@@ -238,6 +238,8 @@ desktopParser baseline=withObject "checkpoint" $ \o->do
   wordStar'<-prefs .: "wordStar"; blink<-prefs .: "blinkCursor"; crt<-prefs .: "crtFilter"
   pixelate<-prefs .: "pixelateUnicode"; icons<-prefs .: "materialIcons"; streamer<-prefs .: "streamerMode"
   defaultView<-prefs .:? "defaultBufferView" .!= 0 >>= boundedInt 0 (fromEnum (maxBound :: BufferView))
+  macSymbols<-prefs .:? "macKeySymbols" .!= macKeySymbols baseline
+  submit<-prefs .:? "chatSubmit" .!= chatSubmitName (chatSubmit baseline) >>= maybe (fail "Invalid chat submit action") pure . parseChatSubmit
   look<-prefs .: "appearance"
   unless (look>=0 && look<=2) (fail "Invalid appearance")
   mode<-prefs .: "videoMode" >>= traverse (boundedInt 0 65535)
@@ -245,11 +247,12 @@ desktopParser baseline=withObject "checkpoint" $ \o->do
   messages<-prefs .: "messagesNumber" >>= traverse positive
   pure (layoutBottomWindows (normalizeBottom baseline {dockedTerminals=M.fromList pinned,bottomTerminal=selectedTerminal,screenSize=size,buffers=documents,windows=views,nextId=ident,composerBuffer=composer,composerSelection=composerSelection',composerFocused=composerFocused',
     conversationTarget=selectedTarget,conversationViews=conversationViews',defaultDirectory=directory,sideTree=sidebar,wordStar=wordStar',blinkCursor=blink,crtFilter=crt,pixelateUnicode=pixelate,materialIcons=icons,streamerMode=streamer,
-    defaultBufferView=toEnum defaultView,appearance=toEnum look,videoMode=mode,problemsVisible=problems,problemsPreferredHeight=preferred,messagesNumber=messages,
-    menu=Nothing,dialog=Nothing,drag=Nothing,dragOriginal=Nothing,clipboard="",clipboardExport=(0,Nothing),prefix=Nothing,blockStart=Nothing,
+    defaultBufferView=toEnum defaultView,chatSubmit=submit,macKeySymbols=macSymbols,appearance=toEnum look,videoMode=mode,problemsVisible=problems,problemsPreferredHeight=preferred,messagesNumber=messages,
+    menu=Nothing,dialog=Nothing,drag=Nothing,dragOriginal=Nothing,clipboard="",clipboardCode=Nothing,clipboardExport=(0,Nothing),prefix=Nothing,blockStart=Nothing,
     status="Recovered session. Background processes ended; reconnect agents as needed.",lastFind="",branchStatus="",branchAdded=0,branchDeleted=0,branchRoot=Nothing,
     gitReview=Nothing,hoverTarget=Nothing,typeHint="",buttonHover=Nothing,buttonPressed=Nothing,contextMenu=Nothing,contextKind=SourceContext,
     diagnostics=[],buildDiagnostics=[],problemsSelected=0,problemsScroll=0,problemsFocused=False,statusHover=Nothing,heldModifiers=[],
+    autocompleteACPEnabled=False,autocompleteDraft=newBuffer "",autocompleteSelection=Selection 0 0,autocompleteFocused=True,
     childAgentSettings=[],childAgentSteering=False,childAgentContextUsage=Nothing,agentSteering=False,agentReplying=False,agentQueued=0,agentContextUsage=Nothing,chatQuestion=Nothing,chatActions=[],chatInputOffset=Nothing}))
 
 documentParser :: Value -> Parser (Int,Document)
