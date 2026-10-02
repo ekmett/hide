@@ -63,8 +63,10 @@ checks=do
   forM_ [AgentDialog "configure",AgentDialog "load",AgentDialog "approval:2",PermissionDialog "approve:2",DiscardDraft] $ \p -> do
     let d=base {dialog=Just (Dialog "Human control" p [Input "Session ID" "secret" 6] 0 ["OK","Cancel"] [])}
     check "sensitive modal blocks every guest event, including Escape/blur" (all (denied d) [P.Key "Enter" [],P.Key "Escape" [],P.Paste "x",P.Blur,P.Mouse "down" 0 0 0 1 []])
-    check "agent setting labels are public while sensitive values are hidden"
-      (let dg=maybe (error "dialog") id (dialog d); r=firstRect d dg in readableAt d (left r) (top r) && not (readableAt d (left r) (top r+1)))
+    let dg=maybe (error "dialog") id (dialog d); r=firstRect d dg
+    case p of
+      PermissionDialog{} -> check "permission controls are entirely private" (not (readableAt d (left r) (top r)) && not (readableAt d (left r) (top r+1)))
+      _ -> check "agent setting labels are public while sensitive values are hidden" (readableAt d (left r) (top r) && not (readableAt d (left r) (top r+1)))
   let dg=Dialog "Agents" (AgentDialog "configure") [Input "Executable" "claude" 0,Input "Environment (JSON object)" "TOKEN=secret" 0] 0 ["OK"] []
       settings=base {dialog=Just dg}
       public=firstRect settings dg

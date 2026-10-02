@@ -17,7 +17,7 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
 import Data.Foldable (toList)
 import Data.IORef
-import Data.List (find)
+import Data.List (find, sortOn)
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Map.Strict as M
 import Data.Maybe (fromMaybe)
@@ -33,7 +33,8 @@ import System.IO.Unsafe (unsafePerformIO)
 import Text.Read (readMaybe)
 import qualified Toml
 import qualified Toml.Syntax as TS
-import THC.Edit.Buffer (newBuffer)
+import THC.Edit.Buffer (newBuffer, Selection(..))
+import THC.Edit.WorkspaceFilesMCP (applyPatch)
 import THC.Edit.Files (FileState(..), saveFile)
 import THC.Edit.Model
 
@@ -112,12 +113,27 @@ tickPermissions (Permissions _ _ ref) desktop=do
   case (dialog cleared,live) of
     (Nothing,request:_) -> do
       modifyIORef' ref (\state->state {displayed=Just (approvalAction request)})
-      let encoded=TE.decodeUtf8 (BL.toStrict (encode (arguments request)))
-          preview=T.chunksOf 60 (T.take 480 encoded)
-      pure cleared {dialog=Just (Dialog "Agent permission" (PermissionDialog (approvalAction request)) [] 0 ["Allow once","Deny"]
-        (["Tool: "<>toolName request,"Arguments"<>(if T.length encoded>480 then " (truncated preview):" else ":")]++preview++
-         ["Allow this request once. Change defaults in Options > Agent Permissions."]))}
+      pure cleared {dialog=Just (approvalReview cleared request)}
     _ -> pure cleared
+
+-- doc-artifact: tools/docs-screenshots.hs permission-diff -> docs/site/screenshots/permission-diff.png
+approvalReview :: Desktop -> Waiting -> Dialog
+approvalReview desktop request=Dialog "Agent permission" (PermissionDialog (approvalAction request)) reviewFields selected ["Allow once","Deny"] []
+  where
+    args=arguments request
+    patch=if toolName request=="buffer_apply_diff" then field "diff" args else Nothing
+    metadata=[ReadOnly "Tool" (toolName request)]++case patch of
+      Just _ -> [ReadOnly "File" (fromMaybe "Unknown buffer" $ do
+        bid<-field "bufferId" args
+        doc<-M.lookup bid (buffers desktop)
+        pure (maybe ("Untitled #"<>T.pack (show bid)) (T.pack.filePath) (documentFile doc)))]
+      Nothing -> []
+    members=case args of Object entries -> sortOn fst [(K.toText key,value) | (key,value)<-KM.toList entries]; _ -> [("Arguments",args)]
+    rows=[view name value | (name,value)<-members,not (name=="diff" && patch/=Nothing)]
+    reviewFields=metadata++rows++[TextArea "diff" True (newBuffer text) (Selection 0 0) 0 0 | Just text<-[patch]]
+    selected=if patch/=Nothing then length reviewFields-1 else 0
+    view name value=let text=case value of String t -> t; _ -> TE.decodeUtf8 (BL.toStrict (encode value))
+                    in if T.any (=='\n') text || T.length text>48 then TextArea name False (newBuffer text) (Selection 0 0) 0 0 else ReadOnly name text
 
 approvalAction :: Waiting -> Text
 approvalAction request="approve:"<>T.pack (show (ticket request))
@@ -157,21 +173,41 @@ permissionAction runtime@(Permissions path registry ref) action values desktop=d
         _ | "approve:" `T.isPrefixOf` action -> case find ((==action).approvalAction) (waiting s) of
           Nothing -> close
           Just request -> do
-            claimed<-atomicModifyIORef' (active request) (\enabled->(False,enabled))
-            modifyIORef' ref (\state->state {waiting=filter ((/=ticket request).ticket) (waiting state),displayed=Nothing})
-            if not claimed || take 1 values/=["0"] then finish request (Left "MCP request denied") >> tickPermissions runtime desktop {dialog=Nothing}
-            else do
-              policies<-readPolicies path
-              case policies of
-                Left err -> finish request (Left err) >> tickPermissions runtime desktop {dialog=Nothing}
-                Right modes | M.lookup (toolName request) modes==Just Disable -> finish request (Left "This MCP tool is disabled") >> tickPermissions runtime desktop {dialog=Nothing}
-                _ -> do
-                  result<-try (execute request desktop {dialog=Nothing} (toolName request) (arguments request))
-                  case result of
-                    Left (_::IOException) -> finish request (Left "MCP tool failed after approval") >> tickPermissions runtime desktop {dialog=Nothing}
-                    Right (updated,continuation) -> do
-                      _<-tryPutMVar (reply request) continuation
-                      tickPermissions runtime updated
+            policies<-readPolicies path
+            enabled<-readIORef (active request)
+            let edited=case (toolName request,arguments request,drop 1 values) of
+                  ("buffer_apply_diff",Object args,text:_) -> Object (KM.insert "diff" (String text) args)
+                  _ -> arguments request
+                validation=if toolName request=="buffer_apply_diff" && take 1 values==["0"] then do
+                  bid<-maybe (Left "Missing bufferId") Right (field "bufferId" edited)
+                  version<-maybe (Left "Missing revision") Right (field "revision" edited)
+                  patch<-maybe (Left "Missing diff") Right (field "diff" edited)
+                  _<-applyPatch desktop bid version patch
+                  pure ()
+                  else Right ()
+                denied=case policies of
+                  Left err -> Just err
+                  Right modes | M.lookup (toolName request) modes==Just Disable -> Just "This MCP tool is disabled"
+                  _ -> Nothing
+            case validation of
+              Left err | enabled,denied==Nothing -> pure desktop {status="Diff not applied: "<>err,
+                dialog=fmap (\dg->dg {body=T.chunksOf (max 1 (width (dialogRect desktop dg)-6)) ("Diff not applied: "<>err)}) (dialog desktop)}
+              _ -> do
+                claimed<-atomicModifyIORef' (active request) (\live->(False,live))
+                modifyIORef' ref (\state->state {waiting=filter ((/=ticket request).ticket) (waiting state),displayed=Nothing})
+                if not claimed || take 1 values/=["0"] then finish request (Left "MCP request denied") >> tickPermissions runtime desktop {dialog=Nothing}
+                else case denied of
+                  Just err -> finish request (Left err) >> tickPermissions runtime desktop {dialog=Nothing}
+                  Nothing -> do
+                    result<-try (execute request desktop {dialog=Nothing} (toolName request) edited)
+                    case result of
+                      Left (_::IOException) -> finish request (Left "MCP tool failed after approval") >> tickPermissions runtime desktop {dialog=Nothing}
+                      Right (updated,continuation) -> do
+                        let report (Right (Object response)) | toolName request=="buffer_apply_diff",Just patch<-(field "diff" edited::Maybe Text) =
+                              Right (Object (KM.insert "appliedDiff" (String patch) (KM.insert "userModified" (Bool (edited/=arguments request)) response)))
+                            report value=value
+                        _<-tryPutMVar (reply request) (report <$> continuation)
+                        tickPermissions runtime updated
         _ -> close
   where
     close=modifyIORef' ref (\state->state {displayed=Nothing}) >> tickPermissions runtime desktop {dialog=Nothing}

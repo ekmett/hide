@@ -172,7 +172,9 @@ clearGestures d=d {drag=Nothing,dragOriginal=Nothing,prefix=Nothing,heldModifier
 cellAccess :: Desktop -> Int -> Int -> CellAccess
 cellAccess d x y=CellAccess (readableAt d x y) (pointerAllowedAt d x y)
 readableAt :: Desktop -> Int -> Int -> Bool
-readableAt d x y=onScreen d x y && streamerReadableAt d x y && case dialog d of
+readableAt d x y
+  | Just dg<-dialog d, PermissionDialog{}<-purpose dg, inside (dialogRect d dg) x y || y==snd (screenSize d)-1=False
+  | otherwise=onScreen d x y && streamerReadableAt d x y && case dialog d of
   Just dg | inside (dialogRect d dg) x y -> True
   _ | overlayAt d x y -> True
     | otherwise -> case topWindow d x y of

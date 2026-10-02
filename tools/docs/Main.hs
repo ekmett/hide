@@ -61,7 +61,7 @@ site = "build/site"
 -- Keep this list in sync with tools/docs-screenshots.hs.
 screenshotNames :: [FilePath]
 screenshotNames = map (<.> "png")
-  ["file-menu", "split", "preferences", "build-target", "debug-launch", "git-commit",
+  ["permission-diff", "file-menu", "split", "preferences", "build-target", "debug-launch", "git-commit",
    "conversation", "debug-step", "debug-menu", "debug-stack"]
 
 repo :: String

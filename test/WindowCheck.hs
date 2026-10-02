@@ -6,6 +6,8 @@ import qualified Data.Map.Strict as M
 import Data.List (find)
 import THC.Edit.Frontend
 import THC.Edit.Model
+import THC.Edit.Render (snapshot)
+import qualified Data.Text as T
 import THC.Edit.Buffer (newBuffer, Selection(..))
 import THC.Edit.Files (FileState(..))
 import qualified Graphics.Vty as V
@@ -24,6 +26,8 @@ checks = do
     (windowPinned pin (get ident pin) && bounds (get ident pin)==problemsRect pin &&
      sameIdentity view (get ident pin) && sameIdentity view (get ident unpinnedOriginal) &&
      bounds (get ident unpinnedOriginal)==bounds view && buffers unpinnedOriginal==buffers terminal && M.null (dockedTerminals unpinnedOriginal))
+  let border=T.lines (snapshot pin) !! top (problemsRect pin)
+  check "bottom tab strip joins the panel sides with downward corners" (T.head border=='╔' && T.last border=='╗')
   let clicked=fst (handleEvent (V.EvMouseDown 9 4 V.BLeft []) terminal)
   check "terminal frame pin control docks the existing view" (windowPinned clicked (get ident clicked))
   let second=addReadOnly "Terminal 2" "second" pin

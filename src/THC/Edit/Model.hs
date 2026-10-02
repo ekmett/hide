@@ -66,7 +66,9 @@ data LanguageAction = TypeInfo | FindDefinition | Completions | ShowProblems | R
 data Completion = Completion Text [(Int,Int,Text)] deriving (Eq,Show)
 data ProjectAction = LoadProject | ProjectPage Int Int | ProjectDetails Int Int deriving (Eq,Show)
 data Effect = ProjectRequest ProjectAction | DownloadDocument Int | ReadBrowserClipboard | WriteBrowserClipboard Text | LanguageRequest LanguageAction | RunGit GitAction | ReadMergeBranches | JumpTo FilePath Int Int | ReadPath FilePath | BrowsePath FilePath Text | BrowseDirectories FilePath | ChangeDirectory FilePath | OpenChoice FilePath Text Text | ReadTree FilePath | ExpandTree Int | ReadHelp | RefreshGit FilePath | ReadGitDiff | AskGitCommit | WriteGitCommit Text | SaveDocument Int (Maybe FilePath) (Maybe Command) | ReviewExternal | ResolveConflict Conflict ConflictAction | AgentAction Text [Text] | PermissionAction Text [Text] | DebugAction Text [Text] | SetScreenMode Int | Exit deriving (Eq,Show)
-data Field = Input Text Text Int | CheckBox Text Bool | Radio Text [Text] Int | ListBox Text [Text] Int | FileList [Entry] Int deriving (Eq,Show)
+data Field = Input Text Text Int | CheckBox Text Bool | Radio Text [Text] Int | ListBox Text [Text] Int | FileList [Entry] Int
+  | ReadOnly Text Text
+  | TextArea Text Bool Buffer Selection Int Int deriving (Eq,Show)
 data Purpose = Opening FilePath Text [Entry] | ChangingDirectory FilePath [Entry] | Committing | Saving Int (Maybe Command) | Finding | Replacing | GoingTo | Renaming
   | ProjectLoading Int | ProjectChoices Int Int
   | CodeActionChoices Int Int [Text]
@@ -251,6 +253,7 @@ statusHints d
   | dragOriginal d/=Nothing = [(" ↑↓→← Move  Shift+↑↓→← Resize",Nothing),key "  ↵ Done" V.KEnter [],key "  Esc Cancel" V.KEsc []]
   | Just text<-menuHelp d = [command " F1 Help" Help,(" | "<>text,Nothing)]
   | Just c<-prefix d = [(" Ctrl+"<>T.singleton c<>"- ",Nothing),key " Esc Cancel" V.KEsc []]
+  | Just dg<-dialog d, approvalDialog dg = [key " Tab Next" (V.KChar '\t') [],key "  Alt+A Allow" (V.KChar 'a') [V.MAlt],key "  Alt+D Deny" (V.KChar 'd') [V.MAlt],key "  Esc Deny" V.KEsc []]
   | dialog d/=Nothing = [key " Tab Next" (V.KChar '\t') [],key "  Enter Select" V.KEnter [],key "  Esc Cancel" V.KEsc []]
   | problemsVisible d && problemsFocused d = [key " Enter Source" V.KEnter [],command (if nativeMac d then "  Cmd+C Copy" else "  Ctrl+C Copy") Copy,command "  Copy all" CopyAllMessages]
   | questionActive d = [key " Enter Answer" V.KEnter [],key "  Tab Choices" (V.KChar '\t') [],key "  Esc Cancel" V.KEsc []]
@@ -638,6 +641,8 @@ fieldHeight CheckBox{} = 2
 fieldHeight (Radio _ xs _) = length xs+2
 fieldHeight ListBox{} = 6
 fieldHeight FileList{} = 13
+fieldHeight ReadOnly{} = 1
+fieldHeight (TextArea _ _ b _ _ _) = min 10 (bufferLineCount b+2)
 
 -- Keep the appearance controls visible together in the standard 80x25 mode.
 dialogFieldHeight :: Dialog -> Field -> Int
@@ -646,31 +651,64 @@ dialogFieldHeight _ field = fieldHeight field
 
 -- Shared content geometry keeps drawing, focus scrolling and hit testing aligned.
 -- Preferences: input/screen controls left, appearance controls right; narrow displays stack.
-dialogFieldLayout :: Int -> Dialog -> [Rect]
-dialogFieldLayout w dg
+dialogFieldLayout :: Int -> Int -> Dialog -> [Rect]
+dialogFieldLayout w available dg
   | purpose dg==Settings && w>=54 = column 3 cw before ++ column (5+cw) cw after
   | otherwise = column 3 (max 1 (w-6)) (fields dg)
   where
     (before,after)=break (\f -> case f of Radio "Appearance" _ _ -> True; _ -> False) (fields dg)
     cw=(w-8) `div` 2
-    column x fw fs=zipWith (\y f -> Rect x y fw (dialogFieldHeight dg f))
-      (scanl (+) (2+length (body dg)) (map (dialogFieldHeight dg) fs)) fs
+    column x fw fs=zipWith (\y f -> Rect x y fw (fieldRows f))
+      (scanl (+) (2+length (body dg)) (map fieldRows fs)) fs
+    fieldRows (TextArea _ True _ _ _ _) = max 4 (available-5-length (body dg)-sum [dialogFieldHeight dg f | f<-fields dg,not (editableArea f)])
+    fieldRows f = dialogFieldHeight dg f
 
 dialogRect :: Desktop -> Dialog -> Rect
 dialogRect d dg = Rect ((sw-w) `div` 2) (max 1 ((sh-h) `div` 2)) w h
   where
     (sw,sh) = screenSize d
-    w = min sw 62
-    h = min (sh-2) (max 7 (3+maximum (2+length (body dg):[top r+height r | r<-dialogFieldLayout w dg])))
+    w = if approvalDialog dg then min sw (min (max 20 (sw-4)) 110) else min sw 62
+    h = min (sh-2) (max 7 (3+maximum (2+length (body dg):[top r+height r | r<-dialogFieldLayout w (sh-2) dg])))
 
 fieldRects :: Desktop -> Dialog -> [Rect]
 fieldRects d dg = [r {left=x+left r,top=y+top r-offset} | r<-layout]
   where
     Rect x y w h = dialogRect d dg
-    layout=dialogFieldLayout w dg
+    layout=dialogFieldLayout w h dg
     offset = case drop (focus dg) layout of
       r:_ -> max 0 (min (top r-2) (top r+height r-(h-3)))
       _ -> 0
+
+approvalDialog :: Dialog -> Bool
+approvalDialog dg = case purpose dg of PermissionDialog action -> "approve:" `T.isPrefixOf` action; _ -> False
+
+editableArea :: Field -> Bool
+editableArea (TextArea _ editable _ _ _ _) = editable
+editableArea _ = False
+
+-- The text area uses the ordinary buffer/editor operations in a private view;
+-- it never enters the desktop buffer map, recovery checkpoint or agent inventory.
+textAreaRect :: Rect -> Field -> Rect
+textAreaRect (Rect x y w h) (TextArea _ editable _ _ _ _) =
+  if editable then Rect x (y+1) (max 1 (w-1)) (max 1 (h-2))
+  else Rect (x+labelWidth) y (max 1 (w-labelWidth-1)) (max 1 (h-1))
+  where labelWidth=min 18 (w `div` 3)
+textAreaRect r _ = r
+
+textAreaEdit :: Rect -> (Desktop -> Desktop) -> Field -> Field
+textAreaEdit rect edit field@(TextArea name True b sel row col) =
+  case (activeDocument changed,activeWindow changed) of
+    (Just doc,Just w) -> TextArea name True (documentBuffer doc) (selection w) (scrollRow w) (scrollColumn w)
+    _ -> field
+  where
+    area=textAreaRect rect field
+    base=addDocument Nothing b (initialDesktop (width area+2,height area+4))
+    view=modifyActive (\w -> w {bounds=Rect 0 1 (width area+2) (height area+2),selection=sel,scrollRow=row,scrollColumn=col}) base
+    changed=edit view
+textAreaEdit _ _ field = field
+
+dialogCloseRect :: Desktop -> Dialog -> Rect
+dialogCloseRect d dg = let Rect x y w _=dialogRect d dg in Rect (x+w-5) y 3 1
 
 buttonRects :: Desktop -> Dialog -> [Rect]
 buttonRects d dg = zipWith (\bx label -> Rect bx (y+h-3) (T.length label+4) 1) starts (buttons dg)
@@ -1515,20 +1553,27 @@ starPrefix _ _ d = (d,[])
 
 dialogEvent :: V.Event -> Dialog -> Desktop -> (Desktop,[Effect])
 dialogEvent ev dg d = case ev of
+  V.EvKey (V.KFun 3) mods | V.MAlt `elem` mods, PermissionDialog{}<-purpose dg -> dialogEvent (V.EvKey V.KEsc []) dg d
   V.EvKey V.KEsc _ | PermissionDialog action<-purpose dg -> (d {dialog=Nothing,buttonHover=Nothing,buttonPressed=Nothing},[PermissionAction action ["1"]])
   V.EvKey V.KEsc _ -> (d {dialog=Nothing,buttonHover=Nothing,buttonPressed=Nothing},[])
-  V.EvKey (V.KChar c) mods | V.MCtrl `elem` mods || V.MAlt `elem` mods,
+  V.EvKey (V.KChar c) mods | (V.MCtrl `elem` mods && not areaFocused && not (approvalDialog dg)) || V.MAlt `elem` mods,
     Just i<-findIndex (==Just (toLower c)) (buttonMnemonics dg) -> submitDialog i dg d
   V.EvKey (V.KChar '\t') mods -> setFocus (focus dg + if V.MShift `elem` mods then -1 else 1)
   V.EvKey V.KBackTab _ -> setFocus (focus dg-1)
+  V.EvKey key mods | areaFocused -> areaKey key mods
+  V.EvKey V.KEnter _ | approvalDialog dg, focus dg<count -> (d,[])
   V.EvKey V.KEnter _ -> submitDialog (if focus dg>=count then focus dg-count else 0) dg d
   V.EvKey k mods | focus dg<count -> updateField (fieldKey k mods)
   V.EvKey (V.KChar ' ') _ -> submitDialog (focus dg-count) dg d
   V.EvKey V.KLeft _ -> setFocus (focus dg-1)
   V.EvKey V.KRight _ -> setFocus (focus dg+1)
+  V.EvPaste bytes | areaFocused -> case TE.decodeUtf8' bytes of
+    Right text -> updateField (textAreaEdit focusedRect (insertText (T.filter (\c -> textInputChar c || c=='\n' || c=='\r' || c=='\t') text)))
+    Left _ -> (d,[])
   V.EvPaste bytes | focus dg<count -> case TE.decodeUtf8' bytes of
     Right text -> updateField (\f -> case f of Input label value pos -> let clean=T.filter textInputChar text in Input label (T.take pos value<>clean<>T.drop pos value) (pos+T.length clean); _ -> f)
     Left _ -> (d,[])
+  V.EvMouseDown x y V.BLeft _ | approvalDialog dg, inside (dialogCloseRect d dg) x y -> submitDialog 1 dg d
   V.EvMouseDown x y V.BLeft _ -> case findIndex (\r -> inside r x y) (buttonRects d dg) of
     Just i -> (d {buttonHover=Just i,buttonPressed=Just i},[])
     Nothing -> case findIndex (\r -> inside r x y && y >= top (dialogRect d dg)+2 && y < top (dialogRect d dg)+height (dialogRect d dg)-3) (fieldRects d dg) of
@@ -1539,9 +1584,18 @@ dialogEvent ev dg d = case ev of
                     click (CheckBox label b) = CheckBox label (not b)
                     click (Radio label xs _) = Radio label xs (max 0 (min (length xs-1) (y-t-1)))
                     click (ListBox label xs selected) = ListBox label xs (max 0 (min (length xs-1) (max 0 (selected-3)+y-t-1)))
+                    click f@(TextArea name editable b sel row col) = let area=textAreaRect (fieldRects d dg !! i) f
+                                                                 in if x==left area+width area && y>=top area && y<top area+height area then
+                                                                   TextArea name editable b sel ((y-top area)*max 0 (bufferLineCount b-height area) `div` max 1 (height area-1)) col
+                                                                 else if inside area x y then
+                                                                   let line=max 0 (min (bufferLineCount b-1) (row+y-top area))
+                                                                       pos=bufferLineOffset b line+columnOffset (bufferLineAt b line) (col+x-left area)
+                                                                   in TextArea name editable b (Selection pos pos) row col
+                                                                   else f
+                    click f = f
                 in updateDialog dg {focus=i,fields=replaceAt i (click (fields dg !! i)) (fields dg)}
-  V.EvMouseDown _ _ V.BScrollDown _ -> updateField (fieldKey V.KDown [])
-  V.EvMouseDown _ _ V.BScrollUp _ -> updateField (fieldKey V.KUp [])
+  V.EvMouseDown x y V.BScrollDown _ -> wheel x y 3
+  V.EvMouseDown x y V.BScrollUp _ -> wheel x y (-3)
   V.EvMouseUp x y button | button==Nothing || button==Just V.BLeft ->
     let released=d {buttonPressed=Nothing}
     in case buttonPressed d of
@@ -1550,6 +1604,22 @@ dialogEvent ev dg d = case ev of
   _ -> (d,[])
   where
     count=length (fields dg)
+    areaFocused=case drop (focus dg) (fields dg) of TextArea{}:_ -> True; _ -> False
+    focusedRect=fromMaybe (Rect 0 0 1 1) (listToMaybe (drop (focus dg) (fieldRects d dg)))
+    areaKey (V.KChar c) mods | V.MCtrl `elem` mods, c `elem` ['c','x','v'], f@(TextArea _ True b sel _ _)<-fields dg !! focus dg =
+      let copied=selectedText sel b
+          edited=case c of 'x' -> textAreaEdit focusedRect (insertText "") f; 'v' -> textAreaEdit focusedRect (insertText (clipboard d)) f; _ -> f
+      in (d {clipboard=if c=='v' then clipboard d else copied,dialog=Just dg {fields=replaceAt (focus dg) edited (fields dg)}},[])
+    areaKey key mods = updateField $ \f -> if editableArea f
+      then textAreaEdit focusedRect (case key of
+        V.KChar c | V.MCtrl `elem` mods, Just cmd<-lookup c [('z',Undo),('y',Redo),('a',SelectAll)] -> fst . runCommand cmd
+        _ -> editorKey key mods) f
+      else clampArea focusedRect (fieldKey key mods f)
+    clampArea rect f@(TextArea name editable b sel row col) = TextArea name editable b sel (min row (max 0 (bufferLineCount b-height (textAreaRect rect f)))) col
+    clampArea _ f = f
+    wheel x y delta = case findIndex (\r -> inside r x y && y<top (dialogRect d dg)+height (dialogRect d dg)-3) (fieldRects d dg) of
+      Just i | f@TextArea{}<-fields dg !! i -> updateDialog dg {focus=i,fields=replaceAt i (clampArea (fieldRects d dg !! i) (scrollTextArea delta f)) (fields dg)}
+      _ -> updateField (fieldKey (if delta>0 then V.KDown else V.KUp) [])
     setFocus i = updateDialog dg {focus=i `mod` (count+length (buttons dg))}
     updateDialog new = (d {dialog=Just new},[])
     updateField f | focus dg<count =
@@ -1565,6 +1635,10 @@ dialogEvent ev dg d = case ev of
 replaceAt :: Int -> a -> [a] -> [a]
 replaceAt i x xs = take i xs ++ [x] ++ drop (i+1) xs
 
+scrollTextArea :: Int -> Field -> Field
+scrollTextArea delta (TextArea name editable b sel row col) = TextArea name editable b sel (max 0 (min (bufferLineCount b-1) (row+delta))) col
+scrollTextArea _ f = f
+
 fieldKey :: V.Key -> [V.Modifier] -> Field -> Field
 fieldKey key mods field = case field of
   Input label value pos -> let set s p = Input label s (max 0 (min (T.length s) p)) in case key of
@@ -1577,6 +1651,12 @@ fieldKey key mods field = case field of
     V.KChar 'u' | V.MCtrl `elem` mods -> set "" 0
     V.KChar c | (null mods || mods==[V.MShift]) && textInputChar c -> set (T.take pos value<>T.singleton c<>T.drop pos value) (pos+1)
     _ -> field
+  TextArea name editable b sel row col -> case key of
+    V.KLeft -> TextArea name editable b sel row (max 0 (col-1))
+    V.KRight -> TextArea name editable b sel row (min (bufferLength b) (col+1))
+    V.KHome -> TextArea name editable b sel 0 0
+    V.KEnd -> TextArea name editable b sel (max 0 (bufferLineCount b-1)) col
+    _ -> scrollTextArea (case key of V.KUp -> -1; V.KDown -> 1; V.KPageUp -> -8; V.KPageDown -> 8; _ -> 0) field
   CheckBox label value | key==V.KChar ' ' -> CheckBox label (not value)
   Radio label values chosen -> Radio label values (choose values chosen)
   FileList values chosen -> FileList values (max 0 (min (length values-1) (case key of V.KLeft -> chosen-8; V.KRight -> chosen+8; V.KPageUp -> chosen-16; V.KPageDown -> chosen+16; V.KHome -> 0; V.KEnd -> length values-1; _ -> choose values chosen)))
@@ -1624,7 +1704,8 @@ submitDialog button dg original
     DebugDialog action -> (d,[DebugAction action (T.pack (show button) : values ++
       [if value then "true" else "false" | CheckBox _ value <- fields dg] ++
       [T.pack (show i) | ListBox _ _ i <- fields dg])])
-    PermissionDialog action -> (d,[PermissionAction action (T.pack (show button) : values ++
+    PermissionDialog action -> (if button==0 && approvalDialog dg then original else d,[PermissionAction action (T.pack (show button) : values ++
+      [contents b | TextArea _ True b _ _ _ <- fields dg] ++
       [T.pack (show i) | Radio _ _ i <- fields dg] ++
       [T.pack (show i) | ListBox _ _ i <- fields dg])])
     AgentDialog action -> (d,[AgentAction action (T.pack (show button) : values ++

@@ -2,8 +2,11 @@
 -- Capture actual editor commands over this checkout through the Metal frontend.
 -- Run from the repository root; see docs/contributing.md#documentation-screenshots.
 import Control.Monad (forM_, when)
+import Data.Aeson (object, (.=))
 import qualified Data.Text as T
-import THC.Edit.Buffer (newBuffer, Selection(..))
+import THC.Edit.Buffer (newBuffer, Selection(..), revision, contents)
+import THC.Edit.MCPPermissions (withPermissionsAt, permissionCall, policyEffects)
+import THC.Edit.WorkspaceFilesMCP (fileTools, fileTool)
 import qualified Graphics.Vty as V
 import System.Directory
 import System.Environment (getArgs, lookupEnv, setEnv, unsetEnv)
@@ -36,8 +39,8 @@ main = do
   setEnv "thc_edit_datadir" root
   unsetEnv "THC_ROOT"
   setEnv "THC_EDIT_CAPTURE_EXIT" "1"
-  withConversationAt root $ \conversation -> withDebugger $ \debugger -> do
-    let effects = debuggerEffects debugger (conversationEffects conversation applyEffects)
+  withConversationAt root $ \conversation -> withDebugger $ \debugger -> withPermissionsAt (scratch </> "permissions.toml") fileTools $ \permissions -> do
+    let effects = policyEffects permissions (debuggerEffects debugger (conversationEffects conversation applyEffects))
         command = Driver.command effects
         key k mods = Driver.input effects (V.EvKey k mods)
         typeText = Driver.typeText effects
@@ -68,13 +71,21 @@ main = do
           wide <- command ToggleTree next
           full <- command Zoom (fst (handleEvent (V.EvResize 100 24) wide))
           pure full
+        permissionDiff d = case (activeWindow d,activeDocument d) of
+          (Just w,Just doc) | first:rest<-take 6 (T.lines (contents (documentBuffer doc))) -> do
+            let patch=T.unlines (["--- a/src/THC/Edit/Buffer.hs","+++ b/src/THC/Edit/Buffer.hs","@@ -1,6 +1,7 @@"] ++
+                  ["-"<>first,"+{-# LANGUAGE MultiParamTypeClasses #-}","+{-# LANGUAGE OverloadedStrings #-}"] ++ map (" "<>) rest)
+            fst <$> permissionCall permissions (fileTool applyEffects) d "buffer_apply_diff"
+              (object ["bufferId" .= bufferId w,"revision" .= revision (documentBuffer doc),"diff" .= patch])
+          _ -> fail "Permission screenshot requires the open source buffer"
         start = (initialDesktop (100,32))
           {videoMode=Just 3, crtFilter=True, pixelateUnicode=True, blinkCursor=False, streamerMode=True, nativeMac=True}
     (_, loaded) <- applyEffects start [ReadPath root, ReadPath (root </> "src/THC/Edit/Buffer.hs")]
     -- Start on a short source declaration, with the package visible behind it.
     let desktop = modifyActive (\w -> w {scrollRow=23}) loaded
         scenes =
-          [ ("conversation", chat)
+          [ ("permission-diff", permissionDiff)
+          , ("conversation", chat)
           , ("debug-step", debug)
           , ("file-menu", pure . (\d -> d {menu=Just (0,1)}))
           , ("split", \d -> command Zoom d >>= command SplitHorizontal >>= pure . modifyActive (\w -> w {scrollRow=45}))

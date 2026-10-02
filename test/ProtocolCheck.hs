@@ -36,6 +36,15 @@ checks = do
   check "unknown named menu is rejected" (either (const True) (const False) (menu ["command" .= ("future-command"::T.Text)]))
   check "legacy positional menus cannot execute a different command" (case menu ["index" .= (0::Int)] of Right input -> applyInput input d==(d,[]); _ -> False)
   check "legacy menu enabled flags stay disabled" (parseMaybe (withObject "metadata" (.: "menus")) (object (frameMetadata "/" d))==Just (replicate (length protocolCommands) False))
+  let review=d {dialog=Just (Dialog "Review" (PermissionDialog "approve:1") [TextArea "diff" True (newBuffer "private diff") (Selection 0 7) 0 0] 0 ["Allow once","Deny"] [])}
+      selected=parseMaybe (withObject "metadata" (.: "selection")) (object (frameMetadata "/" review))::Maybe T.Text
+      (copied,copyEffects)=applyInput (BrowserCommand Copy) review
+      (cut,cutEffects)=applyInput (BrowserCommand Cut) review
+      text desktop=case editableDialogField desktop of Just (TextArea _ _ b _ _ _) -> contents b; _ -> ""
+  check "human browser clipboard reads only focused review selection" (selected==Just "private" && clipboard copied=="private" && copyEffects==[WriteBrowserClipboard "private"])
+  check "human browser cut changes only review text" (text cut==" diff" && activeText cut==activeText d && cutEffects==[WriteBrowserClipboard "private"])
+  check "browser paste requests the system clipboard for the review" (applyInput (BrowserCommand THC.Edit.Model.Paste) review==(review,[ReadBrowserClipboard]))
+  check "agent browser commands cannot inspect or edit human review" (all (\input->case applyGuestInput input review of Left _ -> True; _ -> False) [BrowserCommand Copy,BrowserCommand Cut,BrowserCommand SelectAll,THC.Edit.Protocol.Paste "bad"])
   let primary=selectConversationView "" "Primary" (initialDesktop (80,25))
       drafted=primary {composerBuffer=newBuffer "unsent",composerSelection=Selection 6 6}
       child=selectConversationView "child" "Worker" drafted

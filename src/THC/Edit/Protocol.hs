@@ -24,7 +24,7 @@ import System.IO (Handle, hFlush)
 import THC.Edit.GuestAccess
 import THC.Edit.Model hiding (Paste)
 import qualified THC.Edit.Model as Model
-import THC.Edit.Buffer (dirty, newBuffer, newByteBuffer)
+import THC.Edit.Buffer (dirty, newBuffer, newByteBuffer, selectedText)
 import THC.Edit.Font
 import THC.Edit.Render (renderDesktop)
 import THC.Edit.Unicode (displayOpsForPic, graphemes, clusterWidth)
@@ -115,6 +115,10 @@ applyInputUnchecked :: WebInput -> Desktop -> (Desktop,[Effect])
 applyInputUnchecked input d = case input of
   SuspendSession -> (d,[]) -- The session owner checkpoints and stops, not the UI model.
   SystemTheme value -> (d {systemDark=value},[])
+  BrowserCommand Model.Paste | editableDialogField d/=Nothing -> (d,[ReadBrowserClipboard])
+  BrowserCommand cmd | editableDialogField d/=Nothing, Just key<-lookup cmd [(Copy,'c'),(Cut,'x'),(SelectAll,'a'),(Undo,'z'),(Redo,'y')] ->
+    let (next,effects)=handleEvent (V.EvKey (V.KChar key) [V.MCtrl]) d
+    in (next,effects++[WriteBrowserClipboard (clipboard next) | cmd `elem` [Copy,Cut]])
   BrowserCommand cmd | dialog d/=Nothing -> (d,[WriteBrowserClipboard "" | cmd `elem` [Copy,Cut]])
                      | otherwise -> runCommand cmd d
   MenuCommand (Just cmd) | dialog d==Nothing && commandEnabled d cmd -> runCommand cmd d
@@ -212,12 +216,19 @@ protocolCommands = [cmd | (_,_,items)<-menus, MenuItem _ _ cmd<-items]
 protocolMenuCommands :: [(T.Text,Command)]
 protocolMenuCommands = [(T.pack (show cmd),cmd) | cmd<-protocolCommands]
 
+editableDialogField :: Desktop -> Maybe Field
+editableDialogField d=case dialog d of
+  Just dg | field@TextArea{}:_<-drop (focus dg) (fields dg),editableArea field -> Just field
+  _ -> Nothing
+
 frameMetadata :: FilePath -> Desktop -> [Pair]
 frameMetadata cwd d =
   ["title" .= applicationTitle cwd d,"size" .= screenSize d,"mode" .= videoMode d,
    "dirty" .= webDirty d,"cursor" .= cursor,"blink" .= blinkCursor d,
    "crt" .= crtFilter d,"pixelated" .= pixelateUnicode d,
-   "selection" .= (if dialog d/=Nothing then "" else clipboard (fst (runCommand Copy d {browserFrontend=False}))),
+   "selection" .= (case editableDialogField d of
+     Just (TextArea _ True b sel _ _) -> selectedText sel b
+     _ -> if dialog d/=Nothing then "" else clipboard (fst (runCommand Copy d {browserFrontend=False}))),
    "terminal" .= (activeTerminal d/=Nothing && dialog d==Nothing && menu d==Nothing),
    "wordstar" .= wordStar d,"menus" .= replicate (length protocolCommands) False,
    "menuState" .= [(ident,(dialog d==Nothing || cmd==Model.Paste) && commandEnabled d cmd) | (ident,cmd)<-protocolMenuCommands]]

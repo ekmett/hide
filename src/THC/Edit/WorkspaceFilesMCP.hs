@@ -1,5 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
-module THC.Edit.WorkspaceFilesMCP (fileTools, fileToolNames, fileTool, applyUnifiedDiff) where
+module THC.Edit.WorkspaceFilesMCP (fileTools, fileToolNames, fileTool, applyUnifiedDiff, applyPatch) where
 
 import Control.Exception (IOException, bracket, try)
 import Control.Monad (forM, unless, when)

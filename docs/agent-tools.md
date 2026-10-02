@@ -391,6 +391,21 @@ project defaults → global configuration. Project `thc.toml` can set defaults
 and agent context, but cannot override global permissions. See
 [configuration](configuration.md).
 
+Prompted requests show each argument as a labeled value; multiline values have
+scrollable read-only boxes. `buffer_apply_diff` instead opens a colored, editable
+diff with its file, buffer ID and expected revision above it. The human can edit
+with the usual selection, clipboard and undo keys, then choose **Allow once** or
+**Deny** below the diff (`Alt+A` / `Alt+D`; Escape or close denies). Enter in the
+diff inserts a newline. Agents cannot read or operate approval controls.
+
+[![Editable diff approval with file metadata and Allow/Deny actions.](site/screenshots/permission-diff.png)](site/screenshots/permission-diff.png)
+
+Allow validates the reviewed diff against the current buffer with the same strict,
+atomic patch checks. Invalid or stale edits remain open with an error and apply
+nothing. A successful prompted patch returns `appliedDiff`, `userModified` and
+the resulting `revision`, so the requesting agent sees the human's actual edit.
+The buffer remains unsaved; approval never writes the file to disk.
+
 A pending approval can be cancelled; cancellation does not undo an operation
 already executed. Long-running questions, HLS and debugger replies release the
 desktop lock while waiting. After a disconnect or uncertain reply, inspect current

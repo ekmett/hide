@@ -11,6 +11,7 @@ import qualified Data.Map.Strict as M
 import Data.Maybe (fromMaybe)
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
+import qualified Data.Text.Encoding as TE
 import qualified Graphics.Vty as V
 import System.Directory
 import System.FilePath ((</>))
@@ -20,9 +21,13 @@ import System.Timeout (timeout)
 import THC.Edit.Buffer
 import THC.Edit.MCPPermissions
 import THC.Edit.Model
+import THC.Edit.Render (snapshot, snapshotHtml)
+import THC.Edit.GuestAccess (readableAt, guestKeyboardAllowed, guestEffectsAllowed)
+import THC.Edit.WorkspaceFilesMCP (fileTools, fileTool)
 
 checks :: IO ()
 checks=do
+  reviewChecks
   configChecks
   projectConfigChecks
   agentLimitChecks
@@ -47,7 +52,16 @@ checks=do
       (_,readonly)<-permissionCall runtime execute base "read" (object [])
       first<-readonly
       check "read-only tools default to Enable" (not (isLeft first))
-      (prompted,pending)<-permissionCall runtime execute base "mutate" (object ["revision" .= (0::Int)])
+      (prompted,pending)<-permissionCall runtime execute base "mutate" (object ["revision" .= (0::Int),"command" .= T.unlines ["line "<>T.pack (show n) | n<-[1..20::Int]]])
+      let readOnlyReview=prompted {dialog=fmap (\dg->dg {focus=1}) (dialog prompted)}
+          afterTyping=fst (handleEvent (V.EvKey (V.KChar 'x') []) readOnlyReview)
+          (_,selectEffects)=handleEvent (V.EvKey (V.KChar 'a') [V.MCtrl]) prompted
+          scrolled=fst (handleEvent (V.EvKey V.KEnd []) readOnlyReview)
+      check "Ctrl+A on read-only metadata cannot approve" (null selectEffects)
+      check "generic arguments are labeled read-only multiline fields" (case dialog afterTyping of
+        Just dg -> any (\f->case f of TextArea "command" False b _ _ _ -> "line 1\n" `T.isPrefixOf` contents b; _ -> False) (fields dg) &&
+          fmap fields (dialog afterTyping)==fmap fields (dialog readOnlyReview) && "line 20" `T.isInfixOf` snapshot scrolled
+        _ -> False)
       calls<-readIORef seen
       check "mutations default to Prompt without executing" (length calls==1 && maybe False ((=="Agent permission").dialogTitle) (dialog prompted))
       executed<-withAsync pending $ \worker -> do
@@ -111,6 +125,99 @@ checks=do
     closed<-mapM (timeout 1000000) pendingAfterClose
     check "session shutdown completes every pending waiter" (all (maybe False isLeft) closed)
   putStrLn "MCP permission checks passed"
+
+reviewChecks :: IO ()
+reviewChecks=bracket temporary removePathForcibly $ \directory ->
+  withPermissionsAt (directory </> "review.toml") fileTools $ \runtime -> do
+    let core d _=pure (False,d)
+        base=addDocument Nothing (newBuffer "old\n") (initialDesktop (100,32))
+        bid=fromMaybe (error "missing buffer") (bufferId <$> activeWindow base)
+        patch="@@ -1 +1 @@\n-old\n+agent\n"
+        revised="@@ -1 +1 @@\n-old\n+human λ\n"
+        args=object ["bufferId" .= bid,"revision" .= (0::Int),"diff" .= (patch::T.Text)]
+        request d=permissionCall runtime (fileTool core) d "buffer_apply_diff" args
+        input event d=let (next,fx)=handleEvent event d in snd <$> policyEffects runtime core next fx
+        key k mods=input (V.EvKey k mods)
+        replace text d=key (V.KChar 'a') [V.MCtrl] d >>= input (V.EvPaste (TE.encodeUtf8 text))
+        allow=key (V.KChar 'a') [V.MAlt]
+        deny=key V.KEsc []
+        area d=case dialog d of Just dg -> [(b,sel,sr,sc) | TextArea _ True b sel sr sc<-fields dg]; _ -> []
+        areaText d=case area d of (b,_,_,_):_->contents b; _->""
+        isLeft (Left _)=True; isLeft _=False
+    (shown,pending)<-request base
+    let image=snapshot shown
+        colors=snapshotHtml shown
+        dg=fromMaybe (error "missing review") (dialog shown)
+        rect=dialogRect shown dg
+    check "approval shows object fields and unescaped diff lines" (all (`T.isInfixOf` image) ["bufferId:","revision:","File:","-old","+agent","Allow once","Deny"])
+    check "diff review colors added and removed lines" ("rgb(85,255,85)" `T.isInfixOf` colors && "rgb(255,85,85)" `T.isInfixOf` colors)
+    check "approval controls and edited text are private to the human" (not (guestKeyboardAllowed shown) && not (readableAt shown 10 (snd (screenSize shown)-1)) && not (guestEffectsAllowed [PermissionAction "approve:1" ["0",revised]]) && and [not (readableAt shown x y) | x<-[left rect..left rect+width rect-1],y<-[top rect..top rect+height rect-1]])
+    edited<-replace revised shown
+    check "human edits private diff without changing target buffer" (areaText edited==revised && activeText edited=="old\n")
+    undone<-key (V.KChar 'z') [V.MCtrl] edited
+    check "diff editor undo is independent of target history" (areaText undone==patch && activeText undone=="old\n")
+    restored<-key (V.KChar 'y') [V.MCtrl] undone
+    applied<-allow restored
+    result<-pending
+    check "Allow applies human patch and reports exact applied diff" (activeText applied=="human λ\n" && dialog applied==Nothing &&
+      (either (const Nothing) (field "appliedDiff") result::Maybe T.Text)==Just revised &&
+      (either (const Nothing) (field "userModified") result::Maybe Bool)==Just True &&
+      (either (const Nothing) (field "revision") result::Maybe Int)==Just 1)
+    (bad,badPending)<-request base
+    invalid<-replace "not a diff" bad >>= allow
+    check "invalid human diff retains review and does not edit target" (dialog invalid/=Nothing && areaText invalid=="not a diff" && activeText invalid=="old\n" && "Diff not applied:" `T.isInfixOf` snapshot invalid)
+    _<-deny invalid
+    _<-badPending
+    (retry,retryPending)<-request base
+    invalidAgain<-replace "bad" retry >>= allow
+    fixed<-replace revised invalidAgain >>= allow
+    fixedResult<-retryPending
+    check "correcting invalid diff can approve same pending request" (activeText fixed=="human λ\n" && not (isLeft fixedResult))
+    (partial,partialPending)<-request base
+    atomic<-replace "@@ -1 +1 @@\n-old\n+first\n@@ -9 +9 @@\n-missing\n+second\n" partial >>= allow
+    check "a later invalid hunk cannot partially apply the human patch" (activeText atomic=="old\n" && dialog atomic/=Nothing)
+    _<-deny atomic
+    _<-partialPending
+    (stale,stalePending)<-request base
+    let changed=stale {buffers=M.adjust (\doc->doc {documentBuffer=replaceBuffer False "newer\n" (documentBuffer doc)}) bid (buffers stale)}
+    rejected<-allow changed
+    check "stale target retains review without applying any hunk" (dialog rejected/=Nothing && activeText rejected=="newer\n" && "revision changed" `T.isInfixOf` snapshot rejected)
+    _<-deny rejected
+    check "Deny after stale rejection resolves request" . isLeft =<< stalePending
+    (old,oldPending)<-request base
+    _<-timeout 10000 oldPending
+    (replacement,replacementPending)<-request base
+    let oldDialog=fromMaybe (error "missing cancelled dialog") (dialog old)
+        (obsolete,oldEffects)=submitDialog 0 oldDialog replacement
+    (_,stillWaiting)<-policyEffects runtime core obsolete oldEffects
+    check "cancelled dialog cannot approve its replacement ticket" (dialog stillWaiting==dialog replacement && activeText stillWaiting=="old\n")
+    replacementApplied<-allow stillWaiting
+    replacementResult<-replacementPending
+    check "replacement retains its own decision and original diff" (activeText replacementApplied=="agent\n" && (either (const Nothing) (field "userModified") replacementResult::Maybe Bool)==Just False)
+    (cancelled,cancelPending)<-request base
+    _<-key (V.KFun 3) [V.MAlt] cancelled
+    check "close shortcut denies pending patch" . isLeft =<< cancelPending
+    (closing,closePending)<-request base
+    let closeRect=maybe (error "missing approval") (dialogCloseRect closing) (dialog closing)
+    _<-input (V.EvMouseDown (left closeRect+1) (top closeRect) V.BLeft []) closing
+    check "review close button denies without applying" . isLeft =<< closePending
+    (entered,enterPending)<-request base
+    newline<-key V.KEnter [] entered
+    check "Enter edits diff rather than implicitly approving" (dialog newline/=Nothing && T.length (areaText newline)==T.length patch+1 && activeText newline=="old\n")
+    _<-deny newline
+    _<-enterPending
+    (protected,protectedPending)<-request base
+    let private=protected {buffers=M.adjust (\doc->doc {documentLabel=Just "Conversation"}) bid (buffers protected)}
+    privateResult<-allow private
+    check "approval does not bypass protected-buffer guards" (activeText privateResult=="old\n" && dialog privateResult/=Nothing)
+    _<-deny privateResult
+    _<-protectedPending
+    let long=T.unlines ["+line "<>T.pack (show n) | n<-[1..70::Int]]
+        large=shown {dialog=fmap (\view->view {fields=[TextArea "diff" True (newBuffer long) (Selection 0 0) 0 0],focus=0}) (dialog shown)}
+    bottom<-key V.KEnd [V.MCtrl] large
+    check "long diff scrolls to final lines and retains bottom actions" ("+line 70" `T.isInfixOf` snapshot bottom && all (`T.isInfixOf` snapshot bottom) ["Allow once","Deny"])
+    let (narrow,_)=handleEvent (V.EvResize 60 18) bottom
+    check "small screen keeps approval buttons in bounds" (case dialog narrow of Just view -> all (\r->top r>=1 && top r<snd (screenSize narrow)-1) (buttonRects narrow view); _->False)
 
 configChecks :: IO ()
 configChecks=bracket temporary removePathForcibly $ \directory -> do

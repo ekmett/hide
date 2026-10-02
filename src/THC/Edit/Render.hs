@@ -102,6 +102,10 @@ renderDesktop d = flattenPicture (screenSize d) ((V.picForLayers (privacyLayers+
       Just dg -> case drop (focus dg) (zip (fieldRects d dg) (fields dg)) of
         (Rect x y w _,Input _ value p):_ -> let offset=max 0 (displayColumn value p-w+1)
                                          in V.Cursor (x+displayColumn value p-offset) (y+1)
+        (rect,f@(TextArea _ True b sel sr sc)):_ ->
+          let area=textAreaRect rect f; (line,col)=bufferLineColumn b (caret sel)
+              cx=left area+displayColumn (bufferLineAt b line) col-sc; cy=top area+line-sr
+          in if inside area cx cy && cy<top (dialogRect d dg)+height (dialogRect d dg)-3 then V.Cursor cx cy else V.NoCursor
         _ -> V.NoCursor
       Nothing | menu d/=Nothing || contextMenu d/=Nothing || problemsFocused d || maybe False treeFocused (sideTree d) -> V.NoCursor
       Nothing -> case (activeWindow d,activeDocument d) of
@@ -217,10 +221,13 @@ windowLayers d active w =
     renderLine n=V.cropRight contentWidth (V.translateX (negate (scrollColumn w)) (styledImage (darkAppearance d) selectable (lineColor n) active (selection w) (bufferLineOffset b n) (fromMaybe [] (atMay styledLines n))) V.<|> V.charFill base ' ' contentWidth 1)
 
     lineColor n = case documentLabel doc of
-      Just "Git diff" -> let line=bufferLineAt b n in Just (attr (if "+" `T.isPrefixOf` line then V.RGBColor 85 255 85 else if "-" `T.isPrefixOf` line then V.RGBColor 255 85 85 else if "@@" `T.isPrefixOf` line then cyan else yellow) blue)
+      Just "Git diff" -> Just (diffLineAttr (bufferLineAt b n))
       Just _ | useStyles -> Nothing
       Just _ -> Just (attr yellow blue)
       Nothing -> Nothing
+
+diffLineAttr :: Text -> V.Attr
+diffLineAttr line=attr (if "+" `T.isPrefixOf` line then V.RGBColor 85 255 85 else if "-" `T.isPrefixOf` line then V.RGBColor 255 85 85 else if "@@" `T.isPrefixOf` line then cyan else yellow) blue
 
 atMay :: [a] -> Int -> Maybe a
 atMay xs n = case drop n xs of a:_ -> Just a; [] -> Nothing
@@ -323,7 +330,7 @@ bottomLayers :: Desktop -> [V.Image]
 bottomLayers d
   | not (bottomVisible d) || height r<2 = []
   | M.null (dockedTerminals d) = problemsLayers d
-  | otherwise = tabs++controls++[place 0 y (label frame (T.replicate (width r) "═"))]++content
+  | otherwise = tabs++controls++[place 0 y (label frame ("╔"<>T.replicate (max 0 (width r-2)) "═"<>"╗"))]++content
   where
     r=problemsRect d; y=top r
     frame=attr white blue
@@ -363,6 +370,7 @@ contextLayers d (r@(Rect x y w h),chosen) =
 dialogLayers :: Desktop -> Dialog -> [V.Image]
 dialogLayers d dg =
   [place (x+max 1 ((w-T.length title) `div` 2)) y (label (attr white gray) title)]
+  ++ [place (left r) (top r) (label (attr white gray) "[x]") | approvalDialog dg,let r=dialogCloseRect d dg]
   ++ [place (bx+if pushed i then 1 else 0) by (V.cropRight bw (buttonImage i name)) | (i,(Rect bx by bw _,name))<-zip [0..] (zip (buttonRects d dg) (buttons dg))]
   ++ concat [buttonShadow gray r | (i,r)<-zip [0..] (buttonRects d dg), not (pushed i)]
   ++ concat [fieldLayer i r f | (i,(r,f))<-zip [0..] (zip (fieldRects d dg) (fields dg))]
@@ -382,7 +390,7 @@ dialogLayers d dg =
         normal=attr (if focus dg==length (fields dg)+i then white else black) bg
         mnemonic=fromMaybe Nothing (atMay (buttonMnemonics dg) i)
         pos=fromMaybe (T.length name) (mnemonic >>= \c -> T.findIndex ((==c) . toLower) name)
-    fieldLayer i (Rect fx fy fw _) field
+    fieldLayer i rect@(Rect fx fy fw fh) field
       | fy>=y+h-3 = []
       | otherwise = [place fx (max (y+2) fy) (V.cropBottom (max 0 (y+h-3-max (y+2) fy)) (V.translateY (min 0 (fy-y-2)) image))]
       where
@@ -391,6 +399,19 @@ dialogLayers d dg =
         image=case field of
           Input name value p -> let offset=if focus dg==i then max 0 (displayColumn value p-fw+1) else 0
                                in V.vertCat [row paper fw name,V.cropRight fw (V.translateX (negate offset) (label inputColor value) V.<|> V.charFill inputColor ' ' fw 1)]
+          ReadOnly name value -> let lw=min 18 (fw `div` 3) in row a lw (name<>":") V.<|> row paper (fw-lw) value
+          TextArea name editable b sel sr sc ->
+            let area=textAreaRect rect field
+                pane=attr white blue
+                line n=V.cropRight (width area) (V.translateX (negate sc)
+                  (styledImage False (const True) (Just (if editable then diffLineAttr (bufferLineAt b n) else pane))
+                    (focus dg==i && editable) sel (bufferLineOffset b n) [(c,Plain) | c<-T.unpack (bufferLineAt b n)])
+                  V.<|> V.charFill pane ' ' (width area) 1)
+                thumb=sr*max 0 (height area-1) `div` max 1 (bufferLineCount b-height area)
+                content=V.vertCat [line n V.<|> label (attr blue scrollCyan) (if n-sr==thumb then "■" else "│") | n<-[sr..sr+height area-1]]
+                position=T.pack (show (sr+1))<>"/"<>T.pack (show (bufferLineCount b))<>"  ← → ↑ ↓ PgUp PgDn"
+            in if editable then V.vertCat [row paper fw (name<>"  (editable)"),content,row paper fw position]
+               else (row paper (left area-fx) (name<>":") V.<-> V.charFill paper ' ' (left area-fx) (max 0 (fh-1))) V.<|> V.vertCat [content,row paper (fw-(left area-fx)) position]
           CheckBox name checked -> row a fw ((if checked then "[X] " else "[ ] ")<>name)
           Radio name values chosen -> V.vertCat (row paper fw name:[row (if focus dg==i && n==chosen then selected else paper) fw ((if n==chosen then "(●) " else "( ) ")<>v) | (n,v)<-zip [0..] values])
           FileList entries chosen ->
