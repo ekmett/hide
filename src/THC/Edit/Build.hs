@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 module THC.Edit.Build
-  (Toolchain(..), BuildAction(..), BuildConfig(..), loadBuildConfig, resolveBuildRoot, buildSource, buildPlan, testPlan, buildConfigValue, parseBuildConfig) where
+  (Toolchain(..), BuildAction(..), BuildConfig(..), loadBuildConfig, isProject, resolveBuildRoot, buildSource, buildPlan, testPlan, buildConfigValue, parseBuildConfig) where
 
 import Control.Exception (IOException, try)
 import Data.Aeson
@@ -94,7 +94,7 @@ buildPlan action config root source = do
     THC -> pure (Right [(exe,[case action of Compile -> "acquire"; Make -> "acquire"; Run -> "run"]++chosen++
       ["--project-dir",root]++optional "--thc-root" (buildTHCRoot config)++
       (if action==Run then optional "--runtime" (buildRuntime config)++["--" | not (null args)]++args else []))])
-    GHC | project -> pure (Right [("cabal",[if action==Run then "run" else "build","--with-compiler="++exe]++chosen++
+    GHC | project -> pure (Right [("cabal",[if action==Run then "run" else "build"]++["--with-compiler="++exe | exe/="ghc"]++chosen++
       (if action==Run then ["--" | not (null args)]++args else []))])
     GHC -> case source of
       Just file | takeExtension file `elem` [".hs",".lhs"] -> do
@@ -115,4 +115,4 @@ testPlan config root
   | otherwise = do
       project<-isProject root
       pure $ if not project then Left "Tests require a Cabal project." else
-        Right [("cabal",["test","--with-compiler="++buildExecutable config,"--test-show-details=direct"]++[T.unpack (buildTarget config) | not (T.null (buildTarget config))])]
+        Right [("cabal",["test"]++["--with-compiler="++buildExecutable config | buildExecutable config/="ghc"]++["--test-show-details=direct"]++[T.unpack (buildTarget config) | not (T.null (buildTarget config))])]

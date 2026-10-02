@@ -15,6 +15,7 @@ import Data.Maybe (fromJust)
 import qualified Data.Text as T
 import Network.Socket
 import System.IO
+import System.Environment (lookupEnv)
 import System.Info (os)
 import System.Process (CreateProcess(..), StdStream(..), proc, readProcessWithExitCode, withCreateProcess)
 import Text.Read (readMaybe)
@@ -55,6 +56,25 @@ checks = do
     events <- await client (\es -> DAP.Response ident (Right (object [])) `elem` es)
     check "managed readiness precedes replies exactly once" ([e | e<-events,case e of DAP.Notification _ _ -> False; _ -> True]==[DAP.Connected,DAP.Response ident (Right (object []))])
     check "managed launch connects after process startup" (DAP.Response ident (Right (object [])) `elem` events)
+  preparing<-newEmptyMVar
+  releasePreparation<-newEmptyMVar
+  beforePin<-lookupEnv "THC_EDIT_DAP_TEST_PIN"
+  prepared<-timeout 500000 (DAP.startManagedWith (putMVar preparing () >> takeMVar releasePreparation >>
+    pure ("python3",["-u","-c","import os; assert os.environ['THC_EDIT_DAP_TEST_PIN']=='private'; "++managedPeer,show managedPort],[("THC_EDIT_DAP_TEST_PIN","private")])) "." "127.0.0.1" managedPort)
+  check "managed preparation does not block the caller" (case prepared of Just _ -> True; _ -> False)
+  forM_ prepared $ \client -> flip finally (DAP.stopClient client) $ do
+    takeMVar preparing
+    putMVar releasePreparation ()
+    ident<-DAP.request client "initialize" (object [])
+    events<-await client (\es -> DAP.Response ident (Right (object [])) `elem` es)
+    check "managed compiler overrides reach only the adapter child" (DAP.Connected `elem` events)
+    afterPin<-lookupEnv "THC_EDIT_DAP_TEST_PIN"
+    check "managed environment leaves parent untouched" (beforePin==afterPin)
+  blocked<-newEmptyMVar
+  bracket (DAP.startManagedWith (putMVar blocked () >> threadDelay 60000000 >> pure ("never",[],[])) "." "127.0.0.1" managedPort) DAP.stopClient $ \client -> do
+    takeMVar blocked
+    stopped<-timeout processStopTimeout (DAP.stopClient client)
+    check "cancellation interrupts compiler preparation before spawn" (stopped==Just ())
   withServer drain $ \occupiedPort ->
     bracket (DAP.startManaged "/nonexistent/should-not-start" [] "." "127.0.0.1" occupiedPort) DAP.stopClient $ \client -> do
       events <- await client (any disconnected)

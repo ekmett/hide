@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 module THC.Edit.DAP
-  ( Client, Event(..), startClient, startAdapter, startManaged, stopClient, request, pollEvents
+  ( Client, Event(..), startClient, startAdapter, startManaged, startManagedWith, stopClient, request, pollEvents
   ) where
 
 import Control.Concurrent (threadDelay)
@@ -69,16 +69,22 @@ startAdapter executable arguments directory = startTransport $ \emit register co
 -- Managed adapters build or start their program before opening DAP. Keep that work off the UI
 -- thread, and never attach to a listener which was already using the chosen port.
 startManaged :: FilePath -> [String] -> FilePath -> Text -> Int -> IO Client
-startManaged executable arguments directory host port = startTransport $ \emit register communicate -> do
+startManaged executable arguments = startManagedWith (pure (executable,arguments,[]))
+
+-- Compiler/cradle discovery belongs to the transport worker too. Cancellation
+-- during preparation cannot leave a later adapter process running unowned.
+startManagedWith :: IO (FilePath,[String],[(String,String)]) -> FilePath -> Text -> Int -> IO Client
+startManagedWith prepare directory host port = startTransport $ \emit register communicate -> do
   unless (host `elem` ["localhost","127.0.0.1","::1"] && port>0 && port<=65535)
     (ioError (userError "Invalid managed DAP loopback endpoint"))
   occupied <- try (withConnection host port (\_ -> pure ())) :: IO (Either IOException ())
   case occupied of
     Right () -> ioError (userError "DAP port is already in use; choose an unused port")
     Left _ -> pure ()
+  (executable,arguments,overrides)<-prepare
   inherited<-getEnvironment
-  let environment=("DAP_HOST",if host=="localhost" then "127.0.0.1" else T.unpack host):("DAP_PORT",show port):
-        filter (\(key,_) -> key `notElem` ["DAP_HOST","DAP_PORT"]) inherited
+  let explicit=("DAP_HOST",if host=="localhost" then "127.0.0.1" else T.unpack host):("DAP_PORT",show port):overrides
+      environment=explicit++filter (\(key,_) -> map toLower key `notElem` map (map toLower . fst) explicit) inherited
   withAdapter register executable arguments directory (Just environment) $ \input output errors process release -> do
     hClose input
     withAsync (drainOutput emit "stdout" output) $ \_ ->

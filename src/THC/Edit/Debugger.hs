@@ -21,6 +21,7 @@ import System.IO (IOMode(ReadMode), withBinaryFile)
 import System.FilePath (isAbsolute, takeFileName, takeExtension, makeRelative, (</>))
 import System.Timeout (timeout)
 import Text.Read (readMaybe)
+import qualified THC.Edit.Compilers as Compilers
 import qualified THC.Edit.Build as Build
 import THC.Edit.Build (resolveBuildRoot)
 import THC.Edit.Buffer
@@ -407,18 +408,24 @@ launchTarget runtime@(Debugger ref _) port d
 -- The entry file chooses the GHC cradle/component. Advanced adapter settings can
 -- still use Adapter config; both paths feed the same debugger state machine.
 launchGHC :: Debugger -> FilePath -> Build.BuildConfig -> Int -> Desktop -> IO Desktop
-launchGHC _ _ config _ d | Build.buildExecutable config/="ghc" =
+launchGHC _ _ config _ d | not (Compilers.recognizedCompiler (Build.buildExecutable config)) =
   pure d {status="hdb uses its own GHC build; a custom compiler requires an explicit Adapter config."}
-launchGHC runtime directory config port d = case Build.buildSource d of
+launchGHC runtime@(Debugger ref _) directory config port d = case Build.buildSource d of
   Just path | takeExtension path `elem` [".hs",".lhs"] -> do
     file<-canonicalizePath path
     exists<-doesFileExist file
     if not exists then pure d {status="Save the Haskell entry file before debugging."} else do
       let arguments=object ["projectRoot" .= directory,"entryFile" .= makeRelative directory file,
             "entryPoint" .= ("main"::Text),"entryArgs" .= Build.buildArguments config,"extraGhcArgs" .= ([]::[String])]
-      started<-startSession runtime directory
-        (LaunchConfig (Server "hdb" ["server","--port",show port] "127.0.0.1" port) "launch" arguments "hdb") d
-      pure started {status="Starting GHC debugger; loading the entry file with hdb..."}
+          prepare=do
+            project<-Build.isProject directory
+            resolved<-Compilers.debuggerCompiler directory project (Build.buildExecutable config)
+            (executable,environment)<-either (ioError . userError . T.unpack) pure resolved
+            pure (executable,["server","--port",show port],environment)
+      readIORef ref >>= mapM_ D.stopClient . client
+      connection<-D.startManagedWith prepare directory "127.0.0.1" port
+      started<-initializeSession runtime directory connection ("127.0.0.1",port) "launch" arguments "hdb" True d
+      pure started {status="Resolving the selected GHC and starting its debugger..."}
   _ -> pure d {status="Open the Haskell entry file for GHC debugging, or use Adapter config."}
 
 initializeSession :: Debugger -> FilePath -> D.Client -> (Text,Int) -> Text -> Value -> Text -> Bool -> Desktop -> IO Desktop

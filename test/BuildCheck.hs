@@ -44,7 +44,9 @@ checks = bracket temporary removePathForcibly $ \root -> do
 
   check "standalone compile checks source" . (==Right [("ghc",["--make","-fno-code","-fdiagnostics-color=never",file])]) =<< B.buildPlan B.Compile ghc root (Just file)
   writeFile (root </> "fixture.cabal") "name: fixture\n"
-  check "Cabal project builds with selected compiler" . (==Right [("cabal",["build","--with-compiler=ghc"])]) =<< B.buildPlan B.Make ghc root (Just file)
+  check "Cabal project builds with selected compiler" . (==Right [("cabal",["build"])]) =<< B.buildPlan B.Make ghc root (Just file)
+  check "explicit Cabal compiler is preserved literally" . (==Right [("cabal",["build","--with-compiler=compiler with spaces"])]) =<< B.buildPlan B.Make (ghc {B.buildExecutable="compiler with spaces"}) root (Just file)
+  check "automatic Cabal tests defer to project compiler" . (==Right [("cabal",["test","--test-show-details=direct"])]) =<< B.testPlan ghc root
   removeFile (root </> "fixture.cabal")
   check "path spaces and warning location" (parseBuildDiagnostic root "src/My File.hs:12:3: warning: unused name" == Just (Diagnostic (root </> "src" </> "My File.hs") Nothing 11 2 2 "warning: unused name"))
   python<-findExecutable "python3" >>= maybe (findExecutable "python") (pure . Just)
