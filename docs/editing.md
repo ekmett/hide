@@ -20,8 +20,8 @@ files stay selected.
 choose Open. Double-click a directory to browse into it, or a file to open it.
 The list shows the file's size and local modification time.
 
-**Ctrl+B**, or **Tools > File tree**, toggles the Files pane. Expand directories
-to browse their contents and open files from the tree. Drag the divider to make
+**Ctrl+B** (⌃B in the Mac window), or **Tools > File tree**, toggles the
+Files pane. Expand directories to browse their contents and open files from the tree. Drag the divider to make
 room for long names; adjacent windows follow it. Unsaved filenames appear in
 red and return to normal after saving or undoing the change. Their names and
 buffer window titles show green `+n` and red `-n` counts for lines added and
@@ -64,15 +64,40 @@ undoable operation. Saving establishes a new baseline and clears the change view
 ## Text and selection
 
 Type to insert text. Hold Shift while moving to select it, or drag with the
-mouse. Ctrl+arrows moves by word. **Edit > Select all** selects the buffer.
-Copy, Cut and Paste are available in the Edit menu and on Ctrl+C/X/V;
-Ctrl+Insert, Shift+Delete and Shift+Insert provide the other familiar bindings.
+mouse. The Mac column below describes the native window: ⌘ Command, ⌥ Option,
+⇧ Shift and ⌃ Control. Text terminals use the Windows/Linux bindings when their
+emulator forwards them; Command shortcuts belong to the terminal app.
+**Options > Preferences** can display Mac modifier symbols in text-mode key
+labels. It keeps the actual Control/Alt bindings; it does not remap them to
+Command. The choice is saved in [configuration](configuration.md).
 
-**Ctrl+Z** undoes and **Ctrl+Shift+Z** redoes (**Ctrl+Y** also works).
-On macOS, use Cmd for the Edit-menu shortcuts. Split views share text
-and undo history; each view keeps its own cursor and selection. UTF-8 text retains its line endings, including CRLF.
-Combining sequences and joined emoji move and delete as complete graphemes;
-your terminal or selected frontend supplies their appearance.
+| Action | Windows / Linux | Mac |
+| --- | --- | --- |
+| Move / select by word | Ctrl+←/→ / Ctrl+Shift+←/→ | ⌃←/→ / ⌃⇧←/→ |
+| Copy / cut / paste / select all | Ctrl+C / X / V / A | ⌘C / ⌘X / ⌘V / ⌘A |
+| Undo / redo | Ctrl+Z / Ctrl+Shift+Z (Ctrl+Y) | ⌘Z / ⌘⇧Z |
+| Start / end of file | Ctrl+Home / Ctrl+End | ⌃Home / ⌃End |
+
+Ctrl+Insert, Shift+Delete and Shift+Insert also copy, cut and paste. Split views
+share text and undo history; each view keeps its own cursor and selection.
+UTF-8 text retains its line endings, including CRLF. Combining sequences and
+joined emoji move and delete as complete graphemes; your terminal or selected
+frontend supplies their appearance.
+
+Choose ACP or Copilot in **Options > Autocomplete** for inline suggestions:
+
+| Action | Windows / Linux | Mac |
+| --- | --- | --- |
+| Request a suggestion | Alt+\ | ⌘\ |
+| Previous / next alternative | Alt+[ / Alt+] | ⌘[ / ⌘] |
+| Accept all / next word | Tab / Alt+→ | Tab / ⌥→ |
+| Dismiss | Escape | Escape |
+
+Holding Alt (⌥ on Mac) alone for a second requests a suggestion in a native
+window or browser. Modifier-only holds are unavailable in text terminals.
+The explicit Mac completion shortcuts also work in the browser; Option remains
+available for composed text. HLS identifier completion is a separate action on
+Ctrl+Space (⌃Space), subject to OS shortcut interception.
 
 Syntax highlighting follows the filename. Haskell, C, C++, Cabal files and over
 100 other languages use Skylighting's language definitions. New unnamed text
@@ -90,20 +115,24 @@ permissions.
 
 ## Search
 
-**Ctrl+F** opens Find and **Ctrl+H** opens Replace. On macOS, use **Cmd+F**
-and **Cmd+Option+F**; Cmd+H keeps its standard Hide action. Find and Replace
-share a dialog: click either tab or press **Ctrl+Tab** to switch without losing
-the search or replacement text. The corresponding Find/Replace shortcut also
-switches tabs. Search is literal and case-sensitive; Replace changes one match.
+| Action | Windows / Linux native window or terminal | Mac native window |
+| --- | --- | --- |
+| Find / replace | Ctrl+F / Ctrl+H (Ctrl+R) | ⌘F / ⌘⌥F |
+| Next / previous match | Ctrl+L / Ctrl+Shift+L | ⌘G / ⌘⇧G |
+| Go to line | Ctrl+G | ⌃G |
+
+Find and Replace share a dialog: click either tab or press Ctrl+Tab (⌃Tab) to
+switch without losing the search or replacement text. The corresponding
+Find/Replace shortcut also switches tabs. Search is literal and case-sensitive;
+Replace changes one match.
 
 [![Find and Replace tabs with both search and replacement text.](site/screenshots/find-replace.png)](site/screenshots/find-replace.png)
 
-**Ctrl+L** finds the next match and **Ctrl+Shift+L** the previous match in native
-non-Mac and terminal frontends. **Ctrl+R** remains a Replace alias there, and
-**Ctrl+G**, or **Search > Go to line**, goes to a line number. F3 still opens files.
-On macOS, **Cmd+G** / **Cmd+Shift+G** find the next/previous match. In the browser,
-use Ctrl/Cmd+G and Shift+Ctrl/Cmd+G; use the menu for Go to line there. Embedded
-terminals retain their control keys while the terminal has focus.
+In the browser, Ctrl/⌘G and Ctrl/⌘⇧G find the next and previous matches; use
+**Search > Go to line** for a line number. Browsers retain Ctrl/⌘R for Reload,
+and native Mac ⌘H keeps Hide. F3 still opens files. Embedded terminals retain
+control keys while the terminal has focus; native Mac menu shortcuts still
+invoke their editor commands.
 
 ## Windows
 
@@ -130,9 +159,13 @@ Floating windows keep their position and size. Dragging a title preserves size
 while there is room, then shrinks the window against the desktop or dock boundary.
 Files and Messages remain the boundaries for adjacent windows.
 
-**F6** or **Ctrl+Tab** cycles windows. Shift+Ctrl+Tab reverses direction.
-Each editor and Messages window has a stable number: **Alt+1** through **Alt+9**
-activates it. On macOS, use Option for these numbered shortcuts.
+| Action | Windows / Linux | Mac native window |
+| --- | --- | --- |
+| Next / previous window | Ctrl+Tab (F6) / Ctrl+Shift+Tab | ⌃Tab (F6) / ⌃⇧Tab |
+| Activate numbered window | Alt+1…9 | ⌥1…9 |
+| Zoom | F5 | F5 |
+
+Each editor and Messages window has a stable number.
 
 **Alt+Tab** cycles the menu, Files, windows and Messages; Shift reverses it.
 Some operating systems reserve this shortcut. Click the destination or use the
@@ -142,7 +175,8 @@ window shortcuts when the OS intercepts it.
 
 Press **F10** to enter the menu bar, then use arrows or letter mnemonics.
 The status bar describes the highlighted action. Its key labels are clickable.
-On macOS, the native menu bar also provides Command shortcuts.
+On macOS, the native menu bar provides ⌘ shortcuts. Other Control bindings
+remain Control; ⌘ is not a universal substitute. Function keys may need Fn/Globe.
 
 [![File popup menu with Open selected in green and native Mac shortcuts.](site/screenshots/file-menu.png)](site/screenshots/file-menu.png)
 
@@ -153,9 +187,10 @@ button; releasing outside cancels the click.
 
 ## Save, close and external changes
 
-**F2** saves. **File > Save as** writes under a new name and refuses to replace
-an existing destination. **Alt+F3** closes the current window and **Alt+X**
-exits. Closing the last view of a changed file, or exiting with changed files,
+**F2** or **Ctrl+S** (⌘S on Mac) saves. **File > Save as** (⌘⇧S) writes
+under a new name and refuses to replace an existing destination. **Alt+F3**
+(⌘W) closes the current window; **Ctrl+Q** or **Alt+X** (⌘Q) exits. Closing the
+last view of a changed file, or exiting with changed files,
 asks what to save. **File > Exit** ends the editor session. To leave the desktop
 running, detach and use `thc-edit --resume` later; **Ctrl+]** detaches from the
 terminal frontend. See [sessions](sessions.md) for the other frontends.
@@ -183,17 +218,17 @@ also apply after Git operations and conversation edits.
 
 Select WordStar under **Options > Preferences**, or start with `--wordstar`.
 
-| Keys | Action |
-| --- | --- |
-| Ctrl+E / S / D / X | Up / left / right / down |
-| Ctrl+A / F | Previous / next word |
-| Ctrl+Y | Delete line |
-| Ctrl+K, then B / K | Mark block start / end |
-| Ctrl+K, then C / V / Y | Copy / cut / delete block |
-| Ctrl+K, then S / D | Save / close |
-| Ctrl+Q, then S / D | Start / end of line |
-| Ctrl+Q, then R / C | Start / end of file |
-| Ctrl+Q, then F / A | Find / replace |
+| Action | Windows / Linux | Mac |
+| --- | --- | --- |
+| Up / left / right / down | Ctrl+E / S / D / X | ⌃E / ⌃S / ⌃D / ⌃X |
+| Previous / next word | Ctrl+A / F | ⌃A / ⌃F |
+| Delete line | Ctrl+Y | ⌃Y |
+| Mark block start / end | Ctrl+K, then B / K | ⌃K, then B / K |
+| Copy / cut / delete block | Ctrl+K, then C / V / Y | ⌃K, then C / V / Y |
+| Save / close | Ctrl+K, then S / D | ⌃K, then S / D |
+| Start / end of line | Ctrl+Q, then S / D | ⌃Q, then S / D |
+| Start / end of file | Ctrl+Q, then R / C | ⌃Q, then R / C |
+| Find / replace | Ctrl+Q, then F / A | ⌃Q, then F / A |
 
 Escape cancels a prefix. This is a useful subset of WordStar's commands.
 

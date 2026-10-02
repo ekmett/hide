@@ -39,31 +39,56 @@ covers choosing an unfinished desktop and continuing on another frontend.
 
 Use **F3** to open a file, **F2** to save and **F10** to enter the menus. **F1**
 opens this guide. Menu descriptions and clickable shortcuts appear in the status
-bar. On a Mac, Command+O/S/W/Q also opens, saves, closes and exits; function keys
-may need Fn/Globe.
+bar. Mac function keys may need Fn/Globe.
 
-The Files pane follows the selected directory. **Ctrl+B** shows or hides it.
-Drag a window by its title, resize it from the corner, or use **Window > Tile**
-and **Window > Cascade**. **Window > Split vertically** and **Split horizontally**
-open another view of the same buffer, including its undo history. **F6** cycles
-windows; **Alt+1** through **Alt+9** selects a numbered window directly.
+The Files pane follows the selected directory. Drag a window by its title,
+resize it from the corner, or use **Window > Tile** and **Window > Cascade**.
+**Window > Split vertically** and **Split horizontally** open another view of
+the same buffer, including its undo history.
 
-| Action | Keys |
-| --- | --- |
-| Help / save / open | F1 / F2 / F3 |
-| Zoom / next window / menus | F5 / F6 / F10 |
-| Close / exit | Alt+F3 / Alt+X |
-| Select / move by word | Shift+arrows / Ctrl+arrows |
-| Undo / redo | Ctrl+Z / Ctrl+Shift+Z (Ctrl+Y also works) |
-| Copy / cut / paste | Ctrl+C / Ctrl+X / Ctrl+V |
-| Find / replace / search again | Ctrl+F / Ctrl+H (Ctrl+R alias) / Ctrl+L |
-| Go to line | Ctrl+G |
-| Dialog next / previous / accept / cancel | Tab / Shift+Tab / Enter / Escape |
+These are the default source-editor bindings. The Mac column describes the
+native window: ⌘ Command, ⌥ Option, ⇧ Shift and ⌃ Control.
 
-In the browser, Ctrl/Cmd+G finds the next match; use **Search > Go to line** for
-a line number. Native and browser frontends use the system clipboard. In a text
-terminal, Copy and Cut also request the system clipboard through OSC 52 where
-supported; paste external text through your terminal. **Options > Preferences** also offers WordStar keys.
+| Action | Windows / Linux | Mac |
+| --- | --- | --- |
+| New / open | Ctrl+N / Ctrl+O (F3) | ⌘N / ⌘O (F3) |
+| Save / save as | Ctrl+S (F2) / File > Save as | ⌘S (F2) / ⌘⇧S |
+| Close / exit | Alt+F3 / Ctrl+Q (Alt+X) | ⌘W / ⌘Q |
+| Help / zoom / menus | F1 / F5 / F10 | F1 / F5 / F10 |
+| Next / previous window | Ctrl+Tab (F6) / Ctrl+Shift+Tab | ⌃Tab (F6) / ⌃⇧Tab |
+| Numbered window / Files pane | Alt+1…9 / Ctrl+B | ⌥1…9 / ⌃B |
+| Select / move by word | Shift+arrows / Ctrl+← or → | ⇧arrows / ⌃← or → |
+| Undo / redo | Ctrl+Z / Ctrl+Shift+Z (Ctrl+Y) | ⌘Z / ⌘⇧Z |
+| Copy / cut / paste / select all | Ctrl+C / X / V / A | ⌘C / ⌘X / ⌘V / ⌘A |
+| Find / replace | Ctrl+F / Ctrl+H | ⌘F / ⌘⌥F |
+| Next / previous match | Ctrl+L / Ctrl+Shift+L | ⌘G / ⌘⇧G |
+| Go to line | Ctrl+G | ⌃G |
+| Complete identifier (HLS) | Ctrl+Space | ⌃Space |
+| Request inline suggestion | Alt+\ | ⌘\ |
+| Previous / next suggestion | Alt+[ / Alt+] | ⌘[ / ⌘] |
+| Accept suggestion / next word / dismiss | Tab / Alt+→ / Escape | Tab / ⌥→ / Escape |
+| Conversation / new conversation | Ctrl+Shift+C / Ctrl+Shift+N | ⌘⇧C / ⌘⇧N |
+| Dialog next / previous / accept / cancel | Tab / Shift+Tab / Enter / Escape | Tab / ⇧Tab / Enter / Escape |
+
+Choose an inline provider in **Options > Autocomplete**. Holding Alt (⌥ on Mac)
+alone for a second also requests a suggestion in native windows and browsers.
+Text terminals do not report modifier-only holds; use the explicit shortcut.
+
+In the browser, Ctrl/⌘G and Ctrl/⌘⇧G find the next and previous matches; use
+**Search > Go to line** for a line number. Ctrl+R remains a Replace alias in
+native non-Mac windows and text terminals; browsers retain Reload. Native Mac
+menus own their ⌘ shortcuts, including ⌘H for Hide. Other Control bindings stay
+available; do not substitute ⌘ for every Ctrl shortcut. In a text terminal on
+any OS, use the Windows/Linux column when the terminal forwards those keys:
+⌘ shortcuts belong to the terminal app. OS-reserved shortcuts may be intercepted.
+**Options > Preferences** can show Mac modifier symbols in text-mode key labels;
+this changes their appearance, not the Control/Alt bindings. See
+[configuration](docs/configuration.md) for the saved setting.
+
+Native and browser frontends use the system clipboard. In a text terminal,
+Copy and Cut also request the system clipboard through OSC 52 where supported;
+paste external text through your terminal. **Options > Preferences** also offers
+WordStar keys.
 
 A star in a file's title means unsaved edits. Saving checks whether the disk
 file changed underneath you. Clean buffers reload external changes; when both
@@ -109,10 +134,11 @@ Configure an ACP provider under **Options > Agents**, then open
 contents and selections through the editor’s MCP tools, including unsaved text.
 It can also use [session tools](docs/session-tools.md) for HLS, window layout,
 checked edits, build/run/test, shared terminals and source debugging.
-**Enter** sends a query,
-**Shift+Enter** adds a line and **Escape** cancels an active reply. Queries sent
-while a reply is running are queued; **Ctrl+Enter** steers when supported by the
-provider. Click the conversation title to choose its model and reasoning effort.
+**Enter** sends a query by default; **Ctrl+Enter** (⌃Enter or ⌘Enter in the
+Mac window) steers when supported by the provider. **Options > Chat input** can
+swap those actions. **Shift+Enter** (⇧Enter) adds a line and **Escape** cancels an
+active reply. Queries sent while a reply is running are queued. Click the
+conversation title to choose its model and reasoning effort.
 
 Replies, code and tool activity remain beside your files. Permission requests
 let you inspect proposed work before allowing it; editor-mediated file changes
