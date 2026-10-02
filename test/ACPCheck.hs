@@ -13,13 +13,21 @@ import System.FilePath ((</>))
 import System.IO (hClose, openTempFile)
 import System.Process (readProcessWithExitCode)
 import System.Exit (ExitCode(..))
+import System.Info (os)
 import System.Timeout (timeout)
 import THC.Edit.ACP
 
 checks :: IO ()
 checks = bracket temporary removePathForcibly $ \root -> do
+  -- The Windows venv redirector retains stdout while its interpreter runs,
+  -- which would invalidate the fixture that closes stdout without exiting.
+  python <- if os=="mingw32" then do
+    (status,path,_) <- readProcessWithExitCode "python3" ["-c","import sys;print(sys._base_executable)"] ""
+    check "Python interpreter available" (status==ExitSuccess)
+    pure (T.unpack (T.strip (T.pack path)))
+    else pure "python3"
   let server = root </> "fake.py"
-      launch = Launch "python3" [server] [("THC_ACP_CHECK", "λ")]
+      launch = Launch python [server] [("THC_ACP_CHECK", "λ")]
       start = startClient launch root
   BS.writeFile server (TE.encodeUtf8 (T.pack fakeServer))
   bracket start stopClient $ \client -> do
@@ -67,8 +75,10 @@ checks = bracket temporary removePathForcibly $ \root -> do
     check "uncooperative process stops" . (== Just ()) =<< timeout 2000000 (stopClient client)
   pids <- words <$> readFile (root </> "pids")
   forM_ pids $ \pid -> do
-    (status,_,_) <- readProcessWithExitCode "kill" ["-0",pid] ""
-    check "process tree reaped" (status /= ExitSuccess)
+    (status,_,_) <- if os=="mingw32"
+      then readProcessWithExitCode python ["-c",windowsProcessProbe,pid] ""
+      else readProcessWithExitCode "kill" ["-0",pid] ""
+    check "process tree reaped" (if os=="mingw32" then status==ExitFailure 1 else status/=ExitSuccess)
   writeFile server $ unlines
     [ "import json,subprocess,sys,time"
     , "child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)'])"
@@ -131,4 +141,18 @@ fakeServer = unlines
   , "cancel=recv();assert cancel['method']=='session/cancel' and 'id' not in cancel"
   , "send(dict(method='cancelled'))"
   , "assert recv()['method']=='close'"
+  ]
+
+-- Return 0 for a live process, 1 for absent/exited, and 2 for inspection errors.
+windowsProcessProbe :: String
+windowsProcessProbe = unlines
+  [ "import ctypes,sys"
+  , "k=ctypes.WinDLL('kernel32',use_last_error=True)"
+  , "k.OpenProcess.restype=ctypes.c_void_p"
+  , "k.WaitForSingleObject.argtypes=[ctypes.c_void_p,ctypes.c_ulong]"
+  , "k.CloseHandle.argtypes=[ctypes.c_void_p]"
+  , "handle=k.OpenProcess(0x100000,False,int(sys.argv[1]))"
+  , "if not handle: sys.exit(1 if ctypes.get_last_error()==87 else 2)"
+  , "state=k.WaitForSingleObject(handle,0);k.CloseHandle(handle)"
+  , "sys.exit(1 if state==0 else (0 if state==258 else 2))"
   ]
