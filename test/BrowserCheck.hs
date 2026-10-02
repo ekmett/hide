@@ -65,6 +65,32 @@ checks = do
     (_,project)<-App.applyEffects (initialDesktop (80,25)) [ReadPath dir]
     check "opening a package directory opens its Cabal file and explorer"
       (fmap filePath (activeDocument project >>= documentFile)==Just package && isJust (sideTree project))
+    let focusPath=canonical </> "a.hs"
+    (_,source)<-App.applyEffects project [ReadPath focusPath]
+    let edited=insertText "unsaved " source
+        hidden=fst (runCommand New edited)
+        sourceWindow=fmap windowId (activeWindow edited)
+        noFallback=hidden {defaultDirectory=Just (error "existing ReadPath entered filesystem/Git fallback"),
+          branchStatus="cached branch",branchAdded=7,branchDeleted=3}
+    removeFile focusPath
+    (_,refocused)<-App.applyEffects noFallback [ReadPath focusPath]
+    check "opening an existing removed file only focuses its unsaved buffer"
+      (fmap windowId (activeWindow refocused)==sourceWindow && activeText refocused=="unsaved abc" &&
+       buffers refocused==buffers hidden && branchStatus refocused=="cached branch" &&
+       branchAdded refocused==7 && branchDeleted refocused==3 && dialog refocused==Nothing)
+    -- Even a path now occupied by a directory must not enter ReadTree.
+    createDirectory focusPath
+    (_,directoryRefocused)<-App.applyEffects noFallback [ReadPath focusPath]
+    check "existing buffer focus precedes directory probing"
+      (fmap windowId (activeWindow directoryRefocused)==sourceWindow &&
+       buffers directoryRefocused==buffers hidden && sideTree directoryRefocused==sideTree hidden)
+    removeDirectory focusPath
+    BS.writeFile focusPath "changed on disk"
+    let alias=canonical </> "nested" </> ".." </> "a.hs"
+    (_,aliasRefocused)<-App.applyEffects hidden [ReadPath alias]
+    check "file aliases retain canonicalized existing-buffer fallback"
+      (fmap windowId (activeWindow aliasRefocused)==sourceWindow && activeText aliasRefocused=="unsaved abc" &&
+       buffers aliasRefocused==buffers hidden)
     BS.writeFile (canonical </> "aaa.cabal") "name: aaa\n"
     multiple<-packageFile dir
     check "multiple Cabal files choose deterministically" (multiple==Just (canonical </> "aaa.cabal"))

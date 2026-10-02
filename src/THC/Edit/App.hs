@@ -516,6 +516,9 @@ applyEffects = foldM apply . (False,)
       result<-writeEditorDefaults (object ["bufferView" .= bufferViewName mode])
       pure (False,d {status=either ("Default view changed for this session; could not save: "<>) (const "Default buffer view saved.") result})
     apply (_,d) SetScreenMode{}=pure (False,d {status="Screen modes are available in a graphical window."})
+    apply (_,d) (ReadPath path)
+      | Just window<-find (\w -> fmap filePath (M.lookup (bufferId w) (buffers d) >>= documentFile)==Just path) (windows d) =
+          pure (False,focusWindow (windowId window) d)
     apply (_,d) (ReadPath path)=do
       directory<-doesDirectoryExist path
       if directory then do
