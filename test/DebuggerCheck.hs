@@ -23,6 +23,7 @@ import THC.Edit.Buffer
 import THC.Edit.Debugger
 import THC.Edit.Files (FileState(..))
 import THC.Edit.Model
+import THC.Edit.Render (snapshotHtml)
 
 checks :: IO ()
 checks = presentationCheck >> pendingPresentationCheck >> startupDeadlineCheck >> launchChecks >> mapM_ session ["basic", "frame", "choices", "breakpoints", "reconnect", "mcp"] >> putStrLn "Debugger checks passed"
@@ -71,6 +72,8 @@ checks = presentationCheck >> pendingPresentationCheck >> startupDeadlineCheck >
       else do
         stopped<-waitFor "initial source" (T.isInfixOf "value = λ" . activeText) attached
         check "sourceReference opens read-only at adapter line" (maybe False ((/=Nothing).documentLabel) (activeDocument stopped) && fmap (caret.selection) (activeWindow stopped)==Just (T.length "module Generated where\n"))
+        check "embedded debugger source renders syntax colors"
+          ("color:rgb(255,255,255);background:rgb(0,0,170)'>where" `T.isInfixOf` snapshotHtml stopped)
         initialRequests<-commands
         check "variables are not fetched automatically" (not (any ((==Just ("variables"::T.Text)) . field "command") initialRequests))
         final<-case mode of

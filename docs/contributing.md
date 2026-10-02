@@ -147,6 +147,46 @@ The source also includes native-input, terminal, DAP, browser and remote-session
 harnesses under `test/` and `tools/`. Their setup depends on the component under
 test; consult the harness before running it against a live session.
 
+## Live debugger checks
+
+`test/DebuggerLive.hs` drives the real editor debugger through the shared
+`EditorDriver`, using both normal commands and MCP operations. Compile it after
+building the library:
+
+```sh
+cabal exec -- ghc -Wall -threaded -XGHC2021 -package thc-edit -itools test/DebuggerLive.hs -outputdir build/debugger-live -o build/debugger-live/check
+build/debugger-live/check launch 4734 /absolute/path/to/toy 10 > build/debugger-live/trace.jsonl
+```
+
+Use a disposable, terminating THC Cabal executable with debug source notes. The
+last argument selects a breakpoint line in the entry source which execution
+will encounter after the initial stop (10 is only an example).
+The program must have work after that breakpoint for a trace-in stop; the
+qualification toy uses nested primitive mutable-variable operations. Choose an
+unused port. Launch uses the normal saved **Build target** settings, so select
+THC first and provide its compiler, runtime and LLVM tools on `PATH`. To keep
+personal settings out of a run, set `XDG_CONFIG_HOME` to a fresh scratch directory;
+THC is the default toolchain. Builds still write into the selected project.
+
+The check verifies embedded-source retrieval, a verified breakpoint at the
+requested line, a fresh stop on that breakpoint, trace-in/step-over, and
+termination. It also exercises step-out when step-over leaves the toy stopped.
+It rejects stale suspension generations and saves state/output as JSON lines.
+Step-over or step-out may legitimately terminate an optimized toy; the trace
+records which controls were exercised. Otherwise the check continues it. It
+fails if the program exits before the breakpoint hit or initial trace-in stop.
+Each wait is bounded, and failure closes the owned debugger process.
+
+Use `attach PORT PROJECT BREAKPOINT_LINE` instead of `launch` to qualify an
+already-suspended local runtime. That process belongs to the caller: record its exit status and
+clean it up if the test fails. A successful DAP termination check does not prove
+its operating-system exit status. Run separate instances for each THC backend;
+this check does not establish locals inspection, interactive stdin, exception
+stops or another adapter's compatibility.
+
+The source-linked [GHC debugging assessment](design/ghc-debugging-options.md)
+covers candidate adapters, GHCi facilities and separate profiling/heap workflows.
+
 ## Finding your way around
 
 | Location | Responsibility |

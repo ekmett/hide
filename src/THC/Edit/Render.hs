@@ -166,7 +166,12 @@ windowLayers d active w =
     background=if helpWindow && not (darkAppearance d) then scrollCyan else blue
     base=if helpWindow then attr (if darkAppearance d then white else black) background else edit
     frame=attr (if moving then cyan else if active then white else gray) background
-    styledLines=splitStyled (if documentLabel doc /= Nothing && documentLabel doc /= Just "Conversation" && documentLabel doc /= Just "Turbo Haskell Help" && not (maybe False (T.isPrefixOf "Terminal ") (documentLabel doc)) then [(ch,Plain) | ch<-T.unpack t] else documentHighlight doc)
+    -- Embedded DAP sources retain language tokens despite their read-only label.
+    -- Docs: docs/site/screenshots/debug-step.png (docs/running.md).
+    useStyles=case documentLabel doc of
+      Nothing -> True
+      Just name -> name `elem` ["Conversation","Turbo Haskell Help"] || any (`T.isPrefixOf` name) ["Terminal ","Source "]
+    styledLines=splitStyled (if useStyles then documentHighlight doc else [(ch,Plain) | ch<-T.unpack t])
     scrollbarImage vertical =
       let Rect sx sy bw bh=scrollbarRect d vertical doc w
           len=if vertical then bh else bw
@@ -212,9 +217,7 @@ windowLayers d active w =
 
     lineColor n = case documentLabel doc of
       Just "Git diff" -> let line=bufferLineAt b n in Just (attr (if "+" `T.isPrefixOf` line then V.RGBColor 85 255 85 else if "-" `T.isPrefixOf` line then V.RGBColor 255 85 85 else if "@@" `T.isPrefixOf` line then cyan else yellow) blue)
-      Just "Conversation" -> Nothing
-      Just "Turbo Haskell Help" -> Nothing
-      Just name | "Terminal " `T.isPrefixOf` name -> Nothing
+      Just _ | useStyles -> Nothing
       Just _ -> Just (attr yellow blue)
       Nothing -> Nothing
 
