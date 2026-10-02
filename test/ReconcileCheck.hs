@@ -45,7 +45,7 @@ checks = bracket temporary removePathForcibly $ \dir -> withReconciliation $ \ru
   check "clean buffer reloads with exact disk baseline" (disk clean==Just "new\n" && not (dirty (sourceBuffer clean)))
   check "reload preserves undo and increases revision" (contents (undo (sourceBuffer clean))=="original\n" && revision (sourceBuffer clean)>revision buffer)
   check "all split views have bounded selection and scroll" (all (\w -> caret (selection w)<=4 && scrollRow w<=1 && scrollColumn w<=3) (windows clean))
-  check "reload rebuilds highlight cache" (T.pack (map fst (documentHighlight (source clean)))=="new\n")
+  check "reload invalidates syntax for background highlighting" (null (documentHighlight (source clean)) && documentSourceRows (source clean)==Nothing)
   let dirtyDesktop = insertText "local " (moveTo False 0 clean)
       local = contents (sourceBuffer dirtyDesktop)
   externalWrite path "disk version\n"

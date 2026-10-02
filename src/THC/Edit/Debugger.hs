@@ -29,7 +29,6 @@ import qualified THC.Edit.DAP as D
 import THC.Edit.Files (filePath)
 import qualified THC.Edit.LSP as L
 import THC.Edit.Model
-import THC.Edit.Syntax (highlightFor)
 
 type Core = Desktop -> [Effect] -> IO (Bool,Desktop)
 data Debugger = Debugger (IORef State) (IO Integer)
@@ -639,7 +638,7 @@ response runtime@(Debugger ref _) core kind body d = do
             title="Source "<>sourceLabel source<>" ["<>tshow (integer "sourceReference" source)<>"]"
             opened=addReadOnly title content d
             bid=maybe (nextId d) bufferId (activeWindow opened)
-            styled=opened {buffers=M.adjust (\doc -> doc {documentHighlight=highlightFor (T.unpack (sourceLabel source)) content}) bid (buffers opened)}
+            styled=opened {buffers=M.adjust (\doc -> doc {documentSuggestedName=Just (T.unpack (sourceLabel source))}) bid (buffers opened)}
         modifyIORef' ref (\state -> state {sources=M.insert bid source (sources state)})
         pure (position selected styled) {status="Stopped in "<>frameLabel selected}
     Control _ -> pure d

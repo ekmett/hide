@@ -9,6 +9,7 @@ import qualified Data.Text as T
 import Data.Text (Text)
 import qualified Data.Text.Lazy as TL
 import qualified Data.Map.Strict as M
+import qualified Data.Vector as Vec
 import Data.Foldable (toList)
 import Data.List (mapAccumR)
 import qualified Data.IntSet as IS
@@ -176,7 +177,7 @@ windowLayers d active w =
     useStyles=case documentLabel doc of
       Nothing -> True
       Just name -> name `elem` ["Conversation","Turbo Haskell Help"] || any (`T.isPrefixOf` name) ["Terminal ","Source "]
-    styledLines=splitStyled (if useStyles then documentHighlight doc else [(ch,Plain) | ch<-T.unpack t])
+    styledLines=splitStyled (documentHighlight doc)
     scrollbarImage vertical =
       let Rect sx sy bw bh=scrollbarRect d vertical doc w
           len=if vertical then bh else bw
@@ -218,7 +219,10 @@ windowLayers d active w =
         count=windowHexBytes w
         bytes=T.take count (T.drop (n*count) t)
         highlighted offset = offset==caret (selection w) || let (a,z)=ordered (selection w) in offset>=a && offset<z
-    renderLine n=V.cropRight contentWidth (V.translateX (negate (scrollColumn w)) (styledImage (darkAppearance d) selectable (lineColor n) active (selection w) (bufferLineOffset b n) (fromMaybe [] (atMay styledLines n))) V.<|> V.charFill base ' ' contentWidth 1)
+    renderLine n=V.cropRight contentWidth (V.translateX (negate (scrollColumn w)) (styledImage (darkAppearance d) selectable (lineColor n) active (selection w) (bufferLineOffset b n) (if syntaxDocument doc then maybe plainRow (\rows->fromMaybe plainRow (rows Vec.!? n)) (documentSourceRows doc)
+        else if useStyles && not (null (documentHighlight doc)) then fromMaybe [] (atMay styledLines n) else plainRow)) V.<|> V.charFill base ' ' contentWidth 1)
+
+      where plainRow=[(ch,Plain) | ch<-T.unpack (bufferLineAt b n)]
 
     lineColor n = case documentLabel doc of
       Just "Git diff" -> Just (diffLineAttr (bufferLineAt b n))

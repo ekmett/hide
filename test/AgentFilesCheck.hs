@@ -55,7 +55,7 @@ checks = bracket temporary removePathForcibly $ \base -> do
   check "write saves and preserves prior unsaved text in undo" (bytes=="new\n" && contents (bufferOf written)=="new\n" && contents (undo (bufferOf written))==oldText && not (dirty (bufferOf written)))
   check "write updates revision and disk baseline" (revision (bufferOf written)>revision (bufferOf split) && (documentFile (document written) >>= diskBytes)==Just bytes)
   check "write clamps every split view" (all (\w -> caret (selection w)<=4 && anchor (selection w)>=0 && anchor (selection w)<=4) (windows written))
-  check "write restyles the source" (T.pack (map fst (documentHighlight (document written)))=="new\n")
+  check "write invalidates source styling for the background worker" (null (documentHighlight (document written)) && documentSourceRows (document written)==Nothing)
   fresh<-capture path written
   assertRejected "edited buffer rejects stale snapshot" fresh "overwritten" (insertText "later " written)
   let changedBaseline=written {buffers=M.adjust (\doc -> doc {documentFile=Just originalFile}) 1 (buffers written)}

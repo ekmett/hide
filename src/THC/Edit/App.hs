@@ -63,6 +63,7 @@ import THC.Edit.RemoteWeb (runRemoteWeb)
 import System.Exit (die)
 import System.Timeout (timeout)
 import THC.Edit.Buffer
+import THC.Edit.Highlighting (withHighlighting,tickHighlighting)
 import THC.Edit.Model
 import THC.Edit.Render
 import THC.Edit.Files
@@ -238,13 +239,13 @@ runEditor args = do
         sessionStore<-sessionStoreDirectory
         privatePaths<-mapM canonicalizePath ([configPath,localConfigPath,sessionStore,agentDirectory </> "agents.json",agentDirectory </> "agent-session.json"]++endpoints)
         let protectedDesktop=staged {guestPrivatePaths=privatePaths}
-        if Html `elem` flags then TIO.putStr (snapshotHtml protectedDesktop)
-        else if Snapshot `elem` flags then TIO.putStr (snapshot protectedDesktop)
+        if Html `elem` flags then TIO.putStr (snapshotHtml protectedDesktop {buffers=M.map highlightDocument (buffers protectedDesktop)})
+        else if Snapshot `elem` flags then TIO.putStr (snapshot protectedDesktop {buffers=M.map highlightDocument (buffers protectedDesktop)})
         else do
           mapM_ (setEnv "THC_EDIT_SESSION") daemon
           font<-Font.loadFont
           let specs=builtinTools++debugTools++chatTools++toolingTools++workspaceTools++fileTools++testsTools++historyTools++runtimeTools++gitTools++controlTools++clipboardTools++docsTools++[screenTool]
-          withPermissions (specs++agentTools) $ \permissions -> withDebugger $ \debugger -> withConversationAt (startingDirectory protectedDesktop) $ \conversation -> withTooling $ \tooling -> withGitOperations $ \gitOperations -> withReconciliation $ \reconciliation -> withProjectBrowser $ \projectBrowser -> do
+          withPermissions (specs++agentTools) $ \permissions -> withDebugger $ \debugger -> withConversationAt (startingDirectory protectedDesktop) $ \conversation -> withTooling $ \tooling -> withGitOperations $ \gitOperations -> withReconciliation $ \reconciliation -> withProjectBrowser $ \projectBrowser -> withHighlighting $ \highlighting -> do
             exiting<-newIORef False
             let runtimeEffects=projectBrowserEffects projectBrowser (gitOperationEffects gitOperations (debuggerEffects debugger (conversationEffects conversation (reconciliationEffects reconciliation (toolingEffects tooling applyEffects)))))
                 core d pending=foldM step (False,d) pending
@@ -261,7 +262,7 @@ runEditor args = do
                   (quit,updated)<-policyEffects permissions core d pending
                   approvedExit<-readIORef exiting
                   pure (quit || approvedExit,updated)
-                tick d=tickProjectBrowser projectBrowser d >>= tickGitOperations gitOperations applyEffects >>= tickTooling tooling applyEffects >>= tickReconciliation reconciliation >>= tickConversation conversation >>= tickDebugger debugger (toolingEffects tooling applyEffects) >>= tickPermissions permissions
+                tick d=tickProjectBrowser projectBrowser d >>= tickGitOperations gitOperations applyEffects >>= tickTooling tooling applyEffects >>= tickReconciliation reconciliation >>= tickConversation conversation >>= tickDebugger debugger (toolingEffects tooling applyEffects) >>= tickPermissions permissions >>= tickHighlighting highlighting
                 inspectTool d name parameters
                   | name `elem` ["list_windows","list_buffers","read_buffer","read_selection"] = pure (d,pure (builtinTool d name parameters))
                   | name `elem` chatToolNames = chatTool conversation d name parameters

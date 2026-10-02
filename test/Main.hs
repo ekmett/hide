@@ -29,6 +29,7 @@ import qualified WorkspaceMCPCheck
 import qualified WorkspaceFilesMCPCheck
 import qualified TestsMCPCheck
 #endif
+import qualified HighlightingCheck
 import qualified AgentIntegrationCheck
 import qualified AgentAccessCheck
 import qualified AgentRuntimeCheck
@@ -80,6 +81,7 @@ check name ok = unless ok (error name)
 
 main :: IO ()
 main = do
+  HighlightingCheck.checks
   AgentIntegrationCheck.checks
   AgentAccessCheck.checks
   AgentRuntimeCheck.checks
@@ -146,8 +148,8 @@ main = do
   check "unknown extension remains plain" (all ((== Plain) . snd) (highlightFor "notes.unknown" "module x = 42"))
   mapM_ (\text -> check "tokenizer preserves source positions" (T.pack (map fst (highlight text)) == text))
     ["", "\n", "\n\n", "module Main where\r\n\tmain = print \"λ界\"\r\n", "x = '\\x03bb'", "x = [1..10] -- unfinished", "{- open comment\n"]
-  let python=newDocument (newBuffer "def f():\n    return 42\n") (Just (FileState "test.py" Nothing))
-      renamed=restyle python {documentFile=Just (FileState "notes.unknown" Nothing)}
+  let python=highlightDocument $ newDocument (newBuffer "def f():\n    return 42\n") (Just (FileState "test.py" Nothing))
+      renamed=highlightDocument $ restyle python {documentFile=Just (FileState "notes.unknown" Nothing)}
   check "document filename chooses syntax" (take 3 (map snd (documentHighlight python)) == replicate 3 Keyword)
   check "renaming refreshes syntax" (all ((== Plain) . snd) (documentHighlight renamed))
   check "CRLF input is highlighted, not just preserved" (take 6 (map snd (highlight "module Main where\r\n")) == replicate 6 Keyword)
@@ -159,7 +161,7 @@ main = do
       typed = key (V.KChar 'x') [] modal
   let typedKeyword=insertText "module" n
       undoneKeyword=fst (runCommand Undo typedKeyword)
-  check "edits refresh syntax cache" (fmap documentHighlight (activeDocument typedKeyword) == Just (highlight "module"))
+  check "edits invalidate syntax without tokenizing on input" (fmap documentHighlight (activeDocument typedKeyword) == Just [] && fmap documentSourceRows (activeDocument typedKeyword)==Just Nothing)
   check "undo refreshes syntax cache" (fmap documentHighlight (activeDocument undoneKeyword) == Just [])
   check "modal blocks text" (buffers typed == buffers modal)
   check "modal blocks underlying focus" (map windowId (windows clicked) == map windowId (windows modal))

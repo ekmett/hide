@@ -24,6 +24,7 @@ import THC.Edit.Buffer
 import THC.Edit.Debugger
 import THC.Edit.Files (FileState(..))
 import THC.Edit.Model
+import THC.Edit.Highlighting (withHighlighting,tickHighlighting)
 import THC.Edit.Render (snapshotHtml)
 
 checks :: IO ()
@@ -73,8 +74,14 @@ checks = completionChecks >> presentationCheck >> pendingPresentationCheck >> st
       else do
         stopped<-waitFor "initial source" (T.isInfixOf "value = λ" . activeText) attached
         check "sourceReference opens read-only at adapter line" (maybe False ((/=Nothing).documentLabel) (activeDocument stopped) && fmap (caret.selection) (activeWindow stopped)==Just (T.length "module Generated where\n"))
+        colored<-withHighlighting $ \highlighting -> do
+          let awaitColors d=do
+                next<-tickHighlighting highlighting d
+                if maybe False (isJust.documentSourceRows) (activeDocument next) then pure next
+                  else threadDelay 10000 >> awaitColors next
+          timeout 2000000 (awaitColors stopped) >>= maybe (error "embedded source highlighting timed out") pure
         check "embedded debugger source renders syntax colors"
-          ("color:rgb(255,255,255);background:rgb(0,0,170)'>where" `T.isInfixOf` snapshotHtml stopped)
+          ("color:rgb(255,255,255);background:rgb(0,0,170)'>where" `T.isInfixOf` snapshotHtml colored)
         initialRequests<-commands
         check "variables are not fetched automatically" (not (any ((==Just ("variables"::T.Text)) . field "command") initialRequests))
         final<-case mode of

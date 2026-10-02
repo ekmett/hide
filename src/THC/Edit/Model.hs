@@ -7,6 +7,7 @@ import qualified Data.Text as T
 import Data.Text (Text)
 import qualified Data.Text.Encoding as TE
 import qualified Data.Map.Strict as M
+import qualified Data.Vector as Vec
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import Data.Maybe (listToMaybe, fromMaybe)
@@ -27,17 +28,38 @@ data Rect = Rect { left :: Int, top :: Int, width :: Int, height :: Int } derivi
 inside :: Rect -> Int -> Int -> Bool
 inside (Rect x y w h) a b = a >= x && a < x+w && b >= y && b < y+h
 
-data Document = Document { documentBuffer :: Buffer, documentFile :: Maybe FileState, documentLabel :: Maybe Text, documentHighlight :: [(Char,Style)], documentWidth :: Int, documentCursorVisible :: Bool, documentSuggestedName :: Maybe FilePath } deriving (Eq,Show)
--- Shared by split views; cursor movement and repaint reuse the lazy token cache.
+data Document = Document { documentBuffer :: Buffer, documentFile :: Maybe FileState, documentLabel :: Maybe Text, documentHighlight :: [(Char,Style)], documentWidth :: Int, documentCursorVisible :: Bool, documentSuggestedName :: Maybe FilePath, documentSourceRows :: Maybe (Vec.Vector [(Char,Style)]) } deriving (Eq,Show)
+-- Source colors are populated by the session worker, never forced by input or drawing.
 newDocument :: Buffer -> Maybe FileState -> Document
-newDocument b file = restyle (Document b file Nothing [] 0 True Nothing)
+newDocument b file = restyle (Document b file Nothing [] 0 True Nothing Nothing)
 
--- ponytail: retokenize the buffer after edits; use an incremental engine if large-file latency warrants it.
 restyle :: Document -> Document
-restyle doc | byteMode (documentBuffer doc) = doc {documentHighlight=[],documentWidth=hexWidth 16}
-restyle doc = doc {documentHighlight=highlightFor (maybe (fromMaybe "Main.hs" (documentSuggestedName doc)) filePath (documentFile doc)) text,
-  documentWidth=maximum (0:[displayColumn line (T.length line) | raw<-textLines text,let line=T.dropWhileEnd (=='\r') raw])}
+restyle doc = doc {documentHighlight=[],documentSourceRows=Nothing,
+  documentWidth=if byteMode (documentBuffer doc) then hexWidth 16 else documentWidth doc}
+
+syntaxDocument :: Document -> Bool
+syntaxDocument doc = not (byteMode (documentBuffer doc)) &&
+  maybe True (T.isPrefixOf "Source ") (documentLabel doc)
+
+documentSyntaxPath :: Document -> FilePath
+documentSyntaxPath doc = maybe (fromMaybe "Main.hs" (documentSuggestedName doc)) filePath (documentFile doc)
+
+-- | Explicit synchronous highlighting for snapshots and deterministic pure callers.
+-- Interactive rendering uses the worker-populated row index or plain text.
+highlightDocument :: Document -> Document
+highlightDocument doc
+  | not (syntaxDocument doc) = doc
+  | otherwise = doc {documentHighlight=tokens,documentSourceRows=Just (indexedHighlightRows tokens),documentWidth=measureDocumentWidth text}
   where text=contents (documentBuffer doc)
+        tokens=highlightFor (documentSyntaxPath doc) text
+
+indexedHighlightRows :: [(Char,Style)] -> Vec.Vector [(Char,Style)]
+indexedHighlightRows = Vec.fromList . rows
+  where rows []=[[]]
+        rows xs=let (line,rest)=break ((=='\n').fst) xs in line:case rest of []->[]; _:more->rows more
+
+measureDocumentWidth :: Text -> Int
+measureDocumentWidth text=maximum (0:[displayColumn line (T.length line) | raw<-textLines text,let line=T.dropWhileEnd (=='\r') raw])
 
 data Window = Window
   { windowId :: Int, bufferId :: Int, bounds :: Rect, selection :: Selection
@@ -2116,7 +2138,11 @@ windowHexBytes = hexBytesPerRow . subtract 2 . width . bounds
 
 windowDocumentWidth :: Document -> Window -> Int
 windowDocumentWidth doc w | byteMode (documentBuffer doc) = hexWidth (windowHexBytes w)
-                          | otherwise = documentWidth doc
+                          | documentSourceRows doc/=Nothing = documentWidth doc
+                          | otherwise = maximum (documentWidth doc:caretColumn:
+                              [displayColumn line (T.length line) | n<-[scrollRow w..min (bufferLineCount b-1) (scrollRow w+max 0 (height (bounds w)-2))],let line=bufferLineAt b n])
+  where b=documentBuffer doc
+        (_,caretColumn)=windowCursorCell b w
 
 documentRows :: Document -> Window -> Int
 documentRows doc w | byteMode b = bufferLength b `div` windowHexBytes w+1

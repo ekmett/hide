@@ -44,6 +44,9 @@ your terminal or selected frontend supplies their appearance.
 Syntax highlighting follows the filename. Haskell, C, C++, Cabal files and over
 100 other languages use Skylighting's language definitions. New unnamed text
 buffers start with Haskell highlighting; unknown extensions use plain text.
+Colors update in the background after edits; the current text remains visible
+while coloring is pending. A slow coloring job leaves plain text until the next
+edit, and results from older text are discarded.
 
 The native window and browser use the system clipboard. Text terminals keep an
 editor-local clipboard and request a system clipboard write through OSC 52 on
