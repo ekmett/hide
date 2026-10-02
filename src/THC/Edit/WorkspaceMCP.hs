@@ -242,7 +242,7 @@ arrange action wid x y w h original=do
       v<-floatingWindow d
       a<-maybe (Left "move requires x and y.") Right x
       b<-maybe (Left "move requires x and y.") Right y
-      pure (mapWindow (windowId v) (\window->window {bounds=fitMovingWindow d ((bounds window) {left=a,top=b}),restoredBounds=Nothing}) d,[])
+      pure (moveWindow (windowId v) a b d,[])
     "resize" -> do
       v<-floatingWindow d
       a<-maybe (Left "resize requires width and height.") Right w

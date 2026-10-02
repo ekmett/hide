@@ -79,6 +79,10 @@ checks=do
   (resized,resizeResult)<-call split "editor_arrange" ["action" .= ("resize"::T.Text),"width" .= (40::Int),"height" .= height (bounds (fromJust (activeWindow split)))]
   let win=fromJust (activeWindow split); expected=resizeWindowBounds (windowId win) ((bounds win) {width=40}) split
   ok "resize reuses shared-edge docking behavior" (succeeded resizeResult && map bounds (windows resized)==map bounds (windows expected))
+  let rightWindow=last (windows split)
+  (moved,moveResult)<-call split "editor_arrange" ["action" .= ("move"::T.Text),"windowId" .= windowId rightWindow,"x" .= (40::Int),"y" .= (1::Int)]
+  ok "move carries the tiled neighbor through the same rule as title dragging"
+    (succeeded moveResult && map bounds (windows moved)==[Rect 40 1 50 33,Rect 0 1 40 33] && buffers moved==buffers split)
   (shown,shownResult)<-call original "editor_panels" ["messages" .= True,"messagesHeight" .= (8::Int)]
   ok "messages tool resizes existing dock rules" (succeeded shownResult && problemsVisible shown && drag shown==Nothing && problemsHeight shown==8)
   (badPanel,badPanelResult)<-call shown "editor_panels" ["messages" .= False,"messagesHeight" .= (8::Int)]
