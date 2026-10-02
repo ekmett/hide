@@ -54,14 +54,14 @@ data Command = New | Open | Download | ChangeDir | Save | SaveAs | Close | Quit 
   | AgentChoose Text | AgentSet Text Text
   | AgentDirectory | AgentOptions | AgentPermissions | AgentGuidance | Conversation | AgentCancel | AgentResume | AgentCopyRaw | AgentNew
   | ToggleHex | GoToMessage | CopyAllMessages
-  | ToolchainOptions | SelectToolchain Toolchain
+  | ToolchainOptions | SelectToolchain Toolchain | SelectCompiler Text
   | DebugCommand Text
   | Disabled Text deriving (Eq,Show)
 data ConflictAction = CompareDisk | ReloadDisk | KeepBuffer | SaveConflictAs deriving (Eq,Show)
 data Conflict = Conflict { conflictBuffer :: Int, conflictRevision :: Int, conflictBaseline :: FileState, conflictDisk :: Maybe ByteString } deriving (Eq,Show)
 data GitAction = FetchRemote | PullRemote | MergeBranch Text deriving (Eq,Show)
 data Toolchain = THC | GHC deriving (Eq,Show)
-data ContextKind = ToolchainContext | SourceContext | GitContext | MessagesContext | AgentContext [(Text,Command)] deriving (Eq,Show)
+data ContextKind = ToolchainContext [(Text,Command)] | SourceContext | GitContext | MessagesContext | AgentContext [(Text,Command)] deriving (Eq,Show)
 data LanguageAction = TypeInfo | FindDefinition | Completions | ShowProblems | RestartLanguage | RenameAt Text | RequestCodeActions | ApplyCodeAction Int Int Text deriving (Eq,Show)
 data Completion = Completion Text [(Int,Int,Text)] deriving (Eq,Show)
 data ProjectAction = LoadProject | ProjectPage Int Int | ProjectDetails Int Int deriving (Eq,Show)
@@ -179,7 +179,8 @@ commandDescription cmd = case cmd of
   StopBuild -> "Stop the current build or captured run."
   RunTarget -> "Run the selected target with THC or GHC."
   ToolchainOptions -> "Choose THC or GHC for compile, build, run and debugging."
-  SelectToolchain choice -> "Use "<>T.pack (show choice)<>" for this project."
+  SelectToolchain choice -> "Use saved "<>T.pack (show choice)<>" settings."
+  SelectCompiler command -> if command=="ghc" then "Use the Cabal project compiler, or GHC on PATH for standalone files." else "Use the selected installed GHC for build, run and debugging."
   RunOptions -> "Choose THC or GHC, the executable and project target."
   OpenTerminal -> "Open a project shell in a terminal window."
   StopTerminal -> "Stop the selected terminal process."
@@ -473,11 +474,13 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
     go MakeTarget d = (d,[AgentAction "make" []])
     go StopBuild d = (d,[AgentAction "build-stop" []])
     go RunTarget d = (d,[AgentAction "run" []])
+    go ToolchainOptions d | dialog d/=Nothing = (d,[])
     go ToolchainOptions d =
       let Rect x y _ _=toolchainBadgeRect d
-          opened=openContext ToolchainContext x y d
-      in (opened {contextMenu=fmap (\(r,_) -> (r,if toolchain d==Just GHC then 1 else 0)) (contextMenu opened)},[])
+          opened=openContext (ToolchainContext [("THC",SelectToolchain THC),("GHC Automatic",SelectCompiler "ghc"),("Target settings...",RunOptions)]) x y d
+      in (opened {contextMenu=fmap (\(r,_) -> (r,if toolchain d==Just GHC then 1 else 0)) (contextMenu opened)},[AgentAction "toolchain" []])
     go (SelectToolchain choice) d = (d,[AgentAction "toolchain" [T.pack (show choice)]])
+    go (SelectCompiler command) d = (d,[AgentAction "toolchain" ["GHC",command]])
     go RunOptions d = (d,[AgentAction "run-options" []])
     go OpenTerminal d = (d,[AgentAction "terminal" []])
     go StopTerminal d = (d,[AgentAction "terminal-stop" []])
@@ -1067,7 +1070,7 @@ menuAt :: Int -> Maybe Int
 menuAt x = findIndex (\(start,w) -> x >= start && x < start+w) menuPositions
 
 contextItems :: ContextKind -> [(Text,Command)]
-contextItems ToolchainContext = [("THC",SelectToolchain THC),("GHC",SelectToolchain GHC),("Target settings...",RunOptions)]
+contextItems (ToolchainContext items) = items
 contextItems SourceContext = [("Rename symbol...",RenameSymbol),("Code actions...",CodeActions),("Go to definition",Definition),("Inspect type",InspectType),("Complete identifier",Complete)]
 contextItems MessagesContext = [("Go to source",GoToMessage),("Copy message",Copy),("Copy all messages",CopyAllMessages),("Hide Messages",Problems)]
 contextItems (AgentContext items) = items

@@ -3,11 +3,12 @@ module RunCheck (checks) where
 
 import Control.Concurrent (threadDelay)
 import Control.Exception (bracket)
-import Control.Monad (unless, when, forM_)
+import Control.Monad (unless, when, forM_, foldM)
 import Data.Aeson
 import Data.Aeson.Types (parseMaybe)
 import qualified Data.Aeson.Key as K
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as BL
 import qualified Data.Map.Strict as M
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -26,6 +27,7 @@ import THC.Edit.Terminal (terminalAvailable)
 
 checks :: IO ()
 checks = do
+  compilerMenuChecks
   keyboardChecks
   bracket temporary removePathForcibly $ \root ->
     withEnv "XDG_CONFIG_HOME" (Just (root </> "config")) $
@@ -166,3 +168,89 @@ temporary=do
   removeFile path
   createDirectory path
   canonicalizePath path
+
+compilerMenuChecks :: IO ()
+compilerMenuChecks=bracket temporary removePathForcibly $ \root -> do
+  let bin=root </> "bin"
+      selected=root </> "compiler with spaces"
+      settings=root </> "config/thc-edit"
+      path=settings </> "run.json"
+      started=root </> "started"
+      release=root </> "release"
+      done=root </> "done"
+      desktop=(initialDesktop (80,25)) {sideTree=Just (Sidebar root [] 0 0 20 False)}
+      core d _=pure (False,d)
+      open runtime d=let (shown,effects)=runCommand ToolchainOptions d in
+        snd <$> conversationEffects runtime core shown effects
+      await runtime label predicate d=timeout 5000000 (loop d) >>= maybe (error label) pure
+        where loop current=do
+                next<-tickConversation runtime current
+                if predicate next then pure next else threadDelay 1000 >> loop next
+      waitFile file=timeout 5000000 loop >>= check "compiler menu fixture starts" . (==Just ())
+        where loop=do exists<-doesFileExist file; if exists then pure () else threadDelay 1000 >> loop
+      entries=contextItems . contextKind
+      choose runtime label d=case [command | (name,command)<-entries d,label `T.isInfixOf` name] of
+        command:_ -> let (next,effects)=runCommand command d in snd <$> conversationEffects runtime core next effects
+        [] -> error "missing compiler choice"
+      saved=object ["toolchain" .= ("GHC"::T.Text),"command" .= ("ghc"::T.Text),"cwd" .= root,
+        "target" .= ("exe:kept"::T.Text),"arguments" .= ["literal argument"::T.Text],"custom" .= True,
+        "toolchains" .= object ["THC" .= object ["toolchain" .= ("THC"::T.Text),"command" .= ("/saved/thc"::T.Text),"custom" .= ("retain"::T.Text)]]]
+  check "opening toolchain menu starts asynchronous catalogue discovery"
+    (snd (runCommand ToolchainOptions desktop)==[AgentAction "toolchain" []])
+  createDirectory bin
+  createDirectoryIfMissing True settings
+  writeFile selected ""
+  BS.writeFile path (BL.toStrict (encode saved))
+  python<-findExecutable "python3" >>= maybe (error "python3 required") pure
+  let executable=bin </> "ghcup"
+  writeFile executable $ unlines
+    ["#!"++python,"import os,sys,time", "a=sys.argv[1:]", "assert a[0]=='--offline'",
+     "if a[1]=='list':", " open(os.environ['MENU_STARTED'],'w').close()",
+     " while not os.path.exists(os.environ['MENU_RELEASE']): time.sleep(.001)",
+     " print('ghc 9.8.2 installed')", "else:", " open(os.environ['MENU_DONE'],'w').close()", " print(os.environ['MENU_COMPILER'])"]
+  perms<-getPermissions executable
+  setPermissions executable perms {executable=True}
+  withEnv "XDG_CONFIG_HOME" (Just (root </> "config")) $ withEnv "PATH" (Just bin) $
+    withEnv "MENU_STARTED" (Just started) $ withEnv "MENU_RELEASE" (Just release) $
+    withEnv "MENU_DONE" (Just done) $ withEnv "MENU_COMPILER" (Just selected) $ do
+      withConversation $ \runtime -> do
+        fast<-timeout 500000 (open runtime desktop)
+        shown<-maybe (error "compiler discovery blocked UI") pure fast
+        check "Automatic is immediately available while discovering" (any (T.isInfixOf "Automatic" . fst) (entries shown))
+        waitFile started
+        writeFile release "release"
+        populated<-await runtime "installed compiler menu" (any (T.isInfixOf "9.8.2" . fst) . entries) shown
+        chosen<-choose runtime "9.8.2" populated
+        config<-B.loadBuildConfig settings root
+        value<-decodeStrict' <$> BS.readFile path
+        check "installed selection keeps target arguments and custom fields" (B.buildExecutable config==selected && B.buildTarget config=="exe:kept" && B.buildArguments config==["literal argument"] && (value >>= field "custom")==Just True)
+        reopened<-open runtime chosen
+        automatic<-choose runtime "Automatic" reopened
+        restored<-B.loadBuildConfig settings root
+        check "Automatic restores project compiler selection without losing target" (B.buildExecutable restored=="ghc" && B.buildTarget restored=="exe:kept")
+        (_,edited)<-conversationEffects runtime core automatic [AgentAction "run-config" ["0","ghc","exe:edited","","","[]","1"]]
+        afterEdit<-decodeStrict' <$> BS.readFile path
+        check "editing target retains unknown saved fields" ((afterEdit >>= field "custom")==Just True)
+        _<-choose runtime "THC" =<< open runtime edited
+        other<-decodeStrict' <$> BS.readFile path
+        check "compiler menu preserves the other backend" ((other >>= field "command")==Just ("/saved/thc"::T.Text) && (other >>= field "custom")==Just ("retain"::T.Text))
+      removeFile started
+      removeFile release
+      removeFile done
+      closed<-timeout 3000000 $ withConversation $ \runtime -> do
+        opened<-open runtime desktop
+        waitFile started
+        let dismissed=fst (handleEvent (V.EvKey V.KEsc []) opened)
+        writeFile release "release"
+        waitFile done
+        -- The completed worker may be collected on either side of this tick;
+        -- neither that result nor later ticks can restore the dismissed popup.
+        final<-foldM (\d _ -> threadDelay 1000 >> tickConversation runtime d) dismissed [1..100::Int]
+        check "discovery does not reopen a dismissed popup" (contextMenu final==Nothing)
+      check "closed-menu worker cleanup is bounded" (closed==Just ())
+      removeFile started
+      removeFile release
+      cleanup<-timeout 3000000 $ withConversation $ \runtime -> do
+        _<-open runtime desktop
+        waitFile started
+      check "conversation shutdown cancels pending discovery" (cleanup==Just ())

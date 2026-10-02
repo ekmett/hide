@@ -2,7 +2,7 @@
 module THC.Edit.Conversation (ConversationState, conversationServices, conversationAgents, withConversationAt, chatTools, chatToolNames, chatTool, withConversation, conversationEffects, tickConversation, parseLaunch, renderReply, pauseLabel, renderTimestamp) where
 
 import Prelude hiding (reads)
-import Control.Exception (IOException, bracket, try, onException)
+import Control.Exception (IOException, bracket, try, onException, mask)
 #ifdef WITH_WINDOW
 import Control.Concurrent (forkIO)
 import System.Process (createProcess, proc, waitForProcess)
@@ -20,10 +20,10 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
 import Data.Time (UTCTime, TimeZone, getCurrentTime, getCurrentTimeZone, diffUTCTime, utcToLocalTime, formatTime, defaultTimeLocale)
 import Data.IORef
-import Data.List (find, sortOn)
+import Data.List (find, findIndex, sortOn)
 import qualified Data.Map.Strict as M
 import qualified Data.Set as S
-import Data.Maybe (fromMaybe, mapMaybe, isNothing)
+import Data.Maybe (fromMaybe, mapMaybe, isNothing, listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -32,6 +32,7 @@ import System.FilePath ((</>), takeDirectory, isAbsolute, makeRelative, splitDir
 import Data.Text.Encoding.Error (lenientDecode)
 import qualified THC.Edit.Terminal as Terminal
 import qualified THC.Edit.Consoles as C
+import qualified THC.Edit.Compilers as Compilers
 import qualified THC.Edit.Build as B
 import qualified THC.Edit.BuildJobs as Jobs
 import System.Info (os)
@@ -79,6 +80,7 @@ data State = State
   , expandedToolRuns :: S.Set (Text,Text)
   , childControls :: M.Map Text (Maybe Text,Async (Either Text ()))
   , childCancels :: M.Map Text (Async (Either Text ()))
+  , compilerDiscovery :: Maybe (Async [Compilers.Compiler])
   , buildSettingsCache :: Maybe (Maybe UTCTime,Toolchain)
   , resumeRecordPath :: FilePath
   }
@@ -109,7 +111,7 @@ withConversationAt root action = C.withConsoles $ \consoles -> Jobs.withBuildJob
     , approvals=[],presented=Nothing,deferredApproval=False,nextApproval=1,queuedQueries=[]
     , ownedTerminals=S.empty,terminalWaiters=M.empty,lastMessageAt=Nothing
     , lastRender=(0,Nothing,[]),lastSession=remembered,waitingQuestion=Nothing,lastQuestion=Nothing
-    , deliveredContext=Nothing,buildSettingsCache=Nothing,resumeRecordPath=resumePath,directoryAgents=[],agentDelivery=Nothing
+    , deliveredContext=Nothing,compilerDiscovery=Nothing,buildSettingsCache=Nothing,resumeRecordPath=resumePath,directoryAgents=[],agentDelivery=Nothing
     , agentInitialized=Null,agentConfig=Null,streamTails=M.empty,lastAgentSync=Nothing,childRecords=M.empty,childRender=Nothing,childCancels=M.empty,childControls=M.empty,expandedToolRuns=S.empty }
   AR.withAgentRuntime root (provider <$> readIORef ref) $ \agents ->
     bracket (pure (ConversationState directory ref consoles jobs agents)) closeConversation action
@@ -127,6 +129,7 @@ closeConversation (ConversationState _ ref _ _ _) = do
   forM_ (waitingQuestion s) $ \(_,reply)->void (tryPutMVar reply (Left "Editor session closed."))
   finishAgentDelivery ref (Left "Editor session closed.")
   mapM_ denyChild (map snd (approvals s))
+  mapM_ cancel (compilerDiscovery s)
   mapM_ cancel (childCancels s)
   mapM_ (cancel . snd) (childControls s)
   mapM_ A.stopClient (connection s)
@@ -178,10 +181,64 @@ buildChoices saved = M.insert (fromMaybe "THC" (field "toolchain" saved)) (flat 
   where flat (Object fields')=Object (KM.delete "toolchains" fields'); flat _=object []
 
 rememberBuildChoices :: Value -> Value -> Value
-rememberBuildChoices saved selected = case selected of
+rememberBuildChoices saved selected = case combined of
   Object fields' -> Object (KM.insert "toolchains" (toJSON choices) fields')
-  _ -> selected
-  where choices=M.insert (fromMaybe "THC" (field "toolchain" selected)) selected (buildChoices saved)
+  _ -> combined
+  where
+    name=fromMaybe "THC" (field "toolchain" selected)
+    previous=M.findWithDefault (object []) name (buildChoices saved)
+    combined=mergeSettings previous selected
+    choices=M.insert name combined (buildChoices saved)
+
+mergeSettings :: Value -> Value -> Value
+mergeSettings (Object old) (Object new)=Object (KM.union new old)
+mergeSettings _ new=new
+
+-- One bounded discovery worker belongs to this conversation runtime. Reopening
+-- while it runs shares the catalogue query; results never reopen a closed menu.
+openCompilerMenu :: ConversationState -> Desktop -> IO Desktop
+openCompilerMenu (ConversationState directory ref _ _ _) d
+  | dialog d/=Nothing = pure d
+  | otherwise = do
+      mask $ \restore -> do
+        current<-readIORef ref
+        when (isNothing (compilerDiscovery current)) $ do
+          worker<-async (restore Compilers.installedCompilers)
+          modifyIORef' ref (\state -> state {compilerDiscovery=Just worker})
+      saved<-readRunSettings directory
+      pure (compilerMenu False saved [] d) {status="Finding installed GHC compilers..."}
+
+pollCompilerMenu :: ConversationState -> Desktop -> IO Desktop
+pollCompilerMenu (ConversationState directory ref _ _ _) d = do
+  current<-readIORef ref
+  result<-maybe (pure Nothing) poll (compilerDiscovery current)
+  case result of
+    Nothing -> pure d
+    Just outcome -> do
+      modifyIORef' ref (\state -> state {compilerDiscovery=Nothing})
+      case contextKind d of
+        ToolchainContext _ | contextMenu d/=Nothing,dialog d==Nothing -> do
+          saved<-readRunSettings directory
+          let compilers=either (const []) id outcome
+          pure (compilerMenu True saved compilers d) {status=if null compilers then "Automatic uses project settings; no GHCup compilers found." else "Select an installed GHC or Automatic."}
+        _ -> pure d
+
+compilerMenu :: Bool -> Value -> [Compilers.Compiler] -> Desktop -> Desktop
+compilerMenu preserve saved compilers d = opened {contextMenu=fmap (\(r,_) -> (r,chosen)) (contextMenu opened)}
+  where
+    ghc=M.findWithDefault (object []) "GHC" (buildChoices saved)
+    command=fromMaybe "ghc" (field "command" ghc)
+    selected=if (field "toolchain" saved :: Maybe Text)==Just "GHC" then SelectCompiler command else SelectToolchain THC
+    installed=[("GHC "<>Compilers.compilerVersion compiler,SelectCompiler (T.pack (Compilers.compilerPath compiler))) | compiler<-compilers]
+    custom=[("GHC saved compiler",SelectCompiler command) | command/="ghc",SelectCompiler command `notElem` map snd installed]
+    entries=[("THC",SelectToolchain THC),("GHC Automatic",SelectCompiler "ghc")]++installed++custom++[("Target settings...",RunOptions)]
+    rows=[(if action==selected then "✓ "<>label else "  "<>label,action) | (label,action)<-entries]
+    previous=case (preserve,contextMenu d) of
+      (True,Just (_,index)) -> snd <$> listToMaybe (drop index (contextItems (contextKind d)))
+      _ -> Nothing
+    chosen=fromMaybe 0 (findIndex ((==fromMaybe selected previous).snd) entries)
+    Rect x y _ _=toolchainBadgeRect d
+    opened=openContext (ToolchainContext rows) x y d
 
 conversationEffects :: ConversationState -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> [Effect] -> IO (Bool,Desktop)
 conversationEffects runtime@(ConversationState _ ref _ _ _) fallback = foldM apply . (False,)
@@ -294,11 +351,14 @@ performPrimary runtime@(ConversationState directory ref consoles jobs _) action 
     ("compile",_) -> runTarget directory consoles jobs (Just B.Compile) d
     ("make",_) -> runTarget directory consoles jobs (Just B.Make) d
     ("build-stop",_) -> Jobs.stopBuildJob jobs d
-    ("toolchain",[choice]) | choice `elem` ["THC","GHC"] -> do
+    ("toolchain",[]) -> openCompilerMenu runtime d
+    ("toolchain",choice:commands) | choice `elem` ["THC","GHC"],length commands<=1,
+      all (\command -> not (T.null command) && T.length command<=4096 && not (T.any (== '\0') command)) commands -> do
       saved<-readRunSettings directory
       let selected=if choice=="GHC" then B.GHC else B.THC
           defaults=object ["toolchain" .= choice,"command" .= (if selected==B.GHC then "ghc" else "thc"::Text)]
-          chosen=M.findWithDefault defaults choice (buildChoices saved)
+          previous=M.findWithDefault defaults choice (buildChoices saved)
+          chosen=mergeSettings previous (object (["toolchain" .= choice]++["command" .= command | command<-commands]))
       result<-persist (directory </> "run.json") (rememberBuildChoices saved chosen)
       modifyIORef' ref (\state -> state {buildSettingsCache=Nothing})
       pure $ either (\err -> d {status=err}) (const d {toolchain=Just selected,status=choice<>" selected. F9 builds; Ctrl+F9 runs."}) result
@@ -503,7 +563,8 @@ tickConversation runtime@(ConversationState directory ref consoles jobs _) origi
       modifyIORef' ref (\state -> state {buildSettingsCache=Just (stamp,choice)})
       pure choice
   let loaded=original {toolchain=Just selected}
-  fresh<-pruneChildApprovals runtime loaded
+  menuReady<-pollCompilerMenu runtime loaded
+  fresh<-pruneChildApprovals runtime menuReady
   initial<-drainConversationAgents runtime fresh
   currentQuestion<-readIORef ref
   ready<-case waitingQuestion currentQuestion of

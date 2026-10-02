@@ -255,7 +255,7 @@ checks = do
       ghc=fst (handleEvent (V.EvKey V.KDown []) toolchainPopup)
       (_,selectEffects)=handleEvent (V.EvKey V.KEnter []) ghc
   check "status toolchain dropdown selects GHC by keyboard"
-    (contextMenu toolchainPopup/=Nothing && selectEffects==[AgentAction "toolchain" ["GHC"]])
+    (contextMenu toolchainPopup/=Nothing && selectEffects==[AgentAction "toolchain" ["GHC","ghc"]])
   check "modal status cannot switch toolchain"
     (dialog (fst (handleEvent (V.EvMouseDown (left selector+2) statusY V.BLeft []) statusModal))==dialog statusModal)
   let numbered=fst (runCommand New desktop)
