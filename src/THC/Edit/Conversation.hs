@@ -2,7 +2,7 @@
 module THC.Edit.Conversation (ConversationState, conversationServices, conversationAgents, withConversationAt, chatTools, chatToolNames, chatTool, withConversation, conversationEffects, tickConversation, parseLaunch, renderReply, pauseLabel, renderTimestamp) where
 
 import Prelude hiding (reads)
-import Control.Exception (IOException, bracket, try, onException, mask, mask_)
+import Control.Exception (IOException, bracket, try, onException, mask, mask_, evaluate)
 #ifdef WITH_WINDOW
 import Control.Concurrent (forkIO)
 import System.Process (createProcess, proc, waitForProcess)
@@ -36,6 +36,7 @@ import qualified THC.Edit.Compilers as Compilers
 import qualified THC.Edit.Build as B
 import qualified THC.Edit.BuildJobs as Jobs
 import System.Info (os)
+import System.Mem.StableName (StableName, makeStableName)
 import System.IO (openBinaryTempFile, hClose)
 import Text.Read (readMaybe)
 import qualified THC.Edit.ACP as A
@@ -74,7 +75,7 @@ data State = State
   , ownedTerminals :: S.Set Text
   , terminalWaiters :: M.Map Text [Value]
   , lastMessageAt :: Maybe UTCTime
-  , lastRender :: (Int,Maybe Text,[Record]), lastSession :: Maybe (A.Launch,FilePath,Text)
+  , lastRender :: Maybe (Int,Maybe Text,StableName [Record]), lastSession :: Maybe (A.Launch,FilePath,Text)
   , waitingQuestion :: Maybe (Int,MVar (Either Text Value)), lastQuestion :: Maybe ChatQuestion
   , deliveredContext :: Maybe Value
   , directoryAgents :: [AH.AgentId]
@@ -120,7 +121,7 @@ withConversationAt root action = C.withConsoles $ \consoles -> Jobs.withBuildJob
     , pending=M.empty,queuedPrompt=Nothing,transcript=[],reads=M.empty
     , approvals=[],presented=Nothing,deferredApproval=False,nextApproval=1,queuedQueries=[]
     , ownedTerminals=S.empty,terminalWaiters=M.empty,lastMessageAt=Nothing
-    , lastRender=(0,Nothing,[]),lastSession=remembered,waitingQuestion=Nothing,lastQuestion=Nothing
+    , lastRender=Nothing,lastSession=remembered,waitingQuestion=Nothing,lastQuestion=Nothing
     , deliveredContext=Nothing,compilerDiscovery=Nothing,fileCaptures=[],retiringRequests=[],promptPreparation=Nothing,buildSettingsCache=Nothing,buildSettingsVersion=0,buildSettingsWorker=Nothing,buildSettingsChecked=Nothing,resumeRecordPath=resumePath,shellLaunches=[],directoryAgents=[],agentDelivery=Nothing
     , agentInitialized=Null,agentConfig=Null,streamTails=M.empty,lastAgentSync=Nothing,childRecords=M.empty,childRender=Nothing,childCancels=M.empty,childControls=M.empty,expandedToolRuns=S.empty }
   AR.withAgentRuntime root (provider <$> readIORef ref) $ \agents ->
@@ -294,8 +295,8 @@ perform (ConversationState _ ref _ _ _) "toggle-tool-run" [ident] d=do
   writeIORef ref next
   pure (keepConversationPosition d (paintView target False next {transcript=records} d))
 perform (ConversationState _ ref _ _ _) "execute-shell-block" [bidText,startText,endText,dialect,body] d
-  | Just bid<-readMaybe (T.unpack bidText), Just start<-readMaybe (T.unpack startText), Just end<-readMaybe (T.unpack endText),
-    Just doc<-M.lookup bid (buffers d), (start,end,dialect,body) `elem` documentShellBlocks doc =
+  | Just bid<-readMaybe (T.unpack bidText), Just blockStart<-readMaybe (T.unpack startText), Just blockEnd<-readMaybe (T.unpack endText),
+    Just doc<-M.lookup bid (buffers d), (blockStart,blockEnd,dialect,body) `elem` documentShellBlocks doc =
       if not Terminal.terminalAvailable then pure (message "Cannot execute shell block" ["Embedded terminals are unavailable in this build."] d)
       else if T.null (T.strip body) then pure (message "Cannot execute shell block" ["This shell block is empty."] d)
       else if dialect `notElem` ["sh","bash","zsh"] then pure (message "Cannot execute shell block" ["This shell dialect is unavailable."] d)
@@ -392,8 +393,8 @@ performPrimary runtime@(ConversationState directory ref consoles jobs _) action 
       saved<-readRunSettings directory
       let selected=if choice=="GHC" then B.GHC else B.THC
           defaults=object ["toolchain" .= choice,"command" .= (if selected==B.GHC then "ghc" else "thc"::Text)]
-          previous=M.findWithDefault defaults choice (buildChoices saved)
-          chosen=mergeSettings previous (object (["toolchain" .= choice]++["command" .= command | command<-commands]))
+          previousChoice=M.findWithDefault defaults choice (buildChoices saved)
+          chosen=mergeSettings previousChoice (object (["toolchain" .= choice]++["command" .= command | command<-commands]))
       result<-persist (directory </> "run.json") (rememberBuildChoices saved chosen)
       when (result==Right ()) $ modifyIORef' ref (\state -> state
         {buildSettingsCache=Just selected,buildSettingsVersion=buildSettingsVersion state+1,buildSettingsChecked=Nothing})
@@ -673,13 +674,17 @@ tickConversation runtime@(ConversationState directory ref consoles jobs _) origi
       modifyIORef' ref (\state -> state {approvals=filter ((/=token).fst) (approvals state),presented=Nothing})
     _ -> pure ()
   afterDismiss<-readIORef ref
+  -- The transcript is immutable. Idle navigation need not compare every old
+  -- message and tool JSON value just to discover that it has not changed.
+  transcriptIdentity<-makeStableName =<< evaluate (transcript afterDismiss)
   let widthNow=conversationWidth advanced
+      renderKey=(widthNow,session afterDismiss,transcriptIdentity)
       -- A fresh runtime does not own the recovered transcript. Keep that view
       -- and its draft until a human connects, or a new question needs painting.
       ownsView=not (isNothing (connection afterDismiss)) || not (null (transcript afterDismiss)) || chatQuestion advanced/=Nothing || lastQuestion afterDismiss/=Nothing
-      redraw=ownsView && (lastRender afterDismiss/=(widthNow,session afterDismiss,transcript afterDismiss) || lastQuestion afterDismiss/=chatQuestion advanced)
+      redraw=ownsView && (lastRender afterDismiss/=Just renderKey || lastQuestion afterDismiss/=chatQuestion advanced)
       rendered=(if redraw then paint False afterDismiss advanced else advanced) {agentReplying=busy afterDismiss,agentQueued=length (queuedQueries afterDismiss)}
-  when redraw (modifyIORef' ref (\state -> state {lastRender=(widthNow,session state,transcript state),lastQuestion=chatQuestion rendered}))
+  when redraw (modifyIORef' ref (\state -> state {lastRender=Just renderKey,lastQuestion=chatQuestion rendered}))
   syncConversationAgent runtime
   visible<-refreshChildConversation runtime rendered
   shown<-present runtime visible
@@ -1194,7 +1199,7 @@ renderReply graphical width outgoing = fst . renderReplyWithShellBlocks graphica
 renderReplyWithShellBlocks :: Bool -> Int -> Bool -> Text -> ([(Char,Style)],[(Int,Int,Text,Text)])
 renderReplyWithShellBlocks graphical requested outgoing text
   | width<6 = (recolor markdown,blocks)
-  | otherwise = (concat rendered,[(position start,position end,dialect,body) | (start,end,dialect,body)<-blocks])
+  | otherwise = (concat rendered,[(position blockStart,position blockEnd,dialect,body) | (blockStart,blockEnd,dialect,body)<-blocks])
   where
     width=max 1 requested
     (markdown,blocks)=renderMarkdownWithShellBlocks (if width<6 then width else width-5) text
