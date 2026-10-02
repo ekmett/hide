@@ -1124,7 +1124,7 @@ mouseEvent x y V.BLeft _ d | Just capture <- drag d = (case capture of
   TreeScrolling -> case sideTree d of
     Just tree -> scrollTreeTo ((y-3)*treeScrollLimit d tree `div` max 1 (treeContentRows d-3)) tree d
     Nothing -> d
-  Moving i dx dy -> mapWindow i (\w -> w {bounds = fitMovingWindow d (bounds w) {left=x-dx,top=y-dy},restoredBounds=Nothing}) d
+  Moving i dx dy -> moveWindow i (x-dx) (y-dy) d
   Resizing i dx dy -> case find ((==i).windowId) (windows d) of
     Just w -> resizeWindowBounds i (bounds w) {width=x-left (bounds w)+dx,height=y-top (bounds w)+dy} d
     Nothing -> d
@@ -1187,10 +1187,28 @@ dragKey key mods d = case dragOriginal d of
       let r=bounds w in
       (if V.MShift `elem` mods
         then resizeWindowBounds wid r {width=width r+dx,height=height r+dy} d
-        else mapWindow wid (\v -> v {bounds=fitMovingWindow d r {left=left r+dx,top=top r+dy},restoredBounds=Nothing}) d,[])
+        else moveWindow wid (left r+dx) (top r+dy) d,[])
       | otherwise -> (d,[])
   _ -> (d,[])
   where done=d {drag=Nothing,dragOriginal=Nothing}
+
+-- Walk both moving edges against the original contacts on each axis. Doing
+-- the axes independently keeps a diagonal title drag from losing its neighbors
+-- after the first axis moves. Corner resizing remains the way to detach.
+moveWindow :: Int -> Int -> Int -> Desktop -> Desktop
+moveWindow wid _ _ d | M.member wid (dockedTerminals d) = d
+moveWindow wid x y d = case find ((==wid).windowId) (windows d) of
+  Nothing -> d
+  Just source ->
+    let r=bounds source
+        target=fitMovingWindow d r {left=x,top=y}
+        views=floatingWindows d
+        along axis delta area=snd (moveEdges axis (True,True) delta area (wid,r) views)
+        horizontal=along False (left target-left r) (treeWidthOf d,fst (screenSize d))
+        vertical=along True (top target-top r) (1,top (problemsRect d))
+        combine a b=let ar=bounds a; br=bounds b; rectangle=ar {top=top br,height=height br}
+                    in a {bounds=rectangle,restoredBounds=if restoredBounds b==Nothing then Nothing else restoredBounds a}
+    in replaceFloating (zipWith combine horizontal vertical) d
 
 -- A diagonal corner gesture deliberately breaks contacts. A single moving edge
 -- uses the same rule whether it came from a frame, corner or Shift-arrow drag.
@@ -1219,13 +1237,18 @@ resizeWindowEdge wid vertical leading position d = case find ((==wid).windowId) 
 -- Docks seed the same contact walk with a rectangle outside the window list.
 -- The returned edge can stop short of the pointer to preserve every minimum size.
 resizeEdge :: Bool -> Bool -> Int -> (Int,Int) -> (Int,Rect) -> [Window] -> (Int,[Window])
-resizeEdge vertical leading position (desktopLow,desktopHigh) source views = (oldEdge+delta,map apply views)
+resizeEdge vertical leading position area source views = (oldEdge+delta,moved)
   where
     (sourceLow,sourceHigh)=axisBounds vertical (snd source)
     oldEdge=if leading then sourceLow else sourceHigh
-    requested=position-oldEdge
+    (delta,moved)=moveEdges vertical (leading,not leading) (position-oldEdge) area source views
+
+moveEdges :: Bool -> (Bool,Bool) -> Int -> (Int,Int) -> (Int,Rect) -> [Window] -> (Int,[Window])
+moveEdges _ _ 0 _ _ views = (0,views)
+moveEdges vertical (low,high) requested (desktopLow,desktopHigh) source views = (delta,map apply views)
+  where
     minimumSize=min (if vertical then 5 else 16) (desktopHigh-desktopLow)
-    seed=(source,leading,not leading)
+    seed=(source,low,high)
     planned=propagate [seed] [seed]
     -- ponytail: list scans are cubic in window count; index touching edges only
     -- if desktops with hundreds of windows make this visible during dragging.

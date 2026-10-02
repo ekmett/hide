@@ -73,8 +73,8 @@ windows alongside one another; **Cascade** staggers them. **F5** zooms the activ
 window. During a move or resize, arrows move, Shift+arrows resize and Enter
 finishes. Escape restores all windows affected by the drag.
 
-Touching edges stay together when you move a divider. Equal sides share the
-divider; a smaller window whose whole side touches the edge moves with it. Once
+Touching edges stay together when you drag a title or move a divider. Equal sides
+share the divider; a smaller window whose whole side touches the edge moves with it. Once
 that window reaches a desktop boundary, its outer edge stays there and further
 divider movement resizes it. The same rule carries a chain of touching windows.
 Partial overlaps stay independent, and a diagonal corner drag breaks the contact.

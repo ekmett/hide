@@ -232,6 +232,35 @@ checks = do
       rows=arranged [Rect 0 1 80 15,Rect 20 16 30 8]
       rowAtBottom=corner 0 15 rows
       rowPulled=corner 0 (-10) (release rowAtBottom)
+  let stacked=arranged [Rect 0 20 100 19,Rect 0 1 100 19]
+      titleGrab=mouse 15 20 stacked
+      titlePull=mouse 15 15 titleGrab
+  check "title dragging a tiled lower window shrinks its upper neighbor"
+    (rectangles titlePull==[Rect 0 15 100 19,Rect 0 1 100 14])
+  check "keyboard movement carries the same tiled divider"
+    (rectangles (fst (handleEvent (V.EvKey V.KUp []) titleGrab))==
+      [Rect 0 19 100 19,Rect 0 1 100 18])
+  check "Escape restores both sides after title dragging a tiled divider"
+    (rectangles (fst (handleEvent (V.EvKey V.KEsc []) titlePull))==rectangles stacked)
+  let tiledRows=fst (runCommand Tile (arranged [Rect 5 5 30 10,Rect 8 8 30 10]))
+      lower=focusWindow 2 tiledRows
+      lowerGrab=mouse 15 20 lower
+      columns=arranged [Rect 50 1 50 38,Rect 0 1 50 38]
+      narrowAbove=arranged [Rect 10 20 80 15,Rect 20 10 30 10]
+      diagonal=mouse 25 15 (mouse 15 20 narrowAbove)
+  check "the actual Tile command produces contacts followed by title dragging"
+    (rectangles (mouse 15 15 lowerGrab)==[Rect 0 15 100 19,Rect 0 1 100 14] &&
+     buffers titlePull==buffers stacked)
+  check "title dragging stops at the neighbor minimum and can return"
+    (rectangles (mouse 15 (-50) titleGrab)==[Rect 0 6 100 19,Rect 0 1 100 5] &&
+     rectangles (mouse 15 20 titlePull)==rectangles stacked)
+  check "title dragging follows horizontal tiled contacts too"
+    (rectangles (mouse 55 1 (mouse 65 1 columns))==[Rect 40 1 50 38,Rect 0 1 40 38])
+  check "diagonal title dragging retains the original shorter-side contact"
+    (rectangles diagonal==[Rect 20 15 80 15,Rect 20 5 30 10])
+  check "title dragging leaves partially touching neighbors independent"
+    (rectangles (mouse 15 15 (mouse 15 20 (arranged [Rect 10 20 50 15,Rect 40 10 40 10])))==
+      [Rect 10 15 50 15,Rect 40 10 40 10])
   check "edge resize carries a fully touching shorter neighbor"
     (rectangles carried==[Rect 0 1 50 30,Rect 50 5 20 10] && buffers carried==buffers largeAndSmall)
   check "carried window sticks after reaching the right desktop edge"
