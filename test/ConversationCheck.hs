@@ -250,6 +250,27 @@ checks = bracket temporary removePathForcibly $ \root ->
         check "captured write rejects intervening buffer edits without approval"
           (maybe False hasError writeResult && dialog completed==Nothing)
         check "stale asynchronous write leaves disk intact" . (=="disk original\n") =<< BS.readFile source
+    forM_ ["slow-replaced","slow-private"] $ \scenario -> do
+      held<-newEmptyMVar
+      releaseCapture<-newEmptyMVar
+      withAsync (bracket (Posix.openFd pipe Posix.ReadWrite Posix.defaultFileFlags >>= \fd -> Posix.setFdOption fd Posix.CloseOnExec True >> Posix.fdToHandle fd) hClose $ \handle -> do
+        putMVar held ()
+        takeMVar releaseCapture
+        BS.hPut handle "held read\n") $ \writer -> withConversation $ \runtime -> do
+          takeMVar held
+          configured<-configure runtime ("yes"::T.Text) desktop
+          started<-prompt runtime scenario configured
+          waiting<-await runtime "prepared read behind FIFO head" (T.isInfixOf "guarded requests sent" . conversationText) started
+          let guarded=if scenario=="slow-private" then waiting {guestPrivatePaths=source:guestPrivatePaths waiting}
+                else waiting {buffers=M.map (\doc->if fmap filePath (documentFile doc)==Just source
+                  then doc {documentBuffer=(newBuffer "same revision replacement") {revision=revision (documentBuffer doc)}} else doc) (buffers waiting)}
+          check "prepared response stays queued until FIFO head completes" . (==Nothing) =<< response (scenario<>"-source")
+          putMVar releaseCapture ()
+          wait writer
+          completed<-await runtime "prepared response revalidation" ((=="Agent: end_turn").status) guarded
+          answer<-response (scenario<>"-source")
+          check "prepared reads reject equal-revision replacement or newly private source"
+            (maybe False hasError answer && dialog completed==Nothing)
     cancelOpened<-newEmptyMVar
     cancelRelease<-newEmptyMVar
     withAsync (bracket (Posix.openFd pipe Posix.ReadWrite Posix.defaultFileFlags >>= \fd -> Posix.setFdOption fd Posix.CloseOnExec True >> Posix.fdToHandle fd) hClose $ \_ -> do
@@ -744,6 +765,10 @@ providerScript=unlines
   , "      call('slow-read','fs/read_text_file',{'path':os.path.join(os.path.dirname(os.environ['THC_SOURCE']),'slow-source')})"
   , "      call('slow-write','fs/write_text_file',{'path':os.environ['THC_SOURCE'],'content':'must not overwrite'})"
   , "      update({'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'file requests sent'}})"
+  , "    elif scenario in ['slow-replaced','slow-private']:"
+  , "      call(scenario+'-head','fs/read_text_file',{'path':os.path.join(os.path.dirname(os.environ['THC_SOURCE']),'slow-source')})"
+  , "      call(scenario+'-source','fs/read_text_file',{'path':os.environ['THC_SOURCE'],'line':1,'limit':1})"
+  , "      update({'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'guarded requests sent'}})"
   , "    elif scenario=='write-two': call('two-read-a','fs/read_text_file',{'path':os.environ['THC_SOURCE']})"
   , "    elif scenario=='wait': update({'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'waiting for cancellation'}})"
   , "    elif scenario=='disconnect': sys.exit(0)"
@@ -756,7 +781,7 @@ providerScript=unlines
   , "        command=\"import sys,time;print('0123456789',end='',flush=True);time.sleep(0.1);sys.exit(9)\" if scenario=='terminal' else (\"open('should-not-exist','w').close()\" if scenario=='terminal-reject' else 'import time;time.sleep(30)')"
   , "      call('terminal-create-'+str(terminal_serial),'terminal/create',{'command':executable,'args':['-c',command],'outputByteLimit':8})"
   , "  elif method is None and isinstance(ident,str):"
-  , "    if ident=='slow-write': finish()"
+  , "    if ident=='slow-write' or ident in ['slow-replaced-source','slow-private-source']: finish()"
   , "    elif ident=='two-read-a': call('two-read-b','fs/read_text_file',{'path':os.environ['THC_SECOND']})"
   , "    elif ident=='two-read-b': call('two-write-a','fs/write_text_file',{'path':os.environ['THC_SOURCE'],'content':'first approved\\n'})"
   , "    elif ident=='two-write-a': call('two-write-b','fs/write_text_file',{'path':os.environ['THC_SECOND'],'content':'should be rejected\\n'})"

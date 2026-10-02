@@ -2,7 +2,7 @@
 module ACPCheck (checks) where
 
 import Control.Concurrent (threadDelay)
-import Control.Exception (bracket)
+import Control.Exception (bracket, try, ErrorCall)
 import Control.Monad (unless, forM_, replicateM)
 import Data.Aeson
 import qualified Data.ByteString as BS
@@ -34,7 +34,8 @@ checks = bracket temporary removePathForcibly $ \root -> do
     ident <- request client "initialize" (object ["text" .= ("λ😀\nhello" :: T.Text)])
     events <- waitEvents client (any isRequest)
     check "inbound string id preserved" (Request (String "permission/λ") "session/request_permission" Null `elem` events)
-    respond client (String "permission/λ") (Right (object ["approved" .= False]))
+    prepared<-prepareResponse (String "permission/λ") (Right (object ["approved" .= False]))
+    respondPrepared client prepared
     result <- waitEvents client (hasResponse ident)
     check "fragmented UTF-8 round trip and env override" (Response ident (Right (String "λ😀\nhello")) `elem` result)
     numeric <- if any isRequest result then pure result else waitEvents client (any isRequest)
@@ -113,6 +114,33 @@ checks = bracket temporary removePathForcibly $ \root -> do
     result<-timeout 10000000 (drain [])
     check "ACP batches preserve FIFO and byte accounting across bursts"
       (fmap (\events->[name | Notification name _<-events]) result==Just (map (T.pack.show) [0::Int ..79]))
+  strict<-try (prepareResponse (String "strict") (Right (String (error "deferred response encoding")))) :: IO (Either ErrorCall PreparedResponse)
+  check "preparing a response forces JSON encoding before enqueue" (case strict of Left _->True; _->False)
+  writeFile server $ unlines
+    [ "import json,sys"
+    , "for line in sys.stdin:"
+    , " r=json.loads(line); text=r.get('result', '')"
+    , " print(json.dumps(dict(jsonrpc='2.0',method='prepared',params=[r['id'],len(text)])),flush=True)"
+    ]
+  bracket start stopClient $ \client -> do
+    first<-prepareResponse (String "first") (Right (String (T.replicate 500000 "λ\n\"")))
+    second<-prepareResponse (Number 2) (Right (String "second"))
+    queued<-timeout 1000000 (respondPrepared client first >> respondPrepared client second)
+    check "prepared large responses enqueue without doing payload work" (queued==Just ())
+    replies<-waitEvents client (\events->length [() | Notification "prepared" _<-events]==2)
+    check "prepared responses preserve FIFO, escaped Unicode and ids"
+      ([value | Notification "prepared" value<-replies]==[toJSON [String "first",Number 1500000],toJSON [Number 2,Number 6]])
+    oversized<-prepareResponse (String "oversized") (Right (String (T.replicate (8*1024*1024) "\n")))
+    respondPrepared client oversized
+    ended<-waitEvents client (any isDisconnect)
+    check "prepared frames enforce encoded byte limit after escaping" (any isDisconnect ended)
+  writeFile server "import time\ntime.sleep(30)\n"
+  bracket start stopClient $ \client -> do
+    body<-prepareResponse (String "blocked") (Right (String (T.replicate (8*1024*1024) "x")))
+    queued<-timeout 1000000 (replicateM 8 (respondPrepared client body))
+    check "prepared responses keep a blocked peer's outgoing bytes bounded" (maybe False ((==8).length) queued)
+    ended<-waitEvents client (any isDisconnect)
+    check "prepared response queue byte overflow disconnects" (any isDisconnect ended)
   putStrLn "ACP checks passed"
   where
     check label ok = unless ok (error label)

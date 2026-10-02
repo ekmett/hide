@@ -60,6 +60,21 @@ checks = bracket temporary removePathForcibly $ \base -> do
   assertRejected "edited buffer rejects stale snapshot" fresh "overwritten" (insertText "later " written)
   let changedBaseline=written {buffers=M.adjust (\doc -> doc {documentFile=Just originalFile}) 1 (buffers written)}
   assertRejected "changed baseline rejects snapshot even with same revision" fresh "overwritten" changedBaseline
+  identity<-sourceIdentity path written
+  check "freshness identity survives window splits" . (==identity) =<< sourceIdentity path (fst (runCommand SplitVertical written))
+  check "freshness identity catches changed baseline with equal revision" . (/=identity) =<< sourceIdentity path changedBaseline
+  let replacement=written {buffers=M.adjust (\doc->doc {documentBuffer=(newBuffer "reloaded") {revision=revision (documentBuffer doc)}}) 1 (buffers written)}
+  check "freshness identity catches replacement buffer with equal revision" . (/=identity) =<< sourceIdentity path replacement
+  let duplicate=addDocument (Just originalFile) (newBuffer "last duplicate") written
+      changedEarlier=duplicate {buffers=M.adjust (\doc->doc {documentBuffer=newBuffer "earlier ignored"}) 1 (buffers duplicate)}
+  duplicateIdentity<-sourceIdentity path duplicate
+  check "freshness identity uses same last duplicate as source snapshots" (fmap snapshotText (M.lookup path (sourceSnapshots duplicate))==Just "last duplicate")
+  check "earlier duplicate does not replace the winning source identity" . (==duplicateIdentity) =<< sourceIdentity path changedEarlier
+  check "editing the last duplicate invalidates its source identity" . (/=duplicateIdentity) =<< sourceIdentity path (insertText "changed " duplicate)
+  let opaque=written {buffers=M.adjust (\doc->doc {documentFile=Just originalFile {diskBytes=error "freshness forced disk bytes"}}) 1 (buffers written)}
+  opaqueIdentity<-sourceIdentity path opaque
+  check "freshness identity does not compare disk bytes" (opaqueIdentity/=Nothing)
+  check "protected sources have no public freshness identity" . (==Nothing) =<< sourceIdentity path written {guestPrivatePaths=[path]}
   BS.writeFile path "external change"
   assertRejected "unchanged buffer with changed disk rejects write" fresh "overwritten" written
   afterRejected<-BS.readFile path

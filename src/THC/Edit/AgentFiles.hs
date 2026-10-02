@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
-module THC.Edit.AgentFiles (Snapshot, captureFile, snapshotPath, snapshotText, acceptWrite, sourceSnapshots, contextText) where
+module THC.Edit.AgentFiles (Snapshot, captureFile, snapshotPath, snapshotText, acceptWrite, SourceIdentity, sourceIdentity, sourceSnapshots, contextText) where
 
-import Control.Exception (IOException, try)
+import Control.Exception (IOException, try, evaluate)
 import Control.Monad (unless, when)
 import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as M
@@ -12,6 +12,7 @@ import qualified Data.Text.Encoding as TE
 import System.Directory (canonicalizePath)
 import System.FilePath (isAbsolute, makeRelative, splitDirectories)
 import System.IO (IOMode(ReadMode), withBinaryFile)
+import System.Mem.StableName (StableName, makeStableName)
 import System.IO.Error (catchIOError, isDoesNotExistError)
 import THC.Edit.Buffer
 import THC.Edit.Files
@@ -31,9 +32,27 @@ fileLimit = 16*1024*1024
 textTooLarge :: Text -> Bool
 textTooLarge text = T.length text>fileLimit || BS.length (TE.encodeUtf8 text)>fileLimit
 
+-- The stamp deliberately compares identity, not full text/disk baselines. A
+-- replaced-but-equal buffer conservatively requires a fresh capture as well.
+data SourceIdentity = SourceIdentity !Int !Int (StableName Buffer) (StableName FileState) deriving Eq
+
+sourceIdentity :: FilePath -> Desktop -> IO (Maybe SourceIdentity)
+sourceIdentity path d = case find (\(_,file,_)->filePath file==path) (reverse (publicSources d)) of
+  Nothing -> pure Nothing
+  Just (bid,file,buffer) -> do
+    current<-evaluate buffer >>= makeStableName
+    baseline<-evaluate file >>= makeStableName
+    pure (Just (SourceIdentity bid (revision buffer) current baseline))
+
 sourceSnapshots :: Desktop -> M.Map FilePath Snapshot
 sourceSnapshots d = M.fromList [(filePath file,Snapshot file (Just (bid,revision b)) (contents b)) |
-  (bid,doc)<-M.toList (buffers d),not (protectedBuffer d bid),documentLabel doc==Nothing,textBuffer (documentBuffer doc),Just file<-[documentFile doc],let b=documentBuffer doc]
+  (bid,file,b)<-publicSources d]
+
+-- Ascending IDs plus Map.fromList make the last eligible duplicate path win;
+-- sourceIdentity uses the same selection without flattening any source text.
+publicSources :: Desktop -> [(Int,FileState,Buffer)]
+publicSources d = [(bid,file,b) | (bid,doc)<-M.toAscList (buffers d),not (protectedBuffer d bid),
+  documentLabel doc==Nothing,textBuffer (documentBuffer doc),Just file<-[documentFile doc],let b=documentBuffer doc]
 
 -- ACP paths are absolute and bounded by the session's canonical project root.
 -- Resolving both endpoints also rejects symlinks which escape that root.

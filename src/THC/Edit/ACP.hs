@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 module THC.Edit.ACP
-  ( Launch(..), Client, Event(..), startClient, stopClient, request, notify, respond, pollEvents ) where
+  ( Launch(..), Client, Event(..), startClient, stopClient, request, notify, respond, PreparedResponse, prepareResponse, respondPrepared, pollEvents ) where
 
 import Control.Concurrent
 import Control.Exception
@@ -29,7 +29,7 @@ data Launch = Launch { executable :: FilePath, arguments :: [String], environmen
 data Event = Response Int (Either Value Value) | Notification Text Value | Request Value Text Value | Disconnected Text
   deriving (Eq, Show)
 data State = State
-  { outgoing :: Seq.Seq BL.ByteString, outgoingBytes :: Int
+  { outgoing :: Seq.Seq (Int,BL.ByteString), outgoingBytes :: Int
   , incoming :: Seq.Seq (Int,Event), incomingBytes :: Int
   , pending :: IS.IntSet, nextId :: Int, failure :: Maybe Text }
 data Client = Client { state :: MVar State, wakeWriter :: MVar (), disconnect :: Text -> IO (), closeClient :: IO () }
@@ -88,7 +88,7 @@ startClient launch root = mask_ $ do
           let drain = do
                 item <- modifyMVar shared $ \s -> case Seq.viewl (outgoing s) of
                   Seq.EmptyL -> pure (s,Nothing)
-                  body Seq.:< rest -> pure (s {outgoing = rest, outgoingBytes = outgoingBytes s - fromIntegral (BL.length body)},Just body)
+                  (size,body) Seq.:< rest -> pure (s {outgoing = rest, outgoingBytes = outgoingBytes s - size},Just body)
                 case item of
                   Nothing -> pure ()
                   Just body -> BL.hPutStr input body >> BS.hPut input "\n" >> hFlush input >> drain
@@ -137,24 +137,40 @@ request client method params = do
         updated = s { nextId = ident + 1 }
     pure (case problem of
       Just reason -> updated { incoming = incoming s Seq.|> (0,Response ident (Left (rpcError reason))) }
-      Nothing -> updated { outgoing = outgoing s Seq.|> body, outgoingBytes = outgoingBytes s + size, pending = IS.insert ident (pending s) },ident)
+      Nothing -> updated { outgoing = outgoing s Seq.|> (size,body), outgoingBytes = outgoingBytes s + size, pending = IS.insert ident (pending s) },ident)
   void (tryPutMVar (wakeWriter client) ())
   pure ident
 
 notify :: Client -> Text -> Value -> IO ()
 notify client method params = enqueue client (object ["jsonrpc" .= ("2.0" :: Text), "method" .= method, "params" .= params])
 
+-- Prepared frames contain no deferred JSON encoding or byte counting. File
+-- capture workers may prepare one, but only the session may authorize sending.
+data PreparedResponse = PreparedResponse !Int BL.ByteString
+
+prepareResponse :: Value -> Either Value Value -> IO PreparedResponse
+prepareResponse ident result = prepareMessage (object (["jsonrpc" .= ("2.0" :: Text), "id" .= ident] ++ either (\e -> ["error" .= e]) (\r -> ["result" .= r]) result))
+
 respond :: Client -> Value -> Either Value Value -> IO ()
-respond client ident result = enqueue client (object (["jsonrpc" .= ("2.0" :: Text), "id" .= ident] ++ either (\e -> ["error" .= e]) (\r -> ["result" .= r]) result))
+respond client ident result = prepareResponse ident result >>= respondPrepared client
+
+prepareMessage :: Value -> IO PreparedResponse
+prepareMessage value = do
+  let body=encode value
+  -- Escaping can expand a legal input beyond the frame limit. Stop encoding
+  -- after that boundary and retain no rejected payload.
+  size<-evaluate (fromIntegral (BL.length (BL.take (fromIntegral frameLimit+1) body)))
+  pure (PreparedResponse size (if size>frameLimit then BL.empty else body))
 
 enqueue :: Client -> Value -> IO ()
-enqueue client value = do
-  let body = encode value
-      size = fromIntegral (BL.length body)
+enqueue client value = prepareMessage value >>= respondPrepared client
+
+respondPrepared :: Client -> PreparedResponse -> IO ()
+respondPrepared client (PreparedResponse size body) = do
   accepted <- modifyMVar (state client) $ \s ->
     if failure s /= Nothing then pure (s,True)
     else if size > frameLimit || outgoingBytes s + size > queueLimit || Seq.length (outgoing s) >= 4096 then pure (s,False)
-    else pure (s { outgoing = outgoing s Seq.|> body, outgoingBytes = outgoingBytes s + size },True)
+    else pure (s { outgoing = outgoing s Seq.|> (size,body), outgoingBytes = outgoingBytes s + size },True)
   if accepted then void (tryPutMVar (wakeWriter client) ()) else disconnect client "ACP: outgoing message queue exceeded limit"
 
 pollEvents :: Client -> IO [Event]

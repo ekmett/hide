@@ -62,7 +62,9 @@ activity ident value=Activity ident value [value] False
 data Approval = ChildPermission AH.AgentId AP.ACPPermission (MVar (Maybe Text)) | Permission Value [(Text,Text)] Value | Write Value Snapshot Text | Execute Value Terminal.TerminalConfig Int
 
 data FileRequest = ReadFile Int (Maybe Int) | WriteFile Text
-data FileCapture = FileCapture Value FileRequest Desktop (Async (Either Text Snapshot))
+data FileCapture = FileCapture Value (Async (Either Text CapturedFile))
+data CapturedFile = CapturedFile Snapshot (Maybe SourceIdentity) CapturedAction
+data CapturedAction = CapturedRead A.PreparedResponse | CapturedWrite Text
 
 data State = State
   { provider :: A.Launch, connection :: Maybe A.Client, session :: Maybe Text, project :: FilePath
@@ -140,7 +142,7 @@ closeConversation (ConversationState _ ref _ _ _) = do
   mapM_ (cancel . snd) (buildSettingsWorker s)
   mapM_ (\(_,_,worker) -> cancel worker) (promptPreparation s)
   mapM_ cancel (compilerDiscovery s)
-  mapM_ (\(FileCapture _ _ _ worker) -> cancel worker) (fileCaptures s)
+  mapM_ (\(FileCapture _ worker) -> cancel worker) (fileCaptures s)
   mapM_ (wait . snd) (retiringRequests s)
   mapM_ cancel (childCancels s)
   mapM_ (cancel . snd) (childControls s)
@@ -907,17 +909,38 @@ queueFileCapture ref client ident request root path d = mask $ \restore -> do
   if length (fileCaptures s)+sum (map fst (retiringRequests s))>=4
     then A.respond client ident (Left (failure "Too many pending file requests."))
     else do
-      worker<-async (restore (captureFile root path d))
-      modifyIORef' ref (\state -> state {fileCaptures=fileCaptures state++[FileCapture ident request d worker]})
+      worker<-async (restore (prepareFileCapture ident request root path d))
+      modifyIORef' ref (\state -> state {fileCaptures=fileCaptures state++[FileCapture ident worker]})
   pure d
+
+prepareFileCapture :: Value -> FileRequest -> FilePath -> FilePath -> Desktop -> IO (Either Text CapturedFile)
+prepareFileCapture ident request root path before = do
+  captured<-captureFile root path before
+  case captured of
+    Left err -> pure (Left err)
+    Right snap -> do
+      expected<-sourceIdentity (snapshotPath snap) before
+      action<-case request of
+        WriteFile content -> pure (CapturedWrite content)
+        ReadFile line limit -> do
+          let content=snapshotText snap
+              buffer=newBuffer content
+              startOffset=if line>bufferLineCount buffer then T.length content else bufferLineOffset buffer (line-1)
+              endOffset=case limit of
+                Nothing -> T.length content
+                Just count | count>=bufferLineCount buffer-line+1 -> T.length content
+                           | otherwise -> bufferLineOffset buffer (line-1+count)
+              chosen=T.take (max 0 (endOffset-startOffset)) (T.drop startOffset content)
+          CapturedRead <$> A.prepareResponse ident (Right (object ["content" .= chosen]))
+      pure (Right (CapturedFile snap expected action))
 
 retireRequests :: IORef State -> IO State
 retireRequests ref = mask $ \restore -> do
   s<-readIORef ref
   let captures=fileCaptures s
-      workers=[cancel worker | FileCapture _ _ _ worker<-captures]++[cancel worker | (_,_,worker)<-maybe [] pure (promptPreparation s)]
+      workers=[cancel worker | FileCapture _ worker<-captures]++[cancel worker | (_,_,worker)<-maybe [] pure (promptPreparation s)]
   if null workers then pure s else do
-    forM_ (connection s) $ \client -> forM_ captures $ \(FileCapture ident _ _ _) ->
+    forM_ (connection s) $ \client -> forM_ captures $ \(FileCapture ident _) ->
       A.respond client ident (Left (failure "File request cancelled."))
     reaper<-async (restore (sequence_ workers))
     let next=s {fileCaptures=[],promptPreparation=Nothing,retiringRequests=retiringRequests s++[(length workers,reaper)]}
@@ -935,7 +958,7 @@ pollFileCaptures runtime@(ConversationState _ ref _ _ _) d = do
     drain=do
       s<-readIORef ref
       case (connection s,fileCaptures s) of
-        (Just client,FileCapture ident request before worker:rest) -> do
+        (Just client,FileCapture ident worker:rest) -> do
           ready<-poll worker
           case ready of
             Nothing -> pure ()
@@ -943,25 +966,18 @@ pollFileCaptures runtime@(ConversationState _ ref _ _ _) d = do
               modifyIORef' ref (\state -> state {fileCaptures=rest})
               case either (const (Left "File request failed.")) id result of
                 Left err -> A.respond client ident (Left (failure err))
-                Right snap
+                Right (CapturedFile snap expected action)
                   | protectedPath d (snapshotPath snap) || any (\(bid,doc) ->
                       fmap filePath (documentFile doc)==Just (snapshotPath snap) && (protectedBuffer d bid || not (textBuffer (documentBuffer doc)))) (M.toList (buffers d)) ->
                       A.respond client ident (Left (failure "Agent authority files require human input."))
-                  | M.lookup (snapshotPath snap) (sourceSnapshots before)/=M.lookup (snapshotPath snap) (sourceSnapshots d) ->
-                      A.respond client ident (Left (failure "File changed in the editor during capture; request a fresh read."))
-                  | otherwise -> case request of
-                      ReadFile line limit -> do
-                        let content=snapshotText snap
-                            buffer=newBuffer content
-                            startOffset=if line>bufferLineCount buffer then T.length content else bufferLineOffset buffer (line-1)
-                            endOffset=case limit of
-                              Nothing -> T.length content
-                              Just count | count>=bufferLineCount buffer-line+1 -> T.length content
-                                         | otherwise -> bufferLineOffset buffer (line-1+count)
-                            chosen=T.take (max 0 (endOffset-startOffset)) (T.drop startOffset content)
-                        modifyIORef' ref (\state -> state {reads=M.insert (snapshotPath snap) snap (reads state)})
-                        A.respond client ident (Right (object ["content" .= chosen]))
-                      WriteFile content -> enqueueApproval runtime (Write ident (M.findWithDefault snap (snapshotPath snap) (reads s)) content)
+                  | otherwise -> do
+                      current<-sourceIdentity (snapshotPath snap) d
+                      if current/=expected then A.respond client ident (Left (failure "File changed in the editor during capture; request a fresh read."))
+                      else case action of
+                        CapturedRead response -> do
+                          modifyIORef' ref (\state -> state {reads=M.insert (snapshotPath snap) snap (reads state)})
+                          A.respondPrepared client response
+                        CapturedWrite content -> enqueueApproval runtime (Write ident (M.findWithDefault snap (snapshotPath snap) (reads s)) content)
               drain
         _ -> pure ()
 

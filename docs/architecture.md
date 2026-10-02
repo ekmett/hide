@@ -68,7 +68,9 @@ latest snapshot instead of rebuilding the output history. Stop records a request
 then the supervisor releases and joins the child process outside the UI tick.
 
 Agent file capture and prompt-context preparation run in bounded owned workers.
-Completion checks current buffer/privacy state before applying a result; cancel
+File-read workers also slice the requested lines and encode the complete bounded
+ACP response. Completion checks current buffer/file identities and privacy before
+enqueuing prepared bytes, without comparing whole snapshots; cancel
 and disconnect retire unfinished work. Idle compiler-setting reads also run in
 a worker. HLS synchronization queues immutable buffer references, with text
 comparison and encoding on the protocol writer; incoming events are consumed
