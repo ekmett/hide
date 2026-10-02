@@ -298,7 +298,7 @@ perform runtime@(Debugger ref clock) core action values d = do
       Just port | port>0 && port<=65535 -> do
         result<-try $ do
           directory<-resolveBuildRoot d
-          startSession runtime directory (LaunchConfig Nothing host port "attach" (object []) "thc") d
+          startSession runtime directory (LaunchConfig (TCP host port) "attach" (object []) "thc") d
         pure $ either (\(err::IOException) -> d {status="DAP: "<>T.pack (show err)}) id result
       _ -> pure d {status="Enter a port between 1 and 65535."}
     ("disconnect",_) -> do
@@ -330,11 +330,13 @@ perform runtime@(Debugger ref clock) core action values d = do
       | "select:" `T.isPrefixOf` action -> pure (clearDialog d) {status="Debugger selection expired."}
       | otherwise -> pure d {status="Debugger is not ready for this command."}
 
-data LaunchConfig = LaunchConfig (Maybe [String]) Text Int Text Value Text
+data Transport = TCP Text Int | Stdio FilePath [String] | Server FilePath [String] Text Int
+data LaunchConfig = LaunchConfig Transport Text Value Text
 
 parseLaunch :: Value -> Parser LaunchConfig
 parseLaunch = withObject "debugger configuration" $ \o -> do
   command<-o .:? "command"
+  server<-o .:? "server"
   host<-o .:? "host" .!= "127.0.0.1"
   port<-o .:? "port" .!= 4711
   requestName<-o .:? "request" .!= "launch"
@@ -342,20 +344,32 @@ parseLaunch = withObject "debugger configuration" $ \o -> do
   adapter<-o .:? "adapterId" .!= "thc-edit"
   unless (requestName `elem` ["launch","attach"]) (fail "request must be launch or attach")
   case arguments of Object _ -> pure (); _ -> fail "arguments must be a JSON object"
-  case command of
-    Just (exe:args) | not (null exe),all (notElem '\0') (exe:args) ->
+  let argv label values=case values of
+        exe:args | not (null exe),all (notElem '\0') values -> pure (exe,args)
+        _ -> fail (label++" must be a nonempty argv array without NUL bytes")
+      endpointValid=unless (host `elem` ["localhost","127.0.0.1","::1"] && port>0 && port<=65535)
+        (fail "host/port must name a loopback DAP endpoint")
+  transport<-case (command,server) of
+    (Just _,Just _) -> fail "choose command or server, not both"
+    (Just values,Nothing) -> do
       when (KM.member "host" o || KM.member "port" o) (fail "choose command or host/port, not both")
-    Just _ -> fail "command must be a nonempty argv array without NUL bytes"
-    Nothing -> unless (host `elem` ["localhost","127.0.0.1","::1"] && port>0 && port<=65535)
-      (fail "host/port must name a loopback DAP endpoint")
-  pure (LaunchConfig command host port requestName arguments adapter)
+      uncurry Stdio <$> argv "command" values
+    (Nothing,Just values) -> do
+      endpointValid
+      (exe,args)<-argv "server" values
+      pure (Server exe args host port)
+    (Nothing,Nothing) -> endpointValid >> pure (TCP host port)
+  pure (LaunchConfig transport requestName arguments adapter)
 
 startSession :: Debugger -> FilePath -> LaunchConfig -> Desktop -> IO Desktop
-startSession runtime directory (LaunchConfig command host port requestName arguments adapter) d = do
-  c<-case command of
-    Just (exe:args) -> D.startAdapter exe args directory
-    _ -> D.startClient host port
-  initializeSession runtime directory c (host,port) requestName arguments adapter False d
+startSession runtime@(Debugger ref _) directory (LaunchConfig transport requestName arguments adapter) d = do
+  -- Release an earlier owned listener before testing its port for the new session.
+  readIORef ref >>= mapM_ D.stopClient . client
+  (c,address,owned)<-case transport of
+    Stdio exe args -> (,,) <$> D.startAdapter exe args directory <*> pure ("127.0.0.1",4711) <*> pure False
+    TCP host port -> (,,) <$> D.startClient host port <*> pure (host,port) <*> pure False
+    Server exe args host port -> (,,) <$> D.startManaged exe args directory host port <*> pure (host,port) <*> pure True
+  initializeSession runtime directory c address requestName arguments adapter owned d
 
 launchTHC :: Debugger -> Int -> Desktop -> IO Desktop
 launchTHC runtime@(Debugger ref _) port d
@@ -410,7 +424,8 @@ tickDebugger runtime@(Debugger ref clock) core original = do
   updated<-foldM (receive runtime core) original events
   now<-clock
   current<-readIORef ref
-  let expired=M.filter (\(_,_,sent) -> now-sent>15000000000) (pending current)
+  let deadline kind=if kind==Attach && fst (startRequest current)=="launch" then 120000000000 else 15000000000
+      expired=M.filter (\(kind,_,sent) -> now-sent>deadline kind) (pending current)
   let detachExpired=maybe False (\sent -> now-sent>1000000000) (disconnectAt current)
       timedOut=not (M.null expired)
   if not timedOut && not detachExpired && failure current==Nothing then pure updated else do

@@ -13,6 +13,7 @@ import qualified Data.Map.Strict as M
 import Data.Maybe (fromMaybe, isJust)
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
+import qualified Network.Socket as Socket
 import System.Directory
 import System.Exit (ExitCode(..))
 import System.IO
@@ -26,7 +27,7 @@ import THC.Edit.Model
 import THC.Edit.Render (snapshotHtml)
 
 checks :: IO ()
-checks = presentationCheck >> pendingPresentationCheck >> startupDeadlineCheck >> launchChecks >> mapM_ session ["basic", "frame", "choices", "breakpoints", "reconnect", "mcp", "lazy"] >> putStrLn "Debugger checks passed"
+checks = presentationCheck >> pendingPresentationCheck >> startupDeadlineCheck >> launchDeadlineCheck >> launchChecks >> mapM_ session ["basic", "frame", "choices", "breakpoints", "reconnect", "mcp", "lazy"] >> putStrLn "Debugger checks passed"
   where
     session mode = bracket (fixture mode) cleanup $ \(port,logPath,process) -> withDebugger $ \runtime -> do
       let core d _=pure (False,d)
@@ -256,20 +257,31 @@ check label ok=unless ok (error label)
 launchChecks :: IO ()
 launchChecks = do
   directory <- getCurrentDirectory
+  port <- bracket (Socket.socket Socket.AF_INET Socket.Stream Socket.defaultProtocol) Socket.close $ \listener -> do
+    Socket.bind listener (Socket.SockAddrInet 0 (Socket.tupleToHostAddress (127,0,0,1)))
+    Socket.SockAddrInet number _ <- Socket.getSocketName listener
+    pure (fromIntegral number :: Int)
   temp <- getTemporaryDirectory
   bracket (openTempFile temp "dap-launch.json") (\(path,h) -> hClose h >> removeFile path) $ \(path,h) -> do
     hClose h
     let logs=path<>".log"
-        config mode requestName=object ["command" .= (["python3",directory<>"/test/dap-session.py",logs,"stdio-"<>mode] :: [String]),
-          "request" .= (requestName :: T.Text),"arguments" .= object ["program" .= ("space λ.hs" :: T.Text)]]
+        config transport mode requestName=object
+          ([ (if transport=="server" then "server" else "command") .=
+              (["python3",directory<>"/test/dap-session.py",logs,transport<>"-"<>mode] :: [String]),
+            "request" .= (requestName :: T.Text),"arguments" .= object ["program" .= ("space λ.hs" :: T.Text)]] ++
+            ["port" .= port | transport=="server"])
         core d _=pure (False,d)
         waitFor runtime predicate d=timeout debuggerTimeout (loop d) >>= maybe (error "launch fixture timed out") pure
           where loop state=do
                   updated<-tickDebugger runtime core state
-                  if predicate updated then pure updated else threadDelay 1000 >> loop updated
-    mapM_ (\(mode,requestName) -> withDebugger $ \runtime -> do
+                  if predicate updated then pure updated else if "DAP:" `T.isPrefixOf` status updated then do
+                    (_,finish)<-debuggerTool runtime core updated "debug_status" (object [])
+                    details<-finish
+                    error (T.unpack (status updated)++" "++show details)
+                  else threadDelay 1000 >> loop updated
+    mapM_ (\(transport,mode,requestName) -> withDebugger $ \runtime -> do
       writeFile logs ""
-      BL.writeFile path (encode (config mode requestName))
+      BL.writeFile path (encode (config transport mode requestName))
       let send action values d=snd <$> debuggerEffects runtime core d [DebugAction action values]
       started<-send "launch-config" ["1",T.pack path] (initialDesktop (80,25))
       if mode=="launch-fail" then do
@@ -283,14 +295,50 @@ launchChecks = do
       entries<-map (fromMaybe (error "bad launch log") . decodeStrictText) . T.lines <$> TIO.readFile logs
       let requests=[r | e<-entries,Just r<-[field "request" e]]
       unless (mode=="launch-fail") $ check "disconnect terminates launches and preserves attached programs"
-        (any (\r -> field "command" r==Just ("disconnect"::T.Text) && (field "arguments" r >>= field "terminateDebuggee")==Just (requestName=="launch")) requests)
+        (any (\r -> field "command" r==Just ("disconnect"::T.Text) && (field "arguments" r >>= field "terminateDebuggee")==Just (requestName=="launch" || transport=="server")) requests)
       check "launch forwards request and arguments" (any (\r -> field "command" r==Just requestName && (field "arguments" r >>= field "program")==Just ("space λ.hs" :: T.Text)) requests)
-      ) [("basic","launch"),("basic","attach"),("launch-fail","launch")]
+      ) [("stdio","basic","launch"),("stdio","basic","attach"),("stdio","launch-fail","launch"),("server","basic","launch"),("server","basic","attach")]
     withDebugger $ \runtime -> do
       TIO.writeFile path "{\"command\":[\"python3\"],\"request\":\"launch\",\"arguments\":[]}"
       (_,d)<-debuggerEffects runtime core (initialDesktop (80,25)) [DebugAction "launch-config" ["1",T.pack path]]
       check "invalid launch arguments rejected before spawning" ("arguments" `T.isInfixOf` status d)
+    forM_ [object ["command" .= (["python3"]::[String]),"server" .= (["python3"]::[String])],
+           object ["server" .= ([]::[String])],
+           object ["server" .= (["python3"]::[String]),"host" .= ("example.com"::T.Text)]] $ \bad ->
+      withDebugger $ \runtime -> do
+        BL.writeFile path (encode bad)
+        (_,d)<-debuggerEffects runtime core (initialDesktop (80,25)) [DebugAction "launch-config" ["1",T.pack path]]
+        check "invalid server config rejected before spawning" ("DAP configuration:" `T.isPrefixOf` status d)
     removeFile logs
+
+-- Launch can compile a cold project. Other DAP requests keep the short deadline.
+launchDeadlineCheck :: IO ()
+launchDeadlineCheck = do
+  directory<-getCurrentDirectory
+  temp<-getTemporaryDirectory
+  bracket (openTempFile temp "dap-cold-launch.json")
+    (\(path,h) -> hClose h >> mapM_ removeFile [path,path<>".log"]) $ \(path,h) -> do
+    hClose h
+    let logs=path<>".log"
+        core d _=pure (False,d)
+    writeFile logs ""
+    BL.writeFile path (encode (object ["command" .= (["python3",directory<>"/test/dap-session.py",logs,"stdio-launch-wait"]::[String])]))
+    clock<-newIORef 0
+    withDebuggerClock (readIORef clock) $ \runtime -> do
+      (_,started)<-debuggerEffects runtime core (initialDesktop (80,25)) [DebugAction "launch-config" ["1",T.pack path]]
+      let loop d=do
+            updated<-tickDebugger runtime core d
+            (_,finish)<-debuggerTool runtime core updated "debug_status" (object [])
+            result<-finish
+            if either (const False) (\v -> maybe False (T.isInfixOf "loading cradle") (field "output" v)) result
+              then pure updated else threadDelay 1000 >> loop updated
+      loading<-timeout debuggerTimeout (loop started) >>= maybe (error "cold launch fixture did not load") pure
+      writeIORef clock 16000000000
+      alive<-tickDebugger runtime core loading
+      check "cold launch survives ordinary request deadline" (not ("timed out" `T.isInfixOf` status alive))
+      writeIORef clock 121000000000
+      expired<-tickDebugger runtime core alive
+      check "cold launch retains bounded deadline" ("DAP request timed out" `T.isInfixOf` status expired)
 
 -- Six minutes pass before the UI sees transport readiness. The request clock
 -- must start at that event, and still expire an unresponsive initialize afterward.

@@ -199,3 +199,13 @@ The shared debugger now records variable-reference provenance from UI and MCP
 responses, denies ordinary expansion of lazy/unknown references, advertises and
 handles variable invalidation, and keeps the stopped source frame when only
 values expire. Explicit Force/Evaluate remains a separate delivery item.
+
+Owned-server launch is now available through the shared adapter configuration's
+`server` argv field. The existing process transport sets child-only DAP_HOST and
+DAP_PORT, rejects an occupied endpoint, forwards output, and stops its process
+group on cancellation or completion. Readiness is bounded to five minutes and
+launch requests to two minutes; ordinary requests retain fifteen seconds.
+A real hdb run through this path repeated breakpoint, scopes, lazy inspection
+protection, stepping and termination, and left no listener on its selected port.
+The launch selector still uses Adapter config for GHC; component discovery and
+failed-cradle/exception qualification remain open items above.

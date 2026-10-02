@@ -105,9 +105,44 @@ adapter-specific attach configuration. A TCP configuration replaces `command`
 with `"host": "127.0.0.1", "port": 4711`; only loopback endpoints are accepted.
 Adapter commands and arguments are passed without a shell.
 
+For GHC debugging, install **hdb** built for your GHC version and use an owned
+TCP server configuration. This example runs `main` from `Main.hs`:
+
+```json
+{
+  "server": ["hdb", "server", "--port", "4711"],
+  "host": "127.0.0.1",
+  "port": 4711,
+  "adapterId": "hdb",
+  "request": "launch",
+  "arguments": {
+    "projectRoot": "/absolute/canonical/path/to/project",
+    "entryFile": "Main.hs",
+    "entryPoint": "main",
+    "entryArgs": [],
+    "extraGhcArgs": []
+  }
+}
+```
+
+Choose **Debug > Launch > Adapter config**. The editor starts hdb in the project
+directory, sets `DAP_HOST` and `DAP_PORT` in that child process, and connects
+when its loopback listener is ready. The server command's port must match the
+configuration. Existing listeners are rejected before spawning. Owned server
+startup has a five-minute deadline; a DAP launch request has two minutes for
+loading/compiling the project. Ordinary requests retain their 15-second deadline.
+Use **Debug > Disconnect** to cancel startup or stop the owned session.
+
+hdb uses your project's cradle to load the entry module. Use the canonical
+project path (resolving symlinks) and an entry file belonging to that cradle.
+Once stopped, use the same breakpoints, stepping, call stack and scopes as THC.
+Lazy values are displayed without forcing them; ordinary expansion refuses a
+lazy handle. hdb remains an external tool, with no GHC API dependency in the editor.
+
 **Debug > Attach** connects directly to an already-running DAP endpoint,
 defaulting to `127.0.0.1:4711`. The debugger protocol stays separate from program
-output. Disconnecting an attached session leaves its program running;
+output. Disconnecting an attached session requests that its program remain running;
+the adapter determines whether detach is supported.
 disconnecting an editor-launched session requests termination and releases its
 owned adapter. Detaching the editor display preserves the debugger, so `--resume`
 returns to the same breakpoints and stopped state. With THC, continuing to

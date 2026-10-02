@@ -1,13 +1,17 @@
 # Deterministic DAP peers. Replies are released by requests, never by timers.
-import json, socket, sys
+import json, os, socket, sys
 
 mode = sys.argv[2] if len(sys.argv) > 2 else 'basic'
+owned = mode.startswith('server-')
+if owned:
+    mode = mode[7:]
 stdio = mode.startswith('stdio-')
 if stdio:
     mode = mode[6:]
 else:
     server = socket.socket()
-    server.bind(('127.0.0.1', 0))
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind((os.environ['DAP_HOST'], int(os.environ['DAP_PORT'])) if owned else ('127.0.0.1', 0))
     server.listen(2)
     print(server.getsockname()[1], flush=True)
 
@@ -88,6 +92,10 @@ for session in range(1, 3 if mode == 'reconnect' else 2):
                 configured.append(cmd)
                 reply(req)
             elif cmd == 'configurationDone':
+                if mode == 'launch-wait':
+                    reply(req)
+                    event('output', dict(category='console', output='loading cradle'))
+                    continue
                 if mode == 'launch-fail':
                     continue
                 assert pending_attach and 'setExceptionBreakpoints' in configured

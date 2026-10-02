@@ -23,6 +23,7 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Data.Text.Encoding.Error (lenientDecode)
 import Network.Socket
+import System.Environment (getEnvironment)
 import System.IO (Handle, hClose, hFlush, hSetBinaryMode)
 import System.Process
 import qualified Network.Socket.ByteString as Socket
@@ -61,11 +62,11 @@ withConnection host port action = do
 -- argv is passed directly to the OS; configuration never invokes a shell.
 startAdapter :: FilePath -> [String] -> FilePath -> IO Client
 startAdapter executable arguments directory = startTransport $ \emit register communicate ->
-  withAdapter register executable arguments directory $ \input output errors _ release ->
+  withAdapter register executable arguments directory Nothing $ \input output errors _ release ->
     withAsync (drainOutput emit "stderr" errors) $ \_ ->
       communicate (BS.hGetSome output) (\bytes -> BS.hPut input bytes >> hFlush input) `finally` release
 
--- THC builds and starts its guest before opening DAP. Keep that work off the UI
+-- Managed adapters build or start their program before opening DAP. Keep that work off the UI
 -- thread, and never attach to a listener which was already using the chosen port.
 startManaged :: FilePath -> [String] -> FilePath -> Text -> Int -> IO Client
 startManaged executable arguments directory host port = startTransport $ \emit register communicate -> do
@@ -75,7 +76,10 @@ startManaged executable arguments directory host port = startTransport $ \emit r
   case occupied of
     Right () -> ioError (userError "DAP port is already in use; choose an unused port")
     Left _ -> pure ()
-  withAdapter register executable arguments directory $ \input output errors process release -> do
+  inherited<-getEnvironment
+  let environment=("DAP_HOST",if host=="localhost" then "127.0.0.1" else T.unpack host):("DAP_PORT",show port):
+        filter (\(key,_) -> key `notElem` ["DAP_HOST","DAP_PORT"]) inherited
+  withAdapter register executable arguments directory (Just environment) $ \input output errors process release -> do
     hClose input
     withAsync (drainOutput emit "stdout" output) $ \_ ->
       withAsync (drainOutput emit "stderr" errors) $ \_ -> flip finally release $ do
@@ -87,9 +91,9 @@ startManaged executable arguments directory host port = startTransport $ \emit r
             acquire = do
               result<-race exited connectReady
               case result of
-                Left code -> ioError (userError ("THC debugger process exited: "++show code++"; see Debug / Output"))
+                Left code -> ioError (userError ("Debugger process exited: "++show code++"; see Debug / Output"))
                 Right connection -> pure connection
-        bracket acquire closeConnection $ \connection -> do
+        bracket (bounded 300000000 "Debugger server did not become ready within five minutes" acquire) closeConnection $ \connection -> do
           register (closeConnection connection >> release)
           communicate (Socket.recv connection) (Socket.sendAll connection)
 
@@ -109,11 +113,11 @@ openConnection host port = do
     bounded 5000000 "DAP connection timed out" (connect connection address)
     pure connection
 
-withAdapter :: (IO () -> IO ()) -> FilePath -> [String] -> FilePath -> (Handle -> Handle -> Handle -> ProcessHandle -> IO () -> IO a) -> IO a
-withAdapter register executable arguments directory action =
+withAdapter :: (IO () -> IO ()) -> FilePath -> [String] -> FilePath -> Maybe [(String,String)] -> (Handle -> Handle -> Handle -> ProcessHandle -> IO () -> IO a) -> IO a
+withAdapter register executable arguments directory environment action =
   bracket (do
     handles@(_,_,_,process)<-createProcess (proc executable arguments)
-      {cwd=Just directory,std_in=CreatePipe,std_out=CreatePipe,std_err=CreatePipe,create_group=True}
+      {cwd=Just directory,env=environment,std_in=CreatePipe,std_out=CreatePipe,std_err=CreatePipe,create_group=True}
     stop<-processCleanup process
     let release=do
           stop
