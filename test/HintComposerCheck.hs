@@ -58,12 +58,40 @@ checks=do
   let disabled=paste "not a hint" (base {autocompleteACPEnabled=False})
   check "disabled ACP does not expose a composer" (bufferLength (autocompleteDraft disabled)==0)
   let settings=Dialog "Autocomplete" (AutocompleteDialog "save")
-        ([Input ("Field "<>T.pack (show n)) "" 0 | n<-[1::Int ..7]]++[CheckBox "Debug pane" True]) 0 ["Save","Cancel"] ["Choose a backend."]
+        (ComboBox "Provider" ["Off","ACP","Copilot"] 1 Nothing:[Input ("Field "<>T.pack (show n)) "" 0 | n<-[2::Int ..7]]++[CheckBox "Debug pane" True]) 0 ["Save","Cancel"] ["Choose a backend."]
       rectangles=fieldRects (initialDesktop (80,25)) settings
       outer=dialogRect (initialDesktop (80,25)) settings
   check "autocomplete settings fit standard screen in two columns"
     (length rectangles==8 && length (filter ((==left (rectangles !! 0)).left) rectangles)==5 &&
       all (\r->top r+height r<=top outer+height outer-3) rectangles)
+  let settingsDesktop=(initialDesktop (80,25)) {dialog=Just settings}
+      step k=fst . key k []
+      opened=step V.KEnter settingsDesktop
+      preview=step V.KDown opened
+      cancelled=step V.KEsc preview
+      committed=step V.KEnter preview
+      provider d=case dialog d of
+        Just dg | ComboBox _ _ selected popup:_<-fields dg -> Just (selected,popup)
+        _ -> Nothing
+  check "provider dropdown opens, previews and cancels without dismissing settings"
+    (provider opened==Just (1,Just 1) && provider preview==Just (1,Just 2) && provider cancelled==Just (1,Nothing))
+  check "provider dropdown commits without submitting settings"
+    (provider committed==Just (2,Nothing) && null (snd (key V.KEnter [] preview)))
+  check "provider does not accept arbitrary text or paste"
+    (provider (step (V.KChar '$') settingsDesktop)==Just (1,Nothing) && provider (paste "garbage" settingsDesktop)==Just (1,Nothing))
+  let fieldRect=rectangles !! 0
+      mouseOpened=fst (handleEvent (V.EvMouseDown (left fieldRect+1) (top fieldRect+1) V.BLeft []) settingsDesktop)
+      popup=comboBoxRect mouseOpened settings 0 ["Off","ACP","Copilot"]
+      mouseChosen=fst (handleEvent (V.EvMouseDown (left popup+1) (top popup+3) V.BLeft []) mouseOpened)
+      (_,saved)=submitDialog 0 (fromJust (dialog mouseChosen)) mouseChosen
+  check "mouse provider selection reaches autocomplete save in field order"
+    (provider mouseChosen==Just (2,Nothing) && saved==[AutocompleteAction "save" (["0","Copilot"]++replicate 6 ""++["true"])])
+  let hovered=fst (hoverAt (left popup+1) (top popup+1) mouseOpened)
+      dismissed=fst (handleEvent (V.EvMouseDown (left outer+1) (top outer+1) V.BLeft []) hovered)
+  check "hover previews a choice; clicking outside preserves the original"
+    (provider hovered==Just (1,Just 0) && provider dismissed==Just (1,Nothing))
+  let tabbedProvider=step (V.KChar '\t') preview
+  check "Tab commits provider and advances focus" (provider tabbedProvider==Just (2,Nothing) && maybe False ((==1).focus) (dialog tabbedProvider))
   let narrow=dialogFieldLayout 50 23 settings
   check "narrow autocomplete settings retain stacked scrolling layout" (all ((==3).left) narrow)
   bracket temporary removeFile $ \path->do

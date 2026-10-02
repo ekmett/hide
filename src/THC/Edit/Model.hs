@@ -96,7 +96,7 @@ data LanguageAction = TypeInfo | FindDefinition | Completions | ShowProblems | R
 data Completion = Completion Text [(Int,Int,Text)] deriving (Eq,Show)
 data ProjectAction = LoadProject | ProjectPage Int Int | ProjectDetails Int Int deriving (Eq,Show)
 data Effect = AutocompleteAction Text [Text] | SaveMacKeySymbols Bool | SaveChatSubmit ChatSubmit | SaveBufferViewDefault BufferView | ProjectRequest ProjectAction | DownloadDocument Int | ReadBrowserClipboard | WriteBrowserClipboard Text | LanguageRequest LanguageAction | RunGit GitAction | ReadMergeBranches | JumpTo FilePath Int Int | ReadPath FilePath | BrowsePath FilePath Text | BrowseDirectories FilePath | ChangeDirectory FilePath | OpenChoice FilePath Text Text | ReadTree FilePath | ExpandTree Int | ReadHelp | RefreshGit FilePath | ReadGitDiff | AskGitCommit | WriteGitCommit Text | SaveDocument Int (Maybe FilePath) (Maybe Command) | ReviewExternal | ResolveConflict Conflict ConflictAction | AgentAction Text [Text] | PermissionAction Text [Text] | DebugAction Text [Text] | SetScreenMode Int | Exit deriving (Eq,Show)
-data Field = Input Text Text Int | CheckBox Text Bool | Radio Text [Text] Int | ListBox Text [Text] Int | FileList [Entry] Int
+data Field = Input Text Text Int | ComboBox Text [Text] Int (Maybe Int) | CheckBox Text Bool | Radio Text [Text] Int | ListBox Text [Text] Int | FileList [Entry] Int
   | ReadOnly Text Text
   | TextArea Text Bool Buffer Selection Int Int deriving (Eq,Show)
 data Purpose = Opening FilePath Text [Entry] | ChangingDirectory FilePath [Entry] | Committing | Saving Int (Maybe Command) | Searching Bool Text | GoingTo | Renaming
@@ -935,6 +935,7 @@ dialogCommandAllowed cmd d=case dialog d of
 
 fieldHeight :: Field -> Int
 fieldHeight Input{} = 3
+fieldHeight ComboBox{} = 3
 fieldHeight CheckBox{} = 2
 fieldHeight (Radio _ xs _) = length xs+2
 fieldHeight ListBox{} = 6
@@ -2075,8 +2076,43 @@ starPrefix 'q' c d = case c of
   _ -> (d {status="Unknown Ctrl+Q command."},[])
 starPrefix _ _ d = (d,[])
 
+-- Preview is separate from the committed choice so Escape is lossless.
+openComboBox :: Dialog -> Maybe (Int,Text,[Text],Int,Int)
+openComboBox dg = listToMaybe [(i,name,choices,chosen,preview) | (i,ComboBox name choices chosen (Just preview))<-zip [0..] (fields dg)]
+
+comboBoxRect :: Desktop -> Dialog -> Int -> [Text] -> Rect
+comboBoxRect d dg i choices = Rect x popupY w popupHeight
+  where
+    Rect x y w _=fieldRects d dg !! i
+    popupHeight=length choices+2
+    popupY=if y+2+popupHeight<=snd (screenSize d)-1 then y+2 else max 1 (y-popupHeight)
+
+comboBoxEvent :: V.Event -> Dialog -> Desktop -> Int -> Text -> [Text] -> Int -> Int -> (Desktop,[Effect])
+comboBoxEvent ev dg d i name choices chosen preview = case ev of
+  V.EvKey V.KEsc _ -> finish chosen
+  V.EvKey V.KEnter _ -> finish preview
+  V.EvKey (V.KChar ' ') _ -> finish preview
+  V.EvKey (V.KChar '\t') mods -> advance (if V.MShift `elem` mods then -1 else 1)
+  V.EvKey V.KBackTab _ -> advance (-1)
+  V.EvKey V.KUp _ -> highlight (preview-1)
+  V.EvKey V.KDown _ -> highlight (preview+1)
+  V.EvKey V.KHome _ -> highlight 0
+  V.EvKey V.KEnd _ -> highlight (length choices-1)
+  V.EvMouseDown x y V.BLeft _ -> finish (if inside rect x y && y>top rect && y<top rect+height rect-1 then y-top rect-1 else chosen)
+  V.EvMouseDown _ _ V.BScrollUp _ -> highlight (preview-1)
+  V.EvMouseDown _ _ V.BScrollDown _ -> highlight (preview+1)
+  _ -> (d,[])
+  where
+    rect=comboBoxRect d dg i choices
+    update selection opened=(d {dialog=Just dg {fields=replaceAt i (ComboBox name choices selection opened) (fields dg)},buttonHover=Nothing,buttonPressed=Nothing},[])
+    finish selection=update selection Nothing
+    highlight selection=update chosen (Just (max 0 (min (length choices-1) selection)))
+    advance delta=let (next,effects)=finish preview in (next {dialog=fmap (\value->value {focus=(i+delta) `mod` (length (fields dg)+length (buttons dg))}) (dialog next)},effects)
+
 dialogEvent :: V.Event -> Dialog -> Desktop -> (Desktop,[Effect])
-dialogEvent ev dg d = case ev of
+dialogEvent ev dg d
+  | Just (i,name,choices,chosen,preview)<-openComboBox dg = comboBoxEvent ev dg d i name choices chosen preview
+  | otherwise = case ev of
   V.EvKey key mods | DebugDialog action<-purpose dg,"hdb-accept:" `T.isPrefixOf` action,
     key==V.KEsc || key==V.KFun 3 && V.MAlt `elem` mods ->
       (d {dialog=Nothing,buttonHover=Nothing,buttonPressed=Nothing},[DebugAction action ["1"]])
@@ -2091,6 +2127,8 @@ dialogEvent ev dg d = case ev of
   V.EvKey (V.KChar '\t') mods -> setFocus (focus dg + if V.MShift `elem` mods then -1 else 1)
   V.EvKey V.KBackTab _ -> setFocus (focus dg-1)
   V.EvKey key mods | areaFocused -> areaKey key mods
+  V.EvKey key mods | ComboBox name choices chosen Nothing:_<-drop (focus dg) (fields dg),
+    key==V.KEnter || key==V.KChar ' ' || key==V.KDown && V.MAlt `elem` mods -> updateField (const (ComboBox name choices chosen (Just chosen)))
   V.EvKey V.KEnter _ | approvalDialog dg, focus dg<count -> (d,[])
   V.EvKey V.KEnter _ -> submitDialog (if focus dg>=count then focus dg-count else 0) dg d
   V.EvKey k mods | focus dg<count -> updateField (fieldKey k mods)
@@ -2111,6 +2149,7 @@ dialogEvent ev dg d = case ev of
       Just i -> let Rect l t _ _ = fieldRects d dg !! i
                     click (FileList xs selected) = FileList xs (max 0 (min (length xs-1) ((max 0 selected `div` 16)*16+max 0 (y-t-2)+if x-l >= width (fieldRects d dg !! i) `div` 2 then 8 else 0)))
                     click (Input label value pos) = Input label value (columnOffset value (max 0 (x-l)+max 0 (displayColumn value pos-width (fieldRects d dg !! i)+1)))
+                    click (ComboBox name choices chosen _) = ComboBox name choices chosen (Just chosen)
                     click (CheckBox label b) = CheckBox label (not b)
                     click (Radio label xs _) = Radio label xs (max 0 (min (length xs-1) (y-t-1)))
                     click (ListBox label xs selected) = ListBox label xs (max 0 (min (length xs-1) (max 0 (selected-3)+y-t-1)))
@@ -2277,7 +2316,10 @@ submitDialog button dg original
   where
     d=original {dialog=Nothing,buttonHover=Nothing,buttonPressed=Nothing}
     selected=fromMaybe 0 (listToMaybe [i | ListBox _ _ i <- fields dg])
-    values=[value | Input _ value _ <- fields dg]
+    values=concatMap fieldValue (fields dg)
+    fieldValue (Input _ value _)=[value]
+    fieldValue (ComboBox _ choices chosen _)=take 1 (drop chosen choices)
+    fieldValue _=[]
     first=fromMaybe "" (listToMaybe values); second=fromMaybe "" (listToMaybe (drop 1 values))
     discardActive s = case activeWindow s of
       Nothing -> s
@@ -2598,6 +2640,11 @@ addReadOnly title text d = case [(bid,w) | (bid,doc)<-M.toList (buffers d),docum
 
 -- Hit testing uses the same cell geometry as selection, including tabs and wide glyphs.
 hoverAt :: Int -> Int -> Desktop -> (Desktop,[Effect])
+hoverAt x y d | Just dg<-dialog d, Just (i,name,choices,chosen,_)<-openComboBox dg =
+  let rect=comboBoxRect d dg i choices
+  in if inside rect x y && y>top rect && y<top rect+height rect-1
+     then (d {dialog=Just dg {fields=replaceAt i (ComboBox name choices chosen (Just (y-top rect-1))) (fields dg)}},[])
+     else (d,[])
 hoverAt x y d = (d {hoverTarget=target,typeHint=fromMaybe (if target==hoverTarget d && typeHint d `notElem` ["Unpin window","Dock window at bottom"] then typeHint d else "") pinHint,buttonHover=hovered,contextMenu=popup,statusHover=highlight},[])
   where
     pinHint | Just _<-bottomTerminal d, y==top (problemsRect d), x>=fst (screenSize d)-9, x<fst (screenSize d)-6 = Just "Unpin window"

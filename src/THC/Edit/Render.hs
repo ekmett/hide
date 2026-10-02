@@ -110,7 +110,7 @@ data RenderState = RenderState
 data DocumentKey = DocumentKey (Maybe (FilePath,Bool)) (Maybe Text) Int Bool (Maybe FilePath) Bool deriving Eq
 data ViewKey = ViewKey Int Text Selection (Int,Int) Selection deriving Eq
 data QuestionKey = QuestionKey Int (Maybe Int) Selection Bool deriving Eq
-data FieldKey = InputKey Text Int | CheckBoxKey Text Bool | RadioKey Text Int
+data FieldKey = InputKey Text Int | ComboBoxKey Text Int (Maybe Int) | CheckBoxKey Text Bool | RadioKey Text Int
   | ListBoxKey Text Int | FileListKey Int | ReadOnlyKey Text
   | TextAreaKey Text Bool Selection Int Int deriving Eq
 data DialogKey = DialogKey Text Int [Text] [FieldKey] deriving Eq
@@ -150,6 +150,7 @@ renderKey original = do
         pure (QuestionKey (questionToken value) (questionChoice value) (questionSelection value) (questionFocused value))
       field value=case value of
         Input caption text cursor -> payload text >> pure (InputKey caption cursor)
+        ComboBox caption choices choice preview -> payload choices >> pure (ComboBoxKey caption choice preview)
         CheckBox caption checked -> pure (CheckBoxKey caption checked)
         Radio caption choices choice -> payload choices >> pure (RadioKey caption choice)
         ListBox caption choices choice -> payload choices >> pure (ListBoxKey caption choice)
@@ -722,7 +723,7 @@ contextLayers d (r@(Rect x y w h),chosen) =
 -- Refresh those artifacts with tools/docs-screenshots.hs after visual changes.
 dialogLayers :: Desktop -> Dialog -> [V.Image]
 dialogLayers d dg =
-  [place (x+max 1 ((w-T.length title) `div` 2)) y (label (attr white gray) title)]
+  comboLayers ++ [place (x+max 1 ((w-T.length title) `div` 2)) y (label (attr white gray) title)]
   ++ [place (left r) (top r) (row (if chosen==mode then selected else paper) (width r) (if mode then " Replace " else " Find "))
       | Searching chosen _<-[purpose dg],(r,mode)<-searchTabRects d dg]
   ++ [place (left r) (top r) (label (attr white gray) "[x]") | approvalDialog dg,let r=dialogCloseRect d dg]
@@ -733,6 +734,12 @@ dialogLayers d dg =
   ++ [place x y (box (attr white gray) True w h)]
   where
     Rect x y w h=dialogRect d dg
+    comboLayers=case openComboBox dg of
+      Nothing -> []
+      Just (i,_,choices,_,preview) ->
+        let Rect cx cy cw ch=comboBoxRect d dg i choices
+        in [place (cx+1) (cy+1+n) (row (if n==preview then selected else paper) (cw-2) (" "<>choice)) | (n,choice)<-zip [0..] choices]
+           ++ [place cx cy (box paper False cw ch)]
     title=" "<>dialogTitle dg<>" "
     pushed i=buttonPressed d==Just i && buttonHover d==Just i
     buttonImage i name = label normal "  " V.<|> label normal (T.take pos name)
@@ -754,6 +761,8 @@ dialogLayers d dg =
         image=case field of
           Input name value p -> let offset=if focus dg==i then max 0 (displayColumn value p-fw+1) else 0
                                in V.vertCat [row paper fw name,V.cropRight fw (V.translateX (negate offset) (label inputColor value) V.<|> V.charFill inputColor ' ' fw 1)]
+          ComboBox name choices chosen _ -> V.vertCat [row paper fw name,
+            row inputColor (fw-2) (fromMaybe "" (atMay choices chosen)) V.<|> label (attr blue scrollCyan) " ▼"]
           ReadOnly name value -> let lw=min 18 (fw `div` 3) in row a lw (name<>":") V.<|> row paper (fw-lw) value
           TextArea name editable b sel sr sc ->
             let area=textAreaRect rect field

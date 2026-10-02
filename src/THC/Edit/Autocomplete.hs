@@ -206,7 +206,7 @@ autocompleteEffects runtime fallback d effects=foldM step (False,d) effects
         "settings"->enqueue runtime Settings >> pure state
         "save"->case args of
           button:backend:exe:arguments:model:effort:cp:cpArgs:debug:_ | button `elem` ["0","2","3"]->do
-            enqueue runtime (Save (object ["provider" .= backend,"executable" .= exe,"arguments" .= arguments,"model" .= model,"effort" .= effort,"copilotExecutable" .= cp,"copilotArguments" .= cpArgs,"debug" .= (debug=="true")]))
+            enqueue runtime (Save (object ["provider" .= T.toLower backend,"executable" .= exe,"arguments" .= arguments,"model" .= model,"effort" .= effort,"copilotExecutable" .= cp,"copilotArguments" .= cpArgs,"debug" .= (debug=="true")]))
             when (button=="2") (enqueue runtime SignIn)
             when (button=="3") (enqueue runtime SignOut)
             atomically (modifyTVar' (generation runtime) (+1))
@@ -307,7 +307,7 @@ settingsDialog values d=d {dialog=Just (Dialog "Autocomplete" (AutocompleteDialo
       _->fallback
     input key label fallback=let text=value key fallback in Input label text (T.length text)
     visible=case values of Object o->KM.lookup "debug" o==Just (Bool True); _->False
-    fields'=[input "provider" "Provider (off/acp/copilot)" "off",input "executable" "ACP executable" "codex-acp",
+    fields'=[ComboBox "Provider" ["Off","ACP","Copilot"] (case value "provider" "off" of "acp"->1; "copilot"->2; _->0) Nothing,input "executable" "ACP executable" "codex-acp",
       input "arguments" "ACP arguments (JSON)" "[]",input "model" "Model" "",input "effort" "Effort" "",
       input "copilotExecutable" "Copilot executable" "copilot-language-server",input "copilotArguments" "Copilot arguments (JSON)" "[\"--stdio\"]",
       CheckBox "Show completion chat" visible]

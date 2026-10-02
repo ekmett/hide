@@ -84,7 +84,10 @@ UTF-8 text retains its line endings, including CRLF. Combining sequences and
 joined emoji move and delete as complete graphemes; your terminal or selected
 frontend supplies their appearance.
 
-Choose ACP or Copilot in **Options > Autocomplete** for inline suggestions:
+Choose **ACP** or **Copilot** from the **Provider** dropdown in
+**Options > Autocomplete** for inline suggestions. Choose **Off** to disable them.
+Click the field or press Enter to open it, use the arrow keys to choose, and
+press Enter to select or Escape to cancel.
 
 | Action | Windows / Linux | Mac |
 | --- | --- | --- |
