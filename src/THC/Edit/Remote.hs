@@ -30,7 +30,7 @@ import qualified Data.Text as T
 import qualified Network.Socket as N
 import System.Environment (getExecutablePath, getArgs)
 import System.Exit (ExitCode(..))
-import System.FilePath (takeFileName)
+import System.FilePath (takeFileName, dropExtension)
 import System.IO
 import System.Process
 import System.Timeout (timeout)
@@ -42,8 +42,8 @@ import THC.Edit.Model hiding (Paste, message)
 import THC.Edit.Protocol
 import THC.Edit.RemoteEndpoint
 import THC.Edit.Session
-import System.Directory (getCurrentDirectory, doesFileExist, doesDirectoryExist, removeFile)
-import THC.Edit.Recovery (writeCheckpoint, readCheckpoint)
+import System.Directory (getCurrentDirectory, doesFileExist, doesDirectoryExist, removeFile, listDirectory)
+import THC.Edit.Recovery (writeCheckpoint, readCheckpoint, checkpointKey)
 
 #endif
 
@@ -202,6 +202,8 @@ runRemoteDaemonWithStartup owned session scale effects tick inspect initial = do
     owned
     runState checkpoint recovered path
   runState checkpoint recovered path = do
+    names <- sessionStoreDirectory >>= listDirectory
+    let label = T.pack (shortSessionId session (map dropExtension names))
     epoch <- randomIdentity
     font <- loadFont
     state <- newMVar (Session recovered {browserFrontend=True} Nothing 0 [] 0 False)
@@ -348,8 +350,10 @@ runRemoteDaemonWithStartup owned session scale effects tick inspect initial = do
                 let d=desktop s
                     oldRows=maybe [] (\(_,r,_)->r) previous
                     oldMeta=maybe [] (\(_,_,m)->m) previous
-                    rows=if fmap (\(old,_,_)->old) previous==Just d then oldRows else frameRows d
-                    metadata=frameMetadata cwd d
+                    -- Comparing Desktop also walks buffers and every undo snapshot.
+                    -- Render visible cells; the row diff below suppresses unchanged output.
+                    rows=frameRows d
+                    metadata=[if key=="title" then (key,String (applicationTitle cwd d<>" ["<>label<>"]")) else (key,value) | (key,value)<-frameMetadata cwd d]
                     reset=maybe True (\(old,_,_)->screenSize old/=screenSize d || videoMode old/=videoMode d || pixelateUnicode old/=pixelateUnicode d) previous
                 case clipboardExport d of
                   (serial,Just text) -> do
@@ -417,15 +421,17 @@ runRemoteDaemonWithStartup owned session scale effects tick inspect initial = do
           current <- readMVar state
           if stopped current then pure () else do
             let snapshot=desktop current
-            if snapshot==previous then checkpointLoop previous else do
+            key <- checkpointKey snapshot
+            if Just key==previous then checkpointLoop previous else do
               result <- checkpointNow snapshot
-              checkpointLoop (either (const previous) (const snapshot) result)
+              checkpointLoop (either (const previous) (const (Just key)) result)
         finishSession = do
           current <- readMVar state
           resumable <- readTVarIO preserveCheckpoint
           if stopped current && not resumable then forgetSession session
             else void (checkpointNow (desktop current))
-    void (checkpointNow recovered)
+    initialCheckpoint <- checkpointNow recovered
+    initialKey <- either (const (pure Nothing)) (const (Just <$> checkpointKey recovered)) initialCheckpoint
     args <- getArgs
     oldRecord <- loadSession session
     fresh <- newSessionRecord Nothing (withoutDaemon args)
@@ -449,7 +455,7 @@ runRemoteDaemonWithStartup owned session scale effects tick inspect initial = do
                 pendingStops<-M.elems <$> readTVarIO inspections
                 cancelled<-timeout 2000000 (sequence_ pendingStops >> empty)
                 when (cancelled==Nothing) (hPutStrLn stderr "Editor closed with an unfinished MCP reply.")
-      withAsync (checkpointLoop recovered) $ \_ -> withAsync commandLoop $ \inputs -> withAsync tickLoop $ \ticks -> withAsync acceptLoop $ \accepts ->
+      withAsync (checkpointLoop initialKey) $ \_ -> withAsync commandLoop $ \inputs -> withAsync tickLoop $ \ticks -> withAsync acceptLoop $ \accepts ->
         -- Windows accept is a blocking foreign call: close its socket before
         -- withAsync waits for cancellation, rather than in the outer bracket.
         race_ (readMVar done >> drainInspections) (race_ (wait inputs) (race_ (wait ticks) (wait accepts))) `finally` N.close socket

@@ -1,14 +1,14 @@
 {-# LANGUAGE DeriveGeneric, OverloadedStrings, ScopedTypeVariables #-}
 module THC.Edit.Session
-  (SessionRecord(..), newSessionRecord, rememberSession, forgetSession, listSessions, loadSession, sessionStoreDirectory, checkpointPath, sessionState, sessionActivity) where
+  (SessionRecord(..), newSessionRecord, rememberSession, forgetSession, listSessions, loadSession, sessionStoreDirectory, checkpointPath, sessionState, sessionActivity, shortSessionId) where
 
 import Control.Exception (IOException, bracket, bracketOnError, catch, finally)
 import Control.Monad (filterM, unless)
 import Data.Aeson (FromJSON, ToJSON, Value, object, (.=), eitherDecodeStrict', encode)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
-import Data.List (sortOn, nub)
-import Data.Maybe (catMaybes)
+import Data.List (sortOn, nub, find, isPrefixOf)
+import Data.Maybe (catMaybes, fromMaybe)
 import Data.Ord (Down(..))
 import Data.Time (UTCTime, getCurrentTime)
 import GHC.Generics (Generic)
@@ -116,3 +116,9 @@ listSessions = do
   names <- concat <$> mapM listDirectory [directory,legacy]
   records <- mapM loadSession (nub [ident | name<-names, takeExtension name==".json", let ident=dropExtension name, length ident==48, all (`elem` ("0123456789abcdef"::String)) ident])
   sortOn (Down . sessionCreated) <$> filterM (fmap (/="ended") . sessionState) (catMaybes records)
+
+-- Display identity only: the endpoint still requires the complete session ID.
+-- Include recoverable sessions when choosing a distinguishing prefix.
+shortSessionId :: String -> [String] -> String
+shortSessionId ident others = fromMaybe ident (find unique [take n ident | n<-[12..length ident]])
+  where unique prefix = not (any (isPrefixOf prefix) (filter (/=ident) others))

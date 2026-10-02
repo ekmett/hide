@@ -440,7 +440,6 @@ editActive f cursor d = case (activeWindow d, activeDocument d) of
       bid = bufferId active
       original = documentBuffer doc
       changed = f (selection active) original
-      new = contents changed
       (common,oldEnd,inserted) = fromMaybe (0,0,0) (lastChange changed)
       newEnd = common+inserted
       rebase p | byteMode original/=byteMode changed = min (bufferLength changed) (modeOffset original p)
@@ -450,7 +449,7 @@ editActive f cursor d = case (activeWindow d, activeDocument d) of
       adjust w | bufferId w /= bid = w
                | windowId w == windowId active = w {selection = Selection target target,windowHexLow=False}
                | otherwise = w {selection = let Selection a c = selection w in Selection (rebase a) (rebase c)}
-      target = max 0 (min (T.length new) (fromMaybe newEnd cursor))
+      target = max 0 (min (bufferLength changed) (fromMaybe newEnd cursor))
   _ -> d
 
 insertText :: Text -> Desktop -> Desktop
@@ -550,7 +549,7 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
     go Paste d | Just ident<-activeTerminal d = (d,[AgentAction "terminal-input" [ident,clipboard d]])
     go Paste d | activeHex d = (pasteHex (clipboard d) d,[])
     go Paste d = (insertText (clipboard d) d,[])
-    go SelectAll d = (modifyActive (\w -> w {selection = Selection 0 (T.length (activeText d))}) d,[])
+    go SelectAll d = (modifyActive (\w -> w {selection = Selection 0 (maybe 0 (bufferLength . documentBuffer) (activeDocument d))}) d,[])
     go action d | activeHex d, action `elem` [Find,Replace,FindNext] = (d {status="Text search is unavailable in hex mode."},[])
     go GoTo d | activeHex d = (prompt "Go to byte" GoingTo [Input "Byte offset (decimal)" "0" 1] d,[])
     go Find d = (searchPrompt False d,[])
@@ -655,15 +654,23 @@ findText needle d = case activeWindow d of
 
 findPrevious :: Desktop -> Desktop
 findPrevious d | T.null (lastFind d) = d {status="Enter search text first."}
-findPrevious d = case activeWindow d of
-  Nothing -> d
-  Just w -> case candidates of
-    [] -> d {status="Search text not found."}
-    _ -> let before=filter (<fst (ordered (selection w))) candidates
-             p=last (if null before then candidates else before)
-         in ensureVisible (modifyActive (\v -> v {selection=Selection p (p+T.length needle)}) d {status="Search match."})
-  where needle=lastFind d; text=activeText d
-        candidates=[p | p<-[0..T.length text-T.length needle],needle `T.isPrefixOf` T.drop p text]
+findPrevious d = case (activeWindow d,activeDocument d) of
+  (Just w,Just doc) ->
+    let b=documentBuffer doc
+        limit=fst (ordered (selection w))
+        -- Include the rest of an overlapping match whose start precedes the
+        -- selection. breakOnEnd searches once instead of dropping every prefix.
+        before=locate (bufferSlice b 0 (max 0 (limit+size-1)))
+        found=case before of Just p -> Just p; Nothing -> locate (contents b)
+    in case found of
+      Nothing -> d {status="Search text not found."}
+      Just p -> ensureVisible (modifyActive (\v -> v {selection=Selection p (p+size)}) d {status="Search match."})
+  _ -> d
+  where
+    needle=lastFind d
+    size=T.length needle
+    locate text=let (prefix,_)=T.breakOnEnd needle text in
+      if T.null prefix then Nothing else Just (T.length prefix-size)
 
 helpLines :: [Text]
 helpLines = ["F1 Help   F2 Save   F3 Open   F5 Zoom", "F6 Next window   F10 Menu   Alt+X Exit", "Alt+F3 Close   Ctrl+Z Undo   Ctrl+Shift+Z Redo", "Shift+arrows Select   Ctrl+arrows Words", "Ctrl+C/X/V Copy/Cut/Paste (internal clipboard)", "Ctrl+F Find   Ctrl+H Replace   Ctrl+L Next", "Ctrl+G Go to line   Ctrl+A Select all", "Mouse: title drag, bottom-right resize", "Window menu: tile, cascade, shared splits", "", "WordStar (Options > Editor):", "Ctrl+E/S/D/X Up/Left/Right/Down", "Ctrl+A/F Word left/right   Ctrl+Y Delete line", "Ctrl+K B/K Block start/end   C/V Copy/Cut", "Ctrl+K Y Delete block   S Save   D Close", "Ctrl+Q S/D Line start/end   R/C File top/end", "Ctrl+Q F Find   Ctrl+Q A Replace", "Escape cancels a command prefix.", "", "Tools: HLS code actions and Cabal project browser."]
@@ -1553,17 +1560,17 @@ keyEvent key mods d
 editorKey :: V.Key -> [V.Modifier] -> Desktop -> Desktop
 editorKey key mods d | activeHex d = hexKey key mods d
 editorKey key mods d = case key of
-  V.KLeft -> move (if ctrl then wordLeft t p else previousCharacter t p)
-  V.KRight -> move (if ctrl then wordRight t p else nextCharacter t p)
+  V.KLeft -> move (if ctrl then wordLeft t p else bufferPreviousCharacter b p)
+  V.KRight -> move (if ctrl then wordRight t p else bufferNextCharacter b p)
   V.KUp -> vertical (-1)
   V.KDown -> vertical 1
   V.KPageUp -> vertical (negate page)
   V.KPageDown -> vertical page
   V.KHome -> move (if ctrl then 0 else start)
-  V.KEnd -> move (if ctrl then T.length t else start+T.length (bufferLineAt b row))
-  V.KBS -> erase (if ctrl then wordLeft t p else previousCharacter t p) p
-  V.KDel -> erase p (if ctrl then wordRight t p else nextCharacter t p)
-  V.KEnter -> insertText (if "\r\n" `T.isInfixOf` t then "\r\n" else "\n") d
+  V.KEnd -> move (if ctrl then bufferLength b else start+T.length (bufferLineAt b row))
+  V.KBS -> erase (if ctrl then wordLeft t p else bufferPreviousCharacter b p) p
+  V.KDel -> erase p (if ctrl then wordRight t p else bufferNextCharacter b p)
+  V.KEnter -> insertText (bufferNewline b) d
   V.KChar '\t' -> insertText "  " d
   V.KChar c | null mods || mods==[V.MShift], textInputChar c -> insertText (T.singleton c) d
   _ -> d
@@ -1588,7 +1595,7 @@ starKey c d = case lookup c [('e',V.KUp),('s',V.KLeft),('d',V.KRight),('x',V.KDo
     'q' -> (d {prefix=Just 'q'},[])
     'a' -> (editorKey V.KLeft [V.MCtrl] d,[])
     'f' -> (editorKey V.KRight [V.MCtrl] d,[])
-    'y' -> let t=activeText d; p=maybe 0 (caret . selection) (activeWindow d); row=fst (lineColumn t p); a=lineOffset t row; z=min (T.length t) (lineOffset t (row+1))
+    'y' -> let b=maybe (newBuffer "") documentBuffer (activeDocument d); p=maybe 0 (caret . selection) (activeWindow d); row=fst (bufferLineColumn b p); a=bufferLineOffset b row; z=bufferLineOffset b (row+1)
            in (editActive (\_ -> replaceSelection (Selection a z) "") (Just a) d,[])
     'z' -> runCommand Undo d
     _ -> (d,[])
@@ -1597,7 +1604,7 @@ starPrefix :: Char -> Char -> Desktop -> (Desktop,[Effect])
 starPrefix 'k' c d = case c of
   'b' -> (d {blockStart=(\w -> (bufferId w,caret (selection w))) <$> activeWindow d},[])
   'k' -> (case (blockStart d,activeWindow d) of
-    (Just (bid,p),Just w) | bid==bufferId w -> modifyActive (\v -> v {selection=Selection (min p (T.length (activeText d))) (caret (selection v))}) d
+    (Just (bid,p),Just w) | bid==bufferId w -> modifyActive (\v -> v {selection=Selection (min p (maybe 0 (bufferLength . documentBuffer) (activeDocument d))) (caret (selection v))}) d
     _ -> d,[])
   'c' -> runCommand Copy d
   'v' -> runCommand Cut d
@@ -1609,7 +1616,7 @@ starPrefix 'q' c d = case c of
   's' -> (editorKey V.KHome [] d,[])
   'd' -> (editorKey V.KEnd [] d,[])
   'r' -> (moveTo False 0 d,[])
-  'c' -> (moveTo False (T.length (activeText d)) d,[])
+  'c' -> (moveTo False (maybe 0 (bufferLength . documentBuffer) (activeDocument d)) d,[])
   'f' -> runCommand Find d
   'a' -> runCommand Replace d
   _ -> (d {status="Unknown Ctrl+Q command."},[])
@@ -1787,7 +1794,7 @@ submitDialog button dg original
       Just n | n>=0 -> (moveTo False n d,[])
       _ -> (original {status="Enter a nonnegative byte offset."},[])
     GoingTo -> case readMaybe (T.unpack first) of
-      Just n | n>0 -> (moveTo False (lineOffset (activeText d) (n-1)) d,[])
+      Just n | n>0 -> (moveTo False (maybe 0 (\doc->bufferLineOffset (documentBuffer doc) (n-1)) (activeDocument d)) d,[])
       _ -> (original {status="Enter a positive line number."},[])
     DiscardDraft | button==0 -> runCommand Quit d {composerBuffer=newBuffer "",composerSelection=Selection 0 0,conversationViews=M.map (\view->view {conversationDraft=newBuffer "",conversationDraftSelection=Selection 0 0}) (conversationViews d)}
                  | otherwise -> (d,[])
@@ -2224,7 +2231,7 @@ hexKey key mods d = case (activeWindow d,activeDocument d) of
         editActive (\_ -> replaceSelection (if anchor sel/=p then sel else Selection p (min size (p+1))) (T.singleton (chr value)))
           (Just (if low then fst (ordered sel) else fst (ordered sel)+1)) d
       start=fst (ordered sel)
-      old=if start<size then ord (T.index (contents b) start) else 0
+      old=if start<size then maybe 0 (ord.fst) (T.uncons (bufferSlice b start 1)) else 0
       count=windowHexBytes w
       page=max 1 (height (bounds w)-3)*count
     in case key of

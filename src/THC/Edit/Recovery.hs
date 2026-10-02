@@ -1,9 +1,12 @@
 {-# LANGUAGE CPP, OverloadedStrings, PackageImports #-}
-module THC.Edit.Recovery (writeCheckpoint, readCheckpoint) where
+module THC.Edit.Recovery (writeCheckpoint, readCheckpoint, CheckpointKey, checkpointKey) where
 
-import Control.Exception (IOException, bracket, try)
+import Control.Exception (IOException, bracket, try, evaluate)
 import Control.Monad (unless, when)
 import Data.Aeson
+import Data.Functor.Identity (runIdentity)
+import Data.IORef
+import System.Mem.StableName
 import Data.Aeson.Types (Parser, parseEither)
 import qualified Data.ByteString as BS
 import qualified "base64-bytestring" Data.ByteString.Base64 as B64
@@ -77,8 +80,10 @@ bufferParser=withObject "buffer" $ \o->do
   either (fail . T.unpack) pure (restoreBuffer snapshot)
   where history=withObject "history" $ \o->(,,) <$> o .: "contents" <*> o .: "byteMode" <*> o .: "change"
 
-fileValue :: FileState -> Value
-fileValue file=object ["path" .= filePath file,"diskBytes" .= fmap (TE.decodeUtf8 . B64.encode) (diskBytes file)]
+fileValueWith :: Monad m => (BS.ByteString -> m Value) -> FileState -> m Value
+fileValueWith baseline file=do
+  bytes<-traverse baseline (diskBytes file)
+  pure (object ["path" .= filePath file,"diskBytes" .= bytes])
 fileParser :: Value -> Parser FileState
 fileParser=withObject "file baseline" $ \o->do
   path<-o .: "path" >>= checkedPath True
@@ -90,41 +95,74 @@ fileParser=withObject "file baseline" $ \o->do
 -- ended view and has no terminal identifier that can route input to a process.
 keptDocument :: Document -> Bool
 keptDocument doc=documentLabel doc `notElem` [Just "Agent request",Just "Proposed agent edit"]
-documentValue :: Desktop -> (Int,Document) -> Value
-documentValue desktop (ident,doc)=object ["id" .= ident,"buffer" .= bufferValue recoveredBuffer,"file" .= fmap fileValue (documentFile doc),
-  "label" .= recoveredLabel (documentLabel doc),"suggestedName" .= documentSuggestedName doc]
+documentValueWith :: Monad m => ([(Int,Int)] -> Buffer -> m Value) -> (BS.ByteString -> m Value) -> Desktop -> (Int,Document) -> m Value
+documentValueWith buffer baseline desktop (ident,doc)=do
+  encoded<-buffer privateSpans (documentBuffer doc)
+  file<-traverse (fileValueWith baseline) (documentFile doc)
+  pure (object ["id" .= ident,"buffer" .= encoded,"file" .= file,
+    "label" .= recoveredLabel (documentLabel doc),"suggestedName" .= documentSuggestedName doc])
   where
-    -- Pending answers no longer have a waiter after a crash. Their rendered
-    -- interaction spans must not become public transcript when actions reset.
-    privateSpans=[(a,z) | (a,z,action,_)<-chatActions desktop,"question-" `T.isPrefixOf` action]
-    recoveredBuffer
-      | documentLabel doc==Just "Conversation",fmap fst (conversationDocument "" desktop)==Just ident,T.null (conversationTarget desktop),not (null privateSpans)=newBuffer (T.pack
-          [if c/='\n' && c/='\r' && any (\(a,z)->index>=a && index<z) privateSpans then ' ' else c
-          | (index,c)<-zip [0..] (T.unpack (contents (documentBuffer doc)))])
-      | otherwise=documentBuffer doc
+    -- The key retains mask boundaries without constructing the redacted text.
+    privateSpans
+      | documentLabel doc==Just "Conversation",fmap fst (conversationDocument "" desktop)==Just ident,T.null (conversationTarget desktop)=
+          [(a,z) | (a,z,action,_)<-chatActions desktop,"question-" `T.isPrefixOf` action]
+      | otherwise=[]
     recoveredLabel (Just label) | "Terminal " `T.isPrefixOf` label=Just ("Ended "<>label)
     recoveredLabel label=label
 
+redactPending :: [(Int,Int)] -> Buffer -> Buffer
+redactPending [] buffer=buffer
+redactPending spans buffer=newBuffer (T.pack
+  [if c/='\n' && c/='\r' && any (\(a,z)->index>=a && index<z) spans then ' ' else c
+  | (index,c)<-zip [0..] (T.unpack (contents buffer))])
+
 desktopValue :: Desktop -> Value
-desktopValue=desktopValueSaved . rememberConversationView
+desktopValue desktop=runIdentity (desktopValueWith
+  (\spans -> pure . bufferValue . redactPending spans)
+  (pure . String . TE.decodeUtf8 . B64.encode) desktop)
 
-desktopValueSaved :: Desktop -> Value
-desktopValueSaved d=object ["schemaVersion" .= (1::Int),"screen" .= screenSize d,"buffers" .= map (documentValue d) (M.toAscList documents),
-  "dockedTerminals" .= [object ["windowId" .= ident,"bounds" .= rectValue rectangle,"restoredBounds" .= fmap rectValue saved] | (ident,(rectangle,saved))<-M.toList (dockedTerminals d),any ((==ident).windowId) (windows d)],
-  "bottomTerminal" .= bottomTerminal d,
-  "windows" .= map windowValue [w | w<-windows d,M.member (bufferId w) documents],"nextId" .= nextId d,
-  "conversationTarget" .= conversationTarget d,"conversationViews" .= map conversationViewValue (M.toList (conversationViews d)),
-  "composer" .= bufferValue (composerBuffer d),"composerSelection" .= selectionValue (composerSelection d),"composerFocused" .= composerFocused d,
-  "directory" .= defaultDirectory d,"sidebar" .= fmap sidebarValue (sideTree d),"preferences" .= object
-    ["wordStar" .= wordStar d,"blinkCursor" .= blinkCursor d,"crtFilter" .= crtFilter d,"pixelateUnicode" .= pixelateUnicode d,
-     "materialIcons" .= materialIcons d,"streamerMode" .= streamerMode d,"appearance" .= fromEnum (appearance d),"videoMode" .= videoMode d,
-     "problemsVisible" .= problemsVisible d,"problemsHeight" .= problemsPreferredHeight d,"messagesNumber" .= messagesNumber d]]
-  where documents=M.filter keptDocument (buffers d)
+-- Metadata uses the same schema as the checkpoint. Stable identities replace
+-- expensive immutable contents; revisions alone miss reload and save changes.
+data CheckpointKey = CheckpointKey Value [StableName Buffer] [StableName BS.ByteString] deriving Eq
+checkpointKey :: Desktop -> IO CheckpointKey
+checkpointKey desktop=do
+  buffersRef<-newIORef []
+  baselinesRef<-newIORef []
+  let buffer spans value=do
+        ident<-evaluate value >>= makeStableName
+        modifyIORef' buffersRef (ident:)
+        pure (toJSON spans)
+      baseline value=do
+        ident<-evaluate value >>= makeStableName
+        modifyIORef' baselinesRef (ident:)
+        pure Null
+  metadata<-desktopValueWith buffer baseline desktop
+  CheckpointKey metadata <$> readIORef buffersRef <*> readIORef baselinesRef
 
-conversationViewValue :: (Text,ConversationView) -> Value
-conversationViewValue (target,view)=object ["target" .= target,"bufferId" .= conversationBufferId view,"name" .= conversationName view,
-  "draft" .= bufferValue (conversationDraft view),"selection" .= selectionValue (conversationDraftSelection view),
-  "scroll" .= conversationScroll view,"replySelection" .= selectionValue (conversationReplySelection view)]
+desktopValueWith :: Monad m => ([(Int,Int)] -> Buffer -> m Value) -> (BS.ByteString -> m Value) -> Desktop -> m Value
+desktopValueWith buffer baseline desktop=do
+  encodedDocuments<-mapM (documentValueWith buffer baseline d) (M.toAscList documents)
+  views<-mapM (conversationViewValueWith buffer) (M.toList (conversationViews d))
+  composer<-buffer [] (composerBuffer d)
+  pure (object ["schemaVersion" .= (1::Int),"screen" .= screenSize d,"buffers" .= encodedDocuments,
+    "dockedTerminals" .= [object ["windowId" .= ident,"bounds" .= rectValue rectangle,"restoredBounds" .= fmap rectValue saved] | (ident,(rectangle,saved))<-M.toList (dockedTerminals d),any ((==ident).windowId) (windows d)],
+    "bottomTerminal" .= bottomTerminal d,
+    "windows" .= map windowValue [w | w<-windows d,M.member (bufferId w) documents],"nextId" .= nextId d,
+    "conversationTarget" .= conversationTarget d,"conversationViews" .= views,
+    "composer" .= composer,"composerSelection" .= selectionValue (composerSelection d),"composerFocused" .= composerFocused d,
+    "directory" .= defaultDirectory d,"sidebar" .= fmap sidebarValue (sideTree d),"preferences" .= object
+      ["wordStar" .= wordStar d,"blinkCursor" .= blinkCursor d,"crtFilter" .= crtFilter d,"pixelateUnicode" .= pixelateUnicode d,
+       "materialIcons" .= materialIcons d,"streamerMode" .= streamerMode d,"appearance" .= fromEnum (appearance d),"videoMode" .= videoMode d,
+       "problemsVisible" .= problemsVisible d,"problemsHeight" .= problemsPreferredHeight d,"messagesNumber" .= messagesNumber d]])
+  where d=rememberConversationView desktop
+        documents=M.filter keptDocument (buffers d)
+
+conversationViewValueWith :: Monad m => ([(Int,Int)] -> Buffer -> m Value) -> (Text,ConversationView) -> m Value
+conversationViewValueWith buffer (target,view)=do
+  draft<-buffer [] (conversationDraft view)
+  pure (object ["target" .= target,"bufferId" .= conversationBufferId view,"name" .= conversationName view,
+    "draft" .= draft,"selection" .= selectionValue (conversationDraftSelection view),
+    "scroll" .= conversationScroll view,"replySelection" .= selectionValue (conversationReplySelection view)])
 
 conversationViewParser :: M.Map Int Document -> Value -> Parser (Text,ConversationView)
 conversationViewParser documents=withObject "conversation view" $ \o->do

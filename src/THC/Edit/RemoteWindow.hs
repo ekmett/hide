@@ -25,6 +25,9 @@ import qualified Data.ByteString.Lazy as BL
 import qualified Data.Map.Strict as M
 import Foreign (alloca, allocaArray, peek, peekArray, withArray)
 import Foreign.C
+import Data.IORef
+import GHC.Clock (getMonotonicTimeNSec)
+import Text.Printf (printf)
 import System.Directory (getHomeDirectory, createDirectoryIfMissing)
 import System.FilePath ((</>), takeFileName)
 import System.Info (os)
@@ -212,6 +215,8 @@ drawRemote font atlas frame = do
 runRemoteWindow :: Backend -> Double -> (Int,Int) -> Int -> String -> RemotePeer -> IO ()
 runRemoteWindow backend scale (cols,rows) mode host peer = do
   font <- loadFont
+  drawTimes <- newIORef ([]::[Double])
+  titleTiming <- newIORef (0::Double,""::T.Text)
   incoming <- newTBQueueIO 8
   outgoing <- newTBQueueIO 256
   queuedBytes <- newTVarIO (0::Int)
@@ -264,7 +269,18 @@ runRemoteWindow backend scale (cols,rows) mode host peer = do
                   when (BS.length payload<=16777216) (send [JsonPacket (object ["type" .= ("upload"::T.Text),"name" .= name]),BinaryPacket payload]))
                 `catch` \(e::IOException) -> hPutStrLn stderr ("Cannot upload dropped file: "++show e)
         _ -> when connected (sendEvent event)
-      title connection frame = utf8 ((maybe "Turbo Haskell" remoteTitle frame)<>(if null host then "" else " — "<>T.pack host)<>connection) c_title
+      title connection frame = do
+        (_,timing)<-readIORef titleTiming
+        utf8 ((maybe "Turbo Haskell" remoteTitle frame)<>(if null host then "" else " — "<>T.pack host)<>connection<>timing) c_title
+      updateTiming connection frame = do
+        now<-((/1000000000).fromIntegral) <$> getMonotonicTimeNSec
+        (previous,_)<-readIORef titleTiming
+        when (now-previous>=1) $ do
+          samples<-readIORef drawTimes
+          unless (null samples) $ do
+            let timing=T.pack (printf " | %.1f ms/frame" (sum samples/fromIntegral (length samples)))
+            writeIORef titleTiming (now,timing)
+            title connection frame
       controls (frame,atlas,connection,changed,closed) item = case item of
         Assets glyphs -> pure (frame,glyphs,connection,True,closed)
         Frame value -> do
@@ -301,10 +317,15 @@ runRemoteWindow backend scale (cols,rows) mode host peer = do
           let connected = T.null status
           when changed $ do
             title status current
-            forM_ current (drawRemote font glyphs)
+            forM_ current $ \value -> do
+              start<-getMonotonicTimeNSec
+              drawRemote font glyphs value
+              end<-getMonotonicTimeNSec
+              modifyIORef' drawTimes (take 60 . (fromIntegral (end-start)/1000000:))
 #ifdef darwin_HOST_OS
             unless connected $ forM_ (zip [0::Int ..] nativeCommands) $ \(i,_) -> c_menu_enabled (fromIntegral i) 0
 #endif
+          updateTiming status current
           dark <- (/=0) <$> c_system_dark
           when (previousTheme/=Just dark && (connected || previousTheme==Nothing)) (sendJSON (object ["type" .= ("theme"::T.Text),"dark" .= dark]))
           event <- allocaArray 6 $ \p -> check "Read remote window event" (c_wait p) >> map fromIntegral <$> peekArray 6 p

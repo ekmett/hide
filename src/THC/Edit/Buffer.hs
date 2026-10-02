@@ -5,6 +5,7 @@ module THC.Edit.Buffer
   , newBuffer, newByteBuffer, bufferBytes, markSaved, toggleByteMode, replaceBuffer, textBuffer
   , contents, dirty, ordered, replaceSelection, undo, redo, selectedText
   , bufferLength, bufferLineCount, bufferLineColumn, bufferLineOffset, bufferLineAt
+  , bufferNextCharacter, bufferPreviousCharacter, bufferNewline, bufferSlice
   , lineColumn, textLines, lineOffset, lineAt, displayColumn, columnOffset
   , combining, nextCharacter, previousCharacter, wordLeft, wordRight, wordChar, characterWidth
   ) where
@@ -20,16 +21,16 @@ import qualified Data.FingerTree as FT
 import Graphics.Vty (safeWcwidth)
 import THC.Edit.Unicode (graphemes, clusterWidth)
 
-data LineMeasure = LineMeasure { characterCount :: !Int, lineCount :: !Int } deriving (Eq,Show)
+data LineMeasure = LineMeasure { characterCount :: !Int, lineCount :: !Int, containsNul :: !Bool, containsCRLF :: !Bool } deriving (Eq,Show)
 instance Semigroup LineMeasure where
-  LineMeasure a b <> LineMeasure c d = LineMeasure (a+c) (b+d)
+  LineMeasure a b n r <> LineMeasure c d m s = LineMeasure (a+c) (b+d) (n || m) (r || s)
 instance Monoid LineMeasure where
-  mempty = LineMeasure 0 0
+  mempty = LineMeasure 0 0 False False
 
 -- Each leaf includes its newline; the final leaf has none (and may be empty).
-data Line = Line !Int Text deriving (Eq,Show)
+data Line = Line !Int !Bool !Bool Text deriving (Eq,Show)
 instance FT.Measured LineMeasure Line where
-  measure (Line n _) = LineMeasure n 1
+  measure (Line n nul crlf _) = LineMeasure n 1 nul crlf
 type LineTree = FT.FingerTree LineMeasure Line
 
 data Buffer = Buffer
@@ -89,7 +90,7 @@ markSaved :: Buffer -> Buffer
 markSaved b = b {saved=contents b,savedByteMode=byteMode b}
 
 textBuffer :: Buffer -> Bool
-textBuffer b = not (byteMode b) && not (T.any (=='\0') (contents b))
+textBuffer b = not (byteMode b) && not (containsNul (FT.measure (bufferLines b)))
 
 toggleByteMode :: Buffer -> Either Text Buffer
 toggleByteMode b
@@ -114,7 +115,7 @@ contents :: Buffer -> Text
 contents = cachedContents
 
 lineText :: Line -> Text
-lineText (Line _ t) = t
+lineText (Line _ _ _ t) = t
 
 treeText :: LineTree -> Text
 treeText = T.concat . map lineText . toList
@@ -122,7 +123,7 @@ treeText = T.concat . map lineText . toList
 linesFromText :: Text -> LineTree
 linesFromText = FT.fromList . go . T.splitOn "\n"
   where
-    line t = Line (T.length t) t
+    line t = Line (T.length t) (T.any (=='\0') t) ("\r\n" `T.isSuffixOf` t) t
     go [] = []
     go [t] = [line t]
     go (t:ts) = line (t <> "\n") : go ts
@@ -130,6 +131,14 @@ linesFromText = FT.fromList . go . T.splitOn "\n"
 bufferLength, bufferLineCount :: Buffer -> Int
 bufferLength = characterCount . FT.measure . bufferLines
 bufferLineCount = lineCount . FT.measure . bufferLines
+
+-- These flags are recomputed only for changed leaves.
+bufferNewline :: Buffer -> Text
+bufferNewline b = if containsCRLF (FT.measure (bufferLines b)) then "\r\n" else "\n"
+
+bufferSlice :: Buffer -> Int -> Int -> Text
+bufferSlice b start count = rangeText a (a+min (max 0 count) (bufferLength b-a)) (bufferLines b)
+  where a=max 0 (min (bufferLength b) start)
 
 -- Locate one line with a measured split, including the final empty line at EOF.
 splitLine :: Int -> LineTree -> (LineTree,Text,Int,LineTree)
@@ -155,6 +164,22 @@ bufferLineAt b row = case FT.viewl remaining of
   FT.EmptyL -> ""
   line FT.:< _ -> T.dropWhileEnd (=='\r') (T.dropWhileEnd (=='\n') (lineText line))
   where remaining = FT.dropUntil ((>max 0 row) . lineCount) (bufferLines b)
+
+-- Character motion inspects the containing line, not a flattened document.
+-- The previous line is needed only at column zero, to preserve CRLF as a unit.
+bufferNextCharacter, bufferPreviousCharacter :: Buffer -> Int -> Int
+bufferNextCharacter b position = p-column+nextCharacter line column
+  where
+    p=max 0 (min (bufferLength b) position)
+    (_,line,column,_)=splitLine p (bufferLines b)
+bufferPreviousCharacter b position
+  | column>0 = p-column+previousCharacter line column
+  | otherwise = case FT.viewr before of
+      _ FT.:> previous -> p-if "\r\n" `T.isSuffixOf` lineText previous then 2 else 1
+      FT.EmptyR -> 0
+  where
+    p=max 0 (min (bufferLength b) position)
+    (before,line,column,_)=splitLine p (bufferLines b)
 
 rangeText :: Int -> Int -> LineTree -> Text
 rangeText a z tree

@@ -25,6 +25,7 @@ import THC.Edit.Recovery
 
 checks :: IO ()
 checks=bracket temporary removePathForcibly $ \root->do
+  keyChecks
   let path=root </> "session.checkpoint"
       sourcePath=root </> "source.hs"
       original=newBuffer "abc λ\n"
@@ -168,3 +169,38 @@ temporary=do
   removeFile path
   createDirectory path
   canonicalizePath path
+
+-- Change detection must not inspect text, history or rendering caches.
+keyChecks :: IO ()
+keyChecks=do
+  let original=replaceSelection (Selection 1 1) "x" (newBuffer "abc")
+      desktop=addDocument (Just (FileState "/project/source.hs" (Just "abc"))) original (initialDesktop (80,25))
+      update f d=d {buffers=M.map f (buffers d)}
+      replace buffer=update (\doc->doc {documentBuffer=buffer}) desktop
+      check label ok=unless ok (error label)
+      changed label d=do a<-checkpointKey desktop; b<-checkpointKey d; check label (a/=b)
+  initial<-checkpointKey desktop
+  repeated<-checkpointKey desktop
+  transient<-checkpointKey (update (\doc->doc {documentHighlight=error "render cache forced by checkpoint key",documentWidth=999})
+    desktop {status="background status",agentReplying=True,clipboard="private transient",menu=Just (0,0)})
+  check "unchanged checkpoint identity and transient UI changes stay cheap" (initial==repeated && initial==transient)
+  changed "same-revision replacement changes checkpoint key" (replace (newBuffer "different") {revision=revision original})
+  changed "markSaved changes checkpoint key without changing revision" (replace (markSaved original))
+  changed "disk conflict baseline changes checkpoint key" (update (\doc->doc {documentFile=Just (FileState "/project/source.hs" (Just "new disk"))}) desktop)
+  changed "saved source path changes checkpoint key" (update (\doc->doc {documentFile=Just (FileState "/project/renamed.hs" (Just "abc"))}) desktop)
+  changed "window selection changes checkpoint key" (desktop {windows=map (\w->w {selection=Selection 1 2}) (windows desktop)})
+  changed "recovered preferences change checkpoint key" (desktop {pixelateUnicode=not (pixelateUnicode desktop)})
+  let poison=original {saved=error "saved contents forced",undoStack=error "undo history forced",redoStack=error "redo history forced"}
+  lazyA<-checkpointKey (replace poison)
+  lazyB<-checkpointKey (replace poison)
+  check "checkpoint key never walks buffer snapshots" (lazyA==lazyB)
+  let chat=(addReadOnly "Conversation" "Public prompt\nOther: private" desktop) {composerBuffer=newBuffer "unsent draft"}
+      masked=chat {chatActions=[(14,28,"question-input",["ephemeral-token"])]}
+  chatKey<-checkpointKey chat
+  maskedKey<-checkpointKey masked
+  tokenOnly<-checkpointKey masked {chatActions=[(14,28,"question-input",["other-token"])]}
+  remembered<-checkpointKey (rememberConversationView masked)
+  check "private pending-answer mask participates but tokens do not" (chatKey/=maskedKey && maskedKey==tokenOnly)
+  check "checkpoint key shares conversation-view normalization" (maskedKey==remembered)
+  draftKey<-checkpointKey chat {composerBuffer=newBuffer "different draft"}
+  check "unsent composer replacement changes checkpoint key" (chatKey/=draftKey)

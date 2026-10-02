@@ -156,7 +156,7 @@ windowLayers d active w =
   where
     Rect x y ww hh=bounds w
     doc=fromMaybe (newDocument (newBuffer "") Nothing) (M.lookup (bufferId w) (buffers d))
-    b=documentBuffer doc; t=contents b
+    b=documentBuffer doc
     file=maybe (maybe ("NONAME"<>T.pack (show (bufferId w))<>".HS") T.pack (documentSuggestedName doc)) (T.pack . takeFileName . filePath) (documentFile doc)
     title=" "<>(if documentLabel doc==Just "Conversation" then conversationTitle d else fromMaybe file (documentLabel doc))<>(if dirty b then " * " else " ")
     (titleColumn,shownTitle)
@@ -214,10 +214,10 @@ windowLayers d active w =
                      | otherwise = True
     renderLine n | byteMode b && n>=documentRows doc w = V.charFill base ' ' contentWidth 1
     renderLine n | byteMode b = V.cropRight contentWidth (V.translateX (negate (scrollColumn w)) (V.horizCat
-      [V.char (if active && maybe False highlighted offset then selected else if maybe False (\i -> let byte=T.index bytes (i-n*count) in byte<' ' || byte>'~') offset then attr gray blue else edit) ch | (ch,offset)<-hexRow count n t]) V.<|> V.charFill base ' ' contentWidth 1)
+      [V.char (if active && maybe False highlighted offset then selected else if maybe False (\i -> let byte=T.index bytes (i-n*count) in byte<' ' || byte>'~') offset then attr gray blue else edit) ch | (ch,offset)<-hexRowChunk count (n*count) bytes]) V.<|> V.charFill base ' ' contentWidth 1)
       where
         count=windowHexBytes w
-        bytes=T.take count (T.drop (n*count) t)
+        bytes=bufferSlice b (n*count) count
         highlighted offset = offset==caret (selection w) || let (a,z)=ordered (selection w) in offset>=a && offset<z
     renderLine n=V.cropRight contentWidth (V.translateX (negate (scrollColumn w)) (styledImage (darkAppearance d) selectable (lineColor n) active (selection w) (bufferLineOffset b n) (if syntaxDocument doc then maybe plainRow (\rows->fromMaybe plainRow (rows Vec.!? n)) (documentSourceRows doc)
         else if useStyles && not (null (documentHighlight doc)) then fromMaybe [] (atMay styledLines n) else plainRow)) V.<|> V.charFill base ' ' contentWidth 1)

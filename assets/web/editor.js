@@ -51,6 +51,13 @@ const surface=document.createElement('canvas'); const ctx=surface.getContext('2d
 let glyphs=new Map(), tiles=new Map(), rows=[], frame=null, scale=2, initialScale=2, cols=80, lines=25, mode=3;
 let socket, ready=false, closed=false, mouse=[-1,-1], cursorEpoch=performance.now(), blinkPhase=-1, dirty=true, composing=false, clipboard='', lastSize='';
 let remoteHost="", sessionFrontend=false, detaching=false, detached=false;
+const drawTimes=[];
+let titleTick=0, timingText='', rasterTime=0;
+function updateTitle(){
+ if(!frame)return;
+ const base=remoteHost?frame.title.replace(/^th(?: |$)/,`th ${remoteHost}:`):frame.title;
+ document.title=base+timingText;
+}
 let downloadName=null, clipboardRequest=null, nativeCopies=[];
 let unsaved=false, serial=0, pendingEdit=0, acknowledged=0;
 function beforeLeave(event){event.preventDefault();event.returnValue=true;}
@@ -106,7 +113,7 @@ function tile(text,fg,pixelated,w,h){
  if(tiles.size>=1024)tiles.clear();tiles.set(key,t);return t;
 }
 function drawRows(changed){
- if(!frame)return;const [cw,ch]=metrics();
+ if(!frame)return;const started=performance.now();const [cw,ch]=metrics();
  for(const [y,spans] of changed){
    const y0=Math.round(y*ch), y1=Math.round((y+1)*ch);ctx.fillStyle='#0000aa';ctx.fillRect(0,y0,surface.width,y1-y0);
    for(const [start,fg,bg,clusters] of spans||[]){let x=start;
@@ -119,15 +126,21 @@ function drawRows(changed){
    }
  }
  gl.bindTexture(gl.TEXTURE_2D,texture);gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,surface);
- dirty=true;
+ rasterTime+=performance.now()-started;dirty=true;
 }
 function present(now){
  const phase=!frame?.blink||Math.floor((now-cursorEpoch)/500)%2===0;
  if(frame&&(dirty||phase!==blinkPhase)){
+   const started=performance.now();
    gl.uniform2f(uniforms.resolution,canvas.width,canvas.height);gl.uniform2f(uniforms.grid,cols,lines);
    gl.uniform2f(uniforms.mouse,...mouse);gl.uniform2f(uniforms.caret,...(frame.cursor||[-1,-1]));
    gl.uniform1i(uniforms.caretOn,phase&&!!frame.cursor);gl.uniform1i(uniforms.crt,frame.crt);
    gl.uniform1f(uniforms.glyphPitch,canvas.height/(lines*16));gl.drawArrays(gl.TRIANGLE_STRIP,0,4);dirty=false;blinkPhase=phase;
+   drawTimes.push(rasterTime+performance.now()-started);rasterTime=0;if(drawTimes.length>60)drawTimes.shift();
+ }
+ if(now-titleTick>=1000&&drawTimes.length){
+   timingText=` | ${(drawTimes.reduce((a,b)=>a+b,0)/drawTimes.length).toFixed(1)} ms/frame`;
+   titleTick=now;updateTitle();
  }
  requestAnimationFrame(present);
 }
@@ -187,7 +200,7 @@ function connect(){
      message.rows=message.rows.map(([y,spans])=>[y,spans.map(([x,fg,bg,runs])=>[x,fg,bg,runs.flatMap(run=>typeof run==='string'?Array.from(run,c=>[c,1]):[run])])]);
      const oldCursor=JSON.stringify(frame?.cursor);
      const changedMode=Object.hasOwn(message,'mode')&&mode!==message.mode;
-     frame={...frame,...message};document.title=remoteHost?frame.title.replace(/^th(?: |$)/,`th ${remoteHost}:`):frame.title;unsaved=frame.dirty;guardLeave();[cols,lines]=frame.size;mode=frame.mode||3;clipboard=frame.selection;
+     frame={...frame,...message};updateTitle();unsaved=frame.dirty;guardLeave();[cols,lines]=frame.size;mode=frame.mode||3;clipboard=frame.selection;
      if(message.reset){rows=Array(lines).fill(null);tiles.clear();}
      for(const [y,r] of message.rows)rows[y]=r;
      if(oldCursor!==JSON.stringify(frame.cursor))cursorEpoch=performance.now();

@@ -20,7 +20,8 @@ thc-edit --resume ID
 ```
 
 Use the ID printed when detaching, or any prefix that identifies it uniquely.
-The saved record supplies the project and, for SSH sessions, the host. Do not
+The native window and browser title also show a distinguishing prefix of the
+session ID in brackets. The saved record supplies the project and, for SSH sessions, the host. Do not
 add a path or `--ssh` to `--resume`.
 
 ## Change displays

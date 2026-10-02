@@ -25,6 +25,12 @@ font. Combining characters, joined emoji, skin tones and flags are handled as
 complete graphemes when editing and clipping; exact rendering follows the
 frontend. Wide characters partly covered by a frame become blank cells.
 
+The title shows the active relative filename, a distinguishing session ID prefix,
+and the average `ms/frame` over the last 60 actual draws. The timing refreshes
+about once a second and keeps its last value while idle. It measures frontend
+drawing and submission time, including cursor-blink draws; browser GPU execution
+continues asynchronously.
+
 ## Size and scale
 
 Native windows and the browser start in Mode 3, an 80-by-25 character grid.

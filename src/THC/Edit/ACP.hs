@@ -10,7 +10,6 @@ import qualified Data.Aeson.KeyMap as KM
 import Data.Aeson.Types (parseMaybe)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
-import Data.Foldable (toList)
 import qualified Data.IntSet as IS
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
@@ -31,7 +30,7 @@ data Event = Response Int (Either Value Value) | Notification Text Value | Reque
   deriving (Eq, Show)
 data State = State
   { outgoing :: Seq.Seq BL.ByteString, outgoingBytes :: Int
-  , incoming :: Seq.Seq Event, incomingBytes :: Int
+  , incoming :: Seq.Seq (Int,Event), incomingBytes :: Int
   , pending :: IS.IntSet, nextId :: Int, failure :: Maybe Text }
 data Client = Client { state :: MVar State, wakeWriter :: MVar (), disconnect :: Text -> IO (), closeClient :: IO () }
 
@@ -74,14 +73,14 @@ startClient launch root = mask_ $ do
           first <- modifyMVar shared $ \s -> case failure s of
             Just _ -> pure (s,False)
             Nothing -> pure (s { failure = Just message, outgoing = Seq.empty, outgoingBytes = 0, pending = IS.empty
-              , incoming = incoming s Seq.>< Seq.fromList (Disconnected message : [Response ident (Left (rpcError message)) | ident <- IS.toList (pending s)]) },True)
+              , incoming = incoming s Seq.>< Seq.fromList [(0,event) | event<-Disconnected message : [Response ident (Left (rpcError message)) | ident <- IS.toList (pending s)]] },True)
           when first (void (tryPutMVar stopped ()))
         failed (e :: IOException) = failClient ("ACP: " <> T.pack (displayException e))
         receive size event = do
           accepted <- modifyMVar shared $ \s ->
             if failure s /= Nothing then pure (s,True)
             else if incomingBytes s + size > queueLimit || Seq.length (incoming s) >= 4096 then pure (s,False)
-            else pure (s { incoming = incoming s Seq.|> event, incomingBytes = incomingBytes s + size
+            else pure (s { incoming = incoming s Seq.|> (size,event), incomingBytes = incomingBytes s + size
                         , pending = case event of Response ident _ -> IS.delete ident (pending s); _ -> pending s },True)
           unless accepted (failClient "ACP: incoming event queue exceeded limit")
         writer = forever $ do
@@ -137,7 +136,7 @@ request client method params = do
                   | otherwise -> Nothing
         updated = s { nextId = ident + 1 }
     pure (case problem of
-      Just reason -> updated { incoming = incoming s Seq.|> Response ident (Left (rpcError reason)) }
+      Just reason -> updated { incoming = incoming s Seq.|> (0,Response ident (Left (rpcError reason))) }
       Nothing -> updated { outgoing = outgoing s Seq.|> body, outgoingBytes = outgoingBytes s + size, pending = IS.insert ident (pending s) },ident)
   void (tryPutMVar (wakeWriter client) ())
   pure ident
@@ -159,7 +158,17 @@ enqueue client value = do
   if accepted then void (tryPutMVar (wakeWriter client) ()) else disconnect client "ACP: outgoing message queue exceeded limit"
 
 pollEvents :: Client -> IO [Event]
-pollEvents client = modifyMVar (state client) (\s -> pure (s {incoming = Seq.empty, incomingBytes = 0},toList (incoming s)))
+pollEvents client = modifyMVar (state client) $ \s -> do
+  -- The session consumes events while holding the desktop lock. Bound both
+  -- count and bytes so a tool burst yields to keyboard/mouse between batches.
+  -- A single legal frame may exceed this budget; it must still make progress.
+  let takeBatch count bytes pending = case Seq.viewl pending of
+        (size,event) Seq.:< rest | count<32 && (count==0 || bytes+size<=262144) ->
+          let (batch,used,remaining)=takeBatch (count+1) (bytes+size) rest
+          in (event:batch,used,remaining)
+        _ -> ([],bytes,pending)
+      (events,consumed,left)=takeBatch (0::Int) 0 (incoming s)
+  pure (s {incoming=left,incomingBytes=incomingBytes s-consumed},events)
 
 -- Chunked reading bounds memory even when a peer never writes a newline, and
 -- delays UTF-8 decoding until a complete frame is available.

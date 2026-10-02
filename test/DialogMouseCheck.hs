@@ -1,7 +1,9 @@
 {-# LANGUAGE OverloadedStrings #-}
 module DialogMouseCheck (checks) where
 
-import Control.Monad (unless)
+import Control.Monad (unless, forM_)
+import Control.Exception (evaluate)
+import System.Timeout (timeout)
 import Data.List (findIndex)
 import Data.Maybe (fromMaybe)
 import THC.Edit.Model
@@ -21,6 +23,7 @@ import qualified Data.Text.Lazy as TL
 checks :: IO ()
 checks = do
   searchChecks
+  previousSearchChecks
   let check name ok = unless ok (error name)
       at n xs = case drop n xs of value:_ -> value; _ -> error "missing test fixture"
       desktop = addDocument Nothing (newBuffer "hello world") (initialDesktop (80,25))
@@ -378,3 +381,20 @@ searchChecks=do
   let terminal=addReadOnly "Terminal 1" "" base
   check "modern shortcuts do not consume PTY control bytes" (and [snd (handleEvent (V.EvKey (V.KChar c) mods) terminal)==[AgentAction "terminal-input" ["1",text]] |
     (c,mods,text)<-[('h',[V.MCtrl],"\b"),('f',[V.MCtrl],"\x06"),('n',[V.MCtrl,V.MShift],"\x0e"),('c',[V.MCtrl,V.MShift],"\x03")]])
+
+-- Independent exhaustive oracle includes overlapping matches and wraparound.
+previousSearchChecks :: IO ()
+previousSearchChecks=do
+  let check name ok=unless ok (error name)
+      run text needle p=fmap selection (activeWindow (findPrevious
+        (moveTo False p (addDocument Nothing (newBuffer text) (initialDesktop (80,25)))) {lastFind=needle}))
+  forM_ ["", "aaa", "ababa", "λ界λ界", "a\nb\na"] $ \text ->
+    forM_ ["a", "aa", "aba", "λ界", "界λ", "\nb", "absent"] $ \needle ->
+      forM_ [0..T.length text] $ \p -> do
+        let matches=[i | i<-[0..T.length text-T.length needle],needle `T.isPrefixOf` T.drop i text]
+            earlier=filter (<p) matches
+            candidates=if null earlier then matches else earlier
+            expected=case reverse candidates of i:_->Selection i (i+T.length needle); []->Selection p p
+        check "previous search preserves overlapping matches, Unicode positions and wraparound" (run text needle p==Just expected)
+  fast<-timeout 1000000 (evaluate (run (T.replicate 200000 "λ界") "λ界" 400000==Just (Selection 399998 400000)))
+  check "previous search scans a large Unicode buffer without repeated prefix walks" (fast==Just True)

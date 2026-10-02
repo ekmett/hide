@@ -93,6 +93,26 @@ checks = bracket temporary removePathForcibly $ \root -> do
     queued <- timeout 2000000 (replicateM 64 (request client "blocked" (String (T.replicate (1024*1024) "x"))))
     check "blocked provider never blocks caller" (maybe False ((== 64) . length) queued)
     check "blocked writer stops promptly" . (== Just ()) =<< timeout 2000000 (stopClient client)
+  -- Burst consumption yields to input without dropping or reordering frames.
+  writeFile server $ unlines
+    [ "import json,sys"
+    , "for line in sys.stdin:"
+    , " r=json.loads(line); size=r['params']"
+    , " for n in range(80): print(json.dumps(dict(jsonrpc='2.0',method=str(n),params='x'*size)),flush=True)"
+    , " print(json.dumps(dict(jsonrpc='2.0',id=r['id'],result=True)),flush=True)"
+    ]
+  bracket start stopClient $ \client -> forM_ [0,100000,300000,0] $ \size -> do
+    ident<-request client "burst" (toJSON (size::Int))
+    let drain accumulated=do
+          batch<-pollEvents client
+          check "ACP batch count is bounded" (length batch<=32)
+          let payloads=[T.length body | Notification _ (String body)<-batch]
+          check "ACP batch byte budget allows only one oversized frame" (sum payloads<=262144 || length batch==1)
+          let combined=accumulated++batch
+          if hasResponse ident combined then pure combined else threadDelay 1000 >> drain combined
+    result<-timeout 10000000 (drain [])
+    check "ACP batches preserve FIFO and byte accounting across bursts"
+      (fmap (\events->[name | Notification name _<-events]) result==Just (map (T.pack.show) [0::Int ..79]))
   putStrLn "ACP checks passed"
   where
     check label ok = unless ok (error label)

@@ -1,5 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
-module THC.Edit.Hex (hexNumber, hexBytesPerRow, hexWidth, hexAsciiColumn, hexColumn, hexDividers, hexRow, hexHit, parseHex) where
+module THC.Edit.Hex (hexNumber, hexBytesPerRow, hexWidth, hexAsciiColumn, hexColumn, hexDividers, hexRow, hexRowChunk, hexHit, parseHex) where
 
 import Data.Char (ord, chr, isHexDigit, digitToInt, isSpace, toUpper)
 import qualified Data.Text as T
@@ -26,10 +26,12 @@ hexDividers count = [8,hexAsciiColumn count-1]
 
 -- Each cell carries its byte offset, so both panes highlight the same selection.
 hexRow :: Int -> Int -> Text -> [(Char,Maybe Int)]
-hexRow count row bytes = plain (hexNumber 8 start<>"│") ++ concatMap cell [0..count-1] ++ plain "│" ++ concatMap ascii [0..count-1]
+hexRow count row bytes = hexRowChunk count (row*count) (T.take count (T.drop (row*count) bytes))
+
+-- Render only the visible slice while retaining absolute byte addresses.
+hexRowChunk :: Int -> Int -> Text -> [(Char,Maybe Int)]
+hexRowChunk count start chunk = plain (hexNumber 8 start<>"│") ++ concatMap cell [0..count-1] ++ plain "│" ++ concatMap ascii [0..count-1]
   where
-    start=row*count
-    chunk=T.take count (T.drop start bytes)
     value i = if i<T.length chunk then Just (T.index chunk i) else Nothing
     plain = map (\c -> (c,Nothing)) . T.unpack
     tagged i = map (\c -> (c,Just (start+i))) . T.unpack

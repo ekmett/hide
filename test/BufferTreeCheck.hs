@@ -11,9 +11,16 @@ check name ok = unless ok (error ("buffer tree: " ++ name))
 checkIndexed :: Buffer -> T.Text -> IO ()
 checkIndexed b text = do
   check "cached character count" (bufferLength b == T.length text)
+  check "cached NUL flag matches Text" (textBuffer b == (not (byteMode b) && not (T.any (=='\0') text)))
+  check "cached newline style matches Text" (bufferNewline b == if "\r\n" `T.isInfixOf` text then "\r\n" else "\n")
+  forM_ [-1..T.length text+1] $ \start -> forM_ [0,1,5,T.length text+1] $ \count ->
+    check "tree range matches Text" (bufferSlice b start count == T.take count (T.drop (max 0 start) text))
   check "cached line count includes the trailing empty line" (bufferLineCount b == length (textLines text))
   forM_ [-1..T.length text+1] $ \p ->
     check "indexed position matches Text" (bufferLineColumn b p == lineColumn text p)
+  forM_ [0..T.length text] $ \p -> do
+    check "indexed next character matches Text" (bufferNextCharacter b p == nextCharacter text p)
+    check "indexed previous character matches Text" (bufferPreviousCharacter b p == previousCharacter text p)
   forM_ [-1..length (textLines text)+1] $ \row -> do
     check "indexed line offset matches Text" (bufferLineOffset b row == lineOffset text row)
     check "indexed CRLF line content matches Text" (bufferLineAt b row == lineAt text row)
@@ -23,7 +30,7 @@ checks = do
   let clipped = replaceSelection (Selection (-3) 99) "界" (newBuffer "abc")
   check "change offsets describe the actual clipped edit"
     (contents clipped == "界" && lastChange clipped == Just (0,3,1))
-  forM_ ["", "\n", "\n\n", "a\r\nb\r\n", "λ😀e\x0301\n界", "last\r", "a\nb\nc\n"] $ \source -> do
+  forM_ ["", "\0x\n", "\n", "\n\n", "a\r\nb\r\n", "λ😀e\x0301\n界", "last\r", "a\nb\nc\n"] $ \source -> do
     check "initial text roundtrip" (contents (newBuffer source) == source)
     checkIndexed (newBuffer source) source
     forM_ [0..T.length source] $ \a -> forM_ [a..T.length source] $ \z ->

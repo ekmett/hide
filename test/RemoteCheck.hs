@@ -44,6 +44,10 @@ isolatedStore action=action
 
 checks :: IO ()
 checks = isolatedStore $ do
+  let identity=replicate 12 'a'++"bcdef"
+  unless (S.shortSessionId identity []==replicate 12 'a') (error "title session prefix starts at twelve characters")
+  unless (S.shortSessionId identity [identity,replicate 12 'a'++"cdefg"]==replicate 12 'a'++"b") (error "title session prefix disambiguates saved sessions")
+
   localPeerCheck
   inspectionExitCheck
   inspectionViewerExitCheck
