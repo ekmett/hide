@@ -94,10 +94,9 @@ aggregate label root queue latest=loop "" "" False
           truncated=wasTruncated || T.length stdout>1024*1024
           problems=take 1000 (mapMaybe (parseBuildDiagnostic root) (T.lines output))
           buffer=newBuffer output
-      -- A strict outer constructor alone leaves the finger tree and parsed
-      -- diagnostic fields unevaluated. Traverse them here before publication.
-      rows<-evaluate (bufferLineCount buffer)
-      forM_ [0..rows-1] $ \row -> void (evaluate (T.length (bufferLineAt buffer row)))
+      -- Strict measures prepare the tree once; seeking every row separately
+      -- turns a burst of short lines into O(lines * log lines) work.
+      evaluate (prepareBuffer buffer)
       forM_ problems $ \problem -> do
         void (evaluate (length (diagnosticPath problem)))
         void (evaluate (diagnosticRow problem+diagnosticColumn problem+diagnosticSeverity problem+T.length (diagnosticMessage problem)))

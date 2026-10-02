@@ -97,7 +97,8 @@ checks = bracket temporary removePathForcibly $ \root -> do
           before<-getAllocationCounter
           fresh<-tickBuildJobs jobs d
           -- Demand the same fields rendering and diagnostic navigation use.
-          let visible=sum [bufferLineCount b+T.length (bufferLineAt b (bufferLineCount b `div` 2)) | doc<-M.elems (buffers fresh),let b=documentBuffer doc]
+          forM_ (M.elems (buffers fresh)) $ \doc -> evaluate (prepareBuffer (documentBuffer doc))
+          let visible=sum [bufferLineCount b+sum [T.length (bufferLineAt b row) | row<-[0,bufferLineCount b `div` 2,bufferLineCount b-1]] | doc<-M.elems (buffers fresh),let b=documentBuffer doc]
               messages=sum [length (diagnosticPath p)+T.length (diagnosticMessage p) | p<-buildDiagnostics fresh]
           _<-evaluate (visible+messages+sum (map scrollRow (windows fresh))+T.length (status fresh))
           after<-getAllocationCounter
