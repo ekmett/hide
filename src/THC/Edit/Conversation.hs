@@ -34,6 +34,7 @@ import qualified THC.Edit.Terminal as Terminal
 import qualified THC.Edit.Consoles as C
 import qualified THC.Edit.Build as B
 import qualified THC.Edit.BuildJobs as Jobs
+import System.Info (os)
 import System.IO (openBinaryTempFile, hClose)
 import Text.Read (readMaybe)
 import qualified THC.Edit.ACP as A
@@ -266,7 +267,7 @@ performPrimary runtime@(ConversationState directory ref consoles jobs _) action 
     ("question-cancel",[token]) | Just q<-chatQuestion d,token==T.pack (show (questionToken q)) ->
       cancelQuestion runtime "Question cancelled by user." d
     ("terminal",_) -> do
-      shell<-fromMaybe "/bin/sh" <$> lookupEnv "SHELL"
+      shell<-if os=="mingw32" then fromMaybe "cmd.exe" <$> lookupEnv "COMSPEC" else fromMaybe "/bin/sh" <$> lookupEnv "SHELL"
       root<-canonicalizePath (maybe (startingDirectory d) treeRoot (sideTree d))
       openConsole consoles (Terminal.TerminalConfig shell [] [] root 80 24) d
     ("run",_) -> runTarget directory consoles jobs (Just B.Run) d

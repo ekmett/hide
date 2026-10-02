@@ -12,7 +12,7 @@ cabal build all
 cabal test
 ```
 
-Native windows, browser support and POSIX embedded terminals are enabled by
+Native windows, browser support and embedded terminals are enabled by
 default. [Installation](install.md) covers their native dependencies. To omit
 components, use the same opt-out flags for build and test:
 
@@ -27,6 +27,30 @@ external changes. The suite also covers session handling and live editor context
 Optional components add checks for browser transport, rendering assets and
 embedded terminals. A passing model check and an interactive frontend check
 establish different things; run the relevant frontend too.
+
+## Native Windows terminals
+
+With the [pinned Ghostty installation](install.md#embedded-terminal) on `PATH`,
+set `$ghosttyPrefix` to its prefix and run these checks from the repository root.
+Use the `clang` supplied with native GHC (its `mingw/bin` directory):
+
+```powershell
+New-Item -ItemType Directory -Force build/native-terminal | Out-Null
+clang -Wall -Wextra "-I$ghosttyPrefix/include" -Icbits cbits/terminal.c test/native-terminal.c "-L$ghosttyPrefix/lib" -lghostty-vt -lshell32 -o build/native-terminal/native-conpty.exe
+./build/native-terminal/native-conpty.exe
+./build/native-terminal/native-conpty.exe --parent-control
+./build/native-terminal/native-conpty.exe --no-console
+ghc --make -threaded -XGHC2021 -DWITH_TERMINAL -isrc -itest -outputdir build/native-terminal/hs test/native-terminal.hs cbits/terminal.c "-optc-I$ghosttyPrefix/include" -optc-Icbits "-L$ghosttyPrefix/lib" -lghostty-vt -o build/native-terminal/wrapper-check.exe
+./build/native-terminal/wrapper-check.exe (Resolve-Path build/native-terminal/native-conpty.exe)
+```
+
+The C fixture exercises real console input, resizing, process-tree termination,
+bounded queues and final output. The two additional modes check that starting a
+terminal preserves an installed parent handler and works without a parent
+console. The Haskell companion checks Unicode paths, argument quoting and
+Ctrl-C in `cmd.exe` and PowerShell. Each command must exit successfully.
+`cabal test` also checks retained editor terminal windows and ACP terminal requests;
+the ACP fixtures require a working `python3` on `PATH`.
 
 ## Rendering previews
 

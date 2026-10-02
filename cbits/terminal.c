@@ -1,12 +1,27 @@
 /* libghostty-vt API pinned to 76895d97b74ff6b24c2b1543bcd69ccc18048a4d. */
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0A00
+#endif
+#ifndef NTDDI_VERSION
+#define NTDDI_VERSION 0x0A000006 /* Windows 10 1809: ConPTY declarations. */
+#endif
+#endif
 #include "terminal.h"
 #include <ghostty/vt.h>
 #include <errno.h>
-#include <fcntl.h>
-#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include <windows.h>
+typedef HRESULT (WINAPI *CreateConsoleFn)(COORD, HANDLE, HANDLE, DWORD, HPCON *);
+typedef HRESULT (WINAPI *ResizeConsoleFn)(HPCON, COORD);
+typedef void (WINAPI *CloseConsoleFn)(HPCON);
+#else
+#include <fcntl.h>
+#include <signal.h>
 #include <sys/ioctl.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -14,6 +29,7 @@
 #include <util.h>
 #else
 #include <pty.h>
+#endif
 #endif
 
 #define OUTPUT_LIMIT (256 * 1024)
@@ -24,7 +40,21 @@ struct thc_terminal {
     GhosttyRenderStateRowIterator row;
     GhosttyRenderStateRowCells cell;
     int columns, rows, master, exited, exit_code, drained, reaped;
+#ifdef _WIN32
+    HPCON console, closing_console;
+    HANDLE child, job, input_pipe, output_pipe, reader, writer, closer;
+    CreateConsoleFn create_console;
+    ResizeConsoleFn resize_console;
+    CloseConsoleFn close_console;
+    CRITICAL_SECTION io_lock;
+    CONDITION_VARIABLE input_ready, output_space;
+    uint8_t pending_output[OUTPUT_LIMIT];
+    size_t pending_length;
+    DWORD io_error;
+    int stopping, input_stopped, output_eof;
+#else
     pid_t pid;
+#endif
     uint32_t *cells;
     uint8_t *text, *input;
     size_t text_length, text_capacity, input_length;
@@ -57,6 +87,209 @@ int thc_terminal_appearance(thc_terminal *t, int dark) {
     t->appearance = appearance;
     return 1;
 }
+#ifdef _WIN32
+static int win_fail(thc_terminal *t, const char *what, DWORD error) {
+    snprintf(t->error, sizeof(t->error), "%s: Windows error %lu", what, (unsigned long)error);
+    return 0;
+}
+static DWORD WINAPI read_pipe(void *context) {
+    thc_terminal *t = context;
+    uint8_t bytes[4096];
+    for (;;) {
+        EnterCriticalSection(&t->io_lock);
+        while (!t->stopping && OUTPUT_LIMIT - t->pending_length < sizeof(bytes))
+            SleepConditionVariableCS(&t->output_space, &t->io_lock, INFINITE);
+        int stopping = t->stopping;
+        LeaveCriticalSection(&t->io_lock);
+        if (stopping) break;
+        DWORD count = 0;
+        BOOL ok = ReadFile(t->output_pipe, bytes, sizeof(bytes), &count, NULL);
+        DWORD error = ok ? 0 : GetLastError();
+        EnterCriticalSection(&t->io_lock);
+        if (count) {
+            memcpy(t->pending_output + t->pending_length, bytes, count);
+            t->pending_length += count;
+        }
+        if (!ok || !count) {
+            t->output_eof = 1;
+            if (!t->stopping && error != ERROR_BROKEN_PIPE && error != ERROR_NO_DATA)
+                t->io_error = error;
+        }
+        LeaveCriticalSection(&t->io_lock);
+        if (!ok || !count) break;
+    }
+    return 0;
+}
+static DWORD WINAPI write_pipe(void *context) {
+    thc_terminal *t = context;
+    uint8_t bytes[4096];
+    for (;;) {
+        EnterCriticalSection(&t->io_lock);
+        while (!t->stopping && !t->input_stopped && !t->input_length)
+            SleepConditionVariableCS(&t->input_ready, &t->io_lock, INFINITE);
+        int stopping = t->stopping || t->input_stopped;
+        DWORD count = (DWORD)(t->input_length < sizeof(bytes) ? t->input_length : sizeof(bytes));
+        if (!stopping) memcpy(bytes, t->input, count);
+        LeaveCriticalSection(&t->io_lock);
+        if (stopping) break;
+        DWORD written = 0;
+        BOOL ok = WriteFile(t->input_pipe, bytes, count, &written, NULL);
+        DWORD error = ok ? 0 : GetLastError();
+        EnterCriticalSection(&t->io_lock);
+        if (written) {
+            t->input_length -= written;
+            memmove(t->input, t->input + written, t->input_length);
+        }
+        if (!ok) {
+            t->input_stopped = 1;
+            if (!t->stopping && error != ERROR_BROKEN_PIPE && error != ERROR_NO_DATA && error != ERROR_OPERATION_ABORTED)
+                t->io_error = error;
+        }
+        LeaveCriticalSection(&t->io_lock);
+        if (!ok) break;
+    }
+    return 0;
+}
+static DWORD WINAPI close_console(void *context) {
+    thc_terminal *t = context;
+    t->close_console(t->closing_console);
+    return 0;
+}
+int thc_terminal_write(thc_terminal *t, const uint8_t *data, size_t length) {
+    EnterCriticalSection(&t->io_lock);
+    DWORD error = 0;
+    if (!t->child || t->exited || t->input_stopped || t->stopping) error = ERROR_BROKEN_PIPE;
+    else if (length > INPUT_LIMIT - t->input_length) error = ERROR_NOT_ENOUGH_QUOTA;
+    else if (length) {
+        uint8_t *input = realloc(t->input, t->input_length + length);
+        if (!input) error = ERROR_NOT_ENOUGH_MEMORY;
+        else {
+            t->input = input;
+            memcpy(t->input + t->input_length, data, length);
+            t->input_length += length;
+            WakeConditionVariable(&t->input_ready);
+        }
+    }
+    LeaveCriticalSection(&t->io_lock);
+    return error ? win_fail(t, "terminal input queue", error) : 1;
+}
+int thc_terminal_spawn_windows(thc_terminal *t, const wchar_t *executable, wchar_t *command,
+                               const wchar_t *environment, const wchar_t *directory) {
+    if (t->child || t->console) return win_fail(t, "terminal already started", ERROR_INVALID_PARAMETER);
+    HMODULE kernel = GetModuleHandleW(L"kernel32.dll");
+    t->create_console = (CreateConsoleFn)(void *)GetProcAddress(kernel, "CreatePseudoConsole");
+    t->resize_console = (ResizeConsoleFn)(void *)GetProcAddress(kernel, "ResizePseudoConsole");
+    t->close_console = (CloseConsoleFn)(void *)GetProcAddress(kernel, "ClosePseudoConsole");
+    if (!t->create_console || !t->resize_console || !t->close_console)
+        return win_fail(t, "ConPTY requires Windows 10 version 1809 or newer", ERROR_CALL_NOT_IMPLEMENTED);
+    HANDLE input_read = NULL, output_write = NULL;
+    STARTUPINFOEXW startup = {0};
+    PROCESS_INFORMATION child = {0};
+    SIZE_T bytes = 0;
+    int attributes_ready = 0;
+    DWORD error = 0;
+    t->job = CreateJobObjectW(NULL, NULL);
+    if (!t->job) { error = GetLastError(); goto done; }
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0};
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if (!SetInformationJobObject(t->job, JobObjectExtendedLimitInformation, &limits, sizeof(limits))) { error = GetLastError(); goto done; }
+    if (!CreatePipe(&input_read, &t->input_pipe, NULL, 0) ||
+        !CreatePipe(&t->output_pipe, &output_write, NULL, 0)) { error = GetLastError(); goto done; }
+    HRESULT hr = t->create_console((COORD){(SHORT)t->columns, (SHORT)t->rows}, input_read, output_write, 0, &t->console);
+    if (FAILED(hr)) { error = (DWORD)hr; goto done; }
+    /* SSH can leave the host ignoring Ctrl-C, which Windows propagates to
+     * new children. Reenable delivery without removing installed handlers. */
+    if (!SetConsoleCtrlHandler(NULL, FALSE)) { error = GetLastError(); goto done; }
+    InitializeProcThreadAttributeList(NULL, 1, 0, &bytes);
+    startup.lpAttributeList = malloc(bytes);
+    if (!startup.lpAttributeList) { error = ERROR_NOT_ENOUGH_MEMORY; goto done; }
+    if (!InitializeProcThreadAttributeList(startup.lpAttributeList, 1, 0, &bytes)) { error = GetLastError(); goto done; }
+    attributes_ready = 1;
+    if (!UpdateProcThreadAttribute(startup.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
+                                   t->console, sizeof(t->console), NULL, NULL)) { error = GetLastError(); goto done; }
+    startup.StartupInfo.cb = sizeof(startup);
+    /* Null explicit handles prevent redirected daemon stdio from bypassing
+     * the pseudoconsole through Windows standard-handle inheritance. */
+    startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    if (!CreateProcessW(executable, command, NULL, NULL, FALSE,
+                        EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT,
+                        (void *)environment, directory, &startup.StartupInfo, &child)) { error = GetLastError(); goto done; }
+    t->child = child.hProcess;
+    if (!AssignProcessToJobObject(t->job, t->child)) { error = GetLastError(); TerminateProcess(t->child, 137); goto done; }
+    t->reader = CreateThread(NULL, 0, read_pipe, t, 0, NULL);
+    if (!t->reader) { error = GetLastError(); goto done; }
+    t->writer = CreateThread(NULL, 0, write_pipe, t, 0, NULL);
+    if (!t->writer) { error = GetLastError(); goto done; }
+    if (ResumeThread(child.hThread) == (DWORD)-1) error = GetLastError();
+done:
+    if (child.hThread) CloseHandle(child.hThread);
+    if (attributes_ready) DeleteProcThreadAttributeList(startup.lpAttributeList);
+    free(startup.lpAttributeList);
+    if (input_read) CloseHandle(input_read);
+    if (output_write) CloseHandle(output_write);
+    return error ? win_fail(t, "start terminal command", error) : 1;
+}
+static int poll_process(thc_terminal *t) {
+    EnterCriticalSection(&t->io_lock);
+    t->output_length = t->pending_length;
+    memcpy(t->output, t->pending_output, t->pending_length);
+    t->pending_length = 0;
+    t->drained = t->output_eof;
+    DWORD error = t->io_error;
+    WakeConditionVariable(&t->output_space);
+    LeaveCriticalSection(&t->io_lock);
+    if (error) return win_fail(t, "terminal pipe", error);
+    if (t->output_length) thc_terminal_feed(t, t->output, t->output_length);
+    if (t->child && !t->exited && WaitForSingleObject(t->child, 0) == WAIT_OBJECT_0) {
+        DWORD code;
+        if (!GetExitCodeProcess(t->child, &code)) return win_fail(t, "terminal exit code", GetLastError());
+        t->exit_code = (int)code;
+        /* Closing may emit a final frame and block on older Windows. The reader
+         * keeps draining while subsequent polls consume its bounded queue. */
+        t->closing_console = t->console;
+        t->closer = CreateThread(NULL, 0, close_console, t, 0, NULL);
+        if (!t->closer) return win_fail(t, "close terminal console", GetLastError());
+        t->console = NULL;
+        t->exited = 1;
+    }
+    return 1;
+}
+void thc_terminal_kill(thc_terminal *t) {
+    if (t->job) TerminateJobObject(t->job, 137);
+    EnterCriticalSection(&t->io_lock);
+    t->input_stopped = 1;
+    WakeConditionVariable(&t->input_ready);
+    LeaveCriticalSection(&t->io_lock);
+    if (t->writer) CancelSynchronousIo(t->writer);
+}
+static void join_io(HANDLE thread) {
+    if (!thread) return;
+    /* Repeat cancellation to cover a worker entering ReadFile/WriteFile just
+     * after the stop flag was set and the first cancellation found no IO. */
+    while (WaitForSingleObject(thread, 10) == WAIT_TIMEOUT) CancelSynchronousIo(thread);
+    CloseHandle(thread);
+}
+static void free_process(thc_terminal *t) {
+    thc_terminal_kill(t);
+    EnterCriticalSection(&t->io_lock);
+    t->stopping = 1;
+    WakeAllConditionVariable(&t->input_ready);
+    WakeAllConditionVariable(&t->output_space);
+    LeaveCriticalSection(&t->io_lock);
+    join_io(t->reader); join_io(t->writer);
+    if (t->input_pipe) CloseHandle(t->input_pipe);
+    /* No reader remains: close our output end before joining a potentially
+     * blocking ClosePseudoConsole, so its final frame cannot deadlock cleanup. */
+    if (t->output_pipe) CloseHandle(t->output_pipe);
+    if (t->console) t->close_console(t->console);
+    if (t->closer) { WaitForSingleObject(t->closer, INFINITE); CloseHandle(t->closer); }
+    if (t->child) CloseHandle(t->child);
+    if (t->job) CloseHandle(t->job);
+    DeleteCriticalSection(&t->io_lock);
+}
+#endif
+
+#ifndef _WIN32
 static int flush_input(thc_terminal *t) {
     while (t->master >= 0 && t->input_length) {
         ssize_t n = write(t->master, t->input, t->input_length);
@@ -81,16 +314,22 @@ int thc_terminal_write(thc_terminal *t, const uint8_t *data, size_t length) {
     t->input_length += length;
     return flush_input(t);
 }
+#endif
 static void pty_reply(GhosttyTerminal terminal, void *userdata, const uint8_t *data, size_t length) {
     (void)terminal;
     thc_terminal *t = userdata;
-    if (t->master >= 0) (void)thc_terminal_write(t, data, length);
+    (void)thc_terminal_write(t, data, length);
 }
 thc_terminal *thc_terminal_new(int columns, int rows) {
     if (!dimensions(columns, rows)) { errno = EINVAL; return NULL; }
     thc_terminal *t = calloc(1, sizeof(*t));
     if (!t) return NULL;
     t->master = -1;
+#ifdef _WIN32
+    InitializeCriticalSection(&t->io_lock);
+    InitializeConditionVariable(&t->input_ready);
+    InitializeConditionVariable(&t->output_space);
+#endif
     t->columns = columns;
     t->rows = rows;
     t->cursor_x = t->cursor_y = -1;
@@ -106,6 +345,7 @@ thc_terminal *thc_terminal_new(int columns, int rows) {
     ghostty_terminal_set(t->terminal, GHOSTTY_TERMINAL_OPT_WRITE_PTY, (const void *)pty_reply);
     return t;
 }
+#ifndef _WIN32
 int thc_terminal_spawn(thc_terminal *t, const char *executable, char *const argv[],
                        char *const env[], const char *directory) {
     if (t->pid || t->master >= 0) { errno = EINVAL; return fail(t, "terminal already started"); }
@@ -157,6 +397,7 @@ int thc_terminal_spawn(thc_terminal *t, const char *executable, char *const argv
     }
     return 1;
 }
+#endif
 void thc_terminal_feed(thc_terminal *t, const uint8_t *data, size_t length) {
     ghostty_terminal_vt_write(t->terminal, data, length);
 }
@@ -164,10 +405,17 @@ int thc_terminal_resize(thc_terminal *t, int columns, int rows) {
     if (!dimensions(columns, rows)) { errno = EINVAL; return fail(t, "terminal size"); }
     if (!vt_check(t, ghostty_terminal_resize(t->terminal, columns, rows, 8, 16))) return 0;
     t->columns = columns; t->rows = rows;
+#ifdef _WIN32
+    if (t->console) {
+        HRESULT hr = t->resize_console(t->console, (COORD){(SHORT)columns, (SHORT)rows});
+        if (FAILED(hr)) return win_fail(t, "resize ConPTY", (DWORD)hr);
+    }
+#else
     if (t->master >= 0) {
         struct winsize size = {.ws_row = (unsigned short)rows, .ws_col = (unsigned short)columns};
         if (ioctl(t->master, TIOCSWINSZ, &size)) return fail(t, "resize PTY");
     }
+#endif
     return 1;
 }
 static uint32_t rgb(GhosttyColorRgb c) { return (uint32_t)c.r << 16 | (uint32_t)c.g << 8 | c.b; }
@@ -229,6 +477,7 @@ static int snapshot(thc_terminal *t) {
     }
     return vt_check(t, ghostty_render_state_clean(t->render));
 }
+#ifndef _WIN32
 static int read_output(thc_terminal *t) {
     while (t->master >= 0 && t->output_length < OUTPUT_LIMIT) {
         ssize_t n = read(t->master, t->output + t->output_length, OUTPUT_LIMIT - t->output_length);
@@ -243,7 +492,11 @@ static int read_output(thc_terminal *t) {
     if (t->output_length == OUTPUT_LIMIT) t->drained = 0;
     return 1;
 }
+#endif
 int thc_terminal_poll(thc_terminal *t) {
+#ifdef _WIN32
+    if (!poll_process(t)) return 0;
+#else
     t->output_length = 0;
     t->drained = 1;
     if (!flush_input(t)) {
@@ -263,6 +516,7 @@ int thc_terminal_poll(thc_terminal *t) {
             if (!read_output(t)) return 0;
         } else if (result < 0 && errno != EINTR) return fail(t, "wait terminal process");
     }
+#endif
     return snapshot(t);
 }
 const uint32_t *thc_terminal_cells(thc_terminal *t) { return t->cells; }
@@ -273,6 +527,7 @@ void thc_terminal_info(thc_terminal *t, int info[6]) {
     info[4] = t->exited && t->drained; info[5] = t->exit_code;
 }
 const char *thc_terminal_error(thc_terminal *t) { return t->error; }
+#ifndef _WIN32
 void thc_terminal_kill(thc_terminal *t) {
     if (t->pid > 0 && !t->reaped) {
         /* Interactive shells put foreground jobs in a separate process group.
@@ -291,10 +546,15 @@ void thc_terminal_kill(thc_terminal *t) {
         t->exit_code = pid > 0 ? (WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status)) : 137;
     }
 }
+#endif
 void thc_terminal_free(thc_terminal *t) {
     if (!t) return;
+#ifdef _WIN32
+    free_process(t);
+#else
     thc_terminal_kill(t);
     if (t->master >= 0) close(t->master);
+#endif
     if (t->cell) ghostty_render_state_row_cells_free(t->cell);
     if (t->row) ghostty_render_state_row_iterator_free(t->row);
     if (t->render) ghostty_render_state_free(t->render);

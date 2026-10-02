@@ -43,7 +43,19 @@ and daemon agent polling continues while no frontend is attached.
   socket shutdown does not wake that foreign call. Token bridge fixtures close
   their owned input peer before joining the reader. All assertions retain their
   original deadlines. Native headless build and real SSH crash/recovery checks
-  also pass; this does not qualify the Windows embedded-terminal backend.
+  also pass.
+
+- [x] Native Windows embedded terminals: verified on Windows 11 build 26200,
+  GHC 9.12.4 and pinned Ghostty revision
+  `76895d97b74ff6b24c2b1543bcd69ccc18048a4d`. Native C and Haskell fixtures cover
+  console input/resizing, Unicode paths/environment/arguments, Ctrl-C in cmd and
+  PowerShell, bounded queues, final output, process-tree cleanup and owner crash.
+  Terminal and conversation checks exercise retained windows and ACP terminal
+  create/output/wait/kill/release/reject through ConPTY. An idle ACP provider with
+  inherited output pipes reproduced a shutdown timeout; terminating its process
+  tree before joining the readers fixes it without relaxing deadlines. The full
+  macOS editor suite also passes. Reproduce the native terminal checks using
+  [the contributor commands](../contributing.md#native-windows-terminals).
 
 - [ ] Investigate intermittent macOS stdio relay closure after attachment.
   The Ctrl-C regression twice received EOF after hello/assets and before its

@@ -2,13 +2,21 @@
 #define THC_TERMINAL_H
 #include <stddef.h>
 #include <stdint.h>
+#ifdef _WIN32
+#include <wchar.h>
+#endif
 
 typedef struct thc_terminal thc_terminal;
 /* ABI cell words: UTF-8 offset, byte length, RGB foreground, RGB background,
  * attributes (bold=1, italic=2, underline=4, strike=8, faint=16), width. */
 thc_terminal *thc_terminal_new(int columns, int rows);
+#ifdef _WIN32
+int thc_terminal_spawn_windows(thc_terminal *, const wchar_t *executable, wchar_t *command,
+                               const wchar_t *environment, const wchar_t *directory);
+#else
 int thc_terminal_spawn(thc_terminal *, const char *executable, char *const argv[],
                        char *const env[], const char *directory);
+#endif
 int thc_terminal_write(thc_terminal *, const uint8_t *, size_t);
 int thc_terminal_resize(thc_terminal *, int columns, int rows);
 int thc_terminal_appearance(thc_terminal *, int dark);

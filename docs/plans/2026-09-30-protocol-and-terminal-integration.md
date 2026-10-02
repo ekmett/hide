@@ -58,7 +58,7 @@ before commits and keep the durable Mac/Linux editor checkouts synchronized.
   draining, resize, Unicode, terminal replies and foreground-job cleanup.
 - Metal preview uses the same grid renderer for Markdown and terminal cells.
 
-## Agreed docking behavior (pending implementation)
+## Docking behavior
 
 Files docks only on the left; Messages only on the bottom. Editor windows float
 within the remaining workspace. Terminals can float or join Messages in one
@@ -66,8 +66,8 @@ bottom panel with tabs. Dock resizing pushes adjacent floating windows until the
 reach the opposite workspace edge, then resizes them; expanding the workspace
 pulls abutting windows with the dock boundary.
 
-Pinning or unpinning a terminal preserves its existing PTY, process, scrollback and
-window identity. Use a single-cell monochrome pin in the SDL font if available;
+Pinning or unpinning preserves the terminal, process, scrollback and window
+identity. Use a single-cell monochrome pin in the SDL font if available;
 the text fallback is `[P]` with a cyan P when pinned and `[ ]` when floating.
 The status hint describes the action: “Unpin window” or “Dock window at bottom”.
 Only windows that support both states expose an interactive pin control.

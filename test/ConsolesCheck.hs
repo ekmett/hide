@@ -12,6 +12,8 @@ import qualified Data.Text.Encoding as TE
 import System.Timeout (timeout)
 import System.Process (readProcessWithExitCode)
 import System.Exit (ExitCode(..))
+import System.Info (os)
+import System.Environment (lookupEnv)
 import THC.Edit.Buffer
 import THC.Edit.Consoles
 import THC.Edit.Model
@@ -27,10 +29,29 @@ checks = withConsoles $ \consoles -> do
   check "unknown release is rejected" . isLeft =<< releaseConsole consoles "missing"
   unchanged <- tickConsoles consoles desktop
   check "empty collection leaves desktop unchanged" (unchanged == desktop)
-  if terminalAvailable then nativeChecks consoles desktop else do
+  if terminalAvailable then (if os=="mingw32" then windowsChecks else nativeChecks) consoles desktop else do
     unavailable <- startConsole consoles (config "true") 4096 desktop
     check "unavailable backend does not create terminal" (isLeft unavailable)
   putStrLn "Consoles checks passed"
+
+windowsChecks :: Consoles -> Desktop -> IO ()
+windowsChecks consoles desktop = do
+  shell<-maybe "cmd.exe" id <$> lookupEnv "COMSPEC"
+  let windowsConfig=TerminalConfig shell ["/d","/c","echo retained-output & exit /b 7"] [] "." 40 5
+  (ident,opened)<-startConsole consoles windowsConfig 4096 desktop >>= requireRight
+  (raw,truncated,code)<-waitOutput consoles ident (\(_,_,exit)->exit/=Nothing)
+  check "ConPTY console output and exit retained" ("retained-output" `BS.isInfixOf` raw && not truncated && code==Just 7)
+  let bid=maybe (error "missing ConPTY window") bufferId (activeWindow opened)
+      closed=opened {windows=filter ((/=bid).bufferId) (windows opened),buffers=M.delete bid (buffers opened)}
+  afterClose<-tickConsoles consoles closed
+  check "ConPTY closed window stays closed" (M.notMember bid (buffers afterClose))
+  check "ConPTY closed window retains captured output" . (==Right (raw,truncated,code)) =<< consoleOutput consoles ident
+  releaseConsole consoles ident >>= requireRight
+  check "released ConPTY console ID is rejected" . isLeft =<< consoleOutput consoles ident
+  (second,_)<-startConsole consoles windowsConfig 8 desktop >>= requireRight
+  (_,limited,_)<-waitOutput consoles second (\(_,_,exit)->exit/=Nothing)
+  check "ConPTY console output bound is explicit" (second/=ident && limited)
+  releaseConsole consoles second >>= requireRight
 
 nativeChecks :: Consoles -> Desktop -> IO ()
 nativeChecks consoles desktop = do

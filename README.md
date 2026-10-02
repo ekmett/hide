@@ -134,8 +134,8 @@ sessions. The [remote guide](docs/remote.md) covers installation and paths.
 
 ## Build and run
 
-The default build includes native windows, the browser and embedded terminals
-(on POSIX), along with terminal display and SSH sessions. You need GHC 9.6 or
+The default build includes native windows, the browser and embedded terminals,
+along with terminal display and SSH sessions. You need GHC 9.6 or
 newer, Cabal, `pkg-config`, utf8proc 2.10+, SDL3 3.2+ and libghostty-vt.
 [Installation](docs/install.md) covers these dependencies and the Linux font stack.
 

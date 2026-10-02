@@ -21,7 +21,13 @@ import Foreign hiding (Word32)
 import Foreign.C
 import System.Directory (doesFileExist, getPermissions, executable, makeAbsolute)
 import System.Environment (getEnvironment)
-import System.FilePath ((</>), isAbsolute, splitSearchPath)
+import System.FilePath ((</>), isAbsolute, isPathSeparator, splitSearchPath)
+#ifdef mingw32_HOST_OS
+import Data.Char (toUpper)
+import Data.List (sortOn)
+import System.FilePath (takeExtension)
+import System.Process.Internals (translate)
+#endif
 #endif
 
 data TerminalConfig = TerminalConfig
@@ -62,9 +68,13 @@ data Terminal = Terminal (MVar (Maybe (Ptr NativeTerminal)))
 
 foreign import ccall unsafe "thc_terminal_appearance" c_appearance :: Ptr NativeTerminal -> CInt -> IO CInt
 foreign import ccall unsafe "thc_terminal_new" c_new :: CInt -> CInt -> IO (Ptr NativeTerminal)
+#ifdef mingw32_HOST_OS
+foreign import ccall safe "thc_terminal_spawn_windows" c_spawn :: Ptr NativeTerminal -> CWString -> CWString -> CWString -> CWString -> IO CInt
+#else
 foreign import ccall safe "thc_terminal_spawn" c_spawn :: Ptr NativeTerminal -> CString -> Ptr CString -> Ptr CString -> CString -> IO CInt
+#endif
 foreign import ccall unsafe "thc_terminal_write" c_write :: Ptr NativeTerminal -> Ptr Word8 -> CSize -> IO CInt
-foreign import ccall unsafe "thc_terminal_resize" c_resize :: Ptr NativeTerminal -> CInt -> CInt -> IO CInt
+foreign import ccall safe "thc_terminal_resize" c_resize :: Ptr NativeTerminal -> CInt -> CInt -> IO CInt
 foreign import ccall safe "thc_terminal_poll" c_poll :: Ptr NativeTerminal -> IO CInt
 foreign import ccall unsafe "thc_terminal_cells" c_cells :: Ptr NativeTerminal -> IO (Ptr Word32)
 foreign import ccall unsafe "thc_terminal_text" c_text :: Ptr NativeTerminal -> Ptr CSize -> IO (Ptr Word8)
@@ -101,22 +111,30 @@ startTerminal config
       inherited <- getEnvironment
       cwd <- makeAbsolute (terminalDirectory config)
       let overrides = terminalEnvironment config
-          environment = overrides ++ [(k,v) | (k,v) <- inherited, k `notElem` map fst overrides, k /= "TERM"]
-          withTerm = if "TERM" `elem` map fst overrides then environment else ("TERM","xterm-256color") : environment
+          environment = overrides ++ [(k,v) | (k,v) <- inherited, variableKey k `notElem` map (variableKey . fst) overrides, variableKey k /= "TERM"]
+          withTerm = if "TERM" `elem` map (variableKey . fst) overrides then environment else ("TERM","xterm-256color") : environment
           command = terminalCommand config
           absolute path = if isAbsolute path then path else cwd </> path
-          candidates = if '/' `elem` command then [absolute command]
-            else [absolute dir </> command | dir <- splitSearchPath (maybe "/usr/bin:/bin" id (lookup "PATH" withTerm))]
+          paths = if isAbsolute command || any isPathSeparator command then [absolute command]
+            else [absolute dir </> command | dir <- splitSearchPath (maybe defaultPath id (lookup "PATH" [(variableKey k,v) | (k,v)<-withTerm]))]
+          candidates = concatMap executablePaths paths
       found <- findExecutableIn candidates
       case found of
         Nothing -> pure (Left ("Terminal command not found: " <> T.pack command))
         Just path -> do
           ptr <- c_new (fromIntegral (terminalColumns config)) (fromIntegral (terminalRows config))
           if ptr == nullPtr then pure (Left "Could not allocate libghostty-vt terminal") else
-            (withCString path $ \exe -> withCString cwd $ \directory ->
-              withStrings (command : terminalArguments config) $ \args ->
-              withStrings [k ++ "=" ++ v | (k,v) <- withTerm] $ \env -> do
-                ok <- c_spawn ptr exe args env directory
+            (do
+#ifdef mingw32_HOST_OS
+                ok <- withCWString path $ \exe -> withCWString cwd $ \directory ->
+                  withCWString (unwords (map quoteArgument (path : terminalArguments config))) $ \args ->
+                  withCWString (concat [k ++ "=" ++ v ++ "\0" | (k,v)<-sortOn (variableKey . fst) withTerm] ++ "\0") $ \env ->
+                    c_spawn ptr exe args env directory
+#else
+                ok <- withCString path $ \exe -> withCString cwd $ \directory ->
+                  withStrings (command : terminalArguments config) $ \args ->
+                  withStrings [k ++ "=" ++ v | (k,v) <- withTerm] $ \env -> c_spawn ptr exe args env directory
+#endif
                 if ok == 0 then do
                   err <- nativeError ptr
                   c_free ptr
@@ -127,7 +145,21 @@ startTerminal config
       exists <- doesFileExist p
       runnable <- if exists then executable <$> getPermissions p else pure False
       if runnable then pure (Just p) else findExecutableIn ps
+#ifdef mingw32_HOST_OS
+    -- cmd.exe treats quoted switches as command text, unlike CRT argv parsers.
+    -- Leave unambiguous tokens bare; use the process library for actual quoting.
+    quoteArgument arg
+      | null arg || any (`elem` (" \t\"" :: String)) arg = translate arg
+      | otherwise = arg
+    variableKey = map toUpper
+    defaultPath = ""
+    executablePaths path = path : [path ++ ".exe" | null (takeExtension path)]
+#else
+    variableKey = id
+    defaultPath = "/usr/bin:/bin"
+    executablePaths path = [path]
     withStrings strings action = withMany withCString strings $ \pointers -> withArray0 nullPtr pointers action
+#endif
 
 withOpen :: Terminal -> (Ptr NativeTerminal -> IO (Either Text a)) -> IO (Either Text a)
 withOpen (Terminal state) action = withMVar state $ maybe (pure (Left "Terminal has been released")) action
@@ -165,9 +197,14 @@ pollTerminal terminal = withOpen terminal $ \ptr -> do
         pure $ Right TerminalSnapshot
           { snapshotColumns = columns, snapshotRows = rows, snapshotCells = decoded
           , snapshotCursor = if cx < 0 || cy < 0 then Nothing else Just (cx,cy)
-          , snapshotOutput = output, snapshotExitCode = if exited == 0 then Nothing else Just code }
+          , snapshotOutput = output, snapshotExitCode = if exited == 0 then Nothing else Just (nativeExit code) }
       _ -> error "terminal info ABI"
   where
+#ifdef mingw32_HOST_OS
+    nativeExit code = fromIntegral (fromIntegral code :: Word32)
+#else
+    nativeExit code = code
+#endif
     copyBuffer getter ptr = alloca $ \len -> do
       buffer <- getter ptr len
       n <- fromIntegral <$> peek len

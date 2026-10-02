@@ -22,6 +22,7 @@ import System.Directory
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.FilePath ((</>))
 import System.IO (hClose, openTempFile)
+import System.Info (os)
 import System.Timeout (timeout)
 import THC.Edit.Render (snapshot, snapshotHtml)
 import THC.Edit.Buffer
@@ -202,7 +203,7 @@ checks = bracket temporary removePathForcibly $ \root ->
       check "unsupported multi-select is explicit" . isLeft =<< invalid
     closingReply<-withConversation $ \runtime->snd <$> chatTool runtime savedDraft "ask_user" (object ["question" .= ("Session closes"::T.Text)])
     check "session shutdown resolves a waiting question" . isLeft =<< closingReply
-    writeFile server providerScript
+    BS.writeFile server (TE.encodeUtf8 (T.pack providerScript))
     BS.writeFile source "disk original\n"
     BS.writeFile secondSource "second original\n"
     (secondFile,secondBuffer)<-loadFile secondSource >>= either error pure
@@ -399,7 +400,11 @@ checks = bracket temporary removePathForcibly $ \root ->
         check "terminal requires explicit execution approval" (maybe False ((=="Run agent command").dialogTitle) (dialog pendingTerminal))
         completedTerminal<-actDialog runtime 0 pendingTerminal >>= done runtime
         output<-response "terminal-output-1"
-        check "ACP terminal output and truncation use real backend" ((output >>= field "result" >>= field "output")==Just ("23456789"::T.Text) && (output >>= field "result" >>= field "truncated")==Just True)
+        let terminalOutput=output >>= field "result" >>= field "output"
+            -- ConPTY emits rendered VT updates, including cursor controls.
+            outputMatches=if os=="mingw32" then maybe False ((==8).BS.length.TE.encodeUtf8) terminalOutput
+              else terminalOutput==Just ("23456789"::T.Text)
+        check "ACP terminal output and truncation use real backend" (outputMatches && (output >>= field "result" >>= field "truncated")==Just True)
         exit<-response "terminal-wait-1"
         check "ACP waits for real exit status" ((exit >>= field "result" >>= field "exitCode")==Just (9::Int))
         released<-response "terminal-after-release-1"
@@ -625,7 +630,11 @@ providerScript=unlines
   , "    elif scenario.startswith('terminal'):"
   , "      terminal_serial+=1"
   , "      command=\"printf 'λ0123456789'; sleep 0.1; exit 9\" if scenario=='terminal' else ('touch should-not-exist' if scenario=='terminal-reject' else 'sleep 30')"
-  , "      call('terminal-create-'+str(terminal_serial),'terminal/create',{'command':'/bin/sh','args':['-c',command],'outputByteLimit':8})"
+  , "      executable='/bin/sh'"
+  , "      if os.name=='nt':"
+  , "        executable=sys.executable"
+  , "        command=\"import sys,time;print('0123456789',end='',flush=True);time.sleep(0.1);sys.exit(9)\" if scenario=='terminal' else (\"open('should-not-exist','w').close()\" if scenario=='terminal-reject' else 'import time;time.sleep(30)')"
+  , "      call('terminal-create-'+str(terminal_serial),'terminal/create',{'command':executable,'args':['-c',command],'outputByteLimit':8})"
   , "  elif method is None and isinstance(ident,str):"
   , "    if ident=='two-read-a': call('two-read-b','fs/read_text_file',{'path':os.environ['THC_SECOND']})"
   , "    elif ident=='two-read-b': call('two-write-a','fs/write_text_file',{'path':os.environ['THC_SOURCE'],'content':'first approved\\n'})"

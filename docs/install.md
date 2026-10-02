@@ -6,7 +6,7 @@ editing, HLS, Git and conversations do not require the THC compiler or runtime.
 ## Build the editor
 
 You need GHC 9.6 or newer, Cabal, `pkg-config` and the development files for
-utf8proc 2.10 or newer, SDL3 3.2 or newer, and libghostty-vt on POSIX.
+utf8proc 2.10 or newer, SDL3 3.2 or newer, and libghostty-vt.
 Set up Ghostty using the [embedded terminal instructions](#embedded-terminal)
 below before building, or omit it with `-f-terminal`. On macOS:
 
@@ -97,9 +97,10 @@ browser-only build can use `-f-window -f-terminal`, avoiding both native librari
 ## Embedded terminal
 
 Embedded terminals enable **File > Terminal**, **Run > Run** and ACP
-terminal requests through libghostty-vt. They are enabled by default on POSIX;
-native Windows builds omit this POSIX PTY backend.
-It works independently of SDL.
+terminal requests through libghostty-vt. They are enabled by default and work
+independently of SDL. macOS and Linux use a PTY; native Windows uses ConPTY
+(Windows 10 version 1809 or newer). On Windows the default shell is `COMSPEC`,
+usually `cmd.exe`; terminal commands run in the editor session’s project directory.
 
 The Ghostty C API is evolving. The verified source revision is
 `76895d97b74ff6b24c2b1543bcd69ccc18048a4d`, built with Zig 0.16.0:
@@ -113,6 +114,23 @@ cd /path/to/thc-edit
 export PKG_CONFIG_PATH=/tmp/thc-ghostty-install/share/pkgconfig:$PKG_CONFIG_PATH
 cabal run --ghc-options=-optl-Wl,-rpath,/tmp/thc-ghostty-install/lib thc-edit -- --window .
 ```
+
+For a native Windows remote server, build the same pinned Ghostty checkout in
+PowerShell, then expose its package metadata and DLL:
+
+```powershell
+$ghosttyPrefix = "$env:LOCALAPPDATA\thc-edit\ghostty"
+zig build -Demit-lib-vt=true -Demit-xcframework=false -Doptimize=ReleaseFast --prefix $ghosttyPrefix -j4
+$env:PKG_CONFIG_PATH = "$ghosttyPrefix\share\pkgconfig;$env:PKG_CONFIG_PATH"
+$env:PATH = "$ghosttyPrefix\bin;$env:PATH"
+cd C:\path\to\thc-edit
+cabal build all -f-window -f-web
+```
+
+Keep utf8proc's package metadata and DLL on those paths too. This includes
+embedded terminals on the remote server; the native-window and browser clients
+can run on another machine. The pinned Ghostty library builds in ReleaseFast;
+its upstream `test-lib-vt` checks should use `-Doptimize=Debug`.
 
 Keep the installed Ghostty library available at runtime, or use your system's
 normal library installation path. A build with `-f-terminal` can still edit,

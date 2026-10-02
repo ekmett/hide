@@ -22,9 +22,10 @@ The default local build includes terminal, native-window and browser clients.
 Keep both installations on compatible revisions of the remote protocol.
 
 The remote endpoint has POSIX and native Windows implementations. Native window
-and browser frontend dependencies belong to the client. For embedded terminals
-on a POSIX server, keep `terminal` enabled and install libghostty-vt; omit only
-`window` and `web`. Native Windows builds omit the POSIX PTY backend.
+and browser frontend dependencies belong to the client. For embedded terminals,
+keep `terminal` enabled and install libghostty-vt on the server; omit only
+`window` and `web`. Native Windows servers use ConPTY, so commands run directly
+in Windows without WSL.
 
 ## Open a project
 

@@ -3,7 +3,7 @@ module TerminalCheck (checks) where
 
 import Control.Monad (unless)
 import THC.Edit.Terminal
-#ifdef WITH_TERMINAL
+#if defined(WITH_TERMINAL) && !defined(mingw32_HOST_OS)
 import Control.Concurrent (threadDelay)
 import Control.Exception (bracket, try, IOException)
 import qualified Data.ByteString as BS
@@ -19,8 +19,57 @@ import System.Exit (ExitCode(..))
 import System.Timeout (timeout)
 #endif
 
+#if defined(WITH_TERMINAL) && defined(mingw32_HOST_OS)
+import Control.Concurrent (threadDelay)
+import Control.Exception (bracket)
+import qualified Data.ByteString as BS
+import Data.Either (isLeft)
+import qualified Data.Text as T
+import System.Directory
+import System.Environment (lookupEnv)
+import System.FilePath ((</>))
+import System.IO (hClose, openTempFile)
+import System.Timeout (timeout)
+#endif
+
 checks :: IO ()
 #ifdef WITH_TERMINAL
+#ifdef mingw32_HOST_OS
+checks = bracket temporary removePathForcibly $ \directory -> do
+  check "native ConPTY backend enabled" terminalAvailable
+  shell<-maybe "cmd.exe" id <$> lookupEnv "COMSPEC"
+  let config=TerminalConfig shell ["/d","/c","echo %THC_TERMINAL_TEST% & cd & exit /b 7"] [("THC_TERMINAL_TEST","value with spaces")] directory 20 5
+      require = either (error . T.unpack) pure
+      await terminal bytes = do
+        snap<-pollTerminal terminal >>= require
+        let output=bytes<>snapshotOutput snap
+        if snapshotExitCode snap/=Nothing then pure (snap,output) else threadDelay 10000 >> await terminal output
+  result<-withTerminal config $ \terminal -> do
+    finished<-timeout 8000000 (await terminal BS.empty)
+    (snap,raw)<-maybe (error "ConPTY fixture timed out") pure finished
+    check ("ConPTY exit code and environment: "++show (snapshotExitCode snap,raw)) (snapshotExitCode snap==Just 7 && "value with spaces" `BS.isInfixOf` raw)
+    check "ConPTY snapshot dimensions" (snapshotColumns snap==20 && snapshotRows snap==5 && length (snapshotCells snap)==100)
+    resizeTerminal terminal 31 9 >>= require
+    resized<-pollTerminal terminal >>= require
+    check "ended terminal can resize its retained screen" (snapshotColumns resized==31 && snapshotRows resized==9)
+  either (error . T.unpack) pure result
+  terminal<-startTerminal config >>= require
+  closeTerminal terminal
+  closeTerminal terminal
+  check "released Windows terminal rejects polling" . isLeft =<< pollTerminal terminal
+  bad<-startTerminal config {terminalDirectory=directory </> "missing"}
+  check "Windows bad working directory fails during spawn" (isLeft bad)
+  nul<-startTerminal config {terminalArguments=["bad\0argument"]}
+  check "Windows spawn rejects NUL arguments" (isLeft nul)
+  badSize<-startTerminal config {terminalColumns=0}
+  check "Windows spawn rejects invalid dimensions" (isLeft badSize)
+  putStrLn "Terminal checks passed (ConPTY)"
+  where
+    temporary=do
+      root<-getTemporaryDirectory
+      (path,h)<-openTempFile root "thc-terminal-windows"
+      hClose h; removeFile path; createDirectory path; pure path
+#else
 checks = bracket temporary removePathForcibly $ \directory -> do
   check "real terminal backend enabled" terminalAvailable
   let config script = TerminalConfig "/bin/sh" ["-c",script] [("THC_TERMINAL_TEST","value with spaces")] directory 20 5
@@ -143,6 +192,7 @@ checks = bracket temporary removePathForcibly $ \directory -> do
       removeFile path
       createDirectory path
       pure path
+#endif
 #else
 checks = do
   check "terminal fallback honestly unavailable" (not terminalAvailable)
