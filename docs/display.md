@@ -54,7 +54,9 @@ row; scale 1 downsamples vertically.
 
 **Options > Preferences > Appearance** offers Light, Dark and System.
 Use `--appearance light|dark|system` or `THC_EDIT_APPEARANCE` at startup.
-System is the default.
+System is the default. Preferences groups key bindings and screen modes on the
+left, appearance and rendering controls on the right. Narrow terminals stack
+the controls into one column.
 
 [![Preferences dialog showing key bindings, screen mode, appearance, CRT filter and Pixelate Unicode.](site/screenshots/preferences.png)](site/screenshots/preferences.png)
 

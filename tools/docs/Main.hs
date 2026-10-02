@@ -61,8 +61,8 @@ site = "build/site"
 -- Keep this list in sync with tools/docs-screenshots.hs.
 screenshotNames :: [FilePath]
 screenshotNames = map (<.> "png")
-  ["desktop", "file-menu", "open-file", "save-as", "save-changes", "change-directory",
-   "find", "replace", "preferences", "build-target", "debug-launch", "git-commit"]
+  ["file-menu", "split", "preferences", "build-target", "debug-launch", "git-commit",
+   "conversation", "debug-step", "debug-menu", "debug-stack"]
 
 repo :: String
 repo = "https://github.com/ekmett/thc-edit"

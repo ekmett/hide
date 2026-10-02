@@ -34,6 +34,14 @@ project.
 Open **Tools > Conversation** and type in the draft at the bottom. Your messages
 align right in cyan; replies align left in gray. Code keeps its syntax colors.
 
+[![A live conversation about Buffer.hs, with model selection, a completed tool call, replies, context usage and an unsent follow-up.](site/screenshots/conversation.png)](site/screenshots/conversation.png)
+
+This example asks the agent to explain the editor's own buffer implementation.
+The cyan bubble at the bottom is the next draft, not a sent message. Press
+**Enter** to send it. The title selects the model and effort; the lower-left
+counter reports context usage. Click the double chevron beside a run of tool
+calls to see the individual calls, then expand a call to inspect its details.
+
 | Keys | Action |
 | --- | --- |
 | Enter | Send, or queue a query while a reply is active |

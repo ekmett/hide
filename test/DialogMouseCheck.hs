@@ -296,6 +296,19 @@ checks = do
   check "80x25 Preferences shows every appearance option without scrolling"
     (all (`T.isInfixOf` snapshot graphicalPreferences) ["CRT filter","Pixelate Unicode","Streamer mode"] &&
      all (\r -> top r+height r<=minimum (map top (buttonRects graphicalPreferences graphicalDialog))) (fieldRects graphicalPreferences graphicalDialog))
+  let preferenceRects=fieldRects graphicalPreferences graphicalDialog
+      appearanceIndex=fromMaybe (error "missing appearance") (findIndex (\field -> case field of Radio "Appearance" _ _ -> True; _ -> False) (fields graphicalDialog))
+      appearanceRect=at appearanceIndex preferenceRects
+      darkChoice=fst (handleEvent (V.EvMouseDown (left appearanceRect+5) (top appearanceRect+2) V.BLeft []) graphicalPreferences)
+      darkSaved=fst (handleEvent (V.EvKey V.KEnter []) darkChoice)
+      narrow=graphicalPreferences {screenSize=(40,25)}
+  check "Preferences uses compact columns with working right-column hit targets"
+    (height (dialogRect graphicalPreferences graphicalDialog)<=15 &&
+     left appearanceRect>left (at 0 preferenceRects) && top appearanceRect==top (at 0 preferenceRects) &&
+     appearance darkSaved==DarkMode &&
+     all (\i -> fieldRects graphicalPreferences graphicalDialog {focus=i}==preferenceRects) [0..length (fields graphicalDialog)-1])
+  check "narrow Preferences falls back to one column"
+    (all ((==3+left (dialogRect narrow graphicalDialog)) . left) (fieldRects narrow graphicalDialog))
   check "Pixelate Unicode can be clicked immediately at 80x25" (pixelateUnicode savedPixel)
   check "focused Messages hides source caret" (V.picCursor (renderDesktop desktop {problemsFocused=True})==V.NoCursor)
   check "cursor blinking defaults on" (blinkCursor desktop)

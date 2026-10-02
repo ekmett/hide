@@ -75,19 +75,50 @@ including its modal dialogs. On macOS, build the window backend and run:
 ```sh
 cabal build lib:thc-edit
 mkdir -p build/docs-capture/objects
-cabal exec -- ghc -threaded -XGHC2021 -package thc-edit tools/docs-screenshots.hs -outputdir build/docs-capture/objects -o build/docs-capture/screenshots
+cabal exec -- ghc -threaded -XGHC2021 -package thc-edit -itools tools/docs-screenshots.hs -outputdir build/docs-capture/objects -o build/docs-capture/screenshots
 build/docs-capture/screenshots
 make docs
 make docs-check
 ```
 
+`tools/EditorDriver.hs` supplies reusable commands, input events (including their
+effects), text entry, condition-based waits, and Metal captures with a colorless
+text companion. The screenshot file contains scene recipes and crop selection;
+new UI workflows can reuse the driver without adding another event loop or
+capture implementation. These are trusted local development scripts. Agents
+controlling a live session use the permission-checked MCP tools described in
+[Session tools](session-tools.md), including their protected-input rules.
+
 Pass scene names to refresh only affected images, for example
-`build/docs-capture/screenshots open-file preferences`. The tool loads the real
+`build/docs-capture/screenshots preferences debug-launch`. The tool loads the real
 Cabal file and `src/THC/Edit/Buffer.hs`, invokes the normal editor commands,
-and draws hidden Metal windows at 3× scale, 100×32 cells, with **CRT filter** and
+and draws hidden Metal windows at 3× scale, up to 100×32 cells, with **CRT filter** and
 **Pixelate Unicode** enabled. It needs a macOS graphical login for Metal, but
 shows no window and starts no editor session. Personal provider settings are
-excluded; no source file is saved and no build, debugger or commit is started.
+excluded from the default scenes; no source file is saved and no build or commit
+is submitted.
+
+The conversation and source-stepping illustrations use live sessions and must be
+requested explicitly:
+
+```sh
+THC_DOCS_AGENT_CONFIG="$HOME/.config/thc-edit/agents.json" build/docs-capture/screenshots conversation
+THC_DOCS_DAP_PORT=4730 build/docs-capture/screenshots debug-step
+```
+
+The conversation asks the configured provider to read `src/THC/Edit/Buffer.hs`
+and explain it, then asks a short follow-up about edit costs. Use a provider permitted to read this checkout; its configuration
+is copied only into ignored capture scratch space. The debugger attaches to an
+already-running, suspended local DAP endpoint, steps into the program, captures
+the source, Debug menu and call-stack picker, then continues it to termination.
+Use a disposable toy program that terminates, not an interactive debugging
+session. Both modes close their connections on exit. Their compact desktops
+keep the status-bar instructions visible. Never stage provider configuration or
+session records with the images.
+
+Dialog and menu images are cropped to their actual UI rectangles plus the shadow
+and a small margin. Keep full desktops only when window arrangement is the subject.
+Avoid repeating the same source background for unrelated controls.
 
 PNG artifacts live in `docs/site/screenshots/`; BMP intermediates stay under
 `build/docs-capture/`. Source comments beside the dialog definitions identify

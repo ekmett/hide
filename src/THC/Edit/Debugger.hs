@@ -18,7 +18,7 @@ import qualified Data.Text as T
 import GHC.Clock (getMonotonicTimeNSec)
 import System.Directory (XdgDirectory(XdgConfig), canonicalizePath, doesFileExist, getXdgDirectory)
 import System.IO (IOMode(ReadMode), withBinaryFile)
-import System.FilePath (isAbsolute, (</>))
+import System.FilePath (isAbsolute, takeFileName, (</>))
 import System.Timeout (timeout)
 import Text.Read (readMaybe)
 import qualified THC.Edit.Build as Build
@@ -601,6 +601,7 @@ openFrame runtime@(Debugger ref _) core explicit d selected = do
               then "Stopped; unsaved text may differ from the running source." else "Stopped in "<>frameLabel selected}
         else opened
 
+-- Docs: docs/site/screenshots/debug-step.png (docs/running.md) shows the live stopped source.
 position :: Value -> Desktop -> Desktop
 position selected d
   | row>0 = moveTo False (L.positionOffset (activeText d) (row-1,max 0 (integer "column" selected-1))) d
@@ -646,6 +647,7 @@ persistentBreakpoints :: State -> M.Map Text (Value,[Breakpoint])
 persistentBreakpoints = M.map (\(src,points) -> (src,map (\bp -> bp {bpResult=Null}) points)) .
   M.filter (\(src,_) -> integer "sourceReference" src==0 && not (T.null (text "path" src))) . breakpoints
 
+-- Docs: docs/site/screenshots/debug-stack.png (docs/running.md) shows the live frame picker.
 showChoices :: Debugger -> Text -> Text -> [Value] -> [Text] -> Desktop -> IO Desktop
 showChoices (Debugger ref _) title action rows labels d = do
   s<-readIORef ref
@@ -672,7 +674,7 @@ sourceKey source = text "path" source<>"#"<>tshow (integer "sourceReference" sou
 sourceLabel :: Value -> Text
 sourceLabel source=fromMaybe (fromMaybe "Unavailable source" (field "name" source)) (field "path" source)
 frameLabel :: Value -> Text
-frameLabel value=text "name" value<>"  "<>maybe "" sourceLabel (field "source" value)<>if integer "line" value>0 then ":"<>tshow (integer "line" value) else ""
+frameLabel value=text "name" value<>"  "<>maybe "" (T.pack . takeFileName . T.unpack . sourceLabel) (field "source" value)<>if integer "line" value>0 then ":"<>tshow (integer "line" value) else ""
 variableLabel :: Value -> Text
 variableLabel value=(if integer "variablesReference" value>0 then "+ " else "  ")<>text "name" value<>" = "<>text "value" value<>
   (if T.null (text "type" value) then "" else " : "<>text "type" value)

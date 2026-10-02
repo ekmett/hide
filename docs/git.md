@@ -19,7 +19,7 @@ the badge.
 2. Open **Tools > Git diff** and read the changes.
 3. Choose **Tools > Approve changes** and enter a commit message.
 
-[![Approve changes dialog over the actual thc-edit repository diff.](site/screenshots/git-commit.png)](site/screenshots/git-commit.png)
+[![Approve changes: name the commit and confirm its repository-wide scope.](site/screenshots/git-commit.png)](site/screenshots/git-commit.png)
 
 Approval stages and commits **all reviewed saved changes in that repository**,
 including new files and deletions. It is a repository-wide review. The command

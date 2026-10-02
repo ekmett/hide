@@ -20,8 +20,6 @@ files stay selected.
 choose Open. Double-click a directory to browse into it, or a file to open it.
 The list shows the file's size and local modification time.
 
-[![Open a file dialog browsing thc-edit source files, with a green selection and file details.](site/screenshots/open-file.png)](site/screenshots/open-file.png)
-
 **Ctrl+B**, or **Tools > File tree**, toggles the Files pane. Expand directories
 to browse their contents and open files from the tree. Drag the divider to make
 room for long names; adjacent windows follow it. Unsaved filenames appear in
@@ -30,8 +28,6 @@ red and return to normal after saving or undoing the change.
 **File > Change dir** changes the working directory and refreshes Files without
 closing open buffers. Enter browses into the selected directory, Browse opens
 a typed path, and OK accepts the displayed directory.
-
-[![Change directory dialog in the thc-edit checkout.](site/screenshots/change-directory.png)](site/screenshots/change-directory.png)
 
 ## Text and selection
 
@@ -62,10 +58,6 @@ permissions.
 Search matches literal text and is case-sensitive. Replace changes one match
 at a time. **Ctrl+G**, or **Search > Go to line**, goes to a line number.
 
-[![Find dialog searching for LineMeasure in Buffer.hs.](site/screenshots/find.png)](site/screenshots/find.png)
-
-[![Replace dialog with separate search and replacement fields.](site/screenshots/replace.png)](site/screenshots/replace.png)
-
 In the browser, Ctrl/Cmd+F opens Find and Ctrl/Cmd+G finds the next match.
 Shift+Ctrl/Cmd+G finds the previous match. Use the menu for Go to line there.
 
@@ -75,7 +67,7 @@ Use **Window > Split vertically** or **Split horizontally** to keep two parts
 of a file visible. A split is another view of the same file, so an edit or Undo
 in either window appears in both.
 
-[![The Metal editor showing its own Buffer.hs source, package file and Files pane.](site/screenshots/desktop.png)](site/screenshots/desktop.png)
+[![Two views of Buffer.hs, split horizontally with independent scroll positions.](site/screenshots/split.png)](site/screenshots/split.png)
 
 Drag a title to move a window, a frame edge to resize that side, or the
 bottom-right corner to resize both dimensions. **Window > Tile** arranges
@@ -108,7 +100,7 @@ Press **F10** to enter the menu bar, then use arrows or letter mnemonics.
 The status bar describes the highlighted action. Its key labels are clickable.
 On macOS, the native menu bar also provides Command shortcuts.
 
-[![File menu with Open selected in green and its description in the status bar.](site/screenshots/file-menu.png)](site/screenshots/file-menu.png)
+[![File popup menu with Open selected in green and native Mac shortcuts.](site/screenshots/file-menu.png)](site/screenshots/file-menu.png)
 
 Tab and Shift+Tab cycle dialog controls. Enter accepts and Escape cancels.
 Ctrl or Alt plus a button's marked letter activates it. Dialogs also accept
@@ -123,10 +115,6 @@ exits. Closing the last view of a changed file, or exiting with changed files,
 asks what to save. **File > Exit** ends the editor session. To leave the desktop
 running, detach and use `thc-edit --resume` later; **Ctrl+]** detaches from the
 terminal frontend. See [sessions](sessions.md) for the other frontends.
-
-[![Save file as dialog for Buffer.hs.](site/screenshots/save-as.png)](site/screenshots/save-as.png)
-
-[![Save changes confirmation with Save, Discard and Cancel buttons.](site/screenshots/save-changes.png)](site/screenshots/save-changes.png)
 
 A title star means the buffer has unsaved edits. The branch badge's star means
 saved changes in Git; saving a buffer can clear one while setting the other.

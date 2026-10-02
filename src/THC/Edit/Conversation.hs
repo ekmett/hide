@@ -458,6 +458,8 @@ preparePrompt state query=do
         extra=[guidance | deliveredContext state/=Just context]++[catalog | deliveredContext state==Nothing]
     pure (map block (query:extra),context)
 
+-- Docs: docs/site/screenshots/conversation.png (docs/conversations.md and the site front page).
+-- Refresh the live capture when message bubbles, tool groups, model controls or composer change.
 tickConversation :: ConversationState -> Desktop -> IO Desktop
 tickConversation runtime@(ConversationState _ ref consoles jobs _) original = do
   fresh<-pruneChildApprovals runtime original

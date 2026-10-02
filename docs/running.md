@@ -114,6 +114,26 @@ returns to the same breakpoints and stopped state. With THC, continuing to
 normal termination avoids a known early-detach shutdown race in the Graal DAP
 instrument.
 
+## Step through a program
+
+1. Launch or attach, then wait for the first stop. The editor opens the
+   debugger's source and moves the caret to the stopped location.
+2. Press **F7** to trace into the next operation, **F8** to step over it, or
+   **Ctrl+F7** to return from the current frame. Each stop updates the source
+   position; the status bar identifies the stopped frame.
+3. Open **Debug > Call stack**, select a frame and choose **Open** to visit its
+   source. Use **Debug > Scopes** for values exposed by that adapter.
+4. Press **F4** to continue. Set a breakpoint with **Ctrl+F8** when you want the
+   program to stop at a source location instead of stepping all the way there.
+
+[![THC stopped in Main.main after Trace into, with the source caret and stopped-frame status.](site/screenshots/debug-step.png)](site/screenshots/debug-step.png)
+
+This is a live THC session running a small Haskell program. Its source is
+supplied by the debugger. The editor remains open on its own project; debugging
+a process does not require replacing the files already on your desktop.
+
+[![Debug popup menu with Trace into selected and stepping shortcuts alongside it.](site/screenshots/debug-menu.png)](site/screenshots/debug-menu.png)
+
 | Action | Keys or menu |
 | --- | --- |
 | Toggle a source breakpoint | Ctrl+F8 |
@@ -128,6 +148,8 @@ instrument.
 | Choose advertised exception filters | Debug > Exceptions |
 | Read debugger output | Debug > Output |
 | Disconnect | Debug > Disconnect |
+
+[![Call stack from the stopped THC program, with a selected frame and Open action.](site/screenshots/debug-stack.png)](site/screenshots/debug-stack.png)
 
 Choose a frame to inspect its scopes and expand variables explicitly. Values
 come from the runtime; the editor does not automatically evaluate expressions
