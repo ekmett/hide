@@ -38,10 +38,14 @@ data CachedAction = CachedAction ToolQuery Value Bool
 data Session = Session L.Client (IORef (M.Map Int Pending))
 data Preparing = Preparing Target FilePath T.Text (M.Map FilePath (Int,T.Text)) ThreadId (MVar (Either IOException (M.Map FilePath (Int,T.Text))))
   | ToolPreparing ToolQuery ThreadId (MVar (Either IOException (M.Map FilePath (Int,T.Text))))
+type ProblemKey = (Int,[(Int,FilePath,Int,StableName Buffer)],StableName [Diagnostic])
+data ProblemCache = ProblemCache ProblemKey [Diagnostic] Bool (StableName [Diagnostic])
+
 data Tooling = Tooling
   { sessions :: IORef (M.Map FilePath (Either T.Text Session))
   , roots :: IORef (M.Map FilePath FilePath)
   , problems :: IORef (M.Map FilePath (Maybe Int,[Value]))
+  , problemGeneration :: IORef Int, problemProjection :: IORef (Maybe ProblemCache)
   , hovered :: IORef (Maybe Target, Integer, Bool)
   , actions :: IORef (M.Map T.Text CachedAction), nextAction :: IORef Int
   , retiring :: IORef [MVar ()]
@@ -50,7 +54,7 @@ data Tooling = Tooling
   }
 
 withTooling :: (Tooling -> IO a) -> IO a
-withTooling = bracket (Tooling <$> newIORef M.empty <*> newIORef M.empty <*> newIORef M.empty <*> newIORef (Nothing,0,False) <*> newIORef M.empty <*> newIORef 1 <*> newIORef [] <*> newIORef Nothing <*> newIORef M.empty) closeTooling
+withTooling = bracket (Tooling <$> newIORef M.empty <*> newIORef M.empty <*> newIORef M.empty <*> newIORef 0 <*> newIORef Nothing <*> newIORef (Nothing,0,False) <*> newIORef M.empty <*> newIORef 1 <*> newIORef [] <*> newIORef Nothing <*> newIORef M.empty) closeTooling
 
 closeTooling :: Tooling -> IO ()
 closeTooling t = do
@@ -638,6 +642,7 @@ tickTooling t core d = do
     receive _ desktop (L.Diagnostics path version values) = do
       let diagnostics=case values of Array xs -> Vector.toList xs; _ -> []
       modifyIORef' (problems t) (M.insert path (version,diagnostics))
+      modifyIORef' (problemGeneration t) (+1)
       pure desktop
     receive session@(Session _ pending) desktop (L.Response ident response) = do
       requests<-readIORef pending
@@ -868,6 +873,7 @@ toolingEffects t core d effects = foldM apply (False,d) effects
       closeTooling t
       writeIORef (sessions t) M.empty
       writeIORef (problems t) M.empty
+      modifyIORef' (problemGeneration t) (+1)
       writeIORef (hovered t) (Nothing,0,False)
       pure (False,desktop {status="Restarting HLS.",typeHint=""})
     apply (_,desktop) (LanguageRequest RequestCodeActions) = case (activeWindow desktop,activeDocument desktop) of
@@ -925,15 +931,35 @@ sourceSnapshot d root = walk root
 
 refreshProblems :: Tooling -> Desktop -> IO Desktop
 refreshProblems t d = do
-  entries<-readIORef (problems t)
-  let shown=[Diagnostic path version row col severity msg | (path,(version,ds))<-M.toList entries,
-        let current=[v | (_,p,v,_)<-sourceDocuments d,p==path],
-        diagnosticsCurrent version current,
-        value<-ds, Just (row,col,severity,msg)<-[parseMaybe parseDiagnostic value]]
-      updated=chooseProblem (problemsSelected d) (d {diagnostics=sortOn (\p -> (diagnosticPath p,diagnosticRow p,diagnosticColumn p)) (shown++buildDiagnostics d)})
-      newErrors=null [p | p<-diagnostics d,diagnosticSeverity p==1] && any ((==1) . diagnosticSeverity) shown
-  pure (if newErrors && not (problemsVisible d) then setProblemsVisible True updated else updated)
+  generation<-readIORef (problemGeneration t)
+  sources<-forM (sourceDocuments d) $ \(bid,path,version,_) -> do
+    identity<-makeStableName =<< evaluate (documentBuffer (buffers d M.! bid))
+    pure (bid,path,version,identity)
+  buildIdentity<-makeStableName =<< evaluate (buildDiagnostics d)
+  currentIdentity<-makeStableName =<< evaluate (diagnostics d)
+  previous<-readIORef (problemProjection t)
+  let key=(generation,sources,buildIdentity)
+  case previous of
+    Just (ProblemCache old values hasErrors identity) | old==key ->
+      -- Preserve the actual list, not just equal contents: idle ticks do no
+      -- diagnostic parsing, sorting, error scans, or selection-length scans.
+      if currentIdentity==identity then pure d else publish values hasErrors
+    _ -> do
+      entries<-readIORef (problems t)
+      let versions=M.fromListWith (++) [(path,[version]) | (_,path,version,_)<-sources]
+          shown=[Diagnostic path version row col severity msg | (path,(version,ds))<-M.toList entries,
+            diagnosticsCurrent version (M.findWithDefault [] path versions),
+            value<-ds, Just (row,col,severity,msg)<-[parseMaybe parseDiagnostic value]]
+          values=sortOn (\p -> (diagnosticPath p,diagnosticRow p,diagnosticColumn p)) (shown++buildDiagnostics d)
+          hasErrors=any ((==1) . diagnosticSeverity) shown
+      identity<-makeStableName =<< evaluate values
+      writeIORef (problemProjection t) (Just (ProblemCache key values hasErrors identity))
+      publish values hasErrors
   where
+    publish values hasErrors =
+      let updated=chooseProblem (problemsSelected d) d {diagnostics=values}
+          newErrors=not (any ((==1) . diagnosticSeverity) (diagnostics d)) && hasErrors
+      in pure (if newErrors && not (problemsVisible d) then setProblemsVisible True updated else updated)
     parseDiagnostic=withObject "diagnostic" $ \o -> do
       (row,col)<-o .: "range" >>= rangeStart
       severity<-o .:? "severity" .!= (1::Int)

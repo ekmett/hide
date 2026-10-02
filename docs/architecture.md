@@ -72,7 +72,9 @@ Completion checks current buffer/privacy state before applying a result; cancel
 and disconnect retire unfinished work. Idle compiler-setting reads also run in
 a worker. HLS synchronization queues immutable buffer references, with text
 comparison and encoding on the protocol writer; incoming events are consumed
-in bounded batches. Cursor-only ticks reuse buffer/client identity keys.
+in bounded batches. Cursor-only ticks reuse buffer/client identity keys. The
+Messages projection reuses its parsed, sorted diagnostics until an HLS batch,
+source identity/version, or build diagnostic list changes.
 
 These boundaries keep routine tool output and held file reads out of navigation
 and rendering. Explicit save/configuration operations and some tool launch

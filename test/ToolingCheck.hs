@@ -1,12 +1,15 @@
 {-# LANGUAGE OverloadedStrings #-}
-module ToolingCheck (checks) where
-import Control.Monad (unless, when, forM_, replicateM)
+module ToolingCheck (checks, diagnosticCacheChecks) where
+import Control.Monad (unless, when, forM_, replicateM, foldM)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (withAsync, poll, wait)
 import Data.Aeson.Types (parseMaybe)
-import Control.Exception (bracket)
+import Control.Exception (bracket, evaluate)
+import System.Mem.StableName (makeStableName)
+import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.Aeson
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as BL
 import Data.List (findIndex)
 import qualified Data.Map.Strict as M
 import qualified Data.Text as T
@@ -78,6 +81,7 @@ checks = do
         check "Save As while preparing cancels original target" (status renamedPath=="Rename target changed; request it again." && buffers renamedPath==buffers moved)
   check "HLS exposes code action discovery and checked application"
     (all (`elem` toolingToolNames) ["lsp_code_actions","lsp_apply_code_action"])
+  diagnosticCacheChecks
   mcpChecks
   codeActionChecks
   commandChecks
@@ -369,6 +373,79 @@ codeActionChecks = bracket temporary removePathForcibly $ \root -> do
       hClose h; removeFile path; createDirectory path
       canonicalizePath path
 
+-- An unchanged tick must retain the already parsed/sorted projection, while all
+-- source ownership/version changes and newly published batches invalidate it.
+diagnosticCacheChecks :: IO ()
+diagnosticCacheChecks = bracket temporary removePathForcibly $ \root -> do
+  let source=root </> "Main.hs"; other=root </> "Other.hs"; server=root </> "fake-hls"
+      base=addDocument (Just (FileState source Nothing)) (newBuffer "foo = 1\n") (initialDesktop (80,25))
+      bid=maybe (error "no source") bufferId (activeWindow base)
+      core d _=pure (False,d)
+      check name ok=unless ok (error name)
+      identity d=makeStableName =<< evaluate (diagnostics d)
+      await tooling label predicate d=do
+        latest<-newIORef d
+        let loop current=do
+              next<-tickTooling tooling core current
+              writeIORef latest next
+              if predicate next then pure next else threadDelay 1000 >> loop next
+        result<-timeout 3000000 (loop d)
+        case result of
+          Just next->pure next
+          Nothing->do lastView<-readIORef latest; error ("Diagnostic update timed out: "++label++"; "++show (status lastView,diagnostics lastView))
+      diagnostic message=object ["range" .= object ["start" .= object ["line" .= (0::Int),"character" .= (0::Int)]],"severity" .= (1::Int),"message" .= (message::T.Text)]
+      batch path version messages=object ["uri" .= ("file://"<>T.pack path),"version" .= (version::Maybe Int),"diagnostics" .= map diagnostic messages]
+      publish tooling d entries predicate=do
+        BS.writeFile (root </> "diagnostics.next") (BL.toStrict (encode entries))
+        renameFile (root </> "diagnostics.next") (root </> "diagnostics.json")
+        (_,pending)<-toolingEffects tooling core d [LanguageRequest TypeInfo]
+        await tooling (show entries) predicate pending
+  writeFile source "foo = 1\n"; writeFile other "other = 2\n"
+  writeFile (root </> "hie.yaml") "cradle: {direct: {arguments: []}}\n"
+  writeFile server mcpServer
+  permission<-getPermissions server; setPermissions server permission {executable=True}
+  bracket (lookupEnv "THC_EDIT_HLS") (maybe (unsetEnv "THC_EDIT_HLS") (setEnv "THC_EDIT_HLS")) $ \_ -> do
+    setEnv "THC_EDIT_HLS" server
+    withTooling $ \tooling -> do
+      ready<-await tooling "initial" (not.null.diagnostics) base
+      expected<-identity ready
+      unchanged<-foldM (\current _->do next<-tickTooling tooling core current; actual<-identity next; check "idle diagnostic ticks reuse the parsed sorted list" (actual==expected); pure next) ready [1..40::Int]
+      changed<-tickTooling tooling core (insertText "x" unchanged)
+      check "editing invalidates versioned diagnostics" (null (diagnostics changed))
+      restored<-tickTooling tooling core unchanged
+      check "returning to the original source version restores current diagnostics" (length (diagnostics restored)==1)
+      restoredIdentity<-identity restored
+      let savedView=restored {buffers=M.adjust (\doc->doc {documentBuffer=markSaved (documentBuffer doc)}) bid (buffers restored)}
+      savedView'<-tickTooling tooling core savedView
+      savedIdentity<-identity savedView'
+      check "saving rebases the diagnostics projection key" (savedIdentity/=restoredIdentity && diagnostics savedView'==diagnostics restored)
+      let reloaded=savedView' {buffers=M.adjust (\doc->doc {documentBuffer=newBuffer "different = 3\n"}) bid (buffers savedView')}
+      reloaded'<-tickTooling tooling core reloaded
+      reloadIdentity<-identity reloaded'
+      check "equal-revision reload invalidates the cached source identity" (reloadIdentity/=savedIdentity)
+      updated<-publish tooling restored [batch source (Just 0) ["updated"]] ((==["updated"]).map diagnosticMessage.diagnostics)
+      cleared<-publish tooling updated [batch source (Just 0) []] (null.diagnostics)
+      let opened=addDocument (Just (FileState other Nothing)) (newBuffer "other = 2\n") cleared
+      opened'<-await tooling "opened" (any ((==other).diagnosticPath).diagnostics) opened
+      both<-publish tooling (focusWindow bid opened') [batch source (Just 0) ["main"],batch other (Just 0) ["other"]] ((==2).length.diagnostics)
+      let otherId=maybe (error "no second source") windowId (activeWindow opened')
+      closed<-tickTooling tooling core (closeActive (focusWindow otherId both))
+      check "closing a source removes its versioned diagnostics" (map diagnosticPath (diagnostics closed)==[source])
+      let moved=closed {buffers=M.adjust (\doc->doc {documentFile=Just (FileState other Nothing)}) bid (buffers closed)}
+      moved'<-tickTooling tooling core moved
+      check "Save As remaps diagnostics to the current source path" (map diagnosticPath (diagnostics moved')==[other])
+      let build=Diagnostic "build" Nothing 0 0 2 "compiler warning"
+      compiled<-tickTooling tooling core moved' {buildDiagnostics=[build]}
+      check "new build diagnostics invalidate the combined projection" (build `elem` diagnostics compiled)
+      (_,restart)<-toolingEffects tooling core compiled [LanguageRequest RestartLanguage]
+      fresh<-tickTooling tooling core restart {buffers=M.empty,windows=[],buildDiagnostics=[]}
+      check "language restart clears the diagnostic projection" (null (diagnostics fresh))
+  putStrLn "diagnostics cache checks passed"
+  where
+    temporary=do
+      base<-getTemporaryDirectory; (path,h)<-openTempFile base "thc-diagnostics-cache"
+      hClose h; removeFile path; createDirectory path; canonicalizePath path
+
 mcpServer :: String
 mcpServer = unlines
   [ "#!/usr/bin/env python3"
@@ -385,6 +462,9 @@ mcpServer = unlines
   , " if method=='textDocument/didChange': docs[params['textDocument']['uri']]=params['contentChanges'][0]['text']"
   , " if method=='textDocument/didOpen': send(dict(method='textDocument/publishDiagnostics',params=dict(uri=params['textDocument']['uri'],version=params['textDocument']['version'],diagnostics=[dict(range=dict(start=dict(line=0,character=3),end=dict(line=0,character=6)),message='fix me',severity=1)])))"
 
+  , " if pathlib.Path('diagnostics.json').exists():"
+  , "  batches=json.loads(pathlib.Path('diagnostics.json').read_text()); pathlib.Path('diagnostics.json').unlink()"
+  , "  for batch in batches: send(dict(method='textDocument/publishDiagnostics',params=batch))"
   , " if 'id' not in msg: continue"
   , " result={}"
   , " if method=='initialize': result=dict(capabilities=dict(codeActionProvider=dict(resolveProvider=not pathlib.Path('no-resolve').exists())))"
