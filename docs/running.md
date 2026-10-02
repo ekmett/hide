@@ -70,7 +70,7 @@ ACP terminal requests use the same backend, with approval before execution.
 
 ## Launch or attach a debugger
 
-**Debug > Launch** offers **THC target** and **Adapter config**. THC target
+**Debug > Launch** offers **Selected target** and **Adapter config**. With THC selected, Selected target
 uses the THC installation and package selected in **Run > Target**. Choose an
 unused loopback port (default `4711`); the editor starts `thc run --dap-port PORT`,
 waits for its debugger, and configures your breakpoints before execution.
@@ -80,7 +80,7 @@ launch can spend several minutes building and capturing dependencies.
 **Debug > Disconnect** stops that work; protocol response timing starts when
 the debugger connects.
 
-[![Launch debugger dialog offering THC target and Adapter config.](site/screenshots/debug-launch.png)](site/screenshots/debug-launch.png)
+[![Launch debugger dialog offering Selected target and Adapter config.](site/screenshots/debug-launch.png)](site/screenshots/debug-launch.png)
 
 THC initially stops at an instrumented source location. Embedded source opens
 read-only, where **Ctrl+F8** sets a breakpoint in the running program. Both
@@ -149,6 +149,23 @@ returns to the same breakpoints and stopped state. With THC, continuing to
 normal termination avoids a known early-detach shutdown race in the Graal DAP
 instrument.
 
+The status bar's **THC ▼** / **GHC ▼** menu switches the toolchain used by
+Compile, Make, Run and **Debug > Launch > Selected target**. The choice is saved
+with independent settings for each toolchain. A new choice starts with the
+standard `thc` or `ghc` executable; switching back restores its compiler and
+target. **Target settings…** lets you change them. Other open sessions refresh
+the global selection.
+Running sessions keep their current toolchain until you launch again.
+
+[![Status-bar toolchain selector with THC, GHC and Target settings.](site/screenshots/toolchain.png)](site/screenshots/toolchain.png)
+
+With **GHC** selected, open the saved Haskell entry file and choose **Selected
+target** to run its `main` through `hdb` on PATH. Program arguments come from
+Target settings. hdb uses that file's cradle/component and its own compiled-in
+GHC version. A customized GHC executable requires explicit **Adapter config**,
+so Selected target cannot silently substitute another compiler. Use **Adapter config**
+for a different entry point or additional GHC options.
+
 ## Step through a program
 
 1. Launch or attach, then wait for the first stop. The editor opens the
@@ -158,6 +175,8 @@ instrument.
    position; the status bar identifies the stopped frame.
 3. Open **Debug > Call stack**, select a frame and choose **Open** to visit its
    source. Use **Debug > Scopes** for values exposed by that adapter.
+   **Debug > Exceptions…** chooses when to stop; **Exception details** shows
+   the stopped exception, nested causes and stack when the adapter supports it.
 4. Press **F4** to continue. Set a breakpoint with **Ctrl+F8** when you want the
    program to stop at a source location instead of stepping all the way there.
 

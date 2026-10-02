@@ -18,7 +18,7 @@ import qualified Data.Text as T
 import GHC.Clock (getMonotonicTimeNSec)
 import System.Directory (XdgDirectory(XdgConfig), canonicalizePath, doesFileExist, getXdgDirectory)
 import System.IO (IOMode(ReadMode), withBinaryFile)
-import System.FilePath (isAbsolute, takeFileName, (</>))
+import System.FilePath (isAbsolute, takeFileName, takeExtension, makeRelative, (</>))
 import System.Timeout (timeout)
 import Text.Read (readMaybe)
 import qualified THC.Edit.Build as Build
@@ -33,7 +33,7 @@ import THC.Edit.Syntax (highlightFor)
 type Core = Desktop -> [Effect] -> IO (Bool,Desktop)
 data Debugger = Debugger (IORef State) (IO Integer)
 data Pending = Init | Attach | Configure | Breaks Text [Int] | Exceptions | Threads Bool
-  | Stack Bool | Scopes | Variables | Source Bool Value | Control Bool | Detach
+  | Stack Bool | Scopes | Variables | ExceptionDetails | Source Bool Value | Control Bool | Detach
   | Inspection Text (MVar (Either Text Value))
   deriving (Eq)
 data Breakpoint = Breakpoint { bpLine :: Int, bpResult :: Value } deriving (Eq,Show)
@@ -206,8 +206,8 @@ parseTool s name = withObject "debugger tool arguments" $ \o -> do
       live
       unless (ready s && configured s) (fail "Debugger is not ready for inspection")
       command<-o .: "request"
-      unless (command `elem` ["threads","stackTrace","scopes","variables","source"]) (fail "Unsupported debugger inspection")
-      when (command `elem` ["stackTrace","scopes","variables"] && not (stopped s)) (fail "Debugger must be stopped for this inspection")
+      unless (command `elem` ["threads","stackTrace","scopes","variables","source","exceptionInfo"]) (fail "Unsupported debugger inspection")
+      when (command `elem` ["stackTrace","scopes","variables","exceptionInfo"] && not (stopped s)) (fail "Debugger must be stopped for this inspection")
       -- Validate even unused optional fields: malformed handles are never ignored.
       mapM_ positive ["threadId","frameId","variablesReference","sourceReference"]
       start<-o .:? "start" .!= (0::Int)
@@ -218,6 +218,10 @@ parseTool s name = withObject "debugger tool arguments" $ \o -> do
         "stackTrace" -> do
           tid<-required "threadId" (thread s)
           pure (object ["threadId" .= tid,"startFrame" .= start,"levels" .= count])
+        "exceptionInfo" -> do
+          unless (flag "supportsExceptionInfoRequest" (capabilities s)) (fail "This debugger does not support exception details")
+          tid<-required "threadId" (thread s)
+          pure (object ["threadId" .= tid])
         "scopes" -> do
           ident<-required "frameId" (frame s >>= field "id")
           pure (object ["frameId" .= ident])
@@ -272,13 +276,13 @@ perform runtime@(Debugger ref clock) core action values d = do
     ("output",_) -> pure (addReadOnly "Debugger output" (output s) d)
     -- Docs: docs/site/screenshots/debug-launch.png (docs/running.md).
     ("launch",_) -> pure d {dialog=Just (Dialog "Launch debugger" (DebugDialog "launch-config")
-      [Input "Adapter configuration" ".thc-debug.json" 15,Input "THC DAP port" "4711" 4] 0 ["THC target","Adapter config","Cancel"]
-      ["THC target uses your selected build settings.",
+      [Input "Adapter configuration" ".thc-debug.json" 15,Input "DAP port" "4711" 4] 0 ["Selected target","Adapter config","Cancel"]
+      ["Selected target follows the THC/GHC status-bar choice.",
        "Adapter config reads a project-relative JSON file."])}
     ("launch-config","0":_:portText:_) -> case readMaybe (T.unpack portText) of
       Just port | port>0 && port<=65535 -> do
-        result<-try $ launchTHC runtime port d
-        pure $ either (\(err::IOException) -> d {status="THC debugger: "<>T.pack (show err)}) id result
+        result<-try $ launchTarget runtime port d
+        pure $ either (\(err::IOException) -> d {status="Debugger: "<>T.pack (show err)}) id result
       _ -> pure d {status="Enter a DAP port between 1 and 65535."}
     ("launch-config","1":configPath:_) -> do
       result<-try $ do
@@ -317,6 +321,10 @@ perform runtime@(Debugger ref clock) core action values d = do
       pure $ if null filters then d {status="This debugger advertises no exception filters."} else
         d {dialog=Just (Dialog "Exception breakpoints" (DebugDialog (token s "exceptions"))
            [CheckBox (text "label" f) (text "filter" f `elem` exceptionFilters s) | f<-filters] 0 ["OK","Cancel"] [])}
+    ("exception-info",_) | stopped s,Just tid<-thread s ->
+      if flag "supportsExceptionInfoRequest" (capabilities s) then
+        send runtime ExceptionDetails "exceptionInfo" (object ["threadId" .= tid]) >> pure d {status="Loading exception details..."}
+      else pure d {status="This debugger does not support exception details."}
     ("threads",_) | configured s -> send runtime (Threads True) "threads" (object []) >> pure d {status="Loading threads..."}
     ("stack",_) | stopped s, Just tid<-thread s -> send runtime (Stack True) "stackTrace" (stackArguments tid) >> pure d {status="Loading call stack..."}
     ("scopes",_) | stopped s, Just selected<-frame s,Just ident<-(field "id" selected :: Maybe Int) ->
@@ -371,15 +379,15 @@ startSession runtime@(Debugger ref _) directory (LaunchConfig transport requestN
     Server exe args host port -> (,,) <$> D.startManaged exe args directory host port <*> pure (host,port) <*> pure True
   initializeSession runtime directory c address requestName arguments adapter owned d
 
-launchTHC :: Debugger -> Int -> Desktop -> IO Desktop
-launchTHC runtime@(Debugger ref _) port d
+launchTarget :: Debugger -> Int -> Desktop -> IO Desktop
+launchTarget runtime@(Debugger ref _) port d
   | any (\doc -> documentLabel doc==Nothing && dirty (documentBuffer doc)) (M.elems (buffers d)) =
       pure d {status="Save modified source files before launching the disk build."}
   | otherwise = do
       directory<-resolveBuildRoot d
       settings<-getXdgDirectory XdgConfig "thc-edit"
       config<-Build.loadBuildConfig settings directory
-      if Build.buildToolchain config/=Build.THC then pure d {status="Select the THC toolchain in Build target, or choose Adapter config for GHC debugging."}
+      if Build.buildToolchain config==Build.GHC then launchGHC runtime directory config port d
       else do
         plan<-Build.buildPlan Build.Run config directory (filePath <$> (activeDocument d >>= documentFile))
         case plan of
@@ -393,6 +401,23 @@ launchTHC runtime@(Debugger ref _) port d
             pure started {status="Starting THC debugger; build output is in Debug / Output..."}
           Left err -> pure d {status=err}
           _ -> pure d {status="THC debugger requires a single runtime launch command."}
+
+-- The entry file chooses the GHC cradle/component. Advanced adapter settings can
+-- still use Adapter config; both paths feed the same debugger state machine.
+launchGHC :: Debugger -> FilePath -> Build.BuildConfig -> Int -> Desktop -> IO Desktop
+launchGHC _ _ config _ d | Build.buildExecutable config/="ghc" =
+  pure d {status="hdb uses its own GHC build; a custom compiler requires an explicit Adapter config."}
+launchGHC runtime directory config port d = case Build.buildSource d of
+  Just path | takeExtension path `elem` [".hs",".lhs"] -> do
+    file<-canonicalizePath path
+    exists<-doesFileExist file
+    if not exists then pure d {status="Save the Haskell entry file before debugging."} else do
+      let arguments=object ["projectRoot" .= directory,"entryFile" .= makeRelative directory file,
+            "entryPoint" .= ("main"::Text),"entryArgs" .= Build.buildArguments config,"extraGhcArgs" .= ([]::[String])]
+      started<-startSession runtime directory
+        (LaunchConfig (Server "hdb" ["server","--port",show port] "127.0.0.1" port) "launch" arguments "hdb") d
+      pure started {status="Starting GHC debugger; loading the entry file with hdb..."}
+  _ -> pure d {status="Open the Haskell entry file for GHC debugging, or use Adapter config."}
 
 initializeSession :: Debugger -> FilePath -> D.Client -> (Text,Int) -> Text -> Value -> Text -> Bool -> Desktop -> IO Desktop
 initializeSession (Debugger ref _) directory c address requestName arguments adapter owned d = do
@@ -517,7 +542,7 @@ receive runtime@(Debugger ref _) core d event = do
              pure (automaticDesktop s d) {status="DAP: "<>err}
            Right body -> response runtime core kind body d
   where
-    stale kind=case kind of Threads{} -> True; Control{} -> True; Stack{} -> True; Scopes -> True; Variables -> True; Source{} -> True; Inspection{} -> True; _ -> False
+    stale kind=case kind of Threads{} -> True; Control{} -> True; Stack{} -> True; Scopes -> True; Variables -> True; ExceptionDetails -> True; Source{} -> True; Inspection{} -> True; _ -> False
 
 -- DAP lazy handles are executable: hdb forces a thunk when its children are
 -- requested. Track provenance for both UI and MCP; never guess a reference.
@@ -561,6 +586,7 @@ response runtime@(Debugger ref _) core kind body d = do
       modifyIORef' ref (\state -> state {breakpoints=M.adjust (\(source,points) -> (source,if map bpLine points==requested then zipWith (\p value -> p {bpResult=value}) points (items "breakpoints" body++repeat Null) else points)) key (breakpoints state)})
       pure d
     Exceptions -> pure d
+    ExceptionDetails -> pure (addReadOnly "Debugger exception" (exceptionText body) d)
     Threads showPicker -> do
       let rows=items "threads" body
           tid=case thread s of Just ident | any ((==Just ident).field "id") rows -> Just ident; _ -> listToMaybe rows >>= field "id"
@@ -749,3 +775,13 @@ tshow=T.pack.show
 merge :: Value -> Value -> Value
 merge (Object old) (Object new)=Object (KM.union new old)
 merge old _=old
+
+-- DAP exception details remain useful as selectable text, including nested causes.
+exceptionText :: Value -> Text
+exceptionText body=T.unlines (filter (not . T.null)
+  ([text "exceptionId" body,text "description" body,"Break mode: "<>text "breakMode" body] ++
+   maybe [] (details "") (field "details" body)))
+  where
+    details indent value=map (indent<>) (filter (not . T.null)
+      [fromMaybe (text "typeName" value) (field "fullTypeName" value),text "message" value,text "stackTrace" value]) ++
+      concatMap (details (indent<>"  ")) (items "innerException" value)

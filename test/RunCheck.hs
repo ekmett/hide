@@ -17,7 +17,9 @@ import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.FilePath ((</>))
 import System.IO (hClose, openTempFile)
 import System.Timeout (timeout)
+import qualified THC.Edit.Build as B
 import THC.Edit.Buffer
+import THC.Edit.Debugger
 import THC.Edit.Conversation
 import THC.Edit.Model
 import THC.Edit.Terminal (terminalAvailable)
@@ -56,12 +58,34 @@ checks = do
       permissions<-getPermissions command
       setPermissions command permissions {executable=True}
       withConversation $ \runtime -> do
+        initial<-tickConversation runtime desktop
+        check "status starts with persisted toolchain" (toolchain initial==Just THC)
+        ghc<-send runtime "toolchain" ["GHC"] initial
+        stored<-B.loadBuildConfig (root </> "config/thc-edit") root
+        check "status selector saves GHC and compiler together" (toolchain ghc==Just GHC && B.buildToolchain stored==GHC && B.buildExecutable stored=="ghc")
+        withConversation $ \other -> do
+          stale<-tickConversation other desktop
+          _<-send runtime "toolchain" ["THC"] ghc
+          refreshed<-tickConversation other stale
+          check "another session refreshes global toolchain choice" (toolchain refreshed==Just THC)
+          _<-send runtime "toolchain" ["GHC"] refreshed
+          pure ()
+        reloaded<-tickConversation runtime desktop
+        check "status restores saved GHC choice" (toolchain reloaded==Just GHC)
+        _<-send runtime "toolchain" ["THC"] ghc
         options<-send runtime "run-options" [] desktop
         check "Run options default to thc with optional empty settings" (case dialog options of
           Just dg -> [value | Input _ value _<-fields dg]==["thc","","","","[]"]
           Nothing -> False)
         configured<-save runtime [target,compilerRoot,runtimePath] options {dialog=Nothing}
         check "Run configuration saved under isolated XDG" =<< doesFileExist (root </> "config" </> "thc-edit" </> "run.json")
+        switched<-send runtime "toolchain" ["GHC"] configured
+        restored<-send runtime "toolchain" ["THC"] switched
+        let elsewhere=restored {sideTree=Just (Sidebar (root </> "another-project") [] 0 0 20 False)}
+        _<-send runtime "toolchain" ["THC"] elsewhere
+        preserved<-B.loadBuildConfig (root </> "config/thc-edit") root
+        check "switching preserves custom compiler and root-scoped target"
+          (B.buildExecutable preserved==command && B.buildTarget preserved==target && B.buildTHCRoot preserved==compilerRoot && B.buildRuntime preserved==runtimePath)
         reopened<-send runtime "run-options" [] configured
         check "Run options preserve literal configured arguments" (case dialog reopened of
           Just dg -> [value | Input _ value _<-fields dg]==[T.pack command,target,compilerRoot,runtimePath,"[]"]
@@ -73,6 +97,13 @@ checks = do
         check "dialog passes toolchain after text inputs" (case submitted of
           [AgentAction "run-config" values] -> last values=="1" && values !! 5=="[]"
           _ -> False)
+        _<-conversationEffects runtime (\state _ -> pure (False,state)) configured submitted
+        withDebugger $ \debugger -> do
+          (_,refusedDebug)<-debuggerEffects debugger (\state _ -> pure (False,state)) configured
+            [DebugAction "launch-config" ["0","","4711"]]
+          check "GHC debug refuses silently replacing custom compiler"
+            ("custom compiler requires an explicit Adapter config" `T.isInfixOf` status refusedDebug)
+        _<-send runtime "toolchain" ["THC"] configured
         let dirtyDesktop=insertText "unsaved source" (addDocument Nothing (newBuffer "") configured)
         refused<-send runtime "run" [] dirtyDesktop
         check "Run rejects dirty source buffers" (maybe False ((=="Save before running").dialogTitle) (dialog refused))

@@ -71,6 +71,7 @@ for session in range(1, 3 if mode == 'reconnect' else 2):
             if cmd == 'initialize':
                 event('initialized')
                 reply(req, dict(supportsConfigurationDoneRequest=True,
+                      supportsExceptionInfoRequest=mode in ('exception', 'mcp'),
                       exceptionBreakpointFilters=[dict(filter='uncaught', label='Uncaught exceptions', default=True)]))
             elif cmd in ('attach', 'launch'):
                 if mode == 'launch-fail':
@@ -102,6 +103,11 @@ for session in range(1, 3 if mode == 'reconnect' else 2):
                 reply(req)
                 reply(pending_attach)
                 event('stopped', dict(reason='entry', threadId=7, allThreadsStopped=True))
+            elif cmd == 'exceptionInfo':
+                assert mode in ('exception', 'mcp') and args['threadId'] == 7
+                reply(req, dict(exceptionId='IOException', description='cannot open λ.hs', breakMode='always',
+                    details=dict(typeName='IOException', message='permission denied', stackTrace='Main.hs:6',
+                                 innerException=[dict(typeName='Inner', message='nested cause')])) )
             elif cmd == 'threads':
                 thread_count += 1
                 if mode == 'lazy' and thread_count == 3:

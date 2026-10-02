@@ -81,6 +81,8 @@ main = do
           , ("preferences", command EditorOptions)
           , ("build-target", \d -> command RunOptions d >>= key (V.KChar '\t') [] >>= typeText "exe:thc-edit")
           , ("debug-launch", command (DebugCommand "launch"))
+          , ("debug-menu", pure . (\d -> d {menu=Just (5,6)}))
+          , ("toolchain", command ToolchainOptions)
           , ("git-commit", \d -> command GitDiff d {streamerMode=False} >>= command GitCommit >>= typeText "Document editor dialogs")
           ]
     forM_ scenes $ \(name, open) -> if (null requested && name `elem` ["conversation","debug-step"]) || (not (null requested) && name `notElem` requested) then pure () else do
@@ -103,6 +105,7 @@ capture effects scratch output name shown = do
   -- Include the actual shadow and eight pixels of context; menus retain their heading.
   let crop = case dialog shown of
         Just dg -> Just (dialogRect shown dg)
+        Nothing | Just (r,_)<-contextMenu shown -> Just r
         Nothing -> case menu shown of
           Just (i,_) -> Just (menuRect shown i)
           Nothing | name `elem` ["conversation","debug-step"] -> bounds <$> activeWindow shown

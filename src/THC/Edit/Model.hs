@@ -54,12 +54,14 @@ data Command = New | Open | Download | ChangeDir | Save | SaveAs | Close | Quit 
   | AgentChoose Text | AgentSet Text Text
   | AgentDirectory | AgentOptions | AgentPermissions | AgentGuidance | Conversation | AgentCancel | AgentResume | AgentCopyRaw | AgentNew
   | ToggleHex | GoToMessage | CopyAllMessages
+  | ToolchainOptions | SelectToolchain Toolchain
   | DebugCommand Text
   | Disabled Text deriving (Eq,Show)
 data ConflictAction = CompareDisk | ReloadDisk | KeepBuffer | SaveConflictAs deriving (Eq,Show)
 data Conflict = Conflict { conflictBuffer :: Int, conflictRevision :: Int, conflictBaseline :: FileState, conflictDisk :: Maybe ByteString } deriving (Eq,Show)
 data GitAction = FetchRemote | PullRemote | MergeBranch Text deriving (Eq,Show)
-data ContextKind = SourceContext | GitContext | MessagesContext | AgentContext [(Text,Command)] deriving (Eq,Show)
+data Toolchain = THC | GHC deriving (Eq,Show)
+data ContextKind = ToolchainContext | SourceContext | GitContext | MessagesContext | AgentContext [(Text,Command)] deriving (Eq,Show)
 data LanguageAction = TypeInfo | FindDefinition | Completions | ShowProblems | RestartLanguage | RenameAt Text | RequestCodeActions | ApplyCodeAction Int Int Text deriving (Eq,Show)
 data Completion = Completion Text [(Int,Int,Text)] deriving (Eq,Show)
 data ProjectAction = LoadProject | ProjectPage Int Int | ProjectDetails Int Int deriving (Eq,Show)
@@ -119,6 +121,7 @@ data Desktop = Desktop
   , childAgentSettings :: [AgentSetting], childAgentSteering :: Bool, childAgentContextUsage :: Maybe (Integer,Integer)
   , conversationTarget :: Text, conversationViews :: M.Map Text ConversationView
   , streamerMode :: Bool, clipboardExport :: (Int,Maybe Text), guestPrivatePaths :: [FilePath]
+  , toolchain :: Maybe Toolchain
   , dockedTerminals :: M.Map Int (Rect,Maybe Rect), bottomTerminal :: Maybe Int
   } deriving (Eq,Show)
 
@@ -137,7 +140,7 @@ menus =
       mi "Continue" "F4" (DebugCommand "continue"),mi "Pause" "" (DebugCommand "pause"),
       mi "Trace into" "F7" (DebugCommand "stepIn"),mi "Step over" "F8" (DebugCommand "next"),mi "Step out" "Ctrl+F7" (DebugCommand "stepOut"),
       mi "Threads..." "" (DebugCommand "threads"),mi "Call stack..." "" (DebugCommand "stack"),mi "Scopes..." "" (DebugCommand "scopes"),
-      mi "Exceptions..." "" (DebugCommand "exceptions"),mi "Output" "" (DebugCommand "output"),mi "Disconnect" "" (DebugCommand "disconnect")])
+      mi "Exceptions..." "" (DebugCommand "exceptions"),mi "Exception details" "" (DebugCommand "exception-info"),mi "Output" "" (DebugCommand "output"),mi "Disconnect" "" (DebugCommand "disconnect")])
   ,("Tools",'t',[mi "File tree" "Ctrl+B" ToggleTree,mi "Git diff..." "" GitDiff,mi "Approve changes..." "" GitCommit,mi "Inspect type" "Shift+F1" InspectType,mi "Code actions..." "" CodeActions,mi "Messages" "" Problems,mi "Go to next" "Alt+F8" NextMessage,mi "Go to previous" "Alt+F7" PreviousMessage,mi "Restart language server" "" RestartHLS,mi "Conversation" "" Conversation,mi "Agents..." "" AgentDirectory,mi "Conversation model..." "" (AgentChoose ""),mi "Cancel reply" "" AgentCancel,mi "Resume session..." "" AgentResume,mi "New session" "" AgentNew,mi "Copy raw conversation" "" AgentCopyRaw,mi "Widget gallery..." "" Gallery,mi "Project browser..." "" ProjectBrowser])
   ,("Options",'o',[mi "Preferences..." "" EditorOptions,mi "Agents..." "" AgentOptions,mi "Agent Permissions" "" AgentPermissions,mi "Agent Context..." "" AgentGuidance])
   ,("Window",'w',[mi "Agents..." "" AgentDirectory,mi "Tile" "" Tile,mi "Cascade" "" Cascade,mi "Split vertically" "" SplitVertical,mi "Split horizontally" "" SplitHorizontal,mi "Zoom" "F5" Zoom,mi "Pin / unpin terminal" "" ToggleTerminalPin,mi "Next" "F6" NextWindow,mi "Close" "Alt+F3" Close])
@@ -173,6 +176,8 @@ commandDescription cmd = case cmd of
   MakeTarget -> "Build the selected project target."
   StopBuild -> "Stop the current build or captured run."
   RunTarget -> "Run the selected target with THC or GHC."
+  ToolchainOptions -> "Choose THC or GHC for compile, build, run and debugging."
+  SelectToolchain choice -> "Use "<>T.pack (show choice)<>" for this project."
   RunOptions -> "Choose THC or GHC, the executable and project target."
   OpenTerminal -> "Open a project shell in a terminal window."
   StopTerminal -> "Stop the selected terminal process."
@@ -182,7 +187,8 @@ commandDescription cmd = case cmd of
     "breakpoint" -> "Toggle a breakpoint at the current source line."
     "breakpoints" -> "Inspect breakpoint verification and remove breakpoints."
     "scopes" -> "Inspect scopes; expand variables explicitly without evaluation."
-    "disconnect" -> "Detach the debugger and leave the program running."
+    "exception-info" -> "Inspect the stopped exception, its cause and stack."
+    "disconnect" -> "Disconnect the debugger; stop editor-owned programs."
     _ -> "Debugger: " <> action
   AgentChoose _ -> "Choose the conversation model or reasoning effort."
   AgentSet _ _ -> "Apply this choice to the conversation."
@@ -219,7 +225,7 @@ commandDescription cmd = case cmd of
   PreviousMessage -> "Go to the previous diagnostic, opening its file if needed."
   RestartHLS -> "Restart the Haskell language server."
   CodeActions -> "List HLS quick fixes and refactorings for the selected source range."
-  RenameSymbol -> "Rename this symbol with HLS; review and save the changed buffers."
+  RenameSymbol -> "Rename this symbol with HLS; review and save the changes."
   ToggleTree -> "Show or hide the file tree."
   GitDiff -> "Review saved Git changes, including untracked files."
   GitCommit -> "Approve the reviewed saved changes and enter a commit message."
@@ -238,7 +244,10 @@ menuHelp d = case contextMenu d of
 
 -- Labels, hit rectangles and actions share one source, including modal hints.
 statusItems :: Desktop -> [(Text,Maybe (Either Command V.Event))]
-statusItems d
+statusItems d=statusHints d++[(toolchainBadgeText d,if dialog d==Nothing then Just (Left ToolchainOptions) else Nothing) | not (T.null (toolchainBadgeText d))]
+
+statusHints :: Desktop -> [(Text,Maybe (Either Command V.Event))]
+statusHints d
   | dragOriginal d/=Nothing = [(" ↑↓→← Move  Shift+↑↓→← Resize",Nothing),key "  ↵ Done" V.KEnter [],key "  Esc Cancel" V.KEsc []]
   | Just text<-menuHelp d = [command " F1 Help" Help,(" | "<>text,Nothing)]
   | Just c<-prefix d = [(" Ctrl+"<>T.singleton c<>"- ",Nothing),key " Esc Cancel" V.KEsc []]
@@ -256,10 +265,11 @@ statusItems d
 
 statusItemRects :: Desktop -> [(Rect,Int,Either Command V.Event)]
 statusItemRects d = [(Rect x (snd (screenSize d)-1) (min (T.length text) (limit-x)) 1,i,action)
-  | (i,(x,(text,Just action)))<-zip [0..] (zip starts items), x<limit]
+  | (i,(x,(text,Just action)))<-zip [0..] (zip starts items), x<limit] ++
+  [(toolchainBadgeRect d,length items,Left ToolchainOptions) | dialog d==Nothing, not (T.null (toolchainBadgeText d))]
   where
-    items=statusItems d; starts=scanl (+) 0 (map (T.length . fst) items)
-    limit=fst (screenSize d)-if activeConversation d then 0 else T.length (gitBadgeText d)
+    items=statusHints d; starts=scanl (+) 0 (map (T.length . fst) items)
+    limit=left (toolchainBadgeRect d)
 
 menuPositions :: [(Int,Int)]
 menuPositions = zip starts widths
@@ -293,7 +303,7 @@ menuRect d i = Rect (min x (max 0 (sw-w))) 1 w (length (menuItemsFor d i)+2)
         w = min sw (maximum [T.length t + T.length (menuShortcut d entry) + 5 | entry@(MenuItem t _ _) <- menuItemsFor d i])
 
 initialDesktop :: (Int,Int) -> Desktop
-initialDesktop size = Desktop size [] M.empty 1 Nothing Nothing Nothing "" False Nothing "" Nothing "" Nothing "" False Nothing Nothing Nothing "" Nothing Nothing Nothing [] False 0 0 False Nothing 0 0 Nothing SourceContext Nothing (newBuffer "") (Selection 0 0) True False False 0 True False False False Nothing Nothing [] 8 Nothing [] False SystemMode True [] Nothing [] Nothing [] False Nothing "" M.empty False (0,Nothing) [] M.empty Nothing
+initialDesktop size = Desktop size [] M.empty 1 Nothing Nothing Nothing "" False Nothing "" Nothing "" Nothing "" False Nothing Nothing Nothing "" Nothing Nothing Nothing [] False 0 0 False Nothing 0 0 Nothing SourceContext Nothing (newBuffer "") (Selection 0 0) True False False 0 True False False False Nothing Nothing [] 8 Nothing [] False SystemMode True [] Nothing [] Nothing [] False Nothing "" M.empty False (0,Nothing) [] Nothing M.empty Nothing
 
 activeWindow :: Desktop -> Maybe Window
 activeWindow d = listToMaybe (filter (windowVisible d) (windows d))
@@ -460,6 +470,11 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
     go MakeTarget d = (d,[AgentAction "make" []])
     go StopBuild d = (d,[AgentAction "build-stop" []])
     go RunTarget d = (d,[AgentAction "run" []])
+    go ToolchainOptions d =
+      let Rect x y _ _=toolchainBadgeRect d
+          opened=openContext ToolchainContext x y d
+      in (opened {contextMenu=fmap (\(r,_) -> (r,if toolchain d==Just GHC then 1 else 0)) (contextMenu opened)},[])
+    go (SelectToolchain choice) d = (d,[AgentAction "toolchain" [T.pack (show choice)]])
     go RunOptions d = (d,[AgentAction "run-options" []])
     go OpenTerminal d = (d,[AgentAction "terminal" []])
     go StopTerminal d = (d,[AgentAction "terminal-stop" []])
@@ -1014,6 +1029,7 @@ menuAt :: Int -> Maybe Int
 menuAt x = findIndex (\(start,w) -> x >= start && x < start+w) menuPositions
 
 contextItems :: ContextKind -> [(Text,Command)]
+contextItems ToolchainContext = [("THC",SelectToolchain THC),("GHC",SelectToolchain GHC),("Target settings...",RunOptions)]
 contextItems SourceContext = [("Rename symbol...",RenameSymbol),("Code actions...",CodeActions),("Go to definition",Definition),("Inspect type",InspectType),("Complete identifier",Complete)]
 contextItems MessagesContext = [("Go to source",GoToMessage),("Copy message",Copy),("Copy all messages",CopyAllMessages),("Hide Messages",Problems)]
 contextItems (AgentContext items) = items
@@ -1083,6 +1099,18 @@ gitBranchText d
 
 gitBadgeText :: Desktop -> Text
 gitBadgeText d = if T.null (branchStatus d) then "" else " │ "<>gitBranchText d<>" +"<>gitCountText (branchAdded d)<>" -"<>gitCountText (branchDeleted d)<>" "
+
+-- Docs: docs/site/screenshots/toolchain.png (docs/running.md), including the popup.
+toolchainBadgeText :: Desktop -> Text
+toolchainBadgeText d | fst (screenSize d)<20 = ""
+                     | otherwise = " "<>T.pack (show (fromMaybe THC (toolchain d)))<>" ▼ "
+
+toolchainBadgeRect :: Desktop -> Rect
+toolchainBadgeRect d = Rect (max 0 (sw-gitWidth-len)) (sh-1) len 1
+  where
+    (sw,sh)=screenSize d
+    gitWidth=if activeConversation d then 0 else T.length (gitBadgeText d)
+    len=T.length (toolchainBadgeText d)
 
 gitBadgeRect :: Desktop -> Rect
 gitBadgeRect d = let (sw,sh)=screenSize d; len=T.length (gitBadgeText d) in Rect (max 0 (sw-len)) (sh-1) (min sw len) 1

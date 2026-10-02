@@ -27,7 +27,7 @@ import Data.Maybe (fromMaybe, mapMaybe, isNothing)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import System.Directory (XdgDirectory(..), getXdgDirectory, createDirectoryIfMissing, canonicalizePath, getCurrentDirectory, renameFile, removeFile)
+import System.Directory (XdgDirectory(..), getXdgDirectory, createDirectoryIfMissing, canonicalizePath, getCurrentDirectory, getModificationTime, renameFile, removeFile)
 import System.FilePath ((</>), takeDirectory, isAbsolute, makeRelative, splitDirectories)
 import Data.Text.Encoding.Error (lenientDecode)
 import qualified THC.Edit.Terminal as Terminal
@@ -79,6 +79,7 @@ data State = State
   , expandedToolRuns :: S.Set (Text,Text)
   , childControls :: M.Map Text (Maybe Text,Async (Either Text ()))
   , childCancels :: M.Map Text (Async (Either Text ()))
+  , buildSettingsCache :: Maybe (Maybe UTCTime,Toolchain)
   , resumeRecordPath :: FilePath
   }
 data ConversationState = ConversationState FilePath (IORef State) C.Consoles Jobs.BuildJobs AR.AgentRuntime
@@ -108,7 +109,7 @@ withConversationAt root action = C.withConsoles $ \consoles -> Jobs.withBuildJob
     , approvals=[],presented=Nothing,deferredApproval=False,nextApproval=1,queuedQueries=[]
     , ownedTerminals=S.empty,terminalWaiters=M.empty,lastMessageAt=Nothing
     , lastRender=(0,Nothing,[]),lastSession=remembered,waitingQuestion=Nothing,lastQuestion=Nothing
-    , deliveredContext=Nothing,resumeRecordPath=resumePath,directoryAgents=[],agentDelivery=Nothing
+    , deliveredContext=Nothing,buildSettingsCache=Nothing,resumeRecordPath=resumePath,directoryAgents=[],agentDelivery=Nothing
     , agentInitialized=Null,agentConfig=Null,streamTails=M.empty,lastAgentSync=Nothing,childRecords=M.empty,childRender=Nothing,childCancels=M.empty,childControls=M.empty,expandedToolRuns=S.empty }
   AR.withAgentRuntime root (provider <$> readIORef ref) $ \agents ->
     bracket (pure (ConversationState directory ref consoles jobs agents)) closeConversation action
@@ -162,6 +163,25 @@ persist path value = do
         BL.hPut handle (encode value); hClose handle; renameFile temporary path
   pure (either (Left . T.pack . show) Right (result :: Either IOException ()))
   where ignore task=void (try task :: IO (Either IOException ()))
+
+-- Keep backend settings independently. The flat selected record remains readable
+-- by existing build/run clients; never save loadBuildConfig's root-filtered view
+-- merely to switch backend. Legacy flat run.json becomes the first saved choice.
+readRunSettings :: FilePath -> IO Value
+readRunSettings directory = do
+  result<-try (BS.readFile (directory </> "run.json")) :: IO (Either IOException BS.ByteString)
+  pure (either (const (object [])) (fromMaybe (object []) . decodeStrict') result)
+
+buildChoices :: Value -> M.Map Text Value
+buildChoices saved = M.insert (fromMaybe "THC" (field "toolchain" saved)) (flat saved)
+  (fromMaybe M.empty (field "toolchains" saved))
+  where flat (Object fields')=Object (KM.delete "toolchains" fields'); flat _=object []
+
+rememberBuildChoices :: Value -> Value -> Value
+rememberBuildChoices saved selected = case selected of
+  Object fields' -> Object (KM.insert "toolchains" (toJSON choices) fields')
+  _ -> selected
+  where choices=M.insert (fromMaybe "THC" (field "toolchain" selected)) selected (buildChoices saved)
 
 conversationEffects :: ConversationState -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> [Effect] -> IO (Bool,Desktop)
 conversationEffects runtime@(ConversationState _ ref _ _ _) fallback = foldM apply . (False,)
@@ -274,13 +294,23 @@ performPrimary runtime@(ConversationState directory ref consoles jobs _) action 
     ("compile",_) -> runTarget directory consoles jobs (Just B.Compile) d
     ("make",_) -> runTarget directory consoles jobs (Just B.Make) d
     ("build-stop",_) -> Jobs.stopBuildJob jobs d
+    ("toolchain",[choice]) | choice `elem` ["THC","GHC"] -> do
+      saved<-readRunSettings directory
+      let selected=if choice=="GHC" then B.GHC else B.THC
+          defaults=object ["toolchain" .= choice,"command" .= (if selected==B.GHC then "ghc" else "thc"::Text)]
+          chosen=M.findWithDefault defaults choice (buildChoices saved)
+      result<-persist (directory </> "run.json") (rememberBuildChoices saved chosen)
+      modifyIORef' ref (\state -> state {buildSettingsCache=Nothing})
+      pure $ either (\err -> d {status=err}) (const d {toolchain=Just selected,status=choice<>" selected. F9 builds; Ctrl+F9 runs."}) result
     ("run-options",_) -> runTarget directory consoles jobs Nothing d
     ("run-config",_:settings) -> case B.parseBuildConfig settings of
       Left err -> pure (message "Build target" [err] d)
       Right config -> do
         root<-B.resolveBuildRoot d
-        result<-persist (directory </> "run.json") (B.buildConfigValue root config)
-        pure d {status=either id (const "Target saved. F9 builds; Ctrl+F9 runs.") result}
+        saved<-readRunSettings directory
+        result<-persist (directory </> "run.json") (rememberBuildChoices saved (B.buildConfigValue root config))
+        modifyIORef' ref (\state -> state {buildSettingsCache=Nothing})
+        pure $ either (\err -> d {status=err}) (const d {toolchain=Just (B.buildToolchain config),status="Target saved. F9 builds; Ctrl+F9 runs."}) result
     ("terminal-input",[tid,text]) -> do
       result<-C.inputConsole consoles tid (TE.encodeUtf8 text)
       pure (either (\err -> d {status=err}) (const d) result)
@@ -461,8 +491,19 @@ preparePrompt state query=do
 -- Docs: docs/site/screenshots/conversation.png (docs/conversations.md and the site front page).
 -- Refresh the live capture when message bubbles, tool groups, model controls or composer change.
 tickConversation :: ConversationState -> Desktop -> IO Desktop
-tickConversation runtime@(ConversationState _ ref consoles jobs _) original = do
-  fresh<-pruneChildApprovals runtime original
+tickConversation runtime@(ConversationState directory ref consoles jobs _) original = do
+  stamp<-either (const Nothing) Just <$> (try (getModificationTime (directory </> "run.json")) :: IO (Either IOException UTCTime))
+  cached<-buildSettingsCache <$> readIORef ref
+  selected<-case cached of
+    Just (previous,choice) | previous==stamp -> pure choice
+    _ -> do
+      root<-B.resolveBuildRoot original
+      config<-B.loadBuildConfig directory root
+      let choice=B.buildToolchain config
+      modifyIORef' ref (\state -> state {buildSettingsCache=Just (stamp,choice)})
+      pure choice
+  let loaded=original {toolchain=Just selected}
+  fresh<-pruneChildApprovals runtime loaded
   initial<-drainConversationAgents runtime fresh
   currentQuestion<-readIORef ref
   ready<-case waitingQuestion currentQuestion of

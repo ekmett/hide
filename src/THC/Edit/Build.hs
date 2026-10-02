@@ -14,10 +14,9 @@ import qualified Data.Text.Encoding
 import System.Directory (canonicalizePath, doesFileExist, listDirectory)
 import System.Environment (lookupEnv)
 import System.FilePath ((</>), takeExtension, takeDirectory)
-import THC.Edit.Model (Desktop(..), Sidebar(..), Window(..), Document(..), startingDirectory)
+import THC.Edit.Model (Desktop(..), Sidebar(..), Window(..), Document(..), Toolchain(..), startingDirectory)
 import THC.Edit.Files (filePath)
 
-data Toolchain = THC | GHC deriving (Eq,Show)
 data BuildAction = Compile | Make | Run deriving (Eq,Show)
 data BuildConfig = BuildConfig
   { buildToolchain :: Toolchain, buildExecutable :: FilePath, buildTarget :: Text

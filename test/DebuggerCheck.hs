@@ -27,7 +27,7 @@ import THC.Edit.Model
 import THC.Edit.Render (snapshotHtml)
 
 checks :: IO ()
-checks = presentationCheck >> pendingPresentationCheck >> startupDeadlineCheck >> launchDeadlineCheck >> launchChecks >> mapM_ session ["basic", "frame", "choices", "breakpoints", "reconnect", "mcp", "lazy"] >> putStrLn "Debugger checks passed"
+checks = presentationCheck >> pendingPresentationCheck >> startupDeadlineCheck >> launchDeadlineCheck >> launchChecks >> mapM_ session ["basic", "frame", "choices", "breakpoints", "reconnect", "mcp", "lazy", "exception"] >> putStrLn "Debugger checks passed"
   where
     session mode = bracket (fixture mode) cleanup $ \(port,logPath,process) -> withDebugger $ \runtime -> do
       let core d _=pure (False,d)
@@ -142,6 +142,12 @@ checks = presentationCheck >> pendingPresentationCheck >> startupDeadlineCheck >
             let changes=[fromMaybe [] (field "breakpoints" args) | req<-requests, field "command" req==Just ("setBreakpoints"::T.Text),Just args<-[field "arguments" req]] :: [[Value]]
             check "fixture exercised different snapshots and repeated original list" (map (map (field "line")) changes==[[Just (2::Int)],[Just 2,Just 1],[Just 2]])
             pure shown
+          "exception" -> do
+            requested<-send "exception-info" [] stopped
+            shown<-waitFor "exception details" (T.isInfixOf "nested cause" . activeText) requested
+            check "exception view includes identity, message and source stack"
+              (all (`T.isInfixOf` activeText shown) ["IOException","cannot open λ.hs","permission denied","Main.hs:6","always"])
+            pure shown
           "mcp" -> do
             let tool name args desktop=do
                   (updated,result)<-debuggerTool runtime core desktop name (object args)
@@ -182,6 +188,9 @@ checks = presentationCheck >> pendingPresentationCheck >> startupDeadlineCheck >
             vars<-inspect ["generation" .= gen,"request" .= ("variables"::T.Text),"variablesReference" .= (21::Int),"start" .= (0::Int),"count" .= (3::Int)] stopped
             check "MCP returns non-evaluating variable inspection" ("<thunk>" `T.isInfixOf` T.pack (show vars))
             _<-inspect ["generation" .= gen,"request" .= ("stackTrace"::T.Text)] stopped
+            exceptionResult<-inspect ["generation" .= gen,"request" .= ("exceptionInfo"::T.Text)] stopped
+            check "MCP preserves structured exception details"
+              ((field "body" exceptionResult >>= field "exceptionId" :: Maybe T.Text)==Just "IOException")
             sourceResult<-inspect ["generation" .= gen,"request" .= ("source"::T.Text)] stopped
             check "MCP source reply uses selected sourceReference" ((field "body" sourceResult >>= field "content" :: Maybe T.Text)==Just (activeText stopped))
             let local=addDocument (Just (FileState (logPath<>".hs") Nothing)) (replaceBuffer False "dirty = 2\n" (newBuffer "local = 1\n")) stopped

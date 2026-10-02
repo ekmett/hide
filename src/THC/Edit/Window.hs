@@ -154,7 +154,7 @@ runWindow backend scale effects tick initial = do
       c_size wp hp
       w <- fromIntegral <$> peek wp
       h <- fromIntegral <$> peek hp
-      pure ((fst (handleEvent (V.EvResize w h) initial {nativeMac=os == "darwin"})) {menu=menu initial})
+      pure ((fst (handleEvent (V.EvResize w h) initial {nativeMac=os == "darwin"})) {menu=menu initial,contextMenu=if (w,h)==screenSize initial then contextMenu initial else Nothing})
     captureOnly <- (== Just "1") <$> lookupEnv "THC_EDIT_CAPTURE_EXIT"
     if captureOnly then systemTheme sized >>= draw font else systemTheme sized >>= tick >>= loop font Nothing
   where

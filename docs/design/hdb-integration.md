@@ -209,3 +209,21 @@ A real hdb run through this path repeated breakpoint, scopes, lazy inspection
 protection, stepping and termination, and left no listener on its selected port.
 The launch selector still uses Adapter config for GHC; component discovery and
 failed-cradle/exception qualification remain open items above.
+
+The shared status bar now selects THC/GHC for build, run and Selected target
+debug launch. GHC Selected target starts hdb on PATH using the saved source
+entry file, canonical project root, `main` and the configured program arguments.
+Advanced launches still use the adapter configuration. A real selected-GHC
+launch repeated the same live breakpoint/inspection/step/termination check.
+`exceptionInfo` is now exposed through the shared read-only inspection tool and
+Debug > Exception details, gated by the adapter capability. Structured fixture
+checks cover nested causes and stack text; real exception outcomes remain to
+be qualified independently.
+
+A real GHC `error "demo exception"` probe enabled hdb's `break-on-error` filter
+and confirmed the setExceptionBreakpoints response, but hdb 0.14.0.0/GHC 9.14.1
+ran to termination without an exception stop. Its output contained the error
+and an `exited` event after `terminated`. This does not qualify live exception
+stops/details; investigate the upstream filter behavior and preserve the exit
+code before claiming that path reliable. Fixture-backed exception presentation
+remains separate evidence.

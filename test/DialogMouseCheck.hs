@@ -175,7 +175,7 @@ checks = do
       (focusedBehind,behindEffects)=handleEvent (V.EvMouseDown (left behindRect+width behindRect-1) (top behindRect+5) V.BLeft []) separated
       (focusedTitle,titleEffects)=handleEvent (V.EvMouseDown (left behindRect+3) (top behindRect) V.BLeft []) separated
   check "only foreground window has scrollbars and frame controls"
-    (all (\glyph -> T.count glyph (snapshot separated {videoMode=Just 3})==1) ["▲","▼","◄","►","■","↑"])
+    (all (\glyph -> T.count glyph (T.unlines (take (snd (screenSize separated)-1) (T.lines (snapshot separated {videoMode=Just 3}))))==1) ["▲","▼","◄","►","■","↑"])
   check "terminal close button uses ASCII x" ("[x]" `T.isInfixOf` snapshot desktop && not ("■" `T.isInfixOf` snapshot desktop))
   check "resize grip is an ordinary frame corner" (not ("◢" `T.isInfixOf` snapshot separated) && "═╝" `T.isInfixOf` snapshot separated)
   let compactTree=installTree "/project" [Entry "src" True Nothing Nothing,Entry "Main.hs" False Nothing Nothing] desktop
@@ -250,6 +250,14 @@ checks = do
   let narrow=statusDesktop {screenSize=(40,25),branchStatus="main",branchRoot=Just "/tmp"}
   check "status hit rectangles stop at Git badge"
     (all (\(r,_,_)->left r+width r<=left (gitBadgeRect narrow)) (statusItemRects narrow))
+  let selector=toolchainBadgeRect statusDesktop
+      toolchainPopup=fst (handleEvent (V.EvMouseDown (left selector+2) statusY V.BLeft []) statusDesktop)
+      ghc=fst (handleEvent (V.EvKey V.KDown []) toolchainPopup)
+      (_,selectEffects)=handleEvent (V.EvKey V.KEnter []) ghc
+  check "status toolchain dropdown selects GHC by keyboard"
+    (contextMenu toolchainPopup/=Nothing && selectEffects==[AgentAction "toolchain" ["GHC"]])
+  check "modal status cannot switch toolchain"
+    (dialog (fst (handleEvent (V.EvMouseDown (left selector+2) statusY V.BLeft []) statusModal))==dialog statusModal)
   let numbered=fst (runCommand New desktop)
       splitNumbered=fst (runCommand SplitVertical numbered)
       closedNumbered=fst (runCommand Close numbered)

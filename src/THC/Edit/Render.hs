@@ -90,9 +90,10 @@ renderDesktop d = flattenPicture (screenSize d) ((V.picForLayers (privacyLayers+
       [V.char normal ' ' V.<|> label (attr red bg) (T.take 1 title) V.<|> label normal (T.drop 1 title<>" ")
        | (i,(title,_,_))<-zip [0..] menus,let bg=if fmap fst (menu d)==Just i then green else gray,let normal=attr black bg]
       V.<|> V.charFill paper ' ' sw 1)
-    statusBar = V.cropRight (max 0 (sw-T.length badge)) (V.horizCat
+    statusBar = V.cropRight (left (toolchainBadgeRect d)) (V.horizCat
       [keyLegendOn (if statusHover d==Just i && action/=Nothing then green else gray) text
-      | (i,(text,action))<-zip [0..] (statusItems d)] V.<|> V.charFill paper ' ' sw 1) V.<|> badgeImage
+      | (i,(text,action))<-zip [0..] (statusHints d)] V.<|> V.charFill paper ' ' sw 1) V.<|> toolchainImage V.<|> badgeImage
+    toolchainImage = label (attr black (if statusHover d==Just (length (statusHints d)) then green else gray)) (toolchainBadgeText d)
     badge = if activeConversation d then "" else gitBadgeText d
     badgeImage = if T.null badge then V.emptyImage else label paper (" │ "<>gitBranchText d<>" ")
       V.<|> label (attr green gray) ("+"<>gitCountText (branchAdded d)) V.<|> label paper " "

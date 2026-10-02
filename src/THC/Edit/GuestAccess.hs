@@ -83,7 +83,7 @@ guestCommandAllowed cmd=case cmd of
   AgentNew -> False
   _ -> True
 agentActionAllowed :: Text -> Bool
-agentActionAllowed action=action `elem` ["compile","make","build-stop","run","run-options","run-config","terminal","terminal-input","terminal-stop"]
+agentActionAllowed action=action `elem` ["compile","make","build-stop","run","run-options","run-config","toolchain","terminal","terminal-input","terminal-stop"]
 guestEffectsAllowed :: [Effect] -> Bool
 guestEffectsAllowed=all allowed
   where
