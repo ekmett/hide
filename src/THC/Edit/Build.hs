@@ -91,7 +91,7 @@ buildPlan action config root source = do
       optional flag value=[part | not (T.null value),part<-[flag,T.unpack value]]
       args=buildArguments config
   case buildToolchain config of
-    THC -> pure (Right [(exe,[case action of Compile -> "acquire"; Make -> "acquire"; Run -> "run"]++chosen++
+    THC -> pure (Right [(exe,[if action==Run then "run" else "build"]++chosen++
       ["--project-dir",root]++optional "--thc-root" (buildTHCRoot config)++
       (if action==Run then optional "--runtime" (buildRuntime config)++["--" | not (null args)]++args else []))])
     GHC | project -> pure (Right [("cabal",[if action==Run then "run" else "build"]++["--with-compiler="++exe | exe/="ghc"]++chosen++
@@ -105,7 +105,7 @@ buildPlan action config root source = do
           Run -> [("runghc",["-f",exe,file]++args)]
       _ -> pure (Left "Choose a saved Haskell source file or a Cabal project.")
 
--- Cabal owns the test runner. THC currently exposes acquire/run, not a test
+-- Cabal owns the test runner. THC currently exposes build/acquire/run, not a test
 -- command, so never present a successful compile as a successful test run.
 testPlan :: BuildConfig -> FilePath -> IO (Either Text [(FilePath,[String])])
 testPlan config root

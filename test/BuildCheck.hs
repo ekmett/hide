@@ -36,6 +36,13 @@ checks = bracket temporary removePathForcibly $ \root -> do
   check "F9 starts Make" (snd (handleEvent (V.EvKey (V.KFun 9) []) initial)==[AgentAction "make" []])
   check "Alt-F9 starts Compile" (snd (handleEvent (V.EvKey (V.KFun 9) [V.MAlt]) initial)==[AgentAction "compile" []])
   check "THC target retains literal argv" . (==Right [("thc with spaces",["run","exe:hello world;literal","--project-dir",root,"--thc-root","compiler root","--runtime","runtime path","--","one two"])]) =<< B.buildPlan B.Run thc root Nothing
+  forM_ [B.Compile,B.Make] $ \action -> do
+    check "THC builds selected components without runtime or program arguments" .
+      (==Right [("thc with spaces",["build","exe:hello world;literal","--project-dir",root,"--thc-root","compiler root"])]) =<< B.buildPlan action thc root Nothing
+    check "THC builds the current package when no target is selected" .
+      (==Right [("thc with spaces",["build","--project-dir",root,"--thc-root","compiler root"])]) =<< B.buildPlan action (thc {B.buildTarget=""}) root Nothing
+    check "THC accepts a library build target literally" .
+      (==Right [("thc with spaces",["build","lib:example","--project-dir",root,"--thc-root","compiler root"])]) =<< B.buildPlan action (thc {B.buildTarget="lib:example"}) root Nothing
   check "reject option-like target" (case B.parseBuildConfig ["thc","--help","","", "[]", "0"] of Left _ -> True; _ -> False)
   check "reject invalid program arguments" (case B.parseBuildConfig ["ghc","","","", "not JSON", "1"] of Left _ -> True; _ -> False)
   check "switch default compiler with toolchain" (fmap B.buildExecutable (B.parseBuildConfig ["thc","","","", "[]", "1"])==Right "ghc")

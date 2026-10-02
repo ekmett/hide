@@ -20,8 +20,11 @@ open an output window; output arrives while you keep editing. Compiler errors
 and warnings appear in **Messages**, where **Alt+F8** and **Alt+F7** move between
 source locations. **Compile > Stop build** stops the current job.
 
-For THC, Compile and Make invoke `thc acquire`: Cabal builds the component and
-THC captures its dependency closure. Run invokes `thc run`. For GHC projects,
+For THC, Compile and Make invoke `thc build`: Cabal builds the selected
+component and THC acquires its dependency Core. Leave the target empty to build
+the current package, or name a Cabal library or executable target. Run invokes
+`thc run`, which selects a runnable component and acquires anything it needs.
+Use a THC version with the `build` command. For GHC projects,
 the editor uses `cabal build` and `cabal run` with the selected compiler.
 Outside a Cabal project, Compile checks the current `.hs` or `.lhs` file with
 `ghc --make -fno-code`, Make compiles the module (and links an executable for
