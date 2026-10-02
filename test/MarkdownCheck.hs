@@ -2,6 +2,8 @@
 module MarkdownCheck (checks) where
 
 import Control.Monad (forM_, unless)
+import Control.Exception (evaluate)
+import System.Timeout (timeout)
 import qualified Data.Text as T
 import THC.Edit.Buffer (displayColumn)
 import THC.Edit.Model
@@ -49,5 +51,12 @@ checks = do
   check "appearance resolves explicit and OS choices" (not (darkAppearance help {appearance=LightMode,systemDark=True}) && darkAppearance help {appearance=DarkMode,systemDark=False} && darkAppearance help {appearance=SystemMode,systemDark=True})
   check "Help backgrounds follow light and dark appearance" ("background:rgb(0,170,170)" `T.isInfixOf` light && "background:rgb(0,0,0)" `T.isInfixOf` dark && light/=dark)
   check "empty input" (null (renderMarkdown 80 ""))
+  let paragraph=T.replicate 2000 "Ordinary message with some **bold** and code `abc`.\n"
+      long=renderMarkdown 73 paragraph
+  rendered<-timeout 2000000 (evaluate (length long))
+  check "large streamed paragraph avoids quadratic inline concatenation" (maybe False (>90000) rendered)
+  check "large paragraph retains text order and inline styles"
+    (take 8 (map fst long)=="Ordinary" && length [() | ('b',Keyword)<-long]==2000 && length [() | ('a',Literal)<-long]==2000)
+
   putStrLn "Markdown checks passed"
   where check label ok = unless ok (error label)

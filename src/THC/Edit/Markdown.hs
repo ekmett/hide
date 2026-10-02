@@ -7,6 +7,8 @@ import Commonmark.Entity (lookupEntity)
 import Data.Functor.Identity (runIdentity)
 import Data.Char (isSpace)
 import Data.List (intercalate)
+import qualified Data.Sequence as Seq
+import Data.Foldable (toList)
 import Data.Maybe (fromMaybe, listToMaybe)
 import qualified Data.Text as T
 import qualified Skylighting as S
@@ -15,7 +17,7 @@ import THC.Edit.Buffer (columnOffset, displayColumn, nextCharacter)
 import THC.Edit.Syntax (Style(..), highlightFor)
 
 type Styled = [(Char,Style)]
-newtype Inline = Inline Styled deriving (Show, Semigroup, Monoid)
+newtype Inline = Inline (Seq.Seq (Char,Style)) deriving (Show, Semigroup, Monoid)
 newtype Blocks = Blocks [Block] deriving (Show, Semigroup, Monoid)
 data Block = Table [ColAlignment] [Styled] [[Styled]] | Code Bool Styled | Flow Styled | Pre Styled | Indent T.Text Blocks | Gap deriving Show
 
@@ -25,29 +27,29 @@ instance C.Rangeable Blocks where ranged _ = id
 instance C.HasAttributes Blocks where addAttributes _ = id
 
 instance C.IsInline Inline where
-  lineBreak = Inline [('\n',Plain)]
+  lineBreak = Inline (Seq.singleton ('\n',Plain))
   softBreak = C.str " "
-  str = Inline . paint Plain
+  str = Inline . Seq.fromList . paint Plain
   entity text = C.str (fromMaybe text (lookupEntity (T.drop 1 text)))
   escapedChar = C.str . T.singleton
   emph = tint Constructor
   strong = tint Keyword
   link url _ label@(Inline chars)
-    | textOf chars == url = tint Literal label
-    | otherwise = tint Literal label <> Inline (paint Comment (" (" <> url <> ")"))
+    | textOf (toList chars) == url = tint Literal label
+    | otherwise = tint Literal label <> Inline (Seq.fromList (paint Comment (" (" <> url <> ")")))
   image url title label = C.str "[image: " <> C.link url title label <> C.str "]"
-  code = Inline . paint Literal
+  code = Inline . Seq.fromList . paint Literal
   rawInline _ = C.str
 
 instance C.IsBlock Inline Blocks where
-  paragraph (Inline []) = mempty
-  paragraph (Inline chars) = Blocks [Flow chars, Gap]
-  plain (Inline []) = mempty
-  plain (Inline chars) = Blocks [Flow chars]
+  paragraph (Inline chars) | Seq.null chars = mempty
+  paragraph (Inline chars) = Blocks [Flow (toList chars), Gap]
+  plain (Inline chars) | Seq.null chars = mempty
+  plain (Inline chars) = Blocks [Flow (toList chars)]
   thematicBreak = Blocks [Flow (paint Comment "───"), Gap]
   blockQuote blocks = Blocks [Indent "> " (trim blocks), Gap]
   codeBlock info source = Blocks [Code (shellBlock info) (codeStyles info source), Gap]
-  heading level content = let Inline chars = tint (Heading level) content in Blocks [Flow chars,Gap]
+  heading level content = let Inline chars = tint (Heading level) content in Blocks [Flow (toList chars),Gap]
   rawBlock _ source = Blocks [Pre (paint Plain source),Gap]
   referenceLinkDefinition _ _ = mempty
   list kind spacing items = Blocks (concat (zipWith item [first..] items) ++ [Gap])
@@ -60,7 +62,7 @@ instance C.IsBlock Inline Blocks where
 
 instance HasPipeTable Inline Blocks where
   pipeTable aligns header body = Blocks [Table aligns (map unInline header) (map (map unInline) body),Gap]
-    where unInline (Inline chars)=chars
+    where unInline (Inline chars)=toList chars
 
 -- CommonMark handles incomplete input too, so streaming callers keep ownership
 -- of the raw source and may simply render each new accumulated chunk.
@@ -73,7 +75,7 @@ paint :: Style -> T.Text -> Styled
 paint style = map (,style) . T.unpack
 
 tint :: Style -> Inline -> Inline
-tint style (Inline chars) = Inline [(c,if old == Plain then style else old) | (c,old) <- chars]
+tint style (Inline chars) = Inline (fmap (\(c,old)->(c,if old==Plain then style else old)) chars)
 
 textOf :: Styled -> T.Text
 textOf = T.pack . map fst
