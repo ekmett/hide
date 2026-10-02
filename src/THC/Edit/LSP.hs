@@ -3,6 +3,7 @@ module THC.Edit.LSP
   ( Client, Event(..), startClient, stopClient, syncDocuments, notifySaved, request, pollEvents, serverCapabilities
   , executeCommand, replyEdit, retireClient
   , fileUri, uriFilePath, offsetPosition, positionOffset, positionValue
+  , bufferOffsetPosition, bufferPositionOffset, bufferPositionValue
   ) where
 
 import Control.Concurrent
@@ -29,6 +30,7 @@ import System.IO
 import System.Process
 import System.Timeout (timeout)
 import Text.Read (readMaybe)
+import THC.Edit.Buffer (Buffer, bufferLineColumn, bufferLineOffset, bufferLineAt, bufferSlice)
 
 data Event = Response Int Value | ApplyEdit Int Value Value | Diagnostics FilePath (Maybe Int) Value | ServerError Text
   deriving (Eq, Show)
@@ -304,3 +306,22 @@ positionOffset contents (line,column) = min (T.length contents) (prefix + units 
 positionValue :: Text -> Int -> Value
 positionValue contents offset = let (line,column) = offsetPosition contents offset
   in object ["line" .= line, "character" .= column]
+
+-- | Convert a clamped character offset using measured line lookup, scanning only
+-- the prefix of that line for UTF-16 units (including a CR before a newline).
+bufferOffsetPosition :: Buffer -> Int -> (Int,Int)
+bufferOffsetPosition buffer offset=(row,snd (offsetPosition prefix column))
+  where
+    (row,column)=bufferLineColumn buffer offset
+    prefix=bufferSlice buffer (bufferLineOffset buffer row) column
+
+-- | Convert a clamped UTF-16 position without traversing preceding lines.
+-- Strict protocol ranges should round-trip through 'bufferOffsetPosition' to
+-- reject out-of-range positions and positions inside a surrogate pair.
+bufferPositionOffset :: Buffer -> (Int,Int) -> Int
+bufferPositionOffset buffer (row,column)=bufferLineOffset buffer row+positionOffset (bufferLineAt buffer row) (0,column)
+
+-- | The LSP JSON position for a buffer character offset.
+bufferPositionValue :: Buffer -> Int -> Value
+bufferPositionValue buffer offset=let (row,column)=bufferOffsetPosition buffer offset
+  in object ["line" .= row,"character" .= column]

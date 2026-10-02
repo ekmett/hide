@@ -4,6 +4,7 @@ module BufferTreeCheck (checks) where
 import Control.Monad (foldM, forM_, unless)
 import Control.Exception (evaluate)
 import GHC.Conc (getAllocationCounter)
+import System.Mem.StableName (makeStableName)
 import qualified Data.ByteString as BS
 import qualified Data.Text as T
 import THC.Edit.Buffer
@@ -31,6 +32,7 @@ checkIndexed b text = do
 
 checks :: IO ()
 checks = do
+  batchChecks
   lineChangesChecks
   let clipped = replaceSelection (Selection (-3) 99) "界" (newBuffer "abc")
   check "change offsets describe the actual clipped edit"
@@ -238,3 +240,44 @@ checkReview b=do
       expectedContext=if null changedRows then [] else contexts 0 visibleRows++[View.ViewRow Nothing Nothing (length rows-last visibleRows-1) | last visibleRows+1<length rows]
       actualContext=[View.viewRowAt View.OnlyChangesView projection row | row<-[0..View.viewRowCount View.OnlyChangesView projection-1]]
   check "context projection merges overlaps and makes omitted gaps unselectable" (actualContext==expectedContext)
+
+-- A flat oracle deliberately applies original-offset edits from right to left.
+batchChecks :: IO ()
+batchChecks = do
+  forM_ ["ab", "a\r\nb", "😀\nxλ"] $ \source -> do
+    let original=newBuffer source
+        size=T.length source
+    forM_ [(a,z,c,d) | a<-[0..size], z<-[a..size], c<-[max (a+1) z..size], d<-[c..size]] $ \(a,z,c,d) ->
+      forM_ [("", "界"), ("x\n", ""), ("λ", "😀\r\n")] $ \(first,second) -> do
+        let edits=[(a,z,first),(c,d,second)]
+            expected=foldr (\(lo,hi,text) old -> T.take lo old<>text<>T.drop hi old) source edits
+        result<-either (error . T.unpack) pure (replaceRanges edits original)
+        check "batch agrees with independent flat oracle" (contents result==expected)
+        check "batch advances one revision only when text changes" (revision result==if source==expected then 0 else 1)
+        check "batch is one undo/redo step" (contents (undo result)==source && contents (redo (undo result))==expected)
+        checkReview result
+  let original=newBuffer "one\ntwo\nthree\n"
+      prior=replaceSelection (Selection 0 3) "ONE" original
+  priorName<-evaluate prior >>= makeStableName
+  forM_ [[],[(0,3,"ONE")],[(0,1,""),(1,3,"ONE")]] $ \edits -> do
+    result<-either (error . T.unpack) pure (replaceRanges edits prior)
+    resultName<-evaluate result >>= makeStableName
+    check "empty and net-no-op batches retain identity, history and lastChange" (resultName==priorName && result==prior)
+  forM_ [[(-1,0,"")],[(0,99,"")],[(2,1,"")],[(4,4,"x"),(0,0,"x")],[(0,4,"x"),(3,3,"y")],[(0,0,"x"),(0,1,"y")]] $ \edits ->
+    check "invalid batch is rejected atomically" (case replaceRanges edits prior of Left _ -> True; Right _ -> False)
+  check "byte batch rejects non-byte text" (case replaceRanges [(0,1,"x"),(2,2,"😀")] (newByteBuffer (BS.pack [65,66])) of Left _ -> True; Right _ -> False)
+  changed<-either (error . T.unpack) pure (replaceRanges [(0,3,"1"),(8,13,"THREE!")] original)
+  check "disjoint batch retains unchanged-line provenance" (bufferLineChanges changed==(2,2))
+  check "batch reports enclosing replacement and inverse" (lastChange changed==Just (0,13,12) && lastChange (undo changed)==Just (0,12,13))
+  recovered<-either (error . T.unpack) pure (restoreBuffer (snapshotBuffer changed))
+  check "batch snapshot retains undo and change counts" (contents (undo recovered)==contents original && bufferLineChanges recovered==(2,2))
+  let savedBatch=markSaved changed
+  check "batch undo across save uses enclosing inverse correctly" (contents (undo savedBatch)==contents original && contents (redo (undo savedBatch))==contents changed && bufferLineChanges (redo (undo savedBatch))==(0,0))
+  let large=newBuffer (T.replicate 200000 "unchanged\n")
+  _<-evaluate (prepareBuffer large)
+  before<-getAllocationCounter
+  sparse<-either (error . T.unpack) pure (replaceRanges [(0,1,"X"),(1799991,1799992,"Y")] large)
+  _<-evaluate (prepareBuffer sparse)
+  after<-getAllocationCounter
+  check "preparing sparse batch shares unchanged tree and does not flatten text" (before-after<2*1024*1024)
+  check "sparse batch counts only changed lines" (bufferLineChanges sparse==(2,2))

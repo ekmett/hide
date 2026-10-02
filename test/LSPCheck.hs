@@ -2,8 +2,9 @@
 module LSPCheck (checks) where
 
 import Control.Concurrent (threadDelay)
-import Control.Exception (bracket)
-import Control.Monad (unless)
+import Control.Exception (bracket, evaluate)
+import GHC.Conc (getAllocationCounter)
+import Control.Monad (forM_, unless)
 import Data.Aeson
 import Data.Aeson.Types (parseMaybe)
 import qualified Data.Text as T
@@ -12,10 +13,30 @@ import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.FilePath ((</>))
 import System.IO (hClose, openTempFile)
 import System.Timeout (timeout)
+import qualified THC.Edit.Buffer as Buffer
 import THC.Edit.LSP
 
 checks :: IO ()
 checks = do
+  forM_ ["", "a😀b\r\nxλ", "\n\n", "a\r\r\nlast\r", "e\x0301\n界\0"] $ \source -> do
+    let original=Buffer.newBuffer source
+        edited=Buffer.replaceSelection (Buffer.Selection 0 0) "😀\n" original
+    forM_ [original,edited] $ \buffer -> do
+      let text=Buffer.contents buffer
+      forM_ [-1..T.length text+2] $ \offset -> do
+        check "measured UTF16 offset conversion matches flat text" (bufferOffsetPosition buffer offset==offsetPosition text offset)
+        check "measured UTF16 position JSON matches flat text" (bufferPositionValue buffer offset==positionValue text offset)
+      forM_ [-1..Buffer.bufferLineCount buffer+2] $ \row -> forM_ [-1..12] $ \column ->
+        check "measured UTF16 position conversion matches flat text" (bufferPositionOffset buffer (row,column)==positionOffset text (row,column))
+  let large=Buffer.newBuffer (T.replicate 200000 "a😀b\r\n")
+  _<-evaluate (Buffer.prepareBuffer large)
+  allocationBefore<-getAllocationCounter
+  forM_ [199990..199999] $ \row -> do
+    offset<-evaluate (bufferPositionOffset large (row,3))
+    check "deep UTF16 position seeks directly to measured line" (offset==row*5+2)
+    check "deep UTF16 offset seeks directly to measured line" (bufferOffsetPosition large offset==(row,3))
+  allocationAfter<-getAllocationCounter
+  check "UTF16 endpoints do not traverse or split preceding document text" (allocationBefore-allocationAfter<1024*1024)
   let sample = "a😀b\r\nxλ"
       path = "/tmp/λ space/#%?.hs"
   check "URI Unicode and reserved characters round trip" (uriFilePath (fileUri path) == Just path)

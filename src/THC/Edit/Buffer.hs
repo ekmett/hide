@@ -3,7 +3,7 @@ module THC.Edit.Buffer
   ( Buffer(saved,undoStack,redoStack,revision,lastChange,byteMode,savedByteMode), Selection(..)
   , BufferSnapshot(..), snapshotBuffer, restoreBuffer
   , newBuffer, newByteBuffer, bufferBytes, markSaved, toggleByteMode, replaceBuffer, textBuffer
-  , contents, dirty, ordered, replaceSelection, undo, redo, selectedText
+  , contents, dirty, ordered, replaceSelection, replaceRanges, prepareBuffer, undo, redo, selectedText
   , bufferLineChanges, bufferViewProjection, bufferLength, bufferLineCount,
     ChangeKind(..), changeRowCount, bufferChangeRows, changeLength, changeSlice
   , changeLineColumn, changeLineOffset, changeLineAt, liveToChangeOffset, changeToLiveOffset
@@ -24,7 +24,7 @@ import Data.Foldable (toList)
 import Control.Monad (unless)
 import qualified Data.FingerTree as FT
 import Graphics.Vty (safeWcwidth)
-import THC.Edit.BufferView (ViewProjection, buildViewProjection)
+import THC.Edit.BufferView (ViewProjection, buildViewProjection, forceViewProjection)
 import THC.Edit.Unicode (graphemes, clusterWidth)
 
 data LineMeasure = LineMeasure
@@ -270,6 +270,36 @@ replaceSelection sel inserted b@Buffer{bufferLines=tree,undoStack=history,revisi
     insertedLength=T.length inserted
     updated=restoreBaseline (baselineLines b) (editTree a z inserted tree)
 
+-- | Apply ascending, disjoint character ranges in the original buffer as one
+-- undo step. Starts must be distinct; invalid ranges or byte text reject the
+-- entire batch. Empty and text-preserving batches return the original buffer.
+replaceRanges :: [(Int,Int,Text)] -> Buffer -> Either Text Buffer
+replaceRanges edits b@Buffer{bufferLines=tree,undoStack=history,revision=version}=do
+  validate Nothing edits
+  case filter changed edits of
+    [] -> pure b
+    changes@((a,_,_):_) ->
+      let (_,z,_)=last changes
+          updated=restoreBaseline (baselineLines b) (foldl' (\current (lo,hi,text) -> editTree lo hi text current) tree (reverse changes))
+          n=z-a+characterCount (FT.measure updated)-characterCount (FT.measure tree)
+      in pure $ if sameText tree updated then b else
+        b {bufferLines=updated,viewProjection=projectionFor updated,cachedContents=treeText updated
+          ,undoStack=take 100 ((tree,byteMode b,(a,a+n,z-a)):history),redoStack=[]
+          ,revision=version+1,lastChange=Just (a,z,n)}
+  where
+    validate _ []=Right ()
+    validate previous ((a,z,text):rest)
+      | a<0 || z<a || z>bufferLength b=Left "Invalid buffer edit range"
+      | maybe False (\(start,end) -> a<=start || a<end) previous=Left "Buffer edit ranges must be ascending and disjoint"
+      | byteMode b && T.any ((>255).ord) text=Left "Invalid byte buffer edit"
+      | otherwise=validate (Just (a,z)) rest
+    changed (a,z,text)=T.length text/=z-a || rangeText a z tree/=text
+
+-- | Prepare measured edits and compact review indexes on their owning worker.
+-- Shared text, flattened contents, saved baselines and undo history stay lazy.
+prepareBuffer :: Buffer -> ()
+prepareBuffer b=FT.measure (bufferLines b) `seq` forceViewProjection (viewProjection b)
+
 -- Only the edited line region is rebuilt. Include adjacent tombstones so
 -- restoring a replaced/deleted original line can recover its baseline identity.
 editTree :: Int -> Int -> Text -> LineTree -> LineTree
@@ -419,12 +449,15 @@ normalizeLines tree
 restoreBaseline :: LineTree -> LineTree -> LineTree
 restoreBaseline baseline current
   | newLineCount measure==0 && deletedLineCount measure==0=current
-  | characterCount measure==characterCount savedMeasure && contentHash measure==contentHash savedMeasure
-  , treeText current==treeText baseline=baseline
+  | sameText current baseline=baseline
   | otherwise=current
   where
     measure=FT.measure current
-    savedMeasure=FT.measure baseline
+
+-- Fingerprints only reject mismatches; equality still checks exact live text.
+sameText :: LineTree -> LineTree -> Bool
+sameText left right=characterCount a==characterCount b && contentHash a==contentHash b && treeText left==treeText right
+  where a=FT.measure left; b=FT.measure right
 
 rebaseHistory :: LineTree -> LineTree -> [(LineTree,Bool,(Int,Int,Int))] -> [(LineTree,Bool,(Int,Int,Int))]
 rebaseHistory _ _ []=[]

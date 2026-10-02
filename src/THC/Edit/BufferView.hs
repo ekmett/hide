@@ -1,7 +1,7 @@
 -- | Compact row mappings for change views. Text remains in the buffer tree.
 module THC.Edit.BufferView
   ( BufferView(..), ReviewSide(..), ViewProjection, ViewRow(..)
-  , bufferViewName, parseBufferView, buildViewProjection, viewRowCount, viewRowAt, viewRowForChange, viewChangeRanges
+  , bufferViewName, parseBufferView, buildViewProjection, forceViewProjection, viewRowCount, viewRowAt, viewRowForChange, viewChangeRanges
   ) where
 
 import qualified Data.Vector as V
@@ -40,6 +40,16 @@ buildViewProjection total hunks = ViewProjection total (index contextual) (index
     index=V.fromList . go 0
     go _ []=[]
     go row (piece:rest)=Segment row piece:go (row+pieceRows piece) rest
+
+-- | Force the compact indexes without touching any buffer text.
+forceViewProjection :: ViewProjection -> ()
+forceViewProjection (ViewProjection total context aligned)=
+  total `seq` V.foldl' forceSegment () context `seq` V.foldl' forceSegment () aligned
+  where
+    forceSegment () (Segment row piece)=row `seq` case piece of
+      Lines start count -> start `seq` count `seq` ()
+      Gap start count -> start `seq` count `seq` ()
+      Hunk start removed added -> start `seq` removed `seq` added `seq` ()
 
 pieceRows :: Piece -> Int
 pieceRows (Lines _ n)=n
