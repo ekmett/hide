@@ -5,7 +5,9 @@ import Control.Concurrent (threadDelay)
 import Control.Exception (bracket)
 import Control.Monad (unless, forM_, replicateM)
 import Data.Aeson
+import qualified Data.ByteString as BS
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
 import System.Directory hiding (executable)
 import System.FilePath ((</>))
 import System.IO (hClose, openTempFile)
@@ -19,7 +21,7 @@ checks = bracket temporary removePathForcibly $ \root -> do
   let server = root </> "fake.py"
       launch = Launch "python3" [server] [("THC_ACP_CHECK", "λ")]
       start = startClient launch root
-  writeFile server fakeServer
+  BS.writeFile server (TE.encodeUtf8 (T.pack fakeServer))
   bracket start stopClient $ \client -> do
     ident <- request client "initialize" (object ["text" .= ("λ😀\nhello" :: T.Text)])
     events <- waitEvents client (any isRequest)
@@ -67,6 +69,15 @@ checks = bracket temporary removePathForcibly $ \root -> do
   forM_ pids $ \pid -> do
     (status,_,_) <- readProcessWithExitCode "kill" ["-0",pid] ""
     check "process tree reaped" (status /= ExitSuccess)
+  writeFile server $ unlines
+    [ "import json,subprocess,sys,time"
+    , "child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)'])"
+    , "print(json.dumps({'jsonrpc':'2.0','method':'ready'}),flush=True)"
+    , "time.sleep(30)"
+    ]
+  bracket start stopClient $ \client -> do
+    _ <- waitEvents client (any (\event -> case event of Notification "ready" _ -> True; _ -> False))
+    check "idle provider and inherited output pipes stop promptly" . (== Just ()) =<< timeout 2000000 (stopClient client)
   writeFile server "import time\ntime.sleep(30)\n"
   bracket start stopClient $ \client -> do
     queued <- timeout 2000000 (replicateM 64 (request client "blocked" (String (T.replicate (1024*1024) "x"))))

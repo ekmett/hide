@@ -48,7 +48,7 @@ startClient launch root = mask_ $ do
       { cwd = Just root, env = Just (Map.toList (Map.union (Map.fromList (environment launch)) (Map.fromList inherited)))
       , std_in = CreatePipe, std_out = CreatePipe, std_err = CreatePipe, create_group = True }
   pid <- getPid process
-  let cleanupProcess = do
+  let terminateProvider = do
         -- Terminate the private process group, including adapter-owned children.
         -- Windows terminateProcess uses the process handle; taskkill covers its children.
         case pid of
@@ -56,8 +56,10 @@ startClient launch root = mask_ $ do
                      | otherwise -> ignore (readProcessWithExitCode "/bin/kill" ["-KILL", "--", "-" ++ show ident] "")
           Nothing -> pure ()
         ignore (terminateProcess process)
+      closeProcess = do
         mapM_ (ignore . hClose) [input,output,errors]
         void (timeout 1000000 (waitForProcess process))
+      cleanupProcess = terminateProvider >> closeProcess
   (do
     mapM_ (`hSetBinaryMode` True) [input,output,errors]
     shared <- newMVar (State Seq.empty 0 Seq.empty 0 IS.empty 1 Nothing)
@@ -101,8 +103,11 @@ startClient launch root = mask_ $ do
     void $ forkIO $ (do
       readMVar stopped
       tids <- readMVar workers
+      -- Windows synchronous pipe reads can defer thread cancellation until EOF.
+      -- Kill the provider tree first, including descendants holding those pipes.
+      terminateProvider
       mapM_ killThread tids
-      cleanupProcess) `finally` putMVar finished ()
+      closeProcess) `finally` putMVar finished ()
     tids <- sequence
       [ forkIOWithUnmask (\unmask -> unmask (readFrames output receive) `catch` failed)
       , forkIOWithUnmask (\unmask -> unmask writer `catch` failed)
