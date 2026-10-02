@@ -21,6 +21,7 @@ for session in range(1, 3 if mode == 'reconnect' else 2):
     pending_attach = pending_variables = pending_source = pending_scopes = None
     configured, breakpoint_requests = [], []
     scope_count = 0
+    thread_count = 0
 
     def send(value):
         global seq
@@ -94,6 +95,11 @@ for session in range(1, 3 if mode == 'reconnect' else 2):
                 reply(pending_attach)
                 event('stopped', dict(reason='entry', threadId=7, allThreadsStopped=True))
             elif cmd == 'threads':
+                thread_count += 1
+                if mode == 'lazy' and thread_count == 3:
+                    event('invalidated', dict(areas=['variables']))
+                if mode == 'lazy' and thread_count == 4:
+                    event('invalidated', dict(areas=['threads']))
                 reply(req, dict(threads=[dict(id=7, name='main λ')]))
             elif cmd == 'stackTrace':
                 rows = [dict(id=11, name='entry λ', line=2, column=1,
@@ -125,7 +131,7 @@ for session in range(1, 3 if mode == 'reconnect' else 2):
             elif cmd == 'variables':
                 reference = args['variablesReference']
                 if reference == 21:
-                    reply(req, dict(variables=[dict(name='value', value='<thunk>', type='Thunk', variablesReference=22)]))
+                    reply(req, dict(variables=[dict(name='value', value='<thunk>', type='Thunk', variablesReference=22, presentationHint=dict(lazy=mode == 'lazy'))]))
                 elif reference == 31:
                     reply(req, dict(variables=[dict(name='WRONG_SCOPE', value='wrong row', variablesReference=0)]))
                 else:

@@ -34,7 +34,7 @@ type Core = Desktop -> [Effect] -> IO (Bool,Desktop)
 data Debugger = Debugger (IORef State) (IO Integer)
 data Pending = Init | Attach | Configure | Breaks Text [Int] | Exceptions | Threads Bool
   | Stack Bool | Scopes | Variables | Source Bool Value | Control Bool | Detach
-  | Inspection (MVar (Either Text Value))
+  | Inspection Text (MVar (Either Text Value))
   deriving (Eq)
 data Breakpoint = Breakpoint { bpLine :: Int, bpResult :: Value } deriving (Eq,Show)
 data State = State
@@ -47,14 +47,14 @@ data State = State
   , startRequest :: (Text,Value), managed :: Bool, adapterId :: Text
   , failure :: Maybe Text, disconnectAt :: Maybe Integer
   , choices :: M.Map Text [Value], choiceId :: Int, breakRequests :: M.Map Text Int
-  , breakModified :: M.Map Text Bool
+  , breakModified :: M.Map Text Bool, variableRefs :: M.Map Int Bool
   }
 
 emptyState :: State
 emptyState = State {client=Nothing,connected=False,capabilities=Null,ready=False,configured=False,pending=M.empty,generation=0,
   stopped=False,thread=Nothing,frame=Nothing,frames=[],followSource=True,exceptionFilters=[],breakpoints=M.empty,sources=M.empty,
   root=".",endpoint=("127.0.0.1",4711),output="",failure=Nothing,disconnectAt=Nothing,
-  choices=M.empty,choiceId=0,breakRequests=M.empty,breakModified=M.empty,startRequest=("attach",object []),managed=False,adapterId=""}
+  choices=M.empty,choiceId=0,breakRequests=M.empty,breakModified=M.empty,startRequest=("attach",object []),managed=False,adapterId="",variableRefs=M.empty}
 
 withDebugger :: (Debugger -> IO a) -> IO a
 withDebugger = withDebuggerClock (toInteger <$> getMonotonicTimeNSec)
@@ -126,7 +126,7 @@ debuggerTool runtime@(Debugger ref _) core d name arguments = do
     run (ToolInspect command args)=do
       s<-readIORef ref
       reply<-newEmptyMVar
-      send runtime (Inspection reply) command args
+      send runtime (Inspection command reply) command args
       pure (d,do
         result<-timeout 16000000 (awaitInspection ref (generation s) reply)
         pure $ case result of
@@ -223,6 +223,10 @@ parseTool s name = withObject "debugger tool arguments" $ \o -> do
           pure (object ["frameId" .= ident])
         "variables" -> do
           ident<-required "variablesReference" Nothing
+          case M.lookup ident (variableRefs s) of
+            Just False -> pure ()
+            Just True -> fail "Lazy variable requires explicit evaluation; read-only inspection cannot force it"
+            Nothing -> fail "Unknown or expired variable reference; request scopes/variables again"
           pure (object ["variablesReference" .= ident,"start" .= start,"count" .= count])
         _ -> do
           let selected=frame s >>= field "source"
@@ -248,7 +252,7 @@ boundedResult value | BL.length (encode value)>=1024*1024 = Left "Debugger respo
                     | otherwise = Right value
 
 completeInspection :: Pending -> Either Text Value -> IO ()
-completeInspection (Inspection reply) result=tryPutMVar reply result >> pure ()
+completeInspection (Inspection _ reply) result=tryPutMVar reply result >> pure ()
 completeInspection _ _=pure ()
 
 awaitInspection :: IORef State -> Int -> MVar (Either Text Value) -> IO (Either Text Value)
@@ -386,7 +390,7 @@ initializeSession (Debugger ref _) directory c address requestName arguments ada
 
 -- Frame and variable handles are scoped to a suspended execution state.
 invalidate :: State -> State
-invalidate s=s {generation=generation s+1,stopped=False,frame=Nothing,frames=[],choices=M.empty}
+invalidate s=s {generation=generation s+1,stopped=False,frame=Nothing,frames=[],choices=M.empty,variableRefs=M.empty}
 
 send :: Debugger -> Pending -> Text -> Value -> IO ()
 send (Debugger ref clock) kind command arguments = do
@@ -427,7 +431,7 @@ receive runtime@(Debugger ref _) core d event = do
           ["clientID" .= ("thc-edit"::Text),"clientName" .= ("Turbo Haskell"::Text),"adapterID" .= adapterId s,
            "pathFormat" .= ("path"::Text),"linesStartAt1" .= True,"columnsStartAt1" .= True,
            "supportsVariableType" .= True,"supportsRunInTerminalRequest" .= False,
-           "supportsVariablePaging" .= False,"supportsMemoryReferences" .= False])
+           "supportsVariablePaging" .= False,"supportsMemoryReferences" .= False,"supportsInvalidatedEvent" .= True])
       pure d
     D.Disconnected reason -> do
       mapM_ D.stopClient (client s)
@@ -447,6 +451,18 @@ receive runtime@(Debugger ref _) core d event = do
         send runtime (Threads False) "threads" (object [])
         forM_ tid (\ident -> send runtime (Stack False) "stackTrace" (stackArguments ident))
       pure (automaticDesktop s d) {status="Stopped: "<>text "reason" body}
+    D.Notification "invalidated" body -> do
+      let areas=fromMaybe [] (field "areas" body) :: [Text]
+          allAreas=null areas || "all" `elem` areas
+          threads=allAreas || "threads" `elem` areas
+          stacks=threads || "stacks" `elem` areas
+      if not (stacks || "variables" `elem` areas) then pure d else do
+        modifyIORef' ref (\state -> state {generation=generation state+1,choices=M.empty,variableRefs=M.empty,
+          thread=if threads then Nothing else thread state,
+          frame=if stacks then Nothing else frame state,frames=if stacks then [] else frames state})
+        if threads then send runtime (Threads False) "threads" (object [])
+        else when (stacks && stopped s) $ forM_ (thread s) (\tid -> send runtime (Stack False) "stackTrace" (stackArguments tid))
+        pure (clearDialog d) {status="Debugger values changed; request scopes again."}
     D.Notification "continued" _ -> modifyIORef' ref invalidate >> pure (automaticDesktop s d) {status="Running..."}
     D.Notification "thread" _ -> when (configured s) (send runtime (Threads False) "threads" (object [])) >> pure d
     D.Notification "terminated" _ -> do
@@ -469,7 +485,8 @@ receive runtime@(Debugger ref _) core d event = do
           completeInspection kind (Left "Debugger inspection expired; refresh debug_status.")
           pure d
         else case kind of
-          Inspection reply -> do
+          Inspection command reply -> do
+            forM_ result (recordVariables ref command)
             _<-tryPutMVar reply (result >>= boundedResult)
             pure d
           _ -> case result of
@@ -486,6 +503,17 @@ receive runtime@(Debugger ref _) core d event = do
            Right body -> response runtime core kind body d
   where
     stale kind=case kind of Threads{} -> True; Control{} -> True; Stack{} -> True; Scopes -> True; Variables -> True; Source{} -> True; Inspection{} -> True; _ -> False
+
+-- DAP lazy handles are executable: hdb forces a thunk when its children are
+-- requested. Track provenance for both UI and MCP; never guess a reference.
+recordVariables :: IORef State -> Text -> Value -> IO ()
+recordVariables ref command body
+  | command `elem` ["scopes","variables"] = do
+      let refs=M.fromListWith (||)
+            [(ident,command=="variables" && maybe False (flag "lazy") (field "presentationHint" row))
+            | row<-items command body,let ident=integer "variablesReference" row,ident>0]
+      modifyIORef' ref (\state -> state {variableRefs=M.unionWith (||) refs (variableRefs state)})
+  | otherwise = pure ()
 
 configure :: Debugger -> IO ()
 configure runtime@(Debugger ref _) = do
@@ -531,9 +559,11 @@ response runtime@(Debugger ref _) core kind body d = do
       else if not (followSource s) then pure d
       else maybe (pure d {status="Stopped; no source frame supplied."}) (openFrame runtime core False d) (listToMaybe rows)
     Scopes -> do
+      recordVariables ref "scopes" body
       let rows=items "scopes" body
       showChoices runtime "Scopes" "expand" rows (map (text "name") rows) d
     Variables -> do
+      recordVariables ref "variables" body
       let rows=items "variables" body
       showChoices runtime "Variables" "expand" rows (map variableLabel rows) d
     Source explicit _ | not explicit && not (followSource s) -> pure d
@@ -548,7 +578,7 @@ response runtime@(Debugger ref _) core kind body d = do
         modifyIORef' ref (\state -> state {sources=M.insert bid source (sources state)})
         pure (position selected styled) {status="Stopped in "<>frameLabel selected}
     Control _ -> pure d
-    Inspection reply -> tryPutMVar reply (boundedResult body) >> pure d
+    Inspection command reply -> recordVariables ref command body >> tryPutMVar reply (boundedResult body) >> pure d
     Detach -> do
       mapM_ D.stopClient (client s)
       modifyIORef' ref (\state -> (invalidate state) {client=Nothing,connected=False,pending=M.empty,ready=False,configured=False,disconnectAt=Nothing})
@@ -570,10 +600,13 @@ select runtime@(Debugger ref _) core fullToken action values d = do
       when (stopped s) (send runtime (Stack True) "stackTrace" (stackArguments tid))
       pure d
     "frame" | stopped s,Just chosen<-selected >>= at rows -> do
-      modifyIORef' ref (\state -> state {frame=Just chosen,generation=generation state+1,choices=M.empty})
+      modifyIORef' ref (\state -> state {frame=Just chosen,generation=generation state+1,choices=M.empty,variableRefs=M.empty})
       openFrame runtime core True d chosen
     "expand" | stopped s,Just chosen<-selected >>= at rows,let ident=integer "variablesReference" chosen,ident>0 ->
-      send runtime Variables "variables" (object ["variablesReference" .= ident]) >> pure d {status="Loading variables..."}
+      case M.lookup ident (variableRefs s) of
+        Just False -> send runtime Variables "variables" (object ["variablesReference" .= ident]) >> pure d {status="Loading variables..."}
+        Just True -> pure d {status="Lazy variable requires explicit evaluation; expansion does not force it."}
+        Nothing -> pure d {status="Debugger value expired; request scopes again."}
     "exceptions" -> do
       let filters=items "exceptionBreakpointFilters" (capabilities s)
           selectedFilters=[text "filter" f | (f,"true")<-zip filters (drop 1 values)]

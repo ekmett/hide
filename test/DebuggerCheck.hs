@@ -26,7 +26,7 @@ import THC.Edit.Model
 import THC.Edit.Render (snapshotHtml)
 
 checks :: IO ()
-checks = presentationCheck >> pendingPresentationCheck >> startupDeadlineCheck >> launchChecks >> mapM_ session ["basic", "frame", "choices", "breakpoints", "reconnect", "mcp"] >> putStrLn "Debugger checks passed"
+checks = presentationCheck >> pendingPresentationCheck >> startupDeadlineCheck >> launchChecks >> mapM_ session ["basic", "frame", "choices", "breakpoints", "reconnect", "mcp", "lazy"] >> putStrLn "Debugger checks passed"
   where
     session mode = bracket (fixture mode) cleanup $ \(port,logPath,process) -> withDebugger $ \runtime -> do
       let core d _=pure (False,d)
@@ -87,6 +87,41 @@ checks = presentationCheck >> pendingPresentationCheck >> startupDeadlineCheck >
             after<-waitForIO "resume barrier" (\_ -> (>before) . length . filter ((==Just ("threads"::T.Text)) . field "command") <$> commands) resumed
             check "late variables cannot reopen inspection after resume" (dialog after==Nothing)
             send "pause" [] after >>= waitFor "pause" (T.isInfixOf "Stopped" . status)
+          "lazy" -> do
+            scopes<-send "scopes" [] stopped >>= waitFor "scopes" (hasDialog "Scopes")
+            variables<-choose 0 scopes >>= waitFor "variables" (hasDialog "Variables")
+            blocked<-choose 0 variables
+            check "ordinary UI expansion does not force a lazy variable"
+              ("explicit" `T.isInfixOf` status blocked)
+            let current d=do (_,result)<-debuggerTool runtime core d "debug_status" (object []); result >>= either (error . T.unpack) pure
+                reject ref gen d=do
+                  (_,result)<-debuggerTool runtime core d "debug_inspect" (object
+                    ["generation" .= (gen::Int),"request" .= ("variables"::T.Text),"variablesReference" .= (ref::Int)])
+                  answer<-result
+                  check "read-only inspection rejects forcing or unobserved references" (either (const True) (const False) answer)
+            before<-current blocked
+            let gen=fromMaybe (error "missing generation") (field "generation" before)::Int
+            reject 22 gen blocked
+            reject 999 gen blocked
+            -- Initial attach and stopped events each request threads. This third
+            -- request causes the fixture to invalidate only variable handles.
+            pending<-send "threads" [] blocked {dialog=Nothing}
+            invalidated<-waitForIO "variables invalidation" (\d -> maybe False (>gen) . field "generation" <$> current d) pending
+            now<-current invalidated
+            let gen'=fromMaybe (error "missing generation") (field "generation" now)::Int
+            check "variable invalidation preserves stopped source frame" (field "stopped" now==Just True && (field "frame" now::Maybe Value)==field "frame" before)
+            reject 21 gen' invalidated
+            pendingThreads<-send "threads" [] invalidated
+            refreshed<-waitForIO "thread invalidation refreshes selected source" (\d -> do
+              state<-current d
+              pure (maybe False (>gen') (field "generation" state) && T.isPrefixOf "Stopped in " (status d))) pendingThreads
+            refreshedState<-current refreshed
+            check "thread invalidation reloads current stopped frame"
+              (field "stopped" refreshedState==Just True && field "threadId" refreshedState==Just (7::Int) && (field "frame" refreshedState::Maybe Value)==field "frame" before)
+            requests<-commands
+            check "only non-forcing scope variables reached the adapter"
+              ([field "variablesReference" args::Maybe Int | req<-requests,field "command" req==Just ("variables"::T.Text),Just args<-[field "arguments" req]]==[Just 21])
+            pure refreshed
           "choices" -> do
             scopes<-send "scopes" [] stopped >>= waitFor "first scope picker" (hasDialog "Scopes")
             replaced<-send "scopes" [] scopes >>= waitFor "second scopes reply" (T.isInfixOf "Scopes ready" . status)

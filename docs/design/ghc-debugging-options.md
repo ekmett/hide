@@ -8,6 +8,9 @@ in source, not a successful thc-edit integration test. The editor baseline was
 `53c134add77ad3a45a8001b3c478cc1ed41b9c0d`. The inspected `hdb` source was
 `af22571abc9d4316ad592815f46d9b430f278014` (2026-09-19); release packages can differ.
 
+The selected follow-on is [a shared debugger interface with hdb integration](hdb-integration.md).
+That design records subsequent implementation and live qualification separately.
+
 ## Recommendation
 
 Make **GHC source debugging through `hdb` and the existing DAP client** the next
