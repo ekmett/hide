@@ -124,6 +124,7 @@ data Desktop = Desktop
 
 data MenuItem = MenuItem Text Text Command deriving (Eq,Show)
 menus :: [(Text,Char,[MenuItem])]
+-- Docs: docs/site/screenshots/file-menu.png (docs/editing.md); refresh after menu changes.
 menus =
   [("File",'f',[mi "New" "" New, mi "Open..." "F3" Open, mi "Save" "F2" Save, mi "Save as..." "" SaveAs, mi "Disk changes..." "" ReviewDisk, mi "Close" "Alt+F3" Close, mi "Change dir..." "" ChangeDir, mi "Terminal" "" OpenTerminal, mi "Exit" "Alt+X" Quit])
   ,("Edit",'e',[mi "Undo" "Ctrl+Z" Undo, mi "Redo" "Ctrl+Y" Redo, mi "Cut" "Shift+Del" Cut, mi "Copy" "Ctrl+Ins" Copy, mi "Paste" "Shift+Ins" Paste, mi "Select all" "Ctrl+A" SelectAll,mi "Text / hex mode" "" ToggleHex,mi "Complete identifier..." "Ctrl+Space" Complete])
@@ -472,6 +473,7 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
     go (AgentChoose category) d = (openAgentChoices category d,[])
     go (AgentSet ident value) d = (d,[AgentAction "set-config" [ident,value]])
     go AgentCopyRaw d = (d,[AgentAction "copy" []])
+    -- Docs: save-as.png and save-changes.png in docs/site/screenshots (docs/editing.md).
     go SaveAs d = case activeWindow d of
       Nothing -> (d,[])
       Just _ | maybe False ((/=Nothing) . documentLabel) (activeDocument d) -> (d {status="This window is read-only."},[])
@@ -500,6 +502,7 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
     go SelectAll d = (modifyActive (\w -> w {selection = Selection 0 (T.length (activeText d))}) d,[])
     go action d | activeHex d, action `elem` [Find,Replace,FindNext] = (d {status="Text search is unavailable in hex mode."},[])
     go GoTo d | activeHex d = (prompt "Go to byte" GoingTo [Input "Byte offset (decimal)" "0" 1] d,[])
+    -- Docs: docs/site/screenshots/{find,replace}.png illustrate these fields in docs/editing.md.
     go Find d = (prompt "Find" Finding [Input "Text to find" (lastFind d) (T.length (lastFind d))] d,[])
     go Replace d = (prompt "Replace" Replacing [Input "Text to find" (lastFind d) (T.length (lastFind d)),Input "Replace with" "" 0] d,[])
     go FindPrevious d = (findPrevious d,[])
@@ -536,6 +539,7 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
     go GitPull d = (d,[RunGit PullRemote])
     go ProjectBrowser d = (d,[ProjectRequest LoadProject])
     go GitMerge d = (d,[ReadMergeBranches])
+    -- Docs: docs/site/screenshots/preferences.png (docs/display.md); refresh with the controls.
     go EditorOptions d = (prompt "Preferences" Settings
       ([Radio "Key bindings" ["Modern","WordStar"] (if wordStar d then 1 else 0)] ++
        [Radio "Screen size" ["Mode 3 (80x25)","Mode 259 (80x50)"] (if mode == 259 then 1 else 0) | Just mode <- [videoMode d]] ++
@@ -543,7 +547,8 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
        [field | videoMode d/=Nothing,field<-[CheckBox "CRT filter" (crtFilter d),CheckBox "Pixelate Unicode" (pixelateUnicode d)]]) d,[])
     go Gallery d = (prompt "Dialog controls" Widgets [Input "Module name" "Main" 4,CheckBox "Auto indent" True,Radio "Tab width" ["4 columns","8 columns"] 1,ListBox "Source files" ["Main.hs","Types.hs","Parser.hs","Syntax.hs","Eval.hs"] 0] d,[])
     go (Disabled reason) d = (d {status = reason},[])
-    confirm action d = (d {dialog = Just (Dialog "Save changes?" (Confirm action) [] 0 ["Save","Discard","Cancel"] ["Save changes to " <> documentTitle d <> "?"])},[])
+    -- Docs: docs/site/screenshots/save-changes.png (docs/editing.md); refresh with this dialog.
+    confirm action d = (d {dialog = Just (Dialog "Save changes?" (Confirm action) [] 0 ["Save","Discard","Cancel"] (["Save changes to:"] ++ wrapMessage (documentTitle d <> "?")))},[])
     selected d | activeConversation d = conversationSelection d
     selected d = case (activeWindow d,activeDocument d) of (Just w,Just doc) -> selectedText (selection w) (documentBuffer doc); _ -> ""
 
@@ -1916,11 +1921,13 @@ treeMouse x y button tree d = case button of
   _ -> (d,[])
   where sh=snd (screenSize d)-problemsHeight d
 
+-- Docs: docs/site/screenshots/change-directory.png (docs/editing.md).
 openDirectoryBrowser :: FilePath -> [Entry] -> Desktop -> Desktop
 openDirectoryBrowser base entries d = d {dialog=Just (Dialog "Change directory" (ChangingDirectory base dirs)
   [Input "Directory" (T.pack base) (length base),FileList dirs 0] 1 ["OK","Browse","Cancel"] []),menu=Nothing,drag=Nothing,dragOriginal=Nothing}
   where dirs=filter entryDirectory entries
 
+-- Docs: docs/site/screenshots/open-file.png (docs/editing.md and the site front page).
 openBrowser :: FilePath -> Text -> [Entry] -> Desktop -> Desktop
 openBrowser base pattern entries d = d {dialog=Just (Dialog "Open a file" (Opening base pattern entries) [Input "Name" pattern (T.length pattern),FileList entries 0] 1 ["Open","Cancel"] []),menu=Nothing,drag=Nothing,dragOriginal=Nothing}
 

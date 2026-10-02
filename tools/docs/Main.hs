@@ -57,6 +57,13 @@ guides =
 site :: FilePath
 site = "build/site"
 
+-- These are generated from the live dialog definitions through Metal.
+-- Keep this list in sync with tools/docs-screenshots.hs.
+screenshotNames :: [FilePath]
+screenshotNames = map (<.> "png")
+  ["desktop", "file-menu", "open-file", "save-as", "save-changes", "change-directory",
+   "find", "replace", "preferences", "build-target", "debug-launch", "git-commit"]
+
 repo :: String
 repo = "https://github.com/ekmett/thc-edit"
 
@@ -105,6 +112,9 @@ buildSite revision pandoc = do
   copyFile "docs/site/site.css" (site </> "assets/site.css")
   copyFile "docs/site/site.js" (site </> "assets/site.js")
   copyFile "docs/site/theme.js" (site </> "assets/theme.js")
+  forM_ screenshotNames $ \name -> do
+    createDirectoryIfMissing True (site </> "assets/screenshots")
+    copyFile ("docs/site/screenshots" </> name) (site </> "assets/screenshots" </> name)
   forM_ guides $ \guide@(Guide source _ title) -> renderGuide revision pandoc source (guidePath guide) title
   renderGuide revision pandoc "docs/site/index.md" "home.html" "Turbo Haskell editor"
   renderShell revision ("home.html" : map guidePath guides)
@@ -226,6 +236,7 @@ guideURL revision source output url
       let (path, suffix) = break (`elem` ("?#" :: String)) url
           resolved = collapse (takeDirectory source </> decodeURL path)
           pages = ("docs/site/index.md", "home.html") : [(src, guidePath g) | g@(Guide src _ _) <- guides]
+            ++ [("docs/site/screenshots" </> name, "assets/screenshots" </> name) | name <- screenshotNames]
       case lookup resolved pages of
         Just target -> pure (fromPage output target ++ suffix)
         Nothing -> do

@@ -34,6 +34,8 @@ Arguments go directly to the process; shell syntax is not interpreted. Settings
 live in the user configuration directory. The Cabal target belongs to the
 selected project, while the compiler installation is shared.
 
+[![Build target dialog for the thc-edit project, with compiler, Cabal target, toolchain and arguments.](site/screenshots/build-target.png)](site/screenshots/build-target.png)
+
 Run uses an embedded terminal when the [terminal build](install.md#embedded-terminal)
 is available. Basic builds capture output without interactive input; **Run >
 Stop build/run** stops a captured run. All commands execute on the session host,
@@ -77,6 +79,8 @@ Build output is available in **Debug > Output** while it starts. The first
 launch can spend several minutes building and capturing dependencies.
 **Debug > Disconnect** stops that work; protocol response timing starts when
 the debugger connects.
+
+[![Launch debugger dialog offering THC target and Adapter config.](site/screenshots/debug-launch.png)](site/screenshots/debug-launch.png)
 
 THC initially stops at an instrumented source location. Embedded source opens
 read-only, where **Ctrl+F8** sets a breakpoint in the running program. Both

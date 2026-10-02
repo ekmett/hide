@@ -1040,6 +1040,7 @@ openConsole consoles config d = do
   result<-C.startConsole consoles config (1024*1024) d
   pure (either (\err -> message "Cannot start terminal" (wrapMessage err) d) snd result)
 
+-- Docs: docs/site/screenshots/build-target.png (docs/running.md) shows the target dialog.
 runTarget :: FilePath -> C.Consoles -> Jobs.BuildJobs -> Maybe B.BuildAction -> Desktop -> IO Desktop
 runTarget directory consoles jobs action d = do
   root<-B.resolveBuildRoot d

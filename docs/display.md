@@ -56,6 +56,8 @@ row; scale 1 downsamples vertically.
 Use `--appearance light|dark|system` or `THC_EDIT_APPEARANCE` at startup.
 System is the default.
 
+[![Preferences dialog showing key bindings, screen mode, appearance, CRT filter and Pixelate Unicode.](site/screenshots/preferences.png)](site/screenshots/preferences.png)
+
 Native windows follow the OS appearance, and the browser follows
 `prefers-color-scheme`, including changes while running. Text terminals read
 `COLORFGBG` at startup and default to Dark when it is unavailable. The setting

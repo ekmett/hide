@@ -1,8 +1,9 @@
 # Editor guide
 
-Open a project, keep the relevant files in view, and work from source through
-types, diagnostics, conversation and review. These guides describe that workflow
-in the terminal, a native window and the browser.
+`thc-edit` is Turbo Haskell’s source editor. These guides cover editing files,
+using Haskell language tools, building and debugging programs, reviewing Git
+changes and working with agents. The same editor runs in a terminal, a native
+window or a browser, locally or over SSH.
 
 ## Getting started
 

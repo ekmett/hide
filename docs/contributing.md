@@ -67,6 +67,40 @@ The HTML is a static preview. Available scenes are `desktop`, `menu`, `about`,
 `gallery`, `split`, `open`, `tree`, `help`, `diff` and `preferences`.
 **Tools > Widget gallery** exercises the dialog controls interactively.
 
+## Documentation screenshots
+
+The site uses actual Metal captures of the editor running over this checkout,
+including its modal dialogs. On macOS, build the window backend and run:
+
+```sh
+cabal build lib:thc-edit
+mkdir -p build/docs-capture/objects
+cabal exec -- ghc -threaded -XGHC2021 -package thc-edit tools/docs-screenshots.hs -outputdir build/docs-capture/objects -o build/docs-capture/screenshots
+build/docs-capture/screenshots
+make docs
+make docs-check
+```
+
+Pass scene names to refresh only affected images, for example
+`build/docs-capture/screenshots open-file preferences`. The tool loads the real
+Cabal file and `src/THC/Edit/Buffer.hs`, invokes the normal editor commands,
+and draws hidden Metal windows at 3× scale, 100×32 cells, with **CRT filter** and
+**Pixelate Unicode** enabled. It needs a macOS graphical login for Metal, but
+shows no window and starts no editor session. Personal provider settings are
+excluded; no source file is saved and no build, debugger or commit is started.
+
+PNG artifacts live in `docs/site/screenshots/`; BMP intermediates stay under
+`build/docs-capture/`. Source comments beside the dialog definitions identify
+which images and guide pages need refreshing. Changes to shared dialog frames,
+fields, buttons or shadows require refreshing all dialog images. Keep the scene
+list in `tools/docs-screenshots.hs` and the site's screenshot allowlist in
+`tools/docs/Main.hs` together when adding or removing an artifact.
+
+Inspect regenerated images for clipped fields, wrong selections or stale labels
+before committing them. Check that each image still illustrates its adjacent
+instructions. The site copies only the allowlisted images and validates their
+links, including deployment below `/thc-edit/`.
+
 ## Live language-server checks
 
 With a compatible HLS and GHC on `PATH`:
@@ -116,7 +150,6 @@ editor and checks local links, fragments and revision-pinned source links.
 The Documentation workflow rebuilds and publishes every push to `main` at
 [ekmett.github.io/thc-edit](https://ekmett.github.io/thc-edit/). It can also be
 started manually from GitHub Actions.
-
 
 Keep the [README](../README.md) useful both on GitHub and as F1 Help. Put detailed
 workflows in the [user guide](README.md), and keep design history in `design/`

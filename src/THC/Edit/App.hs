@@ -572,6 +572,7 @@ applyEffects = foldM apply . (False,)
       case reviewed of
         Left err -> pure (False,message "Cannot review changes" (wrapMessage err) d)
         Right review -> apply (False,(addReadOnly "Git diff" (reviewText review) d) {gitReview=Just review,status="Review saved changes; Tools > Approve changes commits them."}) (RefreshGit (reviewRoot review))
+    -- Docs: docs/site/screenshots/git-commit.png (docs/git.md); refresh if approval changes.
     apply (_,d) AskGitCommit
       | any (dirty . documentBuffer) (M.elems (buffers d)) = pure (False,message "Unsaved changes" ["Save changed buffers before approving a commit."] d)
       | Just review <- gitReview d = pure (False,d {dialog=Just (Dialog "Approve changes" Committing [Input "Commit message" "" 0] 0 ["Commit","Cancel"] ["Commit all reviewed saved changes in:",T.pack (reviewRoot review)]),menu=Nothing})

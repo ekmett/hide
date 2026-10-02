@@ -266,10 +266,11 @@ perform runtime@(Debugger ref clock) core action values d = do
   s<-readIORef ref
   case (action,values) of
     ("output",_) -> pure (addReadOnly "Debugger output" (output s) d)
+    -- Docs: docs/site/screenshots/debug-launch.png (docs/running.md).
     ("launch",_) -> pure d {dialog=Just (Dialog "Launch debugger" (DebugDialog "launch-config")
       [Input "Adapter configuration" ".thc-debug.json" 15,Input "THC DAP port" "4711" 4] 0 ["THC target","Adapter config","Cancel"]
-      ["THC target uses the selected build target and compiler settings.",
-       "Adapter config reads a JSON file relative to the project root."])}
+      ["THC target uses your selected build settings.",
+       "Adapter config reads a project-relative JSON file."])}
     ("launch-config","0":_:portText:_) -> case readMaybe (T.unpack portText) of
       Just port | port>0 && port<=65535 -> do
         result<-try $ launchTHC runtime port d
