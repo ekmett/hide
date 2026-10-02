@@ -1,9 +1,10 @@
 {-# LANGUAGE OverloadedStrings #-}
 module THC.Edit.Tooling (Tooling, toolingTool, toolingTools, toolingToolNames, withTooling, tickTooling, toolingEffects, completionItems, workspaceEdits, hoverText, diagnosticsCurrent) where
 
-import Control.Exception (bracket, try, IOException, onException, mask_)
+import Control.Exception (bracket, try, IOException, onException, mask_, evaluate)
 import Control.Concurrent.STM
 import System.Timeout (timeout)
+import System.Mem.StableName (StableName, makeStableName)
 import Control.Concurrent (ThreadId, forkIO, killThread, MVar, newEmptyMVar, putMVar, readMVar, tryReadMVar)
 import Control.Monad (filterM, foldM, forM, forM_, unless, when, void)
 import Data.Aeson
@@ -14,7 +15,7 @@ import qualified Data.Aeson.Key as Key
 import qualified Data.Map.Strict as M
 import Data.IORef
 import Data.List (find, sortOn)
-import Data.Maybe (mapMaybe, fromMaybe)
+import Data.Maybe (catMaybes, mapMaybe, fromMaybe)
 import qualified Data.Text as T
 import qualified Data.Vector as Vector
 import GHC.Clock (getMonotonicTimeNSec)
@@ -45,10 +46,11 @@ data Tooling = Tooling
   , actions :: IORef (M.Map T.Text CachedAction), nextAction :: IORef Int
   , retiring :: IORef [MVar ()]
   , preparing :: IORef (Maybe Preparing)
+  , synchronized :: IORef (M.Map FilePath (StableName L.Client, [(Int,FilePath,Int,StableName Buffer)]))
   }
 
 withTooling :: (Tooling -> IO a) -> IO a
-withTooling = bracket (Tooling <$> newIORef M.empty <*> newIORef M.empty <*> newIORef M.empty <*> newIORef (Nothing,0,False) <*> newIORef M.empty <*> newIORef 1 <*> newIORef [] <*> newIORef Nothing) closeTooling
+withTooling = bracket (Tooling <$> newIORef M.empty <*> newIORef M.empty <*> newIORef M.empty <*> newIORef (Nothing,0,False) <*> newIORef M.empty <*> newIORef 1 <*> newIORef [] <*> newIORef Nothing <*> newIORef M.empty) closeTooling
 
 closeTooling :: Tooling -> IO ()
 closeTooling t = do
@@ -430,15 +432,25 @@ sessionFor t path = do
 
 sync :: Tooling -> Desktop -> IO ()
 sync t d = do
-  docs<-forM (sourceDocuments d) $ \(_,path,version,text) -> do
+  docs<-forM (sourceDocuments d) $ \(bid,path,version,text) -> do
     root<-rootFor t path
     _<-sessionFor t path
-    pure (root,[(path,version,text)])
+    identity<-makeStableName =<< evaluate (documentBuffer (buffers d M.! bid))
+    pure (root,[((bid,path,version,identity),(path,version,text))])
   active<-readIORef (sessions t)
+  previous<-readIORef (synchronized t)
   let grouped=M.fromListWith (++) docs
-  forM_ (M.toList active) $ \(root,session) -> case session of
-    Right (Session client _) -> L.syncDocuments client (M.findWithDefault [] root grouped)
-    Left _ -> pure ()
+  current<-forM (M.toList active) $ \(root,session) -> case session of
+    Right (Session client _) -> do
+      identity<-makeStableName =<< evaluate client
+      let entries=M.findWithDefault [] root grouped
+          key=(identity,map fst entries)
+      -- Buffer identity catches equal-revision reloads without flattening text.
+      -- Client identity forces didOpen after a restarted language server.
+      when (M.lookup root previous/=Just key) (L.syncDocuments client (map snd entries))
+      pure (Just (root,key))
+    Left _ -> pure Nothing
+  writeIORef (synchronized t) (M.fromList (catMaybes current))
 
 cursorTarget :: Desktop -> Maybe Target
 cursorTarget d = do

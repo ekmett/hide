@@ -66,6 +66,13 @@ checks = do
         check "post-response applyEdit never acquires completed owner" (not (any (\event->case event of ApplyEdit{}->True; _->False) after))
       lifecycle <- readFile (root </> "lifecycle")
       check "shutdown response then exit" (lifecycle == "shutdown\nexit\n")
+      -- Initialization is deliberately held: document projection/equality must
+      -- belong to the writer, never to the caller holding the desktop lock.
+      writeFile server "#!/usr/bin/env python3\nimport time\ntime.sleep(30)\n"
+      bracket (startClient root) stopClient $ \client -> do
+        let delayed = [(source,0,error "syncDocuments forced source text on caller")]
+        syncDocuments client delayed
+        syncDocuments client delayed
       writeFile server "#!/usr/bin/env python3\nimport sys,time\nsys.stderr.write('x'*10000 + '\\ncompiler-version-unavailable\\n'); sys.stderr.flush()\ntime.sleep(0.1)\nsys.exit(1)\n"
       bracket (startClient root) stopClient $ \client -> do
         failure <- timeout 3000000 (waitFailure client)
@@ -75,6 +82,12 @@ checks = do
         ident <- request client "textDocument/hover" Null
         replies <- pollEvents client
         check "request after failure receives error response" (any (\event -> case event of Response actual value -> actual == ident && parseMaybe (withObject "response" (.: "error")) value /= (Nothing :: Maybe Value); _ -> False) replies)
+        burst <- mapM (\_ -> request client "textDocument/hover" Null) [1..200::Int]
+        batch <- pollEvents client
+        check "HLS flood gives the UI a bounded batch" (length batch <= 32)
+        rest <- waitResponse client (last burst)
+        check "bounded HLS batches retain FIFO responses"
+          ([actual | Response actual _ <- batch ++ rest] == burst)
         stopped <- timeout 2000000 (stopClient client)
         check "failed server stops promptly and idempotently" (stopped == Just ())
   putStrLn "LSP checks passed"

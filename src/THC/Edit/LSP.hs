@@ -17,6 +17,8 @@ import qualified Data.ByteString.Lazy as BL
 import Data.Char ( isHexDigit, ord, toLower)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
+import qualified Data.Sequence as Seq
+import Data.Foldable (toList)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -33,8 +35,8 @@ data Event = Response Int Value | ApplyEdit Int Value Value | Diagnostics FilePa
 data Command = Documents [(FilePath,Int,Text)] | Request Int Text Value | Saved FilePath | Reply Value
 
 data Client = Client
-  { commands :: Chan Command, events :: MVar [Event], nextId :: MVar Int
-  , unavailable :: MVar (Maybe Text), lastDocuments :: MVar [(FilePath,Int,Text)]
+  { commands :: Chan Command, events :: MVar (Seq.Seq Event), nextId :: MVar Int
+  , unavailable :: MVar (Maybe Text)
   , serverCapabilities :: IO Value, closeClient :: IO ()
   , commandOwner :: MVar (Maybe Int), replyEdit :: Value -> Bool -> Maybe Text -> IO (), retireClient :: IO (MVar ())
   }
@@ -55,7 +57,7 @@ startClient root = mask $ \restore -> do
   restore (do
     mapM_ (`hSetBinaryMode` True) [input, output, errors]
     queue <- newChan
-    inbox <- newMVar []
+    inbox <- newMVar Seq.empty
     counter <- newMVar 1
     writeLock <- newMVar ()
     initialized <- newEmptyMVar
@@ -65,11 +67,10 @@ startClient root = mask $ \restore -> do
     ownerState <- newMVar Nothing
     replyQueue <- newChan
     unavailableState <- newMVar Nothing
-    documentsState <- newMVar []
     capabilitiesState <- newMVar Null
     errorTail <- newMVar ""
     writerThread <- newEmptyMVar
-    let emit event = modifyMVar_ inbox (pure . (event:))
+    let emit event = modifyMVar_ inbox (pure . (Seq.|> event))
         send value = withMVar writeLock $ \_ -> do
           let body = encode value
           BC.hPutStr input (BC.pack ("Content-Length: " ++ show (BL.length body) ++ "\r\n\r\n"))
@@ -167,17 +168,18 @@ startClient root = mask $ \restore -> do
           modifyMVar_ ownerState (const (pure Nothing))
           void (forkIO stop)
           pure stopDone
-    pure (Client queue inbox counter unavailableState documentsState (readMVar capabilitiesState) stop ownerState reply retire)
+    pure (Client queue inbox counter unavailableState (readMVar capabilitiesState) stop ownerState reply retire)
     ) `onException` cleanup
 
 stopClient :: Client -> IO ()
 stopClient = closeClient
 
 syncDocuments :: Client -> [(FilePath,Int,Text)] -> IO ()
-syncDocuments client docs = modifyMVar_ (lastDocuments client) $ \previous -> do
-  unless (previous == docs) $ withMVar (unavailable client) $ \failure ->
-    when (failure == Nothing) (writeChan (commands client) (Documents docs))
-  pure docs
+-- The caller only queues immutable references. Equality and full-text encoding
+-- run in writeCommands; comparing here forces edited buffer text on the UI.
+-- Tooling coalesces unchanged buffer identities before reaching this queue.
+syncDocuments client docs = withMVar (unavailable client) $ \failure ->
+  when (failure == Nothing) (writeChan (commands client) (Documents docs))
 
 notifySaved :: Client -> FilePath -> IO ()
 notifySaved client path = withMVar (unavailable client) $ \failure ->
@@ -187,7 +189,7 @@ request :: Client -> Text -> Value -> IO Int
 request client method params = modifyMVar (nextId client) $ \ident -> do
   withMVar (unavailable client) $ \failure -> case failure of
     Nothing -> writeChan (commands client) (Request ident method params)
-    Just message -> modifyMVar_ (events client) (pure . (Response ident (object ["id" .= ident, "error" .= object ["code" .= (-32603 :: Int), "message" .= message]]):))
+    Just message -> modifyMVar_ (events client) (pure . (Seq.|> Response ident (object ["id" .= ident, "error" .= object ["code" .= (-32603 :: Int), "message" .= message]])))
   pure (ident+1, ident)
 
 -- Reserve ownership before the request can reach the server. Incoming applyEdit
@@ -205,7 +207,9 @@ executeCommand client name arguments = modifyMVar (nextId client) $ \ident -> do
   pure (ident+1,outcome)
 
 pollEvents :: Client -> IO [Event]
-pollEvents client = modifyMVar (events client) (\pending -> pure ([], reverse pending))
+-- Bound work per desktop tick while retaining FIFO request/response order.
+pollEvents client = modifyMVar (events client) $ \pending ->
+  let (ready,rest)=Seq.splitAt 32 pending in pure (rest,toList ready)
 
 writeCommands :: (Text -> Value -> IO ()) -> (Int -> Text -> Value -> IO ()) -> (Value -> IO ()) -> Chan Command -> Map.Map FilePath (Int, Text) -> IO ()
 writeCommands notify call send queue previous = do
