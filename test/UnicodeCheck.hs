@@ -10,9 +10,9 @@ import qualified Data.Text.Encoding as TE
 import Data.Foldable (toList)
 import qualified Graphics.Vty as V
 import Graphics.Vty.Span (SpanOp(..))
-import THC.Edit.Buffer
-import THC.Edit.Model
-import THC.Edit.Unicode
+import Hide.Buffer
+import Hide.Model
+import Hide.Unicode
 
 checks :: IO ()
 checks = do

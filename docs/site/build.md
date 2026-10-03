@@ -14,7 +14,7 @@ make docs
 ```
 
 Open `build/site/index.html`, or serve the generated directory with a local web
-server. The output also works below the GitHub Pages project path `/thc-edit/`.
+server. The output also works below the GitHub Pages project path `/hide/`.
 All CSS, JavaScript and fonts used by the theme are local files or system fonts;
 the site does not load a third-party script or font service.
 
@@ -57,7 +57,7 @@ artifact. Deployment runs only after that build and link check succeed.
 
 In the repository's Pages settings, choose **GitHub Actions** as the build and
 deployment source. The published site is
-[ekmett.github.io/thc-edit](https://ekmett.github.io/thc-edit/).
+[ekmett.github.io/hide](https://ekmett.github.io/hide/).
 
 The framework was adapted from
 [THC's documentation generator](https://github.com/ekmett/thc/blob/8dec8726eae35fee25f3d22d743052a73dc06649/src/tools/docs/Main.hs).

@@ -6,18 +6,18 @@ import Control.Exception (evaluate)
 import System.Timeout (timeout)
 import Data.List (findIndex)
 import Data.Maybe (fromMaybe)
-import THC.Edit.BufferView
-import THC.Edit.Model
-import THC.Edit.Render (snapshotHtml, snapshot, renderDesktop)
-import THC.Edit.Buffer (newBuffer, columnOffset, contents, markSaved, replaceSelection, Selection(..))
-import THC.Edit.Window (nativeMenuShortcut)
+import Hide.BufferView
+import Hide.Model
+import Hide.Render (snapshotHtml, snapshot, renderDesktop)
+import Hide.Buffer (newBuffer, columnOffset, contents, markSaved, replaceSelection, Selection(..))
+import Hide.Window (nativeMenuShortcut)
 import qualified Data.Text.Encoding as TE
-import THC.Edit.Browser (Entry(..))
-import THC.Edit.Files (FileState(..))
+import Hide.Browser (Entry(..))
+import Hide.Files (FileState(..))
 import qualified Data.Text as T
 import qualified Data.Map.Strict as M
 import qualified Graphics.Vty as V
-import THC.Edit.Unicode (displayOpsForPic)
+import Hide.Unicode (displayOpsForPic)
 import Graphics.Vty.Span (SpanOp(..))
 import Data.Foldable (toList)
 import qualified Data.Text.Lazy as TL

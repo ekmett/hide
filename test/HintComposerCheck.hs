@@ -10,10 +10,10 @@ import qualified Data.Text.Encoding as TE
 import qualified Graphics.Vty as V
 import System.Directory
 import System.IO (openTempFile,hClose)
-import THC.Edit.Buffer
-import THC.Edit.GuestAccess
-import THC.Edit.Model
-import THC.Edit.Recovery
+import Hide.Buffer
+import Hide.GuestAccess
+import Hide.Model
+import Hide.Recovery
 
 checks :: IO ()
 checks=do

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Check headless startup, discovery and resume with no display dependencies.
 
-Usage: python3 test/daemon-session.py /absolute/path/to/thc-edit
+Usage: python3 test/daemon-session.py /absolute/path/to/hide
 Uses only temporary projects and closes only sessions created by this test.
 The wire helper uses POSIX pipe selection.
 """
@@ -22,7 +22,7 @@ with tempfile.TemporaryDirectory(prefix="thc-daemon-cli-") as temporary:
     root = Path(temporary)
     env = dict(os.environ, XDG_DATA_HOME=str(root / "data"),
                XDG_CONFIG_HOME=str(root / "config"), THC_EDIT_BACKEND="remote",
-               thc_edit_datadir=str(Path(__file__).resolve().parents[1]))
+               hide_datadir=str(Path(__file__).resolve().parents[1]))
     sessions = []
 
     def run(*args, success=True):
@@ -37,7 +37,7 @@ with tempfile.TemporaryDirectory(prefix="thc-daemon-cli-") as temporary:
         found = re.search(r"^Session: ([a-f0-9]{48})$", output, re.MULTILINE)
         assert found, output
         ident = found.group(1)
-        assert "Resume: thc-edit --resume " + ident in output, output
+        assert "Resume: hide --resume " + ident in output, output
         if ident not in sessions:
             sessions.append(ident)
         return ident

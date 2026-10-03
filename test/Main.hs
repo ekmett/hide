@@ -62,7 +62,7 @@ import qualified TerminalCheck
 import qualified ConsolesCheck
 import Control.Monad (unless)
 import qualified Data.Text as T
-import THC.Edit.App (demoDesktop)
+import Hide.App (demoDesktop)
 import qualified BufferViewCheck
 import qualified BufferTreeCheck
 import qualified LSPCheck
@@ -72,7 +72,7 @@ import qualified GitOperationsCheck
 import qualified GitCheck
 import qualified HelpCheck
 import qualified BrowserCheck
-import THC.Edit.Browser (Entry(..))
+import Hide.Browser (Entry(..))
 import qualified WindowCheck
 import qualified FilesCheck
 import qualified ExternalCheck
@@ -80,11 +80,11 @@ import qualified ReconcileCheck
 import qualified ACPCheck
 import qualified LinksCheck
 import qualified MarkdownCheck
-import THC.Edit.Render
-import THC.Edit.Buffer
-import THC.Edit.Syntax
-import THC.Edit.Files (FileState(..))
-import THC.Edit.Model
+import Hide.Render
+import Hide.Buffer
+import Hide.Syntax
+import Hide.Files (FileState(..))
+import Hide.Model
 import qualified Graphics.Vty as V
 import qualified Data.Map.Strict as M
 

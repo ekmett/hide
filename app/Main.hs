@@ -1,4 +1,4 @@
 module Main (main) where
-import qualified THC.Edit.App
+import qualified Hide.App
 main :: IO ()
-main = THC.Edit.App.main
+main = Hide.App.main

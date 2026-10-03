@@ -72,9 +72,9 @@ binary=str(pathlib.Path(sys.argv[1]).resolve())
 with tempfile.TemporaryDirectory(prefix='thc-remote-browser-') as directory:
     root=pathlib.Path(directory);source=root/"a b ' λ.txt";source.write_text('original\n')
     ssh=root/'ssh'
-    ssh.write_text('#!/usr/bin/env python3\nimport os,sys\nassert sys.argv[-1]=="thc-edit --remote",sys.argv\nos.execv(os.environ["THC_TEST_EXE"],[os.environ["THC_TEST_EXE"],"--remote"])\n')
+    ssh.write_text('#!/usr/bin/env python3\nimport os,sys\nassert sys.argv[-1]=="hide --remote",sys.argv\nos.execv(os.environ["THC_TEST_EXE"],[os.environ["THC_TEST_EXE"],"--remote"])\n')
     ssh.chmod(0o700)
-    env=dict(os.environ,PATH=str(root)+os.pathsep+os.environ['PATH'],THC_TEST_EXE=binary,THC_EDIT_WEB_OPEN='0',thc_edit_datadir=str(pathlib.Path(__file__).resolve().parents[1]))
+    env=dict(os.environ,PATH=str(root)+os.pathsep+os.environ['PATH'],THC_TEST_EXE=binary,THC_EDIT_WEB_OPEN='0',hide_datadir=str(pathlib.Path(__file__).resolve().parents[1]))
     with open(root/'log','w+') as log:
         process=subprocess.Popen([binary,'--web',"test-host:"+str(source)],env=env,stdout=subprocess.DEVNULL,stderr=log)
         ws=None
@@ -82,7 +82,7 @@ with tempfile.TemporaryDirectory(prefix='thc-remote-browser-') as directory:
             url=None
             for _ in range(150):
                 log.flush();log.seek(0);text=log.read()
-                found=re.search(r'Turbo Haskell browser: (http://\S+)',text)
+                found=re.search(r'Haskell browser: (http://\S+)',text)
                 if found: url=found.group(1);break
                 if process.poll() is not None: raise AssertionError(text)
                 time.sleep(.1)

@@ -9,7 +9,7 @@ import System.Directory
 import System.Environment
 import System.FilePath ((</>), searchPathSeparator)
 import System.IO
-import THC.Edit.Compilers
+import Hide.Compilers
 
 checks :: IO ()
 checks=do

@@ -5,7 +5,7 @@ description: Debug a running program through the Turbo Haskell editor MCP server
 
 # Debugging in the editor
 
-The `editor` MCP server controls the live editor session. Its tools share the user's buffers and debugger. Discover `tools/list` first; this skill is also available as the `thc-edit://debugging` resource.
+The `editor` MCP server controls the live editor session. Its tools share the user's buffers and debugger. Discover `tools/list` first; this skill is also available as the `hide://debugging` resource.
 
 1. Read `debug_status` and `list_buffers`. Reuse an active session. Otherwise use `debug_launch` for the configured THC target, or provide an `adapterConfig` file for another DAP adapter. `debug_attach` connects to a loopback adapter.
 2. Wait for `ready` and inspect `stopped`. A launch or control reply with `accepted` means the command was submitted, not that execution has reached its next stop. Check status again after a short interval; report startup errors from its output rather than repeatedly launching.

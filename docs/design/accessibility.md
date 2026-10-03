@@ -8,27 +8,27 @@ Do not infer controls or document text from its painted character cells.
 
 ## What exists, and where the bridge belongs
 
-[Model.hs](../../src/THC/Edit/Model.hs) already owns useful semantics: persistent
+[Model.hs](../../src/Hide/Model.hs) already owns useful semantics: persistent
 window and buffer IDs, source selection, dialogs with typed fields, menus,
 sidebar rows, diagnostics and conversation controls.
-[Render.hs](../../src/THC/Edit/Render.hs) turns these into Vty pictures; it is a
+[Render.hs](../../src/Hide/Render.hs) turns these into Vty pictures; it is a
 consumer of the semantic model, not the right source for an accessibility tree.
-[Buffer.hs](../../src/THC/Edit/Buffer.hs) provides measured persistent line trees,
+[Buffer.hs](../../src/Hide/Buffer.hs) provides measured persistent line trees,
 `bufferSlice`, line lookup and revisions. Accessibility must preserve that
 representation and avoid `contents`, whole-document comparisons or flattening
 on the desktop thread.
 
-[Window.hs](../../src/THC/Edit/Window.hs) and
+[Window.hs](../../src/Hide/Window.hs) and
 [cbits/window.c](../../cbits/window.c) run SDL on the bound main thread and paint
 one native surface. [cbits/menu.m](../../cbits/menu.m) already creates real
 `NSMenu` objects; preserve their existing accessibility instead of duplicating
 menu-bar elements. Painted editor windows are children inside one OS window.
 
 Crucially, normal session attachment uses
-[RemoteWindow.hs](../../src/THC/Edit/RemoteWindow.hs), including local daemon
-sessions. The daemon in [Remote.hs](../../src/THC/Edit/Remote.hs) owns `Desktop`;
+[RemoteWindow.hs](../../src/Hide/RemoteWindow.hs), including local daemon
+sessions. The daemon in [Remote.hs](../../src/Hide/Remote.hs) owns `Desktop`;
 the display receives frames. Adding AppKit hooks only to `Window.runWindow`
-would miss that path. Extend [Protocol.hs](../../src/THC/Edit/Protocol.hs) with
+would miss that path. Extend [Protocol.hs](../../src/Hide/Protocol.hs) with
 optional semantic updates and actions alongside the existing display transport.
 The browser currently has a canvas and an offscreen input textarea in
 [assets/web](../../assets/web/index.html); those expose neither the desktop
@@ -36,7 +36,7 @@ structure nor the source document.
 
 ## Shared semantic contract
 
-Add `THC.Edit.Accessibility` with a pure projection and checked action reducer.
+Add `Hide.Accessibility` with a pure projection and checked action reducer.
 The first representation needs only nodes, parent/child IDs, roles, names,
 values, states, cell rectangles, relationships, supported actions and optional
 text references. Use `windowId` for views and `bufferId` plus revision for text;

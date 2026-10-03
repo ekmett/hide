@@ -49,7 +49,7 @@ for background stops, then reveal `source`, `stack`, `scopes` or `output` using
 the current generation. Set `follow: true` to follow future stops. The user and
 agent share the same debugger; revealing a stop does not restart the program.
 
-The [debugging skill](../skills/debug-editor/SKILL.md) is also available to MCP clients through `resources/read` at `thc-edit://debugging`.
+The [debugging skill](../skills/debug-editor/SKILL.md) is also available to MCP clients through `resources/read` at `hide://debugging`.
 
 ## See what is on screen
 
@@ -98,7 +98,7 @@ attempts leave the child available to retry.
 Recovery itself never starts child providers. Ended children cannot reconnect.
 
 Workspace windows open on the editor host. A build without native windows shows
-`thc-edit --resume SESSION_ID` to run in a terminal instead. When the editor runs
+`hide --resume SESSION_ID` to run in a terminal instead. When the editor runs
 over SSH, use a display attachment from your SSH client; launching a window on
 the remote host does not open one on your local desktop.
 
@@ -176,7 +176,7 @@ Policies live in `[editor.mcp.permissions]` in the shared [configuration file](c
 Register a stdio server with this command and the session ID printed when the display detaches:
 
 ```sh
-thc-edit --mcp-editor SESSION_ID
+hide --mcp-editor SESSION_ID
 ```
 
 The bridge connects to that session's private endpoint without taking its display connection. Tools keep working while the display is detached. Use `tools/list` for the current schemas. Long-running protocol requests and questions wait outside the desktop lock, so the person using the editor can continue working. Cancelling an MCP request cancels its wait; it does not reverse an operation that already ran.

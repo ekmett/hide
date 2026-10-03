@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Check the stdio relay, detached daemon, reconnect replay, and clean shutdown.
 
-Usage: python3 test/remote-session.py /absolute/path/to/thc-edit
+Usage: python3 test/remote-session.py /absolute/path/to/hide
 """
 import json
 import os
@@ -53,7 +53,7 @@ def control(process, kind):
 def main(executable):
     session, client = secrets.token_hex(24), secrets.token_hex(24)
     env = dict(os.environ)
-    env.setdefault("thc_edit_datadir", str(Path(__file__).resolve().parent.parent))
+    env.setdefault("hide_datadir", str(Path(__file__).resolve().parent.parent))
     with tempfile.TemporaryDirectory(prefix="thc-remote-") as directory:
         path = Path(directory) / "file ' quoted ; λ.hs"
         path.write_text("")

@@ -182,7 +182,7 @@ the socket closed”.
 - [ ] Capture actual dialogs and stopped code in Metal, document workflows, and
       qualify both successful and exceptional exits plus agent background/reveal.
 
-Do not add a GHC API dependency to thc-edit. The external hdb installation owns
+Do not add a GHC API dependency to hide. The external hdb installation owns
 that compiler coupling. Keep upstream capability gaps explicit; a local GHC
 9.14.1 test cannot establish 9.14.3 multithreaded behavior.
 

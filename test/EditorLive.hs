@@ -1,5 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
--- Compile after cabal build: cabal exec -- ghc -threaded -package thc-edit test/EditorLive.hs -o /tmp/thc-editor-live
+-- Compile after cabal build: cabal exec -- ghc -threaded -package hide test/EditorLive.hs -o /tmp/hide-live
 -- Run with an installed HLS and its supported GHC on PATH; fixtures are disposable.
 module Main (main) where
 
@@ -15,11 +15,11 @@ import System.Directory
 import System.FilePath ((</>))
 import System.IO (hClose, openTempFile)
 import System.Timeout (timeout)
-import THC.Edit.App (applyEffects)
-import THC.Edit.Files (filePath)
-import THC.Edit.Buffer
-import THC.Edit.Model
-import THC.Edit.Tooling
+import Hide.App (applyEffects)
+import Hide.Files (filePath)
+import Hide.Buffer
+import Hide.Model
+import Hide.Tooling
 
 main :: IO ()
 main = bracket temporary removePathForcibly $ \root -> do
@@ -82,7 +82,7 @@ main = bracket temporary removePathForcibly $ \root -> do
   where
     temporary = do
       base <- getTemporaryDirectory
-      (path, handle) <- openTempFile base "thc-editor-live"
+      (path, handle) <- openTempFile base "hide-live"
       hClose handle
       removeFile path
       createDirectory path

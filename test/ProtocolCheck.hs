@@ -9,9 +9,9 @@ import qualified Data.ByteString.Lazy as BL
 import qualified Data.Text as T
 import System.Directory (getTemporaryDirectory, removeFile)
 import System.IO
-import THC.Edit.Protocol
-import THC.Edit.Model
-import THC.Edit.Buffer
+import Hide.Protocol
+import Hide.Model
+import Hide.Buffer
 
 checks :: IO ()
 checks = do
@@ -43,12 +43,12 @@ checks = do
       text desktop=case editableDialogField desktop of Just (TextArea _ _ b _ _ _) -> contents b; _ -> ""
   check "human browser clipboard reads only focused review selection" (selected==Just "private" && clipboard copied=="private" && copyEffects==[WriteBrowserClipboard "private"])
   check "human browser cut changes only review text" (text cut==" diff" && activeText cut==activeText d && cutEffects==[WriteBrowserClipboard "private"])
-  check "browser paste requests the system clipboard for the review" (applyInput (BrowserCommand THC.Edit.Model.Paste) review==(review,[ReadBrowserClipboard]))
-  check "agent browser commands cannot inspect or edit human review" (all (\input->case applyGuestInput input review of Left _ -> True; _ -> False) [BrowserCommand Copy,BrowserCommand Cut,BrowserCommand SelectAll,THC.Edit.Protocol.Paste "bad"])
+  check "browser paste requests the system clipboard for the review" (applyInput (BrowserCommand Hide.Model.Paste) review==(review,[ReadBrowserClipboard]))
+  check "agent browser commands cannot inspect or edit human review" (all (\input->case applyGuestInput input review of Left _ -> True; _ -> False) [BrowserCommand Copy,BrowserCommand Cut,BrowserCommand SelectAll,Hide.Protocol.Paste "bad"])
   let search=fst (runCommand Find d)
-      typed=fst (applyInput (THC.Edit.Protocol.Paste "hello") search)
+      typed=fst (applyInput (Hide.Protocol.Paste "hello") search)
       replacement=fst (applyInput (BrowserCommand Replace) typed)
-      filled=fst (applyInput (THC.Edit.Protocol.Paste "world") replacement)
+      filled=fst (applyInput (Hide.Protocol.Paste "world") replacement)
       back=fst (applyInput (BrowserCommand Find) filled)
       again=fst (applyInput (BrowserCommand Replace) back)
   check "browser Find and Replace commands switch tabs without losing text" (case dialog again of Just dg -> [value | Input _ value _<-fields dg]==["hello","world"]; _->False)

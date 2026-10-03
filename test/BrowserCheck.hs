@@ -10,10 +10,10 @@ import System.FilePath ((</>), takeDirectory, takeFileName)
 import System.IO (hClose, openBinaryTempFile)
 import Data.Maybe (isJust)
 import qualified Graphics.Vty as V
-import qualified THC.Edit.App as App
-import THC.Edit.Model
-import THC.Edit.Files (filePath)
-import THC.Edit.Browser
+import qualified Hide.App as App
+import Hide.Model
+import Hide.Files (filePath)
+import Hide.Browser
 
 checks :: IO ()
 checks = do
@@ -121,7 +121,7 @@ checks = do
     isLeft _ = False
     makeDirectory = do
       base <- getTemporaryDirectory
-      (path, handle) <- openBinaryTempFile base "thc-edit-browser-check"
+      (path, handle) <- openBinaryTempFile base "hide-browser-check"
       hClose handle
       removeFile path
       createDirectory path

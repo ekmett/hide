@@ -5,11 +5,11 @@ import Control.Monad (forM_, unless)
 import Control.Exception (evaluate)
 import System.Timeout (timeout)
 import qualified Data.Text as T
-import THC.Edit.Buffer (displayColumn)
-import THC.Edit.Model
-import THC.Edit.Render (snapshotHtml)
-import THC.Edit.Markdown
-import THC.Edit.Syntax (Style(..),linkSpans)
+import Hide.Buffer (displayColumn)
+import Hide.Model
+import Hide.Render (snapshotHtml)
+import Hide.Markdown
+import Hide.Syntax (Style(..),linkSpans)
 
 checks :: IO ()
 checks = do

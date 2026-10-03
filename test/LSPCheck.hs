@@ -13,8 +13,8 @@ import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.FilePath ((</>))
 import System.IO (hClose, openTempFile)
 import System.Timeout (timeout)
-import qualified THC.Edit.Buffer as Buffer
-import THC.Edit.LSP
+import qualified Hide.Buffer as Buffer
+import Hide.LSP
 
 checks :: IO ()
 checks = do
@@ -117,7 +117,7 @@ checks = do
     result events = case [value | Response _ response <- events, Just value <- [parseMaybe (withObject "response" (.: "result")) response]] of value:_ -> Just value; [] -> Nothing
     temporary = do
       root <- getTemporaryDirectory
-      (path, file) <- openTempFile root "thc-edit-lsp-check"
+      (path, file) <- openTempFile root "hide-lsp-check"
       hClose file
       removeFile path
       createDirectory path

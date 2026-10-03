@@ -11,11 +11,11 @@ import qualified Data.Text as T
 import System.Directory
 import System.Environment (lookupEnv,setEnv,unsetEnv)
 import System.IO (openTempFile,hClose)
-import qualified THC.Edit.App as App
-import THC.Edit.Buffer
-import THC.Edit.ControlMCP
-import THC.Edit.MCPPermissions (readEditorDefaults,permissionConfigPath)
-import THC.Edit.Model
+import qualified Hide.App as App
+import Hide.Buffer
+import Hide.ControlMCP
+import Hide.MCPPermissions (readEditorDefaults,permissionConfigPath)
+import Hide.Model
 
 checks :: IO ()
 checks=bracket temporary removePathForcibly $ \root ->

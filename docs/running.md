@@ -41,7 +41,7 @@ Arguments go directly to the process; shell syntax is not interpreted. Settings
 live in the user configuration directory. The Cabal target belongs to the
 selected project, while the compiler installation is shared.
 
-[![Build target dialog for the thc-edit project, with compiler, Cabal target, toolchain and arguments.](site/screenshots/build-target.png)](site/screenshots/build-target.png)
+[![Build target dialog for the hide project, with compiler, Cabal target, toolchain and arguments.](site/screenshots/build-target.png)](site/screenshots/build-target.png)
 
 Run uses an embedded terminal when the [terminal build](install.md#embedded-terminal)
 is available. Basic builds capture output without interactive input; **Run >

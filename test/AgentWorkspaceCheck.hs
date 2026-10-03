@@ -12,7 +12,7 @@ import System.FilePath ((</>), takeDirectory)
 import System.Info (os)
 import System.IO (hClose, openTempFile)
 import System.Process (proc, cwd, readCreateProcessWithExitCode)
-import THC.Edit.AgentWorkspace
+import Hide.AgentWorkspace
 
 checks :: IO ()
 checks=bracket temporary removePathForcibly $ \root -> do

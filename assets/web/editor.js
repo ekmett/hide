@@ -258,7 +258,7 @@ function connect(){
      acknowledged=Math.max(acknowledged,message.seq);if(Object.hasOwn(message,"dirty"))unsaved=message.dirty;guardLeave();
    }else if(message.type==='detached'){
      detached=true;closed=true;ready=false;guardLeave();fullscreen.disabled=true;
-     status.textContent='Session detached. Resume from your terminal with thc-edit --resume.';
+     status.textContent='Session detached. Resume from your terminal with hide --resume.';
      navigator.keyboard?.unlock?.();socket.close();
    }else if(message.type==='closed'){
      closed=true;ready=false;guardLeave();fullscreen.disabled=true;
@@ -363,6 +363,6 @@ fullscreen.addEventListener('click',async()=>{
  }catch(error){status.textContent=`Keyboard capture unavailable: ${error.message}`;}
  input.focus({preventScroll:true});
 });
-document.addEventListener('fullscreenchange',()=>{if(!document.fullscreenElement){navigator.keyboard?.unlock?.();status.textContent=detached?'Session detached. Resume with thc-edit --resume.':closed?'Editor closed. You can close this tab.':ready?'Connected':'Disconnected';}resize();});
+document.addEventListener('fullscreenchange',()=>{if(!document.fullscreenElement){navigator.keyboard?.unlock?.();status.textContent=detached?'Session detached. Resume with hide --resume.':closed?'Editor closed. You can close this tab.':ready?'Connected':'Disconnected';}resize();});
 canvas.addEventListener('webglcontextlost',e=>{e.preventDefault();status.textContent='WebGL context lost — reload to reconnect; buffers stay in the editor.';});
 input.focus({preventScroll:true});

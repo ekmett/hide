@@ -66,7 +66,7 @@ screenshotNames = "editor-conversation.png" : map (<.> "png")
    "conversation", "debug-step", "debug-menu", "debug-stack", "side-by-side", "window-views-menu", "shell-block-menu", "documentation-links"]
 
 repo :: String
-repo = "https://github.com/ekmett/thc-edit"
+repo = "https://github.com/ekmett/hide"
 
 guidePath :: Guide -> FilePath
 guidePath (Guide _ slug _) = "guides" </> slug <.> "html"
@@ -81,7 +81,7 @@ main = do
       buildSite revision pandoc
       checkSite revision
     ["check", revision] -> checkRevision revision >> checkSite revision
-    _ -> die "Usage: thc-edit-docs (build REVISION PANDOC | check REVISION)"
+    _ -> die "Usage: hide-docs (build REVISION PANDOC | check REVISION)"
 
 checkRevision :: String -> IO ()
 checkRevision revision = do
@@ -117,7 +117,7 @@ buildSite revision pandoc = do
     createDirectoryIfMissing True (site </> "assets/screenshots")
     copyFile ("docs/site/screenshots" </> name) (site </> "assets/screenshots" </> name)
   forM_ guides $ \guide@(Guide source _ title) -> renderGuide revision pandoc source (guidePath guide) title
-  renderGuide revision pandoc "docs/site/index.md" "home.html" "Turbo Haskell editor"
+  renderGuide revision pandoc "docs/site/index.md" "home.html" "hide — Haskell IDE"
   renderShell revision ("home.html" : map guidePath guides)
   Text.writeFile (site </> "revision.txt") (Text.pack (revision ++ "\n"))
   Text.writeFile (site </> ".nojekyll") ""
@@ -132,7 +132,7 @@ filesBelow root = do
     directory <- doesDirectoryExist path
     if directory then filesBelow path else pure [path]
 
--- Always relative to the generated site root: file://, / and /thc-edit/ all agree.
+-- Always relative to the generated site root: file://, / and /hide/ all agree.
 fromPage :: FilePath -> FilePath -> String
 fromPage page target = concat (replicate depth "../") ++ target
   where depth = length (filter (/= ".") (splitDirectories (takeDirectory page)))
@@ -176,19 +176,19 @@ renderShell revision pages = do
       html = "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">" ++
         "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">" ++
         "<meta name=\"thc-revision\" content=\"" ++ revision ++ "\">" ++
-        "<title>thc-edit documentation</title><script src=\"assets/theme.js\"></script>" ++
+        "<title>hide documentation</title><script src=\"assets/theme.js\"></script>" ++
         "<link rel=\"stylesheet\" href=\"assets/site.css\"></head>" ++
         "<body class=\"thc-shell\"><button class=\"thc-menu\" type=\"button\" aria-expanded=\"false\" " ++
         "aria-controls=\"thc-rail\">Documentation menu</button><div class=\"thc-shell-layout\">" ++
         "<aside class=\"thc-rail\" id=\"thc-rail\"><a class=\"thc-brand\" href=\"home.html\" " ++
-        "data-page=\"home.html\" target=\"thc-content\">thc-edit<span> / docs</span></a>" ++
+        "data-page=\"home.html\" target=\"thc-content\">hide<span> / docs</span></a>" ++
         "<fieldset class=\"thc-appearance\" id=\"thc-appearance\"><legend>Appearance</legend>" ++
         "<div class=\"thc-theme-options\">" ++
         "<button type=\"button\" data-thc-appearance=\"light\" aria-pressed=\"false\">Light</button>" ++
         "<button type=\"button\" data-thc-appearance=\"dark\" aria-pressed=\"false\">Dark</button>" ++
         "<button type=\"button\" data-thc-appearance=\"system\" aria-pressed=\"true\">Follow OS</button>" ++
         "</div></fieldset>" ++
-        "<nav aria-label=\"thc-edit documentation\"><p class=\"thc-nav-label\">Start</p>" ++
+        "<nav aria-label=\"hide documentation\"><p class=\"thc-nav-label\">Start</p>" ++
         item "home.html" "Overview" ++
         "<a class=\"thc-nav-link\" href=\"" ++ repo ++
         "\" target=\"_blank\" rel=\"noopener noreferrer\">GitHub ↗</a>" ++
@@ -198,7 +198,7 @@ renderShell revision pages = do
         "<p>Terminal · Native · Browser</p>" ++
         link (repo ++ "/tree/" ++ revision) "Source ↗" ++ " · " ++
         link (repo ++ "/commit/" ++ revision) (take 12 revision) ++ "</div></aside>" ++
-        "<iframe id=\"thc-content\" name=\"thc-content\" title=\"thc-edit documentation content\" " ++
+        "<iframe id=\"thc-content\" name=\"thc-content\" title=\"hide documentation content\" " ++
         "src=\"home.html\"></iframe></div>" ++ manifest ++
         "<script src=\"assets/site.js\" defer></script></body></html>"
   Text.writeFile (site </> "index.html") (Text.pack html)
@@ -209,7 +209,7 @@ renderGuide revision pandoc source output title = do
   tags <- mapM rewriteTag (parseTags fragment)
   let content = "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">" ++
         "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>" ++ escape title ++
-        " · thc-edit</title></head><body class=\"thc-guide\">" ++
+        " · hide</title></head><body class=\"thc-guide\">" ++
         "<main class=\"thc-prose\" id=\"main\">" ++ renderTags tags ++
         "<footer class=\"thc-footer\">" ++ link (repo ++ "/blob/" ++ revision ++ "/" ++ source) "View this page's source" ++
         "</footer></main></body></html>"
@@ -292,7 +292,7 @@ checkSite revision = do
     die "Missing site route inventory, content frame, or appearance control"
   putStrLn ("Documentation checked: " ++ show (length guides) ++ " guides, " ++ show (Map.size pages) ++
     " HTML pages, " ++ show (sum [length urls | (_,urls) <- Map.elems pages]) ++
-    " links/assets; relative paths also work below /thc-edit/. Revision " ++ revision)
+    " links/assets; relative paths also work below /hide/. Revision " ++ revision)
 
 checkURL :: Set.Set FilePath -> Map.Map FilePath (Set.Set String, [String]) -> FilePath -> String -> [String]
 checkURL inventory pages page url

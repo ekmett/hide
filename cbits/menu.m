@@ -13,7 +13,7 @@ static NSMutableDictionary<NSNumber *, NSMenuItem *> *items;
 
 /* Set before SDL creates NSApplication: unbundled launches otherwise inherit
  * the executable name for the application menu. */
-void thc_menu_prepare(void) { [[NSProcessInfo processInfo] setProcessName:@"Turbo Haskell"]; }
+void thc_menu_prepare(void) { [[NSProcessInfo processInfo] setProcessName:@"Haskell"]; }
 
 static NSMenuItem *commandItem(NSString *title, NSString *shortcut, int command, int enabled) {
     BOOL option = [shortcut hasPrefix:@"~"];
@@ -29,10 +29,10 @@ void thc_menu_clear(int about, int settings, int quit) {
     if (!target) target = [THCMenuTarget new];
     items = [NSMutableDictionary new];
     NSMenu *bar = [NSMenu new];
-    NSMenuItem *appItem = [[NSMenuItem alloc] initWithTitle:@"Turbo Haskell" action:nil keyEquivalent:@""];
-    NSMenu *appMenu = [[NSMenu alloc] initWithTitle:@"Turbo Haskell"];
+    NSMenuItem *appItem = [[NSMenuItem alloc] initWithTitle:@"Haskell" action:nil keyEquivalent:@""];
+    NSMenu *appMenu = [[NSMenu alloc] initWithTitle:@"Haskell"];
     [appMenu setAutoenablesItems:NO];
-    [appMenu addItem:commandItem(@"About Turbo Haskell", @"", about, 1)];
+    [appMenu addItem:commandItem(@"About Haskell", @"", about, 1)];
     [appMenu addItem:[NSMenuItem separatorItem]];
     [appMenu addItem:commandItem(@"Settings…", @",", settings, 1)];
     [appMenu addItem:[NSMenuItem separatorItem]];
@@ -41,12 +41,12 @@ void thc_menu_clear(int about, int settings, int quit) {
     [servicesItem setSubmenu:services];
     [NSApp setServicesMenu:services];
     [appMenu addItem:[NSMenuItem separatorItem]];
-    [appMenu addItemWithTitle:@"Hide Turbo Haskell" action:@selector(hide:) keyEquivalent:@"h"];
+    [appMenu addItemWithTitle:@"Hide Haskell" action:@selector(hide:) keyEquivalent:@"h"];
     NSMenuItem *hideOthers = [appMenu addItemWithTitle:@"Hide Others" action:@selector(hideOtherApplications:) keyEquivalent:@"h"];
     [hideOthers setKeyEquivalentModifierMask:NSEventModifierFlagCommand | NSEventModifierFlagOption];
     [appMenu addItemWithTitle:@"Show All" action:@selector(unhideAllApplications:) keyEquivalent:@""];
     [appMenu addItem:[NSMenuItem separatorItem]];
-    [appMenu addItem:commandItem(@"Quit Turbo Haskell", @"q", quit, 1)];
+    [appMenu addItem:commandItem(@"Quit Haskell", @"q", quit, 1)];
     [appItem setSubmenu:appMenu];
     [bar addItem:appItem];
     [NSApp setMainMenu:bar];

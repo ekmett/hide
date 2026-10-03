@@ -5,13 +5,13 @@ import Data.Aeson
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.ByteString as BS
-import THC.Edit.RemoteWindow
+import Hide.RemoteWindow
 #ifdef WITH_REMOTE
 import qualified Data.ByteString.Lazy as BL
 import Data.Aeson.Types (parseEither)
-import qualified THC.Edit.Protocol as P
-import THC.Edit.Buffer (newBuffer)
-import THC.Edit.Model (initialDesktop, addDocument, Desktop(..))
+import qualified Hide.Protocol as P
+import Hide.Buffer (newBuffer)
+import Hide.Model (initialDesktop, addDocument, Desktop(..))
 #endif
 
 checks :: IO ()

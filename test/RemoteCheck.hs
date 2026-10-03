@@ -22,15 +22,15 @@ import System.Posix.Files (setFileMode)
 import Data.List (isInfixOf)
 #endif
 import System.Timeout (timeout)
-import THC.Edit.Buffer (newBuffer, markSaved)
+import Hide.Buffer (newBuffer, markSaved)
 import qualified Data.Map.Strict as M
-import THC.Edit.EditorMCP (editorResponse, runEditorMCPWithHandles, runEditorMCPWithToken, readMCPLine)
-import THC.Edit.Markdown (renderMarkdown)
-import THC.Edit.Model
-import THC.Edit.Protocol
-import THC.Edit.Remote
-import THC.Edit.RemoteEndpoint
-import qualified THC.Edit.Session as S
+import Hide.EditorMCP (editorResponse, runEditorMCPWithHandles, runEditorMCPWithToken, readMCPLine)
+import Hide.Markdown (renderMarkdown)
+import Hide.Model
+import Hide.Protocol
+import Hide.Remote
+import Hide.RemoteEndpoint
+import qualified Hide.Session as S
 isolatedStore :: IO a -> IO a
 #ifndef mingw32_HOST_OS
 isolatedStore action=do
@@ -266,10 +266,10 @@ sshFailureCheck = do
       bracket_ (setEnv "PATH" directory) (maybe (unsetEnv "PATH") (setEnv "PATH") oldPath) $ do
         result <- timeout 3000000 (try (withSSHPeer "example.invalid" ["--","some'path; $(false)"] $ \peer ->
           let receive=peerReceive peer >>= maybe (pure ()) (const receive) in receive) :: IO (Either IOException ()))
-        unless (case result of Just (Left err) -> "thc-edit is not installed" `isInfixOf` show err; _ -> False)
-          (error "Missing remote thc-edit must fail clearly without retrying")
+        unless (case result of Just (Left err) -> "hide is not installed" `isInfixOf` show err; _ -> False)
+          (error "Missing remote hide must fail clearly without retrying")
       launched <- readFile command
-      unless (launched=="thc-edit --remote") (error "SSH must not interpolate remote paths into the login shell command")
+      unless (launched=="hide --remote") (error "SSH must not interpolate remote paths into the login shell command")
       attempts <- readFile counter
       unless (lines attempts==["attempt"]) (error "Missing remote executable retried SSH")
       writeFile executable "#!/bin/sh\nexec /bin/sleep 30\n"

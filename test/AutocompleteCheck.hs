@@ -17,9 +17,9 @@ import System.FilePath ((</>))
 import System.IO (hClose, openTempFile)
 import System.Timeout (timeout)
 import AutocompleteACPCheck (fixture)
-import THC.Edit.Autocomplete
-import THC.Edit.Buffer
-import THC.Edit.Model
+import Hide.Autocomplete
+import Hide.Buffer
+import Hide.Model
 
 checks :: IO ()
 checks=bracket temporary removePathForcibly $ \root->do

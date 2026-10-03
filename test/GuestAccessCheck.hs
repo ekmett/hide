@@ -4,12 +4,12 @@ import Control.Monad (unless,forM_)
 import qualified Data.Map.Strict as M
 import qualified Data.Text as T
 import qualified Graphics.Vty as V
-import THC.Edit.Browser (Entry(..))
-import THC.Edit.Files (FileState(..))
-import THC.Edit.Buffer
-import THC.Edit.GuestAccess
-import THC.Edit.Model
-import qualified THC.Edit.Protocol as P
+import Hide.Browser (Entry(..))
+import Hide.Files (FileState(..))
+import Hide.Buffer
+import Hide.GuestAccess
+import Hide.Model
+import qualified Hide.Protocol as P
 
 checks :: IO ()
 checks=do

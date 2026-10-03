@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Ctrl-C stops a browser session daemon, retaining unsaved work for resume.
-Usage: python3 test/interrupt-session.py /absolute/path/to/thc-edit
+Usage: python3 test/interrupt-session.py /absolute/path/to/hide
 Only creates, interrupts and closes its own temporary session.
 """
 import os
@@ -24,7 +24,7 @@ try:
     source.write_text('original\n')
     env = dict(os.environ, XDG_DATA_HOME=str(root / 'data'),
                XDG_CONFIG_HOME=str(root / 'config'), THC_EDIT_WEB_OPEN='0',
-               thc_edit_datadir=str(Path(__file__).resolve().parents[1]))
+               hide_datadir=str(Path(__file__).resolve().parents[1]))
     def run(*args):
         return subprocess.check_output([binary, *args], cwd=root, env=env,
                                        stdin=subprocess.DEVNULL, text=True, timeout=45)
@@ -104,7 +104,7 @@ try:
             frontend.send_signal(signal.SIGINT)
             frontend.wait(timeout=20)
             log.seek(0)
-            assert 'Resume: thc-edit --resume ' + ident in log.read()
+            assert 'Resume: hide --resume ' + ident in log.read()
             await_state('recoverable')
             assert daemon.wait(timeout=15) == 0
         assert source.read_text() == 'original\n'

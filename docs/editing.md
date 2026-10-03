@@ -4,8 +4,8 @@ Open a directory to work on its files, or pass filenames to put them directly
 on the desktop:
 
 ```sh
-thc-edit .
-thc-edit src/Main.hs src/Library.hs
+hide .
+hide src/Main.hs src/Library.hs
 ```
 
 With no argument, the editor finds the nearest enclosing Cabal package, falling
@@ -203,8 +203,8 @@ window shortcuts when the OS intercepts it.
 
 Press **F10** to enter the menu bar, then use arrows or letter mnemonics.
 The status bar describes the highlighted action. Its key labels are clickable.
-On macOS, **Turbo Haskell > Settings…** (⌘,) opens **Options > Preferences**;
-**About Turbo Haskell** opens the About dialog. The native menu bar provides ⌘
+On macOS, **Haskell > Settings…** (⌘,) opens **Options > Preferences**;
+**About Haskell** opens the About dialog. The native menu bar provides ⌘
 shortcuts. Other Control bindings remain Control; ⌘ is not a universal substitute. Function keys may need Fn/Globe.
 
 [![File popup menu with Open selected in green and native Mac shortcuts.](site/screenshots/file-menu.png)](site/screenshots/file-menu.png)
@@ -223,7 +223,7 @@ under a new name and refuses to replace an existing destination. **Alt+F3**
 (⌘W) closes the current window; **Ctrl+Q** or **Alt+X** (⌘Q) exits. Closing the
 last view of a changed file, or exiting with changed files,
 asks what to save. **File > Exit** ends the editor session. To leave the desktop
-running, detach and use `thc-edit --resume` later; **Ctrl+]** detaches from the
+running, detach and use `hide --resume` later; **Ctrl+]** detaches from the
 terminal frontend. See [sessions](sessions.md) for the other frontends.
 
 A title star means the buffer has unsaved edits. The branch badge's star means

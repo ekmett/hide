@@ -5,9 +5,9 @@ import Control.Monad (forM_,unless)
 import Data.Aeson (Value(..))
 import qualified Data.Text as T
 import qualified Data.Vector as V
-import THC.Edit.Buffer
-import THC.Edit.InlineState
-import THC.Edit.InlineTypes
+import Hide.Buffer
+import Hide.InlineState
+import Hide.InlineTypes
 
 checks :: IO ()
 checks=do

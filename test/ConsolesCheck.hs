@@ -14,11 +14,11 @@ import System.Process (readProcessWithExitCode)
 import System.Exit (ExitCode(..))
 import System.Info (os)
 import System.Environment (lookupEnv)
-import THC.Edit.Buffer
-import THC.Edit.Consoles
-import THC.Edit.Model
-import THC.Edit.Syntax (Style(..))
-import THC.Edit.Terminal
+import Hide.Buffer
+import Hide.Consoles
+import Hide.Model
+import Hide.Syntax (Style(..))
+import Hide.Terminal
 
 checks :: IO ()
 checks = withConsoles $ \consoles -> do

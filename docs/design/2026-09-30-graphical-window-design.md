@@ -2,7 +2,7 @@
 
 User request: an optional Metal/Vulkan window with the existing UI, tightly joined cells, preferably a classic IBM font. Play the interface straight. Terminal mode stays available and its build need not acquire graphical dependencies.
 
-`thc-edit --window` uses an optional Cabal `window` flag and SDL3 >=3.2. macOS explicitly selects Metal; Linux and Windows select Vulkan. A failed backend is an actionable error, never a silent software fallback. SDL handles the native window, events, HiDPI and presentation through a small C FFI bridge; editor state, widgets and rendering layout remain Haskell.
+`hide --window` uses an optional Cabal `window` flag and SDL3 >=3.2. macOS explicitly selects Metal; Linux and Windows select Vulkan. A failed backend is an actionable error, never a silent software fallback. SDL handles the native window, events, HiDPI and presentation through a small C FFI bridge; editor state, widgets and rendering layout remain Haskell.
 
 The graphical renderer consumes the same Vty display spans used by the terminal and snapshot renderer. Bitmap glyphs and cell backgrounds are composed into a compact pixel buffer and uploaded to a nearest-filtered texture. This deliberately simple renderer redraws on input/exposure, not continuously. No shaders or custom Vulkan device management are needed.
 

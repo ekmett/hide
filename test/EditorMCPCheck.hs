@@ -15,10 +15,10 @@ import qualified Data.Map.Strict as M
 import Data.Maybe (fromJust)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import THC.Edit.EditorMCP
-import THC.Edit.Files (FileState(..))
-import THC.Edit.Buffer
-import THC.Edit.Model
+import Hide.EditorMCP
+import Hide.Files (FileState(..))
+import Hide.Buffer
+import Hide.Model
 
 checks :: IO ()
 checks = do
@@ -106,7 +106,7 @@ checks = do
   allowed<-strict [agentSpec] (request "agents_list" (object []))
   check "strict registered tool reaches controller" (maybe False (T.isInfixOf "ready" . text) allowed)
   check "strict registered tool dispatched once" . (==3) =<< readIORef invoked
-  (_,readSkill)<-editorResponseWith debugTools execute edited (rpc "resources/read" (object ["uri" .= ("thc-edit://debugging"::T.Text)]))
+  (_,readSkill)<-editorResponseWith debugTools execute edited (rpc "resources/read" (object ["uri" .= ("hide://debugging"::T.Text)]))
   skill<-readSkill
   check "MCP packaged skill readable" (maybe False (T.isInfixOf "name: debug-editor" . text) skill)
   let token=T.replicate 48 "a"

@@ -15,7 +15,7 @@ import qualified Data.Text as T
 import System.Timeout (timeout)
 import System.Directory (getTemporaryDirectory, canonicalizePath)
 import System.FilePath ((</>))
-import THC.Edit.AgentHub
+import Hide.AgentHub
 
 checks :: IO ()
 checks=do

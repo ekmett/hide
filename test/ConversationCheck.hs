@@ -32,20 +32,20 @@ import qualified System.Posix.IO as Posix
 #endif
 import System.Info (os)
 import System.Timeout (timeout)
-import THC.Edit.Render (snapshot, snapshotHtml)
-import THC.Edit.Buffer
-import qualified THC.Edit.App as App
-import THC.Edit.GuestAccess (guestCommandAllowed, protectedBuffer)
-import THC.Edit.Conversation
-import qualified THC.Edit.AgentHub as AH
-import qualified THC.Edit.AgentRuntime as AR
+import Hide.Render (snapshot, snapshotHtml)
+import Hide.Buffer
+import qualified Hide.App as App
+import Hide.GuestAccess (guestCommandAllowed, protectedBuffer)
+import Hide.Conversation
+import qualified Hide.AgentHub as AH
+import qualified Hide.AgentRuntime as AR
 import System.Mem.StableName (makeStableName)
-import THC.Edit.Files
-import THC.Edit.Model hiding (prompt)
-import THC.Edit.Markdown (renderMarkdown)
-import THC.Edit.Syntax (Style(..))
-import THC.Edit.Terminal (terminalAvailable)
-import THC.Edit.Session (checkpointPath)
+import Hide.Files
+import Hide.Model hiding (prompt)
+import Hide.Markdown (renderMarkdown)
+import Hide.Syntax (Style(..))
+import Hide.Terminal (terminalAvailable)
+import Hide.Session (checkpointPath)
 
 -- Draft code is ordinary Markdown carried by the existing Buffer. Exercise
 -- user edits and submitted/copy payloads, without depending on bubble artwork.

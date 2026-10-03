@@ -10,10 +10,10 @@ import qualified Data.Text.Encoding as TE
 import System.Directory
 import System.FilePath ((</>))
 import System.IO (hClose, openBinaryTempFile)
-import THC.Edit.AgentFiles
-import THC.Edit.Buffer
-import THC.Edit.Files
-import THC.Edit.Model
+import Hide.AgentFiles
+import Hide.Buffer
+import Hide.Files
+import Hide.Model
 
 checks :: IO ()
 checks = bracket temporary removePathForcibly $ \base -> do
@@ -147,7 +147,7 @@ checks = bracket temporary removePathForcibly $ \base -> do
   where
     temporary=do
       base<-getTemporaryDirectory
-      (path,handle)<-openBinaryTempFile base "thc-edit-agent-files"
+      (path,handle)<-openBinaryTempFile base "hide-agent-files"
       hClose handle
       removeFile path
       createDirectory path

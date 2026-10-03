@@ -17,7 +17,7 @@ import System.Directory
 import System.FilePath ((</>))
 import System.IO (hClose, openTempFile)
 import System.Timeout (timeout)
-import THC.Edit.LSP
+import Hide.LSP
 
 main :: IO ()
 main = bracket temporary removePathForcibly $ \root -> do

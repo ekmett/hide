@@ -9,8 +9,8 @@ import qualified Data.Text as T
 import System.Directory
 import System.FilePath ((</>))
 import System.IO (hClose, openBinaryTempFile)
-import THC.Edit.Buffer
-import THC.Edit.Files
+import Hide.Buffer
+import Hide.Files
 
 check :: String -> Bool -> IO ()
 check name ok = unless ok (error name)
@@ -104,7 +104,7 @@ checks = bracket makeDirectory removePathForcibly $ \dir -> do
   where
     makeDirectory = do
       base <- getTemporaryDirectory
-      (path, handle) <- openBinaryTempFile base "thc-edit-files-check"
+      (path, handle) <- openBinaryTempFile base "hide-files-check"
       hClose handle
       removeFile path
       createDirectory path

@@ -1,6 +1,7 @@
 # Editor guide
 
-`thc-edit` is Turbo Haskell’s source editor. These guides cover editing files,
+hide is a Haskell IDE and the Turbo Haskell editor. It does not require
+Turbo Haskell to function. These guides cover editing files,
 using Haskell language tools, building and debugging programs, reviewing Git
 changes and working with agents. The same editor runs in a terminal, a native
 window or a browser, locally or over SSH.
@@ -17,7 +18,7 @@ window or a browser, locally or over SSH.
 | Inspect and change binary files | [Hex editing](hex.md) |
 
 [F1 Help](../README.md) is the short guide bundled with the editor. The command
-`thc-edit --help` lists startup options.
+`hide --help` lists startup options.
 
 ## Working on a project
 

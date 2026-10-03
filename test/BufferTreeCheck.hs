@@ -7,8 +7,8 @@ import GHC.Conc (getAllocationCounter)
 import System.Mem.StableName (makeStableName)
 import qualified Data.ByteString as BS
 import qualified Data.Text as T
-import THC.Edit.Buffer
-import qualified THC.Edit.BufferView as View
+import Hide.Buffer
+import qualified Hide.BufferView as View
 
 check :: String -> Bool -> IO ()
 check name ok = unless ok (error ("buffer tree: " ++ name))

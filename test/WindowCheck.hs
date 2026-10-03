@@ -5,15 +5,15 @@ import Control.Exception (evaluate)
 import Data.Maybe (fromMaybe)
 import qualified Data.Map.Strict as M
 import Data.List (find)
-import THC.Edit.Frontend
-import THC.Edit.Model
-import THC.Edit.Render (snapshot, renderKey)
+import Hide.Frontend
+import Hide.Model
+import Hide.Render (snapshot, renderKey)
 import qualified Data.Text as T
-import THC.Edit.Buffer (newBuffer, Selection(..))
-import qualified THC.Edit.Buffer as B
-import THC.Edit.BufferView
-import THC.Edit.Files (FileState(..))
-import THC.Edit.Syntax (Style(..))
+import Hide.Buffer (newBuffer, Selection(..))
+import qualified Hide.Buffer as B
+import Hide.BufferView
+import Hide.Files (FileState(..))
+import Hide.Syntax (Style(..))
 import qualified Data.Vector as Vec
 import qualified Graphics.Vty as V
 checks :: IO ()

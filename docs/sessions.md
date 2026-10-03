@@ -7,7 +7,7 @@ process, whether the project is local or reached over SSH.
 ## Return to your work
 
 ```sh
-thc-edit --resume
+hide --resume
 ```
 
 With one unfinished session, the editor opens it directly. With several, it
@@ -16,7 +16,7 @@ the launching terminal. If there is no interactive terminal, select the session
 explicitly:
 
 ```sh
-thc-edit --resume ID
+hide --resume ID
 ```
 
 Use the ID printed when detaching, or any prefix that identifies it uniquely.
@@ -29,9 +29,9 @@ add a path or `--ssh` to `--resume`.
 Choose the frontend as usual when returning:
 
 ```sh
-thc-edit --terminal --resume
-thc-edit --window --resume
-thc-edit --web --resume
+hide --terminal --resume
+hide --window --resume
+hide --web --resume
 ```
 
 `--metal` and `--vulkan` also work. The native and browser displays are included unless disabled at build time. Only one frontend controls a session at a time, so detach
@@ -64,9 +64,9 @@ while disconnected detaches without queuing an Exit for later delivery.
 ## Run without a display
 
 ```sh
-thc-edit --daemon .
-thc-edit --sessions
-thc-edit --window --resume ID
+hide --daemon .
+hide --sessions
+hide --window --resume ID
 ```
 
 `--daemon` starts the desktop, waits until it is ready, prints its ID and returns.

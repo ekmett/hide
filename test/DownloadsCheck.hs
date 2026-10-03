@@ -5,7 +5,7 @@ import Control.Exception (finally)
 import Control.Monad (unless)
 import Data.Either (isLeft)
 import System.Timeout (timeout)
-import THC.Edit.Downloads
+import Hide.Downloads
 checks :: IO ()
 checks=withDownloads $ \downloads -> do
   entered<-newEmptyMVar

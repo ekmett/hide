@@ -151,7 +151,7 @@ Refresh generation after execution changes. Stack/variable inspection requires
 a stopped target. Inspection pages default to 100 entries, maximum 1000.
 Breakpoints use 1-based lines, at most 1000. See the
 [debugging skill](agent-skills.md#debug-a-program), also published as
-`thc-edit://debugging` through MCP resources.
+`hide://debugging` through MCP resources.
 
 ## Git
 
@@ -413,6 +413,6 @@ already executed. Long-running questions, HLS and debugger replies release the
 desktop lock while waiting. After a disconnect or uncertain reply, inspect current
 state before retrying a mutation. IDs belong to the editor session.
 
-External clients connect with `thc-edit --mcp-editor SESSION_ID`. The bridge
+External clients connect with `hide --mcp-editor SESSION_ID`. The bridge
 shares the session without taking over its display. Skills describe workflows;
 MCP tool schemas and host policy govern the actual calls.

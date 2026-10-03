@@ -16,9 +16,9 @@ import System.Directory
 import System.FilePath ((</>))
 import System.IO (hClose, openTempFile)
 import System.Timeout (timeout)
-import qualified THC.Edit.ACP as A
-import THC.Edit.AgentACP
-import THC.Edit.AgentHub
+import qualified Hide.ACP as A
+import Hide.AgentACP
+import Hide.AgentHub
 
 checks :: IO ()
 checks=bracket temporary removePathForcibly $ \root -> do

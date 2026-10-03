@@ -16,9 +16,9 @@ import System.IO (openTempFile,hClose)
 import System.Timeout (timeout)
 import System.Process (readProcessWithExitCode)
 import System.Exit (ExitCode(..))
-import qualified THC.Edit.ACP as ACP
-import THC.Edit.Copilot
-import THC.Edit.InlineTypes
+import qualified Hide.ACP as ACP
+import Hide.Copilot
+import Hide.InlineTypes
 
 checks :: IO ()
 checks=bracket temporary removePathForcibly $ \root->do

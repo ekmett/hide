@@ -3,8 +3,8 @@ module ClipboardMCPCheck (checks) where
 import Control.Monad (unless)
 import Data.Aeson
 import qualified Data.Text as T
-import THC.Edit.ClipboardMCP
-import THC.Edit.Model
+import Hide.ClipboardMCP
+import Hide.Model
 
 checks :: IO ()
 checks=do

@@ -18,12 +18,12 @@ import System.FilePath ((</>))
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.IO (hClose, openTempFile)
 import System.Timeout (timeout)
-import THC.Edit.Buffer
-import THC.Edit.MCPPermissions
-import THC.Edit.Model
-import THC.Edit.Render (snapshot, snapshotHtml)
-import THC.Edit.GuestAccess (readableAt, guestKeyboardAllowed, guestEffectsAllowed)
-import THC.Edit.WorkspaceFilesMCP (fileTools, fileTool)
+import Hide.Buffer
+import Hide.MCPPermissions
+import Hide.Model
+import Hide.Render (snapshot, snapshotHtml)
+import Hide.GuestAccess (readableAt, guestKeyboardAllowed, guestEffectsAllowed)
+import Hide.WorkspaceFilesMCP (fileTools, fileTool)
 
 checks :: IO ()
 checks=do

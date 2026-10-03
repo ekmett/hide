@@ -5,26 +5,26 @@ import Control.Monad (forM_, unless, when)
 import qualified Data.Map.Strict as M
 import Data.Aeson (object, (.=))
 import Data.List (intersperse)
-import THC.Edit.Syntax (Style(Plain))
+import Hide.Syntax (Style(Plain))
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
-import THC.Edit.Buffer (newBuffer, Selection(..), revision, contents, replaceSelection, bufferLineOffset, bufferLineChanges, bufferLineColumn, displayColumn, bufferLineCount)
-import THC.Edit.BufferView (BufferView(SideBySideView))
-import THC.Edit.Files (FileState(..))
-import THC.Edit.MCPPermissions (withPermissionsAt, permissionCall, policyEffects)
-import THC.Edit.WorkspaceFilesMCP (fileTools, fileTool)
+import Hide.Buffer (newBuffer, Selection(..), revision, contents, replaceSelection, bufferLineOffset, bufferLineChanges, bufferLineColumn, displayColumn, bufferLineCount)
+import Hide.BufferView (BufferView(SideBySideView))
+import Hide.Files (FileState(..))
+import Hide.MCPPermissions (withPermissionsAt, permissionCall, policyEffects)
+import Hide.WorkspaceFilesMCP (fileTools, fileTool)
 import qualified Graphics.Vty as V
 import System.Directory
 import System.Environment (getArgs, lookupEnv, setEnv, unsetEnv)
 import System.FilePath ((</>))
-import THC.Edit.App (applyEffects)
-import THC.Edit.Conversation (withConversationAt, conversationEffects, tickConversation, renderReply)
-import THC.Edit.Debugger (withDebugger, debuggerEffects, tickDebugger, hdbOfferDialog, downloadsDialog)
-import qualified THC.Edit.Compilers as Compilers
-import qualified THC.Edit.HdbAcquisition as Hdb
-import qualified THC.Edit.Downloads as Downloads
-import THC.Edit.Environment (environmentAction)
-import THC.Edit.Model
+import Hide.App (applyEffects)
+import Hide.Conversation (withConversationAt, conversationEffects, tickConversation, renderReply)
+import Hide.Debugger (withDebugger, debuggerEffects, tickDebugger, hdbOfferDialog, downloadsDialog)
+import qualified Hide.Compilers as Compilers
+import qualified Hide.HdbAcquisition as Hdb
+import qualified Hide.Downloads as Downloads
+import Hide.Environment (environmentAction)
+import Hide.Model
 import qualified EditorDriver as Driver
 
 main :: IO ()
@@ -51,7 +51,7 @@ main = do
   setEnv "XDG_DATA_HOME" (scratch </> "data")
   -- Never save an editing session.
   setEnv "XDG_CONFIG_HOME" (scratch </> "config")
-  setEnv "thc_edit_datadir" root
+  setEnv "hide_datadir" root
   unsetEnv "THC_ROOT"
   setEnv "THC_EDIT_CAPTURE_EXIT" "1"
   withDebugger $ \debugger -> withPermissionsAt (scratch </> "permissions.toml") fileTools $ \permissions -> do
@@ -65,7 +65,7 @@ main = do
           Just _ -> withConversationAt root $ \conversation -> do
             let liveEffects=conversationEffects conversation effects
             sent <- snd <$> liveEffects d [AgentAction "send" ["0",
-              "Read src/THC/Edit/Buffer.hs and explain its finger tree of lines in three short bullets (under 70 words). Read-only, please.",
+              "Read src/Hide/Buffer.hs and explain its finger tree of lines in three short bullets (under 70 words). Read-only, please.",
               "false","false","false"]]
             reply <- await "agent reply" (tickConversation conversation) ((=="Agent: end_turn") . status) sent
             followup <- snd <$> liveEffects reply [AgentAction "send" ["0",
@@ -131,7 +131,7 @@ main = do
           pure full
         permissionDiff d = case (activeWindow d,activeDocument d) of
           (Just w,Just doc) | first:rest<-take 6 (T.lines (contents (documentBuffer doc))) -> do
-            let patch=T.unlines (["--- a/src/THC/Edit/Buffer.hs","+++ b/src/THC/Edit/Buffer.hs","@@ -1,6 +1,7 @@"] ++
+            let patch=T.unlines (["--- a/src/Hide/Buffer.hs","+++ b/src/Hide/Buffer.hs","@@ -1,6 +1,7 @@"] ++
                   ["-"<>first,"+{-# LANGUAGE MultiParamTypeClasses #-}","+{-# LANGUAGE OverloadedStrings #-}"] ++ map (" "<>) rest)
             fst <$> permissionCall permissions (fileTool applyEffects) d "buffer_apply_diff"
               (object ["bufferId" .= bufferId w,"revision" .= revision (documentBuffer doc),"diff" .= patch])
@@ -140,7 +140,7 @@ main = do
           opened <- command Help (fst (handleEvent (V.EvResize 80 25) d {sideTree=Nothing}))
           case (activeWindow opened,activeDocument opened) of
             (Just w,Just doc) | block@(blockStart,_,_,raw):_<-documentShellBlocks doc -> do
-              unless (raw=="thc-edit .\n") (fail "Help shell screenshot source anchor changed")
+              unless (raw=="hide .\n") (fail "Help shell screenshot source anchor changed")
               let (row,_)=bufferLineColumn (documentBuffer doc) blockStart
                   scroll=max 0 (row-2)
                   positioned=modifyActive (\window -> window {bounds=Rect 1 1 78 11,scrollRow=scroll}) opened
@@ -170,7 +170,7 @@ main = do
               pure shown
             _ -> fail "README Installation link is missing"
         review d = do
-          let file=root </> "src/THC/Edit/Frontend.hs"
+          let file=root </> "src/Hide/Frontend.hs"
           source <- TIO.readFile file
           let replace before after buffer =
                 let (prefix,suffix)=T.breakOn before (contents buffer)
@@ -207,7 +207,7 @@ main = do
             [] -> fail "Missing Window menu"
         start = (initialDesktop (100,32))
           {videoMode=Just 3, crtFilter=True, pixelateUnicode=True, blinkCursor=False, streamerMode=True, nativeMac=True}
-    (_, loaded) <- applyEffects start [ReadPath root, ReadPath (root </> "src/THC/Edit/Buffer.hs")]
+    (_, loaded) <- applyEffects start [ReadPath root, ReadPath (root </> "src/Hide/Buffer.hs")]
     -- Start on a short source declaration, with the package visible behind it.
     let desktop = modifyActive (\w -> w {scrollRow=23}) loaded
         scenes =
@@ -233,7 +233,7 @@ main = do
           , ("split", \d -> command Zoom d >>= command SplitHorizontal >>= pure . modifyActive (\w -> w {scrollRow=45}))
           , ("environment", \d -> environmentAction "choose" ["1"] d {streamerMode=False} >>= typeText "PKG_CONFIG_PATH" >>= key (V.KChar '\t') [] >>= typeText (root </> ".deps/ghostty/share/pkgconfig"))
           , ("preferences", command EditorOptions)
-          , ("build-target", \d -> command RunOptions d >>= key (V.KChar '\t') [] >>= typeText "exe:thc-edit")
+          , ("build-target", \d -> command RunOptions d >>= key (V.KChar '\t') [] >>= typeText "exe:hide")
           , ("debug-launch", command (DebugCommand "launch"))
           , ("debug-menu", pure . (\d -> d {menu=Just (5,6)}))
           , ("toolchain", command ToolchainOptions)

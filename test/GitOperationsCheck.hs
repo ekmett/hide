@@ -18,12 +18,12 @@ import System.FilePath ((</>))
 import System.IO (hClose, openTempFile)
 import System.Process (proc, readCreateProcessWithExitCode)
 import System.Timeout (timeout)
-import qualified THC.Edit.App as App
-import THC.Edit.Buffer
-import THC.Edit.Files
-import THC.Edit.Git
-import THC.Edit.GitOperations
-import THC.Edit.Model
+import qualified Hide.App as App
+import Hide.Buffer
+import Hide.Files
+import Hide.Git
+import Hide.GitOperations
+import Hide.Model
 
 checks :: IO ()
 checks = bracket temporary removePathForcibly $ \base -> do

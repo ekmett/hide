@@ -15,13 +15,13 @@ import System.FilePath ((</>))
 import System.Info (os)
 import System.IO (openTempFile, hClose)
 import System.Timeout (timeout)
-import THC.Edit.Buffer
-import qualified THC.Edit.Build as B
-import qualified THC.Edit.BuildJobs as Jobs
-import THC.Edit.Conversation (withConversation, conversationServices)
-import THC.Edit.Files (FileState(..))
-import THC.Edit.Model
-import THC.Edit.TestsMCP
+import Hide.Buffer
+import qualified Hide.Build as B
+import qualified Hide.BuildJobs as Jobs
+import Hide.Conversation (withConversation, conversationServices)
+import Hide.Files (FileState(..))
+import Hide.Model
+import Hide.TestsMCP
 
 checks :: IO ()
 checks = bracket temporary removePathForcibly $ \root -> do

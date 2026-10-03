@@ -11,7 +11,7 @@ Install Haskell Language Server for the GHC used by your package and put
 `.hs` or `.lhs` files:
 
 ```sh
-thc-edit .
+hide .
 ```
 
 The editor starts `haskell-language-server-wrapper --lsp` in the detected project

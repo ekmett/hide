@@ -14,9 +14,9 @@ import System.Environment (getArgs)
 import System.IO (hPutStrLn, stderr)
 import System.Timeout (timeout)
 import Text.Read (readMaybe)
-import THC.Edit.App (applyEffects)
-import THC.Edit.Debugger
-import THC.Edit.Model
+import Hide.App (applyEffects)
+import Hide.Debugger
+import Hide.Model
 import qualified EditorDriver as Driver
 
 main :: IO ()

@@ -3,8 +3,8 @@ module HelpCheck (checks) where
 
 import Control.Monad (forM_, unless)
 import qualified Data.Text as T
-import THC.Edit.Buffer (displayColumn)
-import THC.Edit.Help (layoutMarkdown)
+import Hide.Buffer (displayColumn)
+import Hide.Help (layoutMarkdown)
 
 checks :: IO ()
 checks = do

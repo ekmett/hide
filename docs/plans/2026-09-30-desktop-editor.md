@@ -1,10 +1,10 @@
 # Turbo desktop and local editing implementation plan
 
 
-**Goal:** Deliver a runnable `thc-edit` with the classic desktop, functional widgets and safe local editing.
+**Goal:** Deliver a runnable `hide` with the classic desktop, functional widgets and safe local editing.
 **Architecture:** Pure buffer and desktop state transitions produce file-operation requests. A cell renderer shares window/control geometry with hit testing; Vty owns terminal I/O and cleanup.
 **Tech stack:** Haskell, Vty/crossplatform, boot libraries. No Brick or native editor framework.
-**Spec:** ../design/2026-09-30-thc-edit-design.md
+**Spec:** ../design/2026-09-30-hide-design.md
 
 ## Constraints and review focus
 
@@ -18,7 +18,7 @@
 
 ## Task 1: Editing model
 
-Files: `thc-edit.cabal`, `cabal.project`, `src/THC/Edit/Buffer.hs`, `src/THC/Edit/Syntax.hs`, `test/Main.hs`.
+Files: `hide.cabal`, `cabal.project`, `src/Hide/Buffer.hs`, `src/Hide/Syntax.hs`, `test/Main.hs`.
 Interfaces: character-indexed `Buffer`, `Selection`, `replaceSelection`, `undo`, `redo`, line/column conversion and lexical `highlight`.
 - [x] Add runnable checks for insertion, selection replacement, undo/redo, shared edits, tab/wide-character navigation and nested Haskell comments. Observe failure before implementation.
 - [x] Implement using Text and bounded undo snapshots; document the large-file ceiling.
@@ -26,7 +26,7 @@ Interfaces: character-indexed `Buffer`, `Selection`, `replaceSelection`, `undo`,
 
 ## Task 2: Desktop and widgets
 
-Files: `src/THC/Edit/Model.hs`, `src/THC/Edit/Render.hs`, extend `test/Main.hs`.
+Files: `src/Hide/Model.hs`, `src/Hide/Render.hs`, extend `test/Main.hs`.
 Interfaces: `Desktop`, `Window`, `Rect`, `Command`, `Effect`; `handleEvent :: Event -> Desktop -> (Desktop, [Effect])`; `renderDesktop :: Desktop -> Picture`.
 - [x] Add event-replay checks for topmost hit testing, modal interception, menu keys, drag capture, resize clamps, tiled/shared views, WordStar prefixes and dirty close cancellation; observe failures.
 - [x] Implement menus, window frames, scrollbars, keyboard/mouse control, help/about, file/search dialogs and an interactive widget gallery.
@@ -35,7 +35,7 @@ Interfaces: `Desktop`, `Window`, `Rect`, `Command`, `Effect`; `handleEvent :: Ev
 
 ## Task 3: Files and executable
 
-Files: `src/THC/Edit/Files.hs`, `src/THC/Edit/App.hs`, `app/Main.hs`, extend `test/Main.hs`.
+Files: `src/Hide/Files.hs`, `src/Hide/App.hs`, `app/Main.hs`, extend `test/Main.hs`.
 Interfaces: UTF-8 load, identity-aware checked save; terminal loop executes `Effect` and feeds results back into Desktop.
 - [x] Add real temporary-file tests for round trips, CRLF/final-newline preservation, external-write conflicts, symlinks, unsupported UTF-8 and failed saves; observe failures.
 - [x] Implement same-directory temporary writes/replacement, permissions preservation and errors that keep buffers dirty.
@@ -47,7 +47,7 @@ Interfaces: UTF-8 load, identity-aware checked save; terminal loop executes `Eff
 Files: `README.md`, design status, plan checklist.
 - [x] Review whole branch, fix meaningful defects with regression checks, run the full suite.
 - [x] Document actual commands, supported keys, terminal limitations and currently disabled capabilities.
-- [x] Synchronize tested commits into `/Users/ekmett/thc-edit` and coordinate Linux smoke testing (Linux transfer blocked pending user approval).
+- [x] Synchronize tested commits into `/Users/ekmett/hide` and coordinate Linux smoke testing (Linux transfer blocked pending user approval).
 
 ## Subsequent milestone
 
@@ -56,7 +56,7 @@ HLS transport/tooling and Cabal component browsing get a separate implementation
 ## Execution record
 
 - User approved the design and said to proceed. Execute inline; no additional implementation-approval round.
-- Working checkout: `/private/tmp/thc-edit-work`; durable repository: `/Users/ekmett/thc-edit`.
+- Working checkout: `/private/tmp/thc-edit-work`; durable repository: `/Users/ekmett/hide`.
 
 - Implemented the pure buffer/desktop, Vty renderer and CLI; a parallel file-I/O
   task supplied checked saves and temporary-file tests.

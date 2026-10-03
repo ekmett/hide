@@ -7,9 +7,9 @@ import qualified Data.ByteString as BS
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Graphics.Vty as V
-import THC.Edit.RemoteTerminal
-import THC.Edit.RemoteWindow (parseRemoteFrame)
-import qualified THC.Edit.Protocol as P
+import Hide.RemoteTerminal
+import Hide.RemoteWindow (parseRemoteFrame)
+import qualified Hide.Protocol as P
 
 checks :: IO ()
 checks = do

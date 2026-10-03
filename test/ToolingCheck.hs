@@ -18,11 +18,11 @@ import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.FilePath ((</>))
 import System.IO (openTempFile, hClose)
 import System.Timeout (timeout)
-import THC.Edit.Buffer
-import THC.Edit.Files (FileState(..), loadFile, saveFile)
-import THC.Edit.Model
-import qualified THC.Edit.LSP as L
-import THC.Edit.Tooling
+import Hide.Buffer
+import Hide.Files (FileState(..), loadFile, saveFile)
+import Hide.Model
+import qualified Hide.LSP as L
+import Hide.Tooling
 
 checks :: IO ()
 checks = do

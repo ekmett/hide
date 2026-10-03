@@ -9,12 +9,12 @@ import Data.Aeson.Types (parseMaybe)
 import qualified Data.Text as T
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
-import qualified THC.Edit.Model as Model
+import qualified Hide.Model as Model
 import qualified Graphics.Vty as V
-import THC.Edit.Web
-import THC.Edit.Model hiding (Paste)
-import THC.Edit.Buffer
-import THC.Edit.Frontend
+import Hide.Web
+import Hide.Model hiding (Paste)
+import Hide.Buffer
+import Hide.Frontend
 
 checks :: IO ()
 checks = do

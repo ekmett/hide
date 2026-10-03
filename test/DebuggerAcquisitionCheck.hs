@@ -19,15 +19,15 @@ import System.Environment
 import System.FilePath
 import System.Info (os)
 import System.Timeout
-import THC.Edit.Buffer
-import THC.Edit.Build
-import THC.Edit.Debugger
-import THC.Edit.Downloads
-import THC.Edit.Files
-import THC.Edit.GuestAccess
-import THC.Edit.HdbAcquisition
-import THC.Edit.Model
-import THC.Edit.RemoteEndpoint (randomIdentity)
+import Hide.Buffer
+import Hide.Build
+import Hide.Debugger
+import Hide.Downloads
+import Hide.Files
+import Hide.GuestAccess
+import Hide.HdbAcquisition
+import Hide.Model
+import Hide.RemoteEndpoint (randomIdentity)
 
 checks :: IO ()
 checks | os=="mingw32"=pure () -- Official hdb bindists are currently POSIX only.

@@ -18,11 +18,11 @@ import System.IO (openTempFile,hClose)
 import Data.Bits ((.&.))
 import System.Posix.Files (fileMode,getFileStatus)
 #endif
-import THC.Edit.Buffer
-import THC.Edit.Files
-import THC.Edit.BufferView
-import THC.Edit.Model
-import THC.Edit.Recovery
+import Hide.Buffer
+import Hide.Files
+import Hide.BufferView
+import Hide.Model
+import Hide.Recovery
 
 checks :: IO ()
 checks=bracket temporary removePathForcibly $ \root->do

@@ -1,6 +1,7 @@
-# Turbo Haskell editor
+# hide — Haskell IDE
 
-`thc-edit` is a source editor for Haskell projects, written in Haskell. It brings
+hide is a Haskell IDE written in Haskell, and the Turbo Haskell editor.
+It does not require Turbo Haskell to function. It brings
 file editing, language tools, builds, debugging, Git and agent conversations into
 one workspace. Use it in a terminal, a native Metal/Vulkan window or a browser,
 with the same files, windows and commands in each.
@@ -22,8 +23,8 @@ full resolution.
 [Install the editor](../install.md), then open a directory or a source file:
 
 ```sh
-thc-edit .
-thc-edit Main.hs
+hide .
+hide Main.hs
 ```
 
 Opening a directory shows its files in the Files pane and opens its Cabal package
@@ -64,15 +65,15 @@ Each desktop belongs to a [session](../sessions.md). Detach and return later,
 or resume through a different frontend:
 
 ```sh
-thc-edit --resume
-thc-edit --web --resume
+hide --resume
+hide --web --resume
 ```
 
 For [remote editing](../remote.md), keep files and tools on another machine and
 use a local display:
 
 ```sh
-thc-edit --window buildbox:projects/example
+hide --window buildbox:projects/example
 ```
 
 ## Documentation and development

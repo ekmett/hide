@@ -11,13 +11,13 @@ import qualified Graphics.Vty as V
 import System.Directory
 import System.FilePath
 import System.IO
-import THC.Edit.Buffer
-import THC.Edit.Conversation (renderReply)
-import THC.Edit.GuestAccess
-import THC.Edit.Links
-import THC.Edit.Markdown
-import THC.Edit.Model
-import THC.Edit.Syntax (linkSpans)
+import Hide.Buffer
+import Hide.Conversation (renderReply)
+import Hide.GuestAccess
+import Hide.Links
+import Hide.Markdown
+import Hide.Model
+import Hide.Syntax (linkSpans)
 
 checks :: IO ()
 checks=bracket temporary removePathForcibly $ \root->do

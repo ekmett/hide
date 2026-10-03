@@ -18,10 +18,10 @@ import System.IO (openBinaryTempFile, hClose)
 import System.FilePath ((</>))
 import System.Process (readProcessWithExitCode)
 import System.Exit (ExitCode(..))
-import THC.Edit.Buffer
-import THC.Edit.Files
-import THC.Edit.Model
-import THC.Edit.WorkspaceMCP
+import Hide.Buffer
+import Hide.Files
+import Hide.Model
+import Hide.WorkspaceMCP
 
 checks :: IO ()
 checks=do

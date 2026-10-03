@@ -5,17 +5,17 @@ import Control.Concurrent (threadDelay)
 import System.Process (readProcessWithExitCode)
 import System.Exit (ExitCode(..))
 import System.Timeout (timeout)
-import THC.Edit.Downloads
+import Hide.Downloads
 import Control.Exception (bracket,finally)
 import System.Directory
 import System.Environment
 import System.FilePath ((</>))
 import System.IO
-import THC.Edit.Compilers (Compiler(..))
-import THC.Edit.RemoteEndpoint (randomIdentity)
+import Hide.Compilers (Compiler(..))
+import Hide.RemoteEndpoint (randomIdentity)
 import Data.Either (isLeft,isRight)
 import qualified Data.Text as T
-import THC.Edit.HdbAcquisition
+import Hide.HdbAcquisition
 checks :: IO ()
 checks=do
   let asset=either (error.T.unpack) id (selectHdbAsset "aarch64-apple-darwin" "9.14.1")

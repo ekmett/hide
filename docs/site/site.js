@@ -82,7 +82,7 @@
     history.replaceState(null, "", shellUrl(page));
     const inner = frame.contentDocument;
     inner.defaultView.thcTheme?.apply();
-    document.title = inner.title ? inner.title + " · thc-edit docs" : "thc-edit documentation";
+    document.title = inner.title ? inner.title + " · hide docs" : "hide documentation";
     // Keep external and
     // unlisted targets out of the frame while their local links stay in place.
     inner.addEventListener("click", event => {

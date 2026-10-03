@@ -19,9 +19,9 @@ import System.Environment (lookupEnv)
 import System.Info (os)
 import System.Process (CreateProcess(..), StdStream(..), proc, readProcessWithExitCode, withCreateProcess)
 import Text.Read (readMaybe)
-import THC.Edit.Process (processCleanup)
+import Hide.Process (processCleanup)
 import System.Timeout (timeout)
-import qualified THC.Edit.DAP as DAP
+import qualified Hide.DAP as DAP
 
 checks :: IO ()
 checks = do

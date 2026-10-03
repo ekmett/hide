@@ -1,7 +1,7 @@
 module BufferViewCheck (checks) where
 
 import Control.Monad (unless,forM_)
-import THC.Edit.BufferView
+import Hide.BufferView
 
 checks :: IO ()
 checks=do

@@ -1,6 +1,7 @@
-# thc-edit
+# hide — Haskell IDE
 
-Turbo Haskell's source editor. [Read the documentation](https://ekmett.github.io/thc-edit/).
+hide is a Haskell IDE written in Haskell, and the Turbo Haskell editor.
+It does not require Turbo Haskell: use it with GHC, HLS, Git and your choice of agent. [Read the documentation](https://ekmett.github.io/hide/).
 
 I'm building a Haskell environment where source, types, diagnostics, conversations
 and running programs live in the same place. Open a package, follow a definition,
@@ -17,21 +18,25 @@ the display in front of you.
 ## Open a project
 
 ```sh
-thc-edit .
+hide .
 ```
+
+`make install` installs `hide`, the short command `th`, and the `thc-edit` launcher
+next to one another. With THC installed, `thc edit .` invokes the same editor.
+THC is optional.
 
 This opens the current directory in the Files pane and its Cabal package file,
 when there is one. Pass source files to start with those instead:
 
 ```sh
-thc-edit Main.hs Other.hs
+hide Main.hs Other.hs
 ```
 
 Use `--window` for a native window or `--web` for the browser. The default is the
 terminal. To get the executable, see [Build and run](#build-and-run) below.
 
-Each desktop runs in its own session. Detach and return with `thc-edit --resume`,
-or choose a different display with `thc-edit --web --resume`. In a terminal,
+Each desktop runs in its own session. Detach and return with `hide --resume`,
+or choose a different display with `hide --web --resume`. In a terminal,
 **Ctrl+]** detaches; **File > Exit** finishes the session. [Sessions](docs/sessions.md)
 covers choosing an unfinished desktop and continuing on another frontend.
 
@@ -150,17 +155,17 @@ setup, review and resuming sessions.
 
 ## Work on another machine
 
-With `thc-edit` installed on both machines, open a remote project using an
+With `hide` installed on both machines, open a remote project using an
 SSH host or alias:
 
 ```sh
-thc-edit --window buildbox:projects/example
-thc-edit --web buildbox:projects/example
+hide --window buildbox:projects/example
+hide --web buildbox:projects/example
 ```
 
 Files, HLS, Git and project commands run there. Drawing and clipboard access
 stay local. A dropped connection leaves the session running so you can reconnect
-to the same buffers. `thc-edit --resume` also remembers the host for remote
+to the same buffers. `hide --resume` also remembers the host for remote
 sessions. The [remote guide](docs/remote.md) covers installation and paths.
 
 ## Build and run
@@ -171,9 +176,9 @@ newer, Cabal, `pkg-config`, utf8proc 2.10+, SDL3 3.2+ and libghostty-vt.
 [Installation](docs/install.md) covers these dependencies and the Linux font stack.
 
 ```sh
-cabal run thc-edit -- --window .
-cabal run thc-edit -- --web .
-cabal install exe:thc-edit --installdir="$HOME/.local/bin"
+cabal run hide -- --window .
+cabal run hide -- --web .
+cabal install exe:hide --installdir="$HOME/.local/bin"
 ```
 
 `--window` selects Metal on macOS and Vulkan elsewhere. Build flags are opt-out:
@@ -181,7 +186,7 @@ cabal install exe:thc-edit --installdir="$HOME/.local/bin"
 terminal-display or remote-server build is:
 
 ```sh
-cabal install exe:thc-edit -f-window -f-web -f-terminal
+cabal install exe:hide -f-window -f-web -f-terminal
 ```
 
 It needs utf8proc but neither SDL nor Ghostty. Sessions and SSH editing remain

@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 -- Convert web-bandwidth.hs snapshots into actual adaptive wire packets.
--- cabal exec -- runghc -package=thc-edit tools/web-wire-trial.hs < frames.jsonl > packets.jsonl
+-- cabal exec -- runghc -package=hide tools/web-wire-trial.hs < frames.jsonl > packets.jsonl
 import Data.Aeson
 import Data.Aeson.Types (parseEither)
 import qualified Data.Aeson.KeyMap as K
@@ -8,7 +8,7 @@ import qualified Data.ByteString.Lazy.Char8 as BL
 import qualified Data.ByteString.Lazy as Bytes
 import qualified Data.Map.Strict as M
 import qualified Data.Text as T
-import THC.Edit.Web
+import Hide.Web
 
 main :: IO ()
 main = BL.getContents >>= go M.empty . BL.lines

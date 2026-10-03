@@ -20,16 +20,16 @@ import System.IO
 import System.Info (os)
 import System.Process
 import System.Timeout (timeout)
-import qualified THC.Edit.Consoles as C
+import qualified Hide.Consoles as C
 import qualified Data.ByteString as BS
 import qualified Data.Text.Encoding as TE
-import qualified THC.Edit.Terminal as Terminal
-import THC.Edit.Buffer
-import THC.Edit.Debugger
-import THC.Edit.Files (FileState(..))
-import THC.Edit.Model
-import THC.Edit.Highlighting (withHighlighting,tickHighlighting)
-import THC.Edit.Render (snapshotHtml)
+import qualified Hide.Terminal as Terminal
+import Hide.Buffer
+import Hide.Debugger
+import Hide.Files (FileState(..))
+import Hide.Model
+import Hide.Highlighting (withHighlighting,tickHighlighting)
+import Hide.Render (snapshotHtml)
 
 checks :: IO ()
 checks = terminalLauncherCheck >> terminalCheck >> completionChecks >> presentationCheck >> pendingPresentationCheck >> startupDeadlineCheck >> launchDeadlineCheck >> launchChecks >> mapM_ session ["basic", "frame", "choices", "breakpoints", "reconnect", "mcp", "lazy", "exception"] >> putStrLn "Debugger checks passed"

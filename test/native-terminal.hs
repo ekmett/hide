@@ -13,7 +13,7 @@ import System.FilePath ((</>))
 import System.IO (hClose, openTempFile)
 import System.Timeout (timeout)
 import qualified TerminalCheck
-import THC.Edit.Terminal
+import Hide.Terminal
 
 main :: IO ()
 main = do

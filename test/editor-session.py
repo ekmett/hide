@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Check persistent local sessions across browser and terminal frontends.
 
-Usage: python3 test/editor-session.py /absolute/path/to/thc-edit
+Usage: python3 test/editor-session.py /absolute/path/to/hide
 Requires a POSIX pseudo-terminal and an executable built with browser support.
 Only sessions created for this test's temporary files are closed.
 """
@@ -45,14 +45,14 @@ def display_text(display):
                      for row in display.rows)
 
 
-with tempfile.TemporaryDirectory(prefix='thc-editor-session-') as directory:
+with tempfile.TemporaryDirectory(prefix='hide-session-') as directory:
     root = pathlib.Path(directory)
     source = root / 'unsaved λ.txt'
     second = root / 'second.txt'
     source.write_text('original\n')
     second.write_text('second\n')
     env = dict(os.environ, THC_EDIT_WEB_OPEN='0', TERM='xterm-256color',
-               thc_edit_datadir=str(pathlib.Path(__file__).resolve().parents[1]), XDG_DATA_HOME=str(root/'data'))
+               hide_datadir=str(pathlib.Path(__file__).resolve().parents[1]), XDG_DATA_HOME=str(root/'data'))
     processes, sockets, logs, sessions = [], [], [], set()
     catalog = root/'data/thc-edit/sessions'
 
@@ -75,7 +75,7 @@ with tempfile.TemporaryDirectory(prefix='thc-editor-session-') as directory:
         def address():
             log.seek(0)
             text = log.read()
-            found = re.search(r'Turbo Haskell browser: (http://\S+)', text)
+            found = re.search(r'Haskell browser: (http://\S+)', text)
             if found:
                 return found.group(1)
             if process.poll() is not None:
@@ -101,7 +101,7 @@ with tempfile.TemporaryDirectory(prefix='thc-editor-session-') as directory:
         ws.close()
         found = re.search(r'^Session: ([a-f0-9]{48})$', output, re.MULTILINE)
         assert found, output
-        assert 'Resume: thc-edit --resume ' + found.group(1) in output, output
+        assert 'Resume: hide --resume ' + found.group(1) in output, output
         sessions.add(found.group(1))
         return found.group(1)
 

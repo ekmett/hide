@@ -18,10 +18,10 @@ On Debian/Ubuntu, the package is `libutf8proc-dev`; check that your distribution
 supplies the required version. Then clone the `main` branch and build:
 
 ```sh
-git clone --branch main https://github.com/ekmett/thc-edit.git
-cd thc-edit
+git clone --branch main https://github.com/ekmett/hide.git
+cd hide
 cabal build all
-cabal run thc-edit -- .
+cabal run hide -- .
 ```
 
 The default build includes terminal, native-window and browser displays.
@@ -29,15 +29,23 @@ Without a display option, the editor runs in a UTF-8 terminal. An 80-column, 25-
 useful starting size. Mouse support, modified keys and exact colors follow the
 terminal's capabilities.
 
-To install on your path:
+To install on your path, including the `th` and `thc edit` launchers:
 
 ```sh
-cabal install exe:thc-edit --installdir="$HOME/.local/bin"
+make install
 ```
 
+`make install` puts `hide`, `th` and `thc-edit` in `~/.local/bin` (override
+`BINDIR` to choose another location). The small launchers find `hide` beside
+themselves and forward every argument. With THC installed, its external-command
+dispatch makes `thc edit` work. hide itself does not require THC.
+For a binary-only install, use `cabal install exe:hide`; copy the launchers
+from `bin/` beside it if wanted. Windows uses `th.cmd` and `thc-edit.cmd` beside
+`hide.exe`.
+
 Add that directory to `PATH` if it is not already there. All examples using
-`thc-edit` also work from a checkout as `cabal run thc-edit -- ...`, with the
-appropriate build flags before `thc-edit`.
+`hide` also work from a checkout as `cabal run hide -- ...`, with the
+appropriate build flags before `hide`.
 
 ## Native window
 
@@ -45,7 +53,7 @@ Native windows are enabled by default. Install SDL3 3.2 or newer. On macOS:
 
 ```sh
 brew install sdl3
-cabal run thc-edit -- --window .
+cabal run hide -- --window .
 ```
 
 `--window` chooses Metal on macOS and Vulkan elsewhere. `--metal` and `--vulkan`
@@ -56,7 +64,7 @@ color emoji where a fallback font is needed. macOS uses CoreText.
 An installed build includes this frontend too:
 
 ```sh
-cabal install exe:thc-edit --installdir="$HOME/.local/bin"
+cabal install exe:hide --installdir="$HOME/.local/bin"
 ```
 
 ## Browser
@@ -64,7 +72,7 @@ cabal install exe:thc-edit --installdir="$HOME/.local/bin"
 The browser frontend is enabled by default:
 
 ```sh
-cabal run thc-edit -- --web .
+cabal run hide -- --web .
 ```
 
 It opens a WebGL page served by the editor on an ephemeral loopback port. Keep
@@ -81,7 +89,7 @@ the URL without opening a browser automatically.
 | Conversations | An ACP stdio provider under Options > Agents; see [conversations](conversations.md) |
 | Shells and program output | The `terminal` build described below |
 | Compile, build, or run Haskell | THC, or GHC and Cabal; add the terminal build for interactive programs. See [running](running.md). |
-| Remote editing | `thc-edit` on both machines; see [remote editing](remote.md) |
+| Remote editing | `hide` on both machines; see [remote editing](remote.md) |
 
 Build flags are opt-out: `-f-window` omits SDL/native windows, `-f-web` omits
 the browser server, and `-f-terminal` omits Ghostty/embedded terminals. For a
@@ -150,20 +158,20 @@ git clone https://github.com/ghostty-org/ghostty /tmp/thc-ghostty
 cd /tmp/thc-ghostty
 git checkout 76895d97b74ff6b24c2b1543bcd69ccc18048a4d
 zig build -Demit-lib-vt=true -Demit-xcframework=false -Doptimize=ReleaseFast --prefix /tmp/thc-ghostty-install
-cd /path/to/thc-edit
+cd /path/to/hide
 export PKG_CONFIG_PATH=/tmp/thc-ghostty-install/share/pkgconfig:$PKG_CONFIG_PATH
-cabal run --ghc-options=-optl-Wl,-rpath,/tmp/thc-ghostty-install/lib thc-edit -- --window .
+cabal run --ghc-options=-optl-Wl,-rpath,/tmp/thc-ghostty-install/lib hide -- --window .
 ```
 
 For a native Windows remote server, build the same pinned Ghostty checkout in
 PowerShell, then expose its package metadata and DLL:
 
 ```powershell
-$ghosttyPrefix = "$env:LOCALAPPDATA\thc-edit\ghostty"
+$ghosttyPrefix = "$env:LOCALAPPDATA\hide\ghostty"
 zig build -Demit-lib-vt=true -Demit-xcframework=false -Doptimize=ReleaseFast --prefix $ghosttyPrefix -j4
 $env:PKG_CONFIG_PATH = "$ghosttyPrefix\share\pkgconfig;$env:PKG_CONFIG_PATH"
 $env:PATH = "$ghosttyPrefix\bin;$env:PATH"
-cd C:\path\to\thc-edit
+cd C:\path\to\hide
 cabal build all -f-window -f-web
 ```
 
@@ -178,7 +186,7 @@ use HLS, review Git changes and hold conversations.
 
 ## Bash completion
 
-With current `thc` and `thc-edit` on your `PATH`, enable Bash completion with:
+With current `thc` and the installed `thc-edit` launcher on your `PATH`, enable Bash completion with:
 
 ```bash
 source <(thc --bash-completion-script)
@@ -201,13 +209,18 @@ Add the command to your Bash startup file to enable it in future shells.
 Environment variables override `[editor.defaults]` in the shared
 [configuration file](configuration.md). Explicit frontend, scale and appearance
 options override both.
-For example, `thc-edit --terminal .` overrides a configured graphical frontend.
-`thc-edit --help` lists the command-line options. [Display and frontends](display.md)
+For example, `hide --terminal .` overrides a configured graphical frontend.
+`hide --help` lists the command-line options. [Display and frontends](display.md)
 covers screen modes and interactive preferences.
 
-Provider and Run target settings are stored in the user's `thc-edit`
+Provider and Run target settings remain in the user's legacy `thc-edit`
 configuration directory, normally `$XDG_CONFIG_HOME/thc-edit` or
 `~/.config/thc-edit` on Unix. Appearance and key preferences can be changed for
 the running editor under **Options > Preferences**. Shared startup defaults and
 Agent Permissions live separately in `thc/config.toml`; use that file for
 repeatable launches across projects.
+
+The rename preserves existing settings and resumable sessions in their
+`thc-edit` storage directories. The `THC_EDIT_*` environment variables and
+shared `thc/config.toml` / project `thc.toml` settings also retain their names;
+none of these require a THC installation.

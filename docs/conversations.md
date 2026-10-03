@@ -30,7 +30,7 @@ The adapter version exercised with the editor is
 select an existing Codex executable. Provider installation, authentication and
 model access are separate from the editor.
 
-Settings live in the user's `thc-edit` configuration directory. In a remote
+Settings remain in the user's legacy `thc-edit` configuration directory. In a remote
 session, configure the provider on the remote host, where it runs beside the
 project.
 
@@ -150,7 +150,7 @@ before running and use the editor's embedded terminals.
 
 ## Continue later
 
-Detach the editor and use `thc-edit --resume` to return to the running desktop,
+Detach the editor and use `hide --resume` to return to the running desktop,
 including its conversation. [Editor sessions](sessions.md) cover this workflow
 across native windows, the browser, terminals and SSH.
 

@@ -11,10 +11,10 @@ import System.Environment (setEnv)
 import System.FilePath (replaceExtension)
 import System.Process (callProcess)
 import System.Timeout (timeout)
-import THC.Edit.Frontend (Backend(Metal))
-import THC.Edit.Model
-import THC.Edit.Render (snapshot)
-import THC.Edit.Window (runWindow)
+import Hide.Frontend (Backend(Metal))
+import Hide.Model
+import Hide.Render (snapshot)
+import Hide.Window (runWindow)
 
 type Effects = Desktop -> [Effect] -> IO (Bool,Desktop)
 

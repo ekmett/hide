@@ -15,10 +15,10 @@ import System.FilePath ((</>))
 import System.IO (hClose, openTempFile)
 import System.Info (os)
 import System.Process (callProcess)
-import THC.Edit.Buffer
-import THC.Edit.Files (FileState(..), loadFile)
-import THC.Edit.Model
-import THC.Edit.WorkspaceFilesMCP
+import Hide.Buffer
+import Hide.Files (FileState(..), loadFile)
+import Hide.Model
+import Hide.WorkspaceFilesMCP
 
 checks :: IO ()
 checks=do

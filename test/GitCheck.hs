@@ -11,9 +11,9 @@ import System.Exit (ExitCode(..))
 import System.FilePath ((</>))
 import System.IO (hClose, openTempFile)
 import System.Process (proc, readCreateProcessWithExitCode, cwd)
-import THC.Edit.Git
-import THC.Edit.Model
-import THC.Edit.Render (snapshot, snapshotHtml)
+import Hide.Git
+import Hide.Model
+import Hide.Render (snapshot, snapshotHtml)
 import qualified Graphics.Vty as V
 
 checks :: IO ()
@@ -151,7 +151,7 @@ checks = bracket temporary removePathForcibly $ \base -> do
     counts repo=(repoAdded repo,repoDeleted repo)
     temporary = do
       base <- getTemporaryDirectory
-      (path, handle) <- openTempFile base "thc-edit-git-check"
+      (path, handle) <- openTempFile base "hide-git-check"
       hClose handle
       removeFile path
       createDirectory path

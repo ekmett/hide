@@ -11,12 +11,12 @@ import qualified Data.Text as T
 import qualified Data.Vector as V
 import System.Timeout (timeout)
 import System.Mem.StableName (makeStableName)
-import THC.Edit.Buffer
-import THC.Edit.Files
-import THC.Edit.Highlighting
-import THC.Edit.Model
-import THC.Edit.Render (snapshot)
-import THC.Edit.Syntax
+import Hide.Buffer
+import Hide.Files
+import Hide.Highlighting
+import Hide.Model
+import Hide.Render (snapshot)
+import Hide.Syntax
 
 checks :: IO ()
 checks = do

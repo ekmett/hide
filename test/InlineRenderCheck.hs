@@ -11,14 +11,14 @@ import qualified Data.Text.Lazy as TL
 import qualified Data.Vector as Vec
 import qualified Graphics.Vty as V
 import Graphics.Vty.Span (SpanOp(..))
-import THC.Edit.Buffer
-import THC.Edit.Files (FileState(..))
-import THC.Edit.InlineState
-import THC.Edit.InlineTypes
-import THC.Edit.Model
-import THC.Edit.Render
-import THC.Edit.Syntax
-import THC.Edit.Unicode (displayOpsForPic)
+import Hide.Buffer
+import Hide.Files (FileState(..))
+import Hide.InlineState
+import Hide.InlineTypes
+import Hide.Model
+import Hide.Render
+import Hide.Syntax
+import Hide.Unicode (displayOpsForPic)
 
 checks :: IO ()
 checks=do

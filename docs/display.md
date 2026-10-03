@@ -3,15 +3,15 @@
 Use the same files, windows and commands in a terminal, a native window or the
 browser. Choose the display that suits the machine in front of you; a remote
 project can use any of these local displays too. Choose another frontend with
-`thc-edit --window --resume` or `thc-edit --web --resume` after detaching the
+`hide --window --resume` or `hide --web --resume` after detaching the
 current one; see [sessions](sessions.md).
 
 ## Choose a frontend
 
 ```sh
-thc-edit --terminal .
-thc-edit --window .
-thc-edit --web .
+hide --terminal .
+hide --window .
+hide --web .
 ```
 
 `--window` selects Metal on macOS and Vulkan elsewhere. `--metal` and `--vulkan`
@@ -37,8 +37,8 @@ Native windows and the browser start in Mode 3, an 80-by-25 character grid.
 Use Mode 259 for 80-by-50 with half-height rendering:
 
 ```sh
-thc-edit --window --mode 259 .
-thc-edit --web --size 100x32 --scale 2.5 .
+hide --window --mode 259 .
+hide --web --size 100x32 --scale 2.5 .
 ```
 
 **Options > Preferences > Screen size** changes modes while running.

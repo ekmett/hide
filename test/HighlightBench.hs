@@ -1,5 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
--- cabal exec -- ghc -O2 -package thc-edit test/HighlightBench.hs -o /tmp/thc-highlight-bench
+-- cabal exec -- ghc -O2 -package hide test/HighlightBench.hs -o /tmp/thc-highlight-bench
 -- /tmp/thc-highlight-bench
 import Control.Exception (evaluate)
 import Control.Monad (forM_)
@@ -7,10 +7,10 @@ import qualified Data.Text as T
 import qualified Graphics.Vty as V
 import System.CPUTime (getCPUTime)
 import Text.Printf (printf)
-import THC.Edit.Buffer
-import THC.Edit.Model
-import THC.Edit.Render (snapshot)
-import THC.Edit.Syntax
+import Hide.Buffer
+import Hide.Model
+import Hide.Render (snapshot)
+import Hide.Syntax
 
 main :: IO ()
 main = do

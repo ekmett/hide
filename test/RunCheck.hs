@@ -19,14 +19,14 @@ import System.FilePath ((</>))
 import System.IO (hClose, openTempFile)
 import System.Timeout (timeout)
 import System.Info (os)
-import qualified THC.Edit.Consoles as C
-import THC.Edit.Markdown (renderMarkdownWithShellBlocks)
-import qualified THC.Edit.Build as B
-import THC.Edit.Buffer
-import THC.Edit.Debugger
-import THC.Edit.Conversation
-import THC.Edit.Model
-import THC.Edit.Terminal (terminalAvailable)
+import qualified Hide.Consoles as C
+import Hide.Markdown (renderMarkdownWithShellBlocks)
+import qualified Hide.Build as B
+import Hide.Buffer
+import Hide.Debugger
+import Hide.Conversation
+import Hide.Model
+import Hide.Terminal (terminalAvailable)
 
 checks :: IO ()
 checks = do

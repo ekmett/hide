@@ -1,6 +1,6 @@
 # Browser backend
 
-Goal: `thc-edit --web` opens the real editor in a local browser, using WebGL,
+Goal: `hide --web` opens the real editor in a local browser, using WebGL,
 bundled character tiles, optional CRT filtering, and bidirectional WebSocket input.
 The existing Haskell model, effects, and tooling remain authoritative.
 
@@ -19,7 +19,7 @@ The existing Haskell model, effects, and tooling remain authoritative.
 - [x] Document launch, build flag, keyboard limits and browser Unicode differences.
   Commit and launch a browser demo without disturbing existing editor sessions.
 
-Files: `THC.Edit.Web` owns transport and input decoding; `assets/web` owns browser
+Files: `Hide.Web` owns transport and input decoding; `assets/web` owns browser
 rendering/input. `Frontend`, `App`, `Font`, and the Cabal file integrate the backend.
 The CRT fragment shader matches the native 24/255 scanline darkness and
 100/255 radial-squared vignette, with scanlines disabled below two physical
@@ -55,7 +55,7 @@ in this trace, especially when snapshots exceed the dictionary.
 Reproduce after building with `-fweb`:
 
 ```sh
-cabal exec -v0 -- runghc -package=thc-edit tools/web-bandwidth.hs > frames.jsonl
+cabal exec -v0 -- runghc -package=hide tools/web-bandwidth.hs > frames.jsonl
 python3 tools/web-bandwidth.py frames.jsonl
 ```
 
@@ -104,7 +104,7 @@ network captures. Assets, input, acknowledgments and TCP/IP are excluded.
 Reproduce after generating frames.jsonl with the earlier command:
 
 ```
-cabal exec -v0 --offline -- runghc -package=thc-edit tools/web-wire-trial.hs < .deps/bandwidth-trial/frames.jsonl > .deps/bandwidth-trial/packets.jsonl
+cabal exec -v0 --offline -- runghc -package=hide tools/web-wire-trial.hs < .deps/bandwidth-trial/frames.jsonl > .deps/bandwidth-trial/packets.jsonl
 node test/web-wire.mjs .deps/bandwidth-trial/packets.jsonl
 ```
 

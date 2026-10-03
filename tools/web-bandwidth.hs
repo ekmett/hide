@@ -1,18 +1,18 @@
 {-# LANGUAGE OverloadedStrings #-}
--- Run with cabal exec -- runghc -package=thc-edit tools/web-bandwidth.hs
+-- Run with cabal exec -- runghc -package=hide tools/web-bandwidth.hs
 import Data.Aeson
 import qualified Data.ByteString.Lazy.Char8 as BL
 import qualified Data.Text.IO as T
 import Data.List (mapAccumL)
 import qualified Graphics.Vty as V
-import THC.Edit.Model
-import THC.Edit.Buffer
-import THC.Edit.Web
-import THC.Edit.Render (renderDesktop)
+import Hide.Model
+import Hide.Buffer
+import Hide.Web
+import Hide.Render (renderDesktop)
 
 main :: IO ()
 main = do
-  source <- T.readFile "src/THC/Edit/Model.hs"
+  source <- T.readFile "src/Hide/Model.hs"
   mapM_ (trial source) [(80,25),(128,50),(240,80)]
   where
     trial source size = do

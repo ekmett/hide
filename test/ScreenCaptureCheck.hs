@@ -10,14 +10,14 @@ import Data.List (nub)
 import Data.Maybe (fromMaybe, listToMaybe)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import THC.Edit.Browser (Entry(..))
-import THC.Edit.Buffer (newBuffer, Selection(..))
-import THC.Edit.GuestAccess (CellAccess(..))
-import THC.Edit.Font (loadFont)
-import THC.Edit.Model
-import THC.Edit.Render (snapshot)
-import THC.Edit.ScreenCapture
-import THC.Edit.Unicode (clusterWidth, graphemes)
+import Hide.Browser (Entry(..))
+import Hide.Buffer (newBuffer, Selection(..))
+import Hide.GuestAccess (CellAccess(..))
+import Hide.Font (loadFont)
+import Hide.Model
+import Hide.Render (snapshot)
+import Hide.ScreenCapture
+import Hide.Unicode (clusterWidth, graphemes)
 
 checks :: IO ()
 checks=do

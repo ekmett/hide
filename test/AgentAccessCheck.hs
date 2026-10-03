@@ -5,8 +5,8 @@ import Control.Concurrent.Async (mapConcurrently)
 import Control.Monad (unless)
 import qualified Data.Set as S
 import qualified Data.Text as T
-import THC.Edit.AgentAccess
-import THC.Edit.AgentHub (AgentId(..))
+import Hide.AgentAccess
+import Hide.AgentHub (AgentId(..))
 
 checks :: IO ()
 checks = do

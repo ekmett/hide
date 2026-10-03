@@ -15,7 +15,7 @@ import System.Process (readProcessWithExitCode)
 import System.Exit (ExitCode(..))
 import System.Info (os)
 import System.Timeout (timeout)
-import THC.Edit.ACP
+import Hide.ACP
 
 checks :: IO ()
 checks = bracket temporary removePathForcibly $ \root -> do
@@ -148,7 +148,7 @@ checks = bracket temporary removePathForcibly $ \root -> do
     isRequest _ = False
     temporary = do
       base <- getTemporaryDirectory
-      (path,file) <- openTempFile base "thc-edit-acp-check"
+      (path,file) <- openTempFile base "hide-acp-check"
       hClose file
       removeFile path
       createDirectory path

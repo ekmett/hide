@@ -13,13 +13,13 @@ import System.FilePath ((</>), takeDirectory)
 import System.IO (hClose, openBinaryTempFile)
 import System.IO.Error (catchIOError, isDoesNotExistError)
 import System.Timeout (timeout)
-import THC.Edit.App (applyEffects)
-import THC.Edit.Buffer
-import THC.Edit.Browser (Entry(..))
-import THC.Edit.Files
-import THC.Edit.Model
-import THC.Edit.Reconcile
-import qualified THC.Edit.AgentFiles as AgentFiles
+import Hide.App (applyEffects)
+import Hide.Buffer
+import Hide.Browser (Entry(..))
+import Hide.Files
+import Hide.Model
+import Hide.Reconcile
+import qualified Hide.AgentFiles as AgentFiles
 
 checks :: IO ()
 checks = bracket temporary removePathForcibly $ \dir -> withReconciliation $ \runtime -> do
@@ -111,7 +111,7 @@ checks = bracket temporary removePathForcibly $ \dir -> withReconciliation $ \ru
     check label condition = unless condition (error label)
     temporary = do
       base <- getTemporaryDirectory
-      (path, handle) <- openBinaryTempFile base "thc-edit-reconcile"
+      (path, handle) <- openBinaryTempFile base "hide-reconcile"
       hClose handle
       removeFile path
       createDirectory path

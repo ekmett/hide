@@ -146,7 +146,7 @@ failure before relaunching. Unsaved source does not rebuild the running program.
 Empty scopes mean the adapter supplied no lexical values.
 
 The packaged debugging skill is also available through MCP `resources/read` at
-`thc-edit://debugging`.
+`hide://debugging`.
 
 ## Review repository changes
 

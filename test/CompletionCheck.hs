@@ -6,7 +6,7 @@ import System.Console.GetOpt
 import System.Directory
 import System.FilePath ((</>), addTrailingPathSeparator)
 import System.IO (hClose, openTempFile)
-import THC.Edit.Completion
+import Hide.Completion
 
 checks :: IO ()
 checks = bracket temporary removePathForcibly $ \directory -> do
@@ -19,41 +19,41 @@ checks = bracket temporary removePathForcibly $ \directory -> do
       complete=bashCompletion descriptors
       absolute name=directory </> name
       prefix=addTrailingPathSeparator directory
-  options <- complete ["1","thc-edit","--he"]
+  options <- complete ["1","hide","--he"]
   check "completion filters option prefixes from descriptors" (options==["--help"])
-  shorts <- complete ["1","thc-edit","-h"]
+  shorts <- complete ["1","hide","-h"]
   check "completion includes short option aliases" (shorts==["-h"])
   mapM_ (\args -> complete args >>= check "invalid completion indices are quiet" . null)
-    [[],["nope","thc-edit",""],["-1","thc-edit",""],["0","thc-edit"],["2","thc-edit",""],["1"]]
-  choices <- complete ["2","thc-edit","--appearance","d"]
-  inline <- complete ["1","thc-edit","--appearance=d"]
-  modes <- complete ["2","thc-edit","--mode",""]
+    [[],["nope","hide",""],["-1","hide",""],["0","hide"],["2","hide",""],["1"]]
+  choices <- complete ["2","hide","--appearance","d"]
+  inline <- complete ["1","hide","--appearance=d"]
+  modes <- complete ["2","hide","--mode",""]
   check "completion handles separate and inline option choices" (choices==["dark"] && inline==["--appearance=dark"])
   check "completion offers implemented screen modes" (all (`elem` modes) ["3","259"])
   writeFile (absolute "file with spaces.hs") "unchanged"
   createDirectory (absolute "folder with spaces")
-  paths <- complete ["1","thc-edit",prefix++"f"]
+  paths <- complete ["1","hide",prefix++"f"]
   check "completion preserves spaces and marks directories" (sort paths==sort [absolute "file with spaces.hs",addTrailingPathSeparator (absolute "folder with spaces")])
-  afterValue <- complete ["3","thc-edit","--ssh","example.test",prefix++"file"]
+  afterValue <- complete ["3","hide","--ssh","example.test",prefix++"file"]
   check "completion consumes option values before positional paths" (afterValue==[absolute "file with spaces.hs"])
-  unknownValue <- complete ["2","thc-edit","--ssh",prefix]
+  unknownValue <- complete ["2","hide","--ssh",prefix]
   check "completion does not treat hosts as local paths" (null unknownValue)
   writeFile (absolute "--helpful.hs") ""
-  literal <- withCurrentDirectory directory (complete ["2","thc-edit","--","--he"])
+  literal <- withCurrentDirectory directory (complete ["2","hide","--","--he"])
   check "completion honors the option terminator" (literal==["--helpful.hs"])
-  empty <- withCurrentDirectory directory (complete ["1","thc-edit",""])
+  empty <- withCurrentDirectory directory (complete ["1","hide",""])
   check "empty words complete current directory without losing relative spelling"
     (all (`elem` empty) ["--help","file with spaces.hs",addTrailingPathSeparator "folder with spaces"])
   let hostile="$(touch should-not-exist).hs"
   writeFile (absolute hostile) ""
   before <- sort <$> listDirectory directory
-  raw <- withCurrentDirectory directory (complete ["1","thc-edit","$("])
+  raw <- withCurrentDirectory directory (complete ["1","hide","$("])
   after <- sort <$> listDirectory directory
   untouched <- readFile (absolute "file with spaces.hs")
-  noEvaluation <- complete ["1","thc-edit","--never"]
+  noEvaluation <- complete ["1","hide","--never"]
   check "completion neither evaluates words/options nor modifies files"
     (raw==[hostile] && before==after && untouched=="unchanged" && noEvaluation==["--never-run"])
-  missing <- complete ["1","thc-edit",absolute "missing"++"/file"]
+  missing <- complete ["1","hide",absolute "missing"++"/file"]
   check "unreadable or missing completion directories are quiet" (null missing)
   putStrLn "bash completion checks passed"
   where

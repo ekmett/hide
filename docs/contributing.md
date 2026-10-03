@@ -58,9 +58,9 @@ These previews use the actual Vty rendering output at 80 by 25 without starting
 an interactive terminal:
 
 ```sh
-cabal run -v0 thc-edit -- --demo --snapshot
-cabal run -v0 thc-edit -- --demo --scene menu --snapshot-html > menu.html
-cabal run -v0 thc-edit -- --demo --scene help --snapshot-html > help.html
+cabal run -v0 hide -- --demo --snapshot
+cabal run -v0 hide -- --demo --scene menu --snapshot-html > menu.html
+cabal run -v0 hide -- --demo --scene help --snapshot-html > help.html
 ```
 
 The HTML is a static preview. Available scenes are `desktop`, `menu`, `about`,
@@ -69,9 +69,9 @@ The HTML is a static preview. Available scenes are `desktop`, `menu`, `about`,
 
 ## Documenting keyboard shortcuts
 
-Verify bindings against `nativeMenuShortcut` in `src/THC/Edit/Window.hs`,
-`cbits/menu.m`, `cbits/window.c`, `src/THC/Edit/Frontend.hs`,
-`src/THC/Edit/Model.hs` and `assets/web/editor.js`. Native menus, browser
+Verify bindings against `nativeMenuShortcut` in `src/Hide/Window.hs`,
+`cbits/menu.m`, `cbits/window.c`, `src/Hide/Frontend.hs`,
+`src/Hide/Model.hs` and `assets/web/editor.js`. Native menus, browser
 shortcuts and terminal input are different entry points; do not infer a Mac
 binding by replacing Ctrl with Command.
 
@@ -90,9 +90,9 @@ The site uses actual Metal captures of the editor running over this checkout,
 including its modal dialogs. On macOS, build the window backend and run:
 
 ```sh
-cabal build lib:thc-edit
+cabal build lib:hide
 mkdir -p build/docs-capture/objects
-cabal exec -- ghc -threaded -XGHC2021 -package thc-edit -itools tools/docs-screenshots.hs -outputdir build/docs-capture/objects -o build/docs-capture/screenshots
+cabal exec -- ghc -threaded -XGHC2021 -package hide -itools tools/docs-screenshots.hs -outputdir build/docs-capture/objects -o build/docs-capture/screenshots
 build/docs-capture/screenshots
 make docs
 make docs-check
@@ -108,7 +108,7 @@ controlling a live session use the permission-checked MCP tools described in
 
 Pass scene names to refresh only affected images, for example
 `build/docs-capture/screenshots preferences debug-launch`. The tool loads the real
-Cabal file and `src/THC/Edit/Buffer.hs`, invokes the normal editor commands,
+Cabal file and `src/Hide/Buffer.hs`, invokes the normal editor commands,
 and draws hidden Metal windows at 3× scale, up to 100×32 cells, with **CRT filter** and
 **Pixelate Unicode** enabled. It needs a macOS graphical login for Metal, but
 shows no window and starts no editor session. Personal provider settings are
@@ -129,7 +129,7 @@ THC_DOCS_DAP_PORT=4730 build/docs-capture/screenshots debug-step
 Set `THC_DOCS_CAPTURE_DIR` to a temporary directory to preview captures before
 replacing the site assets. Recorded replay does not read provider configuration
 or start an ACP connection. The optional live conversation asks the configured
-provider to read `src/THC/Edit/Buffer.hs` and explain it, then asks a short
+provider to read `src/Hide/Buffer.hs` and explain it, then asks a short
 follow-up about edit costs. Use a provider permitted to read this checkout; its
 configuration is copied only into ignored capture scratch space. The debugger attaches to an
 already-running, suspended local DAP endpoint, steps into the program, captures
@@ -153,17 +153,17 @@ list in `tools/docs-screenshots.hs` and the site's screenshot allowlist in
 Inspect regenerated images for clipped fields, wrong selections or stale labels
 before committing them. Check that each image still illustrates its adjacent
 instructions. The site copies only the allowlisted images and validates their
-links, including deployment below `/thc-edit/`.
+links, including deployment below `/hide/`.
 
 ## Live language-server checks
 
 With a compatible HLS and GHC on `PATH`:
 
 ```sh
-cabal exec -- ghc -threaded -package thc-edit test/HLSLive.hs -o /tmp/thc-hls-live
+cabal exec -- ghc -threaded -package hide test/HLSLive.hs -o /tmp/thc-hls-live
 /tmp/thc-hls-live
-cabal exec -- ghc -threaded -package thc-edit test/EditorLive.hs -o /tmp/thc-editor-live
-/tmp/thc-editor-live
+cabal exec -- ghc -threaded -package hide test/EditorLive.hs -o /tmp/hide-live
+/tmp/hide-live
 ```
 
 The source also includes native-input, terminal, DAP, browser and remote-session
@@ -177,7 +177,7 @@ test; consult the harness before running it against a live session.
 building the library:
 
 ```sh
-cabal exec -- ghc -Wall -threaded -XGHC2021 -package thc-edit -itools test/DebuggerLive.hs -outputdir build/debugger-live -o build/debugger-live/check
+cabal exec -- ghc -Wall -threaded -XGHC2021 -package hide -itools test/DebuggerLive.hs -outputdir build/debugger-live -o build/debugger-live/check
 build/debugger-live/check launch 4734 /absolute/path/to/toy 10 > build/debugger-live/trace.jsonl
 ```
 
@@ -214,7 +214,7 @@ covers candidate adapters, GHCi facilities and separate profiling/heap workflows
 
 | Location | Responsibility |
 | --- | --- |
-| `app/Main.hs`, `src/THC/Edit/App.hs` | Startup, command-line options and effects |
+| `app/Main.hs`, `src/Hide/App.hs` | Startup, command-line options and effects |
 | `Model.hs`, `Render.hs`, `Buffer.hs` | Desktop interaction, drawing and document state |
 | `Files.hs`, `Reconcile.hs` | File access and external changes |
 | `Tooling.hs`, `LSP.hs` | HLS integration |
@@ -227,7 +227,7 @@ covers candidate adapters, GHCi facilities and separate profiling/heap workflows
 | `RemoteTerminal.hs`, `RemoteWindow.hs`, `RemoteWeb.hs` | Terminal, native and browser session frontends |
 | `Protocol.hs`, `Font.hs`, `cbits/`, `assets/` | Display transport, fonts and native support |
 
-The module filenames above are under `src/THC/Edit/` unless a directory is shown.
+The module filenames above are under `src/Hide/` unless a directory is shown.
 [Architecture](architecture.md) explains how they fit together.
 
 ## Documentation and attribution
@@ -242,7 +242,7 @@ make docs-check
 The site is written to `build/site`. The generator builds independently of the
 editor and checks local links, fragments and revision-pinned source links.
 The Documentation workflow rebuilds and publishes every push to `main` at
-[ekmett.github.io/thc-edit](https://ekmett.github.io/thc-edit/). It can also be
+[ekmett.github.io/hide](https://ekmett.github.io/hide/). It can also be
 started manually from GitHub Actions.
 
 Keep the [README](../README.md) useful both on GitHub and as F1 Help. Put detailed
@@ -255,3 +255,5 @@ Skylighting and its bundled grammar set are GPL-2 licensed; skylighting-core is
 BSD-3-Clause. These are editor dependencies. The
 [Turbo Pascal UI museum](https://ilyabirman.net/meanwhile/all/ui-museum-turbo-pascal-7-1/)
 records the interface reference.
+
+Run `sh test/launchers.sh` after changing the adjacent `thc-edit` or `th` launchers.

@@ -2,7 +2,7 @@
 module TerminalCheck (checks) where
 
 import Control.Monad (unless)
-import THC.Edit.Terminal
+import Hide.Terminal
 #if defined(WITH_TERMINAL) && !defined(mingw32_HOST_OS)
 import Control.Concurrent (threadDelay)
 import Control.Exception (bracket, try, IOException)

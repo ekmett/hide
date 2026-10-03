@@ -1,6 +1,6 @@
 # Daemon startup and crash recovery
 
-Start an editor without a display using `thc-edit --daemon [path]`. Print its
+Start an editor without a display using `hide --daemon [path]`. Print its
 session ID and resume command only after it accepts connections. `--sessions`
 lists running or recoverable desktops; `--resume [ID]` attaches using any frontend.
 The existing detached session loop continues agents, HLS, builds and debugging.

@@ -1,10 +1,10 @@
-# GHC debugging options for thc-edit
+# GHC debugging options for hide
 
 Date: 2026-10-02
 
 Status: research and source inspection only. No debugger was installed, built,
 or run for this report. “Verified” below means documented upstream or visible
-in source, not a successful thc-edit integration test. The editor baseline was
+in source, not a successful hide integration test. The editor baseline was
 `53c134add77ad3a45a8001b3c478cc1ed41b9c0d`. The inspected `hdb` source was
 `af22571abc9d4316ad592815f46d9b430f278014` (2026-09-19); release packages can differ.
 
@@ -17,7 +17,7 @@ Make **GHC source debugging through `hdb` and the existing DAP client** the next
 practical experiment. Keep GHCi in an ordinary terminal as the immediately
 useful fallback. Treat native debugging, profiling, eventlogs and heap analysis
 as separate workflows with different questions and preparation requirements.
-Do not embed the GHC API in thc-edit or build a new GHCi-output parser first.
+Do not embed the GHC API in hide or build a new GHCi-output parser first.
 
 The expected useful first slice is: load one Cabal component, break in project
 source, step, stop on an exception, inspect unforced values, continue, and
@@ -25,7 +25,7 @@ terminate cleanly. Existing UI and MCP operations cover most of that surface.
 The two concrete integration gaps to investigate first are **launch timing** and
 **interactive program input**, not a new debugging UI.
 
-| User question | Best initial route | Fit in thc-edit |
+| User question | Best initial route | Fit in hide |
 | --- | --- | --- |
 | Why does this function return the wrong result? | GHCi or `hdb`, interpreted project code | Existing source/breakpoint/scopes UI through DAP; terminal fallback now |
 | Where did this exception come from? | Exception breaks; `hdb` stack information; trace history in GHCi | Existing exception filters and stack view, subject to adapter semantics |
@@ -39,8 +39,8 @@ backend provides all six experiences.
 
 ## What the editor already has
 
-[Running and debugging](../running.md), [Debugger.hs](../../src/THC/Edit/Debugger.hs),
-[DAP.hs](../../src/THC/Edit/DAP.hs) and [Build.hs](../../src/THC/Edit/Build.hs)
+[Running and debugging](../running.md), [Debugger.hs](../../src/Hide/Debugger.hs),
+[DAP.hs](../../src/Hide/DAP.hs) and [Build.hs](../../src/Hide/Build.hs)
 show a largely reusable debugger client:
 
 - Adapter configuration accepts either a subprocess speaking DAP over stdio or
@@ -100,7 +100,7 @@ older compilers. [GHC 9.14.1 release notes](https://downloads.haskell.org/ghc/9.
 
 The project documents source/exception breakpoints, step-in/over/out, thunk-aware
 inspection and a stopped REPL. Its supported stable starting point is GHC 9.14;
-installation differs on Windows. It is an external DAP application, so thc-edit
+installation differs on Windows. It is an external DAP application, so hide
 does not need to acquire a GHC-library dependency.
 [Project installation and configuration](https://well-typed.github.io/haskell-debugger/).
 
@@ -155,7 +155,7 @@ a fallback rather than requiring a reverse request. Windows explicitly disables
 this terminal route upstream. In the external-interpreter fallback, stdout and
 stderr are forwarded as DAP output, while stdin is a pipe with no forwarding
 path in that implementation. Therefore an output-only first test is plausible;
-interactive `getLine` is not a supported thc-edit workflow established by this
+interactive `getLine` is not a supported hide workflow established by this
 research. [Capability selection](https://github.com/well-typed/haskell-debugger/blob/af22571abc9d4316ad592815f46d9b430f278014/hdb-dap/Development/Debug/Adapter/Server.hs),
 [interpreter I/O paths](https://github.com/well-typed/haskell-debugger/blob/af22571abc9d4316ad592815f46d9b430f278014/hdb-dap/Development/Debug/Adapter/DAPDebuggee.hs).
 
@@ -180,7 +180,7 @@ noninteractive examples, not the recommended basis for new terminal support.
 Do not describe it as abandoned or assume it stops at 9.12: the current
 `ghci-dap` README advertises GHC 9.10, 9.12 and 9.14 and includes version-specific
 implementation directories. Pin and test the complete compiler/package tuple;
-there is no verified thc-edit compatibility matrix here.
+there is no verified hide compatibility matrix here.
 [`ghci-dap`](https://github.com/phoityne/ghci-dap).
 
 ## Native executables: DWARF, GDB and LLDB
@@ -199,7 +199,7 @@ machine-level stops. Qualify actual source mapping and unwinding separately
 from whether an adapter launches. “LLDB can launch it” is insufficient evidence
 for pleasant Haskell source debugging.
 
-`lldb-dap` already matches thc-edit's subprocess-DAP configuration shape. GDB
+`lldb-dap` already matches hide's subprocess-DAP configuration shape. GDB
 also documents a DAP interpreter (`--interpreter=dap`), so a new GDB/MI client
 is unnecessary for an initial native experiment. Actual installed binaries,
 platform attach restrictions, core dumps and debug symbols still need checking.

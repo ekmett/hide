@@ -10,8 +10,8 @@ import System.Directory
 import System.FilePath ((</>))
 import System.IO (hClose, openBinaryTempFile)
 import System.Timeout (timeout)
-import THC.Edit.External
-import THC.Edit.Browser (entryName)
+import Hide.External
+import Hide.Browser (entryName)
 
 checks :: IO ()
 checks = bracket temporary removePathForcibly $ \dir -> withWatcher $ \watcher -> do
@@ -108,7 +108,7 @@ checks = bracket temporary removePathForcibly $ \dir -> withWatcher $ \watcher -
     check name ok = unless ok (error name)
     temporary = do
       base <- getTemporaryDirectory
-      (path, handle) <- openBinaryTempFile base "thc-edit-external-check"
+      (path, handle) <- openBinaryTempFile base "hide-external-check"
       hClose handle
       removeFile path
       createDirectory path

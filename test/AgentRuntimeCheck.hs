@@ -16,11 +16,11 @@ import System.FilePath ((</>))
 import System.IO (hClose, openTempFile)
 import System.Process (callProcess)
 import System.Timeout (timeout)
-import qualified THC.Edit.ACP as ACP
-import THC.Edit.AgentAccess
-import THC.Edit.AgentHub
-import THC.Edit.AgentRuntime
-import THC.Edit.Session
+import qualified Hide.ACP as ACP
+import Hide.AgentAccess
+import Hide.AgentHub
+import Hide.AgentRuntime
+import Hide.Session
 
 checks :: IO ()
 checks = bracket temporary removePathForcibly $ \root -> do

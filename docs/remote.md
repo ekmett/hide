@@ -6,12 +6,12 @@ provider run on the project host. Display, clipboard and downloads stay local.
 
 ## Install on both machines
 
-The remote host needs `thc-edit` on the `PATH` used by SSH commands. Sessions
+The remote host needs `hide` on the `PATH` used by SSH commands. Sessions
 and remote editing are always included. A minimal server installation omits
 client frontends and embedded terminals:
 
 ```sh
-cabal install exe:thc-edit -f-window -f-web -f-terminal
+cabal install exe:hide -f-window -f-web -f-terminal
 ```
 
 It does not need SDL, a browser, a graphical session or the THC compiler for
@@ -32,17 +32,17 @@ in Windows without WSL.
 Use an ordinary SSH host, username or configured alias:
 
 ```sh
-thc-edit --terminal buildbox:projects/example
-thc-edit --window buildbox:projects/example
-thc-edit --web user@buildbox:projects/example
+hide --terminal buildbox:projects/example
+hide --window buildbox:projects/example
+hide --web user@buildbox:projects/example
 ```
 
 The path names a file or directory on the remote host. Use your shell's quoting
 for spaces:
 
 ```sh
-thc-edit --window --ssh buildbox 'projects/example package'
-thc-edit --web --ssh buildbox '~/projects/example'
+hide --window --ssh buildbox 'projects/example package'
+hide --web --ssh buildbox '~/projects/example'
 ```
 
 `--ssh HOST PATH` is equivalent to `HOST:PATH`; leaving out PATH opens the remote
@@ -52,10 +52,10 @@ working directory. A leading `~/` expands to the remote user's home. Use
 One client opens one remote project at a time. Prefix a local filename containing
 a colon with `./` to distinguish it from a remote target.
 
-The client starts the fixed remote command `thc-edit --remote` through SSH without
+The client starts the fixed remote command `hide --remote` through SSH without
 a PTY. Paths and startup options travel in the protocol, not as pieces of a
 remote shell command. Test that the remote command can find the executable if
-connection reports that `thc-edit` is missing. SSH host aliases, authentication
+connection reports that `hide` is missing. SSH host aliases, authentication
 and host-key handling use your normal SSH configuration.
 
 `--terminal` uses the same session connection as the graphical frontends; it
@@ -91,19 +91,19 @@ If the connection drops, the remote session keeps its buffers and the client
 attempts to reconnect. After detaching, return from the same client machine with:
 
 ```sh
-thc-edit --resume
+hide --resume
 ```
 
 The session record remembers the SSH host and project. With several unfinished
 sessions, choose one from the numbered list or use `--resume ID` with its full
 ID or a unique prefix. You can also change displays, for example with
-`thc-edit --web --resume`. Do not combine `--resume` with `--ssh` or a path.
+`hide --web --resume`. Do not combine `--resume` with `--ssh` or a path.
 
 To attach from a client machine without that saved record, use the remote
 session's full ID and host:
 
 ```sh
-thc-edit --window --ssh buildbox --remote-session ID
+hide --window --ssh buildbox --remote-session ID
 ```
 
 Only one client controls a session at a time. **File > Exit** ends it through

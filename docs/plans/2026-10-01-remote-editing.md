@@ -2,9 +2,9 @@
 
 ## Design
 
-Run the editor and all project tooling beside the remote filesystem. Local Metal/Vulkan and browser displays use the same protocol. `thc-edit PATH --remote` serves length-framed packets on stdin/stdout, diagnostics only on stderr, no PTY. `thc-edit USER@HOST:PATH --metal` and `--web` launch the installed OpenSSH client and attach locally. Honor SSH configuration and host authentication; do not forward credentials or install software automatically.
+Run the editor and all project tooling beside the remote filesystem. Local Metal/Vulkan and browser displays use the same protocol. `hide PATH --remote` serves length-framed packets on stdin/stdout, diagnostics only on stderr, no PTY. `hide USER@HOST:PATH --metal` and `--web` launch the installed OpenSSH client and attach locally. Honor SSH configuration and host authentication; do not forward credentials or install software automatically.
 
-The SSH bootstrap runs `thc-edit --remote` directly, without requiring the full thc project. Startup arguments travel in the protocol hello, avoiding Unix/cmd.exe shell quoting differences. Native Windows remote servers are required alongside macOS/Linux.
+The SSH bootstrap runs `hide --remote` directly, without requiring the full thc project. Startup arguments travel in the protocol hello, avoiding Unix/cmd.exe shell quoting differences. Native Windows remote servers are required alongside macOS/Linux.
 
 Remote sessions survive transport loss. Private per-user endpoints hold persistent sessions: Unix sockets on POSIX, authenticated loopback connections on Windows. Reattachment receives a complete frame and resets compression. The session continues polling tooling while detached. One writer is allowed. Explicit Exit runs ordinary unsaved-buffer checks and ends the session; closing the transport detaches. Session identities and client event sequences prevent duplicate edits on reconnect. Keep unacknowledged input bounded; reject protocol mismatches and malformed or oversized packets.
 
@@ -16,9 +16,9 @@ Remote code is behind a manual `remote` Cabal flag, alongside existing `web`, `w
 
 ## Interfaces
 
-- `THC.Edit.Protocol` owns `WebInput`, parsing/application, display rows and compression, metadata/assets, framing (`WirePacket = JsonPacket Value | BinaryPacket ByteString`, `readPacket`, `writePacket`) and bounded display decoding.
-- `THC.Edit.Remote` owns `RemotePeer {peerSend :: WirePacket -> IO (), peerSendBatch :: [WirePacket] -> IO (), peerReceive :: IO (Maybe WirePacket)}`, `withSSHPeer :: String -> [String] -> (RemotePeer -> IO ()) -> IO ()`, and remote daemon/attachment helpers. Persistent execution receives the existing effects and tick callbacks.
-- `THC.Edit.RemoteWindow` exports `runRemoteWindow :: Backend -> Double -> (Int,Int) -> Int -> String -> RemotePeer -> IO ()`.
+- `Hide.Protocol` owns `WebInput`, parsing/application, display rows and compression, metadata/assets, framing (`WirePacket = JsonPacket Value | BinaryPacket ByteString`, `readPacket`, `writePacket`) and bounded display decoding.
+- `Hide.Remote` owns `RemotePeer {peerSend :: WirePacket -> IO (), peerSendBatch :: [WirePacket] -> IO (), peerReceive :: IO (Maybe WirePacket)}`, `withSSHPeer :: String -> [String] -> (RemotePeer -> IO ()) -> IO ()`, and remote daemon/attachment helpers. Persistent execution receives the existing effects and tick callbacks.
+- `Hide.RemoteWindow` exports `runRemoteWindow :: Backend -> Double -> (Int,Int) -> Int -> String -> RemotePeer -> IO ()`.
 - Web retains public protocol reexports for compatibility; the local browser bridge consumes RemotePeer. App selects server, SSH client or existing local execution before opening files locally.
 
 ## Implementation plan

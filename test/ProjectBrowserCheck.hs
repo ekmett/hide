@@ -14,9 +14,9 @@ import System.Directory
 import System.FilePath ((</>))
 import System.IO (openTempFile,hClose)
 import System.Timeout (timeout)
-import THC.Edit.Model
-import THC.Edit.ProjectBrowser
-import THC.Edit.Render (snapshot)
+import Hide.Model
+import Hide.ProjectBrowser
+import Hide.Render (snapshot)
 
 checks :: IO ()
 checks=bracket fixture removePathForcibly $ \root->withProjectBrowser $ \browser->do

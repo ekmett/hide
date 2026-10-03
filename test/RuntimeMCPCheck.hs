@@ -7,12 +7,12 @@ import Data.Aeson.Types (parseMaybe)
 import qualified Data.Text as T
 import qualified Data.Aeson.Key as K
 import System.Directory (findExecutable,getTemporaryDirectory)
-import THC.Edit.Conversation
-import THC.Edit.RuntimeMCP
-import THC.Edit.Terminal (terminalAvailable)
-import qualified THC.Edit.BuildJobs as Jobs
-import THC.Edit.Model
-import THC.Edit.Buffer
+import Hide.Conversation
+import Hide.RuntimeMCP
+import Hide.Terminal (terminalAvailable)
+import qualified Hide.BuildJobs as Jobs
+import Hide.Model
+import Hide.Buffer
 checks :: IO ()
 checks=withConversation $ \runtime -> do
   let d=initialDesktop (80,25)

@@ -1,7 +1,7 @@
 # Graphical Window Implementation Plan
 
 
-Goal: `thc-edit --window` presents the existing editor on Metal/macOS and Vulkan/Linux with tightly rendered IBM VGA cells.
+Goal: `hide --window` presents the existing editor on Metal/macOS and Vulkan/Linux with tightly rendered IBM VGA cells.
 Spec: ../design/2026-09-30-graphical-window-design.md
 Constraints: optional Cabal flag, no changes to THC, preserve terminal behavior, plain UI copy, real selected GPU driver, included font licensing.
 Review focus: HiDPI pointer alignment; double-inserted text; dirty window close; clipping at tiny window dimensions; resource cleanup and backend errors.

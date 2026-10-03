@@ -13,19 +13,19 @@ import System.Environment
 import System.FilePath ((</>))
 import System.IO (hClose,openTempFile)
 import System.Timeout (timeout)
-import THC.Edit.Conversation
-import qualified THC.Edit.AgentRuntime as AR
-import qualified THC.Edit.AgentHub as AH
-import THC.Edit.GuestAccess (guestKeyboardAllowed,guestCommandAllowed,sanitizedBuffer,guestTransitionAllowed)
+import Hide.Conversation
+import qualified Hide.AgentRuntime as AR
+import qualified Hide.AgentHub as AH
+import Hide.GuestAccess (guestKeyboardAllowed,guestCommandAllowed,sanitizedBuffer,guestTransitionAllowed)
 import qualified Data.Map.Strict as M
 import Data.List (findIndex)
 import Data.IORef
-import THC.Edit.Buffer (contents,newBuffer,Selection(..),snapshotBuffer)
-import THC.Edit.Recovery (writeCheckpoint,readCheckpoint)
-import qualified THC.Edit.Font as Font
-import THC.Edit.ScreenCapture (capture)
-import THC.Edit.Session
-import THC.Edit.Model
+import Hide.Buffer (contents,newBuffer,Selection(..),snapshotBuffer)
+import Hide.Recovery (writeCheckpoint,readCheckpoint)
+import qualified Hide.Font as Font
+import Hide.ScreenCapture (capture)
+import Hide.Session
+import Hide.Model
 
 checks :: IO ()
 checks=bracket temporary removePathForcibly $ \root ->

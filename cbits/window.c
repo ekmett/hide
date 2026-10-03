@@ -91,7 +91,7 @@ static void refresh_pointer(void) {
 int thc_open(const char *backend, double requested_scale, int requested_cols, int requested_rows, int height) {
     if (!isfinite(requested_scale) || (requested_scale != 0 && (requested_scale < 1 || requested_scale > 8)))
         return SDL_SetError("Tile scale must be between 1 and 8");
-    SDL_SetAppMetadata("Turbo Haskell", "0.1.0.0", NULL);
+    SDL_SetAppMetadata("Haskell", "0.1.0.0", NULL);
     if (!SDL_Init(SDL_INIT_VIDEO)) return 0;
     crt_filter = false;
     blink_cursor = true; cursor_epoch = SDL_GetTicks();
@@ -102,7 +102,7 @@ int thc_open(const char *backend, double requested_scale, int requested_cols, in
     const char *capture_exit = SDL_getenv("THC_EDIT_CAPTURE_EXIT");
     SDL_WindowFlags flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY;
     if (capture_exit && strcmp(capture_exit, "1") == 0) flags |= SDL_WINDOW_HIDDEN;
-    window = SDL_CreateWindow("Turbo Haskell", 1280, 800, flags);
+    window = SDL_CreateWindow("Haskell", 1280, 800, flags);
     if (!window) return 0;
     renderer = SDL_CreateRenderer(window, backend);
     if (!renderer) return 0;

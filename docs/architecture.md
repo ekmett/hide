@@ -30,7 +30,7 @@ bytes and use the same file and undo machinery.
 To measure highlighting on the included fixture:
 
 ```sh
-cabal exec -- ghc -O2 -package thc-edit test/HighlightBench.hs -o /tmp/thc-highlight-bench
+cabal exec -- ghc -O2 -package hide test/HighlightBench.hs -o /tmp/thc-highlight-bench
 /tmp/thc-highlight-bench
 ```
 
@@ -139,7 +139,7 @@ the identity, host and startup arguments so `--resume` can reconnect without
 reconstructing the launch command. Local and SSH sessions use the same display
 protocol, with terminal, native and browser frontends.
 
-SSH starts the fixed `thc-edit --remote` command without a PTY. Startup options
+SSH starts the fixed `hide --remote` command without a PTY. Startup options
 and paths travel in bounded, length-prefixed JSON/binary packets over stdin and
 stdout; diagnostics use stderr. The relay owns the connection rather than the
 editor state. Clients share the adaptive display compression above.

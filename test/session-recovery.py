@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Kill a private test daemon and recover unsaved edits through another frontend.
-Usage: python3 test/session-recovery.py /absolute/path/to/thc-edit
+Usage: python3 test/session-recovery.py /absolute/path/to/hide
 POSIX integration harness; operates only on its own temporary session.
 """
 import json
@@ -61,7 +61,7 @@ with tempfile.TemporaryDirectory(prefix='thc-recovery-live-') as directory:
     config.parent.mkdir(parents=True)
     config.write_text('')
     env = dict(os.environ, XDG_CONFIG_HOME=str(root/'config'), XDG_DATA_HOME=str(root/'data'),
-        THC_EDIT_WEB_OPEN='0', thc_edit_datadir=str(pathlib.Path(__file__).resolve().parents[1]))
+        THC_EDIT_WEB_OPEN='0', hide_datadir=str(pathlib.Path(__file__).resolve().parents[1]))
     ident = secrets.token_hex(24)
     checkpoint = root/'data/thc-edit/sessions'/f'{ident}.checkpoint'
     endpoint = pathlib.Path(f'/tmp/thc-edit-{os.geteuid()}')/ident

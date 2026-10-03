@@ -17,8 +17,8 @@ import System.IO.Error (tryIOError)
 #ifndef mingw32_HOST_OS
 import qualified System.Posix.Files as Posix
 #endif
-import THC.Edit.DocsMCP
-import THC.Edit.Model
+import Hide.DocsMCP
+import Hide.Model
 
 checks :: IO ()
 checks=bracket temporary removePathForcibly $ \root->do
@@ -49,8 +49,8 @@ checks=bracket temporary removePathForcibly $ \root->do
   BS.writeFile (compiler </> "docs/core.md") "# Core\nCompiler internals\n"
   BS.writeFile (compiler </> "compiler/README.md") "# Compiler component\n"
   BS.writeFile (compiler </> "compiler/docs/ir.md") "# IR\nLowering\n"
-  bracket (saveEnv ["thc_edit_datadir","THC_ROOT","XDG_CONFIG_HOME"]) restoreEnv $ \_->do
-    setEnv "thc_edit_datadir" editor
+  bracket (saveEnv ["hide_datadir","THC_ROOT","XDG_CONFIG_HOME"]) restoreEnv $ \_->do
+    setEnv "hide_datadir" editor
     setEnv "THC_ROOT" compiler
     setEnv "XDG_CONFIG_HOME" configuration
     check "documentation tool schemas match dispatch names" (length docsTools==3 && docsToolNames==["docs_list","docs_search","docs_read"])

@@ -10,12 +10,12 @@ import qualified Data.Text.Encoding as TE
 import qualified Graphics.Vty as V
 import System.Directory
 import System.IO (openBinaryTempFile,hClose)
-import THC.Edit.Buffer
-import THC.Edit.Files
-import THC.Edit.Hex
-import THC.Edit.Model
-import THC.Edit.Render (snapshot, snapshotHtml)
-import qualified THC.Edit.AgentFiles as A
+import Hide.Buffer
+import Hide.Files
+import Hide.Hex
+import Hide.Model
+import Hide.Render (snapshot, snapshotHtml)
+import qualified Hide.AgentFiles as A
 
 checks :: IO ()
 checks = bracket temporary removeFile $ \path -> do

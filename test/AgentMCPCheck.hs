@@ -11,8 +11,8 @@ import qualified Data.ByteString as BS
 import Data.IORef
 import qualified Data.Text as T
 import System.Directory (getTemporaryDirectory, canonicalizePath)
-import THC.Edit.AgentHub
-import THC.Edit.AgentMCP
+import Hide.AgentHub
+import Hide.AgentMCP
 
 checks :: IO ()
 checks=do

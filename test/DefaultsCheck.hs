@@ -4,9 +4,9 @@ import Control.Monad (unless,forM_)
 import Data.Aeson
 import Data.Aeson.Types (parseEither)
 import qualified Data.Text as T
-import THC.Edit.BufferView
-import THC.Edit.Defaults
-import THC.Edit.Model (ChatSubmit(..))
+import Hide.BufferView
+import Hide.Defaults
+import Hide.Model (ChatSubmit(..))
 
 checks :: IO ()
 checks=do

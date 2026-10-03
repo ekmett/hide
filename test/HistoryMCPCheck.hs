@@ -7,9 +7,9 @@ import qualified Data.ByteString.Lazy as BL
 import qualified Data.Map.Strict as M
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import THC.Edit.HistoryMCP
-import THC.Edit.Model
-import THC.Edit.Buffer
+import Hide.HistoryMCP
+import Hide.Model
+import Hide.Buffer
 checks :: IO ()
 checks=do
   let check label ok=unless ok (error label)

@@ -12,10 +12,10 @@ import System.Environment
 import System.FilePath
 import System.IO
 import System.Process (readProcess)
-import THC.Edit.Environment
-import THC.Edit.GuestAccess
-import THC.Edit.MCPPermissions (permissionConfigPath)
-import THC.Edit.Model
+import Hide.Environment
+import Hide.GuestAccess
+import Hide.MCPPermissions (permissionConfigPath)
+import Hide.Model
 
 checks :: IO ()
 checks=bracket temporary removePathForcibly $ \root->
