@@ -9,14 +9,14 @@ import THC.Edit.Buffer (displayColumn)
 import THC.Edit.Model
 import THC.Edit.Render (snapshotHtml)
 import THC.Edit.Markdown
-import THC.Edit.Syntax (Style(..))
+import THC.Edit.Syntax (Style(..),linkSpans)
 
 checks :: IO ()
 checks = do
   let text width = T.pack . map fst . renderMarkdown width
       styled = renderMarkdown 80 "# Heading\n\nSome *emphasis* and **strong** with `code`."
   check "headings and inline markup render with styles" (text 80 "# Heading" == "Heading" && ('H',Heading 1) `elem` styled && ('e',Constructor) `elem` styled && ('s',Keyword) `elem` styled && ('c',Literal) `elem` styled)
-  check "links retain destination and decode entities" (text 80 "[docs][ref] &amp; &#955;\n\n[ref]: https://example.test/a" == "docs (https://example.test/a) & λ")
+  check "links retain destination metadata and decode entities" (text 80 "[docs][ref] &amp; &#955;\n\n[ref]: https://example.test/a" == "docs & λ" && linkSpans (renderMarkdown 80 "[docs](https://example.test/a)")==[(0,4,"https://example.test/a")])
   check "escapes are parsed by CommonMark" (text 80 "\\*literal\\*" == "*literal*")
   check "ordered, nested lists and quotes render" ("3. one\n4. two\n   • nested" `T.isInfixOf` text 80 "3. one\n4. two\n   - nested" && text 80 "> quote" == "> quote")
   let haskell = renderMarkdown 80 "```haskell\nmodule X where\nx = 42\n```"

@@ -5,6 +5,7 @@ const status = document.querySelector('#status');
 const input = document.querySelector('#input');
 const fullscreen = document.querySelector('#fullscreen');
 const clipboardAction = document.querySelector('#clipboard-action');
+const resourceAction = document.querySelector('#open-resource');
 const gl = canvas.getContext('webgl', {alpha:false, antialias:false, preserveDrawingBuffer:true});
 if (!gl) {status.textContent='WebGL is unavailable in this browser.';throw new Error(status.textContent);}
 const vertex = `attribute vec2 position; varying vec2 uv; void main(){uv=(position+1.0)*0.5; gl_Position=vec4(position,0,1);}`;
@@ -157,6 +158,44 @@ async function systemClipboard(request){
  }
 }
 clipboardAction.addEventListener('click',()=>{if(clipboardRequest)systemClipboard(clipboardRequest);});
+// WebSocket replies may arrive after browser user activation expires. Keep an
+// explicit button available when opening a new tab needs another human click.
+let pendingResource=null,pendingResourceMime=null;
+function receiveResource(message){
+  let url;
+  try{
+    if(message.url){
+      const parsed=new URL(message.url);
+      if(!['http:','https:'].includes(parsed.protocol))throw new Error('Unsupported link');
+      url=parsed.href;
+    }else{
+      if(!['image/png','image/jpeg','image/gif','image/webp','image/bmp','image/svg+xml','application/pdf'].includes(message.mime))throw new Error('Unsupported file');
+      if(typeof message.data!=='string'||message.data.length>11184812)throw new Error('File too large');
+      const bytes=Uint8Array.from(atob(message.data),c=>c.charCodeAt(0));
+      if(bytes.length>8388608)throw new Error('File too large');
+      url=URL.createObjectURL(new Blob([bytes],{type:message.mime}));
+    }
+  }catch(error){status.textContent='Cannot open link: '+error.message;return;}
+  if(pendingResource?.startsWith('blob:'))URL.revokeObjectURL(pendingResource);
+  pendingResource=url;pendingResourceMime=message.mime||null;
+  openResourceTab();
+}
+function openResourceTab(){
+  if(!pendingResource)return;
+  const tab=window.open('about:blank','_blank');
+  if(!tab){resourceAction.hidden=false;status.textContent='Click Open link to open this resource in a new tab.';return;}
+  const url=pendingResource;
+  tab.opener=null;
+  if(url.startsWith('blob:')&&pendingResourceMime?.startsWith('image/')){
+    // Embed images rather than navigating to SVG as an active same-origin document.
+    const img=tab.document.createElement('img');img.src=url;img.style.maxWidth='100%';
+    tab.document.title='Image';tab.document.body.appendChild(img);
+  }else tab.location.replace(url);
+  pendingResource=null;resourceAction.hidden=true;
+  if(url.startsWith('blob:'))setTimeout(()=>URL.revokeObjectURL(url),60000);
+}
+resourceAction.addEventListener('click',openResourceTab);
+
 // A stored, nonfinal DEFLATE block seeds the native decoder with the previous
 // screen. Only the compressed tail travels over the socket. RFC 1951 section 3.2.4.
 async function decodeFrame(bytes, previous){
@@ -209,6 +248,8 @@ function connect(){
      if(changedMode)lastSize='';resize();
    }else if(message.type==='download'){
      downloadName=message.name;
+   }else if(message.type==='open-resource'){
+     receiveResource(message);
    }else if(message.type==='copy'){
      if(nativeCopies.shift()!==message.text)systemClipboard(message);
    }else if(message.type==='paste-request'){

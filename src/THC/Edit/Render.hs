@@ -136,6 +136,7 @@ renderKey original = do
         f<-traverse file (documentFile value)
         payload (documentHighlight value)
         mapM_ payload (documentSourceRows value)
+        payload (documentLinks value)
         payload (documentShellBlocks value)
         pure (DocumentKey f (documentLabel value) (documentWidth value)
           (documentCursorVisible value) (documentSuggestedName value) (present (documentSourceRows value)))
@@ -585,6 +586,9 @@ styledImage dark selectable override active sel start chars = V.horizCat (expand
              | otherwise=T.map (\c -> if c<' ' || c=='\DEL' then '·' else c) g
         width=sum (map clusterWidth (graphemes text))
         image=label a text
+    syntaxAttr (LinkStyle _ style)=V.withStyle (syntaxAttr style) V.underline
+    syntaxAttr (ProseStyle (LinkStyle _ style))=V.withStyle (syntaxAttr (ProseStyle style)) V.underline
+    syntaxAttr (BubbleStyle outgoing (LinkStyle _ style))=V.withStyle (syntaxAttr (BubbleStyle outgoing style)) V.underline
     syntaxAttr (ProseStyle (CodeStyle shell style))=syntaxAttr (CodeStyle shell style)
     syntaxAttr (ProseStyle style) | dark = V.withForeColor (syntaxAttr style) (case style of Plain->white; _->foreground style)
     syntaxAttr (ProseStyle style)=attr (case style of Heading 1->white; Heading 2->blue; Heading _->V.RGBColor 170 0 170; Keyword->blue; Literal->V.RGBColor 0 85 0; Comment->V.RGBColor 85 85 85; _->black) scrollCyan

@@ -25,6 +25,7 @@ import System.Timeout (timeout)
 import THC.Edit.Buffer (newBuffer, markSaved)
 import qualified Data.Map.Strict as M
 import THC.Edit.EditorMCP (editorResponse, runEditorMCPWithHandles, runEditorMCPWithToken, readMCPLine)
+import THC.Edit.Markdown (renderMarkdown)
 import THC.Edit.Model
 import THC.Edit.Protocol
 import THC.Edit.Remote
@@ -48,6 +49,7 @@ checks = isolatedStore $ do
   unless (S.shortSessionId identity []==replicate 12 'a') (error "title session prefix starts at twelve characters")
   unless (S.shortSessionId identity [identity,replicate 12 'a'++"cdefg"]==replicate 12 'a'++"b") (error "title session prefix disambiguates saved sessions")
 
+  linkOpenCheck
   localPeerCheck
   inspectionExitCheck
   inspectionViewerExitCheck
@@ -494,3 +496,57 @@ inspectionViewerExitCheck=do
       closed display False
     ended<-timeout 3000000 (wait daemon)
     unless (ended==Just ()) (error "MCP Exit with attached viewer did not finish")
+
+-- A real click travels through the daemon and returns a client-side open once.
+-- Retried input/reconnection must not launch the user's browser a second time.
+linkOpenCheck :: IO ()
+linkOpenCheck=do
+  session<-randomIdentity
+  path<-sessionEndpoint session
+  let initial=addHelpStyled (renderMarkdown 60 "[Website](https://example.com/)") (initialDesktop (80,25))
+      window=maybe (error "missing help") id (activeWindow initial)
+      x=left (bounds window)+1; y=top (bounds window)+1
+      effects d _=pure (False,d)
+      awaitReady n=bracket (connectEndpoint path) hClose (const (pure ())) `catch` \(e::IOException)->
+        if n<=0 then throwIO e else threadDelay 20000 >> awaitReady (n-1)
+      receive h wanted=do
+        result<-timeout 3000000 (readPacket h)
+        case result of
+          Just (Just (JsonPacket (Object fields))) | KM.lookup "type" fields==Just (String wanted)->pure fields
+          Just (Just _)->receive h wanted
+          _->error ("Link transport timed out waiting for "++T.unpack wanted)
+      send h fields=writePacket h (JsonPacket (object fields))
+      mouse h serial action=send h ["type" .= ("mouse"::T.Text),"seq" .= (serial::Int),"action" .= (action::T.Text),"x" .= x,"y" .= y,"button" .= (0::Int)]
+  flip finally (S.forgetSession session) $
+    withAsync (runRemoteDaemon session 1 effects pure inspect initial) $ \daemon->do
+      link daemon
+      awaitReady (100::Int)
+      bracket (connectEndpoint path) hClose $ \h->do
+        send h ["type" .= ("hello"::T.Text),"version" .= (1::Int),"session" .= session,"client" .= replicate 48 'e',"ack" .= (0::Int)]
+        void (receive h "assets")
+        mouse h 1 "down"; void (receive h "ack")
+        mouse h 2 "up"
+        let openedAndAck opened acknowledged
+              | opened && acknowledged=pure ()
+              | otherwise=do
+                  result<-timeout 3000000 (readPacket h)
+                  case result of
+                    Just (Just (JsonPacket (Object fields)))
+                      | KM.lookup "type" fields==Just (String "open-resource")->do
+                          unless (not opened && KM.lookup "url" fields==Just (String "https://example.com/")) (error "Wrong or duplicate client URL")
+                          openedAndAck True acknowledged
+                      | KM.lookup "type" fields==Just (String "ack")->openedAndAck opened True
+                    Just (Just _)->openedAndAck opened acknowledged
+                    _->error "Missing asynchronous link response or acknowledgement"
+        openedAndAck False False
+        mouse h 2 "up"
+        let onlyAck=do
+              packet<-timeout 3000000 (readPacket h)
+              case packet of
+                Just (Just (JsonPacket (Object fields)))
+                  | KM.lookup "type" fields==Just (String "open-resource")->error "Retried click reopened browser"
+                  | KM.lookup "type" fields==Just (String "ack")->pure ()
+                Just (Just _)->onlyAck
+                _->error "Missing duplicate acknowledgement"
+        onlyAck
+  putStrLn "Remote link delivery and duplicate-input checks passed"

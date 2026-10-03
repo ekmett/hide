@@ -36,6 +36,7 @@ import System.IO (withBinaryFile, IOMode(ReadMode), hFileSize, openBinaryTempFil
 import THC.Edit.Font
 import THC.Edit.Model (Command(Paste))
 import THC.Edit.Protocol (WirePacket(..), decodeFrame)
+import THC.Edit.Links (openResource)
 import THC.Edit.Remote (peerSendBatch, peerReceive)
 import THC.Edit.Window
 #endif
@@ -312,6 +313,9 @@ runRemoteWindow backend scale (cols,rows) mode host peer = do
               text <- parseIO (withObject "copy" (.: "text")) value
               utf8 text c_set_clipboard
               pure (frame,atlas,connection,changed,closed)
+            "open-resource" -> do
+              result<-openResource value
+              pure (frame,atlas,either id (const connection) result,changed,closed)
             "paste-request" -> paste >> pure (frame,atlas,connection,changed,closed)
             "connection" -> do
               connected <- parseIO (withObject "connection" (.: "connected")) value

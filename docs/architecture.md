@@ -62,6 +62,16 @@ linear light and applies Floyd–Steinberg error diffusion to four coverage
 levels before enlargement. The browser's pixelated fallback does not use that
 native filter. Bundled bitmap glyphs retain nearest-neighbor scaling.
 
+Markdown links retain their targets through wrapping, tables and chat-bubble
+layout. That layout records character spans once; hit testing uses the buffer's
+line index. A bounded session worker loads and lays out linked documents outside
+the input lock, then installs the prepared buffer. A click follows its target on release, while a drag selects text.
+`FollowLink` opens relative Markdown on the session host. For external targets,
+`open-resource` carries either an HTTP(S) `url` or bounded `mime`/base64 `data`
+to the client. These live control messages are excluded from reply replay.
+Native clients invoke the OS opener with an argument vector; the browser opens
+a tab with an explicit click fallback when popup activation has expired.
+
 ## Background work
 
 Native and browser redraw gates compare explicit window and control metadata

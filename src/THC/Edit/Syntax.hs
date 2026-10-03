@@ -1,14 +1,15 @@
 {-# LANGUAGE OverloadedStrings #-}
-module THC.Edit.Syntax (Style(..), highlight, highlightFor, bubbleTile) where
+module THC.Edit.Syntax (Style(..), highlight, highlightFor, bubbleTile, linkSpans) where
 
 import Data.List (intercalate)
+import qualified Data.List as List
 import Data.Char (chr)
 import Data.Word (Word32)
 import qualified Data.Text as T
 import qualified Skylighting as S
 import System.FilePath (takeFileName)
 
-data Style = Plain | Heading Int | CodeStyle Bool Style | ProseStyle Style | Keyword | Comment | Literal | Number | Constructor | Pragma | BubbleStyle Bool Style | BubbleText Int Bool Style | TerminalStyle Word32 Word32 Word32 deriving (Eq,Show)
+data Style = LinkStyle T.Text Style | Plain | Heading Int | CodeStyle Bool Style | ProseStyle Style | Keyword | Comment | Literal | Number | Constructor | Pragma | BubbleStyle Bool Style | BubbleText Int Bool Style | TerminalStyle Word32 Word32 Word32 deriving (Eq,Show)
 
 highlight :: T.Text -> [(Char,Style)]
 highlight = highlightFor "Main.hs"
@@ -45,3 +46,18 @@ bubbleTile graphical n
   | n<0 || n>7 = ' '
   | graphical = chr (0xe000+n)
   | otherwise = "▟▙▜▛▐▌◥◤" !! n
+
+-- Metadata is collected by Markdown/conversation layout, never by the renderer.
+linkSpans :: [(Char,Style)] -> [(Int,Int,T.Text)]
+linkSpans = reverse . snd . List.foldl' collect (0,[])
+  where
+    target (LinkStyle url _)=Just url
+    target (ProseStyle s)=target s
+    target (BubbleText _ _ s)=target s
+    target (BubbleStyle _ s)=target s
+    target _=Nothing
+    collect (offset,found) (_,style)=(offset+1,case target style of
+      Nothing->found
+      Just url->case found of
+        (start,end,old):rest | end==offset && url==old -> (start,offset+1,url):rest
+        _->(offset,offset+1,url):found)

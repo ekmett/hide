@@ -79,6 +79,12 @@ remote buffer, with a limit of 16 MiB per file. Choose a remote location with
 Save as. Browser **File > Download** brings the current buffer, including
 unsaved changes, back to the client machine.
 
+Markdown links open documents on the remote host inside Help. Web URLs open
+on your client machine. Linked images and PDFs are transferred to the client
+(up to 8 MiB per file) and opened there, so a remote path never needs to exist
+locally. External-open requests are live actions and are not replayed on
+reconnection.
+
 ## Reconnect to the same session
 
 If the connection drops, the remote session keeps its buffers and the client

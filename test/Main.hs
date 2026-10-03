@@ -78,6 +78,7 @@ import qualified FilesCheck
 import qualified ExternalCheck
 import qualified ReconcileCheck
 import qualified ACPCheck
+import qualified LinksCheck
 import qualified MarkdownCheck
 import THC.Edit.Render
 import THC.Edit.Buffer
@@ -292,5 +293,6 @@ main = do
   ExternalCheck.checks
   ReconcileCheck.checks
   ACPCheck.checks
+  LinksCheck.checks
   MarkdownCheck.checks
   putStrLn "editor checks passed"

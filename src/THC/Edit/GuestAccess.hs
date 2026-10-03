@@ -80,6 +80,7 @@ guestCommandAllowed cmd=case cmd of
   SubmitChat{} -> False
   AgentPermissions -> False
   AgentGuidance -> False
+  OpenLink{} -> False
   EnvironmentOptions -> False
   Conversation -> False
   AgentCancel -> False
@@ -95,6 +96,7 @@ guestEffectsAllowed=all allowed
     allowed ReadGitDiff=False
     allowed AskGitCommit=False
     allowed WriteGitCommit{}=False
+    allowed FollowLink{}=False
     allowed EnvironmentAction{}=False
     allowed PermissionAction{}=False
     allowed SaveChatSubmit{}=False

@@ -34,9 +34,7 @@ instance C.IsInline Inline where
   escapedChar = C.str . T.singleton
   emph = tint Constructor
   strong = tint Keyword
-  link url _ label@(Inline chars)
-    | textOf (toList chars) == url = tint Literal label
-    | otherwise = tint Literal label <> Inline (Seq.fromList (paint Comment (" (" <> url <> ")")))
+  link url _ (Inline chars) = Inline (fmap (\(c,s)->(c,LinkStyle url (if s==Plain then Literal else s))) chars)
   image url title label = C.str "[image: " <> C.link url title label <> C.str "]"
   code = Inline . Seq.fromList . paint Literal
   rawInline _ = C.str
@@ -154,7 +152,7 @@ renderTable width aligns header body
     rowLines isHeader cells=
       let wrapped=zipWith wrapWords sizes (take count (cells++repeat []))
           height=maximum (1:map length wrapped)
-          line j=paint Comment "│"++concat [paint Plain " "++pad alignment n (if isHeader then [(c,Heading 2) | (c,_)<-part] else part)++paint Comment " │"
+          line j=paint Comment "│"++concat [paint Plain " "++pad alignment n (if isHeader then [(c,case s of LinkStyle url _->LinkStyle url (Heading 2); _->Heading 2) | (c,s)<-part] else part)++paint Comment " │"
             | (n,alignment,parts)<-zip3 sizes (aligns++repeat DefaultAlignedCol) wrapped, let part=case drop j parts of x:_->x; _->[]]
       in map line [0..height-1]
     pad alignment n chars=paint Plain (T.replicate left " ")++chars++paint Plain (T.replicate (extra-left) " ")

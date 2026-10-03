@@ -74,6 +74,7 @@ runRemoteWeb scale host peer = do
               let adjusted=case value of Object fields->Object (KM.insert "scale" (toJSON scale) fields); _->value
               atomically $ modifyTVar' cache (\c->c {cachedAssets=Just adjusted}) >> emit (JsonPacket adjusted)
             Just "connection" -> atomically $ modifyTVar' cache (\c->c {cachedConnection=Just value,downloading=False}) >> writeTVar downloadHeader Nothing >> emit packet
+            Just "open-resource" -> atomically (emit packet)
             Just "download" -> atomically $ modifyTVar' cache (\c->c {downloading=True}) >> writeTVar downloadHeader (Just packet)
             Just "copy" -> atomically (retain [packet])
             Just "ack" -> atomically $ do

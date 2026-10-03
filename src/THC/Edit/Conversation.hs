@@ -52,7 +52,7 @@ import THC.Edit.Buffer
 import THC.Edit.Markdown (renderMarkdownWithShellBlocks)
 import THC.Edit.Model hiding (prompt)
 import System.Environment (lookupEnv)
-import THC.Edit.Syntax (Style(..), bubbleTile)
+import THC.Edit.Syntax (linkSpans,Style(..), bubbleTile)
 
 -- One configured stdio provider; its protocol supplies models and tools.
 data Phase = Initializing (Maybe Text) | Starting (Maybe Text) | Prompting | Steering Text | Setting deriving Eq
@@ -1153,7 +1153,7 @@ paintView target force s original
                          selection=Selection (bounded (anchor (selection w))) (bounded (caret (selection w)))}
       visible=target==conversationTarget original
       view=M.findWithDefault (ConversationView bid "Primary" (newBuffer "") (Selection 0 0) (0,0) (Selection 0 0)) target (conversationViews opened)
-      colored=opened {conversationViews=M.insert target view {conversationBufferId=bid,conversationReplySelection=let Selection a c=conversationReplySelection view in Selection (min (T.length text) a) (min (T.length text) c)} (conversationViews opened),chatQuestion=chatQuestion original,chatActions=if visible then actions else chatActions original,chatInputOffset=if visible then inputOffset else chatInputOffset original,buffers=M.adjust (\doc -> doc {documentHighlight=styled,documentCursorVisible=False,documentShellBlocks=shellBlocks}) bid (buffers opened),windows=map adjust (windows opened)}
+      colored=opened {conversationViews=M.insert target view {conversationBufferId=bid,conversationReplySelection=let Selection a c=conversationReplySelection view in Selection (min (T.length text) a) (min (T.length text) c)} (conversationViews opened),chatQuestion=chatQuestion original,chatActions=if visible then actions else chatActions original,chatInputOffset=if visible then inputOffset else chatInputOffset original,buffers=M.adjust (\doc -> doc {documentHighlight=styled,documentCursorVisible=False,documentLinks=linkSpans styled,documentMarkdownPath=Just (project s </> "conversation.md"),documentShellBlocks=shellBlocks}) bid (buffers opened),windows=map adjust (windows opened)}
       focused=case find ((==bid).bufferId) (windows colored) of Just w | force && visible -> focusWindow (windowId w) colored {composerFocused=True}; _ -> colored
     in focused
   where

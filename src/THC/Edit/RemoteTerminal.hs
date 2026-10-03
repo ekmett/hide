@@ -8,6 +8,7 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Graphics.Vty as V
 import qualified Data.IntMap.Strict as IM
+import THC.Edit.Links (openResource)
 import THC.Edit.Remote (RemotePeer)
 import THC.Edit.RemoteWindow (RemoteFrame(..), RemoteCell(..))
 import THC.Edit.Unicode (textImage)
@@ -130,6 +131,11 @@ runRemoteTerminal peer = bracket (mkVty V.defaultConfig) (\vty -> V.shutdown vty
                 loop receiver sender frame connected (Just copied) notice
               "notice" -> do
                 notification <- parseIO (withObject "notice" (.: "message")) value
+                render frame notification
+                loop receiver sender frame connected clipboard notification
+              "open-resource" -> do
+                result<-openResource value
+                let notification=either id (const "Opened link") result
                 render frame notification
                 loop receiver sender frame connected clipboard notification
               "paste-request" -> do

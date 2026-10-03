@@ -14,10 +14,10 @@ import Data.Maybe (listToMaybe, fromMaybe)
 import Data.List (find, findIndex, sortOn, mapAccumL, groupBy)
 import Data.Char (toLower, isAlphaNum, chr, ord, toUpper, isHexDigit, digitToInt)
 import Text.Read (readMaybe)
-import System.FilePath ((</>), takeDirectory, isAbsolute, equalFilePath, splitDirectories, joinPath, normalise)
+import System.FilePath ((</>), takeDirectory, takeExtension, isAbsolute, equalFilePath, splitDirectories, joinPath, normalise)
 import THC.Edit.Browser (Entry(..))
 import THC.Edit.Git (GitReview)
-import THC.Edit.Syntax (Style(..), highlightFor)
+import THC.Edit.Syntax (Style(..), highlightFor, linkSpans)
 import THC.Edit.Hex
 import THC.Edit.Unicode (textInputChar)
 import THC.Edit.InlineState
@@ -30,13 +30,13 @@ data Rect = Rect { left :: Int, top :: Int, width :: Int, height :: Int } derivi
 inside :: Rect -> Int -> Int -> Bool
 inside (Rect x y w h) a b = a >= x && a < x+w && b >= y && b < y+h
 
-data Document = Document { documentBuffer :: Buffer, documentFile :: Maybe FileState, documentLabel :: Maybe Text, documentHighlight :: [(Char,Style)], documentWidth :: Int, documentCursorVisible :: Bool, documentSuggestedName :: Maybe FilePath, documentSourceRows :: Maybe (Vec.Vector [(Char,Style)]), documentShellBlocks :: [(Int,Int,Text,Text)] } deriving (Eq,Show)
+data Document = Document { documentBuffer :: Buffer, documentFile :: Maybe FileState, documentLabel :: Maybe Text, documentHighlight :: [(Char,Style)], documentWidth :: Int, documentCursorVisible :: Bool, documentSuggestedName :: Maybe FilePath, documentSourceRows :: Maybe (Vec.Vector [(Char,Style)]), documentShellBlocks :: [(Int,Int,Text,Text)], documentLinks :: [(Int,Int,Text)], documentMarkdownPath :: Maybe FilePath } deriving (Eq,Show)
 -- Source colors are populated by the session worker, never forced by input or drawing.
 newDocument :: Buffer -> Maybe FileState -> Document
-newDocument b file = restyle (Document b file Nothing [] 0 True Nothing Nothing [])
+newDocument b file = restyle (Document b file Nothing [] 0 True Nothing Nothing [] [] Nothing)
 
 restyle :: Document -> Document
-restyle doc = doc {documentHighlight=[],documentSourceRows=Nothing,documentShellBlocks=[],
+restyle doc = doc {documentHighlight=[],documentSourceRows=Nothing,documentShellBlocks=[],documentLinks=[],
   documentWidth=if byteMode (documentBuffer doc) then hexWidth 16 else documentWidth doc}
 
 syntaxDocument :: Document -> Bool
@@ -75,7 +75,7 @@ data Window = Window
   } deriving (Eq,Show)
 data Command = New | Open | Download | ChangeDir | Save | SaveAs | Close | Quit | Undo | Redo | Cut | Copy | Paste
   | Find | FindNext | FindPrevious | Replace | GoTo | SelectAll | Zoom | NextWindow | Cascade | Tile
-  | SplitVertical | SplitHorizontal | ToggleTerminalPin | About | Help | EditorOptions | ChatInputOptions | Gallery
+  | OpenLink (Maybe FilePath) Text | SplitVertical | SplitHorizontal | ToggleTerminalPin | About | Help | EditorOptions | ChatInputOptions | Gallery
   | InspectType | Definition | Complete | Problems | NextMessage | PreviousMessage | RestartHLS | RenameSymbol | CodeActions
   | ProjectBrowser | ToggleTree | GitDiff | GitCommit | GitFetch | GitPull | GitMerge | ReviewDisk
   | CompileTarget | MakeTarget | StopBuild | RunTarget | RunOptions | OpenTerminal | StopTerminal
@@ -91,11 +91,11 @@ data ConflictAction = CompareDisk | ReloadDisk | KeepBuffer | SaveConflictAs der
 data Conflict = Conflict { conflictBuffer :: Int, conflictRevision :: Int, conflictBaseline :: FileState, conflictDisk :: Maybe ByteString } deriving (Eq,Show)
 data GitAction = FetchRemote | PullRemote | MergeBranch Text deriving (Eq,Show)
 data Toolchain = THC | GHC deriving (Eq,Show)
-data ContextKind = ToolchainContext [(Text,Command)] | ShellContext Command | ChangeContext Command | SourceContext | GitContext | MessagesContext | AgentContext [(Text,Command)] deriving (Eq,Show)
+data ContextKind = ToolchainContext [(Text,Command)] | LinkContext Command | ShellContext Command | ChangeContext Command | SourceContext | GitContext | MessagesContext | AgentContext [(Text,Command)] deriving (Eq,Show)
 data LanguageAction = TypeInfo | FindDefinition | Completions | ShowProblems | RestartLanguage | RenameAt Text | RequestCodeActions | ApplyCodeAction Int Int Text deriving (Eq,Show)
 data Completion = Completion Text [(Int,Int,Text)] deriving (Eq,Show)
 data ProjectAction = LoadProject | ProjectPage Int Int | ProjectDetails Int Int deriving (Eq,Show)
-data Effect = EnvironmentAction Text [Text] | AutocompleteAction Text [Text] | SaveMacKeySymbols Bool | SaveChatSubmit ChatSubmit | SaveBufferViewDefault BufferView | ProjectRequest ProjectAction | DownloadDocument Int | ReadBrowserClipboard | WriteBrowserClipboard Text | LanguageRequest LanguageAction | RunGit GitAction | ReadMergeBranches | JumpTo FilePath Int Int | ReadPath FilePath | BrowsePath FilePath Text | BrowseDirectories FilePath | ChangeDirectory FilePath | OpenChoice FilePath Text Text | ReadTree FilePath | ExpandTree Int | ReadHelp | RefreshGit FilePath | ReadGitDiff | AskGitCommit | WriteGitCommit Text | SaveDocument Int (Maybe FilePath) (Maybe Command) | ReviewExternal | ResolveConflict Conflict ConflictAction | AgentAction Text [Text] | PermissionAction Text [Text] | DebugAction Text [Text] | SetScreenMode Int | Exit deriving (Eq,Show)
+data Effect = FollowLink (Maybe FilePath) Text | EnvironmentAction Text [Text] | AutocompleteAction Text [Text] | SaveMacKeySymbols Bool | SaveChatSubmit ChatSubmit | SaveBufferViewDefault BufferView | ProjectRequest ProjectAction | DownloadDocument Int | ReadBrowserClipboard | WriteBrowserClipboard Text | LanguageRequest LanguageAction | RunGit GitAction | ReadMergeBranches | JumpTo FilePath Int Int | ReadPath FilePath | BrowsePath FilePath Text | BrowseDirectories FilePath | ChangeDirectory FilePath | OpenChoice FilePath Text Text | ReadTree FilePath | ExpandTree Int | ReadHelp | RefreshGit FilePath | ReadGitDiff | AskGitCommit | WriteGitCommit Text | SaveDocument Int (Maybe FilePath) (Maybe Command) | ReviewExternal | ResolveConflict Conflict ConflictAction | AgentAction Text [Text] | PermissionAction Text [Text] | DebugAction Text [Text] | SetScreenMode Int | Exit deriving (Eq,Show)
 data Field = Input Text Text Int | ComboBox Text [Text] Int (Maybe Int) | CheckBox Text Bool | Radio Text [Text] Int | ListBox Text [Text] Int | FileList [Entry] Int
   | ReadOnly Text Text
   | TextArea Text Bool Buffer Selection Int Int deriving (Eq,Show)
@@ -115,7 +115,7 @@ data Diagnostic = Diagnostic
   , diagnosticColumn :: Int, diagnosticSeverity :: Int, diagnosticMessage :: Text
   } deriving (Eq,Show)
 data Sidebar = Sidebar { treeRoot :: FilePath, treeRows :: [TreeRow], treeSelected :: Int, treeScroll :: Int, treeWidth :: Int, treeFocused :: Bool } deriving (Eq,Show)
-data Drag = ReviewSizing Int | DockSizing | MessagesSizing | TreeScrolling | Moving Int Int Int | Resizing Int Int Int | EdgeSizing Int Bool Bool Int | Selecting Int | Scrolling Int Bool deriving (Eq,Show)
+data Drag = FollowingLink Int Int Int (Maybe FilePath) Text | ReviewSizing Int | DockSizing | MessagesSizing | TreeScrolling | Moving Int Int Int | Resizing Int Int Int | EdgeSizing Int Bool Bool Int | Selecting Int | Scrolling Int Bool deriving (Eq,Show)
 data AgentSetting = AgentSetting { settingId :: Text, settingName :: Text, settingCategory :: Text, settingCurrent :: Text, settingChoices :: [(Text,Text)] } deriving (Eq,Show)
 -- | The human-selected composer action for Enter; Ctrl+Enter uses the other action.
 data ChatSubmit = QuerySubmit | SteerSubmit deriving (Eq,Show,Enum,Bounded)
@@ -284,6 +284,7 @@ commandDescription cmd = case cmd of
   Tile -> "Arrange windows in horizontal rows."
   SplitVertical -> "Create a side-by-side view of the same buffer."
   SplitHorizontal -> "Create a view of the same buffer above or below."
+  OpenLink _ target -> "Open "<>target
   About -> "Show information about Turbo Haskell."; Help -> "Open the read-only help document."
   EditorOptions -> "Change key bindings, cursor appearance, and graphical screen mode."; Gallery -> "Try the available dialog controls."
   InspectType -> "Ask HLS for type information at the cursor."
@@ -648,6 +649,23 @@ reviewHit x y b w=do
   pure (side,fullRow,changeLineOffset b fullRow+columnOffset (changeLineAt b fullRow) col)
   where projection=bufferViewProjection b
 
+-- Docs: tools/docs-screenshots.hs documentation-links -> docs/site/screenshots/documentation-links.png (docs/editing.md).
+linkAt :: Int -> Int -> Desktop -> Maybe Command
+linkAt x y d=do
+  w<-activeWindow d
+  doc<-activeDocument d
+  if null (documentLinks doc) then Nothing else pure ()
+  let Rect l t ww _=bounds w
+      row=y-t-1+scrollRow w
+      col=x-l-1+scrollColumn w
+      b=documentBuffer doc
+      text=bufferLineAt b row
+      position=bufferLineOffset b row+columnOffset text col
+  if x<=l || x>=l+ww-1 || y<=t || y>=t+1+windowContentRows d doc w || row>=bufferLineCount b || col>=displayColumn text (T.length text)
+    then Nothing else do
+      (_,_,url)<-find (\(start,end,_)->position>=start && position<end) (documentLinks doc)
+      pure (OpenLink (documentMarkdownPath doc) url)
+
 -- Docs: tools/docs-screenshots.hs shell-block-menu -> docs/site/screenshots/shell-block-menu.png (docs/conversations.md).
 shellBlockAt :: Int -> Int -> Desktop -> Maybe Command
 shellBlockAt x y d=do
@@ -808,6 +826,7 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
     go NextMessage d = navigateMessage 1 d
     go PreviousMessage d = navigateMessage (-1) d
     go RestartHLS d = (d,[LanguageRequest RestartLanguage])
+    go (OpenLink origin target) d = (d,[FollowLink origin target])
     go Help d = (d,[ReadHelp])
     go ToggleTree d = case sideTree d of Just _ -> (setTree Nothing d,[]); Nothing -> (d,[ReadTree (startingDirectory d)])
     go GitDiff d = (d,[ReadGitDiff])
@@ -1129,6 +1148,9 @@ dispatchEvent ev d | activeAutocomplete d, Just result<-autocompleteEvent ev d =
 dispatchEvent ev d | questionActive d, Just result<-questionEvent ev d = result
 dispatchEvent ev d | activeConversation d, Just result<-composerEvent ev d = result
 dispatchEvent ev d | Just ident<-activeTerminal d,Just text<-terminalInput ev = (d,[AgentAction "terminal-input" [ident,text]])
+dispatchEvent (V.EvMouseUp x y button) d | Just (FollowingLink _ a b origin target)<-drag d,
+  button==Nothing || button==Just V.BLeft =
+    (d {drag=Nothing,dragOriginal=Nothing},[FollowLink origin target | x==a && y==b])
 dispatchEvent (V.EvMouseUp _ _ _) d = (d {drag = Nothing,dragOriginal=Nothing},[])
 dispatchEvent (V.EvMouseDown x y button mods) d = mouseEvent x y button mods d
 dispatchEvent (V.EvPaste bytes) d | activeHex d = (either (const (d {status="Paste hexadecimal text."})) (`pasteHex` d) (TE.decodeUtf8' bytes),[])
@@ -1580,6 +1602,7 @@ menuAt x = findIndex (\(start,w) -> x >= start && x < start+w) menuPositions
 
 contextItems :: ContextKind -> [(Text,Command)]
 contextItems (ToolchainContext items) = items
+contextItems (LinkContext command) = [("Open",command)]
 contextItems (ShellContext command) = [("Execute in terminal",command)]
 contextItems (ChangeContext command) = ("Revert this change",command):contextItems SourceContext
 contextItems SourceContext = [("Copy Location",CopyLocation),("Rename symbol...",RenameSymbol),("Code actions...",CodeActions),("Go to definition",Definition),("Inspect type",InspectType),("Complete identifier",Complete)]
@@ -1722,6 +1745,9 @@ wheelEvent x y steps mods d = go (abs steps) d []
 
 mouseEvent :: Int -> Int -> V.Button -> [V.Modifier] -> Desktop -> (Desktop,[Effect])
 mouseEvent x y V.BLeft _ d | Just capture <- drag d = (case capture of
+  FollowingLink i a b origin target
+    | x==a && y==b -> d {drag=Just (FollowingLink i a b origin target)}
+    | otherwise -> selectAt True x y (focusWindow i d) {drag=Just (Selecting i)}
   ReviewSizing wid -> case find ((==wid).windowId) (windows d) of
     Just w -> mapWindow wid (\v -> v {reviewSplit=max 0 (min 100 ((x-left (bounds w)-1)*100 `div` max 1 (width (bounds w)-3)))}) d
     Nothing -> d
@@ -1749,6 +1775,7 @@ windowMouse x y button mods d = case find (\w -> windowVisible d w && inside (bo
   Just w -> let focused = focusWindow (windowId w) d {sideTree=fmap (\sidebar -> sidebar {treeFocused=False}) (sideTree d)}; Rect l t ww hh = bounds w in case button of
     V.BScrollUp -> (changeScroll True (-3) focused,[])
     V.BScrollDown -> (changeScroll True 3 focused,[])
+    V.BRight | Just command<-linkAt x y focused -> (openContext (LinkContext command) x (y+1) focused,[])
     V.BRight | x>l && x<l+ww-1 && y>t && y<t+hh-1,
                Just command<-shellBlockAt x y focused -> (openContext (ShellContext command) x y focused,[])
     V.BRight | x>l && x<l+ww-1 && y>t && y<t+hh-1,
@@ -1772,6 +1799,8 @@ windowMouse x y button mods d = case find (\w -> windowVisible d w && inside (bo
       | bufferView w==SideBySideView, x==left (bounds w)+1+fst (reviewPaneWidths w) -> (focused {drag=Just (ReviewSizing (windowId w))},[])
       | activeAutocomplete focused, inside (autocompleteComposerRect focused w) x y -> (autocompleteClick x y mods w focused,[])
       | activeAutocomplete focused, y>=top (autocompleteComposerRect focused w) -> (focused,[])
+      | Just (OpenLink origin target)<-linkAt x y focused, null mods ->
+          (selectAt False x y focused {drag=Just (FollowingLink (windowId w) x y origin target)},[])
       | activeConversation focused, Just action<-conversationClick x y w focused -> (focused {drag=Nothing},[action])
       | activeConversation focused, inside (composerRect focused w) x y -> (composerClick x y mods w focused,[])
       | activeConversation focused, y>=top (composerRect focused w) -> (focused,[])
@@ -2615,6 +2644,8 @@ scrollTreeTo position tree d = d {sideTree=Just tree {treeScroll=max 0 (min (tre
 
 treeMouse :: Int -> Int -> V.Button -> Sidebar -> Desktop -> (Desktop,[Effect])
 treeMouse x y button tree d = case button of
+  V.BRight | y>=2, y<sh-2, node:_<-drop (treeScroll tree+y-2) (treeRows tree), not (nodeDirectory node), map toLower (takeExtension (nodePath node)) `elem` [".md",".markdown",".png",".jpg",".jpeg",".gif",".webp",".bmp",".svg",".pdf"] ->
+    (openContext (LinkContext (OpenLink (Just (nodePath node)) "")) x (y+1) d,[])
   V.BLeft | y==1 && x>=treeWidth tree-5 && x<treeWidth tree-1 -> (setTree Nothing d,[])
           | x==treeWidth tree-2 && y>=2 && y<sh-2 && treeFocused tree && treeContentRows d>=3 ->
               let offset=y-2; len=treeContentRows d; thumb=scrollbarThumb len (treeScrollLimit d tree) (treeScroll tree)
@@ -2640,7 +2671,7 @@ addHelpStyled :: [(Char,Style)] -> Desktop -> Desktop
 addHelpStyled chars d = let opened=addHelp (T.pack (map fst chars)) d
                        in case activeWindow opened of
                          Nothing -> opened
-                         Just w -> opened {buffers=M.adjust (\doc -> doc {documentHighlight=[(c,ProseStyle style) | (c,style)<-chars]}) (bufferId w) (buffers opened)}
+                         Just w -> opened {buffers=M.adjust (\doc -> doc {documentHighlight=[(c,ProseStyle style) | (c,style)<-chars],documentLinks=linkSpans chars}) (bufferId w) (buffers opened)}
 
 addHelp :: Text -> Desktop -> Desktop
 addHelp text d = addReadOnly "Turbo Haskell Help" text d

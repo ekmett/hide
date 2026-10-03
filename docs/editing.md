@@ -33,6 +33,22 @@ show them in their titles too. Saving establishes a new baseline.
 closing open buffers. Enter browses into the selected directory, Browse opens
 a typed path, and OK accepts the displayed directory.
 
+## Documentation and links
+
+**F1** opens the rendered README. Click a colored link such as
+**Installation** to open that Markdown document in Help. Relative links follow
+from the document you are reading, including links back up to its parent
+folder. Drag across a link to select its text without opening it.
+
+Web links open in your browser. Right-click a linked screenshot and choose
+**Open** to view it; the Files pane offers the same action for Markdown,
+images and PDF files. Double-clicking a file in Files still opens its editor
+buffer. In a browser session, external links and images open in a new tab;
+if popup blocking prevents that, click **Open link** above the editor.
+Linked Markdown and transferred images/PDFs are limited to 8 MiB each.
+
+[![The Installation link in Help, with its Open context menu.](site/screenshots/documentation-links.png)](site/screenshots/documentation-links.png)
+
 ## Buffer views
 
 The section at the bottom of **Window** changes how the selected source window

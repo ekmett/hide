@@ -38,6 +38,8 @@ import THC.Edit.Buffer (bufferBytes)
 import THC.Edit.Files (filePath)
 import THC.Edit.Font (loadFont)
 import THC.Edit.Frontend (modeSize)
+import THC.Edit.Links (prepareLink,applyLink)
+import Paths_thc_edit (getDataFileName)
 import THC.Edit.Model hiding (Paste, message)
 import THC.Edit.Protocol
 import THC.Edit.RemoteEndpoint
@@ -215,6 +217,8 @@ runRemoteDaemonWithStartup owned session scale effects tick inspect initial = do
     inspectionClosing <- newTVarIO False
     activeDisplay <- newTVarIO False
     commands <- newTBQueueIO 128
+    linkJobs <- newTBQueueIO 4
+    linkReplies <- newTBQueueIO 4
     let commandLoop = forever $ do
           (serial,received,input,reply) <- atomically (readTBQueue commands)
           result <- try $ modifyMVar state $ \original -> do
@@ -235,15 +239,28 @@ runRemoteDaemonWithStartup owned session scale effects tick inspect initial = do
                   full=not (null anticipated) && (length (savedReplies s)>=128 || sum (map packetSize (retained++anticipated))>33554432)
               (exited,updated,replies) <- if tooLarge || full
                 then pure (False,(desktop s) {status=if tooLarge then "Clipboard or download exceeds 16 MiB; the command was not applied." else "Remote reply journal is full; reconnect before retrying this command."},[])
-                else foldM effect (False,next,[]) requests
+                else foldM (effect (owner s,generation s)) (False,next,[]) requests
               -- Replaying a clipboard read could produce a second, distinct paste input.
-              let retainedReplies=filter (\packet -> packetType packet/=Just "paste-request") replies
+              let retainedReplies=filter (\packet -> packetType packet `notElem` [Just "paste-request",Just "open-resource"]) replies
                   saved=savedReplies s++[(serial,retainedReplies) | not (null retainedReplies)]
               pure (s {desktop=updated,acknowledged=serial,stopped=exited,savedReplies=saved},(replies,exited,serial,webDirty updated))
           case result of
             Left (_::IOException) -> modifyMVar_ state (\s -> pure s {generation=generation s+1})
             Right _ -> pure ()
           atomically (putTMVar reply (result :: Either IOException ([WirePacket],Bool,Int,Bool)))
+        linkLoop = forever $ do
+          (stamp,columns,directory,origin,target)<-atomically (readTBQueue linkJobs)
+          prepared<-prepareLink True columns directory origin target
+          modifyMVar_ state $ \s->do
+            if stopped s || stamp/=(owner s,generation s) then pure s else do
+              let (updated,packet)=applyLink prepared (desktop s)
+              -- Bounded and live-only: the display drains these without replay.
+              delivered<-case packet of
+                Nothing->pure True
+                Just value->atomically $ do
+                  full<-isFullTBQueue linkReplies
+                  if full then pure False else writeTBQueue linkReplies (stamp,JsonPacket value) >> pure True
+              pure s {desktop=if delivered then updated else updated {status="Too many pending links; try again shortly."}}
         tickLoop = forever $ do
           threadDelay 50000
           modifyMVar_ state $ \s -> if stopped s then pure s else do
@@ -385,6 +402,9 @@ runRemoteDaemonWithStartup owned session scale effects tick inspect initial = do
                   (do first<-readTBQueue outgoing
                       rest<-flushTBQueue outgoing
                       pure (Just (concat (first:rest)))) `orElse` (do
+                    first<-readTBQueue linkReplies
+                    rest<-flushTBQueue linkReplies
+                    pure (Just (map snd (filter ((==(owner s,generation s)).fst) (first:rest))))) `orElse` (do
                     readTVar inspectionClosing >>= check
                     readTVar inflight >>= check . (==0)
                     pure Nothing)
@@ -410,8 +430,17 @@ runRemoteDaemonWithStartup owned session scale effects tick inspect initial = do
             Nothing -> []
             Just doc -> [json "download" ["name" .= maybe (maybe "NONAME.HS" id (documentSuggestedName doc)) (takeFileName . filePath) (documentFile doc)],BinaryPacket (bufferBytes (documentBuffer doc))]
           _ -> []
-        effect result@(True,_,_) _ = pure result
-        effect (_,d,replies) request = case request of
+        queueLink stamp d replies origin target=do
+          queued<-atomically $ do
+            full<-isFullTBQueue linkJobs
+            if full then pure False else do
+              writeTBQueue linkJobs (stamp,max 20 (min 76 (fst (screenSize d)-treeWidthOf d-4)),startingDirectory d,origin,target)
+              pure True
+          pure (False,d {status=if queued then "Opening link…" else "Link loader is busy; try again shortly."},replies)
+        effect _ result@(True,_,_) _ = pure result
+        effect stamp (_,d,replies) request = case request of
+          ReadHelp -> getDataFileName "README.md" >>= \helpPath -> queueLink stamp d replies (Just helpPath) ""
+          FollowLink origin target -> queueLink stamp d replies origin target
           ReadBrowserClipboard -> pure (False,d,replies++[json "paste-request" []])
           WriteBrowserClipboard text -> pure (False,d,replies++[json "copy" ["text" .= text]])
           DownloadDocument bid -> case M.lookup bid (buffers d) of
@@ -471,10 +500,10 @@ runRemoteDaemonWithStartup owned session scale effects tick inspect initial = do
                 pendingStops<-M.elems <$> readTVarIO inspections
                 cancelled<-timeout 2000000 (sequence_ pendingStops >> empty)
                 when (cancelled==Nothing) (hPutStrLn stderr "Editor closed with an unfinished MCP reply.")
-      withAsync (checkpointLoop initialKey) $ \_ -> withAsync commandLoop $ \inputs -> withAsync tickLoop $ \ticks -> withAsync acceptLoop $ \accepts ->
+      withAsync (checkpointLoop initialKey) $ \_ -> withAsync commandLoop $ \inputs -> withAsync linkLoop $ \links -> withAsync tickLoop $ \ticks -> withAsync acceptLoop $ \accepts ->
         -- Windows accept is a blocking foreign call: close its socket before
         -- withAsync waits for cancellation, rather than in the outer bracket.
-        race_ (readMVar done >> drainInspections) (race_ (wait inputs) (race_ (wait ticks) (wait accepts))) `finally` N.close socket
+        race_ (readMVar done >> drainInspections) (race_ (wait inputs) (race_ (wait ticks) (race_ (wait links) (wait accepts)))) `finally` N.close socket
 
   withoutDaemon args@("--":_)=args
   withoutDaemon ("--remote-daemon":_:rest)=withoutDaemon rest

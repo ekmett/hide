@@ -11,6 +11,7 @@ import THC.Edit.BufferView
 import THC.Edit.Defaults
 import THC.Edit.MCPPermissions
 import THC.Edit.ClipboardMCP
+import THC.Edit.Links (followLink)
 import THC.Edit.Environment
 import THC.Edit.ControlMCP
 import Control.Exception (bracket, finally, catch, AsyncException(UserInterrupt), Exception, throwIO)
@@ -57,7 +58,6 @@ import System.FilePath ((</>), isAbsolute, takeDirectory, takeFileName, takeExte
 import Control.Exception (try, IOException)
 import Paths_thc_edit (getDataFileName)
 import THC.Edit.Browser
-import THC.Edit.Markdown (renderMarkdownWithShellBlocks)
 import THC.Edit.Git
 import System.Environment (getArgs, lookupEnv, setEnv)
 import THC.Edit.Frontend
@@ -584,15 +584,11 @@ applyEffects = foldM apply . (False,)
       _ -> pure (False,d)
     apply (_,d) ReadHelp=do
       path<-getDataFileName "README.md"
-      result<-try (TIO.readFile path) :: IO (Either IOException T.Text)
-      pure (False,case result of
-        Left err -> message "Cannot open Help" (wrapMessage (T.pack (show err))) d
-        Right text ->
-          let (styled,blocks)=renderMarkdownWithShellBlocks (max 20 (min 76 (fst (screenSize d)-treeWidthOf d-4))) text
-              opened=addHelpStyled styled d
-          in case activeWindow opened of
-            Just w -> opened {buffers=M.adjust (\doc -> doc {documentShellBlocks=blocks}) (bufferId w) (buffers opened)}
-            Nothing -> opened)
+      (opened,_)<-followLink False d (Just path) ""
+      pure (False,opened)
+    apply (_,d) (FollowLink origin target)=do
+      (opened,_)<-followLink False d origin target
+      pure (False,opened)
     apply (_,d) (RefreshGit path)=do
       repo<-repositoryStatus path
       pure (False,d {branchStatus=maybe "" (\r -> repoBranch r <> if repoDirty r then "*" else "") repo,branchAdded=maybe 0 repoAdded repo,branchDeleted=maybe 0 repoDeleted repo,branchRoot=fmap repoRoot repo,gitReview=case gitReview d of Just review | fmap repoRoot repo == Just (reviewRoot review) -> Just review; _ -> Nothing})

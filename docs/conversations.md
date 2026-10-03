@@ -4,6 +4,11 @@ Keep a conversation beside the source you are working on. Ask about selected
 text or another open file, including unsaved work, then read the reply and review
 proposed changes in the same desktop.
 
+Links in replies work like [documentation links](editing.md#documentation-and-links):
+click to open, or drag to select text. Relative Markdown and image links resolve
+from the conversation's project directory. Right-click a linked image and choose
+**Open** to view it.
+
 ## Configure a provider
 
 **Options > Agents** configures an ACP stdio provider. Enter its executable,

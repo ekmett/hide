@@ -152,6 +152,23 @@ main = do
                 (fail "Shell block context menu did not open without executing")
               pure shown
             _ -> fail "Help screenshot needs an executable shell fence"
+        documentationLinks d = do
+          opened <- command Help (fst (handleEvent (V.EvResize 80 25) d {sideTree=Nothing}))
+          case (activeWindow opened,activeDocument opened) of
+            (Just _,Just doc) | (offset,_,target):_<-filter (\(_,_,url)->url=="docs/install.md") (documentLinks doc) -> do
+              let (row,col)=bufferLineColumn (documentBuffer doc) offset
+                  scroll=max 0 (row-3)
+                  positioned=modifyActive (\w->w {bounds=Rect 1 1 78 12,scrollRow=scroll}) opened
+                  x=2+col; y=2+row-scroll
+              pressed <- Driver.input effects (V.EvMouseDown x y V.BLeft []) positioned
+              followed <- Driver.input effects (V.EvMouseUp x y (Just V.BLeft)) pressed
+              unless (maybe False ((==Just (root </> "docs/install.md")).documentMarkdownPath) (activeDocument followed))
+                (fail "Installation link did not open in Help")
+              let (shown,pending)=handleEvent (V.EvMouseDown x y V.BRight []) positioned
+              unless (null pending && contextKind shown==LinkContext (OpenLink (documentMarkdownPath doc) target))
+                (fail "Documentation link menu did not open")
+              pure shown
+            _ -> fail "README Installation link is missing"
         review d = do
           let file=root </> "src/THC/Edit/Frontend.hs"
           source <- TIO.readFile file
@@ -207,6 +224,7 @@ main = do
           , ("find-replace", \d -> command Find d >>= typeText "bufferLineAt" >>= key (V.KChar 'h') [V.MCtrl] >>= typeText "lineAt")
           , ("permission-diff", permissionDiff)
           , ("shell-block-menu", shellBlockMenu)
+          , ("documentation-links", documentationLinks)
           , ("side-by-side", review)
           , ("window-views-menu", reviewMenu)
           , ("conversation", chat)
@@ -240,7 +258,7 @@ capture effects scratch output name shown = do
   -- Crop exact rendered pixels, using the same cell rectangles as the UI.
   -- Include the actual shadow and eight pixels of context; menus retain their heading.
   let crop = case dialog shown of
-        _ | name=="shell-block-menu" -> bounds <$> activeWindow shown
+        _ | name `elem` ["shell-block-menu","documentation-links"] -> bounds <$> activeWindow shown
         Just dg -> Just (dialogRect shown dg)
         Nothing | Just (r,_)<-contextMenu shown -> Just r
         Nothing -> case menu shown of
@@ -249,7 +267,7 @@ capture effects scratch output name shown = do
                   | otherwise -> Nothing
       pixels = case crop of
         Nothing -> Nothing
-        Just (Rect x y w h) | name `elem` ["side-by-side","shell-block-menu"] ->
+        Just (Rect x y w h) | name `elem` ["side-by-side","shell-block-menu","documentation-links"] ->
           Just (Rect (max 0 (x*24-8)) (max 0 (y*48-8)) (w*24+16) (h*48+16))
         Just (Rect x y w h) ->
           let x0=max 0 (x*24-8); y0=if menu shown/=Nothing then 0 else max 0 (y*48-8)

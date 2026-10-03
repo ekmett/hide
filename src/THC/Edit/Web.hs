@@ -6,6 +6,7 @@ module THC.Edit.Web (runWeb
   ) where
 import THC.Edit.Model hiding (Paste)
 #ifdef WITH_WEB
+import THC.Edit.Links (followLink)
 import THC.Edit.Protocol
 import THC.Edit.BrowserServer
 import Control.Concurrent.Async (withAsync)
@@ -83,6 +84,10 @@ runWeb scale effects tick initial = do
             if exit then send (object ["type" .= ("closed"::T.Text)]) >> void (tryPutMVar done ())
               else loop conn send queue disconnected (Just (key,resetKey,rows,metadata)) updated
       effect _ _ result@(True,_) _ = pure result
+      effect _ send (_,d) (FollowLink origin target) = do
+        (opened,packet)<-followLink True d origin target
+        mapM_ send packet
+        pure (False,opened)
       effect _ send (_,d) ReadBrowserClipboard = send (object ["type" .= ("paste-request"::T.Text)]) >> pure (False,d)
       effect _ send (_,d) (WriteBrowserClipboard text) = send (object ["type" .= ("copy"::T.Text),"text" .= text]) >> pure (False,d)
       effect conn send (_,d) (DownloadDocument bid) = do

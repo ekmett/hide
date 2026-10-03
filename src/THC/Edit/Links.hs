@@ -1,0 +1,150 @@
+{-# LANGUAGE OverloadedStrings #-}
+module THC.Edit.Links (followLink, prepareLink, applyLink, openResource, validWebURL) where
+
+import Control.Concurrent (forkIO)
+import Control.Exception (IOException, try, evaluate)
+import Control.Monad (unless, void)
+import Data.Aeson
+import Data.Aeson.Types (parseEither)
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Base64 as B64
+import qualified Data.Map.Strict as M
+import Data.Char (isAlphaNum,toLower)
+import Data.Maybe (fromMaybe)
+import Data.Text (Text)
+import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
+import Network.URI (parseURIReference,uriScheme,uriAuthority,uriRegName,uriPath,uriFragment,uriQuery)
+import System.Directory (canonicalizePath,getTemporaryDirectory)
+import System.FilePath ((</>),takeDirectory,takeExtension,isAbsolute,normalise)
+import System.Info (os)
+import System.IO (withBinaryFile,IOMode(ReadMode),hFileSize,openBinaryTempFile,hClose)
+import System.Process (createProcess,proc,waitForProcess,CreateProcess(..),StdStream(NoStream))
+import THC.Edit.Buffer (Selection(..),bufferLength)
+import THC.Edit.LSP (uriFilePath)
+import THC.Edit.Markdown (renderMarkdownWithShellBlocks)
+import THC.Edit.Model
+
+validWebURL :: Text -> Bool
+validWebURL text=not (T.any (<' ') text) && case parseURIReference (T.unpack text) of
+  Just uri -> uriScheme uri `elem` ["http:","https:"] && maybe False (not . null . uriRegName) (uriAuthority uri)
+  _ -> False
+
+-- Local document links stay on the server. External opens are emitted to the
+-- frontend: an HTTP(S) URL, or bounded, typed image/PDF bytes (never a host path).
+data LinkResult = LinkDocument Document Int FilePath | LinkExternal Text (Maybe Value)
+
+followLink :: Bool -> Desktop -> Maybe FilePath -> Text -> IO (Desktop,Maybe Value)
+followLink stream d origin target=do
+  prepared<-prepareLink stream (max 20 (min 76 (fst (screenSize d)-treeWidthOf d-4))) (startingDirectory d) origin target
+  pure (applyLink prepared d)
+
+-- The session worker finishes I/O, layout, buffer construction and link indexing
+-- before publishing. Applying the result only installs immutable payloads.
+prepareLink :: Bool -> Int -> FilePath -> Maybe FilePath -> Text -> IO LinkResult
+prepareLink stream columns directory origin target=do
+  result<-try run
+  pure $ case result of
+    Left (_::IOException)->LinkExternal "Cannot open link: the target is missing, unreadable or unsupported." Nothing
+    Right value->value
+  where
+    run | validWebURL target=external (object ["type" .= ("open-resource"::Text),"url" .= target])
+        | otherwise=do
+          (path,fragment)<-localTarget
+          if map toLower (takeExtension path) `elem` [".md",".markdown"] then do
+            text<-boundedRead path >>= either (const (ioError (userError "Invalid UTF-8 Markdown"))) pure . TE.decodeUtf8'
+            let (styled,blocks)=renderMarkdownWithShellBlocks columns text
+                opened=addHelpStyled styled (initialDesktop (columns+4,25))
+                rows=map (T.pack . map fst) (splitStyled styled)
+                matching=[i | (i,line)<-zip [0..] rows, slug line==fragment]
+                row=if T.null fragment then 0 else fromMaybe 0 (first matching)
+            case activeDocument opened of
+              Nothing->ioError (userError "Missing help buffer")
+              Just doc->do
+                let prepared=doc {documentMarkdownPath=Just path,documentShellBlocks=blocks}
+                _<-evaluate (bufferLength (documentBuffer prepared)+length (documentHighlight prepared)+sum [a+b+T.length url | (a,b,url)<-documentLinks prepared]+length blocks+row)
+                pure (LinkDocument prepared row path)
+          else case lookup (map toLower (takeExtension path)) formats of
+            Just mime | stream->do
+              bytes<-boundedRead path
+              let encoded=TE.decodeUtf8 (B64.encode bytes)
+              _<-evaluate (T.length encoded)
+              external (object ["type" .= ("open-resource"::Text),"mime" .= mime,"data" .= encoded])
+            Just _->launch path >> pure (LinkExternal "Opened in the default application." Nothing)
+            Nothing->pure (LinkExternal "Open link supports Markdown, web URLs, images and PDF files." Nothing)
+    external packet | stream=pure (LinkExternal "Opening link on the client." (Just packet))
+                    | otherwise=do result<-openResource packet; pure (LinkExternal (either id (const "Opened in the browser.") result) Nothing)
+    localTarget=do
+      let base=maybe directory takeDirectory origin
+      case parseURIReference (T.unpack target) of
+        Just uri | null (uriScheme uri), uriAuthority uri==Nothing, null (uriQuery uri)->do
+          decoded<-maybe (ioError (userError "Invalid path")) (pure . drop 1) (uriFilePath ("file:///"<>T.pack (uriPath uri)))
+          let path=if null decoded then fromMaybe base origin else if isAbsolute decoded then decoded else base </> decoded
+          absolute<-canonicalizePath (normalise path)
+          pure (absolute,T.pack (drop 1 (uriFragment uri)))
+        _ | isAbsolute (T.unpack target)->do path<-canonicalizePath (T.unpack target); pure (path,"")
+          | otherwise->ioError (userError "Unsupported link scheme")
+    first []=Nothing
+    first (x:_)=Just x
+    slug=T.intercalate "-" . T.words . T.filter (\c->isAlphaNum c || c==' ' || c=='-' || c=='_') . T.toLower
+    splitStyled chars=let (line,rest)=break ((=='\n').fst) chars in line:case rest of []->[]; _:more->splitStyled more
+
+applyLink :: LinkResult -> Desktop -> (Desktop,Maybe Value)
+applyLink (LinkExternal notice packet) d=(d {status=notice},packet)
+applyLink (LinkDocument doc row path) d=
+  let opened=addHelp "" d
+      installed=case activeWindow opened of
+        Just w->opened {buffers=M.insert (bufferId w) doc (buffers opened)}
+        Nothing->opened
+      positioned=modifyActive (\w->w {scrollRow=row,scrollColumn=0,selection=Selection 0 0}) installed
+  in (positioned {status=T.pack path},Nothing)
+
+formats :: [(String,Text)]
+formats=[(".png","image/png"),(".jpg","image/jpeg"),(".jpeg","image/jpeg"),(".gif","image/gif"),(".webp","image/webp"),(".bmp","image/bmp"),(".svg","image/svg+xml"),(".pdf","application/pdf")]
+
+boundedRead :: FilePath -> IO BS.ByteString
+boundedRead path=withBinaryFile path ReadMode $ \h->do
+  size<-hFileSize h
+  unless (size<=8388608) (ioError (userError "Link exceeds 8 MiB"))
+  bytes<-BS.hGet h 8388609
+  unless (BS.length bytes<=8388608) (ioError (userError "Link exceeds 8 MiB"))
+  pure bytes
+
+-- OS invocation uses argument vectors, not shell interpolation of link text.
+launch :: FilePath -> IO ()
+launch target=do
+  let command=case os of
+        "darwin"->proc "open" [target]
+        "mingw32"->proc "rundll32.exe" ["url.dll,FileProtocolHandler",target]
+        _->proc "xdg-open" [target]
+  (_,_,_,process)<-createProcess command {std_in=NoStream,std_out=NoStream,std_err=NoStream}
+  void (forkIO (void (waitForProcess process)))
+
+openResource :: Value -> IO (Either Text ())
+openResource value=case parseEither parse value of
+  Left _->pure (Left "Invalid external link response.")
+  Right resource->do
+    result<-try $ case resource of
+      Left url->launch (T.unpack url)
+      Right (extension,bytes)->do
+        temporary<-getTemporaryDirectory
+        (path,h)<-openBinaryTempFile temporary ("thc-link"<>extension)
+        BS.hPut h bytes; hClose h
+        launch path
+    pure $ case result of
+      Left (_::IOException)->Left "Could not launch the default application."
+      Right ()->Right ()
+  where
+    parse=withObject "resource" $ \o->do
+      url<-o .:? "url"
+      case url of
+        Just text | validWebURL text->pure (Left text)
+                  | otherwise->fail "Only HTTP(S) URLs can be opened"
+        Nothing->do
+          mime<-o .: "mime"
+          extension<-maybe (fail "Unsupported file type") pure (lookup mime [(mimeType,ext) | (ext,mimeType)<-formats])
+          encoded<-o .: "data"
+          unless (T.length encoded<=11184812) (fail "File too large")
+          bytes<-either fail pure (B64.decode (TE.encodeUtf8 encoded))
+          unless (BS.length bytes<=8388608) (fail "File too large")
+          pure (Right (extension,bytes))
