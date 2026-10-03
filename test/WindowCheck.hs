@@ -336,6 +336,19 @@ checks = do
      fmap treeWidth (sideTree grownMessages)==Just 24)
   check "zoom restores bounds with their original edge attachments"
     (rect (grow zoomed)==Just (Rect 0 1 100 38) && rect restored==rect (grow rightOnly))
+  let selector=toolchainBadgeRect desktop
+      sx=left selector
+      sy=top selector
+      mouseInput x y=V.EvMouseDown x y V.BLeft []
+      beginSelection=fst (handleEvent (mouseInput 3 3) desktop)
+      beginMove=fst (handleEvent (mouseInput 10 1) desktop)
+  forM_ [beginSelection,beginMove] $ \captured -> do
+    let (crossed,actions)=handleEvent (mouseInput sx sy) captured
+        ended=fst (handleEvent (V.EvMouseUp sx sy (Just V.BLeft)) crossed)
+        clicked=fst (handleEvent (mouseInput sx sy) ended)
+    check "dragging across compiler selector retains capture without invoking it"
+      (drag captured/=Nothing && drag crossed==drag captured && contextMenu crossed==Nothing && null actions)
+    check "compiler selector opens on a new click after release" (contextMenu clicked/=Nothing)
   let mouse x y=fst . handleEvent (V.EvMouseDown x y V.BLeft [])
       grabbed=mouse 10 1 desktop
       dragged=mouse 20 6 grabbed

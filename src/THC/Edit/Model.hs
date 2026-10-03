@@ -1038,8 +1038,9 @@ resizeScreenMode (sw,sh) d = layoutBottomWindows (ensureVisibleAfterLayout d (cl
     stretch w = w {bounds=stretchRect (bounds w),restoredBounds=fmap stretchRect (restoredBounds w)}
 
 handleEvent :: V.Event -> Desktop -> (Desktop,[Effect])
--- Status hints dispatch their displayed action before invalidating a proposal.
-handleEvent event@(V.EvMouseDown _ y V.BLeft _) d | y==snd (screenSize d)-1 = handleEventCore event d
+-- Fresh status clicks dispatch before invalidating a proposal. Captured drags
+-- keep their original owner and unmodified coordinates, even outside its window.
+handleEvent event@(V.EvMouseDown _ y V.BLeft _) d | drag d==Nothing, y==snd (screenSize d)-1 = handleEventCore event d
 handleEvent event d=case inlineEvent event d of
   Just result->result
   Nothing->handleEventCore event (case event of
@@ -1078,7 +1079,7 @@ inlineEvent (V.EvKey key mods) d | Just v<-inlinePreview d,inlineMatches d v = c
 inlineEvent _ _=Nothing
 
 handleEventCore :: V.Event -> Desktop -> (Desktop,[Effect])
-handleEventCore (V.EvMouseDown x y V.BLeft _) d | y==snd (screenSize d)-1 =
+handleEventCore (V.EvMouseDown x y V.BLeft _) d | drag d==Nothing, y==snd (screenSize d)-1 =
   case find (\(rect,_,_)->inside rect x y) (statusItemRects d) of
     Just (_,_,Left cmd) -> runCommand cmd d
     Just (_,_,Right event) -> handleEvent event (if activeConversation d then d {composerFocused=True} else d)
