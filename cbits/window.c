@@ -279,7 +279,7 @@ static bool draw_crt(const SDL_FRect *target) {
     return SDL_RenderTexture(renderer, vignette, NULL, target);
 }
 static void invert_pointer(void) {
-    if (mouse_x<0 || mouse_x>=cols || mouse_y<0 || mouse_y>=rows) return;
+    if (left_down || mouse_x<0 || mouse_x>=cols || mouse_y<0 || mouse_y>=rows) return;
     for (int y=cell_y(mouse_y);y<cell_y(mouse_y+1);++y)
         for (int x=cell_x(mouse_x);x<cell_x(mouse_x+1);++x)
             pixels[y*frame_w+x]=mouse_color(pixels[y*frame_w+x]);

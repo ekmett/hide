@@ -44,6 +44,7 @@ import THC.Edit.RemoteEndpoint
 import THC.Edit.Session
 import System.Directory (getCurrentDirectory, doesFileExist, doesDirectoryExist, removeFile, listDirectory)
 import THC.Edit.Recovery (writeCheckpoint, readCheckpoint, checkpointKey)
+import THC.Edit.Render (renderKey)
 
 #endif
 
@@ -323,7 +324,10 @@ runRemoteDaemonWithStartup owned session scale effects tick inspect initial = do
           writePacket connection (json "hello" ["version" .= protocolVersion,"session" .= session,"epoch" .= attachmentEpoch,"ack" .= ack,"replay" .= length replay])
           writePacket connection (JsonPacket (assetsPacket font scale))
           mapM_ (writePacket connection) replay
-          outgoing <- newTBQueueIO 1
+          -- Keep input consumption independent of frame generation. Drain replies
+          -- in order as a bounded batch, then render the latest state once.
+          outgoing <- newTBQueueIO 128
+          pending <- newTBQueueIO 128
           inflight <- newTVarIO (0::Int)
           let receive = forever $ do
                 packet <- readPacket connection >>= maybe (failure "Remote client detached") pure
@@ -335,26 +339,36 @@ runRemoteDaemonWithStartup owned session scale effects tick inspect initial = do
                     payload <- timeout 30000000 (readPacket connection)
                     case payload of Just (Just (BinaryPacket bytes)) -> pure (UploadFile name bytes); _ -> failure "Expected upload bytes"
                   _ -> pure input
-                bracket_
-                  (atomically (readTVar inspectionClosing >>= check . not >> modifyTVar' inflight (+1)))
-                  (atomically (modifyTVar' inflight (subtract 1))) $ do
-                    reply <- newEmptyTMVarIO
-                    atomically (writeTBQueue commands (serial,received,complete,reply))
-                    (responses,exit,committed,isDirty) <- atomically (takeTMVar reply) >>= either throwIO pure
-                    resumable <- readTVarIO preserveCheckpoint
-                    -- State and sequence are committed before any fallible socket write.
-                    atomically $ writeTBQueue outgoing (responses++[json "ack" ["seq" .= committed,"dirty" .= isDirty]]++[json "closed" ["resumable" .= resumable] | exit])
+                reply <- newEmptyTMVarIO
+                atomically $ do
+                  readTVar inspectionClosing >>= check . not
+                  writeTBQueue commands (serial,received,complete,reply)
+                  writeTBQueue pending reply
+                  modifyTVar' inflight (+1)
+              respond = forever $ do
+                reply <- atomically (readTBQueue pending)
+                (responses,exit,committed,isDirty) <- atomically (takeTMVar reply) >>= either throwIO pure
+                resumable <- readTVarIO preserveCheckpoint
+                -- State and sequence are committed before any fallible socket write.
+                atomically $ do
+                  writeTBQueue outgoing (responses++[json "ack" ["seq" .= committed,"dirty" .= isDirty]]++[json "closed" ["resumable" .= resumable] | exit])
+                  modifyTVar' inflight (subtract 1)
               send previous = do
                 s <- readMVar state
                 cwd <- getCurrentDirectory
                 let d=desktop s
-                    oldRows=maybe [] (\(_,r,_)->r) previous
-                    oldMeta=maybe [] (\(_,_,m)->m) previous
-                    -- Comparing Desktop also walks buffers and every undo snapshot.
-                    -- Render visible cells; the row diff below suppresses unchanged output.
-                    rows=frameRows d
-                    metadata=[if key=="title" then (key,String (applicationTitle cwd d<>" ["<>label<>"]")) else (key,value) | (key,value)<-frameMetadata cwd d]
-                    reset=maybe True (\(old,_,_)->screenSize old/=screenSize d || videoMode old/=videoMode d || pixelateUnicode old/=pixelateUnicode d) previous
+                stateKey<-renderKey d
+                let key=(stateKey,cwd)
+                    resetKey=(screenSize d,videoMode d,pixelateUnicode d)
+                    oldRows=maybe [] (\(_,_,r,_)->r) previous
+                    oldMeta=maybe [] (\(_,_,_,m)->m) previous
+                    -- The same bounded key as the web/native frontends: never
+                    -- compare desktops, file contents, or undo history.
+                    sameFrame=maybe False (\(old,_,_,_)->old==key) previous
+                    rows=if sameFrame then oldRows else frameRows d
+                    metadata=if sameFrame then oldMeta else
+                      [if name=="title" then (name,String (applicationTitle cwd d<>" ["<>label<>"]")) else (name,value) | (name,value)<-frameMetadata cwd d]
+                    reset=maybe True (\(_,old,_,_)->old/=resetKey) previous
                 case clipboardExport d of
                   (serial,Just text) -> do
                     writePacket connection (json "copy" ["text" .= text])
@@ -365,17 +379,19 @@ runRemoteDaemonWithStartup owned session scale effects tick inspect initial = do
                       in pure $ if fst (clipboardExport latest)==serial
                         then current {desktop=latest {clipboardExport=(serial,Nothing)}} else current
                   _ -> pure ()
-                when (reset || rows/=oldRows || metadata/=oldMeta) $
+                when (reset || (not sameFrame && (rows/=oldRows || metadata/=oldMeta))) $
                   writePacket connection (BinaryPacket (BL.toStrict (framePacket reset oldRows rows (if reset then metadata else filter (`notElem` oldMeta) metadata))))
                 next <- timeout 50000 $ atomically $
-                  (Just <$> readTBQueue outgoing) `orElse` (do
+                  (do first<-readTBQueue outgoing
+                      rest<-flushTBQueue outgoing
+                      pure (Just (concat (first:rest)))) `orElse` (do
                     readTVar inspectionClosing >>= check
                     readTVar inflight >>= check . (==0)
                     pure Nothing)
                 case next of
                   Just (Just packets) -> do
                     mapM_ (writePacket connection) packets
-                    if any ((==Just "closed") . packetType) packets then void (tryPutMVar done ()) else send (Just (d,rows,metadata))
+                    if any ((==Just "closed") . packetType) packets then void (tryPutMVar done ()) else send (Just (key,resetKey,rows,metadata))
                   Just Nothing -> do
                     -- An MCP Exit has no display input to carry its close. Flush
                     -- accepted input replies first, then acknowledge and close.
@@ -383,8 +399,8 @@ runRemoteDaemonWithStartup owned session scale effects tick inspect initial = do
                     writePacket connection (json "ack" ["seq" .= acknowledged final,"dirty" .= webDirty (desktop final)])
                     writePacket connection (json "closed" [])
                     void (tryPutMVar done ())
-                  Nothing -> send (Just (d,rows,metadata))
-          race_ receive (send Nothing) `finally` do
+                  Nothing -> send (Just (key,resetKey,rows,metadata))
+          race_ receive (race_ respond (send Nothing)) `finally` do
             s <- readMVar state
             when (stopped s) (void (tryPutMVar done ()))
         responsePackets d request = case request of

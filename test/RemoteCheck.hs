@@ -4,7 +4,7 @@ import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar
 import Control.Concurrent.Async (withAsync, wait, link)
 import Control.Exception hiding (assert)
-import Control.Monad (unless, void, replicateM, replicateM_)
+import Control.Monad (unless, void, replicateM, replicateM_, forM_)
 import Data.Aeson
 import Data.Aeson.Types (parseMaybe)
 import qualified Data.Aeson.KeyMap as KM
@@ -323,9 +323,15 @@ localPeerCheck = do
         assert "live local session listed while writer attached" (any ((==session).S.sessionId) records')
         send peer ["type" .= ("frontend"::T.Text),"mode" .= (Nothing::Maybe Int)]
         send peer ["type" .= ("paste"::T.Text),"text" .= ("persistent λ"::T.Text),"seq" .= (1::Int)]
+        -- Burst inputs must retain application and acknowledgement order while
+        -- the display independently renders the newest available state.
+        forM_ [1..32::Int] $ \i -> send peer ["type" .= ("paste"::T.Text),"text" .= T.pack (show i),"seq" .= (i+1)]
+        forM_ [1..33::Int] $ \i -> do
+          ack<-receive peer "ack"
+          assert "burst acknowledgements retain input order" (KM.lookup "seq" ack==Just (toJSON i))
       threadDelay 150000
       d <- readIORef observed
-      assert "local peer detach retains unsaved desktop" (activeText d=="persistent λ")
+      assert "local peer detach retains unsaved desktop" (activeText d=="persistent λ"<>T.concat (map (T.pack.show) [1..32::Int]))
       exists <- S.loadSession session
       assert "detach retains session catalog" (maybe False (const True) exists)
       withLocalPeer session True [] $ \peer -> do

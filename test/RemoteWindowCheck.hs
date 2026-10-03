@@ -21,6 +21,10 @@ checks = do
       row = toJSON [(0::Int,0xffffff::Int,0::Int,[String "abc",toJSON ("界"::T.Text,2::Int)])]
       rows = row : replicate 24 (toJSON ([]::[Value]))
       valid = either (const False) (const True) . parseRemoteFrame meta
+  check "drag and wheel updates wait for the new frame instead of repainting stale content"
+    (not (nativeRepaint [3,10,4,0,0,1]) && not (nativeRepaint [9,10,4,-1,0]))
+  check "press and release repaint the local pointer visibility"
+    (nativeRepaint [3,10,4,1,0,1] && nativeRepaint [4,10,4])
   check "remote Unicode rows validate" (valid rows)
   let menuMeta fields=object (["size" .= ([80,25]::[Int]) ]++fields)
       states metadata=either (const []) remoteMenus (parseRemoteFrame metadata rows)

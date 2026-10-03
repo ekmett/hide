@@ -50,7 +50,8 @@ foreign import ccall unsafe "thc_pixelate_unicode" c_pixelate_unicode :: CInt ->
 foreign import ccall unsafe "thc_cursor" c_cursor :: CInt -> CInt -> IO ()
 foreign import ccall unsafe "thc_cursor_blink" c_cursor_blink :: CInt -> IO ()
 foreign import ccall unsafe "thc_crt_filter" c_crt_filter :: CInt -> IO ()
-foreign import ccall unsafe "thc_present" c_present :: IO CInt
+-- Presentation can wait for vblank. Let receiver/sender threads run meanwhile.
+foreign import ccall safe "thc_present" c_present :: IO CInt
 foreign import ccall unsafe "thc_wake" c_wake :: IO ()
 foreign import ccall safe "thc_wait" c_wait :: Ptr Int32 -> IO CInt
 foreign import ccall unsafe "thc_text" c_text :: IO CString

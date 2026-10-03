@@ -2,7 +2,7 @@
 module THC.Edit.RemoteWindow
   (runRemoteWindow, RemoteFrame(..), RemoteCell(..), parseRemoteFrame
   , nativeKeyInput, nativeEventInput, pasteShortcut, sanitizeDownloadName
-  , remoteInputAllowed, remoteCloseDetaches, remoteDetachShortcut) where
+  , remoteInputAllowed, remoteCloseDetaches, remoteDetachShortcut, nativeRepaint) where
 import Control.Monad (unless)
 import Data.Aeson hiding (withArray)
 import qualified Data.Aeson.KeyMap as KM
@@ -130,6 +130,15 @@ nativeEventInput event = case event of
       "clicks" .= max 0 (min 3 clicks),"mods" .= modifierNames mods])
 nativeMenuNames :: [T.Text]
 nativeMenuNames = [T.pack (show cmd) | (_,_,items)<-menus, MenuItem _ _ cmd<-items]
+
+-- Drag/wheel updates are painted when their resulting frame arrives. Painting
+-- the previous frame first spends an extra vblank on obsolete selection/layout.
+-- Press/release still repaint locally to hide/restore the cell pointer.
+nativeRepaint :: [Int] -> Bool
+nativeRepaint event = case event of
+  3:_:_:clicks:_ -> clicks>0
+  n:_ -> n `elem` [4,5,7,8,12]
+  _ -> False
 
 remoteDetachShortcut :: [Int] -> Bool
 remoteDetachShortcut event = case event of
@@ -333,7 +342,7 @@ runRemoteWindow backend scale (cols,rows) mode host peer = do
           event <- allocaArray 6 $ \p -> check "Read remote window event" (c_wait p) >> map fromIntegral <$> peekArray 6 p
           unless (remoteDetachShortcut event || remoteCloseDetaches connected event) $ do
             when (remoteInputAllowed connected event) (dispatch connected current event)
-            loop receiver sender current glyphs status (if connected || previousTheme==Nothing then Just dark else previousTheme) (case event of n:_ -> n `elem` [3,4,5,7,8,9,12]; _ -> False)
+            loop receiver sender current glyphs status (if connected || previousTheme==Nothing then Just dark else previousTheme) (nativeRepaint event)
   bracket_ (pure ()) c_close $ do
 #ifdef darwin_HOST_OS
     c_menu_prepare

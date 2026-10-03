@@ -237,6 +237,7 @@ static void check_geometry(int lines, int cell_height) {
     e.button.button = SDL_BUTTON_LEFT; e.button.x = 23; e.button.y = 799;
     assert(SDL_PushEvent(&e));
     assert(thc_wait(out) && out[0] == 3);
+    check_mouse_cell(test_renderer, lines - 1, cell_height, false); /* No cell pointer during a drag. */
     SDL_zero(e); e.type = SDL_EVENT_MOUSE_MOTION;
     e.motion.x = 39; e.motion.y = 799;
     assert(SDL_PushEvent(&e));
@@ -244,8 +245,10 @@ static void check_geometry(int lines, int cell_height) {
     SDL_zero(e); e.type = SDL_EVENT_MOUSE_MOTION; e.motion.x = 40; e.motion.y = 798;
     assert(SDL_PushEvent(&e));
     SDL_zero(e); e.type = SDL_EVENT_MOUSE_BUTTON_UP; e.button.button = SDL_BUTTON_LEFT;
+    e.button.x = 23; e.button.y = 799;
     assert(SDL_PushEvent(&e));
     assert(thc_wait(out) && out[0] == 4); /* Same-cell drag samples do no work. */
+    check_mouse_cell(test_renderer, lines - 1, cell_height, true); /* Release restores the pointer. */
     SDL_zero(e); e.type = SDL_EVENT_MOUSE_BUTTON_DOWN; e.button.button = SDL_BUTTON_LEFT;
     assert(SDL_PushEvent(&e));
     assert(thc_wait(out) && out[0] == 3);

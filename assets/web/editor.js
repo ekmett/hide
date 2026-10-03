@@ -49,7 +49,7 @@ gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE); gl.texParame
 const uniforms=Object.fromEntries(['resolution','grid','mouse','caret','crt','caretOn','glyphPitch'].map(k=>[k,gl.getUniformLocation(program,k)]));
 const surface=document.createElement('canvas'); const ctx=surface.getContext('2d',{alpha:false});
 let glyphs=new Map(), tiles=new Map(), rows=[], frame=null, scale=2, initialScale=2, cols=80, lines=25, mode=3;
-let socket, ready=false, closed=false, mouse=[-1,-1], cursorEpoch=performance.now(), blinkPhase=-1, dirty=true, composing=false, clipboard='', lastSize='';
+let socket, ready=false, closed=false, mouse=[-1,-1], leftDown=false, cursorEpoch=performance.now(), blinkPhase=-1, dirty=true, composing=false, clipboard='', lastSize='';
 let remoteHost="", sessionFrontend=false, detaching=false, detached=false;
 const drawTimes=[];
 let titleTick=0, timingText='', rasterTime=0;
@@ -133,7 +133,7 @@ function present(now){
  if(frame&&(dirty||phase!==blinkPhase)){
    const started=performance.now();
    gl.uniform2f(uniforms.resolution,canvas.width,canvas.height);gl.uniform2f(uniforms.grid,cols,lines);
-   gl.uniform2f(uniforms.mouse,...mouse);gl.uniform2f(uniforms.caret,...(frame.cursor||[-1,-1]));
+   gl.uniform2f(uniforms.mouse,...(leftDown?[-1,-1]:mouse));gl.uniform2f(uniforms.caret,...(frame.cursor||[-1,-1]));
    gl.uniform1i(uniforms.caretOn,phase&&!!frame.cursor);gl.uniform1i(uniforms.crt,frame.crt);
    gl.uniform1f(uniforms.glyphPitch,canvas.height/(lines*16));gl.drawArrays(gl.TRIANGLE_STRIP,0,4);dirty=false;blinkPhase=phase;
    drawTimes.push(rasterTime+performance.now()-started);rasterTime=0;if(drawTimes.length>60)drawTimes.shift();
@@ -231,14 +231,15 @@ function connect(){
 connect();
 function point(e){const r=canvas.getBoundingClientRect();return [Math.floor((e.clientX-r.left)*cols/r.width),Math.floor((e.clientY-r.top)*lines/r.height)];}
 function mouseEvent(action,e,extra={}){const [px,py]=point(e),x=Math.max(-1,Math.min(511,px)),y=Math.max(-1,Math.min(255,py));send({type:'mouse',action,x,y,button:e.button===2?2:0,clicks:Math.min(3,e.detail||1),mods:mods(e),...extra});}
-canvas.addEventListener('pointerdown',e=>{e.preventDefault();input.focus({preventScroll:true});canvas.setPointerCapture(e.pointerId);mouseEvent('down',e);});
-canvas.addEventListener('pointerup',e=>{mouseEvent('up',e);if(canvas.hasPointerCapture(e.pointerId))canvas.releasePointerCapture(e.pointerId);});
+canvas.addEventListener('pointerdown',e=>{e.preventDefault();if(e.button===0){leftDown=true;dirty=true;}input.focus({preventScroll:true});canvas.setPointerCapture(e.pointerId);mouseEvent('down',e);});
+canvas.addEventListener('pointerup',e=>{if(e.button===0){leftDown=false;dirty=true;}mouseEvent('up',e);if(canvas.hasPointerCapture(e.pointerId))canvas.releasePointerCapture(e.pointerId);});
 canvas.addEventListener('pointermove',e=>{const p=point(e);if(p[0]!==mouse[0]||p[1]!==mouse[1]){mouse=p;dirty=true;mouseEvent('move',e,{clicks:0});}});
+canvas.addEventListener('pointercancel',release);
 canvas.addEventListener('pointerleave',()=>{mouse=[-1,-1];dirty=true;});
 canvas.addEventListener('dblclick',e=>mouseEvent('down',e,{clicks:2}));
 canvas.addEventListener('contextmenu',e=>e.preventDefault());
 canvas.addEventListener('wheel',e=>{e.preventDefault();mouseEvent(e.deltaY<0?'wheel-up':'wheel-down',e);},{passive:false});
-function release(){send({type:'blur'});mouse=[-1,-1];dirty=true;}
+function release(){send({type:'blur'});leftDown=false;mouse=[-1,-1];dirty=true;}
 window.addEventListener('blur',release);document.addEventListener('visibilitychange',()=>{if(document.hidden)release();});
 window.addEventListener('resize',resize);new ResizeObserver(resize).observe(screen);
 window.addEventListener('keydown',e=>{
