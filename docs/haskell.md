@@ -27,9 +27,9 @@ interface; language requests do not stop you editing.
 
 | Action | Keys or menu |
 | --- | --- |
-| Inspect the type at the cursor | Shift+F1 or Tools > Inspect type |
+| Inspect the type at the cursor | Shift+F1 (⇧F1 on Mac) or Tools > Inspect type |
 | Follow a definition | F12 or Search > Go to definition |
-| Complete an identifier | Ctrl+Space or Edit > Complete identifier |
+| Complete an identifier | Ctrl+Space (⌃Space on Mac) or Edit > Complete identifier |
 | Rename a symbol | Right-click source, then Rename |
 | Quick fixes and refactorings | Tools > Code actions or right-click source, then Code actions |
 
@@ -71,7 +71,7 @@ the bottom of the desktop. Click a message to select it; Enter or double-click
 opens its source. **Alt+F8** visits the next message and **Alt+F7** the previous
 one, opening the file when needed.
 
-Copy a selected message with Ctrl+C, Ctrl+Insert, or Cmd+C on macOS. The copy
+Copy a selected message with Ctrl+C, Ctrl+Insert, or ⌘C on macOS. The copy
 includes the full message and source location. Right-click Messages for Go to
 source, Copy message, Copy all messages and Hide Messages.
 

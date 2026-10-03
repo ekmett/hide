@@ -47,35 +47,38 @@ resize it from the corner, or use **Window > Tile** and **Window > Cascade**.
 the same buffer, including its undo history.
 
 These are the default source-editor bindings. The Mac column describes the
-native window: ⌘ Command, ⌥ Option, ⇧ Shift and ⌃ Control.
+native window: ⌃ Control, ⌥ Option, ⇧ Shift and ⌘ Command, in that order
+when combined. Mac keyboards label Enter as Return.
 
 | Action | Windows / Linux | Mac |
 | --- | --- | --- |
 | New / open | Ctrl+N / Ctrl+O (F3) | ⌘N / ⌘O (F3) |
-| Save / save as | Ctrl+S (F2) / File > Save as | ⌘S (F2) / ⌘⇧S |
+| Save / save as | Ctrl+S (F2) / File > Save as | ⌘S (F2) / ⇧⌘S |
+| Preferences | Options > Preferences | ⌘, (Command-Comma) |
 | Close / exit | Alt+F3 / Ctrl+Q (Alt+X) | ⌘W / ⌘Q |
 | Help / zoom / menus | F1 / F5 / F10 | F1 / F5 / F10 |
 | Next / previous window | Ctrl+Tab (F6) / Ctrl+Shift+Tab | ⌃Tab (F6) / ⌃⇧Tab |
 | Numbered window / Files pane | Alt+1…9 / Ctrl+B | ⌥1…9 / ⌃B |
-| Select / move by word | Shift+arrows / Ctrl+← or → | ⇧arrows / ⌃← or → |
-| Undo / redo | Ctrl+Z / Ctrl+Shift+Z (Ctrl+Y) | ⌘Z / ⌘⇧Z |
-| Copy / cut / paste / select all | Ctrl+C / X / V / A | ⌘C / ⌘X / ⌘V / ⌘A |
-| Find / replace | Ctrl+F / Ctrl+H | ⌘F / ⌘⌥F |
-| Next / previous match | Ctrl+L / Ctrl+Shift+L | ⌘G / ⌘⇧G |
+| Select text | Shift+arrow key | ⇧ with an arrow key |
+| Move by word | Ctrl+← / Ctrl+→ | ⌃← / ⌃→ |
+| Undo / redo | Ctrl+Z / Ctrl+Shift+Z (Ctrl+Y) | ⌘Z / ⇧⌘Z |
+| Copy / cut / paste / select all | Ctrl+C / Ctrl+X / Ctrl+V / Ctrl+A | ⌘C / ⌘X / ⌘V / ⌘A |
+| Find / replace | Ctrl+F / Ctrl+H | ⌘F / ⌥⌘F |
+| Next / previous match | Ctrl+L / Ctrl+Shift+L | ⌘G / ⇧⌘G |
 | Go to line | Ctrl+G | ⌃G |
 | Complete identifier (HLS) | Ctrl+Space | ⌃Space |
 | Request inline suggestion | Alt+\ | ⌘\ |
 | Previous / next suggestion | Alt+[ / Alt+] | ⌘[ / ⌘] |
-| Accept suggestion / next word / dismiss | Tab / Alt+→ / Escape | Tab / ⌥→ / Escape |
-| Conversation / new conversation | Ctrl+Shift+C / Ctrl+Shift+N | ⌘⇧C / ⌘⇧N |
-| Dialog next / previous / accept / cancel | Tab / Shift+Tab / Enter / Escape | Tab / ⇧Tab / Enter / Escape |
+| Accept suggestion / next word / dismiss | Tab / Alt+→ / Escape | Tab / ⌥→ / Esc |
+| Conversation / new conversation | Ctrl+Shift+C / Ctrl+Shift+N | ⇧⌘C / ⇧⌘N |
+| Dialog next / previous / accept / cancel | Tab / Shift+Tab / Enter / Escape | Tab / ⇧Tab / Return / Esc |
 
 Choose an inline provider in **Options > Autocomplete**. Holding Alt (⌥ on Mac)
 alone for a second also requests a suggestion in native windows and browsers.
 Text terminals do not report modifier-only holds; use the explicit shortcut.
 
-In the browser, Ctrl/⌘G and Ctrl/⌘⇧G find the next and previous matches; use
-**Search > Go to line** for a line number. Ctrl+R remains a Replace alias in
+In the browser, Ctrl+G / Ctrl+Shift+G (⌘G / ⇧⌘G on Mac) find the next and
+previous matches; use **Search > Go to line** for a line number. Ctrl+R remains a Replace alias in
 native non-Mac windows and text terminals; browsers retain Reload. Native Mac
 menus own their ⌘ shortcuts, including ⌘H for Hide. Other Control bindings stay
 available; do not substitute ⌘ for every Ctrl shortcut. In a text terminal on
@@ -134,9 +137,9 @@ Configure an ACP provider under **Options > Agents**, then open
 contents and selections through the editor’s MCP tools, including unsaved text.
 It can also use [session tools](docs/session-tools.md) for HLS, window layout,
 checked edits, build/run/test, shared terminals and source debugging.
-**Enter** sends a query by default; **Ctrl+Enter** (⌃Enter or ⌘Enter in the
-Mac window) steers when supported by the provider. **Options > Chat input** can
-swap those actions. **Shift+Enter** (⇧Enter) adds a line and **Escape** cancels an
+**Enter** (Return on Mac) sends a query by default; **Ctrl+Enter** (⌃Return or
+⌘Return in the Mac window) steers when supported by the provider. **Options > Chat input** can
+swap those actions. **Shift+Enter** (⇧Return) adds a line and **Escape** cancels an
 active reply. Queries sent while a reply is running are queued. Click the
 conversation title to choose its model and reasoning effort.
 

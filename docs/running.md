@@ -9,11 +9,15 @@ Choose **Run > Target** (also **Compile > Target**) to select **THC** or **GHC**
 the compiler executable, and an optional Cabal target such as
 `package:exe:program`. Save your source files, then use:
 
-| Action | Shortcut | What it does |
-| --- | --- | --- |
-| Compile | Alt+F9 | Compile the selected package target; check a standalone GHC source file |
-| Make | F9 | Build the selected package target or standalone executable |
-| Run | Ctrl+F9 | Build and run the selected program |
+| Action | Windows/Linux | Mac | What it does |
+| --- | --- | --- | --- |
+| Compile | Alt+F9 | ⌥F9 | Compile the selected package target; check a standalone GHC source file |
+| Make | F9 | F9 | Build the selected package target or standalone executable |
+| Run | Ctrl+F9 | ⌃F9 | Build and run the selected program |
+
+On Mac, hold Fn or the Globe key as well if the function keys control media
+or hardware settings. Ctrl and Alt shortcuts below mean ⌃ Control and ⌥ Option,
+respectively; Command is not a substitute.
 
 These actions are also clickable in the ordinary status bar. Compile and Make
 open an output window; output arrives while you keep editing. Compiler errors

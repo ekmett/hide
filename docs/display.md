@@ -103,10 +103,18 @@ Native windows use the system clipboard. The browser also uses the system
 clipboard; if permission needs a fresh gesture, click the displayed Copy or
 Paste toolbar button to retry.
 
-Browser shortcuts include Ctrl/Cmd+A to select all, Ctrl/Cmd+Z to undo, and
-Ctrl/Cmd+Shift+Z or Ctrl/Cmd+Y to redo. Ctrl/Cmd+F opens editor Find; Ctrl+H (Cmd+Option+F on macOS) opens Replace;
-Ctrl/Cmd+G and Shift+Ctrl/Cmd+G find the next and previous matches. Browser menu
-items for native Find, Undo and Redo may act differently from these shortcuts.
+The browser frontend handles these shortcuts when its editor has focus:
+
+| Action | Windows/Linux | Mac |
+| --- | --- | --- |
+| Select all | Ctrl+A | ⌘A |
+| Undo / redo | Ctrl+Z / Ctrl+Shift+Z (Ctrl+Y) | ⌘Z / ⇧⌘Z (⌘Y) |
+| Find / replace | Ctrl+F / Ctrl+H | ⌘F / ⌥⌘F |
+| Next / previous match | Ctrl+G / Ctrl+Shift+G | ⌘G / ⇧⌘G |
+
+Browser menu items for Find, Undo and Redo may act differently from these
+shortcuts. The [editing guide](editing.md#text-and-selection) explains Mac key
+symbols and how text-terminal bindings differ.
 
 **Fullscreen / capture keys** requests fullscreen and Keyboard Lock where
 available. Some OS and browser shortcuts remain reserved. Text terminal mouse

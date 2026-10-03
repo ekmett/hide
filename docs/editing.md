@@ -64,18 +64,26 @@ undoable operation. Saving establishes a new baseline and clears the change view
 ## Text and selection
 
 Type to insert text. Hold Shift while moving to select it, or drag with the
-mouse. The Mac column below describes the native window: ⌘ Command, ⌥ Option,
-⇧ Shift and ⌃ Control. Text terminals use the Windows/Linux bindings when their
+mouse. The Mac column below describes the native window: ⌃ Control, ⌥ Option,
+⇧ Shift and ⌘ Command. Text terminals use the Windows/Linux bindings when their
 emulator forwards them; Command shortcuts belong to the terminal app.
 **Options > Preferences** can display Mac modifier symbols in text-mode key
 labels. It keeps the actual Control/Alt bindings; it does not remap them to
 Command. The choice is saved in [configuration](configuration.md).
 
+Mac shortcuts follow [Apple’s modifier order](https://developer.apple.com/design/human-interface-guidelines/keyboards):
+Control, Option, Shift, Command (⌃⌥⇧⌘). Symbols are joined without plus signs,
+so redo is ⇧⌘Z and Replace is ⌥⌘F. Return is the main key labeled Enter on
+Windows keyboards; Esc cancels. Shortcuts written with Ctrl or Alt elsewhere in
+this guide still mean Control or Option on Mac, unless a Mac alternative is given.
+Command is a separate key.
+
 | Action | Windows / Linux | Mac |
 | --- | --- | --- |
-| Move / select by word | Ctrl+←/→ / Ctrl+Shift+←/→ | ⌃←/→ / ⌃⇧←/→ |
-| Copy / cut / paste / select all | Ctrl+C / X / V / A | ⌘C / ⌘X / ⌘V / ⌘A |
-| Undo / redo | Ctrl+Z / Ctrl+Shift+Z (Ctrl+Y) | ⌘Z / ⌘⇧Z |
+| Move by word | Ctrl+← / Ctrl+→ | ⌃← / ⌃→ |
+| Select by word | Ctrl+Shift+← / Ctrl+Shift+→ | ⌃⇧← / ⌃⇧→ |
+| Copy / cut / paste / select all | Ctrl+C / Ctrl+X / Ctrl+V / Ctrl+A | ⌘C / ⌘X / ⌘V / ⌘A |
+| Undo / redo | Ctrl+Z / Ctrl+Shift+Z (Ctrl+Y) | ⌘Z / ⇧⌘Z |
 | Start / end of file | Ctrl+Home / Ctrl+End | ⌃Home / ⌃End |
 
 Ctrl+Insert, Shift+Delete and Shift+Insert also copy, cut and paste. Split views
@@ -120,8 +128,8 @@ permissions.
 
 | Action | Windows / Linux native window or terminal | Mac native window |
 | --- | --- | --- |
-| Find / replace | Ctrl+F / Ctrl+H (Ctrl+R) | ⌘F / ⌘⌥F |
-| Next / previous match | Ctrl+L / Ctrl+Shift+L | ⌘G / ⌘⇧G |
+| Find / replace | Ctrl+F / Ctrl+H (Ctrl+R) | ⌘F / ⌥⌘F |
+| Next / previous match | Ctrl+L / Ctrl+Shift+L | ⌘G / ⇧⌘G |
 | Go to line | Ctrl+G | ⌃G |
 
 Find and Replace share a dialog: click either tab or press Ctrl+Tab (⌃Tab) to
@@ -131,8 +139,9 @@ Replace changes one match.
 
 [![Find and Replace tabs with both search and replacement text.](site/screenshots/find-replace.png)](site/screenshots/find-replace.png)
 
-In the browser, Ctrl/⌘G and Ctrl/⌘⇧G find the next and previous matches; use
-**Search > Go to line** for a line number. Browsers retain Ctrl/⌘R for Reload,
+In the browser, Ctrl+G / Ctrl+Shift+G (⌘G / ⇧⌘G on Mac) find the next and
+previous matches; use **Search > Go to line** for a line number. Browsers retain
+Ctrl+R (⌘R on Mac) for Reload,
 and native Mac ⌘H keeps Hide. F3 still opens files. Embedded terminals retain
 control keys while the terminal has focus; native Mac menu shortcuts still
 invoke their editor commands.
@@ -178,19 +187,22 @@ window shortcuts when the OS intercepts it.
 
 Press **F10** to enter the menu bar, then use arrows or letter mnemonics.
 The status bar describes the highlighted action. Its key labels are clickable.
-On macOS, the native menu bar provides ⌘ shortcuts. Other Control bindings
-remain Control; ⌘ is not a universal substitute. Function keys may need Fn/Globe.
+On macOS, **Turbo Haskell > Settings…** (⌘,) opens **Options > Preferences**;
+**About Turbo Haskell** opens the About dialog. The native menu bar provides ⌘
+shortcuts. Other Control bindings remain Control; ⌘ is not a universal substitute. Function keys may need Fn/Globe.
 
 [![File popup menu with Open selected in green and native Mac shortcuts.](site/screenshots/file-menu.png)](site/screenshots/file-menu.png)
 
-Tab and Shift+Tab cycle dialog controls. Enter accepts and Escape cancels.
-Ctrl or Alt plus a button's marked letter activates it. Dialogs also accept
+Tab and Shift+Tab (⇧Tab on Mac) cycle dialog controls. Enter (Return on Mac)
+accepts and Escape (Esc) cancels.
+Ctrl or Alt plus a button's marked letter activates it. In the native Mac
+window, use Control with the letter; Option keeps its text-entry role. Dialogs also accept
 Alt+Tab for focus traversal. Mouse buttons activate when released over the
 button; releasing outside cancels the click.
 
 ## Save, close and external changes
 
-**F2** or **Ctrl+S** (⌘S on Mac) saves. **File > Save as** (⌘⇧S) writes
+**F2** or **Ctrl+S** (⌘S on Mac) saves. **File > Save as** (⇧⌘S) writes
 under a new name and refuses to replace an existing destination. **Alt+F3**
 (⌘W) closes the current window; **Ctrl+Q** or **Alt+X** (⌘Q) exits. Closing the
 last view of a changed file, or exiting with changed files,

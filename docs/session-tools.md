@@ -81,8 +81,10 @@ message, not as its parent's instructions. Each conversation keeps its own draft
 and scroll position, including across editor recovery. **Tools > Conversation**
 switches back to Primary. Click the child conversation title to change its
 advertised model or effort while it is idle and has no queued messages. These
-settings belong to that child. Ctrl+Enter steers an active reply only when its
-provider advertises support; rejected steering keeps the draft. Reported child
+settings belong to that child. The [chat input setting](conversations.md#send-a-query)
+chooses whether Enter (Return on Mac) queries or steers; Ctrl+Enter (⌃Return or
+⌘Return on Mac) uses the other action. Steering requires provider support;
+rejected steering keeps the draft. Reported child
 context usage appears in the lower-left frame; otherwise it shows `--`. Expand a tool row to inspect its retained details. The view shows
 the latest 100 events; history tools can read older retained events.
 

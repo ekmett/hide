@@ -31,7 +31,7 @@ project.
 
 ## Send a query
 
-Open **Tools > Conversation** (**Ctrl+Shift+C**, or **Cmd+Shift+C** on macOS)
+Open **Tools > Conversation** (**Ctrl+Shift+C**, or **⇧⌘C** on macOS)
 and type in the draft at the bottom. The command focuses the existing conversation
 without repainting its history or replacing its draft. Your messages
 align right in cyan; replies align left in gray. Code keeps its syntax colors.
@@ -41,21 +41,21 @@ align right in cyan; replies align left in gray. Code keeps its syntax colors.
 This recorded exchange asks the agent to explain the editor's own buffer implementation.
 The screenshot replays the recorded replies and rounded context usage through the current renderer.
 The cyan bubble at the bottom is the next draft, not a sent message. Press
-**Enter** to send it with the default Query setting. The title selects the model and effort; the lower-left
+**Enter** (Return on Mac) to send it with the default Query setting. The title selects the model and effort; the lower-left
 counter reports context usage. Click the double chevron beside a run of tool
 calls to see the individual calls, then expand a call to inspect its details.
 
-| Keys | Action |
-| --- | --- |
-| Enter | Query by default: send, or queue while a reply is active |
-| Shift+Enter | Insert a newline |
-| Ctrl+Enter | Steer by default, if the provider supports it |
-| Escape | Cancel the active reply |
-| Tab | Browse replies with the keyboard |
+| Windows/Linux | Mac window/browser | Action |
+| --- | --- | --- |
+| Enter | Return | Query by default: send, or queue while a reply is active |
+| Shift+Enter | ⇧Return | Insert a newline |
+| Ctrl+Enter | ⌃Return or ⌘Return | Steer by default, if the provider supports it |
+| Escape | Esc | Cancel the active reply |
+| Tab | Tab | Browse replies with the keyboard |
 
 Choose **Options > Chat input** to make Enter **Query** or **Steer**;
-Ctrl+Enter always uses the other action. Both actions remain visible in the
-status bar, including when no reply is running. The setting also lives in the
+Ctrl+Enter (⌃Return or ⌘Return on Mac) always uses the other action. Both actions
+remain visible in the status bar, including when no reply is running. The setting also lives in the
 global or project configuration:
 
 ```toml
@@ -149,7 +149,7 @@ Detach the editor and use `thc-edit --resume` to return to the running desktop,
 including its conversation. [Editor sessions](sessions.md) cover this workflow
 across native windows, the browser, terminals and SSH.
 
-**Tools > New conversation** (**Ctrl+Shift+N**, or **Cmd+Shift+N** on macOS)
+**Tools > New conversation** (**Ctrl+Shift+N**, or **⇧⌘N** on macOS)
 starts a fresh primary conversation directly, including from a child view. **Tools > Resume session**
 accepts a saved provider session ID; the latest ID is saved across editor restarts.
 These menu actions manage the provider's conversation, independently of the
@@ -186,7 +186,7 @@ model. Suggestions appear in gray without changing the buffer.
 | **Alt+[**, **Alt+]** | **⌘[**, **⌘]** | Browse alternatives; request another when you reach the end |
 | **Alt+Right** | **⌥→** | Accept the next word |
 | **Tab** | **Tab** | Accept the proposal |
-| **Escape** | **Escape** | Dismiss it |
+| **Escape** | **Esc** | Dismiss it |
 
 In the graphical and browser frontends, holding **Alt** (**⌥** on Mac) alone for a second also
 requests a proposal. Traditional terminals use the explicit shortcut. Moving or
@@ -201,7 +201,7 @@ control the editor.
 
 The completion conversation is hidden by default. Enable **Show completion chat** to inspect it beside Messages and terminals. In ACP mode you
 can type hints there—such as “keep this allocation-free”—and discuss intent with
-the same completion agent. **Enter** sends a hint; **Shift+Enter** adds a newline.
+the same completion agent. **Enter** (Return on Mac) sends a hint; **Shift+Enter** (⇧Return) adds a newline.
 This draft is separate from your main conversation.
 
 Copilot uses GitHub's `copilot-language-server` executable. Choose **Sign in** in

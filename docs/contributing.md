@@ -67,6 +67,23 @@ The HTML is a static preview. Available scenes are `desktop`, `menu`, `about`,
 `gallery`, `split`, `open`, `tree`, `help`, `diff` and `preferences`.
 **Tools > Widget gallery** exercises the dialog controls interactively.
 
+## Documenting keyboard shortcuts
+
+Verify bindings against `nativeMenuShortcut` in `src/THC/Edit/Window.hs`,
+`cbits/menu.m`, `cbits/window.c`, `src/THC/Edit/Frontend.hs`,
+`src/THC/Edit/Model.hs` and `assets/web/editor.js`. Native menus, browser
+shortcuts and terminal input are different entry points; do not infer a Mac
+binding by replacing Ctrl with Command.
+
+Use separate platform columns when bindings differ. For Mac, follow
+[Apple’s modifier order](https://developer.apple.com/design/human-interface-guidelines/keyboards):
+Fn, Control, Option, Shift, Command. Write symbol combinations without plus
+signs (⇧⌘Z, ⌥⌘F), or full key names joined by hyphens (Shift-Command-Z).
+Use Return and Esc in Mac columns. Write Ctrl+Shift+Z in Windows/Linux columns.
+Repeat modifiers for each alternative; avoid ambiguous forms such as Ctrl/Cmd+G.
+The README and [editing guide](editing.md#text-and-selection) carry the main
+shortcut tables; update the relevant feature guide when its bindings change.
+
 ## Documentation screenshots
 
 The site uses actual Metal captures of the editor running over this checkout,
