@@ -351,6 +351,8 @@ when a child conversation is selected.
 | --- | --- | --- | --- |
 | `ask_user` | Q | `question`, `choices?`, `allowMultiple?` | One inline question, optional single-choice answers, always free text; waits for human |
 | `agent_settings` | R | `{}` | Public provider/model/config choices, connection/steering state, context usage and global/project guidance |
+| `environment_get` | R | `names?` | Effective subprocess environment; credentials/authority values redacted; missing names null |
+| `environment_set` | X | `values`, `scope?` | String sets, null unsets; session/project/global; affects new processes; project overrides global; protected variables denied |
 | `editor_settings` | W | `settings?`, `defaults?` | Read current state, change session settings or merge future startup defaults |
 
 Questions: 1–4096 characters; up to 12 choices of 1–256 characters;

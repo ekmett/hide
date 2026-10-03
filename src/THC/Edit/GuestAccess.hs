@@ -80,6 +80,7 @@ guestCommandAllowed cmd=case cmd of
   SubmitChat{} -> False
   AgentPermissions -> False
   AgentGuidance -> False
+  EnvironmentOptions -> False
   Conversation -> False
   AgentCancel -> False
   AgentResume -> False
@@ -94,6 +95,7 @@ guestEffectsAllowed=all allowed
     allowed ReadGitDiff=False
     allowed AskGitCommit=False
     allowed WriteGitCommit{}=False
+    allowed EnvironmentAction{}=False
     allowed PermissionAction{}=False
     allowed SaveChatSubmit{}=False
     allowed AutocompleteAction{}=False
@@ -105,6 +107,7 @@ guestEffectsAllowed=all allowed
     allowed _=True
 protectedPurpose :: Purpose -> Bool
 protectedPurpose p=case p of
+  EnvironmentDialog{} -> True
   PermissionDialog{} -> True
   ChatInputSettings -> True
   AutocompleteDialog{} -> True

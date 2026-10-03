@@ -124,22 +124,15 @@ wrapper that searches `.deps/ghostty/share/pkgconfig` and
 `.deps/ghostty/lib/pkgconfig` before the inherited search path. Installing
 Ghostty under this checkout's `.deps/ghostty` therefore lets ordinary
 `cabal build` work from the editor or a fresh shell without exporting
-`PKG_CONFIG_PATH`. Other dependencies still use the system pkg-config paths.
+`PKG_CONFIG_PATH`. Run Cabal from the checkout root: the extra program path
+is relative to the invocation directory. Other dependencies still use the
+system pkg-config paths.
 This discovers an existing installation; it does not download or build Ghostty.
 
 `cabal.project.local` is the ignored file for machine-specific Cabal overrides.
+Native Windows uses its normal `pkg-config.exe`; it skips the POSIX wrapper.
 A Ghostty installation elsewhere, including the Windows setup below, still
-needs its pkg-config directory on `PKG_CONFIG_PATH`. For native Windows, put
-this override in `cabal.project.local` to use the native executable:
-
-```cabal
-program-locations
-  pkg-config-location: pkg-config.exe
-```
-
-After changing pkg-config executables in an existing checkout, Cabal may retain
-its old discovery cache. Run `cabal clean` once if it still reports Ghostty
-missing despite the wrapper finding it.
+needs its pkg-config directory on `PKG_CONFIG_PATH`.
 
 ## Embedded terminal
 
@@ -171,7 +164,6 @@ zig build -Demit-lib-vt=true -Demit-xcframework=false -Doptimize=ReleaseFast --p
 $env:PKG_CONFIG_PATH = "$ghosttyPrefix\share\pkgconfig;$env:PKG_CONFIG_PATH"
 $env:PATH = "$ghosttyPrefix\bin;$env:PATH"
 cd C:\path\to\thc-edit
-# Set the cabal.project.local override shown above.
 cabal build all -f-window -f-web
 ```
 

@@ -3,6 +3,7 @@ module THC.Edit.MCPPermissions
   ( Permissions, withPermissions, withPermissionsAt, permissionCall, policyEffects, tickPermissions
   , permissionConfigPath, readEditorDefaults, writeEditorDefaults, readEditorDefaultsAt, writeEditorDefaultsAt
   , projectConfigPath, readEditorDefaultsFor, readAgentContextAt, writeAgentContextAt, readAgentContexts
+  , readEnvironmentAt, writeEnvironmentAt
   , readAgentLimitsFor, updateConfigTable, readAutocompleteFor, writeAutocomplete, writeAutocompleteFor
   ) where
 
@@ -278,6 +279,19 @@ readEditorDefaultsFor directory=configIO $ do
     case (globalValue,projectValue) of
       (Object globalEntries,Object projectEntries)->Right (Object (KM.union projectEntries globalEntries))
       _->Left "Editor defaults must be a table"
+
+-- Environment entries preserve other configuration and comments, like defaults.
+readEnvironmentAt :: FilePath -> IO (Either Text Value)
+readEnvironmentAt path=configIO $ do
+  config<-readConfig path
+  pure $ do
+    (_,_,table)<-config
+    selected<-lookupTable ["editor","environment"] table
+    values<-traverse (primitive . snd) (maybe M.empty tableMap selected)
+    pure (object [K.fromText key .= value | (key,value)<-M.toList values])
+
+writeEnvironmentAt :: FilePath -> Value -> IO (Either Text ())
+writeEnvironmentAt path=writeTable path ["editor","environment"]
 
 -- Autocomplete provider settings are human-owned, separate from display defaults.
 readAutocompleteFor :: FilePath -> IO (Either Text Value)

@@ -11,6 +11,7 @@ import THC.Edit.BufferView
 import THC.Edit.Defaults
 import THC.Edit.MCPPermissions
 import THC.Edit.ClipboardMCP
+import THC.Edit.Environment
 import THC.Edit.ControlMCP
 import Control.Exception (bracket, finally, catch, AsyncException(UserInterrupt), Exception, throwIO)
 import Control.Concurrent (myThreadId, throwTo, threadDelay)
@@ -135,6 +136,7 @@ runEditor args = do
     configBase<-case paths of
       path:_ | not (any isSSH flags), parseRemoteTarget path==Nothing -> expandRemoteHome path
       _ -> getCurrentDirectory
+    loadEnvironment configBase >>= either (die . T.unpack) pure
     defaultsJSON<-readEditorDefaultsFor configBase >>= either (die . T.unpack) pure
     defaults<-either die pure (parseEither parseDefaults defaultsJSON)
     let backendDefault=backendEnvironment <|> defaultBackend defaults
@@ -247,7 +249,7 @@ runEditor args = do
         else do
           mapM_ (setEnv "THC_EDIT_SESSION") daemon
           font<-Font.loadFont
-          let specs=builtinTools++debugTools++chatTools++toolingTools++workspaceTools++fileTools++testsTools++historyTools++runtimeTools++gitTools++controlTools++clipboardTools++docsTools++[screenTool]
+          let specs=builtinTools++debugTools++chatTools++toolingTools++workspaceTools++fileTools++testsTools++historyTools++runtimeTools++gitTools++controlTools++environmentTools++clipboardTools++docsTools++[screenTool]
           withPermissions (specs++agentTools) $ \permissions -> withConversationAt (startingDirectory protectedDesktop) $ \conversation -> withDebuggerConsoles (let (_,consoles,_)=conversationServices conversation in consoles) $ \debugger -> withTooling $ \tooling -> withGitOperations $ \gitOperations -> withReconciliation $ \reconciliation -> withProjectBrowser $ \projectBrowser -> withHighlighting $ \highlighting -> withAutocomplete (startingDirectory protectedDesktop) $ \autocomplete -> do
             exiting<-newIORef False
             let runtimeEffects=autocompleteEffects autocomplete (projectBrowserEffects projectBrowser (gitOperationEffects gitOperations (debuggerEffects debugger (conversationEffects conversation (reconciliationEffects reconciliation (toolingEffects tooling applyEffects))))))
@@ -278,6 +280,7 @@ runEditor args = do
                   | name `elem` gitToolNames = gitTool gitOperations d name parameters
                   | name=="clipboard_write" = clipboardTool d parameters
                   | name `elem` docsToolNames = docsTool d name parameters
+                  | name `elem` environmentToolNames = pure (d,environmentTool (startingDirectory d) name parameters)
                   | name `elem` controlToolNames = controlTool guestCore d name parameters
                   | name=="editor_screen" = pure (d,case parseEither (withObject "screen" (\o -> o .:? "image" .!= False)) parameters of
                       Left err -> pure (Left (T.pack err))
@@ -501,6 +504,7 @@ applyEffects :: Desktop -> [Effect] -> IO (Bool,Desktop)
 applyEffects = foldM apply . (False,)
   where
     apply state@(True,_) _=pure state
+    apply (_,d) (EnvironmentAction action args)= (False,) <$> environmentAction action args d
     apply (_,d) AutocompleteAction{}=pure (False,d {status="Autocomplete is unavailable in this preview."})
     apply (_,d) LanguageRequest{}=pure (False,d {status="Language tools are unavailable in this preview."})
     apply (_,d) JumpTo{}=pure (False,d)

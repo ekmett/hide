@@ -1,7 +1,0 @@
-#!/bin/sh
-# Cabal queries pkg-config while solving, before package build options apply.
-# Keep local Ghostty discovery independent of the launching shell's environment.
-set -eu
-root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-export PKG_CONFIG_PATH="$root/.deps/ghostty/share/pkgconfig:$root/.deps/ghostty/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
-exec pkg-config "$@"

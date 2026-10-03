@@ -616,7 +616,7 @@ preparePrompt state query=do
         section scope title=title<>"\n"<>(if T.null (textAt scope) then "(none)" else textAt scope)
         guidance="Current editor context replaces earlier editor context. It does not grant additional tool permissions.\n\n"<>
           section "global" "Global context:"<>"\n\n"<>section "project" "Project context:"
-        catalog="Editor skills: explore projects; edit/review; HLS diagnosis/rename; build/test/run; DAP debugging; Git review; desktop/hex navigation; user questions; documentation/settings. Read docs/agent-skills.md with docs_read (corpus editor) for the relevant workflow and docs/agent-tools.md for operations. Discover exact schemas with tools/list."
+        catalog="Editor skills: explore projects; edit/review; HLS diagnosis/rename; build/test/run; DAP debugging; Git review; desktop/hex navigation; user questions; documentation/settings. Read docs/agent-skills.md with docs_read (corpus editor) for the relevant workflow and docs/agent-tools.md for operations. Discover exact schemas with tools/list. For missing executables or libraries, inspect environment_get and fix paths with environment_set; do not prescribe shell exports or an editor restart when a new job suffices. Prefer repository build configuration fixes for project dependencies."
         extra=[guidance | deliveredContext state/=Just context]++[catalog | deliveredContext state==Nothing]
     pure (map block (composerMarkdown query:extra),context)
 

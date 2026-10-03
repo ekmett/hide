@@ -23,6 +23,7 @@ import THC.Edit.Debugger (withDebugger, debuggerEffects, tickDebugger, hdbOfferD
 import qualified THC.Edit.Compilers as Compilers
 import qualified THC.Edit.HdbAcquisition as Hdb
 import qualified THC.Edit.Downloads as Downloads
+import THC.Edit.Environment (environmentAction)
 import THC.Edit.Model
 import qualified EditorDriver as Driver
 
@@ -212,6 +213,7 @@ main = do
           , ("debug-step", debug)
           , ("file-menu", pure . (\d -> d {menu=Just (0,1)}))
           , ("split", \d -> command Zoom d >>= command SplitHorizontal >>= pure . modifyActive (\w -> w {scrollRow=45}))
+          , ("environment", \d -> environmentAction "choose" ["1"] d {streamerMode=False} >>= typeText "PKG_CONFIG_PATH" >>= key (V.KChar '\t') [] >>= typeText (root </> ".deps/ghostty/share/pkgconfig"))
           , ("preferences", command EditorOptions)
           , ("build-target", \d -> command RunOptions d >>= key (V.KChar '\t') [] >>= typeText "exe:thc-edit")
           , ("debug-launch", command (DebugCommand "launch"))

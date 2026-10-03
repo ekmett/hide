@@ -66,6 +66,47 @@ inherit; project `false` overrides global `true`. Project defaults apply at
 startup. The agent's `editor_settings.defaults` writer still edits the global
 file; it does not rewrite the project file.
 
+## Environment
+
+**Options > Environment…** lists the running editor's environment. Select a
+name and **Edit**, or choose **New**. Set its value and scope, then **Apply**;
+**Unset variable** removes it from the environment of future processes.
+
+![Editing the environment for new processes.](site/screenshots/environment.png)
+
+- **Session** applies immediately and lasts until the editor process exits.
+- **Project** saves in the project's `thc.toml`.
+- **Global** saves in the shared `thc/config.toml`.
+
+```toml
+[editor.environment]
+PKG_CONFIG_PATH = "/path/to/library/share/pkgconfig"
+OLD_BUILD_OPTION = false
+```
+
+Strings are literal values: `$PATH`, `${NAME}` and `~` are not expanded. Read the
+current value before extending a search path; use `:` on macOS/Linux and `;`
+on Windows. `false` explicitly unsets a variable. On startup, project entries
+override global entries, which override the inherited shell environment.
+Saving a global entry respects an existing project override. Session changes
+can temporarily override either.
+
+New builds, terminals, debugger adapters and agent providers inherit the updated
+environment. Already running processes retain their old values: start a new
+job or reconnect the affected provider. There is no need to restart the editor.
+Agent-provider-specific environment overrides still take precedence.
+
+Agents use `environment_get` and `environment_set`, controlled individually by
+**Options > Agent Permissions**. Credential values are redacted in tool results,
+and agents cannot write credential variables. Editor session/transport variables,
+configuration locations and loader overrides are protected from changes through
+this facility. Streamer mode masks the value field. Do not commit secrets in
+project configuration; session scope avoids writing values to disk.
+
+For dependencies shared by the project, prefer a checked-in build configuration.
+This editor's `cabal.project` already discovers Ghostty installed under
+`.deps/ghostty`; see [Installation](install.md#bundled-ghostty-discovery).
+
 ## Agent context
 
 Use `[editor.agent].context` in either file for guidance you want supplied to

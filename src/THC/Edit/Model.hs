@@ -80,7 +80,7 @@ data Command = New | Open | Download | ChangeDir | Save | SaveAs | Close | Quit 
   | ProjectBrowser | ToggleTree | GitDiff | GitCommit | GitFetch | GitPull | GitMerge | ReviewDisk
   | CompileTarget | MakeTarget | StopBuild | RunTarget | RunOptions | OpenTerminal | StopTerminal
   | AgentChoose Text | AgentSet Text Text
-  | AgentDirectory | AgentOptions | AgentPermissions | AgentGuidance | Conversation | AgentCancel | AgentResume | AgentCopyRaw | AgentNew
+  | EnvironmentOptions | AgentDirectory | AgentOptions | AgentPermissions | AgentGuidance | Conversation | AgentCancel | AgentResume | AgentCopyRaw | AgentNew
   | ExecuteShellBlock Int (Int,Int,Text,Text)
   | SetBufferView BufferView | SetDefaultBufferView BufferView | RevertChange Int Int (Int,Int) Int
   | ToggleHex | GoToMessage | CopyAllMessages | CopyLocation | SubmitChat ChatSubmit
@@ -95,7 +95,7 @@ data ContextKind = ToolchainContext [(Text,Command)] | ShellContext Command | Ch
 data LanguageAction = TypeInfo | FindDefinition | Completions | ShowProblems | RestartLanguage | RenameAt Text | RequestCodeActions | ApplyCodeAction Int Int Text deriving (Eq,Show)
 data Completion = Completion Text [(Int,Int,Text)] deriving (Eq,Show)
 data ProjectAction = LoadProject | ProjectPage Int Int | ProjectDetails Int Int deriving (Eq,Show)
-data Effect = AutocompleteAction Text [Text] | SaveMacKeySymbols Bool | SaveChatSubmit ChatSubmit | SaveBufferViewDefault BufferView | ProjectRequest ProjectAction | DownloadDocument Int | ReadBrowserClipboard | WriteBrowserClipboard Text | LanguageRequest LanguageAction | RunGit GitAction | ReadMergeBranches | JumpTo FilePath Int Int | ReadPath FilePath | BrowsePath FilePath Text | BrowseDirectories FilePath | ChangeDirectory FilePath | OpenChoice FilePath Text Text | ReadTree FilePath | ExpandTree Int | ReadHelp | RefreshGit FilePath | ReadGitDiff | AskGitCommit | WriteGitCommit Text | SaveDocument Int (Maybe FilePath) (Maybe Command) | ReviewExternal | ResolveConflict Conflict ConflictAction | AgentAction Text [Text] | PermissionAction Text [Text] | DebugAction Text [Text] | SetScreenMode Int | Exit deriving (Eq,Show)
+data Effect = EnvironmentAction Text [Text] | AutocompleteAction Text [Text] | SaveMacKeySymbols Bool | SaveChatSubmit ChatSubmit | SaveBufferViewDefault BufferView | ProjectRequest ProjectAction | DownloadDocument Int | ReadBrowserClipboard | WriteBrowserClipboard Text | LanguageRequest LanguageAction | RunGit GitAction | ReadMergeBranches | JumpTo FilePath Int Int | ReadPath FilePath | BrowsePath FilePath Text | BrowseDirectories FilePath | ChangeDirectory FilePath | OpenChoice FilePath Text Text | ReadTree FilePath | ExpandTree Int | ReadHelp | RefreshGit FilePath | ReadGitDiff | AskGitCommit | WriteGitCommit Text | SaveDocument Int (Maybe FilePath) (Maybe Command) | ReviewExternal | ResolveConflict Conflict ConflictAction | AgentAction Text [Text] | PermissionAction Text [Text] | DebugAction Text [Text] | SetScreenMode Int | Exit deriving (Eq,Show)
 data Field = Input Text Text Int | ComboBox Text [Text] Int (Maybe Int) | CheckBox Text Bool | Radio Text [Text] Int | ListBox Text [Text] Int | FileList [Entry] Int
   | ReadOnly Text Text
   | TextArea Text Bool Buffer Selection Int Int deriving (Eq,Show)
@@ -103,7 +103,7 @@ data Purpose = Opening FilePath Text [Entry] | ChangingDirectory FilePath [Entry
   | ProjectLoading Int | ProjectChoices Int Int
   | CodeActionChoices Int Int [Text]
   | Completing Int Int Int [Completion] | Locations [(FilePath,Int,Int)] | Merging [Text]
-  | AutocompleteDialog Text | DiskConflict Conflict | AgentDialog Text | PermissionDialog Text | DebugDialog Text
+  | EnvironmentDialog Text | AutocompleteDialog Text | DiskConflict Conflict | AgentDialog Text | PermissionDialog Text | DebugDialog Text
   | DiscardDraft | Confirm Command | Information | Settings | ChatInputSettings | Widgets deriving (Eq,Show)
 data Dialog = Dialog
   { dialogTitle :: Text, purpose :: Purpose, fields :: [Field], focus :: Int
@@ -188,7 +188,7 @@ menus =
       mi "Threads..." "" (DebugCommand "threads"),mi "Call stack..." "" (DebugCommand "stack"),mi "Scopes..." "" (DebugCommand "scopes"),
       mi "Exceptions..." "" (DebugCommand "exceptions"),mi "Exception details" "" (DebugCommand "exception-info"),mi "Output" "" (DebugCommand "output"),mi "Disconnect" "" (DebugCommand "disconnect")])
   ,("Tools",'t',[mi "File tree" "Ctrl+B" ToggleTree,mi "Git diff..." "" GitDiff,mi "Approve changes..." "" GitCommit,mi "Inspect type" "Shift+F1" InspectType,mi "Code actions..." "" CodeActions,mi "Messages" "" Problems,mi "Go to next" "Alt+F8" NextMessage,mi "Go to previous" "Alt+F7" PreviousMessage,mi "Restart language server" "" RestartHLS,mi "Conversation" "Ctrl+Shift+C" Conversation,mi "Agents..." "" AgentDirectory,mi "Conversation model..." "" (AgentChoose ""),mi "Cancel reply" "" AgentCancel,mi "Resume session..." "" AgentResume,mi "New conversation" "Ctrl+Shift+N" AgentNew,mi "Copy raw conversation" "" AgentCopyRaw,mi "Widget gallery..." "" Gallery,mi "Project browser..." "" ProjectBrowser,mi "Downloads..." "" (DebugCommand "downloads")])
-  ,("Options",'o',[mi "Preferences..." "" EditorOptions,mi "Chat input..." "" ChatInputOptions,mi "Autocomplete..." "" (AutocompleteCommand "settings"),mi "Agents..." "" AgentOptions,mi "Agent Permissions" "" AgentPermissions,mi "Agent Context..." "" AgentGuidance])
+  ,("Options",'o',[mi "Preferences..." "" EditorOptions,mi "Environment..." "" EnvironmentOptions,mi "Chat input..." "" ChatInputOptions,mi "Autocomplete..." "" (AutocompleteCommand "settings"),mi "Agents..." "" AgentOptions,mi "Agent Permissions" "" AgentPermissions,mi "Agent Context..." "" AgentGuidance])
   ,("Window",'w',[mi "Agents..." "" AgentDirectory,mi "Tile" "" Tile,mi "Cascade" "" Cascade,mi "Split vertically" "" SplitVertical,mi "Split horizontally" "" SplitHorizontal,mi "Zoom" "F5" Zoom,mi "Pin / unpin terminal" "" ToggleTerminalPin,mi "Next" "F6" NextWindow,mi "Close" "Alt+F3" Close,mi "" "" (Disabled ""),mi "Current" "" (SetBufferView CurrentView),mi "Changes" "" (SetBufferView ChangesView),mi "Only Changes" "" (SetBufferView OnlyChangesView),mi "Side by Side" "" (SetBufferView SideBySideView)])
   ,("Help",'h',[mi "Contents" "F1" Help,mi "About Turbo Haskell..." "" About])]
   where mi = MenuItem
@@ -263,6 +263,7 @@ commandDescription cmd = case cmd of
   AgentDirectory -> "Inspect agents, their history and workspaces."
   AgentOptions -> "Configure agents and their executable commands."
   AgentPermissions -> "Set each agent tool to Enable, Prompt, or Disable."
+  EnvironmentOptions -> "Inspect and change the environment inherited by new processes."
   AgentGuidance -> "Edit global or project context supplied to the conversation agent."
   Conversation -> "Show the agent conversation."
   AgentCancel -> "Cancel the active agent reply."
@@ -727,6 +728,7 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
     go AgentDirectory d = (d,[AgentAction "directory" []])
     go AgentOptions d = (d,[AgentAction "options" []])
     go AgentPermissions d = (d,[PermissionAction "show" []])
+    go EnvironmentOptions d = (d,[EnvironmentAction "show" []])
     go AgentGuidance d = (d,[AgentAction "context" []])
     go Conversation d = case find (\w -> maybe False ((==Just "Conversation").documentLabel) (M.lookup (bufferId w) (buffers d))) (windows d) of
       Just w -> (focusWindow (windowId w) d {composerFocused=True},[AgentAction "focus" []])
@@ -2286,6 +2288,7 @@ submitDialog button dg original
       [contents b | TextArea _ True b _ _ _ <- fields dg] ++
       [T.pack (show i) | Radio _ _ i <- fields dg] ++
       [T.pack (show i) | ListBox _ _ i <- fields dg])])
+    EnvironmentDialog action -> (d,[EnvironmentAction action (T.pack (show button):values++[if value then "true" else "false" | CheckBox _ value<-fields dg]++concat [take 1 (drop i choices) | ListBox _ choices i<-fields dg])])
     AgentDialog action -> (d,[AgentAction action (T.pack (show button) : values ++
       [if value then "true" else "false" | CheckBox _ value <- fields dg] ++
       [T.pack (show i) | Radio _ _ i <- fields dg] ++

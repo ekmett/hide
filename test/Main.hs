@@ -18,6 +18,7 @@ import qualified GuestAccessCheck
 import qualified StreamerCheck
 import qualified ClipboardMCPCheck
 import qualified DocsMCPCheck
+import qualified EnvironmentCheck
 import qualified ControlMCPCheck
 import qualified DefaultsCheck
 import qualified MCPPermissionsCheck
@@ -113,6 +114,7 @@ main = do
   StreamerCheck.checks
   ClipboardMCPCheck.checks
   DocsMCPCheck.checks
+  EnvironmentCheck.checks
   ControlMCPCheck.checks
   DefaultsCheck.checks
   MCPPermissionsCheck.checks

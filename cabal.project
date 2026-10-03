@@ -1,8 +1,5 @@
 packages: .
 
--- Discover the checkout's Ghostty installation before dependency solving.
--- Native Windows: override pkg-config-location in cabal.project.local;
--- see docs/install.md. Cabal does not use conditional program locations
--- when constructing the solver's pkg-config database.
-program-locations
-  pkg-config-location: tools/pkg-config-thc-edit
+-- The POSIX wrapper discovers .deps/ghostty before dependency solving.
+-- Native Windows skips the extensionless script and uses its normal pkg-config.
+extra-prog-path: tools/pkgconfig

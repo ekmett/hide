@@ -107,6 +107,14 @@ that every case was observed.
 A successful process with no parsed test results is not evidence that individual
 tests passed. Build and test jobs share a slot.
 
+**Environment:** for missing executables/libraries, read `environment_get`
+with the relevant names (usually `PATH` or `PKG_CONFIG_PATH`). Preserve existing
+search paths and use `environment_set` with session or project scope. Start a
+new job; do not prescribe shell exports or restarting the editor. Existing
+terminal/provider processes retain their old environment, so restart only those
+if needed. Prefer a repository build-configuration fix for shared dependencies.
+Values are literal; credentials and editor authority variables are protected.
+
 **Recover:** inspect an existing job before starting another. `build_stop` stops
 a captured job; `terminal_stop` stops a terminal process. Retained output can
 lose its earlier bytes; read its truncation flag. `terminal_start` takes an
