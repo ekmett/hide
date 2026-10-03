@@ -117,6 +117,30 @@ are never overwritten. These tools can be downloaded again if the cache is
 cleared. Acquisition needs `curl`, `tar`, and `shasum` on macOS or `sha256sum` on
 Linux; it does not change shell startup files or `PATH`.
 
+## Bundled Ghostty discovery
+
+On macOS and Linux, the checked-in `cabal.project` selects a small pkg-config
+wrapper that searches `.deps/ghostty/share/pkgconfig` and
+`.deps/ghostty/lib/pkgconfig` before the inherited search path. Installing
+Ghostty under this checkout's `.deps/ghostty` therefore lets ordinary
+`cabal build` work from the editor or a fresh shell without exporting
+`PKG_CONFIG_PATH`. Other dependencies still use the system pkg-config paths.
+This discovers an existing installation; it does not download or build Ghostty.
+
+`cabal.project.local` is the ignored file for machine-specific Cabal overrides.
+A Ghostty installation elsewhere, including the Windows setup below, still
+needs its pkg-config directory on `PKG_CONFIG_PATH`. For native Windows, put
+this override in `cabal.project.local` to use the native executable:
+
+```cabal
+program-locations
+  pkg-config-location: pkg-config.exe
+```
+
+After changing pkg-config executables in an existing checkout, Cabal may retain
+its old discovery cache. Run `cabal clean` once if it still reports Ghostty
+missing despite the wrapper finding it.
+
 ## Embedded terminal
 
 Embedded terminals enable **File > Terminal**, **Run > Run** and ACP
@@ -147,6 +171,7 @@ zig build -Demit-lib-vt=true -Demit-xcframework=false -Doptimize=ReleaseFast --p
 $env:PKG_CONFIG_PATH = "$ghosttyPrefix\share\pkgconfig;$env:PKG_CONFIG_PATH"
 $env:PATH = "$ghosttyPrefix\bin;$env:PATH"
 cd C:\path\to\thc-edit
+# Set the cabal.project.local override shown above.
 cabal build all -f-window -f-web
 ```
 
