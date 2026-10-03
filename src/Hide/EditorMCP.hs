@@ -1,4 +1,10 @@
 {-# LANGUAGE OverloadedStrings #-}
+-- | JSON-RPC/MCP bridge between agent subprocesses and the owning editor session.
+--
+-- A private endpoint exposes the current desktop without claiming the display.
+-- Tool initiation and reply waiting are separate phases so HLS, DAP and human
+-- approvals can continue while a request is pending. Actor-bound routes expose
+-- only their supplied tools, with no fallback into ordinary desktop reads.
 module Hide.EditorMCP (editorResponse, editorResponseWith, editorResponseOnly, rpcError, builtinTools, builtinTool, debugTools, editorServers, editorServersFor, editorServersAt, runEditorMCP, runEditorMCPWithHandles, runEditorMCPWithToken, readMCPLine) where
 
 import Control.Exception (bracket, try, IOException, finally, catch, mask, throwIO)
@@ -37,6 +43,8 @@ editorServers = editorServersFor Nothing
 editorServersFor :: Maybe T.Text -> IO [Value]
 editorServersFor token = lookupEnv "THC_EDIT_SESSION" >>= maybe (pure []) (\ident -> editorServersAt ident token)
 
+-- | Describe a stdio bridge using the current executable and a private session ID.
+-- An optional capability travels in the child environment, not argv.
 editorServersAt :: String -> Maybe T.Text -> IO [Value]
 editorServersAt ident token = do
   executable <- getExecutablePath
@@ -52,6 +60,8 @@ runEditorMCP ident = do
 runEditorMCPWithHandles :: String -> Handle -> Handle -> IO ()
 runEditorMCPWithHandles ident = runEditorMCPWithToken ident Nothing
 
+-- | Serve bounded newline-delimited MCP over supplied handles and the session endpoint.
+-- The token selects the host-authorized actor route; callers retain handle ownership.
 runEditorMCPWithToken :: String -> Maybe T.Text -> Handle -> Handle -> IO ()
 runEditorMCPWithToken ident token input outputHandle = do
   unless (maybe True (\value -> not (T.null value) && T.length value<=256) token)
@@ -108,8 +118,8 @@ runEditorMCPWithToken ident token input outputHandle = do
       cleanup=readMVar pendingCalls >>= mapM_ stop . M.elems
   loop BS.empty `finally` cleanup
 
--- Enforce the limit while reading, including requests without a terminating
--- newline. Keep bytes after a newline for the next JSON-RPC message.
+-- | Read a size-bounded JSON-RPC line, retaining bytes after its newline.
+-- Enforce the limit even when a sender never terminates the line.
 readMCPLine :: Handle -> BS.ByteString -> IO (Maybe (BS.ByteString,BS.ByteString))
 readMCPLine handle = collect 0 []
   where
@@ -167,8 +177,7 @@ responseTools includeBuiltins extra desktop request = case request of
 builtinTools :: [Value]
 builtinTools=tools
 
--- Exposed separately so session permission policy can wrap built-in reads just
--- like runtime tools, without decoding a JSON-RPC response back into a value.
+-- | Read public desktop metadata or bounded buffer content after privacy filtering.
 builtinTool :: Desktop -> T.Text -> Value -> Either T.Text Value
 builtinTool desktop=tool
   where
@@ -218,15 +227,14 @@ builtinTool desktop=tool
     bufferInfo ident doc=object ["bufferId" .= ident,"title" .= title doc,"path" .= (if privateDocument desktop doc then Nothing else fmap filePath (documentFile doc)),
       "modified" .= dirty (documentBuffer doc),"binary" .= byteMode (documentBuffer doc),"revision" .= revision (documentBuffer doc)]
 
--- Initiation runs with the desktop locked. Waiting for protocol replies must
--- happen afterwards so the same session can continue polling HLS and DAP.
+-- | Dispatch with the desktop locked and return a reply continuation.
+-- Wait for that continuation only after releasing the desktop lock.
 editorResponseWith :: [Value]
   -> (Desktop -> T.Text -> Value -> IO (Desktop, IO (Either T.Text Value)))
   -> Desktop -> Value -> IO (Desktop, IO (Maybe Value))
 editorResponseWith = editorResponseUsing True
 
--- Actor-bound orchestration bridges expose only explicitly supplied tools.
--- In particular, an unknown call must never reach the desktop read fallback.
+-- | Dispatch only explicitly supplied tools, with no built-in desktop-read fallback.
 editorResponseOnly :: [Value]
   -> (Desktop -> T.Text -> Value -> IO (Desktop, IO (Either T.Text Value)))
   -> Desktop -> Value -> IO (Desktop, IO (Maybe Value))

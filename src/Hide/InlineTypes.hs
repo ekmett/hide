@@ -1,24 +1,29 @@
 {-# LANGUAGE OverloadedStrings #-}
+-- | Shared completion-provider inputs, proposals and feedback.
+--
+-- Replacement coordinates use zero-based Unicode-character offsets, not UTF-16
+-- or screen cells. Adapters translate their wire coordinates; the background
+-- owner prepares source/history before sending. Provider metadata remains opaque
+-- so acceptance can be reported without interpreting service-specific tokens.
 module Hide.InlineTypes where
 
 import Data.Text (Text)
 import Data.Aeson (Value)
--- Contract shared with backend implementers; all offsets/columns are Unicode
--- code points (Haskell Text API units), not UTF-16. Backends convert as needed.
--- CompletionInput values are forced on the background worker before sending.
+-- | Immutable file, caret, revision, nearby context and recent-edit snapshot.
 data CompletionInput = CompletionInput
   { inputId :: Text, inputIntent :: Text, inputPath :: FilePath, inputText :: Text
   , inputVersion :: Int, inputOffset :: Int
   , inputFirstLine :: Int, inputNearby :: [Text], inputHistory :: Value
   }
+-- | Half-open character replacement range, new text and optional provider metadata.
 data Proposal = Proposal
   { proposalStart :: Int, proposalEnd :: Int, proposalText :: Text
   , proposalData :: Maybe Value
   } deriving (Eq,Show)
+-- | Acceptance outcome; partial counts are cumulative in the normalized original
+-- insertion text, including matching prefixes removed from the visible proposal.
+-- Copilot maps this count back through original line endings and UTF-16.
 data CompletionFeedback = Shown | Accepted | Ignored | PartiallyAccepted Int
--- PartiallyAccepted counts Unicode characters cumulatively in the original
--- insertText after editor newline normalization, including any matching prefix
--- trimmed from the displayed proposal. Copilot maps that count back to the
--- original wire text and UTF-16. proposalData retains the full opaque item.
+-- | Device-flow code and validated opaque command; credentials remain provider-owned.
 data CopilotSignIn = CopilotSignIn
   { signInCode :: Text, signInCommand :: Value } deriving (Eq,Show)

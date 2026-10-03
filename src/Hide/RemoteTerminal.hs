@@ -1,4 +1,10 @@
 {-# LANGUAGE CPP, OverloadedStrings, ScopedTypeVariables #-}
+-- | Vty frontend for validated remote cell frames.
+--
+-- Bounded sender/receiver queues keep transport and frame decoding outside input
+-- handling. Disconnects retain the last picture with a notice and suppress remote
+-- input; local detach remains available. Clipboard export uses OSC 52 and does
+-- not read the terminal host clipboard.
 module Hide.RemoteTerminal (runRemoteTerminal, terminalEventInput, remoteTerminalPicture, terminalClipboard) where
 
 import Data.Aeson
@@ -32,6 +38,7 @@ import Hide.RemoteWindow (parseRemoteFrame, sanitizeDownloadName)
 import Hide.Unicode (updatePicture)
 #endif
 
+-- | Translate supported Vty events with bounded coordinates, dimensions and paste sizes.
 terminalEventInput :: V.Event -> Maybe Value
 terminalEventInput event = case event of
   V.EvKey key modifiers -> do
@@ -55,6 +62,7 @@ terminalEventInput event = case event of
     mouse x y action button modifiers = Just (object ["type" .= ("mouse"::T.Text),"action" .= (action::T.Text),
       "x" .= max (-1) (min 511 x),"y" .= max (-1) (min 255 y),"button" .= (case button of V.BRight -> 2; V.BMiddle -> 1; _ -> 0::Int),"clicks" .= (1::Int),"mods" .= mods modifiers])
 
+-- | Build a Vty picture from previously validated remote frame geometry.
 remoteTerminalPicture :: RemoteFrame -> V.Picture
 remoteTerminalPicture frame = (V.picForImage (V.vertCat [row (IM.findWithDefault [] y rows) | y<-[0..height-1]]))
   {V.picCursor=maybe V.NoCursor (uncurry V.Cursor) (remoteCursor frame)}
@@ -67,7 +75,7 @@ remoteTerminalPicture frame = (V.picForImage (V.vertCat [row (IM.findWithDefault
     spans at []=[spaces (width-at)]
     spans at (RemoteCell x _ fg bg text w:rest)=spaces (x-at):textImage (V.defAttr `V.withForeColor` color fg `V.withBackColor` color bg) text:spans (x+w) rest
 
--- OSC 52 writes the host terminal clipboard. Payload is base64, never raw text.
+-- | Construct a base64 OSC 52 clipboard-write sequence; no clipboard read is performed.
 terminalClipboard :: T.Text -> BS.ByteString
 terminalClipboard text="\ESC]52;c;"<>BS.pack (base64 (BS.unpack (TE.encodeUtf8 text)))<>"\BEL"
   where
@@ -81,6 +89,8 @@ terminalClipboard text="\ESC]52;c;"<>BS.pack (base64 (BS.unpack (TE.encodeUtf8 t
 #ifdef WITH_REMOTE
 data Incoming = Frame RemoteFrame | Control Value
 
+-- | Scope terminal setup, remote display/input handling and cursor restoration.
+-- Detach performs a bounded outbound handoff wait.
 runRemoteTerminal :: RemotePeer -> IO ()
 runRemoteTerminal peer = bracket (mkVty V.defaultConfig) (\vty -> V.shutdown vty `finally` cursorStyle Nothing) $ \vty -> do
   forM_ [V.Mouse,V.BracketedPaste,V.Focus] $ \mode ->

@@ -1,3 +1,8 @@
+-- | Ephemeral bearer capabilities for actor-bound editor bridges.
+--
+-- Tokens map authenticated bridge connections to hub identities within one host
+-- runtime. They are not checkpointed or publicly rendered. Resolving a token
+-- establishes identity only; live-agent and operation checks remain with the hub.
 module Hide.AgentAccess
   (AgentAccess, newAgentAccess, grantAgentAccess, revokeAgentAccess, resolveAgentAccess) where
 
@@ -15,6 +20,7 @@ newtype AgentAccess = AgentAccess (TVar (M.Map Text AgentId))
 newAgentAccess :: IO AgentAccess
 newAgentAccess = AgentAccess <$> newTVarIO M.empty
 
+-- | Issue an additional capability for an agent identity.
 grantAgentAccess :: AgentAccess -> AgentId -> IO Text
 grantAgentAccess access@(AgentAccess registry) ident = do
   token <- T.pack <$> randomIdentity
@@ -25,10 +31,12 @@ grantAgentAccess access@(AgentAccess registry) ident = do
       pure True
   if accepted then pure token else grantAgentAccess access ident
 
+-- | Revoke every capability associated with this agent.
 revokeAgentAccess :: AgentAccess -> AgentId -> IO ()
 revokeAgentAccess (AgentAccess registry) ident =
   atomically (modifyTVar' registry (M.filter (/= ident)))
 
+-- | Resolve a private capability without granting any additional operation authority.
 resolveAgentAccess :: AgentAccess -> Text -> IO (Maybe AgentId)
 resolveAgentAccess (AgentAccess registry) token
   | T.length token /= 48 = pure Nothing

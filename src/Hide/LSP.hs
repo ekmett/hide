@@ -1,4 +1,11 @@
 {-# LANGUAGE OverloadedStrings #-}
+-- | HLS transport, full-document synchronization and UTF-16 position conversion.
+--
+-- Initialization and encoding/writes run off the UI thread. Callers queue immutable
+-- buffer references and coalesce unchanged identities; the writer performs any
+-- whole-document comparison. An executeCommand reserves ownership of incoming
+-- applyEdit requests at receipt time. Retirement can drain edit replies before
+-- bounded asynchronous shutdown.
 module Hide.LSP
   ( Client, Event(..), startClient, stopClient, syncDocuments, notifySaved, request, pollEvents, serverCapabilities
   , executeCommand, replyEdit, retireClient, retireClientAfterReplies
@@ -36,6 +43,8 @@ data Event = Response Int Value | ApplyEdit Int Value Value | Diagnostics FilePa
   deriving (Eq, Show)
 data Command = Documents [(FilePath,Int,Text)] | Request Int Text Value | Saved FilePath | Reply Value | Barrier (MVar ())
 
+-- | HLS process and protocol worker ownership. retireClientAfterReplies returns
+-- a barrier for asynchronous retirement after queued edit replies drain.
 data Client = Client
   { commands :: Chan Command, events :: MVar (Seq.Seq Event), nextId :: MVar Int
   , unavailable :: MVar (Maybe Text)
@@ -181,6 +190,8 @@ startClient root = mask $ \restore -> do
 stopClient :: Client -> IO ()
 stopClient = closeClient
 
+-- | Queue immutable document references for writer-side comparison and encoding.
+-- Callers should coalesce unchanged buffer/client identities.
 syncDocuments :: Client -> [(FilePath,Int,Text)] -> IO ()
 -- The caller only queues immutable references. Equality and full-text encoding
 -- run in writeCommands; comparing here forces edited buffer text on the UI.
@@ -199,8 +210,7 @@ request client method params = modifyMVar (nextId client) $ \ident -> do
     Just message -> modifyMVar_ (events client) (pure . (Seq.|> Response ident (object ["id" .= ident, "error" .= object ["code" .= (-32603 :: Int), "message" .= message]])))
   pure (ident+1, ident)
 
--- Reserve ownership before the request can reach the server. Incoming applyEdit
--- messages keep this receipt-time ID even if the UI polls after completion.
+-- | Reserve exclusive command edit ownership before transmitting the request.
 executeCommand :: Client -> Text -> Value -> IO (Either Text Int)
 executeCommand client name arguments = modifyMVar (nextId client) $ \ident -> do
   outcome <- modifyMVar (commandOwner client) $ \owner -> case owner of
@@ -213,6 +223,7 @@ executeCommand client name arguments = modifyMVar (nextId client) $ \ident -> do
         pure (Just ident,Right ident)
   pure (ident+1,outcome)
 
+-- | Drain at most 32 protocol events in FIFO order to bound UI adoption work.
 pollEvents :: Client -> IO [Event]
 -- Bound work per desktop tick while retaining FIFO request/response order.
 pollEvents client = modifyMVar (events client) $ \pending ->

@@ -1,4 +1,10 @@
 {-# LANGUAGE OverloadedStrings #-}
+-- | Bounded completion previews and partial word acceptance.
+--
+-- Provider edits are validated, normalized and trimmed into preview rows; source
+-- buffers and undo trees stay outside the derived view. Scalar view guards select
+-- which proposal still belongs at the caret. Partial acceptance rebases the
+-- remaining proposal against the edit just applied.
 module Hide.InlineState where
 import Control.Monad (unless)
 import Data.Char (isSpace)
@@ -14,6 +20,7 @@ data InlineOption = InlineOption
   -- and already accepted text when reporting cumulative partial acceptance.
   , optionPrefixLength :: Int, optionFirstRow :: Int, optionLastRow :: Int
   , optionRows :: V.Vector [(T.Text,Bool)] } deriving (Eq,Show)
+-- | Window/buffer/revision/selection/generation guards and bounded proposal alternatives.
 data InlineView = InlineView
   { inlineWindow :: Int, inlineBuffer :: Int, inlineRevision :: Int
   , inlineSelection :: Selection, inlineGeneration :: Int
@@ -24,6 +31,8 @@ selectedOption v
   | inlineIndex v<0=Nothing
   | otherwise=case drop (inlineIndex v) (inlineOptions v) of a:_->Just a; _->Nothing
 
+-- | Validate a proposal, normalize CRLF, trim unchanged edges and prepare rows.
+-- Reject invalid or text-preserving replacements.
 prepareOption :: Buffer -> Proposal -> Either T.Text InlineOption
 prepareOption b input=do
   let a=proposalStart input; z=proposalEnd input; replacement=T.replace "\r\n" "\n" (proposalText input)
@@ -46,8 +55,8 @@ prepareOption b input=do
   unless (proposalStart p/=proposalEnd p || not (T.null (proposalText p))) (Left "Completion makes no change.")
   pure (InlineOption p prefix first lastRow (V.fromList rows))
 
--- Accept a lexical word and its leading whitespace. A replacement consumes
--- the corresponding original word; remaining replacement text stays proposed.
+-- | Choose the next lexical word with leading whitespace, consume its replaced
+-- original text and rebase the remaining proposal.
 proposalWord :: Buffer -> Proposal -> (Int,Int,T.Text,Maybe Proposal)
 proposalWord b p
   | T.null (proposalText p)=(a,z,"",Nothing)

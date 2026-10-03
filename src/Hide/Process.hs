@@ -1,4 +1,10 @@
 {-# LANGUAGE ScopedTypeVariables #-}
+-- | Best-effort shutdown for owned subprocess groups.
+--
+-- Capture cleanup immediately after spawn, before another waiter can reap the
+-- PID. The returned action serializes repeated cleanup, terminates the process
+-- tree and bounds exit polling. Callers stop children before joining pipe workers;
+-- suppressed cleanup IO failures mean return is not proof every descendant exited.
 module Hide.Process (processCleanup) where
 
 import Control.Concurrent (modifyMVar_, newMVar, threadDelay)
@@ -8,8 +14,9 @@ import System.Info (os)
 import System.Process
 import System.Timeout (timeout)
 
--- Call immediately after spawning with create_group=True. Capture the PID before
--- waitForProcess can reap it; callers must stop the tree before joining pipe IO.
+-- | Capture an idempotent cleanup action immediately after createProcess with
+-- @create_group=True@, before another waiter can reap the PID.
+-- Invoke it before joining readers that may be blocked on child pipes.
 processCleanup :: ProcessHandle -> IO (IO ())
 processCleanup process = do
   pid<-getPid process

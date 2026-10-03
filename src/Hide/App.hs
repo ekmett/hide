@@ -1,4 +1,11 @@
 {-# LANGUAGE CPP, OverloadedStrings #-}
+-- | Command-line entry point and composition root for editor sessions.
+--
+-- Interactive frontends attach to a persistent session; snapshots and the MCP
+-- bridge take separate startup paths. Nested resource scopes own language tools,
+-- conversations, debugging, reconciliation and highlighting. Effect handlers form
+-- a delegation chain, while the session tick adopts their completed work.
+-- Permission checks wrap agent-facing dispatch rather than individual frontends.
 module Hide.App (main, demoDesktop, applyEffects) where
 
 import Control.Applicative ((<|>))
@@ -109,6 +116,7 @@ options = [Option [] ["appearance"] (ReqArg ColorMode "light|dark|system") "Docu
           ,Option [] ["scene"] (ReqArg Scene "desktop|menu|about|gallery|split|open|tree|help|diff|preferences") "Preview scene (with --demo)"
           ,Option ['h'] ["help"] (NoArg Usage) "Show help"]
 
+-- | Parse launch options and enter a frontend, session daemon, snapshot, or MCP bridge.
 main :: IO ()
 main = do
   args<-getArgs
@@ -496,10 +504,14 @@ setScene d scene=case scene of
   "split" -> fst (runCommand SplitHorizontal d)
   _ -> message "Unknown preview scene" [T.pack scene] d
 
+-- | A deterministic sample desktop for previews and rendering checks.
 demoDesktop :: Desktop
 demoDesktop = addDocument Nothing (newBuffer sample) (initialDesktop (80,25))
   where sample=T.unlines ["module Main where","", "factorial :: Integer -> Integer", "factorial n = product [1 .. n]", "", "main :: IO ()", "main = do", "  putStrLn \"Enter a number:\"", "  input <- getLine", "  print (factorial (read input))"]
 
+-- | Interpret basic file, help, browser and save effects in order.
+-- The Bool result requests exit; runtime-specific handlers delegate unhandled
+-- effects here. This interpreter can perform blocking filesystem work.
 applyEffects :: Desktop -> [Effect] -> IO (Bool,Desktop)
 applyEffects = foldM apply . (False,)
   where

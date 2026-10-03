@@ -1,3 +1,9 @@
+-- | Byte-preserving file loading and baseline-checked replacement saves.
+--
+-- Loaded paths are canonicalized. Invalid UTF-8 or NUL-containing input selects
+-- byte mode. Saving writes a sibling temporary file, preserves existing permissions
+-- and rechecks path/symlink/baseline before rename. The final comparison/rename
+-- still has a concurrent-writer race; atomic replacement is not power-loss durability.
 module Hide.Files (FileState(..), loadFile, saveFile) where
 
 import Control.Exception (bracket, mask)
@@ -11,9 +17,12 @@ import System.IO (hClose, hFlush, openBinaryTempFile)
 import System.IO.Error (catchIOError, isDoesNotExistError, tryIOError)
 import Hide.Buffer (Buffer, newBuffer, newByteBuffer, bufferBytes, byteMode)
 
+-- | Canonical path and last observed disk bytes; Nothing denotes a missing file.
 data FileState = FileState { filePath :: FilePath, diskBytes :: Maybe ByteString }
   deriving (Eq, Show)
 
+-- | Load a canonical file or a clean new buffer for a missing path.
+-- Undecodable or NUL-containing data stays lossless in byte mode.
 loadFile :: FilePath -> IO (Either String (FileState, Buffer))
 loadFile path = fileResult path $ do
   resolved <- canonicalizePath path
@@ -24,6 +33,9 @@ loadFile path = fileResult path $ do
         _ -> newByteBuffer bytes
   pure (FileState resolved baseline, buffer)
 
+-- | Save only if the expected path/baseline still matches; adopt the returned
+-- FileState and mark the buffer saved separately on success. Text-mode NUL data
+-- is rejected.
 saveFile :: FileState -> Buffer -> IO (Either String FileState)
 saveFile state buffer = fileResult path $ mask $ \restore -> do
   checkDisk

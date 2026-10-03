@@ -1,4 +1,11 @@
 {-# LANGUAGE OverloadedStrings #-}
+-- | Background filesystem polling with coalesced observations.
+--
+-- Callers subscribe canonical file paths with baseline tokens. Desired-state updates
+-- do no file IO; the worker checks metadata plus a rotating overdue byte rescan.
+-- Before/after stamps avoid publishing a raced read. Pending results coalesce by
+-- path and are filtered against current subscriptions, so obsolete observations
+-- cannot masquerade as evidence for a new baseline.
 module Hide.External
   ( Watcher, Observation(..), withWatcher, watchPaths, pollObservations, forceCheck ) where
 
@@ -32,14 +39,13 @@ data Desired = Desired (Map.Map FilePath Int) (Set.Set FilePath) (Map.Map (Bool,
 type Stamp = (UTCTime, Integer)
 data CachedFile = CachedFile (Maybe Stamp) Observation Word64
 
+-- | Scope the watcher worker and its desired/published observation state.
 withWatcher :: (Watcher -> IO a) -> IO a
 withWatcher action = do
   watcher <- Watcher <$> newMVar (Desired Map.empty Set.empty Map.empty False) <*> newEmptyMVar
   bracket (forkIO (worker watcher)) killThread (const (action watcher))
 
--- File paths are canonical paths from FileState. Tokens change with the disk
--- baseline so a delayed pre-save observation cannot replace newly saved text.
--- Only update the desired snapshot here; filesystem work belongs to the worker.
+-- | Replace subscriptions using canonical paths and caller-owned baseline tokens.
 watchPaths :: Watcher -> [(FilePath, Int)] -> [FilePath] -> IO ()
 watchPaths watcher@(Watcher state _) files directories = do
   changed <- modifyMVar state $ \(Desired oldFiles oldDirs pending forced) -> do
@@ -48,11 +54,12 @@ watchPaths watcher@(Watcher state _) files directories = do
     pure (Desired newFiles newDirs (Map.filter (wanted newFiles newDirs) pending) forced, oldFiles /= newFiles || oldDirs /= newDirs)
   when changed (wake watcher)
 
+-- | Drain coalesced results that still match current subscriptions/tokens.
 pollObservations :: Watcher -> IO [Observation]
 pollObservations (Watcher state _) = modifyMVar state $ \(Desired files dirs pending forced) ->
   pure (Desired files dirs Map.empty forced, Map.elems pending)
 
--- Asynchronous: the next pass checks bytes even when metadata is unchanged.
+-- | Request an asynchronous byte check that bypasses metadata-cache reuse.
 forceCheck :: Watcher -> IO ()
 forceCheck watcher@(Watcher state _) = do
   modifyMVar_ state $ \(Desired files dirs pending _) -> pure (Desired files dirs pending True)

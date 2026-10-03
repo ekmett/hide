@@ -1,4 +1,14 @@
 {-# LANGUAGE OverloadedStrings #-}
+-- | Per-project HLS orchestration and checked adoption of language edits.
+--
+-- Owned workers discover roots, start clients, capture source and prepare patches.
+-- Synchronization keys use client and buffer identities so idle ticks do not
+-- flatten documents. Adoption rechecks all targets and privacy before installing
+-- prepared edits; it preserves unrelated navigation and does not save files.
+--
+-- Session events wait behind pending edit batches. A client that executed a
+-- command is retired afterward because late applyEdit has no originating command
+-- ID. Earlier accepted batches survive later failure and are reported as partial.
 module Hide.Tooling (Tooling, toolingTool, toolingTools, toolingToolNames, withTooling, withToolingUsing, tickTooling, toolingEffects, completionItems, workspaceEdits, hoverText, diagnosticsCurrent) where
 
 import Control.Exception (bracket, try, IOException, onException, mask_, evaluate, finally, displayException)
@@ -83,6 +93,7 @@ data Tooling = Tooling
   , heldEvents :: IORef (M.Map FilePath [L.Event])
   }
 
+-- | Scope language sessions, preparation workers and pending retirement joins.
 withTooling :: (Tooling -> IO a) -> IO a
 withTooling = withToolingUsing projectRoot L.startClient editSnapshot loadFile
 
@@ -182,6 +193,8 @@ toolingTools = map descriptor toolingToolNames
       "lsp_apply_code_action" -> "Apply a listed action once at its original revision. Checked text edits change buffers only; advertised commands run in HLS and may have server-side effects. Command results report succeeded, commandSucceeded, appliedBatches, partial and changed buffers. Earlier accepted edits remain after failure/cancellation. Resource operations are rejected."
       _ -> "Rename through HLS, requiring the current revision; edits change buffers, never saved files."
 
+-- | Initiate against live buffers under desktop serialization; run the returned
+-- continuation outside the lock while tickTooling continues to make progress.
 toolingTool :: Tooling -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> T.Text -> Value -> IO (Desktop, IO (Either T.Text Value))
 toolingTool = startTool False
 
@@ -928,7 +941,7 @@ retireSession drainReplies t root (Session client pending) = mask_ $ do
   writeIORef (actions t) M.empty
   modifyIORef' (sessions t) (M.delete root)
 
--- Idle hover is debounced; no request is issued for every mouse pixel or keystroke.
+-- | Pump startup, synchronization, protocol events and prepared-edit adoption.
 tickTooling :: Tooling -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> IO Desktop
 tickTooling t core d = do
   retired<-readIORef (retiring t)
@@ -1151,7 +1164,7 @@ completionItems text pos result = take 200 (mapMaybe parseItem sorted)
       additional<-o .:? "additionalTextEdits" .!= [] >>= mapM (textEdit text)
       pure (Completion label (primary:additional))
 
--- Resource operations are refused: rename may edit text, never create/delete files.
+-- | Decode text-only workspace edits; reject resource create/delete/rename operations.
 workspaceEdits :: Value -> Either T.Text [(FilePath,Maybe Int,[Value])]
 workspaceEdits result = maybe (Left "Unsupported workspace edit; no files changed.") Right (parseMaybe parse result)
   where

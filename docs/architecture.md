@@ -5,6 +5,31 @@ Input produces desktop transitions and effects; rendering turns the resulting
 state into a character grid. File access, language tools, Git, conversations and
 debugging feed results back into that desktop.
 
+## Reading the source
+
+`Hide.App` composes the session services. `Hide.Model` owns pure desktop
+transitions and returns effects; service handlers consume their effects and
+delegate the rest. Their ticks adopt completed work into the serialized desktop.
+`Hide.Render` paints that state, with an explicit metadata/identity key deciding
+when another frame is needed.
+
+The main implementation boundaries are:
+
+| Area | Modules to start with | Design boundary |
+| --- | --- | --- |
+| Editing and change views | `Buffer`, `BufferView`, `Model` | Persistent text versus per-window coordinates and presentation |
+| Rendering | `Render`, `Unicode`, `Font`, `Markdown` | Prepared styled text versus grapheme/cell composition |
+| Sessions and displays | `Remote`, `Protocol`, `Recovery`, `Session` | Persistent owner versus replaceable frontend attachment |
+| Language/build/debug | `Tooling`, `LSP`, `BuildJobs`, `Debugger`, `DAP` | Worker preparation versus checked adoption and reply waits |
+| Conversations | `Conversation`, `AgentHub`, `AgentRuntime`, `Autocomplete` | Provider lifecycle, authenticated actors and immutable request context |
+| Agent tools and policy | `EditorMCP`, `MCPPermissions`, `GuestAccess`, the `*MCP` modules | Serialized initiation versus outside-lock continuation; independent privacy checks |
+| Disk and Git | `Files`, `External`, `Reconcile`, `GitOperations` | Observed baselines versus current unsaved edits |
+
+Module overviews and initial API Haddocks expand these contracts. They distinguish
+character offsets, display cells, byte offsets and protocol positions rather than
+using “position” interchangeably. The native C/Objective-C interfaces remain in
+`cbits`; Haskell resource owners describe when those handles may be used.
+
 ## Buffers and views
 
 A text file uses a persistent finger tree of newline-inclusive lines, measured

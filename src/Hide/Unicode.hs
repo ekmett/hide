@@ -1,4 +1,10 @@
 {-# LANGUAGE ForeignFunctionInterface, OverloadedStrings #-}
+-- | Shared grapheme segmentation, cell widths and picture composition.
+--
+-- utf8proc supplies segmentation with an ASCII fast path; source offsets remain
+-- Unicode characters while display widths follow graphemes and editor overrides.
+-- Partially clipped/covered wide clusters become blanks. Terminal output advances
+-- explicitly past two-cell clusters even when the user's font draws them narrowly.
 module Hide.Unicode (graphemes, clusterWidth, textImage, flattenPicture, displayOpsForPic, updatePicture, terminalText, textInputChar) where
 
 import Control.Monad (forM_, when)
@@ -27,8 +33,7 @@ import qualified Graphics.Vty.Image.Internal as I
 foreign import ccall unsafe "utf8proc_charwidth" c_width :: CInt -> CInt
 foreign import ccall unsafe "thc_graphemes" c_graphemes :: CString -> CInt -> Ptr CInt -> IO CInt
 
--- utf8proc owns the grapheme rules (including emoji ZWJ,
--- flags and combining sequences); source offsets remain Unicode code points.
+-- | Segment extended graphemes, preserving CRLF as one cluster on the ASCII fast path.
 graphemes :: T.Text -> [T.Text]
 graphemes t
   | T.all (<'\128') t = ascii t
@@ -97,8 +102,7 @@ pictureRows (w,h) picture = images
       Vec.freeze grid
     images=[V.horizCat [textImage a (T.concat (map snd group)) | group@((a,_):_)<-groupBy (\a b -> fst a==fst b) [(a,t) | Cell a t _<-Vec.toList (Vec.slice (y*w) w cells)]] | y<-[0..h-1]]
 
--- The same cluster widths must reach both frontends. Vty's stock span builder
--- remeasures text by code point, undoing the image widths for ZWJ sequences.
+-- | Produce spans with explicit cluster widths instead of Vty code-point remeasurement.
 displayOpsForPic :: V.Picture -> (Int,Int) -> DisplayOps
 displayOpsForPic picture size = Vec.fromList (map (Vec.fromList . spans) (pictureRows size picture))
   where
@@ -106,8 +110,7 @@ displayOpsForPic picture size = Vec.fromList (map (Vec.fromList . spans) (pictur
     spans (I.HorizJoin a b _ _) = spans a ++ spans b
     spans _=[]
 
--- Reuse Vty's terminal capabilities and attribute writers, supplying our spans.
--- Keep its per-row diff cache; input, resize and terminal lifecycle stay in Vty.
+-- | Emit grapheme-aware spans through Vty capabilities and its row-diff cache.
 updatePicture :: V.Vty -> V.Picture -> IO ()
 updatePicture vty picture = do
   let output=V.outputIface vty
@@ -137,16 +140,14 @@ updatePicture vty picture = do
   outputByteBuffer output (writeToByteString bytes)
   writeIORef (assumedStateRef output) previous {prevOutputOps=Just ops}
 
--- Format code points are essential components of emoji and Indic text.
+-- | Accept printable input and the joiner/tag characters needed by complex graphemes.
 textInputChar :: Char -> Bool
 textInputChar c=isPrint c || c `elem` ['\x200c','\x200d'] || c>='\xe0020' && c<='\xe007f'
 
--- Reserve both cells even when the terminal's font draws a wide grapheme in
--- one. Explicit positioning also repairs the following text's column.
+-- | Encode positioned terminal text with explicit advancement across two-cell clusters.
 terminalText :: (Int -> Write) -> Int -> T.Text -> (Write,Int)
-terminalText move start text = go (graphemes text) start
+terminalText move start text = foldl' emit (mempty,start) (graphemes text)
   where
-    go clusters start = foldl' emit (mempty,start) clusters
     emit (bytes,x) g =
       let n=clusterWidth g
           raw=writeByteString (TE.encodeUtf8 g)

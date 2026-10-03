@@ -1,4 +1,11 @@
 {-# LANGUAGE CPP, OverloadedStrings, ScopedTypeVariables #-}
+-- | Persistent editor sessions with local and SSH frontend attachments.
+--
+-- The daemon owns the desktop and tools independently of display connections.
+-- A serialized command worker commits state and sequence numbers before replies.
+-- Bounded input/reply journals support reconnection within the same server epoch;
+-- replay is refused when ownership or restart makes delivery uncertain. Tick and
+-- checkpoint workers continue without a display, with one display writer at a time.
 module Hide.Remote
   ( RemotePeer(..), withLocalPeer, withSSHPeer, withSSHSession, runRemoteRelay, runRemoteDaemon, runRemoteDaemonWithStartup ) where
 
@@ -50,9 +57,13 @@ import Hide.Render (renderKey)
 
 #endif
 
+-- | Callback-scoped peer transport. Sending queues input; receive events carry
+-- frames, controls and acknowledgements of processing.
 data RemotePeer = RemotePeer
   { peerSend :: WirePacket -> IO ()
   , peerSendBatch :: [WirePacket] -> IO ()
+    -- ^ Atomically enqueue related metadata/payload packets, with capacity
+    -- backpressure. Queueing does not confirm execution.
   , peerReceive :: IO (Maybe WirePacket)
   }
 
@@ -186,6 +197,8 @@ data Session = Session
   , stopped :: Bool
   }
 
+-- | Acquire the session lifetime lock, recover state and serve attachments.
+-- Invoke startup only after taking ownership; reclaim only eligible stale endpoints.
 runRemoteDaemonWithStartup :: IO () -> String -> Double -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> (Desktop -> IO Desktop) -> (Desktop -> Maybe T.Text -> Value -> IO (Bool, Desktop, IO (Maybe Value))) -> Desktop -> IO ()
 runRemoteDaemonWithStartup owned session scale effects tick inspect initial = do
   checkpoint <- checkpointPath session
@@ -546,6 +559,8 @@ withSSHPeer host args action = do
 withSSHSession :: String -> String -> Bool -> [String] -> (RemotePeer -> IO ()) -> IO ()
 withSSHSession host = withSessionPeer (Just host)
 
+-- | Scope a local attachment, reconnect handling and bounded acknowledgement drain.
+-- Detachment leaves the session daemon running.
 withLocalPeer :: String -> Bool -> [String] -> (RemotePeer -> IO ()) -> IO ()
 withLocalPeer = withSessionPeer Nothing
 

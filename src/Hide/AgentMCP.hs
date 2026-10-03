@@ -1,4 +1,10 @@
 {-# LANGUAGE OverloadedStrings #-}
+-- | Strict MCP schemas and dispatch for agent orchestration.
+--
+-- The host supplies the actor and working directory; tool arguments cannot replace
+-- either. Creation combines hub reservation with explicit first-message enqueueing,
+-- and failed/interrupted post-creation work ends the new child. Authority remains
+-- with the hub rather than being inferred from JSON schema hints.
 module Hide.AgentMCP (agentTools, agentToolNames, agentTool) where
 
 import Control.Exception (mask, onException)
@@ -14,6 +20,7 @@ import Hide.AgentHub
 agentToolNames :: [Text]
 agentToolNames=[name | (name,_,_,_,_)<-specs]
 
+-- | Published orchestration schemas; human-only configuration/steering hooks are omitted.
 agentTools :: [Value]
 agentTools=[object ["name" .= name,"description" .= description,"inputSchema" .= schema required properties,
   "annotations" .= object ["readOnlyHint" .= readonly,"destructiveHint" .= not readonly,"openWorldHint" .= not readonly]]
@@ -46,8 +53,7 @@ integer lower upper=object ["type" .= ("integer"::Text),"minimum" .= lower,"maxi
 enum :: [Text] -> Value
 enum values=object ["type" .= ("string"::Text),"enum" .= values]
 
--- Actor and directory are supplied by the authenticated host bridge. Neither
--- can be overridden by a tool argument, including nested workspace fields.
+-- | Validate names, fields and bounds, then dispatch as the host-supplied actor.
 agentTool :: AgentHub -> Actor -> FilePath -> Text -> Value -> IO (Either Text Value)
 agentTool hub actor directory name args=case [properties | (key,_,_,_,properties)<-specs,key==name] of
   []->pure (Left "Unknown agent tool.")

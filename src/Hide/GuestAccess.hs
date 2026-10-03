@@ -1,5 +1,11 @@
 {-# LANGUAGE OverloadedStrings #-}
--- Shared policy for host-chosen guest input and guest-readable screen cells.
+-- | Policy for host-attributed agent input, readable cells and authority files.
+--
+-- Readability, clickability, command/effect validation and post-transition checks
+-- protect different paths into the editor. The host selects input origin and
+-- isolates the clipboard for an entire agent batch. Filesystem callers must
+-- canonicalize paths before using pure path policy. Agent read masks apply even
+-- when the human has disabled streamer mode.
 module Hide.GuestAccess
   ( InputOrigin(..), CellAccess(..), cellAccess, readableAt, pointerAllowedAt
   , streamerReadableAt, sensitiveLabel, sanitizedStatus, protectedPath, protectedPathParent, protectedBuffer, privateDocument, sanitizedBuffer
@@ -19,19 +25,18 @@ import Hide.Files (filePath)
 import Hide.Buffer
 import Hide.Model
 
+-- | Trusted host attribution; never accept an origin claimed by input JSON.
 data InputOrigin = HumanInput | GuestInput deriving (Eq,Show)
 data CellAccess = CellAccess { cellReadable :: Bool, cellClickable :: Bool } deriving (Eq,Show)
 
 protectedBuffer :: Desktop -> Int -> Bool
 protectedBuffer d bid=maybe False (\doc -> privateDocument d doc || maybe False (`elem` ["Conversation","Autocomplete","Agent request","Proposed agent edit"]) (documentLabel doc)) (M.lookup bid (buffers d))
 
--- Callers resolve filesystem paths before applying this pure policy. FileState
--- paths and the host-provided private list are already canonical.
+-- | Check authority/privacy policy on an already canonicalized filesystem path.
 protectedPath :: Desktop -> FilePath -> Bool
 protectedPath d path=map toLower (takeFileName path)=="thc.toml" || any (`pathContains` path) (guestPrivatePaths d)
 
--- Renaming/deleting an ancestor, or creating a file in its place, can disable
--- the authority store even without touching its filename directly.
+-- | Also protect ancestors whose removal could destroy authority stores.
 protectedPathParent :: Desktop -> FilePath -> Bool
 protectedPathParent d path=protectedPath d path || any (pathContains path) (guestPrivatePaths d)
 
@@ -46,7 +51,7 @@ privateDocument d doc=maybe False privateLabel (documentLabel doc) || maybe Fals
     privateLabel "Git diff"=True
     privateLabel label=maybe False (protectedPath d . T.unpack) (T.stripPrefix "Disk changes: " label)
 
--- Keep offsets/newlines stable for paginated buffer reads.
+-- | Omit private documents and blank private conversation spans, preserving offsets.
 sanitizedBuffer :: Desktop -> Int -> Maybe Text
 sanitizedBuffer d bid=do
   doc<-M.lookup bid (buffers d)
@@ -181,10 +186,10 @@ sanitizedStatus :: Desktop -> Text
 sanitizedStatus d | "Session " `T.isPrefixOf` status d="Session [redacted]"
                   | otherwise=status d
 
--- The host brackets a whole batch under the desktop lock. Guest gestures and
--- clipboard may flow between its events, but never across the human boundary.
+-- | Begin a serialized agent batch with isolated clipboard and cleared gesture state.
 beginGuestInput :: Desktop -> Desktop
 beginGuestInput d=(clearGestures d) {clipboard="",clipboardCode=Nothing}
+-- | Restore the human clipboard after the entire agent input batch.
 endGuestInput :: Desktop -> Desktop -> Desktop
 endGuestInput original updated=(clearGestures updated) {clipboard=clipboard original,clipboardCode=clipboardCode original}
 clearGestures :: Desktop -> Desktop

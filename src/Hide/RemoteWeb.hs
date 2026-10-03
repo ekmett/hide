@@ -1,4 +1,11 @@
 {-# LANGUAGE CPP, OverloadedStrings #-}
+-- | Local browser bridge for a persistent remote peer.
+--
+-- The peer remains attached while browsers disconnect. Reconstructed rows and
+-- metadata provide a reset frame on the next browser connection; clipboard and
+-- complete download results have separate bounded retention. Connection
+-- generations keep acknowledgements for an old browser from reaching its
+-- replacement. Interrupted delivery can replay retained results.
 module Hide.RemoteWeb (runRemoteWeb) where
 import Hide.Remote (RemotePeer(..))
 #if defined(WITH_REMOTE) && defined(WITH_WEB)
@@ -26,6 +33,8 @@ data Cache = Cache
   { cachedAssets :: Maybe Value, cachedRows :: [Value], cachedMeta :: Object
   , cachedConnection :: Maybe Value, downloading :: Bool, sessionClosed :: Bool }
 
+-- | Run peer reception alongside the single-viewer browser server.
+-- Uploads enter the peer as atomic metadata/payload batches.
 runRemoteWeb :: Double -> String -> RemotePeer -> IO ()
 runRemoteWeb scale host peer = do
   cache<-newTVarIO (Cache Nothing [] KM.empty Nothing False False)

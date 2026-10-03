@@ -1,4 +1,10 @@
 {-# LANGUAGE OverloadedStrings #-}
+-- | Own named terminals and their corresponding editor documents.
+--
+-- Process preparation can run off the UI worker; adoption transfers an already
+-- started terminal into the console service. Screen polling updates documents,
+-- while a separate bounded byte suffix serves output tools. Closing a view does
+-- not implicitly reopen it on the next terminal update.
 module Hide.Consoles
   ( Consoles, withConsoles, startConsole, tickConsoles, consoleOutput
   , PreparedConsole, prepareConsole, adoptConsole, closePreparedConsole, consoleProcessId
@@ -31,8 +37,9 @@ withConsoles = bracket (Consoles <$> newMVar (1,M.empty)) closeAll
       mapM_ (closeTerminal . consoleTerminal) consoles
       pure (counter,M.empty)
 
--- Preparation may search PATH and spawn a child; callers can run it on a worker.
--- Until adoption, the caller owns the result and must close it on cancellation.
+-- | Caller-owned started terminal until adoption; close the returned value if
+-- adoption is abandoned. Cancellation inside preparation already has cleanup.
+-- The ownership transfer is conventional, not enforced by a linear type.
 newtype PreparedConsole = PreparedConsole Console
 
 prepareConsole :: [String] -> TerminalConfig -> Int -> IO (Either Text PreparedConsole)
@@ -72,6 +79,7 @@ consoleProcessId consoles ident = updateConsole consoles ident $ \console -> do
   result <- terminalProcessId (consoleTerminal console)
   pure (console,result)
 
+-- | Apply appearance/size changes, poll terminals and update existing views.
 tickConsoles :: Consoles -> Desktop -> IO Desktop
 tickConsoles (Consoles state) desktop = modifyMVar state $ \(counter,consoles) -> do
   updated <- mapM (\console -> if consoleRetiring console then pure console else do
@@ -84,6 +92,7 @@ tickConsoles (Consoles state) desktop = modifyMVar state $ \(counter,consoles) -
                         , maybe True ((== Nothing) . consoleError) (M.lookup ident consoles)]
   pure ((counter,updated),case errors of message:_ -> shown {status=message}; [] -> shown)
 
+-- | Refresh and return retained bytes, sticky truncation state and process exit status.
 consoleOutput :: Consoles -> Text -> IO (Either Text (ByteString,Bool,Maybe Int))
 consoleOutput consoles ident = updateConsole consoles ident $ \console -> do
   updated <- refresh console
@@ -96,8 +105,8 @@ inputConsole consoles ident bytes = updateConsole consoles ident $ \console -> d
   result <- if consoleRetiring console then pure (Left "Terminal has stopped") else maybe (writeTerminal (consoleTerminal console) bytes) (pure . Left) (consoleError console)
   pure (console,result)
 
--- Remove the process from polling before cleanup starts. The returned action
--- may wait for process exit; it does not hold the shared console service lock.
+-- | Stop normal polling and return cleanup to run outside the shared service lock.
+-- The returned cleanup still has to be executed.
 retireConsole :: Consoles -> Text -> IO (Either Text (IO ()))
 retireConsole (Consoles state) ident = modifyMVar state $ \(counter,consoles) -> case M.lookup ident consoles of
   Nothing -> pure ((counter,consoles),Left "Unknown or released terminal")
@@ -113,6 +122,7 @@ retireConsole (Consoles state) ident = modifyMVar state $ \(counter,consoles) ->
 killConsole :: Consoles -> Text -> IO (Either Text ())
 killConsole consoles ident = retireConsole consoles ident >>= either (pure . Left) (fmap Right)
 
+-- | Close the terminal and remove its console service entry.
 releaseConsole :: Consoles -> Text -> IO (Either Text ())
 releaseConsole (Consoles state) ident = modifyMVar state $ \(counter,consoles) -> case M.lookup ident consoles of
   Nothing -> pure ((counter,consoles),Left "Unknown or released terminal")

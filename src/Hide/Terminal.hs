@@ -1,4 +1,10 @@
 {-# LANGUAGE CPP, ForeignFunctionInterface, OverloadedStrings #-}
+-- | Managed PTY/ConPTY and libghostty-vt foreign-function boundary.
+--
+-- An MVar serializes access and prevents native-pointer use after release.
+-- Snapshots copy native memory into Haskell values; output chunks are incremental,
+-- not cumulative transcripts. Stopping the process and releasing the native
+-- terminal are separate operations so output can remain visible after exit.
 module Hide.Terminal
   ( Terminal, TerminalConfig(..), TerminalCell(..), TerminalSnapshot(..)
   , terminalAvailable, startTerminal, startTerminalUnsetting, terminalProcessId, withTerminal, writeTerminal, resizeTerminal
@@ -30,6 +36,7 @@ import System.Process.Internals (translate)
 #endif
 #endif
 
+-- | Direct executable/argv, working directory, grid size and inherited-environment overrides.
 data TerminalConfig = TerminalConfig
   { terminalCommand :: FilePath
   , terminalArguments :: [String]
@@ -102,6 +109,8 @@ validSize columns rows = columns > 0 && rows > 0 && columns <= 1000 && rows <= 1
 startTerminal :: TerminalConfig -> IO (Either Text Terminal)
 startTerminal = startTerminalUnsetting []
 
+-- | Validate launch fields, remove selected inherited variables and resolve the
+-- executable against the resulting PATH. TERM defaults unless overridden or unset.
 startTerminalUnsetting :: [String] -> TerminalConfig -> IO (Either Text Terminal)
 startTerminalUnsetting unset config
   | not (validSize (terminalColumns config) (terminalRows config)) = pure (Left "Terminal size must be between 1 and 1000 rows and columns")
@@ -183,6 +192,8 @@ resizeTerminal terminal columns rows
       ok <- c_resize ptr (fromIntegral columns) (fromIntegral rows)
       if ok == 0 then Left <$> nativeError ptr else pure (Right ())
 
+-- | Copy a row-major cell snapshot and incremental raw output.
+-- Wide-grapheme continuation cells have width zero.
 pollTerminal :: Terminal -> IO (Either Text TerminalSnapshot)
 pollTerminal terminal = withOpen terminal $ \ptr -> do
   ok <- c_poll ptr
@@ -217,9 +228,11 @@ pollTerminal terminal = withOpen terminal $ \ptr -> do
       n <- fromIntegral <$> peek len
       if n == 0 then pure BS.empty else BS.packCStringLen (castPtr buffer,n)
 
+-- | Stop the child while retaining its native terminal and screen.
 killTerminal :: Terminal -> IO ()
 killTerminal (Terminal state) = withMVar state $ maybe (pure ()) c_kill
 
+-- | Idempotently release the native terminal; subsequent pointer access is guarded.
 closeTerminal :: Terminal -> IO ()
 closeTerminal (Terminal state) = mask_ $ modifyMVar_ state $ \current -> do
   maybe (pure ()) c_free current

@@ -1,4 +1,10 @@
 {-# LANGUAGE OverloadedStrings #-}
+-- | Structured test status derived from the shared captured build job.
+--
+-- Cabal suite outcomes and explicit TAP 13 streams provide evidence; arbitrary
+-- console prose is not treated as individual tests. Truncation and incomplete TAP
+-- plans remain visible. The latest non-test job replaces the status report, while
+-- its predecessor's output document can remain open.
 module Hide.TestsMCP (testsTools, testsToolNames, testsTool, testResults, parseTestSuites) where
 
 import Data.Aeson
@@ -26,6 +32,7 @@ testsTools=
     "inputSchema" .= object ["type" .= ("object"::T.Text),"properties" .= object [],"additionalProperties" .= False],
     "annotations" .= object ["readOnlyHint" .= True,"destructiveHint" .= False,"openWorldHint" .= False]]]
 
+-- | Start a saved-source GHC/Cabal test job or read the latest shared test status.
 testsTool :: ConversationState -> Desktop -> T.Text -> Value -> IO (Desktop,IO (Either T.Text Value))
 testsTool runtime d name arguments = case parseEither (withObject "test arguments" pure) arguments of
   Left err -> done d (Left (T.pack err))
@@ -63,8 +70,7 @@ testsTool runtime d name arguments = case parseEither (withObject "test argument
 field :: FromJSON a => Key -> Value -> Maybe a
 field key=parseMaybe (withObject "job" (.: key))
 
--- Cabal's suite outcomes are explicit evidence. Framework-specific case names
--- are intentionally not guessed from free-form console output.
+-- | Extract up to 500 final-by-name Cabal suite states from explicit wrapper lines.
 parseTestSuites :: T.Text -> [(T.Text,T.Text)]
 parseTestSuites text=take 500 (M.toList (M.fromList [entry | line<-T.lines text,Just entry<-[parse (T.dropWhileEnd (=='\r') line)]]))
   where
@@ -75,6 +81,8 @@ parseTestSuites text=take 500 (M.toList (M.fromList [entry | line<-T.lines text,
       if T.null name || T.length name>256 then Nothing else
         (\result -> (name,result)) <$> lookup state [("RUNNING...","running"),("PASS","passed"),("FAIL","failed")]
 
+-- | Combine job lifecycle, retained stdout and diagnostics into a bounded report.
+-- Process exit and incomplete/truncated evidence are retained separately.
 testResults :: Value -> (T.Text,Bool) -> Desktop -> Value
 testResults job (stdoutText,stdoutTruncated) d
   | field "action" job/=Just ("Test"::T.Text) = object ["available" .= False,"job" .= job]

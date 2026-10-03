@@ -1,4 +1,9 @@
 {-# LANGUAGE OverloadedStrings #-}
+-- | Asynchronous read-only browser for an existing Cabal plan.
+--
+-- A request token owns the loading dialog. Completed reads are adopted only while
+-- that dialog, project root and privacy paths still match; navigation uses a
+-- bounded cached snapshot. Browsing never configures or builds the project.
 module Hide.ProjectBrowser (withProjectBrowser, projectBrowserEffects, tickProjectBrowser) where
 
 import Control.Concurrent.Async (Async, async, cancel, poll)
@@ -20,10 +25,12 @@ data Cached = Cached Int FilePath [FilePath] Value
 data Browser = Browser Int (Maybe (Async (FilePath,[FilePath],Value))) (Maybe Cached)
 type ProjectBrowserState = IORef Browser
 
+-- | Scope the outstanding plan read and cancel it on exit.
 withProjectBrowser :: (ProjectBrowserState -> IO a) -> IO a
 withProjectBrowser=bracket (newIORef (Browser 0 Nothing Nothing)) close
   where close ref=readIORef ref >>= \(Browser _ worker _)->mapM_ cancel worker
 
+-- | Handle project-browser effects and delegate all others to the supplied interpreter.
 projectBrowserEffects :: ProjectBrowserState -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> [Effect] -> IO (Bool,Desktop)
 projectBrowserEffects ref fallback=foldM step . (False,)
   where
@@ -57,8 +64,8 @@ projectBrowserEffects ref fallback=foldM step . (False,)
     actionToken (ProjectDetails token _)=token
     actionToken LoadProject = -1
 
--- Completed reads may only replace their own loading dialog in the same project.
--- Escape, another modal, a new request, or a changed privacy policy retires them.
+-- | Adopt a completed read only into its own still-current loading dialog.
+-- A dismissed dialog or changed root/privacy policy invalidates the result.
 tickProjectBrowser :: ProjectBrowserState -> Desktop -> IO Desktop
 tickProjectBrowser ref desktop=do
   Browser token worker cached<-readIORef ref

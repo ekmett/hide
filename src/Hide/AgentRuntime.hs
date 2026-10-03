@@ -1,4 +1,10 @@
 {-# LANGUAGE CPP, OverloadedStrings, ScopedTypeVariables #-}
+-- | Connect the agent hub to editor sessions, bridge capabilities and recovery.
+--
+-- The runtime owns child launch/reconnect workers and the primary conversation
+-- mailbox. Private checkpoints are separate from public agent descriptions and
+-- activate only after the session lifetime lock is held. Invalid recovery data is
+-- retained and disables spawning rather than being silently replaced.
 module Hide.AgentRuntime
   ( AgentRuntime, AgentRequest(..), withAgentRuntime, withAgentRuntimeUsing
   , agentHub, agentAccess, primaryAgent, primaryServers, drainAgentRequests
@@ -39,6 +45,8 @@ import Hide.Protocol (WirePacket(..))
 import Hide.Remote (RemotePeer(..), withLocalPeer)
 import Hide.Session
 
+-- | A host/UI mailbox request whose reply cell stays filled after completion.
+-- Consumers must reject stale requests already resolved elsewhere.
 data AgentRequest = DeliverPrimary HubMessage (MVar (Either Text Value))
   | CancelPrimary | EndPrimary
   | ProviderPermission AgentId ACPPermission (MVar (Maybe Text))
@@ -61,6 +69,7 @@ data RuntimeState = RuntimeState
   , primaryState :: Maybe (FilePath,Text,Capabilities)
   , closed :: Bool, notice :: Maybe Text, checkpointActive :: Bool }
 
+-- | Scope providers, private bridge access, pending replies and checkpoint workers.
 withAgentRuntime :: FilePath -> IO ACP.Launch -> (AgentRuntime -> IO a) -> IO a
 withAgentRuntime = withAgentRuntimeUsing startEditor resumeEditor
 
@@ -136,6 +145,7 @@ withAgentRuntimeUsing openEditor restoreEditor directory getLaunch action = brac
 primaryServers :: AgentRuntime -> IO [Value]
 primaryServers runtime = maybe (pure []) (\record -> editorServersAt (sessionId record) (Just (primaryToken runtime))) (rootSession runtime)
 
+-- | Drain unresolved mailbox requests for adoption by the owning UI tick.
 drainAgentRequests :: AgentRuntime -> IO [AgentRequest]
 drainAgentRequests runtime = modifyMVar (runtimeState runtime) $ \s -> do
   ready <- filterM unresolved (requests s)
@@ -174,8 +184,7 @@ failPendingPrimary runtime = failDeliveries (runtimeState runtime)
 agentSession :: AgentRuntime -> AgentId -> IO (Maybe SessionRecord)
 agentSession runtime ident = M.lookup ident . sessions <$> readMVar (runtimeState runtime)
 
--- Provider initialization runs off the UI thread. Closing the host joins these
--- workers, so a delayed load cannot outlive its runtime or leave a bearer behind.
+-- | Schedule provider initialization off the UI thread; shutdown joins the worker.
 requestAgentReconnect :: AgentRuntime -> AgentId -> IO (Either Text ())
 requestAgentReconnect runtime ident = modifyMVar (reconnectWorkers runtime) $ \workers -> do
   liveWorkers <- M.filter isRunning <$> traverse (\worker -> (worker,) <$> poll worker) workers
@@ -195,8 +204,7 @@ requestAgentReconnect runtime ident = modifyMVar (reconnectWorkers runtime) $ \w
 runtimeNotice :: AgentRuntime -> IO (Maybe Text)
 runtimeNotice runtime = modifyMVar (runtimeState runtime) (\s -> pure (s {notice=Nothing},notice s))
 
--- The daemon host calls this only after acquiring its session lifetime lock.
--- Construction precedes that lock, so competing startup must remain read-only.
+-- | Enable private sidecar persistence only after acquiring the session lifetime lock.
 activateAgentCheckpoint :: AgentRuntime -> IO ()
 activateAgentCheckpoint runtime = modifyMVar_ (runtimeState runtime) $ \s ->
   pure s {checkpointActive=not (closed s)}
@@ -369,7 +377,7 @@ attachEditor resume record = do
   withLocalPeer (sessionId record) resume (sessionArguments record) $ \peer -> do
     ready <- timeout 75000000 (awaitReady peer False)
     unless (ready==Just ()) (ioError (userError "Agent editor did not become ready within 75 seconds."))
-  detached <- timeout 5000000 (awaitDetached record)
+  detached <- timeout 5000000 awaitDetached
   unless (detached==Just ()) (ioError (userError "Agent editor started but detach could not be confirmed."))
   where
     awaitReady peer assets = peerReceive peer >>= \packet -> case packet of
@@ -379,9 +387,9 @@ attachEditor resume record = do
         | field "type" value==Just ("connection"::Text), field "connected" value==Just True, assets -> pure ()
         | field "type" value `elem` [Just ("closed"::Text),Just "error"] -> ioError (userError "Agent editor startup failed.")
       _ -> awaitReady peer assets
-    awaitDetached record = do
+    awaitDetached = do
       activity <- sessionActivity record
-      if (activity >>= field "attached")==Just False then pure () else threadDelay 20000 >> awaitDetached record
+      if (activity >>= field "attached")==Just False then pure () else threadDelay 20000 >> awaitDetached
 
 data RuntimeCheckpoint = RuntimeCheckpoint
   { savedHub :: Value, savedPrimary :: AgentId

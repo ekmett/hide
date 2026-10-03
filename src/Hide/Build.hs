@@ -1,4 +1,10 @@
 {-# LANGUAGE OverloadedStrings #-}
+-- | Resolve build context and plan THC/GHC commands without executing them.
+--
+-- Source selection ignores labeled output windows. Saved targets are scoped to
+-- their working directory so changing projects does not reuse an unrelated target.
+-- Project GHC work goes through Cabal; loose-file work uses GHC/runghc. Process
+-- ownership and output collection belong to "Hide.BuildJobs" or consoles.
 module Hide.Build
   (Toolchain(..), BuildAction(..), BuildConfig(..), loadBuildConfig, isProject, resolveBuildRoot, buildSource, buildPlan, testPlan, buildConfigValue, parseBuildConfig) where
 
@@ -29,7 +35,7 @@ buildSource desktop = listToMaybe [filePath file | window<-windows desktop,
   Just doc<-[M.lookup (bufferId window) (buffers desktop)], documentLabel doc==Nothing,
   Just file<-[documentFile doc]]
 
--- The selected directory wins. Otherwise find the enclosing package for a file.
+-- | Resolve the selected sidebar/default/source context to an enclosing build root.
 resolveBuildRoot :: Desktop -> IO FilePath
 resolveBuildRoot desktop = do
   let fallback=fromMaybe (maybe (startingDirectory desktop) takeDirectory (buildSource desktop)) (defaultDirectory desktop)
@@ -45,6 +51,7 @@ isProject root = do
   entries<-either (const []) id <$> (try (listDirectory root) :: IO (Either IOException [FilePath]))
   pure ("cabal.project" `elem` entries || any ((==".cabal").takeExtension) entries)
 
+-- | Load toolchain settings, reusing the saved target only for its matching cwd.
 loadBuildConfig :: FilePath -> FilePath -> IO BuildConfig
 loadBuildConfig directory root = do
   loaded<-try (BS.readFile (directory </> "run.json")) :: IO (Either IOException BS.ByteString)
@@ -78,6 +85,7 @@ parseBuildConfig (command:target:thcRoot:runtime:rest) = do
     else Right (BuildConfig tool executable target thcRoot runtime args)
 parseBuildConfig _ = Left "Incomplete build target settings."
 
+-- | Construct executable/argument steps for compile, make or run; do not execute them.
 buildPlan :: BuildAction -> BuildConfig -> FilePath -> Maybe FilePath -> IO (Either Text [(FilePath,[String])])
 buildPlan _ config _ _
   | null (buildExecutable config) || any (elem '\0') (buildExecutable config:T.unpack (buildTarget config):T.unpack (buildTHCRoot config):T.unpack (buildRuntime config):buildArguments config) =
@@ -105,8 +113,7 @@ buildPlan action config root source = do
           Run -> [("runghc",["-f",exe,file]++args)]
       _ -> pure (Left "Choose a saved Haskell source file or a Cabal project.")
 
--- Cabal owns the test runner. THC currently exposes build/acquire/run, not a test
--- command, so never present a successful compile as a successful test run.
+-- | Plan a GHC/Cabal test run. THC has no configured test-runner plan.
 testPlan :: BuildConfig -> FilePath -> IO (Either Text [(FilePath,[String])])
 testPlan config root
   | buildToolchain config/=GHC = pure (Left "THC has no configured test runner. Select GHC to run Cabal tests.")

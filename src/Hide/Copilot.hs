@@ -1,7 +1,13 @@
 {-# LANGUAGE OverloadedStrings #-}
 -- SPDX-License-Identifier: BSD-3-Clause
--- | GitHub's official Copilot language-server protocol. All operations except
--- status polling belong to an owned background worker, never the desktop lock.
+-- | Copilot language-server transport and completion adaptation.
+--
+-- The adapter keeps one synchronized document and converts editor character
+-- positions to UTF-16. Synchronization batches and remembered document state are
+-- committed together before requests proceed. Feedback retains opaque provider
+-- items; authentication credentials remain with the language server, while the
+-- editor displays only validated device-flow information. All operations except
+-- status polling belong to one background owner, outside the desktop lock.
 module Hide.Copilot
   ( Copilot, withCopilot, completeCopilot, signInCopilot, finishSignInCopilot
   , signOutCopilot, feedbackCopilot, pollCopilotMessages
@@ -167,7 +173,8 @@ withCopilot launch root action = mask $ \restore -> do
 pollCopilotMessages :: Copilot -> IO [Text]
 pollCopilotMessages client=atomically $ do result<-readTVar (messages client); writeTVar (messages client) []; pure result
 
--- | Synchronize the current file incrementally, then request all alternatives.
+-- | Synchronize the current file, then request all alternatives. Changes replace
+-- the previous whole-document range rather than sending fine-grained edits.
 completeCopilot :: Copilot -> CompletionInput -> IO [Proposal]
 completeCopilot client input=do
   let path=inputPath input; text=inputText input; version=inputVersion input

@@ -1,4 +1,11 @@
 {-# LANGUAGE OverloadedStrings #-}
+-- | Adapt one ACP provider session to the agent hub driver interface.
+--
+-- A pump correlates protocol replies and publishes public updates; prompt/config
+-- operations and permission handling have separate serialized ownership. Native
+-- ACP file/terminal requests are disabled here in favor of the supplied MCP
+-- services. Uncertain steering or cancellation outcomes retire the connection
+-- rather than risk replaying input the provider may already have consumed.
 module Hide.AgentACP (ACPPermission(..), startACPDriver) where
 
 import Control.Applicative ((<|>))
@@ -22,10 +29,14 @@ import System.Timeout (timeout)
 import qualified Hide.ACP as A
 import Hide.AgentHub
 
+-- | A scrubbed permission display and bounded provider choices.
+-- The callback returns an offered option ID or cancellation.
 data ACPPermission = ACPPermission
   { permissionTitle :: Text, permissionDetails :: Text, permissionOptions :: [(Text,Text,Text)] }
   deriving (Eq,Show)
 
+-- | Negotiate initialize/new/fork/resume and validate the provider session
+-- before handing driver ownership to the hub.
 startACPDriver :: A.Launch -> [Value] -> Text -> (ACPPermission -> IO (Maybe Text)) -> StartProvider
 startACPDriver launch servers context permission request emit=safely $ mask $ \restore -> do
   unless (T.length context<=65536) (raise "Initial agent context exceeds 65536 characters.")

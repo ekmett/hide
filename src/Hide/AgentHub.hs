@@ -1,4 +1,11 @@
 {-# LANGUAGE OverloadedStrings #-}
+-- | Agent identities, relationships, message tickets and bounded history in STM.
+--
+-- Reservations enforce live limits before provider startup. Each agent has a
+-- worker that delivers queued prompts outside the state transaction. The host
+-- supplies authenticated actors; ancestry controls cancellation and termination.
+-- Recovery retains identities and history without replaying queues or implicitly
+-- starting providers. Public descriptions and private resume snapshots differ.
 module Hide.AgentHub
   ( AgentHub, AgentId(..), Actor(..), HubLimits(..), SpawnSpec(..), Context(..), Workspace(..)
   , AgentDriver(..), DriverEvent(..), StartProvider, StartRequest(..), PrivateSource(..), HubMessage(..)
@@ -29,6 +36,7 @@ import qualified Data.Text.Encoding as TE
 
 -- These identities are supplied by the host bridge, never decoded from tool arguments.
 newtype AgentId = AgentId { agentIdText :: Text } deriving (Eq,Ord,Show)
+-- | Host-authenticated author identity; never decode this from an agent tool argument.
 data Actor = Human | Agent AgentId deriving (Eq,Show)
 data HubLimits = HubLimits { totalActiveAgents :: Int, directSubagents :: Int } deriving (Eq,Show)
 data Context = Fresh | Fork AgentId deriving (Eq,Show)
@@ -50,6 +58,7 @@ data StartRequest = StartRequest
 data HubMessage = HubMessage
   { messageTicket :: Int, messageAuthor :: Actor, messageText :: Text, messageIsUserSeat :: Bool }
   deriving (Eq,Show)
+-- | Provider lifetime and delivery boundary, publishing typed events back to the hub.
 data AgentDriver = AgentDriver
   { driverDirectory :: FilePath, driverSessionKey :: Text, driverCapabilities :: Capabilities
   , driverConfigure :: [(Text,Text)] -> IO (Either Text Capabilities)
@@ -179,6 +188,8 @@ reserve (AgentHub _ _ ref) limits actor raw external=do
           _->Left "The source provider does not advertise live session forking."
       pure (spec,source)
 
+-- | Reserve and start an agent. This operation does not enqueue spawnTask;
+-- the caller must explicitly send its first message.
 spawnAgent :: AgentHub -> Actor -> SpawnSpec -> IO (Either Text AgentId)
 spawnAgent hub@(AgentHub readLimits launcher _) actor spec=mask $ \restore->do
   limits<-restore (safeCall (readLimits (spawnDirectory spec)))
@@ -418,6 +429,7 @@ childControl (AgentHub _ _ ref) ident kind validate action commit=mask $ \restor
               pure result
             _->pure (Left "Child operation ended or was cancelled.")) `finally` release
 
+-- | Queue a message with authenticated author and derived user-seat attribution.
 sendAgent :: AgentHub -> Actor -> AgentId -> Text -> IO (Either Text Int)
 sendAgent (AgentHub _ _ ref) actor ident body=atomically $ do
   state<-readTVar ref
@@ -439,6 +451,7 @@ sendAgent (AgentHub _ _ ref) actor ident body=atomically $ do
           unless (not (T.null (T.strip body)) && T.length body<=65536 && not (T.any (=='\0') body)) (Left "Message must contain 1–65536 characters without NUL.")
           pure entry
 
+-- | Wait for a ticket within a deadline without cancelling ongoing work on timeout.
 waitAgent :: AgentHub -> Actor -> AgentId -> Int -> Int -> IO (Either Text Value)
 waitAgent (AgentHub _ _ ref) actor ident ticket milliseconds
   | milliseconds<0 || milliseconds>60000=pure (Left "Wait timeout must be 0–60000 milliseconds.")
@@ -651,8 +664,8 @@ safeCall action=do
 stopQuiet :: AgentDriver -> IO ()
 stopQuiet driver=void (safeCall (driverStop driver >> pure (Right ())))
 
--- The Value returned here contains private resume keys. Store it only beside
--- the private session checkpoint; never return it through a public tool.
+-- | Capture private recovery state, including provider resume keys.
+-- Never return this snapshot through public tools.
 snapshotHub :: AgentHub -> IO Value
 snapshotHub (AgentHub _ _ ref)=do
   state<-readTVarIO ref
@@ -662,6 +675,7 @@ snapshotHub (AgentHub _ _ ref)=do
           "ended" .= (entryPhase entry==Ended),"sessionKey" .= entryKey entry,"capabilities" .= capabilitiesValue (entryCaps entry),"external" .= entryExternal entry,
           "nextTicket" .= entryNextTicket entry,"nextEvent" .= entryNextEvent entry,"dropped" .= entryDropped entry,"history" .= map eventValue (toList (entryHistory entry))]
 
+-- | Restore records without starting providers or replaying pending message queues.
 restoreHub :: HubLimits -> StartProvider -> Value -> IO (Either Text AgentHub)
 restoreHub limits _ _ | Left err<-checkedLimits limits=pure (Left err)
 restoreHub limits launcher value=case parseEither persisted value of

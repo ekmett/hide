@@ -1,4 +1,11 @@
 {-# LANGUAGE OverloadedStrings #-}
+-- | Own a captured build/run and publish prepared output snapshots.
+--
+-- A supervisor executes commands sequentially until failure. Bounded output events
+-- feed an aggregation worker, which prepares buffer measures and diagnostics before
+-- publishing one replaceable snapshot. The tick adopts at most one snapshot.
+-- Stop signals the supervisor; it retains ownership through process-tree cleanup
+-- and reader joins. Stdout retention is separate from stderr and command echoes.
 module Hide.BuildJobs (BuildJobs, withBuildJobs, startBuildJob, tickBuildJobs, stopBuildJob, buildJobStatus, buildJobStdout, parseBuildDiagnostic) where
 
 import Data.Aeson
@@ -33,10 +40,12 @@ data Snapshot = Snapshot Buffer [Diagnostic] (Text,Bool) (Maybe (Either Text Exi
 data Job = Job Int Text FilePath (IO ()) (Async ()) (TMVar Snapshot)
 data BuildJobs = BuildJobs (IORef (Maybe Job)) (IORef (Maybe (Int,Text,FilePath,Maybe (Either Text ExitCode)))) (IORef (Text,Bool))
 
+-- | Scope the captured-job service and its supervisor/aggregation workers.
 withBuildJobs :: (BuildJobs -> IO a) -> IO a
 withBuildJobs = bracket (BuildJobs <$> newIORef Nothing <*> newIORef Nothing <*> newIORef ("",False)) close
   where close (BuildJobs ref _ _)=readIORef ref >>= mapM_ (\(Job _ _ _ stop worker _) -> stop >> void (waitCatch worker))
 
+-- | Start a command sequence in its explicit working directory, using the single job slot.
 startBuildJob :: BuildJobs -> Text -> FilePath -> [(FilePath,[String])] -> Desktop -> IO Desktop
 startBuildJob (BuildJobs ref report stdoutReport) label root commands desktop = mask $ \restore -> do
   current<-readIORef ref
@@ -151,6 +160,7 @@ stopBuildJob (BuildJobs ref _ _) desktop = do
       stop
       pure desktop {status=label<>": Stopping…"}
 
+-- | Adopt the latest prepared output and diagnostics without replaying output history.
 tickBuildJobs :: BuildJobs -> Desktop -> IO Desktop
 tickBuildJobs (BuildJobs ref report stdoutReport) desktop = do
   current<-readIORef ref
@@ -220,7 +230,6 @@ buildJobStatus (BuildJobs ref report _)=do
       "exitCode" .= (case outcome of Just (Right ExitSuccess) -> Just (0::Int); Just (Right (ExitFailure code)) -> Just code; _ -> Nothing),
       "error" .= (case outcome of Just (Left err) -> Just err; _ -> Nothing)]))
 
--- Machine-readable test reports consume stdout only. Stderr and the command
--- echo still appear in the human output buffer, but cannot forge test points.
+-- | Read the retained stdout-only tail and its truncation flag.
 buildJobStdout :: BuildJobs -> IO (Text,Bool)
 buildJobStdout (BuildJobs _ _ output)=readIORef output

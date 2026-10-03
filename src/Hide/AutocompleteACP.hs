@@ -1,6 +1,12 @@
 {-# LANGUAGE OverloadedStrings #-}
--- | Private ACP autocomplete sessions. Providers suggest; only the editor's
--- explicit acceptance command can apply a returned proposal.
+-- | Persistent ACP side-chat restricted to structured completion proposals.
+--
+-- A serialized prompt owner shares an immutable current-file snapshot through a
+-- separate authenticated MCP submission slot. Only a matching structured proposal
+-- after end_turn becomes a returned preview; only editor acceptance applies it.
+-- Ordinary chat and hint turns are not parsed as edits. Native file,
+-- terminal and permission requests are denied. Cancellation drains the prompt or
+-- retires the connection before another prompt can use it.
 module Hide.AutocompleteACP
   ( ACPCompletion, withACPCompletion, completeACP, hintACP, feedbackACP, pollACPCompletionTranscript, completionTools, callCompletionTool ) where
 

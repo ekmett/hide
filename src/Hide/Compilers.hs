@@ -1,4 +1,11 @@
 {-# LANGUAGE OverloadedStrings #-}
+-- | Discover GHC installations and prepare exact debugger/compiler pairings.
+--
+-- GHCup discovery is offline and time bounded. Project compiler selection asks
+-- Cabal instead of parsing its configuration. Debug preparation canonicalizes the
+-- compiler, rechecks version/libdir and supplies matching environment variables.
+-- A missing adapter is distinct from a failed compiler probe so acquisition can
+-- be offered for the selected compiler.
 module Hide.Compilers
   (Compiler(..), installedCompilers, compilerInfo, nativeVersions, recognizedCompiler, debuggerCompiler, debuggerCompilerInfo) where
 
@@ -40,12 +47,13 @@ numericVersion value=case T.splitOn "." (T.pack value) of
   parts | length parts>=3 && all (\part -> not (T.null part) && T.all isDigit part) parts -> mapM (readMaybe . T.unpack) parts
   _ -> Nothing
 
+-- | Recognize compiler executable naming, not ABI compatibility.
 recognizedCompiler :: FilePath -> Bool
 recognizedCompiler path=name=="ghc" || maybe False (isJust . numericVersion . T.unpack) (T.stripPrefix "ghc-" name)
   where file=T.pack (takeFileName path)
         name=fromMaybe file (T.stripSuffix ".exe" file)
 
--- Call from a cancellable worker, never the desktop/event thread.
+-- | Probe installed compilers with bounded subprocesses; call from a cancellable worker.
 installedCompilers :: IO [Compiler]
 installedCompilers = fromMaybe [] <$> timeout 15000000 discoverInstalled
 
@@ -73,8 +81,7 @@ discoverInstalled = do
               pure (if exists then Just (Compiler version path) else Nothing)
             _ -> pure Nothing
 
--- Cabal owns project configuration (including imports and project.local).
--- Do not approximate its parser or infer compatibility from tested-with.
+-- | Resolve compiler information using Cabal for a project or a standalone executable.
 compilerInfo :: FilePath -> Bool -> FilePath -> IO (Either T.Text Compiler)
 compilerInfo root project command
   | not (recognizedCompiler command) = pure (Left "hdb uses its own GHC build; a custom compiler requires an explicit Adapter config.")
@@ -120,7 +127,9 @@ debuggerCompiler root project command = do
     Just found->Right found
     Nothing->Left ("No hdb-"<>compilerVersion compiler<>" or hdb executable found; install a matching debugger or use Adapter config.")
 
--- A missing adapter is a concrete acquisition opportunity, not a compiler error.
+-- | Prepare verified compiler details and discover an optional hdb executable.
+-- Its wrapper checks compiler ABI when launched.
+-- A missing adapter is a successful result with Nothing, not a compiler failure.
 debuggerCompilerInfo :: FilePath -> Bool -> FilePath -> IO (Either T.Text (Compiler,Maybe (FilePath,[(String,String)])))
 debuggerCompilerInfo root project command = do
   resolved<-compilerInfo root project command

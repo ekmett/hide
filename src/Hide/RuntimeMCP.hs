@@ -1,4 +1,10 @@
 {-# LANGUAGE OverloadedStrings #-}
+-- | Build/run and terminal tools backed by the editor's shared runtime services.
+--
+-- Agent commands use the same build-job and console owners as menus and ACP
+-- terminal requests. Captured builds occupy the single shared job slot; terminals
+-- have separate IDs and bounded retained output. Executables and argv are passed
+-- directly, while terminal input may itself execute shell commands.
 module Hide.RuntimeMCP (runtimeTools, runtimeTool, runtimeToolNames) where
 
 import Data.Aeson
@@ -21,6 +27,7 @@ import qualified Hide.BuildJobs as Jobs
 runtimeToolNames :: [T.Text]
 runtimeToolNames=["build_status","build_start","build_stop","terminal_list","terminal_start","terminal_output","terminal_input","terminal_stop"]
 
+-- | Schemas for build lifecycle and terminal creation, input, output and stopping.
 runtimeTools :: [Value]
 runtimeTools=
   [ tool "build_status" "Read active build and last completion, including output buffer ID and exit code. read_buffer reads its output." True [] []
@@ -43,7 +50,8 @@ runtimeTools=
       "inputSchema" .= object ["type" .= ("object"::T.Text),"properties" .= object [K.fromText key .= value | (key,value)<-props],"required" .= required,"additionalProperties" .= False],
       "annotations" .= object ["readOnlyHint" .= readOnly,"destructiveHint" .= not readOnly,"openWorldHint" .= not readOnly]]
 
--- These are the same services used by ACP terminal requests and the Run menu.
+-- | Dispatch against the conversation-owned build and console services.
+-- Builds require saved source buffers; launch planning can perform synchronous IO.
 runtimeTool :: ConversationState -> Desktop -> T.Text -> Value -> IO (Desktop,IO (Either T.Text Value))
 runtimeTool runtime d name args=case parseEither (withObject "arguments" pure) args of
   Left err -> done d (Left (T.pack err))

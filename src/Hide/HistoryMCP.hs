@@ -1,4 +1,10 @@
 {-# LANGUAGE OverloadedStrings #-}
+-- | Bounded undo previews and revision-checked history application for agents.
+--
+-- Previews describe the edits that undo/redo would apply and do not mutate the
+-- buffer. Application uses the normal edit path, keeps the user's window ordering
+-- and focus, and rejects private/read-only buffers or insufficient history before
+-- performing any steps. Undo changes memory; it does not save files.
 module Hide.HistoryMCP (historyTools, historyTool, historyToolNames) where
 
 import Control.Monad (unless)
@@ -17,6 +23,7 @@ import Hide.Model
 
 historyToolNames :: [T.Text]
 historyToolNames=["editor_history","editor_undo"]
+-- | Schemas for diff-style history previews and revision-guarded undo/redo.
 historyTools :: [Value]
 historyTools=[describe "editor_history" True "Inspect undo/redo entries as bounded diff-style previews, newest first. Steps describe changes that would be applied in that direction. Previews do not modify the buffer." ["bufferId"] [("offset",integer),("limit",integer)],
   describe "editor_undo" False "Apply undo or redo steps to a live buffer without saving. Requires its current revision, fails atomically if too few steps exist." ["bufferId","revision"] [("revision",integer),("steps",integer)]]
@@ -27,6 +34,8 @@ historyTools=[describe "editor_history" True "Inspect undo/redo entries as bound
       "inputSchema" .= object ["type" .= ("object"::T.Text),"properties" .= object (["bufferId" .= integer,"direction" .= object ["type" .= ("string"::T.Text),"enum" .= (["undo","redo"]::[T.Text])]]++[K.fromText k .= v | (k,v)<-props]),"required" .= required,"additionalProperties" .= False],
       "annotations" .= object ["readOnlyHint" .= readonly,"destructiveHint" .= not readonly,"openWorldHint" .= False]]
 
+-- | Inspect a history page or apply a checked number of steps to a live buffer.
+-- The returned continuation carries the reply; mutations occur in the initial phase.
 historyTool :: Desktop -> T.Text -> Value -> IO (Desktop,IO (Either T.Text Value))
 historyTool d name args=pure $ case parseEither parse args of
   Left err -> (d,pure (Left (T.pack err)))

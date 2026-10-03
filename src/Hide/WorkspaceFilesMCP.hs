@@ -1,4 +1,11 @@
 {-# LANGUAGE OverloadedStrings #-}
+-- | Workspace search, filesystem operations and exact buffer patches for agents.
+--
+-- Search overlays eligible open buffers on disk candidates and reports bounded
+-- results. Filesystem mutations validate canonical containment, exclude repository
+-- metadata/private paths, and reject dirty affected buffers. Unified diffs require
+-- exact context and coordinates: no fuzzy matching or external patch command.
+-- Search is deferred; file mutations and buffer adoption run in the initial phase.
 module Hide.WorkspaceFilesMCP (fileTools, fileToolNames, fileTool, applyUnifiedDiff, applyPatch) where
 
 import Control.Exception (IOException, bracket, try)
@@ -54,6 +61,8 @@ type Reply = (Desktop,IO (Either Text Value))
 
 data Request = Search Text Bool Int Int | Patch Int Int Text | Files Text FilePath (Maybe FilePath)
 
+-- | Dispatch a validated workspace request; execute its returned search continuation
+-- outside the desktop lock. Filesystem operations may perform synchronous IO.
 fileTool :: Core -> Desktop -> Text -> Value -> IO Reply
 fileTool core desktop name args=case parseEither parse args of
   Left err -> immediate desktop (Left (T.pack err))
@@ -173,6 +182,8 @@ fileOperation core desktop operation raw target=do
   pure (refreshed,Right (object ["operation" .= operation,"path" .= path,"to" .= target,"savedBuffers" .= False]))
   where rejectPrivate path=when (protectedPathParent desktop path) (ioError (userError "This path contains private editor configuration or session data"))
 
+-- | Apply an exact diff to a public editable buffer at the expected revision.
+-- Add one undo step, rebase window selections, and leave the file unsaved.
 applyPatch :: Desktop -> Int -> Int -> Text -> Either Text Desktop
 applyPatch desktop bid expected patch=do
   doc<-maybe (Left "Unknown bufferId") Right (M.lookup bid (buffers desktop))
@@ -186,8 +197,9 @@ applyPatch desktop bid expected patch=do
   pure desktop {buffers=M.insert bid (restyle doc {documentBuffer=changed}) (buffers desktop),
     windows=map (\w -> if bufferId w==bid then w {selection=let Selection a c=selection w in Selection (rebase a) (rebase c),windowHexLow=False} else w) (windows desktop)}
 
--- The counts and both line positions are checked; no fuzzy matching, filesystem
--- patch utility, or partial application can change a buffer after bad context.
+-- | Validate and apply a single-file unified diff with exact old/new line counts.
+-- Return new text and original half-open character edits; reject all bad context
+-- before changing any caller-owned state.
 applyUnifiedDiff :: Text -> Text -> Either Text (Text,[(Int,Int,Text)])
 applyUnifiedDiff original patch=do
   unless (T.length patch<=1048576 && not (T.any (=='\0') patch)) (Left "Diff exceeds 1 MiB characters or contains NUL")

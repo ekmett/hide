@@ -28,6 +28,25 @@ Optional components add checks for browser transport, rendering assets and
 embedded terminals. A passing model check and an interactive frontend check
 establish different things; run the relevant frontend too.
 
+## Source documentation
+
+Each `Hide.*` module starts with an overview of its role, ownership and notable
+control flow. Public API Haddocks describe caller obligations: coordinate units,
+resource lifetime, worker/adoption boundaries, privacy checks and failure behavior.
+Keep those contracts beside the owning operation when changing it; avoid repeating
+the type signature in prose. The [architecture guide](architecture.md) connects
+the subsystems.
+
+Generate the initial API reference and linked source with:
+
+```sh
+cabal haddock lib:hide --haddock-html --haddock-hyperlink-source
+```
+
+Coverage is preliminary, especially the model's internal helpers and native FFI
+exports. A documentation build checks parsing and links, not the truth of the
+contracts: review those against implementation and the relevant behavioral tests.
+
 ## Native Windows terminals
 
 With the [pinned Ghostty installation](install.md#embedded-terminal) on `PATH`,

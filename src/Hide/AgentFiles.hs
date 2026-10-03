@@ -1,4 +1,10 @@
 {-# LANGUAGE OverloadedStrings #-}
+-- | Immutable file/context capture and checked ACP writes.
+--
+-- Eligible open source buffers override bounded UTF-8 disk reads. Stable buffer
+-- and file identities let worker results be invalidated without comparing source
+-- text during routine adoption. Explicit approved writes separately verify the
+-- captured editor/disk baselines and use checked saving; they preserve Undo.
 module Hide.AgentFiles (Snapshot, captureFile, snapshotPath, snapshotText, acceptWrite, SourceIdentity, sourceIdentity, sourceSnapshots, contextText) where
 
 import Control.Exception (IOException, try, evaluate)
@@ -19,6 +25,7 @@ import Hide.Files
 import Hide.GuestAccess (protectedPath, protectedBuffer)
 import Hide.Model
 
+-- | Captured text with its canonical path, disk baseline and optional live-buffer version.
 data Snapshot = Snapshot FileState (Maybe (Int,Int)) Text deriving (Eq,Show)
 snapshotPath :: Snapshot -> FilePath
 snapshotPath (Snapshot file _ _) = filePath file
@@ -32,8 +39,8 @@ fileLimit = 16*1024*1024
 textTooLarge :: Text -> Bool
 textTooLarge text = T.length text>fileLimit || BS.length (TE.encodeUtf8 text)>fileLimit
 
--- The stamp deliberately compares identity, not full text/disk baselines. A
--- replaced-but-equal buffer conservatively requires a fresh capture as well.
+-- | Shallow immutable buffer/file identities plus revision for stale-work checks.
+-- Replaced-but-equal values conservatively require a fresh capture.
 data SourceIdentity = SourceIdentity !Int !Int (StableName Buffer) (StableName FileState) deriving Eq
 
 sourceIdentity :: FilePath -> Desktop -> IO (Maybe SourceIdentity)
@@ -54,8 +61,8 @@ publicSources :: Desktop -> [(Int,FileState,Buffer)]
 publicSources d = [(bid,file,b) | (bid,doc)<-M.toAscList (buffers d),not (protectedBuffer d bid),
   documentLabel doc==Nothing,textBuffer (documentBuffer doc),Just file<-[documentFile doc],let b=documentBuffer doc]
 
--- ACP paths are absolute and bounded by the session's canonical project root.
--- Resolving both endpoints also rejects symlinks which escape that root.
+-- | Capture an absolute canonical project-contained file, excluding private paths
+-- and byte buffers. A missing disk file is represented by empty text.
 captureFile :: FilePath -> FilePath -> Desktop -> IO (Either Text Snapshot)
 captureFile root path d = do
   result <- try $ do
@@ -85,8 +92,8 @@ captureFile root path d = do
     pure captured
   pure (either (Left . T.pack . show) Right (result :: Either IOException Snapshot))
 
--- A successful protocol write is also a disk write. Preserve the previous editor
--- contents in the ordinary undo tree and use the normal checked atomic save.
+-- | Validate an approved write against captured editor and disk state, then save it.
+-- This explicit write boundary can compare full contents; it is not a redraw check.
 acceptWrite :: Snapshot -> Text -> Desktop -> IO (Either Text Desktop)
 acceptWrite (Snapshot file expected oldText) text d
   | protectedPath d (filePath file) = pure (Left "Agent authority files require human input.")

@@ -1,4 +1,11 @@
 {-# LANGUAGE OverloadedStrings #-}
+-- | Repository inspection, exact review snapshots and checked commits.
+--
+-- Git receives literal paths with routing environment overrides removed; external
+-- diff/textconv helpers are disabled. Privacy filtering classifies rename/copy
+-- lineage before selection. Reviews retain HEAD, index and working-file identity
+-- so a commit can reject changed evidence. Normal hooks still run and their tree
+-- changes are reported separately from the reviewed staged tree.
 module Hide.Git
   ( RepoStatus(..), repositoryStatus, repositoryDiff, repositoryDiffFiltered, repositoryDiffFilteredAt
   , GitReview(..), reviewRepository, commitReview
@@ -87,8 +94,7 @@ repositoryDiff path selected = result $ do
 repositoryDiffFiltered :: FilePath -> (FilePath -> Bool) -> IO (Either Text (Text,Int))
 repositoryDiffFiltered path=repositoryDiffFilteredAt path Nothing
 
--- Selection narrows the output only after whole-repository private lineage is
--- classified, so selecting an innocent-looking rename destination is not a bypass.
+-- | Filter whole-repository rename/copy lineage before selecting paths for a diff.
 repositoryDiffFilteredAt :: FilePath -> Maybe FilePath -> (FilePath -> Bool) -> IO (Either Text (Text,Int))
 repositoryDiffFilteredAt path selected excluded=do
   prepared<-result $ do
@@ -180,8 +186,8 @@ checkIntegrationState root expected=result $ do
     active<-doesPathExist (root </> T.unpack path)
     when active (failGit "Finish the current Git operation first.")
 
--- Examine both sides of incoming path changes without rendering their content.
--- Reject special entries conservatively rather than following newly added links.
+-- | Preflight incoming integration for protected/unsupported paths and index state.
+-- This check does not itself mutate the repository.
 checkIncomingChanges :: FilePath -> Text -> Text -> (FilePath -> Bool) -> IO (Either Text ())
 checkIncomingChanges root expected target excluded=result $ do
   checkIntegrationState root expected >>= either failGit pure
@@ -212,6 +218,7 @@ checkIncomingChanges root expected target excluded=result $ do
 reviewRepository :: FilePath -> IO (Either Text GitReview)
 reviewRepository=reviewWith (const (pure ()))
 
+-- | Capture a bounded complete review with HEAD, index and working-file evidence.
 reviewRepositoryChecked :: FilePath -> (FilePath -> Bool) -> IO (Either Text GitReview)
 reviewRepositoryChecked path excluded=do
   reviewed<-reviewWith (checkChanges excluded) path
@@ -241,6 +248,8 @@ commitReview review message=do
       Just False -> "Committed; Git hooks changed the reviewed tree. Inspect HEAD.\n"
       Nothing -> "Committed; the reviewed tree could not be verified. Inspect HEAD.\n")<>commitOutput outcome)
 
+-- | Revalidate the review and stage saved changes repository-wide before committing.
+-- Normal hooks run; report whether the final committed tree matches staged evidence.
 commitReviewChecked :: GitReview -> Text -> (FilePath -> Bool) -> IO (Either Text GitCommit)
 commitReviewChecked review message excluded=commitWith (checkChanges excluded) review message
 

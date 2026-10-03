@@ -1,4 +1,15 @@
 {-# LANGUAGE OverloadedStrings #-}
+-- | Shared desktop state, geometry and pure input transitions.
+--
+-- Documents own buffers; windows refer to documents by ID and keep independent
+-- selection, scroll and review state. The same rectangles drive painting and hit
+-- testing. Commands and input return ordered effects for the session interpreter,
+-- so filesystem and protocol services can remain outside the pure transition.
+--
+-- Docking and neighboring-window geometry are handled here, as are modal focus,
+-- gesture ownership and source/chat editing. Derived equality exists for tests
+-- and explicit data operations; never use Desktop, Document or Buffer equality
+-- as an interaction or redraw gate. Cached text work belongs to its worker.
 module Hide.Model where
 
 import qualified Data.Bifunctor as Bifunctor
@@ -25,11 +36,12 @@ import Hide.Buffer
 import Hide.BufferView
 import Hide.Files (FileState(..))
 
--- The same rectangles drive drawing and mouse dispatch.
+-- | A zero-based character-cell rectangle with exclusive right and bottom edges.
 data Rect = Rect { left :: Int, top :: Int, width :: Int, height :: Int } deriving (Eq,Show)
 inside :: Rect -> Int -> Int -> Bool
 inside (Rect x y w h) a b = a >= x && a < x+w && b >= y && b < y+h
 
+-- | Shared buffer and prepared presentation metadata; split windows reference its ID.
 data Document = Document { documentBuffer :: Buffer, documentFile :: Maybe FileState, documentLabel :: Maybe Text, documentHighlight :: [(Char,Style)], documentWidth :: Int, documentCursorVisible :: Bool, documentSuggestedName :: Maybe FilePath, documentSourceRows :: Maybe (Vec.Vector [(Char,Style)]), documentShellBlocks :: [(Int,Int,Text,Text)], documentLinks :: [(Int,Int,Text)], documentMarkdownPath :: Maybe FilePath } deriving (Eq,Show)
 -- Source colors are populated by the session worker, never forced by input or drawing.
 newDocument :: Buffer -> Maybe FileState -> Document
@@ -67,6 +79,7 @@ data ReviewSelection = ReviewSelection
   { reviewRevision :: Int, reviewCounts :: (Int,Int), reviewSide :: ReviewSide, reviewRange :: Selection
   } deriving (Eq,Show)
 
+-- | A view of one document, with its own geometry, selection and scroll position.
 data Window = Window
   { windowId :: Int, bufferId :: Int, bounds :: Rect, selection :: Selection
   , scrollRow :: Int, scrollColumn :: Int, restoredBounds :: Maybe Rect
@@ -95,6 +108,7 @@ data ContextKind = ToolchainContext [(Text,Command)] | LinkContext Command | She
 data LanguageAction = TypeInfo | FindDefinition | Completions | ShowProblems | RestartLanguage | RenameAt Text | RequestCodeActions | ApplyCodeAction Int Int Text deriving (Eq,Show)
 data Completion = Completion Text [(Int,Int,Text)] deriving (Eq,Show)
 data ProjectAction = LoadProject | ProjectPage Int Int | ProjectDetails Int Int deriving (Eq,Show)
+-- | Ordered requests for the host interpreter, produced alongside a new desktop.
 data Effect = FollowLink (Maybe FilePath) Text | EnvironmentAction Text [Text] | AutocompleteAction Text [Text] | SaveMacKeySymbols Bool | SaveChatSubmit ChatSubmit | SaveBufferViewDefault BufferView | ProjectRequest ProjectAction | DownloadDocument Int | ReadBrowserClipboard | WriteBrowserClipboard Text | LanguageRequest LanguageAction | RunGit GitAction | ReadMergeBranches | JumpTo FilePath Int Int | ReadPath FilePath | BrowsePath FilePath Text | BrowseDirectories FilePath | ChangeDirectory FilePath | OpenChoice FilePath Text Text | ReadTree FilePath | ExpandTree Int | ReadHelp | RefreshGit FilePath | ReadGitDiff | AskGitCommit | WriteGitCommit Text | SaveDocument Int (Maybe FilePath) (Maybe Command) | ReviewExternal | ResolveConflict Conflict ConflictAction | AgentAction Text [Text] | PermissionAction Text [Text] | DebugAction Text [Text] | SetScreenMode Int | Exit deriving (Eq,Show)
 data Field = Input Text Text Int | ComboBox Text [Text] Int (Maybe Int) | CheckBox Text Bool | Radio Text [Text] Int | ListBox Text [Text] Int | FileList [Entry] Int
   | ReadOnly Text Text
@@ -144,8 +158,8 @@ data ConversationView = ConversationView
   , conversationScroll :: (Int,Int), conversationReplySelection :: Selection
   } deriving (Eq,Show)
 
--- Structural Eq exists only for test assertions. Runtime change detection must
--- never compare Desktops: use explicit metadata and immutable payload identities.
+-- | Session UI state and references to immutable document payloads.
+-- This record is not a cheap equality key; use the dedicated rendering projection.
 data Desktop = Desktop
   { screenSize :: (Int,Int), windows :: [Window], buffers :: M.Map Int Document
   , nextId :: Int, menu :: Maybe (Int,Int), dialog :: Maybe Dialog, drag :: Maybe Drag
@@ -698,6 +712,7 @@ message title lines' d = d {dialog = Just (Dialog title Information [] 0 ["OK"] 
 prompt :: Text -> Purpose -> [Field] -> Desktop -> Desktop
 prompt title p fs d = d {dialog = Just (Dialog title p fs 0 ["OK","Cancel"] []), menu = Nothing, drag = Nothing,dragOriginal=Nothing}
 
+-- | Apply a semantic editor command and return any required host effects.
 runCommand :: Command -> Desktop -> (Desktop,[Effect])
 runCommand cmd source | browserFrontend source, cmd `elem` [Copy,Cut,CopyAllMessages,CopyLocation] =
   let (next,requests)=runCommand cmd source {browserFrontend=False}
@@ -1045,7 +1060,7 @@ buttonMnemonics dg = snd (mapAccumL choose [] (buttons dg))
     choose used name = let chosen=find (\c -> isAlphaNum c && c `notElem` used) (T.unpack (T.toLower name))
                       in (maybe used (:used) chosen,chosen)
 
--- A screen-mode change scales the desktop layout to use the new row count.
+-- | Resize the desktop and adjust windows using their edge attachment rules.
 resizeScreenMode :: (Int,Int) -> Desktop -> Desktop
 resizeScreenMode (sw,sh) d = layoutBottomWindows (ensureVisibleAfterLayout d (clampHexScroll d resized {windows=map stretch (windows d)}))
   where
@@ -1058,6 +1073,8 @@ resizeScreenMode (sw,sh) d = layoutBottomWindows (ensureVisibleAfterLayout d (cl
     stretchRect (Rect l t w h) = fitWindow resized (Rect (x l) (y t) (x (l+w)-x l) (y (t+h)-y t))
     stretch w = w {bounds=stretchRect (bounds w),restoredBounds=fmap stretchRect (restoredBounds w)}
 
+-- | Dispatch a Vty event through modal, gesture and focused-view handling.
+-- The caller must interpret returned effects in order.
 handleEvent :: V.Event -> Desktop -> (Desktop,[Effect])
 -- Fresh status clicks dispatch before invalidating a proposal. Captured drags
 -- keep their original owner and unmodified coordinates, even outside its window.

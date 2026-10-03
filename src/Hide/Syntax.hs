@@ -1,4 +1,10 @@
 {-# LANGUAGE OverloadedStrings #-}
+-- | Source token styles and presentation annotations shared by renderers.
+--
+-- Skylighting supplies language grammars; this module maps token classes to editor
+-- styles. A tokenizer result is accepted only when it preserves the original
+-- characters exactly. Link and bubble annotations remain in the styled stream
+-- so later layout can retain interaction metadata without reparsing text.
 module Hide.Syntax (Style(..), highlight, highlightFor, bubbleTile, linkSpans) where
 
 import Data.List (intercalate)
@@ -9,13 +15,14 @@ import qualified Data.Text as T
 import qualified Skylighting as S
 import System.FilePath (takeFileName)
 
+-- | Token color intent plus nested prose, link, bubble or terminal annotations.
 data Style = LinkStyle T.Text Style | Plain | Heading Int | CodeStyle Bool Style | ProseStyle Style | Keyword | Comment | Literal | Number | Constructor | Pragma | BubbleStyle Bool Style | BubbleText Int Bool Style | TerminalStyle Word32 Word32 Word32 deriving (Eq,Show)
 
 highlight :: T.Text -> [(Char,Style)]
 highlight = highlightFor "Main.hs"
 
--- Language rules come entirely from Skylighting's maintained KDE definitions.
--- Only their token categories are mapped to the editor's palette here.
+-- | Choose a grammar by filename, tokenize, and preserve exact source positions.
+-- Unknown grammars, tokenizer failure or normalized output fall back to plain text.
 highlightFor :: FilePath -> T.Text -> [(Char,Style)]
 highlightFor path source = case S.syntaxesByFilename S.defaultSyntaxMap (takeFileName path) of
   syntax:_ -> case S.tokenize (S.TokenizerConfig S.defaultSyntaxMap False) syntax source of
@@ -40,14 +47,15 @@ highlightFor path source = case S.syntaxesByFilename S.defaultSyntaxMap (takeFil
       S.PreprocessorTok -> Pragma; S.ExtensionTok -> Pragma
       _ -> Plain
 
--- Top-left/right, bottom-left/right, single-row caps, left/right tails.
+-- | Choose a private graphical tile or terminal block-character fallback by tile index.
 bubbleTile :: Bool -> Int -> Char
 bubbleTile graphical n
   | n<0 || n>7 = ' '
   | graphical = chr (0xe000+n)
   | otherwise = "▟▙▜▛▐▌◥◤" !! n
 
--- Metadata is collected by Markdown/conversation layout, never by the renderer.
+-- | Collect half-open character-offset spans from nested link annotations.
+-- Compute during layout, not on each paint.
 linkSpans :: [(Char,Style)] -> [(Int,Int,T.Text)]
 linkSpans = reverse . snd . List.foldl' collect (0,[])
   where

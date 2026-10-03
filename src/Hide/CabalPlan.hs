@@ -1,4 +1,11 @@
 {-# LANGUAGE OverloadedStrings #-}
+-- | Bounded, privacy-filtered inspection of an existing Cabal plan.json.
+--
+-- This module never invokes Cabal. It prioritizes local units and limits file,
+-- row and encoded-response sizes. Source paths must remain in the workspace and
+-- pass lexical/canonical privacy checks. Freshness can be stale or unknown;
+-- unchanged timestamps are not evidence that a plan is current. Raw configuration
+-- and repository credentials are not part of the returned plan view.
 module Hide.CabalPlan (cabalPlan, publicProjectPath) where
 
 import Control.Monad (unless, forM, filterM)
@@ -24,8 +31,7 @@ import Hide.Files (filePath)
 import Hide.GuestAccess (protectedPath, privateDocument)
 import Hide.Model
 
--- Only Cabal's canonical, already-generated plan is consulted. No repository
--- URLs, compiler arguments, flags, environment or raw parse errors are returned.
+-- | Read and sanitize the already-generated plan with bounded status and truncation metadata.
 cabalPlan :: Desktop -> FilePath -> IO Value
 cabalPlan desktop root=do
   attempted<-tryIOError $ do
@@ -54,7 +60,7 @@ cabalPlan desktop root=do
                   pure (object (fields++["sourceRoot" .= relativeSource]),components,safe)) validUnits
                 freshness<-planFreshness desktop root modified (mapMaybe (\(_,_,source)->source) normalized)
                 let omitted=length inspectedRows-length validUnits
-                    metadata=[key .= (fromMaybe Nothing (parseMaybe (\_ -> optionalPlanText source header) Null))
+                    metadata=[key .= (fromMaybe Nothing (parseMaybe (optionalPlanText source) header))
                       | (key,source)<-[("compilerId","compiler-id"),("cabalVersion","cabal-version"),("os","os"),("arch","arch")]]
                     result selected=object (metadata++
                       ["status" .= ("available"::Text),"path" .= relative,"provenance" .= ("Cabal install-plan"::Text),
@@ -69,8 +75,8 @@ cabalPlan desktop root=do
                 pure (bounded normalized)
   pure (either (const (object ["status" .= ("unavailable"::Text)])) id attempted)
 
--- Plan paths may be absolute or relative, but output source roots remain inside
--- this workspace. Check both spellings so symlinks cannot hide private inputs.
+-- | Resolve a source path inside the supplied canonical workspace root and
+-- reject private paths before exposing it.
 publicProjectPath :: Desktop -> FilePath -> FilePath -> IO (Maybe FilePath)
 publicProjectPath desktop root raw
   | null raw || length raw>32768 || any (< ' ') raw || protectedPath desktop raw=pure Nothing

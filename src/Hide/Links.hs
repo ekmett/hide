@@ -1,4 +1,10 @@
 {-# LANGUAGE OverloadedStrings #-}
+-- | Resolve document links on the session host and external opens on the client.
+--
+-- Markdown loading, layout and indexing can be prepared by a worker and then
+-- installed as an immutable document. External resources travel as HTTP(S) URLs
+-- or bounded MIME-tagged bytes, never a remote filesystem path. Native openers
+-- receive argument vectors; their process exit is reaped asynchronously.
 module Hide.Links (followLink, prepareLink, applyLink, openResource, validWebURL) where
 
 import Control.Concurrent (forkIO)
@@ -25,6 +31,7 @@ import Hide.LSP (uriFilePath)
 import Hide.Markdown (renderMarkdownWithShellBlocks)
 import Hide.Model
 
+-- | Accept control-free absolute HTTP(S) URLs with a nonempty host.
 validWebURL :: Text -> Bool
 validWebURL text=not (T.any (<' ') text) && case parseURIReference (T.unpack text) of
   Just uri -> uriScheme uri `elem` ["http:","https:"] && maybe False (not . null . uriRegName) (uriAuthority uri)
@@ -34,13 +41,15 @@ validWebURL text=not (T.any (<' ') text) && case parseURIReference (T.unpack tex
 -- frontend: an HTTP(S) URL, or bounded, typed image/PDF bytes (never a host path).
 data LinkResult = LinkDocument Document Int FilePath | LinkExternal Text (Maybe Value)
 
+-- | Synchronous convenience composition of preparation and adoption.
+-- Interactive callers should separate the worker phase with prepareLink/applyLink.
 followLink :: Bool -> Desktop -> Maybe FilePath -> Text -> IO (Desktop,Maybe Value)
 followLink stream d origin target=do
   prepared<-prepareLink stream (max 20 (min 76 (fst (screenSize d)-treeWidthOf d-4))) (startingDirectory d) origin target
   pure (applyLink prepared d)
 
--- The session worker finishes I/O, layout, buffer construction and link indexing
--- before publishing. Applying the result only installs immutable payloads.
+-- | Resolve and prepare a link outside the desktop lock. With streaming enabled,
+-- return external resources as client packets; otherwise invoke the local opener.
 prepareLink :: Bool -> Int -> FilePath -> Maybe FilePath -> Text -> IO LinkResult
 prepareLink stream columns directory origin target=do
   result<-try run
@@ -89,6 +98,7 @@ prepareLink stream columns directory origin target=do
     slug=T.intercalate "-" . T.words . T.filter (\c->isAlphaNum c || c==' ' || c=='-' || c=='_') . T.toLower
     splitStyled chars=let (line,rest)=break ((=='\n').fst) chars in line:case rest of []->[]; _:more->splitStyled more
 
+-- | Install a prepared document or status notice, returning an optional client packet.
 applyLink :: LinkResult -> Desktop -> (Desktop,Maybe Value)
 applyLink (LinkExternal notice packet) d=(d {status=notice},packet)
 applyLink (LinkDocument doc row path) d=
@@ -120,6 +130,9 @@ launch target=do
   (_,_,_,process)<-createProcess command {std_in=NoStream,std_out=NoStream,std_err=NoStream}
   void (forkIO (void (waitForProcess process)))
 
+-- | Validate a client resource packet and launch the OS opener.
+-- File bytes are bounded and written to a temporary file; success means launch,
+-- not confirmation that another application displayed the resource.
 openResource :: Value -> IO (Either Text ())
 openResource value=case parseEither parse value of
   Left _->pure (Left "Invalid external link response.")

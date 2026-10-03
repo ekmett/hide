@@ -1,4 +1,10 @@
 {-# LANGUAGE OverloadedStrings #-}
+-- | Agent input and display settings through the ordinary model input path.
+--
+-- The host attributes input to the agent and brackets a batch with an isolated
+-- clipboard. Events apply sequentially, not transactionally; refusal stops the
+-- remaining batch. Human authority controls remain protected even when display
+-- settings or ordinary editor actions are permitted.
 module Hide.ControlMCP (controlTools, controlToolNames, controlTool) where
 import Control.Monad (unless,foldM)
 import Data.Aeson
@@ -14,6 +20,7 @@ import Hide.Frontend (modeSize)
 
 controlToolNames :: [T.Text]
 controlToolNames=["editor_input","editor_settings"]
+-- | Schemas for agent input and the permitted display-settings subset.
 controlTools :: [Value]
 controlTools=
   [object ["name" .= ("editor_input"::T.Text),"description" .= ("Operate the editor using up to 64 mouse/key/paste events through its normal input path. Coordinates are 0-based character cells. Mouse actions: down/up/move/wheel-up/wheel-down; button0 left,2 right. Keys include characters, Enter, Escape, Tab, ArrowUp/Down/Left/Right, F1..F24, Home/End/PageUp/PageDown/Backspace/Delete/Insert. mods is an array of ctrl/alt/shift. Events may edit, save or run commands; applied sequentially, not transactionally. Conversation input, agent settings, approvals and Streamer mode require human input. Copy/paste uses an isolated clipboard for this batch, never the human clipboard."::T.Text),
@@ -22,6 +29,8 @@ controlTools=
     "inputSchema" .= object ["type" .= ("object"::T.Text),"additionalProperties" .= False,"properties" .= object ["settings" .= object ["type" .= ("object"::T.Text)],"defaults" .= object ["type" .= ("object"::T.Text)]]],"annotations" .= annotations False]]
   where annotations readonly=object ["readOnlyHint" .= readonly,"destructiveHint" .= not readonly,"openWorldHint" .= not readonly]
 
+-- | Dispatch validated settings or at most 64 input events under desktop serialization.
+-- Earlier accepted events remain applied if a later event is denied.
 controlTool :: (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> T.Text -> Value -> IO (Desktop,IO (Either T.Text Value))
 controlTool apply d name args=case parseEither parse args of
   Left err -> pure (d,pure (Left (T.pack err)))

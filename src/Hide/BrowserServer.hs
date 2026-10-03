@@ -1,4 +1,10 @@
 {-# LANGUAGE OverloadedStrings, ScopedTypeVariables #-}
+-- | Loopback HTTP/WebSocket host shared by browser frontends.
+--
+-- An unpredictable URL path, exact Host/Origin checks and a single-viewer slot
+-- restrict attachment. This is local capability-based access, not user-account
+-- authentication. The server scopes listener and viewer ownership and applies
+-- bounded WebSocket messages and restrictive asset response headers.
 module Hide.BrowserServer (serveBrowser, allowedOrigin) where
 import Control.Concurrent.Async (withAsync, wait, race_)
 import Control.Concurrent.MVar
@@ -20,10 +26,12 @@ import System.Info (os)
 import System.IO (withBinaryFile, IOMode(ReadMode), hPutStrLn, stderr)
 import System.Process (callProcess)
 
+-- | Require exact expected Host and HTTP Origin; missing Origin is rejected.
 allowedOrigin :: BS.ByteString -> BS.ByteString -> Maybe BS.ByteString -> Bool
 allowedOrigin expectedHost host origin = host==expectedHost && origin==Just ("http://"<>expectedHost)
 
--- Local and SSH-backed browsers share authentication, assets and one-viewer policy.
+-- | Own the loopback listener and bracket the single viewer slot.
+-- Return when the completion signal is consumed or the server terminates.
 serveBrowser :: MVar () -> (WS.Connection -> IO ()) -> IO ()
 serveBrowser done session = do
   html<-getDataFileName "assets/web/index.html" >>= BL.readFile

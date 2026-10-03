@@ -1,3 +1,9 @@
+-- | Pure launch-option selection and the shared native event encoding.
+--
+-- Explicit options override environment values. Native key codes and modifier bits
+-- map to the editor input model, including selected macOS Command bindings. SSH
+-- path recognition distinguishes scp-style targets from drive-letter and explicitly
+-- relative local paths; it is not a shell command parser.
 module Hide.Frontend (Backend(..), chooseBackend, chooseScale, parseWindowSize, parseScreenMode, modeSize, modeHeight, parseRemoteTarget, decodeKey, zoomDirection) where
 import Data.Bits ((.&.))
 import Data.Char (chr, isDigit)
@@ -19,6 +25,7 @@ modeSize mode = (80, if mode == 259 then 50 else 25)
 modeHeight :: Int -> Int
 modeHeight mode = if mode == 259 then 8 else 16
 
+-- | Choose the explicit frontend before considering an environment/default value.
 chooseBackend :: Maybe String -> [Backend] -> Either String Backend
 chooseBackend env explicit = case nub explicit of
   [backend] -> Right backend
@@ -34,7 +41,7 @@ chooseBackend env explicit = case nub explicit of
     Just _ -> Left "THC_EDIT_BACKEND must be terminal, auto, metal, vulkan, web or remote."
   _ -> Left "Choose only one of --terminal, --window, --metal, --vulkan, --web or --remote."
 
--- Stable, small ABI shared with cbits/window.c; no SDL structure layout in Haskell.
+-- | Decode native scalar/special-key codes and modifier bits into editor input.
 decodeKey :: Int -> Int -> Maybe V.Event
 decodeKey key mask = fmap (`V.EvKey` mods) decoded
   where
@@ -54,7 +61,8 @@ parseWindowSize value = case break (== 'x') value of
               cols >= 40, cols <= 512, rows >= 12, rows <= 256 -> Right (cols,rows)
   _ -> Left "--size needs COLSxROWS (40..512 columns, 12..256 rows), e.g. 80x25."
 
--- Explicit flags override the environment, including an invalid environment value.
+-- | Choose explicit or environment scale; round valid numeric scales to eighths.
+-- Zero denotes automatic selection when no scale is supplied.
 chooseScale :: Maybe String -> [String] -> Either String Double
 chooseScale env explicit = case explicit of
   [] -> maybe (Right 0) parse (env >>= \s -> if null s then Nothing else Just s)
@@ -74,7 +82,7 @@ zoomDirection key mask
   | key==fromEnum '-' = Just (-1)
   | otherwise = Nothing
 
--- A leading ./ disambiguates local names containing a colon, as with scp.
+-- | Recognize host:path while keeping drive-letter and explicitly relative paths local.
 parseRemoteTarget :: FilePath -> Maybe (String,FilePath)
 parseRemoteTarget (_:':':slash:_) | slash `elem` "/\\" = Nothing
 parseRemoteTarget target = case break (==':') target of

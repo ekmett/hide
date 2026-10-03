@@ -1,7 +1,11 @@
 {-# LANGUAGE OverloadedStrings #-}
 -- SPDX-License-Identifier: BSD-3-Clause
--- | Bounded background source highlighting. The desktop thread only exchanges
--- immutable buffer references and already evaluated results.
+-- | Bounded background source highlighting with identity-checked adoption.
+--
+-- One worker initializes Skylighting and evaluates rows/widths before publication.
+-- The desktop tick coalesces pending visible-buffer requests and installs only
+-- results matching buffer identity, revision and syntax path. Failed or timed-out
+-- work leaves plain text rather than moving tokenization onto the UI thread.
 module Hide.Highlighting
   ( Highlighting, withHighlighting, withHighlightingUsing, tickHighlighting ) where
 

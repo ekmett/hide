@@ -1,4 +1,11 @@
 {-# LANGUAGE CPP, OverloadedStrings #-}
+-- | In-process browser display for the shared desktop model.
+--
+-- An IORef retains the desktop across browser reconnects. Each attached browser
+-- loop runs the supplied tick, applies serialized input/effects and emits compressed
+-- row frames; there is no tick loop during browser absence here. Explicit render
+-- keys avoid payload equality merely to detect an idle frame. Grid/mode/pixelation
+-- changes reset frame history.
 module Hide.Web (runWeb
 #ifdef WITH_WEB
   , WebInput(..), parseInput, applyInput, frameRows, framePacket, frameCandidates, frameDictionary, allowedOrigin, webDirty
@@ -31,6 +38,8 @@ import Hide.Font
 import Hide.Frontend (modeSize)
 import Hide.Render (renderKey)
 
+-- | Serve a browser frontend, intercepting clipboard, download, link and mode
+-- effects. Acknowledge input after its effects have been applied.
 runWeb :: Double -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> (Desktop -> IO Desktop) -> Desktop -> IO ()
 runWeb scale effects tick initial = do
   font<-loadFont

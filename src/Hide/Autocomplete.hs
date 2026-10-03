@@ -1,5 +1,10 @@
 {-# LANGUAGE OverloadedStrings, ScopedTypeVariables #-}
--- | One persistent completion provider, owned off the interaction thread.
+-- | Background ownership of persistent completion providers and preview adoption.
+--
+-- Requests capture immutable source context. A worker forces input/history and
+-- prepares bounded previews; the tick checks generation, caret/view state and
+-- stable source identity before installation. The provider is opened lazily and
+-- kept warm across completions; explicit acceptance uses ordinary buffer edits.
 module Hide.Autocomplete
   ( Autocomplete, withAutocomplete, autocompleteEffects, tickAutocomplete
   , autocompleteToken, autocompleteTool ) where

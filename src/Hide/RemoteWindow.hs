@@ -1,4 +1,10 @@
 {-# LANGUAGE CPP, OverloadedStrings, ScopedTypeVariables #-}
+-- | Native SDL frontend for remotely owned editor sessions.
+--
+-- A receiver worker validates/decodes frames and downloads; SDL events and drawing
+-- stay on the window thread. Draining pending messages allows one presentation of
+-- the latest frame. Local pointer feedback and remote content updates have distinct
+-- repaint rules, so drag/wheel rendering can await the resulting remote frame.
 module Hide.RemoteWindow
   (runRemoteWindow, RemoteFrame(..), RemoteCell(..), parseRemoteFrame
   , nativeKeyInput, nativeEventInput, pasteShortcut, sanitizeDownloadName
@@ -41,7 +47,7 @@ import Hide.Remote (peerSendBatch, peerReceive)
 import Hide.Window
 #endif
 
--- Validate display data before it reaches the native rasterizer.
+-- | A positioned grapheme with explicit cell width and foreground/background RGB.
 data RemoteCell = RemoteCell Int Int Int Int T.Text Int deriving (Eq,Show)
 data RemoteFrame = RemoteFrame
   { remoteSize :: (Int,Int), remoteMode :: Maybe Int, remoteTitle :: T.Text
@@ -50,6 +56,8 @@ data RemoteFrame = RemoteFrame
   , remoteMenus :: [Bool], remoteCells :: [RemoteCell]
   } deriving (Eq,Show)
 
+-- | Validate dimensions, ordered nonoverlapping spans, colors, cursor and widths
+-- before any remote cells reach native drawing.
 parseRemoteFrame :: Value -> [Value] -> Either String RemoteFrame
 parseRemoteFrame metadata rows = parseEither (withObject "frame metadata" $ \o -> do
   size@(cols,lines') <- o .: "size"
@@ -146,15 +154,18 @@ remoteDetachShortcut event = case event of
   1:key:mods:_ -> key==fromEnum ']' && mods .&. 15==2
   _ -> False
 
--- During an outage only local zoom operates. Closing detaches without queuing
--- a Quit command that could unexpectedly replay after reconnection.
+-- | Gate disconnected input while retaining local zoom controls.
 remoteInputAllowed :: Bool -> [Int] -> Bool
 remoteInputAllowed connected event = connected || case event of
   1:key:mods:_ -> maybe False (const True) (zoomDirection key mods)
   _ -> False
+-- | Detach locally on a disconnected close, without queuing a Quit that
+-- could unexpectedly execute after reconnection.
 remoteCloseDetaches :: Bool -> [Int] -> Bool
 remoteCloseDetaches connected event = not connected && case event of 6:_ -> True; _ -> False
 
+-- | Strip path components and unsuitable characters, bound UTF-8 length and
+-- supply a fallback name. File creation still requires exclusive temporary output.
 sanitizeDownloadName :: T.Text -> T.Text
 sanitizeDownloadName input = case limit (T.map clean (last (T.splitOn "/" (T.replace "\\" "/" input)))) of
   "" -> "download"; "." -> "download"; ".." -> "download"; name -> name

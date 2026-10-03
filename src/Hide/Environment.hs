@@ -1,5 +1,11 @@
 {-# LANGUAGE OverloadedStrings #-}
--- Environment changes belong to this editor process, and affect future children.
+-- | Editor environment overlays for future subprocesses.
+--
+-- Project entries override global entries; session overrides need no persistence.
+-- An entire request validates before mutation, and persisted changes reread merged
+-- precedence before updating affected process variables. Authority/transport
+-- variables are protected; agent inspection redacts sensitive values and agent
+-- mutation also rejects sensitive names. Existing children are unaffected.
 module Hide.Environment
   ( environmentTools, environmentToolNames, environmentTool
   , loadEnvironment, changeEnvironment, environmentAction
@@ -66,6 +72,7 @@ safeIO action=do
     Left (_::IOException)->Left "Could not read or update the editor environment."
     Right value->value
 
+-- | Apply merged global/project environment settings to this editor process.
 loadEnvironment :: FilePath -> IO (Either Text ())
 loadEnvironment directory=safeIO $ do
   loaded<-savedEnvironment directory
@@ -73,8 +80,8 @@ loadEnvironment directory=safeIO $ do
     Left err->pure (Left err)
     Right entries->apply entries >> pure (Right ())
 
--- Validate the whole request before changing either disk or the process. Global
--- writes retain the project's precedence; session overrides deliberately bypass it.
+-- | Validate and apply a scoped environment change for future children.
+-- The agent flag imposes additional sensitive-name restrictions.
 changeEnvironment :: Bool -> FilePath -> Text -> Value -> IO (Either Text ())
 changeEnvironment agent directory scope values=safeIO $ case validate agent values of
   Left err->pure (Left err)
@@ -110,6 +117,7 @@ environmentTools=
         ["type" .= ("object"::Text),"properties" .= properties,"required" .= (required::[Text]),"additionalProperties" .= False],
        "annotations" .= object ["readOnlyHint" .= readonly,"destructiveHint" .= not readonly,"openWorldHint" .= not readonly]]
 
+-- | Expose redacted environment inspection and restricted agent updates.
 environmentTool :: FilePath -> Text -> Value -> IO (Either Text Value)
 environmentTool directory name args=safeIO $ case parseEither parse args of
   Left err->pure (Left (T.pack err))
@@ -135,9 +143,8 @@ environmentTool directory name args=safeIO $ case parseEither parse args of
         pure (Right (scope,values))
       _->fail "Unknown environment tool"
 
--- Documentation: docs/configuration.md, tools/docs-screenshots.hs environment
--- scene and docs/site/screenshots/environment.png. The variables list never
--- contains credentials; its edit field participates in Streamer mode masking.
+-- | Dispatch the human environment-dialog actions. The list contains names only;
+-- the value editor participates in Streamer masking.
 environmentAction :: Text -> [Text] -> Desktop -> IO Desktop
 environmentAction action args d=case (action,args) of
   ("show",_)->showVariables

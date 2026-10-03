@@ -1,4 +1,11 @@
 {-# LANGUAGE OverloadedStrings #-}
+-- | DAP orchestration, editor inspection views and debugger terminal ownership.
+--
+-- Stopped-state generations scope stack and variable handles; late replies cannot
+-- update a newer stop. Inspection distinguishes lazy references because expanding
+-- them may execute target code. Replacements retire transport/consoles before
+-- reusing endpoints. Consented hdb acquisition retains the exact launch context
+-- and cannot revive a superseded launch after installation completes.
 module Hide.Debugger (Debugger, Core, withDebugger, withDebuggerConsoles, withDebuggerClock, withDebuggerHdb, hdbOfferDialog, downloadsDialog, debuggerEffects, tickDebugger, debuggerTool) where
 
 import Control.Concurrent (MVar, newEmptyMVar, tryPutMVar, tryReadMVar, threadDelay)
@@ -69,11 +76,11 @@ emptyState = State {client=Nothing,connected=False,capabilities=Null,ready=False
 withDebugger :: (Debugger -> IO a) -> IO a
 withDebugger action = C.withConsoles (\consoles -> withDebuggerConsoles consoles action)
 
--- Application wiring shares the same terminals as Run and conversation tools.
+-- | Scope debugger state while borrowing the shared console service.
 withDebuggerConsoles :: C.Consoles -> (Debugger -> IO a) -> IO a
 withDebuggerConsoles consoles = withDebuggerHdbConsoles consoles (toInteger <$> getMonotonicTimeNSec) Hdb.prepareHdb Hdb.acquireHdb
 
--- Clock values are monotonic nanoseconds, also allowing deterministic deadline checks.
+-- | Provide the monotonic nanosecond clock used for debugger deadlines.
 withDebuggerClock :: IO Integer -> (Debugger -> IO a) -> IO a
 withDebuggerClock clock = withDebuggerHdb clock Hdb.prepareHdb Hdb.acquireHdb
 
@@ -108,8 +115,8 @@ debuggerEffects runtime fallback = foldM apply . (False,)
           invalidateHdb runtime >> fallback d [effect]
     apply (_,d) effect=fallback d [effect]
 
--- The first action runs under the desktop lock; its continuation must run outside
--- that lock so the normal editor tick can receive the adapter's response.
+-- | Initiate a tool under desktop serialization and return its outside-lock wait.
+-- Inspection handles must belong to the current stopped generation.
 debuggerTool :: Debugger -> Core -> Desktop -> Text -> Value -> IO (Desktop, IO (Either Text Value))
 debuggerTool runtime@(Debugger ref _ _) core d name arguments = do
   s<-readIORef ref
@@ -568,6 +575,7 @@ send (Debugger ref clock _) kind command arguments = do
       Right ident -> modifyIORef' ref (\state -> state {pending=M.insert ident (kind,generation state,now) (pending state),
         breakRequests=case kind of Breaks key _ -> M.insert key ident (breakRequests state); _ -> breakRequests state})
 
+-- | Adopt DAP events, expire pending operations and advance resource retirement.
 tickDebugger :: Debugger -> Core -> Desktop -> IO Desktop
 tickDebugger runtime@(Debugger ref clock _) core original = do
   reapRetired runtime

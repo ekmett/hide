@@ -1,4 +1,10 @@
 {-# LANGUAGE DeriveGeneric, OverloadedStrings, ScopedTypeVariables #-}
+-- | Private discovery records for live, recoverable and remote desktops.
+--
+-- Catalog metadata is separate from endpoint ownership and checkpoint payloads.
+-- Local status combines a bounded connection probe with recovery-file presence;
+-- remote records remain discoverable while offline. Display prefixes can be short,
+-- but endpoint operations require the complete session identity.
 module Hide.Session
   (SessionRecord(..), newSessionRecord, rememberSession, forgetSession, listSessions, loadSession, sessionStoreDirectory, checkpointPath, sessionState, sessionActivity, shortSessionId) where
 
@@ -50,7 +56,8 @@ sessionStoreDirectory = do
 checkpointPath :: String -> IO FilePath
 checkpointPath ident = (++".checkpoint") . dropExtension <$> recordPath ident
 
--- Discovery keeps crashed desktops visible when they have a recovery snapshot.
+-- | Classify a catalog entry using a bounded probe and checkpoint presence.
+-- Recoverable status does not validate the checkpoint contents.
 sessionState :: SessionRecord -> IO String
 sessionState record = case sessionHost record of
   Just _ -> pure "remote"
@@ -73,6 +80,7 @@ sessionActivity record=do
       `catch` \(_::IOException)->pure Nothing
   pure (maybe Nothing id result)
 
+-- | Publish a bounded session record through a temporary-file rename.
 rememberSession :: SessionRecord -> IO ()
 rememberSession record = do
   path <- recordPath (sessionId record)
@@ -86,6 +94,7 @@ rememberSession record = do
       hClose handle
       renameFile temporary path
 
+-- | Remove discovery/checkpoint/sidecar artifacts; this does not stop a daemon.
 forgetSession :: String -> IO ()
 forgetSession ident = do
   path <- recordPath ident
@@ -117,8 +126,7 @@ listSessions = do
   records <- mapM loadSession (nub [ident | name<-names, takeExtension name==".json", let ident=dropExtension name, length ident==48, all (`elem` ("0123456789abcdef"::String)) ident])
   sortOn (Down . sessionCreated) <$> filterM (fmap (/="ended") . sessionState) (catMaybes records)
 
--- Display identity only: the endpoint still requires the complete session ID.
--- Include recoverable sessions when choosing a distinguishing prefix.
+-- | Choose an unambiguous display prefix within the supplied session inventory.
 shortSessionId :: String -> [String] -> String
 shortSessionId ident others = fromMaybe ident (find unique [take n ident | n<-[12..length ident]])
   where unique prefix = not (any (isPrefixOf prefix) (filter (/=ident) others))

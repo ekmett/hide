@@ -1,4 +1,10 @@
 {-# LANGUAGE OverloadedStrings #-}
+-- | Logical framebuffer capture for agent tools, not an OS screenshot.
+--
+-- Text, PNG and cell permissions derive from one grapheme-aware picture. A cluster
+-- is redacted wholly if any occupied cell is unreadable, preserving coordinates.
+-- The bitmap PNG approximates complex graphemes and uses a fixed cursor phase;
+-- it does not include OS chrome, native shaping or the CRT shader.
 module Hide.ScreenCapture (capture, screenTool, redactCluster) where
 
 import Codec.Picture (PixelRGB8(..), encodePng, generateImage)
@@ -33,8 +39,8 @@ screenTool=object
      ["image" .= object ["type" .= ("boolean"::Text),"default" .= False]],"additionalProperties" .= False],
    "annotations" .= object ["readOnlyHint" .= True,"destructiveHint" .= False,"openWorldHint" .= False]]
 
--- Both representations use one flattened picture. This is a logical editor
--- framebuffer, independent of a window server or the currently visible frontend.
+-- | Return bounded text/permission metadata and optionally a bitmap PNG.
+-- Apply agent read masks before producing either representation.
 capture :: Font -> Desktop -> Bool -> IO (Either Text Value)
 capture font desktop includeImage
   | cols<=0 || rows<=0 || toInteger cols*toInteger rows>32768 = pure (Left "Editor screen exceeds the 32768-cell capture limit.")
@@ -120,8 +126,8 @@ capture font desktop includeImage
                    then invert base else base
     invert (PixelRGB8 r g b)=PixelRGB8 (255-r) (255-g) (255-b)
 
--- Access belongs to physical cells, while text belongs to graphemes. Hiding
--- just the tail of a wide glyph would still expose its code point in text.
+-- | Blank a whole grapheme if any covered cell is unreadable; preserve position
+-- and keep clickability independent from readability.
 redactCluster :: Text -> [CellAccess] -> (Text,[CellAccess])
 redactCluster text access
   | all cellReadable access=(text,access)

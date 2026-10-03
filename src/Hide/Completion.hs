@@ -1,3 +1,9 @@
+-- | Bash completion from existing option descriptors and directory entries.
+--
+-- Completion reads GetOpt metadata without evaluating option constructors or
+-- executing shell text. Fixed argument choices come from supported options;
+-- filesystem candidates are sorted and deduplicated; candidates containing line
+-- breaks are discarded.
 module Hide.Completion (bashCompletion) where
 
 import Data.List (isPrefixOf, nub, sort)
@@ -7,8 +13,8 @@ import System.FilePath ((</>), takeFileName, pathSeparator)
 import System.IO.Error (catchIOError)
 import Text.Read (readMaybe)
 
--- WORD includes the executable and the current (possibly empty) word. Completion
--- only reads directory entries: option constructors and shell text are never run.
+-- | Complete from the current-word index followed by shell words including
+-- the executable. Malformed input returns no candidates.
 bashCompletion :: [OptDescr a] -> [String] -> IO [String]
 bashCompletion descriptors (index:words')
   | Just n<-readMaybe index, n>0, current:_<-drop n words' =

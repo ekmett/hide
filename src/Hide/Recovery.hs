@@ -1,4 +1,11 @@
 {-# LANGUAGE CPP, OverloadedStrings, PackageImports #-}
+-- | Versioned editor checkpoints and cheap persistence invalidation keys.
+--
+-- Checkpoints preserve buffers, history, views and preferences, not running
+-- background processes. Transient approvals are excluded and private question
+-- text is redacted where required; terminals recover as ended documents.
+-- Metadata and stable immutable-payload identities decide whether to checkpoint.
+-- Publishing uses flush and rename, without an explicit fsync durability promise.
 module Hide.Recovery (writeCheckpoint, readCheckpoint, CheckpointKey, checkpointKey) where
 
 import Control.Exception (IOException, bracket, try, evaluate)
@@ -33,6 +40,8 @@ import Hide.Model
 checkpointLimit :: Int
 checkpointLimit=256*1024*1024
 
+-- | Validate serialized state before publishing by rename. Oversized output
+-- is refused without truncating histories or replacing the previous checkpoint.
 writeCheckpoint :: FilePath -> Desktop -> IO (Either Text ())
 writeCheckpoint path desktop=do
   let encoded=BL.take (fromIntegral checkpointLimit+1) (encode (desktopValue desktop))
@@ -49,6 +58,8 @@ writeCheckpoint path desktop=do
         renameFile temporary path
   where cleanup (temporary,handle)=ignore (hClose handle) >> ignore (removeFile temporary)
 
+-- | Bound and validate checkpoint input, then overlay it on a supplied baseline.
+-- Reject symlink input and invalid references/ranges; clear transient interactions.
 readCheckpoint :: FilePath -> Desktop -> IO (Either Text Desktop)
 readCheckpoint path baseline=do
   loaded<-safeIO $ do
@@ -122,9 +133,10 @@ desktopValue desktop=runIdentity (desktopValueWith
   (\spans -> pure . bufferValue . redactPending spans)
   (pure . String . TE.decodeUtf8 . B64.encode) desktop)
 
--- Metadata uses the same schema as the checkpoint. Stable identities replace
--- expensive immutable contents; revisions alone miss reload and save changes.
+-- | Small recovery metadata, redaction boundaries and stable buffer/baseline identities.
 data CheckpointKey = CheckpointKey Value [StableName Buffer] [StableName BS.ByteString] deriving Eq
+-- | Capture persistence identity without walking buffer contents or Undo history.
+-- Payload replacement is detected even when its revision number is unchanged.
 checkpointKey :: Desktop -> IO CheckpointKey
 checkpointKey desktop=do
   buffersRef<-newIORef []

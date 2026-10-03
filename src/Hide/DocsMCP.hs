@@ -1,4 +1,10 @@
 {-# LANGUAGE CPP, OverloadedStrings #-}
+-- | Bounded offline documentation access for editor and compiler corpora.
+--
+-- Only documentation paths enter the corpus. Reads reject symlink components,
+-- resolve containment, and enforce file/search budgets. The initial tool call
+-- captures the desktop; its returned continuation performs filesystem work after
+-- the caller releases the desktop lock. Truncated searches report that limit.
 module Hide.DocsMCP (docsTools, docsToolNames, docsTool) where
 
 import Control.Monad (unless, when)
@@ -25,6 +31,7 @@ import Hide.Model (Desktop)
 docsToolNames :: [Text]
 docsToolNames=["docs_list","docs_search","docs_read"]
 
+-- | Schemas for listing, literal searching and reading documentation by line range.
 docsTools :: [Value]
 docsTools=[descriptor "docs_list" "List offline documentation with titles and Markdown headings. Paths are relative to the selected corpus; default corpus is editor." []
     [("offset",integer),("limit",integer)],
@@ -42,7 +49,8 @@ docsTools=[descriptor "docs_list" "List offline documentation with titles and Ma
 
 data Request = ListDocs Int Int | SearchDocs Text (Maybe FilePath) Int Int Bool | ReadDoc FilePath Int Int
 
--- Capture the desktop under its lock, then perform all filesystem work outside.
+-- | Capture a docs request and return its deferred read/search continuation.
+-- Run that continuation outside the desktop lock.
 docsTool :: Desktop -> Text -> Value -> IO (Desktop,IO (Either Text Value))
 docsTool desktop name arguments=pure (desktop,case parseEither (parseRequest name) arguments of
   Left err -> pure (Left (T.pack err))

@@ -1,4 +1,9 @@
 {-# LANGUAGE OverloadedStrings #-}
+-- | Agent writes to the editor clipboard and attached frontend clipboard queue.
+--
+-- The tool never reads the user's system clipboard. A serial marks a new export
+-- for the frontend, whose browser/terminal permissions can still reject the copy;
+-- a successful tool reply acknowledges queueing, not OS acceptance.
 module Hide.ClipboardMCP (clipboardTools, clipboardTool) where
 
 import Control.Monad (unless)
@@ -10,6 +15,7 @@ import qualified Data.Text.Encoding as TE
 import qualified Data.ByteString as BS
 import Hide.Model
 
+-- | Schema for the bounded text-only clipboard write operation.
 clipboardTools :: [Value]
 clipboardTools=[object
   ["name" .= ("clipboard_write"::T.Text)
@@ -18,6 +24,8 @@ clipboardTools=[object
     "properties" .= object ["text" .= object ["type" .= ("string"::T.Text)]]]
   ,"annotations" .= object ["readOnlyHint" .= False,"destructiveHint" .= False,"openWorldHint" .= False]]]
 
+-- | Validate text, replace the editor clipboard and increment the export serial.
+-- Reject NUL and payloads exceeding one MiB of UTF-8.
 clipboardTool :: Desktop -> Value -> IO (Desktop,IO (Either T.Text Value))
 clipboardTool d args=case parseEither parse args of
   Left err -> pure (d,pure (Left (T.pack err)))

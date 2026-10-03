@@ -1,4 +1,10 @@
 {-# LANGUAGE CPP, ForeignFunctionInterface, OverloadedStrings #-}
+-- | SDL/Metal/Vulkan adapter for the common Vty picture and input model.
+--
+-- Grapheme-aware spans select exact bitmap tiles for interface geometry and native
+-- shaping for other text. The window thread owns SDL calls, event handling and
+-- presentation; render keys decide when a frame is needed. Exported FFI helpers
+-- also serve the remote native frontend rather than a second drawing ABI.
 module Hide.Window (runWindow, nativeMenuShortcut
 #ifdef WITH_WINDOW
   , check, utf8, nativeMenus, nativeCommands
@@ -65,6 +71,7 @@ foreign import ccall unsafe "thc_menu_item" c_menu_item :: CString -> CString ->
 foreign import ccall unsafe "thc_menu_enabled" c_menu_enabled :: CInt -> CInt -> IO ()
 #endif
 
+-- | Turn a zero native status into an IO error with native diagnostic text.
 check :: String -> IO CInt -> IO ()
 check context action = do
   ok <- action
@@ -72,6 +79,7 @@ check context action = do
     err <- c_error >>= peekCString
     ioError (userError (context ++ ": " ++ err))
 
+-- | Lend a temporary NUL-terminated UTF-8 C string for the callback only.
 utf8 :: T.Text -> (CString -> IO a) -> IO a
 utf8 text = BS.useAsCString (TE.encodeUtf8 text)
 
@@ -143,6 +151,8 @@ draw font d = do
     rgb (V.SetTo (V.ISOColor n)) = [0,0xaa0000,0x00aa00,0xaa5500,0x0000aa,0xaa00aa,0x00aaaa,0xaaaaaa,0x555555,0xff5555,0x55ff55,0xffff55,0x5555ff,0xff55ff,0x55ffff,0xffffff] !! (fromIntegral n `mod` 16)
     rgb _ = 0
 
+-- | Run on the main bound OS thread and scope native-window cleanup.
+-- Translate native events/effects while using explicit metadata/identity redraw keys.
 runWindow :: Backend -> Double -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> (Desktop -> IO Desktop) -> Desktop -> IO ()
 runWindow backend scale effects tick initial = do
   font <- loadFont
@@ -252,7 +262,7 @@ runWindow :: Backend -> Double -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> 
 runWindow _ _ _ _ _ = ioError (userError "Graphical support is not built. Install SDL3 and rebuild with: cabal build -fwindow")
 #endif
 
--- Uppercase requests Shift; ~ requests Option in the Cocoa menu bridge.
+-- | Encode a native shortcut: uppercase denotes Shift and a leading ~ denotes Option.
 nativeMenuShortcut :: Command -> String
 nativeMenuShortcut cmd = case cmd of
   New -> "n"; Open -> "o"; Save -> "s"; SaveAs -> "S"; Close -> "w"; Quit -> "q"

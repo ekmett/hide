@@ -1,5 +1,11 @@
 {-# LANGUAGE OverloadedStrings #-}
 -- SPDX-License-Identifier: BSD-3-Clause
+-- | Session-owned serial download queue with progress and cancellation.
+--
+-- One worker handles a bounded pending queue. Cancellation is a signal; the action
+-- owns resource cleanup and must bracket it. Async exceptions propagate rather
+-- than becoming ordinary failures. Completed history is pruned as jobs arrive,
+-- while active jobs remain visible. Tool-cache selection shares THC configuration.
 module Hide.Downloads
   (Downloads, Download(..), DownloadState(..), DownloadProgress(..),
    withDownloads, startDownload, cancelDownload, downloadSnapshot, managedToolRoot) where
@@ -16,9 +22,11 @@ import System.Environment (lookupEnv)
 import System.FilePath ((</>),isAbsolute,normalise)
 import System.Info (os)
 
+-- | Reported completed bytes and optional total; an unknown total is not zero.
 data DownloadProgress=DownloadProgress
   { downloadPhase :: Text, downloadBytes :: Integer, downloadTotal :: Maybe Integer }
   deriving (Eq,Show)
+-- | Queued/running/cancelling states are distinct from terminal outcomes.
 data DownloadState=DownloadQueued | DownloadRunning DownloadProgress | DownloadCancelling
   | DownloadComplete FilePath | DownloadFailed Text | DownloadCancelled deriving (Eq,Show)
 data Download=Download {downloadId :: Int,downloadLabel :: Text,downloadState :: DownloadState} deriving (Eq,Show)
@@ -60,6 +68,7 @@ cancelDownload (Downloads _ jobs _) ident=atomically $ do
       pure True
     _->pure False
 
+-- | Return retained jobs in ID order with their current progress and state.
 downloadSnapshot :: Downloads -> IO [Download]
 downloadSnapshot (Downloads _ jobs _)=map (\(Job row _ _)->row) . M.elems <$> readTVarIO jobs
 

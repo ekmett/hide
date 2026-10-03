@@ -1,4 +1,10 @@
 {-# LANGUAGE CPP, ForeignFunctionInterface, ScopedTypeVariables #-}
+-- | Private local transport and lifetime locking for editor sessions.
+--
+-- POSIX uses owner-only Unix socket paths. Windows uses a private descriptor,
+-- loopback TCP and mutual challenge-response authentication. A kernel-held lock
+-- protects daemon lifetime separately from any one connection. Endpoint presence
+-- alone does not establish that a daemon is alive.
 module Hide.RemoteEndpoint
   (sessionEndpoint, connectEndpoint, connectEndpointWithShutdown, socketToEndpoint, endpointExists, withEndpointListener, randomIdentity, spawnDetached, privateDirectory, withSessionLock) where
 import Control.Exception
@@ -40,6 +46,8 @@ randomIdentity = do
   bytes <- randomBytes 24
   pure (concatMap (\n -> let s=showHex n "" in replicate (2-length s) '0'++s) (BS.unpack bytes))
 
+-- | Validate a full 48-character lowercase hexadecimal session ID and prepare
+-- the private endpoint directory.
 sessionEndpoint :: String -> IO FilePath
 sessionEndpoint session = do
   unless (validIdentity session) (failure "Invalid remote session identifier")
@@ -66,8 +74,8 @@ privateDirectory directory = do
   setFileMode directory ownerModes
 #endif
 
--- A kernel-held lifetime lock is released even on SIGKILL. Keep its file in
--- place: unlinking a locked inode would allow a second independent owner.
+-- | Hold the session lifetime lock for the callback. Retain the lock file on
+-- release: unlinking it would let separate inode owners bypass exclusion.
 withSessionLock :: FilePath -> IO a -> IO a
 #ifdef mingw32_HOST_OS
 withSessionLock path action = bracket acquire c_unlock (const action)
@@ -144,6 +152,7 @@ readDescriptor path = withCWString path $ \name -> allocaBytes 256 $ \bytes -> a
 writeDescriptor :: FilePath -> BS.ByteString -> IO ()
 writeDescriptor path bytes = withCWString path $ \name -> BS.useAsCStringLen bytes $ \(p,n) ->
   c_writeDescriptor name (castPtr p) (fromIntegral n) >>= checkWindows "Create private remote endpoint"
+-- | Check for an endpoint artifact, not daemon liveness.
 endpointExists :: FilePath -> IO Bool
 endpointExists path = maybe False (const True) <$> readDescriptor path
 
@@ -164,6 +173,8 @@ readExact h n = do
 boundedAuthentication :: IO () -> IO ()
 boundedAuthentication action = timeout 5000000 action >>= maybe (failure "Remote endpoint authentication timed out") pure
 
+-- | Connect and authenticate before returning a handle and shutdown action.
+-- Use the borrowed shutdown action only while the owning handle remains open.
 connectEndpointWithShutdown :: FilePath -> IO (Handle, IO ())
 connectEndpointWithShutdown path = do
   descriptor <- readDescriptor path >>= maybe (failure "Remote endpoint is not ready") pure

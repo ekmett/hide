@@ -1,4 +1,9 @@
--- | Compact row mappings for change views. Text remains in the buffer tree.
+-- | Compact row projections for inline and side-by-side change views.
+--
+-- The projection stores runs, aligned hunks and collapsed context gaps, never
+-- source text. Binary searches map display rows to the full change-row space;
+-- missing left/right rows represent alignment padding and gaps have no selectable
+-- text. Editable offsets remain the responsibility of "Hide.Buffer" and the model.
 module Hide.BufferView
   ( BufferView(..), ReviewSide(..), ViewProjection, ViewRow(..)
   , bufferViewName, parseBufferView, buildViewProjection, forceViewProjection, viewRowCount, viewRowAt, viewRowForChange, viewChangeRanges
@@ -6,18 +11,21 @@ module Hide.BufferView
 
 import qualified Data.Vector as V
 
+-- | Per-window choice of live text, full changes, contextual changes or aligned sides.
 data BufferView = CurrentView | ChangesView | OnlyChangesView | SideBySideView
   deriving (Eq,Show,Enum,Bounded)
 data ReviewSide = UnifiedSide | OriginalSide | CurrentSide
   deriving (Eq,Show,Enum,Bounded)
 
--- Full change-row indices, not editable offsets. A gap has no selectable text.
+-- | Full change-row indices for each side, or missing rows for padding/gaps.
+-- These are not live character offsets.
 data ViewRow = ViewRow
   { viewLeftRow :: Maybe Int, viewRightRow :: Maybe Int, viewOmittedRows :: Int
   } deriving (Eq,Show)
 
 data Piece = Lines Int Int | Hunk Int Int Int | Gap Int Int deriving (Eq,Show)
 data Segment = Segment Int Piece deriving (Eq,Show)
+-- | A per-buffer compact index shared by views; build it from ordered hunk metadata.
 data ViewProjection = ViewProjection Int (V.Vector Segment) (V.Vector Segment) deriving (Eq,Show)
 
 -- | Build once per buffer tree, using only changed-run metadata. The triples
@@ -85,6 +93,7 @@ findSegment key target rows
       | otherwise=search lo mid
       where mid=(lo+hi) `div` 2
 
+-- | Map a zero-based display row to its source rows; invalid rows return no source.
 viewRowAt :: BufferView -> ViewProjection -> Int -> ViewRow
 viewRowAt mode p row
   | row<0 || row>=viewRowCount mode p=ViewRow Nothing Nothing 0

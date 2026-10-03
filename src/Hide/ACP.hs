@@ -1,4 +1,11 @@
 {-# LANGUAGE OverloadedStrings #-}
+-- | Bounded newline-delimited JSON-RPC transport for an ACP subprocess.
+--
+-- Reader/writer workers publish protocol events and failures through a queue;
+-- stderr retains a bounded diagnostic tail. A separate supervisor owns process-tree
+-- shutdown. Requests correlate by ID, while
+-- prepared responses separate expensive encoding from later authorization and
+-- sending. Session policy belongs to callers, not the transport.
 module Hide.ACP
   ( Launch(..), Client, Event(..), startClient, stopClient, request, notify, respond, PreparedResponse, prepareResponse, respondPrepared, pollEvents ) where
 
@@ -24,6 +31,7 @@ import System.IO
 import System.Process hiding (cleanupProcess)
 import System.Timeout (timeout)
 
+-- | Executable, argv and inherited-environment overrides; no shell interpretation.
 data Launch = Launch { executable :: FilePath, arguments :: [String], environment :: [(String,String)] }
   deriving (Eq, Show)
 data Event = Response Int (Either Value Value) | Notification Text Value | Request Value Text Value | Disconnected Text
@@ -32,6 +40,7 @@ data State = State
   { outgoing :: Seq.Seq (Int,BL.ByteString), outgoingBytes :: Int
   , incoming :: Seq.Seq (Int,Event), incomingBytes :: Int
   , pending :: IS.IntSet, nextId :: Int, failure :: Maybe Text }
+-- | Opaque owner of the provider process and transport workers; stop it after use.
 data Client = Client { state :: MVar State, wakeWriter :: MVar (), disconnect :: Text -> IO (), closeClient :: IO () }
 
 -- Both queues and individual frames are bounded; a stalled peer cannot grow them indefinitely.
@@ -124,6 +133,8 @@ stopClient = closeClient
 rpcError :: Text -> Value
 rpcError message = object ["code" .= (-32603 :: Int), "message" .= message]
 
+-- | Queue a request and return its correlation ID. Local queue failures arrive
+-- as error Response events rather than a successful provider reply.
 request :: Client -> Text -> Value -> IO Int
 request client method params = do
   ident <- modifyMVar (state client) $ \s -> do
@@ -148,6 +159,7 @@ notify client method params = enqueue client (object ["jsonrpc" .= ("2.0" :: Tex
 -- capture workers may prepare one, but only the session may authorize sending.
 data PreparedResponse = PreparedResponse !Int BL.ByteString
 
+-- | Encode and size-check a response without sending or authorizing it.
 prepareResponse :: Value -> Either Value Value -> IO PreparedResponse
 prepareResponse ident result = prepareMessage (object (["jsonrpc" .= ("2.0" :: Text), "id" .= ident] ++ either (\e -> ["error" .= e]) (\r -> ["result" .= r]) result))
 
@@ -165,6 +177,7 @@ prepareMessage value = do
 enqueue :: Client -> Value -> IO ()
 enqueue client value = prepareMessage value >>= respondPrepared client
 
+-- | Enqueue a prepared response; queue overflow disconnects the transport.
 respondPrepared :: Client -> PreparedResponse -> IO ()
 respondPrepared client (PreparedResponse size body) = do
   accepted <- modifyMVar (state client) $ \s ->
@@ -173,6 +186,7 @@ respondPrepared client (PreparedResponse size body) = do
     else pure (s { outgoing = outgoing s Seq.|> (size,body), outgoingBytes = outgoingBytes s + size },True)
   if accepted then void (tryPutMVar (wakeWriter client) ()) else disconnect client "ACP: outgoing message queue exceeded limit"
 
+-- | Drain a bounded event batch so a caller can return to other session work.
 pollEvents :: Client -> IO [Event]
 pollEvents client = modifyMVar (state client) $ \s -> do
   -- The session consumes events while holding the desktop lock. Bound both

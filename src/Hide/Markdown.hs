@@ -1,4 +1,10 @@
 {-# LANGUAGE OverloadedStrings #-}
+-- | CommonMark layout into styled character rows for help and conversations.
+--
+-- Parsing builds a small block representation, then wrapping and table layout
+-- use display-cell widths. Code panels retain their original source separately
+-- from padded, highlighted display text. Link targets remain nested style data;
+-- shell spans identify executable source without reconstructing it from the grid.
 module Hide.Markdown (renderMarkdown, renderMarkdownWithShellBlocks) where
 
 import qualified Commonmark as C
@@ -62,13 +68,13 @@ instance HasPipeTable Inline Blocks where
   pipeTable aligns header body = Blocks [Table aligns (map unInline header) (map (map unInline) body),Gap]
     where unInline (Inline chars)=toList chars
 
--- CommonMark handles incomplete input too, so streaming callers keep ownership
--- of the raw source and may simply render each new accumulated chunk.
+-- | Render accumulated Markdown at a cell width, including incomplete streaming input.
 renderMarkdown :: Int -> T.Text -> Styled
 renderMarkdown width = fst . renderMarkdownWithShellBlocks width
 
--- Spans refer to displayed cells; their payload is the parser's original code
--- body, before tabs, wrapping, syntax colors, or panel padding are applied.
+-- | Return styled characters and half-open character-offset shell spans.
+-- Each span carries dialect and original parser code body, before wrapping, tab
+-- expansion and padding. Offsets count characters, not terminal cells.
 renderMarkdownWithShellBlocks :: Int -> T.Text -> (Styled,[(Int,Int,T.Text,T.Text)])
 renderMarkdownWithShellBlocks requested source =
   (intercalate [('\n',Plain)] (map fst rendered), reverse (snd (foldl collect (0,[]) rendered)))

@@ -1,4 +1,10 @@
 {-# LANGUAGE OverloadedStrings #-}
+-- | Plain-text layout helper for a small Markdown subset.
+--
+-- This is the older unstyled layout API, retained separately from the CommonMark
+-- renderer used by interactive help and conversations. It wraps in display cells,
+-- preserves fenced code and emits simple tables without link interaction metadata.
+-- Use "Hide.Markdown" when color, code panels or actionable links are needed.
 module Hide.Help (layoutMarkdown) where
 
 import Data.Text (Text)
@@ -7,9 +13,9 @@ import Data.Char (isAlphaNum, isDigit, isSpace)
 import Data.Maybe (isJust)
 import Hide.Buffer (columnOffset, displayColumn, nextCharacter)
 
--- A small README renderer: no HTML, reference links, escapes, block quotes,
--- or nested inline markup. Fenced code stays verbatim and may scroll sideways.
--- A glyph wider than the entire viewport is kept intact (notably CJK at width 1).
+-- | Lay out plain text at a requested cell width (minimum one).
+-- Fenced code may exceed the viewport; oversized graphemes remain intact.
+-- This subset omits HTML interpretation, reference links and nested inline markup.
 layoutMarkdown :: Int -> Text -> Text
 layoutMarkdown requested = T.intercalate "\n" . blocks . T.splitOn "\n" . T.replace "\r\n" "\n"
   where

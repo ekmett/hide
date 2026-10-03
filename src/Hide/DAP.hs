@@ -1,5 +1,12 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+-- | Bounded asynchronous Debug Adapter Protocol transport.
+--
+-- Connection/preparation can run on a worker while the client object is returned.
+-- Managed launch owns the adapter process group and refuses an already-listening
+-- endpoint. Requests and replies share sequence allocation and a serialized writer;
+-- closure fails pending requests. Retirement barriers sequence replacement before
+-- reusing an endpoint, rather than overlapping old and new adapters.
 module Hide.DAP
   ( Client, Event(..), startClientAfter, startAdapterAfter, startManagedWithAfter, startClient, startAdapter, startManaged, startManagedWith, stopClient, request, respond, pollEvents
   ) where
@@ -85,8 +92,8 @@ startManaged executable arguments = startManagedWith (pure (executable,arguments
 startManagedWith :: IO (FilePath,[String],[(String,String)]) -> FilePath -> Text -> Int -> IO Client
 startManagedWith = startManagedWithAfter (pure ())
 
--- Retiring a previous owned session can wait here, without delaying the caller
--- or racing its still-live listener when the same endpoint is reused.
+-- | Wait for prior retirement, prepare launch environment and start/connect
+-- the owned adapter on its worker.
 startManagedWithAfter :: IO () -> IO (FilePath,[String],[(String,String)]) -> FilePath -> Text -> Int -> IO Client
 startManagedWithAfter before prepare directory host port = startTransport $ \emit register communicate -> do
   before
@@ -229,12 +236,12 @@ startTransport transport = mask $ \restore -> do
     `finally` (release >> finish "DAP connection closed"))
   pure (Client out inbox bytes awaiting counter unavailable finalEvents (mask_ (finish "DAP client stopped" >> release >> cancel thread)))
 
--- Cancels IO workers and closes the connection or owned adapter process.
+-- | Cancel and join the client transport/process cleanup; this can block.
 stopClient :: Client -> IO ()
 stopClient = closeClient
 
--- Queue saturation throws IOException promptly, rather than blocking the UI.
--- Responses and events remain bounded even if the caller stops polling.
+-- | Queue a DAP request and return its sequence ID. A closed client queues a
+-- failed Response; saturation throws promptly.
 request :: Client -> Text -> Value -> IO Int
 request client command arguments = atomically $ do
   ident <- readTVar (nextId client)
@@ -269,6 +276,7 @@ respond client requestId command result = atomically $ do
         ++ either (\message -> ["success" .= False,"message" .= message])
           (\body -> ["success" .= True,"body" .= body]) result))
 
+-- | Drain pending protocol events and synthesized terminal request failures.
 pollEvents :: Client -> IO [Event]
 pollEvents client = atomically $ do
   events <- flushTBQueue (incoming client)

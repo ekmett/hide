@@ -1,4 +1,14 @@
 {-# LANGUAGE CPP, OverloadedStrings #-}
+-- | Primary ACP conversation ownership and child-agent transcript projection.
+--
+-- The session tick consumes protocol and hub mailbox events. Owned workers prepare
+-- prompt context, file captures and consoles before adoption; capture itself does
+-- not authorize an action. Prepared results must still match source identity and
+-- privacy policy. Child cancellation/configuration/steering completes through ticks.
+--
+-- Conversation state also owns shared build and console services. Tool initiation
+-- returns a desktop plus a continuation, so human questions can wait outside the
+-- desktop lock while the rest of the session continues.
 module Hide.Conversation (ConversationState, conversationServices, conversationAgents, withConversationAt, chatTools, chatToolNames, chatTool, withConversation, conversationEffects, tickConversation, parseLaunch, renderReply, pauseLabel, renderTimestamp) where
 
 import Prelude hiding (reads)
@@ -95,6 +105,7 @@ data State = State
   , shellLaunches :: [Async (Either Text C.PreparedConsole)]
   , resumeRecordPath :: FilePath
   }
+-- | Session-scoped provider, transcript and shared service ownership.
 data ConversationState = ConversationState FilePath (IORef State) C.Consoles Jobs.BuildJobs AR.AgentRuntime
 
 conversationAgents :: ConversationState -> AR.AgentRuntime
@@ -106,6 +117,7 @@ defaultLaunch = A.Launch "codex-acp" [] []
 withConversation :: (ConversationState -> IO a) -> IO a
 withConversation action = getCurrentDirectory >>= \root -> withConversationAt root action
 
+-- | Load conversation configuration and scope provider, service and worker lifetimes.
 withConversationAt :: FilePath -> (ConversationState -> IO a) -> IO a
 withConversationAt root action = C.withConsoles $ \consoles -> Jobs.withBuildJobs $ \jobs -> do
   directory<-getXdgDirectory XdgConfig "thc-edit"
@@ -259,6 +271,7 @@ compilerMenu preserve saved compilers d = opened {contextMenu=fmap (\(r,_) -> (r
     Rect x y _ _=toolchainBadgeRect d
     opened=openContext (ToolchainContext rows) x y d
 
+-- | Consume conversation effects and delegate unrelated effects to the next interpreter.
 conversationEffects :: ConversationState -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> [Effect] -> IO (Bool,Desktop)
 conversationEffects runtime@(ConversationState _ ref _ _ _) fallback original effects = do
   (quit,updated)<-foldM apply (False,original) effects
@@ -640,8 +653,8 @@ pollBuildSettings directory ref d = mask $ \restore -> do
   latest<-readIORef ref
   pure d {toolchain=Just (fromMaybe (fromMaybe THC (toolchain d)) (buildSettingsCache latest))}
 
--- Docs: docs/site/screenshots/conversation.png (docs/conversations.md and the site front page).
--- Refresh the live capture when message bubbles, tool groups, model controls or composer change.
+-- | Advance mailboxes, protocol replies, approvals and transcript views.
+-- The caller serializes access to both desktop and conversation state.
 tickConversation :: ConversationState -> Desktop -> IO Desktop
 tickConversation runtime@(ConversationState directory ref consoles jobs _) original = do
   launched<-pollShellLaunches runtime original
@@ -1215,8 +1228,7 @@ clipCells :: Int -> Text -> Text
 clipCells count text=T.take (columnOffset text (max 0 count)) text
 
 
--- Corner cells share the text rows. The spiked corner stays square, so the
--- top edge runs continuously into the tail. Terminal fonts use block fallbacks.
+-- | Lay out Markdown as styled response-bubble characters for the chosen frontend.
 renderReply :: Bool -> Int -> Bool -> Text -> [(Char,Style)]
 renderReply graphical width outgoing = fst . renderReplyWithShellBlocks graphical width outgoing
 
@@ -1399,6 +1411,8 @@ chatTools=[object ["name" .= ("agent_settings"::Text),"description" .= ("Read pr
       "allowMultiple" .= object ["type" .= ("boolean"::Text),"enum" .= [False]]]],
   "annotations" .= object ["readOnlyHint" .= False,"destructiveHint" .= False,"openWorldHint" .= False]]]
 
+-- | Initiate a conversation tool under desktop serialization. Run the returned
+-- reply continuation outside the desktop lock, especially for human questions.
 chatTool :: ConversationState -> Desktop -> Text -> Value -> IO (Desktop,IO (Either Text Value))
 chatTool (ConversationState _ ref _ _ _) d name args
   | name=="agent_settings" = if args/=object [] then pure (d,pure (Left "agent_settings accepts no arguments.")) else do

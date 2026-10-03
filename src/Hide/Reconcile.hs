@@ -1,4 +1,11 @@
 {-# LANGUAGE OverloadedStrings #-}
+-- | Adopt background filesystem observations into buffers and the Files pane.
+--
+-- Observation tokens follow disk baselines rather than edit revisions: edits must
+-- not hide disk changes, and old observations must not undo a save. Clean existing
+-- files reload with Undo; dirty changes and deletions become conflicts. Explicit
+-- conflict decisions recheck buffer revision, baseline and disk. Keeping a buffer
+-- retains save-conflict checks rather than accepting an unseen disk overwrite.
 module Hide.Reconcile
   ( Reconciliation, withReconciliation, reconciliationEffects, tickReconciliation ) where
 
@@ -20,6 +27,7 @@ import Hide.External
 import Hide.Files
 import Hide.Model
 
+-- | Session-owned watcher subscriptions, baseline tokens and conflict state.
 data Reconciliation = Reconciliation Watcher (IORef Tracking)
 data Tracking = Tracking
   { watched :: M.Map Int (FileState, Int), generation :: Int
@@ -28,6 +36,7 @@ data Tracking = Tracking
   , directoryEntries :: M.Map FilePath [Entry]
   }
 
+-- | Scope the filesystem watcher and reconciliation state.
 withReconciliation :: (Reconciliation -> IO a) -> IO a
 withReconciliation action = withWatcher $ \watcher -> do
   state <- newIORef (Tracking M.empty 0 M.empty M.empty M.empty)
@@ -54,6 +63,7 @@ synchronize (Reconciliation watcher ref) desktop = do
     directoryEntries=M.restrictKeys (directoryEntries old) desiredDirs}
   watchPaths watcher [(filePath file,token) | (file,token) <- M.elems current] directories
 
+-- | Wrap core effects so baseline changes are synchronized before/after handling.
 reconciliationEffects :: Reconciliation -> (Desktop -> [Effect] -> IO (Bool,Desktop))
   -> Desktop -> [Effect] -> IO (Bool,Desktop)
 reconciliationEffects runtime core = foldM apply . (False,)
@@ -68,6 +78,8 @@ reconciliationEffects runtime core = foldM apply . (False,)
       synchronize runtime (snd result)
       pure result
 
+-- | Consume coalesced observations, reload clean files and present conflicts.
+-- Adoption may construct replacement buffers; explicit decisions reread the disk.
 tickReconciliation :: Reconciliation -> Desktop -> IO Desktop
 tickReconciliation runtime@(Reconciliation watcher _) desktop = do
   synchronize runtime desktop

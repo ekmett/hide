@@ -1,4 +1,10 @@
 {-# LANGUAGE OverloadedStrings #-}
+-- | Agent navigation, window organization and project inspection.
+--
+-- Window/buffer IDs select the live model; source locations use one-based lines
+-- and columns while hex navigation uses byte offsets. Mutations reuse model
+-- commands and the supplied effect interpreter. Read-only project/Git work is
+-- returned as deferred IO with the corresponding immutable desktop snapshot.
 module Hide.WorkspaceMCP (workspaceTools, workspaceToolNames, workspaceTool) where
 
 import Control.Monad (unless, when)
@@ -28,6 +34,7 @@ import Hide.Model
 workspaceToolNames :: [Text]
 workspaceToolNames = [name | (name,_,_,_,_) <- definitions]
 
+-- | Schemas for layout, navigation, panels, files, project context and Git inspection.
 workspaceTools :: [Value]
 workspaceTools = [object ["name" .= name,"description" .= description,
   "inputSchema" .= object ["type" .= ("object"::Text),"properties" .= Object (KM.fromList properties),
@@ -59,8 +66,9 @@ definitions =
 type Apply = Desktop -> [Effect] -> IO (Bool,Desktop)
 type Reply = (Desktop,IO (Either Text Value))
 
--- The caller holds the desktop lock for this phase. Only read-only project/Git
--- work is returned as deferred IO; the reply captures the matching live snapshot.
+-- | Handle a workspace tool under desktop serialization, then return its reply action.
+-- Run deferred project/Git reads outside the lock; file/navigation effects can
+-- perform synchronous IO during the initial phase.
 workspaceTool :: Apply -> Desktop -> Text -> Value -> IO Reply
 workspaceTool apply desktop name args = case parseEither parse args of
   Left err -> failure desktop (T.pack err)

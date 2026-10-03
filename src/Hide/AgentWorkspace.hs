@@ -1,4 +1,10 @@
 {-# LANGUAGE OverloadedStrings, ScopedTypeVariables #-}
+-- | Canonical shared directories and persistent Git worktrees for agents.
+--
+-- A worktree starts from a resolved commit, not the parent's dirty or unsaved
+-- contents. It may use a new named branch or detached HEAD. Successful worktrees
+-- outlive the agent; failure cleanup removes only an empty directory allocated
+-- by that call. Git subprocesses discard inherited repository/index overrides.
 module Hide.AgentWorkspace
   (AgentWorkspace(..), createAgentWorktree, sharedAgentWorkspace) where
 
@@ -16,6 +22,7 @@ import System.FilePath ((</>))
 import System.Process (proc, cwd, env, readCreateProcessWithExitCode)
 import Hide.RemoteEndpoint (privateDirectory, randomIdentity)
 
+-- | Workspace location and provenance, not a lease that deletes the checkout.
 data AgentWorkspace = AgentWorkspace
   { workspacePath :: FilePath
   , workspaceSourceRepo :: Maybe FilePath
@@ -33,8 +40,8 @@ instance FromJSON AgentWorkspace where
   parseJSON=withObject "agent workspace" $ \o -> AgentWorkspace <$> o .: "path"
     <*> o .:? "sourceRepo" <*> o .:? "baseCommit" <*> o .:? "branch" <*> o .: "mode"
 
--- New worktrees start at a resolved commit, never the parent's staged, working,
--- or unsaved contents. They persist until the human explicitly removes them.
+-- | Create a persistent worktree from a resolved commit. Nonempty partial
+-- checkouts and created branches remain available after failure for inspection.
 createAgentWorktree :: FilePath -> Maybe Text -> Maybe Text -> Text -> IO (Either Text AgentWorkspace)
 createAgentWorktree parent ref branch feature=workspaceIO $ do
   directory<-existingDirectory parent
@@ -70,6 +77,7 @@ createAgentWorktree parent ref branch feature=workspaceIO $ do
     `catch` (\(err::IOException)->ioError (userError
       ("Worktree creation failed at "++allocated++"; any nonempty checkout was retained. "++show err)))
 
+-- | Validate and canonicalize an existing directory; Git metadata is optional.
 sharedAgentWorkspace :: FilePath -> IO (Either Text AgentWorkspace)
 sharedAgentWorkspace parent=workspaceIO $ do
   directory<-existingDirectory parent

@@ -1,4 +1,11 @@
 {-# LANGUAGE OverloadedStrings #-}
+-- | Human approval policy and bounded, layered TOML configuration.
+--
+-- Calls consult current policy under desktop serialization and return waits as
+-- continuations. The oldest live approval is shown; cancellation withdraws it.
+-- Configuration edits replace supported token spans, reparse the result and use
+-- checked saving rather than reformatting unrelated tables and comments.
+-- Project agent limits may tighten global ceilings but cannot raise them.
 module Hide.MCPPermissions
   ( Permissions, withPermissions, withPermissionsAt, permissionCall, policyEffects, tickPermissions
   , permissionConfigPath, readEditorDefaults, writeEditorDefaults, readEditorDefaultsAt, writeEditorDefaultsAt
@@ -67,8 +74,8 @@ withPermissionsAt path specs=bracket acquire release
     registry=M.fromList [(name,fromMaybe False (field "annotations" spec >>= field "readOnlyHint")) | spec<-specs,Just name<-[field "name" spec]]
     release (Permissions _ _ ref)=readIORef ref >>= mapM_ (\request->finish request (Left "Editor session closed before approval")) . waiting
 
--- All initial calls and UI effects run under the session desktop lock. The
--- returned continuation is the only wait, and must run outside that lock.
+-- | Initiate an allowed operation or queue approval under the desktop lock.
+-- Run its continuation after releasing that lock so approval can make progress.
 permissionCall :: Permissions -> Tool -> Tool
 permissionCall runtime@(Permissions path registry ref) callback desktop name args=do
   loaded<-readPolicies path
@@ -100,8 +107,7 @@ finish request result=do
   _<-tryPutMVar (reply request) (pure result)
   pure ()
 
--- Display the oldest pending request when existing editor dialogs have closed.
--- A replaced modal is redisplayed, and cancellation removes actionable prompts.
+-- | Display the oldest live approval and withdraw stale or cancelled prompts.
 tickPermissions :: Permissions -> Desktop -> IO Desktop
 tickPermissions (Permissions _ _ ref) desktop=do
   s<-readIORef ref
@@ -139,6 +145,7 @@ approvalReview desktop request=Dialog "Agent permission" (PermissionDialog (appr
 approvalAction :: Waiting -> Text
 approvalAction request="approve:"<>T.pack (show (ticket request))
 
+-- | Handle permission-dialog decisions and delegate other effects.
 policyEffects :: Permissions -> Core -> Core
 policyEffects runtime fallback desktop effects=foldM apply (False,desktop) effects
   where
@@ -249,8 +256,7 @@ readPolicies path=do
 readEditorDefaults :: IO (Either Text Value)
 readEditorDefaults=permissionConfigPath >>= readEditorDefaultsAt
 
--- A nearer package/repository boundary keeps settings in a containing project
--- from silently configuring an independent nested project.
+-- | Find project configuration upward, stopping at nearer repository/package boundaries.
 projectConfigPath :: FilePath -> IO FilePath
 projectConfigPath input=do
   absolute<-canonicalizePath input
@@ -454,8 +460,8 @@ writeTable path namespace values=withMVar configWriteLock $ \_ -> do
           Right (Left _) -> Left "Configuration changed on disk or could not be saved; retry after reviewing it"
           Right (Right _) -> Right ()
 
--- Change scalar token spans rather than reprinting the document. The real TOML
--- parser validates every candidate, so unrelated comments/keys remain verbatim.
+-- | Update supported primitive value spans and validate the candidate TOML.
+-- Unsupported inline/dotted insertions fail without rewriting unrelated content.
 updateConfigTable :: [Text] -> Value -> Text -> Either Text Text
 updateConfigTable namespace (Object values) original=do
   _<-either (const (Left "Invalid TOML configuration")) Right (Toml.parse original)

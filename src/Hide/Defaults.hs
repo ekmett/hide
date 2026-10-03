@@ -1,4 +1,10 @@
 {-# LANGUAGE OverloadedStrings #-}
+-- | Strict parsing of optional startup defaults.
+--
+-- Absent fields remain Nothing so the caller can apply CLI, environment and
+-- configuration precedence. Parsing reuses frontend validators for backend/scale
+-- and bounds modes, dimensions and enumerated preferences. It does not select a
+-- concrete runtime default or silently accept unknown fields.
 module Hide.Defaults (Defaults(..), parseDefaults) where
 
 import Control.Monad (unless)
@@ -9,6 +15,7 @@ import Hide.BufferView
 import Hide.Model (ChatSubmit,parseChatSubmit)
 import Hide.Frontend (chooseBackend, chooseScale)
 
+-- | Optional configuration overrides, before runtime precedence is resolved.
 data Defaults = Defaults
   { defaultBackend :: Maybe String, defaultScale :: Maybe Double
   , defaultScreenMode :: Maybe Int, defaultColumns :: Maybe Int, defaultRows :: Maybe Int
@@ -17,6 +24,7 @@ data Defaults = Defaults
   , defaultPixelateUnicode :: Maybe Bool, defaultMaterialIcons :: Maybe Bool, defaultStreamerMode :: Maybe Bool, defaultView :: Maybe BufferView, defaultChatSubmit :: Maybe ChatSubmit, defaultMacKeySymbols :: Maybe Bool
   } deriving (Eq,Show)
 
+-- | Validate a defaults object; omission is not a concrete default value.
 parseDefaults :: Value -> Parser Defaults
 parseDefaults=withObject "editor.defaults" $ \o -> do
   unless (all (`elem` ["backend","scale","screenMode","columns","rows","appearance","wordStar","blinkCursor","crtFilter","pixelateUnicode","materialIcons","streamerMode","bufferView","chatSubmit","macKeySymbols"]) (KM.keys o)) (fail "Unknown editor default")

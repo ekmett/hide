@@ -1,4 +1,13 @@
 {-# LANGUAGE OverloadedStrings, ExistentialQuantification #-}
+-- | Compose the desktop into the common Vty character grid.
+--
+-- Painting consumes model geometry and prepared document rows. Layers implement
+-- windows, menus, dialogs, shadows and privacy masks before grapheme-aware
+-- flattening. Native, browser and terminal frontends consume the same result.
+--
+-- The redraw gate is a separate explicit metadata projection. Immutable payloads
+-- are compared by stable identity, including hidden documents needed by native
+-- menus; adding a model field must not silently introduce a text/history scan.
 module Hide.Render (renderDesktop, snapshot, snapshotHtml, RenderKey, renderKey) where
 
 import Control.Exception (evaluate)
@@ -115,6 +124,7 @@ data FieldKey = InputKey Text Int | ComboBoxKey Text Int (Maybe Int) | CheckBoxK
   | TextAreaKey Text Bool Selection Int Int deriving Eq
 data DialogKey = DialogKey Text Int [Text] [FieldKey] deriving Eq
 data SidebarKey = SidebarKey FilePath Int Int Int Bool deriving Eq
+-- | Comparable UI metadata and immutable payload identities, without a Desktop payload.
 data RenderKey = RenderKey RenderState (M.Map Int DocumentKey) (M.Map Text ViewKey)
   (Maybe QuestionKey) (Maybe DialogKey) (Maybe SidebarKey) Bool (Int,Bool) [RenderIdentity] deriving Eq
 
@@ -279,6 +289,7 @@ box a double w h
   where (tl,tr,bl,br,hz,vt)=if double then ('╔','╗','╚','╝','═','║') else ('┌','┐','└','┘','─','│')
         line l m r=V.char a l V.<|> V.charFill a m (w-2) 1 V.<|> V.char a r
 
+-- | Paint the current model and flatten overlapping wide graphemes into one picture.
 renderDesktop :: Desktop -> V.Picture
 renderDesktop d = flattenPicture (screenSize d) ((V.picForLayers (privacyLayers++layers)) {V.picCursor=visibleCursor})
   where
@@ -802,13 +813,14 @@ dialogLayers d dg =
             in V.vertCat ([row paper fw (case purpose dg of ChangingDirectory{} -> "Directories"; _ -> "Files"),bar] ++ [line r | r<-[0..7]] ++ [label borderColor "└" V.<|> V.charFill borderColor '─' cw 1 V.<|> label borderColor "┴" V.<|> V.charFill borderColor '─' cw 1 V.<|> label borderColor "┘",row (attr scrollCyan blue) fw path,row (attr scrollCyan blue) fw details])
           ListBox name values chosen -> V.vertCat (row paper fw name:[row (if n==chosen then a else paper) fw (" "<>v) | (n,v)<-take 4 (drop (max 0 (chosen-3)) (zip [0..] values))])
 
+-- | Render a colorless character-grid snapshot for inspection and tests.
 snapshot :: Desktop -> Text
 snapshot d = T.unlines [T.concat (map plain (toList ops)) | ops<-toList (displayOpsForPic (renderDesktop d) (screenSize d))]
   where plain TextSpan{textSpanText=t}=TL.toStrict t
         plain (Skip n)=T.replicate n " "
         plain (RowEnd n)=T.replicate n " "
 
--- Headless preview uses the actual Vty output spans, not a second UI renderer.
+-- | Render a standalone HTML view of the current grid and its colors.
 snapshotHtml :: Desktop -> Text
 snapshotHtml d = "<!doctype html><meta charset='utf-8'><title>Haskell</title><style>body{background:#111;margin:24px;display:grid;place-content:center;min-height:90vh}pre{background:#0000aa;font:min(20px,calc((100vw - 48px)/48))/1.066667 'Courier New',monospace;margin:0;box-shadow:0 0 0 2px #333;white-space:pre}span{font-weight:normal}</style><pre>" <> T.intercalate "\n" rows <> "</pre>"
   where

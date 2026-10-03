@@ -1,3 +1,9 @@
+-- | Bundled bitmap atlas and exact-pixel glyph selection.
+--
+-- Material icons take precedence over IBM VGA and then Unicode fallback glyphs.
+-- The exact-bitmap repertoire is retained separately so native frontends can shape
+-- ordinary Unicode while preserving interface geometry. Private-use corner tiles
+-- are synthesized consistently with the shipped atlas.
 module Hide.Font (Font, Glyph(..), loadFont, glyph, bitmapGlyph, bitmapAtlas) where
 
 import Data.Word (Word16)
@@ -10,9 +16,11 @@ import Numeric (readHex)
 import Paths_hide (getDataFileName)
 
 data Font = Font (IM.IntMap Glyph) (IM.IntMap Glyph)
+-- | Pixel width and sixteen left-aligned Word16 scanlines.
 data Glyph = Glyph { glyphWidth :: Int, glyphRows :: [Word16] }
   deriving (Eq, Show)
 
+-- | Load and validate atlas entries; reject malformed or duplicate/out-of-order input.
 loadFont :: IO Font
 loadFont = do
   ibm <- load "assets/fonts/ibm-vga-8x16.hex"
@@ -48,6 +56,7 @@ loadFont = do
       [(n, "")] -> Just n
       _ -> Nothing
 
+-- | Resolve a bitmap glyph, synthesizing corner tiles and supplying missing-glyph fallbacks.
 glyph :: Font -> Char -> Glyph
 glyph (Font font _) c
   | ord c>=0xe000 && ord c<=0xe007 = Glyph 8 (map (*256) (corners !! (ord c-0xe000)))
@@ -62,7 +71,7 @@ glyph (Font font _) c
              [255,254,252,248,240,224,192,128]++replicate 8 0]
     missing = IM.findWithDefault (Glyph 8 (replicate 16 0xff00)) 0xfffd font
 
--- Interface geometry and the original IBM repertoire retain their exact pixels.
+-- | Identify glyphs that should retain exact bitmap rendering rather than native shaping.
 bitmapGlyph :: Font -> Char -> Bool
 bitmapGlyph (Font _ ibm) c = IM.member (ord c) ibm || ord c>=0x2500 && ord c<=0x259f || ord c>=0xe000 && ord c<=0xe007
 

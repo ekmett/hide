@@ -1,4 +1,10 @@
 {-# LANGUAGE CPP, OverloadedStrings #-}
+-- | Shared input schema, cell-frame compression and transport packet framing.
+--
+-- Input origin is assigned by the host. Frame compression uses the reconstructed
+-- previous screen as its dictionary, regardless of the preceding packet encoding;
+-- full-frame and changed-row candidates compete by encoded size. Byte-stream
+-- framing is separate from frontend validation of decoded cells.
 module Hide.Protocol where
 
 import Data.Aeson (Value(..))
@@ -32,6 +38,8 @@ import Hide.Unicode (displayOpsForPic, graphemes, clusterWidth)
 data WebInput = Key T.Text [V.Modifier] | Paste T.Text | Mouse T.Text Int Int Int Int [V.Modifier]
               | Wheel Int Int Int [V.Modifier] | SystemTheme Bool | BrowserCommand Command | MenuCommand (Maybe Command) | UploadFile T.Text BS.ByteString | Frontend (Maybe Int) Bool | OpenPath FilePath | Resize Int Int | SuspendSession | Blur | Modifiers [V.Modifier] deriving (Eq,Show)
 
+-- | Validate an input packet and its bounds. Upload metadata starts with an empty
+-- payload that transport code fills from the following binary packet.
 parseInput :: Value -> Parser WebInput
 parseInput = withObject "browser event" $ \o -> do
   kind <- o .: "type" :: Parser T.Text
@@ -98,6 +106,8 @@ applyInputFrom :: InputOrigin -> WebInput -> Desktop -> (Desktop,[Effect])
 applyInputFrom HumanInput input d=applyInputUnchecked input d
 applyInputFrom GuestInput input d=either (const (d,[])) id (applyGuestInput input d)
 
+-- | Apply host-attributed agent input with policy refusals. The host must bracket
+-- the whole batch with beginGuestInput/endGuestInput under desktop serialization.
 applyGuestInput :: WebInput -> Desktop -> Either T.Text (Desktop,[Effect])
 applyGuestInput input d
   | not allowed = Left "This editor control requires human input."
@@ -202,6 +212,7 @@ frameCandidates reset old rows metadata =
       (["type" .= ("frame"::T.Text),"reset" .= reset,
         "rows" .= selected]++metadata))))
 
+-- | Choose a compressed representation against the reconstructed previous frame.
 framePacket :: Bool -> [Value] -> [Value] -> [Pair] -> BL.ByteString
 framePacket reset old rows metadata = foldl1 smaller (frameCandidates reset old rows metadata)
   where smaller a b=if BL.length b<BL.length a then b else a
@@ -246,8 +257,9 @@ assetsPacket font scale = object ["type" .= ("assets"::T.Text),"version" .= prot
 maxPacketSize :: Int
 maxPacketSize = 16777217
 
--- The length includes the kind byte. No text, terminal escapes or delimiters
--- appear outside these records, so arbitrary binary file data is unambiguous.
+-- | Write four-byte big-endian length, kind byte and payload.
+-- The length includes the kind byte, making arbitrary binary data unambiguous.
+-- Concurrent writers must provide external serialization.
 writePacket :: Handle -> WirePacket -> IO ()
 writePacket h packet = do
   let bytes=case packet of JsonPacket value -> BS.cons 0 (BL.toStrict (encode value)); BinaryPacket value -> BS.cons 1 value
@@ -257,6 +269,8 @@ writePacket h packet = do
   BS.hPut h bytes
   hFlush h
 
+-- | Read one framed packet. Clean boundary EOF is Nothing; truncation or an
+-- invalid packet kind fails.
 readPacket :: Handle -> IO (Maybe WirePacket)
 readPacket h = do
   header<-exact 4
@@ -278,8 +292,10 @@ readPacket h = do
       chunk<-BS.hGet h n
       if BS.null chunk then pure (BS.concat (reverse chunks)) else go (n-BS.length chunk) (chunk:chunks)
 
--- Feed a stored DEFLATE block containing the previous screen into the decoder,
--- just as the browser does. This works with raw DEFLATE dictionaries everywhere.
+-- | Reconstruct a bounded frame and validate row indices/completeness.
+-- Native/frontend cell validation remains a separate boundary. Seed the raw
+-- DEFLATE dictionary with a prepended stored block of previous-screen bytes,
+-- then discard that prefix from the decompressed output.
 decodeFrame :: [Value] -> BS.ByteString -> IO (Value,[Value])
 decodeFrame old packet = do
   (tag,compressed)<-maybe (bad "Empty display packet") pure (BS.uncons packet)

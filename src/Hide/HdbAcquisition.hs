@@ -1,5 +1,12 @@
 {-# LANGUAGE CPP, OverloadedStrings, ScopedTypeVariables #-}
 -- SPDX-License-Identifier: BSD-3-Clause
+-- | Checksum-pinned acquisition of official hdb compiler-specific bindists.
+--
+-- Catalog selection is exact by compiler/platform. Preparation probes without
+-- fetching; acquisition revalidates the pinned URL, restricts redirects to HTTPS,
+-- and checks size, hash, archive layout and wrapper startup. Private staging and a per-destination lock protect install
+-- publication; unmanaged existing launchers/bundles are refused. Subprocess output
+-- uses files so cancellation can reap children before handles close.
 module Hide.HdbAcquisition
   (HdbAsset(..), HdbPlan(..), selectHdbAsset, hostHdbPlatform, managedToolRoot,
    prepareHdb, acquireHdb, installHdbArchive, validateArchiveListing) where
@@ -43,8 +50,8 @@ data HdbPlan=HdbPlan
 release :: Text
 release="0.14.0.0"
 
--- Release v0.14.0.0's official bindists.yaml builds every asset with GHC 9.14.1.
--- Digests are the GitHub release-asset SHA256 values; no mutable latest URL.
+-- | Select an exact supported compiler/platform pair from the pinned catalog.
+-- Entries come from official bindists.yaml and GitHub asset digests.
 selectHdbAsset :: Text -> Text -> Either Text HdbAsset
 selectHdbAsset platform version
   | version/="9.14.1"=Left "No official hdb binary is available for this exact GHC version; configure an existing adapter."
@@ -72,6 +79,7 @@ catalog=[
   ("x86_64-linux-unknown",(13947326,"f0d16b58ea1ca915029147189ebfd0635eb492458cace33ab4f5cd411f067929"))
   ]
 
+-- | Determine the catalog platform from host OS and distribution information.
 hostHdbPlatform :: IO Text
 hostHdbPlatform
   | os=="darwin"=pure (T.pack arch<>"-apple-darwin")
@@ -204,8 +212,8 @@ installArchive plan archive stage report=do
     report (DownloadProgress "Ready" (hdbAssetSize asset) (Just (hdbAssetSize asset)))
     pure launcher
 
--- Accept only regular files/directories in the upstream wrapper/bin/lib layout.
--- Tar's verbose listing reports effective long/PAX names; unknown forms fail.
+-- | Validate the allowed bindist layout and return its archive root.
+-- Inspect effective long/PAX names from the listing; unknown forms fail.
 validateArchiveListing :: HdbAsset -> Text -> Either Text Text
 validateArchiveListing asset listing=do
   rows<-mapM parse (T.lines listing)

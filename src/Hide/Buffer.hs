@@ -1,4 +1,15 @@
 {-# LANGUAGE MultiParamTypeClasses, OverloadedStrings #-}
+-- | Persistent editable text, byte-preserving buffers and change provenance.
+--
+-- A finger tree stores newline-inclusive lines. Its measure counts live text,
+-- review text, inserted/deleted lines and encoding flags. Deleted baseline lines
+-- remain as zero-live-width tombstones; change runs place deletions before
+-- insertions. Edits share untouched subtrees and undo retains those trees.
+--
+-- Offsets count Unicode characters, not UTF-8 bytes or display cells. Byte mode
+-- instead uses one Latin-1 character per byte. Whole-text projections are lazy;
+-- line navigation uses measured splits. Fingerprints reject unequal content but
+-- never establish equality without an exact check. Derived Eq is not a redraw key.
 module Hide.Buffer
   ( Buffer(saved,undoStack,redoStack,revision,lastChange,byteMode,savedByteMode), Selection(..)
   , BufferSnapshot(..), snapshotBuffer, restoreBuffer
@@ -17,9 +28,8 @@ import qualified Data.Text as T
 import Data.Text (Text)
 import qualified Data.Text.Encoding as TE
 import qualified Data.ByteString as BS
-import Data.Char (ord)
 import Data.Word (Word64)
-import Data.Char (GeneralCategory(..), generalCategory, isAlphaNum, isSpace)
+import Data.Char (GeneralCategory(..), generalCategory, isAlphaNum, isSpace, ord)
 import Data.Foldable (toList)
 import Control.Monad (unless)
 import qualified Data.FingerTree as FT
@@ -46,14 +56,16 @@ instance FT.Measured LineMeasure Line where
     where reviewSize=n+if "\n" `T.isSuffixOf` text then 0 else 1
 type LineTree = FT.FingerTree LineMeasure Line
 
+-- | An editable revision with a saved baseline and at most 100 undo states.
+-- Use buffer operations to preserve line provenance and cached projections.
 data Buffer = Buffer
   { bufferLines :: !LineTree, cachedContents :: Text, saved :: Text
   , undoStack :: [(LineTree,Bool,(Int,Int,Int))], redoStack :: [(LineTree,Bool,(Int,Int,Int))]
   , revision :: !Int, lastChange :: Maybe (Int,Int,Int), byteMode :: Bool, savedByteMode :: Bool
   , baselineLines :: !LineTree, viewProjection :: ViewProjection
   } deriving (Eq, Show)
--- Recovery flattens each persistent history tree explicitly; its edit metadata
--- and representation mode must travel with it for lossless undo and redo.
+-- | Explicit recovery representation, including flattened histories and provenance.
+-- Constructing or encoding this value may traverse all retained buffer text.
 data BufferSnapshot = BufferSnapshot
   { snapshotContents :: Text, snapshotSaved :: Text
   , snapshotUndo :: [(Text,Bool,(Int,Int,Int))], snapshotRedo :: [(Text,Bool,(Int,Int,Int))]
@@ -66,6 +78,7 @@ data BufferSnapshot = BufferSnapshot
 -- omitted; all coordinates and baseline text are checked when restoring.
 type LineChangesSnapshot = [(Int,Bool,Text)]
 
+-- | Project a buffer and its history for persistence. Keep this out of input/render work.
 snapshotBuffer :: Buffer -> BufferSnapshot
 snapshotBuffer b=BufferSnapshot (contents b) (saved b) (map flatten (undoStack b)) (map flatten (redoStack b))
   (revision b) (lastChange b) (byteMode b) (savedByteMode b)
@@ -74,6 +87,7 @@ snapshotBuffer b=BufferSnapshot (contents b) (saved b) (map flatten (undoStack b
     flatten (tree,mode,change)=(treeText tree,mode,change)
     first (tree,_,_)=tree
 
+-- | Validate recovery coordinates, byte representation and history before rebuilding trees.
 restoreBuffer :: BufferSnapshot -> Either Text Buffer
 restoreBuffer s
   | snapshotRevision s<0 || snapshotRevision s>1073741823=Left "Invalid buffer revision"
@@ -107,12 +121,14 @@ restoreBuffer s
       tree<-restoreLines (snapshotSaved s) text changes
       pure (tree,mode,change)
 
+-- | Anchor and caret in zero-based character offsets; either end may come first.
 data Selection = Selection { anchor :: Int, caret :: Int } deriving (Eq, Show)
 
+-- | Create a clean text buffer with an empty undo history and one final editor row.
 newBuffer :: Text -> Buffer
 newBuffer t = let tree=linesFromText t in Buffer tree t t [] [] 0 Nothing False False tree (projectionFor tree)
 
--- Byte buffers use one Latin-1 code point per byte; text never passes through a lossy decoder.
+-- | Create a clean byte buffer using one Latin-1 character per byte, without lossy decoding.
 newByteBuffer :: BS.ByteString -> Buffer
 newByteBuffer bytes = (newBuffer (TE.decodeLatin1 bytes)) {byteMode=True,savedByteMode=True}
 
@@ -120,13 +136,14 @@ encodeContents :: Bool -> Text -> BS.ByteString
 encodeContents False = TE.encodeUtf8
 encodeContents True = BS.pack . map (fromIntegral . ord) . T.unpack
 
+-- | Encode the current representation for file output: UTF-8 text or original byte values.
 bufferBytes :: Buffer -> BS.ByteString
 bufferBytes b = encodeContents (byteMode b) (contents b)
 
+-- | Establish the current contents as baseline through measured changed-leaf traversal.
+-- Undo/redo provenance is rebased lazily, replaying stored inverse edits only
+-- when a history entry is used. Do not update saved directly.
 markSaved :: Buffer -> Buffer
--- Reset the baseline through this operation, not a direct update of saved.
--- Measured searches visit only changed leaves. History rebasing stays lazy and
--- replays each stored inverse edit only if that history entry is used.
 markSaved b = b {bufferLines=clean,baselineLines=clean,viewProjection=projectionFor clean,saved=contents b,savedByteMode=byteMode b,
   undoStack=rebaseHistory clean clean (undoStack b),redoStack=rebaseHistory clean clean (redoStack b)}
   where clean=normalizeLines (bufferLines b)
@@ -152,8 +169,7 @@ replaceBuffer mode text b
       redoStack=[],revision=revision b+1,lastChange=Just (0,bufferLength b,T.length text)}
   where updated=restoreBaseline (baselineLines b) (editTree 0 (bufferLength b) text (bufferLines b))
 
--- The lazy projection is shared by rendering, highlighting and language tooling.
--- Undo retains only trees, so old flattened documents are not retained by history.
+-- | The shared lazy whole-text projection. Use line/slice accessors for local navigation.
 contents :: Buffer -> Text
 contents = cachedContents
 
@@ -178,6 +194,7 @@ linesFromText = FT.fromList . go . T.splitOn "\n"
     go [t] = [line t]
     go (t:ts) = line (t <> "\n") : go ts
 
+-- | Live character and editor-row totals from the root measure; tombstones do not count.
 bufferLength, bufferLineCount :: Buffer -> Int
 bufferLength = characterCount . FT.measure . bufferLines
 bufferLineCount = lineCount . FT.measure . bufferLines
@@ -186,6 +203,7 @@ bufferLineCount = lineCount . FT.measure . bufferLines
 bufferNewline :: Buffer -> Text
 bufferNewline b = if containsCRLF (FT.measure (bufferLines b)) then "\r\n" else "\n"
 
+-- | Read a clamped start/count range of live text using measured splits.
 bufferSlice :: Buffer -> Int -> Int -> Text
 bufferSlice b start count = rangeText a (a+min (max 0 count) (bufferLength b-a)) (bufferLines b)
   where a=max 0 (min (bufferLength b) start)
@@ -205,14 +223,17 @@ splitLeaf position tree = case FT.viewl right of
     (left,right)=FT.split ((>p) . characterCount) tree
     (prefix,final)=FT.split ((>lineCount (FT.measure tree)-1) . lineCount) tree
 
+-- | Locate a character offset as a zero-based row and character column.
 bufferLineColumn :: Buffer -> Int -> (Int,Int)
 bufferLineColumn b p = let (before,_,column,_) = splitLine p (bufferLines b)
                       in (lineCount (FT.measure before),column)
 
+-- | Find the start of a zero-based live row using the tree measure.
 bufferLineOffset :: Buffer -> Int -> Int
 bufferLineOffset b row = characterCount (FT.measure before)
   where (before,_) = FT.split ((>max 0 row) . lineCount) (bufferLines b)
 
+-- | Read one live row without its line terminator; out-of-range rows return empty text.
 bufferLineAt :: Buffer -> Int -> Text
 bufferLineAt b row = case FT.viewl remaining of
   FT.EmptyL -> ""
@@ -256,6 +277,8 @@ dirty b | byteMode b==savedByteMode b = bufferLineChanges b/=(0,0)
 ordered :: Selection -> (Int,Int)
 ordered (Selection a c) = (min a c, max a c)
 
+-- | Replace a clamped half-open selection and retain the previous tree for Undo.
+-- Invalid byte-mode characters are ignored; text-preserving edits add no history.
 replaceSelection :: Selection -> Text -> Buffer -> Buffer
 replaceSelection sel inserted b@Buffer{bufferLines=tree,undoStack=history,revision=version}
   | byteMode b && T.any ((>255) . ord) inserted = b {lastChange=Nothing}
@@ -687,7 +710,7 @@ characterWidth '\r' = 0
 characterWidth c | c < ' ' || c == '\DEL' = 1
 characterWidth c = safeWcwidth c
 
--- Counts of inserted and removed lines relative to the last load/save.
+-- | Return inserted and deleted baseline-line counts from the root measure.
 bufferLineChanges :: Buffer -> (Int,Int)
 bufferLineChanges b=let measure=FT.measure (bufferLines b) in (newLineCount measure,deletedLineCount measure)
 

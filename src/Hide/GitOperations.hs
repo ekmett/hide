@@ -1,4 +1,11 @@
 {-# LANGUAGE OverloadedStrings #-}
+-- | Serialize UI and MCP Git work through one owned background worker.
+--
+-- Both entry paths reserve the same worker under desktop serialization. Mutations
+-- interlock with conflicting saves/commands and ordinary quit waits. Agent pull
+-- separates fetch/preparation from integration under current policy. One-time review
+-- IDs bind commits to evidence. Reload adopts only matching clean buffers, leaving
+-- intervening edits and their save-conflict baselines intact.
 module Hide.GitOperations (withGitOperations, gitOperationEffects, tickGitOperations, gitTools, gitToolNames, gitTool) where
 
 import Control.Concurrent
@@ -33,6 +40,7 @@ data Result = Branches FilePath [T.Text]
 data Worker = Worker Bool (Maybe Integer) ThreadId (MVar (Either SomeException Result))
 data GitOperations = GitOperations (IORef (Maybe Worker)) (IORef (Maybe FilePath)) (IORef (Integer,M.Map Integer Value)) (IORef (Maybe (T.Text,GitReview)))
 
+-- | Scope the Git worker and pending operation state.
 withGitOperations :: (GitOperations -> IO a) -> IO a
 withGitOperations = bracket (GitOperations <$> newIORef Nothing <*> newIORef Nothing <*> newIORef (0,M.empty) <*> newIORef Nothing) close
   where
@@ -157,6 +165,7 @@ readBranches root = do
   refs <- checkedGit root ["for-each-ref","--format=%(refname:short)%09%(symref)","refs/heads","refs/remotes"]
   pure (Branches root [name | line<-T.lines refs, let (name,symbolic)=T.breakOn "\t" line, T.null (T.drop 1 symbolic), name/=current, not (T.null name)])
 
+-- | Apply Git serialization/interlocks and delegate other effects.
 gitOperationEffects :: GitOperations -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> [Effect] -> IO (Bool,Desktop)
 gitOperationEffects runtime@(GitOperations ref _ _ _) core = foldM apply . (False,)
   where
@@ -185,8 +194,7 @@ gitOperationEffects runtime@(GitOperations ref _ _ _) core = foldM apply . (Fals
         startWorker runtime mutates Nothing (action root)
         pure (False,desktop {status=title<>"…",gitReview=Nothing})
 
--- Applying results happens on the UI thread. Any buffer edited while Git ran is
--- kept with its old disk baseline, so a later Save detects the disk conflict.
+-- | Adopt completed Git results while preserving intervening edits.
 tickGitOperations :: GitOperations -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> IO Desktop
 tickGitOperations (GitOperations ref focused jobs reviews) core initial = do
   previous <- readIORef focused
@@ -313,6 +321,8 @@ completion ident result=case result of
 unsaved :: Desktop -> Bool
 unsaved=any (dirty . documentBuffer) . M.elems . buffers
 
+-- | Accept an asynchronous Git job or inspect status/review. A returned job ID
+-- means acceptance, not successful completion; review IDs are consumed once.
 gitTool :: GitOperations -> Desktop -> T.Text -> Value -> IO (Desktop,IO (Either T.Text Value))
 gitTool runtime@(GitOperations ref _ jobs reviews) desktop name args=case parseEither (withObject "arguments" pure) args of
   Left _ -> reply desktop (Left "Expected an arguments object.")
