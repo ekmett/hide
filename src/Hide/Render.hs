@@ -320,7 +320,7 @@ renderDesktop d = flattenPicture (screenSize d) ((V.picForLayers (privacyLayers+
     toolchainImage = label (attr black (if statusHover d==Just (length (statusHints d)) then green else gray)) (toolchainBadgeText d)
     badge = if activeConversation d then "" else gitBadgeText d
     badgeImage = if T.null badge then V.emptyImage else label paper (" │ "<>gitBranchText d<>" ")
-      V.<|> label (attr green gray) ("+"<>gitCountText (branchAdded d)) V.<|> label paper " "
+      V.<|> label (attr (V.RGBColor 0 85 0) gray) ("+"<>gitCountText (branchAdded d)) V.<|> label paper " "
       V.<|> label (attr red gray) ("-"<>gitCountText (branchDeleted d)) V.<|> label paper " "
     cursor = case dialog d of
       Just dg -> case drop (focus dg) (zip (fieldRects d dg) (fields dg)) of

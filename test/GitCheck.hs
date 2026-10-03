@@ -109,7 +109,7 @@ checks = bracket temporary removePathForcibly $ \base -> do
       choosing=badge {dialog=Just (Dialog "Merge branch" (Merging ["topic"]) [ListBox "Branch" ["topic"] 0] 0 ["Merge","Cancel"] [])}
       (_,chosen)=handleEvent (V.EvKey V.KEnter []) choosing
   check "Git badge shows both counts" ("main* +12 -3" `T.isInfixOf` snapshot badge)
-  check "Git additions are green" ("color:rgb(0,170,0);background:rgb(170,170,170)'>+12" `T.isInfixOf` snapshotHtml badge)
+  check "Git additions are dark green" ("color:rgb(0,85,0);background:rgb(170,170,170)'>+12" `T.isInfixOf` snapshotHtml badge)
   check "Git deletions are red" ("color:rgb(170,0,0);background:rgb(170,170,170)'>-3" `T.isInfixOf` snapshotHtml badge)
   let longBadge=badge {branchStatus=T.replicate 100 "branch/"}
   check "long branch truncation keeps counts visible" ("… +12 -3" `T.isInfixOf` snapshot longBadge && T.length (gitBadgeText longBadge)<=80)
