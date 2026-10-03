@@ -1709,6 +1709,14 @@ fileEntryAt x y d dg = listToMaybe
   , let chosen=(max 0 selected `div` 16)*16+y-top r-2+(if column>cw+1 then 8 else 0)
   , chosen<length entries]
 
+-- A coalesced wheel burst retains distance but renders only its final state.
+wheelEvent :: Int -> Int -> Int -> [V.Modifier] -> Desktop -> (Desktop,[Effect])
+wheelEvent x y steps mods d = go (abs steps) d []
+  where
+    event=V.EvMouseDown x y (if steps>0 then V.BScrollUp else V.BScrollDown) mods
+    go 0 current pending=(current,concat (reverse pending))
+    go n current pending=let (next,requests)=handleEvent event current in go (n-1) next (requests:pending)
+
 mouseEvent :: Int -> Int -> V.Button -> [V.Modifier] -> Desktop -> (Desktop,[Effect])
 mouseEvent x y V.BLeft _ d | Just capture <- drag d = (case capture of
   ReviewSizing wid -> case find ((==wid).windowId) (windows d) of

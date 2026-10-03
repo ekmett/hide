@@ -30,7 +30,7 @@ import THC.Edit.Render (renderDesktop)
 import THC.Edit.Unicode (displayOpsForPic, graphemes, clusterWidth)
 
 data WebInput = Key T.Text [V.Modifier] | Paste T.Text | Mouse T.Text Int Int Int Int [V.Modifier]
-              | SystemTheme Bool | BrowserCommand Command | MenuCommand (Maybe Command) | UploadFile T.Text BS.ByteString | Frontend (Maybe Int) Bool | OpenPath FilePath | Resize Int Int | SuspendSession | Blur | Modifiers [V.Modifier] deriving (Eq,Show)
+              | Wheel Int Int Int [V.Modifier] | SystemTheme Bool | BrowserCommand Command | MenuCommand (Maybe Command) | UploadFile T.Text BS.ByteString | Frontend (Maybe Int) Bool | OpenPath FilePath | Resize Int Int | SuspendSession | Blur | Modifiers [V.Modifier] deriving (Eq,Show)
 
 parseInput :: Value -> Parser WebInput
 parseInput = withObject "browser event" $ \o -> do
@@ -79,7 +79,11 @@ parseInput = withObject "browser event" $ \o -> do
       action <- o .: "action"; x <- o .: "x"; y <- o .: "y"
       button <- o .:? "button" .!= 0; clicks <- o .:? "clicks" .!= 1
       unless (action `elem` ["down","up","move","wheel-up","wheel-down"] && x>=(-1) && x<512 && y>=(-1) && y<256 && button>=0 && button<=2 && clicks>=0 && clicks<=3) (fail "Invalid mouse event")
-      Mouse action x y button clicks <$> mods
+      steps <- o .:? "steps" .!= 1
+      unless (steps>=1 && steps<=256) (fail "Invalid wheel distance")
+      if action `elem` ["wheel-up","wheel-down"] && steps/=1
+        then Wheel x y (if action=="wheel-up" then steps else -steps) <$> mods
+        else Mouse action x y button clicks <$> mods
     "suspend" -> pure SuspendSession
     "blur" -> pure Blur
     "modifiers" -> Modifiers <$> mods
@@ -105,6 +109,7 @@ applyGuestInput input d
       Key name mods -> maybe False (\key->guestKeyAllowed d key mods) (inputKey name mods)
       Paste _ -> guestKeyboardAllowed d
       Mouse _ x y _ _ _ -> pointerAllowedAt d x y
+      Wheel x y _ _ -> pointerAllowedAt d x y
       Blur -> True
       Modifiers _ -> guestKeyboardAllowed d
       BrowserCommand cmd -> guestKeyboardAllowed d && guestCommandAllowed cmd
@@ -135,6 +140,7 @@ applyInputUnchecked input d = case input of
   Resize w h -> handleEvent (V.EvResize w h) d
   Blur -> hoverAt (-1) (-1) d {drag=Nothing,dragOriginal=Nothing,prefix=Nothing,buttonPressed=Nothing,heldModifiers=[]}
   Modifiers mods -> (d {heldModifiers=mods},[])
+  Wheel x y steps mods -> wheelEvent x y steps mods d
   Mouse action x y button clicks mods -> case action of
     "move" | dialog d/=Nothing || drag d==Nothing -> hoverAt x y d
            | otherwise -> handleEvent (V.EvMouseDown x y V.BLeft mods) d

@@ -47,6 +47,9 @@ checks = do
 
   check "download filenames respect UTF8 filesystem limits" (BS.length (TE.encodeUtf8 (sanitizeDownloadName (T.replicate 180 "界")))<=180)
 #ifdef WITH_REMOTE
+  check "coalesced native wheel travel survives the wire" (case nativeEventInput [9,10,4,-125,0] of
+    Just value -> parseEither P.parseInput value==Right (P.Wheel 10 4 (-125) [])
+    _ -> False)
   let desktop = (addDocument Nothing (newBuffer "λ界 é\n🐈") (initialDesktop (80,25))) {videoMode=Just 3,browserFrontend=True}
       actualRows = P.frameRows desktop
   (decoded,reconstructed) <- P.decodeFrame [] (BL.toStrict (P.framePacket True [] actualRows (P.frameMetadata "/remote/project" desktop)))

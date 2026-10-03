@@ -4,7 +4,7 @@ module THC.Edit.Window (runWindow, nativeMenuShortcut
   , check, utf8, nativeMenus, nativeCommands
   , c_system_dark, c_open, c_mode, c_scale, c_title, c_close, c_size
   , c_begin, c_glyph, c_unicode, c_pixelate_unicode, c_cursor, c_cursor_blink
-  , c_crt_filter, c_present, c_wait, c_text, c_clipboard, c_set_clipboard
+  , c_crt_filter, c_present, c_wait, c_wake, c_text, c_clipboard, c_set_clipboard
 #ifdef darwin_HOST_OS
   , c_menu_enabled, c_menu_prepare
 #endif
@@ -51,6 +51,7 @@ foreign import ccall unsafe "thc_cursor" c_cursor :: CInt -> CInt -> IO ()
 foreign import ccall unsafe "thc_cursor_blink" c_cursor_blink :: CInt -> IO ()
 foreign import ccall unsafe "thc_crt_filter" c_crt_filter :: CInt -> IO ()
 foreign import ccall unsafe "thc_present" c_present :: IO CInt
+foreign import ccall unsafe "thc_wake" c_wake :: IO ()
 foreign import ccall safe "thc_wait" c_wait :: Ptr Int32 -> IO CInt
 foreign import ccall unsafe "thc_text" c_text :: IO CString
 foreign import ccall unsafe "thc_clipboard" c_clipboard :: IO CString
@@ -214,7 +215,7 @@ runWindow backend scale effects tick initial = do
     dispatch (6:_) d | dialog d /= Nothing = pure (d,[])
                     | otherwise = pure (runCommand Quit d)
     dispatch (7:_) d = pure (hoverAt (-1) (-1) d {drag=Nothing,dragOriginal=Nothing,prefix=Nothing,buttonPressed=Nothing,heldModifiers=[]})
-    dispatch (9:x:y:direction:mods:_) d = pure (handleEvent (V.EvMouseDown x y (if direction>0 then V.BScrollUp else V.BScrollDown) (keyMods mods)) d)
+    dispatch (9:x:y:direction:mods:_) d = pure (wheelEvent x y direction (keyMods mods) d)
     dispatch (11:i:_) d | i >= 0, cmd:_ <- drop i nativeCommands =
       if cmd == Paste then paste d
       else if dialog d == Nothing || dialogCommandAllowed cmd d then clipboardResult (cmd `elem` [Copy,Cut]) d (runCommand cmd d)

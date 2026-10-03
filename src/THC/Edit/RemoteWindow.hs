@@ -5,6 +5,7 @@ module THC.Edit.RemoteWindow
   , remoteInputAllowed, remoteCloseDetaches, remoteDetachShortcut) where
 import Control.Monad (unless)
 import Data.Aeson hiding (withArray)
+import qualified Data.Aeson.KeyMap as KM
 import Data.Aeson.Types (Parser, parseEither)
 import Data.Bits ((.&.))
 import qualified Data.ByteString as BS
@@ -20,7 +21,6 @@ import Control.Concurrent.Async (withAsync, poll)
 import Control.Concurrent.STM hiding (check)
 import Control.Exception (bracket, bracket_, throwIO, IOException, catch, finally)
 import Control.Monad (forM_, forever, when, foldM)
-import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.Map.Strict as M
 import Foreign (alloca, allocaArray, peek, peekArray, withArray)
@@ -116,7 +116,9 @@ nativeEventInput event = case event of
   5:w:h:_ -> Just (object ["type" .= ("resize"::T.Text),"width" .= max 40 (min 512 w),"height" .= max 12 (min 256 h)])
   6:_ -> Just (object ["type" .= ("command"::T.Text),"command" .= ("quit"::T.Text)])
   7:_ -> Just (object ["type" .= ("blur"::T.Text)])
-  9:x:y:direction:mods:_ -> mouse (if direction>0 then "wheel-up" else "wheel-down") x y 1 1 mods
+  9:x:y:direction:mods:_ -> case mouse (if direction>0 then "wheel-up" else "wheel-down") x y 1 1 mods of
+    Just (Object fields) -> Just (Object (KM.insert "steps" (toJSON (max 1 (min 256 (abs direction)))) fields))
+    result -> result
   11:i:_ | i>=0, ident:_ <- drop i nativeMenuNames -> Just (object ["type" .= ("menu"::T.Text),"command" .= ident])
   12:x:y:_ -> mouse "move" x y 1 0 0
   13:mods:_ -> Just (object ["type" .= ("modifiers"::T.Text),"mods" .= modifierNames mods])
@@ -156,7 +158,7 @@ data Incoming = Frame RemoteFrame | Assets (M.Map T.Text Glyph) | Control Value
 receiveFrames :: RemotePeer -> TBQueue Incoming -> IO ()
 receiveFrames peer queue = go [] (object []) Nothing
   where
-    emit = atomically . writeTBQueue queue
+    emit item = atomically (writeTBQueue queue item) >> c_wake
     go rows metadata download = peerReceive peer >>= \packet -> case packet of
       Nothing -> emit (Control (object ["type" .= ("closed"::T.Text)]))
       Just (JsonPacket value) -> do

@@ -35,7 +35,8 @@ static bool suppress_option_text;
 static bool blink_cursor = true, cursor_present, cursor_drawn;
 static int cursor_x = -1, cursor_y = -1;
 static Uint64 cursor_epoch;
-static Uint32 command_event;
+static Uint32 command_event, wake_event;
+static double wheel_remainder;
 static void pointer(float x, float y, int32_t *event);
 
 static void clear_pointer(void) {
@@ -94,7 +95,9 @@ int thc_open(const char *backend, double requested_scale, int requested_cols, in
     if (!SDL_Init(SDL_INIT_VIDEO)) return 0;
     crt_filter = false;
     blink_cursor = true; cursor_epoch = SDL_GetTicks();
-    command_event = SDL_RegisterEvents(1);
+    command_event = SDL_RegisterEvents(2);
+    wake_event = command_event + 1;
+    wheel_remainder = 0;
     /* Documentation captures use the real Metal renderer without showing a window. */
     const char *capture_exit = SDL_getenv("THC_EDIT_CAPTURE_EXIT");
     SDL_WindowFlags flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY;
@@ -335,6 +338,24 @@ static void pointer(float x, float y, int32_t *event) {
 void thc_post_command(int command) {
     SDL_Event e; SDL_zero(e); e.type = command_event; e.user.code = command; SDL_PushEvent(&e);
 }
+/* SDL_PushEvent is thread-safe: decoded frames wake the main thread directly. */
+void thc_wake(void) {
+    if (!SDL_HasEvent(wake_event)) {
+        SDL_Event e; SDL_zero(e); e.type = wake_event; SDL_PushEvent(&e);
+    }
+}
+/* Only consume the consecutive run: never move across release/key boundaries. */
+static void latest_motion(SDL_Event *event) {
+    SDL_Event next;
+    while (SDL_PeepEvents(&next, 1, SDL_PEEKEVENT, SDL_EVENT_FIRST, SDL_EVENT_LAST) == 1 &&
+           next.type == SDL_EVENT_MOUSE_MOTION && next.motion.windowID == event->motion.windowID &&
+           next.motion.which == event->motion.which && next.motion.state == event->motion.state) {
+        SDL_PeepEvents(event, 1, SDL_GETEVENT, SDL_EVENT_MOUSE_MOTION, SDL_EVENT_MOUSE_MOTION);
+    }
+}
+static double wheel_delta(const SDL_Event *event) {
+    return event->wheel.y * (event->wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -1 : 1);
+}
 static int idle_event(int32_t *out) {
     out[0] = cursor_present && cursor_drawn != cursor_phase() ? 8 : 0;
     return 1;
@@ -348,6 +369,7 @@ int thc_wait(int32_t *out) {
         if (now >= deadline) return idle_event(out);
         SDL_ClearError();
         if (!SDL_WaitEventTimeout(&e, (Sint32)(deadline - now))) return *SDL_GetError() ? 0 : idle_event(out);
+        if (e.type == wake_event) return 1;
         if (e.type == command_event) { out[0] = 11; out[1] = e.user.code; return 1; }
         switch (e.type) {
         case SDL_EVENT_QUIT: case SDL_EVENT_WINDOW_CLOSE_REQUESTED: out[0] = 6; return 1;
@@ -419,18 +441,34 @@ int thc_wait(int32_t *out) {
             left_down = false; SDL_CaptureMouse(false);
             out[0] = 4; pointer(e.button.x, e.button.y, out); return 1;
         case SDL_EVENT_MOUSE_MOTION: {
+            latest_motion(&e);
             int old_x = mouse_x, old_y = mouse_y;
             bool was_visible = SDL_CursorVisible();
             pointer(e.motion.x, e.motion.y, out);
-            if (!left_down && mouse_x == old_x && mouse_y == old_y && SDL_CursorVisible() == was_visible) break;
+            if (mouse_x == old_x && mouse_y == old_y && SDL_CursorVisible() == was_visible) break;
             out[0] = left_down ? 3 : 12; return 1;
         }
-        case SDL_EVENT_MOUSE_WHEEL:
-            if (e.wheel.y == 0) break;
+        case SDL_EVENT_MOUSE_WHEEL: {
+            double delta = wheel_delta(&e);
+            SDL_Event next;
+            while (SDL_PeepEvents(&next, 1, SDL_PEEKEVENT, SDL_EVENT_FIRST, SDL_EVENT_LAST) == 1 &&
+                   next.type == SDL_EVENT_MOUSE_WHEEL && next.wheel.windowID == e.wheel.windowID &&
+                   next.wheel.which == e.wheel.which && next.wheel.mouse_x == e.wheel.mouse_x &&
+                   next.wheel.mouse_y == e.wheel.mouse_y && wheel_delta(&next) * delta > 0) {
+                SDL_PeepEvents(&next, 1, SDL_GETEVENT, SDL_EVENT_MOUSE_WHEEL, SDL_EVENT_MOUSE_WHEEL);
+                delta += wheel_delta(&next);
+            }
+            if (!isfinite(delta) || delta == 0) break;
+            /* Retain fractional travel; a tiny momentum sample is not a wheel notch. */
+            if (delta * wheel_remainder < 0) wheel_remainder = 0;
+            wheel_remainder += delta;
+            int steps = (int)SDL_clamp(trunc(wheel_remainder), -256, 256);
+            wheel_remainder -= trunc(wheel_remainder);
+            if (!steps) break;
             out[0] = 9; pointer(e.wheel.mouse_x, e.wheel.mouse_y, out);
-            out[3] = e.wheel.y > 0 ? 1 : -1;
-            if (e.wheel.direction == SDL_MOUSEWHEEL_FLIPPED) out[3] = -out[3];
+            out[3] = steps;
             return 1;
+        }
         default: break;
         }
     }

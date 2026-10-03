@@ -2,6 +2,8 @@
 #define THC_WINDOW_H
 #include <stdint.h>
 void thc_post_command(int command);
+/* Thread-safe wake after queuing an incoming frame; no repaint implied. */
+void thc_wake(void);
 int thc_open(const char *backend, double scale, int cols, int rows, int cell_height);
 int thc_mode(int cell_height, int cols, int rows);
 /* Grow/shrink tiles without changing the grid; zero restores the density-aware default. */
@@ -21,6 +23,7 @@ void thc_crt_filter(int enabled);
 int thc_present(void);
 /* Six integers; kind 0 is a 100ms idle wake, kind 8 requests a redraw (also blink),
  * kind 12 is hover at cell x,y, and kind 13 carries held modifier bits in slot 1.
+ * Wheel kind 9 carries signed detents in slot 3, including coalesced travel.
  * Button-down kind 3 has click count in slot 3 and SDL button number in slot 5.
  * Hover (-1,-1) leaves the window. A zero return indicates an SDL error. */
 int thc_wait(int32_t *event);
