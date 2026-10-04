@@ -253,9 +253,13 @@ when no separate editor workspace is needed.
 
 **Do:** read `agent_directory` for IDs, workspace paths, limits and advertised
 model/effort choices. Call `agent_spawn` with a provisional `name` and concrete
-`task`. Specify `workspace: {"mode":"worktree"}` for independent feature work.
-Use `workspace: {"mode":"shared"}` only for intentional shared edits. Omission
-currently chooses shared mode, so make the choice explicit.
+`task`. Omitted `workspace` creates a separate worktree and hidden editor from the
+caller's committed `HEAD`, with independent buffers, build jobs, terminals and
+debugger. Unsaved/uncommitted parent edits are not copied. It requires Git;
+failure does not fall back to shared edits. Specify optional `ref`, `branch` or
+`name` in `workspace: {"mode":"worktree"}` when needed. Use
+`workspace: {"mode":"shared"}` only for intentional shared edits in the parent's
+editor.
 Use a fresh context unless the provider supports a real fork and the source is
 yours to fork. After understanding a task, choose a descriptive name with
 `agent_rename`; names can also be assigned to other agents without changing IDs.

@@ -19,6 +19,7 @@ import System.Timeout (timeout)
 import qualified Hide.ACP as ACP
 import Hide.AgentAccess
 import Hide.AgentHub
+import Hide.AgentMCP (agentTool)
 import Hide.AgentRuntime
 import Hide.Session
 
@@ -72,7 +73,11 @@ checks = bracket temporary removePathForcibly $ \root -> do
       failPendingPrimary runtime "Provider disconnected."
       ended <- waitAgent hub Human primary next 2000 >>= right
       assert "disconnect resolves outstanding primary delivery" (field "status" ended==Just ("failed"::T.Text))
-      child <- spawnAgent hub (Agent primary) spec >>= right
+      noGit <- agentTool hub (Agent primary) project "agent_spawn" (object ["name" .= ("No Git default"::T.Text),"task" .= ("Independent work"::T.Text)])
+      assert "omitted workspace refuses non-Git without shared fallback" (either (const True) (const False) noGit)
+      assert "failed isolated default starts no editor" . null =<< readIORef opened
+      childResult <- agentTool hub (Agent primary) project "agent_spawn" (object ["name" .= ("child"::T.Text),"task" .= ("Inspect code"::T.Text),"workspace" .= object ["mode" .= ("shared"::T.Text)]]) >>= right
+      child <- spawnedId childResult
       record <- agentSession runtime child >>= maybe (error "Missing shared editor") pure
       assert "shared child uses existing editor session" (sessionId record==session)
       assert "shared child starts no hidden editor" . null =<< readIORef opened
@@ -110,7 +115,8 @@ checks = bracket temporary removePathForcibly $ \root -> do
       callProcess "git" ["-C",project,"add","source.txt"]
       callProcess "git" ["-C",project,"-c","user.name=Runtime Test","-c","user.email=test@example.invalid","-c","commit.gpgsign=false","commit","-qm","fixture"]
       writeFile (project </> "source.txt") "dirty\n"
-      isolated <- spawnAgent hub Human spec {spawnName="worktree",spawnWorkspace=Worktree Nothing Nothing (Just "runtime-test")} >>= right
+      isolatedResult <- agentTool hub Human project "agent_spawn" (object ["name" .= ("worktree"::T.Text),"task" .= ("Inspect committed source"::T.Text)]) >>= right
+      isolated <- spawnedId isolatedResult
       workspace <- agentSession runtime isolated >>= maybe (error "Missing worktree editor") pure
       assert "worktree owns independent editor and directory" (sessionId workspace/=session && sessionDirectory workspace/=project)
       assert "worktree starts at committed source" . (=="committed\n") =<< readFile (sessionDirectory workspace </> "source.txt")
@@ -122,6 +128,7 @@ checks = bracket temporary removePathForcibly $ \root -> do
       assert "ending worktree agent preserves checkout" =<< doesFileExist (sessionDirectory workspace </> "source.txt")
   persistenceChecks root
   where
+    spawnedId value=maybe (fail "Missing spawned agent ID") (pure . AgentId) (field "agent" value >>= field "id")
     isCancel CancelPrimary = True
     isCancel _ = False
 

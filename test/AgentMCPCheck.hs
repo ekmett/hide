@@ -71,6 +71,17 @@ checks=do
     forked<-call (Agent child) "agent_spawn" (object ["name" .= ("Fork"::T.Text),"task" .= ("Fork task"::T.Text),"context" .= ("fork"::T.Text),"sourceAgentId" .= agentIdText child]) >>= right
     forkRequests<-readIORef launched
     ensure "fork source passes through trusted core validation" (case reverse forkRequests of request:_->startSource request==Just (PrivateSource child ("private-test-key-"<>agentIdText child)); _->False)
+    ensure "omitted fork workspace retains isolated default" (case reverse forkRequests of request:_->spawnWorkspace (startSpec request)==Worktree Nothing Nothing Nothing; _->False)
+    isolated<-call (Agent owner) "agent_spawn" (object ["name" .= ("Isolated default"::T.Text),"task" .= ("Independent work"::T.Text),"model" .= ("large"::T.Text),"effort" .= ("high"::T.Text)]) >>= right
+    defaultRequests<-readIORef launched
+    ensure "omitted workspace reaches hub as worktree while preserving model and effort" (case reverse defaultRequests of
+      request:_->let selected=startSpec request in spawnWorkspace selected==Worktree Nothing Nothing Nothing && spawnContext selected==Fresh && spawnModel selected==Just "large" && spawnEffort selected==Just "high"
+      _->False)
+    _<-call (Agent owner) "agent_end" (target (identOf isolated)) >>= right
+    shared<-call (Agent owner) "agent_spawn" (object ["name" .= ("Intentional shared"::T.Text),"task" .= ("Shared work"::T.Text),"workspace" .= object ["mode" .= ("shared"::T.Text)]]) >>= right
+    sharedRequests<-readIORef launched
+    ensure "explicit shared workspace reaches hub unchanged" (case reverse sharedRequests of request:_->spawnWorkspace (startSpec request)==Shared; _->False)
+    _<-call (Agent owner) "agent_end" (target (identOf shared)) >>= right
     unsupported<-call Human "agent_spawn" (object ["name" .= ("Unknown model"::T.Text),"task" .= ("task"::T.Text),"model" .= ("invented"::T.Text)])
     ensure "unadvertised models return explicit failure" (isLeft unsupported)
     atomically (writeTVar gate False)
