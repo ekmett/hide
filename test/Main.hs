@@ -24,6 +24,7 @@ import qualified PluginBufferCheck
 import qualified MenuCommandsCheck
 import qualified MenuContextCheck
 import qualified PluginMenuCheck
+import qualified PluginTreeCheck
 import qualified PluginCommandCheck
 import qualified DocsMCPCheck
 import qualified EnvironmentCheck
@@ -128,6 +129,7 @@ main = do
   WorkerDiffCheck.checks
   BufferEditsCheck.checks
   PluginBufferCheck.checks
+  PluginTreeCheck.checks
   PluginCommandCheck.checks
   PluginMenuCheck.checks
   MenuCommandsCheck.checks
