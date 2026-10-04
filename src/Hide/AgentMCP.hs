@@ -28,7 +28,7 @@ agentTools=[object ["name" .= name,"description" .= description,"inputSchema" .=
 specs :: [(Text,Text,Bool,[Text],[(Text,Value)])]
 specs=
   [("agent_directory","List session agents, parent/name, state, workspace, limits and provider-advertised model/effort choices. Private provider keys are omitted.",True,[],[])
-  ,("agent_spawn","Create a child and enqueue its task, returning public agent metadata and a message ticket. Uses the caller's workspace; worktree starts from committed source. No automatic display focus. Fork requires provider support and caller ownership.",False,["name","task"],
+  ,("agent_spawn","Create a child and enqueue its task, returning public agent metadata and a message ticket. Defaults to a separate worktree/editor from the caller's committed HEAD; requires Git. Explicit workspace mode shared opts into the caller's editor. No automatic display focus. Fork requires provider support and caller ownership.",False,["name","task"],
     [("name",string 80),("task",string 65536),("context",enum ["fresh","fork"]),("sourceAgentId",ident),("model",string 4096),("effort",string 4096),
      ("workspace",schema ["mode"] [("mode",enum ["shared","worktree"]),("ref",string 4096),("branch",string 4096),("name",string 4096)])])
   ,("agent_rename","Rename an agent; its stable ID and rename history remain. Names must be unique.",False,["agentId","name"],[("agentId",ident),("name",string 80)])
@@ -75,7 +75,7 @@ agentTool hub actor directory name args=case [properties | (key,_,_,_,properties
         model<-optionalText o "model" 4096
         effort<-optionalText o "effort" 4096
         workspace<-case KM.lookup "workspace" o of
-          Nothing->pure Shared
+          Nothing->pure (Worktree Nothing Nothing Nothing)
           Just value->strictObject ["mode","ref","branch","name"] parseWorkspace value
         let spec=SpawnSpec childName task directory workspace origin model effort
         pure $ do

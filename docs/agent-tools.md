@@ -361,12 +361,14 @@ messages from other agents remain peer messages, not human instructions.
 and actual provider fork support; it never silently starts a fresh conversation.
 Choose `model` and `effort` only from provider-advertised choices.
 
-`workspace` defaults to `{"mode":"shared"}`. Use `{"mode":"worktree"}` with
-optional `ref`, `branch` and `name` for a separate Git checkout from committed
-source. Unsaved/uncommitted parent edits are not copied. Its editor runs without
-a display until opened, with separate buffers, build jobs, terminals and debugger.
-Shared children use their parent's editor and its existing job slots. Ending an
-agent does not delete its worktree.
+`workspace` defaults to `{"mode":"worktree"}`: a separate checkout of the caller's
+committed `HEAD`, detached unless a `branch` is specified. Optional `ref`, `branch`
+and `name` retain their normal worktree meanings. Unsaved/uncommitted parent edits
+are not copied. Git is required; failure never falls back to shared mode. Its
+editor runs without a display until opened, with separate buffers, build jobs,
+terminals and debugger. Explicit `{"mode":"shared"}` opts into the parent's editor
+and existing job slots. The human New Agent dialog creates a shared child.
+Ending an agent does not delete its worktree.
 
 Global `[editor.agents]` sets `max_agents` (default 8, range 1–64, including the
 primary) and `max_subagents` (default 4, range 0–64 direct children per agent).
