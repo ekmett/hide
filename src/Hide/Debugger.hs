@@ -49,13 +49,13 @@ import Hide.Model
 type Core = Desktop -> [Effect] -> IO (Bool,Desktop)
 data Debugger = Debugger (IORef State) (IO Integer) HdbRuntime
 data Pending = Init | Attach | Configure | Breaks Text [Int] | Exceptions | Threads Bool
-  | Stack Bool | Scopes | Variables | ExceptionDetails | Source Bool Value | Control Bool | Detach
+  | Stack Bool Int Int | Scopes Int | Variables Int | ExceptionDetails | Source Bool Int Value | Control Bool | Detach
   | Inspection Text (MVar (Either Text Value))
   deriving (Eq)
 data Breakpoint = Breakpoint { bpLine :: Int, bpResult :: Value } deriving (Eq,Show)
 data State = State
   { client :: Maybe D.Client, connected :: Bool, capabilities :: Value, ready :: Bool, configured :: Bool
-  , pending :: M.Map Int (Pending,Int,Integer), generation :: Int
+  , pending :: M.Map Int (Pending,Int,Integer), generation :: Int, frameRevision :: Int
   , stopped :: Bool, thread :: Maybe Int, frame :: Maybe Value, frames :: [Value], followSource :: Bool
   , exceptionFilters :: [Text]
   , breakpoints :: M.Map Text (Value,[Breakpoint]), sources :: M.Map Int Value
@@ -69,7 +69,7 @@ data State = State
   }
 
 emptyState :: State
-emptyState = State {client=Nothing,connected=False,capabilities=Null,ready=False,configured=False,pending=M.empty,generation=0,
+emptyState = State {client=Nothing,connected=False,capabilities=Null,ready=False,configured=False,pending=M.empty,generation=0,frameRevision=0,
   stopped=False,thread=Nothing,frame=Nothing,frames=[],followSource=True,exceptionFilters=[],breakpoints=M.empty,sources=M.empty,
   root=".",endpoint=("127.0.0.1",4711),output="",failure=Nothing,disconnectAt=Nothing,endedAt=Nothing,programExitCode=Nothing,
   hdbLauncher=Nothing,debugEnvironment=[],debugConsoles=[],terminalLaunch=Nothing,outputShown=False,choices=M.empty,choiceId=0,breakRequests=M.empty,breakModified=M.empty,startRequest=("attach",object []),managed=False,adapterId="",variableRefs=M.empty}
@@ -376,9 +376,9 @@ perform runtime@(Debugger ref clock _) core action values d = do
         send runtime ExceptionDetails "exceptionInfo" (object ["threadId" .= tid]) >> pure d {status="Loading exception details..."}
       else pure d {status="This debugger does not support exception details."}
     ("threads",_) | configured s -> send runtime (Threads True) "threads" (object []) >> pure d {status="Loading threads..."}
-    ("stack",_) | stopped s, Just tid<-thread s -> send runtime (Stack True) "stackTrace" (stackArguments tid) >> pure d {status="Loading call stack..."}
+    ("stack",_) | stopped s, Just tid<-thread s -> sendStack runtime True tid >> pure d {status="Loading call stack..."}
     ("scopes",_) | stopped s, Just selected<-frame s,Just ident<-(field "id" selected :: Maybe Int) ->
-      send runtime Scopes "scopes" (object ["frameId" .= ident]) >> pure d {status="Loading scopes..."}
+      send runtime (Scopes (frameRevision s)) "scopes" (object ["frameId" .= ident]) >> pure d {status="Loading scopes..."}
     (command,_) | command `elem` ["continue","next","stepIn","stepOut","pause"],ready s,Just tid<-thread s,
                   (command=="pause" && not (stopped s)) || (command/="pause" && stopped s) -> do
       when (command/="pause") (modifyIORef' ref invalidate)
@@ -563,7 +563,7 @@ tickTerminalLaunch runtime@(Debugger ref _ _) d = do
 
 -- Frame and variable handles are scoped to a suspended execution state.
 invalidate :: State -> State
-invalidate s=s {generation=generation s+1,stopped=False,frame=Nothing,frames=[],choices=M.empty,variableRefs=M.empty}
+invalidate s=s {generation=generation s+1,frameRevision=frameRevision s+1,stopped=False,frame=Nothing,frames=[],choices=M.empty,variableRefs=M.empty}
 
 send :: Debugger -> Pending -> Text -> Value -> IO ()
 send (Debugger ref clock _) kind command arguments = do
@@ -575,6 +575,13 @@ send (Debugger ref clock _) kind command arguments = do
       Left (err::IOException) -> modifyIORef' ref (\state -> state {failure=Just ("DAP: "<>T.pack (show err))})
       Right ident -> modifyIORef' ref (\state -> state {pending=M.insert ident (kind,generation state,now) (pending state),
         breakRequests=case kind of Breaks key _ -> M.insert key ident (breakRequests state); _ -> breakRequests state})
+
+-- Capture presentation revision after a stop/thread transition. The stack
+-- target remains explicit even when another thread is selected while it waits.
+sendStack :: Debugger -> Bool -> Int -> IO ()
+sendStack runtime@(Debugger ref _ _) showPicker tid=do
+  current<-readIORef ref
+  send runtime (Stack showPicker tid (frameRevision current)) "stackTrace" (stackArguments tid)
 
 -- | Adopt DAP events, expire pending operations and advance resource retirement.
 tickDebugger :: Debugger -> Core -> Desktop -> IO Desktop
@@ -651,7 +658,7 @@ receive runtime@(Debugger ref clock _) core d event = do
       modifyIORef' ref (\state -> (invalidate state) {stopped=True,thread=tid})
       when (configured s) $ do
         send runtime (Threads False) "threads" (object [])
-        forM_ tid (\ident -> send runtime (Stack False) "stackTrace" (stackArguments ident))
+        forM_ tid (\ident -> sendStack runtime False ident)
       pure (automaticDesktop s d) {status="Stopped: "<>text "reason" body}
     D.Notification "invalidated" body -> do
       let areas=fromMaybe [] (field "areas" body) :: [Text]
@@ -659,11 +666,11 @@ receive runtime@(Debugger ref clock _) core d event = do
           threads=allAreas || "threads" `elem` areas
           stacks=threads || "stacks" `elem` areas
       if not (stacks || "variables" `elem` areas) then pure d else do
-        modifyIORef' ref (\state -> state {generation=generation state+1,choices=M.empty,variableRefs=M.empty,
+        modifyIORef' ref (\state -> state {generation=generation state+1,frameRevision=frameRevision state+1,choices=M.empty,variableRefs=M.empty,
           thread=if threads then Nothing else thread state,
           frame=if stacks then Nothing else frame state,frames=if stacks then [] else frames state})
         if threads then send runtime (Threads False) "threads" (object [])
-        else when (stacks && stopped s) $ forM_ (thread s) (\tid -> send runtime (Stack False) "stackTrace" (stackArguments tid))
+        else when (stacks && stopped s) $ forM_ (thread s) (\tid -> sendStack runtime False tid)
         pure (clearDialog d) {status="Debugger values changed; request scopes again."}
     D.Notification "continued" _ -> modifyIORef' ref invalidate >> pure (automaticDesktop s d) {status="Running..."}
     D.Notification "thread" _ -> when (configured s) (send runtime (Threads False) "threads" (object [])) >> pure d
@@ -693,7 +700,7 @@ receive runtime@(Debugger ref clock _) core d event = do
       Nothing -> pure d
       Just (kind,epoch,_) -> do
         modifyIORef' ref (\state -> state {pending=M.delete ident (pending state)})
-        if (stale kind && epoch/=generation s) || (case kind of Breaks key _ -> M.lookup key (breakRequests s)/=Just ident; _ -> False) then do
+        if (stale kind && epoch/=generation s) || selectionExpired s kind || (case kind of Breaks key _ -> M.lookup key (breakRequests s)/=Just ident; _ -> False) then do
           completeInspection kind (Left "Debugger inspection expired; refresh debug_status.")
           pure d
         else case kind of
@@ -709,12 +716,21 @@ receive runtime@(Debugger ref clock _) core d event = do
              case kind of
                Control wasStopped | wasStopped -> do
                  modifyIORef' ref (\state -> state {stopped=True})
-                 forM_ (thread s) (\tid -> send runtime (Stack False) "stackTrace" (stackArguments tid))
+                 forM_ (thread s) (\tid -> sendStack runtime False tid)
                _ -> pure ()
              pure (automaticDesktop s d) {status="DAP: "<>err}
            Right body -> if isJust (endedAt s) then pure d else response runtime core kind body d
   where
-    stale kind=case kind of Threads{} -> True; Control{} -> True; Stack{} -> True; Scopes -> True; Variables -> True; ExceptionDetails -> True; Source{} -> True; Inspection{} -> True; _ -> False
+    stale kind=case kind of Threads{} -> True; Control{} -> True; Stack{} -> True; Scopes{} -> True; Variables{} -> True; ExceptionDetails -> True; Source{} -> True; Inspection{} -> True; _ -> False
+
+-- Selection controls presentation/source follow only. Stopped handles remain
+-- valid for sibling frames until the stop epoch itself expires.
+selectionExpired :: State -> Pending -> Bool
+selectionExpired s kind=case kind of
+  Scopes revision -> revision/=frameRevision s
+  Variables revision -> revision/=frameRevision s
+  Source _ revision _ -> revision/=frameRevision s
+  _ -> False
 
 -- DAP lazy handles are executable: hdb forces a thunk when its children are
 -- requested. Track provenance for both UI and MCP; never guess a reference.
@@ -751,7 +767,7 @@ response runtime@(Debugger ref _ _) core kind body d = do
       pure d {status=if fst (startRequest s)=="launch" then "Launching debugger..." else "Attaching debugger..."}
     Attach -> do
       send runtime (Threads False) "threads" (object [])
-      when (stopped s) $ forM_ (thread s) (\tid -> send runtime (Stack False) "stackTrace" (stackArguments tid))
+      when (stopped s) $ forM_ (thread s) (\tid -> sendStack runtime False tid)
       pure d
     Configure -> pure d
     Breaks key requested -> do
@@ -763,24 +779,25 @@ response runtime@(Debugger ref _ _) core kind body d = do
       let rows=items "threads" body
           tid=case thread s of Just ident | any ((==Just ident).field "id") rows -> Just ident; _ -> listToMaybe rows >>= field "id"
       modifyIORef' ref (\state -> state {thread=tid})
-      when (stopped s && thread s==Nothing) $ forM_ tid (\ident -> send runtime (Stack False) "stackTrace" (stackArguments ident))
+      when (stopped s && thread s==Nothing) $ forM_ tid (\ident -> sendStack runtime False ident)
       if showPicker then showChoices runtime "Threads" "thread" rows (map (text "name") rows) d else pure d
-    Stack showPicker -> do
+    Stack _ tid selectedRevision | tid/=fromMaybe (-1) (thread s) || selectedRevision/=frameRevision s -> pure d
+    Stack showPicker _ _ -> do
       let rows=items "stackFrames" body
       modifyIORef' ref (\state -> state {frame=listToMaybe rows,frames=rows})
       if showPicker then showChoices runtime "Call stack" "frame" rows (map frameLabel rows) d
       else if not (followSource s) then pure d
       else maybe (pure d {status="Stopped; no source frame supplied."}) (openFrame runtime core False d) (listToMaybe rows)
-    Scopes -> do
+    Scopes _ -> do
       recordVariables ref "scopes" body
       let rows=items "scopes" body
       showChoices runtime "Scopes" "expand" rows (map (text "name") rows) d
-    Variables -> do
+    Variables _ -> do
       recordVariables ref "variables" body
       let rows=items "variables" body
       showChoices runtime "Variables" "expand" rows (map variableLabel rows) d
-    Source explicit _ | not explicit && not (followSource s) -> pure d
-    Source _ selected -> case field "content" body of
+    Source explicit _ _ | not explicit && not (followSource s) -> pure d
+    Source _ _ selected -> case field "content" body of
       Nothing -> pure d {status="DAP source response has no content."}
       Just content -> do
         let source=fromMaybe Null (field "source" selected)
@@ -809,15 +826,15 @@ select runtime@(Debugger ref _ _) core fullToken action values d = do
       when (configured s) (sendBreakpoints runtime key src remaining)
       pure d {status="Breakpoint removed."}
     "thread" | Just chosen<-selected >>= at rows,Just tid<-field "id" chosen -> do
-      modifyIORef' ref (\state -> (invalidate state) {stopped=stopped s,thread=Just tid})
-      when (stopped s) (send runtime (Stack True) "stackTrace" (stackArguments tid))
+      modifyIORef' ref (\state -> state {frameRevision=frameRevision state+1,thread=Just tid,frame=Nothing,frames=[],choices=M.empty})
+      when (stopped s) (sendStack runtime True tid)
       pure d
     "frame" | stopped s,Just chosen<-selected >>= at rows -> do
-      modifyIORef' ref (\state -> state {frame=Just chosen,generation=generation state+1,choices=M.empty,variableRefs=M.empty})
+      modifyIORef' ref (\state -> state {frame=Just chosen,frameRevision=frameRevision state+1,choices=M.empty})
       openFrame runtime core True d chosen
     "expand" | stopped s,Just chosen<-selected >>= at rows,let ident=integer "variablesReference" chosen,ident>0 ->
       case M.lookup ident (variableRefs s) of
-        Just False -> send runtime Variables "variables" (object ["variablesReference" .= ident]) >> pure d {status="Loading variables..."}
+        Just False -> send runtime (Variables (frameRevision s)) "variables" (object ["variablesReference" .= ident]) >> pure d {status="Loading variables..."}
         Just True -> pure d {status="Lazy variable requires explicit evaluation; expansion does not force it."}
         Nothing -> pure d {status="Debugger value expired; request scopes again."}
     "exceptions" -> do
@@ -835,7 +852,7 @@ openFrame runtime@(Debugger ref _ _) core explicit d selected = do
       reference=integer "sourceReference" source
       path=text "path" source
       local=if isAbsolute (T.unpack path) then T.unpack path else root s </> T.unpack path
-  if reference>0 then send runtime (Source explicit selected) "source" (object ["source" .= source,"sourceReference" .= reference]) >> pure d
+  if reference>0 then send runtime (Source explicit (frameRevision s) selected) "source" (object ["source" .= source,"sourceReference" .= reference]) >> pure d
   else do
     exists<-if T.null path then pure False else doesFileExist local
     if not exists then pure d {status="Stopped: source is unavailable ("<>sourceLabel source<>")."}

@@ -68,8 +68,15 @@ checks = terminalLauncherCheck >> terminalCheck >> completionChecks >> presentat
       if mode=="frame" then do
         stopped<-waitFor "initial stop" (T.isInfixOf "Stopped" . status) attached
         stack<-send "stack" [] stopped >>= waitFor "frame chooser" (hasDialog "Call stack")
+        (_,beforeReply)<-debuggerTool runtime core stack "debug_status" (object [])
+        before<-beforeReply
         waiting<-send "scopes" [] stack
         chosen<-choose 1 waiting
+        (_,afterReply)<-debuggerTool runtime core chosen "debug_status" (object [])
+        after<-afterReply
+        check "frame selection preserves stopped handles"
+          ((before >>= maybe (Left "missing epoch") Right . (field "generation" :: Value -> Maybe Int))==
+           (after >>= maybe (Left "missing epoch") Right . (field "generation" :: Value -> Maybe Int)))
         -- This response follows the current source and both delayed old replies.
         drained<-send "threads" [] chosen >>= waitFor "stale frame replies must not open scopes" (hasDialog "Threads")
         check "late source cannot replace selected frame" (activeText drained=="chosen frame source\n")
