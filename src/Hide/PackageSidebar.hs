@@ -46,8 +46,8 @@ rootId :: P.NodeId
 rootId=ident "package"
 ident :: Text -> P.NodeId
 ident=either (error . T.unpack) id . P.nodeId
-componentId :: ComponentSources -> P.NodeId
-componentId=ident . ("target:"<>) . sourceTarget
+componentId :: Int -> P.NodeId
+componentId=ident . ("target:"<>) . T.pack . show
 scope :: Desktop -> Scope
 scope d=(maybe (startingDirectory d) treeRoot (sideTree d),guestPrivatePaths d)
 
@@ -162,9 +162,9 @@ createSlot registry root _private serial file=do
               Just nodes->pure (Right nodes)
               Nothing | key==rootId->pure $ Right $ case package of
                 Left _->[P.NodeDef (P.NodeInfo (ident "error") "Package description unavailable; reopen the package file" "" False Nothing) Nothing []]
-                Right value->[P.NodeDef (P.NodeInfo (componentId component) (sourceTarget component) "" True Nothing) Nothing [] | component<-take 4096 (sourceComponents value)]
+                Right value->[P.NodeDef (P.NodeInfo (componentId index) (T.take 256 (sourceTarget component)) "" True Nothing) Nothing [] | (index,component)<-zip [0..] (take 4096 (sourceComponents value))]
               Nothing->case package of
-                Right value | component:_<-filter ((==key).componentId) (sourceComponents value)->do
+                Right value | component:_<-[component | (index,component)<-zip [0..] (sourceComponents value),componentId index==key]->do
                   resolved<-resolveSources root (sidebarPrivatePaths ctx) (takeDirectory file) component
                   case resolved of
                     Left err->pure (Left (CommandRejected err))

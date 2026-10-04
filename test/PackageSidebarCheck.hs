@@ -45,8 +45,16 @@ checks=bracket temporary removePathForcibly $ \root->do
       opened<-activate "Main.hs" sources >>= wait "source opens through host" (\d->(filePath <$> (activeDocument d >>= documentFile))==Just mainFile)
       -- The root's manifest action must remain usable after a manifest refresh.
       writeFile file (manifest "sample"<>"-- changed\n")
+      sourceRow<-case [row | row<-rows opened,rowDepth row==2,P.infoLabel (rowInfo row)=="Main.hs"] of
+        row:_->pure row
+        _->fail "Source row disappeared"
+      sourceAction<-maybe (fail "Source action missing") pure (rowCommand sourceRow)
+      let sourceTrace=maybe [] (hitTrace (keyOf (rowHit sourceRow))) (sideTree opened)
+          (staleRequest,staleEffects)=runCommand (TreeCommand sourceTrace sourceAction) opened {sideTree=fmap (\tree->tree {treeFocused=True}) (sideTree opened)}
+      (_,staleQueued)<-sidebarEffects host core staleRequest staleEffects
+      stale<-wait "changed manifest rejects old source action" (T.isInfixOf "Package source changed" . status) staleQueued
       threadDelay 600000
-      refreshed<-wait "refreshed package projection" ready =<< tick opened
+      refreshed<-wait "refreshed package projection" ready =<< tick stale
       packageRow<-case [row | row<-rows refreshed,P.infoLabel (rowInfo row)=="sample"] of
         row:_->pure row
         _->fail "Package root disappeared"
@@ -58,7 +66,10 @@ checks=bracket temporary removePathForcibly $ \root->do
       (_,queued)<-sidebarEffects host core requested effects
       manifestOpened<-wait "updated manifest remains openable" (\d->(filePath <$> (activeDocument d >>= documentFile))==Just file) queued
       writeFile file (manifest "renamed")
-      _<-wait "renamed package root" (\d->has "renamed" d && not (has "sample" d)) manifestOpened
+      renamed<-wait "renamed package root" (\d->has "renamed" d && not (has "sample" d)) manifestOpened
+      createDirectory (root </> "empty")
+      let moved=renamed {sideTree=fmap (\tree->tree {treeRoot=root </> "empty"}) (sideTree renamed)}
+      _<-wait "old package retires after changing directory" (not . has "renamed") moved
       pure ()
   putStrLn "package sidebar checks passed"
   where
