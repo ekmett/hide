@@ -6,6 +6,7 @@ import System.Timeout (timeout)
 import Data.Maybe (fromJust,isNothing)
 import qualified Data.Map.Strict as Map
 import qualified Hide.Model as M
+import qualified Hide.BufferView as M
 import Hide.TextPresentation
 import Hide.Markdown (renderMarkdown)
 import qualified Hide.Links as Links
@@ -15,6 +16,7 @@ import Hide.GuestAccess (readableAt,streamerReadableAt)
 import Data.Aeson (Value(..),object,toJSON,(.=))
 import qualified Data.Text as T
 import qualified Data.Text.Lazy as TL
+import qualified Data.ByteString.Lazy as BL
 import qualified Data.Vector as Vec
 import qualified Graphics.Vty as V
 import Graphics.Vty.Span (SpanOp(..))
@@ -25,6 +27,8 @@ import Hide.Buffer (Buffer(undoStack),Selection(..),newBuffer,bufferContent,cont
 import Hide.Syntax (Style(..))
 import Hide.TextLayout
 import Hide.Unicode
+import qualified Hide.Protocol as Protocol
+import Hide.TextStyle (textBold)
 import Hide.RemoteWindow
 import Hide.RemoteTerminal (remoteTerminalPicture)
 
@@ -63,6 +67,11 @@ checks=do
      check "render and navigation share the prepared position map" (layoutPosition layout (layoutStart glyph)==(rowNumber,layoutColumn glyph))
      forM_ [0..layoutAdvance glyph-1] $ \cell->check "all glyph cells hit one original source range" (layoutOffset layout rowNumber (layoutColumn glyph+cell)==layoutStart glyph)
  check "ordinary rows do not acquire title geometry" (layoutRowWidth (Vec.last (layoutRows layout))==5)
+ let controls="A\ESC#6B\r"
+     controlSource=bufferContent (newBuffer controls)
+     controlStyles=Vec.singleton [(c,SectionStyle 1 (Heading 1)) | c<-T.unpack controls]
+ controlLayout<-prepareTextLayout True 40 controlSource controlStyles
+ check "prepared rendering sanitizes controls before measuring glyphs" (all (\glyph->not (T.any (\c->c<' ') (layoutDisplayText glyph))) (Vec.toList (layoutGlyphs (Vec.head (layoutRows controlLayout)))) && contentSlice controlSource 0 (contentLength controlSource)==controls)
  withTextPresentation $ \owner->do
    let opened=M.addHelpStyled (renderMarkdown 40 "# ABCDEF\n\n[link](file.md)") (M.initialDesktop (80,25))
        view=fromJust (M.activeWindow opened)
@@ -72,6 +81,19 @@ checks=do
          if maybe False (\w->M.windowPresentation next w/=Nothing) (M.activeWindow next) then pure next
          else threadDelay 1000 >> settle next
        prepare desktop=timeout 5000000 (settle desktop) >>= maybe (fail "wide heading owner did not adopt") pure
+   let browsing=initial {M.windows=[(head (M.windows initial)) {M.scrollRow=1}]}
+       originalText=bufferContent (M.documentBuffer (fromJust (M.activeDocument initial)))
+       topOffset desktop=let current=fromJust (M.activeWindow desktop) in M.windowTextOffset desktop current originalText (M.scrollRow current) (M.scrollColumn current)
+   preparedBrowsing<-prepareTextPresentations browsing
+   check "adoption preserves the semantic viewport top" (topOffset preparedBrowsing==topOffset browsing)
+   let shownPreferences=fst (M.runCommand M.EditorOptions preparedBrowsing)
+       offDialog=(fromJust (M.dialog shownPreferences)) {M.fields=map (\field->case field of M.CheckBox "Wide section titles" _->M.CheckBox "Wide section titles" False; _->field) (M.fields (fromJust (M.dialog shownPreferences)))}
+       returned=fst (M.submitDialog 0 offDialog shownPreferences)
+   check "disabling wide titles preserves semantic manual browsing" (topOffset returned==topOffset preparedBrowsing)
+   queued<-tickTextPresentation owner initial
+   let queuedResize=queued {M.windows=[view {M.bounds=M.Rect 2 2 10 12}]}
+   pendingReady<-prepare queuedResize
+   check "pending resize cannot adopt the old worker width" (case Map.lookup (M.windowId view) (M.windowPresentations pendingReady) of Just (M.WindowPresentation _ columns _)->columns==8; _->False)
    ready<-prepare initial
    let w=fromJust (M.activeWindow ready)
        doc=fromJust (M.activeDocument ready)
@@ -91,6 +113,11 @@ checks=do
    check "copy retains original ASCII without fullwidth substitution or wrap newlines" (M.clipboard copied==contents (M.documentBuffer doc) && not ("Ａ" `T.isInfixOf` M.clipboard copied))
    check "plain snapshot projects terminal fullwidth headings" ("ＡＢＣ" `T.isInfixOf` snapshot ready)
    check "HTML snapshots preserve stretch geometry and font traits" (all (`T.isInfixOf` snapshotHtml ready) ["width:2ch","scaleX(2)","font-weight:bold"])
+   native<-either fail pure (parseRemoteFrame (object (Protocol.frameMetadata "." ready)) (Protocol.frameRows ready))
+   check "actual native heading frames preserve original glyph, span and bold paint" (any (\cell->case cell of RemoteCell _ _ paint "A" 2->textBold paint; _->False) (remoteCells native))
+   let originalRows=Protocol.frameRows (ready {M.wideSectionTitles=False})
+   (_,rebuilt)<-Protocol.decodeFrame originalRows (BL.toStrict (Protocol.framePacket False originalRows (Protocol.frameRows ready) (Protocol.frameMetadata "." ready)))
+   check "actual geometry change survives production compressed patch reconstruction" (rebuilt==Protocol.frameRows ready)
    let (a,z,_) = head (M.documentLinks doc)
        (linkRow,linkColumn)=layoutPosition layout a
        lx=M.left (M.bounds w)+1+linkColumn
@@ -98,6 +125,8 @@ checks=do
    check "links below wrapped headings retain their original target" (M.linkAt lx ly ready==Just (M.OpenLink Nothing "file.md") && z>a)
    let resized=ready {M.windows=[w {M.bounds=M.Rect 2 2 10 12}]}
        disabled=ready {M.wideSectionTitles=False}
+   let review=ready {M.windows=[w {M.bufferView=M.SideBySideView}]}
+   check "review views retain their original coordinate owner" (M.windowPresentation review (head (M.windows review))==Nothing)
    check "resize and disabling refuse stale layout immediately" (M.windowPresentation resized (head (M.windows resized))==Nothing && M.windowPresentation disabled w==Nothing)
    let preferences=fst (M.runCommand M.EditorOptions disabled)
        dg=fromJust (M.dialog preferences)

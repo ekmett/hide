@@ -114,7 +114,7 @@ checks = do
       outputPopup=openContext SourceContext 10 5 (addReadOnly "Output" "first" (initialDesktop (80,25)))
       replacedOutput=addReadOnly "Output" "second" outputPopup
   check "source context refuses sidebar ownership" (let (refused,effects)=selectPopup sidebarFocus in contextMenu refused==Nothing && clipboard refused==clipboard sidebarFocus && null effects)
-  check "equal-revision read-only replacement is not a source target" (not (contextTargetCurrent outputPopup) && not (contextTargetCurrent replacedOutput) && fmap (revision . documentBuffer) (activeDocument outputPopup)==fmap (revision . documentBuffer) (activeDocument replacedOutput))
+  check "read-only replacement advances revision but is not a source target" (not (contextTargetCurrent outputPopup) && not (contextTargetCurrent replacedOutput) && fmap (succ . revision . documentBuffer) (activeDocument outputPopup)==fmap (revision . documentBuffer) (activeDocument replacedOutput))
   let childPopup=openContext (AgentContext [("Cancel reply",AgentCancel)]) 10 5 (selectConversationView "child" "Child" targetSource)
       switched=childPopup {conversationTarget=""}
   check "unchanged conversation context can invoke" (snd (selectPopup childPopup)==[AgentAction "cancel" []])

@@ -37,7 +37,7 @@ tickTextPresentation (TextPresentation pending observed) desktop=mask $ \restore
     (Just (Pending captured _),Just result)->do
       writeIORef pending Nothing
       pure $ case result of
-        Right prepared | captured==targets->desktop {windowPresentations=M.fromList prepared}
+        Right prepared | captured==targets->reprojectWindowPresentations desktop desktop {windowPresentations=M.fromList prepared}
         _->desktop
     _->pure desktop
   let retained=M.filterWithKey (\ident (WindowPresentation target width _)->(ident,target,width) `elem` targets) (windowPresentations ready)
@@ -65,7 +65,7 @@ prepare (Capture (ident,target,width) text styled)=do
 prepareTextPresentations :: Desktop -> IO Desktop
 prepareTextPresentations desktop=do
   prepared<-mapM prepare (captures desktop (metadata desktop))
-  pure desktop {windowPresentations=M.fromList prepared}
+  pure (reprojectWindowPresentations desktop desktop {windowPresentations=M.fromList prepared})
 
 metadata :: Desktop -> [Target]
 metadata desktop

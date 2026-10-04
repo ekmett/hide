@@ -2442,7 +2442,7 @@ windowPresentationTarget d w=case windowContent w of
     if PluginWindow.preparedWindowHasSections prepared then Just (PluginPresentation reference prepared) else Nothing
   SourceContent bid->do
     doc<-M.lookup bid (buffers d)
-    if syntaxDocument doc || null (documentHighlight doc) ||
+    if bufferView w/=CurrentView || byteMode (documentBuffer doc) || syntaxDocument doc || null (documentHighlight doc) ||
        not (documentLabel doc `elem` [Just "Haskell Help",Just "Conversation"] || documentMarkdownPath doc/=Nothing) then Nothing
     else Just (DocumentPresentation bid (revision (documentBuffer doc)))
 
@@ -2464,6 +2464,24 @@ windowTextOffset d w text row column=case windowPresentation d w of
   Just layout->TextLayout.layoutOffset layout row column
   Nothing->let line=max 0 (min (contentLineCount text-1) row)
            in contentLineOffset text line+columnOffset (contentLineAt text line) column
+
+-- | Preserve the semantic viewport top when prepared geometry adopts or a
+-- preference disables it. Only measured source maps and scalar identities are
+-- compared; manual browsing never becomes an implicit caret-follow operation.
+reprojectWindowPresentations :: Desktop -> Desktop -> Desktop
+reprojectWindowPresentations before after=after {windows=map reposition (windows after)}
+  where
+    reposition w
+      | Just previous<-find ((==windowId w).windowId) (windows before)
+      , windowPresentationTarget before previous==windowPresentationTarget after w
+      , windowPresentation before previous/=windowPresentation after w
+      , Just text<-case windowContent w of
+          SourceContent bid->bufferContent . documentBuffer <$> M.lookup bid (buffers after)
+          PluginContent reference->PluginWindow.preparedWindowText <$> M.lookup reference (pluginWindows after)
+      = let offset=windowTextOffset before previous text (scrollRow previous) (scrollColumn previous)
+            (row,column)=windowTextPosition after w text offset
+        in w {scrollRow=max 0 row,scrollColumn=max 0 column}
+      | otherwise=w
 
 windowTextRows :: Desktop -> Window -> BufferContent -> Int
 windowTextRows d w text=maybe (contentLineCount text) (Vec.length . TextLayout.layoutRows) (windowPresentation d w)
@@ -2915,7 +2933,7 @@ submitDialog button dg original
     AutocompleteDialog action -> (d,[AutocompleteAction action (T.pack (show button):values++[if enabled then "true" else "false" | CheckBox _ enabled<-fields dg])])
     ChatInputSettings -> let chosen=if any (\f -> case f of Radio "Enter action" _ 1 -> True; _ -> False) (fields dg) then SteerSubmit else QuerySubmit
                          in (d {chatSubmit=chosen},[SaveChatSubmit chosen])
-    Settings -> (d {wideSectionTitles=fromMaybe (wideSectionTitles d) (listToMaybe [value | CheckBox "Wide section titles" value<-fields dg]),macKeySymbols=fromMaybe (macKeySymbols d) (listToMaybe [value | CheckBox "Mac key symbols" value<-fields dg]),wordStar=any (\f -> case f of Radio "Key bindings" _ 1 -> True; _ -> False) (fields dg),
+    Settings -> (reprojectWindowPresentations d d {wideSectionTitles=fromMaybe (wideSectionTitles d) (listToMaybe [value | CheckBox "Wide section titles" value<-fields dg]),macKeySymbols=fromMaybe (macKeySymbols d) (listToMaybe [value | CheckBox "Mac key symbols" value<-fields dg]),wordStar=any (\f -> case f of Radio "Key bindings" _ 1 -> True; _ -> False) (fields dg),
       appearance=fromMaybe (appearance d) (listToMaybe [toEnum (max 0 (min 2 value)) | Radio "Appearance" _ value<-fields dg]),
       streamerMode=fromMaybe (streamerMode d) (listToMaybe [value | CheckBox "Streamer mode" value<-fields dg]),
       blinkCursor=fromMaybe (blinkCursor d) (listToMaybe [value | CheckBox "Blinking cursor" value<-fields dg]),

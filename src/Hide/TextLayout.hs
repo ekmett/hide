@@ -58,9 +58,11 @@ prepareTextLayout wide requested text styled=do
       | not (null current) && wide && sectionTitle style && col+advance>columns = finish current col start:wrap [] 0 a remaining
       | otherwise=wrap (LayoutGlyph g drawn a z col advance style:current) (col+advance) start rest
       where
-        natural=if g==T.singleton '\t' then 8-col `mod` 8 else clusterWidth g
-        advance=if wide && sectionTitle style then 2 else natural
-        drawn=if g==T.singleton '\t' then T.replicate (if wide && sectionTitle style then 1 else natural) (T.singleton ' ') else g
+        natural=sum (map clusterWidth (graphemes drawn))
+        advance=if wide && sectionTitle style && not (T.null drawn) then 2 else natural
+        drawn | g==T.singleton '\r'=T.empty
+              | g==T.singleton '\t'=T.replicate (if wide && sectionTitle style then 1 else 8-col `mod` 8) (T.singleton ' ')
+              | otherwise=T.map (\c->if c<' ' || c=='\DEL' then '·' else c) g
     finish current col start=LayoutRow start (case current of glyph:_->layoutEnd glyph; _->start) col (V.fromList (reverse current))
 
 -- | Locate an original character offset in prepared visual rows. Both cells of
