@@ -576,3 +576,13 @@ owner maps retain scalar provenance and validated immutable rows, never document
 payloads. `DebuggerSidebarCheck` exercises real fake-DAP interleaving, captured
 frame activation, passive cached ticks, sticky lazy-reference refusal, resume
 expiry and thread-exit refusal of delayed child pages.
+
+`Hide.SessionSidebar` uses the existing private session catalog on one scoped
+discovery worker. Only bounded public session summaries survive preparation; no
+startup arguments, checkpoints or provider keys enter its snapshot. The UI owner
+publishes forced scalar window IDs/titles through `editorWindowEntries` and
+compares separate catalog/window revisions, invalidating at most two nodes.
+Closed `SessionSidebarRequest` values pass the ordinary tree hit/lifetime/modal
+checks, then the live session owner rechecks session identity and window
+availability via `activateEditorWindow`. No new permission map or attachment
+manager is introduced. Cross-frontend explicit resume remains the next slice.

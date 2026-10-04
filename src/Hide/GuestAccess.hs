@@ -147,6 +147,7 @@ agentActionAllowed action=action `elem` ["compile","make","build-stop","run","ru
 guestEffectsAllowed :: [Effect] -> Bool
 guestEffectsAllowed=all allowed
   where
+    allowed SessionSidebarAction{}=False
     allowed AgentSidebarAction{}=False
     allowed ReloadKeyBindings{}=False
     allowed (InvokeMenu _ origin _)=origin==Plugin.AgentMenu
