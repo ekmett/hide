@@ -59,6 +59,9 @@ originCheck=bracket temporary removeFile $ \path->do
       bid=maybe (error "missing source buffer") id (activeWindow guarded >>= bufferId)
       check label valid=unless valid (fail label)
   check "canonical generated-source origin protects immutable read" (protectedBuffer guarded bid && sanitizedBuffer guarded bid==Nothing)
+  let view=maybe (error "missing origin source view") id (activeWindow guarded)
+  check "shared model origin policy protects public window metadata" (lookup (windowId view) [(ident,title) | (ident,title,_,_)<-editorWindowEntries guarded {streamerMode=True}]==Just "Private buffer")
+  check "shared origin policy protects Streamer application title" (applicationTitle "/tmp" guarded {streamerMode=True}=="th [private]")
   check "origin does not grant file/save authority" ((activeDocument guarded >>= documentFile)==Nothing)
   saved<-writeCheckpoint path guarded
   either (fail . show) pure saved
