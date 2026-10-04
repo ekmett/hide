@@ -5,7 +5,7 @@
 -- public names from Show or parse arbitrary constructor expressions. This catalog
 -- is the first step toward registration, not a dynamic plugin registry or
 -- authority boundary.
-module Hide.Commands (BuiltinCommand(..), builtinCommands, commandIdentifier, platformBindings, configuredBindings) where
+module Hide.Commands (BuiltinCommand(..), builtinCommands, commandIdentifier, contributedBindingCommands, platformBindings, configuredBindings) where
 
 import Data.Text (Text)
 import Control.Monad (unless, forM_)
@@ -13,7 +13,8 @@ import qualified Graphics.Vty as V
 import Data.List (find)
 import qualified Data.Map.Strict as M
 import Hide.Bindings (BindingPlatform(..), bindingPlatforms, platformName, BindingContext(..), bindingContexts, contextName, Bindings, compileBindings, readChord)
-import Hide.Model (Command(..), terminalSourceReserved, wordStarReserved, dialogBindingCommands, dialogReserved)
+import Hide.Model (Desktop(..), Command(..), terminalSourceReserved, wordStarReserved, dialogBindingCommands, dialogReserved)
+import qualified Hide.Plugin.Menu as Plugin
 import Hide.BufferView (BufferView(..))
 
 -- | One action and its public identity.
@@ -135,16 +136,31 @@ builtinCommands =
   ,BuiltinCommand "hide.help.about" (About)
   ]
 
+-- | Small exact contribution identities admitted by the existing menu host.
+-- Built-in identities retain their canonical route, including Help/navigation.
+-- Evaluating the catalogue forces its bounded spine and actor flags, so a worker
+-- retains only exact refs and names. No callback or document payload is inspected.
+contributedBindingCommands :: Desktop -> [(Text,Command)]
+contributedBindingCommands d=foldr entry [] (contributedMenus d)
+  where
+    entry item rest
+      | name `elem` map builtinIdentifier builtinCommands = rest
+      | otherwise = rest `seq` allowed `seq` (name,RegisteredMenu reference allowed):rest
+      where
+        reference=Plugin.menuReference item
+        name=Plugin.menuName reference
+        allowed=Plugin.menuAgentAllowed item && reference `elem` agentMenuRefs d
+
 -- | Compile every platform context outside the interaction path. Explicit global
 -- entries apply to all owners; a context entry replaces the same global command.
 -- Plain PTY control characters cannot be assigned to editor commands.
-configuredBindings :: M.Map Text (M.Map Text (M.Map Text [Text])) -> Either Text (M.Map (BindingPlatform,BindingContext) (Bindings Command))
-configuredBindings configuration=do
+configuredBindings :: [(Text,Command)] -> M.Map Text (M.Map Text (M.Map Text [Text])) -> Either Text (M.Map (BindingPlatform,BindingContext) (Bindings Command))
+configuredBindings catalogue configuration=do
   unless (all (`elem` map platformName bindingPlatforms) (M.keys configuration)) (Left "Unknown keybinding platform")
-  M.unions <$> traverse (\platform->platformBindings platform (M.findWithDefault M.empty (platformName platform) configuration)) bindingPlatforms
+  M.unions <$> traverse (\platform->platformBindings catalogue platform (M.findWithDefault M.empty (platformName platform) configuration)) bindingPlatforms
 
-platformBindings :: BindingPlatform -> M.Map Text (M.Map Text [Text]) -> Either Text (M.Map (BindingPlatform,BindingContext) (Bindings Command))
-platformBindings platform configuration=do
+platformBindings :: [(Text,Command)] -> BindingPlatform -> M.Map Text (M.Map Text [Text]) -> Either Text (M.Map (BindingPlatform,BindingContext) (Bindings Command))
+platformBindings catalogue platform configuration=do
   unless (all (`elem` ("global":map contextName bindingContexts)) (M.keys configuration))
     (Left ("Unknown "<>platformName platform<>" keybinding context"))
   forM_ (concat (M.elems (M.findWithDefault M.empty "global" configuration))) readChord
@@ -172,7 +188,7 @@ platformBindings platform configuration=do
               (platform/=TerminalPlatform && key `elem` map V.KChar "0+=-" && any (`elem` mods) [V.MCtrl,V.MAlt])
         unless (not (terminalSourceReserved key mods || contextReserved || platformReserved || context==WordStarKeys && wordStarReserved key mods || context==DialogKeys && dialogReserved key mods))
           (Left ("Reserved "<>contextName context<>" key: "<>raw))
-      compiled<-either (Left . (("Keybinding context "<>contextName context<>": ")<>)) Right $ compileBindings [(builtinIdentifier entry,builtinAction entry,keys context (builtinAction entry)) | entry<-builtinCommands,context/=DialogKeys || builtinAction entry `elem` dialogBindingCommands] overrides
+      compiled<-either (Left . (("Keybinding context "<>contextName context<>": ")<>)) Right $ compileBindings ([(builtinIdentifier entry,builtinAction entry,keys context (builtinAction entry)) | entry<-builtinCommands,context/=DialogKeys || builtinAction entry `elem` dialogBindingCommands]++[(name,action,[]) | (name,action)<-catalogue,context/=DialogKeys,name `notElem` map builtinIdentifier builtinCommands]) overrides
       pure ((platform,context),compiled)
     processControl key mods=case key of
       V.KChar _ -> V.MCtrl `elem` mods && V.MAlt `notElem` mods && V.MMeta `notElem` mods

@@ -7,7 +7,7 @@
 -- repaint rules, so drag/wheel rendering can await the resulting remote frame.
 module Hide.RemoteWindow
   (runRemoteWindow, RemoteFrame(..), RemoteContribution(..), RemoteCell(..), parseRemoteFrame
-  , nativeKeyInput, nativeEventInput, remoteMenuInput, remoteNativeMenuInput, remoteDockWindowInput, remoteMenuLayout, sanitizeDownloadName
+  , nativeKeyInput, nativeEventInput, remoteBindingInput, remoteMenuInput, remoteNativeMenuInput, remoteDockWindowInput, remoteMenuLayout, sanitizeDownloadName
   , remoteInputAllowed, remoteCloseDetaches, remoteDetachShortcut, nativeRepaint) where
 import Control.Monad (unless)
 import Hide.Commands (commandIdentifier)
@@ -177,9 +177,25 @@ remoteMenuInput frame index
       Just name:_ -> Just (object ["type" .= ("menu"::T.Text),"command" .= name])
       _ -> Nothing
     else case drop (index-length menuActions) (remoteContributions frame) of
-      item:_ -> Just (object ["type" .= ("menu"::T.Text),"command" .= contributionId item,"registry" .= contributionRegistry item,"generation" .= contributionGeneration item])
+      item:_ -> Just (contributionInput item)
       _ -> Nothing
   | otherwise = Nothing
+
+contributionInput :: RemoteContribution -> Value
+contributionInput item=object ["type" .= ("menu"::T.Text),"command" .= contributionId item,"registry" .= contributionRegistry item,"generation" .= contributionGeneration item]
+
+-- | Freeze a contributed keyboard action to the exact registration published in
+-- this frame. Effective labels distinguish bound contributions from descriptive
+-- hints or a contribution whose name collides with a built-in command. The host
+-- independently checks lifetime, focused target and actor authority at admission.
+-- Inert targets are consumed instead of evaluating the supplied raw-key fallback.
+-- A disabled row with a valid binding still retains its exact registration stamp.
+remoteBindingInput :: RemoteFrame -> V.Event -> Maybe Value -> Maybe Value
+remoteBindingInput frame (V.EvKey key modifiers) fallback=case chordName key modifiers >>= (`lookup` remoteBindings frame) of
+  Just "" -> Nothing
+  Just name | item:_<-[item | item<-remoteContributions frame,contributionId item==name],not (T.null (contributionKey item)) -> Just (contributionInput item)
+  _ -> fallback
+remoteBindingInput _ _ fallback=fallback
 
 -- | Validate native incarnation before resolving the current host catalogue.
 remoteNativeMenuInput :: RemoteFrame -> Int -> [Int] -> Maybe Value
@@ -371,7 +387,9 @@ runRemoteWindow backend scale (cols,rows) mode host peer = do
                   payload <- BS.hGet handle 16777217
                   when (BS.length payload<=16777216) (send [JsonPacket (object ["type" .= ("upload"::T.Text),"name" .= name]),BinaryPacket payload]))
                 `catch` \(e::IOException) -> hPutStrLn stderr ("Cannot upload dropped file: "++show e)
-        _ -> when connected (sendEvent event)
+        _ -> when connected $ forM_ (case (frame,event) of
+          (Just value,1:key:mods:_) | Just input<-decodeKey key mods -> remoteBindingInput value input (nativeEventInput event)
+          _ -> nativeEventInput event) sendJSON
       title connection frame = do
         (_,timing)<-readIORef titleTiming
         utf8 ((maybe "Haskell" remoteTitle frame)<>(if null host then "" else " — "<>T.pack host)<>connection<>timing) c_title
