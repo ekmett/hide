@@ -514,6 +514,8 @@ withdraws provider roots at the owner. Its secondary Open keeps the
 existing actor-stamped link worker/client-resource transport and a frozen sidebar
 target. Moving that transport into the typed reply path is a separate slice.
 Recovery stores bounded path/expansion/viewport hints, never live provider handles.
+It restores targets reachable through initial directory pages; hints beyond those
+pages wait for interactive paging.
 `SidebarCheck` exercises Files and an independently declared test provider through
 actual keyboard input, delayed/collapsed loads, paging, retirement, privacy and
 filesystem observation refresh. Other domain providers remain subsequent work.

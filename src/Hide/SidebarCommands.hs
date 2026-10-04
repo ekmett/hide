@@ -220,8 +220,10 @@ mount host@(SidebarHost _ ref _ _ _) d=case sideTree d of
     state<-readIORef ref
     case filesProvider state of
       Just (FilesProvider provider root _ _) | root==treeRoot tree->do
-        let next=if M.member (P.treeReference provider) (providers state) then addProvider provider tree else tree
-        pure d {sideTree=Just next}
+        let key=NodeKey (P.treeReference provider) (P.infoId (P.nodeInfo (P.treeRoot provider)))
+            next=if M.member (P.treeReference provider) (providers state) then addProvider provider tree else tree
+        if M.member key (treeNodes tree) then pure d {sideTree=Just next}
+          else startRoot provider next
       _->do
         -- This path is startup/directory selection, which already belongs to the
         -- host's file effect owner. Registration and root validation are bounded.
@@ -231,11 +233,15 @@ mount host@(SidebarHost _ ref _ _ _) d=case sideTree d of
             withdrawn=maybe tree (\(FilesProvider old _ _ _)->removeRoot (P.treeReference old) tree) (filesProvider state)
             fresh=addProvider provider withdrawn {treeAgentRefs=[owner]}
             key=NodeKey owner (P.infoId (P.nodeInfo (P.treeRoot provider)))
-            node=treeNodes fresh M.! key
-            (opened,request)=requestChildren (nodeHit key node) Nothing fresh
             defs=M.insert key (P.treeRoot provider) (definitions state)
         writeIORef ref state {filesProvider=Just created,providers=M.insert owner provider (providers state),definitions=defs}
-        maybe (pure d {sideTree=Just opened}) (\value->enqueue host value Menu.HumanMenu d {sideTree=Just opened}) request
+        startRoot provider fresh
+  where
+    startRoot provider tree=let key=NodeKey (P.treeReference provider) (P.infoId (P.nodeInfo (P.treeRoot provider)))
+      in case M.lookup key (treeNodes tree) of
+        Nothing->pure d {sideTree=Just tree,status="Sidebar provider/node budget reached; Files cannot be mounted."}
+        Just node->let (opened,request)=requestChildren (nodeHit key node) Nothing tree
+          in maybe (pure d {sideTree=Just opened}) (\value->enqueue host value Menu.HumanMenu d {sideTree=Just opened}) request
 
 enqueue :: SidebarHost -> TreeRequest -> Menu.MenuOrigin -> Desktop -> IO Desktop
 enqueue (SidebarHost _ ref _ _ _) request origin d=case sideTree d of

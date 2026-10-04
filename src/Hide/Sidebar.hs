@@ -94,8 +94,11 @@ addRoot ref info action actions tree
   where key=NodeKey ref (infoId info)
         node=NodeState info 1 Nothing S.empty M.empty False Unloaded 0 [] action actions
 removeRoot :: TreeRef -> Sidebar -> Sidebar
-removeRoot ref tree=foldr withdraw marked [key | key@(NodeKey owner _)<-toList (treeRoots tree),owner==ref]
+removeRoot ref tree
+  | null roots=tree
+  | otherwise=foldr withdraw marked roots
   where
+    roots=[key | key@(NodeKey owner _)<-toList (treeRoots tree),owner==ref]
     marked=tree {treeRoots=S.filter (\(NodeKey owner _)->owner/=ref) (treeRoots tree),treeRevision=treeRevision tree+1}
     withdraw key current=case M.lookup key (treeNodes current) of
       Just node | address@(_:_)<-stateAddress node,Just index<-M.lookupIndex address (treeRows current)->

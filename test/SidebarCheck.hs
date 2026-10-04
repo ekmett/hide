@@ -5,7 +5,7 @@ import Control.Concurrent.Async (withAsync,wait,poll)
 import Data.IORef
 import Control.Concurrent.MVar
 import Control.Exception (bracket,evaluate)
-import Control.Monad (unless,forM_,void,replicateM_)
+import Control.Monad (unless,forM,forM_,void,replicateM_)
 import qualified Data.Map.Strict as M
 import qualified Data.Sequence as S
 import qualified Data.Text as T
@@ -107,6 +107,7 @@ checks=bracket temporary removePathForcibly $ \dir->withSidebarCommands $ \host-
   refresh host dir expanded
   edgeChecks dir
   recoveryChecks dir
+  budgetChecks dir
   putStrLn "shared sidebar checks passed"
 
 independent :: SidebarHost -> Desktop -> IO ()
@@ -258,3 +259,21 @@ recoveryChecks dir=withSidebarCommands $ \host->do
     let moved=after {treeSelected=0,treeScroll=0}
         adopted=adoptProjection prepared moved
     check "projection adoption preserves later viewport and selection input" (treeSelected adopted==0 && treeScroll adopted==0)
+
+-- Valid scoped roots fill the public bound; Files mounting must refuse safely.
+budgetChecks :: FilePath -> IO ()
+budgetChecks dir=withSidebarCommands $ \host->withRegistry $ \registry->do
+  ident<-right (P.nodeId "root")
+  providers<-forM [1..32::Int] $ \index->right =<< P.registerTree registry
+    ("extension.budget.provider"<>T.pack (show index))
+    (P.NodeDef (P.NodeInfo ident "Other root" "" True Nothing) Nothing [])
+    (\_ _->pure (Right (P.NodePage [] Nothing)))
+  let full=foldl (\tree provider->addRoot (P.treeReference provider) (P.nodeInfo (P.treeRoot provider)) Nothing [] tree) (emptySidebar dir 24 True) providers
+      desktop=installSidebar full (initialDesktop (100,30))
+  refused<-act host (desktop,[])
+  check "Files root refuses a full provider budget without crashing" ("budget" `T.isInfixOf` status refused && S.length (treeRoots (treeOf refused))==32)
+  let available=refused {sideTree=Just (removeRoot (P.treeReference (head providers)) (treeOf refused))}
+  accepted<-act host (available,[]) >>= settle host
+  check "Files root loads once a provider slot becomes available" (any ((=="Main.hs").P.infoLabel.rowInfo.snd) (visibleRows 0 32768 (treeOf accepted)))
+  let unchanged=removeRoot (P.treeReference (head providers)) (treeOf accepted)
+  check "repeated withdrawal does not invalidate prepared projections" (treeRevision unchanged==treeRevision (treeOf accepted))
