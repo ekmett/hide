@@ -61,7 +61,7 @@ pathContains root path=let relative=makeRelative root path in not (isAbsolute re
 privateDocument :: Desktop -> Document -> Bool
 -- Human Git review can contain authority files; guests use workspace_git's
 -- filtered result instead of inheriting the unrestricted review buffer.
-privateDocument d doc=maybe False privateLabel (documentLabel doc) || maybe False (protectedPath d . filePath) (documentFile doc)
+privateDocument d doc=maybe False privateLabel (documentLabel doc) || maybe False (protectedPath d . filePath) (documentFile doc) || maybe False (protectedPath d) (documentOrigin doc)
   where
     privateLabel "Git diff"=True
     privateLabel label=maybe False (protectedPath d . T.unpack) (T.stripPrefix "Disk changes: " label)

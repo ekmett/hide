@@ -45,6 +45,7 @@ import qualified Hide.Terminal as Terminal
 import qualified Hide.DAP as D
 import Hide.Files (filePath)
 import Hide.Plugin.BufferHost (versionCurrent)
+import Hide.GuestAccess (protectedBuffer,protectedPath,protectedFilePath)
 import qualified Hide.LSP as L
 import Hide.Model
 
@@ -52,10 +53,12 @@ type Core = Desktop -> [Effect] -> IO (Bool,Desktop)
 data Debugger = Debugger (IORef State) (IO Integer) HdbRuntime SidebarMailbox
 data SidebarMailbox = SidebarMailbox !(TVar (Maybe (Int,Int))) !(TBQueue SidebarIngress)
 data SidebarIngress = ReadDebugPage !DebugPageRequest !(TMVar (Either Text Value)) | CacheDebugPage !DebugPageRequest !Value
+  | ReadDebugSource !Int !Int !Int !(Maybe FilePath) !(MVar (Either Text Value))
 data Pending = Init | Attach | Configure | Breaks Text [Int] | Exceptions | Threads Bool
   | Stack Bool Int Int | Scopes Int | Variables Int | ExceptionDetails | Source Bool Int Value | Control Bool | Detach
-  | Inspection Text (MVar (Either Text Value)) | SidebarRead DebugPageRequest (TMVar (Either Text Value))
+  | Inspection Text (MVar (Either Text Value)) | SourceInspection !Int !Int !(Maybe FilePath) (MVar (Either Text Value)) | SidebarRead DebugPageRequest (TMVar (Either Text Value))
   deriving (Eq)
+data SourceObservation = SourceObservation !Int !(Maybe FilePath)
 data Breakpoint = Breakpoint { bpLine :: Int, bpResult :: Value } deriving (Eq,Show)
 data State = State
   { client :: Maybe D.Client, connected :: Bool, capabilities :: Value, ready :: Bool, configured :: Bool
@@ -73,6 +76,7 @@ data State = State
   , sidebarVisible :: Bool, sidebarSession :: Int, sidebarPages :: M.Map DebugPageRequest Value
   , sidebarThreads :: M.Map Int (), sidebarFrames :: M.Map (Int,Int) Value
   , sidebarReferences :: M.Map (Int,Int,Int) Bool
+  , sourceReferences :: M.Map Int SourceObservation, nextSourceObservation :: Int
   , watchExpressions :: M.Map Int Text, nextWatch :: Int, sourceWatchDialog :: Maybe (Int,DebugSourceRequest)
   }
 
@@ -80,7 +84,7 @@ emptyState :: State
 emptyState = State {client=Nothing,connected=False,capabilities=Null,ready=False,configured=False,pending=M.empty,generation=0,frameRevision=0,
   stopped=False,thread=Nothing,frame=Nothing,frames=[],followSource=True,exceptionFilters=[],breakpoints=M.empty,sources=M.empty,
   root=".",endpoint=("127.0.0.1",4711),output="",failure=Nothing,disconnectAt=Nothing,endedAt=Nothing,programExitCode=Nothing,
-  hdbLauncher=Nothing,debugEnvironment=[],debugConsoles=[],terminalLaunch=Nothing,outputShown=False,choices=M.empty,choiceId=0,breakRequests=M.empty,breakModified=M.empty,startRequest=("attach",object []),managed=False,adapterId="",variableRefs=M.empty,sidebarVisible=False,sidebarSession=0,sidebarPages=M.empty,sidebarThreads=M.empty,sidebarFrames=M.empty,sidebarReferences=M.empty,watchExpressions=M.empty,nextWatch=1,sourceWatchDialog=Nothing}
+  hdbLauncher=Nothing,debugEnvironment=[],debugConsoles=[],terminalLaunch=Nothing,outputShown=False,choices=M.empty,choiceId=0,breakRequests=M.empty,breakModified=M.empty,startRequest=("attach",object []),managed=False,adapterId="",variableRefs=M.empty,sidebarVisible=False,sidebarSession=0,sidebarPages=M.empty,sidebarThreads=M.empty,sidebarFrames=M.empty,sidebarReferences=M.empty,sourceReferences=M.empty,nextSourceObservation=1,watchExpressions=M.empty,nextWatch=1,sourceWatchDialog=Nothing}
 
 withDebugger :: (Debugger -> IO a) -> IO a
 withDebugger action = C.withConsoles (\consoles -> withDebuggerConsoles consoles action)
@@ -177,12 +181,16 @@ debuggerSidebarRead (Debugger _ _ _ (SidebarMailbox epoch queue)) request@(Debug
 
 -- At most four small mailbox messages per tick. Backpressure belongs to provider
 -- workers; the session owner never waits for a producer or a DAP socket.
-drainSidebarReads :: Debugger -> IO ()
-drainSidebarReads runtime@(Debugger ref _ _ (SidebarMailbox _ queue))=forM_ [1..4::Int] $ \_->do
+drainSidebarReads :: Debugger -> Desktop -> IO ()
+drainSidebarReads runtime@(Debugger ref _ _ (SidebarMailbox _ queue)) d=forM_ [1..4::Int] $ \_->do
   next<-atomically (tryReadTBQueue queue)
   forM_ next $ \ingress->do
     s<-readIORef ref
     case ingress of
+      ReadDebugSource captured reference stamp origin reply
+        | generation s/=captured || not (stopped s && ready s && configured s && isJust (client s) && endedAt s==Nothing && disconnectAt s==Nothing) || not (sourceStampCurrent s reference stamp) || maybe False (protectedPath d) origin ->void (tryPutMVar reply (Left "Debugger source is private or expired."))
+        | length [() | (SourceInspection{},_,_)<-M.elems (pending s)]>=4 ->void (tryPutMVar reply (Left "Debugger source inspection is busy."))
+        | otherwise->send runtime (SourceInspection reference stamp origin reply) "source" (object ["sourceReference" .= reference])
       CacheDebugPage request value | validSidebarRequest s request && (M.member request (sidebarPages s) || M.size (sidebarPages s)<64)->do
         recordSidebarResponse ref request value
         modifyIORef' ref (\state->state {sidebarPages=M.insert request value (sidebarPages state)})
@@ -271,6 +279,7 @@ debuggerTool runtime@(Debugger ref _ _ _) core d name arguments = do
       snapshot shown
     run (ToolBreakpoints bid rows)=case M.lookup bid (buffers d) of
       Nothing -> immediate d (Left "Unknown bufferId.")
+      Just _ | protectedBuffer d bid -> immediate d (Left "Buffer is private.")
       Just doc | byteMode (documentBuffer doc) -> immediate d (Left "Breakpoints require a source text buffer.")
       Just doc -> do
         s<-readIORef ref
@@ -291,6 +300,27 @@ debuggerTool runtime@(Debugger ref _ _ _) core d name arguments = do
                 breakModified=M.insert key modified (breakModified state)})
               when (configured s) (sendBreakpoints runtime key src points)
             snapshot d
+    run (ToolInspect "source" args)=do
+      state<-readIORef ref
+      let reference=integer "sourceReference" args
+      case M.lookup reference (sourceReferences state) of
+        Nothing->immediate d (Left "Unknown or expired source reference.")
+        Just (SourceObservation stamp backing)->do
+          captured<-evaluate (generation state)
+          base<-evaluate (root state)
+          private<-evaluate (guestPrivatePaths d)
+          reply<-newEmptyMVar
+          pure (d,do
+            origin<-canonicalSourcePath base backing
+            case origin of
+              Left err->pure (Left err)
+              Right canonical | maybe False (protectedFilePath private) canonical->pure (Left "Debugger source is private.")
+              Right canonical->do
+                let Debugger _ _ _ (SidebarMailbox _ queue)=runtime
+                result<-timeout 16000000 $ do
+                  atomically (writeTBQueue queue (ReadDebugSource captured reference stamp canonical reply))
+                  awaitInspection ref captured reply
+                pure $ maybe (Left "Debugger source inspection timed out.") (>>= \body->boundedResult (object ["generation" .= captured,"request" .= ("source"::Text),"body" .= body])) result)
     run (ToolInspect command args)=do
       s<-readIORef ref
       reply<-newEmptyMVar
@@ -403,7 +433,9 @@ parseTool s name = withObject "debugger tool arguments" $ \o -> do
         _ -> do
           let selected=frame s >>= field "source"
               reference=selected >>= field "sourceReference" >>= \n -> if n>0 then Just n else Nothing
+          unless (stopped s) (fail "Debugger must be stopped for source inspection")
           ident<-required "sourceReference" reference
+          unless (M.member ident (sourceReferences s)) (fail "Unknown or expired source reference; inspect a stopped stack again")
           pure (object ["sourceReference" .= ident])
       pure (ToolInspect command args)
     _ -> fail "Unknown debugger tool"
@@ -425,6 +457,7 @@ boundedResult value | BL.length (encode value)>=1024*1024 = Left "Debugger respo
                     | otherwise = Right value
 
 completeInspection :: Pending -> Either Text Value -> IO ()
+completeInspection (SourceInspection _ _ _ reply) result=void (tryPutMVar reply result)
 completeInspection (Inspection _ reply) result=tryPutMVar reply result >> pure ()
 completeInspection (SidebarRead _ reply) result=atomically (void (tryPutTMVar reply result))
 completeInspection _ _=pure ()
@@ -483,7 +516,7 @@ perform runtime@(Debugger ref clock _ _) core action values d = do
       modifyIORef' ref (\state -> (invalidate state) {ready=False,configured=False,pending=M.empty,disconnectAt=Just now})
       send runtime Detach "disconnect" (object ["terminateDebuggee" .= (managed s || fst (startRequest s)=="launch")])
       pure (clearDialog d) {status="Disconnecting debugger..."}
-    (action,button:expression:_) | Just suffix<-T.stripPrefix "source-watch:" action,Just ident<-readMaybe (T.unpack suffix),Just (current,captured)<-sourceWatchDialog s,ident==current->do
+    (watchAction,button:expression:_) | Just suffix<-T.stripPrefix "source-watch:" watchAction,Just ident<-readMaybe (T.unpack suffix),Just (current,captured)<-sourceWatchDialog s,ident==current->do
       modifyIORef' ref (\state->state {sourceWatchDialog=Nothing})
       valid<-sourceCurrent captured d
       pureResult<-if button/="0" then pure d else if not valid then pure d {status="Watch source changed; open its context menu again."}
@@ -696,7 +729,7 @@ tickTerminalLaunch runtime@(Debugger ref _ _ _) d = do
 
 -- Frame and variable handles are scoped to a suspended execution state.
 invalidate :: State -> State
-invalidate s=s {generation=generation s+1,frameRevision=frameRevision s+1,stopped=False,frame=Nothing,frames=[],choices=M.empty,variableRefs=M.empty,sidebarPages=M.empty,sidebarThreads=M.empty,sidebarFrames=M.empty,sidebarReferences=M.empty}
+invalidate s=s {generation=generation s+1,frameRevision=frameRevision s+1,stopped=False,frame=Nothing,frames=[],choices=M.empty,variableRefs=M.empty,sidebarPages=M.empty,sidebarThreads=M.empty,sidebarFrames=M.empty,sidebarReferences=M.empty,sourceReferences=M.empty}
 
 send :: Debugger -> Pending -> Text -> Value -> IO ()
 send (Debugger ref clock _ _) kind command arguments = do
@@ -721,7 +754,7 @@ tickDebugger :: Debugger -> Core -> Desktop -> IO Desktop
 tickDebugger runtime core original = do
   updated<-tickDebuggerOwner runtime core original
   publishSidebarEpoch runtime
-  drainSidebarReads runtime
+  drainSidebarReads runtime updated
   pure updated
 
 tickDebuggerOwner :: Debugger -> Core -> Desktop -> IO Desktop
@@ -806,7 +839,7 @@ receive runtime@(Debugger ref clock _ _) core d event = do
           threads=allAreas || "threads" `elem` areas
           stacks=threads || "stacks" `elem` areas
       if not (stacks || "variables" `elem` areas) then pure d else do
-        modifyIORef' ref (\state -> state {generation=generation state+1,frameRevision=frameRevision state+1,choices=M.empty,variableRefs=M.empty,sidebarPages=M.empty,sidebarThreads=M.empty,sidebarFrames=M.empty,sidebarReferences=M.empty,
+        modifyIORef' ref (\state -> state {generation=generation state+1,frameRevision=frameRevision state+1,choices=M.empty,variableRefs=M.empty,sidebarPages=M.empty,sidebarThreads=M.empty,sidebarFrames=M.empty,sidebarReferences=M.empty,sourceReferences=M.empty,
           thread=if threads then Nothing else thread state,
           frame=if stacks then Nothing else frame state,frames=if stacks then [] else frames state})
         if threads then send runtime (Threads False) "threads" (object [])
@@ -821,7 +854,7 @@ receive runtime@(Debugger ref clock _ _) core d event = do
       when (stopped s) $ modifyIORef' ref (\state->state
         { generation=generation state+1,frameRevision=frameRevision state+1
         , choices=M.empty,variableRefs=M.empty,sidebarPages=M.empty
-        , sidebarThreads=M.empty,sidebarFrames=M.empty,sidebarReferences=M.empty
+        , sidebarThreads=M.empty,sidebarFrames=M.empty,sidebarReferences=M.empty,sourceReferences=M.empty
         , thread=if exitedSelection then Nothing else thread state
         , frame=if exitedSelection then Nothing else frame state
         , frames=if exitedSelection then [] else frames state })
@@ -855,15 +888,19 @@ receive runtime@(Debugger ref clock _ _) core d event = do
       Nothing -> pure d
       Just (kind,epoch,_) -> do
         modifyIORef' ref (\state -> state {pending=M.delete ident (pending state)})
-        if (stale kind && epoch/=generation s) || selectionExpired s kind || (case kind of Breaks key _ -> M.lookup key (breakRequests s)/=Just ident; _ -> False) then do
+        if (stale kind && epoch/=generation s) || selectionExpired s kind || sourceInspectionExpired s d kind || (case kind of Breaks key _ -> M.lookup key (breakRequests s)/=Just ident; _ -> False) then do
           completeInspection kind (Left "Debugger inspection expired; refresh debug_status.")
           pure d
         else case kind of
-          SidebarRead _ reply -> do
+          SourceInspection _ _ _ reply->void (tryPutMVar reply result) >> pure d
+          SidebarRead (DebugPageRequest _ target _) reply -> do
+            case target of DebugStack{}->forM_ result (recordSourceReferences ref); _->pure ()
             atomically (void (tryPutTMVar reply result))
             pure d
           Inspection command reply -> do
-            forM_ result (recordVariables ref command)
+            forM_ result $ \body->do
+              recordVariables ref command body
+              when (command=="stackTrace") (recordSourceReferences ref body)
             _<-tryPutMVar reply (result >>= boundedResult)
             pure d
           _ -> case result of
@@ -879,7 +916,7 @@ receive runtime@(Debugger ref clock _ _) core d event = do
              pure (automaticDesktop s d) {status="DAP: "<>err}
            Right body -> if isJust (endedAt s) then pure d else response runtime core kind body d
   where
-    stale kind=case kind of Threads{} -> True; Control{} -> True; Stack{} -> True; Scopes{} -> True; Variables{} -> True; ExceptionDetails -> True; Source{} -> True; Inspection{} -> True; SidebarRead{} -> True; _ -> False
+    stale kind=case kind of Threads{} -> True; Control{} -> True; Stack{} -> True; Scopes{} -> True; Variables{} -> True; ExceptionDetails -> True; Source{} -> True; Inspection{} -> True; SourceInspection{} -> True; SidebarRead{} -> True; _ -> False
 
 -- Selection controls presentation/source follow only. Stopped handles remain
 -- valid for sibling frames until the stop epoch itself expires.
@@ -889,6 +926,40 @@ selectionExpired s kind=case kind of
   Variables revision -> revision/=frameRevision s
   Source _ revision _ -> revision/=frameRevision s
   _ -> False
+
+-- Captured backing paths are resolved only on a waiting tool/source worker.
+canonicalSourcePath :: FilePath -> Maybe FilePath -> IO (Either Text (Maybe FilePath))
+canonicalSourcePath _ Nothing=pure (Right Nothing)
+canonicalSourcePath base (Just path)=do
+  result<-try (canonicalizePath (if isAbsolute path then path else base </> path))
+  pure $ either (\(err::IOException)->Left ("Debugger source path: "<>T.pack (show err))) (Right . Just) result
+
+sourceStampCurrent :: State -> Int -> Int -> Bool
+sourceStampCurrent s reference stamp=case M.lookup reference (sourceReferences s) of
+  Just (SourceObservation current _)->current==stamp
+  _->False
+
+sourceInspectionExpired :: State -> Desktop -> Pending -> Bool
+sourceInspectionExpired s d (SourceInspection reference stamp origin _)=not (stopped s && sourceStampCurrent s reference stamp) || maybe False (protectedPath d) origin
+sourceInspectionExpired _ _ _=False
+
+-- Observe only bounded handles supplied by current stopped stack metadata.
+-- A changed backing path rotates the scalar stamp; no adapter payload equality
+-- participates in identity. Canonical path preparation is a worker operation.
+recordSourceReferences :: IORef State -> Value -> IO ()
+recordSourceReferences ref body=modifyIORef' ref $ \s->foldl' observe s (take 1000 (items "stackFrames" body))
+  where
+    observe s row=case field "source" row of
+      Just source | reference>0,validPath, M.member reference (sourceReferences s) || M.size (sourceReferences s)<32768 ->
+        case M.lookup reference (sourceReferences s) of
+          Just (SourceObservation _ oldPath) | oldPath==path->s
+          _->s {sourceReferences=M.insert reference (SourceObservation (nextSourceObservation s) path) (sourceReferences s),nextSourceObservation=nextSourceObservation s+1}
+        where
+          reference=integer "sourceReference" source
+          rawPath=case (field "path" source :: Maybe Text) of Just ""->Nothing; value->value
+          path=T.unpack <$> rawPath
+          validPath=maybe True (\value->T.compareLength value 4096/=GT && not (T.any (=='\0') value)) rawPath
+      _->s
 
 -- DAP lazy handles are executable: hdb forces a thunk when its children are
 -- requested. Track provenance for both UI and MCP; never guess a reference.
@@ -942,6 +1013,7 @@ response runtime@(Debugger ref _ _ _) core kind body d = do
       if showPicker then showChoices runtime "Threads" "thread" rows (map (text "name") rows) d else pure d
     Stack _ tid selectedRevision | tid/=fromMaybe (-1) (thread s) || selectedRevision/=frameRevision s -> pure d
     Stack showPicker _ _ -> do
+      recordSourceReferences ref body
       let rows=items "stackFrames" body
       modifyIORef' ref (\state -> state {frame=listToMaybe rows,frames=rows})
       if showPicker then showChoices runtime "Call stack" "frame" rows (map frameLabel rows) d
@@ -967,7 +1039,12 @@ response runtime@(Debugger ref _ _ _) core kind body d = do
         modifyIORef' ref (\state -> state {sources=M.insert bid source (sources state)})
         pure (position selected styled) {status="Stopped in "<>frameLabel selected}
     Control _ -> pure d
-    Inspection command reply -> recordVariables ref command body >> tryPutMVar reply (boundedResult body) >> pure d
+    SourceInspection _ _ _ reply->void (tryPutMVar reply (Right body)) >> pure d
+    Inspection command reply -> do
+      recordVariables ref command body
+      when (command=="stackTrace") (recordSourceReferences ref body)
+      _<-tryPutMVar reply (boundedResult body)
+      pure d
     SidebarRead _ reply -> atomically (void (tryPutTMVar reply (Right body))) >> pure d
     Detach -> do
       stopTransport runtime s

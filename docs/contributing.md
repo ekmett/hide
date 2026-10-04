@@ -628,3 +628,17 @@ equal-revision buffer replacement and changed-source watch confirmation. Watch
 expressions are stored in the existing owner (128 entries, 4096 characters each);
 the Watches tree and explicit evaluation/Force remain the next slice. Local
 source following still uses the existing synchronous owner route.
+
+Debugger source inspection accepts only positive references observed in current
+stopped stack metadata, including human, inspector and sidebar stacks. Source
+observations use bounded path metadata and scalar stamps; generation changes
+expire them. A waiting inspector resolves the captured backing path outside the
+UI lock, then uses the existing bounded owner mailbox. Admission and reply
+publication recheck the handle and shared authority-path policy. At most four
+source inspections can be outstanding. Pathless observed sources are output from
+the human-approved adapter, not filesystem reads or universally sanitized text.
+
+`documentOrigin` is canonical privacy provenance for generated documents. It
+never grants file/save authority; recovery preserves it and shared private-document
+policy denies protected origins. The debugger producer and public status/stack
+projection are being wired in the source-privacy slice before Watches evaluation.

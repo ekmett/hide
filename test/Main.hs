@@ -61,6 +61,7 @@ import qualified AgentWorkspaceCheck
 import qualified UnicodeCheck
 import qualified HexCheck
 import qualified DAPCheck
+import qualified DebuggerSourcePolicyCheck
 import qualified DebuggerSidebarCheck
 import qualified DebuggerCheck
 import qualified CompletionCheck
@@ -171,6 +172,7 @@ main = do
   DAPCheck.checks
   DebuggerCheck.checks
   DebuggerSidebarCheck.checks
+  DebuggerSourcePolicyCheck.checks
   CompletionCheck.checks
   DownloadsCheck.checks
   HdbAcquisitionCheck.checks
