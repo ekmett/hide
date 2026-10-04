@@ -119,7 +119,7 @@ applyGuestInput input d
   | otherwise = Right (updated,effects)
   where
     (updated,rawEffects)=applyInputUnchecked input d
-    effects=map (\effect->case effect of InvokeMenu reference _ target->InvokeMenu reference Plugin.AgentMenu target; _->effect) rawEffects
+    effects=map (\effect->case effect of InvokeMenu reference _ target->InvokeMenu reference Plugin.AgentMenu target; LoadTree request _->LoadTree request Plugin.AgentMenu; InvokeTree trace reference _->InvokeTree trace reference Plugin.AgentMenu; _->effect) rawEffects
     allowed=not (guestModalBlocked d) && case input of
       Key name mods -> maybe False (\key->guestKeyAllowed d key mods) (inputKey name mods)
       Paste _ -> guestKeyboardAllowed d

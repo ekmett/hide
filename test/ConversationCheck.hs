@@ -41,6 +41,7 @@ import qualified Hide.AgentHub as AH
 import qualified Hide.AgentRuntime as AR
 import System.Mem.StableName (makeStableName)
 import Hide.Files
+import Hide.Sidebar
 import Hide.Model hiding (prompt)
 import Hide.Markdown (renderMarkdown)
 import Hide.Syntax (Style(..))
@@ -335,7 +336,7 @@ checks = (composerCodeChecks >>) $ bracket temporary removePathForcibly $ \root 
     BS.writeFile secondSource "second original\n"
     (secondFile,secondBuffer)<-loadFile secondSource >>= either error pure
     (file,b)<-loadFile source >>= either error pure
-    let desktop=insertText "unsaved " (addDocument (Just file) b (addDocument (Just secondFile) secondBuffer (initialDesktop (90,28))) {sideTree=Just (Sidebar root [] 0 0 20 False)})
+    let desktop=insertText "unsaved " (addDocument (Just file) b (addDocument (Just secondFile) secondBuffer (initialDesktop (90,28))) {sideTree=Just (emptySidebar root 20 False)})
 #ifndef mingw32_HOST_OS
     -- Hold an actual filesystem read open while the provider sends more work.
     -- The desktop must keep ticking, and a later write cannot bless user edits

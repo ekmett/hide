@@ -9,17 +9,17 @@
 module Hide.Reconcile
   ( Reconciliation, withReconciliation, reconciliationEffects, tickReconciliation ) where
 
+import Hide.Sidebar
 import Control.Monad (foldM, unless)
 import qualified Data.ByteString as BS
 import Data.IORef
-import Data.List (find, findIndex)
+import Data.List (find)
 import qualified Data.Map.Strict as M
 import Data.Maybe (fromMaybe, listToMaybe)
 import qualified Data.Set as S
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import System.Directory (canonicalizePath, pathIsSymbolicLink)
-import System.FilePath (takeDirectory)
 import System.IO.Error (catchIOError, isDoesNotExistError, tryIOError)
 import Hide.Browser (Entry)
 import Hide.Buffer
@@ -56,7 +56,7 @@ synchronize (Reconciliation watcher ref) desktop = do
       unchanged bid _ = M.lookup bid current==M.lookup bid (watched old) && M.member bid current
       directories = case sideTree desktop of
         Nothing -> []
-        Just tree -> treeRoot tree : [nodePath row | row <- treeRows tree,nodeDirectory row,nodeExpanded row]
+        Just tree -> treeRoot tree : treeWatchPaths tree
       desiredDirs = S.fromList directories
   writeIORef ref old {watched=current,generation=counter,
     changedDisk=M.filterWithKey unchanged (changedDisk old),announced=M.filterWithKey unchanged (announced old),
@@ -80,16 +80,16 @@ reconciliationEffects runtime core = foldM apply . (False,)
 
 -- | Consume coalesced observations, reload clean files and present conflicts.
 -- Adoption may construct replacement buffers; explicit decisions reread the disk.
-tickReconciliation :: Reconciliation -> Desktop -> IO Desktop
-tickReconciliation runtime@(Reconciliation watcher _) desktop = do
+tickReconciliation :: Reconciliation -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> IO Desktop
+tickReconciliation runtime@(Reconciliation watcher _) core desktop = do
   synchronize runtime desktop
   observations <- pollObservations watcher
-  updated <- foldM (observe runtime) desktop observations
+  updated <- foldM (observe runtime core) desktop observations
   synchronize runtime updated
   promptPending runtime updated
 
-observe :: Reconciliation -> Desktop -> Observation -> IO Desktop
-observe runtime@(Reconciliation _ ref) desktop observation = do
+observe :: Reconciliation -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> Observation -> IO Desktop
+observe runtime@(Reconciliation _ ref) core desktop observation = do
   tracking <- readIORef ref
   case observation of
     FileObserved path token bytes -> case owner tracking path token of
@@ -103,7 +103,7 @@ observe runtime@(Reconciliation _ ref) desktop observation = do
     DirectoryObserved path entries -> do
       let cache=M.insert path entries (directoryEntries tracking)
       modifyIORef' ref (\s -> s {directoryEntries=cache})
-      pure (refreshTree cache desktop)
+      snd <$> core desktop [RefreshTree path entries]
     DirectoryUnavailable path err -> pure desktop {status="Cannot refresh "<>T.pack path<>": "<>err}
   where
     owner tracking path token = fst <$> find (\(_, (file,version)) -> filePath file==path && version==token) (M.toList (watched tracking))
@@ -230,24 +230,3 @@ comparison file buffer disk = T.concat
     render Nothing="[File does not exist]"
     render (Just bytes)=either (const ("[Non-text bytes]\n"<>T.pack (show bytes))) id (decode bytes)
 
-refreshTree :: M.Map FilePath [Entry] -> Desktop -> Desktop
-refreshTree cache desktop = desktop {sideTree=fmap refresh (sideTree desktop)}
-  where
-    refresh tree =
-      let oldRows=treeRows tree
-          expanded=S.fromList [nodePath row | row<-oldRows,nodeExpanded row]
-          children base depth=concatMap expand (maybe
-            [row {nodeDepth=depth} | row<-oldRows,takeDirectory (nodePath row)==base]
-            (nodes base depth) (M.lookup base cache))
-          expand row
-            | nodeDirectory row && S.member (nodePath row) expanded =
-                row {nodeExpanded=True} : children (nodePath row) (nodeDepth row+1)
-            | otherwise = [row {nodeExpanded=False}]
-          rows=children (treeRoot tree) 0
-          oldPath index=nodePath <$> listToMaybe (drop index oldRows)
-          locate index=fromMaybe (min index (max 0 (length rows-1)))
-            (oldPath index >>= \path -> findIndex ((==path) . nodePath) rows)
-          selected=locate (treeSelected tree)
-          visible=max 1 (snd (screenSize desktop)-5)
-          scroll=max 0 (min selected (max (locate (treeScroll tree)) (selected-visible+1)))
-      in tree {treeRows=rows,treeSelected=selected,treeScroll=scroll}

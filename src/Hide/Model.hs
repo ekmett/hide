@@ -19,6 +19,9 @@ import Data.Text (Text)
 import qualified Data.Text.Encoding as TE
 import qualified Data.Map.Strict as M
 import qualified Data.Vector as Vec
+import Hide.Sidebar
+import qualified Hide.Plugin.Tree as Tree
+import Hide.Plugin.Command (CommandRef)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import Data.Maybe (listToMaybe, fromMaybe)
@@ -103,26 +106,27 @@ data Command = New | Open | Download | ChangeDir | Save | SaveAs | Close | Quit 
   | SidebarMove Int | SidebarActivate | SidebarExpand | SidebarCollapse | FocusSource | MessagesMove Int | MessagesPage Int
   | ToolchainOptions | SelectToolchain Toolchain | SelectCompiler Text
   | DebugCommand Text | AutocompleteCommand Text
+  | TreeCommand [Tree.TreeHit] CommandRef
   | RegisteredMenu Plugin.MenuRef Bool
   | Disabled Text deriving (Eq,Show)
 data ConflictAction = CompareDisk | ReloadDisk | KeepBuffer | SaveConflictAs deriving (Eq,Show)
 data Conflict = Conflict { conflictBuffer :: Int, conflictRevision :: Int, conflictBaseline :: FileState, conflictDisk :: Maybe ByteString } deriving (Eq,Show)
 data GitAction = FetchRemote | PullRemote | MergeBranch Text deriving (Eq,Show)
 data Toolchain = THC | GHC deriving (Eq,Show)
-data ContextKind = ToolchainContext [(Text,Command)] | LinkContext Command | ShellContext Command | ChangeContext Command | SourceContext | GitContext | MessagesContext | AgentContext [(Text,Command)] deriving (Eq,Show)
+data ContextKind = TreeContext [Tree.TreeHit] [(Text,Command)] | ToolchainContext [(Text,Command)] | LinkContext Command | ShellContext Command | ChangeContext Command | SourceContext | GitContext | MessagesContext | AgentContext [(Text,Command)] deriving (Eq,Show)
 -- | Bounded hit target retained while a context popup is open. Messages use a
 -- projection generation and optional frozen source location, never message text. The
 -- editor's source edits/reloads advance the revision; no buffer payload is kept.
 -- Reconcile reload guarantees old+1, and checked edits/Git reload derive their
 -- replacement from the original buffer. Read-only transcript/output replacement
 -- may restart revisions and is never an editable SourceContext target.
-data ContextTarget = SourceTarget Int Int Int Selection | ConversationTarget Text | MessagesTarget !Integer !Int !(Maybe (FilePath,Int,Int)) | UnavailableMessagesTarget | UnavailableSourceTarget deriving (Eq,Show)
+data ContextTarget = SidebarTarget [Tree.TreeHit] | SourceTarget Int Int Int Selection | ConversationTarget Text | MessagesTarget !Integer !Int !(Maybe (FilePath,Int,Int)) | UnavailableMessagesTarget | UnavailableSourceTarget deriving (Eq,Show)
 
 data LanguageAction = TypeInfo | FindDefinition | Completions | ShowProblems | RestartLanguage | RenameAt Text | RequestCodeActions | ApplyCodeAction Int Int Text deriving (Eq,Show)
 data Completion = Completion Text [(Int,Int,Text)] deriving (Eq,Show)
 data ProjectAction = LoadProject | ProjectPage Int Int | ProjectDetails Int Int deriving (Eq,Show)
 -- | Ordered requests for the host interpreter, produced alongside a new desktop.
-data Effect = ReloadKeyBindings FilePath | InspectKeyBindings (Maybe (Bindings.BindingPlatform,Bindings.BindingContext)) (Maybe (Bindings.Bindings Command)) | FollowLink (Maybe FilePath) Text | EnvironmentAction Text [Text] | AutocompleteAction Text [Text] | SaveMacKeySymbols Bool | SaveChatSubmit ChatSubmit | SaveBufferViewDefault BufferView | ProjectRequest ProjectAction | DownloadDocument Int | ReadBrowserClipboard | WriteBrowserClipboard Text | LanguageRequest LanguageAction | RunGit GitAction | ReadMergeBranches | JumpTo FilePath Int Int | ReadPath FilePath | BrowsePath FilePath Text | BrowseDirectories FilePath | ChangeDirectory FilePath | OpenChoice FilePath Text Text | ReadTree FilePath | ExpandTree Int | ReadHelp | InvokeMenu Plugin.MenuRef Plugin.MenuOrigin (Maybe ContextTarget) | RefreshGit FilePath | ReadGitDiff | AskGitCommit | WriteGitCommit Text | SaveDocument Int (Maybe FilePath) (Maybe Command) | ReviewExternal | ResolveConflict Conflict ConflictAction | AgentAction Text [Text] | PermissionAction Text [Text] | DebugAction Text [Text] | SetScreenMode Int | Exit deriving (Eq,Show)
+data Effect = ReloadKeyBindings FilePath | InspectKeyBindings (Maybe (Bindings.BindingPlatform,Bindings.BindingContext)) (Maybe (Bindings.Bindings Command)) | FollowLink (Maybe FilePath) Text | FollowTreeLink [Tree.TreeHit] FilePath | EnvironmentAction Text [Text] | AutocompleteAction Text [Text] | SaveMacKeySymbols Bool | SaveChatSubmit ChatSubmit | SaveBufferViewDefault BufferView | ProjectRequest ProjectAction | DownloadDocument Int | ReadBrowserClipboard | WriteBrowserClipboard Text | LanguageRequest LanguageAction | RunGit GitAction | ReadMergeBranches | JumpTo FilePath Int Int | ReadPath FilePath | BrowsePath FilePath Text | BrowseDirectories FilePath | ChangeDirectory FilePath | OpenChoice FilePath Text Text | ReadTree FilePath | RefreshTree FilePath [Entry] | LoadTree TreeRequest Plugin.MenuOrigin | InvokeTree [Tree.TreeHit] CommandRef Plugin.MenuOrigin | ReadHelp | InvokeMenu Plugin.MenuRef Plugin.MenuOrigin (Maybe ContextTarget) | RefreshGit FilePath | ReadGitDiff | AskGitCommit | WriteGitCommit Text | SaveDocument Int (Maybe FilePath) (Maybe Command) | ReviewExternal | ResolveConflict Conflict ConflictAction | AgentAction Text [Text] | PermissionAction Text [Text] | DebugAction Text [Text] | SetScreenMode Int | Exit deriving (Eq,Show)
 data Field = Input Text Text Int | ComboBox Text [Text] Int (Maybe Int) | CheckBox Text Bool | Radio Text [Text] Int | ListBox Text [Text] Int | FileList [Entry] Int
   | ReadOnly Text Text
   | TextArea Text Bool Buffer Selection Int Int deriving (Eq,Show)
@@ -136,12 +140,10 @@ data Dialog = Dialog
   { dialogTitle :: Text, purpose :: Purpose, fields :: [Field], focus :: Int
   , buttons :: [Text], body :: [Text]
   } deriving (Eq,Show)
-data TreeRow = TreeRow { nodeName :: Text, nodePath :: FilePath, nodeDepth :: Int, nodeDirectory :: Bool, nodeExpanded :: Bool } deriving (Eq,Show)
 data Diagnostic = Diagnostic
   { diagnosticPath :: FilePath, diagnosticVersion :: Maybe Int, diagnosticRow :: Int
   , diagnosticColumn :: Int, diagnosticSeverity :: Int, diagnosticMessage :: Text
   } deriving (Eq,Show)
-data Sidebar = Sidebar { treeRoot :: FilePath, treeRows :: [TreeRow], treeSelected :: Int, treeScroll :: Int, treeWidth :: Int, treeFocused :: Bool } deriving (Eq,Show)
 data Drag = FollowingLink Int Int Int (Maybe FilePath) Text | ReviewSizing Int | DockSizing | MessagesSizing | TreeScrolling | Moving Int Int Int | Resizing Int Int Int | EdgeSizing Int Bool Bool Int | Selecting Int | Scrolling Int Bool deriving (Eq,Show)
 data AgentSetting = AgentSetting { settingId :: Text, settingName :: Text, settingCategory :: Text, settingCurrent :: Text, settingChoices :: [(Text,Text)] } deriving (Eq,Show)
 -- | The human-selected composer action for Enter; Ctrl+Enter uses the other action.
@@ -268,6 +270,7 @@ commandDescription :: Command -> Text
 commandDescription cmd = case cmd of
   ReloadBindings -> "Reload and validate bindings from global and project configuration."
   InspectBindings -> "Show every effective command binding for the focused profile and context."
+  TreeCommand _ _ -> "Run the captured sidebar action."
   SidebarMove _ -> "Move the selected sidebar row."
   SidebarActivate -> "Open the selected file or toggle its directory."
   SidebarExpand -> "Expand the selected directory or open its file."
@@ -453,6 +456,7 @@ commandEnabled d cmd | dialogCommandAllowed cmd d = True
 commandEnabled d Download = browserFrontend d && maybe False ((==Nothing) . documentLabel) (activeDocument d)
 commandEnabled d GoToMessage | menusActive d = maybe False (commandEnabled d . contributionCommand d) (find ((=="hide.messages.go-to") . Plugin.menuName . Plugin.menuReference) (contributedMenus d))
 commandEnabled d Help | menusActive d = any ((=="hide.help.contents") . Plugin.menuName . Plugin.menuReference) (contributedMenus d)
+commandEnabled d (TreeCommand trace _) = dialog d==Nothing && maybe False (hitCurrent trace) (sideTree d)
 commandEnabled d (RegisteredMenu reference _) = dialog d==Nothing && case find ((==reference) . Plugin.menuReference) (contributedMenus d) of
   Nothing -> False
   Just item | Plugin.menuSlot item=="context.messages" -> case messageInvocationTarget d of
@@ -490,7 +494,7 @@ menuCommandAvailable d cmd = commandEnabled d cmd && canInvoke
               | cmd==Paste = not (maybe False treeFocused (sideTree d)) || dialog d/=Nothing
               | otherwise = dialog d==Nothing && (activeWindow d/=Nothing ||
                   (problemsVisible d && problemsFocused d && cmd==Copy) ||
-                  (case cmd of RegisteredMenu{}->True; _->False) || cmd `elem` [ReloadBindings,InspectBindings,New,Open,ChangeDir,Quit,Help,About,Gallery,EditorOptions,EnvironmentOptions,ChatInputOptions,ProjectBrowser,RunTarget,RunOptions,CompileTarget,MakeTarget,StopBuild,OpenTerminal,StopTerminal,AgentDirectory,AgentOptions,AgentPermissions,AgentGuidance,Conversation,AgentCancel,AgentResume,AgentNew,AgentCopyRaw,ToggleTree,GitDiff,GitCommit,GitFetch,GitPull,GitMerge,Problems,NextMessage,PreviousMessage,ToolchainOptions,AutocompleteCommand "settings",DebugCommand "attach",DebugCommand "launch",DebugCommand "downloads"])
+                  (case cmd of RegisteredMenu{}->True; TreeCommand{}->True; _->False) || cmd `elem` [ReloadBindings,InspectBindings,New,Open,ChangeDir,Quit,Help,About,Gallery,EditorOptions,EnvironmentOptions,ChatInputOptions,ProjectBrowser,RunTarget,RunOptions,CompileTarget,MakeTarget,StopBuild,OpenTerminal,StopTerminal,AgentDirectory,AgentOptions,AgentPermissions,AgentGuidance,Conversation,AgentCancel,AgentResume,AgentNew,AgentCopyRaw,ToggleTree,GitDiff,GitCommit,GitFetch,GitPull,GitMerge,Problems,NextMessage,PreviousMessage,ToolchainOptions,AutocompleteCommand "settings",DebugCommand "attach",DebugCommand "launch",DebugCommand "downloads"])
 
 menuRect :: Desktop -> Int -> Rect
 menuRect d i = Rect (min x (max 0 (sw-w))) 1 w (length (menuItemsFor d i)+2)
@@ -945,11 +949,16 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
     go NextMessage d = navigateMessage 1 d
     go PreviousMessage d = navigateMessage (-1) d
     go RestartHLS d = (d,[LanguageRequest RestartLanguage])
-    go (OpenLink origin target) d = (d,[FollowLink origin target])
+    go (OpenLink origin target) d = case contextTarget d of
+      Just (SidebarTarget trace) | contextTargetCurrent d,Just path<-origin->(d,[FollowTreeLink trace path])
+      _->(d,[FollowLink origin target])
     go Help d = case find ((=="hide.help.contents") . Plugin.menuName . Plugin.menuReference) (contributedMenus d) of
       Just item -> go (contributionCommand d item) d
       Nothing | menusActive d -> (d {status="Help command is unavailable."},[])
               | otherwise -> (d,[ReadHelp])
+    go (TreeCommand trace action) d
+      | commandEnabled d (TreeCommand trace action) = (d,[InvokeTree trace action Plugin.HumanMenu])
+      | otherwise = (d,[])
     go (RegisteredMenu reference _) d
       | commandEnabled source (RegisteredMenu reference False) = (d,[InvokeMenu reference Plugin.HumanMenu target])
       | otherwise = (d {status="Menu action is unavailable."},[])
@@ -1778,6 +1787,7 @@ menuAt :: Int -> Maybe Int
 menuAt x = findIndex (\(start,w) -> x >= start && x < start+w) menuPositions
 
 contextItems :: ContextKind -> [(Text,Command)]
+contextItems (TreeContext _ items) = items
 contextItems (ToolchainContext items) = items
 contextItems (LinkContext command) = [("Open",command)]
 contextItems (ShellContext command) = [("Execute in terminal",command)]
@@ -1858,6 +1868,7 @@ openContext kind x y d = d {contextKind=kind,contextTarget=captureContextTarget 
 -- Focus or edits while a popup is open refuse it instead of redirecting it.
 captureContextTarget :: ContextKind -> Desktop -> Maybe ContextTarget
 captureContextTarget kind d = case kind of
+  TreeContext trace _ -> Just (SidebarTarget trace)
   SourceContext -> source
   ChangeContext{} -> source
   AgentContext{} -> Just (ConversationTarget (conversationTarget d))
@@ -1879,6 +1890,7 @@ messagesOwner d=messagesDisplayed d && problemsFocused d && not (maybe False tre
 
 contextTargetCurrent :: Desktop -> Bool
 contextTargetCurrent d = case contextTarget d of
+  Just (SidebarTarget trace) -> maybe False (\tree->treeFocused tree && hitCurrent trace tree) (sideTree d)
   Nothing -> True
   Just (ConversationTarget target) -> conversationTarget d==target
   Just target@SourceTarget{} -> captureContextTarget SourceContext d==Just target
@@ -2897,27 +2909,33 @@ resizeTree x d = case sideTree d of
       (edge,moved)=resizeEdge False False requested (0,sw) (-1,source) (floatingWindows d)
       next=d {sideTree=Just tree {treeWidth=edge+1},drag=Just DockSizing,dragOriginal=Nothing}
 
-installTree :: FilePath -> [Entry] -> Desktop -> Desktop
-installTree root entries d = setTree (Just (Sidebar root (nodes root 0 entries) 0 0 (min 24 (max 0 (fst (screenSize d)-20))) True)) d {problemsFocused=False}
-
-nodes :: FilePath -> Int -> [Entry] -> [TreeRow]
-nodes base depth entries = [TreeRow (entryName e) (base </> T.unpack (entryName e)) depth (entryDirectory e) False | e<-entries,entryName e/=".."]
-
-expandTree :: Int -> [Entry] -> Desktop -> Desktop
-expandTree i entries d = d {sideTree=fmap expand (sideTree d)}
-  where expand t = case drop i (treeRows t) of
-          node:rest -> t {treeRows=take i (treeRows t) ++ [node {nodeExpanded=True}] ++ nodes (nodePath node) (nodeDepth node+1) entries ++ rest}
-          _ -> t
+-- | Mount host-prepared sidebar metadata without changing dock geometry.
+installSidebar :: Sidebar -> Desktop -> Desktop
+installSidebar tree d=setTree (Just tree) d {problemsFocused=False}
 
 activateTree :: Bool -> Int -> Desktop -> (Desktop,[Effect])
-activateTree forceOpen i d = case sideTree d of
-  Just tree | i>=0, node:rest <- drop i (treeRows tree) ->
-    let selected=d {sideTree=Just tree {treeSelected=i,treeFocused=True}} in
-    if nodeDirectory node then
-      if nodeExpanded node && not forceOpen then (selected {sideTree=Just tree {treeSelected=i,treeFocused=True,treeRows=take i (treeRows tree) ++ [node {nodeExpanded=False}] ++ dropWhile ((>nodeDepth node) . nodeDepth) rest}},[])
-      else if nodeExpanded node then (selected,[]) else (selected,[ExpandTree i])
-    else (selected {sideTree=Just tree {treeSelected=i,treeFocused=False}},[ReadPath (nodePath node)])
-  _ -> (d,[])
+activateTree forceOpen index d=case sideTree d of
+  Just tree | Just row<-rowAt index tree->
+    let chosen=tree {treeSelected=index,treeFocused=True}
+        selected=d {sideTree=Just chosen,problemsFocused=False}
+        expand cursor=let (next,request)=requestChildren (currentHit row chosen) cursor chosen
+                      in (selected {sideTree=Just next},maybe [] (\value->[LoadTree value Plugin.HumanMenu]) request)
+    in case rowAction row of
+      WaitForLoad->(selected,[])
+      RetryLoad->expand Nothing
+      LoadNext cursor->expand (Just cursor)
+      ActivateNode | Tree.infoBranch (rowInfo row)->case M.lookup (keyOf (rowHit row)) (treeNodes chosen) of
+        Just node | stateExpanded node && not forceOpen->(selected {sideTree=Just (collapseAt index chosen)},[])
+                  | stateExpanded node->(selected,[])
+                  | Loaded{}<-stateLoad node->(selected {sideTree=Just chosen {treeNodes=M.adjust (\value->value {stateExpanded=True}) (keyOf (rowHit row)) (treeNodes chosen),treeRevision=treeRevision chosen+1}},[])
+        _->expand Nothing
+      ActivateNode | Just action<-rowCommand row->
+        let trace=hitTrace (keyOf (rowHit row)) chosen
+        in if hitCurrent (rowHit row:drop 1 trace) chosen
+          then (selected,[InvokeTree (rowHit row:drop 1 trace) action Plugin.HumanMenu]) else (selected,[])
+      _->(selected,[])
+  _->(d,[])
+  where currentHit row tree=maybe (rowHit row) (nodeHit (keyOf (rowHit row))) (M.lookup (keyOf (rowHit row)) (treeNodes tree))
 
 treeKey :: V.Key -> [V.Modifier] -> Sidebar -> Desktop -> (Desktop,[Effect])
 treeKey key mods tree d = case key of
@@ -2925,6 +2943,8 @@ treeKey key mods tree d = case key of
   V.KDown -> move 1
   V.KPageUp -> move (-10)
   V.KPageDown -> move 10
+  V.KHome -> selectTreeRow 0 tree d
+  V.KEnd -> selectTreeRow (M.size (treeRows tree)-1) tree d
   V.KEnter -> activateTree False (treeSelected tree) d
   V.KRight -> activateTree True (treeSelected tree) d
   V.KLeft -> collapseTree tree d
@@ -2944,30 +2964,39 @@ moveTree delta tree d = selectTreeRow (treeSelected tree+delta) tree d
 
 selectTreeRow :: Int -> Sidebar -> Desktop -> (Desktop,[Effect])
 selectTreeRow i tree d = (d {sideTree=Just tree {treeSelected=chosen,treeScroll=scroll}},[])
-  where chosen=max 0 (min (length (treeRows tree)-1) i)
+  where chosen=max 0 (min (M.size (treeRows tree)-1) i)
         visible=max 1 (treeContentRows d)
         scroll=max 0 (min chosen (max (treeScroll tree) (chosen-visible+1)))
 
 collapseTree :: Sidebar -> Desktop -> (Desktop,[Effect])
-collapseTree tree d = case drop (treeSelected tree) (treeRows tree) of
-  node:_ | nodeExpanded node -> activateTree False (treeSelected tree) d
-  node:_ -> let ancestors=[i | (i,n)<-zip [0..] (take (treeSelected tree) (treeRows tree)),nodeDepth n < nodeDepth node]
-            in selectTreeRow (if null ancestors then 0 else last ancestors) tree d
-  _ -> (d,[])
+collapseTree tree d=case rowAt (treeSelected tree) tree of
+  Just row | rowExpanded row->(d {sideTree=Just (collapseAt (treeSelected tree) tree)},[])
+  Just row | Just node<-M.lookup (keyOf (rowHit row)) (treeNodes tree), Just parent<-stateParent node->
+    let ancestor=M.lookup parent (treeNodes tree) >>= (\value->M.lookupIndex (stateAddress value) (treeRows tree))
+    in maybe (d,[]) (\index->selectTreeRow index tree d) ancestor
+  _->(d,[])
 
 treeContentRows :: Desktop -> Int
 treeContentRows d = max 0 (snd (screenSize d)-4-problemsHeight d)
 
 treeScrollLimit :: Desktop -> Sidebar -> Int
-treeScrollLimit d tree = max 0 (length (treeRows tree)-treeContentRows d)
+treeScrollLimit d tree = max 0 (M.size (treeRows tree)-treeContentRows d)
 
 scrollTreeTo :: Int -> Sidebar -> Desktop -> Desktop
 scrollTreeTo position tree d = d {sideTree=Just tree {treeScroll=max 0 (min (treeScrollLimit d tree) position)}}
 
 treeMouse :: Int -> Int -> V.Button -> Sidebar -> Desktop -> (Desktop,[Effect])
 treeMouse x y button tree d = case button of
-  V.BRight | y>=2, y<sh-2, node:_<-drop (treeScroll tree+y-2) (treeRows tree), not (nodeDirectory node), map toLower (takeExtension (nodePath node)) `elem` [".md",".markdown",".png",".jpg",".jpeg",".gif",".webp",".bmp",".svg",".pdf"] ->
-    (openContext (LinkContext (OpenLink (Just (nodePath node)) "")) x (y+1) d,[])
+  V.BRight | y>=2, y<sh-2, Just row<-rowAt (treeScroll tree+y-2) tree,
+    Tree.TreeHit owner _ _<-rowHit row, owner `elem` treeAgentRefs tree,
+    not (Tree.infoBranch (rowInfo row)),Just path<-Tree.infoResource (rowInfo row),
+    map toLower (takeExtension path) `elem` [".md",".markdown",".png",".jpg",".jpeg",".gif",".webp",".bmp",".svg",".pdf"] ->
+      let trace=rowHit row:drop 1 (hitTrace (keyOf (rowHit row)) tree)
+      in (openContext (TreeContext trace [("Open",OpenLink (Just path) "")]) x (y+1) d {sideTree=Just tree {treeFocused=True},problemsFocused=False},[])
+  V.BRight | y>=2, y<sh-2, Just row<-rowAt (treeScroll tree+y-2) tree, not (null (rowActions row))->
+    let trace=rowHit row:drop 1 (hitTrace (keyOf (rowHit row)) tree)
+        actions=[(title,TreeCommand trace action) | (title,action)<-rowActions row]
+    in (openContext (TreeContext trace actions) x (y+1) d {sideTree=Just tree {treeFocused=True},problemsFocused=False},[])
   V.BLeft | y==1 && x>=treeWidth tree-5 && x<treeWidth tree-1 -> (setTree Nothing d,[])
           | x==treeWidth tree-2 && y>=2 && y<sh-2 && treeFocused tree && treeContentRows d>=3 ->
               let offset=y-2; len=treeContentRows d; thumb=scrollbarThumb len (treeScrollLimit d tree) (treeScroll tree)

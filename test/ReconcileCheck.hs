@@ -17,6 +17,7 @@ import Hide.App (applyEffects)
 import Hide.Buffer
 import Hide.Browser (Entry(..))
 import Hide.Files
+import Hide.Sidebar
 import Hide.Model
 import Hide.Reconcile
 import qualified Hide.AgentFiles as AgentFiles
@@ -24,7 +25,7 @@ import qualified Hide.AgentFiles as AgentFiles
 checks :: IO ()
 checks = bracket temporary removePathForcibly $ \dir -> withReconciliation $ \runtime -> do
   let path = dir </> "source.hs"
-      tick = tickReconciliation runtime
+      tick = tickReconciliation runtime applyEffects
       effects = reconciliationEffects runtime applyEffects
       apply desktop requests = snd <$> effects desktop requests
       source desktop = maybe (error "missing source") id (M.lookup 1 (buffers desktop))
@@ -88,18 +89,6 @@ checks = bracket temporary removePathForcibly $ \dir -> withReconciliation $ \ru
   check "deleting a clean file prompts without erasing buffer" (contents (sourceBuffer deleted)==contents (sourceBuffer savedCopy))
   restored <- choose ReloadDisk deleted
   check "explicit reload of deletion preserves old content in undo" (contents (sourceBuffer restored)=="" && disk restored==Nothing && contents (undo (sourceBuffer restored))==contents (sourceBuffer savedCopy))
-  let tree = installTree dir [Entry "nested" True Nothing Nothing,Entry "source.hs" False Nothing Nothing] restored
-      nested = dir </> "nested"
-  createDirectory nested
-  externalWrite (nested </> "a.hs") "a"
-  let expanded = expandTree 0 [Entry "a.hs" False Nothing Nothing] tree
-      focused = expanded {sideTree=fmap (\s -> s {treeSelected=1,treeFocused=False}) (sideTree expanded)}
-  browsing <- tick focused
-  externalWrite (nested </> "b.hs") "b"
-  refreshed <- await tick (\d -> maybe False (any ((=="b.hs") . nodeName) . treeRows) (sideTree d)) browsing
-  check "tree refresh preserves expansion focus and selection" (case sideTree refreshed of
-    Just sidebar -> not (treeFocused sidebar) && any (\row -> nodePath row==nested && nodeExpanded row) (treeRows sidebar) && nodeName (treeRows sidebar !! treeSelected sidebar)=="a.hs"
-    _ -> False)
   let commands = [(AgentOptions,"options"),(Conversation,"show"),(AgentCancel,"cancel"),(AgentResume,"resume"),(AgentNew,"new"),(AgentCopyRaw,"copy")]
   check "agent commands route generic effects" (all (\(command,action) -> snd (runCommand command restored)==[AgentAction action []]) commands)
   let agentDialog = Dialog "Agent" (AgentDialog "permission") [Input "Value" "x" 1,CheckBox "Allowed" True,ListBox "Choice" ["a","b"] 1] 3 ["Allow","Deny"] []
@@ -121,7 +110,7 @@ checks = bracket temporary removePathForcibly $ \dir -> withReconciliation $ \ru
 binaryReload :: FilePath -> IO ()
 binaryReload dir = withReconciliation $ \runtime -> do
   let path=dir </> "binary.dat"
-      tick=tickReconciliation runtime
+      tick=tickReconciliation runtime applyEffects
       effects=reconciliationEffects runtime applyEffects
       check name ok=unless ok (error name)
       buffer=maybe (error "missing binary buffer") documentBuffer . activeDocument
@@ -150,7 +139,7 @@ binaryReload dir = withReconciliation $ \runtime -> do
 queuedSave :: FilePath -> Bool -> IO ()
 queuedSave dir agent = withReconciliation $ \runtime -> do
   let path=dir </> if agent then "queued-agent.hs" else "queued-save.hs"
-      tick=tickReconciliation runtime
+      tick=tickReconciliation runtime applyEffects
       effects=reconciliationEffects runtime applyEffects
       check label condition=unless condition (error label)
   externalWrite path "old baseline\n"

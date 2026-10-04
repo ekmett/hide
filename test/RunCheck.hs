@@ -25,6 +25,7 @@ import qualified Hide.Build as B
 import Hide.Buffer
 import Hide.Debugger
 import Hide.Conversation
+import Hide.Sidebar
 import Hide.Model
 import Hide.Terminal (terminalAvailable)
 
@@ -41,7 +42,7 @@ checks = do
           compilerRoot=T.pack (root </> "compiler root")
           runtimePath=T.pack (root </> "runtime with spaces")
           target="exe:target with spaces;$(touch should-not-exist)"
-          desktop=(initialDesktop (80,25)) {sideTree=Just (Sidebar root [] 0 0 20 False)}
+          desktop=(initialDesktop (80,25)) {sideTree=Just (emptySidebar root 20 False)}
           send runtime action values d=snd <$> conversationEffects runtime (\state _ -> pure (False,state)) d [AgentAction action values]
           awaitRun runtime d=do
             result<-timeout 5000000 (loop d)
@@ -96,7 +97,7 @@ checks = do
         check "Run configuration saved under isolated XDG" =<< doesFileExist (root </> "config" </> "thc-edit" </> "run.json")
         switched<-send runtime "toolchain" ["GHC"] configured
         restored<-send runtime "toolchain" ["THC"] switched
-        let elsewhere=restored {sideTree=Just (Sidebar (root </> "another-project") [] 0 0 20 False)}
+        let elsewhere=restored {sideTree=Just (emptySidebar (root </> "another-project") 20 False)}
         _<-send runtime "toolchain" ["THC"] elsewhere
         preserved<-B.loadBuildConfig (root </> "config/thc-edit") root
         check "switching preserves custom compiler and root-scoped target"
@@ -191,7 +192,7 @@ compilerMenuChecks=bracket temporary removePathForcibly $ \root -> do
       started=root </> "started"
       release=root </> "release"
       done=root </> "done"
-      desktop=(initialDesktop (80,25)) {sideTree=Just (Sidebar root [] 0 0 20 False)}
+      desktop=(initialDesktop (80,25)) {sideTree=Just (emptySidebar root 20 False)}
       core d _=pure (False,d)
       open runtime d=let (shown,effects)=runCommand ToolchainOptions d in
         snd <$> conversationEffects runtime core shown effects
@@ -274,7 +275,7 @@ shellBlockChecks = when (terminalAvailable && os/="mingw32") $ bracket temporary
     expectedRoot<-canonicalizePath root
     let body="printf '%s\\n' 'literal ; $(touch should-not-exist) λ'\npwd -P\nprintf 'ready\\n'\nIFS= read -r value\nprintf 'echo:%s\\n' \"$value\"\nprintf 'stderr-visible\\n' >&2\n"
         (styled,blocks)=renderMarkdownWithShellBlocks 30 ("intro\n\n```sh\n"<>body<>"```\n\nafter")
-        base=(initialDesktop (80,25)) {sideTree=Just (Sidebar root [] 0 0 20 False)}
+        base=(initialDesktop (80,25)) {sideTree=Just (emptySidebar root 20 False)}
         bid=nextId base
         help=addHelpStyled styled base
         desktop=help {buffers=M.adjust (\doc->doc {documentShellBlocks=blocks}) bid (buffers help)}

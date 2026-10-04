@@ -11,6 +11,7 @@
 -- desktop lock while the rest of the session continues.
 module Hide.Conversation (ConversationState, conversationServices, conversationAgents, withConversationAt, chatTools, chatToolNames, chatTool, withConversation, conversationEffects, tickConversation, parseLaunch, renderReply, pauseLabel, renderTimestamp) where
 
+import Hide.Sidebar
 import Prelude hiding (reads)
 import Control.Exception (IOException, bracket, try, onException, mask, mask_, evaluate)
 #ifdef WITH_WINDOW

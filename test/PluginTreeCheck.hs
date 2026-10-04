@@ -9,8 +9,8 @@ checks :: IO ()
 checks=withRegistry $ \registry->do
   let check label ok=unless ok (error label)
       ident=either (error . show) id . nodeId
-      root=NodeDef (NodeInfo (ident "root") "Independent" "" True Nothing) Nothing
-      child=NodeDef (NodeInfo (ident "child") "Child" "" False Nothing) Nothing
+      root=NodeDef (NodeInfo (ident "root") "Independent" "" True Nothing) Nothing []
+      child=NodeDef (NodeInfo (ident "child") "Child" "" False Nothing) Nothing []
       handler _ _=pure (Right (NodePage [child] Nothing))
       right=either (error . show) id
   provider<-right <$> registerTree registry "example.sidebar" root handler

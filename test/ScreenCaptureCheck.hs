@@ -14,6 +14,8 @@ import Hide.Browser (Entry(..))
 import Hide.Buffer (newBuffer, Selection(..))
 import Hide.GuestAccess (CellAccess(..))
 import Hide.Font (loadFont)
+import SidebarFixture
+import Hide.Sidebar
 import Hide.Model
 import Hide.Render (snapshot)
 import Hide.ScreenCapture
@@ -90,9 +92,8 @@ checks=do
     Just keys->any (\entry->field "key" entry==Just ("Enter"::T.Text) && field "mods" entry==Just ([]::[T.Text]) && field "allowed" entry==Just True) keys
     _->False)
   let privateFile="/authority/secret-session.json"
-      listed=(initialDesktop (80,25)) {guestPrivatePaths=[privateFile],sideTree=Just (Sidebar "/authority"
-        [TreeRow "secret-session.json" privateFile 0 False False,TreeRow "public.hs" "/authority/public.hs" 0 False False] 0 0 30 False)}
       browser=openBrowser "/authority" "*" [Entry "secret-session.json" False Nothing Nothing,Entry "public.hs" False Nothing Nothing] (initialDesktop (80,25)) {guestPrivatePaths=[privateFile]}
+  listed<-sidebarFixture "/authority" [("secret-session.json",privateFile),("public.hs","/authority/public.hs")] (initialDesktop (80,25)) {guestPrivatePaths=[privateFile]}
   listingCapture<-takeCapture listed False
   browserCapture<-takeCapture browser False
   let publicListing value=let output=fromMaybe "" (field "text" (textMetadata value)) in not ("secret-session" `T.isInfixOf` output) && "public.hs" `T.isInfixOf` output

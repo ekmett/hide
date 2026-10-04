@@ -11,6 +11,7 @@
 -- ID. Earlier accepted batches survive later failure and are reported as partial.
 module Hide.Tooling (Tooling, toolingTool, toolingTools, toolingToolNames, withTooling, withToolingUsing, tickTooling, toolingEffects, completionItems, workspaceEdits, hoverText, diagnosticsCurrent) where
 
+import Hide.Sidebar (treeRoot,treeFocused)
 import Control.Exception (bracket, try, IOException, onException, mask_, evaluate, finally, displayException)
 import Control.Concurrent.Async (Async, async, cancel, waitCatch)
 import Control.Concurrent.STM

@@ -45,6 +45,7 @@ import Hide.Buffer (bufferBytes)
 import Hide.Files (filePath)
 import Hide.Font (loadFont)
 import Hide.Frontend (modeSize)
+import Hide.Sidebar (hitCurrent)
 import Hide.Links (prepareLink,applyLink)
 import Paths_hide (getDataFileName)
 import Hide.Model hiding (Paste, message)
@@ -262,10 +263,10 @@ runRemoteDaemonWithStartup owned session scale effects tick inspect initial = do
             Right _ -> pure ()
           atomically (putTMVar reply (result :: Either IOException ([WirePacket],Bool,Int,Bool)))
         linkLoop = forever $ do
-          (stamp,columns,directory,origin,target)<-atomically (readTBQueue linkJobs)
+          (stamp,captured,columns,directory,origin,target)<-atomically (readTBQueue linkJobs)
           prepared<-prepareLink True columns directory origin target
           modifyMVar_ state $ \s->do
-            if stopped s || stamp/=(owner s,generation s) then pure s else do
+            if stopped s || stamp/=(owner s,generation s) || not (maybe True (\trace->maybe False (hitCurrent trace) (sideTree (desktop s))) captured) then pure s else do
               let (updated,packet)=applyLink prepared (desktop s)
               -- Bounded and live-only: the display drains these without replay.
               delivered<-case packet of
@@ -443,17 +444,18 @@ runRemoteDaemonWithStartup owned session scale effects tick inspect initial = do
             Nothing -> []
             Just doc -> [json "download" ["name" .= maybe (maybe "NONAME.HS" id (documentSuggestedName doc)) (takeFileName . filePath) (documentFile doc)],BinaryPacket (bufferBytes (documentBuffer doc))]
           _ -> []
-        queueLink stamp d replies origin target=do
+        queueLink stamp captured d replies origin target=do
           queued<-atomically $ do
             full<-isFullTBQueue linkJobs
             if full then pure False else do
-              writeTBQueue linkJobs (stamp,max 20 (min 76 (fst (screenSize d)-treeWidthOf d-4)),startingDirectory d,origin,target)
+              writeTBQueue linkJobs (stamp,captured,max 20 (min 76 (fst (screenSize d)-treeWidthOf d-4)),startingDirectory d,origin,target)
               pure True
           pure (False,d {status=if queued then "Opening link…" else "Link loader is busy; try again shortly."},replies)
         effect _ result@(True,_,_) _ = pure result
         effect stamp (_,d,replies) request = case request of
-          ReadHelp -> getDataFileName "README.md" >>= \helpPath -> queueLink stamp d replies (Just helpPath) ""
-          FollowLink origin target -> queueLink stamp d replies origin target
+          ReadHelp -> getDataFileName "README.md" >>= \helpPath -> queueLink stamp Nothing d replies (Just helpPath) ""
+          FollowTreeLink trace path -> queueLink stamp (Just trace) d replies (Just path) ""
+          FollowLink origin target -> queueLink stamp Nothing d replies origin target
           ReadBrowserClipboard -> pure (False,d,replies++[json "paste-request" []])
           WriteBrowserClipboard text -> pure (False,d,replies++[json "copy" ["text" .= text]])
           DownloadDocument bid -> case M.lookup bid (buffers d) of

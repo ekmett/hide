@@ -9,7 +9,7 @@ module Hide.Plugin.Tree
   ( TreeRef, NodeId, nodeId, nodeIdText, TreeHit(..), ChildRequest(..)
   , NodeInfo(..), NodeDef(..), NodePage(..), PreparedPage, pageNodes, pageNext
   , TreeProvider, TreeAction, treeAction, registerTree, treeReference, treeRoot
-  , treeCurrent, retireTree, loadChildren, invokeTreeAction, actionReference
+  , treeCurrent, retireTree, loadChildren, invokeTreeAction, actionReference, actionCurrent
   ) where
 
 import Control.DeepSeq (force)
@@ -46,8 +46,11 @@ treeAction :: Registry context -> Command context a b -> a -> (context -> b -> I
 treeAction=TreeAction
 actionReference :: TreeAction context reply -> CommandRef
 actionReference (TreeAction _ command _ _)=commandRef command
+actionCurrent :: TreeAction context reply -> IO Bool
+actionCurrent (TreeAction registry command _ _)=commandCurrent registry (commandRef command)
 data NodeDef context reply = NodeDef
-  { nodeInfo :: !NodeInfo, nodeAction :: Maybe (TreeAction context reply) }
+  { nodeInfo :: !NodeInfo, nodeAction :: Maybe (TreeAction context reply)
+  , nodeActions :: [(Text,TreeAction context reply)] }
 data NodePage context reply = NodePage [NodeDef context reply] (Maybe Text)
 -- Constructor is private: force/validate metadata before owner publication.
 data PreparedPage context reply = PreparedPage [NodeDef context reply] (Maybe Text)
@@ -105,7 +108,12 @@ preparePage (NodePage supplied token)
     unique=M.fromList [(infoId (nodeInfo node),()) | node<-bounded]
     prepare node=do
       let info=nodeInfo node
+      let actions=nodeActions node
+          refs=maybe [] (pure . actionReference) (nodeAction node)++map (actionReference . snd) actions
+      unless (length (take 9 actions)<=8 && all (\(title,_)->not (T.null title) && T.length title<=128 && T.all (>= ' ') title) actions && M.size (M.fromList [(ref,()) | ref<-refs])==length refs)
+        (ioError (userError "Invalid sidebar node actions."))
       mapM_ (evaluate . actionReference) (nodeAction node)
+      mapM_ (\(title,action)->evaluate (force title) >> evaluate (actionReference action)) actions
       _<-evaluate (force (nodeIdText (infoId info),infoLabel info,infoIcon info,infoBranch info,infoResource info))
       unless (T.length (infoLabel info)<=256 && T.all (>= ' ') (infoLabel info) &&
         T.length (infoIcon info)<=4 && T.all (>= ' ') (infoIcon info) && maybe True ((<=32768) . length) (infoResource info))

@@ -25,6 +25,7 @@ import qualified PluginBufferCheck
 import qualified MenuCommandsCheck
 import qualified MenuContextCheck
 import qualified PluginMenuCheck
+import qualified SidebarCheck
 import qualified PluginTreeCheck
 import qualified PluginCommandCheck
 import qualified DocsMCPCheck
@@ -95,6 +96,7 @@ import Hide.Render
 import Hide.Buffer
 import Hide.Syntax
 import Hide.Files (FileState(..))
+import Hide.Sidebar
 import Hide.Model
 import qualified Graphics.Vty as V
 import qualified Data.Map.Strict as M
@@ -132,6 +134,7 @@ main = do
   BufferEditsCheck.checks
   PluginBufferCheck.checks
   PluginTreeCheck.checks
+  SidebarCheck.checks
   PluginCommandCheck.checks
   PluginMenuCheck.checks
   MenuCommandsCheck.checks
@@ -268,7 +271,7 @@ main = do
       normalLine=T.lines (snapshot shadowBase) !! (my+1)
   check "menu shadow retains underlying characters" (T.take 2 (T.drop (mx+mw) shadowLine) == T.take 2 (T.drop (mx+mw) normalLine))
   check "shadow text is gray on black" ("color:rgb(170,170,170);background:rgb(0,0,0)'>xx" `T.isInfixOf` snapshotHtml shadowMenu)
-  let focusedTree=installTree "/tmp" [Entry "test.hs" False Nothing Nothing] demoDesktop
+  let focusedTree=installSidebar (emptySidebar "/tmp" 24 True) demoDesktop
       pastedTree=fst (handleEvent (V.EvPaste "oops") focusedTree)
       undoneTree=fst (runCommand Undo focusedTree)
   check "tree focus blocks background paste" (buffers pastedTree == buffers focusedTree)
@@ -303,7 +306,7 @@ main = do
       named=foldl (\state ch -> key (V.KChar ch) [] state) erased ("Other.hs" :: String)
       openButton=iterate (key (V.KChar '\t') []) named !! 2
   check "keyboard Open honors typed filename" (snd (handleEvent (V.EvKey V.KEnter []) openButton) == [OpenChoice "/tmp" "Other.hs" "*.hs"])
-  let docked = installTree "/tmp" entries n
+  let docked = installSidebar (emptySidebar "/tmp" 24 True) n
   check "tree reserves editor space" (all ((>=treeWidthOf docked) . left . bounds) (windows docked))
   check "closing tree returns full editor width" (map bounds (windows (fst (runCommand ToggleTree docked))) == map bounds (windows n))
   let help = addHelp "Documentation" n

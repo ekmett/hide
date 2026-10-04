@@ -13,6 +13,7 @@ import System.IO (openBinaryTempFile,hClose)
 import Hide.Buffer
 import Hide.Files
 import Hide.Hex
+import Hide.Sidebar
 import Hide.Model
 import Hide.Render (snapshot, snapshotHtml)
 import qualified Hide.AgentFiles as A
@@ -124,7 +125,7 @@ checks = bracket temporary removeFile $ \path -> do
   check "compact vertical extent includes every byte and EOF insertion row"
     (documentRows compactDoc compactWindow==65 && scrollbarLimit compact True compactDoc compactWindow==44)
   let wide=moveTo False 300 (desktop (buffer compact))
-      docked=installTree "/tmp" [] wide
+      docked=installSidebar (emptySidebar "/tmp" 24 True) wide
       undocked=setTree Nothing docked
       cursorVisible d=case activeWindow d of
         Just w -> let (r,c)=windowCursorCell (buffer d) w in r>=scrollRow w && r<scrollRow w+height (bounds w)-2 && c>=scrollColumn w && c<scrollColumn w+width (bounds w)-2

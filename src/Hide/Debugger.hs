@@ -8,6 +8,7 @@
 -- and cannot revive a superseded launch after installation completes.
 module Hide.Debugger (Debugger, Core, withDebugger, withDebuggerConsoles, withDebuggerClock, withDebuggerHdb, hdbOfferDialog, downloadsDialog, debuggerEffects, tickDebugger, debuggerTool) where
 
+import Hide.Sidebar
 import Control.Concurrent (MVar, newEmptyMVar, tryPutMVar, tryReadMVar, threadDelay)
 import Control.Exception (IOException, bracket, try, evaluate, mask, mask_, finally)
 import Control.Concurrent.Async (Async, async, cancel, poll, race, waitCatch)
