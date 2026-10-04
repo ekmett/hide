@@ -97,7 +97,7 @@ data State = State
   , terminalWaiters :: M.Map Text [Value]
   , lastMessageAt :: Maybe UTCTime
   , lastRender :: Maybe (Int,Maybe Text,StableName [Record]), lastSession :: Maybe (A.Launch,FilePath,Text)
-  , waitingQuestion :: Maybe QuestionTicket, questionResults :: M.Map Int QuestionResult, questionsClosed :: Bool, lastQuestion :: Maybe ChatQuestion
+  , waitingQuestion :: Maybe QuestionTicket, questionResults :: M.Map Int QuestionResult, questionsClosed :: Bool, lastQuestion :: Maybe (StableName ChatQuestion)
   , deliveredContext :: Maybe Value
   , directoryAgents :: [AH.AgentId]
   , agentDelivery :: Maybe (AH.HubMessage,MVar (Either Text Value))
@@ -376,7 +376,7 @@ perform (ConversationState _ ref _ _ _) "toggle-tool-run" [ident] d=do
       next=state {expandedToolRuns=if S.member key expanded then S.delete key expanded else S.insert key expanded}
       records=if T.null target then transcript next else M.findWithDefault [] target (childRecords next)
   writeIORef ref next
-  pure (keepConversationPosition d (paintView target False next {transcript=records} d))
+  keepConversationPosition d <$> paintView target False next {transcript=records} d
 perform (ConversationState _ ref _ _ _) "execute-shell-block" [bidText,startText,endText,dialect,body] d
   | Just bid<-readMaybe (T.unpack bidText), Just blockStart<-readMaybe (T.unpack startText), Just blockEnd<-readMaybe (T.unpack endText),
     Just doc<-M.lookup bid (buffers d), (blockStart,blockEnd,dialect,body) `elem` documentShellBlocks doc =
@@ -441,15 +441,15 @@ performPrimary runtime@(ConversationState directory ref consoles jobs _) action 
           toggle (_,record)=record
           next=s {transcript=map toggle (zip [0::Int ..] (transcript s))}
       writeIORef ref next
-      pure (keepConversationPosition d (paint False next d))
+      keepConversationPosition d <$> paint False next d
     ("question-choice",[token,index]) | Just ident<-readMaybe (T.unpack token),Just chosen<-readMaybe (T.unpack index),
         Just q<-chatQuestion d,questionToken q==ident,chosen>=0,chosen<length (questionChoices q) ->
-      pure (clearReplySelection (paint False s d {chatQuestion=Just q {questionChoice=Just chosen,questionFocused=True}}))
+      clearReplySelection <$> paint False s d {chatQuestion=Just q {questionChoice=Just chosen,questionFocused=True}}
     ("question-input",token:rest) | Just q<-chatQuestion d,token==T.pack (show (questionToken q)) ->
       let p=case rest of
             offset:_ | Just n<-readMaybe (T.unpack offset) -> min (bufferLength (questionBuffer q)) (questionInputStart (conversationWidth d) q+max 0 n)
             _ -> caret (questionSelection q)
-      in pure (clearReplySelection (paint False s d {chatQuestion=Just q {questionChoice=Nothing,questionSelection=Selection p p,questionFocused=True}}))
+      in clearReplySelection <$> paint False s d {chatQuestion=Just q {questionChoice=Nothing,questionSelection=Selection p p,questionFocused=True}}
     ("question-submit",[token]) | Just q<-chatQuestion d,token==T.pack (show (questionToken q)),
         Just (QuestionTicket ident actor receipt)<-waitingQuestion s,ident==questionToken q -> do
       let answer=case questionChoice q of
@@ -467,7 +467,7 @@ performPrimary runtime@(ConversationState directory ref consoles jobs _) action 
                 next=(rememberQuestion ident actor receipt value s) {waitingQuestion=Nothing,queuedQueries=queued,
                   transcript=transcript s++[Reply "Agent" (questionText q),Reply "You" answer]}
             writeIORef ref next
-            pure (paint False next d {chatQuestion=Nothing,chatInputOffset=Nothing,status="Answer submitted.",agentQueued=length queued})
+            paint False next d {chatQuestion=Nothing,chatInputOffset=Nothing,status="Answer submitted.",agentQueued=length queued}
     ("question-cancel",[token]) | Just q<-chatQuestion d,token==T.pack (show (questionToken q)) ->
       cancelQuestion runtime "Question cancelled by user." d
     ("terminal",_) -> do
@@ -534,9 +534,9 @@ performPrimary runtime@(ConversationState directory ref consoles jobs _) action 
       let recoveredWindow=do
             (bid,_)<-find ((==Just "Conversation") . documentLabel . snd) (M.toList (buffers d))
             find ((==Just bid) . bufferId) (windows d)
-      pure $ case recoveredWindow of
+      case recoveredWindow of
         Just win | isNothing (connection s), null (transcript s), isNothing (chatQuestion d) ->
-          focusWindow (windowId win) d {composerFocused=True}
+          pure (focusWindow (windowId win) d {composerFocused=True})
         _ -> paint True s d
     ("set-config",[ident,value])
       | busy s -> pure d {status="Wait for the current reply before changing its model."}
@@ -552,7 +552,8 @@ performPrimary runtime@(ConversationState directory ref consoles jobs _) action 
     ("send-draft",_) | busy s, let text=contents (composerBuffer d), not (T.null (T.strip text)) -> do
       let next=s {queuedQueries=queuedQueries s++[SubmittedQuery text],transcript=transcript s++[Reply "You" (composerMarkdown text)]}
       writeIORef ref next
-      pure (paint True next d) {composerBuffer=newBuffer "",composerSelection=Selection 0 0,composerFocused=True,agentQueued=length (queuedQueries next),status="Query queued."}
+      painted<-paint True next d
+      pure painted {composerBuffer=newBuffer "",composerSelection=Selection 0 0,composerFocused=True,agentQueued=length (queuedQueries next),status="Query queued."}
     ("send-draft",_) | not (T.null (T.strip (contents (composerBuffer d)))) -> do
       next<-perform runtime "send" ["0",contents (composerBuffer d),"false","false","false"] d
       latest<-readIORef ref
@@ -569,7 +570,7 @@ performPrimary runtime@(ConversationState directory ref consoles jobs _) action 
       writeIORef ref next
       opened<-if isNothing (connection s) then start runtime Nothing d else sendQueued runtime d
       latest<-readIORef ref
-      pure (paint True latest opened)
+      paint True latest opened
     ("cancel",_) -> do
       let child (_,ChildPermission{})=True
           child _=False
@@ -788,13 +789,14 @@ refreshConversationLayout :: ConversationState -> Desktop -> IO Desktop
 refreshConversationLayout (ConversationState _ ref _ _ _) original = do
   state<-readIORef ref
   transcriptIdentity<-makeStableName =<< evaluate (transcript state)
+  questionKey<-questionIdentity (chatQuestion original)
   let widthNow=conversationWidthFor "" original
       renderKey=(widthNow,session state,transcriptIdentity)
       -- A recovered view has no raw transcript owned by this runtime yet.
-      ownsView=not (isNothing (connection state)) || not (null (transcript state)) || chatQuestion original/=Nothing || lastQuestion state/=Nothing
-      redraw=ownsView && (lastRender state/=Just renderKey || lastQuestion state/=chatQuestion original)
-      primary=if redraw then paint False state original else original
-  when redraw (modifyIORef' ref (\current -> current {lastRender=Just renderKey,lastQuestion=chatQuestion primary}))
+      ownsView=not (isNothing (connection state)) || not (null (transcript state)) || not (isNothing questionKey) || not (isNothing (lastQuestion state))
+      redraw=ownsView && (lastRender state/=Just renderKey || lastQuestion state/=questionKey)
+  primary<-if redraw then paint False state original else pure original
+  when redraw (modifyIORef' ref (\current -> current {lastRender=Just renderKey,lastQuestion=questionKey}))
   -- Cached children can remain visible beside the selected conversation. Their
   -- geometry is independent, and reflow needs no provider/history round trip.
   foldM (reflowChild state) primary (M.toList (childRecords state))
@@ -809,7 +811,7 @@ refreshConversationLayout (ConversationState _ ref _ _ _) original = do
             , childRender=case childRender current of
                 Just (shown,_,entry) | shown==target -> Just (shown,columns,entry)
                 other -> other })
-          pure (paintView target False state {transcript=records} desktop)
+          paintView target False state {transcript=records} desktop
         _ -> pure desktop
 
 -- Acquisition owns each child until the UI adopts it. Session teardown cancels
@@ -1209,13 +1211,20 @@ isToolRecord (Activity _ value _ _)=field "status" value `elem`
   [Just ("pending"::Text),Just "in_progress",Just "completed",Just "failed"]
 isToolRecord _=False
 
-paint :: Bool -> State -> Desktop -> Desktop
+-- The immutable question key detects replacement without comparing its answer
+-- buffer or retaining separate baseline/Undo roots in the presentation cache.
+questionIdentity :: Maybe ChatQuestion -> IO (Maybe (StableName ChatQuestion))
+questionIdentity=traverse (\q->makeStableName =<< evaluate q)
+
+paint :: Bool -> State -> Desktop -> IO Desktop
 paint=paintView ""
 
-paintView :: Text -> Bool -> State -> Desktop -> Desktop
+paintView :: Text -> Bool -> State -> Desktop -> IO Desktop
 paintView target force s original
-  | not force && isNothing (conversationDocument target d) = original
-  | otherwise = let
+  | not force && isNothing (conversationDocument target d) = pure original
+  | otherwise = do
+    questionKey<-questionIdentity (chatQuestion d)
+    pure $ let
       width=conversationWidthFor target d
       header=if T.null target then "Session: "<>fromMaybe "not connected" (session s)<>"\n" else "No messages yet.\n"
       records=zip [0..] (transcript s)
@@ -1229,7 +1238,7 @@ paintView target force s original
       text=T.pack (map fst styled)
       questionRow=do
         q<-chatQuestion d
-        if not (questionFocused q) || lastQuestion s==Just q then Nothing else do
+        if not (questionFocused q) || lastQuestion s==questionKey then Nothing else do
           offset<-case questionChoice q of
             Nothing -> inputOffset
             Just index -> case [a | (a,_,action,values)<-actions,action=="question-choice",values==[T.pack (show (questionToken q)),T.pack (show index)]] of a:_->Just a; _->Nothing
@@ -1254,7 +1263,7 @@ paintView target force s original
       view=M.findWithDefault (ConversationView bid "Primary" (newBuffer "") (Selection 0 0) (0,0) (Selection 0 0)) target (conversationViews opened)
       colored=opened {conversationViews=M.insert target view {conversationBufferId=bid,conversationReplySelection=let Selection a c=conversationReplySelection view in Selection (min (T.length text) a) (min (T.length text) c)} (conversationViews opened),chatQuestion=chatQuestion original,chatActions=if visible then actions else chatActions original,chatInputOffset=if visible then inputOffset else chatInputOffset original,buffers=M.adjust (\doc -> doc {documentHighlight=styled,documentCursorVisible=False,documentLinks=linkSpans styled,documentMarkdownPath=Just (project s </> "conversation.md"),documentShellBlocks=shellBlocks}) bid (buffers opened),windows=map adjust (windows opened)}
       focused=case find ((==Just bid) . bufferId) (windows colored) of Just w | force && visible -> focusWindow (windowId w) colored {composerFocused=True}; _ -> colored
-    in focused
+      in focused
   where
     d=if T.null target && T.null (conversationTarget original) then original else original {chatQuestion=Nothing}
     plain style=map (,style).T.unpack
@@ -1567,7 +1576,7 @@ chatToolAs (ConversationState _ ref _ _ agents) caller d name args
                   next=s {waitingQuestion=Just (QuestionTicket token actor originalReceipt),nextApproval=token+1}
                   pending=object ["questionId" .= token,"status" .= ("pending"::Text)]
               writeIORef ref next
-              let shown=clearReplySelection (paint True next (selectConversationView "" "Primary" d) {chatQuestion=Just q,status="A question is waiting in Conversation."})
+              shown<-clearReplySelection <$> paint True next (selectConversationView "" "Primary" d) {chatQuestion=Just q,status="A question is waiting in Conversation."}
               pure (shown,pure (Right pending))
   | otherwise=pure (d,pure (Left "ask_user requires the authenticated requesting agent."))
   where
@@ -1630,7 +1639,7 @@ cancelQuestion (ConversationState _ ref _ _ _) reason d=do
     Just _->do
       let next=abandonQuestion reason s
       writeIORef ref next
-      pure (paint False next d {chatQuestion=Nothing,chatInputOffset=Nothing,status=reason})
+      paint False next d {chatQuestion=Nothing,chatInputOffset=Nothing,status=reason}
 
 -- Provider workers exchange requests through the mailbox; only the editor tick
 -- mutates conversation state or presents a permission dialog.
@@ -1724,9 +1733,9 @@ showAgentHistory runtime@(ConversationState _ ref _ _ agents) ident d=do
       state<-readIORef ref
       -- Remove transient question rendering before its document becomes hidden;
       -- the private answer remains in chatQuestion and returns with Primary.
-      let primary=if isNothing (chatQuestion d) then d else paint False state d {chatQuestion=Nothing}
-          withPrimary=if isNothing (conversationDocument "" primary) then paint True state primary else primary
-          target=AH.agentIdText ident
+      primary<-if isNothing (chatQuestion d) then pure d else paint False state d {chatQuestion=Nothing}
+      withPrimary<-if isNothing (conversationDocument "" primary) then paint True state primary else pure primary
+      let target=AH.agentIdText ident
           name=fromMaybe target (field "name" entry)
           selectedView=selectConversationView target name withPrimary {chatQuestion=chatQuestion d}
       modifyIORef' ref (\s->s {childRender=Nothing})
@@ -1759,7 +1768,7 @@ performChild runtime@(ConversationState _ ref _ _ agents) action values d=do
           toggle (_,record)=record
           changed=map toggle (zip [0::Int ..] records)
       modifyIORef' ref (\s->s {childRecords=M.insert target changed (childRecords s)})
-      pure (keepConversationPosition d (paintView target False state {transcript=changed} d))
+      keepConversationPosition d <$> paintView target False state {transcript=changed} d
     _ -> pure d {status="Switch to Primary for provider settings or session controls; use Agents to reconnect a child."}
   where
     startControl submitted operation=startChildControl runtime (AH.AgentId (conversationTarget d)) submitted operation d
@@ -1841,7 +1850,7 @@ refreshChildConversation (ConversationState _ ref _ _ agents) d=do
                   retain record=record
                   records=Pause metadata:map retain (foldl (childHistoryRecord name) [] events)
               modifyIORef' ref (\s->s {childRecords=M.insert target records (childRecords s),childRender=Just signature,childWidths=M.insert target (conversationWidthFor target projected) (childWidths s)})
-              pure (paintView target False current {transcript=records} projected)
+              paintView target False current {transcript=records} projected
 
 -- The Hub caps each page by bytes as well as count. Follow pages within the
 -- captured event range so a large tool event cannot hide the newest reply.
