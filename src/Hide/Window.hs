@@ -294,8 +294,8 @@ runWindow backend scale effects tick initial = do
       when (force || clipboard before /= clipboard after) (utf8 (clipboard after) c_set_clipboard)
       pure result
     copyClick x y d = case contextMenu d of
-      Just (r,_) | inside r x y, y>top r, y<top r+height r-1 ->
-        case drop (y-top r-1) (contextItems (contextKind d)) of (_,cmd):_ -> cmd `elem` [Copy,CopyAllMessages,CopyLocation]; _ -> False
+      Just (r,chosen) | inside r x y, y>top r, y<top r+height r-1 ->
+        case drop (contextOffset r chosen+y-top r-1) (contextItemsFor d) of (_,cmd):_ -> cmd `elem` [Copy,CopyAllMessages,CopyLocation]; _ -> False
       _ -> any (\(r,_,action) -> inside r x y && action `elem` [Left Copy,Left CopyAllMessages,Left CopyLocation]) (statusItemRects d)
     copies (V.EvKey key ms) d | Just cmd<-boundKeyCommand key ms d = cmd `elem` [Copy,Cut,CopyAllMessages,CopyLocation]
     copies (V.EvKey _ _) d | bindingInputAvailable d, Just _<-effectiveBindings d = False

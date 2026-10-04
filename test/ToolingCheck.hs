@@ -724,8 +724,8 @@ diagnosticCacheChecks = bracket temporary removePathForcibly $ \root -> do
       publish tooling d entries predicate=do
         BS.writeFile (root </> "diagnostics.next") (BL.toStrict (encode entries))
         renameFile (root </> "diagnostics.next") (root </> "diagnostics.json")
-        (_,pending)<-toolingEffects tooling core d [LanguageRequest TypeInfo]
-        await tooling (show entries) predicate pending
+        (_,pending)<-toolingEffects tooling core d {problemsFocused=False} [LanguageRequest TypeInfo]
+        await tooling (show entries) predicate pending {problemsFocused=problemsFocused d}
   writeFile source "foo = 1\n"; writeFile other "other = 2\n"
   writeFile (root </> "hie.yaml") "cradle: {direct: {arguments: []}}\n"
   writeFile server mcpServer
@@ -735,7 +735,7 @@ diagnosticCacheChecks = bracket temporary removePathForcibly $ \root -> do
     withTooling $ \tooling -> do
       ready<-await tooling "initial" (not.null.diagnostics) base
       expected<-identity ready
-      unchanged<-foldM (\current _->do next<-tickTooling tooling core current; actual<-identity next; check "idle diagnostic ticks reuse the parsed sorted list" (actual==expected); pure next) ready [1..40::Int]
+      unchanged<-foldM (\current _->do next<-tickTooling tooling core current; actual<-identity next; check "idle diagnostic ticks reuse the parsed sorted list" (actual==expected); check "idle diagnostic ticks preserve captured action generation" (diagnosticsGeneration next==diagnosticsGeneration ready); pure next) ready [1..40::Int]
       changed<-tickTooling tooling core (insertText "x" unchanged)
       check "editing invalidates versioned diagnostics" (null (diagnostics changed))
       restored<-tickTooling tooling core unchanged
@@ -749,7 +749,10 @@ diagnosticCacheChecks = bracket temporary removePathForcibly $ \root -> do
       reloaded'<-tickTooling tooling core reloaded
       reloadIdentity<-identity reloaded'
       check "equal-revision reload invalidates the cached source identity" (reloadIdentity/=savedIdentity)
-      updated<-publish tooling restored [batch source (Just 0) ["updated"]] ((==["updated"]).map diagnosticMessage.diagnostics)
+      let captured=openContext MessagesContext 5 5 restored {problemsFocused=True}
+      updated<-publish tooling captured [batch source (Just 0) ["updated"]] ((==["updated"]).map diagnosticMessage.diagnostics)
+      check "real HLS diagnostic replacement invalidates an open Messages action"
+        (diagnosticsGeneration updated>diagnosticsGeneration captured && not (contextTargetCurrent updated))
       cleared<-publish tooling updated [batch source (Just 0) []] (null.diagnostics)
       let opened=addDocument (Just (FileState other Nothing)) (newBuffer "other = 2\n") cleared
       opened'<-await tooling "opened" (any ((==other).diagnosticPath).diagnostics) opened

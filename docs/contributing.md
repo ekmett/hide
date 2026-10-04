@@ -181,7 +181,8 @@ context actions retain their own arguments. These checks do not replace host inp
 origin and policy checks. `Hide.Plugin.Menu` composes contributions in declared named slots by group,
 order and namespaced entry ID. `withMenus` bounds snapshots to 256 entries;
 unknown slots, duplicate IDs and stale lifetimes fail explicitly. `menuAction`
-retains typed command arguments and a worker-side presentation adapter. The
+projects typed arguments from an immutable host admission snapshot on the worker,
+then applies a worker-side presentation adapter. The
 metadata snapshot contains no plugin callback or buffer payload.
 
 The live `Hide.MenuCommands` host contributes **Help > Contents** through a
@@ -192,17 +193,41 @@ on one session worker; adoption preserves read-only Help styling, relative links
 and shell-block/navigation metadata. Browser/native frames carry entry IDs and
 exact generations plus a fresh non-secret registry nonce. A native catalogue rebuild also stamps a new Cocoa incarnation.
 
-Install linked contributions before publishing the session snapshot. Published
-retirement goes through `retireMenuFromHost`, which the serialized session owner
-drains before admission and adoption. Do not retire a published command/menu from
+Install linked contributions before publishing the initial session snapshot.
+For runtime activation, `publishMenuFromHost` strictly prepares an exact bounded
+metadata delta outside the session lock, then queues it to the owner. Publication
+closes positional popups and preserves intervening contributions. Published
+retirement workers use `requestMenuRetirement` on the same bounded queue.
+The owner drains at most 16 deltas per tick; queue capacity is 256 and applies
+backpressure only to registration workers. UI retirement uses the direct
+`retireMenuFromHost` owner operation, which never waits for queue capacity. Do not retire a published command/menu from
 an unrelated worker. Shutdown cancels and joins work before closing its registry
 scopes. Plugin agent-enable metadata cannot grant authority: the live host only
-permits its exact first-party Help ref and retains existing protected-control
+permits its exact first-party Help/navigation refs and retains existing protected-control
 policy checks. Origin comes from host dispatch, never frontend JSON.
 
-This slice supports the existing main-menu slots and prepared documentation
-replies. Context-menu contributions, runtime activation/publication and full
-first-party routing through the typed registry remain open in #2.
+Messages > Go to source contributes `hide.messages.go-to` in `context.messages`.
+The popup and direct Messages action capture diagnostic generation, selection and
+source location. Every projection replacement advances the generation; idle HLS
+cache ticks preserve it. Even an empty projection retains its popup owner so Hide
+Messages remains usable. Selected-message actions have separate availability.
+
+The menu worker uses `Files.loadFile` for unopened sources and prepares buffer
+projection plus measured UTF-16 navigation before publication. Already-open
+sources use an immutable content read and exact content version; adoption focuses
+the matching live buffer and preserves unsaved edits. An intervening replacement,
+close/reopen, diagnostic refresh or input-owner change refuses the prepared result.
+Agent navigation retains existing path policy: the resolved effect target is
+validated before dispatch, the worker checks captured authority paths before file
+loading, and adoption checks the prepared canonical path/current open-buffer
+policy. Human navigation retains ordinary access.
+The existing general `Tooling.jump` still performs synchronous file navigation;
+it is outside this contribution slice and should reuse worker preparation later.
+
+This slice supports main-menu slots, Messages context contributions, runtime
+publication/withdrawal, prepared documentation and source navigation replies.
+Other context slots and full first-party routing through the typed registry remain
+open in #2. This is not a frozen extension SDK.
 
 `sh tools/check-native.sh` tests the real SDL event queue without a window. On
 macOS it also checks an unshown application menu for duplicate enablement and

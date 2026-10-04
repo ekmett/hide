@@ -35,6 +35,7 @@ checks = do
          changeDoc (\doc->doc {documentSourceRows=Just (Vec.singleton [('x',Comment)])}) base,
          changeDoc (\doc->doc {documentBuffer=B.markSaved original}) base,
          base {composerBuffer=newBuffer "new draft"},
+         setDiagnostics (diagnostics base) base,
          base {diagnostics=[Diagnostic "Fixture.hs" Nothing 0 0 1 "new problem"]},
          base {systemDark=not (systemDark base)},
          modifyActive (\w->w {selection=Selection 0 1}) base,

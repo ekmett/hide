@@ -1333,7 +1333,7 @@ refreshProblems t d = do
       publish values hasErrors
   where
     publish values hasErrors =
-      let updated=chooseProblem (problemsSelected d) d {diagnostics=values}
+      let updated=chooseProblem (problemsSelected d) (setDiagnostics values d)
           newErrors=not (any ((==1) . diagnosticSeverity) (diagnostics d)) && hasErrors
       in pure (if newErrors && not (problemsVisible d) then setProblemsVisible True updated else updated)
     parseDiagnostic=withObject "diagnostic" $ \o -> do
