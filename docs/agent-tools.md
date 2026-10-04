@@ -435,5 +435,18 @@ directory updates stay in the background and do not select another conversation.
 This requires a persistent editor session. Existing orchestration tools continue
 to support explicit fork/worktree choices.
 
-Provider model/effort menus, the hidden ACP completion worker and the Sessions
-sidebar root remain tracked in [#7](https://github.com/ekmett/hide/issues/7).
+Agent **Model** and **Effort** menus use the provider's advertised identifiers and
+values. Choice dialogs retain the exact agent and configuration; changed or
+reconnected targets refuse an old selection. Changing another agent's model does
+not select its conversation.
+
+When ACP autocomplete is configured, **ACP completion** appears separately from
+Primary and subagents, including before its lazy connection starts. Selecting it
+reveals the same cached completion transcript. Closing that pane leaves completion
+running; revealing or hiding it preserves the warm connection. Its Model/Effort
+menus explicitly negotiate choices on that existing owner and persist accepted
+settings independently of the main conversation. Background sidebar refresh never
+starts a provider. Old completion/settings incarnations refuse stale choices.
+
+Sessions, completion naming and fuller New Agent fork/workspace controls remain
+tracked in [#7](https://github.com/ekmett/hide/issues/7).

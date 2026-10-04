@@ -557,3 +557,13 @@ enter its snapshot. Ticks compare the worker revision and invalidate at most fou
 scoped nodes via `refreshTreeFromHost`, which reuses ordinary request generations,
 worker cancellation and page adoption. `SelectedInput` supplies a reusable
 single-line selected range; ordinary caret-only Input behavior is unchanged.
+
+Agent sidebar configuration returns prepared public choices with an opaque receipt
+from the existing hub epoch/capability version. Child configuration rechecks it
+inside the ordinary child-control reservation; Primary retains its own ACP
+request/pending owner. Neither route changes the selected conversation to dispatch.
+The separate ACP completion node consumes cheap metadata published by Autocomplete.
+Only explicit choice discovery starts that existing lazy connection. Configuration
+and prompts share its serial owner; session/configuration receipts and settings
+incarnations expire old choices without introducing a second connection or policy
+registry. Revealing/hiding its cached transcript does not retire the provider.

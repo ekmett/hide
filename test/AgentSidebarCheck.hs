@@ -15,6 +15,8 @@ import System.Environment
 import System.FilePath ((</>))
 import System.IO (openTempFile,hClose)
 import System.Timeout (timeout)
+import Hide.Autocomplete (withAutocomplete,autocompleteEffects,tickAutocomplete)
+import Hide.MCPPermissions (readAutocompleteFor)
 import Hide.AgentSidebar
 import Hide.AgentSidebarTypes
 import qualified Hide.AgentHub as AH
@@ -39,19 +41,33 @@ checks=bracket temporary removePathForcibly $ \root->
     createDirectoryIfMissing True config
     writeFile script AgentIntegrationCheck.fixture
     BL.writeFile (config </> "agents.json") (encode (object ["executable" .= ("python3"::T.Text),"arguments" .= [script]]))
+    writeFile (root </> "thc.toml") (unlines ["[editor.autocomplete]","provider = 'acp'","executable = 'python3'","arguments = '"++show [script]++"'","debug = false"])
     record<-newSessionRecord Nothing ["--",root]
     rememberSession record
     environment "THC_EDIT_SESSION" (Just (sessionId record)) $ withSidebarCommands $ \host->withConversationAt root $ \conversation->
-      withAgentSidebar host (conversationAgents conversation) $ \agents->do
-        let core=conversationEffects conversation applyEffects
-            tick d=tickConversation conversation d >>= tickAgentSidebar agents host >>= tickSidebar host core
+      withAutocomplete root $ \autocomplete->withAgentSidebar host (conversationAgents conversation) autocomplete $ \agents->do
+        let core=autocompleteEffects autocomplete (conversationEffects conversation applyEffects)
+            tick d=tickConversation conversation d >>= tickAutocomplete autocomplete >>= tickAgentSidebar agents host >>= tickSidebar host core
             act (d,effects)=snd <$> sidebarEffects host core d effects
             hub=AR.agentHub (conversationAgents conversation)
             primary=AR.primaryAgent (conversationAgents conversation)
         initial<-initializeSidebar host (installSidebar (emptySidebar root 26 True) ((initialDesktop (100,35)) {defaultDirectory=Just root}))
         published<-await tick (has "Agents") initial
         expanded<-act (activateTree True (index "Agents" published) published) >>= await tick (has "Primary")
-        renamed<-act (chooseMenu "Primary  idle" expanded) >>= await tick (maybe False ((=="Rename agent").dialogTitle) . dialog)
+        completionReady<-await tick (has "ACP completion  configured") expanded
+        revealed<-act (activateTree False (index "ACP completion  configured" completionReady) completionReady) >>= await tick hasCompletionChat
+        ensure "completion tree activation reveals the existing transcript" (hasCompletionChat revealed)
+        let closed=fst (runCommand Close revealed)
+        ensure "closing completion transcript leaves its provider node" (not (hasCompletionChat closed) && has "ACP completion" closed)
+        choicesDialog<-act (chooseMenu "ACP completion  configured" closed) >>= await tick (maybe False completionPurpose . dialog)
+        let choose=fmapDialog (\dg->dg {fields=[ListBox "Provider choices" ["Small","Large"] 1]}) choicesDialog
+        acceptedChoice<-act (handleEvent (V.EvKey V.KEnter []) choose)
+        let modelSaved _=readAutocompleteFor root >>= pure . (\value->case value of Right configValue->field "model" configValue==Just ("large"::T.Text); _->False)
+        configured<-awaitIO tick modelSaved acceptedChoice
+        ensure "completion model settings remain separate from Primary" (null (agentSettings configured))
+        let staleSubmission=handleEvent (V.EvKey V.KEnter []) choose
+        stale<-act (configured,snd staleSubmission) >>= await tick (T.isInfixOf "expired" . status)
+        renamed<-act (chooseMenu "Primary  idle" stale) >>= await tick (maybe False ((=="Rename agent").dialogTitle) . dialog)
         ensure "rename opens with current name selected" (inputValue renamed==Just ("Primary",Selection 0 7))
         let typed=fst (handleEvent (V.EvKey (V.KChar 'N') []) renamed)
         ensure "typing replaces rename selection" (inputValue typed==Just ("N",Selection 1 1))
@@ -113,6 +129,8 @@ checks=bracket temporary removePathForcibly $ \root->
           y=2+target-treeScroll (tree d)
           (popup,_)=handleEvent (V.EvMouseDown 5 y V.BRight []) d
       in handleEvent (V.EvKey V.KEnter []) popup
+    hasCompletionChat d=any ((==Just "Autocomplete").documentLabel) (M.elems (buffers d))
+    completionPurpose dg=case purpose dg of CompletionChoiceDialog{}->True; _->False
     inputValue d=case dialog d of
       Just dg | SelectedInput _ value sel:_<-fields dg->Just (value,sel)
       _->Nothing

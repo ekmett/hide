@@ -7,7 +7,7 @@
 -- Recovery retains identities and history without replaying queues or implicitly
 -- starting providers. Public descriptions and private resume snapshots differ.
 module Hide.AgentHub
-  ( AgentHub, AgentId(..), AgentSummary(..), agentSummaries, Actor(..), HubLimits(..), SpawnSpec(..), Context(..), Workspace(..)
+  ( AgentHub, AgentId(..), AgentSummary(..), agentSummaries, AgentConfigRef, agentConfigAgent, agentConfiguration, agentConfigurationCurrent, configureAgentAt, Actor(..), HubLimits(..), SpawnSpec(..), Context(..), Workspace(..)
   , AgentDriver(..), DriverEvent(..), StartProvider, StartRequest(..), PrivateSource(..), HubMessage(..)
   , Capabilities(..), ConfigChoice(..), parseCapabilities, filterPrivateCapabilities
   , newAgentHub, newAgentHubWithLimits, closeAgentHub, spawnAgent, spawnAgentWithTask, reconnectAgent, registerAgent, updateExternalAgent, setExternalAgentBusy, renameAgent
@@ -54,6 +54,13 @@ data SpawnSpec = SpawnSpec
 data ConfigChoice = ConfigChoice
   { configId :: Text, configCategory :: Text, configCurrent :: Text, configValues :: [(Text,Text)]
   } deriving (Eq,Show)
+-- | Opaque receipt for one agent incarnation and its advertised configuration.
+-- It carries only the stable agent ID and existing owner version counters.
+data AgentConfigRef = AgentConfigRef !AgentId !Int !Int deriving (Eq,Show)
+-- | Exact agent captured by a configuration dialog.
+agentConfigAgent :: AgentConfigRef -> AgentId
+agentConfigAgent (AgentConfigRef ident _ _)=ident
+
 data Capabilities = Capabilities { supportsFork :: Bool, supportsResume :: Bool, supportsSteering :: Bool, configChoices :: [ConfigChoice] }
   deriving (Eq,Show)
 -- Only the trusted launcher and protected persistence see provider session keys.
@@ -301,7 +308,7 @@ updateExternalAgent hub@(AgentHub readLimits _ ref) ident driver=mask $ \restore
         Just entry | entryExternal entry && (active entry || entryPhase entry==Recovered),not (hubClosed state)->do
           let reviving=entryPhase entry==Recovered
           if reviving && length (filter active (M.elems (hubEntries state)))>=totalActiveAgents limits then pure (Left "Total active-agent limit reached.") else do
-            let next=appendEvent "provider_updated" Human Null entry {entryDriver=Just driver,entryKey=if T.null (driverSessionKey driver) then Nothing else Just (driverSessionKey driver),entryCaps=driverCapabilities driver,entrySpec=(entrySpec entry) {spawnDirectory=driverDirectory driver},entryPhase=if reviving then Idle else entryPhase entry}
+            let next=appendEvent "provider_updated" Human Null entry {entryDriver=Just driver,entryKey=if T.null (driverSessionKey driver) then Nothing else Just (driverSessionKey driver),entryCaps=driverCapabilities driver,entryCapsVersion=entryCapsVersion entry+1,entrySpec=(entrySpec entry) {spawnDirectory=driverDirectory driver},entryPhase=if reviving then Idle else entryPhase entry}
             writeTVar ref state {hubEntries=M.insert ident next (hubEntries state),hubLastLimits=limits}
             pure (Right reviving)
         _->pure (Left "Unknown or ended external agent.")
@@ -392,15 +399,45 @@ worker hub@(AgentHub _ _ ref) ident = do
 -- These operations are host-only: agent tools cannot change their controlling
 -- user's settings or manufacture a human steering message.
 configureAgent :: AgentHub -> AgentId -> Text -> Text -> IO (Either Text ())
-configureAgent hub ident option value=fmap (fmap (const ())) $
+configureAgent hub ident=configureAgentChecked hub ident Nothing
+
+-- | Configure through the ordinary child-control reservation, rejecting a
+-- replaced connection or changed advertisement before any provider call.
+configureAgentAt :: AgentHub -> AgentConfigRef -> Text -> Text -> IO (Either Text ())
+configureAgentAt hub receipt=configureAgentChecked hub (agentConfigAgent receipt) (Just receipt)
+
+configureAgentChecked :: AgentHub -> AgentId -> Maybe AgentConfigRef -> Text -> Text -> IO (Either Text ())
+configureAgentChecked hub ident expected option value=fmap (fmap (const ())) $
   childControl hub ident "configuration" validate (\_ driver->driverConfigure driver [(option,value)]) commit
   where
     validate entry=do
+      unless (maybe True (==configurationRef entry) expected) (Left "Agent setting expired; reopen its choices.")
       unless (entryPhase entry==Idle && entryCurrent entry==Nothing && Q.null (entryQueue entry))
         (Left "Wait for the child's replies and queued messages before changing settings.")
       unless (length [() | choice<-configChoices (entryCaps entry),configId choice==option,value `elem` map fst (configValues choice)]==1)
         (Left "This child setting is not currently advertised by the provider.")
-    commit caps=appendEvent "configured" Human (capabilitiesValue caps) . (\entry->entry {entryCaps=caps})
+    commit caps=appendEvent "configured" Human (capabilitiesValue caps) . (\entry->entry {entryCaps=caps,entryCapsVersion=entryCapsVersion entry+1})
+
+configurationRef :: Entry -> AgentConfigRef
+configurationRef entry=AgentConfigRef (entryId entry) (entryEpoch entry) (entryCapsVersion entry)
+
+-- | Read bounded public choices without task/history/private driver retention.
+-- Call on a preparation worker when preparing a large choice list.
+agentConfiguration :: AgentHub -> AgentId -> IO (Either Text (AgentConfigRef,[ConfigChoice]))
+agentConfiguration (AgentHub _ _ ref) ident=do
+  state<-readTVarIO ref
+  pure $ case M.lookup ident (hubEntries state) of
+    Just entry | active entry,not (hubClosed state)->Right (configurationRef entry,configChoices (entryCaps entry))
+    _->Left "Select a connected agent."
+
+-- | Cheap current-incarnation check for the primary owner's synchronous dispatch.
+-- Child adoption instead validates inside configureAgentAt's atomic reservation.
+agentConfigurationCurrent :: AgentHub -> AgentConfigRef -> IO Bool
+agentConfigurationCurrent (AgentHub _ _ ref) expected=do
+  state<-readTVarIO ref
+  pure $ case M.lookup (agentConfigAgent expected) (hubEntries state) of
+    Just entry->not (hubClosed state) && active entry && configurationRef entry==expected
+    _->False
 
 steerAgent :: AgentHub -> AgentId -> Text -> IO (Either Text Value)
 steerAgent hub ident text=childControl hub ident "steering" validate

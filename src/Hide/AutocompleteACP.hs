@@ -8,7 +8,7 @@
 -- terminal and permission requests are denied. Cancellation drains the prompt or
 -- retires the connection before another prompt can use it.
 module Hide.AutocompleteACP
-  ( ACPCompletion, withACPCompletion, completeACP, hintACP, feedbackACP, pollACPCompletionTranscript, completionTools, callCompletionTool ) where
+  ( ACPCompletion, withACPCompletion, completeACP, hintACP, feedbackACP, pollACPCompletionTranscript, completionConfiguration, discoverACPConfiguration, configureACPAt, completionTools, callCompletionTool ) where
 
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar
@@ -23,38 +23,39 @@ import qualified Data.ByteString.Lazy as BL
 import Data.IORef
 import qualified Data.Map.Strict as M
 import Data.Maybe (fromMaybe)
+import Data.Unique (newUnique,hashUnique)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import System.Timeout (timeout)
 import qualified Hide.ACP as ACP
-import Hide.AgentHub (ConfigChoice(..), Capabilities(..), parseCapabilities)
+import Hide.AgentHub (ConfigChoice(..), Capabilities(..), parseCapabilities, filterPrivateCapabilities)
 import Hide.Buffer (lineColumn)
 import Hide.InlineTypes
 
-data Session = Session ACP.Client (IORef (Maybe Text)) (IORef Bool) (IORef Value)
+data Session = Session ACP.Client (IORef (Maybe Text)) (IORef Bool) (IORef (Int,Value)) (IORef Value) !Int
 data Pending = Pending Text Value Text [(Int,Int)] (Maybe [Proposal])
 data State = State Bool (Maybe Session) (Maybe Pending)
 data Transcript = Transcript (IORef [Text]) (IORef (M.Map Text Text))
-data ACPCompletion = ACPCompletion ACP.Launch FilePath [Value] (Maybe Text) (Maybe Text) (MVar ()) (MVar State) (IORef [Value]) Transcript
+data ACPCompletion = ACPCompletion ACP.Launch FilePath [Value] (IORef (Maybe Text,Maybe Text)) (MVar ()) (MVar State) (IORef [Value]) Transcript
 
 -- | Own a separate, lazily opened ACP connection. No primary conversation
 -- session, transcript, permission callback or editor-wide tools are shared.
 withACPCompletion :: ACP.Launch -> FilePath -> [Value] -> Maybe Text -> Maybe Text -> (ACPCompletion -> IO a) -> IO a
 withACPCompletion launch root servers model effort=bracket acquire close
   where
-    acquire=ACPCompletion launch root servers model effort <$> newMVar () <*> newMVar (State False Nothing Nothing) <*> newIORef [] <*> (Transcript <$> newIORef [] <*> newIORef M.empty)
-    close completion@(ACPCompletion _ _ _ _ _ serial state _ _)=mask_ $ do
+    acquire=ACPCompletion launch root servers <$> newIORef (model,effort) <*> newMVar () <*> newMVar (State False Nothing Nothing) <*> newIORef [] <*> (Transcript <$> newIORef [] <*> newIORef M.empty)
+    close completion@(ACPCompletion _ _ _ _ serial state _ _)=mask_ $ do
       modifyMVar_ state $ \(State _ session _) -> pure (State True session Nothing)
       retire completion
       -- Stopping the transport releases any in-flight RPC before scope exit.
       withMVar serial (const (pure ()))
 
 retire :: ACPCompletion -> IO ()
-retire completion@(ACPCompletion _ _ _ _ _ _ state _ _)=mask_ $ do
+retire completion@(ACPCompletion _ _ _ _ _ state _ _)=mask_ $ do
   flushTranscript completion
   session<-modifyMVar state $ \(State closed current _) -> pure (State closed Nothing Nothing,current)
-  forM_ session $ \(Session client sid _ _) -> do
+  forM_ session $ \(Session client sid _ _ _ _) -> do
     readIORef sid >>= mapM_ (\ident -> ACP.notify client "session/cancel" (object ["sessionId" .= ident]))
     ACP.stopClient client
 
@@ -78,8 +79,8 @@ hintACP completion text=do
   void (runPrompt completion Nothing (object ["intent" .= ("hint"::Text),"message" .= text]))
 
 runPrompt :: ACPCompletion -> Maybe Pending -> Value -> IO [Proposal]
-runPrompt completion@(ACPCompletion _ _ _ _ _ serial state feedback _) pending context=withMVar serial $ \_ -> mask $ \restore -> do
-  session@(Session _ sid first _) <- restore (getSession completion) `onException` retire completion
+runPrompt completion@(ACPCompletion _ _ _ _ serial state feedback _) pending context=withMVar serial $ \_ -> mask $ \restore -> do
+  session@(Session _ sid first _ _ _) <- restore (getSession completion) `onException` retire completion
   ident<-readIORef sid >>= maybe (failure "Autocomplete session is unavailable.") pure
   firstUse<-readIORef first
   recent<-atomicModifyIORef' feedback (\old -> ([],old))
@@ -108,7 +109,7 @@ runPrompt completion@(ACPCompletion _ _ _ _ _ serial state feedback _) pending c
 -- | Queue bounded acceptance feedback for the next completion prompt. This
 -- never starts a provider turn just to report that a suggestion was shown.
 feedbackACP :: ACPCompletion -> CompletionFeedback -> Proposal -> IO ()
-feedbackACP completion@(ACPCompletion _ _ _ _ _ _ _ feedback _) action proposal=do
+feedbackACP completion@(ACPCompletion _ _ _ _ _ _ feedback _) action proposal=do
   let status=case action of Shown -> "shown"; Accepted -> "accepted"; Ignored -> "ignored"; PartiallyAccepted _ -> "partially-accepted" :: Text
       partial=case action of PartiallyAccepted count -> Just (max 0 (min (T.length (proposalText proposal)) count)); _ -> Nothing
       entry=object ["status" .= status,"startOffset" .= proposalStart proposal,"endOffset" .= proposalEnd proposal
@@ -117,14 +118,14 @@ feedbackACP completion@(ACPCompletion _ _ _ _ _ _ _ feedback _) action proposal=
   record completion ("[feedback] "<>status)
 
 getSession :: ACPCompletion -> IO Session
-getSession completion@(ACPCompletion launch root servers model effort _ state _ _)=mask $ \restore -> do
+getSession completion@(ACPCompletion launch root servers defaults _ state _ _)=mask $ \restore -> do
   State closed existing _<-readMVar state
   when closed (failure "Autocomplete is closed.")
   case existing of
     Just session -> pure session
     Nothing -> do
       client<-ACP.startClient launch root
-      session@(Session _ sid _ configuration)<-Session client <$> newIORef Nothing <*> newIORef True <*> newIORef Null
+      session@(Session _ sid _ configuration initializedRef _)<-Session client <$> newIORef Nothing <*> newIORef True <*> newIORef (0,Null) <*> newIORef Null <*> (hashUnique <$> newUnique)
       installed<-modifyMVar state $ \current@(State stopped _ active) ->
         if stopped then pure (current,False) else pure (State False (Just session) active,True)
       unless installed (ACP.stopClient client >> failure "Autocomplete is closed.")
@@ -133,10 +134,12 @@ getSession completion@(ACPCompletion launch root servers model effort _ state _ 
           ["protocolVersion" .= (1::Int),"clientInfo" .= object ["name" .= ("hide-autocomplete"::Text),"version" .= ("0.1.0.0"::Text)]
           ,"clientCapabilities" .= object ["fs" .= object ["readTextFile" .= False,"writeTextFile" .= False],"terminal" .= False]])
         unless (field "protocolVersion" initialized==Just (1::Int)) (failure "Unsupported autocomplete ACP protocol version.")
+        writeIORef initializedRef initialized
         _<-rpc completion session "session/new" (object ["cwd" .= root,"mcpServers" .= servers])
         ident<-readIORef sid >>= maybe (failure "Autocomplete provider returned no valid session.") pure
+        (model,effort)<-readIORef defaults
         forM_ [("model",model),("thought_level",effort)] $ \(category,requested) -> forM_ requested $ \value -> do
-          current<-readIORef configuration
+          current<-snd <$> readIORef configuration
           let choices=[choice | choice<-configChoices (parseCapabilities initialized current),configCategory choice==category,value `elem` map fst (configValues choice)]
           case choices of
             [choice] -> when (configCurrent choice/=value) $ void $ rpc completion session "session/set_config_option"
@@ -144,10 +147,54 @@ getSession completion@(ACPCompletion launch root servers model effort _ state _ 
             _ -> failure "Autocomplete model or effort is not advertised by this provider."
         pure session
 
+-- | Read public, bounded choices without opening a connection. The receipt is
+-- valid only for this exact live session and configuration version. Private
+-- session/MCP credentials are filtered by the transcript's existing key owner.
+completionConfiguration :: ACPCompletion -> IO (Maybe ((Int,Int),[ConfigChoice]))
+completionConfiguration completion@(ACPCompletion _ _ _ _ _ state _ _)=do
+  State closed current _<-readMVar state
+  case current of
+    Just (Session _ sid _ configuration initialized ident) | not closed->do
+      ready<-readIORef sid
+      initial<-readIORef initialized
+      (version,value)<-readIORef configuration
+      keys<-privateKeys completion
+      pure $ case ready of
+        Nothing->Nothing
+        Just _->Just ((ident,version),configChoices (filterPrivateCapabilities keys (parseCapabilities initial value)))
+    _->pure Nothing
+
+-- | Explicit choice discovery starts the same lazy connection. Call on the
+-- completion worker; prompts, configuration and discovery share its serial lock.
+discoverACPConfiguration :: ACPCompletion -> IO ()
+discoverACPConfiguration completion@(ACPCompletion _ _ _ _ serial _ _ _)=
+  withMVar serial (\_ -> void (getSession completion) `onException` retire completion)
+
+-- | Change one currently advertised value on the exact captured session/version.
+-- A retired receipt never initializes or configures its replacement. Native
+-- permissions remain denied and the existing serialized RPC owner is reused.
+configureACPAt :: ACPCompletion -> (Int,Int) -> Text -> Text -> IO (Either Text ())
+configureACPAt completion@(ACPCompletion _ _ _ defaults serial state _ _) expected option value=withMVar serial $ \_->do
+  snapshot<-completionConfiguration completion
+  State closed current _<-readMVar state
+  case (snapshot,current) of
+    (Just (actual,choices),Just session@(Session _ sid _ _ _ _))
+      | not closed,actual==expected,
+        [choice]<-[choice | choice<-choices,configId choice==option,value `elem` map fst (configValues choice)]->do
+          ident<-readIORef sid >>= maybe (failure "Autocomplete session is unavailable.") pure
+          when (configCurrent choice/=value) $ void $ rpc completion session "session/set_config_option"
+            (object ["sessionId" .= ident,"configId" .= option,"value" .= value])
+          modifyIORef' defaults (\(model,effort)->if configCategory choice=="model" then (Just value,effort) else (model,Just value))
+          pure (Right ())
+    _->pure (Left "Completion setting expired or is no longer advertised.")
+
+updateConfiguration :: IORef (Int,Value) -> Value -> IO ()
+updateConfiguration ref value=atomicModifyIORef' ref (\(version,_)->((version+1,value),()))
+
 -- One serialized caller consumes ACP replies. The authenticated MCP route can
 -- fill the independent submission slot while this worker services the provider.
 rpc :: ACPCompletion -> Session -> Text -> Value -> IO Value
-rpc completion@(ACPCompletion _ _ _ _ _ _ state _ _) (Session client sid first configuration) method params=mask $ \restore -> do
+rpc completion@(ACPCompletion _ _ _ _ _ state _ _) (Session client sid first configuration _ _) method params=mask $ \restore -> do
   requestId<-ACP.request client method params
   when (method=="session/prompt") (writeIORef first False)
   let interrupted
@@ -174,7 +221,7 @@ rpc completion@(ACPCompletion _ _ _ _ _ _ state _ _) (Session client sid first c
             Just ident' | not (T.null ident'),T.length ident'<=4096,not (T.any (<' ') ident') -> writeIORef sid (Just ident')
             _ -> failure "Autocomplete provider returned an invalid session."
           when (method `elem` ["session/new","session/set_config_option"] && field "configOptions" value/=(Nothing::Maybe [Value]))
-            (writeIORef configuration value)
+            (updateConfiguration configuration value)
           pure (Just value)
       ACP.Request ident "session/request_permission" _ -> do
         record completion "[denied] native permission request"
@@ -188,7 +235,7 @@ rpc completion@(ACPCompletion _ _ _ _ _ _ state _ _) (Session client sid first c
         expected<-readIORef sid
         when (expected/=Nothing && field "sessionId" value==expected) $ case field "update" value of
           Just update -> case field "sessionUpdate" update :: Maybe Text of
-            Just "config_option_update" -> writeIORef configuration update
+            Just "config_option_update" -> updateConfiguration configuration update
             Just kind | kind `elem` ["agent_message_chunk","agent_thought_chunk"] ->
               case field "content" update >>= field "text" of
                 Just text -> streamTranscript completion (if kind=="agent_message_chunk" then "reply" else "thought") text
@@ -257,7 +304,7 @@ strict allowed parse=withObject "completion arguments" $ \value -> do
 -- | Handle a tool call without access to the Desktop or the filesystem. The
 -- private route authenticates callers; request identity prevents stale replies.
 callCompletionTool :: ACPCompletion -> Text -> Value -> IO (Either Text Value)
-callCompletionTool completion@(ACPCompletion _ _ _ _ _ _ state _ _) name arguments=do
+callCompletionTool completion@(ACPCompletion _ _ _ _ _ state _ _) name arguments=do
   result<-modifyMVar state $ \current@(State closed session active) ->
     case active of
       Just pending@(Pending ident context source offsets accepted) | not closed -> do
@@ -295,13 +342,13 @@ callCompletionTool completion@(ACPCompletion _ _ _ _ _ _ state _ _) name argumen
 
 -- | Drain the bounded debug transcript without issuing any ACP request.
 pollACPCompletionTranscript :: ACPCompletion -> IO [Text]
-pollACPCompletionTranscript (ACPCompletion _ _ _ _ _ _ _ _ (Transcript entries _))=
+pollACPCompletionTranscript (ACPCompletion _ _ _ _ _ _ _ (Transcript entries _))=
   atomicModifyIORef' entries (\old -> ([],old))
 
 privateKeys :: ACPCompletion -> IO [Text]
-privateKeys (ACPCompletion launch _ servers _ _ _ state _ _)=do
+privateKeys (ACPCompletion launch _ servers _ _ state _ _)=do
   State _ current _<-readMVar state
-  sid<-case current of Just (Session _ ref _ _) -> readIORef ref; Nothing -> pure Nothing
+  sid<-case current of Just (Session _ ref _ _ _ _) -> readIORef ref; Nothing -> pure Nothing
   let headerKeys server=case field "headers" server of
         Just (Object headers) -> [value | String value<-KM.elems headers]
         _ -> [value | entry<-fromMaybe [] (field "headers" server),Just value<-[field "value" entry]]
@@ -316,14 +363,14 @@ record completion text=do
   appendTranscript completion (foldr (\key -> T.replace key "[private]") text keys)
 
 appendTranscript :: ACPCompletion -> Text -> IO ()
-appendTranscript (ACPCompletion _ _ _ _ _ _ _ _ (Transcript entries _)) text=do
+appendTranscript (ACPCompletion _ _ _ _ _ _ _ (Transcript entries _)) text=do
   let bounded=T.copy (T.take 2048 text)
   _<-evaluate (T.length bounded)
   atomicModifyIORef' entries (\old -> (drop (max 0 (length old-63)) old++[bounded],()))
 
 -- Do not publish a suffix that may be the first part of a split private key.
 streamTranscript :: ACPCompletion -> Text -> Text -> IO ()
-streamTranscript completion@(ACPCompletion _ _ _ _ _ _ _ _ (Transcript _ tails)) kind chunk=do
+streamTranscript completion@(ACPCompletion _ _ _ _ _ _ _ (Transcript _ tails)) kind chunk=do
   keys<-privateKeys completion
   previous<-atomicModifyIORef' tails (\old -> (M.delete kind old,M.findWithDefault "" kind old))
   let scrubbed=foldr (\key -> T.replace key "[private]") (previous<>chunk) keys
@@ -333,7 +380,7 @@ streamTranscript completion@(ACPCompletion _ _ _ _ _ _ _ _ (Transcript _ tails))
   unless (T.null shown) (appendTranscript completion ("["<>kind<>"] "<>shown))
 
 flushTranscript :: ACPCompletion -> IO ()
-flushTranscript completion@(ACPCompletion _ _ _ _ _ _ _ _ (Transcript _ tails))=do
+flushTranscript completion@(ACPCompletion _ _ _ _ _ _ _ (Transcript _ tails))=do
   previous<-atomicModifyIORef' tails (\old -> (M.empty,old))
   forM_ (M.toList previous) $ \(kind,text) -> unless (T.null text) (appendTranscript completion ("["<>kind<>"] [private]"))
 

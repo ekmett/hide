@@ -307,6 +307,18 @@ applyAgentSidebar :: ConversationState -> AgentSidebarRequest -> Desktop -> IO D
 applyAgentSidebar runtime@(ConversationState _ ref _ _ agents) request d=case request of
   ShowAgent ident | ident==AR.primaryAgent agents->perform runtime "show" [] d
                   | otherwise->showAgentHistory runtime ident d
+  ShowAgentConfiguration receipt option choices selected->do
+    when (AH.agentConfigAgent receipt==AR.primaryAgent agents) (syncConversationAgent runtime)
+    current<-AH.agentConfigurationCurrent hub receipt
+    pure $ if not current then d {status="Agent choices expired."} else d {dialog=Just (Dialog "Agent setting"
+      (AgentChoiceDialog receipt option choices) [ListBox "Provider choices" (map (T.take 256 . snd) choices) selected]
+      0 ["Apply","Cancel"] []),contextMenu=Nothing,contextTarget=Nothing}
+  ConfigureAgent receipt option value
+    | AH.agentConfigAgent receipt==AR.primaryAgent agents->do
+        syncConversationAgent runtime
+        current<-AH.agentConfigurationCurrent hub receipt
+        if current then performPrimary runtime "set-config" [option,value] d else pure d {status="Agent setting expired."}
+    | otherwise->startChildControl runtime (AH.agentConfigAgent receipt) Nothing (AH.configureAgentAt hub receipt option value) d
   RenameAgent ident->do
     selected<-AH.statusAgent hub AH.Human ident
     pure $ case selected of
@@ -329,6 +341,7 @@ applyAgentSidebar runtime@(ConversationState _ ref _ _ agents) request d=case re
         worker<-async (restore (AH.spawnAgentWithTask hub AH.Human spec))
         modifyIORef' ref (\current->current {creatingAgent=Just worker})
         pure d {status="Starting agent…"}
+  _->pure d {status="Completion owner is unavailable."}
   where hub=AR.agentHub agents
 
 pollAgentCreation :: ConversationState -> Desktop -> IO Desktop
@@ -1643,18 +1656,24 @@ performChild runtime@(ConversationState _ ref _ _ agents) action values d=do
       pure (keepConversationPosition d (paintView target False state {transcript=changed} d))
     _ -> pure d {status="Switch to Primary for provider settings or session controls; use Agents to reconnect a child."}
   where
-    startControl submitted operation=do
-      state<-readIORef ref
-      let target=conversationTarget d
-      if M.member target (childControls state) then pure d {status="A child operation is already pending."} else do
-        worker<-async operation
-        modifyIORef' ref (\current->current {childControls=M.insert target (submitted,worker) (childControls current)})
-        pure d {agentReplying=True,contextMenu=Nothing,status=if submitted==Nothing then "Updating child settings..." else "Steering child; draft kept until accepted."}
+    startControl submitted operation=startChildControl runtime (AH.AgentId (conversationTarget d)) submitted operation d
     send hub ident text = do
       result<-AH.sendAgent hub AH.Human ident (composerMarkdown text)
       case result of
         Left err -> pure d {status=err}
         Right _ -> refreshChildConversation runtime d {composerBuffer=newBuffer "",composerSelection=Selection 0 0,status="Human message queued."}
+
+-- Exact target is independent of the selected conversation. Worker ownership is
+-- the same childControls map polled and retired by the existing conversation.
+startChildControl :: ConversationState -> AH.AgentId -> Maybe Text -> IO (Either Text ()) -> Desktop -> IO Desktop
+startChildControl (ConversationState _ ref _ _ _) ident submitted operation d=mask $ \restore->do
+  state<-readIORef ref
+  let target=AH.agentIdText ident
+  if M.member target (childControls state) then pure d {status="A child operation is already pending."} else do
+    worker<-async (restore operation)
+    modifyIORef' ref (\current->current {childControls=M.insert target (submitted,worker) (childControls current)})
+    pure d {agentReplying=agentReplying d || target==conversationTarget d,contextMenu=Nothing,
+      status=if submitted==Nothing then "Updating child settings..." else "Steering child; draft kept until accepted."}
 
 refreshChildConversation :: ConversationState -> Desktop -> IO Desktop
 refreshChildConversation (ConversationState _ ref _ _ agents) d=do
@@ -1667,7 +1686,7 @@ refreshChildConversation (ConversationState _ ref _ _ agents) d=do
         let result=either (const (Left "Child operation interrupted.")) id outcome
             cleared=case (submitted,result) of (Just text,Right ())->clearSubmittedDraft target text desktop; _->desktop
             notice=either id (const (if submitted==Nothing then "Child settings updated." else "Follow-up added to child's active turn.")) result
-        in if target==conversationTarget desktop then cleared {status=notice} else cleared
+        in if target==conversationTarget desktop || submitted==Nothing then cleared {status=notice} else cleared
       applyControl desktop _=desktop
       controlled=foldl applyControl d controls
   modifyIORef' ref (\current->current {childControls=foldr M.delete (childControls current) controlsDone})

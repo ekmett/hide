@@ -106,7 +106,19 @@ checks=bracket temporary removePathForcibly $ \root->do
       settled<-tickAutocomplete runtime wideRequest
       shown<-save runtime True settled >>= awaitDesktop runtime "debug pane toggle on" hasTranscript
       check "debug pane preserves focused source" (activeText shown==large)
-      hidden<-save runtime False shown >>= awaitDesktop runtime "debug pane toggle off" (not.hasTranscript)
+      -- Revealing the same completion transcript must keep its warm provider.
+      continued<-send runtime "propose" [] shown
+      fifth<-awaitPrompt 5
+      let fifthId=required "requestId" fifth::T.Text
+      fifthSubmitted<-autocompleteTool runtime "submit_completion" (object ["requestId" .= fifthId,"proposals" .= ([]::[Value])])
+      check "warm provider can abstain" (either (const False) (const True) fifthSubmitted)
+      writeFile (root </> T.unpack fifthId) "complete"
+      waitRetired runtime fifthId
+      warm<-tickAutocomplete runtime continued
+      warmEntries<-logs
+      check "revealing completion chat preserves the existing provider instance"
+        (length [() | entry<-warmEntries,field "method" entry==Just ("session/new"::T.Text)]==1)
+      hidden<-save runtime False warm >>= awaitDesktop runtime "debug pane toggle off" (not.hasTranscript)
       check "debug toggle keeps the source" (activeText hidden==large)
       entries<-logs
       check "autocomplete configuration is independent of the main agent" (length [() | entry<-entries,field "method" entry==Just ("initialize"::T.Text)]==1)

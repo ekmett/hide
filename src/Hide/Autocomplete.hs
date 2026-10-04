@@ -7,7 +7,7 @@
 -- kept warm across completions; explicit acceptance uses ordinary buffer edits.
 module Hide.Autocomplete
   ( Autocomplete, withAutocomplete, autocompleteEffects, tickAutocomplete
-  , autocompleteToken, autocompleteTool ) where
+  , autocompleteToken, autocompleteTool, completionSummary ) where
 
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (withAsync, race)
@@ -17,7 +17,7 @@ import Control.Monad (forever, forM_, void, when, foldM)
 import Data.Aeson
 import qualified Data.Aeson.KeyMap as KM
 import Data.IORef
-import Data.Maybe (fromMaybe, mapMaybe)
+import Data.Maybe (fromMaybe, mapMaybe, isNothing)
 import qualified Data.Map.Strict as M
 import qualified Data.Text as T
 import GHC.Clock (getMonotonicTimeNSec)
@@ -34,13 +34,18 @@ import qualified Hide.Copilot as P
 import Hide.MCPPermissions (readAutocompleteFor, writeAutocompleteFor)
 import Hide.EditorMCP (editorServersFor)
 import Hide.RemoteEndpoint (randomIdentity)
+import Hide.AgentSidebarTypes
+import qualified Hide.AgentHub as Hub
+import Control.DeepSeq (force)
 
 -- Snapshot identity guards adoption even when undo returns an old revision.
 data Snapshot = Snapshot InlineView Buffer (StableName Buffer) FilePath
 data Job = Request Snapshot T.Text Int | Settings | Save Value | Feedback CompletionFeedback Proposal
   | SignIn | FinishSignIn | SignOut | Hint T.Text
+  | Reveal CompletionTarget | Choices CompletionTarget T.Text | Configure CompletionTarget T.Text T.Text
 data Reply = Ready Snapshot [InlineOption] | Notice T.Text | ShowSettings Value
   | ShowSignIn T.Text | Configured Bool Bool | Transcript Buffer
+  | RevealTranscript CompletionTarget | ChoiceDialog CompletionTarget T.Text [(T.Text,T.Text)] Int
 
 data Provider = Provider
   { complete :: CompletionInput -> IO [Proposal]
@@ -53,13 +58,19 @@ data Autocomplete = Autocomplete
   , generation :: TVar Int, connection :: IORef (Maybe A.ACPCompletion)
   , requested :: IORef (Maybe Snapshot), displayed :: IORef (Maybe InlineView)
   , hold :: IORef (Maybe (Integer,Int,Bool)), debugVisible :: IORef Bool
-  , debugBuffer :: IORef Buffer, transcriptReady :: IORef (Maybe Buffer) }
+  , debugBuffer :: IORef Buffer, transcriptReady :: IORef (Maybe Buffer)
+  , summary :: IORef (Maybe CompletionSummary), settingsEpoch :: IORef Int }
+
+-- | Read cheap prepared ACP metadata. This never starts a provider or retains
+-- its transcript, source snapshots or private connection identity.
+completionSummary :: Autocomplete -> IO (Maybe CompletionSummary)
+completionSummary=readIORef . summary
 
 withAutocomplete :: FilePath -> (Autocomplete -> IO a) -> IO a
 withAutocomplete root use=do
   token<-T.pack <$> randomIdentity
   runtime<-Autocomplete token <$> newTBQueueIO 64 <*> newTQueueIO <*> newTVarIO 0 <*> newIORef Nothing
-    <*> newIORef Nothing <*> newIORef Nothing <*> newIORef Nothing <*> newIORef False <*> newIORef (newBuffer "") <*> newIORef Nothing
+    <*> newIORef Nothing <*> newIORef Nothing <*> newIORef Nothing <*> newIORef False <*> newIORef (newBuffer "") <*> newIORef Nothing <*> newIORef Nothing <*> newIORef 0
   servers<-editorServersFor (Just token)
   withAsync (owner runtime servers) $ \_ -> withAsync (traceLoop runtime) (const (use runtime))
   where
@@ -72,15 +83,34 @@ withAutocomplete root use=do
       let cfg=either (const (error "default autocomplete configuration")) id (C.parseCompletionConfig (object []))
       loop runtime servers values (either (const cfg) id (C.parseCompletionConfig values)) Nothing
     loop runtime servers values cfg active=do
+      epoch<-atomicModifyIORef' (settingsEpoch runtime) (\previous->(previous+1,previous+1))
+      settings<-newIORef values
       emit runtime (Configured (C.debug cfg) (C.provider cfg=="acp"))
+      let refresh=do
+            preparedSummary<-if C.provider cfg/="acp" then pure Nothing else do
+              configuration<-readIORef (connection runtime) >>= maybe (pure Nothing) A.completionConfiguration
+              pure (Just (CompletionSummary (CompletionTarget epoch (fmap fst configuration)) (if isNothing configuration then "configured" else "connected")))
+            writeIORef (summary runtime) preparedSummary
+          currentTarget=do
+            configuration<-readIORef (connection runtime) >>= maybe (pure Nothing) A.completionConfiguration
+            pure (CompletionTarget epoch (fmap fst configuration))
+          targetCurrent expected=(==expected) <$> currentTarget
+      refresh
       auth<-newIORef Nothing
       let run current job=case job of
-            Settings->emit runtime (ShowSettings values) >> pure True
+            Settings->readIORef settings >>= emit runtime . ShowSettings >> pure True
             Save updated->case C.parseCompletionConfig updated of
               Left problem->emit runtime (Notice problem) >> pure True
-              Right _->writeAutocompleteFor root updated >>= \result->case result of
+              Right selected->writeAutocompleteFor root updated >>= \result->case result of
                 Left problem->emit runtime (Notice problem) >> pure True
-                Right ()->pure False
+                Right ()->do
+                  previous<-C.parseCompletionConfig <$> readIORef settings
+                  case previous of
+                    Right old | selected {C.debug=C.debug old}==old->do
+                      writeIORef settings updated
+                      emit runtime (Configured (C.debug selected) (C.provider selected=="acp"))
+                      pure True
+                    _->pure False
             Feedback action proposal->forM_ current (\p->void (try (feedback p action proposal) :: IO (Either IOException ()))) >> pure True
             Request snap intent serial->do
               valid<-((==serial) <$> readTVarIO (generation runtime))
@@ -115,20 +145,60 @@ withAutocomplete root use=do
                 Left (_::IOException)->emit runtime (Notice "Completion agent hint failed.")
                 Right ()->pure ()
               pure True
+            Reveal expected->do
+              valid<-targetCurrent expected
+              emit runtime (if valid && C.provider cfg=="acp" then RevealTranscript expected else Notice "Completion view expired.")
+              pure True
+            Choices expected category->do
+              valid<-targetCurrent expected
+              session<-readIORef (connection runtime)
+              case session of
+                Just provider | valid && C.provider cfg=="acp"->do
+                  A.discoverACPConfiguration provider
+                  configuration<-A.completionConfiguration provider
+                  case configuration of
+                    Just (receipt,choices) | [choice]<-[choice | choice<-choices,Hub.configCategory choice==category]->do
+                      let options=Hub.configValues choice
+                          selected=length (takeWhile ((/=Hub.configCurrent choice).fst) options)
+                      _<-evaluate (force options)
+                      refresh
+                      emit runtime (ChoiceDialog (CompletionTarget epoch (Just receipt)) (Hub.configId choice) options selected)
+                    _->emit runtime (Notice "The completion provider has not advertised these choices.")
+                _->emit runtime (Notice "Completion choices expired.")
+              pure True
+            Configure expected option value->do
+              valid<-targetCurrent expected
+              session<-readIORef (connection runtime)
+              case (session,expected) of
+                (Just provider,CompletionTarget _ (Just receipt)) | valid->do
+                  configuration<-A.completionConfiguration provider
+                  result<-A.configureACPAt provider receipt option value
+                  case result of
+                    Left problem->emit runtime (Notice problem)
+                    Right ()->do
+                      previous<-readIORef settings
+                      let category=case configuration of Just (_,choices)->[Hub.configCategory choice | choice<-choices,Hub.configId choice==option]; _->[]
+                          key=if category==["model"] then "model" else "effort"
+                          updated=case previous of Object fields->Object (KM.insert key (String value) fields); _->previous
+                      writeIORef settings updated
+                      saved<-writeAutocompleteFor root updated
+                      emit runtime (Notice (either ("Completion setting changed, but could not be saved: "<>) (const "Completion setting updated.") saved))
+                _->emit runtime (Notice "Completion setting expired.")
+              pure True
             SignOut->do
               writeIORef auth Nothing
               forM_ current $ \p->try (signOut p) >>= \result->emit runtime (Notice (either (const "Copilot sign-out failed.") (const "Copilot signed out.") (result :: Either IOException ())))
               pure True
           go current=do
             job<-atomically (readTBQueue (jobs runtime))
-            let needsProvider=case job of Request{}->True; SignIn->True; FinishSignIn->True; SignOut->True; Hint{}->True; _->False
+            let needsProvider=case job of Request{}->True; SignIn->True; FinishSignIn->True; SignOut->True; Hint{}->True; Choices{}->True; _->False
             if needsProvider && maybe True (const False) current && C.provider cfg/="off"
               then do
-                opened<-try (withProvider runtime servers cfg (\p->run (Just p) job >>= \again->when again (go (Just p))))
+                opened<-try (withProvider runtime servers cfg (\p->run (Just p) job >>= \again->refresh >> when again (go (Just p))))
                 case opened of
-                  Left (_::IOException)->emit runtime (Notice "Cannot start autocomplete provider. Check Options > Autocomplete.") >> go Nothing
+                  Left (_::IOException)->emit runtime (Notice "Cannot start autocomplete provider. Check Options > Autocomplete.") >> refresh >> go Nothing
                   Right ()->pure ()
-              else run current job >>= \again->when again (go current)
+              else run current job >>= \again->refresh >> when again (go current)
       go active
     withProvider runtime servers cfg action
       | C.provider cfg=="acp"=A.withACPCompletion (C.acpLaunch cfg) root servers (C.model cfg) (C.effort cfg) $ \session->do
@@ -202,6 +272,10 @@ autocompleteEffects :: Autocomplete -> (Desktop -> [Effect] -> IO (Bool,Desktop)
 autocompleteEffects runtime fallback d effects=foldM step (False,d) effects
   where
     step result@(True,_) _=pure result
+    step (_,state) (AgentSidebarAction closedRequest) | Just job<-completionJob closedRequest=do
+      enqueue runtime job
+      when (case job of Configure{}->True; _->False) $ atomically (modifyTVar' (generation runtime) (+1))
+      pure (False,case job of Configure{}->clearInline state; _->state)
     step (_,state) (AutocompleteAction action args)=do
       next<-case action of
         "propose"->request runtime action state
@@ -229,6 +303,11 @@ autocompleteEffects runtime fallback d effects=foldM step (False,d) effects
         _->pure state
       pure (False,next)
     step (_,state) effect=fallback state [effect]
+    completionJob closedRequest=case closedRequest of
+      ShowCompletion target->Just (Reveal target)
+      ChooseCompletion target category->Just (Choices target category)
+      ConfigureCompletion target option value->Just (Configure target option value)
+      _->Nothing
     report outcome state=forM_ (inlinePreview state >>= selectedOption) (enqueue runtime . Feedback outcome . optionProposal)
     accept word state=case inlinePreview state of
       Just view | inlineMatches state view,Just opt<-selectedOption view,Just doc<-activeDocument state->do
@@ -290,6 +369,18 @@ tickAutocomplete runtime original=do
           writeIORef (displayed runtime) (if null options then Nothing else Just shown)
           forM_ (selectedOption shown) (enqueue runtime . Feedback Shown . optionProposal)
           pure state {inlinePreview=if null options then Nothing else Just shown,status=if null options then "No autocomplete proposal." else ""}
+      RevealTranscript expected->do
+        current<-readIORef (summary runtime)
+        if maybe True (\(CompletionSummary target _)->target/=expected) current || not (isNothing (dialog state)) then pure state {status="Completion view expired."} else do
+          writeIORef (debugVisible runtime) True
+          b<-readIORef (debugBuffer runtime)
+          let shown=showTranscript True b state
+          pure (maybe shown (\w->focusWindow (windowId w) shown) (transcriptWindow shown))
+      ChoiceDialog expected option choices selected->do
+        current<-readIORef (summary runtime)
+        pure $ if maybe True (\(CompletionSummary target _)->target/=expected) current || not (isNothing (dialog state)) then state {status="Completion choices expired."} else
+          state {dialog=Just (Dialog "Completion setting" (CompletionChoiceDialog expected option choices)
+            [ListBox "Provider choices" (map (T.take 256 . snd) choices) selected] 0 ["Apply","Cancel"] ["Independent of the main conversation."])}
       Notice text->pure state {status=text}
       ShowSettings values->pure (settingsDialog values state)
       ShowSignIn code->pure state {dialog=Just (Dialog "Copilot sign in" (AutocompleteDialog "signin") [] 0 ["Continue","Cancel"] ["Enter this device code when asked:",code,"Continue opens the provider's sign-in flow."])}
