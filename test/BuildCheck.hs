@@ -52,6 +52,26 @@ checks = bracket temporary removePathForcibly $ \root -> do
   check "output focus keeps standalone source" (B.buildSource outputFocused==Just file)
   check "output focus keeps project directory without Files" . (==root) =<< B.resolveBuildRoot outputFocused
 
+  installed<-findExecutable "ghc"
+  forM_ installed $ \_ -> withBuildJobs $ \jobs -> do
+    Right run<-B.buildPlan B.Run ghc root (Just file)
+    running<-startBuildJob jobs "Run" root run initial
+    ran<-await jobs running finished
+    check "real GHC Run resolves the named compiler on PATH" (status ran=="Run completed." && "build-check" `T.isInfixOf` output ran)
+
+  let relativeCompiler="compiler with spaces"++(if os=="mingw32" then ".exe" else "")
+      selectedCompiler=root </> relativeCompiler
+  writeFile selectedCompiler "selected compiler path fixture"
+  permissions<-getPermissions selectedCompiler
+  setPermissions selectedCompiler permissions {executable=True}
+  resolvedCompiler<-canonicalizePath selectedCompiler
+  check "Run resolves a selected relative compiler against its build root" .
+    (==Right [("runghc",["-f",resolvedCompiler,file,"one two"])]) =<<
+      B.buildPlan B.Run (ghc {B.buildExecutable="." </> relativeCompiler,B.buildArguments=["one two"]}) root (Just file)
+  check "Run reports the missing selected compiler before launch" .
+    (==Left "The selected GHC executable was not found or is not executable: ./absent-compiler") =<<
+      B.buildPlan B.Run (ghc {B.buildExecutable="./absent-compiler"}) root (Just file)
+
   check "standalone compile checks source" . (==Right [("ghc",["--make","-fno-code","-fdiagnostics-color=never",file])]) =<< B.buildPlan B.Compile ghc root (Just file)
   writeFile (root </> "fixture.cabal") "name: fixture\n"
   check "Cabal project builds with selected compiler" . (==Right [("cabal",["build"])]) =<< B.buildPlan B.Make ghc root (Just file)
@@ -132,7 +152,6 @@ checks = bracket temporary removePathForcibly $ \root -> do
     missing<-startBuildJob jobs "Compile" root [(root </> "absent-compiler",[])] initial
     result<-await jobs missing finished
     check "missing compiler is reported" ("Compile:" `T.isPrefixOf` status result)
-  installed<-findExecutable "ghc"
   forM_ installed $ \compiler -> withBuildJobs $ \jobs -> do
     let config=ghc {B.buildExecutable=compiler}
     Right commands<-B.buildPlan B.Make config root (Just file)
@@ -146,13 +165,9 @@ checks = bracket temporary removePathForcibly $ \root -> do
     libraryBuilt<-await jobs libraryStarted finished
     check "GHC Make supports non-Main modules" (status libraryBuilt=="Make completed.")
 
-    Right run<-B.buildPlan B.Run config root (Just file)
-    running<-startBuildJob jobs "Run" root run built
-    ran<-await jobs running finished
-    check "real GHC run" (status ran=="Run completed." && "build-check" `T.isInfixOf` output ran)
     writeFile file "module Main where\nmain :: IO ()\nmain = nonexistentName\n"
     Right compile<-B.buildPlan B.Compile config root (Just file)
-    compiling<-startBuildJob jobs "Compile" root compile ran
+    compiling<-startBuildJob jobs "Compile" root compile libraryBuilt
     bad<-await jobs compiling finished
     check "real GHC error reaches Messages" (not (null (buildDiagnostics bad)) && "failed" `T.isInfixOf` status bad)
     cabal<-findExecutable "cabal"

@@ -17,9 +17,9 @@ import qualified Data.Map.Strict as M
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding
-import System.Directory (canonicalizePath, doesFileExist, listDirectory)
+import System.Directory (canonicalizePath, doesFileExist, findExecutable, listDirectory)
 import System.Environment (lookupEnv)
-import System.FilePath ((</>), takeExtension, takeDirectory)
+import System.FilePath ((</>), isAbsolute, takeFileName, takeExtension, takeDirectory)
 import Hide.Model (Desktop(..), Sidebar(..), Window(..), Document(..), Toolchain(..), startingDirectory)
 import Hide.Files (filePath)
 
@@ -107,10 +107,17 @@ buildPlan action config root source = do
     GHC -> case source of
       Just file | takeExtension file `elem` [".hs",".lhs"] -> do
         exists<-doesFileExist file
-        pure $ if not exists then Left "Save the source file before building." else Right $ case action of
-          Compile -> [(exe,["--make","-fno-code","-fdiagnostics-color=never",file])]
-          Make -> [(exe,["--make","-fdiagnostics-color=never",file])]
-          Run -> [("runghc",["-f",exe,file]++args)]
+        if not exists then pure (Left "Save the source file before building.") else case action of
+          Compile -> pure (Right [(exe,["--make","-fno-code","-fdiagnostics-color=never",file])])
+          Make -> pure (Right [(exe,["--make","-fdiagnostics-color=never",file])])
+          Run -> do
+            -- runghc's -f executes a path directly rather than searching PATH.
+            compiler<-findExecutable (if isAbsolute exe then exe else if takeFileName exe/=exe then root </> exe else exe)
+            case compiler of
+              Nothing -> pure (Left ("The selected GHC executable was not found or is not executable: "<>T.pack exe))
+              Just path -> do
+                resolved<-canonicalizePath path
+                pure (Right [("runghc",["-f",resolved,file]++args)])
       _ -> pure (Left "Choose a saved Haskell source file or a Cabal project.")
 
 -- | Plan a GHC/Cabal test run. THC has no configured test-runner plan.
