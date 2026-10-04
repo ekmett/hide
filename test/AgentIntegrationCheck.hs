@@ -97,7 +97,8 @@ checks=bracket temporary removePathForcibly $ \root ->
       ensure "child opens in the existing protected conversation composer" (activeConversation history && not (guestKeyboardAllowed history))
       let historyText=activeText history
       ensure "history preserves peer identity instead of assigning the human seat" (("Agent "<>AH.agentIdText primary<>" (peer message)") `T.isInfixOf` historyText)
-      ensure "agent input cannot manufacture selected-child authority or usage" (all (\changed->not (guestTransitionAllowed history changed [])) [history {childAgentSteering=True},history {childAgentContextUsage=Just (1,2)},history {childAgentSettings=agentSettings connected}])
+      childTransitions<-mapM (\changed->guestTransitionAllowed history changed []) [history {childAgentSteering=True},history {childAgentContextUsage=Just (1,2)},history {childAgentSettings=agentSettings connected}]
+      ensure "agent input cannot manufacture selected-child authority or usage" (not (or childTransitions))
       let childDrafted=history {composerBuffer=newBuffer "child unsent",composerSelection=Selection 2 5}
       primaryAgain<-ui "show" [] childDrafted
       ensure "switching restores primary draft caret and transcript" (T.null (conversationTarget primaryAgain) && contents (composerBuffer primaryAgain)=="primary unsent" && composerSelection primaryAgain==Selection 3 7 && activeText primaryAgain==primaryText)
@@ -209,7 +210,8 @@ checks=bracket temporary removePathForcibly $ \root ->
       ensure "hidden unsent drafts still prevent quiet Exit" (conversationHasDraft recovered && not (null (conversationViews recovered)))
       recoveredShown<-ui "show" [] recovered
       ensure "show after switching does not lose primary transcript" (activeText recoveredShown==primaryText)
-      (questionView,_)<-chatTool conversation recoveredShown "ask_user" (object ["question" .= ("Choose privately"::T.Text)])
+      caller<-captureQuestionCaller conversation primary >>= right
+      (questionView,_)<-chatToolAs conversation (Just caller) recoveredShown "ask_user" (object ["question" .= ("Choose privately"::T.Text)])
       let privateAnswer=questionView {chatQuestion=fmap (\q->q {questionBuffer=newBuffer "unsent secret answer",questionSelection=Selection 20 20}) (chatQuestion questionView)}
       paintedAnswer<-tickConversation conversation privateAnswer
       hiddenQuestion<-ui "directory-select" ["0",T.pack (show liveIndex)] paintedAnswer

@@ -10,7 +10,7 @@
 -- checked saving rather than reformatting unrelated tables and comments.
 -- Project agent limits may tighten global ceilings but cannot raise them.
 module Hide.MCPPermissions
-  ( Permissions, withPermissions, withPermissionsAt, permissionCall, policyEffects, tickPermissions
+  ( Permissions, withPermissions, withPermissionsAt, permissionCall, permissionCallAs, policyEffects, tickPermissions
   , ReadAdmission, permissionReadCall, bufferEditor, readReference, resolveReadReference, bufferReader
   , permissionConfigPath, readEditorDefaults, writeEditorDefaults, readEditorDefaultsAt, writeEditorDefaultsAt
   , projectConfigPath, readEditorDefaultsFor, readAgentContextAt, writeAgentContextAt, readAgentContexts
@@ -103,6 +103,9 @@ withPermissionsAt path specs=bracket acquire release
 permissionCall :: Permissions -> Tool -> Tool
 permissionCall = permissionCallAs (pure (Right ()))
 
+-- | Host-owned live caller validation for requests deferred by policy approval.
+-- Extension data cannot provide this validator; use it only at authenticated
+-- transport admission. Immediate calls already passed that transport check.
 permissionCallAs :: IO (Either Text ()) -> Permissions -> Tool -> Tool
 permissionCallAs caller runtime@(Permissions path registry ref _ _ _) callback desktop name args=do
   closed<-sessionClosed runtime
@@ -114,6 +117,9 @@ permissionCallAs caller runtime@(Permissions path registry ref _ _ _) callback d
       Right policies -> case M.findWithDefault (if readonly then Enable else Prompt) name policies of
         Disable -> denied "This MCP tool is disabled in Options > Agent Permissions"
         Enable -> callback desktop name args
+        Prompt | name=="ask_user",Object fields<-args,KM.keys fields==["questionId"] -> do
+          actor<-caller
+          case actor of Left err->denied err; Right ()->callback desktop name args
         Prompt -> enqueue True
   where
     enqueue needsApproval=do
@@ -513,7 +519,10 @@ permissionAction runtime@(Permissions path registry ref _ _ _) action values des
                   else case denied of
                     Just err -> finish runtime request (Left err) >> tickPermissions runtime desktop {dialog=Nothing}
                     Nothing -> do
-                      result<-try (callback desktop {dialog=Nothing} (toolName request) edited)
+                      actor<-patchCaller request
+                      result<-try (case actor of
+                        Left err->pure (desktop {dialog=Nothing},pure (Left err))
+                        Right ()->callback desktop {dialog=Nothing} (toolName request) edited)
                       case result of
                         Left (_::IOException) -> finish runtime request (Left "MCP tool failed after approval") >> tickPermissions runtime desktop {dialog=Nothing}
                         Right (updated,continuation) -> do
