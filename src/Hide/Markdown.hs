@@ -38,8 +38,8 @@ instance C.IsInline Inline where
   str = Inline . Seq.fromList . paint Plain
   entity text = C.str (fromMaybe text (lookupEntity (T.drop 1 text)))
   escapedChar = C.str . T.singleton
-  emph = tint Constructor
-  strong = tint Keyword
+  emph = decorate ItalicStyle . tint Constructor
+  strong = decorate BoldStyle . tint Keyword
   link url _ (Inline chars) = Inline (fmap (\(c,s)->(c,LinkStyle url (if s==Plain then Literal else s))) chars)
   image url title label = C.str "[image: " <> C.link url title label <> C.str "]"
   code = Inline . Seq.fromList . paint Literal
@@ -53,7 +53,7 @@ instance C.IsBlock Inline Blocks where
   thematicBreak = Blocks [Flow (paint Comment "───"), Gap]
   blockQuote blocks = Blocks [Indent "> " (trim blocks), Gap]
   codeBlock info source = Blocks [Code info source (codeStyles info source), Gap]
-  heading level content = let Inline chars = tint (Heading level) content in Blocks [Flow (toList chars),Gap]
+  heading level content = let Inline chars = decorate BoldStyle (tint (Heading level) content) in Blocks [Flow (toList chars),Gap]
   rawBlock _ source = Blocks [Pre (paint Plain source),Gap]
   referenceLinkDefinition _ _ = mempty
   list kind spacing items = Blocks (concat (zipWith item [first..] items) ++ [Gap])
@@ -103,6 +103,9 @@ paint style = map (,style) . T.unpack
 
 tint :: Style -> Inline -> Inline
 tint style (Inline chars) = Inline (fmap (\(c,old)->(c,if old==Plain then style else old)) chars)
+
+decorate :: (Style -> Style) -> Inline -> Inline
+decorate style (Inline chars)=Inline (fmap (\(c,old)->(c,style old)) chars)
 
 textOf :: Styled -> T.Text
 textOf = T.pack . map fst

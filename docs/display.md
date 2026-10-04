@@ -25,6 +25,12 @@ font. Combining characters, joined emoji, skin tones and flags are handled as
 complete graphemes when editing and clipping; exact rendering follows the
 frontend. Wide characters partly covered by a frame become blank cells.
 
+Markdown headings and strong text use bold; emphasis uses italic. These traits
+follow the same text through terminal, native and browser displays without
+changing its cell width or copied content. Native bitmap glyphs use thicker or
+slanted strokes; fallback fonts use their bold/italic faces. The terminal uses
+SGR attributes, so the visible result depends on its font and capabilities.
+
 The title shows the active relative filename, a distinguishing session ID prefix,
 and the average `ms/frame` over the last 60 actual draws. The timing refreshes
 about once a second and keeps its last value while idle. It measures frontend

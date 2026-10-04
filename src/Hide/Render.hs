@@ -635,33 +635,37 @@ styledImage dark selectable override active sel start chars = V.horizCat (expand
     expand col offset (g:gs) styled = image : expand (col+width) (offset+T.length g) gs (drop (T.length g) styled)
       where
         style=case styled of (_,s):_->s; _->Plain
-        a=if active && selectable style && offset<hi && offset+T.length g>lo then attr blue gray else fromMaybe (syntaxAttr style) override
+        normal=syntaxAttr style
+        colored=maybe normal (\color->color {V.attrStyle=V.attrStyle normal}) override
+        a=if active && selectable style && offset<hi && offset+T.length g>lo then colored `V.withForeColor` blue `V.withBackColor` gray else colored
         text | g=="\r"=""
              | g=="\t"=T.replicate (8-col `mod` 8) " "
              | otherwise=T.map (\c -> if c<' ' || c=='\DEL' then '·' else c) g
         width=sum (map clusterWidth (graphemes text))
         image=label a text
-    syntaxAttr (LinkStyle _ style)=V.withStyle (syntaxAttr style) V.underline
-    syntaxAttr (ProseStyle (LinkStyle _ style))=V.withStyle (syntaxAttr (ProseStyle style)) V.underline
-    syntaxAttr (BubbleStyle outgoing (LinkStyle _ style))=V.withStyle (syntaxAttr (BubbleStyle outgoing style)) V.underline
-    syntaxAttr (ProseStyle (CodeStyle shell style))=syntaxAttr (CodeStyle shell style)
-    syntaxAttr (ProseStyle style) | dark = V.withForeColor (syntaxAttr style) (case style of Plain->white; _->foreground style)
-    syntaxAttr (ProseStyle style)=attr (case style of Heading 1->white; Heading 2->blue; Heading _->V.RGBColor 170 0 170; Keyword->blue; Literal->V.RGBColor 0 85 0; Comment->V.RGBColor 85 85 85; _->black) scrollCyan
-    syntaxAttr (CodeStyle shell style)
+    syntaxAttr style=let (base,bold,italic)=fontTraits style in
+      foldl V.withStyle (baseAttr base) ([V.bold | bold]++[V.italic | italic])
+    baseAttr (LinkStyle _ style)=V.withStyle (syntaxAttr style) V.underline
+    baseAttr (ProseStyle (LinkStyle _ style))=V.withStyle (syntaxAttr (ProseStyle style)) V.underline
+    baseAttr (BubbleStyle outgoing (LinkStyle _ style))=V.withStyle (syntaxAttr (BubbleStyle outgoing style)) V.underline
+    baseAttr (ProseStyle (CodeStyle shell style))=syntaxAttr (CodeStyle shell style)
+    baseAttr (ProseStyle style) | dark = V.withForeColor (syntaxAttr style) (case style of Plain->white; _->foreground style)
+    baseAttr (ProseStyle style)=attr (case style of Heading 1->white; Heading 2->blue; Heading _->V.RGBColor 170 0 170; Keyword->blue; Literal->V.RGBColor 0 85 0; Comment->V.RGBColor 85 85 85; _->black) scrollCyan
+    baseAttr (CodeStyle shell style)
       | dark = attr (foreground style) black
       | shell = attr (lightForeground style) gray
       | otherwise = attr (foreground style) blue
-    syntaxAttr (BubbleStyle _ (CodeStyle shell style))=syntaxAttr (CodeStyle shell style)
-    syntaxAttr (BubbleText _ outgoing style)=syntaxAttr (BubbleStyle outgoing style)
-    syntaxAttr (BubbleStyle outgoing style)=attr bubbleForeground (if outgoing then scrollCyan else gray)
+    baseAttr (BubbleStyle _ (CodeStyle shell style))=syntaxAttr (CodeStyle shell style)
+    baseAttr (BubbleText _ outgoing style)=syntaxAttr (BubbleStyle outgoing style)
+    baseAttr (BubbleStyle outgoing style)=attr bubbleForeground (if outgoing then scrollCyan else gray)
       where bubbleForeground | outgoing = black
                        | otherwise = case style of
                            Heading 1 -> blue; Heading _ -> V.RGBColor 170 0 170; Keyword -> blue; Comment -> V.RGBColor 85 85 85
                            Literal -> V.RGBColor 0 85 0; Number -> V.RGBColor 170 0 170
                            Constructor -> blue; Pragma -> V.RGBColor 85 85 85; _ -> black
-    syntaxAttr (TerminalStyle fg bg flags)=foldl V.withStyle (attr (rgb fg) (rgb bg)) [style | (bit,style)<-[(1,V.bold),(2,V.italic),(4,V.underline),(8,V.strikethrough),(16,V.dim)], flags .&. bit /= 0]
+    baseAttr (TerminalStyle fg bg flags)=foldl V.withStyle (attr (rgb fg) (rgb bg)) [style | (bit,style)<-[(1,V.bold),(2,V.italic),(4,V.underline),(8,V.strikethrough),(16,V.dim)], flags .&. bit /= 0]
       where rgb value=V.RGBColor (fromIntegral (value `shiftR` 16 .&. 255)) (fromIntegral (value `shiftR` 8 .&. 255)) (fromIntegral (value .&. 255))
-    syntaxAttr style=attr (foreground style) blue
+    baseAttr style=attr (foreground style) blue
     foreground style=case style of Heading 1->white; Heading 2->cyan; Heading _->V.RGBColor 85 255 85; Plain->yellow; Keyword->white; Comment->cyan; Literal->V.RGBColor 85 255 85; Number->V.RGBColor 255 85 255; Constructor->yellow; _->gray
     lightForeground style=case style of Keyword->blue; Comment->V.RGBColor 85 85 85; Literal->V.RGBColor 0 85 0; Number->V.RGBColor 170 0 170; _->black
 
@@ -881,7 +885,7 @@ snapshotHtml :: Desktop -> Text
 snapshotHtml d = "<!doctype html><meta charset='utf-8'><title>Haskell</title><style>body{background:#111;margin:24px;display:grid;place-content:center;min-height:90vh}pre{background:#0000aa;font:min(20px,calc((100vw - 48px)/48))/1.066667 'Courier New',monospace;margin:0;box-shadow:0 0 0 2px #333;white-space:pre}span{font-weight:normal}</style><pre>" <> T.intercalate "\n" rows <> "</pre>"
   where
     rows=[T.concat (map spanHtml (toList ops)) | ops<-toList (displayOpsForPic (renderDesktop d) (screenSize d))]
-    spanHtml TextSpan{textSpanAttr=a,textSpanText=t}="<span style='color:"<>color (V.attrForeColor a)<>";background:"<>color (V.attrBackColor a)<>"'>"<>escape (TL.toStrict t)<>"</span>"
+    spanHtml TextSpan{textSpanAttr=a,textSpanText=t}="<span style='color:"<>color (V.attrForeColor a)<>";background:"<>color (V.attrBackColor a)<>(if V.styleMask a .&. V.bold/=0 then ";font-weight:bold" else "")<>(if V.styleMask a .&. V.italic/=0 then ";font-style:italic" else "")<>"'>"<>escape (TL.toStrict t)<>"</span>"
     spanHtml (Skip n)=T.replicate n " "
     spanHtml (RowEnd n)=T.replicate n " "
     color (V.SetTo (V.RGBColor r g b))="rgb("<>T.intercalate "," (map (T.pack.show) [r,g,b])<>")"

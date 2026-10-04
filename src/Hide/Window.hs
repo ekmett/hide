@@ -44,6 +44,7 @@ import System.Directory (getCurrentDirectory)
 import System.Info (os)
 import System.IO (hPutStrLn, stderr)
 import Hide.Unicode (graphemes, clusterWidth)
+import Hide.TextStyle
 import Hide.Font
 import Hide.Render
 
@@ -92,8 +93,8 @@ foreign import ccall unsafe "thc_error" c_error :: IO CString
 foreign import ccall unsafe "thc_backend" c_backend :: IO CString
 foreign import ccall unsafe "thc_size" c_size :: Ptr CInt -> Ptr CInt -> IO ()
 foreign import ccall unsafe "thc_begin" c_begin :: IO CInt
-foreign import ccall unsafe "thc_glyph" c_glyph :: CInt -> CInt -> CInt -> CInt -> Ptr Word16 -> Word32 -> Word32 -> IO ()
-foreign import ccall unsafe "thc_unicode" c_unicode :: CInt -> CInt -> CInt -> CString -> Word32 -> Word32 -> IO CInt
+foreign import ccall unsafe "thc_glyph" c_glyph :: CInt -> CInt -> CInt -> CInt -> Ptr Word16 -> Word32 -> Word32 -> Word32 -> IO ()
+foreign import ccall unsafe "thc_unicode" c_unicode :: CInt -> CInt -> CInt -> CString -> Word32 -> Word32 -> Word32 -> IO CInt
 foreign import ccall unsafe "thc_pixelate_unicode" c_pixelate_unicode :: CInt -> IO ()
 foreign import ccall unsafe "thc_cursor" c_cursor :: CInt -> CInt -> IO ()
 foreign import ccall unsafe "thc_cursor_blink" c_cursor_blink :: CInt -> IO ()
@@ -206,16 +207,15 @@ draw font d = do
     chars _ x _ [] = pure x
     chars y x a (cluster:rest) = do
       let width=clusterWidth cluster
-          fg=rgb (V.attrForeColor a); bg=rgb (V.attrBackColor a)
+          paint=textStyleFromAttr a
+          fg=fromIntegral (textForeground paint); bg=fromIntegral (textBackground paint); flags=fromIntegral (textFlags paint)
       case T.unpack cluster of
         [ch] | bitmapGlyph font ch -> do
           let Glyph gw bitmap=glyph font ch
-          withArray bitmap $ \bits -> c_glyph (fromIntegral x) (fromIntegral y) (fromIntegral width) (fromIntegral gw) bits fg bg
-        _ -> utf8 cluster $ \text -> check "Draw Unicode" (c_unicode (fromIntegral x) (fromIntegral y) (fromIntegral width) text fg bg)
+          withArray bitmap $ \bits -> c_glyph (fromIntegral x) (fromIntegral y) (fromIntegral width) (fromIntegral gw) bits fg bg flags
+        _ -> utf8 cluster $ \text -> check "Draw Unicode" (c_unicode (fromIntegral x) (fromIntegral y) (fromIntegral width) text fg bg flags)
       chars y (x+width) a rest
-    rgb (V.SetTo (V.RGBColor r g b)) = fromIntegral r `shiftL` 16 .|. fromIntegral g `shiftL` 8 .|. fromIntegral b
-    rgb (V.SetTo (V.ISOColor n)) = [0,0xaa0000,0x00aa00,0xaa5500,0x0000aa,0xaa00aa,0x00aaaa,0xaaaaaa,0x555555,0xff5555,0x55ff55,0xffff55,0x5555ff,0xff55ff,0x55ffff,0xffffff] !! (fromIntegral n `mod` 16)
-    rgb _ = 0
+
 
 -- | Run on the main bound OS thread and scope native-window cleanup.
 -- Translate native events/effects while using explicit metadata/identity redraw keys.

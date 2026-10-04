@@ -45,6 +45,7 @@ import System.FilePath ((</>), takeFileName)
 import System.Info (os)
 import System.Timeout (timeout)
 import System.IO (withBinaryFile, IOMode(ReadMode), hFileSize, openBinaryTempFile, hClose, hPutStrLn, stderr)
+import Hide.TextStyle
 import Hide.Font
 import Hide.Protocol (WirePacket(..), decodeFrame)
 import Hide.Links (openResource)
@@ -59,8 +60,8 @@ data RemoteContribution = RemoteContribution
   , contributionTitle :: T.Text, contributionKey :: T.Text, contributionEnabled :: Bool
   } deriving (Eq,Show)
 
--- | A positioned grapheme with explicit cell width and foreground/background RGB.
-data RemoteCell = RemoteCell Int Int Int Int T.Text Int deriving (Eq,Show)
+-- | A positioned grapheme with explicit cell width, RGB colors and bold/italic traits.
+data RemoteCell = RemoteCell Int Int TextStyle T.Text Int deriving (Eq,Show)
 data RemoteFrame = RemoteFrame
   { remoteSize :: (Int,Int), remoteMode :: Maybe Int, remoteTitle :: T.Text
   , remoteCursor :: Maybe (Int,Int), remoteBlink :: Bool, remoteCRT :: Bool
@@ -114,17 +115,17 @@ parseRemoteFrame metadata rows = parseEither (withObject "frame metadata" $ \o -
         T.length key<=32 && T.all (>= ' ') key && generation>0 && generation<=9007199254740991 && slot `elem` ("context.messages":[T.toLower name | (name,_,_)<-menus])) (fail "Invalid contributed menu entry")
       pure (RemoteContribution ident registry generation slot group order title key enabled)
     parseRow cols y value = do
-      spans <- parseJSON value :: Parser [(Int,Int,Int,[Value])]
+      spans <- parseJSON value :: Parser [(Int,Int,Int,Int,[Value])]
       unless (length spans<=cols+1) (fail "Too many spans")
       snd <$> foldRow cols y (0,[]) spans
     foldRow _ _ acc [] = pure acc
-    foldRow cols y (previous,acc) ((x,fg,bg,runs):rest) = do
-      unless (x>=previous && x<=cols && all (\c -> c>=0 && c<=0xffffff) [fg,bg] && length runs<=cols+1) (fail "Invalid span")
+    foldRow cols y (previous,acc) ((x,fg,bg,flags,runs):rest) = do
+      unless (x>=previous && x<=cols && flags>=0 && flags<=3 && all (\c -> c>=0 && c<=0xffffff) [fg,bg] && length runs<=cols+1) (fail "Invalid span")
       clusters <- concat <$> traverse parseRun runs
       let width = sum (map snd clusters)
       unless (width<=cols-x && length clusters<=cols*4) (fail "Span exceeds row")
       let positions = scanl (+) x (map snd clusters)
-          cells = [RemoteCell at y fg bg text w | (at,(text,w)) <- zip positions clusters, w>0]
+          cells = [RemoteCell at y (TextStyle fg bg (flags .&. 1/=0) (flags .&. 2/=0)) text w | (at,(text,w)) <- zip positions clusters, w>0]
       foldRow cols y (x+width,acc++cells) rest
     parseRun (String text) = do
       unless (T.length text<=512 && T.all (\c -> c>=' ' && c/='\DEL' && clusterWidth (T.singleton c)==1) text) (fail "Invalid character run")
@@ -307,13 +308,13 @@ drawRemote font atlas frame = do
   c_crt_filter (flag (remoteCRT frame))
   c_pixelate_unicode (flag (remotePixelated frame))
   check "Allocate remote frame" c_begin
-  forM_ (remoteCells frame) $ \(RemoteCell x y fg bg text w) -> do
+  forM_ (remoteCells frame) $ \(RemoteCell x y paint text w) -> do
     let bitmap = case M.lookup text atlas of
           Just tile -> Just tile
           Nothing -> case T.unpack text of [c] | bitmapGlyph font c -> Just (glyph font c); _ -> Nothing
     case bitmap of
-      Just (Glyph width bits) -> withArray bits $ \p -> c_glyph (fromIntegral x) (fromIntegral y) (fromIntegral w) (fromIntegral width) p (fromIntegral fg) (fromIntegral bg)
-      Nothing -> utf8 text $ \p -> check "Draw remote Unicode" (c_unicode (fromIntegral x) (fromIntegral y) (fromIntegral w) p (fromIntegral fg) (fromIntegral bg))
+      Just (Glyph width bits) -> withArray bits $ \p -> c_glyph (fromIntegral x) (fromIntegral y) (fromIntegral w) (fromIntegral width) p (fromIntegral (textForeground paint)) (fromIntegral (textBackground paint)) (fromIntegral (textFlags paint))
+      Nothing -> utf8 text $ \p -> check "Draw remote Unicode" (c_unicode (fromIntegral x) (fromIntegral y) (fromIntegral w) p (fromIntegral (textForeground paint)) (fromIntegral (textBackground paint)) (fromIntegral (textFlags paint)))
   forM_ (remoteCursor frame) $ \(x,y) -> c_cursor (fromIntegral x) (fromIntegral y)
   check "Present remote frame" c_present
   where flag value = if value then 1 else 0
