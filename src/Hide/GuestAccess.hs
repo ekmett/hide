@@ -182,6 +182,7 @@ protectedPurpose p=case p of
   PermissionDialog{} -> True
   ChatInputSettings -> True
   AutocompleteDialog{} -> True
+  DebugSourceWatchDialog{} -> True
   DebugDialog action -> privateDownloadAction action
   AgentDialog action -> not (agentActionAllowed action)
   DiscardDraft -> True
@@ -225,7 +226,7 @@ privateField (Input label _ _)=sensitiveLabel label
 privateField (CheckBox "Streamer mode" _)=True
 privateField _=False
 privateDialogField :: Desktop -> Dialog -> Field -> Bool
-privateDialogField d dg field=privateField field || case field of
+privateDialogField d dg field=privateSourceWatch d dg || privateField field || case field of
   Input _ value _ -> case purpose dg of
     Opening base _ _ -> privateName base value
     ChangingDirectory base _ -> privateName base value
@@ -234,6 +235,13 @@ privateDialogField d dg field=privateField field || case field of
   _ -> False
   where
     privateName base value=let name=T.unpack value in protectedPath d (normalise (if isAbsolute name then name else base </> name))
+-- Privacy is captured from the source owner when the watch prompt opens, never
+-- inferred from an ordinary field label. Current policy can add protection.
+privateSourceWatch :: Desktop -> Dialog -> Bool
+privateSourceWatch d dg=case purpose dg of
+  DebugSourceWatchDialog _ bid origin captured->captured || protectedBuffer d bid || maybe False (protectedPath d) origin
+  _->False
+
 focusedPrivateField :: Desktop -> Bool
 focusedPrivateField d=case dialog d of Just dg -> maybe False (privateDialogField d dg) (at (fields dg) (focus dg)); _ -> False
 privateFieldsUnchanged :: Desktop -> Desktop -> Bool
@@ -243,6 +251,7 @@ privateFieldsUnchanged before after=case (dialog before,dialog after) of
   where
     values d dg=[value field | field<-fields dg,privateDialogField d dg field]
     value (Input label text _)=Left (label,text)
+    value (SelectedInput label text _)=Left (label,text)
     value (CheckBox label checked)=Right (label,checked)
     value _=Left ("","")
 
@@ -292,8 +301,7 @@ streamerReadableAt d x y
         Just w | Just doc<-windowDocument (buffers d) w,documentLabel doc==Just "Conversation" -> not (contentPrivate (\_ -> sessionOffset) d doc w x y)
         _ -> True
   where
-    sensitiveValue dg (r,Input label _ _)=sensitiveLabel label && y>top r && inside r x y && y>=top (dialogRect d dg)+2 && y<top (dialogRect d dg)+height (dialogRect d dg)-3
-    sensitiveValue _ _=False
+    sensitiveValue dg (r,f)=privateDialogField d dg f && y>top r && inside r x y && y>=top (dialogRect d dg)+2 && y<top (dialogRect d dg)+height (dialogRect d dg)-3
 -- Only recognized browser/tree paths are checked. Ordinary source text and
 -- unrelated filenames are never scanned for strings which resemble secrets.
 privateTreeCell :: Desktop -> Int -> Int -> Bool

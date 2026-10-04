@@ -150,6 +150,7 @@ data Purpose = Opening FilePath Text [Entry] | ChangingDirectory FilePath [Entry
   | AgentChoiceDialog !Hide.AgentHub.AgentConfigRef !Text ![(Text,Text)]
   | CompletionChoiceDialog !CompletionTarget !Text ![(Text,Text)]
   | EnvironmentDialog Text | AutocompleteDialog Text | DiskConflict Conflict | AgentDialog Text | PermissionDialog Text | DebugDialog Text
+  | DebugSourceWatchDialog !Int !Int !(Maybe FilePath) !Bool
   | DiscardDraft | Confirm Command | Information | Settings | ChatInputSettings | Widgets deriving (Eq,Show)
 data Dialog = Dialog
   { dialogTitle :: Text, purpose :: Purpose, fields :: [Field], focus :: Int
@@ -2895,6 +2896,7 @@ submitDialog button dg original
     Renaming -> if T.null (T.strip first) then (original {status="Enter a new name."},[]) else (d,[LanguageRequest (RenameAt (T.strip first))])
     Saving bid after -> if T.null first then (original,[]) else (d,[SaveDocument bid (Just (T.unpack first)) after])
     DiskConflict conflict -> (d,[ResolveConflict conflict ([CompareDisk,ReloadDisk,KeepBuffer,SaveConflictAs] !! button)])
+    DebugSourceWatchDialog ident _ _ _ -> (d,[DebugAction ("source-watch:"<>T.pack (show ident)) (T.pack (show button):values)])
     DebugDialog action -> (d,[DebugAction action (T.pack (show button) : values ++
       [if value then "true" else "false" | CheckBox _ value <- fields dg] ++
       [T.pack (show i) | ListBox _ _ i <- fields dg])])
@@ -3294,9 +3296,14 @@ addHelp :: Text -> Desktop -> Desktop
 addHelp text d = addReadOnly "Haskell Help" text d
 
 addReadOnly :: Text -> Text -> Desktop -> Desktop
-addReadOnly title text d = case [(bid,w) | (bid,doc)<-M.toList (buffers d),documentLabel doc==Just title,w<-windows d,bufferId w==Just bid] of
-  (bid,w):_ -> focusWindow (windowId w) d {buffers=M.adjust (\doc -> restyle doc {documentBuffer=(newBuffer text) {revision=revision (documentBuffer doc)+1}}) bid (buffers d)}
-  [] -> let new=modifyActive (\w -> w {bufferView=CurrentView,reviewSelection=Nothing}) (addDocument Nothing (newBuffer text) d) in new {buffers=M.adjust (\doc -> doc {documentLabel=Just title}) (nextId d) (buffers new)}
+addReadOnly title text = addReadOnlyBuffer title (newBuffer text)
+
+-- | Adopt an already measured read-only buffer. Replacements advance the source
+-- revision; the prepared immutable geometry is independent of that revision.
+addReadOnlyBuffer :: Text -> Buffer -> Desktop -> Desktop
+addReadOnlyBuffer title prepared d = case [(bid,w) | (bid,doc)<-M.toList (buffers d),documentLabel doc==Just title,w<-windows d,bufferId w==Just bid] of
+  (bid,w):_ -> focusWindow (windowId w) d {buffers=M.adjust (\doc -> restyle doc {documentBuffer=prepared {revision=revision (documentBuffer doc)+1}}) bid (buffers d)}
+  [] -> let new=modifyActive (\w -> w {bufferView=CurrentView,reviewSelection=Nothing}) (addDocument Nothing prepared d) in new {buffers=M.adjust (\doc -> doc {documentLabel=Just title}) (nextId d) (buffers new)}
 
 -- Hit testing uses the same cell geometry as selection, including tabs and wide glyphs.
 hoverAt :: Int -> Int -> Desktop -> (Desktop,[Effect])

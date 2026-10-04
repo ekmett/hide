@@ -640,5 +640,13 @@ the human-approved adapter, not filesystem reads or universally sanitized text.
 
 `documentOrigin` is canonical privacy provenance for generated documents. It
 never grants file/save authority; recovery preserves it and shared private-document
-policy denies protected origins. The debugger producer and public status/stack
-projection are being wired in the source-privacy slice before Watches evaluation.
+policy denies protected origins. Adapter source responses prepare canonical
+origins and measured buffers on an owned worker; owner adoption rechecks the exact
+stop, frame selection and observed source stamp. Generated buffers retain that
+observation, so reusing a numeric reference cannot revive an old source action.
+Public status/stack projections omit whole private source records on waiting
+workers; shared Debug tree rows retain canonical resource provenance for masking.
+Private Add Watch prompts carry frozen source privacy rather than depending on
+field labels. Arbitrary adapter variables/output remain the approved execution
+boundary and are not universally sanitized. Local filesystem source following
+still uses the existing synchronous owner path; its async preparation is separate.
