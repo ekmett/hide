@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 module WindowCheck (checks) where
+import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Monad (unless, forM_, foldM)
 import Control.Exception (evaluate)
 import Data.Maybe (fromMaybe)
@@ -89,9 +90,9 @@ checks = do
       selectedReview=modifyActive (\w -> w {reviewSelection=Just (ReviewSelection (B.revision reviewedBuffer) (B.bufferLineChanges reviewedBuffer) UnifiedSide reviewRange'),selection=Selection 0 4}) reviewFull
       copiedReview=fst (runCommand Copy selectedReview)
       cutReview=fst (runCommand Cut selectedReview)
-      revertedReview=fst (runCommand (RevertChange (bufferId reviewWindow) (B.revision reviewedBuffer) (B.bufferLineChanges reviewedBuffer) 0) reviewFull)
+      revertedReview=fst (runCommand (RevertChange (sourceFixtureBuffer reviewWindow) (B.revision reviewedBuffer) (B.bufferLineChanges reviewedBuffer) 0) reviewFull)
       typedReview=insertText "x" selectedReview
-      savedReview=selectedReview {buffers=M.adjust (\doc -> doc {documentBuffer=B.markSaved (documentBuffer doc)}) (bufferId reviewWindow) (buffers selectedReview)}
+      savedReview=selectedReview {buffers=M.adjust (\doc -> doc {documentBuffer=B.markSaved (documentBuffer doc)}) (sourceFixtureBuffer reviewWindow) (buffers selectedReview)}
   check "review view is per window and names all view modes"
     (bufferView reviewWindow==ChangesView && maybe False ((==CurrentView).bufferView) (activeWindow reviewBase) &&
      any (\(MenuItem _ _ c)->c==SetBufferView ChangesView) (menuItems 8))
@@ -134,7 +135,7 @@ checks = do
      activeText (fst (runCommand Undo contextualCut))==B.contents changedContext)
   check "keyboard navigation skips hidden context gaps to a visible live row"
     (maybe False ((==B.bufferLineOffset changedContext 23).caret.selection) (activeWindow navigation))
-  let staleRevert=fst (runCommand (RevertChange (bufferId reviewWindow) (B.revision reviewedBuffer) (B.bufferLineChanges reviewedBuffer) 0) typedReview)
+  let staleRevert=fst (runCommand (RevertChange (sourceFixtureBuffer reviewWindow) (B.revision reviewedBuffer) (B.bufferLineChanges reviewedBuffer) 0) typedReview)
       contextOpened=fst (windowMouse 1 2 V.BRight [] reviewFull)
   check "hunk context action is available on red rows and rejects stale invocation"
     (case contextKind contextOpened of ChangeContext RevertChange{} -> activeText staleRevert==activeText typedReview; _ -> False)
@@ -157,7 +158,7 @@ checks = do
       pin=fst (runCommand ToggleTerminalPin terminal)
       unpinnedOriginal=fst (runCommand ToggleTerminalPin pin)
       get wid d=fromMaybe (error "window missing") (find ((==wid).windowId) (windows d))
-      sameIdentity a b=windowId a==windowId b && bufferId a==bufferId b && windowNumber a==windowNumber b && selection a==selection b
+      sameIdentity a b=windowId a==windowId b && sourceFixtureBuffer a==sourceFixtureBuffer b && windowNumber a==windowNumber b && selection a==selection b
   check "terminal pin retains window buffer number selection and restores floating bounds"
     (windowPinned pin (get ident pin) && bounds (get ident pin)==problemsRect pin &&
      sameIdentity view (get ident pin) && sameIdentity view (get ident unpinnedOriginal) &&

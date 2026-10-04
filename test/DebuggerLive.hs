@@ -3,6 +3,7 @@
 -- This catches broken source identity, stale stops, and failed termination.
 module Main (main) where
 
+import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Concurrent (threadDelay)
 import Control.Monad (unless)
 import Data.Aeson
@@ -74,7 +75,7 @@ main = do
     let setBreakpoints rows d = do
           state <- current d
           fst <$> tool "debug_set_breakpoints"
-            ["generation" .= epoch state,"bufferId" .= bufferId window,"lines" .= rows] d
+            ["generation" .= epoch state,"bufferId" .= sourceFixtureBuffer window,"lines" .= rows] d
         points s = fromMaybe [] (field "breakpoints" s) :: [Value]
     requested <- setBreakpoints [line] entry
     verified <- waitFor "verified source breakpoint" (\_ s -> not (null (points s)) && all (not . flag "pending") (points s)) requested

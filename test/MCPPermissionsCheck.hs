@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module MCPPermissionsCheck (checks) where
 
+import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (concurrently, withAsync, poll, wait)
 import Control.Exception (bracket)
@@ -40,7 +41,7 @@ checks=do
         specs=[object ["name" .= name,"annotations" .= object ["readOnlyHint" .= readonly]] | (name,readonly)<-[("mutate"::T.Text,False),("read",True)]]
         core desktop _=pure (False,desktop)
         base=addDocument Nothing (newBuffer "before") (initialDesktop (80,25))
-        bid=fromMaybe (error "missing initial buffer") (bufferId <$> activeWindow base)
+        bid=fromMaybe (error "missing initial buffer") (sourceFixtureBuffer <$> activeWindow base)
         changed=base {buffers=M.adjust (\doc->doc {documentBuffer=replaceBuffer False "current" (documentBuffer doc)}) bid (buffers base)}
         submit runtime button desktop=case dialog desktop of
           Just dg -> let (next,effects)=submitDialog button dg desktop in snd <$> policyEffects runtime core next effects
@@ -135,7 +136,7 @@ reviewChecks=withBufferDiffCommands $ \commands->bracket temporary removePathFor
   withPermissionsAt (directory </> "review.toml") fileTools $ \runtime -> do
     let core d _=pure (False,d)
         base=addDocument Nothing (newBuffer "old\n") (initialDesktop (100,32))
-        bid=fromMaybe (error "missing buffer") (bufferId <$> activeWindow base)
+        bid=fromMaybe (error "missing buffer") (sourceFixtureBuffer <$> activeWindow base)
         patch="@@ -1 +1 @@\n-old\n+agent\n"
         revised="@@ -1 +1 @@\n-old\n+human λ\n"
         args=object ["bufferId" .= bid,"revision" .= (0::Int),"diff" .= (patch::T.Text)]

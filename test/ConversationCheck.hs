@@ -1,6 +1,7 @@
 {-# LANGUAGE CPP, OverloadedStrings #-}
 module ConversationCheck (checks, composerCodeChecks) where
 
+import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Concurrent (threadDelay)
 
 import Control.Concurrent.Async (Async, withAsync, cancel, poll, wait)
@@ -153,7 +154,7 @@ checks = (composerCodeChecks >>) $ bracket temporary removePathForcibly $ \root 
         sourceDocument desktop=case [doc | doc<-M.elems (buffers desktop),fmap filePath (documentFile doc)==Just source] of
           doc:_ -> doc
           [] -> error "Source document missing"
-        focusSource desktop=case [w | w<-windows desktop,Just doc<-[M.lookup (bufferId w) (buffers desktop)],fmap filePath (documentFile doc)==Just source] of
+        focusSource desktop=case [w | w<-windows desktop,Just doc<-[M.lookup (sourceFixtureBuffer w) (buffers desktop)],fmap filePath (documentFile doc)==Just source] of
           w:_ -> focusWindow (windowId w) desktop
           [] -> error "Source window missing"
     check "token counts use compact rounded SI units"
@@ -742,7 +743,7 @@ checks = (composerCodeChecks >>) $ bracket temporary removePathForcibly $ \root 
           let (next,effects)=submitDialog 0 dg scope
           (_,opened)<-conversationEffects runtime App.applyEffects next effects
           check "context UI opens protected project config for normal editing"
-            (fmap (fmap filePath . documentFile) (activeDocument opened)==Just (Just (root </> "thc.toml")) && maybe False (protectedBuffer opened . bufferId) (activeWindow opened))
+            (fmap (fmap filePath . documentFile) (activeDocument opened)==Just (Just (root </> "thc.toml")) && maybe False (protectedBuffer opened . sourceFixtureBuffer) (activeWindow opened))
         Nothing -> error "Missing Agent Context scope chooser"
       writeFile (root </> "thc.toml") "[editor.agent]\ncontext = 'Updated project guidance'\n"
       updated<-prompt runtime "stream" guided >>= done runtime
@@ -861,8 +862,8 @@ checks = (composerCodeChecks >>) $ bracket temporary removePathForcibly $ \root 
           baseWindow=fromMaybe (error "child window missing") (activeWindow childView)
           paired primaryColumns childColumns=childView
             { conversationTarget=""
-            , windows=[baseWindow {bufferId=childId,bounds=(bounds baseWindow) {width=childColumns}},
-                baseWindow {windowId=windowId baseWindow+100,bufferId=primaryId,bounds=(bounds baseWindow) {width=primaryColumns}}] }
+            , windows=[baseWindow {windowContent=SourceContent childId,bounds=(bounds baseWindow) {width=childColumns}},
+                baseWindow {windowId=windowId baseWindow+100,windowContent=SourceContent primaryId,bounds=(bounds baseWindow) {width=primaryColumns}}] }
           bufferIdentity bid d=makeStableName =<< evaluate (documentBuffer (fromMaybe (error "chat buffer missing") (M.lookup bid (buffers d))))
       forM_ [(148,62),(43,126)] $ \(primaryColumns,childColumns) -> do
         shown<-tickConversation runtime (paired primaryColumns childColumns)

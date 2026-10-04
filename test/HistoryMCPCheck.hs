@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 module HistoryMCPCheck (checks) where
+import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Monad (unless)
 import Data.Aeson
 import qualified Data.ByteString as BS
@@ -15,7 +16,7 @@ checks=do
   let check label ok=unless ok (error label)
       base=addDocument Nothing (newBuffer "old\nline") (initialDesktop (80,25))
       edited=insertText "new " base
-      bid=maybe 0 bufferId (activeWindow edited)
+      bid=maybe 0 sourceFixtureBuffer (activeWindow edited)
       version=revision (documentBuffer (buffers edited M.! bid))
       call desktop name values=do (next,finish)<-historyTool desktop name (object (["bufferId" .= bid]++values)); reply<-finish; pure (next,reply)
       text=TE.decodeUtf8 . BL.toStrict . encode

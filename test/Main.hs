@@ -91,6 +91,7 @@ import qualified GitCheck
 import qualified HelpCheck
 import qualified BrowserCheck
 import Hide.Browser (Entry(..))
+import qualified PluginWindowsCheck
 import qualified WindowCheck
 import qualified FilesCheck
 import qualified ExternalCheck
@@ -296,6 +297,7 @@ main = do
   DialogMouseCheck.checks
   GitOperationsCheck.checks
   GitCheck.checks
+  PluginWindowsCheck.checks
   WindowCheck.checks
 #ifdef WITH_FONT
   FontCheck.checks

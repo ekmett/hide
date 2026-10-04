@@ -814,10 +814,11 @@ sync t d = do
 cursorTarget :: Desktop -> Maybe Target
 cursorTarget d = do
   w<-activeWindow d
+  bid<-bufferId w
   doc<-activeDocument d
   _<-documentFile doc
   if not (textBuffer (documentBuffer doc)) || documentLabel doc/=Nothing || problemsFocused d || maybe False treeFocused (sideTree d) then Nothing
-    else Just (bufferId w,revision (documentBuffer doc),caret (selection w))
+    else Just (bid,revision (documentBuffer doc),caret (selection w))
 
 currentTarget :: Desktop -> Maybe Target
 currentTarget d | dialog d/=Nothing || menu d/=Nothing || contextMenu d/=Nothing || problemsFocused d = Nothing
@@ -1055,7 +1056,7 @@ finishToolResult :: Tooling -> Session -> ToolQuery -> Value -> Desktop -> IO De
 finishToolResult t session query response d = do
   active<-toolActive query
   if not active then pure d else
-    if queryHuman query && queryName query=="lsp_code_actions" && (dialog d/=Nothing || fmap bufferId (activeWindow d)/=Just (let (bid,_,_)=queryTarget query in bid)) then completeTool query (Left "Code action selection changed") >> pure d else
+    if queryHuman query && queryName query=="lsp_code_actions" && (dialog d/=Nothing || (activeWindow d >>= bufferId)/=Just (let (bid,_,_)=queryTarget query in bid)) then completeTool query (Left "Code action selection changed") >> pure d else
     if fmap fst (targetDocument (queryTarget query) d)/=Just (queryPath query) then completeTool query (Left "Buffer changed while awaiting HLS") >> pure d
     else case member "error" response of
       Just err -> completeTool query (Left (fromMaybe "HLS request failed" (member "message" err >>= stringValue))) >> pure d

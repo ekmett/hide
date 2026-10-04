@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module WorkspaceFilesMCPCheck (checks) where
 
+import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Exception (bracket)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (withAsync,poll)
@@ -72,7 +73,7 @@ checks=withBufferDiffCommands $ \commands->do
       TIO.writeFile (root </> "source.hs") "disk needle\n"
       loaded<-loadFile (root </> "source.hs") >>= either error pure
       let clean=uncurry (\state buffer->addDocument (Just state) buffer initial) loaded
-          bid=maybe (error "missing buffer") bufferId (activeWindow clean)
+          bid=maybe (error "missing buffer") sourceFixtureBuffer (activeWindow clean)
           patch::T.Text
           patch="--- a/source.hs\n+++ b/source.hs\n@@ -1 +1 @@\n-disk needle\n+live needle\n"
       (dirtyDesktop,patched)<-success "buffer_apply_diff" ["bufferId" .= bid,"revision" .= (0::Int),"diff" .= patch] clean
@@ -105,11 +106,11 @@ checks=withBufferDiffCommands $ \commands->do
       check "deleting the selected subdirectory returns directory views to the project root"
         (defaultDirectory removedTree==Just root && fmap treeRoot (sideTree removedTree)==Just root)
       let binary=addDocument Nothing (newByteBuffer (BS.pack [0,255])) initial
-          binaryId=maybe (error "missing binary buffer") bufferId (activeWindow binary)
+          binaryId=maybe (error "missing binary buffer") sourceFixtureBuffer (activeWindow binary)
       rejected "buffer_apply_diff" ["bufferId" .= binaryId,"revision" .= (0::Int),"diff" .= patch] binary
       let multiBase=fst (runCommand SplitVertical (addDocument Nothing (newBuffer "a\nb\ncc\nd\n") initial))
           multi=multiBase {windows=map (\w->w {selection=Selection 5 5}) (windows multiBase)}
-          multiId=maybe (error "missing split buffer") bufferId (activeWindow multi)
+          multiId=maybe (error "missing split buffer") sourceFixtureBuffer (activeWindow multi)
           multiPatch::T.Text
           multiPatch="@@ -1 +1 @@\n-a\n+AAAAA\n@@ -3 +3 @@\n-cc\n+Z\n"
       (mapped,_)<-success "buffer_apply_diff" ["bufferId" .= multiId,"revision" .= (0::Int),"diff" .= multiPatch] multi
@@ -137,7 +138,7 @@ checks=withBufferDiffCommands $ \commands->do
       secretPath<-canonicalizePath (root </> "authority/config.toml")
       let protected=initial {guestPrivatePaths=[secretPath,root </> "future/session.json"]}
           privateLive=addDocument (Just (FileState secretPath (Just "private needle\n"))) (newBuffer "unsaved private needle\n") protected
-          privateBid=maybe (error "missing private buffer") bufferId (activeWindow privateLive)
+          privateBid=maybe (error "missing private buffer") sourceFixtureBuffer (activeWindow privateLive)
       callProcess "git" ["-C",root,"add","authority/config.toml"]
       (_,privateSearch)<-success "workspace_search" ["query" .= ("private needle"::T.Text)] privateLive
       (_,privateTracked)<-success "workspace_search" ["query" .= ("private needle"::T.Text),"trackedOnly" .= True] privateLive

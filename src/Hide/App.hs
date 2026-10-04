@@ -21,6 +21,7 @@ import qualified Hide.AutocompleteACP as CompletionACP
 import Hide.BufferView
 import Hide.Defaults
 import qualified Hide.Plugin.Menu as PluginMenu
+import Hide.PluginWindowHost (tickPluginWindows,retireClosedWindow)
 import Hide.MenuCommands
 import Hide.Keybindings
 import Hide.Commands (configuredBindings, contributedBindingCommands)
@@ -293,7 +294,7 @@ runEditor args = do
                     (quit,updated)<-policyEffects permissions core d pending
                     approvedExit<-readIORef exiting
                     pure (quit || approvedExit,updated)
-                  tick d=tickProjectBrowser projectBrowser d >>= tickGitOperations gitOperations applyEffects >>= tickTooling tooling applyEffects >>= tickReconciliation reconciliation (sidebarEffects sidebarHost applyEffects) >>= tickConversation conversation >>= tickDebugger debugger (toolingEffects tooling applyEffects) >>= tickPermissions permissions >>= tickHighlighting highlighting >>= tickAutocomplete autocomplete >>= tickKeybindings keybindings >>= tickMenus menuHost >>= tickDebuggerSidebar debugSidebar sidebarHost debugger >>= tickPackageSidebar packageSidebar sidebarHost >>= tickAgentSidebar agentSidebar sidebarHost >>= tickSidebar sidebarHost runtimeEffects
+                  tick d=tickProjectBrowser projectBrowser d >>= tickGitOperations gitOperations applyEffects >>= tickTooling tooling applyEffects >>= tickReconciliation reconciliation (sidebarEffects sidebarHost applyEffects) >>= tickConversation conversation >>= tickDebugger debugger (toolingEffects tooling applyEffects) >>= tickPermissions permissions >>= tickHighlighting highlighting >>= tickAutocomplete autocomplete >>= tickKeybindings keybindings >>= tickMenus menuHost >>= tickDebuggerSidebar debugSidebar sidebarHost debugger >>= tickPackageSidebar packageSidebar sidebarHost >>= tickAgentSidebar agentSidebar sidebarHost >>= tickSidebar sidebarHost runtimeEffects >>= tickPluginWindows
                   inspectTool d name parameters
                     | name `elem` ["list_windows","list_buffers","read_buffer","read_selection"] = pure (d,pure (builtinTool d name parameters))
                     | name `elem` chatToolNames = chatTool conversation d name parameters
@@ -541,6 +542,7 @@ applyEffects :: Desktop -> [Effect] -> IO (Bool,Desktop)
 applyEffects = foldM apply . (False,)
   where
     apply state@(True,_) _=pure state
+    apply (_,d) (RetirePluginWindow reference)=(False,) <$> retireClosedWindow reference d
     -- Reload/inspection belong to the session worker, not this blocking file
     -- interpreter used by standalone drivers and snapshots.
     apply (_,d) ReloadKeyBindings{}=pure (False,d {status="Binding reload requires a running session."})
@@ -572,7 +574,7 @@ applyEffects = foldM apply . (False,)
       pure (False,d {status=either ("Default view changed for this session; could not save: "<>) (const "Default buffer view saved.") result})
     apply (_,d) SetScreenMode{}=pure (False,d {status="Screen modes are available in a graphical window."})
     apply (_,d) (ReadPath path)
-      | Just window<-find (\w -> fmap filePath (M.lookup (bufferId w) (buffers d) >>= documentFile)==Just path) (windows d) =
+      | Just window<-find (\w -> fmap filePath (windowDocument (buffers d) w >>= documentFile)==Just path) (windows d) =
           pure (False,focusWindow (windowId window) d)
     apply (_,d) (ReadPath path)=do
       directory<-doesDirectoryExist path
@@ -585,7 +587,7 @@ applyEffects = foldM apply . (False,)
         let opened=case result of
               Left err->message "Cannot open file" (wrapMessage (T.pack err)) d
               Right (file,b)->case find (\(_,doc)->fmap filePath (documentFile doc)==Just (filePath file)) (M.toList (buffers d)) of
-                Just (bid,_)->maybe d (\w->focusWindow (windowId w) d) (find ((==bid).bufferId) (windows d))
+                Just (bid,_)->maybe d (\w->focusWindow (windowId w) d) (find ((==Just bid) . bufferId) (windows d))
                 Nothing->addDocument (Just file) b d
         apply (False,opened) (RefreshGit (startingDirectory opened))
     apply (_,d) (BrowsePath path pattern)=do

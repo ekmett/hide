@@ -18,7 +18,7 @@ import qualified Data.ByteString as BS
 import Data.IORef
 import Data.List (find)
 import qualified Data.Map.Strict as M
-import Data.Maybe (mapMaybe)
+import Data.Maybe (mapMaybe,fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -79,7 +79,7 @@ startBuildJob (BuildJobs ref report stdoutReport) label root commands desktop = 
         emit (Finished outcome)
         wait aggregator
       let opened=addReadOnly (label<>" output") "" desktop
-          bid=maybe (nextId desktop) bufferId (activeWindow opened)
+          bid=fromMaybe (nextId desktop) (activeWindow opened >>= bufferId)
           old=buildDiagnostics desktop
       writeIORef ref (Just (Job bid label root stop worker latest))
       writeIORef report (Just (bid,label,root,Nothing))
@@ -176,7 +176,7 @@ tickBuildJobs (BuildJobs ref report stdoutReport) desktop = do
               oldLines=maybe 0 (bufferLineCount . documentBuffer) (M.lookup bid (buffers desktop))
               newLines=bufferLineCount buffer
               follow window
-                | bufferId window==bid, Just previous<-find ((==windowId window) . windowId) (windows desktop) =
+                | bufferId window==Just (bid), Just previous<-find ((==windowId window) . windowId) (windows desktop) =
                     window {scrollRow=if scrollRow previous+height (bounds previous)-2>=oldLines
                       then max 0 (newLines-height (bounds window)+2) else scrollRow previous}
                 | otherwise = window

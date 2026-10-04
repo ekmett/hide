@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 module ToolingCheck (checks, diagnosticCacheChecks, startupChecks, workspaceEditChecks, commandChecks) where
+import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Monad (unless, when, forM_, replicateM, foldM, void)
 import Control.Concurrent (threadDelay, newEmptyMVar, readMVar, putMVar, tryPutMVar, tryReadMVar)
 import Control.Concurrent.Async (withAsync, poll, wait, cancel)
@@ -113,7 +114,7 @@ startupChecks :: IO ()
 startupChecks = bracket temporary removePathForcibly $ \root -> do
   let source=root </> "Main.hs"; other=root </> "Other.hs"; server=root </> "fake-hls"
       base=addDocument (Just (FileState source Nothing)) (newBuffer "foo = 1\n") (initialDesktop (80,25))
-      bid=maybe (error "missing source") bufferId (activeWindow base)
+      bid=maybe (error "missing source") sourceFixtureBuffer (activeWindow base)
       desktop=addDocument (Just (FileState other Nothing)) (newBuffer "bar = 2\n") base
       arguments=object ["bufferId" .= bid,"line" .= (1::Int),"column" .= (1::Int)]
       core d _=pure (False,d)
@@ -295,7 +296,7 @@ mcpChecks = bracket temporary removePathForcibly $ \root -> do
       disk="foo = 1\n" :: T.Text
       base=addDocument (Just (FileState source Nothing)) (newBuffer disk) (initialDesktop (80,25))
       live=insertText "😀 " base
-      bid=maybe (error "no source window") bufferId (activeWindow live)
+      bid=maybe (error "no source window") sourceFixtureBuffer (activeWindow live)
       rev=revision . documentBuffer . (M.! bid) . buffers
       args d extra=object (["bufferId" .= bid,"line" .= (1::Int),"column" .= (3::Int),"revision" .= rev d]++extra)
       core d _=pure (False,d)
@@ -403,11 +404,11 @@ workspaceEditChecks :: IO ()
 workspaceEditChecks = bracket temporary removePathForcibly $ \root->do
   let source=root </> "Main.hs"; other=root </> "Util.hs"; extra=root </> "Extra.hs"; server=root </> "fake-hls"
       initial=addDocument (Just (FileState source Nothing)) (newBuffer "😀 foo = 1\n") (initialDesktop (80,25))
-      sourceId=maybe (error "missing source") bufferId (activeWindow initial)
+      sourceId=maybe (error "missing source") sourceFixtureBuffer (activeWindow initial)
       withOther=addDocument (Just (FileState other Nothing)) (newBuffer "foo = 2\n") initial
-      otherId=maybe (error "missing other") bufferId (activeWindow withOther)
+      otherId=maybe (error "missing other") sourceFixtureBuffer (activeWindow withOther)
       base=addDocument Nothing (newBuffer "scratch\n") withOther
-      scratchId=maybe (error "missing scratch") bufferId (activeWindow base)
+      scratchId=maybe (error "missing scratch") sourceFixtureBuffer (activeWindow base)
       snapshot d _=pure (M.union (M.fromList [(filePath file,(revision (documentBuffer doc),contents (documentBuffer doc))) | doc<-M.elems (buffers d),Just file<-[documentFile doc]]) (M.singleton extra (-1,"third = 3\n")))
       args=object ["bufferId" .= sourceId,"revision" .= (0::Int),"line" .= (1::Int),"column" .= (3::Int)]
       core d _=pure (False,d)
@@ -452,12 +453,12 @@ workspaceEditChecks = bracket temporary removePathForcibly $ \root->do
     setEnv "THC_EDIT_HLS" server
     withHeld $ \tooling held answer release->do
       let oldLength=bufferLength (documentBuffer (buffers held M.! sourceId))
-          moved=(insertText "typed " held) {windows=map (\w->if bufferId w==sourceId then w {selection=Selection oldLength oldLength,bounds=Rect 2 3 25 8} else w) (windows held)}
+          moved=(insertText "typed " held) {windows=map (\w->if sourceFixtureBuffer w==sourceId then w {selection=Selection oldLength oldLength,bounds=Rect 2 3 25 8} else w) (windows held)}
       putMVar release ()
       (adopted,reply)<-finish tooling moved answer
       check "prepared batch succeeds" (not (isLeft reply) && textAt sourceId adopted=="😀 fixed = 1\n" && textAt otherId adopted=="fixed = 2\n")
       check "adoption preserves unrelated input" (textAt scratchId adopted=="typed scratch\n")
-      let sourceWindows=[w | w<-windows adopted,bufferId w==sourceId]
+      let sourceWindows=[w | w<-windows adopted,sourceFixtureBuffer w==sourceId]
       check "adoption preserves moved windows and rebases current selection" (case sourceWindows of w:_->bounds w==Rect 2 3 25 8 && selection w==Selection (oldLength+2) (oldLength+2); _->False)
       check "each affected live buffer gets one undo step" (contents (undo (documentBuffer (buffers adopted M.! sourceId)))==textAt sourceId base && contents (undo (documentBuffer (buffers adopted M.! otherId)))==textAt otherId base)
       check "closed target becomes an unsaved buffer" (any (\doc->fmap filePath (documentFile doc)==Just extra && contents (documentBuffer doc)=="fixed = 3\n" && dirty (documentBuffer doc)) (M.elems (buffers adopted)))
@@ -466,7 +467,7 @@ workspaceEditChecks = bracket temporary removePathForcibly $ \root->do
           , ("save baseline",editOther markSaved)
           , ("file baseline",\d->d {buffers=M.adjust (\doc->doc {documentFile=Just (FileState other (Just "new baseline"))}) otherId (buffers d)})
           , ("Save As",\d->d {buffers=M.adjust (\doc->doc {documentFile=Just (FileState (root </> "Moved.hs") Nothing)}) otherId (buffers d)})
-          , ("close",\d->d {buffers=M.delete otherId (buffers d),windows=filter ((/=otherId) . bufferId) (windows d)})
+          , ("close",\d->d {buffers=M.delete otherId (buffers d),windows=filter ((/=otherId) . sourceFixtureBuffer) (windows d)})
           , ("open closed target",addDocument (Just (FileState extra Nothing)) (newBuffer "new unsaved contents\n"))
           , ("private target",\d->d {guestPrivatePaths=[extra]})] $ \(label,change)->
       withHeld $ \tooling held answer release->do
@@ -535,7 +536,7 @@ codeActionChecks = bracket temporary removePathForcibly $ \root -> do
   let source=root </> "Main.hs"; other=root </> "Util.hs"; private=root </> "Secret.hs"
       server=root </> "fake-hls"
       live=addDocument (Just (FileState source Nothing)) (newBuffer "😀 foo = 1\n") (initialDesktop (80,25))
-      bid=maybe (error "missing source") bufferId (activeWindow live)
+      bid=maybe (error "missing source") sourceFixtureBuffer (activeWindow live)
       rev d=revision (documentBuffer (buffers d M.! bid))
       core d _=pure (False,d)
       args d=object ["bufferId" .= bid,"revision" .= rev d,"line" .= (1::Int),"column" .= (3::Int),"endLine" .= (1::Int),"endColumn" .= (6::Int)]
@@ -705,7 +706,7 @@ diagnosticCacheChecks :: IO ()
 diagnosticCacheChecks = bracket temporary removePathForcibly $ \root -> do
   let source=root </> "Main.hs"; other=root </> "Other.hs"; server=root </> "fake-hls"
       base=addDocument (Just (FileState source Nothing)) (newBuffer "foo = 1\n") (initialDesktop (80,25))
-      bid=maybe (error "no source") bufferId (activeWindow base)
+      bid=maybe (error "no source") sourceFixtureBuffer (activeWindow base)
       core d _=pure (False,d)
       check name ok=unless ok (error name)
       identity d=makeStableName =<< evaluate (diagnostics d)
@@ -836,7 +837,7 @@ commandChecks = bracket temporary removePathForcibly $ \root -> do
       secret=root </> "Secret.hs"
       server=root </> "fake-command-hls"
       base=(addDocument (Just (FileState source Nothing)) (newBuffer "foo = 1\n") (initialDesktop (80,25))) {guestPrivatePaths=[secret]}
-      bid=maybe (error "missing source") bufferId (activeWindow base)
+      bid=maybe (error "missing source") sourceFixtureBuffer (activeWindow base)
       version d=revision (documentBuffer (buffers d M.! bid))
       args d=object ["bufferId" .= bid,"revision" .= version d,"line" .= (1::Int),"column" .= (1::Int)]
       core d _=pure (False,d)
