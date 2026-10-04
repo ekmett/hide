@@ -92,9 +92,29 @@ freshness tracking uses the same version check.
 This is an implementation slice, not a complete plugin SDK. Session-scoped
 `BufferRef` handles, activation scopes, checked buffer edits, menu contributions
 and custom widget/window types remain tracked in
-[the delivery plan](https://github.com/ekmett/hide/issues/1). HLS currently owns
-worker preparation and atomic checked edit adoption in `Hide.Tooling`; wrapping
-that owner remains part of [the buffer service work](https://github.com/ekmett/hide/issues/4).
+[the delivery plan](https://github.com/ekmett/hide/issues/1).
+
+## Host checked edit ownership
+
+`Hide.BufferEdits` owns opaque `PreparedEdit` values, worker preparation
+through `Hide.Buffer.replaceRanges`, and all-target checked atomic adoption.
+`Hide.Tooling` is the live HLS consumer; it retains protocol parsing, canonical
+project admission, task cancellation/session ordering and reply delivery.
+Preparation forces replacement trees, output content and selection spans on the
+worker. It deliberately retains the file baseline and ordinary Undo state that
+will be installed; these owned edits differ from immutable read images.
+
+Under the session lock, `commitEdits` rejects duplicate, closed, replaced,
+ambiguous or private targets before changing any buffer. Open targets require
+matching buffer version and file-baseline identity. Success installs worker
+values, preserves unrelated navigation and rebases current selections. Changed
+buffers receive one ordinary Undo entry; saving stays explicit and a stale
+result never rebases the proposed edits.
+
+These are host operations, not the public scoped plugin edit service. A caller
+must already own the session transition, admit the project/path/source baseline,
+and revalidate its task's admission. Session-scoped buffer references and plugin
+authority remain part of [the buffer service work](https://github.com/ekmett/hide/issues/4).
 
 ## Native Windows terminals
 
