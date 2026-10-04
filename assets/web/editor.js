@@ -315,7 +315,7 @@ window.addEventListener('keydown',e=>{
  // Only a matching default clipboard action may delegate its keyboard gesture
  // to the browser clipboard event. Unbinding/remapping suppresses that default.
  const nativeClipboard={c:'hide.edit.copy',x:'hide.edit.cut',v:'hide.edit.paste'}[key.toLowerCase()];
- if(control&&!e.altKey&&!e.shiftKey&&nativeClipboard&&action===nativeClipboard&&(!frame?.wordstar||e.metaKey))return;
+ if(control&&!e.altKey&&!e.shiftKey&&nativeClipboard&&action===nativeClipboard)return;
  // Modal editing keeps its platform clipboard shortcuts and authority checks.
  if(control&&!e.altKey&&!e.shiftKey&&!frame?.bindingsActive&&nativeClipboard){e.preventDefault();command(nativeClipboard);return;}
  e.preventDefault();cursorEpoch=performance.now();send({type:'key',key,mods:mods(e)});return;

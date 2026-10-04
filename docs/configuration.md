@@ -96,9 +96,11 @@ changing attachments selects the focused profile and context immediately:
 "hide.file.save" = ["Ctrl+Shift+S"]
 ```
 
-Contexts are `source`, `sidebar`, `conversation`, `messages`, `debugger` and
+Contexts are `source`, `wordstar`, `dialog`, `sidebar`, `conversation`, `messages`, `debugger` and
 `terminal`. A `global` table supplies explicitly configured commands to all of
-those contexts; a context entry takes precedence over the same global command.
+those contexts where the command and chord belong to the input owner; a context
+entry takes precedence over the same global command. Dialogs inherit only their
+editing/search actions, and omit chords owned by dialog controls.
 Within each table a project entry replaces the global configuration's entry.
 An override replaces all shortcuts for its command; `[]` explicitly unbinds it.
 Omitted commands retain their inherited defaults. Menu and command status labels
@@ -106,6 +108,17 @@ show the focused context's effective binding, including an empty label for an
 unbound command. Commands remain available through their menus.
 
 Source, conversation and debugger panes retain the standard command defaults.
+When WordStar is enabled for a text source, its `wordstar` table owns named
+commands such as Save, Open and Undo. Their function-key and existing named
+command defaults remain; other Ctrl character keys stay inactive unless assigned.
+Ctrl+E/S/D/X movement, Ctrl+A/F word movement, Ctrl+Y
+line deletion, and Ctrl+K/Ctrl+Q prefix/block grammar stay fixed. Overrides using
+those owned chords fail validation. Global chords owned by this grammar are
+omitted from its inherited map, preserving their use in other contexts. Prefix command steps remain available even
+when the same named command is rebound or unbound in the table; customizable
+prefix/movement grammar remains open in #3. Hex buffers use `source`.
+For example, `[editor.keybindings.terminal.wordstar]` with
+`"hide.file.save" = ["Ctrl+Shift+J"]` replaces F2 for WordStar sources only.
 The sidebar additionally binds Up/Down and PageUp/PageDown to row movement,
 Enter to activate, Right to expand, Left to collapse, and F6 to return to source.
 Messages uses its own row/page movement, Enter to jump to source, and F6 to leave.
@@ -121,9 +134,25 @@ Unknown contexts or commands, malformed chords and conflicts stop configuration
 loading. To assign an occupied key, remove or replace its previous command's
 binding too. Ordinary text, menu mnemonics, window navigation, completion controls,
 Escape, F10 and Ctrl+] remain reserved. Conversation Enter retains the configured
-Query/Steer and code-block submission behavior. Modal controls keep their own
-bindings and permission checks; source accelerators are inactive while a modal
-owns input.
+Query/Steer and code-block submission behavior. Dialog `dialog` tables accept only Copy, Cut, Paste, Select all, Undo, Redo,
+Find and Replace canonical command IDs. Editing actions apply to an editable
+TextArea; Find/Replace apply to a search dialog. Plain single-line `Input`
+fields retain their existing text/editing controls and Ctrl/Alt button mnemonics. Defaults are Ctrl+C/X/V/A,
+Ctrl+Shift+C/X/V/A, Ctrl+Z Undo, Ctrl+Y and Ctrl+Shift+Z Redo, Ctrl+F Find,
+and Ctrl+H/R Replace, with the macOS Cmd counterparts. Only permitted actions
+are projected to native/browser accelerators for the current field. For example:
+
+```toml
+[editor.keybindings.macos.dialog]
+"hide.edit.copy" = ["Cmd+Shift+J"]
+"hide.edit.paste" = ["Cmd+Shift+K"]
+```
+
+Dialog editing remaps operate on that field's buffer and undo history. Enter,
+Escape, Tab, Ctrl+Tab search switching, Ctrl+U input clearing, text, button
+mnemonics and permission decisions retain their control ownership. Sensitive
+agent/approval controls keep their human authority regardless of a remap.
+Source accelerators are inactive while a modal owns input.
 
 Choose **Options > Reload keybindings** after editing TOML. Loading and
 validation run on the session worker; the existing map stays active until a valid
@@ -146,7 +175,7 @@ browser permissions or user activation prevent access. Browser/OS reserved short
 characters retain composed text input and cannot be assigned to commands; Cmd+Alt
 chords remain distinct. Local graphical scale keys remain reserved.
 
-Source WordStar and modal binding customization remain subsequent stages of
+WordStar movement/prefix/block grammar and dialog-navigation customization remain subsequent stages of
 [configurable keybindings](https://github.com/ekmett/hide/issues/3).
 
 ## Environment
