@@ -566,3 +566,16 @@ owner maps retain scalar provenance and validated immutable rows, never document
 payloads. `DebuggerSidebarCheck` exercises real fake-DAP interleaving, captured
 frame activation, passive cached ticks, sticky lazy-reference refusal, resume
 expiry and thread-exit refusal of delayed child pages.
+
+Source popups capture a copied expression of at most 4096 characters, the measured
+clicked row, file path, source IDs and revision. Toggle breakpoint and Add watch
+run as exact human-only menu contributions; their worker captures ContentVersion
+and prepares canonical path/dirty state before the debugger owner rechecks the
+live target. The main Debug breakpoint and keyboard action resolve the same
+registration. A source label cannot authorize a pathless operation: only the
+existing debugger-owned source map can. Source replacement advances revision.
+`MenuContextCheck` covers stamped browser/native routing, byte/modal/agent refusal,
+equal-revision buffer replacement and changed-source watch confirmation. Watch
+expressions are stored in the existing owner (128 entries, 4096 characters each);
+the Watches tree and explicit evaluation/Force remain the next slice. Local
+source following still uses the existing synchronous owner route.

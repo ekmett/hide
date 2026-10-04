@@ -44,6 +44,7 @@ import qualified Hide.Consoles as C
 import qualified Hide.Terminal as Terminal
 import qualified Hide.DAP as D
 import Hide.Files (filePath)
+import Hide.Plugin.BufferHost (versionCurrent)
 import qualified Hide.LSP as L
 import Hide.Model
 
@@ -72,13 +73,14 @@ data State = State
   , sidebarVisible :: Bool, sidebarSession :: Int, sidebarPages :: M.Map DebugPageRequest Value
   , sidebarThreads :: M.Map Int (), sidebarFrames :: M.Map (Int,Int) Value
   , sidebarReferences :: M.Map (Int,Int,Int) Bool
+  , watchExpressions :: M.Map Int Text, nextWatch :: Int, sourceWatchDialog :: Maybe (Int,DebugSourceRequest)
   }
 
 emptyState :: State
 emptyState = State {client=Nothing,connected=False,capabilities=Null,ready=False,configured=False,pending=M.empty,generation=0,frameRevision=0,
   stopped=False,thread=Nothing,frame=Nothing,frames=[],followSource=True,exceptionFilters=[],breakpoints=M.empty,sources=M.empty,
   root=".",endpoint=("127.0.0.1",4711),output="",failure=Nothing,disconnectAt=Nothing,endedAt=Nothing,programExitCode=Nothing,
-  hdbLauncher=Nothing,debugEnvironment=[],debugConsoles=[],terminalLaunch=Nothing,outputShown=False,choices=M.empty,choiceId=0,breakRequests=M.empty,breakModified=M.empty,startRequest=("attach",object []),managed=False,adapterId="",variableRefs=M.empty,sidebarVisible=False,sidebarSession=0,sidebarPages=M.empty,sidebarThreads=M.empty,sidebarFrames=M.empty,sidebarReferences=M.empty}
+  hdbLauncher=Nothing,debugEnvironment=[],debugConsoles=[],terminalLaunch=Nothing,outputShown=False,choices=M.empty,choiceId=0,breakRequests=M.empty,breakModified=M.empty,startRequest=("attach",object []),managed=False,adapterId="",variableRefs=M.empty,sidebarVisible=False,sidebarSession=0,sidebarPages=M.empty,sidebarThreads=M.empty,sidebarFrames=M.empty,sidebarReferences=M.empty,watchExpressions=M.empty,nextWatch=1,sourceWatchDialog=Nothing}
 
 withDebugger :: (Debugger -> IO a) -> IO a
 withDebugger action = C.withConsoles (\consoles -> withDebuggerConsoles consoles action)
@@ -121,6 +123,9 @@ debuggerEffects runtime fallback = foldM apply . (False,)
     apply (_,d) (DebugAction action values) = do
       next<-perform runtime fallback action values d
       publishSidebarEpoch runtime
+      pure (False,next)
+    apply (_,d) (DebugSourceAction request) = do
+      next<-sourceAction runtime request d
       pure (False,next)
     apply (_,d) (DebugSidebarAction request) = do
       next<-selectSidebarFrame runtime fallback request d
@@ -409,7 +414,7 @@ debuggerStatus s=object
    "finishing" .= (isJust (client s) && isJust (endedAt s)),"exitCode" .= programExitCode s,"connected" .= connected s,
    "ready" .= ready s,"configured" .= configured s,"stopped" .= stopped s,"follow" .= followSource s,
    "threadId" .= thread s,"frame" .= frame s,"source" .= (frame s >>= (field "source" :: Value -> Maybe Value)),
-   "capabilities" .= capabilities s,"breakpoints" .=
+   "watchCount" .= M.size (watchExpressions s),"capabilities" .= capabilities s,"breakpoints" .=
      [object ["source" .= src,"line" .= bpLine bp,"verified" .= flag "verified" (bpResult bp),
        "pending" .= (bpResult bp==Null),"result" .= bpResult bp,
        "sourceModified" .= M.findWithDefault False key (breakModified s)] | (key,src,bp)<-allBreakpoints s],
@@ -478,6 +483,16 @@ perform runtime@(Debugger ref clock _ _) core action values d = do
       modifyIORef' ref (\state -> (invalidate state) {ready=False,configured=False,pending=M.empty,disconnectAt=Just now})
       send runtime Detach "disconnect" (object ["terminateDebuggee" .= (managed s || fst (startRequest s)=="launch")])
       pure (clearDialog d) {status="Disconnecting debugger..."}
+    (action,button:expression:_) | Just suffix<-T.stripPrefix "source-watch:" action,Just ident<-readMaybe (T.unpack suffix),Just (current,captured)<-sourceWatchDialog s,ident==current->do
+      modifyIORef' ref (\state->state {sourceWatchDialog=Nothing})
+      valid<-sourceCurrent captured d
+      pureResult<-if button/="0" then pure d else if not valid then pure d {status="Watch source changed; open its context menu again."}
+        else if T.null (T.strip expression) || T.length expression>4096 || T.any (=='\0') expression then pure d {status="Watch expression must contain 1–4096 characters without NUL."}
+        else if M.size (watchExpressions s)>=128 then pure d {status="Watch limit reached; remove a watch first."}
+        else do
+          modifyIORef' ref (\state->state {watchExpressions=M.insert (nextWatch state) expression (watchExpressions state),nextWatch=nextWatch state+1})
+          pure d {status="Watch added."}
+      pure pureResult
     ("breakpoint",_) -> toggleBreakpoint runtime d
     ("breakpoints",_) -> do
       let rows=[object ["key" .= key,"line" .= bpLine bp] | (key,_,bp)<-allBreakpoints s]
@@ -592,7 +607,7 @@ initializeSession runtime@(Debugger ref _ _ _) directory c address requestName a
   s<-readIORef ref
   stopTransport runtime s
   writeIORef ref emptyState {client=Just c,generation=generation s+1,root=directory,endpoint=address,
-    followSource=followSource s,sidebarVisible=followSource s,sidebarSession=generation s+1,breakpoints=persistentBreakpoints s,breakModified=breakModified s,startRequest=(requestName,arguments),managed=owned,adapterId=adapter}
+    watchExpressions=watchExpressions s,nextWatch=nextWatch s,followSource=followSource s,sidebarVisible=followSource s,sidebarSession=generation s+1,breakpoints=persistentBreakpoints s,breakModified=breakModified s,startRequest=(requestName,arguments),managed=owned,adapterId=adapter}
   pure (automaticDesktop s d) {status="Connecting debugger..."}
 
 debuggerConsoles :: Debugger -> C.Consoles
@@ -1016,6 +1031,45 @@ position selected d
   | otherwise = d
   where row=integer "line" selected
 
+sourceCurrent :: DebugSourceRequest -> Desktop -> IO Bool
+sourceCurrent request d=case (activeWindow d,activeDocument d) of
+  (Just window,Just doc) | windowFocused d window, windowId window==debugSourceWindow request,
+      bufferId window==debugSourceBuffer request,selection window==debugSourceSelection request,
+      (filePath <$> documentFile doc)==debugSourceFile request,not (byteMode (documentBuffer doc))->
+    versionCurrent (debugSourceVersion request) (documentBuffer doc)
+  _->pure False
+
+sourceAction :: Debugger -> DebugSourceRequest -> Desktop -> IO Desktop
+sourceAction runtime@(Debugger ref _ _ _) request d=do
+  valid<-sourceCurrent request d
+  state<-readIORef ref
+  let source=case debugSourceCanonical request of
+        Just path->Just (object ["path" .= path])
+        Nothing->if configured state && isJust (client state) && endedAt state==Nothing && disconnectAt state==Nothing
+          then M.lookup (debugSourceBuffer request) (sources state) else Nothing
+  if not valid || dialog d/=Nothing then pure d {status="Source action expired."} else case source of
+    Nothing->pure d {status="Buffer has no live debugger source."}
+    Just captured->case debugSourceOperation request of
+      ToggleSourceBreakpoint->toggleBreakpointSource runtime captured (debugSourceRow request) (debugSourceModified request) d
+      AddSourceWatch->do
+        let ident=choiceId state+1
+            expression=fromMaybe "" (debugSourceExpression request)
+        modifyIORef' ref (\current->current {choiceId=ident,sourceWatchDialog=Just (ident,request)})
+        pure d {status="Enter a watch expression.",dialog=Just (Dialog "Add watch" (DebugDialog ("source-watch:"<>tshow ident))
+          [SelectedInput "Expression" expression (Selection 0 (T.length expression))] 0 ["Add","Cancel"]
+          ["Expression evaluation can execute program code."])}
+
+toggleBreakpointSource :: Debugger -> Value -> Int -> Bool -> Desktop -> IO Desktop
+toggleBreakpointSource runtime@(Debugger ref _ _ _) source row modified d=do
+  state<-readIORef ref
+  let key=sourceKey source
+      old=maybe [] snd (M.lookup key (breakpoints state))
+      removing=any ((==row).bpLine) old
+      points=if removing then filter ((/=row).bpLine) old else old++[Breakpoint row Null]
+  modifyIORef' ref (\current->current {breakpoints=M.insert key (source,points) (breakpoints current),breakModified=M.insert key modified (breakModified current)})
+  when (configured state) (sendBreakpoints runtime key source points)
+  pure d {status=if removing then "Breakpoint removed." else "Breakpoint requested at line "<>tshow row<>if modified then "; source has unsaved changes." else "."}
+
 toggleBreakpoint :: Debugger -> Desktop -> IO Desktop
 toggleBreakpoint runtime@(Debugger ref _ _ _) d = do
   s<-readIORef ref
@@ -1027,15 +1081,8 @@ toggleBreakpoint runtime@(Debugger ref _ _ _) d = do
         Nothing -> pure (M.lookup (bufferId window) (sources s))
       case source of
         Nothing -> pure d {status="Choose a source file or debugger source first."}
-        Just src -> do
-          let key=sourceKey src
-              row=1+fst (lineColumn (contents (documentBuffer doc)) (caret (selection window)))
-              old=maybe [] snd (M.lookup key (breakpoints s))
-              removing=any ((==row).bpLine) old
-              points=if removing then filter ((/=row).bpLine) old else old++[Breakpoint row Null]
-          modifyIORef' ref (\state -> state {breakpoints=M.insert key (src,points) (breakpoints state),breakModified=M.insert key (dirty (documentBuffer doc)) (breakModified state)})
-          when (configured s) (sendBreakpoints runtime key src points)
-          pure d {status=if removing then "Breakpoint removed." else "Breakpoint requested at line "<>tshow row<>if dirty (documentBuffer doc) then "; source has unsaved changes." else "."}
+        Just src ->toggleBreakpointSource runtime src
+          (1+fst (bufferLineColumn (documentBuffer doc) (caret (selection window)))) (dirty (documentBuffer doc)) d
     _ -> pure d {status="Choose a source file first."}
 
 sendBreakpoints :: Debugger -> Text -> Value -> [Breakpoint] -> IO ()

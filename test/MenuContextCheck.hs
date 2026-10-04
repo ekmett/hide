@@ -12,12 +12,15 @@ import qualified Data.Map.Strict as M
 import qualified Data.Text as T
 import qualified Graphics.Vty as V
 import System.Directory
-import System.FilePath ((</>))
+import System.FilePath ((</>),takeDirectory)
 import System.IO
 import System.Timeout (timeout)
 import qualified Hide.Buffer as B
 import Hide.Buffer (newBuffer,contents,caret,bufferContent,contentLineOffset)
 import Hide.Commands (configuredBindings)
+import Hide.Debugger (withDebugger,debuggerEffects,debuggerTool)
+import Hide.DebuggerSidebarTypes
+import Hide.Plugin.BufferHost (captureVersion)
 import Hide.DocsMCP
 import Hide.Files (FileState(..))
 import Hide.GuestAccess (beginGuestInput,validateGuestEffects)
@@ -40,7 +43,7 @@ checks=sourceSelectionCheck >> (bracket temporary removePathForcibly $ \root->wi
       path=root </> "Main.hs"
       problem=Diagnostic path Nothing 1 2 1 "problem"
       pollUntil predicate original=do
-        let loop d=do next<-tickMenus host d; if predicate next then pure next else threadDelay 1000 >> loop next
+        let loop d=do next<-tickMenus host (\current _->pure (False,current)) d; if predicate next then pure next else threadDelay 1000 >> loop next
         timeout 5000000 (loop original) >>= maybe (error "context worker did not complete") pure
       run d requests=do
         (_,pending)<-menuEffects host (\_ _->error "context action missed scoped worker") d requests
@@ -51,11 +54,15 @@ checks=sourceSelectionCheck >> (bracket temporary removePathForcibly $ \root->wi
       opaque=source {buffers=M.map (\doc->doc {documentBuffer=(documentBuffer doc) {B.undoStack=error "navigation retained Undo",B.redoStack=error "navigation retained Redo"}}) (buffers source)}
       sourceId=maybe (error "missing source") bufferId (activeWindow source)
       pane=(setDiagnostics [problem] (setProblemsVisible True opaque)) {problemsFocused=True,contributedMenus=metadata,menusActive=True,agentMenuRefs=menuAgentReferences host}
+      sourcePopup=openContext SourceContext 8 5 source {contributedMenus=metadata,menusActive=True}
       popup=openContext MessagesContext 8 5 pane
       (chosen,requests)=handleEvent (V.EvKey V.KEnter []) popup
       reference=case [Plugin.menuReference item | item<-metadata,Plugin.menuName (Plugin.menuReference item)=="hide.messages.go-to"] of ref:_->ref; _->error "missing Messages contribution"
       target=contextTarget popup
       packet ref=object ["type" .= ("menu"::T.Text),"command" .= Plugin.menuName ref,"registry" .= Plugin.menuEpoch ref,"generation" .= Plugin.menuGeneration ref]
+  sourceActionCheck host metadata path
+  check "source popup exposes registered breakpoint and watch actions"
+    (all (`elem` map fst (contextItemsFor sourcePopup)) ["Toggle breakpoint","Add watch…"])
   check "Messages popup composes the actual registered source action" (requests==[InvokeMenu reference Plugin.HumanMenu target])
   check "Go to source key action resolves the same registry identity" (snd (runCommand GoToMessage pane)==requests)
   check "unselected/empty projection retains popup but disables source navigation"
@@ -169,7 +176,7 @@ checks=sourceSelectionCheck >> (bracket temporary removePathForcibly $ \root->wi
     (\context text->PreparedDocument <$> prepareMarkdown (invocationColumns context) path "" text)
   prepared<-publishMenuFromHost host extension
   check "runtime publication prepares exact bounded metadata" (prepared==Right ())
-  published<-tickMenus host popup
+  published<-tickMenus host (\current _->pure (False,current)) popup
   check "runtime publication closes positional popup and preserves other registrations"
     (contextMenu published==Nothing && menu published==Nothing && all (`elem` map Plugin.menuReference (contributedMenus published)) [reference,extension])
   let contextPopup=openContext MessagesContext 8 5 published
@@ -186,7 +193,7 @@ checks=sourceSelectionCheck >> (bracket temporary removePathForcibly $ \root->wi
     (\context text->PreparedDocument <$> prepareMarkdown (invocationColumns context) path "" text)
   _<-publishMenuFromHost host second
   requestMenuRetirement host extension
-  ordered<-tickMenus host contextPopup
+  ordered<-tickMenus host (\current _->pure (False,current)) contextPopup
   check "ordered deltas cannot clobber intervening registrations"
     (second `elem` map Plugin.menuReference (contributedMenus ordered) && extension `notElem` map Plugin.menuReference (contributedMenus ordered))
   check "withdrawn context packet refuses queued admission" (null (snd (applyInput extensionInput ordered)))
@@ -199,7 +206,7 @@ checks=sourceSelectionCheck >> (bracket temporary removePathForcibly $ \root->wi
   publication<-async (try (publishMenuFromHost host lazyRef) :: IO (Either ErrorCall (Either Plugin.MenuError ())))
   failed<-wait publication
   check "publication caller evaluates lazy metadata before enqueue" (case failed of Left _->True; _->False)
-  unchanged<-tickMenus host ordered
+  unchanged<-tickMenus host (\current _->pure (False,current)) ordered
   check "owner tick receives no failed lazy publication" (lazyRef `notElem` map Plugin.menuReference (contributedMenus unchanged))
   -- A bounded queue backpressures workers and a bounded drain leaves later
   -- deltas for another tick. Direct owner retirement never waits for that queue.
@@ -207,10 +214,10 @@ checks=sourceSelectionCheck >> (bracket temporary removePathForcibly $ \root->wi
     (\context text->PreparedDocument <$> prepareMarkdown (invocationColumns context) path "" text)
   replicateM_ 16 (publishMenuFromHost host second >>= either (error . show) pure)
   _<-publishMenuFromHost host replacement
-  limited<-tickMenus host unchanged
+  limited<-tickMenus host (\current _->pure (False,current)) unchanged
   check "one owner tick bounds publication drain to sixteen deltas"
     (replacement `notElem` map Plugin.menuReference (contributedMenus limited))
-  later<-tickMenus host limited
+  later<-tickMenus host (\current _->pure (False,current)) limited
   check "later tick adopts remaining live publication"
     (replacement `elem` map Plugin.menuReference (contributedMenus later))
   replicateM_ 256 (publishMenuFromHost host second >>= either (error . show) pure)
@@ -222,10 +229,10 @@ checks=sourceSelectionCheck >> (bracket temporary removePathForcibly $ \root->wi
   retired<-maybe (error "owner retirement blocked on full publication queue") pure direct
   check "direct owner withdrawal needs no publication capacity"
     (replacement `notElem` map Plugin.menuReference (contributedMenus retired))
-  resumed<-tickMenus host retired
+  resumed<-tickMenus host (\current _->pure (False,current)) retired
   released<-timeout 1000000 (wait blocked)
   check "bounded owner drain releases waiting producer" (released==Just (Right ()))
-  _<-foldM (\current _->tickMenus host current) resumed [1..17::Int]
+  _<-foldM (\current _->tickMenus host (\current _->pure (False,current)) current) resumed [1..17::Int]
   -- Existing queued work also checks the source contribution lifetime at adoption.
   (_,late)<-menuEffects host (\_ _->error "missing context worker") chosen requests
   requestMenuRetirement host reference
@@ -245,6 +252,85 @@ sourceSelectionCheck=do
       (popup,_)=handleEvent (V.EvMouseDown 3 2 V.BRight []) selected
   unless (fmap selection (activeWindow popup)==Just (B.Selection 0 5))
     (error "source right-click within selection must preserve the captured watch expression")
+  unless (case contextTarget popup of Just target@SourceTarget{}->sourceTargetExpression target==Just "alpha" && sourceTargetRow target==1; _->False)
+    (error "source popup must freeze its selected expression and measured row")
   let (elsewhere,_)=handleEvent (V.EvMouseDown 9 2 V.BRight []) selected
   unless (fmap selection (activeWindow elsewhere)==Just (B.Selection 8 8))
     (error "source right-click outside selection must capture the clicked location")
+
+sourceActionCheck :: MenuHost -> [Plugin.MenuItem] -> FilePath -> IO ()
+sourceActionCheck host metadata path=withDebugger $ \runtime->do
+  let core=debuggerEffects runtime (\_ _->error "source contribution missed debugger owner")
+      base=modifyActive (\w->w {bounds=Rect 0 1 60 20,selection=B.Selection 0 16}) $
+        (addDocument (Just (FileState path Nothing)) (newBuffer "alpha beta\ngamma delta\n") (initialDesktop (80,25)))
+          {contributedMenus=metadata,menusActive=True,agentMenuRefs=menuAgentReferences host}
+      popup d=fst (handleEvent (V.EvMouseDown 3 2 V.BRight []) d)
+      action title d=case lookup title (contextItemsFor d) of Just command->runCommand command d; _->error "source action absent"
+      waitResult d=timeout 5000000 (loop d) >>= maybe (error "source owner did not adopt") pure
+        where loop current=do next<-tickMenus host core current
+                              if status next/="Running menu action…" then pure next else threadDelay 1000 >> loop next
+      queue title d=let (next,effects)=action title (popup d) in snd <$> menuEffects host core next effects
+      run title d=queue title d >>= waitResult
+      inspect d=do (_,finish)<-debuggerTool runtime core d "debug_status" (object []); finish >>= either (error . T.unpack) pure
+      check label yes=unless yes (error label)
+  let captured=popup base
+      (_,breakpointEffects)=action "Toggle breakpoint" captured
+      (_,keyEffects)=runCommand (DebugCommand "breakpoint") captured
+      debugIndex=case findIndex (\(title,_,_)->title=="Debug") menus of Just index->index; _->error "Debug menu missing"
+  check "breakpoint key and popup share exact typed action" (breakpointEffects==keyEffects)
+  check "main Debug breakpoint carries registry stamp" (any (\(MenuItem _ _ command)->case command of RegisteredMenu ref _->Plugin.menuName ref=="hide.debug.toggle-breakpoint"; _->False) (menuItemsFor base debugIndex))
+  sourceRef<-case breakpointEffects of [InvokeMenu ref _ _]->pure ref; _->error "missing source registration"
+  let packet=object ["type" .= ("menu"::T.Text),"command" .= Plugin.menuName sourceRef,"registry" .= Plugin.menuEpoch sourceRef,"generation" .= Plugin.menuGeneration sourceRef]
+  transported<-either error pure (parseEither parseInput packet)
+  check "browser stamped source context reaches exact typed route" (snd (applyInput transported captured)==breakpointEffects)
+  remote<-either error pure (parseRemoteFrame (object (frameMetadata (takeDirectory path) captured++["menuCommands" .= map fst protocolMenuCommands])) (replicate 25 (toJSON ([]::[Value]))))
+  let token=length nativeCommands+maybe (error "native source token missing") id (findIndex ((==sourceRef) . Plugin.menuReference) metadata)
+  check "native source contribution preserves current exact registration" (remoteNativeMenuInput remote 71 [11,token,71]==Just packet && nativeMenuEventFor (nativeCommandsFor captured) 71 [11,token,71]==Just (RegisteredMenu sourceRef False))
+  check "native source contribution refuses stale catalogue event" (remoteNativeMenuInput remote 72 [11,token,71]==Nothing)
+  check "source controls refuse agent origin" (case applyGuestInput transported (beginGuestInput captured) of Left _->True; _->False)
+  let bytes=captured {buffers=M.map (\doc->doc {documentBuffer=(documentBuffer doc) {B.byteMode=True}}) (buffers captured)}
+  check "source controls refuse byte input" (not (commandEnabled bytes (RegisteredMenu sourceRef False)))
+  chosen<-run "Toggle breakpoint" base
+  info<-inspect chosen
+  let breakpointLines=case parseEither (withObject "status" (.:"breakpoints")) info of Right values->[line | value<-values,Right line<-[parseEither (withObject "breakpoint" (.:"line")) value]]; Left _->[] :: [Int]
+  check "breakpoint uses clicked row rather than selection caret" (breakpointLines==[1])
+  queued<-queue "Toggle breakpoint" base
+  let replaced=queued {buffers=M.map (\doc->doc {documentBuffer=newBuffer "alpha beta\ngamma delta\n"}) (buffers queued)}
+  stale<-waitResult replaced
+  check "equal-revision replacement refuses prepared source action" ("changed" `T.isInfixOf` status stale)
+  watch<-run "Add watch…" base
+  prompt<-maybe (error "captured watch dialog missing") pure (dialog watch)
+  check "watch dialog has frozen full selection" (case fields prompt of SelectedInput _ text _:_ ->text=="alpha beta\ngamma"; _->False)
+  let (submitted,effects)=submitDialog 0 prompt watch
+  (_,stored)<-core submitted effects
+  storedInfo<-inspect stored
+  check "watch confirmation stores one bounded expression" (parseEither (withObject "status" (.:"watchCount")) storedInfo==Right (1::Int))
+  check "source controls refuse protected modal input" (not (commandEnabled watch (RegisteredMenu sourceRef False)))
+  later<-run "Add watch…" base
+  laterPrompt<-maybe (error "second watch dialog missing") pure (dialog later)
+  let edited=insertText "x" later
+      (staleSubmission,staleEffects)=submitDialog 0 laterPrompt edited
+  (_,staleWatch)<-core staleSubmission staleEffects
+  staleInfo<-inspect staleWatch
+  check "watch confirmation refuses changed source" (parseEither (withObject "status" (.:"watchCount")) staleInfo==Right (1::Int) && "changed" `T.isInfixOf` status staleWatch)
+  withRegistry $ \registry->do
+    version<-captureVersion (documentBuffer (maybe (error "missing source document") id (activeDocument base)))
+    let target=case contextTarget captured of Just value@SourceTarget{}->value; _->error "missing source capture"
+        request=DebugSourceRequest ToggleSourceBreakpoint (sourceTargetWindow target) (sourceTargetBuffer target) version (sourceTargetSelection target) (sourceTargetFile target) (Just path) 2 Nothing False
+        unit=Codec Null (const (Right ())) (const Null)
+    command<-either (error . show) pure =<< registerCommand registry (CommandDef "example.debug-forged" "Forged" unit unit (\_ ()->pure (Right ())))
+    reference<-either (error . show) pure =<< Plugin.contributeMenu (menuContributions host)
+      (Plugin.MenuDef "example.debug-forged" "context.source" "extensions" 50 "Forged source action" "" False
+        (Plugin.menuAction registry command (const (Right ())) (\_ ()->pure (PreparedDebugSource request))))
+    _<-publishMenuFromHost host reference
+    published<-tickMenus host core base
+    refused<-run "Forged source action" published
+    check "extension cannot authorize protected debugger source reply" ("host-owned contribution" `T.isInfixOf` status refused)
+    _<-retireMenuFromHost host reference published
+    pure ()
+  let forged=modifyActive (\w->w {selection=B.Selection 0 0}) (addReadOnly "Source forged [9]" "alpha" base)
+  refused<-run "Toggle breakpoint" forged
+  check "Source label cannot grant debugger source authority" ("no live debugger source" `T.isInfixOf` status refused)
+  let shown=openContext SourceContext 8 5 forged
+      updated=addReadOnly "Source forged [9]" "beta" shown
+  check "read-only source replacement advances captured revision" (not (contextTargetCurrent updated))
