@@ -1,9 +1,9 @@
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE OverloadedStrings,ScopedTypeVariables #-}
 module TypedBufferReadsCheck (checks) where
 
 import Control.Concurrent (threadDelay,newEmptyMVar,putMVar,takeMVar)
 import Control.Concurrent.Async
-import Control.Exception (bracket,try,evaluate,SomeException)
+import Control.Exception (bracket,try,evaluate,SomeException,IOException,catch,throwIO,finally)
 import Control.Monad (unless,forM)
 import Data.IORef
 import qualified Data.Map.Strict as M
@@ -12,13 +12,22 @@ import qualified Data.Text.IO as TIO
 import GHC.Conc (getAllocationCounter,threadStatus,ThreadStatus(..),BlockReason(..))
 import System.Directory
 import System.FilePath
+import System.IO (hClose)
+import Data.Aeson
+import Data.Aeson.Types (parseMaybe)
+import qualified Data.Aeson.KeyMap as KM
+import Hide.Protocol
+import Hide.Remote
+import Hide.RemoteEndpoint
+import qualified Hide.Session as S
+import Hide.BufferReadCommand (withBufferReadCommands)
 import System.Timeout (timeout)
 import Hide.Buffer
 import Hide.Model
 import Hide.MCPPermissions
 import qualified Hide.Plugin.Buffer as P
 import Hide.Plugin.BufferHost (readerReference)
-import Hide.EditorMCP (builtinTools)
+import Hide.EditorMCP (builtinTools,readBufferTool,editorResponseOnly)
 
 checks :: IO ()
 checks=do
@@ -122,6 +131,35 @@ checks=do
       pure workers
     outcomes<-mapM wait accepted
     check "all accepted ingress replies survive shutdown" (all (either (const True) (const False)) outcomes)
+    withPermissionsAt path builtinTools $ \owner->withBufferReadCommands $ \commands->do
+      session<-randomIdentity
+      endpoint<-sessionEndpoint session
+      let reader=bufferReader owner (pure (Right ()))
+          inspect d _ request=do
+            (next,reply)<-editorResponseOnly builtinTools (readBufferTool commands reader) d request
+            pure (False,next,reply)
+          effects d requests=pure (Exit `elem` requests,d)
+          open attempts=connectEndpoint endpoint `catch` \(err::IOException)->
+            if attempts<=0 then throwIO err else threadDelay 10000 >> open (attempts-1)
+          receive h=timeout 3000000 (readPacket h) >>= maybe (error "typed daemon read timed out") pure
+          readRemote=bracket (open (100::Int)) hClose $ \h->do
+            writePacket h (JsonPacket (object ["type" .= ("inspect"::T.Text),"request" .= object
+              ["jsonrpc" .= ("2.0"::T.Text),"id" .= (1::Int),"method" .= ("tools/call"::T.Text),
+               "params" .= object ["name" .= ("read_buffer"::T.Text),"arguments" .= object ["bufferId" .= ident]]]]))
+            receive h
+          succeeded response=case response of
+            Just (JsonPacket (Object fields))->case KM.lookup "result" fields of
+              Just result->parseMaybe (withObject "tool result" (.: "isError")) result==Just False
+              _->False
+            _->False
+      flip finally (S.forgetSession session) $ withAsync (runRemoteDaemon session 1 effects (tickPermissions owner) inspect base) $ \daemon->do
+        link daemon
+        _<-bracket (open (100::Int)) hClose (const (pure ()))
+        withLocalPeer session True [] $ \peer->do
+          assets<-timeout 3000000 (peerReceive peer)
+          check "typed reader frontend receives assets" (case assets of Just (Just (JsonPacket (Object fields)))->KM.lookup "type" fields==Just (String "assets"); _->False)
+          check "typed read_buffer progresses through daemon owner with attached frontend" . succeeded =<< readRemote
+        check "same typed reader survives frontend detach" . succeeded =<< readRemote
     saved<-newIORef Nothing
     worker<-withPermissionsAt path builtinTools $ \owner->do
       let reader=bufferReader owner (pure (Right ()))
