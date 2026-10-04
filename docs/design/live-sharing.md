@@ -133,8 +133,8 @@ on the host before serialization. Masking pixels in a browser is insufficient.
 The canonical policy owns protected authority paths, credentials/session keys,
 private composers, permission controls and resource-specific visibility. Its path
 classification uses canonical resource provenance, including symlinks and
-adapter-generated documents. The in-progress agent policy consolidation is a
-prerequisite, not a separate guest-only list. Peer views always use this projection,
+adapter-generated documents. Extend the [shared protected-content policy](../agent-tools.md#protected-content-policy),
+not a separate guest-only list. Peer views always use this projection,
 even if the host turns Streamer mode off. Turning it on/off changes the host's
 presentation, never another principal's rights. A hidden buffer stays hidden in
 all of its views. Ordinary private resources can be explicitly shared; authority
