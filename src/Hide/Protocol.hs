@@ -272,7 +272,7 @@ frameMetadata cwd d =
    "menuState" .= [(ident,menuCommandAvailable d cmd) | (ident,cmd)<-protocolMenuCommands],
    "menuContributions" .= [object ["id" .= Plugin.menuName reference,"registry" .= Plugin.menuEpoch reference,"generation" .= Plugin.menuGeneration reference,
       "slot" .= Plugin.menuSlot item,"group" .= Plugin.menuGroup item,"order" .= Plugin.menuOrder item,
-      "title" .= Plugin.menuTitle item,"key" .= Plugin.menuKey item,"enabled" .= menuCommandAvailable d (contributionCommand d item)]
+      "title" .= Plugin.menuTitle item,"key" .= menuShortcut d (MenuItem (Plugin.menuTitle item) (Plugin.menuKey item) (contributionCommand d item)),"enabled" .= menuCommandAvailable d (contributionCommand d item)]
       | item<-contributedMenus d,let reference=Plugin.menuReference item]]
   where cursor=case V.picCursor (renderDesktop d) of V.Cursor x y -> Just (x,y); _ -> Nothing
 

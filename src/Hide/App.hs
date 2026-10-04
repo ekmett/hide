@@ -21,7 +21,7 @@ import Hide.Defaults
 import qualified Hide.Plugin.Menu as PluginMenu
 import Hide.MenuCommands
 import Hide.Keybindings
-import Hide.Commands (configuredBindings)
+import Hide.Commands (configuredBindings, contributedBindingCommands)
 import Hide.MCPPermissions
 import Hide.ClipboardMCP
 import Hide.Links (followLink)
@@ -156,7 +156,6 @@ runEditor args = do
     defaultsJSON<-readEditorDefaultsFor configBase >>= either (die . T.unpack) pure
     defaults<-either die pure (parseEither parseDefaults defaultsJSON)
     keys<-readKeybindingsFor configBase >>= either (die . T.unpack) pure
-    keymap<-either (die . T.unpack) pure (configuredBindings keys)
     let backendDefault=backendEnvironment <|> defaultBackend defaults
         scaleDefault=scaleEnvironment <|> (show <$> defaultScale defaults)
         appearanceDefault=appearanceEnvironment <|> defaultAppearance defaults
@@ -244,8 +243,9 @@ runEditor args = do
         `catch` (\err -> writeIORef wasInterrupted True >> interrupted err)
         `catch` (\FrontendDetached -> writeIORef wasInterrupted True)) `finally` report
     else withSidebarCommands $ \sidebarHost -> do
+        initialKeymap<-if Snapshot `elem` flags || Html `elem` flags then either (die . T.unpack) pure (configuredBindings [] keys) else pure M.empty
         let initial=if Demo `elem` flags then addDocument Nothing (newBuffer (activeText demoDesktop)) (initialDesktop dimensions) else initialDesktop dimensions
-            configured=(fst (handleEvent (uncurry V.EvResize dimensions) initial)) {keyBindings=keymap,macKeySymbols=fromMaybe False (defaultMacKeySymbols defaults),defaultBufferView=fromMaybe CurrentView (defaultView defaults),chatSubmit=fromMaybe QuerySubmit (defaultChatSubmit defaults),appearance=colorMode,systemDark=maybe True (not . (`elem` ["7","15"]) . reverse . takeWhile (/=';') . reverse) terminalColors,wordStar=flagBool WordStar StandardKeys (fromMaybe (wordStar initial) (defaultWordStar defaults)),crtFilter=flagBool CRT NoCRT (fromMaybe (crtFilter initial) (defaultCRT defaults)),materialIcons=flagBool MaterialIcons ClassicIcons (fromMaybe (materialIcons initial) (defaultMaterialIcons defaults)),blinkCursor=fromMaybe (fromMaybe (blinkCursor initial) (defaultBlinkCursor defaults)) (lastMaybe [value | CursorBlink value<-flags]),pixelateUnicode=fromMaybe (fromMaybe (pixelateUnicode initial) (defaultPixelateUnicode defaults)) (lastMaybe [value | Pixelate value<-flags]),streamerMode=fromMaybe (fromMaybe False (defaultStreamerMode defaults)) (lastMaybe [value | Streamer value<-flags]),videoMode=if backend == Terminal then Nothing else Just screenMode}
+            configured=(fst (handleEvent (uncurry V.EvResize dimensions) initial)) {keyBindings=initialKeymap,macKeySymbols=fromMaybe False (defaultMacKeySymbols defaults),defaultBufferView=fromMaybe CurrentView (defaultView defaults),chatSubmit=fromMaybe QuerySubmit (defaultChatSubmit defaults),appearance=colorMode,systemDark=maybe True (not . (`elem` ["7","15"]) . reverse . takeWhile (/=';') . reverse) terminalColors,wordStar=flagBool WordStar StandardKeys (fromMaybe (wordStar initial) (defaultWordStar defaults)),crtFilter=flagBool CRT NoCRT (fromMaybe (crtFilter initial) (defaultCRT defaults)),materialIcons=flagBool MaterialIcons ClassicIcons (fromMaybe (materialIcons initial) (defaultMaterialIcons defaults)),blinkCursor=fromMaybe (fromMaybe (blinkCursor initial) (defaultBlinkCursor defaults)) (lastMaybe [value | CursorBlink value<-flags]),pixelateUnicode=fromMaybe (fromMaybe (pixelateUnicode initial) (defaultPixelateUnicode defaults)) (lastMaybe [value | Pixelate value<-flags]),streamerMode=fromMaybe (fromMaybe False (defaultStreamerMode defaults)) (lastMaybe [value | Streamer value<-flags]),videoMode=if backend == Terminal then Nothing else Just screenMode}
         localPaths<-if daemon/=Nothing then mapM expandRemoteHome paths else pure paths
         (_,loaded)<-applyEffects configured (map ReadPath localPaths)
         cwd<-getCurrentDirectory
@@ -268,81 +268,84 @@ runEditor args = do
           mapM_ (setEnv "THC_EDIT_SESSION") daemon
           font<-Font.loadFont
           let specs=builtinTools++debugTools++chatTools++toolingTools++workspaceTools++fileTools++testsTools++historyTools++runtimeTools++gitTools++controlTools++environmentTools++clipboardTools++docsTools++[screenTool]
-          withPermissions (specs++agentTools) $ \permissions -> withBufferReadCommands $ \bufferCommands -> withBufferDiffCommands $ \diffCommands -> withDocsCommands $ \docsCommands -> withMenuCommands docsCommands $ \menuHost -> withConversationAt (startingDirectory protectedDesktop) $ \conversation -> withDebuggerConsoles (let (_,consoles,_)=conversationServices conversation in consoles) $ \debugger -> withTooling $ \tooling -> withGitOperations $ \gitOperations -> withReconciliation $ \reconciliation -> withProjectBrowser $ \projectBrowser -> withHighlighting $ \highlighting -> withKeybindings $ \keybindings -> withAutocomplete (startingDirectory protectedDesktop) $ \autocomplete -> do
+          withPermissions (specs++agentTools) $ \permissions -> withBufferReadCommands $ \bufferCommands -> withBufferDiffCommands $ \diffCommands -> withDocsCommands $ \docsCommands -> withMenuCommands docsCommands $ \menuHost -> withConversationAt (startingDirectory protectedDesktop) $ \conversation -> withDebuggerConsoles (let (_,consoles,_)=conversationServices conversation in consoles) $ \debugger -> withTooling $ \tooling -> withGitOperations $ \gitOperations -> withReconciliation $ \reconciliation -> withProjectBrowser $ \projectBrowser -> withHighlighting $ \highlighting -> withAutocomplete (startingDirectory protectedDesktop) $ \autocomplete -> do
             contributions<-PluginMenu.menuSnapshot (menuContributions menuHost)
-            let liveDesktop=protectedDesktop {contributedMenus=contributions,agentMenuRefs=menuAgentReferences menuHost,menusActive=True}
-            exiting<-newIORef False
-            let runtimeEffects=sidebarEffects sidebarHost (menuEffects menuHost (keybindingEffects keybindings (autocompleteEffects autocomplete (projectBrowserEffects projectBrowser (gitOperationEffects gitOperations (debuggerEffects debugger (conversationEffects conversation (reconciliationEffects reconciliation (toolingEffects tooling applyEffects)))))))))
-                core d pending=foldM step (False,d) pending
-                  where
-                    step result@(True,_) _=pure result
-                    step (_,current) (SetScreenMode mode)=pure (False,(resizeScreenMode (modeSize mode) current) {videoMode=Just mode})
-                    step (_,current) effect=do
-                      result@(quit,_)<-runtimeEffects current [effect]
-                      when quit (writeIORef exiting True)
-                      pure result
-                guestCore d pending=validateGuestEffects d pending >> core d pending
-                effects d pending=do
-                  writeIORef exiting False
-                  (quit,updated)<-policyEffects permissions core d pending
-                  approvedExit<-readIORef exiting
-                  pure (quit || approvedExit,updated)
-                tick d=tickProjectBrowser projectBrowser d >>= tickGitOperations gitOperations applyEffects >>= tickTooling tooling applyEffects >>= tickReconciliation reconciliation (sidebarEffects sidebarHost applyEffects) >>= tickConversation conversation >>= tickDebugger debugger (toolingEffects tooling applyEffects) >>= tickPermissions permissions >>= tickHighlighting highlighting >>= tickAutocomplete autocomplete >>= tickKeybindings keybindings >>= tickMenus menuHost >>= tickSidebar sidebarHost
-                inspectTool d name parameters
-                  | name `elem` ["list_windows","list_buffers","read_buffer","read_selection"] = pure (d,pure (builtinTool d name parameters))
-                  | name `elem` chatToolNames = chatTool conversation d name parameters
-                  | name `elem` toolingToolNames = toolingTool tooling guestCore d name parameters
-                  | name `elem` workspaceToolNames = workspaceTool guestCore d name parameters
-                  | name `elem` fileToolNames = fileTool guestCore d name parameters
-                  | name `elem` testsToolNames = testsTool conversation d name parameters
-                  | name `elem` historyToolNames = historyTool d name parameters
-                  | name `elem` runtimeToolNames = runtimeTool conversation d name parameters
-                  | name `elem` gitToolNames = gitTool gitOperations d name parameters
-                  | name=="clipboard_write" = clipboardTool d parameters
-                  | name `elem` docsToolNames = docsTool docsCommands d name parameters
-                  | name `elem` environmentToolNames = pure (d,environmentTool (startingDirectory d) name parameters)
-                  | name `elem` controlToolNames = controlTool guestCore d name parameters
-                  | name=="editor_screen" = pure (d,case parseEither (withObject "screen" (\o -> o .:? "image" .!= False)) parameters of
-                      Left err -> pure (Left (T.pack err))
-                      Right image -> capture font d image)
-                  | otherwise = debuggerTool debugger guestCore d name parameters
-                inspect d token request=do
-                  writeIORef exiting False
-                  let agents=conversationAgents conversation
-                      hub=AR.agentHub agents
-                      reject=pure (d,pure (Just (rpcError (fromMaybe Null (parseMaybe (withObject "request" (.: "id")) request)) (-32600) "Invalid or inactive agent connection.")))
-                  let permitted callback current name parameters
-                        | name=="read_buffer" = readBufferTool bufferCommands (bufferReader permissions currentCaller) current name parameters
-                        | name=="buffer_apply_diff" = bufferDiffTool diffCommands (bufferEditor permissions currentCaller) current name parameters
-                        | otherwise = permissionCall permissions callback current name parameters
-                      currentCaller=case token of
-                        Nothing->pure (Right ())
-                        Just secret->fmap (() <$) (resolveActiveAgentAccess (AR.agentAccess agents) hub secret)
-                  response<-case token of
-                    Nothing -> editorResponseWith specs (permitted inspectTool) d request
-                    Just secret | secret==autocompleteToken autocomplete -> editorResponseOnly CompletionACP.completionTools (\current name parameters -> pure (current,autocompleteTool autocomplete name parameters)) d request
-                    Just secret -> do
-                      bound<-resolveAgentAccess (AR.agentAccess agents) secret
-                      case bound of
-                        Nothing -> reject
-                        Just ident -> do
-                          active<-AH.statusAgent hub (AH.Agent ident) ident
-                          case active >>= maybe (Left "Unknown workspace.") Right . parseMaybe (withObject "agent" (.: "cwd")) of
-                            Left _ -> reject
-                            Right root -> do
-                              let dispatch current name parameters
-                                    | name `elem` agentToolNames = pure (current,agentTool hub (AH.Agent ident) root name parameters)
-                                    | otherwise = inspectTool current name parameters
-                                  -- Worktree agents reach this endpoint only for
-                                  -- coordination. Their editor tools use their own session.
-                                  visible=if ident==AR.primaryAgent agents then specs++agentTools else agentTools
-                              editorResponseOnly visible (permitted dispatch) d request
-                  let (updated,finish)=response
-                  quit<-readIORef exiting
-                  pure (quit,updated,finish)
-            case daemon of
-              Just sid -> runRemoteDaemonWithStartup (AR.activateAgentCheckpoint (conversationAgents conversation)) sid scale effects tick inspect liveDesktop
-              Nothing -> die "Missing session process identity."
+            let liveBase=protectedDesktop {contributedMenus=contributions,agentMenuRefs=menuAgentReferences menuHost,menusActive=True}
+            keymap<-either (die . T.unpack) pure (configuredBindings (contributedBindingCommands liveBase) keys)
+            let liveDesktop=liveBase {keyBindings=keymap}
+            withKeybindings keys (contributedBindingCommands liveBase) $ \keybindings -> do
+              exiting<-newIORef False
+              let runtimeEffects=sidebarEffects sidebarHost (menuEffects menuHost (keybindingEffects keybindings (autocompleteEffects autocomplete (projectBrowserEffects projectBrowser (gitOperationEffects gitOperations (debuggerEffects debugger (conversationEffects conversation (reconciliationEffects reconciliation (toolingEffects tooling applyEffects)))))))))
+                  core d pending=foldM step (False,d) pending
+                    where
+                      step result@(True,_) _=pure result
+                      step (_,current) (SetScreenMode mode)=pure (False,(resizeScreenMode (modeSize mode) current) {videoMode=Just mode})
+                      step (_,current) effect=do
+                        result@(quit,_)<-runtimeEffects current [effect]
+                        when quit (writeIORef exiting True)
+                        pure result
+                  guestCore d pending=validateGuestEffects d pending >> core d pending
+                  effects d pending=do
+                    writeIORef exiting False
+                    (quit,updated)<-policyEffects permissions core d pending
+                    approvedExit<-readIORef exiting
+                    pure (quit || approvedExit,updated)
+                  tick d=tickProjectBrowser projectBrowser d >>= tickGitOperations gitOperations applyEffects >>= tickTooling tooling applyEffects >>= tickReconciliation reconciliation (sidebarEffects sidebarHost applyEffects) >>= tickConversation conversation >>= tickDebugger debugger (toolingEffects tooling applyEffects) >>= tickPermissions permissions >>= tickHighlighting highlighting >>= tickAutocomplete autocomplete >>= tickKeybindings keybindings >>= tickMenus menuHost >>= tickSidebar sidebarHost
+                  inspectTool d name parameters
+                    | name `elem` ["list_windows","list_buffers","read_buffer","read_selection"] = pure (d,pure (builtinTool d name parameters))
+                    | name `elem` chatToolNames = chatTool conversation d name parameters
+                    | name `elem` toolingToolNames = toolingTool tooling guestCore d name parameters
+                    | name `elem` workspaceToolNames = workspaceTool guestCore d name parameters
+                    | name `elem` fileToolNames = fileTool guestCore d name parameters
+                    | name `elem` testsToolNames = testsTool conversation d name parameters
+                    | name `elem` historyToolNames = historyTool d name parameters
+                    | name `elem` runtimeToolNames = runtimeTool conversation d name parameters
+                    | name `elem` gitToolNames = gitTool gitOperations d name parameters
+                    | name=="clipboard_write" = clipboardTool d parameters
+                    | name `elem` docsToolNames = docsTool docsCommands d name parameters
+                    | name `elem` environmentToolNames = pure (d,environmentTool (startingDirectory d) name parameters)
+                    | name `elem` controlToolNames = controlTool guestCore d name parameters
+                    | name=="editor_screen" = pure (d,case parseEither (withObject "screen" (\o -> o .:? "image" .!= False)) parameters of
+                        Left err -> pure (Left (T.pack err))
+                        Right image -> capture font d image)
+                    | otherwise = debuggerTool debugger guestCore d name parameters
+                  inspect d token request=do
+                    writeIORef exiting False
+                    let agents=conversationAgents conversation
+                        hub=AR.agentHub agents
+                        reject=pure (d,pure (Just (rpcError (fromMaybe Null (parseMaybe (withObject "request" (.: "id")) request)) (-32600) "Invalid or inactive agent connection.")))
+                    let permitted callback current name parameters
+                          | name=="read_buffer" = readBufferTool bufferCommands (bufferReader permissions currentCaller) current name parameters
+                          | name=="buffer_apply_diff" = bufferDiffTool diffCommands (bufferEditor permissions currentCaller) current name parameters
+                          | otherwise = permissionCall permissions callback current name parameters
+                        currentCaller=case token of
+                          Nothing->pure (Right ())
+                          Just secret->fmap (() <$) (resolveActiveAgentAccess (AR.agentAccess agents) hub secret)
+                    response<-case token of
+                      Nothing -> editorResponseWith specs (permitted inspectTool) d request
+                      Just secret | secret==autocompleteToken autocomplete -> editorResponseOnly CompletionACP.completionTools (\current name parameters -> pure (current,autocompleteTool autocomplete name parameters)) d request
+                      Just secret -> do
+                        bound<-resolveAgentAccess (AR.agentAccess agents) secret
+                        case bound of
+                          Nothing -> reject
+                          Just ident -> do
+                            active<-AH.statusAgent hub (AH.Agent ident) ident
+                            case active >>= maybe (Left "Unknown workspace.") Right . parseMaybe (withObject "agent" (.: "cwd")) of
+                              Left _ -> reject
+                              Right root -> do
+                                let dispatch current name parameters
+                                      | name `elem` agentToolNames = pure (current,agentTool hub (AH.Agent ident) root name parameters)
+                                      | otherwise = inspectTool current name parameters
+                                    -- Worktree agents reach this endpoint only for
+                                    -- coordination. Their editor tools use their own session.
+                                    visible=if ident==AR.primaryAgent agents then specs++agentTools else agentTools
+                                editorResponseOnly visible (permitted dispatch) d request
+                    let (updated,finish)=response
+                    quit<-readIORef exiting
+                    pure (quit,updated,finish)
+              case daemon of
+                Just sid -> runRemoteDaemonWithStartup (AR.activateAgentCheckpoint (conversationAgents conversation)) sid scale effects tick inspect liveDesktop
+                Nothing -> die "Missing session process identity."
 
   where
     lastMaybe []=Nothing

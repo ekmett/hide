@@ -312,13 +312,19 @@ window.addEventListener('keydown',e=>{
  const names={ArrowUp:'Up',ArrowDown:'Down',ArrowLeft:'Left',ArrowRight:'Right',' ':'Space',Esc:'Escape'};
  const chord=[e.ctrlKey?'Ctrl':null,e.metaKey?'Cmd':null,e.altKey?'Alt':null,e.shiftKey?'Shift':null,names[key]|| (key.length===1?key.toUpperCase():key)].filter(Boolean).join('+');
  const action=frame?.bindings?.find(([candidate])=>candidate===chord)?.[1];
+ // An inert contributed owner consumes its chord across publication/map changes.
+ if(action===''){e.preventDefault();return;}
  // Only a matching default clipboard action may delegate its keyboard gesture
  // to the browser clipboard event. Unbinding/remapping suppresses that default.
  const nativeClipboard={c:'hide.edit.copy',x:'hide.edit.cut',v:'hide.edit.paste'}[key.toLowerCase()];
  if(control&&!e.altKey&&!e.shiftKey&&nativeClipboard&&action===nativeClipboard)return;
  // Modal editing keeps its platform clipboard shortcuts and authority checks.
  if(control&&!e.altKey&&!e.shiftKey&&!frame?.bindingsActive&&nativeClipboard){e.preventDefault();command(nativeClipboard);return;}
- e.preventDefault();cursorEpoch=performance.now();send({type:'key',key,mods:mods(e)});return;
+ e.preventDefault();cursorEpoch=performance.now();
+ const contribution=action&&frame?.menuContributions?.find(item=>item.id===action&&item.key);
+ if(contribution)send({type:'menu',command:contribution.id,registry:contribution.registry,generation:contribution.generation});
+ else send({type:'key',key,mods:mods(e)});
+ return;
 });
 window.addEventListener('keyup',e=>send({type:'modifiers',mods:mods(e)}));
 input.addEventListener('compositionstart',()=>{composing=true;});
