@@ -115,7 +115,7 @@ data ContextKind = ToolchainContext [(Text,Command)] | LinkContext Command | She
 -- Reconcile reload guarantees old+1, and checked edits/Git reload derive their
 -- replacement from the original buffer. Read-only transcript/output replacement
 -- may restart revisions and is never an editable SourceContext target.
-data ContextTarget = SourceTarget Int Int Int Selection | ConversationTarget Text | UnavailableSourceTarget deriving (Eq,Show)
+data ContextTarget = SourceTarget Int Int Int Selection | ConversationTarget Text | MessagesTarget Integer Int FilePath Int Int | UnavailableMessagesTarget | UnavailableSourceTarget deriving (Eq,Show)
 
 data LanguageAction = TypeInfo | FindDefinition | Completions | ShowProblems | RestartLanguage | RenameAt Text | RequestCodeActions | ApplyCodeAction Int Int Text deriving (Eq,Show)
 data Completion = Completion Text [(Int,Int,Text)] deriving (Eq,Show)
@@ -198,6 +198,7 @@ data Desktop = Desktop
   , keyBindings :: M.Map Bindings.BindingContext (Bindings.Bindings Command)
   , contributedMenus :: [Plugin.MenuItem], agentMenuRefs :: [Plugin.MenuRef], menusActive :: Bool
   , contextTarget :: Maybe ContextTarget
+  , diagnosticsGeneration :: !Integer
   } deriving (Eq,Show)
 
 data MenuItem = MenuItem Text Text Command deriving (Eq,Show)
@@ -475,7 +476,7 @@ menuRect d i = Rect (min x (max 0 (sw-w))) 1 w (length (menuItemsFor d i)+2)
         w = min sw (maximum [T.length t + keyLabelWidth (menuShortcut d entry) + 5 + (case command of SetBufferView _ -> 4; _ -> 0) | entry@(MenuItem t _ command) <- menuItemsFor d i])
 
 initialDesktop :: (Int,Int) -> Desktop
-initialDesktop size = Desktop size [] M.empty 1 Nothing Nothing Nothing "" Nothing False Nothing "" Nothing "" Nothing "" False Nothing Nothing Nothing "" Nothing Nothing Nothing [] False 0 0 False Nothing 0 0 Nothing SourceContext Nothing (newBuffer "") (Selection 0 0) True False False 0 True False False False Nothing Nothing [] 8 Nothing [] False SystemMode True [] Nothing [] Nothing [] False Nothing "" M.empty False (0,Nothing) [] Nothing CurrentView QuerySubmit Nothing 0 M.empty Nothing False (newBuffer "") (Selection 0 0) True False M.empty [] [] False Nothing
+initialDesktop size = Desktop size [] M.empty 1 Nothing Nothing Nothing "" Nothing False Nothing "" Nothing "" Nothing "" False Nothing Nothing Nothing "" Nothing Nothing Nothing [] False 0 0 False Nothing 0 0 Nothing SourceContext Nothing (newBuffer "") (Selection 0 0) True False False 0 True False False False Nothing Nothing [] 8 Nothing [] False SystemMode True [] Nothing [] Nothing [] False Nothing "" M.empty False (0,Nothing) [] Nothing CurrentView QuerySubmit Nothing 0 M.empty Nothing False (newBuffer "") (Selection 0 0) True False M.empty [] [] False Nothing 0
 
 activeWindow :: Desktop -> Maybe Window
 activeWindow d = listToMaybe (filter (windowVisible d) (windows d))
@@ -1776,6 +1777,9 @@ captureContextTarget kind d = case kind of
   SourceContext -> source
   ChangeContext{} -> source
   AgentContext{} -> Just (ConversationTarget (conversationTarget d))
+  MessagesContext -> Just $ case drop (problemsSelected d) (diagnostics d) of
+    problem:_ | messagesOwner d -> MessagesTarget (diagnosticsGeneration d) (problemsSelected d) (diagnosticPath problem) (diagnosticRow problem) (diagnosticColumn problem)
+    _ -> UnavailableMessagesTarget
   _ -> Nothing -- These actions already carry arguments or have session scope.
   where
     source=Just $ case (activeWindow d,activeDocument d) of
@@ -1783,11 +1787,16 @@ captureContextTarget kind d = case kind of
         SourceTarget (windowId w) (bufferId w) (revision (documentBuffer doc)) (selection w)
       _ -> UnavailableSourceTarget
 
+messagesOwner :: Desktop -> Bool
+messagesOwner d=messagesDisplayed d && problemsFocused d && not (maybe False treeFocused (sideTree d))
+
 contextTargetCurrent :: Desktop -> Bool
 contextTargetCurrent d = case contextTarget d of
   Nothing -> True
   Just (ConversationTarget target) -> conversationTarget d==target
   Just target@SourceTarget{} -> captureContextTarget SourceContext d==Just target
+  Just (MessagesTarget generation index _ _ _) -> messagesOwner d && diagnosticsGeneration d==generation && problemsSelected d==index
+  Just UnavailableMessagesTarget -> False
   Just UnavailableSourceTarget -> False
 
 gitCountText :: Int -> Text
@@ -2675,6 +2684,12 @@ copyMessages [] d = (d {status="No messages to copy."},[])
 copyMessages issues d = (d {clipboard=T.intercalate "\n\n" (map format issues),clipboardCode=Nothing,status="Messages copied."},[])
   where format issue=(case diagnosticSeverity issue of 1 -> "Error "; 2 -> "Warning "; 3 -> "Info "; _ -> "Hint ")<>
           T.pack (diagnosticPath issue)<>":"<>T.pack (show (diagnosticRow issue+1))<>":"<>T.pack (show (diagnosticColumn issue+1))<>" "<>diagnosticMessage issue
+
+-- | Publish a replacement diagnostic projection with a fresh popup lifetime.
+-- Even an equal-looking refresh invalidates captured actions; no payload equality
+-- or message scanning is needed to check their currentness.
+setDiagnostics :: [Diagnostic] -> Desktop -> Desktop
+setDiagnostics values d=d {diagnostics=values,diagnosticsGeneration=diagnosticsGeneration d+1}
 
 chooseProblem :: Int -> Desktop -> Desktop
 chooseProblem index d = d {problemsSelected=chosen,problemsScroll=max 0 (min chosen (max (problemsScroll d) (chosen-visible+1)))}

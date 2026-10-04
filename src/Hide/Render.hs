@@ -77,6 +77,7 @@ data RenderState = RenderState
   , keyAgentMenuRefs :: [Plugin.MenuRef]
   , keyMenusActive :: Bool
   , keyContextTarget :: Maybe ContextTarget
+  , keyDiagnosticsGeneration :: Integer
   , keyProblemsVisible :: Bool
   , keyProblemsSelected :: Int
   , keyProblemsScroll :: Int
@@ -224,6 +225,7 @@ renderKey original = do
         , keyAgentMenuRefs=agentMenuRefs original
         , keyMenusActive=menusActive original
         , keyContextTarget=contextTarget original
+        , keyDiagnosticsGeneration=diagnosticsGeneration original
         , keyProblemsVisible=problemsVisible original
         , keyProblemsSelected=problemsSelected original
         , keyProblemsScroll=problemsScroll original
