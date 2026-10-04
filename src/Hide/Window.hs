@@ -5,9 +5,9 @@
 -- shaping for other text. The window thread owns SDL calls, event handling and
 -- presentation; render keys decide when a frame is needed. Exported FFI helpers
 -- also serve the remote native frontend rather than a second drawing ABI.
-module Hide.Window (runWindow, nativeMenuShortcut, nativeMenuEvent, nativeCommands
+module Hide.Window (runWindow, nativeMenuShortcut, nativeMenuEvent, nativeMenuEventFor, nativeMenuToken, nativeCommands, nativeCommandsFor
 #ifdef WITH_WINDOW
-  , check, utf8, nativeMenus
+  , check, utf8, nativeMenus, nativeMenusFor, installNativeMenus
   , c_system_dark, c_open, c_mode, c_scale, c_title, c_close, c_size
   , c_begin, c_glyph, c_unicode, c_pixelate_unicode, c_cursor, c_cursor_blink
   , c_crt_filter, c_present, c_wait, c_wake, c_text, c_clipboard, c_set_clipboard
@@ -20,9 +20,7 @@ import Hide.Frontend
 import Hide.Model
 import Hide.Commands (builtinCommands, builtinAction)
 #ifdef WITH_WINDOW
-#ifdef darwin_HOST_OS
 import Data.List (elemIndex)
-#endif
 import Control.Exception (bracket_)
 import Control.Monad (forM_, when, unless, foldM)
 import Data.Foldable (toList)
@@ -53,9 +51,22 @@ nativeCommands = map builtinAction builtinCommands
 -- | Reject queued events from a retired native menu before resolving a token.
 -- Availability and caller policy must still be checked against current host state.
 nativeMenuEvent :: Int -> [Int] -> Maybe Command
-nativeMenuEvent generation (11:token:incarnation:_)
-  | generation>0, incarnation==generation, token>=0 = case drop token nativeCommands of cmd:_ -> Just cmd; _ -> Nothing
-nativeMenuEvent _ _ = Nothing
+nativeMenuEvent=nativeMenuEventFor nativeCommands
+
+-- | Bounded catalogue assembled from the published session snapshot. Dynamic
+-- entries retain exact refs; labels and frontend positions are never identities.
+nativeCommandsFor :: Desktop -> [Command]
+nativeCommandsFor d=nativeCommands++map (contributionCommand d) (contributedMenus d)
+
+nativeMenuEventFor :: [Command] -> Int -> [Int] -> Maybe Command
+nativeMenuEventFor commands generation event=do
+  token<-nativeMenuToken (length commands) generation event
+  case drop token commands of command:_ -> Just command; _ -> Nothing
+
+nativeMenuToken :: Int -> Int -> [Int] -> Maybe Int
+nativeMenuToken count generation (11:token:incarnation:_)
+  | generation>0, incarnation==generation, token>=0,token<count=Just token
+nativeMenuToken _ _ _=Nothing
 
 #ifdef WITH_WINDOW
 foreign import ccall unsafe "thc_system_dark" c_system_dark :: IO CInt
@@ -104,24 +115,34 @@ utf8 :: T.Text -> (CString -> IO a) -> IO a
 utf8 text = BS.useAsCString (TE.encodeUtf8 text)
 
 nativeMenus :: IO ()
-#ifdef darwin_HOST_OS
-nativeMenus = do
-  c_menu_clear (number About) (number EditorOptions) (number Quit)
-  forM_ menus $ \(title,_,items) -> do
-    utf8 title c_menu_add
-    forM_ items $ \(MenuItem name _ cmd) -> case cmd of
-      Disabled{} -> c_menu_separator
-      _ -> unless (cmd `elem` [About,EditorOptions,Quit]) $ utf8 name $ \namePtr -> withCString (nativeMenuShortcut cmd) $ \keyPtr ->
-        c_menu_item namePtr keyPtr (number cmd) 1
+nativeMenus=nativeMenusFor (initialDesktop (80,25))
+
+-- | Install exactly the menu rows painted by the host, assigning tokens from
+-- the retained command catalogue. Rebuilding stamps a fresh native incarnation.
+nativeMenusFor :: Desktop -> IO ()
+nativeMenusFor d=installNativeMenus [(title,[(name,nativeMenuShortcut cmd,number cmd) | MenuItem name _ cmd<-menuItemsFor d i]) | (i,(title,_,_))<-zip [0..] menus]
   where
-    number cmd=maybe (error "Missing native application command") fromIntegral (elemIndex cmd nativeCommands)
+    number Disabled{} = -1
+    number cmd=maybe (error "Missing native command registration") id (elemIndex cmd (nativeCommandsFor d))
+
+-- | The remote frontend uses the same Cocoa installer with host-issued tokens.
+installNativeMenus :: [(T.Text,[(T.Text,String,Int)])] -> IO ()
+#ifdef darwin_HOST_OS
+installNativeMenus layout=do
+  c_menu_clear (number About) (number EditorOptions) (number Quit)
+  forM_ layout $ \(title,items)->do
+    utf8 title c_menu_add
+    forM_ items $ \(name,key,token)->
+      if token<0 then c_menu_separator else unless (token `elem` map (fromIntegral . number) [About,EditorOptions,Quit]) $
+        utf8 name $ \namePtr->withCString key $ \keyPtr->c_menu_item namePtr keyPtr (fromIntegral token) 1
+  where number cmd=maybe (error "Missing native application command") fromIntegral (elemIndex cmd nativeCommands)
 #else
-nativeMenus = pure ()
+installNativeMenus _ = pure ()
 #endif
 
 updateMenus :: Desktop -> IO ()
 #ifdef darwin_HOST_OS
-updateMenus d = forM_ (zip [0..] nativeCommands) $ \(i,cmd) ->
+updateMenus d = forM_ (zip [0..] (nativeCommandsFor d)) $ \(i,cmd) ->
   c_menu_enabled i (if menuCommandAvailable d cmd then 1 else 0)
 #else
 updateMenus _ = pure ()
@@ -175,7 +196,7 @@ runWindow backend scale effects tick initial = do
   bracket_ (pure ()) c_close $ do
     withCString driver $ \name -> check ("Cannot start " ++ driver ++ " window") (c_open name (realToFrac scale) (fromIntegral (fst (screenSize initial))) (fromIntegral (snd (screenSize initial))) (fromIntegral (modeHeight (maybe 3 id (videoMode initial)))))
     c_backend >>= peekCString >>= hPutStrLn stderr . ("Haskell renderer: " ++)
-    nativeMenus
+    nativeMenusFor initial
     sized <- alloca $ \wp -> alloca $ \hp -> do
       c_size wp hp
       w <- fromIntegral <$> peek wp
@@ -187,8 +208,9 @@ runWindow backend scale effects tick initial = do
     systemTheme d = do value<-c_system_dark; pure d {systemDark=value/=0}
     loop font previous d = do
       key<-renderKey d
-      when (fmap snd previous /= Just key) $ do
-        when (fmap fst previous /= Just (applicationTitle "" d)) $ do
+      when (fmap (\(_,old,_)->old) previous /= Just key) $ do
+        when (fmap (\(_,_,catalogue)->catalogue) previous/=Just (contributedMenus d)) (nativeMenusFor d)
+        when (fmap (\(title,_,_)->title) previous /= Just (applicationTitle "" d)) $ do
           cwd <- getCurrentDirectory
           utf8 (applicationTitle cwd d) c_title
         updateMenus d
@@ -197,7 +219,7 @@ runWindow backend scale effects tick initial = do
       (next,requests) <- dispatch event d
       (exit,updated) <- foldM windowEffect (False,next) requests
       when (clipboard updated /= clipboard d) (utf8 (clipboard updated) c_set_clipboard)
-      let displayed = case event of kind:_ | kind `elem` [3,4,5,7,8,9,12] -> Nothing; _ -> Just (applicationTitle "" d,key)
+      let displayed = case event of kind:_ | kind `elem` [3,4,5,7,8,9,12] -> Nothing; _ -> Just (applicationTitle "" d,key,contributedMenus d)
       unless exit (systemTheme updated >>= tick >>= loop font displayed)
     windowEffect state@(True,_) _ = pure state
     windowEffect (_,d) request = applyWindowEffect d request
@@ -241,7 +263,7 @@ runWindow backend scale effects tick initial = do
     dispatch event@(11:_) d = do
 #ifdef darwin_HOST_OS
       generation<-fromIntegral <$> c_menu_generation
-      case nativeMenuEvent generation event of
+      case nativeMenuEventFor (nativeCommandsFor d) generation event of
         Just cmd | menuCommandAvailable d cmd ->
           if cmd==Paste then paste d else clipboardResult (cmd `elem` [Copy,Cut]) d (runCommand cmd d)
         _ -> pure (d,[])

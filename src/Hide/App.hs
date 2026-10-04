@@ -16,6 +16,8 @@ import Hide.Autocomplete
 import qualified Hide.AutocompleteACP as CompletionACP
 import Hide.BufferView
 import Hide.Defaults
+import qualified Hide.Plugin.Menu as PluginMenu
+import Hide.MenuCommands
 import Hide.Keybindings
 import Hide.Commands (terminalBindings)
 import Hide.MCPPermissions
@@ -262,9 +264,11 @@ runEditor args = do
           mapM_ (setEnv "THC_EDIT_SESSION") daemon
           font<-Font.loadFont
           let specs=builtinTools++debugTools++chatTools++toolingTools++workspaceTools++fileTools++testsTools++historyTools++runtimeTools++gitTools++controlTools++environmentTools++clipboardTools++docsTools++[screenTool]
-          withPermissions (specs++agentTools) $ \permissions -> withDocsCommands $ \docsCommands -> withConversationAt (startingDirectory protectedDesktop) $ \conversation -> withDebuggerConsoles (let (_,consoles,_)=conversationServices conversation in consoles) $ \debugger -> withTooling $ \tooling -> withGitOperations $ \gitOperations -> withReconciliation $ \reconciliation -> withProjectBrowser $ \projectBrowser -> withHighlighting $ \highlighting -> withKeybindings $ \keybindings -> withAutocomplete (startingDirectory protectedDesktop) $ \autocomplete -> do
+          withPermissions (specs++agentTools) $ \permissions -> withDocsCommands $ \docsCommands -> withMenuCommands docsCommands $ \menuHost -> withConversationAt (startingDirectory protectedDesktop) $ \conversation -> withDebuggerConsoles (let (_,consoles,_)=conversationServices conversation in consoles) $ \debugger -> withTooling $ \tooling -> withGitOperations $ \gitOperations -> withReconciliation $ \reconciliation -> withProjectBrowser $ \projectBrowser -> withHighlighting $ \highlighting -> withKeybindings $ \keybindings -> withAutocomplete (startingDirectory protectedDesktop) $ \autocomplete -> do
+            contributions<-PluginMenu.menuSnapshot (menuContributions menuHost)
+            let liveDesktop=protectedDesktop {contributedMenus=contributions,agentMenuRefs=menuAgentReferences menuHost,menusActive=True}
             exiting<-newIORef False
-            let runtimeEffects=keybindingEffects keybindings (autocompleteEffects autocomplete (projectBrowserEffects projectBrowser (gitOperationEffects gitOperations (debuggerEffects debugger (conversationEffects conversation (reconciliationEffects reconciliation (toolingEffects tooling applyEffects)))))))
+            let runtimeEffects=menuEffects menuHost (keybindingEffects keybindings (autocompleteEffects autocomplete (projectBrowserEffects projectBrowser (gitOperationEffects gitOperations (debuggerEffects debugger (conversationEffects conversation (reconciliationEffects reconciliation (toolingEffects tooling applyEffects))))))))
                 core d pending=foldM step (False,d) pending
                   where
                     step result@(True,_) _=pure result
@@ -279,7 +283,7 @@ runEditor args = do
                   (quit,updated)<-policyEffects permissions core d pending
                   approvedExit<-readIORef exiting
                   pure (quit || approvedExit,updated)
-                tick d=tickProjectBrowser projectBrowser d >>= tickGitOperations gitOperations applyEffects >>= tickTooling tooling applyEffects >>= tickReconciliation reconciliation >>= tickConversation conversation >>= tickDebugger debugger (toolingEffects tooling applyEffects) >>= tickPermissions permissions >>= tickHighlighting highlighting >>= tickAutocomplete autocomplete >>= tickKeybindings keybindings
+                tick d=tickProjectBrowser projectBrowser d >>= tickGitOperations gitOperations applyEffects >>= tickTooling tooling applyEffects >>= tickReconciliation reconciliation >>= tickConversation conversation >>= tickDebugger debugger (toolingEffects tooling applyEffects) >>= tickPermissions permissions >>= tickHighlighting highlighting >>= tickAutocomplete autocomplete >>= tickKeybindings keybindings >>= tickMenus menuHost
                 inspectTool d name parameters
                   | name `elem` ["list_windows","list_buffers","read_buffer","read_selection"] = pure (d,pure (builtinTool d name parameters))
                   | name `elem` chatToolNames = chatTool conversation d name parameters
@@ -326,7 +330,7 @@ runEditor args = do
                   quit<-readIORef exiting
                   pure (quit,updated,finish)
             case daemon of
-              Just sid -> runRemoteDaemonWithStartup (AR.activateAgentCheckpoint (conversationAgents conversation)) sid scale effects tick inspect protectedDesktop
+              Just sid -> runRemoteDaemonWithStartup (AR.activateAgentCheckpoint (conversationAgents conversation)) sid scale effects tick inspect liveDesktop
               Nothing -> die "Missing session process identity."
 
   where
@@ -602,6 +606,7 @@ applyEffects = foldM apply . (False,)
         result<-readDirectory (nodePath node) "*"
         pure (False,case result of Left err -> d {status=T.pack err}; Right (_,entries) -> expandTree index entries d)
       _ -> pure (False,d)
+    apply (_,d) InvokeMenu{}=pure (False,d {status="Registered menu actions are unavailable in this preview."})
     apply (_,d) ReadHelp=do
       path<-getDataFileName "README.md"
       (opened,_)<-followLink False d (Just path) ""

@@ -6,8 +6,8 @@
 -- the latest frame. Local pointer feedback and remote content updates have distinct
 -- repaint rules, so drag/wheel rendering can await the resulting remote frame.
 module Hide.RemoteWindow
-  (runRemoteWindow, RemoteFrame(..), RemoteCell(..), parseRemoteFrame
-  , nativeKeyInput, nativeEventInput, remoteMenuInput, pasteShortcut, sanitizeDownloadName
+  (runRemoteWindow, RemoteFrame(..), RemoteContribution(..), RemoteCell(..), parseRemoteFrame
+  , nativeKeyInput, nativeEventInput, remoteMenuInput, remoteNativeMenuInput, remoteMenuLayout, pasteShortcut, sanitizeDownloadName
   , remoteInputAllowed, remoteCloseDetaches, remoteDetachShortcut, nativeRepaint) where
 import Control.Monad (unless)
 import Hide.Commands (commandIdentifier)
@@ -20,8 +20,10 @@ import qualified Data.Text.Encoding as TE
 import qualified Data.Text as T
 import qualified Graphics.Vty as V
 import Hide.Frontend
-import Hide.Model (Command)
-import Hide.Window (nativeCommands, nativeMenuEvent)
+import Hide.Model (Command(..), MenuItem(..), menus)
+import Data.List (elemIndex, nub)
+import Data.Maybe (fromMaybe)
+import Hide.Window (nativeCommands, nativeMenuToken, nativeMenuShortcut)
 import Hide.Remote (RemotePeer)
 import Hide.Unicode (clusterWidth, graphemes)
 #if defined(WITH_WINDOW) && defined(WITH_REMOTE)
@@ -42,12 +44,18 @@ import System.Info (os)
 import System.Timeout (timeout)
 import System.IO (withBinaryFile, IOMode(ReadMode), hFileSize, openBinaryTempFile, hClose, hPutStrLn, stderr)
 import Hide.Font
-import Hide.Model (Command(Paste))
 import Hide.Protocol (WirePacket(..), decodeFrame)
 import Hide.Links (openResource)
 import Hide.Remote (peerSendBatch, peerReceive)
-import Hide.Window hiding (nativeCommands, nativeMenuEvent)
+import Hide.Window hiding (nativeCommands, nativeMenuToken, nativeMenuShortcut)
 #endif
+
+-- | Bounded host-issued catalogue metadata, independent of native menu slots.
+data RemoteContribution = RemoteContribution
+  { contributionId :: T.Text, contributionRegistry :: T.Text, contributionGeneration :: Integer
+  , contributionSlot :: T.Text, contributionGroup :: T.Text, contributionOrder :: Int
+  , contributionTitle :: T.Text, contributionKey :: T.Text, contributionEnabled :: Bool
+  } deriving (Eq,Show)
 
 -- | A positioned grapheme with explicit cell width and foreground/background RGB.
 data RemoteCell = RemoteCell Int Int Int Int T.Text Int deriving (Eq,Show)
@@ -55,7 +63,7 @@ data RemoteFrame = RemoteFrame
   { remoteSize :: (Int,Int), remoteMode :: Maybe Int, remoteTitle :: T.Text
   , remoteCursor :: Maybe (Int,Int), remoteBlink :: Bool, remoteCRT :: Bool
   , remotePixelated :: Bool, remoteTerminal :: Bool, remoteWordStar :: Bool
-  , remoteMenus :: [Bool], remoteCells :: [RemoteCell]
+  , remoteContributions :: [RemoteContribution], remoteMenus :: [Bool], remoteCells :: [RemoteCell]
   } deriving (Eq,Show)
 
 -- | Validate dimensions, ordered nonoverlapping spans, colors, cursor and widths
@@ -78,10 +86,21 @@ parseRemoteFrame metadata rows = parseEither (withObject "frame metadata" $ \o -
   supported <- o .:? "menuCommands" .!= [] :: Parser [T.Text]
   states <- o .:? "menuState" .!= [] :: Parser [(T.Text,Bool)]
   unless (length supported<=256 && length states<=256 && all ((<=256).T.length) (supported++map fst states)) (fail "Invalid menu state")
+  contributions<-o .:? "menuContributions" .!= [] >>= mapM parseContribution
+  unless (length contributions<=256 && length (nub (map contributionId contributions))==length contributions) (fail "Invalid contribution catalogue")
   let enabled=[maybe False (\name -> name `elem` supported && lookup name states==Just True) (commandIdentifier cmd) | cmd<-menuActions]
   cells <- concat <$> sequence [parseRow cols y row | (y,row) <- zip [0..] rows]
-  pure (RemoteFrame size mode title cursor blink crt pixelated terminal wordstar enabled cells)) metadata
+  pure (RemoteFrame size mode title cursor blink crt pixelated terminal wordstar contributions (enabled++map contributionEnabled contributions) cells)) metadata
   where
+    parseContribution=withObject "menu contribution" $ \o->do
+      ident<-o .: "id"; registry<-o .: "registry"; boundedGeneration<-o .: "generation" :: Parser Int
+      let generation=toInteger boundedGeneration
+      slot<-o .: "slot"; group<-o .: "group"; order<-o .: "order"
+      title<-o .: "title"; key<-o .: "key"; enabled<-o .: "enabled"
+      unless (all (\text->not (T.null text) && T.length text<=128 && T.all (>= ' ') text) [ident,slot,group,title] &&
+        T.length registry==48 && T.all (`elem` ("0123456789abcdef"::String)) registry &&
+        T.length key<=32 && T.all (>= ' ') key && generation>0 && generation<=9007199254740991 && slot `elem` [T.toLower name | (name,_,_)<-menus]) (fail "Invalid contributed menu entry")
+      pure (RemoteContribution ident registry generation slot group order title key enabled)
     parseRow cols y value = do
       spans <- parseJSON value :: Parser [(Int,Int,Int,[Value])]
       unless (length spans<=cols+1) (fail "Too many spans")
@@ -144,10 +163,33 @@ menuActions = nativeCommands
 -- | Resolve a local menu slot against the server's named command state.
 remoteMenuInput :: RemoteFrame -> Int -> Maybe Value
 remoteMenuInput frame index
-  | index>=0, True:_<-drop index (remoteMenus frame),
-    Just name:_<-drop index (map commandIdentifier menuActions) =
-      Just (object ["type" .= ("menu"::T.Text),"command" .= name])
+  | index>=0, True:_<-drop index (remoteMenus frame) =
+    if index<length menuActions then case drop index (map commandIdentifier menuActions) of
+      Just name:_ -> Just (object ["type" .= ("menu"::T.Text),"command" .= name])
+      _ -> Nothing
+    else case drop (index-length menuActions) (remoteContributions frame) of
+      item:_ -> Just (object ["type" .= ("menu"::T.Text),"command" .= contributionId item,"registry" .= contributionRegistry item,"generation" .= contributionGeneration item])
+      _ -> Nothing
   | otherwise = Nothing
+
+-- | Validate native incarnation before resolving the current host catalogue.
+remoteNativeMenuInput :: RemoteFrame -> Int -> [Int] -> Maybe Value
+remoteNativeMenuInput frame generation event=nativeMenuToken (length (remoteMenus frame)) generation event >>= remoteMenuInput frame
+
+-- | Same published contributions appear in terminal/canvas popups and Cocoa.
+-- The existing Help row is replaced by its exact registered action; other
+-- contributions append in host-prepared group/order/ID order.
+remoteMenuLayout :: RemoteFrame -> [(T.Text,[(T.Text,String,Int)])]
+remoteMenuLayout frame=[(title,compose title items) | (title,_,items)<-menus]
+  where
+    indexed=zip [length menuActions..] (remoteContributions frame)
+    compose title items=map builtin items++[(contributionTitle item,"",token) | (token,item)<-indexed,contributionSlot item==T.toLower title,contributionId item/="hide.help.contents"]
+    builtin (MenuItem title _ Help) | (token,item):_<-[(token,item) | (token,item)<-indexed,contributionId item=="hide.help.contents"] = (contributionTitle item,"",token)
+    builtin (MenuItem title _ Disabled{})=(title,"",-1)
+    builtin (MenuItem title _ command)=(title,nativeMenuShortcut command,maybe (-1) id (elemIndex command menuActions))
+
+contributionCatalogue :: RemoteFrame -> [(T.Text,T.Text,Integer,T.Text,T.Text,Int,T.Text,T.Text)]
+contributionCatalogue frame=[(contributionId item,contributionRegistry item,contributionGeneration item,contributionSlot item,contributionGroup item,contributionOrder item,contributionTitle item,contributionKey item) | item<-remoteContributions frame]
 
 -- Drag/wheel updates are painted when their resulting frame arrives. Painting
 -- the previous frame first spends an extra vblank on obsolete selection/layout.
@@ -283,9 +325,8 @@ runRemoteWindow backend scale (cols,rows) mode host peer = do
         11:i:_ -> do
 #ifdef darwin_HOST_OS
           generation<-fromIntegral <$> c_menu_generation
-          case nativeMenuEvent generation event of
-            Just command | Just value<-frame, Just packet<-remoteMenuInput value i ->
-              if command==Paste then paste else sendJSON packet
+          case frame >>= \value->remoteNativeMenuInput value generation event of
+            Just packet -> if i==fromMaybe (-1) (elemIndex Paste nativeCommands) then paste else sendJSON packet
             _ -> pure ()
 #else
           pure ()
@@ -329,8 +370,9 @@ runRemoteWindow backend scale (cols,rows) mode host peer = do
             check "Change remote screen mode" (c_mode (fromIntegral (modeHeight (maybe mode id (remoteMode value)))) (fromIntegral w) (fromIntegral h))
             resize
 #ifdef darwin_HOST_OS
-          forM_ (zip [0..] nativeCommands) $ \(i,_) ->
-            c_menu_enabled (fromIntegral (i::Int)) (if maybe False id (atMay (remoteMenus value) i) then 1 else 0)
+          when (fmap contributionCatalogue frame/=Just (contributionCatalogue value)) (installNativeMenus (remoteMenuLayout value))
+          forM_ (zip [0..] (remoteMenus value)) $ \(i,enabled) ->
+            c_menu_enabled (fromIntegral (i::Int)) (if enabled then 1 else 0)
 #endif
           pure (Just value,atlas,connection,True,closed)
         Control value -> do
@@ -366,7 +408,7 @@ runRemoteWindow backend scale (cols,rows) mode host peer = do
               end<-getMonotonicTimeNSec
               modifyIORef' drawTimes (take 60 . (fromIntegral (end-start)/1000000:))
 #ifdef darwin_HOST_OS
-            unless connected $ forM_ (zip [0::Int ..] nativeCommands) $ \(i,_) -> c_menu_enabled (fromIntegral i) 0
+            unless connected $ forM_ (zip [0::Int ..] (maybe (replicate (length nativeCommands) False) remoteMenus frame)) $ \(i,_) -> c_menu_enabled (fromIntegral i) 0
 #endif
           updateTiming status current
           dark <- (/=0) <$> c_system_dark

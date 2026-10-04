@@ -8,7 +8,7 @@
 -- authorization grant: the host supplies context and checks caller policy.
 module Hide.Plugin.Command
   ( Registry, Command, CommandRef, Codec(..), CommandDef(..), CommandInfo(..)
-  , CommandError(..), withRegistry, registerCommand, retireCommand, commandRef
+  , CommandError(..), validCommandName, withRegistry, registerCommand, retireCommand, commandRef
   , resolveCommand, registeredCommands, commandCurrent, invoke, invokeJSON
   ) where
 
@@ -67,7 +67,7 @@ withRegistry = bracket acquire close
 -- | Register a unique namespaced command; a live name is never replaced.
 registerCommand :: Registry context -> CommandDef context a b -> IO (Either CommandError (Command context a b))
 registerCommand (Registry ident state) definition
-  | not (validName name)=pure (Left (InvalidCommandName name))
+  | not (validCommandName name)=pure (Left (InvalidCommandName name))
   | otherwise=modifyMVar state $ \current@(State closed generation entries)->
       if closed then pure (current,Left RegistryClosed)
       else if M.member name entries then pure (current,Left (DuplicateCommand name))
@@ -76,8 +76,9 @@ registerCommand (Registry ident state) definition
            in pure (State False next (M.insert name (Entry next definition) entries),Right (Command reference definition))
   where name=commandName definition
 
-validName :: Text -> Bool
-validName name=T.length name<=128 && length segments>=2 && all validSegment segments
+-- | Namespaced lowercase ASCII IDs, shared by command and menu declarations.
+validCommandName :: Text -> Bool
+validCommandName name=T.length name<=128 && length segments>=2 && all validSegment segments
   where
     segments=T.splitOn "." name
     validSegment segment=case T.uncons segment of
