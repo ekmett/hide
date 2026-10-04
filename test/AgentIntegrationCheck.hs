@@ -97,7 +97,8 @@ checks=bracket temporary removePathForcibly $ \root ->
       ensure "child opens in the existing protected conversation composer" (activeConversation history && not (guestKeyboardAllowed history))
       let historyText=activeText history
       ensure "history preserves peer identity instead of assigning the human seat" (("Agent "<>AH.agentIdText primary<>" (peer message)") `T.isInfixOf` historyText)
-      ensure "agent input cannot manufacture selected-child authority or usage" (all (\changed->not (guestTransitionAllowed history changed [])) [history {childAgentSteering=True},history {childAgentContextUsage=Just (1,2)},history {childAgentSettings=agentSettings connected}])
+      childTransitions<-mapM (\changed->guestTransitionAllowed history changed []) [history {childAgentSteering=True},history {childAgentContextUsage=Just (1,2)},history {childAgentSettings=agentSettings connected}]
+      ensure "agent input cannot manufacture selected-child authority or usage" (not (or childTransitions))
       let childDrafted=history {composerBuffer=newBuffer "child unsent",composerSelection=Selection 2 5}
       primaryAgain<-ui "show" [] childDrafted
       ensure "switching restores primary draft caret and transcript" (T.null (conversationTarget primaryAgain) && contents (composerBuffer primaryAgain)=="primary unsent" && composerSelection primaryAgain==Selection 3 7 && activeText primaryAgain==primaryText)

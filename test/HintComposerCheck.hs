@@ -52,8 +52,9 @@ checks=do
     (windowContentRows (filled {autocompleteACPEnabled=False}) doc w-windowContentRows filled doc w==height rect+1)
   check "agents cannot type or click hint composer"
     (not (guestKeyboardAllowed filled) && not (pointerAllowedAt filled (left rect) (top rect)) && not (readableAt filled (left rect) (top rect)))
+  hintAllowed<-guestTransitionAllowed base typed []
   check "agent transition policy rejects hint edits and submission"
-    (not (guestTransitionAllowed base typed []) && not (guestEffectsAllowed effects))
+    (not hintAllowed && not (guestEffectsAllowed effects))
   check "agent can still read autocomplete trace above the private draft" (readableAt filled (left (bounds w)+2) (top (bounds w)+2))
   let disabled=paste "not a hint" (base {autocompleteACPEnabled=False})
   check "disabled ACP does not expose a composer" (bufferLength (autocompleteDraft disabled)==0)

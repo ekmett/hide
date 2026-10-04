@@ -12,9 +12,12 @@ module Hide.GuestAccess
   , validateGuestEffects, guestCommandAllowed, guestCommandAllowedIn, guestEffectsAllowed, guestKeyboardAllowed, guestKeyAllowed, guestKeyCombinations
   , guestModalBlocked, guestTransitionAllowed, beginGuestInput, endGuestInput
   ) where
+import Control.Exception (evaluate)
+import Control.Monad (foldM,when)
+import System.Mem.StableName (makeStableName)
+import qualified Hide.Plugin.BufferHost as BufferHost
 import Hide.Sidebar
 import qualified Hide.Plugin.Tree as Tree
-import Control.Monad (when)
 import System.Directory (canonicalizePath)
 import Data.Char (toLower)
 import Data.List (find)
@@ -202,18 +205,38 @@ guestKeyAllowed d key mods=maybe True (guestCommandAllowedIn d) (boundKeyCommand
 guestKeyCombinations :: [(Text,[V.Modifier])]
 guestKeyCombinations=[(key,mods) | key<-["Enter","Escape","Tab","ArrowUp","ArrowDown","ArrowLeft","ArrowRight","Home","End","PageUp","PageDown","Backspace","Delete","Insert"]++["F"<>T.pack (show n) | n<-[1::Int ..24]],mods<-[[],[V.MShift],[V.MCtrl],[V.MAlt]]]++[(T.singleton c,mods) | c<-['a'..'z']++['1'..'9']++[' '],mods<-[[V.MCtrl],[V.MAlt]]]
 
--- Effects alone miss widgets which mutate directly, including draft edits,
--- question choices, settings checkboxes and discard confirmation.
-guestTransitionAllowed :: Desktop -> Desktop -> [Effect] -> Bool
-guestTransitionAllowed before after effects=guestEffectsAllowed effects && not (guestModalBlocked after) &&
-  streamerMode before==streamerMode after && chatSubmit before==chatSubmit after && privateFieldsUnchanged before after && composerBuffer before==composerBuffer after &&
-  composerSelection before==composerSelection after && chatQuestion before==chatQuestion after &&
-  autocompleteACPEnabled before==autocompleteACPEnabled after &&
-  revision (autocompleteDraft before)==revision (autocompleteDraft after) &&
-  autocompleteSelection before==autocompleteSelection after && autocompleteFocused before==autocompleteFocused after &&
-  agentSettings before==agentSettings after && childAgentSettings before==childAgentSettings after &&
-  childAgentSteering before==childAgentSteering after && childAgentContextUsage before==childAgentContextUsage after &&
-  all (\(bid,doc)->not (protectedBuffer before bid) || M.lookup bid (buffers after)==Just doc) (M.toList (buffers before))
+-- | Validate a proposed guest transition while the owning session is serialized.
+-- Only small UI metadata is compared structurally. Immutable protected documents,
+-- drafts and questions use constructor identities; equal revisions alone do not
+-- establish unchanged content. Capture evaluates WHNF, never text or Undo.
+-- Conservatively reject replacement of a protected document, including metadata.
+guestTransitionAllowed :: Desktop -> Desktop -> [Effect] -> IO Bool
+guestTransitionAllowed before after effects
+  | not metadataUnchanged = pure False
+  | otherwise = do
+      composer<-sameContent (composerBuffer before) (composerBuffer after)
+      autocomplete<-sameContent (autocompleteDraft before) (autocompleteDraft after)
+      question<-case (chatQuestion before,chatQuestion after) of
+        (Nothing,Nothing)->pure True
+        (Just a,Just b)->sameConstructor a b
+        _->pure False
+      if not (composer && autocomplete && question) then pure False else
+        foldM unchanged True (M.toList (buffers before))
+  where
+    metadataUnchanged=guestEffectsAllowed effects && not (guestModalBlocked after) &&
+      streamerMode before==streamerMode after && chatSubmit before==chatSubmit after && privateFieldsUnchanged before after &&
+      composerSelection before==composerSelection after &&
+      autocompleteACPEnabled before==autocompleteACPEnabled after &&
+      autocompleteSelection before==autocompleteSelection after && autocompleteFocused before==autocompleteFocused after &&
+      agentSettings before==agentSettings after && childAgentSettings before==childAgentSettings after &&
+      childAgentSteering before==childAgentSteering after && childAgentContextUsage before==childAgentContextUsage after
+    sameContent a b=BufferHost.captureVersion a >>= \version->BufferHost.versionCurrent version b
+    sameConstructor a b=(==) <$> (evaluate a >>= makeStableName) <*> (evaluate b >>= makeStableName)
+    unchanged False _=pure False
+    unchanged True (bid,doc)
+      | not (protectedBuffer before bid)=pure True
+      | Just next<-M.lookup bid (buffers after)=sameConstructor doc next
+      | otherwise=pure False
 
 -- Both text-entry widgets carry the same privacy semantics; selection is UI state.
 inputValue :: Field -> Maybe (Text,Text)
@@ -237,9 +260,11 @@ privateDialogField d dg field=privateField field || case inputValue field of
     privateName base value=let name=T.unpack value in protectedPath d (normalise (if isAbsolute name then name else base </> name))
 focusedPrivateField :: Desktop -> Bool
 focusedPrivateField d=case dialog d of Just dg -> maybe False (privateDialogField d dg) (at (fields dg) (focus dg)); _ -> False
+-- Compare private field metadata across dialog replacement as well. Purpose may
+-- carry a disk baseline or conflict payload, so its derived equality is unsuitable.
 privateFieldsUnchanged :: Desktop -> Desktop -> Bool
 privateFieldsUnchanged before after=case (dialog before,dialog after) of
-  (Just a,Just b) | purpose a==purpose b -> values before a==values after b
+  (Just a,Just b) -> values before a==values after b
   _ -> True
   where
     values d dg=[value field | field<-fields dg,privateDialogField d dg field]

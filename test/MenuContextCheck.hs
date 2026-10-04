@@ -110,7 +110,8 @@ checks=bracket temporary removePathForcibly $ \root->withDocsCommands $ \docs->w
   let unopened=(setDiagnostics [problem] (setProblemsVisible True (initialDesktop (80,25)))) {problemsFocused=True,contributedMenus=metadata,menusActive=True}
       (newChosen,newRequests)=handleEvent (V.EvKey V.KEnter []) (openContext MessagesContext 8 5 unopened)
   let publicAgentPane=newChosen {agentMenuRefs=menuAgentReferences host}
-      agentRequests=case applyGuestInput input (beginGuestInput publicAgentPane) of
+  guestAdmitted<-applyGuestInput input (beginGuestInput publicAgentPane)
+  let agentRequests=case guestAdmitted of
         Right (_,effects)->effects
         Left err->error (T.unpack err)
   check "host-permitted diagnostic source preserves attributed agent origin"

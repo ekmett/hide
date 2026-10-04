@@ -82,7 +82,8 @@ runChecks=withDocsCommands $ \docs->withRegistry $ \registry->withMenuCommands d
       check "contributed remap cannot escape modal editing" (null (snd (handleEvent key modal)))
 #if defined(WITH_WEB) || defined(WITH_REMOTE)
       guestKey<-either error pure (parseEither parseInput (object ["type" .= ("key"::T.Text),"key" .= ("j"::T.Text),"mods" .= (["ctrl","shift"]::[T.Text])]))
-      check "contributed remap cannot grant guest authority" (case applyGuestInput guestKey (beginGuestInput loaded) of Left _->True; _->False)
+      guestRemap<-applyGuestInput guestKey (beginGuestInput loaded)
+      check "contributed remap cannot grant guest authority" (case guestRemap of Left _->True; _->False)
 #endif
       TIO.writeFile (directory </> "thc.toml") "[editor.keybindings.terminal.source]\n\"example.not-published\" = [\"Ctrl+Shift+J\"]\n"
       let (invalid,invalidRequests)=runCommand ReloadBindings loaded
@@ -133,14 +134,16 @@ runChecks=withDocsCommands $ \docs->withRegistry $ \registry->withMenuCommands d
   check "extension declaration reaches actual transported route" (extensionEffects==[InvokeMenu extension Plugin.HumanMenu Nothing])
   opened<-run invoked extensionEffects
   check "transported extension installs independent Markdown and links" (maybe False (T.isInfixOf "Independent extension" . contents . documentBuffer) (activeDocument opened) && maybe False (not . null . documentLinks) (activeDocument opened))
-  check "extension metadata cannot grant agent invocation" (case applyGuestInput packet (beginGuestInput initial) of Left _->True; _->False)
+  guestExtension<-applyGuestInput packet (beginGuestInput initial)
+  check "extension metadata cannot grant agent invocation" (case guestExtension of Left _->True; _->False)
   check "contributed Help has no generationless static menu route" (case parseEither parseInput (object ["type" .= ("menu"::T.Text),"command" .= ("hide.help.contents"::T.Text)]) of Left _->True; _->False)
   helpPacket<-either error pure (parseEither parseInput (object ["type" .= ("menu"::T.Text),"command" .= Plugin.menuName helpRef,"registry" .= Plugin.menuEpoch helpRef,"generation" .= Plugin.menuGeneration helpRef]))
   withMenuCommands docs $ \nextHost->do
     nextMetadata<-Plugin.menuSnapshot (menuContributions nextHost)
     let nextDesktop=initial {contributedMenus=nextMetadata,agentMenuRefs=menuAgentReferences nextHost}
     check "prior scope same name/generation cannot target a new session registry" (null (snd (applyInput helpPacket nextDesktop)))
-  check "host-permitted help preserves agent origin" (case applyGuestInput helpPacket (beginGuestInput initial) of Right (_,requests)->requests==[InvokeMenu helpRef Plugin.AgentMenu Nothing]; _->False)
+  guestHelp<-applyGuestInput helpPacket (beginGuestInput initial)
+  check "host-permitted help preserves agent origin" (case guestHelp of Right (_,requests)->requests==[InvokeMenu helpRef Plugin.AgentMenu Nothing]; _->False)
   stalePacket<-either error pure (parseEither parseInput (object ["type" .= ("menu"::T.Text),"command" .= Plugin.menuName extension,"registry" .= Plugin.menuEpoch extension,"generation" .= (Plugin.menuGeneration extension+100)]))
   let oversized=object ["type" .= ("menu"::T.Text),"command" .= Plugin.menuName extension,"registry" .= Plugin.menuEpoch extension,"generation" .= (9007199254740992::Integer)]
   check "contributed wire generations are bounded" (case parseEither parseInput oversized of Left _->True; _->False)

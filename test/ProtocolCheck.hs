@@ -51,7 +51,8 @@ checks = do
   check "stable Dock focus selects a live target without effects" (fmap windowId (activeWindow focused)==Just 1 && null (snd (applyInput focus second)))
   check "closed Dock target refuses focus without redirecting" (fmap windowId (activeWindow (fst (applyInput focus closed)))==fmap windowId (activeWindow closed))
   check "Dock focus cannot switch a modal owner" (fmap windowId (activeWindow (fst (applyInput focus blocked)))==fmap windowId (activeWindow blocked) && dialog (fst (applyInput focus blocked))==dialog blocked)
-  check "agent input cannot invoke native Dock focus" (case applyGuestInput focus (beginGuestInput second) of Left _->True; _->False)
+  guestFocus<-applyGuestInput focus (beginGuestInput second)
+  check "agent input cannot invoke native Dock focus" (case guestFocus of Left _->True; _->False)
   let oddName=d {buffers=M.adjust (\doc->doc {documentFile=Just (FileState "/project/odd\nname\t.hs" Nothing)}) 1 (buffers d)}
   check "legal control characters in filenames are safe display metadata"
     (case editorWindowEntries oddName of [(1,title,_,_)]->title=="odd·name·.hs"; _->False)
@@ -100,7 +101,8 @@ checks = do
   check "human browser clipboard reads only focused review selection" (selected==Just "private" && clipboard copied=="private" && copyEffects==[WriteBrowserClipboard "private"])
   check "human browser cut changes only review text" (text cut==" diff" && activeText cut==activeText d && cutEffects==[WriteBrowserClipboard "private"])
   check "browser paste requests the system clipboard for the review" (applyInput (BrowserCommand Hide.Model.Paste) review==(review,[ReadBrowserClipboard]))
-  check "agent browser commands cannot inspect or edit human review" (all (\input->case applyGuestInput input review of Left _ -> True; _ -> False) [BrowserCommand Copy,BrowserCommand Cut,BrowserCommand SelectAll,Hide.Protocol.Paste "bad"])
+  reviewInputs<-mapM (\input->applyGuestInput input review) [BrowserCommand Copy,BrowserCommand Cut,BrowserCommand SelectAll,Hide.Protocol.Paste "bad"]
+  check "agent browser commands cannot inspect or edit human review" (all (either (const True) (const False)) reviewInputs)
   let search=fst (runCommand Find d)
       typed=fst (applyInput (Hide.Protocol.Paste "hello") search)
       replacement=fst (applyInput (BrowserCommand Replace) typed)

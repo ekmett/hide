@@ -28,6 +28,13 @@ Optional components add checks for browser transport, rendering assets and
 embedded terminals. A passing model check and an interactive frontend check
 establish different things; run the relevant frontend too.
 
+Agent input uses a shallow IO validation step while the session owner is
+serialized. Protected document and question identities, and draft content versions,
+prevent direct widget changes from bypassing policy without comparing buffer text,
+disk baselines or Undo. Equal numeric revisions do not authorize replacement.
+Human input remains a pure model transition; screen permission hints run on the
+capture worker and do not replace admission checks.
+
 ## Source documentation
 
 Each `Hide.*` module starts with an overview of its role, ownership and notable
