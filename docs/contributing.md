@@ -72,7 +72,7 @@ search are not yet registered commands.
 
 ## Immutable plugin buffer reads
 
-`Hide.Plugin.Buffer` provides opaque `BufferRead` and `ContentVersion` values.
+`Hide.Plugin.Buffer` provides opaque `BufferRef`, `BufferRead` and `ContentVersion` values.
 The host adapter `Hide.Plugin.BufferHost` captures immutable measured trees without
 retaining the separate saved baseline, Undo or Redo roots. Deleted provenance
 leaves in the live tree remain retained but are invisible to reads.
@@ -86,15 +86,54 @@ operations. Capture and version checks never flatten or compare contents.
 buffer with the same revision and contents invalidates the captured version.
 The identity check is conservative: replacing the immutable buffer to establish
 a new saved baseline also requires a fresh version. The live `read_buffer` MCP
-consumer uses these measured reads after host privacy filtering, and ACP source
-freshness tracking uses the same version check.
+consumer now captures through `Hide.BufferReads` during a narrowly admitted
+`MCPPermissions.permissionReadCall` callback, then formats measured reads on its
+reply worker. ACP source freshness tracking uses the same version check.
 
-This is an implementation slice, not a complete plugin SDK. Session-scoped
-`BufferRef` handles, activation scopes, checked buffer edits, menu contributions
+`BufferRef` combines the running session namespace with its once-allocated
+logical document ID. It survives ordinary edits and reload of that document;
+close/reopen and a new daemon/recovery lifetime cannot reuse the reference.
+`ContentVersion` separately identifies the immutable content captured from it.
+The namespace belongs to the existing Permissions session lifetime, so frontend
+detach does not create a new scope.
+
+A read receipt exists only after ordinary MCP policy dispatch or an accepted
+approval, and expires when its capture callback returns. Queued authenticated
+reads resolve their token and active actor again before capture; anonymous
+inspection remains guest input. Privacy comes from the existing GuestAccess
+owner, including private-buffer rejection and Conversation masks. Already granted
+immutable reads may outlive the receipt and cannot be recalled. Ordinary capture
+forces only the cheap measured-content constructor, releasing the separate
+Buffer/Undo thunk; Conversation redaction and tree construction stay on the
+reply worker. The receipt does not grant edit authority or create a public
+plugin CallContext.
+
+This is an implementation slice, not a complete plugin SDK. Plugin
+activation/task scopes, public checked buffer edits, menu contributions
 and custom widget/window types remain tracked in
-[the delivery plan](https://github.com/ekmett/hide/issues/1). HLS currently owns
-worker preparation and atomic checked edit adoption in `Hide.Tooling`; wrapping
-that owner remains part of [the buffer service work](https://github.com/ekmett/hide/issues/4).
+[the delivery plan](https://github.com/ekmett/hide/issues/1).
+
+## Host checked edit ownership
+
+`Hide.BufferEdits` owns opaque `PreparedEdit` values, worker preparation
+through `Hide.Buffer.replaceRanges`, and all-target checked atomic adoption.
+`Hide.Tooling` is the live HLS consumer; it retains protocol parsing, canonical
+project admission, task cancellation/session ordering and reply delivery.
+Preparation forces replacement trees, output content and selection spans on the
+worker. It deliberately retains the file baseline and ordinary Undo state that
+will be installed; these owned edits differ from immutable read images.
+
+Under the session lock, `commitEdits` rejects duplicate, closed, replaced,
+ambiguous or private targets before changing any buffer. Open targets require
+matching buffer version and file-baseline identity. Success installs worker
+values, preserves unrelated navigation and rebases current selections. Changed
+buffers receive one ordinary Undo entry; saving stays explicit and a stale
+result never rebases the proposed edits.
+
+These are host operations, not the public scoped plugin edit service. A caller
+must already own the session transition, admit the project/path/source baseline,
+and revalidate its task's admission. Public edit admission, cancellation, approval-once continuations and plugin
+authority remain part of [the buffer service work](https://github.com/ekmett/hide/issues/4).
 
 ## Frontend command routing
 
@@ -112,8 +151,31 @@ its revision; read-only output/transcript replacement is not an editable source
 target. Moving input ownership to the sidebar also refuses a source choice.
 Agent choices retain the conversation target. Other parameterized
 context actions retain their own arguments. These checks do not replace host input
-origin and policy checks. General dynamic extension menus and full first-party
-routing through the typed registry remain open in #2.
+origin and policy checks. `Hide.Plugin.Menu` composes contributions in declared named slots by group,
+order and namespaced entry ID. `withMenus` bounds snapshots to 256 entries;
+unknown slots, duplicate IDs and stale lifetimes fail explicitly. `menuAction`
+retains typed command arguments and a worker-side presentation adapter. The
+metadata snapshot contains no plugin callback or buffer payload.
+
+The live `Hide.MenuCommands` host contributes **Help > Contents** through a
+thin `hide.help.contents` command calling the existing scoped `hide.docs.read`
+reader. F1, the popup, native catalogue and transported menu packets resolve the
+same retained contribution. Documentation reading and Markdown preparation run
+on one session worker; adoption preserves read-only Help styling, relative links
+and shell-block/navigation metadata. Browser/native frames carry entry IDs and
+exact generations plus a fresh non-secret registry nonce. A native catalogue rebuild also stamps a new Cocoa incarnation.
+
+Install linked contributions before publishing the session snapshot. Published
+retirement goes through `retireMenuFromHost`, which the serialized session owner
+drains before admission and adoption. Do not retire a published command/menu from
+an unrelated worker. Shutdown cancels and joins work before closing its registry
+scopes. Plugin agent-enable metadata cannot grant authority: the live host only
+permits its exact first-party Help ref and retains existing protected-control
+policy checks. Origin comes from host dispatch, never frontend JSON.
+
+This slice supports the existing main-menu slots and prepared documentation
+replies. Context-menu contributions, runtime activation/publication and full
+first-party routing through the typed registry remain open in #2.
 
 `sh tools/check-native.sh` tests the real SDL event queue without a window. On
 macOS it also checks an unshown application menu for duplicate enablement and

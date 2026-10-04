@@ -135,7 +135,7 @@ builtinCommands =
   ,BuiltinCommand "hide.help.about" (About)
   ]
 
--- | Compile every terminal context outside the interaction path. Explicit global
+-- | Compile every platform context outside the interaction path. Explicit global
 -- entries apply to all owners; a context entry replaces the same global command.
 -- Plain PTY control characters cannot be assigned to editor commands.
 configuredBindings :: M.Map Text (M.Map Text (M.Map Text [Text])) -> Either Text (M.Map (BindingPlatform,BindingContext) (Bindings Command))

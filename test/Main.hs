@@ -17,7 +17,11 @@ import qualified RemoteTerminalCheck
 import qualified GuestAccessCheck
 import qualified StreamerCheck
 import qualified ClipboardMCPCheck
+import qualified BufferReadsCheck
+import qualified BufferEditsCheck
 import qualified PluginBufferCheck
+import qualified MenuCommandsCheck
+import qualified PluginMenuCheck
 import qualified PluginCommandCheck
 import qualified DocsMCPCheck
 import qualified EnvironmentCheck
@@ -118,8 +122,12 @@ main = do
   GuestAccessCheck.checks
   StreamerCheck.checks
   ClipboardMCPCheck.checks
+  BufferReadsCheck.checks
+  BufferEditsCheck.checks
   PluginBufferCheck.checks
   PluginCommandCheck.checks
+  PluginMenuCheck.checks
+  MenuCommandsCheck.checks
   DocsMCPCheck.checks
   EnvironmentCheck.checks
   ControlMCPCheck.checks

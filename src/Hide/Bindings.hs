@@ -7,6 +7,7 @@
 -- caller. Context selection and ordinary typing remain with the input owner.
 module Hide.Bindings (BindingPlatform(..), bindingPlatforms, platformName, BindingContext(..), contextName, bindingContexts, Bindings, compileBindings, bindingAction, bindingKeys, bindingEntries, bindingChords, chordName, readChord) where
 
+import Control.DeepSeq (deepseq)
 import Control.Monad (foldM, unless)
 import Data.Char (toLower, isPrint)
 import Data.List (nub)
@@ -45,7 +46,8 @@ compileBindings defaults overrides = do
     (Left ("Unknown keybinding command: "<>T.intercalate ", " [name | name<-M.keys overrides,name `notElem` map (\(entry,_,_)->entry) defaults]))
   entries <- traverse prepare defaults
   index <- foldM insert M.empty [(key,(name,action)) | (name,action,keys)<-entries,key<-keys]
-  pure (Bindings (fmap snd index) entries [(key,name) | (name,_,keys)<-entries,key<-keys])
+  let projection=[(key,name) | (name,_,keys)<-entries,key<-keys]
+  projection `deepseq` pure (Bindings (fmap snd index) entries projection)
   where
     prepare (name,action,keys)=do
       parsed<-traverse parseChord (M.findWithDefault keys name overrides)

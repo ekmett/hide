@@ -34,6 +34,7 @@ checks=do
       key k mods d=handleEvent (V.EvKey k mods) d
       noEffects (_,effects)=null effects
       rejected= either (const True) (const False) . platformBindings TerminalPlatform . M.singleton "source" . M.fromList
+  check "Mac combined modifier display follows Control Option Shift Command order" (keyLabel base {nativeMac=True} "Ctrl+Cmd+Alt+Shift+S"=="⌃⌥⇧⌘S")
   check "Command is distinct from Control" (readChord "Cmd+Alt+Shift+S"==Right (V.KChar 's',[V.MMeta,V.MAlt,V.MShift]) && chordName (V.KChar 's') [V.MMeta,V.MShift,V.MAlt]==Just "Cmd+Alt+Shift+S" && chordName (V.KChar 's') [V.MCtrl]/=chordName (V.KChar 's') [V.MMeta])
   let platforms=either (error . show) id (configuredBindings (M.singleton "macos" (M.singleton "source" (M.fromList [("hide.file.save",["Cmd+Shift+S"]),("hide.file.save-as",[])]))))
       mac=base {nativeMac=True,videoMode=Just 3,keyBindings=platforms}
@@ -133,7 +134,7 @@ reloadChecks=bracket temporary removePathForcibly $ \directory->do
           updated<-tickKeybindings runtime d
           if done updated then pure updated else threadDelay 1000 >> settle done updated
         await done d=timeout 5000000 (settle done d) >>= maybe (error "keybinding worker did not finish") pure
-        reloaded d=status d/="Reloading terminal bindings..."
+        reloaded d=status d/="Reloading keybindings..."
     TIO.writeFile path "[editor.keybindings.terminal.source]\n\"hide.file.save\" = [\"Ctrl+Shift+S\"]\n\"hide.file.open\" = []\n"
     pending<-start ReloadBindings base
     unless (boundKeyCommand (V.KChar 's') [V.MCtrl] pending==Just Save) (error "old bindings remain active while reload is pending")
