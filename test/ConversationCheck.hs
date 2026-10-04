@@ -467,7 +467,7 @@ checks = (composerCodeChecks >>) $ bracket temporary removePathForcibly $ \root 
       check "conversation renders streamed Markdown" ("Hello" `T.isInfixOf` conversationText streamed && not ("**bold" `T.isInfixOf` conversationText streamed))
       check "conversation omits speaker headings and session banner once chatting"
         (not (any (`elem` T.lines (conversationText streamed)) ["You","Agent"]) && not ("Session:" `T.isInfixOf` conversationText streamed))
-      check "conversation preserves Markdown styling" (any ((==BubbleText 1 False Keyword).snd) (conversationHighlight streamed))
+      check "conversation preserves Markdown styling" (any ((==BubbleText 1 False (BoldStyle Keyword)).snd) (conversationHighlight streamed))
       check "tool update merges pending record" (T.count "[completed] Local tool" (conversationText streamed)==1 && not ("[pending] Local tool" `T.isInfixOf` conversationText streamed))
       check "tool activity starts collapsed without raw arguments" (not ("rawInput" `T.isInfixOf` conversationText streamed) && "▸" `T.isInfixOf` conversationText streamed)
       let activityAction=case [values | (_,_,name,values)<-chatActions streamed,name=="toggle-activity"] of values:_->values; _->error "missing activity action"
