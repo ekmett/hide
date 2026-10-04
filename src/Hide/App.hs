@@ -322,6 +322,8 @@ runEditor args = do
                     let permitted callback current name parameters
                           | name=="read_buffer" = readBufferTool bufferCommands (bufferReader permissions currentCaller) current name parameters
                           | name=="buffer_apply_diff" = bufferDiffTool diffCommands (bufferEditor permissions currentCaller) current name parameters
+                          | name=="ask_user",Nothing<-token = pure (current,pure (Left "ask_user requires the authenticated requesting agent."))
+                          | name=="ask_user" = permissionCallAs currentCaller permissions callback current name parameters
                           | otherwise = permissionCall permissions callback current name parameters
                         currentCaller=case token of
                           Nothing->pure (Right ())
@@ -338,8 +340,12 @@ runEditor args = do
                             case active >>= maybe (Left "Unknown workspace.") Right . parseMaybe (withObject "agent" (.: "cwd")) of
                               Left _ -> reject
                               Right root -> do
+                                questionCaller<-captureQuestionCaller conversation ident
                                 let dispatch current name parameters
                                       | name `elem` agentToolNames = pure (current,agentTool hub (AH.Agent ident) root name parameters)
+                                      | name `elem` chatToolNames = case questionCaller of
+                                          Left err->pure (current,pure (Left err))
+                                          Right caller->chatToolAs conversation (Just caller) current name parameters
                                       | otherwise = inspectTool current name parameters
                                     -- Worktree agents reach this endpoint only for
                                     -- coordination. Their editor tools use their own session.
