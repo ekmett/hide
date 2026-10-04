@@ -189,10 +189,11 @@ edgeChecks dir=withSidebarCommands $ \host->do
   base<-initializeSidebar host (installSidebar (emptySidebar dir 24 True) (initialDesktop (100,30)))
   withRegistry $ \registry->do
     replyGate<-newEmptyMVar
+    actionEntered<-newEmptyMVar
     leafRef<-newEmptyMVar
     count<-newMVar (0::Int)
     (provider,leaf)<-TreeExtension.declare registry
-      (\ctx->takeMVar replyGate >> SidebarPrepared <$> prepareMarkdown (sidebarColumns ctx) "/extension/help.md" "" "# Retired action\n")
+      (\ctx->void (tryPutMVar actionEntered ()) >> takeMVar replyGate >> SidebarPrepared <$> prepareMarkdown (sidebarColumns ctx) "/extension/help.md" "" "# Retired action\n")
       (\_ ->do
         next<-modifyMVar count (\value->pure (value+1,value+1))
         if next==1 then pure (Left (CommandRejected "fixture unavailable")) else do
@@ -210,24 +211,37 @@ edgeChecks dir=withSidebarCommands $ \host->do
     let resized=fst (handleEvent (V.EvResize 90 30) pendingResize)
     resizedResult<-await (tickSidebar host) (T.isInfixOf "expired" . status) resized
     check "prepared sidebar document refuses changed geometry" (not ("Retired action" `T.isInfixOf` activeText resizedResult))
-    invoked<-act host (activateTree False (atLabel "Inspect" recovered) recovered)
+    takeMVar actionEntered
+    let startInspect current=do
+          next<-tickSidebar host current
+          act host (activateTree False (atLabel "Inspect" next) next)
+    invoked<-await startInspect (T.isPrefixOf "Opening sidebar target" . status) recovered
+    readMVar actionEntered
     withdrawn<-retireTreeFromHost host (P.treeReference provider) invoked
     check "withdrawal removes cached root rows before another projection" (not (any ((=="Tools").P.infoLabel.rowInfo.snd) (visibleRows 0 32768 (treeOf withdrawn))))
-    putMVar replyGate ()
-    refused<-await (tickSidebar host) (T.isInfixOf "expired" . status) withdrawn
-    check "late retired action cannot install a prepared document" (not ("Retired action" `T.isInfixOf` activeText refused))
+    let openFile current=do
+          next<-tickSidebar host current
+          act host (activateTree False (atLabel "Main.hs" next) next)
+    refused<-await openFile (not . null . windows) withdrawn
+    check "retired blocked action is cancelled and releases the Files action slot" (activeText refused=="main = 1\n")
   scoped<-withRegistry $ \registry->do
     (provider,_)<-TreeExtension.declare registry (const (error "not invoked")) (const (pure (Right (P.NodePage [] Nothing))))
     publishTreeFromHost host provider
     live<-settle host base
     check "scoped provider was published" (any ((=="Tools").P.infoLabel.rowInfo.snd) (visibleRows 0 32768 (treeOf live)))
+    let toolRow=maybe (error "Tools row") id (rowAt (atLabel "Tools" live) (treeOf live))
+        oldTrace=hitTrace (keyOf (rowHit toolRow)) (treeOf live)
+    hidden<-act host (runCommand ToggleTree live)
+    reshown<-act host (hidden,[ReadTree dir]) >>= settle host
+    check "hide/show remounts still-live registered providers" (any ((=="Tools").P.infoLabel.rowInfo.snd) (visibleRows 0 32768 (treeOf reshown)))
+    check "reopened provider refuses its pre-hide captured trace" (not (hitCurrent oldTrace (treeOf reshown)))
     -- Only registration workers backpressure; owner ticks drain four deltas.
     replicateM_ 32 (publishTreeFromHost host provider)
     advanced<-withAsync (publishTreeFromHost host provider) $ \writer->do
       threadDelay 20000
       blocked<-poll writer
       check "publication queue backpressures only its producer" (case blocked of Nothing->True; _->False)
-      next<-tickSidebar host live
+      next<-tickSidebar host reshown
       resumed<-timeout 1000000 (wait writer)
       check "bounded owner drain releases publication producer" (case resumed of Just ()->True; _->False)
       pure next
@@ -238,9 +252,15 @@ edgeChecks dir=withSidebarCommands $ \host->do
   check "closing provider command scope withdraws its root" (not (any ((=="Tools").P.infoLabel.rowInfo.snd) (visibleRows 0 32768 (treeOf closed))))
 
 recoveryChecks :: FilePath -> IO ()
-recoveryChecks dir=withSidebarCommands $ \host->do
+recoveryChecks dir=withSidebarCommands $ \host->withRegistry $ \registry->do
   initial<-initializeSidebar host (installSidebar (emptySidebar dir 24 True) (initialDesktop (100,30)))
-  opened<-act host (activateTree True (atLabel "src" initial) initial) >>= settle host
+  (provider,_)<-TreeExtension.declare registry (const (error "not invoked")) (const (pure (Right (P.NodePage [] Nothing))))
+  publishTreeFromHost host provider
+  published<-settle host initial
+  relocated<-act host (published,[ReadTree (dir </> "src")]) >>= settle host
+  returned<-act host (relocated,[ReadTree dir]) >>= settle host
+  check "nonresource provider precedes recovered Files rows" (P.infoLabel (rowInfo (maybe (error "provider root") id (rowAt 0 (treeOf returned))))=="Tools")
+  opened<-act host (activateTree True (atLabel "src" returned) returned) >>= settle host
   let selected=select (atLabel "a.hs" opened) opened
       checkpoint=dir </> "sidebar.checkpoint"
       before=treeOf selected

@@ -46,14 +46,14 @@ data Sidebar = Sidebar
   { treeRoot :: FilePath, treeRows :: !(M.Map [Int] TreeRow), treeSelected :: !Int
   , treeScroll :: !Int, treeWidth :: !Int, treeFocused :: !Bool
   , treeNodes :: !(M.Map NodeKey NodeState), treeRoots :: !(S.Seq NodeKey)
-  , treeRevision :: !Integer, treeProjectionRevision :: !Integer
+  , treeEpoch :: !Integer, treeRevision :: !Integer, treeProjectionRevision :: !Integer
   , treeHints :: !(Maybe SidebarHints), treeAgentRefs :: ![TreeRef]
   , treeWatchPaths :: ![FilePath], treeBadges :: !(M.Map FilePath (Bool,Int,Int))
   } deriving (Eq,Show)
 data Projection = Projection !Integer !(M.Map [Int] TreeRow) !(M.Map RowKey Int) !(M.Map NodeKey NodeState) ![FilePath]
 
 emptySidebar :: FilePath -> Int -> Bool -> Sidebar
-emptySidebar path width focused=Sidebar path M.empty 0 0 width focused M.empty S.empty 0 (-1) Nothing [] [] M.empty
+emptySidebar path width focused=Sidebar path M.empty 0 0 width focused M.empty S.empty 1 0 (-1) Nothing [] [] M.empty
 nodeHit :: NodeKey -> NodeState -> TreeHit
 nodeHit (NodeKey ref ident) node=TreeHit ref ident (stateGeneration node)
 rowAt :: Int -> Sidebar -> Maybe TreeRow
@@ -92,7 +92,7 @@ addRoot ref info action actions tree
   | S.length (treeRoots tree)>=32 || M.size (treeNodes tree)>=32768=tree
   | otherwise=tree {treeNodes=M.insert key node (treeNodes tree),treeRoots=treeRoots tree S.|> key,treeRevision=treeRevision tree+1}
   where key=NodeKey ref (infoId info)
-        node=NodeState info 1 Nothing S.empty M.empty False Unloaded 0 [] action actions
+        node=NodeState info (treeEpoch tree) Nothing S.empty M.empty False Unloaded (treeEpoch tree) [] action actions
 removeRoot :: TreeRef -> Sidebar -> Sidebar
 removeRoot ref tree
   | null roots=tree
@@ -176,9 +176,9 @@ adoptPage request nodes next tree
       let key=NodeKey ref (infoId info)
           previous=M.lookup key values
           retained=previous >>= \old->if infoBranch info && infoBranch (stateInfo old) && infoResource info==infoResource (stateInfo old) then Just old else Nothing
-          node=NodeState info (maybe 1 ((+1).stateGeneration) previous) (Just parent)
+          node=NodeState info (maybe (treeEpoch tree) ((+1).stateGeneration) previous) (Just parent)
             (maybe S.empty stateChildren retained) (maybe M.empty stateChildIndex retained) (maybe False stateExpanded retained) (maybe Unloaded stateLoad retained)
-            (maybe 0 stateRequest previous) (maybe [] stateAddress previous) action actions
+            (maybe (treeEpoch tree) stateRequest previous) (maybe [] stateAddress previous) action actions
       in M.insert key node values
 failRequest :: TreeRequest -> Text -> Sidebar -> Sidebar
 failRequest request failure tree

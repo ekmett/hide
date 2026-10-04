@@ -209,11 +209,12 @@ sidebarValue :: Sidebar -> Value
 sidebarValue tree=object ["root" .= treeRoot tree,"selected" .= selected,"scroll" .= scrolled,"width" .= treeWidth tree,
   "focused" .= treeFocused tree,"rows" .= rows]
   where
-    prepared=[(P.infoLabel info,path,rowDepth row,P.infoBranch info,rowExpanded row) | row<-M.elems (treeRows tree),let info=rowInfo row,Just path<-[P.infoResource info]]
+    prepared=[(index,(P.infoLabel info,path,rowDepth row,P.infoBranch info,rowExpanded row)) | (index,row)<-zip [0..] (M.elems (treeRows tree)),let info=rowInfo row,Just path<-[P.infoResource info]]
+    resourceIndex index=fromMaybe 0 (findIndex ((==index).fst) prepared)
     (values,selected,scrolled)=case treeHints tree of
       Just (SidebarHints hints chosen topPath)->let locate wanted=maybe 0 (\path->fromMaybe 0 (findIndex ((==path).fst) hints)) wanted
         in ([(T.pack (takeFileName path),path,0,expanded,expanded) | (path,expanded)<-hints],locate chosen,locate topPath)
-      _->(prepared,treeSelected tree,treeScroll tree)
+      _->(map snd prepared,resourceIndex (treeSelected tree),resourceIndex (treeScroll tree))
     rows=[object ["name" .= name,"path" .= path,"depth" .= depth,"directory" .= directory,"expanded" .= expanded] | (name,path,depth,directory,expanded)<-values]
 
 desktopParser :: Desktop -> Value -> Parser Desktop

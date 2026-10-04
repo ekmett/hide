@@ -498,7 +498,10 @@ prefixes, spans, row indices and directory subscriptions; paint reads only the
 viewport slice and cached badges. Selected/top row identities anchor adoption.
 Provider/node/request generations and captured ancestry reject obsolete loads
 and actions. An obsolete Loading token is released without resetting a newer
-request. The host controls exact Files refs permitted for agent navigation;
+request. Hiding the sidebar retains live provider declarations; reopening remounts
+their prepared roots with fresh node/request epochs. Obsolete actions cancel on
+the existing worker queue and release their bounded slot after reaping. The host
+controls exact Files refs permitted for agent navigation;
 resource metadata never grants authority.
 
 There are at most four active child loads, 64 waiting loads, one projection, one
@@ -514,6 +517,7 @@ withdraws provider roots at the owner. Its secondary Open keeps the
 existing actor-stamped link worker/client-resource transport and a frozen sidebar
 target. Moving that transport into the typed reply path is a separate slice.
 Recovery stores bounded path/expansion/viewport hints, never live provider handles.
+Selection and top-row indices are remapped after filtering resource entries.
 It restores targets reachable through initial directory pages; hints beyond those
 pages wait for interactive paging.
 `SidebarCheck` exercises Files and an independently declared test provider through

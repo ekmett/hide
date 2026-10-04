@@ -13,7 +13,7 @@ import qualified Control.Concurrent.Async
 import Control.Concurrent.STM
 import Control.DeepSeq (force)
 import Control.Exception (bracket,evaluate,displayException)
-import Control.Monad (foldM,forever,forM,when)
+import Control.Monad (foldM,forever,forM,filterM,when)
 import Data.Aeson (Value(Null))
 import Data.IORef
 import Data.List (find,sortOn)
@@ -44,7 +44,7 @@ data SidebarContext = SidebarContext
 data SidebarReply = SidebarExisting !FilePath !Int !Int !ContentVersion | SidebarDocument !FilePath !Document | SidebarPrepared !LinkResult
 
 data ChildJob = ChildJob !TreeRequest !Menu.MenuOrigin !(Async (Either CommandError (P.PreparedPage SidebarContext SidebarReply))) !Bool
-data ActionJob = ActionJob ![P.TreeHit] !CommandRef !Menu.MenuOrigin !Int !(Async (Either CommandError SidebarReply))
+data ActionJob = ActionJob ![P.TreeHit] !CommandRef !Menu.MenuOrigin !Int !(Async (Either CommandError SidebarReply)) !Bool
 data FilesProvider = FilesProvider !(P.TreeProvider SidebarContext SidebarReply) !FilePath !CommandRef !(IORef (M.Map P.NodeId FilePath,M.Map FilePath P.NodeId,Int,M.Map FilePath [Entry]))
 data State = State
   { providers :: !(M.Map P.TreeRef (P.TreeProvider SidebarContext SidebarReply))
@@ -53,7 +53,8 @@ data State = State
   , projection :: !(Maybe (Integer,Async (Projection,M.Map NodeKey (P.NodeDef SidebarContext SidebarReply))))
   , actionJob :: !(Maybe ActionJob), filesProvider :: !(Maybe FilesProvider)
   , badgeStamp :: !(Maybe (StableName (M.Map Int Document)))
-  , badgeJob :: !(Maybe (StableName (M.Map Int Document),Async (M.Map FilePath (Bool,Int,Int)))) }
+  , badgeJob :: !(Maybe (StableName (M.Map Int Document),Async (M.Map FilePath (Bool,Int,Int))))
+  , sidebarRevision :: !Integer }
 data Cancellation = forall a. Cancellation (Async a)
 data SidebarHost = SidebarHost !(Registry SidebarContext) !(IORef State)
   !(TBQueue (P.TreeProvider SidebarContext SidebarReply)) !(TBQueue Cancellation) !(Async ())
@@ -64,7 +65,7 @@ withSidebarCommands :: (SidebarHost -> IO a) -> IO a
 withSidebarCommands use=withRegistry $ \registry->bracket (acquire registry) close use
   where
     acquire registry=do
-      state<-newIORef (State M.empty M.empty [] [] Nothing Nothing Nothing Nothing Nothing)
+      state<-newIORef (State M.empty M.empty [] [] Nothing Nothing Nothing Nothing Nothing 0)
       publications<-newTBQueueIO 32
       cancellation<-newTBQueueIO 32
       canceller<-async (forever (do Cancellation worker<-atomically (readTBQueue cancellation); cancel worker))
@@ -73,7 +74,7 @@ withSidebarCommands use=withRegistry $ \registry->bracket (acquire registry) clo
       state<-readIORef ref
       mapM_ (\(ChildJob _ _ worker _)->cancel worker) (jobs state)
       mapM_ (cancel . snd) (projection state)
-      mapM_ (\(ActionJob _ _ _ _ worker)->cancel worker) (actionJob state)
+      mapM_ (\(ActionJob _ _ _ _ worker _)->cancel worker) (actionJob state)
       mapM_ (cancel . snd) (badgeJob state)
       cancel canceller
 
@@ -204,7 +205,7 @@ readState (SidebarHost _ ref _ _ _)=readIORef ref
 sidebarEffects :: SidebarHost -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> [Effect] -> IO (Bool,Desktop)
 sidebarEffects host core d effects=do
   mounted<-mount host d
-  foldM step (False,mounted) effects >>= \(quit,next)->(quit,) <$> mount host next
+  foldM step (False,mounted) effects >>= \(quit,next)->(quit,) <$> (mount host next >>= rememberSidebar host)
   where
     step result@(True,_) _=pure result
     step (_,current) effect=case effect of
@@ -216,13 +217,17 @@ sidebarEffects host core d effects=do
 mount :: SidebarHost -> Desktop -> IO Desktop
 mount host@(SidebarHost _ ref _ _ _) d=case sideTree d of
   Nothing->pure d
-  Just tree->do
+  Just visible->do
     state<-readIORef ref
+    live<-filterM P.treeCurrent (M.elems (providers state))
+    let epoch=sidebarRevision state+1
+        basis=if M.null (treeNodes visible) then visible {treeEpoch=epoch,treeRevision=epoch} else visible
+        tree=foldl (flip addProvider) basis live
     case filesProvider state of
       Just (FilesProvider provider root _ _) | root==treeRoot tree->do
         let key=NodeKey (P.treeReference provider) (P.infoId (P.nodeInfo (P.treeRoot provider)))
             next=if M.member (P.treeReference provider) (providers state) then addProvider provider tree else tree
-        if M.member key (treeNodes tree) then pure d {sideTree=Just next}
+        if M.member key (treeNodes visible) then pure d {sideTree=Just next}
           else startRoot provider next
       _->do
         -- This path is startup/directory selection, which already belongs to the
@@ -242,6 +247,14 @@ mount host@(SidebarHost _ ref _ _ _) d=case sideTree d of
         Nothing->pure d {sideTree=Just tree,status="Sidebar provider/node budget reached; Files cannot be mounted."}
         Just node->let (opened,request)=requestChildren (nodeHit key node) Nothing tree
           in maybe (pure d {sideTree=Just opened}) (\value->enqueue host value Menu.HumanMenu d {sideTree=Just opened}) request
+
+-- A fresh visible tree starts above every prior publication revision. Root and
+-- request generations inherit that epoch, so reopening cannot alias old traces,
+-- queued child tokens or projection results. Remembering is constant-time.
+rememberSidebar :: SidebarHost -> Desktop -> IO Desktop
+rememberSidebar (SidebarHost _ ref _ _ _) d=do
+  mapM_ (\tree->modifyIORef' ref (\state->state {sidebarRevision=max (sidebarRevision state) (treeRevision tree)})) (sideTree d)
+  pure d
 
 enqueue :: SidebarHost -> TreeRequest -> Menu.MenuOrigin -> Desktop -> IO Desktop
 enqueue (SidebarHost _ ref _ _ _) request origin d=case sideTree d of
@@ -272,7 +285,7 @@ invokeAction (SidebarHost _ ref _ _ _) trace reference origin d=case (trace,side
       (Nothing,Just command) | live && allowed->do
         ctx<-captureActionContext origin trace d
         worker<-async (P.invokeTreeAction command ctx)
-        writeIORef ref state {actionJob=Just (ActionJob trace reference origin (sidebarColumns ctx) worker)}
+        writeIORef ref state {actionJob=Just (ActionJob trace reference origin (sidebarColumns ctx) worker False)}
         pure d {status="Opening sidebar target…"}
       _->pure d {status="Sidebar action is stale, protected or busy."}
   _->pure d {status="Sidebar action expired."}
@@ -336,7 +349,7 @@ tickSidebar host@(SidebarHost _ ref publications cancellation _) initial=do
   projected<-finishProjection host adopted
   restarted<-startLoads host projected
   startProjection host restarted
-  badges host restarted
+  badges host restarted >>= rememberSidebar host
   where
     finishChild state (d,keep) job@(ChildJob request origin worker cancelled)=do
       live<-maybe (pure False) P.treeCurrent (M.lookup (owner request) (providers state))
@@ -434,25 +447,29 @@ startProjection (SidebarHost _ ref _ _ _) d=do
     _->pure ()
 
 finishAction :: SidebarHost -> Desktop -> IO Desktop
-finishAction (SidebarHost _ ref _ _ _) d=do
+finishAction (SidebarHost _ ref _ cancellation _) d=do
   state<-readIORef ref
   case actionJob state of
     Nothing->pure d
-    Just (ActionJob trace reference origin columns worker)->do
+    Just (ActionJob trace reference origin columns worker cancelled)->do
+      let owner=case trace of P.TreeHit value _ _:_->Just value; _->Nothing
+      live<-maybe (pure False) P.treeCurrent (owner >>= (`M.lookup` providers state))
+      commandLive<-case trace of
+        hit:_->case M.lookup (keyOf hit) (definitions state) of
+          Just node->maybe (pure False) P.actionCurrent (find ((==reference).P.actionReference) (maybe [] pure (P.nodeAction node)++P.menuActions node))
+          _->pure False
+        _->pure False
+      let current=not cancelled && live && commandLive && columns==sidebarColumns (context origin d) && dialog d==Nothing && maybe False (\tree->treeFocused tree && hitCurrent trace tree) (sideTree d) &&
+            (origin==Menu.HumanMenu || maybe False (\tree->maybe False (`elem` treeAgentRefs tree) owner) (sideTree d))
       completed<-poll worker
       case completed of
+        Nothing | not current && not cancelled->do
+          queued<-atomically $ do full<-isFullTBQueue cancellation; if full then pure False else writeTBQueue cancellation (Cancellation worker) >> pure True
+          modifyIORef' ref (\s->s {actionJob=Just (ActionJob trace reference origin columns worker queued)})
+          pure d {status="Sidebar result expired."}
         Nothing->pure d
         Just result->do
           modifyIORef' ref (\s->s {actionJob=Nothing})
-          let owner=case trace of P.TreeHit value _ _:_->Just value; _->Nothing
-          live<-maybe (pure False) P.treeCurrent (owner >>= (`M.lookup` providers state))
-          commandLive<-case trace of
-            hit:_->case M.lookup (keyOf hit) (definitions state) of
-              Just node->maybe (pure False) P.actionCurrent (find ((==reference).P.actionReference) (maybe [] pure (P.nodeAction node)++P.menuActions node))
-              _->pure False
-            _->pure False
-          let current=live && commandLive && columns==sidebarColumns (context origin d) && dialog d==Nothing && maybe False (\tree->treeFocused tree && hitCurrent trace tree) (sideTree d) &&
-                (origin==Menu.HumanMenu || maybe False (\tree->maybe False (`elem` treeAgentRefs tree) owner) (sideTree d))
           case result of
             Right (Right (SidebarExisting path wid bid version)) | current->adoptExisting origin path wid bid version d
             _->pure $ if not current then d {status="Sidebar result expired."} else case result of
