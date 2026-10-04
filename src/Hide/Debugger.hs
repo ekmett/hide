@@ -213,10 +213,11 @@ recordSidebarResponse :: IORef State -> DebugPageRequest -> Value -> IO ()
 recordSidebarResponse ref (DebugPageRequest _ target _) body=modifyIORef' ref $ \s->case target of
   DebugThreads->s {sidebarThreads=M.fromList [(ident,()) | row<-take 128 (items "threads" body),let ident=integer "id" row,ident>0]}
   DebugStack tid->s {sidebarFrames=boundedUnion (M.fromList [((tid,fid),row) | row<-take 128 (items "stackFrames" body),let fid=integer "id" row,fid>0]) (sidebarFrames s)}
-  DebugScopes tid fid->s {sidebarReferences=boundedUnion (references tid fid "scopes") (sidebarReferences s)}
-  DebugVariables tid fid _->s {sidebarReferences=boundedUnion (references tid fid "variables") (sidebarReferences s)}
+  DebugScopes tid fid->s {sidebarReferences=boundedReferences (references tid fid "scopes") (sidebarReferences s)}
+  DebugVariables tid fid _->s {sidebarReferences=boundedReferences (references tid fid "variables") (sidebarReferences s)}
   where
     boundedUnion newer previous=fst (M.splitAt 32768 (M.union newer previous))
+    boundedReferences newer previous=fst (M.splitAt 32768 (M.unionWith (||) newer previous))
     references tid fid key=M.fromListWith (||) [((tid,fid,ident),key=="variables" && maybe False (flag "lazy") (field "presentationHint" row)) | row<-take 128 (items key body),let ident=integer "variablesReference" row,ident>0]
 
 selectSidebarFrame :: Debugger -> Core -> DebugSidebarRequest -> Desktop -> IO Desktop
@@ -797,7 +798,22 @@ receive runtime@(Debugger ref clock _ _) core d event = do
         else when (stacks && stopped s) $ forM_ (thread s) (\tid -> sendStack runtime False tid)
         pure (clearDialog d) {status="Debugger values changed; request scopes again."}
     D.Notification "continued" _ -> modifyIORef' ref invalidate >> pure (automaticDesktop s d) {status="Running..."}
-    D.Notification "thread" _ -> when (configured s) (send runtime (Threads False) "threads" (object [])) >> pure d
+    D.Notification "thread" body -> do
+      -- DAP thread changes can retire stack owners without a continued event.
+      -- Conservatively expire the stop's references, retaining stopped state and
+      -- selection when its thread survives. Source/picker replies use the same
+      -- new epoch; no stale child page can revive an exited thread.
+      when (stopped s) $ modifyIORef' ref (\state->state
+        { generation=generation state+1,frameRevision=frameRevision state+1
+        , choices=M.empty,variableRefs=M.empty,sidebarPages=M.empty
+        , sidebarThreads=M.empty,sidebarFrames=M.empty,sidebarReferences=M.empty
+        , thread=if exitedSelection then Nothing else thread state
+        , frame=if exitedSelection then Nothing else frame state
+        , frames=if exitedSelection then [] else frames state })
+      when (configured s) (send runtime (Threads False) "threads" (object []))
+      pure d
+      where exitedSelection=text "reason" body=="exited" && field "threadId" body==thread s
+
     D.Notification "terminated" _ -> do
       now<-clock
       mapM_ (\(kind,_,_) -> completeInspection kind (Left "Debug session ended.")) (M.elems (pending s))

@@ -564,4 +564,5 @@ admits at most four messages. Validated pages are capped at 1 MiB and 64 cached
 pages per stop. Cache validation and prepared presentation run off the UI lock;
 owner maps retain scalar provenance and validated immutable rows, never document
 payloads. `DebuggerSidebarCheck` exercises real fake-DAP interleaving, captured
-frame activation, passive cached ticks, lazy reference refusal and resume expiry.
+frame activation, passive cached ticks, sticky lazy-reference refusal, resume
+expiry and thread-exit refusal of delayed child pages.
