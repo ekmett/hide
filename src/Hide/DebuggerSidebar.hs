@@ -23,7 +23,7 @@ import qualified Data.Map.Strict as M
 import Data.Text (Text)
 import qualified Data.Text as T
 import Text.Read (readMaybe)
-import Hide.Debugger (Debugger,debuggerSidebarEpoch,debuggerSidebarSession,debuggerSidebarRead)
+import Hide.Debugger (Debugger,debuggerSidebarEpoch,debuggerSidebarSession,debuggerSidebarRead,debuggerWatches)
 import Hide.DebuggerSidebarTypes
 import Hide.Model (Desktop(..),Effect(LoadTree))
 import Hide.Sidebar
@@ -32,7 +32,7 @@ import qualified Hide.Plugin.Menu as Menu
 import qualified Hide.Plugin.Tree as P
 import Hide.SidebarCommands
 
-data DebuggerSidebar = DebuggerSidebar !P.TreeRef !(IORef (Maybe Int)) !(IORef (Maybe Int))
+data DebuggerSidebar = DebuggerSidebar !P.TreeRef !(IORef (Maybe Int)) !(IORef (Maybe Int)) !P.TreeRef !(IORef (Maybe Int))
 
 rootId :: P.NodeId
 rootId=ident "debug"
@@ -47,6 +47,7 @@ withDebuggerSidebar :: SidebarHost -> Debugger -> (DebuggerSidebar -> IO a) -> I
 withDebuggerSidebar host runtime use=withRegistry $ \registry->do
   selected<-newIORef Nothing
   shownSession<-newIORef Nothing
+  watchRevisionSeen<-newIORef Nothing
   open<-registerCommand registry (CommandDef "hide.sidebar.debug.source" "Go to source" hidden hidden $ \ctx captured->
     pure $ if sidebarOrigin ctx==Menu.HumanMenu then Right (SidebarDebug captured)
       else Left (CommandRejected "Debug sidebar actions require human input.")) >>= either (ioError . userError . show) pure
@@ -69,13 +70,35 @@ withDebuggerSidebar host runtime use=withRegistry $ \registry->do
                   pure (Right (P.NodePage rows (continuation request offset body (length rows))))
   provider<-P.registerTree registry "hide.sidebar.debug" root children >>= either (ioError . userError . show) pure
   publishTreeFromHost host provider
-  use (DebuggerSidebar (P.treeReference provider) selected shownSession)
+  let registerWatch name title=registerCommand registry (CommandDef name title hidden hidden $ \ctx captured->
+        pure $ if sidebarOrigin ctx==Menu.HumanMenu then Right (SidebarDebug captured)
+          else Left (CommandRejected "Watch changes require human input.")) >>= either (ioError . userError . show) pure
+  add<-registerWatch "hide.sidebar.debug.watch-add" "Add watch"
+  edit<-registerWatch "hide.sidebar.debug.watch-edit" "Edit watch"
+  remove<-registerWatch "hide.sidebar.debug.watch-remove" "Remove watch"
+  let watchAction command captured=P.treeAction registry command captured (\_ value->pure value)
+      watchesRoot=P.NodeDef (P.NodeInfo watchesId "Watches" "" True Nothing) Nothing [P.ActionMenu "Add watch…" (watchAction add AddDebugWatch)]
+      watchChildren _ (P.ChildRequest parent cursor)
+        | parent/=watchesId || cursor/=Nothing=pure (Left (CommandRejected "Watch node expired."))
+        | otherwise=do
+            (_,entries)<-debuggerWatches runtime
+            let rows=map (watchNode (watchAction edit) (watchAction remove)) (M.toList entries)
+                emptyRow=P.NodeDef (P.NodeInfo (ident "watch-empty") "No watches; add an expression" "" False Nothing) Nothing []
+            pure (Right (P.NodePage (if null rows then [emptyRow] else rows) Nothing))
+  watches<-P.registerTree registry "hide.sidebar.watches" watchesRoot watchChildren >>= either (ioError . userError . show) pure
+  publishTreeFromHost host watches
+  use (DebuggerSidebar (P.treeReference provider) selected shownSession (P.treeReference watches) watchRevisionSeen)
   where hidden=Codec Null (const (Left "Debug sidebar arguments are host-captured.")) (const Null)
 
 -- | /O(1)/ stopped projection comparison. Scoped refresh performs metadata
 -- invalidation; cached indexed rows retain selection and viewport anchors.
 tickDebuggerSidebar :: DebuggerSidebar -> SidebarHost -> Debugger -> Desktop -> IO Desktop
-tickDebuggerSidebar (DebuggerSidebar owner ref shown) host runtime d=do
+tickDebuggerSidebar (DebuggerSidebar owner ref shown watchOwner watchSeen) host runtime original=do
+  (revision,_)<-debuggerWatches runtime
+  oldRevision<-readIORef watchSeen
+  d<-if oldRevision==Just revision then pure original else do
+    writeIORef watchSeen (Just revision)
+    refreshTreeFromHost host watchOwner watchesId original
   epoch<-debuggerSidebarEpoch runtime
   previous<-readIORef ref
   refreshed<-if previous==epoch then pure d else do
@@ -90,6 +113,22 @@ tickDebuggerSidebar (DebuggerSidebar owner ref shown) host runtime d=do
         let (opened,request)=requestChildren (nodeHit (NodeKey owner rootId) root) Nothing tree
         maybe (pure refreshed) (\value->snd <$> sidebarEffects host (\current _->pure (False,current)) refreshed {sideTree=Just opened} [LoadTree value Menu.HumanMenu]) request
     _->pure refreshed
+
+watchesId :: P.NodeId
+watchesId=ident "watches"
+
+watchNode :: (DebugSidebarRequest -> P.TreeAction SidebarContext SidebarReply)
+  -> (DebugSidebarRequest -> P.TreeAction SidebarContext SidebarReply)
+  -> (Int,DebuggerWatch) -> P.NodeDef SidebarContext SidebarReply
+watchNode editAction removeAction (key,entry)=P.NodeDef
+  (P.NodeInfo (node "watch" [key]) title "" False (watchOrigin entry)) (Just edit)
+  [P.ActionMenu "Remove watch" (removeAction (RemoveDebugWatch key (watchRevision entry)))]
+  where
+    edit=editAction (EditDebugWatch key (watchRevision entry))
+    -- An originless private role is conservatively hidden, while canonical
+    -- source origins use the ordinary shared row privacy projection.
+    expression=if watchPrivate entry && watchOrigin entry==Nothing then "Private watch" else watchExpression entry
+    title=bounded (expression<>" [pending; evaluate explicitly]")
 
 pageOffset :: Maybe Text -> Maybe Int
 pageOffset token=do

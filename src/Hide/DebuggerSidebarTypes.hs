@@ -8,7 +8,8 @@
 -- Captured debugger targets carry the stopped epoch and their DAP owner IDs.
 -- Labels and filesystem paths cannot select a debugger operation.
 module Hide.DebuggerSidebarTypes
-  ( DebugSidebarRequest(..)
+  ( DebuggerWatch(..)
+  , DebugSidebarRequest(..)
   , DebugPageTarget(..)
   , DebugPageRequest(..)
   , DebugSourceOperation(..), DebugSourceRequest(..)
@@ -20,7 +21,15 @@ import Hide.Plugin.BufferHost (ContentVersion)
 
 -- | Only explicit sidebar activation changes the selected frame/source.
 -- Choosing a frame preserves other frames' stopped-state handles.
-data DebugSidebarRequest = SelectDebugFrame !Int !Int !Int deriving (Eq,Show)
+data DebugSidebarRequest = SelectDebugFrame !Int !Int !Int
+  | AddDebugWatch | EditDebugWatch !Int !Int | RemoveDebugWatch !Int !Int deriving (Eq,Show)
+
+-- | Bounded immutable expression metadata published by the existing debugger
+-- owner. IDs are monotonic; an edit advances its revision, removal never reuses it.
+-- Canonical origin is privacy provenance and grants no source/file authority.
+data DebuggerWatch = DebuggerWatch
+  { watchExpression :: !Text, watchRevision :: !Int
+  , watchOrigin :: !(Maybe FilePath), watchPrivate :: !Bool }
 
 -- | The owner validates thread/frame/reference provenance before enqueuing DAP.
 -- Variable targets retain both their thread and frame, not just an adapter ID.

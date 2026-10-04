@@ -6,7 +6,7 @@
 -- them may execute target code. Replacements retire transport/consoles before
 -- reusing endpoints. Consented hdb acquisition retains the exact launch context
 -- and cannot revive a superseded launch after installation completes.
-module Hide.Debugger (Debugger, Core, withDebugger, withDebuggerConsoles, withDebuggerClock, withDebuggerHdb, hdbOfferDialog, downloadsDialog, debuggerEffects, tickDebugger, debuggerTool, debuggerSidebarEpoch, debuggerSidebarSession, debuggerSidebarRead) where
+module Hide.Debugger (Debugger, Core, withDebugger, withDebuggerConsoles, withDebuggerClock, withDebuggerHdb, hdbOfferDialog, downloadsDialog, debuggerEffects, tickDebugger, debuggerTool, debuggerSidebarEpoch, debuggerSidebarSession, debuggerSidebarRead, debuggerWatches) where
 
 import Hide.Sidebar
 import Hide.DebuggerSidebarTypes
@@ -51,7 +51,7 @@ import Hide.Model
 
 type Core = Desktop -> [Effect] -> IO (Bool,Desktop)
 data Debugger = Debugger (IORef State) (IO Integer) HdbRuntime SidebarMailbox
-data SidebarMailbox = SidebarMailbox !(TVar (Maybe (Int,Int,FilePath))) !(TBQueue SidebarIngress)
+data SidebarMailbox = SidebarMailbox !(TVar (Maybe (Int,Int,FilePath))) !(TBQueue SidebarIngress) !(TVar (Int,M.Map Int DebuggerWatch))
 data SidebarIngress = ReadDebugPage !DebugPageRequest !(TMVar (Either Text Value)) | CacheDebugPage !DebugPageRequest !Value
   | ReadDebugSource !Int !Int !Int !(Maybe FilePath) !(MVar (Either Text Value))
 data Pending = Init | Attach | Configure | Breaks Text [Int] | Exceptions | Threads Bool
@@ -79,14 +79,14 @@ data State = State
   , sidebarReferences :: M.Map (Int,Int,Int) Bool
   , sourcePreparing :: Maybe SourcePreparation
   , sourceReferences :: M.Map Int SourceObservation, nextSourceObservation :: Int
-  , watchExpressions :: M.Map Int Text, nextWatch :: Int, sourceWatchDialog :: Maybe (Int,DebugSourceRequest)
+  , watchExpressions :: M.Map Int DebuggerWatch, watchCatalogueRevision :: Int, nextWatch :: Int, watchDialog :: Maybe (Int,Maybe (Int,Int)), sourceWatchDialog :: Maybe (Int,DebugSourceRequest)
   }
 
 emptyState :: State
 emptyState = State {client=Nothing,connected=False,capabilities=Null,ready=False,configured=False,pending=M.empty,generation=0,frameRevision=0,
   stopped=False,thread=Nothing,frame=Nothing,frames=[],followSource=True,exceptionFilters=[],breakpoints=M.empty,sources=M.empty,
   root=".",endpoint=("127.0.0.1",4711),output="",failure=Nothing,disconnectAt=Nothing,endedAt=Nothing,programExitCode=Nothing,
-  hdbLauncher=Nothing,debugEnvironment=[],debugConsoles=[],terminalLaunch=Nothing,outputShown=False,choices=M.empty,choiceId=0,breakRequests=M.empty,breakModified=M.empty,startRequest=("attach",object []),managed=False,adapterId="",variableRefs=M.empty,sidebarVisible=False,sidebarSession=0,sidebarPages=M.empty,sidebarThreads=M.empty,sidebarFrames=M.empty,sidebarReferences=M.empty,sourcePreparing=Nothing,sourceReferences=M.empty,nextSourceObservation=1,watchExpressions=M.empty,nextWatch=1,sourceWatchDialog=Nothing}
+  hdbLauncher=Nothing,debugEnvironment=[],debugConsoles=[],terminalLaunch=Nothing,outputShown=False,choices=M.empty,choiceId=0,breakRequests=M.empty,breakModified=M.empty,startRequest=("attach",object []),managed=False,adapterId="",variableRefs=M.empty,sidebarVisible=False,sidebarSession=0,sidebarPages=M.empty,sidebarThreads=M.empty,sidebarFrames=M.empty,sidebarReferences=M.empty,sourcePreparing=Nothing,sourceReferences=M.empty,nextSourceObservation=1,watchExpressions=M.empty,watchCatalogueRevision=0,nextWatch=1,watchDialog=Nothing,sourceWatchDialog=Nothing}
 
 withDebugger :: (Debugger -> IO a) -> IO a
 withDebugger action = C.withConsoles (\consoles -> withDebuggerConsoles consoles action)
@@ -112,13 +112,13 @@ withDebuggerHdbConsoles :: C.Consoles -> IO Integer -> (Compilers.Compiler -> IO
 withDebuggerHdbConsoles consoles clock prepare acquire action = Downloads.withDownloads $ \downloads -> do
   jobs<-newIORef (HdbState 0 Nothing Nothing Nothing Nothing [])
   retired<-newIORef []
-  mailbox<-SidebarMailbox <$> newTVarIO Nothing <*> newTBQueueIO 32
+  mailbox<-SidebarMailbox <$> newTVarIO Nothing <*> newTBQueueIO 32 <*> newTVarIO (0,M.empty)
   let runtime=HdbRuntime downloads jobs prepare acquire consoles retired
   bracket ((\ref -> Debugger ref clock runtime mailbox) <$> newIORef emptyState)
     (\debugger@(Debugger ref _ _ _) -> do
       h<-readIORef jobs
       mapM_ (\(_,_,_,task)->cancel task) (hdbPreparing h)
-      atomically $ case mailbox of SidebarMailbox epoch _->writeTVar epoch Nothing
+      atomically $ case mailbox of SidebarMailbox epoch _ _->writeTVar epoch Nothing
       readIORef ref >>= stopTransport debugger
       readIORef retired >>= mapM_ waitCatch) action
 
@@ -134,7 +134,7 @@ debuggerEffects runtime fallback = foldM apply . (False,)
       next<-sourceAction runtime request d
       pure (False,next)
     apply (_,d) (DebugSidebarAction request) = do
-      next<-selectSidebarFrame runtime fallback request d
+      next<-sidebarAction runtime fallback request d
       publishSidebarEpoch runtime
       pure (False,next)
     apply (_,d) effect@(AgentAction action values)
@@ -145,22 +145,28 @@ debuggerEffects runtime fallback = foldM apply . (False,)
 -- | /O(1)/ immutable stopped projection. Provider workers borrow no mutable
 -- debugger state; frame choice cannot expire sibling stopped handles.
 debuggerSidebarEpoch :: Debugger -> IO (Maybe Int)
-debuggerSidebarEpoch (Debugger _ _ _ (SidebarMailbox epoch _))=fmap (fmap (\(_,captured,_)->captured)) (readTVarIO epoch)
+debuggerSidebarEpoch (Debugger _ _ _ (SidebarMailbox epoch _ _))=fmap (fmap (\(_,captured,_)->captured)) (readTVarIO epoch)
 
 -- | Session identity for revealing Debug once; a later stop keeps the viewport.
 debuggerSidebarSession :: Debugger -> IO (Maybe Int)
-debuggerSidebarSession (Debugger _ _ _ (SidebarMailbox epoch _))=fmap (fmap (\(session,_,_)->session)) (readTVarIO epoch)
+debuggerSidebarSession (Debugger _ _ _ (SidebarMailbox epoch _ _))=fmap (fmap (\(session,_,_)->session)) (readTVarIO epoch)
+
+-- | /O(1)/ borrow of the bounded immutable expression catalogue. Sidebar workers
+-- prepare presentation; this projection never reads mutable debugger state.
+debuggerWatches :: Debugger -> IO (Int,M.Map Int DebuggerWatch)
+debuggerWatches (Debugger _ _ _ (SidebarMailbox _ _ watches))=readTVarIO watches
 
 publishSidebarEpoch :: Debugger -> IO ()
-publishSidebarEpoch (Debugger ref _ _ (SidebarMailbox epoch _))=do
+publishSidebarEpoch (Debugger ref _ _ (SidebarMailbox epoch _ watches))=do
   s<-readIORef ref
   atomically (writeTVar epoch (if sidebarVisible s && stopped s && configured s && isJust (client s) && endedAt s==Nothing && disconnectAt s==Nothing then Just (sidebarSession s,generation s,root s) else Nothing))
+  atomically (writeTVar watches (watchCatalogueRevision s,watchExpressions s))
 
 -- | Wait on a sidebar worker. Only the debugger owner validates provenance and
 -- enqueues its ordinary DAP request. Response sizing/cache preparation happen here,
 -- outside the UI lock; owner cache admission retains at most 64 pages of 1 MiB.
 debuggerSidebarRead :: Debugger -> DebugPageRequest -> IO (Either Text Value)
-debuggerSidebarRead (Debugger _ _ _ (SidebarMailbox epoch queue)) request@(DebugPageRequest captured target _)=do
+debuggerSidebarRead (Debugger _ _ _ (SidebarMailbox epoch queue _)) request@(DebugPageRequest captured target _)=do
   current<-readTVarIO epoch
   if fmap (\(_,value,_)->value) current/=Just captured then pure (Left "Debugger node expired.") else do
     reply<-newEmptyTMVarIO
@@ -187,7 +193,7 @@ debuggerSidebarRead (Debugger _ _ _ (SidebarMailbox epoch queue)) request@(Debug
 -- At most four small mailbox messages per tick. Backpressure belongs to provider
 -- workers; the session owner never waits for a producer or a DAP socket.
 drainSidebarReads :: Debugger -> Desktop -> IO ()
-drainSidebarReads runtime@(Debugger ref _ _ (SidebarMailbox _ queue)) d=forM_ [1..4::Int] $ \_->do
+drainSidebarReads runtime@(Debugger ref _ _ (SidebarMailbox _ queue _)) d=forM_ [1..4::Int] $ \_->do
   next<-atomically (tryReadTBQueue queue)
   forM_ next $ \ingress->do
     s<-readIORef ref
@@ -238,8 +244,59 @@ recordSidebarResponse ref (DebugPageRequest _ target _) body=modifyIORef' ref $ 
     boundedReferences newer previous=fst (M.splitAt 32768 (M.unionWith (||) newer previous))
     references tid fid key=M.fromListWith (||) [((tid,fid,ident),key=="variables" && maybe False (flag "lazy") (field "presentationHint" row)) | row<-take 128 (items key body),let ident=integer "variablesReference" row,ident>0]
 
-selectSidebarFrame :: Debugger -> Core -> DebugSidebarRequest -> Desktop -> IO Desktop
-selectSidebarFrame runtime@(Debugger ref _ _ _) core (SelectDebugFrame epoch tid fid) d=do
+sidebarAction :: Debugger -> Core -> DebugSidebarRequest -> Desktop -> IO Desktop
+sidebarAction runtime@(Debugger ref _ _ _) core request d
+  | dialog d/=Nothing || questionActive d=pure d {status="Debugger action is unavailable while a dialog owns input."}
+  | otherwise=case request of
+      SelectDebugFrame epoch tid fid->selectSidebarFrame runtime core epoch tid fid d
+      AddDebugWatch->watchPrompt runtime Nothing d
+      EditDebugWatch ident revision->do
+        s<-readIORef ref
+        case M.lookup ident (watchExpressions s) of
+          Just entry | watchRevision entry==revision->watchPrompt runtime (Just (ident,entry)) d
+          _->pure d {status="Watch expired."}
+      RemoveDebugWatch ident revision->do
+        s<-readIORef ref
+        case M.lookup ident (watchExpressions s) of
+          Just entry | watchRevision entry==revision->do
+            modifyIORef' ref (\current->current {watchExpressions=M.delete ident (watchExpressions current),watchCatalogueRevision=watchCatalogueRevision current+1})
+            pure d {status="Watch removed."}
+          _->pure d {status="Watch expired."}
+
+watchPrompt :: Debugger -> Maybe (Int,DebuggerWatch) -> Desktop -> IO Desktop
+watchPrompt (Debugger ref _ _ _) chosen d=do
+  s<-readIORef ref
+  let ident=choiceId s+1
+      expression=maybe "" (watchExpression.snd) chosen
+      origin=chosen >>= watchOrigin.snd
+      private=maybe False (watchPrivate.snd) chosen
+      target=fmap (\(key,entry)->(key,watchRevision entry)) chosen
+  modifyIORef' ref (\current->current {choiceId=ident,watchDialog=Just (ident,target)})
+  pure d {dialog=Just (Dialog (if isJust chosen then "Edit watch" else "Add watch") (DebuggerWatchDialog ident origin private)
+    [SelectedInput "Expression" expression (Selection 0 (T.length expression))] 0 ["Save","Cancel"]
+    ["Evaluation is explicit and can execute program code."]),status="Enter a watch expression."}
+
+storeWatch :: Debugger -> Maybe (Int,Int) -> Text -> Maybe FilePath -> Bool -> Desktop -> IO Desktop
+storeWatch (Debugger ref _ _ _) target expression origin private d=do
+  s<-readIORef ref
+  let chosen=target >>= \(ident,revision)->case M.lookup ident (watchExpressions s) of
+        Just entry | watchRevision entry==revision->Just (ident,entry)
+        _->Nothing
+  if T.null (T.strip expression) || T.compareLength expression 4096==GT || T.any (=='\0') expression
+    then pure d {status="Watch expression must contain 1–4096 characters without NUL."}
+  else if isJust target && not (isJust chosen) then pure d {status="Watch changed; reopen its editor."}
+  else if not (isJust target) && M.size (watchExpressions s)>=128 then pure d {status="Watch limit reached; remove a watch first."}
+  else do
+    let ident=maybe (nextWatch s) fst chosen
+        entry=case chosen of
+          Nothing->DebuggerWatch (T.copy expression) 0 origin private
+          Just (_,previous)->previous {watchExpression=T.copy expression,watchRevision=watchRevision previous+1}
+    modifyIORef' ref (\current->current {watchExpressions=M.insert ident entry (watchExpressions current),
+      nextWatch=if isJust chosen then nextWatch current else nextWatch current+1,watchCatalogueRevision=watchCatalogueRevision current+1})
+    pure d {status=if isJust chosen then "Watch updated." else "Watch added."}
+
+selectSidebarFrame :: Debugger -> Core -> Int -> Int -> Int -> Desktop -> IO Desktop
+selectSidebarFrame runtime@(Debugger ref _ _ _) core epoch tid fid d=do
   s<-readIORef ref
   if not (validSidebarRequest s (DebugPageRequest epoch (DebugScopes tid fid) 0)) || dialog d/=Nothing
     then pure d {status="Debugger frame expired."}
@@ -326,7 +383,7 @@ debuggerTool runtime@(Debugger ref _ _ _) core d name arguments = do
               Left err->pure (Left err)
               Right canonical | maybe False (protectedFilePath private) canonical->pure (Left "Debugger source is private.")
               Right canonical->do
-                let Debugger _ _ _ (SidebarMailbox _ queue)=runtime
+                let Debugger _ _ _ (SidebarMailbox _ queue _)=runtime
                 result<-timeout 16000000 $ do
                   atomically (writeTBQueue queue (ReadDebugSource captured reference stamp canonical reply))
                   awaitInspection ref captured reply
@@ -583,13 +640,13 @@ perform runtime@(Debugger ref clock _ _) core action values d = do
     (watchAction,button:expression:_) | Just suffix<-T.stripPrefix "source-watch:" watchAction,Just ident<-readMaybe (T.unpack suffix),Just (current,captured)<-sourceWatchDialog s,ident==current->do
       modifyIORef' ref (\state->state {sourceWatchDialog=Nothing})
       valid<-sourceCurrent captured d
-      pureResult<-if button/="0" then pure d else if not valid then pure d {status="Watch source changed; open its context menu again."}
-        else if T.null (T.strip expression) || T.length expression>4096 || T.any (=='\0') expression then pure d {status="Watch expression must contain 1–4096 characters without NUL."}
-        else if M.size (watchExpressions s)>=128 then pure d {status="Watch limit reached; remove a watch first."}
-        else do
-          modifyIORef' ref (\state->state {watchExpressions=M.insert (nextWatch state) expression (watchExpressions state),nextWatch=nextWatch state+1})
-          pure d {status="Watch added."}
-      pure pureResult
+      if button/="0" then pure d else if not valid then pure d {status="Watch source changed; open its context menu again."}
+        else storeWatch runtime Nothing expression
+          (case debugSourceCanonical captured of Just path->Just path; Nothing->activeDocument d >>= documentOrigin)
+          (protectedBuffer d (debugSourceBuffer captured)) d
+    (watchAction,button:expression:_) | Just suffix<-T.stripPrefix "watch-edit:" watchAction,Just ident<-readMaybe (T.unpack suffix),Just (current,target)<-watchDialog s,ident==current->do
+      modifyIORef' ref (\state->state {watchDialog=Nothing})
+      if button/="0" then pure d else storeWatch runtime target expression Nothing False d
     ("breakpoint",_) -> toggleBreakpoint runtime d
     ("breakpoints",_) -> do
       let rows=[object ["key" .= key,"line" .= bpLine bp] | (key,_,bp)<-allBreakpoints s]
@@ -704,7 +761,7 @@ initializeSession runtime@(Debugger ref _ _ _) directory c address requestName a
   s<-readIORef ref
   stopTransport runtime s
   writeIORef ref emptyState {client=Just c,generation=generation s+1,root=directory,endpoint=address,
-    watchExpressions=watchExpressions s,nextWatch=nextWatch s,followSource=followSource s,sidebarVisible=followSource s,sidebarSession=generation s+1,breakpoints=persistentBreakpoints s,breakModified=breakModified s,startRequest=(requestName,arguments),managed=owned,adapterId=adapter}
+    watchExpressions=watchExpressions s,watchCatalogueRevision=watchCatalogueRevision s,nextWatch=nextWatch s,choiceId=choiceId s,followSource=followSource s,sidebarVisible=followSource s,sidebarSession=generation s+1,breakpoints=persistentBreakpoints s,breakModified=breakModified s,startRequest=(requestName,arguments),managed=owned,adapterId=adapter}
   pure (automaticDesktop s d) {status="Connecting debugger..."}
 
 debuggerConsoles :: Debugger -> C.Consoles
@@ -1332,6 +1389,7 @@ clearDialog :: Desktop -> Desktop
 clearDialog d = case dialog d of
   Just dg | DebugDialog{}<-purpose dg->d {dialog=Nothing}
   Just dg | DebugSourceWatchDialog{}<-purpose dg->d {dialog=Nothing}
+  Just dg | DebuggerWatchDialog{}<-purpose dg->d {dialog=Nothing}
   _->d
 sourceKey :: Value -> Text
 sourceKey source = text "path" source<>"#"<>tshow (integer "sourceReference" source)

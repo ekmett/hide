@@ -626,8 +626,15 @@ existing debugger-owned source map can. Source replacement advances revision.
 `MenuContextCheck` covers stamped browser/native routing, byte/modal/agent refusal,
 equal-revision buffer replacement and changed-source watch confirmation. Watch
 expressions are stored in the existing owner (128 entries, 4096 characters each);
-the Watches tree and explicit evaluation/Force remain the next slice. Local
-source following still uses the existing synchronous owner route.
+Watches is an ordinary scoped, collapsible root available without a stopped
+session. Add/Edit/Remove use captured human-only actions; IDs are never reused
+and edit revisions reject stale rows and confirmations. Canonical source origins
+and captured privacy protect the expression editor and shared row projection.
+Owner ticks compare only the catalogue revision; provider workers prepare labels.
+`DebuggerSidebarCheck` covers the live management route, stale Remove after Edit,
+expression bounds and private editor fields. Management and passive expansion do
+not evaluate. Explicit evaluation/Force remain the next slice. Local source
+following still uses the existing synchronous owner route.
 
 Debugger source inspection accepts only positive references observed in current
 stopped stack metadata, including human, inspector and sidebar stacks. Source
