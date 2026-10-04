@@ -558,6 +558,45 @@ scoped nodes via `refreshTreeFromHost`, which reuses ordinary request generation
 worker cancellation and page adoption. `SelectedInput` supplies a reusable
 single-line selected range; ordinary caret-only Input behavior is unchanged.
 
+## Prepared plugin text windows
+
+`Hide.Plugin.Window.prepareTextWindow` and `prepareMarkdownWindow` prepare
+read-only content on a command's worker. `withWindowScope` bounds its publication
+lifetime. `openTextWindow` returns an opaque `WindowUpdate` for a new exact
+instance; `refreshTextWindow` publishes a later complete prepared presentation.
+A `MenuReply` can return `PreparedWindow`
+through the existing contributed-menu adapter. The host checks the exact menu
+registration and captured target before installing the result; plugins never
+receive a mutable Desktop or a rendering callback.
+
+The view has its own window identity and normal frame, title, number, focus,
+movement and resize geometry. It adds no source Document or BufferRef.
+`Window.windowContent` distinguishes source identity from plugin content, and
+`bufferId` returns `Nothing` for plugin views. Source-only services use the
+checked `windowDocument` lookup. Selection and copying operate on the prepared
+semantic text; source editing, Save and language tooling are unavailable there.
+
+The initial presentation is private to guests and masked by Streamer mode.
+The same adapter accepts `SidebarWindow` replies after existing sidebar action
+checks. Duplicate opens and stale refreshes are refused, and refresh retains host
+geometry and selection, clamping offsets when text shrinks. Closing it removes the prepared content while preserving
+source documents; an escaped update cannot reopen the closed instance. Scope
+retirement revokes further publication. All plugin titles are masked in streamer
+mode, including application and Dock metadata. A retired scope retains its
+read-only snapshot with an unavailable title; its old references cannot refresh
+or reopen it.
+
+Ordinary views are transient. `prepareRecoverableTextWindow` explicitly declares
+non-secret text eligible for private recovery, with a namespaced type ID and
+positive format version. Recovery preserves text, title and host geometry in an
+inert unavailable view with a fresh revoked reference. Parsing never runs plugin
+code and a restored type does not automatically reattach to a registration.
+Prepared content identities make redraw/checkpoint invalidation shallow.
+
+Public privacy grants, automatic reattachment and richer widget APIs remain tracked in
+[#5](https://github.com/ekmett/hide/issues/5). Editable widgets and the broader
+`WindowDef` signatures in the design document remain proposed.
+
 Agent sidebar configuration returns prepared public choices with an opaque receipt
 from the existing hub epoch/capability version. Child configuration rechecks it
 inside the ordinary child-control reservation; Primary retains its own ACP

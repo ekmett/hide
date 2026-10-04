@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module WorkerDiffCheck (checks) where
 
+import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar
 import Control.Concurrent.Async
@@ -34,7 +35,7 @@ checks=withBufferDiffCommands $ \commands->bracket temporary removePathForcibly 
       enable=TIO.writeFile path "[editor.mcp.permissions]\nbuffer_apply_diff = 'enable'\n"
       prompt=TIO.writeFile path "[editor.mcp.permissions]\nbuffer_apply_diff = 'prompt'\n"
       base=addDocument Nothing (newBuffer "old\n") (initialDesktop (80,25))
-      bid=maybe (error "missing diff target") bufferId (activeWindow base)
+      bid=maybe (error "missing diff target") sourceFixtureBuffer (activeWindow base)
       patch="@@ -1 +1 @@\n-old\n+agent\n"::T.Text
       corrected="@@ -1 +1 @@\n-old\n+human λ\n"::T.Text
       args text=object ["bufferId" .= bid,"revision" .= (0::Int),"diff" .= text]

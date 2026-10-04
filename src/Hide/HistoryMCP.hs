@@ -54,7 +54,7 @@ historyTool d name args=pure $ case parseEither parse args of
         in (d,pure (Right (object ["buffer" .= info b,"direction" .= direction,"offset" .= offset,"entries" .= entries,"total" .= available])))
       else if wanted/=Just (revision b) then bad "Buffer revision changed; inspect it before applying history."
       else if count>available then bad "Not enough history entries; no changes applied."
-      else case find ((==bid) . bufferId) (windows d) of
+      else case find ((==Just bid) . bufferId) (windows d) of
         Nothing -> bad "Buffer has no open window."
         Just w ->
           let focused=focusWindow (windowId w) d

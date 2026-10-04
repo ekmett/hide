@@ -1,6 +1,7 @@
 {-# LANGUAGE CPP, OverloadedStrings #-}
 module RecoveryCheck (checks) where
 
+import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Exception (bracket)
 import Control.Monad (unless)
 import Data.Aeson
@@ -36,17 +37,17 @@ checks=bracket temporary removePathForcibly $ \root->do
       hex=undo (replaceSelection (Selection 0 0) "B" (replaceSelection (Selection 1 2) "A" (newByteBuffer bytes)))
       fresh=(initialDesktop (80,25)) {guestPrivatePaths=[root </> "fresh-config"],nativeMac=True,browserFrontend=True}
       source=modifyActive (\w -> w {bufferView=SideBySideView,reviewSplit=63}) (addDocument (Just (FileState sourcePath (Just (bufferBytes original)))) edited (initialDesktop (100,35)))
-      sourceId=bufferId (fromJust (activeWindow source))
+      sourceId=sourceFixtureBuffer (fromJust (activeWindow source))
       split=fst (runCommand SplitVertical source)
       binary=addDocument Nothing hex split
-      binaryId=bufferId (fromJust (activeWindow binary))
+      binaryId=sourceFixtureBuffer (fromJust (activeWindow binary))
       transcript="Session: old-provider-id\nPublic transcript\nOther: private pending answer"
       conversation=addReadOnly "Conversation" transcript binary
-      conversationId=bufferId (fromJust (activeWindow conversation))
+      conversationId=sourceFixtureBuffer (fromJust (activeWindow conversation))
       terminal=addReadOnly "Terminal 7" "last terminal output" conversation
-      terminalId=bufferId (fromJust (activeWindow terminal))
+      terminalId=sourceFixtureBuffer (fromJust (activeWindow terminal))
       approval=addReadOnly "Agent request" "pending approval body" terminal
-      approvalId=bufferId (fromJust (activeWindow approval))
+      approvalId=sourceFixtureBuffer (fromJust (activeWindow approval))
       draft=replaceSelection (Selection 0 0) "private draft λ\n\n    main = 1\n      continuation\n" (newBuffer "")
       desktop=approval {composerBuffer=draft,composerSelection=Selection 1 5,composerFocused=True,defaultDirectory=Just root,
         sideTree=Just ((emptySidebar root 23 True) {treeHints=Just (SidebarHints [(sourcePath,False)] (Just sourcePath) (Just sourcePath))}),problemsVisible=True,problemsPreferredHeight=9,
@@ -69,7 +70,7 @@ checks=bracket temporary removePathForcibly $ \root->do
   check "recovered undo and redo behave exactly like the original"
     (snapshotBuffer (undo (get recovered sourceId))==snapshotBuffer (undo edited) && snapshotBuffer (redo (get recovered sourceId))==snapshotBuffer (redo edited))
   check "hex bytes saved representation and history survive recovery" (snapshotBuffer (get recovered binaryId)==snapshotBuffer hex && bufferBytes (redo (get recovered binaryId))==bufferBytes (redo hex))
-  check "split windows retain shared buffer IDs geometry and selection" (windows recovered==filter ((/=approvalId).bufferId) (windows desktop))
+  check "split windows retain shared buffer IDs geometry and selection" (windows recovered==filter ((/=approvalId).sourceFixtureBuffer) (windows desktop))
   check "conversation transcript and private draft history survive"
     ("Public transcript" `T.isInfixOf` contents (get recovered conversationId) && not ("private pending answer" `T.isInfixOf` contents (get recovered conversationId)) && snapshotBuffer (composerBuffer recovered)==snapshotBuffer draft && composerSelection recovered==Selection 1 5)
   check "ended terminals are inert read-only views and approval buffers are omitted"
@@ -95,7 +96,7 @@ checks=bracket temporary removePathForcibly $ \root->do
         (addReadOnly "Conversation" (T.replicate 80 "primary transcript\n") (initialDesktop (80,25)))
         {composerBuffer=newBuffer "primary draft",composerSelection=Selection 2 5}
       childChat=selectConversationView "agent-2" "Child" primaryChat
-      childBid=bufferId (fromJust (activeWindow childChat))
+      childBid=sourceFixtureBuffer (fromJust (activeWindow childChat))
       populated=modifyActive (\w->w {scrollRow=8,selection=Selection 2 7}) childChat
         {buffers=M.adjust (\doc->restyle doc {documentBuffer=newBuffer (T.replicate 80 "child transcript\n")}) childBid (buffers childChat),
          composerBuffer=newBuffer "child draft",composerSelection=Selection 1 4}
@@ -120,7 +121,7 @@ checks=bracket temporary removePathForcibly $ \root->do
   check "restored old baseline triggers existing save conflict checks" (case conflict of Left _->disk=="external disk edit"; _->False)
   encoded<-BS.readFile path
   check "recovery preserves per-window buffer view and divider"
-    (all (\w -> bufferView w==SideBySideView && reviewSplit w==63) [w | w<-windows recovered,bufferId w==sourceId])
+    (all (\w -> bufferView w==SideBySideView && reviewSplit w==63) [w | w<-windows recovered,sourceFixtureBuffer w==sourceId])
   check "checkpoint omits private pending answers and approval tokens" (not ("private pending answer" `BS.isInfixOf` encoded) && not ("pending-action-token" `BS.isInfixOf` encoded) && not ("pending approval body" `BS.isInfixOf` encoded))
   invalidWrite<-writeCheckpoint path desktop {nextId=0}
   preserved<-BS.readFile path

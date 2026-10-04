@@ -13,7 +13,8 @@ import Data.Maybe (fromMaybe)
 import Hide.Sidebar
 import qualified Hide.Plugin.Tree as P
 import Control.Exception (IOException, bracket, try, evaluate)
-import Control.Monad (unless, when)
+import Control.Monad (unless, when, foldM)
+import Hide.Plugin.Command (validCommandName)
 import Data.Aeson
 import Data.Functor.Identity (runIdentity)
 import Data.IORef
@@ -38,6 +39,7 @@ import Hide.Buffer
 import Hide.BufferView
 import Hide.Files (FileState(..))
 import Hide.Model
+import qualified Hide.Plugin.Window as W
 
 -- Histories are never truncated to fit. A rejected checkpoint leaves the last
 -- complete checkpoint in place, and the caller must surface the returned error.
@@ -70,11 +72,42 @@ readCheckpoint path baseline=do
     symbolic<-pathIsSymbolicLink path
     when symbolic (ioError (userError "Recovery checkpoint must not be a symlink"))
     withBinaryFile path ReadMode (\handle->BS.hGet handle (checkpointLimit+1))
-  pure $ do
-    bytes<-loaded
-    unless (BS.length bytes<=checkpointLimit) (Left "Recovery checkpoint exceeds 256 MiB.")
-    value<-either (const (Left "Invalid recovery checkpoint JSON.")) Right (eitherDecodeStrict' bytes)
-    either (const (Left "Invalid or unsupported recovery checkpoint.")) Right (parseEither (desktopParser baseline) value)
+  case loaded >>= decode of
+    Left err->pure (Left err)
+    Right value->case parseEither (withObject "plugin recovery" pluginSnapshots) value of
+      Left _->pure (Left "Invalid plugin recovery state.")
+      Right snapshots->W.withWindowScope $ \scope->do
+        prepared<-foldM (restore scope) baseline {windows=[],pluginWindows=M.empty,retiredPluginWindows=S.empty} snapshots
+        pure (either (const (Left "Invalid or unsupported recovery checkpoint.")) Right (parseEither (desktopParser prepared) value))
+  where
+    decode bytes=do
+      unless (BS.length bytes<=checkpointLimit) (Left "Recovery checkpoint exceeds 256 MiB.")
+      either (const (Left "Invalid recovery checkpoint JSON.")) Right (eitherDecodeStrict' bytes)
+    restore scope desktop (ident,kind,version,title,text)=do
+      prepared<-W.prepareRecoverableTextWindow kind version title text >>= either (ioError . userError . T.unpack) pure
+      update<-W.openTextWindow scope prepared >>= maybe (ioError (userError "Recovery scope ended")) pure
+      accepted<-W.admitWindowUpdate False update
+      case accepted of
+        Nothing->ioError (userError "Recovery publication expired")
+        Just (reference,view)->let opened=addPluginWindow reference view desktop in
+          pure opened {windows=case windows opened of w:rest->w {windowId=ident}:rest; []->[]}
+
+-- Validation is pure and never calls a plugin. All rendering preparation belongs
+-- to readCheckpoint's calling recovery worker before layout adoption.
+pluginSnapshots :: Object -> Parser [(Int,Text,Int,Text,Text)]
+pluginSnapshots object'=do
+  values<-object' .:? "pluginWindows" .!= []
+  unless (length values<=256) (fail "Too many recovered plugin windows")
+  snapshots<-mapM (withObject "plugin window" $ \entry->do
+    ident<-entry .: "id" >>= positive
+    kind<-entry .: "kind"
+    version<-entry .: "version" >>= positive
+    title<-entry .: "title"
+    text<-entry .: "text"
+    unless (T.length kind<=128 && validCommandName kind && T.length title<=8192 && T.all (\c->c>=' ' && c/='\DEL') title) (fail "Invalid plugin window metadata")
+    pure (ident,kind,version,title,text)) values
+  unless (S.size (S.fromList [ident | (ident,_,_,_,_)<-snapshots])==length snapshots) (fail "Duplicate plugin windows")
+  pure snapshots
 
 safeIO :: IO a -> IO (Either Text a)
 safeIO action=do
@@ -135,16 +168,17 @@ redactPending spans buffer=newBuffer (T.pack
 desktopValue :: Desktop -> Value
 desktopValue desktop=runIdentity (desktopValueWith
   (\spans -> pure . bufferValue . redactPending spans)
-  (pure . String . TE.decodeUtf8 . B64.encode) desktop)
+  (pure . String . TE.decodeUtf8 . B64.encode) (\prepared->let text=W.preparedWindowText prepared in pure (String (contentSlice text 0 (contentLength text)))) desktop)
 
 -- | Small recovery metadata, redaction boundaries and stable buffer/baseline identities.
-data CheckpointKey = CheckpointKey Value [StableName Buffer] [StableName BS.ByteString] deriving Eq
+data CheckpointKey = CheckpointKey Value [StableName Buffer] [StableName BS.ByteString] [StableName W.PreparedWindow] deriving Eq
 -- | Capture persistence identity without walking buffer contents or Undo history.
 -- Payload replacement is detected even when its revision number is unchanged.
 checkpointKey :: Desktop -> IO CheckpointKey
 checkpointKey desktop=do
   buffersRef<-newIORef []
   baselinesRef<-newIORef []
+  pluginsRef<-newIORef []
   let buffer spans value=do
         ident<-evaluate value >>= makeStableName
         modifyIORef' buffersRef (ident:)
@@ -153,18 +187,26 @@ checkpointKey desktop=do
         ident<-evaluate value >>= makeStableName
         modifyIORef' baselinesRef (ident:)
         pure Null
-  metadata<-desktopValueWith buffer baseline desktop
-  CheckpointKey metadata <$> readIORef buffersRef <*> readIORef baselinesRef
+      plugin value=do
+        ident<-evaluate value >>= makeStableName
+        modifyIORef' pluginsRef (ident:)
+        pure Null
+  metadata<-desktopValueWith buffer baseline plugin desktop
+  CheckpointKey metadata <$> readIORef buffersRef <*> readIORef baselinesRef <*> readIORef pluginsRef
 
-desktopValueWith :: Monad m => ([(Int,Int)] -> Buffer -> m Value) -> (BS.ByteString -> m Value) -> Desktop -> m Value
-desktopValueWith buffer baseline desktop=do
+desktopValueWith :: Monad m => ([(Int,Int)] -> Buffer -> m Value) -> (BS.ByteString -> m Value) -> (W.PreparedWindow -> m Value) -> Desktop -> m Value
+desktopValueWith buffer baseline plugin desktop=do
   encodedDocuments<-mapM (documentValueWith buffer baseline d) (M.toAscList documents)
   views<-mapM (conversationViewValueWith buffer) (M.toList (conversationViews d))
+  plugins<-mapM (\(window,prepared,(kind,version))->do
+    text<-plugin prepared
+    pure (object ["id" .= windowId window,"kind" .= kind,"version" .= version,"title" .= W.preparedWindowTitle prepared,"text" .= text])) durable
   composer<-buffer [] (composerBuffer d)
   pure (object ["schemaVersion" .= (1::Int),"screen" .= screenSize d,"buffers" .= encodedDocuments,
     "dockedTerminals" .= [object ["windowId" .= ident,"bounds" .= rectValue rectangle,"restoredBounds" .= fmap rectValue saved] | (ident,(rectangle,saved))<-M.toList (dockedTerminals d),any ((==ident).windowId) (windows d)],
     "bottomTerminal" .= bottomTerminal d,
-    "windows" .= map windowValue [w | w<-windows d,M.member (bufferId w) documents],"nextId" .= nextId d,
+    "pluginWindows" .= plugins,
+    "windows" .= map windowValue [w | w<-windows d,maybe (S.member (windowId w) durableIds) (`M.member` documents) (bufferId w)],"nextId" .= nextId d,
     "conversationTarget" .= conversationTarget d,"conversationViews" .= views,
     "composer" .= composer,"composerSelection" .= selectionValue (composerSelection d),"composerFocused" .= composerFocused d,
     "directory" .= defaultDirectory d,"sidebar" .= fmap sidebarValue (sideTree d),"preferences" .= object
@@ -173,6 +215,8 @@ desktopValueWith buffer baseline desktop=do
        "problemsVisible" .= problemsVisible d,"problemsHeight" .= problemsPreferredHeight d,"messagesNumber" .= messagesNumber d]])
   where d=rememberConversationView desktop
         documents=M.filter keptDocument (buffers d)
+        durableIds=S.fromList [windowId w | (w,_,_)<-durable]
+        durable=[(w,prepared,recovery) | w<-windows d,PluginContent reference<-[windowContent w],Just prepared<-[M.lookup reference (pluginWindows d)],Just recovery<-[W.preparedWindowRecovery prepared]]
 
 conversationViewValueWith :: Monad m => ([(Int,Int)] -> Buffer -> m Value) -> (Text,ConversationView) -> m Value
 conversationViewValueWith buffer (target,view)=do
@@ -230,7 +274,10 @@ desktopParser baseline=withObject "checkpoint" $ \o->do
   unless (M.size documents==length parsedDocuments) (fail "Duplicate buffer IDs")
   encodedWindows<-o .: "windows"
   unless (length encodedWindows<=4096) (fail "Too many recovered windows")
-  views<-mapM (windowParser documents) encodedWindows
+  snapshots<-pluginSnapshots o
+  let recovered=M.fromList [(windowId w,(reference,prepared)) | w<-windows baseline,PluginContent reference<-[windowContent w],Just prepared<-[M.lookup reference (pluginWindows baseline)],W.preparedWindowRecovery prepared/=Nothing]
+  unless (all (\(ident,_,_,_,_)->M.member ident recovered) snapshots) (fail "Missing prepared plugin recovery")
+  views<-mapM (windowParser documents recovered) encodedWindows
   unless (S.size (S.fromList (map windowId views))==length views) (fail "Duplicate window IDs")
   encodedDock<-o .:? "dockedTerminals" .!= []
   unless (length encodedDock<=length views) (fail "Too many docked terminals")
@@ -268,7 +315,7 @@ desktopParser baseline=withObject "checkpoint" $ \o->do
   mode<-prefs .: "videoMode" >>= traverse (boundedInt 0 65535)
   problems<-prefs .: "problemsVisible"; preferred<-prefs .: "problemsHeight" >>= boundedInt 0 4096
   messages<-prefs .: "messagesNumber" >>= traverse positive
-  pure (layoutBottomWindows (normalizeBottom baseline {dockedTerminals=M.fromList pinned,bottomTerminal=selectedTerminal,screenSize=size,buffers=documents,windows=views,nextId=ident,composerBuffer=composer,composerSelection=composerSelection',composerFocused=composerFocused',
+  pure (layoutBottomWindows (normalizeBottom baseline {dockedTerminals=M.fromList pinned,bottomTerminal=selectedTerminal,screenSize=size,buffers=documents,windows=views,pluginWindows=M.fromList [(reference,prepared) | w<-views,Just (reference,prepared)<-[M.lookup (windowId w) recovered]],retiredPluginWindows=S.fromList [reference | w<-views,PluginContent reference<-[windowContent w]],nextId=ident,composerBuffer=composer,composerSelection=composerSelection',composerFocused=composerFocused',
     conversationTarget=selectedTarget,conversationViews=conversationViews',defaultDirectory=directory,sideTree=sidebar,wordStar=wordStar',blinkCursor=blink,crtFilter=crt,pixelateUnicode=pixelate,materialIcons=icons,streamerMode=streamer,
     defaultBufferView=toEnum defaultView,chatSubmit=submit,macKeySymbols=macSymbols,appearance=toEnum look,videoMode=mode,problemsVisible=problems,problemsPreferredHeight=preferred,messagesNumber=messages,
     menu=Nothing,dialog=Nothing,drag=Nothing,dragOriginal=Nothing,clipboard="",clipboardCode=Nothing,clipboardExport=(0,Nothing),prefix=Nothing,blockStart=Nothing,
@@ -287,20 +334,26 @@ documentParser=withObject "document" $ \o->do
   suggested<-o .: "suggestedName" >>= traverse (checkedPath False)
   unless (label `notElem` [Just "Agent request",Just "Proposed agent edit"] && maybe True (not . T.isPrefixOf "Terminal ") label) (fail "Transient document")
   pure (ident,restyle (newDocument buffer file) {documentLabel=label,documentSuggestedName=suggested})
-windowParser :: M.Map Int Document -> Value -> Parser Window
-windowParser documents=withObject "window" $ \o->do
+windowParser :: M.Map Int Document -> M.Map Int (W.WindowRef,W.PreparedWindow) -> Value -> Parser Window
+windowParser documents plugins=withObject "window" $ \o->do
   ident<-o .: "id" >>= positive
   bid<-o .: "bufferId"
-  doc<-maybe (fail "Window references missing buffer") pure (M.lookup bid documents)
+  (content,length',sourceView)<-case bid of
+    Just source->do
+      doc<-maybe (fail "Window references missing buffer") pure (M.lookup source documents)
+      pure (SourceContent source,bufferLength (documentBuffer doc),not (byteMode (documentBuffer doc)) && documentLabel doc==Nothing)
+    Nothing->case M.lookup ident plugins of
+      Just (reference,prepared)->pure (PluginContent reference,contentLength (W.preparedWindowText prepared),False)
+      Nothing->fail "Window references missing plugin state"
   number<-o .: "number" >>= positive
   rectangle<-o .: "bounds" >>= rectParser
-  selected<-o .: "selection" >>= selectionParser (bufferLength (documentBuffer doc))
+  selected<-o .: "selection" >>= selectionParser length'
   row<-o .: "scrollRow" >>= boundedInt 0 1073741823
   column<-o .: "scrollColumn" >>= boundedInt 0 1073741823
   restored<-o .: "restoredBounds" >>= traverse rectParser
   viewIndex<-o .:? "bufferView" .!= 0 >>= boundedInt 0 (fromEnum (maxBound :: BufferView))
   split<-o .:? "reviewSplit" .!= 50 >>= boundedInt 0 100
-  Window ident bid rectangle selected row column restored <$> o .: "hexLow" <*> o .: "hexAscii" <*> pure number <*> pure (if byteMode (documentBuffer doc) || documentLabel doc/=Nothing then CurrentView else toEnum viewIndex) <*> pure Nothing <*> pure split
+  Window ident content rectangle selected row column restored <$> o .: "hexLow" <*> o .: "hexAscii" <*> pure number <*> pure (if sourceView then toEnum viewIndex else CurrentView) <*> pure Nothing <*> pure split
 rectParser :: Value -> Parser Rect
 rectParser value=do
   (x,y,w,h)<-parseJSON value

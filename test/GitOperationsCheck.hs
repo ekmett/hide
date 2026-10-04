@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module GitOperationsCheck (checks) where
 
+import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Concurrent (threadDelay)
 import Control.Exception (bracket)
 import Control.Monad (unless, void)
@@ -38,7 +39,7 @@ checks = bracket temporary removePathForcibly $ \base -> do
       commit dir name=void (git dir ["add","-A"]) >> void (git dir ["commit","-m",name])
       open desktop=loadFile source >>= either error (\(file,b)->pure (addDocument (Just file) b desktop))
       doc desktop=case [d | d<-M.elems (buffers desktop),fmap filePath (documentFile d)==Just source] of d:_ -> d; [] -> error "missing source buffer"
-      select desktop=case [windowId w | w<-windows desktop,Just d<-[M.lookup (bufferId w) (buffers desktop)],fmap filePath (documentFile d)==Just source] of i:_ -> focusWindow i desktop; [] -> error "missing source window"
+      select desktop=case [windowId w | w<-windows desktop,Just d<-[M.lookup (sourceFixtureBuffer w) (buffers desktop)],fmap filePath (documentFile d)==Just source] of i:_ -> focusWindow i desktop; [] -> error "missing source window"
   createDirectory upstream
   void (git upstream ["init","-b","main"])
   T.writeFile upstreamSource "original\n"
@@ -141,7 +142,7 @@ checks = bracket temporary removePathForcibly $ \base -> do
     T.writeFile savePath "before\n"
     (saveFileState,saveBuffer)<-loadFile savePath >>= either error pure
     let saveDesktop=addDocument (Just saveFileState) (replaceSelection (Selection 0 (bufferLength saveBuffer)) "saved\n" saveBuffer) (initialDesktop (100,30))
-        saveBid=maybe (error "missing save window") bufferId (activeWindow saveDesktop)
+        saveBid=maybe (error "missing save window") sourceFixtureBuffer (activeWindow saveDesktop)
     (quitAfterSave,afterSave)<-gitOperationEffects runtime App.applyEffects saveDesktop [SaveDocument saveBid Nothing (Just Quit)]
     savedText<-T.readFile savePath
     check "real save-and-quit continuation cannot exit during fetch" (not quitAfterSave && savedText=="saved\n" && "Wait for" `T.isPrefixOf` status afterSave)

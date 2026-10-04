@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module DebuggerCheck (checks,fixture,cleanup) where
 
+import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (withAsync, poll, wait)
 import Control.Exception (bracket)
@@ -188,7 +189,7 @@ checks = terminalLauncherCheck >> terminalCheck >> completionChecks >> presentat
                     pure value
             snapshot<-current stopped
             let gen=epoch snapshot
-                virtualId=maybe (error "missing debugger source buffer") bufferId (activeWindow stopped)
+                virtualId=maybe (error "missing debugger source buffer") sourceFixtureBuffer (activeWindow stopped)
             check "MCP reports connected, stopped selection" (field "connected" snapshot==Just True && field "stopped" snapshot==Just True && field "threadId" snapshot==Just (7::Int))
             rejected "debug_attach" ["port" .= (read port::Int)] stopped
             rejected "debug_launch" [] stopped
@@ -212,7 +213,7 @@ checks = terminalLauncherCheck >> terminalCheck >> completionChecks >> presentat
             sourceResult<-inspect ["generation" .= gen,"request" .= ("source"::T.Text)] stopped
             check "MCP source reply uses selected sourceReference" ((field "body" sourceResult >>= field "content" :: Maybe T.Text)==Just (activeText stopped))
             let local=addDocument (Just (FileState (logPath<>".hs") Nothing)) (replaceBuffer False "dirty = 2\n" (newBuffer "local = 1\n")) stopped
-                localId=maybe (error "missing local buffer") bufferId (activeWindow local)
+                localId=maybe (error "missing local buffer") sourceFixtureBuffer (activeWindow local)
                 points bid requested=["generation" .= gen,"bufferId" .= bid,"lines" .= (requested::[Int])]
             (virtual,_)<-success "debug_set_breakpoints" (points virtualId [2,1,2]) local
             check "MCP breakpoint changes do not select their buffer" (virtual==local)

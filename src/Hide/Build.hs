@@ -14,14 +14,13 @@ import Data.Aeson
 import Data.Aeson.Types (parseMaybe)
 import qualified Data.ByteString as BS
 import Data.Maybe (fromMaybe, listToMaybe)
-import qualified Data.Map.Strict as M
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding
 import System.Directory (canonicalizePath, doesFileExist, findExecutable, listDirectory)
 import System.Environment (lookupEnv)
 import System.FilePath ((</>), isAbsolute, takeFileName, takeExtension, takeDirectory)
-import Hide.Model (Desktop(..), Window(..), Document(..), Toolchain(..), startingDirectory)
+import Hide.Model (Desktop(..), Document(..), Toolchain(..), startingDirectory, windowDocument)
 import Hide.Files (filePath)
 
 data BuildAction = Compile | Make | Run deriving (Eq,Show)
@@ -33,7 +32,7 @@ data BuildConfig = BuildConfig
 -- Output and debugger windows do not replace the most recently used source.
 buildSource :: Desktop -> Maybe FilePath
 buildSource desktop = listToMaybe [filePath file | window<-windows desktop,
-  Just doc<-[M.lookup (bufferId window) (buffers desktop)], documentLabel doc==Nothing,
+  Just doc<-[windowDocument (buffers desktop) window], documentLabel doc==Nothing,
   Just file<-[documentFile doc]]
 
 -- | Resolve the selected sidebar/default/source context to an enclosing build root.

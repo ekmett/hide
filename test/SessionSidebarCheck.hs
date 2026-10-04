@@ -20,10 +20,13 @@ import Hide.SessionSidebar
 import Hide.SessionSidebarTypes
 import Hide.Sidebar
 import Hide.SidebarCommands
+import Hide.PluginWindowHost (adoptWindowUpdate)
+import qualified Hide.Plugin.Window as W
+import qualified Hide.Plugin.Menu as Menu
 import qualified Hide.Plugin.Tree as P
 
 checks :: IO ()
-checks=bracket temporary removePathForcibly $ \root->
+checks=W.withWindowScope $ \scope->bracket temporary removePathForcibly $ \root->
   environment "XDG_DATA_HOME" (Just (root </> "data")) $ do
     firstRecord<-newSessionRecord Nothing ["--private-startup-secret"]
     otherRecord<-newSessionRecord (Just "remote.example") ["--other-private-secret"]
@@ -36,7 +39,10 @@ checks=bracket temporary removePathForcibly $ \root->
         firstId=case windows first of window:_->windowId window; _->error "Missing fixture window"
         named=first {buffers=M.map (\doc->doc {documentLabel=Just "First"}) (buffers first)}
         added=addDocument Nothing (newBuffer "second\n") named
-        initial=added {buffers=M.map (\doc->doc {documentLabel=Just (fromMaybe "Second" (documentLabel doc))}) (buffers added),sideTree=Just (emptySidebar root 28 False)}
+        sourceInitial=added {buffers=M.map (\doc->doc {documentLabel=Just (fromMaybe "Second" (documentLabel doc))}) (buffers added),sideTree=Just (emptySidebar root 28 False)}
+    prepared<-W.prepareTextWindow "Plugin notes" "Private plugin text"
+    update<-W.openTextWindow scope prepared >>= maybe (fail "Plugin scope unexpectedly retired") pure
+    initial<-adoptWindowUpdate Menu.HumanMenu update sourceInitial
     withSidebarCommands $ \host->do
       (service,after)<-withSessionSidebar host (Just (sessionId current)) initial $ \service->do
         let core=sessionSidebarEffects service (\d _->pure (False,d))
@@ -62,7 +68,7 @@ checks=bracket temporary removePathForcibly $ \root->
           all (not . T.isInfixOf "private") labels)
           (fail "Same-directory sessions are ambiguous or expose private arguments")
         views<-activate ((==currentNode).P.nodeIdText.P.infoId) expanded >>= wait "current session windows"
-          (\d->has "First" d && has "Second" d && ready d)
+          (\d->has "First" d && has "Second" d && has "Plugin notes" d && ready d)
         selected<-activate ((=="First").P.infoLabel) views >>= wait "captured window selection"
           (\d->(windowId <$> activeWindow d)==Just firstId)
         unless (guestEffectsAllowed [SessionSidebarAction (SelectSessionWindow (T.pack (sessionId current)) firstId)]==False)

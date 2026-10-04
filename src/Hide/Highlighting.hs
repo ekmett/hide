@@ -103,10 +103,9 @@ tickHighlighting (Highlighting state) desktop = do
   where
     (_,candidates)=foldl' choose (S.empty,[]) (filter (windowVisible desktop) (windows desktop))
     choose (seen,docs) window
-      | S.member ident seen = (seen,docs)
-      | Just doc<-M.lookup ident (buffers desktop),syntaxDocument doc = (S.insert ident seen,docs++[(ident,doc)])
+      | Just ident<-bufferId window,S.member ident seen = (seen,docs)
+      | Just ident<-bufferId window,Just doc<-M.lookup ident (buffers desktop),syntaxDocument doc = (S.insert ident seen,docs++[(ident,doc)])
       | otherwise = (seen,docs)
-      where ident=bufferId window
     request (ident,doc)=do
       buffer<-evaluate (documentBuffer doc)
       identity<-makeStableName buffer

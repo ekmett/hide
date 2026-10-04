@@ -136,7 +136,7 @@ reload bid file bytes raw desktop = case M.lookup bid (buffers desktop) of
         fresh=markSaved replaced {revision=max (revision original+1) (revision replaced)}
         updated=restyle doc {documentFile=Just file {diskBytes=bytes},documentBuffer=fresh}
         clamp n=max 0 (min (bufferLength fresh) n)
-        adjust window | bufferId window/=bid = window
+        adjust window | bufferId window/=Just bid = window
                       | otherwise = window {selection=let Selection a c=selection window in Selection (clamp a) (clamp c),
                           scrollRow=max 0 (min (documentRows updated window-1) (scrollRow window)),
                           scrollColumn=max 0 (min (windowDocumentWidth updated window) (scrollColumn window))}
@@ -175,7 +175,7 @@ promptPending (Reconciliation _ ref) desktop
 reviewPending :: Reconciliation -> Desktop -> IO Desktop
 reviewPending (Reconciliation watcher ref) desktop = do
   tracking <- readIORef ref
-  let choices=maybe [] (pure . bufferId) (activeWindow desktop) ++ M.keys (changedDisk tracking)
+  let choices=maybe [] pure (activeWindow desktop >>= bufferId) ++ M.keys (changedDisk tracking)
   case listToMaybe [conflict | bid <- choices, Just conflict <- [pendingConflict tracking desktop bid]] of
     Just conflict -> do
       modifyIORef' ref (\s -> s {announced=M.insert (conflictBuffer conflict) (conflictDisk conflict) (announced s)})

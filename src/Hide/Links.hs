@@ -109,8 +109,8 @@ applyLink (LinkExternal notice packet) d=(d {status=notice},packet)
 applyLink (LinkDocument doc row path) d=
   let opened=addHelp "" d
       installed=case activeWindow opened of
-        Just w->opened {buffers=M.insert (bufferId w) doc (buffers opened)}
-        Nothing->opened
+        Just w | Just bid<-bufferId w->opened {buffers=M.insert bid doc (buffers opened)}
+        _->opened
       positioned=modifyActive (\w->w {scrollRow=row,scrollColumn=0,selection=Selection 0 0}) installed
   in (positioned {status=T.pack path},Nothing)
 

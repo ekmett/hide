@@ -31,6 +31,8 @@ import Hide.Plugin.BufferHost (ContentVersion,captureVersion,versionCurrent)
 import Hide.Files (FileState(..),loadFile)
 import Hide.GuestAccess (protectedPath,protectedFilePath,protectedBuffer)
 import Hide.Links (LinkResult,applyLink)
+import Hide.PluginWindowHost (adoptWindowUpdate)
+import qualified Hide.Plugin.Window as PluginWindow
 import Hide.Model
 import Hide.DebuggerSidebarTypes
 import Hide.AgentSidebarTypes
@@ -44,7 +46,7 @@ import qualified Hide.Plugin.Menu as Menu
 data SidebarContext = SidebarContext
   { sidebarOrigin :: !Menu.MenuOrigin, sidebarPrivatePaths :: ![FilePath]
   , sidebarColumns :: !Int, sidebarOpened :: !(Maybe (FilePath,Int,Int,ContentVersion)) }
-data SidebarReply = SidebarExisting !FilePath !Int !Int !ContentVersion | SidebarDocument !FilePath !Document | SidebarPrepared !LinkResult | SidebarSession !SessionSidebarRequest | SidebarAgent !AgentSidebarRequest | SidebarDebug !DebugSidebarRequest
+data SidebarReply = SidebarSession !SessionSidebarRequest | SidebarExisting !FilePath !Int !Int !ContentVersion | SidebarDocument !FilePath !Document | SidebarPrepared !LinkResult | SidebarAgent !AgentSidebarRequest | SidebarDebug !DebugSidebarRequest | SidebarWindow !PluginWindow.WindowUpdate
 
 data ChildJob = ChildJob !TreeRequest !Menu.MenuOrigin !(Async (Either CommandError (P.PreparedPage SidebarContext SidebarReply))) !Bool
 data ActionJob = ActionJob ![P.TreeHit] !CommandRef !Menu.MenuOrigin !Int !(Async (Either CommandError SidebarReply)) !Bool
@@ -307,7 +309,7 @@ captureActionContext origin trace d=do
         (hit:_,Just tree)->P.infoResource . stateInfo =<< nodeAt hit tree
         _->Nothing
   opened<-case target >>= \path->(path,) <$> find (\(_,doc)->fmap filePath (documentFile doc)==Just path) (M.toList (buffers d)) of
-    Just (path,(bid,doc)) | Just window<-find ((==bid).bufferId) (windows d)->do
+    Just (path,(bid,doc)) | Just window<-find ((==Just bid) . bufferId) (windows d)->do
       version<-captureVersion (documentBuffer doc)
       pure (Just (path,windowId window,bid,version))
     _->pure Nothing
@@ -494,6 +496,7 @@ finishAction (SidebarHost _ ref _ cancellation _) core d=do
             Right (Right (SidebarExisting path wid bid version)) | current->adoptExisting origin path wid bid version d
             Right (Right (SidebarDebug request)) | current && origin==Menu.HumanMenu->snd <$> core d [DebugSidebarAction request]
             Right (Right (SidebarSession request)) | current && origin==Menu.HumanMenu->snd <$> core d [SessionSidebarAction request]
+            Right (Right (SidebarWindow request)) | current->adoptWindowUpdate origin request d
             Right (Right (SidebarAgent request)) | current && origin==Menu.HumanMenu->snd <$> core d [AgentSidebarAction request]
             _->pure $ if not current then d {status="Sidebar result expired."} else case result of
               Left err->d {status="Sidebar action failed: "<>T.pack (displayException err)}
@@ -501,19 +504,20 @@ finishAction (SidebarHost _ ref _ cancellation _) core d=do
               Right (Right SidebarExisting{})->d {status="Sidebar result expired."}
               Right (Right SidebarDebug{})->d {status="Sidebar result expired."}
               Right (Right SidebarSession{})->d {status="Sidebar result expired."}
+              Right (Right SidebarWindow{})->d {status="Sidebar result expired."}
               Right (Right SidebarAgent{})->d {status="Sidebar result expired."}
               Right (Right (SidebarPrepared value))->fst (applyLink value d)
               Right (Right (SidebarDocument path doc))
                 | origin==Menu.AgentMenu && protectedPath d path->d {status="Sidebar target is now protected."}
                 | otherwise->case find (\(_,opened)->fmap filePath (documentFile opened)==Just path) (M.toList (buffers d)) of
                   Just (bid,_) | origin==Menu.AgentMenu && protectedBuffer d bid->d {status="Sidebar target is now private."}
-                  Just (bid,_)->maybe d (\window->leave (focusWindow (windowId window) d)) (find ((==bid).bufferId) (windows d))
+                  Just (bid,_)->maybe d (\window->leave (focusWindow (windowId window) d)) (find ((==Just bid) . bufferId) (windows d))
                   Nothing->leave (addDocument (documentFile doc) (documentBuffer doc) d)
   where leave opened=opened {sideTree=fmap (\tree->tree {treeFocused=False}) (sideTree opened)}
 
 adoptExisting :: Menu.MenuOrigin -> FilePath -> Int -> Int -> ContentVersion -> Desktop -> IO Desktop
 adoptExisting origin path wid bid version d=case (find ((==wid).windowId) (windows d),M.lookup bid (buffers d)) of
-  (Just window,Just doc) | bufferId window==bid && fmap filePath (documentFile doc)==Just path->do
+  (Just window,Just doc) | bufferId window==Just (bid) && fmap filePath (documentFile doc)==Just path->do
     current<-versionCurrent version (documentBuffer doc)
     pure $ if not current || origin==Menu.AgentMenu && (protectedPath d path || protectedBuffer d bid)
       then d {status="Existing sidebar file changed or became private."}

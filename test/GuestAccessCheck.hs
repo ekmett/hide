@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 module GuestAccessCheck (checks) where
+import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Monad (unless,forM_)
 import qualified Data.Map.Strict as M
 import qualified Data.Text as T
@@ -19,13 +20,13 @@ checks :: IO ()
 checks=do
   let check label ok=unless ok (error label)
       base=(addDocument Nothing (newBuffer "file") (initialDesktop (100,35))) {wordStar=False}
-      sourceId=maybe (-1) bufferId (activeWindow base)
+      sourceId=maybe (-1) sourceFixtureBuffer (activeWindow base)
       firstRect d dg=case fieldRects d dg of r:_->r; _->error "missing field rectangle"
       conversation=addReadOnly "Conversation" "Session: provider-secret\nPublic transcript\nOther: private answer" base
       chat=conversation {composerBuffer=newBuffer "private draft",composerFocused=True,
         chatActions=[(43,64,"question-input",[])],chatInputOffset=Just 50}
       window=case activeWindow chat of Just w->w; _->error "no chat window"
-      ident=bufferId window
+      ident=sourceFixtureBuffer window
       Rect x y _ _=bounds window
       draft=composerRect chat window
       denied d event=case P.applyGuestInput event d of Left _->True; _->False
@@ -63,10 +64,10 @@ checks=do
   let (human,_) = P.applyInputFrom HumanInput (P.Paste "human") chat
   check "human input still edits the conversation draft" (contents (composerBuffer human)/=contents (composerBuffer chat))
   let moved=P.applyInputFrom GuestInput (P.Key "F6" []) chat
-  check "guest may focus a normal window away from conversation" (maybe False (not . protectedBuffer (fst moved) . bufferId) (activeWindow (fst moved)))
+  check "guest may focus a normal window away from conversation" (maybe False (not . protectedBuffer (fst moved) . sourceFixtureBuffer) (activeWindow (fst moved)))
   forM_ ["Agent request","Proposed agent edit","Git diff","Disk changes: /example/thc.toml"] $ \label -> do
     let review=addReadOnly label "private review" base
-        bid=maybe (-1) bufferId (activeWindow review)
+        bid=maybe (-1) sourceFixtureBuffer (activeWindow review)
     check "private review text is unavailable to generic buffer reads" (protectedBuffer review bid && sanitizedBuffer review bid==Nothing && denied review (P.Key "c" [V.MCtrl]))
   forM_ [AgentDialog "configure",AgentDialog "load",AgentDialog "approval:2",PermissionDialog "approve:2",DiscardDraft] $ \p -> do
     let d=base {dialog=Just (Dialog "Human control" p [Input "Session ID" "secret" 6] 0 ["OK","Cancel"] [])}
@@ -120,7 +121,7 @@ checks=do
   let privatePath="/authority/config.toml"
       privateSource=addDocument (Just (FileState privatePath Nothing)) (newBuffer "private settings") base {guestPrivatePaths=[privatePath]}
       privateWindow=maybe (error "missing private source") id (activeWindow privateSource)
-      privateId=bufferId privateWindow
+      privateId=sourceFixtureBuffer privateWindow
       Rect px py _ _=bounds privateWindow
   check "host authority paths protect human-open buffers and input"
     (protectedBuffer privateSource privateId && sanitizedBuffer privateSource privateId==Nothing && denied privateSource (P.Paste "replace") && not (readableAt privateSource (px+2) (py+2)) && not (streamerReadableAt privateSource (px+2) (py+2)))

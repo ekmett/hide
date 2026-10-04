@@ -29,7 +29,7 @@ import Hide.Browser (packageFile)
 import Hide.Build (resolveBuildRoot, buildSource)
 import Hide.Files (filePath)
 import Hide.Git
-import Hide.GuestAccess (protectedBuffer, protectedPath, protectedPathParent, privateDocument, sanitizedStatus)
+import Hide.GuestAccess (protectedWindow, protectedPath, protectedPathParent, privateDocument, sanitizedStatus)
 import Hide.Model
 
 workspaceToolNames :: [Text]
@@ -120,7 +120,7 @@ workspaceTool apply desktop name args = case parseEither parse args of
       "workspace_project" -> pure (desktop,ioResult $ do
         root<-resolveBuildRoot desktop
         package<-packageFile root >>= maybe (pure Nothing) (publicProjectPath desktop root)
-        source<-if maybe False (protectedBuffer desktop . bufferId) (activeWindow desktop) then pure Nothing else maybe (pure Nothing) (publicProjectPath desktop root) (buildSource desktop)
+        source<-if maybe False (protectedWindow desktop) (activeWindow desktop) then pure Nothing else maybe (pure Nothing) (publicProjectPath desktop root) (buildSource desktop)
         plan<-cabalPlan desktop root
         let result=object ["root" .= root,"packageFile" .= package,"source" .= source,"unsavedBuffers" .= unsaved desktop,"cabalPlan" .= plan]
         when (BL.length (encode result)>1048576) (ioError (userError "Project context exceeds 1 MiB."))
@@ -166,9 +166,9 @@ selectTarget d wid bid = do
   when (isJust wid && isJust bid) (Left "Choose either windowId or bufferId.")
   w<-case (wid,bid) of
     (Just ident,_) -> maybe (Left "Window not found.") Right (find ((==ident).windowId) (windows d))
-    (_,Just ident) -> maybe (Left "Buffer has no open window.") Right (find ((==ident).bufferId) (windows d))
+    (_,Just ident) -> maybe (Left "Buffer has no open window.") Right (find ((==Just ident) . bufferId) (windows d))
     _ -> maybe (Left "No active window.") Right (activeWindow d)
-  when (protectedBuffer d (bufferId w)) (Left "This conversation or approval window is controlled by the user.")
+  when (protectedWindow d w) (Left "This conversation or approval window is controlled by the user.")
   pure (focusWindow (windowId w) d)
 
 invalidPath :: FilePath -> Bool
@@ -185,12 +185,12 @@ openPath apply d path
         pure (absolute,exists)
       case checked of
         Left err -> pure (Left (T.pack (show err)))
-        Right (absolute,exists) -> case find (\w->maybe False ((==Just absolute).fmap filePath.documentFile) (M.lookup (bufferId w) (buffers d))) (windows d) of
+        Right (absolute,exists) -> case find (\w->maybe False ((==Just absolute).fmap filePath.documentFile) (windowDocument (buffers d) w)) (windows d) of
           Just w -> pure (Right (focusWindow (windowId w) d))
           Nothing | not exists -> pure (Left "File does not exist; opening does not create files.")
           Nothing -> do
             (_,next)<-apply d [ReadPath absolute]
-            pure $ case find (\w->maybe False ((==Just absolute).fmap filePath.documentFile) (M.lookup (bufferId w) (buffers next))) (windows next) of
+            pure $ case find (\w->maybe False ((==Just absolute).fmap filePath.documentFile) (windowDocument (buffers next) w)) (windows next) of
               Nothing -> Left ("Could not open file: "<>status next)
               Just w -> Right (focusWindow (windowId w) next)
 
@@ -265,7 +265,7 @@ arrange action wid x y w h original=do
           pure window
         needWindow d=do
           window<-maybe (Left "No active window.") Right (activeWindow d)
-          when (protectedBuffer d (bufferId window)) (Left "This conversation or approval window is controlled by the user.")
+          when (protectedWindow d window) (Left "This conversation or approval window is controlled by the user.")
           pure window
 
 fileAction :: Apply -> Desktop -> Text -> Maybe Int -> Maybe Int -> Maybe FilePath -> Maybe Int -> Maybe Text -> IO Reply
@@ -276,7 +276,7 @@ fileAction apply original action wid bid path rev decision
   | otherwise=case selectTarget original wid bid of
       Left err -> failure original err
       Right d -> case (activeWindow d,activeDocument d) of
-        (Just window,Just doc) -> let b=documentBuffer doc in
+        (Just window,Just doc) | Just sourceId<-bufferId window -> let b=documentBuffer doc in
           if rev/=Just (revision b) then failure original "Current buffer revision is required; refresh list_buffers."
           else if isJust path && (action=="close" || isJust (documentFile doc)) then failure original "A destination path is only allowed when saving an untitled buffer."
           else if maybe False invalidPath path then failure original "Invalid destination path."
@@ -294,8 +294,8 @@ fileAction apply original action wid bid path rev decision
             case destinationResult of
               Left err -> failure original (T.pack (show err))
               Right destination -> do
-                (_,savedDesktop)<-apply d [SaveDocument (bufferId window) destination Nothing]
-                case M.lookup (bufferId window) (buffers savedDesktop) of
+                (_,savedDesktop)<-apply d [SaveDocument sourceId destination Nothing]
+                case windowDocument (buffers savedDesktop) window of
                   Just savedDoc | not (dirty (documentBuffer savedDoc)),isJust (documentFile savedDoc),dialog savedDesktop==Nothing ->
                     success (if action=="close" then closeActive (focusWindow (windowId window) savedDesktop) else savedDesktop)
                   _ -> failure savedDesktop ("Save did not complete: "<>failureDetail savedDesktop)
@@ -316,7 +316,7 @@ layout d=object ["screen" .= object ["columns" .= fst (screenSize d),"rows" .= s
   "status" .= T.take 8192 (sanitizedStatus d)]
   where
     windowValue w=object (["windowId" .= windowId w,"bufferId" .= bufferId w,"focused" .= windowFocused d w,"pinned" .= windowPinned d w,"visible" .= windowVisible d w,"bounds" .= rectValue (bounds w)]++
-      case M.lookup (bufferId w) (buffers d) of
+      case windowDocument (buffers d) w of
         Nothing -> []
         Just doc -> let b=documentBuffer doc; (row,column)=bufferLineColumn b (caret (selection w)) in
           ["path" .= visiblePath d doc,"label" .= (if privateDocument d doc then Just "[private]" else documentLabel doc),"dirty" .= dirty b,"revision" .= revision b,

@@ -1,6 +1,7 @@
 {-# LANGUAGE CPP, OverloadedStrings #-}
 module MenuContextCheck (checks) where
 
+import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (async,wait,poll)
 import Control.Exception (bracket,evaluate,try,ErrorCall,IOException)
@@ -49,7 +50,7 @@ checks=bracket temporary removePathForcibly $ \root->withDocsCommands $ \docs->w
   metadata<-Plugin.menuSnapshot (menuContributions host)
   let source=insertText "unsaved " (addDocument (Just (FileState path Nothing)) (newBuffer "memory\n😀source\n") (initialDesktop (80,25)))
       opaque=source {buffers=M.map (\doc->doc {documentBuffer=(documentBuffer doc) {B.undoStack=error "navigation retained Undo",B.redoStack=error "navigation retained Redo"}}) (buffers source)}
-      sourceId=maybe (error "missing source") bufferId (activeWindow source)
+      sourceId=maybe (error "missing source") sourceFixtureBuffer (activeWindow source)
       pane=(setDiagnostics [problem] (setProblemsVisible True opaque)) {problemsFocused=True,contributedMenus=metadata,menusActive=True,agentMenuRefs=menuAgentReferences host}
       popup=openContext MessagesContext 8 5 pane
       (chosen,requests)=handleEvent (V.EvKey V.KEnter []) popup
@@ -92,7 +93,7 @@ checks=bracket temporary removePathForcibly $ \root->withDocsCommands $ \docs->w
   navigated<-run chosen requests
   let expected=contentLineOffset (bufferContent (documentBuffer (buffers pane M.! sourceId))) 1+1
   check "navigation focuses dirty existing source without reading disk baseline"
-    (not (problemsFocused navigated) && fmap bufferId (activeWindow navigated)==Just sourceId && activeText navigated==activeText source && maybe False ((==expected).caret.selection) (activeWindow navigated))
+    (not (problemsFocused navigated) && fmap sourceFixtureBuffer (activeWindow navigated)==Just sourceId && activeText navigated==activeText source && maybe False ((==expected).caret.selection) (activeWindow navigated))
   -- A replacement at the same numeric revision must not redirect a prepared read.
   (_,pending)<-menuEffects host (\_ _->error "missing context worker") chosen requests
   let replaced=pending {buffers=M.adjust (\doc->doc {documentBuffer=(newBuffer "replacement\nsource") {B.revision=B.revision (documentBuffer doc)}}) sourceId (buffers pending)}
@@ -103,7 +104,7 @@ checks=bracket temporary removePathForcibly $ \root->withDocsCommands $ \docs->w
   check "diagnostic refresh refuses late navigation adoption" (problemsFocused expired)
   (_,pendingFocus)<-menuEffects host (\_ _->error "missing context worker") chosen requests
   lostFocus<-pollUntil (T.isInfixOf "expired" . status) pendingFocus {problemsFocused=False}
-  check "changed Messages input owner refuses late navigation adoption" (fmap bufferId (activeWindow lostFocus)==Just sourceId)
+  check "changed Messages input owner refuses late navigation adoption" (fmap sourceFixtureBuffer (activeWindow lostFocus)==Just sourceId)
   -- An unopened source is fully prepared off-lock, then installed as an editable
   -- document with the same established Files loader/decoder.
   let unopened=(setDiagnostics [problem] (setProblemsVisible True (initialDesktop (80,25)))) {problemsFocused=True,contributedMenus=metadata,menusActive=True}
@@ -151,7 +152,7 @@ checks=bracket temporary removePathForcibly $ \root->withDocsCommands $ \docs->w
       (farChosen,farRequests)=handleEvent (V.EvKey V.KEnter []) (openContext MessagesContext 8 5 farPane)
   farOpened<-run farChosen farRequests
   check "beyond-EOF diagnostics clamp prepared caret and viewport to live source"
-    (maybe False (\window->caret (selection window)==B.bufferLength (documentBuffer (buffers farOpened M.! bufferId window)) && scrollRow window<B.bufferLineCount (documentBuffer (buffers farOpened M.! bufferId window))) (activeWindow farOpened))
+    (maybe False (\window->caret (selection window)==B.bufferLength (documentBuffer (buffers farOpened M.! sourceFixtureBuffer window)) && scrollRow window<B.bufferLineCount (documentBuffer (buffers farOpened M.! sourceFixtureBuffer window))) (activeWindow farOpened))
   let longPath=root </> "Wide.hs"
   writeFile longPath (replicate 200 'x'++"\n")
   let longPane=setDiagnostics [problem {diagnosticPath=longPath,diagnosticRow=0,diagnosticColumn=180}] unopened

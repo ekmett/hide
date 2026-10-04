@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module WorkspaceMCPCheck (checks) where
 
+import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Exception (bracket)
 import Control.Monad (unless, foldM, when)
 import Data.Aeson
@@ -61,7 +62,7 @@ checks=do
   ok "navigation uses live Unicode buffer offsets" (succeeded result && cursor navigated==5)
   (unchanged,outOfRange)<-call original "editor_navigate" ["line" .= (maxBound::Int)]
   ok "navigation rejects extreme positions without clamping" (rejected outOfRange && unchanged==original)
-  (_,badTarget)<-call original "editor_navigate" ["windowId" .= windowId current,"bufferId" .= bufferId current]
+  (_,badTarget)<-call original "editor_navigate" ["windowId" .= windowId current,"bufferId" .= sourceFixtureBuffer current]
   ok "navigation rejects ambiguous targets" (rejected badTarget)
   (_,typo)<-call original "editor_arrange" ["action" .= ("move"::T.Text),"heigth" .= (9::Int)]
   ok "workspace tools reject unknown arguments" (rejected typo)

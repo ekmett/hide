@@ -8,7 +8,7 @@
 -- when the human has disabled streamer mode.
 module Hide.GuestAccess
   ( InputOrigin(..), CellAccess(..), cellAccess, readableAt, pointerAllowedAt
-  , streamerReadableAt, sensitiveLabel, sanitizedStatus, protectedPath, protectedFilePath, protectedPathParent, protectedBuffer, privateDocument, sanitizedBuffer, sanitizedBufferContent
+  , streamerReadableAt, sensitiveLabel, sanitizedStatus, protectedPath, protectedFilePath, protectedPathParent, protectedBuffer, protectedWindow, privateDocument, sanitizedBuffer, sanitizedBufferContent
   , validateGuestEffects, guestCommandAllowed, guestEffectsAllowed, guestKeyboardAllowed, guestKeyAllowed, guestKeyCombinations
   , guestModalBlocked, guestTransitionAllowed, beginGuestInput, endGuestInput
   ) where
@@ -36,6 +36,11 @@ data CellAccess = CellAccess { cellReadable :: Bool, cellClickable :: Bool } der
 
 protectedBuffer :: Desktop -> Int -> Bool
 protectedBuffer d bid=maybe False (\doc -> privateDocument d doc || maybe False (`elem` ["Conversation","Autocomplete","Agent request","Proposed agent edit"]) (documentLabel doc)) (M.lookup bid (buffers d))
+
+-- | Plugin content is private until the host accepts explicit semantic grants.
+-- Labels and painted cells cannot grant agent interaction or clipboard access.
+protectedWindow :: Desktop -> Window -> Bool
+protectedWindow d w=case bufferId w of Just bid->protectedBuffer d bid; Nothing->True
 
 -- | Check authority/privacy policy on an already canonicalized filesystem path.
 protectedPath :: Desktop -> FilePath -> Bool
@@ -191,7 +196,7 @@ guestModalBlocked d=maybe False (protectedPurpose . purpose) (dialog d) || case 
   (Just _,AgentContext{}) -> True
   _ -> False
 guestKeyboardAllowed :: Desktop -> Bool
-guestKeyboardAllowed d=not (guestModalBlocked d) && not (focusedPrivateField d) && (isJust (dialog d) || problemsFocused d || maybe False treeFocused (sideTree d) || maybe True (not . protectedBuffer d . bufferId) (activeWindow d))
+guestKeyboardAllowed d=not (guestModalBlocked d) && not (focusedPrivateField d) && (isJust (dialog d) || problemsFocused d || maybe False treeFocused (sideTree d) || maybe True (not . protectedWindow d) (activeWindow d))
 guestKeyAllowed :: Desktop -> V.Key -> [V.Modifier] -> Bool
 guestKeyAllowed d key mods=maybe True guestCommandAllowed (boundKeyCommand key mods d) && not (guestModalBlocked d) && (guestKeyboardAllowed d || navigation || fieldNavigation)
   where
@@ -266,7 +271,7 @@ readableAt d x y
   Just dg | inside (dialogRect d dg) x y -> True
   _ | overlayAt d x y -> True
     | otherwise -> case topWindow d x y of
-        Just w | protectedBuffer d (bufferId w) -> case M.lookup (bufferId w) (buffers d) of
+        Just w | protectedWindow d w -> case windowDocument (buffers d) w of
           Just doc | documentLabel doc==Just "Autocomplete" -> not (autocompletePane d w && inside (autocompleteComposerRect d w) x y)
           Just doc | documentLabel doc==Just "Conversation" -> not (byteMode (documentBuffer doc)) && not (inside (composerRect d w) x y) && not (contentPrivate privateOffset d doc w x y)
           _ -> False
@@ -283,8 +288,9 @@ streamerReadableAt d x y
     | privateTreeCell d x y -> False
     | overlayAt d x y -> True
     | otherwise -> case topWindow d x y of
-        Just w | Just doc<-M.lookup (bufferId w) (buffers d),privateDocument d doc -> False
-        Just w | Just doc<-M.lookup (bufferId w) (buffers d),documentLabel doc==Just "Conversation" -> not (contentPrivate (\_ -> sessionOffset) d doc w x y)
+        Just w | PluginContent _<-windowContent w,streamerMode d -> False
+        Just w | Just doc<-windowDocument (buffers d) w,privateDocument d doc -> False
+        Just w | Just doc<-windowDocument (buffers d) w,documentLabel doc==Just "Conversation" -> not (contentPrivate (\_ -> sessionOffset) d doc w x y)
         _ -> True
   where
     sensitiveValue dg (r,Input label _ _)=sensitiveLabel label && y>top r && inside r x y && y>=top (dialogRect d dg)+2 && y<top (dialogRect d dg)+height (dialogRect d dg)-3
@@ -344,7 +350,7 @@ pointerAllowedAt d x y
   | Just (r,chosen)<-contextMenu d,inside r x y=maybe False (guestCommandAllowed . snd) (at (contextItemsFor d) (contextOffset r chosen+y-top r-1))
   | Just (index,_)<-menu d,inside (menuRect d index) x y=maybe False (\(MenuItem _ _ command)->guestCommandAllowed command) (at (menuItemsFor d index) (y-top (menuRect d index)-1))
   | overlayAt d x y=True
-  | Just w<-topWindow d x y=not (protectedBuffer d (bufferId w))
+  | Just w<-topWindow d x y=not (protectedWindow d w)
   | otherwise=True
 onScreen :: Desktop -> Int -> Int -> Bool
 onScreen d=inside (uncurry (Rect 0 0) (screenSize d))
