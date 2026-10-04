@@ -35,6 +35,7 @@ import Hide.InlineState
 import Hide.Buffer
 import Hide.BufferView
 import qualified Hide.Bindings as Bindings
+import qualified Hide.Plugin.Menu as Plugin
 import Hide.Files (FileState(..))
 
 -- | A zero-based character-cell rectangle with exclusive right and bottom edges.
@@ -102,6 +103,7 @@ data Command = New | Open | Download | ChangeDir | Save | SaveAs | Close | Quit 
   | SidebarMove Int | SidebarActivate | SidebarExpand | SidebarCollapse | FocusSource | MessagesMove Int | MessagesPage Int
   | ToolchainOptions | SelectToolchain Toolchain | SelectCompiler Text
   | DebugCommand Text | AutocompleteCommand Text
+  | RegisteredMenu Plugin.MenuRef Bool
   | Disabled Text deriving (Eq,Show)
 data ConflictAction = CompareDisk | ReloadDisk | KeepBuffer | SaveConflictAs deriving (Eq,Show)
 data Conflict = Conflict { conflictBuffer :: Int, conflictRevision :: Int, conflictBaseline :: FileState, conflictDisk :: Maybe ByteString } deriving (Eq,Show)
@@ -119,7 +121,7 @@ data LanguageAction = TypeInfo | FindDefinition | Completions | ShowProblems | R
 data Completion = Completion Text [(Int,Int,Text)] deriving (Eq,Show)
 data ProjectAction = LoadProject | ProjectPage Int Int | ProjectDetails Int Int deriving (Eq,Show)
 -- | Ordered requests for the host interpreter, produced alongside a new desktop.
-data Effect = ReloadKeyBindings FilePath | InspectKeyBindings (Maybe Bindings.BindingContext) (Maybe (Bindings.Bindings Command)) | FollowLink (Maybe FilePath) Text | EnvironmentAction Text [Text] | AutocompleteAction Text [Text] | SaveMacKeySymbols Bool | SaveChatSubmit ChatSubmit | SaveBufferViewDefault BufferView | ProjectRequest ProjectAction | DownloadDocument Int | ReadBrowserClipboard | WriteBrowserClipboard Text | LanguageRequest LanguageAction | RunGit GitAction | ReadMergeBranches | JumpTo FilePath Int Int | ReadPath FilePath | BrowsePath FilePath Text | BrowseDirectories FilePath | ChangeDirectory FilePath | OpenChoice FilePath Text Text | ReadTree FilePath | ExpandTree Int | ReadHelp | RefreshGit FilePath | ReadGitDiff | AskGitCommit | WriteGitCommit Text | SaveDocument Int (Maybe FilePath) (Maybe Command) | ReviewExternal | ResolveConflict Conflict ConflictAction | AgentAction Text [Text] | PermissionAction Text [Text] | DebugAction Text [Text] | SetScreenMode Int | Exit deriving (Eq,Show)
+data Effect = ReloadKeyBindings FilePath | InspectKeyBindings (Maybe Bindings.BindingContext) (Maybe (Bindings.Bindings Command)) | FollowLink (Maybe FilePath) Text | EnvironmentAction Text [Text] | AutocompleteAction Text [Text] | SaveMacKeySymbols Bool | SaveChatSubmit ChatSubmit | SaveBufferViewDefault BufferView | ProjectRequest ProjectAction | DownloadDocument Int | ReadBrowserClipboard | WriteBrowserClipboard Text | LanguageRequest LanguageAction | RunGit GitAction | ReadMergeBranches | JumpTo FilePath Int Int | ReadPath FilePath | BrowsePath FilePath Text | BrowseDirectories FilePath | ChangeDirectory FilePath | OpenChoice FilePath Text Text | ReadTree FilePath | ExpandTree Int | ReadHelp | InvokeMenu Plugin.MenuRef Plugin.MenuOrigin | RefreshGit FilePath | ReadGitDiff | AskGitCommit | WriteGitCommit Text | SaveDocument Int (Maybe FilePath) (Maybe Command) | ReviewExternal | ResolveConflict Conflict ConflictAction | AgentAction Text [Text] | PermissionAction Text [Text] | DebugAction Text [Text] | SetScreenMode Int | Exit deriving (Eq,Show)
 data Field = Input Text Text Int | ComboBox Text [Text] Int (Maybe Int) | CheckBox Text Bool | Radio Text [Text] Int | ListBox Text [Text] Int | FileList [Entry] Int
   | ReadOnly Text Text
   | TextArea Text Bool Buffer Selection Int Int deriving (Eq,Show)
@@ -194,6 +196,7 @@ data Desktop = Desktop
   , autocompleteACPEnabled :: Bool, autocompleteDraft :: Buffer
   , autocompleteSelection :: Selection, autocompleteFocused :: Bool, macKeySymbols :: Bool
   , keyBindings :: M.Map Bindings.BindingContext (Bindings.Bindings Command)
+  , contributedMenus :: [Plugin.MenuItem], agentMenuRefs :: [Plugin.MenuRef], menusActive :: Bool
   , contextTarget :: Maybe ContextTarget
   } deriving (Eq,Show)
 
@@ -244,9 +247,10 @@ keyLabelWidth text = displayColumn text (T.length text)
 
 menuShortcut :: Desktop -> MenuItem -> Text
 menuShortcut d (MenuItem _ key cmd)
-  | Just bindings<-effectiveBindings d = keyLabel d (fromMaybe "" (listToMaybe (Bindings.bindingKeys bindings cmd)))
+  | Just bindings<-effectiveBindings d = keyLabel d (fromMaybe "" (listToMaybe (Bindings.bindingKeys bindings shortcutCommand)))
   | nativeMac d = keyLabel d $ fromMaybe key (lookup cmd [(New,"Cmd+N"),(Open,"Cmd+O"),(Save,"Cmd+S"),(SaveAs,"Cmd+Shift+S"),(Close,"Cmd+W"),(Quit,"Cmd+Q"),(Undo,"Cmd+Z"),(Redo,"Cmd+Shift+Z"),(Copy,"Cmd+C"),(Cut,"Cmd+X"),(Paste,"Cmd+V"),(SelectAll,"Cmd+A"),(Find,"Cmd+F"),(Replace,"Cmd+Option+F"),(FindNext,"Cmd+G"),(FindPrevious,"Cmd+Shift+G"),(Conversation,"Cmd+Shift+C"),(AgentNew,"Cmd+Shift+N")])
   | otherwise = keyLabel d key
+  where shortcutCommand=case cmd of RegisteredMenu ref _ | Plugin.menuName ref=="hide.help.contents"->Help; _->cmd
 
 commandDescription :: Command -> Text
 commandDescription cmd = case cmd of
@@ -338,6 +342,8 @@ commandDescription cmd = case cmd of
   GitFetch -> "Fetch remote changes without changing the working tree."
   GitPull -> "Pull remote changes with a fast-forward-only update."
   GitMerge -> "Choose a branch to merge into the current branch."
+  RegisteredMenu reference _ | Plugin.menuName reference=="hide.help.contents" -> "Open the read-only help document."
+                            | otherwise -> "Open the selected extension document."
   Disabled reason -> reason
 
 menuHelp :: Desktop -> Maybe Text
@@ -405,11 +411,33 @@ menuItemsFor :: Desktop -> Int -> [MenuItem]
 menuItemsFor d i
   | browserFrontend d && i==0 = take 4 items ++ [MenuItem "Download" "" Download] ++ drop 4 items
   | otherwise = items
-  where items=menuItems i
+  where
+    original=menuItems i
+    slot=let (title,_,_)=menus !! (i `mod` length menus) in T.toLower title
+    additions=[MenuItem (Plugin.menuTitle item) (Plugin.menuKey item) (contributionCommand d item) | item<-contributedMenus d,Plugin.menuSlot item==slot]
+    helpEntry=[item | item@(MenuItem _ _ (RegisteredMenu ref _))<-additions,Plugin.menuName ref=="hide.help.contents"]
+    items=case helpEntry of
+      first:_ -> [if cmd==Help then first else item | item@(MenuItem _ _ cmd)<-original]++[item | item<-additions,item/=first]
+      [] -> original++additions
+
+-- | Agent enablement is intersected with exact refs granted by the host policy;
+-- an extension's metadata cannot grant authority or change protected controls.
+contributionCommand :: Desktop -> Plugin.MenuItem -> Command
+contributionCommand d item=RegisteredMenu reference (Plugin.menuAgentAllowed item && reference `elem` agentMenuRefs d)
+  where reference=Plugin.menuReference item
+
+-- | Resolve a transported entry against its exact prepared lifetime. Unknown
+-- names and retired generations never rediscover the currently focused action.
+contributedCommand :: Text -> Text -> Integer -> Desktop -> Maybe Command
+contributedCommand name epoch generation d=do
+  item<-find (\item->Plugin.menuName (Plugin.menuReference item)==name && Plugin.menuEpoch (Plugin.menuReference item)==epoch && Plugin.menuGeneration (Plugin.menuReference item)==generation) (contributedMenus d)
+  pure (contributionCommand d item)
 
 commandEnabled :: Desktop -> Command -> Bool
 commandEnabled d cmd | dialogCommandAllowed cmd d = True
 commandEnabled d Download = browserFrontend d && maybe False ((==Nothing) . documentLabel) (activeDocument d)
+commandEnabled d Help | menusActive d = any ((=="hide.help.contents") . Plugin.menuName . Plugin.menuReference) (contributedMenus d)
+commandEnabled d (RegisteredMenu reference _) = dialog d==Nothing && any ((==reference) . Plugin.menuReference) (contributedMenus d)
 commandEnabled _ Disabled{} = False
 commandEnabled d SidebarMove{} = maybe False treeFocused (sideTree d)
 commandEnabled d cmd | cmd `elem` [SidebarActivate,SidebarExpand,SidebarCollapse] = maybe False treeFocused (sideTree d)
@@ -438,7 +466,7 @@ menuCommandAvailable d cmd = commandEnabled d cmd && canInvoke
               | cmd==Paste = not (maybe False treeFocused (sideTree d)) || dialog d/=Nothing
               | otherwise = dialog d==Nothing && (activeWindow d/=Nothing ||
                   (problemsVisible d && problemsFocused d && cmd==Copy) ||
-                  cmd `elem` [ReloadBindings,InspectBindings,New,Open,ChangeDir,Quit,Help,About,Gallery,EditorOptions,EnvironmentOptions,ChatInputOptions,ProjectBrowser,RunTarget,RunOptions,CompileTarget,MakeTarget,StopBuild,OpenTerminal,StopTerminal,AgentDirectory,AgentOptions,AgentPermissions,AgentGuidance,Conversation,AgentCancel,AgentResume,AgentNew,AgentCopyRaw,ToggleTree,GitDiff,GitCommit,GitFetch,GitPull,GitMerge,Problems,NextMessage,PreviousMessage,ToolchainOptions,AutocompleteCommand "settings",DebugCommand "attach",DebugCommand "launch",DebugCommand "downloads"])
+                  (case cmd of RegisteredMenu{}->True; _->False) || cmd `elem` [ReloadBindings,InspectBindings,New,Open,ChangeDir,Quit,Help,About,Gallery,EditorOptions,EnvironmentOptions,ChatInputOptions,ProjectBrowser,RunTarget,RunOptions,CompileTarget,MakeTarget,StopBuild,OpenTerminal,StopTerminal,AgentDirectory,AgentOptions,AgentPermissions,AgentGuidance,Conversation,AgentCancel,AgentResume,AgentNew,AgentCopyRaw,ToggleTree,GitDiff,GitCommit,GitFetch,GitPull,GitMerge,Problems,NextMessage,PreviousMessage,ToolchainOptions,AutocompleteCommand "settings",DebugCommand "attach",DebugCommand "launch",DebugCommand "downloads"])
 
 menuRect :: Desktop -> Int -> Rect
 menuRect d i = Rect (min x (max 0 (sw-w))) 1 w (length (menuItemsFor d i)+2)
@@ -447,7 +475,7 @@ menuRect d i = Rect (min x (max 0 (sw-w))) 1 w (length (menuItemsFor d i)+2)
         w = min sw (maximum [T.length t + keyLabelWidth (menuShortcut d entry) + 5 + (case command of SetBufferView _ -> 4; _ -> 0) | entry@(MenuItem t _ command) <- menuItemsFor d i])
 
 initialDesktop :: (Int,Int) -> Desktop
-initialDesktop size = Desktop size [] M.empty 1 Nothing Nothing Nothing "" Nothing False Nothing "" Nothing "" Nothing "" False Nothing Nothing Nothing "" Nothing Nothing Nothing [] False 0 0 False Nothing 0 0 Nothing SourceContext Nothing (newBuffer "") (Selection 0 0) True False False 0 True False False False Nothing Nothing [] 8 Nothing [] False SystemMode True [] Nothing [] Nothing [] False Nothing "" M.empty False (0,Nothing) [] Nothing CurrentView QuerySubmit Nothing 0 M.empty Nothing False (newBuffer "") (Selection 0 0) True False M.empty Nothing
+initialDesktop size = Desktop size [] M.empty 1 Nothing Nothing Nothing "" Nothing False Nothing "" Nothing "" Nothing "" False Nothing Nothing Nothing "" Nothing Nothing Nothing [] False 0 0 False Nothing 0 0 Nothing SourceContext Nothing (newBuffer "") (Selection 0 0) True False False 0 True False False False Nothing Nothing [] 8 Nothing [] False SystemMode True [] Nothing [] Nothing [] False Nothing "" M.empty False (0,Nothing) [] Nothing CurrentView QuerySubmit Nothing 0 M.empty Nothing False (newBuffer "") (Selection 0 0) True False M.empty [] [] False Nothing
 
 activeWindow :: Desktop -> Maybe Window
 activeWindow d = listToMaybe (filter (windowVisible d) (windows d))
@@ -894,7 +922,13 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
     go PreviousMessage d = navigateMessage (-1) d
     go RestartHLS d = (d,[LanguageRequest RestartLanguage])
     go (OpenLink origin target) d = (d,[FollowLink origin target])
-    go Help d = (d,[ReadHelp])
+    go Help d = case find ((=="hide.help.contents") . Plugin.menuName . Plugin.menuReference) (contributedMenus d) of
+      Just item -> go (contributionCommand d item) d
+      Nothing | menusActive d -> (d {status="Help command is unavailable."},[])
+              | otherwise -> (d,[ReadHelp])
+    go (RegisteredMenu reference _) d
+      | commandEnabled d (RegisteredMenu reference False) = (d,[InvokeMenu reference Plugin.HumanMenu])
+      | otherwise = (d {status="Menu action is unavailable."},[])
     go ToggleTree d = case sideTree d of Just _ -> (setTree Nothing d,[]); Nothing -> (d,[ReadTree (startingDirectory d)])
     go GitDiff d = (d,[ReadGitDiff])
     go GitCommit d = (d,[AskGitCommit])

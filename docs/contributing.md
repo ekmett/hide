@@ -151,8 +151,31 @@ its revision; read-only output/transcript replacement is not an editable source
 target. Moving input ownership to the sidebar also refuses a source choice.
 Agent choices retain the conversation target. Other parameterized
 context actions retain their own arguments. These checks do not replace host input
-origin and policy checks. General dynamic extension menus and full first-party
-routing through the typed registry remain open in #2.
+origin and policy checks. `Hide.Plugin.Menu` composes contributions in declared named slots by group,
+order and namespaced entry ID. `withMenus` bounds snapshots to 256 entries;
+unknown slots, duplicate IDs and stale lifetimes fail explicitly. `menuAction`
+retains typed command arguments and a worker-side presentation adapter. The
+metadata snapshot contains no plugin callback or buffer payload.
+
+The live `Hide.MenuCommands` host contributes **Help > Contents** through a
+thin `hide.help.contents` command calling the existing scoped `hide.docs.read`
+reader. F1, the popup, native catalogue and transported menu packets resolve the
+same retained contribution. Documentation reading and Markdown preparation run
+on one session worker; adoption preserves read-only Help styling, relative links
+and shell-block/navigation metadata. Browser/native frames carry entry IDs and
+exact generations plus a fresh non-secret registry nonce. A native catalogue rebuild also stamps a new Cocoa incarnation.
+
+Install linked contributions before publishing the session snapshot. Published
+retirement goes through `retireMenuFromHost`, which the serialized session owner
+drains before admission and adoption. Do not retire a published command/menu from
+an unrelated worker. Shutdown cancels and joins work before closing its registry
+scopes. Plugin agent-enable metadata cannot grant authority: the live host only
+permits its exact first-party Help ref and retains existing protected-control
+policy checks. Origin comes from host dispatch, never frontend JSON.
+
+This slice supports the existing main-menu slots and prepared documentation
+replies. Context-menu contributions, runtime activation/publication and full
+first-party routing through the typed registry remain open in #2.
 
 `sh tools/check-native.sh` tests the real SDL event queue without a window. On
 macOS it also checks an unshown application menu for duplicate enablement and

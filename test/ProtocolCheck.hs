@@ -44,6 +44,7 @@ checks = do
   check "canonical names do not depend on constructor spelling" (all (T.isPrefixOf "hide.") canonical)
   forM_ protocolCommands $ \cmd -> case cmd of
     Disabled{} -> check "separators expose no command" (Commands.commandIdentifier cmd==Nothing)
+    Help -> check "contributed Help requires an exact menu lifetime" (either (const True) (const False) (menu ["command" .= ("hide.help.contents"::T.Text)]))
     _ -> do
       check "every menu action has a stable identity" (Commands.commandIdentifier cmd/=Nothing)
       forM_ (Commands.commandIdentifier cmd) $ \name ->

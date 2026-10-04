@@ -23,6 +23,7 @@ import System.FilePath ((</>), isAbsolute, makeRelative, splitDirectories, norma
 import Hide.Browser (Entry(..))
 import Hide.Files (filePath)
 import Hide.Buffer
+import qualified Hide.Plugin.Menu as Plugin
 import Hide.Model
 
 -- | Trusted host attribution; never accept an origin claimed by input JSON.
@@ -85,6 +86,7 @@ sessionOffset text n="Session: " `T.isPrefixOf` text && n<T.length (T.takeWhile 
 
 guestCommandAllowed :: Command -> Bool
 guestCommandAllowed cmd=case cmd of
+  RegisteredMenu _ allowed -> allowed
   DebugCommand action | privateDownloadAction action -> False
   GitDiff -> False
   GitCommit -> False
@@ -112,6 +114,7 @@ guestEffectsAllowed :: [Effect] -> Bool
 guestEffectsAllowed=all allowed
   where
     allowed ReloadKeyBindings{}=False
+    allowed (InvokeMenu _ origin)=origin==Plugin.AgentMenu
     allowed ReadGitDiff=False
     allowed AskGitCommit=False
     allowed WriteGitCommit{}=False

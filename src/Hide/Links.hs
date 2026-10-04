@@ -5,7 +5,7 @@
 -- installed as an immutable document. External resources travel as HTTP(S) URLs
 -- or bounded MIME-tagged bytes, never a remote filesystem path. Native openers
 -- receive argument vectors; their process exit is reaped asynchronously.
-module Hide.Links (followLink, prepareLink, applyLink, openResource, validWebURL) where
+module Hide.Links (followLink, prepareLink, prepareMarkdown, LinkResult, applyLink, openResource, validWebURL) where
 
 import Control.Concurrent (forkIO)
 import Control.Exception (IOException, try, evaluate)
@@ -62,17 +62,7 @@ prepareLink stream columns directory origin target=do
           (path,fragment)<-localTarget
           if map toLower (takeExtension path) `elem` [".md",".markdown"] then do
             text<-boundedRead path >>= either (const (ioError (userError "Invalid UTF-8 Markdown"))) pure . TE.decodeUtf8'
-            let (styled,blocks)=renderMarkdownWithShellBlocks columns text
-                opened=addHelpStyled styled (initialDesktop (columns+4,25))
-                rows=map (T.pack . map fst) (splitStyled styled)
-                matching=[i | (i,line)<-zip [0..] rows, slug line==fragment]
-                row=if T.null fragment then 0 else fromMaybe 0 (first matching)
-            case activeDocument opened of
-              Nothing->ioError (userError "Missing help buffer")
-              Just doc->do
-                let prepared=doc {documentMarkdownPath=Just path,documentShellBlocks=blocks}
-                _<-evaluate (bufferLength (documentBuffer prepared)+length (documentHighlight prepared)+sum [a+b+T.length url | (a,b,url)<-documentLinks prepared]+length blocks+row)
-                pure (LinkDocument prepared row path)
+            prepareMarkdown columns path fragment text
           else case lookup (map toLower (takeExtension path)) formats of
             Just mime | stream->do
               bytes<-boundedRead path
@@ -93,8 +83,23 @@ prepareLink stream columns directory origin target=do
           pure (absolute,T.pack (drop 1 (uriFragment uri)))
         _ | isAbsolute (T.unpack target)->do path<-canonicalizePath (T.unpack target); pure (path,"")
           | otherwise->ioError (userError "Unsupported link scheme")
-    first []=Nothing
-    first (x:_)=Just x
+
+-- | Prepare already-read Markdown on a worker, preserving the existing help
+-- styling, shell blocks, relative-link base and fragment navigation.
+prepareMarkdown :: Int -> FilePath -> Text -> Text -> IO LinkResult
+prepareMarkdown columns path fragment text=do
+  let (styled,blocks)=renderMarkdownWithShellBlocks columns text
+      opened=addHelpStyled styled (initialDesktop (columns+4,25))
+      rows=map (T.pack . map fst) (splitStyled styled)
+      matching=[i | (i,line)<-zip [0..] rows, slug line==fragment]
+      row=if T.null fragment then 0 else fromMaybe 0 (case matching of first:_ -> Just first; _ -> Nothing)
+  case activeDocument opened of
+    Nothing->ioError (userError "Missing help buffer")
+    Just doc->do
+      let prepared=doc {documentMarkdownPath=Just path,documentShellBlocks=blocks}
+      _<-evaluate (bufferLength (documentBuffer prepared)+length (documentHighlight prepared)+sum [a+b+T.length url | (a,b,url)<-documentLinks prepared]+length blocks+row)
+      pure (LinkDocument prepared row path)
+  where
     slug=T.intercalate "-" . T.words . T.filter (\c->isAlphaNum c || c==' ' || c=='-' || c=='_') . T.toLower
     splitStyled chars=let (line,rest)=break ((=='\n').fst) chars in line:case rest of []->[]; _:more->splitStyled more
 
