@@ -66,6 +66,7 @@ checks = do
       actualRows = P.frameRows desktop
   (decoded,reconstructed) <- P.decodeFrame [] (BL.toStrict (P.framePacket True [] actualRows (P.frameMetadata "/remote/project" desktop)))
   check "compressed editor Unicode frame validates for native rendering" (either (const False) ((==(80,25)).remoteSize) (parseRemoteFrame decoded reconstructed))
+  check "validated native menu route uses shared protocol" (case remoteMenu enabledMenu 0 of Just value -> parseEither P.parseInput value==Right (P.MenuCommand Model.New); _ -> False)
   check "native events use shared protocol" (all (maybe False (either (const False) (const True) . parseEither P.parseInput) . nativeEventInput)
-    [[1,-9,1],[3,10,4,2,2,1],[3,11,4,0,1,1],[4,11,4],[5,80,25],[6],[7],[9,10,4,-1,4],[11,0],[12,-1,-1],[13,15]])
+    [[1,-9,1],[3,10,4,2,2,1],[3,11,4,0,1,1],[4,11,4],[5,80,25],[6],[7],[9,10,4,-1,4],[12,-1,-1],[13,15]])
 #endif

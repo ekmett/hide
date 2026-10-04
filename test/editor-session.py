@@ -140,7 +140,7 @@ with tempfile.TemporaryDirectory(prefix='hide-session-') as directory:
             # Introspection must leave the display's writer ownership intact.
             event(ws, display, 3, type='paste', text='+')
             assert tool(6, 'read_buffer', arguments)['text'] == 'persistent unsaved λ+'
-            event(ws, display, 4, type='command', command='undo')
+            event(ws, display, 4, type='command', command='hide.edit.undo')
             assert tool(7, 'read_buffer', arguments)['text'] == 'persistent unsaved λ'
         finally:
             bridge.stdin.close()
@@ -207,7 +207,7 @@ with tempfile.TemporaryDirectory(prefix='hide-session-') as directory:
 
     try:
         process, ws, display = web([str(source)])
-        event(ws, display, 1, type='command', command='selectAll')
+        event(ws, display, 1, type='command', command='hide.edit.select-all')
         event(ws, display, 2, type='paste', text='persistent unsaved λ')
         expect_text(display, 'persistent unsaved λ')
         assert source.read_text() == 'original\n', 'Unsaved edit reached disk'
@@ -242,15 +242,15 @@ with tempfile.TemporaryDirectory(prefix='hide-session-') as directory:
         ws.close()
         process, ws, display = web(['--resume=' + first_id])
         expect_text(display, 'persistent unsaved λ!+')
-        event(ws, display, 1, type='command', command='undo')
+        event(ws, display, 1, type='command', command='hide.edit.undo')
         if 'persistent unsaved λ!+' in display_text(display):
             display.until('frame', lambda _: 'persistent unsaved λ!+' not in display_text(display))
         expect_text(display, 'persistent unsaved λ!')
-        event(ws, display, 2, type='command', command='undo')
+        event(ws, display, 2, type='command', command='hide.edit.undo')
         if 'persistent unsaved λ!' in display_text(display):
             display.until('frame', lambda _: 'persistent unsaved λ!' not in display_text(display))
         expect_text(display, 'persistent unsaved λ')
-        event(ws, display, 3, type='command', command='redo')
+        event(ws, display, 3, type='command', command='hide.edit.redo')
         expect_text(display, 'persistent unsaved λ!')
         event(ws, display, 4, type='key', key='F2')
         assert source.read_text() == 'persistent unsaved λ!'

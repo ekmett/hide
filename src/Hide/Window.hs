@@ -19,8 +19,10 @@ module Hide.Window (runWindow, nativeMenuShortcut, nativeMenuEvent, nativeComman
 import Hide.Frontend
 import Hide.Model
 import Hide.Commands (builtinCommands, builtinAction)
-import Data.List (elemIndex)
 #ifdef WITH_WINDOW
+#ifdef darwin_HOST_OS
+import Data.List (elemIndex)
+#endif
 import Control.Exception (bracket_)
 import Control.Monad (forM_, when, unless, foldM)
 import Data.Foldable (toList)

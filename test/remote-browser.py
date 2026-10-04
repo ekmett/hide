@@ -90,18 +90,18 @@ with tempfile.TemporaryDirectory(prefix='thc-remote-browser-') as directory:
             ws=WebSocket(url);display=Display(ws)
             display.until('frame')
             assert source.name in display.meta['title'],display.meta
-            ws.send({'type':'command','command':'selectAll','seq':1});display.until('ack',lambda m:m['seq']==1)
+            ws.send({'type':'command','command':'hide.edit.select-all','seq':1});display.until('ack',lambda m:m['seq']==1)
             ws.send({'type':'paste','text':'remote λ\n','seq':2});display.until('ack',lambda m:m['seq']==2)
             ws.send({'type':'key','key':'F2','seq':3});display.until('ack',lambda m:m['seq']==3)
             assert source.read_text()=='remote λ\n'
-            ws.send({'type':'command','command':'selectAll','seq':4});display.until('ack',lambda m:m['seq']==4)
+            ws.send({'type':'command','command':'hide.edit.select-all','seq':4});display.until('ack',lambda m:m['seq']==4)
             ws.send({'type':'command','command':'hide.edit.copy','seq':5});assert display.until('copy')['text']=='remote λ\n'
             display.until('ack',lambda m:m['seq']==5)
             ws.close();ws=None;time.sleep(.3)
             ws=WebSocket(url);display=Display(ws);display.until('frame')
             ws.send({'type':'command','command':'hide.edit.copy','seq':1});assert display.until('copy')['text']=='remote λ\n'
             display.until('ack',lambda m:m['seq']==1)
-            ws.send({'type':'command','command':'download','seq':2})
+            ws.send({'type':'command','command':'hide.file.download','seq':2})
             display.until('download');kind,blob=ws.read();assert kind==2 and blob==b'remote \xce\xbb\n'
             display.until('ack',lambda m:m['seq']==2)
             ws.send({'type':'command','command':'hide.app.quit','seq':3});display.until('closed')
