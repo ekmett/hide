@@ -50,6 +50,7 @@ import qualified InlineRenderCheck
 import qualified AutocompleteACPCheck
 import qualified CopilotCheck
 import qualified HighlightingCheck
+import qualified AgentSidebarCheck
 import qualified AgentIntegrationCheck
 import qualified AgentAccessCheck
 import qualified AgentRuntimeCheck
@@ -115,6 +116,7 @@ main = do
   AutocompleteACPCheck.checks
   CopilotCheck.checks
   HighlightingCheck.checks
+  AgentSidebarCheck.checks
   AgentIntegrationCheck.checks
   AgentAccessCheck.checks
   AgentRuntimeCheck.checks

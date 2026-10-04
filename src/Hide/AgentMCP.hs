@@ -7,8 +7,7 @@
 -- with the hub rather than being inferred from JSON schema hints.
 module Hide.AgentMCP (agentTools, agentToolNames, agentTool) where
 
-import Control.Exception (mask, onException)
-import Control.Monad (unless, void)
+import Control.Monad (unless)
 import Data.Aeson
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
@@ -79,18 +78,11 @@ agentTool hub actor directory name args=case [properties | (key,_,_,_,properties
           Nothing->pure Shared
           Just value->strictObject ["mode","ref","branch","name"] parseWorkspace value
         let spec=SpawnSpec childName task directory workspace origin model effort
-        pure $ mask $ \restore->do
-          created<-restore (spawnAgent hub actor spec)
+        pure $ do
+          created<-spawnAgentWithTask hub actor spec
           case created of
             Left err->pure (Left err)
-            Right ident->do
-              let cleanup=void (endAgent hub actor ident)
-              (do
-                queued<-sendAgent hub actor ident task
-                case queued of
-                  Left err->cleanup >> pure (Left err)
-                  Right ticket->fmap (\agent->object ["agent" .= agent,"ticket" .= ticket]) <$> statusAgent hub actor ident)
-                `onException` cleanup
+            Right (ident,ticket)->fmap (\agent->object ["agent" .= agent,"ticket" .= ticket]) <$> statusAgent hub actor ident
       "agent_rename"->do
         ident<-agentId o
         newName<-text o "name" 80

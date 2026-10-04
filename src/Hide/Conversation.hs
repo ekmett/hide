@@ -61,6 +61,7 @@ import Hide.Session (checkpointPath)
 import Hide.AgentFiles
 import Hide.Buffer
 import Hide.Markdown (renderMarkdownWithShellBlocks)
+import Hide.AgentSidebarTypes
 import Hide.Model hiding (prompt)
 import System.Environment (lookupEnv)
 import Hide.Syntax (linkSpans,Style(..), bubbleTile)
@@ -104,6 +105,7 @@ data State = State
   , buildSettingsCache :: Maybe Toolchain, buildSettingsVersion :: Int
   , buildSettingsWorker :: Maybe (Int,Async Toolchain), buildSettingsChecked :: Maybe UTCTime
   , shellLaunches :: [Async (Either Text C.PreparedConsole)]
+  , creatingAgent :: Maybe (Async (Either Text (AH.AgentId,Int)))
   , resumeRecordPath :: FilePath
   }
 -- | Session-scoped provider, transcript and shared service ownership.
@@ -135,7 +137,7 @@ withConversationAt root action = C.withConsoles $ \consoles -> Jobs.withBuildJob
     , approvals=[],presented=Nothing,deferredApproval=False,nextApproval=1,queuedQueries=[]
     , ownedTerminals=S.empty,terminalWaiters=M.empty,lastMessageAt=Nothing
     , lastRender=Nothing,lastSession=remembered,waitingQuestion=Nothing,lastQuestion=Nothing
-    , deliveredContext=Nothing,compilerDiscovery=Nothing,fileCaptures=[],retiringRequests=[],promptPreparation=Nothing,buildSettingsCache=Nothing,buildSettingsVersion=0,buildSettingsWorker=Nothing,buildSettingsChecked=Nothing,resumeRecordPath=resumePath,shellLaunches=[],directoryAgents=[],agentDelivery=Nothing
+    , deliveredContext=Nothing,compilerDiscovery=Nothing,fileCaptures=[],retiringRequests=[],promptPreparation=Nothing,buildSettingsCache=Nothing,buildSettingsVersion=0,buildSettingsWorker=Nothing,buildSettingsChecked=Nothing,resumeRecordPath=resumePath,creatingAgent=Nothing,shellLaunches=[],directoryAgents=[],agentDelivery=Nothing
     , agentInitialized=Null,agentConfig=Null,streamTails=M.empty,lastAgentSync=Nothing,childRecords=M.empty,childRender=Nothing,childWidths=M.empty,childCancels=M.empty,childControls=M.empty,expandedToolRuns=S.empty }
   AR.withAgentRuntime root (provider <$> readIORef ref) $ \agents ->
     bracket (pure (ConversationState directory ref consoles jobs agents)) closeConversation action
@@ -155,6 +157,7 @@ closeConversation (ConversationState _ ref _ _ _) = do
   mapM_ denyChild (map snd (approvals s))
   mapM_ (cancel . snd) (buildSettingsWorker s)
   mapM_ (\(_,_,worker) -> cancel worker) (promptPreparation s)
+  mapM_ cancel (creatingAgent s)
   mapM_ cancel (compilerDiscovery s)
   mapM_ (\(FileCapture _ worker) -> cancel worker) (fileCaptures s)
   mapM_ (wait . snd) (retiringRequests s)
@@ -279,6 +282,7 @@ conversationEffects runtime@(ConversationState _ ref _ _ _) fallback original ef
   if quit then pure (True,updated) else (False,) <$> refreshConversationLayout runtime updated
   where
     apply state@(True,_) _=pure state
+    apply (_,d) (AgentSidebarAction request) = (False,) <$> applyAgentSidebar runtime request d
     apply (_,d) (AgentAction "edit-context" ("0":scope:_)) = do
       state<-readIORef ref
       root<-if isNothing (connection state) then B.resolveBuildRoot d else pure (project state)
@@ -296,6 +300,47 @@ conversationEffects runtime@(ConversationState _ ref _ _ _) fallback original ef
       syncConversationAgent runtime
       pure (False,updated)
     apply (_,d) effect = fallback d [effect]
+
+-- Sidebar requests are fixed human operations, adopted after host hit/lifetime
+-- validation. Dialog purposes carry the exact ID instead of a directory index.
+applyAgentSidebar :: ConversationState -> AgentSidebarRequest -> Desktop -> IO Desktop
+applyAgentSidebar runtime@(ConversationState _ ref _ _ agents) request d=case request of
+  ShowAgent ident | ident==AR.primaryAgent agents->perform runtime "show" [] d
+                  | otherwise->showAgentHistory runtime ident d
+  RenameAgent ident->do
+    selected<-AH.statusAgent hub AH.Human ident
+    pure $ case selected of
+      Left err->d {status=err}
+      Right entry->let name=fromMaybe (AH.agentIdText ident) (field "name" entry)
+        in d {dialog=Just (Dialog "Rename agent" (AgentRenameDialog ident)
+          [SelectedInput "Name" name (Selection 0 (T.length name))] 0 ["Rename","Cancel"] []),contextMenu=Nothing,contextTarget=Nothing}
+  RenameAgentTo ident name->do
+    result<-AH.renameAgent hub AH.Human ident name
+    pure d {status=either id (const "Agent renamed.") result}
+  NewAgent->pure d {dialog=Just (Dialog "New agent" AgentNewDialog
+    [Input "Name" "" 0,Input "Task" "" 0] 0 ["Create","Cancel"]
+    ["Start a fresh agent in this workspace and enqueue its task."]),contextMenu=Nothing,contextTarget=Nothing}
+  CreateAgent name task->do
+    state<-readIORef ref
+    case creatingAgent state of
+      Just _->pure d {status="An agent is already starting."}
+      Nothing->mask $ \restore->do
+        let spec=AH.SpawnSpec name task (startingDirectory d) AH.Shared AH.Fresh Nothing Nothing
+        worker<-async (restore (AH.spawnAgentWithTask hub AH.Human spec))
+        modifyIORef' ref (\current->current {creatingAgent=Just worker})
+        pure d {status="Starting agent…"}
+  where hub=AR.agentHub agents
+
+pollAgentCreation :: ConversationState -> Desktop -> IO Desktop
+pollAgentCreation (ConversationState _ ref _ _ _) d=do
+  state<-readIORef ref
+  case creatingAgent state of
+    Nothing->pure d
+    Just worker->poll worker >>= \completed->case completed of
+      Nothing->pure d
+      Just outcome->do
+        modifyIORef' ref (\current->current {creatingAgent=Nothing})
+        pure d {status=either (const "Agent creation interrupted.") (either id (const "Agent created; task queued.")) outcome}
 
 perform :: ConversationState -> Text -> [Text] -> Desktop -> IO Desktop
 perform (ConversationState _ ref _ _ _) "focus" [] d=do
@@ -694,7 +739,8 @@ tickConversation runtime@(ConversationState directory ref consoles jobs _) origi
   let rendered=laidOut {agentReplying=busy afterDismiss,agentQueued=length (queuedQueries afterDismiss)}
   syncConversationAgent runtime
   visible<-refreshChildConversation runtime rendered
-  shown<-present runtime visible
+  created<-pollAgentCreation runtime visible
+  shown<-present runtime created
   notice<-AR.runtimeNotice (conversationAgents runtime)
   pure (maybe shown (\text -> shown {status=text}) notice)
 
