@@ -481,7 +481,7 @@ menuRect :: Desktop -> Int -> Rect
 menuRect d i = Rect (min x (max 0 (sw-w))) 1 w (length (menuItemsFor d i)+2)
   where x = fst (menuPositions !! i)
         sw = fst (screenSize d)
-        w = min sw (maximum [T.length t + keyLabelWidth (menuShortcut d entry) + 5 + (case command of SetBufferView _ -> 4; _ -> 0) | entry@(MenuItem t _ command) <- menuItemsFor d i])
+        w = min sw (maximum [keyLabelWidth t + keyLabelWidth (menuShortcut d entry) + 5 + (case command of SetBufferView _ -> 4; _ -> 0) | entry@(MenuItem t _ command) <- menuItemsFor d i])
 
 initialDesktop :: (Int,Int) -> Desktop
 initialDesktop size = Desktop size [] M.empty 1 Nothing Nothing Nothing "" Nothing False Nothing "" Nothing "" Nothing "" False Nothing Nothing Nothing "" Nothing Nothing Nothing [] False 0 0 False Nothing 0 0 Nothing SourceContext Nothing (newBuffer "") (Selection 0 0) True False False 0 True False False False Nothing Nothing [] 8 Nothing [] False SystemMode True [] Nothing [] Nothing [] False Nothing "" M.empty False (0,Nothing) [] Nothing CurrentView QuerySubmit Nothing 0 M.empty Nothing False (newBuffer "") (Selection 0 0) True False M.empty [] [] False Nothing
@@ -1811,7 +1811,7 @@ openContext kind x y d = d {contextKind=kind,contextTarget=captureContextTarget 
     (sw,sh)=screenSize d
     items=contextItems kind
     h=max 3 (min (sh-2) (length items+2))
-    w=min sw (max 24 (maximum (0:map (keyLabelWidth . fst) items)+4))
+    w=min sw (max 24 (maximum (0:[keyLabelWidth title+keyLabelWidth (menuShortcut d (MenuItem title "" cmd))+5 | (title,cmd)<-items])))
     popup=Rect (max 0 (min x (sw-w))) (max 1 (min y (sh-h-1))) w h
 
 -- Source actions are admitted only at their captured view/caret/revision.

@@ -168,28 +168,17 @@ revision so an earlier click cannot move the editor back.
 
 ## Configurable bindings
 
-Introduce stable named commands and context-sensitive bindings in the existing
-configuration hierarchy. Keep current shortcuts as defaults, with global and
-project overrides using the same precedence as other editor settings. For example:
+Stable named commands and context-sensitive bindings now use the existing
+configuration hierarchy. See the implemented [keybinding schema and examples](../configuration.md#keybindings)
+for global/project precedence, platform profiles, context names, command IDs,
+replacement lists and explicit unbinding. Profiles are independent; there is no
+generic platform table inherited by macOS.
 
-```toml
-[editor.keybindings.editor]
-"debug.toggle-breakpoint" = ["Ctrl+F8"]
-"debug.add-watch" = ["Ctrl+Shift+W"]
-
-[editor.keybindings.sidebar]
-"tree.expand" = ["Right"]
-"tree.collapse" = ["Left"]
-
-[editor.keybindings.macos.editor]
-"debug.add-watch" = ["Cmd+Shift+W"]
-```
-
-These are proposed names and syntax, to be validated with the existing TOML
-parser. An override replaces that command's binding list in that context; an
-empty list unbinds it. Omitted commands retain their defaults. Platform-specific
-entries override generic entries in the same config layer. Existing WordStar
-behavior becomes a default profile instead of bypassing configured commands.
+Named WordStar commands use an editable profile. Movement, deletion and the
+Ctrl+K/Ctrl+Q block grammar remain fixed. Dialog editing/search actions are
+configurable for existing editable TextArea controls; dialog navigation and
+single-line Input ownership remain fixed. Runtime contributed-command binding
+registration remains proposed in the [plugin design](../design/haskell-plugins.md#commands-menus-and-bindings).
 
 Resolve the most specific active context before global commands. Cover editor,
 sidebar, conversation, debugger, terminal and dialog contexts. Ordinary typing

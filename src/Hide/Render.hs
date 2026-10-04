@@ -700,7 +700,17 @@ menuLayers d (i,j) = [place x y contents']
         pos = fromMaybe 0 (T.findIndex ((==menuMnemonic entry) . toLower) title)
         name = label a (T.take pos title) V.<|> label (if disabled then a else hot) (T.take 1 (T.drop pos title)) V.<|> label a (T.drop (pos+1) title)
         radio = case cmd of SetBufferView mode -> if defaultBufferView d==mode then "(●) " else "( ) "; _ -> ""
-        content = label a " " V.<|> label (attr black bg) radio V.<|> name V.<|> label a (T.replicate (max 1 (w-4-T.length radio-T.length title-keyLabelWidth key)) " ") V.<|> label (if disabled then a else hot) key V.<|> label a " "
+        content = menuRow (w-2) a (if disabled then a else hot) (label (attr black bg) radio V.<|> name) key
+
+-- Keep shortcuts at the right edge in cell coordinates, cropping a long title
+-- before its key. Both popup kinds use the same key color and wide-glyph path.
+menuRow :: Int -> V.Attr -> V.Attr -> V.Image -> Text -> V.Image
+menuRow w a hot name key = V.cropRight w $
+  label a " " V.<|> shownName V.<|> V.charFill a ' ' gap 1 V.<|> shownKey V.<|> label a " "
+  where
+    shownKey=V.cropRight (max 0 (w-3)) (label hot key)
+    shownName=V.cropRight (max 0 (w-3-V.imageWidth shownKey)) name
+    gap=max 1 (w-2-V.imageWidth shownName-V.imageWidth shownKey)
 
 bottomLayers :: Desktop -> [V.Image]
 bottomLayers d
@@ -741,8 +751,14 @@ problemsLayers d
 
 contextLayers :: Desktop -> (Rect,Int) -> [V.Image]
 contextLayers d (r@(Rect x y w h),chosen) =
-  [place (x+1) (y+i-contextOffset r chosen+1) (row (attr (if contextTargetCurrent d && commandEnabled d cmd then black else V.RGBColor 85 85 85) (if i==chosen then green else gray)) (w-2) (" "<>title)) | (i,(title,cmd))<-take (max 0 (h-2)) (drop (contextOffset r chosen) (zip [0..] (contextItems (contextKind d))))]
+  [place (x+1) (y+i-contextOffset r chosen+1) (item i title cmd) | (i,(title,cmd))<-take (max 0 (h-2)) (drop (contextOffset r chosen) (zip [0..] (contextItems (contextKind d))))]
   ++ [place x y (box paper False w h)]
+  where
+    item i title cmd=menuRow (w-2) a (if disabled then a else attr red bg) (label a title) (menuShortcut d (MenuItem title "" cmd))
+      where
+        disabled=not (contextTargetCurrent d && commandEnabled d cmd)
+        bg=if i==chosen then green else gray
+        a=attr (if disabled then V.RGBColor 85 85 85 else black) bg
 
 -- Dialog frames, fields, buttons and shadows appear in docs/site/screenshots/*.png.
 -- Refresh those artifacts with tools/docs-screenshots.hs after visual changes.
