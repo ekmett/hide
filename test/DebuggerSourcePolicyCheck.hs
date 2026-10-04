@@ -114,6 +114,11 @@ generatedOriginCheck=bracket (Fixture.fixture "source-origin") Fixture.cleanup $
           rows<-o .: "stackFrames" :: Parser [Value]
           traverse (withObject "frame" (\row->row .: "source" >>= withObject "source" (.:"path"))) rows)) page :: Maybe [FilePath]
     unless (paths==Just [canonical]) (fail "Shared Debug provider page must retain canonical source resource provenance")
+  (_,requestedChooser)<-debuggerEffects runtime core stopped [DebugAction "stack" []]
+  chooser<-await (pure . maybe False ((=="Call stack").dialogTitle) . dialog) requestedChooser
+  frameDialog<-maybe (fail "human frame chooser missing") pure (dialog chooser)
+  let frameRect=dialogRect chooser frameDialog; fx=left frameRect+2; fy=top frameRect+2
+  unless (not (readableAt chooser fx fy) && not (streamerReadableAt chooser fx fy) && guestModalBlocked chooser) (fail "Human frame chooser metadata must remain private until canonical row projection exists")
   putStrLn "actual generated source origin checks passed"
 
 -- Current path policy is checked at owner admission and again at late publication.

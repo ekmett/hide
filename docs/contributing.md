@@ -647,6 +647,7 @@ observation, so reusing a numeric reference cannot revive an old source action.
 Public status/stack projections omit whole private source records on waiting
 workers; shared Debug tree rows retain canonical resource provenance for masking.
 Private Add Watch prompts carry frozen source privacy rather than depending on
-field labels. Arbitrary adapter variables/output remain the approved execution
+field labels. The human frame chooser is conservatively private until it exposes
+prepared public semantic rows. Arbitrary adapter variables/output remain the approved execution
 boundary and are not universally sanitized. Local filesystem source following
 still uses the existing synchronous owner path; its async preparation is separate.

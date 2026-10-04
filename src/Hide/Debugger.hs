@@ -1000,7 +1000,7 @@ canonicalSourcePath _ (Just "")=pure (Right Nothing)
 canonicalSourcePath _ (Just path) | length (take 4097 path)>4096 || '\0' `elem` path=pure (Left "Invalid debugger source path.")
 canonicalSourcePath base (Just path)=do
   result<-try (canonicalizePath (if isAbsolute path then path else base </> path))
-  pure $ either (\(err::IOException)->Left ("Debugger source path: "<>T.pack (show err))) (Right . Just) result
+  pure $ either (\(_::IOException)->Left "Debugger source path is unavailable.") (Right . Just) result
 
 sourceStampCurrent :: State -> Int -> Int -> Bool
 sourceStampCurrent s reference stamp=case M.lookup reference (sourceReferences s) of
@@ -1329,7 +1329,10 @@ automaticDesktop :: State -> Desktop -> Desktop
 automaticDesktop s d=if followSource s then clearDialog d else d
 
 clearDialog :: Desktop -> Desktop
-clearDialog d = case dialog d of Just dg | DebugDialog{}<-purpose dg -> d {dialog=Nothing}; _ -> d
+clearDialog d = case dialog d of
+  Just dg | DebugDialog{}<-purpose dg->d {dialog=Nothing}
+  Just dg | DebugSourceWatchDialog{}<-purpose dg->d {dialog=Nothing}
+  _->d
 sourceKey :: Value -> Text
 sourceKey source = text "path" source<>"#"<>tshow (integer "sourceReference" source)
 sourceLabel :: Value -> Text

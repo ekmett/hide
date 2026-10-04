@@ -101,7 +101,7 @@ sessionOffset text n="Session: " `T.isPrefixOf` text && n<T.length (T.takeWhile 
 guestCommandAllowed :: Command -> Bool
 guestCommandAllowed cmd=case cmd of
   RegisteredMenu _ allowed -> allowed
-  DebugCommand action | privateDownloadAction action -> False
+  DebugCommand action | privateDebuggerAction action -> False
   GitDiff -> False
   GitCommit -> False
   AgentChoose{} -> False
@@ -166,7 +166,7 @@ guestEffectsAllowed=all allowed
     allowed PermissionAction{}=False
     allowed SaveChatSubmit{}=False
     allowed AutocompleteAction{}=False
-    allowed (DebugAction action _)=not (privateDownloadAction action)
+    allowed (DebugAction action _)=not (privateDebuggerAction action)
     allowed (AgentAction action _)=agentActionAllowed action
     allowed (SaveDocument _ _ follow)=maybe True guestCommandAllowed follow
     allowed ReadBrowserClipboard=False
@@ -183,13 +183,19 @@ protectedPurpose p=case p of
   ChatInputSettings -> True
   AutocompleteDialog{} -> True
   DebugSourceWatchDialog{} -> True
-  DebugDialog action -> privateDownloadAction action
+  DebugDialog action -> privateDebuggerAction action
   AgentDialog action -> not (agentActionAllowed action)
   DiscardDraft -> True
   Confirm command -> not (guestCommandAllowed command)
   _ -> False
-privateDownloadAction :: Text -> Bool
-privateDownloadAction action=action=="downloads" || "hdb-" `T.isPrefixOf` action
+privateDebuggerAction :: Text -> Bool
+-- Frame chooser labels are adapter metadata, not prepared public semantic rows.
+-- Keep the host-owned chooser private until it carries canonical row provenance.
+privateDebuggerAction action=action=="downloads" || "hdb-" `T.isPrefixOf` action || privateFrameChooserAction action
+privateFrameChooserAction :: Text -> Bool
+privateFrameChooserAction action=case T.splitOn ":" action of
+  ["select",_,_,"frame"]->True
+  _->False
 
 guestModalBlocked :: Desktop -> Bool
 guestModalBlocked d=maybe False (protectedPurpose . purpose) (dialog d) || case (contextMenu d,contextKind d) of
@@ -272,7 +278,7 @@ cellAccess :: Desktop -> Int -> Int -> CellAccess
 cellAccess d x y=CellAccess (readableAt d x y) (pointerAllowedAt d x y)
 readableAt :: Desktop -> Int -> Int -> Bool
 readableAt d x y
-  | Just dg<-dialog d, DebugDialog action<-purpose dg, privateDownloadAction action,
+  | Just dg<-dialog d, DebugDialog action<-purpose dg, privateDebuggerAction action,
     inside (dialogRect d dg) x y || y==snd (screenSize d)-1=False
   | Just dg<-dialog d, PermissionDialog{}<-purpose dg, inside (dialogRect d dg) x y || y==snd (screenSize d)-1=False
   | otherwise=onScreen d x y && streamerReadableAt d x y && case dialog d of
@@ -289,6 +295,8 @@ readableAt d x y
 -- Labels remain visible; only sensitive value rows are blanked.
 streamerReadableAt :: Desktop -> Int -> Int -> Bool
 streamerReadableAt d x y
+  | Just dg<-dialog d, DebugDialog action<-purpose dg, privateFrameChooserAction action,
+    inside (dialogRect d dg) x y || y==snd (screenSize d)-1=False
   | y==snd (screenSize d)-1, "Session " `T.isPrefixOf` status d=False
   | otherwise=case dialog d of
   Just dg | inside (dialogRect d dg) x y -> not (any (sensitiveValue dg) (zip (fieldRects d dg) (fields dg))) && not (privateBrowserCell d dg x y)
