@@ -52,7 +52,7 @@ checks = do
   check "closed Dock target refuses focus without redirecting" (fmap windowId (activeWindow (fst (applyInput focus closed)))==fmap windowId (activeWindow closed))
   check "Dock focus cannot switch a modal owner" (fmap windowId (activeWindow (fst (applyInput focus blocked)))==fmap windowId (activeWindow blocked) && dialog (fst (applyInput focus blocked))==dialog blocked)
   check "agent input cannot invoke native Dock focus" (case applyGuestInput focus (beginGuestInput second) of Left _->True; _->False)
-  let oddName=d {buffers=M.adjust (\doc->doc {documentSuggestedName=Just "odd\nname\t.hs"}) 1 (buffers d)}
+  let oddName=d {buffers=M.adjust (\doc->doc {documentFile=Just (FileState "/project/odd\nname\t.hs" Nothing)}) 1 (buffers d)}
   check "legal control characters in filenames are safe display metadata"
     (case editorWindowEntries oddName of [(1,title,_,_)]->title=="odd·name·.hs"; _->False)
   check "window title projection and focus never force buffers" (length (editorWindowEntries opaque)==2 && fmap windowId (activeWindow (fst (applyInput focus opaque)))==Just 1)

@@ -104,6 +104,17 @@ int main(void) {
         NSMenuItem *remaining = [[delegate applicationDockMenu:NSApp] itemAtIndex:3];
         [(id<MenuAction>)remaining.target invoke:remaining];
         assert(postedWindow == 93 && postedDockGeneration == thc_dock_generation());
+        int connectedGeneration = thc_dock_generation();
+        thc_dock_begin(); thc_dock_end(); /* Lost session publishes no available targets. */
+        assert([delegate applicationDockMenu:NSApp] == delegate.original);
+        thc_dock_begin(); thc_dock_item(93, "Terminal", 1, 1); thc_dock_end();
+        assert(thc_dock_generation() > connectedGeneration);
+        postedWindow = 0;
+        [(id<MenuAction>)remaining.target invoke:remaining];
+        assert(postedWindow == 0);
+        NSMenuItem *reconnected = [[delegate applicationDockMenu:NSApp] itemAtIndex:3];
+        [(id<MenuAction>)reconnected.target invoke:reconnected];
+        assert(postedWindow == 93 && postedDockGeneration == thc_dock_generation());
         assert(thc_menu_generation() == replacement); /* Dock updates leave main tokens intact. */
         NSWindow *native = [[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,200,100) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskMiniaturizable backing:NSBackingStoreBuffered defer:NO];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
