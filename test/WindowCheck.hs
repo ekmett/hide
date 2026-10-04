@@ -177,6 +177,11 @@ checks = do
      not (windowVisible withPanelMessages (get ident withPanelMessages)) && bottomTerminal focused==Just ident &&
      activeTerminal focused==Just "1" && activeTerminal cycled/=Just "1" &&
      length (filter (windowVisible focused) (filter (windowPinned focused) (windows focused)))==1)
+  let dockFocused=activateEditorWindow ident withPanelMessages
+      dockIds=[wid | (wid,_,_,_)<-editorWindowEntries withPanelMessages]
+  check "Dock catalogue includes unselected terminal tabs and activates their existing view"
+    (ident `elem` dockIds && windowId secondView `elem` dockIds &&
+     bottomTerminal dockFocused==Just ident && fmap windowId (activeWindow dockFocused)==Just ident)
   let resized=fst (handleEvent (V.EvResize 120 45) focused)
       files=resizeTree 31 (installSidebar (emptySidebar "/tmp" 24 True) resized)
       panel=resizeProblems 30 files

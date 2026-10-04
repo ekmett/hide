@@ -7,7 +7,7 @@
 -- repaint rules, so drag/wheel rendering can await the resulting remote frame.
 module Hide.RemoteWindow
   (runRemoteWindow, RemoteFrame(..), RemoteContribution(..), RemoteCell(..), parseRemoteFrame
-  , nativeKeyInput, nativeEventInput, remoteMenuInput, remoteNativeMenuInput, remoteMenuLayout, sanitizeDownloadName
+  , nativeKeyInput, nativeEventInput, remoteMenuInput, remoteNativeMenuInput, remoteDockWindowInput, remoteMenuLayout, sanitizeDownloadName
   , remoteInputAllowed, remoteCloseDetaches, remoteDetachShortcut, nativeRepaint) where
 import Control.Monad (unless)
 import Hide.Commands (commandIdentifier)
@@ -23,8 +23,9 @@ import qualified Graphics.Vty as V
 import Hide.Frontend
 import Hide.Model (Command(..), MenuItem(..), menus)
 import Data.List (elemIndex, nub)
+import qualified Data.IntSet as IS
 import Data.Maybe (fromMaybe)
-import Hide.Window (nativeCommands, nativeMenuToken, nativeChordShortcut)
+import Hide.Window (nativeCommands, nativeMenuToken, nativeChordShortcut, nativeDockWindow)
 import Hide.Remote (RemotePeer)
 import Hide.Unicode (clusterWidth, graphemes)
 #if defined(WITH_WINDOW) && defined(WITH_REMOTE)
@@ -48,7 +49,7 @@ import Hide.Font
 import Hide.Protocol (WirePacket(..), decodeFrame)
 import Hide.Links (openResource)
 import Hide.Remote (peerSendBatch, peerReceive)
-import Hide.Window hiding (nativeCommands, nativeMenuToken, nativeChordShortcut)
+import Hide.Window hiding (nativeCommands, nativeMenuToken, nativeChordShortcut, nativeDockWindow)
 #endif
 
 -- | Bounded host-issued catalogue metadata, independent of native menu slots.
@@ -65,6 +66,7 @@ data RemoteFrame = RemoteFrame
   , remoteCursor :: Maybe (Int,Int), remoteBlink :: Bool, remoteCRT :: Bool
   , remotePixelated :: Bool, remoteTerminal :: Bool, remoteWordStar :: Bool
   , remoteBindings :: [(T.Text,T.Text)]
+  , remoteWindows :: [(Int,T.Text,Bool,Bool)]
   , remoteContributions :: [RemoteContribution], remoteMenus :: [Bool], remoteCells :: [RemoteCell]
   } deriving (Eq,Show)
 
@@ -93,8 +95,13 @@ parseRemoteFrame metadata rows = parseEither (withObject "frame metadata" $ \o -
   contributions<-o .:? "menuContributions" .!= [] >>= mapM parseContribution
   unless (length contributions<=256 && length (nub (map contributionId contributions))==length contributions) (fail "Invalid contribution catalogue")
   let enabled=[maybe False (\name -> name `elem` supported && lookup name states==Just True) (commandIdentifier cmd) | cmd<-menuActions]
+  windows<-o .:? "editorWindows" .!= [] >>= mapM (withObject "editor window" $ \entry->do
+    ident<-entry .: "id"; windowTitle<-entry .: "title"; selected<-entry .: "selected"; windowEnabled<-entry .: "enabled"
+    unless (ident>0 && ident<=2147483647 && T.length windowTitle<=8192 && not (T.any (\c->c<' ' || c=='\DEL') windowTitle)) (fail "Invalid editor window")
+    pure (ident,windowTitle,selected,windowEnabled))
+  unless (IS.size (IS.fromList [ident | (ident,_,_,_)<-windows])==length windows && length [() | (_,_,True,_)<-windows]<=1) (fail "Invalid editor window catalogue")
   cells <- concat <$> sequence [parseRow cols y row | (y,row) <- zip [0..] rows]
-  pure (RemoteFrame size mode title cursor blink crt pixelated terminal wordstar bindings contributions (enabled++map contributionEnabled contributions) cells)) metadata
+  pure (RemoteFrame size mode title cursor blink crt pixelated terminal wordstar bindings windows contributions (enabled++map contributionEnabled contributions) cells)) metadata
   where
     validBinding (chord,name)=T.length name<=256 && case readChord chord of Right (key,mods)->chordName key mods==Just chord; _->False
     parseContribution=withObject "menu contribution" $ \o->do
@@ -190,6 +197,12 @@ remoteMenuLayout frame=[(title,compose title items) | (title,_,items)<-menus]
     builtin (MenuItem title _ Help) | (token,item):_<-[(token,item) | (token,item)<-indexed,contributionId item=="hide.help.contents"] = (contributionTitle item,shortcut (contributionId item),token)
     builtin (MenuItem title _ Disabled{})=(title,("",0),-1)
     builtin (MenuItem title _ command)=(title,maybe ("",0) shortcut (commandIdentifier command),maybe (-1) id (elemIndex command menuActions))
+
+-- | Decode Dock events from the live session frame, refusing stale/missing IDs.
+remoteDockWindowInput :: RemoteFrame -> Int -> [Int] -> Maybe Value
+remoteDockWindowInput frame generation event=do
+  ident<-nativeDockWindow (remoteWindows frame) generation event
+  pure (object ["type" .= ("focus-window"::T.Text),"id" .= ident])
 
 contributionCatalogue :: RemoteFrame -> [(T.Text,T.Text,Integer,T.Text,T.Text,Int,T.Text,T.Text)]
 contributionCatalogue frame=[(contributionId item,contributionRegistry item,contributionGeneration item,contributionSlot item,contributionGroup item,contributionOrder item,contributionTitle item,contributionKey item) | item<-remoteContributions frame]
@@ -333,6 +346,13 @@ runRemoteWindow backend scale (cols,rows) mode host peer = do
 #else
           pure ()
 #endif
+        16:_ -> do
+#ifdef darwin_HOST_OS
+          generation<-fromIntegral <$> c_dock_generation
+          forM_ (frame >>= \value->remoteDockWindowInput value generation event) $ \packet->sendJSON packet >> c_raise
+#else
+          pure ()
+#endif
         14:_ | null host -> do
           bytes <- c_text >>= BS.packCString
           case TE.decodeUtf8' bytes of
@@ -375,6 +395,7 @@ runRemoteWindow backend scale (cols,rows) mode host peer = do
           when (fmap contributionCatalogue frame/=Just (contributionCatalogue value)) (installNativeMenus (remoteMenuLayout value))
           forM_ (concatMap snd (remoteMenuLayout value)) $ \(_,(shortcut,modifiers),token)->do
             when (token>=0) $ withCString shortcut $ \keyPtr->c_menu_shortcut (fromIntegral token) keyPtr (fromIntegral modifiers)
+          updateDockWindows (remoteWindows value)
           forM_ (zip [0..] (remoteMenus value)) $ \(i,enabled) ->
             c_menu_enabled (fromIntegral (i::Int)) (if enabled then 1 else 0)
 #endif
@@ -412,7 +433,9 @@ runRemoteWindow backend scale (cols,rows) mode host peer = do
               end<-getMonotonicTimeNSec
               modifyIORef' drawTimes (take 60 . (fromIntegral (end-start)/1000000:))
 #ifdef darwin_HOST_OS
-            unless connected $ forM_ (zip [0::Int ..] (maybe (replicate (length nativeCommands) False) remoteMenus frame)) $ \(i,_) -> c_menu_enabled (fromIntegral i) 0
+            unless connected $ do
+              updateDockWindows []
+              forM_ (zip [0::Int ..] (maybe (replicate (length nativeCommands) False) remoteMenus frame)) $ \(i,_) -> c_menu_enabled (fromIntegral i) 0
 #endif
           updateTiming status current
           dark <- (/=0) <$> c_system_dark

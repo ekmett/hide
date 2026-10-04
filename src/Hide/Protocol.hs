@@ -38,7 +38,7 @@ import Hide.Commands (commandIdentifier)
 import Hide.Unicode (displayOpsForPic, graphemes, clusterWidth)
 
 data WebInput = Key T.Text [V.Modifier] | Paste T.Text | Mouse T.Text Int Int Int Int [V.Modifier]
-              | Wheel Int Int Int [V.Modifier] | SystemTheme Bool | BrowserCommand Command | MenuCommand Command | ContributedMenu T.Text T.Text Integer | UploadFile T.Text BS.ByteString | Frontend (Maybe Int) Bool | OpenPath FilePath | Resize Int Int | SuspendSession | Blur | Modifiers [V.Modifier] deriving (Eq,Show)
+              | Wheel Int Int Int [V.Modifier] | SystemTheme Bool | FocusWindow Int | BrowserCommand Command | MenuCommand Command | ContributedMenu T.Text T.Text Integer | UploadFile T.Text BS.ByteString | Frontend (Maybe Int) Bool | OpenPath FilePath | Resize Int Int | SuspendSession | Blur | Modifiers [V.Modifier] deriving (Eq,Show)
 
 -- | Validate an input packet and its bounds. Upload metadata starts with an empty
 -- payload that transport code fills from the following binary packet.
@@ -59,6 +59,10 @@ parseInput = withObject "browser event" $ \o -> do
           unless (not (T.null name) && T.length name<=128 && T.all (>= ' ') name && value>0 && toInteger value<=9007199254740991 &&
             T.length registry==48 && T.all (`elem` ("0123456789abcdef"::String)) registry) (fail "Invalid contributed menu lifetime")
           pure (ContributedMenu name registry (toInteger value))
+    "focus-window" -> do
+      ident<-o .: "id"
+      unless (ident>0 && ident<=2147483647) (fail "Invalid window identity")
+      pure (FocusWindow ident)
     "theme" -> SystemTheme <$> o .: "dark"
     "command" -> do
       name <- o .: "command"
@@ -135,6 +139,7 @@ applyGuestInput input d
 applyInputUnchecked :: WebInput -> Desktop -> (Desktop,[Effect])
 applyInputUnchecked input d = case input of
   SuspendSession -> (d,[]) -- The session owner checkpoints and stops, not the UI model.
+  FocusWindow ident -> (activateEditorWindow ident d,[])
   SystemTheme value -> (d {systemDark=value},[])
   BrowserCommand cmd | dialogCommandAllowed cmd d ->
     let (next,effects)=runCommand cmd d {browserFrontend=True}
@@ -263,6 +268,7 @@ frameMetadata cwd d =
    "wordstar" .= wordStar d,
    "bindingsActive" .= (bindingInputAvailable d && maybe False (const True) (effectiveBindings d)),
    "bindings" .= (focusedBindingChords d),
+   "editorWindows" .= [object ["id" .= ident,"title" .= title,"selected" .= selected,"enabled" .= enabled] | (ident,title,selected,enabled)<-editorWindowEntries d],
    "menuState" .= [(ident,menuCommandAvailable d cmd) | (ident,cmd)<-protocolMenuCommands],
    "menuContributions" .= [object ["id" .= Plugin.menuName reference,"registry" .= Plugin.menuEpoch reference,"generation" .= Plugin.menuGeneration reference,
       "slot" .= Plugin.menuSlot item,"group" .= Plugin.menuGroup item,"order" .= Plugin.menuOrder item,

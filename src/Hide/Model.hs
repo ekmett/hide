@@ -28,7 +28,7 @@ import Data.Maybe (listToMaybe, fromMaybe)
 import Data.List (find, findIndex, sortOn, mapAccumL, groupBy)
 import Data.Char (toLower, isAlphaNum, chr, ord, toUpper, isHexDigit, digitToInt)
 import Text.Read (readMaybe)
-import System.FilePath ((</>), takeDirectory, takeExtension, isAbsolute, equalFilePath, splitDirectories, joinPath, normalise)
+import System.FilePath ((</>), takeDirectory, takeFileName, takeExtension, isAbsolute, equalFilePath, splitDirectories, joinPath, normalise)
 import Hide.Browser (Entry(..))
 import Hide.Git (GitReview)
 import Hide.Syntax (Style(..), highlightFor, linkSpans)
@@ -552,6 +552,28 @@ activateWindowNumber number d
 windowFocused :: Desktop -> Window -> Bool
 windowFocused d w = not (problemsFocused d) && not (maybe False treeFocused (sideTree d)) &&
   fmap windowId (activeWindow d)==Just (windowId w)
+
+-- | Small native window metadata, including open docked tabs. Buffers without
+-- views are absent; deriving names never reads content, baselines or histories.
+editorWindowEntries :: Desktop -> [(Int,Text,Bool,Bool)]
+editorWindowEntries d=[(windowId w,safeTitle (title w doc),selected==Just (windowId w),enabled) | w<-sortOn windowNumber (windows d),Just doc<-[M.lookup (bufferId w) (buffers d)]]
+  where
+    enabled=dialog d==Nothing && not (questionActive d)
+    selected=if problemsFocused d || maybe False treeFocused (sideTree d) then Nothing else windowId <$> activeWindow d
+    safeTitle=T.take 8192 . T.map (\c->if c<' ' || c=='\DEL' then '·' else c)
+    title w doc
+      | streamerMode d,Just file<-documentFile doc,any (equalFilePath (filePath file)) (guestPrivatePaths d) = "Private buffer"
+      | otherwise = fromMaybe file (documentLabel doc)
+      where file=maybe (maybe ("NONAME"<>T.pack (show (bufferId w))<>".HS") T.pack (documentSuggestedName doc)) (T.pack . takeFileName . filePath) (documentFile doc)
+
+-- | Dock targets are human view selection, not an escape from a modal control.
+editorWindowAvailable :: Desktop -> Int -> Bool
+editorWindowAvailable d ident=dialog d==Nothing && not (questionActive d) && any ((==ident).windowId) (windows d)
+
+activateEditorWindow :: Int -> Desktop -> Desktop
+activateEditorWindow ident d
+  | editorWindowAvailable d ident = focusWindow ident d {menu=Nothing,contextMenu=Nothing,drag=Nothing,dragOriginal=Nothing,prefix=Nothing}
+  | otherwise = d
 
 focusWindow :: Int -> Desktop -> Desktop
 focusWindow i d = d { bottomTerminal=if M.member i (dockedTerminals d) then Just i else bottomTerminal d, problemsFocused=False, sideTree=fmap (\tree -> tree {treeFocused=False}) (sideTree d), windows = filter ((==i) . windowId) (windows d) ++ filter ((/=i) . windowId) (windows d) }
