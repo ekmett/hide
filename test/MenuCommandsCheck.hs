@@ -51,7 +51,7 @@ runChecks=withDocsCommands $ \docs->withRegistry $ \registry->withMenuCommands d
       helpRef=case [Plugin.menuReference entry | entry<-metadata,Plugin.menuName (Plugin.menuReference entry)=="hide.help.contents"] of ref:_->ref; _->error "missing help contribution"
       check label condition=unless condition (error label)
       waitDoc desktop=do
-        updated<-tickMenus host desktop
+        updated<-tickMenus host (\current _->pure (False,current)) desktop
         case activeDocument updated of
           Just _->pure updated
           _ | "failed" `T.isInfixOf` status updated || "expired" `T.isInfixOf` status updated->error (T.unpack (status updated))
@@ -153,12 +153,12 @@ runChecks=withDocsCommands $ \docs->withRegistry $ \registry->withMenuCommands d
   (_,pending)<-menuEffects host (\_ _->error "missing host") initial [InvokeMenu extension Plugin.HumanMenu Nothing]
   requestMenuRetirement host extension
   threadDelay 100000
-  refused<-tickMenus host pending
+  refused<-tickMenus host (\current _->pure (False,current)) pending
   check "ordered host retirement precedes late reply adoption" (activeDocument refused==Nothing && all ((/=extension) . Plugin.menuReference) (contributedMenus refused))
   (_,queuedOld)<-menuEffects host (\_ _->error "missing host") refused [InvokeMenu extension Plugin.HumanMenu Nothing]
   check "queued retired action has no document and explicit refusal" (activeDocument queuedOld==Nothing && "stale" `T.isInfixOf` status queuedOld)
   requestMenuRetirement host helpRef
-  withdrawnHelp<-tickMenus host initial
+  withdrawnHelp<-tickMenus host (\current _->pure (False,current)) initial
   check "retired Help fallback row paints unavailable" (not (menuCommandAvailable withdrawnHelp Help))
   check "F1 cannot bypass retired Help through preview fallback" (null (snd (handleEvent (V.EvKey (V.KFun 1) []) withdrawnHelp)))
   entered<-newEmptyMVar
@@ -240,7 +240,7 @@ runtimeLifecycleChecks docs=bracket temporary removePathForcibly $ \directory->w
         (\context text->fmap PreparedDocument (prepareMarkdown (invocationColumns context) "/tmp/README.md" "" text))
       publication<-publishMenuFromHost host replacement
       check "replacement publishes through existing host" (publication==Right ())
-      published<-tickMenus host retired
+      published<-tickMenus host (\current _->pure (False,current)) retired
 #if defined(WITH_WEB) || defined(WITH_REMOTE)
       let pendingFrame=frameFor published
           pendingKey=remoteBindingInput pendingFrame key (terminalEventInput key)
@@ -260,7 +260,7 @@ runtimeLifecycleChecks docs=bracket temporary removePathForcibly $ \directory->w
 #endif
       (_,queued)<-menuEffects host (\_ _->error "bound replacement missed host") chosen actions
       let document current=do
-            next<-tickMenus host current
+            next<-tickMenus host (\current _->pure (False,current)) current
             if activeDocument next/=Nothing then pure next else threadDelay 1000 >> document next
       opened<-timeout 5000000 (document queued) >>= maybe (error "bound replacement callback did not finish") pure
       check "replacement chord invokes actual typed callback" (maybe False (T.isInfixOf "Independent extension" . contents . documentBuffer) (activeDocument opened))

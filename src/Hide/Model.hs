@@ -54,10 +54,12 @@ inside :: Rect -> Int -> Int -> Bool
 inside (Rect x y w h) a b = a >= x && a < x+w && b >= y && b < y+h
 
 -- | Shared buffer and prepared presentation metadata; split windows reference its ID.
-data Document = Document { documentBuffer :: Buffer, documentFile :: Maybe FileState, documentLabel :: Maybe Text, documentHighlight :: [(Char,Style)], documentWidth :: Int, documentCursorVisible :: Bool, documentSuggestedName :: Maybe FilePath, documentSourceRows :: Maybe (Vec.Vector [(Char,Style)]), documentShellBlocks :: [(Int,Int,Text,Text)], documentLinks :: [(Int,Int,Text)], documentMarkdownPath :: Maybe FilePath } deriving (Eq,Show)
+-- documentOrigin retains canonical privacy provenance for generated source. It
+-- does not authorize saving, filesystem access or debugger source operations.
+data Document = Document { documentBuffer :: Buffer, documentFile :: Maybe FileState, documentLabel :: Maybe Text, documentHighlight :: [(Char,Style)], documentWidth :: Int, documentCursorVisible :: Bool, documentSuggestedName :: Maybe FilePath, documentSourceRows :: Maybe (Vec.Vector [(Char,Style)]), documentShellBlocks :: [(Int,Int,Text,Text)], documentLinks :: [(Int,Int,Text)], documentMarkdownPath :: Maybe FilePath, documentOrigin :: Maybe FilePath } deriving (Eq,Show)
 -- Source colors are populated by the session worker, never forced by input or drawing.
 newDocument :: Buffer -> Maybe FileState -> Document
-newDocument b file = restyle (Document b file Nothing [] 0 True Nothing Nothing [] [] Nothing)
+newDocument b file = restyle (Document b file Nothing [] 0 True Nothing Nothing [] [] Nothing Nothing)
 
 restyle :: Document -> Document
 restyle doc = doc {documentHighlight=[],documentSourceRows=Nothing,documentShellBlocks=[],documentLinks=[],
@@ -124,17 +126,21 @@ data Toolchain = THC | GHC deriving (Eq,Show)
 data ContextKind = TreeContext [Tree.TreeHit] [(Text,Command)] | ToolchainContext [(Text,Command)] | LinkContext Command | ShellContext Command | ChangeContext Command | SourceContext | GitContext | MessagesContext | AgentContext [(Text,Command)] deriving (Eq,Show)
 -- | Bounded hit target retained while a context popup is open. Messages use a
 -- projection generation and optional frozen source location, never message text. The
--- editor's source edits/reloads advance the revision; no buffer payload is kept.
+-- source target keeps a copied expression of at most 4096 characters, never a
+-- Buffer or Undo payload. Source edits/reloads and read-only source replacement
+-- advance revision; admission additionally captures exact ContentVersion.
 -- Reconcile reload guarantees old+1, and checked edits/Git reload derive their
--- replacement from the original buffer. Read-only transcript/output replacement
--- may restart revisions and is never an editable SourceContext target.
-data ContextTarget = SidebarTarget [Tree.TreeHit] | SourceTarget Int Int Int Selection | ConversationTarget Text | MessagesTarget !Integer !Int !(Maybe (FilePath,Int,Int)) | UnavailableMessagesTarget | UnavailableSourceTarget deriving (Eq,Show)
+-- replacement from the original buffer.
+data ContextTarget = SidebarTarget [Tree.TreeHit] | SourceTarget
+  { sourceTargetWindow :: !Int, sourceTargetBuffer :: !Int, sourceTargetRevision :: !Int
+  , sourceTargetSelection :: !Selection, sourceTargetRow :: !Int
+  , sourceTargetExpression :: !(Maybe Text), sourceTargetFile :: !(Maybe FilePath) } | ConversationTarget Text | MessagesTarget !Integer !Int !(Maybe (FilePath,Int,Int)) | UnavailableMessagesTarget | UnavailableSourceTarget deriving (Eq,Show)
 
 data LanguageAction = TypeInfo | FindDefinition | Completions | ShowProblems | RestartLanguage | RenameAt Text | RequestCodeActions | ApplyCodeAction Int Int Text deriving (Eq,Show)
 data Completion = Completion Text [(Int,Int,Text)] deriving (Eq,Show)
 data ProjectAction = LoadProject | ProjectPage Int Int | ProjectDetails Int Int deriving (Eq,Show)
 -- | Ordered requests for the host interpreter, produced alongside a new desktop.
-data Effect = SessionSidebarAction !SessionSidebarRequest | RetirePluginWindow !PluginWindow.WindowRef | DebugSidebarAction !DebugSidebarRequest | AgentSidebarAction !AgentSidebarRequest | ReloadKeyBindings FilePath | InspectKeyBindings (Maybe (Bindings.BindingPlatform,Bindings.BindingContext)) (Maybe (Bindings.Bindings Command)) | FollowLink (Maybe FilePath) Text | FollowTreeLink [Tree.TreeHit] FilePath Text | EnvironmentAction Text [Text] | AutocompleteAction Text [Text] | SaveMacKeySymbols Bool | SaveChatSubmit ChatSubmit | SaveBufferViewDefault BufferView | ProjectRequest ProjectAction | DownloadDocument Int | ReadBrowserClipboard | WriteBrowserClipboard Text | LanguageRequest LanguageAction | RunGit GitAction | ReadMergeBranches | JumpTo FilePath Int Int | ReadPath FilePath | BrowsePath FilePath Text | BrowseDirectories FilePath | ChangeDirectory FilePath | OpenChoice FilePath Text Text | ReadTree FilePath | RefreshTree FilePath [Entry] | LoadTree TreeRequest Plugin.MenuOrigin | InvokeTree [Tree.TreeHit] CommandRef Plugin.MenuOrigin | ReadHelp | InvokeMenu Plugin.MenuRef Plugin.MenuOrigin (Maybe ContextTarget) | RefreshGit FilePath | ReadGitDiff | AskGitCommit | WriteGitCommit Text | SaveDocument Int (Maybe FilePath) (Maybe Command) | ReviewExternal | ResolveConflict Conflict ConflictAction | AgentAction Text [Text] | PermissionAction Text [Text] | DebugAction Text [Text] | SetScreenMode Int | Exit deriving (Eq,Show)
+data Effect = SessionSidebarAction !SessionSidebarRequest | DebugSourceAction !DebugSourceRequest | RetirePluginWindow !PluginWindow.WindowRef | DebugSidebarAction !DebugSidebarRequest | AgentSidebarAction !AgentSidebarRequest | ReloadKeyBindings FilePath | InspectKeyBindings (Maybe (Bindings.BindingPlatform,Bindings.BindingContext)) (Maybe (Bindings.Bindings Command)) | FollowLink (Maybe FilePath) Text | FollowTreeLink [Tree.TreeHit] FilePath Text | EnvironmentAction Text [Text] | AutocompleteAction Text [Text] | SaveMacKeySymbols Bool | SaveChatSubmit ChatSubmit | SaveBufferViewDefault BufferView | ProjectRequest ProjectAction | DownloadDocument Int | ReadBrowserClipboard | WriteBrowserClipboard Text | LanguageRequest LanguageAction | RunGit GitAction | ReadMergeBranches | JumpTo FilePath Int Int | ReadPath FilePath | BrowsePath FilePath Text | BrowseDirectories FilePath | ChangeDirectory FilePath | OpenChoice FilePath Text Text | ReadTree FilePath | RefreshTree FilePath [Entry] | LoadTree TreeRequest Plugin.MenuOrigin | InvokeTree [Tree.TreeHit] CommandRef Plugin.MenuOrigin | ReadHelp | InvokeMenu Plugin.MenuRef Plugin.MenuOrigin (Maybe ContextTarget) | RefreshGit FilePath | ReadGitDiff | AskGitCommit | WriteGitCommit Text | SaveDocument Int (Maybe FilePath) (Maybe Command) | ReviewExternal | ResolveConflict Conflict ConflictAction | AgentAction Text [Text] | PermissionAction Text [Text] | DebugAction Text [Text] | SetScreenMode Int | Exit deriving (Eq,Show)
 data Field = Input Text Text Int | SelectedInput Text Text Selection | ComboBox Text [Text] Int (Maybe Int) | CheckBox Text Bool | Radio Text [Text] Int | ListBox Text [Text] Int | FileList [Entry] Int
   | ReadOnly Text Text
   | TextArea Text Bool Buffer Selection Int Int deriving (Eq,Show)
@@ -146,6 +152,7 @@ data Purpose = Opening FilePath Text [Entry] | ChangingDirectory FilePath [Entry
   | AgentChoiceDialog !Hide.AgentHub.AgentConfigRef !Text ![(Text,Text)]
   | CompletionChoiceDialog !CompletionTarget !Text ![(Text,Text)]
   | EnvironmentDialog Text | AutocompleteDialog Text | DiskConflict Conflict | AgentDialog Text | PermissionDialog Text | DebugDialog Text
+  | DebugSourceWatchDialog !Int !Int !(Maybe FilePath) !Bool
   | DiscardDraft | Confirm Command | Information | Settings | ChatInputSettings | Widgets deriving (Eq,Show)
 data Dialog = Dialog
   { dialogTitle :: Text, purpose :: Purpose, fields :: [Field], focus :: Int
@@ -277,6 +284,7 @@ commandBindingKeys d cmd
   where shortcutCommand=case cmd of
           RegisteredMenu ref _ | Plugin.menuName ref=="hide.help.contents" -> Help
                                | Plugin.menuName ref=="hide.messages.go-to" -> GoToMessage
+                               | Plugin.menuName ref=="hide.debug.toggle-breakpoint" -> DebugCommand "breakpoint"
           _ -> cmd
 
 commandDescription :: Command -> Text
@@ -448,7 +456,12 @@ menuItemsFor d i
     slot=let (title,_,_)=menus !! (i `mod` length menus) in T.toLower title
     additions=[MenuItem (Plugin.menuTitle item) (Plugin.menuKey item) (contributionCommand d item) | item<-contributedMenus d,Plugin.menuSlot item==slot]
     helpEntry=[item | item@(MenuItem _ _ (RegisteredMenu ref _))<-additions,Plugin.menuName ref=="hide.help.contents"]
-    items=case helpEntry of
+    sourceEntry=find ((=="hide.debug.toggle-breakpoint") . Plugin.menuName . Plugin.menuReference) (contributedMenus d)
+    replaceSource (MenuItem title key (DebugCommand "breakpoint"))=case sourceEntry of
+      Just item->MenuItem title key (contributionCommand d item)
+      Nothing->MenuItem title key (if menusActive d then Disabled "Breakpoint command is unavailable." else DebugCommand "breakpoint")
+    replaceSource item=item
+    items=map replaceSource $ case helpEntry of
       first:_ -> [if cmd==Help then first else item | item@(MenuItem _ _ cmd)<-original]++[item | item<-additions,item/=first]
       [] -> original++additions
 
@@ -470,10 +483,14 @@ commandEnabled d cmd | dialogCommandAllowed cmd d = True
 commandEnabled d cmd | activePluginWindow d/=Nothing, sourceOnlyCommand cmd = False
 commandEnabled d Download = browserFrontend d && maybe False ((==Nothing) . documentLabel) (activeDocument d)
 commandEnabled d GoToMessage | menusActive d = maybe False (commandEnabled d . contributionCommand d) (find ((=="hide.messages.go-to") . Plugin.menuName . Plugin.menuReference) (contributedMenus d))
+commandEnabled d (DebugCommand "breakpoint") | menusActive d = maybe False (commandEnabled d . contributionCommand d) (find ((=="hide.debug.toggle-breakpoint") . Plugin.menuName . Plugin.menuReference) (contributedMenus d))
 commandEnabled d Help | menusActive d = any ((=="hide.help.contents") . Plugin.menuName . Plugin.menuReference) (contributedMenus d)
 commandEnabled d (TreeCommand trace _) = dialog d==Nothing && maybe False (hitCurrent trace) (sideTree d)
 commandEnabled d (RegisteredMenu reference _) = dialog d==Nothing && case find ((==reference) . Plugin.menuReference) (contributedMenus d) of
   Nothing -> False
+  Just item | Plugin.menuSlot item=="context.source" -> case sourceInvocationTarget d of
+    Just target@SourceTarget{} -> contextTargetCurrent d {contextTarget=Just target} && maybe False (textBuffer . documentBuffer) (activeDocument d)
+    _ -> False
   Just item | Plugin.menuSlot item=="context.messages" -> case messageInvocationTarget d of
     Just target@(MessagesTarget _ _ location) -> contextTargetCurrent d {contextTarget=Just target} &&
       (Plugin.menuName reference/="hide.messages.go-to" || location/=Nothing)
@@ -558,7 +575,7 @@ activePluginWindow d=do
 -- | Shared document authority classification. Titles, buffer reads and screen
 -- masks use the same canonical path and host-owned document-role rules.
 privateDocument :: Desktop -> Document -> Bool
-privateDocument d doc=maybe False privateLabel (documentLabel doc) || maybe False (privatePath . filePath) (documentFile doc)
+privateDocument d doc=maybe False privateLabel (documentLabel doc) || maybe False (privatePath . filePath) (documentFile doc) || maybe False privatePath (documentOrigin doc)
   where
     privatePath=Privacy.protectedFilePath (guestPrivatePaths d)
     privateLabel "Git diff"=True
@@ -938,6 +955,9 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
     go ChangeDir d = (d,[BrowseDirectories (startingDirectory d)])
     go Save d = saveRequest Nothing d
     go ReviewDisk d = (d,[ReviewExternal])
+    go (DebugCommand "breakpoint") d | menusActive source = case find ((=="hide.debug.toggle-breakpoint") . Plugin.menuName . Plugin.menuReference) (contributedMenus source) of
+      Just item->go (contributionCommand source item) d
+      Nothing->(d {status="Breakpoint command is unavailable."},[])
     go (DebugCommand action) d = (d,[DebugAction action []])
     go CompileTarget d = (d,[AgentAction "compile" []])
     go MakeTarget d = (d,[AgentAction "make" []])
@@ -1055,6 +1075,7 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
       | commandEnabled source (RegisteredMenu reference False) = (d,[InvokeMenu reference Plugin.HumanMenu target])
       | otherwise = (d {status="Menu action is unavailable."},[])
       where target=case find ((==reference) . Plugin.menuReference) (contributedMenus source) of
+              Just item | Plugin.menuSlot item=="context.source" -> sourceInvocationTarget source
               Just item | Plugin.menuSlot item=="context.messages" -> messageInvocationTarget source
               _ -> Nothing
     go ToggleTree d = case sideTree d of Just _ -> (setTree Nothing d,[]); Nothing -> (d,[ReadTree (startingDirectory d)])
@@ -1924,7 +1945,22 @@ contextItemsFor d | contextKind d==MessagesContext = map replace base++extras
     replace entry@(_,GoToMessage)=maybe entry id sourceEntry
     replace entry=entry
     extras=[entry | entry@(_,command)<-additions,case command of RegisteredMenu ref _->Plugin.menuName ref/="hide.messages.go-to"; _->True]
+contextItemsFor d | sourceContextKind (contextKind d) =
+  contextItems (contextKind d)++[(Plugin.menuTitle item,contributionCommand d item) | item<-contributedMenus d,Plugin.menuSlot item=="context.source"]
 contextItemsFor d=contextItems (contextKind d)
+
+sourceContextDocument :: Document -> Bool
+sourceContextDocument doc=maybe True (T.isPrefixOf "Source ") (documentLabel doc)
+
+sourceContextKind :: ContextKind -> Bool
+sourceContextKind SourceContext=True
+sourceContextKind ChangeContext{}=True
+sourceContextKind _=False
+
+sourceInvocationTarget :: Desktop -> Maybe ContextTarget
+sourceInvocationTarget d
+  | contextMenu d/=Nothing, sourceContextKind (contextKind d) = contextTarget d
+  | otherwise = captureContextTarget SourceContext d
 
 -- Only an open Messages popup retains its original capture. Direct key/menu
 -- invocation captures the live owner, never a leftover dismissed popup target.
@@ -1998,9 +2034,32 @@ captureContextTarget kind d = case kind of
   _ -> Nothing -- These actions already carry arguments or have session scope.
   where
     source=Just $ case (activeWindow d,activeDocument d) of
-      (Just w,Just doc) | documentLabel doc==Nothing, windowFocused d w, Just bid<-bufferId w ->
-        SourceTarget (windowId w) bid (revision (documentBuffer doc)) (selection w)
+      (Just w,Just doc) | sourceContextDocument doc, windowFocused d w, Just bid<-bufferId w ->
+        let b=documentBuffer doc
+            selected=selection w
+            row=1+fst (bufferLineColumn b (caret selected))
+        in SourceTarget (windowId w) bid (revision b) selected row
+          (if byteMode b then Nothing else sourceExpression b selected) (filePath <$> documentFile doc)
       _ -> UnavailableSourceTarget
+
+-- | Frozen bounded expression. Selection overflow is unavailable rather than a
+-- truncated executable expression. Identifier capture touches at most 8194 chars;
+-- forcing its small Text before publication does not retain the Buffer/Undo.
+sourceExpression :: Buffer -> Selection -> Maybe Text
+sourceExpression b selected
+  | a<z = if z-a>limit then Nothing else ready (bufferSlice b a (z-a))
+  | otherwise =
+      let start=max 0 (a-limit-1)
+          nearby=bufferSlice b start (2*limit+2)
+          offset=a-start
+          before=T.takeWhileEnd wordChar (T.take offset nearby)
+          after=T.takeWhile wordChar (T.drop offset nearby)
+          expression=before<>after
+      in if T.length expression>limit || T.null expression then Nothing else ready expression
+  where
+    (a,z)=ordered selected
+    limit=4096
+    ready text=let frozen=T.copy text in T.length frozen `seq` Just frozen
 
 messagesOwner :: Desktop -> Bool
 messagesOwner d=messagesDisplayed d && problemsFocused d && not (maybe False treeFocused (sideTree d))
@@ -2010,7 +2069,12 @@ contextTargetCurrent d = case contextTarget d of
   Just (SidebarTarget trace) -> maybe False (\tree->treeFocused tree && hitCurrent trace tree) (sideTree d)
   Nothing -> True
   Just (ConversationTarget target) -> conversationTarget d==target
-  Just target@SourceTarget{} -> captureContextTarget SourceContext d==Just target
+  Just target@SourceTarget{} -> case (activeWindow d,activeDocument d) of
+    (Just window,Just doc) -> sourceContextDocument doc && windowFocused d window &&
+      windowId window==sourceTargetWindow target && bufferId window==Just (sourceTargetBuffer target) &&
+      revision (documentBuffer doc)==sourceTargetRevision target && selection window==sourceTargetSelection target &&
+      fmap filePath (documentFile doc)==sourceTargetFile target
+    _ -> False
   Just (MessagesTarget generation index _) -> messagesOwner d && diagnosticsGeneration d==generation && problemsSelected d==index
   Just UnavailableMessagesTarget -> False
   Just UnavailableSourceTarget -> False
@@ -2136,8 +2200,16 @@ windowMouse x y button mods d = case find (\w -> windowVisible d w && inside (bo
     V.BRight | x>l && x<l+ww-1 && y>t && y<t+hh-1,
                Just command<-shellBlockAt x y focused -> (openContext (ShellContext command) x y focused,[])
     V.BRight | x>l && x<l+ww-1 && y>t && y<t+hh-1,
-               maybe False ((==Nothing) . documentLabel) (activeDocument focused) ->
-      (openContext (reviewContext x y focused) x y (selectAt False x y focused),[])
+               maybe False sourceContextDocument (activeDocument focused) ->
+      let pointed=selectAt False x y focused
+          (a,z)=ordered (selection w)
+          hit=maybe (-1) (caret . selection) (activeWindow pointed)
+          captured=if bufferView w==CurrentView && a<z && hit>=a && hit<z then focused else pointed
+          opened=openContext (reviewContext x y focused) x y captured
+          row=maybe 1 (\doc->1+fst (bufferLineColumn (documentBuffer doc) hit)) (activeDocument captured)
+          freeze target@SourceTarget{}=target {sourceTargetRow=row}
+          freeze target=target
+      in (opened {contextTarget=fmap freeze (contextTarget opened)},[])
     V.BLeft
       | not (windowFocused d w), x==l || x==l+ww-1 || y==t || y==t+hh-1 -> (focused,[])
       | y==t && x>=l+2 && x<=l+4 -> runCommand Close focused
@@ -2836,6 +2908,7 @@ submitDialog button dg original
     Renaming -> if T.null (T.strip first) then (original {status="Enter a new name."},[]) else (d,[LanguageRequest (RenameAt (T.strip first))])
     Saving bid after -> if T.null first then (original,[]) else (d,[SaveDocument bid (Just (T.unpack first)) after])
     DiskConflict conflict -> (d,[ResolveConflict conflict ([CompareDisk,ReloadDisk,KeepBuffer,SaveConflictAs] !! button)])
+    DebugSourceWatchDialog ident _ _ _ -> (d,[DebugAction ("source-watch:"<>T.pack (show ident)) (T.pack (show button):values)])
     DebugDialog action -> (d,[DebugAction action (T.pack (show button) : values ++
       [if value then "true" else "false" | CheckBox _ value <- fields dg] ++
       [T.pack (show i) | ListBox _ _ i <- fields dg])])
@@ -3241,9 +3314,14 @@ addHelp :: Text -> Desktop -> Desktop
 addHelp text d = addReadOnly "Haskell Help" text d
 
 addReadOnly :: Text -> Text -> Desktop -> Desktop
-addReadOnly title text d = case [(bid,w) | (bid,doc)<-M.toList (buffers d),documentLabel doc==Just title,w<-windows d,bufferId w==Just (bid)] of
-  (bid,w):_ -> focusWindow (windowId w) d {buffers=M.adjust (\doc -> restyle doc {documentBuffer=newBuffer text}) bid (buffers d)}
-  [] -> let new=modifyActive (\w -> w {bufferView=CurrentView,reviewSelection=Nothing}) (addDocument Nothing (newBuffer text) d) in new {buffers=M.adjust (\doc -> doc {documentLabel=Just title}) (nextId d) (buffers new)}
+addReadOnly title text = addReadOnlyBuffer title (newBuffer text)
+
+-- | Adopt an already measured read-only buffer. Replacements advance the source
+-- revision; the prepared immutable geometry is independent of that revision.
+addReadOnlyBuffer :: Text -> Buffer -> Desktop -> Desktop
+addReadOnlyBuffer title prepared d = case [(bid,w) | (bid,doc)<-M.toList (buffers d),documentLabel doc==Just title,w<-windows d,bufferId w==Just bid] of
+  (bid,w):_ -> focusWindow (windowId w) d {buffers=M.adjust (\doc -> restyle doc {documentBuffer=prepared {revision=revision (documentBuffer doc)+1}}) bid (buffers d)}
+  [] -> let new=modifyActive (\w -> w {bufferView=CurrentView,reviewSelection=Nothing}) (addDocument Nothing prepared d) in new {buffers=M.adjust (\doc -> doc {documentLabel=Just title}) (nextId d) (buffers new)}
 
 -- Hit testing uses the same cell geometry as selection, including tabs and wide glyphs.
 hoverAt :: Int -> Int -> Desktop -> (Desktop,[Effect])
