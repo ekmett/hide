@@ -125,9 +125,9 @@ watchNode editAction removeAction (key,entry)=P.NodeDef
   [P.ActionMenu "Remove watch" (removeAction (RemoveDebugWatch key (watchRevision entry)))]
   where
     edit=editAction (EditDebugWatch key (watchRevision entry))
-    -- An originless private role is conservatively hidden, while canonical
-    -- source origins use the ordinary shared row privacy projection.
-    expression=if watchPrivate entry && watchOrigin entry==Nothing then "Private watch" else watchExpression entry
+    -- Captured privacy is sticky even if its origin later becomes public.
+    -- Public captures still use the shared current canonical-path policy.
+    expression=if watchPrivate entry then "Private watch" else watchExpression entry
     title=bounded (expression<>" [pending; evaluate explicitly]")
 
 pageOffset :: Maybe Text -> Maybe Int

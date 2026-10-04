@@ -642,7 +642,7 @@ perform runtime@(Debugger ref clock _ _) core action values d = do
       valid<-sourceCurrent captured d
       if button/="0" then pure d else if not valid then pure d {status="Watch source changed; open its context menu again."}
         else storeWatch runtime Nothing expression
-          (case debugSourceCanonical captured of Just path->Just path; Nothing->activeDocument d >>= documentOrigin)
+          (case debugSourceCanonical captured of Just path->Just path; Nothing->M.lookup (debugSourceBuffer captured) (buffers d) >>= documentOrigin)
           (protectedBuffer d (debugSourceBuffer captured)) d
     (watchAction,button:expression:_) | Just suffix<-T.stripPrefix "watch-edit:" watchAction,Just ident<-readMaybe (T.unpack suffix),Just (current,target)<-watchDialog s,ident==current->do
       modifyIORef' ref (\state->state {watchDialog=Nothing})

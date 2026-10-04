@@ -13,7 +13,9 @@ import qualified Data.Text.Encoding
 import System.FilePath (takeDirectory)
 import System.Timeout (timeout)
 import qualified DebuggerCheck as Fixture
-import Hide.Buffer (Selection(..))
+import Hide.Buffer (Selection(..),newBuffer)
+import Hide.Files (FileState(..))
+import Hide.Plugin.BufferHost (captureVersion)
 import Hide.Debugger
 import Hide.DebuggerSidebar
 import Hide.DebuggerSidebarTypes
@@ -88,7 +90,19 @@ watchManagement=withSidebarCommands $ \host->withDebugger $ \runtime->withDebugg
         [SelectedInput "Expression" "private-expression" (Selection 0 18)] 0 ["Save","Cancel"] []),guestPrivatePaths=["/private"]}
       rect=case dialog private of Just dg->one "watch field rectangle" (fieldRects private dg); _->error "missing private watch"
   check "watch privacy survives its captured expression and canonical origin" (not (readableAt private (left rect+1) (top rect+1)) && not (streamerReadableAt private (left rect+1) (top rect+1)))
-  _<-foldM (\d _->tick d) valid [1..20::Int]
+  let privateSource=addDocument (Just (FileState "/private/watch.hs" Nothing)) (newBuffer "private-source-expression") valid
+        {guestPrivatePaths=["/private"],sideTree=fmap (\tree->tree {treeFocused=False}) (sideTree valid)}
+      window=maybe (error "private source window missing") id (activeWindow privateSource)
+      doc=maybe (error "private source document missing") id (activeDocument privateSource)
+      bid=maybe (error "private source ID missing") id (bufferId window)
+  version<-captureVersion (documentBuffer doc)
+  (_,sourceEditor)<-core privateSource [DebugSourceAction (DebugSourceRequest AddSourceWatch (windowId window) bid version (selection window)
+    (Just "/private/watch.hs") (Just "/private/watch.hs") 1 (Just "private-source-expression") False)]
+  storedPrivate<-save "private-source-expression" sourceEditor
+  protected<-wait "private watch row" (has "Private watch") storedPrivate {guestPrivatePaths=[]}
+  (_,privateEntries)<-debuggerWatches runtime
+  check "captured source privacy remains decisive after origin becomes public" (all (not.T.isInfixOf "private-source-expression") (labels protected) && any (\entry->watchPrivate entry && watchOrigin entry==Just "/private/watch.hs") (M.elems privateEntries))
+  _<-foldM (\d _->tick d) protected [1..20::Int]
   check "management does not create a stopped session or evaluation handles" . (==Nothing) =<< debuggerSidebarEpoch runtime
 
 session :: String -> IO ()
