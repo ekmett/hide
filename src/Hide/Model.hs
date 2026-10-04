@@ -110,18 +110,19 @@ data Conflict = Conflict { conflictBuffer :: Int, conflictRevision :: Int, confl
 data GitAction = FetchRemote | PullRemote | MergeBranch Text deriving (Eq,Show)
 data Toolchain = THC | GHC deriving (Eq,Show)
 data ContextKind = ToolchainContext [(Text,Command)] | LinkContext Command | ShellContext Command | ChangeContext Command | SourceContext | GitContext | MessagesContext | AgentContext [(Text,Command)] deriving (Eq,Show)
--- | Bounded source hit target retained while a context popup is open. The
+-- | Bounded hit target retained while a context popup is open. Messages use a
+-- projection generation and optional frozen source location, never message text. The
 -- editor's source edits/reloads advance the revision; no buffer payload is kept.
 -- Reconcile reload guarantees old+1, and checked edits/Git reload derive their
 -- replacement from the original buffer. Read-only transcript/output replacement
 -- may restart revisions and is never an editable SourceContext target.
-data ContextTarget = SourceTarget Int Int Int Selection | ConversationTarget Text | UnavailableSourceTarget deriving (Eq,Show)
+data ContextTarget = SourceTarget Int Int Int Selection | ConversationTarget Text | MessagesTarget !Integer !Int !(Maybe (FilePath,Int,Int)) | UnavailableMessagesTarget | UnavailableSourceTarget deriving (Eq,Show)
 
 data LanguageAction = TypeInfo | FindDefinition | Completions | ShowProblems | RestartLanguage | RenameAt Text | RequestCodeActions | ApplyCodeAction Int Int Text deriving (Eq,Show)
 data Completion = Completion Text [(Int,Int,Text)] deriving (Eq,Show)
 data ProjectAction = LoadProject | ProjectPage Int Int | ProjectDetails Int Int deriving (Eq,Show)
 -- | Ordered requests for the host interpreter, produced alongside a new desktop.
-data Effect = ReloadKeyBindings FilePath | InspectKeyBindings (Maybe (Bindings.BindingPlatform,Bindings.BindingContext)) (Maybe (Bindings.Bindings Command)) | FollowLink (Maybe FilePath) Text | EnvironmentAction Text [Text] | AutocompleteAction Text [Text] | SaveMacKeySymbols Bool | SaveChatSubmit ChatSubmit | SaveBufferViewDefault BufferView | ProjectRequest ProjectAction | DownloadDocument Int | ReadBrowserClipboard | WriteBrowserClipboard Text | LanguageRequest LanguageAction | RunGit GitAction | ReadMergeBranches | JumpTo FilePath Int Int | ReadPath FilePath | BrowsePath FilePath Text | BrowseDirectories FilePath | ChangeDirectory FilePath | OpenChoice FilePath Text Text | ReadTree FilePath | ExpandTree Int | ReadHelp | InvokeMenu Plugin.MenuRef Plugin.MenuOrigin | RefreshGit FilePath | ReadGitDiff | AskGitCommit | WriteGitCommit Text | SaveDocument Int (Maybe FilePath) (Maybe Command) | ReviewExternal | ResolveConflict Conflict ConflictAction | AgentAction Text [Text] | PermissionAction Text [Text] | DebugAction Text [Text] | SetScreenMode Int | Exit deriving (Eq,Show)
+data Effect = ReloadKeyBindings FilePath | InspectKeyBindings (Maybe (Bindings.BindingPlatform,Bindings.BindingContext)) (Maybe (Bindings.Bindings Command)) | FollowLink (Maybe FilePath) Text | EnvironmentAction Text [Text] | AutocompleteAction Text [Text] | SaveMacKeySymbols Bool | SaveChatSubmit ChatSubmit | SaveBufferViewDefault BufferView | ProjectRequest ProjectAction | DownloadDocument Int | ReadBrowserClipboard | WriteBrowserClipboard Text | LanguageRequest LanguageAction | RunGit GitAction | ReadMergeBranches | JumpTo FilePath Int Int | ReadPath FilePath | BrowsePath FilePath Text | BrowseDirectories FilePath | ChangeDirectory FilePath | OpenChoice FilePath Text Text | ReadTree FilePath | ExpandTree Int | ReadHelp | InvokeMenu Plugin.MenuRef Plugin.MenuOrigin (Maybe ContextTarget) | RefreshGit FilePath | ReadGitDiff | AskGitCommit | WriteGitCommit Text | SaveDocument Int (Maybe FilePath) (Maybe Command) | ReviewExternal | ResolveConflict Conflict ConflictAction | AgentAction Text [Text] | PermissionAction Text [Text] | DebugAction Text [Text] | SetScreenMode Int | Exit deriving (Eq,Show)
 data Field = Input Text Text Int | ComboBox Text [Text] Int (Maybe Int) | CheckBox Text Bool | Radio Text [Text] Int | ListBox Text [Text] Int | FileList [Entry] Int
   | ReadOnly Text Text
   | TextArea Text Bool Buffer Selection Int Int deriving (Eq,Show)
@@ -198,6 +199,7 @@ data Desktop = Desktop
   , keyBindings :: M.Map (Bindings.BindingPlatform,Bindings.BindingContext) (Bindings.Bindings Command)
   , contributedMenus :: [Plugin.MenuItem], agentMenuRefs :: [Plugin.MenuRef], menusActive :: Bool
   , contextTarget :: Maybe ContextTarget
+  , diagnosticsGeneration :: !Integer
   } deriving (Eq,Show)
 
 data MenuItem = MenuItem Text Text Command deriving (Eq,Show)
@@ -257,7 +259,10 @@ commandBindingKeys :: Desktop -> Command -> [Text]
 commandBindingKeys d cmd
   | dialog d/=Nothing, not (dialogCommandAllowed cmd d) = []
   | otherwise = maybe [] (\bindings->Bindings.bindingKeys bindings shortcutCommand) (effectiveBindings d)
-  where shortcutCommand=case cmd of RegisteredMenu ref _ | Plugin.menuName ref=="hide.help.contents"->Help; _->cmd
+  where shortcutCommand=case cmd of
+          RegisteredMenu ref _ | Plugin.menuName ref=="hide.help.contents" -> Help
+                               | Plugin.menuName ref=="hide.messages.go-to" -> GoToMessage
+          _ -> cmd
 
 commandDescription :: Command -> Text
 commandDescription cmd = case cmd of
@@ -350,12 +355,13 @@ commandDescription cmd = case cmd of
   GitPull -> "Pull remote changes with a fast-forward-only update."
   GitMerge -> "Choose a branch to merge into the current branch."
   RegisteredMenu reference _ | Plugin.menuName reference=="hide.help.contents" -> "Open the read-only help document."
-                            | otherwise -> "Open the selected extension document."
+                            | Plugin.menuName reference=="hide.messages.go-to" -> "Go to the captured diagnostic source location."
+                            | otherwise -> "Run the selected extension action."
   Disabled reason -> reason
 
 menuHelp :: Desktop -> Maybe Text
 menuHelp d = case contextMenu d of
-  Just (_,i) -> commandDescription . snd <$> listToMaybe (drop i (contextItems (contextKind d)))
+  Just (_,i) -> commandDescription . snd <$> listToMaybe (drop i (contextItemsFor d))
   Nothing -> do
     (i,j)<-menu d
     MenuItem _ _ cmd<-listToMaybe (drop j (menuItemsFor d i))
@@ -445,8 +451,15 @@ contributedCommand name epoch generation d=do
 commandEnabled :: Desktop -> Command -> Bool
 commandEnabled d cmd | dialogCommandAllowed cmd d = True
 commandEnabled d Download = browserFrontend d && maybe False ((==Nothing) . documentLabel) (activeDocument d)
+commandEnabled d GoToMessage | menusActive d = maybe False (commandEnabled d . contributionCommand d) (find ((=="hide.messages.go-to") . Plugin.menuName . Plugin.menuReference) (contributedMenus d))
 commandEnabled d Help | menusActive d = any ((=="hide.help.contents") . Plugin.menuName . Plugin.menuReference) (contributedMenus d)
-commandEnabled d (RegisteredMenu reference _) = dialog d==Nothing && any ((==reference) . Plugin.menuReference) (contributedMenus d)
+commandEnabled d (RegisteredMenu reference _) = dialog d==Nothing && case find ((==reference) . Plugin.menuReference) (contributedMenus d) of
+  Nothing -> False
+  Just item | Plugin.menuSlot item=="context.messages" -> case messageInvocationTarget d of
+    Just target@(MessagesTarget _ _ location) -> contextTargetCurrent d {contextTarget=Just target} &&
+      (Plugin.menuName reference/="hide.messages.go-to" || location/=Nothing)
+    _ -> False
+  Just _ -> True
 commandEnabled _ Disabled{} = False
 commandEnabled d SidebarMove{} = maybe False treeFocused (sideTree d)
 commandEnabled d cmd | cmd `elem` [SidebarActivate,SidebarExpand,SidebarCollapse] = maybe False treeFocused (sideTree d)
@@ -463,7 +476,9 @@ commandEnabled d CopyLocation = maybe False (\doc -> documentFile doc/=Nothing &
 commandEnabled d (AgentChoose _) = not (null (conversationSettings d))
 commandEnabled d (AgentSet _ _) = not (agentReplying d) && not (null (conversationSettings d))
 commandEnabled d cmd | cmd `elem` [GoToMessage,CopyAllMessages,NextMessage,PreviousMessage] = not (null (diagnostics d))
-commandEnabled d Copy | problemsVisible d && problemsFocused d = not (null (diagnostics d))
+commandEnabled d Copy | problemsVisible d && problemsFocused d = case messageInvocationTarget d of
+  Just (MessagesTarget _ _ (Just _)) -> True
+  _ -> False
 commandEnabled d cmd | problemsVisible d && problemsFocused d, cmd `elem` [Undo,Redo,Cut,Paste,SelectAll] = False
 commandEnabled _ _ = True
 -- | Shared current-state gate for menu invocations and frontend hints. Queued
@@ -484,7 +499,7 @@ menuRect d i = Rect (min x (max 0 (sw-w))) 1 w (length (menuItemsFor d i)+2)
         w = min sw (maximum [T.length t + keyLabelWidth (menuShortcut d entry) + 5 + (case command of SetBufferView _ -> 4; _ -> 0) | entry@(MenuItem t _ command) <- menuItemsFor d i])
 
 initialDesktop :: (Int,Int) -> Desktop
-initialDesktop size = Desktop size [] M.empty 1 Nothing Nothing Nothing "" Nothing False Nothing "" Nothing "" Nothing "" False Nothing Nothing Nothing "" Nothing Nothing Nothing [] False 0 0 False Nothing 0 0 Nothing SourceContext Nothing (newBuffer "") (Selection 0 0) True False False 0 True False False False Nothing Nothing [] 8 Nothing [] False SystemMode True [] Nothing [] Nothing [] False Nothing "" M.empty False (0,Nothing) [] Nothing CurrentView QuerySubmit Nothing 0 M.empty Nothing False (newBuffer "") (Selection 0 0) True False M.empty [] [] False Nothing
+initialDesktop size = Desktop size [] M.empty 1 Nothing Nothing Nothing "" Nothing False Nothing "" Nothing "" Nothing "" False Nothing Nothing Nothing "" Nothing Nothing Nothing [] False 0 0 False Nothing 0 0 Nothing SourceContext Nothing (newBuffer "") (Selection 0 0) True False False 0 True False False False Nothing Nothing [] 8 Nothing [] False SystemMode True [] Nothing [] Nothing [] False Nothing "" M.empty False (0,Nothing) [] Nothing CurrentView QuerySubmit Nothing 0 M.empty Nothing False (newBuffer "") (Selection 0 0) True False M.empty [] [] False Nothing 0
 
 activeWindow :: Desktop -> Maybe Window
 activeWindow d = listToMaybe (filter (windowVisible d) (windows d))
@@ -881,6 +896,9 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
     go ToggleHex d = (toggleHex d,[])
     go Undo d = (editActive (const undo) Nothing d,[])
     go Redo d = (editActive (const redo) Nothing d,[])
+    go GoToMessage d | menusActive d = case find ((=="hide.messages.go-to") . Plugin.menuName . Plugin.menuReference) (contributedMenus d) of
+      Just item -> go (contributionCommand d item) d
+      Nothing -> (d {status="Source navigation is unavailable."},[])
     go GoToMessage d = jumpProblem d
     go CopyAllMessages d = copyMessages (diagnostics d) d
     go Copy d | problemsVisible d && problemsFocused d = copyMessages (take 1 (drop (problemsSelected d) (diagnostics d))) d
@@ -933,8 +951,11 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
       Nothing | menusActive d -> (d {status="Help command is unavailable."},[])
               | otherwise -> (d,[ReadHelp])
     go (RegisteredMenu reference _) d
-      | commandEnabled d (RegisteredMenu reference False) = (d,[InvokeMenu reference Plugin.HumanMenu])
+      | commandEnabled source (RegisteredMenu reference False) = (d,[InvokeMenu reference Plugin.HumanMenu target])
       | otherwise = (d {status="Menu action is unavailable."},[])
+      where target=case find ((==reference) . Plugin.menuReference) (contributedMenus source) of
+              Just item | Plugin.menuSlot item=="context.messages" -> messageInvocationTarget source
+              _ -> Nothing
     go ToggleTree d = case sideTree d of Just _ -> (setTree Nothing d,[]); Nothing -> (d,[ReadTree (startingDirectory d)])
     go GitDiff d = (d,[ReadGitDiff])
     go GitCommit d = (d,[AskGitCommit])
@@ -1766,6 +1787,25 @@ contextItems MessagesContext = [("Go to source",GoToMessage),("Copy message",Cop
 contextItems (AgentContext items) = items
 contextItems GitContext = [("Pull",GitPull),("Fetch",GitFetch),("Merge...",GitMerge)]
 
+-- | Compose prepared context contributions with the existing session actions.
+contextItemsFor :: Desktop -> [(Text,Command)]
+contextItemsFor d | contextKind d==MessagesContext = map replace base++extras
+  where
+    base=contextItems MessagesContext
+    additions=[(Plugin.menuTitle item,contributionCommand d item) | item<-contributedMenus d,Plugin.menuSlot item=="context.messages"]
+    sourceEntry=find (\(_,command)->case command of RegisteredMenu ref _->Plugin.menuName ref=="hide.messages.go-to"; _->False) additions
+    replace entry@(_,GoToMessage)=maybe entry id sourceEntry
+    replace entry=entry
+    extras=[entry | entry@(_,command)<-additions,case command of RegisteredMenu ref _->Plugin.menuName ref/="hide.messages.go-to"; _->True]
+contextItemsFor d=contextItems (contextKind d)
+
+-- Only an open Messages popup retains its original capture. Direct key/menu
+-- invocation captures the live owner, never a leftover dismissed popup target.
+messageInvocationTarget :: Desktop -> Maybe ContextTarget
+messageInvocationTarget d
+  | contextMenu d/=Nothing && contextKind d==MessagesContext = contextTarget d
+  | otherwise = captureContextTarget MessagesContext d
+
 conversationSettings :: Desktop -> [AgentSetting]
 conversationSettings d=if T.null (conversationTarget d) then agentSettings d else childAgentSettings d
 conversationSteering :: Desktop -> Bool
@@ -1809,7 +1849,7 @@ openContext :: ContextKind -> Int -> Int -> Desktop -> Desktop
 openContext kind x y d = d {contextKind=kind,contextTarget=captureContextTarget kind d,contextMenu=Just (popup,0),drag=Nothing,dragOriginal=Nothing,menu=Nothing}
   where
     (sw,sh)=screenSize d
-    items=contextItems kind
+    items=contextItemsFor d {contextKind=kind}
     h=max 3 (min (sh-2) (length items+2))
     w=min sw (max 24 (maximum (0:map (keyLabelWidth . fst) items)+4))
     popup=Rect (max 0 (min x (sw-w))) (max 1 (min y (sh-h-1))) w h
@@ -1821,6 +1861,12 @@ captureContextTarget kind d = case kind of
   SourceContext -> source
   ChangeContext{} -> source
   AgentContext{} -> Just (ConversationTarget (conversationTarget d))
+  MessagesContext -> Just $ if messagesOwner d then
+    MessagesTarget (diagnosticsGeneration d) (problemsSelected d) (case drop (problemsSelected d) (diagnostics d) of
+      problem:_ -> let path=diagnosticPath problem; row=diagnosticRow problem; column=diagnosticColumn problem
+                   in path `seq` row `seq` column `seq` Just (path,row,column)
+      _ -> Nothing)
+    else UnavailableMessagesTarget
   _ -> Nothing -- These actions already carry arguments or have session scope.
   where
     source=Just $ case (activeWindow d,activeDocument d) of
@@ -1828,11 +1874,16 @@ captureContextTarget kind d = case kind of
         SourceTarget (windowId w) (bufferId w) (revision (documentBuffer doc)) (selection w)
       _ -> UnavailableSourceTarget
 
+messagesOwner :: Desktop -> Bool
+messagesOwner d=messagesDisplayed d && problemsFocused d && not (maybe False treeFocused (sideTree d))
+
 contextTargetCurrent :: Desktop -> Bool
 contextTargetCurrent d = case contextTarget d of
   Nothing -> True
   Just (ConversationTarget target) -> conversationTarget d==target
   Just target@SourceTarget{} -> captureContextTarget SourceContext d==Just target
+  Just (MessagesTarget generation index _) -> messagesOwner d && diagnosticsGeneration d==generation && problemsSelected d==index
+  Just UnavailableMessagesTarget -> False
   Just UnavailableSourceTarget -> False
 
 gitCountText :: Int -> Text
@@ -1884,7 +1935,7 @@ contextEvent ev (r,chosen) d = case ev of
     close=(d {contextMenu=Nothing},[])
     choose i=(d {contextMenu=Just (r,i `mod` length items)},[])
     invoke i=case drop i items of (_,cmd):_ | contextTargetCurrent d && commandEnabled d cmd -> runCommand cmd d; _ -> close
-    items=contextItems (contextKind d)
+    items=contextItemsFor d
 
 -- SDL supplies click counts; terminal clicks retain the same selection and Enter path.
 handleDoubleClick :: Int -> Int -> Desktop -> (Desktop,[Effect])
@@ -2746,6 +2797,12 @@ copyMessages [] d = (d {status="No messages to copy."},[])
 copyMessages issues d = (d {clipboard=T.intercalate "\n\n" (map format issues),clipboardCode=Nothing,status="Messages copied."},[])
   where format issue=(case diagnosticSeverity issue of 1 -> "Error "; 2 -> "Warning "; 3 -> "Info "; _ -> "Hint ")<>
           T.pack (diagnosticPath issue)<>":"<>T.pack (show (diagnosticRow issue+1))<>":"<>T.pack (show (diagnosticColumn issue+1))<>" "<>diagnosticMessage issue
+
+-- | Publish a replacement diagnostic projection with a fresh popup lifetime.
+-- Even an equal-looking refresh invalidates captured actions; no payload equality
+-- or message scanning is needed to check their currentness.
+setDiagnostics :: [Diagnostic] -> Desktop -> Desktop
+setDiagnostics values d=d {diagnostics=values,diagnosticsGeneration=diagnosticsGeneration d+1}
 
 chooseProblem :: Int -> Desktop -> Desktop
 chooseProblem index d = d {problemsSelected=chosen,problemsScroll=max 0 (min chosen (max (problemsScroll d) (chosen-visible+1)))}

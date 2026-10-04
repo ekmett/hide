@@ -37,7 +37,7 @@ checks=bracket (lookupEnv "hide_datadir") (maybe (unsetEnv "hide_datadir") (setE
 runChecks :: IO ()
 runChecks=withDocsCommands $ \docs->withRegistry $ \registry->withMenuCommands docs $ \host->do
   extension<-either (error . show) pure =<< registerExtension registry (menuContributions host)
-    (\context text->prepareMarkdown (Plugin.invocationColumns context) "/tmp/README.md" "" text)
+    (\context text->fmap PreparedDocument (prepareMarkdown (invocationColumns context) "/tmp/README.md" "" text))
   metadata<-Plugin.menuSnapshot (menuContributions host)
   let initial=(initialDesktop (80,25)) {contributedMenus=metadata,agentMenuRefs=menuAgentReferences host,menusActive=True}
       helpRef=case [Plugin.menuReference entry | entry<-metadata,Plugin.menuName (Plugin.menuReference entry)=="hide.help.contents"] of ref:_->ref; _->error "missing help contribution"
@@ -52,7 +52,7 @@ runChecks=withDocsCommands $ \docs->withRegistry $ \registry->withMenuCommands d
         (_,queued)<-menuEffects host (\_ _->error "registered action missed menu worker") desktop effects
         timeout 5000000 (waitDoc queued) >>= maybe (error "menu worker did not complete") pure
   let (fromF1,effects)=handleEvent (V.EvKey (V.KFun 1) []) initial
-  check "F1 resolves live contributed Help lifetime" (effects==[InvokeMenu helpRef Plugin.HumanMenu])
+  check "F1 resolves live contributed Help lifetime" (effects==[InvokeMenu helpRef Plugin.HumanMenu Nothing])
   help<-run fromF1 effects
   check "registered help prepares styled document with relative links" (maybe False (\doc->documentMarkdownPath doc/=Nothing && not (null (documentLinks doc)) && documentLabel doc==Just "Haskell Help") (activeDocument help))
   let helpIndex=case findIndex (\(title,_,_)->title=="Help") menus of Just index->index; _->error "missing help slot"
@@ -82,9 +82,9 @@ runChecks=withDocsCommands $ \docs->withRegistry $ \registry->withMenuCommands d
   modalFrame<-either error pure (parseRemoteFrame (object (frameMetadata "/tmp" modal)) (replicate 25 (toJSON ([]::[Value]))))
   check "registered native Help has no source accelerator through a modal" (nativeMenuShortcut modal helpCommand==("",0) && all (\(_,rows)->all (\(_,shortcut,_)->shortcut==("",0)) rows) (remoteMenuLayout modalFrame))
   nativeInput<-either error pure (parseEither parseInput nativePacket)
-  check "native emitted packet reaches same actual host invocation" (snd (applyInput nativeInput initial)==[InvokeMenu extension Plugin.HumanMenu])
+  check "native emitted packet reaches same actual host invocation" (snd (applyInput nativeInput initial)==[InvokeMenu extension Plugin.HumanMenu Nothing])
   let (invoked,extensionEffects)=applyInput packet initial
-  check "extension declaration reaches actual transported route" (extensionEffects==[InvokeMenu extension Plugin.HumanMenu])
+  check "extension declaration reaches actual transported route" (extensionEffects==[InvokeMenu extension Plugin.HumanMenu Nothing])
   opened<-run invoked extensionEffects
   check "transported extension installs independent Markdown and links" (maybe False (T.isInfixOf "Independent extension" . contents . documentBuffer) (activeDocument opened) && maybe False (not . null . documentLinks) (activeDocument opened))
   check "extension metadata cannot grant agent invocation" (case applyGuestInput packet (beginGuestInput initial) of Left _->True; _->False)
@@ -94,21 +94,21 @@ runChecks=withDocsCommands $ \docs->withRegistry $ \registry->withMenuCommands d
     nextMetadata<-Plugin.menuSnapshot (menuContributions nextHost)
     let nextDesktop=initial {contributedMenus=nextMetadata,agentMenuRefs=menuAgentReferences nextHost}
     check "prior scope same name/generation cannot target a new session registry" (null (snd (applyInput helpPacket nextDesktop)))
-  check "host-permitted help preserves agent origin" (case applyGuestInput helpPacket (beginGuestInput initial) of Right (_,requests)->requests==[InvokeMenu helpRef Plugin.AgentMenu]; _->False)
+  check "host-permitted help preserves agent origin" (case applyGuestInput helpPacket (beginGuestInput initial) of Right (_,requests)->requests==[InvokeMenu helpRef Plugin.AgentMenu Nothing]; _->False)
   stalePacket<-either error pure (parseEither parseInput (object ["type" .= ("menu"::T.Text),"command" .= Plugin.menuName extension,"registry" .= Plugin.menuEpoch extension,"generation" .= (Plugin.menuGeneration extension+100)]))
   let oversized=object ["type" .= ("menu"::T.Text),"command" .= Plugin.menuName extension,"registry" .= Plugin.menuEpoch extension,"generation" .= (9007199254740992::Integer)]
   check "contributed wire generations are bounded" (case parseEither parseInput oversized of Left _->True; _->False)
   check "stale transported generation cannot invoke extension" (null (snd (applyInput stalePacket initial)))
 #endif
   -- Retire through the host owner while an admitted result is outstanding.
-  (_,pending)<-menuEffects host (\_ _->error "missing host") initial [InvokeMenu extension Plugin.HumanMenu]
-  retireMenuFromHost host extension
+  (_,pending)<-menuEffects host (\_ _->error "missing host") initial [InvokeMenu extension Plugin.HumanMenu Nothing]
+  requestMenuRetirement host extension
   threadDelay 100000
   refused<-tickMenus host pending
   check "ordered host retirement precedes late reply adoption" (activeDocument refused==Nothing && all ((/=extension) . Plugin.menuReference) (contributedMenus refused))
-  (_,queuedOld)<-menuEffects host (\_ _->error "missing host") refused [InvokeMenu extension Plugin.HumanMenu]
+  (_,queuedOld)<-menuEffects host (\_ _->error "missing host") refused [InvokeMenu extension Plugin.HumanMenu Nothing]
   check "queued retired action has no document and explicit refusal" (activeDocument queuedOld==Nothing && "stale" `T.isInfixOf` status queuedOld)
-  retireMenuFromHost host helpRef
+  requestMenuRetirement host helpRef
   withdrawnHelp<-tickMenus host initial
   check "retired Help fallback row paints unavailable" (not (menuCommandAvailable withdrawnHelp Help))
   check "F1 cannot bypass retired Help through preview fallback" (null (snd (handleEvent (V.EvKey (V.KFun 1) []) withdrawnHelp)))
@@ -123,10 +123,10 @@ runChecks=withDocsCommands $ \docs->withRegistry $ \registry->withMenuCommands d
     command<-either (error . show) pure =<< registerCommand registry slow
     reference<-either (error . show) pure =<< Plugin.contributeMenu (menuContributions closingHost)
       (Plugin.MenuDef "example.cancel-on-close" "help" "extensions" 20 "Closing" "" False
-        (Plugin.menuAction registry command () (\context valueText->prepareMarkdown (Plugin.invocationColumns context) "/tmp/README.md" "" valueText)))
+        (Plugin.menuAction registry command (const (Right ())) (\context valueText->fmap PreparedDocument (prepareMarkdown (invocationColumns context) "/tmp/README.md" "" valueText))))
     closingMetadata<-Plugin.menuSnapshot (menuContributions closingHost)
     let closingDesktop=initial {contributedMenus=closingMetadata,agentMenuRefs=menuAgentReferences closingHost}
-    _<-menuEffects closingHost (\_ _->error "missing closing worker") closingDesktop [InvokeMenu reference Plugin.HumanMenu]
+    _<-menuEffects closingHost (\_ _->error "missing closing worker") closingDesktop [InvokeMenu reference Plugin.HumanMenu Nothing]
     began<-timeout 1000000 (takeMVar entered)
     check "closing worker starts" (began==Just ())
   joined<-tryTakeMVar finished

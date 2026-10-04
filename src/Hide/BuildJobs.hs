@@ -84,7 +84,7 @@ startBuildJob (BuildJobs ref report stdoutReport) label root commands desktop = 
       writeIORef ref (Just (Job bid label root stop worker latest))
       writeIORef report (Just (bid,label,root,Nothing))
       writeIORef stdoutReport ("",False)
-      pure opened {status=label<>"…",buildDiagnostics=[],diagnostics=filter (`notElem` old) (diagnostics opened)}
+      pure (setDiagnostics (filter (`notElem` old) (diagnostics opened)) opened) {status=label<>"…",buildDiagnostics=[]}
 
 aggregate :: Text -> FilePath -> TBQueue Event -> TMVar Snapshot -> IO ()
 aggregate label root queue latest=loop "" "" False
@@ -180,8 +180,7 @@ tickBuildJobs (BuildJobs ref report stdoutReport) desktop = do
                     window {scrollRow=if scrollRow previous+height (bounds previous)-2>=oldLines
                       then max 0 (newLines-height (bounds window)+2) else scrollRow previous}
                 | otherwise = window
-              shown=desktop {buffers=M.adjust update bid (buffers desktop),buildDiagnostics=problems
-                ,diagnostics=filter (`notElem` old) (diagnostics desktop)++problems}
+              shown=(setDiagnostics (filter (`notElem` old) (diagnostics desktop)++problems) desktop) {buffers=M.adjust update bid (buffers desktop),buildDiagnostics=problems}
               result=case outcome of
                 Nothing -> shown
                 Just final -> (if null problems then shown else setProblemsVisible True shown) {status=summary label final}

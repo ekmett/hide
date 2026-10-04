@@ -265,7 +265,7 @@ compilerMenu preserve saved compilers d = opened {contextMenu=fmap (\(r,_) -> (r
     entries=[("THC",SelectToolchain THC),("GHC Automatic",SelectCompiler "ghc")]++installed++custom++[("Target settings...",RunOptions)]
     rows=[(if action==selected then "✓ "<>label else "  "<>label,action) | (label,action)<-entries]
     previous=case (preserve,contextMenu d) of
-      (True,Just (_,index)) -> snd <$> listToMaybe (drop index (contextItems (contextKind d)))
+      (True,Just (_,index)) -> snd <$> listToMaybe (drop index (contextItemsFor d))
       _ -> Nothing
     chosen=fromMaybe 0 (findIndex ((==fromMaybe selected previous).snd) entries)
     Rect x y _ _=toolchainBadgeRect d

@@ -7,8 +7,8 @@
 -- check currentness again before adopting replies and supply their own context,
 -- policy and presentation adapter; this module has no mutable desktop capability.
 module Hide.Plugin.Menu
-  ( Menus, MenuRef, MenuItem(..), MenuDef(..), MenuAction, MenuError(..), MenuContext(..), MenuOrigin(..)
-  , withMenus, menuAction, contributeMenu, retireMenu, menuSnapshot
+  ( Menus, MenuRef, MenuItem(..), MenuDef(..), MenuAction, MenuError(..), MenuOrigin(..)
+  , withMenus, menuAction, contributeMenu, retireMenu, menuSnapshot, menuMetadata
   , menuName, menuEpoch, menuGeneration, menuCurrent, invokeMenu
   ) where
 
@@ -25,8 +25,6 @@ import Hide.Plugin.Command
 
 -- | Origin is supplied by host dispatch, never frontend JSON.
 data MenuOrigin = HumanMenu | AgentMenu deriving (Eq,Show)
--- | Immutable bounded input for the initial documentation menu consumer.
-data MenuContext = MenuContext { invocationColumns :: Int, invocationOrigin :: MenuOrigin } deriving (Eq,Show)
 
 -- | Exact entry lifetime. Names may be reused, identities never are.
 data MenuRef = MenuRef Unique Text Integer Text deriving Eq
@@ -46,10 +44,11 @@ data MenuItem = MenuItem
   , menuOrder :: Int, menuTitle :: Text, menuKey :: Text, menuAgentAllowed :: Bool
   } deriving (Eq,Show)
 
--- | Host-chosen typed reply adapter, evaluated with command work off the UI lock.
+-- | Host-chosen argument projection and reply adapter, evaluated with typed
+-- command work off the UI lock. Projection reads only captured immutable context.
 data MenuAction context reply = forall a b. MenuAction
-  (Registry context) (Command context a b) a (context -> b -> IO reply)
-menuAction :: Registry context -> Command context a b -> a -> (context -> b -> IO reply) -> MenuAction context reply
+  (Registry context) (Command context a b) (context -> Either Text a) (context -> b -> IO reply)
+menuAction :: Registry context -> Command context a b -> (context -> Either Text a) -> (context -> b -> IO reply) -> MenuAction context reply
 menuAction=MenuAction
 
 data MenuDef context reply = MenuDef
@@ -121,6 +120,23 @@ actionCurrent (MenuAction registry command _ _)=commandCurrent registry (command
 menuCurrent :: Menus context reply -> MenuRef -> IO Bool
 menuCurrent menus reference=entry menus reference >>= either (const (pure False)) (\(Entry _ action)->actionCurrent action)
 
+-- | Prepare one exact live contribution for publication outside the session
+-- lock. An unrelated unprepared registration cannot poison this delta.
+menuMetadata :: Menus context reply -> MenuRef -> IO (Either MenuError MenuItem)
+menuMetadata menus reference=do
+  found<-entry menus reference
+  case found of
+    Left err->pure (Left err)
+    Right (Entry item action)->do
+      live<-actionCurrent action
+      if not live then pure (Left (StaleMenu (menuName reference))) else Right <$> prepareMetadata item
+
+prepareMetadata :: MenuItem -> IO MenuItem
+prepareMetadata item=do
+  let ref=menuReference item
+  _<-evaluate (force (menuName ref,menuEpoch ref,menuGeneration ref,menuSlot item,menuGroup item,menuOrder item,menuTitle item,menuKey item,menuAgentAllowed item))
+  pure item
+
 -- | Snapshot live metadata in deterministic slot/group/order/ID order. Preparing
 -- snapshots belongs to the registration owner, never the per-frame render path.
 menuSnapshot :: Menus context reply -> IO [MenuItem]
@@ -130,10 +146,10 @@ menuSnapshot (Menus _ _ _ state)=do
   let metadata=concat alive
   -- Force only the bounded frontend fields on the registration owner. A lazy
   -- extension metadata expression must never migrate into painting/admission.
-  _<-evaluate (force [(menuName ref,menuEpoch ref,menuGeneration ref,menuSlot item,menuGroup item,menuOrder item,menuTitle item,menuKey item,menuAgentAllowed item) | item<-metadata,let ref=menuReference item])
-  pure (sortOn (\item->(menuSlot item,menuGroup item,menuOrder item,menuName (menuReference item))) metadata)
+  prepared<-mapM prepareMetadata metadata
+  pure (sortOn (\item->(menuSlot item,menuGroup item,menuOrder item,menuName (menuReference item))) prepared)
 
--- | Invoke retained typed arguments on the caller's worker. The host owns reply
+-- | Project captured typed arguments and invoke on the caller's worker. The host owns reply
 -- preparation failures/cancellation and must check menuCurrent before adoption.
 invokeMenu :: Menus context reply -> MenuRef -> context -> IO (Either MenuError reply)
 invokeMenu menus reference context=do
@@ -141,7 +157,9 @@ invokeMenu menus reference context=do
   case found of
     Left err->pure (Left err)
     Right (Entry _ (MenuAction registry command arguments prepare))->do
-      result<-invoke registry command context arguments
+      result<-case arguments context of
+        Left err->pure (Left (CommandRejected err))
+        Right value->invoke registry command context value
       case result of
         Left err->pure (Left (MenuCommandError err))
         Right value->Right <$> prepare context value

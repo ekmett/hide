@@ -8,10 +8,12 @@
 -- when the human has disabled streamer mode.
 module Hide.GuestAccess
   ( InputOrigin(..), CellAccess(..), cellAccess, readableAt, pointerAllowedAt
-  , streamerReadableAt, sensitiveLabel, sanitizedStatus, protectedPath, protectedPathParent, protectedBuffer, privateDocument, sanitizedBuffer, sanitizedBufferContent
-  , guestCommandAllowed, guestEffectsAllowed, guestKeyboardAllowed, guestKeyAllowed, guestKeyCombinations
+  , streamerReadableAt, sensitiveLabel, sanitizedStatus, protectedPath, protectedFilePath, protectedPathParent, protectedBuffer, privateDocument, sanitizedBuffer, sanitizedBufferContent
+  , validateGuestEffects, guestCommandAllowed, guestEffectsAllowed, guestKeyboardAllowed, guestKeyAllowed, guestKeyCombinations
   , guestModalBlocked, guestTransitionAllowed, beginGuestInput, endGuestInput
   ) where
+import Control.Monad (when)
+import System.Directory (canonicalizePath)
 import Data.Char (toLower)
 import Data.List (find)
 import qualified Data.Map.Strict as M
@@ -35,7 +37,12 @@ protectedBuffer d bid=maybe False (\doc -> privateDocument d doc || maybe False 
 
 -- | Check authority/privacy policy on an already canonicalized filesystem path.
 protectedPath :: Desktop -> FilePath -> Bool
-protectedPath d path=map toLower (takeFileName path)=="thc.toml" || any (`pathContains` path) (guestPrivatePaths d)
+protectedPath d=protectedFilePath (guestPrivatePaths d)
+
+-- | The same canonical-path policy on a captured immutable authority projection.
+-- Workers can apply it without retaining a mutable desktop or its payloads.
+protectedFilePath :: [FilePath] -> FilePath -> Bool
+protectedFilePath privatePaths path=map toLower (takeFileName path)=="thc.toml" || any (`pathContains` path) privatePaths
 
 -- | Also protect ancestors whose removal could destroy authority stores.
 protectedPathParent :: Desktop -> FilePath -> Bool
@@ -108,13 +115,32 @@ guestCommandAllowed cmd=case cmd of
   AgentCopyRaw -> False
   AgentNew -> False
   _ -> True
+-- | Validate resolved filesystem effects before agent-facing dispatch. Delayed
+-- contributions retain their host-captured location; workers/adoption recheck
+-- prepared canonical targets against their owning current policy as well.
+validateGuestEffects :: Desktop -> [Effect] -> IO ()
+validateGuestEffects d=mapM_ check
+  where
+    denied=ioError (userError "Agent tools cannot access editor authority or session-key files.")
+    path name=canonicalizePath name >>= \resolved->when (protectedPath d resolved) denied
+    buffer ident=when (protectedBuffer d ident) denied
+    check effect=case effect of
+      ReadPath name->path name
+      JumpTo name _ _->path name
+      InvokeMenu _ _ (Just (MessagesTarget _ _ (Just (name,_,_))))->path name
+      OpenChoice base input pattern->let chosen=T.unpack (if T.null input then pattern else input) in path (if isAbsolute chosen then chosen else base </> chosen)
+      SaveDocument ident target _->buffer ident >> maybe (pure ()) path target
+      DownloadDocument ident->buffer ident
+      ResolveConflict conflict _->buffer (conflictBuffer conflict)
+      _->pure ()
+
 agentActionAllowed :: Text -> Bool
 agentActionAllowed action=action `elem` ["compile","make","build-stop","run","run-options","run-config","toolchain","terminal","terminal-input","terminal-stop"]
 guestEffectsAllowed :: [Effect] -> Bool
 guestEffectsAllowed=all allowed
   where
     allowed ReloadKeyBindings{}=False
-    allowed (InvokeMenu _ origin)=origin==Plugin.AgentMenu
+    allowed (InvokeMenu _ origin _)=origin==Plugin.AgentMenu
     allowed ReadGitDiff=False
     allowed AskGitCommit=False
     allowed WriteGitCommit{}=False
@@ -298,7 +324,7 @@ pointerAllowedAt :: Desktop -> Int -> Int -> Bool
 pointerAllowedAt d x y
   | not (onScreen d x y) || guestModalBlocked d=False
   | Just dg<-dialog d=inside (dialogRect d dg) x y && not (any (\(r,f)->privateDialogField d dg f && inside r x y) (zip (fieldRects d dg) (fields dg)))
-  | Just (r,chosen)<-contextMenu d,inside r x y=maybe False (guestCommandAllowed . snd) (at (contextItems (contextKind d)) (contextOffset r chosen+y-top r-1))
+  | Just (r,chosen)<-contextMenu d,inside r x y=maybe False (guestCommandAllowed . snd) (at (contextItemsFor d) (contextOffset r chosen+y-top r-1))
   | Just (index,_)<-menu d,inside (menuRect d index) x y=maybe False (\(MenuItem _ _ command)->guestCommandAllowed command) (at (menuItemsFor d index) (y-top (menuRect d index)-1))
   | overlayAt d x y=True
   | Just w<-topWindow d x y=not (protectedBuffer d (bufferId w))
