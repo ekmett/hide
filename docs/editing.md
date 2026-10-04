@@ -33,6 +33,21 @@ show them in their titles too. Saving establishes a new baseline.
 closing open buffers. Enter browses into the selected directory, Browse opens
 a typed path, and OK accepts the displayed directory.
 
+## Cabal packages
+
+The sidebar shows each `.cabal` package in the selected directory as a separate
+root beside Files and Agents. Expand a package to browse its library, executable,
+test and benchmark targets, then expand a target to open its source files.
+Right-click the package name to open its package description.
+
+Source entries follow Cabal declarations, including common stanzas and conditional
+source directories. A `?` marks conditional entries; multiple existing candidates
+expand into their paths. Generated, virtual and missing sources remain visible.
+Opening a source reuses an existing buffer, preserving unsaved edits.
+
+Package descriptions refresh after changes on disk. Discovery currently covers
+the selected directory; it does not require a build or a Cabal plan.
+
 ## Documentation and links
 
 **F1** opens the rendered README. Click a colored link such as
