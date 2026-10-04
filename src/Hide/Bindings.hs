@@ -5,7 +5,7 @@
 -- Compilation rejects ambiguous chords before publishing a table. Lookup touches
 -- only the chord index, never a buffer or desktop. Modal ownership stays with the
 -- caller. Context selection and ordinary typing remain with the input owner.
-module Hide.Bindings (BindingPlatform(..), bindingPlatforms, platformName, BindingContext(..), contextName, bindingContexts, Bindings, compileBindings, bindingAction, bindingKeys, bindingEntries, bindingChords, bindingChordsWhere, chordName, readChord) where
+module Hide.Bindings (BindingPlatform(..), bindingPlatforms, platformName, BindingContext(..), contextName, bindingContexts, Bindings, compileBindings, bindingAction, bindingKeys, bindingEntries, bindingChords, bindingChordsWith, bindingChordsWhere, chordName, readChord) where
 
 import Control.DeepSeq (deepseq)
 import Control.Monad (foldM, unless)
@@ -71,6 +71,11 @@ bindingEntries (Bindings _ entries _)=[(name,keys) | (name,_,keys)<-entries]
 -- Returning it does not traverse commands, buffers or the lookup index.
 bindingChords :: Bindings a -> [(Text,Text)]
 bindingChords (Bindings _ _ chords)=chords
+
+-- | Project an owner's small action catalogue without reparsing prepared keys.
+-- An empty target may retain inert chord ownership at a transport boundary.
+bindingChordsWith :: (Text -> a -> Text) -> Bindings a -> [(Text,Text)]
+bindingChordsWith target (Bindings _ entries _)=[(chord,target name action) | (name,action,keys)<-entries,chord<-keys]
 
 -- | Filter an owner's small action catalogue without reparsing its prepared keys.
 bindingChordsWhere :: (a -> Bool) -> Bindings a -> [(Text,Text)]

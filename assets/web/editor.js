@@ -312,6 +312,8 @@ window.addEventListener('keydown',e=>{
  const names={ArrowUp:'Up',ArrowDown:'Down',ArrowLeft:'Left',ArrowRight:'Right',' ':'Space',Esc:'Escape'};
  const chord=[e.ctrlKey?'Ctrl':null,e.metaKey?'Cmd':null,e.altKey?'Alt':null,e.shiftKey?'Shift':null,names[key]|| (key.length===1?key.toUpperCase():key)].filter(Boolean).join('+');
  const action=frame?.bindings?.find(([candidate])=>candidate===chord)?.[1];
+ // An inert contributed owner consumes its chord across publication/map changes.
+ if(action===''){e.preventDefault();return;}
  // Only a matching default clipboard action may delegate its keyboard gesture
  // to the browser clipboard event. Unbinding/remapping suppresses that default.
  const nativeClipboard={c:'hide.edit.copy',x:'hide.edit.cut',v:'hide.edit.paste'}[key.toLowerCase()];

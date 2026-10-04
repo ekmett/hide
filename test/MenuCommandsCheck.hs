@@ -31,6 +31,7 @@ import Data.Aeson.Types (parseEither)
 import Hide.GuestAccess (beginGuestInput)
 import Hide.Protocol
 import Hide.Frontend (decodeKey)
+import Hide.RemoteTerminal (terminalEventInput)
 import Hide.RemoteWindow
 import Hide.Window (nativeCommands, nativeCommandsFor, nativeMenuEventFor, nativeMenuShortcut)
 #endif
@@ -186,7 +187,7 @@ runtimeLifecycleChecks docs=bracket temporary removePathForcibly $ \directory->w
     (\context text->fmap PreparedDocument (prepareMarkdown (invocationColumns context) "/tmp/README.md" "" text))
   metadata<-Plugin.menuSnapshot (menuContributions host)
   let check label condition=unless condition (error label)
-      config=M.fromList [("terminal",M.singleton "source" (M.singleton "example.manual" ["Ctrl+Shift+J"])),
+      config=M.fromList [("terminal",M.singleton "source" (M.fromList [("example.manual",["Ctrl+Shift+J"]),("hide.focus.source",["Ctrl+Shift+U"])])),
         ("graphical",M.singleton "source" (M.singleton "example.manual" ["Ctrl+Shift+J"])),
         ("macos",M.singleton "source" (M.singleton "example.manual" ["Cmd+Shift+J"]))]
       base=(initialDesktop (80,25)) {defaultDirectory=Just directory,contributedMenus=metadata,menusActive=True,agentMenuRefs=menuAgentReferences host}
@@ -213,14 +214,17 @@ runtimeLifecycleChecks docs=bracket temporary removePathForcibly $ \directory->w
   check "Mac label and native accelerator use the same contributed map"
     (label mac=="⇧⌘J" && nativeMenuShortcut mac originalCommand==("j",9))
   check "terminal and native decoded key packets retain exact contribution"
-    (remoteBindingInput oldFrame key==Just (packet original) && (decodeKey (fromEnum 'j') 9 >>= remoteBindingInput (frameFor mac))==Just (packet original))
+    (remoteBindingInput oldFrame key Nothing==Just (packet original) && (decodeKey (fromEnum 'j') 9 >>= \input->remoteBindingInput (frameFor mac) input Nothing)==Just (packet original))
   check "Mac contribution metadata publishes effective label"
     (case filter ((=="example.manual") . contributionId) (remoteContributions (frameFor mac)) of item:_->contributionKey item==label mac; _->False)
   check "remote Cocoa menu keeps configured contribution accelerator"
     (case lookup "Help" (remoteMenuLayout (frameFor mac)) of Just rows->any (\(title,shortcut,_)->title=="Extension manual" && shortcut==("j",9)) rows; _->False)
   let modal=prompt "Edit" Information [Input "Text" "draft" 5] mac
   check "modal published map cannot route contributed key"
-    ((decodeKey (fromEnum 'j') 9 >>= remoteBindingInput (frameFor modal))==Nothing && nativeMenuShortcut modal originalCommand==("",0))
+    ((decodeKey (fromEnum 'j') 9 >>= \input->remoteBindingInput (frameFor modal) input Nothing)==Nothing && nativeMenuShortcut modal originalCommand==("",0))
+  let builtinKey=V.EvKey (V.KChar 'u') [V.MCtrl,V.MShift]
+  check "non-menu builtin chord keeps its raw transport route"
+    (lookup "Ctrl+Shift+U" (remoteBindings oldFrame)==Just "hide.focus.source" && remoteBindingInput oldFrame builtinKey (terminalEventInput builtinKey)==terminalEventInput builtinKey)
   oldInput<-either error pure (parseEither parseInput (packet original))
 #endif
   withKeybindings config (contributedBindingCommands base) $ \bindings->do
@@ -233,15 +237,23 @@ runtimeLifecycleChecks docs=bracket temporary removePathForcibly $ \directory->w
         (\context text->fmap PreparedDocument (prepareMarkdown (invocationColumns context) "/tmp/README.md" "" text))
       publication<-publishMenuFromHost host replacement
       check "replacement publishes through existing host" (publication==Right ())
-      published<-tickMenus host inert
+      published<-tickMenus host retired
+#if defined(WITH_WEB) || defined(WITH_REMOTE)
+      let pendingFrame=frameFor published
+          pendingKey=remoteBindingInput pendingFrame key (terminalEventInput key)
+      check "actual pending publication frame consumes inert contributed chord" (pendingKey==Nothing)
+      check "pending frame projects explicit inert ownership" (lookup "Ctrl+Shift+J" (remoteBindings pendingFrame)==Just "")
+      check "actual retired old-ref frame consumes missing contribution chord" (remoteBindingInput (frameFor retired) key (terminalEventInput key)==Nothing)
+      check "actual retired inert-map frame consumes missing contribution chord" (remoteBindingInput (frameFor inert) key (terminalEventInput key)==Nothing)
+#endif
       replaced<-bounded bindings (RegisteredMenu replacement False) published
       let (chosen,actions)=handleEvent key replaced
       check "replacement refresh routes current exact registration" (actions==[InvokeMenu replacement Plugin.HumanMenu Nothing] && replacement/=original)
 #if defined(WITH_WEB) || defined(WITH_REMOTE)
       check "queued old-frame shortcut cannot redirect to replacement" (null (snd (applyInput oldInput replaced)))
       let disabledOldFrame=oldFrame {remoteMenus=replicate (length (remoteMenus oldFrame)) False}
-      check "disabled old-frame shortcut retains its stamp rather than raw-key fallback" (remoteBindingInput disabledOldFrame key==Just (packet original))
-      check "replacement frame shortcut stamps new registration" (remoteBindingInput (frameFor replaced) key==Just (packet replacement))
+      check "disabled old-frame shortcut retains its stamp rather than raw-key fallback" (remoteBindingInput disabledOldFrame key Nothing==Just (packet original))
+      check "replacement frame shortcut stamps new registration" (remoteBindingInput (frameFor replaced) key Nothing==Just (packet replacement))
 #endif
       (_,queued)<-menuEffects host (\_ _->error "bound replacement missed host") chosen actions
       let document current=do

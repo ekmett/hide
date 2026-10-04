@@ -44,6 +44,9 @@ assert.equal(packets.at(-1).type,'menu');assert.equal(packets.at(-1).command,'ex
 context.frame.menuContributions[0].key='';key('J',{metaKey:true,shiftKey:true});assert.equal(packets.at(-1).type,'key'); // A contribution sharing a builtin ID cannot steal its chord.
 context.frame.menuContributions[0].key='⇧⌘J';context.frame.menuContributions[0].enabled=false;
 key('J',{metaKey:true,shiftKey:true});assert.equal(packets.at(-1).type,'menu');assert.equal(packets.at(-1).generation,7); // Disabled metadata still retains the exact lifetime; the host decides availability.
+context.frame.bindings=[['Cmd+Shift+J','']];context.frame.menuContributions[0].generation=8;context.frame.menuContributions[0].key='';
+key('J',{metaKey:true,shiftKey:true});assert.equal(packets.some(packet=>packet.type==='key'||packet.type==='menu'),false); // Actual pending/retired host frames retain an inert target, never raw fallback.
+context.frame.bindings=[['Ctrl+Shift+U','hide.focus.source']];key('U',{ctrlKey:true,shiftKey:true});assert.equal(packets.at(-1).type,'key'); // Non-menu builtins retain keyboard transport.
 context.frame.bindings=[];context.frame.menuContributions[0].enabled=true;key('J',{metaKey:true,shiftKey:true});assert.equal(packets.at(-1).type,'key'); // Unbinding removes stamped routing.
 context.frame.bindingsActive=false;key('v',{metaKey:true});assert.deepEqual(commands,['hide.edit.paste']);
 const exported={};handlers.get('copy')({preventDefault(){},clipboardData:{setData:(type,text)=>exported[type]=text}});
