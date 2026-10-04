@@ -33,8 +33,11 @@ captureBuffer admission desktop reference=do
           image<-if documentLabel doc==Just "Conversation" then pure content else evaluate content
           version<-captureVersion (documentBuffer doc)
           changed<-evaluate (captureDirty (documentBuffer doc))
+          -- Resolve the selector without traversing the path. A labeled file
+          -- otherwise leaves Just(filePath fileState) retaining unrelated state.
+          sourcePath<-traverse (evaluate . filePath) (documentFile doc)
           let metadata=BufferMetadata ident
                 (fromMaybe (maybe "Untitled" (T.pack . filePath) (documentFile doc)) (documentLabel doc))
-                (fmap filePath (documentFile doc)) (snapshotDirty changed) (revision (documentBuffer doc))
+                sourcePath (snapshotDirty changed) (revision (documentBuffer doc))
           bounded<-evaluate metadata
           pure (Right (CapturedRead reference version image redacted bounded))
