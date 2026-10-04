@@ -209,7 +209,8 @@ checks=bracket temporary removePathForcibly $ \root ->
       ensure "hidden unsent drafts still prevent quiet Exit" (conversationHasDraft recovered && not (null (conversationViews recovered)))
       recoveredShown<-ui "show" [] recovered
       ensure "show after switching does not lose primary transcript" (activeText recoveredShown==primaryText)
-      (questionView,_)<-chatTool conversation recoveredShown "ask_user" (object ["question" .= ("Choose privately"::T.Text)])
+      caller<-captureQuestionCaller conversation primary >>= right
+      (questionView,_)<-chatToolAs conversation (Just caller) recoveredShown "ask_user" (object ["question" .= ("Choose privately"::T.Text)])
       let privateAnswer=questionView {chatQuestion=fmap (\q->q {questionBuffer=newBuffer "unsent secret answer",questionSelection=Selection 20 20}) (chatQuestion questionView)}
       paintedAnswer<-tickConversation conversation privateAnswer
       hiddenQuestion<-ui "directory-select" ["0",T.pack (show liveIndex)] paintedAnswer

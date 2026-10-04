@@ -389,14 +389,27 @@ when a child conversation is selected.
 
 | Tool | Kind | Arguments | Result / contract |
 | --- | --- | --- | --- |
-| `ask_user` | Q | `question`, `choices?`, `allowMultiple?` | One inline question, optional single-choice answers, always free text; waits for human |
+| `ask_user` | Q | `question`, `choices?`, `allowMultiple?` **or** `questionId` alone | Create an inline question and return pending immediately; retrieve its owned pending/answered/cancelled result |
 | `agent_settings` | R | `{}` | Public provider/model/config choices, connection/steering state, context usage and global/project guidance |
 | `environment_get` | R | `names?` | Effective subprocess environment; credentials/authority values redacted; missing names null |
 | `environment_set` | X | `values`, `scope?` | String sets, null unsets; session/project/global; affects new processes; project overrides global; protected variables denied |
 | `editor_settings` | W | `settings?`, `defaults?` | Read current state, change session settings or merge future startup defaults |
 
 Questions: 1–4096 characters; up to 12 choices of 1–256 characters;
-`allowMultiple` must be false. One pending question, no human-answer timeout.
+`allowMultiple` must be false. One pending question. Creating it follows the
+configured permission policy, then returns `questionId` and `status: "pending"`.
+Retrieving that ID requires the same authenticated caller/provider incarnation;
+it does not prompt again, but current Disable policy still applies. Pending
+results reveal neither the draft nor the current choice. Answers require explicit
+human submission and are limited to 65536 characters.
+
+The submitted answer is queued once to the original live Primary Conversation
+provider through its normal query queue. Authenticated calls made without a live
+provider are poll-only. Anonymous calls, including current worktree-child editor
+bridges without attributed credentials, are refused. Replacement or disconnection
+invalidates delivery to that provider. Up to 64 terminal results are retained in
+memory; old IDs expire. There is no timeout-to-answer or implied approval: the
+agent can continue independent work while the human decides.
 Agent settings omit argument/environment values and session keys, returning only
 argument count and environment names; secret-labelled settings are redacted.
 
@@ -453,8 +466,8 @@ the resulting `revision`, so the requesting agent sees the human's actual edit.
 The buffer remains unsaved; approval never writes the file to disk.
 
 A pending approval can be cancelled; cancellation does not undo an operation
-already executed. Long-running questions, HLS and debugger replies release the
-desktop lock while waiting. After a disconnect or uncertain reply, inspect current
+already executed. Questions return pending without waiting for the human. HLS
+and debugger reply waits release the desktop lock. After a disconnect or uncertain reply, inspect current
 state before retrying a mutation. IDs belong to the editor session.
 
 External clients connect with `hide --mcp-editor SESSION_ID`. The bridge
