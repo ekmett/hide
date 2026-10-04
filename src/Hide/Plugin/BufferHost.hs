@@ -89,12 +89,16 @@ data CapturedRead = CapturedRead
 -- | Session/actor-bound strict-diff admission; no cached approval or Human call.
 data BufferEditor = BufferEditor BufferNamespace (BufferRef -> ContentVersion -> Text -> IO (Either Text DiffResult))
 
+-- | Host-only assembly over the fixed admission transport. The callback owns
+-- current policy, actor and target validation; constructing a handle grants none.
 newBufferEditor :: BufferNamespace -> (BufferRef -> ContentVersion -> Text -> IO (Either Text DiffResult)) -> BufferEditor
 newBufferEditor = BufferEditor
 
+-- | Host wire adapter: a reference alone confers no edit authority.
 editorReference :: BufferEditor -> Int -> BufferRef
 editorReference (BufferEditor namespace _) = bufferReference namespace
 
+-- | Submit on a worker; waiting for approval must remain outside session locks.
 requestDiff :: BufferEditor -> BufferRef -> ContentVersion -> Text -> IO (Either Text DiffResult)
 requestDiff (BufferEditor _ request) = request
 

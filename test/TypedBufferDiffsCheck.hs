@@ -100,8 +100,12 @@ checks=bracket temporary removePathForcibly $ \directory->do
   outcomes<-mapM (timeout 5000000 . wait) pending
   check "shutdown resolves every accepted typed diff reply" (all (\result->case result of Just (Left _)->True; _->False) outcomes)
   retired<-withBufferDiffCommands pure
-  rejected<-bufferDiffCommand retired closed reference version patch
-  check "retired command cannot resurrect a diff request" (case rejected of Left _->True; _->False)
+  withPermissionsAt config fileTools $ \owner->do
+    let editor=bufferEditor owner (pure (Right ()))
+        reference=editorReference editor ident
+    version<-captureVersion (documentBuffer (buffers base M.! ident))
+    rejected<-timeout 5000000 (bufferDiffCommand retired editor reference version patch)
+    check "retired command cannot resurrect a diff request in live service" (case rejected of Just (Left _)->True; _->False)
   putStrLn "typed buffer diff checks passed"
   where
     waitQueued worker=do
