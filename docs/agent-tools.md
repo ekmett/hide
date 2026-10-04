@@ -420,3 +420,20 @@ state before retrying a mutation. IDs belong to the editor session.
 External clients connect with `hide --mcp-editor SESSION_ID`. The bridge
 shares the session without taking over its display. Skills describe workflows;
 MCP tool schemas and host policy govern the actual calls.
+
+### Agents sidebar
+
+Expand **Agents** in the shared sidebar to see agent names, parent relationships
+and current states. A leaf opens its existing conversation; an agent with children
+expands to show them and offers **Conversation** in its context menu. **Rename**
+starts with the current name selected, and keeps the captured agent ID while the
+directory changes. Names remain unique.
+
+Right-click **Agents** and choose **New Agent** to enter a name and task. This starts
+a fresh agent in the current shared workspace and queues that task. Creation and
+directory updates stay in the background and do not select another conversation.
+This requires a persistent editor session. Existing orchestration tools continue
+to support explicit fork/worktree choices.
+
+Provider model/effort menus, the hidden ACP completion worker and the Sessions
+sidebar root remain tracked in [#7](https://github.com/ekmett/hide/issues/7).

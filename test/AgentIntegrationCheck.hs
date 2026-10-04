@@ -1,5 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
-module AgentIntegrationCheck (checks) where
+module AgentIntegrationCheck (checks, fixture) where
 
 import Control.Concurrent (threadDelay)
 import Control.Exception (bracket)

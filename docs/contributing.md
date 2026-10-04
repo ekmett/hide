@@ -543,3 +543,17 @@ pages wait for interactive paging.
 `SidebarCheck` exercises Files and an independently declared test provider through
 actual keyboard input, delayed/collapsed loads, paging, retirement, privacy and
 filesystem observation refresh. Other domain providers remain subsequent work.
+
+`Hide.AgentSidebar` consumes this tree for the Agents root. Its scoped typed actions
+return only closed `AgentSidebarRequest` values. After exact hit/lifetime/modal
+validation, `tickSidebar` dispatches one `AgentSidebarAction` through the existing
+Conversation interpreter. Plugin handlers receive no Desktop or unrestricted
+effect-list callback. Conversation owns captured-ID dialogs/views and one creation
+attempt; AgentHub owns rename validation and the shared spawn/task rollback.
+
+A single metadata worker prepares only names, parent IDs and states from
+`agentSummaries`; tasks, histories, transcripts and private provider keys never
+enter its snapshot. Ticks compare the worker revision and invalidate at most four
+scoped nodes via `refreshTreeFromHost`, which reuses ordinary request generations,
+worker cancellation and page adoption. `SelectedInput` supplies a reusable
+single-line selected range; ordinary caret-only Input behavior is unchanged.

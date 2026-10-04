@@ -41,7 +41,7 @@ right=either (error.show) pure
 treeOf :: Desktop -> Sidebar
 treeOf=maybe (error "missing tree") id . sideTree
 settle :: SidebarHost -> Desktop -> IO Desktop
-settle host=await (tickSidebar host) (\d->let tree=treeOf d in treeProjectionRevision tree==treeRevision tree && all ready (M.elems (treeNodes tree)))
+settle host=await (tickSidebar host applyEffects) (\d->let tree=treeOf d in treeProjectionRevision tree==treeRevision tree && all ready (M.elems (treeNodes tree)))
   where ready node=case stateLoad node of Loading{}->False; _->True
 await :: HasCallStack => (Desktop -> IO Desktop) -> (Desktop -> Bool) -> Desktop -> IO Desktop
 await tick done initial=do
@@ -78,15 +78,15 @@ checks=bracket temporary removePathForcibly $ \dir->withSidebarCommands $ \host-
   let dormant=expanded {buffers=error "painting inspected buffers",sideTree=Just (treeOf expanded) {treeNodes=M.map (\node->node {stateChildren=S.singleton (error "painting traversed tree")}) (treeNodes (treeOf expanded))}}
   void (evaluate (T.length (snapshot dormant)))
   opened<-act host (activateTree False (atLabel "Main.hs" expanded) expanded)
-    >>= await (tickSidebar host) (\d->not (null (windows d)))
+    >>= await (tickSidebar host applyEffects) (\d->not (null (windows d)))
   check "Files primary action opens through a typed worker" (activeText opened=="main = 1\n")
   let changed=insertText "local " opened
-  dirty<-await (tickSidebar host) (\d->maybe False (\(value,_,_)->value) (M.lookup (dir </> "Main.hs") (treeBadges (treeOf d)))) changed
+  dirty<-await (tickSidebar host applyEffects) (\d->maybe False (\(value,_,_)->value) (M.lookup (dir </> "Main.hs") (treeBadges (treeOf d)))) changed
   check "Files cached badge preserves dirty counts" ("Main.hs +1 -1" `T.isInfixOf` snapshot dirty)
   removeFile (dir </> "Main.hs")
   createDirectory (dir </> "Main.hs")
   reopened<-act host (activateTree False (atLabel "Main.hs" dirty) dirty)
-    >>= await (tickSidebar host) (\d->not (treeFocused (treeOf d)) || "failed" `T.isInfixOf` status d)
+    >>= await (tickSidebar host applyEffects) (\d->not (treeFocused (treeOf d)) || "failed" `T.isInfixOf` status d)
   check "Opening an existing dirty file survives an unreadable disk replacement and preserves its live content" (activeText reopened=="local main = 1\n" && not (treeFocused (treeOf reopened)))
   removeDirectory (dir </> "Main.hs")
   TIO.writeFile (dir </> "Main.hs") "main = 1\n"
@@ -129,9 +129,9 @@ independent host d=withRegistry $ \registry->do
   published<-settle host d
   let index=atLabel "Tools" published
   loading<-act host (activateTree True index published)
-  running<-tickSidebar host loading
+  running<-tickSidebar host applyEffects loading
   takeMVar started
-  projected<-await (tickSidebar host) (T.isInfixOf "Loading…" . snapshot) running
+  projected<-await (tickSidebar host applyEffects) (T.isInfixOf "Loading…" . snapshot) running
   check "independent provider displays actual loading row" ("Loading…" `T.isInfixOf` snapshot projected)
   repeated<-act host (activateTree True index projected)
   count<-readMVar calls
@@ -149,7 +149,7 @@ independent host d=withRegistry $ \registry->do
   let (_,resourceEffects)=handleEvent (V.EvKey V.KEnter []) (fst (handleEvent (V.EvKey V.KDown []) secondaryPopup))
   check "independent resource declaration reuses captured link transport" (case resourceEffects of [FollowTreeLink trace "/extension/help.md" "#details"]->hitCurrent trace (treeOf secondaryPopup); _->False)
   secondaryInvoked<-act host (Wire.applyInput (Wire.Key "Enter" []) secondaryPopup)
-  _<-await (tickSidebar host) (T.isInfixOf "Independent action" . activeText) secondaryInvoked
+  _<-await (tickSidebar host applyEffects) (T.isInfixOf "Independent action" . activeText) secondaryInvoked
   let selected=select (atLabel "Inspect" loaded) loaded
       node=maybe (error "leaf") id (rowAt (treeSelected (treeOf selected)) (treeOf selected))
       trace=hitTrace (keyOf (rowHit node)) (treeOf selected)
@@ -158,7 +158,7 @@ independent host d=withRegistry $ \registry->do
   protected<-act host (selected,[InvokeTree trace reference Menu.AgentMenu])
   check "host refuses independent agent action" ("protected" `T.isInfixOf` status protected)
   invoked<-act host (Wire.applyInput (Wire.Key "Enter" []) selected)
-  displayed<-await (tickSidebar host) (T.isInfixOf "Independent action" . activeText) invoked
+  displayed<-await (tickSidebar host applyEffects) (T.isInfixOf "Independent action" . activeText) invoked
   check "independent action runs through actual frontend keyboard route" ("Independent action" `T.isInfixOf` activeText displayed)
   paged<-act host (activateTree False (atLabel "More…" loaded) loaded) >>= settle host
   check "bounded continuation uses the shared More row" ("Other" `T.isInfixOf` snapshot paged && not ("More…" `T.isInfixOf` snapshot paged))
@@ -170,7 +170,7 @@ independent host d=withRegistry $ \registry->do
 refresh :: SidebarHost -> FilePath -> Desktop -> IO ()
 refresh host dir d=withReconciliation $ \watcher->do
   let nested=dir </> "src"
-      tick value=tickReconciliation watcher (sidebarEffects host applyEffects) value >>= tickSidebar host
+      tick value=tickReconciliation watcher (sidebarEffects host applyEffects) value >>= tickSidebar host applyEffects
   TIO.writeFile (nested </> "a.hs") "a"
   opened<-act host (activateTree True (atLabel "src" d) d) >>= settle host
   let selected=select (atLabel "a.hs" opened) opened
@@ -209,18 +209,18 @@ edgeChecks dir=withSidebarCommands $ \host->do
     pendingResize<-act host (activateTree False (atLabel "Inspect" recovered) recovered)
     putMVar replyGate ()
     let resized=fst (handleEvent (V.EvResize 90 30) pendingResize)
-    resizedResult<-await (tickSidebar host) (T.isInfixOf "expired" . status) resized
+    resizedResult<-await (tickSidebar host applyEffects) (T.isInfixOf "expired" . status) resized
     check "prepared sidebar document refuses changed geometry" (not ("Retired action" `T.isInfixOf` activeText resizedResult))
     takeMVar actionEntered
     let startInspect current=do
-          next<-tickSidebar host current
+          next<-tickSidebar host applyEffects current
           act host (activateTree False (atLabel "Inspect" next) next)
     invoked<-await startInspect (T.isPrefixOf "Opening sidebar target" . status) recovered
     readMVar actionEntered
     withdrawn<-retireTreeFromHost host (P.treeReference provider) invoked
     check "withdrawal removes cached root rows before another projection" (not (any ((=="Tools").P.infoLabel.rowInfo.snd) (visibleRows 0 32768 (treeOf withdrawn))))
     let openFile current=do
-          next<-tickSidebar host current
+          next<-tickSidebar host applyEffects current
           act host (activateTree False (atLabel "Main.hs" next) next)
     refused<-await openFile (not . null . windows) withdrawn
     check "retired blocked action is cancelled and releases the Files action slot" (activeText refused=="main = 1\n")
@@ -241,7 +241,7 @@ edgeChecks dir=withSidebarCommands $ \host->do
       threadDelay 20000
       blocked<-poll writer
       check "publication queue backpressures only its producer" (case blocked of Nothing->True; _->False)
-      next<-tickSidebar host reshown
+      next<-tickSidebar host applyEffects reshown
       resumed<-timeout 1000000 (wait writer)
       check "bounded owner drain releases publication producer" (case resumed of Just ()->True; _->False)
       pure next
