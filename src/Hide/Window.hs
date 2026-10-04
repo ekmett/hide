@@ -43,7 +43,7 @@ import System.Environment (lookupEnv)
 import System.Directory (getCurrentDirectory)
 import System.Info (os)
 import System.IO (hPutStrLn, stderr)
-import Hide.Unicode (graphemes, clusterWidth)
+import Hide.Unicode (graphemes, clusterWidth, displayClusters)
 import Hide.TextStyle
 import Hide.Font
 import Hide.Render
@@ -199,16 +199,15 @@ draw font d = do
   where
     go _ _ [] = pure ()
     go y x (op:ops) = case op of
-      TextSpan {textSpanAttr=a,textSpanText=t} -> do
-        end <- chars y x a (graphemes (TL.toStrict t))
+      TextSpan a advance _ t -> do
+        end <- chars y x a (displayClusters advance (TL.toStrict t))
         go y end ops
       Skip n -> go y (x+n) ops
       RowEnd _ -> pure ()
     chars _ x _ [] = pure x
-    chars y x a (cluster:rest) = do
-      let width=clusterWidth cluster
-          paint=textStyleFromAttr a
-          fg=fromIntegral (textForeground paint); bg=fromIntegral (textBackground paint); flags=fromIntegral (textFlags paint)
+    chars y x a ((cluster,width):rest) = do
+      let paint=textStyleFromAttr a
+          fg=fromIntegral (textForeground paint); bg=fromIntegral (textBackground paint); flags=fromIntegral (textFlags paint+if width/=clusterWidth cluster then 4 else 0)
       case T.unpack cluster of
         [ch] | bitmapGlyph font ch -> do
           let Glyph gw bitmap=glyph font ch

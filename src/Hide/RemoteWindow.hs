@@ -131,8 +131,11 @@ parseRemoteFrame metadata rows = parseEither (withObject "frame metadata" $ \o -
       unless (T.length text<=512 && T.all (\c -> c>=' ' && c/='\DEL' && clusterWidth (T.singleton c)==1) text) (fail "Invalid character run")
       pure [(T.singleton c,1) | c<-T.unpack text]
     parseRun value = do
-      (text,w) <- parseJSON value :: Parser (T.Text,Int)
-      unless (not (T.null text) && T.length text<=4096 && not (T.any (\c -> c<' ' || c=='\DEL') text) && graphemes text==[text] && w>=0 && w<=2 && clusterWidth text==w) (fail "Invalid grapheme")
+      (text,w,stretched) <- case value of
+        Array fields | length fields==3 -> parseJSON value :: Parser (T.Text,Int,Bool)
+        _ -> (\(text,w)->(text,w,False)) <$> (parseJSON value :: Parser (T.Text,Int))
+      unless (not (T.null text) && T.length text<=4096 && not (T.any (\c -> c<' ' || c=='\DEL') text) && graphemes text==[text] && w>=0 && w<=2 &&
+        (if stretched then w==2 && clusterWidth text==1 else clusterWidth text==w)) (fail "Invalid grapheme")
       pure [(text,w)]
 
 modifierNames :: Int -> [T.Text]
@@ -313,8 +316,8 @@ drawRemote font atlas frame = do
           Just tile -> Just tile
           Nothing -> case T.unpack text of [c] | bitmapGlyph font c -> Just (glyph font c); _ -> Nothing
     case bitmap of
-      Just (Glyph width bits) -> withArray bits $ \p -> c_glyph (fromIntegral x) (fromIntegral y) (fromIntegral w) (fromIntegral width) p (fromIntegral (textForeground paint)) (fromIntegral (textBackground paint)) (fromIntegral (textFlags paint))
-      Nothing -> utf8 text $ \p -> check "Draw remote Unicode" (c_unicode (fromIntegral x) (fromIntegral y) (fromIntegral w) p (fromIntegral (textForeground paint)) (fromIntegral (textBackground paint)) (fromIntegral (textFlags paint)))
+      Just (Glyph width bits) -> withArray bits $ \p -> c_glyph (fromIntegral x) (fromIntegral y) (fromIntegral w) (fromIntegral width) p (fromIntegral (textForeground paint)) (fromIntegral (textBackground paint)) (fromIntegral (textFlags paint+if w/=clusterWidth text then 4 else 0))
+      Nothing -> utf8 text $ \p -> check "Draw remote Unicode" (c_unicode (fromIntegral x) (fromIntegral y) (fromIntegral w) p (fromIntegral (textForeground paint)) (fromIntegral (textBackground paint)) (fromIntegral (textFlags paint+if w/=clusterWidth text then 4 else 0)))
   forM_ (remoteCursor frame) $ \(x,y) -> c_cursor (fromIntegral x) (fromIntegral y)
   check "Present remote frame" c_present
   where flag value = if value then 1 else 0

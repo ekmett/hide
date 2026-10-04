@@ -9,15 +9,15 @@ def cells(spans):
     result = {}
     for x, fg, bg, traits, runs in spans:
         for run in runs:
-            for text, width in ([(c, 1) for c in run] if isinstance(run, str) else [run]):
-                result[x] = (fg, bg, traits, text, width)
-                for i in range(1, width): result[x+i] = (fg, bg, traits, '', 0)
+            for text, width, stretched in ([(c, 1, False) for c in run] if isinstance(run, str) else [(*run, False)] if len(run)==2 else [run]):
+                result[x] = (fg, bg, traits, text, width, stretched)
+                for i in range(1, width): result[x+i] = (fg, bg, traits, '', 0, False)
                 x += width
     return result
 
 def pack(selected):
     spans = []
-    for x, (fg, bg, traits, text, width) in selected:
+    for x, (fg, bg, traits, text, width, stretched) in selected:
         if not width: continue
         if not spans or spans[-1][0] != x or spans[-1][1:4] != [fg, bg, traits]:
             spans.append([x, fg, bg, traits, [], x])
@@ -25,7 +25,7 @@ def pack(selected):
         if width == 1 and len(text) == 1:
             if span[4] and isinstance(span[4][-1], str): span[4][-1] += text
             else: span[4].append(text)
-        else: span[4].append([text, width])
+        else: span[4].append([text, width, True] if stretched else [text, width])
         span[0] += width
     return [[start, fg, bg, traits, runs] for _, fg, bg, traits, runs, start in spans]
 

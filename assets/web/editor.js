@@ -114,7 +114,8 @@ function tile(text,fg,pixelated,w,h,traits){
    t.width=pixelated?Math.max(8,Math.round(w/(8*scale*(devicePixelRatio||1)))*8):Math.max(1,Math.ceil(w));
    t.height=pixelated?16:Math.max(16,Math.ceil(h*16/cellHeight()));
    const c=t.getContext('2d');c.fillStyle=rgb(fg);c.textBaseline='alphabetic';c.font=`${traits&2?'italic ':''}${traits&1?'bold ':''}${t.height*0.85}px monospace`;
-   c.fillText(text,0,t.height*0.82,t.width);
+   if(traits&4)c.scale(2,1);
+   c.fillText(text,0,t.height*0.82,(traits&4)?t.width/2:t.width);
  }
  if(tiles.size>=1024)tiles.clear();tiles.set(key,t);return t;
 }
@@ -123,10 +124,10 @@ function drawRows(changed){
  for(const [y,spans] of changed){
    const y0=Math.round(y*ch), y1=Math.round((y+1)*ch);ctx.fillStyle='#0000aa';ctx.fillRect(0,y0,surface.width,y1-y0);
    for(const [start,fg,bg,traits,clusters] of spans||[]){let x=start;
-     for(const [text,width] of clusters){
+     for(const [text,width,stretched] of clusters){
        const x0=Math.round(x*cw),x1=Math.round((x+width)*cw);
        ctx.fillStyle=rgb(bg);ctx.fillRect(x0,y0,x1-x0,y1-y0);
-       if(width>0&&text!==' ')ctx.drawImage(tile(text,fg,frame.pixelated,x1-x0,y1-y0,traits),x0,y0,x1-x0,y1-y0);
+       if(width>0&&text!==' ')ctx.drawImage(tile(text,fg,frame.pixelated,x1-x0,y1-y0,traits+(stretched?4:0)),x0,y0,x1-x0,y1-y0);
        x+=width;
      }
    }

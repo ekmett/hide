@@ -5,11 +5,10 @@
 -- Unicode characters while display widths follow graphemes and editor overrides.
 -- Partially clipped/covered wide clusters become blanks. Terminal output advances
 -- explicitly past two-cell clusters even when the user's font draws them narrowly.
-module Hide.Unicode (graphemes, clusterWidth, textImage, flattenPicture, displayOpsForPic, updatePicture, terminalText, textInputChar) where
+module Hide.Unicode (graphemes, clusterWidth, textImage, wideTextImage, displayClusters, terminalSpan, flattenPicture, displayOpsForPic, updatePicture, terminalText, textInputChar) where
 
 import Control.Monad (forM_, when)
 import Data.Char (isPrint)
-import Data.List (groupBy)
 import Data.IORef (readIORef, writeIORef)
 import Blaze.ByteString.Builder (Write, writeToByteString)
 import Blaze.ByteString.Builder.ByteString (writeByteString)
@@ -61,6 +60,25 @@ textImage :: V.Attr -> T.Text -> V.Image
 textImage _ t | T.null t = V.emptyImage
 textImage a t = I.HorizText a (TL.fromStrict t) (sum (map clusterWidth (graphemes t))) (T.length t)
 
+-- | Render each semantic grapheme in exactly two cells. Naturally wide text
+-- remains two cells. The original text remains in HorizText, whose explicit
+-- advance survives the compositor; no Unicode substitution or attribute marker.
+wideTextImage :: V.Attr -> T.Text -> V.Image
+wideTextImage a=unmergedImages . map (\g->I.HorizText a (TL.fromStrict g) 2 (T.length g)) . graphemes
+
+-- Vty merges adjacent HorizText values by attribute. That optimization assumes
+-- natural advances, so an explicit-width primitive retains a join boundary.
+unmergedImages :: [V.Image] -> V.Image
+unmergedImages=foldr (\image rest->I.HorizJoin image rest
+  (V.imageWidth image+V.imageWidth rest) (max (V.imageHeight image) (V.imageHeight rest))) V.emptyImage
+
+-- | Read a text primitive's explicit advance. A deliberately widened primitive
+-- contains one grapheme; ordinary runs retain natural widths.
+displayClusters :: Int -> T.Text -> [(T.Text,Int)]
+displayClusters width text=case graphemes text of
+  [g] | width==2 -> [(g,2)]
+  gs -> [(g,clusterWidth g) | g<-gs]
+
 -- Vty's layout is useful, but its clipping splits individual code points.
 -- Compose its image tree on a cell grid first, so partial clusters become
 -- blanks, including when another window covers one half of a wide glyph.
@@ -86,10 +104,10 @@ pictureRows (w,h) picture = images
             MV.write grid (y*w+x) (Cell a t n)
             forM_ [1..n-1] $ \i -> MV.write grid (y*w+x+i) (Tail a i)
           draw (l,top,r,b) x y img = case img of
-            I.HorizText a text _ _ | y>=top && y<b -> do
-              let chunks=graphemes (TL.toStrict text)
-              forM_ (zip (scanl (+) x (map clusterWidth chunks)) chunks) $ \(cx,t) -> do
-                let n=clusterWidth t; lo=max l cx; hi=min r (cx+n)
+            I.HorizText a text advance _ | y>=top && y<b -> do
+              let chunks=displayClusters advance (TL.toStrict text)
+              forM_ (zip (scanl (+) x (map snd chunks)) chunks) $ \(cx,(t,n)) -> do
+                let lo=max l cx; hi=min r (cx+n)
                 when (lo<hi) $ if cx>=l && cx+n<=r then put cx y a t n
                   else forM_ [lo..hi-1] $ \i -> put i y a " " 1
             I.HorizJoin left right _ _ -> draw (l,top,r,b) x y left >> draw (l,top,r,b) (x+V.imageWidth left) y right
@@ -100,7 +118,13 @@ pictureRows (w,h) picture = images
             _ -> pure () -- BGFill is transparent to lower layers.
       mapM_ (draw (0,0,w,h) 0 0) (reverse (V.picLayers picture))
       Vec.freeze grid
-    images=[V.horizCat [textImage a (T.concat (map snd group)) | group@((a,_):_)<-groupBy (\a b -> fst a==fst b) [(a,t) | Cell a t _<-Vec.toList (Vec.slice (y*w) w cells)]] | y<-[0..h-1]]
+    images=[V.horizCat (runs [(a,t,n) | Cell a t n<-Vec.toList (Vec.slice (y*w) w cells)]) | y<-[0..h-1]]
+    runs []=[]
+    runs ((a,t,n):rest)
+      | n/=clusterWidth t = unmergedImages [I.HorizText a (TL.fromStrict t) n (T.length t)]:runs rest
+      | otherwise = let (same,after)=span (\(b,g,advance)->a==b && advance==clusterWidth g) rest
+                        text=T.concat (t:[g | (_,g,_)<-same])
+                    in textImage a text:runs after
 
 -- | Produce spans with explicit cluster widths instead of Vty code-point remeasurement.
 displayOpsForPic :: V.Picture -> (Int,Int) -> DisplayOps
@@ -123,10 +147,10 @@ updatePicture vty picture = do
       changed y row=case prevOutputOps previous of
         Just old | Vec.length old==Vec.length ops -> old Vec.! y/=row
         _ -> True
-      emit y (prefix,old,x) (TextSpan a _ _ t) =
+      emit y (prefix,old,x) (TextSpan a advance _ t) =
         let limited=limitAttrForDisplay output a
             fixed=fixDisplayAttr old limited
-            (text,end)=terminalText (\col -> writeMoveCursor dc (min (w-1) col) y) x (TL.toStrict t)
+            (text,end)=terminalSpan (\col -> writeMoveCursor dc (min (w-1) col) y) x advance (TL.toStrict t)
         in (prefix <> writeSetAttr dc urls old limited (displayAttrDiffs old fixed) <> text,fixed,end)
       emit _ state _=state
       rowBytes y row=let (text,_,_)=foldl' (emit y) (mempty,initial,0) (Vec.toList row)
@@ -153,3 +177,15 @@ terminalText move start text = foldl' emit (mempty,start) (graphemes text)
           raw=writeByteString (TE.encodeUtf8 g)
           drawn=if n==2 then writeByteString "  " <> move x <> raw <> move (x+2) else raw
       in (bytes<>drawn,x+n)
+
+-- | Project explicit advances only at terminal output. Fullwidth ASCII and
+-- ideographic spaces preserve two-cell geometry; other narrow graphemes use
+-- their original text plus a padding cell. Semantic text remains unchanged.
+terminalSpan :: (Int -> Write) -> Int -> Int -> T.Text -> (Write,Int)
+terminalSpan move start advance text=case displayClusters advance text of
+  [(g,2)] | clusterWidth g<2 -> terminalText move start (fullwidth g)
+  _->terminalText move start text
+  where
+    fullwidth g | Just (base,rest)<-T.uncons g,base==' ' = "\x3000"<>rest
+                | Just (base,rest)<-T.uncons g,base>='!' && base<='~' = T.cons (toEnum (fromEnum base+0xfee0)) rest
+                | otherwise=g<>" "

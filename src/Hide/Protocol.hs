@@ -36,7 +36,7 @@ import Hide.Font
 import Hide.Render (renderDesktop)
 import qualified Hide.Plugin.Menu as Plugin
 import Hide.Commands (commandIdentifier)
-import Hide.Unicode (displayOpsForPic, graphemes, clusterWidth)
+import Hide.Unicode (displayOpsForPic, graphemes, clusterWidth, displayClusters)
 
 data WebInput = Key T.Text [V.Modifier] | Paste T.Text | Mouse T.Text Int Int Int Int [V.Modifier]
               | Wheel Int Int Int [V.Modifier] | SystemTheme Bool | FocusWindow Int | BrowserCommand Command | MenuCommand Command | ContributedMenu T.Text T.Text Integer | UploadFile T.Text BS.ByteString | Frontend (Maybe Int) Bool | OpenPath FilePath | Resize Int Int | SuspendSession | Blur | Modifiers [V.Modifier] deriving (Eq,Show)
@@ -193,9 +193,9 @@ frameRows d = map (toJSON . spans 0 . toList) (toList (displayOpsForPic (renderD
   where
     spans _ [] = []
     spans x (op:rest) = case op of
-      TextSpan{textSpanAttr=a,textSpanText=t} ->
+      TextSpan a advance _ t ->
         let paint=textStyleFromAttr a
-            clusters=[(cluster,clusterWidth cluster) | cluster<-graphemes (TL.toStrict t)]
+            clusters=displayClusters advance (TL.toStrict t)
         in toJSON (x,textForeground paint,textBackground paint,textFlags paint,packClusters clusters):spans (x+sum (map snd clusters)) rest
       Skip n -> toJSON (x,0xffffff::Int,0x0000aa::Int,0::Int,[String (T.replicate n " ")]):spans (x+n) rest
       RowEnd n -> toJSON (x,0xffffff::Int,0x0000aa::Int,0::Int,[String (T.replicate n " ")]):spans (x+n) rest
@@ -204,7 +204,7 @@ frameRows d = map (toJSON . spans 0 . toList) (toList (displayOpsForPic (renderD
     pack []=[]
     pack xs@(first:_)
       | ordinary first = [String (T.concat (map fst xs))]
-      | otherwise = map toJSON xs
+      | otherwise = [if w/=clusterWidth text then toJSON (text,w,True) else toJSON (text,w) | (text,w)<-xs]
 
 -- Both encodings use the reconstructed previous screen, never the previous
 -- packet, as their dictionary. Screen rows contain only arrays, bounded integer

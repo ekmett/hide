@@ -189,7 +189,7 @@ void thc_glyph(int x, int y, int cells, int glyph_width, const uint16_t *bits, u
     int y0=cell_y(y), y1=cell_y(y+1);
     for (int py=y0;py<y1;++py) for (int px=SDL_max(0,x0);px<SDL_min(frame_w,x1);++px) {
         int dx=(int)((px-x0)/scale), dy=(py-y0)*16/SDL_max(1,y1-y0);
-        int source=dx-((traits&2)?(15-dy)/4:0);
+        int source=((traits&4)?dx/2:dx)-((traits&2)?(15-dy)/4:0);
         bool ink=source>=0 && source<glyph_width && source<16 && (bits[dy] & (0x8000u>>source));
         if ((traits&1) && source>0 && source<=glyph_width && source<=16)
             ink=ink || (bits[dy] & (0x8000u>>(source-1)));

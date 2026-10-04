@@ -18,7 +18,7 @@ import Hide.Links (openResource)
 import Hide.Remote (RemotePeer)
 import Hide.TextStyle
 import Hide.RemoteWindow (RemoteFrame(..), RemoteCell(..), remoteBindingInput)
-import Hide.Unicode (textImage)
+import Hide.Unicode (textImage,wideTextImage,clusterWidth)
 #ifdef WITH_REMOTE
 import Control.Concurrent.Async (withAsync, poll)
 import Control.Concurrent.STM
@@ -73,7 +73,7 @@ remoteTerminalPicture frame = (V.picForImage (V.vertCat [row (IM.findWithDefault
     row = V.horizCat . spans 0 . reverse
     spaces n=V.charFill V.defAttr ' ' n 1
     spans at []=[spaces (width-at)]
-    spans at (RemoteCell x _ paint text w:rest)=spaces (x-at):textImage (textStyleAttr paint) text:spans (x+w) rest
+    spans at (RemoteCell x _ paint text w:rest)=spaces (x-at):(if w/=clusterWidth text then wideTextImage else textImage) (textStyleAttr paint) text:spans (x+w) rest
 
 -- | Construct a base64 OSC 52 clipboard-write sequence; no clipboard read is performed.
 terminalClipboard :: T.Text -> BS.ByteString

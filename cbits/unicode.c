@@ -41,10 +41,11 @@ int thc_unicode_bitmap(const char *utf8, int w, int h, uint32_t fg, uint32_t tra
     CGContextRef ctx = CGBitmapContextCreate(pixels, w, h, 8, w*4, space, kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Host);
     if (ctx) {
         CGRect ink = CTLineGetBoundsWithOptions(line, kCTLineBoundsUseGlyphPathBounds);
-        CGFloat sx = ink.size.width > w ? w / ink.size.width : 1;
+        CGFloat logical_w=(traits&4)?w/2.0:w;
+        CGFloat sx = ink.size.width > logical_w ? logical_w / ink.size.width : 1;
         CGFloat sy = ink.size.height > h ? h / ink.size.height : 1;
-        CGContextScaleCTM(ctx, sx, sy);
-        CGContextSetTextPosition(ctx, (w/sx-ink.size.width)/2-ink.origin.x, (h/sy-ink.size.height)/2-ink.origin.y);
+        CGContextScaleCTM(ctx, sx*((traits&4)?2:1), sy);
+        CGContextSetTextPosition(ctx, (logical_w/sx-ink.size.width)/2-ink.origin.x, (h/sy-ink.size.height)/2-ink.origin.y);
         CTLineDraw(line, ctx);
         CGContextRelease(ctx);
     }
@@ -71,10 +72,11 @@ int thc_unicode_bitmap(const char *utf8, int w, int h, uint32_t fg, uint32_t tra
     pango_layout_set_text(layout, utf8, -1);
     PangoRectangle ink;
     pango_layout_get_pixel_extents(layout, &ink, NULL);
-    double sx = ink.width > w ? (double)w/ink.width : 1;
+    double logical_w=(traits&4)?w/2.0:w;
+    double sx = ink.width > logical_w ? logical_w/ink.width : 1;
     double sy = ink.height > h ? (double)h/ink.height : 1;
-    cairo_scale(cr, sx, sy);
-    cairo_move_to(cr, (w/sx-ink.width)/2-ink.x, (h/sy-ink.height)/2-ink.y);
+    cairo_scale(cr, sx*((traits&4)?2:1), sy);
+    cairo_move_to(cr, (logical_w/sx-ink.width)/2-ink.x, (h/sy-ink.height)/2-ink.y);
     cairo_set_source_rgb(cr, ((fg>>16)&255)/255.0, ((fg>>8)&255)/255.0, (fg&255)/255.0);
     pango_cairo_show_layout(cr, layout);
     cairo_surface_flush(surface);

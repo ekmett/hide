@@ -178,6 +178,24 @@ static void check_font_traits(SDL_Renderer *renderer) {
         assert(hashes[0]==hashes[4]); /* Cache returns the original regular glyph. */
     }
     thc_pixelate_unicode(0);
+    assert(thc_begin());
+    thc_glyph(1,1,2,8,glyph,0xffffff,0,4); /* Narrow bitmap stretched into two cells. */
+    assert(thc_unicode(4,1,2,"f",0xffffff,0,4));
+    assert(thc_present());
+    SDL_Surface *wide=SDL_RenderReadPixels(renderer,NULL);
+    assert(wide);
+    int columns,rows; thc_size(&columns,&rows);
+    int top=wide->h/rows;
+    unsigned left=0,right=0;
+    for (int y=top;y<2*top;++y) for (int x=0;x<32;++x) {
+        Uint8 r,g,b,a; assert(SDL_ReadSurfacePixel(wide,16+x,y,&r,&g,&b,&a));
+        if (r) { if(x<16)++left;else ++right; }
+    }
+    assert(left>0 && right==0); /* This thin bitmap's stroke doubles horizontally. */
+    Uint8 r,g,b,a;
+    assert(SDL_ReadSurfacePixel(wide,16+12,top,&r,&g,&b,&a) && r==255);
+    assert(SDL_ReadSurfacePixel(wide,16+6,top,&r,&g,&b,&a) && r==0);
+    SDL_DestroySurface(wide);
 }
 
 static void check_geometry(int lines, int cell_height) {
