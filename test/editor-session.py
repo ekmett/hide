@@ -205,12 +205,50 @@ with tempfile.TemporaryDirectory(prefix='hide-session-') as directory:
             os.close(master)
             os.close(slave)
 
+    def platform_keys(ws, display):
+        serial = 100
+        def send(**fields):
+            nonlocal serial
+            serial += 1
+            event(ws, display, serial, **fields)
+        send(type='frontend', mode=3, mac=True)
+        send(type='command', command='hide.edit.select-all')
+        serial += 1
+        ws.send(dict(seq=serial, type='key', key='j', mods=['cmd','shift']))
+        copied = display.until('copy')
+        assert copied['text'] == 'persistent unsaved λ', copied
+        display.until('ack', lambda value: value['seq'] == serial)
+        # A removed paste accelerator must preserve the selected text.
+        send(type='key', key='v', mods=['cmd'])
+        expect_text(display, 'persistent unsaved λ')
+        serial += 1
+        ws.send(dict(seq=serial, type='key', key='k', mods=['cmd','shift']))
+        display.until('paste-request')
+        display.until('ack', lambda value: value['seq'] == serial)
+        send(type='paste', text='clipboard replacement')
+        expect_text(display, 'clipboard replacement')
+        send(type='command', command='hide.edit.undo')
+        expect_text(display, 'persistent unsaved λ')
+        config = root/'thc.toml'
+        config.write_text('[editor.keybindings.macos.source]\n"hide.edit.copy" = ["Cmd+Shift+J"]\n"hide.edit.paste" = ["Cmd+Shift+L"]\n')
+        send(type='menu', command='hide.bindings.reload')
+        if ('Cmd+Shift+L','hide.edit.paste') not in map(tuple,display.meta.get('bindings', [])):
+            display.until('frame', lambda value: ['Cmd+Shift+L','hide.edit.paste'] in value.get('bindings', []))
+        serial += 1
+        ws.send(dict(seq=serial, type='key', key='l', mods=['cmd','shift']))
+        display.until('paste-request')
+        display.until('ack', lambda value: value['seq'] == serial)
+        send(type='frontend', mode=3, mac=False)
+        print('Live macOS-profile clipboard remaps, removed accelerator, and worker reload across browser transport passed')
+
     try:
+        (root/'thc.toml').write_text('[editor.keybindings.macos.source]\n"hide.edit.copy" = ["Cmd+Shift+J"]\n"hide.edit.paste" = ["Cmd+Shift+K"]\n')
         process, ws, display = web([str(source)])
         event(ws, display, 1, type='command', command='hide.edit.select-all')
         event(ws, display, 2, type='paste', text='persistent unsaved λ')
         expect_text(display, 'persistent unsaved λ')
         assert source.read_text() == 'original\n', 'Unsaved edit reached disk'
+        platform_keys(ws, display)
         inspect_live_editor(ws, display)
         first_id = detach(process, ws, signal.SIGINT)
         assert (catalog / (first_id + '.json')).exists()

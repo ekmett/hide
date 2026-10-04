@@ -2139,7 +2139,7 @@ bindingContext d
   | activeTerminal d/=Nothing = Just Bindings.TerminalKeys
   | Just label<-activeDocument d >>= documentLabel,
     "Debugger " `T.isPrefixOf` label || "Source " `T.isPrefixOf` label = Just Bindings.DebuggerKeys
-  | (not (wordStar d) || bindingPlatform d/=Bindings.TerminalPlatform), Just doc<-activeDocument d, documentLabel doc==Nothing = Just Bindings.SourceKeys
+  | (not (wordStar d) || bindingPlatform d/=Bindings.TerminalPlatform), Just _<-activeDocument d = Just Bindings.SourceKeys
   | Nothing<-activeDocument d = Just Bindings.SourceKeys
   | otherwise = Nothing
 
@@ -2148,7 +2148,7 @@ effectiveBindings d = bindingContext d >>= \context->M.lookup (bindingPlatform d
 
 terminalContextReserved :: Desktop -> V.Key -> [V.Modifier] -> Bool
 terminalContextReserved d key mods = terminalSourceReserved key mods ||
-  (wordStar d && V.MCtrl `elem` mods && V.MMeta `notElem` mods) ||
+  (wordStar d && bindingContext d==Just Bindings.SourceKeys && V.MCtrl `elem` mods && V.MMeta `notElem` mods) ||
   (bindingContext d==Just Bindings.ConversationKeys && key==V.KEnter)
 
 bindingInputAvailable :: Desktop -> Bool
@@ -2184,8 +2184,8 @@ keyEvent :: V.Key -> [V.Modifier] -> Desktop -> (Desktop,[Effect])
 keyEvent key mods d
   | key==V.KEsc = (d {prefix=Nothing},[])
   | Just p <- prefix d, V.KChar c <- key = starPrefix p (toLower c) d {prefix=Nothing}
-  | V.MAlt `elem` mods, V.KChar c <- key, Just i <- findIndex (\(_,mn,_) -> mn==toLower c) menus = (d {menu=Just (i,0)},[])
-  | V.MAlt `elem` mods, key==V.KChar 'x' = runCommand Quit d
+  | V.MAlt `elem` mods, V.MMeta `notElem` mods, V.KChar c <- key, Just i <- findIndex (\(_,mn,_) -> mn==toLower c) menus = (d {menu=Just (i,0)},[])
+  | V.MAlt `elem` mods, V.MMeta `notElem` mods, key==V.KChar 'x' = runCommand Quit d
   | V.MAlt `elem` mods, key==V.KFun 3 = runCommand Close d
   | key==V.KFun 1, V.MShift `elem` mods = runCommand InspectType d
   | key==V.KFun 12 = runCommand Definition d
@@ -2304,6 +2304,8 @@ comboBoxEvent ev dg d i name choices chosen preview = case ev of
     advance delta=let (next,effects)=finish preview in (next {dialog=fmap (\value->value {focus=(i+delta) `mod` (length (fields dg)+length (buttons dg))}) (dialog next)},effects)
 
 dialogEvent :: V.Event -> Dialog -> Desktop -> (Desktop,[Effect])
+dialogEvent (V.EvKey key mods) dg d
+  | nativeMac d, V.MMeta `elem` mods = Bifunctor.first (\next->next {nativeMac=True}) (dialogEvent (V.EvKey key (V.MCtrl:filter (/=V.MMeta) mods)) dg d {nativeMac=False})
 dialogEvent ev dg d
   | Just (i,name,choices,chosen,preview)<-openComboBox dg = comboBoxEvent ev dg d i name choices chosen preview
   | otherwise = case ev of

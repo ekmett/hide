@@ -55,6 +55,13 @@ checks = do
   check "named menu ignores a stale positional index" (menu ["command" .= ("hide.file.new"::T.Text),"index" .= (999::Int)]==Right (MenuCommand New))
   check "unknown named menu is rejected" (either (const True) (const False) (menu ["command" .= ("future-command"::T.Text)]))
   check "menu input requires a command identity" (either (const True) (const False) (menu ["index" .= (0::Int)]))
+  let platformMaps=either (error . show) id (Commands.configuredBindings (M.singleton "macos" (M.singleton "source" (M.fromList [("hide.edit.copy",["Cmd+Shift+J"]),("hide.edit.paste",["Cmd+Shift+K"])]))))
+      browser=modifyActive (\w->w {selection=Selection 0 5}) (addDocument Nothing (newBuffer "hello") d) {browserFrontend=True,nativeMac=True,videoMode=Just 3,keyBindings=platformMaps}
+      parsedKey=parseEither parseInput (object ["type" .= ("key"::T.Text),"key" .= ("j"::T.Text),"mods" .= (["cmd","shift"]::[T.Text])])
+  check "Command wire input resolves effective clipboard copy" (case parsedKey of Right input->snd (applyInput input browser)==[WriteBrowserClipboard "hello"]; _->False)
+  check "Command clipboard remap requests platform paste and disables the old shortcut" (snd (applyInput (Key "k" [V.MMeta,V.MShift]) browser)==[ReadBrowserClipboard] && null (snd (applyInput (Key "v" [V.MMeta]) browser)))
+  let projected=parseMaybe (withObject "metadata" (.: "bindings")) (object (frameMetadata "/" browser))::Maybe [(T.Text,T.Text)]
+  check "focused frame advertises effective clipboard chords only" (maybe False (\entries->lookup "Cmd+Shift+J" entries==Just "hide.edit.copy" && lookup "Cmd+C" entries==Nothing) projected)
   let bindings=either (error . show) id (Commands.platformBindings Bindings.TerminalPlatform (M.singleton "source" (M.singleton "hide.file.save" ["Ctrl+Shift+S"])))
       daemon=(addDocument (Just (FileState "/project/Main.hs" Nothing)) (newBuffer "hello") d) {browserFrontend=True,videoMode=Just 3,keyBindings=bindings}
       terminal=fst (applyInput (Frontend Nothing False) daemon)
@@ -85,7 +92,7 @@ checks = do
         [] -> error "binding command missing from Options menu"
       enter command=snd (handleEvent (V.EvKey V.KEnter []) (optionsMenu command))
   check "empty desktop Options menu actually requests binding reload" (enter ReloadBindings==[ReloadKeyBindings (startingDirectory unavailable)])
-  check "empty desktop Options menu actually requests effective binding inspection" (enter InspectBindings==[InspectKeyBindings Nothing Nothing])
+  check "empty desktop Options menu actually requests effective binding inspection" (enter InspectBindings==[InspectKeyBindings (Just (Bindings.TerminalPlatform,Bindings.SourceKeys)) Nothing])
   check "empty desktop native/browser named menu route admits binding tasks" (snd (applyInput (MenuCommand ReloadBindings) unavailable)==enter ReloadBindings && snd (applyInput (MenuCommand InspectBindings) unavailable)==enter InspectBindings)
   forM_ [ReloadBindings,InspectBindings] $ \command -> do
     let native=do

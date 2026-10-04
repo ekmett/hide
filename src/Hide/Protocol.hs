@@ -33,6 +33,7 @@ import qualified Hide.Model as Model
 import Hide.Buffer (dirty, newBuffer, newByteBuffer, selectedText)
 import Hide.Font
 import Hide.Render (renderDesktop)
+import qualified Hide.Bindings as Bindings
 import Hide.Commands (commandIdentifier)
 import Hide.Unicode (displayOpsForPic, graphemes, clusterWidth)
 
@@ -46,7 +47,7 @@ parseInput = withObject "browser event" $ \o -> do
   kind <- o .: "type" :: Parser T.Text
   let mods = do
         values <- o .:? "mods" .!= [] :: Parser [T.Text]
-        traverse (\v -> case v of "shift" -> pure V.MShift; "ctrl" -> pure V.MCtrl; "alt" -> pure V.MAlt; _ -> fail "Unknown modifier") values
+        traverse (\v -> case v of "shift" -> pure V.MShift; "ctrl" -> pure V.MCtrl; "alt" -> pure V.MAlt; "cmd" -> pure V.MMeta; _ -> fail "Unknown modifier") values
   case kind of
     "menu" -> do
       name <- o .: "command"
@@ -248,6 +249,8 @@ frameMetadata cwd d =
      _ -> if dialog d/=Nothing then "" else clipboard (fst (runCommand Copy d {browserFrontend=False}))),
    "terminal" .= (activeTerminal d/=Nothing && dialog d==Nothing && menu d==Nothing),
    "wordstar" .= wordStar d,
+   "bindingsActive" .= (bindingInputAvailable d && maybe False (const True) (effectiveBindings d)),
+   "bindings" .= (if bindingInputAvailable d then maybe [] Bindings.bindingChords (effectiveBindings d) else []),
    "menuState" .= [(ident,menuCommandAvailable d cmd) | (ident,cmd)<-protocolMenuCommands]]
   where cursor=case V.picCursor (renderDesktop d) of V.Cursor x y -> Just (x,y); _ -> Nothing
 

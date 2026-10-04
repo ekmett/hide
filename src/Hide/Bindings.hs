@@ -45,7 +45,7 @@ compileBindings defaults overrides = do
     (Left ("Unknown keybinding command: "<>T.intercalate ", " [name | name<-M.keys overrides,name `notElem` map (\(entry,_,_)->entry) defaults]))
   entries <- traverse prepare defaults
   index <- foldM insert M.empty [(key,(name,action)) | (name,action,keys)<-entries,key<-keys]
-  pure (Bindings (fmap snd index) entries [(key,name) | (key,(name,_))<-M.toList index])
+  pure (Bindings (fmap snd index) entries [(key,name) | (name,_,keys)<-entries,key<-keys])
   where
     prepare (name,action,keys)=do
       parsed<-traverse parseChord (M.findWithDefault keys name overrides)

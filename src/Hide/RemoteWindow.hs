@@ -7,10 +7,11 @@
 -- repaint rules, so drag/wheel rendering can await the resulting remote frame.
 module Hide.RemoteWindow
   (runRemoteWindow, RemoteFrame(..), RemoteCell(..), parseRemoteFrame
-  , nativeKeyInput, nativeEventInput, remoteMenuInput, pasteShortcut, sanitizeDownloadName
+  , nativeKeyInput, nativeEventInput, remoteMenuInput, sanitizeDownloadName
   , remoteInputAllowed, remoteCloseDetaches, remoteDetachShortcut, nativeRepaint) where
 import Control.Monad (unless)
 import Hide.Commands (commandIdentifier)
+import Hide.Bindings (readChord, chordName)
 import Data.Aeson hiding (withArray)
 import qualified Data.Aeson.KeyMap as KM
 import Data.Aeson.Types (Parser, parseEither)
@@ -55,6 +56,7 @@ data RemoteFrame = RemoteFrame
   { remoteSize :: (Int,Int), remoteMode :: Maybe Int, remoteTitle :: T.Text
   , remoteCursor :: Maybe (Int,Int), remoteBlink :: Bool, remoteCRT :: Bool
   , remotePixelated :: Bool, remoteTerminal :: Bool, remoteWordStar :: Bool
+  , remoteBindings :: [(T.Text,T.Text)]
   , remoteMenus :: [Bool], remoteCells :: [RemoteCell]
   } deriving (Eq,Show)
 
@@ -75,13 +77,16 @@ parseRemoteFrame metadata rows = parseEither (withObject "frame metadata" $ \o -
   pixelated <- o .:? "pixelated" .!= False
   terminal <- o .:? "terminal" .!= False
   wordstar <- o .:? "wordstar" .!= False
+  bindings <- o .: "bindings"
+  unless (length bindings<=8192 && all validBinding bindings) (fail "Invalid binding projection")
   supported <- o .:? "menuCommands" .!= [] :: Parser [T.Text]
   states <- o .:? "menuState" .!= [] :: Parser [(T.Text,Bool)]
   unless (length supported<=256 && length states<=256 && all ((<=256).T.length) (supported++map fst states)) (fail "Invalid menu state")
   let enabled=[maybe False (\name -> name `elem` supported && lookup name states==Just True) (commandIdentifier cmd) | cmd<-menuActions]
   cells <- concat <$> sequence [parseRow cols y row | (y,row) <- zip [0..] rows]
-  pure (RemoteFrame size mode title cursor blink crt pixelated terminal wordstar enabled cells)) metadata
+  pure (RemoteFrame size mode title cursor blink crt pixelated terminal wordstar bindings enabled cells)) metadata
   where
+    validBinding (chord,name)=T.length name<=256 && case readChord chord of Right (key,mods)->chordName key mods==Just chord; _->False
     parseRow cols y value = do
       spans <- parseJSON value :: Parser [(Int,Int,Int,[Value])]
       unless (length spans<=cols+1) (fail "Too many spans")
@@ -104,7 +109,7 @@ parseRemoteFrame metadata rows = parseEither (withObject "frame metadata" $ \o -
       pure [(text,w)]
 
 modifierNames :: Int -> [T.Text]
-modifierNames mask = ["shift" | mask .&. 1/=0] ++ ["ctrl" | mask .&. 10/=0] ++ ["alt" | mask .&. 4/=0]
+modifierNames mask = ["shift" | mask .&. 1/=0] ++ ["ctrl" | mask .&. 2/=0] ++ ["alt" | mask .&. 4/=0] ++ ["cmd" | mask .&. 8/=0]
 nativeKeyInput :: Int -> Int -> Maybe Value
 nativeKeyInput key mask = do
   V.EvKey k decodedMods <- decodeKey key mask
@@ -115,10 +120,7 @@ nativeKeyInput key mask = do
     _ -> lookup k [(V.KUp,"ArrowUp"),(V.KDown,"ArrowDown"),(V.KLeft,"ArrowLeft"),(V.KRight,"ArrowRight"),
       (V.KHome,"Home"),(V.KEnd,"End"),(V.KPageUp,"PageUp"),(V.KPageDown,"PageDown"),
       (V.KBackTab,"Tab"),(V.KEnter,"Enter"),(V.KEsc,"Escape"),(V.KBS,"Backspace"),(V.KDel,"Delete"),(V.KIns,"Insert")]
-  pure (object ["type" .= ("key"::T.Text),"key" .= name,"mods" .= [label | (modifier,label)<-[(V.MShift,"shift"::T.Text),(V.MCtrl,"ctrl"),(V.MAlt,"alt")],modifier `elem` decodedMods]])
-pasteShortcut :: Bool -> Bool -> Int -> Int -> Bool
-pasteShortcut terminal wordstar key mask = key==fromEnum 'v' && mask .&. 10/=0
-  && (not wordstar || mask .&. 8/=0 || terminal && mask .&. 1/=0) && not (terminal && mask .&. 15==2)
+  pure (object ["type" .= ("key"::T.Text),"key" .= name,"mods" .= [label | (modifier,label)<-[(V.MShift,"shift"::T.Text),(V.MCtrl,"ctrl"),(V.MAlt,"alt"),(V.MMeta,"cmd")],modifier `elem` decodedMods]])
 nativeEventInput :: [Int] -> Maybe Value
 nativeEventInput event = case event of
   1:key:mods:_ | not (remoteDetachShortcut event) -> nativeKeyInput key mods
@@ -274,7 +276,6 @@ runRemoteWindow backend scale (cols,rows) mode host peer = do
         sendEvent [5,w,h]
       dispatch connected frame event = case event of
         1:key:mods:_ | not (maybe False remoteTerminal frame && mods .&. 15==2), Just direction <- zoomDirection key mods -> check "Change window scale" (c_scale (fromIntegral direction)) >> when connected resize
-                    | pasteShortcut (maybe False remoteTerminal frame) (maybe False remoteWordStar frame) key mods -> paste
         2:_ -> do
           bytes <- c_text >>= BS.packCString
           case TE.decodeUtf8' bytes of
@@ -329,7 +330,9 @@ runRemoteWindow backend scale (cols,rows) mode host peer = do
             check "Change remote screen mode" (c_mode (fromIntegral (modeHeight (maybe mode id (remoteMode value)))) (fromIntegral w) (fromIntegral h))
             resize
 #ifdef darwin_HOST_OS
-          forM_ (zip [0..] nativeCommands) $ \(i,_) ->
+          forM_ (zip [0..] nativeCommands) $ \(i,cmd) -> do
+            let (shortcut,modifiers)=nativeChordShortcut [chord | (chord,name)<-remoteBindings value,Just name==commandIdentifier cmd]
+            withCString shortcut $ \keyPtr->c_menu_shortcut (fromIntegral i) keyPtr (fromIntegral modifiers)
             c_menu_enabled (fromIntegral (i::Int)) (if maybe False id (atMay (remoteMenus value) i) then 1 else 0)
 #endif
           pure (Just value,atlas,connection,True,closed)

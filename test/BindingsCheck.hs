@@ -34,10 +34,14 @@ checks=do
       noEffects (_,effects)=null effects
       rejected= either (const True) (const False) . platformBindings TerminalPlatform . M.singleton "source" . M.fromList
   check "Command is distinct from Control" (readChord "Cmd+Alt+Shift+S"==Right (V.KChar 's',[V.MMeta,V.MAlt,V.MShift]) && chordName (V.KChar 's') [V.MMeta,V.MShift,V.MAlt]==Just "Cmd+Alt+Shift+S" && chordName (V.KChar 's') [V.MCtrl]/=chordName (V.KChar 's') [V.MMeta])
-  let platforms=either (error . show) id (configuredBindings (M.singleton "macos" (M.singleton "source" (M.singleton "hide.file.save" ["Cmd+Shift+S"]))))
+  let platforms=either (error . show) id (configuredBindings (M.singleton "macos" (M.singleton "source" (M.fromList [("hide.file.save",["Cmd+Shift+S"]),("hide.file.save-as",[])]))))
       mac=base {nativeMac=True,videoMode=Just 3,keyBindings=platforms}
   check "macOS remap owns Command without changing Control" (boundKeyCommand (V.KChar 's') [V.MMeta,V.MShift] mac==Just Save && boundKeyCommand (V.KChar 's') [V.MMeta] mac==Nothing && boundKeyCommand (V.KChar 's') [V.MCtrl] mac==Nothing && boundKeyCommand (V.KChar 's') [V.MCtrl] base {keyBindings=platforms}==Just Save)
   check "macOS composed Option characters cannot bind commands" (either (const True) (const False) (platformBindings MacPlatform (M.singleton "source" (M.singleton "hide.file.save" ["Alt+J"]))))
+  let replaceMaps=either (error . show) id (configuredBindings (M.singleton "macos" (M.singleton "source" (M.fromList [("hide.search.replace",["Cmd+Alt+F"]),("hide.edit.copy",[])]))))
+      replaceMac=mac {keyBindings=replaceMaps}
+  check "configured Command Option Replace dispatches through its owner" (maybe False (\dg->case purpose dg of Searching True _->True; _->False) (dialog (fst (key (V.KChar 'f') [V.MMeta,V.MAlt] replaceMac))))
+  check "unbound Command copy cannot fall through to a fixed shortcut" (clipboard (fst (key (V.KChar 'c') [V.MMeta] (modifyActive (\w->w {selection=Selection 0 5}) replaceMac)))=="")
   check "remapping replaces every old binding" (bindingAction sourceKeys (V.KFun 2) []==Nothing && bindingAction sourceKeys (V.KChar 's') [V.MCtrl]==Nothing)
   check "modifier order and letter case normalize" (bindingAction sourceKeys (V.KChar 'S') [V.MShift,V.MCtrl]==Just Save)
   check "empty binding lists remain unbound" (null (bindingKeys sourceKeys Open))
@@ -86,7 +90,7 @@ checks=do
   let debug=addReadOnly "Debugger output" "stopped" contextBase
   check "debugger override drives dispatch and menu labels" (snd (key (V.KChar 'd') [V.MCtrl,V.MShift] debug)==[DebugAction "continue" []] && noEffects (key (V.KFun 4) [] debug) && menuShortcut debug (MenuItem "Continue" "F4" (DebugCommand "continue"))=="Ctrl+Shift+D")
   let global=either (error . show) id (platformBindings TerminalPlatform (M.singleton "global" (M.singleton "hide.file.save" ["Ctrl+Shift+S","Alt+F11"])))
-  check "global control overrides apply outside PTYs" (all (\context->bindingAction (global M.! context) (V.KChar 's') [V.MCtrl,V.MShift]==Just Save) [SourceKeys,SidebarKeys,ConversationKeys,MessagesKeys,DebuggerKeys])
+  check "global control overrides apply outside PTYs" (all (\context->bindingAction (global M.! (TerminalPlatform,context)) (V.KChar 's') [V.MCtrl,V.MShift]==Just Save) [SourceKeys,SidebarKeys,ConversationKeys,MessagesKeys,DebuggerKeys])
   check "PTY inherits transferable global chords and omits process controls" (bindingKeys (global M.! (TerminalPlatform,TerminalKeys)) Save==["Alt+F11"] && snd (key (V.KChar 'c') [V.MCtrl] (pty {keyBindings=global}))==[AgentAction "terminal-input" ["test","\ETX"]])
   check "unknown contexts fail instead of disappearing" (either (const True) (const False) (platformBindings TerminalPlatform (M.singleton "sidebaar" M.empty)))
   let defaults=either (error . show) id (platformBindings TerminalPlatform M.empty)
