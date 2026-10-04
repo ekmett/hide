@@ -5,11 +5,15 @@
 -- spellings keep existing remote clients usable; never derive new public names
 -- from Show or parse arbitrary constructor expressions. This catalog is the first
 -- step toward registration, not a dynamic plugin registry or authority boundary.
-module Hide.Commands (BuiltinCommand(..), builtinCommands, commandIdentifier, commandAliases) where
+module Hide.Commands (BuiltinCommand(..), builtinCommands, commandIdentifier, commandAliases, terminalSourceBindings) where
 
 import Data.Text (Text)
+import Control.Monad (unless, forM_)
+import qualified Graphics.Vty as V
 import Data.List (find)
-import Hide.Model (Command(..))
+import qualified Data.Map.Strict as M
+import Hide.Bindings (Bindings, compileBindings, readChord)
+import Hide.Model (Command(..), terminalSourceReserved)
 import Hide.BufferView (BufferView(..))
 
 -- | One action and its fixed canonical/legacy wire identities.
@@ -119,3 +123,31 @@ builtinCommands =
   ,BuiltinCommand "hide.help.contents" "Help" (Help)
   ,BuiltinCommand "hide.help.about" "About" (About)
   ]
+
+-- | Prepare standard terminal source bindings. Actions with no default chord can
+-- still be bound by their canonical identifier. Other input contexts keep their
+-- own bindings until migrated; this table never owns terminal-process input.
+terminalSourceBindings :: M.Map Text [Text] -> Either Text (Bindings Command)
+terminalSourceBindings overrides=do
+  forM_ (concat (M.elems overrides)) $ \raw->do
+    (key,mods)<-readChord raw
+    unless (not (terminalSourceReserved key mods) && case key of V.KChar _->any (`elem` mods) [V.MCtrl,V.MAlt]; _->True)
+      (Left ("Reserved source key: "<>raw))
+  compileBindings [(builtinIdentifier entry,builtinAction entry,maybe [] id (lookup (builtinAction entry) defaults)) | entry<-builtinCommands] overrides
+  where
+    defaults=
+      [(New,["Ctrl+N"]),(Open,["F3","Ctrl+O"]),(Save,["F2","Ctrl+S"])
+      ,(Close,["Alt+F3"]),(Quit,["Alt+X","Ctrl+Q"])
+      ,(Undo,["Ctrl+Z"]),(Redo,["Ctrl+Shift+Z","Ctrl+Y"])
+      ,(Copy,["Ctrl+C","Ctrl+Insert"]),(Cut,["Ctrl+X","Shift+Delete"])
+      ,(Paste,["Ctrl+V","Shift+Insert"]),(SelectAll,["Ctrl+A"])
+      ,(Find,["Ctrl+F"]),(Replace,["Ctrl+H","Ctrl+R"])
+      ,(FindNext,["Ctrl+L"]),(FindPrevious,["Ctrl+Shift+L"]),(GoTo,["Ctrl+G"])
+      ,(Help,["F1"]),(InspectType,["Shift+F1"]),(Definition,["F12"])
+      ,(Complete,["Ctrl+Space"]),(Zoom,["F5"]),(NextWindow,["F6"])
+      ,(ToggleTree,["Ctrl+B"]),(Conversation,["Ctrl+Shift+C"]),(AgentNew,["Ctrl+Shift+N"])
+      ,(NextMessage,["Alt+F8"]),(PreviousMessage,["Alt+F7"])
+      ,(MakeTarget,["F9"]),(CompileTarget,["Alt+F9"]),(RunTarget,["Ctrl+F9"])
+      ,(DebugCommand "continue",["F4"]),(DebugCommand "stepIn",["F7"])
+      ,(DebugCommand "next",["F8"]),(DebugCommand "stepOut",["Ctrl+F7"])
+      ,(DebugCommand "breakpoint",["Ctrl+F8"])]

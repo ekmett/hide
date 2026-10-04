@@ -11,8 +11,11 @@ import System.Directory (getTemporaryDirectory, removeFile)
 import System.IO
 import qualified Hide.Commands as Commands
 import Data.List (nub)
+import qualified Data.Map.Strict as M
+import qualified Graphics.Vty as V
 import Hide.Protocol
 import Hide.Model
+import Hide.Files (FileState(..))
 import Hide.Buffer
 
 checks :: IO ()
@@ -52,6 +55,10 @@ checks = do
   check "unknown named menu is rejected" (either (const True) (const False) (menu ["command" .= ("future-command"::T.Text)]))
   check "legacy positional menus cannot execute a different command" (case menu ["index" .= (0::Int)] of Right input -> applyInput input d==(d,[]); _ -> False)
   check "legacy menu enabled flags stay disabled" (parseMaybe (withObject "metadata" (.: "menus")) (object (frameMetadata "/" d))==Just (replicate (length protocolCommands) False))
+  let bindings=either (error . show) id (Commands.terminalSourceBindings (M.singleton "hide.file.save" ["Ctrl+Shift+S"]))
+      daemon=(addDocument (Just (FileState "/project/Main.hs" Nothing)) (newBuffer "hello") d) {browserFrontend=True,videoMode=Just 3,sourceBindings=Just bindings}
+      terminal=fst (applyInput (Frontend Nothing False) daemon)
+  check "terminal attachment enables custom source keys without losing clipboard transport" (case snd (applyInput (Key "s" [V.MCtrl,V.MShift]) terminal) of [SaveDocument{}]->browserFrontend terminal; _->False)
   let review=d {dialog=Just (Dialog "Review" (PermissionDialog "approve:1") [TextArea "diff" True (newBuffer "private diff") (Selection 0 7) 0 0] 0 ["Allow once","Deny"] [])}
       selected=parseMaybe (withObject "metadata" (.: "selection")) (object (frameMetadata "/" review))::Maybe T.Text
       (copied,copyEffects)=applyInput (BrowserCommand Copy) review

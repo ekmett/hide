@@ -66,6 +66,39 @@ inherit; project `false` overrides global `true`. Project defaults apply at
 startup. The agent's `editor_settings.defaults` writer still edits the global
 file; it does not rewrite the project file.
 
+## Terminal source keybindings
+
+For the standard key profile in text terminals, replace a source command's
+shortcuts in the global configuration or a project's `thc.toml`:
+
+```toml
+[editor.keybindings.terminal.source]
+"hide.file.save" = ["Ctrl+Shift+S"]
+"hide.file.open" = []
+"hide.window.split-vertical" = ["Ctrl+Shift+V"]
+```
+
+This replaces both F2 and Ctrl+S for Save, removes the Open shortcuts, and adds
+a shortcut to split the active buffer. Menu and status labels show the effective
+source bindings. Commands remain available through their menus. A project entry
+replaces the global entry for that command; omitted commands retain their
+inherited shortcuts. Start a new session to load changes. Recovery reloads the
+configuration; attaching to an already running session retains its bindings.
+
+Use the canonical IDs in [the command catalog](../src/Hide/Commands.hs), with
+Ctrl, Alt and Shift modifiers and names such as F2, Insert, Delete, Left and
+PageDown. Unknown commands, malformed chords and conflicting bindings are
+reported at startup. To assign an occupied key, remove or replace its previous
+command's binding too. Ordinary text, menu mnemonics, window navigation,
+completion controls, Escape, F10 and Ctrl+] remain reserved.
+
+These settings apply to source buffers in terminal displays, including remote
+sessions. Put remote project settings on the remote host. PTY input, modal
+dialogs, chat and the WordStar profile retain their own controls. Native and
+browser shortcut remapping is the next stage of
+[configurable keybindings](https://github.com/ekmett/hide/issues/3); their menus
+and clipboard shortcuts still use the existing platform defaults.
+
 ## Environment
 
 **Options > Environment…** lists the running editor's environment. Select a

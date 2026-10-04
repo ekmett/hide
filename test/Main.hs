@@ -30,6 +30,7 @@ import qualified WorkspaceMCPCheck
 import qualified WorkspaceFilesMCPCheck
 import qualified TestsMCPCheck
 #endif
+import qualified BindingsCheck
 import qualified HintComposerCheck
 import qualified AutocompleteCheck
 import qualified InlineCheck
@@ -93,6 +94,7 @@ check name ok = unless ok (error name)
 
 main :: IO ()
 main = do
+  BindingsCheck.checks
   HintComposerCheck.checks
   AutocompleteCheck.checks
   InlineCheck.checks
