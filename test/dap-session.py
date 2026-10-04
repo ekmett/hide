@@ -148,10 +148,14 @@ for session in range(1, 3 if mode == 'reconnect' else 2):
                     event('invalidated', dict(areas=['variables']))
                 if mode == 'lazy' and thread_count == 4:
                     event('invalidated', dict(areas=['threads']))
-                reply(req, dict(threads=[dict(id=7, name='main λ')]))
+                reply(req, dict(threads=[dict(id=7, name='main λ'), dict(id=8, name='worker')] if mode == 'sidebar' else [dict(id=7, name='main λ')]))
             elif cmd == 'stackTrace':
                 rows = [dict(id=11, name='entry λ', line=2, column=1,
                              source=dict(name='Generated.hs', sourceReference=9))]
+                if mode == 'sidebar':
+                    rows = [dict(id=11 if args['threadId'] == 7 else 21, name='entry λ' if args['threadId'] == 7 else 'worker frame', line=2, column=1, source=dict(name='Generated.hs', sourceReference=9))]
+                    if args['threadId'] == 7:
+                        rows.append(dict(id=12, name='sibling frame', line=1, column=1, source=dict(name='Other.hs', sourceReference=10)))
                 if mode == 'frame':
                     rows.append(dict(id=12, name='other frame', line=1, column=1,
                                      source=dict(name='Other.hs', sourceReference=10)))
@@ -169,7 +173,16 @@ for session in range(1, 3 if mode == 'reconnect' else 2):
                                     mimeType='text/x-haskell'))
             elif cmd == 'scopes':
                 scope_count += 1
-                if mode == 'frame':
+                if mode == 'sidebar':
+                    fid = args['frameId']
+                    if fid == 11:
+                        pending_scopes = req
+                    else:
+                        reply(req, dict(scopes=[dict(name='Locals %d' % fid, variablesReference=200+fid, expensive=False)]))
+                        if pending_scopes:
+                            reply(pending_scopes, dict(scopes=[dict(name='Locals 11', variablesReference=211, expensive=False)]))
+                            pending_scopes = None
+                elif mode == 'frame':
                     assert args['frameId'] == 11
                     pending_scopes = req
                 else:
@@ -178,7 +191,9 @@ for session in range(1, 3 if mode == 'reconnect' else 2):
                                                 variablesReference=31 if changed else 21, expensive=False)]))
             elif cmd == 'variables':
                 reference = args['variablesReference']
-                if reference == 21:
+                if mode == 'sidebar' and reference in (211, 212, 221):
+                    reply(req, dict(variables=[dict(name='counter%d' % reference, value=str(reference), variablesReference=0), dict(name='lazy', value='<thunk>', variablesReference=900, presentationHint=dict(lazy=True)), dict(name='waiting', value='expand to wait', variablesReference=910)]))
+                elif reference == 21:
                     reply(req, dict(variables=[dict(name='value', value='<thunk>', type='Thunk', variablesReference=22, presentationHint=dict(lazy=mode == 'lazy'))]))
                 elif reference == 31:
                     reply(req, dict(variables=[dict(name='WRONG_SCOPE', value='wrong row', variablesReference=0)]))

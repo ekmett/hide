@@ -1,5 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
-module DebuggerCheck (checks) where
+module DebuggerCheck (checks,fixture,cleanup) where
 
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (withAsync, poll, wait)

@@ -557,3 +557,11 @@ enter its snapshot. Ticks compare the worker revision and invalidate at most fou
 scoped nodes via `refreshTreeFromHost`, which reuses ordinary request generations,
 worker cancellation and page adoption. `SelectedInput` supplies a reusable
 single-line selected range; ordinary caret-only Input behavior is unchanged.
+
+The Debug sidebar uses the same scoped tree route as Files and Agents. Provider
+workers wait on the existing debugger owner through a 32-entry mailbox; each tick
+admits at most four messages. Validated pages are capped at 1 MiB and 64 cached
+pages per stop. Cache validation and prepared presentation run off the UI lock;
+owner maps retain scalar provenance and validated immutable rows, never document
+payloads. `DebuggerSidebarCheck` exercises real fake-DAP interleaving, captured
+frame activation, passive cached ticks, lazy reference refusal and resume expiry.
