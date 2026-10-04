@@ -17,7 +17,7 @@ import qualified Hide.AutocompleteACP as CompletionACP
 import Hide.BufferView
 import Hide.Defaults
 import Hide.Keybindings
-import Hide.Commands (terminalBindings)
+import Hide.Commands (configuredBindings)
 import Hide.MCPPermissions
 import Hide.ClipboardMCP
 import Hide.Links (followLink)
@@ -149,8 +149,8 @@ runEditor args = do
     loadEnvironment configBase >>= either (die . T.unpack) pure
     defaultsJSON<-readEditorDefaultsFor configBase >>= either (die . T.unpack) pure
     defaults<-either die pure (parseEither parseDefaults defaultsJSON)
-    keys<-readTerminalKeysFor configBase >>= either (die . T.unpack) pure
-    keymap<-either (die . T.unpack) pure (terminalBindings keys)
+    keys<-readKeybindingsFor configBase >>= either (die . T.unpack) pure
+    keymap<-either (die . T.unpack) pure (configuredBindings keys)
     let backendDefault=backendEnvironment <|> defaultBackend defaults
         scaleDefault=scaleEnvironment <|> (show <$> defaultScale defaults)
         appearanceDefault=appearanceEnvironment <|> defaultAppearance defaults

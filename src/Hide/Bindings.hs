@@ -5,7 +5,7 @@
 -- Compilation rejects ambiguous chords before publishing a table. Lookup touches
 -- only the chord index, never a buffer or desktop. Modal ownership stays with the
 -- caller. Context selection and ordinary typing remain with the input owner.
-module Hide.Bindings (BindingContext(..), contextName, bindingContexts, Bindings, compileBindings, bindingAction, bindingKeys, bindingEntries, chordName, readChord) where
+module Hide.Bindings (BindingPlatform(..), bindingPlatforms, platformName, BindingContext(..), contextName, bindingContexts, Bindings, compileBindings, bindingAction, bindingKeys, bindingEntries, bindingChords, chordName, readChord) where
 
 import Control.Monad (foldM, unless)
 import Data.Char (toLower, isPrint)
@@ -15,6 +15,14 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Graphics.Vty as V
 import Text.Read (readMaybe)
+
+-- | Terminal and graphical profiles are prepared together so attaching another
+-- frontend only selects a table. Command and Control remain distinct modifiers.
+data BindingPlatform = TerminalPlatform | GraphicalPlatform | MacPlatform deriving (Eq,Ord,Show)
+bindingPlatforms :: [BindingPlatform]
+bindingPlatforms = [TerminalPlatform,GraphicalPlatform,MacPlatform]
+platformName :: BindingPlatform -> Text
+platformName platform = case platform of TerminalPlatform -> "terminal"; GraphicalPlatform -> "graphical"; MacPlatform -> "macos"
 
 -- | Focused input owners. Modal controls keep their separate authority boundary.
 data BindingContext = SourceKeys | SidebarKeys | ConversationKeys | MessagesKeys | DebuggerKeys | TerminalKeys deriving (Eq,Ord,Show)
@@ -27,7 +35,7 @@ contextName context = case context of
   SourceKeys -> "source"; SidebarKeys -> "sidebar"; ConversationKeys -> "conversation"
   MessagesKeys -> "messages"; DebuggerKeys -> "debugger"; TerminalKeys -> "terminal"
 
-data Bindings a = Bindings !(M.Map Text a) [(Text,a,[Text])] deriving (Eq,Show)
+data Bindings a = Bindings !(M.Map Text a) [(Text,a,[Text])] [(Text,Text)] deriving (Eq,Show)
 
 -- | Resolve command names and reject unknown actions, malformed chords and
 -- collisions. Callers merge configuration layers per command before compiling.
@@ -37,7 +45,7 @@ compileBindings defaults overrides = do
     (Left ("Unknown keybinding command: "<>T.intercalate ", " [name | name<-M.keys overrides,name `notElem` map (\(entry,_,_)->entry) defaults]))
   entries <- traverse prepare defaults
   index <- foldM insert M.empty [(key,(name,action)) | (name,action,keys)<-entries,key<-keys]
-  pure (Bindings (fmap snd index) entries)
+  pure (Bindings (fmap snd index) entries [(key,name) | (key,(name,_))<-M.toList index])
   where
     prepare (name,action,keys)=do
       parsed<-traverse parseChord (M.findWithDefault keys name overrides)
@@ -47,24 +55,29 @@ compileBindings defaults overrides = do
       Just (other,_) -> Left ("Keybinding "<>key<>" conflicts between "<>other<>" and "<>name)
 
 bindingAction :: Bindings a -> V.Key -> [V.Modifier] -> Maybe a
-bindingAction (Bindings index _) key mods=chordName key mods >>= (`M.lookup` index)
+bindingAction (Bindings index _ _) key mods=chordName key mods >>= (`M.lookup` index)
 
 bindingKeys :: Eq a => Bindings a -> a -> [Text]
-bindingKeys (Bindings _ entries) action=concat [keys | (_,candidate,keys)<-entries,candidate==action]
+bindingKeys (Bindings _ entries _) action=concat [keys | (_,candidate,keys)<-entries,candidate==action]
 
 -- | The complete effective map in catalog order, including explicit unbinding.
 -- Intended for worker-owned inspection, not a per-frame walk of command labels.
 bindingEntries :: Bindings a -> [(Text,[Text])]
-bindingEntries (Bindings _ entries)=[(name,keys) | (name,_,keys)<-entries]
+bindingEntries (Bindings _ entries _)=[(name,keys) | (name,_,keys)<-entries]
+
+-- | Prepared chord-to-public-command projection for frontend clipboard ownership.
+-- Returning it does not traverse commands, buffers or the lookup index.
+bindingChords :: Bindings a -> [(Text,Text)]
+bindingChords (Bindings _ _ chords)=chords
 
 -- | Canonical labels are also lookup keys. Uppercase character events are
 -- normalized; Shift remains an explicit modifier, independent of list order.
 chordName :: V.Key -> [V.Modifier] -> Maybe Text
 chordName key mods
-  | any (`notElem` [V.MCtrl,V.MAlt,V.MShift]) mods = Nothing
+  | any (`notElem` [V.MCtrl,V.MMeta,V.MAlt,V.MShift]) mods = Nothing
   | otherwise = (prefix<>) <$> name
   where
-    prefix=T.concat [label<>"+" | (modifier,label)<-[(V.MCtrl,"Ctrl"),(V.MAlt,"Alt"),(V.MShift,"Shift")],modifier `elem` mods]
+    prefix=T.concat [label<>"+" | (modifier,label)<-[(V.MCtrl,"Ctrl"),(V.MMeta,"Cmd"),(V.MAlt,"Alt"),(V.MShift,"Shift")],modifier `elem` mods]
     name=case key of
       V.KChar ' '->Just "Space"
       V.KChar '\t'->Just "Tab"
@@ -83,7 +96,7 @@ readChord raw=do
   let parts=T.splitOn "+" raw
       keyName=T.toLower (last parts)
       names=init parts
-  mods<-traverse (\name->case T.toLower name of "ctrl"->Right V.MCtrl; "alt"->Right V.MAlt; "shift"->Right V.MShift; _->Left ("Unknown modifier in "<>raw)) names
+  mods<-traverse (\name->case T.toLower name of "ctrl"->Right V.MCtrl; "cmd"->Right V.MMeta; "alt"->Right V.MAlt; "shift"->Right V.MShift; _->Left ("Unknown modifier in "<>raw)) names
   unless (length mods==length (nub mods)) (Left ("Repeated modifier in "<>raw))
   key<-case lookup keyName [("space",V.KChar ' '),("tab",V.KChar '\t'),("enter",V.KEnter),("escape",V.KEsc),("insert",V.KIns),("delete",V.KDel),("backspace",V.KBS),("left",V.KLeft),("right",V.KRight),("up",V.KUp),("down",V.KDown),("home",V.KHome),("end",V.KEnd),("pageup",V.KPageUp),("pagedown",V.KPageDown)] of
     Just value->Right value

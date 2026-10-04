@@ -16,11 +16,11 @@ import qualified Data.Text as T
 import Hide.Bindings
 import Hide.BufferView (BufferView(CurrentView))
 import Hide.Buffer (Buffer, newBuffer, prepareBuffer)
-import Hide.Commands (terminalBindings)
-import Hide.MCPPermissions (readTerminalKeysFor)
+import Hide.Commands (configuredBindings)
+import Hide.MCPPermissions (readKeybindingsFor)
 import Hide.Model
 
-data Result = Reloaded FilePath (M.Map BindingContext (Bindings Command)) | Inspected Text Buffer Int
+data Result = Reloaded FilePath (M.Map (BindingPlatform,BindingContext) (Bindings Command)) | Inspected Text Buffer Int
 newtype Keybindings = Keybindings (IORef (Maybe (Async (Either Text Result))))
 
 -- | Scope the session's reload/inspection worker, independent of attachments.
@@ -32,14 +32,14 @@ withKeybindings = bracket (Keybindings <$> newIORef Nothing) close
 keybindingEffects :: Keybindings -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> [Effect] -> IO (Bool,Desktop)
 keybindingEffects (Keybindings ref) core desktop effects=case effects of
   [ReloadKeyBindings directory] -> start $ do
-    loaded<-readTerminalKeysFor directory
-    case loaded >>= terminalBindings of
+    loaded<-readKeybindingsFor directory
+    case loaded >>= configuredBindings of
       Left err -> pure (Left err)
       Right maps -> do
         _<-evaluate (force (map bindingEntries (M.elems maps)))
         pure (Right (Reloaded directory maps))
   [InspectKeyBindings context bindings] -> start $ do
-    let title="Terminal bindings: "<>maybe "unavailable" contextName context
+    let title="Keybindings: "<>maybe "unavailable" (\(platform,owner)->platformName platform<>"/"<>contextName owner) context
         entries=maybe [] bindingEntries bindings
         text=T.unlines (title:"":if null entries then ["No configurable map is active in this view."] else
           [name<>" = "<>if null chords then "[]" else T.intercalate ", " chords | (name,chords)<-entries])
@@ -71,7 +71,7 @@ tickKeybindings (Keybindings ref) desktop=do
         Left err -> desktop {status="Keybindings: "<>T.pack (displayException err)}
         Right (Left err) -> desktop {status="Keybindings: "<>err}
         Right (Right (Reloaded directory maps))
-          | startingDirectory desktop==directory -> desktop {keyBindings=maps,status="Terminal bindings reloaded."}
+          | startingDirectory desktop==directory -> desktop {keyBindings=maps,status="Keybindings reloaded."}
           | otherwise -> desktop {status="Working directory changed; reload bindings again."}
         Right (Right (Inspected title buffer width)) ->
           let added=modifyActive (\window->window {bufferView=CurrentView,reviewSelection=Nothing}) (addDocument Nothing buffer desktop)

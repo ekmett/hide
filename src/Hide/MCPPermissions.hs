@@ -10,7 +10,7 @@ module Hide.MCPPermissions
   ( Permissions, withPermissions, withPermissionsAt, permissionCall, policyEffects, tickPermissions
   , permissionConfigPath, readEditorDefaults, writeEditorDefaults, readEditorDefaultsAt, writeEditorDefaultsAt
   , projectConfigPath, readEditorDefaultsFor, readAgentContextAt, writeAgentContextAt, readAgentContexts
-  , readEnvironmentAt, writeEnvironmentAt, readTerminalKeysAt, readTerminalKeysFor
+  , readEnvironmentAt, writeEnvironmentAt, readKeybindingsAt, readKeybindingsFor
   , readAgentLimitsFor, updateConfigTable, readAutocompleteFor, writeAutocomplete, writeAutocompleteFor
   ) where
 
@@ -277,26 +277,28 @@ projectConfigPath input=do
 
 -- | Read terminal context tables. Empty arrays explicitly unbind a command;
 -- all validation and compilation happens before publishing the prepared maps.
-readTerminalKeysAt :: FilePath -> IO (Either Text (M.Map Text (M.Map Text [Text])))
-readTerminalKeysAt path=configIO $ do
+readKeybindingsAt :: FilePath -> IO (Either Text (M.Map Text (M.Map Text (M.Map Text [Text]))))
+readKeybindingsAt path=configIO $ do
   config<-readConfig path
   pure $ do
     (_,_,table)<-config
-    selected<-lookupTable ["editor","keybindings","terminal"] table
-    traverse context (maybe M.empty tableMap selected)
+    selected<-lookupTable ["editor","keybindings"] table
+    traverse platform (maybe M.empty tableMap selected)
   where
+    platform (_,Toml.Table' _ values)=traverse context (tableMap values)
+    platform _=Left "Keybinding platforms must be tables"
     context (_,Toml.Table' _ values)=traverse (keys . snd) (tableMap values)
-    context _=Left "Terminal keybinding contexts must be tables"
+    context _=Left "Keybinding contexts must be tables"
     keys (Toml.List' _ values) | length values<=64 = traverse text values
     keys _=Left "Keybindings must be arrays of at most 64 chords"
     text (Toml.Text' _ value) | T.length value<=80 = Right value
     text _=Left "Keybinding chords must be strings of at most 80 characters"
 
-readTerminalKeysFor :: FilePath -> IO (Either Text (M.Map Text (M.Map Text [Text])))
-readTerminalKeysFor directory=configIO $ do
-  global<-permissionConfigPath >>= readTerminalKeysAt
-  project<-projectConfigPath directory >>= readTerminalKeysAt
-  pure (M.unionWith M.union <$> project <*> global)
+readKeybindingsFor :: FilePath -> IO (Either Text (M.Map Text (M.Map Text (M.Map Text [Text]))))
+readKeybindingsFor directory=configIO $ do
+  global<-permissionConfigPath >>= readKeybindingsAt
+  project<-projectConfigPath directory >>= readKeybindingsAt
+  pure (M.unionWith (M.unionWith M.union) <$> project <*> global)
 
 readEditorDefaultsFor :: FilePath -> IO (Either Text Value)
 readEditorDefaultsFor directory=configIO $ do

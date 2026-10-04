@@ -119,7 +119,7 @@ data LanguageAction = TypeInfo | FindDefinition | Completions | ShowProblems | R
 data Completion = Completion Text [(Int,Int,Text)] deriving (Eq,Show)
 data ProjectAction = LoadProject | ProjectPage Int Int | ProjectDetails Int Int deriving (Eq,Show)
 -- | Ordered requests for the host interpreter, produced alongside a new desktop.
-data Effect = ReloadKeyBindings FilePath | InspectKeyBindings (Maybe Bindings.BindingContext) (Maybe (Bindings.Bindings Command)) | FollowLink (Maybe FilePath) Text | EnvironmentAction Text [Text] | AutocompleteAction Text [Text] | SaveMacKeySymbols Bool | SaveChatSubmit ChatSubmit | SaveBufferViewDefault BufferView | ProjectRequest ProjectAction | DownloadDocument Int | ReadBrowserClipboard | WriteBrowserClipboard Text | LanguageRequest LanguageAction | RunGit GitAction | ReadMergeBranches | JumpTo FilePath Int Int | ReadPath FilePath | BrowsePath FilePath Text | BrowseDirectories FilePath | ChangeDirectory FilePath | OpenChoice FilePath Text Text | ReadTree FilePath | ExpandTree Int | ReadHelp | RefreshGit FilePath | ReadGitDiff | AskGitCommit | WriteGitCommit Text | SaveDocument Int (Maybe FilePath) (Maybe Command) | ReviewExternal | ResolveConflict Conflict ConflictAction | AgentAction Text [Text] | PermissionAction Text [Text] | DebugAction Text [Text] | SetScreenMode Int | Exit deriving (Eq,Show)
+data Effect = ReloadKeyBindings FilePath | InspectKeyBindings (Maybe (Bindings.BindingPlatform,Bindings.BindingContext)) (Maybe (Bindings.Bindings Command)) | FollowLink (Maybe FilePath) Text | EnvironmentAction Text [Text] | AutocompleteAction Text [Text] | SaveMacKeySymbols Bool | SaveChatSubmit ChatSubmit | SaveBufferViewDefault BufferView | ProjectRequest ProjectAction | DownloadDocument Int | ReadBrowserClipboard | WriteBrowserClipboard Text | LanguageRequest LanguageAction | RunGit GitAction | ReadMergeBranches | JumpTo FilePath Int Int | ReadPath FilePath | BrowsePath FilePath Text | BrowseDirectories FilePath | ChangeDirectory FilePath | OpenChoice FilePath Text Text | ReadTree FilePath | ExpandTree Int | ReadHelp | RefreshGit FilePath | ReadGitDiff | AskGitCommit | WriteGitCommit Text | SaveDocument Int (Maybe FilePath) (Maybe Command) | ReviewExternal | ResolveConflict Conflict ConflictAction | AgentAction Text [Text] | PermissionAction Text [Text] | DebugAction Text [Text] | SetScreenMode Int | Exit deriving (Eq,Show)
 data Field = Input Text Text Int | ComboBox Text [Text] Int (Maybe Int) | CheckBox Text Bool | Radio Text [Text] Int | ListBox Text [Text] Int | FileList [Entry] Int
   | ReadOnly Text Text
   | TextArea Text Bool Buffer Selection Int Int deriving (Eq,Show)
@@ -193,7 +193,7 @@ data Desktop = Desktop
   , dockedTerminals :: M.Map Int (Rect,Maybe Rect), bottomTerminal :: Maybe Int
   , autocompleteACPEnabled :: Bool, autocompleteDraft :: Buffer
   , autocompleteSelection :: Selection, autocompleteFocused :: Bool, macKeySymbols :: Bool
-  , keyBindings :: M.Map Bindings.BindingContext (Bindings.Bindings Command)
+  , keyBindings :: M.Map (Bindings.BindingPlatform,Bindings.BindingContext) (Bindings.Bindings Command)
   , contextTarget :: Maybe ContextTarget
   } deriving (Eq,Show)
 
@@ -214,7 +214,7 @@ menus =
       mi "Threads..." "" (DebugCommand "threads"),mi "Call stack..." "" (DebugCommand "stack"),mi "Scopes..." "" (DebugCommand "scopes"),
       mi "Exceptions..." "" (DebugCommand "exceptions"),mi "Exception details" "" (DebugCommand "exception-info"),mi "Output" "" (DebugCommand "output"),mi "Disconnect" "" (DebugCommand "disconnect")])
   ,("Tools",'t',[mi "File tree" "Ctrl+B" ToggleTree,mi "Git diff..." "" GitDiff,mi "Approve changes..." "" GitCommit,mi "Inspect type" "Shift+F1" InspectType,mi "Code actions..." "" CodeActions,mi "Messages" "" Problems,mi "Go to next" "Alt+F8" NextMessage,mi "Go to previous" "Alt+F7" PreviousMessage,mi "Restart language server" "" RestartHLS,mi "Conversation" "Ctrl+Shift+C" Conversation,mi "Agents..." "" AgentDirectory,mi "Conversation model..." "" (AgentChoose ""),mi "Cancel reply" "" AgentCancel,mi "Resume session..." "" AgentResume,mi "New conversation" "Ctrl+Shift+N" AgentNew,mi "Copy raw conversation" "" AgentCopyRaw,mi "Widget gallery..." "" Gallery,mi "Project browser..." "" ProjectBrowser,mi "Downloads..." "" (DebugCommand "downloads")])
-  ,("Options",'o',[mi "Preferences..." "" EditorOptions,mi "Environment..." "" EnvironmentOptions,mi "Chat input..." "" ChatInputOptions,mi "Autocomplete..." "" (AutocompleteCommand "settings"),mi "Agents..." "" AgentOptions,mi "Agent Permissions" "" AgentPermissions,mi "Agent Context..." "" AgentGuidance,mi "Reload terminal bindings" "" ReloadBindings,mi "Inspect terminal bindings" "" InspectBindings])
+  ,("Options",'o',[mi "Preferences..." "" EditorOptions,mi "Environment..." "" EnvironmentOptions,mi "Chat input..." "" ChatInputOptions,mi "Autocomplete..." "" (AutocompleteCommand "settings"),mi "Agents..." "" AgentOptions,mi "Agent Permissions" "" AgentPermissions,mi "Agent Context..." "" AgentGuidance,mi "Reload keybindings" "" ReloadBindings,mi "Inspect keybindings" "" InspectBindings])
   ,("Window",'w',[mi "Agents..." "" AgentDirectory,mi "Tile" "" Tile,mi "Cascade" "" Cascade,mi "Split vertically" "" SplitVertical,mi "Split horizontally" "" SplitHorizontal,mi "Zoom" "F5" Zoom,mi "Pin / unpin terminal" "" ToggleTerminalPin,mi "Next" "F6" NextWindow,mi "Close" "Alt+F3" Close,mi "" "" (Disabled ""),mi "Current" "" (SetBufferView CurrentView),mi "Changes" "" (SetBufferView ChangesView),mi "Only Changes" "" (SetBufferView OnlyChangesView),mi "Side by Side" "" (SetBufferView SideBySideView)])
   ,("Help",'h',[mi "Contents" "F1" Help,mi "About Haskell..." "" About])]
   where mi = MenuItem
@@ -235,7 +235,7 @@ keyLabel :: Desktop -> Text -> Text
 keyLabel d text
   | nativeMac d || videoMode d==Nothing && macKeySymbols d =
       foldl' (\s (from,to) -> T.replace from to s) text
-        [("Cmd+Shift+","⇧⌘"),("Cmd+Option+","⌥⌘"),("Cmd+","⌘"),
+        [("Cmd+Alt+Shift+","⇧⌥⌘"),("Cmd+Alt+","⌥⌘"),("Cmd+Shift+","⇧⌘"),("Cmd+Option+","⌥⌘"),("Cmd+","⌘"),
          ("Option+","⌥"),("Alt+","⌥"),("Shift+","⇧"),("Ctrl+","⌃")]
   | otherwise = text
 
@@ -772,7 +772,7 @@ runCommand cmd source | not (problemsFocused source), composerActive source, cmd
 runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source {menu = Nothing, contextMenu=Nothing, buttonHover=Nothing, buttonPressed=Nothing, prefix = Nothing, drag = Nothing,dragOriginal=Nothing})
   where
     go ReloadBindings d = (d {status="Reloading terminal bindings..."},[ReloadKeyBindings (startingDirectory d)])
-    go InspectBindings d = (d,[InspectKeyBindings (bindingContext d) (effectiveBindings d)])
+    go InspectBindings d = (d,[InspectKeyBindings ((,) (bindingPlatform d) <$> bindingContext d) (effectiveBindings d)])
     go (SidebarMove delta) d = case sideTree d of
       Just tree | treeFocused tree -> moveTree delta tree d
       _ -> (d,[])
@@ -1154,8 +1154,8 @@ inlineMatches d v=inlineEligible d && inlineEpoch d==inlineGeneration v && case 
   _->False
 
 inlineEvent :: V.Event -> Desktop -> Maybe (Desktop,[Effect])
-inlineEvent (V.EvKey (V.KChar '\\') [V.MAlt]) d | inlineEligible d = Just (clearInline d,[AutocompleteAction "propose" []])
-inlineEvent (V.EvKey key mods) d | Just v<-inlinePreview d,inlineMatches d v = case (key,mods) of
+inlineEvent (V.EvKey (V.KChar '\\') mods) d | mods==[if nativeMac d then V.MMeta else V.MAlt], inlineEligible d = Just (clearInline d,[AutocompleteAction "propose" []])
+inlineEvent (V.EvKey key mods) d | Just v<-inlinePreview d,inlineMatches d v = case (key,map (\modifier->if nativeMac d && modifier==V.MMeta then V.MAlt else modifier) mods) of
   (V.KChar '[',[V.MAlt])->Just (cycleOption v (-1))
   (V.KChar ']',[V.MAlt])->Just (cycleOption v 1)
   (V.KChar '\t',[])->Just (d,[AutocompleteAction "accept" []])
@@ -2126,23 +2126,29 @@ selectAt extend x y d = case activeWindow d of
 
 -- | Choose the current terminal input owner using only small focus metadata.
 -- Captured gestures, popups and human question/completion controls retain priority.
+bindingPlatform :: Desktop -> Bindings.BindingPlatform
+bindingPlatform d | nativeMac d = Bindings.MacPlatform
+                  | videoMode d/=Nothing = Bindings.GraphicalPlatform
+                  | otherwise = Bindings.TerminalPlatform
+
 bindingContext :: Desktop -> Maybe Bindings.BindingContext
 bindingContext d
-  | videoMode d/=Nothing || nativeMac d = Nothing
   | problemsFocused d = Just Bindings.MessagesKeys
   | maybe False treeFocused (sideTree d) = Just Bindings.SidebarKeys
   | activeConversation d = Just Bindings.ConversationKeys
   | activeTerminal d/=Nothing = Just Bindings.TerminalKeys
   | Just label<-activeDocument d >>= documentLabel,
     "Debugger " `T.isPrefixOf` label || "Source " `T.isPrefixOf` label = Just Bindings.DebuggerKeys
-  | not (wordStar d), Just doc<-activeDocument d, documentLabel doc==Nothing = Just Bindings.SourceKeys
+  | (not (wordStar d) || bindingPlatform d/=Bindings.TerminalPlatform), Just doc<-activeDocument d, documentLabel doc==Nothing = Just Bindings.SourceKeys
+  | Nothing<-activeDocument d = Just Bindings.SourceKeys
   | otherwise = Nothing
 
 effectiveBindings :: Desktop -> Maybe (Bindings.Bindings Command)
-effectiveBindings d = bindingContext d >>= (`M.lookup` keyBindings d)
+effectiveBindings d = bindingContext d >>= \context->M.lookup (bindingPlatform d,context) (keyBindings d)
 
 terminalContextReserved :: Desktop -> V.Key -> [V.Modifier] -> Bool
 terminalContextReserved d key mods = terminalSourceReserved key mods ||
+  (wordStar d && V.MCtrl `elem` mods && V.MMeta `notElem` mods) ||
   (bindingContext d==Just Bindings.ConversationKeys && key==V.KEnter)
 
 bindingInputAvailable :: Desktop -> Bool
@@ -2163,7 +2169,7 @@ unboundKey key mods d = case bindingContext d of
 terminalSourceReserved :: V.Key -> [V.Modifier] -> Bool
 terminalSourceReserved key mods=(key==V.KChar ']' && V.MCtrl `elem` mods) || key==V.KEsc || key==V.KFun 10 ||
   key `elem` [V.KChar '\t',V.KBackTab] ||
-  (V.MAlt `elem` mods && case key of
+  (V.MAlt `elem` mods && V.MMeta `notElem` mods && case key of
     V.KChar c->c `elem` ['1'..'9'] || toLower c `elem` [mn | (_,mn,_)<-menus] || c `elem` ['\\','[',']']
     V.KRight->True
     _->False)

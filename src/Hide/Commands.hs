@@ -5,14 +5,14 @@
 -- public names from Show or parse arbitrary constructor expressions. This catalog
 -- is the first step toward registration, not a dynamic plugin registry or
 -- authority boundary.
-module Hide.Commands (BuiltinCommand(..), builtinCommands, commandIdentifier, terminalBindings) where
+module Hide.Commands (BuiltinCommand(..), builtinCommands, commandIdentifier, platformBindings, configuredBindings) where
 
 import Data.Text (Text)
 import Control.Monad (unless, forM_)
 import qualified Graphics.Vty as V
 import Data.List (find)
 import qualified Data.Map.Strict as M
-import Hide.Bindings (BindingContext(..), bindingContexts, contextName, Bindings, compileBindings, readChord)
+import Hide.Bindings (BindingPlatform(..), bindingPlatforms, platformName, BindingContext(..), bindingContexts, contextName, Bindings, compileBindings, readChord)
 import Hide.Model (Command(..), terminalSourceReserved)
 import Hide.BufferView (BufferView(..))
 
@@ -138,10 +138,15 @@ builtinCommands =
 -- | Compile every terminal context outside the interaction path. Explicit global
 -- entries apply to all owners; a context entry replaces the same global command.
 -- Plain PTY control characters cannot be assigned to editor commands.
-terminalBindings :: M.Map Text (M.Map Text [Text]) -> Either Text (M.Map BindingContext (Bindings Command))
-terminalBindings configuration=do
+configuredBindings :: M.Map Text (M.Map Text (M.Map Text [Text])) -> Either Text (M.Map (BindingPlatform,BindingContext) (Bindings Command))
+configuredBindings configuration=do
+  unless (all (`elem` map platformName bindingPlatforms) (M.keys configuration)) (Left "Unknown keybinding platform")
+  M.unions <$> traverse (\platform->platformBindings platform (M.findWithDefault M.empty (platformName platform) configuration)) bindingPlatforms
+
+platformBindings :: BindingPlatform -> M.Map Text (M.Map Text [Text]) -> Either Text (M.Map (BindingPlatform,BindingContext) (Bindings Command))
+platformBindings platform configuration=do
   unless (all (`elem` ("global":map contextName bindingContexts)) (M.keys configuration))
-    (Left "Unknown terminal keybinding context")
+    (Left ("Unknown "<>platformName platform<>" keybinding context"))
   forM_ (concat (M.elems (M.findWithDefault M.empty "global" configuration))) readChord
   M.fromList <$> traverse prepare bindingContexts
   where
@@ -151,22 +156,31 @@ terminalBindings configuration=do
           overrides=M.union (M.findWithDefault M.empty (contextName context) configuration) inherited
       forM_ (concat (M.elems overrides)) $ \raw->do
         (key,mods)<-readChord raw
-        let character=case key of V.KChar _->not (any (`elem` mods) [V.MCtrl,V.MAlt]); _->False
+        let character=case key of V.KChar _->not (any (`elem` mods) [V.MCtrl,V.MAlt,V.MMeta]); _->False
             contextReserved=case context of
               SidebarKeys -> character
               MessagesKeys -> character
               ConversationKeys -> character || key==V.KEnter
               TerminalKeys -> character || processControl key mods
               _ -> character || key==V.KEnter
-        unless (not (terminalSourceReserved key mods || contextReserved))
+        let platformReserved = (platform==TerminalPlatform && V.MMeta `elem` mods) ||
+              (platform==MacPlatform && ((V.MAlt `elem` mods && V.MCtrl `notElem` mods && V.MMeta `notElem` mods && case key of V.KChar _->True; _->False) || (key `elem` map V.KChar "h\\[]" && V.MMeta `elem` mods))) ||
+              (platform/=TerminalPlatform && key `elem` map V.KChar "0+=-" && any (`elem` mods) [V.MCtrl,V.MAlt])
+        unless (not (terminalSourceReserved key mods || contextReserved || platformReserved))
           (Left ("Reserved "<>contextName context<>" key: "<>raw))
       compiled<-either (Left . (("Keybinding context "<>contextName context<>": ")<>)) Right $ compileBindings [(builtinIdentifier entry,builtinAction entry,keys context (builtinAction entry)) | entry<-builtinCommands] overrides
-      pure (context,compiled)
+      pure ((platform,context),compiled)
     processControl key mods=case key of
-      V.KChar _ -> V.MCtrl `elem` mods && V.MAlt `notElem` mods
+      V.KChar _ -> V.MCtrl `elem` mods && V.MAlt `notElem` mods && V.MMeta `notElem` mods
       _ -> False
     processControlChord raw=case readChord raw of Right (key,mods)->processControl key mods; _->False
-    keys context action=maybe [] id (lookup action (defaultsFor context))
+    keys context action=maybe [] id (lookup action (if platform==MacPlatform then macDefaults context else defaultsFor context))
+    macDefaults context = [(action,chords++maybe [] id (lookup action (defaultsFor context))) | (action,chords)<-macCommands] ++ filter (\(action,_)->action `notElem` map fst macCommands) (defaultsFor context)
+    macCommands =
+      [(New,["Cmd+N"]),(Open,["Cmd+O"]),(Save,["Cmd+S"]),(SaveAs,["Cmd+Shift+S"]),(Close,["Cmd+W"]),(Quit,["Cmd+Q"])
+      ,(Undo,["Cmd+Z"]),(Redo,["Cmd+Shift+Z"]),(Copy,["Cmd+C"]),(Cut,["Cmd+X"]),(Paste,["Cmd+V"]),(SelectAll,["Cmd+A"])
+      ,(Find,["Cmd+F"]),(Replace,["Cmd+Alt+F"]),(FindNext,["Cmd+G"]),(FindPrevious,["Cmd+Shift+G"])
+      ,(EditorOptions,["Cmd+,"]),(Conversation,["Cmd+Shift+C"]),(AgentNew,["Cmd+Shift+N"])]
     defaultsFor TerminalKeys=[(action,filter (/="Ctrl+Q") chords) | (action,chords)<-defaults,action `elem` [Close,Quit,Zoom,NextWindow,NextMessage,PreviousMessage,MakeTarget,CompileTarget,RunTarget] || case action of DebugCommand _->True; _->False]
     defaultsFor SidebarKeys=filter ((/=NextWindow).fst) defaults ++
       [(SidebarMove (-1),["Up"]),(SidebarMove 1,["Down"]),(SidebarMove (-10),["PageUp"]),(SidebarMove 10,["PageDown"]),
