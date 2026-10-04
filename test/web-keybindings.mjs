@@ -32,6 +32,7 @@ context.frame.bindings=[['Cmd+Alt+F','hide.search.replace']];
 key('ƒ',{metaKey:true,altKey:true,code:'KeyF'});assert.equal(packets.at(-1).key,'f');assert.deepEqual(Array.from(packets.at(-1).mods),['cmd','alt']);
 assert.equal(key('≈',{altKey:true,code:'KeyX'}).prevented,undefined); // Option text stays composition-owned.
 context.frame.terminal=true;key('c',{ctrlKey:true});assert.equal(packets.at(-1).type,'key');assert.deepEqual(Array.from(packets.at(-1).mods),['ctrl']);
+assert.equal(key('r',{ctrlKey:true}).prevented,true);assert.equal(packets.at(-1).key,'r');assert.equal(key('R',{ctrlKey:true,shiftKey:true}).prevented,true);assert.equal(packets.at(-1).key,'R');
 context.frame.terminal=false;assert.equal(key('r',{metaKey:true}).prevented,undefined);assert.equal(key('h',{metaKey:true}).prevented,undefined);
 context.frame.bindingsActive=false;key('v',{metaKey:true});assert.deepEqual(commands,['hide.edit.paste']);
 const exported={};handlers.get('copy')({preventDefault(){},clipboardData:{setData:(type,text)=>exported[type]=text}});

@@ -297,11 +297,11 @@ window.addEventListener('keydown',e=>{
  if(composing||e.isComposing||e.key==='Process'||e.key==='Dead')return;
  if(['Control','Shift','Alt','Meta','CapsLock'].includes(e.key))return;
  const control=e.ctrlKey||e.metaKey;
- // Browser and OS reservations remain outside editor authority.
- if(e.metaKey&&e.key.toLowerCase()==='h'||control&&!e.altKey&&e.key.toLowerCase()==='r')return;
- if(frame?.terminal&&e.ctrlKey&&!e.metaKey&&!e.shiftKey&&!e.altKey){
+ if(frame?.terminal&&e.ctrlKey&&!e.metaKey&&!e.altKey){
    e.preventDefault();send({type:'key',key:e.key,mods:mods(e)});return;
  }
+ // Browser and OS reservations remain outside editor authority after PTY input.
+ if(e.metaKey&&e.key.toLowerCase()==='h'||control&&!e.altKey&&e.key.toLowerCase()==='r')return;
  if((e.ctrlKey||e.altKey&&!e.metaKey)&&['+','=','-','0'].includes(e.key)){
    e.preventDefault();scale=e.key==='0'?initialScale:Math.max(1,Math.min(8,scale+(e.key==='-'?-0.125:0.125)));tiles.clear();resize();return;
  }
