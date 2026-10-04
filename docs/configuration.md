@@ -154,6 +154,18 @@ mnemonics and permission decisions retain their control ownership. Sensitive
 agent/approval controls keep their human authority regardless of a remap.
 Source accelerators are inactive while a modal owns input.
 
+Typed commands published through the session's menu registry can use their public
+menu contribution ID in the same tables. For example, an extension that publishes
+`example.manual` can bind it with `"example.manual" = ["Ctrl+Shift+J"]` in
+`[editor.keybindings.terminal.source]`. Contributions have no automatic shortcut;
+the menu's descriptive key hint does not activate a chord. Unknown IDs fail initial
+loading or reload. A previously loaded ID becomes inert when its registration
+retires; a replacement registration receives its own exact lifetime. Bindings are
+rebuilt on the session worker as contributions change. `[]` removes the effective
+shortcut. Contributions cannot enter the dialog editing whitelist or grant agent
+authority. Bare commands without a menu contribution remain outside this binding
+catalogue.
+
 Choose **Options > Reload keybindings** after editing TOML. Loading and
 validation run on the session worker; the existing map stays active until a valid
 replacement is ready. A failed reload reports its error and keeps that map.

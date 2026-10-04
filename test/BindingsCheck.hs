@@ -26,25 +26,25 @@ import Hide.Render (renderKey)
 checks :: IO ()
 checks=do
   let check name ok=unless ok (error name)
-      prepare=either (error . show) id . platformBindings TerminalPlatform . M.singleton "source" . M.fromList
+      prepare=either (error . show) id . platformBindings [] TerminalPlatform . M.singleton "source" . M.fromList
       bindings=prepare [("hide.file.save",["Ctrl+Shift+S"]),("hide.file.open",[])]
       base=addDocument (Just (FileState "/project/Main.hs" Nothing)) (newBuffer "hello") (initialDesktop (80,25))
       source=base {keyBindings=bindings}
       sourceKeys=bindings M.! (TerminalPlatform,SourceKeys)
       key k mods d=handleEvent (V.EvKey k mods) d
       noEffects (_,effects)=null effects
-      rejected= either (const True) (const False) . platformBindings TerminalPlatform . M.singleton "source" . M.fromList
+      rejected= either (const True) (const False) . platformBindings [] TerminalPlatform . M.singleton "source" . M.fromList
   check "Mac combined modifier display follows Control Option Shift Command order" (keyLabel base {nativeMac=True} "Ctrl+Cmd+Alt+Shift+S"=="⌃⌥⇧⌘S")
   check "Command is distinct from Control" (readChord "Cmd+Alt+Shift+S"==Right (V.KChar 's',[V.MMeta,V.MAlt,V.MShift]) && chordName (V.KChar 's') [V.MMeta,V.MShift,V.MAlt]==Just "Cmd+Alt+Shift+S" && chordName (V.KChar 's') [V.MCtrl]/=chordName (V.KChar 's') [V.MMeta])
-  let platforms=either (error . show) id (configuredBindings (M.singleton "macos" (M.singleton "source" (M.fromList [("hide.file.save",["Cmd+Shift+S"]),("hide.file.save-as",[])]))))
+  let platforms=either (error . show) id (configuredBindings [] (M.singleton "macos" (M.singleton "source" (M.fromList [("hide.file.save",["Cmd+Shift+S"]),("hide.file.save-as",[])]))))
       mac=base {nativeMac=True,videoMode=Just 3,keyBindings=platforms}
   check "macOS remap owns Command without changing Control" (boundKeyCommand (V.KChar 's') [V.MMeta,V.MShift] mac==Just Save && boundKeyCommand (V.KChar 's') [V.MMeta] mac==Nothing && boundKeyCommand (V.KChar 's') [V.MCtrl] mac==Nothing && boundKeyCommand (V.KChar 's') [V.MCtrl] base {keyBindings=platforms}==Just Save)
-  check "macOS composed Option characters cannot bind commands" (either (const True) (const False) (platformBindings MacPlatform (M.singleton "source" (M.singleton "hide.file.save" ["Alt+J"]))))
-  let replaceMaps=either (error . show) id (configuredBindings (M.singleton "macos" (M.singleton "source" (M.fromList [("hide.search.replace",["Cmd+Alt+F"]),("hide.edit.copy",[])]))))
+  check "macOS composed Option characters cannot bind commands" (either (const True) (const False) (platformBindings [] MacPlatform (M.singleton "source" (M.singleton "hide.file.save" ["Alt+J"]))))
+  let replaceMaps=either (error . show) id (configuredBindings [] (M.singleton "macos" (M.singleton "source" (M.fromList [("hide.search.replace",["Cmd+Alt+F"]),("hide.edit.copy",[])]))))
       replaceMac=mac {keyBindings=replaceMaps}
   check "configured Command Option Replace dispatches through its owner" (maybe False (\dg->case purpose dg of Searching True _->True; _->False) (dialog (fst (key (V.KChar 'f') [V.MMeta,V.MAlt] replaceMac))))
   check "unbound Command copy cannot fall through to a fixed shortcut" (clipboard (fst (key (V.KChar 'c') [V.MMeta] (modifyActive (\w->w {selection=Selection 0 5}) replaceMac)))=="")
-  let modalMaps=either (error . show) id (configuredBindings (M.singleton "macos" (M.singleton "source" (M.singleton "hide.edit.copy" ["Cmd+Left"]))))
+  let modalMaps=either (error . show) id (configuredBindings [] (M.singleton "macos" (M.singleton "source" (M.singleton "hide.edit.copy" ["Cmd+Left"]))))
       sourceModal=mac {keyBindings=modalMaps}
       editorModal=prompt "Edit" Information [TextArea "Text" True (newBuffer "draft") (Selection 0 5) 0 0] sourceModal
   check "native source accelerators cannot hijack modal movement" (nativeMenuShortcut sourceModal Copy==("\xf702",8) && nativeMenuShortcut editorModal Copy==("c",8) && clipboard (fst (key V.KLeft [V.MMeta] editorModal))=="")
@@ -75,7 +75,7 @@ checks=do
   captured<-renderKey popup
   invalidated<-renderKey popup {contextTarget=Just UnavailableSourceTarget}
   check "captured context target changes invalidate menu rendering" (captured/=invalidated)
-  let maps=either (error . show) id (platformBindings TerminalPlatform (M.fromList
+  let maps=either (error . show) id (platformBindings [] TerminalPlatform (M.fromList
         [("global",M.singleton "hide.options.agent-permissions" ["Alt+P"])
         ,("sidebar",M.fromList [("hide.sidebar.expand",["Ctrl+E"]),("hide.sidebar.down",[]),("hide.options.agent-permissions",["Ctrl+Shift+P"])])
         ,("conversation",M.fromList [("hide.edit.copy",["Ctrl+Shift+J"]),("hide.agents.cancel",["Ctrl+Shift+K"])])
@@ -94,14 +94,14 @@ checks=do
   let pty=addReadOnly "Terminal test" "output" contextBase
   check "terminal editor actions can be rebound" (snd (key (V.KFun 11) [V.MAlt] pty)==[AgentAction "terminal-stop" []])
   check "terminal control characters retain process ownership" (all (\(c,text)->snd (key (V.KChar c) [V.MCtrl] pty)==[AgentAction "terminal-input" ["test",text]]) [('c',"\ETX"),('q',"\DC1"),('s',"\DC3")])
-  check "terminal control chords cannot be assigned to commands" (either (const True) (const False) (platformBindings TerminalPlatform (M.singleton "terminal" (M.singleton "hide.terminal.stop" ["Ctrl+C"]))))
+  check "terminal control chords cannot be assigned to commands" (either (const True) (const False) (platformBindings [] TerminalPlatform (M.singleton "terminal" (M.singleton "hide.terminal.stop" ["Ctrl+C"]))))
   let debug=addReadOnly "Debugger output" "stopped" contextBase
   check "debugger override drives dispatch and menu labels" (snd (key (V.KChar 'd') [V.MCtrl,V.MShift] debug)==[DebugAction "continue" []] && noEffects (key (V.KFun 4) [] debug) && menuShortcut debug (MenuItem "Continue" "F4" (DebugCommand "continue"))=="Ctrl+Shift+D")
-  let global=either (error . show) id (platformBindings TerminalPlatform (M.singleton "global" (M.singleton "hide.file.save" ["Ctrl+Shift+S","Alt+F11"])))
+  let global=either (error . show) id (platformBindings [] TerminalPlatform (M.singleton "global" (M.singleton "hide.file.save" ["Ctrl+Shift+S","Alt+F11"])))
   check "global control overrides apply outside PTYs" (all (\context->bindingAction (global M.! (TerminalPlatform,context)) (V.KChar 's') [V.MCtrl,V.MShift]==Just Save) [SourceKeys,SidebarKeys,ConversationKeys,MessagesKeys,DebuggerKeys])
   check "PTY inherits transferable global chords and omits process controls" (bindingKeys (global M.! (TerminalPlatform,TerminalKeys)) Save==["Alt+F11"] && snd (key (V.KChar 'c') [V.MCtrl] (pty {keyBindings=global}))==[AgentAction "terminal-input" ["test","\ETX"]])
-  check "unknown contexts fail instead of disappearing" (either (const True) (const False) (platformBindings TerminalPlatform (M.singleton "sidebaar" M.empty)))
-  let defaults=either (error . show) id (platformBindings TerminalPlatform M.empty)
+  check "unknown contexts fail instead of disappearing" (either (const True) (const False) (platformBindings [] TerminalPlatform (M.singleton "sidebaar" M.empty)))
+  let defaults=either (error . show) id (platformBindings [] TerminalPlatform M.empty)
       compiled d=d {keyBindings=defaults}
       draft=chat {keyBindings=M.empty,composerSelection=Selection 5 5}
       chatState (d,effects)=(contents (composerBuffer d),composerSelection d,composerFocused d,clipboard d,effects)
@@ -116,8 +116,8 @@ checks=do
     [(V.KDown,[]),(V.KPageDown,[]),(V.KEnter,[]),(V.KChar 'c',[V.MCtrl]),(V.KFun 4,[]),(V.KFun 6,[])])
   check "default PTY input and editor controls retain ownership" (all (\(k,m)->snd (key k m pty {keyBindings=M.empty})==snd (key k m (compiled pty)))
     [(V.KChar 'c',[V.MCtrl]),(V.KChar 'q',[V.MCtrl]),(V.KFun 1,[]),(V.KFun 4,[]),(V.KFun 7,[]),(V.KFun 9,[]),(V.KUp,[])])
-  check "resolved reload retains guest origin policy" (not (guestKeyAllowed source {keyBindings=either (error . show) id (platformBindings TerminalPlatform (M.singleton "source" (M.singleton "hide.bindings.reload" ["Alt+F11"])))} (V.KFun 11) [V.MAlt]))
-  let starMaps=either (error . show) id (platformBindings TerminalPlatform (M.singleton "wordstar" (M.fromList [("hide.file.save",["Ctrl+Shift+J"]),("hide.edit.undo",[])])))
+  check "resolved reload retains guest origin policy" (not (guestKeyAllowed source {keyBindings=either (error . show) id (platformBindings [] TerminalPlatform (M.singleton "source" (M.singleton "hide.bindings.reload" ["Alt+F11"])))} (V.KFun 11) [V.MAlt]))
+  let starMaps=either (error . show) id (platformBindings [] TerminalPlatform (M.singleton "wordstar" (M.fromList [("hide.file.save",["Ctrl+Shift+J"]),("hide.edit.undo",[])])))
       star=base {wordStar=True,keyBindings=starMaps}
   check "WordStar Save remap dispatches its named command" (case snd (key (V.KChar 'j') [V.MCtrl,V.MShift] star) of [SaveDocument{}]->True; _->False)
   check "WordStar unspecified Control keys retain their old inactive default" (clipboard (fst (key (V.KChar 'c') [V.MCtrl] (modifyActive (\w->w {selection=Selection 0 5}) star)))=="")
@@ -125,8 +125,8 @@ checks=do
   check "WordStar fixed movement retains its input owner" (maybe (-1) (caret . selection) (activeWindow (fst (key (V.KChar 'd') [V.MCtrl] star)))==1)
   check "WordStar prefix block grammar retains its input owner" (prefix (fst (key (V.KChar 'k') [V.MCtrl] star))==Just 'k' && blockStart (fst (key (V.KChar 'b') [] (fst (key (V.KChar 'k') [V.MCtrl] star))))==Just (maybe (-1) bufferId (activeWindow star),0))
   check "WordStar remap uses effective menu and status labels" (menuShortcut star (MenuItem "Save" "F2" Save)=="Ctrl+Shift+J" && any ((==" Ctrl+Shift+J Save").fst) (statusHints star))
-  check "WordStar owned grammar chords reject named overrides" (either (const True) (const False) (platformBindings TerminalPlatform (M.singleton "wordstar" (M.singleton "hide.file.save" ["Ctrl+K"]))))
-  let dialogMaps=either (error . show) id (configuredBindings (M.singleton "macos" (M.singleton "dialog" (M.fromList [("hide.edit.copy",["Cmd+Shift+J"]),("hide.edit.paste",["Cmd+Shift+K"]),("hide.edit.undo",["Cmd+Shift+L"])]))))
+  check "WordStar owned grammar chords reject named overrides" (either (const True) (const False) (platformBindings [] TerminalPlatform (M.singleton "wordstar" (M.singleton "hide.file.save" ["Ctrl+K"]))))
+  let dialogMaps=either (error . show) id (configuredBindings [] (M.singleton "macos" (M.singleton "dialog" (M.fromList [("hide.edit.copy",["Cmd+Shift+J"]),("hide.edit.paste",["Cmd+Shift+K"]),("hide.edit.undo",["Cmd+Shift+L"])]))))
       background=modifyActive (\w->w {selection=Selection 0 5}) base {nativeMac=True,videoMode=Just 3,keyBindings=dialogMaps}
       editing=prompt "Edit" Information [TextArea "Text" True (newBuffer "draft") (Selection 0 5) 0 0] background
       copiedDialog=fst (key (V.KChar 'j') [V.MMeta,V.MShift] editing)
@@ -143,9 +143,9 @@ checks=do
   check "dialog remap cannot admit an agent-owned sensitive control" (not (guestKeyAllowed editing {dialog=fmap (\dg->dg {purpose=AgentDialog "settings"}) (dialog editing)} (V.KChar 'j') [V.MMeta,V.MShift]))
   check "dialog labels and inspection use its effective context" (menuShortcut editing (MenuItem "Copy" "Cmd+C" Copy)=="⇧⌘J" && any ((==" ⇧⌘K Paste").fst) (statusHints editing) && case snd (runCommand InspectBindings editing) of [InspectKeyBindings (Just (MacPlatform,DialogKeys)) (Just table)]->bindingKeys table Copy==["Cmd+Shift+J"]; _->False)
   check "dialog projection omits actions unavailable to its focused control" (null (focusedBindingChords editing {dialog=fmap (\dg->dg {focus=1}) (dialog editing)}) && not (any ((=="hide.file.save").snd) (focusedBindingChords editing)))
-  check "dialog cannot bind a background source command" (either (const True) (const False) (platformBindings TerminalPlatform (M.singleton "dialog" (M.singleton "hide.file.save" ["Ctrl+Shift+J"]))))
+  check "dialog cannot bind a background source command" (either (const True) (const False) (platformBindings [] TerminalPlatform (M.singleton "dialog" (M.singleton "hide.file.save" ["Ctrl+Shift+J"]))))
   check "dialog field text and navigation retain their owner" (dialogText (fst (key (V.KChar 'ø') [] editing))=="ø" && dialog (fst (key V.KEsc [] editing))==Nothing)
-  let dialogDefaults=either (error . show) id (configuredBindings M.empty)
+  let dialogDefaults=either (error . show) id (configuredBindings [] M.empty)
       searchEditing=fst (runCommand Find background {keyBindings=dialogDefaults})
   check "default dialog clipboard matches field-owned behavior" (clipboard (fst (key (V.KChar 'c') [V.MCtrl] editing {nativeMac=False,keyBindings=dialogDefaults}))=="draft")
   check "unavailable dialog editing action retains Input button mnemonic ownership" (dialog (fst (key (V.KChar 'c') [V.MCtrl] searchEditing))==Nothing)
@@ -157,9 +157,9 @@ reloadChecks :: IO ()
 reloadChecks=bracket temporary removePathForcibly $ \directory->do
   old<-lookupEnv "XDG_CONFIG_HOME"
   let restore=maybe (unsetEnv "XDG_CONFIG_HOME") (setEnv "XDG_CONFIG_HOME") old
-  bracket_ (setEnv "XDG_CONFIG_HOME" directory) restore $ withKeybindings $ \runtime->do
+  bracket_ (setEnv "XDG_CONFIG_HOME" directory) restore $ withKeybindings M.empty $ \runtime->do
     let path=directory </> "thc.toml"
-        defaults=either (error . show) id (platformBindings TerminalPlatform M.empty)
+        defaults=either (error . show) id (platformBindings [] TerminalPlatform M.empty)
         base=(addDocument (Just (FileState (directory </> "Main.hs") Nothing)) (newBuffer "text") (initialDesktop (80,25))) {keyBindings=defaults}
         fallback d _=pure (False,d)
         start command d=let (requested,effects)=runCommand command d in snd <$> keybindingEffects runtime fallback requested effects

@@ -1,9 +1,9 @@
 {-# LANGUAGE CPP, OverloadedStrings #-}
 module MenuCommandsCheck (checks) where
 import Control.Concurrent (threadDelay)
-import Control.Exception (bracket,finally)
+import Control.Exception (bracket,bracket_,finally)
 import Control.Concurrent.MVar
-import System.Directory (getCurrentDirectory)
+import System.Directory (getCurrentDirectory,getTemporaryDirectory,createDirectory,removeFile,removePathForcibly)
 import System.Environment (lookupEnv,setEnv,unsetEnv)
 import Control.Monad (unless)
 import Data.Aeson
@@ -15,6 +15,10 @@ import Hide.Commands (configuredBindings)
 import qualified Data.Map.Strict as M
 import Hide.Buffer (contents)
 import Hide.DocsMCP
+import System.FilePath ((</>))
+import System.IO (openTempFile,hClose)
+import qualified Data.Text.IO as TIO
+import Hide.Keybindings
 import Hide.MenuCommands
 import Hide.Model
 import Hide.Plugin.Command (withRegistry,registerCommand,CommandDef(..),Codec(..))
@@ -51,6 +55,37 @@ runChecks=withDocsCommands $ \docs->withRegistry $ \registry->withMenuCommands d
       run desktop effects=do
         (_,queued)<-menuEffects host (\_ _->error "registered action missed menu worker") desktop effects
         timeout 5000000 (waitDoc queued) >>= maybe (error "menu worker did not complete") pure
+  -- Configuration reaches an independently typed contribution, not a built-in alias.
+  bracket temporary removePathForcibly $ \directory->do
+    previous<-lookupEnv "XDG_CONFIG_HOME"
+    bracket_ (setEnv "XDG_CONFIG_HOME" directory) (maybe (unsetEnv "XDG_CONFIG_HOME") (setEnv "XDG_CONFIG_HOME") previous) $ withKeybindings M.empty $ \bindings->do
+      TIO.writeFile (directory </> "thc.toml") "[editor.keybindings.terminal.source]\n\"example.manual\" = [\"Ctrl+Shift+J\"]\n"
+      let base=initial {defaultDirectory=Just directory,keyBindings=either (error . show) id (configuredBindings [] M.empty)}
+          (reload,requests)=runCommand ReloadBindings base
+          settle current=do
+            next<-tickKeybindings bindings current
+            if status next=="Reloading keybindings..." then threadDelay 1000 >> settle next else pure next
+      (_,pending)<-keybindingEffects bindings (\desktop _->pure (False,desktop)) reload requests
+      loaded<-timeout 5000000 (settle pending) >>= maybe (error "runtime binding reload did not finish") pure
+      let key=V.EvKey (V.KChar 'j') [V.MCtrl,V.MShift]
+          (chosen,actions)=handleEvent key loaded
+      check "TOML binds an actual contributed typed command" (actions==[InvokeMenu extension Plugin.HumanMenu Nothing])
+      opened<-run chosen actions
+      check "bound typed callback installs independent extension document"
+        (maybe False (T.isInfixOf "Independent extension" . contents . documentBuffer) (activeDocument opened))
+      let modal=prompt "Edit" Information [Input "Text" "draft" 5] loaded
+      check "contributed remap cannot escape modal editing" (null (snd (handleEvent key modal)))
+#if defined(WITH_WEB) || defined(WITH_REMOTE)
+      guestKey<-either error pure (parseEither parseInput (object ["type" .= ("key"::T.Text),"key" .= ("j"::T.Text),"mods" .= (["ctrl","shift"]::[T.Text])]))
+      check "contributed remap cannot grant guest authority" (case applyGuestInput guestKey (beginGuestInput loaded) of Left _->True; _->False)
+#endif
+      TIO.writeFile (directory </> "thc.toml") "[editor.keybindings.terminal.source]\n\"example.manual\" = []\n"
+      let (unbinding,unbindingRequests)=runCommand ReloadBindings loaded
+      (_,unbindingPending)<-keybindingEffects bindings (\desktop _->pure (False,desktop)) unbinding unbindingRequests
+      unbound<-timeout 5000000 (settle unbindingPending) >>= maybe (error "runtime unbinding reload did not finish") pure
+      let boundItem=case filter ((==extension) . Plugin.menuReference) metadata of item:_->item; _->error "missing bound extension"
+      check "explicit empty list removes contributed chord and effective label"
+        (null (snd (handleEvent key unbound)) && menuShortcut unbound (MenuItem "Extension" "F12" (contributionCommand unbound boundItem))=="")
   let (fromF1,effects)=handleEvent (V.EvKey (V.KFun 1) []) initial
   check "F1 resolves live contributed Help lifetime" (effects==[InvokeMenu helpRef Plugin.HumanMenu Nothing])
   help<-run fromF1 effects
@@ -71,7 +106,7 @@ runChecks=withDocsCommands $ \docs->withRegistry $ \registry->withMenuCommands d
   check "native old menu incarnation refuses extension event" (remoteNativeMenuInput frame 20 [11,nativeToken,19]==Nothing)
   check "local native catalogue retains exact registered action" (nativeMenuEventFor (nativeCommandsFor initial) 19 [11,nativeToken,19]==Just (contributionCommand initial (metadata !! extensionIndex)))
   check "native Help row carries its registered token and extension joins Help menu" (case lookup "Help" (remoteMenuLayout frame) of Just rows->any (\(title,_,token)->title=="Extension manual" && token==nativeToken) rows && any (\(title,_,token)->title=="Contents" && token>=length nativeCommands) rows; _->False)
-  let profiles=either (error . show) id (configuredBindings (M.singleton "macos" (M.singleton "source" (M.singleton "hide.help.contents" ["Cmd+Shift+J"]))))
+  let profiles=either (error . show) id (configuredBindings [] (M.singleton "macos" (M.singleton "source" (M.singleton "hide.help.contents" ["Cmd+Shift+J"]))))
       configured=initial {nativeMac=True,videoMode=Just 3,keyBindings=profiles}
       helpCommand=case [contributionCommand configured item | item<-metadata,Plugin.menuReference item==helpRef] of command:_->command; _->error "missing live help command"
       configuredTransport=object (frameMetadata "/tmp" configured++["menuCommands" .= map fst protocolMenuCommands])
@@ -132,3 +167,12 @@ runChecks=withDocsCommands $ \docs->withRegistry $ \registry->withMenuCommands d
   joined<-tryTakeMVar finished
   check "session scope joins cancelled worker before registry closure" (joined==Just ())
   putStrLn "live menu command checks passed"
+
+temporary :: IO FilePath
+temporary=do
+  directory<-getTemporaryDirectory
+  (path,handle)<-openTempFile directory "hide-runtime-bindings"
+  hClose handle
+  removeFile path
+  createDirectory path
+  pure path

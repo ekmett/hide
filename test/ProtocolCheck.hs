@@ -74,20 +74,20 @@ checks = do
   check "named menu ignores a stale positional index" (menu ["command" .= ("hide.file.new"::T.Text),"index" .= (999::Int)]==Right (MenuCommand New))
   check "unknown named menu is rejected" (either (const True) (const False) (menu ["command" .= ("future-command"::T.Text)]))
   check "menu input requires a command identity" (either (const True) (const False) (menu ["index" .= (0::Int)]))
-  let platformMaps=either (error . show) id (Commands.configuredBindings (M.singleton "macos" (M.singleton "source" (M.fromList [("hide.edit.copy",["Cmd+Shift+J"]),("hide.edit.paste",["Cmd+Shift+K"])]))))
+  let platformMaps=either (error . show) id (Commands.configuredBindings [] (M.singleton "macos" (M.singleton "source" (M.fromList [("hide.edit.copy",["Cmd+Shift+J"]),("hide.edit.paste",["Cmd+Shift+K"])]))))
       browser=modifyActive (\w->w {selection=Selection 0 5}) (addDocument Nothing (newBuffer "hello") d) {browserFrontend=True,nativeMac=True,videoMode=Just 3,keyBindings=platformMaps}
       parsedKey=parseEither parseInput (object ["type" .= ("key"::T.Text),"key" .= ("j"::T.Text),"mods" .= (["cmd","shift"]::[T.Text])])
   check "Command wire input resolves effective clipboard copy" (case parsedKey of Right input->snd (applyInput input browser)==[WriteBrowserClipboard "hello"]; _->False)
   check "Command clipboard remap requests platform paste and disables the old shortcut" (snd (applyInput (Key "k" [V.MMeta,V.MShift]) browser)==[ReadBrowserClipboard] && null (snd (applyInput (Key "v" [V.MMeta]) browser)))
   let projected=parseMaybe (withObject "metadata" (.: "bindings")) (object (frameMetadata "/" browser))::Maybe [(T.Text,T.Text)]
   check "focused frame advertises effective clipboard chords only" (maybe False (\entries->lookup "Cmd+Shift+J" entries==Just "hide.edit.copy" && lookup "Cmd+C" entries==Nothing) projected)
-  let modalMaps=either (error . show) id (Commands.configuredBindings (M.singleton "macos" (M.singleton "dialog" (M.fromList [("hide.edit.copy",["Cmd+Shift+J"]),("hide.edit.paste",["Cmd+Shift+K"])]))))
+  let modalMaps=either (error . show) id (Commands.configuredBindings [] (M.singleton "macos" (M.singleton "dialog" (M.fromList [("hide.edit.copy",["Cmd+Shift+J"]),("hide.edit.paste",["Cmd+Shift+K"])]))))
       modalBrowser=prompt "Edit" Information [TextArea "Text" True (newBuffer "field") (Selection 0 5) 0 0] browser {keyBindings=modalMaps}
   check "browser remapped modal Copy exports the field selection" (snd (applyInput (Key "j" [V.MMeta,V.MShift]) modalBrowser)==[WriteBrowserClipboard "field"])
   check "browser remapped modal Paste requests clipboard from its field owner" (snd (applyInput (Key "k" [V.MMeta,V.MShift]) modalBrowser)==[ReadBrowserClipboard] && null (snd (applyInput (Key "v" [V.MMeta]) modalBrowser)))
   let modalProjection=parseMaybe (withObject "metadata" (.: "bindings")) (object (frameMetadata "/" modalBrowser))::Maybe [(T.Text,T.Text)]
   check "browser modal projection uses only its allowed effective chords" (maybe False (\entries->lookup "Cmd+Shift+J" entries==Just "hide.edit.copy" && lookup "Cmd+C" entries==Nothing && all ((/= "hide.file.save").snd) entries) modalProjection)
-  let bindings=either (error . show) id (Commands.platformBindings Bindings.TerminalPlatform (M.singleton "source" (M.singleton "hide.file.save" ["Ctrl+Shift+S"])))
+  let bindings=either (error . show) id (Commands.platformBindings [] Bindings.TerminalPlatform (M.singleton "source" (M.singleton "hide.file.save" ["Ctrl+Shift+S"])))
       daemon=(addDocument (Just (FileState "/project/Main.hs" Nothing)) (newBuffer "hello") d) {browserFrontend=True,videoMode=Just 3,keyBindings=bindings}
       terminal=fst (applyInput (Frontend Nothing False) daemon)
   check "terminal attachment enables custom source keys without losing clipboard transport" (case snd (applyInput (Key "s" [V.MCtrl,V.MShift]) terminal) of [SaveDocument{}]->browserFrontend terminal; _->False)

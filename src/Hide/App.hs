@@ -19,7 +19,7 @@ import Hide.Defaults
 import qualified Hide.Plugin.Menu as PluginMenu
 import Hide.MenuCommands
 import Hide.Keybindings
-import Hide.Commands (configuredBindings)
+import Hide.Commands (configuredBindings, contributedBindingCommands)
 import Hide.MCPPermissions
 import Hide.ClipboardMCP
 import Hide.Links (followLink)
@@ -154,7 +154,6 @@ runEditor args = do
     defaultsJSON<-readEditorDefaultsFor configBase >>= either (die . T.unpack) pure
     defaults<-either die pure (parseEither parseDefaults defaultsJSON)
     keys<-readKeybindingsFor configBase >>= either (die . T.unpack) pure
-    keymap<-either (die . T.unpack) pure (configuredBindings keys)
     let backendDefault=backendEnvironment <|> defaultBackend defaults
         scaleDefault=scaleEnvironment <|> (show <$> defaultScale defaults)
         appearanceDefault=appearanceEnvironment <|> defaultAppearance defaults
@@ -242,8 +241,9 @@ runEditor args = do
         `catch` (\err -> writeIORef wasInterrupted True >> interrupted err)
         `catch` (\FrontendDetached -> writeIORef wasInterrupted True)) `finally` report
     else do
+        initialKeymap<-if Snapshot `elem` flags || Html `elem` flags then either (die . T.unpack) pure (configuredBindings [] keys) else pure M.empty
         let initial=if Demo `elem` flags then addDocument Nothing (newBuffer (activeText demoDesktop)) (initialDesktop dimensions) else initialDesktop dimensions
-            configured=(fst (handleEvent (uncurry V.EvResize dimensions) initial)) {keyBindings=keymap,macKeySymbols=fromMaybe False (defaultMacKeySymbols defaults),defaultBufferView=fromMaybe CurrentView (defaultView defaults),chatSubmit=fromMaybe QuerySubmit (defaultChatSubmit defaults),appearance=colorMode,systemDark=maybe True (not . (`elem` ["7","15"]) . reverse . takeWhile (/=';') . reverse) terminalColors,wordStar=flagBool WordStar StandardKeys (fromMaybe (wordStar initial) (defaultWordStar defaults)),crtFilter=flagBool CRT NoCRT (fromMaybe (crtFilter initial) (defaultCRT defaults)),materialIcons=flagBool MaterialIcons ClassicIcons (fromMaybe (materialIcons initial) (defaultMaterialIcons defaults)),blinkCursor=fromMaybe (fromMaybe (blinkCursor initial) (defaultBlinkCursor defaults)) (lastMaybe [value | CursorBlink value<-flags]),pixelateUnicode=fromMaybe (fromMaybe (pixelateUnicode initial) (defaultPixelateUnicode defaults)) (lastMaybe [value | Pixelate value<-flags]),streamerMode=fromMaybe (fromMaybe False (defaultStreamerMode defaults)) (lastMaybe [value | Streamer value<-flags]),videoMode=if backend == Terminal then Nothing else Just screenMode}
+            configured=(fst (handleEvent (uncurry V.EvResize dimensions) initial)) {keyBindings=initialKeymap,macKeySymbols=fromMaybe False (defaultMacKeySymbols defaults),defaultBufferView=fromMaybe CurrentView (defaultView defaults),chatSubmit=fromMaybe QuerySubmit (defaultChatSubmit defaults),appearance=colorMode,systemDark=maybe True (not . (`elem` ["7","15"]) . reverse . takeWhile (/=';') . reverse) terminalColors,wordStar=flagBool WordStar StandardKeys (fromMaybe (wordStar initial) (defaultWordStar defaults)),crtFilter=flagBool CRT NoCRT (fromMaybe (crtFilter initial) (defaultCRT defaults)),materialIcons=flagBool MaterialIcons ClassicIcons (fromMaybe (materialIcons initial) (defaultMaterialIcons defaults)),blinkCursor=fromMaybe (fromMaybe (blinkCursor initial) (defaultBlinkCursor defaults)) (lastMaybe [value | CursorBlink value<-flags]),pixelateUnicode=fromMaybe (fromMaybe (pixelateUnicode initial) (defaultPixelateUnicode defaults)) (lastMaybe [value | Pixelate value<-flags]),streamerMode=fromMaybe (fromMaybe False (defaultStreamerMode defaults)) (lastMaybe [value | Streamer value<-flags]),videoMode=if backend == Terminal then Nothing else Just screenMode}
         localPaths<-if daemon/=Nothing then mapM expandRemoteHome paths else pure paths
         (_,loaded)<-applyEffects configured (map ReadPath localPaths)
         cwd<-getCurrentDirectory
@@ -266,9 +266,11 @@ runEditor args = do
           mapM_ (setEnv "THC_EDIT_SESSION") daemon
           font<-Font.loadFont
           let specs=builtinTools++debugTools++chatTools++toolingTools++workspaceTools++fileTools++testsTools++historyTools++runtimeTools++gitTools++controlTools++environmentTools++clipboardTools++docsTools++[screenTool]
-          withPermissions (specs++agentTools) $ \permissions -> withBufferReadCommands $ \bufferCommands -> withBufferDiffCommands $ \diffCommands -> withDocsCommands $ \docsCommands -> withMenuCommands docsCommands $ \menuHost -> withConversationAt (startingDirectory protectedDesktop) $ \conversation -> withDebuggerConsoles (let (_,consoles,_)=conversationServices conversation in consoles) $ \debugger -> withTooling $ \tooling -> withGitOperations $ \gitOperations -> withReconciliation $ \reconciliation -> withProjectBrowser $ \projectBrowser -> withHighlighting $ \highlighting -> withKeybindings $ \keybindings -> withAutocomplete (startingDirectory protectedDesktop) $ \autocomplete -> do
+          withPermissions (specs++agentTools) $ \permissions -> withBufferReadCommands $ \bufferCommands -> withBufferDiffCommands $ \diffCommands -> withDocsCommands $ \docsCommands -> withMenuCommands docsCommands $ \menuHost -> withConversationAt (startingDirectory protectedDesktop) $ \conversation -> withDebuggerConsoles (let (_,consoles,_)=conversationServices conversation in consoles) $ \debugger -> withTooling $ \tooling -> withGitOperations $ \gitOperations -> withReconciliation $ \reconciliation -> withProjectBrowser $ \projectBrowser -> withHighlighting $ \highlighting -> withKeybindings keys $ \keybindings -> withAutocomplete (startingDirectory protectedDesktop) $ \autocomplete -> do
             contributions<-PluginMenu.menuSnapshot (menuContributions menuHost)
-            let liveDesktop=protectedDesktop {contributedMenus=contributions,agentMenuRefs=menuAgentReferences menuHost,menusActive=True}
+            let liveBase=protectedDesktop {contributedMenus=contributions,agentMenuRefs=menuAgentReferences menuHost,menusActive=True}
+            keymap<-either (die . T.unpack) pure (configuredBindings (contributedBindingCommands liveBase) keys)
+            let liveDesktop=liveBase {keyBindings=keymap}
             exiting<-newIORef False
             let runtimeEffects=menuEffects menuHost (keybindingEffects keybindings (autocompleteEffects autocomplete (projectBrowserEffects projectBrowser (gitOperationEffects gitOperations (debuggerEffects debugger (conversationEffects conversation (reconciliationEffects reconciliation (toolingEffects tooling applyEffects))))))))
                 core d pending=foldM step (False,d) pending
