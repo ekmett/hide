@@ -277,6 +277,11 @@ Do not replay stale keypresses against a newer host caret. For the first editabl
 slice, use an explicit **writer lease per buffer**, with a visible holder and
 Request editing / Release actions. Different participants can edit different
 buffers at once. Handoff establishes the current revision before typing resumes.
+Each lease names its holder and a host-issued generation. Every mutation carries
+that generation and rechecks it at commit, even if content has not changed: an
+A → B → A handoff must not revive A's earlier queued edits. Release, disconnect,
+revocation and handoff invalidate the generation. The host can reclaim a lease;
+a disconnected or expired membership cannot leave an orphaned editing lock.
 All mutation routes, including agents, formatting and reload, respect the lease
 or negotiate a checked handoff. Keep unaccepted typing as a local recoverable
 draft on disconnect or lost lease, never silently discard or resubmit it.
@@ -305,9 +310,13 @@ reports the actual commit, including any host modifications, to the suggester.
 A terminal process belongs to the session, with explicit output subscribers and
 an input/resize controller. Multiple read views do not fight over PTY dimensions.
 Granting terminal input shows the controller; requesting control is separate from
-following output. Disconnect releases control, not the process. Granting output
-includes a choice of retained history or output from now onward. Revocation stops
-input immediately; stopping already-running work is a separate visible action.
+following output. Disconnect releases control, not the process. Sharing output initially includes the current screen and retained history; the
+grant dialog says so. Start a new shared terminal when existing output should not
+be disclosed. Do not offer “from now onward” by filtering byte offsets alone:
+existing screen cells can retain older text and leak through later snapshots,
+scrollback, copy or structured reads. Such an option would require an independently
+initialized post-grant terminal projection across all those surfaces. Revocation
+stops input immediately; stopping already-running work is a separate visible action.
 
 Moving an embedded terminal into a native/browser/terminal display retains the
 same PTY and process identity. Under tmux/screen, launch a hide display attached to
@@ -384,10 +393,14 @@ Each slice must have a useful end-to-end workflow. Before admitting a peer, prov
 - Duplicate input, stale view IDs and dropped acknowledgements do not duplicate an
   edit/process launch or retarget a command. Slow peers cannot delay host typing.
 - A writer handoff preserves the other person's changes, unsent drafts and explicit
-  Undo boundaries. Later transformation tests cover overlapping edits, Unicode,
+  Undo boundaries. A → B → A without content changes rejects the first lease's
+  delayed mutations; disconnect releases the lease without losing its draft. Later transformation tests cover overlapping edits, Unicode,
   deleted anchors and independent inverses before concurrent writers are enabled.
 - A peer cannot grant itself tools through menus, project configuration, crafted
   protocol fields, agent messages or restored approval state.
+- A terminal-output grant clearly includes existing visible/retained content.
+  If a future “from now” mode is added, pre-grant fixture text still on screen is
+  absent from every subsequent snapshot, read and copy, not only the byte log.
 - Closing one display, disconnecting a guest and ending the session have distinct,
   tested effects on buffers, agents, terminals and recoverable work.
 
