@@ -1,7 +1,7 @@
 # Haskell plugin API
 
 Status: design proposal with implemented command registration and immutable
-buffer read slices. `Hide.Plugin.Command` and `Hide.Plugin.Buffer` document those
+buffer read and strict-diff slices. `Hide.Plugin.Command` and `Hide.Plugin.Buffer` document those
 current APIs; the signatures below sketch the full proposed contracts and are
 not a compilable SDK. The approved
 [sidebar design](../plans/sidebar-navigation.md) supplies the navigation model.

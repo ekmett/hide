@@ -126,7 +126,7 @@ worker from narrow current/baseline text inputs, without retaining Buffer/Undo. 
 plugin CallContext.
 
 This is an implementation slice, not a complete plugin SDK. Plugin
-activation/task scopes, public checked buffer edits, subscriptions/events
+activation/task scopes, arbitrary prepared-edit grants, subscriptions/events
 and custom widget/window types remain tracked in
 [the delivery plan](https://github.com/ekmett/hide/issues/1).
 
@@ -174,10 +174,30 @@ run unmasked, and cancellation/finalizer joins run outside the desktop lock.
 Request lifetime is separate from an attempt, so failed preparation cannot retire
 a correction ticket or allow an obsolete completion to apply.
 
-These are host operations, not the public scoped plugin edit service. A caller
-must already own the session transition, admit the project/path/source baseline,
-and revalidate its task's admission. Public edit admission, cancellation, approval-once continuations and plugin
-authority remain part of [the buffer service work](https://github.com/ekmett/hide/issues/4).
+Linked handlers now call
+`applyBufferDiff :: BufferEditor -> BufferRef -> ContentVersion -> Text -> IO (Either Text DiffResult)`
+from `Hide.Plugin.Buffer`, using `capturedVersion` from the admitted read. The
+opaque editor belongs to the running Permissions session and a fixed actor; it
+contains no cached approval or Human provenance. Call on a worker. The existing
+32-request ingress is shared with captures, and owner admission refuses a stale
+version before retaining any original source, including equal-revision replacement
+in the queue gap. Current policy, actor and privacy still apply to every request.
+
+The real `buffer_apply_diff` MCP route calls registered `hide.buffer.apply-diff`
+through `Hide.BufferDiffCommand`. Its locked wire adapter checks numeric revision
+and captures exact content identity; the reply worker retains only editor/ref/
+version/diff. The same Waiting request owns editable correction attempts,
+cancellation/adoption claim and terminal typed result. Cancellation retires the
+shared attempt; shutdown rejects new calls and resolves accepted replies before
+joining workers outside the session lock. `DiffResult` reports exact appliedDiff,
+userModified and resulting revision; formatting the wire result stays on the worker.
+Retiring the command rejects later invocation without redirecting retained handles.
+
+This exposes one strict single-buffer diff operation, not arbitrary prepared-edit
+commit grants. Generic plugin activation/event lifetimes and wider authority
+contexts remain part of [the buffer service work](https://github.com/ekmett/hide/issues/4).
+Configuration policy still reads/parses once per owner admission batch and at
+approval/adoption; moving that IO off the UI owner remains separate work.
 
 ## Frontend command routing
 

@@ -21,6 +21,9 @@ import Hide.Remote
 import Hide.RemoteEndpoint
 import qualified Hide.Session as S
 import Hide.BufferReadCommand (withBufferReadCommands)
+import Hide.BufferDiffCommand (withBufferDiffCommands,bufferDiffTool)
+import Hide.WorkspaceFilesMCP (fileTools)
+import qualified Data.Text.Encoding as TE
 import System.Timeout (timeout)
 import Hide.Buffer
 import Hide.Model
@@ -131,22 +134,33 @@ checks=do
       pure workers
     outcomes<-mapM wait accepted
     check "all accepted ingress replies survive shutdown" (all (either (const True) (const False)) outcomes)
-    withPermissionsAt path builtinTools $ \owner->withBufferReadCommands $ \commands->do
+    TIO.writeFile path "[editor.mcp.permissions]\nread_buffer = 'enable'\nbuffer_apply_diff = 'enable'\n"
+    withPermissionsAt path (builtinTools++fileTools) $ \owner->withBufferReadCommands $ \commands->withBufferDiffCommands $ \diffCommands->do
       session<-randomIdentity
       endpoint<-sessionEndpoint session
       let reader=bufferReader owner (pure (Right ()))
           inspect d _ request=do
-            (next,reply)<-editorResponseOnly builtinTools (readBufferTool commands reader) d request
+            let dispatch current name args
+                  | name=="buffer_apply_diff"=bufferDiffTool diffCommands (bufferEditor owner (pure (Right ()))) current name args
+                  | otherwise=readBufferTool commands reader current name args
+            (next,reply)<-editorResponseOnly (builtinTools++fileTools) dispatch d request
             pure (False,next,reply)
           effects d requests=pure (Exit `elem` requests,d)
           open attempts=connectEndpoint endpoint `catch` \(err::IOException)->
             if attempts<=0 then throwIO err else threadDelay 10000 >> open (attempts-1)
           receive h=timeout 3000000 (readPacket h) >>= maybe (error "typed daemon read timed out") pure
-          readRemote=bracket (open (100::Int)) hClose $ \h->do
+          callRemote name args=bracket (open (100::Int)) hClose $ \h->do
             writePacket h (JsonPacket (object ["type" .= ("inspect"::T.Text),"request" .= object
               ["jsonrpc" .= ("2.0"::T.Text),"id" .= (1::Int),"method" .= ("tools/call"::T.Text),
-               "params" .= object ["name" .= ("read_buffer"::T.Text),"arguments" .= object ["bufferId" .= ident]]]]))
+               "params" .= object ["name" .= (name::T.Text),"arguments" .= args]]]))
             receive h
+          readRemote=callRemote "read_buffer" (object ["bufferId" .= ident])
+          payload response=do
+            JsonPacket value<-response
+            content<-parseMaybe (withObject "rpc" (\o->o .: "result" >>= withObject "tool result" (.: "content"))) value :: Maybe [Value]
+            row<-case content of first:_->Just first; _->Nothing
+            text<-parseMaybe (withObject "content" (.: "text")) row
+            decodeStrict' (TE.encodeUtf8 text)
           succeeded response=case response of
             Just (JsonPacket (Object fields))->case KM.lookup "result" fields of
               Just result->parseMaybe (withObject "tool result" (.: "isError")) result==Just False
@@ -160,6 +174,11 @@ checks=do
           check "typed reader frontend receives assets" (case assets of Just (Just (JsonPacket (Object fields)))->KM.lookup "type" fields==Just (String "assets"); _->False)
           check "typed read_buffer progresses through daemon owner with attached frontend" . succeeded =<< readRemote
         check "same typed reader survives frontend detach" . succeeded =<< readRemote
+        let patch="@@ -1 +1 @@\n-original\n+daemon edit\n"::T.Text
+        edited<-callRemote "buffer_apply_diff" (object ["bufferId" .= ident,"revision" .= (0::Int),"diff" .= patch])
+        check "actual typed MCP diff applies after frontend detach" (succeeded edited && (payload edited >>= parseMaybe (withObject "diff" (.: "appliedDiff")))==Just patch)
+        current<-readRemote
+        check "daemon read observes exact typed diff result" ((payload current >>= parseMaybe (withObject "read" (.: "text")))==Just ("daemon edit\n"::T.Text))
     saved<-newIORef Nothing
     worker<-withPermissionsAt path builtinTools $ \owner->do
       let reader=bufferReader owner (pure (Right ()))
