@@ -30,7 +30,7 @@ import Hide.Model (Desktop(..), MenuItem(..), menus, commandEnabled)
 import Hide.GuestAccess (CellAccess(..), cellAccess, guestKeyboardAllowed, beginGuestInput, guestKeyCombinations)
 import qualified Hide.Protocol as P
 import Hide.Render (renderDesktop)
-import Hide.Unicode (clusterWidth, displayOpsForPic, graphemes)
+import Hide.Unicode (clusterWidth, displayClusters, displayOpsForPic, terminalProjection)
 
 screenTool :: Value
 screenTool=object
@@ -67,22 +67,22 @@ capture font desktop includeImage
     maskRow y line=snd (mapAccumL (maskCluster y) 0 padded)
       where
         chunks=concatMap spanClusters line
-        occupied=sum [clusterWidth text | (text,_)<-chunks]
-        padded=chunks++replicate (max 0 (cols-occupied)) (" ",V.defAttr)
-    spanClusters TextSpan{textSpanAttr=attr,textSpanText=t}=[(text,attr) | text<-graphemes (TL.toStrict t)]
-    spanClusters (Skip n)=replicate n (" ",V.defAttr)
-    spanClusters (RowEnd n)=replicate n (" ",V.defAttr)
-    maskCluster y x (text,attr)=
-      let width=clusterWidth text
-          access=[cellAccess desktop column y | column<-[x..x+width-1]]
+        occupied=sum [advance | (_,advance,_)<-chunks]
+        padded=chunks++replicate (max 0 (cols-occupied)) (" ",1,V.defAttr)
+    spanClusters (TextSpan attr advance _ t)=
+      [(text,width,attr) | (text,width)<-displayClusters advance (TL.toStrict t)]
+    spanClusters (Skip n)=replicate n (" ",1,V.defAttr)
+    spanClusters (RowEnd n)=replicate n (" ",1,V.defAttr)
+    maskCluster y x (text,width,attr)=
+      let access=[cellAccess desktop column y | column<-[x..x+width-1]]
           (shown,safeAccess)=redactCluster text access
           readable=all cellReadable safeAccess
           shownAttr=if readable then attr else V.defAttr `V.withForeColor` V.RGBColor 0 0 0 `V.withBackColor` V.RGBColor 0 0 0
-      in (x+width,(shown,shownAttr,safeAccess))
-    plain=T.unlines [T.concat [text | (text,_,_)<-line] | line<-maskedRows]
-    accessGrid=Vec.fromList (concatMap (concatMap (\(_,_,access)->access)) maskedRows)
+      in (x+width,(shown,width,shownAttr,safeAccess))
+    plain=T.unlines [T.concat [terminalProjection advance text | (text,advance,_,_)<-line] | line<-maskedRows]
+    accessGrid=Vec.fromList (concatMap (concatMap (\(_,_,_,access)->access)) maskedRows)
     readableCell x y=cellReadable (accessGrid Vec.! (y*cols+x))
-    accessRows=[object ["y" .= y,"runs" .= runs (concatMap (\(_,_,access)->access) line)] | (y,line)<-zip [0::Int ..] maskedRows]
+    accessRows=[object ["y" .= y,"runs" .= runs (concatMap (\(_,_,_,access)->access) line)] | (y,line)<-zip [0::Int ..] maskedRows]
     runs entries=snd (mapAccumL run 0 (groupBy same entries))
       where
         same a b=cellReadable a==cellReadable b && cellClickable a==cellClickable b
@@ -114,15 +114,15 @@ capture font desktop includeImage
       (object ["type" .= ("text"::Text),"text" .= TE.decodeUtf8 (BL.toStrict (encode (metadata keys commands)))] :
         [object ["type" .= ("image"::Text),"mimeType" .= ("image/png"::Text),
           "data" .= TE.decodeUtf8 (B64.encode (BL.toStrict png))] | includeImage])]
-    blank=(glyph font ' ',PixelRGB8 0 0 0,PixelRGB8 0 0 0,0)
-    cells=Vec.fromList (concatMap (take cols . (++repeat blank) . concatMap (\(text,attr,_)->concatMap (cluster attr) (graphemes text))) maskedRows)
-    cluster attr text=case T.uncons text of
+    blank=(glyph font ' ',PixelRGB8 0 0 0,PixelRGB8 0 0 0,0,False)
+    cells=Vec.fromList (concatMap (take cols . (++repeat blank) . concatMap (\(text,advance,attr,_)->cluster attr advance text)) maskedRows)
+    cluster attr advance text=case T.uncons text of
       Nothing -> []
       Just (c,_) -> let tile=glyph font c
-                   in [(tile,color (V.attrForeColor attr),color (V.attrBackColor attr),offset*8) | offset<-[0..clusterWidth text-1]]
+                   in [(tile,color (V.attrForeColor attr),color (V.attrBackColor attr),offset*8,advance>clusterWidth text) | offset<-[0..advance-1]]
     png=encodePng (generateImage pixel (cols*8) (rows*cellHeight))
-    pixel x y=let (tile,fg,bg,offset)=cells Vec.! ((y `div` cellHeight)*cols+x `div` 8)
-                  gx=offset+x `mod` 8
+    pixel x y=let (tile,fg,bg,offset,stretched)=cells Vec.! ((y `div` cellHeight)*cols+x `div` 8)
+                  gx=(offset+x `mod` 8) `div` (if stretched then 2 else 1)
                   gy=(y `mod` cellHeight)*16 `div` cellHeight
                   ink=gx<glyphWidth tile && gx<16 && testBit (glyphRows tile !! gy) (15-gx)
                   base=if ink then fg else bg
@@ -131,11 +131,12 @@ capture font desktop includeImage
     invert (PixelRGB8 r g b)=PixelRGB8 (255-r) (255-g) (255-b)
 
 -- | Blank a whole grapheme if any covered cell is unreadable; preserve position
--- and keep clickability independent from readability.
+-- and keep clickability independent from readability. The access list supplies
+-- the occupied advance, including deliberately stretched narrow graphemes.
 redactCluster :: Text -> [CellAccess] -> (Text,[CellAccess])
 redactCluster text access
   | all cellReadable access=(text,access)
-  | otherwise=(T.replicate (clusterWidth text) " ",[entry {cellReadable=False} | entry<-access])
+  | otherwise=(T.replicate (length access) " ",[entry {cellReadable=False} | entry<-access])
 
 color :: V.MaybeDefault V.Color -> PixelRGB8
 color (V.SetTo (V.RGBColor r g b))=PixelRGB8 r g b

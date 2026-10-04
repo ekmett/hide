@@ -9,7 +9,7 @@ module Hide.Plugin.Window
   ( WindowRef, WindowScope, WindowUpdate, withWindowScope, openTextWindow, refreshTextWindow
   , updateWindowRef, admitWindowUpdate, windowRefCurrent, retireWindowRef
   , PreparedWindow, prepareTextWindow, prepareMarkdownWindow, prepareRecoverableTextWindow
-  , preparedWindowTitle, preparedWindowText, preparedWindowRows, preparedWindowRecovery
+  , preparedWindowTitle, preparedWindowText, preparedWindowRows, preparedWindowHasSections, preparedWindowRecovery
   ) where
 
 import Control.Exception (evaluate, bracket)
@@ -21,7 +21,7 @@ import qualified Data.Vector as V
 import Hide.Buffer (BufferContent, bufferContent, newBuffer, prepareBuffer)
 import Hide.Markdown (renderMarkdown)
 import Hide.Plugin.Command (validCommandName)
-import Hide.Syntax (Style(..))
+import Hide.Syntax (Style(..),sectionTitle)
 
 -- | Exact content instance. A closed/reopened view cannot reuse this identity.
 data WindowRef = WindowRef Unique WindowScope (TVar (Integer,Bool))
@@ -34,21 +34,25 @@ instance Show WindowRef where
 
 -- | Fully prepared immutable text and styled display rows. Equality observes
 -- the unique prepared identity only, never text or styled payloads.
-data PreparedWindow = PreparedWindow !Unique !Text !BufferContent !(V.Vector [(Char,Style)]) !(Maybe (Text,Int))
+data PreparedWindow = PreparedWindow !Unique !Text !BufferContent !(V.Vector [(Char,Style)]) !(Maybe (Text,Int)) !Bool
 preparedWindowRef :: PreparedWindow -> Unique
-preparedWindowRef (PreparedWindow ident _ _ _ _)=ident
+preparedWindowRef (PreparedWindow ident _ _ _ _ _)=ident
 preparedWindowTitle :: PreparedWindow -> Text
-preparedWindowTitle (PreparedWindow _ title _ _ _)=title
+preparedWindowTitle (PreparedWindow _ title _ _ _ _)=title
 preparedWindowText :: PreparedWindow -> BufferContent
-preparedWindowText (PreparedWindow _ _ text _ _)=text
+preparedWindowText (PreparedWindow _ _ text _ _ _)=text
 preparedWindowRows :: PreparedWindow -> V.Vector [(Char,Style)]
-preparedWindowRows (PreparedWindow _ _ _ rows _)=rows
+preparedWindowRows (PreparedWindow _ _ _ rows _ _)=rows
+
+-- | Cached heading presence, forced during preparation; input never scans rows.
+preparedWindowHasSections :: PreparedWindow -> Bool
+preparedWindowHasSections (PreparedWindow _ _ _ _ _ sections)=sections
 
 -- | Explicit durable type/version. Ordinary prepared views are transient: their
 -- text is never checkpointed implicitly. The host restores durable text as an
 -- inert unavailable view; it does not invoke a plugin from the recovery parser.
 preparedWindowRecovery :: PreparedWindow -> Maybe (Text,Int)
-preparedWindowRecovery (PreparedWindow _ _ _ _ recovery)=recovery
+preparedWindowRecovery (PreparedWindow _ _ _ _ recovery _)=recovery
 
 -- | Prepare text whose title and content may be written to private recovery.
 -- Use only non-secret state declared durable by the view's owner. Type IDs are
@@ -57,8 +61,8 @@ prepareRecoverableTextWindow :: Text -> Int -> Text -> Text -> IO (Either Text P
 prepareRecoverableTextWindow kind version title text
   | not (validCommandName kind) || T.length kind>128 || version<=0=pure (Left "Invalid durable plugin window type/version.")
   | otherwise=do
-      PreparedWindow ident caption measured rows _<-prepareTextWindow title text
-      pure (Right (PreparedWindow ident caption measured rows (Just (kind,version))))
+      PreparedWindow ident caption measured rows _ sections<-prepareTextWindow title text
+      pure (Right (PreparedWindow ident caption measured rows (Just (kind,version)) sections))
 
 instance Eq PreparedWindow where
   a==b=preparedWindowRef a==preparedWindowRef b
@@ -81,7 +85,7 @@ prepare title styled=do
   _<-evaluate (V.foldl' (\n row->foldl' (\m (c,s)->c `seq` s `seq` m+1) n row) (0::Int) rows)
   let measured=newBuffer (T.pack (map fst styled))
   _<-evaluate (prepareBuffer measured)
-  evaluate (PreparedWindow ident (T.take 8192 (T.map safe title)) (bufferContent measured) rows Nothing)
+  evaluate (PreparedWindow ident (T.take 8192 (T.map safe title)) (bufferContent measured) rows Nothing (any (sectionTitle . snd) styled))
   where
     safe c | c<' ' || c=='\DEL'=' '
            | otherwise=c

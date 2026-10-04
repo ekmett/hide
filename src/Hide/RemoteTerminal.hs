@@ -16,8 +16,9 @@ import qualified Graphics.Vty as V
 import qualified Data.IntMap.Strict as IM
 import Hide.Links (openResource)
 import Hide.Remote (RemotePeer)
+import Hide.TextStyle
 import Hide.RemoteWindow (RemoteFrame(..), RemoteCell(..), remoteBindingInput)
-import Hide.Unicode (textImage)
+import Hide.Unicode (textImage,wideTextImage,clusterWidth)
 #ifdef WITH_REMOTE
 import Control.Concurrent.Async (withAsync, poll)
 import Control.Concurrent.STM
@@ -68,12 +69,11 @@ remoteTerminalPicture frame = (V.picForImage (V.vertCat [row (IM.findWithDefault
   {V.picCursor=maybe V.NoCursor (uncurry V.Cursor) (remoteCursor frame)}
   where
     (width,height)=remoteSize frame
-    rows=IM.fromListWith (++) [(y,[cell]) | cell@(RemoteCell _ y _ _ _ _)<-remoteCells frame]
-    color n=V.rgbColor (n `shiftR` 16 .&. 255) (n `shiftR` 8 .&. 255) (n .&. 255)
+    rows=IM.fromListWith (++) [(y,[cell]) | cell@(RemoteCell _ y _ _ _)<-remoteCells frame]
     row = V.horizCat . spans 0 . reverse
     spaces n=V.charFill V.defAttr ' ' n 1
     spans at []=[spaces (width-at)]
-    spans at (RemoteCell x _ fg bg text w:rest)=spaces (x-at):textImage (V.defAttr `V.withForeColor` color fg `V.withBackColor` color bg) text:spans (x+w) rest
+    spans at (RemoteCell x _ paint text w:rest)=spaces (x-at):(if w/=clusterWidth text then wideTextImage else textImage) (textStyleAttr paint) text:spans (x+w) rest
 
 -- | Construct a base64 OSC 52 clipboard-write sequence; no clipboard read is performed.
 terminalClipboard :: T.Text -> BS.ByteString

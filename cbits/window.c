@@ -15,7 +15,7 @@ static int cell_height;
 static uint32_t *pixels;
 static int frame_w, frame_h;
 static bool pixelate_unicode;
-typedef struct { char *text; int w, h; bool pixelated; uint32_t fg, *pixels; } UnicodeTile;
+typedef struct { char *text; int w, h; bool pixelated; uint32_t fg, traits, *pixels; } UnicodeTile;
 static UnicodeTile unicode_tiles[512];
 static unsigned tile_next;
 static void clear_unicode(void) {
@@ -183,32 +183,35 @@ int thc_begin(void) {
 
 /* Bitmap composition keeps all glyph/background edges on the same cell grid.
  * ponytail: upload one small frame per event; use an atlas if profiling demands it. */
-void thc_glyph(int x, int y, int cells, int glyph_width, const uint16_t *bits, uint32_t fg, uint32_t bg) {
+void thc_glyph(int x, int y, int cells, int glyph_width, const uint16_t *bits, uint32_t fg, uint32_t bg, uint32_t traits) {
     if (!pixels || y < 0 || y >= rows) return;
     int x0=cell_x(x), x1=cell_x(x+SDL_max(cells,(glyph_width+7)/8));
     int y0=cell_y(y), y1=cell_y(y+1);
     for (int py=y0;py<y1;++py) for (int px=SDL_max(0,x0);px<SDL_min(frame_w,x1);++px) {
         int dx=(int)((px-x0)/scale), dy=(py-y0)*16/SDL_max(1,y1-y0);
-        bool ink=dx<glyph_width && dx<16 && (bits[dy] & (0x8000u>>dx));
+        int source=((traits&4)?dx/2:dx)-((traits&2)?(15-dy)/4:0);
+        bool ink=source>=0 && source<glyph_width && source<16 && (bits[dy] & (0x8000u>>source));
+        if ((traits&1) && source>0 && source<=glyph_width && source<=16)
+            ink=ink || (bits[dy] & (0x8000u>>(source-1)));
         if (ink || cells) pixels[py*frame_w+px]=0xff000000 | (ink?fg:bg);
     }
 }
 void thc_pixelate_unicode(int enabled) { pixelate_unicode=enabled!=0; }
-int thc_unicode(int x, int y, int cells, const char *text, uint32_t fg, uint32_t bg) {
+int thc_unicode(int x, int y, int cells, const char *text, uint32_t fg, uint32_t bg, uint32_t traits) {
     if (!pixels || x<0 || y<0 || x+cells>cols || y>=rows || cells<1) return 1;
     int x0=cell_x(x), y0=cell_y(y), width=cell_x(x+cells)-x0, height=cell_y(y+1)-y0;
     int w=pixelate_unicode?8*cells:width, h=pixelate_unicode?16:height;
     UnicodeTile *tile=NULL;
     for (int i=0;i<512;++i) {
         UnicodeTile *candidate=&unicode_tiles[i];
-        if (candidate->text && candidate->w==w && candidate->h==h && candidate->pixelated==pixelate_unicode && candidate->fg==fg && !strcmp(candidate->text,text)) { tile=candidate; break; }
+        if (candidate->text && candidate->w==w && candidate->h==h && candidate->pixelated==pixelate_unicode && candidate->fg==fg && candidate->traits==traits && !strcmp(candidate->text,text)) { tile=candidate; break; }
     }
     if (!tile) {
         tile=&unicode_tiles[tile_next++%512];
         free(tile->text); free(tile->pixels); *tile=(UnicodeTile){0};
         tile->text=strdup(text); tile->pixels=calloc((size_t)w*h,sizeof(uint32_t));
-        tile->w=w; tile->h=h; tile->fg=fg; tile->pixelated=pixelate_unicode;
-        if (!tile->text || !tile->pixels || !(pixelate_unicode ? thc_unicode_pixelated(text,w,h,fg,tile->pixels) : thc_unicode_bitmap(text,w,h,fg,tile->pixels))) {
+        tile->w=w; tile->h=h; tile->fg=fg; tile->traits=traits; tile->pixelated=pixelate_unicode;
+        if (!tile->text || !tile->pixels || !(pixelate_unicode ? thc_unicode_pixelated(text,w,h,fg,traits,tile->pixels) : thc_unicode_bitmap(text,w,h,fg,traits,tile->pixels))) {
             free(tile->text); free(tile->pixels); *tile=(UnicodeTile){0};
             return SDL_SetError("Cannot rasterize Unicode text");
         }

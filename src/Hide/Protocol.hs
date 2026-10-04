@@ -31,11 +31,12 @@ import Hide.GuestAccess
 import Hide.Model hiding (Paste)
 import qualified Hide.Model as Model
 import Hide.Buffer (dirty, newBuffer, newByteBuffer, selectedText)
+import Hide.TextStyle
 import Hide.Font
 import Hide.Render (renderDesktop)
 import qualified Hide.Plugin.Menu as Plugin
 import Hide.Commands (commandIdentifier)
-import Hide.Unicode (displayOpsForPic, graphemes, clusterWidth)
+import Hide.Unicode (displayOpsForPic, graphemes, clusterWidth, displayClusters)
 
 data WebInput = Key T.Text [V.Modifier] | Paste T.Text | Mouse T.Text Int Int Int Int [V.Modifier]
               | Wheel Int Int Int [V.Modifier] | SystemTheme Bool | FocusWindow Int | BrowserCommand Command | MenuCommand Command | ContributedMenu T.Text T.Text Integer | UploadFile T.Text BS.ByteString | Frontend (Maybe Int) Bool | OpenPath FilePath | Resize Int Int | SuspendSession | Blur | Modifiers [V.Modifier] deriving (Eq,Show)
@@ -190,21 +191,18 @@ frameRows d = map (toJSON . spans 0 . toList) (toList (displayOpsForPic (renderD
   where
     spans _ [] = []
     spans x (op:rest) = case op of
-      TextSpan{textSpanAttr=a,textSpanText=t} ->
-        let clusters=[(cluster,clusterWidth cluster) | cluster<-graphemes (TL.toStrict t)]
-        in toJSON (x,rgb (V.attrForeColor a),rgb (V.attrBackColor a),packClusters clusters):spans (x+sum (map snd clusters)) rest
-      Skip n -> toJSON (x,0xffffff::Int,0x0000aa::Int,[String (T.replicate n " ")]):spans (x+n) rest
-      RowEnd n -> toJSON (x,0xffffff::Int,0x0000aa::Int,[String (T.replicate n " ")]):spans (x+n) rest
+      TextSpan a advance _ t ->
+        let paint=textStyleFromAttr a
+            clusters=displayClusters advance (TL.toStrict t)
+        in toJSON (x,textForeground paint,textBackground paint,textFlags paint,packClusters clusters):spans (x+sum (map snd clusters)) rest
+      Skip n -> toJSON (x,0xffffff::Int,0x0000aa::Int,0::Int,[String (T.replicate n " ")]):spans (x+n) rest
+      RowEnd n -> toJSON (x,0xffffff::Int,0x0000aa::Int,0::Int,[String (T.replicate n " ")]):spans (x+n) rest
     packClusters = concatMap pack . groupBy (\a b -> ordinary a==ordinary b)
     ordinary (cluster,w)=w==1 && T.length cluster==1
     pack []=[]
     pack xs@(first:_)
       | ordinary first = [String (T.concat (map fst xs))]
-      | otherwise = map toJSON xs
-    rgb :: V.MaybeDefault V.Color -> Int
-    rgb (V.SetTo (V.RGBColor r g b)) = fromIntegral r `shiftL` 16 .|. fromIntegral g `shiftL` 8 .|. fromIntegral b
-    rgb (V.SetTo (V.ISOColor n)) = [0,0xaa0000,0x00aa00,0xaa5500,0x0000aa,0xaa00aa,0x00aaaa,0xaaaaaa,0x555555,0xff5555,0x55ff55,0xffff55,0x5555ff,0xff55ff,0x55ffff,0xffffff] !! (fromIntegral n `mod` 16)
-    rgb _ = 0
+      | otherwise = [if w/=clusterWidth text then toJSON (text,w,True) else toJSON (text,w) | (text,w)<-xs]
 
 -- Both encodings use the reconstructed previous screen, never the previous
 -- packet, as their dictionary. Screen rows contain only arrays, bounded integer

@@ -41,7 +41,7 @@ def wait_for(predicate, seconds=15):
 
 def display_text(display):
     return '\n'.join(''.join(run if isinstance(run, str) else run[0]
-                            for span in (row or []) for run in span[3])
+                            for span in (row or []) for run in span[4])
                      for row in display.rows)
 
 
