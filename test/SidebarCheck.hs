@@ -1,10 +1,11 @@
 {-# LANGUAGE OverloadedStrings #-}
 module SidebarCheck (checks) where
 import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async (withAsync,wait,poll)
 import Data.IORef
 import Control.Concurrent.MVar
 import Control.Exception (bracket,evaluate)
-import Control.Monad (unless,forM_,void)
+import Control.Monad (unless,forM_,void,replicateM_)
 import qualified Data.Map.Strict as M
 import qualified Data.Sequence as S
 import qualified Data.Text as T
@@ -81,9 +82,13 @@ checks=bracket temporary removePathForcibly $ \dir->withSidebarCommands $ \host-
   let changed=insertText "local " opened
   dirty<-await (tickSidebar host) (\d->maybe False (\(value,_,_)->value) (M.lookup (dir </> "Main.hs") (treeBadges (treeOf d)))) changed
   check "Files cached badge preserves dirty counts" ("Main.hs +1 -1" `T.isInfixOf` snapshot dirty)
+  removeFile (dir </> "Main.hs")
+  createDirectory (dir </> "Main.hs")
   reopened<-act host (activateTree False (atLabel "Main.hs" dirty) dirty)
-    >>= await (tickSidebar host) (\d->not (treeFocused (treeOf d)))
-  check "Opening an existing dirty file preserves its live content" (activeText reopened=="local main = 1\n")
+    >>= await (tickSidebar host) (\d->not (treeFocused (treeOf d)) || "failed" `T.isInfixOf` status d)
+  check "Opening an existing dirty file survives an unreadable disk replacement and preserves its live content" (activeText reopened=="local main = 1\n" && not (treeFocused (treeOf reopened)))
+  removeDirectory (dir </> "Main.hs")
+  TIO.writeFile (dir </> "Main.hs") "main = 1\n"
   let privateIndex=atLabel "thc.toml" reopened
       privateTree=select privateIndex reopened
   (agentState,agentEffects)<-right (Wire.applyGuestInput (Wire.Key "Enter" []) privateTree)
@@ -94,11 +99,12 @@ checks=bracket temporary removePathForcibly $ \dir->withSidebarCommands $ \host-
       rowY=2+treeSelected (treeOf docs)-treeScroll (treeOf docs)
       (popup,_)=handleEvent (V.EvMouseDown 5 rowY V.BRight []) docs
       (_,links)=handleEvent (V.EvKey V.KEnter []) popup
-  check "Files secondary Open retains its frozen provider target" (case links of [FollowTreeLink trace path]->path==dir </> "Readme.md" && hitCurrent trace (treeOf popup); _->False)
+  check "Files secondary Open retains its frozen provider target" (case links of [FollowTreeLink trace path ""]->path==dir </> "Readme.md" && hitCurrent trace (treeOf popup); _->False)
   let replaced=popup {sideTree=Just (collapseAt 0 (treeOf popup))}
   check "stale Files popup refuses after ancestor collapse" (null (snd (handleEvent (V.EvKey V.KEnter []) replaced)))
   independent host expanded
   refresh host dir expanded
+  edgeChecks dir
   putStrLn "shared sidebar checks passed"
 
 independent :: SidebarHost -> Desktop -> IO ()
@@ -134,6 +140,13 @@ independent host d=withRegistry $ \registry->do
   void (tryPutMVar gate ())
   loaded<-act host (activateTree True index refused) >>= settle host
   check "independent provider shares the visible Files tree" (all (`T.isInfixOf` snapshot loaded) ["Files","Tools","★ Inspect","More…"])
+  let targetIndex=atLabel "Inspect" loaded
+      (secondaryPopup,_)=Wire.applyInput (Wire.Mouse "down" 5 (2+targetIndex-treeScroll (treeOf loaded)) 2 1 []) loaded
+  check "independent secondary actions join the actual shared popup" (map fst (contextItemsFor secondaryPopup)==["Inspect details","Read documentation"])
+  let (_,resourceEffects)=handleEvent (V.EvKey V.KEnter []) (fst (handleEvent (V.EvKey V.KDown []) secondaryPopup))
+  check "independent resource declaration reuses captured link transport" (case resourceEffects of [FollowTreeLink trace "/extension/help.md" "#details"]->hitCurrent trace (treeOf secondaryPopup); _->False)
+  secondaryInvoked<-act host (Wire.applyInput (Wire.Key "Enter" []) secondaryPopup)
+  _<-await (tickSidebar host) (T.isInfixOf "Independent action" . activeText) secondaryInvoked
   let selected=select (atLabel "Inspect" loaded) loaded
       node=maybe (error "leaf") id (rowAt (treeSelected (treeOf selected)) (treeOf selected))
       trace=hitTrace (keyOf (rowHit node)) (treeOf selected)
@@ -166,3 +179,39 @@ refresh host dir d=withReconciliation $ \watcher->do
 
 temporary :: IO FilePath
 temporary=do root<-getTemporaryDirectory; (path,handle)<-openTempFile root "hide-sidebar"; hClose handle; removeFile path; createDirectory path; canonicalizePath path
+
+-- Same live route for failure/retry, queued retirement and owning scope closure.
+edgeChecks :: FilePath -> IO ()
+edgeChecks dir=withSidebarCommands $ \host->do
+  base<-initializeSidebar host (installSidebar (emptySidebar dir 24 True) (initialDesktop (100,30)))
+  withRegistry $ \registry->do
+    replyGate<-newEmptyMVar
+    leafRef<-newEmptyMVar
+    count<-newMVar (0::Int)
+    (provider,leaf)<-TreeExtension.declare registry
+      (\ctx->takeMVar replyGate >> SidebarPrepared <$> prepareMarkdown (sidebarColumns ctx) "/extension/help.md" "" "# Retired action\n")
+      (\_ ->do
+        next<-modifyMVar count (\value->pure (value+1,value+1))
+        if next==1 then pure (Left (CommandRejected "fixture unavailable")) else do
+          node<-readMVar leafRef
+          pure (Right (P.NodePage [node] Nothing)))
+    putMVar leafRef leaf
+    publishTreeFromHost host provider
+    published<-settle host base
+    failed<-act host (activateTree True (atLabel "Tools" published) published) >>= settle host
+    check "provider failures produce a real Retry row" ("Retry:" `T.isInfixOf` snapshot failed && any (T.isInfixOf "fixture unavailable".P.infoLabel.rowInfo.snd) (visibleRows 0 32768 (treeOf failed)))
+    recovered<-act host (activateTree False (case [index | (index,row)<-visibleRows 0 32768 (treeOf failed),rowAction row==RetryLoad] of index:_->index; _->error "missing Retry row") failed) >>= settle host
+    check "Retry invokes the same provider and replaces the failed row" ("Inspect" `T.isInfixOf` snapshot recovered && not ("Retry:" `T.isInfixOf` snapshot recovered))
+    invoked<-act host (activateTree False (atLabel "Inspect" recovered) recovered)
+    withdrawn<-retireTreeFromHost host (P.treeReference provider) invoked
+    putMVar replyGate ()
+    refused<-await (tickSidebar host) (T.isInfixOf "expired" . status) withdrawn
+    check "late retired action cannot install a prepared document" (not ("Retired action" `T.isInfixOf` activeText refused))
+  scoped<-withRegistry $ \registry->do
+    (provider,_)<-TreeExtension.declare registry (const (error "not invoked")) (const (pure (Right (P.NodePage [] Nothing))))
+    publishTreeFromHost host provider
+    live<-settle host base
+    check "scoped provider was published" (any ((=="Tools").P.infoLabel.rowInfo.snd) (visibleRows 0 32768 (treeOf live)))
+    pure live
+  closed<-settle host scoped
+  check "closing provider command scope withdraws its root" (not (any ((=="Tools").P.infoLabel.rowInfo.snd) (visibleRows 0 32768 (treeOf closed))))

@@ -7,7 +7,7 @@
 -- before adopting delayed replies. Nothing here grants agent authority.
 module Hide.Plugin.Tree
   ( TreeRef, NodeId, nodeId, nodeIdText, TreeHit(..), ChildRequest(..)
-  , NodeInfo(..), NodeDef(..), NodePage(..), PreparedPage, pageNodes, pageNext
+  , NodeInfo(..), NodeDef(..), NodeMenu(..), TreeMenuTarget(..), menuTarget, menuActions, NodePage(..), PreparedPage, pageNodes, pageNext
   , TreeProvider, TreeAction, treeAction, registerTree, treeReference, treeRoot
   , treeCurrent, retireTree, loadChildren, invokeTreeAction, actionReference, actionCurrent
   ) where
@@ -48,9 +48,19 @@ actionReference :: TreeAction context reply -> CommandRef
 actionReference (TreeAction _ command _ _)=commandRef command
 actionCurrent :: TreeAction context reply -> IO Bool
 actionCurrent (TreeAction registry command _ _)=commandCurrent registry (commandRef command)
+-- | Secondary actions are prepared declarations. Resource links reuse the
+-- host's existing human link transport; registered actions retain typed args.
+data TreeMenuTarget = RegisteredAction !CommandRef | ResourceLink !FilePath !Text deriving (Eq,Show)
+data NodeMenu context reply = ActionMenu !Text (TreeAction context reply) | ResourceMenu !Text !FilePath !Text
+menuTarget :: NodeMenu context reply -> (Text,TreeMenuTarget)
+menuTarget (ActionMenu title action)=(title,RegisteredAction (actionReference action))
+menuTarget (ResourceMenu title path target)=(title,ResourceLink path target)
+menuActions :: NodeDef context reply -> [TreeAction context reply]
+menuActions node=[action | ActionMenu _ action<-nodeMenus node]
 data NodeDef context reply = NodeDef
   { nodeInfo :: !NodeInfo, nodeAction :: Maybe (TreeAction context reply)
-  , nodeActions :: [(Text,TreeAction context reply)] }
+  , nodeMenus :: [NodeMenu context reply] }
+
 data NodePage context reply = NodePage [NodeDef context reply] (Maybe Text)
 -- Constructor is private: force/validate metadata before owner publication.
 data PreparedPage context reply = PreparedPage [NodeDef context reply] (Maybe Text)
@@ -108,12 +118,17 @@ preparePage (NodePage supplied token)
     unique=M.fromList [(infoId (nodeInfo node),()) | node<-bounded]
     prepare node=do
       let info=nodeInfo node
-      let actions=nodeActions node
-          refs=maybe [] (pure . actionReference) (nodeAction node)++map (actionReference . snd) actions
-      unless (length (take 9 actions)<=8 && all (\(title,_)->not (T.null title) && T.length title<=128 && T.all (>= ' ') title) actions && M.size (M.fromList [(ref,()) | ref<-refs])==length refs)
+      let actions=nodeMenus node
+          refs=maybe [] (pure . actionReference) (nodeAction node)++map actionReference (menuActions node)
+      unless (length (take 9 actions)<=8 && all (\action->let (title,_)=menuTarget action in not (T.null title) && T.length title<=128 && T.all (>= ' ') title) actions && M.size (M.fromList [(ref,()) | ref<-refs])==length refs)
         (ioError (userError "Invalid sidebar node actions."))
       mapM_ (evaluate . actionReference) (nodeAction node)
-      mapM_ (\(title,action)->evaluate (force title) >> evaluate (actionReference action)) actions
+      mapM_ (\action->case menuTarget action of
+        (title,RegisteredAction reference)->evaluate (force title) >> evaluate reference >> pure ()
+        (title,ResourceLink path target)->do
+          _<-evaluate (force (title,path,target))
+          unless (length path<=32768 && T.length target<=8192 && T.all (>= ' ') target)
+            (ioError (userError "Invalid sidebar resource action."))) actions
       _<-evaluate (force (nodeIdText (infoId info),infoLabel info,infoIcon info,infoBranch info,infoResource info))
       unless (T.length (infoLabel info)<=256 && T.all (>= ' ') (infoLabel info) &&
         T.length (infoIcon info)<=4 && T.all (>= ' ') (infoIcon info) && maybe True ((<=32768) . length) (infoResource info))

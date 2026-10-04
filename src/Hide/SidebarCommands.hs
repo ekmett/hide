@@ -11,6 +11,7 @@ module Hide.SidebarCommands
 import Control.Concurrent.Async (Async,async,cancel,poll)
 import qualified Control.Concurrent.Async
 import Control.Concurrent.STM
+import Control.DeepSeq (force)
 import Control.Exception (bracket,evaluate,displayException)
 import Control.Monad (foldM,forever,forM,when)
 import Data.Aeson (Value(Null))
@@ -20,11 +21,13 @@ import qualified Data.Map.Strict as M
 import qualified Data.Text as T
 import Data.Text (Text)
 import System.Directory (canonicalizePath)
-import System.FilePath ((</>))
+import System.FilePath ((</>),takeExtension)
+import Data.Char (toLower)
 import System.Mem.StableName
 import Text.Read (readMaybe)
 import Hide.Browser
 import Hide.Buffer (captureDirty,snapshotDirty,bufferLineChanges,prepareBuffer)
+import Hide.Plugin.BufferHost (ContentVersion,captureVersion,versionCurrent)
 import Hide.Files (FileState(..),loadFile)
 import Hide.GuestAccess (protectedPath,protectedFilePath,protectedBuffer)
 import Hide.Links (LinkResult,applyLink)
@@ -37,17 +40,17 @@ import qualified Hide.Plugin.Menu as Menu
 -- | Captured host policy; extension labels and paths grant no authority.
 data SidebarContext = SidebarContext
   { sidebarOrigin :: !Menu.MenuOrigin, sidebarPrivatePaths :: ![FilePath]
-  , sidebarColumns :: !Int }
-data SidebarReply = SidebarDocument !FilePath !Document | SidebarPrepared !LinkResult
+  , sidebarColumns :: !Int, sidebarOpened :: !(Maybe (FilePath,Int,Int,ContentVersion)) }
+data SidebarReply = SidebarExisting !FilePath !Int !Int !ContentVersion | SidebarDocument !FilePath !Document | SidebarPrepared !LinkResult
 
 data ChildJob = ChildJob !TreeRequest !Menu.MenuOrigin !(Async (Either CommandError (P.PreparedPage SidebarContext SidebarReply))) !Bool
 data ActionJob = ActionJob ![P.TreeHit] !CommandRef !Menu.MenuOrigin !(Async (Either CommandError SidebarReply))
 data FilesProvider = FilesProvider !(P.TreeProvider SidebarContext SidebarReply) !FilePath !CommandRef !(IORef (M.Map P.NodeId FilePath,M.Map FilePath P.NodeId,Int,M.Map FilePath [Entry]))
 data State = State
   { providers :: !(M.Map P.TreeRef (P.TreeProvider SidebarContext SidebarReply))
-  , definitions :: !(M.Map NodeKey (Integer,P.NodeDef SidebarContext SidebarReply))
+  , definitions :: !(M.Map NodeKey (P.NodeDef SidebarContext SidebarReply))
   , jobs :: ![ChildJob], waiting :: ![(TreeRequest,Menu.MenuOrigin)]
-  , projection :: !(Maybe (Integer,Async (Projection,M.Map NodeKey (Integer,P.NodeDef SidebarContext SidebarReply))))
+  , projection :: !(Maybe (Integer,Async (Projection,M.Map NodeKey (P.NodeDef SidebarContext SidebarReply))))
   , actionJob :: !(Maybe ActionJob), filesProvider :: !(Maybe FilesProvider)
   , badgeStamp :: !(Maybe (StableName (M.Map Int Document)))
   , badgeJob :: !(Maybe (StableName (M.Map Int Document),Async (M.Map FilePath (Bool,Int,Int)))) }
@@ -88,9 +91,9 @@ retireTreeFromHost (SidebarHost _ ref _ _ _) owner d=do
   pure d {sideTree=fmap (removeRoot owner) (sideTree d),contextMenu=Nothing,contextTarget=Nothing}
 
 context :: Menu.MenuOrigin -> Desktop -> SidebarContext
-context origin d=SidebarContext origin (guestPrivatePaths d) (max 20 (min 76 (fst (screenSize d)-treeWidthOf d-4)))
-metadata :: P.NodeDef c r -> (P.NodeInfo,Maybe CommandRef,[(Text,CommandRef)])
-metadata node=(P.nodeInfo node,fmap P.actionReference (P.nodeAction node),[(title,P.actionReference command) | (title,command)<-P.nodeActions node])
+context origin d=SidebarContext origin (guestPrivatePaths d) (max 20 (min 76 (fst (screenSize d)-treeWidthOf d-4))) Nothing
+metadata :: P.NodeDef c r -> (P.NodeInfo,Maybe CommandRef,[(Text,P.TreeMenuTarget)])
+metadata node=(P.nodeInfo node,fmap P.actionReference (P.nodeAction node),map P.menuTarget (P.nodeMenus node))
 addProvider :: P.TreeProvider SidebarContext SidebarReply -> Sidebar -> Sidebar
 addProvider provider tree=let (info,action,actions)=metadata (P.treeRoot provider)
   in addRoot (P.treeReference provider) info action actions tree
@@ -101,49 +104,61 @@ createFiles host root=do
   let registry=sidebarRegistry host
   rootId<-either (ioError . userError . T.unpack) pure (P.nodeId "root")
   cache<-newIORef (M.singleton rootId root,M.singleton root rootId,1,M.empty)
-  open<-either (ioError . userError . show) pure =<< registerCommand registry (CommandDef "hide.sidebar.files.open" "Open file" codec codec $ \ctx path->do
-    resolved<-canonicalizePath path
-    if sidebarOrigin ctx==Menu.AgentMenu && protectedFilePath (sidebarPrivatePaths ctx) resolved
-      then pure (Left (CommandRejected "Agent file target is protected.")) else do
-        result<-loadFile resolved
-        case result of
-          Left err->pure (Left (CommandRejected (T.pack err)))
-          Right (file,buffer)->do
-            _<-evaluate (prepareBuffer buffer)
-            doc<-evaluate (newDocument buffer (Just file))
-            pure (Right (SidebarDocument (filePath file) doc)))
+  open<-either (ioError . userError . show) pure =<< registerCommand registry (CommandDef "hide.sidebar.files.open" "Open file" codec codec $ \ctx path->case sidebarOpened ctx of
+    Just (captured,wid,bid,version) | captured==path->pure (Right (SidebarExisting path wid bid version))
+    _->do
+      resolved<-canonicalizePath path
+      if sidebarOrigin ctx==Menu.AgentMenu && protectedFilePath (sidebarPrivatePaths ctx) resolved
+        then pure (Left (CommandRejected "Agent file target is protected.")) else do
+          result<-loadFile resolved
+          case result of
+            Left err->pure (Left (CommandRejected (T.pack err)))
+            Right (file,buffer)->do
+              _<-evaluate (prepareBuffer buffer)
+              doc<-evaluate (newDocument buffer (Just file))
+              pure (Right (SidebarDocument (filePath file) doc)))
   provider<-either (ioError . userError . show) pure =<< P.registerTree registry "hide.sidebar.files"
     (P.NodeDef (P.NodeInfo rootId "Files" "" True (Just root)) Nothing [])
-    (\_ (P.ChildRequest ident cursor)->do
+    (\ctx (P.ChildRequest ident cursor)->do
       (paths,_,_,cached)<-readIORef cache
       case M.lookup ident paths of
         Nothing->pure (Left (CommandRejected "Files node is no longer known."))
-        Just path->case cursor of
-          Just token | maybe True (\offset->offset<0 || offset>32768) (readMaybe (T.unpack token)::Maybe Int)->pure (Left (InvalidArguments "Invalid Files page cursor."))
-          _->do
-            listing<-case M.lookup path cached of
-              Just entries->pure (Right (path,entries))
-              Nothing->readDirectory path "*"
-            case listing of
-              Left err->pure (Left (CommandRejected (T.pack err)))
-              Right (_,entries)->do
-                let visible=filter ((/="..").entryName) entries
-                    offset=maybe 0 id (cursor >>= readMaybe . T.unpack)
-                    page=take 128 (drop offset visible)
-                if length (take 32769 visible)>32768 then pure (Left (CommandRejected "Directory exceeds the 32768-entry sidebar budget.")) else do
-                  values<-forM page $ \entry->do
-                    let resource=path </> T.unpack (entryName entry)
-                    node<-atomicModifyIORef' cache $ \(byId,byPath,next,dirs)->case M.lookup resource byPath of
-                      Just node->((byId,byPath,next,dirs),node)
-                      Nothing->let Right node=P.nodeId ("file-"<>T.pack (show next)) in
-                        ((M.insert node resource byId,M.insert resource node byPath,next+1,dirs),node)
-                    pure (P.NodeDef (P.NodeInfo node (T.take 256 (T.filter (>= ' ') (entryName entry))) (if entryDirectory entry then "📁" else "📄")
-                      (entryDirectory entry) (Just resource))
-                      (if entryDirectory entry then Nothing else Just (P.treeAction registry open resource (\_ ->pure))) [])
-                  -- Cache bounded directory pages at the filesystem owner. Old
-                  -- directories may be re-enumerated after their cache expires.
-                  atomicModifyIORef' cache $ \(a,b,c,dirs)->((a,b,c,M.insert path visible (if M.size dirs>=32 then M.empty else dirs)),())
-                  pure (Right (P.NodePage values (if length (drop (offset+128) visible)>0 then Just (T.pack (show (offset+128))) else Nothing))))
+        Just path->do
+          resolved<-canonicalizePath path
+          if sidebarOrigin ctx==Menu.AgentMenu && protectedFilePath (sidebarPrivatePaths ctx) resolved
+            then pure (Left (CommandRejected "Agent directory target is protected.")) else case cursor of
+              Just token | maybe True (\offset->offset<0 || offset>32768) (readMaybe (T.unpack token)::Maybe Int)->pure (Left (InvalidArguments "Invalid Files page cursor."))
+              _->do
+                listing<-case M.lookup resolved cached of
+                  Just entries->pure (Right (resolved,entries))
+                  Nothing->readDirectory resolved "*"
+                case listing of
+                  Left err->pure (Left (CommandRejected (T.pack err)))
+                  Right (base,entries)->do
+                    let visible=filter ((/="..").entryName) entries
+                        offset=maybe 0 id (cursor >>= readMaybe . T.unpack)
+                        page=take 128 (drop offset visible)
+                    (_,known,_,_)<-readIORef cache
+                    let missing=[() | entry<-page,not (M.member (base </> T.unpack (entryName entry)) known)]
+                    if M.size known+length missing>32768 then pure (Left (CommandRejected "Files identity budget reached; remount Files to refresh its scope.")) else
+                     if length (take 32769 visible)>32768 then pure (Left (CommandRejected "Directory exceeds the 32768-entry sidebar budget.")) else do
+                      values<-forM page $ \entry->do
+                        let resource=base </> T.unpack (entryName entry)
+                        allocated<-atomicModifyIORef' cache $ \(byId,byPath,next,dirs)->case M.lookup resource byPath of
+                          Just node->((byId,byPath,next,dirs),Right node)
+                          Nothing | M.size byPath>=32768->((byId,byPath,next,dirs),Left "Files identity budget reached.")
+                                  | otherwise->case P.nodeId ("file-"<>T.pack (show next)) of
+                                      Left failure->((byId,byPath,next,dirs),Left failure)
+                                      Right node->((M.insert node resource byId,M.insert resource node byPath,next+1,dirs),Right node)
+                        node<-either (ioError . userError . T.unpack) pure allocated
+                        pure (P.NodeDef (P.NodeInfo node (T.take 256 (T.filter (>= ' ') (entryName entry))) (if entryDirectory entry then "📁" else "📄")
+                          (entryDirectory entry) (Just resource))
+                          (if entryDirectory entry then Nothing else Just (P.treeAction registry open resource (\_ ->pure)))
+                          [P.ResourceMenu "Open" resource "" | not (entryDirectory entry),map toLower (takeExtension resource) `elem` [".md",".markdown",".png",".jpg",".jpeg",".gif",".webp",".bmp",".svg",".pdf"]])
+                      -- Cache bounded directory pages at the filesystem owner. Old
+                      -- directories may be re-enumerated after their cache expires.
+                      atomicModifyIORef' cache $ \(a,b,c,dirs)->((M.insert ident base a,M.insert base ident b,c,M.insert base visible (if M.size dirs>=32 then M.empty else dirs)),())
+                      pure (Right (P.NodePage values (if length (drop (offset+128) visible)>0 then Just (T.pack (show (offset+128))) else Nothing))))
   pure (FilesProvider provider root (commandRef open) cache)
   where codec=Codec Null (const (Left "Files arguments are host-captured.")) (const Null)
 
@@ -205,19 +220,20 @@ mount host@(SidebarHost _ ref _ _ _) d=case sideTree d of
     state<-readIORef ref
     case filesProvider state of
       Just (FilesProvider provider root _ _) | root==treeRoot tree->do
-        let next=addProvider provider tree
+        let next=if M.member (P.treeReference provider) (providers state) then addProvider provider tree else tree
         pure d {sideTree=Just next}
       _->do
         -- This path is startup/directory selection, which already belongs to the
         -- host's file effect owner. Registration and root validation are bounded.
         mapM_ (\(FilesProvider provider _ command _)->P.retireTree provider >> retireCommand (sidebarRegistry host) command) (filesProvider state)
-        created@(FilesProvider provider _ command _)<-createFiles host (treeRoot tree)
+        created@(FilesProvider provider _ _ _)<-createFiles host (treeRoot tree)
         let owner=P.treeReference provider
-            fresh=addProvider provider tree {treeAgentRefs=[owner]}
+            withdrawn=maybe tree (\(FilesProvider old _ _ _)->removeRoot (P.treeReference old) tree) (filesProvider state)
+            fresh=addProvider provider withdrawn {treeAgentRefs=[owner]}
             key=NodeKey owner (P.infoId (P.nodeInfo (P.treeRoot provider)))
             node=treeNodes fresh M.! key
             (opened,request)=requestChildren (nodeHit key node) Nothing fresh
-            defs=M.insert key (stateGeneration (treeNodes opened M.! key),P.treeRoot provider) (definitions state)
+            defs=M.insert key (P.treeRoot provider) (definitions state)
         writeIORef ref state {filesProvider=Just created,providers=M.insert owner provider (providers state),definitions=defs}
         maybe (pure d {sideTree=Just opened}) (\value->enqueue host value Menu.HumanMenu d {sideTree=Just opened}) request
 
@@ -240,19 +256,34 @@ invokeAction (SidebarHost _ ref _ _ _) trace reference origin d=case (trace,side
     state<-readIORef ref
     let P.TreeHit owner _ _=hit
         action=do
-          (_,node)<-M.lookup (keyOf hit) (definitions state)
+          node<-M.lookup (keyOf hit) (definitions state)
           find ((==reference).P.actionReference)
-            (maybe [] pure (P.nodeAction node)++map snd (P.nodeActions node))
+            (maybe [] pure (P.nodeAction node)++P.menuActions node)
         allowed=origin==Menu.HumanMenu || owner `elem` treeAgentRefs tree &&
           maybe False (not . protectedPath d) (P.infoResource . stateInfo =<< nodeAt hit tree)
     live<-maybe (pure False) P.treeCurrent (M.lookup owner (providers state))
     case (actionJob state,action) of
       (Nothing,Just command) | live && allowed->do
-        worker<-async (P.invokeTreeAction command (context origin d))
+        ctx<-captureActionContext origin trace d
+        worker<-async (P.invokeTreeAction command ctx)
         writeIORef ref state {actionJob=Just (ActionJob trace reference origin worker)}
         pure d {status="Opening sidebar target…"}
       _->pure d {status="Sidebar action is stale, protected or busy."}
   _->pure d {status="Sidebar action expired."}
+
+-- Capture just one existing file's immutable identity at admission. The worker
+-- never reloads it from disk; version/path/window checks protect late adoption.
+captureActionContext :: Menu.MenuOrigin -> [P.TreeHit] -> Desktop -> IO SidebarContext
+captureActionContext origin trace d=do
+  let target=case (trace,sideTree d) of
+        (hit:_,Just tree)->P.infoResource . stateInfo =<< nodeAt hit tree
+        _->Nothing
+  opened<-case target >>= \path->(path,) <$> find (\(_,doc)->fmap filePath (documentFile doc)==Just path) (M.toList (buffers d)) of
+    Just (path,(bid,doc)) | Just window<-find ((==bid).bufferId) (windows d)->do
+      version<-captureVersion (documentBuffer doc)
+      pure (Just (path,windowId window,bid,version))
+    _->pure Nothing
+  pure (context origin d) {sidebarOpened=opened}
 
 refreshFiles :: SidebarHost -> FilePath -> [Entry] -> Desktop -> IO Desktop
 refreshFiles host@(SidebarHost _ ref _ _ _) path entries d=do
@@ -260,7 +291,7 @@ refreshFiles host@(SidebarHost _ ref _ _ _) path entries d=do
   case (filesProvider state,sideTree d) of
     (Just (FilesProvider provider _ _ cache),Just tree)->do
       (_,paths,_,_)<-readIORef cache
-      atomicModifyIORef' cache (\(a,b,c,dirs)->((a,b,c,M.insert path entries dirs),()))
+      atomicModifyIORef' cache (\(a,b,c,dirs)->((a,b,c,M.insert path entries (if M.size dirs>=32 && not (M.member path dirs) then M.empty else dirs)),()))
       case M.lookup path paths >>= \ident->let key=NodeKey (P.treeReference provider) ident in (key,) <$> M.lookup key (treeNodes tree) of
         Just (key,node) | stateExpanded node->do
           let invalid=collapseNode (nodeHit key node) tree
@@ -282,12 +313,18 @@ tickSidebar host@(SidebarHost _ ref publications cancellation _) initial=do
       Nothing->pure d
       Just provider->do
         live<-P.treeCurrent provider
-        if not live then pure d else do
+        registered<-readIORef ref
+        let accepted=live && (M.member (P.treeReference provider) (providers registered) || M.size (providers registered)<32)
+        if not accepted then pure d {status=if live then "Sidebar provider budget reached." else status d} else do
           let owner=P.treeReference provider; root=P.treeRoot provider; key=NodeKey owner (P.infoId (P.nodeInfo root))
-          modifyIORef' ref (\s->s {providers=M.insert owner provider (providers s),definitions=M.insert key (1,root) (definitions s)})
+          modifyIORef' ref (\s->s {providers=M.insert owner provider (providers s),definitions=M.insert key root (definitions s)})
           pure d {sideTree=fmap (addProvider provider) (sideTree d),contextMenu=Nothing,contextTarget=Nothing}) mounted [1..4::Int]
+  registered<-readIORef ref
+  withdrawn<-foldM (\d (reference,provider)->do
+    live<-P.treeCurrent provider
+    if live then pure d else retireTreeFromHost host reference d) published (M.toList (providers registered))
   state<-readIORef ref
-  (loaded,retained)<-foldM (finishChild state) (published,[]) (jobs state)
+  (loaded,retained)<-foldM (finishChild state) (withdrawn,[]) (jobs state)
   modifyIORef' ref (\s->s {jobs=reverse retained})
   adopted<-finishAction host loaded
   projected<-finishProjection host adopted
@@ -297,7 +334,13 @@ tickSidebar host@(SidebarHost _ ref publications cancellation _) initial=do
   where
     finishChild state (d,keep) job@(ChildJob request origin worker cancelled)=do
       live<-maybe (pure False) P.treeCurrent (M.lookup (owner request) (providers state))
-      let current=live && maybe False (requestCurrent request) (sideTree d) &&
+      allowed<-if origin==Menu.HumanMenu then pure True else case filesProvider state of
+        Just (FilesProvider provider _ _ cache) | P.treeReference provider==owner request->do
+          (paths,_,_,_)<-readIORef cache
+          let P.TreeHit _ ident _=requestHit request
+          pure (maybe False (not . protectedPath d) (M.lookup ident paths))
+        _->pure False
+      let current=live && allowed && maybe False (requestCurrent request) (sideTree d) &&
             (origin==Menu.HumanMenu || maybe False (elem (owner request).treeAgentRefs) (sideTree d))
       recovered<-if current then pure d else releaseRequest host request origin d
       completed<-poll worker
@@ -316,7 +359,7 @@ tickSidebar host@(SidebarHost _ ref publications cancellation _) initial=do
               Left err->pure (d {sideTree=Just (failRequest request err tree)},keep)
               Right changed->do
                 modifyIORef' ref (\s->s {definitions=foldr (\node->let key=NodeKey (owner request) (P.infoId (P.nodeInfo node))
-                  in M.insert key (stateGeneration (treeNodes changed M.! key),node)) (definitions s) (P.pageNodes page)})
+                  in M.insert key node) (definitions s) (P.pageNodes page)})
                 pure (d {sideTree=Just changed},keep)
     owner request=let P.TreeHit value _ _=requestHit request in value
 
@@ -399,22 +442,34 @@ finishAction (SidebarHost _ ref _ _ _) d=do
           live<-maybe (pure False) P.treeCurrent (owner >>= (`M.lookup` providers state))
           commandLive<-case trace of
             hit:_->case M.lookup (keyOf hit) (definitions state) of
-              Just (_,node)->maybe (pure False) P.actionCurrent (find ((==reference).P.actionReference) (maybe [] pure (P.nodeAction node)++map snd (P.nodeActions node)))
+              Just node->maybe (pure False) P.actionCurrent (find ((==reference).P.actionReference) (maybe [] pure (P.nodeAction node)++P.menuActions node))
               _->pure False
             _->pure False
           let current=live && commandLive && dialog d==Nothing && maybe False (\tree->treeFocused tree && hitCurrent trace tree) (sideTree d) &&
                 (origin==Menu.HumanMenu || maybe False (\tree->maybe False (`elem` treeAgentRefs tree) owner) (sideTree d))
-          pure $ if not current then d {status="Sidebar result expired."} else case result of
-            Left err->d {status="Sidebar action failed: "<>T.pack (displayException err)}
-            Right (Left err)->d {status="Sidebar action failed: "<>T.pack (show err)}
-            Right (Right (SidebarPrepared value))->fst (applyLink value d)
-            Right (Right (SidebarDocument path doc))
-              | origin==Menu.AgentMenu && protectedPath d path->d {status="Sidebar target is now protected."}
-              | otherwise->case find (\(_,opened)->fmap filePath (documentFile opened)==Just path) (M.toList (buffers d)) of
-                Just (bid,_) | origin==Menu.AgentMenu && protectedBuffer d bid->d {status="Sidebar target is now private."}
-                Just (bid,_)->maybe d (\window->leave (focusWindow (windowId window) d)) (find ((==bid).bufferId) (windows d))
-                Nothing->leave (addDocument (documentFile doc) (documentBuffer doc) d)
+          case result of
+            Right (Right (SidebarExisting path wid bid version)) | current->adoptExisting origin path wid bid version d
+            _->pure $ if not current then d {status="Sidebar result expired."} else case result of
+              Left err->d {status="Sidebar action failed: "<>T.pack (displayException err)}
+              Right (Left err)->d {status="Sidebar action failed: "<>T.pack (show err)}
+              Right (Right SidebarExisting{})->d {status="Sidebar result expired."}
+              Right (Right (SidebarPrepared value))->fst (applyLink value d)
+              Right (Right (SidebarDocument path doc))
+                | origin==Menu.AgentMenu && protectedPath d path->d {status="Sidebar target is now protected."}
+                | otherwise->case find (\(_,opened)->fmap filePath (documentFile opened)==Just path) (M.toList (buffers d)) of
+                  Just (bid,_) | origin==Menu.AgentMenu && protectedBuffer d bid->d {status="Sidebar target is now private."}
+                  Just (bid,_)->maybe d (\window->leave (focusWindow (windowId window) d)) (find ((==bid).bufferId) (windows d))
+                  Nothing->leave (addDocument (documentFile doc) (documentBuffer doc) d)
   where leave opened=opened {sideTree=fmap (\tree->tree {treeFocused=False}) (sideTree opened)}
+
+adoptExisting :: Menu.MenuOrigin -> FilePath -> Int -> Int -> ContentVersion -> Desktop -> IO Desktop
+adoptExisting origin path wid bid version d=case (find ((==wid).windowId) (windows d),M.lookup bid (buffers d)) of
+  (Just window,Just doc) | bufferId window==bid && fmap filePath (documentFile doc)==Just path->do
+    current<-versionCurrent version (documentBuffer doc)
+    pure $ if not current || origin==Menu.AgentMenu && (protectedPath d path || protectedBuffer d bid)
+      then d {status="Existing sidebar file changed or became private."}
+      else let focused=focusWindow wid d in focused {sideTree=fmap (\tree->tree {treeFocused=False}) (sideTree focused)}
+  _->pure d {status="Existing sidebar file expired."}
 
 badges :: SidebarHost -> Desktop -> IO Desktop
 badges (SidebarHost _ ref _ _ _) d=do
@@ -433,7 +488,7 @@ badges (SidebarHost _ ref _ _ _) d=do
   when (maybe True (const False) (badgeJob current) && badgeStamp current/=Just stamp) $ do
     snapshots<-forM [(filePath file,documentBuffer doc) | doc<-M.elems (buffers d),Just file<-[documentFile doc]] $ \(path,buffer)->do
       snapshot<-evaluate (captureDirty buffer)
-      counts<-evaluate (bufferLineChanges buffer)
+      counts<-evaluate (force (bufferLineChanges buffer))
       pure (path,snapshot,counts)
     worker<-async $ do
       values<-forM snapshots $ \(path,snapshot,(added,deleted))->do

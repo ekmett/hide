@@ -126,7 +126,7 @@ data LanguageAction = TypeInfo | FindDefinition | Completions | ShowProblems | R
 data Completion = Completion Text [(Int,Int,Text)] deriving (Eq,Show)
 data ProjectAction = LoadProject | ProjectPage Int Int | ProjectDetails Int Int deriving (Eq,Show)
 -- | Ordered requests for the host interpreter, produced alongside a new desktop.
-data Effect = ReloadKeyBindings FilePath | InspectKeyBindings (Maybe (Bindings.BindingPlatform,Bindings.BindingContext)) (Maybe (Bindings.Bindings Command)) | FollowLink (Maybe FilePath) Text | FollowTreeLink [Tree.TreeHit] FilePath | EnvironmentAction Text [Text] | AutocompleteAction Text [Text] | SaveMacKeySymbols Bool | SaveChatSubmit ChatSubmit | SaveBufferViewDefault BufferView | ProjectRequest ProjectAction | DownloadDocument Int | ReadBrowserClipboard | WriteBrowserClipboard Text | LanguageRequest LanguageAction | RunGit GitAction | ReadMergeBranches | JumpTo FilePath Int Int | ReadPath FilePath | BrowsePath FilePath Text | BrowseDirectories FilePath | ChangeDirectory FilePath | OpenChoice FilePath Text Text | ReadTree FilePath | RefreshTree FilePath [Entry] | LoadTree TreeRequest Plugin.MenuOrigin | InvokeTree [Tree.TreeHit] CommandRef Plugin.MenuOrigin | ReadHelp | InvokeMenu Plugin.MenuRef Plugin.MenuOrigin (Maybe ContextTarget) | RefreshGit FilePath | ReadGitDiff | AskGitCommit | WriteGitCommit Text | SaveDocument Int (Maybe FilePath) (Maybe Command) | ReviewExternal | ResolveConflict Conflict ConflictAction | AgentAction Text [Text] | PermissionAction Text [Text] | DebugAction Text [Text] | SetScreenMode Int | Exit deriving (Eq,Show)
+data Effect = ReloadKeyBindings FilePath | InspectKeyBindings (Maybe (Bindings.BindingPlatform,Bindings.BindingContext)) (Maybe (Bindings.Bindings Command)) | FollowLink (Maybe FilePath) Text | FollowTreeLink [Tree.TreeHit] FilePath Text | EnvironmentAction Text [Text] | AutocompleteAction Text [Text] | SaveMacKeySymbols Bool | SaveChatSubmit ChatSubmit | SaveBufferViewDefault BufferView | ProjectRequest ProjectAction | DownloadDocument Int | ReadBrowserClipboard | WriteBrowserClipboard Text | LanguageRequest LanguageAction | RunGit GitAction | ReadMergeBranches | JumpTo FilePath Int Int | ReadPath FilePath | BrowsePath FilePath Text | BrowseDirectories FilePath | ChangeDirectory FilePath | OpenChoice FilePath Text Text | ReadTree FilePath | RefreshTree FilePath [Entry] | LoadTree TreeRequest Plugin.MenuOrigin | InvokeTree [Tree.TreeHit] CommandRef Plugin.MenuOrigin | ReadHelp | InvokeMenu Plugin.MenuRef Plugin.MenuOrigin (Maybe ContextTarget) | RefreshGit FilePath | ReadGitDiff | AskGitCommit | WriteGitCommit Text | SaveDocument Int (Maybe FilePath) (Maybe Command) | ReviewExternal | ResolveConflict Conflict ConflictAction | AgentAction Text [Text] | PermissionAction Text [Text] | DebugAction Text [Text] | SetScreenMode Int | Exit deriving (Eq,Show)
 data Field = Input Text Text Int | ComboBox Text [Text] Int (Maybe Int) | CheckBox Text Bool | Radio Text [Text] Int | ListBox Text [Text] Int | FileList [Entry] Int
   | ReadOnly Text Text
   | TextArea Text Bool Buffer Selection Int Int deriving (Eq,Show)
@@ -950,7 +950,7 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
     go PreviousMessage d = navigateMessage (-1) d
     go RestartHLS d = (d,[LanguageRequest RestartLanguage])
     go (OpenLink origin target) d = case contextTarget d of
-      Just (SidebarTarget trace) | contextTargetCurrent d,Just path<-origin->(d,[FollowTreeLink trace path])
+      Just (SidebarTarget trace) | contextTargetCurrent d,Just path<-origin->(d,[FollowTreeLink trace path target])
       _->(d,[FollowLink origin target])
     go Help d = case find ((=="hide.help.contents") . Plugin.menuName . Plugin.menuReference) (contributedMenus d) of
       Just item -> go (contributionCommand d item) d
@@ -2987,15 +2987,9 @@ scrollTreeTo position tree d = d {sideTree=Just tree {treeScroll=max 0 (min (tre
 
 treeMouse :: Int -> Int -> V.Button -> Sidebar -> Desktop -> (Desktop,[Effect])
 treeMouse x y button tree d = case button of
-  V.BRight | y>=2, y<sh-2, Just row<-rowAt (treeScroll tree+y-2) tree,
-    Tree.TreeHit owner _ _<-rowHit row, owner `elem` treeAgentRefs tree,
-    not (Tree.infoBranch (rowInfo row)),Just path<-Tree.infoResource (rowInfo row),
-    map toLower (takeExtension path) `elem` [".md",".markdown",".png",".jpg",".jpeg",".gif",".webp",".bmp",".svg",".pdf"] ->
-      let trace=rowHit row:drop 1 (hitTrace (keyOf (rowHit row)) tree)
-      in (openContext (TreeContext trace [("Open",OpenLink (Just path) "")]) x (y+1) d {sideTree=Just tree {treeFocused=True},problemsFocused=False},[])
   V.BRight | y>=2, y<sh-2, Just row<-rowAt (treeScroll tree+y-2) tree, not (null (rowActions row))->
     let trace=rowHit row:drop 1 (hitTrace (keyOf (rowHit row)) tree)
-        actions=[(title,TreeCommand trace action) | (title,action)<-rowActions row]
+        actions=[(title,case target of Tree.RegisteredAction action->TreeCommand trace action; Tree.ResourceLink path targetText->OpenLink (Just path) targetText) | (title,target)<-rowActions row]
     in (openContext (TreeContext trace actions) x (y+1) d {sideTree=Just tree {treeFocused=True},problemsFocused=False},[])
   V.BLeft | y==1 && x>=treeWidth tree-5 && x<treeWidth tree-1 -> (setTree Nothing d,[])
           | x==treeWidth tree-2 && y>=2 && y<sh-2 && treeFocused tree && treeContentRows d>=3 ->

@@ -595,7 +595,7 @@ applyEffects = foldM apply . (False,)
           changed<-try (setCurrentDirectory base) :: IO (Either IOException ())
           case changed of
             Left err -> pure (False,browserError (T.pack (show err)) d)
-            Right () -> apply (False,installSidebar (emptySidebar base (min 24 (max 0 (fst (screenSize d)-20))) True) d {defaultDirectory=Just base,dialog=Nothing,status="Directory changed."}) (RefreshGit base)
+            Right () -> apply (False,installSidebar (sidebarDirectory base d) d {defaultDirectory=Just base,dialog=Nothing,status="Directory changed."}) (RefreshGit base)
     apply (_,d) (OpenChoice base input pattern)=do
       let chosen=if T.null input then pattern else input
           path=if isAbsolute (T.unpack chosen) then T.unpack chosen else base </> T.unpack chosen
@@ -606,7 +606,7 @@ applyEffects = foldM apply . (False,)
         exists<-doesFileExist path
         if exists then apply (False,d {dialog=Nothing}) (ReadPath path)
         else pure (False,browserError "File not found." d)
-    apply (_,d) (ReadTree path)=pure (False,installSidebar (emptySidebar path (min 24 (max 0 (fst (screenSize d)-20))) True) d)
+    apply (_,d) (ReadTree path)=pure (False,installSidebar (sidebarDirectory path d) d)
     apply (_,d) LoadTree{}=pure (False,d {status="Sidebar provider host is unavailable in this preview."})
     apply (_,d) InvokeTree{}=pure (False,d {status="Sidebar provider host is unavailable in this preview."})
     apply (_,d) RefreshTree{}=pure (False,d)
@@ -615,9 +615,9 @@ applyEffects = foldM apply . (False,)
       path<-getDataFileName "README.md"
       (opened,_)<-followLink False d (Just path) ""
       pure (False,opened)
-    apply (_,d) (FollowTreeLink trace path)
+    apply (_,d) (FollowTreeLink trace path target)
       | maybe False (hitCurrent trace) (sideTree d)=do
-          (opened,_)<-followLink False d (Just path) ""
+          (opened,_)<-followLink False d (Just path) target
           pure (False,opened)
       | otherwise=pure (False,d {status="Sidebar link target expired."})
     apply (_,d) (FollowLink origin target)=do
@@ -691,3 +691,9 @@ packageDirectory start = search start
       entries<-either (const []) id <$> (try (listDirectory path) :: IO (Either IOException [FilePath]))
       if any ((==".cabal") . takeExtension) entries then pure path
         else if takeDirectory path==path then pure start else search (takeDirectory path)
+
+-- Selecting another Files directory preserves the other ordinary provider roots.
+sidebarDirectory :: FilePath -> Desktop -> Sidebar
+sidebarDirectory path d=case sideTree d of
+  Just tree->tree {treeRoot=path,treeFocused=True}
+  Nothing->emptySidebar path (min 24 (max 0 (fst (screenSize d)-20))) True

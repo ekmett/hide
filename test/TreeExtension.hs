@@ -12,8 +12,10 @@ declare registry reply children=do
   let ident text=either (error.show) id (nodeId text)
       codec=Codec Null (const (Left "Host only")) (const Null)
   action<-registerCommand registry (CommandDef "extension.tools.inspect" "Inspect" codec codec (\_ ()->pure (Right ()))) >>= either (error.show) pure
+  secondary<-registerCommand registry (CommandDef "extension.tools.details" "Inspect details" codec codec (\_ ()->pure (Right ()))) >>= either (error.show) pure
   let leaf=NodeDef (NodeInfo (ident "inspect") "Inspect" "★" False Nothing)
-        (Just (treeAction registry action () (\ctx ()->reply ctx))) []
+        (Just (treeAction registry action () (\ctx ()->reply ctx)))
+        [ActionMenu "Inspect details" (treeAction registry secondary () (\ctx ()->reply ctx)),ResourceMenu "Read documentation" "/extension/help.md" "#details"]
       root=NodeDef (NodeInfo (ident "root") "Tools" "" True Nothing) Nothing []
   provider<-registerTree registry "extension.tools" root (\_ -> children) >>= either (error.show) pure
   pure (provider,leaf)

@@ -28,13 +28,13 @@ data LoadState = Unloaded | Loading !Integer !(Maybe Text) | Loaded !(Maybe Text
 data NodeState = NodeState
   { stateInfo :: !NodeInfo, stateGeneration :: !Integer, stateParent :: !(Maybe NodeKey)
   , stateChildren :: !(S.Seq NodeKey), stateChildIndex :: !(M.Map NodeKey ()), stateExpanded :: !Bool, stateLoad :: !LoadState
-  , stateRequest :: !Integer, stateAddress :: ![Int], stateAction :: !(Maybe CommandRef), stateActions :: ![(Text,CommandRef)]
+  , stateRequest :: !Integer, stateAddress :: ![Int], stateAction :: !(Maybe CommandRef), stateActions :: ![(Text,TreeMenuTarget)]
   } deriving (Eq,Show)
 data RowAction = ActivateNode | WaitForLoad | RetryLoad | LoadNext !Text deriving (Eq,Show)
 data TreeRow = TreeRow
   { rowKey :: !RowKey, rowAddress :: ![Int], rowHit :: !TreeHit, rowInfo :: !NodeInfo, rowDepth :: !Int
   , rowPrefix :: !Text, rowSpan :: !Int, rowExpanded :: !Bool, rowAction :: !RowAction
-  , rowCommand :: !(Maybe CommandRef), rowActions :: ![(Text,CommandRef)]
+  , rowCommand :: !(Maybe CommandRef), rowActions :: ![(Text,TreeMenuTarget)]
   } deriving (Eq,Show)
 data TreeRequest = TreeRequest
   { requestHit :: !TreeHit, requestGeneration :: !Integer, requestCursor :: !(Maybe Text)
@@ -86,10 +86,10 @@ hitTrace key tree=take 65 (go key)
           Just node->nodeHit ident node:maybe [] go (stateParent node)
 
 -- | Publish prepared root metadata. Provider count and IDs are host-checked.
-addRoot :: TreeRef -> NodeInfo -> Maybe CommandRef -> [(Text,CommandRef)] -> Sidebar -> Sidebar
+addRoot :: TreeRef -> NodeInfo -> Maybe CommandRef -> [(Text,TreeMenuTarget)] -> Sidebar -> Sidebar
 addRoot ref info action actions tree
   | M.member key (treeNodes tree)=tree
-  | S.length (treeRoots tree)>=32=tree
+  | S.length (treeRoots tree)>=32 || M.size (treeNodes tree)>=32768=tree
   | otherwise=tree {treeNodes=M.insert key node (treeNodes tree),treeRoots=treeRoots tree S.|> key,treeRevision=treeRevision tree+1}
   where key=NodeKey ref (infoId info)
         node=NodeState info 1 Nothing S.empty M.empty False Unloaded 0 [] action actions
@@ -139,11 +139,11 @@ requestCurrent request tree=hitCurrent (requestAncestors request) tree && case n
 
 -- | Adopt at most one prepared bounded page. Structural projection is deferred
 -- to its worker. A page may not steal another parent's/provider's node identity.
-adoptPage :: TreeRequest -> [(NodeInfo,Maybe CommandRef,[(Text,CommandRef)])] -> Maybe Text -> Sidebar -> Either Text Sidebar
+adoptPage :: TreeRequest -> [(NodeInfo,Maybe CommandRef,[(Text,TreeMenuTarget)])] -> Maybe Text -> Sidebar -> Either Text Sidebar
 adoptPage request nodes next tree
   | not (requestCurrent request tree)=Left "Sidebar request expired."
   | length (requestAncestors request)>64=Left "Sidebar depth budget reached."
-  | length nodes>128 || M.size (treeNodes tree)+length nodes>32768=Left "Sidebar node budget reached."
+  | length nodes>128 || M.size (treeNodes tree)+length [() | (info,_,_)<-nodes,not (M.member (NodeKey ref (infoId info)) (treeNodes tree))]>32768=Left "Sidebar node budget reached."
   | any foreignNode nodes=Left "Sidebar node belongs to another parent or is an ancestor."
   | otherwise=Right tree {treeNodes=M.insert parent updated (foldr insert (treeNodes tree) nodes),treeRevision=treeRevision tree+1}
   where
@@ -160,8 +160,9 @@ adoptPage request nodes next tree
     insert (info,action,actions) values=
       let key=NodeKey ref (infoId info)
           previous=M.lookup key values
+          retained=previous >>= \old->if infoBranch info && infoBranch (stateInfo old) && infoResource info==infoResource (stateInfo old) then Just old else Nothing
           node=NodeState info (maybe 1 ((+1).stateGeneration) previous) (Just parent)
-            (maybe S.empty stateChildren previous) (maybe M.empty stateChildIndex previous) (maybe False stateExpanded previous) (maybe Unloaded stateLoad previous)
+            (maybe S.empty stateChildren retained) (maybe M.empty stateChildIndex retained) (maybe False stateExpanded retained) (maybe Unloaded stateLoad retained)
             (maybe 0 stateRequest previous) (maybe [] stateAddress previous) action actions
       in M.insert key node values
 failRequest :: TreeRequest -> Text -> Sidebar -> Sidebar

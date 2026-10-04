@@ -229,4 +229,3 @@ comparison file buffer disk = T.concat
     section title text="===== "<>title<>" =====\n"<>text<>"\n===== END "<>title<>" =====\n\n"
     render Nothing="[File does not exist]"
     render (Just bytes)=either (const ("[Non-text bytes]\n"<>T.pack (show bytes))) id (decode bytes)
-

@@ -485,7 +485,9 @@ Run `sh test/launchers.sh` after changing the adjacent `thc-edit` or `th` launch
 `Hide.Plugin.Tree` registers a provider through the existing scoped typed command
 registry. Provider-local node IDs are independent of labels and resource paths.
 Prepared child pages contain at most 128 nodes and bounded presentation/cursor
-fields. Node actions retain typed arguments and exact command registrations.
+fields. Node actions retain typed arguments and exact command registrations. Prepared
+secondary declarations supply registered actions or captured resource-link targets;
+filesystem extension rules stay with the Files provider.
 `Hide.SidebarCommands` owns publication, load admission and reply adoption; no
 extension callback runs during a tick or paint.
 
@@ -506,7 +508,9 @@ UI lock. UI state retains at most 32 roots, 32768 nodes and depth 64. Directory
 enumeration remains on the existing Browser/filesystem worker; delivered pages
 are bounded. Dirty snapshots are evaluated on the badge worker.
 
-Files primary opens use the typed action worker. Its secondary Open keeps the
+Files primary opens use the typed action worker. Already-open files use captured
+window/buffer/content versions and never depend on another disk load; scope closure
+withdraws provider roots at the owner. Its secondary Open keeps the
 existing actor-stamped link worker/client-resource transport and a frozen sidebar
 target. Moving that transport into the typed reply path is a separate slice.
 Recovery stores bounded path/expansion/viewport hints, never live provider handles.

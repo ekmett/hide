@@ -454,7 +454,7 @@ runRemoteDaemonWithStartup owned session scale effects tick inspect initial = do
         effect _ result@(True,_,_) _ = pure result
         effect stamp (_,d,replies) request = case request of
           ReadHelp -> getDataFileName "README.md" >>= \helpPath -> queueLink stamp Nothing d replies (Just helpPath) ""
-          FollowTreeLink trace path -> queueLink stamp (Just trace) d replies (Just path) ""
+          FollowTreeLink trace resource target -> queueLink stamp (Just trace) d replies (Just resource) target
           FollowLink origin target -> queueLink stamp Nothing d replies origin target
           ReadBrowserClipboard -> pure (False,d,replies++[json "paste-request" []])
           WriteBrowserClipboard text -> pure (False,d,replies++[json "copy" ["text" .= text]])
