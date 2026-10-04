@@ -2,7 +2,8 @@
 module EditorMCPCheck (checks) where
 import Control.Monad (unless)
 import Data.IORef
-import Control.Exception (bracket, try, IOException)
+import Control.Exception (bracket, try, IOException, evaluate)
+import GHC.Conc (getAllocationCounter)
 import System.Directory (getTemporaryDirectory, removeFile)
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.IO (openBinaryTempFile, hClose, hSeek, SeekMode(AbsoluteSeek))
@@ -54,6 +55,19 @@ checks = do
   check "MCP conversation selections cannot bypass private redaction" (case builtinTool (modifyActive (\w->w {selection=Selection 0 200}) withPrivateInput) "read_selection" (object []) of Left _->True; _->False)
   let binaryConversation=privateConversation {buffers=M.adjust (\doc->doc {documentBuffer=newByteBuffer "Session: binary-session-secret"}) (bufferId privateWindow) (buffers privateConversation)}
   check "MCP binary conversation cannot bypass session redaction" (case builtinTool binaryConversation "read_buffer" (object []) of Left _->True; _->False)
+  let byteDocument=addDocument Nothing (newByteBuffer (BS.pack [0,127,128,255])) (initialDesktop (80,25))
+  check "MCP byte formatting preserves original values and spacing" (case builtinTool byteDocument "read_buffer" (object []) of
+    Right (Object fields)->KM.lookup "hex" fields==Just (String "00 7f 80 ff") && KM.lookup "totalBytes" fields==Just (toJSON (4::Int))
+    _->False)
+  let largeBytes=addDocument Nothing (newByteBuffer (BS.replicate (2*1024*1024) 120)) (initialDesktop (80,25))
+      largeBuffer=documentBuffer (fromJust (activeDocument largeBytes))
+  _<-evaluate (prepareBuffer largeBuffer)
+  allocatedBefore<-getAllocationCounter
+  localBytes<-evaluate (case builtinTool largeBytes "read_buffer" (object ["byteOffset" .= (1048576::Int)]) of
+    Right value->BL.length (encode value)
+    Left err->error (T.unpack err))
+  allocatedAfter<-getAllocationCounter
+  check "MCP bounded byte read does not flatten or encode the whole buffer" (localBytes>0 && allocatedBefore-allocatedAfter<2000000)
   let privateReview=addReadOnly "Agent request" "private-review-token" (initialDesktop (80,25))
   check "MCP private approval buffers refuse content reads" (case builtinTool privateReview "read_buffer" (object []) of Left _->True; _->False)
   check "MCP still lists non-secret internal buffer identifiers" (case builtinTool privateReview "list_buffers" (object []) of Right value->"bufferId" `T.isInfixOf` text value && not ("private-review-token" `T.isInfixOf` text value); _->False)

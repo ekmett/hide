@@ -8,7 +8,7 @@
 -- when the human has disabled streamer mode.
 module Hide.GuestAccess
   ( InputOrigin(..), CellAccess(..), cellAccess, readableAt, pointerAllowedAt
-  , streamerReadableAt, sensitiveLabel, sanitizedStatus, protectedPath, protectedPathParent, protectedBuffer, privateDocument, sanitizedBuffer
+  , streamerReadableAt, sensitiveLabel, sanitizedStatus, protectedPath, protectedPathParent, protectedBuffer, privateDocument, sanitizedBuffer, sanitizedBufferContent
   , guestCommandAllowed, guestEffectsAllowed, guestKeyboardAllowed, guestKeyAllowed, guestKeyCombinations
   , guestModalBlocked, guestTransitionAllowed, beginGuestInput, endGuestInput
   ) where
@@ -61,6 +61,18 @@ sanitizedBuffer d bid=do
     Just "Conversation" | byteMode (documentBuffer doc) -> Nothing
     Just "Conversation" -> Just (T.pack [if privateOffset d text n && c/='\n' && c/='\r' then ' ' else c | (n,c)<-zip [0..] (T.unpack text)])
     _ -> Just text
+-- | Policy-checked immutable content and whether privacy masking changed text.
+-- Ordinary buffers retain their measured tree without projecting whole text.
+-- Conversation masking remains an explicit full-text worker operation.
+sanitizedBufferContent :: Desktop -> Int -> Maybe (Bool,BufferContent)
+sanitizedBufferContent d bid=do
+  doc<-M.lookup bid (buffers d)
+  safe<-sanitizedBuffer d bid
+  let original=documentBuffer doc
+  pure $ if documentLabel doc==Just "Conversation"
+    then (safe/=contents original,bufferContent (newBuffer safe))
+    else (False,bufferContent original)
+
 privateOffset :: Desktop -> Text -> Int -> Bool
 privateOffset d text n=sessionOffset text n || any private (chatActions d)
   where

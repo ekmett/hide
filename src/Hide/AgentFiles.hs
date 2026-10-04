@@ -21,6 +21,8 @@ import System.IO (IOMode(ReadMode), withBinaryFile)
 import System.Mem.StableName (StableName, makeStableName)
 import System.IO.Error (catchIOError, isDoesNotExistError)
 import Hide.Buffer
+import Hide.Plugin.Buffer (ContentVersion)
+import Hide.Plugin.BufferHost (captureVersion)
 import Hide.Files
 import Hide.GuestAccess (protectedPath, protectedBuffer)
 import Hide.Model
@@ -41,15 +43,15 @@ textTooLarge text = T.length text>fileLimit || BS.length (TE.encodeUtf8 text)>fi
 
 -- | Shallow immutable buffer/file identities plus revision for stale-work checks.
 -- Replaced-but-equal values conservatively require a fresh capture.
-data SourceIdentity = SourceIdentity !Int !Int (StableName Buffer) (StableName FileState) deriving Eq
+data SourceIdentity = SourceIdentity !Int !ContentVersion (StableName FileState) deriving Eq
 
 sourceIdentity :: FilePath -> Desktop -> IO (Maybe SourceIdentity)
 sourceIdentity path d = case find (\(_,file,_)->filePath file==path) (reverse (publicSources d)) of
   Nothing -> pure Nothing
   Just (bid,file,buffer) -> do
-    current<-evaluate buffer >>= makeStableName
+    current<-captureVersion buffer
     baseline<-evaluate file >>= makeStableName
-    pure (Just (SourceIdentity bid (revision buffer) current baseline))
+    pure (Just (SourceIdentity bid current baseline))
 
 sourceSnapshots :: Desktop -> M.Map FilePath Snapshot
 sourceSnapshots d = M.fromList [(filePath file,Snapshot file (Just (bid,revision b)) (contents b)) |
