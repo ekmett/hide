@@ -22,12 +22,13 @@ Keep three responsibilities distinct:
 | --- | --- |
 | Host | Buffers and Undo, window geometry/focus, standard widgets, commands, task supervision, policy, session transport and recovery |
 | Plugin | Domain state, providers, commands, prepared presentation and resource cleanup |
-| Frontend | Terminal/native/browser events and presentation of the common cell grid |
+| Frontend | Terminal/native/browser input, cell and canvas presentation, and platform accessibility adapters |
 
 Plugins run on the session host, including an SSH host or detached daemon. A
 frontend disconnect does not unload them. A browser or Metal client does not need
-the plugin's Haskell package: it receives ordinary frames, named menu actions and
-semantic control metadata from the host.
+the plugin's Haskell package: it receives cell updates, named actions, prepared
+canvas resources and a semantic widget tree from the host. Canvas rendering is a planned extension,
+tracked separately from the first command/widget implementation.
 
 ## Packaging and activation
 
@@ -47,7 +48,6 @@ data Plugin = Plugin
 data Manifest = Manifest
   { pluginId         :: PluginId
   , pluginVersion    :: Version
-  , requiredApi      :: ApiRange
   , dependencies     :: [PluginDependency]
   , configuration    :: ConfigSchema
   }
@@ -62,9 +62,10 @@ errors with the affected plugin named. Activation failures withdraw partial
 registrations and release acquired resources.
 
 Do not begin with GHC runtime linking, `hint`, downloaded object code or hot code
-unloading. Cabal/GHC already check compatibility for the linked build. API version
-ranges describe source contracts, not a stable GHC binary ABI. Runtime replacement
-can come later if it earns its complexity.
+unloading. Cabal/GHC check the linked build. Change the source API and its consumers
+together while the design develops; do not add compatibility negotiation for
+hypothetical older plugins. Runtime replacement can come later if it earns its
+complexity.
 
 Native Haskell plugins are trusted code. `IO`, FFI and shared process memory mean
 this is not a sandbox, even if a convenience API hides `liftIO`. Host policy still
@@ -286,6 +287,120 @@ Closing a conversation view closes its window scope, not necessarily its provide
 That provider belongs to a session service scope. Unsaved plugin-owned documents
 must participate in host close/save negotiation; a hung plugin cannot indefinitely
 prevent the host from offering cancellation or forced shutdown.
+
+## Semantic tree and accessibility transport
+
+The prepared `View` becomes a retained tree shared by rendering, input routing,
+automation and accessibility. Think of it as a small virtual DOM for the editor's
+widgets, with no dependency on HTML. The host adds window chrome and modal
+structure around plugin content. Do not reverse-engineer this tree from pixels or
+painted cells. This work is tracked in [#13](https://github.com/ekmett/hide/issues/13);
+[the accessibility plan](accessibility.md) covers platform adapters and text APIs.
+
+A node carries its scoped identity and lifetime, parent, role, name, current
+state/value, supported actions and sensitivity. Layout supplies bounds, clipping
+and reading order. Text nodes refer to a buffer identity/revision and range;
+selection and focus belong to the view. A logical tree item keeps its identity
+when its visible row changes. Closing/reopening a dialog or recycling a widget
+for a different item creates a new lifetime.
+
+Publish the visible tree and its ancestors alongside cell frames, with explicit
+insert/update/remove patches. Include changed focus/selection and logical child
+counts for virtualized regions. Structural, content and layout revisions identify
+what changed; a cursor blink does not invalidate the document. Never compare
+whole desktops, buffer contents or undo histories to construct a patch. Prepare
+payloads off the interaction thread. Coalesce complete prepared states, then
+regenerate patches against the acknowledged base; do not drop arbitrary deltas
+whose successors refer to them. A missing base requests a fresh snapshot.
+
+Cells, semantic geometry and canvas surfaces commit against one layout revision.
+A drag can immediately transform an existing ready surface and its semantics;
+it never waits for image decoding. New content that depends on unavailable
+resources uses an explicit placeholder until ready. The frontend adopts a
+coherent presentation, then emits platform notifications. It must not expose a new button label at an old clickable rectangle. Actions
+identify the node lifetime and any relevant text/layout revision. The host checks
+current modal state, availability and caller authority again before dispatch.
+An unrelated frame update must not reject an otherwise valid action.
+
+Visible nodes are the minimum transport, not a claim of complete accessibility.
+Offscreen children and text ranges remain discoverable through bounded queries
+against measured buffers and provider indexes. Native synchronous text APIs may
+require an asynchronously maintained local document replica. A viewport excerpt
+cannot masquerade as complete document text; its limited state must be explicit
+until the adapter can satisfy full-range requests. Range queries must not block
+on a remote round trip from a native accessibility callback.
+
+Map this tree into NSAccessibility on macOS, UI Automation on Windows, AT-SPI on
+Linux and a semantic DOM beside WebGL in the browser. All share node identities,
+focus and actions; each still needs platform text/IME, Unicode offset, geometry
+and notification handling. Accessibility and agent projections share semantics
+but retain caller-specific policy. Redact secrets before transmission. A platform
+accessibility caller is not automatically proof of human authority; the existing
+accessibility plan's assistive-access policy must be resolved before exposing
+protected approvals and agent settings through those adapters.
+
+## Canvas windows
+
+A canvas is another window content view, tracked in
+[#14](https://github.com/ekmett/hide/issues/14). A PNG viewer is the first concrete
+consumer: pan and zoom an image inside ordinary editor chrome. Later plugins can
+supply plots, diagrams or custom GPU content. Canvas views contribute semantic
+names, descriptions and actions to the same tree; selectable regions can expose
+text or structured copy behavior.
+
+The host owns window placement, focus, input capture and the final clip/stencil.
+A plugin receives content-local coordinates and a viewport/scale. Its drawing is
+clipped to the actual visible region after overlapping windows, menus, dialogs
+and chrome are accounted for. Resizing, moving and scrolling use the host's
+layout transform; Retina device pixels are not confused with character cells.
+Rendering, hit testing and accessibility share explicit conversions among grid
+cells, canvas-local coordinates, frontend logical points and device pixels. Any
+filter distortion must also participate in geometry conversion. Hit testing uses
+that same transform and capture rules. Plugins cannot paint or accept clicks over an approval dialog by enlarging their content bounds.
+
+Start with retained image resources and a small portable scene description that
+Metal, Vulkan and WebGL can execute. Send resource creation/upload/release and
+scene/damage changes over the session wire protocol. Give surfaces and resources
+explicit lifetimes and revisions; an unchanged image is uploaded once, not
+encoded into every cell frame. Reconnect and graphics-context loss rebuild the
+current scene from retained state. Bound decoded image size and GPU memory,
+retire resources on view/plugin closure, and retain them until presentations and
+GPU work using them have finished. Attachment/context epochs reject stale uploads
+and releases. Decode and prepare off-thread; budget graphics-thread upload work
+where the backend requires it. Transport resources in bounded cancellable chunks
+with input and interactive presentation updates taking priority. Animated content
+requests frames while active; a static canvas does not force continuous desktop
+redraws.
+
+Keep a deliberate route for plugin-defined rendering pipelines alongside that
+portable path. Arbitrary Haskell callbacks on an SSH host cannot run inside a
+browser, and Metal/Vulkan/WebGL do not share shader formats. Such a plugin must
+provide frontend-executable resources/commands or an explicitly installed
+renderer extension for the chosen backend. The compositor renders plugin output
+into a host-controlled target and applies the final stencil itself; it does not
+trust plugin code to preserve graphics state or voluntarily obey the clip.
+Renderer IDs select explicitly installed and locally enabled extensions; a remote
+host cannot install native code by naming one. If unavailable, use the
+portable scene or named fallback. Enforce scene/resource limits and schedule
+custom GPU work within a frame budget; arbitrary installed callbacks still need
+cooperative limits. Native renderer extensions are trusted installed code, not a
+sandbox.
+
+The host also owns color space and filter placement. A canvas can request crisp
+image presentation or participation in the editor's CRT effect without changing
+cell rendering globally. Final screenshots composite both cell and canvas layers;
+text captures use the canvas's semantic description and available actions. A
+stencil is not a confidentiality boundary: apply audience/redaction policy before
+sending image resources or semantics. Agent screenshots capture only the
+authorized masked composite, never underlying private canvas textures. Text
+terminals receive a useful named fallback with image metadata and Open Externally,
+not an empty source buffer pretending to display pixels.
+
+Deliver this after the shared widget ownership contract. The first PNG slice
+includes resources, clipping, identity/lifecycle, basic image semantics and the
+shared wire path. Enrich accessibility and add backend-specific rendering
+extensions with concrete consumers afterward. Keep the accessibility work
+independently useful for ordinary windows throughout.
 
 ## Sidebar contributions
 
@@ -557,7 +672,8 @@ handing fresh handles to plugins.
 
 ## Bringing it into the current code
 
-These are proposed boundaries, not a request to implement them in this pass:
+Delivery is staged in [the plugin tracking issue](https://github.com/ekmett/hide/issues/1).
+The interfaces remain proposed until their implementation PRs establish parity:
 
 1. Put a named, typed command registry behind the current `Command`/`Effect`
    dispatch. Keep existing constructors internally while menus and configurable
@@ -599,5 +715,7 @@ that exposure should not accidentally become the compatibility promise.
 The recommendation is trusted, linked Haskell packages first. If installation
 without rebuilding becomes essential, compare a separate-process Haskell SDK
 against runtime GHC loading rather than quietly promising both. Similarly, keep
-custom pixel rendering and live code reload outside the first API. Neither is
-necessary for agent hooks, the stacked sidebar or useful custom editor windows.
+canvas implementation in its own tracked stage after widget ownership. Live
+code reload remains outside the initial implementation. Neither blocks agent
+hooks or the stacked sidebar; the semantic contract must already accommodate
+canvas content so it does not acquire a separate accessibility/input system.
