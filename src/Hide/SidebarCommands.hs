@@ -5,7 +5,7 @@
 module Hide.SidebarCommands
   ( SidebarHost, SidebarContext(..), SidebarReply(..), withSidebarCommands
   , sidebarRegistry, publishTreeFromHost, retireTreeFromHost, sidebarEffects
-  , tickSidebar, initializeSidebar
+  , tickSidebar, refreshTreeFromHost, initializeSidebar
   ) where
 
 import Control.Concurrent.Async (Async,async,cancel,poll)
@@ -32,6 +32,7 @@ import Hide.Files (FileState(..),loadFile)
 import Hide.GuestAccess (protectedPath,protectedFilePath,protectedBuffer)
 import Hide.Links (LinkResult,applyLink)
 import Hide.Model
+import Hide.AgentSidebarTypes
 import Hide.Sidebar
 import Hide.Plugin.Command
 import qualified Hide.Plugin.Tree as P
@@ -41,7 +42,7 @@ import qualified Hide.Plugin.Menu as Menu
 data SidebarContext = SidebarContext
   { sidebarOrigin :: !Menu.MenuOrigin, sidebarPrivatePaths :: ![FilePath]
   , sidebarColumns :: !Int, sidebarOpened :: !(Maybe (FilePath,Int,Int,ContentVersion)) }
-data SidebarReply = SidebarExisting !FilePath !Int !Int !ContentVersion | SidebarDocument !FilePath !Document | SidebarPrepared !LinkResult
+data SidebarReply = SidebarExisting !FilePath !Int !Int !ContentVersion | SidebarDocument !FilePath !Document | SidebarPrepared !LinkResult | SidebarAgent !AgentSidebarRequest
 
 data ChildJob = ChildJob !TreeRequest !Menu.MenuOrigin !(Async (Either CommandError (P.PreparedPage SidebarContext SidebarReply))) !Bool
 data ActionJob = ActionJob ![P.TreeHit] !CommandRef !Menu.MenuOrigin !Int !(Async (Either CommandError SidebarReply)) !Bool
@@ -189,7 +190,7 @@ initializeSidebar host d=do
           await loading
 
     await current=do
-      next<-tickSidebar host current
+      next<-tickSidebar host (\value _->pure (False,value)) current
       case sideTree next of
         Just tree | treeProjectionRevision tree==treeRevision tree && all ready (M.elems (treeNodes tree))->pure next
         Nothing->pure next
@@ -312,19 +313,30 @@ refreshFiles host@(SidebarHost _ ref _ _ _) path entries d=do
       (_,paths,_,_)<-readIORef cache
       atomicModifyIORef' cache (\(a,b,c,dirs)->((a,b,c,M.insert path entries (if M.size dirs>=32 && not (M.member path dirs) then M.empty else dirs)),()))
       case M.lookup path paths >>= \ident->let key=NodeKey (P.treeReference provider) ident in (key,) <$> M.lookup key (treeNodes tree) of
-        Just (key,node) | stateExpanded node->do
-          let invalid=collapseNode (nodeHit key node) tree
-              current=treeNodes invalid M.! key
-              (changed,request)=requestChildren (nodeHit key current) Nothing invalid
-          maybe (pure d) (\value->enqueue host value Menu.HumanMenu d {sideTree=Just changed,contextMenu=Nothing,contextTarget=Nothing}) request
+        Just (NodeKey owner ident,_) -> refreshTreeFromHost host owner ident d
         _->pure d
     _->pure d
+
+-- | Invalidate one expanded scoped node through the ordinary request owner.
+-- Nothing runs a provider here; closed nodes load the latest metadata on expansion.
+refreshTreeFromHost :: SidebarHost -> P.TreeRef -> P.NodeId -> Desktop -> IO Desktop
+refreshTreeFromHost host@(SidebarHost _ ref _ _ _) owner ident d=do
+  state<-readIORef ref
+  live<-maybe (pure False) P.treeCurrent (M.lookup owner (providers state))
+  case sideTree d of
+    Just tree | live,Just node<-M.lookup key (treeNodes tree),stateExpanded node->do
+      let invalid=collapseNode (nodeHit key node) tree
+          current=treeNodes invalid M.! key
+          (changed,request)=requestChildren (nodeHit key current) Nothing invalid
+      maybe (pure d) (\value->enqueue host value Menu.HumanMenu d {sideTree=Just changed,contextMenu=Nothing,contextTarget=Nothing}) request
+    _->pure d
+  where key=NodeKey owner ident
 
 -- At most four loads, one projection, one action and one badge computation.
 -- Publication drains four deltas per tick. All queues and retained UI nodes have
 -- explicit ceilings; slow providers cannot starve input with a recursive drain.
-tickSidebar :: SidebarHost -> Desktop -> IO Desktop
-tickSidebar host@(SidebarHost _ ref publications cancellation _) initial=do
+tickSidebar :: SidebarHost -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> IO Desktop
+tickSidebar host@(SidebarHost _ ref publications cancellation _) core initial=do
   mounted<-mount host initial
   published<-foldM (\d _->do
     supplied<-atomically (tryReadTBQueue publications)
@@ -345,7 +357,7 @@ tickSidebar host@(SidebarHost _ ref publications cancellation _) initial=do
   state<-readIORef ref
   (loaded,retained)<-foldM (finishChild state) (withdrawn,[]) (jobs state)
   modifyIORef' ref (\s->s {jobs=reverse retained})
-  adopted<-finishAction host loaded
+  adopted<-finishAction host core loaded
   projected<-finishProjection host adopted
   restarted<-startLoads host projected
   startProjection host restarted
@@ -446,8 +458,8 @@ startProjection (SidebarHost _ ref _ _ _) d=do
       modifyIORef' ref (\s->s {projection=Just (treeRevision tree,worker)})
     _->pure ()
 
-finishAction :: SidebarHost -> Desktop -> IO Desktop
-finishAction (SidebarHost _ ref _ cancellation _) d=do
+finishAction :: SidebarHost -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> IO Desktop
+finishAction (SidebarHost _ ref _ cancellation _) core d=do
   state<-readIORef ref
   case actionJob state of
     Nothing->pure d
@@ -472,10 +484,12 @@ finishAction (SidebarHost _ ref _ cancellation _) d=do
           modifyIORef' ref (\s->s {actionJob=Nothing})
           case result of
             Right (Right (SidebarExisting path wid bid version)) | current->adoptExisting origin path wid bid version d
+            Right (Right (SidebarAgent request)) | current && origin==Menu.HumanMenu->snd <$> core d [AgentSidebarAction request]
             _->pure $ if not current then d {status="Sidebar result expired."} else case result of
               Left err->d {status="Sidebar action failed: "<>T.pack (displayException err)}
               Right (Left err)->d {status="Sidebar action failed: "<>T.pack (show err)}
               Right (Right SidebarExisting{})->d {status="Sidebar result expired."}
+              Right (Right SidebarAgent{})->d {status="Sidebar result expired."}
               Right (Right (SidebarPrepared value))->fst (applyLink value d)
               Right (Right (SidebarDocument path doc))
                 | origin==Menu.AgentMenu && protectedPath d path->d {status="Sidebar target is now protected."}

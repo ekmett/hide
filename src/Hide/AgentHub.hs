@@ -7,10 +7,10 @@
 -- Recovery retains identities and history without replaying queues or implicitly
 -- starting providers. Public descriptions and private resume snapshots differ.
 module Hide.AgentHub
-  ( AgentHub, AgentId(..), Actor(..), HubLimits(..), SpawnSpec(..), Context(..), Workspace(..)
+  ( AgentHub, AgentId(..), AgentSummary(..), agentSummaries, Actor(..), HubLimits(..), SpawnSpec(..), Context(..), Workspace(..)
   , AgentDriver(..), DriverEvent(..), StartProvider, StartRequest(..), PrivateSource(..), HubMessage(..)
   , Capabilities(..), ConfigChoice(..), parseCapabilities, filterPrivateCapabilities
-  , newAgentHub, newAgentHubWithLimits, closeAgentHub, spawnAgent, reconnectAgent, registerAgent, updateExternalAgent, setExternalAgentBusy, renameAgent
+  , newAgentHub, newAgentHubWithLimits, closeAgentHub, spawnAgent, spawnAgentWithTask, reconnectAgent, registerAgent, updateExternalAgent, setExternalAgentBusy, renameAgent
   , configureAgent, steerAgent, listAgents, statusAgent, sendAgent, waitAgent, cancelAgent, endAgent
   , historyAgent, searchAgentHistory, recordAgentEvent, snapshotHub, restoreHub, restoreHubWithLimits
   ) where
@@ -33,6 +33,12 @@ import System.FilePath (isAbsolute)
 import System.Timeout (timeout)
 import Text.Read (readMaybe)
 import qualified Data.Text.Encoding as TE
+
+-- | Small directory projection. No task, transcript, history, capability payload
+-- or private provider identity is retained by sidebar snapshots.
+data AgentSummary = AgentSummary
+  { summaryId :: !AgentId, summaryName :: !Text, summaryParent :: !(Maybe AgentId)
+  , summaryStatus :: !Text } deriving (Eq,Show)
 
 -- These identities are supplied by the host bridge, never decoded from tool arguments.
 newtype AgentId = AgentId { agentIdText :: Text } deriving (Eq,Ord,Show)
@@ -212,6 +218,21 @@ spawnAgent hub@(AgentHub readLimits launcher _) actor spec=mask $ \restore->do
 
 -- Only the human-facing host calls this hook; it is absent from agent tools.
 -- Reserve under the same STM lock as spawn, retaining identity and history.
+-- | Reserve/start a child and enqueue its assigned task. Failure or interruption
+-- after creation ends that exact child; it never leaves an unassigned provider.
+spawnAgentWithTask :: AgentHub -> Actor -> SpawnSpec -> IO (Either Text (AgentId,Int))
+spawnAgentWithTask hub actor spec=mask $ \restore->do
+  created<-restore (spawnAgent hub actor spec)
+  case created of
+    Left err->pure (Left err)
+    Right ident->do
+      let cleanup=void (endAgent hub actor ident)
+      (do
+        queued<-sendAgent hub actor ident (spawnTask spec)
+        case queued of
+          Left err->cleanup >> pure (Left err)
+          Right ticket->pure (Right (ident,ticket))) `onException` cleanup
+
 reconnectAgent :: AgentHub -> AgentId -> IO (Either Text ())
 reconnectAgent hub@(AgentHub readLimits launcher ref) ident=mask $ \restore->do
   previous<-M.lookup ident . hubEntries <$> readTVarIO ref
@@ -562,6 +583,16 @@ trimResults entries=trim (sum (map size (M.elems entries))) entries
 ticketValue :: Int -> Either Text Value -> Value
 ticketValue ticket result=object (["ticket" .= ticket,"status" .= (either (\reason->if reason `elem` ["Agent prompt cancelled.","Agent session ended."] then "cancelled" else "failed") (const "completed") result::Text)]++either (\err->["error" .= boundedError err]) (\value->["result" .= boundedValue value]) result)
 
+-- | Read immutable directory fields on the preparation worker. Rendering never
+-- scans the hub or compares its histories.
+agentSummaries :: AgentHub -> IO [AgentSummary]
+agentSummaries (AgentHub _ _ ref)=do
+  state<-readTVarIO ref
+  pure [AgentSummary (entryId entry) (spawnName (entrySpec entry)) (entryParent entry) (entryStatus entry) | entry<-M.elems (hubEntries state)]
+
+entryStatus :: Entry -> Text
+entryStatus entry=maybe (T.toLower (T.pack (show (entryPhase entry)))) (\(_,kind)->if kind=="configuration" then "configuring" else if kind=="cancelled" then "cancelling" else "running") (entryControl entry)
+
 listAgents :: AgentHub -> Actor -> IO (Either Text Value)
 listAgents (AgentHub _ _ ref) actor=atomically $ do
   state<-readTVar ref
@@ -574,7 +605,7 @@ statusAgent (AgentHub _ _ ref) actor ident=atomically $ do
 entryValue :: HubState -> Entry -> Value
 entryValue state entry=object ["id" .= agentIdText (entryId entry),"name" .= spawnName spec,"task" .= T.take 2048 (spawnTask spec),"taskTruncated" .= (T.length (spawnTask spec)>2048),
   "parentId" .= fmap agentIdText (entryParent entry),"parentName" .= (entryParent entry >>= (fmap (spawnName.entrySpec) . (`M.lookup` hubEntries state))),
-  "workspace" .= workspaceValue (spawnWorkspace spec),"status" .= maybe (T.toLower (T.pack (show (entryPhase entry)))) (\(_,kind)->if kind=="configuration" then "configuring" else if kind=="cancelled" then "cancelling" else "running") (entryControl entry),"cwd" .= spawnDirectory spec,"queued" .= Q.length (entryQueue entry),
+  "workspace" .= workspaceValue (spawnWorkspace spec),"status" .= entryStatus entry,"cwd" .= spawnDirectory spec,"queued" .= Q.length (entryQueue entry),
   "currentTicket" .= fmap messageTicket (entryCurrent entry),"contextUsage" .= fmap (\(used,size)->object ["used" .= used,"size" .= size]) (entryUsage entry),"capabilities" .= capabilitiesValue (entryCaps entry),
   "reconnectable" .= (entryPhase entry==Recovered && not (entryExternal entry) && entryKey entry/=Nothing && supportsResume (entryCaps entry)),"historyDropped" .= entryDropped entry,"nextEvent" .= entryNextEvent entry,"humanSeat" .= (entryParent entry==Nothing)]
   where spec=entrySpec entry
