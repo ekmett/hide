@@ -16,6 +16,7 @@ import System.Timeout (timeout)
 import qualified Hide.ACP as ACP
 import Hide.AutocompleteACP
 import Hide.InlineTypes
+import Hide.AgentHub (ConfigChoice(..))
 
 checks :: IO ()
 checks=bracket temporary removePathForcibly $ \root -> do
@@ -37,6 +38,15 @@ checks=bracket temporary removePathForcibly $ \root -> do
   writeFile script fixture
   writeFile logPath ""
   withACPCompletion launch root servers (Just "model-b") (Just "high") $ \completion -> do
+    dormant<-completionConfiguration completion
+    check "configuration discovery is lazy" (dormant==Nothing)
+    discoverACPConfiguration completion
+    (captured,choices)<-completionConfiguration completion >>= maybe (error "No completion choices") pure
+    check "public completion choices exclude private credentials" (map configId choices==["model-id","effort-id"])
+    changed<-configureACPAt completion captured "model-id" "model-a"
+    check "captured advertised model configures the existing completion instance" (changed==Right ())
+    expired<-configureACPAt completion captured "effort-id" "low"
+    check "old completion configuration receipt expires" (isLeft expired)
     check "only snapshot context, skill and submit tools are exposed" (map (field "name") completionTools==map Just (["submit_completion","read_completion_context","read_completion_file","read_completion_skill"]::[T.Text]))
     idle<-callCompletionTool completion "read_completion_context" (object ["requestId" .= ("first"::T.Text)])
     check "context cannot be read while idle" (isLeft idle)
@@ -106,6 +116,8 @@ checks=bracket temporary removePathForcibly $ \root -> do
       awaitPrompt "reopened"
       release "reopened"
       check "raw streamed agent text never becomes an edit" . null =<< wait running
+    oldConnection<-configureACPAt completion captured "model-id" "model-b"
+    check "retired completion instance cannot configure its replacement" (isLeft oldConnection)
     final<-logs
     check "cancelled private connection is replaced with a fresh session" (length [() | entry<-final,field "method" entry==Just ("session/new"::T.Text)]==2)
     let otherLog=root </> "other.jsonl"
@@ -155,7 +167,7 @@ fixture=unlines
   , " with open(os.environ['LOG'],'a') as log: log.write(json.dumps(value)+'\\n')"
   , " return value"
   , "def option(i,category,current,choices): return dict(id=i,type='select',category=category,currentValue=current,options=[dict(value=v,name=v) for v in choices])"
-  , "options=[option('model-id','model','model-a',['model-a','model-b']),option('effort-id','thought_level','low',['low','high'])]"
+  , "options=[option('model-id','model','model-a',['model-a','model-b']),option('effort-id','thought_level','low',['low','high']),option('mcp-auth-secret','model','hidden-model',['hidden-model'])]"
   , "while True:"
   , " request=recv(); method=request.get('method'); params=request.get('params',{})"
   , " if method=='initialize':"

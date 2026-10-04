@@ -19,6 +19,7 @@ import System.IO (hClose, openTempFile)
 import System.Timeout (timeout)
 import AutocompleteACPCheck (fixture)
 import Hide.Autocomplete
+import Hide.AgentSidebarTypes
 import Hide.Buffer
 import Hide.Model
 
@@ -107,8 +108,40 @@ checks=bracket temporary removePathForcibly $ \root->do
       settled<-tickAutocomplete runtime wideRequest
       shown<-save runtime True settled >>= awaitDesktop runtime "debug pane toggle on" hasTranscript
       check "debug pane preserves focused source" (activeText shown==large)
-      hidden<-save runtime False shown >>= awaitDesktop runtime "debug pane toggle off" (not.hasTranscript)
+      -- Revealing the same completion transcript must keep its warm provider.
+      continued<-send runtime "propose" [] shown
+      fifth<-awaitPrompt 5
+      let fifthId=required "requestId" fifth::T.Text
+      fifthSubmitted<-autocompleteTool runtime "submit_completion" (object ["requestId" .= fifthId,"proposals" .= ([]::[Value])])
+      check "warm provider can abstain" (either (const False) (const True) fifthSubmitted)
+      writeFile (root </> T.unpack fifthId) "complete"
+      waitRetired runtime fifthId
+      warm<-tickAutocomplete runtime continued
+      warmEntries<-logs
+      check "revealing completion chat preserves the existing provider instance"
+        (length [() | entry<-warmEntries,field "method" entry==Just ("session/new"::T.Text)]==1)
+      hidden<-save runtime False warm >>= awaitDesktop runtime "debug pane toggle off" (not.hasTranscript)
       check "debug toggle keeps the source" (activeText hidden==large)
+      let shortSource=addDocument Nothing (newBuffer "x\n") hidden
+          configure target option value state=snd <$> autocompleteEffects runtime (\d _->pure (False,d)) state
+            [AgentSidebarAction (ConfigureCompletion target option value)]
+      sixthRequest<-send runtime "propose" [] shortSource
+      sixth<-awaitPrompt 6
+      sixthId<-submit runtime sixth "first proposal\n"
+      waitRetired runtime sixthId
+      firstPreview<-awaitDesktop runtime "preview before settings change" (isJust.inlinePreview) sixthRequest
+      oldTarget<-awaitIO "connected completion target" $ fmap (\(CompletionSummary target _)->target) <$> completionSummary runtime
+      changedSetting<-configure oldTarget "model-id" "model-b" firstPreview
+      configuredPreview<-awaitDesktop runtime "accepted setting invalidates preview" (\d->status d=="Completion setting updated." && inlinePreview d==Nothing) changedSetting
+      seventhRequest<-send runtime "propose" [] configuredPreview
+      seventh<-awaitPrompt 7
+      seventhId<-submit runtime seventh "newer proposal\n"
+      waitRetired runtime seventhId
+      newerPreview<-awaitDesktop runtime "new preview after settings change" (isJust.inlinePreview) seventhRequest
+      rejectedSetting<-configure oldTarget "effort-id" "high" newerPreview
+      preserved<-awaitDesktop runtime "expired completion setting" (\d->status d=="Completion setting expired.") rejectedSetting
+      check "expired setting leaves a newer inline proposal intact"
+        (inlinePreview preserved==inlinePreview newerPreview && activeText preserved=="x\n")
       entries<-logs
       check "autocomplete configuration is independent of the main agent" (length [() | entry<-entries,field "method" entry==Just ("initialize"::T.Text)]==1)
   putStrLn "Autocomplete runtime checks passed"

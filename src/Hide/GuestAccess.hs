@@ -174,6 +174,8 @@ guestEffectsAllowed=all allowed
     allowed _=True
 protectedPurpose :: Purpose -> Bool
 protectedPurpose p=case p of
+  AgentChoiceDialog{} -> True
+  CompletionChoiceDialog{} -> True
   AgentRenameDialog{} -> True
   AgentNewDialog -> True
   EnvironmentDialog{} -> True

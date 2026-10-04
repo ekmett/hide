@@ -141,6 +141,8 @@ data Purpose = Opening FilePath Text [Entry] | ChangingDirectory FilePath [Entry
   | CodeActionChoices Int Int [Text]
   | Completing Int Int Int [Completion] | Locations [(FilePath,Int,Int)] | Merging [Text]
   | AgentRenameDialog !Hide.AgentHub.AgentId | AgentNewDialog
+  | AgentChoiceDialog !Hide.AgentHub.AgentConfigRef !Text ![(Text,Text)]
+  | CompletionChoiceDialog !CompletionTarget !Text ![(Text,Text)]
   | EnvironmentDialog Text | AutocompleteDialog Text | DiskConflict Conflict | AgentDialog Text | PermissionDialog Text | DebugDialog Text
   | DiscardDraft | Confirm Command | Information | Settings | ChatInputSettings | Widgets deriving (Eq,Show)
 data Dialog = Dialog
@@ -2811,6 +2813,12 @@ submitDialog button dg original
       branch:_ -> (d,[RunGit (MergeBranch branch)])
       _ -> (d,[])
     Committing -> if T.null (T.strip first) then (original {status="Enter a commit message."},[]) else (original,[WriteGitCommit first])
+    AgentChoiceDialog receipt option choices -> case drop selected choices of
+      (value,_):_->(d,[AgentSidebarAction (ConfigureAgent receipt option value)])
+      _->(d,[])
+    CompletionChoiceDialog target option choices -> case drop selected choices of
+      (value,_):_->(d,[AgentSidebarAction (ConfigureCompletion target option value)])
+      _->(d,[])
     AgentRenameDialog ident -> (d,[AgentSidebarAction (RenameAgentTo ident first)])
     AgentNewDialog -> (d,[AgentSidebarAction (CreateAgent first second)])
     Renaming -> if T.null (T.strip first) then (original {status="Enter a new name."},[]) else (d,[LanguageRequest (RenameAt (T.strip first))])
