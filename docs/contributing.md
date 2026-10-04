@@ -567,3 +567,12 @@ Only explicit choice discovery starts that existing lazy connection. Configurati
 and prompts share its serial owner; session/configuration receipts and settings
 incarnations expire old choices without introducing a second connection or policy
 registry. Revealing/hiding its cached transcript does not retire the provider.
+
+The Debug sidebar uses the same scoped tree route as Files and Agents. Provider
+workers wait on the existing debugger owner through a 32-entry mailbox; each tick
+admits at most four messages. Validated pages are capped at 1 MiB and 64 cached
+pages per stop. Cache validation and prepared presentation run off the UI lock;
+owner maps retain scalar provenance and validated immutable rows, never document
+payloads. `DebuggerSidebarCheck` exercises real fake-DAP interleaving, captured
+frame activation, passive cached ticks, sticky lazy-reference refusal, resume
+expiry and thread-exit refusal of delayed child pages.

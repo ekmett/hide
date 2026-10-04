@@ -60,6 +60,7 @@ import Data.IORef (newIORef, readIORef, writeIORef)
 import Control.Monad (foldM, when)
 import System.IO (hPutStrLn, stderr, hFlush, stdout, stdin, hIsTerminalDevice)
 import Hide.Debugger
+import Hide.DebuggerSidebar
 import Hide.Conversation
 import Hide.Tooling
 import Hide.GitOperations
@@ -269,7 +270,7 @@ runEditor args = do
           mapM_ (setEnv "THC_EDIT_SESSION") daemon
           font<-Font.loadFont
           let specs=builtinTools++debugTools++chatTools++toolingTools++workspaceTools++fileTools++testsTools++historyTools++runtimeTools++gitTools++controlTools++environmentTools++clipboardTools++docsTools++[screenTool]
-          withPermissions (specs++agentTools) $ \permissions -> withBufferReadCommands $ \bufferCommands -> withBufferDiffCommands $ \diffCommands -> withDocsCommands $ \docsCommands -> withMenuCommands docsCommands $ \menuHost -> withConversationAt (startingDirectory protectedDesktop) $ \conversation -> withDebuggerConsoles (let (_,consoles,_)=conversationServices conversation in consoles) $ \debugger -> withTooling $ \tooling -> withGitOperations $ \gitOperations -> withReconciliation $ \reconciliation -> withProjectBrowser $ \projectBrowser -> withHighlighting $ \highlighting -> withAutocomplete (startingDirectory protectedDesktop) $ \autocomplete -> withAgentSidebar sidebarHost (conversationAgents conversation) autocomplete $ \agentSidebar -> do
+          withPermissions (specs++agentTools) $ \permissions -> withBufferReadCommands $ \bufferCommands -> withBufferDiffCommands $ \diffCommands -> withDocsCommands $ \docsCommands -> withMenuCommands docsCommands $ \menuHost -> withConversationAt (startingDirectory protectedDesktop) $ \conversation -> withDebuggerConsoles (let (_,consoles,_)=conversationServices conversation in consoles) $ \debugger -> withDebuggerSidebar sidebarHost debugger $ \debugSidebar -> withTooling $ \tooling -> withGitOperations $ \gitOperations -> withReconciliation $ \reconciliation -> withProjectBrowser $ \projectBrowser -> withHighlighting $ \highlighting -> withAutocomplete (startingDirectory protectedDesktop) $ \autocomplete -> withAgentSidebar sidebarHost (conversationAgents conversation) autocomplete $ \agentSidebar -> do
             contributions<-PluginMenu.menuSnapshot (menuContributions menuHost)
             let liveBase=protectedDesktop {contributedMenus=contributions,agentMenuRefs=menuAgentReferences menuHost,menusActive=True}
             keymap<-either (die . T.unpack) pure (configuredBindings (contributedBindingCommands liveBase) keys)
@@ -291,7 +292,7 @@ runEditor args = do
                     (quit,updated)<-policyEffects permissions core d pending
                     approvedExit<-readIORef exiting
                     pure (quit || approvedExit,updated)
-                  tick d=tickProjectBrowser projectBrowser d >>= tickGitOperations gitOperations applyEffects >>= tickTooling tooling applyEffects >>= tickReconciliation reconciliation (sidebarEffects sidebarHost applyEffects) >>= tickConversation conversation >>= tickDebugger debugger (toolingEffects tooling applyEffects) >>= tickPermissions permissions >>= tickHighlighting highlighting >>= tickAutocomplete autocomplete >>= tickKeybindings keybindings >>= tickMenus menuHost >>= tickAgentSidebar agentSidebar sidebarHost >>= tickSidebar sidebarHost runtimeEffects
+                  tick d=tickProjectBrowser projectBrowser d >>= tickGitOperations gitOperations applyEffects >>= tickTooling tooling applyEffects >>= tickReconciliation reconciliation (sidebarEffects sidebarHost applyEffects) >>= tickConversation conversation >>= tickDebugger debugger (toolingEffects tooling applyEffects) >>= tickPermissions permissions >>= tickHighlighting highlighting >>= tickAutocomplete autocomplete >>= tickKeybindings keybindings >>= tickMenus menuHost >>= tickDebuggerSidebar debugSidebar sidebarHost debugger >>= tickAgentSidebar agentSidebar sidebarHost >>= tickSidebar sidebarHost runtimeEffects
                   inspectTool d name parameters
                     | name `elem` ["list_windows","list_buffers","read_buffer","read_selection"] = pure (d,pure (builtinTool d name parameters))
                     | name `elem` chatToolNames = chatTool conversation d name parameters
@@ -612,6 +613,7 @@ applyEffects = foldM apply . (False,)
         if exists then apply (False,d {dialog=Nothing}) (ReadPath path)
         else pure (False,browserError "File not found." d)
     apply (_,d) (ReadTree path)=pure (False,installSidebar (sidebarDirectory path d) d)
+    apply (_,d) DebugSidebarAction{}=pure (False,d {status="Debugger sidebar is unavailable in this preview."})
     apply (_,d) AgentSidebarAction{}=pure (False,d {status="Agent navigation is unavailable in this preview."})
     apply (_,d) LoadTree{}=pure (False,d {status="Sidebar provider host is unavailable in this preview."})
     apply (_,d) InvokeTree{}=pure (False,d {status="Sidebar provider host is unavailable in this preview."})
