@@ -53,7 +53,7 @@ capture font desktop includeImage
   where
     (cols,rows)=screenSize desktop
     cellHeight=modeHeight (fromMaybe 3 (videoMode desktop))
-    picture=renderDesktop desktop
+    picture=renderDesktop desktop {streamerMode=True}
     spans=map toList (toList (displayOpsForPic picture (cols,rows)))
     maskedRows=[maskRow y line | (y,line)<-zip [0..] spans]
     maskRow y line=snd (mapAccumL (maskCluster y) 0 padded)

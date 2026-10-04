@@ -21,6 +21,7 @@ import qualified Data.Text.Encoding as TE
 import qualified Data.Map.Strict as M
 import qualified Data.Vector as Vec
 import qualified Hide.Plugin.Window as PluginWindow
+import qualified Hide.Privacy as Privacy
 import Hide.Sidebar
 import Hide.DebuggerSidebarTypes
 import Hide.AgentSidebarTypes
@@ -562,11 +563,20 @@ activePluginWindow d=do
     PluginContent reference->M.lookup reference (pluginWindows d)
     SourceContent _->Nothing
 
+-- | Shared document authority classification. Titles, buffer reads and screen
+-- masks use the same canonical path and host-owned document-role rules.
+privateDocument :: Desktop -> Document -> Bool
+privateDocument d doc=maybe False privateLabel (documentLabel doc) || maybe False (privatePath . filePath) (documentFile doc)
+  where
+    privatePath=Privacy.protectedFilePath (guestPrivatePaths d)
+    privateLabel "Git diff"=True
+    privateLabel label=maybe False (privatePath . T.unpack) (T.stripPrefix "Disk changes: " label)
+
 applicationTitle :: FilePath -> Desktop -> Text
 applicationTitle _ d | Just _<-activePluginWindow d,Just w<-activeWindow d = "th "<>windowTitle d w
 applicationTitle cwd d = case activeDocument d of
   Nothing -> "th"
-  Just doc | streamerMode d, Just file<-documentFile doc, any (equalFilePath (filePath file)) (guestPrivatePaths d) -> "th [private]"
+  Just doc | streamerMode d, privateDocument d doc -> "th [private]"
   Just doc -> "th "<>fromMaybe name (documentLabel doc)
     where
       root=fromMaybe (maybe cwd treeRoot (sideTree d)) (defaultDirectory d)
@@ -622,7 +632,7 @@ windowTitle d w=case windowContent w of
                           | otherwise->(if reference `S.member` retiredPluginWindows d then "Unavailable: " else "")<>maybe "Unavailable plugin window" PluginWindow.preparedWindowTitle (M.lookup reference (pluginWindows d))
   SourceContent bid->case M.lookup bid (buffers d) of
     Nothing->"Unavailable source"
-    Just doc | streamerMode d,Just file<-documentFile doc,any (equalFilePath (filePath file)) (guestPrivatePaths d)->"Private buffer"
+    Just doc | streamerMode d,privateDocument d doc->"Private buffer"
              | otherwise->fromMaybe (maybe (maybe ("NONAME"<>T.pack (show bid)<>".HS") T.pack (documentSuggestedName doc))
                  (T.pack . takeFileName . filePath) (documentFile doc)) (documentLabel doc)
 
@@ -2564,6 +2574,7 @@ boundKeyCommand key mods d
   | bindingInputAvailable d, not (terminalContextReserved d key mods),
     Just cmd<-effectiveBindings d >>= \bindings->Bindings.bindingAction bindings key mods,
     dialog d==Nothing || dialogCommandAllowed cmd d = Just cmd
+  | dialog d==Nothing, messagesDisplayed d, problemsFocused d = problemsKeyCommand key mods
   | otherwise = Nothing
 
 keyEvent :: V.Key -> [V.Modifier] -> Desktop -> (Desktop,[Effect])
@@ -3127,9 +3138,15 @@ problemsMouse x y button d = case button of
   _ -> (d,[])
   where r=problemsRect d; selected=problemsScroll d+y-top r-1; focused=d {bottomTerminal=Nothing,problemsFocused=True,sideTree=fmap (\t -> t {treeFocused=False}) (sideTree d)}
 
+-- Shared by input dispatch and permission admission, including fallback keys.
+problemsKeyCommand :: V.Key -> [V.Modifier] -> Maybe Command
+problemsKeyCommand key mods
+  | V.MCtrl `elem` mods, key `elem` [V.KChar 'c',V.KChar 'C',V.KIns] = Just Copy
+  | otherwise = Nothing
+
 problemsKey :: V.Key -> [V.Modifier] -> Desktop -> (Desktop,[Effect])
 problemsKey key mods d
-  | V.MCtrl `elem` mods, key `elem` [V.KChar 'c',V.KChar 'C',V.KIns] = runCommand Copy d
+  | Just command<-problemsKeyCommand key mods = runCommand command d
   | otherwise = case key of
     V.KUp -> move (-1)
     V.KDown -> move 1

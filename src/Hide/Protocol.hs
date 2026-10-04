@@ -132,9 +132,9 @@ applyGuestInput input d
       Wheel x y _ _ -> pointerAllowedAt d x y
       Blur -> True
       Modifiers _ -> guestKeyboardAllowed d
-      BrowserCommand cmd -> guestKeyboardAllowed d && guestCommandAllowed cmd
-      MenuCommand cmd -> guestKeyboardAllowed d && guestCommandAllowed cmd
-      ContributedMenu name epoch generation -> guestKeyboardAllowed d && maybe False guestCommandAllowed (contributedCommand name epoch generation d)
+      BrowserCommand cmd -> guestKeyboardAllowed d && guestCommandAllowedIn d cmd
+      MenuCommand cmd -> guestKeyboardAllowed d && guestCommandAllowedIn d cmd
+      ContributedMenu name epoch generation -> guestKeyboardAllowed d && maybe False (guestCommandAllowedIn d) (contributedCommand name epoch generation d)
       _ -> False
 
 applyInputUnchecked :: WebInput -> Desktop -> (Desktop,[Effect])

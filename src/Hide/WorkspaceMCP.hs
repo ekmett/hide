@@ -29,7 +29,7 @@ import Hide.Browser (packageFile)
 import Hide.Build (resolveBuildRoot, buildSource)
 import Hide.Files (filePath)
 import Hide.Git
-import Hide.GuestAccess (protectedWindow, protectedPath, protectedPathParent, privateDocument, sanitizedStatus)
+import Hide.GuestAccess (protectedWindow, protectedPath, protectedPathParent, sanitizedStatus)
 import Hide.Model
 
 workspaceToolNames :: [Text]
@@ -127,9 +127,11 @@ workspaceTool apply desktop name args = case parseEither parse args of
         pure result)
       "workspace_diagnostics" -> parsed desktop ((,) <$> o .:? "offset" .!= 0 <*> o .:? "limit" .!= 100) $ \(offset,limit) ->
         if offset<0 || limit<1 || limit>200 then failure desktop "Use offset >= 0 and limit 1..200."
-        else pure (desktop,pure (Right (object ["total" .= length (diagnostics desktop),"offset" .= offset,
-          "diagnostics" .= map (diagnosticValue desktop) (take limit (drop offset (diagnostics desktop))),
-          "buildDiagnosticCount" .= length (buildDiagnostics desktop),"status" .= T.take 8192 (sanitizedStatus desktop)])))
+        else let public=filter (not . protectedPath desktop . diagnosticPath)
+                 entries=public (diagnostics desktop)
+             in pure (desktop,pure (Right (object ["total" .= length entries,"offset" .= offset,
+          "diagnostics" .= map (diagnosticValue desktop) (take limit (drop offset entries)),
+          "buildDiagnosticCount" .= length (public (buildDiagnostics desktop)),"status" .= T.take 8192 (sanitizedStatus desktop)])))
       "workspace_git" -> parsed desktop ((,) <$> o .: "view" <*> o .:? "path") $ \(view,path) ->
         if view/=("status"::Text) && view/="diff" then failure desktop "Unknown Git view."
         else if maybe False invalidPath path then failure desktop "Invalid path."
