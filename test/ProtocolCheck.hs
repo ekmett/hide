@@ -76,6 +76,7 @@ checks = do
   check "browser understands modern search and conversation commands" (and [parseEither parseInput (object ["type" .= ("command"::T.Text),"command" .= name])==Right (BrowserCommand cmd) | (name,cmd)<-[("hide.search.replace"::T.Text,Replace),("hide.agents.conversation",Conversation),("hide.agents.new",AgentNew)]])
   check "browser shortcut aliases are rejected" (all (either (const True) (const False) . parseEither parseInput . (\name->object ["type" .= ("command"::T.Text),"command" .= name])) (["copy","find","newConversation"]::[T.Text]))
   let unavailable=initialDesktop (80,25)
+  check "session Options actions remain available before opening a document" (all (menuCommandAvailable unavailable) [EditorOptions,EnvironmentOptions,ChatInputOptions,AgentOptions,AgentPermissions,AgentGuidance,AutocompleteCommand "settings"])
   check "queued native and browser menu checks share current availability" (not (menuCommandAvailable unavailable SplitVertical) && null (snd (applyInput (MenuCommand SplitVertical) unavailable)))
   let primary=selectConversationView "" "Primary" (initialDesktop (80,25))
       drafted=primary {composerBuffer=newBuffer "unsent",composerSelection=Selection 6 6}

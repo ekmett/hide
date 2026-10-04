@@ -74,6 +74,29 @@ This is an implementation slice, not a complete plugin SDK. Activation scopes,
 checked buffer services, menu contributions and custom widget/window types remain
 tracked in [the delivery plan](https://github.com/ekmett/hide/issues/1).
 
+## Frontend command routing
+
+Browser shortcuts and menu packets use canonical `hide.*` IDs from `Hide.Commands`.
+Short browser spellings are not accepted. Main, native and browser menus share
+`menuCommandAvailable`; queued input checks availability again when consumed.
+Native menu tokens refer to catalogue commands rather than menu occurrences. Each
+native menu lifetime stamps its queued events, so rebuilding the menu rejects old
+events; repeated occurrences of an action share enablement updates.
+
+Source context popups capture the window, buffer, revision and character selection.
+A changed focus, caret or source revision dismisses the action rather than using a
+new target. Source edits and reloads derive from the original buffer and advance
+its revision; read-only output/transcript replacement is not an editable source
+target. Moving input ownership to the sidebar also refuses a source choice.
+Agent choices retain the conversation target. Other parameterized
+context actions retain their own arguments. These checks do not replace host input
+origin and policy checks. General dynamic extension menus and full first-party
+routing through the typed registry remain open in #2.
+
+`sh tools/check-native.sh` tests the real SDL event queue without a window. On
+macOS it also checks an unshown application menu for duplicate enablement and
+retained old menu-item stamps. Neither native check starts an editor session.
+
 ## Native Windows terminals
 
 With the [pinned Ghostty installation](install.md#embedded-terminal) on `PATH`,
