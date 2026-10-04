@@ -144,6 +144,26 @@ Use **Debug > Disconnect** to cancel startup or stop the owned session.
 hdb uses your project's cradle to load the entry module. Use the canonical
 project path (resolving symlinks) and an entry file belonging to that cradle.
 Once stopped, use the same breakpoints, stepping, call stack and scopes as THC.
+
+The shared **Debug** sidebar root reveals once for a visible session. Expand a
+thread to see its stack, then expand a frame and scope to see locals. Multiple
+frames can remain expanded; choosing another frame preserves their stopped-state
+handles. Right-click a frame and choose **Go to source** to visit its captured
+source. Resume, disconnect or a thread change expires the values and pending
+replies. Existing
+Debug menu inspection windows remain available.
+
+Stack pages contain at most 128 frames. Scopes and variables currently expose the
+first 128 rows; adapters without a variable paging contract cannot silently
+produce an unbounded tree. Lazy references display their state without an expand
+action, so passive expansion does not force Haskell thunks. Painting, scrolling
+and repeated ticks use cached rows and do not fetch or evaluate values.
+
+Watches, source breakpoint/watch context actions, variable continuation pages and
+new sidebar screenshots remain in issue #8. Local-file **Go to source** still
+uses the existing synchronous debugger navigation path; embedded source uses the
+existing asynchronous DAP transport.
+
 Lazy values are displayed without forcing them; ordinary expansion refuses a
 lazy handle. hdb remains an external tool, with no GHC API dependency in the editor.
 
