@@ -6,6 +6,11 @@ semantic projection of the desktop, a small AppKit adapter first, and the same
 projection for browser, Windows and Linux adapters. Keep the existing renderer.
 Do not infer controls or document text from its painted character cells.
 
+The [plugin design](haskell-plugins.md#semantic-tree-and-accessibility-transport)
+uses the same retained tree for standard widgets and canvas descriptions. Track
+that shared wire contract in [#13](https://github.com/ekmett/hide/issues/13), with
+canvas content in [#14](https://github.com/ekmett/hide/issues/14).
+
 ## What exists, and where the bridge belongs
 
 [Model.hs](../../src/Hide/Model.hs) already owns useful semantics: persistent
@@ -38,8 +43,13 @@ structure nor the source document.
 
 Add `Hide.Accessibility` with a pure projection and checked action reducer.
 The first representation needs only nodes, parent/child IDs, roles, names,
-values, states, cell rectangles, relationships, supported actions and optional
-text references. Use `windowId` for views and `bufferId` plus revision for text;
+values, states, logical bounds, relationships, supported actions and optional
+text references. Compose host chrome and published plugin semantic subtrees,
+including canvas content, before creating the frontend projection. Geometry
+distinguishes grid cells, canvas-local coordinates, frontend logical points and
+device pixels; rendering, clipping, hit testing and accessibility use the same
+transforms, including any positional distortion applied by a display filter.
+Use `windowId` for views and `bufferId` plus revision for text;
 split views share text but keep independent selection, scrolling and focus.
 Assign an explicit lifetime token to each dialog/menu instance. Field indices
 are identities only within that lifetime. Never derive identity from labels,
@@ -94,8 +104,8 @@ call. If stable pointers are used for immutable text snapshots, their release
 must be explicit and must not run model actions. Make any FFI call that can
 reenter Haskell `safe`; preferably keep routine native publication callback-free.
 
-For attached sessions, negotiate semantic protocol support. Publish an initial
-node snapshot, then deltas carrying monotonically ordered attachment and
+For attached sessions, extend the common protocol with semantic messages. Publish
+an initial node snapshot, then deltas carrying monotonically ordered attachment and
 revision IDs; gaps trigger resynchronization. Keep semantic messages bounded
 independently from pixel frames. Ordinary agents must not gain a new privileged
 transport by claiming to be an accessibility frontend.
@@ -124,6 +134,9 @@ cell rectangles to view coordinates, then use AppKit conversions to screen
 coordinates. Account for flipped views, multiple displays with negative origins,
 Retina backing scale, fullscreen and resize. Parent-relative element frames can
 follow parent movement, but text range bounds still require correct conversion.
+Canvas semantic bounds use the same
+content-local-to-frontend transform as their painted surface, including any
+post-layout CRT distortion that changes positions.
 [AppKit parent-space frames](https://developer.apple.com/documentation/appkit/nsaccessibilityelement-swift.class/accessibilityframeinparentspace)
 
 After publishing a consistent snapshot, send focus, selection, value and
