@@ -21,6 +21,8 @@ The [operation reference](agent-tools.md) describes each call.
 
 ## Shared rules
 
+- Apply the single [protected content policy](agent-tools.md#protected-content-policy)
+  across reads, UI interaction and mutations; changing tools does not grant access.
 - Discover `tools/list` for this running version. Read only the skill needed for
   the task; tool schemas supply exact arguments. A skill grants no permissions.
 - Use `bufferId`/`windowId` from this session. Read the live buffer before editing:

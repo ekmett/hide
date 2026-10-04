@@ -105,6 +105,11 @@ checks=do
       withDiagnostics=original {diagnostics=[diagnostic]}
   (_,diagResult)<-call withDiagnostics "workspace_diagnostics" ["limit" .= (1::Int)]
   ok "diagnostics output is bounded" (case diagResult of Right value->maybe False ((==8192).T.length) (parseMaybe (withObject "result" $ \o->do entries<-o .: "diagnostics"; case entries of entry:_->withObject "entry" (.: "message") entry; _->fail "missing diagnostic") value); _->False)
+  let privateDiagnostic=diagnostic {diagnosticPath="/authority/nested/secret.hs",diagnosticMessage="secret-diagnostic-payload"}
+      mixed=withDiagnostics {guestPrivatePaths=["/authority"],diagnostics=[privateDiagnostic,diagnostic],buildDiagnostics=[privateDiagnostic]}
+  (_,publicResult)<-call mixed "workspace_diagnostics" []
+  ok "diagnostics omit the complete authority record before pagination"
+    (case publicResult of Right value->not ("secret-diagnostic-payload" `T.isInfixOf` T.pack (show value)) && not ("/authority" `T.isInfixOf` T.pack (show value)); _->False)
   (_,badLimit)<-call original "workspace_diagnostics" ["limit" .= (201::Int)]
   ok "diagnostics reject oversized pages" (rejected badLimit)
   temporary<-getTemporaryDirectory

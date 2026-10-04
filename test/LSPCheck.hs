@@ -12,6 +12,7 @@ import System.Directory
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.FilePath ((</>))
 import System.IO (hClose, openTempFile)
+import System.Info (os)
 import System.Timeout (timeout)
 import qualified Hide.Buffer as Buffer
 import Hide.LSP
@@ -49,6 +50,10 @@ checks = do
   bracket temporary removePathForcibly $ \root -> do
     let server = root </> "fake-hls"
         source = root </> "space λ.hs"
+    writeFile (root </> "diagnostic-source.hs") "module X where\n"
+    if os=="mingw32" then writeFile source "module X where\n"
+      else createFileLink (root </> "diagnostic-source.hs") source
+    canonicalSource<-canonicalizePath source
     writeFile server fakeServer
     permissions <- getPermissions server
     setPermissions server (permissions { executable = True })
@@ -60,7 +65,7 @@ checks = do
         first <- request client "test/state" Null
         pending <- waitResponse client first
         check "initialize then open queued document" (result pending == Just (object ["opens" .= (1 :: Int), "changes" .= (0 :: Int), "closes" .= (0 :: Int), "text" .= ("module X where\nx = \"😀\"\n" :: T.Text)]))
-        check "diagnostics decode URI and revision" (any (\event -> case event of Diagnostics file version _ -> file == source && version == Just 0; _ -> False) pending)
+        check "diagnostics resolve source aliases on the transport worker" (any (\event -> case event of Diagnostics file version _ -> file == canonicalSource && version == Just 0; _ -> False) pending)
         syncDocuments client [(source,0,"module X where\nx = \"😀\"\n")]
         syncDocuments client [(source,1,"x = 2\n")]
         second <- request client "test/state" Null

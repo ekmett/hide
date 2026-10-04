@@ -26,6 +26,14 @@ checks=do
   font<-loadFont
   let desktop=addDocument Nothing (newBuffer "  λ 中 ▙ é\n") (initialDesktop (80,25))
       takeCapture d image=capture font d image >>= either (error . T.unpack) pure
+  let privateMessages=setProblemsVisible True desktop {guestPrivatePaths=["/authority"],
+        diagnostics=[Diagnostic "/authority/secret.hs" Nothing 0 0 1 "secret-diagnostic-payload"]}
+  safeMessages<-takeCapture privateMessages True
+  check "logical screen omits protected diagnostic content"
+    (not ("secret-diagnostic-payload" `T.isInfixOf` fromMaybe "" (field "text" (textMetadata safeMessages))))
+  behindDialog<-takeCapture privateMessages {dialog=Just (Dialog "Public dialog" Widgets [] 0 ["OK"] [])} False
+  check "opening a public dialog does not reveal protected Messages behind it"
+    (not ("secret-diagnostic-payload" `T.isInfixOf` fromMaybe "" (field "text" (textMetadata behindDialog))))
   textOnly<-takeCapture desktop False
   let metadata=textMetadata textOnly
   check "screen text is the complete colorless rendered frame" (field "text" metadata==Just (snapshot desktop))

@@ -28,7 +28,7 @@ import System.FilePath ((</>), isAbsolute, makeRelative, splitDirectories, takeE
 import System.IO.Error (tryIOError)
 import Hide.Buffer
 import Hide.Files (filePath)
-import Hide.GuestAccess (protectedPath, privateDocument)
+import Hide.GuestAccess (protectedPath)
 import Hide.Model
 
 -- | Read and sanitize the already-generated plan with bounded status and truncation metadata.

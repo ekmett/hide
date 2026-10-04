@@ -90,6 +90,14 @@ checks = bracket temporary removePathForcibly $ \root -> do
     rebuilt<-await jobs repeated finished
     check "repeated build refreshes existing output window" ("second invocation" `T.isInfixOf` output rebuilt)
 
+    when (os/="mingw32") $ do
+      createFileLink file (root </> "diagnostic-alias.hs")
+      expectedSource<-canonicalizePath file
+      aliased<-startBuildJob jobs "Compile" root [(command,["-c","print('diagnostic-alias.hs:1:1: warning: alias fixture')"])] completed
+      canonical<-await jobs aliased finished
+      check "build diagnostics resolve source aliases before UI publication"
+        (map diagnosticPath (buildDiagnostics canonical)==[expectedSource])
+
     running<-startBuildJob jobs "Run" root [(command,["-u","-c","import time\nwhile True: print('busy',flush=True)"])] completed
     threadDelay 100000
     stopped<-timeout 100000 $ stopBuildJob jobs running
