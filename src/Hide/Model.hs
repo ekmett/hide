@@ -2304,11 +2304,11 @@ comboBoxEvent ev dg d i name choices chosen preview = case ev of
     advance delta=let (next,effects)=finish preview in (next {dialog=fmap (\value->value {focus=(i+delta) `mod` (length (fields dg)+length (buttons dg))}) (dialog next)},effects)
 
 dialogEvent :: V.Event -> Dialog -> Desktop -> (Desktop,[Effect])
-dialogEvent (V.EvKey key mods) dg d
-  | nativeMac d, V.MMeta `elem` mods = Bifunctor.first (\next->next {nativeMac=True}) (dialogEvent (V.EvKey key (V.MCtrl:filter (/=V.MMeta) mods)) dg d {nativeMac=False})
 dialogEvent ev dg d
-  | Just (i,name,choices,chosen,preview)<-openComboBox dg = comboBoxEvent ev dg d i name choices chosen preview
-  | otherwise = case ev of
+  | nativeMac d, V.EvKey (V.KChar 'f') mods<-ev, V.MMeta `elem` mods, V.MAlt `elem` mods,
+    dialogCommandAllowed Replace d = runCommand Replace d
+  | Just (i,name,choices,chosen,preview)<-openComboBox dg = comboBoxEvent platformEvent dg d i name choices chosen preview
+  | otherwise = case platformEvent of
   V.EvKey key mods | DebugDialog action<-purpose dg,"hdb-accept:" `T.isPrefixOf` action,
     key==V.KEsc || key==V.KFun 3 && V.MAlt `elem` mods ->
       (d {dialog=Nothing,buttonHover=Nothing,buttonPressed=Nothing},[DebugAction action ["1"]])
@@ -2368,6 +2368,9 @@ dialogEvent ev dg d
       _ -> (released {buttonHover=Nothing},[])
   _ -> (d,[])
   where
+    platformEvent=case ev of
+      V.EvKey key mods | nativeMac d -> V.EvKey key [if modifier==V.MMeta then V.MCtrl else modifier | modifier<-mods]
+      _ -> ev
     count=length (fields dg)
     areaFocused=case drop (focus dg) (fields dg) of TextArea{}:_ -> True; _ -> False
     focusedRect=fromMaybe (Rect 0 0 1 1) (listToMaybe (drop (focus dg) (fieldRects d dg)))

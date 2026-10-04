@@ -8,6 +8,7 @@ import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.FilePath ((</>))
 import System.IO (hClose, openTempFile)
 import System.Timeout (timeout)
+import Hide.Window (nativeMenuShortcut)
 import Hide.Keybindings
 import qualified Data.Text.IO as TIO
 import qualified Data.Map.Strict as M
@@ -42,6 +43,12 @@ checks=do
       replaceMac=mac {keyBindings=replaceMaps}
   check "configured Command Option Replace dispatches through its owner" (maybe False (\dg->case purpose dg of Searching True _->True; _->False) (dialog (fst (key (V.KChar 'f') [V.MMeta,V.MAlt] replaceMac))))
   check "unbound Command copy cannot fall through to a fixed shortcut" (clipboard (fst (key (V.KChar 'c') [V.MMeta] (modifyActive (\w->w {selection=Selection 0 5}) replaceMac)))=="")
+  let modalMaps=either (error . show) id (configuredBindings (M.singleton "macos" (M.singleton "source" (M.singleton "hide.edit.copy" ["Cmd+Left"]))))
+      sourceModal=mac {keyBindings=modalMaps}
+      editorModal=prompt "Edit" Information [TextArea "Text" True (newBuffer "draft") (Selection 0 5) 0 0] sourceModal
+  check "native source accelerators cannot hijack modal movement" (nativeMenuShortcut sourceModal Copy==("\xf702",8) && nativeMenuShortcut editorModal Copy==("",0) && clipboard (fst (key V.KLeft [V.MMeta] editorModal))=="")
+  check "modal Command clipboard remains owned by the field" (clipboard (fst (key (V.KChar 'c') [V.MMeta] editorModal))=="draft")
+  check "modal Command Option Replace retains search ownership" (maybe False (\dg->case purpose dg of Searching True _->True; _->False) (dialog (fst (key (V.KChar 'f') [V.MMeta,V.MAlt] (fst (runCommand Find mac))))))
   check "remapping replaces every old binding" (bindingAction sourceKeys (V.KFun 2) []==Nothing && bindingAction sourceKeys (V.KChar 's') [V.MCtrl]==Nothing)
   check "modifier order and letter case normalize" (bindingAction sourceKeys (V.KChar 'S') [V.MShift,V.MCtrl]==Just Save)
   check "empty binding lists remain unbound" (null (bindingKeys sourceKeys Open))

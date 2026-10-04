@@ -66,7 +66,7 @@ inherit; project `false` overrides global `true`. Project defaults apply at
 startup. The agent's `editor_settings.defaults` writer still edits the global
 file; it does not rewrite the project file.
 
-## Terminal keybindings
+## Keybindings
 
 Replace commands through the global configuration or a project's `thc.toml`.
 Profiles are `terminal`, `graphical` (Linux/Windows native and browser), and
@@ -122,7 +122,8 @@ loading. To assign an occupied key, remove or replace its previous command's
 binding too. Ordinary text, menu mnemonics, window navigation, completion controls,
 Escape, F10 and Ctrl+] remain reserved. Conversation Enter retains the configured
 Query/Steer and code-block submission behavior. Modal controls keep their own
-bindings and permission checks.
+bindings and permission checks; source accelerators are inactive while a modal
+owns input.
 
 Choose **Options > Reload keybindings** after editing TOML. Loading and
 validation run on the session worker; the existing map stays active until a valid
@@ -139,7 +140,7 @@ Native menus display their effective accelerator with explicit modifiers; additi
 chords use the same input resolver. Copy/cut/paste remaps use the system clipboard.
 Browser keyboard clipboard defaults use browser clipboard events only while their
 configured action still matches. Browser Edit-menu clipboard actions remain semantic
-commands. Remapped clipboard requests may require the visible clipboard button when
+commands. Remapped clipboard requests run after the host resolves their command, so they may require the visible clipboard button when
 browser permissions or user activation prevent access. Browser/OS reserved shortcuts
 (such as Reload and macOS Hide) cannot be intercepted reliably. Plain macOS Option
 characters retain composed text input and cannot be assigned to commands; Cmd+Alt

@@ -52,7 +52,7 @@ with tempfile.TemporaryDirectory(prefix='hide-session-') as directory:
     source.write_text('original\n')
     second.write_text('second\n')
     env = dict(os.environ, THC_EDIT_WEB_OPEN='0', TERM='xterm-256color',
-               hide_datadir=str(pathlib.Path(__file__).resolve().parents[1]), XDG_DATA_HOME=str(root/'data'))
+               hide_datadir=str(pathlib.Path(__file__).resolve().parents[1]), XDG_DATA_HOME=str(root/'data'), XDG_CONFIG_HOME=str(root/'config'))
     processes, sockets, logs, sessions = [], [], [], set()
     catalog = root/'data/thc-edit/sessions'
 
@@ -244,6 +244,7 @@ with tempfile.TemporaryDirectory(prefix='hide-session-') as directory:
     try:
         (root/'thc.toml').write_text('[editor.keybindings.macos.source]\n"hide.edit.copy" = ["Cmd+Shift+J"]\n"hide.edit.paste" = ["Cmd+Shift+K"]\n')
         process, ws, display = web([str(source)])
+        expect_text(display, 'original')
         event(ws, display, 1, type='command', command='hide.edit.select-all')
         event(ws, display, 2, type='paste', text='persistent unsaved λ')
         expect_text(display, 'persistent unsaved λ')

@@ -295,7 +295,9 @@ runWindow _ _ _ _ _ = ioError (userError "Graphical support is not built. Instal
 -- | The native menu and raw input resolve the same focused prepared table.
 -- Empty bindings remove the accelerator; every additional chord remains raw input.
 nativeMenuShortcut :: Desktop -> Command -> (String,Int)
-nativeMenuShortcut d cmd=nativeChordShortcut (maybe [] (\bindings->bindingKeys bindings cmd) (effectiveBindings d))
+nativeMenuShortcut d cmd
+  | bindingInputAvailable d = nativeChordShortcut (maybe [] (\bindings->bindingKeys bindings cmd) (effectiveBindings d))
+  | otherwise = ("",0)
 
 -- | Cocoa key equivalents carry explicit SDL modifier bits, including Command.
 -- Function and navigation keys use Cocoa's documented Unicode key equivalents.

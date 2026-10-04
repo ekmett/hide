@@ -8,7 +8,7 @@ import Hide.Browser (Entry(..))
 import Hide.Files (FileState(..))
 import Hide.Buffer
 import Hide.GuestAccess
-import Hide.Commands (platformBindings)
+import Hide.Commands (platformBindings, configuredBindings)
 import Hide.Bindings (BindingPlatform(TerminalPlatform))
 import Hide.Model
 import qualified Hide.Protocol as P
@@ -29,6 +29,8 @@ checks=do
       denied d event=case P.applyGuestInput event d of Left _->True; _->False
   let bindings=either (error . show) id (platformBindings TerminalPlatform (M.singleton "source" (M.singleton "hide.options.agent-permissions" ["Ctrl+Shift+P"])))
   check "rebound protected command retains agent policy" (denied base {keyBindings=bindings} (P.Key "p" [V.MCtrl,V.MShift]))
+  let macBindings=either (error . show) id (configuredBindings (M.singleton "macos" (M.singleton "source" (M.singleton "hide.options.agent-permissions" ["Cmd+Shift+P"]))))
+  check "Command remap preserves protected host policy" (denied base {keyBindings=macBindings,nativeMac=True,videoMode=Just 3} (P.Key "p" [V.MMeta,V.MShift]))
   let terminal=addReadOnly "Terminal hidden" "old output" base
       terminalId=maybe (error "terminal missing") windowId (activeWindow terminal)
       docked=setTerminalPinned True terminalId terminal
