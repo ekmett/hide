@@ -301,15 +301,15 @@ window.addEventListener('keydown',e=>{
    e.preventDefault();send({type:'key',key:e.key,mods:mods(e)});return;
  }
  // Option+F produces ƒ on macOS; recognize the physical key for Replace.
- if(e.metaKey&&e.altKey&&e.code==='KeyF'){e.preventDefault();command('replace');return;}
+ if(e.metaKey&&e.altKey&&e.code==='KeyF'){e.preventDefault();command('hide.search.replace');return;}
  // Keep native Hide/Reload shortcuts, and never consume plain PTY control keys above.
  if(e.metaKey&&e.key.toLowerCase()==='h'||control&&!e.altKey&&e.key.toLowerCase()==='r')return;
  if(control&&e.shiftKey&&!e.altKey&&(!frame?.terminal||e.metaKey)&&['c','n'].includes(e.key.toLowerCase())){
-   e.preventDefault();command(e.key.toLowerCase()==='c'?'conversation':'newConversation');return;
+   e.preventDefault();command(e.key.toLowerCase()==='c'?'hide.agents.conversation':'hide.agents.new');return;
  }
  if(control&&['f','h','g','a','z','y'].includes(e.key.toLowerCase())&&(!frame?.wordstar||e.metaKey)){
    e.preventDefault();const k=e.key.toLowerCase();
-   command(k==='h'||k==='f'&&e.altKey?'replace':k==='f'?'find':k==='g'?(e.shiftKey?'findPrevious':'findNext'):k==='a'?'selectAll':k==='y'||e.shiftKey?'redo':'undo');return;
+   command(k==='h'||k==='f'&&e.altKey?'hide.search.replace':k==='f'?'hide.search.find':k==='g'?(e.shiftKey?'hide.search.previous':'hide.search.next'):k==='a'?'hide.edit.select-all':k==='y'||e.shiftKey?'hide.edit.redo':'hide.edit.undo');return;
  }
  if((control||e.altKey)&&['+','=','-','0'].includes(e.key)){
    e.preventDefault();scale=e.key==='0'?initialScale:Math.max(1,Math.min(8,scale+(e.key==='-'?-0.125:0.125)));tiles.clear();resize();return;
@@ -330,15 +330,15 @@ input.addEventListener('compositionstart',()=>{composing=true;});
 input.addEventListener('compositionend',e=>{composing=false;if(e.data)send({type:'paste',text:e.data});input.value='';});
 input.addEventListener('input',e=>{if(!composing){const text=input.value.replace(/^\u200b/,'');if(text)send({type:'paste',text});input.value='\u200b';input.setSelectionRange(1,1);}});
 window.addEventListener('paste',e=>{if(e.target===fullscreen)return;e.preventDefault();send({type:'paste',text:e.clipboardData.getData('text/plain')});});
-window.addEventListener('copy',e=>{e.preventDefault();e.clipboardData.setData('text/plain',clipboard);nativeCopies.push(clipboard);command('copy');});
-window.addEventListener('cut',e=>{e.preventDefault();e.clipboardData.setData('text/plain',clipboard);nativeCopies.push(clipboard);command('cut');});
+window.addEventListener('copy',e=>{e.preventDefault();e.clipboardData.setData('text/plain',clipboard);nativeCopies.push(clipboard);command('hide.edit.copy');});
+window.addEventListener('cut',e=>{e.preventDefault();e.clipboardData.setData('text/plain',clipboard);nativeCopies.push(clipboard);command('hide.edit.cut');});
 input.addEventListener('beforeinput',e=>{
- const name={historyUndo:'undo',historyRedo:'redo'}[e.inputType];
+ const name={historyUndo:'hide.edit.undo',historyRedo:'hide.edit.redo'}[e.inputType];
  if(name){e.preventDefault();command(name);}
 });
 // A nonempty selection target lets browser Edit > Select All reach the canvas editor.
 input.addEventListener('select',()=>{
- if(input.value==='\u200b'&&input.selectionStart===0&&input.selectionEnd===1){command('selectAll');input.setSelectionRange(1,1);}
+ if(input.value==='\u200b'&&input.selectionStart===0&&input.selectionEnd===1){command('hide.edit.select-all');input.setSelectionRange(1,1);}
 });
 input.addEventListener('focus',()=>{if(!input.value){input.value='\u200b';input.setSelectionRange(1,1);}});
 window.addEventListener('dragover',e=>{if([...e.dataTransfer.types].includes('Files')){e.preventDefault();e.dataTransfer.dropEffect='copy';}});

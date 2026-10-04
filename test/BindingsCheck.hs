@@ -54,6 +54,10 @@ checks=do
   before<-renderKey source
   after<-renderKey rebound
   check "prepared binding replacement invalidates labels" (before/=after)
+  let popup=openContext SourceContext 8 5 source
+  captured<-renderKey popup
+  invalidated<-renderKey popup {contextTarget=Just UnavailableSourceTarget}
+  check "captured context target changes invalidate menu rendering" (captured/=invalidated)
   let maps=either (error . show) id (terminalBindings (M.fromList
         [("global",M.singleton "hide.options.agent-permissions" ["Alt+P"])
         ,("sidebar",M.fromList [("hide.sidebar.expand",["Ctrl+E"]),("hide.sidebar.down",[]),("hide.options.agent-permissions",["Ctrl+Shift+P"])])

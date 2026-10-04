@@ -7,3 +7,8 @@ esac
 mkdir -p .deps
 cc -Wall -Wextra -DWITH_WINDOW $(pkg-config --cflags $packages) cbits/window.c cbits/unicode.c test/native-input.c $(pkg-config --libs $packages) $fonts -lm -o .deps/native-input
 .deps/native-input
+
+if [ "$(uname -s)" = Darwin ]; then
+  cc -Wall -Wextra -fobjc-arc cbits/menu.m test/native-menu.m -framework Cocoa -o .deps/native-menu
+  .deps/native-menu
+fi

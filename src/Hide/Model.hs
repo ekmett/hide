@@ -108,6 +108,13 @@ data Conflict = Conflict { conflictBuffer :: Int, conflictRevision :: Int, confl
 data GitAction = FetchRemote | PullRemote | MergeBranch Text deriving (Eq,Show)
 data Toolchain = THC | GHC deriving (Eq,Show)
 data ContextKind = ToolchainContext [(Text,Command)] | LinkContext Command | ShellContext Command | ChangeContext Command | SourceContext | GitContext | MessagesContext | AgentContext [(Text,Command)] deriving (Eq,Show)
+-- | Bounded source hit target retained while a context popup is open. The
+-- editor's source edits/reloads advance the revision; no buffer payload is kept.
+-- Reconcile reload guarantees old+1, and checked edits/Git reload derive their
+-- replacement from the original buffer. Read-only transcript/output replacement
+-- may restart revisions and is never an editable SourceContext target.
+data ContextTarget = SourceTarget Int Int Int Selection | ConversationTarget Text | UnavailableSourceTarget deriving (Eq,Show)
+
 data LanguageAction = TypeInfo | FindDefinition | Completions | ShowProblems | RestartLanguage | RenameAt Text | RequestCodeActions | ApplyCodeAction Int Int Text deriving (Eq,Show)
 data Completion = Completion Text [(Int,Int,Text)] deriving (Eq,Show)
 data ProjectAction = LoadProject | ProjectPage Int Int | ProjectDetails Int Int deriving (Eq,Show)
@@ -187,6 +194,7 @@ data Desktop = Desktop
   , autocompleteACPEnabled :: Bool, autocompleteDraft :: Buffer
   , autocompleteSelection :: Selection, autocompleteFocused :: Bool, macKeySymbols :: Bool
   , keyBindings :: M.Map Bindings.BindingContext (Bindings.Bindings Command)
+  , contextTarget :: Maybe ContextTarget
   } deriving (Eq,Show)
 
 data MenuItem = MenuItem Text Text Command deriving (Eq,Show)
@@ -421,6 +429,17 @@ commandEnabled d cmd | cmd `elem` [GoToMessage,CopyAllMessages,NextMessage,Previ
 commandEnabled d Copy | problemsVisible d && problemsFocused d = not (null (diagnostics d))
 commandEnabled d cmd | problemsVisible d && problemsFocused d, cmd `elem` [Undo,Redo,Cut,Paste,SelectAll] = False
 commandEnabled _ _ = True
+-- | Shared current-state gate for menu invocations and frontend hints. Queued
+-- events must check this again when consumed; a painted enabled state is a hint.
+menuCommandAvailable :: Desktop -> Command -> Bool
+menuCommandAvailable d cmd = commandEnabled d cmd && canInvoke
+  where
+    canInvoke | dialogCommandAllowed cmd d = True
+              | cmd==Paste = not (maybe False treeFocused (sideTree d)) || dialog d/=Nothing
+              | otherwise = dialog d==Nothing && (activeWindow d/=Nothing ||
+                  (problemsVisible d && problemsFocused d && cmd==Copy) ||
+                  cmd `elem` [ReloadBindings,InspectBindings,New,Open,ChangeDir,Quit,Help,About,Gallery,EditorOptions,EnvironmentOptions,ChatInputOptions,ProjectBrowser,RunTarget,RunOptions,CompileTarget,MakeTarget,StopBuild,OpenTerminal,StopTerminal,AgentDirectory,AgentOptions,AgentPermissions,AgentGuidance,Conversation,AgentCancel,AgentResume,AgentNew,AgentCopyRaw,ToggleTree,GitDiff,GitCommit,GitFetch,GitPull,GitMerge,Problems,NextMessage,PreviousMessage,ToolchainOptions,AutocompleteCommand "settings",DebugCommand "attach",DebugCommand "launch",DebugCommand "downloads"])
+
 menuRect :: Desktop -> Int -> Rect
 menuRect d i = Rect (min x (max 0 (sw-w))) 1 w (length (menuItemsFor d i)+2)
   where x = fst (menuPositions !! i)
@@ -428,7 +447,7 @@ menuRect d i = Rect (min x (max 0 (sw-w))) 1 w (length (menuItemsFor d i)+2)
         w = min sw (maximum [T.length t + keyLabelWidth (menuShortcut d entry) + 5 + (case command of SetBufferView _ -> 4; _ -> 0) | entry@(MenuItem t _ command) <- menuItemsFor d i])
 
 initialDesktop :: (Int,Int) -> Desktop
-initialDesktop size = Desktop size [] M.empty 1 Nothing Nothing Nothing "" Nothing False Nothing "" Nothing "" Nothing "" False Nothing Nothing Nothing "" Nothing Nothing Nothing [] False 0 0 False Nothing 0 0 Nothing SourceContext Nothing (newBuffer "") (Selection 0 0) True False False 0 True False False False Nothing Nothing [] 8 Nothing [] False SystemMode True [] Nothing [] Nothing [] False Nothing "" M.empty False (0,Nothing) [] Nothing CurrentView QuerySubmit Nothing 0 M.empty Nothing False (newBuffer "") (Selection 0 0) True False M.empty
+initialDesktop size = Desktop size [] M.empty 1 Nothing Nothing Nothing "" Nothing False Nothing "" Nothing "" Nothing "" False Nothing Nothing Nothing "" Nothing Nothing Nothing [] False 0 0 False Nothing 0 0 Nothing SourceContext Nothing (newBuffer "") (Selection 0 0) True False False 0 True False False False Nothing Nothing [] 8 Nothing [] False SystemMode True [] Nothing [] Nothing [] False Nothing "" M.empty False (0,Nothing) [] Nothing CurrentView QuerySubmit Nothing 0 M.empty Nothing False (newBuffer "") (Selection 0 0) True False M.empty Nothing
 
 activeWindow :: Desktop -> Maybe Window
 activeWindow d = listToMaybe (filter (windowVisible d) (windows d))
@@ -1653,7 +1672,7 @@ menuEvent ev (i,j) d = case ev of
   _ -> (d,[])
   where
     choose a b = let a' = a `mod` length menus in (d {menu = Just (a',b `mod` length (menuItemsFor d a'))},[])
-    invoke k = let MenuItem _ _ command = menuItemsFor d i !! k in runCommand command d
+    invoke k = let MenuItem _ _ command = menuItemsFor d i !! k in if menuCommandAvailable d command then runCommand command d else (d {menu=Nothing},[])
 
 menuAt :: Int -> Maybe Int
 menuAt x = findIndex (\(start,w) -> x >= start && x < start+w) menuPositions
@@ -1708,13 +1727,34 @@ contextOffset :: Rect -> Int -> Int
 contextOffset r chosen = let count=max 1 (height r-2) in chosen `div` count*count
 
 openContext :: ContextKind -> Int -> Int -> Desktop -> Desktop
-openContext kind x y d = d {contextKind=kind,contextMenu=Just (popup,0),drag=Nothing,dragOriginal=Nothing,menu=Nothing}
+openContext kind x y d = d {contextKind=kind,contextTarget=captureContextTarget kind d,contextMenu=Just (popup,0),drag=Nothing,dragOriginal=Nothing,menu=Nothing}
   where
     (sw,sh)=screenSize d
     items=contextItems kind
     h=max 3 (min (sh-2) (length items+2))
     w=min sw (max 24 (maximum (0:map (keyLabelWidth . fst) items)+4))
     popup=Rect (max 0 (min x (sw-w))) (max 1 (min y (sh-h-1))) w h
+
+-- Source actions are admitted only at their captured view/caret/revision.
+-- Focus or edits while a popup is open refuse it instead of redirecting it.
+captureContextTarget :: ContextKind -> Desktop -> Maybe ContextTarget
+captureContextTarget kind d = case kind of
+  SourceContext -> source
+  ChangeContext{} -> source
+  AgentContext{} -> Just (ConversationTarget (conversationTarget d))
+  _ -> Nothing -- These actions already carry arguments or have session scope.
+  where
+    source=Just $ case (activeWindow d,activeDocument d) of
+      (Just w,Just doc) | documentLabel doc==Nothing, windowFocused d w ->
+        SourceTarget (windowId w) (bufferId w) (revision (documentBuffer doc)) (selection w)
+      _ -> UnavailableSourceTarget
+
+contextTargetCurrent :: Desktop -> Bool
+contextTargetCurrent d = case contextTarget d of
+  Nothing -> True
+  Just (ConversationTarget target) -> conversationTarget d==target
+  Just target@SourceTarget{} -> captureContextTarget SourceContext d==Just target
+  Just UnavailableSourceTarget -> False
 
 gitCountText :: Int -> Text
 gitCountText n = if n<0 then "?" else T.pack (show n)
@@ -1764,7 +1804,7 @@ contextEvent ev (r,chosen) d = case ev of
   where
     close=(d {contextMenu=Nothing},[])
     choose i=(d {contextMenu=Just (r,i `mod` length items)},[])
-    invoke i=case drop i items of (_,cmd):_ | commandEnabled d cmd -> runCommand cmd d; _ -> close
+    invoke i=case drop i items of (_,cmd):_ | contextTargetCurrent d && commandEnabled d cmd -> runCommand cmd d; _ -> close
     items=contextItems (contextKind d)
 
 -- SDL supplies click counts; terminal clicks retain the same selection and Enter path.

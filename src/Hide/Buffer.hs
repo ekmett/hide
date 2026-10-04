@@ -13,6 +13,8 @@
 module Hide.Buffer
   ( Buffer(saved,undoStack,redoStack,revision,lastChange,byteMode,savedByteMode), Selection(..)
   , BufferSnapshot(..), snapshotBuffer, restoreBuffer
+  , BufferContent, bufferContent, contentLength, contentLineCount, contentByteMode
+  , contentSlice, contentByteSlice, contentLineOffset, contentLineAt
   , newBuffer, newByteBuffer, bufferBytes, markSaved, toggleByteMode, replaceBuffer, textBuffer
   , contents, dirty, ordered, replaceSelection, replaceRanges, prepareBuffer, undo, redo, selectedText
   , bufferLineChanges, bufferViewProjection, bufferLength, bufferLineCount,
@@ -64,6 +66,37 @@ data Buffer = Buffer
   , revision :: !Int, lastChange :: Maybe (Int,Int,Int), byteMode :: Bool, savedByteMode :: Bool
   , baselineLines :: !LineTree, viewProjection :: ViewProjection
   } deriving (Eq, Show)
+-- | Immutable tree and representation; excludes separate baseline/Undo roots.
+-- Deleted provenance leaves remain retained but occupy no live range or row.
+-- Capture is shallow. Local reads use the same measured algorithms as editing.
+data BufferContent = BufferContent !LineTree !Bool
+
+-- | Retain live content without keeping the editable buffer or its Undo alive.
+bufferContent :: Buffer -> BufferContent
+bufferContent b=BufferContent (bufferLines b) (byteMode b)
+
+contentLength, contentLineCount :: BufferContent -> Int
+contentLength (BufferContent tree _)=characterCount (FT.measure tree)
+contentLineCount (BufferContent tree _)=lineCount (FT.measure tree)
+contentByteMode :: BufferContent -> Bool
+contentByteMode (BufferContent _ mode)=mode
+
+-- | Clamped character range; byte representation has one character per byte.
+contentSlice :: BufferContent -> Int -> Int -> Text
+contentSlice (BufferContent tree _) = treeSlice tree
+
+-- | Clamped original-byte range, for byte content only; callers check mode.
+contentByteSlice :: BufferContent -> Int -> Int -> BS.ByteString
+contentByteSlice content start count=encodeContents True (contentSlice content start count)
+
+-- | Start of a zero-based row, clamped at EOF, using the cached tree measure.
+contentLineOffset :: BufferContent -> Int -> Int
+contentLineOffset (BufferContent tree _) = treeLineOffset tree
+
+-- | Editor row without its terminator, using a measured split.
+contentLineAt :: BufferContent -> Int -> Text
+contentLineAt (BufferContent tree _) = treeLineAt tree
+
 -- | Explicit recovery representation, including flattened histories and provenance.
 -- Constructing or encoding this value may traverse all retained buffer text.
 data BufferSnapshot = BufferSnapshot
@@ -205,8 +238,13 @@ bufferNewline b = if containsCRLF (FT.measure (bufferLines b)) then "\r\n" else 
 
 -- | Read a clamped start/count range of live text using measured splits.
 bufferSlice :: Buffer -> Int -> Int -> Text
-bufferSlice b start count = rangeText a (a+min (max 0 count) (bufferLength b-a)) (bufferLines b)
-  where a=max 0 (min (bufferLength b) start)
+bufferSlice b = treeSlice (bufferLines b)
+
+treeSlice :: LineTree -> Int -> Int -> Text
+treeSlice tree start count = rangeText a (a+min (max 0 count) (size-a)) tree
+  where
+    size=characterCount (FT.measure tree)
+    a=max 0 (min size start)
 
 -- Locate one line with a measured split, including the final empty line at EOF.
 splitLine :: Int -> LineTree -> (LineTree,Text,Int,LineTree)
@@ -230,15 +268,21 @@ bufferLineColumn b p = let (before,_,column,_) = splitLine p (bufferLines b)
 
 -- | Find the start of a zero-based live row using the tree measure.
 bufferLineOffset :: Buffer -> Int -> Int
-bufferLineOffset b row = characterCount (FT.measure before)
-  where (before,_) = FT.split ((>max 0 row) . lineCount) (bufferLines b)
+bufferLineOffset b = treeLineOffset (bufferLines b)
+
+treeLineOffset :: LineTree -> Int -> Int
+treeLineOffset tree row = characterCount (FT.measure before)
+  where (before,_) = FT.split ((>max 0 row) . lineCount) tree
 
 -- | Read one live row without its line terminator; out-of-range rows return empty text.
 bufferLineAt :: Buffer -> Int -> Text
-bufferLineAt b row = case FT.viewl remaining of
+bufferLineAt b = treeLineAt (bufferLines b)
+
+treeLineAt :: LineTree -> Int -> Text
+treeLineAt tree row = case FT.viewl remaining of
   FT.EmptyL -> ""
   line FT.:< _ -> T.dropWhileEnd (=='\r') (T.dropWhileEnd (=='\n') (lineText line))
-  where remaining = FT.dropUntil ((>max 0 row) . lineCount) (bufferLines b)
+  where remaining = FT.dropUntil ((>max 0 row) . lineCount) tree
 
 -- Character motion inspects the containing line, not a flattened document.
 -- The previous line is needed only at column zero, to preserve CRLF as a unit.

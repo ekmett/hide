@@ -5,24 +5,27 @@
 -- shaping for other text. The window thread owns SDL calls, event handling and
 -- presentation; render keys decide when a frame is needed. Exported FFI helpers
 -- also serve the remote native frontend rather than a second drawing ABI.
-module Hide.Window (runWindow, nativeMenuShortcut
+module Hide.Window (runWindow, nativeMenuShortcut, nativeMenuEvent, nativeCommands
 #ifdef WITH_WINDOW
-  , check, utf8, nativeMenus, nativeCommands
+  , check, utf8, nativeMenus
   , c_system_dark, c_open, c_mode, c_scale, c_title, c_close, c_size
   , c_begin, c_glyph, c_unicode, c_pixelate_unicode, c_cursor, c_cursor_blink
   , c_crt_filter, c_present, c_wait, c_wake, c_text, c_clipboard, c_set_clipboard
 #ifdef darwin_HOST_OS
-  , c_menu_enabled, c_menu_prepare
+  , c_menu_enabled, c_menu_prepare, c_menu_generation
 #endif
 #endif
   ) where
 import Hide.Frontend
 import Hide.Model
+import Hide.Commands (builtinCommands, builtinAction)
 #ifdef WITH_WINDOW
+#ifdef darwin_HOST_OS
+import Data.List (elemIndex)
+#endif
 import Control.Exception (bracket_)
 import Control.Monad (forM_, when, unless, foldM)
 import Data.Foldable (toList)
-import Data.List (elemIndex)
 import qualified Data.ByteString as BS
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -40,6 +43,21 @@ import Hide.Unicode (graphemes, clusterWidth)
 import Hide.Font
 import Hide.Render
 
+#endif
+
+-- | Native tokens index the command catalogue, never a menu occurrence. The
+-- platform stamps each event with the menu incarnation that produced it.
+nativeCommands :: [Command]
+nativeCommands = map builtinAction builtinCommands
+
+-- | Reject queued events from a retired native menu before resolving a token.
+-- Availability and caller policy must still be checked against current host state.
+nativeMenuEvent :: Int -> [Int] -> Maybe Command
+nativeMenuEvent generation (11:token:incarnation:_)
+  | generation>0, incarnation==generation, token>=0 = case drop token nativeCommands of cmd:_ -> Just cmd; _ -> Nothing
+nativeMenuEvent _ _ = Nothing
+
+#ifdef WITH_WINDOW
 foreign import ccall unsafe "thc_system_dark" c_system_dark :: IO CInt
 foreign import ccall unsafe "thc_open" c_open :: CString -> CDouble -> CInt -> CInt -> CInt -> IO CInt
 foreign import ccall unsafe "thc_mode" c_mode :: CInt -> CInt -> CInt -> IO CInt
@@ -65,8 +83,10 @@ foreign import ccall unsafe "thc_clipboard" c_clipboard :: IO CString
 foreign import ccall unsafe "thc_set_clipboard" c_set_clipboard :: CString -> IO ()
 #ifdef darwin_HOST_OS
 foreign import ccall unsafe "thc_menu_prepare" c_menu_prepare :: IO ()
+foreign import ccall unsafe "thc_menu_generation" c_menu_generation :: IO CInt
 foreign import ccall unsafe "thc_menu_clear" c_menu_clear :: CInt -> CInt -> CInt -> IO ()
 foreign import ccall unsafe "thc_menu_add" c_menu_add :: CString -> IO ()
+foreign import ccall unsafe "thc_menu_separator" c_menu_separator :: IO ()
 foreign import ccall unsafe "thc_menu_item" c_menu_item :: CString -> CString -> CInt -> CInt -> IO ()
 foreign import ccall unsafe "thc_menu_enabled" c_menu_enabled :: CInt -> CInt -> IO ()
 #endif
@@ -83,23 +103,18 @@ check context action = do
 utf8 :: T.Text -> (CString -> IO a) -> IO a
 utf8 text = BS.useAsCString (TE.encodeUtf8 text)
 
-nativeCommands :: [Command]
-nativeCommands = [cmd | (_,_,items) <- menus, MenuItem _ _ cmd <- items]
-
 nativeMenus :: IO ()
 #ifdef darwin_HOST_OS
 nativeMenus = do
   c_menu_clear (number About) (number EditorOptions) (number Quit)
-  let numbered = zip menus (scanl (+) 0 [length items | (_,_,items) <- menus])
-  forM_ numbered $ \((title,_,items),start) -> do
+  forM_ menus $ \(title,_,items) -> do
     utf8 title c_menu_add
-    forM_ (zip [start..] items) $ \(i,MenuItem name _ cmd) ->
-      unless (cmd `elem` [About,EditorOptions,Quit]) $ utf8 name $ \namePtr -> withCString (nativeMenuShortcut cmd) $ \keyPtr ->
-        c_menu_item namePtr keyPtr (fromIntegral i) (if enabled cmd then 1 else 0)
+    forM_ items $ \(MenuItem name _ cmd) -> case cmd of
+      Disabled{} -> c_menu_separator
+      _ -> unless (cmd `elem` [About,EditorOptions,Quit]) $ utf8 name $ \namePtr -> withCString (nativeMenuShortcut cmd) $ \keyPtr ->
+        c_menu_item namePtr keyPtr (number cmd) 1
   where
     number cmd=maybe (error "Missing native application command") fromIntegral (elemIndex cmd nativeCommands)
-    enabled Disabled{} = False
-    enabled _ = True
 #else
 nativeMenus = pure ()
 #endif
@@ -107,11 +122,7 @@ nativeMenus = pure ()
 updateMenus :: Desktop -> IO ()
 #ifdef darwin_HOST_OS
 updateMenus d = forM_ (zip [0..] nativeCommands) $ \(i,cmd) ->
-  c_menu_enabled i (if commandEnabled d cmd && canInvoke cmd then 1 else 0)
-  where
-    canInvoke cmd | dialogCommandAllowed cmd d = True
-    canInvoke Paste = not (maybe False treeFocused (sideTree d)) || dialog d /= Nothing
-    canInvoke cmd = dialog d == Nothing && (activeWindow d /= Nothing || (problemsVisible d && problemsFocused d && cmd==Copy) || cmd `elem` [New,Open,ChangeDir,Quit,Help,About,Gallery,EditorOptions,RunTarget,RunOptions,OpenTerminal,StopTerminal,AgentOptions,Conversation,AgentCancel,AgentResume,AgentNew,AgentCopyRaw,ToggleTree,GitDiff,GitCommit,Problems,NextMessage,PreviousMessage,DebugCommand "downloads"])
+  c_menu_enabled i (if menuCommandAvailable d cmd then 1 else 0)
 #else
 updateMenus _ = pure ()
 #endif
@@ -227,10 +238,16 @@ runWindow backend scale effects tick initial = do
                     | otherwise = pure (runCommand Quit d)
     dispatch (7:_) d = pure (hoverAt (-1) (-1) d {drag=Nothing,dragOriginal=Nothing,prefix=Nothing,buttonPressed=Nothing,heldModifiers=[]})
     dispatch (9:x:y:direction:mods:_) d = pure (wheelEvent x y direction (keyMods mods) d)
-    dispatch (11:i:_) d | i >= 0, cmd:_ <- drop i nativeCommands =
-      if cmd == Paste then paste d
-      else if dialog d == Nothing || dialogCommandAllowed cmd d then clipboardResult (cmd `elem` [Copy,Cut]) d (runCommand cmd d)
-      else pure (d,[])
+    dispatch event@(11:_) d = do
+#ifdef darwin_HOST_OS
+      generation<-fromIntegral <$> c_menu_generation
+      case nativeMenuEvent generation event of
+        Just cmd | menuCommandAvailable d cmd ->
+          if cmd==Paste then paste d else clipboardResult (cmd `elem` [Copy,Cut]) d (runCommand cmd d)
+        _ -> pure (d,[])
+#else
+      pure (d,[])
+#endif
     dispatch (12:x:y:_) d = pure (hoverAt x y d)
     dispatch (13:mods:_) d = pure (d {heldModifiers=keyMods mods},[])
     dispatch _ d = pure (d,[])

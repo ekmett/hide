@@ -70,9 +70,54 @@ resolves a documentation corpus root; it neither imports nor receives `Desktop`.
 tool to it, retaining permission checks and deferred filesystem work. Listing and
 search are not yet registered commands.
 
-This is an implementation slice, not a complete plugin SDK. Activation scopes,
-checked buffer services, menu contributions and custom widget/window types remain
-tracked in [the delivery plan](https://github.com/ekmett/hide/issues/1).
+## Immutable plugin buffer reads
+
+`Hide.Plugin.Buffer` provides opaque `BufferRead` and `ContentVersion` values.
+The host adapter `Hide.Plugin.BufferHost` captures immutable measured trees without
+retaining the separate saved baseline, Undo or Redo roots. Deleted provenance
+leaves in the live tree remain retained but are invisible to reads.
+Public reads use distinct character, byte and
+zero-based line coordinates, validate their full range and reject the wrong
+representation. `readLines` preserves source line terminators; `readLine` gives
+one editor row without its terminator. Whole-buffer reads are explicit worker
+operations. Capture and version checks never flatten or compare contents.
+
+`ContentVersion` combines the revision with immutable buffer identity. A new
+buffer with the same revision and contents invalidates the captured version.
+The identity check is conservative: replacing the immutable buffer to establish
+a new saved baseline also requires a fresh version. The live `read_buffer` MCP
+consumer uses these measured reads after host privacy filtering, and ACP source
+freshness tracking uses the same version check.
+
+This is an implementation slice, not a complete plugin SDK. Session-scoped
+`BufferRef` handles, activation scopes, checked buffer edits, menu contributions
+and custom widget/window types remain tracked in
+[the delivery plan](https://github.com/ekmett/hide/issues/1). HLS currently owns
+worker preparation and atomic checked edit adoption in `Hide.Tooling`; wrapping
+that owner remains part of [the buffer service work](https://github.com/ekmett/hide/issues/4).
+
+## Frontend command routing
+
+Browser shortcuts and menu packets use canonical `hide.*` IDs from `Hide.Commands`.
+Short browser spellings are not accepted. Main, native and browser menus share
+`menuCommandAvailable`; queued input checks availability again when consumed.
+Native menu tokens refer to catalogue commands rather than menu occurrences. Each
+native menu lifetime stamps its queued events, so rebuilding the menu rejects old
+events; repeated occurrences of an action share enablement updates.
+
+Source context popups capture the window, buffer, revision and character selection.
+A changed focus, caret or source revision dismisses the action rather than using a
+new target. Source edits and reloads derive from the original buffer and advance
+its revision; read-only output/transcript replacement is not an editable source
+target. Moving input ownership to the sidebar also refuses a source choice.
+Agent choices retain the conversation target. Other parameterized
+context actions retain their own arguments. These checks do not replace host input
+origin and policy checks. General dynamic extension menus and full first-party
+routing through the typed registry remain open in #2.
+
+`sh tools/check-native.sh` tests the real SDL event queue without a window. On
+macOS it also checks an unshown application menu for duplicate enablement and
+retained old menu-item stamps. Neither native check starts an editor session.
 
 ## Native Windows terminals
 

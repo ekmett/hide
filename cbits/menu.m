@@ -1,15 +1,19 @@
 #import <Cocoa/Cocoa.h>
 #include "window.h"
+#include <limits.h>
+#include <stdlib.h>
 
 @interface THCMenuTarget : NSObject
 - (void)invoke:(id)sender;
 @end
 @implementation THCMenuTarget
-- (void)invoke:(id)sender { thc_post_command((int)[sender tag]); }
+- (void)invoke:(id)sender { thc_post_command((int)[sender tag], [[sender representedObject] intValue]); }
 @end
 static THCMenuTarget *target;
 static NSMenu *current;
-static NSMutableDictionary<NSNumber *, NSMenuItem *> *items;
+static NSMutableDictionary<NSNumber *, NSMutableArray<NSMenuItem *> *> *items;
+static int generation;
+int thc_menu_generation(void) { return generation; }
 
 /* Set before SDL creates NSApplication: unbundled launches otherwise inherit
  * the executable name for the application menu. */
@@ -21,11 +25,15 @@ static NSMenuItem *commandItem(NSString *title, NSString *shortcut, int command,
     NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:title action:@selector(invoke:) keyEquivalent:[shortcut lowercaseString]];
     [item setKeyEquivalentModifierMask:NSEventModifierFlagCommand | (option ? NSEventModifierFlagOption : 0) | (![shortcut isEqualToString:[shortcut lowercaseString]] ? NSEventModifierFlagShift : 0)];
     [item setTarget:target]; [item setTag:command]; [item setEnabled:enabled];
-    items[@(command)] = item;
+    [item setRepresentedObject:@(generation)];
+    if (!items[@(command)]) items[@(command)] = [NSMutableArray new];
+    [items[@(command)] addObject:item];
     return item;
 }
 
 void thc_menu_clear(int about, int settings, int quit) {
+    if (generation == INT_MAX) abort(); /* Never reuse a queued event incarnation. */
+    ++generation;
     if (!target) target = [THCMenuTarget new];
     items = [NSMutableDictionary new];
     NSMenu *bar = [NSMenu new];
@@ -59,7 +67,10 @@ void thc_menu_add(const char *title) {
     [item setSubmenu:current];
     [[NSApp mainMenu] addItem:item];
 }
+void thc_menu_separator(void) { [current addItem:[NSMenuItem separatorItem]]; }
 void thc_menu_item(const char *title, const char *key, int command, int enabled) {
     [current addItem:commandItem([NSString stringWithUTF8String:title], [NSString stringWithUTF8String:key], command, enabled)];
 }
-void thc_menu_enabled(int command, int enabled) { [items[@(command)] setEnabled:enabled]; }
+void thc_menu_enabled(int command, int enabled) {
+    for (NSMenuItem *item in items[@(command)]) [item setEnabled:enabled];
+}

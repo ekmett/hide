@@ -52,7 +52,7 @@ with tempfile.TemporaryDirectory(prefix="thc-daemon-cli-") as temporary:
                                       resume=True, args=[]))
             wire["control"](process, "hello")
             wire["control"](process, "assets")
-            wire["send"](process, dict(type="command", command="quit", seq=1))
+            wire["send"](process, dict(type="command", command="hide.app.quit", seq=1))
             wire["control"](process, "closed")
             process.stdin.close()
             process.wait(timeout=10)

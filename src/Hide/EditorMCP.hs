@@ -25,12 +25,13 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.Text.IO as TIO
 import Paths_hide (getDataFileName)
-import Numeric (showHex)
+import Data.Char (intToDigit)
 import System.Environment (lookupEnv, getExecutablePath)
 import System.IO (Handle, stdin, stdout, hClose, hFlush, hSetBinaryMode)
 import Hide.Buffer
+import qualified Hide.Plugin.Buffer as P
 import Hide.Files (filePath)
-import Hide.GuestAccess (protectedBuffer, privateDocument, sanitizedBuffer)
+import Hide.GuestAccess (protectedBuffer, privateDocument, sanitizedBufferContent)
 import Hide.Model
 import Hide.Protocol (WirePacket(..), readPacket, writePacket)
 import Hide.RemoteEndpoint (sessionEndpoint, connectEndpointWithShutdown)
@@ -188,21 +189,22 @@ builtinTool desktop=tool
       ident <- maybe (maybe (Left "No active buffer") (Right . bufferId) (activeWindow desktop)) Right wanted
       doc <- maybe (Left "Buffer not found") Right (M.lookup ident (buffers desktop))
       unless (start>=1 && count>=1 && count<=1000 && offset>=0) (Left "Use startLine >= 1, lineCount 1..1000, and byteOffset >= 0")
-      safeText<-maybe (Left "This buffer contains private user or approval content.") Right (sanitizedBuffer desktop ident)
-      let original=documentBuffer doc
-          redacted=safeText/=contents original
-          b=if redacted then newBuffer safeText else original
-      if byteMode b then
-        let bytes=BS.take 4096 (BS.drop offset (bufferBytes b))
-            hex n=let s=showHex n "" in T.pack (replicate (2-length s) '0'++s)
-        in Right (object ["buffer" .= bufferInfo ident doc,"byteOffset" .= offset,"bytes" .= BS.length bytes,
-          "hex" .= T.intercalate " " (map hex (BS.unpack bytes)),"totalBytes" .= BS.length (bufferBytes b)])
-      else
-        let available=if start>bufferLineCount b then 0 else min count (bufferLineCount b-start+1)
-            text=T.intercalate "\n" [bufferLineAt b (start-1+row) | row<-[0..available-1]]
+      (redacted,b)<-maybe (Left "This buffer contains private user or approval content.") Right (sanitizedBufferContent desktop ident)
+      if P.representation b==P.ByteBuffer then do
+        let size=P.readLength b
+            a=min offset size
+            z=a+min 4096 (size-a)
+        bytes<-readResult (P.readBytes b (P.ByteRange (P.ByteOffset a) (P.ByteOffset z)))
+        Right (object ["buffer" .= bufferInfo ident doc,"byteOffset" .= offset,"bytes" .= BS.length bytes,
+          "hex" .= T.pack (drop 1 (BS.foldr hex [] bytes)),"totalBytes" .= size])
+      else do
+        total<-readResult (P.readLineCount b)
+        let available=if start>total then 0 else min count (total-start+1)
+        rows<-mapM (readResult . P.readLine b . P.LineNumber . (start-1+)) [0..available-1]
+        let text=T.intercalate "\n" rows
             limited=T.take 131072 text
-        in Right (object ["buffer" .= bufferInfo ident doc,"startLine" .= start,"lineCount" .= available,
-          "totalLines" .= bufferLineCount b,"text" .= limited,"redacted" .= redacted,"truncated" .= (T.length limited<T.length text)])
+        Right (object ["buffer" .= bufferInfo ident doc,"startLine" .= start,"lineCount" .= available,
+          "totalLines" .= total,"text" .= limited,"redacted" .= redacted,"truncated" .= (T.length limited<T.length text)])
     tool "read_selection" args = parseArgs (withObject "read_selection" (.:? "windowId")) args >>= \wanted -> do
       w <- maybe (maybe (Left "No active window") Right (activeWindow desktop))
         (\ident -> maybe (Left "Window not found") Right (findWindow ident)) wanted
@@ -213,6 +215,9 @@ builtinTool desktop=tool
       Right (object ["windowId" .= windowId w,"bufferId" .= bufferId w,"anchor" .= anchor (selection w),
         "caret" .= caret (selection w),"text" .= T.take 131072 text,"truncated" .= (T.length text>131072)])
     tool _ _=Left "Unknown editor tool"
+    hex byte rest=let n=fromIntegral byte in ' ':intToDigit (n `div` 16):intToDigit (n `mod` 16):rest
+    readResult :: Either P.RangeError a -> Either T.Text a
+    readResult=either (Left . T.pack . show) Right
     parseArgs :: (Value -> Parser a) -> Value -> Either T.Text a
     parseArgs parser=either (Left . T.pack) Right . parseEither parser
     findWindow ident=case filter ((==ident).windowId) (windows desktop) of w:_->Just w; _->Nothing
