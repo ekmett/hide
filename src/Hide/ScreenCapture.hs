@@ -25,6 +25,7 @@ import qualified Graphics.Vty as V
 import Graphics.Vty.Span (SpanOp(..))
 import Hide.Font
 import Hide.Frontend (modeHeight)
+import Hide.Commands (commandIdentifier)
 import Hide.Model (Desktop(..), MenuItem(..), menus, commandEnabled)
 import Hide.GuestAccess (CellAccess(..), cellAccess, guestKeyboardAllowed, beginGuestInput, guestKeyCombinations)
 import qualified Hide.Protocol as P
@@ -97,9 +98,9 @@ capture font desktop includeImage
       "accessRows" .= accessRows,"keyboardAllowed" .= guestKeyboardAllowed desktop,
       "keyPermissions" .= [object ["key" .= key,"mods" .= map modifierName modifiers,
         "allowed" .= inputAllowed (P.Key key modifiers)] | (key,modifiers)<-guestKeyCombinations],
-      "commandPermissions" .= [object ["menu" .= menuName,"label" .= label,"command" .= show command,
-        "allowed" .= inputAllowed (P.MenuCommand (Just command)),"enabled" .= commandEnabled desktop command]
-        | (menuName,_,items)<-menus,MenuItem label _ command<-items],
+      "commandPermissions" .= [object ["menu" .= menuName,"label" .= label,"command" .= ident,
+        "allowed" .= inputAllowed (P.MenuCommand command),"enabled" .= commandEnabled desktop command]
+        | (menuName,_,items)<-menus,MenuItem label _ command<-items,Just ident<-[commandIdentifier command]],
       "redactedCells" .= Vec.length (Vec.filter (not . cellReadable) accessGrid),
       "redaction" .= ("Unreadable graphemes become spaces and solid black pixels; whole wide graphemes are hidden if any covered cell is private. Cell coordinates are preserved."::Text),
       "cellWidth" .= (8::Int),"cellHeight" .= cellHeight,"pixelWidth" .= (cols*8),"pixelHeight" .= (rows*cellHeight),

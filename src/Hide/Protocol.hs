@@ -33,11 +33,11 @@ import qualified Hide.Model as Model
 import Hide.Buffer (dirty, newBuffer, newByteBuffer, selectedText)
 import Hide.Font
 import Hide.Render (renderDesktop)
-import Hide.Commands (commandAliases)
+import Hide.Commands (commandIdentifier)
 import Hide.Unicode (displayOpsForPic, graphemes, clusterWidth)
 
 data WebInput = Key T.Text [V.Modifier] | Paste T.Text | Mouse T.Text Int Int Int Int [V.Modifier]
-              | Wheel Int Int Int [V.Modifier] | SystemTheme Bool | BrowserCommand Command | MenuCommand (Maybe Command) | UploadFile T.Text BS.ByteString | Frontend (Maybe Int) Bool | OpenPath FilePath | Resize Int Int | SuspendSession | Blur | Modifiers [V.Modifier] deriving (Eq,Show)
+              | Wheel Int Int Int [V.Modifier] | SystemTheme Bool | BrowserCommand Command | MenuCommand Command | UploadFile T.Text BS.ByteString | Frontend (Maybe Int) Bool | OpenPath FilePath | Resize Int Int | SuspendSession | Blur | Modifiers [V.Modifier] deriving (Eq,Show)
 
 -- | Validate an input packet and its bounds. Upload metadata starts with an empty
 -- payload that transport code fills from the following binary packet.
@@ -49,12 +49,8 @@ parseInput = withObject "browser event" $ \o -> do
         traverse (\v -> case v of "shift" -> pure V.MShift; "ctrl" -> pure V.MCtrl; "alt" -> pure V.MAlt; _ -> fail "Unknown modifier") values
   case kind of
     "menu" -> do
-      name <- o .:? "command"
-      case name of
-        -- Legacy indices depend on the sender's menu layout. Never reinterpret
-        -- them using this executable's possibly different layout.
-        Nothing -> pure (MenuCommand Nothing)
-        Just ident -> maybe (fail "Unknown menu command") (pure . MenuCommand . Just) (lookup ident protocolMenuCommands)
+      name <- o .: "command"
+      maybe (fail "Unknown menu command") (pure . MenuCommand) (lookup name protocolMenuCommands)
     "theme" -> SystemTheme <$> o .: "dark"
     "command" -> do
       name <- o .: "command"
@@ -124,7 +120,7 @@ applyGuestInput input d
       Blur -> True
       Modifiers _ -> guestKeyboardAllowed d
       BrowserCommand cmd -> guestKeyboardAllowed d && guestCommandAllowed cmd
-      MenuCommand (Just cmd) -> guestKeyboardAllowed d && guestCommandAllowed cmd
+      MenuCommand cmd -> guestKeyboardAllowed d && guestCommandAllowed cmd
       _ -> False
 
 applyInputUnchecked :: WebInput -> Desktop -> (Desktop,[Effect])
@@ -136,7 +132,7 @@ applyInputUnchecked input d = case input of
     in (next {browserFrontend=browserFrontend d},effects)
   BrowserCommand cmd | dialog d/=Nothing -> (d,[WriteBrowserClipboard "" | cmd `elem` [Copy,Cut]])
                      | otherwise -> runCommand cmd d
-  MenuCommand (Just cmd) | (dialog d==Nothing || dialogCommandAllowed cmd d) && commandEnabled d cmd -> runCommand cmd d
+  MenuCommand cmd | (dialog d==Nothing || dialogCommandAllowed cmd d) && commandEnabled d cmd -> runCommand cmd d
   MenuCommand _ -> (d,[])
   UploadFile name bytes ->
     let b=case TE.decodeUtf8' bytes of
@@ -228,10 +224,10 @@ protocolVersion = 1
 protocolCommands :: [Command]
 protocolCommands = [cmd | (_,_,items)<-menus, MenuItem _ _ cmd<-items]
 
--- Advertise canonical names and frozen compatibility aliases. Only actions in
--- the menu are remotely invocable through this route; no arbitrary Read input.
+-- Only named menu actions are remotely invocable through this route; no
+-- arbitrary Read input and no positional command identities.
 protocolMenuCommands :: [(T.Text,Command)]
-protocolMenuCommands = [(name,cmd) | cmd<-nub protocolCommands, name<-commandAliases cmd]
+protocolMenuCommands = [(name,cmd) | cmd<-nub protocolCommands, Just name<-[commandIdentifier cmd]]
 
 editableDialogField :: Desktop -> Maybe Field
 editableDialogField d=case dialog d of
@@ -247,7 +243,7 @@ frameMetadata cwd d =
      Just (TextArea _ True b sel _ _) -> selectedText sel b
      _ -> if dialog d/=Nothing then "" else clipboard (fst (runCommand Copy d {browserFrontend=False}))),
    "terminal" .= (activeTerminal d/=Nothing && dialog d==Nothing && menu d==Nothing),
-   "wordstar" .= wordStar d,"menus" .= replicate (length protocolCommands) False,
+   "wordstar" .= wordStar d,
    "menuState" .= [(ident,(dialog d==Nothing || cmd==Model.Paste || dialogCommandAllowed cmd d) && commandEnabled d cmd) | (ident,cmd)<-protocolMenuCommands]]
   where cursor=case V.picCursor (renderDesktop d) of V.Cursor x y -> Just (x,y); _ -> Nothing
 
