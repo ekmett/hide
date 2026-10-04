@@ -25,7 +25,7 @@ import qualified Data.Aeson.KeyMap as K
 import qualified Data.Aeson.Key as Key
 import qualified Data.Map.Strict as M
 import Data.IORef
-import Data.List (find, sortOn, mapAccumL)
+import Data.List (find, sortOn)
 import Data.Maybe (catMaybes, mapMaybe, fromMaybe)
 import qualified Data.Text as T
 import qualified Data.Vector as Vector
@@ -33,6 +33,7 @@ import GHC.Clock (getMonotonicTimeNSec)
 import System.Directory (canonicalizePath, doesDirectoryExist, listDirectory, pathIsSymbolicLink)
 import System.FilePath (takeDirectory, takeExtension, (</>))
 import Hide.Buffer
+import Hide.BufferEdits (PreparedEdit, prepareEdit, commitEdits)
 import Hide.Files
 import Hide.GuestAccess (protectedBuffer, protectedPath)
 import Hide.Model
@@ -65,8 +66,7 @@ data EditRequest = EditRequest
   { editRoot :: FilePath, editSession :: Session, editOwner :: EditOwner
   , editIdentity :: StableName Buffer, editSnapshotContents :: M.Map FilePath (Int,T.Text)
   , editValue :: Value, editDesktop :: Desktop }
-data Editing = Editing EditRequest (Startup (Either T.Text [PreparedPatch])) | RetiringEdit (MVar ())
-data PreparedPatch = PreparedPatch FilePath (Maybe (Int,StableName Buffer,StableName FileState)) FileState Buffer (M.Map Int (Int,Int,Int)) Bool
+data Editing = Editing EditRequest (Startup (Either T.Text [PreparedEdit])) | RetiringEdit (MVar ())
 
 type ProblemKey = (Int,[(Int,FilePath,Int,StableName Buffer)],StableName [Diagnostic])
 data ProblemCache = ProblemCache ProblemKey [Diagnostic] Bool (StableName [Diagnostic])
@@ -577,10 +577,11 @@ advanceEdits t d = mask_ $ do
             case either (Left . T.pack . displayException) id answer of
               Left err->finishEditFailure request err d
               Right patches->do
-                adopted<-adoptPatches patches d
+                adopted<-commitEdits patches d
                 case adopted of
                   Left err->finishEditFailure request err d
                   Right (next,changes)->finishPreparedEdit t request changes d next
+                    {status=if null patches then "No rename edits returned." else "Rename applied to buffers. Review and save the changed files."}
   startNext updated
   where
     startNext desktop=do
@@ -1196,7 +1197,7 @@ bufferTextEdit b=withObject "edit" $ \o->do
 
 -- This entire function runs in the owned edit worker, including Buffer/Text
 -- evaluation. UI adoption only validates identities and splices prepared values.
-preparePatches :: Tooling -> M.Map FilePath (Int,T.Text) -> Value -> Desktop -> IO (Either T.Text [PreparedPatch])
+preparePatches :: Tooling -> M.Map FilePath (Int,T.Text) -> Value -> Desktop -> IO (Either T.Text [PreparedEdit])
 preparePatches t snapshot result d = case workspaceEdits result of
   Left err->pure (Left err)
   Right changes->fmap sequence $ forM changes $ \(path,version,values)->do
@@ -1211,12 +1212,6 @@ preparePatches t snapshot result d = case workspaceEdits result of
     case loaded of
       Left err->pure (Left (T.pack err))
       Right (file,b)->do
-        identity<-case opened of
-          Nothing->pure Nothing
-          Just (bid,_)->do
-            bufferIdentity<-makeStableName =<< evaluate b
-            fileIdentity<-makeStableName =<< evaluate file
-            pure (Just (bid,bufferIdentity,fileIdentity))
         let prepared=do
               unless (filePath file==path && (opened/=Nothing || diskBytes file/=Nothing)) (Left "HLS edit file moved or is missing.")
               unless (textBuffer b) (Left "Cannot apply text edits to a hex buffer.")
@@ -1225,50 +1220,10 @@ preparePatches t snapshot result d = case workspaceEdits result of
                 Nothing->Left "Rename refers to a file outside the checked project; no files changed."
                 _->Right ()
               unless (version==Nothing || version==Just (revision b)) (Left "Rename document version no longer matches.")
-              edits<-maybe (Left "Invalid rename edit range.") Right (mapM (parseMaybe (bufferTextEdit b)) values)
-              let sorted=sortOn (\(a,z,_)->(a,z)) edits
-              unless (and [z<=a' && a/=a' | ((a,z,_),(a',_,_))<-zip sorted (drop 1 sorted)]) (Left "Overlapping rename edits.")
-              updated<-replaceRanges sorted b
-              let (_,spans)=mapAccumL (\shift (a,z,text)->let n=T.length text in (shift+n-(z-a),(a,(z,n,shift)))) 0 sorted
-              pure (updated,M.fromDistinctAscList spans)
+              maybe (Left "Invalid rename edit range.") Right (mapM (parseMaybe (bufferTextEdit b)) values)
         case prepared of
           Left err->pure (Left err)
-          Right (updated,ranges)->do
-            _<-evaluate (prepareBuffer updated)
-            _<-evaluate (T.length (contents updated))
-            _<-evaluate (M.foldlWithKey' (\() a (z,n,shift)->a `seq` z `seq` n `seq` shift `seq` ()) () ranges)
-            pure (Right (PreparedPatch path identity file updated ranges (revision updated/=revision b)))
-
-adoptPatches :: [PreparedPatch] -> Desktop -> IO (Either T.Text (Desktop,[(Int,FileState,Buffer)]))
-adoptPatches patches d = do
-  let byPath=M.fromListWith (++) [(filePath file,[(bid,doc)]) | (bid,doc)<-M.toList (buffers d),Just file<-[documentFile doc]]
-  checks<-forM patches $ \(PreparedPatch path original _ _ _ _)->do
-    let opened=M.findWithDefault [] path byPath
-    if protectedPath d path || any (protectedBuffer d . fst) opened then pure False else case (original,opened) of
-      (Nothing,[])->pure True
-      (Just (bid,oldBuffer,oldFile),[(current,doc)]) | bid==current,Just file<-documentFile doc->do
-        bufferIdentity<-makeStableName =<< evaluate (documentBuffer doc)
-        fileIdentity<-makeStableName =<< evaluate file
-        pure (bufferIdentity==oldBuffer && fileIdentity==oldFile)
-      _->pure False
-  pure $ if not (and checks) then Left "An HLS edit target changed or became private; no files changed."
-    else let (updated,rebases,changed)=foldl' apply (d,M.empty,[]) patches
-             rebased=updated {status=if null patches then "No rename edits returned." else "Rename applied to buffers. Review and save the changed files.",
-               windows=map (\w->case M.lookup (bufferId w) rebases of
-                 Nothing->w
-                 Just ranges->w {selection=let Selection a c=selection w in Selection (rebase ranges a) (rebase ranges c)}) (windows updated)}
-         in Right (rebased,reverse changed)
-  where
-    apply (desktop,rebases,changed) (PreparedPatch _ original file b ranges modified)=
-      let bid=maybe (nextId desktop) (\(ident,_,_)->ident) original
-          updated=case original of
-            Nothing->addDocument (Just file) b desktop
-            Just _->desktop {buffers=M.adjust (\doc->restyle doc {documentBuffer=b}) bid (buffers desktop)}
-      in (updated,M.insert bid ranges rebases,if modified || maybe True (const False) original then (bid,file,b):changed else changed)
-    rebase edits offset=case M.lookupLE offset edits of
-      Nothing->offset
-      Just (a,(z,n,shift)) | offset<z->a+shift+n
-                         | otherwise->offset+shift+n-(z-a)
+          Right edits->prepareEdit (fst <$> opened) file b edits
 
 jump :: (Desktop -> [Effect] -> IO (Bool,Desktop)) -> FilePath -> Int -> Int -> Desktop -> IO Desktop
 jump core path row col d = do
