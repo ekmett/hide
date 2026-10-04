@@ -70,9 +70,31 @@ resolves a documentation corpus root; it neither imports nor receives `Desktop`.
 tool to it, retaining permission checks and deferred filesystem work. Listing and
 search are not yet registered commands.
 
-This is an implementation slice, not a complete plugin SDK. Activation scopes,
-checked buffer services, menu contributions and custom widget/window types remain
-tracked in [the delivery plan](https://github.com/ekmett/hide/issues/1).
+## Immutable plugin buffer reads
+
+`Hide.Plugin.Buffer` provides opaque `BufferRead` and `ContentVersion` values.
+The host adapter `Hide.Plugin.BufferHost` captures immutable measured trees without
+retaining the separate saved baseline, Undo or Redo roots. Deleted provenance
+leaves in the live tree remain retained but are invisible to reads.
+Public reads use distinct character, byte and
+zero-based line coordinates, validate their full range and reject the wrong
+representation. `readLines` preserves source line terminators; `readLine` gives
+one editor row without its terminator. Whole-buffer reads are explicit worker
+operations. Capture and version checks never flatten or compare contents.
+
+`ContentVersion` combines the revision with immutable buffer identity. A new
+buffer with the same revision and contents invalidates the captured version.
+The identity check is conservative: replacing the immutable buffer to establish
+a new saved baseline also requires a fresh version. The live `read_buffer` MCP
+consumer uses these measured reads after host privacy filtering, and ACP source
+freshness tracking uses the same version check.
+
+This is an implementation slice, not a complete plugin SDK. Session-scoped
+`BufferRef` handles, activation scopes, checked buffer edits, menu contributions
+and custom widget/window types remain tracked in
+[the delivery plan](https://github.com/ekmett/hide/issues/1). HLS currently owns
+worker preparation and atomic checked edit adoption in `Hide.Tooling`; wrapping
+that owner remains part of [the buffer service work](https://github.com/ekmett/hide/issues/4).
 
 ## Native Windows terminals
 
