@@ -684,7 +684,7 @@ menuLayers d (i,j) = [place x y contents']
     item n entry@(MenuItem title _ cmd) = V.char paper '│'  V.<|> V.cropRight (w-2) content V.<|> V.char paper '│'
       where
         key = menuShortcut d entry
-        disabled = not (commandEnabled d cmd)
+        disabled = not (menuCommandAvailable d cmd)
         bg = if n == j then green else gray
         a = attr (if disabled then V.RGBColor 85 85 85 else black) bg
         hot = attr red bg

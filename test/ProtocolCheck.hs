@@ -17,6 +17,7 @@ import Hide.Protocol
 import Hide.Model
 import Hide.Files (FileState(..))
 import Hide.Buffer
+import Hide.Render (snapshotHtml)
 
 checks :: IO ()
 checks = do
@@ -78,6 +79,8 @@ checks = do
   let unavailable=initialDesktop (80,25)
   check "session Options actions remain available before opening a document" (all (menuCommandAvailable unavailable) [EditorOptions,EnvironmentOptions,ChatInputOptions,AgentOptions,AgentPermissions,AgentGuidance,AutocompleteCommand "settings"])
   check "queued native and browser menu checks share current availability" (not (menuCommandAvailable unavailable SplitVertical) && null (snd (applyInput (MenuCommand SplitVertical) unavailable)))
+  let emptySaveMenu=snapshotHtml unavailable {menu=Just (0,2)}
+  check "main menu renders unavailable Save with disabled foreground" ("color:rgb(85,85,85);background:rgb(0,170,0)" `T.isInfixOf` emptySaveMenu)
   let primary=selectConversationView "" "Primary" (initialDesktop (80,25))
       drafted=primary {composerBuffer=newBuffer "unsent",composerSelection=Selection 6 6}
       child=selectConversationView "child" "Worker" drafted
