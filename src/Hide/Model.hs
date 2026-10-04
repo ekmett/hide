@@ -254,7 +254,9 @@ menuShortcut d (MenuItem _ key cmd)
 -- | Labels and native accelerators share the effective command identity. The
 -- live registered Help action uses the configurable built-in Help key entry.
 commandBindingKeys :: Desktop -> Command -> [Text]
-commandBindingKeys d cmd=maybe [] (\bindings->Bindings.bindingKeys bindings shortcutCommand) (effectiveBindings d)
+commandBindingKeys d cmd
+  | dialog d/=Nothing, not (dialogCommandAllowed cmd d) = []
+  | otherwise = maybe [] (\bindings->Bindings.bindingKeys bindings shortcutCommand) (effectiveBindings d)
   where shortcutCommand=case cmd of RegisteredMenu ref _ | Plugin.menuName ref=="hide.help.contents"->Help; _->cmd
 
 commandDescription :: Command -> Text
@@ -372,8 +374,10 @@ statusHintsRaw d
   | Just text<-menuHelp d = [command " F1 Help" Help,(" | "<>text,Nothing)]
   | Just c<-prefix d = [(keyLabel d (" Ctrl+"<>T.singleton c<>"- "),Nothing),key " Esc Cancel" V.KEsc []]
   | Just dg<-dialog d, approvalDialog dg = [key " Tab Next" (V.KChar '\t') [],key "  Alt+A Allow" (V.KChar 'a') [V.MAlt],key "  Alt+D Deny" (V.KChar 'd') [V.MAlt],key "  Esc Deny" V.KEsc []]
-  | Just dg<-dialog d, searching dg = [key " Ctrl+Tab Find/Replace" (V.KChar '\t') [V.MCtrl],key "  Tab Next" (V.KChar '\t') [],key "  Enter Apply" V.KEnter [],key "  Esc Cancel" V.KEsc []]
-  | dialog d/=Nothing = [key " Tab Next" (V.KChar '\t') [],key "  Enter Select" V.KEnter [],key "  Esc Cancel" V.KEsc []]
+  | Just dg<-dialog d, searching dg = [key " Ctrl+Tab Find/Replace" (V.KChar '\t') [V.MCtrl],key "  Tab Next" (V.KChar '\t') [],key "  Enter Apply" V.KEnter [],key "  Esc Cancel" V.KEsc []] ++
+      [command (if nativeMac d then "  Cmd+Alt+F Replace" else "  Ctrl+H Replace") Replace]
+  | dialog d/=Nothing = [key " Tab Next" (V.KChar '\t') [],key "  Enter Select" V.KEnter [],key "  Esc Cancel" V.KEsc []] ++
+      [command ((if nativeMac d then "  Cmd+" else "  Ctrl+")<>keyName<>" "<>label) cmd | (keyName,label,cmd)<-[("C","Copy",Copy),("V","Paste",Paste)],dialogCommandAllowed cmd d]
   | problemsVisible d && problemsFocused d = [key " Enter Source" V.KEnter [],command (if nativeMac d then "  Cmd+C Copy" else "  Ctrl+C Copy") Copy,command "  Copy all" CopyAllMessages]
   | Just v<-inlinePreview d,inlineMatches d v = [key " Tab Accept" (V.KChar '\t') [],key "  Alt+Right Word" V.KRight [V.MAlt],key (if nativeMac d then "  Cmd+[ Previous" else "  Alt+[ Previous") (V.KChar '[') [V.MAlt],key (if nativeMac d then "  Cmd+] Next" else "  Alt+] Next") (V.KChar ']') [V.MAlt],key "  Esc Dismiss" V.KEsc []]
   | activeAutocomplete d = [key " Enter Send hint" V.KEnter [],key "  Shift+Enter Newline" V.KEnter [V.MShift],key "  Tab Transcript / hint" (V.KChar '\t') []]
@@ -792,10 +796,7 @@ runCommand cmd source | browserFrontend source, cmd `elem` [Copy,Cut,CopyAllMess
   let (next,requests)=runCommand cmd source {browserFrontend=False}
   in (next {browserFrontend=True},requests++[WriteBrowserClipboard (clipboard next)])
 runCommand Paste source | browserFrontend source = (source {menu=Nothing,contextMenu=Nothing},[ReadBrowserClipboard])
-runCommand cmd source | dialogCommandAllowed cmd source = case cmd of
-  Find -> (searchPrompt False source,[])
-  Replace -> (searchPrompt True source,[])
-  _ -> handleEvent (V.EvKey (V.KChar (fromMaybe 'a' (lookup cmd [(Copy,'c'),(Cut,'x'),(Paste,'v'),(SelectAll,'a'),(Undo,'z'),(Redo,'y')]))) [V.MCtrl]) source
+runCommand cmd source | dialogCommandAllowed cmd source = applyDialogCommand cmd source
 runCommand cmd source | problemsVisible source && problemsFocused source, cmd `elem` [Undo,Redo,Cut,Paste,SelectAll] = (source {menu=Nothing,contextMenu=Nothing},[])
 runCommand Copy source | activeConversation source, Just w<-activeWindow source, anchor (selection w)/=caret (selection w) =
   ((copyClipboard False (conversationSelection source) source) {status="Conversation text copied.",menu=Nothing,contextMenu=Nothing},[])
@@ -1060,6 +1061,44 @@ dialogCommandAllowed cmd d=case dialog d of
           | f:_<-drop (focus dg) (fields dg),editableArea f -> cmd `elem` [Copy,Cut,Paste,SelectAll,Undo,Redo]
   _ -> False
 
+-- | Only existing field editing/search actions participate in dialog bindings.
+-- Navigation, text, mnemonics and permission decisions retain their control owner.
+dialogBindingCommands :: [Command]
+dialogBindingCommands=[Copy,Cut,Paste,SelectAll,Undo,Redo,Find,Replace]
+
+dialogReserved :: V.Key -> [V.Modifier] -> Bool
+dialogReserved key mods=key==V.KChar 'u' && V.MCtrl `elem` mods ||
+  (V.MAlt `elem` mods && V.MMeta `notElem` mods && case key of V.KChar _->True; _->False)
+
+-- | Apply a permitted action to its dialog field without replaying a key through
+-- configurable dispatch. The text-area adapter owns its isolated buffer/undo.
+applyDialogCommand :: Command -> Desktop -> (Desktop,[Effect])
+applyDialogCommand cmd d
+  | not (dialogCommandAllowed cmd d) = (d,[])
+  | cmd==Find = (searchPrompt False d,[])
+  | cmd==Replace = (searchPrompt True d,[])
+  | Just dg<-dialog d,field@(TextArea _ True b sel _ _):_<-drop (focus dg) (fields dg) =
+      let rect=fromMaybe (Rect 0 0 1 1) (listToMaybe (drop (focus dg) (fieldRects d dg)))
+          copied=selectedText sel b
+          edited=case cmd of
+            Cut -> textAreaEdit rect (insertText "") field
+            Paste -> textAreaEdit rect (insertText (clipboard d)) field
+            Copy -> field
+            _ -> textAreaEdit rect (fst . runCommand cmd) field
+      in (d {clipboard=if cmd `elem` [Copy,Cut] then copied else clipboard d,
+             clipboardCode=if cmd `elem` [Copy,Cut] then Nothing else clipboardCode d,
+             dialog=Just dg {fields=replaceAt (focus dg) edited (fields dg)}},[])
+  | otherwise = (d,[])
+
+-- | Only the small dialog action catalogue needs current focus filtering. Other
+-- owners return their prepared projection directly, with no command/index walk.
+focusedBindingChords :: Desktop -> [(Text,Text)]
+focusedBindingChords d
+  | not (bindingInputAvailable d) = []
+  | Just bindings<-effectiveBindings d, dialog d==Nothing = Bindings.bindingChords bindings
+  | Just bindings<-effectiveBindings d = Bindings.bindingChordsWhere (`dialogCommandAllowed` d) bindings
+  | otherwise = []
+
 fieldHeight :: Field -> Int
 fieldHeight Input{} = 3
 fieldHeight ComboBox{} = 3
@@ -1238,7 +1277,8 @@ dispatchEvent (V.EvResize sw sh) d =
 dispatchEvent (V.EvKey key mods) d
   | bindingInputAvailable d, not (terminalContextReserved d key mods), Just bindings<-effectiveBindings d =
       case Bindings.bindingAction bindings key mods of
-        Just cmd | commandEnabled d cmd -> runCommand cmd d
+        Just cmd | dialog d/=Nothing, not (dialogCommandAllowed cmd d) -> unboundKey key mods d
+                 | commandEnabled d cmd -> runCommand cmd d
                  | otherwise -> (d,[])
         Nothing -> unboundKey key mods d
 dispatchEvent (V.EvKey key mods) d | key `elem` [V.KChar '\t',V.KBackTab], V.MAlt `elem` mods =
@@ -2172,13 +2212,14 @@ bindingPlatform d | nativeMac d = Bindings.MacPlatform
 
 bindingContext :: Desktop -> Maybe Bindings.BindingContext
 bindingContext d
+  | dialog d/=Nothing = Just Bindings.DialogKeys
   | problemsFocused d = Just Bindings.MessagesKeys
   | maybe False treeFocused (sideTree d) = Just Bindings.SidebarKeys
   | activeConversation d = Just Bindings.ConversationKeys
   | activeTerminal d/=Nothing = Just Bindings.TerminalKeys
   | Just label<-activeDocument d >>= documentLabel,
     "Debugger " `T.isPrefixOf` label || "Source " `T.isPrefixOf` label = Just Bindings.DebuggerKeys
-  | (not (wordStar d) || bindingPlatform d/=Bindings.TerminalPlatform), Just _<-activeDocument d = Just Bindings.SourceKeys
+  | Just _<-activeDocument d = Just (if wordStar d && not (activeHex d) then Bindings.WordStarKeys else Bindings.SourceKeys)
   | Nothing<-activeDocument d = Just Bindings.SourceKeys
   | otherwise = Nothing
 
@@ -2187,23 +2228,33 @@ effectiveBindings d = bindingContext d >>= \context->M.lookup (bindingPlatform d
 
 terminalContextReserved :: Desktop -> V.Key -> [V.Modifier] -> Bool
 terminalContextReserved d key mods = terminalSourceReserved key mods ||
-  (wordStar d && bindingContext d==Just Bindings.SourceKeys && V.MCtrl `elem` mods && V.MMeta `notElem` mods) ||
+  (bindingContext d==Just Bindings.WordStarKeys && wordStarReserved key mods) ||
+  (bindingContext d==Just Bindings.DialogKeys && dialogReserved key mods) ||
   (bindingContext d==Just Bindings.ConversationKeys && key==V.KEnter)
 
 bindingInputAvailable :: Desktop -> Bool
-bindingInputAvailable d=menu d==Nothing && contextMenu d==Nothing && dialog d==Nothing &&
-  drag d==Nothing && dragOriginal d==Nothing && prefix d==Nothing &&
-  not (questionActive d) && not (activeAutocomplete d)
+bindingInputAvailable d=case dialog d of
+  Just dg -> openComboBox dg==Nothing && any (`dialogCommandAllowed` d) dialogBindingCommands
+  Nothing -> menu d==Nothing && contextMenu d==Nothing && drag d==Nothing &&
+    dragOriginal d==Nothing && prefix d==Nothing && not (questionActive d) && not (activeAutocomplete d)
 
 -- | Plain movement/text is handled by its owner. No removed chord falls through
 -- into a hardcoded named command. PTY fallback retains every ordinary control key.
 unboundKey :: V.Key -> [V.Modifier] -> Desktop -> (Desktop,[Effect])
 unboundKey key mods d = case bindingContext d of
+  Just Bindings.DialogKeys | Just dg<-dialog d -> dialogEvent (V.EvKey key mods) dg d
   Just Bindings.SidebarKeys -> (d,[])
   Just Bindings.MessagesKeys -> (d,[])
   Just Bindings.ConversationKeys -> fromMaybe (editorKey key mods d,[]) (composerEvent (V.EvKey key mods) d)
   Just Bindings.TerminalKeys -> (d,maybe [] (\text->[AgentAction "terminal-input" [fromMaybe "" (activeTerminal d),text]]) (terminalInput (V.EvKey key mods)))
+  Just Bindings.WordStarKeys | wordStarReserved key mods -> keyEvent key mods d
   _ -> (editorKey key mods d,[])
+
+-- | WordStar movement, deletion and prefix/block grammar remain local owners.
+-- Named commands use the prepared WordStar table instead of claiming these keys.
+wordStarReserved :: V.Key -> [V.Modifier] -> Bool
+wordStarReserved (V.KChar c) mods=V.MCtrl `elem` mods && V.MMeta `notElem` mods && toLower c `elem` ("aesdxfykq"::String)
+wordStarReserved _ _=False
 
 terminalSourceReserved :: V.Key -> [V.Modifier] -> Bool
 terminalSourceReserved key mods=(key==V.KChar ']' && V.MCtrl `elem` mods) || key==V.KEsc || key==V.KFun 10 ||
@@ -2216,7 +2267,9 @@ terminalSourceReserved key mods=(key==V.KChar ']' && V.MCtrl `elem` mods) || key
 -- | Policy inspects exactly the same resolved action as human key dispatch.
 boundKeyCommand :: V.Key -> [V.Modifier] -> Desktop -> Maybe Command
 boundKeyCommand key mods d
-  | bindingInputAvailable d, not (terminalContextReserved d key mods) = effectiveBindings d >>= \bindings->Bindings.bindingAction bindings key mods
+  | bindingInputAvailable d, not (terminalContextReserved d key mods),
+    Just cmd<-effectiveBindings d >>= \bindings->Bindings.bindingAction bindings key mods,
+    dialog d==Nothing || dialogCommandAllowed cmd d = Just cmd
   | otherwise = Nothing
 
 keyEvent :: V.Key -> [V.Modifier] -> Desktop -> (Desktop,[Effect])
@@ -2344,20 +2397,20 @@ comboBoxEvent ev dg d i name choices chosen preview = case ev of
 
 dialogEvent :: V.Event -> Dialog -> Desktop -> (Desktop,[Effect])
 dialogEvent ev dg d
-  | nativeMac d, V.EvKey (V.KChar 'f') mods<-ev, V.MMeta `elem` mods, V.MAlt `elem` mods,
+  | not prepared, nativeMac d, V.EvKey (V.KChar 'f') mods<-ev, V.MMeta `elem` mods, V.MAlt `elem` mods,
     dialogCommandAllowed Replace d = runCommand Replace d
   | Just (i,name,choices,chosen,preview)<-openComboBox dg = comboBoxEvent platformEvent dg d i name choices chosen preview
   | otherwise = case platformEvent of
   V.EvKey key mods | DebugDialog action<-purpose dg,"hdb-accept:" `T.isPrefixOf` action,
     key==V.KEsc || key==V.KFun 3 && V.MAlt `elem` mods ->
       (d {dialog=Nothing,buttonHover=Nothing,buttonPressed=Nothing},[DebugAction action ["1"]])
-  V.EvKey (V.KChar c) mods | searching dg,V.MCtrl `elem` mods,toLower c `elem` ['f','h','r'] -> runCommand (if toLower c=='f' then Find else Replace) d
+  V.EvKey (V.KChar c) mods | not prepared,searching dg,V.MCtrl `elem` mods,toLower c `elem` ['f','h','r'] -> runCommand (if toLower c=='f' then Find else Replace) d
   V.EvKey (V.KChar '\t') mods | Searching mode _<-purpose dg,V.MCtrl `elem` mods -> (searchPrompt (not mode) d,[])
   V.EvMouseDown x y V.BLeft _ | searching dg,Just (_,mode)<-find (\(r,_)->inside r x y) (searchTabRects d dg) -> (searchPrompt mode d,[])
   V.EvKey (V.KFun 3) mods | V.MAlt `elem` mods, PermissionDialog{}<-purpose dg -> dialogEvent (V.EvKey V.KEsc []) dg d
   V.EvKey V.KEsc _ | PermissionDialog action<-purpose dg -> (d {dialog=Nothing,buttonHover=Nothing,buttonPressed=Nothing},[PermissionAction action ["1"]])
   V.EvKey V.KEsc _ -> (d {dialog=Nothing,buttonHover=Nothing,buttonPressed=Nothing},[])
-  V.EvKey (V.KChar c) mods | (V.MCtrl `elem` mods && not areaFocused && not (approvalDialog dg)) || V.MAlt `elem` mods,
+  V.EvKey (V.KChar c) mods | not commandModifier, (V.MCtrl `elem` mods && not areaFocused && not (approvalDialog dg)) || V.MAlt `elem` mods,
     Just i<-findIndex (==Just (toLower c)) (buttonMnemonics dg) -> submitDialog i dg d
   V.EvKey (V.KChar '\t') mods -> setFocus (focus dg + if V.MShift `elem` mods then -1 else 1)
   V.EvKey V.KBackTab _ -> setFocus (focus dg-1)
@@ -2407,19 +2460,21 @@ dialogEvent ev dg d
       _ -> (released {buttonHover=Nothing},[])
   _ -> (d,[])
   where
+    commandModifier=case ev of V.EvKey _ mods->V.MMeta `elem` mods; _->False
+    prepared=M.member (bindingPlatform d,Bindings.DialogKeys) (keyBindings d)
     platformEvent=case ev of
       V.EvKey key mods | nativeMac d -> V.EvKey key [if modifier==V.MMeta then V.MCtrl else modifier | modifier<-mods]
       _ -> ev
     count=length (fields dg)
     areaFocused=case drop (focus dg) (fields dg) of TextArea{}:_ -> True; _ -> False
     focusedRect=fromMaybe (Rect 0 0 1 1) (listToMaybe (drop (focus dg) (fieldRects d dg)))
-    areaKey (V.KChar c) mods | V.MCtrl `elem` mods, c `elem` ['c','x','v'], f@(TextArea _ True b sel _ _)<-fields dg !! focus dg =
+    areaKey (V.KChar c) mods | not prepared, V.MCtrl `elem` mods, c `elem` ['c','x','v'], f@(TextArea _ True b sel _ _)<-fields dg !! focus dg =
       let copied=selectedText sel b
           edited=case c of 'x' -> textAreaEdit focusedRect (insertText "") f; 'v' -> textAreaEdit focusedRect (insertText (clipboard d)) f; _ -> f
       in (d {clipboard=if c=='v' then clipboard d else copied,clipboardCode=if c=='v' then clipboardCode d else Nothing,dialog=Just dg {fields=replaceAt (focus dg) edited (fields dg)}},[])
     areaKey key mods = updateField $ \f -> if editableArea f
       then textAreaEdit focusedRect (case key of
-        V.KChar c | V.MCtrl `elem` mods, Just cmd<-lookup (toLower c) [('z',if V.MShift `elem` mods then Redo else Undo),('y',Redo),('a',SelectAll)] -> fst . runCommand cmd
+        V.KChar c | not prepared, V.MCtrl `elem` mods, Just cmd<-lookup (toLower c) [('z',if V.MShift `elem` mods then Redo else Undo),('y',Redo),('a',SelectAll)] -> fst . runCommand cmd
         _ -> editorKey key mods) f
       else clampArea focusedRect (fieldKey key mods f)
     clampArea rect f@(TextArea name editable b sel row col) = TextArea name editable b sel (min row (max 0 (bufferLineCount b-height (textAreaRect rect f)))) col

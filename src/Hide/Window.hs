@@ -249,7 +249,7 @@ runWindow backend scale effects tick initial = do
       | otherwise = case decodeKey key mods of
           Nothing -> pure (d,[])
           Just (V.EvKey k ms) | boundKeyCommand k ms d==Just Paste && commandEnabled d Paste -> paste d
-          Just (V.EvKey (V.KChar 'v') ms) | dialog d/=Nothing && any (`elem` ms) [V.MCtrl,V.MMeta] && dialogCommandAllowed Paste d -> paste d
+          Just (V.EvKey (V.KChar 'v') ms) | dialog d/=Nothing && effectiveBindings d==Nothing && any (`elem` ms) [V.MCtrl,V.MMeta] && dialogCommandAllowed Paste d -> paste d
           Just ev -> clipboardResult (copies ev d) d (handleEvent ev d)
     dispatch (14:_) d = do
       path <- c_text >>= BS.packCString
@@ -299,7 +299,7 @@ runWindow backend scale effects tick initial = do
       _ -> any (\(r,_,action) -> inside r x y && action `elem` [Left Copy,Left CopyAllMessages,Left CopyLocation]) (statusItemRects d)
     copies (V.EvKey key ms) d | Just cmd<-boundKeyCommand key ms d = cmd `elem` [Copy,Cut,CopyAllMessages,CopyLocation]
     copies (V.EvKey _ _) d | bindingInputAvailable d, Just _<-effectiveBindings d = False
-    copies (V.EvKey key ms) d | dialog d/=Nothing && any (`elem` ms) [V.MCtrl,V.MMeta] && key `elem` map V.KChar "cx" = True
+    copies (V.EvKey key ms) d | dialog d/=Nothing && (dialogCommandAllowed Copy d || dialogCommandAllowed Cut d) && any (`elem` ms) [V.MCtrl,V.MMeta] && key `elem` map V.KChar "cx" = True
     copies (V.EvKey key ms) d =
       (V.MCtrl `elem` ms && (not (wordStar d) || problemsFocused d) && key `elem` [V.KChar 'c',V.KChar 'x']) ||
       (key == V.KIns && V.MCtrl `elem` ms) || (key == V.KDel && V.MShift `elem` ms) ||
