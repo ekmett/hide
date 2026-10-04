@@ -296,6 +296,26 @@ checks = (composerCodeChecks >>) $ bracket temporary removePathForcibly $ \root 
       check "opening a recovered conversation preserves its transcript and draft"
         (buffers shown==buffers recovered && composerBuffer shown==composerBuffer recovered && composerSelection shown==composerSelection recovered && composerFocused shown)
     withConversation $ \runtime -> do
+      (asked,reply)<-questionTool runtime savedDraft (object ["question" .= ("Question presentation identity"::T.Text)])
+      _<-questionId reply
+      let q=fromMaybe (error "Missing presentation question") (chatQuestion asked)
+          answer=(newBuffer "kept answer") {saved=error "Question presentation forced saved answer",
+            undoStack=error "Question presentation forced answer Undo",redoStack=error "Question presentation forced answer Redo"}
+          poisoned=asked {chatQuestion=Just q {questionBuffer=answer}}
+          questionDocument d=fromMaybe (error "Missing question presentation document") (activeDocument d)
+      first<-tickConversation runtime poisoned
+      originalIdentity<-makeStableName =<< evaluate (documentBuffer (questionDocument first))
+      unchanged<-tickConversation runtime first
+      unchangedIdentity<-makeStableName =<< evaluate (documentBuffer (questionDocument unchanged))
+      check "unchanged question redraw never compares retained answer history"
+        (originalIdentity==unchangedIdentity && map scrollRow (windows first)==map scrollRow (windows unchanged))
+      let replacement=newBuffer "fresh answer"
+          replaced=unchanged {chatQuestion=Just q {questionBuffer=replacement}}
+      redrawn<-tickConversation runtime replaced
+      replacementIdentity<-makeStableName =<< evaluate (documentBuffer (questionDocument redrawn))
+      check "equal-revision answer replacement invalidates question presentation"
+        (revision answer==revision replacement && originalIdentity/=replacementIdentity && "fresh answer" `T.isInfixOf` conversationText redrawn)
+    withConversation $ \runtime -> do
       (_,anonymous)<-chatTool runtime savedDraft "ask_user" (object ["question" .= ("Anonymous question"::T.Text)])
       refused<-timeout 100000 anonymous
       check "anonymous ask_user cannot acquire a private answer" (case refused of Just (Left _)->True; _->False)
