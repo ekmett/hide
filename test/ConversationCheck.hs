@@ -43,6 +43,7 @@ import qualified Hide.AgentRuntime as AR
 import System.Mem.StableName (makeStableName)
 import Hide.Files
 import Hide.Sidebar
+import qualified Hide.MCPPermissions as Permissions
 import Hide.Model hiding (prompt)
 import Hide.Markdown (renderMarkdown)
 import Hide.Syntax (Style(..))
@@ -136,6 +137,11 @@ checks = (composerCodeChecks >>) $ bracket temporary removePathForcibly $ \root 
         environment support=object ["THC_LOG" .= logPath,"THC_SOURCE" .= source,"THC_SECOND" .= secondSource,"THC_RESUME" .= support]
         send runtime action values desktop=snd <$> conversationEffects runtime fallback desktop [AgentAction action values]
         prompt runtime text=send runtime "send" ["0",text,"false","false","false"]
+        questionTool runtime desktop args=do
+          caller<-captureQuestionCaller runtime (AR.primaryAgent (conversationAgents runtime))
+          case caller of Left err->pure (desktop,pure (Left err)); Right context->chatToolAs runtime (Just context) desktop "ask_user" args
+        questionId reply=reply >>= either (error . T.unpack) (maybe (error "Missing questionId") pure . (field "questionId" :: Value -> Maybe Int))
+        questionPoll runtime desktop ident=questionTool runtime desktop (object ["questionId" .= ident]) >>= snd
         await runtime label predicate desktop=do
           result<-timeout 8000000 (loop desktop)
           maybe (error ("Conversation timeout: "++label)) pure result
@@ -235,20 +241,21 @@ checks = (composerCodeChecks >>) $ bracket temporary removePathForcibly $ \root 
         savedDraft=draftBase {composerBuffer=newBuffer "existing draft",composerSelection=Selection 4 4}
         isLeft (Left _)=True
         isLeft _=False
-        clickAction runtime action desktop=case [(a,values) | (a,_,name,values)<-chatActions desktop,name==action] of
+        clickAction runtime=clickActionBeforeTick runtime True
+        clickActionBeforeTick runtime settle action desktop=case [(a,values) | (a,_,name,values)<-chatActions desktop,name==action] of
           (offset,_):_ -> do
             let win=fromMaybe (error "question window") (activeWindow desktop)
                 buffer=maybe (newBuffer "") documentBuffer (activeDocument desktop)
                 (row,column)=bufferLineColumn buffer offset
                 (changed,effects)=handleEvent (V.EvMouseDown (left (bounds win)+1+column) (top (bounds win)+1+row-scrollRow win) V.BLeft []) desktop
             next<-snd <$> conversationEffects runtime fallback changed effects
-            tickConversation runtime next
+            if settle then tickConversation runtime next else pure next
           _ -> error ("Missing inline action "++T.unpack action)
     withConversation $ \runtime -> do
       let longReply=T.unwords (replicate 90 "window-width")
           rawShell="printf '%s\\n' 'literal λ'\n\tprintf 'tail  '  \n"
           question=longReply<>"\n\n```sh\n"<>rawShell<>"```"
-      (initial,_)<-chatTool runtime (initialDesktop (80,25)) "ask_user" (object ["question" .= question])
+      (initial,_)<-questionTool runtime (initialDesktop (80,25)) (object ["question" .= question])
       forM_ [150,32,120] $ \columns -> do
         let resized=modifyActive (\w->w {bounds=Rect 0 1 columns 23}) initial {screenSize=(columns,25)}
         (_,reflowed)<-conversationEffects runtime fallback resized []
@@ -289,37 +296,63 @@ checks = (composerCodeChecks >>) $ bracket temporary removePathForcibly $ \root 
       check "opening a recovered conversation preserves its transcript and draft"
         (buffers shown==buffers recovered && composerBuffer shown==composerBuffer recovered && composerSelection shown==composerSelection recovered && composerFocused shown)
     withConversation $ \runtime -> do
-      (asked,answer)<-chatTool runtime savedDraft "ask_user" (object ["question" .= ("Pick a direction"::T.Text),"choices" .= (["Left","Right"]::[T.Text])])
+      (_,anonymous)<-chatTool runtime savedDraft "ask_user" (object ["question" .= ("Anonymous question"::T.Text)])
+      refused<-timeout 100000 anonymous
+      check "anonymous ask_user cannot acquire a private answer" (case refused of Just (Left _)->True; _->False)
+    withConversation $ \runtime -> do
+      (asked,answer)<-questionTool runtime savedDraft (object ["question" .= ("Pick a direction"::T.Text),"choices" .= (["Left","Right"]::[T.Text])])
       check "ask_user renders inline choices and custom entry without a modal" (dialog asked==Nothing && chatQuestion asked/=Nothing && all (`T.isInfixOf` conversationText asked) ["Pick a direction","Left","Right","Other:","Submit answer","Cancel"])
       check "question footer describes answer actions" ("Enter Answer" `T.isInfixOf` snapshot asked && not ("Session: not connected" `T.isInfixOf` conversationText asked))
       check "ask_user preserves the existing draft and caret" (composerBuffer asked==composerBuffer savedDraft && composerSelection asked==composerSelection savedDraft)
-      (duplicate,refused)<-chatTool runtime asked "ask_user" (object ["question" .= ("Another?"::T.Text)])
+      (duplicate,refused)<-questionTool runtime asked (object ["question" .= ("Another?"::T.Text)])
       check "only one human question can wait" . (&& (duplicate==asked)) . isLeft =<< refused
-      withAsync answer $ \pendingAnswer -> do
-        threadDelay 10000
-        pendingResult<-poll pendingAnswer
-        check "question registration returns while the human answer waits" (case pendingResult of Nothing->True; _->False)
-        selected<-clickAction runtime "question-choice" asked
-        check "choice click waits for explicit submit" (maybe False ((==Just 0).questionChoice) (chatQuestion selected))
-        submitted<-clickAction runtime "question-submit" selected
-        choiceReply<-wait pendingAnswer
-        check "choice response reaches waiting tool" (case choiceReply of Right value->field "answer" value==Just ("Left"::T.Text) && field "custom" value==Just False; _->False)
-        check "answer removes the inline form and preserves draft" (chatQuestion submitted==Nothing && composerBuffer submitted==composerBuffer savedDraft && composerSelection submitted==composerSelection savedDraft)
-      (custom,customReply)<-chatTool runtime savedDraft "ask_user" (object ["question" .= ("Your answer?"::T.Text)])
+      created<-timeout 100000 answer
+      ident<-case created of Just (Right value)->maybe (error "Missing immediate questionId") pure (field "questionId" value :: Maybe Int); _->error "ask_user did not return pending immediately"
+      check "question creation is immediately pending" (case created of Just (Right value)->field "status" value==Just ("pending"::T.Text); _->False)
+      (_,anonymousPoll)<-chatTool runtime asked "ask_user" (object ["questionId" .= ident])
+      check "anonymous callers cannot retrieve authenticated questions" . isLeft =<< anonymousPoll
+      foreignCaller<-captureQuestionCaller runtime (AH.AgentId "unrelated-agent")
+      check "another actor cannot acquire a private question caller receipt" (case foreignCaller of Left _->True; _->False)
+      selected<-clickAction runtime "question-choice" asked
+      check "choice click waits for explicit submit" (maybe False ((==Just 0).questionChoice) (chatQuestion selected))
+      pending<-questionPoll runtime selected ident
+      check "pending result excludes choice and draft" (pending==Right (object ["questionId" .= ident,"status" .= ("pending"::T.Text)]))
+      (_,mixed)<-questionTool runtime selected (object ["questionId" .= ident,"question" .= ("replacement"::T.Text)])
+      check "question retrieval cannot also replace the question" . isLeft =<< mixed
+      submitted<-clickAction runtime "question-submit" selected
+      choiceReply<-questionPoll runtime submitted ident
+      check "choice response is retained for the requesting actor" (case choiceReply of Right value->field "status" value==Just ("answered"::T.Text) && field "answer" value==Just ("Left"::T.Text) && field "custom" value==Just False; _->False)
+      repeated<-questionPoll runtime submitted ident
+      check "polling is stable and does not duplicate the transcript" (repeated==choiceReply && T.count "Pick a direction" (conversationText submitted)==1)
+      check "answer removes the inline form and preserves draft" (chatQuestion submitted==Nothing && composerBuffer submitted==composerBuffer savedDraft && composerSelection submitted==composerSelection savedDraft)
+      (custom,customReply)<-questionTool runtime savedDraft (object ["question" .= ("Your answer?"::T.Text)])
+      customId<-questionId customReply
       let typed=foldl (\desktop c->fst (handleEvent (V.EvKey (V.KChar c) []) desktop)) custom ("custom λ"::String)
           (sending,effects)=handleEvent (V.EvKey V.KEnter []) typed
+      stillPending<-questionPoll runtime typed customId
+      check "typed draft stays private until submitted" (stillPending==Right (object ["questionId" .= customId,"status" .= ("pending"::T.Text)]))
       sent<-snd <$> conversationEffects runtime fallback sending effects
-      result<-customReply
+      result<-questionPoll runtime sent customId
       check "free text answers preserve Unicode and the ordinary draft" (case result of Right value->field "answer" value==Just ("custom λ"::T.Text) && composerBuffer sent==composerBuffer savedDraft; _->False)
-      (cancelledQuestion,cancelledReply)<-chatTool runtime savedDraft "ask_user" (object ["question" .= ("Cancel me"::T.Text)])
+      (cancelledQuestion,cancelledReply)<-questionTool runtime savedDraft (object ["question" .= ("Cancel me"::T.Text)])
+      cancelId<-questionId cancelledReply
       cancelledDesktop<-clickAction runtime "question-cancel" cancelledQuestion
-      check "inline Cancel resolves the pending request" . (&& (chatQuestion cancelledDesktop==Nothing)) . isLeft =<< cancelledReply
-      (disconnected,disconnectedReply)<-chatTool runtime savedDraft "ask_user" (object ["question" .= ("Requester leaves"::T.Text)])
-      withAsync disconnectedReply $ \worker->threadDelay 10000 >> cancel worker
-      cleaned<-tickConversation runtime disconnected
-      check "requester cancellation clears the pending question on tick" (chatQuestion cleaned==Nothing)
+      cancelledResult<-questionPoll runtime cancelledDesktop cancelId
+      check "inline Cancel stores an explicit terminal result" (chatQuestion cancelledDesktop==Nothing && case cancelledResult of Right value->field "status" value==Just ("cancelled"::T.Text) && (field "answer" value :: Maybe T.Text)==Nothing; _->False)
+      (disconnected,disconnectedReply)<-questionTool runtime savedDraft (object ["question" .= ("Requester leaves"::T.Text)])
+      disconnectedId<-questionId disconnectedReply
+      cleaned<-send runtime "cancel" [] disconnected
+      ended<-questionPoll runtime cleaned disconnectedId
+      check "explicit conversation cancellation retires the pending question" (chatQuestion cleaned==Nothing && case ended of Right value->field "status" value==Just ("cancelled"::T.Text); _->False)
+      forM_ [1..65::Int] $ \_->do
+        (fresh,reply)<-questionTool runtime savedDraft (object ["question" .= ("Bounded result"::T.Text)])
+        _<-questionId reply
+        _<-clickAction runtime "question-cancel" fresh
+        pure ()
+      expired<-questionPoll runtime cleaned ident
+      check "old terminal results explicitly expire" (case expired of Left message->"expired" `T.isInfixOf` message; _->False)
       let narrow=addReadOnly "Conversation" "" (initialDesktop (40,12))
-      (manyChoices,_)<-chatTool runtime narrow "ask_user" (object ["question" .= ("Choose"::T.Text),"choices" .= (T.replicate 100 "z":["Option "<>T.pack (show n) | n<-[1..11::Int]])])
+      (manyChoices,_)<-questionTool runtime narrow (object ["question" .= ("Choose"::T.Text),"choices" .= (T.replicate 100 "z":["Option "<>T.pack (show n) | n<-[1..11::Int]])])
       visibleChoice<-tickConversation runtime (fst (handleEvent (V.EvKey V.KDown []) manyChoices))
       let active=fromMaybe (error "question window") (activeWindow visibleChoice)
           document=fromMaybe (error "question document") (activeDocument visibleChoice)
@@ -328,16 +361,83 @@ checks = (composerCodeChecks >>) $ bracket temporary removePathForcibly $ \root 
       check "long choice labels wrap without being discarded" (T.count "z" (conversationText visibleChoice)==100)
       smallCancelled<-clickAction runtime "question-cancel" =<< tickConversation runtime (fst (handleEvent (V.EvKey V.KUp []) visibleChoice))
       check "small-window custom input leaves Cancel reachable" (chatQuestion smallCancelled==Nothing)
-      (_,invalid)<-chatTool runtime savedDraft "ask_user" (object ["question" .= ("Unsupported"::T.Text),"allowMultiple" .= True])
+      (_,invalid)<-questionTool runtime savedDraft (object ["question" .= ("Unsupported"::T.Text),"allowMultiple" .= True])
       check "unsupported multi-select is explicit" . isLeft =<< invalid
-    closingReply<-withConversation $ \runtime->snd <$> chatTool runtime savedDraft "ask_user" (object ["question" .= ("Session closes"::T.Text)])
-    check "session shutdown resolves a waiting question" . isLeft =<< closingReply
+    withConversation $ \runtime->Permissions.withPermissionsAt (root </> "question-permissions.toml") chatTools $ \permissions->do
+      bound<-captureQuestionCaller runtime (AR.primaryAgent (conversationAgents runtime)) >>= either (error . T.unpack) pure
+      let primary=AR.primaryAgent (conversationAgents runtime)
+          actor=fmap (() <$) (AH.statusAgent (AR.agentHub (conversationAgents runtime)) (AH.Agent primary) primary)
+          operation=chatToolAs runtime (Just bound)
+          call=Permissions.permissionCallAs actor permissions operation
+          approve desktop=case dialog desktop of
+            Just dg->let (next,effects)=submitDialog 0 dg desktop in snd <$> Permissions.policyEffects permissions fallback next effects
+            Nothing->error "Missing question permission review"
+      (review,creation)<-call savedDraft "ask_user" (object ["question" .= ("One permission per question"::T.Text)])
+      check "question creation retains ordinary permission approval" (dialog review/=Nothing && chatQuestion review==Nothing)
+      withAsync creation $ \request->do
+        admitted<-approve review
+        ident<-questionId (wait request)
+        (unchanged,pending)<-call admitted "ask_user" (object ["questionId" .= ident])
+        result<-timeout 100000 pending
+        check "owned pending retrieval does not create another human approval"
+          (dialog unchanged==Nothing && chatQuestion unchanged==chatQuestion admitted && case result of Just (Right value)->field "status" value==Just ("pending"::T.Text); _->False)
+        writeFile (root </> "question-permissions.toml") "[editor.mcp.permissions]\nask_user = 'disable'\n"
+        (_,disabled)<-call admitted "ask_user" (object ["questionId" .= ident])
+        check "Disable still refuses owned question retrieval" . isLeft =<< disabled
+        _<-send runtime "cancel" [] admitted
+        pure ()
+      writeFile (root </> "question-permissions.toml") ""
+      (review,creation)<-call savedDraft "ask_user" (object ["question" .= ("Revoked caller"::T.Text)])
+      _<-AH.endAgent (AR.agentHub (conversationAgents runtime)) AH.Human primary
+      withAsync creation $ \request->do
+        refused<-approve review
+        result<-wait request
+        check "deferred approval cannot resurrect an ended question requester" (chatQuestion refused==Nothing && isLeft result)
+    (closedRuntime,closedId)<-withConversation $ \runtime->do
+      (_,reply)<-questionTool runtime savedDraft (object ["question" .= ("Session closes"::T.Text)])
+      ident<-questionId reply
+      pure (runtime,ident)
+    check "session shutdown refuses further question retrieval" . isLeft =<< questionPoll closedRuntime savedDraft closedId
     BS.writeFile server (TE.encodeUtf8 (T.pack providerScript))
     BS.writeFile source "disk original\n"
     BS.writeFile secondSource "second original\n"
     (secondFile,secondBuffer)<-loadFile secondSource >>= either error pure
     (file,b)<-loadFile source >>= either error pure
     let desktop=insertText "unsaved " (addDocument (Just file) b (addDocument (Just secondFile) secondBuffer (initialDesktop (90,28))) {sideTree=Just (emptySidebar root 20 False)})
+    -- A submitted answer resumes the original idle provider through its existing
+    -- query owner. A replacement with the same provider session ID cannot replay it.
+    withConversation $ \runtime -> do
+      configured<-configure runtime ("yes"::T.Text) desktop
+      connected<-prompt runtime "stream" configured >>= done runtime
+      let liveDraft=connected {composerBuffer=newBuffer "newer independent draft",composerSelection=Selection 6 6}
+      (asked,creation)<-questionTool runtime liveDraft (object ["question" .= ("Resume the idle provider?"::T.Text),"choices" .= (["async-answer-resume-marker"]::[T.Text])])
+      ident<-questionId creation
+      submitted<-clickAction runtime "question-submit" =<< clickAction runtime "question-choice" asked
+      resumed<-done runtime submitted
+      messages<-logged
+      let answerPrompts=[params | entry<-messages,field "method" entry==Just ("session/prompt"::T.Text),Just params<-[field "params" entry::Maybe Value],"async-answer-resume-marker" `T.isInfixOf` json params]
+      check "explicit answer wakes the original idle provider once with question attribution"
+        (length answerPrompts==1 && all (T.isInfixOf ("question "<>T.pack (show ident)).json) answerPrompts && contents (composerBuffer resumed)=="newer independent draft")
+      result<-questionPoll runtime resumed ident
+      check "delivered answer stays available without another transcript record"
+        (case result of Right value->field "answer" value==Just ("async-answer-resume-marker"::T.Text) && T.count "Resume the idle provider?" (conversationText resumed)==1; _->False)
+      (held,reply)<-questionTool runtime resumed (object ["question" .= ("Do not replay"::T.Text),"choices" .= (["async-retired-answer-marker"]::[T.Text])])
+      oldId<-questionId reply
+      originalCaller<-captureQuestionCaller runtime (AR.primaryAgent (conversationAgents runtime)) >>= either (error . T.unpack) pure
+      queued<-clickActionBeforeTick runtime False "question-submit" =<< clickAction runtime "question-choice" held
+      replacement<-send runtime "new" [] queued >>= await runtime "replacement provider" ((=="Session fixture-session").status)
+      (_,oldCreation)<-chatToolAs runtime (Just originalCaller) replacement "ask_user" (object ["question" .= ("Old queued request"::T.Text)])
+      check "old queued admission cannot bind to a replacement provider" . isLeft =<< oldCreation
+      stale<-questionPoll runtime replacement oldId
+      check "same session label on a new connection cannot retrieve an old answer"
+        (case stale of Left message->"expired" `T.isInfixOf` message; _->False)
+      settled<-foldM (\value _->threadDelay 1000 >> tickConversation runtime value) replacement [1..20::Int]
+      entries<-logged
+      check "retired queued answer never prompts the replacement provider"
+        (not (any (T.isInfixOf "async-retired-answer-marker".json) entries) && agentQueued settled==0)
+      (pending,_)<-questionTool runtime settled (object ["question" .= ("Pending lifetime"::T.Text)])
+      retired<-send runtime "new" [] pending >>= await runtime "pending owner retirement" ((=="Session fixture-session").status)
+      check "provider retirement removes an unanswered question without creating an answer" (chatQuestion retired==Nothing)
 #ifndef mingw32_HOST_OS
     -- Hold an actual filesystem read open while the provider sends more work.
     -- The desktop must keep ticking, and a later write cannot bless user edits
@@ -994,6 +1094,7 @@ providerScript=unlines
   , "      update({'sessionUpdate':'usage_update','used':148000,'size':400000})"
   , "      update({'sessionUpdate':'usage_update','used':-1,'size':0})"
   , "      finish()"
+  , "    elif scenario.startswith('Human answer to ask_user question '): finish()"
   , "    elif scenario=='```': finish()"
   , "    elif scenario=='wide':"
   , "      update({'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':('reply-width '*90)+'\\n\\n```sh\\nprintf \\\'live λ\\\'\\n```'}})"

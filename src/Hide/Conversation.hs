@@ -9,7 +9,7 @@
 -- Conversation state also owns shared build and console services. Tool initiation
 -- returns a desktop plus a continuation, so human questions can wait outside the
 -- desktop lock while the rest of the session continues.
-module Hide.Conversation (ConversationState, conversationServices, conversationAgents, withConversationAt, chatTools, chatToolNames, chatTool, withConversation, conversationEffects, tickConversation, parseLaunch, renderReply, pauseLabel, renderTimestamp) where
+module Hide.Conversation (ConversationState, conversationServices, conversationAgents, withConversationAt, chatTools, chatToolNames, chatTool, QuestionCaller, captureQuestionCaller, chatToolAs, withConversation, conversationEffects, tickConversation, parseLaunch, renderReply, pauseLabel, renderTimestamp) where
 
 import Hide.Sidebar
 import Prelude hiding (reads)
@@ -21,7 +21,7 @@ import System.Environment (getExecutablePath)
 #endif
 import Hide.Session (SessionRecord(..))
 import Control.Concurrent.Async (Async, async, cancel, poll, wait, waitCatch)
-import Control.Concurrent.MVar (MVar, newEmptyMVar, readMVar, tryPutMVar, isEmptyMVar)
+import Control.Concurrent.MVar (MVar, tryPutMVar, isEmptyMVar)
 import Control.Monad (foldM, filterM, forM, forM_, void, when, unless)
 import Data.Aeson
 import Data.Aeson.Types (parseMaybe, parseEither)
@@ -79,16 +79,25 @@ data FileCapture = FileCapture Value (Async (Either Text CapturedFile))
 data CapturedFile = CapturedFile Snapshot (Maybe SourceIdentity) CapturedAction
 data CapturedAction = CapturedRead A.PreparedResponse | CapturedWrite Text
 
+-- Fixed answer delivery reuses the ordinary query queue. Its receipt identifies
+-- the exact provider incarnation, not a reusable session label alone.
+data ProviderReceipt = ProviderReceipt !(StableName A.Client) !Text
+-- Host-minted before any permission wait; extension arguments cannot forge it.
+data QuestionCaller = QuestionCaller !(StableName (IORef State)) !AH.AgentId !(Maybe ProviderReceipt)
+data QueuedQuery = SubmittedQuery !Text | QuestionQuery !Int !AH.AgentId !ProviderReceipt !Text
+data QuestionTicket = QuestionTicket !Int !AH.AgentId !(Maybe ProviderReceipt)
+data QuestionResult = QuestionResult !AH.AgentId !(Maybe ProviderReceipt) !Value
+
 data State = State
   { provider :: A.Launch, connection :: Maybe A.Client, session :: Maybe Text, project :: FilePath
   , pending :: M.Map Int Phase, queuedPrompt :: Maybe Text, transcript :: [Record]
   , reads :: M.Map FilePath Snapshot, approvals :: [(Int,Approval)], presented :: Maybe Int, deferredApproval :: Bool, nextApproval :: Int
-  , queuedQueries :: [Text]
+  , queuedQueries :: [QueuedQuery]
   , ownedTerminals :: S.Set Text
   , terminalWaiters :: M.Map Text [Value]
   , lastMessageAt :: Maybe UTCTime
   , lastRender :: Maybe (Int,Maybe Text,StableName [Record]), lastSession :: Maybe (A.Launch,FilePath,Text)
-  , waitingQuestion :: Maybe (Int,MVar (Either Text Value)), lastQuestion :: Maybe ChatQuestion
+  , waitingQuestion :: Maybe QuestionTicket, questionResults :: M.Map Int QuestionResult, questionsClosed :: Bool, lastQuestion :: Maybe ChatQuestion
   , deliveredContext :: Maybe Value
   , directoryAgents :: [AH.AgentId]
   , agentDelivery :: Maybe (AH.HubMessage,MVar (Either Text Value))
@@ -136,7 +145,7 @@ withConversationAt root action = C.withConsoles $ \consoles -> Jobs.withBuildJob
     , pending=M.empty,queuedPrompt=Nothing,transcript=[],reads=M.empty
     , approvals=[],presented=Nothing,deferredApproval=False,nextApproval=1,queuedQueries=[]
     , ownedTerminals=S.empty,terminalWaiters=M.empty,lastMessageAt=Nothing
-    , lastRender=Nothing,lastSession=remembered,waitingQuestion=Nothing,lastQuestion=Nothing
+    , lastRender=Nothing,lastSession=remembered,waitingQuestion=Nothing,questionResults=M.empty,questionsClosed=False,lastQuestion=Nothing
     , deliveredContext=Nothing,compilerDiscovery=Nothing,fileCaptures=[],retiringRequests=[],promptPreparation=Nothing,buildSettingsCache=Nothing,buildSettingsVersion=0,buildSettingsWorker=Nothing,buildSettingsChecked=Nothing,resumeRecordPath=resumePath,creatingAgent=Nothing,shellLaunches=[],directoryAgents=[],agentDelivery=Nothing
     , agentInitialized=Null,agentConfig=Null,streamTails=M.empty,lastAgentSync=Nothing,childRecords=M.empty,childRender=Nothing,childWidths=M.empty,childCancels=M.empty,childControls=M.empty,expandedToolRuns=S.empty }
   AR.withAgentRuntime root (provider <$> readIORef ref) $ \agents ->
@@ -152,7 +161,7 @@ conversationSessionPath directory=lookupEnv "THC_EDIT_SESSION" >>= maybe
 closeConversation :: ConversationState -> IO ()
 closeConversation (ConversationState _ ref _ _ _) = do
   s<-readIORef ref
-  forM_ (waitingQuestion s) $ \(_,reply)->void (tryPutMVar reply (Left "Editor session closed."))
+  writeIORef ref (abandonQuestion "Editor session closed." s) {questionsClosed=True}
   finishAgentDelivery ref (Left "Editor session closed.")
   mapM_ denyChild (map snd (approvals s))
   mapM_ (cancel . snd) (buildSettingsWorker s)
@@ -442,15 +451,23 @@ performPrimary runtime@(ConversationState directory ref consoles jobs _) action 
             _ -> caret (questionSelection q)
       in pure (clearReplySelection (paint False s d {chatQuestion=Just q {questionChoice=Nothing,questionSelection=Selection p p,questionFocused=True}}))
     ("question-submit",[token]) | Just q<-chatQuestion d,token==T.pack (show (questionToken q)),
-        Just (ident,reply)<-waitingQuestion s,ident==questionToken q -> do
+        Just (QuestionTicket ident actor receipt)<-waitingQuestion s,ident==questionToken q -> do
       let answer=case questionChoice q of
             Just index -> fromMaybe "" (case drop index (questionChoices q) of value:_->Just value; _->Nothing)
             Nothing -> contents (questionBuffer q)
-      if T.null (T.strip answer) then pure d {status="Choose an option or enter an answer."} else do
-        accepted<-tryPutMVar reply (Right (object ["answer" .= answer,"choiceIndex" .= questionChoice q,"custom" .= isNothing (questionChoice q)]))
-        let next=s {waitingQuestion=Nothing,transcript=transcript s++[record | accepted,record<-[Reply "Agent" (questionText q),Reply "You" answer]]}
-        writeIORef ref next
-        pure (paint False next d {chatQuestion=Nothing,chatInputOffset=Nothing,status=if accepted then "Answer sent." else "Question request ended; answer was not sent."})
+      if T.null (T.strip answer) then pure d {status="Choose an option or enter an answer."}
+      else if T.length answer>65536 then pure d {status="Answers may contain at most 65536 characters."} else do
+        live<-case receipt of Nothing->pure True; Just target->providerCurrent target s
+        active<-AH.statusAgent (AR.agentHub (conversationAgents runtime)) (AH.Agent actor) actor
+        if not live || either (const True) (const False) active
+          then cancelQuestion runtime "Question requester ended." d
+          else do
+            let value=object ["questionId" .= ident,"status" .= ("answered"::Text),"answer" .= answer,"choiceIndex" .= questionChoice q,"custom" .= isNothing (questionChoice q)]
+                queued=case receipt of Nothing->queuedQueries s; Just target->queuedQueries s++[QuestionQuery ident actor target answer]
+                next=(rememberQuestion ident actor receipt value s) {waitingQuestion=Nothing,queuedQueries=queued,
+                  transcript=transcript s++[Reply "Agent" (questionText q),Reply "You" answer]}
+            writeIORef ref next
+            pure (paint False next d {chatQuestion=Nothing,chatInputOffset=Nothing,status="Answer submitted.",agentQueued=length queued})
     ("question-cancel",[token]) | Just q<-chatQuestion d,token==T.pack (show (questionToken q)) ->
       cancelQuestion runtime "Question cancelled by user." d
     ("terminal",_) -> do
@@ -533,7 +550,7 @@ performPrimary runtime@(ConversationState directory ref consoles jobs _) action 
     ("send-draft",_) | steeringPending s -> pure d {status="Wait for the steering result before sending another message."}
     ("send-draft",_) | queuedPrompt s==Just (contents (composerBuffer d)) -> pure d {status="Preparing the submitted draft..."}
     ("send-draft",_) | busy s, let text=contents (composerBuffer d), not (T.null (T.strip text)) -> do
-      let next=s {queuedQueries=queuedQueries s++[text],transcript=transcript s++[Reply "You" (composerMarkdown text)]}
+      let next=s {queuedQueries=queuedQueries s++[SubmittedQuery text],transcript=transcript s++[Reply "You" (composerMarkdown text)]}
       writeIORef ref next
       pure (paint True next d) {composerBuffer=newBuffer "",composerSelection=Selection 0 0,composerFocused=True,agentQueued=length (queuedQueries next),status="Query queued."}
     ("send-draft",_) | not (T.null (T.strip (contents (composerBuffer d)))) -> do
@@ -723,10 +740,10 @@ tickConversation runtime@(ConversationState directory ref consoles jobs _) origi
   initial<-drainConversationAgents runtime fresh
   currentQuestion<-readIORef ref
   ready<-case waitingQuestion currentQuestion of
-    Nothing -> pure initial
-    Just (_,reply) -> do
-      waiting<-isEmptyMVar reply
-      if waiting then pure initial else cancelQuestion runtime "Question request ended." initial
+    Just (QuestionTicket _ _ (Just receipt))->do
+      live<-providerCurrent receipt currentQuestion
+      if live then pure initial else cancelQuestion runtime "Question requester ended." initial
+    _->pure initial
   d<-C.tickConsoles consoles ready >>= Jobs.tickBuildJobs jobs
   flushTerminalWaiters runtime
   s<-readIORef ref
@@ -736,9 +753,16 @@ tickConversation runtime@(ConversationState directory ref consoles jobs _) origi
   updated<-pollPromptPreparation runtime captured
   afterEvents<-readIORef ref
   advanced<-case queuedQueries afterEvents of
-    text:rest | not (busy afterEvents), not (isNothing (connection afterEvents)), session afterEvents/=Nothing -> do
-      writeIORef ref afterEvents {queuedQueries=rest,queuedPrompt=Just text,reads=sourceSnapshots updated}
-      sendQueued runtime updated
+    query:rest | not (busy afterEvents), not (isNothing (connection afterEvents)), session afterEvents/=Nothing -> do
+      text<-case query of
+        SubmittedQuery value->pure (Just value)
+        QuestionQuery ident actor receipt answer->do
+          live<-providerCurrent receipt afterEvents
+          active<-AH.statusAgent (AR.agentHub (conversationAgents runtime)) (AH.Agent actor) actor
+          pure $ if live && either (const False) (const True) active
+            then Just ("Human answer to ask_user question "<>T.pack (show ident)<>" (submitted explicitly):\n\n"<>answer) else Nothing
+      writeIORef ref afterEvents {queuedQueries=rest,queuedPrompt=text,reads=sourceSnapshots updated}
+      maybe (pure updated) (const (sendQueued runtime updated)) text
     _ -> pure updated
   current<-readIORef ref
   -- Esc/Cancel of a permission dialog denies it; it must never leave the peer waiting.
@@ -806,15 +830,17 @@ receive runtime@(ConversationState _ ref consoles _ _) d event = do
   s<-readIORef ref
   case event of
     A.Disconnected reason -> do
-      redact<-conversationRedactor runtime s
+      cleared<-cancelQuestion runtime "Question requester disconnected." d
+      current<-readIORef ref
+      redact<-conversationRedactor runtime current
       finishAgentDelivery ref (Left "Agent disconnected.")
       AR.failPendingPrimary (conversationAgents runtime) "Agent disconnected."
       mapM_ denyChild (map snd (approvals s))
       mapM_ (C.releaseConsole consoles) (S.toList (ownedTerminals s))
       retired<-retireRequests ref
       writeIORef ref retired {connection=Nothing,session=Nothing,agentDelivery=Nothing,streamTails=M.empty,pending=M.empty,queuedPrompt=Nothing,queuedQueries=[],approvals=[],presented=Nothing,deferredApproval=False,ownedTerminals=S.empty,terminalWaiters=M.empty,
-        transcript=transcript s++[activity "Connection closed" (object ["message" .= redact reason])]}
-      pure (dismissPermission d) {status="Agent disconnected.",agentSteering=False}
+        transcript=transcript current++[activity "Connection closed" (object ["message" .= redact reason])]}
+      pure (dismissPermission cleared) {status="Agent disconnected.",agentSteering=False}
     A.Response ident result -> do
       writeIORef ref s {pending=M.delete ident (pending s)}
       when (M.lookup ident (pending s)==Just Prompting) (flushConversationChunks ref)
@@ -1464,17 +1490,45 @@ chatTools :: [Value]
 chatTools=[object ["name" .= ("agent_settings"::Text),"description" .= ("Read provider executable, argument count, environment variable names, connection state, model/config choices and context usage. Secret-labelled values, argument values, environment values and session keys are omitted. Cannot change provider settings."::Text),
   "inputSchema" .= object ["type" .= ("object"::Text),"properties" .= object [],"additionalProperties" .= False],
   "annotations" .= object ["readOnlyHint" .= True,"destructiveHint" .= False,"openWorldHint" .= False]],
-  object ["name" .= ("ask_user"::Text),"description" .= ("Ask one inline question in the editor conversation. Supply optional single-choice answers; a custom text answer is always available. Waits for the human without a time limit. Only one question may be pending."::Text),
-  "inputSchema" .= object ["type" .= ("object"::Text),"required" .= ["question"::Text],"additionalProperties" .= False,
-    "properties" .= object ["question" .= object ["type" .= ("string"::Text),"minLength" .= (1::Int),"maxLength" .= (4096::Int)],
-      "choices" .= object ["type" .= ("array"::Text),"maxItems" .= (12::Int),"items" .= object ["type" .= ("string"::Text),"minLength" .= (1::Int),"maxLength" .= (256::Int)]],
-      "allowMultiple" .= object ["type" .= ("boolean"::Text),"enum" .= [False]]]],
+  object ["name" .= ("ask_user"::Text),"description" .= ("Create one inline human question and return questionId/status pending immediately. Continue independent work, then retrieve its status using questionId only. Answers require explicit human submission; pending replies never reveal the draft or selected choice. Only the authenticated requesting agent can retrieve results. No timeout supplies an answer or approval."::Text),
+  "inputSchema" .= object ["oneOf" .=
+    [object ["type" .= ("object"::Text),"required" .= ["question"::Text],"additionalProperties" .= False,
+      "properties" .= object ["question" .= object ["type" .= ("string"::Text),"minLength" .= (1::Int),"maxLength" .= (4096::Int)],
+        "choices" .= object ["type" .= ("array"::Text),"maxItems" .= (12::Int),"items" .= object ["type" .= ("string"::Text),"minLength" .= (1::Int),"maxLength" .= (256::Int)]],
+        "allowMultiple" .= object ["type" .= ("boolean"::Text),"enum" .= [False]]]],
+     object ["type" .= ("object"::Text),"required" .= ["questionId"::Text],"additionalProperties" .= False,
+       "properties" .= object ["questionId" .= object ["type" .= ("integer"::Text),"minimum" .= (1::Int)]]]]],
   "annotations" .= object ["readOnlyHint" .= False,"destructiveHint" .= False,"openWorldHint" .= False]]]
 
 -- | Initiate a conversation tool under desktop serialization. Run the returned
--- reply continuation outside the desktop lock, especially for human questions.
+-- reply continuation outside the desktop lock. Anonymous callers cannot create
+-- or retrieve human questions; the host must supply authenticated attribution.
 chatTool :: ConversationState -> Desktop -> Text -> Value -> IO (Desktop,IO (Either Text Value))
-chatTool (ConversationState _ ref _ _ _) d name args
+chatTool runtime=chatToolAs runtime Nothing
+
+-- | Capture authenticated primary attribution before queuing policy approval.
+-- The transport resolves bearer credentials first; this operation checks the
+-- owning actor and captures only the original provider incarnation metadata.
+captureQuestionCaller :: ConversationState -> AH.AgentId -> IO (Either Text QuestionCaller)
+captureQuestionCaller (ConversationState _ ref _ _ agents) actor
+  | actor/=AR.primaryAgent agents=pure (Left "ask_user belongs to this editor's primary agent.")
+  | otherwise=do
+      active<-AH.statusAgent (AR.agentHub agents) (AH.Agent actor) actor
+      s<-readIORef ref
+      if questionsClosed s then pure (Left "Editor session closed.") else case active of
+        Left err->pure (Left err)
+        Right _->do
+          receipt<-case (connection s,session s) of
+            (Just client,Just sid)->Just . (`ProviderReceipt` sid) <$> (makeStableName =<< evaluate client)
+            _->pure Nothing
+          scope<-makeStableName =<< evaluate ref
+          pure (Right (QuestionCaller scope actor receipt))
+
+-- | Host-only authenticated caller binding. A question/result belongs to that
+-- actor and runtime scope; the exact optional provider receipt also qualifies
+-- polling/admission and answer delivery. This function never waits for a human.
+chatToolAs :: ConversationState -> Maybe QuestionCaller -> Desktop -> Text -> Value -> IO (Desktop,IO (Either Text Value))
+chatToolAs (ConversationState _ ref _ _ agents) caller d name args
   | name=="agent_settings" = if args/=object [] then pure (d,pure (Left "agent_settings accepts no arguments.")) else do
       s<-readIORef ref
       root<-if isNothing (connection s) then B.resolveBuildRoot d else pure (project s)
@@ -1491,39 +1545,90 @@ chatTool (ConversationState _ ref _ _ _) d name args
         "settings" .= map setting (agentSettings d),"context" .= either (const Null) id context,
         "contextError" .= either Just (const (Nothing::Maybe Text)) context,"sessionKeysRedacted" .= True])))
   | name/="ask_user"=pure (d,pure (Left "Unknown chat tool."))
-  | otherwise=case parseEither parse args of
-      Left err -> pure (d,pure (Left (T.pack err)))
-      Right (question,choices) -> do
-        s<-readIORef ref
-        case waitingQuestion s of
-          Just _ -> pure (d,pure (Left "A question is already waiting for the user."))
-          Nothing -> do
-            reply<-newEmptyMVar
-            let token=nextApproval s
-                q=ChatQuestion token question choices Nothing (newBuffer "") (Selection 0 0) True
-                next=s {waitingQuestion=Just (token,reply),nextApproval=token+1}
-            writeIORef ref next
-            let shown=clearReplySelection (paint True next (selectConversationView "" "Primary" d) {chatQuestion=Just q,status="A question is waiting in Conversation."})
-            pure (shown,readMVar reply `onException` void (tryPutMVar reply (Left "Question requester disconnected.")))
+  | Just (QuestionCaller scope actor originalReceipt)<-caller,actor==AR.primaryAgent agents=do
+      live<-AH.statusAgent (AR.agentHub agents) (AH.Agent actor) actor
+      s<-readIORef ref
+      owner<-(==scope) <$> (makeStableName =<< evaluate ref)
+      same<-requesterCurrent originalReceipt s
+      case live of
+        Left err->pure (d,pure (Left err))
+        Right _ | not (owner && same)->pure (d,pure (Left "Question requester session expired."))
+        Right _ | questionsClosed s->pure (d,pure (Left "Editor session closed."))
+        Right _->case parseEither parse args of
+          Left err->pure (d,pure (Left (T.pack err)))
+          Right (Left ident)->do
+            result<-questionStatus actor ident s
+            pure (d,pure result)
+          Right (Right (question,choices))->case waitingQuestion s of
+            Just _->pure (d,pure (Left "A question is already waiting for the user."))
+            Nothing->do
+              let token=nextApproval s
+                  q=ChatQuestion token question choices Nothing (newBuffer "") (Selection 0 0) True
+                  next=s {waitingQuestion=Just (QuestionTicket token actor originalReceipt),nextApproval=token+1}
+                  pending=object ["questionId" .= token,"status" .= ("pending"::Text)]
+              writeIORef ref next
+              let shown=clearReplySelection (paint True next (selectConversationView "" "Primary" d) {chatQuestion=Just q,status="A question is waiting in Conversation."})
+              pure (shown,pure (Right pending))
+  | otherwise=pure (d,pure (Left "ask_user requires the authenticated requesting agent."))
   where
-    parse=withObject "ask_user" $ \o->do
-      unless (all (`elem` ["question","choices","allowMultiple"]) (KM.keys o)) (fail "Unknown question argument.")
-      question<-o .: "question"
-      choices<-o .:? "choices" .!= []
-      multiple<-o .:? "allowMultiple" .!= False
-      when multiple (fail "Only single-choice questions are supported; custom text is always available.")
-      unless (not (T.null (T.strip question)) && T.length question<=4096 && not (T.any (\c->c<' ' && c `notElem` ['\n','\t']) question)) (fail "Question must contain 1..4096 characters.")
-      unless (length choices<=12 && all (\text->not (T.null (T.strip text)) && T.length text<=256 && not (T.any (\c->c<' ' || c=='\DEL') text)) choices) (fail "Supply at most 12 nonempty single-line choices of at most 256 characters.")
-      pure (question,choices)
+    parse=withObject "ask_user" $ \o->case KM.lookup "questionId" o of
+      Just _->do
+        unless (KM.keys o==["questionId"]) (fail "Retrieve a question with questionId only.")
+        ident<-o .: "questionId"
+        unless (ident>0) (fail "questionId must be positive.")
+        pure (Left ident)
+      Nothing->do
+        unless (all (`elem` ["question","choices","allowMultiple"]) (KM.keys o)) (fail "Unknown question argument.")
+        question<-o .: "question"
+        choices<-o .:? "choices" .!= []
+        multiple<-o .:? "allowMultiple" .!= False
+        when multiple (fail "Only single-choice questions are supported; custom text is always available.")
+        unless (not (T.null (T.strip question)) && T.length question<=4096 && not (T.any (\c->c<' ' && c `notElem` ['\n','\t']) question)) (fail "Question must contain 1..4096 characters.")
+        unless (length choices<=12 && all (\text->not (T.null (T.strip text)) && T.length text<=256 && not (T.any (\c->c<' ' || c=='\DEL') text)) choices) (fail "Supply at most 12 nonempty single-line choices of at most 256 characters.")
+        pure (Right (question,choices))
+
+questionStatus :: AH.AgentId -> Int -> State -> IO (Either Text Value)
+questionStatus actor ident s=case waitingQuestion s of
+  Just (QuestionTicket current owner receipt) | ident==current->authorize owner receipt (object ["questionId" .= ident,"status" .= ("pending"::Text)])
+  _->case M.lookup ident (questionResults s) of
+    Just (QuestionResult owner receipt value)->authorize owner receipt value
+    Nothing->pure (Left "Question is unknown or its retained result expired.")
+  where
+    authorize owner receipt value
+      | actor/=owner=pure (Left "This question belongs to another requesting agent.")
+      | otherwise=do
+          same<-requesterCurrent receipt s
+          pure $ if same then Right value else Left "Question requester session expired."
+
+-- Keep at most 64 terminal answers, each capped at 65536 characters on submit.
+-- Pending drafts remain exclusively in ChatQuestion, never in this result store.
+rememberQuestion :: Int -> AH.AgentId -> Maybe ProviderReceipt -> Value -> State -> State
+rememberQuestion ident actor receipt value s=s {questionResults=snd (M.splitAt (max 0 (M.size results-64)) results)}
+  where results=M.insert ident (QuestionResult actor receipt value) (questionResults s)
+
+abandonQuestion :: Text -> State -> State
+abandonQuestion reason s=case waitingQuestion s of
+  Nothing->s
+  Just (QuestionTicket ident actor receipt)->(rememberQuestion ident actor receipt
+    (object ["questionId" .= ident,"status" .= ("cancelled"::Text),"reason" .= reason]) s) {waitingQuestion=Nothing}
+
+requesterCurrent :: Maybe ProviderReceipt -> State -> IO Bool
+requesterCurrent receipt s=case receipt of
+  Just target->providerCurrent target s
+  Nothing->pure (isNothing (connection s) && session s==Nothing)
+
+providerCurrent :: ProviderReceipt -> State -> IO Bool
+providerCurrent (ProviderReceipt identity sid) s=case (connection s,session s) of
+  (Just client,Just current) | current==sid->(==identity) <$> (makeStableName =<< evaluate client)
+  _->pure False
 
 cancelQuestion :: ConversationState -> Text -> Desktop -> IO Desktop
 cancelQuestion (ConversationState _ ref _ _ _) reason d=do
   s<-readIORef ref
   case waitingQuestion s of
-    Nothing -> pure d
-    Just (_,reply) -> do
-      void (tryPutMVar reply (Left reason))
-      let next=s {waitingQuestion=Nothing}
+    Nothing->pure d
+    Just _->do
+      let next=abandonQuestion reason s
       writeIORef ref next
       pure (paint False next d {chatQuestion=Nothing,chatInputOffset=Nothing,status=reason})
 
@@ -1576,6 +1681,7 @@ drainConversationAgents runtime@(ConversationState _ ref _ _ agents) d=do
         sendQueued runtime desktop
     apply desktop AR.CancelPrimary=performPrimary runtime "cancel" [] desktop
     apply desktop AR.EndPrimary=do
+      cleared<-cancelQuestion runtime "Agent session ended." desktop
       s<-readIORef ref
       mapM_ denyChild (map snd (approvals s))
       _<-retireRequests ref
@@ -1583,7 +1689,7 @@ drainConversationAgents runtime@(ConversationState _ ref _ _ agents) d=do
       finishAgentDelivery ref (Left "Agent session ended.")
       AR.failPendingPrimary agents "Agent session ended."
       modifyIORef' ref (\state -> state {connection=Nothing,session=Nothing,agentDelivery=Nothing,streamTails=M.empty,pending=M.empty,queuedPrompt=Nothing,queuedQueries=[],approvals=[],presented=Nothing})
-      pure desktop {status="Agent session ended."}
+      pure cleared {status="Agent session ended."}
     apply desktop (AR.AgentReconnected ident result)=do
       refreshed<-case dialog desktop of
         Just dg | purpose dg==AgentDialog "directory-select" -> showAgentDirectory runtime desktop

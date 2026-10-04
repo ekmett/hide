@@ -149,7 +149,7 @@ documentValueWith buffer baseline desktop (ident,doc)=do
   encoded<-buffer privateSpans (documentBuffer doc)
   file<-traverse (fileValueWith baseline) (documentFile doc)
   pure (object ["id" .= ident,"buffer" .= encoded,"file" .= file,
-    "label" .= recoveredLabel (documentLabel doc),"suggestedName" .= documentSuggestedName doc])
+    "label" .= recoveredLabel (documentLabel doc),"suggestedName" .= documentSuggestedName doc,"origin" .= documentOrigin doc])
   where
     -- The key retains mask boundaries without constructing the redacted text.
     privateSpans
@@ -333,8 +333,9 @@ documentParser=withObject "document" $ \o->do
   file<-o .: "file" >>= traverse fileParser
   label<-o .: "label" >>= traverse (boundedText 32768)
   suggested<-o .: "suggestedName" >>= traverse (checkedPath False)
+  origin<-o .:? "origin" >>= traverse (checkedPath True)
   unless (label `notElem` [Just "Agent request",Just "Proposed agent edit"] && maybe True (not . T.isPrefixOf "Terminal ") label) (fail "Transient document")
-  pure (ident,restyle (newDocument buffer file) {documentLabel=label,documentSuggestedName=suggested})
+  pure (ident,restyle (newDocument buffer file) {documentLabel=label,documentSuggestedName=suggested,documentOrigin=origin})
 windowParser :: M.Map Int Document -> M.Map Int (W.WindowRef,W.PreparedWindow) -> Value -> Parser Window
 windowParser documents plugins=withObject "window" $ \o->do
   ident<-o .: "id" >>= positive
