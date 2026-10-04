@@ -14,7 +14,8 @@ The [operation reference](agent-tools.md) describes each call.
 | [Build, test and run](#build-test-and-run) | Check a change or execute the project | Actual completion status and relevant output |
 | [Debug a program](#debug-a-program) | Investigate execution with THC or another DAP adapter | Observed stop, stack or variable evidence |
 | [Review repository changes](#review-repository-changes) | Understand saved changes alongside live edits | Disk diff and unsaved changes accounted for separately |
-| [Organize and operate the desktop](#organize-and-operate-the-desktop) | Show source, Messages, hex data or a particular layout | Returned geometry/mode and a fresh screen snapshot |
+| [Organize the desktop](#organize-the-desktop) | Show source, Messages, hex data or a particular layout | Returned geometry and mode |
+| [Inspect and reproduce a UI problem](#inspect-and-reproduce-a-ui-problem) | Check a dialog, menu, focus or layout problem | Masked before/after screen and exact applied input |
 | [Coordinate agents](#coordinate-agents) | Delegate work or inspect another agent’s progress | Attributed task ticket, actual completion and reviewed workspace changes |
 | [Consult the user](#consult-the-user) | A decision needs the person’s answer | Submitted answer, not a draft or guessed choice |
 | [Consult documentation and settings](#consult-documentation-and-settings) | Learn a feature or inspect/configure the editor | Cited documentation or confirmed settings |
@@ -46,6 +47,10 @@ The [operation reference](agent-tools.md) describes each call.
 use `lsp_document_symbols`, `lsp_definition`, `lsp_type_definition` and
 `lsp_references` to follow structure instead of guessing from text matches.
 
+**Why these tools:** shell search sees saved files. These tools see live buffers,
+including the person’s selected text through `read_selection`, and enforce the
+same resource permissions across source and symbol results.
+
 **Check:** record the paths, buffer IDs and revisions used. Search substitutes
 unsaved buffer contents; its default search also includes untitled buffers.
 
@@ -62,6 +67,9 @@ Cabal component/dependency graph is available through `workspace_project` and
 Use one strict unified diff for the target buffer. Create an empty file with
 `workspace_files`, then open and edit it. Preview history with `editor_history`;
 apply undo/redo with `editor_undo` and the current revision.
+
+**Why these tools:** edits join the editor’s undo history and use exact captured
+versions. A disk rewrite cannot safely replace an unsaved buffer.
 
 **Check:** inspect the resulting change, run the relevant check, then use
 `editor_file` to save when saving is part of the task. Name what remains dirty.
@@ -82,15 +90,21 @@ or symbol/location tools. For rename, call `lsp_rename` with `bufferId`, current
 reasons, then pass the chosen ID and original source revision to
 `lsp_apply_code_action`. Review the changed buffers.
 
+**Why these tools:** reuse the project’s live HLS session and unsaved source,
+with checked edit application instead of asking a second language server about
+older files on disk.
+
 **Check:** distinguish the diagnostic’s reported version from the current
 buffer revision. HLS receives unsaved source. Rename and code actions change live buffers;
 saving and rebuilding remain separate steps.
 
 **Recover:** if source changes while HLS works, refresh and retry against the new
 revision. If HLS is unavailable, report its result and inspect build output.
-Refresh expired or consumed action IDs with another list. Only edit-based actions
-are available, including lazy resolution when HLS advertises it. Actions requiring
-commands or file operations are explicitly unsupported.
+Refresh expired or consumed action IDs with another list. HLS command actions
+and lazy resolution use the same session; successful commands do not restart it.
+Cancellation asks HLS to settle before a bounded restart fallback. Resource file
+operations remain unsupported; read the action result for partial effects before
+retrying. See the [command contract](agent-tools.md#haskell-language-service-and-messages).
 
 ## Build, test and run
 
@@ -102,6 +116,11 @@ commands or file operations are explicitly unsupported.
 Use `test_start` for GHC/Cabal tests and `test_status` for suite outcomes and explicit TAP 13 cases. For an
 interactive program, use a shared terminal: `terminal_start`, `terminal_input`,
 `terminal_output`; `terminal_list` finds existing terminals.
+
+**Why these tools:** builds, tests and terminals remain visible in the workspace
+that owns them. They share its environment and diagnostics; terminal input goes
+to its existing PTY rather than an unrelated shell. Execution still requires its
+own permission.
 
 **Check:** report the exit code, explicit suite/case outcomes and relevant diagnostics.
 For TAP output, check stream completeness and result truncation before claiming
@@ -127,10 +146,15 @@ executable and argument array, with no implicit shell.
 **Use:** explain a runtime failure, inspect values or follow control flow.
 
 **Do:** `debug_status` → reuse the active adapter, or `debug_launch` /
-`debug_attach` → check readiness. Set breakpoints with the current `generation`.
+`debug_attach` → check readiness. Use `debug_set_breakpoints` with the current
+`generation`.
 A breakpoint call replaces the entire set for its source buffer: retain desired
-existing lines. Once stopped, inspect threads → stack trace → scopes → variables.
+existing lines. Once stopped, use `debug_inspect` for threads → stack trace →
+scopes → variables.
 Use `debug_control` to continue, step, pause or disconnect, then refresh status.
+
+**Why these tools:** inspection and the person’s debugger UI use the same stopped
+process and generation. A separate debugger would not have that state.
 
 **Present:** use `debug_present` with `follow: false` to investigate without
 moving the person's source window on each stop. At an interesting stop, send
@@ -162,39 +186,76 @@ search.
 **Check:** Git describes on-disk changes. It does not include unsaved buffer
 edits, and tracked-file search does not search commit history.
 
-**Recover:** narrow a truncated or protected whole-repository diff to safe
-literal files. Dedicated fetch/pull/merge/commit MCP operations are planned.
-Terminal execution, when enabled, follows the person’s requested Git operation;
-it does not acquire authority from this skill.
+**Synchronize:** when requested, start `git_fetch`, `git_pull` or `git_merge` and
+poll `git_operation_status`. Pull is fast-forward only. Pull/merge require saved
+buffers and a clean worktree; inspect failures instead of falling back to a shell
+command that bypasses the editor’s checks.
 
-## Organize and operate the desktop
+**Commit:** `git_review` → poll for a complete `reviewId` → inspect its diff →
+`git_commit` with that ID and message → poll completion. A stale or incomplete
+review cannot authorize a commit. Check the resulting HEAD and
+`reviewedTreeMatched`, since ordinary Git hooks can change the tree.
 
-**Use:** show related files, arrange panels, inspect binary data or operate UI.
+**Why these tools:** use the person’s selected repository and operation slot,
+protect authority paths, and reconcile saved changes with open buffers. They do
+not replace arbitrary Git history queries or confer permission to publish.
+
+**Recover:** narrow a truncated diff to safe literal files. A commit refusal
+requires a fresh complete review. Failed hooks can leave files staged; inspect
+status before retrying.
+
+## Organize the desktop
+
+**Use:** show related source, arrange panels or inspect binary data.
 
 **Do:** `editor_layout` / `list_windows` → `editor_arrange`, `editor_panels` or
 `editor_navigate`. Use `editor_mode` for hex and then navigate by `byteOffset`.
-Read `editor_screen` for the whole text grid; request `image: true` when colors,
-borders or overlap matter. For raw interaction, inspect its access/command/key
-permissions and submit a short `editor_input` batch, then recapture.
 
-**Check:** use returned constrained rectangles, not assumed placement. Tiling,
-splits and dock resizing follow normal editor rules. Split views share buffers.
-The screen PNG represents the editor grid, not OS chrome or the native CRT pass.
+**Why these tools:** they operate the editor’s live windows and docking rules.
+Shell commands cannot select its buffers, move its views or preserve their
+cursor/selection state. Prefer these commands to simulated mouse input.
 
-**Recover:** input events are sequential, not transactional. On a partial failure,
-inspect `appliedEvents` and the current screen before continuing. Human authority
-controls cannot be operated by agent input. Text mode refuses invalid UTF-8 or
-NUL-containing bytes; stay in hex mode for those files.
+**Check:** use returned constrained rectangles, not assumed placement. Split
+views share buffers. Text mode refuses invalid UTF-8 or NUL-containing bytes;
+stay in hex mode for those files.
+
+## Inspect and reproduce a UI problem
+
+**Use:** investigate a menu, dialog, focus or layout problem, or demonstrate an
+interaction that has no structured editor command.
+
+**Do:** capture `editor_screen` and inspect its readable/clickable masks and
+command/key permissions. Request `image: true` when colors, borders or overlap
+matter; use the text grid for labels and coordinates. Submit a short
+`editor_input` batch for one interaction, then capture again before continuing.
+
+**Why these tools:** the screen and admitted input describe this editor’s actual
+UI state. Use them for UI work; use buffer, layout and language-service tools
+for ordinary editing. Input does not acquire human authority from its coordinates.
+
+**Check:** report the observed before/after state and applied event count. The
+PNG shows the editor grid, not OS chrome or the native CRT pass. Do not infer
+that a hidden control was activated from a successful input submission.
+
+**Recover:** events are sequential, not transactional. After partial failure,
+inspect `appliedEvents` and recapture. Never use input to operate approval,
+provider credentials, human drafts or agent permission controls.
 
 ## Coordinate agents
 
 **Use:** delegate a scoped task, work on a separate feature branch, or inspect
 another agent's progress without taking the person's display focus.
 
+**Why this service:** a child can own a separate editor, buffers, build slot,
+terminals and debugger in its worktree. That isolation is the useful distinction
+from ordinary provider subagents or a message queue. Use provider orchestration
+when no separate editor workspace is needed.
+
 **Do:** read `agent_directory` for IDs, workspace paths, limits and advertised
 model/effort choices. Call `agent_spawn` with a provisional `name` and concrete
-`task`. Choose a shared workspace for intentional shared edits, or
-`workspace: {"mode":"worktree"}` for a separate checkout, build jobs and debugger.
+`task`. Specify `workspace: {"mode":"worktree"}` for independent feature work.
+Use `workspace: {"mode":"shared"}` only for intentional shared edits. Omission
+currently chooses shared mode, so make the choice explicit.
 Use a fresh context unless the provider supports a real fork and the source is
 yours to fork. After understanding a task, choose a descriptive name with
 `agent_rename`; names can also be assigned to other agents without changing IDs.
@@ -206,7 +267,8 @@ for follow-ups. Sender attribution is host-controlled: a peer message does not
 occupy the human or controlling parent's user seat.
 
 **Recover:** refresh the directory when a name or state changes. Only the human
-or an ancestor can cancel/end a session. `agent_end` also ends descendants and
+or an ancestor can cancel/end a session. `agent_cancel` stops the current reply;
+`agent_end` also ends descendants and
 preserves their worktrees; it does not merge their edits. Spawn limits come from
 `[editor.agents]` in global/project TOML and cannot be raised through tools.
 A recovered directory is not proof that its providers are running again.
@@ -222,19 +284,31 @@ the person and survive switching conversations.
 
 ## Consult the user
 
-**Use:** ask for a missing decision while preserving the person’s draft.
+**Use:** ask for a missing decision without blocking independent work or replacing
+the person’s draft.
 
 **Do:** `ask_user` with one clear `question` and optional single-choice `choices`.
-A free-text answer is always available. Wait for the submitted response; only
-one question can be pending. Use `clipboard_write` when asked to provide text
-for copying.
+A free-text answer is always available. The result supplies `questionId` and
+`status: "pending"`; continue independent work and retrieve the result by calling
+`ask_user` with only `questionId`. Do not repeatedly poll while nothing depends
+on the answer. Only one question may be pending in the conversation.
 
-**Check:** a pending question is not an answer. Tool activity stays compact in
-the conversation and can be expanded to inspect the request/reply JSON.
+**Why this tool:** the question appears inline with explicit human submission and
+owned result delivery. Neither terminal input nor reading the chat draft provides
+that evidence. `clipboard_write` separately exports supplied text when the person
+asks for something to copy; it never reads their existing clipboard.
 
-**Recover:** cancellation ends the wait; do not answer the question through UI
-input. Clipboard writing accepts supplied text only and queues frontend export;
-it does not read the person’s clipboard or confirm frontend permission.
+**Check:** pending is not an answer. An explicit submission is queued once to the
+original live Primary provider, even if its previous reply has ended. A caller
+without a live provider must retrieve its result. Current child editor bridges
+lack attributed question callers and refuse the operation.
+
+**Recover:** a cancellation is not consent; an expired result needs a new question
+if the decision is still required. No elapsed timeout invents an answer. Results
+belong to the original caller/provider incarnation, remain in memory only and are
+bounded to 64 completed/cancelled questions. Never answer through UI input.
+Clipboard export remains subject to frontend permission; queuing it is not proof
+that the operating system clipboard changed.
 
 ## Consult documentation and settings
 
@@ -244,6 +318,10 @@ it does not read the person’s clipboard or confirm frontend permission.
 `"thc"`. Read `agent_settings` for public provider/model choices, context
 usage and the global/project guidance supplied by the person. Read `editor_settings` for display/editing state; change `settings` for
 this session or `defaults` for future launches when requested.
+
+**Why these tools:** documentation comes from the declared editor/compiler
+corpus; settings reads reflect the running session and project/global precedence.
+They avoid guessing from defaults or disclosing protected configuration wholesale.
 
 **Check:** cite the document and relevant section. Public agent settings are
 read-only; argument/environment values and session keys are withheld. Streamer
