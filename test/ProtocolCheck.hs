@@ -17,6 +17,7 @@ import qualified Graphics.Vty as V
 import Hide.Protocol
 import Hide.Model
 import Hide.Window (nativeCommands, nativeMenuEvent)
+import Hide.GuestAccess (beginGuestInput)
 import Hide.Files (FileState(..))
 import Hide.Buffer
 import Hide.Render (snapshotHtml)
@@ -39,6 +40,23 @@ checks = do
       rejects "truncated, oversized and unknown-kind packets fail" (readPacket h >> pure ())
   let d=addDocument Nothing (newBuffer "λ\nhello") (initialDesktop (80,25))
       screens=map frameRows [d,insertText "world " d,d {screenSize=(100,30)}]
+  check "frame exposes editor window metadata for the real native session frontend"
+    (parseMaybe (withObject "metadata" (.: "editorWindows")) (object (frameMetadata "." d))==Just [object ["id" .= (1::Int),"title" .= ("NONAME1.HS"::T.Text),"selected" .= True,"enabled" .= True]])
+  let second=addDocument Nothing (newBuffer "second") d
+      focus=FocusWindow 1
+      focused=fst (applyInput focus second)
+      closed=closeActive (focusWindow 1 second)
+      blocked=fst (runCommand About second)
+      opaque=second {buffers=M.map (\doc->doc {documentBuffer=error "Dock metadata forced buffer"}) (buffers second)}
+  check "stable Dock focus selects a live target without effects" (fmap windowId (activeWindow focused)==Just 1 && null (snd (applyInput focus second)))
+  check "closed Dock target refuses focus without redirecting" (fmap windowId (activeWindow (fst (applyInput focus closed)))==fmap windowId (activeWindow closed))
+  check "Dock focus cannot switch a modal owner" (fmap windowId (activeWindow (fst (applyInput focus blocked)))==fmap windowId (activeWindow blocked) && dialog (fst (applyInput focus blocked))==dialog blocked)
+  check "agent input cannot invoke native Dock focus" (case applyGuestInput focus (beginGuestInput second) of Left _->True; _->False)
+  let oddName=d {buffers=M.adjust (\doc->doc {documentSuggestedName=Just "odd\nname\t.hs"}) 1 (buffers d)}
+  check "legal control characters in filenames are safe display metadata"
+    (case editorWindowEntries oddName of [(1,title,_,_)]->title=="odd·name·.hs"; _->False)
+  check "window title projection and focus never force buffers" (length (editorWindowEntries opaque)==2 && fmap windowId (activeWindow (fst (applyInput focus opaque)))==Just 1)
+  check "Dock focus input uses bounded stable IDs" (parseEither parseInput (object ["type" .= ("focus-window"::T.Text),"id" .= (1::Int)])==Right focus && case parseEither parseInput (object ["type" .= ("focus-window"::T.Text),"id" .= (0::Int)]) of Left _->True; _->False)
   let menu fields=parseEither parseInput (object (["type" .= ("menu"::T.Text)]++fields))
   let canonical=map Commands.builtinIdentifier Commands.builtinCommands
   check "public command identities are unique" (length canonical==length (nub canonical))

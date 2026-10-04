@@ -459,3 +459,9 @@ int main(void) {
     puts("native input checks passed");
     return 0;
 }
+
+#ifdef __APPLE__
+/* This isolated keyboard decoder test has no Cocoa application lifecycle. */
+void thc_dock_close(void) {}
+void thc_dock_raise(void *window) { (void)window; }
+#endif

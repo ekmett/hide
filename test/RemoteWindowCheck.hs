@@ -23,6 +23,10 @@ checks = do
       row = toJSON [(0::Int,0xffffff::Int,0::Int,[String "abc",toJSON ("界"::T.Text,2::Int)])]
       rows = row : replicate 24 (toJSON ([]::[Value]))
       valid = either (const False) (const True) . parseRemoteFrame meta
+  let windowMeta=object ["size" .= ([80,25]::[Int]),"bindings" .= ([]::[(T.Text,T.Text)]),"editorWindows" .= [object ["id" .= (71::Int),"title" .= ("Main.hs"::T.Text),"selected" .= True,"enabled" .= True]]]
+      dockFrame=either error id (parseRemoteFrame windowMeta rows)
+  check "actual remote native Dock event carries stable host target" (remoteDockWindowInput dockFrame 8 [16,71,8]==Just (object ["type" .= ("focus-window"::T.Text),"id" .= (71::Int)]))
+  check "remote Dock refuses closed stale and disabled targets" (all ((==Nothing) . remoteDockWindowInput dockFrame 8) [[16,0,8],[16,71,7],[16,93,8]] && remoteDockWindowInput dockFrame {remoteWindows=[(71,"Main.hs",True,False)]} 8 [16,71,8]==Nothing)
   check "drag and wheel updates wait for the new frame instead of repainting stale content"
     (not (nativeRepaint [3,10,4,0,0,1]) && not (nativeRepaint [9,10,4,-1,0]))
   check "press and release repaint the local pointer visibility"

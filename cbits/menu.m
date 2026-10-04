@@ -35,9 +35,12 @@ static NSMenuItem *commandItem(NSString *title, NSString *shortcut, int mods, in
     return item;
 }
 
+static void installDockDelegate(void);
+
 void thc_menu_clear(int about, int settings, int quit) {
     if (generation == INT_MAX) abort(); /* Never reuse a queued event incarnation. */
     ++generation;
+    installDockDelegate();
     if (!target) target = [THCMenuTarget new];
     items = [NSMutableDictionary new];
     NSMenu *bar = [NSMenu new];
@@ -84,4 +87,111 @@ void thc_menu_shortcut(int command, const char *key, int mods) {
         [item setKeyEquivalent:[NSString stringWithUTF8String:key]];
         [item setKeyEquivalentModifierMask:shortcutModifiers(mods)];
     }
+}
+
+/* Only this delegate instance gains the Dock hook. SDL still owns the instance,
+ * inherited launch/open-file/quit callbacks, ivars and notification behavior. */
+#import <objc/runtime.h>
+static __weak id dockDelegate;
+static Class dockOriginalClass, dockDelegateClass;
+static NSArray<NSDictionary *> *dockWindows;
+static NSMutableArray<NSDictionary *> *pendingDockWindows;
+static int dockGeneration;
+int thc_dock_generation(void) { return dockGeneration; }
+
+@interface THCDockTarget : NSObject
+- (void)invoke:(NSMenuItem *)sender;
+- (BOOL)validateMenuItem:(NSMenuItem *)sender;
+@end
+@implementation THCDockTarget
+- (BOOL)validateMenuItem:(NSMenuItem *)sender {
+    if ([sender.representedObject intValue] != dockGeneration) return NO;
+    for (NSDictionary *window in dockWindows)
+        if ([window[@"id"] intValue] == sender.tag) return [window[@"enabled"] boolValue];
+    return NO;
+}
+- (void)invoke:(NSMenuItem *)sender {
+    if (!sender.enabled || [sender.representedObject intValue] != dockGeneration) return;
+    for (NSDictionary *window in dockWindows) {
+        if ([window[@"id"] intValue] == sender.tag && [window[@"enabled"] boolValue]) {
+            thc_post_window((int)sender.tag, dockGeneration);
+            return;
+        }
+    }
+}
+@end
+static THCDockTarget *dockTarget;
+static NSMenu *dockMenu(id delegate, SEL selector, NSApplication *application) {
+    NSMenu *original = nil;
+    if (class_getInstanceMethod(dockOriginalClass, selector)) {
+        NSMenu *(*inherited)(id,SEL,NSApplication *) = (void *)class_getMethodImplementation(dockOriginalClass, selector);
+        original = inherited(delegate, selector, application);
+    }
+    if (!dockWindows.count) return original;
+    NSMenu *menu = original ? [original copy] : [NSMenu new];
+    if (!original) [menu setAutoenablesItems:NO];
+    if (menu.numberOfItems) [menu addItem:[NSMenuItem separatorItem]];
+    NSMenuItem *heading = [menu addItemWithTitle:@"Editor windows" action:nil keyEquivalent:@""];
+    heading.enabled = NO;
+    for (NSDictionary *window in dockWindows) {
+        NSMenuItem *item = [menu addItemWithTitle:window[@"title"] action:@selector(invoke:) keyEquivalent:@""];
+        item.target = dockTarget;
+        item.tag = [window[@"id"] intValue];
+        item.representedObject = @(dockGeneration);
+        item.enabled = [window[@"enabled"] boolValue];
+        item.state = [window[@"selected"] boolValue] ? NSControlStateValueOn : NSControlStateValueOff;
+    }
+    return menu;
+}
+static void installDockDelegate(void) {
+    id delegate = NSApp.delegate;
+    if (!delegate || delegate == dockDelegate) return;
+    if (dockDelegate) thc_dock_close();
+    dockDelegate = delegate;
+    dockOriginalClass = object_getClass(delegate);
+    NSString *name = [@"THCDock_" stringByAppendingString:NSStringFromClass(dockOriginalClass)];
+    dockDelegateClass = NSClassFromString(name);
+    if (!dockDelegateClass) {
+        dockDelegateClass = objc_allocateClassPair(dockOriginalClass, name.UTF8String, 0);
+        if (!dockDelegateClass || !class_addMethod(dockDelegateClass, @selector(applicationDockMenu:), (IMP)dockMenu, "@@:@")) abort();
+        objc_registerClassPair(dockDelegateClass);
+    }
+    if (class_getInstanceSize(dockDelegateClass) != class_getInstanceSize(dockOriginalClass)) abort();
+    object_setClass(delegate, dockDelegateClass);
+    /* Refresh optional delegate-method discovery without replacing SDL's owner. */
+    [NSApp setDelegate:nil];
+    [NSApp setDelegate:delegate];
+    if (!dockTarget) dockTarget = [THCDockTarget new];
+}
+void thc_dock_begin(void) { installDockDelegate(); pendingDockWindows = [NSMutableArray new]; }
+void thc_dock_item(int ident, const char *title, int selected, int enabled) {
+    [pendingDockWindows addObject:@{@"id":@(ident), @"title":[NSString stringWithUTF8String:title], @"selected":@(selected), @"enabled":@(enabled)}];
+}
+void thc_dock_end(void) {
+    /* Title/focus updates leave queued actions valid; list identities retire it. */
+    if (![[dockWindows valueForKey:@"id"] isEqual:[pendingDockWindows valueForKey:@"id"]]) {
+        if (dockGeneration == INT_MAX) abort();
+        ++dockGeneration;
+    }
+    dockWindows = [pendingDockWindows copy]; pendingDockWindows = nil;
+}
+void thc_dock_close(void) {
+    id delegate = dockDelegate;
+    if (delegate && object_getClass(delegate) == dockDelegateClass) {
+        BOOL currentDelegate = NSApp.delegate == delegate;
+        if (currentDelegate) [NSApp setDelegate:nil];
+        object_setClass(delegate, dockOriginalClass);
+        if (currentDelegate) [NSApp setDelegate:delegate];
+    }
+    dockDelegate = nil; dockOriginalClass = Nil; dockDelegateClass = Nil;
+    dockWindows = nil; pendingDockWindows = nil;
+    if (dockGeneration == INT_MAX) abort();
+    ++dockGeneration;
+}
+void thc_dock_raise(void *nativeWindow) {
+    NSWindow *window = (__bridge NSWindow *)nativeWindow;
+    if (window.miniaturized) [window deminiaturize:nil];
+    [window makeKeyAndOrderFront:nil];
+    if (@available(macOS 14.0, *)) [NSApp activate];
+    else [NSApp activateIgnoringOtherApps:YES];
 }

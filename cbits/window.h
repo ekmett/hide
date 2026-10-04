@@ -2,6 +2,12 @@
 #define THC_WINDOW_H
 #include <stdint.h>
 void thc_post_command(int command, int generation);
+void thc_post_window(int ident, int generation);
+void thc_raise(void);
+#ifdef __APPLE__
+void thc_dock_close(void);
+void thc_dock_raise(void *native_window);
+#endif
 /* Thread-safe wake after queuing an incoming frame; no repaint implied. */
 void thc_wake(void);
 int thc_open(const char *backend, double scale, int cols, int rows, int cell_height);
