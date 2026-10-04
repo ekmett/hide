@@ -18,6 +18,8 @@ import System.FilePath ((</>))
 import System.IO (hClose,openTempFile)
 import System.Timeout (timeout)
 import Hide.Buffer
+import Hide.AgentAccess
+import qualified Hide.AgentHub as AH
 import Hide.Files (FileState(..))
 import Hide.MCPPermissions
 import Hide.Model
@@ -126,6 +128,20 @@ checks=bracket temporary removePathForcibly $ \directory -> do
     check "same-revision same-content replacement cannot change original request source" (unchanged stale && dialog stale/=Nothing)
     _<-submit runtime 1 stale
     check "replacement failure keeps correction ticket until denied" . isLeft =<< replacementReply
+  enable
+  withPermissionsAt path fileTools $ \runtime -> do
+    let caps=AH.Capabilities False False False []
+        driver=AH.AgentDriver directory "test-diff-provider" caps (\_->pure (Right caps))
+          (\_->pure (Right Null)) (pure ()) (pure ()) (\_->pure (Left "unsupported"))
+    bracket (AH.newAgentHub (AH.HubLimits 1 0) (\_ _->pure (Right driver))) AH.closeAgentHub $ \hub->do
+      ident<-AH.registerAgent hub "Diff actor" directory driver >>= either (error . T.unpack) pure
+      access<-newAgentAccess
+      secret<-grantAgentAccess access ident
+      let caller=fmap (() <$) (resolveActiveAgentAccess access hub secret)
+      (started,response)<-permissionDiffCall runtime caller base "buffer_apply_diff" (args patch)
+      revokeAgentAccess access ident
+      (rejected,result)<-awaitReply runtime started response
+      check "actual token revocation before adoption rejects prepared diff" (unchanged rejected && isLeft result)
   -- The caller thread's allocation counter excludes the worker's full parsing.
   -- The source is already measured before observing admission allocation.
   enable
