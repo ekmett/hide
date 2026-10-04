@@ -187,22 +187,25 @@ finishSubmissionOwned (CaptureSubmission _ _ promise enabled _) result=mask_ $ d
 drainCaptureRequests :: Permissions -> Desktop -> IO Desktop
 drainCaptureRequests runtime@(Permissions path registry state namespace _ (ReadIngress inbox _)) desktop=mask_ $ do
   incoming<-STM.atomically (STM.flushTBQueue inbox)
-  mapM_ admitSafely incoming `onException` mapM_ (\submission->finishSubmission submission (Left "Buffer capture owner interrupted")) incoming
+  let admitBatch=unless (null incoming) $ do
+        policies<-readPolicies path
+        mapM_ (admitSafely policies) incoming
+  admitBatch `onException` mapM_ (\submission->finishSubmission submission (Left "Buffer capture owner interrupted")) incoming
   pure desktop
   where
-    admitSafely submission=admit submission `catch` \(err::SomeException)->
+    admitSafely policies submission=admit policies submission `catch` \(err::SomeException)->
       case fromException err :: Maybe SomeAsyncException of
         Just _->throwIO err
         Nothing->finishSubmission submission (Left "Buffer capture admission failed")
-    admit submission@(CaptureSubmission reference caller _ enabled claim)=withMVar claim $ \()->mask_ $ do
+    admit policies submission@(CaptureSubmission reference caller _ enabled claim)=withMVar claim $ \()->mask_ $ do
       live<-readIORef enabled
       when live $ do
         stopped<-sessionClosed runtime
-        policies<-if stopped then pure (Left "Editor session closed before capture") else readPolicies path
         actor<-caller
         let decision=do
               unless (M.member "read_buffer" registry) (Left "Unknown MCP tool")
               ident<-maybe (Left "Buffer reference belongs to another editor session") Right (referenceId namespace reference)
+              when stopped (Left "Editor session closed before capture")
               modes<-policies
               actor
               pure (ident,M.findWithDefault (if M.findWithDefault False "read_buffer" registry then Enable else Prompt) "read_buffer" modes)
