@@ -115,7 +115,7 @@ makeNode action epoch request offset row=case request of
   DebugStack tid->
     let fid=integer "id" row
         selected=action epoch tid fid
-    in P.NodeDef (P.NodeInfo (node "frame" [epoch,tid,fid]) (bounded (label "name" row<>"  :"<>number (integer "line" row))) "" True Nothing)
+    in P.NodeDef (P.NodeInfo (node "frame" [epoch,tid,fid]) (bounded (label "name" row<>"  :"<>number (integer "line" row))) "" True (T.unpack <$> ((field "source" row :: Maybe Value) >>= field "path")))
       Nothing [P.ActionMenu "Go to source" selected]
   DebugScopes tid fid->plain (node "scope" [epoch,tid,fid,integer "variablesReference" row,offset]) (label "name" row) (integer "variablesReference" row>0)
   DebugVariables tid fid parent->

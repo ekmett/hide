@@ -25,7 +25,6 @@ import qualified Data.Text as T
 import qualified Graphics.Vty as V
 import System.FilePath ((</>), isAbsolute, normalise)
 import Hide.Browser (Entry(..))
-import Hide.Files (filePath)
 import Hide.Buffer
 import qualified Hide.Plugin.Menu as Plugin
 import Hide.Model
@@ -86,7 +85,7 @@ sessionOffset text n="Session: " `T.isPrefixOf` text && n<T.length (T.takeWhile 
 guestCommandAllowed :: Command -> Bool
 guestCommandAllowed cmd=case cmd of
   RegisteredMenu _ allowed -> allowed
-  DebugCommand action | privateDownloadAction action -> False
+  DebugCommand action | privateDebuggerAction action -> False
   GitDiff -> False
   GitCommit -> False
   AgentChoose{} -> False
@@ -161,7 +160,7 @@ guestEffectsAllowed=all allowed
     allowed PermissionAction{}=False
     allowed SaveChatSubmit{}=False
     allowed AutocompleteAction{}=False
-    allowed (DebugAction action _)=not (privateDownloadAction action)
+    allowed (DebugAction action _)=not (privateDebuggerAction action)
     allowed (AgentAction action _)=agentActionAllowed action
     allowed (SaveDocument _ _ follow)=maybe True guestCommandAllowed follow
     allowed ReadBrowserClipboard=False
@@ -177,13 +176,20 @@ protectedPurpose p=case p of
   PermissionDialog{} -> True
   ChatInputSettings -> True
   AutocompleteDialog{} -> True
-  DebugDialog action -> privateDownloadAction action
+  DebugSourceWatchDialog{} -> True
+  DebugDialog action -> privateDebuggerAction action
   AgentDialog action -> not (agentActionAllowed action)
   DiscardDraft -> True
   Confirm command -> not (guestCommandAllowed command)
   _ -> False
-privateDownloadAction :: Text -> Bool
-privateDownloadAction action=action=="downloads" || "hdb-" `T.isPrefixOf` action
+privateDebuggerAction :: Text -> Bool
+-- Frame chooser labels are adapter metadata, not prepared public semantic rows.
+-- Keep the host-owned chooser private until it carries canonical row provenance.
+privateDebuggerAction action=action=="downloads" || "hdb-" `T.isPrefixOf` action || privateFrameChooserAction action
+privateFrameChooserAction :: Text -> Bool
+privateFrameChooserAction action=case T.splitOn ":" action of
+  ["select",_,_,"frame"]->True
+  _->False
 
 guestModalBlocked :: Desktop -> Bool
 guestModalBlocked d=maybe False (protectedPurpose . purpose) (dialog d) || case (contextMenu d,contextKind d) of
@@ -226,7 +232,7 @@ privateField field | Just (label,_)<-inputValue field=sensitiveLabel label
 privateField (CheckBox "Streamer mode" _)=True
 privateField _=False
 privateDialogField :: Desktop -> Dialog -> Field -> Bool
-privateDialogField d dg field=privateField field || case inputValue field of
+privateDialogField d dg field=privateSourceWatch d dg || privateField field || case inputValue field of
   Just (_,value) -> case purpose dg of
     Opening base _ _ -> privateName base value
     ChangingDirectory base _ -> privateName base value
@@ -235,6 +241,13 @@ privateDialogField d dg field=privateField field || case inputValue field of
   _ -> False
   where
     privateName base value=let name=T.unpack value in protectedPath d (normalise (if isAbsolute name then name else base </> name))
+-- Privacy is captured from the source owner when the watch prompt opens, never
+-- inferred from an ordinary field label. Current policy can add protection.
+privateSourceWatch :: Desktop -> Dialog -> Bool
+privateSourceWatch d dg=case purpose dg of
+  DebugSourceWatchDialog _ bid origin captured->captured || protectedBuffer d bid || maybe False (protectedPath d) origin
+  _->False
+
 focusedPrivateField :: Desktop -> Bool
 focusedPrivateField d=case dialog d of Just dg -> maybe False (privateDialogField d dg) (at (fields dg) (focus dg)); _ -> False
 privateFieldsUnchanged :: Desktop -> Desktop -> Bool
@@ -264,7 +277,7 @@ cellAccess :: Desktop -> Int -> Int -> CellAccess
 cellAccess d x y=CellAccess (readableAt d x y) (pointerAllowedAt d x y)
 readableAt :: Desktop -> Int -> Int -> Bool
 readableAt d x y
-  | Just dg<-dialog d, DebugDialog action<-purpose dg, privateDownloadAction action,
+  | Just dg<-dialog d, DebugDialog action<-purpose dg, privateDebuggerAction action,
     inside (dialogRect d dg) x y || y==snd (screenSize d)-1=False
   | Just dg<-dialog d, PermissionDialog{}<-purpose dg, inside (dialogRect d dg) x y || y==snd (screenSize d)-1=False
   | otherwise=onScreen d x y && streamerReadableAt d x y && case dialog d of
@@ -281,6 +294,8 @@ readableAt d x y
 -- Labels remain visible; only sensitive value rows are blanked.
 streamerReadableAt :: Desktop -> Int -> Int -> Bool
 streamerReadableAt d x y
+  | Just dg<-dialog d, DebugDialog action<-purpose dg, privateFrameChooserAction action,
+    inside (dialogRect d dg) x y || y==snd (screenSize d)-1=False
   | y==snd (screenSize d)-1, "Session " `T.isPrefixOf` status d=False
   | otherwise=case dialog d of
   Just dg | inside (dialogRect d dg) x y -> not (any (sensitiveValue dg) (zip (fieldRects d dg) (fields dg))) && not (privateBrowserCell d dg x y)
@@ -294,8 +309,7 @@ streamerReadableAt d x y
         Just w | Just doc<-windowDocument (buffers d) w,documentLabel doc==Just "Conversation" -> not (contentPrivate (\_ -> sessionOffset) d doc w x y)
         _ -> True
   where
-    sensitiveValue dg (r,field) | Just (label,_)<-inputValue field=sensitiveLabel label && y>top r && inside r x y && y>=top (dialogRect d dg)+2 && y<top (dialogRect d dg)+height (dialogRect d dg)-3
-    sensitiveValue _ _=False
+    sensitiveValue dg (r,f)=privateDialogField d dg f && y>top r && inside r x y && y>=top (dialogRect d dg)+2 && y<top (dialogRect d dg)+height (dialogRect d dg)-3
 -- Only recognized browser/tree paths are checked. Ordinary source text and
 -- unrelated filenames are never scanned for strings which resemble secrets.
 privateTreeCell :: Desktop -> Int -> Int -> Bool

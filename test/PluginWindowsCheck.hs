@@ -46,12 +46,14 @@ checks=W.withWindowScope $ \scope->withDocsCommands $ \docs->withRegistry $ \reg
       bindings=either (error . show) id (configuredBindings (contributedBindingCommands initial) (M.singleton "terminal" (M.singleton "source" (M.singleton "example.notes" ["Ctrl+Shift+J"]))))
       (chosen,requests)=handleEvent (V.EvKey (V.KChar 'j') [V.MCtrl,V.MShift]) initial {keyBindings=bindings}
       settle desktop=do
-        next<-tickMenus host desktop
+        next<-tickMenus host core desktop
         if activePluginWindow next/=Nothing then pure next else threadDelay 1000 >> settle next
   (_,queued)<-menuEffects host core chosen requests
   opened<-timeout 5000000 (settle queued) >>= maybe (fail "plugin window did not open") pure
   check "typed extension opens a window without a source document"
     (length (windows opened)==2 && M.size (buffers opened)==1 && activeDocument opened==Nothing && maybe False ((==Nothing) . bufferId) (activeWindow opened))
+  check "plugin window cannot supply a debugger source target"
+    (contextTarget (openContext SourceContext 8 5 opened)==Just UnavailableSourceTarget)
   check "shared frame renders host title and prepared plugin text"
     (all (`T.isInfixOf` snapshot opened) ["Plugin notes","Independent text","Second row"])
   let (selected,_)=handleEvent (V.EvKey (V.KChar 'a') [V.MCtrl]) opened
@@ -184,12 +186,12 @@ checks=W.withWindowScope $ \scope->withDocsCommands $ \docs->withRegistry $ \reg
     check "typed window preparation entered its worker" (entered==Just ())
     let (selectedSource,_)=runCommand SelectAll busy
         (copiedSource,_)=runCommand Copy selectedSource
-    responsive<-timeout 5000000 (tickMenus host copiedSource) >>= maybe (fail "blocked plugin preparation held host tick") pure
+    responsive<-timeout 5000000 (tickMenus host core copiedSource) >>= maybe (fail "blocked plugin preparation held host tick") pure
     check "blocked preparation leaves existing copy/tick responsive" (clipboard responsive=="background source" && activePluginWindow responsive==Nothing)
     expired<-retireMenuFromHost host blockedRef responsive
     putMVar release ()
     let awaitExpired current=do
-          next<-tickMenus host current
+          next<-tickMenus host core current
           if "expired" `T.isInfixOf` status next then pure next else threadDelay 1000 >> awaitExpired next
     refused<-timeout 5000000 (awaitExpired expired) >>= maybe (fail "late retired menu result timeout") pure
     check "retired originating command cannot adopt late plugin window" (activePluginWindow refused==Nothing && length (windows refused)==1)

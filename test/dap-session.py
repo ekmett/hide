@@ -25,6 +25,8 @@ for session in range(1, 3 if mode == 'reconnect' else 2):
     pending_attach = pending_variables = pending_source = pending_scopes = None
     configured, breakpoint_requests = [], []
     scope_count = 0
+    source_count = 0
+    stack_count = 0
     thread_count = 0
     thread_exited = False
 
@@ -151,8 +153,11 @@ for session in range(1, 3 if mode == 'reconnect' else 2):
                     event('invalidated', dict(areas=['threads']))
                 reply(req, dict(threads=[dict(id=7, name='main λ'), dict(id=8, name='worker')] if mode in ('sidebar', 'sidebar-exit') and not thread_exited else [dict(id=7, name='main λ')]))
             elif cmd == 'stackTrace':
+                stack_count += 1
                 rows = [dict(id=11, name='entry λ', line=2, column=1,
                              source=dict(name='Generated.hs', sourceReference=9))]
+                if mode.startswith('source-'):
+                    rows[0]['source']['path'] = sys.argv[1] + ('.changed.hs' if mode == 'source-stamp' and stack_count > 1 else '.hs')
                 if mode in ('sidebar', 'sidebar-exit'):
                     rows = [dict(id=11 if args['threadId'] == 7 else 21, name='entry λ' if args['threadId'] == 7 else 'worker frame', line=2, column=1, source=dict(name='Generated.hs', sourceReference=9))]
                     if args['threadId'] == 7:
@@ -161,8 +166,18 @@ for session in range(1, 3 if mode == 'reconnect' else 2):
                     rows.append(dict(id=12, name='other frame', line=1, column=1,
                                      source=dict(name='Other.hs', sourceReference=10)))
                 reply(req, dict(stackFrames=rows, totalFrames=len(rows)))
+                if mode == 'source-stamp' and pending_source:
+                    reply(pending_source, dict(content='STALE reused source handle'))
+                    pending_source = None
             elif cmd == 'source':
-                if mode == 'frame' and args['sourceReference'] == 9:
+                source_count += 1
+                if mode == 'source-policy-delay' and source_count > 1:
+                    while not os.path.exists(sys.argv[1] + '.release'):
+                        time.sleep(0.001)
+                    reply(req, dict(content='LATE private source body'))
+                elif mode == 'source-stamp' and source_count > 1:
+                    pending_source = req
+                elif mode == 'frame' and args['sourceReference'] == 9:
                     pending_source = req
                 elif mode == 'frame':
                     assert pending_source and pending_scopes
