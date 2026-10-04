@@ -74,7 +74,8 @@ checks=W.withWindowScope $ \scope->bracket temporary removePathForcibly $ \root-
           (fail "Same-directory sessions are ambiguous or expose private arguments")
         views<-activate ((==currentNode).P.nodeIdText.P.infoId) expanded >>= wait "current session windows"
           (\d->has "First" d && has "Second" d && has "Private plugin window" d && has "Private buffer" d && ready d)
-        unless (not (has "Plugin notes" views) && not (has "authority-name.json" views) && not (streamerMode views))
+        let windowLabels=[P.infoLabel (rowInfo row) | row<-rows views,"window:" `T.isPrefixOf` P.nodeIdText (P.infoId (rowInfo row))]
+        unless (not (any (`elem` windowLabels) ["Plugin notes","authority-name.json"]) && not (streamerMode views))
           (fail "Sessions exposes private window names with Streamer disabled")
         selected<-activate ((=="First").P.infoLabel) views >>= wait "captured window selection"
           (\d->(windowId <$> activeWindow d)==Just firstId)
