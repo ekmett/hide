@@ -1277,7 +1277,8 @@ dispatchEvent (V.EvResize sw sh) d =
 dispatchEvent (V.EvKey key mods) d
   | bindingInputAvailable d, not (terminalContextReserved d key mods), Just bindings<-effectiveBindings d =
       case Bindings.bindingAction bindings key mods of
-        Just cmd | (dialog d==Nothing || dialogCommandAllowed cmd d) && commandEnabled d cmd -> runCommand cmd d
+        Just cmd | dialog d/=Nothing, not (dialogCommandAllowed cmd d) -> unboundKey key mods d
+                 | commandEnabled d cmd -> runCommand cmd d
                  | otherwise -> (d,[])
         Nothing -> unboundKey key mods d
 dispatchEvent (V.EvKey key mods) d | key `elem` [V.KChar '\t',V.KBackTab], V.MAlt `elem` mods =

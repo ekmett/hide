@@ -148,6 +148,7 @@ checks=do
   let dialogDefaults=either (error . show) id (configuredBindings M.empty)
       searchEditing=fst (runCommand Find background {keyBindings=dialogDefaults})
   check "default dialog clipboard matches field-owned behavior" (clipboard (fst (key (V.KChar 'c') [V.MCtrl] editing {nativeMac=False,keyBindings=dialogDefaults}))=="draft")
+  check "unavailable dialog editing action retains Input button mnemonic ownership" (dialog (fst (key (V.KChar 'c') [V.MCtrl] searchEditing))==Nothing)
   check "default dialog search retains permitted replacement action" (maybe False (\dg->case purpose dg of Searching True _->True; _->False) (dialog (fst (key (V.KChar 'f') [V.MMeta,V.MAlt] searchEditing))))
   reloadChecks
   putStrLn "keybinding checks passed"

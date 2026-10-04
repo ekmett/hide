@@ -249,7 +249,9 @@ with tempfile.TemporaryDirectory(prefix='hide-session-') as directory:
         assert 'Replace with' not in display_text(display), display_text(display)
         send(type='key', key='y', mods=['cmd','shift'])
         expect_text(display, 'Replace with')
-        send(type='key', key='Escape', mods=[])
+        send(type='key', key='c', mods=['ctrl'])
+        if ['Cmd+Shift+J','hide.edit.copy'] not in display.meta.get('bindings', []):
+            display.until('frame', lambda value: ['Cmd+Shift+J','hide.edit.copy'] in value.get('bindings', []))
         expect_text(display, 'persistent unsaved λ')
         send(type='frontend', mode=3, mac=False)
         print('Live dialog search remap, removed old chord and action-specific projection passed')
