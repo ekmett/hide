@@ -54,6 +54,8 @@ checks=bracket temporary removePathForcibly $ \root->
         initial<-initializeSidebar host (installSidebar (emptySidebar root 26 True) ((initialDesktop (100,35)) {defaultDirectory=Just root}))
         published<-await tick (has "Agents") initial
         expanded<-act (activateTree True (index "Agents" published) published) >>= await tick (has "Primary")
+        ensure "disconnected agents offer no unadvertised model actions"
+          ("Model" `notElem` map fst (contextItemsFor (popupFor "Primary  idle" expanded)))
         completionReady<-await tick (has "ACP completion  configured") expanded
         revealed<-act (activateTree False (index "ACP completion  configured" completionReady) completionReady) >>= await tick hasCompletionChat
         ensure "completion tree activation reveals the existing transcript" (hasCompletionChat revealed)
@@ -88,8 +90,17 @@ checks=bracket temporary removePathForcibly $ \root->
         primaryView<-act (childView,[AgentSidebarAction (ShowAgent primary)])
         ensure "Primary navigation restores Primary target" (T.null (conversationTarget primaryView))
         ensure "agent input cannot manufacture human sidebar controls" (not (guestEffectsAllowed [AgentSidebarAction (RenameAgent primary)]))
+        connecting<-act (primaryView,[AgentAction "send" ["0","Count files","false","false","false"]])
+        connected<-await tick (\d->not (agentReplying d) && has "N  idle" d && any ((=="model").settingId) (agentSettings d) &&
+          "Model" `elem` map fst (contextItemsFor (popupFor "N  idle" d))) connecting
+        primaryChoices<-act (chooseMenuAt 1 "N  idle" connected) >>= await tick (maybe False agentChoicePurpose . dialog)
+        let selectLarge=fmapDialog (\dg->dg {fields=[ListBox "Provider choices" ["Small","Large"] 1]}) primaryChoices
+            capturedPrimary=handleEvent (V.EvKey V.KEnter []) selectLarge
+        primaryUpdated<-act capturedPrimary >>= await tick (any (\option->settingId option=="model" && settingCurrent option=="large") . agentSettings)
+        stalePrimary<-act (primaryUpdated,snd capturedPrimary) >>= await tick (T.isInfixOf "expired" . status)
+        ensure "Primary model change retains its exact conversation" (T.null (conversationTarget stalePrimary))
         -- Real New Agent dialog submits through the existing runtime/ACP owner.
-        newDialog<-act (chooseMenu "Agents" primaryView) >>= await tick (maybe False ((=="New agent").dialogTitle) . dialog)
+        newDialog<-act (chooseMenu "Agents" stalePrimary) >>= await tick (maybe False ((=="New agent").dialogTitle) . dialog)
         let fill=fmapDialog (\dg->dg {fields=[Input "Name" "Child" 5,Input "Task" "Count files" 11]}) newDialog
         starting<-act (handleEvent (V.EvKey V.KEnter []) fill)
         let createdAndQueued desktop=do
@@ -104,8 +115,22 @@ checks=bracket temporary removePathForcibly $ \root->
         let children=[entry | entry<-maybe [] id (field "agents" directory :: Maybe [Value]),field "name" entry==Just ("Child"::T.Text)]
         ensure "New Agent enqueues its task without selecting its view" (length children==1 && T.null (conversationTarget started))
         ensure "background completion never steals focus" (fmap windowId (activeWindow started)==fmap windowId (activeWindow primaryView))
+        childId<-case children of [entry] | Just who<-field "id" entry->pure (AH.AgentId who); _->error "Missing created child"
+        let childReady desktop=do
+              current<-AH.agentConfiguration hub childId
+              pure (has "Child  idle" desktop && case current of Right (_,options)->any ((=="model").AH.configId) options; _->False)
+        idleChild<-awaitIO tick childReady started
+        childChoices<-act (chooseMenuAt 1 "Child  idle" idleChild) >>= await tick (maybe False agentChoicePurpose . dialog)
+        let selectedChild=fmapDialog (\dg->dg {fields=[ListBox "Provider choices" ["Small","Large"] 1]}) childChoices
+            capturedChild=handleEvent (V.EvKey V.KEnter []) selectedChild
+            childLarge _=fmap (\current->case current of Right (_,options)->any (\option->AH.configId option=="model" && AH.configCurrent option=="large") options; _->False) (AH.agentConfiguration hub childId)
+        childUpdated<-act capturedChild >>= awaitIO tick childLarge
+        retiredControl<-await tick ((=="Child settings updated.").status) childUpdated
+        refusedChild<-act (retiredControl,snd capturedChild) >>= await tick (T.isInfixOf "expired" . status)
+        ensure "sidebar child setting never selects that conversation" (T.null (conversationTarget refusedChild))
+        ensure "child setting does not change Primary settings" (any (\option->settingId option=="model" && settingCurrent option=="large") (agentSettings refusedChild))
         (subagent,_)<-AH.spawnAgentWithTask hub (AH.Agent primary) (AH.SpawnSpec "Nested" "Count files" root AH.Shared AH.Fresh Nothing Nothing) >>= right
-        parentReady<-await tick (\d->case [row | (_,row)<-visibleRows 0 32768 (tree d),P.infoLabel (rowInfo row)=="N  idle"] of row:_->P.infoBranch (rowInfo row); _->False) started
+        parentReady<-await tick (\d->case [row | (_,row)<-visibleRows 0 32768 (tree d),P.infoLabel (rowInfo row)=="N  idle"] of row:_->P.infoBranch (rowInfo row); _->False) refusedChild
         nested<-act (activateTree True (index "N  idle" parentReady) parentReady) >>= await tick (has "Nested")
         let nestedRows=[row | (_,row)<-visibleRows 0 32768 (tree nested),T.isPrefixOf "Nested" (P.infoLabel (rowInfo row))]
         ensure "agent parent IDs determine the shared hierarchy" (case nestedRows of
@@ -124,12 +149,17 @@ checks=bracket temporary removePathForcibly $ \root->
     has text d=any (T.isPrefixOf text . P.infoLabel . rowInfo . snd) (visibleRows 0 32768 (tree d))
     index text d=case [i | (i,row)<-visibleRows 0 32768 (tree d),P.infoLabel (rowInfo row)==text] of i:_->i; _->error "missing agent row"
     tree=maybe (error "missing sidebar") id . sideTree
-    chooseMenu label d=
+    popupFor label d=
       let target=index label d
           y=2+target-treeScroll (tree d)
-          (popup,_)=handleEvent (V.EvMouseDown 5 y V.BRight []) d
-      in handleEvent (V.EvKey V.KEnter []) popup
+      in fst (handleEvent (V.EvMouseDown 5 y V.BRight []) d)
+    chooseMenu=chooseMenuAt 0
+    chooseMenuAt selected label d=
+      let popup=popupFor label d
+          selectedPopup=popup {contextMenu=fmap (\(rectangle,_)->(rectangle,selected)) (contextMenu popup)}
+      in handleEvent (V.EvKey V.KEnter []) selectedPopup
     hasCompletionChat d=any ((==Just "Autocomplete").documentLabel) (M.elems (buffers d))
+    agentChoicePurpose dg=case purpose dg of AgentChoiceDialog{}->True; _->False
     completionPurpose dg=case purpose dg of CompletionChoiceDialog{}->True; _->False
     inputValue d=case dialog d of
       Just dg | SelectedInput _ value sel:_<-fields dg->Just (value,sel)

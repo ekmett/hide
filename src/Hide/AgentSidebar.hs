@@ -81,7 +81,7 @@ withAgentSidebar host runtime autocomplete use=withRegistry $ \registry->do
         in P.NodeDef (P.NodeInfo (agentNode who) (A.summaryName summary<>"  "<>A.summaryStatus summary) "" branch Nothing)
              (if branch then Nothing else Just action)
              ([P.ActionMenu "Conversation" action | branch]++[P.ActionMenu "Rename" (P.treeAction registry rename who (\_ value->pure value))]++
-              [P.ActionMenu title (P.treeAction registry setting who (\_ value->pure value)) | (title,setting)<-[("Model",model),("Effort",effort)]])
+              [P.ActionMenu title (P.treeAction registry setting who (\_ value->pure value)) | (title,setting)<-[(title,setting) | (title,setting,available)<-[("Model",model,A.summaryModel summary),("Effort",effort,A.summaryEffort summary)],available]])
       completionNode (CompletionSummary target state)=P.NodeDef
         (P.NodeInfo (completionNodeId target) ("ACP completion  "<>state) "" False Nothing)
         (Just (P.treeAction registry completionOpen target (\_ value->pure value)))

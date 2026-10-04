@@ -161,7 +161,7 @@ completionConfiguration completion@(ACPCompletion _ _ _ _ _ state _ _)=do
       keys<-privateKeys completion
       pure $ case ready of
         Nothing->Nothing
-        Just _->Just ((ident,version),configChoices (filterPrivateCapabilities keys (parseCapabilities initial value)))
+        Just _->Just ((ident,version),configChoices (filterPrivateCapabilities (maybe [] pure ready++keys) (parseCapabilities initial value)))
     _->pure Nothing
 
 -- | Explicit choice discovery starts the same lazy connection. Call on the
@@ -189,7 +189,7 @@ configureACPAt completion@(ACPCompletion _ _ _ defaults serial state _ _) expect
     _->pure (Left "Completion setting expired or is no longer advertised.")
 
 updateConfiguration :: IORef (Int,Value) -> Value -> IO ()
-updateConfiguration ref value=atomicModifyIORef' ref (\(version,_)->((version+1,value),()))
+updateConfiguration ref value=atomicModifyIORef' ref (\(version,_)->let next=version+1 in next `seq` ((next,value),()))
 
 -- One serialized caller consumes ACP replies. The authenticated MCP route can
 -- fill the independent submission slot while this worker services the provider.

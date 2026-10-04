@@ -38,7 +38,7 @@ import qualified Data.Text.Encoding as TE
 -- or private provider identity is retained by sidebar snapshots.
 data AgentSummary = AgentSummary
   { summaryId :: !AgentId, summaryName :: !Text, summaryParent :: !(Maybe AgentId)
-  , summaryStatus :: !Text } deriving (Eq,Show)
+  , summaryStatus :: !Text, summaryModel :: !Bool, summaryEffort :: !Bool } deriving (Eq,Show)
 
 -- These identities are supplied by the host bridge, never decoded from tool arguments.
 newtype AgentId = AgentId { agentIdText :: Text } deriving (Eq,Ord,Show)
@@ -625,7 +625,10 @@ ticketValue ticket result=object (["ticket" .= ticket,"status" .= (either (\reas
 agentSummaries :: AgentHub -> IO [AgentSummary]
 agentSummaries (AgentHub _ _ ref)=do
   state<-readTVarIO ref
-  pure [AgentSummary (entryId entry) (spawnName (entrySpec entry)) (entryParent entry) (entryStatus entry) | entry<-M.elems (hubEntries state)]
+  pure [AgentSummary (entryId entry) (spawnName (entrySpec entry)) (entryParent entry) (entryStatus entry)
+    (available entry "model") (available entry "thought_level") | entry<-M.elems (hubEntries state)]
+
+  where available entry category=active entry && any ((==category).configCategory) (configChoices (entryCaps entry))
 
 entryStatus :: Entry -> Text
 entryStatus entry=maybe (T.toLower (T.pack (show (entryPhase entry)))) (\(_,kind)->if kind=="configuration" then "configuring" else if kind=="cancelled" then "cancelling" else "running") (entryControl entry)

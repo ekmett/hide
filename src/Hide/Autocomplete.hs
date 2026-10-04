@@ -46,6 +46,7 @@ data Job = Request Snapshot T.Text Int | Settings | Save Value | Feedback Comple
 data Reply = Ready Snapshot [InlineOption] | Notice T.Text | ShowSettings Value
   | ShowSignIn T.Text | Configured Bool Bool | Transcript Buffer
   | RevealTranscript CompletionTarget | ChoiceDialog CompletionTarget T.Text [(T.Text,T.Text)] Int
+  | CompletionConfigured CompletionTarget Int T.Text
 
 data Provider = Provider
   { complete :: CompletionInput -> IO [Proposal]
@@ -181,8 +182,14 @@ withAutocomplete root use=do
                           key=if category==["model"] then "model" else "effort"
                           updated=case previous of Object fields->Object (KM.insert key (String value) fields); _->previous
                       writeIORef settings updated
+                      serial<-atomically $ do
+                        modifyTVar' (generation runtime) (+1)
+                        readTVar (generation runtime)
                       saved<-writeAutocompleteFor root updated
-                      emit runtime (Notice (either ("Completion setting changed, but could not be saved: "<>) (const "Completion setting updated.") saved))
+                      refresh
+                      accepted<-currentTarget
+                      emit runtime (CompletionConfigured accepted serial
+                        (either ("Completion setting changed, but could not be saved: "<>) (const "Completion setting updated.") saved))
                 _->emit runtime (Notice "Completion setting expired.")
               pure True
             SignOut->do
@@ -274,8 +281,7 @@ autocompleteEffects runtime fallback d effects=foldM step (False,d) effects
     step result@(True,_) _=pure result
     step (_,state) (AgentSidebarAction closedRequest) | Just job<-completionJob closedRequest=do
       enqueue runtime job
-      when (case job of Configure{}->True; _->False) $ atomically (modifyTVar' (generation runtime) (+1))
-      pure (False,case job of Configure{}->clearInline state; _->state)
+      pure (False,state)
     step (_,state) (AutocompleteAction action args)=do
       next<-case action of
         "propose"->request runtime action state
@@ -381,6 +387,11 @@ tickAutocomplete runtime original=do
         pure $ if maybe True (\(CompletionSummary target _)->target/=expected) current || not (isNothing (dialog state)) then state {status="Completion choices expired."} else
           state {dialog=Just (Dialog "Completion setting" (CompletionChoiceDialog expected option choices)
             [ListBox "Provider choices" (map (T.take 256 . snd) choices) selected] 0 ["Apply","Cancel"] ["Independent of the main conversation."])}
+      CompletionConfigured expected serial text->do
+        current<-readIORef (summary runtime)
+        valid<-((==serial) <$> readTVarIO (generation runtime))
+        let accepted=valid && maybe False (\(CompletionSummary target _)->target==expected) current
+        pure (if accepted then (clearInline state) {status=text} else state {status=text})
       Notice text->pure state {status=text}
       ShowSettings values->pure (settingsDialog values state)
       ShowSignIn code->pure state {dialog=Just (Dialog "Copilot sign in" (AutocompleteDialog "signin") [] 0 ["Continue","Cancel"] ["Enter this device code when asked:",code,"Continue opens the provider's sign-in flow."])}
