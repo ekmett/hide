@@ -6,10 +6,11 @@ import Control.Exception (evaluate)
 import System.Timeout (timeout)
 import Data.List (findIndex)
 import Data.Maybe (fromMaybe)
+import Hide.Commands (configuredBindings)
 import Hide.BufferView
 import Hide.Model
 import Hide.Render (snapshotHtml, snapshot, renderDesktop)
-import Hide.Buffer (revision, newBuffer, columnOffset, contents, markSaved, replaceSelection, Selection(..))
+import Hide.Buffer (revision, newBuffer, columnOffset, contents, markSaved, replaceSelection, saved, undoStack, redoStack, Selection(..))
 import Hide.Window (nativeChordShortcut)
 import qualified Data.Text.Encoding as TE
 import Hide.Browser (Entry(..))
@@ -24,6 +25,7 @@ import qualified Data.Text.Lazy as TL
 
 checks :: IO ()
 checks = do
+  contextShortcutChecks
   searchChecks
   previousSearchChecks
   let check name ok = unless ok (error name)
@@ -516,3 +518,34 @@ previousSearchChecks=do
         check "previous search preserves overlapping matches, Unicode positions and wraparound" (run text needle p==Just expected)
   fast<-timeout 1000000 (evaluate (run (T.replicate 200000 "λ界") "λ界" 400000==Just (Selection 399998 400000)))
   check "previous search scans a large Unicode buffer without repeated prefix walks" (fast==Just True)
+
+-- Context rows share effective labels and character-cell geometry with dropdowns.
+contextShortcutChecks :: IO ()
+contextShortcutChecks=do
+  let check name ok=unless ok (error name)
+      maps=either (error . T.unpack) id (configuredBindings (M.fromList
+        [("terminal",M.singleton "source" (M.fromList [("hide.language.definition",["Ctrl+Shift+D"]),("hide.language.inspect-type",[])]))
+        ,("macos",M.singleton "source" (M.singleton "hide.search.find" ["Cmd+Alt+Shift+J"]))]))
+      base=(addDocument (Just (FileState "/project/Context.hs" Nothing)) (newBuffer "source") (initialDesktop (100,25))) {keyBindings=maps}
+      popup=openContext SourceContext 10 5 base
+      popupRect d=maybe (error "missing popup") fst (contextMenu d)
+      popupRow d n=T.lines (snapshot d) !! (top (popupRect d)+1+n)
+      spans d n=toList (displayOpsForPic (renderDesktop d) (screenSize d)) !! n
+      redKey key d n=any (\op->case op of TextSpan{textSpanText=t,textSpanAttr=a}->TL.toStrict t==key && V.attrForeColor a==V.SetTo (V.RGBColor 170 0 0); _->False) (toList (spans d n))
+  check "context menu paints the effective source remap" ("Ctrl+Shift+D" `T.isInfixOf` popupRow popup 3 && not ("F12" `T.isInfixOf` popupRow popup 3))
+  check "context menu omits an explicitly unbound shortcut" (not ("Shift+F1" `T.isInfixOf` popupRow popup 4))
+  check "context shortcut uses the dropdown red key color" (redKey "Ctrl+Shift+D" popup (top (popupRect popup)+4))
+  let title=T.replicate 16 "界"
+      mac=openContext (ToolchainContext [(title,Find)]) 96 5 base {nativeMac=True,videoMode=Just 3}
+      rect=popupRect mac
+  check "context width counts wide titles and Mac modifier cells" (width rect==32+6+5 && left rect+width rect<=100 && "⌥⇧⌘J" `T.isInfixOf` popupRow mac 0)
+  let clicked=handleEvent (V.EvMouseDown (left rect+width rect-3) (top rect+1) V.BLeft []) mac
+  check "clicking the context shortcut selects its row action" (maybe False (\dg->case purpose dg of Searching False _->True; _->False) (dialog (fst clicked)))
+  let entries=[("Entry "<>T.pack (show n),if n==5 then Save else Find) | n<-[0..19::Int]]
+      narrow=openContext (ToolchainContext entries) 99 24 base {screenSize=(18,9)}
+      scrolled=fst (handleEvent (V.EvKey V.KPageDown []) narrow)
+      narrowRect=popupRect scrolled
+      (_,effects)=handleEvent (V.EvMouseDown (left narrowRect+width narrowRect-2) (top narrowRect+1) V.BLeft []) scrolled
+  check "scrolling a clipped popup preserves shortcut-area hit targets" (width narrowRect==18 && left narrowRect==0 && "Entry 5" `T.isInfixOf` popupRow scrolled 0 && case effects of [SaveDocument{}]->True; _->False)
+  let poisoned=base {buffers=M.map (\doc->doc {documentBuffer=(documentBuffer doc) {saved=error "context geometry forced baseline",undoStack=error "context geometry forced Undo",redoStack=error "context geometry forced Redo"}}) (buffers base)}
+  check "context label geometry does not force baseline or histories" (width (popupRect (openContext SourceContext 10 5 poisoned))==width (popupRect popup))
