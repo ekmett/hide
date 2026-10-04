@@ -8,6 +8,7 @@ import Hide.Browser (Entry(..))
 import Hide.Files (FileState(..))
 import Hide.Buffer
 import Hide.GuestAccess
+import Hide.Commands (terminalSourceBindings)
 import Hide.Model
 import qualified Hide.Protocol as P
 
@@ -25,6 +26,8 @@ checks=do
       Rect x y _ _=bounds window
       draft=composerRect chat window
       denied d event=case P.applyGuestInput event d of Left _->True; _->False
+  let bindings=either (error . show) id (terminalSourceBindings (M.singleton "hide.options.agent-permissions" ["Ctrl+Shift+P"]))
+  check "rebound protected command retains agent policy" (denied base {sourceBindings=Just bindings} (P.Key "p" [V.MCtrl,V.MShift]))
   let terminal=addReadOnly "Terminal hidden" "old output" base
       terminalId=maybe (error "terminal missing") windowId (activeWindow terminal)
       docked=setTerminalPinned True terminalId terminal

@@ -10,7 +10,7 @@ module Hide.MCPPermissions
   ( Permissions, withPermissions, withPermissionsAt, permissionCall, policyEffects, tickPermissions
   , permissionConfigPath, readEditorDefaults, writeEditorDefaults, readEditorDefaultsAt, writeEditorDefaultsAt
   , projectConfigPath, readEditorDefaultsFor, readAgentContextAt, writeAgentContextAt, readAgentContexts
-  , readEnvironmentAt, writeEnvironmentAt
+  , readEnvironmentAt, writeEnvironmentAt, readTerminalSourceKeysAt, readTerminalSourceKeysFor
   , readAgentLimitsFor, updateConfigTable, readAutocompleteFor, writeAutocomplete, writeAutocompleteFor
   ) where
 
@@ -274,6 +274,27 @@ projectConfigPath input=do
         if boundary then canonicalizePath config
           else if parent==directory then canonicalizePath (fallback </> "thc.toml")
           else search fallback parent
+
+-- | Read only the terminal source context. Empty arrays are explicit unbinding,
+-- and project command entries replace global entries rather than concatenating.
+readTerminalSourceKeysAt :: FilePath -> IO (Either Text (M.Map Text [Text]))
+readTerminalSourceKeysAt path=configIO $ do
+  config<-readConfig path
+  pure $ do
+    (_,_,table)<-config
+    selected<-lookupTable ["editor","keybindings","terminal","source"] table
+    traverse (keys . snd) (maybe M.empty tableMap selected)
+  where
+    keys (Toml.List' _ values) | length values<=64 = traverse text values
+    keys _=Left "Terminal source keybindings must be arrays of at most 64 chords"
+    text (Toml.Text' _ value) | T.length value<=80 = Right value
+    text _=Left "Keybinding chords must be strings of at most 80 characters"
+
+readTerminalSourceKeysFor :: FilePath -> IO (Either Text (M.Map Text [Text]))
+readTerminalSourceKeysFor directory=configIO $ do
+  global<-permissionConfigPath >>= readTerminalSourceKeysAt
+  project<-projectConfigPath directory >>= readTerminalSourceKeysAt
+  pure (M.union <$> project <*> global)
 
 readEditorDefaultsFor :: FilePath -> IO (Either Text Value)
 readEditorDefaultsFor directory=configIO $ do

@@ -34,6 +34,7 @@ import Hide.Unicode (textInputChar)
 import Hide.InlineState
 import Hide.Buffer
 import Hide.BufferView
+import qualified Hide.Bindings as Bindings
 import Hide.Files (FileState(..))
 
 -- | A zero-based character-cell rectangle with exclusive right and bottom edges.
@@ -183,6 +184,7 @@ data Desktop = Desktop
   , dockedTerminals :: M.Map Int (Rect,Maybe Rect), bottomTerminal :: Maybe Int
   , autocompleteACPEnabled :: Bool, autocompleteDraft :: Buffer
   , autocompleteSelection :: Selection, autocompleteFocused :: Bool, macKeySymbols :: Bool
+  , sourceBindings :: Maybe (Bindings.Bindings Command)
   } deriving (Eq,Show)
 
 data MenuItem = MenuItem Text Text Command deriving (Eq,Show)
@@ -232,6 +234,7 @@ keyLabelWidth text = displayColumn text (T.length text)
 
 menuShortcut :: Desktop -> MenuItem -> Text
 menuShortcut d (MenuItem _ key cmd)
+  | terminalSourceLabels d, Just bindings<-sourceBindings d = keyLabel d (fromMaybe "" (listToMaybe (Bindings.bindingKeys bindings cmd)))
   | nativeMac d = keyLabel d $ fromMaybe key (lookup cmd [(New,"Cmd+N"),(Open,"Cmd+O"),(Save,"Cmd+S"),(SaveAs,"Cmd+Shift+S"),(Close,"Cmd+W"),(Quit,"Cmd+Q"),(Undo,"Cmd+Z"),(Redo,"Cmd+Shift+Z"),(Copy,"Cmd+C"),(Cut,"Cmd+X"),(Paste,"Cmd+V"),(SelectAll,"Cmd+A"),(Find,"Cmd+F"),(Replace,"Cmd+Option+F"),(FindNext,"Cmd+G"),(FindPrevious,"Cmd+Shift+G"),(Conversation,"Cmd+Shift+C"),(AgentNew,"Cmd+Shift+N")])
   | otherwise = keyLabel d key
 
@@ -355,7 +358,11 @@ statusHintsRaw d
   | not (T.null (status d)) = [command " F1 Help" Help,(" | "<>status d,Nothing)]
   | otherwise = [command " F1 Help" Help,command "  F2 Save" Save,command "  F3 Open" Open,
       command "  Alt+F9 Compile" CompileTarget,command "  F9 Make" MakeTarget,command "  Ctrl+F9 Run" RunTarget]
-  where command label cmd=(label,Just (Left cmd)); key label k mods=(label,Just (Right (V.EvKey k mods)))
+  where command label cmd=(effective label cmd,Just (Left cmd))
+        effective label cmd | terminalSourceLabels d, Just bindings<-sourceBindings d =
+          " "<>maybe "" (<>" ") (listToMaybe (Bindings.bindingKeys bindings cmd))<>T.stripStart (snd (T.breakOn " " (T.stripStart label)))
+        effective label _=label
+        key label k mods=(label,Just (Right (V.EvKey k mods)))
         submitHint action=(if action/=chatSubmit d then "Ctrl+Enter " else "")<>(if action==SteerSubmit then "Steer" else if agentReplying d then "Queue query" else "Query")
         submitLabel opposite=if composerQuery opposite d then if agentReplying d then "Queue query" else "Query" else "Steer"
 
@@ -406,7 +413,7 @@ menuRect d i = Rect (min x (max 0 (sw-w))) 1 w (length (menuItemsFor d i)+2)
         w = min sw (maximum [T.length t + keyLabelWidth (menuShortcut d entry) + 5 + (case command of SetBufferView _ -> 4; _ -> 0) | entry@(MenuItem t _ command) <- menuItemsFor d i])
 
 initialDesktop :: (Int,Int) -> Desktop
-initialDesktop size = Desktop size [] M.empty 1 Nothing Nothing Nothing "" Nothing False Nothing "" Nothing "" Nothing "" False Nothing Nothing Nothing "" Nothing Nothing Nothing [] False 0 0 False Nothing 0 0 Nothing SourceContext Nothing (newBuffer "") (Selection 0 0) True False False 0 True False False False Nothing Nothing [] 8 Nothing [] False SystemMode True [] Nothing [] Nothing [] False Nothing "" M.empty False (0,Nothing) [] Nothing CurrentView QuerySubmit Nothing 0 M.empty Nothing False (newBuffer "") (Selection 0 0) True False
+initialDesktop size = Desktop size [] M.empty 1 Nothing Nothing Nothing "" Nothing False Nothing "" Nothing "" Nothing "" False Nothing Nothing Nothing "" Nothing Nothing Nothing [] False 0 0 False Nothing 0 0 Nothing SourceContext Nothing (newBuffer "") (Selection 0 0) True False False 0 True False False False Nothing Nothing [] 8 Nothing [] False SystemMode True [] Nothing [] Nothing [] False Nothing "" M.empty False (0,Nothing) [] Nothing CurrentView QuerySubmit Nothing 0 M.empty Nothing False (newBuffer "") (Selection 0 0) True False Nothing
 
 activeWindow :: Desktop -> Maybe Window
 activeWindow d = listToMaybe (filter (windowVisible d) (windows d))
@@ -1142,6 +1149,14 @@ dispatchEvent (V.EvResize sw sh) d =
       {width=if left r+width r==oldRight then newRight-left r else width r,
        height=if top r+height r==oldBottom then newBottom-top r else height r}
     resize w=w {bounds=stretch (bounds w),restoredBounds=fmap stretch (restoredBounds w)}
+-- Configured standard terminal source keys own this context completely, rather
+-- than falling through to an old shortcut when a binding was explicitly removed.
+dispatchEvent (V.EvKey key mods) d
+  | terminalSourceContext d, not (terminalSourceReserved key mods), Just bindings<-sourceBindings d =
+      case Bindings.bindingAction bindings key mods of
+        Just cmd | commandEnabled d cmd -> runCommand cmd d
+                 | otherwise -> (d,[])
+        Nothing -> (editorKey key mods d,[])
 dispatchEvent (V.EvKey key mods) d | key `elem` [V.KChar '\t',V.KBackTab], V.MAlt `elem` mods =
   case dialog d of
     Just dg -> dialogEvent (V.EvKey (V.KChar '\t') [V.MShift | backwards]) dg d
@@ -2042,6 +2057,33 @@ selectAt extend x y d = case activeWindow d of
     row = max 0 (min (bufferLineCount b-1) (y-top (bounds w)-1+scrollRow w))
     col = max 0 (x-left (bounds w)-1+scrollColumn w)
     pos = bufferLineOffset b row + columnOffset (bufferLineAt b row) col
+
+-- | The first configurable context deliberately excludes PTYs, conversations,
+-- dialogs and captured gestures. Native and browser shortcuts remain owned by
+-- their frontends until their accelerator/clipboard routes are migrated.
+terminalSourceContext :: Desktop -> Bool
+terminalSourceContext d=terminalSourceLabels d && menu d==Nothing && contextMenu d==Nothing &&
+  dialog d==Nothing && drag d==Nothing && dragOriginal d==Nothing && prefix d==Nothing &&
+  not (problemsFocused d) && not (maybe False treeFocused (sideTree d)) &&
+  not (questionActive d)
+
+terminalSourceLabels :: Desktop -> Bool
+terminalSourceLabels d=videoMode d==Nothing && not (nativeMac d) &&
+  not (problemsFocused d) && not (maybe False treeFocused (sideTree d)) &&
+  not (wordStar d) && case activeDocument d of Just doc->documentLabel doc==Nothing; _->False
+
+terminalSourceReserved :: V.Key -> [V.Modifier] -> Bool
+terminalSourceReserved key mods=(key==V.KChar ']' && V.MCtrl `elem` mods) || key==V.KEsc || key==V.KFun 10 ||
+  key `elem` [V.KChar '\t',V.KBackTab] ||
+  (V.MAlt `elem` mods && case key of
+    V.KChar c->c `elem` ['1'..'9'] || toLower c `elem` [mn | (_,mn,_)<-menus] || c `elem` ['\\','[',']']
+    V.KRight->True
+    _->False)
+
+boundSourceCommand :: V.Key -> [V.Modifier] -> Desktop -> Maybe Command
+boundSourceCommand key mods d
+  | terminalSourceContext d, not (terminalSourceReserved key mods) = sourceBindings d >>= \bindings->Bindings.bindingAction bindings key mods
+  | otherwise = Nothing
 
 keyEvent :: V.Key -> [V.Modifier] -> Desktop -> (Desktop,[Effect])
 keyEvent key mods d
