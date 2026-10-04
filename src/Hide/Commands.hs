@@ -5,14 +5,14 @@
 -- public names from Show or parse arbitrary constructor expressions. This catalog
 -- is the first step toward registration, not a dynamic plugin registry or
 -- authority boundary.
-module Hide.Commands (BuiltinCommand(..), builtinCommands, commandIdentifier, terminalSourceBindings) where
+module Hide.Commands (BuiltinCommand(..), builtinCommands, commandIdentifier, terminalBindings) where
 
 import Data.Text (Text)
 import Control.Monad (unless, forM_)
 import qualified Graphics.Vty as V
 import Data.List (find)
 import qualified Data.Map.Strict as M
-import Hide.Bindings (Bindings, compileBindings, readChord)
+import Hide.Bindings (BindingContext(..), bindingContexts, contextName, Bindings, compileBindings, readChord)
 import Hide.Model (Command(..), terminalSourceReserved)
 import Hide.BufferView (BufferView(..))
 
@@ -114,21 +114,70 @@ builtinCommands =
   ,BuiltinCommand "hide.view.changes" (SetBufferView ChangesView)
   ,BuiltinCommand "hide.view.only-changes" (SetBufferView OnlyChangesView)
   ,BuiltinCommand "hide.view.side-by-side" (SetBufferView SideBySideView)
+  ,BuiltinCommand "hide.bindings.reload" ReloadBindings
+  ,BuiltinCommand "hide.bindings.inspect" InspectBindings
+  ,BuiltinCommand "hide.source.copy-location" CopyLocation
+  ,BuiltinCommand "hide.messages.copy-all" CopyAllMessages
+  ,BuiltinCommand "hide.messages.go-to" GoToMessage
+  ,BuiltinCommand "hide.sidebar.up" (SidebarMove (-1))
+  ,BuiltinCommand "hide.sidebar.down" (SidebarMove 1)
+  ,BuiltinCommand "hide.sidebar.page-up" (SidebarMove (-10))
+  ,BuiltinCommand "hide.sidebar.page-down" (SidebarMove 10)
+  ,BuiltinCommand "hide.sidebar.activate" SidebarActivate
+  ,BuiltinCommand "hide.sidebar.expand" SidebarExpand
+  ,BuiltinCommand "hide.sidebar.collapse" SidebarCollapse
+  ,BuiltinCommand "hide.focus.source" FocusSource
+  ,BuiltinCommand "hide.messages.up" (MessagesMove (-1))
+  ,BuiltinCommand "hide.messages.down" (MessagesMove 1)
+  ,BuiltinCommand "hide.messages.page-up" (MessagesPage (-1))
+  ,BuiltinCommand "hide.messages.page-down" (MessagesPage 1)
   ,BuiltinCommand "hide.help.contents" (Help)
   ,BuiltinCommand "hide.help.about" (About)
   ]
 
--- | Prepare standard terminal source bindings. Actions with no default chord can
--- still be bound by their canonical identifier. Other input contexts keep their
--- own bindings until migrated; this table never owns terminal-process input.
-terminalSourceBindings :: M.Map Text [Text] -> Either Text (Bindings Command)
-terminalSourceBindings overrides=do
-  forM_ (concat (M.elems overrides)) $ \raw->do
-    (key,mods)<-readChord raw
-    unless (not (terminalSourceReserved key mods) && case key of V.KChar _->any (`elem` mods) [V.MCtrl,V.MAlt]; _->True)
-      (Left ("Reserved source key: "<>raw))
-  compileBindings [(builtinIdentifier entry,builtinAction entry,maybe [] id (lookup (builtinAction entry) defaults)) | entry<-builtinCommands] overrides
+-- | Compile every terminal context outside the interaction path. Explicit global
+-- entries apply to all owners; a context entry replaces the same global command.
+-- Plain PTY control characters cannot be assigned to editor commands.
+terminalBindings :: M.Map Text (M.Map Text [Text]) -> Either Text (M.Map BindingContext (Bindings Command))
+terminalBindings configuration=do
+  unless (all (`elem` ("global":map contextName bindingContexts)) (M.keys configuration))
+    (Left "Unknown terminal keybinding context")
+  forM_ (concat (M.elems (M.findWithDefault M.empty "global" configuration))) readChord
+  M.fromList <$> traverse prepare bindingContexts
   where
+    prepare context=do
+      let global=M.findWithDefault M.empty "global" configuration
+          inherited=if context==TerminalKeys then fmap (filter (not . processControlChord)) global else global
+          overrides=M.union (M.findWithDefault M.empty (contextName context) configuration) inherited
+      forM_ (concat (M.elems overrides)) $ \raw->do
+        (key,mods)<-readChord raw
+        let character=case key of V.KChar _->not (any (`elem` mods) [V.MCtrl,V.MAlt]); _->False
+            contextReserved=case context of
+              SidebarKeys -> character
+              MessagesKeys -> character
+              ConversationKeys -> character || key==V.KEnter
+              TerminalKeys -> character || processControl key mods
+              _ -> character || key==V.KEnter
+        unless (not (terminalSourceReserved key mods || contextReserved))
+          (Left ("Reserved "<>contextName context<>" key: "<>raw))
+      compiled<-either (Left . (("Keybinding context "<>contextName context<>": ")<>)) Right $ compileBindings [(builtinIdentifier entry,builtinAction entry,keys context (builtinAction entry)) | entry<-builtinCommands] overrides
+      pure (context,compiled)
+    processControl key mods=case key of
+      V.KChar _ -> V.MCtrl `elem` mods && V.MAlt `notElem` mods
+      _ -> False
+    processControlChord raw=case readChord raw of Right (key,mods)->processControl key mods; _->False
+    keys context action=maybe [] id (lookup action (defaultsFor context))
+    defaultsFor TerminalKeys=[(action,filter (/="Ctrl+Q") chords) | (action,chords)<-defaults,action `elem` [Close,Quit,Zoom,NextWindow,NextMessage,PreviousMessage,MakeTarget,CompileTarget,RunTarget] || case action of DebugCommand _->True; _->False]
+    defaultsFor SidebarKeys=filter ((/=NextWindow).fst) defaults ++
+      [(SidebarMove (-1),["Up"]),(SidebarMove 1,["Down"]),(SidebarMove (-10),["PageUp"]),(SidebarMove 10,["PageDown"]),
+       (SidebarActivate,["Enter"]),(SidebarExpand,["Right"]),(SidebarCollapse,["Left"]),(FocusSource,["F6"])]
+    defaultsFor MessagesKeys=filter (\(action,_)->action/=NextWindow && case action of DebugCommand _->False; _->True) defaults ++
+      [(MessagesMove (-1),["Up"]),(MessagesMove 1,["Down"]),(MessagesPage (-1),["PageUp"]),(MessagesPage 1,["PageDown"]),(GoToMessage,["Enter"]),(FocusSource,["F6"])]
+    defaultsFor ConversationKeys=filter (\(action,_)->action `notElem` [Copy,Cut,Paste,SelectAll,Redo,Conversation]) defaults ++
+      [(Copy,["Ctrl+C","Ctrl+Shift+C","Ctrl+Insert"]),(Cut,["Ctrl+X","Ctrl+Shift+X","Shift+Delete"]),
+       (Paste,["Ctrl+V","Ctrl+Shift+V","Shift+Insert"]),(SelectAll,["Ctrl+A","Ctrl+Shift+A"]),
+       (Redo,["Ctrl+Y","Ctrl+Shift+Y","Ctrl+Shift+Z"])]
+    defaultsFor _=defaults
     defaults=
       [(New,["Ctrl+N"]),(Open,["F3","Ctrl+O"]),(Save,["F2","Ctrl+S"])
       ,(Close,["Alt+F3"]),(Quit,["Alt+X","Ctrl+Q"])
