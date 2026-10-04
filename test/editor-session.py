@@ -254,7 +254,7 @@ with tempfile.TemporaryDirectory(prefix='hide-session-') as directory:
         expect_text(display, 'persistent unsaved λ!')
         event(ws, display, 4, type='key', key='F2')
         assert source.read_text() == 'persistent unsaved λ!'
-        event(ws, display, 5, type='command', command='quit')
+        event(ws, display, 5, type='command', command='hide.app.quit')
         display.until('closed')
         process.wait(timeout=10)
         wait_for(lambda: not (catalog / (first_id + '.json')).exists())
@@ -281,7 +281,7 @@ with tempfile.TemporaryDirectory(prefix='hide-session-') as directory:
                 wire['control'](relay, 'hello')
                 wire['send'](relay, dict(type='key', key='F2', seq=1))
                 wire['control'](relay, 'ack')
-                wire['send'](relay, dict(type='command', command='quit', seq=2))
+                wire['send'](relay, dict(type='command', command='hide.app.quit', seq=2))
                 wire['control'](relay, 'closed')
             finally:
                 relay.stdin.close()

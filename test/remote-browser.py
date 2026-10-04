@@ -104,7 +104,7 @@ with tempfile.TemporaryDirectory(prefix='thc-remote-browser-') as directory:
             ws.send({'type':'command','command':'download','seq':2})
             display.until('download');kind,blob=ws.read();assert kind==2 and blob==b'remote \xce\xbb\n'
             display.until('ack',lambda m:m['seq']==2)
-            ws.send({'type':'command','command':'quit','seq':3});display.until('closed')
+            ws.send({'type':'command','command':'hide.app.quit','seq':3});display.until('closed')
             code=process.wait(timeout=10)
             log.flush();log.seek(0)
             assert code==0,log.read()

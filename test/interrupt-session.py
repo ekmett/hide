@@ -116,7 +116,7 @@ try:
         wire['send'](p, dict(type='key', key='s', mods=['ctrl'], seq=1))
         control(p, 'ack')
         assert source.read_text() == 'unsaved original\n'
-        wire['send'](p, dict(type='command', command='quit', seq=2))
+        wire['send'](p, dict(type='command', command='hide.app.quit', seq=2))
         control(p, 'closed')
         finish(p)
         assert daemon.wait(timeout=15) == 0
