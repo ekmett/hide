@@ -33,14 +33,14 @@ common settings
 
 library
   import: settings
-  build-depends: deepseq, network-uri, toml-parser >=2.0 && <2.1, JuicyPixels, base64-bytestring, blaze-builder, network, async, stm, skylighting >=0.15 && <0.16, aeson, vector, fingertree >=0.1.5 && <0.2, commonmark >=0.3 && <0.4, commonmark-extensions >=0.2 && <0.3
+  build-depends: Cabal-syntax >=3.16 && <3.17, deepseq, network-uri, toml-parser >=2.0 && <2.1, JuicyPixels, base64-bytestring, blaze-builder, network, async, stm, skylighting >=0.15 && <0.16, aeson, vector, fingertree >=0.1.5 && <0.2, commonmark >=0.3 && <0.4, commonmark-extensions >=0.2 && <0.3
   c-sources: cbits/unicode.c
   include-dirs: cbits
   pkgconfig-depends: libutf8proc >=2.10
   hs-source-dirs: src
   other-modules: Paths_hide
   autogen-modules: Paths_hide
-  exposed-modules: Hide.AgentSidebar, Hide.AgentSidebarTypes, Hide.BufferEdits, Hide.BufferReadAdmission, Hide.BufferReadCommand, Hide.BufferDiffCommand, Hide.BufferReads, Hide.Plugin.Buffer, Hide.Plugin.BufferHost, Hide.Plugin.Command, Hide.Plugin.Tree, Hide.Sidebar, Hide.SidebarCommands, Hide.Plugin.Menu, Hide.Documentation, Hide.Commands, Hide.Bindings, Hide.Keybindings, Hide.InlineTypes, Hide.InlineState, Hide.AutocompleteConfig, Hide.Autocomplete, Hide.AutocompleteACP, Hide.Copilot, Hide.AgentAccess, Hide.AgentRuntime, Hide.AgentHub, Hide.AgentACP, Hide.AgentMCP, Hide.AgentWorkspace, Hide.Process, Hide.Completion, Hide.Build, Hide.Compilers, Hide.Downloads, Hide.HdbAcquisition, Hide.CabalPlan, Hide.ProjectBrowser, Hide.BuildJobs, Hide.Protocol, Hide.Remote, Hide.RemoteWeb, Hide.RemoteWindow, Hide.Web, Hide.Unicode, Hide.Buffer, Hide.BufferView, Hide.Syntax, Hide.Highlighting, Hide.Model, Hide.Render, Hide.Files, Hide.App, Hide.Frontend, Hide.Window, Hide.Browser, Hide.Help, Hide.Git, Hide.GitOperations, Hide.LSP, Hide.Tooling, Hide.External, Hide.Reconcile, Hide.ACP, Hide.AgentFiles, Hide.Conversation, Hide.Markdown, Hide.Terminal, Hide.Consoles, Hide.DAP, Hide.Debugger, Hide.Hex
+  exposed-modules: Hide.AgentSidebar, Hide.AgentSidebarTypes, Hide.BufferEdits, Hide.BufferReadAdmission, Hide.BufferReadCommand, Hide.BufferDiffCommand, Hide.BufferReads, Hide.Plugin.Buffer, Hide.Plugin.BufferHost, Hide.Plugin.Command, Hide.Plugin.Tree, Hide.Sidebar, Hide.SidebarCommands, Hide.Plugin.Menu, Hide.Documentation, Hide.Commands, Hide.Bindings, Hide.Keybindings, Hide.InlineTypes, Hide.InlineState, Hide.AutocompleteConfig, Hide.Autocomplete, Hide.AutocompleteACP, Hide.Copilot, Hide.AgentAccess, Hide.AgentRuntime, Hide.AgentHub, Hide.AgentACP, Hide.AgentMCP, Hide.AgentWorkspace, Hide.Process, Hide.Completion, Hide.Build, Hide.Compilers, Hide.Downloads, Hide.HdbAcquisition, Hide.CabalPlan, Hide.PackageSources, Hide.ProjectBrowser, Hide.BuildJobs, Hide.Protocol, Hide.Remote, Hide.RemoteWeb, Hide.RemoteWindow, Hide.Web, Hide.Unicode, Hide.Buffer, Hide.BufferView, Hide.Syntax, Hide.Highlighting, Hide.Model, Hide.Render, Hide.Files, Hide.App, Hide.Frontend, Hide.Window, Hide.Browser, Hide.Help, Hide.Git, Hide.GitOperations, Hide.LSP, Hide.Tooling, Hide.External, Hide.Reconcile, Hide.ACP, Hide.AgentFiles, Hide.Conversation, Hide.Markdown, Hide.Terminal, Hide.Consoles, Hide.DAP, Hide.Debugger, Hide.Hex
   if flag(web)
     cpp-options: -DWITH_WEB
     other-modules: Hide.BrowserServer
@@ -83,6 +83,8 @@ executable hide
 
 test-suite editor-tests
   import: settings
+  build-depends: Cabal-syntax >=3.16 && <3.17
+  other-modules: PackageSourcesCheck
   if flag(web)
     cpp-options: -DWITH_WEB
     other-modules: WebCheck
