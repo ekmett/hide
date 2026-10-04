@@ -37,6 +37,14 @@ assert.equal(key('≈',{altKey:true,code:'KeyX'}).prevented,undefined); // Optio
 context.frame.terminal=true;key('c',{ctrlKey:true});assert.equal(packets.at(-1).type,'key');assert.deepEqual(Array.from(packets.at(-1).mods),['ctrl']);
 assert.equal(key('r',{ctrlKey:true}).prevented,true);assert.equal(packets.at(-1).key,'r');assert.equal(key('R',{ctrlKey:true,shiftKey:true}).prevented,true);assert.equal(packets.at(-1).key,'R');
 context.frame.terminal=false;assert.equal(key('r',{metaKey:true}).prevented,undefined);assert.equal(key('h',{metaKey:true}).prevented,undefined);
+context.frame.bindings=[['Cmd+Shift+J','example.manual']];
+context.frame.menuContributions=[{id:'example.manual',registry:'session-menu',generation:7,key:'⇧⌘J',enabled:true}];
+key('J',{metaKey:true,shiftKey:true});
+assert.equal(packets.at(-1).type,'menu');assert.equal(packets.at(-1).command,'example.manual');assert.equal(packets.at(-1).registry,'session-menu');assert.equal(packets.at(-1).generation,7);
+context.frame.menuContributions[0].key='';key('J',{metaKey:true,shiftKey:true});assert.equal(packets.at(-1).type,'key'); // A contribution sharing a builtin ID cannot steal its chord.
+context.frame.menuContributions[0].key='⇧⌘J';context.frame.menuContributions[0].enabled=false;
+key('J',{metaKey:true,shiftKey:true});assert.equal(packets.at(-1).type,'menu');assert.equal(packets.at(-1).generation,7); // Disabled metadata still retains the exact lifetime; the host decides availability.
+context.frame.bindings=[];context.frame.menuContributions[0].enabled=true;key('J',{metaKey:true,shiftKey:true});assert.equal(packets.at(-1).type,'key'); // Unbinding removes stamped routing.
 context.frame.bindingsActive=false;key('v',{metaKey:true});assert.deepEqual(commands,['hide.edit.paste']);
 const exported={};handlers.get('copy')({preventDefault(){},clipboardData:{setData:(type,text)=>exported[type]=text}});
 assert.equal(exported['text/plain'],'selected');assert.equal(commands.at(-1),'hide.edit.copy'); // Browser Edit > Copy remains semantic.

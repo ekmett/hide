@@ -7,6 +7,7 @@
 -- not read the terminal host clipboard.
 module Hide.RemoteTerminal (runRemoteTerminal, terminalEventInput, remoteTerminalPicture, terminalClipboard) where
 
+import Control.Applicative ((<|>))
 import Data.Aeson
 import Data.Bits ((.&.), shiftR)
 import qualified Data.ByteString as BS
@@ -16,7 +17,7 @@ import qualified Graphics.Vty as V
 import qualified Data.IntMap.Strict as IM
 import Hide.Links (openResource)
 import Hide.Remote (RemotePeer)
-import Hide.RemoteWindow (RemoteFrame(..), RemoteCell(..))
+import Hide.RemoteWindow (RemoteFrame(..), RemoteCell(..), remoteBindingInput)
 import Hide.Unicode (textImage)
 #ifdef WITH_REMOTE
 import Control.Concurrent.Async (withAsync, poll)
@@ -159,7 +160,7 @@ runRemoteTerminal peer = bracket (mkVty V.defaultConfig) (\vty -> V.shutdown vty
             case event of
               Just (V.EvKey (V.KChar ']') [V.MCtrl]) -> pure ()
               _ -> do
-                when connected (forM_ (event >>= terminalEventInput) send)
+                when connected (forM_ (event >>= \input->(frame >>= \value->remoteBindingInput value input) <|> terminalEventInput input) send)
                 when (connected && event/=Nothing && not (T.null notice)) (render frame "")
                 loop receiver sender frame connected clipboard (if event==Nothing then notice else "")
   resize

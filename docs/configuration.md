@@ -162,7 +162,11 @@ the menu's descriptive key hint does not activate a chord. Unknown IDs fail init
 loading or reload. A previously loaded ID becomes inert when its registration
 retires; a replacement registration receives its own exact lifetime. Bindings are
 rebuilt on the session worker as contributions change. `[]` removes the effective
-shortcut. Contributions cannot enter the dialog editing whitelist or grant agent
+shortcut. Remote native, terminal and browser shortcut packets retain the exact
+registration from their displayed frame, so an old queued shortcut cannot invoke a
+replacement registered under the same public ID. Native accelerators, popup labels
+and inspection use the focused platform/context map. Contributions cannot enter the
+dialog editing whitelist or grant agent
 authority. Bare commands without a menu contribution remain outside this binding
 catalogue.
 

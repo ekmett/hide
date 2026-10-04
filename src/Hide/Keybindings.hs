@@ -26,10 +26,13 @@ data Result = Compiled Bool FilePath Catalogue Configuration (M.Map (BindingPlat
 data Keybindings = Keybindings (IORef (Maybe (Async (Either Text Result)))) (IORef Configuration) (IORef (Maybe Catalogue))
 
 -- | Scope the session's binding worker, independent of attachments. The host
--- validates the initial configuration against its live catalogue before input.
+-- validates the initial configuration against this exact catalogue before input.
+-- Its prepared map is already installed; no redundant startup rebuild is queued.
 -- Previously validated configured IDs stay inert after their registration retires.
-withKeybindings :: Configuration -> (Keybindings -> IO a) -> IO a
-withKeybindings configuration = bracket (Keybindings <$> newIORef Nothing <*> newIORef configuration <*> newIORef Nothing) close
+withKeybindings :: Configuration -> Catalogue -> (Keybindings -> IO a) -> IO a
+withKeybindings configuration catalogue use=do
+  initial<-evaluate catalogue
+  bracket (Keybindings <$> newIORef Nothing <*> newIORef configuration <*> newIORef (Just initial)) close use
   where close (Keybindings ref _ _)=readIORef ref >>= mapM_ cancel
 
 -- Retired configured identities remain chord owners, never implicit defaults or
@@ -105,7 +108,8 @@ tickKeybindings (Keybindings ref configurationRef observed) desktop=do
     catalogue<-evaluate (contributedBindingCommands next)
     if maybe False (const True) running || previous==Just catalogue then pure next else do
       configuration<-readIORef configurationRef
-      worker<-async (restore (prepare False (startingDirectory next) catalogue configuration configuration))
+      directory<-evaluate (startingDirectory next)
+      worker<-async (restore (prepare False directory catalogue configuration configuration))
       writeIORef ref (Just worker)
       writeIORef observed (Just catalogue)
       pure next

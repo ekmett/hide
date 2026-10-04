@@ -157,7 +157,7 @@ reloadChecks :: IO ()
 reloadChecks=bracket temporary removePathForcibly $ \directory->do
   old<-lookupEnv "XDG_CONFIG_HOME"
   let restore=maybe (unsetEnv "XDG_CONFIG_HOME") (setEnv "XDG_CONFIG_HOME") old
-  bracket_ (setEnv "XDG_CONFIG_HOME" directory) restore $ withKeybindings M.empty $ \runtime->do
+  bracket_ (setEnv "XDG_CONFIG_HOME" directory) restore $ withKeybindings M.empty [] $ \runtime->do
     let path=directory </> "thc.toml"
         defaults=either (error . show) id (platformBindings [] TerminalPlatform M.empty)
         base=(addDocument (Just (FileState (directory </> "Main.hs") Nothing)) (newBuffer "text") (initialDesktop (80,25))) {keyBindings=defaults}

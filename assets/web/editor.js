@@ -318,7 +318,11 @@ window.addEventListener('keydown',e=>{
  if(control&&!e.altKey&&!e.shiftKey&&nativeClipboard&&action===nativeClipboard)return;
  // Modal editing keeps its platform clipboard shortcuts and authority checks.
  if(control&&!e.altKey&&!e.shiftKey&&!frame?.bindingsActive&&nativeClipboard){e.preventDefault();command(nativeClipboard);return;}
- e.preventDefault();cursorEpoch=performance.now();send({type:'key',key,mods:mods(e)});return;
+ e.preventDefault();cursorEpoch=performance.now();
+ const contribution=action&&frame?.menuContributions?.find(item=>item.id===action&&item.key);
+ if(contribution)send({type:'menu',command:contribution.id,registry:contribution.registry,generation:contribution.generation});
+ else send({type:'key',key,mods:mods(e)});
+ return;
 });
 window.addEventListener('keyup',e=>send({type:'modifiers',mods:mods(e)}));
 input.addEventListener('compositionstart',()=>{composing=true;});
