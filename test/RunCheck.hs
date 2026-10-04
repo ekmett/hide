@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module RunCheck (checks) where
 
+import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Concurrent (threadDelay)
 import Control.Exception (bracket)
 import Control.Monad (unless, when, forM_, foldM)
@@ -299,7 +300,7 @@ shellBlockChecks = when (terminalAvailable && os/="mingw32") $ bracket temporary
     opened<-await "visible interactive terminal" (\entries->case entries of (tid,_,_):_->outputHas tid "ready"; _->pure False) queued
     entries<-C.listConsoles consoles
     let (tid,terminalBid,_)=head entries
-    check "explicit Markdown execution opens and focuses terminal" (fmap bufferId (activeWindow opened)==Just terminalBid)
+    check "explicit Markdown execution opens and focuses terminal" (fmap sourceFixtureBuffer (activeWindow opened)==Just terminalBid)
     check "whole shell body preserves literal arguments" =<< outputHas tid "literal ; $(touch should-not-exist) λ"
     check "shell block runs in selected project cwd" =<< outputHas tid (T.pack expectedRoot)
     check "quoted command substitution remains literal" . not =<< doesFileExist (root </> "should-not-exist")

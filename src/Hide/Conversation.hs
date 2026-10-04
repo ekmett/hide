@@ -307,6 +307,18 @@ applyAgentSidebar :: ConversationState -> AgentSidebarRequest -> Desktop -> IO D
 applyAgentSidebar runtime@(ConversationState _ ref _ _ agents) request d=case request of
   ShowAgent ident | ident==AR.primaryAgent agents->perform runtime "show" [] d
                   | otherwise->showAgentHistory runtime ident d
+  ShowAgentConfiguration receipt option choices selected->do
+    when (AH.agentConfigAgent receipt==AR.primaryAgent agents) (syncConversationAgent runtime)
+    current<-AH.agentConfigurationCurrent hub receipt
+    pure $ if not current then d {status="Agent choices expired."} else d {dialog=Just (Dialog "Agent setting"
+      (AgentChoiceDialog receipt option choices) [ListBox "Provider choices" (map (T.take 256 . snd) choices) selected]
+      0 ["Apply","Cancel"] []),contextMenu=Nothing,contextTarget=Nothing}
+  ConfigureAgent receipt option value
+    | AH.agentConfigAgent receipt==AR.primaryAgent agents->do
+        syncConversationAgent runtime
+        current<-AH.agentConfigurationCurrent hub receipt
+        if current then performPrimary runtime "set-config" [option,value] d else pure d {status="Agent setting expired."}
+    | otherwise->startChildControl runtime (AH.agentConfigAgent receipt) Nothing (AH.configureAgentAt hub receipt option value) d
   RenameAgent ident->do
     selected<-AH.statusAgent hub AH.Human ident
     pure $ case selected of
@@ -329,6 +341,7 @@ applyAgentSidebar runtime@(ConversationState _ ref _ _ agents) request d=case re
         worker<-async (restore (AH.spawnAgentWithTask hub AH.Human spec))
         modifyIORef' ref (\current->current {creatingAgent=Just worker})
         pure d {status="Starting agent…"}
+  _->pure d {status="Completion owner is unavailable."}
   where hub=AR.agentHub agents
 
 pollAgentCreation :: ConversationState -> Desktop -> IO Desktop
@@ -503,7 +516,7 @@ performPrimary runtime@(ConversationState directory ref consoles jobs _) action 
       -- connects. Opening its window must not repaint it from empty state.
       let recoveredWindow=do
             (bid,_)<-find ((==Just "Conversation") . documentLabel . snd) (M.toList (buffers d))
-            find ((==bid) . bufferId) (windows d)
+            find ((==Just bid) . bufferId) (windows d)
       pure $ case recoveredWindow of
         Just win | isNothing (connection s), null (transcript s), isNothing (chatQuestion d) ->
           focusWindow (windowId win) d {composerFocused=True}
@@ -764,7 +777,7 @@ refreshConversationLayout (ConversationState _ ref _ _ _) original = do
   where
     reflowChild state desktop (target,records) =
       case conversationDocument target desktop of
-        Just (bid,_) | any ((==bid).bufferId) (windows desktop),
+        Just (bid,_) | any ((==Just bid) . bufferId) (windows desktop),
             let columns=conversationWidthFor target desktop,
             M.lookup target (childWidths state)/=Just columns -> do
           modifyIORef' ref (\current->current
@@ -1161,7 +1174,7 @@ dismissPermission d=case dialog d of
 keepConversationPosition :: Desktop -> Desktop -> Desktop
 keepConversationPosition before after=after {windows=map keep (windows after)}
   where
-    keep w=case (find ((==windowId w).windowId) (windows before),M.lookup (bufferId w) (buffers after)) of
+    keep w=case (find ((==windowId w).windowId) (windows before),windowDocument (buffers after) w) of
       (Just old,Just doc) | documentLabel doc==Just "Conversation" -> w {scrollRow=min (scrollRow old) (scrollbarLimit after True doc w),scrollColumn=0,selection=Selection 0 0}
       _ -> w
 
@@ -1200,7 +1213,7 @@ paintView target force s original
         Nothing -> let added=addConversationDocument d in added {buffers=M.adjust (\doc->restyle doc {documentBuffer=newBuffer text}) (nextId d) (buffers added)}
         Just (existingId,_) -> d {buffers=M.adjust (\doc->restyle doc {documentBuffer=newBuffer text}) existingId (buffers d)}
       bid=maybe (nextId d) fst existing
-      adjust w | bufferId w/=bid = w
+      adjust w | bufferId w/=Just bid = w
                | otherwise =
                    let rows=max 1 (windowContentRows opened (fromMaybe (newDocument (newBuffer "") Nothing) (M.lookup bid (buffers opened))) w)
                        oldLines=maybe 0 (bufferLineCount . documentBuffer . snd) existing
@@ -1214,7 +1227,7 @@ paintView target force s original
       visible=target==conversationTarget original
       view=M.findWithDefault (ConversationView bid "Primary" (newBuffer "") (Selection 0 0) (0,0) (Selection 0 0)) target (conversationViews opened)
       colored=opened {conversationViews=M.insert target view {conversationBufferId=bid,conversationReplySelection=let Selection a c=conversationReplySelection view in Selection (min (T.length text) a) (min (T.length text) c)} (conversationViews opened),chatQuestion=chatQuestion original,chatActions=if visible then actions else chatActions original,chatInputOffset=if visible then inputOffset else chatInputOffset original,buffers=M.adjust (\doc -> doc {documentHighlight=styled,documentCursorVisible=False,documentLinks=linkSpans styled,documentMarkdownPath=Just (project s </> "conversation.md"),documentShellBlocks=shellBlocks}) bid (buffers opened),windows=map adjust (windows opened)}
-      focused=case find ((==bid).bufferId) (windows colored) of Just w | force && visible -> focusWindow (windowId w) colored {composerFocused=True}; _ -> colored
+      focused=case find ((==Just bid) . bufferId) (windows colored) of Just w | force && visible -> focusWindow (windowId w) colored {composerFocused=True}; _ -> colored
     in focused
   where
     d=if T.null target && T.null (conversationTarget original) then original else original {chatQuestion=Nothing}
@@ -1437,8 +1450,8 @@ conversationWidthFor target d = max 1 $ case matching++available of
   w:_ -> width (bounds w)-2
   [] -> fst (screenSize d)-treeWidthOf d-4
   where
-    matching=[w | Just (bid,_)<-[conversationDocument target d],w<-windows d,bufferId w==bid]
-    available=[w | w<-windows d,Just doc<-[M.lookup (bufferId w) (buffers d)],documentLabel doc==Just "Conversation"]
+    matching=[w | Just (bid,_)<-[conversationDocument target d],w<-windows d,bufferId w==Just (bid)]
+    available=[w | w<-windows d,Just doc<-[windowDocument (buffers d) w],documentLabel doc==Just "Conversation"]
 
 conversationServices :: ConversationState -> (FilePath,C.Consoles,Jobs.BuildJobs)
 conversationServices (ConversationState directory _ consoles jobs _)=(directory,consoles,jobs)
@@ -1643,18 +1656,24 @@ performChild runtime@(ConversationState _ ref _ _ agents) action values d=do
       pure (keepConversationPosition d (paintView target False state {transcript=changed} d))
     _ -> pure d {status="Switch to Primary for provider settings or session controls; use Agents to reconnect a child."}
   where
-    startControl submitted operation=do
-      state<-readIORef ref
-      let target=conversationTarget d
-      if M.member target (childControls state) then pure d {status="A child operation is already pending."} else do
-        worker<-async operation
-        modifyIORef' ref (\current->current {childControls=M.insert target (submitted,worker) (childControls current)})
-        pure d {agentReplying=True,contextMenu=Nothing,status=if submitted==Nothing then "Updating child settings..." else "Steering child; draft kept until accepted."}
+    startControl submitted operation=startChildControl runtime (AH.AgentId (conversationTarget d)) submitted operation d
     send hub ident text = do
       result<-AH.sendAgent hub AH.Human ident (composerMarkdown text)
       case result of
         Left err -> pure d {status=err}
         Right _ -> refreshChildConversation runtime d {composerBuffer=newBuffer "",composerSelection=Selection 0 0,status="Human message queued."}
+
+-- Exact target is independent of the selected conversation. Worker ownership is
+-- the same childControls map polled and retired by the existing conversation.
+startChildControl :: ConversationState -> AH.AgentId -> Maybe Text -> IO (Either Text ()) -> Desktop -> IO Desktop
+startChildControl (ConversationState _ ref _ _ _) ident submitted operation d=mask $ \restore->do
+  state<-readIORef ref
+  let target=AH.agentIdText ident
+  if M.member target (childControls state) then pure d {status="A child operation is already pending."} else do
+    worker<-async (restore operation)
+    modifyIORef' ref (\current->current {childControls=M.insert target (submitted,worker) (childControls current)})
+    pure d {agentReplying=agentReplying d || target==conversationTarget d,contextMenu=Nothing,
+      status=if submitted==Nothing then "Updating child settings..." else "Steering child; draft kept until accepted."}
 
 refreshChildConversation :: ConversationState -> Desktop -> IO Desktop
 refreshChildConversation (ConversationState _ ref _ _ agents) d=do
@@ -1667,7 +1686,7 @@ refreshChildConversation (ConversationState _ ref _ _ agents) d=do
         let result=either (const (Left "Child operation interrupted.")) id outcome
             cleared=case (submitted,result) of (Just text,Right ())->clearSubmittedDraft target text desktop; _->desktop
             notice=either id (const (if submitted==Nothing then "Child settings updated." else "Follow-up added to child's active turn.")) result
-        in if target==conversationTarget desktop then cleared {status=notice} else cleared
+        in if target==conversationTarget desktop || submitted==Nothing then cleared {status=notice} else cleared
       applyControl desktop _=desktop
       controlled=foldl applyControl d controls
   modifyIORef' ref (\current->current {childControls=foldr M.delete (childControls current) controlsDone})

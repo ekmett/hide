@@ -33,6 +33,8 @@ import Hide.Links (LinkResult, applyLink, prepareMarkdown)
 import Hide.BufferView (BufferView(..))
 import Hide.Model hiding (menus)
 import qualified Hide.Model as Model
+import qualified Hide.Plugin.Window as PluginWindow
+import Hide.PluginWindowHost (adoptWindowUpdate)
 import Hide.Plugin.Command
 import qualified Hide.Plugin.Menu as Plugin
 
@@ -46,7 +48,7 @@ data SourceInput = SourceInput ContextTarget ContentVersion DirtySnapshot
 data NavigationInput = NavigationInput (FilePath,Int,Int) (Maybe OpenSource) (Maybe [FilePath])
 data OpenSource = OpenSource Int Int ContentVersion BufferContent
 data Navigation = Navigation FilePath Int Int (Maybe Document)
-data MenuReply = PreparedDocument LinkResult | PreparedNavigation Navigation | PreparedDebugSource DebugSourceRequest
+data MenuReply = PreparedDocument LinkResult | PreparedNavigation Navigation | PreparedDebugSource DebugSourceRequest | PreparedWindow PluginWindow.WindowUpdate
 
 data Pending = Pending Plugin.MenuRef (Maybe ContextTarget) MenuContext (Async (Either Plugin.MenuError MenuReply))
 data Publication = Publish Plugin.MenuItem | Withdraw Plugin.MenuRef
@@ -215,7 +217,7 @@ columns d=max 20 (min 76 (fst (screenSize d)-treeWidthOf d-4))
 captureNavigation :: Plugin.MenuOrigin -> Maybe ContextTarget -> Desktop -> IO (Maybe NavigationInput)
 captureNavigation origin (Just (MessagesTarget _ _ (Just location@(path,_,_)))) d=do
   opened<-case find (\(_,doc)->fmap filePath (documentFile doc)==Just path && documentLabel doc==Nothing) (M.toList (buffers d)) of
-    Just (bid,doc) | Just window<-find ((==bid) . bufferId) (windows d)->do
+    Just (bid,doc) | Just window<-find ((==Just bid) . bufferId) (windows d)->do
       version<-captureVersion (documentBuffer doc)
       image<-evaluate (bufferContent (documentBuffer doc))
       pure (Just (OpenSource (windowId window) bid version image))
@@ -252,7 +254,7 @@ adoptNavigation context (Navigation path row offset loaded) d
   | invocationOrigin context==Plugin.AgentMenu && protectedPath d path=pure d {status="Agent navigation target is now protected."}
   | otherwise=case invocationNavigation context of
     Just (NavigationInput _ (Just (OpenSource wid bid version _)) _)->case (find ((==wid) . windowId) (windows d),M.lookup bid (buffers d)) of
-      (Just window,Just doc) | bufferId window==bid && fmap filePath (documentFile doc)==Just path->do
+      (Just window,Just doc) | bufferId window==Just (bid) && fmap filePath (documentFile doc)==Just path->do
         current<-versionCurrent version (documentBuffer doc)
         pure $ if current && (invocationOrigin context/=Plugin.AgentMenu || not (protectedBuffer d bid)) then position (focusWindow wid d) else expired
       _->pure expired
@@ -260,7 +262,7 @@ adoptNavigation context (Navigation path row offset loaded) d
       | Just doc<-loaded->do
           let opened=addDocument (documentFile doc) (documentBuffer doc) d
               installed=case activeWindow opened of
-                Just window->opened {buffers=M.insert (bufferId window) doc (buffers opened)}
+                Just window | Just bid<-bufferId window->opened {buffers=M.insert bid doc (buffers opened)}
                 _->opened
           pure (position installed)
       | otherwise->pure expired
@@ -290,6 +292,7 @@ tickMenus host@(MenuHost menus _ sourceRefs _ ref) core original=do
           if not live || not current then pure d {status="Menu result expired; invoke it again."} else case result of
             Left err->pure d {status="Menu action failed: "<>T.pack (displayException err)}
             Right (Left err)->pure d {status="Menu action failed: "<>T.pack (show err)}
+            Right (Right (PreparedWindow prepared))->adoptWindowUpdate (invocationOrigin context) prepared d
             Right (Right (PreparedDocument prepared))->pure (fst (applyLink prepared d))
             Right (Right (PreparedNavigation prepared))->adoptNavigation context prepared d
             Right (Right PreparedDebugSource{}) | reference `notElem` sourceRefs->pure d {status="Debugger source controls require a host-owned contribution."}

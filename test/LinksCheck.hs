@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 module LinksCheck (checks) where
+import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Exception (bracket)
 import Control.Monad (unless,forM_)
 import Data.Aeson
@@ -47,9 +48,9 @@ checks=bracket temporary removePathForcibly $ \root->do
       (menu,_)=handleEvent (V.EvMouseDown x y V.BRight []) help
   check "click activates on release, drag remains selection" (null startEffects && clickEffects==[FollowLink (Just (root </> "README.md")) "docs/install.md"] && null dragEffects)
   check "context menu offers linked target" (case contextKind menu of LinkContext (OpenLink _ "docs/install.md")->True; _->False)
-  let chat=help {buffers=M.adjust (\value->value {documentLabel=Just "Conversation"}) (bufferId w) (buffers help)}
+  let chat=help {buffers=M.adjust (\value->value {documentLabel=Just "Conversation"}) (sourceFixtureBuffer w) (buffers help)}
       hiddenAt=top (composerRect chat w)
-      hidden=chat {buffers=M.adjust (\value->value {documentBuffer=newBuffer (T.replicate 50 "link\n"),documentLinks=[(0,249,"https://example.com/")]}) (bufferId w) (buffers chat)}
+      hidden=chat {buffers=M.adjust (\value->value {documentBuffer=newBuffer (T.replicate 50 "link\n"),documentLinks=[(0,249,"https://example.com/")]}) (sourceFixtureBuffer w) (buffers chat)}
   check "composer cannot follow transcript links hidden beneath it" (linkAt x hiddenAt hidden==Nothing)
   forM_ [12,40,100] $ \width->forM_ [False,True] $ \outgoing->do
     let styled=renderReply True width outgoing "Some [wide 界 label](https://example.com/path) text."

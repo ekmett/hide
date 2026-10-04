@@ -88,7 +88,7 @@ commitEdits patches d
                        pure (bufferCurrent && fileIdentity==oldFile)
     pure $ if not (and checks) then Left "An edit target changed or became private; no files changed."
       else let (updated,rebases,changed)=foldl' apply (d,M.empty,[]) patches
-               rebased=updated {windows=map (\w->case M.lookup (bufferId w) rebases of
+               rebased=updated {windows=map (\w->case bufferId w >>= (`M.lookup` rebases) of
                  Nothing->w
                  Just ranges->w {selection=let Selection a c=selection w in Selection (rebase ranges a) (rebase ranges c)}) (windows updated)}
            in Right (rebased,reverse changed)

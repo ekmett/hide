@@ -142,9 +142,9 @@ Its action retains those identities. It must not rediscover whichever file is
 focused when the user eventually chooses the item. Expensive context enrichment
 runs separately; opening a menu does not start an HLS request synchronously.
 
-The proposed command registry will also supply configurable binding defaults.
-Current bindings compile against the built-in catalogue; arbitrary contributed
-commands do not yet have configurable registration. Use the implemented
+Runtime menu-contributed typed actions can be bound by their published IDs,
+alongside built-in commands. The proposed plugin `bindDefault` API is not yet
+implemented. Use the implemented
 [keybinding schema](../configuration.md#keybindings) for current platform/context
 tables and command IDs. Defaults are overridden by TOML; an empty binding list
 unbinds a named command.

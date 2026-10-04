@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module AgentIntegrationCheck (checks, fixture) where
 
+import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Concurrent (threadDelay)
 import Control.Exception (bracket)
 import Control.Monad (unless)
@@ -233,7 +234,7 @@ checks=bracket temporary removePathForcibly $ \root ->
       child<-AH.registerAgent hub "Recovered child" root fakeDriver >>= right
       AH.recordAgentEvent hub child "output" (object ["text" .= ("older Hub history"::T.Text)])
       let selected=selectConversationView (AH.agentIdText child) "Recovered child" (selectConversationView "" "Primary" (initialDesktop (80,25)))
-          bid=maybe (error "missing child view") bufferId (activeWindow selected)
+          bid=maybe (error "missing child view") sourceFixtureBuffer (activeWindow selected)
           newer=selected {buffers=M.adjust (\doc->doc {documentBuffer=newBuffer "newer Desktop child transcript"}) bid (buffers selected),composerBuffer=newBuffer "recovered draft",agentReplying=True,agentQueued=5}
       writeCheckpoint recoveredPath newer >>= right
       AR.activateAgentCheckpoint agents

@@ -962,7 +962,7 @@ response runtime@(Debugger ref _ _ _) core kind body d = do
         let source=fromMaybe Null (field "source" selected)
             title="Source "<>sourceLabel source<>" ["<>tshow (integer "sourceReference" source)<>"]"
             opened=addReadOnly title content d
-            bid=maybe (nextId d) bufferId (activeWindow opened)
+            bid=fromMaybe (nextId d) (activeWindow opened >>= bufferId)
             styled=opened {buffers=M.adjust (\doc -> doc {documentSuggestedName=Just (T.unpack (sourceLabel source))}) bid (buffers opened)}
         modifyIORef' ref (\state -> state {sources=M.insert bid source (sources state)})
         pure (position selected styled) {status="Stopped in "<>frameLabel selected}
@@ -1034,7 +1034,7 @@ position selected d
 sourceCurrent :: DebugSourceRequest -> Desktop -> IO Bool
 sourceCurrent request d=case (activeWindow d,activeDocument d) of
   (Just window,Just doc) | windowFocused d window, windowId window==debugSourceWindow request,
-      bufferId window==debugSourceBuffer request,selection window==debugSourceSelection request,
+      bufferId window==Just (debugSourceBuffer request),selection window==debugSourceSelection request,
       (filePath <$> documentFile doc)==debugSourceFile request,not (byteMode (documentBuffer doc))->
     versionCurrent (debugSourceVersion request) (documentBuffer doc)
   _->pure False
@@ -1078,7 +1078,7 @@ toggleBreakpoint runtime@(Debugger ref _ _ _) d = do
     (Just window,Just doc) -> do
       source<-case documentFile doc of
         Just file -> do path<-canonicalizePath (filePath file); pure (Just (object ["path" .= path]))
-        Nothing -> pure (M.lookup (bufferId window) (sources s))
+        Nothing -> pure (bufferId window >>= (`M.lookup` sources s))
       case source of
         Nothing -> pure d {status="Choose a source file or debugger source first."}
         Just src ->toggleBreakpointSource runtime src

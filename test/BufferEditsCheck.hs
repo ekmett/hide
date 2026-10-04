@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module BufferEditsCheck (checks) where
 
+import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Exception (evaluate)
 import Control.Monad (unless, forM_)
 import qualified Data.Map.Strict as M
@@ -15,14 +16,14 @@ checks=do
   let file=FileState "/project/Main.hs" (Just "first\nsecond\n")
       b=newBuffer "first\nsecond\n"
       d=addDocument (Just file) b (initialDesktop (80,25))
-      bid=maybe (error "missing window") bufferId (activeWindow d)
+      bid=maybe (error "missing window") sourceFixtureBuffer (activeWindow d)
   patch<-Edits.prepareEdit (Just bid) file b [(0,5,"changed")] >>= right
   duplicate<-Edits.commitEdits [patch,patch] d
   check "host rejects duplicate live targets before adopting any edit" (isLeft duplicate)
   let otherFile=FileState "/project/Other.hs" (Just "other\n")
       other=newBuffer "other\n"
       both=addDocument (Just otherFile) other d
-      otherId=maybe (error "missing other window") bufferId (activeWindow both)
+      otherId=maybe (error "missing other window") sourceFixtureBuffer (activeWindow both)
   second<-Edits.prepareEdit (Just otherId) otherFile other [(0,5,"updated")] >>= right
   (applied,changes)<-Edits.commitEdits [patch,second] both >>= right
   check "each target receives one ordinary Undo and remains unsaved"

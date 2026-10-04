@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module TestsMCPCheck (checks) where
 
+import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Concurrent (threadDelay)
 import Control.Exception (bracket)
 import Control.Monad (unless, when)
@@ -30,7 +31,7 @@ checks = bracket temporary removePathForcibly $ \root -> do
       check label ok=unless ok (error label)
       field key=parseMaybe (withObject "value" (.: key))
       report output active code failure=let d=addReadOnly "Test output" output initial
-        in testResults (object ["action" .= ("Test"::T.Text),"active" .= active,"exitCode" .= (code::Maybe Int),"error" .= (failure::Maybe T.Text),"bufferId" .= maybe (-1) bufferId (activeWindow d)]) (output,False) d
+        in testResults (object ["action" .= ("Test"::T.Text),"active" .= active,"exitCode" .= (code::Maybe Int),"error" .= (failure::Maybe T.Text),"bufferId" .= maybe (-1) sourceFixtureBuffer (activeWindow d)]) (output,False) d
       state output active code failure=field "state" (report output active code failure) :: Maybe T.Text
   noProject<-B.testPlan ghc root
   check "tests reject standalone files" (either (const True) (const False) noProject)

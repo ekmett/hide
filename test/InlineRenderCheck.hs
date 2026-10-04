@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module InlineRenderCheck (checks) where
 
+import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Exception (evaluate)
 import Control.Monad (forM_,unless)
 import Data.Foldable (toList)
@@ -29,8 +30,8 @@ checks=do
       base=modifyActive (\win->win {selection=Selection 11 11,bounds=Rect 0 1 70 18}) raw
       w=fromJust (activeWindow base)
       colored=base {buffers=M.adjust (\doc->doc {documentSourceRows=Just (Vec.fromList
-        [[(c,if c=='l' then Keyword else Literal) | c<-T.unpack row] | row<-T.lines source])}) (bufferId w) (buffers base)}
-      preview option=colored {inlinePreview=Just (InlineView (windowId w) (bufferId w) (revision b) (selection w) (inlineEpoch colored) [option] 0)}
+        [[(c,if c=='l' then Keyword else Literal) | c<-T.unpack row] | row<-T.lines source])}) (sourceFixtureBuffer w) (buffers base)}
+      preview option=colored {inlinePreview=Just (InlineView (windowId w) (sourceFixtureBuffer w) (revision b) (selection w) (inlineEpoch colored) [option] 0)}
       rows d=let win=fromJust (activeWindow d); Rect x y width' _=bounds win
              in map (\line->let content=T.drop (columnOffset line (x+1)) line in T.stripEnd (T.take (columnOffset content (width'-2)) content)) (take 8 (drop (y+1) (T.lines (snapshot d))))
   option<-either (error . T.unpack) pure (prepareOption b (Proposal 11 14 "new\nsecond" Nothing))
@@ -50,7 +51,7 @@ checks=do
       hasColor "d tai" (V.RGBColor 85 255 85) shown)
   forM_ [shown {inlineEpoch=inlineEpoch shown+1},
          modifyActive (\win->win {selection=Selection 12 12}) shown,
-         shown {buffers=M.adjust (\doc->doc {documentBuffer=replaceSelection (Selection 0 0) "edited " b}) (bufferId w) (buffers shown)},
+         shown {buffers=M.adjust (\doc->doc {documentBuffer=replaceSelection (Selection 0 0) "edited " b}) (sourceFixtureBuffer w) (buffers shown)},
          shown {menu=Just (0,0)},shown {composerFocused=True,problemsFocused=True}] $ \stale->
     check "stale or obstructed inline preview is not rendered" (snapshot stale==snapshot stale {inlinePreview=Nothing})
   let split=shown {windows=[w {bounds=Rect 0 1 35 18},w {windowId=windowId w+1,bounds=Rect 36 1 35 18}]}
@@ -67,7 +68,7 @@ checks=do
   check "tabs use the whole projected row column and Unicode remains intact"
     (rows (preview tabs)!!1=="let x   😀 tail")
   let opaqueHistory=shown {buffers=M.adjust (\doc->doc {documentBuffer=b
-        {undoStack=error "inline rendering forced Undo history",redoStack=error "inline rendering forced Redo history"}}) (bufferId w) (buffers shown)}
+        {undoStack=error "inline rendering forced Undo history",redoStack=error "inline rendering forced Redo history"}}) (sourceFixtureBuffer w) (buffers shown)}
   check "inline rendering does not inspect edit history" (rows opaqueHistory==rows shown)
   -- Identity capture must not inspect any option text or list tail.
   let opaque=shown {inlinePreview=fmap (\v->v {inlineOptions=error "render key forced inline proposals"}) (inlinePreview shown)}
@@ -78,7 +79,7 @@ checks=do
          opaque {inlinePreview=fmap (\v->v {inlineIndex=inlineIndex v+1}) (inlinePreview opaque)}] $ \changed->do
     next<-renderKey changed
     check "inline identity, dismissal and validation epoch invalidate redraw" (key/=next)
-  let hint=colored {buffers=M.adjust (\doc->doc {documentLabel=Just "Autocomplete"}) (bufferId w) (buffers colored),
+  let hint=colored {buffers=M.adjust (\doc->doc {documentLabel=Just "Autocomplete"}) (sourceFixtureBuffer w) (buffers colored),
         autocompleteACPEnabled=True,autocompleteDraft=newBuffer "    hint",autocompleteSelection=Selection 2 2,
         autocompleteFocused=True,composerBuffer=newBuffer "CHAT_ONLY",inlinePreview=Nothing}
       hintRect=autocompleteComposerRect hint w
