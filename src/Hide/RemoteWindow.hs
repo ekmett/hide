@@ -10,8 +10,7 @@ module Hide.RemoteWindow
   , nativeKeyInput, nativeEventInput, remoteMenuInput, pasteShortcut, sanitizeDownloadName
   , remoteInputAllowed, remoteCloseDetaches, remoteDetachShortcut, nativeRepaint) where
 import Control.Monad (unless)
-import Data.Maybe (listToMaybe)
-import Hide.Commands (commandAliases, commandIdentifier)
+import Hide.Commands (commandIdentifier)
 import Data.Aeson hiding (withArray)
 import qualified Data.Aeson.KeyMap as KM
 import Data.Aeson.Types (Parser, parseEither)
@@ -55,7 +54,7 @@ data RemoteFrame = RemoteFrame
   { remoteSize :: (Int,Int), remoteMode :: Maybe Int, remoteTitle :: T.Text
   , remoteCursor :: Maybe (Int,Int), remoteBlink :: Bool, remoteCRT :: Bool
   , remotePixelated :: Bool, remoteTerminal :: Bool, remoteWordStar :: Bool
-  , remoteMenus :: [Bool], remoteMenuNames :: [Maybe T.Text], remoteCells :: [RemoteCell]
+  , remoteMenus :: [Bool], remoteCells :: [RemoteCell]
   } deriving (Eq,Show)
 
 -- | Validate dimensions, ordered nonoverlapping spans, colors, cursor and widths
@@ -78,10 +77,9 @@ parseRemoteFrame metadata rows = parseEither (withObject "frame metadata" $ \o -
   supported <- o .:? "menuCommands" .!= [] :: Parser [T.Text]
   states <- o .:? "menuState" .!= [] :: Parser [(T.Text,Bool)]
   unless (length supported<=256 && length states<=256 && all ((<=256).T.length) (supported++map fst states)) (fail "Invalid menu state")
-  let names=[listToMaybe [name | name<-commandAliases cmd,name `elem` supported] | cmd<-menuActions]
-      enabled=[maybe False (\name -> lookup name states==Just True) ident | ident<-names]
+  let enabled=[maybe False (\name -> name `elem` supported && lookup name states==Just True) (commandIdentifier cmd) | cmd<-menuActions]
   cells <- concat <$> sequence [parseRow cols y row | (y,row) <- zip [0..] rows]
-  pure (RemoteFrame size mode title cursor blink crt pixelated terminal wordstar enabled names cells)) metadata
+  pure (RemoteFrame size mode title cursor blink crt pixelated terminal wordstar enabled cells)) metadata
   where
     parseRow cols y value = do
       spans <- parseJSON value :: Parser [(Int,Int,Int,[Value])]
@@ -143,12 +141,11 @@ nativeEventInput event = case event of
 menuActions :: [Command]
 menuActions = [cmd | (_,_,items)<-menus, MenuItem _ _ cmd<-items]
 
--- | Resolve a local menu slot against this peer's advertised names and state.
--- Prefer canonical IDs, but retain interoperability with pre-catalog servers.
+-- | Resolve a local menu slot against the server's named command state.
 remoteMenuInput :: RemoteFrame -> Int -> Maybe Value
 remoteMenuInput frame index
   | index>=0, True:_<-drop index (remoteMenus frame),
-    Just name:_<-drop index (remoteMenuNames frame) =
+    Just name:_<-drop index (map commandIdentifier menuActions) =
       Just (object ["type" .= ("menu"::T.Text),"command" .= name])
   | otherwise = Nothing
 

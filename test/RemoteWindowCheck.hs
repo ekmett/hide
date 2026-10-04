@@ -28,16 +28,14 @@ checks = do
   check "remote Unicode rows validate" (valid rows)
   let menuMeta fields=object (["size" .= ([80,25]::[Int]) ]++fields)
       states metadata=either (const []) remoteMenus (parseRemoteFrame metadata rows)
-  check "legacy menus are disabled without named metadata" (not (or (states (menuMeta ["menus" .= ([True,True]::[Bool])]))))
-  check "menu state requires advertised command capability" (not (or (states (menuMeta ["menuState" .= [("New"::T.Text,True)]]))))
-  check "menu enable state maps by command name across reordered layouts" (take 1 (states (menuMeta ["menuCommands" .= (["Quit","New"]::[T.Text]),"menuState" .= [("Quit"::T.Text,False),("New",True)]]))==[True])
+  check "menus are disabled without named metadata" (not (or (states (menuMeta []))))
+  check "menu state requires advertised command capability" (not (or (states (menuMeta ["menuState" .= [("hide.file.new"::T.Text,True)]]))))
+  check "menu enable state maps by command name across reordered layouts" (take 1 (states (menuMeta ["menuCommands" .= (["hide.app.quit","hide.file.new"]::[T.Text]),"menuState" .= [("hide.app.quit"::T.Text,False),("hide.file.new",True)]]))==[True])
   let remoteMenu metadata index= either (const Nothing) (\frame -> remoteMenuInput frame index) (parseRemoteFrame metadata rows)
-      canonicalMenu=menuMeta ["menuCommands" .= (["hide.file.new","New"]::[T.Text]),"menuState" .= [("hide.file.new"::T.Text,True),("New",False)]]
-      oldMenu=menuMeta ["menuCommands" .= (["New"]::[T.Text]),"menuState" .= [("New"::T.Text,True)]]
-  check "modern peer chooses canonical menu identity" (remoteMenu canonicalMenu 0==Just (object ["type" .= ("menu"::T.Text),"command" .= ("hide.file.new"::T.Text)]))
-  check "legacy peer retains its supported menu identity" (remoteMenu oldMenu 0==Just (object ["type" .= ("menu"::T.Text),"command" .= ("New"::T.Text)]))
-  check "invalid menu positions cannot alias the first command" (remoteMenu canonicalMenu (-1)==Nothing && remoteMenu canonicalMenu 10000==Nothing)
-  check "disabled canonical action cannot fall back to enabled legacy alias" (remoteMenu (menuMeta ["menuCommands" .= (["hide.file.new","New"]::[T.Text]),"menuState" .= [("hide.file.new"::T.Text,False),("New",True)]]) 0==Nothing)
+      enabledMenu=menuMeta ["menuCommands" .= (["hide.file.new"]::[T.Text]),"menuState" .= [("hide.file.new"::T.Text,True)]]
+  check "menu invocation uses its public identity" (remoteMenu enabledMenu 0==Just (object ["type" .= ("menu"::T.Text),"command" .= ("hide.file.new"::T.Text)]))
+  check "invalid menu positions cannot alias the first command" (remoteMenu enabledMenu (-1)==Nothing && remoteMenu enabledMenu 10000==Nothing)
+  check "disabled menu actions cannot be invoked" (remoteMenu (menuMeta ["menuCommands" .= (["hide.file.new"]::[T.Text]),"menuState" .= [("hide.file.new"::T.Text,False)]]) 0==Nothing)
   check "native menus send names rather than positions" (nativeEventInput [11,0]==Just (object ["type" .= ("menu"::T.Text),"command" .= ("hide.file.new"::T.Text)]))
   check "remote rows must match height" (not (valid (take 24 rows)))
   check "remote span overflow rejected" (not (valid (toJSON [(79::Int,0::Int,0::Int,[String "ab"])] : drop 1 rows)))
