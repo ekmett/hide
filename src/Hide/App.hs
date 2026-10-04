@@ -295,7 +295,7 @@ runEditor args = do
                     (quit,updated)<-policyEffects permissions core d pending
                     approvedExit<-readIORef exiting
                     pure (quit || approvedExit,updated)
-                  tick d=tickProjectBrowser projectBrowser d >>= tickGitOperations gitOperations applyEffects >>= tickTooling tooling applyEffects >>= tickReconciliation reconciliation (sidebarEffects sidebarHost applyEffects) >>= tickConversation conversation >>= tickDebugger debugger (toolingEffects tooling applyEffects) >>= tickPermissions permissions >>= tickHighlighting highlighting >>= tickAutocomplete autocomplete >>= tickKeybindings keybindings >>= tickMenus menuHost >>= tickDebuggerSidebar debugSidebar sidebarHost debugger >>= tickPackageSidebar packageSidebar sidebarHost >>= tickAgentSidebar agentSidebar sidebarHost >>= tickSessionSidebar sessionSidebar sidebarHost >>= tickSidebar sidebarHost runtimeEffects >>= tickPluginWindows
+                  tick d=tickProjectBrowser projectBrowser d >>= tickGitOperations gitOperations applyEffects >>= tickTooling tooling applyEffects >>= tickReconciliation reconciliation (sidebarEffects sidebarHost applyEffects) >>= tickConversation conversation >>= tickDebugger debugger (toolingEffects tooling applyEffects) >>= tickPermissions permissions >>= tickHighlighting highlighting >>= tickAutocomplete autocomplete >>= tickKeybindings keybindings >>= tickMenus menuHost runtimeEffects >>= tickDebuggerSidebar debugSidebar sidebarHost debugger >>= tickPackageSidebar packageSidebar sidebarHost >>= tickAgentSidebar agentSidebar sidebarHost >>= tickSessionSidebar sessionSidebar sidebarHost >>= tickSidebar sidebarHost runtimeEffects >>= tickPluginWindows
                   inspectTool d name parameters
                     | name `elem` ["list_windows","list_buffers","read_buffer","read_selection"] = pure (d,pure (builtinTool d name parameters))
                     | name `elem` chatToolNames = chatTool conversation d name parameters
@@ -322,6 +322,8 @@ runEditor args = do
                     let permitted callback current name parameters
                           | name=="read_buffer" = readBufferTool bufferCommands (bufferReader permissions currentCaller) current name parameters
                           | name=="buffer_apply_diff" = bufferDiffTool diffCommands (bufferEditor permissions currentCaller) current name parameters
+                          | name=="ask_user",Nothing<-token = pure (current,pure (Left "ask_user requires the authenticated requesting agent."))
+                          | name=="ask_user" = permissionCallAs currentCaller permissions callback current name parameters
                           | otherwise = permissionCall permissions callback current name parameters
                         currentCaller=case token of
                           Nothing->pure (Right ())
@@ -338,8 +340,12 @@ runEditor args = do
                             case active >>= maybe (Left "Unknown workspace.") Right . parseMaybe (withObject "agent" (.: "cwd")) of
                               Left _ -> reject
                               Right root -> do
+                                questionCaller<-captureQuestionCaller conversation ident
                                 let dispatch current name parameters
                                       | name `elem` agentToolNames = pure (current,agentTool hub (AH.Agent ident) root name parameters)
+                                      | name `elem` chatToolNames = case questionCaller of
+                                          Left err->pure (current,pure (Left err))
+                                          Right caller->chatToolAs conversation (Just caller) current name parameters
                                       | otherwise = inspectTool current name parameters
                                     -- Worktree agents reach this endpoint only for
                                     -- coordination. Their editor tools use their own session.
@@ -617,6 +623,7 @@ applyEffects = foldM apply . (False,)
         if exists then apply (False,d {dialog=Nothing}) (ReadPath path)
         else pure (False,browserError "File not found." d)
     apply (_,d) (ReadTree path)=pure (False,installSidebar (sidebarDirectory path d) d)
+    apply (_,d) DebugSourceAction{}=pure (False,d {status="Debugger source actions are unavailable in this preview."})
     apply (_,d) DebugSidebarAction{}=pure (False,d {status="Debugger sidebar is unavailable in this preview."})
     apply (_,d) SessionSidebarAction{}=pure (False,d {status="Session selection is unavailable in this preview."})
     apply (_,d) AgentSidebarAction{}=pure (False,d {status="Agent navigation is unavailable in this preview."})

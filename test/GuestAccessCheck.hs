@@ -2,6 +2,9 @@
 module GuestAccessCheck (checks) where
 import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Monad (unless,forM_)
+import Data.Aeson (object,(.=),withObject,(.:))
+import Data.Aeson.Types (parseMaybe)
+import Hide.ControlMCP (controlTool)
 import qualified Data.Map.Strict as M
 import qualified Data.Text as T
 import qualified Graphics.Vty as V
@@ -29,11 +32,36 @@ checks=do
       ident=sourceFixtureBuffer window
       Rect x y _ _=bounds window
       draft=composerRect chat window
-      denied d event=case P.applyGuestInput event d of Left _->True; _->False
+      denied d event=either (const True) (const False) <$> P.applyGuestInput event d
+      checkDenied label d events=forM_ events $ \event->check label =<< denied d event
+  let poison=(newBuffer "retained live tree") {saved=error "guest guard forced baseline",undoStack=error "guest guard forced Undo",redoStack=error "guest guard forced Redo"}
+      hidden=(newDocument poison Nothing) {documentLabel=Just "Agent request",documentHighlight=error "guest guard forced highlighting",documentSourceRows=error "guest guard forced source rows"}
+      q=ChatQuestion 42 "Human question" ["Yes"] Nothing poison (Selection 0 0) False
+      conflict=Conflict 1 0 (FileState "/public/source.hs" (Just (error "guest guard forced disk baseline"))) (Just (error "guest guard forced disk conflict"))
+      retained=base {buffers=M.insert 99 hidden (buffers base),composerBuffer=poison,autocompleteDraft=poison,chatQuestion=Just q,
+        dialog=Just (Dialog "Conflict" (DiskConflict conflict) [Input "Name" "source.hs" 0] 0 ["OK"] [])}
+  (_,reply)<-controlTool (\d _->pure (False,d)) retained "editor_input"
+    (object ["events" .= [object ["type" .= ("blur"::T.Text)]]])
+  outcome<-reply
+  check "actual guest input never forces hidden protected payloads"
+    (case outcome of Right value->parseMaybe (withObject "reply" (.: "appliedEvents")) value==Just (1::Int); _->False)
+  forM_ [retained {buffers=M.adjust (\doc->doc {documentBuffer=newBuffer "replacement"}) 99 (buffers retained)},
+         retained {buffers=M.adjust (\doc->doc {documentLabel=Just "Public"}) 99 (buffers retained)},
+         retained {buffers=M.delete 99 (buffers retained)},
+         retained {composerBuffer=newBuffer "replacement"},
+         retained {autocompleteDraft=newBuffer "replacement"},
+         retained {chatQuestion=Just q {questionBuffer=newBuffer "replacement"}}] $ \changed->
+    check "protected replacement rejects unchanged numeric revisions" . not =<< guestTransitionAllowed retained changed []
+  let publicInput=retained {dialog=Nothing,chatQuestion=Nothing}
+  (_,typedReply)<-controlTool (\d _->pure (False,d)) publicInput "editor_input"
+    (object ["events" .= [object ["type" .= ("key"::T.Text),"key" .= ("x"::T.Text)]]])
+  typedOutcome<-typedReply
+  check "ordinary guest editing retains hidden protected identity"
+    (case typedOutcome of Right value->parseMaybe (withObject "reply" (.: "appliedEvents")) value==Just (1::Int); _->False)
   let bindings=either (error . show) id (platformBindings [] TerminalPlatform (M.singleton "source" (M.singleton "hide.options.agent-permissions" ["Ctrl+Shift+P"])))
-  check "rebound protected command retains agent policy" (denied base {keyBindings=bindings} (P.Key "p" [V.MCtrl,V.MShift]))
+  checkDenied "rebound protected command retains agent policy" base {keyBindings=bindings} [P.Key "p" [V.MCtrl,V.MShift]]
   let macBindings=either (error . show) id (configuredBindings [] (M.singleton "macos" (M.singleton "source" (M.singleton "hide.options.agent-permissions" ["Cmd+Shift+P"]))))
-  check "Command remap preserves protected host policy" (denied base {keyBindings=macBindings,nativeMac=True,videoMode=Just 3} (P.Key "p" [V.MMeta,V.MShift]))
+  checkDenied "Command remap preserves protected host policy" base {keyBindings=macBindings,nativeMac=True,videoMode=Just 3} [P.Key "p" [V.MMeta,V.MShift]]
   let terminal=addReadOnly "Terminal hidden" "old output" base
       terminalId=maybe (error "terminal missing") windowId (activeWindow terminal)
       docked=setTerminalPinned True terminalId terminal
@@ -47,9 +75,9 @@ checks=do
       approvalWindow=maybe (error "approval missing") id (activeWindow hiddenFirst)
       approvalX=left (bounds approvalWindow)+2; approvalY=top (bounds approvalWindow)+2
   check "hidden pinned terminal cannot mask approval privacy or intercept its coordinates"
-    (windowId approvalWindow==approvalId && not (readableAt hiddenFirst approvalX approvalY) && not (pointerAllowedAt hiddenFirst approvalX approvalY) &&
-     denied hiddenFirst (P.Mouse "down" approvalX approvalY 0 1 []))
-  check "agents cannot stop the editor session" (denied base P.SuspendSession)
+    (windowId approvalWindow==approvalId && not (readableAt hiddenFirst approvalX approvalY) && not (pointerAllowedAt hiddenFirst approvalX approvalY))
+  checkDenied "hidden approval rejects pointer input" hiddenFirst [P.Mouse "down" approvalX approvalY 0 1 []]
+  checkDenied "agents cannot stop the editor session" base [P.SuspendSession]
   check "guest Git review uses filtered workspace tool, not unrestricted human review"
     (not (guestCommandAllowed GitDiff) && not (guestCommandAllowed GitCommit) &&
      all (not . guestEffectsAllowed . pure) [ReadGitDiff,AskGitCommit,WriteGitCommit "message"])
@@ -60,18 +88,19 @@ checks=do
   check "whole conversation window is not clickable, even blank composer space"
     (not (pointerAllowedAt chat (x+2) (y+2)) && not (pointerAllowedAt chat (x+2) (top draft)))
   forM_ [P.Key "Enter" [],P.Key "x" [],P.Paste "answer",P.Mouse "down" (left draft) (top draft) 0 1 [],P.Mouse "down" (x+2) (top draft) 0 1 []] $ \event ->
-    check "guest cannot type or click into human draft/answer controls" (denied chat event)
-  let (human,_) = P.applyInputFrom HumanInput (P.Paste "human") chat
+    checkDenied "guest cannot type or click into human draft/answer controls" chat [event]
+  let (human,_) = P.applyInput (P.Paste "human") chat
   check "human input still edits the conversation draft" (contents (composerBuffer human)/=contents (composerBuffer chat))
-  let moved=P.applyInputFrom GuestInput (P.Key "F6" []) chat
+  moved<-either (error . T.unpack) pure =<< P.applyGuestInput (P.Key "F6" []) chat
   check "guest may focus a normal window away from conversation" (maybe False (not . protectedBuffer (fst moved) . sourceFixtureBuffer) (activeWindow (fst moved)))
   forM_ ["Agent request","Proposed agent edit","Git diff","Disk changes: /example/thc.toml"] $ \label -> do
     let review=addReadOnly label "private review" base
         bid=maybe (-1) sourceFixtureBuffer (activeWindow review)
-    check "private review text is unavailable to generic buffer reads" (protectedBuffer review bid && sanitizedBuffer review bid==Nothing && denied review (P.Key "c" [V.MCtrl]))
+    check "private review text is unavailable to generic buffer reads" (protectedBuffer review bid && sanitizedBuffer review bid==Nothing)
+    checkDenied "private review rejects Copy" review [P.Key "c" [V.MCtrl]]
   forM_ [AgentDialog "configure",AgentDialog "load",AgentDialog "approval:2",PermissionDialog "approve:2",DiscardDraft] $ \p -> do
     let d=base {dialog=Just (Dialog "Human control" p [Input "Session ID" "secret" 6] 0 ["OK","Cancel"] [])}
-    check "sensitive modal blocks every guest event, including Escape/blur" (all (denied d) [P.Key "Enter" [],P.Key "Escape" [],P.Paste "x",P.Blur,P.Mouse "down" 0 0 0 1 []])
+    checkDenied "sensitive modal blocks every guest event, including Escape/blur" d [P.Key "Enter" [],P.Key "Escape" [],P.Paste "x",P.Blur,P.Mouse "down" 0 0 0 1 []]
     let dg=maybe (error "dialog") id (dialog d); r=firstRect d dg
     case p of
       PermissionDialog{} -> check "permission controls are entirely private" (not (readableAt d (left r) (top r)) && not (readableAt d (left r) (top r+1)))
@@ -86,25 +115,29 @@ checks=do
       chatRect=firstRect chatPrefs chatDialog
   check "chat input defaults are public but human-controlled"
     (readableAt chatPrefs (left chatRect) (top chatRect+1) && not (pointerAllowedAt chatPrefs (left chatRect) (top chatRect+1)) &&
-     not (guestCommandAllowed ChatInputOptions) && not (guestEffectsAllowed [SaveChatSubmit SteerSubmit]) &&
-     all (denied chatPrefs) [P.Key "Enter" [],P.Key "ArrowDown" [],P.Key "Escape" [],P.Blur] &&
-     not (guestTransitionAllowed base (base {chatSubmit=SteerSubmit}) []))
+     not (guestCommandAllowed ChatInputOptions) && not (guestEffectsAllowed [SaveChatSubmit SteerSubmit]))
+  checkDenied "chat preferences reject guest input" chatPrefs [P.Key "Enter" [],P.Key "ArrowDown" [],P.Key "Escape" [],P.Blur]
+  check "chat submit changes reject guest transitions" . not =<< guestTransitionAllowed base (base {chatSubmit=SteerSubmit}) []
   let prefs=Dialog "Preferences" Settings [CheckBox "Streamer mode" False] 0 ["OK","Cancel"] []
       pd=base {dialog=Just prefs}
       pr=firstRect pd prefs
   check "guest cannot alter Streamer checkbox by pointer or keyboard"
-    (not (pointerAllowedAt pd (left pr) (top pr)) && denied pd (P.Key " " []))
-  let secretDialog=Dialog "Service" Widgets [Input "API key" "human key" 0,Input "Public name" "" 0] 0 ["OK"] []
-      secretDesktop=base {dialog=Just secretDialog}
-      secretRect=firstRect secretDesktop secretDialog
-  check "secret fields in otherwise ordinary dialogs are readable-label only and immutable"
-    (not (pointerAllowedAt secretDesktop (left secretRect) (top secretRect+1)) && denied secretDesktop (P.Paste "guest key") && denied secretDesktop (P.Key "x" []) && not (denied secretDesktop (P.Key "Tab" [])))
+    (not (pointerAllowedAt pd (left pr) (top pr)))
+  checkDenied "Streamer checkbox rejects keyboard" pd [P.Key " " []]
+  forM_ [Input "API key" "human key" 0,SelectedInput "API key" "human key" (Selection 0 9)] $ \secretField -> do
+    let secretDialog=Dialog "Service" Widgets [secretField,Input "Public name" "" 0] 0 ["OK"] []
+        secretDesktop=base {dialog=Just secretDialog}
+        secretRect=firstRect secretDesktop secretDialog
+    check "secret fields in otherwise ordinary dialogs are readable-label only and immutable"
+      (not (readableAt secretDesktop (left secretRect) (top secretRect+1)) && not (pointerAllowedAt secretDesktop (left secretRect) (top secretRect+1)))
+    checkDenied "private value rejects text input" secretDesktop [P.Paste "guest key",P.Key "x" []]
+    check "private value allows field navigation" . not =<< denied secretDesktop (P.Key "Tab" [])
   let option=AgentSetting "apiKey" "API key" "authentication" "private-token" []
       dropdown=base {agentSettings=[option],contextMenu=Just (Rect 2 2 40 4,0),contextKind=AgentContext [("API key  private-token",AgentChoose "apiKey")]}
   check "agent dropdown public labels stay readable but secret values do not"
     (readableAt dropdown 4 3 && not (readableAt dropdown 14 3) && not (pointerAllowedAt dropdown 4 3))
-  check "ordinary preferences and build dialogs remain usable"
-    (not (denied base {dialog=Just (Dialog "Find" (Searching False "") [Input "Text" "" 0] 0 ["Find"] [])} (P.Paste "needle")) && guestEffectsAllowed [AgentAction "make" [],AgentAction "run-config" [],AgentAction "terminal-input" ["1","ls\n"]])
+  check "ordinary preferences remain usable" . not =<< denied base {dialog=Just (Dialog "Find" (Searching False "") [Input "Text" "" 0] 0 ["Find"] [])} (P.Paste "needle")
+  check "build dialogs remain usable" (guestEffectsAllowed [AgentAction "make" [],AgentAction "run-config" [],AgentAction "terminal-input" ["1","ls\n"]])
   check "agent lifecycle and permission effects are rejected"
     (not (guestEffectsAllowed [AgentAction "send-draft" []]) && not (guestEffectsAllowed [AgentAction "question-submit" []]) && not (guestEffectsAllowed [PermissionAction "show" []]))
   let sticky=base {prefix=Just 'k',heldModifiers=[V.MCtrl],drag=Just (Selecting 0),buttonPressed=Just 0,clipboard="human secret",clipboardCode=Just "human secret",blockStart=Just (0,0)}
@@ -124,7 +157,19 @@ checks=do
       privateId=sourceFixtureBuffer privateWindow
       Rect px py _ _=bounds privateWindow
   check "host authority paths protect human-open buffers and input"
-    (protectedBuffer privateSource privateId && sanitizedBuffer privateSource privateId==Nothing && denied privateSource (P.Paste "replace") && not (readableAt privateSource (px+2) (py+2)) && not (streamerReadableAt privateSource (px+2) (py+2)))
+    (protectedBuffer privateSource privateId && sanitizedBuffer privateSource privateId==Nothing && not (readableAt privateSource (px+2) (py+2)) && not (streamerReadableAt privateSource (px+2) (py+2)))
+  checkDenied "private source rejects pasted text" privateSource [P.Paste "replace"]
+  let child=addDocument (Just (FileState "/authority/nested/secret.hs" Nothing)) (newBuffer "private") base {guestPrivatePaths=["/authority"],streamerMode=True}
+      projectConfig=addDocument (Just (FileState "/project/THC.toml" Nothing)) (newBuffer "private") base {streamerMode=True}
+  check "streamer titles share canonical descendant and project-authority rules"
+    (applicationTitle "/" child=="th [private]" && applicationTitle "/" projectConfig=="th [private]")
+  let messages=(setProblemsVisible True base {guestPrivatePaths=["/authority"],
+        diagnostics=[Diagnostic "/authority/secret.hs" Nothing 0 0 1 "secret-diagnostic-payload"]}) {problemsFocused=True}
+      Rect mx my _ _=problemsRect messages
+  check "protected diagnostic rows are unavailable to agent input" (not (readableAt messages (mx+2) (my+1)))
+  checkDenied "protected Messages reject copy actions" messages
+    ([P.Key "c" [V.MCtrl],P.MenuCommand CopyAllMessages]++
+     [P.Mouse "down" (left r) (top r) 0 1 [] | (r,_,Left c)<-statusItemRects messages,c `elem` [Copy,CopyAllMessages]])
   let saveAs=fst (runCommand SaveAs privateSource)
       saveDialog=maybe (error "missing Save As dialog") id (dialog saveAs)
       saveRect=firstRect saveAs saveDialog
@@ -137,7 +182,8 @@ checks=do
     (readableAt publicSave (left publicRect+1) (top publicRect+1) && streamerReadableAt publicSave (left publicRect+1) (top publicRect+1))
   let privateDestination=publicSave {guestPrivatePaths=[privatePath],dialog=Just publicDialog {fields=[Input "Name" (T.pack privatePath) (length privatePath)]}}
   check "guest cannot edit a masked Save As destination to reveal its prefix"
-    (denied privateDestination (P.Key "Backspace" []) && not (pointerAllowedAt privateDestination (left publicRect+1) (top publicRect+1)))
+    (not (pointerAllowedAt privateDestination (left publicRect+1) (top publicRect+1)))
+  checkDenied "private save destination rejects editing" privateDestination [P.Key "Backspace" []]
   check "private path guards include ancestors without prefix sibling confusion"
     (protectedPath privateSource privatePath && protectedPathParent privateSource "/authority" && not (protectedPath privateSource "/authority/config.toml.example") && not (protectedPathParent privateSource "/authority-sibling"))
   privateTree<-sidebarFixture "/authority" [("config.toml",privatePath),("public.hs","/authority/public.hs")] base {guestPrivatePaths=[privatePath]}
@@ -149,4 +195,11 @@ checks=do
       fileRect=case fieldRects browser browserDialog of _:r:_->r; _->error "missing browser list"
   check "private browser names and selected details share guest and Streamer masks"
     (not (readableAt browser (left fileRect+2) (top fileRect+2)) && not (streamerReadableAt browser (left fileRect+2) (top fileRect+12)) && readableAt browser (left fileRect+2) (top fileRect+3))
+  forM_ [Opening "/authority" "*" [],ChangingDirectory "/authority" []] $ \browserPurpose ->
+    forM_ [Input "Name" "/authority/secret.hs" 0,SelectedInput "Name" "/authority/secret.hs" (Selection 0 20)] $ \nameField -> do
+      let dg=Dialog "Browser" browserPurpose [nameField] 0 ["OK"] []
+          view=base {dialog=Just dg,guestPrivatePaths=["/authority"]}
+          r=firstRect view dg
+      check "browser text widgets share protected pathname masks"
+        (not (readableAt view (left r) (top r+1)) && not (streamerReadableAt view (left r) (top r+1)))
   putStrLn "guest access checks passed"

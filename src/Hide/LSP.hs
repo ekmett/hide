@@ -32,6 +32,8 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Data.Text.Encoding.Error (lenientDecode)
 import Numeric (readHex, showHex)
+import System.Directory (canonicalizePath)
+import System.IO.Error (tryIOError)
 import System.Environment (lookupEnv)
 import System.IO
 import System.Process
@@ -117,7 +119,13 @@ startClient root = mask $ \restore -> do
             Nothing -> when (method == "textDocument/publishDiagnostics") $ do
               let params = fromMaybe Null (field "params" value)
               case (field "uri" params >>= uriFilePath, field "diagnostics" params) of
-                (Just path, Just diagnostics) -> emit (Diagnostics path (field "version" params) diagnostics)
+                (Just path, Just diagnostics) -> do
+                  -- Resolve provenance on the transport worker, never during
+                  -- painting or a policy check on the interaction thread.
+                  resolved<-tryIOError (canonicalizePath path)
+                  case resolved of
+                    Right source->emit (Diagnostics source (field "version" params) diagnostics)
+                    Left _->emit (ServerError "Cannot resolve diagnostic source path.")
                 _ -> pure ()
           Nothing -> case field "id" value :: Maybe Int of
             Just 0 -> do

@@ -9,12 +9,15 @@
 module Hide.GuestAccess
   ( InputOrigin(..), CellAccess(..), cellAccess, readableAt, pointerAllowedAt
   , streamerReadableAt, sensitiveLabel, sanitizedStatus, protectedPath, protectedFilePath, protectedPathParent, protectedBuffer, protectedWindow, privateDocument, sanitizedBuffer, sanitizedBufferContent
-  , validateGuestEffects, guestCommandAllowed, guestEffectsAllowed, guestKeyboardAllowed, guestKeyAllowed, guestKeyCombinations
+  , validateGuestEffects, guestCommandAllowed, guestCommandAllowedIn, guestEffectsAllowed, guestKeyboardAllowed, guestKeyAllowed, guestKeyCombinations
   , guestModalBlocked, guestTransitionAllowed, beginGuestInput, endGuestInput
   ) where
+import Control.Exception (evaluate)
+import Control.Monad (foldM,when)
+import System.Mem.StableName (makeStableName)
+import qualified Hide.Plugin.BufferHost as BufferHost
 import Hide.Sidebar
 import qualified Hide.Plugin.Tree as Tree
-import Control.Monad (when)
 import System.Directory (canonicalizePath)
 import Data.Char (toLower)
 import Data.List (find)
@@ -23,12 +26,12 @@ import Data.Maybe (isJust)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Graphics.Vty as V
-import System.FilePath ((</>), isAbsolute, makeRelative, splitDirectories, normalise, takeFileName)
+import System.FilePath ((</>), isAbsolute, normalise)
 import Hide.Browser (Entry(..))
-import Hide.Files (filePath)
 import Hide.Buffer
 import qualified Hide.Plugin.Menu as Plugin
 import Hide.Model
+import Hide.Privacy (protectedFilePath,pathContains)
 
 -- | Trusted host attribution; never accept an origin claimed by input JSON.
 data InputOrigin = HumanInput | GuestInput deriving (Eq,Show)
@@ -46,25 +49,9 @@ protectedWindow d w=case bufferId w of Just bid->protectedBuffer d bid; Nothing-
 protectedPath :: Desktop -> FilePath -> Bool
 protectedPath d=protectedFilePath (guestPrivatePaths d)
 
--- | The same canonical-path policy on a captured immutable authority projection.
--- Workers can apply it without retaining a mutable desktop or its payloads.
-protectedFilePath :: [FilePath] -> FilePath -> Bool
-protectedFilePath privatePaths path=map toLower (takeFileName path)=="thc.toml" || any (`pathContains` path) privatePaths
-
 -- | Also protect ancestors whose removal could destroy authority stores.
 protectedPathParent :: Desktop -> FilePath -> Bool
 protectedPathParent d path=protectedPath d path || any (pathContains path) (guestPrivatePaths d)
-
-pathContains :: FilePath -> FilePath -> Bool
-pathContains root path=let relative=makeRelative root path in not (isAbsolute relative) && ".." `notElem` splitDirectories relative
-
-privateDocument :: Desktop -> Document -> Bool
--- Human Git review can contain authority files; guests use workspace_git's
--- filtered result instead of inheriting the unrestricted review buffer.
-privateDocument d doc=maybe False privateLabel (documentLabel doc) || maybe False (protectedPath d . filePath) (documentFile doc)
-  where
-    privateLabel "Git diff"=True
-    privateLabel label=maybe False (protectedPath d . T.unpack) (T.stripPrefix "Disk changes: " label)
 
 -- | Omit private documents and blank private conversation spans, preserving offsets.
 sanitizedBuffer :: Desktop -> Int -> Maybe Text
@@ -101,7 +88,7 @@ sessionOffset text n="Session: " `T.isPrefixOf` text && n<T.length (T.takeWhile 
 guestCommandAllowed :: Command -> Bool
 guestCommandAllowed cmd=case cmd of
   RegisteredMenu _ allowed -> allowed
-  DebugCommand action | privateDownloadAction action -> False
+  DebugCommand action | privateDebuggerAction action -> False
   GitDiff -> False
   GitCommit -> False
   AgentChoose{} -> False
@@ -122,6 +109,15 @@ guestCommandAllowed cmd=case cmd of
   AgentCopyRaw -> False
   AgentNew -> False
   _ -> True
+-- | Context-sensitive read checks also cover clipboard commands, which produce
+-- no filesystem effect. Screen masks alone cannot protect Messages copy actions.
+guestCommandAllowedIn :: Desktop -> Command -> Bool
+guestCommandAllowedIn d cmd=guestCommandAllowed cmd && case cmd of
+  Copy | messagesDisplayed d && problemsFocused d->all public (take 1 (drop (problemsSelected d) (diagnostics d)))
+  CopyAllMessages->all public (diagnostics d)
+  _->True
+  where public=not . protectedPath d . diagnosticPath
+
 -- | Validate resolved filesystem effects before agent-facing dispatch. Delayed
 -- contributions retain their host-captured location; workers/adoption recheck
 -- prepared canonical targets against their owning current policy as well.
@@ -167,7 +163,7 @@ guestEffectsAllowed=all allowed
     allowed PermissionAction{}=False
     allowed SaveChatSubmit{}=False
     allowed AutocompleteAction{}=False
-    allowed (DebugAction action _)=not (privateDownloadAction action)
+    allowed (DebugAction action _)=not (privateDebuggerAction action)
     allowed (AgentAction action _)=agentActionAllowed action
     allowed (SaveDocument _ _ follow)=maybe True guestCommandAllowed follow
     allowed ReadBrowserClipboard=False
@@ -183,13 +179,20 @@ protectedPurpose p=case p of
   PermissionDialog{} -> True
   ChatInputSettings -> True
   AutocompleteDialog{} -> True
-  DebugDialog action -> privateDownloadAction action
+  DebugSourceWatchDialog{} -> True
+  DebugDialog action -> privateDebuggerAction action
   AgentDialog action -> not (agentActionAllowed action)
   DiscardDraft -> True
   Confirm command -> not (guestCommandAllowed command)
   _ -> False
-privateDownloadAction :: Text -> Bool
-privateDownloadAction action=action=="downloads" || "hdb-" `T.isPrefixOf` action
+privateDebuggerAction :: Text -> Bool
+-- Frame chooser labels are adapter metadata, not prepared public semantic rows.
+-- Keep the host-owned chooser private until it carries canonical row provenance.
+privateDebuggerAction action=action=="downloads" || "hdb-" `T.isPrefixOf` action || privateFrameChooserAction action
+privateFrameChooserAction :: Text -> Bool
+privateFrameChooserAction action=case T.splitOn ":" action of
+  ["select",_,_,"frame"]->True
+  _->False
 
 guestModalBlocked :: Desktop -> Bool
 guestModalBlocked d=maybe False (protectedPurpose . purpose) (dialog d) || case (contextMenu d,contextKind d) of
@@ -198,7 +201,7 @@ guestModalBlocked d=maybe False (protectedPurpose . purpose) (dialog d) || case 
 guestKeyboardAllowed :: Desktop -> Bool
 guestKeyboardAllowed d=not (guestModalBlocked d) && not (focusedPrivateField d) && (isJust (dialog d) || problemsFocused d || maybe False treeFocused (sideTree d) || maybe True (not . protectedWindow d) (activeWindow d))
 guestKeyAllowed :: Desktop -> V.Key -> [V.Modifier] -> Bool
-guestKeyAllowed d key mods=maybe True guestCommandAllowed (boundKeyCommand key mods d) && not (guestModalBlocked d) && (guestKeyboardAllowed d || navigation || fieldNavigation)
+guestKeyAllowed d key mods=maybe True (guestCommandAllowedIn d) (boundKeyCommand key mods d) && not (guestModalBlocked d) && (guestKeyboardAllowed d || navigation || fieldNavigation)
   where
     fieldNavigation=isJust (dialog d) && key `elem` [V.KChar '\t',V.KBackTab,V.KEsc]
     navigation=dialog d==Nothing && (key==V.KFun 6 || key `elem` [V.KChar '\t',V.KBackTab] && any (`elem` mods) [V.MCtrl,V.MAlt] || V.MAlt `elem` mods && case key of V.KChar c -> c>='1' && c<='9'; _ -> False)
@@ -208,26 +211,52 @@ guestKeyAllowed d key mods=maybe True guestCommandAllowed (boundKeyCommand key m
 guestKeyCombinations :: [(Text,[V.Modifier])]
 guestKeyCombinations=[(key,mods) | key<-["Enter","Escape","Tab","ArrowUp","ArrowDown","ArrowLeft","ArrowRight","Home","End","PageUp","PageDown","Backspace","Delete","Insert"]++["F"<>T.pack (show n) | n<-[1::Int ..24]],mods<-[[],[V.MShift],[V.MCtrl],[V.MAlt]]]++[(T.singleton c,mods) | c<-['a'..'z']++['1'..'9']++[' '],mods<-[[V.MCtrl],[V.MAlt]]]
 
--- Effects alone miss widgets which mutate directly, including draft edits,
--- question choices, settings checkboxes and discard confirmation.
-guestTransitionAllowed :: Desktop -> Desktop -> [Effect] -> Bool
-guestTransitionAllowed before after effects=guestEffectsAllowed effects && not (guestModalBlocked after) &&
-  streamerMode before==streamerMode after && chatSubmit before==chatSubmit after && privateFieldsUnchanged before after && composerBuffer before==composerBuffer after &&
-  composerSelection before==composerSelection after && chatQuestion before==chatQuestion after &&
-  autocompleteACPEnabled before==autocompleteACPEnabled after &&
-  revision (autocompleteDraft before)==revision (autocompleteDraft after) &&
-  autocompleteSelection before==autocompleteSelection after && autocompleteFocused before==autocompleteFocused after &&
-  agentSettings before==agentSettings after && childAgentSettings before==childAgentSettings after &&
-  childAgentSteering before==childAgentSteering after && childAgentContextUsage before==childAgentContextUsage after &&
-  all (\(bid,doc)->not (protectedBuffer before bid) || M.lookup bid (buffers after)==Just doc) (M.toList (buffers before))
+-- | Validate a proposed guest transition while the owning session is serialized.
+-- Only small UI metadata is compared structurally. Immutable protected documents,
+-- drafts and questions use constructor identities; equal revisions alone do not
+-- establish unchanged content. Capture evaluates WHNF, never text or Undo.
+-- Conservatively reject replacement of a protected document, including metadata.
+guestTransitionAllowed :: Desktop -> Desktop -> [Effect] -> IO Bool
+guestTransitionAllowed before after effects
+  | not metadataUnchanged = pure False
+  | otherwise = do
+      composer<-sameContent (composerBuffer before) (composerBuffer after)
+      autocomplete<-sameContent (autocompleteDraft before) (autocompleteDraft after)
+      question<-case (chatQuestion before,chatQuestion after) of
+        (Nothing,Nothing)->pure True
+        (Just a,Just b)->sameConstructor a b
+        _->pure False
+      if not (composer && autocomplete && question) then pure False else
+        foldM unchanged True (M.toList (buffers before))
+  where
+    metadataUnchanged=guestEffectsAllowed effects && not (guestModalBlocked after) &&
+      streamerMode before==streamerMode after && chatSubmit before==chatSubmit after && privateFieldsUnchanged before after &&
+      composerSelection before==composerSelection after &&
+      autocompleteACPEnabled before==autocompleteACPEnabled after &&
+      autocompleteSelection before==autocompleteSelection after && autocompleteFocused before==autocompleteFocused after &&
+      agentSettings before==agentSettings after && childAgentSettings before==childAgentSettings after &&
+      childAgentSteering before==childAgentSteering after && childAgentContextUsage before==childAgentContextUsage after
+    sameContent a b=BufferHost.captureVersion a >>= \version->BufferHost.versionCurrent version b
+    sameConstructor a b=(==) <$> (evaluate a >>= makeStableName) <*> (evaluate b >>= makeStableName)
+    unchanged False _=pure False
+    unchanged True (bid,doc)
+      | not (protectedBuffer before bid)=pure True
+      | Just next<-M.lookup bid (buffers after)=sameConstructor doc next
+      | otherwise=pure False
+
+-- Both text-entry widgets carry the same privacy semantics; selection is UI state.
+inputValue :: Field -> Maybe (Text,Text)
+inputValue (Input label value _)=Just (label,value)
+inputValue (SelectedInput label value _)=Just (label,value)
+inputValue _=Nothing
 
 privateField :: Field -> Bool
-privateField (Input label _ _)=sensitiveLabel label
+privateField field | Just (label,_)<-inputValue field=sensitiveLabel label
 privateField (CheckBox "Streamer mode" _)=True
 privateField _=False
 privateDialogField :: Desktop -> Dialog -> Field -> Bool
-privateDialogField d dg field=privateField field || case field of
-  Input _ value _ -> case purpose dg of
+privateDialogField d dg field=privateSourceWatch d dg || privateField field || case inputValue field of
+  Just (_,value) -> case purpose dg of
     Opening base _ _ -> privateName base value
     ChangingDirectory base _ -> privateName base value
     Saving bid _ -> protectedBuffer d bid || privateName (startingDirectory d) value
@@ -235,15 +264,24 @@ privateDialogField d dg field=privateField field || case field of
   _ -> False
   where
     privateName base value=let name=T.unpack value in protectedPath d (normalise (if isAbsolute name then name else base </> name))
+-- Privacy is captured from the source owner when the watch prompt opens, never
+-- inferred from an ordinary field label. Current policy can add protection.
+privateSourceWatch :: Desktop -> Dialog -> Bool
+privateSourceWatch d dg=case purpose dg of
+  DebugSourceWatchDialog _ bid origin captured->captured || protectedBuffer d bid || maybe False (protectedPath d) origin
+  _->False
+
 focusedPrivateField :: Desktop -> Bool
 focusedPrivateField d=case dialog d of Just dg -> maybe False (privateDialogField d dg) (at (fields dg) (focus dg)); _ -> False
+-- Compare private field metadata across dialog replacement as well. Purpose may
+-- carry a disk baseline or conflict payload, so its derived equality is unsuitable.
 privateFieldsUnchanged :: Desktop -> Desktop -> Bool
 privateFieldsUnchanged before after=case (dialog before,dialog after) of
-  (Just a,Just b) | purpose a==purpose b -> values before a==values after b
+  (Just a,Just b) -> values before a==values after b
   _ -> True
   where
     values d dg=[value field | field<-fields dg,privateDialogField d dg field]
-    value (Input label text _)=Left (label,text)
+    value field | Just pair<-inputValue field=Left pair
     value (CheckBox label checked)=Right (label,checked)
     value _=Left ("","")
 
@@ -264,7 +302,7 @@ cellAccess :: Desktop -> Int -> Int -> CellAccess
 cellAccess d x y=CellAccess (readableAt d x y) (pointerAllowedAt d x y)
 readableAt :: Desktop -> Int -> Int -> Bool
 readableAt d x y
-  | Just dg<-dialog d, DebugDialog action<-purpose dg, privateDownloadAction action,
+  | Just dg<-dialog d, DebugDialog action<-purpose dg, privateDebuggerAction action,
     inside (dialogRect d dg) x y || y==snd (screenSize d)-1=False
   | Just dg<-dialog d, PermissionDialog{}<-purpose dg, inside (dialogRect d dg) x y || y==snd (screenSize d)-1=False
   | otherwise=onScreen d x y && streamerReadableAt d x y && case dialog d of
@@ -281,11 +319,14 @@ readableAt d x y
 -- Labels remain visible; only sensitive value rows are blanked.
 streamerReadableAt :: Desktop -> Int -> Int -> Bool
 streamerReadableAt d x y
+  | Just dg<-dialog d, DebugDialog action<-purpose dg, privateFrameChooserAction action,
+    inside (dialogRect d dg) x y || y==snd (screenSize d)-1=False
   | y==snd (screenSize d)-1, "Session " `T.isPrefixOf` status d=False
   | otherwise=case dialog d of
   Just dg | inside (dialogRect d dg) x y -> not (any (sensitiveValue dg) (zip (fieldRects d dg) (fields dg))) && not (privateBrowserCell d dg x y)
   _ | privateAgentChoice d x y -> False
     | privateTreeCell d x y -> False
+    | privateMessageCell d x y -> False
     | overlayAt d x y -> True
     | otherwise -> case topWindow d x y of
         Just w | PluginContent _<-windowContent w,streamerMode d -> False
@@ -293,8 +334,7 @@ streamerReadableAt d x y
         Just w | Just doc<-windowDocument (buffers d) w,documentLabel doc==Just "Conversation" -> not (contentPrivate (\_ -> sessionOffset) d doc w x y)
         _ -> True
   where
-    sensitiveValue dg (r,Input label _ _)=sensitiveLabel label && y>top r && inside r x y && y>=top (dialogRect d dg)+2 && y<top (dialogRect d dg)+height (dialogRect d dg)-3
-    sensitiveValue _ _=False
+    sensitiveValue dg (r,f)=privateDialogField d dg f && y>top r && inside r x y && y>=top (dialogRect d dg)+2 && y<top (dialogRect d dg)+height (dialogRect d dg)-3
 -- Only recognized browser/tree paths are checked. Ordinary source text and
 -- unrelated filenames are never scanned for strings which resemble secrets.
 privateTreeCell :: Desktop -> Int -> Int -> Bool
@@ -304,18 +344,28 @@ privateTreeCell d x y
       maybe False (maybe False (protectedPath d) . Tree.infoResource . rowInfo) (rowAt (treeScroll tree+y-2) tree)
   | otherwise=False
 
+-- Keep diagnostic indices intact for the human; mask the whole protected row,
+-- including its source name and message, in both agent and Streamer projections.
+privateMessageCell :: Desktop -> Int -> Int -> Bool
+privateMessageCell d x y
+  | maybe False (\(r,_)->inside r x y) (contextMenu d) || maybe False (\(i,_)->inside (menuRect d i) x y) (menu d)=False
+  | messagesDisplayed d, inside r x y,y>top r,y<top r+height r-1 =
+      maybe False (protectedPath d . diagnosticPath) (at (diagnostics d) (problemsScroll d+y-top r-1))
+  | otherwise=False
+  where r=problemsRect d
+
 privateBrowserCell :: Desktop -> Dialog -> Int -> Int -> Bool
 privateBrowserCell d dg x y=case purpose dg of
   Opening base _ _ -> any (privateFieldCell base) rows
   ChangingDirectory base _ -> any (privateFieldCell base) rows
-  Saving bid _ -> any (\(r,field)->case field of
-    Input _ value _ -> inside r x y && y==top r+1 && (protectedBuffer d bid || privateName (startingDirectory d) (T.unpack value))
+  Saving bid _ -> any (\(r,field)->case inputValue field of
+    Just (_,value) -> inside r x y && y==top r+1 && (protectedBuffer d bid || privateName (startingDirectory d) (T.unpack value))
     _ -> False) rows
   _ -> False
   where
     rows=zip (fieldRects d dg) (fields dg)
     privateName base name=protectedPath d (normalise (if isAbsolute name then name else base </> name))
-    privateFieldCell base (r,Input _ value _)=inside r x y && y==top r+1 && privateName base (T.unpack value)
+    privateFieldCell base (r,field) | Just (_,value)<-inputValue field=inside r x y && y==top r+1 && privateName base (T.unpack value)
     privateFieldCell base (r,FileList entries chosen)
       | not (inside r x y)=False
       | y==top r+12=privateEntry chosen
@@ -347,8 +397,12 @@ pointerAllowedAt :: Desktop -> Int -> Int -> Bool
 pointerAllowedAt d x y
   | not (onScreen d x y) || guestModalBlocked d=False
   | Just dg<-dialog d=inside (dialogRect d dg) x y && not (any (\(r,f)->privateDialogField d dg f && inside r x y) (zip (fieldRects d dg) (fields dg)))
-  | Just (r,chosen)<-contextMenu d,inside r x y=maybe False (guestCommandAllowed . snd) (at (contextItemsFor d) (contextOffset r chosen+y-top r-1))
-  | Just (index,_)<-menu d,inside (menuRect d index) x y=maybe False (\(MenuItem _ _ command)->guestCommandAllowed command) (at (menuItemsFor d index) (y-top (menuRect d index)-1))
+  | Just (r,chosen)<-contextMenu d,inside r x y=maybe False (guestCommandAllowedIn d . snd) (at (contextItemsFor d) (contextOffset r chosen+y-top r-1))
+  | Just (index,_)<-menu d,inside (menuRect d index) x y=maybe False (\(MenuItem _ _ command)->guestCommandAllowedIn d command) (at (menuItemsFor d index) (y-top (menuRect d index)-1))
+  | Just (_,_,action)<-find (\(r,_,_)->inside r x y) (statusItemRects d)=case action of
+      Left command->guestCommandAllowedIn d command
+      Right (V.EvKey key mods)->guestKeyAllowed d key mods
+      Right _->False
   | overlayAt d x y=True
   | Just w<-topWindow d x y=not (protectedWindow d w)
   | otherwise=True

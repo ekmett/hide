@@ -28,6 +28,13 @@ Optional components add checks for browser transport, rendering assets and
 embedded terminals. A passing model check and an interactive frontend check
 establish different things; run the relevant frontend too.
 
+Agent input uses a shallow IO validation step while the session owner is
+serialized. Protected document and question identities, and draft content versions,
+prevent direct widget changes from bypassing policy without comparing buffer text,
+disk baselines or Undo. Equal numeric revisions do not authorize replacement.
+Human input remains a pure model transition; screen permission hints run on the
+capture worker and do not replace admission checks.
+
 ## Source documentation
 
 Each `Hide.*` module starts with an overview of its role, ownership and notable
@@ -615,6 +622,42 @@ owner maps retain scalar provenance and validated immutable rows, never document
 payloads. `DebuggerSidebarCheck` exercises real fake-DAP interleaving, captured
 frame activation, passive cached ticks, sticky lazy-reference refusal, resume
 expiry and thread-exit refusal of delayed child pages.
+
+Source popups capture a copied expression of at most 4096 characters, the measured
+clicked row, file path, source IDs and revision. Toggle breakpoint and Add watch
+run as exact human-only menu contributions; their worker captures ContentVersion
+and prepares canonical path/dirty state before the debugger owner rechecks the
+live target. The main Debug breakpoint and keyboard action resolve the same
+registration. A source label cannot authorize a pathless operation: only the
+existing debugger-owned source map can. Source replacement advances revision.
+`MenuContextCheck` covers stamped browser/native routing, byte/modal/agent refusal,
+equal-revision buffer replacement and changed-source watch confirmation. Watch
+expressions are stored in the existing owner (128 entries, 4096 characters each);
+the Watches tree and explicit evaluation/Force remain the next slice. Local
+source following still uses the existing synchronous owner route.
+
+Debugger source inspection accepts only positive references observed in current
+stopped stack metadata, including human, inspector and sidebar stacks. Source
+observations use bounded path metadata and scalar stamps; generation changes
+expire them. A waiting inspector resolves the captured backing path outside the
+UI lock, then uses the existing bounded owner mailbox. Admission and reply
+publication recheck the handle and shared authority-path policy. At most four
+source inspections can be outstanding. Pathless observed sources are output from
+the human-approved adapter, not filesystem reads or universally sanitized text.
+
+`documentOrigin` is canonical privacy provenance for generated documents. It
+never grants file/save authority; recovery preserves it and shared private-document
+policy denies protected origins. Adapter source responses prepare canonical
+origins and measured buffers on an owned worker; owner adoption rechecks the exact
+stop, frame selection and observed source stamp. Generated buffers retain that
+observation, so reusing a numeric reference cannot revive an old source action.
+Public status/stack projections omit whole private source records on waiting
+workers; shared Debug tree rows retain canonical resource provenance for masking.
+Private Add Watch prompts carry frozen source privacy rather than depending on
+field labels. The human frame chooser is conservatively private until it exposes
+prepared public semantic rows. Arbitrary adapter variables/output remain the approved execution
+boundary and are not universally sanitized. Local filesystem source following
+still uses the existing synchronous owner path; its async preparation is separate.
 
 `Hide.SessionSidebar` uses the existing private session catalog on one scoped
 discovery worker. Only bounded public session summaries survive preparation; no

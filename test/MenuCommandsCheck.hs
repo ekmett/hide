@@ -51,7 +51,7 @@ runChecks=withDocsCommands $ \docs->withRegistry $ \registry->withMenuCommands d
       helpRef=case [Plugin.menuReference entry | entry<-metadata,Plugin.menuName (Plugin.menuReference entry)=="hide.help.contents"] of ref:_->ref; _->error "missing help contribution"
       check label condition=unless condition (error label)
       waitDoc desktop=do
-        updated<-tickMenus host desktop
+        updated<-tickMenus host (\current _->pure (False,current)) desktop
         case activeDocument updated of
           Just _->pure updated
           _ | "failed" `T.isInfixOf` status updated || "expired" `T.isInfixOf` status updated->error (T.unpack (status updated))
@@ -82,7 +82,8 @@ runChecks=withDocsCommands $ \docs->withRegistry $ \registry->withMenuCommands d
       check "contributed remap cannot escape modal editing" (null (snd (handleEvent key modal)))
 #if defined(WITH_WEB) || defined(WITH_REMOTE)
       guestKey<-either error pure (parseEither parseInput (object ["type" .= ("key"::T.Text),"key" .= ("j"::T.Text),"mods" .= (["ctrl","shift"]::[T.Text])]))
-      check "contributed remap cannot grant guest authority" (case applyGuestInput guestKey (beginGuestInput loaded) of Left _->True; _->False)
+      guestRemap<-applyGuestInput guestKey (beginGuestInput loaded)
+      check "contributed remap cannot grant guest authority" (case guestRemap of Left _->True; _->False)
 #endif
       TIO.writeFile (directory </> "thc.toml") "[editor.keybindings.terminal.source]\n\"example.not-published\" = [\"Ctrl+Shift+J\"]\n"
       let (invalid,invalidRequests)=runCommand ReloadBindings loaded
@@ -133,14 +134,16 @@ runChecks=withDocsCommands $ \docs->withRegistry $ \registry->withMenuCommands d
   check "extension declaration reaches actual transported route" (extensionEffects==[InvokeMenu extension Plugin.HumanMenu Nothing])
   opened<-run invoked extensionEffects
   check "transported extension installs independent Markdown and links" (maybe False (T.isInfixOf "Independent extension" . contents . documentBuffer) (activeDocument opened) && maybe False (not . null . documentLinks) (activeDocument opened))
-  check "extension metadata cannot grant agent invocation" (case applyGuestInput packet (beginGuestInput initial) of Left _->True; _->False)
+  guestExtension<-applyGuestInput packet (beginGuestInput initial)
+  check "extension metadata cannot grant agent invocation" (case guestExtension of Left _->True; _->False)
   check "contributed Help has no generationless static menu route" (case parseEither parseInput (object ["type" .= ("menu"::T.Text),"command" .= ("hide.help.contents"::T.Text)]) of Left _->True; _->False)
   helpPacket<-either error pure (parseEither parseInput (object ["type" .= ("menu"::T.Text),"command" .= Plugin.menuName helpRef,"registry" .= Plugin.menuEpoch helpRef,"generation" .= Plugin.menuGeneration helpRef]))
   withMenuCommands docs $ \nextHost->do
     nextMetadata<-Plugin.menuSnapshot (menuContributions nextHost)
     let nextDesktop=initial {contributedMenus=nextMetadata,agentMenuRefs=menuAgentReferences nextHost}
     check "prior scope same name/generation cannot target a new session registry" (null (snd (applyInput helpPacket nextDesktop)))
-  check "host-permitted help preserves agent origin" (case applyGuestInput helpPacket (beginGuestInput initial) of Right (_,requests)->requests==[InvokeMenu helpRef Plugin.AgentMenu Nothing]; _->False)
+  guestHelp<-applyGuestInput helpPacket (beginGuestInput initial)
+  check "host-permitted help preserves agent origin" (case guestHelp of Right (_,requests)->requests==[InvokeMenu helpRef Plugin.AgentMenu Nothing]; _->False)
   stalePacket<-either error pure (parseEither parseInput (object ["type" .= ("menu"::T.Text),"command" .= Plugin.menuName extension,"registry" .= Plugin.menuEpoch extension,"generation" .= (Plugin.menuGeneration extension+100)]))
   let oversized=object ["type" .= ("menu"::T.Text),"command" .= Plugin.menuName extension,"registry" .= Plugin.menuEpoch extension,"generation" .= (9007199254740992::Integer)]
   check "contributed wire generations are bounded" (case parseEither parseInput oversized of Left _->True; _->False)
@@ -150,12 +153,12 @@ runChecks=withDocsCommands $ \docs->withRegistry $ \registry->withMenuCommands d
   (_,pending)<-menuEffects host (\_ _->error "missing host") initial [InvokeMenu extension Plugin.HumanMenu Nothing]
   requestMenuRetirement host extension
   threadDelay 100000
-  refused<-tickMenus host pending
+  refused<-tickMenus host (\current _->pure (False,current)) pending
   check "ordered host retirement precedes late reply adoption" (activeDocument refused==Nothing && all ((/=extension) . Plugin.menuReference) (contributedMenus refused))
   (_,queuedOld)<-menuEffects host (\_ _->error "missing host") refused [InvokeMenu extension Plugin.HumanMenu Nothing]
   check "queued retired action has no document and explicit refusal" (activeDocument queuedOld==Nothing && "stale" `T.isInfixOf` status queuedOld)
   requestMenuRetirement host helpRef
-  withdrawnHelp<-tickMenus host initial
+  withdrawnHelp<-tickMenus host (\current _->pure (False,current)) initial
   check "retired Help fallback row paints unavailable" (not (menuCommandAvailable withdrawnHelp Help))
   check "F1 cannot bypass retired Help through preview fallback" (null (snd (handleEvent (V.EvKey (V.KFun 1) []) withdrawnHelp)))
   entered<-newEmptyMVar
@@ -237,7 +240,7 @@ runtimeLifecycleChecks docs=bracket temporary removePathForcibly $ \directory->w
         (\context text->fmap PreparedDocument (prepareMarkdown (invocationColumns context) "/tmp/README.md" "" text))
       publication<-publishMenuFromHost host replacement
       check "replacement publishes through existing host" (publication==Right ())
-      published<-tickMenus host retired
+      published<-tickMenus host (\current _->pure (False,current)) retired
 #if defined(WITH_WEB) || defined(WITH_REMOTE)
       let pendingFrame=frameFor published
           pendingKey=remoteBindingInput pendingFrame key (terminalEventInput key)
@@ -257,7 +260,7 @@ runtimeLifecycleChecks docs=bracket temporary removePathForcibly $ \directory->w
 #endif
       (_,queued)<-menuEffects host (\_ _->error "bound replacement missed host") chosen actions
       let document current=do
-            next<-tickMenus host current
+            next<-tickMenus host (\current _->pure (False,current)) current
             if activeDocument next/=Nothing then pure next else threadDelay 1000 >> document next
       opened<-timeout 5000000 (document queued) >>= maybe (error "bound replacement callback did not finish") pure
       check "replacement chord invokes actual typed callback" (maybe False (T.isInfixOf "Independent extension" . contents . documentBuffer) (activeDocument opened))

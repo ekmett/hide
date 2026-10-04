@@ -46,7 +46,7 @@ library
     other-modules: Hide.BrowserServer
     build-depends: wai, warp, wai-websockets, websockets >=0.13, http-types
   cpp-options: -DWITH_REMOTE
-  exposed-modules: Hide.Links, Hide.Environment, Hide.GuestAccess, Hide.ClipboardMCP, Hide.DocsMCP, Hide.MenuCommands, Hide.Defaults, Hide.ControlMCP, Hide.MCPPermissions, Hide.RemoteEndpoint, Hide.EditorMCP, Hide.WorkspaceFilesMCP, Hide.TestsMCP, Hide.HistoryMCP, Hide.RuntimeMCP, Hide.ScreenCapture, Hide.WorkspaceMCP, Hide.Session, Hide.Recovery, Hide.Font, Hide.RemoteTerminal
+  exposed-modules: Hide.Links, Hide.Environment, Hide.GuestAccess, Hide.Privacy, Hide.ClipboardMCP, Hide.DocsMCP, Hide.MenuCommands, Hide.Defaults, Hide.ControlMCP, Hide.MCPPermissions, Hide.RemoteEndpoint, Hide.EditorMCP, Hide.WorkspaceFilesMCP, Hide.TestsMCP, Hide.HistoryMCP, Hide.RuntimeMCP, Hide.ScreenCapture, Hide.WorkspaceMCP, Hide.Session, Hide.Recovery, Hide.Font, Hide.RemoteTerminal
   build-depends: zlib
   if os(windows)
     c-sources: cbits/remote.c
@@ -95,7 +95,7 @@ test-suite editor-tests
   if !os(windows)
     build-depends: unix
   ghc-options: -threaded
-  other-modules: SessionSidebarCheck, PluginWindowsCheck, SourceWindowFixture, WindowExtension, AgentSidebarCheck, TypedBufferDiffsCheck, TypedBufferReadsCheck, WorkerDiffCheck, BufferEditsCheck, BufferReadsCheck, PluginBufferCheck, PluginCommandCheck, PluginTreeCheck, SidebarCheck, SidebarFixture, TreeExtension, PluginMenuCheck, MenuExtension, MenuCommandsCheck, MenuContextCheck, BindingsCheck, HintComposerCheck, AutocompleteCheck, InlineCheck, InlineRenderCheck, AutocompleteACPCheck, CopilotCheck, HighlightingCheck, AgentIntegrationCheck, AgentAccessCheck, AgentRuntimeCheck, AgentHubCheck, AgentACPCheck, AgentMCPCheck, AgentWorkspaceCheck, CompletionCheck, CompilersCheck, DownloadsCheck, HdbAcquisitionCheck, DebuggerAcquisitionCheck, BuildCheck, ProjectBrowserCheck, UnicodeCheck, HexCheck, DAPCheck, DebuggerCheck, DebuggerSidebarCheck, RunCheck, ConversationCheck, AgentFilesCheck, TerminalCheck, ConsolesCheck, FilesCheck, WindowCheck, BrowserCheck, HelpCheck, GitCheck, GitOperationsCheck, LSPCheck, ToolingCheck, DialogMouseCheck, BufferViewCheck, BufferTreeCheck, ExternalCheck, ReconcileCheck, ACPCheck, MarkdownCheck
+  other-modules: SessionSidebarCheck, PluginWindowsCheck, SourceWindowFixture, WindowExtension, AgentSidebarCheck, TypedBufferDiffsCheck, TypedBufferReadsCheck, WorkerDiffCheck, BufferEditsCheck, BufferReadsCheck, PluginBufferCheck, PluginCommandCheck, PluginTreeCheck, SidebarCheck, SidebarFixture, TreeExtension, PluginMenuCheck, MenuExtension, MenuCommandsCheck, MenuContextCheck, BindingsCheck, HintComposerCheck, AutocompleteCheck, InlineCheck, InlineRenderCheck, AutocompleteACPCheck, CopilotCheck, HighlightingCheck, AgentIntegrationCheck, AgentAccessCheck, AgentRuntimeCheck, AgentHubCheck, AgentACPCheck, AgentMCPCheck, AgentWorkspaceCheck, CompletionCheck, CompilersCheck, DownloadsCheck, HdbAcquisitionCheck, DebuggerAcquisitionCheck, BuildCheck, ProjectBrowserCheck, UnicodeCheck, HexCheck, DAPCheck, DebuggerCheck, DebuggerSidebarCheck, DebuggerSourcePolicyCheck, RunCheck, ConversationCheck, AgentFilesCheck, TerminalCheck, ConsolesCheck, FilesCheck, WindowCheck, BrowserCheck, HelpCheck, GitCheck, GitOperationsCheck, LSPCheck, ToolingCheck, DialogMouseCheck, BufferViewCheck, BufferTreeCheck, ExternalCheck, ReconcileCheck, ACPCheck, MarkdownCheck
   if flag(window)
     cpp-options: -DWITH_WINDOW
   if flag(terminal)

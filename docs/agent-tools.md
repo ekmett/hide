@@ -12,6 +12,43 @@ per tool in **Options > Agent Permissions**. Read-only tools default to Enable;
 other tools default to Prompt. `editor_settings` can write, so even its read form
 uses that tool’s policy.
 
+## Protected content policy
+
+One policy classifies editor authority and protected UI content. It applies to
+agent-facing reads and actions regardless of the human's Streamer setting. Turning
+Streamer mode off does not grant an agent access. The path predicate lives in
+`Hide.Privacy`; resource and UI projections consume it through `Hide.GuestAccess`
+and the model. Path resolution belongs to service workers, not rendering.
+
+**Authority paths** are the host-registered canonical global/project configuration
+files, editor session/recovery store, agent configuration/resume records and live
+session endpoint directory, including descendants of registered roots. Any file
+whose basename is `thc.toml` (case-insensitive) is also authority. Component-wise
+containment excludes similarly prefixed siblings; known symlink paths must be
+resolved before admission. This is one host-maintained set, not a per-tool choice.
+
+**Protected UI content** includes human conversation/question drafts, pending
+approval controls, provider/session credentials and sensitive configuration values.
+Agents may inspect nonsensitive settings but cannot change their own permissions,
+submit a human's answer, or type into a human composer. Generic reads of approval
+and Git-review buffers are refused; structured Git tools provide separately checked
+results. Public conversation transcripts are distinct from their protected spans.
+Plugin windows remain private until the host accepts explicit semantic access.
+
+Structured records whose owning source is an authority path are omitted as records,
+including their path and diagnostic body. Screens preserve geometry with masked
+cells and safe titles. Filter before pagination and serialization; delayed workers
+must recheck the current policy before publishing or applying their result. Apply
+the rule to provenance rather than scanning unrelated source text for strings that
+look like secrets. Per-surface sections below describe output shape and additional
+operation constraints, not alternative definitions of authority.
+
+This is an editor boundary, not a secret scanner or an OS sandbox. Approved
+terminal/build programs, language servers, debugger evaluation and trusted native
+plugins execute with their process account's access. Their arbitrary output cannot
+be made confidential merely by recognizing protected editor paths. Documentation
+reads use a bounded declared corpus, not automatic classification of every word.
+
 ## Buffers, files and search
 
 | Tool | Kind | Arguments | Result / contract |
@@ -31,8 +68,7 @@ Search: `query` is 1–256 characters on one line; `offset` 0–9999; `limit` 1�
 files/matches. Inspect truncation flags. Filesystem mutations stay inside the
 project, refuse overwrite/dirty descendants, protect Git metadata and symlink
 endpoints, and do not recursively delete directories. Save uses disk-conflict
-checks. Private authority files and protected conversation contents are excluded
-or redacted across these surfaces.
+checks. These reads use the [protected content policy](#protected-content-policy).
 
 `workspace_project.cabalPlan` reads only `dist-newstyle/cache/plan.json`; it does
 not invoke Cabal. `status` distinguishes `available`, `missing`, `invalid`,
@@ -170,7 +206,7 @@ Breakpoints use 1-based lines, at most 1000. See the
 | `git_operation_status` | R | `jobId?` | `busy`, job state/exit code, complete review, or commit `head` and `reviewedTreeMatched` |
 
 Diff text is capped at 128 Ki characters. A path filter is a literal file path,
-not a Git glob/magic pathspec. Whole-repository diffs omit private authority files and Git-detected rename/copy
+not a Git glob/magic pathspec. Whole-repository diffs apply the [protected content policy](#protected-content-policy), including Git-detected rename/copy
 destinations derived from them; `omittedFiles` reports a count without their names. Agent mouse/key input cannot
 open the unrestricted human Git review or commit dialog; use `workspace_git`
 for filtered review. `workspace_search` with
@@ -353,14 +389,27 @@ when a child conversation is selected.
 
 | Tool | Kind | Arguments | Result / contract |
 | --- | --- | --- | --- |
-| `ask_user` | Q | `question`, `choices?`, `allowMultiple?` | One inline question, optional single-choice answers, always free text; waits for human |
+| `ask_user` | Q | `question`, `choices?`, `allowMultiple?` **or** `questionId` alone | Create an inline question and return pending immediately; retrieve its owned pending/answered/cancelled result |
 | `agent_settings` | R | `{}` | Public provider/model/config choices, connection/steering state, context usage and global/project guidance |
 | `environment_get` | R | `names?` | Effective subprocess environment; credentials/authority values redacted; missing names null |
 | `environment_set` | X | `values`, `scope?` | String sets, null unsets; session/project/global; affects new processes; project overrides global; protected variables denied |
 | `editor_settings` | W | `settings?`, `defaults?` | Read current state, change session settings or merge future startup defaults |
 
 Questions: 1–4096 characters; up to 12 choices of 1–256 characters;
-`allowMultiple` must be false. One pending question, no human-answer timeout.
+`allowMultiple` must be false. One pending question. Creating it follows the
+configured permission policy, then returns `questionId` and `status: "pending"`.
+Retrieving that ID requires the same authenticated caller/provider incarnation;
+it does not prompt again, but current Disable policy still applies. Pending
+results reveal neither the draft nor the current choice. Answers require explicit
+human submission and are limited to 65536 characters.
+
+The submitted answer is queued once to the original live Primary Conversation
+provider through its normal query queue. Authenticated calls made without a live
+provider are poll-only. Anonymous calls, including current worktree-child editor
+bridges without attributed credentials, are refused. Replacement or disconnection
+invalidates delivery to that provider. Up to 64 terminal results are retained in
+memory; old IDs expire. There is no timeout-to-answer or implied approval: the
+agent can continue independent work while the human decides.
 Agent settings omit argument/environment values and session keys, returning only
 argument count and environment names; secret-labelled settings are redacted.
 
@@ -417,8 +466,8 @@ the resulting `revision`, so the requesting agent sees the human's actual edit.
 The buffer remains unsaved; approval never writes the file to disk.
 
 A pending approval can be cancelled; cancellation does not undo an operation
-already executed. Long-running questions, HLS and debugger replies release the
-desktop lock while waiting. After a disconnect or uncertain reply, inspect current
+already executed. Questions return pending without waiting for the human. HLS
+and debugger reply waits release the desktop lock. After a disconnect or uncertain reply, inspect current
 state before retrying a mutation. IDs belong to the editor session.
 
 External clients connect with `hide --mcp-editor SESSION_ID`. The bridge
