@@ -58,6 +58,11 @@ checks=do
   typedOutcome<-typedReply
   check "ordinary guest editing retains hidden protected identity"
     (case typedOutcome of Right value->parseMaybe (withObject "reply" (.: "appliedEvents")) value==Just (1::Int); _->False)
+  let privateUndo=base {buffers=M.adjust (\doc->doc {documentBuffer=poison,
+        documentFile=Just (FileState "/project/thc.toml" Nothing)}) sourceId (buffers base)}
+  checkDenied "private undo and redo reject keyboard, browser and menu routes before reading history" privateUndo
+    [P.Key "z" [V.MCtrl],P.Key "z" [V.MCtrl,V.MShift],P.Key "y" [V.MCtrl],
+     P.MenuCommand Undo,P.MenuCommand Redo,P.BrowserCommand Undo,P.BrowserCommand Redo]
   let bindings=either (error . show) id (platformBindings [] TerminalPlatform (M.singleton "source" (M.singleton "hide.options.agent-permissions" ["Ctrl+Shift+P"])))
   checkDenied "rebound protected command retains agent policy" base {keyBindings=bindings} [P.Key "p" [V.MCtrl,V.MShift]]
   let macBindings=either (error . show) id (configuredBindings [] (M.singleton "macos" (M.singleton "source" (M.singleton "hide.options.agent-permissions" ["Cmd+Shift+P"]))))

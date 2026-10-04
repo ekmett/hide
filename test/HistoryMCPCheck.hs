@@ -1,13 +1,14 @@
 {-# LANGUAGE OverloadedStrings #-}
 module HistoryMCPCheck (checks) where
 import SourceWindowFixture (sourceFixtureBuffer)
-import Control.Monad (unless)
+import Control.Monad (unless, forM_)
 import Data.Aeson
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.Map.Strict as M
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
+import Hide.Files (FileState(..))
 import Hide.HistoryMCP
 import Hide.Model
 import Hide.Buffer
@@ -37,4 +38,13 @@ checks=do
   let binary=addDocument Nothing (replaceSelection (Selection 1 2) "\255" (newByteBuffer (BS.pack [0,1,2]))) (initialDesktop (80,25))
   (_,hex)<-call binary "editor_history" []
   check "binary history previews hex bytes" (case hex of Right value -> "ff" `T.isInfixOf` text value && "bytes" `T.isInfixOf` text value; _ -> False)
+  let privateBuffer=(newBuffer "private live text")
+        {saved=error "history admission forced private baseline",undoStack=error "history admission forced private undo",redoStack=error "history admission forced private redo"}
+      private=edited {buffers=M.adjust (\doc->doc {documentBuffer=privateBuffer,
+        documentFile=Just (FileState "/project/thc.toml" Nothing)}) bid (buffers edited)}
+  forM_ ["undo","redo"::T.Text] $ \direction->do
+    (_,hidden)<-call private "editor_history" ["direction" .= direction]
+    (_,refused)<-call private "editor_undo" ["direction" .= direction,"revision" .= (0::Int)]
+    check "private history previews and mutations are refused before inspecting history"
+      (either (const True) (const False) hidden && either (const True) (const False) refused)
   putStrLn "history MCP checks passed"

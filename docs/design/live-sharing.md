@@ -293,6 +293,13 @@ cannot safely transform an overlap or its history has expired, retain the propos
 and show a conflict. Generic plugin/agent prepared diffs stay strict-version
 transactions; they are not silently rebased as though they were human typing.
 
+Undo and Redo are edits: both require the current buffer edit grant and writer
+lease, regardless of whether they arrive through keys, a menu, a plugin or MCP.
+Read-only participants cannot apply either. Redo records retain actor and lease
+provenance; reacquiring a lease cannot revive an earlier undo segment. History
+previews use the same resource and segment restrictions, so granting current-file
+access does not expose pre-admission or another participant's private history.
+
 Undo is attributed. It must not rewind a shared buffer to an old whole-tree snapshot
 and erase another person's intervening work. Initially permit ordinary Undo only
 within an uninterrupted history segment owned by the caller; across a handoff,
