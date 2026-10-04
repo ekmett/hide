@@ -8,6 +8,7 @@ import qualified Data.ByteString as BS
 import Hide.RemoteWindow
 import Hide.Window (nativeMenuEvent)
 import qualified Hide.Model as Model
+import qualified Data.Map.Strict
 #ifdef WITH_REMOTE
 import qualified Data.ByteString.Lazy as BL
 import Data.Aeson.Types (parseEither)
@@ -23,6 +24,18 @@ checks = do
       row = toJSON [(0::Int,0xffffff::Int,0::Int,[String "abc",toJSON ("界"::T.Text,2::Int)])]
       rows = row : replicate 24 (toJSON ([]::[Value]))
       valid = either (const False) (const True) . parseRemoteFrame meta
+  let windowMeta=object ["size" .= ([80,25]::[Int]),"bindings" .= ([]::[(T.Text,T.Text)]),"editorWindows" .= [object ["id" .= (71::Int),"title" .= ("Main.hs"::T.Text),"selected" .= True,"enabled" .= True]]]
+      dockFrame=either error id (parseRemoteFrame windowMeta rows)
+  check "actual remote native Dock event carries stable host target" (remoteDockWindowInput dockFrame 8 [16,71,8]==Just (object ["type" .= ("focus-window"::T.Text),"id" .= (71::Int)]))
+  check "remote Dock refuses closed stale and disabled targets" (all ((==Nothing) . remoteDockWindowInput dockFrame 8) [[16,0,8],[16,71,7],[16,93,8]] && remoteDockWindowInput dockFrame {remoteWindows=[(71,"Main.hs",True,False)]} 8 [16,71,8]==Nothing)
+  let duplicateWindows=object ["size" .= ([80,25]::[Int]),"bindings" .= ([]::[(T.Text,T.Text)]),"editorWindows" .= [object ["id" .= (71::Int),"title" .= ("Main.hs"::T.Text),"selected" .= True,"enabled" .= True],object ["id" .= (71::Int),"title" .= ("Other.hs"::T.Text),"selected" .= False,"enabled" .= True]]]
+  check "remote rejects duplicate editor window identities" (either (const True) (const False) (parseRemoteFrame duplicateWindows rows))
+#ifdef WITH_REMOTE
+  let named=Model.addDocument Nothing (newBuffer "payload") (Model.initialDesktop (80,25))
+      odd=named {Model.buffers=Data.Map.Strict.map (\doc->doc {Model.documentLabel=Just "Odd\nlabel\t"}) (Model.buffers named)}
+  check "sanitized host labels round trip through actual remote metadata"
+    (case parseRemoteFrame (object (P.frameMetadata "." odd)) (P.frameRows odd) of Right decoded->remoteWindows decoded==[(1,"Odd·label·",True,True)]; _->False)
+#endif
   check "drag and wheel updates wait for the new frame instead of repainting stale content"
     (not (nativeRepaint [3,10,4,0,0,1]) && not (nativeRepaint [9,10,4,-1,0]))
   check "press and release repaint the local pointer visibility"

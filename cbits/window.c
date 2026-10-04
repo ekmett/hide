@@ -35,7 +35,7 @@ static bool suppress_option_text;
 static bool blink_cursor = true, cursor_present, cursor_drawn;
 static int cursor_x = -1, cursor_y = -1;
 static Uint64 cursor_epoch;
-static Uint32 command_event, wake_event;
+static Uint32 command_event, wake_event, dock_event;
 static double wheel_remainder;
 static void pointer(float x, float y, int32_t *event);
 
@@ -56,6 +56,9 @@ void thc_title(const char *s) { SDL_SetWindowTitle(window, s); }
 void thc_set_clipboard(const char *s) { SDL_SetClipboardText(s); }
 
 void thc_close(void) {
+#ifdef __APPLE__
+    thc_dock_close();
+#endif
     clear_pointer();
     left_down = false;
     suppress_option_text = false;
@@ -95,8 +98,9 @@ int thc_open(const char *backend, double requested_scale, int requested_cols, in
     if (!SDL_Init(SDL_INIT_VIDEO)) return 0;
     crt_filter = false;
     blink_cursor = true; cursor_epoch = SDL_GetTicks();
-    command_event = SDL_RegisterEvents(2);
+    command_event = SDL_RegisterEvents(3);
     wake_event = command_event + 1;
+    dock_event = command_event + 2;
     wheel_remainder = 0;
     /* Documentation captures use the real Metal renderer without showing a window. */
     const char *capture_exit = SDL_getenv("THC_EDIT_CAPTURE_EXIT");
@@ -338,6 +342,16 @@ static void pointer(float x, float y, int32_t *event) {
 void thc_post_command(int command, int generation) {
     SDL_Event e; SDL_zero(e); e.type = command_event; e.user.code = command; e.user.data1 = (void *)(intptr_t)generation; SDL_PushEvent(&e);
 }
+void thc_post_window(int ident, int generation) {
+    SDL_Event e; SDL_zero(e); e.type = dock_event; e.user.code = ident; e.user.data1 = (void *)(intptr_t)generation; SDL_PushEvent(&e);
+}
+void thc_raise(void) {
+#ifdef __APPLE__
+    thc_dock_raise(SDL_GetPointerProperty(SDL_GetWindowProperties(window), SDL_PROP_WINDOW_COCOA_WINDOW_POINTER, NULL));
+#else
+    SDL_RestoreWindow(window); SDL_RaiseWindow(window);
+#endif
+}
 /* SDL_PushEvent is thread-safe: decoded frames wake the main thread directly. */
 void thc_wake(void) {
     if (!SDL_HasEvent(wake_event)) {
@@ -371,6 +385,7 @@ int thc_wait(int32_t *out) {
         if (!SDL_WaitEventTimeout(&e, (Sint32)(deadline - now))) return *SDL_GetError() ? 0 : idle_event(out);
         if (e.type == wake_event) return 1;
         if (e.type == command_event) { out[0] = 11; out[1] = e.user.code; out[2] = (int32_t)(intptr_t)e.user.data1; return 1; }
+        if (e.type == dock_event) { out[0] = 16; out[1] = e.user.code; out[2] = (int32_t)(intptr_t)e.user.data1; return 1; }
         switch (e.type) {
         case SDL_EVENT_QUIT: case SDL_EVENT_WINDOW_CLOSE_REQUESTED: out[0] = 6; return 1;
         case SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED: case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:

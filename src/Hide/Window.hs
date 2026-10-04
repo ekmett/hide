@@ -5,14 +5,14 @@
 -- shaping for other text. The window thread owns SDL calls, event handling and
 -- presentation; render keys decide when a frame is needed. Exported FFI helpers
 -- also serve the remote native frontend rather than a second drawing ABI.
-module Hide.Window (runWindow, nativeMenuShortcut, nativeChordShortcut, nativeMenuEvent, nativeMenuEventFor, nativeMenuToken, nativeCommands, nativeCommandsFor
+module Hide.Window (runWindow, nativeMenuShortcut, nativeChordShortcut, nativeMenuEvent, nativeMenuEventFor, nativeMenuToken, nativeCommands, nativeCommandsFor, nativeDockWindow
 #ifdef WITH_WINDOW
-  , check, utf8, nativeMenus, nativeMenusFor, installNativeMenus
-  , c_system_dark, c_open, c_mode, c_scale, c_title, c_close, c_size
+  , check, utf8, nativeMenus, nativeMenusFor, installNativeMenus, updateDockWindows
+  , c_system_dark, c_open, c_mode, c_scale, c_title, c_raise, c_close, c_size
   , c_begin, c_glyph, c_unicode, c_pixelate_unicode, c_cursor, c_cursor_blink
   , c_crt_filter, c_present, c_wait, c_wake, c_text, c_clipboard, c_set_clipboard
 #ifdef darwin_HOST_OS
-  , c_menu_enabled, c_menu_prepare, c_menu_generation, c_menu_shortcut
+  , c_dock_generation, c_menu_enabled, c_menu_prepare, c_menu_generation, c_menu_shortcut
 #endif
 #endif
   ) where
@@ -74,11 +74,18 @@ nativeMenuToken count generation (11:token:incarnation:_)
   | generation>0, incarnation==generation, token>=0,token<count=Just token
 nativeMenuToken _ _ _=Nothing
 
+-- | Dock incarnation and stable view IDs never share main-menu token positions.
+nativeDockWindow :: [(Int,Text.Text,Bool,Bool)] -> Int -> [Int] -> Maybe Int
+nativeDockWindow entries generation (16:ident:incarnation:_)
+  | generation>0,incarnation==generation,any (\(wid,_,_,enabled)->wid==ident && enabled) entries = Just ident
+nativeDockWindow _ _ _ = Nothing
+
 #ifdef WITH_WINDOW
 foreign import ccall unsafe "thc_system_dark" c_system_dark :: IO CInt
 foreign import ccall unsafe "thc_open" c_open :: CString -> CDouble -> CInt -> CInt -> CInt -> IO CInt
 foreign import ccall unsafe "thc_mode" c_mode :: CInt -> CInt -> CInt -> IO CInt
 foreign import ccall unsafe "thc_scale" c_scale :: CInt -> IO CInt
+foreign import ccall unsafe "thc_raise" c_raise :: IO ()
 foreign import ccall unsafe "thc_title" c_title :: CString -> IO ()
 foreign import ccall unsafe "thc_close" c_close :: IO ()
 foreign import ccall unsafe "thc_error" c_error :: IO CString
@@ -99,6 +106,10 @@ foreign import ccall unsafe "thc_text" c_text :: IO CString
 foreign import ccall unsafe "thc_clipboard" c_clipboard :: IO CString
 foreign import ccall unsafe "thc_set_clipboard" c_set_clipboard :: CString -> IO ()
 #ifdef darwin_HOST_OS
+foreign import ccall unsafe "thc_dock_generation" c_dock_generation :: IO CInt
+foreign import ccall unsafe "thc_dock_begin" c_dock_begin :: IO ()
+foreign import ccall unsafe "thc_dock_item" c_dock_item :: CInt -> CString -> CInt -> CInt -> IO ()
+foreign import ccall unsafe "thc_dock_end" c_dock_end :: IO ()
 foreign import ccall unsafe "thc_menu_prepare" c_menu_prepare :: IO ()
 foreign import ccall unsafe "thc_menu_generation" c_menu_generation :: IO CInt
 foreign import ccall unsafe "thc_menu_clear" c_menu_clear :: CInt -> CInt -> CInt -> IO ()
@@ -147,12 +158,26 @@ installNativeMenus layout=do
 installNativeMenus _ = pure ()
 #endif
 
+-- | Publish only prepared window metadata, on the native window thread.
+updateDockWindows :: [(Int,T.Text,Bool,Bool)] -> IO ()
+#ifdef darwin_HOST_OS
+updateDockWindows entries=do
+  c_dock_begin
+  forM_ entries $ \(ident,title,selected,enabled)->utf8 title $ \text->
+    c_dock_item (fromIntegral ident) text (if selected then 1 else 0) (if enabled then 1 else 0)
+  c_dock_end
+#else
+updateDockWindows _=pure ()
+#endif
+
 updateMenus :: Desktop -> IO ()
 #ifdef darwin_HOST_OS
-updateMenus d = forM_ (zip [0..] (nativeCommandsFor d)) $ \(i,cmd) -> do
-  let (shortcut,modifiers)=nativeMenuShortcut d cmd
-  withCString shortcut $ \keyPtr -> c_menu_shortcut (fromIntegral i) keyPtr (fromIntegral modifiers)
-  c_menu_enabled i (if menuCommandAvailable d cmd then 1 else 0)
+updateMenus d = do
+  updateDockWindows (editorWindowEntries d)
+  forM_ (zip [0..] (nativeCommandsFor d)) $ \(i,cmd) -> do
+    let (shortcut,modifiers)=nativeMenuShortcut d cmd
+    withCString shortcut $ \keyPtr -> c_menu_shortcut (fromIntegral i) keyPtr (fromIntegral modifiers)
+    c_menu_enabled i (if menuCommandAvailable d cmd then 1 else 0)
 #else
 updateMenus _ = pure ()
 #endif
@@ -276,6 +301,15 @@ runWindow backend scale effects tick initial = do
       case nativeMenuEventFor (nativeCommandsFor d) generation event of
         Just cmd | menuCommandAvailable d cmd ->
           if cmd==Paste then paste d else clipboardResult (cmd `elem` [Copy,Cut]) d (runCommand cmd d)
+        _ -> pure (d,[])
+#else
+      pure (d,[])
+#endif
+    dispatch event@(16:_) d = do
+#ifdef darwin_HOST_OS
+      generation<-fromIntegral <$> c_dock_generation
+      case nativeDockWindow (editorWindowEntries d) generation event of
+        Just ident -> c_raise >> pure (activateEditorWindow ident d,[])
         _ -> pure (d,[])
 #else
       pure (d,[])
