@@ -7,7 +7,7 @@
 -- granted immutable read. Large reads and subsequent evaluation belong on a
 -- worker. This module provides no mutable desktop, saving or edit submission.
 module Hide.Plugin.Buffer
-  ( BufferRead, ContentVersion, CharOffset(..), ByteOffset(..), LineNumber(..)
+  ( BufferRef, BufferRead, ContentVersion, CharOffset(..), ByteOffset(..), LineNumber(..)
   , TextRange(..), ByteRange(..), RangeError(..), BufferRepresentation(..)
   , representation, readLength, readLineCount, readText, readBytes, readLines, readLine
   ) where
@@ -15,7 +15,7 @@ module Hide.Plugin.Buffer
 import Data.ByteString (ByteString)
 import Data.Text (Text)
 import qualified Hide.Buffer as B
-import Hide.Plugin.BufferHost (ContentVersion)
+import Hide.Plugin.BufferHost (BufferRef,ContentVersion)
 
 -- | Immutable content reference with no structural Eq/Show instance.
 type BufferRead = B.BufferContent

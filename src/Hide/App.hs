@@ -43,9 +43,9 @@ import Hide.WorkspaceMCP
 import Hide.ProjectBrowser
 import qualified Hide.AgentRuntime as AR
 import qualified Hide.AgentHub as AH
-import Hide.AgentAccess (resolveAgentAccess)
+import Hide.AgentAccess (resolveAgentAccess,resolveActiveAgentAccess)
 import Hide.AgentMCP (agentTools, agentToolNames, agentTool)
-import Hide.EditorMCP (runEditorMCP, editorResponseOnly, rpcError, editorResponseWith, debugTools, builtinTools, builtinTool)
+import Hide.EditorMCP (runEditorMCP, editorResponseOnly, rpcError, editorResponseWith, debugTools, builtinTools, builtinTool, readBufferTool)
 import Hide.RemoteEndpoint (sessionEndpoint)
 import Hide.Session
 import Hide.Completion (bashCompletion)
@@ -307,8 +307,19 @@ runEditor args = do
                   let agents=conversationAgents conversation
                       hub=AR.agentHub agents
                       reject=pure (d,pure (Just (rpcError (fromMaybe Null (parseMaybe (withObject "request" (.: "id")) request)) (-32600) "Invalid or inactive agent connection.")))
+                  let permitted callback current name parameters
+                        | name=="read_buffer" = permissionReadCall permissions callbackRead current name parameters
+                        | otherwise = permissionCall permissions callback current name parameters
+                      callbackRead admission current name parameters
+                        | token==Nothing = readBufferTool admission current name parameters
+                        | otherwise = do
+                            actor<-maybe (pure (Left "Invalid or inactive agent connection."))
+                              (resolveActiveAgentAccess (AR.agentAccess agents) hub) token
+                            case actor of
+                              Left err->pure (current,pure (Left err))
+                              Right _->readBufferTool admission current name parameters
                   response<-case token of
-                    Nothing -> editorResponseWith specs (permissionCall permissions inspectTool) d request
+                    Nothing -> editorResponseWith specs (permitted inspectTool) d request
                     Just secret | secret==autocompleteToken autocomplete -> editorResponseOnly CompletionACP.completionTools (\current name parameters -> pure (current,autocompleteTool autocomplete name parameters)) d request
                     Just secret -> do
                       bound<-resolveAgentAccess (AR.agentAccess agents) secret
@@ -325,7 +336,7 @@ runEditor args = do
                                   -- Worktree agents reach this endpoint only for
                                   -- coordination. Their editor tools use their own session.
                                   visible=if ident==AR.primaryAgent agents then specs++agentTools else agentTools
-                              editorResponseOnly visible (permissionCall permissions dispatch) d request
+                              editorResponseOnly visible (permitted dispatch) d request
                   let (updated,finish)=response
                   quit<-readIORef exiting
                   pure (quit,updated,finish)

@@ -8,6 +8,7 @@
 -- Project agent limits may tighten global ceilings but cannot raise them.
 module Hide.MCPPermissions
   ( Permissions, withPermissions, withPermissionsAt, permissionCall, policyEffects, tickPermissions
+  , ReadAdmission, permissionReadCall, readReference, resolveReadReference
   , permissionConfigPath, readEditorDefaults, writeEditorDefaults, readEditorDefaultsAt, writeEditorDefaultsAt
   , projectConfigPath, readEditorDefaultsFor, readAgentContextAt, writeAgentContextAt, readAgentContexts
   , readEnvironmentAt, writeEnvironmentAt, readTerminalKeysAt, readTerminalKeysFor
@@ -42,6 +43,7 @@ import Text.Read (readMaybe)
 import qualified Toml
 import qualified Toml.Syntax as TS
 import Hide.Buffer (newBuffer, Selection(..))
+import Hide.Plugin.BufferHost (BufferRef,BufferNamespace,newBufferNamespace,bufferReference,referenceId)
 import Hide.WorkspaceFilesMCP (applyPatch)
 import Hide.Files (FileState(..), saveFile)
 import Hide.Model
@@ -52,8 +54,13 @@ data Mode = Enable | Prompt | Disable deriving (Eq,Show)
 data Waiting = Waiting
   { ticket :: Int, toolName :: Text, arguments :: Value, execute :: Tool
   , reply :: MVar (IO (Either Text Value)), active :: IORef Bool }
-data PermissionState = PermissionState { waiting :: [Waiting], nextTicket :: Int, displayed :: Maybe Text }
-data Permissions = Permissions FilePath (M.Map Text Bool) (IORef PermissionState)
+data PermissionState = PermissionState { waiting :: [Waiting], nextTicket :: Int, displayed :: Maybe Text, permissionsClosed :: Bool }
+data Permissions = Permissions FilePath (M.Map Text Bool) (IORef PermissionState) BufferNamespace
+
+-- | Capture-only receipt minted by the owning permission dispatch. The receipt
+-- expires when its admitted callback returns; an already granted immutable read
+-- can outlive it. This is neither human authority nor an edit permission.
+data ReadAdmission = ReadAdmission Permissions (IORef Bool)
 
 permissionConfigPath :: IO FilePath
 permissionConfigPath=do
@@ -70,15 +77,18 @@ withPermissions specs action=permissionConfigPath >>= \path -> withPermissionsAt
 withPermissionsAt :: FilePath -> [Value] -> (Permissions -> IO a) -> IO a
 withPermissionsAt path specs=bracket acquire release
   where
-    acquire=Permissions path registry <$> newIORef (PermissionState [] 1 Nothing)
+    acquire=Permissions path registry <$> newIORef (PermissionState [] 1 Nothing False) <*> newBufferNamespace
     registry=M.fromList [(name,fromMaybe False (field "annotations" spec >>= field "readOnlyHint")) | spec<-specs,Just name<-[field "name" spec]]
-    release (Permissions _ _ ref)=readIORef ref >>= mapM_ (\request->finish request (Left "Editor session closed before approval")) . waiting
+    release (Permissions _ _ ref _)=do
+      requests<-atomicModifyIORef' ref (\s->(s {permissionsClosed=True},waiting s))
+      mapM_ (\request->finish request (Left "Editor session closed before approval")) requests
 
 -- | Initiate an allowed operation or queue approval under the desktop lock.
 -- Run its continuation after releasing that lock so approval can make progress.
 permissionCall :: Permissions -> Tool -> Tool
-permissionCall runtime@(Permissions path registry ref) callback desktop name args=do
-  loaded<-readPolicies path
+permissionCall runtime@(Permissions path registry ref _) callback desktop name args=do
+  closed<-permissionsClosed <$> readIORef ref
+  loaded<-if closed then pure (Left "Editor session closed") else readPolicies path
   case M.lookup name registry of
     Nothing -> denied "Unknown MCP tool"
     Just readonly -> case loaded of
@@ -98,6 +108,38 @@ permissionCall runtime@(Permissions path registry ref) callback desktop name arg
             pure (shown,(readMVar promise >>= id) `onException` finish request (Left "MCP permission request cancelled"))
   where denied reason=pure (desktop,pure (Left reason))
 
+-- | Use the ordinary policy/approval owner for one read_buffer capture. The host
+-- supplies its attributed callback; anonymous inspection remains guest input.
+-- No receipt exists while a request waits for approval. Work returned by the
+-- callback runs later and can consume its snapshot, but cannot capture again.
+permissionReadCall :: Permissions -> (ReadAdmission -> Tool) -> Tool
+permissionReadCall runtime callback desktop name args
+  | name/="read_buffer" = pure (desktop,pure (Left "Read admission requires read_buffer"))
+  | otherwise = permissionCall runtime admitted desktop name args
+  where
+    admitted d tool parameters=bracket (ReadAdmission runtime <$> newIORef True)
+      (\(ReadAdmission _ live)->writeIORef live False)
+      (\receipt->callback receipt d tool parameters)
+
+-- | Mint a session/instance reference during this admitted capture callback.
+-- Existence/privacy remain checked by the buffer owner against current state.
+readReference :: ReadAdmission -> Int -> IO (Either Text BufferRef)
+readReference receipt@(ReadAdmission (Permissions _ _ _ namespace) _) ident=do
+  accepted<-checkReadAdmission receipt
+  pure (bufferReference namespace ident <$ accepted)
+
+-- | Reject a retained receipt or a reference from another session before lookup.
+resolveReadReference :: ReadAdmission -> BufferRef -> IO (Either Text Int)
+resolveReadReference receipt@(ReadAdmission (Permissions _ _ _ namespace) _) reference=do
+  accepted<-checkReadAdmission receipt
+  pure (accepted >> maybe (Left "Buffer reference belongs to another editor session") Right (referenceId namespace reference))
+
+checkReadAdmission :: ReadAdmission -> IO (Either Text ())
+checkReadAdmission (ReadAdmission (Permissions _ _ ref _) live)=do
+  activeNow<-readIORef live
+  closed<-permissionsClosed <$> readIORef ref
+  pure $ if activeNow && not closed then Right () else Left "Buffer read admission expired"
+
 filterMActive :: [Waiting] -> IO [Waiting]
 filterMActive requests=fmap (map fst . filter snd) (mapM (\request->(request,) <$> readIORef (active request)) requests)
 
@@ -109,7 +151,7 @@ finish request result=do
 
 -- | Display the oldest live approval and withdraw stale or cancelled prompts.
 tickPermissions :: Permissions -> Desktop -> IO Desktop
-tickPermissions (Permissions _ _ ref) desktop=do
+tickPermissions (Permissions _ _ ref _) desktop=do
   s<-readIORef ref
   live<-filterMActive (waiting s)
   let staleApproval=case dialog desktop of
@@ -154,7 +196,7 @@ policyEffects runtime fallback desktop effects=foldM apply (False,desktop) effec
     apply (_,d) effect=fallback d [effect]
 
 permissionAction :: Permissions -> Text -> [Text] -> Desktop -> IO Desktop
-permissionAction runtime@(Permissions path registry ref) action values desktop=do
+permissionAction runtime@(Permissions path registry ref _) action values desktop=do
   s<-readIORef ref
   if action=="show" then showSettings runtime desktop else
     if displayed s/=Just action then pure desktop {status="Permission dialog expired."} else
@@ -221,7 +263,7 @@ permissionAction runtime@(Permissions path registry ref) action values desktop=d
     close=modifyIORef' ref (\state->state {displayed=Nothing}) >> tickPermissions runtime desktop {dialog=Nothing}
 
 showSettings :: Permissions -> Desktop -> IO Desktop
-showSettings (Permissions path registry ref) desktop=do
+showSettings (Permissions path registry ref _) desktop=do
   policies<-readPolicies path
   let rows=[name<>"  ["<>modeText (either (const (if readonly then Enable else Prompt)) (M.findWithDefault (if readonly then Enable else Prompt) name) policies)<>"]" | (name,readonly)<-M.toList registry]
       notes=either (:[]) (const ["Select a tool to set Enable, Prompt or Disable.","Policies apply to every request, including cached tool schemas."]) policies

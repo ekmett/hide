@@ -5,11 +5,31 @@
 -- constructor; they never compare contents, baselines or history. Keep checks
 -- under the owning session lock when adopting delayed work.
 module Hide.Plugin.BufferHost
-  ( ContentVersion, captureRead, captureVersion, versionCurrent ) where
+  ( BufferRef, BufferNamespace, newBufferNamespace, bufferReference, referenceId
+  , ContentVersion, captureRead, captureVersion, versionCurrent ) where
 
 import Control.Exception (evaluate)
+import Data.Unique (Unique,newUnique)
 import System.Mem.StableName (StableName, makeStableName)
 import Hide.Buffer (Buffer, BufferContent, bufferContent, revision)
+
+-- | One live editor session namespace. Numeric buffer IDs are allocated once by
+-- the owning session; a new daemon/recovery lifetime receives a fresh namespace.
+newtype BufferNamespace = BufferNamespace Unique
+-- | Logical document instance in one session, distinct from a content version.
+-- Reload/edit retains the instance; close and reopen allocates another ID.
+data BufferRef = BufferRef Unique Int deriving Eq
+
+newBufferNamespace :: IO BufferNamespace
+newBufferNamespace = BufferNamespace <$> newUnique
+
+bufferReference :: BufferNamespace -> Int -> BufferRef
+bufferReference (BufferNamespace owner) = BufferRef owner
+
+referenceId :: BufferNamespace -> BufferRef -> Maybe Int
+referenceId (BufferNamespace owner) (BufferRef actual ident)
+  | owner==actual = Just ident
+  | otherwise = Nothing
 
 -- | Host-issued identity of an immutable buffer value and its edit revision.
 -- Equal numeric revisions do not establish equality. Stable names do not retain

@@ -5,7 +5,7 @@
 -- Tool initiation and reply waiting are separate phases so HLS, DAP and human
 -- approvals can continue while a request is pending. Actor-bound routes expose
 -- only their supplied tools, with no fallback into ordinary desktop reads.
-module Hide.EditorMCP (editorResponse, editorResponseWith, editorResponseOnly, rpcError, builtinTools, builtinTool, debugTools, editorServers, editorServersFor, editorServersAt, runEditorMCP, runEditorMCPWithHandles, runEditorMCPWithToken, readMCPLine) where
+module Hide.EditorMCP (editorResponse, editorResponseWith, editorResponseOnly, rpcError, builtinTools, builtinTool, readBufferTool, debugTools, editorServers, editorServersFor, editorServersAt, runEditorMCP, runEditorMCPWithHandles, runEditorMCPWithToken, readMCPLine) where
 
 import Control.Exception (bracket, try, IOException, finally, catch, mask, throwIO)
 import Control.Concurrent.Async (async, cancel, AsyncCancelled(..))
@@ -29,6 +29,8 @@ import Data.Char (intToDigit)
 import System.Environment (lookupEnv, getExecutablePath)
 import System.IO (Handle, stdin, stdout, hClose, hFlush, hSetBinaryMode)
 import Hide.Buffer
+import Hide.BufferReads (captureBuffer,CapturedRead(..))
+import Hide.MCPPermissions (ReadAdmission,readReference)
 import qualified Hide.Plugin.Buffer as P
 import Hide.Files (filePath)
 import Hide.GuestAccess (protectedBuffer, privateDocument, sanitizedBufferContent)
@@ -185,26 +187,10 @@ builtinTool desktop=tool
     tool :: T.Text -> Value -> Either T.Text Value
     tool "list_windows" _=Right (object ["windows" .= (map window (windows desktop)++panels)])
     tool "list_buffers" _=Right (object ["buffers" .= [bufferInfo ident doc | (ident,doc)<-M.toAscList (buffers desktop)]])
-    tool "read_buffer" args = parseArgs (withObject "read_buffer" $ \o -> (,,,) <$> o .:? "bufferId" <*> o .:? "startLine" .!= 1 <*> o .:? "lineCount" .!= 200 <*> o .:? "byteOffset" .!= 0) args >>= \(wanted,start,count,offset) -> do
-      ident <- maybe (maybe (Left "No active buffer") (Right . bufferId) (activeWindow desktop)) Right wanted
-      doc <- maybe (Left "Buffer not found") Right (M.lookup ident (buffers desktop))
-      unless (start>=1 && count>=1 && count<=1000 && offset>=0) (Left "Use startLine >= 1, lineCount 1..1000, and byteOffset >= 0")
+    tool "read_buffer" args = do
+      (ident,doc,start,count,offset)<-readBufferRequest desktop args
       (redacted,b)<-maybe (Left "This buffer contains private user or approval content.") Right (sanitizedBufferContent desktop ident)
-      if P.representation b==P.ByteBuffer then do
-        let size=P.readLength b
-            a=min offset size
-            z=a+min 4096 (size-a)
-        bytes<-readResult (P.readBytes b (P.ByteRange (P.ByteOffset a) (P.ByteOffset z)))
-        Right (object ["buffer" .= bufferInfo ident doc,"byteOffset" .= offset,"bytes" .= BS.length bytes,
-          "hex" .= T.pack (drop 1 (BS.foldr hex [] bytes)),"totalBytes" .= size])
-      else do
-        total<-readResult (P.readLineCount b)
-        let available=if start>total then 0 else min count (total-start+1)
-        rows<-mapM (readResult . P.readLine b . P.LineNumber . (start-1+)) [0..available-1]
-        let text=T.intercalate "\n" rows
-            limited=T.take 131072 text
-        Right (object ["buffer" .= bufferInfo ident doc,"startLine" .= start,"lineCount" .= available,
-          "totalLines" .= total,"text" .= limited,"redacted" .= redacted,"truncated" .= (T.length limited<T.length text)])
+      formatBufferRead (bufferInfo ident doc) start count offset redacted b
     tool "read_selection" args = parseArgs (withObject "read_selection" (.:? "windowId")) args >>= \wanted -> do
       w <- maybe (maybe (Left "No active window") Right (activeWindow desktop))
         (\ident -> maybe (Left "Window not found") Right (findWindow ident)) wanted
@@ -215,9 +201,6 @@ builtinTool desktop=tool
       Right (object ["windowId" .= windowId w,"bufferId" .= bufferId w,"anchor" .= anchor (selection w),
         "caret" .= caret (selection w),"text" .= T.take 131072 text,"truncated" .= (T.length text>131072)])
     tool _ _=Left "Unknown editor tool"
-    hex byte rest=let n=fromIntegral byte in ' ':intToDigit (n `div` 16):intToDigit (n `mod` 16):rest
-    readResult :: Either P.RangeError a -> Either T.Text a
-    readResult=either (Left . T.pack . show) Right
     parseArgs :: (Value -> Parser a) -> Value -> Either T.Text a
     parseArgs parser=either (Left . T.pack) Right . parseEither parser
     findWindow ident=case filter ((==ident).windowId) (windows desktop) of w:_->Just w; _->Nothing
@@ -229,8 +212,60 @@ builtinTool desktop=tool
     rect (Rect x y w h)=object ["x" .= x,"y" .= y,"width" .= w,"height" .= h]
     title doc | privateDocument desktop doc="[private]"
               | otherwise=fromMaybe (maybe "Untitled" (T.pack . filePath) (documentFile doc)) (documentLabel doc)
-    bufferInfo ident doc=object ["bufferId" .= ident,"title" .= title doc,"path" .= (if privateDocument desktop doc then Nothing else fmap filePath (documentFile doc)),
-      "modified" .= dirty (documentBuffer doc),"binary" .= byteMode (documentBuffer doc),"revision" .= revision (documentBuffer doc)]
+    bufferInfo = bufferMetadata desktop
+
+-- | Capture a policy-admitted immutable read while the session is serialized.
+-- The returned continuation formats the result after the desktop lock is released.
+-- No admission is retained by that continuation; it only consumes granted data.
+readBufferTool :: ReadAdmission -> Desktop -> T.Text -> Value -> IO (Desktop,IO (Either T.Text Value))
+readBufferTool admission desktop _ args=case readBufferRequest desktop args of
+  Left err->pure (desktop,pure (Left err))
+  Right (ident,doc,start,count,offset)->do
+    reference<-readReference admission ident
+    captured<-case reference of
+      Left err->pure (Left err)
+      Right ref->captureBuffer admission desktop ref
+    pure (desktop,pure $ do
+      image<-captured
+      formatBufferRead (bufferMetadata desktop ident doc) start count offset (capturedRedacted image) (capturedContent image))
+
+readBufferRequest :: Desktop -> Value -> Either T.Text (Int,Document,Int,Int,Int)
+readBufferRequest desktop args=do
+  (wanted,start,count,offset)<-either (Left . T.pack) Right $ parseEither
+    (withObject "read_buffer" $ \o -> (,,,) <$> o .:? "bufferId" <*> o .:? "startLine" .!= 1 <*> o .:? "lineCount" .!= 200 <*> o .:? "byteOffset" .!= 0) args
+  ident<-maybe (maybe (Left "No active buffer") (Right . bufferId) (activeWindow desktop)) Right wanted
+  doc<-maybe (Left "Buffer not found") Right (M.lookup ident (buffers desktop))
+  unless (start>=1 && count>=1 && count<=1000 && offset>=0) (Left "Use startLine >= 1, lineCount 1..1000, and byteOffset >= 0")
+  pure (ident,doc,start,count,offset)
+
+bufferMetadata :: Desktop -> Int -> Document -> Value
+bufferMetadata desktop ident doc=object ["bufferId" .= ident,"title" .= title,"path" .= (if privateDocument desktop doc then Nothing else fmap filePath (documentFile doc)),
+  "modified" .= dirty (documentBuffer doc),"binary" .= byteMode (documentBuffer doc),"revision" .= revision (documentBuffer doc)]
+  where title | privateDocument desktop doc="[private]"
+              | otherwise=fromMaybe (maybe "Untitled" (T.pack . filePath) (documentFile doc)) (documentLabel doc)
+
+formatBufferRead :: Value -> Int -> Int -> Int -> Bool -> P.BufferRead -> Either T.Text Value
+formatBufferRead metadata start count offset redacted b
+  | P.representation b==P.ByteBuffer = do
+    let size=P.readLength b
+        a=min offset size
+        z=a+min 4096 (size-a)
+    bytes<-readResult (P.readBytes b (P.ByteRange (P.ByteOffset a) (P.ByteOffset z)))
+    Right (object ["buffer" .= metadata,"byteOffset" .= offset,"bytes" .= BS.length bytes,
+      "hex" .= T.pack (drop 1 (BS.foldr hex [] bytes)),"totalBytes" .= size])
+  | otherwise = do
+    total<-readResult (P.readLineCount b)
+    let available=if start>total then 0 else min count (total-start+1)
+    rows<-mapM (readResult . P.readLine b . P.LineNumber . (start-1+)) [0..available-1]
+    let text=T.intercalate "\n" rows
+        limited=T.take 131072 text
+    Right (object ["buffer" .= metadata,"startLine" .= start,"lineCount" .= available,
+      "totalLines" .= total,"text" .= limited,"redacted" .= redacted,"truncated" .= (T.length limited<T.length text)])
+  where
+    hex byte rest=let n=fromIntegral byte in ' ':intToDigit (n `div` 16):intToDigit (n `mod` 16):rest
+    readResult :: Either P.RangeError a -> Either T.Text a
+    readResult=either (Left . T.pack . show) Right
+
 
 -- | Dispatch with the desktop locked and return a reply continuation.
 -- Wait for that continuation only after releasing the desktop lock.
