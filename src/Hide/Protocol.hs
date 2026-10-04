@@ -33,11 +33,13 @@ import qualified Hide.Model as Model
 import Hide.Buffer (dirty, newBuffer, newByteBuffer, selectedText)
 import Hide.Font
 import Hide.Render (renderDesktop)
+import qualified Hide.Bindings as Bindings
+import qualified Hide.Plugin.Menu as Plugin
 import Hide.Commands (commandIdentifier)
 import Hide.Unicode (displayOpsForPic, graphemes, clusterWidth)
 
 data WebInput = Key T.Text [V.Modifier] | Paste T.Text | Mouse T.Text Int Int Int Int [V.Modifier]
-              | Wheel Int Int Int [V.Modifier] | SystemTheme Bool | BrowserCommand Command | MenuCommand Command | UploadFile T.Text BS.ByteString | Frontend (Maybe Int) Bool | OpenPath FilePath | Resize Int Int | SuspendSession | Blur | Modifiers [V.Modifier] deriving (Eq,Show)
+              | Wheel Int Int Int [V.Modifier] | SystemTheme Bool | BrowserCommand Command | MenuCommand Command | ContributedMenu T.Text T.Text Integer | UploadFile T.Text BS.ByteString | Frontend (Maybe Int) Bool | OpenPath FilePath | Resize Int Int | SuspendSession | Blur | Modifiers [V.Modifier] deriving (Eq,Show)
 
 -- | Validate an input packet and its bounds. Upload metadata starts with an empty
 -- payload that transport code fills from the following binary packet.
@@ -46,11 +48,18 @@ parseInput = withObject "browser event" $ \o -> do
   kind <- o .: "type" :: Parser T.Text
   let mods = do
         values <- o .:? "mods" .!= [] :: Parser [T.Text]
-        traverse (\v -> case v of "shift" -> pure V.MShift; "ctrl" -> pure V.MCtrl; "alt" -> pure V.MAlt; _ -> fail "Unknown modifier") values
+        traverse (\v -> case v of "shift" -> pure V.MShift; "ctrl" -> pure V.MCtrl; "alt" -> pure V.MAlt; "cmd" -> pure V.MMeta; _ -> fail "Unknown modifier") values
   case kind of
     "menu" -> do
       name <- o .: "command"
-      maybe (fail "Unknown menu command") (pure . MenuCommand) (lookup name protocolMenuCommands)
+      generation <- o .:? "generation" :: Parser (Maybe Int)
+      case generation of
+        Nothing -> maybe (fail "Unknown menu command") (pure . MenuCommand) (lookup name protocolMenuCommands)
+        Just value -> do
+          registry <- o .: "registry"
+          unless (not (T.null name) && T.length name<=128 && T.all (>= ' ') name && value>0 && toInteger value<=9007199254740991 &&
+            T.length registry==48 && T.all (`elem` ("0123456789abcdef"::String)) registry) (fail "Invalid contributed menu lifetime")
+          pure (ContributedMenu name registry (toInteger value))
     "theme" -> SystemTheme <$> o .: "dark"
     "command" -> do
       name <- o .: "command"
@@ -110,7 +119,8 @@ applyGuestInput input d
   | not (guestTransitionAllowed d updated effects) = Left "This editor action requires human input."
   | otherwise = Right (updated,effects)
   where
-    (updated,effects)=applyInputUnchecked input d
+    (updated,rawEffects)=applyInputUnchecked input d
+    effects=map (\effect->case effect of InvokeMenu reference _->InvokeMenu reference Plugin.AgentMenu; _->effect) rawEffects
     allowed=not (guestModalBlocked d) && case input of
       Key name mods -> maybe False (\key->guestKeyAllowed d key mods) (inputKey name mods)
       Paste _ -> guestKeyboardAllowed d
@@ -120,6 +130,7 @@ applyGuestInput input d
       Modifiers _ -> guestKeyboardAllowed d
       BrowserCommand cmd -> guestKeyboardAllowed d && guestCommandAllowed cmd
       MenuCommand cmd -> guestKeyboardAllowed d && guestCommandAllowed cmd
+      ContributedMenu name epoch generation -> guestKeyboardAllowed d && maybe False guestCommandAllowed (contributedCommand name epoch generation d)
       _ -> False
 
 applyInputUnchecked :: WebInput -> Desktop -> (Desktop,[Effect])
@@ -134,6 +145,9 @@ applyInputUnchecked input d = case input of
                      | otherwise -> (d,[])
   MenuCommand cmd | menuCommandAvailable d cmd -> runCommand cmd d
   MenuCommand _ -> (d,[])
+  ContributedMenu name epoch generation -> case contributedCommand name epoch generation d of
+    Just cmd | menuCommandAvailable d cmd -> runCommand cmd d
+    _ -> (d {status="Menu action is stale or unavailable."},[])
   UploadFile name bytes ->
     let b=case TE.decodeUtf8' bytes of
           Right text | not (BS.elem 0 bytes) -> newBuffer text
@@ -227,7 +241,7 @@ protocolCommands = [cmd | (_,_,items)<-menus, MenuItem _ _ cmd<-items]
 -- Only named menu actions are remotely invocable through this route; no
 -- arbitrary Read input and no positional command identities.
 protocolMenuCommands :: [(T.Text,Command)]
-protocolMenuCommands = [(name,cmd) | cmd<-nub protocolCommands, Just name<-[commandIdentifier cmd]]
+protocolMenuCommands = [(name,cmd) | cmd<-nub protocolCommands, cmd/=Help, Just name<-[commandIdentifier cmd]]
 
 -- Browser-owned clipboard/search shortcuts use the same identities as menus.
 protocolBrowserCommands :: [(T.Text,Command)]
@@ -248,7 +262,13 @@ frameMetadata cwd d =
      _ -> if dialog d/=Nothing then "" else clipboard (fst (runCommand Copy d {browserFrontend=False}))),
    "terminal" .= (activeTerminal d/=Nothing && dialog d==Nothing && menu d==Nothing),
    "wordstar" .= wordStar d,
-   "menuState" .= [(ident,menuCommandAvailable d cmd) | (ident,cmd)<-protocolMenuCommands]]
+   "bindingsActive" .= (bindingInputAvailable d && maybe False (const True) (effectiveBindings d)),
+   "bindings" .= (if bindingInputAvailable d then maybe [] Bindings.bindingChords (effectiveBindings d) else []),
+   "menuState" .= [(ident,menuCommandAvailable d cmd) | (ident,cmd)<-protocolMenuCommands],
+   "menuContributions" .= [object ["id" .= Plugin.menuName reference,"registry" .= Plugin.menuEpoch reference,"generation" .= Plugin.menuGeneration reference,
+      "slot" .= Plugin.menuSlot item,"group" .= Plugin.menuGroup item,"order" .= Plugin.menuOrder item,
+      "title" .= Plugin.menuTitle item,"key" .= Plugin.menuKey item,"enabled" .= menuCommandAvailable d (contributionCommand d item)]
+      | item<-contributedMenus d,let reference=Plugin.menuReference item]]
   where cursor=case V.picCursor (renderDesktop d) of V.Cursor x y -> Just (x,y); _ -> Nothing
 
 assetsPacket :: Font -> Double -> Value

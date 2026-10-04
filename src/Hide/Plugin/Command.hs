@@ -8,8 +8,8 @@
 -- authorization grant: the host supplies context and checks caller policy.
 module Hide.Plugin.Command
   ( Registry, Command, CommandRef, Codec(..), CommandDef(..), CommandInfo(..)
-  , CommandError(..), withRegistry, registerCommand, retireCommand, commandRef
-  , resolveCommand, registeredCommands, invoke, invokeJSON
+  , CommandError(..), validCommandName, withRegistry, registerCommand, retireCommand, commandRef
+  , resolveCommand, registeredCommands, commandCurrent, invoke, invokeJSON
   ) where
 
 import Control.Concurrent.MVar
@@ -67,7 +67,7 @@ withRegistry = bracket acquire close
 -- | Register a unique namespaced command; a live name is never replaced.
 registerCommand :: Registry context -> CommandDef context a b -> IO (Either CommandError (Command context a b))
 registerCommand (Registry ident state) definition
-  | not (validName name)=pure (Left (InvalidCommandName name))
+  | not (validCommandName name)=pure (Left (InvalidCommandName name))
   | otherwise=modifyMVar state $ \current@(State closed generation entries)->
       if closed then pure (current,Left RegistryClosed)
       else if M.member name entries then pure (current,Left (DuplicateCommand name))
@@ -76,8 +76,9 @@ registerCommand (Registry ident state) definition
            in pure (State False next (M.insert name (Entry next definition) entries),Right (Command reference definition))
   where name=commandName definition
 
-validName :: Text -> Bool
-validName name=T.length name<=128 && length segments>=2 && all validSegment segments
+-- | Namespaced lowercase ASCII IDs, shared by command and menu declarations.
+validCommandName :: Text -> Bool
+validCommandName name=T.length name<=128 && length segments>=2 && all validSegment segments
   where
     segments=T.splitOn "." name
     validSegment segment=case T.uncons segment of
@@ -117,6 +118,11 @@ currentEntry ident closed entries (CommandRef owner generation name)
 
 admit :: Registry context -> CommandRef -> IO (Either CommandError (Entry context))
 admit (Registry ident state) reference=withMVar state $ \(State closed _ entries)->pure (currentEntry ident closed entries reference)
+
+-- | Check exact registration liveness without running codecs or handlers. Hosts
+-- use this again before adopting a delayed reply; retirement cannot resurrect UI.
+commandCurrent :: Registry context -> CommandRef -> IO Bool
+commandCurrent registry reference=either (const False) (const True) <$> admit registry reference
 
 -- | Invoke a typed handle only while that exact registration is live.
 -- Successful typed values remain lazy: callers own their evaluation, including

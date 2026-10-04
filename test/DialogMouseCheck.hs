@@ -10,7 +10,7 @@ import Hide.BufferView
 import Hide.Model
 import Hide.Render (snapshotHtml, snapshot, renderDesktop)
 import Hide.Buffer (revision, newBuffer, columnOffset, contents, markSaved, replaceSelection, Selection(..))
-import Hide.Window (nativeMenuShortcut)
+import Hide.Window (nativeChordShortcut)
 import qualified Data.Text.Encoding as TE
 import Hide.Browser (Entry(..))
 import Hide.Files (FileState(..))
@@ -467,7 +467,7 @@ searchChecks=do
   check "modern menu shortcuts match the native platform"
     (shortcut base Copy=="Ctrl+C" && shortcut base Cut=="Ctrl+X" && shortcut base Paste=="Ctrl+V" && shortcut base Replace=="Ctrl+H" &&
       shortcut base {nativeMac=True} Replace=="⌥⌘F" && shortcut base {nativeMac=True} Redo=="⇧⌘Z" &&
-      nativeMenuShortcut EditorOptions=="," && nativeMenuShortcut Replace=="~f" && nativeMenuShortcut FindPrevious=="G")
+      nativeChordShortcut ["Cmd+,"]==(",",8) && nativeChordShortcut ["Cmd+Alt+F"]==("f",12) && nativeChordShortcut ["Cmd+Shift+G"]==("g",9))
   let child=selectConversationView "child" "Worker" base
       drafted=child {composerBuffer=newBuffer "keep draft",composerSelection=Selection 10 10}
       (focused,focusEffects)=runCommand Conversation drafted

@@ -90,6 +90,7 @@ with tempfile.TemporaryDirectory(prefix='thc-remote-browser-') as directory:
             ws=WebSocket(url);display=Display(ws)
             display.until('frame')
             assert source.name in display.meta['title'],display.meta
+            help_action=next(item for item in display.meta['menuContributions'] if item['id']=='hide.help.contents')
             ws.send({'type':'command','command':'hide.edit.select-all','seq':1});display.until('ack',lambda m:m['seq']==1)
             ws.send({'type':'paste','text':'remote λ\n','seq':2});display.until('ack',lambda m:m['seq']==2)
             ws.send({'type':'key','key':'F2','seq':3});display.until('ack',lambda m:m['seq']==3)
@@ -104,7 +105,16 @@ with tempfile.TemporaryDirectory(prefix='thc-remote-browser-') as directory:
             ws.send({'type':'command','command':'hide.file.download','seq':2})
             display.until('download');kind,blob=ws.read();assert kind==2 and blob==b'remote \xce\xbb\n'
             display.until('ack',lambda m:m['seq']==2)
-            ws.send({'type':'command','command':'hide.app.quit','seq':3});display.until('closed')
+            assert next(item for item in display.meta['menuContributions'] if item['id']=='hide.help.contents')['generation']==help_action['generation']
+            ws.send({'type':'menu','command':help_action['id'],'registry':help_action['registry'],'generation':help_action['generation']+1,'seq':3})
+            display.until('ack',lambda m:m['seq']==3)
+            assert source.name in display.meta['title'],display.meta
+            ws.send({'type':'menu','command':help_action['id'],'registry':help_action['registry'],'generation':help_action['generation'],'seq':4})
+            display.until('ack',lambda m:m['seq']==4)
+            display.until('frame',lambda _:'Haskell Help' in display.meta['title'])
+            assert source.read_text()=='remote λ\n'
+            ws.send({'type':'menu','command':'hide.window.close','seq':5});display.until('ack',lambda m:m['seq']==5)
+            ws.send({'type':'command','command':'hide.app.quit','seq':6});display.until('closed')
             code=process.wait(timeout=10)
             log.flush();log.seek(0)
             assert code==0,log.read()

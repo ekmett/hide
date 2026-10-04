@@ -402,8 +402,8 @@ int main(void) {
     check(SDLK_KP_PLUS, SDL_KMOD_CTRL, NULL, 1);
     check(SDLK_KP_MINUS, SDL_KMOD_CTRL, NULL, 1);
 #ifdef SDL_PLATFORM_MACOS
-    check(SDLK_N, SDL_KMOD_GUI, NULL, 6); /* Native menu alone invokes New. */
-    check(SDLK_Z, SDL_KMOD_GUI | SDL_KMOD_SHIFT, NULL, 6);
+    check(SDLK_N, SDL_KMOD_GUI, NULL, 1); /* Unclaimed Command reaches the shared map. */
+    check(SDLK_Z, SDL_KMOD_GUI | SDL_KMOD_SHIFT, NULL, 1);
     const char *option_digits[] = {"¡", "™", "£", "¢", "∞", "§", "¶", "•", "ª"};
     for (int i = 0; i < 9; ++i) {
         check(SDLK_1 + i, SDL_KMOD_ALT, option_digits[i], 1);
@@ -420,7 +420,7 @@ int main(void) {
     SDL_zero(released); released.type = SDL_EVENT_TEXT_INPUT; released.text.text = "é";
     assert(SDL_PushEvent(&released));
     int32_t out[6]; assert(thc_wait(out) && out[0] == 2 && strcmp(thc_text(), "é") == 0);
-    check(SDLK_1, SDL_KMOD_GUI | SDL_KMOD_ALT, NULL, 6);
+    check(SDLK_1, SDL_KMOD_GUI | SDL_KMOD_ALT, NULL, 1);
     SDL_Keycode scale_keys[] = {SDLK_0, SDLK_EQUALS, SDLK_PLUS, SDLK_MINUS};
     const char *scale_text[] = {"º", "≠", "±", "–"};
     for (int i = 0; i < 4; ++i) {

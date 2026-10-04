@@ -19,7 +19,7 @@ import Hide.Model (initialDesktop, addDocument, Desktop(..))
 checks :: IO ()
 checks = do
   let check name good = unless good (error name)
-      meta = object ["size" .= ([80,25]::[Int]),"mode" .= (3::Int)]
+      meta = object ["size" .= ([80,25]::[Int]), "bindings" .= ([]::[(T.Text,T.Text)]),"mode" .= (3::Int)]
       row = toJSON [(0::Int,0xffffff::Int,0::Int,[String "abc",toJSON ("界"::T.Text,2::Int)])]
       rows = row : replicate 24 (toJSON ([]::[Value]))
       valid = either (const False) (const True) . parseRemoteFrame meta
@@ -28,7 +28,7 @@ checks = do
   check "press and release repaint the local pointer visibility"
     (nativeRepaint [3,10,4,1,0,1] && nativeRepaint [4,10,4])
   check "remote Unicode rows validate" (valid rows)
-  let menuMeta fields=object (["size" .= ([80,25]::[Int]) ]++fields)
+  let menuMeta fields=object (["size" .= ([80,25]::[Int]), "bindings" .= ([]::[(T.Text,T.Text)]) ]++fields)
       states metadata=either (const []) remoteMenus (parseRemoteFrame metadata rows)
   check "menus are disabled without named metadata" (not (or (states (menuMeta []))))
   check "menu state requires advertised command capability" (not (or (states (menuMeta ["menuState" .= [("hide.file.new"::T.Text,True)]]))))
@@ -44,7 +44,7 @@ checks = do
   check "remote span overflow rejected" (not (valid (toJSON [(79::Int,0::Int,0::Int,[String "ab"])] : drop 1 rows)))
   check "remote colors bounded" (not (valid (toJSON [(0::Int,-1::Int,0::Int,[String "a"])] : drop 1 rows)))
   check "remote clusters cannot contain NUL" (not (valid (toJSON [(0::Int,0::Int,0::Int,[toJSON ("a\0"::T.Text,1::Int)])] : drop 1 rows)))
-  check "remote invalid dimensions rejected" (either (const True) (const False) (parseRemoteFrame (object ["size" .= ([999999,25]::[Int])]) rows))
+  check "remote invalid dimensions rejected" (either (const True) (const False) (parseRemoteFrame (object ["size" .= ([999999,25]::[Int]),"bindings" .= ([]::[(T.Text,T.Text)])]) rows))
   check "Control bracket detaches locally" (remoteDetachShortcut [1,fromEnum ']',2] && nativeEventInput [1,fromEnum ']',2]==Nothing)
   check "other bracket shortcuts remain editor input" (all (not . remoteDetachShortcut . (\mods -> [1,fromEnum ']',mods])) [0,1,3,6,8])
   check "native close requests checked remote quit" (nativeEventInput [6] == Just (object ["type" .= ("command"::T.Text),"command" .= ("hide.app.quit"::T.Text)]))
@@ -53,8 +53,7 @@ checks = do
   check "offline zoom remains local" (remoteInputAllowed False [1,fromEnum '+',2] && remoteInputAllowed True [1,97,0])
   check "native blur releases remote state" (nativeEventInput [7] == Just (object ["type" .= ("blur"::T.Text)]))
   check "remote key mapping preserves shift tab" (nativeKeyInput (-9) 1 == Just (object ["type" .= ("key"::T.Text),"key" .= ("Tab"::T.Text),"mods" .= (["shift"]::[T.Text])]))
-  check "terminal control v stays terminal input" (not (pasteShortcut True False (fromEnum 'v') 2) && pasteShortcut True False (fromEnum 'v') 3 && pasteShortcut True True (fromEnum 'v') 3)
-  check "WordStar control v stays editor input" (not (pasteShortcut False True (fromEnum 'v') 2) && pasteShortcut False True (fromEnum 'v') 8)
+  check "native Command preserves wire modifier" (nativeKeyInput (fromEnum 'v') 8==Just (object ["type" .= ("key"::T.Text),"key" .= ("v"::T.Text),"mods" .= (["cmd"]::[T.Text])]))
   check "download names stay single safe components" (sanitizeDownloadName "../../secret" == "secret" && sanitizeDownloadName "..\\..\\secret" == "secret" && sanitizeDownloadName ".." == "download" && not (T.any (<' ') (sanitizeDownloadName "bad\0name")))
 
   check "download filenames respect UTF8 filesystem limits" (BS.length (TE.encodeUtf8 (sanitizeDownloadName (T.replicate 180 "界")))<=180)

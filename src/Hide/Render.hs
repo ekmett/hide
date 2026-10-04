@@ -35,6 +35,7 @@ import Hide.Buffer
 import Hide.BufferView
 import Hide.Unicode (graphemes, clusterWidth, textImage, flattenPicture)
 import Hide.GuestAccess (streamerReadableAt)
+import qualified Hide.Plugin.Menu as Plugin
 import Hide.Model
 import Hide.InlineState
 import Hide.InlineTypes (proposalEnd)
@@ -72,6 +73,9 @@ data RenderState = RenderState
   , keyButtonHover :: Maybe Int
   , keyButtonPressed :: Maybe Int
   , keyContextMenu :: Maybe (Rect,Int)
+  , keyContributedMenus :: [Plugin.MenuItem]
+  , keyAgentMenuRefs :: [Plugin.MenuRef]
+  , keyMenusActive :: Bool
   , keyContextTarget :: Maybe ContextTarget
   , keyProblemsVisible :: Bool
   , keyProblemsSelected :: Int
@@ -216,6 +220,9 @@ renderKey original = do
         , keyButtonHover=buttonHover original
         , keyButtonPressed=buttonPressed original
         , keyContextMenu=contextMenu original
+        , keyContributedMenus=contributedMenus original
+        , keyAgentMenuRefs=agentMenuRefs original
+        , keyMenusActive=menusActive original
         , keyContextTarget=contextTarget original
         , keyProblemsVisible=problemsVisible original
         , keyProblemsSelected=problemsSelected original
