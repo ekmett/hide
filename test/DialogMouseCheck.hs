@@ -473,7 +473,7 @@ previousSearchChecks=do
 contextShortcutChecks :: IO ()
 contextShortcutChecks=do
   let check name ok=unless ok (error name)
-      maps=either (error . T.unpack) id (configuredBindings (M.fromList
+      maps=either (error . T.unpack) id (configuredBindings [] (M.fromList
         [("terminal",M.singleton "source" (M.fromList [("hide.language.definition",["Ctrl+Shift+D"]),("hide.language.inspect-type",[])]))
         ,("macos",M.singleton "source" (M.singleton "hide.search.find" ["Cmd+Alt+Shift+J"]))]))
       base=(addDocument (Just (FileState "/project/Context.hs" Nothing)) (newBuffer "source") (initialDesktop (100,25))) {keyBindings=maps}

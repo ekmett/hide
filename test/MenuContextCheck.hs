@@ -60,7 +60,7 @@ checks=bracket temporary removePathForcibly $ \root->withDocsCommands $ \docs->w
   check "Go to source key action resolves the same registry identity" (snd (runCommand GoToMessage pane)==requests)
   check "unselected/empty projection retains popup but disables source navigation"
     (let empty=openContext MessagesContext 8 5 (setDiagnostics [] pane) in contextTargetCurrent empty && not (commandEnabled empty (RegisteredMenu reference False)))
-  let profiles=right (configuredBindings (M.singleton "macos" (M.singleton "messages" (M.singleton "hide.messages.go-to" ["Cmd+Shift+J"]))))
+  let profiles=right (configuredBindings [] (M.singleton "macos" (M.singleton "messages" (M.singleton "hide.messages.go-to" ["Cmd+Shift+J"]))))
       configured=pane {nativeMac=True,videoMode=Just 3,keyBindings=profiles}
   check "registered Messages action uses its effective canonical binding label"
     (commandBindingKeys configured (RegisteredMenu reference False)==["Cmd+Shift+J"])
@@ -68,7 +68,7 @@ checks=bracket temporary removePathForcibly $ \root->withDocsCommands $ \docs->w
       contextRow d n=case contextMenu d of
         Just (rect,_) -> T.lines (snapshot d) !! (top rect+1+n)
         _ -> error "missing configured popup"
-      removed=configured {keyBindings=right (configuredBindings (M.singleton "macos" (M.singleton "messages" (M.singleton "hide.messages.go-to" []))))}
+      removed=configured {keyBindings=right (configuredBindings [] (M.singleton "macos" (M.singleton "messages" (M.singleton "hide.messages.go-to" []))))}
   check "registered context row paints its effective Mac shortcut"
     ("⇧⌘J" `T.isInfixOf` contextRow configuredPopup 0)
   check "registered context row clears an explicitly unbound shortcut"
