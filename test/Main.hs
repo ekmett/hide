@@ -61,6 +61,7 @@ import qualified AgentWorkspaceCheck
 import qualified UnicodeCheck
 import qualified HexCheck
 import qualified DAPCheck
+import qualified DebuggerSidebarCheck
 import qualified DebuggerCheck
 import qualified CompletionCheck
 import qualified DownloadsCheck
@@ -68,6 +69,7 @@ import qualified HdbAcquisitionCheck
 import qualified DebuggerAcquisitionCheck
 import qualified CompilersCheck
 import qualified BuildCheck
+import qualified PackagePathsCheck
 import qualified PackageSourcesCheck
 import qualified ProjectBrowserCheck
 import qualified RunCheck
@@ -167,6 +169,7 @@ main = do
   HexCheck.checks
   DAPCheck.checks
   DebuggerCheck.checks
+  DebuggerSidebarCheck.checks
   CompletionCheck.checks
   DownloadsCheck.checks
   HdbAcquisitionCheck.checks
@@ -321,6 +324,7 @@ main = do
   HelpCheck.checks
   BrowserCheck.checks
   PackageSourcesCheck.checks
+  PackagePathsCheck.checks
   ProjectBrowserCheck.checks
   FilesCheck.checks
   ExternalCheck.checks

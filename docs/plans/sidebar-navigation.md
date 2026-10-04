@@ -161,11 +161,11 @@ invalidation uses small revisions and immutable identities, never equality or
 hashing of the desktop, buffers, histories or full debugger payloads. Retain the
 existing drag capture, coalescing and dock resize rules.
 
-Separate the stopped-state epoch from selected-frame/source-follow identity. The
-current debugger advances one global generation on frame selection, which would
-otherwise invalidate sibling expanded frame trees. References expire on resume;
-source-follow and watch replies additionally match the current frame-selection
-revision so an earlier click cannot move the editor back.
+The debugger separates the stopped-state epoch from selected-frame/source-follow
+identity. Frame selection preserves sibling stopped handles. References expire
+on resume; source-follow replies additionally match the selected-frame revision
+so an earlier click cannot move the editor back. Watches will use that same
+selection boundary when their consumer is implemented.
 
 ## Configurable bindings
 

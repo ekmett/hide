@@ -578,3 +578,11 @@ Closing it removes the prepared content while preserving source documents.
 The complete scoped refresh, durable recovery and widget APIs remain tracked in
 [#5](https://github.com/ekmett/hide/issues/5). Editable widgets and the broader
 `WindowDef` signatures in the design document remain proposed.
+The Debug sidebar uses the same scoped tree route as Files and Agents. Provider
+workers wait on the existing debugger owner through a 32-entry mailbox; each tick
+admits at most four messages. Validated pages are capped at 1 MiB and 64 cached
+pages per stop. Cache validation and prepared presentation run off the UI lock;
+owner maps retain scalar provenance and validated immutable rows, never document
+payloads. `DebuggerSidebarCheck` exercises real fake-DAP interleaving, captured
+frame activation, passive cached ticks, sticky lazy-reference refusal, resume
+expiry and thread-exit refusal of delayed child pages.

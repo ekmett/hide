@@ -6,9 +6,10 @@
 -- them may execute target code. Replacements retire transport/consoles before
 -- reusing endpoints. Consented hdb acquisition retains the exact launch context
 -- and cannot revive a superseded launch after installation completes.
-module Hide.Debugger (Debugger, Core, withDebugger, withDebuggerConsoles, withDebuggerClock, withDebuggerHdb, hdbOfferDialog, downloadsDialog, debuggerEffects, tickDebugger, debuggerTool) where
+module Hide.Debugger (Debugger, Core, withDebugger, withDebuggerConsoles, withDebuggerClock, withDebuggerHdb, hdbOfferDialog, downloadsDialog, debuggerEffects, tickDebugger, debuggerTool, debuggerSidebarEpoch, debuggerSidebarSession, debuggerSidebarRead) where
 
 import Hide.Sidebar
+import Hide.DebuggerSidebarTypes
 import Control.Concurrent (MVar, newEmptyMVar, tryPutMVar, tryReadMVar, threadDelay)
 import Control.Exception (IOException, bracket, try, evaluate, mask, mask_, finally)
 import Control.Concurrent.Async (Async, async, cancel, poll, race, waitCatch)
@@ -47,15 +48,17 @@ import qualified Hide.LSP as L
 import Hide.Model
 
 type Core = Desktop -> [Effect] -> IO (Bool,Desktop)
-data Debugger = Debugger (IORef State) (IO Integer) HdbRuntime
+data Debugger = Debugger (IORef State) (IO Integer) HdbRuntime SidebarMailbox
+data SidebarMailbox = SidebarMailbox !(TVar (Maybe (Int,Int))) !(TBQueue SidebarIngress)
+data SidebarIngress = ReadDebugPage !DebugPageRequest !(TMVar (Either Text Value)) | CacheDebugPage !DebugPageRequest !Value
 data Pending = Init | Attach | Configure | Breaks Text [Int] | Exceptions | Threads Bool
-  | Stack Bool | Scopes | Variables | ExceptionDetails | Source Bool Value | Control Bool | Detach
-  | Inspection Text (MVar (Either Text Value))
+  | Stack Bool Int Int | Scopes Int | Variables Int | ExceptionDetails | Source Bool Int Value | Control Bool | Detach
+  | Inspection Text (MVar (Either Text Value)) | SidebarRead DebugPageRequest (TMVar (Either Text Value))
   deriving (Eq)
 data Breakpoint = Breakpoint { bpLine :: Int, bpResult :: Value } deriving (Eq,Show)
 data State = State
   { client :: Maybe D.Client, connected :: Bool, capabilities :: Value, ready :: Bool, configured :: Bool
-  , pending :: M.Map Int (Pending,Int,Integer), generation :: Int
+  , pending :: M.Map Int (Pending,Int,Integer), generation :: Int, frameRevision :: Int
   , stopped :: Bool, thread :: Maybe Int, frame :: Maybe Value, frames :: [Value], followSource :: Bool
   , exceptionFilters :: [Text]
   , breakpoints :: M.Map Text (Value,[Breakpoint]), sources :: M.Map Int Value
@@ -66,13 +69,16 @@ data State = State
   , endedAt :: Maybe Integer, programExitCode :: Maybe Int
   , choices :: M.Map Text [Value], choiceId :: Int, breakRequests :: M.Map Text Int
   , breakModified :: M.Map Text Bool, variableRefs :: M.Map Int Bool
+  , sidebarVisible :: Bool, sidebarSession :: Int, sidebarPages :: M.Map DebugPageRequest Value
+  , sidebarThreads :: M.Map Int (), sidebarFrames :: M.Map (Int,Int) Value
+  , sidebarReferences :: M.Map (Int,Int,Int) Bool
   }
 
 emptyState :: State
-emptyState = State {client=Nothing,connected=False,capabilities=Null,ready=False,configured=False,pending=M.empty,generation=0,
+emptyState = State {client=Nothing,connected=False,capabilities=Null,ready=False,configured=False,pending=M.empty,generation=0,frameRevision=0,
   stopped=False,thread=Nothing,frame=Nothing,frames=[],followSource=True,exceptionFilters=[],breakpoints=M.empty,sources=M.empty,
   root=".",endpoint=("127.0.0.1",4711),output="",failure=Nothing,disconnectAt=Nothing,endedAt=Nothing,programExitCode=Nothing,
-  hdbLauncher=Nothing,debugEnvironment=[],debugConsoles=[],terminalLaunch=Nothing,outputShown=False,choices=M.empty,choiceId=0,breakRequests=M.empty,breakModified=M.empty,startRequest=("attach",object []),managed=False,adapterId="",variableRefs=M.empty}
+  hdbLauncher=Nothing,debugEnvironment=[],debugConsoles=[],terminalLaunch=Nothing,outputShown=False,choices=M.empty,choiceId=0,breakRequests=M.empty,breakModified=M.empty,startRequest=("attach",object []),managed=False,adapterId="",variableRefs=M.empty,sidebarVisible=False,sidebarSession=0,sidebarPages=M.empty,sidebarThreads=M.empty,sidebarFrames=M.empty,sidebarReferences=M.empty}
 
 withDebugger :: (Debugger -> IO a) -> IO a
 withDebugger action = C.withConsoles (\consoles -> withDebuggerConsoles consoles action)
@@ -98,11 +104,13 @@ withDebuggerHdbConsoles :: C.Consoles -> IO Integer -> (Compilers.Compiler -> IO
 withDebuggerHdbConsoles consoles clock prepare acquire action = Downloads.withDownloads $ \downloads -> do
   jobs<-newIORef (HdbState 0 Nothing Nothing Nothing Nothing [])
   retired<-newIORef []
+  mailbox<-SidebarMailbox <$> newTVarIO Nothing <*> newTBQueueIO 32
   let runtime=HdbRuntime downloads jobs prepare acquire consoles retired
-  bracket ((\ref -> Debugger ref clock runtime) <$> newIORef emptyState)
-    (\debugger@(Debugger ref _ _) -> do
+  bracket ((\ref -> Debugger ref clock runtime mailbox) <$> newIORef emptyState)
+    (\debugger@(Debugger ref _ _ _) -> do
       h<-readIORef jobs
       mapM_ (\(_,_,_,task)->cancel task) (hdbPreparing h)
+      atomically $ case mailbox of SidebarMailbox epoch _->writeTVar epoch Nothing
       readIORef ref >>= stopTransport debugger
       readIORef retired >>= mapM_ waitCatch) action
 
@@ -110,21 +118,129 @@ debuggerEffects :: Debugger -> Core -> Core
 debuggerEffects runtime fallback = foldM apply . (False,)
   where
     apply result@(True,_) _=pure result
-    apply (_,d) (DebugAction action values) = (False,) <$> perform runtime fallback action values d
+    apply (_,d) (DebugAction action values) = do
+      next<-perform runtime fallback action values d
+      publishSidebarEpoch runtime
+      pure (False,next)
+    apply (_,d) (DebugSidebarAction request) = do
+      next<-selectSidebarFrame runtime fallback request d
+      publishSidebarEpoch runtime
+      pure (False,next)
     apply (_,d) effect@(AgentAction action values)
       | action `elem` ["build-stop","run-config"] || action=="toolchain" && not (null values) =
           invalidateHdb runtime >> fallback d [effect]
     apply (_,d) effect=fallback d [effect]
 
+-- | /O(1)/ immutable stopped projection. Provider workers borrow no mutable
+-- debugger state; frame choice cannot expire sibling stopped handles.
+debuggerSidebarEpoch :: Debugger -> IO (Maybe Int)
+debuggerSidebarEpoch (Debugger _ _ _ (SidebarMailbox epoch _))=fmap (fmap snd) (readTVarIO epoch)
+
+-- | Session identity for revealing Debug once; a later stop keeps the viewport.
+debuggerSidebarSession :: Debugger -> IO (Maybe Int)
+debuggerSidebarSession (Debugger _ _ _ (SidebarMailbox epoch _))=fmap (fmap fst) (readTVarIO epoch)
+
+publishSidebarEpoch :: Debugger -> IO ()
+publishSidebarEpoch (Debugger ref _ _ (SidebarMailbox epoch _))=do
+  s<-readIORef ref
+  atomically (writeTVar epoch (if sidebarVisible s && stopped s && configured s && isJust (client s) && endedAt s==Nothing && disconnectAt s==Nothing then Just (sidebarSession s,generation s) else Nothing))
+
+-- | Wait on a sidebar worker. Only the debugger owner validates provenance and
+-- enqueues its ordinary DAP request. Response sizing/cache preparation happen here,
+-- outside the UI lock; owner cache admission retains at most 64 pages of 1 MiB.
+debuggerSidebarRead :: Debugger -> DebugPageRequest -> IO (Either Text Value)
+debuggerSidebarRead (Debugger _ _ _ (SidebarMailbox epoch queue)) request@(DebugPageRequest captured target _)=do
+  current<-readTVarIO epoch
+  if fmap snd current/=Just captured then pure (Left "Debugger node expired.") else do
+    reply<-newEmptyTMVarIO
+    atomically (writeTBQueue queue (ReadDebugPage request reply))
+    completed<-timeout 16000000 (atomically (takeTMVar reply))
+    case completed of
+      Nothing->pure (Left "Debugger sidebar request timed out.")
+      Just (Left err)->pure (Left err)
+      Just (Right body)->do
+        -- Keep the requested rows and stack total, not arbitrary adapter metadata.
+        let key=case target of DebugThreads->"threads"; DebugStack{}->"stackFrames"; DebugScopes{}->"scopes"; DebugVariables{}->"variables"
+            page=object [fromText key .= take 128 (items key body),"totalFrames" .= (field "totalFrames" body :: Maybe Int)]
+        checked<-evaluate (boundedResult page)
+        case checked of
+          Left err->pure (Left err)
+          Right value->do
+            atomically (writeTBQueue queue (CacheDebugPage request value))
+            pure (Right value)
+  where fromText=K.fromText
+
+-- At most four small mailbox messages per tick. Backpressure belongs to provider
+-- workers; the session owner never waits for a producer or a DAP socket.
+drainSidebarReads :: Debugger -> IO ()
+drainSidebarReads runtime@(Debugger ref _ _ (SidebarMailbox _ queue))=forM_ [1..4::Int] $ \_->do
+  next<-atomically (tryReadTBQueue queue)
+  forM_ next $ \ingress->do
+    s<-readIORef ref
+    case ingress of
+      CacheDebugPage request value | validSidebarRequest s request && (M.member request (sidebarPages s) || M.size (sidebarPages s)<64)->do
+        recordSidebarResponse ref request value
+        modifyIORef' ref (\state->state {sidebarPages=M.insert request value (sidebarPages state)})
+      CacheDebugPage{}->pure ()
+      ReadDebugPage request reply
+        | not (validSidebarRequest s request)->atomically (void (tryPutTMVar reply (Left "Debugger node expired or is lazy.")))
+        | Just cached<-M.lookup request (sidebarPages s)->atomically (void (tryPutTMVar reply (Right cached)))
+        | M.size (sidebarPages s)>=64->atomically (void (tryPutTMVar reply (Left "Debugger sidebar page budget reached; resume to refresh.")))
+        | otherwise->do
+            let (command,args)=sidebarArguments request
+            outcome<-try (send runtime (SidebarRead request reply) command args)
+            case outcome of
+              Left (err::IOException)->atomically (void (tryPutTMVar reply (Left ("DAP: "<>T.pack (show err)))))
+              Right ()->pure ()
+
+validSidebarRequest :: State -> DebugPageRequest -> Bool
+validSidebarRequest s (DebugPageRequest epoch target offset)=generation s==epoch && sidebarVisible s && stopped s && configured s && isJust (client s) && disconnectAt s==Nothing && endedAt s==Nothing && offset>=0 && offset<=32768 && case target of
+  DebugThreads->offset==0
+  DebugStack tid->M.member tid (sidebarThreads s)
+  DebugScopes tid fid->offset==0 && M.member (tid,fid) (sidebarFrames s)
+  DebugVariables tid fid reference->offset==0 && M.lookup (tid,fid,reference) (sidebarReferences s)==Just False
+
+sidebarArguments :: DebugPageRequest -> (Text,Value)
+sidebarArguments (DebugPageRequest _ target offset)=case target of
+  DebugThreads->("threads",object [])
+  DebugStack tid->("stackTrace",object ["threadId" .= tid,"startFrame" .= offset,"levels" .= (128::Int)])
+  DebugScopes _ fid->("scopes",object ["frameId" .= fid])
+  DebugVariables _ _ reference->("variables",object ["variablesReference" .= reference,"start" .= offset,"count" .= (128::Int)])
+
+-- Only IDs and shallow immutable DAP rows enter owner maps. Bounded raw response
+-- fields are prepared/sized by the waiting worker before page cache admission.
+recordSidebarResponse :: IORef State -> DebugPageRequest -> Value -> IO ()
+recordSidebarResponse ref (DebugPageRequest _ target _) body=modifyIORef' ref $ \s->case target of
+  DebugThreads->s {sidebarThreads=M.fromList [(ident,()) | row<-take 128 (items "threads" body),let ident=integer "id" row,ident>0]}
+  DebugStack tid->s {sidebarFrames=boundedUnion (M.fromList [((tid,fid),row) | row<-take 128 (items "stackFrames" body),let fid=integer "id" row,fid>0]) (sidebarFrames s)}
+  DebugScopes tid fid->s {sidebarReferences=boundedReferences (references tid fid "scopes") (sidebarReferences s)}
+  DebugVariables tid fid _->s {sidebarReferences=boundedReferences (references tid fid "variables") (sidebarReferences s)}
+  where
+    boundedUnion newer previous=fst (M.splitAt 32768 (M.union newer previous))
+    boundedReferences newer previous=fst (M.splitAt 32768 (M.unionWith (||) newer previous))
+    references tid fid key=M.fromListWith (||) [((tid,fid,ident),key=="variables" && maybe False (flag "lazy") (field "presentationHint" row)) | row<-take 128 (items key body),let ident=integer "variablesReference" row,ident>0]
+
+selectSidebarFrame :: Debugger -> Core -> DebugSidebarRequest -> Desktop -> IO Desktop
+selectSidebarFrame runtime@(Debugger ref _ _ _) core (SelectDebugFrame epoch tid fid) d=do
+  s<-readIORef ref
+  if not (validSidebarRequest s (DebugPageRequest epoch (DebugScopes tid fid) 0)) || dialog d/=Nothing
+    then pure d {status="Debugger frame expired."}
+    else case M.lookup (tid,fid) (sidebarFrames s) of
+      Nothing->pure d {status="Debugger frame expired."}
+      Just chosen->do
+        modifyIORef' ref (\state->state {thread=Just tid,frame=Just chosen,frameRevision=frameRevision state+1,choices=M.empty})
+        openFrame runtime core True d chosen
+
 -- | Initiate a tool under desktop serialization and return its outside-lock wait.
 -- Inspection handles must belong to the current stopped generation.
 debuggerTool :: Debugger -> Core -> Desktop -> Text -> Value -> IO (Desktop, IO (Either Text Value))
-debuggerTool runtime@(Debugger ref _ _) core d name arguments = do
+debuggerTool runtime@(Debugger ref _ _ _) core d name arguments = do
   s<-readIORef ref
   case parseEither (parseTool s name) arguments of
     Left err -> pure (d,pure (Left (T.pack err)))
     Right request -> do
       result<-try (run request)
+      publishSidebarEpoch runtime
       pure $ either (\(err::IOException) -> (d,pure (Left ("DAP: "<>T.pack (show err))))) id result
   where
     immediate desktop result=pure (desktop,pure (result >>= boundedResult))
@@ -139,6 +255,7 @@ debuggerTool runtime@(Debugger ref _ _) core d name arguments = do
       if isJust (client current) || starting then snapshot desktop else immediate desktop (Left (status desktop))
     run (ToolControl command)=perform runtime core command [] d >>= snapshot
     run (ToolPresent following view)=do
+      when (isJust view) (modifyIORef' ref (\state->state {sidebarVisible=True}))
       forM_ following (\enabled->modifyIORef' ref (\state->state {followSource=enabled}))
       current<-readIORef ref
       shown<-case view of
@@ -304,6 +421,7 @@ boundedResult value | BL.length (encode value)>=1024*1024 = Left "Debugger respo
 
 completeInspection :: Pending -> Either Text Value -> IO ()
 completeInspection (Inspection _ reply) result=tryPutMVar reply result >> pure ()
+completeInspection (SidebarRead _ reply) result=atomically (void (tryPutTMVar reply result))
 completeInspection _ _=pure ()
 
 awaitInspection :: IORef State -> Int -> MVar (Either Text Value) -> IO (Either Text Value)
@@ -317,7 +435,7 @@ awaitInspection ref epoch reply=do
       Nothing -> maybe (threadDelay 10000 >> awaitInspection ref epoch reply) pure result
 
 perform :: Debugger -> Core -> Text -> [Text] -> Desktop -> IO Desktop
-perform runtime@(Debugger ref clock _) core action values d = do
+perform runtime@(Debugger ref clock _ _) core action values d = do
   when (action `elem` ["launch","launch-config","connect","attach","disconnect"]) (invalidateHdb runtime)
   s<-readIORef ref
   case (action,values) of
@@ -376,9 +494,9 @@ perform runtime@(Debugger ref clock _) core action values d = do
         send runtime ExceptionDetails "exceptionInfo" (object ["threadId" .= tid]) >> pure d {status="Loading exception details..."}
       else pure d {status="This debugger does not support exception details."}
     ("threads",_) | configured s -> send runtime (Threads True) "threads" (object []) >> pure d {status="Loading threads..."}
-    ("stack",_) | stopped s, Just tid<-thread s -> send runtime (Stack True) "stackTrace" (stackArguments tid) >> pure d {status="Loading call stack..."}
+    ("stack",_) | stopped s, Just tid<-thread s -> sendStack runtime True tid >> pure d {status="Loading call stack..."}
     ("scopes",_) | stopped s, Just selected<-frame s,Just ident<-(field "id" selected :: Maybe Int) ->
-      send runtime Scopes "scopes" (object ["frameId" .= ident]) >> pure d {status="Loading scopes..."}
+      send runtime (Scopes (frameRevision s)) "scopes" (object ["frameId" .= ident]) >> pure d {status="Loading scopes..."}
     (command,_) | command `elem` ["continue","next","stepIn","stepOut","pause"],ready s,Just tid<-thread s,
                   (command=="pause" && not (stopped s)) || (command/="pause" && stopped s) -> do
       when (command/="pause") (modifyIORef' ref invalidate)
@@ -420,7 +538,7 @@ parseLaunch = withObject "debugger configuration" $ \o -> do
   pure (LaunchConfig transport requestName arguments adapter)
 
 startSession :: Debugger -> FilePath -> LaunchConfig -> Desktop -> IO Desktop
-startSession runtime@(Debugger ref _ _) directory (LaunchConfig transport requestName arguments adapter) d = do
+startSession runtime@(Debugger ref _ _ _) directory (LaunchConfig transport requestName arguments adapter) d = do
   -- Release an earlier owned listener before testing its port for the new session.
   readIORef ref >>= stopTransport runtime
   (c,address,owned)<-case transport of
@@ -433,7 +551,7 @@ startSession runtime@(Debugger ref _ _) directory (LaunchConfig transport reques
   pure started
 
 launchTarget :: Debugger -> Int -> Desktop -> IO Desktop
-launchTarget runtime@(Debugger ref _ _) port d
+launchTarget runtime@(Debugger ref _ _ _) port d
   | any (\doc -> documentLabel doc==Nothing && dirty (documentBuffer doc)) (M.elems (buffers d)) =
       pure d {status="Save modified source files before launching the disk build."}
   | otherwise = do
@@ -470,20 +588,20 @@ launchGHC runtime directory config port d = case Build.buildSource d of
   _ -> pure d {status="Open the Haskell entry file for GHC debugging, or use Adapter config."}
 
 initializeSession :: Debugger -> FilePath -> D.Client -> (Text,Int) -> Text -> Value -> Text -> Bool -> Desktop -> IO Desktop
-initializeSession runtime@(Debugger ref _ _) directory c address requestName arguments adapter owned d = do
+initializeSession runtime@(Debugger ref _ _ _) directory c address requestName arguments adapter owned d = do
   s<-readIORef ref
   stopTransport runtime s
   writeIORef ref emptyState {client=Just c,generation=generation s+1,root=directory,endpoint=address,
-    followSource=followSource s,breakpoints=persistentBreakpoints s,breakModified=breakModified s,startRequest=(requestName,arguments),managed=owned,adapterId=adapter}
+    followSource=followSource s,sidebarVisible=followSource s,sidebarSession=generation s+1,breakpoints=persistentBreakpoints s,breakModified=breakModified s,startRequest=(requestName,arguments),managed=owned,adapterId=adapter}
   pure (automaticDesktop s d) {status="Connecting debugger..."}
 
 debuggerConsoles :: Debugger -> C.Consoles
-debuggerConsoles (Debugger _ _ (HdbRuntime _ _ _ _ consoles _)) = consoles
+debuggerConsoles (Debugger _ _ (HdbRuntime _ _ _ _ consoles _) _) = consoles
 
 -- Session ownership survives frontend detach. Stop/replacement also retires a
 -- terminal still being prepared, so it cannot appear in a newer session.
 stopTransport :: Debugger -> State -> IO ()
-stopTransport runtime@(Debugger ref _ (HdbRuntime _ _ _ _ _ retired)) s = mask $ \restore -> do
+stopTransport runtime@(Debugger ref _ (HdbRuntime _ _ _ _ _ retired) _) s = mask $ \restore -> do
   -- No old worker can publish into the replacement session. Process cleanup is
   -- joined only at daemon teardown, outside the desktop lock.
   modifyIORef' ref (\state -> state {client=Nothing,terminalLaunch=Nothing,debugConsoles=[]})
@@ -498,16 +616,16 @@ stopTransport runtime@(Debugger ref _ (HdbRuntime _ _ _ _ _ retired)) s = mask $
     modifyIORef' retired (task:)
 
 reapRetired :: Debugger -> IO ()
-reapRetired (Debugger _ _ (HdbRuntime _ _ _ _ _ retired)) = do
+reapRetired (Debugger _ _ (HdbRuntime _ _ _ _ _ retired) _) = do
   tasks<-readIORef retired
   running<-filterM (fmap (not . isJust) . poll) tasks
   writeIORef retired running
 
 awaitRetired :: Debugger -> IO ()
-awaitRetired (Debugger _ _ (HdbRuntime _ _ _ _ _ retired)) = readIORef retired >>= mapM_ waitCatch
+awaitRetired (Debugger _ _ (HdbRuntime _ _ _ _ _ retired) _) = readIORef retired >>= mapM_ waitCatch
 
 replyReverse :: Debugger -> Int -> Text -> Either Text Value -> IO ()
-replyReverse (Debugger ref _ _) ident command result = do
+replyReverse (Debugger ref _ _ _) ident command result = do
   s<-readIORef ref
   forM_ (client s) $ \connection -> do
     sent<-try (D.respond connection ident command result)
@@ -537,7 +655,7 @@ terminalArguments s = withObject "runInTerminal" $ \o -> do
     [(key,value) | (key,Just value)<-M.toList environment] cwd 80 24)
 
 tickTerminalLaunch :: Debugger -> Desktop -> IO Desktop
-tickTerminalLaunch runtime@(Debugger ref _ _) d = do
+tickTerminalLaunch runtime@(Debugger ref _ _ _) d = do
   s<-readIORef ref
   case terminalLaunch s of
     _ | isJust (endedAt s) || isJust (disconnectAt s) -> pure d
@@ -563,10 +681,10 @@ tickTerminalLaunch runtime@(Debugger ref _ _) d = do
 
 -- Frame and variable handles are scoped to a suspended execution state.
 invalidate :: State -> State
-invalidate s=s {generation=generation s+1,stopped=False,frame=Nothing,frames=[],choices=M.empty,variableRefs=M.empty}
+invalidate s=s {generation=generation s+1,frameRevision=frameRevision s+1,stopped=False,frame=Nothing,frames=[],choices=M.empty,variableRefs=M.empty,sidebarPages=M.empty,sidebarThreads=M.empty,sidebarFrames=M.empty,sidebarReferences=M.empty}
 
 send :: Debugger -> Pending -> Text -> Value -> IO ()
-send (Debugger ref clock _) kind command arguments = do
+send (Debugger ref clock _ _) kind command arguments = do
   s<-readIORef ref
   forM_ (client s) $ \c -> do
     result<-try (D.request c command arguments)
@@ -576,9 +694,23 @@ send (Debugger ref clock _) kind command arguments = do
       Right ident -> modifyIORef' ref (\state -> state {pending=M.insert ident (kind,generation state,now) (pending state),
         breakRequests=case kind of Breaks key _ -> M.insert key ident (breakRequests state); _ -> breakRequests state})
 
+-- Capture presentation revision after a stop/thread transition. The stack
+-- target remains explicit even when another thread is selected while it waits.
+sendStack :: Debugger -> Bool -> Int -> IO ()
+sendStack runtime@(Debugger ref _ _ _) showPicker tid=do
+  current<-readIORef ref
+  send runtime (Stack showPicker tid (frameRevision current)) "stackTrace" (stackArguments tid)
+
 -- | Adopt DAP events, expire pending operations and advance resource retirement.
 tickDebugger :: Debugger -> Core -> Desktop -> IO Desktop
-tickDebugger runtime@(Debugger ref clock _) core original = do
+tickDebugger runtime core original = do
+  updated<-tickDebuggerOwner runtime core original
+  publishSidebarEpoch runtime
+  drainSidebarReads runtime
+  pure updated
+
+tickDebuggerOwner :: Debugger -> Core -> Desktop -> IO Desktop
+tickDebuggerOwner runtime@(Debugger ref clock _ _) core original = do
   reapRetired runtime
   prepared<-tickTerminalLaunch runtime original
   starting<-tickHdb runtime prepared >>= C.tickConsoles (debuggerConsoles runtime)
@@ -606,7 +738,7 @@ tickDebugger runtime@(Debugger ref clock _) core original = do
     pure (automaticDesktop current updated) {status=fromMaybe (if detachExpired then "Debugger disconnected." else "DAP request timed out; debugger disconnected.") (failure current)}
 
 receive :: Debugger -> Core -> Desktop -> D.Event -> IO Desktop
-receive runtime@(Debugger ref clock _) core d event = do
+receive runtime@(Debugger ref clock _ _) core d event = do
   s<-readIORef ref
   case event of
     _ | Nothing<-client s -> pure d
@@ -651,7 +783,7 @@ receive runtime@(Debugger ref clock _) core d event = do
       modifyIORef' ref (\state -> (invalidate state) {stopped=True,thread=tid})
       when (configured s) $ do
         send runtime (Threads False) "threads" (object [])
-        forM_ tid (\ident -> send runtime (Stack False) "stackTrace" (stackArguments ident))
+        forM_ tid (\ident -> sendStack runtime False ident)
       pure (automaticDesktop s d) {status="Stopped: "<>text "reason" body}
     D.Notification "invalidated" body -> do
       let areas=fromMaybe [] (field "areas" body) :: [Text]
@@ -659,14 +791,29 @@ receive runtime@(Debugger ref clock _) core d event = do
           threads=allAreas || "threads" `elem` areas
           stacks=threads || "stacks" `elem` areas
       if not (stacks || "variables" `elem` areas) then pure d else do
-        modifyIORef' ref (\state -> state {generation=generation state+1,choices=M.empty,variableRefs=M.empty,
+        modifyIORef' ref (\state -> state {generation=generation state+1,frameRevision=frameRevision state+1,choices=M.empty,variableRefs=M.empty,sidebarPages=M.empty,sidebarThreads=M.empty,sidebarFrames=M.empty,sidebarReferences=M.empty,
           thread=if threads then Nothing else thread state,
           frame=if stacks then Nothing else frame state,frames=if stacks then [] else frames state})
         if threads then send runtime (Threads False) "threads" (object [])
-        else when (stacks && stopped s) $ forM_ (thread s) (\tid -> send runtime (Stack False) "stackTrace" (stackArguments tid))
+        else when (stacks && stopped s) $ forM_ (thread s) (\tid -> sendStack runtime False tid)
         pure (clearDialog d) {status="Debugger values changed; request scopes again."}
     D.Notification "continued" _ -> modifyIORef' ref invalidate >> pure (automaticDesktop s d) {status="Running..."}
-    D.Notification "thread" _ -> when (configured s) (send runtime (Threads False) "threads" (object [])) >> pure d
+    D.Notification "thread" body -> do
+      -- DAP thread changes can retire stack owners without a continued event.
+      -- Conservatively expire the stop's references, retaining stopped state and
+      -- selection when its thread survives. Source/picker replies use the same
+      -- new epoch; no stale child page can revive an exited thread.
+      when (stopped s) $ modifyIORef' ref (\state->state
+        { generation=generation state+1,frameRevision=frameRevision state+1
+        , choices=M.empty,variableRefs=M.empty,sidebarPages=M.empty
+        , sidebarThreads=M.empty,sidebarFrames=M.empty,sidebarReferences=M.empty
+        , thread=if exitedSelection then Nothing else thread state
+        , frame=if exitedSelection then Nothing else frame state
+        , frames=if exitedSelection then [] else frames state })
+      when (configured s) (send runtime (Threads False) "threads" (object []))
+      pure d
+      where exitedSelection=text "reason" body=="exited" && field "threadId" body==thread s
+
     D.Notification "terminated" _ -> do
       now<-clock
       mapM_ (\(kind,_,_) -> completeInspection kind (Left "Debug session ended.")) (M.elems (pending s))
@@ -693,10 +840,13 @@ receive runtime@(Debugger ref clock _) core d event = do
       Nothing -> pure d
       Just (kind,epoch,_) -> do
         modifyIORef' ref (\state -> state {pending=M.delete ident (pending state)})
-        if (stale kind && epoch/=generation s) || (case kind of Breaks key _ -> M.lookup key (breakRequests s)/=Just ident; _ -> False) then do
+        if (stale kind && epoch/=generation s) || selectionExpired s kind || (case kind of Breaks key _ -> M.lookup key (breakRequests s)/=Just ident; _ -> False) then do
           completeInspection kind (Left "Debugger inspection expired; refresh debug_status.")
           pure d
         else case kind of
+          SidebarRead _ reply -> do
+            atomically (void (tryPutTMVar reply result))
+            pure d
           Inspection command reply -> do
             forM_ result (recordVariables ref command)
             _<-tryPutMVar reply (result >>= boundedResult)
@@ -709,12 +859,21 @@ receive runtime@(Debugger ref clock _) core d event = do
              case kind of
                Control wasStopped | wasStopped -> do
                  modifyIORef' ref (\state -> state {stopped=True})
-                 forM_ (thread s) (\tid -> send runtime (Stack False) "stackTrace" (stackArguments tid))
+                 forM_ (thread s) (\tid -> sendStack runtime False tid)
                _ -> pure ()
              pure (automaticDesktop s d) {status="DAP: "<>err}
            Right body -> if isJust (endedAt s) then pure d else response runtime core kind body d
   where
-    stale kind=case kind of Threads{} -> True; Control{} -> True; Stack{} -> True; Scopes -> True; Variables -> True; ExceptionDetails -> True; Source{} -> True; Inspection{} -> True; _ -> False
+    stale kind=case kind of Threads{} -> True; Control{} -> True; Stack{} -> True; Scopes{} -> True; Variables{} -> True; ExceptionDetails -> True; Source{} -> True; Inspection{} -> True; SidebarRead{} -> True; _ -> False
+
+-- Selection controls presentation/source follow only. Stopped handles remain
+-- valid for sibling frames until the stop epoch itself expires.
+selectionExpired :: State -> Pending -> Bool
+selectionExpired s kind=case kind of
+  Scopes revision -> revision/=frameRevision s
+  Variables revision -> revision/=frameRevision s
+  Source _ revision _ -> revision/=frameRevision s
+  _ -> False
 
 -- DAP lazy handles are executable: hdb forces a thunk when its children are
 -- requested. Track provenance for both UI and MCP; never guess a reference.
@@ -728,7 +887,7 @@ recordVariables ref command body
   | otherwise = pure ()
 
 configure :: Debugger -> IO ()
-configure runtime@(Debugger ref _ _) = do
+configure runtime@(Debugger ref _ _ _) = do
   s<-readIORef ref
   when (ready s && capabilities s/=Null && not (configured s)) $ do
     modifyIORef' ref (\state -> state {configured=True})
@@ -739,7 +898,7 @@ configure runtime@(Debugger ref _ _) = do
       send runtime Configure "configurationDone" (object [])
 
 response :: Debugger -> Core -> Pending -> Value -> Desktop -> IO Desktop
-response runtime@(Debugger ref _ _) core kind body d = do
+response runtime@(Debugger ref _ _ _) core kind body d = do
   s<-readIORef ref
   case kind of
     Init -> do
@@ -751,7 +910,7 @@ response runtime@(Debugger ref _ _) core kind body d = do
       pure d {status=if fst (startRequest s)=="launch" then "Launching debugger..." else "Attaching debugger..."}
     Attach -> do
       send runtime (Threads False) "threads" (object [])
-      when (stopped s) $ forM_ (thread s) (\tid -> send runtime (Stack False) "stackTrace" (stackArguments tid))
+      when (stopped s) $ forM_ (thread s) (\tid -> sendStack runtime False tid)
       pure d
     Configure -> pure d
     Breaks key requested -> do
@@ -760,27 +919,29 @@ response runtime@(Debugger ref _ _) core kind body d = do
     Exceptions -> pure d
     ExceptionDetails -> pure (addReadOnly "Debugger exception" (exceptionText body) d)
     Threads showPicker -> do
+      recordSidebarResponse ref (DebugPageRequest (generation s) DebugThreads 0) body
       let rows=items "threads" body
           tid=case thread s of Just ident | any ((==Just ident).field "id") rows -> Just ident; _ -> listToMaybe rows >>= field "id"
       modifyIORef' ref (\state -> state {thread=tid})
-      when (stopped s && thread s==Nothing) $ forM_ tid (\ident -> send runtime (Stack False) "stackTrace" (stackArguments ident))
+      when (stopped s && thread s==Nothing) $ forM_ tid (\ident -> sendStack runtime False ident)
       if showPicker then showChoices runtime "Threads" "thread" rows (map (text "name") rows) d else pure d
-    Stack showPicker -> do
+    Stack _ tid selectedRevision | tid/=fromMaybe (-1) (thread s) || selectedRevision/=frameRevision s -> pure d
+    Stack showPicker _ _ -> do
       let rows=items "stackFrames" body
       modifyIORef' ref (\state -> state {frame=listToMaybe rows,frames=rows})
       if showPicker then showChoices runtime "Call stack" "frame" rows (map frameLabel rows) d
       else if not (followSource s) then pure d
       else maybe (pure d {status="Stopped; no source frame supplied."}) (openFrame runtime core False d) (listToMaybe rows)
-    Scopes -> do
+    Scopes _ -> do
       recordVariables ref "scopes" body
       let rows=items "scopes" body
       showChoices runtime "Scopes" "expand" rows (map (text "name") rows) d
-    Variables -> do
+    Variables _ -> do
       recordVariables ref "variables" body
       let rows=items "variables" body
       showChoices runtime "Variables" "expand" rows (map variableLabel rows) d
-    Source explicit _ | not explicit && not (followSource s) -> pure d
-    Source _ selected -> case field "content" body of
+    Source explicit _ _ | not explicit && not (followSource s) -> pure d
+    Source _ _ selected -> case field "content" body of
       Nothing -> pure d {status="DAP source response has no content."}
       Just content -> do
         let source=fromMaybe Null (field "source" selected)
@@ -792,13 +953,14 @@ response runtime@(Debugger ref _ _) core kind body d = do
         pure (position selected styled) {status="Stopped in "<>frameLabel selected}
     Control _ -> pure d
     Inspection command reply -> recordVariables ref command body >> tryPutMVar reply (boundedResult body) >> pure d
+    SidebarRead _ reply -> atomically (void (tryPutTMVar reply (Right body))) >> pure d
     Detach -> do
       stopTransport runtime s
       modifyIORef' ref (\state -> (invalidate state) {client=Nothing,connected=False,pending=M.empty,ready=False,configured=False,disconnectAt=Nothing})
       pure (clearDialog d) {status=if managed s || fst (startRequest s)=="launch" then "Debugger disconnected; launched session stopped." else "Debugger disconnected; attached program is not terminated."}
 
 select :: Debugger -> Core -> Text -> Text -> [Text] -> Desktop -> IO Desktop
-select runtime@(Debugger ref _ _) core fullToken action values d = do
+select runtime@(Debugger ref _ _ _) core fullToken action values d = do
   s<-readIORef ref
   let rows=fromMaybe [] (M.lookup fullToken (choices s))
       selected=case values of _:index:_ -> readMaybe (T.unpack index); _ -> Nothing
@@ -809,15 +971,15 @@ select runtime@(Debugger ref _ _) core fullToken action values d = do
       when (configured s) (sendBreakpoints runtime key src remaining)
       pure d {status="Breakpoint removed."}
     "thread" | Just chosen<-selected >>= at rows,Just tid<-field "id" chosen -> do
-      modifyIORef' ref (\state -> (invalidate state) {stopped=stopped s,thread=Just tid})
-      when (stopped s) (send runtime (Stack True) "stackTrace" (stackArguments tid))
+      modifyIORef' ref (\state -> state {frameRevision=frameRevision state+1,thread=Just tid,frame=Nothing,frames=[],choices=M.empty})
+      when (stopped s) (sendStack runtime True tid)
       pure d
     "frame" | stopped s,Just chosen<-selected >>= at rows -> do
-      modifyIORef' ref (\state -> state {frame=Just chosen,generation=generation state+1,choices=M.empty,variableRefs=M.empty})
+      modifyIORef' ref (\state -> state {frame=Just chosen,frameRevision=frameRevision state+1,choices=M.empty})
       openFrame runtime core True d chosen
     "expand" | stopped s,Just chosen<-selected >>= at rows,let ident=integer "variablesReference" chosen,ident>0 ->
       case M.lookup ident (variableRefs s) of
-        Just False -> send runtime Variables "variables" (object ["variablesReference" .= ident]) >> pure d {status="Loading variables..."}
+        Just False -> send runtime (Variables (frameRevision s)) "variables" (object ["variablesReference" .= ident]) >> pure d {status="Loading variables..."}
         Just True -> pure d {status="Lazy variable requires explicit evaluation; expansion does not force it."}
         Nothing -> pure d {status="Debugger value expired; request scopes again."}
     "exceptions" -> do
@@ -829,13 +991,13 @@ select runtime@(Debugger ref _ _) core fullToken action values d = do
     _ -> pure d {status="No expandable debugger value selected."}
 
 openFrame :: Debugger -> Core -> Bool -> Desktop -> Value -> IO Desktop
-openFrame runtime@(Debugger ref _ _) core explicit d selected = do
+openFrame runtime@(Debugger ref _ _ _) core explicit d selected = do
   s<-readIORef ref
   let source=fromMaybe Null (field "source" selected)
       reference=integer "sourceReference" source
       path=text "path" source
       local=if isAbsolute (T.unpack path) then T.unpack path else root s </> T.unpack path
-  if reference>0 then send runtime (Source explicit selected) "source" (object ["source" .= source,"sourceReference" .= reference]) >> pure d
+  if reference>0 then send runtime (Source explicit (frameRevision s) selected) "source" (object ["source" .= source,"sourceReference" .= reference]) >> pure d
   else do
     exists<-if T.null path then pure False else doesFileExist local
     if not exists then pure d {status="Stopped: source is unavailable ("<>sourceLabel source<>")."}
@@ -855,7 +1017,7 @@ position selected d
   where row=integer "line" selected
 
 toggleBreakpoint :: Debugger -> Desktop -> IO Desktop
-toggleBreakpoint runtime@(Debugger ref _ _) d = do
+toggleBreakpoint runtime@(Debugger ref _ _ _) d = do
   s<-readIORef ref
   case (activeWindow d,activeDocument d) of
     (Just _,Just doc) | byteMode (documentBuffer doc) -> pure d {status="Breakpoints require source text; leave hex mode first."}
@@ -877,7 +1039,7 @@ toggleBreakpoint runtime@(Debugger ref _ _) d = do
     _ -> pure d {status="Choose a source file first."}
 
 sendBreakpoints :: Debugger -> Text -> Value -> [Breakpoint] -> IO ()
-sendBreakpoints runtime@(Debugger ref _ _) key source points = do
+sendBreakpoints runtime@(Debugger ref _ _ _) key source points = do
   s<-readIORef ref
   send runtime (Breaks key (map bpLine points)) "setBreakpoints"
     (object ["source" .= source,"breakpoints" .= [object ["line" .= bpLine p] | p<-points],
@@ -895,7 +1057,7 @@ persistentBreakpoints = M.map (\(src,points) -> (src,map (\bp -> bp {bpResult=Nu
 
 -- Docs: docs/site/screenshots/debug-stack.png (docs/running.md) shows the live frame picker.
 showChoices :: Debugger -> Text -> Text -> [Value] -> [Text] -> Desktop -> IO Desktop
-showChoices (Debugger ref _ _) title action rows labels d = do
+showChoices (Debugger ref _ _ _) title action rows labels d = do
   s<-readIORef ref
   let key=token s action
       shown=chooser title key labels d
@@ -989,20 +1151,20 @@ hdbCurrent :: GhcLaunch -> HdbContext -> Bool
 hdbCurrent (GhcLaunch _ _ _ _ context) current@(_,_,_,_,identities)=context==current &&
   not (any (\(_,_,_,_,modified)->modified) identities)
 hdbPending :: Debugger -> IO Bool
-hdbPending (Debugger _ _ (HdbRuntime _ ref _ _ _ _))=do
+hdbPending (Debugger _ _ (HdbRuntime _ ref _ _ _ _) _)=do
   h<-readIORef ref
   pure (any (==hdbSerial h) ([ident | (ident,_,_)<-maybeToList (hdbWanted h)]++
     [ident | (ident,_,_,_)<-maybeToList (hdbPreparing h)]++[ident | (ident,_,_)<-maybeToList (hdbOffer h)]++
     [ident | (ident,_,_)<-maybeToList (hdbWaiting h)]))
 
 invalidateHdb :: Debugger -> IO ()
-invalidateHdb (Debugger _ _ (HdbRuntime _ ref _ _ _ _))=do
+invalidateHdb (Debugger _ _ (HdbRuntime _ ref _ _ _ _) _)=do
   h<-readIORef ref
   forM_ (hdbPreparing h) (\(_,_,stop,_)->atomically (void (tryPutTMVar stop ())))
   writeIORef ref h {hdbSerial=hdbSerial h+1,hdbWanted=Nothing,hdbOffer=Nothing}
 
 queueHdb :: Debugger -> GhcLaunch -> Desktop -> IO Desktop
-queueHdb runtime@(Debugger _ _ (HdbRuntime _ ref _ _ _ _)) request d=do
+queueHdb runtime@(Debugger _ _ (HdbRuntime _ ref _ _ _ _) _) request d=do
   invalidateHdb runtime
   h<-readIORef ref
   writeIORef ref h {hdbWanted=Just (hdbSerial h,request,True)}
@@ -1010,7 +1172,7 @@ queueHdb runtime@(Debugger _ _ (HdbRuntime _ ref _ _ _ _)) request d=do
   pure d {status="Resolving the selected GHC and its debugger..."}
 
 startHdbPreparation :: Debugger -> IO ()
-startHdbPreparation (Debugger _ _ (HdbRuntime _ ref prepare _ _ _))=mask $ \restore->do
+startHdbPreparation (Debugger _ _ (HdbRuntime _ ref prepare _ _ _) _)=mask $ \restore->do
   h<-readIORef ref
   case (hdbPreparing h,hdbWanted h) of
     (Nothing,Just (ident,request@(GhcLaunch directory config _ _ _),allowOffer))->do
@@ -1032,7 +1194,7 @@ startHdbPreparation (Debugger _ _ (HdbRuntime _ ref prepare _ _ _))=mask $ \rest
     _->pure ()
 
 startPreparedGhc :: Debugger -> GhcLaunch -> FilePath -> [(String,String)] -> Desktop -> IO Desktop
-startPreparedGhc runtime@(Debugger ref _ _) (GhcLaunch directory config file port _) executable environment d=do
+startPreparedGhc runtime@(Debugger ref _ _ _) (GhcLaunch directory config file port _) executable environment d=do
   readIORef ref >>= stopTransport runtime
   connection<-D.startManagedWithAfter (awaitRetired runtime) (pure (executable,["server","--port",show port],environment)) directory "127.0.0.1" port
   let arguments=object ["projectRoot" .= directory,"entryFile" .= makeRelative directory file,
@@ -1054,7 +1216,7 @@ hdbOfferDialog ident plan=Dialog "Download Haskell debugger?" (DebugDialog ("hdb
     area name value=TextArea name False (newBuffer (T.intercalate "\n" (T.chunksOf 36 value))) (Selection 0 0) 0 0
 
 acceptHdb :: Debugger -> Text -> [Text] -> Desktop -> IO Desktop
-acceptHdb runtime@(Debugger _ _ (HdbRuntime downloads ref _ acquire _ _)) action values d=do
+acceptHdb runtime@(Debugger _ _ (HdbRuntime downloads ref _ acquire _ _) _) action values d=do
   h<-readIORef ref
   case hdbOffer h of
     Just (ident,request,plan) | action=="hdb-accept:"<>tshow ident,ident==hdbSerial h->do
@@ -1072,7 +1234,7 @@ acceptHdb runtime@(Debugger _ _ (HdbRuntime downloads ref _ acquire _ _)) action
     _->pure d {status="This debugger download offer expired."}
 
 hdbDownloadsAction :: Debugger -> [Text] -> Desktop -> IO Desktop
-hdbDownloadsAction runtime@(Debugger _ _ (HdbRuntime downloads ref _ _ _ _)) values d=case values of
+hdbDownloadsAction runtime@(Debugger _ _ (HdbRuntime downloads ref _ _ _ _) _) values d=case values of
   []->showDownloads runtime d
   "0":index:_->do
     h<-readIORef ref
@@ -1085,7 +1247,7 @@ hdbDownloadsAction runtime@(Debugger _ _ (HdbRuntime downloads ref _ _ _ _)) val
   _->pure d
 
 showDownloads :: Debugger -> Desktop -> IO Desktop
-showDownloads (Debugger _ _ (HdbRuntime downloads ref _ _ _ _)) d=do
+showDownloads (Debugger _ _ (HdbRuntime downloads ref _ _ _ _) _) d=do
   rows<-Downloads.downloadSnapshot downloads
   h<-readIORef ref
   let oldIndex=case dialog d of Just dg | purpose dg==DebugDialog "downloads",ListBox _ _ n:_<-fields dg->n; _->0
@@ -1123,7 +1285,7 @@ downloadsDialog rows index previous=Dialog "Downloads" (DebugDialog "downloads")
 -- Every poll is nonblocking. Cancellation cleanup and GHC/Cabal queries stay on
 -- the one preparation worker; a replacement waits for that worker to retire.
 tickHdb :: Debugger -> Desktop -> IO Desktop
-tickHdb runtime@(Debugger _ _ (HdbRuntime downloads ref _ _ _ _)) original=do
+tickHdb runtime@(Debugger _ _ (HdbRuntime downloads ref _ _ _ _) _) original=do
   h<-readIORef ref
   let requests=[request | (ident,request,_)<-maybeToList (hdbWanted h),ident==hdbSerial h]++
         [request | (ident,request,_)<-maybeToList (hdbOffer h),ident==hdbSerial h]++
