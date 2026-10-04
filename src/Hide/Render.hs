@@ -743,7 +743,7 @@ problemsLayers d
 
 contextLayers :: Desktop -> (Rect,Int) -> [V.Image]
 contextLayers d (r@(Rect x y w h),chosen) =
-  [place (x+1) (y+i-contextOffset r chosen+1) (row (attr (if contextTargetCurrent d && commandEnabled d cmd then black else V.RGBColor 85 85 85) (if i==chosen then green else gray)) (w-2) (" "<>title)) | (i,(title,cmd))<-take (max 0 (h-2)) (drop (contextOffset r chosen) (zip [0..] (contextItems (contextKind d))))]
+  [place (x+1) (y+i-contextOffset r chosen+1) (row (attr (if contextTargetCurrent d && commandEnabled d cmd then black else V.RGBColor 85 85 85) (if i==chosen then green else gray)) (w-2) (" "<>title)) | (i,(title,cmd))<-take (max 0 (h-2)) (drop (contextOffset r chosen) (zip [0..] (contextItemsFor d)))]
   ++ [place x y (box paper False w h)]
 
 -- Dialog frames, fields, buttons and shadows appear in docs/site/screenshots/*.png.

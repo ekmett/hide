@@ -6,30 +6,49 @@
 -- contribution/command lifetime and host modal/layout state before installing a
 -- prepared document. No extension callback executes during admission or adoption.
 module Hide.MenuCommands
-  ( MenuHost, withMenuCommands, menuContributions, menuAgentReferences, retireMenuFromHost, menuEffects, tickMenus
+  ( MenuHost, withMenuCommands, menuContributions, menuAgentReferences, publishMenuFromHost, requestMenuRetirement, retireMenuFromHost, MenuContext(..), MenuReply(..), menuEffects, tickMenus
   ) where
 
-import Control.Concurrent.STM (TQueue, atomically, newTQueueIO, writeTQueue, tryReadTQueue)
+import Control.Concurrent.STM (TBQueue, atomically, newTBQueueIO, writeTBQueue, tryReadTBQueue)
 import Control.Concurrent.Async (Async, async, cancel, poll)
-import Control.Exception (bracket, displayException, mask)
+import Control.Exception (bracket, displayException, mask, evaluate)
 import Data.Aeson
 import Data.Aeson.Types (parseEither)
 import Data.IORef
-import Data.List (find)
+import Data.List (find, sortOn)
 import qualified Data.Text as T
+import qualified Data.Map.Strict as M
+import Hide.Buffer (BufferContent, bufferContent, contentLength, contentLineAt, contentLineOffset, contentLineCount, contentByteMode, prepareBuffer, Selection(..))
+import Hide.GuestAccess (protectedPath,protectedFilePath,protectedBuffer)
+import Hide.Files (FileState(..),loadFile)
+import Hide.Plugin.BufferHost (ContentVersion,captureVersion,versionCurrent)
 import Paths_hide (getDataFileName)
 import System.Directory (canonicalizePath)
 import System.FilePath (takeDirectory)
 import Hide.DocsMCP (DocsCommands, readDocs)
+import qualified Hide.LSP as L
 import Hide.Documentation
 import Hide.Links (LinkResult, applyLink, prepareMarkdown)
+import Hide.BufferView (BufferView(..))
 import Hide.Model hiding (menus)
 import qualified Hide.Model as Model
 import Hide.Plugin.Command
 import qualified Hide.Plugin.Menu as Plugin
 
-data Pending = Pending Plugin.MenuRef Plugin.MenuContext (Async (Either Plugin.MenuError LinkResult))
-data MenuHost = MenuHost (Plugin.Menus Plugin.MenuContext LinkResult) [Plugin.MenuRef] (TQueue Plugin.MenuRef) (IORef (Maybe Pending))
+-- | Immutable host input. No mutable Desktop or plugin availability callback
+-- crosses into the worker; arguments are projected from this admitted snapshot.
+data MenuContext = MenuContext
+  { invocationColumns :: Int, invocationOrigin :: Plugin.MenuOrigin
+  , invocationNavigation :: Maybe NavigationInput
+  }
+data NavigationInput = NavigationInput (FilePath,Int,Int) (Maybe OpenSource) (Maybe [FilePath])
+data OpenSource = OpenSource Int Int ContentVersion BufferContent
+data Navigation = Navigation FilePath Int Int (Maybe Document)
+data MenuReply = PreparedDocument LinkResult | PreparedNavigation Navigation
+
+data Pending = Pending Plugin.MenuRef (Maybe ContextTarget) MenuContext (Async (Either Plugin.MenuError MenuReply))
+data Publication = Publish Plugin.MenuItem | Withdraw Plugin.MenuRef
+data MenuHost = MenuHost (Plugin.Menus MenuContext MenuReply) [Plugin.MenuRef] (TBQueue Publication) (IORef (Maybe Pending))
 
 -- | Keep the registry independent of frontend attachments. The host may add
 -- linked extension declarations to menuContributions before taking its snapshot.
@@ -37,15 +56,19 @@ data MenuHost = MenuHost (Plugin.Menus Plugin.MenuContext LinkResult) [Plugin.Me
 -- retireMenuFromHost. Closing cancels and joins the worker before either registry
 -- scope closes, so shutdown cannot race adoption or resurrect a document.
 withMenuCommands :: DocsCommands -> (MenuHost -> IO a) -> IO a
-withMenuCommands docs use=withRegistry $ \registry->Plugin.withMenus [T.toLower title | (title,_,_)<-Model.menus] $ \menus->do
+withMenuCommands docs use=withRegistry $ \registry->Plugin.withMenus ("context.messages":[T.toLower title | (title,_,_)<-Model.menus]) $ \menus->do
   command<-either (ioError . userError . show) pure =<< registerCommand registry (helpCommand docs)
   reference<-either (ioError . userError . show) pure =<< Plugin.contributeMenu menus
     (Plugin.MenuDef "hide.help.contents" "help" "contents" 0 "Contents" "F1" True
-      (Plugin.menuAction registry command () (\context (path,text)->prepareMarkdown (Plugin.invocationColumns context) path "" text)))
-  bracket (MenuHost menus [reference] <$> newTQueueIO <*> newIORef Nothing) close use
-  where close (MenuHost _ _ _ ref)=readIORef ref >>= mapM_ (\(Pending _ _ worker)->cancel worker)
+      (Plugin.menuAction registry command (const (Right ())) (\context (path,text)->PreparedDocument <$> prepareMarkdown (invocationColumns context) path "" text)))
+  navigation<-either (ioError . userError . show) pure =<< registerCommand registry navigationCommand
+  navigationRef<-either (ioError . userError . show) pure =<< Plugin.contributeMenu menus
+    (Plugin.MenuDef "hide.messages.go-to" "context.messages" "source" 0 "Go to source" "" True
+      (Plugin.menuAction registry navigation navigationArguments (\_ -> pure . PreparedNavigation)))
+  bracket (MenuHost menus [reference,navigationRef] <$> newTBQueueIO 256 <*> newIORef Nothing) close use
+  where close (MenuHost _ _ _ ref)=readIORef ref >>= mapM_ (\(Pending _ _ _ worker)->cancel worker)
 
-menuContributions :: MenuHost -> Plugin.Menus Plugin.MenuContext LinkResult
+menuContributions :: MenuHost -> Plugin.Menus MenuContext MenuReply
 menuContributions (MenuHost menus _ _ _)=menus
 
 -- | Exact first-party refs allowed by host policy. Contribution metadata can
@@ -53,23 +76,51 @@ menuContributions (MenuHost menus _ _ _)=menus
 menuAgentReferences :: MenuHost -> [Plugin.MenuRef]
 menuAgentReferences (MenuHost _ permitted _ _)=permitted
 
--- | Queue retirement to the serialized session owner. Published contributions
--- must use this route, not retire the underlying menu/command from another
--- thread. The owner withdraws metadata before admitting/adopting further work.
-retireMenuFromHost :: MenuHost -> Plugin.MenuRef -> IO ()
-retireMenuFromHost (MenuHost _ _ withdrawals _)=atomically . writeTQueue withdrawals
+-- | Prepare bounded metadata on the caller's registration worker, then queue an
+-- exact delta. Never call this while holding the desktop/session lock. Deltas
+-- cannot clobber newer publications, unlike delayed whole-catalogue snapshots.
+publishMenuFromHost :: MenuHost -> Plugin.MenuRef -> IO (Either Plugin.MenuError ())
+publishMenuFromHost (MenuHost menus _ changes _) reference=do
+  metadata<-Plugin.menuMetadata menus reference
+  case metadata of
+    Left err->pure (Left err)
+    Right item->atomically (writeTBQueue changes (Publish item)) >> pure (Right ())
 
-withdrawMenus :: MenuHost -> Desktop -> IO Desktop
-withdrawMenus host@(MenuHost menus _ withdrawals _) d=do
-  pending<-atomically (tryReadTQueue withdrawals)
-  case pending of
-    Nothing->pure d
-    Just reference->do
-      _<-Plugin.retireMenu menus reference
-      withdrawMenus host d {contributedMenus=filter ((/=reference) . Plugin.menuReference) (contributedMenus d),
-        agentMenuRefs=filter (/=reference) (agentMenuRefs d)}
+-- | Registration workers request ordered retirement with bounded backpressure.
+-- Never call this queueing operation while holding the session/UI lock.
+requestMenuRetirement :: MenuHost -> Plugin.MenuRef -> IO ()
+requestMenuRetirement (MenuHost _ _ changes _)=atomically . writeTBQueue changes . Withdraw
 
-helpCommand :: DocsCommands -> CommandDef Plugin.MenuContext () (FilePath,T.Text)
+-- | Withdraw directly at the session owner. UI callers do not enqueue or wait for
+-- capacity, even if registration workers have filled the publication queue.
+retireMenuFromHost :: MenuHost -> Plugin.MenuRef -> Desktop -> IO Desktop
+retireMenuFromHost (MenuHost menus _ _ _) reference d=do
+  _<-Plugin.retireMenu menus reference
+  pure d {contributedMenus=filter ((/=reference) . Plugin.menuReference) (contributedMenus d),
+    agentMenuRefs=filter (/=reference) (agentMenuRefs d),menu=Nothing,contextMenu=Nothing,contextTarget=Nothing}
+
+-- Input remains schedulable under producer load: at most 16 bounded deltas are
+-- admitted at one owner boundary. Metadata/handlers were prepared elsewhere.
+adoptPublications :: MenuHost -> Desktop -> IO Desktop
+adoptPublications host@(MenuHost menus _ changes _)=drain (16::Int)
+  where
+    drain 0 d=pure d
+    drain remaining d=do
+      pending<-atomically (tryReadTBQueue changes)
+      case pending of
+        Nothing->pure d
+        Just change->do
+          next<-case change of
+            Withdraw reference->retireMenuFromHost host reference d
+            Publish item->do
+              live<-Plugin.menuCurrent menus (Plugin.menuReference item)
+              pure $ if not live then d else d {contributedMenus=sortOn order
+                (item:filter ((/=Plugin.menuName (Plugin.menuReference item)) . Plugin.menuName . Plugin.menuReference) (contributedMenus d))}
+          -- Catalogue changes close positional popups before their next event.
+          drain (remaining-1) next {menu=Nothing,contextMenu=Nothing,contextTarget=Nothing}
+    order item=(Plugin.menuSlot item,Plugin.menuGroup item,Plugin.menuOrder item,Plugin.menuName (Plugin.menuReference item))
+
+helpCommand :: DocsCommands -> CommandDef MenuContext () (FilePath,T.Text)
 helpCommand docs=CommandDef "hide.help.contents" "Help contents" unit output $ \_ ()->do
   path<-getDataFileName "README.md" >>= canonicalizePath
   let resolve _=pure (takeDirectory path)
@@ -92,45 +143,124 @@ helpCommand docs=CommandDef "hide.help.contents" "Help contents" unit output $ \
       (either (Left . T.pack) Right . parseEither (withObject "help contents" $ \o->(,) <$> o .: "path" <*> o .: "text"))
       (\(path,text)->object ["path" .= path,"text" .= text])
 
+navigationArguments :: MenuContext -> Either T.Text (FilePath,Int,Int)
+navigationArguments context=case invocationNavigation context of
+  Just (NavigationInput location _ _)->Right location
+  Nothing->Left "No captured diagnostic source location."
+
+-- The source command is typed and host-admitted. Its location cannot come from
+-- frontend JSON, and its immutable read/version never comes from later focus.
+navigationCommand :: CommandDef MenuContext (FilePath,Int,Int) Navigation
+navigationCommand=CommandDef "hide.messages.go-to" "Go to diagnostic source" location prepared $ \context target@(path,row,col)->
+  case invocationNavigation context of
+    Just (NavigationInput captured opened authority) | captured==target->do
+      resolved<-canonicalizePath path
+      if maybe False (`protectedFilePath` resolved) authority then pure forbidden else case opened of
+        Just (OpenSource _ _ _ image)->prepare resolved row col image Nothing
+        Nothing->do
+          result<-loadFile resolved
+          case result of
+            Left err->pure (Left (CommandRejected (T.pack err)))
+            Right (file,_) | maybe False (\paths -> protectedFilePath paths (filePath file)) authority->pure forbidden
+            Right (file,buffer)->do
+              _<-evaluate (prepareBuffer buffer)
+              doc<-evaluate (newDocument buffer (Just file))
+              prepare (filePath file) row col (bufferContent buffer) (Just doc)
+    _->pure (Left (CommandRejected "Navigation arguments were not admitted by the host."))
+  where
+    forbidden=Left (CommandRejected "Agent navigation cannot open protected authority files.")
+    location=Codec (object ["type" .= ("object"::T.Text)])
+      (either (Left . T.pack) Right . parseEither (withObject "source location" $ \o->(,,) <$> o .: "path" <*> o .: "row" <*> o .: "column"))
+      (\(path,row,col)->object ["path" .= path,"row" .= row,"column" .= col])
+    -- The immutable prepared document is host-only; external output is metadata.
+    prepared=Codec (object ["type" .= ("object"::T.Text)]) (const (Left "Prepared navigation is a host value."))
+      (\(Navigation path row offset _)->object ["path" .= path,"row" .= row,"offset" .= offset])
+    prepare path row col image doc=do
+      let selected=max 0 (min row (contentLineCount image-1))
+          line=contentLineAt image selected
+          offset=min (contentLength image) (contentLineOffset image selected+L.positionOffset line (0,col))
+      _<-evaluate offset
+      pure (if contentByteMode image then Left (CommandRejected "Diagnostic source is not a text buffer.") else Right (Navigation path selected offset doc))
+
 columns :: Desktop -> Int
 columns d=max 20 (min 76 (fst (screenSize d)-treeWidthOf d-4))
 
--- | Admission performs only host policy/lifetime checks and starts one worker.
--- Busy calls fail explicitly rather than replacing another prepared result.
+captureNavigation :: Plugin.MenuOrigin -> Maybe ContextTarget -> Desktop -> IO (Maybe NavigationInput)
+captureNavigation origin (Just (MessagesTarget _ _ (Just location@(path,_,_)))) d=do
+  opened<-case find (\(_,doc)->fmap filePath (documentFile doc)==Just path && documentLabel doc==Nothing) (M.toList (buffers d)) of
+    Just (bid,doc) | Just window<-find ((==bid) . bufferId) (windows d)->do
+      version<-captureVersion (documentBuffer doc)
+      image<-evaluate (bufferContent (documentBuffer doc))
+      pure (Just (OpenSource (windowId window) bid version image))
+    _->pure Nothing
+  privatePaths<-evaluate (guestPrivatePaths d)
+  pure (Just (NavigationInput location opened (if origin==Plugin.AgentMenu then Just privatePaths else Nothing)))
+captureNavigation _ _ _=pure Nothing
+
+-- | Admission checks only policy/lifetimes and captures immutable read handles.
+-- Busy calls refuse instead of replacing another prepared result.
 menuEffects :: MenuHost -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> [Effect] -> IO (Bool,Desktop)
-menuEffects host@(MenuHost menus permitted _ ref) _ original [InvokeMenu reference origin]=mask $ \restore->do
-  d<-withdrawMenus host original
+menuEffects host@(MenuHost menus permitted _ ref) _ original [InvokeMenu reference origin target]=mask $ \restore->do
+  d<-adoptPublications host original
   pending<-readIORef ref
   live<-Plugin.menuCurrent menus reference
   let item=find ((==reference) . Plugin.menuReference) (contributedMenus d)
-      allowed=dialog d==Nothing && maybe False (\entry->origin==Plugin.HumanMenu || reference `elem` permitted && Plugin.menuAgentAllowed entry) item
+      allowed=dialog d==Nothing && maybe False (\entry->origin==Plugin.HumanMenu || reference `elem` permitted && Plugin.menuAgentAllowed entry) item &&
+        maybe True (\captured->contextTargetCurrent d {contextTarget=Just captured}) target
   if not live || not allowed then pure (False,d {status="Menu action is stale or unavailable."}) else case pending of
     Just _->pure (False,d {status="A menu action is already running."})
     Nothing->do
-      let context=Plugin.MenuContext (columns d) origin
+      navigation<-captureNavigation origin target d
+      let context=MenuContext (columns d) origin navigation
       worker<-async (restore (Plugin.invokeMenu menus reference context))
-      writeIORef ref (Just (Pending reference context worker))
-      pure (False,d {status="Opening document…"})
+      writeIORef ref (Just (Pending reference target context worker))
+      pure (False,d {status="Running menu action…"})
 menuEffects _ core d requests=core d requests
 
--- | Retirement also refuses late adoption. Modal/layout changes discard the
--- prepared result; no plugin code or whole-buffer comparison is needed.
+-- | Check captured identity before applying prepared geometry. Dirty open files
+-- stay in memory; disk preparation can never replace an intervening open buffer.
+adoptNavigation :: MenuContext -> Navigation -> Desktop -> IO Desktop
+adoptNavigation context (Navigation path row offset loaded) d
+  | invocationOrigin context==Plugin.AgentMenu && protectedPath d path=pure d {status="Agent navigation target is now protected."}
+  | otherwise=case invocationNavigation context of
+    Just (NavigationInput _ (Just (OpenSource wid bid version _)) _)->case (find ((==wid) . windowId) (windows d),M.lookup bid (buffers d)) of
+      (Just window,Just doc) | bufferId window==bid && fmap filePath (documentFile doc)==Just path->do
+        current<-versionCurrent version (documentBuffer doc)
+        pure $ if current && (invocationOrigin context/=Plugin.AgentMenu || not (protectedBuffer d bid)) then position (focusWindow wid d) else expired
+      _->pure expired
+    _ | any ((==Just path) . fmap filePath . documentFile) (M.elems (buffers d))->pure expired
+      | Just doc<-loaded->do
+          let opened=addDocument (documentFile doc) (documentBuffer doc) d
+              installed=case activeWindow opened of
+                Just window->opened {buffers=M.insert (bufferId window) doc (buffers opened)}
+                _->opened
+          pure (position installed)
+      | otherwise->pure expired
+  where
+    expired=d {status="Navigation target changed; invoke it again."}
+    position=ensureVisible . modifyActive (\window->window {selection=Selection offset offset,reviewSelection=Nothing,
+      bufferView=CurrentView,scrollRow=max 0 (row-height (bounds window) `div` 2),scrollColumn=0})
+
+-- | Drain ordered publication/retirement before late reply adoption. No handler
+-- or lazy extension metadata executes here, and no file work runs under the lock.
 tickMenus :: MenuHost -> Desktop -> IO Desktop
 tickMenus host@(MenuHost menus _ _ ref) original=do
-  d<-withdrawMenus host original
+  d<-adoptPublications host original
   pending<-readIORef ref
   case pending of
     Nothing->pure d
-    Just (Pending reference context worker)->do
+    Just (Pending reference target context worker)->do
       completed<-poll worker
       case completed of
         Nothing->pure d
         Just result->do
           writeIORef ref Nothing
           live<-Plugin.menuCurrent menus reference
-          let current=dialog d==Nothing && columns d==Plugin.invocationColumns context &&
-                any ((==reference) . Plugin.menuReference) (contributedMenus d)
-          pure $ if not live || not current then d {status="Menu result expired; invoke it again."} else case result of
-            Left err->d {status="Menu action failed: "<>T.pack (displayException err)}
-            Right (Left err)->d {status="Menu action failed: "<>T.pack (show err)}
-            Right (Right prepared)->fst (applyLink prepared d)
+          let current=dialog d==Nothing && columns d==invocationColumns context &&
+                any ((==reference) . Plugin.menuReference) (contributedMenus d) &&
+                maybe True (\captured->contextTargetCurrent d {contextTarget=Just captured}) target
+          if not live || not current then pure d {status="Menu result expired; invoke it again."} else case result of
+            Left err->pure d {status="Menu action failed: "<>T.pack (displayException err)}
+            Right (Left err)->pure d {status="Menu action failed: "<>T.pack (show err)}
+            Right (Right (PreparedDocument prepared))->pure (fst (applyLink prepared d))
+            Right (Right (PreparedNavigation prepared))->adoptNavigation context prepared d
