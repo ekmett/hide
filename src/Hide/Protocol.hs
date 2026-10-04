@@ -54,8 +54,7 @@ parseInput = withObject "browser event" $ \o -> do
     "theme" -> SystemTheme <$> o .: "dark"
     "command" -> do
       name <- o .: "command"
-      maybe (fail "Unknown browser command") (pure . BrowserCommand) (lookup (name::T.Text)
-        [("quit",Quit),("paste",Model.Paste),("download",Download),("copy",Copy),("cut",Cut),("selectAll",SelectAll),("undo",Undo),("redo",Redo),("find",Find),("replace",Replace),("conversation",Conversation),("newConversation",AgentNew),("findNext",FindNext),("findPrevious",FindPrevious)])
+      maybe (fail "Unknown browser command") (pure . BrowserCommand) (lookup (name::T.Text) protocolBrowserCommands)
     "upload" -> do
       name <- o .: "name"
       unless (not (T.null name) && T.length name<=255 && T.all (\c -> c>=' ' && c/='/' && c/='\\') name && name/="." && name/="..") (fail "Invalid filename")
@@ -131,8 +130,9 @@ applyInputUnchecked input d = case input of
     let (next,effects)=runCommand cmd d {browserFrontend=True}
     in (next {browserFrontend=browserFrontend d},effects)
   BrowserCommand cmd | dialog d/=Nothing -> (d,[WriteBrowserClipboard "" | cmd `elem` [Copy,Cut]])
-                     | otherwise -> runCommand cmd d
-  MenuCommand cmd | (dialog d==Nothing || dialogCommandAllowed cmd d) && commandEnabled d cmd -> runCommand cmd d
+                     | menuCommandAvailable d cmd -> runCommand cmd d
+                     | otherwise -> (d,[])
+  MenuCommand cmd | menuCommandAvailable d cmd -> runCommand cmd d
   MenuCommand _ -> (d,[])
   UploadFile name bytes ->
     let b=case TE.decodeUtf8' bytes of
@@ -229,6 +229,10 @@ protocolCommands = [cmd | (_,_,items)<-menus, MenuItem _ _ cmd<-items]
 protocolMenuCommands :: [(T.Text,Command)]
 protocolMenuCommands = [(name,cmd) | cmd<-nub protocolCommands, Just name<-[commandIdentifier cmd]]
 
+-- Browser-owned clipboard/search shortcuts use the same identities as menus.
+protocolBrowserCommands :: [(T.Text,Command)]
+protocolBrowserCommands = [(name,cmd) | cmd<-[Quit,Model.Paste,Download,Copy,Cut,SelectAll,Undo,Redo,Find,Replace,Conversation,AgentNew,FindNext,FindPrevious], Just name<-[commandIdentifier cmd]]
+
 editableDialogField :: Desktop -> Maybe Field
 editableDialogField d=case dialog d of
   Just dg | field@TextArea{}:_<-drop (focus dg) (fields dg),editableArea field -> Just field
@@ -244,7 +248,7 @@ frameMetadata cwd d =
      _ -> if dialog d/=Nothing then "" else clipboard (fst (runCommand Copy d {browserFrontend=False}))),
    "terminal" .= (activeTerminal d/=Nothing && dialog d==Nothing && menu d==Nothing),
    "wordstar" .= wordStar d,
-   "menuState" .= [(ident,(dialog d==Nothing || cmd==Model.Paste || dialogCommandAllowed cmd d) && commandEnabled d cmd) | (ident,cmd)<-protocolMenuCommands]]
+   "menuState" .= [(ident,menuCommandAvailable d cmd) | (ident,cmd)<-protocolMenuCommands]]
   where cursor=case V.picCursor (renderDesktop d) of V.Cursor x y -> Just (x,y); _ -> Nothing
 
 assetsPacket :: Font -> Double -> Value
