@@ -125,3 +125,10 @@ These editor sessions are separate from a provider's conversation sessions.
 **Tools > New conversation** and **Tools > Resume session** manage the latter; see
 [conversations](conversations.md). [Remote editing](remote.md) covers connecting
 to another machine for the first time.
+
+## Proposed live sharing
+
+The [live-sharing design](design/live-sharing.md) describes simultaneous displays
+and invited collaborators with independent views and per-person permissions. It
+is a proposal; the single controlling frontend behavior described above remains
+the current session contract.
