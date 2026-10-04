@@ -4,11 +4,11 @@
 -- Initialization and encoding/writes run off the UI thread. Callers queue immutable
 -- buffer references and coalesce unchanged identities; the writer performs any
 -- whole-document comparison. An executeCommand reserves ownership of incoming
--- applyEdit requests at receipt time. Retirement can drain edit replies before
--- bounded asynchronous shutdown.
+-- applyEdit requests at receipt time, until its terminal response. Cancellation
+-- does not release ownership prematurely; only a broken transport is retired.
 module Hide.LSP
   ( Client, Event(..), startClient, stopClient, syncDocuments, notifySaved, request, pollEvents, serverCapabilities
-  , executeCommand, replyEdit, retireClient, retireClientAfterReplies
+  , executeCommand, replyEdit, cancelRequest, retireClient
   , fileUri, uriFilePath, offsetPosition, positionOffset, positionValue
   , bufferOffsetPosition, bufferPositionOffset, bufferPositionValue
   ) where
@@ -32,6 +32,8 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Data.Text.Encoding.Error (lenientDecode)
 import Numeric (readHex, showHex)
+import System.Directory (canonicalizePath)
+import System.IO.Error (tryIOError)
 import System.Environment (lookupEnv)
 import System.IO
 import System.Process
@@ -41,15 +43,14 @@ import Hide.Buffer (Buffer, bufferLineColumn, bufferLineOffset, bufferLineAt, bu
 
 data Event = Response Int Value | ApplyEdit Int Value Value | Diagnostics FilePath (Maybe Int) Value | ServerError Text
   deriving (Eq, Show)
-data Command = Documents [(FilePath,Int,Text)] | Request Int Text Value | Saved FilePath | Reply Value | Barrier (MVar ())
+data Command = Documents [(FilePath,Int,Text)] | Request Int Text Value | Saved FilePath | Reply Value | Notification Text Value
 
--- | HLS process and protocol worker ownership. retireClientAfterReplies returns
--- a barrier for asynchronous retirement after queued edit replies drain.
+-- | HLS process and protocol worker ownership; retirement is asynchronous.
 data Client = Client
   { commands :: Chan Command, events :: MVar (Seq.Seq Event), nextId :: MVar Int
   , unavailable :: MVar (Maybe Text)
   , serverCapabilities :: IO Value, closeClient :: IO ()
-  , commandOwner :: MVar (Maybe Int), replyEdit :: Value -> Bool -> Maybe Text -> IO (), retireClient :: IO (MVar ()), retireClientAfterReplies :: IO (MVar ())
+  , commandOwner :: MVar (Maybe Int), replyEdit :: Value -> Bool -> Maybe Text -> IO (), retireClient :: IO (MVar ())
   }
 
 -- Initialization and all subsequent writes happen off the UI thread.
@@ -118,7 +119,13 @@ startClient root = mask $ \restore -> do
             Nothing -> when (method == "textDocument/publishDiagnostics") $ do
               let params = fromMaybe Null (field "params" value)
               case (field "uri" params >>= uriFilePath, field "diagnostics" params) of
-                (Just path, Just diagnostics) -> emit (Diagnostics path (field "version" params) diagnostics)
+                (Just path, Just diagnostics) -> do
+                  -- Resolve provenance on the transport worker, never during
+                  -- painting or a policy check on the interaction thread.
+                  resolved<-tryIOError (canonicalizePath path)
+                  case resolved of
+                    Right source->emit (Diagnostics source (field "version" params) diagnostics)
+                    Left _->emit (ServerError "Cannot resolve diagnostic source path.")
                 _ -> pure ()
           Nothing -> case field "id" value :: Maybe Int of
             Just 0 -> do
@@ -174,17 +181,12 @@ startClient root = mask $ \restore -> do
         reply ident applied reason = writeChan queue (Reply (object
           ["jsonrpc" .= ("2.0" :: Text),"id" .= ident,"result" .= object
             (["applied" .= applied] ++ maybe [] (\text -> ["failureReason" .= text]) reason)]))
-        retire drainReplies = mask_ $ do
-          modifyMVar_ unavailableState (const (pure (Just "HLS command transport retired; starting a fresh server.")))
+        retire = mask_ $ do
+          modifyMVar_ unavailableState (const (pure (Just "HLS transport stopped responding; starting a fresh server.")))
           modifyMVar_ ownerState (const (pure Nothing))
-          drained<-newEmptyMVar
-          when drainReplies (writeChan queue (Barrier drained))
-          -- A final executeCommand response can arrive before the server reads
-          -- our preceding applyEdit replies. Flush that FIFO off the UI thread;
-          -- a broken or blocked writer still has a bounded retirement lifetime.
-          void (forkIO ((when drainReplies (void (timeout 250000 (readMVar drained)))) `finally` stop))
+          void (forkIO stop)
           pure stopDone
-    pure (Client queue inbox counter unavailableState (readMVar capabilitiesState) stop ownerState reply (retire False) (retire True))
+    pure (Client queue inbox counter unavailableState (readMVar capabilitiesState) stop ownerState reply retire)
     ) `onException` cleanup
 
 stopClient :: Client -> IO ()
@@ -223,6 +225,11 @@ executeCommand client name arguments = modifyMVar (nextId client) $ \ident -> do
         pure (Just ident,Right ident)
   pure (ident+1,outcome)
 
+-- | Cancel a request without releasing its ownership before the server replies.
+cancelRequest :: Client -> Int -> IO ()
+cancelRequest client ident = writeChan (commands client)
+  (Notification "$/cancelRequest" (object ["id" .= ident]))
+
 -- | Drain at most 32 protocol events in FIFO order to bound UI adoption work.
 pollEvents :: Client -> IO [Event]
 -- Bound work per desktop tick while retaining FIFO request/response order.
@@ -233,7 +240,7 @@ writeCommands :: (Text -> Value -> IO ()) -> (Int -> Text -> Value -> IO ()) -> 
 writeCommands notify call send queue previous = do
   command <- readChan queue
   case command of
-    Barrier done -> putMVar done () >> writeCommands notify call send queue previous
+    Notification method params -> notify method params >> writeCommands notify call send queue previous
     Reply value -> send value >> writeCommands notify call send queue previous
     Saved path -> notify "textDocument/didSave" (object ["textDocument" .= object ["uri" .= fileUri path]]) >> writeCommands notify call send queue previous
     Request ident method params -> call ident method params >> writeCommands notify call send queue previous

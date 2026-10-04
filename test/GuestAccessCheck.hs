@@ -94,11 +94,12 @@ checks=do
       pr=firstRect pd prefs
   check "guest cannot alter Streamer checkbox by pointer or keyboard"
     (not (pointerAllowedAt pd (left pr) (top pr)) && denied pd (P.Key " " []))
-  let secretDialog=Dialog "Service" Widgets [Input "API key" "human key" 0,Input "Public name" "" 0] 0 ["OK"] []
-      secretDesktop=base {dialog=Just secretDialog}
-      secretRect=firstRect secretDesktop secretDialog
-  check "secret fields in otherwise ordinary dialogs are readable-label only and immutable"
-    (not (pointerAllowedAt secretDesktop (left secretRect) (top secretRect+1)) && denied secretDesktop (P.Paste "guest key") && denied secretDesktop (P.Key "x" []) && not (denied secretDesktop (P.Key "Tab" [])))
+  forM_ [Input "API key" "human key" 0,SelectedInput "API key" "human key" (Selection 0 9)] $ \secretField -> do
+    let secretDialog=Dialog "Service" Widgets [secretField,Input "Public name" "" 0] 0 ["OK"] []
+        secretDesktop=base {dialog=Just secretDialog}
+        secretRect=firstRect secretDesktop secretDialog
+    check "secret fields in otherwise ordinary dialogs are readable-label only and immutable"
+      (not (readableAt secretDesktop (left secretRect) (top secretRect+1)) && not (pointerAllowedAt secretDesktop (left secretRect) (top secretRect+1)) && denied secretDesktop (P.Paste "guest key") && denied secretDesktop (P.Key "x" []) && not (denied secretDesktop (P.Key "Tab" [])))
   let option=AgentSetting "apiKey" "API key" "authentication" "private-token" []
       dropdown=base {agentSettings=[option],contextMenu=Just (Rect 2 2 40 4,0),contextKind=AgentContext [("API key  private-token",AgentChoose "apiKey")]}
   check "agent dropdown public labels stay readable but secret values do not"
@@ -125,6 +126,17 @@ checks=do
       Rect px py _ _=bounds privateWindow
   check "host authority paths protect human-open buffers and input"
     (protectedBuffer privateSource privateId && sanitizedBuffer privateSource privateId==Nothing && denied privateSource (P.Paste "replace") && not (readableAt privateSource (px+2) (py+2)) && not (streamerReadableAt privateSource (px+2) (py+2)))
+  let child=addDocument (Just (FileState "/authority/nested/secret.hs" Nothing)) (newBuffer "private") base {guestPrivatePaths=["/authority"],streamerMode=True}
+      projectConfig=addDocument (Just (FileState "/project/THC.toml" Nothing)) (newBuffer "private") base {streamerMode=True}
+  check "streamer titles share canonical descendant and project-authority rules"
+    (applicationTitle "/" child=="th [private]" && applicationTitle "/" projectConfig=="th [private]")
+  let messages=(setProblemsVisible True base {guestPrivatePaths=["/authority"],
+        diagnostics=[Diagnostic "/authority/secret.hs" Nothing 0 0 1 "secret-diagnostic-payload"]}) {problemsFocused=True}
+      Rect mx my _ _=problemsRect messages
+  check "protected diagnostic rows and copy commands are unavailable to agent input"
+    (not (readableAt messages (mx+2) (my+1)) && denied messages (P.Key "c" [V.MCtrl]) && denied messages (P.MenuCommand CopyAllMessages) &&
+     all (\(r,_,_)->denied messages (P.Mouse "down" (left r) (top r) 0 1 []))
+       [(r,i,a) | (r,i,a@(Left c))<-statusItemRects messages,c `elem` [Copy,CopyAllMessages]])
   let saveAs=fst (runCommand SaveAs privateSource)
       saveDialog=maybe (error "missing Save As dialog") id (dialog saveAs)
       saveRect=firstRect saveAs saveDialog
@@ -149,4 +161,11 @@ checks=do
       fileRect=case fieldRects browser browserDialog of _:r:_->r; _->error "missing browser list"
   check "private browser names and selected details share guest and Streamer masks"
     (not (readableAt browser (left fileRect+2) (top fileRect+2)) && not (streamerReadableAt browser (left fileRect+2) (top fileRect+12)) && readableAt browser (left fileRect+2) (top fileRect+3))
+  forM_ [Opening "/authority" "*" [],ChangingDirectory "/authority" []] $ \browserPurpose ->
+    forM_ [Input "Name" "/authority/secret.hs" 0,SelectedInput "Name" "/authority/secret.hs" (Selection 0 20)] $ \nameField -> do
+      let dg=Dialog "Browser" browserPurpose [nameField] 0 ["OK"] []
+          view=base {dialog=Just dg,guestPrivatePaths=["/authority"]}
+          r=firstRect view dg
+      check "browser text widgets share protected pathname masks"
+        (not (readableAt view (left r) (top r+1)) && not (streamerReadableAt view (left r) (top r+1)))
   putStrLn "guest access checks passed"

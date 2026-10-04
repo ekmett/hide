@@ -886,13 +886,13 @@ commandChecks = bracket temporary removePathForcibly $ \root -> do
       (normal,reply)<-apply tooling base "normal"
       result<-right reply
       check "offered legacy command applies owned edits" (activeText normal=="bar = 1\n" && field "succeeded" result==Just True && field "appliedBatches" result==Just (1::Int))
-      -- Command A has completed. Command B must use a different process even
-      -- when A's server delays its unsolicited edit until B starts.
+      -- A terminal response releases command ownership without losing the
+      -- initialized server, diagnostics, and synchronized documents.
       beforeNext<-BS.readFile (root </> "last-executor")
       (nextAction,nextAnswer)<-apply tooling normal "normal"
       _<-right nextAnswer
       afterNext<-BS.readFile (root </> "last-executor")
-      check "successful command retires ownership before the next command" (afterNext/=beforeNext && activeText nextAction=="bar = 1\n")
+      check "successful commands reuse the initialized HLS process" (afterNext==beforeNext && activeText nextAction=="bar = 1\n")
       check "command does not save disk" . (=="foo = 1\n") =<< readFile source
       check "command edits retain undo" (activeText (fst (runCommand Undo normal))=="foo = 1\n")
       (twice,twiceReply)<-apply tooling base "twice"
@@ -903,14 +903,14 @@ commandChecks = bracket temporary removePathForcibly $ \root -> do
         pipelineResult<-right pipelineReply
         when (title=="pipeline-drain") $ do
           -- The server has stopped reading while didChange fills its pipe.
-          -- Retirement must return promptly and retain queued replies meanwhile.
+          -- Completion must return promptly and retain queued replies meanwhile.
           threadDelay 30000
           writeFile (root </> "pipeline-drain-release") ""
         check "pipelined command response follows all edit adoptions" (activeText pipelined==expected && field "succeeded" pipelineResult==Just success && field "commandSucceeded" pipelineResult==Just commandSucceeded && field "appliedBatches" pipelineResult==Just (batches::Int) && field "partial" pipelineResult==Just (not success))
         do
           _<-marker tooling pipelined (T.unpack title<>"-acks.json")
           observed<-eitherDecodeStrict' <$> BS.readFile (root </> T.unpack title<>"-acks.json") >>= either error pure
-          check "server receives pipelined edit acknowledgments before retirement" (map (field "applied") (observed::[Value])==[Just True,Just (title/="pipeline-invalid")])
+          check "server receives pipelined edit acknowledgments" (map (field "applied") (observed::[Value])==[Just True,Just (title/="pipeline-invalid")])
       forM_ ["rejected","private","version","resource","nested"] $ \title->do
         (unchanged,answer)<-apply tooling base title
         refused<-right answer
@@ -950,13 +950,36 @@ commandChecks = bracket temporary removePathForcibly $ \root -> do
       writeFile (root </> "release") ""
       newListing<-list tooling cancelled
       (_,oldReply)<-begin tooling cancelled "normal" cancelListing
-      check "retiring command transport invalidates old action IDs" . isLeft =<< oldReply
+      check "a fresh action list invalidates older IDs" . isLeft =<< oldReply
       (restarted,nextReply)<-begin tooling cancelled "normal" newListing
       (fresh,done)<-finish tooling restarted nextReply
       _<-right done
-      check "retired server cannot edit replacement command" (activeText fresh=="bar = 1\n")
+      check "next command runs after cancellation settles" (activeText fresh=="bar = 1\n")
       starts<-lines <$> readFile (root </> "started")
-      check "cancelled command requires a new HLS process" (length starts>=2)
+      check "success, failure and settled cancellation retain one HLS process" (length starts==1)
+      cleanMarkers
+      cancelableListing<-list tooling fresh
+      (cancelable,cancelableReply)<-begin tooling fresh "cancelable" cancelableListing
+      cancelableReady<-marker tooling cancelable "held"
+      _<-timeout 1000 cancelableReply
+      cancelableDone<-marker tooling cancelableReady "cancel-acknowledged"
+      (afterCancel,afterCancelReply)<-apply tooling cancelableDone "normal"
+      _<-right afterCancelReply
+      check "cancellation settles without applying subsequent edits" (activeText cancelableDone=="bar = 1\n" && activeText afterCancel=="bar = 1\n")
+      cleanMarkers
+      hangingListing<-list tooling afterCancel
+      (hanging,hangingReply)<-begin tooling afterCancel "hang" hangingListing
+      hung<-marker tooling hanging "held"
+      _<-timeout 1000 hangingReply
+      let awaitRestart current=do
+            next<-tickTooling tooling core current
+            if "HLS did not finish cancellation" `T.isPrefixOf` status next then pure next
+              else threadDelay 1000 >> awaitRestart next
+      retired<-timeout 4000000 (awaitRestart hung) >>= maybe (error "Unresponsive cancellation was not retired") pure
+      (recovered,recoveredReply)<-apply tooling retired "normal"
+      _<-right recoveredReply
+      recoveredStarts<-lines <$> readFile (root </> "started")
+      check "only unresponsive cancellation restarts HLS" (length recoveredStarts==2 && activeText recovered=="bar = 1\n")
   where
     fromMaybeList Nothing=[]
     fromMaybeList (Just xs)=xs
@@ -1005,7 +1028,7 @@ commandServer = unlines
   ," if m=='initialize':send(dict(id=i,result=dict(capabilities=dict(codeActionProvider=dict(resolveProvider=True),executeCommandProvider=dict(commands=['fixture'])))));continue"
   ," if m=='shutdown':send(dict(id=i,result=None));continue"
   ," if m=='textDocument/codeAction':"
-  ,"  uri=p['textDocument']['uri'];actions=[dict(title=mode,command='fixture',arguments=[mode,uri]) for mode in ['normal','twice','pipeline','pipeline-drain','pipeline-failed','pipeline-invalid','rejected','failed','held','held-after','private','version','resource','nested']]"
+  ,"  uri=p['textDocument']['uri'];actions=[dict(title=mode,command='fixture',arguments=[mode,uri]) for mode in ['normal','hang','cancelable','twice','pipeline','pipeline-drain','pipeline-failed','pipeline-invalid','rejected','failed','held','held-after','private','version','resource','nested']]"
   ,"  literal=dict(changes={uri:[dict(range=dict(start=dict(line=0,character=0),end=dict(line=0,character=3)),newText='lit')]})"
   ,"  actions += [dict(title='literal-failed',edit=literal,command=dict(title='fail',command='fixture',arguments=['fail-only',uri]))]"
   ,"  send(dict(id=i,result=actions));continue"
@@ -1029,6 +1052,19 @@ commandServer = unlines
   ,"   if len(replies)==2:"
   ,"    path=pathlib.Path(mode+'-acks.next');path.write_text(json.dumps(replies));path.replace(mode+'-acks.json')"
   ,"   continue"
+  ,"  if mode=='cancelable':"
+  ,"   pathlib.Path('held').touch()"
+  ,"   while True:"
+  ,"    cancellation=recv()"
+  ,"    if cancellation.get('method')=='$/cancelRequest':break"
+  ,"   assert cancellation['params']['id']==i"
+  ,"   assert edit(uri,'BAD')['applied']==False"
+  ,"   send(dict(id=i,error=dict(code=-32800,message='cancelled')))"
+  ,"   pathlib.Path('cancel-acknowledged').touch()"
+  ,"   continue"
+  ,"  if mode=='hang':"
+  ,"   pathlib.Path('held').touch()"
+  ,"   while True:time.sleep(.01)"
   ,"  if mode=='held':hold()"
   ,"  if mode!='fail-only':"
   ,"   target=(root.parent/'Outside.hs').as_uri() if mode=='rejected' else (root/'Secret.hs').as_uri() if mode=='private' else (root/'nested'/'Other.hs').as_uri() if mode=='nested' else uri"
@@ -1038,10 +1074,5 @@ commandServer = unlines
   ,"  if mode in ['failed','fail-only']:send(dict(id=i,error=dict(code=-32603,message='fixture command failed')))"
   ,"  else:send(dict(id=i,result=None))"
   ,"  pathlib.Path('command-finished').touch()"
-  ,"  # Delay A's edit until another server has started for B."
-  ,"  while len(pathlib.Path('started').read_text().splitlines())<=generation: time.sleep(.002)"
-  ,"  # Intentionally after executeCommand response: no active command owns this."
-  ,"  edit(uri,'BAD')"
-  ,"  pathlib.Path('late-replied').touch()"
   ,"  continue"
   ," if i is not None:send(dict(id=i,result={}))"]

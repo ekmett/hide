@@ -33,7 +33,7 @@ import Hide.BufferReadCommand (BufferReadCommands,readPage,readBufferCommand,for
 import Hide.Plugin.BufferHost (readerReference)
 import qualified Hide.Plugin.Buffer as P
 import Hide.Files (filePath)
-import Hide.GuestAccess (protectedWindow, privateDocument, sanitizedBufferContent)
+import Hide.GuestAccess (protectedWindow, sanitizedBufferContent)
 import Hide.Model
 import Hide.Protocol (WirePacket(..), readPacket, writePacket)
 import Hide.RemoteEndpoint (sessionEndpoint, connectEndpointWithShutdown)
