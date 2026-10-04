@@ -24,6 +24,24 @@ The native window and browser title also show a distinguishing prefix of the
 session ID in brackets. The saved record supplies the project and, for SSH sessions, the host. Do not
 add a path or `--ssh` to `--resume`.
 
+## Shared sidebar
+
+Expand **Sessions** to see editor sessions with their project, host, state and
+an unambiguous ID prefix. Sessions in the same directory keep distinct targets.
+Discovery and local probes run in the background; expanding a row never claims
+another display or starts SSH. Startup arguments and provider keys are absent
+from the tree.
+
+Expand the current session to see its live editor windows. Selecting a window
+uses its captured ID and the ordinary window-selection owner. Removed windows,
+retired actions and modal controls refuse the selection; background refresh
+keeps the current focus. Other-session attachment from the sidebar remains in
+[#7](https://github.com/ekmett/hide/issues/7); use `hide --resume ID` below for now.
+
+The sidebar retains at most 1024 sessions/windows and pages 128 rows at a time.
+A discovery attempt has a ten-second limit and retains its last successful
+inventory on timeout or error. Remote catalog entries can remain visible offline.
+
 ## Change displays
 
 Choose the frontend as usual when returning:

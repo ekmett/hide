@@ -36,6 +36,7 @@ import qualified Hide.Plugin.Window as PluginWindow
 import Hide.Model
 import Hide.DebuggerSidebarTypes
 import Hide.AgentSidebarTypes
+import Hide.SessionSidebarTypes
 import Hide.Sidebar
 import Hide.Plugin.Command
 import qualified Hide.Plugin.Tree as P
@@ -45,7 +46,7 @@ import qualified Hide.Plugin.Menu as Menu
 data SidebarContext = SidebarContext
   { sidebarOrigin :: !Menu.MenuOrigin, sidebarPrivatePaths :: ![FilePath]
   , sidebarColumns :: !Int, sidebarOpened :: !(Maybe (FilePath,Int,Int,ContentVersion)) }
-data SidebarReply = SidebarExisting !FilePath !Int !Int !ContentVersion | SidebarDocument !FilePath !Document | SidebarPrepared !LinkResult | SidebarAgent !AgentSidebarRequest | SidebarDebug !DebugSidebarRequest | SidebarWindow !PluginWindow.WindowUpdate
+data SidebarReply = SidebarSession !SessionSidebarRequest | SidebarExisting !FilePath !Int !Int !ContentVersion | SidebarDocument !FilePath !Document | SidebarPrepared !LinkResult | SidebarAgent !AgentSidebarRequest | SidebarDebug !DebugSidebarRequest | SidebarWindow !PluginWindow.WindowUpdate
 
 data ChildJob = ChildJob !TreeRequest !Menu.MenuOrigin !(Async (Either CommandError (P.PreparedPage SidebarContext SidebarReply))) !Bool
 data ActionJob = ActionJob ![P.TreeHit] !CommandRef !Menu.MenuOrigin !Int !(Async (Either CommandError SidebarReply)) !Bool
@@ -494,6 +495,7 @@ finishAction (SidebarHost _ ref _ cancellation _) core d=do
           case result of
             Right (Right (SidebarExisting path wid bid version)) | current->adoptExisting origin path wid bid version d
             Right (Right (SidebarDebug request)) | current && origin==Menu.HumanMenu->snd <$> core d [DebugSidebarAction request]
+            Right (Right (SidebarSession request)) | current && origin==Menu.HumanMenu->snd <$> core d [SessionSidebarAction request]
             Right (Right (SidebarWindow request)) | current->adoptWindowUpdate origin request d
             Right (Right (SidebarAgent request)) | current && origin==Menu.HumanMenu->snd <$> core d [AgentSidebarAction request]
             _->pure $ if not current then d {status="Sidebar result expired."} else case result of
@@ -501,6 +503,7 @@ finishAction (SidebarHost _ ref _ cancellation _) core d=do
               Right (Left err)->d {status="Sidebar action failed: "<>T.pack (show err)}
               Right (Right SidebarExisting{})->d {status="Sidebar result expired."}
               Right (Right SidebarDebug{})->d {status="Sidebar result expired."}
+              Right (Right SidebarSession{})->d {status="Sidebar result expired."}
               Right (Right SidebarWindow{})->d {status="Sidebar result expired."}
               Right (Right SidebarAgent{})->d {status="Sidebar result expired."}
               Right (Right (SidebarPrepared value))->fst (applyLink value d)

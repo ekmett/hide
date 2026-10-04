@@ -92,11 +92,15 @@ Each command result includes `succeeded`, `commandSucceeded`, `applied`,
 `appliedBatches`, `partial`, `error`, and changed buffer revisions. A successful
 command response does not override a rejected edit. Each accepted edit batch is
 atomic; the whole command is not. Earlier accepted edits remain if a later batch,
-the command, or the waiting client fails. Every completed, failed, or canceled
-command retires that HLS process and invalidates its action IDs before another
-command can run. Relist actions on the new process; edit-only actions keep using
-the existing process. At most one command runs per project client, with at most
-128 accepted edit batches and the existing 30-second request deadline.
+the command, or the waiting client fails. Completed commands, including error
+responses, reuse the initialized HLS process. Cancellation sends `$/cancelRequest`
+and rejects further edits while retaining the command slot until the terminal
+response. Only a broken transport or cancellation that has not settled within
+two seconds restarts HLS and invalidates its action IDs. At most one command runs
+per project client, with at most 128 accepted edit batches and a 30-second request
+deadline. LSP does not attach an originating command ID to `workspace/applyEdit`:
+the editor admits edits during the serialized command interval and checks their
+paths and revisions; this is not isolation from a malicious language server.
 `appliedBatches` counts accepted batches, including empty or no-op batches;
 `buffers` lists only changed buffer revisions.
 
