@@ -7,6 +7,7 @@
 -- returned as deferred IO with the corresponding immutable desktop snapshot.
 module Hide.WorkspaceMCP (workspaceTools, workspaceToolNames, workspaceTool) where
 
+import Hide.Sidebar
 import Control.Monad (unless, when)
 import Data.Aeson
 import Data.Aeson.Types (Parser, parseEither)

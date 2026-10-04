@@ -49,7 +49,9 @@ data CommandError = RegistryClosed | InvalidCommandName Text | DuplicateCommand 
 instance NFData CommandError
 
 -- | Opaque registration identity suitable for delayed wire invocations.
-data CommandRef = CommandRef Unique Integer Text
+data CommandRef = CommandRef Unique Integer Text deriving (Eq,Ord)
+instance Show CommandRef where
+  show (CommandRef _ generation name)="CommandRef "++show name++" "++show generation
 -- The typed definition cannot be paired with an invented registration externally.
 data Command context a b = Command CommandRef (CommandDef context a b)
 data Entry context = forall a b. Entry Integer (CommandDef context a b)

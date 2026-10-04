@@ -15,6 +15,7 @@ import Hide.Buffer
 import Hide.Files (FileState(..))
 import Hide.InlineState
 import Hide.InlineTypes
+import Hide.Sidebar
 import Hide.Model
 import Hide.Render
 import Hide.Syntax
@@ -113,7 +114,7 @@ checks=do
   let messages=sourceFocused {bottomTerminal=Nothing}
   check "unfocused Messages tab strip and body use single borders" (borders messages=="┌│└")
   check "focused Messages tab strip and body use double borders" (borders messages {problemsFocused=True}=="╔║╚")
-  let sourceTree=sourceFocused {sideTree=Just (Sidebar "/project" [] 0 0 20 True)}
+  let sourceTree=sourceFocused {sideTree=Just (emptySidebar "/project" 20 True)}
   check "tree focus leaves selected docked tab with single borders"
     (borders (focusWindow acpId sourceFocused) {sideTree=sideTree sourceTree}=="┌│└")
   putStrLn "Inline render checks passed"

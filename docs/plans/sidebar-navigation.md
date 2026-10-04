@@ -1,7 +1,8 @@
 # Unified sidebar navigation
 
 Status: base design approved; the context actions and Cabal package roots below
-incorporate subsequent user refinements. Implementation has not started.
+incorporate subsequent user refinements. The shared provider core and Files live
+slice are in progress in PR #30; other domain providers remain subsequent work.
 
 ## Intended experience
 

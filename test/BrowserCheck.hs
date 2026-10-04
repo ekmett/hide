@@ -11,6 +11,7 @@ import System.IO (hClose, openBinaryTempFile)
 import Data.Maybe (isJust)
 import qualified Graphics.Vty as V
 import qualified Hide.App as App
+import Hide.Sidebar
 import Hide.Model
 import Hide.Files (filePath)
 import Hide.Browser

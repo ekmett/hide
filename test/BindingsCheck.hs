@@ -16,6 +16,7 @@ import qualified Data.Text as T
 import qualified Graphics.Vty as V
 import Hide.Bindings
 import Hide.Commands
+import Hide.Sidebar
 import Hide.Model
 import Hide.Browser (Entry(..))
 import Hide.GuestAccess (guestKeyAllowed)
@@ -82,8 +83,8 @@ checks=do
         ,("terminal",M.singleton "hide.terminal.stop" ["Alt+F11"])
         ,("debugger",M.singleton "hide.debug.continue" ["Ctrl+Shift+D"])]))
       contextBase=base {keyBindings=maps}
-      tree=installTree "/project" [Entry "src" True Nothing Nothing,Entry "Main.hs" False Nothing Nothing] contextBase
-  check "sidebar expansion uses its own override" (snd (key (V.KChar 'e') [V.MCtrl] tree)==[ExpandTree 0] && noEffects (key V.KRight [] tree))
+      tree=installSidebar (emptySidebar "/project" 24 True) contextBase
+  check "sidebar expansion uses its own override" (boundKeyCommand (V.KChar 'e') [V.MCtrl] tree==Just SidebarExpand && noEffects (key V.KRight [] tree))
   check "removed sidebar movement stays removed" (maybe (-1) treeSelected (sideTree (fst (key V.KDown [] tree)))==0)
   check "context entry replaces global command chords" (boundKeyCommand (V.KChar 'p') [V.MCtrl,V.MShift] tree==Just AgentPermissions && boundKeyCommand (V.KChar 'p') [V.MAlt] tree==Nothing)
   check "rebound sidebar protected action retains guest policy" (not (guestKeyAllowed tree (V.KChar 'p') [V.MCtrl,V.MShift]))

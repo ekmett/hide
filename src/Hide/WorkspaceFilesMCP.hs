@@ -9,6 +9,7 @@
 -- runs in the owning permission tick; filesystem mutations remain initial-phase IO.
 module Hide.WorkspaceFilesMCP (fileTools, fileToolNames, fileTool, applyUnifiedDiff, PatchSource, PreparedPatch, capturePatchSource, capturePatchRequest, preparePatch, commitPatch) where
 
+import Hide.Sidebar
 import Control.Exception (IOException, bracket, try, evaluate)
 import Control.Monad (forM, unless, when)
 import Data.Aeson

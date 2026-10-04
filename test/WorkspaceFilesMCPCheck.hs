@@ -23,6 +23,7 @@ import TypedBufferDiffsCheck (startDiffCall)
 import Hide.Buffer
 import Hide.Files (FileState(..), loadFile)
 import Hide.MCPPermissions (withPermissionsAt,tickPermissions)
+import Hide.Sidebar
 import Hide.Model
 import Hide.WorkspaceFilesMCP
 
@@ -96,7 +97,7 @@ checks=withBufferDiffCommands $ \commands->do
       exists<-doesDirectoryExist (root </> "new")
       check "delete removes an empty directory" (not exists)
       _<-file "mkdir" "tree" initial
-      let treeDesktop=initial {defaultDirectory=Just (root </> "tree"),sideTree=Just (Sidebar (root </> "tree") [] 0 0 24 False)}
+      let treeDesktop=initial {defaultDirectory=Just (root </> "tree"),sideTree=Just (emptySidebar (root </> "tree") 24 False)}
       (movedTree,_)<-success "workspace_files" (operation "rename" "tree"++["to" .= ("moved"::T.Text)]) treeDesktop
       check "renaming a directory updates current directory and files tree root"
         (defaultDirectory movedTree==Just (root </> "moved") && fmap treeRoot (sideTree movedTree)==Just (root </> "moved"))
