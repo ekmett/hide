@@ -117,7 +117,8 @@ checks=sourceSelectionCheck >> (bracket temporary removePathForcibly $ \root->wi
   let unopened=(setDiagnostics [problem] (setProblemsVisible True (initialDesktop (80,25)))) {problemsFocused=True,contributedMenus=metadata,menusActive=True}
       (newChosen,newRequests)=handleEvent (V.EvKey V.KEnter []) (openContext MessagesContext 8 5 unopened)
   let publicAgentPane=newChosen {agentMenuRefs=menuAgentReferences host}
-      agentRequests=case applyGuestInput input (beginGuestInput publicAgentPane) of
+  guestAdmitted<-applyGuestInput input (beginGuestInput publicAgentPane)
+  let agentRequests=case guestAdmitted of
         Right (_,effects)->effects
         Left err->error (T.unpack err)
   check "host-permitted diagnostic source preserves attributed agent origin"
@@ -288,7 +289,8 @@ sourceActionCheck host metadata path=withDebugger $ \runtime->do
   let token=length nativeCommands+maybe (error "native source token missing") id (findIndex ((==sourceRef) . Plugin.menuReference) metadata)
   check "native source contribution preserves current exact registration" (remoteNativeMenuInput remote 71 [11,token,71]==Just packet && nativeMenuEventFor (nativeCommandsFor captured) 71 [11,token,71]==Just (RegisteredMenu sourceRef False))
   check "native source contribution refuses stale catalogue event" (remoteNativeMenuInput remote 72 [11,token,71]==Nothing)
-  check "source controls refuse agent origin" (case applyGuestInput transported (beginGuestInput captured) of Left _->True; _->False)
+  sourceGuest<-applyGuestInput transported (beginGuestInput captured)
+  check "source controls refuse agent origin" (case sourceGuest of Left _->True; _->False)
   let bytes=captured {buffers=M.map (\doc->doc {documentBuffer=(documentBuffer doc) {B.byteMode=True}}) (buffers captured)}
   check "source controls refuse byte input" (not (commandEnabled bytes (RegisteredMenu sourceRef False)))
   chosen<-run "Toggle breakpoint" base

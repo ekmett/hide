@@ -92,7 +92,7 @@ checks=bracket temporary removePathForcibly $ \dir->withSidebarCommands $ \host-
   TIO.writeFile (dir </> "Main.hs") "main = 1\n"
   let privateIndex=atLabel "thc.toml" reopened
       privateTree=select privateIndex reopened
-  (agentState,agentEffects)<-right (Wire.applyGuestInput (Wire.Key "Enter" []) privateTree)
+  (agentState,agentEffects)<-right =<< Wire.applyGuestInput (Wire.Key "Enter" []) privateTree
   check "agent input stamps the real Files action" (case agentEffects of [InvokeTree _ _ Menu.AgentMenu]->True; _->False)
   denied<-act host (agentState,agentEffects)
   check "agent protected Files action refuses before loading" ("protected" `T.isInfixOf` status denied)

@@ -48,8 +48,16 @@ capture font desktop includeImage
   | includeImage && toInteger cols*8*toInteger rows*toInteger cellHeight>4194304 = pure (Left "Editor image exceeds the 4-megapixel capture limit.")
   | BS.length (TE.encodeUtf8 plain)>1048576 = pure (Left "Editor screen text exceeds 1 MiB.")
   | includeImage && BL.length png>2097152 = pure (Left "Editor PNG exceeds 2 MiB; request text only or reduce the editor size.")
-  | BL.length (encode result)>4194304 = pure (Left "Editor screen result exceeds 4 MiB.")
-  | otherwise = pure (Right result)
+  | otherwise = do
+      keys<-mapM (\(key,modifiers)->do
+        allowed<-inputAllowed (P.Key key modifiers)
+        pure (object ["key" .= key,"mods" .= map modifierName modifiers,"allowed" .= allowed])) guestKeyCombinations
+      commands<-mapM (\(menuName,label,command,ident)->do
+        allowed<-inputAllowed (P.MenuCommand command)
+        pure (object ["menu" .= menuName,"label" .= label,"command" .= ident,"allowed" .= allowed,"enabled" .= commandEnabled desktop command]))
+        [(menuName,label,command,ident) | (menuName,_,items)<-menus,MenuItem label _ command<-items,Just ident<-[commandIdentifier command]]
+      let reply=result keys commands
+      pure (if BL.length (encode reply)>4194304 then Left "Editor screen result exceeds 4 MiB." else Right reply)
   where
     (cols,rows)=screenSize desktop
     cellHeight=modeHeight (fromMaybe 3 (videoMode desktop))
@@ -84,31 +92,26 @@ capture font desktop includeImage
     cursor=case V.picCursor picture of
       V.Cursor x y | x>=0 && x<cols && y>=0 && y<rows && readableCell x y -> Just (x,y)
       _ -> Nothing
-    inputAllowed input=case P.applyGuestInput input (beginGuestInput desktop) of
-      Left _->False
-      Right _->True
+    inputAllowed input=either (const False) (const True) <$> P.applyGuestInput input (beginGuestInput desktop)
     modifierName modifier=case modifier of
       V.MCtrl->"ctrl"::Text
       V.MAlt->"alt"
       V.MShift->"shift"
       _->T.pack (show modifier)
-    metadata=object ["cols" .= cols,"rows" .= rows,"text" .= plain,
+    metadata keys commands=object ["cols" .= cols,"rows" .= rows,"text" .= plain,
       "cursor" .= fmap (\(x,y) -> object ["x" .= x,"y" .= y]) cursor,
       "cursorPolicy" .= ("visible underline; blink phase fixed on; hidden in private cells"::Text),
       "accessRows" .= accessRows,"keyboardAllowed" .= guestKeyboardAllowed desktop,
-      "keyPermissions" .= [object ["key" .= key,"mods" .= map modifierName modifiers,
-        "allowed" .= inputAllowed (P.Key key modifiers)] | (key,modifiers)<-guestKeyCombinations],
-      "commandPermissions" .= [object ["menu" .= menuName,"label" .= label,"command" .= ident,
-        "allowed" .= inputAllowed (P.MenuCommand command),"enabled" .= commandEnabled desktop command]
-        | (menuName,_,items)<-menus,MenuItem label _ command<-items,Just ident<-[commandIdentifier command]],
+      "keyPermissions" .= keys,
+      "commandPermissions" .= commands,
       "redactedCells" .= Vec.length (Vec.filter (not . cellReadable) accessGrid),
       "redaction" .= ("Unreadable graphemes become spaces and solid black pixels; whole wide graphemes are hidden if any covered cell is private. Cell coordinates are preserved."::Text),
       "cellWidth" .= (8::Int),"cellHeight" .= cellHeight,"pixelWidth" .= (cols*8),"pixelHeight" .= (rows*cellHeight),
       "videoMode" .= fromMaybe 3 (videoMode desktop),"imageIncluded" .= includeImage,
       "renderer" .= ("canonical IBM/Unicode bitmap approximation; multi-codepoint graphemes use their first code point"::Text),
       "excluded" .= (["OS chrome","CRT effects","native font shaping","mouse pointer"]::[Text])]
-    result=object ["isError" .= False,"content" .=
-      (object ["type" .= ("text"::Text),"text" .= TE.decodeUtf8 (BL.toStrict (encode metadata))] :
+    result keys commands=object ["isError" .= False,"content" .=
+      (object ["type" .= ("text"::Text),"text" .= TE.decodeUtf8 (BL.toStrict (encode (metadata keys commands)))] :
         [object ["type" .= ("image"::Text),"mimeType" .= ("image/png"::Text),
           "data" .= TE.decodeUtf8 (B64.encode (BL.toStrict png))] | includeImage])]
     blank=(glyph font ' ',PixelRGB8 0 0 0,PixelRGB8 0 0 0,0,False)

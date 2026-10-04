@@ -81,11 +81,13 @@ controlTool apply d name args=case parseEither parse args of
       _ -> ["type"]
     run state@(_,_,True,_) _=pure state
     run state@(_,_,_,Just _) _=pure state
-    run (current,count,False,Nothing) input=case P.applyGuestInput input current {browserFrontend=False} of
-      Left err -> pure (current,count,False,Just err)
-      Right (changed,effects) -> do
-        (stopped,updated)<-apply changed {browserFrontend=browserFrontend current} effects
-        pure (updated,count+1,stopped,Nothing)
+    run (current,count,False,Nothing) input=do
+      admitted<-P.applyGuestInput input current {browserFrontend=False}
+      case admitted of
+        Left err -> pure (current,count,False,Just err)
+        Right (changed,effects) -> do
+          (stopped,updated)<-apply changed {browserFrontend=browserFrontend current} effects
+          pure (updated,count+1,stopped,Nothing)
 
 parseSettings :: Desktop -> Value -> Parser Desktop
 parseSettings d=withObject "settings" $ \o -> do
