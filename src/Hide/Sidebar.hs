@@ -94,8 +94,20 @@ addRoot ref info action actions tree
   where key=NodeKey ref (infoId info)
         node=NodeState info 1 Nothing S.empty M.empty False Unloaded 0 [] action actions
 removeRoot :: TreeRef -> Sidebar -> Sidebar
-removeRoot ref tree=tree {
-  treeRoots=S.filter (\(NodeKey owner _)->owner/=ref) (treeRoots tree),treeRevision=treeRevision tree+1}
+removeRoot ref tree=foldr withdraw marked [key | key@(NodeKey owner _)<-toList (treeRoots tree),owner==ref]
+  where
+    marked=tree {treeRoots=S.filter (\(NodeKey owner _)->owner/=ref) (treeRoots tree),treeRevision=treeRevision tree+1}
+    withdraw key current=case M.lookup key (treeNodes current) of
+      Just node | address@(_:_)<-stateAddress node,Just index<-M.lookupIndex address (treeRows current)->
+        let (before,_,rest)=M.splitLookup address (treeRows current)
+            (descendants,after)=M.split (address++[maxBound]) rest
+            removed=1+M.size descendants
+            rows=M.union before after
+            adjust position | position>=index && position<index+removed=max 0 (min index (M.size rows-1))
+                            | position>=index+removed=position-removed
+                            | otherwise=position
+        in current {treeRows=rows,treeSelected=adjust (treeSelected current),treeScroll=adjust (treeScroll current)}
+      _->current
 
 -- | Expanding twice shares one request. Pages retain their opaque cursor.
 requestChildren :: TreeHit -> Maybe Text -> Sidebar -> (Sidebar,Maybe TreeRequest)

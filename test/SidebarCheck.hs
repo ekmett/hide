@@ -14,6 +14,7 @@ import qualified Graphics.Vty as V
 import System.Directory
 import System.FilePath ((</>))
 import System.IO (openTempFile,hClose)
+import Hide.Recovery (writeCheckpoint,readCheckpoint)
 import System.Timeout (timeout)
 import GHC.Stack (HasCallStack)
 import Hide.App (applyEffects)
@@ -105,6 +106,7 @@ checks=bracket temporary removePathForcibly $ \dir->withSidebarCommands $ \host-
   independent host expanded
   refresh host dir expanded
   edgeChecks dir
+  recoveryChecks dir
   putStrLn "shared sidebar checks passed"
 
 independent :: SidebarHost -> Desktop -> IO ()
@@ -202,8 +204,14 @@ edgeChecks dir=withSidebarCommands $ \host->do
     check "provider failures produce a real Retry row" ("Retry:" `T.isInfixOf` snapshot failed && any (T.isInfixOf "fixture unavailable".P.infoLabel.rowInfo.snd) (visibleRows 0 32768 (treeOf failed)))
     recovered<-act host (activateTree False (case [index | (index,row)<-visibleRows 0 32768 (treeOf failed),rowAction row==RetryLoad] of index:_->index; _->error "missing Retry row") failed) >>= settle host
     check "Retry invokes the same provider and replaces the failed row" ("Inspect" `T.isInfixOf` snapshot recovered && not ("Retry:" `T.isInfixOf` snapshot recovered))
+    pendingResize<-act host (activateTree False (atLabel "Inspect" recovered) recovered)
+    putMVar replyGate ()
+    let resized=fst (handleEvent (V.EvResize 90 30) pendingResize)
+    resizedResult<-await (tickSidebar host) (T.isInfixOf "expired" . status) resized
+    check "prepared sidebar document refuses changed geometry" (not ("Retired action" `T.isInfixOf` activeText resizedResult))
     invoked<-act host (activateTree False (atLabel "Inspect" recovered) recovered)
     withdrawn<-retireTreeFromHost host (P.treeReference provider) invoked
+    check "withdrawal removes cached root rows before another projection" (not (any ((=="Tools").P.infoLabel.rowInfo.snd) (visibleRows 0 32768 (treeOf withdrawn))))
     putMVar replyGate ()
     refused<-await (tickSidebar host) (T.isInfixOf "expired" . status) withdrawn
     check "late retired action cannot install a prepared document" (not ("Retired action" `T.isInfixOf` activeText refused))
@@ -212,6 +220,41 @@ edgeChecks dir=withSidebarCommands $ \host->do
     publishTreeFromHost host provider
     live<-settle host base
     check "scoped provider was published" (any ((=="Tools").P.infoLabel.rowInfo.snd) (visibleRows 0 32768 (treeOf live)))
-    pure live
+    -- Only registration workers backpressure; owner ticks drain four deltas.
+    replicateM_ 32 (publishTreeFromHost host provider)
+    advanced<-withAsync (publishTreeFromHost host provider) $ \writer->do
+      threadDelay 20000
+      blocked<-poll writer
+      check "publication queue backpressures only its producer" (case blocked of Nothing->True; _->False)
+      next<-tickSidebar host live
+      resumed<-timeout 1000000 (wait writer)
+      check "bounded owner drain releases publication producer" (case resumed of Just ()->True; _->False)
+      pure next
+    relocated<-act host (advanced,[ReadTree (dir </> "src")]) >>= settle host
+    check "changing Files directory preserves independent sibling root" (any ((=="Tools").P.infoLabel.rowInfo.snd) (visibleRows 0 32768 (treeOf relocated)))
+    pure relocated
   closed<-settle host scoped
   check "closing provider command scope withdraws its root" (not (any ((=="Tools").P.infoLabel.rowInfo.snd) (visibleRows 0 32768 (treeOf closed))))
+
+recoveryChecks :: FilePath -> IO ()
+recoveryChecks dir=withSidebarCommands $ \host->do
+  initial<-initializeSidebar host (installSidebar (emptySidebar dir 24 True) (initialDesktop (100,30)))
+  opened<-act host (activateTree True (atLabel "src" initial) initial) >>= settle host
+  let selected=select (atLabel "a.hs" opened) opened
+      checkpoint=dir </> "sidebar.checkpoint"
+      before=treeOf selected
+      chosen=maybe (error "selected row") id (rowAt (treeSelected before) before)
+      positioned=selected {sideTree=Just before {treeScroll=treeSelected before}}
+  writeCheckpoint checkpoint positioned >>= right
+  recovered<-readCheckpoint checkpoint (initialDesktop (100,30)) >>= right
+  check "recovery retains hints rather than old scope handles" (M.null (treeNodes (treeOf recovered)) && null (treeRoots (treeOf recovered)))
+  withSidebarCommands $ \freshHost->do
+    restored<-initializeSidebar freshHost recovered
+    let after=treeOf restored
+        freshRow=maybe (error "restored row") id (rowAt (treeSelected after) after)
+    check "fresh scope restores selected and top resource anchors" (P.infoResource (rowInfo freshRow)==P.infoResource (rowInfo chosen) && treeScroll after==treeSelected after && rowHit freshRow/=rowHit chosen)
+    -- A prepared result must preserve input changes made after preparation began.
+    prepared<-prepareProjection after
+    let moved=after {treeSelected=0,treeScroll=0}
+        adopted=adoptProjection prepared moved
+    check "projection adoption preserves later viewport and selection input" (treeSelected adopted==0 && treeScroll adopted==0)

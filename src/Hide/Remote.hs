@@ -45,7 +45,7 @@ import Hide.Buffer (bufferBytes)
 import Hide.Files (filePath)
 import Hide.Font (loadFont)
 import Hide.Frontend (modeSize)
-import Hide.Sidebar (hitCurrent)
+import Hide.Sidebar (hitCurrent,treeFocused)
 import Hide.Links (prepareLink,applyLink)
 import Paths_hide (getDataFileName)
 import Hide.Model hiding (Paste, message)
@@ -266,7 +266,7 @@ runRemoteDaemonWithStartup owned session scale effects tick inspect initial = do
           (stamp,captured,columns,directory,origin,target)<-atomically (readTBQueue linkJobs)
           prepared<-prepareLink True columns directory origin target
           modifyMVar_ state $ \s->do
-            if stopped s || stamp/=(owner s,generation s) || not (maybe True (\trace->maybe False (hitCurrent trace) (sideTree (desktop s))) captured) then pure s else do
+            if stopped s || stamp/=(owner s,generation s) || not (maybe True (\trace->maybe False (\tree->treeFocused tree && hitCurrent trace tree) (sideTree (desktop s)) && dialog (desktop s)==Nothing && columns==max 20 (min 76 (fst (screenSize (desktop s))-treeWidthOf (desktop s)-4))) captured) then pure s else do
               let (updated,packet)=applyLink prepared (desktop s)
               -- Bounded and live-only: the display drains these without replay.
               delivered<-case packet of

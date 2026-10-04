@@ -44,7 +44,7 @@ data SidebarContext = SidebarContext
 data SidebarReply = SidebarExisting !FilePath !Int !Int !ContentVersion | SidebarDocument !FilePath !Document | SidebarPrepared !LinkResult
 
 data ChildJob = ChildJob !TreeRequest !Menu.MenuOrigin !(Async (Either CommandError (P.PreparedPage SidebarContext SidebarReply))) !Bool
-data ActionJob = ActionJob ![P.TreeHit] !CommandRef !Menu.MenuOrigin !(Async (Either CommandError SidebarReply))
+data ActionJob = ActionJob ![P.TreeHit] !CommandRef !Menu.MenuOrigin !Int !(Async (Either CommandError SidebarReply))
 data FilesProvider = FilesProvider !(P.TreeProvider SidebarContext SidebarReply) !FilePath !CommandRef !(IORef (M.Map P.NodeId FilePath,M.Map FilePath P.NodeId,Int,M.Map FilePath [Entry]))
 data State = State
   { providers :: !(M.Map P.TreeRef (P.TreeProvider SidebarContext SidebarReply))
@@ -73,7 +73,7 @@ withSidebarCommands use=withRegistry $ \registry->bracket (acquire registry) clo
       state<-readIORef ref
       mapM_ (\(ChildJob _ _ worker _)->cancel worker) (jobs state)
       mapM_ (cancel . snd) (projection state)
-      mapM_ (\(ActionJob _ _ _ worker)->cancel worker) (actionJob state)
+      mapM_ (\(ActionJob _ _ _ _ worker)->cancel worker) (actionJob state)
       mapM_ (cancel . snd) (badgeJob state)
       cancel canceller
 
@@ -266,7 +266,7 @@ invokeAction (SidebarHost _ ref _ _ _) trace reference origin d=case (trace,side
       (Nothing,Just command) | live && allowed->do
         ctx<-captureActionContext origin trace d
         worker<-async (P.invokeTreeAction command ctx)
-        writeIORef ref state {actionJob=Just (ActionJob trace reference origin worker)}
+        writeIORef ref state {actionJob=Just (ActionJob trace reference origin (sidebarColumns ctx) worker)}
         pure d {status="Opening sidebar target…"}
       _->pure d {status="Sidebar action is stale, protected or busy."}
   _->pure d {status="Sidebar action expired."}
@@ -432,7 +432,7 @@ finishAction (SidebarHost _ ref _ _ _) d=do
   state<-readIORef ref
   case actionJob state of
     Nothing->pure d
-    Just (ActionJob trace reference origin worker)->do
+    Just (ActionJob trace reference origin columns worker)->do
       completed<-poll worker
       case completed of
         Nothing->pure d
@@ -445,7 +445,7 @@ finishAction (SidebarHost _ ref _ _ _) d=do
               Just node->maybe (pure False) P.actionCurrent (find ((==reference).P.actionReference) (maybe [] pure (P.nodeAction node)++P.menuActions node))
               _->pure False
             _->pure False
-          let current=live && commandLive && dialog d==Nothing && maybe False (\tree->treeFocused tree && hitCurrent trace tree) (sideTree d) &&
+          let current=live && commandLive && columns==sidebarColumns (context origin d) && dialog d==Nothing && maybe False (\tree->treeFocused tree && hitCurrent trace tree) (sideTree d) &&
                 (origin==Menu.HumanMenu || maybe False (\tree->maybe False (`elem` treeAgentRefs tree) owner) (sideTree d))
           case result of
             Right (Right (SidebarExisting path wid bid version)) | current->adoptExisting origin path wid bid version d
