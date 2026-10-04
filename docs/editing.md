@@ -207,6 +207,12 @@ On macOS, **Haskell > Settings…** (⌘,) opens **Options > Preferences**;
 **About Haskell** opens the About dialog. The native menu bar provides ⌘
 shortcuts. Other Control bindings remain Control; ⌘ is not a universal substitute. Function keys may need Fn/Globe.
 
+Right-click the macOS Dock icon to use **Editor windows** above **Options**.
+The list includes open editor views and docked terminal tabs, checks the selected
+view, and follows title changes. Choosing a row focuses that view and restores a
+minimized native window. Rows are unavailable while a dialog or human question
+owns input.
+
 [![File popup menu with Open selected in green and native Mac shortcuts.](site/screenshots/file-menu.png)](site/screenshots/file-menu.png)
 
 Tab and Shift+Tab (⇧Tab on Mac) cycle dialog controls. Enter (Return on Mac)
