@@ -205,7 +205,8 @@ builtinTool desktop=tool
     parseArgs parser=either (Left . T.pack) Right . parseEither parser
     findWindow ident=case filter ((==ident).windowId) (windows desktop) of w:_->Just w; _->Nothing
     window w=object ["windowId" .= windowId w,"number" .= windowNumber w,"bufferId" .= bufferId w,
-      "title" .= maybe "" title (windowDocument (buffers desktop) w),
+      "title" .= maybe "[private]" title (windowDocument (buffers desktop) w),
+      "kind" .= (case windowContent w of SourceContent _->"source"::T.Text; PluginContent _->"plugin"),
       "active" .= (fmap windowId (activeWindow desktop)==Just (windowId w)),"bounds" .= rect (bounds w)]
     panels=[object ["kind" .= ("files"::T.Text),"title" .= ("Files"::T.Text),"path" .= treeRoot tree] | Just tree<-[sideTree desktop]]
       ++[object ["kind" .= ("messages"::T.Text),"title" .= ("Messages"::T.Text),"bounds" .= rect (problemsRect desktop)] | problemsVisible desktop]

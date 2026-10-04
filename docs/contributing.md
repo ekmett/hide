@@ -579,13 +579,24 @@ semantic text; source editing, Save and language tooling are unavailable there.
 The initial presentation is private to guests and masked by Streamer mode.
 The same adapter accepts `SidebarWindow` replies after existing sidebar action
 checks. Duplicate opens and stale refreshes are refused, and refresh retains host
-geometry and selection. Closing it removes the prepared content while preserving
+geometry and selection, clamping offsets when text shrinks. Closing it removes the prepared content while preserving
 source documents; an escaped update cannot reopen the closed instance. Scope
 retirement revokes further publication. All plugin titles are masked in streamer
-mode, including application and Dock metadata.
-Durable recovery, retirement placeholders and richer widget APIs remain tracked in
+mode, including application and Dock metadata. A retired scope retains its
+read-only snapshot with an unavailable title; its old references cannot refresh
+or reopen it.
+
+Ordinary views are transient. `prepareRecoverableTextWindow` explicitly declares
+non-secret text eligible for private recovery, with a namespaced type ID and
+positive format version. Recovery preserves text, title and host geometry in an
+inert unavailable view with a fresh revoked reference. Parsing never runs plugin
+code and a restored type does not automatically reattach to a registration.
+Prepared content identities make redraw/checkpoint invalidation shallow.
+
+Public privacy grants, automatic reattachment and richer widget APIs remain tracked in
 [#5](https://github.com/ekmett/hide/issues/5). Editable widgets and the broader
 `WindowDef` signatures in the design document remain proposed.
+
 The Debug sidebar uses the same scoped tree route as Files and Agents. Provider
 workers wait on the existing debugger owner through a 32-entry mailbox; each tick
 admits at most four messages. Validated pages are capped at 1 MiB and 64 cached

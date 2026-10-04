@@ -57,6 +57,7 @@ instance Eq RenderIdentity where
 data RenderState = RenderState
   { keyScreenSize :: (Int,Int)
   , keyWindows :: [Window]
+  , keyRetiredPluginWindows :: [PluginWindow.WindowRef]
   , keyNextId :: Int
   , keyMenu :: Maybe (Int,Int)
   , keyDrag :: Maybe Drag
@@ -208,6 +209,7 @@ renderKey original = do
   let state=RenderState
         { keyScreenSize=screenSize original
         , keyWindows=windows original
+        , keyRetiredPluginWindows=toList (retiredPluginWindows original)
         , keyNextId=nextId original
         , keyMenu=menu original
         , keyDrag=drag original

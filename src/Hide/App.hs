@@ -20,6 +20,7 @@ import qualified Hide.AutocompleteACP as CompletionACP
 import Hide.BufferView
 import Hide.Defaults
 import qualified Hide.Plugin.Menu as PluginMenu
+import Hide.PluginWindowHost (tickPluginWindows,retireClosedWindow)
 import Hide.MenuCommands
 import Hide.Keybindings
 import Hide.Commands (configuredBindings, contributedBindingCommands)
@@ -292,7 +293,7 @@ runEditor args = do
                     (quit,updated)<-policyEffects permissions core d pending
                     approvedExit<-readIORef exiting
                     pure (quit || approvedExit,updated)
-                  tick d=tickProjectBrowser projectBrowser d >>= tickGitOperations gitOperations applyEffects >>= tickTooling tooling applyEffects >>= tickReconciliation reconciliation (sidebarEffects sidebarHost applyEffects) >>= tickConversation conversation >>= tickDebugger debugger (toolingEffects tooling applyEffects) >>= tickPermissions permissions >>= tickHighlighting highlighting >>= tickAutocomplete autocomplete >>= tickKeybindings keybindings >>= tickMenus menuHost >>= tickDebuggerSidebar debugSidebar sidebarHost debugger >>= tickAgentSidebar agentSidebar sidebarHost >>= tickSidebar sidebarHost runtimeEffects
+                  tick d=tickProjectBrowser projectBrowser d >>= tickGitOperations gitOperations applyEffects >>= tickTooling tooling applyEffects >>= tickReconciliation reconciliation (sidebarEffects sidebarHost applyEffects) >>= tickConversation conversation >>= tickDebugger debugger (toolingEffects tooling applyEffects) >>= tickPermissions permissions >>= tickHighlighting highlighting >>= tickAutocomplete autocomplete >>= tickKeybindings keybindings >>= tickMenus menuHost >>= tickDebuggerSidebar debugSidebar sidebarHost debugger >>= tickAgentSidebar agentSidebar sidebarHost >>= tickSidebar sidebarHost runtimeEffects >>= tickPluginWindows
                   inspectTool d name parameters
                     | name `elem` ["list_windows","list_buffers","read_buffer","read_selection"] = pure (d,pure (builtinTool d name parameters))
                     | name `elem` chatToolNames = chatTool conversation d name parameters
@@ -540,6 +541,7 @@ applyEffects :: Desktop -> [Effect] -> IO (Bool,Desktop)
 applyEffects = foldM apply . (False,)
   where
     apply state@(True,_) _=pure state
+    apply (_,d) (RetirePluginWindow reference)=(False,) <$> retireClosedWindow reference d
     -- Reload/inspection belong to the session worker, not this blocking file
     -- interpreter used by standalone drivers and snapshots.
     apply (_,d) ReloadKeyBindings{}=pure (False,d {status="Binding reload requires a running session."})
