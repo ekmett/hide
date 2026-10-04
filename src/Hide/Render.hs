@@ -72,6 +72,7 @@ data RenderState = RenderState
   , keyButtonHover :: Maybe Int
   , keyButtonPressed :: Maybe Int
   , keyContextMenu :: Maybe (Rect,Int)
+  , keyContextTarget :: Maybe ContextTarget
   , keyProblemsVisible :: Bool
   , keyProblemsSelected :: Int
   , keyProblemsScroll :: Int
@@ -192,7 +193,7 @@ renderKey original = do
   payload (clipboard original)
   mapM_ payload (snd (clipboardExport original))
   payload (contextKind original)
-  mapM_ payload (sourceBindings original)
+  mapM_ payload (keyBindings original)
   payload (guestPrivatePaths original)
   names<-readIORef identities
   let state=RenderState
@@ -215,6 +216,7 @@ renderKey original = do
         , keyButtonHover=buttonHover original
         , keyButtonPressed=buttonPressed original
         , keyContextMenu=contextMenu original
+        , keyContextTarget=contextTarget original
         , keyProblemsVisible=problemsVisible original
         , keyProblemsSelected=problemsSelected original
         , keyProblemsScroll=problemsScroll original

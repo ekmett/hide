@@ -66,38 +66,69 @@ inherit; project `false` overrides global `true`. Project defaults apply at
 startup. The agent's `editor_settings.defaults` writer still edits the global
 file; it does not rewrite the project file.
 
-## Terminal source keybindings
+## Terminal keybindings
 
-For the standard key profile in text terminals, replace a source command's
-shortcuts in the global configuration or a project's `thc.toml`:
+Replace commands in a focused terminal context through the global configuration
+or a project's `thc.toml`:
 
 ```toml
 [editor.keybindings.terminal.source]
 "hide.file.save" = ["Ctrl+Shift+S"]
 "hide.file.open" = []
-"hide.window.split-vertical" = ["Ctrl+Shift+V"]
+
+[editor.keybindings.terminal.sidebar]
+"hide.sidebar.expand" = ["Ctrl+E"]
+"hide.sidebar.down" = []
+
+[editor.keybindings.terminal.conversation]
+"hide.edit.copy" = ["Ctrl+Shift+Y"]
+
+[editor.keybindings.terminal.terminal]
+"hide.terminal.stop" = ["Alt+F11"]
 ```
 
-This replaces both F2 and Ctrl+S for Save, removes the Open shortcuts, and adds
-a shortcut to split the active buffer. Menu and status labels show the effective
-source bindings. Commands remain available through their menus. A project entry
-replaces the global entry for that command; omitted commands retain their
-inherited shortcuts. Start a new session to load changes. Recovery reloads the
-configuration; attaching to an already running session retains its bindings.
+Contexts are `source`, `sidebar`, `conversation`, `messages`, `debugger` and
+`terminal`. A `global` table supplies explicitly configured commands to all of
+those contexts; a context entry takes precedence over the same global command.
+Within each table a project entry replaces the global configuration's entry.
+An override replaces all shortcuts for its command; `[]` explicitly unbinds it.
+Omitted commands retain their inherited defaults. Menu and command status labels
+show the focused context's effective binding, including an empty label for an
+unbound command. Commands remain available through their menus.
 
-Use the canonical IDs in [the command catalog](../src/Hide/Commands.hs), with
-Ctrl, Alt and Shift modifiers and names such as F2, Insert, Delete, Left and
-PageDown. Unknown commands, malformed chords and conflicting bindings are
-reported at startup. To assign an occupied key, remove or replace its previous
-command's binding too. Ordinary text, menu mnemonics, window navigation,
-completion controls, Escape, F10 and Ctrl+] remain reserved.
+Source, conversation and debugger panes retain the standard command defaults.
+The sidebar additionally binds Up/Down and PageUp/PageDown to row movement,
+Enter to activate, Right to expand, Left to collapse, and F6 to return to source.
+Messages uses its own row/page movement, Enter to jump to source, and F6 to leave.
+PTY windows retain window/build shortcuts while ordinary keys, including Ctrl+C,
+Ctrl+Q and Ctrl+S, reach the process. Global Ctrl character chords are omitted from PTY maps, so a global Save override
+such as Ctrl+Shift+S still applies to the other contexts. A mixed global list
+retains its transferable PTY chords. Explicit terminal-context Ctrl character
+assignments fail validation.
 
-These settings apply to source buffers in terminal displays, including remote
-sessions. Put remote project settings on the remote host. PTY input, modal
-dialogs, chat and the WordStar profile retain their own controls. Native and
-browser shortcut remapping is the next stage of
-[configurable keybindings](https://github.com/ekmett/hide/issues/3); their menus
-and clipboard shortcuts still use the existing platform defaults.
+Use canonical IDs in [the command catalog](../src/Hide/Commands.hs), with Ctrl,
+Alt and Shift modifiers and names such as F2, Insert, Delete, Left and PageDown.
+Unknown contexts or commands, malformed chords and conflicts stop configuration
+loading. To assign an occupied key, remove or replace its previous command's
+binding too. Ordinary text, menu mnemonics, window navigation, completion controls,
+Escape, F10 and Ctrl+] remain reserved. Conversation Enter retains the configured
+Query/Steer and code-block submission behavior. Modal controls keep their own
+bindings and permission checks.
+
+Choose **Options > Reload terminal bindings** after editing TOML. Loading and
+validation run on the session worker; the existing map stays active until a valid
+replacement is ready. A failed reload reports its error and keeps that map.
+Changing the working directory while loading requires another reload. Recovery
+loads current configuration; attaching to a running session retains its map.
+
+**Options > Inspect terminal bindings** opens a read-only buffer containing every
+command's effective chords for the context focused when inspection was requested.
+Unbound commands appear as `[]`. Both operations have canonical IDs
+`hide.bindings.reload` and `hide.bindings.inspect` and can themselves be bound.
+Agents cannot request a reload. Put remote project settings on the remote host.
+Source WordStar, native/browser accelerator and clipboard routing, and modal
+binding customization remain subsequent stages of
+[configurable keybindings](https://github.com/ekmett/hide/issues/3).
 
 ## Environment
 

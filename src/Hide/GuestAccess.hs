@@ -95,6 +95,7 @@ guestCommandAllowed cmd=case cmd of
   ChatInputOptions -> False
   AutocompleteCommand{} -> False
   SubmitChat{} -> False
+  ReloadBindings -> False
   AgentPermissions -> False
   AgentGuidance -> False
   OpenLink{} -> False
@@ -110,6 +111,7 @@ agentActionAllowed action=action `elem` ["compile","make","build-stop","run","ru
 guestEffectsAllowed :: [Effect] -> Bool
 guestEffectsAllowed=all allowed
   where
+    allowed ReloadKeyBindings{}=False
     allowed ReadGitDiff=False
     allowed AskGitCommit=False
     allowed WriteGitCommit{}=False
@@ -145,7 +147,7 @@ guestModalBlocked d=maybe False (protectedPurpose . purpose) (dialog d) || case 
 guestKeyboardAllowed :: Desktop -> Bool
 guestKeyboardAllowed d=not (guestModalBlocked d) && not (focusedPrivateField d) && (isJust (dialog d) || problemsFocused d || maybe False treeFocused (sideTree d) || maybe True (not . protectedBuffer d . bufferId) (activeWindow d))
 guestKeyAllowed :: Desktop -> V.Key -> [V.Modifier] -> Bool
-guestKeyAllowed d key mods=maybe True guestCommandAllowed (boundSourceCommand key mods d) && not (guestModalBlocked d) && (guestKeyboardAllowed d || navigation || fieldNavigation)
+guestKeyAllowed d key mods=maybe True guestCommandAllowed (boundKeyCommand key mods d) && not (guestModalBlocked d) && (guestKeyboardAllowed d || navigation || fieldNavigation)
   where
     fieldNavigation=isJust (dialog d) && key `elem` [V.KChar '\t',V.KBackTab,V.KEsc]
     navigation=dialog d==Nothing && (key==V.KFun 6 || key `elem` [V.KChar '\t',V.KBackTab] && any (`elem` mods) [V.MCtrl,V.MAlt] || V.MAlt `elem` mods && case key of V.KChar c -> c>='1' && c<='9'; _ -> False)
