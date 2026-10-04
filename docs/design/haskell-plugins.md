@@ -583,6 +583,21 @@ prepared ACP responses do. Plugins implementing tools are responsible for their
 output and declared resource dependencies; the host cannot infer secret origins
 inside arbitrary returned JSON.
 
+## Multiple displays and invited participants
+
+The [live-sharing proposal](live-sharing.md) extends this ownership model to
+independent terminal/native/browser displays and invited human participants.
+Session resources remain shared; focus, layout, selection and private drafts belong
+to views. Host-issued invocation contexts retain the authenticated participant,
+delegation and display identity across plugin work. Human peers do not become
+agent providers, and their input never inherits the host's authority.
+
+The host owns admission, policy and resource lifetimes. A sharing plugin contributes
+People, named conversations, suggestions, Follow and Ping through these existing
+command/window/tree contracts. All peer presentation, including semantic nodes and
+canvas resources, is filtered before transport by the same protected-content policy
+used for agent access. These remain proposed extensions, not current SDK behavior.
+
 ## Building our agent integration with this API
 
 The first-party proof should register these contributions:
