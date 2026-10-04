@@ -12,7 +12,7 @@ module Hide.PackageSources
 
 import qualified Data.ByteString as BS
 import Data.ByteString (ByteString)
-import Data.List (nub)
+import Data.Containers.ListUtils (nubOrd)
 import Data.Foldable (toList)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -39,9 +39,17 @@ data ComponentSources = ComponentSources
 -- resolved component with no directories uses Cabal's default current directory.
 data SourceGroup = SourceGroup
   { sourceDirectories :: [FilePath], sourceEntries :: [Source]
+  , sourceIncludeDirectories :: [FilePath]
   , sourceBuildable :: !Bool, sourceRunKind :: !RunKind }
-data Source = ModuleSource !Text !Bool | SignatureSource !Text | FileSource !FilePath
-  deriving (Eq,Show)
+-- | Modules and main-is paths are relative to the effective Haskell source
+-- directories; foreign files are package-relative. A detailed test's driver
+-- module is an entry point, distinct from its ordinary supporting modules.
+-- Virtual modules have no file. Include names use include directories; generated
+-- flags describe this node only and must be combined with selected branches.
+data Source = ModuleSource !Text !Bool | SignatureSource !Text | VirtualSource !Text
+  | IncludeSource !FilePath !Bool
+  | MainSource !FilePath | DriverSource !Text | PackageFileSource !FilePath
+  deriving (Eq,Ord,Show)
 -- | Unknown means this branch has no interface declaration. Executable interfaces
 -- may support direct Run/Debug; library-style tests require their test driver.
 data RunKind = NoRun | ExecutableRun | DriverRun | UnknownRun deriving (Eq,Show)
@@ -73,16 +81,22 @@ parsePackageSources bytes
     executableSources value=group ExecutableRun (file (getSymbolicPath (modulePath value))) (buildInfo value)
     testSources value=let (run,entries)=case testInterface value of
                            TestSuiteExeV10 _ path->(ExecutableRun,file (getSymbolicPath path))
-                           TestSuiteLibV09 _ name->(DriverRun,[moduleSource (testBuildInfo value) name])
+                           TestSuiteLibV09 _ name->(DriverRun,[DriverSource (T.pack (prettyShow name))])
                            TestSuiteUnsupported _->(UnknownRun,[])
                       in group run entries (testBuildInfo value)
     benchmarkSources value=let (run,entries)=case benchmarkInterface value of
                                 BenchmarkExeV10 _ path->(ExecutableRun,file (getSymbolicPath path))
                                 BenchmarkUnsupported _->(UnknownRun,[])
                            in group run entries (benchmarkBuildInfo value)
-    file path=[FileSource path | not (null path)]
-    moduleSource info name=ModuleSource (T.pack (prettyShow name)) (name `elem` autogenModules info)
+    file path=[MainSource path | not (null path)]
+    moduleSource info name
+      | name `elem` virtualModules info = VirtualSource (T.pack (prettyShow name))
+      | otherwise = ModuleSource (T.pack (prettyShow name)) (name `elem` autogenModules info)
     group run entries info=SourceGroup (map getSymbolicPath (hsSourceDirs info))
-      (nub (entries++map (moduleSource info) (otherModules info++autogenModules info)
-        ++map (FileSource . getSymbolicPath) (cSources info++cxxSources info++asmSources info++cmmSources info++jsSources info)))
+      (nubOrd (entries++map (moduleSource info) (otherModules info++autogenModules info++virtualModules info)
+        ++map (PackageFileSource . getSymbolicPath) (cSources info++cxxSources info++asmSources info++cmmSources info++jsSources info)
+        ++map (\path->IncludeSource path (path `elem` generatedIncludes))
+          (map getSymbolicPath (includes info)++generatedIncludes)))
+      (map getSymbolicPath (includeDirs info))
       (buildable info) run
+      where generatedIncludes=map getSymbolicPath (autogenIncludes info)
