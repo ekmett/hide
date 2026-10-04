@@ -19,6 +19,8 @@ import System.FilePath ((</>))
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.IO (hClose, openTempFile)
 import System.Timeout (timeout)
+import Hide.BufferDiffCommand (withBufferDiffCommands)
+import TypedBufferDiffsCheck (startDiffCall)
 import Hide.Buffer
 import Hide.MCPPermissions
 import Hide.Model
@@ -129,7 +131,7 @@ checks=do
   putStrLn "MCP permission checks passed"
 
 reviewChecks :: IO ()
-reviewChecks=bracket temporary removePathForcibly $ \directory ->
+reviewChecks=withBufferDiffCommands $ \commands->bracket temporary removePathForcibly $ \directory ->
   withPermissionsAt (directory </> "review.toml") fileTools $ \runtime -> do
     let core d _=pure (False,d)
         base=addDocument Nothing (newBuffer "old\n") (initialDesktop (100,32))
@@ -137,7 +139,7 @@ reviewChecks=bracket temporary removePathForcibly $ \directory ->
         patch="@@ -1 +1 @@\n-old\n+agent\n"
         revised="@@ -1 +1 @@\n-old\n+human λ\n"
         args=object ["bufferId" .= bid,"revision" .= (0::Int),"diff" .= (patch::T.Text)]
-        request d=permissionCall runtime (fileTool core) d "buffer_apply_diff" args
+        request d=startDiffCall commands runtime (pure (Right ())) d "buffer_apply_diff" args
         input event d=let (next,fx)=handleEvent event d in snd <$> policyEffects runtime core next fx
         key k mods=input (V.EvKey k mods)
         replace text d=key (V.KChar 'a') [V.MCtrl] d >>= input (V.EvPaste (TE.encodeUtf8 text))

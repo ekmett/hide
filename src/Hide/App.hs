@@ -46,6 +46,7 @@ import qualified Hide.AgentHub as AH
 import Hide.AgentAccess (resolveAgentAccess,resolveActiveAgentAccess)
 import Hide.AgentMCP (agentTools, agentToolNames, agentTool)
 import Hide.BufferReadCommand (withBufferReadCommands)
+import Hide.BufferDiffCommand (withBufferDiffCommands,bufferDiffTool)
 import Hide.EditorMCP (runEditorMCP, editorResponseOnly, rpcError, editorResponseWith, debugTools, builtinTools, builtinTool, readBufferTool)
 import Hide.RemoteEndpoint (sessionEndpoint)
 import Hide.Session
@@ -265,7 +266,7 @@ runEditor args = do
           mapM_ (setEnv "THC_EDIT_SESSION") daemon
           font<-Font.loadFont
           let specs=builtinTools++debugTools++chatTools++toolingTools++workspaceTools++fileTools++testsTools++historyTools++runtimeTools++gitTools++controlTools++environmentTools++clipboardTools++docsTools++[screenTool]
-          withPermissions (specs++agentTools) $ \permissions -> withBufferReadCommands $ \bufferCommands -> withDocsCommands $ \docsCommands -> withMenuCommands docsCommands $ \menuHost -> withConversationAt (startingDirectory protectedDesktop) $ \conversation -> withDebuggerConsoles (let (_,consoles,_)=conversationServices conversation in consoles) $ \debugger -> withTooling $ \tooling -> withGitOperations $ \gitOperations -> withReconciliation $ \reconciliation -> withProjectBrowser $ \projectBrowser -> withHighlighting $ \highlighting -> withKeybindings $ \keybindings -> withAutocomplete (startingDirectory protectedDesktop) $ \autocomplete -> do
+          withPermissions (specs++agentTools) $ \permissions -> withBufferReadCommands $ \bufferCommands -> withBufferDiffCommands $ \diffCommands -> withDocsCommands $ \docsCommands -> withMenuCommands docsCommands $ \menuHost -> withConversationAt (startingDirectory protectedDesktop) $ \conversation -> withDebuggerConsoles (let (_,consoles,_)=conversationServices conversation in consoles) $ \debugger -> withTooling $ \tooling -> withGitOperations $ \gitOperations -> withReconciliation $ \reconciliation -> withProjectBrowser $ \projectBrowser -> withHighlighting $ \highlighting -> withKeybindings $ \keybindings -> withAutocomplete (startingDirectory protectedDesktop) $ \autocomplete -> do
             contributions<-PluginMenu.menuSnapshot (menuContributions menuHost)
             let liveDesktop=protectedDesktop {contributedMenus=contributions,agentMenuRefs=menuAgentReferences menuHost,menusActive=True}
             exiting<-newIORef False
@@ -310,7 +311,7 @@ runEditor args = do
                       reject=pure (d,pure (Just (rpcError (fromMaybe Null (parseMaybe (withObject "request" (.: "id")) request)) (-32600) "Invalid or inactive agent connection.")))
                   let permitted callback current name parameters
                         | name=="read_buffer" = readBufferTool bufferCommands (bufferReader permissions currentCaller) current name parameters
-                        | name=="buffer_apply_diff" = permissionDiffCall permissions currentCaller current name parameters
+                        | name=="buffer_apply_diff" = bufferDiffTool diffCommands (bufferEditor permissions currentCaller) current name parameters
                         | otherwise = permissionCall permissions callback current name parameters
                       currentCaller=case token of
                         Nothing->pure (Right ())

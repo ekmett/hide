@@ -5,9 +5,11 @@
 -- Deleted provenance leaves remain retained but are invisible to live reads.
 -- Reads may outlive their source buffer; revocation cannot erase an already
 -- granted immutable read. Large reads and subsequent evaluation belong on a
--- worker. This module provides no mutable desktop, saving or edit submission.
+-- worker. Strict diff requests use a separate host-bound editor; no mutable
+-- desktop, saving or arbitrary prepared-edit grant is exposed.
 module Hide.Plugin.Buffer
-  ( BufferReader, captureBuffer, CapturedRead, capturedRef, capturedVersion, capturedContent
+  ( BufferEditor, applyBufferDiff, DiffResult, diffRevision, appliedDiff, userModified
+  , BufferReader, captureBuffer, CapturedRead, capturedRef, capturedVersion, capturedContent
   , capturedRedacted, capturedMetadata, BufferMetadata, bufferIdentifier, displayName, path, modified, editRevision
   , BufferRef, BufferRead, ContentVersion, CharOffset(..), ByteOffset(..), LineNumber(..)
   , TextRange(..), ByteRange(..), RangeError(..), BufferRepresentation(..)
@@ -17,7 +19,7 @@ module Hide.Plugin.Buffer
 import Data.ByteString (ByteString)
 import Data.Text (Text)
 import qualified Hide.Buffer as B
-import Hide.Plugin.BufferHost (BufferRef,ContentVersion,BufferReader,requestCapture,CapturedRead(..),BufferMetadata(..))
+import Hide.Plugin.BufferHost (BufferRef,ContentVersion,BufferReader,requestCapture,CapturedRead(..),BufferMetadata(..),BufferEditor,requestDiff,DiffResult(..))
 
 -- | Immutable content reference with no structural Eq/Show instance.
 type BufferRead = B.BufferContent
@@ -87,3 +89,12 @@ validRange size a z=if a<0 || z<a || z>size then Left InvalidRange else Right ()
 -- a terminal error. An already granted image remains usable after either closes.
 captureBuffer :: BufferReader -> BufferRef -> IO (Either Text CapturedRead)
 captureBuffer = requestCapture
+
+-- | Submit a strict unified diff against the exact version from an admitted read.
+-- Call on a worker, outside the session lock. Current actor, policy, target and
+-- privacy are checked at admission and adoption. Approval may edit the diff on
+-- the same ticket. Success is atomic, adds ordinary Undo and never saves/rebases.
+-- Cancellation and session closure terminally resolve this request; a stale
+-- version, including equal-revision replacement before admission, is rejected.
+applyBufferDiff :: BufferEditor -> BufferRef -> ContentVersion -> Text -> IO (Either Text DiffResult)
+applyBufferDiff = requestDiff

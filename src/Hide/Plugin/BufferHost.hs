@@ -8,6 +8,7 @@ module Hide.Plugin.BufferHost
   ( BufferRef, BufferNamespace, newBufferNamespace, bufferReference, referenceId
   , ContentVersion, captureRead, captureVersion, versionCurrent
   , BufferReader, newBufferReader, readerReference, requestCapture
+  , BufferEditor, newBufferEditor, editorReference, requestDiff, DiffResult(..)
   , CapturedRead(..), BufferMetadata(..) ) where
 
 import Control.Exception (evaluate)
@@ -84,3 +85,22 @@ data CapturedRead = CapturedRead
   { capturedRef :: !BufferRef, capturedVersion :: !ContentVersion
   , capturedContent :: BufferContent, capturedRedacted :: Bool
   , capturedMetadata :: !BufferMetadata }
+
+-- | Session/actor-bound strict-diff admission; no cached approval or Human call.
+data BufferEditor = BufferEditor BufferNamespace (BufferRef -> ContentVersion -> Text -> IO (Either Text DiffResult))
+
+-- | Host-only assembly over the fixed admission transport. The callback owns
+-- current policy, actor and target validation; constructing a handle grants none.
+newBufferEditor :: BufferNamespace -> (BufferRef -> ContentVersion -> Text -> IO (Either Text DiffResult)) -> BufferEditor
+newBufferEditor = BufferEditor
+
+-- | Host wire adapter: a reference alone confers no edit authority.
+editorReference :: BufferEditor -> Int -> BufferRef
+editorReference (BufferEditor namespace _) = bufferReference namespace
+
+-- | Submit on a worker; waiting for approval must remain outside session locks.
+requestDiff :: BufferEditor -> BufferRef -> ContentVersion -> Text -> IO (Either Text DiffResult)
+requestDiff (BufferEditor _ request) = request
+
+-- | Exact applied review and resulting revision. Success never saves the buffer.
+data DiffResult = DiffResult { diffRevision :: !Int, appliedDiff :: !Text, userModified :: !Bool }
