@@ -103,7 +103,7 @@ entry takes precedence over the same global command. Dialogs inherit only their
 editing/search actions, and omit chords owned by dialog controls.
 Within each table a project entry replaces the global configuration's entry.
 An override replaces all shortcuts for its command; `[]` explicitly unbinds it.
-Omitted commands retain their inherited defaults. Menu and command status labels
+Omitted commands retain their inherited defaults. Menu, context-menu and command status labels
 show the focused context's effective binding, including an empty label for an
 unbound command. Commands remain available through their menus.
 

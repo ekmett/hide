@@ -27,6 +27,7 @@ import Hide.Plugin.Command
 import qualified Hide.Plugin.Menu as Plugin
 import Hide.Links (prepareMarkdown)
 import Hide.Protocol
+import Hide.Render (snapshot)
 import Hide.RemoteWindow
 import Hide.Window (nativeCommands,nativeCommandsFor,nativeMenuEventFor)
 import MenuExtension
@@ -63,6 +64,15 @@ checks=bracket temporary removePathForcibly $ \root->withDocsCommands $ \docs->w
       configured=pane {nativeMac=True,videoMode=Just 3,keyBindings=profiles}
   check "registered Messages action uses its effective canonical binding label"
     (commandBindingKeys configured (RegisteredMenu reference False)==["Cmd+Shift+J"])
+  let configuredPopup=openContext MessagesContext 8 5 configured
+      contextRow d n=case contextMenu d of
+        Just (rect,_) -> T.lines (snapshot d) !! (top rect+1+n)
+        _ -> error "missing configured popup"
+      removed=configured {keyBindings=right (configuredBindings (M.singleton "macos" (M.singleton "messages" (M.singleton "hide.messages.go-to" []))))}
+  check "registered context row paints its effective Mac shortcut"
+    ("⇧⌘J" `T.isInfixOf` contextRow configuredPopup 0)
+  check "registered context row clears an explicitly unbound shortcut"
+    (not ("⇧⌘J" `T.isInfixOf` contextRow (openContext MessagesContext 8 5 removed) 0))
   check "remapped Messages key resolves the same captured contributed action"
     (snd (handleEvent (V.EvKey (V.KChar 'j') [V.MMeta,V.MShift]) configured)==requests)
   let invalidSelection=openContext MessagesContext 8 5 pane {problemsSelected=10}
