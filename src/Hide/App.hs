@@ -11,7 +11,7 @@ module Hide.App (main, demoDesktop, applyEffects) where
 import Control.Applicative ((<|>))
 import Data.Maybe (fromMaybe)
 import Hide.DocsMCP
-import Hide.GuestAccess (protectedPath, protectedBuffer)
+import Hide.GuestAccess (validateGuestEffects)
 import Hide.Autocomplete
 import qualified Hide.AutocompleteACP as CompletionACP
 import Hide.BufferView
@@ -690,21 +690,3 @@ packageDirectory start = search start
       entries<-either (const []) id <$> (try (listDirectory path) :: IO (Either IOException [FilePath]))
       if any ((==".cabal") . takeExtension) entries then pure path
         else if takeDirectory path==path then pure start else search (takeDirectory path)
-
--- The guest input route may produce filesystem effects through ordinary dialogs.
--- Check their resolved targets before any effect runs; human input uses core
--- directly and retains normal access to these files.
-validateGuestEffects :: Desktop -> [Effect] -> IO ()
-validateGuestEffects d = mapM_ check
-  where
-    denied=ioError (userError "Guest tools cannot access editor authority or session-key files.")
-    path name=canonicalizePath name >>= \resolved -> when (protectedPath d resolved) denied
-    buffer ident=when (protectedBuffer d ident) denied
-    check effect=case effect of
-      ReadPath name -> path name
-      JumpTo name _ _ -> path name
-      OpenChoice base input pattern -> let chosen=T.unpack (if T.null input then pattern else input) in path (if isAbsolute chosen then chosen else base </> chosen)
-      SaveDocument ident target _ -> buffer ident >> maybe (pure ()) path target
-      DownloadDocument ident -> buffer ident
-      ResolveConflict conflict _ -> buffer (conflictBuffer conflict)
-      _ -> pure ()

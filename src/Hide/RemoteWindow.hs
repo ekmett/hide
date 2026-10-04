@@ -104,7 +104,7 @@ parseRemoteFrame metadata rows = parseEither (withObject "frame metadata" $ \o -
       title<-o .: "title"; key<-o .: "key"; enabled<-o .: "enabled"
       unless (all (\text->not (T.null text) && T.length text<=128 && T.all (>= ' ') text) [ident,slot,group,title] &&
         T.length registry==48 && T.all (`elem` ("0123456789abcdef"::String)) registry &&
-        T.length key<=32 && T.all (>= ' ') key && generation>0 && generation<=9007199254740991 && slot `elem` [T.toLower name | (name,_,_)<-menus]) (fail "Invalid contributed menu entry")
+        T.length key<=32 && T.all (>= ' ') key && generation>0 && generation<=9007199254740991 && slot `elem` ("context.messages":[T.toLower name | (name,_,_)<-menus])) (fail "Invalid contributed menu entry")
       pure (RemoteContribution ident registry generation slot group order title key enabled)
     parseRow cols y value = do
       spans <- parseJSON value :: Parser [(Int,Int,Int,[Value])]

@@ -388,6 +388,24 @@ checks = do
       atSecond=addDocument (Just (FileState "/project/Other.hs" Nothing)) (newBuffer "other") nextMessageState
       (_,previousMessage)=handleEvent (V.EvKey (V.KFun 7) [V.MAlt]) atSecond
       (_,emptyNavigation)=runCommand NextMessage desktop
+  let messagePopup=openContext MessagesContext 10 5 messages {problemsVisible=True,problemsFocused=True}
+      messageInvoke=snd . handleEvent (V.EvKey V.KEnter [])
+  let emptyMessages=openContext MessagesContext 10 5 (setDiagnostics [] messagePopup)
+      hideIndex=fromMaybe (error "missing Hide Messages") (findIndex ((==Problems).snd) (contextItems MessagesContext))
+      hideEmpty=fst (handleEvent (V.EvKey V.KEnter []) emptyMessages {contextMenu=fmap (\(rect,_)->(rect,hideIndex)) (contextMenu emptyMessages)})
+  check "empty Messages popup can still hide its pane" (contextTargetCurrent emptyMessages && not (problemsVisible hideEmpty))
+  check "Messages popup retains selected diagnostic owner"
+    (messageInvoke messagePopup==[JumpTo "/project/Main.hs" 1 2])
+  check "Messages popup refuses changed selection instead of jumping elsewhere"
+    (null (messageInvoke messagePopup {problemsSelected=1}))
+  check "Messages popup refuses replaced/reordered diagnostics"
+    (null (messageInvoke (setDiagnostics [secondProblem,problem] messagePopup)))
+  check "Messages popup refuses equal-looking fresh diagnostic projections"
+    (null (messageInvoke (setDiagnostics (diagnostics messagePopup) messagePopup)))
+  check "Messages currentness never inspects diagnostic message or list payload"
+    (contextTargetCurrent messagePopup {diagnostics=error "popup currentness forced diagnostics"})
+  check "Messages popup refuses focus redirected to a source window"
+    (null (messageInvoke messagePopup {problemsFocused=False}))
   check "first message navigation visits selected diagnostic" (firstMessage==[JumpTo "/project/Main.hs" 1 2])
   check "message navigation goes across files in both directions" (nextMessage==[JumpTo "/project/Other.hs" 0 0] && previousMessage==[JumpTo "/project/Main.hs" 1 2])
   check "empty message navigation is disabled and harmless" (not (commandEnabled desktop NextMessage) && not (commandEnabled desktop PreviousMessage) && null emptyNavigation)

@@ -47,7 +47,7 @@ checks=do
   let modalMaps=either (error . show) id (configuredBindings (M.singleton "macos" (M.singleton "source" (M.singleton "hide.edit.copy" ["Cmd+Left"]))))
       sourceModal=mac {keyBindings=modalMaps}
       editorModal=prompt "Edit" Information [TextArea "Text" True (newBuffer "draft") (Selection 0 5) 0 0] sourceModal
-  check "native source accelerators cannot hijack modal movement" (nativeMenuShortcut sourceModal Copy==("\xf702",8) && nativeMenuShortcut editorModal Copy==("",0) && clipboard (fst (key V.KLeft [V.MMeta] editorModal))=="")
+  check "native source accelerators cannot hijack modal movement" (nativeMenuShortcut sourceModal Copy==("\xf702",8) && nativeMenuShortcut editorModal Copy==("c",8) && clipboard (fst (key V.KLeft [V.MMeta] editorModal))=="")
   check "modal Command clipboard remains owned by the field" (clipboard (fst (key (V.KChar 'c') [V.MMeta] editorModal))=="draft")
   check "modal Command Option Replace retains search ownership" (maybe False (\dg->case purpose dg of Searching True _->True; _->False) (dialog (fst (key (V.KChar 'f') [V.MMeta,V.MAlt] (fst (runCommand Find mac))))))
   check "remapping replaces every old binding" (bindingAction sourceKeys (V.KFun 2) []==Nothing && bindingAction sourceKeys (V.KChar 's') [V.MCtrl]==Nothing)
@@ -117,6 +117,39 @@ checks=do
   check "default PTY input and editor controls retain ownership" (all (\(k,m)->snd (key k m pty {keyBindings=M.empty})==snd (key k m (compiled pty)))
     [(V.KChar 'c',[V.MCtrl]),(V.KChar 'q',[V.MCtrl]),(V.KFun 1,[]),(V.KFun 4,[]),(V.KFun 7,[]),(V.KFun 9,[]),(V.KUp,[])])
   check "resolved reload retains guest origin policy" (not (guestKeyAllowed source {keyBindings=either (error . show) id (platformBindings TerminalPlatform (M.singleton "source" (M.singleton "hide.bindings.reload" ["Alt+F11"])))} (V.KFun 11) [V.MAlt]))
+  let starMaps=either (error . show) id (platformBindings TerminalPlatform (M.singleton "wordstar" (M.fromList [("hide.file.save",["Ctrl+Shift+J"]),("hide.edit.undo",[])])))
+      star=base {wordStar=True,keyBindings=starMaps}
+  check "WordStar Save remap dispatches its named command" (case snd (key (V.KChar 'j') [V.MCtrl,V.MShift] star) of [SaveDocument{}]->True; _->False)
+  check "WordStar unspecified Control keys retain their old inactive default" (clipboard (fst (key (V.KChar 'c') [V.MCtrl] (modifyActive (\w->w {selection=Selection 0 5}) star)))=="")
+  check "WordStar old named command chords stay removed" (noEffects (key (V.KFun 2) [] star) && activeText (fst (key (V.KChar 'z') [V.MCtrl] (fst (key (V.KChar '!' ) [] star))))=="!hello")
+  check "WordStar fixed movement retains its input owner" (maybe (-1) (caret . selection) (activeWindow (fst (key (V.KChar 'd') [V.MCtrl] star)))==1)
+  check "WordStar prefix block grammar retains its input owner" (prefix (fst (key (V.KChar 'k') [V.MCtrl] star))==Just 'k' && blockStart (fst (key (V.KChar 'b') [] (fst (key (V.KChar 'k') [V.MCtrl] star))))==Just (maybe (-1) bufferId (activeWindow star),0))
+  check "WordStar remap uses effective menu and status labels" (menuShortcut star (MenuItem "Save" "F2" Save)=="Ctrl+Shift+J" && any ((==" Ctrl+Shift+J Save").fst) (statusHints star))
+  check "WordStar owned grammar chords reject named overrides" (either (const True) (const False) (platformBindings TerminalPlatform (M.singleton "wordstar" (M.singleton "hide.file.save" ["Ctrl+K"]))))
+  let dialogMaps=either (error . show) id (configuredBindings (M.singleton "macos" (M.singleton "dialog" (M.fromList [("hide.edit.copy",["Cmd+Shift+J"]),("hide.edit.paste",["Cmd+Shift+K"]),("hide.edit.undo",["Cmd+Shift+L"])]))))
+      background=modifyActive (\w->w {selection=Selection 0 5}) base {nativeMac=True,videoMode=Just 3,keyBindings=dialogMaps}
+      editing=prompt "Edit" Information [TextArea "Text" True (newBuffer "draft") (Selection 0 5) 0 0] background
+      copiedDialog=fst (key (V.KChar 'j') [V.MMeta,V.MShift] editing)
+      pastedDialog=fst (key (V.KChar 'k') [V.MMeta,V.MShift] editing {clipboard="replacement"})
+      dialogText d=case dialog d of Just dg | TextArea _ _ b _ _ _:_<-fields dg -> contents b; _->error "missing text field"
+  check "dialog remapped Copy reads the focused field" (clipboard copiedDialog=="draft")
+  check "dialog remapped Paste changes only the focused field" (dialogText pastedDialog=="replacement" && activeText pastedDialog=="hello")
+  check "dialog remapped Undo applies directly to field history" (dialogText (fst (key (V.KChar 'l') [V.MMeta,V.MShift] pastedDialog))=="draft")
+  check "removed dialog clipboard keys do not replay defaults" (clipboard (fst (key (V.KChar 'c') [V.MMeta] editing))=="" && dialogText (fst (key (V.KChar 'v') [V.MMeta] editing {clipboard="replacement"}))=="draft")
+  check "dialog native accelerator follows its field's effective remap" (nativeMenuShortcut editing Copy==("j",9) && nativeMenuShortcut editing Save==("",0))
+  let guarded=prompt "Guard" Information [TextArea "Text" True (newBuffer "safe") (Selection 0 4) 0 0] background {buffers=error "modal clipboard forced background source"}
+  check "dialog focused accelerator projection does not force background buffers" (nativeMenuShortcut guarded Copy==("j",9) && lookup "Cmd+Shift+J" (focusedBindingChords guarded)==Just "hide.edit.copy")
+  check "dialog remapped clipboard does not force background buffers" (clipboard (fst (key (V.KChar 'j') [V.MMeta,V.MShift] guarded))=="safe" && dialogText (fst (key (V.KChar 'k') [V.MMeta,V.MShift] guarded {clipboard="replacement"}))=="replacement")
+  check "dialog remap cannot admit an agent-owned sensitive control" (not (guestKeyAllowed editing {dialog=fmap (\dg->dg {purpose=AgentDialog "settings"}) (dialog editing)} (V.KChar 'j') [V.MMeta,V.MShift]))
+  check "dialog labels and inspection use its effective context" (menuShortcut editing (MenuItem "Copy" "Cmd+C" Copy)=="⇧⌘J" && any ((==" ⇧⌘K Paste").fst) (statusHints editing) && case snd (runCommand InspectBindings editing) of [InspectKeyBindings (Just (MacPlatform,DialogKeys)) (Just table)]->bindingKeys table Copy==["Cmd+Shift+J"]; _->False)
+  check "dialog projection omits actions unavailable to its focused control" (null (focusedBindingChords editing {dialog=fmap (\dg->dg {focus=1}) (dialog editing)}) && not (any ((=="hide.file.save").snd) (focusedBindingChords editing)))
+  check "dialog cannot bind a background source command" (either (const True) (const False) (platformBindings TerminalPlatform (M.singleton "dialog" (M.singleton "hide.file.save" ["Ctrl+Shift+J"]))))
+  check "dialog field text and navigation retain their owner" (dialogText (fst (key (V.KChar 'ø') [] editing))=="ø" && dialog (fst (key V.KEsc [] editing))==Nothing)
+  let dialogDefaults=either (error . show) id (configuredBindings M.empty)
+      searchEditing=fst (runCommand Find background {keyBindings=dialogDefaults})
+  check "default dialog clipboard matches field-owned behavior" (clipboard (fst (key (V.KChar 'c') [V.MCtrl] editing {nativeMac=False,keyBindings=dialogDefaults}))=="draft")
+  check "unavailable dialog editing action retains Input button mnemonic ownership" (dialog (fst (key (V.KChar 'c') [V.MCtrl] searchEditing))==Nothing)
+  check "default dialog search retains permitted replacement action" (maybe False (\dg->case purpose dg of Searching True _->True; _->False) (dialog (fst (key (V.KChar 'f') [V.MMeta,V.MAlt] searchEditing))))
   reloadChecks
   putStrLn "keybinding checks passed"
 

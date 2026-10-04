@@ -93,7 +93,7 @@ any OS, use the Windows/Linux column when the terminal forwards those keys:
 **Options > Preferences** can show Mac modifier symbols in text-mode key labels;
 this changes their appearance, not the Control/Alt bindings. See
 [configuration](docs/configuration.md) for the saved setting. Commands can be
-replaced or unbound per terminal, graphical or macOS profile and source, sidebar,
+replaced or unbound per terminal, graphical or macOS profile and source, WordStar, dialog editing/search, sidebar,
 conversation, debugger, Messages or PTY context in TOML. The focused context supplies
 menu and status hints; **Options > Reload keybindings** adopts validated edits,
 and **Inspect keybindings** shows the effective map. See
@@ -104,7 +104,8 @@ the visible Copy/Paste button when clipboard permission or user activation has
 expired; browser Edit-menu actions also remain available. In a text terminal,
 Copy and Cut also request the system clipboard through OSC 52 where supported;
 paste external text through your terminal. **Options > Preferences** also offers
-WordStar keys.
+WordStar keys. WordStar movement/prefix/block grammar and dialog navigation
+retain their fixed input ownership.
 
 A star in a file's title means unsaved edits. Saving checks whether the disk
 file changed underneath you. Clean buffers reload external changes; when both

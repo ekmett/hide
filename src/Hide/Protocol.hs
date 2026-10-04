@@ -33,7 +33,6 @@ import qualified Hide.Model as Model
 import Hide.Buffer (dirty, newBuffer, newByteBuffer, selectedText)
 import Hide.Font
 import Hide.Render (renderDesktop)
-import qualified Hide.Bindings as Bindings
 import qualified Hide.Plugin.Menu as Plugin
 import Hide.Commands (commandIdentifier)
 import Hide.Unicode (displayOpsForPic, graphemes, clusterWidth)
@@ -120,7 +119,7 @@ applyGuestInput input d
   | otherwise = Right (updated,effects)
   where
     (updated,rawEffects)=applyInputUnchecked input d
-    effects=map (\effect->case effect of InvokeMenu reference _->InvokeMenu reference Plugin.AgentMenu; _->effect) rawEffects
+    effects=map (\effect->case effect of InvokeMenu reference _ target->InvokeMenu reference Plugin.AgentMenu target; _->effect) rawEffects
     allowed=not (guestModalBlocked d) && case input of
       Key name mods -> maybe False (\key->guestKeyAllowed d key mods) (inputKey name mods)
       Paste _ -> guestKeyboardAllowed d
@@ -263,7 +262,7 @@ frameMetadata cwd d =
    "terminal" .= (activeTerminal d/=Nothing && dialog d==Nothing && menu d==Nothing),
    "wordstar" .= wordStar d,
    "bindingsActive" .= (bindingInputAvailable d && maybe False (const True) (effectiveBindings d)),
-   "bindings" .= (if bindingInputAvailable d then maybe [] Bindings.bindingChords (effectiveBindings d) else []),
+   "bindings" .= (focusedBindingChords d),
    "menuState" .= [(ident,menuCommandAvailable d cmd) | (ident,cmd)<-protocolMenuCommands],
    "menuContributions" .= [object ["id" .= Plugin.menuName reference,"registry" .= Plugin.menuEpoch reference,"generation" .= Plugin.menuGeneration reference,
       "slot" .= Plugin.menuSlot item,"group" .= Plugin.menuGroup item,"order" .= Plugin.menuOrder item,

@@ -230,7 +230,7 @@ with tempfile.TemporaryDirectory(prefix='hide-session-') as directory:
         send(type='command', command='hide.edit.undo')
         expect_text(display, 'persistent unsaved λ')
         config = root/'thc.toml'
-        config.write_text('[editor.keybindings.macos.source]\n"hide.edit.copy" = ["Cmd+Shift+J"]\n"hide.edit.paste" = ["Cmd+Shift+L"]\n')
+        config.write_text('[editor.keybindings.macos.source]\n"hide.edit.copy" = ["Cmd+Shift+J"]\n"hide.edit.paste" = ["Cmd+Shift+L"]\n[editor.keybindings.macos.dialog]\n"hide.search.replace" = ["Cmd+Shift+Y"]\n')
         send(type='menu', command='hide.bindings.reload')
         if ('Cmd+Shift+L','hide.edit.paste') not in map(tuple,display.meta.get('bindings', [])):
             display.until('frame', lambda value: ['Cmd+Shift+L','hide.edit.paste'] in value.get('bindings', []))
@@ -239,10 +239,46 @@ with tempfile.TemporaryDirectory(prefix='hide-session-') as directory:
         display.until('paste-request')
         display.until('ack', lambda value: value['seq'] == serial)
         send(type='frontend', mode=3, mac=False)
+        send(type='frontend', mode=3, mac=True)
+        send(type='command', command='hide.search.find')
+        if ['Cmd+Shift+Y','hide.search.replace'] not in display.meta.get('bindings', []):
+            display.until('frame', lambda value: ['Cmd+Shift+Y','hide.search.replace'] in value.get('bindings', []))
+        assert ['Cmd+Shift+Y','hide.search.replace'] in display.meta.get('bindings', []), display.meta
+        assert not any(name == 'hide.edit.copy' for _, name in display.meta.get('bindings', [])), display.meta
+        send(type='key', key='f', mods=['cmd','alt'])
+        assert 'Replace with' not in display_text(display), display_text(display)
+        send(type='key', key='y', mods=['cmd','shift'])
+        expect_text(display, 'Replace with')
+        send(type='key', key='c', mods=['ctrl'])
+        if ['Cmd+Shift+J','hide.edit.copy'] not in display.meta.get('bindings', []):
+            display.until('frame', lambda value: ['Cmd+Shift+J','hide.edit.copy'] in value.get('bindings', []))
+        expect_text(display, 'persistent unsaved λ')
+        send(type='frontend', mode=3, mac=False)
+        print('Live dialog search remap, removed old chord and action-specific projection passed')
         print('Live macOS-profile clipboard remaps, removed accelerator, and worker reload across browser transport passed')
 
+    def wordstar_keys():
+        target=root/'WordStar.hs'
+        target.write_text('wordstar original\n')
+        (root/'thc.toml').write_text('[editor.keybindings.graphical.wordstar]\n"hide.file.save" = ["Ctrl+Shift+J"]\n')
+        process,ws,display=web(['--wordstar',str(target)])
+        expect_text(display, 'wordstar original')
+        assert ['Ctrl+Shift+J','hide.file.save'] in display.meta.get('bindings', []),display.meta
+        event(ws,display,1,type='command',command='hide.edit.select-all')
+        event(ws,display,2,type='paste',text='wordstar edit')
+        expect_text(display,'wordstar edit')
+        event(ws,display,3,type='key',key='F2',mods=[])
+        assert target.read_text()=='wordstar original\n',target.read_text()
+        event(ws,display,4,type='key',key='j',mods=['ctrl','shift'])
+        wait_for(lambda:target.read_text()=='wordstar edit')
+        event(ws,display,5,type='command',command='hide.app.quit')
+        display.until('closed')
+        process.wait(timeout=10)
+        print('Live WordStar named Save remap and removed F2 accelerator passed')
+
     try:
-        (root/'thc.toml').write_text('[editor.keybindings.macos.source]\n"hide.edit.copy" = ["Cmd+Shift+J"]\n"hide.edit.paste" = ["Cmd+Shift+K"]\n')
+        wordstar_keys()
+        (root/'thc.toml').write_text('[editor.keybindings.macos.source]\n"hide.edit.copy" = ["Cmd+Shift+J"]\n"hide.edit.paste" = ["Cmd+Shift+K"]\n[editor.keybindings.macos.dialog]\n"hide.search.replace" = ["Cmd+Shift+Y"]\n')
         process, ws, display = web([str(source)])
         expect_text(display, 'original')
         event(ws, display, 1, type='command', command='hide.edit.select-all')
@@ -318,9 +354,11 @@ with tempfile.TemporaryDirectory(prefix='hide-session-') as directory:
                 wire['send'](relay, dict(type='hello', version=1, session=ident,
                                         client=secrets.token_hex(24), ack=0, resume=True, args=[]))
                 wire['control'](relay, 'hello')
-                wire['send'](relay, dict(type='key', key='F2', seq=1))
+                wire['send'](relay, dict(type='key', key='Escape', seq=1))
                 wire['control'](relay, 'ack')
-                wire['send'](relay, dict(type='command', command='hide.app.quit', seq=2))
+                wire['send'](relay, dict(type='menu', command='hide.file.save', seq=2))
+                wire['control'](relay, 'ack')
+                wire['send'](relay, dict(type='command', command='hide.app.quit', seq=3))
                 wire['control'](relay, 'closed')
             finally:
                 relay.stdin.close()
