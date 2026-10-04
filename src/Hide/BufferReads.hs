@@ -9,15 +9,13 @@ import qualified Data.Map.Strict as M
 import Data.Text (Text)
 import Hide.GuestAccess (sanitizedBufferContent)
 import Hide.Model (Desktop(..),Document(..))
-import Hide.MCPPermissions (ReadAdmission,resolveReadReference)
-import Hide.Plugin.Buffer (BufferRef,BufferRead,ContentVersion)
+import Hide.BufferReadAdmission (ReadAdmission,resolveReadReference)
+import Hide.Plugin.BufferHost (BufferRef,CapturedRead(..),BufferMetadata(..))
 import Hide.Plugin.BufferHost (captureVersion)
-
--- | Already granted immutable content. Receipt expiry prevents future capture,
--- but cannot recall this image. Version describes its original source identity.
-data CapturedRead = CapturedRead
-  { capturedRef :: BufferRef, capturedVersion :: ContentVersion
-  , capturedContent :: BufferRead, capturedRedacted :: Bool }
+import Hide.Buffer (captureDirty,snapshotDirty,revision)
+import Hide.Files (filePath)
+import Data.Maybe (fromMaybe)
+import qualified Data.Text as T
 
 captureBuffer :: ReadAdmission -> Desktop -> BufferRef -> IO (Either Text CapturedRead)
 captureBuffer admission desktop reference=do
@@ -34,4 +32,12 @@ captureBuffer admission desktop reference=do
           -- Masked Conversation content must be built by the reply worker.
           image<-if documentLabel doc==Just "Conversation" then pure content else evaluate content
           version<-captureVersion (documentBuffer doc)
-          pure (Right (CapturedRead reference version image redacted))
+          changed<-evaluate (captureDirty (documentBuffer doc))
+          -- Resolve the selector without traversing the path. A labeled file
+          -- otherwise leaves Just(filePath fileState) retaining unrelated state.
+          sourcePath<-traverse (evaluate . filePath) (documentFile doc)
+          let metadata=BufferMetadata ident
+                (fromMaybe (maybe "Untitled" (T.pack . filePath) (documentFile doc)) (documentLabel doc))
+                sourcePath (snapshotDirty changed) (revision (documentBuffer doc))
+          bounded<-evaluate metadata
+          pure (Right (CapturedRead reference version image redacted bounded))

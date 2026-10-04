@@ -118,6 +118,8 @@ Typed arguments stay typed inside Haskell. The explicit codec supplies validatio
 and the external schema for configured actions or tool calls. Do not assume that
 an arbitrary `FromJSON` instance supplies an accurate JSON Schema.
 
+The following plugin-level signatures remain proposed, including binding
+registration. Implemented host menu APIs are documented in `Hide.Plugin.Menu`.
 Menus contribute entries to named slots and groups:
 
 ```haskell
@@ -140,8 +142,12 @@ Its action retains those identities. It must not rediscover whichever file is
 focused when the user eventually chooses the item. Expensive context enrichment
 runs separately; opening a menu does not start an HLS request synchronously.
 
-The command registry also supplies configurable bindings from the approved sidebar
-proposal. Defaults are overridden by TOML; an empty binding list unbinds a command.
+The proposed command registry will also supply configurable binding defaults.
+Current bindings compile against the built-in catalogue; arbitrary contributed
+commands do not yet have configurable registration. Use the implemented
+[keybinding schema](../configuration.md#keybindings) for current platform/context
+tables and command IDs. Defaults are overridden by TOML; an empty binding list
+unbinds a named command.
 Menus, help/status hints and native macOS menus show the effective binding, using
 the frontend's notation. Native menu events use command IDs with a registry epoch,
 not positions in a compiled list. A stale event cannot invoke a newly reused item.
