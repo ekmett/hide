@@ -47,7 +47,8 @@ agentNode=ident . A.agentIdText
 withAgentSidebar :: SidebarHost -> AgentRuntime -> (AgentSidebar -> IO a) -> IO a
 withAgentSidebar host runtime use=withRegistry $ \registry->do
   initial<-prepare
-  source<-newIORef (Snapshot 1 (parents M.empty initial) initial)
+  affected<-prepareParents M.empty initial
+  source<-newIORef (Snapshot 1 affected initial)
   pending<-newIORef (0,[])
   let command name title run=registerCommand registry (CommandDef name title hidden hidden run) >>= either (ioError . userError . show) pure
       human ctx value=if sidebarOrigin ctx==Menu.HumanMenu then pure (Right (SidebarAgent value)) else pure (Left (CommandRejected "Agent sidebar actions require the human."))
@@ -75,7 +76,9 @@ withAgentSidebar host runtime use=withRegistry $ \registry->do
         threadDelay 250000
         next<-prepare
         Snapshot revision _ previous<-readIORef source
-        if next==previous then pure () else writeIORef source (Snapshot (revision+1) (parents previous next) next)
+        if next==previous then pure () else do
+          affectedNodes<-prepareParents previous next
+          writeIORef source (Snapshot (revision+1) affectedNodes next)
   withAsync worker (const (use (AgentSidebar (P.treeReference provider) source pending)))
   where
     hidden=Codec Null (const (Left "Agent arguments are host-captured.")) (const Null)
@@ -84,6 +87,10 @@ withAgentSidebar host runtime use=withRegistry $ \registry->do
       let bounded=take 1024 summaries
       _<-evaluate (force [(A.agentIdText (A.summaryId summary),A.summaryName summary,fmap A.agentIdText (A.summaryParent summary),A.summaryStatus summary) | summary<-bounded])
       evaluate (M.fromList [(A.summaryId summary,summary) | summary<-bounded])
+    prepareParents previous next=do
+      let affectedNodes=parents previous next
+      _<-evaluate (force (map P.nodeIdText affectedNodes))
+      pure affectedNodes
     parents previous next=rootId:map agentNode (S.toList (S.fromList (mapMaybe A.summaryParent (M.elems previous++M.elems next))))
 
 -- | /O(1)/ revision admission, then at most four scoped invalidations. Provider
