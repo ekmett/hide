@@ -105,22 +105,20 @@ parseInput = withObject "browser event" $ \o -> do
     "modifiers" -> Modifiers <$> mods
     _ -> fail "Unknown event"
 
+-- | Ordinary human input is a pure model transition.
 applyInput :: WebInput -> Desktop -> (Desktop,[Effect])
-applyInput = applyInputFrom HumanInput
+applyInput = applyInputUnchecked
 
--- The host brackets each locked guest batch with begin/endGuestInput; origin
--- is never parsed from JSON. applyGuestInput also reports policy refusals.
-applyInputFrom :: InputOrigin -> WebInput -> Desktop -> (Desktop,[Effect])
-applyInputFrom HumanInput input d=applyInputUnchecked input d
-applyInputFrom GuestInput input d=either (const (d,[])) id (applyGuestInput input d)
-
--- | Apply host-attributed agent input with policy refusals. The host must bracket
+-- | Apply host-attributed agent input with policy refusals. The host brackets
 -- the whole batch with beginGuestInput/endGuestInput under desktop serialization.
-applyGuestInput :: WebInput -> Desktop -> Either T.Text (Desktop,[Effect])
+-- Identity validation is shallow IO and finishes before effects are dispatched.
+-- Origin is assigned by the host, never parsed from JSON.
+applyGuestInput :: WebInput -> Desktop -> IO (Either T.Text (Desktop,[Effect]))
 applyGuestInput input d
-  | not allowed = Left "This editor control requires human input."
-  | not (guestTransitionAllowed d updated effects) = Left "This editor action requires human input."
-  | otherwise = Right (updated,effects)
+  | not allowed = pure (Left "This editor control requires human input.")
+  | otherwise = do
+      valid<-guestTransitionAllowed d updated effects
+      pure (if valid then Right (updated,effects) else Left "This editor action requires human input.")
   where
     (updated,rawEffects)=applyInputUnchecked input d
     effects=map (\effect->case effect of InvokeMenu reference _ target->InvokeMenu reference Plugin.AgentMenu target; LoadTree request _->LoadTree request Plugin.AgentMenu; InvokeTree trace reference _->InvokeTree trace reference Plugin.AgentMenu; _->effect) rawEffects
