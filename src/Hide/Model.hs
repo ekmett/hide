@@ -533,11 +533,10 @@ windowDocument :: M.Map Int Document -> Window -> Maybe Document
 windowDocument documents w=bufferId w >>= (`M.lookup` documents)
 
 -- | Adopt worker-prepared content without creating an editable document.
-addPluginWindow :: PluginWindow.PreparedWindow -> Desktop -> Desktop
-addPluginWindow prepared d=d {windows=w:windows d,pluginWindows=M.insert reference prepared (pluginWindows d),nextId=i+1,
+addPluginWindow :: PluginWindow.WindowRef -> PluginWindow.PreparedWindow -> Desktop -> Desktop
+addPluginWindow reference prepared d=d {windows=w:windows d,pluginWindows=M.insert reference prepared (pluginWindows d),nextId=i+1,
   problemsFocused=False,sideTree=fmap (\tree->tree {treeFocused=False}) (sideTree d)}
   where
-    reference=PluginWindow.preparedWindowRef prepared
     i=nextId d
     (sw,sh)=screenSize d
     w=Window i (PluginContent reference) (fitWindow d (Rect 0 1 sw (sh-2))) (Selection 0 0) 0 0 Nothing False False
@@ -551,7 +550,7 @@ activePluginWindow d=do
     SourceContent _->Nothing
 
 applicationTitle :: FilePath -> Desktop -> Text
-applicationTitle _ d | Just view<-activePluginWindow d = "th "<>PluginWindow.preparedWindowTitle view
+applicationTitle _ d | Just _<-activePluginWindow d,Just w<-activeWindow d = "th "<>windowTitle d w
 applicationTitle cwd d = case activeDocument d of
   Nothing -> "th"
   Just doc | streamerMode d, Just file<-documentFile doc, any (equalFilePath (filePath file)) (guestPrivatePaths d) -> "th [private]"
@@ -606,7 +605,8 @@ editorWindowEntries d=[(windowId w,safeTitle (windowTitle d w),selected==Just (w
 -- | Host title projection never reads content or histories.
 windowTitle :: Desktop -> Window -> Text
 windowTitle d w=case windowContent w of
-  PluginContent reference->maybe "Unavailable plugin window" PluginWindow.preparedWindowTitle (M.lookup reference (pluginWindows d))
+  PluginContent reference | streamerMode d->"Private plugin window"
+                          | otherwise->maybe "Unavailable plugin window" PluginWindow.preparedWindowTitle (M.lookup reference (pluginWindows d))
   SourceContent bid->case M.lookup bid (buffers d) of
     Nothing->"Unavailable source"
     Just doc | streamerMode d,Just file<-documentFile doc,any (equalFilePath (filePath file)) (guestPrivatePaths d)->"Private buffer"
@@ -2386,8 +2386,10 @@ pluginKey key mods d | Just view<-activePluginWindow d,Just w<-activeWindow d =
       extend=V.MShift `elem` mods
       move target=pluginMoveTo extend target d
   in case key of
-    V.KLeft->move (max 0 (pos-1))
-    V.KRight->move (min (contentLength text) (pos+1))
+    V.KLeft->move (if pos==contentLineOffset text row then max 0 (pos-1)
+      else contentLineOffset text row+previousCharacter (contentLineAt text row) (pos-contentLineOffset text row))
+    V.KRight->move (if pos>=contentLineOffset text row+T.length (contentLineAt text row) then min (contentLength text) (pos+1)
+      else contentLineOffset text row+nextCharacter (contentLineAt text row) (pos-contentLineOffset text row))
     V.KUp->move (vertical (-1))
     V.KDown->move (vertical 1)
     V.KPageUp->move (vertical (negate (max 1 (height (bounds w)-2))))

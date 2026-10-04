@@ -561,7 +561,10 @@ single-line selected range; ordinary caret-only Input behavior is unchanged.
 ## Prepared plugin text windows
 
 `Hide.Plugin.Window.prepareTextWindow` and `prepareMarkdownWindow` prepare
-read-only content on a command's worker. A `MenuReply` can return `PreparedWindow`
+read-only content on a command's worker. `withWindowScope` bounds its publication
+lifetime. `openTextWindow` returns an opaque `WindowUpdate` for a new exact
+instance; `refreshTextWindow` publishes a later complete prepared presentation.
+A `MenuReply` can return `PreparedWindow`
 through the existing contributed-menu adapter. The host checks the exact menu
 registration and captured target before installing the result; plugins never
 receive a mutable Desktop or a rendering callback.
@@ -574,8 +577,13 @@ checked `windowDocument` lookup. Selection and copying operate on the prepared
 semantic text; source editing, Save and language tooling are unavailable there.
 
 The initial presentation is private to guests and masked by Streamer mode.
-Closing it removes the prepared content while preserving source documents.
-The complete scoped refresh, durable recovery and widget APIs remain tracked in
+The same adapter accepts `SidebarWindow` replies after existing sidebar action
+checks. Duplicate opens and stale refreshes are refused, and refresh retains host
+geometry and selection. Closing it removes the prepared content while preserving
+source documents; an escaped update cannot reopen the closed instance. Scope
+retirement revokes further publication. All plugin titles are masked in streamer
+mode, including application and Dock metadata.
+Durable recovery, retirement placeholders and richer widget APIs remain tracked in
 [#5](https://github.com/ekmett/hide/issues/5). Editable widgets and the broader
 `WindowDef` signatures in the design document remain proposed.
 The Debug sidebar uses the same scoped tree route as Files and Agents. Provider

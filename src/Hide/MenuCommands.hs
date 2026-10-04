@@ -33,6 +33,7 @@ import Hide.BufferView (BufferView(..))
 import Hide.Model hiding (menus)
 import qualified Hide.Model as Model
 import qualified Hide.Plugin.Window as PluginWindow
+import Hide.PluginWindowHost (adoptWindowUpdate)
 import Hide.Plugin.Command
 import qualified Hide.Plugin.Menu as Plugin
 
@@ -45,7 +46,7 @@ data MenuContext = MenuContext
 data NavigationInput = NavigationInput (FilePath,Int,Int) (Maybe OpenSource) (Maybe [FilePath])
 data OpenSource = OpenSource Int Int ContentVersion BufferContent
 data Navigation = Navigation FilePath Int Int (Maybe Document)
-data MenuReply = PreparedDocument LinkResult | PreparedNavigation Navigation | PreparedWindow PluginWindow.PreparedWindow
+data MenuReply = PreparedDocument LinkResult | PreparedNavigation Navigation | PreparedWindow PluginWindow.WindowUpdate
 
 data Pending = Pending Plugin.MenuRef (Maybe ContextTarget) MenuContext (Async (Either Plugin.MenuError MenuReply))
 data Publication = Publish Plugin.MenuItem | Withdraw Plugin.MenuRef
@@ -263,6 +264,6 @@ tickMenus host@(MenuHost menus _ _ ref) original=do
           if not live || not current then pure d {status="Menu result expired; invoke it again."} else case result of
             Left err->pure d {status="Menu action failed: "<>T.pack (displayException err)}
             Right (Left err)->pure d {status="Menu action failed: "<>T.pack (show err)}
-            Right (Right (PreparedWindow prepared))->pure (addPluginWindow prepared d)
+            Right (Right (PreparedWindow prepared))->adoptWindowUpdate (invocationOrigin context) prepared d
             Right (Right (PreparedDocument prepared))->pure (fst (applyLink prepared d))
             Right (Right (PreparedNavigation prepared))->adoptNavigation context prepared d
