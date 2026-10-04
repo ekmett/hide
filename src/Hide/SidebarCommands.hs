@@ -5,7 +5,7 @@
 module Hide.SidebarCommands
   ( SidebarHost, SidebarContext(..), SidebarReply(..), withSidebarCommands
   , sidebarRegistry, publishTreeFromHost, retireTreeFromHost, sidebarEffects
-  , tickSidebar, refreshTreeFromHost, initializeSidebar
+  , tickSidebar, refreshTreeFromHost, initializeSidebar, prepareSidebarFile
   ) where
 
 import Control.Concurrent.Async (Async,async,cancel,poll)
@@ -100,13 +100,11 @@ addProvider :: P.TreeProvider SidebarContext SidebarReply -> Sidebar -> Sidebar
 addProvider provider tree=let (info,action,actions)=metadata (P.treeRoot provider)
   in addRoot (P.treeReference provider) info action actions tree
 
--- Files is declared through precisely the public provider/action route.
-createFiles :: SidebarHost -> FilePath -> IO FilesProvider
-createFiles host root=do
-  let registry=sidebarRegistry host
-  rootId<-either (ioError . userError . T.unpack) pure (P.nodeId "root")
-  cache<-newIORef (M.singleton rootId root,M.singleton root rootId,1,M.empty)
-  open<-either (ioError . userError . show) pure =<< registerCommand registry (CommandDef "hide.sidebar.files.open" "Open file" codec codec $ \ctx path->case sidebarOpened ctx of
+-- | Prepare a captured file action on its worker. Reuse the existing buffer when
+-- its captured identity is still current; adoption performs that check. New reads
+-- recheck canonical privacy before preparing a document, never under the UI lock.
+prepareSidebarFile :: SidebarContext -> FilePath -> IO (Either CommandError SidebarReply)
+prepareSidebarFile ctx path=case sidebarOpened ctx of
     Just (captured,wid,bid,version) | captured==path->pure (Right (SidebarExisting path wid bid version))
     _->do
       resolved<-canonicalizePath path
@@ -118,7 +116,15 @@ createFiles host root=do
             Right (file,buffer)->do
               _<-evaluate (prepareBuffer buffer)
               doc<-evaluate (newDocument buffer (Just file))
-              pure (Right (SidebarDocument (filePath file) doc)))
+              pure (Right (SidebarDocument (filePath file) doc))
+
+-- Files is declared through precisely the public provider/action route.
+createFiles :: SidebarHost -> FilePath -> IO FilesProvider
+createFiles host root=do
+  let registry=sidebarRegistry host
+  rootId<-either (ioError . userError . T.unpack) pure (P.nodeId "root")
+  cache<-newIORef (M.singleton rootId root,M.singleton root rootId,1,M.empty)
+  open<-either (ioError . userError . show) pure =<< registerCommand registry (CommandDef "hide.sidebar.files.open" "Open file" codec codec prepareSidebarFile)
   provider<-either (ioError . userError . show) pure =<< P.registerTree registry "hide.sidebar.files"
     (P.NodeDef (P.NodeInfo rootId "Files" "" True (Just root)) Nothing [])
     (\ctx (P.ChildRequest ident cursor)->do
