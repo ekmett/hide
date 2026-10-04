@@ -9,6 +9,8 @@ import qualified Data.ByteString.Lazy as BL
 import qualified Data.Text as T
 import System.Directory (getTemporaryDirectory, removeFile)
 import System.IO
+import qualified Hide.Commands as Commands
+import Data.List (nub)
 import Hide.Protocol
 import Hide.Model
 import Hide.Buffer
@@ -32,6 +34,20 @@ checks = do
   let d=addDocument Nothing (newBuffer "λ\nhello") (initialDesktop (80,25))
       screens=map frameRows [d,insertText "world " d,d {screenSize=(100,30)}]
   let menu fields=parseEither parseInput (object (["type" .= ("menu"::T.Text)]++fields))
+  let canonical=map Commands.builtinIdentifier Commands.builtinCommands
+      aliases=concatMap (Commands.commandAliases . Commands.builtinAction) Commands.builtinCommands
+  check "advertised aliases fit legacy clients" (length protocolMenuCommands<=256)
+  check "command names and aliases are globally unambiguous" (length aliases==length (nub aliases))
+  check "canonical names do not depend on constructor spelling" (all (T.isPrefixOf "hide.") canonical)
+  forM_ protocolCommands $ \cmd -> case cmd of
+    Disabled{} -> check "separators expose no command" (null (Commands.commandAliases cmd))
+    _ -> do
+      check "every menu action has a stable identity" (Commands.commandIdentifier cmd/=Nothing)
+      forM_ (Commands.commandAliases cmd) $ \name ->
+        check "every advertised alias resolves to its exact action" (menu ["command" .= name]==Right (MenuCommand (Just cmd)))
+  check "parameterized command injection has no public name" (null (Commands.commandAliases (DebugCommand "unregistered")))
+  check "stable namespaced menu ID resolves independently of constructor spelling" (menu ["command" .= ("hide.file.new"::T.Text)]==Right (MenuCommand (Just New)))
+  check "parameterized commands use explicit namespaced IDs" (menu ["command" .= ("hide.debug.step-into"::T.Text)]==Right (MenuCommand (Just (DebugCommand "stepIn"))))
   check "named menu ignores a stale positional index" (menu ["command" .= ("New"::T.Text),"index" .= (999::Int)]==Right (MenuCommand (Just New)))
   check "unknown named menu is rejected" (either (const True) (const False) (menu ["command" .= ("future-command"::T.Text)]))
   check "legacy positional menus cannot execute a different command" (case menu ["index" .= (0::Int)] of Right input -> applyInput input d==(d,[]); _ -> False)

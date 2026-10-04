@@ -18,7 +18,7 @@ import Data.Aeson.Types (Parser, Pair, parseEither)
 import Data.Bits ((.|.), (.&.), shiftL, shiftR)
 import Data.Char (toLower)
 import Data.Foldable (toList)
-import Data.List (groupBy)
+import Data.List (groupBy, nub)
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.Map.Strict as M
 import qualified Data.Text as T
@@ -33,6 +33,7 @@ import qualified Hide.Model as Model
 import Hide.Buffer (dirty, newBuffer, newByteBuffer, selectedText)
 import Hide.Font
 import Hide.Render (renderDesktop)
+import Hide.Commands (commandAliases)
 import Hide.Unicode (displayOpsForPic, graphemes, clusterWidth)
 
 data WebInput = Key T.Text [V.Modifier] | Paste T.Text | Mouse T.Text Int Int Int Int [V.Modifier]
@@ -227,10 +228,10 @@ protocolVersion = 1
 protocolCommands :: [Command]
 protocolCommands = [cmd | (_,_,items)<-menus, MenuItem _ _ cmd<-items]
 
--- Constructor spellings are wire identifiers; new menu entries cannot shift
--- existing commands. Resolve only this whitelist, never arbitrary Read input.
+-- Advertise canonical names and frozen compatibility aliases. Only actions in
+-- the menu are remotely invocable through this route; no arbitrary Read input.
 protocolMenuCommands :: [(T.Text,Command)]
-protocolMenuCommands = [(T.pack (show cmd),cmd) | cmd<-protocolCommands]
+protocolMenuCommands = [(name,cmd) | cmd<-nub protocolCommands, name<-commandAliases cmd]
 
 editableDialogField :: Desktop -> Maybe Field
 editableDialogField d=case dialog d of
