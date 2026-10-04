@@ -6,9 +6,10 @@
 -- flatten documents. Adoption rechecks all targets and privacy before installing
 -- prepared edits; it preserves unrelated navigation and does not save files.
 --
--- Session events wait behind pending edit batches. A client that executed a
--- command is retired afterward because late applyEdit has no originating command
--- ID. Earlier accepted batches survive later failure and are reported as partial.
+-- Session events wait behind pending edit batches. Commands reuse the project
+-- client after their terminal response. Cancellation rejects further edits while
+-- awaiting that response; only an unresponsive transport is retired. Accepted
+-- batches survive later failure and are reported as partial.
 module Hide.Tooling (Tooling, toolingTool, toolingTools, toolingToolNames, withTooling, withToolingUsing, tickTooling, toolingEffects, completionItems, workspaceEdits, hoverText, diagnosticsCurrent) where
 
 import Hide.Sidebar (treeRoot,treeFocused)
@@ -41,7 +42,7 @@ import Hide.Model
 import qualified Hide.LSP as L
 
 type Target = (Int,Int,Int)
-data Pending = Pending LanguageAction Target FilePath (M.Map FilePath (Int,T.Text)) | ToolPending ToolQuery | CommandPending ToolQuery (Maybe T.Text)
+data Pending = Pending LanguageAction Target FilePath (M.Map FilePath (Int,T.Text)) | ToolPending ToolQuery | CommandPending ToolQuery (Maybe T.Text) | CancelledCommand Integer
 data ToolQuery = ToolQuery
   { queryName :: T.Text, queryTarget :: Target, queryPath :: FilePath, queryArguments :: Value
   , querySnapshot :: M.Map FilePath (Int,T.Text), queryDeadline :: Integer
@@ -246,6 +247,7 @@ startToolWith seed human t _ d name arguments = case parseEither parameters argu
       pure (if human then d {status=err} else d,pure (Left err))
     isTool (ToolPending _) = True
     isTool CommandPending{} = True
+    isTool CancelledCommand{} = True
     isTool _ = False
     parameters=withObject "HLS tool arguments" $ \o -> do
       unless (name `elem` toolingToolNames) (fail "Unknown HLS tool")
@@ -468,7 +470,7 @@ finishCodeAction t session@(Session client pending) query value d = do
           Just edit | edit/=Null->queueEdit t session (CommandPrelude query command arguments) (querySnapshot query) edit d
           _->executePreparedCommand t session query command arguments d
       _->queueEdit t session (ToolEdit query) (querySnapshot query) (fromMaybe Null (member "edit" value)) d
-  where isCommand CommandPending{}=True; isCommand _=False
+  where isCommand CommandPending{}=True; isCommand CancelledCommand{}=True; isCommand _=False
 
 ownerTarget :: EditOwner -> (Target,FilePath)
 ownerTarget (RenameEdit target path)=(target,path)
@@ -499,7 +501,7 @@ finishEditFailure request err d = case editOwner request of
   CommandBatch query execution ident->do
     let Session client pending=editSession request
     L.replyEdit client ident False (Just err)
-    modifyIORef' pending (M.adjust (const (CommandPending query (Just err))) execution)
+    modifyIORef' pending (M.adjust (\entry->case entry of CommandPending{}->CommandPending query (Just err); _->entry) execution)
     pure d
   owner->do
     let query=ownerQuery owner
@@ -538,7 +540,7 @@ queueEdit t session owner snapshot value d = mask_ $ do
         let Session client pending=session
             err="HLS edit source changed or became private."
         L.replyEdit client ident False (Just err)
-        modifyIORef' pending (M.adjust (const (CommandPending query (Just err))) execution)
+        modifyIORef' pending (M.adjust (\entry->case entry of CommandPending{}->CommandPending query (Just err); _->entry) execution)
         pure d
       _->completeTool (ownerQuery owner) (Left "HLS edit source changed or became private.") >> pure d
     Just stamp->do
@@ -644,7 +646,7 @@ executePreparedCommand t (Session client pending) query command arguments d = do
       Right ident->do
         modifyIORef' pending (M.insert ident (CommandPending query Nothing))
         pure d {status="Executing HLS code action..."}
-  where isCommand CommandPending{}=True; isCommand _=False
+  where isCommand CommandPending{}=True; isCommand CancelledCommand{}=True; isCommand _=False
 
 sourceDocuments :: Desktop -> [(Int,FilePath,Int,T.Text)]
 sourceDocuments d = [(bid,filePath f,revision b,contents b) | (bid,doc)<-M.toList (buffers d), documentLabel doc==Nothing, textBuffer (documentBuffer doc),
@@ -928,15 +930,15 @@ finishPreparationResult t d = do
                       pure d {status="Renaming symbol..."}
                     _ -> pure d
 
--- applyEdit has no originating executeCommand ID. A client that executed one
--- command is never allowed to own another, including after successful replies.
+-- A cancelled request retains the command slot until its terminal response.
+-- Restart only when the server cannot settle it or the transport has failed.
 -- Cleanup is asynchronous, but remains owned by closeTooling.
-retireSession :: Bool -> Tooling -> FilePath -> Session -> IO ()
-retireSession drainReplies t root (Session client pending) = mask_ $ do
+retireSession :: Tooling -> FilePath -> Session -> IO ()
+retireSession t root (Session client pending) = mask_ $ do
   cancelEdits t ((==root) . editRoot) "HLS session retired"
   modifyIORef' (heldEvents t) (M.delete root)
   -- Register cleanup before removing the old session's ownership.
-  stopped<-if drainReplies then L.retireClientAfterReplies client else L.retireClient client
+  stopped<-L.retireClient client
   modifyIORef' (retiring t) (stopped:)
   modifyIORef' (retiringRoots t) (M.insert root stopped)
   readIORef pending >>= mapM_ (failPending "HLS command transport retired; retry on the fresh server.") . M.elems
@@ -969,24 +971,33 @@ tickTooling t core d = do
     collect desktop (_,Left _) = pure desktop
     collect desktop (root,Right session@(Session client pending)) = do
       requests<-readIORef pending
-      cancelled<-or <$> forM (M.elems requests) (\entry->case entry of CommandPending query _->not <$> toolActive query; _->pure False)
-      if cancelled then do
-        retireSession False t root session
-        applied<-or <$> forM (M.elems requests) (\entry->case entry of CommandPending query _->(>0) . fst <$> readTVarIO (queryProgress query); _->pure False)
-        pure desktop {status=if applied then "HLS command cancelled. Earlier applied edits remain; review buffers." else "HLS command cancelled; server restarted."}
-      else do
-        (live,updated)<-foldM (\(kept,view) (ident,entry) -> do
-          activeRequest<-case entry of ToolPending query -> toolActive query; _ -> pure True
-          if activeRequest then pure (M.insert ident entry kept,view) else do
-            result<-case entry of ToolPending query | queryHuman query -> atomically (tryReadTMVar (queryReply query)); _ -> pure Nothing
-            pure (kept,case result of Just (Left err)->view {status=err}; _->view)) (M.empty,desktop) (M.toList requests)
-        writeIORef pending live
-        held<-M.findWithDefault [] root <$> readIORef (heldEvents t)
-        busy<-editRootBusy t root
-        if busy then pure updated else do
-          events<-if null held then L.pollEvents client else pure held
-          modifyIORef' (heldEvents t) (M.delete root)
-          consume root session updated events
+      now<-toInteger <$> getMonotonicTimeNSec
+      settled<-forM (M.toList requests) $ \(ident,entry)->case entry of
+        CommandPending query _->do
+          activeRequest<-toolActive query
+          if activeRequest then pure (ident,entry) else do
+            L.cancelRequest client ident
+            pure (ident,CancelledCommand (now+2000000000))
+        _->pure (ident,entry)
+      let cancelledNow=or [True | ((_,CommandPending{}),(_,CancelledCommand{}))<-zip (M.toList requests) settled]
+          initial=if cancelledNow then desktop {status="HLS command cancelled. Earlier applied edits remain; review buffers."} else desktop
+      (live,updated)<-foldM (\(kept,view) (ident,entry) -> do
+        activeRequest<-case entry of ToolPending query -> toolActive query; _ -> pure True
+        if activeRequest then pure (M.insert ident entry kept,view) else do
+          result<-case entry of ToolPending query | queryHuman query -> atomically (tryReadTMVar (queryReply query)); _ -> pure Nothing
+          pure (kept,case result of Just (Left err)->view {status=err}; _->view)) (M.empty,initial) settled
+      writeIORef pending live
+      held<-M.findWithDefault [] root <$> readIORef (heldEvents t)
+      busy<-editRootBusy t root
+      received<-if busy then pure updated else do
+        events<-if null held then L.pollEvents client else pure held
+        modifyIORef' (heldEvents t) (M.delete root)
+        consume root session updated events
+      remainingRequests<-readIORef pending
+      if any (\entry->case entry of CancelledCommand deadline->now>=deadline; _->False) (M.elems remainingRequests) then do
+        retireSession t root session
+        pure received {status="HLS did not finish cancellation; server restarted. Earlier applied edits remain."}
+      else pure received
     consume _ _ desktop []=pure desktop
     consume root session desktop events@(event:rest)=do
       busy<-editRootBusy t root
@@ -1010,7 +1021,7 @@ tickTooling t core d = do
       requests<-readIORef pending
       mapM_ (failPending err) (M.elems requests)
       case [query | CommandPending query _<-M.elems requests] of
-        query:_->rootFor t (queryPath query) >>= \root->retireSession False t root session
+        query:_->rootFor t (queryPath query) >>= \root->retireSession t root session
         _->writeIORef pending M.empty
       pure desktop {status="HLS: "<>singleLine err,typeHint=""}
     receive _ desktop (L.Diagnostics path version values) = do
@@ -1032,8 +1043,8 @@ tickTooling t core d = do
                         | otherwise -> failure
           progress<-readTVarIO (queryProgress query)
           completeTool query (Right (commandResult query progress succeeded err))
-          rootFor t (queryPath query) >>= \root->retireSession activeRequest t root session
           pure desktop {status=if err==Nothing then "HLS command completed. Review and save changed buffers." else "HLS command failed. Earlier applied edits remain; review buffers."}
+        Just CancelledCommand{} -> pure desktop
         Just (ToolPending query) -> finishTool t session query response desktop
         Just (Pending action target path snapshot)
           | fmap fst (targetDocument target desktop)/=Just path -> pure desktop
