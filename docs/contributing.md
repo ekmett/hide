@@ -72,7 +72,7 @@ search are not yet registered commands.
 
 ## Immutable plugin buffer reads
 
-`Hide.Plugin.Buffer` provides opaque `BufferRead` and `ContentVersion` values.
+`Hide.Plugin.Buffer` provides opaque `BufferRef`, `BufferRead` and `ContentVersion` values.
 The host adapter `Hide.Plugin.BufferHost` captures immutable measured trees without
 retaining the separate saved baseline, Undo or Redo roots. Deleted provenance
 leaves in the live tree remain retained but are invisible to reads.
@@ -86,11 +86,30 @@ operations. Capture and version checks never flatten or compare contents.
 buffer with the same revision and contents invalidates the captured version.
 The identity check is conservative: replacing the immutable buffer to establish
 a new saved baseline also requires a fresh version. The live `read_buffer` MCP
-consumer uses these measured reads after host privacy filtering, and ACP source
-freshness tracking uses the same version check.
+consumer now captures through `Hide.BufferReads` during a narrowly admitted
+`MCPPermissions.permissionReadCall` callback, then formats measured reads on its
+reply worker. ACP source freshness tracking uses the same version check.
 
-This is an implementation slice, not a complete plugin SDK. Session-scoped
-`BufferRef` handles, activation scopes, checked buffer edits, menu contributions
+`BufferRef` combines the running session namespace with its once-allocated
+logical document ID. It survives ordinary edits and reload of that document;
+close/reopen and a new daemon/recovery lifetime cannot reuse the reference.
+`ContentVersion` separately identifies the immutable content captured from it.
+The namespace belongs to the existing Permissions session lifetime, so frontend
+detach does not create a new scope.
+
+A read receipt exists only after ordinary MCP policy dispatch or an accepted
+approval, and expires when its capture callback returns. Queued authenticated
+reads resolve their token and active actor again before capture; anonymous
+inspection remains guest input. Privacy comes from the existing GuestAccess
+owner, including private-buffer rejection and Conversation masks. Already granted
+immutable reads may outlive the receipt and cannot be recalled. Ordinary capture
+forces only the cheap measured-content constructor, releasing the separate
+Buffer/Undo thunk; Conversation redaction and tree construction stay on the
+reply worker. The receipt does not grant edit authority or create a public
+plugin CallContext.
+
+This is an implementation slice, not a complete plugin SDK. Plugin
+activation/task scopes, public checked buffer edits, menu contributions
 and custom widget/window types remain tracked in
 [the delivery plan](https://github.com/ekmett/hide/issues/1).
 
@@ -113,7 +132,7 @@ result never rebases the proposed edits.
 
 These are host operations, not the public scoped plugin edit service. A caller
 must already own the session transition, admit the project/path/source baseline,
-and revalidate its task's admission. Session-scoped buffer references and plugin
+and revalidate its task's admission. Public edit admission, cancellation, approval-once continuations and plugin
 authority remain part of [the buffer service work](https://github.com/ekmett/hide/issues/4).
 
 ## Frontend command routing
