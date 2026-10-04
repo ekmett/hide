@@ -11,6 +11,8 @@ import qualified Data.Text as T
 import qualified Graphics.Vty as V
 import Data.List (findIndex)
 import System.Timeout (timeout)
+import Hide.Commands (configuredBindings)
+import qualified Data.Map.Strict as M
 import Hide.Buffer (contents)
 import Hide.DocsMCP
 import Hide.MenuCommands
@@ -24,7 +26,7 @@ import Data.Aeson.Types (parseEither)
 import Hide.GuestAccess (beginGuestInput)
 import Hide.Protocol
 import Hide.RemoteWindow
-import Hide.Window (nativeCommands, nativeCommandsFor, nativeMenuEventFor)
+import Hide.Window (nativeCommands, nativeCommandsFor, nativeMenuEventFor, nativeMenuShortcut)
 #endif
 
 checks :: IO ()
@@ -69,6 +71,16 @@ runChecks=withDocsCommands $ \docs->withRegistry $ \registry->withMenuCommands d
   check "native old menu incarnation refuses extension event" (remoteNativeMenuInput frame 20 [11,nativeToken,19]==Nothing)
   check "local native catalogue retains exact registered action" (nativeMenuEventFor (nativeCommandsFor initial) 19 [11,nativeToken,19]==Just (contributionCommand initial (metadata !! extensionIndex)))
   check "native Help row carries its registered token and extension joins Help menu" (case lookup "Help" (remoteMenuLayout frame) of Just rows->any (\(title,_,token)->title=="Extension manual" && token==nativeToken) rows && any (\(title,_,token)->title=="Contents" && token>=length nativeCommands) rows; _->False)
+  let profiles=either (error . show) id (configuredBindings (M.singleton "macos" (M.singleton "source" (M.singleton "hide.help.contents" ["Cmd+Shift+J"]))))
+      configured=initial {nativeMac=True,videoMode=Just 3,keyBindings=profiles}
+      helpCommand=case [contributionCommand configured item | item<-metadata,Plugin.menuReference item==helpRef] of command:_->command; _->error "missing live help command"
+      configuredTransport=object (frameMetadata "/tmp" configured++["menuCommands" .= map fst protocolMenuCommands])
+  configuredFrame<-either error pure (parseRemoteFrame configuredTransport (replicate 25 (toJSON ([]::[Value]))))
+  check "configured keyboard Help invokes current registry lifetime" (snd (handleEvent (V.EvKey (V.KChar 'j') [V.MMeta,V.MShift]) configured)==effects)
+  check "local and remote native Help keep effective shortcut on the registered token" (nativeMenuShortcut configured helpCommand==("j",9) && case lookup "Help" (remoteMenuLayout configuredFrame) of Just rows->any (\(title,shortcut,token)->title=="Contents" && shortcut==("j",9) && token>=length nativeCommands) rows; _->False)
+  let modal=prompt "Edit" Information [Input "Text" "draft" 5] configured
+  modalFrame<-either error pure (parseRemoteFrame (object (frameMetadata "/tmp" modal)) (replicate 25 (toJSON ([]::[Value]))))
+  check "registered native Help has no source accelerator through a modal" (nativeMenuShortcut modal helpCommand==("",0) && all (\(_,rows)->all (\(_,shortcut,_)->shortcut==("",0)) rows) (remoteMenuLayout modalFrame))
   nativeInput<-either error pure (parseEither parseInput nativePacket)
   check "native emitted packet reaches same actual host invocation" (snd (applyInput nativeInput initial)==[InvokeMenu extension Plugin.HumanMenu])
   let (invoked,extensionEffects)=applyInput packet initial

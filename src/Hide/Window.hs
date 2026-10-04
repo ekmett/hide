@@ -5,20 +5,26 @@
 -- shaping for other text. The window thread owns SDL calls, event handling and
 -- presentation; render keys decide when a frame is needed. Exported FFI helpers
 -- also serve the remote native frontend rather than a second drawing ABI.
-module Hide.Window (runWindow, nativeMenuShortcut, nativeMenuEvent, nativeMenuEventFor, nativeMenuToken, nativeCommands, nativeCommandsFor
+module Hide.Window (runWindow, nativeMenuShortcut, nativeChordShortcut, nativeMenuEvent, nativeMenuEventFor, nativeMenuToken, nativeCommands, nativeCommandsFor
 #ifdef WITH_WINDOW
   , check, utf8, nativeMenus, nativeMenusFor, installNativeMenus
   , c_system_dark, c_open, c_mode, c_scale, c_title, c_close, c_size
   , c_begin, c_glyph, c_unicode, c_pixelate_unicode, c_cursor, c_cursor_blink
   , c_crt_filter, c_present, c_wait, c_wake, c_text, c_clipboard, c_set_clipboard
 #ifdef darwin_HOST_OS
-  , c_menu_enabled, c_menu_prepare, c_menu_generation
+  , c_menu_enabled, c_menu_prepare, c_menu_generation, c_menu_shortcut
 #endif
 #endif
   ) where
 import Hide.Frontend
 import Hide.Model
 import Hide.Commands (builtinCommands, builtinAction)
+import Hide.Bindings (readChord)
+import qualified Data.Text as Text
+import qualified Graphics.Vty as Keys
+import Data.Char (chr, toLower)
+import Data.Maybe (mapMaybe)
+import Data.Bits ((.|.))
 #ifdef WITH_WINDOW
 import Data.List (elemIndex)
 import Control.Exception (bracket_)
@@ -98,7 +104,8 @@ foreign import ccall unsafe "thc_menu_generation" c_menu_generation :: IO CInt
 foreign import ccall unsafe "thc_menu_clear" c_menu_clear :: CInt -> CInt -> CInt -> IO ()
 foreign import ccall unsafe "thc_menu_add" c_menu_add :: CString -> IO ()
 foreign import ccall unsafe "thc_menu_separator" c_menu_separator :: IO ()
-foreign import ccall unsafe "thc_menu_item" c_menu_item :: CString -> CString -> CInt -> CInt -> IO ()
+foreign import ccall unsafe "thc_menu_item" c_menu_item :: CString -> CString -> CInt -> CInt -> CInt -> IO ()
+foreign import ccall unsafe "thc_menu_shortcut" c_menu_shortcut :: CInt -> CString -> CInt -> IO ()
 foreign import ccall unsafe "thc_menu_enabled" c_menu_enabled :: CInt -> CInt -> IO ()
 #endif
 
@@ -120,21 +127,21 @@ nativeMenus=nativeMenusFor (initialDesktop (80,25))
 -- | Install exactly the menu rows painted by the host, assigning tokens from
 -- the retained command catalogue. Rebuilding stamps a fresh native incarnation.
 nativeMenusFor :: Desktop -> IO ()
-nativeMenusFor d=installNativeMenus [(title,[(name,nativeMenuShortcut cmd,number cmd) | MenuItem name _ cmd<-menuItemsFor d i]) | (i,(title,_,_))<-zip [0..] menus]
+nativeMenusFor d=installNativeMenus [(title,[(name,nativeMenuShortcut d cmd,number cmd) | MenuItem name _ cmd<-menuItemsFor d i]) | (i,(title,_,_))<-zip [0..] menus]
   where
     number Disabled{} = -1
     number cmd=maybe (error "Missing native command registration") id (elemIndex cmd (nativeCommandsFor d))
 
 -- | The remote frontend uses the same Cocoa installer with host-issued tokens.
-installNativeMenus :: [(T.Text,[(T.Text,String,Int)])] -> IO ()
+installNativeMenus :: [(T.Text,[(T.Text,(String,Int),Int)])] -> IO ()
 #ifdef darwin_HOST_OS
 installNativeMenus layout=do
   c_menu_clear (number About) (number EditorOptions) (number Quit)
   forM_ layout $ \(title,items)->do
     utf8 title c_menu_add
-    forM_ items $ \(name,key,token)->
+    forM_ items $ \(name,(key,mods),token)->
       if token<0 then c_menu_separator else unless (token `elem` map (fromIntegral . number) [About,EditorOptions,Quit]) $
-        utf8 name $ \namePtr->withCString key $ \keyPtr->c_menu_item namePtr keyPtr (fromIntegral token) 1
+        utf8 name $ \namePtr->withCString key $ \keyPtr->c_menu_item namePtr keyPtr (fromIntegral mods) (fromIntegral token) 1
   where number cmd=maybe (error "Missing native application command") fromIntegral (elemIndex cmd nativeCommands)
 #else
 installNativeMenus _ = pure ()
@@ -142,7 +149,9 @@ installNativeMenus _ = pure ()
 
 updateMenus :: Desktop -> IO ()
 #ifdef darwin_HOST_OS
-updateMenus d = forM_ (zip [0..] (nativeCommandsFor d)) $ \(i,cmd) ->
+updateMenus d = forM_ (zip [0..] (nativeCommandsFor d)) $ \(i,cmd) -> do
+  let (shortcut,modifiers)=nativeMenuShortcut d cmd
+  withCString shortcut $ \keyPtr -> c_menu_shortcut (fromIntegral i) keyPtr (fromIntegral modifiers)
   c_menu_enabled i (if menuCommandAvailable d cmd then 1 else 0)
 #else
 updateMenus _ = pure ()
@@ -236,10 +245,11 @@ runWindow backend scale effects tick initial = do
           else (resizeScreenMode (w,h) d) {videoMode=Just mode})
     applyWindowEffect d request = effects d [request]
     dispatch (1:key:mods:_) d
-      | Just direction <- zoomDirection key mods = changeScale (fromIntegral direction) d
-      | key == fromEnum 'v' && mods .&. 10 /= 0 && (not (wordStar d) || mods .&. 8 /= 0) = paste d
+      | not (activeTerminal d/=Nothing && mods .&. 15==2), Just direction <- zoomDirection key mods = changeScale (fromIntegral direction) d
       | otherwise = case decodeKey key mods of
           Nothing -> pure (d,[])
+          Just (V.EvKey k ms) | boundKeyCommand k ms d==Just Paste && commandEnabled d Paste -> paste d
+          Just (V.EvKey (V.KChar 'v') ms) | dialog d/=Nothing && any (`elem` ms) [V.MCtrl,V.MMeta] && dialogCommandAllowed Paste d -> paste d
           Just ev -> clipboardResult (copies ev d) d (handleEvent ev d)
     dispatch (14:_) d = do
       path <- c_text >>= BS.packCString
@@ -287,6 +297,9 @@ runWindow backend scale effects tick initial = do
       Just (r,_) | inside r x y, y>top r, y<top r+height r-1 ->
         case drop (y-top r-1) (contextItems (contextKind d)) of (_,cmd):_ -> cmd `elem` [Copy,CopyAllMessages,CopyLocation]; _ -> False
       _ -> any (\(r,_,action) -> inside r x y && action `elem` [Left Copy,Left CopyAllMessages,Left CopyLocation]) (statusItemRects d)
+    copies (V.EvKey key ms) d | Just cmd<-boundKeyCommand key ms d = cmd `elem` [Copy,Cut,CopyAllMessages,CopyLocation]
+    copies (V.EvKey _ _) d | bindingInputAvailable d, Just _<-effectiveBindings d = False
+    copies (V.EvKey key ms) d | dialog d/=Nothing && any (`elem` ms) [V.MCtrl,V.MMeta] && key `elem` map V.KChar "cx" = True
     copies (V.EvKey key ms) d =
       (V.MCtrl `elem` ms && (not (wordStar d) || problemsFocused d) && key `elem` [V.KChar 'c',V.KChar 'x']) ||
       (key == V.KIns && V.MCtrl `elem` ms) || (key == V.KDel && V.MShift `elem` ms) ||
@@ -301,11 +314,25 @@ runWindow :: Backend -> Double -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> 
 runWindow _ _ _ _ _ = ioError (userError "Graphical support is not built. Install SDL3 and rebuild with: cabal build -fwindow")
 #endif
 
--- | Encode a native shortcut: uppercase denotes Shift and a leading ~ denotes Option.
-nativeMenuShortcut :: Command -> String
-nativeMenuShortcut cmd = case cmd of
-  New -> "n"; Open -> "o"; Save -> "s"; SaveAs -> "S"; Close -> "w"; Quit -> "q"
-  Undo -> "z"; Redo -> "Z"; Copy -> "c"; Cut -> "x"; Paste -> "v"; SelectAll -> "a"
-  Find -> "f"; Replace -> "~f"; FindNext -> "g"; FindPrevious -> "G"
-  EditorOptions -> ","
-  Conversation -> "C"; AgentNew -> "N"; _ -> ""
+-- | The native menu and raw input resolve the same focused prepared table.
+-- Empty bindings remove the accelerator; every additional chord remains raw input.
+nativeMenuShortcut :: Desktop -> Command -> (String,Int)
+nativeMenuShortcut d cmd
+  | bindingInputAvailable d = nativeChordShortcut (commandBindingKeys d cmd)
+  | otherwise = ("",0)
+
+-- | Cocoa key equivalents carry explicit SDL modifier bits, including Command.
+-- Function and navigation keys use Cocoa's documented Unicode key equivalents.
+nativeChordShortcut :: [Text.Text] -> (String,Int)
+nativeChordShortcut chords=case mapMaybe encode chords of value:_ -> value; [] -> ("",0)
+  where
+    encode chord=case readChord chord of
+      Left _->Nothing
+      Right (key,mods)->do
+        name<-case key of
+          Keys.KChar c->Just [toLower c]
+          Keys.KFun n | n>=1 && n<=24->Just [chr (0xf704+n-1)]
+          _->lookup key [(Keys.KEnter,"\r"),(Keys.KEsc,"\ESC"),(Keys.KBS,"\DEL"),(Keys.KDel,[chr 0xf728]),(Keys.KIns,[chr 0xf727]),
+            (Keys.KUp,[chr 0xf700]),(Keys.KDown,[chr 0xf701]),(Keys.KLeft,[chr 0xf702]),(Keys.KRight,[chr 0xf703]),
+            (Keys.KHome,[chr 0xf729]),(Keys.KEnd,[chr 0xf72b]),(Keys.KPageUp,[chr 0xf72c]),(Keys.KPageDown,[chr 0xf72d])]
+        pure (name,foldr (.|.) 0 [mask | (modifier,mask)<-[(Keys.MShift,1),(Keys.MCtrl,2),(Keys.MAlt,4),(Keys.MMeta,8)],modifier `elem` mods])

@@ -74,7 +74,7 @@ function send(value){
  if(['key','paste','command','upload','mouse'].includes(value.type)){pendingEdit=serial;guardLeave();}
  socket.send(JSON.stringify(value));
 }
-function mods(e){return [e.shiftKey?'shift':null,(e.ctrlKey||e.metaKey)?'ctrl':null,e.altKey&&!e.getModifierState?.('AltGraph')?'alt':null].filter(Boolean);}
+function mods(e){return [e.shiftKey?'shift':null,e.ctrlKey?'ctrl':null,e.metaKey?'cmd':null,e.altKey&&!e.getModifierState?.('AltGraph')?'alt':null].filter(Boolean);}
 function cellHeight(){return mode===259?8:16;}
 function metrics(){return [surface.width/cols,surface.height/lines];}
 function resize(){
@@ -154,7 +154,7 @@ async function systemClipboard(request){
    clipboardRequest=null;clipboardAction.hidden=true;input.focus({preventScroll:true});
  }catch(error){
    clipboardRequest=request;clipboardAction.textContent=request.type==='copy'?'Copy to clipboard':'Paste from clipboard';clipboardAction.hidden=false;
-   status.textContent='Clipboard access needs a click, or use the browser Copy/Paste shortcut.';
+   status.textContent='Clipboard access needs a click, or use the browser Edit menu.';
  }
 }
 clipboardAction.addEventListener('click',()=>{if(clipboardRequest)systemClipboard(clipboardRequest);});
@@ -297,33 +297,28 @@ window.addEventListener('keydown',e=>{
  if(composing||e.isComposing||e.key==='Process'||e.key==='Dead')return;
  if(['Control','Shift','Alt','Meta','CapsLock'].includes(e.key))return;
  const control=e.ctrlKey||e.metaKey;
- if(frame?.terminal&&e.ctrlKey&&!e.metaKey&&!e.shiftKey&&!e.altKey){
+ if(frame?.terminal&&e.ctrlKey&&!e.metaKey&&!e.altKey){
    e.preventDefault();send({type:'key',key:e.key,mods:mods(e)});return;
  }
- // Option+F produces ƒ on macOS; recognize the physical key for Replace.
- if(e.metaKey&&e.altKey&&e.code==='KeyF'){e.preventDefault();command('hide.search.replace');return;}
- // Keep native Hide/Reload shortcuts, and never consume plain PTY control keys above.
+ // Browser and OS reservations remain outside editor authority after PTY input.
  if(e.metaKey&&e.key.toLowerCase()==='h'||control&&!e.altKey&&e.key.toLowerCase()==='r')return;
- if(control&&e.shiftKey&&!e.altKey&&(!frame?.terminal||e.metaKey)&&['c','n'].includes(e.key.toLowerCase())){
-   e.preventDefault();command(e.key.toLowerCase()==='c'?'hide.agents.conversation':'hide.agents.new');return;
- }
- if(control&&['f','h','g','a','z','y'].includes(e.key.toLowerCase())&&(!frame?.wordstar||e.metaKey)){
-   e.preventDefault();const k=e.key.toLowerCase();
-   command(k==='h'||k==='f'&&e.altKey?'hide.search.replace':k==='f'?'hide.search.find':k==='g'?(e.shiftKey?'hide.search.previous':'hide.search.next'):k==='a'?'hide.edit.select-all':k==='y'||e.shiftKey?'hide.edit.redo':'hide.edit.undo');return;
- }
- if((control||e.altKey)&&['+','=','-','0'].includes(e.key)){
+ if((e.ctrlKey||e.altKey&&!e.metaKey)&&['+','=','-','0'].includes(e.key)){
    e.preventDefault();scale=e.key==='0'?initialScale:Math.max(1,Math.min(8,scale+(e.key==='-'?-0.125:0.125)));tiles.clear();resize();return;
  }
- // Native clipboard events retain browser permission/user-activation semantics.
- if(control&&['c','x','v'].includes(e.key.toLowerCase())&&(!frame?.wordstar||e.metaKey))return;
  if(e.getModifierState('AltGraph'))return;
- // Command owns these shortcuts on macOS; Option retains composed text.
- if(e.metaKey&&!e.ctrlKey&&!e.altKey&&!e.shiftKey&&navigator.platform.includes('Mac')){
-   const shortcut={Backslash:'\\',BracketLeft:'[',BracketRight:']'}[e.code];
-   if(shortcut){e.preventDefault();cursorEpoch=performance.now();send({type:'key',key:shortcut,mods:['alt']});return;}
- }
- if(e.altKey&&!control&&navigator.platform.includes('Mac')&&e.key.length===1&&!/^[a-z0-9]$/i.test(e.key))return;
- e.preventDefault();cursorEpoch=performance.now();send({type:'key',key:e.key,mods:mods(e)});
+ // Option is text input; Command+Option chords use the unmodified key label.
+ if(e.altKey&&!control&&navigator.platform.includes('Mac')&&e.key.length===1)return;
+ const key=e.metaKey&&e.altKey&&/^Key[A-Z]$/.test(e.code)?e.code.slice(3).toLowerCase():e.key;
+ const names={ArrowUp:'Up',ArrowDown:'Down',ArrowLeft:'Left',ArrowRight:'Right',' ':'Space',Esc:'Escape'};
+ const chord=[e.ctrlKey?'Ctrl':null,e.metaKey?'Cmd':null,e.altKey?'Alt':null,e.shiftKey?'Shift':null,names[key]|| (key.length===1?key.toUpperCase():key)].filter(Boolean).join('+');
+ const action=frame?.bindings?.find(([candidate])=>candidate===chord)?.[1];
+ // Only a matching default clipboard action may delegate its keyboard gesture
+ // to the browser clipboard event. Unbinding/remapping suppresses that default.
+ const nativeClipboard={c:'hide.edit.copy',x:'hide.edit.cut',v:'hide.edit.paste'}[key.toLowerCase()];
+ if(control&&!e.altKey&&!e.shiftKey&&nativeClipboard&&action===nativeClipboard&&(!frame?.wordstar||e.metaKey))return;
+ // Modal editing keeps its platform clipboard shortcuts and authority checks.
+ if(control&&!e.altKey&&!e.shiftKey&&!frame?.bindingsActive&&nativeClipboard){e.preventDefault();command(nativeClipboard);return;}
+ e.preventDefault();cursorEpoch=performance.now();send({type:'key',key,mods:mods(e)});return;
 });
 window.addEventListener('keyup',e=>send({type:'modifiers',mods:mods(e)}));
 input.addEventListener('compositionstart',()=>{composing=true;});

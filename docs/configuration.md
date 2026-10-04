@@ -66,10 +66,12 @@ inherit; project `false` overrides global `true`. Project defaults apply at
 startup. The agent's `editor_settings.defaults` writer still edits the global
 file; it does not rewrite the project file.
 
-## Terminal keybindings
+## Keybindings
 
-Replace commands in a focused terminal context through the global configuration
-or a project's `thc.toml`:
+Replace commands through the global configuration or a project's `thc.toml`.
+Profiles are `terminal`, `graphical` (Linux/Windows native and browser), and
+`macos` (macOS native and browser). Every profile is prepared on startup/reload;
+changing attachments selects the focused profile and context immediately:
 
 ```toml
 [editor.keybindings.terminal.source]
@@ -85,6 +87,13 @@ or a project's `thc.toml`:
 
 [editor.keybindings.terminal.terminal]
 "hide.terminal.stop" = ["Alt+F11"]
+
+[editor.keybindings.macos.source]
+"hide.edit.copy" = ["Cmd+Shift+J"]
+"hide.edit.paste" = ["Cmd+Shift+K"]
+
+[editor.keybindings.graphical.source]
+"hide.file.save" = ["Ctrl+Shift+S"]
 ```
 
 Contexts are `source`, `sidebar`, `conversation`, `messages`, `debugger` and
@@ -107,27 +116,37 @@ retains its transferable PTY chords. Explicit terminal-context Ctrl character
 assignments fail validation.
 
 Use canonical IDs in [the command catalog](../src/Hide/Commands.hs), with Ctrl,
-Alt and Shift modifiers and names such as F2, Insert, Delete, Left and PageDown.
+Alt, Shift and graphical Cmd modifiers and names such as F2, Insert, Delete, Left and PageDown.
 Unknown contexts or commands, malformed chords and conflicts stop configuration
 loading. To assign an occupied key, remove or replace its previous command's
 binding too. Ordinary text, menu mnemonics, window navigation, completion controls,
 Escape, F10 and Ctrl+] remain reserved. Conversation Enter retains the configured
 Query/Steer and code-block submission behavior. Modal controls keep their own
-bindings and permission checks.
+bindings and permission checks; source accelerators are inactive while a modal
+owns input.
 
-Choose **Options > Reload terminal bindings** after editing TOML. Loading and
+Choose **Options > Reload keybindings** after editing TOML. Loading and
 validation run on the session worker; the existing map stays active until a valid
 replacement is ready. A failed reload reports its error and keeps that map.
 Changing the working directory while loading requires another reload. Recovery
 loads current configuration; attaching to a running session retains its map.
 
-**Options > Inspect terminal bindings** opens a read-only buffer containing every
+**Options > Inspect keybindings** opens a read-only buffer containing every
 command's effective chords for the context focused when inspection was requested.
 Unbound commands appear as `[]`. Both operations have canonical IDs
 `hide.bindings.reload` and `hide.bindings.inspect` and can themselves be bound.
 Agents cannot request a reload. Put remote project settings on the remote host.
-Source WordStar, native/browser accelerator and clipboard routing, and modal
-binding customization remain subsequent stages of
+Native menus display their effective accelerator with explicit modifiers; additional
+chords use the same input resolver. Copy/cut/paste remaps use the system clipboard.
+Browser keyboard clipboard defaults use browser clipboard events only while their
+configured action still matches. Browser Edit-menu clipboard actions remain semantic
+commands. Remapped clipboard requests run after the host resolves their command, so they may require the visible clipboard button when
+browser permissions or user activation prevent access. Browser/OS reserved shortcuts
+(such as Reload and macOS Hide) cannot be intercepted reliably. Plain macOS Option
+characters retain composed text input and cannot be assigned to commands; Cmd+Alt
+chords remain distinct. Local graphical scale keys remain reserved.
+
+Source WordStar and modal binding customization remain subsequent stages of
 [configurable keybindings](https://github.com/ekmett/hide/issues/3).
 
 ## Environment
