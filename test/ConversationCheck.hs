@@ -841,6 +841,8 @@ checks = (composerCodeChecks >>) $ bracket temporary removePathForcibly $ \root 
             sent row=any (\(_,style)->case style of BubbleText _ True _->True; _->False) row
             received row=any (\(_,style)->case style of BubbleText _ False _->True; _->False) row
             columnsOf row=let text=T.pack (map fst row) in displayColumn text (T.length text)
+        check "live conversation publication advances source-map revision"
+          (revision (documentBuffer doc)>maybe (-1) (revision . documentBuffer) (activeDocument answered))
         check "resize then Zoom anchors live user bubbles at the right window edge"
           (not (null (filter sent rows)) && all ((==available).columnsOf) (filter sent rows))
         check "resize then Zoom lets long live replies span the available window"

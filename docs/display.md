@@ -37,6 +37,27 @@ about once a second and keeps its last value while idle. It measures frontend
 drawing and submission time, including cursor-blink draws; browser GPU execution
 continues asynchronously.
 
+## Text styles
+
+Markdown headings and strong text use bold; emphasis uses italic. These traits
+travel with colors through native, browser and terminal frames. The bitmap font
+uses deterministic stroke/slant variants; system fallback fonts use their own
+bold and italic faces. Terminal output uses SGR, with the terminal font deciding
+the appearance.
+
+**Options > Preferences > Wide section titles** widens Markdown headings to two
+cells per grapheme and saves `wideSectionTitles` in `[editor.defaults]`. It is off
+by default. Native and browser displays stretch naturally narrow glyphs across
+those cells. The terminal uses fullwidth ASCII and ideographic spaces; other
+narrow graphemes keep their original text followed by padding. CJK and emoji that
+already occupy two cells stay two cells. Combining marks remain attached.
+
+Heading wrapping, selection, cursor movement and links use the same prepared
+layout in every frontend. Copy retains the original semantic text, without
+fullwidth substitutions or extra wrapping newlines. A resized or replaced view
+uses ordinary geometry until its matching layout is ready. Tiled terminal views
+never use DEC whole-row width or height escapes.
+
 ## Size and scale
 
 Native windows and the browser start in Mode 3, an 80-by-25 character grid.

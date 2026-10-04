@@ -210,7 +210,7 @@ desktopValueWith buffer baseline plugin desktop=do
     "conversationTarget" .= conversationTarget d,"conversationViews" .= views,
     "composer" .= composer,"composerSelection" .= selectionValue (composerSelection d),"composerFocused" .= composerFocused d,
     "directory" .= defaultDirectory d,"sidebar" .= fmap sidebarValue (sideTree d),"preferences" .= object
-      ["wordStar" .= wordStar d,"blinkCursor" .= blinkCursor d,"crtFilter" .= crtFilter d,"pixelateUnicode" .= pixelateUnicode d,
+      ["wordStar" .= wordStar d,"wideSectionTitles" .= wideSectionTitles d,"blinkCursor" .= blinkCursor d,"crtFilter" .= crtFilter d,"pixelateUnicode" .= pixelateUnicode d,
        "defaultBufferView" .= fromEnum (defaultBufferView d),"chatSubmit" .= chatSubmitName (chatSubmit d),"macKeySymbols" .= macKeySymbols d,"materialIcons" .= materialIcons d,"streamerMode" .= streamerMode d,"appearance" .= fromEnum (appearance d),"videoMode" .= videoMode d,
        "problemsVisible" .= problemsVisible d,"problemsHeight" .= problemsPreferredHeight d,"messagesNumber" .= messagesNumber d]])
   where d=rememberConversationView desktop
@@ -305,6 +305,7 @@ desktopParser baseline=withObject "checkpoint" $ \o->do
   directory<-o .: "directory" >>= traverse (checkedPath True)
   sidebar<-o .: "sidebar" >>= traverse sidebarParser
   prefs<-o .: "preferences"
+  wideTitles<-prefs .:? "wideSectionTitles" .!= False
   wordStar'<-prefs .: "wordStar"; blink<-prefs .: "blinkCursor"; crt<-prefs .: "crtFilter"
   pixelate<-prefs .: "pixelateUnicode"; icons<-prefs .: "materialIcons"; streamer<-prefs .: "streamerMode"
   defaultView<-prefs .:? "defaultBufferView" .!= 0 >>= boundedInt 0 (fromEnum (maxBound :: BufferView))
@@ -316,7 +317,7 @@ desktopParser baseline=withObject "checkpoint" $ \o->do
   problems<-prefs .: "problemsVisible"; preferred<-prefs .: "problemsHeight" >>= boundedInt 0 4096
   messages<-prefs .: "messagesNumber" >>= traverse positive
   pure (layoutBottomWindows (normalizeBottom baseline {dockedTerminals=M.fromList pinned,bottomTerminal=selectedTerminal,screenSize=size,buffers=documents,windows=views,pluginWindows=M.fromList [(reference,prepared) | w<-views,Just (reference,prepared)<-[M.lookup (windowId w) recovered]],retiredPluginWindows=S.fromList [reference | w<-views,PluginContent reference<-[windowContent w]],nextId=ident,composerBuffer=composer,composerSelection=composerSelection',composerFocused=composerFocused',
-    conversationTarget=selectedTarget,conversationViews=conversationViews',defaultDirectory=directory,sideTree=sidebar,wordStar=wordStar',blinkCursor=blink,crtFilter=crt,pixelateUnicode=pixelate,materialIcons=icons,streamerMode=streamer,
+    conversationTarget=selectedTarget,conversationViews=conversationViews',defaultDirectory=directory,sideTree=sidebar,wideSectionTitles=wideTitles,windowPresentations=M.empty,wordStar=wordStar',blinkCursor=blink,crtFilter=crt,pixelateUnicode=pixelate,materialIcons=icons,streamerMode=streamer,
     defaultBufferView=toEnum defaultView,chatSubmit=submit,macKeySymbols=macSymbols,appearance=toEnum look,videoMode=mode,problemsVisible=problems,problemsPreferredHeight=preferred,messagesNumber=messages,
     menu=Nothing,dialog=Nothing,drag=Nothing,dragOriginal=Nothing,clipboard="",clipboardCode=Nothing,clipboardExport=(0,Nothing),prefix=Nothing,blockStart=Nothing,
     status="Recovered session. Background processes ended; reconnect agents as needed.",lastFind="",branchStatus="",branchAdded=0,branchDeleted=0,branchRoot=Nothing,

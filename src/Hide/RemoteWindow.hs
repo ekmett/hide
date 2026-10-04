@@ -135,7 +135,7 @@ parseRemoteFrame metadata rows = parseEither (withObject "frame metadata" $ \o -
         Array fields | length fields==3 -> parseJSON value :: Parser (T.Text,Int,Bool)
         _ -> (\(text,w)->(text,w,False)) <$> (parseJSON value :: Parser (T.Text,Int))
       unless (not (T.null text) && T.length text<=4096 && not (T.any (\c -> c<' ' || c=='\DEL') text) && graphemes text==[text] && w>=0 && w<=2 &&
-        (if stretched then w==2 && clusterWidth text==1 else clusterWidth text==w)) (fail "Invalid grapheme")
+        (if stretched then w==2 && clusterWidth text<2 else clusterWidth text==w)) (fail "Invalid grapheme")
       pure [(text,w)]
 
 modifierNames :: Int -> [T.Text]

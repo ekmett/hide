@@ -5,7 +5,7 @@
 -- Unicode characters while display widths follow graphemes and editor overrides.
 -- Partially clipped/covered wide clusters become blanks. Terminal output advances
 -- explicitly past two-cell clusters even when the user's font draws them narrowly.
-module Hide.Unicode (graphemes, clusterWidth, textImage, wideTextImage, displayClusters, terminalSpan, flattenPicture, displayOpsForPic, updatePicture, terminalText, textInputChar) where
+module Hide.Unicode (graphemes, clusterWidth, textImage, wideTextImage, displayClusters, terminalProjection, terminalSpan, flattenPicture, displayOpsForPic, updatePicture, terminalText, textInputChar) where
 
 import Control.Monad (forM_, when)
 import Data.Char (isPrint)
@@ -182,10 +182,15 @@ terminalText move start text = foldl' emit (mempty,start) (graphemes text)
 -- ideographic spaces preserve two-cell geometry; other narrow graphemes use
 -- their original text plus a padding cell. Semantic text remains unchanged.
 terminalSpan :: (Int -> Write) -> Int -> Int -> T.Text -> (Write,Int)
-terminalSpan move start advance text=case displayClusters advance text of
-  [(g,2)] | clusterWidth g<2 -> terminalText move start (fullwidth g)
-  _->terminalText move start text
+terminalSpan move start advance text=terminalText move start (terminalProjection advance text)
+
+-- | Display-only fullwidth/padding projection, also used by plain grid snapshots.
+terminalProjection :: Int -> T.Text -> T.Text
+terminalProjection advance text=case displayClusters advance text of
+  [(g,2)] | clusterWidth g<2 -> fullwidth g
+  _->text
   where
-    fullwidth g | Just (base,rest)<-T.uncons g,base==' ' = "\x3000"<>rest
+    fullwidth g | clusterWidth g==0 = " "<>g<>" "
+                | Just (base,rest)<-T.uncons g,base==' ' = "\x3000"<>rest
                 | Just (base,rest)<-T.uncons g,base>='!' && base<='~' = T.cons (toEnum (fromEnum base+0xfee0)) rest
                 | otherwise=g<>" "

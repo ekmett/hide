@@ -15,6 +15,7 @@ import Data.IORef
 import System.Mem.StableName (StableName, makeStableName, eqStableName)
 import Data.List (find)
 import qualified Graphics.Vty as V
+import qualified Hide.TextLayout as TextLayout
 import Hide.Unicode (displayOpsForPic)
 import Graphics.Vty.Span (SpanOp(..))
 import qualified Data.Text as T
@@ -31,7 +32,7 @@ import Data.Time (formatTime, defaultTimeLocale)
 import Hide.Hex
 import Hide.Buffer
 import Hide.BufferView
-import Hide.Unicode (graphemes, clusterWidth, textImage, flattenPicture)
+import Hide.Unicode (graphemes, clusterWidth, textImage, flattenPicture, wideTextImage, displayClusters, terminalProjection)
 import Hide.GuestAccess (streamerReadableAt)
 import qualified Hide.Plugin.Menu as Plugin
 import Hide.Sidebar
@@ -68,6 +69,7 @@ data RenderState = RenderState
   , keyLastFind :: Text
   , keyBranchStatus :: Text
   , keyNativeMac :: Bool
+  , keyWideSectionTitles :: Bool, keyWindowPresentations :: [(Int,WindowPresentation)]
   , keyMacKeySymbols :: Bool
   , keyVideoMode :: Maybe Int
   , keyHoverTarget :: Maybe (Int,Int,Int)
@@ -220,6 +222,8 @@ renderKey original = do
         , keyLastFind=lastFind original
         , keyBranchStatus=branchStatus original
         , keyNativeMac=nativeMac original
+        , keyWideSectionTitles=wideSectionTitles original
+        , keyWindowPresentations=M.toList (windowPresentations original)
         , keyMacKeySymbols=macKeySymbols original
         , keyVideoMode=videoMode original
         , keyHoverTarget=hoverTarget original
@@ -365,7 +369,7 @@ renderDesktop d = flattenPicture (screenSize d) ((V.picForLayers (privacyLayers+
       Nothing | menu d/=Nothing || contextMenu d/=Nothing || problemsFocused d || maybe False treeFocused (sideTree d) -> V.NoCursor
       Nothing -> case (activeWindow d,activeDocument d) of
         (Just w,Just doc) | questionActive d,Just q<-chatQuestion d,questionChoice q==Nothing,Just offset<-chatInputOffset d -> let
-          (inputRow,column)=bufferLineColumn (documentBuffer doc) offset
+          (inputRow,column)=windowTextPosition d w (bufferContent (documentBuffer doc)) offset
           text=contents (questionBuffer q)
           shownWidth=max 1 (width (bounds w)-2)
           delta=displayColumn text (caret (questionSelection q))-displayColumn text (questionInputStart shownWidth q)
@@ -381,7 +385,7 @@ renderDesktop d = flattenPicture (screenSize d) ((V.picForLayers (privacyLayers+
           rect=composerRect d w; (marker,line)=composerLine b r
           in if height rect>0 && width rect>0 then V.Cursor (left rect+displayColumn line (max 0 (c-marker))-sc) (top rect+r-sr) else V.NoCursor
         (_,Just doc) | not (documentCursorVisible doc) -> V.NoCursor
-        (Just w,Just doc) -> let { b=documentBuffer doc; (r,c)=windowCursorCell b w; x=left (bounds w)+1+c-scrollColumn w; y=top (bounds w)+1+r-scrollRow w;
+        (Just w,Just doc) -> let { b=documentBuffer doc; (r,c)=windowCaretCell d doc w; x=left (bounds w)+1+c-scrollColumn w; y=top (bounds w)+1+r-scrollRow w;
                                                   liveRow=not (windowChangeView b w) || viewRightRow (viewRowAt (bufferView w) (bufferViewProjection b) r)/=Nothing }
                             in if liveRow && inside (Rect (left (bounds w)+1) (top (bounds w)+1) (width (bounds w)-2) (windowContentRows d doc w)) x y then V.Cursor x y else V.NoCursor
         _ -> V.NoCursor
@@ -393,7 +397,10 @@ castShadow size (Rect x y w h) below =
   place (x+2) (y+1) (V.crop w h (V.translate (negate (x+2)) (negate (y+1)) dimmed))
   where
     dimmed = V.vertCat [V.horizCat (map dim (toList spans)) | spans <- toList (displayOpsForPic (flattenPicture size (V.picForLayers below)) size)]
-    dim TextSpan{textSpanText=t} = label shadow (TL.toStrict t)
+    dim (TextSpan original advance _ text) = V.horizCat
+      [(if cells/=clusterWidth glyph then wideTextImage else textImage) paint glyph
+      | (glyph,cells)<-displayClusters advance (TL.toStrict text)]
+      where paint=shadow {V.attrStyle=V.attrStyle original}
     dim (Skip n) = V.charFill shadow ' ' n 1
     dim (RowEnd n) = V.charFill shadow ' ' n 1
 
@@ -419,6 +426,9 @@ pluginWindowLayers d active w prepared=
     title=" "<>T.take (columnOffset (windowTitle d w) (max 0 (ww-17))) (windowTitle d w)<>" "
     column=max 6 ((ww-keyLabelWidth title) `div` 2)
     body=V.vertCat [line n | n<-[scrollRow w..scrollRow w+max 0 (hh-3)]]
+    line n | Just layout<-windowPresentation d w = V.cropRight (max 0 (ww-2))
+      (V.translateX (negate (scrollColumn w)) (maybe V.emptyImage (styledLayoutImage (darkAppearance d) (const True) active (selection w)) (TextLayout.layoutRows layout Vec.!? n))
+        V.<|> V.charFill edit ' ' (max 0 (ww-2)) 1)
     line n=V.cropRight (max 0 (ww-2))
       (V.translateX (negate (scrollColumn w)) (styledImage (darkAppearance d) (const True) Nothing active (selection w)
         (contentLineOffset text n) (fromMaybe [] (rows Vec.!? n))) V.<|> V.charFill edit ' ' (max 0 (ww-2)) 1)
@@ -599,6 +609,9 @@ windowLayers d active w =
       _ -> V.charFill base ' ' columns 1
     selectable style | documentLabel doc==Just "Conversation" = case style of BubbleText{} -> True; _ -> False
                      | otherwise = True
+    renderLine n | Just layout<-windowPresentation d w = V.cropRight contentWidth
+      (V.translateX (negate (scrollColumn w)) (maybe V.emptyImage (styledLayoutImage (darkAppearance d) selectable active (selection w)) (TextLayout.layoutRows layout Vec.!? n))
+        V.<|> V.charFill base ' ' contentWidth 1)
     renderLine n | byteMode b && n>=documentRows doc w = V.charFill base ' ' contentWidth 1
     renderLine n | byteMode b = V.cropRight contentWidth (V.translateX (negate (scrollColumn w)) (V.horizCat
       [V.char (if active && maybe False highlighted offset then selected else if maybe False (\i -> let byte=T.index bytes (i-n*count) in byte<' ' || byte>'~') offset then attr gray blue else edit) ch | (ch,offset)<-hexRowChunk count (n*count) bytes]) V.<|> V.charFill base ' ' contentWidth 1)
@@ -635,7 +648,7 @@ styledImage dark selectable override active sel start chars = V.horizCat (expand
     expand col offset (g:gs) styled = image : expand (col+width) (offset+T.length g) gs (drop (T.length g) styled)
       where
         style=case styled of (_,s):_->s; _->Plain
-        normal=syntaxAttr style
+        normal=syntaxAttr dark style
         colored=maybe normal (\color->color {V.attrStyle=V.attrStyle normal}) override
         a=if active && selectable style && offset<hi && offset+T.length g>lo then colored `V.withForeColor` blue `V.withBackColor` gray else colored
         text | g=="\r"=""
@@ -643,20 +656,39 @@ styledImage dark selectable override active sel start chars = V.horizCat (expand
              | otherwise=T.map (\c -> if c<' ' || c=='\DEL' then '·' else c) g
         width=sum (map clusterWidth (graphemes text))
         image=label a text
-    syntaxAttr style=let (base,bold,italic)=fontTraits style in
+
+styledLayoutImage :: Bool -> (Style -> Bool) -> Bool -> Selection -> TextLayout.LayoutRow -> V.Image
+styledLayoutImage dark selectable active sel row=V.horizCat
+  [(if TextLayout.layoutAdvance glyph/=clusterWidth text && TextLayout.layoutAdvance glyph==2 then wideTextImage else textImage) paint text
+  | glyph<-Vec.toList (TextLayout.layoutGlyphs row)
+  , let text=TextLayout.layoutDisplayText glyph
+        style=TextLayout.layoutStyle glyph
+        normal=syntaxAttr dark style
+        paint=if active && selectable style && TextLayout.layoutStart glyph<hi && TextLayout.layoutEnd glyph>lo
+          then normal `V.withForeColor` blue `V.withBackColor` gray else normal]
+  where (lo,hi)=ordered sel
+
+-- One paint owner for ordinary and prepared semantic glyphs.
+syntaxAttr :: Bool -> Style -> V.Attr
+syntaxAttr dark style=paint style
+  where
+    paint style=let (base,bold,italic)=fontTraits style in
       foldl V.withStyle (baseAttr base) ([V.bold | bold]++[V.italic | italic])
-    baseAttr (LinkStyle _ style)=V.withStyle (syntaxAttr style) V.underline
-    baseAttr (ProseStyle (LinkStyle _ style))=V.withStyle (syntaxAttr (ProseStyle style)) V.underline
-    baseAttr (BubbleStyle outgoing (LinkStyle _ style))=V.withStyle (syntaxAttr (BubbleStyle outgoing style)) V.underline
-    baseAttr (ProseStyle (CodeStyle shell style))=syntaxAttr (CodeStyle shell style)
-    baseAttr (ProseStyle style) | dark = V.withForeColor (syntaxAttr style) (case style of Plain->white; _->foreground style)
+    baseAttr (SectionStyle _ style)=paint style
+    baseAttr (ProseStyle (SectionStyle _ style))=paint (ProseStyle style)
+    baseAttr (BubbleStyle outgoing (SectionStyle _ style))=paint (BubbleStyle outgoing style)
+    baseAttr (LinkStyle _ style)=V.withStyle (paint style) V.underline
+    baseAttr (ProseStyle (LinkStyle _ style))=V.withStyle (paint (ProseStyle style)) V.underline
+    baseAttr (BubbleStyle outgoing (LinkStyle _ style))=V.withStyle (paint (BubbleStyle outgoing style)) V.underline
+    baseAttr (ProseStyle (CodeStyle shell style))=paint (CodeStyle shell style)
+    baseAttr (ProseStyle style) | dark = V.withForeColor (paint style) (case style of Plain->white; _->foreground style)
     baseAttr (ProseStyle style)=attr (case style of Heading 1->white; Heading 2->blue; Heading _->V.RGBColor 170 0 170; Keyword->blue; Literal->V.RGBColor 0 85 0; Comment->V.RGBColor 85 85 85; _->black) scrollCyan
     baseAttr (CodeStyle shell style)
       | dark = attr (foreground style) black
       | shell = attr (lightForeground style) gray
       | otherwise = attr (foreground style) blue
-    baseAttr (BubbleStyle _ (CodeStyle shell style))=syntaxAttr (CodeStyle shell style)
-    baseAttr (BubbleText _ outgoing style)=syntaxAttr (BubbleStyle outgoing style)
+    baseAttr (BubbleStyle _ (CodeStyle shell style))=paint (CodeStyle shell style)
+    baseAttr (BubbleText _ outgoing style)=paint (BubbleStyle outgoing style)
     baseAttr (BubbleStyle outgoing style)=attr bubbleForeground (if outgoing then scrollCyan else gray)
       where bubbleForeground | outgoing = black
                        | otherwise = case style of
@@ -876,7 +908,7 @@ dialogLayers d dg =
 -- | Render a colorless character-grid snapshot for inspection and tests.
 snapshot :: Desktop -> Text
 snapshot d = T.unlines [T.concat (map plain (toList ops)) | ops<-toList (displayOpsForPic (renderDesktop d) (screenSize d))]
-  where plain TextSpan{textSpanText=t}=TL.toStrict t
+  where plain (TextSpan _ n _ t)=terminalProjection n (TL.toStrict t)
         plain (Skip n)=T.replicate n " "
         plain (RowEnd n)=T.replicate n " "
 
@@ -885,9 +917,11 @@ snapshotHtml :: Desktop -> Text
 snapshotHtml d = "<!doctype html><meta charset='utf-8'><title>Haskell</title><style>body{background:#111;margin:24px;display:grid;place-content:center;min-height:90vh}pre{background:#0000aa;font:min(20px,calc((100vw - 48px)/48))/1.066667 'Courier New',monospace;margin:0;box-shadow:0 0 0 2px #333;white-space:pre}span{font-weight:normal}</style><pre>" <> T.intercalate "\n" rows <> "</pre>"
   where
     rows=[T.concat (map spanHtml (toList ops)) | ops<-toList (displayOpsForPic (renderDesktop d) (screenSize d))]
-    spanHtml TextSpan{textSpanAttr=a,textSpanText=t}="<span style='color:"<>color (V.attrForeColor a)<>";background:"<>color (V.attrBackColor a)<>(if V.styleMask a .&. V.bold/=0 then ";font-weight:bold" else "")<>(if V.styleMask a .&. V.italic/=0 then ";font-style:italic" else "")<>"'>"<>escape (TL.toStrict t)<>"</span>"
+    spanHtml (TextSpan a n _ t)="<span style='color:"<>color (V.attrForeColor a)<>";background:"<>color (V.attrBackColor a)<>(if V.styleMask a .&. V.bold/=0 then ";font-weight:bold" else "")<>(if V.styleMask a .&. V.italic/=0 then ";font-style:italic" else "")<>"'>"<>body n (TL.toStrict t)<>"</span>"
     spanHtml (Skip n)=T.replicate n " "
     spanHtml (RowEnd n)=T.replicate n " "
+    body advance text | [(g,2)]<-displayClusters advance text,clusterWidth g<2 = "<span style='display:inline-block;width:2ch'><span style='display:inline-block;transform:scaleX(2);transform-origin:left'>"<>escape g<>"</span></span>"
+                      | otherwise=escape text
     color (V.SetTo (V.RGBColor r g b))="rgb("<>T.intercalate "," (map (T.pack.show) [r,g,b])<>")"
     color _="#aaa"
     escape=T.concatMap (\c -> case c of '&'->"&amp;"; '<'->"&lt;"; '>'->"&gt;"; _->T.singleton c)

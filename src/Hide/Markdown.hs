@@ -53,7 +53,7 @@ instance C.IsBlock Inline Blocks where
   thematicBreak = Blocks [Flow (paint Comment "───"), Gap]
   blockQuote blocks = Blocks [Indent "> " (trim blocks), Gap]
   codeBlock info source = Blocks [Code info source (codeStyles info source), Gap]
-  heading level content = let Inline chars = decorate BoldStyle (tint (Heading level) content) in Blocks [Flow (toList chars),Gap]
+  heading level content = let Inline chars = decorate (SectionStyle level) (decorate BoldStyle (tint (Heading level) content)) in Blocks [Flow (toList chars),Gap]
   rawBlock _ source = Blocks [Pre (paint Plain source),Gap]
   referenceLinkDefinition _ _ = mempty
   list kind spacing items = Blocks (concat (zipWith item [first..] items) ++ [Gap])

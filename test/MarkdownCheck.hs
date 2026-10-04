@@ -15,7 +15,7 @@ checks :: IO ()
 checks = do
   let text width = T.pack . map fst . renderMarkdown width
       styled = renderMarkdown 80 "# Heading\n\nSome *emphasis* and **strong** with `code`."
-  check "headings and inline markup render with styles" (text 80 "# Heading" == "Heading" && ('H',BoldStyle (Heading 1)) `elem` styled && ('e',ItalicStyle Constructor) `elem` styled && ('s',BoldStyle Keyword) `elem` styled && ('c',Literal) `elem` styled)
+  check "headings and inline markup render with styles" (text 80 "# Heading" == "Heading" && ('H',SectionStyle 1 (BoldStyle (Heading 1))) `elem` styled && ('e',ItalicStyle Constructor) `elem` styled && ('s',BoldStyle Keyword) `elem` styled && ('c',Literal) `elem` styled)
   check "links retain destination metadata and decode entities" (text 80 "[docs][ref] &amp; &#955;\n\n[ref]: https://example.test/a" == "docs & λ" && linkSpans (renderMarkdown 80 "[docs](https://example.test/a)")==[(0,4,"https://example.test/a")])
   check "escapes are parsed by CommonMark" (text 80 "\\*literal\\*" == "*literal*")
   check "ordered, nested lists and quotes render" ("3. one\n4. two\n   • nested" `T.isInfixOf` text 80 "3. one\n4. two\n   - nested" && text 80 "> quote" == "> quote")
@@ -38,7 +38,7 @@ checks = do
     ("┌" `T.isInfixOf` text 40 table && "│" `T.isInfixOf` text 40 table && "alpha" `T.isInfixOf` text 40 table && not ("**" `T.isInfixOf` text 40 table))
   forM_ [4,8,12,40] $ \width -> check "tables fit narrow windows"
     (all (\line -> displayColumn line (T.length line)<=width) (T.lines (text width table)))
-  check "heading levels retain hierarchy" (('S',BoldStyle (Heading 2)) `elem` renderMarkdown 40 "## Section" && ('T',BoldStyle (Heading 3)) `elem` renderMarkdown 40 "### Topic")
+  check "heading levels retain hierarchy" (('S',SectionStyle 2 (BoldStyle (Heading 2))) `elem` renderMarkdown 40 "## Section" && ('T',SectionStyle 3 (BoldStyle (Heading 3))) `elem` renderMarkdown 40 "### Topic")
   check "code backgrounds include padding" ((' ',CodeStyle False Plain) `elem` haskell)
   let shell=renderMarkdown 20 "```sh\necho hello\n```"
       shellLines=T.lines (T.pack (map fst shell))
