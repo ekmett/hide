@@ -287,19 +287,27 @@ or negotiate a checked handoff. Keep unaccepted typing as a local recoverable
 draft on disconnect or lost lease, never silently discard or resubmit it.
 
 Simultaneous writers in the same buffer are a subsequent slice: bounded ordered
-text operations, tested transformation over intervening edits and selective Undo.
+text operations and tested transformation over intervening edits.
 Do not add a general offline CRDT merely to get multiple displays. If this slice
 cannot safely transform an overlap or its history has expired, retain the proposal
 and show a conflict. Generic plugin/agent prepared diffs stay strict-version
 transactions; they are not silently rebased as though they were human typing.
 
-Undo is attributed. It must not rewind a shared buffer to an old whole-tree snapshot
-and erase another person's intervening work. Initially permit ordinary Undo only
-within an uninterrupted history segment owned by the caller; across a handoff,
-show a checked inverse diff for review. The concurrent-writer slice must implement
-selective inversion before advertising normal per-person Undo. The host retains
-an explicit review/revert operation for others' changes. Save checks disk conflicts
-and its own permission; granting edit does not silently grant file replacement.
+Undo and Redo are edits: both require the current buffer edit grant and writer
+lease, regardless of whether they arrive through keys, a menu, a plugin or MCP.
+Read-only participants cannot apply either. Each request checks the current buffer
+revision and lease generation before applying; reacquiring a lease cannot revive
+an earlier queued request.
+
+Keep one shared undo/redo history per buffer, across all its views and participants.
+An authorized editor may undo another person's edit; author metadata is useful
+for attribution, not a restriction on which entries can be undone. The host orders
+history operations with all other edits, so an accepted Undo acts on the current
+shared history, not a stale client snapshot. No per-person selective Undo is
+required. History previews follow the same buffer read policy as current contents;
+sharing a buffer includes its retained history. Use a clean copy when earlier
+versions must remain private. Save checks disk conflicts and its own permission;
+granting edit does not silently grant file replacement.
 
 A read-only participant can submit a versioned suggestion. The host sees its author
 and diff and applies it through the existing prepared-edit/Undo path. Acceptance
@@ -375,10 +383,10 @@ host and can be presented by both the collaboration plugin and Sessions sidebar.
    independent browsing, participant names, read-only follow and ping.
 3. **Conversation and suggestions.** Named group chat, private drafts, versioned
    suggestions, host review and attributed receipts.
-4. **Granted editing and tools.** Writer leases, safe Undo boundary, save/filesystem
+4. **Granted editing and tools.** Writer leases, revision-checked shared Undo/Redo, save/filesystem
    rights, terminal controller, explicit build/debug/agent delegation.
 5. **Public deployment and concurrent typing.** Harden and document the proxy/OIDC
-   deployment; independently deliver same-buffer transformation/selective Undo.
+   deployment; independently deliver same-buffer operation transformation.
    Neither is a reason to block useful private-network collaboration.
 
 Each slice must have a useful end-to-end workflow. Before admitting a peer, prove:
@@ -392,10 +400,10 @@ Each slice must have a useful end-to-end workflow. Before admitting a peer, prov
   cannot publish or commit after its authority is withdrawn.
 - Duplicate input, stale view IDs and dropped acknowledgements do not duplicate an
   edit/process launch or retarget a command. Slow peers cannot delay host typing.
-- A writer handoff preserves the other person's changes, unsent drafts and explicit
-  Undo boundaries. A → B → A without content changes rejects the first lease's
+- A writer handoff preserves shared history and unsent drafts; authorized Undo can
+  revert either writer's latest edit. A → B → A without content changes rejects the first lease's
   delayed mutations; disconnect releases the lease without losing its draft. Later transformation tests cover overlapping edits, Unicode,
-  deleted anchors and independent inverses before concurrent writers are enabled.
+  deleted anchors and ordered Undo/Redo before concurrent writers are enabled.
 - A peer cannot grant itself tools through menus, project configuration, crafted
   protocol fields, agent messages or restored approval state.
 - A terminal-output grant clearly includes existing visible/retained content.
