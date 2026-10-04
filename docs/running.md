@@ -159,10 +159,22 @@ produce an unbounded tree. Lazy references display their state without an expand
 action, so passive expansion does not force Haskell thunks. Painting, scrolling
 and repeated ticks use cached rows and do not fetch or evaluate values.
 
-Watches, source breakpoint/watch context actions, variable continuation pages and
+Right-click source text for **Toggle breakpoint** or **Add watch**. Clicking
+inside a selection preserves its expression; elsewhere Add watch prefills the
+identifier at the click. Both actions retain that source position and refuse a
+changed source rather than acting on a different caret.
+
+**Watches** is a persistent collapsible root beneath Debug, available without a
+stopped session. Right-click its root to add an expression, activate a watch to
+edit it, or use its context menu to remove it. Expressions survive session
+replacement; at most 128 watches with 4096 characters each are retained. Private
+source expressions stay masked in the tree and protected in the editor.
+Managing or expanding watches does not evaluate program code.
+
+Explicit stopped-frame evaluation, lazy Force, variable continuation pages and
 new sidebar screenshots remain in issue #8. Local-file **Go to source** still
 uses the existing synchronous debugger navigation path; embedded source uses the
-existing asynchronous DAP transport.
+asynchronous DAP transport and prepares its source document on a worker.
 
 Lazy values are displayed without forcing them; ordinary expansion refuses a
 lazy handle. hdb remains an external tool, with no GHC API dependency in the editor.

@@ -181,6 +181,7 @@ protectedPurpose p=case p of
   ChatInputSettings -> True
   AutocompleteDialog{} -> True
   DebugSourceWatchDialog{} -> True
+  DebuggerWatchDialog{} -> True
   DebugDialog action -> privateDebuggerAction action
   AgentDialog action -> not (agentActionAllowed action)
   DiscardDraft -> True
@@ -270,6 +271,7 @@ privateDialogField d dg field=privateSourceWatch d dg || privateField field || c
 privateSourceWatch :: Desktop -> Dialog -> Bool
 privateSourceWatch d dg=case purpose dg of
   DebugSourceWatchDialog _ bid origin captured->captured || protectedBuffer d bid || maybe False (protectedPath d) origin
+  DebuggerWatchDialog _ origin captured->captured || maybe False (protectedPath d) origin
   _->False
 
 focusedPrivateField :: Desktop -> Bool
