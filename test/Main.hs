@@ -69,6 +69,7 @@ import qualified HdbAcquisitionCheck
 import qualified DebuggerAcquisitionCheck
 import qualified CompilersCheck
 import qualified BuildCheck
+import qualified PackageSourcesCheck
 import qualified ProjectBrowserCheck
 import qualified RunCheck
 import qualified ConversationCheck
@@ -319,6 +320,7 @@ main = do
   check "help text cannot be edited" (activeText (insertText "x" help) == "Documentation")
   HelpCheck.checks
   BrowserCheck.checks
+  PackageSourcesCheck.checks
   ProjectBrowserCheck.checks
   FilesCheck.checks
   ExternalCheck.checks
