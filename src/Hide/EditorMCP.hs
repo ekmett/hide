@@ -25,12 +25,11 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.Text.IO as TIO
 import Paths_hide (getDataFileName)
-import Data.Char (intToDigit)
 import System.Environment (lookupEnv, getExecutablePath)
 import System.IO (Handle, stdin, stdout, hClose, hFlush, hSetBinaryMode)
 import Hide.Buffer
-import Hide.BufferReads (captureBuffer,CapturedRead(..))
-import Hide.MCPPermissions (ReadAdmission,readReference)
+import Hide.BufferReadCommand (BufferReadCommands,readPage,readBufferCommand,formatBufferRead)
+import Hide.Plugin.BufferHost (readerReference)
 import qualified Hide.Plugin.Buffer as P
 import Hide.Files (filePath)
 import Hide.GuestAccess (protectedBuffer, privateDocument, sanitizedBufferContent)
@@ -214,20 +213,16 @@ builtinTool desktop=tool
               | otherwise=fromMaybe (maybe "Untitled" (T.pack . filePath) (documentFile doc)) (documentLabel doc)
     bufferInfo = bufferMetadata desktop
 
--- | Capture a policy-admitted immutable read while the session is serialized.
--- The returned continuation formats the result after the desktop lock is released.
--- No admission is retained by that continuation; it only consumes granted data.
-readBufferTool :: ReadAdmission -> Desktop -> T.Text -> Value -> IO (Desktop,IO (Either T.Text Value))
-readBufferTool admission desktop _ args=case readBufferRequest desktop args of
+-- | Capture only target identity and page coordinates while serialized. The
+-- typed command queues/awaits a fresh policy decision on the returned worker;
+-- no Desktop, Document, receipt or full-text thunk is retained by the callback.
+readBufferTool :: BufferReadCommands -> P.BufferReader -> Desktop -> T.Text -> Value -> IO (Desktop,IO (Either T.Text Value))
+readBufferTool commands reader desktop _ args=case readBufferRequest desktop args of
   Left err->pure (desktop,pure (Left err))
-  Right (ident,doc,start,count,offset)->do
-    reference<-readReference admission ident
-    captured<-case reference of
-      Left err->pure (Left err)
-      Right ref->captureBuffer admission desktop ref
-    pure (desktop,pure $ do
-      image<-captured
-      formatBufferRead (bufferMetadata desktop ident doc) start count offset (capturedRedacted image) (capturedContent image))
+  Right (ident,_,start,count,offset)->case readPage start count offset of
+    Left err->pure (desktop,pure (Left err))
+    Right page->let reference=readerReference reader ident
+      in pure (desktop,readBufferCommand commands reader reference page)
 
 readBufferRequest :: Desktop -> Value -> Either T.Text (Int,Document,Int,Int,Int)
 readBufferRequest desktop args=do
@@ -243,29 +238,6 @@ bufferMetadata desktop ident doc=object ["bufferId" .= ident,"title" .= title,"p
   "modified" .= dirty (documentBuffer doc),"binary" .= byteMode (documentBuffer doc),"revision" .= revision (documentBuffer doc)]
   where title | privateDocument desktop doc="[private]"
               | otherwise=fromMaybe (maybe "Untitled" (T.pack . filePath) (documentFile doc)) (documentLabel doc)
-
-formatBufferRead :: Value -> Int -> Int -> Int -> Bool -> P.BufferRead -> Either T.Text Value
-formatBufferRead metadata start count offset redacted b
-  | P.representation b==P.ByteBuffer = do
-    let size=P.readLength b
-        a=min offset size
-        z=a+min 4096 (size-a)
-    bytes<-readResult (P.readBytes b (P.ByteRange (P.ByteOffset a) (P.ByteOffset z)))
-    Right (object ["buffer" .= metadata,"byteOffset" .= offset,"bytes" .= BS.length bytes,
-      "hex" .= T.pack (drop 1 (BS.foldr hex [] bytes)),"totalBytes" .= size])
-  | otherwise = do
-    total<-readResult (P.readLineCount b)
-    let available=if start>total then 0 else min count (total-start+1)
-    rows<-mapM (readResult . P.readLine b . P.LineNumber . (start-1+)) [0..available-1]
-    let text=T.intercalate "\n" rows
-        limited=T.take 131072 text
-    Right (object ["buffer" .= metadata,"startLine" .= start,"lineCount" .= available,
-      "totalLines" .= total,"text" .= limited,"redacted" .= redacted,"truncated" .= (T.length limited<T.length text)])
-  where
-    hex byte rest=let n=fromIntegral byte in ' ':intToDigit (n `div` 16):intToDigit (n `mod` 16):rest
-    readResult :: Either P.RangeError a -> Either T.Text a
-    readResult=either (Left . T.pack . show) Right
-
 
 -- | Dispatch with the desktop locked and return a reply continuation.
 -- Wait for that continuation only after releasing the desktop lock.

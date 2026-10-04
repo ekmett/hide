@@ -45,6 +45,7 @@ import qualified Hide.AgentRuntime as AR
 import qualified Hide.AgentHub as AH
 import Hide.AgentAccess (resolveAgentAccess,resolveActiveAgentAccess)
 import Hide.AgentMCP (agentTools, agentToolNames, agentTool)
+import Hide.BufferReadCommand (withBufferReadCommands)
 import Hide.EditorMCP (runEditorMCP, editorResponseOnly, rpcError, editorResponseWith, debugTools, builtinTools, builtinTool, readBufferTool)
 import Hide.RemoteEndpoint (sessionEndpoint)
 import Hide.Session
@@ -264,7 +265,7 @@ runEditor args = do
           mapM_ (setEnv "THC_EDIT_SESSION") daemon
           font<-Font.loadFont
           let specs=builtinTools++debugTools++chatTools++toolingTools++workspaceTools++fileTools++testsTools++historyTools++runtimeTools++gitTools++controlTools++environmentTools++clipboardTools++docsTools++[screenTool]
-          withPermissions (specs++agentTools) $ \permissions -> withDocsCommands $ \docsCommands -> withMenuCommands docsCommands $ \menuHost -> withConversationAt (startingDirectory protectedDesktop) $ \conversation -> withDebuggerConsoles (let (_,consoles,_)=conversationServices conversation in consoles) $ \debugger -> withTooling $ \tooling -> withGitOperations $ \gitOperations -> withReconciliation $ \reconciliation -> withProjectBrowser $ \projectBrowser -> withHighlighting $ \highlighting -> withKeybindings $ \keybindings -> withAutocomplete (startingDirectory protectedDesktop) $ \autocomplete -> do
+          withPermissions (specs++agentTools) $ \permissions -> withBufferReadCommands $ \bufferCommands -> withDocsCommands $ \docsCommands -> withMenuCommands docsCommands $ \menuHost -> withConversationAt (startingDirectory protectedDesktop) $ \conversation -> withDebuggerConsoles (let (_,consoles,_)=conversationServices conversation in consoles) $ \debugger -> withTooling $ \tooling -> withGitOperations $ \gitOperations -> withReconciliation $ \reconciliation -> withProjectBrowser $ \projectBrowser -> withHighlighting $ \highlighting -> withKeybindings $ \keybindings -> withAutocomplete (startingDirectory protectedDesktop) $ \autocomplete -> do
             contributions<-PluginMenu.menuSnapshot (menuContributions menuHost)
             let liveDesktop=protectedDesktop {contributedMenus=contributions,agentMenuRefs=menuAgentReferences menuHost,menusActive=True}
             exiting<-newIORef False
@@ -308,17 +309,12 @@ runEditor args = do
                       hub=AR.agentHub agents
                       reject=pure (d,pure (Just (rpcError (fromMaybe Null (parseMaybe (withObject "request" (.: "id")) request)) (-32600) "Invalid or inactive agent connection.")))
                   let permitted callback current name parameters
-                        | name=="read_buffer" = permissionReadCall permissions callbackRead current name parameters
+                        | name=="read_buffer" = readBufferTool bufferCommands (bufferReader permissions currentCaller) current name parameters
                         | name=="buffer_apply_diff" = permissionDiffCall permissions currentCaller current name parameters
                         | otherwise = permissionCall permissions callback current name parameters
                       currentCaller=case token of
                         Nothing->pure (Right ())
                         Just secret->fmap (() <$) (resolveActiveAgentAccess (AR.agentAccess agents) hub secret)
-                      callbackRead admission current name parameters=do
-                        actor<-currentCaller
-                        case actor of
-                          Left err->pure (current,pure (Left err))
-                          Right ()->readBufferTool admission current name parameters
                   response<-case token of
                     Nothing -> editorResponseWith specs (permitted inspectTool) d request
                     Just secret | secret==autocompleteToken autocomplete -> editorResponseOnly CompletionACP.completionTools (\current name parameters -> pure (current,autocompleteTool autocomplete name parameters)) d request

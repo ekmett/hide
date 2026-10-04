@@ -169,7 +169,7 @@ checks=bracket temporary removePathForcibly $ \root ->
       ensure "parent-owned child shows controlling-parent attribution" ("controlling parent" `T.isInfixOf` activeText liveView)
       ensure "live child title/dropdown use advertised child model choices" ("small" `T.isInfixOf` conversationTitle liveView && commandEnabled liveView (AgentChoose ""))
       changedChild<-ui "set-config" ["model","large"] liveView
-      configuredChild<-tickUntil (pure . any ((=="large").settingCurrent) . childAgentSettings) changedChild
+      configuredChild<-tickUntil (pure . (\d->not (agentReplying d) && any ((=="large").settingCurrent) (childAgentSettings d))) changedChild
       ensure "child configuration does not replace primary provider settings" (agentSettings configuredChild==agentSettings liveView && "large" `T.isInfixOf` conversationTitle configuredChild)
       waitingChild<-ui "send-draft" [] configuredChild {composerBuffer=newBuffer "steer-wait"}
       steerReady<-tickUntil (pure . (==Just (120,1000)) . childAgentContextUsage) waitingChild
