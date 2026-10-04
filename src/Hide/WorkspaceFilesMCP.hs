@@ -5,10 +5,11 @@
 -- results. Filesystem mutations validate canonical containment, exclude repository
 -- metadata/private paths, and reject dirty affected buffers. Unified diffs require
 -- exact context and coordinates: no fuzzy matching or external patch command.
--- Search is deferred; file mutations and buffer adoption run in the initial phase.
-module Hide.WorkspaceFilesMCP (fileTools, fileToolNames, fileTool, applyUnifiedDiff, applyPatch) where
+-- Search and strict diff preparation run on reply/permission workers. Diff adoption
+-- runs in the owning permission tick; filesystem mutations remain initial-phase IO.
+module Hide.WorkspaceFilesMCP (fileTools, fileToolNames, fileTool, applyUnifiedDiff, PatchSource, PreparedPatch, capturePatchSource, preparePatch, commitPatch) where
 
-import Control.Exception (IOException, bracket, try)
+import Control.Exception (IOException, bracket, try, evaluate)
 import Control.Monad (forM, unless, when)
 import Data.Aeson
 import Data.Aeson.Types (parseEither)
@@ -30,6 +31,7 @@ import System.Process
 import System.Timeout (timeout)
 import Text.Read (readMaybe)
 import Hide.Buffer
+import Hide.BufferEdits (PreparedEdit,prepareBufferEdit,commitEdits)
 import Hide.Build (resolveBuildRoot)
 import Hide.Files (FileState(..), saveFile)
 import Hide.GuestAccess (protectedBuffer, protectedPath, protectedPathParent)
@@ -59,7 +61,7 @@ fileTools=
 type Core = Desktop -> [Effect] -> IO (Bool,Desktop)
 type Reply = (Desktop,IO (Either Text Value))
 
-data Request = Search Text Bool Int Int | Patch Int Int Text | Files Text FilePath (Maybe FilePath)
+data Request = Search Text Bool Int Int | Files Text FilePath (Maybe FilePath)
 
 -- | Dispatch a validated workspace request; execute its returned search continuation
 -- outside the desktop lock. Filesystem operations may perform synchronous IO.
@@ -67,9 +69,6 @@ fileTool :: Core -> Desktop -> Text -> Value -> IO Reply
 fileTool core desktop name args=case parseEither parse args of
   Left err -> immediate desktop (Left (T.pack err))
   Right (Search query tracked offset count) -> pure (desktop,guardIO (searchWorkspace desktop query tracked offset count))
-  Right (Patch bid expected patch) -> case applyPatch desktop bid expected patch of
-    Left err -> immediate desktop (Left err)
-    Right updated -> immediate updated (Right (object ["bufferId" .= bid,"revision" .= maybe expected (revision.documentBuffer) (M.lookup bid (buffers updated)),"saved" .= False]))
   Right (Files operation path target) -> do
     result<-try (fileOperation core desktop operation path target)
     case result of Left (err::IOException) -> immediate desktop (Left (T.pack (show err)))
@@ -85,9 +84,6 @@ fileTool core desktop name args=case parseEither parse args of
         unless (not (T.null query) && T.length query<=256 && not (T.any (`elem` ['\0','\n','\r']) query)) (fail "query must be 1..256 characters on one line")
         unless (offset>=0 && offset<10000 && count>0 && count<=1000) (fail "offset must be 0..9999 and limit 1..1000")
         pure (Search query tracked offset count)
-      "buffer_apply_diff" -> do
-        exact o ["bufferId","revision","diff"]
-        Patch <$> o .: "bufferId" <*> o .: "revision" <*> o .: "diff"
       "workspace_files" -> do
         exact o ["operation","path","to"]
         operation<-o .: "operation"
@@ -182,20 +178,57 @@ fileOperation core desktop operation raw target=do
   pure (refreshed,Right (object ["operation" .= operation,"path" .= path,"to" .= target,"savedBuffers" .= False]))
   where rejectPrivate path=when (protectedPathParent desktop path) (ioError (userError "This path contains private editor configuration or session data"))
 
--- | Apply an exact diff to a public editable buffer at the expected revision.
--- Add one undo step, rebase window selections, and leave the file unsaved.
-applyPatch :: Desktop -> Int -> Int -> Text -> Either Text Desktop
-applyPatch desktop bid expected patch=do
+-- | A strict diff replacement prepared by a worker, with exact reply metadata.
+-- No constructor or structural Eq/Show is exposed; adoption uses BufferEdits.
+data PreparedPatch = PreparedPatch !Int Text !Bool PreparedEdit
+
+-- | Narrow original source retained by the request, not an entire Desktop.
+-- Each edited attempt uses this same identity/baseline; an equal-revision reload
+-- while the approval waits cannot turn the request into authority for new text.
+data PatchSource = PatchSource !Int !Buffer !(Maybe FileState)
+
+-- | Capture only original target metadata. Whole-text validation belongs to
+-- preparePatch's worker; current editability/privacy is checked again at adoption.
+capturePatchSource :: Desktop -> Value -> Either Text PatchSource
+capturePatchSource desktop args=do
+  (bid,expected,patch)<-patchArguments args
+  unless (T.length patch<=1048576) (Left "Diff exceeds 1 MiB characters")
   doc<-maybe (Left "Unknown bufferId") Right (M.lookup bid (buffers desktop))
   unless (not (protectedBuffer desktop bid)) (Left "This buffer contains private user or editor configuration data")
   let old=documentBuffer doc
   unless (revision old==expected) (Left "Buffer revision changed; read the buffer again")
   unless (textBuffer old && documentLabel doc==Nothing) (Left "Diff edits require an editable text buffer")
-  (updated,edits)<-applyUnifiedDiff (contents old) patch
-  let changed=replaceSelection (Selection 0 (bufferLength old)) updated old
-      rebase p=max 0 (min (T.length updated) (foldl (\q (a,z,text) -> if p<a then q else if p>=z then q+T.length text-(z-a) else q+a-p+T.length text) p edits))
-  pure desktop {buffers=M.insert bid (restyle doc {documentBuffer=changed}) (buffers desktop),
-    windows=map (\w -> if bufferId w==bid then w {selection=let Selection a c=selection w in Selection (rebase a) (rebase c),windowHexLow=False} else w) (windows desktop)}
+  pure (PatchSource bid old (documentFile doc))
+
+preparePatch :: PatchSource -> Maybe Text -> Value -> IO (Either Text PreparedPatch)
+preparePatch (PatchSource target old file) original args=case patchArguments args of
+  Left err->pure (Left err)
+  Right (bid,expected,patch) | bid/=target || expected/=revision old->pure (Left "Diff attempt changed its original target")
+                          | otherwise->case applyUnifiedDiff (contents old) patch of
+    Left err->pure (Left err)
+    Right (_,edits)->do
+      prepared<-prepareBufferEdit bid file old edits
+      modified<-evaluate (maybe False (/=patch) original)
+      pure (PreparedPatch bid patch modified <$> prepared)
+
+patchArguments :: Value -> Either Text (Int,Int,Text)
+patchArguments= either (Left . T.pack) Right . parseEither
+  (withObject "buffer_apply_diff" $ \o->do
+    unless (all (`elem` ["bufferId","revision","diff"]) (KM.keys o)) (fail "Unknown argument")
+    (,,) <$> o .: "bufferId" <*> o .: "revision" <*> o .: "diff")
+
+-- | Recheck current editability and install exactly once through the shared
+-- all-target owner. The caller has rechecked ticket lifetime, actor and policy.
+commitPatch :: PreparedPatch -> Desktop -> IO (Either Text (Desktop,Value))
+commitPatch (PreparedPatch bid patch modified prepared) desktop=case M.lookup bid (buffers desktop) of
+  Just doc | textBuffer (documentBuffer doc),documentLabel doc==Nothing->do
+    adopted<-commitEdits [prepared] desktop
+    pure $ do
+      (updated,_)<-adopted
+      let next=updated {windows=map (\w->if bufferId w==bid then w {windowHexLow=False} else w) (windows updated)}
+      pure (next,object ["bufferId" .= bid,"revision" .= revision (documentBuffer (buffers next M.! bid)),"saved" .= False,
+        "appliedDiff" .= patch,"userModified" .= modified])
+  _->pure (Left "Diff target is no longer an editable text buffer")
 
 -- | Validate and apply a single-file unified diff with exact old/new line counts.
 -- Return new text and original half-open character edits; reject all bad context

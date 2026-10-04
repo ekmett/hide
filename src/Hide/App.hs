@@ -305,15 +305,16 @@ runEditor args = do
                       reject=pure (d,pure (Just (rpcError (fromMaybe Null (parseMaybe (withObject "request" (.: "id")) request)) (-32600) "Invalid or inactive agent connection.")))
                   let permitted callback current name parameters
                         | name=="read_buffer" = permissionReadCall permissions callbackRead current name parameters
+                        | name=="buffer_apply_diff" = permissionDiffCall permissions currentCaller current name parameters
                         | otherwise = permissionCall permissions callback current name parameters
-                      callbackRead admission current name parameters
-                        | token==Nothing = readBufferTool admission current name parameters
-                        | otherwise = do
-                            actor<-maybe (pure (Left "Invalid or inactive agent connection."))
-                              (resolveActiveAgentAccess (AR.agentAccess agents) hub) token
-                            case actor of
-                              Left err->pure (current,pure (Left err))
-                              Right _->readBufferTool admission current name parameters
+                      currentCaller=case token of
+                        Nothing->pure (Right ())
+                        Just secret->fmap (() <$) (resolveActiveAgentAccess (AR.agentAccess agents) hub secret)
+                      callbackRead admission current name parameters=do
+                        actor<-currentCaller
+                        case actor of
+                          Left err->pure (current,pure (Left err))
+                          Right ()->readBufferTool admission current name parameters
                   response<-case token of
                     Nothing -> editorResponseWith specs (permitted inspectTool) d request
                     Just secret | secret==autocompleteToken autocomplete -> editorResponseOnly CompletionACP.completionTools (\current name parameters -> pure (current,autocompleteTool autocomplete name parameters)) d request

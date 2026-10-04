@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module MCPPermissionsCheck (checks) where
 
+import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (concurrently, withAsync, poll, wait)
 import Control.Exception (bracket)
 import Control.Monad (foldM, unless)
@@ -140,7 +141,11 @@ reviewChecks=bracket temporary removePathForcibly $ \directory ->
         input event d=let (next,fx)=handleEvent event d in snd <$> policyEffects runtime core next fx
         key k mods=input (V.EvKey k mods)
         replace text d=key (V.KChar 'a') [V.MCtrl] d >>= input (V.EvPaste (TE.encodeUtf8 text))
-        allow=key (V.KChar 'a') [V.MAlt]
+        settle d=do
+          next<-tickPermissions runtime d
+          if maybe True (any (T.isPrefixOf "Diff not applied:") . body) (dialog next)
+            then pure next else threadDelay 1000 >> settle next
+        allow d=key (V.KChar 'a') [V.MAlt] d >>= \started->timeout 5000000 (settle started) >>= maybe (error "diff preparation timeout") pure
         deny=key V.KEsc []
         area d=case dialog d of Just dg -> [(b,sel,sr,sc) | TextArea _ True b sel sr sc<-fields dg]; _ -> []
         areaText d=case area d of (b,_,_,_):_->contents b; _->""
@@ -182,7 +187,7 @@ reviewChecks=bracket temporary removePathForcibly $ \directory ->
     (stale,stalePending)<-request base
     let changed=stale {buffers=M.adjust (\doc->doc {documentBuffer=replaceBuffer False "newer\n" (documentBuffer doc)}) bid (buffers stale)}
     rejected<-allow changed
-    check "stale target retains review without applying any hunk" (dialog rejected/=Nothing && activeText rejected=="newer\n" && "revision changed" `T.isInfixOf` snapshot rejected)
+    check "stale target retains review without applying any hunk" (dialog rejected/=Nothing && activeText rejected=="newer\n" && "changed" `T.isInfixOf` snapshot rejected)
     _<-deny rejected
     check "Deny after stale rejection resolves request" . isLeft =<< stalePending
     (old,oldPending)<-request base
