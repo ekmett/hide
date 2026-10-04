@@ -115,7 +115,7 @@ withSessionSidebar host current initial use=withRegistry $ \registry->do
 -- read or retained. Only catalog/current-window revisions trigger invalidation.
 tickSessionSidebar :: SessionSidebar -> SidebarHost -> Desktop -> IO Desktop
 tickSessionSidebar (SessionSidebar provider current source seen) host d=do
-  let views=take 1024 [(wid,label title) | (wid,title,_,_)<-editorWindowEntries d]
+  let views=take 1024 [(wid,label title) | (wid,title,_,_)<-editorWindowEntries d {streamerMode=True}]
   _<-evaluate (force views)
   Snapshot catalogRevision _ windowRevision _<-atomicModifyIORef' source $ \old@(Snapshot revision entries serial previous)->
     let next=if previous==views then old else Snapshot revision entries (serial+1) views in (next,next)

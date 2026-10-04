@@ -15,6 +15,7 @@ import System.Timeout (timeout)
 import Hide.Buffer (newBuffer)
 import Hide.GuestAccess (guestEffectsAllowed)
 import Hide.Model
+import Hide.Files (loadFile)
 import Hide.Session
 import Hide.SessionSidebar
 import Hide.SessionSidebarTypes
@@ -40,9 +41,13 @@ checks=W.withWindowScope $ \scope->bracket temporary removePathForcibly $ \root-
         named=first {buffers=M.map (\doc->doc {documentLabel=Just "First"}) (buffers first)}
         added=addDocument Nothing (newBuffer "second\n") named
         sourceInitial=added {buffers=M.map (\doc->doc {documentLabel=Just (fromMaybe "Second" (documentLabel doc))}) (buffers added),sideTree=Just (emptySidebar root 28 False)}
+    let authority=root </> "authority-name.json"
+    writeFile authority "private-authority-value"
+    (authorityFile,authorityBuffer)<-loadFile authority >>= either fail pure
+    let publicInitial=(addDocument (Just authorityFile) authorityBuffer sourceInitial) {guestPrivatePaths=[authority],streamerMode=False}
     prepared<-W.prepareTextWindow "Plugin notes" "Private plugin text"
     update<-W.openTextWindow scope prepared >>= maybe (fail "Plugin scope unexpectedly retired") pure
-    initial<-adoptWindowUpdate Menu.HumanMenu update sourceInitial
+    initial<-adoptWindowUpdate Menu.HumanMenu update publicInitial
     withSidebarCommands $ \host->do
       (service,after)<-withSessionSidebar host (Just (sessionId current)) initial $ \service->do
         let core=sessionSidebarEffects service (\d _->pure (False,d))
@@ -68,7 +73,9 @@ checks=W.withWindowScope $ \scope->bracket temporary removePathForcibly $ \root-
           all (not . T.isInfixOf "private") labels)
           (fail "Same-directory sessions are ambiguous or expose private arguments")
         views<-activate ((==currentNode).P.nodeIdText.P.infoId) expanded >>= wait "current session windows"
-          (\d->has "First" d && has "Second" d && has "Plugin notes" d && ready d)
+          (\d->has "First" d && has "Second" d && has "Private plugin window" d && has "Private buffer" d && ready d)
+        unless (not (has "Plugin notes" views) && not (has "authority-name.json" views) && not (streamerMode views))
+          (fail "Sessions exposes private window names with Streamer disabled")
         selected<-activate ((=="First").P.infoLabel) views >>= wait "captured window selection"
           (\d->(windowId <$> activeWindow d)==Just firstId)
         unless (guestEffectsAllowed [SessionSidebarAction (SelectSessionWindow (T.pack (sessionId current)) firstId)]==False)
