@@ -1,7 +1,11 @@
 {-# LANGUAGE OverloadedStrings #-}
 module BufferReadsCheck (checks) where
 
-import Control.Exception (bracket,try,evaluate,SomeException)
+import Control.Exception (bracket,onException)
+import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async
+import GHC.Conc (threadStatus,ThreadStatus(..),BlockReason(..))
+import Hide.BufferReadCommand (withBufferReadCommands)
 import Control.Monad (unless)
 import Data.Aeson
 import Data.Aeson.Types (parseMaybe)
@@ -35,7 +39,20 @@ checks=bracket temporary removePathForcibly $ \directory -> do
         _ -> error "missing read approval"
       text image=P.readText (capturedContent image) (P.TextRange (P.CharOffset 0) (P.CharOffset 6))
   saved<-newIORef Nothing
-  withPermissionsAt path builtinTools $ \runtime -> do
+  withPermissionsAt path builtinTools $ \runtime -> withBufferReadCommands $ \commands->do
+    let reader=bufferReader runtime (pure (Right ()))
+        begin reader' d=do
+          (_,finish)<-readBufferTool commands reader' d "read_buffer" args
+          worker<-async finish
+          let queued=threadStatus (asyncThreadId worker) >>= \state->case state of
+                ThreadBlocked BlockedOnMVar->pure ()
+                ThreadFinished->pure ()
+                ThreadDied->pure ()
+                _->threadDelay 1000 >> queued
+          timeout 3000000 queued >>= maybe (error "read consumer did not enqueue") pure
+          shown<-tickPermissions runtime d
+          let reply=(waitCatch worker >>= pure . either (const (Left "Read worker cancelled")) id) `onException` cancel worker
+          pure (shown,reply)
     let capture admission d _ _=do
           ref<-readReference admission bid >>= either (error . T.unpack) pure
           image<-captureBuffer admission d ref >>= either (error . T.unpack) pure
@@ -67,32 +84,32 @@ checks=bracket temporary removePathForcibly $ \directory -> do
     let private=base {buffers=M.adjust (\doc->doc {documentLabel=Just "Agent request"}) bid (buffers base)}
         conversation=base {buffers=M.adjust (\doc->doc {documentLabel=Just "Conversation",documentBuffer=newBuffer "Session: private-token\npublic λ\n"}) bid (buffers base)}
         poisoned=conversation {chatActions=error "worker mask evaluated"}
-    (_,hidden)<-permissionReadCall runtime readBufferTool private "read_buffer" args
+    (_,hidden)<-begin reader private
     check "admitted reads retain private-buffer refusal" . isLeft =<< hidden
-    (_,masked)<-permissionReadCall runtime readBufferTool conversation "read_buffer" args
+    (_,masked)<-begin reader conversation
     maskedResult<-masked
     check "admitted conversation read applies existing mask" (either (const False) (\value->case parseMaybe (withObject "read result" (.: "text")) value of
       Just output->not ("private-token" `T.isInfixOf` output) && "public λ" `T.isInfixOf` output
       Nothing->False) maskedResult)
-    (_,maskWorker)<-permissionReadCall runtime readBufferTool poisoned "read_buffer" args
-    maskResult<-try (maskWorker >>= evaluate) :: IO (Either SomeException (Either T.Text Value))
+    (_,maskWorker)<-begin reader poisoned
+    maskResult<-maskWorker
     check "conversation mask is forced only by returned worker, not admission" (isLeft maskResult)
     TIO.writeFile path "[editor.mcp.permissions]\nread_buffer = 'prompt'\n"
-    (prompt,pending)<-permissionReadCall runtime readBufferTool base "read_buffer" args
+    (prompt,pending)<-begin reader base
     check "read policy Prompt uses owning approval queue" (dialog prompt/=Nothing)
     let current=changed {dialog=dialog prompt}
     _<-submit runtime current
     result<-pending
     check "queued read captures current buffer after approval" (either (const False) (\value->parseMaybe (withObject "read result" (.: "text")) value==Just ("new λ\n"::T.Text)) result)
-    (again,denied)<-permissionReadCall runtime readBufferTool base "read_buffer" args
+    (again,denied)<-begin reader base
     check "allow-once read does not grant later calls" (dialog again/=Nothing)
     TIO.writeFile path "[editor.mcp.permissions]\nread_buffer = 'disable'\n"
     _<-submit runtime again
     check "policy tightened while read waits rejects queued capture" . isLeft =<< denied
-    (_,blocked)<-permissionReadCall runtime readBufferTool base "read_buffer" args
+    (_,blocked)<-begin reader base
     check "disabled read fails closed" . isLeft =<< blocked
     TIO.writeFile path "[editor.mcp.permissions]\nread_buffer = 'prompt'\n"
-    (cancelPrompt,cancelled)<-permissionReadCall runtime readBufferTool base "read_buffer" args
+    (cancelPrompt,cancelled)<-begin reader base
     interrupted<-timeout 10000 cancelled
     check "cancelled read approval exits without capture" (interrupted==Nothing)
     _<-submit runtime cancelPrompt
@@ -104,19 +121,13 @@ checks=bracket temporary removePathForcibly $ \directory -> do
       ident<-AH.registerAgent hub "Read actor" directory driver >>= either (error . T.unpack) pure
       access<-newAgentAccess
       secret<-grantAgentAccess access ident
-      let attributed admission d name parameters=do
-            actor<-resolveActiveAgentAccess access hub secret
-            case actor of
-              Left err->pure (d,pure (Left err))
-              Right _->readBufferTool admission d name parameters
-      (actorPrompt,actorPending)<-permissionReadCall runtime attributed base "read_buffer" args
+      let attributed=bufferReader runtime (fmap (() <$) (resolveActiveAgentAccess access hub secret))
+      (actorPrompt,actorPending)<-begin attributed base
       revokeAgentAccess access ident
       _<-submit runtime actorPrompt
       check "revoked token cannot capture after queued approval" . isLeft =<< actorPending
       liveToken<-grantAgentAccess access ident
-      (endedPrompt,endedPending)<-permissionReadCall runtime (\admission d name parameters->do
-        actor<-resolveActiveAgentAccess access hub liveToken
-        case actor of Left err->pure (d,pure (Left err)); Right _->readBufferTool admission d name parameters) base "read_buffer" args
+      (endedPrompt,endedPending)<-begin (bufferReader runtime (fmap (() <$) (resolveActiveAgentAccess access hub liveToken))) base
       _<-AH.endAgent hub AH.Human ident
       _<-submit runtime endedPrompt
       check "ended actor cannot capture after queued approval" . isLeft =<< endedPending
