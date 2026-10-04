@@ -69,7 +69,7 @@ checks=do
   check "screen cell masks cover the complete grid" (length accesses==80*25)
   check "readable conversation cells can still be unclickable" (any (\(_,_,readable,clickable)->readable && not clickable) accesses)
   check "screen exposes blocked conversation command permissions" (case field "commandPermissions" privateMetadata::Maybe [Value] of
-    Just commands->any (\entry->field "command" entry==Just ("AgentPermissions"::T.Text) && field "allowed" entry==Just False) commands
+    Just commands->any (\entry->field "command" entry==Just ("hide.options.agent-permissions"::T.Text) && field "allowed" entry==Just False) commands
     _->False)
   let config=desktop {dialog=Just (Dialog "Agents" (AgentDialog "configure")
         [Input "Executable" "public-command" 0,Input "Environment (JSON object)" "private-env-token" 0] 0 ["OK","Cancel"] [])}

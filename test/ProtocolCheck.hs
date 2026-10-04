@@ -9,6 +9,8 @@ import qualified Data.ByteString.Lazy as BL
 import qualified Data.Text as T
 import System.Directory (getTemporaryDirectory, removeFile)
 import System.IO
+import qualified Hide.Commands as Commands
+import Data.List (nub)
 import Hide.Protocol
 import Hide.Model
 import Hide.Buffer
@@ -32,10 +34,21 @@ checks = do
   let d=addDocument Nothing (newBuffer "λ\nhello") (initialDesktop (80,25))
       screens=map frameRows [d,insertText "world " d,d {screenSize=(100,30)}]
   let menu fields=parseEither parseInput (object (["type" .= ("menu"::T.Text)]++fields))
-  check "named menu ignores a stale positional index" (menu ["command" .= ("New"::T.Text),"index" .= (999::Int)]==Right (MenuCommand (Just New)))
+  let canonical=map Commands.builtinIdentifier Commands.builtinCommands
+  check "public command identities are unique" (length canonical==length (nub canonical))
+  check "canonical names do not depend on constructor spelling" (all (T.isPrefixOf "hide.") canonical)
+  forM_ protocolCommands $ \cmd -> case cmd of
+    Disabled{} -> check "separators expose no command" (Commands.commandIdentifier cmd==Nothing)
+    _ -> do
+      check "every menu action has a stable identity" (Commands.commandIdentifier cmd/=Nothing)
+      forM_ (Commands.commandIdentifier cmd) $ \name ->
+        check "every public name resolves to its exact action" (menu ["command" .= name]==Right (MenuCommand cmd))
+  check "parameterized command injection has no public name" (Commands.commandIdentifier (DebugCommand "unregistered")==Nothing)
+  check "stable namespaced menu ID resolves independently of constructor spelling" (menu ["command" .= ("hide.file.new"::T.Text)]==Right (MenuCommand New))
+  check "parameterized commands use explicit namespaced IDs" (menu ["command" .= ("hide.debug.step-into"::T.Text)]==Right (MenuCommand (DebugCommand "stepIn")))
+  check "named menu ignores a stale positional index" (menu ["command" .= ("hide.file.new"::T.Text),"index" .= (999::Int)]==Right (MenuCommand New))
   check "unknown named menu is rejected" (either (const True) (const False) (menu ["command" .= ("future-command"::T.Text)]))
-  check "legacy positional menus cannot execute a different command" (case menu ["index" .= (0::Int)] of Right input -> applyInput input d==(d,[]); _ -> False)
-  check "legacy menu enabled flags stay disabled" (parseMaybe (withObject "metadata" (.: "menus")) (object (frameMetadata "/" d))==Just (replicate (length protocolCommands) False))
+  check "menu input requires a command identity" (either (const True) (const False) (menu ["index" .= (0::Int)]))
   let review=d {dialog=Just (Dialog "Review" (PermissionDialog "approve:1") [TextArea "diff" True (newBuffer "private diff") (Selection 0 7) 0 0] 0 ["Allow once","Deny"] [])}
       selected=parseMaybe (withObject "metadata" (.: "selection")) (object (frameMetadata "/" review))::Maybe T.Text
       (copied,copyEffects)=applyInput (BrowserCommand Copy) review

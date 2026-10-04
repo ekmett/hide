@@ -7,9 +7,10 @@
 -- repaint rules, so drag/wheel rendering can await the resulting remote frame.
 module Hide.RemoteWindow
   (runRemoteWindow, RemoteFrame(..), RemoteCell(..), parseRemoteFrame
-  , nativeKeyInput, nativeEventInput, pasteShortcut, sanitizeDownloadName
+  , nativeKeyInput, nativeEventInput, remoteMenuInput, pasteShortcut, sanitizeDownloadName
   , remoteInputAllowed, remoteCloseDetaches, remoteDetachShortcut, nativeRepaint) where
 import Control.Monad (unless)
+import Hide.Commands (commandIdentifier)
 import Data.Aeson hiding (withArray)
 import qualified Data.Aeson.KeyMap as KM
 import Data.Aeson.Types (Parser, parseEither)
@@ -19,7 +20,7 @@ import qualified Data.Text.Encoding as TE
 import qualified Data.Text as T
 import qualified Graphics.Vty as V
 import Hide.Frontend
-import Hide.Model (MenuItem(..), menus)
+import Hide.Model (Command, MenuItem(..), menus)
 import Hide.Remote (RemotePeer)
 import Hide.Unicode (clusterWidth, graphemes)
 #if defined(WITH_WINDOW) && defined(WITH_REMOTE)
@@ -76,7 +77,7 @@ parseRemoteFrame metadata rows = parseEither (withObject "frame metadata" $ \o -
   supported <- o .:? "menuCommands" .!= [] :: Parser [T.Text]
   states <- o .:? "menuState" .!= [] :: Parser [(T.Text,Bool)]
   unless (length supported<=256 && length states<=256 && all ((<=256).T.length) (supported++map fst states)) (fail "Invalid menu state")
-  let enabled=[ident `elem` supported && lookup ident states==Just True | ident<-nativeMenuNames]
+  let enabled=[maybe False (\name -> name `elem` supported && lookup name states==Just True) (commandIdentifier cmd) | cmd<-menuActions]
   cells <- concat <$> sequence [parseRow cols y row | (y,row) <- zip [0..] rows]
   pure (RemoteFrame size mode title cursor blink crt pixelated terminal wordstar enabled cells)) metadata
   where
@@ -128,7 +129,7 @@ nativeEventInput event = case event of
   9:x:y:direction:mods:_ -> case mouse (if direction>0 then "wheel-up" else "wheel-down") x y 1 1 mods of
     Just (Object fields) -> Just (Object (KM.insert "steps" (toJSON (max 1 (min 256 (abs direction)))) fields))
     result -> result
-  11:i:_ | i>=0, ident:_ <- drop i nativeMenuNames -> Just (object ["type" .= ("menu"::T.Text),"command" .= ident])
+  11:i:_ | i>=0, Just ident:_ <- drop i (map commandIdentifier menuActions) -> Just (object ["type" .= ("menu"::T.Text),"command" .= ident])
   12:x:y:_ -> mouse "move" x y 1 0 0
   13:mods:_ -> Just (object ["type" .= ("modifiers"::T.Text),"mods" .= modifierNames mods])
   _ -> Nothing
@@ -137,8 +138,16 @@ nativeEventInput event = case event of
     mouse action x y button clicks mods = Just (object ["type" .= ("mouse"::T.Text),"action" .= (action::T.Text),
       "x" .= max (-1) (min 511 x),"y" .= max (-1) (min 255 y),"button" .= (if button==3 then 2 else 0::Int),
       "clicks" .= max 0 (min 3 clicks),"mods" .= modifierNames mods])
-nativeMenuNames :: [T.Text]
-nativeMenuNames = [T.pack (show cmd) | (_,_,items)<-menus, MenuItem _ _ cmd<-items]
+menuActions :: [Command]
+menuActions = [cmd | (_,_,items)<-menus, MenuItem _ _ cmd<-items]
+
+-- | Resolve a local menu slot against the server's named command state.
+remoteMenuInput :: RemoteFrame -> Int -> Maybe Value
+remoteMenuInput frame index
+  | index>=0, True:_<-drop index (remoteMenus frame),
+    Just name:_<-drop index (map commandIdentifier menuActions) =
+      Just (object ["type" .= ("menu"::T.Text),"command" .= name])
+  | otherwise = Nothing
 
 -- Drag/wheel updates are painted when their resulting frame arrives. Painting
 -- the previous frame first spends an extra vblank on obsolete selection/layout.
@@ -273,6 +282,7 @@ runRemoteWindow backend scale (cols,rows) mode host peer = do
             Left _ -> pure ()
         11:i:_ | i<0 || not (maybe False (\value -> case drop i (remoteMenus value) of enabled:_ -> enabled; _ -> False) frame) -> pure ()
                | Paste:_ <- drop i nativeCommands -> paste
+               | otherwise -> forM_ (frame >>= (\value -> remoteMenuInput value i)) sendJSON
         14:_ | null host -> do
           bytes <- c_text >>= BS.packCString
           case TE.decodeUtf8' bytes of
