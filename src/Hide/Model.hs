@@ -1142,14 +1142,21 @@ applyDialogCommand cmd d
              dialog=Just dg {fields=replaceAt (focus dg) edited (fields dg)}},[])
   | otherwise = (d,[])
 
--- | Only the small dialog action catalogue needs current focus filtering. Other
--- owners return their prepared projection directly, with no command/index walk.
+-- | Project only prepared chords and bounded contribution/focus metadata.
+-- Inert runtime ownership keeps its chord with an empty target, so a frontend
+-- cannot queue a raw key that redirects to a later replacement registration.
 focusedBindingChords :: Desktop -> [(Text,Text)]
 focusedBindingChords d
   | not (bindingInputAvailable d) = []
-  | Just bindings<-effectiveBindings d, dialog d==Nothing = Bindings.bindingChords bindings
+  | Just bindings<-effectiveBindings d, dialog d==Nothing = Bindings.bindingChordsWith target bindings
   | Just bindings<-effectiveBindings d = Bindings.bindingChordsWhere (`dialogCommandAllowed` d) bindings
   | otherwise = []
+  where
+    current=M.fromList [(Plugin.menuName (Plugin.menuReference item),contributionCommand d item) | item<-contributedMenus d]
+    target name action=case action of
+      RegisteredMenu{} | M.lookup name current/=Just action -> ""
+      Disabled{} -> ""
+      _ -> name
 
 fieldHeight :: Field -> Int
 fieldHeight Input{} = 3
