@@ -79,5 +79,3 @@ formatBufferRead metadata start count offset redacted b
     hex byte rest=let n=fromIntegral byte in ' ':intToDigit (n `div` 16):intToDigit (n `mod` 16):rest
     readResult :: Either P.RangeError a -> Either T.Text a
     readResult=either (Left . T.pack . show) Right
-
-
