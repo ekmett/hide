@@ -18,6 +18,7 @@ import qualified GuestAccessCheck
 import qualified StreamerCheck
 import qualified ClipboardMCPCheck
 import qualified PluginBufferCheck
+import qualified PluginMenuCheck
 import qualified PluginCommandCheck
 import qualified DocsMCPCheck
 import qualified EnvironmentCheck
@@ -120,6 +121,7 @@ main = do
   ClipboardMCPCheck.checks
   PluginBufferCheck.checks
   PluginCommandCheck.checks
+  PluginMenuCheck.checks
   DocsMCPCheck.checks
   EnvironmentCheck.checks
   ControlMCPCheck.checks

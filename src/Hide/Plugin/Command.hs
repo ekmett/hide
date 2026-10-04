@@ -9,7 +9,7 @@
 module Hide.Plugin.Command
   ( Registry, Command, CommandRef, Codec(..), CommandDef(..), CommandInfo(..)
   , CommandError(..), withRegistry, registerCommand, retireCommand, commandRef
-  , resolveCommand, registeredCommands, invoke, invokeJSON
+  , resolveCommand, registeredCommands, commandCurrent, invoke, invokeJSON
   ) where
 
 import Control.Concurrent.MVar
@@ -117,6 +117,11 @@ currentEntry ident closed entries (CommandRef owner generation name)
 
 admit :: Registry context -> CommandRef -> IO (Either CommandError (Entry context))
 admit (Registry ident state) reference=withMVar state $ \(State closed _ entries)->pure (currentEntry ident closed entries reference)
+
+-- | Check exact registration liveness without running codecs or handlers. Hosts
+-- use this again before adopting a delayed reply; retirement cannot resurrect UI.
+commandCurrent :: Registry context -> CommandRef -> IO Bool
+commandCurrent registry reference=either (const False) (const True) <$> admit registry reference
 
 -- | Invoke a typed handle only while that exact registration is live.
 -- Successful typed values remain lazy: callers own their evaluation, including
