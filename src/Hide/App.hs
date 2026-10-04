@@ -8,6 +8,8 @@
 -- Permission checks wrap agent-facing dispatch rather than individual frontends.
 module Hide.App (main, demoDesktop, applyEffects) where
 
+import Hide.Sidebar
+import Hide.SidebarCommands
 import Control.Applicative ((<|>))
 import Data.Maybe (fromMaybe)
 import Hide.DocsMCP
@@ -240,7 +242,7 @@ runEditor args = do
           when (Daemon `elem` flags && not stopped) (awaitSessionDetached record))
         `catch` (\err -> writeIORef wasInterrupted True >> interrupted err)
         `catch` (\FrontendDetached -> writeIORef wasInterrupted True)) `finally` report
-    else do
+    else withSidebarCommands $ \sidebarHost -> do
         initialKeymap<-if Snapshot `elem` flags || Html `elem` flags then either (die . T.unpack) pure (configuredBindings [] keys) else pure M.empty
         let initial=if Demo `elem` flags then addDocument Nothing (newBuffer (activeText demoDesktop)) (initialDesktop dimensions) else initialDesktop dimensions
             configured=(fst (handleEvent (uncurry V.EvResize dimensions) initial)) {keyBindings=initialKeymap,macKeySymbols=fromMaybe False (defaultMacKeySymbols defaults),defaultBufferView=fromMaybe CurrentView (defaultView defaults),chatSubmit=fromMaybe QuerySubmit (defaultChatSubmit defaults),appearance=colorMode,systemDark=maybe True (not . (`elem` ["7","15"]) . reverse . takeWhile (/=';') . reverse) terminalColors,wordStar=flagBool WordStar StandardKeys (fromMaybe (wordStar initial) (defaultWordStar defaults)),crtFilter=flagBool CRT NoCRT (fromMaybe (crtFilter initial) (defaultCRT defaults)),materialIcons=flagBool MaterialIcons ClassicIcons (fromMaybe (materialIcons initial) (defaultMaterialIcons defaults)),blinkCursor=fromMaybe (fromMaybe (blinkCursor initial) (defaultBlinkCursor defaults)) (lastMaybe [value | CursorBlink value<-flags]),pixelateUnicode=fromMaybe (fromMaybe (pixelateUnicode initial) (defaultPixelateUnicode defaults)) (lastMaybe [value | Pixelate value<-flags]),streamerMode=fromMaybe (fromMaybe False (defaultStreamerMode defaults)) (lastMaybe [value | Streamer value<-flags]),videoMode=if backend == Terminal then Nothing else Just screenMode}
@@ -259,7 +261,7 @@ runEditor args = do
         endpoints<-maybe (pure []) (\sid -> do endpoint<-sessionEndpoint sid; pure [takeDirectory endpoint]) daemon
         sessionStore<-sessionStoreDirectory
         privatePaths<-mapM canonicalizePath ([configPath,localConfigPath,sessionStore,agentDirectory </> "agents.json",agentDirectory </> "agent-session.json"]++endpoints)
-        let protectedDesktop=staged {guestPrivatePaths=privatePaths}
+        protectedDesktop<-initializeSidebar sidebarHost staged {guestPrivatePaths=privatePaths}
         if Html `elem` flags then TIO.putStr (snapshotHtml protectedDesktop {buffers=M.map highlightDocument (buffers protectedDesktop)})
         else if Snapshot `elem` flags then TIO.putStr (snapshot protectedDesktop {buffers=M.map highlightDocument (buffers protectedDesktop)})
         else do
@@ -273,7 +275,7 @@ runEditor args = do
             let liveDesktop=liveBase {keyBindings=keymap}
             withKeybindings keys (contributedBindingCommands liveBase) $ \keybindings -> do
               exiting<-newIORef False
-              let runtimeEffects=menuEffects menuHost (keybindingEffects keybindings (autocompleteEffects autocomplete (projectBrowserEffects projectBrowser (gitOperationEffects gitOperations (debuggerEffects debugger (conversationEffects conversation (reconciliationEffects reconciliation (toolingEffects tooling applyEffects))))))))
+              let runtimeEffects=sidebarEffects sidebarHost (menuEffects menuHost (keybindingEffects keybindings (autocompleteEffects autocomplete (projectBrowserEffects projectBrowser (gitOperationEffects gitOperations (debuggerEffects debugger (conversationEffects conversation (reconciliationEffects reconciliation (toolingEffects tooling applyEffects)))))))))
                   core d pending=foldM step (False,d) pending
                     where
                       step result@(True,_) _=pure result
@@ -288,7 +290,7 @@ runEditor args = do
                     (quit,updated)<-policyEffects permissions core d pending
                     approvedExit<-readIORef exiting
                     pure (quit || approvedExit,updated)
-                  tick d=tickProjectBrowser projectBrowser d >>= tickGitOperations gitOperations applyEffects >>= tickTooling tooling applyEffects >>= tickReconciliation reconciliation >>= tickConversation conversation >>= tickDebugger debugger (toolingEffects tooling applyEffects) >>= tickPermissions permissions >>= tickHighlighting highlighting >>= tickAutocomplete autocomplete >>= tickKeybindings keybindings >>= tickMenus menuHost
+                  tick d=tickProjectBrowser projectBrowser d >>= tickGitOperations gitOperations applyEffects >>= tickTooling tooling applyEffects >>= tickReconciliation reconciliation (sidebarEffects sidebarHost applyEffects) >>= tickConversation conversation >>= tickDebugger debugger (toolingEffects tooling applyEffects) >>= tickPermissions permissions >>= tickHighlighting highlighting >>= tickAutocomplete autocomplete >>= tickKeybindings keybindings >>= tickMenus menuHost >>= tickSidebar sidebarHost
                   inspectTool d name parameters
                     | name `elem` ["list_windows","list_buffers","read_buffer","read_selection"] = pure (d,pure (builtinTool d name parameters))
                     | name `elem` chatToolNames = chatTool conversation d name parameters
@@ -593,11 +595,11 @@ applyEffects = foldM apply . (False,)
       result<-readDirectory path "*"
       case result of
         Left err -> pure (False,browserError (T.pack err) d)
-        Right (base,entries) -> do
+        Right (base,_) -> do
           changed<-try (setCurrentDirectory base) :: IO (Either IOException ())
           case changed of
             Left err -> pure (False,browserError (T.pack (show err)) d)
-            Right () -> apply (False,installTree base entries d {defaultDirectory=Just base,dialog=Nothing,status="Directory changed."}) (RefreshGit base)
+            Right () -> apply (False,installSidebar (sidebarDirectory base d) d {defaultDirectory=Just base,dialog=Nothing,status="Directory changed."}) (RefreshGit base)
     apply (_,d) (OpenChoice base input pattern)=do
       let chosen=if T.null input then pattern else input
           path=if isAbsolute (T.unpack chosen) then T.unpack chosen else base </> T.unpack chosen
@@ -608,21 +610,20 @@ applyEffects = foldM apply . (False,)
         exists<-doesFileExist path
         if exists then apply (False,d {dialog=Nothing}) (ReadPath path)
         else pure (False,browserError "File not found." d)
-    apply (_,d) (ReadTree path)=do
-      result<-readDirectory path "*"
-      case result of
-        Left err -> pure (False,message "Cannot browse directory" (wrapMessage (T.pack err)) d)
-        Right (base,entries) -> apply (False,installTree base entries d) (RefreshGit base)
-    apply (_,d) (ExpandTree index)=case sideTree d of
-      Just tree | node:_ <- drop index (treeRows tree) -> do
-        result<-readDirectory (nodePath node) "*"
-        pure (False,case result of Left err -> d {status=T.pack err}; Right (_,entries) -> expandTree index entries d)
-      _ -> pure (False,d)
+    apply (_,d) (ReadTree path)=pure (False,installSidebar (sidebarDirectory path d) d)
+    apply (_,d) LoadTree{}=pure (False,d {status="Sidebar provider host is unavailable in this preview."})
+    apply (_,d) InvokeTree{}=pure (False,d {status="Sidebar provider host is unavailable in this preview."})
+    apply (_,d) RefreshTree{}=pure (False,d)
     apply (_,d) InvokeMenu{}=pure (False,d {status="Registered menu actions are unavailable in this preview."})
     apply (_,d) ReadHelp=do
       path<-getDataFileName "README.md"
       (opened,_)<-followLink False d (Just path) ""
       pure (False,opened)
+    apply (_,d) (FollowTreeLink trace path target)
+      | maybe False (hitCurrent trace) (sideTree d)=do
+          (opened,_)<-followLink False d (Just path) target
+          pure (False,opened)
+      | otherwise=pure (False,d {status="Sidebar link target expired."})
     apply (_,d) (FollowLink origin target)=do
       (opened,_)<-followLink False d origin target
       pure (False,opened)
@@ -694,3 +695,9 @@ packageDirectory start = search start
       entries<-either (const []) id <$> (try (listDirectory path) :: IO (Either IOException [FilePath]))
       if any ((==".cabal") . takeExtension) entries then pure path
         else if takeDirectory path==path then pure start else search (takeDirectory path)
+
+-- Selecting another Files directory preserves the other ordinary provider roots.
+sidebarDirectory :: FilePath -> Desktop -> Sidebar
+sidebarDirectory path d=case sideTree d of
+  Just tree->tree {treeRoot=path,treeFocused=True}
+  Nothing->emptySidebar path (min 24 (max 0 (fst (screenSize d)-20))) True

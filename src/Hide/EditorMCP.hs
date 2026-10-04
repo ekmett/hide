@@ -7,6 +7,7 @@
 -- only their supplied tools, with no fallback into ordinary desktop reads.
 module Hide.EditorMCP (editorResponse, editorResponseWith, editorResponseOnly, rpcError, builtinTools, builtinTool, readBufferTool, debugTools, editorServers, editorServersFor, editorServersAt, runEditorMCP, runEditorMCPWithHandles, runEditorMCPWithToken, readMCPLine) where
 
+import Hide.Sidebar
 import Control.Exception (bracket, try, IOException, finally, catch, mask, throwIO)
 import Control.Concurrent.Async (async, cancel, AsyncCancelled(..))
 import Control.Concurrent.MVar

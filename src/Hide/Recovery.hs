@@ -8,6 +8,10 @@
 -- Publishing uses flush and rename, without an explicit fsync durability promise.
 module Hide.Recovery (writeCheckpoint, readCheckpoint, CheckpointKey, checkpointKey) where
 
+import Data.List (findIndex)
+import Data.Maybe (fromMaybe)
+import Hide.Sidebar
+import qualified Hide.Plugin.Tree as P
 import Control.Exception (IOException, bracket, try, evaluate)
 import Control.Monad (unless, when)
 import Data.Aeson
@@ -24,7 +28,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import System.Directory (pathIsSymbolicLink, removeFile, renameFile)
-import System.FilePath (isAbsolute, takeDirectory)
+import System.FilePath (isAbsolute, takeDirectory, takeFileName)
 import System.IO (IOMode(ReadMode), hClose, hFlush, openBinaryTempFile, withBinaryFile)
 import System.IO.Error (catchIOError)
 #ifndef mingw32_HOST_OS
@@ -202,9 +206,16 @@ rectValue (Rect x y w h)=toJSON (x,y,w,h)
 selectionValue :: Selection -> Value
 selectionValue (Selection a c)=toJSON (a,c)
 sidebarValue :: Sidebar -> Value
-sidebarValue tree=object ["root" .= treeRoot tree,"selected" .= treeSelected tree,"scroll" .= treeScroll tree,"width" .= treeWidth tree,
-  "focused" .= treeFocused tree,"rows" .= [object ["name" .= nodeName row,"path" .= nodePath row,"depth" .= nodeDepth row,
-    "directory" .= nodeDirectory row,"expanded" .= nodeExpanded row] | row<-treeRows tree]]
+sidebarValue tree=object ["root" .= treeRoot tree,"selected" .= selected,"scroll" .= scrolled,"width" .= treeWidth tree,
+  "focused" .= treeFocused tree,"rows" .= rows]
+  where
+    prepared=[(index,(P.infoLabel info,path,rowDepth row,P.infoBranch info,rowExpanded row)) | (index,row)<-zip [0..] (M.elems (treeRows tree)),let info=rowInfo row,Just path<-[P.infoResource info]]
+    resourceIndex index=fromMaybe 0 (findIndex ((==index).fst) prepared)
+    (values,selected,scrolled)=case treeHints tree of
+      Just (SidebarHints hints chosen topPath)->let locate wanted=maybe 0 (\path->fromMaybe 0 (findIndex ((==path).fst) hints)) wanted
+        in ([(T.pack (takeFileName path),path,0,expanded,expanded) | (path,expanded)<-hints],locate chosen,locate topPath)
+      _->(map snd prepared,resourceIndex (treeSelected tree),resourceIndex (treeScroll tree))
+    rows=[object ["name" .= name,"path" .= path,"depth" .= depth,"directory" .= directory,"expanded" .= expanded] | (name,path,depth,directory,expanded)<-values]
 
 desktopParser :: Desktop -> Value -> Parser Desktop
 desktopParser baseline=withObject "checkpoint" $ \o->do
@@ -310,9 +321,16 @@ sidebarParser=withObject "sidebar" $ \o->do
   chosen<-o .: "selected" >>= boundedInt (-1) (max 0 (length entries-1))
   scroll<-o .: "scroll" >>= boundedInt 0 (length entries)
   width'<-o .: "width" >>= boundedInt 1 4096
-  Sidebar root entries chosen scroll width' <$> o .: "focused"
-  where rowParser=withObject "tree row" $ \o->TreeRow <$> (o .: "name" >>= boundedText 32768) <*> (o .: "path" >>= checkedPath True)
-          <*> (o .: "depth" >>= boundedInt 0 1024) <*> o .: "directory" <*> o .: "expanded"
+  focused<-o .: "focused"
+  let pathAt index=case drop index entries of (path,_):_->Just path; _->Nothing
+  pure (emptySidebar root width' focused) {treeHints=Just (SidebarHints entries (pathAt chosen) (pathAt scroll))}
+  where rowParser=withObject "tree row" $ \o->do
+          _<-o .: "name" >>= boundedText 32768
+          path<-o .: "path" >>= checkedPath True
+          _<-o .: "depth" >>= boundedInt 0 1024
+          directory<-o .: "directory"
+          expanded<-o .: "expanded"
+          pure (path,directory && expanded)
 positive :: Int -> Parser Int
 positive=boundedInt 1 1073741823
 boundedInt :: Int -> Int -> Int -> Parser Int

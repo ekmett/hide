@@ -8,6 +8,7 @@ import Data.List (findIndex)
 import Data.Maybe (fromMaybe)
 import Hide.Commands (configuredBindings)
 import Hide.BufferView
+import Hide.Sidebar
 import Hide.Model
 import Hide.Render (snapshotHtml, snapshot, renderDesktop)
 import Hide.Buffer (revision, newBuffer, columnOffset, contents, markSaved, replaceSelection, saved, undoStack, redoStack, Selection(..))
@@ -109,7 +110,7 @@ checks = do
   check "context action retains the source hit target" (clipboard targetReady=="/project/Target.hs:1:1" && contextMenu targetReady==Nothing)
   check "stale source cases would otherwise invoke an enabled action" (all (\candidate->commandEnabled candidate CopyLocation && clipboard (fst (selectPopup candidate {contextTarget=Nothing}))/=clipboard candidate) [focusedElsewhere,movedCaret,changedContent])
   check "context action refuses changed focus, caret and revision" (all (\candidate->let (refused,effects)=selectPopup candidate in contextMenu refused==Nothing && clipboard refused==clipboard candidate && null effects) [focusedElsewhere,movedCaret,changedContent])
-  let sidebarFocus=targetPopup {sideTree=fmap (\tree->tree {treeFocused=True}) (sideTree (installTree "/project" [] targetPopup))}
+  let sidebarFocus=targetPopup {sideTree=fmap (\tree->tree {treeFocused=True}) (sideTree (installSidebar (emptySidebar "/project" 24 True) targetPopup))}
       outputPopup=openContext SourceContext 10 5 (addReadOnly "Output" "first" (initialDesktop (80,25)))
       replacedOutput=addReadOnly "Output" "second" outputPopup
   check "source context refuses sidebar ownership" (let (refused,effects)=selectPopup sidebarFocus in contextMenu refused==Nothing && clipboard refused==clipboard sidebarFocus && null effects)
@@ -279,57 +280,6 @@ checks = do
     (all (\glyph -> T.count glyph (T.unlines (take (snd (screenSize separated)-1) (T.lines (snapshot separated {videoMode=Just 3}))))==1) ["▲","▼","◄","►","■","↑"])
   check "terminal close button uses ASCII x" ("[x]" `T.isInfixOf` snapshot desktop && not ("■" `T.isInfixOf` snapshot desktop))
   check "resize grip is an ordinary frame corner" (not ("◢" `T.isInfixOf` snapshot separated) && "═╝" `T.isInfixOf` snapshot separated)
-  let compactTree=installTree "/project" [Entry "src" True Nothing Nothing,Entry "Main.hs" False Nothing Nothing] desktop
-  let dirtyTree=installTree "/project" [Entry "Main.hs" False Nothing Nothing] (insertText "x" source)
-      cleanTree=installTree "/project" [Entry "Main.hs" False Nothing Nothing] (fst (runCommand Undo (insertText "x" source)))
-      redName="color:rgb(255,85,85);background:rgb(0,0,170)'> Main.hs"
-      unfocus d=d {sideTree=fmap (\t -> t {treeFocused=False}) (sideTree d)}
-  check "unsaved filenames are red and undo restores their normal color"
-    (redName `T.isInfixOf` snapshotHtml (unfocus dirtyTree) && not (redName `T.isInfixOf` snapshotHtml (unfocus cleanTree)))
-  let treeLine d=T.lines (snapshot (unfocus d)) !! 2
-      savedTree=dirtyTree {buffers=M.map (\doc -> doc {documentBuffer=markSaved (documentBuffer doc)}) (buffers dirtyTree)}
-  check "Files shows the buffer's line counts after its dirty filename"
-    ("Main.hs +1 -1" `T.isInfixOf` treeLine dirtyTree &&
-     not ("+1" `T.isInfixOf` treeLine cleanTree) && not ("+1" `T.isInfixOf` treeLine savedTree))
-  check "dock buttons indicate collapse direction" ("[←]" `T.isInfixOf` snapshot compactTree && "[↓]" `T.isInfixOf` snapshot (setProblemsVisible True desktop) {problemsFocused=True})
-  check "dock arrows match editor cyan" ("color:rgb(85,255,255);background:rgb(0,0,170)'>←" `T.isInfixOf` snapshotHtml compactTree && "color:rgb(85,255,255);background:rgb(0,170,170)'>↓" `T.isInfixOf` snapshotHtml (setProblemsVisible True desktop) {problemsFocused=True})
-  check "Files has a floating title and scrollbar without a path row"
-    (not ("/project" `T.isInfixOf` snapshot compactTree) && " Files " `T.isInfixOf` snapshot compactTree &&
-     "▲" `T.isInfixOf` snapshot compactTree && "▼" `T.isInfixOf` snapshot compactTree &&
-     snd (handleEvent (V.EvMouseDown 3 2 V.BLeft []) compactTree)==[ExpandTree 0])
-  let longTree=installTree "/project" [Entry (T.pack (show i)<>".hs") False Nothing Nothing | i<-[1::Int ..100]] desktop
-      scrolled=fst (handleEvent (V.EvMouseDown 4 4 V.BScrollDown []) longTree)
-      barClicked=fst (handleEvent (V.EvMouseDown (treeWidthOf longTree-1) (snd (screenSize longTree)-3) V.BLeft []) longTree)
-  let unfocusedTree=compactTree {sideTree=fmap (\t -> t {treeFocused=False}) (sideTree compactTree)}
-      glyphAt d x y=let line=T.lines (snapshot d) !! y in T.index line (columnOffset line x)
-      shared=treeWidthOf unfocusedTree
-      smallNeighbor=modifyActive (\w -> w {bounds=Rect shared 4 30 10}) unfocusedTree
-  check "Files leaves its top, left and bottom edges unframed"
-    (glyphAt unfocusedTree 0 1==' ' && glyphAt unfocusedTree 0 2==' ' && glyphAt unfocusedTree 0 23==' ')
-  check "shared column yields to neighboring frames and stays single where exposed"
-    (glyphAt unfocusedTree shared 1=='╔' && glyphAt unfocusedTree shared 23=='╚' &&
-     glyphAt smallNeighbor shared 4=='╔' && glyphAt smallNeighbor shared 13=='╚' &&
-     glyphAt smallNeighbor shared 1=='│')
-  let raisedFiles=setProblemsVisible True unfocusedTree
-      bottomFiles=top (problemsRect raisedFiles)-1
-      resizedFiles=resizeMessagesTo 10 raisedFiles
-  check "Messages raises Files background and its scroll area"
-    (glyphAt raisedFiles 0 bottomFiles==' ' && treeContentRows raisedFiles==bottomFiles-2 &&
-     glyphAt resizedFiles 0 9==' ' && treeContentRows resizedFiles==7)
-  check "Files scrollbar and wheel scroll rows" (fmap treeScroll (sideTree scrolled)==Just 3 && fmap treeScroll (sideTree barClicked)==Just 1)
-  check "tree markers have a separating space" ("📁 src" `T.isInfixOf` snapshot compactTree && not ("[+]" `T.isInfixOf` snapshot compactTree))
-  check "Unicode folders are the default in terminals and windows"
-    (all (T.isInfixOf "📁 src" . snapshot) [compactTree,compactTree {videoMode=Just 3}])
-  check "Material folders remain an explicit option"
-    ("\xf024b src" `T.isInfixOf` snapshot compactTree {materialIcons=True})
-  let branched=expandTree 1 [Entry "C.hs" False Nothing Nothing]
-        (expandTree 0 [Entry "A" True Nothing Nothing,Entry "B.hs" False Nothing Nothing] compactTree)
-      branchLines=["├📂 src","│├📂 A","││└📄 C.hs","│└📄 B.hs","└📄 Main.hs"]
-      scrolledBranches=branched {sideTree=fmap (\tree -> tree {treeScroll=2}) (sideTree branched)}
-  check "Files draws connected branches with one-column depth steps"
-    (all (`T.isInfixOf` snapshot branched) branchLines)
-  check "tree branches preserve ancestry above the scrolled viewport"
-    ("││└📄 C.hs" `T.isInfixOf` snapshot scrolledBranches)
   check "inactive scrollbar region only focuses window"
     (fmap windowId (activeWindow focusedBehind)==Just (windowId behind) && drag focusedBehind==Nothing && null behindEffects && fmap scrollRow (activeWindow focusedBehind)==Just (scrollRow behind))
   check "inactive close region cannot close the window"

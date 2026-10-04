@@ -6,6 +6,7 @@ import Data.Maybe (fromMaybe)
 import qualified Data.Map.Strict as M
 import Data.List (find)
 import Hide.Frontend
+import Hide.Sidebar
 import Hide.Model
 import Hide.Render (snapshot, renderKey)
 import qualified Data.Text as T
@@ -58,7 +59,7 @@ checks = do
   check "hidden child draft changes invalidate native menus and rendering" (childKey/=childChangedKey)
   let idle=child {dialog=dialog textArea,
         chatQuestion=Just (ChatQuestion 7 "Question" ["One","Two"] Nothing original (Selection 0 0) True),
-        sideTree=Just (Sidebar "/project" [TreeRow "Fixture.hs" "Fixture.hs" 0 False False] 0 0 20 False)}
+        sideTree=Just (emptySidebar "/project" 20 False)}
       idleWrapper d=d {systemDark=systemDark d,
         buffers=M.map (\doc->doc {documentFile=fmap (\f->f {filePath=filePath f}) (documentFile doc),documentSourceRows=fmap id (documentSourceRows doc)}) (buffers d),
         conversationViews=M.map (\v->v {conversationDraft=conversationDraft v}) (conversationViews d),
@@ -182,7 +183,7 @@ checks = do
     (ident `elem` dockIds && windowId secondView `elem` dockIds &&
      bottomTerminal dockFocused==Just ident && fmap windowId (activeWindow dockFocused)==Just ident)
   let resized=fst (handleEvent (V.EvResize 120 45) focused)
-      files=resizeTree 31 (installTree "/tmp" [] resized)
+      files=resizeTree 31 (installSidebar (emptySidebar "/tmp" 24 True) resized)
       panel=resizeProblems 30 files
       tiled=fst (runCommand Tile panel)
       cascaded=fst (runCommand Cascade tiled)
@@ -291,7 +292,7 @@ checks = do
   let two=fst (runCommand New desktop)
       controlTab=fst (handleEvent (V.EvKey (V.KChar '\t') [V.MCtrl]) two)
       controlBack=fst (handleEvent (V.EvKey V.KBackTab [V.MCtrl,V.MShift]) controlTab)
-      tree=installTree "/tmp" [] two
+      tree=installSidebar (emptySidebar "/tmp" 24 True) two
       altTab=fst . handleEvent (V.EvKey (V.KChar '\t') [V.MAlt])
       menuFocused=tree {menu=Just (0,0)}
       treeFocusedAgain=altTab menuFocused
@@ -304,7 +305,7 @@ checks = do
      maybe False (windowFocused fileFocused) (activeWindow fileFocused) && buffers fileFocused==buffers tree)
   check "Alt Tab cycles dialog fields"
     (fmap focus (dialog (altTab preferences))==fmap ((+1).focus) (dialog preferences))
-  let docked=installTree "/tmp" [] desktop
+  let docked=installSidebar (emptySidebar "/tmp" 24 True) desktop
       edge=maybe (error "no Files") ((subtract 1).treeWidth) (sideTree docked)
       floating=modifyActive (\w -> w {bounds=Rect edge 3 30 10}) docked
       rect=fmap bounds . activeWindow
@@ -470,7 +471,7 @@ checks = do
   check "Shift arrows resize with the same sticky edge rule"
     (rectangles (fst (handleEvent (V.EvKey V.KRight [V.MShift]) (mouse 38 30 largeAndSmall)))==
      [Rect 0 1 41 30,Rect 41 5 20 10])
-  let withFiles rs=(arranged rs) {sideTree=Just (Sidebar "/tmp" [] 0 0 24 False)}
+  let withFiles rs=(arranged rs) {sideTree=Just (emptySidebar "/tmp" 24 False)}
       withMessages rs=(arranged rs) {problemsVisible=True,problemsPreferredHeight=8}
       equalFiles=withFiles [Rect 23 1 30 38]
       fileChain=withFiles [Rect 23 5 25 20,Rect 48 8 20 10]
@@ -508,7 +509,7 @@ checks = do
     (applicationTitle "/project" named=="th src/Main.hs")
   check "outer title follows the active file and project directory"
     (applicationTitle "/project" other=="th test/Spec.hs" &&
-     applicationTitle "/elsewhere" (installTree "/project" [] named)=="th src/Main.hs" &&
+     applicationTitle "/elsewhere" (installSidebar (emptySidebar "/project" 24 True) named)=="th src/Main.hs" &&
      applicationTitle "/project" named {defaultDirectory=Just "/project/test"}=="th ../src/Main.hs")
   check "outer title handles empty desktops and unnamed files"
     (applicationTitle "/project" (initialDesktop (80,25))=="th" &&

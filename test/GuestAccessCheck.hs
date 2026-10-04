@@ -10,6 +10,8 @@ import Hide.Buffer
 import Hide.GuestAccess
 import Hide.Commands (platformBindings, configuredBindings)
 import Hide.Bindings (BindingPlatform(TerminalPlatform))
+import SidebarFixture
+import Hide.Sidebar
 import Hide.Model
 import qualified Hide.Protocol as P
 
@@ -137,10 +139,9 @@ checks=do
     (denied privateDestination (P.Key "Backspace" []) && not (pointerAllowedAt privateDestination (left publicRect+1) (top publicRect+1)))
   check "private path guards include ancestors without prefix sibling confusion"
     (protectedPath privateSource privatePath && protectedPathParent privateSource "/authority" && not (protectedPath privateSource "/authority/config.toml.example") && not (protectedPathParent privateSource "/authority-sibling"))
-  let privateTree=base {guestPrivatePaths=[privatePath],sideTree=Just (Sidebar "/authority"
-        [TreeRow "config.toml" privatePath 0 False False,TreeRow "public.hs" "/authority/public.hs" 0 False False] 0 0 30 False)}
+  privateTree<-sidebarFixture "/authority" [("config.toml",privatePath),("public.hs","/authority/public.hs")] base {guestPrivatePaths=[privatePath]}
   check "private sidebar filenames are hidden while ordinary filenames remain visible"
-    (not (readableAt privateTree 5 2) && not (streamerReadableAt privateTree 5 2) && readableAt privateTree 5 3)
+    (not (readableAt privateTree 5 3) && not (streamerReadableAt privateTree 5 3) && readableAt privateTree 5 4)
   let entries=[Entry "config.toml" False Nothing Nothing,Entry "public.hs" False Nothing Nothing]
       browser=openBrowser "/authority" "*" entries base {guestPrivatePaths=[privatePath]}
       browserDialog=maybe (error "missing browser") id (dialog browser)

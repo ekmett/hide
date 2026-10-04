@@ -499,3 +499,47 @@ BSD-3-Clause. These are editor dependencies. The
 records the interface reference.
 
 Run `sh test/launchers.sh` after changing the adjacent `thc-edit` or `th` launchers.
+
+## Shared sidebar providers
+
+`Hide.Plugin.Tree` registers a provider through the existing scoped typed command
+registry. Provider-local node IDs are independent of labels and resource paths.
+Prepared child pages contain at most 128 nodes and bounded presentation/cursor
+fields. Node actions retain typed arguments and exact command registrations. Prepared
+secondary declarations supply registered actions or captured resource-link targets;
+filesystem extension rules stay with the Files provider.
+`Hide.SidebarCommands` owns publication, load admission and reply adoption; no
+extension callback runs during a tick or paint.
+
+Files uses this ordinary provider route. `Hide.Sidebar` stores node metadata and
+an indexed visible-row map keyed by prepared ancestry addresses. Collapse removes
+a contiguous subtree with ordered-map splits. Projection workers prepare branch
+prefixes, spans, row indices and directory subscriptions; paint reads only the
+viewport slice and cached badges. Selected/top row identities anchor adoption.
+Provider/node/request generations and captured ancestry reject obsolete loads
+and actions. An obsolete Loading token is released without resetting a newer
+request. Hiding the sidebar retains live provider declarations; reopening remounts
+their prepared roots with fresh node/request epochs. Obsolete actions cancel on
+the existing worker queue and release their bounded slot after reaping. The host
+controls exact Files refs permitted for agent navigation;
+resource metadata never grants authority.
+
+There are at most four active child loads, 64 waiting loads, one projection, one
+action and one badge worker. Registration publication uses a 32-entry bounded
+queue and adopts at most four deltas per tick. Cancellation is scheduled off the
+UI lock. UI state retains at most 32 roots, 32768 nodes and depth 64. Directory
+enumeration remains on the existing Browser/filesystem worker; delivered pages
+are bounded. Dirty snapshots are evaluated on the badge worker.
+
+Files primary opens use the typed action worker. Already-open files use captured
+window/buffer/content versions and never depend on another disk load; scope closure
+withdraws provider roots at the owner. Its secondary Open keeps the
+existing actor-stamped link worker/client-resource transport and a frozen sidebar
+target. Moving that transport into the typed reply path is a separate slice.
+Recovery stores bounded path/expansion/viewport hints, never live provider handles.
+Selection and top-row indices are remapped after filtering resource entries.
+It restores targets reachable through initial directory pages; hints beyond those
+pages wait for interactive paging.
+`SidebarCheck` exercises Files and an independently declared test provider through
+actual keyboard input, delayed/collapsed loads, paging, retirement, privacy and
+filesystem observation refresh. Other domain providers remain subsequent work.

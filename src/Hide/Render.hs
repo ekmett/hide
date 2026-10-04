@@ -23,8 +23,6 @@ import qualified Data.Text.Lazy as TL
 import qualified Data.Map.Strict as M
 import qualified Data.Vector as Vec
 import Data.Foldable (toList)
-import Data.List (mapAccumR)
-import qualified Data.IntSet as IS
 import Data.Char (isSpace, toLower)
 import Data.Maybe (fromMaybe)
 import System.FilePath (takeFileName, (</>))
@@ -36,6 +34,8 @@ import Hide.BufferView
 import Hide.Unicode (graphemes, clusterWidth, textImage, flattenPicture)
 import Hide.GuestAccess (streamerReadableAt)
 import qualified Hide.Plugin.Menu as Plugin
+import Hide.Sidebar
+import qualified Hide.Plugin.Tree as Tree
 import Hide.Model
 import Hide.InlineState
 import Hide.InlineTypes (proposalEnd)
@@ -129,7 +129,7 @@ data FieldKey = InputKey Text Int | ComboBoxKey Text Int (Maybe Int) | CheckBoxK
   | ListBoxKey Text Int | FileListKey Int | ReadOnlyKey Text
   | TextAreaKey Text Bool Selection Int Int deriving Eq
 data DialogKey = DialogKey Text Int [Text] [FieldKey] deriving Eq
-data SidebarKey = SidebarKey FilePath Int Int Int Bool deriving Eq
+data SidebarKey = SidebarKey FilePath Int Int Int Bool Integer deriving Eq
 -- | Comparable UI metadata and immutable payload identities, without a Desktop payload.
 data RenderKey = RenderKey RenderState (M.Map Int DocumentKey) (M.Map Text ViewKey)
   (Maybe QuestionKey) (Maybe DialogKey) (Maybe SidebarKey) Bool (Int,Bool) [RenderIdentity] deriving Eq
@@ -182,7 +182,8 @@ renderKey original = do
         pure (DialogKey (dialogTitle value) (focus value) (buttons value) fields')
       sidebar value=do
         payload (treeRows value)
-        pure (SidebarKey (treeRoot value) (treeSelected value) (treeScroll value) (treeWidth value) (treeFocused value))
+        payload (treeBadges value)
+        pure (SidebarKey (treeRoot value) (treeSelected value) (treeScroll value) (treeWidth value) (treeFocused value) (treeRevision value))
   documents<-mapM document (buffers original)
   payload (composerBuffer original)
   mapM_ payload (inlinePreview original)
@@ -635,8 +636,7 @@ styledImage dark selectable override active sel start chars = V.horizCat (expand
 
 treeLayers :: Desktop -> Sidebar -> [V.Image]
 treeLayers d tree =
-  [place (max 0 ((w-15) `div` 2)) 1 (label frame " Files "),
-   place (w-5) 1 (label frame "[" V.<|> label (attr cyan blue) "←" V.<|> label frame "]")]
+  [place (w-5) 1 (label frame "[" V.<|> label (attr cyan blue) "←" V.<|> label frame "]")]
   ++ [place (w-1) y (V.char frame '│')
      | y<-[1..h], not (any (\win -> inside (bounds win) (w-1) y) (windows d))]
   ++ [place (w-2) 2 (V.vertCat [scrollCell n | n<-[0..visible-1]]) | treeFocused tree, visible>=3]
@@ -644,26 +644,17 @@ treeLayers d tree =
   where
     w=treeWidth tree; h=max 0 (snd (screenSize d)-2-problemsHeight d); visible=treeContentRows d
     frame=attr white blue
-    listing=take visible (drop (treeScroll tree) (zip [0..] decorated))
-    -- Use the same measured counts as the buffer title (docs/editing.md).
-    changedFiles=M.fromList [(filePath file,bufferLineChanges b)
-      | doc<-M.elems (buffers d), Just file<-[documentFile doc],
-        let b=documentBuffer doc, dirty b]
-    decorated=snd (mapAccumR branch IS.empty (treeRows tree))
-    branch following node =
-      let depth=nodeDepth node
-          prefix=T.pack [if IS.member level following then '│' else ' ' | level<-[0..depth-1]]
-            <> (if IS.member depth following then "├" else "└")
-      in (IS.insert depth (fst (IS.split depth following)),(node,prefix))
-    line (i,(node,prefix))=V.cropRight listWidth (leading
+    listing=visibleRows (treeScroll tree) visible tree
+    line (i,node)=V.cropRight listWidth (leading
       V.<|> label a (" "<>shownName) V.<|> counts V.<|> V.charFill a ' ' listWidth 1)
       where
+        info=rowInfo node
         listWidth=max 0 (w-if treeFocused tree then 3 else 2)
         chosen=treeFocused tree && i==treeSelected tree
-        changes=if nodeDirectory node then Nothing else M.lookup (nodePath node) changedFiles
+        changes=if Tree.infoBranch info then Nothing else Tree.infoResource info >>= (\path->case M.lookup path (treeBadges tree) of Just (True,added,deleted)->Just (added,deleted); _->Nothing)
         bg=if chosen then green else blue
         a=if changes/=Nothing then attr (V.RGBColor 255 85 85) bg else if chosen then selected else edit
-        leading=label (if chosen then selected else frame) prefix V.<|> label iconColor marker
+        leading=label (if chosen then selected else frame) (rowPrefix node) V.<|> label iconColor marker
         available=max 0 (listWidth-V.imageWidth leading-1)
         badge=case changes of
           Just (added,deleted) | added/=0 || deleted/=0 ->
@@ -671,11 +662,12 @@ treeLayers d tree =
             V.<|> label a " " V.<|> label (attr (V.RGBColor 255 85 85) bg) ("-"<>T.pack (show deleted))
           _ -> V.emptyImage
         counts=if V.imageWidth badge<available then badge else V.emptyImage
-        shownName=T.take (columnOffset (nodeName node) (available-V.imageWidth counts)) (nodeName node)
-        iconColor=if chosen then selected else attr (if nodeDirectory node then yellow else white) blue
-        marker | nodeDirectory node, materialIcons d = if nodeExpanded node then "\xf0770" else "\xf024b"
-               | nodeDirectory node = if nodeExpanded node then "📂" else "📁"
-               | otherwise = "📄"
+        shownName=T.take (columnOffset (Tree.infoLabel info) (available-V.imageWidth counts)) (Tree.infoLabel info)
+        iconColor=if chosen then selected else attr (if Tree.infoBranch info then yellow else white) blue
+        marker | Tree.infoIcon info=="📁", materialIcons d = if rowExpanded node then "\xf0770" else "\xf024b"
+               | Tree.infoIcon info=="📁" = if rowExpanded node then "📂" else "📁"
+               | Tree.infoIcon info=="" = if Tree.infoBranch info then if rowExpanded node then "▼" else "▶" else ""
+               | otherwise = Tree.infoIcon info
     thumb=scrollbarThumb visible (treeScrollLimit d tree) (treeScroll tree)
     scrollCell n=V.char (if n==0 || n==visible-1 then attr blue scrollCyan else attr scrollCyan blue)
       (if n==0 then '▲' else if n==visible-1 then '▼' else if n==thumb then '█' else '░')

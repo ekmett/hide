@@ -12,6 +12,8 @@ module Hide.GuestAccess
   , validateGuestEffects, guestCommandAllowed, guestEffectsAllowed, guestKeyboardAllowed, guestKeyAllowed, guestKeyCombinations
   , guestModalBlocked, guestTransitionAllowed, beginGuestInput, endGuestInput
   ) where
+import Hide.Sidebar
+import qualified Hide.Plugin.Tree as Tree
 import Control.Monad (when)
 import System.Directory (canonicalizePath)
 import Data.Char (toLower)
@@ -124,8 +126,14 @@ validateGuestEffects d=mapM_ check
     denied=ioError (userError "Agent tools cannot access editor authority or session-key files.")
     path name=canonicalizePath name >>= \resolved->when (protectedPath d resolved) denied
     buffer ident=when (protectedBuffer d ident) denied
+    treePath trace=case (trace,sideTree d) of
+      (hit:_,Just tree)->maybe (pure ()) path (Tree.infoResource . stateInfo =<< nodeAt hit tree)
+      _->denied
     check effect=case effect of
       ReadPath name->path name
+      ReadTree name->path name
+      LoadTree request _->treePath (requestAncestors request)
+      InvokeTree trace _ _->treePath trace
       JumpTo name _ _->path name
       InvokeMenu _ _ (Just (MessagesTarget _ _ (Just (name,_,_))))->path name
       OpenChoice base input pattern->let chosen=T.unpack (if T.null input then pattern else input) in path (if isAbsolute chosen then chosen else base </> chosen)
@@ -141,10 +149,13 @@ guestEffectsAllowed=all allowed
   where
     allowed ReloadKeyBindings{}=False
     allowed (InvokeMenu _ origin _)=origin==Plugin.AgentMenu
+    allowed (InvokeTree _ _ origin)=origin==Plugin.AgentMenu
+    allowed (LoadTree _ origin)=origin==Plugin.AgentMenu
     allowed ReadGitDiff=False
     allowed AskGitCommit=False
     allowed WriteGitCommit{}=False
     allowed FollowLink{}=False
+    allowed FollowTreeLink{}=False
     allowed EnvironmentAction{}=False
     allowed PermissionAction{}=False
     allowed SaveChatSubmit{}=False
@@ -278,7 +289,7 @@ privateTreeCell :: Desktop -> Int -> Int -> Bool
 privateTreeCell d x y
   | maybe False (\(r,_)->inside r x y) (contextMenu d) || maybe False (\(i,_)->inside (menuRect d i) x y) (menu d)=False
   | Just tree<-sideTree d,x>=1,x<treeWidth tree-2,y>=2,y<2+treeContentRows d =
-      maybe False (protectedPath d . nodePath) (at (treeRows tree) (treeScroll tree+y-2))
+      maybe False (maybe False (protectedPath d) . Tree.infoResource . rowInfo) (rowAt (treeScroll tree+y-2) tree)
   | otherwise=False
 
 privateBrowserCell :: Desktop -> Dialog -> Int -> Int -> Bool

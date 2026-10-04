@@ -8,6 +8,7 @@
 module Hide.Build
   (Toolchain(..), BuildAction(..), BuildConfig(..), loadBuildConfig, isProject, resolveBuildRoot, buildSource, buildPlan, testPlan, buildConfigValue, parseBuildConfig) where
 
+import Hide.Sidebar
 import Control.Exception (IOException, try)
 import Data.Aeson
 import Data.Aeson.Types (parseMaybe)
@@ -20,7 +21,7 @@ import qualified Data.Text.Encoding
 import System.Directory (canonicalizePath, doesFileExist, findExecutable, listDirectory)
 import System.Environment (lookupEnv)
 import System.FilePath ((</>), isAbsolute, takeFileName, takeExtension, takeDirectory)
-import Hide.Model (Desktop(..), Sidebar(..), Window(..), Document(..), Toolchain(..), startingDirectory)
+import Hide.Model (Desktop(..), Window(..), Document(..), Toolchain(..), startingDirectory)
 import Hide.Files (filePath)
 
 data BuildAction = Compile | Make | Run deriving (Eq,Show)
