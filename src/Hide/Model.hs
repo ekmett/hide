@@ -19,6 +19,7 @@ import Data.Text (Text)
 import qualified Data.Text.Encoding as TE
 import qualified Data.Map.Strict as M
 import qualified Data.Vector as Vec
+import qualified Hide.Plugin.Window as PluginWindow
 import Hide.Sidebar
 import Hide.AgentSidebarTypes
 import qualified Hide.AgentHub
@@ -86,9 +87,10 @@ data ReviewSelection = ReviewSelection
   { reviewRevision :: Int, reviewCounts :: (Int,Int), reviewSide :: ReviewSide, reviewRange :: Selection
   } deriving (Eq,Show)
 
--- | A view of one document, with its own geometry, selection and scroll position.
+-- | Content identity is separate from host chrome; plugin views have no buffer ID.
+data WindowContent = SourceContent !Int | PluginContent !PluginWindow.WindowRef deriving (Eq,Show)
 data Window = Window
-  { windowId :: Int, bufferId :: Int, bounds :: Rect, selection :: Selection
+  { windowId :: Int, windowContent :: WindowContent, bounds :: Rect, selection :: Selection
   , scrollRow :: Int, scrollColumn :: Int, restoredBounds :: Maybe Rect
   , windowHexLow :: Bool, windowHexAscii :: Bool
   , windowNumber :: Int, bufferView :: BufferView, reviewSelection :: Maybe ReviewSelection, reviewSplit :: Int
@@ -180,6 +182,7 @@ data ConversationView = ConversationView
 -- This record is not a cheap equality key; use the dedicated rendering projection.
 data Desktop = Desktop
   { screenSize :: (Int,Int), windows :: [Window], buffers :: M.Map Int Document
+  , pluginWindows :: M.Map PluginWindow.WindowRef PluginWindow.PreparedWindow
   , nextId :: Int, menu :: Maybe (Int,Int), dialog :: Maybe Dialog, drag :: Maybe Drag
   , clipboard :: Text, clipboardCode :: Maybe Text, wordStar :: Bool, prefix :: Maybe Char, status :: Text
   , blockStart :: Maybe (Int,Int), lastFind :: Text, sideTree :: Maybe Sidebar, branchStatus :: Text, nativeMac :: Bool, gitReview :: Maybe GitReview, videoMode :: Maybe Int
@@ -402,6 +405,7 @@ statusHintsRaw d
        key "  Shift+Enter Newline" V.KEnter [V.MShift]] ++ [key "  Esc Cancel" V.KEsc [] | agentReplying d]
   | not (T.null (typeHint d)) = [(" "<>typeHint d,Nothing)]
   | not (T.null (status d)) = [command " F1 Help" Help,(" | "<>status d,Nothing)]
+  | Just _<-activePluginWindow d = [command " Ctrl+C Copy" Copy,command "  Alt+F3 Close" Close,(" | Read-only plugin text",Nothing)]
   | otherwise = [command " F1 Help" Help,command "  F2 Save" Save,command "  F3 Open" Open,
       command "  Alt+F9 Compile" CompileTarget,command "  F9 Make" MakeTarget,command "  Ctrl+F9 Run" RunTarget]
   where command label cmd=(effective label cmd,Just (Left cmd))
@@ -456,6 +460,7 @@ contributedCommand name epoch generation d=do
 
 commandEnabled :: Desktop -> Command -> Bool
 commandEnabled d cmd | dialogCommandAllowed cmd d = True
+commandEnabled d cmd | activePluginWindow d/=Nothing, sourceOnlyCommand cmd = False
 commandEnabled d Download = browserFrontend d && maybe False ((==Nothing) . documentLabel) (activeDocument d)
 commandEnabled d GoToMessage | menusActive d = maybe False (commandEnabled d . contributionCommand d) (find ((=="hide.messages.go-to") . Plugin.menuName . Plugin.menuReference) (contributedMenus d))
 commandEnabled d Help | menusActive d = any ((=="hide.help.contents") . Plugin.menuName . Plugin.menuReference) (contributedMenus d)
@@ -475,7 +480,7 @@ commandEnabled d MessagesPage{} = problemsFocused d
 commandEnabled d (ExecuteShellBlock bid block) = maybe False (elem block . documentShellBlocks) (M.lookup bid (buffers d))
 commandEnabled d (SetBufferView _) = maybe False (\doc -> documentLabel doc==Nothing && textBuffer (documentBuffer doc)) (activeDocument d)
 commandEnabled d (RevertChange bid version counts _) = case activeDocument d of
-  Just doc -> documentLabel doc==Nothing && textBuffer (documentBuffer doc) && fmap bufferId (activeWindow d)==Just bid && revision (documentBuffer doc)==version && bufferLineChanges (documentBuffer doc)==counts
+  Just doc -> documentLabel doc==Nothing && textBuffer (documentBuffer doc) && (activeWindow d >>= bufferId)==Just bid && revision (documentBuffer doc)==version && bufferLineChanges (documentBuffer doc)==counts
   _ -> False
 commandEnabled d ToggleTerminalPin = maybe False (terminalWindow d) (activeWindow d)
 commandEnabled d cmd | cmd `elem` [Zoom,SplitVertical,SplitHorizontal], maybe False (windowPinned d) (activeWindow d) = False
@@ -488,6 +493,11 @@ commandEnabled d Copy | problemsVisible d && problemsFocused d = case messageInv
   _ -> False
 commandEnabled d cmd | problemsVisible d && problemsFocused d, cmd `elem` [Undo,Redo,Cut,Paste,SelectAll] = False
 commandEnabled _ _ = True
+-- | Actions requiring editable source identity never act on plugin text.
+sourceOnlyCommand :: Command -> Bool
+sourceOnlyCommand cmd=cmd `elem` [Save,SaveAs,Download,Undo,Redo,Cut,Paste,Find,FindNext,FindPrevious,Replace,GoTo,
+  InspectType,Definition,Complete,RenameSymbol,CodeActions,ToggleHex,SplitVertical,SplitHorizontal]
+
 -- | Shared current-state gate for menu invocations and frontend hints. Queued
 -- events must check this again when consumed; a painted enabled state is a hint.
 menuCommandAvailable :: Desktop -> Command -> Bool
@@ -506,14 +516,41 @@ menuRect d i = Rect (min x (max 0 (sw-w))) 1 w (length (menuItemsFor d i)+2)
         w = min sw (maximum [keyLabelWidth t + keyLabelWidth (menuShortcut d entry) + 5 + (case command of SetBufferView _ -> 4; _ -> 0) | entry@(MenuItem t _ command) <- menuItemsFor d i])
 
 initialDesktop :: (Int,Int) -> Desktop
-initialDesktop size = Desktop size [] M.empty 1 Nothing Nothing Nothing "" Nothing False Nothing "" Nothing "" Nothing "" False Nothing Nothing Nothing "" Nothing Nothing Nothing [] False 0 0 False Nothing 0 0 Nothing SourceContext Nothing (newBuffer "") (Selection 0 0) True False False 0 True False False False Nothing Nothing [] 8 Nothing [] False SystemMode True [] Nothing [] Nothing [] False Nothing "" M.empty False (0,Nothing) [] Nothing CurrentView QuerySubmit Nothing 0 M.empty Nothing False (newBuffer "") (Selection 0 0) True False M.empty [] [] False Nothing 0
+initialDesktop size = Desktop size [] M.empty M.empty 1 Nothing Nothing Nothing "" Nothing False Nothing "" Nothing "" Nothing "" False Nothing Nothing Nothing "" Nothing Nothing Nothing [] False 0 0 False Nothing 0 0 Nothing SourceContext Nothing (newBuffer "") (Selection 0 0) True False False 0 True False False False Nothing Nothing [] 8 Nothing [] False SystemMode True [] Nothing [] Nothing [] False Nothing "" M.empty False (0,Nothing) [] Nothing CurrentView QuerySubmit Nothing 0 M.empty Nothing False (newBuffer "") (Selection 0 0) True False M.empty [] [] False Nothing 0
 
 activeWindow :: Desktop -> Maybe Window
 activeWindow d = listToMaybe (filter (windowVisible d) (windows d))
 activeDocument :: Desktop -> Maybe Document
-activeDocument d = activeWindow d >>= (\w -> M.lookup (bufferId w) (buffers d))
+activeDocument d = activeWindow d >>= (\w -> windowDocument (buffers d) w)
+
+-- | Source identity is absent for plugin-owned content.
+bufferId :: Window -> Maybe Int
+bufferId w=case windowContent w of SourceContent bid->Just bid; PluginContent _->Nothing
+
+-- | Checked lookup shared by source-only owners.
+windowDocument :: M.Map Int Document -> Window -> Maybe Document
+windowDocument documents w=bufferId w >>= (`M.lookup` documents)
+
+-- | Adopt worker-prepared content without creating an editable document.
+addPluginWindow :: PluginWindow.PreparedWindow -> Desktop -> Desktop
+addPluginWindow prepared d=d {windows=w:windows d,pluginWindows=M.insert reference prepared (pluginWindows d),nextId=i+1,
+  problemsFocused=False,sideTree=fmap (\tree->tree {treeFocused=False}) (sideTree d)}
+  where
+    reference=PluginWindow.preparedWindowRef prepared
+    i=nextId d
+    (sw,sh)=screenSize d
+    w=Window i (PluginContent reference) (fitWindow d (Rect 0 1 sw (sh-2))) (Selection 0 0) 0 0 Nothing False False
+      (nextWindowNumber d) CurrentView Nothing 50
+
+activePluginWindow :: Desktop -> Maybe PluginWindow.PreparedWindow
+activePluginWindow d=do
+  w<-activeWindow d
+  case windowContent w of
+    PluginContent reference->M.lookup reference (pluginWindows d)
+    SourceContent _->Nothing
 
 applicationTitle :: FilePath -> Desktop -> Text
+applicationTitle _ d | Just view<-activePluginWindow d = "th "<>PluginWindow.preparedWindowTitle view
 applicationTitle cwd d = case activeDocument d of
   Nothing -> "th"
   Just doc | streamerMode d, Just file<-documentFile doc, any (equalFilePath (filePath file)) (guestPrivatePaths d) -> "th [private]"
@@ -522,7 +559,7 @@ applicationTitle cwd d = case activeDocument d of
       root=fromMaybe (maybe cwd treeRoot (sideTree d)) (defaultDirectory d)
       name=case documentFile doc of
         Just file -> T.pack (relative (filePath file))
-        Nothing -> T.pack (fromMaybe ("NONAME"++maybe "" (show . bufferId) (activeWindow d)++".HS") (documentSuggestedName doc))
+        Nothing -> T.pack (fromMaybe ("NONAME"++maybe "" (maybe "" show . bufferId) (activeWindow d)++".HS") (documentSuggestedName doc))
       relative path | not (isAbsolute path) = path
                     | otherwise = joinPath (stripCommon (splitDirectories (normalise root)) (splitDirectories (normalise path)))
       stripCommon (a:as) (b:bs) | a==b = stripCommon as bs
@@ -538,7 +575,7 @@ addDocument file b d = d { windows = w : windows d, buffers = M.insert i (newDoc
     i = nextId d
     offset = length (windows d) `mod` 5
     (sw,sh) = screenSize d
-    w = Window i i (fitWindow d (Rect offset (1+offset) (sw-offset) (sh-2-offset))) (Selection 0 0) 0 0 Nothing False False (nextWindowNumber d) (if byteMode b then CurrentView else defaultBufferView d) Nothing 50
+    w = Window i (SourceContent i) (fitWindow d (Rect offset (1+offset) (sw-offset) (sh-2-offset))) (Selection 0 0) 0 0 Nothing False False (nextWindowNumber d) (if byteMode b then CurrentView else defaultBufferView d) Nothing 50
 
 nextWindowNumber :: Desktop -> Int
 nextWindowNumber d = choose 1
@@ -559,15 +596,21 @@ windowFocused d w = not (problemsFocused d) && not (maybe False treeFocused (sid
 -- | Small native window metadata, including open docked tabs. Buffers without
 -- views are absent; deriving names never reads content, baselines or histories.
 editorWindowEntries :: Desktop -> [(Int,Text,Bool,Bool)]
-editorWindowEntries d=[(windowId w,safeTitle (title w doc),selected==Just (windowId w),enabled) | w<-sortOn windowNumber (windows d),Just doc<-[M.lookup (bufferId w) (buffers d)]]
+editorWindowEntries d=[(windowId w,safeTitle (windowTitle d w),selected==Just (windowId w),enabled) | w<-sortOn windowNumber (windows d)]
   where
     enabled=dialog d==Nothing && not (questionActive d)
     selected=if problemsFocused d || maybe False treeFocused (sideTree d) then Nothing else windowId <$> activeWindow d
     safeTitle=T.take 8192 . T.map (\c->if c<' ' || c=='\DEL' then '·' else c)
-    title w doc
-      | streamerMode d,Just file<-documentFile doc,any (equalFilePath (filePath file)) (guestPrivatePaths d) = "Private buffer"
-      | otherwise = fromMaybe file (documentLabel doc)
-      where file=maybe (maybe ("NONAME"<>T.pack (show (bufferId w))<>".HS") T.pack (documentSuggestedName doc)) (T.pack . takeFileName . filePath) (documentFile doc)
+
+-- | Host title projection never reads content or histories.
+windowTitle :: Desktop -> Window -> Text
+windowTitle d w=case windowContent w of
+  PluginContent reference->maybe "Unavailable plugin window" PluginWindow.preparedWindowTitle (M.lookup reference (pluginWindows d))
+  SourceContent bid->case M.lookup bid (buffers d) of
+    Nothing->"Unavailable source"
+    Just doc | streamerMode d,Just file<-documentFile doc,any (equalFilePath (filePath file)) (guestPrivatePaths d)->"Private buffer"
+             | otherwise->fromMaybe (maybe (maybe ("NONAME"<>T.pack (show bid)<>".HS") T.pack (documentSuggestedName doc))
+                 (T.pack . takeFileName . filePath) (documentFile doc)) (documentLabel doc)
 
 -- | Dock targets are human view selection, not an escape from a modal control.
 editorWindowAvailable :: Desktop -> Int -> Bool
@@ -648,10 +691,9 @@ editActive _ _ d | maybe False treeFocused (sideTree d) || problemsFocused d = d
 editActive f cursor d = case (activeWindow d, activeDocument d) of
   (Just _, Just doc) | documentLabel doc /= Nothing -> d {status="This window is read-only."}
   (Just active, Just doc)
-    | revision changed==revision original -> maybe (modifyActive (\w -> w {reviewSelection=Nothing}) d) (\p -> moveTo False p d) cursor
-    | otherwise -> clampReviewWindows (ensureVisible d { buffers = M.insert bid (restyle doc {documentBuffer = changed}) (buffers d), windows = map adjust (windows d) })
+    | Just _<-bufferId active, revision changed==revision original -> maybe (modifyActive (\w -> w {reviewSelection=Nothing}) d) (\p -> moveTo False p d) cursor
+    | Just bid<-bufferId active -> clampReviewWindows (ensureVisible d { buffers = M.insert bid (restyle doc {documentBuffer = changed}) (buffers d), windows = map adjust (windows d) })
     where
-      bid = bufferId active
       original = documentBuffer doc
       changed = f (selection active) original
       (common,oldEnd,inserted) = fromMaybe (0,0,0) (lastChange changed)
@@ -660,7 +702,7 @@ editActive f cursor d = case (activeWindow d, activeDocument d) of
                | p <= common = p
                | p >= oldEnd = p + newEnd-oldEnd
                | otherwise = newEnd
-      adjust w | bufferId w /= bid = w
+      adjust w | bufferId w/=bufferId active = w
                | windowId w == windowId active = w {selection = Selection target target,windowHexLow=False,reviewSelection=Nothing,bufferView=if byteMode changed then CurrentView else bufferView w}
                | otherwise = w {selection = let Selection a c = selection w in Selection (rebase a) (rebase c),reviewSelection=Nothing,bufferView=if byteMode changed then CurrentView else bufferView w}
       target = max 0 (min (bufferLength changed) (fromMaybe newEnd cursor))
@@ -748,7 +790,7 @@ setBufferView mode d
 clampReviewWindows :: Desktop -> Desktop
 clampReviewWindows d=d {windows=map clamp (windows d)}
   where
-    clamp w | Just doc<-M.lookup (bufferId w) (buffers d),windowChangeView (documentBuffer doc) w =
+    clamp w | Just doc<-windowDocument (buffers d) w,windowChangeView (documentBuffer doc) w =
       w {reviewSelection=windowReviewSelection (documentBuffer doc) w,
          scrollRow=max 0 (min (scrollbarLimit d True doc w) (scrollRow w))}
     clamp w=w
@@ -813,14 +855,15 @@ shellBlockAt x y d=do
       position=bufferLineOffset b row+columnOffset (bufferLineAt b row) col
   if byteMode b || windowChangeView b w || row>=bufferLineCount b then Nothing else do
     block<-find (\(start,end,_,raw)->position>=start && position<end && not (T.null (T.strip raw))) (documentShellBlocks doc)
-    pure (ExecuteShellBlock (bufferId w) block)
+    bid<-bufferId w
+    pure (ExecuteShellBlock bid block)
 
 reviewContext :: Int -> Int -> Desktop -> ContextKind
 reviewContext x y d=case (activeWindow d,activeDocument d) of
   (Just w,Just doc) | windowChangeView b w,
     let entry=viewRowAt (bufferView w) (bufferViewProjection b) (y-top (bounds w)-1+scrollRow w),
     Just row<-case reviewHit x y b w of Just (_,r,_)->Just r; Nothing->case viewLeftRow entry of Just r->Just r; Nothing->viewRightRow entry,
-    Just _<-changeHunkAt b row -> ChangeContext (RevertChange (bufferId w) (revision b) (bufferLineChanges b) row)
+    Just _<-changeHunkAt b row, Just bid<-bufferId w -> ChangeContext (RevertChange bid (revision b) (bufferLineChanges b) row)
     where b=documentBuffer doc
   _ -> SourceContext
 
@@ -836,6 +879,7 @@ prompt title p fs d = d {dialog = Just (Dialog title p fs 0 ["OK","Cancel"] []),
 
 -- | Apply a semantic editor command and return any required host effects.
 runCommand :: Command -> Desktop -> (Desktop,[Effect])
+runCommand cmd source | dialog source==Nothing, Just _<-activePluginWindow source, sourceOnlyCommand cmd = (source {status="This plugin window is read-only."},[])
 runCommand cmd source | browserFrontend source, cmd `elem` [Copy,Cut,CopyAllMessages,CopyLocation] =
   let (next,requests)=runCommand cmd source {browserFrontend=False}
   in (next {browserFrontend=True},requests++[WriteBrowserClipboard (clipboard next)])
@@ -847,6 +891,11 @@ runCommand Copy source | activeConversation source, Just w<-activeWindow source,
 runCommand cmd source | activeAutocomplete source, autocompleteFocused source, cmd `elem` [Undo,Redo,Copy,Cut,Paste,SelectAll] = (autocompleteEdit (composerCommandWith False cmd) source,[])
 runCommand cmd source | questionActive source, cmd `elem` [Undo,Redo,Copy,Cut,Paste,SelectAll] = (questionEdit (composerCommandWith False cmd) source,[])
 runCommand cmd source | not (problemsFocused source), composerActive source, cmd `elem` [Undo,Redo,Copy,Cut,Paste,SelectAll] = (composerCommand cmd source,[])
+runCommand Copy source | dialog source==Nothing,Just view<-activePluginWindow source, Just w<-activeWindow source =
+  let (a,b)=ordered (selection w)
+  in (copyClipboard False (contentSlice (PluginWindow.preparedWindowText view) a b) source {menu=Nothing,contextMenu=Nothing},[])
+runCommand SelectAll source | dialog source==Nothing,Just view<-activePluginWindow source =
+  (modifyActive (\w->w {selection=Selection 0 (contentLength (PluginWindow.preparedWindowText view))}) source,[])
 runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source {menu = Nothing, contextMenu=Nothing, buttonHover=Nothing, buttonPressed=Nothing, prefix = Nothing, drag = Nothing,dragOriginal=Nothing})
   where
     go ReloadBindings d = (d {status="Reloading keybindings..."},[ReloadKeyBindings (startingDirectory d)])
@@ -867,7 +916,7 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
             location=T.pack (filePath file)<>":"<>T.pack (show (r+1))<>":"<>T.pack (show (col+1))
         in ((copyClipboard False location d) {status="Location copied."},[])
       _ -> (d,[])
-    go Download d = (d,[DownloadDocument (bufferId w) | commandEnabled d Download, Just w<-[activeWindow d]])
+    go Download d = (d,[DownloadDocument bid | commandEnabled d Download, Just w<-[activeWindow d], Just bid<-[bufferId w]])
     go New d = (addDocument Nothing (newBuffer "") d,[])
     go Open d = (d,[BrowsePath (startingDirectory d) "*.hs"])
     go ChangeDir d = (d,[BrowseDirectories (startingDirectory d)])
@@ -893,7 +942,7 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
     go AgentPermissions d = (d,[PermissionAction "show" []])
     go EnvironmentOptions d = (d,[EnvironmentAction "show" []])
     go AgentGuidance d = (d,[AgentAction "context" []])
-    go Conversation d = case find (\w -> maybe False ((==Just "Conversation").documentLabel) (M.lookup (bufferId w) (buffers d))) (windows d) of
+    go Conversation d = case find (\w -> maybe False ((==Just "Conversation").documentLabel) (windowDocument (buffers d) w)) (windows d) of
       Just w -> (focusWindow (windowId w) d {composerFocused=True},[AgentAction "focus" []])
       Nothing -> (d,[AgentAction "show" []])
     go AgentCancel d = (d,[AgentAction "cancel" []])
@@ -905,11 +954,12 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
     go SaveAs d = case activeWindow d of
       Nothing -> (d,[])
       Just _ | maybe False ((/=Nothing) . documentLabel) (activeDocument d) -> (d {status="This window is read-only."},[])
-      Just w -> (prompt "Save file as" (Saving (bufferId w) Nothing) [Input "Name" (currentPath d) (T.length (currentPath d))] d,[])
+      Just w | Just bid<-bufferId w -> (prompt "Save file as" (Saving bid Nothing) [Input "Name" (currentPath d) (T.length (currentPath d))] d,[])
+      _ -> (d,[])
     go Quit d = case find (dirty . documentBuffer . snd) (M.toList (buffers d)) of
       Nothing | conversationHasDraft d -> (d {dialog=Just (Dialog "Unsent query" DiscardDraft [] 0 ["Discard","Cancel"] ["Discard the unsent conversation query?"])},[])
               | otherwise -> (d,[Exit])
-      Just (bid,_) -> let focused = maybe d (\w -> focusWindow (windowId w) d) (find ((==bid) . bufferId) (windows d))
+      Just (bid,_) -> let focused = maybe d (\w -> focusWindow (windowId w) d) (find ((==Just bid) . bufferId) (windows d))
                      in confirm Quit focused
     go Close d = case (activeWindow d, activeDocument d) of
       (Just w, Just doc) | dirty (documentBuffer doc) && length (filter ((==bufferId w) . bufferId) (windows d)) == 1 -> confirm Close d
@@ -1023,9 +1073,9 @@ documentTitle d = if T.null (currentPath d) then "NONAME.HS" else currentPath d
 saveRequest :: Maybe Command -> Desktop -> (Desktop,[Effect])
 saveRequest after d = case (activeWindow d,activeDocument d) of
   (Just _,Just doc) | documentLabel doc /= Nothing -> (d {status="This window is read-only."},[])
-  (Just w,Just doc) -> case documentFile doc of
-    Nothing -> (prompt "Save file as" (Saving (bufferId w) after) [Input "Name" (currentPath d) (T.length (currentPath d))] d,[])
-    Just _ -> (d,[SaveDocument (bufferId w) Nothing after])
+  (Just w,Just doc) | Just bid<-bufferId w -> case documentFile doc of
+    Nothing -> (prompt "Save file as" (Saving bid after) [Input "Name" (currentPath d) (T.length (currentPath d))] d,[])
+    Just _ -> (d,[SaveDocument bid Nothing after])
   _ -> (d,[])
 
 closeActive :: Desktop -> Desktop
@@ -1033,7 +1083,10 @@ closeActive d = case activeWindow d of
   Nothing -> d
   Just w -> layoutProblems d (normalizeBottom (rememberConversationView d)
     {windows=ws,dockedTerminals=M.delete (windowId w) (dockedTerminals d),
-     buffers=if any ((==bufferId w) . bufferId) ws || maybe False ((==Just "Conversation").documentLabel) (M.lookup (bufferId w) (buffers d)) then buffers d else M.delete (bufferId w) (buffers d)})
+     buffers=case bufferId w of
+       Just bid | not (any ((==Just bid) . bufferId) ws), not (maybe False ((==Just "Conversation").documentLabel) (windowDocument (buffers d) w)) -> M.delete bid (buffers d)
+       _ -> buffers d,
+     pluginWindows=case windowContent w of PluginContent reference->M.delete reference (pluginWindows d); SourceContent _->pluginWindows d})
     where ws=filter ((/=windowId w).windowId) (windows d)
 
 tileWindows :: Bool -> Desktop -> Desktop
@@ -1303,7 +1356,7 @@ inlineEligible d=dialog d==Nothing && menu d==Nothing && contextMenu d==Nothing 
 
 inlineMatches :: Desktop -> InlineView -> Bool
 inlineMatches d v=inlineEligible d && inlineEpoch d==inlineGeneration v && case (activeWindow d,activeDocument d) of
-  (Just w,Just doc)->windowId w==inlineWindow v && bufferId w==inlineBuffer v && revision (documentBuffer doc)==inlineRevision v && selection w==inlineSelection v
+  (Just w,Just doc)->windowId w==inlineWindow v && bufferId w==Just (inlineBuffer v) && revision (documentBuffer doc)==inlineRevision v && selection w==inlineSelection v
   _->False
 
 inlineEvent :: V.Event -> Desktop -> Maybe (Desktop,[Effect])
@@ -1389,6 +1442,7 @@ dispatchEvent (V.EvPaste bytes) d = case TE.decodeUtf8' bytes of
   Left _ -> (message "Paste failed" ["The pasted text is not valid UTF-8."] d,[])
   Right t -> (insertText (T.filter (\c -> textInputChar c || c `elem` ['\n','\r','\t']) t) d,[])
 dispatchEvent (V.EvKey key mods) d | Just tree <- sideTree d, treeFocused tree = treeKey key mods tree d
+dispatchEvent (V.EvKey key mods) d | Just _<-activePluginWindow d = (pluginKey key mods d,[])
 dispatchEvent (V.EvKey key mods) d = keyEvent key mods d
 dispatchEvent _ d = (d,[])
 
@@ -1403,7 +1457,7 @@ rememberConversationView d = case conversationDocument (conversationTarget d) d 
   Nothing -> d
   Just (bid,_) ->
     let old=M.lookup (conversationTarget d) (conversationViews d)
-        win=find ((==bid).bufferId) (windows d)
+        win=find ((==Just bid) . bufferId) (windows d)
         view=ConversationView bid (maybe "Primary" conversationName old) (composerBuffer d) (composerSelection d)
           (maybe (maybe (0,0) conversationScroll old) (\w->(scrollRow w,scrollColumn w)) win)
           (maybe (maybe (Selection 0 0) conversationReplySelection old) selection win)
@@ -1416,28 +1470,28 @@ addConversationDocument d=let added=addDocument Nothing (newBuffer "") d in
 selectConversationView :: Text -> Text -> Desktop -> Desktop
 selectConversationView target name original =
   let saved=rememberConversationView original
-      existingWindow=find (\w->maybe False ((==Just "Conversation").documentLabel) (M.lookup (bufferId w) (buffers saved))) (windows saved)
+      existingWindow=find (\w->maybe False ((==Just "Conversation").documentLabel) (windowDocument (buffers saved) w)) (windows saved)
       (bid,prepared0)=case conversationDocument target saved of
         Just (ident,_) -> (ident,saved)
         Nothing -> let added=addConversationDocument saved in (nextId saved,added)
       prepared=case existingWindow of
-        Nothing | not (any ((==bid).bufferId) (windows prepared0)) ->
+        Nothing | not (any ((==Just bid) . bufferId) (windows prepared0)) ->
           let added=addConversationDocument prepared0
           in added {buffers=M.delete (nextId prepared0) (buffers added),windows=case windows added of
-            new:rest -> new {bufferId=bid}:rest
+            new:rest -> new {windowContent=SourceContent bid}:rest
             [] -> []}
         _ -> prepared0
       old=M.lookup target (conversationViews prepared)
       view=maybe (ConversationView bid name (newBuffer "") (Selection 0 0) (0,0) (Selection 0 0)) (\v->v {conversationName=name}) old
-      adjusted w=w {bufferId=bid,scrollRow=fst (conversationScroll view),scrollColumn=snd (conversationScroll view),selection=conversationReplySelection view}
+      adjusted w=w {windowContent=SourceContent bid,scrollRow=fst (conversationScroll view),scrollColumn=snd (conversationScroll view),selection=conversationReplySelection view}
       oldWindows=case existingWindow of
         Just _ -> windows saved
         Nothing -> windows prepared
-      views=map (\w->if maybe False ((==Just "Conversation").documentLabel) (M.lookup (bufferId w) (buffers prepared)) then adjusted w else w) oldWindows
+      views=map (\w->if maybe False ((==Just "Conversation").documentLabel) (windowDocument (buffers prepared) w) then adjusted w else w) oldWindows
       result=prepared {windows=views,childAgentSettings=[],childAgentSteering=False,childAgentContextUsage=Nothing,conversationTarget=target,conversationViews=M.insert target view (conversationViews prepared),
         composerBuffer=conversationDraft view,composerSelection=conversationDraftSelection view,composerFocused=True,
         chatActions=[],chatInputOffset=Nothing,contextMenu=Nothing,menu=Nothing}
-  in maybe result (\w->focusWindow (windowId w) result) (find ((==bid).bufferId) views)
+  in maybe result (\w->focusWindow (windowId w) result) (find ((==Just bid) . bufferId) views)
 
 conversationHasDraft :: Desktop -> Bool
 conversationHasDraft d=not (T.null (contents (composerBuffer d))) ||
@@ -1471,7 +1525,7 @@ composerActive d = activeConversation d && composerFocused d && not (questionAct
 layoutComposer :: Desktop -> Desktop -> Desktop
 layoutComposer before after = after {windows=map adjust (windows after)}
   where
-    adjust w | Just doc<-M.lookup (bufferId w) (buffers after),
+    adjust w | Just doc<-windowDocument (buffers after) w,
                let reserved state | documentLabel doc==Just "Conversation" = height (composerRect state w)
                                   | autocompletePane state w = height (autocompleteComposerRect state w)
                                   | otherwise = 0,
@@ -1667,7 +1721,7 @@ composerEventWith _ _ _ = Nothing
 -- The Autocomplete hint is independent human input. Reuse editing operations
 -- through a temporary projection, then copy back only its dedicated state.
 autocompletePane :: Desktop -> Window -> Bool
-autocompletePane d w=autocompleteACPEnabled d && maybe False ((==Just "Autocomplete") . documentLabel) (M.lookup (bufferId w) (buffers d))
+autocompletePane d w=autocompleteACPEnabled d && maybe False ((==Just "Autocomplete") . documentLabel) (windowDocument (buffers d) w)
 
 activeAutocomplete :: Desktop -> Bool
 activeAutocomplete d=maybe False (autocompletePane d) (activeWindow d)
@@ -1766,7 +1820,7 @@ questionEvent event d=case chatQuestion d of
 
 conversationClick :: Int -> Int -> Window -> Desktop -> Maybe Effect
 conversationClick x y w d=do
-  doc<-M.lookup (bufferId w) (buffers d)
+  doc<-windowDocument (buffers d) w
   let row=y-top (bounds w)-1+scrollRow w
       b=documentBuffer doc
       column=columnOffset (bufferLineAt b row) (x-left (bounds w)-1+scrollColumn w)
@@ -1926,8 +1980,8 @@ captureContextTarget kind d = case kind of
   _ -> Nothing -- These actions already carry arguments or have session scope.
   where
     source=Just $ case (activeWindow d,activeDocument d) of
-      (Just w,Just doc) | documentLabel doc==Nothing, windowFocused d w ->
-        SourceTarget (windowId w) (bufferId w) (revision (documentBuffer doc)) (selection w)
+      (Just w,Just doc) | documentLabel doc==Nothing, windowFocused d w, Just bid<-bufferId w ->
+        SourceTarget (windowId w) bid (revision (documentBuffer doc)) (selection w)
       _ -> UnavailableSourceTarget
 
 messagesOwner :: Desktop -> Bool
@@ -2249,7 +2303,7 @@ scrollbarLimit d vertical doc w = max 0 (if vertical then documentRows doc w-max
 clampHexScroll :: Desktop -> Desktop -> Desktop
 clampHexScroll before d = d {windows=map clamp (windows d)}
   where
-    clamp w | Just doc<-M.lookup (bufferId w) (buffers d), byteMode (documentBuffer doc) =
+    clamp w | Just doc<-windowDocument (buffers d) w, byteMode (documentBuffer doc) =
       let old=fromMaybe w (find ((==windowId w).windowId) (windows before))
           changed=windowHexBytes old/=windowHexBytes w
           row=if changed then scrollRow old*windowHexBytes old `div` windowHexBytes w else scrollRow w
@@ -2265,6 +2319,9 @@ scrollbarThumb :: Int -> Int -> Int -> Int
 scrollbarThumb len limit position = 1+min limit (max 0 position)*max 0 (len-3) `div` max 1 limit
 
 changeScroll :: Bool -> Int -> Desktop -> Desktop
+changeScroll vertical delta d | Just view<-activePluginWindow d =
+  modifyActive (\w->if vertical then w {scrollRow=max 0 (min (max 0 (contentLineCount (PluginWindow.preparedWindowText view)-height (bounds w)+2)) (scrollRow w+delta))}
+    else w {scrollColumn=max 0 (scrollColumn w+delta)}) d
 changeScroll vertical delta d = case (activeWindow d,activeDocument d) of
   (Just w,Just doc) -> let value=max 0 (min (scrollbarLimit d vertical doc w) ((if vertical then scrollRow w else scrollColumn w)+delta))
     in modifyActive (\v -> if vertical then v {scrollRow=value} else v {scrollColumn=value}) d
@@ -2294,6 +2351,12 @@ scrollTrack vertical x y d = case (activeWindow d,activeDocument d) of
   _ -> d
 
 selectAt :: Bool -> Int -> Int -> Desktop -> Desktop
+selectAt extend x y d | Just view<-activePluginWindow d,Just w<-activeWindow d =
+  let text=PluginWindow.preparedWindowText view
+      row=max 0 (min (contentLineCount text-1) (y-top (bounds w)-1+scrollRow w))
+      col=max 0 (x-left (bounds w)-1+scrollColumn w)
+      pos=contentLineOffset text row+columnOffset (contentLineAt text row) col
+  in pluginMoveTo extend pos d
 selectAt extend x y d = case activeWindow d of
   Nothing -> d
   Just w | activeHex d -> let { col=max 0 (x-left (bounds w)-1+scrollColumn w)
@@ -2310,6 +2373,49 @@ selectAt extend x y d = case activeWindow d of
     row = max 0 (min (bufferLineCount b-1) (y-top (bounds w)-1+scrollRow w))
     col = max 0 (x-left (bounds w)-1+scrollColumn w)
     pos = bufferLineOffset b row + columnOffset (bufferLineAt b row) col
+
+-- | Read-only semantic text navigation; printable keys cannot edit a source behind it.
+pluginKey :: V.Key -> [V.Modifier] -> Desktop -> Desktop
+pluginKey key mods d | Just view<-activePluginWindow d,Just w<-activeWindow d =
+  let text=PluginWindow.preparedWindowText view
+      pos=caret (selection w)
+      (row,col)=contentPosition text pos
+      vertical delta=let next=max 0 (min (contentLineCount text-1) (row+delta))
+                     in contentLineOffset text next+columnOffset (contentLineAt text next) col
+      extend=V.MShift `elem` mods
+      move target=pluginMoveTo extend target d
+  in case key of
+    V.KLeft->move (max 0 (pos-1))
+    V.KRight->move (min (contentLength text) (pos+1))
+    V.KUp->move (vertical (-1))
+    V.KDown->move (vertical 1)
+    V.KPageUp->move (vertical (negate (max 1 (height (bounds w)-2))))
+    V.KPageDown->move (vertical (max 1 (height (bounds w)-2)))
+    V.KHome->move (if V.MCtrl `elem` mods then 0 else contentLineOffset text row)
+    V.KEnd->move (if V.MCtrl `elem` mods then contentLength text else contentLineOffset text row+T.length (contentLineAt text row))
+    _->d
+pluginKey _ _ d=d
+
+pluginMoveTo :: Bool -> Int -> Desktop -> Desktop
+pluginMoveTo extend requested d | Just view<-activePluginWindow d =
+  let text=PluginWindow.preparedWindowText view
+      pos=max 0 (min (contentLength text) requested)
+      (row,col)=contentPosition text pos
+      update w=w {selection=Selection (if extend then anchor (selection w) else pos) pos,
+      scrollRow=max 0 (min row (max (scrollRow w) (row-height (bounds w)+3))),
+      scrollColumn=max 0 (min col (max (scrollColumn w) (col-width (bounds w)+3)))}
+  in modifyActive update d
+pluginMoveTo _ _ d=d
+
+-- Measured line offsets avoid scanning preceding text on cursor movement.
+contentPosition :: BufferContent -> Int -> (Int,Int)
+contentPosition text pos=(row,displayColumn (contentLineAt text row) (pos-contentLineOffset text row))
+  where
+    row=findRow 0 (max 0 (contentLineCount text-1))
+    findRow low high | low>=high=low
+                     | contentLineOffset text middle<=pos=findRow middle high
+                     | otherwise=findRow low (middle-1)
+      where middle=(low+high+1) `div` 2
 
 -- | Choose the current focused input owner using only small focus metadata.
 -- Captured gestures, popups and human question/completion controls retain priority.
@@ -2349,6 +2455,7 @@ bindingInputAvailable d=case dialog d of
 -- | Plain movement/text is handled by its owner. No removed chord falls through
 -- into a hardcoded named command. PTY fallback retains every ordinary control key.
 unboundKey :: V.Key -> [V.Modifier] -> Desktop -> (Desktop,[Effect])
+unboundKey key mods d | Just _<-activePluginWindow d, dialog d==Nothing,maybe False (windowFocused d) (activeWindow d) = (pluginKey key mods d,[])
 unboundKey key mods d = case bindingContext d of
   Just Bindings.DialogKeys | Just dg<-dialog d -> dialogEvent (V.EvKey key mods) dg d
   Just Bindings.SidebarKeys -> (d,[])
@@ -2450,9 +2557,9 @@ starKey c d = case lookup c [('e',V.KUp),('s',V.KLeft),('d',V.KRight),('x',V.KDo
 
 starPrefix :: Char -> Char -> Desktop -> (Desktop,[Effect])
 starPrefix 'k' c d = case c of
-  'b' -> (d {blockStart=(\w -> (bufferId w,caret (selection w))) <$> activeWindow d},[])
+  'b' -> (d {blockStart=(\w -> (,caret (selection w)) <$> bufferId w) =<< activeWindow d},[])
   'k' -> (case (blockStart d,activeWindow d) of
-    (Just (bid,p),Just w) | bid==bufferId w -> modifyActive (\v -> v {selection=Selection (min p (maybe 0 (bufferLength . documentBuffer) (activeDocument d))) (caret (selection v))}) d
+    (Just (bid,p),Just w) | Just bid==bufferId w -> modifyActive (\v -> v {selection=Selection (min p (maybe 0 (bufferLength . documentBuffer) (activeDocument d))) (caret (selection v))}) d
     _ -> d,[])
   'c' -> runCommand Copy d
   'v' -> runCommand Cut d
@@ -2687,7 +2794,7 @@ submitDialog button dg original
       ident:_ -> (d,[LanguageRequest (ApplyCodeAction bid version ident)])
       _ -> (d,[])
     Completing bid version pos choices -> case (activeWindow d,activeDocument d,drop selected choices) of
-      (Just w,Just doc,Completion _ edits:_) | bufferId w==bid, revision (documentBuffer doc)==version, caret (selection w)==pos ->
+      (Just w,Just doc,Completion _ edits:_) | bufferId w==Just (bid), revision (documentBuffer doc)==version, caret (selection w)==pos ->
         (applyCompletion edits d,[])
       _ -> (d {status="Completion expired; request it again."},[])
     Locations places -> case drop selected places of
@@ -2757,7 +2864,8 @@ submitDialog button dg original
     first=fromMaybe "" (listToMaybe values); second=fromMaybe "" (listToMaybe (drop 1 values))
     discardActive s = case activeWindow s of
       Nothing -> s
-      Just w -> s {windows=filter ((/=bufferId w) . bufferId) (windows s), buffers=M.delete (bufferId w) (buffers s)}
+      Just w | Just bid<-bufferId w -> s {windows=filter ((/=Just bid) . bufferId) (windows s), buffers=M.delete bid (buffers s)}
+      _ -> s
 
 
 startingDirectory :: Desktop -> FilePath
@@ -2769,7 +2877,7 @@ treeWidthOf = maybe 0 (max 0 . subtract 1 . treeWidth) . sideTree
 
 -- Pinning changes only view placement. Console processes remain owned by Consoles.
 terminalWindow :: Desktop -> Window -> Bool
-terminalWindow d w = maybe False terminal (M.lookup (bufferId w) (buffers d) >>= documentLabel)
+terminalWindow d w = maybe False terminal (windowDocument (buffers d) w >>= documentLabel)
   where terminal label=any (`T.isPrefixOf` label) ["Terminal ","Ended Terminal "]
 
 windowPinned :: Desktop -> Window -> Bool
@@ -2816,7 +2924,7 @@ bottomTabs d = placeTabs 1 visible
   where
     available=max 0 (fst (screenSize d)-12)
     tabs=[(Nothing,"Messages "<>maybe "" (T.pack.show) (messagesNumber d)) | problemsVisible d]++
-      [(Just (windowId w),(if (documentLabel =<< M.lookup (bufferId w) (buffers d))==Just "Autocomplete" then "Autocomplete " else "Terminal ")<>T.pack (show (windowNumber w))) | w<-sortOn windowNumber (windows d),windowPinned d w]
+      [(Just (windowId w),(if (documentLabel =<< windowDocument (buffers d) w)==Just "Autocomplete" then "Autocomplete " else "Terminal ")<>T.pack (show (windowNumber w))) | w<-sortOn windowNumber (windows d),windowPinned d w]
     selected=fromMaybe 0 (findIndex ((==bottomTerminal d).fst) tabs)
     tabWidth (_,name)=min available (T.length name+2)
     prefix=take (selected+1) tabs
@@ -3093,13 +3201,14 @@ addHelpStyled :: [(Char,Style)] -> Desktop -> Desktop
 addHelpStyled chars d = let opened=addHelp (T.pack (map fst chars)) d
                        in case activeWindow opened of
                          Nothing -> opened
-                         Just w -> opened {buffers=M.adjust (\doc -> doc {documentHighlight=[(c,ProseStyle style) | (c,style)<-chars],documentLinks=linkSpans chars}) (bufferId w) (buffers opened)}
+                         Just w | Just bid<-bufferId w -> opened {buffers=M.adjust (\doc -> doc {documentHighlight=[(c,ProseStyle style) | (c,style)<-chars],documentLinks=linkSpans chars}) bid (buffers opened)}
+                         _ -> opened
 
 addHelp :: Text -> Desktop -> Desktop
 addHelp text d = addReadOnly "Haskell Help" text d
 
 addReadOnly :: Text -> Text -> Desktop -> Desktop
-addReadOnly title text d = case [(bid,w) | (bid,doc)<-M.toList (buffers d),documentLabel doc==Just title,w<-windows d,bufferId w==bid] of
+addReadOnly title text d = case [(bid,w) | (bid,doc)<-M.toList (buffers d),documentLabel doc==Just title,w<-windows d,bufferId w==Just (bid)] of
   (bid,w):_ -> focusWindow (windowId w) d {buffers=M.adjust (\doc -> restyle doc {documentBuffer=newBuffer text}) bid (buffers d)}
   [] -> let new=modifyActive (\w -> w {bufferView=CurrentView,reviewSelection=Nothing}) (addDocument Nothing (newBuffer text) d) in new {buffers=M.adjust (\doc -> doc {documentLabel=Just title}) (nextId d) (buffers new)}
 
@@ -3125,7 +3234,8 @@ hoverAt x y d = (d {hoverTarget=target,typeHint=fromMaybe (if target==hoverTarge
         w <- find (\w -> windowVisible d w && inside (bounds w) x y) (windows d)
         let Rect l t ww hh=bounds w
         if x<=l || x>=l+ww-1 || y<=t || y>=t+hh-1 then Nothing else do
-          doc <- M.lookup (bufferId w) (buffers d)
+          bid <- bufferId w
+          doc <- windowDocument (buffers d) w
           if documentLabel doc/=Nothing || not (textBuffer (documentBuffer doc)) then Nothing else do
             let b=documentBuffer doc
                 visualRow=y-t-1+scrollRow w
@@ -3135,11 +3245,11 @@ hoverAt x y d = (d {hoverTarget=target,typeHint=fromMaybe (if target==hoverTarge
               (_,row,projected)<-reviewHit x y b w
               case bufferChangeRows b row 1 of
                 (DeletedLine,_,_):_ -> Nothing
-                _ | projected<changeLineOffset b row+T.length (changeLineAt b row) -> Just (bufferId w,revision b,changeToLiveOffset b projected)
+                _ | projected<changeLineOffset b row+T.length (changeLineAt b row) -> Just (bid,revision b,changeToLiveOffset b projected)
                 _ -> Nothing
             else let line=bufferLineAt b normalRow; offset=columnOffset line normalColumn
                  in if normalRow>=bufferLineCount b || normalColumn>=displayColumn line (T.length line) then Nothing
-                    else Just (bufferId w,revision b,bufferLineOffset b normalRow+offset)
+                    else Just (bid,revision b,bufferLineOffset b normalRow+offset)
 
 -- A completion (including imports) is a single undoable transaction.
 applyCompletion :: [(Int,Int,Text)] -> Desktop -> Desktop

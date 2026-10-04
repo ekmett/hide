@@ -151,11 +151,11 @@ autocompleteTool :: Autocomplete -> T.Text -> Value -> IO (Either T.Text Value)
 autocompleteTool runtime name args=readIORef (connection runtime) >>= maybe (pure (Left "No active completion request.")) (\c->A.callCompletionTool c name args)
 
 snapshot :: Desktop -> IO (Maybe Snapshot)
-snapshot d | inlineEligible d,Just w<-activeWindow d,Just doc<-activeDocument d=do
+snapshot d | inlineEligible d,Just w<-activeWindow d,Just doc<-activeDocument d,Just bid<-bufferId w=do
   let source=documentBuffer doc
       path=documentSyntaxPath doc
       absolute=if isAbsolute path then path else startingDirectory d </> path
-      view=InlineView (windowId w) (bufferId w) (revision source) (selection w) (inlineEpoch d) [] 0
+      view=InlineView (windowId w) bid (revision source) (selection w) (inlineEpoch d) [] 0
   identity<-makeStableName =<< evaluate source
   pure (Just (Snapshot view source identity absolute))
 snapshot _=pure Nothing
@@ -331,19 +331,21 @@ traceLoop runtime=go ""
         go text
 
 transcriptWindow :: Desktop -> Maybe Window
-transcriptWindow d=case [w | w<-windows d, (documentLabel =<< M.lookup (bufferId w) (buffers d))==Just "Autocomplete"] of
+transcriptWindow d=case [w | w<-windows d, (documentLabel =<< windowDocument (buffers d) w)==Just "Autocomplete"] of
   w:_->Just w
   _->Nothing
 
 updateTranscript :: Buffer -> Desktop -> Desktop
 updateTranscript b d=case transcriptWindow d of
   Nothing->d
-  Just w->d {buffers=M.adjust (\doc->doc {documentBuffer=b}) (bufferId w) (buffers d)}
+  Just w | Just bid<-bufferId w->d {buffers=M.adjust (\doc->doc {documentBuffer=b}) bid (buffers d)}
+  _->d
 
 showTranscript :: Bool -> Buffer -> Desktop -> Desktop
 showTranscript False _ d=case transcriptWindow d of
   Nothing->d
-  Just w->layoutProblems d (normalizeBottom d {windows=filter ((/=windowId w).windowId) (windows d),buffers=M.delete (bufferId w) (buffers d),dockedTerminals=M.delete (windowId w) (dockedTerminals d)})
+  Just w | Just bid<-bufferId w->layoutProblems d (normalizeBottom d {windows=filter ((/=windowId w).windowId) (windows d),buffers=M.delete bid (buffers d),dockedTerminals=M.delete (windowId w) (dockedTerminals d)})
+  _->d
 showTranscript True b d=case transcriptWindow d of
   Just _->updateTranscript b d
   Nothing->let added=addDocument Nothing b d

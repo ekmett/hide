@@ -164,7 +164,7 @@ desktopValueWith buffer baseline desktop=do
   pure (object ["schemaVersion" .= (1::Int),"screen" .= screenSize d,"buffers" .= encodedDocuments,
     "dockedTerminals" .= [object ["windowId" .= ident,"bounds" .= rectValue rectangle,"restoredBounds" .= fmap rectValue saved] | (ident,(rectangle,saved))<-M.toList (dockedTerminals d),any ((==ident).windowId) (windows d)],
     "bottomTerminal" .= bottomTerminal d,
-    "windows" .= map windowValue [w | w<-windows d,M.member (bufferId w) documents],"nextId" .= nextId d,
+    "windows" .= map windowValue [w | w<-windows d,Just bid<-[bufferId w],M.member bid documents],"nextId" .= nextId d,
     "conversationTarget" .= conversationTarget d,"conversationViews" .= views,
     "composer" .= composer,"composerSelection" .= selectionValue (composerSelection d),"composerFocused" .= composerFocused d,
     "directory" .= defaultDirectory d,"sidebar" .= fmap sidebarValue (sideTree d),"preferences" .= object
@@ -300,7 +300,7 @@ windowParser documents=withObject "window" $ \o->do
   restored<-o .: "restoredBounds" >>= traverse rectParser
   viewIndex<-o .:? "bufferView" .!= 0 >>= boundedInt 0 (fromEnum (maxBound :: BufferView))
   split<-o .:? "reviewSplit" .!= 50 >>= boundedInt 0 100
-  Window ident bid rectangle selected row column restored <$> o .: "hexLow" <*> o .: "hexAscii" <*> pure number <*> pure (if byteMode (documentBuffer doc) || documentLabel doc/=Nothing then CurrentView else toEnum viewIndex) <*> pure Nothing <*> pure split
+  Window ident (SourceContent bid) rectangle selected row column restored <$> o .: "hexLow" <*> o .: "hexAscii" <*> pure number <*> pure (if byteMode (documentBuffer doc) || documentLabel doc/=Nothing then CurrentView else toEnum viewIndex) <*> pure Nothing <*> pure split
 rectParser :: Value -> Parser Rect
 rectParser value=do
   (x,y,w,h)<-parseJSON value

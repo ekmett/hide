@@ -570,7 +570,7 @@ applyEffects = foldM apply . (False,)
       pure (False,d {status=either ("Default view changed for this session; could not save: "<>) (const "Default buffer view saved.") result})
     apply (_,d) SetScreenMode{}=pure (False,d {status="Screen modes are available in a graphical window."})
     apply (_,d) (ReadPath path)
-      | Just window<-find (\w -> fmap filePath (M.lookup (bufferId w) (buffers d) >>= documentFile)==Just path) (windows d) =
+      | Just window<-find (\w -> fmap filePath (windowDocument (buffers d) w >>= documentFile)==Just path) (windows d) =
           pure (False,focusWindow (windowId window) d)
     apply (_,d) (ReadPath path)=do
       directory<-doesDirectoryExist path
@@ -583,7 +583,7 @@ applyEffects = foldM apply . (False,)
         let opened=case result of
               Left err->message "Cannot open file" (wrapMessage (T.pack err)) d
               Right (file,b)->case find (\(_,doc)->fmap filePath (documentFile doc)==Just (filePath file)) (M.toList (buffers d)) of
-                Just (bid,_)->maybe d (\w->focusWindow (windowId w) d) (find ((==bid).bufferId) (windows d))
+                Just (bid,_)->maybe d (\w->focusWindow (windowId w) d) (find ((==Just bid) . bufferId) (windows d))
                 Nothing->addDocument (Just file) b d
         apply (False,opened) (RefreshGit (startingDirectory opened))
     apply (_,d) (BrowsePath path pattern)=do

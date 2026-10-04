@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 module WebCheck (checks) where
+import SourceWindowFixture (sourceFixtureBuffer)
 import Data.Bits ((.&.), shiftR)
 import Control.Monad (unless,forM_)
 import Data.Aeson
@@ -64,7 +65,7 @@ checks = do
   check "text drop remains editable and retains suggested filename"
     (activeText textImport=="name: demo" && activeText (insertText "x" textImport)/=activeText textImport && currentPath textImport=="demo.cabal")
   check "Download refers to exact active buffer"
-    (snd (runCommand Download imported)==[DownloadDocument (bufferId w) | w<-take 1 (windows imported)])
+    (snd (runCommand Download imported)==[DownloadDocument (sourceFixtureBuffer w) | w<-take 1 (windows imported)])
   let found=findText "one" (addDocument Nothing (newBuffer "one two one") (initialDesktop (80,25)))
       next=fst (applyInput (BrowserCommand FindNext) found)
       previous=fst (applyInput (BrowserCommand FindPrevious) next)

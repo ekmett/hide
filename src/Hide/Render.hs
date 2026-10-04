@@ -36,6 +36,7 @@ import Hide.GuestAccess (streamerReadableAt)
 import qualified Hide.Plugin.Menu as Plugin
 import Hide.Sidebar
 import qualified Hide.Plugin.Tree as Tree
+import qualified Hide.Plugin.Window as PluginWindow
 import Hide.Model
 import Hide.InlineState
 import Hide.InlineTypes (proposalEnd)
@@ -185,6 +186,7 @@ renderKey original = do
         payload (treeRows value)
         payload (treeBadges value)
         pure (SidebarKey (treeRoot value) (treeSelected value) (treeScroll value) (treeWidth value) (treeFocused value) (treeRevision value))
+  mapM_ payload (pluginWindows original)
   documents<-mapM document (buffers original)
   payload (composerBuffer original)
   mapM_ payload (inlinePreview original)
@@ -393,31 +395,55 @@ castShadow size (Rect x y w h) below =
     dim (Skip n) = V.charFill shadow ' ' n 1
     dim (RowEnd n) = V.charFill shadow ' ' n 1
 
+-- The same host buttons and border geometry are shared by source and plugin text.
+hostWindowFrame :: Desktop -> Bool -> Window -> V.Attr -> [V.Image]
+hostWindowFrame d active w frame=
+  (if active then [place (x+2) y (label frame "[" V.<|> label (attr (V.RGBColor 85 255 85) blue) (if videoMode d==Nothing then "x" else "■") V.<|> label frame "]"),
+   place (x+ww-6) y (label frame "[" V.<|> label (attr cyan blue) "↑" V.<|> label frame "]")] else [])
+  ++[place (x+ww-7-T.length number) y (label frame number),place x y (box frame (active && not moving) ww hh)]
+  where
+    Rect x y ww hh=bounds w
+    number=T.pack (show (windowNumber w))
+    moving=case drag d of Just (Moving wid _ _)->wid==windowId w; Just (Resizing wid _ _)->wid==windowId w; _->False
+
+pluginWindowLayers :: Desktop -> Bool -> Window -> PluginWindow.PreparedWindow -> [V.Image]
+pluginWindowLayers d active w prepared=
+  [place (x+1) (y+1) body,place (x+column) y (label frame title)]++hostWindowFrame d active w frame
+  where
+    Rect x y ww hh=bounds w
+    frame=attr (if active then white else gray) blue
+    text=PluginWindow.preparedWindowText prepared
+    rows=PluginWindow.preparedWindowRows prepared
+    title=" "<>T.take (columnOffset (PluginWindow.preparedWindowTitle prepared) (max 0 (ww-17))) (PluginWindow.preparedWindowTitle prepared)<>" "
+    column=max 6 ((ww-keyLabelWidth title) `div` 2)
+    body=V.vertCat [line n | n<-[scrollRow w..scrollRow w+max 0 (hh-3)]]
+    line n=V.cropRight (max 0 (ww-2))
+      (V.translateX (negate (scrollColumn w)) (styledImage (darkAppearance d) (const True) Nothing active (selection w)
+        (contentLineOffset text n) (fromMaybe [] (rows Vec.!? n))) V.<|> V.charFill edit ' ' (max 0 (ww-2)) 1)
+
 windowLayers :: Desktop -> Bool -> Window -> [V.Image]
+windowLayers d active w | PluginContent reference<-windowContent w = case M.lookup reference (pluginWindows d) of
+  Nothing->[]
+  Just prepared->pluginWindowLayers d active w prepared
 windowLayers d active w =
   [place x (y+1+issueRow issue-scrollRow w) (label (attr (if diagnosticSeverity issue==1 then V.RGBColor 255 85 85 else yellow) blue) "▶")
     | not (byteMode (documentBuffer doc)), issue<-diagnostics d, Just (diagnosticPath issue)==fmap filePath (documentFile doc), issueRow issue>=scrollRow w, issueRow issue<scrollRow w+hh-2]
-  ++ (if active then
-    [place (x+2) y (label frame "[" V.<|> label (attr (V.RGBColor 85 255 85) blue) (if videoMode d==Nothing then "x" else "■") V.<|> label frame "]"),place (x+ww-6) y (label frame "[" V.<|> label (attr cyan blue) "↑" V.<|> label frame "]")
-    ,place (x+windowPositionColumn doc) (y+hh-1) (label frame (T.take (max 0 (ww-windowPositionColumn doc-2)) (windowPositionText d doc w)))
-    ,scrollbarImage True,scrollbarImage False] else [])
+  ++ (if active then [place (x+windowPositionColumn doc) (y+hh-1) (label frame (T.take (max 0 (ww-windowPositionColumn doc-2)) (windowPositionText d doc w))),scrollbarImage True,scrollbarImage False] else [])
   ++ [place (x+6) y (label frame "[" V.<|> label (attr cyan blue) " " V.<|> label frame "]") | active,terminalWindow d w,not (windowPinned d w)]
   ++ composerLayers
   ++ hexDividerLayers
   ++ reviewDividerLayers
-  ++ [place (x+ww-7-T.length number) y (label frame number)
-  ,place (x+titleColumn) y (titleImage)
-  ,place (x+1) (y+1) documentImage
-  ,place x y (box frame (active && not moving) ww hh)]
+  ++ [place (x+titleColumn) y titleImage,place (x+1) (y+1) documentImage]
+  ++ hostWindowFrame d active w frame
   where
     Rect x y ww hh=bounds w
-    doc=fromMaybe (newDocument (newBuffer "") Nothing) (M.lookup (bufferId w) (buffers d))
+    doc=fromMaybe (newDocument (newBuffer "") Nothing) (windowDocument (buffers d) w)
     b=documentBuffer doc
     issueRow issue
       | windowChangeView b w = viewRowForChange (bufferView w) (bufferViewProjection b) CurrentSide
           (fst (changeLineColumn b (liveToChangeOffset b (bufferLineOffset b (diagnosticRow issue)))))
       | otherwise = sourceDisplayRow (diagnosticRow issue)
-    file=maybe (maybe ("NONAME"<>T.pack (show (bufferId w))<>".HS") T.pack (documentSuggestedName doc)) (T.pack . takeFileName . filePath) (documentFile doc)
+    file=maybe (maybe ("NONAME"<>maybe "" (T.pack . show) (bufferId w)<>".HS") T.pack (documentSuggestedName doc)) (T.pack . takeFileName . filePath) (documentFile doc)
     -- Measured line changes are shared by all views; never diff text while drawing.
     -- Docs: docs/editing.md (unsaved change counts in each buffer title).
     name=(if documentLabel doc==Just "Conversation" then conversationTitle d else fromMaybe file (documentLabel doc))<>(if dirty b then " *" else "")

@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module AutocompleteCheck (checks) where
 
+import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Concurrent (threadDelay)
 import Control.Exception (bracket)
 import Control.Monad (unless)
@@ -85,7 +86,7 @@ checks=bracket temporary removePathForcibly $ \root->do
       waitRetired runtime sameVersionId
       let changedIdentity=sameVersionRequest {buffers=M.adjust
             (\doc->doc {documentBuffer=(newBuffer "replacement with reused revision\n") {revision=revision (documentBuffer doc)}})
-            (maybe (error "Missing source window") bufferId (activeWindow sameVersionRequest)) (buffers sameVersionRequest)}
+            (maybe (error "Missing source window") sourceFixtureBuffer (activeWindow sameVersionRequest)) (buffers sameVersionRequest)}
       rejectedIdentity<-tickAutocomplete runtime changedIdentity
       check "buffer identity rejects stale results even with the same revision and caret"
         (inlinePreview rejectedIdentity==Nothing && activeText rejectedIdentity=="replacement with reused revision\n")

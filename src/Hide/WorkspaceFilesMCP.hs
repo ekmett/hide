@@ -158,7 +158,7 @@ fileOperation core desktop operation raw target=do
       if directory then removeDirectory path else removeFile path
       let ids=[bid | (bid,_,_)<-affected]
           keepDirectory value=if within path value then root else value
-      pure desktop {buffers=foldr M.delete (buffers desktop) ids,windows=filter ((`notElem` ids).bufferId) (windows desktop),
+      pure desktop {buffers=foldr M.delete (buffers desktop) ids,windows=filter (maybe True (`notElem` ids) . bufferId) (windows desktop),
         defaultDirectory=fmap keepDirectory (defaultDirectory desktop),sideTree=fmap (\tree->tree {treeRoot=keepDirectory (treeRoot tree)}) (sideTree desktop)}
     _ -> do
       unless exists (ioError (userError "Path does not exist"))
@@ -238,7 +238,7 @@ commitPatch (PreparedPatch bid patch modified prepared) desktop=case M.lookup bi
     adopted<-commitEdits [prepared] desktop
     pure $ do
       (updated,_)<-adopted
-      let next=updated {windows=map (\w->if bufferId w==bid then w {windowHexLow=False} else w) (windows updated)}
+      let next=updated {windows=map (\w->if bufferId w==Just (bid) then w {windowHexLow=False} else w) (windows updated)}
       pure (next,DiffResult (revision (documentBuffer (buffers next M.! bid))) patch modified)
   _->pure (Left "Diff target is no longer an editable text buffer")
 

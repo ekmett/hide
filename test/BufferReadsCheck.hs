@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module BufferReadsCheck (checks) where
 
+import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Exception (bracket,onException)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async
@@ -31,7 +32,7 @@ checks :: IO ()
 checks=bracket temporary removePathForcibly $ \directory -> do
   let path=directory </> "config.toml"
       base=addDocument Nothing (newBuffer "old λ\n") (initialDesktop (80,25))
-      bid=maybe (error "missing initial buffer") bufferId (activeWindow base)
+      bid=maybe (error "missing initial buffer") sourceFixtureBuffer (activeWindow base)
       args=object ["bufferId" .= bid]
       core d _=pure (False,d)
       submit runtime d=case dialog d of

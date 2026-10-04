@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module ConsolesCheck (checks) where
 
+import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Concurrent (threadDelay)
 import Control.Monad (unless)
 import qualified Data.ByteString as BS
@@ -41,8 +42,8 @@ windowsChecks consoles desktop = do
   (ident,opened)<-startConsole consoles windowsConfig 4096 desktop >>= requireRight
   (raw,truncated,code)<-waitOutput consoles ident (\(_,_,exit)->exit/=Nothing)
   check "ConPTY console output and exit retained" ("retained-output" `BS.isInfixOf` raw && not truncated && code==Just 7)
-  let bid=maybe (error "missing ConPTY window") bufferId (activeWindow opened)
-      closed=opened {windows=filter ((/=bid).bufferId) (windows opened),buffers=M.delete bid (buffers opened)}
+  let bid=maybe (error "missing ConPTY window") sourceFixtureBuffer (activeWindow opened)
+      closed=opened {windows=filter ((/=bid).sourceFixtureBuffer) (windows opened),buffers=M.delete bid (buffers opened)}
   afterClose<-tickConsoles consoles closed
   check "ConPTY closed window stays closed" (M.notMember bid (buffers afterClose))
   check "ConPTY closed window retains captured output" . (==Right (raw,truncated,code)) =<< consoleOutput consoles ident
@@ -56,24 +57,24 @@ windowsChecks consoles desktop = do
 nativeChecks :: Consoles -> Desktop -> IO ()
 nativeChecks consoles desktop = do
   (ident,opened) <- startConsole consoles (config "printf '\\033[1;38;2;12;34;56;48;2;65;43;21mA\\033[0m界'; exit 7") 4096 desktop >>= requireRight
-  let bid = maybe (error "missing terminal window") bufferId (activeWindow opened)
+  let bid = maybe (error "missing terminal window") sourceFixtureBuffer (activeWindow opened)
   check "numbered read-only terminal window" (maybe False (\doc -> documentLabel doc == Just ("Terminal " <> ident)) (activeDocument opened) && maybe False ((>0) . windowNumber) (activeWindow opened))
   (raw,truncated,exitCode) <- waitOutput consoles ident (\(_,_,code) -> code /= Nothing)
   check "exit and raw bytes retained" (exitCode == Just 7 && not truncated && TE.encodeUtf8 "界" `BS.isInfixOf` raw)
   let other = addDocument Nothing (newBuffer "focus stays here") opened
-      selected = other {windows=map (\w -> if bufferId w == bid then w {bounds=Rect 0 1 22 6,selection=Selection 999999 999999,scrollRow=999999,scrollColumn=999999} else w) (windows other)}
+      selected = other {windows=map (\w -> if sourceFixtureBuffer w == bid then w {bounds=Rect 0 1 22 6,selection=Selection 999999 999999,scrollRow=999999,scrollColumn=999999} else w) (windows other)}
   painted <- tickConsoles consoles selected
   check "tick never steals focus" (fmap windowId (activeWindow painted) == fmap windowId (activeWindow other))
   let doc = buffers painted M.! bid
       screen = contents (documentBuffer doc)
-      terminalView = case [w | w <- windows painted,bufferId w == bid] of w:_ -> w; [] -> error "missing terminal window"
+      terminalView = case [w | w <- windows painted,sourceFixtureBuffer w == bid] of w:_ -> w; [] -> error "missing terminal window"
   check "truecolor and attributes reach document" (('A',TerminalStyle 0x0c2238 0x412b15 1) `elem` documentHighlight doc)
   check "wide continuation omitted and blank cells preserved" ("A界" `T.isPrefixOf` screen && T.length (T.takeWhile (/= '\n') screen) == 19 && length (T.lines screen) == 4)
   check "terminal selection and scrolling clamped" (caret (selection terminalView) <= T.length screen && scrollRow terminalView <= scrollbarLimit painted True doc terminalView && scrollColumn terminalView <= scrollbarLimit painted False doc terminalView)
   check "collapsed selection follows terminal cursor across wide glyph" (caret (selection terminalView) == 2)
-  selecting <- tickConsoles consoles painted {windows=map (\w -> if bufferId w == bid then w {selection=Selection 0 2} else w) (windows painted)}
-  check "tick preserves selected terminal text" (all ((== Selection 0 2) . selection) [w | w <- windows selecting,bufferId w == bid])
-  let closed = painted {windows=filter ((/=bid) . bufferId) (windows painted),buffers=M.delete bid (buffers painted)}
+  selecting <- tickConsoles consoles painted {windows=map (\w -> if sourceFixtureBuffer w == bid then w {selection=Selection 0 2} else w) (windows painted)}
+  check "tick preserves selected terminal text" (all ((== Selection 0 2) . selection) [w | w <- windows selecting,sourceFixtureBuffer w == bid])
+  let closed = painted {windows=filter ((/=bid) . sourceFixtureBuffer) (windows painted),buffers=M.delete bid (buffers painted)}
   afterClose <- tickConsoles consoles closed
   check "closing window does not reopen it" (windows afterClose == windows closed && M.notMember bid (buffers afterClose))
   check "closed window retains raw output" . (== Right (raw,truncated,exitCode)) =<< consoleOutput consoles ident
@@ -109,7 +110,7 @@ nativeChecks consoles desktop = do
   (started,_,_) <- waitOutput consoles docking (\(bytes,_,_) -> "\n" `BS.isInfixOf` bytes)
   let dockView=case activeWindow dockDesktop of Just w->w; Nothing->error "missing dock terminal"
       dockId=windowId dockView
-      dockBuffer=bufferId dockView
+      dockBuffer=sourceFixtureBuffer dockView
       processId=B8.takeWhile (\c->c/='\r' && c/='\n') started
       pinned=setTerminalPinned True dockId dockDesktop
       concealed=setProblemsVisible True pinned
@@ -126,7 +127,7 @@ nativeChecks consoles desktop = do
   check "docking and undocking retain the same live process and input route"
     (activeTerminal floatedTick==Just docking && not (windowPinned floatedTick dockView) &&
      (processId<>":hidden") `BS.isInfixOf` afterDock && (processId<>":floating") `BS.isInfixOf` afterDock &&
-     fmap bufferId (activeWindow floatedTick)==Just dockBuffer && fmap windowNumber (activeWindow floatedTick)==Just (windowNumber dockView))
+     fmap sourceFixtureBuffer (activeWindow floatedTick)==Just dockBuffer && fmap windowNumber (activeWindow floatedTick)==Just (windowNumber dockView))
   releaseConsole consoles docking >>= requireRight
   (resizing,resizeDesktop) <- startConsole consoles (config "stty -echo; printf ready; read line; printf '\\033[?25l'; read line; stty size; printf '\\033[?25h'; read line") 4096 desktop >>= requireRight
   _ <- waitOutput consoles resizing (\(bytes,_,_) -> "ready" `BS.isInfixOf` bytes)

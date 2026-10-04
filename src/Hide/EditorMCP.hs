@@ -33,7 +33,7 @@ import Hide.BufferReadCommand (BufferReadCommands,readPage,readBufferCommand,for
 import Hide.Plugin.BufferHost (readerReference)
 import qualified Hide.Plugin.Buffer as P
 import Hide.Files (filePath)
-import Hide.GuestAccess (protectedBuffer, privateDocument, sanitizedBufferContent)
+import Hide.GuestAccess (protectedWindow, privateDocument, sanitizedBufferContent)
 import Hide.Model
 import Hide.Protocol (WirePacket(..), readPacket, writePacket)
 import Hide.RemoteEndpoint (sessionEndpoint, connectEndpointWithShutdown)
@@ -194,8 +194,8 @@ builtinTool desktop=tool
     tool "read_selection" args = parseArgs (withObject "read_selection" (.:? "windowId")) args >>= \wanted -> do
       w <- maybe (maybe (Left "No active window") Right (activeWindow desktop))
         (\ident -> maybe (Left "Window not found") Right (findWindow ident)) wanted
-      doc <- maybe (Left "Buffer not found") Right (M.lookup (bufferId w) (buffers desktop))
-      unless (not (protectedBuffer desktop (bufferId w))) (Left "Selections from private conversation or approval buffers are unavailable.")
+      doc <- maybe (Left "Buffer not found") Right (windowDocument (buffers desktop) w)
+      unless (not (protectedWindow desktop w)) (Left "Selections from private conversation or approval buffers are unavailable.")
       let b=documentBuffer doc
           text=selectedText (selection w) b
       Right (object ["windowId" .= windowId w,"bufferId" .= bufferId w,"anchor" .= anchor (selection w),
@@ -205,7 +205,7 @@ builtinTool desktop=tool
     parseArgs parser=either (Left . T.pack) Right . parseEither parser
     findWindow ident=case filter ((==ident).windowId) (windows desktop) of w:_->Just w; _->Nothing
     window w=object ["windowId" .= windowId w,"number" .= windowNumber w,"bufferId" .= bufferId w,
-      "title" .= maybe "" title (M.lookup (bufferId w) (buffers desktop)),
+      "title" .= maybe "" title (windowDocument (buffers desktop) w),
       "active" .= (fmap windowId (activeWindow desktop)==Just (windowId w)),"bounds" .= rect (bounds w)]
     panels=[object ["kind" .= ("files"::T.Text),"title" .= ("Files"::T.Text),"path" .= treeRoot tree] | Just tree<-[sideTree desktop]]
       ++[object ["kind" .= ("messages"::T.Text),"title" .= ("Messages"::T.Text),"bounds" .= rect (problemsRect desktop)] | problemsVisible desktop]
@@ -229,7 +229,7 @@ readBufferRequest :: Desktop -> Value -> Either T.Text (Int,Document,Int,Int,Int
 readBufferRequest desktop args=do
   (wanted,start,count,offset)<-either (Left . T.pack) Right $ parseEither
     (withObject "read_buffer" $ \o -> (,,,) <$> o .:? "bufferId" <*> o .:? "startLine" .!= 1 <*> o .:? "lineCount" .!= 200 <*> o .:? "byteOffset" .!= 0) args
-  ident<-maybe (maybe (Left "No active buffer") (Right . bufferId) (activeWindow desktop)) Right wanted
+  ident<-maybe (maybe (Left "No active source buffer") Right (activeWindow desktop >>= bufferId)) Right wanted
   doc<-maybe (Left "Buffer not found") Right (M.lookup ident (buffers desktop))
   unless (start>=1 && count>=1 && count<=1000 && offset>=0) (Left "Use startLine >= 1, lineCount 1..1000, and byteOffset >= 0")
   pure (ident,doc,start,count,offset)

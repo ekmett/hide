@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings,ScopedTypeVariables #-}
 module TypedBufferReadsCheck (checks) where
 
+import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Concurrent (threadDelay,newEmptyMVar,putMVar,takeMVar)
 import Control.Concurrent.Async
 import Control.Exception (bracket,try,evaluate,SomeException,IOException,catch,throwIO,finally)
@@ -38,7 +39,7 @@ checks=do
   let root=temporary </> "hide-typed-buffer-read-check"
       path=root </> "config.toml"
       base=addDocument Nothing (newBuffer "original\n") (initialDesktop (80,25))
-      ident=maybe (error "missing read target") bufferId (activeWindow base)
+      ident=maybe (error "missing read target") sourceFixtureBuffer (activeWindow base)
       check label ok=unless ok (error label)
       wait worker=timeout 3000000 (Control.Concurrent.Async.wait worker) >>= maybe (error "typed read reply timed out") pure
       queued worker=do

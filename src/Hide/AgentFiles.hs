@@ -24,7 +24,7 @@ import Hide.Buffer
 import Hide.Plugin.Buffer (ContentVersion)
 import Hide.Plugin.BufferHost (captureVersion)
 import Hide.Files
-import Hide.GuestAccess (protectedPath, protectedBuffer)
+import Hide.GuestAccess (protectedPath, protectedBuffer, protectedWindow)
 import Hide.Model
 
 -- | Captured text with its canonical path, disk baseline and optional live-buffer version.
@@ -121,14 +121,14 @@ acceptWrite (Snapshot file expected oldText) text d
       (Nothing,Nothing) -> let opened=addDocument (Just file) (newBuffer oldText) d
         in Right (nextId d,newBuffer oldText,opened)
       _ -> Left "File changed in the editor after the agent read it; request a fresh read."
-    clamp bid size w | bufferId w==bid = w {selection=Selection (max 0 (min size (anchor (selection w)))) (max 0 (min size (caret (selection w)))),scrollRow=0,scrollColumn=0}
+    clamp bid size w | bufferId w==Just (bid) = w {selection=Selection (max 0 (min size (anchor (selection w)))) (max 0 (min size (caret (selection w)))),scrollRow=0,scrollColumn=0}
                      | otherwise = w
 
 contextText :: Bool -> Bool -> Bool -> Desktop -> Text
 contextText selectionOnly wholeFile includeDiagnostics d = T.intercalate "\n\n" (fileContext++problemContext)
   where
     fileContext=case (activeWindow d,activeDocument d) of
-      (Just w,Just doc) | not (protectedBuffer d (bufferId w)), documentLabel doc==Nothing, textBuffer (documentBuffer doc) ->
+      (Just w,Just doc) | not (protectedWindow d w), documentLabel doc==Nothing, textBuffer (documentBuffer doc) ->
         let b=documentBuffer doc; Selection a z=selection w
             path=maybe "Unsaved buffer" (T.pack . filePath) (documentFile doc)
             selected=T.take (abs (z-a)) (T.drop (min a z) (contents b))

@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module TypedBufferDiffsCheck (checks,startDiffCall) where
 
+import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async
 import Control.Exception (bracket,onException)
@@ -29,7 +30,7 @@ checks :: IO ()
 checks=bracket temporary removePathForcibly $ \directory->do
   let config=directory </> "config.toml"
       base=addDocument Nothing (newBuffer "old\n") (initialDesktop (80,25))
-      ident=maybe (error "missing typed diff target") bufferId (activeWindow base)
+      ident=maybe (error "missing typed diff target") sourceFixtureBuffer (activeWindow base)
       patch="@@ -1 +1 @@\n-old\n+agent\n"
       check label ok=unless ok (error label)
   TIO.writeFile config "[editor.mcp.permissions]\nbuffer_apply_diff = 'enable'\n"
