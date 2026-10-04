@@ -5,7 +5,7 @@
 -- Compilation rejects ambiguous chords before publishing a table. Lookup touches
 -- only the chord index, never a buffer or desktop. Modal ownership stays with the
 -- caller. Context selection and ordinary typing remain with the input owner.
-module Hide.Bindings (BindingPlatform(..), bindingPlatforms, platformName, BindingContext(..), contextName, bindingContexts, Bindings, compileBindings, bindingAction, bindingKeys, bindingEntries, bindingChords, chordName, readChord) where
+module Hide.Bindings (BindingPlatform(..), bindingPlatforms, platformName, BindingContext(..), contextName, bindingContexts, Bindings, compileBindings, bindingAction, bindingKeys, bindingEntries, bindingChords, bindingChordsWhere, chordName, readChord) where
 
 import Control.DeepSeq (deepseq)
 import Control.Monad (foldM, unless)
@@ -26,14 +26,14 @@ platformName :: BindingPlatform -> Text
 platformName platform = case platform of TerminalPlatform -> "terminal"; GraphicalPlatform -> "graphical"; MacPlatform -> "macos"
 
 -- | Focused input owners. Modal controls keep their separate authority boundary.
-data BindingContext = SourceKeys | WordStarKeys | SidebarKeys | ConversationKeys | MessagesKeys | DebuggerKeys | TerminalKeys deriving (Eq,Ord,Show)
+data BindingContext = SourceKeys | WordStarKeys | DialogKeys | SidebarKeys | ConversationKeys | MessagesKeys | DebuggerKeys | TerminalKeys deriving (Eq,Ord,Show)
 
 bindingContexts :: [BindingContext]
-bindingContexts = [SourceKeys,WordStarKeys,SidebarKeys,ConversationKeys,MessagesKeys,DebuggerKeys,TerminalKeys]
+bindingContexts = [SourceKeys,WordStarKeys,DialogKeys,SidebarKeys,ConversationKeys,MessagesKeys,DebuggerKeys,TerminalKeys]
 
 contextName :: BindingContext -> Text
 contextName context = case context of
-  SourceKeys -> "source"; WordStarKeys -> "wordstar"; SidebarKeys -> "sidebar"; ConversationKeys -> "conversation"
+  SourceKeys -> "source"; WordStarKeys -> "wordstar"; DialogKeys -> "dialog"; SidebarKeys -> "sidebar"; ConversationKeys -> "conversation"
   MessagesKeys -> "messages"; DebuggerKeys -> "debugger"; TerminalKeys -> "terminal"
 
 data Bindings a = Bindings !(M.Map Text a) [(Text,a,[Text])] [(Text,Text)] deriving (Eq,Show)
@@ -71,6 +71,10 @@ bindingEntries (Bindings _ entries _)=[(name,keys) | (name,_,keys)<-entries]
 -- Returning it does not traverse commands, buffers or the lookup index.
 bindingChords :: Bindings a -> [(Text,Text)]
 bindingChords (Bindings _ _ chords)=chords
+
+-- | Filter an owner's small action catalogue without reparsing its prepared keys.
+bindingChordsWhere :: (a -> Bool) -> Bindings a -> [(Text,Text)]
+bindingChordsWhere allowed (Bindings _ entries _)=[(chord,name) | (name,action,keys)<-entries,allowed action,chord<-keys]
 
 -- | Canonical labels are also lookup keys. Uppercase character events are
 -- normalized; Shift remains an explicit modifier, independent of list order.

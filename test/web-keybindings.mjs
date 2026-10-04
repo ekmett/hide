@@ -21,6 +21,9 @@ function key(key,flags={}){
 }
 context.frame.bindings=[['Cmd+C','hide.edit.copy'],['Cmd+V','hide.edit.paste']];
 assert.equal(key('c',{metaKey:true}).prevented,undefined); // Native clipboard event owns activation.
+context.frame.wordstar=true;context.frame.bindings=[['Ctrl+C','hide.edit.copy']];
+assert.equal(key('c',{ctrlKey:true}).prevented,undefined); // Explicit WordStar or dialog Copy keeps its clipboard gesture.
+context.frame.wordstar=false;
 context.frame.bindings=[['Cmd+Shift+J','hide.edit.copy'],['Cmd+Shift+K','hide.edit.paste']];
 assert.equal(key('c',{metaKey:true}).prevented,true); // Removed Cmd+C cannot trigger a browser Copy event.
 assert.equal(packets.at(-1).type,'key');assert.deepEqual(Array.from(packets.at(-1).mods),['cmd']);
