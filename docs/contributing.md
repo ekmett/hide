@@ -125,10 +125,37 @@ will be installed; these owned edits differ from immutable read images.
 
 Under the session lock, `commitEdits` rejects duplicate, closed, replaced,
 ambiguous or private targets before changing any buffer. Open targets require
-matching buffer version and file-baseline identity. Success installs worker
+matching buffer version and file-baseline identity (including its absence for
+untitled documents). Success installs worker
 values, preserves unrelated navigation and rebases current selections. Changed
 buffers receive one ordinary Undo entry; saving stays explicit and a stale
 result never rebases the proposed edits.
+
+
+`buffer_apply_diff` captures the original editable buffer and optional file
+baseline when its request is admitted. Whole-text strict diff validation,
+replacement construction and comparison with the original approved diff run on
+an unmasked worker through WorkspaceFilesMCP and BufferEdits. A new content
+identity invalidates the request even when the numeric revision and text match.
+No attempt silently captures a newer source. Patch input is limited to 1 MiB
+characters before building an approval review.
+
+MCPPermissions owns the same Waiting ticket, reply and lifetime across edited
+approval attempts. Allow starts a worker without blocking the UI; invalid or
+stale results leave the same private review editable for correction. Current
+review identity guards completion, so an older attempt cannot overwrite newer
+review text, selection, Undo or body. The exact applied diff and userModified
+flag come from the worker result. Successful adoption is one ordinary Undo and
+never saves, including untitled targets.
+
+The existing permission tick rechecks policy, attributed token/actor and current
+target/privacy before the shared BufferEdits adopter. Enable becoming Prompt
+requires a new approved request. A short per-ticket claim linearizes adoption
+and its success reply against cancellation: cancellation first installs nothing;
+adoption first owns the successful reply. Spawn/registration is masked; workers
+run unmasked, and cancellation/finalizer joins run outside the desktop lock.
+Request lifetime is separate from an attempt, so failed preparation cannot retire
+a correction ticket or allow an obsolete completion to apply.
 
 These are host operations, not the public scoped plugin edit service. A caller
 must already own the session transition, admit the project/path/source baseline,
