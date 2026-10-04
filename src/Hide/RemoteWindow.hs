@@ -20,7 +20,8 @@ import qualified Data.Text.Encoding as TE
 import qualified Data.Text as T
 import qualified Graphics.Vty as V
 import Hide.Frontend
-import Hide.Model (Command, MenuItem(..), menus)
+import Hide.Model (Command)
+import Hide.Window (nativeCommands, nativeMenuEvent)
 import Hide.Remote (RemotePeer)
 import Hide.Unicode (clusterWidth, graphemes)
 #if defined(WITH_WINDOW) && defined(WITH_REMOTE)
@@ -45,7 +46,7 @@ import Hide.Model (Command(Paste))
 import Hide.Protocol (WirePacket(..), decodeFrame)
 import Hide.Links (openResource)
 import Hide.Remote (peerSendBatch, peerReceive)
-import Hide.Window
+import Hide.Window hiding (nativeCommands, nativeMenuEvent)
 #endif
 
 -- | A positioned grapheme with explicit cell width and foreground/background RGB.
@@ -124,12 +125,11 @@ nativeEventInput event = case event of
   3:x:y:clicks:mods:button:_ -> mouse (if clicks==0 then "move" else "down") x y button clicks mods
   4:x:y:_ -> mouse "up" x y 1 1 0
   5:w:h:_ -> Just (object ["type" .= ("resize"::T.Text),"width" .= max 40 (min 512 w),"height" .= max 12 (min 256 h)])
-  6:_ -> Just (object ["type" .= ("command"::T.Text),"command" .= ("quit"::T.Text)])
+  6:_ -> Just (object ["type" .= ("command"::T.Text),"command" .= ("hide.app.quit"::T.Text)])
   7:_ -> Just (object ["type" .= ("blur"::T.Text)])
   9:x:y:direction:mods:_ -> case mouse (if direction>0 then "wheel-up" else "wheel-down") x y 1 1 mods of
     Just (Object fields) -> Just (Object (KM.insert "steps" (toJSON (max 1 (min 256 (abs direction)))) fields))
     result -> result
-  11:i:_ | i>=0, Just ident:_ <- drop i (map commandIdentifier menuActions) -> Just (object ["type" .= ("menu"::T.Text),"command" .= ident])
   12:x:y:_ -> mouse "move" x y 1 0 0
   13:mods:_ -> Just (object ["type" .= ("modifiers"::T.Text),"mods" .= modifierNames mods])
   _ -> Nothing
@@ -139,7 +139,7 @@ nativeEventInput event = case event of
       "x" .= max (-1) (min 511 x),"y" .= max (-1) (min 255 y),"button" .= (if button==3 then 2 else 0::Int),
       "clicks" .= max 0 (min 3 clicks),"mods" .= modifierNames mods])
 menuActions :: [Command]
-menuActions = [cmd | (_,_,items)<-menus, MenuItem _ _ cmd<-items]
+menuActions = nativeCommands
 
 -- | Resolve a local menu slot against the server's named command state.
 remoteMenuInput :: RemoteFrame -> Int -> Maybe Value
@@ -280,9 +280,16 @@ runRemoteWindow backend scale (cols,rows) mode host peer = do
           case TE.decodeUtf8' bytes of
             Right text -> forM_ (T.unpack text) $ \c -> sendEvent [1,fromEnum c,0]
             Left _ -> pure ()
-        11:i:_ | i<0 || not (maybe False (\value -> case drop i (remoteMenus value) of enabled:_ -> enabled; _ -> False) frame) -> pure ()
-               | Paste:_ <- drop i nativeCommands -> paste
-               | otherwise -> forM_ (frame >>= (\value -> remoteMenuInput value i)) sendJSON
+        11:i:_ -> do
+#ifdef darwin_HOST_OS
+          generation<-fromIntegral <$> c_menu_generation
+          case nativeMenuEvent generation event of
+            Just command | Just value<-frame, Just packet<-remoteMenuInput value i ->
+              if command==Paste then paste else sendJSON packet
+            _ -> pure ()
+#else
+          pure ()
+#endif
         14:_ | null host -> do
           bytes <- c_text >>= BS.packCString
           case TE.decodeUtf8' bytes of

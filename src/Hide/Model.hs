@@ -98,6 +98,8 @@ data Command = New | Open | Download | ChangeDir | Save | SaveAs | Close | Quit 
   | ExecuteShellBlock Int (Int,Int,Text,Text)
   | SetBufferView BufferView | SetDefaultBufferView BufferView | RevertChange Int Int (Int,Int) Int
   | ToggleHex | GoToMessage | CopyAllMessages | CopyLocation | SubmitChat ChatSubmit
+  | ReloadBindings | InspectBindings
+  | SidebarMove Int | SidebarActivate | SidebarExpand | SidebarCollapse | FocusSource | MessagesMove Int | MessagesPage Int
   | ToolchainOptions | SelectToolchain Toolchain | SelectCompiler Text
   | DebugCommand Text | AutocompleteCommand Text
   | Disabled Text deriving (Eq,Show)
@@ -106,11 +108,18 @@ data Conflict = Conflict { conflictBuffer :: Int, conflictRevision :: Int, confl
 data GitAction = FetchRemote | PullRemote | MergeBranch Text deriving (Eq,Show)
 data Toolchain = THC | GHC deriving (Eq,Show)
 data ContextKind = ToolchainContext [(Text,Command)] | LinkContext Command | ShellContext Command | ChangeContext Command | SourceContext | GitContext | MessagesContext | AgentContext [(Text,Command)] deriving (Eq,Show)
+-- | Bounded source hit target retained while a context popup is open. The
+-- editor's source edits/reloads advance the revision; no buffer payload is kept.
+-- Reconcile reload guarantees old+1, and checked edits/Git reload derive their
+-- replacement from the original buffer. Read-only transcript/output replacement
+-- may restart revisions and is never an editable SourceContext target.
+data ContextTarget = SourceTarget Int Int Int Selection | ConversationTarget Text | UnavailableSourceTarget deriving (Eq,Show)
+
 data LanguageAction = TypeInfo | FindDefinition | Completions | ShowProblems | RestartLanguage | RenameAt Text | RequestCodeActions | ApplyCodeAction Int Int Text deriving (Eq,Show)
 data Completion = Completion Text [(Int,Int,Text)] deriving (Eq,Show)
 data ProjectAction = LoadProject | ProjectPage Int Int | ProjectDetails Int Int deriving (Eq,Show)
 -- | Ordered requests for the host interpreter, produced alongside a new desktop.
-data Effect = FollowLink (Maybe FilePath) Text | EnvironmentAction Text [Text] | AutocompleteAction Text [Text] | SaveMacKeySymbols Bool | SaveChatSubmit ChatSubmit | SaveBufferViewDefault BufferView | ProjectRequest ProjectAction | DownloadDocument Int | ReadBrowserClipboard | WriteBrowserClipboard Text | LanguageRequest LanguageAction | RunGit GitAction | ReadMergeBranches | JumpTo FilePath Int Int | ReadPath FilePath | BrowsePath FilePath Text | BrowseDirectories FilePath | ChangeDirectory FilePath | OpenChoice FilePath Text Text | ReadTree FilePath | ExpandTree Int | ReadHelp | RefreshGit FilePath | ReadGitDiff | AskGitCommit | WriteGitCommit Text | SaveDocument Int (Maybe FilePath) (Maybe Command) | ReviewExternal | ResolveConflict Conflict ConflictAction | AgentAction Text [Text] | PermissionAction Text [Text] | DebugAction Text [Text] | SetScreenMode Int | Exit deriving (Eq,Show)
+data Effect = ReloadKeyBindings FilePath | InspectKeyBindings (Maybe Bindings.BindingContext) (Maybe (Bindings.Bindings Command)) | FollowLink (Maybe FilePath) Text | EnvironmentAction Text [Text] | AutocompleteAction Text [Text] | SaveMacKeySymbols Bool | SaveChatSubmit ChatSubmit | SaveBufferViewDefault BufferView | ProjectRequest ProjectAction | DownloadDocument Int | ReadBrowserClipboard | WriteBrowserClipboard Text | LanguageRequest LanguageAction | RunGit GitAction | ReadMergeBranches | JumpTo FilePath Int Int | ReadPath FilePath | BrowsePath FilePath Text | BrowseDirectories FilePath | ChangeDirectory FilePath | OpenChoice FilePath Text Text | ReadTree FilePath | ExpandTree Int | ReadHelp | RefreshGit FilePath | ReadGitDiff | AskGitCommit | WriteGitCommit Text | SaveDocument Int (Maybe FilePath) (Maybe Command) | ReviewExternal | ResolveConflict Conflict ConflictAction | AgentAction Text [Text] | PermissionAction Text [Text] | DebugAction Text [Text] | SetScreenMode Int | Exit deriving (Eq,Show)
 data Field = Input Text Text Int | ComboBox Text [Text] Int (Maybe Int) | CheckBox Text Bool | Radio Text [Text] Int | ListBox Text [Text] Int | FileList [Entry] Int
   | ReadOnly Text Text
   | TextArea Text Bool Buffer Selection Int Int deriving (Eq,Show)
@@ -184,7 +193,8 @@ data Desktop = Desktop
   , dockedTerminals :: M.Map Int (Rect,Maybe Rect), bottomTerminal :: Maybe Int
   , autocompleteACPEnabled :: Bool, autocompleteDraft :: Buffer
   , autocompleteSelection :: Selection, autocompleteFocused :: Bool, macKeySymbols :: Bool
-  , sourceBindings :: Maybe (Bindings.Bindings Command)
+  , keyBindings :: M.Map Bindings.BindingContext (Bindings.Bindings Command)
+  , contextTarget :: Maybe ContextTarget
   } deriving (Eq,Show)
 
 data MenuItem = MenuItem Text Text Command deriving (Eq,Show)
@@ -204,7 +214,7 @@ menus =
       mi "Threads..." "" (DebugCommand "threads"),mi "Call stack..." "" (DebugCommand "stack"),mi "Scopes..." "" (DebugCommand "scopes"),
       mi "Exceptions..." "" (DebugCommand "exceptions"),mi "Exception details" "" (DebugCommand "exception-info"),mi "Output" "" (DebugCommand "output"),mi "Disconnect" "" (DebugCommand "disconnect")])
   ,("Tools",'t',[mi "File tree" "Ctrl+B" ToggleTree,mi "Git diff..." "" GitDiff,mi "Approve changes..." "" GitCommit,mi "Inspect type" "Shift+F1" InspectType,mi "Code actions..." "" CodeActions,mi "Messages" "" Problems,mi "Go to next" "Alt+F8" NextMessage,mi "Go to previous" "Alt+F7" PreviousMessage,mi "Restart language server" "" RestartHLS,mi "Conversation" "Ctrl+Shift+C" Conversation,mi "Agents..." "" AgentDirectory,mi "Conversation model..." "" (AgentChoose ""),mi "Cancel reply" "" AgentCancel,mi "Resume session..." "" AgentResume,mi "New conversation" "Ctrl+Shift+N" AgentNew,mi "Copy raw conversation" "" AgentCopyRaw,mi "Widget gallery..." "" Gallery,mi "Project browser..." "" ProjectBrowser,mi "Downloads..." "" (DebugCommand "downloads")])
-  ,("Options",'o',[mi "Preferences..." "" EditorOptions,mi "Environment..." "" EnvironmentOptions,mi "Chat input..." "" ChatInputOptions,mi "Autocomplete..." "" (AutocompleteCommand "settings"),mi "Agents..." "" AgentOptions,mi "Agent Permissions" "" AgentPermissions,mi "Agent Context..." "" AgentGuidance])
+  ,("Options",'o',[mi "Preferences..." "" EditorOptions,mi "Environment..." "" EnvironmentOptions,mi "Chat input..." "" ChatInputOptions,mi "Autocomplete..." "" (AutocompleteCommand "settings"),mi "Agents..." "" AgentOptions,mi "Agent Permissions" "" AgentPermissions,mi "Agent Context..." "" AgentGuidance,mi "Reload terminal bindings" "" ReloadBindings,mi "Inspect terminal bindings" "" InspectBindings])
   ,("Window",'w',[mi "Agents..." "" AgentDirectory,mi "Tile" "" Tile,mi "Cascade" "" Cascade,mi "Split vertically" "" SplitVertical,mi "Split horizontally" "" SplitHorizontal,mi "Zoom" "F5" Zoom,mi "Pin / unpin terminal" "" ToggleTerminalPin,mi "Next" "F6" NextWindow,mi "Close" "Alt+F3" Close,mi "" "" (Disabled ""),mi "Current" "" (SetBufferView CurrentView),mi "Changes" "" (SetBufferView ChangesView),mi "Only Changes" "" (SetBufferView OnlyChangesView),mi "Side by Side" "" (SetBufferView SideBySideView)])
   ,("Help",'h',[mi "Contents" "F1" Help,mi "About Haskell..." "" About])]
   where mi = MenuItem
@@ -234,12 +244,21 @@ keyLabelWidth text = displayColumn text (T.length text)
 
 menuShortcut :: Desktop -> MenuItem -> Text
 menuShortcut d (MenuItem _ key cmd)
-  | terminalSourceLabels d, Just bindings<-sourceBindings d = keyLabel d (fromMaybe "" (listToMaybe (Bindings.bindingKeys bindings cmd)))
+  | Just bindings<-effectiveBindings d = keyLabel d (fromMaybe "" (listToMaybe (Bindings.bindingKeys bindings cmd)))
   | nativeMac d = keyLabel d $ fromMaybe key (lookup cmd [(New,"Cmd+N"),(Open,"Cmd+O"),(Save,"Cmd+S"),(SaveAs,"Cmd+Shift+S"),(Close,"Cmd+W"),(Quit,"Cmd+Q"),(Undo,"Cmd+Z"),(Redo,"Cmd+Shift+Z"),(Copy,"Cmd+C"),(Cut,"Cmd+X"),(Paste,"Cmd+V"),(SelectAll,"Cmd+A"),(Find,"Cmd+F"),(Replace,"Cmd+Option+F"),(FindNext,"Cmd+G"),(FindPrevious,"Cmd+Shift+G"),(Conversation,"Cmd+Shift+C"),(AgentNew,"Cmd+Shift+N")])
   | otherwise = keyLabel d key
 
 commandDescription :: Command -> Text
 commandDescription cmd = case cmd of
+  ReloadBindings -> "Reload and validate terminal bindings from global and project configuration."
+  InspectBindings -> "Show every effective command binding for this terminal context."
+  SidebarMove _ -> "Move the selected sidebar row."
+  SidebarActivate -> "Open the selected file or toggle its directory."
+  SidebarExpand -> "Expand the selected directory or open its file."
+  SidebarCollapse -> "Collapse the selected directory or select its parent."
+  FocusSource -> "Return focus to the source window."
+  MessagesMove _ -> "Move the selected message."
+  MessagesPage _ -> "Move through messages by one visible page."
   AutocompleteCommand _ -> "Configure inline code suggestions and sign in to Copilot."
   New -> "Create a new source buffer."; Open -> "Browse directories and open a file."
   ChangeDir -> "Choose a new default directory."
@@ -359,7 +378,7 @@ statusHintsRaw d
   | otherwise = [command " F1 Help" Help,command "  F2 Save" Save,command "  F3 Open" Open,
       command "  Alt+F9 Compile" CompileTarget,command "  F9 Make" MakeTarget,command "  Ctrl+F9 Run" RunTarget]
   where command label cmd=(effective label cmd,Just (Left cmd))
-        effective label cmd | terminalSourceLabels d, Just bindings<-sourceBindings d =
+        effective label cmd | Just bindings<-effectiveBindings d =
           " "<>maybe "" (<>" ") (listToMaybe (Bindings.bindingKeys bindings cmd))<>T.stripStart (snd (T.breakOn " " (T.stripStart label)))
         effective label _=label
         key label k mods=(label,Just (Right (V.EvKey k mods)))
@@ -392,6 +411,10 @@ commandEnabled :: Desktop -> Command -> Bool
 commandEnabled d cmd | dialogCommandAllowed cmd d = True
 commandEnabled d Download = browserFrontend d && maybe False ((==Nothing) . documentLabel) (activeDocument d)
 commandEnabled _ Disabled{} = False
+commandEnabled d SidebarMove{} = maybe False treeFocused (sideTree d)
+commandEnabled d cmd | cmd `elem` [SidebarActivate,SidebarExpand,SidebarCollapse] = maybe False treeFocused (sideTree d)
+commandEnabled d MessagesMove{} = problemsFocused d
+commandEnabled d MessagesPage{} = problemsFocused d
 commandEnabled d (ExecuteShellBlock bid block) = maybe False (elem block . documentShellBlocks) (M.lookup bid (buffers d))
 commandEnabled d (SetBufferView _) = maybe False (\doc -> documentLabel doc==Nothing && textBuffer (documentBuffer doc)) (activeDocument d)
 commandEnabled d (RevertChange bid version counts _) = case activeDocument d of
@@ -406,6 +429,17 @@ commandEnabled d cmd | cmd `elem` [GoToMessage,CopyAllMessages,NextMessage,Previ
 commandEnabled d Copy | problemsVisible d && problemsFocused d = not (null (diagnostics d))
 commandEnabled d cmd | problemsVisible d && problemsFocused d, cmd `elem` [Undo,Redo,Cut,Paste,SelectAll] = False
 commandEnabled _ _ = True
+-- | Shared current-state gate for menu invocations and frontend hints. Queued
+-- events must check this again when consumed; a painted enabled state is a hint.
+menuCommandAvailable :: Desktop -> Command -> Bool
+menuCommandAvailable d cmd = commandEnabled d cmd && canInvoke
+  where
+    canInvoke | dialogCommandAllowed cmd d = True
+              | cmd==Paste = not (maybe False treeFocused (sideTree d)) || dialog d/=Nothing
+              | otherwise = dialog d==Nothing && (activeWindow d/=Nothing ||
+                  (problemsVisible d && problemsFocused d && cmd==Copy) ||
+                  cmd `elem` [ReloadBindings,InspectBindings,New,Open,ChangeDir,Quit,Help,About,Gallery,EditorOptions,EnvironmentOptions,ChatInputOptions,ProjectBrowser,RunTarget,RunOptions,CompileTarget,MakeTarget,StopBuild,OpenTerminal,StopTerminal,AgentDirectory,AgentOptions,AgentPermissions,AgentGuidance,Conversation,AgentCancel,AgentResume,AgentNew,AgentCopyRaw,ToggleTree,GitDiff,GitCommit,GitFetch,GitPull,GitMerge,Problems,NextMessage,PreviousMessage,ToolchainOptions,AutocompleteCommand "settings",DebugCommand "attach",DebugCommand "launch",DebugCommand "downloads"])
+
 menuRect :: Desktop -> Int -> Rect
 menuRect d i = Rect (min x (max 0 (sw-w))) 1 w (length (menuItemsFor d i)+2)
   where x = fst (menuPositions !! i)
@@ -413,7 +447,7 @@ menuRect d i = Rect (min x (max 0 (sw-w))) 1 w (length (menuItemsFor d i)+2)
         w = min sw (maximum [T.length t + keyLabelWidth (menuShortcut d entry) + 5 + (case command of SetBufferView _ -> 4; _ -> 0) | entry@(MenuItem t _ command) <- menuItemsFor d i])
 
 initialDesktop :: (Int,Int) -> Desktop
-initialDesktop size = Desktop size [] M.empty 1 Nothing Nothing Nothing "" Nothing False Nothing "" Nothing "" Nothing "" False Nothing Nothing Nothing "" Nothing Nothing Nothing [] False 0 0 False Nothing 0 0 Nothing SourceContext Nothing (newBuffer "") (Selection 0 0) True False False 0 True False False False Nothing Nothing [] 8 Nothing [] False SystemMode True [] Nothing [] Nothing [] False Nothing "" M.empty False (0,Nothing) [] Nothing CurrentView QuerySubmit Nothing 0 M.empty Nothing False (newBuffer "") (Selection 0 0) True False Nothing
+initialDesktop size = Desktop size [] M.empty 1 Nothing Nothing Nothing "" Nothing False Nothing "" Nothing "" Nothing "" False Nothing Nothing Nothing "" Nothing Nothing Nothing [] False 0 0 False Nothing 0 0 Nothing SourceContext Nothing (newBuffer "") (Selection 0 0) True False False 0 True False False False Nothing Nothing [] 8 Nothing [] False SystemMode True [] Nothing [] Nothing [] False Nothing "" M.empty False (0,Nothing) [] Nothing CurrentView QuerySubmit Nothing 0 M.empty Nothing False (newBuffer "") (Selection 0 0) True False M.empty Nothing
 
 activeWindow :: Desktop -> Maybe Window
 activeWindow d = listToMaybe (filter (windowVisible d) (windows d))
@@ -737,6 +771,17 @@ runCommand cmd source | questionActive source, cmd `elem` [Undo,Redo,Copy,Cut,Pa
 runCommand cmd source | not (problemsFocused source), composerActive source, cmd `elem` [Undo,Redo,Copy,Cut,Paste,SelectAll] = (composerCommand cmd source,[])
 runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source {menu = Nothing, contextMenu=Nothing, buttonHover=Nothing, buttonPressed=Nothing, prefix = Nothing, drag = Nothing,dragOriginal=Nothing})
   where
+    go ReloadBindings d = (d {status="Reloading terminal bindings..."},[ReloadKeyBindings (startingDirectory d)])
+    go InspectBindings d = (d,[InspectKeyBindings (bindingContext d) (effectiveBindings d)])
+    go (SidebarMove delta) d = case sideTree d of
+      Just tree | treeFocused tree -> moveTree delta tree d
+      _ -> (d,[])
+    go SidebarActivate d = maybe (d,[]) (\tree->activateTree False (treeSelected tree) d) (sideTree d)
+    go SidebarExpand d = maybe (d,[]) (\tree->activateTree True (treeSelected tree) d) (sideTree d)
+    go SidebarCollapse d = maybe (d,[]) (\tree->collapseTree tree d) (sideTree d)
+    go (MessagesPage delta) d = (chooseProblem (problemsSelected d+delta*max 1 (problemsHeight d-2)) d,[])
+    go (MessagesMove delta) d = (chooseProblem (problemsSelected d+delta) d,[])
+    go FocusSource d = (d {problemsFocused=False,sideTree=fmap (\tree->tree {treeFocused=False}) (sideTree d)},[])
     go (SubmitChat action) d = (d {composerFocused=True},[AgentAction (if action==QuerySubmit then "send-draft" else "steer-draft") []])
     go CopyLocation d = case (activeWindow d,activeDocument d) of
       (Just w,Just doc) | Just file<-documentFile doc ->
@@ -1149,14 +1194,14 @@ dispatchEvent (V.EvResize sw sh) d =
       {width=if left r+width r==oldRight then newRight-left r else width r,
        height=if top r+height r==oldBottom then newBottom-top r else height r}
     resize w=w {bounds=stretch (bounds w),restoredBounds=fmap stretch (restoredBounds w)}
--- Configured standard terminal source keys own this context completely, rather
--- than falling through to an old shortcut when a binding was explicitly removed.
+-- A compiled map owns named commands in the focused terminal context. Missing
+-- chords fall back to local text/movement, never to removed command defaults.
 dispatchEvent (V.EvKey key mods) d
-  | terminalSourceContext d, not (terminalSourceReserved key mods), Just bindings<-sourceBindings d =
+  | bindingInputAvailable d, not (terminalContextReserved d key mods), Just bindings<-effectiveBindings d =
       case Bindings.bindingAction bindings key mods of
         Just cmd | commandEnabled d cmd -> runCommand cmd d
                  | otherwise -> (d,[])
-        Nothing -> (editorKey key mods d,[])
+        Nothing -> unboundKey key mods d
 dispatchEvent (V.EvKey key mods) d | key `elem` [V.KChar '\t',V.KBackTab], V.MAlt `elem` mods =
   case dialog d of
     Just dg -> dialogEvent (V.EvKey (V.KChar '\t') [V.MShift | backwards]) dg d
@@ -1433,8 +1478,8 @@ composerEventWith code (V.EvKey key mods) d
   | key==V.KEnter, composerFocused d, all (`elem` [V.MCtrl,V.MShift]) mods = Just (if code then composerSubmit mods d else if V.MShift `elem` mods then (composerInsert "\n" d,[]) else (d,[]))
   | V.KChar c<-key, textInputChar c, null mods || mods==[V.MShift] = done ((if code then composerTyped else composerInsert) (T.singleton c) d)
   | not (composerFocused d) || V.MAlt `elem` mods || V.MMeta `elem` mods = Nothing
-  | ctrl, V.KChar c<-key, toLower c=='z', V.MShift `elem` mods = Just (if code then runCommand Redo d else (composerCommandWith False Redo d,[]))
-  | ctrl, V.KChar c<-key, Just cmd<-lookup (toLower c) [('c',Copy),('x',Cut),('v',Paste),('a',SelectAll),('z',Undo),('y',Redo)] = Just (if code then runCommand cmd d else (composerCommandWith False cmd d,[]))
+  | effectiveBindings d==Nothing, ctrl, V.KChar c<-key, toLower c=='z', V.MShift `elem` mods = Just (if code then runCommand Redo d else (composerCommandWith False Redo d,[]))
+  | effectiveBindings d==Nothing, ctrl, V.KChar c<-key, Just cmd<-lookup (toLower c) [('c',Copy),('x',Cut),('v',Paste),('a',SelectAll),('z',Undo),('y',Redo)] = Just (if code then runCommand cmd d else (composerCommandWith False cmd d,[]))
   | otherwise = case key of
       V.KLeft | marker>0 && p==start+marker -> move (if r>0 then bufferLineOffset b r-1 else p)
       V.KLeft -> move (if ctrl then wordLeft text p else bufferPreviousCharacter b p)
@@ -1627,7 +1672,7 @@ menuEvent ev (i,j) d = case ev of
   _ -> (d,[])
   where
     choose a b = let a' = a `mod` length menus in (d {menu = Just (a',b `mod` length (menuItemsFor d a'))},[])
-    invoke k = let MenuItem _ _ command = menuItemsFor d i !! k in runCommand command d
+    invoke k = let MenuItem _ _ command = menuItemsFor d i !! k in if menuCommandAvailable d command then runCommand command d else (d {menu=Nothing},[])
 
 menuAt :: Int -> Maybe Int
 menuAt x = findIndex (\(start,w) -> x >= start && x < start+w) menuPositions
@@ -1682,13 +1727,34 @@ contextOffset :: Rect -> Int -> Int
 contextOffset r chosen = let count=max 1 (height r-2) in chosen `div` count*count
 
 openContext :: ContextKind -> Int -> Int -> Desktop -> Desktop
-openContext kind x y d = d {contextKind=kind,contextMenu=Just (popup,0),drag=Nothing,dragOriginal=Nothing,menu=Nothing}
+openContext kind x y d = d {contextKind=kind,contextTarget=captureContextTarget kind d,contextMenu=Just (popup,0),drag=Nothing,dragOriginal=Nothing,menu=Nothing}
   where
     (sw,sh)=screenSize d
     items=contextItems kind
     h=max 3 (min (sh-2) (length items+2))
     w=min sw (max 24 (maximum (0:map (keyLabelWidth . fst) items)+4))
     popup=Rect (max 0 (min x (sw-w))) (max 1 (min y (sh-h-1))) w h
+
+-- Source actions are admitted only at their captured view/caret/revision.
+-- Focus or edits while a popup is open refuse it instead of redirecting it.
+captureContextTarget :: ContextKind -> Desktop -> Maybe ContextTarget
+captureContextTarget kind d = case kind of
+  SourceContext -> source
+  ChangeContext{} -> source
+  AgentContext{} -> Just (ConversationTarget (conversationTarget d))
+  _ -> Nothing -- These actions already carry arguments or have session scope.
+  where
+    source=Just $ case (activeWindow d,activeDocument d) of
+      (Just w,Just doc) | documentLabel doc==Nothing, windowFocused d w ->
+        SourceTarget (windowId w) (bufferId w) (revision (documentBuffer doc)) (selection w)
+      _ -> UnavailableSourceTarget
+
+contextTargetCurrent :: Desktop -> Bool
+contextTargetCurrent d = case contextTarget d of
+  Nothing -> True
+  Just (ConversationTarget target) -> conversationTarget d==target
+  Just target@SourceTarget{} -> captureContextTarget SourceContext d==Just target
+  Just UnavailableSourceTarget -> False
 
 gitCountText :: Int -> Text
 gitCountText n = if n<0 then "?" else T.pack (show n)
@@ -1738,7 +1804,7 @@ contextEvent ev (r,chosen) d = case ev of
   where
     close=(d {contextMenu=Nothing},[])
     choose i=(d {contextMenu=Just (r,i `mod` length items)},[])
-    invoke i=case drop i items of (_,cmd):_ | commandEnabled d cmd -> runCommand cmd d; _ -> close
+    invoke i=case drop i items of (_,cmd):_ | contextTargetCurrent d && commandEnabled d cmd -> runCommand cmd d; _ -> close
     items=contextItems (contextKind d)
 
 -- SDL supplies click counts; terminal clicks retain the same selection and Enter path.
@@ -2058,19 +2124,41 @@ selectAt extend x y d = case activeWindow d of
     col = max 0 (x-left (bounds w)-1+scrollColumn w)
     pos = bufferLineOffset b row + columnOffset (bufferLineAt b row) col
 
--- | The first configurable context deliberately excludes PTYs, conversations,
--- dialogs and captured gestures. Native and browser shortcuts remain owned by
--- their frontends until their accelerator/clipboard routes are migrated.
-terminalSourceContext :: Desktop -> Bool
-terminalSourceContext d=terminalSourceLabels d && menu d==Nothing && contextMenu d==Nothing &&
-  dialog d==Nothing && drag d==Nothing && dragOriginal d==Nothing && prefix d==Nothing &&
-  not (problemsFocused d) && not (maybe False treeFocused (sideTree d)) &&
-  not (questionActive d)
+-- | Choose the current terminal input owner using only small focus metadata.
+-- Captured gestures, popups and human question/completion controls retain priority.
+bindingContext :: Desktop -> Maybe Bindings.BindingContext
+bindingContext d
+  | videoMode d/=Nothing || nativeMac d = Nothing
+  | problemsFocused d = Just Bindings.MessagesKeys
+  | maybe False treeFocused (sideTree d) = Just Bindings.SidebarKeys
+  | activeConversation d = Just Bindings.ConversationKeys
+  | activeTerminal d/=Nothing = Just Bindings.TerminalKeys
+  | Just label<-activeDocument d >>= documentLabel,
+    "Debugger " `T.isPrefixOf` label || "Source " `T.isPrefixOf` label = Just Bindings.DebuggerKeys
+  | not (wordStar d), Just doc<-activeDocument d, documentLabel doc==Nothing = Just Bindings.SourceKeys
+  | otherwise = Nothing
 
-terminalSourceLabels :: Desktop -> Bool
-terminalSourceLabels d=videoMode d==Nothing && not (nativeMac d) &&
-  not (problemsFocused d) && not (maybe False treeFocused (sideTree d)) &&
-  not (wordStar d) && case activeDocument d of Just doc->documentLabel doc==Nothing; _->False
+effectiveBindings :: Desktop -> Maybe (Bindings.Bindings Command)
+effectiveBindings d = bindingContext d >>= (`M.lookup` keyBindings d)
+
+terminalContextReserved :: Desktop -> V.Key -> [V.Modifier] -> Bool
+terminalContextReserved d key mods = terminalSourceReserved key mods ||
+  (bindingContext d==Just Bindings.ConversationKeys && key==V.KEnter)
+
+bindingInputAvailable :: Desktop -> Bool
+bindingInputAvailable d=menu d==Nothing && contextMenu d==Nothing && dialog d==Nothing &&
+  drag d==Nothing && dragOriginal d==Nothing && prefix d==Nothing &&
+  not (questionActive d) && not (activeAutocomplete d)
+
+-- | Plain movement/text is handled by its owner. No removed chord falls through
+-- into a hardcoded named command. PTY fallback retains every ordinary control key.
+unboundKey :: V.Key -> [V.Modifier] -> Desktop -> (Desktop,[Effect])
+unboundKey key mods d = case bindingContext d of
+  Just Bindings.SidebarKeys -> (d,[])
+  Just Bindings.MessagesKeys -> (d,[])
+  Just Bindings.ConversationKeys -> fromMaybe (editorKey key mods d,[]) (composerEvent (V.EvKey key mods) d)
+  Just Bindings.TerminalKeys -> (d,maybe [] (\text->[AgentAction "terminal-input" [fromMaybe "" (activeTerminal d),text]]) (terminalInput (V.EvKey key mods)))
+  _ -> (editorKey key mods d,[])
 
 terminalSourceReserved :: V.Key -> [V.Modifier] -> Bool
 terminalSourceReserved key mods=(key==V.KChar ']' && V.MCtrl `elem` mods) || key==V.KEsc || key==V.KFun 10 ||
@@ -2080,9 +2168,10 @@ terminalSourceReserved key mods=(key==V.KChar ']' && V.MCtrl `elem` mods) || key
     V.KRight->True
     _->False)
 
-boundSourceCommand :: V.Key -> [V.Modifier] -> Desktop -> Maybe Command
-boundSourceCommand key mods d
-  | terminalSourceContext d, not (terminalSourceReserved key mods) = sourceBindings d >>= \bindings->Bindings.bindingAction bindings key mods
+-- | Policy inspects exactly the same resolved action as human key dispatch.
+boundKeyCommand :: V.Key -> [V.Modifier] -> Desktop -> Maybe Command
+boundKeyCommand key mods d
+  | bindingInputAvailable d, not (terminalContextReserved d key mods) = effectiveBindings d >>= \bindings->Bindings.bindingAction bindings key mods
   | otherwise = Nothing
 
 keyEvent :: V.Key -> [V.Modifier] -> Desktop -> (Desktop,[Effect])
@@ -2676,10 +2765,7 @@ treeKey key mods tree d = case key of
   V.KPageDown -> move 10
   V.KEnter -> activateTree False (treeSelected tree) d
   V.KRight -> activateTree True (treeSelected tree) d
-  V.KLeft -> case drop (treeSelected tree) (treeRows tree) of
-    node:_ | nodeExpanded node -> activateTree False (treeSelected tree) d
-    node:_ -> let ancestors=[i | (i,n)<-zip [0..] (take (treeSelected tree) (treeRows tree)),nodeDepth n < nodeDepth node] in moveToNode (if null ancestors then 0 else last ancestors)
-    _ -> (d,[])
+  V.KLeft -> collapseTree tree d
   V.KEsc -> leave
   V.KChar '\t' -> leave
   V.KFun 6 -> leave
@@ -2688,9 +2774,24 @@ treeKey key mods tree d = case key of
   V.KDel -> (d,[])
   _ -> keyEvent key mods d
   where
-    move delta=moveToNode (treeSelected tree+delta)
-    moveToNode i = let chosen=max 0 (min (length (treeRows tree)-1) i); visible=max 1 (treeContentRows d); scroll=max 0 (min chosen (max (treeScroll tree) (chosen-visible+1))) in (d {sideTree=Just tree {treeSelected=chosen,treeScroll=scroll}},[])
+    move delta=moveTree delta tree d
     leave=(d {sideTree=Just tree {treeFocused=False}},[])
+
+moveTree :: Int -> Sidebar -> Desktop -> (Desktop,[Effect])
+moveTree delta tree d = selectTreeRow (treeSelected tree+delta) tree d
+
+selectTreeRow :: Int -> Sidebar -> Desktop -> (Desktop,[Effect])
+selectTreeRow i tree d = (d {sideTree=Just tree {treeSelected=chosen,treeScroll=scroll}},[])
+  where chosen=max 0 (min (length (treeRows tree)-1) i)
+        visible=max 1 (treeContentRows d)
+        scroll=max 0 (min chosen (max (treeScroll tree) (chosen-visible+1)))
+
+collapseTree :: Sidebar -> Desktop -> (Desktop,[Effect])
+collapseTree tree d = case drop (treeSelected tree) (treeRows tree) of
+  node:_ | nodeExpanded node -> activateTree False (treeSelected tree) d
+  node:_ -> let ancestors=[i | (i,n)<-zip [0..] (take (treeSelected tree) (treeRows tree)),nodeDepth n < nodeDepth node]
+            in selectTreeRow (if null ancestors then 0 else last ancestors) tree d
+  _ -> (d,[])
 
 treeContentRows :: Desktop -> Int
 treeContentRows d = max 0 (snd (screenSize d)-4-problemsHeight d)

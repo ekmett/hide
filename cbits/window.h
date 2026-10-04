@@ -1,7 +1,7 @@
 #ifndef THC_WINDOW_H
 #define THC_WINDOW_H
 #include <stdint.h>
-void thc_post_command(int command);
+void thc_post_command(int command, int generation);
 /* Thread-safe wake after queuing an incoming frame; no repaint implied. */
 void thc_wake(void);
 int thc_open(const char *backend, double scale, int cols, int rows, int cell_height);

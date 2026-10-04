@@ -282,6 +282,12 @@ static void check_geometry(int lines, int cell_height) {
     SDL_zero(e); e.type = SDL_EVENT_QUIT; assert(SDL_PushEvent(&e));
     assert(thc_wait(out) && out[0] == 0); /* Frame notification wakes without forced repaint. */
     assert(thc_wait(out) && out[0] == 6); /* Redundant wake signals collapse too. */
+
+    SDL_FlushEvents(SDL_EVENT_FIRST, SDL_EVENT_LAST);
+    thc_post_command(37, 19);
+    assert(thc_wait(out) && out[0] == 11 && out[1] == 37 && out[2] == 19);
+    thc_post_command(37, 20);
+    assert(thc_wait(out) && out[0] == 11 && out[1] == 37 && out[2] == 20);
     SDL_zero(e); e.type = SDL_EVENT_MOUSE_BUTTON_DOWN;
     e.button.button = SDL_BUTTON_LEFT; e.button.clicks = 2;
     assert(SDL_PushEvent(&e));

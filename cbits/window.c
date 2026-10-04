@@ -335,8 +335,8 @@ static void pointer(float x, float y, int32_t *event) {
     if (mouse_x >= 0 && mouse_x < cols && mouse_y >= 0 && mouse_y < rows) SDL_HideCursor();
     else SDL_ShowCursor();
 }
-void thc_post_command(int command) {
-    SDL_Event e; SDL_zero(e); e.type = command_event; e.user.code = command; SDL_PushEvent(&e);
+void thc_post_command(int command, int generation) {
+    SDL_Event e; SDL_zero(e); e.type = command_event; e.user.code = command; e.user.data1 = (void *)(intptr_t)generation; SDL_PushEvent(&e);
 }
 /* SDL_PushEvent is thread-safe: decoded frames wake the main thread directly. */
 void thc_wake(void) {
@@ -370,7 +370,7 @@ int thc_wait(int32_t *out) {
         SDL_ClearError();
         if (!SDL_WaitEventTimeout(&e, (Sint32)(deadline - now))) return *SDL_GetError() ? 0 : idle_event(out);
         if (e.type == wake_event) return 1;
-        if (e.type == command_event) { out[0] = 11; out[1] = e.user.code; return 1; }
+        if (e.type == command_event) { out[0] = 11; out[1] = e.user.code; out[2] = (int32_t)(intptr_t)e.user.data1; return 1; }
         switch (e.type) {
         case SDL_EVENT_QUIT: case SDL_EVENT_WINDOW_CLOSE_REQUESTED: out[0] = 6; return 1;
         case SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED: case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:

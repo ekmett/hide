@@ -214,9 +214,9 @@ checks = isolatedStore $ do
       threadDelay 100000
       d <- readIORef observed
       assert "duplicate input is not applied twice" (activeText d=="λ")
-      writePacket second (JsonPacket (object ["type" .= ("command"::T.Text),"seq" .= (2::Int),"command" .= ("selectAll"::T.Text)]))
+      writePacket second (JsonPacket (object ["type" .= ("command"::T.Text),"seq" .= (2::Int),"command" .= ("hide.edit.select-all"::T.Text)]))
       ack second 2
-      writePacket second (JsonPacket (object ["type" .= ("command"::T.Text),"seq" .= (3::Int),"command" .= ("cut"::T.Text)]))
+      writePacket second (JsonPacket (object ["type" .= ("command"::T.Text),"seq" .= (3::Int),"command" .= ("hide.edit.cut"::T.Text)]))
       -- Lose the reply after commitment, not the input before acceptance. An
       -- immediate full-duplex close may discard the write on some platforms.
       let cutCommitted = do
@@ -338,7 +338,7 @@ localPeerCheck = do
       assert "detach retains session catalog" (maybe False (const True) exists)
       withLocalPeer session True [] $ \peer -> do
         void (receive peer "assets")
-        send peer ["type" .= ("command"::T.Text),"command" .= ("quit"::T.Text),"seq" .= (1::Int)]
+        send peer ["type" .= ("command"::T.Text),"command" .= ("hide.app.quit"::T.Text),"seq" .= (1::Int)]
         void (receive peer "ack")
         send peer ["type" .= ("key"::T.Text),"key" .= ("Tab"::T.Text),"seq" .= (2::Int)]
         void (receive peer "ack")
@@ -435,7 +435,7 @@ promptedExitCheck=do
       writePacket display (JsonPacket (object ["type" .= ("hello"::T.Text),"version" .= (1::Int),"session" .= session,"client" .= replicate 48 'e',"ack" .= (0::Int)]))
       control display "hello"
       control display "assets"
-      writePacket display (JsonPacket (object ["type" .= ("command"::T.Text),"seq" .= (1::Int),"command" .= ("quit"::T.Text)]))
+      writePacket display (JsonPacket (object ["type" .= ("command"::T.Text),"seq" .= (1::Int),"command" .= ("hide.app.quit"::T.Text)]))
       writePacket display (JsonPacket (object ["type" .= ("paste"::T.Text),"seq" .= (2::Int),"text" .= ("must not reopen session"::T.Text)]))
       control display "closed"
       bracket (open (0::Int)) hClose $ \late -> do

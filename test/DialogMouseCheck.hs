@@ -9,7 +9,7 @@ import Data.Maybe (fromMaybe)
 import Hide.BufferView
 import Hide.Model
 import Hide.Render (snapshotHtml, snapshot, renderDesktop)
-import Hide.Buffer (newBuffer, columnOffset, contents, markSaved, replaceSelection, Selection(..))
+import Hide.Buffer (revision, newBuffer, columnOffset, contents, markSaved, replaceSelection, Selection(..))
 import Hide.Window (nativeMenuShortcut)
 import qualified Data.Text.Encoding as TE
 import Hide.Browser (Entry(..))
@@ -97,6 +97,25 @@ checks = do
   check "context rename emits language request" (renameEffects==[LanguageRequest (RenameAt "greeting")])
   check "escape dismisses context" (contextMenu dismissed==Nothing)
   check "context menu draws" (snapshotHtml popup/=snapshotHtml desktop)
+  let targetSource=addDocument (Just (FileState "/project/Target.hs" Nothing)) (newBuffer "target") (initialDesktop (80,25))
+      targetPopup=openContext SourceContext 10 5 targetSource
+      selectPopup popupState=handleEvent (V.EvKey V.KEnter []) popupState
+      focusedElsewhere=addDocument (Just (FileState "/project/Other.hs" Nothing)) (newBuffer "other") targetPopup
+      movedCaret=modifyActive (\w->w {selection=Selection 1 1}) targetPopup
+      changedContent=modifyActive (\w->w {selection=Selection 0 0}) (insertText "changed" targetPopup)
+      targetReady=fst (selectPopup targetPopup)
+  check "context action retains the source hit target" (clipboard targetReady=="/project/Target.hs:1:1" && contextMenu targetReady==Nothing)
+  check "stale source cases would otherwise invoke an enabled action" (all (\candidate->commandEnabled candidate CopyLocation && clipboard (fst (selectPopup candidate {contextTarget=Nothing}))/=clipboard candidate) [focusedElsewhere,movedCaret,changedContent])
+  check "context action refuses changed focus, caret and revision" (all (\candidate->let (refused,effects)=selectPopup candidate in contextMenu refused==Nothing && clipboard refused==clipboard candidate && null effects) [focusedElsewhere,movedCaret,changedContent])
+  let sidebarFocus=targetPopup {sideTree=fmap (\tree->tree {treeFocused=True}) (sideTree (installTree "/project" [] targetPopup))}
+      outputPopup=openContext SourceContext 10 5 (addReadOnly "Output" "first" (initialDesktop (80,25)))
+      replacedOutput=addReadOnly "Output" "second" outputPopup
+  check "source context refuses sidebar ownership" (let (refused,effects)=selectPopup sidebarFocus in contextMenu refused==Nothing && clipboard refused==clipboard sidebarFocus && null effects)
+  check "equal-revision read-only replacement is not a source target" (not (contextTargetCurrent outputPopup) && not (contextTargetCurrent replacedOutput) && fmap (revision . documentBuffer) (activeDocument outputPopup)==fmap (revision . documentBuffer) (activeDocument replacedOutput))
+  let childPopup=openContext (AgentContext [("Cancel reply",AgentCancel)]) 10 5 (selectConversationView "child" "Child" targetSource)
+      switched=childPopup {conversationTarget=""}
+  check "unchanged conversation context can invoke" (snd (selectPopup childPopup)==[AgentAction "cancel" []])
+  check "context action refuses a different conversation target" (let (refused,effects)=selectPopup switched in contextMenu refused==Nothing && null effects)
   let source=addDocument (Just (FileState "/project/Main.hs" Nothing)) (newBuffer "hello\nworld") (initialDesktop (80,25))
       problem=Diagnostic "/project/Main.hs" Nothing 1 2 1 "Not in scope"
       pane=setProblemsVisible True source {diagnostics=[problem]}

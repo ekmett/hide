@@ -72,6 +72,7 @@ data RenderState = RenderState
   , keyButtonHover :: Maybe Int
   , keyButtonPressed :: Maybe Int
   , keyContextMenu :: Maybe (Rect,Int)
+  , keyContextTarget :: Maybe ContextTarget
   , keyProblemsVisible :: Bool
   , keyProblemsSelected :: Int
   , keyProblemsScroll :: Int
@@ -192,7 +193,7 @@ renderKey original = do
   payload (clipboard original)
   mapM_ payload (snd (clipboardExport original))
   payload (contextKind original)
-  mapM_ payload (sourceBindings original)
+  mapM_ payload (keyBindings original)
   payload (guestPrivatePaths original)
   names<-readIORef identities
   let state=RenderState
@@ -215,6 +216,7 @@ renderKey original = do
         , keyButtonHover=buttonHover original
         , keyButtonPressed=buttonPressed original
         , keyContextMenu=contextMenu original
+        , keyContextTarget=contextTarget original
         , keyProblemsVisible=problemsVisible original
         , keyProblemsSelected=problemsSelected original
         , keyProblemsScroll=problemsScroll original
@@ -684,7 +686,7 @@ menuLayers d (i,j) = [place x y contents']
     item n entry@(MenuItem title _ cmd) = V.char paper '│'  V.<|> V.cropRight (w-2) content V.<|> V.char paper '│'
       where
         key = menuShortcut d entry
-        disabled = not (commandEnabled d cmd)
+        disabled = not (menuCommandAvailable d cmd)
         bg = if n == j then green else gray
         a = attr (if disabled then V.RGBColor 85 85 85 else black) bg
         hot = attr red bg
@@ -732,7 +734,7 @@ problemsLayers d
 
 contextLayers :: Desktop -> (Rect,Int) -> [V.Image]
 contextLayers d (r@(Rect x y w h),chosen) =
-  [place (x+1) (y+i-contextOffset r chosen+1) (row (attr (if commandEnabled d cmd then black else V.RGBColor 85 85 85) (if i==chosen then green else gray)) (w-2) (" "<>title)) | (i,(title,cmd))<-take (max 0 (h-2)) (drop (contextOffset r chosen) (zip [0..] (contextItems (contextKind d))))]
+  [place (x+1) (y+i-contextOffset r chosen+1) (row (attr (if contextTargetCurrent d && commandEnabled d cmd then black else V.RGBColor 85 85 85) (if i==chosen then green else gray)) (w-2) (" "<>title)) | (i,(title,cmd))<-take (max 0 (h-2)) (drop (contextOffset r chosen) (zip [0..] (contextItems (contextKind d))))]
   ++ [place x y (box paper False w h)]
 
 -- Dialog frames, fields, buttons and shadows appear in docs/site/screenshots/*.png.
