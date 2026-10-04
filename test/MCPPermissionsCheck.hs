@@ -340,8 +340,8 @@ projectConfigChecks=bracket temporary removePathForcibly $ \directory -> do
         (merged==Right (object ["backend" .= ("terminal"::T.Text),"scale" .= (2::Int),"rows" .= (40::Int),"wordStar" .= True]) && globalOnly==Right (object ["backend" .= ("terminal"::T.Text),"scale" .= (1::Int),"wordStar" .= True]))
       TIO.appendFile globalPath "\n[editor.keybindings.terminal.source]\n\"hide.file.save\" = [\"Ctrl+Shift+S\"]\n\"hide.file.open\" = []\n"
       TIO.appendFile projectPath "\n[editor.keybindings.terminal.source]\n\"hide.file.save\" = []\n"
-      mergedKeys<-readTerminalSourceKeysFor source
-      check "project keybindings replace global chords and preserve explicit removal" (mergedKeys==Right (M.fromList [("hide.file.save",[]),("hide.file.open",[])]))
+      mergedKeys<-readTerminalKeysFor source
+      check "project keybindings replace global chords and preserve explicit removal" (mergedKeys==Right (M.singleton "source" (M.fromList [("hide.file.save",[]),("hide.file.open",[])])))
       contexts<-readAgentContexts source
       check "agent contexts return separate global/project text and resolved paths"
         (contexts==Right (object ["global" .= object ["path" .= globalPath,"text" .= ("Global guidance"::T.Text)],"project" .= object ["path" .= projectPath,"text" .= ("Project guidance"::T.Text)]]))
@@ -436,8 +436,8 @@ keybindingConfigChecks :: IO ()
 keybindingConfigChecks=bracket temporary removePathForcibly $ \directory->do
   let path=directory </> "thc.toml"
   TIO.writeFile path "[editor.keybindings.terminal.source]\n\"hide.file.save\" = [\"Ctrl+Shift+S\"]\n\"hide.file.open\" = []\n"
-  loaded<-readTerminalSourceKeysAt path
-  unless (loaded==Right (M.fromList [("hide.file.save",["Ctrl+Shift+S"]),("hide.file.open",[])])) (error "keybinding arrays and explicit unbind load from TOML")
+  loaded<-readTerminalKeysAt path
+  unless (loaded==Right (M.singleton "source" (M.fromList [("hide.file.save",["Ctrl+Shift+S"]),("hide.file.open",[])]))) (error "keybinding arrays and explicit unbind load from TOML")
   TIO.writeFile path "[editor.keybindings.terminal.source]\n\"hide.file.save\" = \"Ctrl+S\"\n"
-  invalid<-readTerminalSourceKeysAt path
+  invalid<-readTerminalKeysAt path
   unless (either (const True) (const False) invalid) (error "scalar keybindings must fail")

@@ -192,7 +192,7 @@ renderKey original = do
   payload (clipboard original)
   mapM_ payload (snd (clipboardExport original))
   payload (contextKind original)
-  mapM_ payload (sourceBindings original)
+  mapM_ payload (keyBindings original)
   payload (guestPrivatePaths original)
   names<-readIORef identities
   let state=RenderState

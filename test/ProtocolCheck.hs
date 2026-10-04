@@ -52,8 +52,8 @@ checks = do
   check "named menu ignores a stale positional index" (menu ["command" .= ("hide.file.new"::T.Text),"index" .= (999::Int)]==Right (MenuCommand New))
   check "unknown named menu is rejected" (either (const True) (const False) (menu ["command" .= ("future-command"::T.Text)]))
   check "menu input requires a command identity" (either (const True) (const False) (menu ["index" .= (0::Int)]))
-  let bindings=either (error . show) id (Commands.terminalSourceBindings (M.singleton "hide.file.save" ["Ctrl+Shift+S"]))
-      daemon=(addDocument (Just (FileState "/project/Main.hs" Nothing)) (newBuffer "hello") d) {browserFrontend=True,videoMode=Just 3,sourceBindings=Just bindings}
+  let bindings=either (error . show) id (Commands.terminalBindings (M.singleton "source" (M.singleton "hide.file.save" ["Ctrl+Shift+S"])))
+      daemon=(addDocument (Just (FileState "/project/Main.hs" Nothing)) (newBuffer "hello") d) {browserFrontend=True,videoMode=Just 3,keyBindings=bindings}
       terminal=fst (applyInput (Frontend Nothing False) daemon)
   check "terminal attachment enables custom source keys without losing clipboard transport" (case snd (applyInput (Key "s" [V.MCtrl,V.MShift]) terminal) of [SaveDocument{}]->browserFrontend terminal; _->False)
 

@@ -91,7 +91,10 @@ any OS, use the Windows/Linux column when the terminal forwards those keys:
 ⌘ shortcuts belong to the terminal app. OS-reserved shortcuts may be intercepted.
 **Options > Preferences** can show Mac modifier symbols in text-mode key labels;
 this changes their appearance, not the Control/Alt bindings. See
-[configuration](docs/configuration.md) for the saved setting.
+[configuration](docs/configuration.md) for the saved setting. Terminal commands
+can be replaced or unbound per source, sidebar, conversation, debugger, Messages
+or PTY context in TOML; the focused context supplies menu and status hints. See
+[terminal keybindings](docs/configuration.md#terminal-keybindings) for examples.
 
 Native and browser frontends use the system clipboard. In a text terminal,
 Copy and Cut also request the system clipboard through OSC 52 where supported;

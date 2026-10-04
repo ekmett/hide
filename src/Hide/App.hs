@@ -16,7 +16,7 @@ import Hide.Autocomplete
 import qualified Hide.AutocompleteACP as CompletionACP
 import Hide.BufferView
 import Hide.Defaults
-import Hide.Commands (terminalSourceBindings)
+import Hide.Commands (terminalBindings)
 import Hide.MCPPermissions
 import Hide.ClipboardMCP
 import Hide.Links (followLink)
@@ -148,8 +148,8 @@ runEditor args = do
     loadEnvironment configBase >>= either (die . T.unpack) pure
     defaultsJSON<-readEditorDefaultsFor configBase >>= either (die . T.unpack) pure
     defaults<-either die pure (parseEither parseDefaults defaultsJSON)
-    keys<-readTerminalSourceKeysFor configBase >>= either (die . T.unpack) pure
-    keymap<-if null keys then pure Nothing else Just <$> either (die . T.unpack) pure (terminalSourceBindings keys)
+    keys<-readTerminalKeysFor configBase >>= either (die . T.unpack) pure
+    keymap<-either (die . T.unpack) pure (terminalBindings keys)
     let backendDefault=backendEnvironment <|> defaultBackend defaults
         scaleDefault=scaleEnvironment <|> (show <$> defaultScale defaults)
         appearanceDefault=appearanceEnvironment <|> defaultAppearance defaults
@@ -238,7 +238,7 @@ runEditor args = do
         `catch` (\FrontendDetached -> writeIORef wasInterrupted True)) `finally` report
     else do
         let initial=if Demo `elem` flags then addDocument Nothing (newBuffer (activeText demoDesktop)) (initialDesktop dimensions) else initialDesktop dimensions
-            configured=(fst (handleEvent (uncurry V.EvResize dimensions) initial)) {sourceBindings=keymap,macKeySymbols=fromMaybe False (defaultMacKeySymbols defaults),defaultBufferView=fromMaybe CurrentView (defaultView defaults),chatSubmit=fromMaybe QuerySubmit (defaultChatSubmit defaults),appearance=colorMode,systemDark=maybe True (not . (`elem` ["7","15"]) . reverse . takeWhile (/=';') . reverse) terminalColors,wordStar=flagBool WordStar StandardKeys (fromMaybe (wordStar initial) (defaultWordStar defaults)),crtFilter=flagBool CRT NoCRT (fromMaybe (crtFilter initial) (defaultCRT defaults)),materialIcons=flagBool MaterialIcons ClassicIcons (fromMaybe (materialIcons initial) (defaultMaterialIcons defaults)),blinkCursor=fromMaybe (fromMaybe (blinkCursor initial) (defaultBlinkCursor defaults)) (lastMaybe [value | CursorBlink value<-flags]),pixelateUnicode=fromMaybe (fromMaybe (pixelateUnicode initial) (defaultPixelateUnicode defaults)) (lastMaybe [value | Pixelate value<-flags]),streamerMode=fromMaybe (fromMaybe False (defaultStreamerMode defaults)) (lastMaybe [value | Streamer value<-flags]),videoMode=if backend == Terminal then Nothing else Just screenMode}
+            configured=(fst (handleEvent (uncurry V.EvResize dimensions) initial)) {keyBindings=keymap,macKeySymbols=fromMaybe False (defaultMacKeySymbols defaults),defaultBufferView=fromMaybe CurrentView (defaultView defaults),chatSubmit=fromMaybe QuerySubmit (defaultChatSubmit defaults),appearance=colorMode,systemDark=maybe True (not . (`elem` ["7","15"]) . reverse . takeWhile (/=';') . reverse) terminalColors,wordStar=flagBool WordStar StandardKeys (fromMaybe (wordStar initial) (defaultWordStar defaults)),crtFilter=flagBool CRT NoCRT (fromMaybe (crtFilter initial) (defaultCRT defaults)),materialIcons=flagBool MaterialIcons ClassicIcons (fromMaybe (materialIcons initial) (defaultMaterialIcons defaults)),blinkCursor=fromMaybe (fromMaybe (blinkCursor initial) (defaultBlinkCursor defaults)) (lastMaybe [value | CursorBlink value<-flags]),pixelateUnicode=fromMaybe (fromMaybe (pixelateUnicode initial) (defaultPixelateUnicode defaults)) (lastMaybe [value | Pixelate value<-flags]),streamerMode=fromMaybe (fromMaybe False (defaultStreamerMode defaults)) (lastMaybe [value | Streamer value<-flags]),videoMode=if backend == Terminal then Nothing else Just screenMode}
         localPaths<-if daemon/=Nothing then mapM expandRemoteHome paths else pure paths
         (_,loaded)<-applyEffects configured (map ReadPath localPaths)
         cwd<-getCurrentDirectory
