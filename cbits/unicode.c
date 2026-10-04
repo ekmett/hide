@@ -21,10 +21,15 @@ int thc_graphemes(const char *utf8, int bytes, int *boundaries) {
 #include <CoreText/CoreText.h>
 #endif
 #ifdef WITH_WINDOW
-int thc_unicode_bitmap(const char *utf8, int w, int h, uint32_t fg, uint32_t *pixels) {
+int thc_unicode_bitmap(const char *utf8, int w, int h, uint32_t fg, uint32_t traits, uint32_t *pixels) {
     CFStringRef s = CFStringCreateWithCString(NULL, utf8, kCFStringEncodingUTF8);
     if (!s) return 0;
     CTFontRef font = CTFontCreateWithName(CFSTR("Menlo"), h * 0.85, NULL);
+    CTFontSymbolicTraits mask=((traits&1)?kCTFontBoldTrait:0)|((traits&2)?kCTFontItalicTrait:0);
+    if (mask) {
+        CTFontRef styled=CTFontCreateCopyWithSymbolicTraits(font,0,NULL,mask,mask);
+        if (styled) { CFRelease(font); font=styled; }
+    }
     CGColorSpaceRef space = CGColorSpaceCreateDeviceRGB();
     CGFloat rgba[] = {((fg>>16)&255)/255.0, ((fg>>8)&255)/255.0, (fg&255)/255.0, 1};
     CGColorRef color = CGColorCreate(space, rgba);
@@ -36,10 +41,11 @@ int thc_unicode_bitmap(const char *utf8, int w, int h, uint32_t fg, uint32_t *pi
     CGContextRef ctx = CGBitmapContextCreate(pixels, w, h, 8, w*4, space, kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Host);
     if (ctx) {
         CGRect ink = CTLineGetBoundsWithOptions(line, kCTLineBoundsUseGlyphPathBounds);
-        CGFloat sx = ink.size.width > w ? w / ink.size.width : 1;
+        CGFloat logical_w=(traits&4)?w/2.0:w;
+        CGFloat sx = ink.size.width > logical_w ? logical_w / ink.size.width : 1;
         CGFloat sy = ink.size.height > h ? h / ink.size.height : 1;
-        CGContextScaleCTM(ctx, sx, sy);
-        CGContextSetTextPosition(ctx, (w/sx-ink.size.width)/2-ink.origin.x, (h/sy-ink.size.height)/2-ink.origin.y);
+        CGContextScaleCTM(ctx, sx*((traits&4)?2:1), sy);
+        CGContextSetTextPosition(ctx, (logical_w/sx-ink.size.width)/2-ink.origin.x, (h/sy-ink.size.height)/2-ink.origin.y);
         CTLineDraw(line, ctx);
         CGContextRelease(ctx);
     }
@@ -54,20 +60,23 @@ int thc_unicode_bitmap(const char *utf8, int w, int h, uint32_t fg, uint32_t *pi
 #include <pango/pangocairo.h>
 #endif
 #ifdef WITH_WINDOW
-int thc_unicode_bitmap(const char *utf8, int w, int h, uint32_t fg, uint32_t *pixels) {
+int thc_unicode_bitmap(const char *utf8, int w, int h, uint32_t fg, uint32_t traits, uint32_t *pixels) {
     cairo_surface_t *surface = cairo_image_surface_create_for_data((unsigned char *)pixels, CAIRO_FORMAT_ARGB32, w, h, w*4);
     cairo_t *cr = cairo_create(surface);
     PangoLayout *layout = pango_cairo_create_layout(cr);
     PangoFontDescription *font = pango_font_description_from_string("monospace");
     pango_font_description_set_absolute_size(font, h*0.85*PANGO_SCALE);
+    pango_font_description_set_weight(font,(traits&1)?PANGO_WEIGHT_BOLD:PANGO_WEIGHT_NORMAL);
+    pango_font_description_set_style(font,(traits&2)?PANGO_STYLE_ITALIC:PANGO_STYLE_NORMAL);
     pango_layout_set_font_description(layout, font);
     pango_layout_set_text(layout, utf8, -1);
     PangoRectangle ink;
     pango_layout_get_pixel_extents(layout, &ink, NULL);
-    double sx = ink.width > w ? (double)w/ink.width : 1;
+    double logical_w=(traits&4)?w/2.0:w;
+    double sx = ink.width > logical_w ? logical_w/ink.width : 1;
     double sy = ink.height > h ? (double)h/ink.height : 1;
-    cairo_scale(cr, sx, sy);
-    cairo_move_to(cr, (w/sx-ink.width)/2-ink.x, (h/sy-ink.height)/2-ink.y);
+    cairo_scale(cr, sx*((traits&4)?2:1), sy);
+    cairo_move_to(cr, (logical_w/sx-ink.width)/2-ink.x, (h/sy-ink.height)/2-ink.y);
     cairo_set_source_rgb(cr, ((fg>>16)&255)/255.0, ((fg>>8)&255)/255.0, (fg&255)/255.0);
     pango_cairo_show_layout(cr, layout);
     cairo_surface_flush(surface);
@@ -141,11 +150,11 @@ int thc_unicode_downsample(const uint32_t *source, int w, int h, uint32_t *pixel
     return 1;
 }
 
-int thc_unicode_pixelated(const char *text, int w, int h, uint32_t fg, uint32_t *pixels) {
+int thc_unicode_pixelated(const char *text, int w, int h, uint32_t fg, uint32_t traits, uint32_t *pixels) {
     if (w<1 || h<1 || w>1024 || h>1024) return 0;
     uint32_t *source=calloc((size_t)w*h*16,sizeof(uint32_t));
     if (!source) return 0;
-    int ok=thc_unicode_bitmap(text,w*4,h*4,fg,source) && thc_unicode_downsample(source,w,h,pixels);
+    int ok=thc_unicode_bitmap(text,w*4,h*4,fg,traits,source) && thc_unicode_downsample(source,w,h,pixels);
     free(source);
     return ok;
 }

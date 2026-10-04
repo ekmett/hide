@@ -96,20 +96,26 @@ function allocate(){
  }
  dirty=true;
 }
-function tile(text,fg,pixelated,w,h){
- const bitmap=glyphs.get(text), key=JSON.stringify([text,fg,pixelated,w,h]);
+function bitmapInk(bitmap,y,x,traits){
+ const source=x-((traits&2)?Math.floor((15-y)/4):0),row=bitmap[1][y];
+ return (source>=0&&source<bitmap[0]&&!!(row&(1<<(15-source))))||
+   ((traits&1)&&source>0&&source<=bitmap[0]&&!!(row&(1<<(16-source))));
+}
+function tile(text,fg,pixelated,w,h,traits){
+ const bitmap=glyphs.get(text), key=JSON.stringify([text,fg,pixelated,w,h,traits]);
  if(tiles.has(key))return tiles.get(key);
  const t=document.createElement('canvas');
  if(bitmap){
    t.width=bitmap[0];t.height=16;const c=t.getContext('2d'), image=c.createImageData(t.width,16);
-   for(let y=0;y<16;y++)for(let x=0;x<t.width;x++)if(bitmap[1][y]&(1<<(15-x))){const i=(y*t.width+x)*4;image.data.set([fg>>16,(fg>>8)&255,fg&255,255],i);}
+   for(let y=0;y<16;y++)for(let x=0;x<t.width;x++)if(bitmapInk(bitmap,y,x,traits)){const i=(y*t.width+x)*4;image.data.set([fg>>16,(fg>>8)&255,fg&255,255],i);}
    c.putImageData(image,0,0);
  }else{
    // Shape an entire grapheme in one canvas operation, preserving emoji sequences.
    t.width=pixelated?Math.max(8,Math.round(w/(8*scale*(devicePixelRatio||1)))*8):Math.max(1,Math.ceil(w));
    t.height=pixelated?16:Math.max(16,Math.ceil(h*16/cellHeight()));
-   const c=t.getContext('2d');c.fillStyle=rgb(fg);c.textBaseline='alphabetic';c.font=`${t.height*0.85}px monospace`;
-   c.fillText(text,0,t.height*0.82,t.width);
+   const c=t.getContext('2d');c.fillStyle=rgb(fg);c.textBaseline='alphabetic';c.font=`${traits&2?'italic ':''}${traits&1?'bold ':''}${t.height*0.85}px monospace`;
+   if(traits&4)c.scale(2,1);
+   c.fillText(text,0,t.height*0.82,(traits&4)?t.width/2:t.width);
  }
  if(tiles.size>=1024)tiles.clear();tiles.set(key,t);return t;
 }
@@ -117,11 +123,11 @@ function drawRows(changed){
  if(!frame)return;const started=performance.now();const [cw,ch]=metrics();
  for(const [y,spans] of changed){
    const y0=Math.round(y*ch), y1=Math.round((y+1)*ch);ctx.fillStyle='#0000aa';ctx.fillRect(0,y0,surface.width,y1-y0);
-   for(const [start,fg,bg,clusters] of spans||[]){let x=start;
-     for(const [text,width] of clusters){
+   for(const [start,fg,bg,traits,clusters] of spans||[]){let x=start;
+     for(const [text,width,stretched] of clusters){
        const x0=Math.round(x*cw),x1=Math.round((x+width)*cw);
        ctx.fillStyle=rgb(bg);ctx.fillRect(x0,y0,x1-x0,y1-y0);
-       if(width>0&&text!==' ')ctx.drawImage(tile(text,fg,frame.pixelated,x1-x0,y1-y0),x0,y0,x1-x0,y1-y0);
+       if(width>0&&text!==' ')ctx.drawImage(tile(text,fg,frame.pixelated,x1-x0,y1-y0,traits+(stretched?4:0)),x0,y0,x1-x0,y1-y0);
        x+=width;
      }
    }
@@ -237,7 +243,11 @@ function connect(){
      glyphs=new Map(message.glyphs.map(([c,w,rs])=>[c,[w,rs]]));tiles.clear();scale=initialScale=message.scale||2;ready=true;status.textContent='Connected';lastSize='';send({type:'theme',dark:systemTheme.matches});
    }else if(message.type==='frame'){
      if(!platformSent){platformSent=true;send({type:'frontend',mode:message.mode||3,mac:navigator.platform.includes('Mac')});}
-     message.rows=message.rows.map(([y,spans])=>[y,spans.map(([x,fg,bg,runs])=>[x,fg,bg,runs.flatMap(run=>typeof run==='string'?Array.from(run,c=>[c,1]):[run])])]);
+     message.rows=message.rows.map(([y,spans])=>[y,spans.map(span=>{
+       if(span.length!==5||!Number.isInteger(span[3])||span[3]<0||span[3]>3)throw new Error('Invalid font traits');
+       const [x,fg,bg,traits,runs]=span;
+       return [x,fg,bg,traits,runs.flatMap(run=>typeof run==='string'?Array.from(run,c=>[c,1]):[run])];
+     })]);
      const oldCursor=JSON.stringify(frame?.cursor);
      const changedMode=Object.hasOwn(message,'mode')&&mode!==message.mode;
      frame={...frame,...message};updateTitle();unsaved=frame.dirty;guardLeave();[cols,lines]=frame.size;mode=frame.mode||3;clipboard=frame.selection;

@@ -49,9 +49,9 @@ static void check_mouse_cell(SDL_Renderer *renderer, int row, int cell_height, b
     for (int i = 0; i < 16; ++i) { glyph[i] = 0xc000; accent[i] = 0x3000; bright[i] = 0x0c00; }
     assert(thc_begin());
     for (int x = 0; x < 2; ++x) {
-        thc_glyph(x, row, 1, 8, glyph, 0xaaaaaa, 0x0000aa);
-        thc_glyph(x, row, 0, 8, accent, 0x00aaaa, 0);
-        thc_glyph(x, row, 0, 8, bright, 0xffffff, 0);
+        thc_glyph(x, row, 1, 8, glyph, 0xaaaaaa, 0x0000aa, 0);
+        thc_glyph(x, row, 0, 8, accent, 0x00aaaa, 0, 0);
+        thc_glyph(x, row, 0, 8, bright, 0xffffff, 0, 0);
     }
     for (int repeat = 0; repeat < 2; ++repeat) {
         assert(thc_present());
@@ -89,7 +89,7 @@ static void check_crt(SDL_Renderer *renderer, int lines, double pitch) {
     for (int i = 0; i < 16; ++i) solid[i] = 0xffff;
     assert(thc_begin());
     for (int y = 0; y < lines; ++y) for (int x = 0; x < 80; ++x)
-        thc_glyph(x, y, 1, 8, solid, 0xffffff, 0);
+        thc_glyph(x, y, 1, 8, solid, 0xffffff, 0, 0);
     for (int enabled = 0; enabled < 3; ++enabled) {
         thc_crt_filter(enabled == 1);
         for (int repeat = 0; repeat < 2; ++repeat) {
@@ -137,8 +137,8 @@ static void check_unicode(SDL_Renderer *renderer) {
     uint64_t hashes[3]={0};
     for (int mode=0;mode<3;++mode) {
         assert(thc_begin()); thc_pixelate_unicode(mode==1);
-        assert(thc_unicode(1,1,2,"👩🏽‍💻",0xffffff,0x0000aa));
-        assert(thc_unicode(3,1,1,"é",0xffff55,0x0000aa));
+        assert(thc_unicode(1,1,2,"👩🏽‍💻",0xffffff,0x0000aa,0));
+        assert(thc_unicode(3,1,1,"é",0xffff55,0x0000aa,0));
         assert(thc_present());
         SDL_Surface *image=SDL_RenderReadPixels(renderer,NULL);
         assert(image);
@@ -152,6 +152,50 @@ static void check_unicode(SDL_Renderer *renderer) {
     }
     assert(hashes[0]!=hashes[1] && hashes[0]==hashes[2]);
     thc_pixelate_unicode(0);
+}
+
+static void check_font_traits(SDL_Renderer *renderer) {
+    uint16_t glyph[16];
+    for (int y=0;y<16;++y) glyph[y]=0x1000;
+    for (int bitmap=0;bitmap<3;++bitmap) {
+        uint64_t hashes[5]={0};
+        thc_pixelate_unicode(bitmap==2);
+        for (int style=0;style<5;++style) {
+            unsigned traits=style==4?0:(unsigned)style;
+            assert(thc_begin());
+            if (!bitmap) thc_glyph(1,1,1,8,glyph,0xffffff,0,traits);
+            else assert(thc_unicode(1,1,1,"f",0xffffff,0,traits));
+            assert(thc_present());
+            SDL_Surface *image=SDL_RenderReadPixels(renderer,NULL);
+            assert(image);
+            for (int y=0;y<image->h;++y) for (int x=0;x<image->w;++x) {
+                Uint8 r,g,b,a; assert(SDL_ReadSurfacePixel(image,x,y,&r,&g,&b,&a));
+                hashes[style]=hashes[style]*33+r*65536u+g*256u+b;
+            }
+            SDL_DestroySurface(image);
+        }
+        for (int a=0;a<4;++a) for (int b=a+1;b<4;++b) assert(hashes[a]!=hashes[b]);
+        assert(hashes[0]==hashes[4]); /* Cache returns the original regular glyph. */
+    }
+    thc_pixelate_unicode(0);
+    assert(thc_begin());
+    thc_glyph(1,1,2,8,glyph,0xffffff,0,4); /* Narrow bitmap stretched into two cells. */
+    assert(thc_unicode(4,1,2,"f",0xffffff,0,4));
+    assert(thc_present());
+    SDL_Surface *wide=SDL_RenderReadPixels(renderer,NULL);
+    assert(wide);
+    int columns,rows; thc_size(&columns,&rows);
+    int top=wide->h/rows;
+    unsigned left=0,right=0;
+    for (int y=top;y<2*top;++y) for (int x=0;x<32;++x) {
+        Uint8 r,g,b,a; assert(SDL_ReadSurfacePixel(wide,16+x,y,&r,&g,&b,&a));
+        if (r) { if(x<16)++left;else ++right; }
+    }
+    assert(left>0 && right==0); /* This thin bitmap's stroke doubles horizontally. */
+    Uint8 r,g,b,a;
+    assert(SDL_ReadSurfacePixel(wide,16+12,top,&r,&g,&b,&a) && r==255);
+    assert(SDL_ReadSurfacePixel(wide,16+6,top,&r,&g,&b,&a) && r==0);
+    SDL_DestroySurface(wide);
 }
 
 static void check_geometry(int lines, int cell_height) {
@@ -169,10 +213,11 @@ static void check_geometry(int lines, int cell_height) {
     assert(cols == 80 && rows == lines);
     check_crt(SDL_GetRenderer(windows[0]), lines, cell_height/8.0);
     check_unicode(SDL_GetRenderer(windows[0]));
+    check_font_traits(SDL_GetRenderer(windows[0]));
     assert(thc_begin());
     uint16_t glyph[16];
     for (int i = 0; i < 16; ++i) glyph[i] = 0xffff;
-    thc_glyph(0, lines - 1, 1, 8, glyph, 0xff0000, 0);
+    thc_glyph(0, lines - 1, 1, 8, glyph, 0xff0000, 0, 0);
     thc_cursor(0, lines - 1);
     assert(thc_present());
     SDL_Surface *frame = SDL_RenderReadPixels(SDL_GetRenderer(windows[0]), NULL);
@@ -185,7 +230,7 @@ static void check_geometry(int lines, int cell_height) {
     SDL_free(windows);
     wait_cursor_blink();
     assert(thc_begin());
-    thc_glyph(0, lines - 1, 1, 8, glyph, 0xff0000, 0);
+    thc_glyph(0, lines - 1, 1, 8, glyph, 0xff0000, 0, 0);
     thc_cursor(0, lines - 1);
     assert(thc_present());
     frame = SDL_RenderReadPixels(test_renderer, NULL);
@@ -195,7 +240,7 @@ static void check_geometry(int lines, int cell_height) {
     thc_cursor_blink(0);
     wait_cursor_blink();
     assert(thc_begin());
-    thc_glyph(0, lines - 1, 1, 8, glyph, 0xff0000, 0);
+    thc_glyph(0, lines - 1, 1, 8, glyph, 0xff0000, 0, 0);
     thc_cursor(0, lines - 1);
     assert(thc_present());
     frame = SDL_RenderReadPixels(test_renderer, NULL);

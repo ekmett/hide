@@ -51,7 +51,7 @@ checks=bracket temporary removePathForcibly $ \root->do
       draft=replaceSelection (Selection 0 0) "private draft λ\n\n    main = 1\n      continuation\n" (newBuffer "")
       desktop=approval {composerBuffer=draft,composerSelection=Selection 1 5,composerFocused=True,defaultDirectory=Just root,
         sideTree=Just ((emptySidebar root 23 True) {treeHints=Just (SidebarHints [(sourcePath,False)] (Just sourcePath) (Just sourcePath))}),problemsVisible=True,problemsPreferredHeight=9,
-        wordStar=True,blinkCursor=False,pixelateUnicode=True,materialIcons=True,appearance=DarkMode,streamerMode=True,chatSubmit=SteerSubmit,
+        wordStar=True,wideSectionTitles=True,blinkCursor=False,pixelateUnicode=True,materialIcons=True,appearance=DarkMode,streamerMode=True,chatSubmit=SteerSubmit,
         dialog=Just (Dialog "Pending permission" (PermissionDialog "approve:secret") [] 0 ["Allow"] []),
         menu=Just (0,0),drag=Just (Selecting sourceId),clipboard="transient clipboard",clipboardCode=Just "transient clipboard",clipboardExport=(3,Just "export"),
         chatActions=[(T.length "Session: old-provider-id\nPublic transcript\n",T.length transcript,"question-input",["pending-action-token"])],agentReplying=True,agentQueued=3,agentSettings=[AgentSetting "token" "Token" "private" "secret" []],
@@ -66,6 +66,7 @@ checks=bracket temporary removePathForcibly $ \root->do
   check "checkpoint is owner-private" (permissions .&. 0o077==0)
 #endif
   recovered<-readCheckpoint path fresh {childAgentSettings=[AgentSetting "model" "Model" "model" "old" [("old","Old")]],childAgentSteering=True,childAgentContextUsage=Just (1,2)} >>= right
+  check "recovery preserves wide preference but never cached presentation payload" (wideSectionTitles recovered && M.null (windowPresentations recovered))
   check "recovery preserves exact text state and both history stacks" (snapshotBuffer (get recovered sourceId)==snapshotBuffer edited)
   check "recovered undo and redo behave exactly like the original"
     (snapshotBuffer (undo (get recovered sourceId))==snapshotBuffer (undo edited) && snapshotBuffer (redo (get recovered sourceId))==snapshotBuffer (redo edited))

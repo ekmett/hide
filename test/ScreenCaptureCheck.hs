@@ -7,12 +7,15 @@ import Data.Aeson
 import Data.Aeson.Types (parseMaybe)
 import qualified Data.ByteString.Base64 as B64
 import Data.List (nub)
+import qualified Data.Map.Strict as M
 import Data.Maybe (fromMaybe, listToMaybe)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Hide.Browser (Entry(..))
 import Hide.Buffer (newBuffer, Selection(..))
-import Hide.GuestAccess (CellAccess(..))
+import Hide.GuestAccess (CellAccess(..), cellAccess)
+import Hide.Markdown (renderMarkdown)
+import Hide.TextPresentation (prepareTextPresentations)
 import Hide.Font (loadFont)
 import SidebarFixture
 import Hide.Sidebar
@@ -24,7 +27,7 @@ import Hide.Unicode (clusterWidth, graphemes)
 checks :: IO ()
 checks=do
   font<-loadFont
-  let desktop=addDocument Nothing (newBuffer "  λ 中 ▙ é\n") (initialDesktop (80,25))
+  let desktop=addDocument Nothing (newBuffer "  λ 中 ▙ é 👩🏽\x200d\&💻 ❤️\n") (initialDesktop (80,25))
       takeCapture d image=capture font d image >>= either (error . T.unpack) pure
   let privateMessages=setProblemsVisible True desktop {guestPrivatePaths=["/authority"],
         diagnostics=[Diagnostic "/authority/secret.hs" Nothing 0 0 1 "secret-diagnostic-payload"]}
@@ -38,7 +41,7 @@ checks=do
   let metadata=textMetadata textOnly
   check "screen text is the complete colorless rendered frame" (field "text" metadata==Just (snapshot desktop))
   check "text-only capture has no image block" (length (blocks textOnly)==1)
-  check "screen text preserves Unicode and grapheme clusters" (all (`T.isInfixOf` snapshot desktop) ["λ","中","▙","é"])
+  check "screen text preserves Unicode and grapheme clusters" (all (`T.isInfixOf` snapshot desktop) ["λ","中","▙","é","👩🏽\x200d\&💻","❤️"])
   withImage<-takeCapture desktop True
   image<-pngImage withImage
   check "PNG and colorless text use the same frame" ((field "text" (textMetadata withImage)::Maybe T.Text)==field "text" metadata)
@@ -81,6 +84,53 @@ checks=do
   check "screen exposes blocked conversation command permissions" (case field "commandPermissions" privateMetadata::Maybe [Value] of
     Just commands->any (\entry->field "command" entry==Just ("hide.options.agent-permissions"::T.Text) && field "allowed" entry==Just False) commands
     _->False)
+  -- Capture an actual prepared heading, not an invented span. The second
+  -- semantic character owns two private cells; public glyphs and the border
+  -- after it must retain the same positions in text, PNG and access metadata.
+  -- CommonMark normalizes accents; retain a decomposed combining cluster in
+  -- this styled payload to exercise capture's actual grapheme path as well.
+  let styled=concatMap (\(c,style)->if c=='é' then [('e',style),('\x0301',style)] else [(c,style)])
+        (renderMarkdown 40 "# ABC界é👩🏽\x200d\&💻❤️\n\npublic")
+      opened=addHelpStyled styled (initialDesktop (80,25))
+      view=fromMaybe (error "missing heading window") (activeWindow opened)
+      heading=opened {wideSectionTitles=True,windows=[view {bounds=Rect 2 2 12 12}],
+        buffers=M.map (\doc->doc {documentLabel=Just "Conversation"}) (buffers opened)}
+  prepared<-prepareTextPresentations heading
+  let guarded=prepared {chatActions=[(1,2,"question-choice",[]),(6,10,"question-choice",[])]}
+      plainHeading=prepared {wideSectionTitles=False}
+  wideCapture<-takeCapture guarded True
+  ordinaryCapture<-takeCapture plainHeading True
+  wideImage<-pngImage wideCapture
+  ordinaryImage<-pngImage ordinaryCapture
+  let wideMetadata=textMetadata wideCapture
+      wideRows=T.lines (fromMaybe "" (field "text" wideMetadata))
+      wideAccess=accessCells wideMetadata
+      atCell x y=[(readable,clickable) | (cx',cy',readable,clickable)<-wideAccess,cx'==x,cy'==y]
+      cellPixels picture x y=[pixelAt picture px py | px<-[x*8..x*8+7],py<-[y*16..y*16+15]]
+  check ("capture text preserves explicit heading advances around private cells: "++show (take 2 (drop 3 wideRows)))
+    ("Ａ  Ｃ界ｅ́" `T.isInfixOf` (wideRows!!3) && "  ❤️" `T.isInfixOf` (wideRows!!4) && not ("👩🏽" `T.isInfixOf` T.unlines wideRows) && all ((==80) . sum . map clusterWidth . graphemes) wideRows)
+  check "capture masks agree with prepared source positions in both heading cells"
+    (all (\x->atCell x 3==[(False,False)] && not (cellReadable (cellAccess guarded x 3))) [5,6] &&
+     all (\x->atCell x 3==[(True,False)] && cellReadable (cellAccess guarded x 3)) [3,4,7,8,9,10])
+  check "private stretched glyph is black in both PNG cells"
+    (all (all (==PixelRGB8 0 0 0) . (\x->cellPixels wideImage x 3)) [5,6])
+  check "natural ZWJ emoji is wholly redacted while the following variation-selector emoji keeps its cells"
+    (all (\x->atCell x 4==[(False,False)] && all (==PixelRGB8 0 0 0) (cellPixels wideImage x 4)) [3,4] &&
+     all (\x->atCell x 4==[(True,False)] && cellReadable (cellAccess guarded x 4)) [5,6])
+  check "combining heading grapheme and natural CJK retain their complete two-cell spans"
+    (all (\x->atCell x 3==[(True,False)]) [9,10,11,12])
+  check "public stretched glyph draws in both cells and leaves following border fixed"
+    (all (\x->length (nub (cellPixels wideImage x 3))>1) [7,8] &&
+      cellPixels wideImage 13 3==cellPixels ordinaryImage 13 3)
+  naturalCapture<-takeCapture prepared {wideSectionTitles=False,
+    chatActions=[(3,4,"question-choice",[]),(6,10,"question-choice",[]),(10,12,"question-choice",[])]} True
+  naturalImage<-pngImage naturalCapture
+  let naturalMetadata=textMetadata naturalCapture
+      naturalCells=accessCells naturalMetadata
+      naturalText=fromMaybe "" (field "text" naturalMetadata)
+  check "ordinary natural CJK and ZWJ/variation-selector emoji redact both occupied cells"
+    (not (any (`T.isInfixOf` naturalText) ["界","👩🏽","❤️"]) &&
+      all (\x->(x,3,False,False) `elem` naturalCells && all (==PixelRGB8 0 0 0) (cellPixels naturalImage x 3)) [6,7,9,10,11,12])
   let config=desktop {dialog=Just (Dialog "Agents" (AgentDialog "configure")
         [Input "Executable" "public-command" 0,Input "Environment (JSON object)" "private-env-token" 0] 0 ["OK","Cancel"] [])}
   configCapture<-takeCapture config False
@@ -112,8 +162,10 @@ checks=do
   let readable=CellAccess True True
       private=CellAccess False False
       (wideText,wideAccess)=redactCluster "中" [readable,private]
+      (stretchedText,stretchedAccess)=redactCluster "A" [readable,private]
       (emojiText,emojiAccess)=redactCluster "👩\x200d\&💻" [private,readable]
   check "one private wide-glyph cell redacts the entire grapheme" (wideText=="  " && all (not . cellReadable) wideAccess && map cellClickable wideAccess==[True,False])
+  check "one private stretched ASCII cell redacts its full explicit advance" (stretchedText=="  " && all (not . cellReadable) stretchedAccess && map cellClickable stretchedAccess==[True,False])
   check "multi-codepoint grapheme redaction preserves cell width" (emojiText=="  " && all (not . cellReadable) emojiAccess)
   bounded<-capture font desktop {screenSize=(maxBound,2)} True
   check "oversized capture fails before rendering or overflow" (case bounded of Left _ -> True; _ -> False)

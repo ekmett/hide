@@ -161,6 +161,7 @@ guestEffectsAllowed=all allowed
     allowed FollowTreeLink{}=False
     allowed EnvironmentAction{}=False
     allowed PermissionAction{}=False
+    allowed SaveWideSectionTitles{}=False
     allowed SaveChatSubmit{}=False
     allowed AutocompleteAction{}=False
     allowed (DebugAction action _)=not (privateDebuggerAction action)
@@ -419,6 +420,6 @@ contentPrivate predicate d doc w x y
   where
     r=bounds w; b=documentBuffer doc
     row=y-top r-1+scrollRow w
-    offset=bufferLineOffset b row+columnOffset (bufferLineAt b row) (x-left r-1+scrollColumn w)
+    offset=windowTextOffset d w (bufferContent b) row (x-left r-1+scrollColumn w)
 at :: [a] -> Int -> Maybe a
 at values index | index<0=Nothing | otherwise=case drop index values of value:_->Just value; _->Nothing

@@ -11,6 +11,7 @@ columns = 120
 rows = 50
 appearance = "dark"
 wordStar = false
+wideSectionTitles = false
 macKeySymbols = false
 blinkCursor = true
 crtFilter = true
@@ -21,6 +22,10 @@ streamerMode = false
 ```
 
 Use `terminal`, `auto`, `metal`, `vulkan`, or `web` for the display backend. `remote` serves the protocol over standard input/output. Scale runs from 1 to 8 in eighth steps. Screen mode 3 defaults to 80×25; 259 defaults to 80×50. Explicit columns and rows override those dimensions. The terminal takes its size from the terminal window.
+
+`wideSectionTitles = true` widens Markdown section headings to two cells per
+grapheme. **Options > Preferences > Wide section titles** changes and saves
+the same Display setting. It is off by default; see [display](display.md#text-styles).
 
 In text mode, `macKeySymbols = true` uses ⌃, ⌥, ⇧ and ⌘ in key labels.
 You can also set **Options > Preferences > Mac key symbols**, which saves the

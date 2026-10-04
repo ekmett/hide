@@ -1237,7 +1237,7 @@ paintView target force s original
       existing=conversationDocument target d
       opened=case existing of
         Nothing -> let added=addConversationDocument d in added {buffers=M.adjust (\doc->restyle doc {documentBuffer=newBuffer text}) (nextId d) (buffers added)}
-        Just (existingId,_) -> d {buffers=M.adjust (\doc->restyle doc {documentBuffer=newBuffer text}) existingId (buffers d)}
+        Just (existingId,_) -> d {buffers=M.adjust (\doc->restyle doc {documentBuffer=(newBuffer text) {revision=revision (documentBuffer doc)+1}}) existingId (buffers d)}
       bid=maybe (nextId d) fst existing
       adjust w | bufferId w/=Just bid = w
                | otherwise =
