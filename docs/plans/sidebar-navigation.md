@@ -1,5 +1,8 @@
 # Unified sidebar navigation
 
+Status: base design approved; the context actions and Cabal package roots below
+incorporate subsequent user refinements. Implementation has not started.
+
 ## Intended experience
 
 The left sidebar is one scrollable tree view. Files is an ordinary root alongside
@@ -58,6 +61,52 @@ only this session's windows. Other roots do not depend on that choice.
   work respects the existing presentation policy and does not steal focus.
 - Empty roots remain reachable. Loading, unavailable, running and error states are
   explicit rows, rather than blank trees or modal errors for ordinary expansion.
+
+## Node context actions
+
+Capture the node's stable identity when opening a context menu, not its visible
+row index. Async updates or scrolling must not redirect an action to another node.
+
+- Right-click Agents offers New Agent. Right-click an agent offers Rename and
+  model/effort selection from the provider's actual advertised choices.
+- Rename opens an editable field containing the current name, selected so typing
+  replaces it. Validate uniqueness through the existing hub and keep the stable ID.
+- Include the persistent autocomplete agent while ACP completion is enabled. Mark
+  its completion role; its hidden chat is still reachable, renameable and
+  configurable. Do not create a duplicate hub entry for the same provider session.
+  Its model/effort changes update the completion provider's settings, not the main
+  conversation. Non-ACP completion services need not pretend to be chat agents.
+- Right-click a filename in the navigation tree offers Rename with its existing
+  basename selected. Use the checked workspace rename service, refusing collisions
+  and preserving open-buffer identity/path updates. Dirty buffers require an
+  explicit save or cancellation through the existing safeguards. Renaming a file
+  is separate from renaming a Haskell symbol.
+
+## Cabal package roots
+
+In a directory containing a Cabal package, contribute another root named after
+that package. Its children are component targets, and opening a target exposes
+its source files. Multiple local packages may contribute separate named roots;
+Files remains the filesystem view.
+
+Use maintained Cabal package-description parsing with configured metadata when
+available. The current plan reader supplies resolved components/dependencies,
+not a complete source-file list. Without a fresh plan, display declared targets
+with clear conditional/disabled/unknown state; merely expanding the tree must not
+run Cabal configuration. Resolve modules and main files through the component's
+source directories; distinguish missing/generated files. Opening a shared file
+from two targets reuses its canonical buffer.
+
+Target context menus offer Build. Executable and supported executable-backed
+benchmark targets also offer Run and Debug. Test/benchmark driver actions remain
+available for interfaces that are not directly launchable; libraries do not get
+Run. Use the selected THC/GHC toolchain and shared build/debug target resolver.
+Show a reason when a backend cannot perform an action instead of constructing a
+command from the display label.
+
+Capture workspace, package and component identity with the action. Revalidate
+configuration when it runs. File discovery, plan reading and compiler capability
+checks run on workers; metadata changes preserve the viewport anchor.
 
 ## Source context actions
 
