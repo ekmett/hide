@@ -69,6 +69,7 @@ import qualified HdbAcquisitionCheck
 import qualified DebuggerAcquisitionCheck
 import qualified CompilersCheck
 import qualified BuildCheck
+import qualified PackagePathsCheck
 import qualified PackageSourcesCheck
 import qualified ProjectBrowserCheck
 import qualified RunCheck
@@ -321,6 +322,7 @@ main = do
   HelpCheck.checks
   BrowserCheck.checks
   PackageSourcesCheck.checks
+  PackagePathsCheck.checks
   ProjectBrowserCheck.checks
   FilesCheck.checks
   ExternalCheck.checks
