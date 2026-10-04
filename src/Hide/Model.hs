@@ -2178,7 +2178,7 @@ bindingContext d
   | activeTerminal d/=Nothing = Just Bindings.TerminalKeys
   | Just label<-activeDocument d >>= documentLabel,
     "Debugger " `T.isPrefixOf` label || "Source " `T.isPrefixOf` label = Just Bindings.DebuggerKeys
-  | (not (wordStar d) || bindingPlatform d/=Bindings.TerminalPlatform), Just _<-activeDocument d = Just Bindings.SourceKeys
+  | Just _<-activeDocument d = Just (if wordStar d && not (activeHex d) then Bindings.WordStarKeys else Bindings.SourceKeys)
   | Nothing<-activeDocument d = Just Bindings.SourceKeys
   | otherwise = Nothing
 
@@ -2187,7 +2187,7 @@ effectiveBindings d = bindingContext d >>= \context->M.lookup (bindingPlatform d
 
 terminalContextReserved :: Desktop -> V.Key -> [V.Modifier] -> Bool
 terminalContextReserved d key mods = terminalSourceReserved key mods ||
-  (wordStar d && bindingContext d==Just Bindings.SourceKeys && V.MCtrl `elem` mods && V.MMeta `notElem` mods) ||
+  (bindingContext d==Just Bindings.WordStarKeys && wordStarReserved key mods) ||
   (bindingContext d==Just Bindings.ConversationKeys && key==V.KEnter)
 
 bindingInputAvailable :: Desktop -> Bool
@@ -2203,7 +2203,14 @@ unboundKey key mods d = case bindingContext d of
   Just Bindings.MessagesKeys -> (d,[])
   Just Bindings.ConversationKeys -> fromMaybe (editorKey key mods d,[]) (composerEvent (V.EvKey key mods) d)
   Just Bindings.TerminalKeys -> (d,maybe [] (\text->[AgentAction "terminal-input" [fromMaybe "" (activeTerminal d),text]]) (terminalInput (V.EvKey key mods)))
+  Just Bindings.WordStarKeys | wordStarReserved key mods -> keyEvent key mods d
   _ -> (editorKey key mods d,[])
+
+-- | WordStar movement, deletion and prefix/block grammar remain local owners.
+-- Named commands use the prepared WordStar table instead of claiming these keys.
+wordStarReserved :: V.Key -> [V.Modifier] -> Bool
+wordStarReserved (V.KChar c) mods=V.MCtrl `elem` mods && V.MMeta `notElem` mods && toLower c `elem` ("aesdxfykq"::String)
+wordStarReserved _ _=False
 
 terminalSourceReserved :: V.Key -> [V.Modifier] -> Bool
 terminalSourceReserved key mods=(key==V.KChar ']' && V.MCtrl `elem` mods) || key==V.KEsc || key==V.KFun 10 ||

@@ -13,7 +13,7 @@ import qualified Graphics.Vty as V
 import Data.List (find)
 import qualified Data.Map.Strict as M
 import Hide.Bindings (BindingPlatform(..), bindingPlatforms, platformName, BindingContext(..), bindingContexts, contextName, Bindings, compileBindings, readChord)
-import Hide.Model (Command(..), terminalSourceReserved)
+import Hide.Model (Command(..), terminalSourceReserved, wordStarReserved)
 import Hide.BufferView (BufferView(..))
 
 -- | One action and its public identity.
@@ -152,7 +152,10 @@ platformBindings platform configuration=do
   where
     prepare context=do
       let global=M.findWithDefault M.empty "global" configuration
-          inherited=if context==TerminalKeys then fmap (filter (not . processControlChord)) global else global
+          inherited=case context of
+            TerminalKeys -> fmap (filter (not . processControlChord)) global
+            WordStarKeys -> fmap (filter (not . wordStarChord)) global
+            _ -> global
           overrides=M.union (M.findWithDefault M.empty (contextName context) configuration) inherited
       forM_ (concat (M.elems overrides)) $ \raw->do
         (key,mods)<-readChord raw
@@ -166,13 +169,14 @@ platformBindings platform configuration=do
         let platformReserved = (platform==TerminalPlatform && V.MMeta `elem` mods) ||
               (platform==MacPlatform && ((V.MAlt `elem` mods && V.MCtrl `notElem` mods && V.MMeta `notElem` mods && case key of V.KChar _->True; _->False) || (key `elem` map V.KChar "h\\[]" && V.MMeta `elem` mods))) ||
               (platform/=TerminalPlatform && key `elem` map V.KChar "0+=-" && any (`elem` mods) [V.MCtrl,V.MAlt])
-        unless (not (terminalSourceReserved key mods || contextReserved || platformReserved))
+        unless (not (terminalSourceReserved key mods || contextReserved || platformReserved || context==WordStarKeys && wordStarReserved key mods))
           (Left ("Reserved "<>contextName context<>" key: "<>raw))
       compiled<-either (Left . (("Keybinding context "<>contextName context<>": ")<>)) Right $ compileBindings [(builtinIdentifier entry,builtinAction entry,keys context (builtinAction entry)) | entry<-builtinCommands] overrides
       pure ((platform,context),compiled)
     processControl key mods=case key of
       V.KChar _ -> V.MCtrl `elem` mods && V.MAlt `notElem` mods && V.MMeta `notElem` mods
       _ -> False
+    wordStarChord raw=case readChord raw of Right (key,mods)->wordStarReserved key mods; _->False
     processControlChord raw=case readChord raw of Right (key,mods)->processControl key mods; _->False
     keys context action=maybe [] id (lookup action (if platform==MacPlatform then macDefaults context else defaultsFor context))
     macDefaults context = [(action,chords++maybe [] id (lookup action (defaultsFor context))) | (action,chords)<-macCommands] ++ filter (\(action,_)->action `notElem` map fst macCommands) (defaultsFor context)
@@ -181,6 +185,8 @@ platformBindings platform configuration=do
       ,(Undo,["Cmd+Z"]),(Redo,["Cmd+Shift+Z"]),(Copy,["Cmd+C"]),(Cut,["Cmd+X"]),(Paste,["Cmd+V"]),(SelectAll,["Cmd+A"])
       ,(Find,["Cmd+F"]),(Replace,["Cmd+Alt+F"]),(FindNext,["Cmd+G"]),(FindPrevious,["Cmd+Shift+G"])
       ,(EditorOptions,["Cmd+,"]),(Conversation,["Cmd+Shift+C"]),(AgentNew,["Cmd+Shift+N"])]
+    defaultsFor WordStarKeys=[(action,filter (not . owned) chords) | (action,chords)<-defaults]
+      where owned raw=case readChord raw of Right (key,mods)->wordStarReserved key mods; _->False
     defaultsFor TerminalKeys=[(action,filter (/="Ctrl+Q") chords) | (action,chords)<-defaults,action `elem` [Close,Quit,Zoom,NextWindow,NextMessage,PreviousMessage,MakeTarget,CompileTarget,RunTarget] || case action of DebugCommand _->True; _->False]
     defaultsFor SidebarKeys=filter ((/=NextWindow).fst) defaults ++
       [(SidebarMove (-1),["Up"]),(SidebarMove 1,["Down"]),(SidebarMove (-10),["PageUp"]),(SidebarMove 10,["PageDown"]),

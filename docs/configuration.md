@@ -96,7 +96,7 @@ changing attachments selects the focused profile and context immediately:
 "hide.file.save" = ["Ctrl+Shift+S"]
 ```
 
-Contexts are `source`, `sidebar`, `conversation`, `messages`, `debugger` and
+Contexts are `source`, `wordstar`, `sidebar`, `conversation`, `messages`, `debugger` and
 `terminal`. A `global` table supplies explicitly configured commands to all of
 those contexts; a context entry takes precedence over the same global command.
 Within each table a project entry replaces the global configuration's entry.
@@ -106,6 +106,16 @@ show the focused context's effective binding, including an empty label for an
 unbound command. Commands remain available through their menus.
 
 Source, conversation and debugger panes retain the standard command defaults.
+When WordStar is enabled for a text source, its `wordstar` table owns named
+commands such as Save, Open and Undo. Their normal function-key and nonconflicting
+command defaults remain; Ctrl+E/S/D/X movement, Ctrl+A/F word movement, Ctrl+Y
+line deletion, and Ctrl+K/Ctrl+Q prefix/block grammar stay fixed. Overrides using
+those owned chords fail validation. Global chords owned by this grammar are
+omitted from its inherited map, preserving their use in other contexts. Prefix command steps remain available even
+when the same named command is rebound or unbound in the table; customizable
+prefix/movement grammar remains open in #3. Hex buffers use `source`.
+For example, `[editor.keybindings.terminal.wordstar]` with
+`"hide.file.save" = ["Ctrl+Shift+J"]` replaces F2 for WordStar sources only.
 The sidebar additionally binds Up/Down and PageUp/PageDown to row movement,
 Enter to activate, Right to expand, Left to collapse, and F6 to return to source.
 Messages uses its own row/page movement, Enter to jump to source, and F6 to leave.
@@ -146,7 +156,7 @@ browser permissions or user activation prevent access. Browser/OS reserved short
 characters retain composed text input and cannot be assigned to commands; Cmd+Alt
 chords remain distinct. Local graphical scale keys remain reserved.
 
-Source WordStar and modal binding customization remain subsequent stages of
+WordStar movement/prefix/block grammar and modal binding customization remain subsequent stages of
 [configurable keybindings](https://github.com/ekmett/hide/issues/3).
 
 ## Environment
