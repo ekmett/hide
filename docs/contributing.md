@@ -85,10 +85,25 @@ operations. Capture and version checks never flatten or compare contents.
 `ContentVersion` combines the revision with immutable buffer identity. A new
 buffer with the same revision and contents invalidates the captured version.
 The identity check is conservative: replacing the immutable buffer to establish
-a new saved baseline also requires a fresh version. The live `read_buffer` MCP
-consumer now captures through `Hide.BufferReads` during a narrowly admitted
-`MCPPermissions.permissionReadCall` callback, then formats measured reads on its
-reply worker. ACP source freshness tracking uses the same version check.
+a new saved baseline also requires a fresh version. ACP source freshness tracking
+uses the same version check.
+
+Linked command handlers can call
+`captureBuffer :: BufferReader -> BufferRef -> IO (Either Text CapturedRead)` from
+`Hide.Plugin.Buffer` without a Desktop. The opaque reader belongs to the running
+Permissions session and a host-bound actor. It requests fresh policy for every
+call; it contains no Human context or reusable approval. Workers submit to a
+bounded 32-request ingress, which refuses overflow explicitly. The session tick
+transfers requests into the existing permission owner, captures current state,
+and resolves typed replies. Cancellation withdraws one request; shutdown closes
+acceptance and terminally resolves pending replies. Only the host's fixed capture
+operation and actor check run during admission.
+
+The real `read_buffer` tool invokes `hide.buffer.read` through
+`Hide.BufferReadCommand` on its reply worker. Its typed context contains only a
+reader and target reference. The MCP admission callback captures page coordinates
+and the reference, retaining no Desktop/Document. Formatting and JSON evaluation
+remain worker work.
 
 `BufferRef` combines the running session namespace with its once-allocated
 logical document ID. It survives ordinary edits and reload of that document;
@@ -103,13 +118,15 @@ reads resolve their token and active actor again before capture; anonymous
 inspection remains guest input. Privacy comes from the existing GuestAccess
 owner, including private-buffer rejection and Conversation masks. Already granted
 immutable reads may outlive the receipt and cannot be recalled. Ordinary capture
-forces only the cheap measured-content constructor, releasing the separate
-Buffer/Undo thunk; Conversation redaction and tree construction stay on the
-reply worker. The receipt does not grant edit authority or create a public
+forces only cheap immutable constructors, releasing the separate Buffer/Undo
+thunk; Conversation redaction and tree construction stay on the reply worker.
+Metadata's modified flag normally uses root measures. After a byte/text mode
+switch it preserves the exact existing encoding comparison, deferred to the
+worker from narrow current/baseline text inputs, without retaining Buffer/Undo. The receipt does not grant edit authority or create a public
 plugin CallContext.
 
 This is an implementation slice, not a complete plugin SDK. Plugin
-activation/task scopes, public checked buffer edits, menu contributions
+activation/task scopes, public checked buffer edits, subscriptions/events
 and custom widget/window types remain tracked in
 [the delivery plan](https://github.com/ekmett/hide/issues/1).
 

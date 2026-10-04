@@ -7,7 +7,9 @@
 -- granted immutable read. Large reads and subsequent evaluation belong on a
 -- worker. This module provides no mutable desktop, saving or edit submission.
 module Hide.Plugin.Buffer
-  ( BufferRef, BufferRead, ContentVersion, CharOffset(..), ByteOffset(..), LineNumber(..)
+  ( BufferReader, captureBuffer, CapturedRead, capturedRef, capturedVersion, capturedContent
+  , capturedRedacted, capturedMetadata, BufferMetadata, bufferIdentifier, displayName, path, modified, editRevision
+  , BufferRef, BufferRead, ContentVersion, CharOffset(..), ByteOffset(..), LineNumber(..)
   , TextRange(..), ByteRange(..), RangeError(..), BufferRepresentation(..)
   , representation, readLength, readLineCount, readText, readBytes, readLines, readLine
   ) where
@@ -15,7 +17,7 @@ module Hide.Plugin.Buffer
 import Data.ByteString (ByteString)
 import Data.Text (Text)
 import qualified Hide.Buffer as B
-import Hide.Plugin.BufferHost (BufferRef,ContentVersion)
+import Hide.Plugin.BufferHost (BufferRef,ContentVersion,BufferReader,requestCapture,CapturedRead(..),BufferMetadata(..))
 
 -- | Immutable content reference with no structural Eq/Show instance.
 type BufferRead = B.BufferContent
@@ -78,3 +80,10 @@ require :: BufferRepresentation -> BufferRead -> Either RangeError ()
 require wanted b=if representation b==wanted then Right () else Left WrongRepresentation
 validRange :: Int -> Int -> Int -> Either RangeError ()
 validRange size a z=if a<0 || z<a || z>size then Left InvalidRange else Right ()
+
+-- | Request a current capture from the owning session. Every call checks current
+-- policy and actor, and may await host-owned approval. Call on a worker, outside
+-- the session lock. Cancellation withdraws this request; service shutdown gives
+-- a terminal error. An already granted image remains usable after either closes.
+captureBuffer :: BufferReader -> BufferRef -> IO (Either Text CapturedRead)
+captureBuffer = requestCapture

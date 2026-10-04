@@ -6,9 +6,12 @@
 -- under the owning session lock when adopting delayed work.
 module Hide.Plugin.BufferHost
   ( BufferRef, BufferNamespace, newBufferNamespace, bufferReference, referenceId
-  , ContentVersion, captureRead, captureVersion, versionCurrent ) where
+  , ContentVersion, captureRead, captureVersion, versionCurrent
+  , BufferReader, newBufferReader, readerReference, requestCapture
+  , CapturedRead(..), BufferMetadata(..) ) where
 
 import Control.Exception (evaluate)
+import Data.Text (Text)
 import Data.Unique (Unique,newUnique)
 import System.Mem.StableName (StableName, makeStableName)
 import Hide.Buffer (Buffer, BufferContent, bufferContent, revision)
@@ -52,3 +55,32 @@ captureVersion b=do
 -- The caller also revalidates target existence and current authority.
 versionCurrent :: ContentVersion -> Buffer -> IO Bool
 versionCurrent expected b=(==expected) <$> captureVersion b
+
+-- | A session-bound ability to request fresh policy decisions. It contains no
+-- cached approval or Human context; the host supplies the fixed actor binding.
+data BufferReader = BufferReader BufferNamespace (BufferRef -> IO (Either Text CapturedRead))
+
+-- | Host-only assembly of a reader over its bounded request transport.
+newBufferReader :: BufferNamespace -> (BufferRef -> IO (Either Text CapturedRead)) -> BufferReader
+newBufferReader = BufferReader
+
+-- | Host wire adapter: references alone confer no capture authority.
+readerReference :: BufferReader -> Int -> BufferRef
+readerReference (BufferReader namespace _) = bufferReference namespace
+
+requestCapture :: BufferReader -> BufferRef -> IO (Either Text CapturedRead)
+requestCapture (BufferReader _ request) = request
+
+-- | Metadata from the same admitted source as the immutable image. The modified
+-- flag may require full encoding comparison after a representation switch;
+-- evaluate it on a worker. Its thunk contains only those narrow text inputs.
+data BufferMetadata = BufferMetadata
+  { bufferIdentifier :: !Int, displayName :: !Text, path :: !(Maybe FilePath)
+  , modified :: Bool, editRevision :: !Int }
+
+-- | Already granted content. Closing a reader or source cannot recall it.
+-- Conversation redaction remains deferred for the reply worker.
+data CapturedRead = CapturedRead
+  { capturedRef :: !BufferRef, capturedVersion :: !ContentVersion
+  , capturedContent :: BufferContent, capturedRedacted :: Bool
+  , capturedMetadata :: !BufferMetadata }

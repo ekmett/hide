@@ -16,6 +16,7 @@ module Hide.Buffer
   , BufferContent, bufferContent, contentLength, contentLineCount, contentByteMode
   , contentSlice, contentByteSlice, contentLineOffset, contentLineAt
   , newBuffer, newByteBuffer, bufferBytes, markSaved, toggleByteMode, replaceBuffer, textBuffer
+  , DirtySnapshot, captureDirty, snapshotDirty
   , contents, dirty, ordered, replaceSelection, replaceRanges, prepareBuffer, undo, redo, selectedText
   , bufferLineChanges, bufferViewProjection, bufferLength, bufferLineCount,
     ChangeKind(..), changeRowCount, bufferChangeRows, changeLength, changeSlice
@@ -314,9 +315,24 @@ rangeText a z tree
       line FT.:< _ | characterCount (FT.measure middle) < z-start -> middle FT.|> line
       _ -> middle
 
+-- | Narrow immutable inputs for the modified flag. Matching representations
+-- need only the measured changes. A representation switch needs exact encoded
+-- text comparison; retain those fields, not Buffer/Undo, and evaluate on a worker.
+data DirtySnapshot = MeasuredDirty !Bool | EncodedDirty !Bool Text !Bool Text
+
+-- | Evaluate this constructor shallowly during capture. Text projections remain
+-- lazy, so the exceptional representation comparison does not run under UI locks.
+captureDirty :: Buffer -> DirtySnapshot
+captureDirty Buffer{bufferLines=tree,cachedContents=current,saved=baseline,byteMode=mode,savedByteMode=savedMode}
+  | mode==savedMode=let measure=FT.measure tree in MeasuredDirty ((newLineCount measure,deletedLineCount measure)/=(0,0))
+  | otherwise=EncodedDirty mode current savedMode baseline
+
+snapshotDirty :: DirtySnapshot -> Bool
+snapshotDirty (MeasuredDirty changed)=changed
+snapshotDirty (EncodedDirty mode current savedMode baseline)=encodeContents mode current/=encodeContents savedMode baseline
+
 dirty :: Buffer -> Bool
-dirty b | byteMode b==savedByteMode b = bufferLineChanges b/=(0,0)
-        | otherwise = bufferBytes b /= encodeContents (savedByteMode b) (saved b)
+dirty = snapshotDirty . captureDirty
 
 ordered :: Selection -> (Int,Int)
 ordered (Selection a c) = (min a c, max a c)
