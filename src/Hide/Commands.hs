@@ -114,6 +114,8 @@ builtinCommands =
   ,BuiltinCommand "hide.view.changes" (SetBufferView ChangesView)
   ,BuiltinCommand "hide.view.only-changes" (SetBufferView OnlyChangesView)
   ,BuiltinCommand "hide.view.side-by-side" (SetBufferView SideBySideView)
+  ,BuiltinCommand "hide.bindings.reload" ReloadBindings
+  ,BuiltinCommand "hide.bindings.inspect" InspectBindings
   ,BuiltinCommand "hide.source.copy-location" CopyLocation
   ,BuiltinCommand "hide.messages.copy-all" CopyAllMessages
   ,BuiltinCommand "hide.messages.go-to" GoToMessage
@@ -140,10 +142,13 @@ terminalBindings :: M.Map Text (M.Map Text [Text]) -> Either Text (M.Map Binding
 terminalBindings configuration=do
   unless (all (`elem` ("global":map contextName bindingContexts)) (M.keys configuration))
     (Left "Unknown terminal keybinding context")
+  forM_ (concat (M.elems (M.findWithDefault M.empty "global" configuration))) readChord
   M.fromList <$> traverse prepare bindingContexts
   where
     prepare context=do
-      let overrides=M.union (M.findWithDefault M.empty (contextName context) configuration) (M.findWithDefault M.empty "global" configuration)
+      let global=M.findWithDefault M.empty "global" configuration
+          inherited=if context==TerminalKeys then fmap (filter (not . processControlChord)) global else global
+          overrides=M.union (M.findWithDefault M.empty (contextName context) configuration) inherited
       forM_ (concat (M.elems overrides)) $ \raw->do
         (key,mods)<-readChord raw
         let character=case key of V.KChar _->not (any (`elem` mods) [V.MCtrl,V.MAlt]); _->False
@@ -151,19 +156,27 @@ terminalBindings configuration=do
               SidebarKeys -> character
               MessagesKeys -> character
               ConversationKeys -> character || key==V.KEnter
-              TerminalKeys -> character || V.MCtrl `elem` mods && V.MAlt `notElem` mods
+              TerminalKeys -> character || processControl key mods
               _ -> character || key==V.KEnter
         unless (not (terminalSourceReserved key mods || contextReserved))
           (Left ("Reserved "<>contextName context<>" key: "<>raw))
       compiled<-either (Left . (("Keybinding context "<>contextName context<>": ")<>)) Right $ compileBindings [(builtinIdentifier entry,builtinAction entry,keys context (builtinAction entry)) | entry<-builtinCommands] overrides
       pure (context,compiled)
+    processControl key mods=case key of
+      V.KChar _ -> V.MCtrl `elem` mods && V.MAlt `notElem` mods
+      _ -> False
+    processControlChord raw=case readChord raw of Right (key,mods)->processControl key mods; _->False
     keys context action=maybe [] id (lookup action (defaultsFor context))
-    defaultsFor TerminalKeys=[(action,filter (/="Ctrl+Q") chords) | (action,chords)<-defaults,action `elem` [Close,Quit,Zoom,NextWindow,NextMessage,PreviousMessage,MakeTarget,CompileTarget,RunTarget]]
+    defaultsFor TerminalKeys=[(action,filter (/="Ctrl+Q") chords) | (action,chords)<-defaults,action `elem` [Close,Quit,Zoom,NextWindow,NextMessage,PreviousMessage,MakeTarget,CompileTarget,RunTarget] || case action of DebugCommand _->True; _->False]
     defaultsFor SidebarKeys=filter ((/=NextWindow).fst) defaults ++
       [(SidebarMove (-1),["Up"]),(SidebarMove 1,["Down"]),(SidebarMove (-10),["PageUp"]),(SidebarMove 10,["PageDown"]),
        (SidebarActivate,["Enter"]),(SidebarExpand,["Right"]),(SidebarCollapse,["Left"]),(FocusSource,["F6"])]
-    defaultsFor MessagesKeys=filter ((/=NextWindow).fst) defaults ++
+    defaultsFor MessagesKeys=filter (\(action,_)->action/=NextWindow && case action of DebugCommand _->False; _->True) defaults ++
       [(MessagesMove (-1),["Up"]),(MessagesMove 1,["Down"]),(MessagesPage (-1),["PageUp"]),(MessagesPage 1,["PageDown"]),(GoToMessage,["Enter"]),(FocusSource,["F6"])]
+    defaultsFor ConversationKeys=filter (\(action,_)->action `notElem` [Copy,Cut,Paste,SelectAll,Redo,Conversation]) defaults ++
+      [(Copy,["Ctrl+C","Ctrl+Shift+C","Ctrl+Insert"]),(Cut,["Ctrl+X","Ctrl+Shift+X","Shift+Delete"]),
+       (Paste,["Ctrl+V","Ctrl+Shift+V","Shift+Insert"]),(SelectAll,["Ctrl+A","Ctrl+Shift+A"]),
+       (Redo,["Ctrl+Y","Ctrl+Shift+Y","Ctrl+Shift+Z"])]
     defaultsFor _=defaults
     defaults=
       [(New,["Ctrl+N"]),(Open,["F3","Ctrl+O"]),(Save,["F2","Ctrl+S"])

@@ -84,7 +84,7 @@ or a project's `thc.toml`:
 "hide.edit.copy" = ["Ctrl+Shift+Y"]
 
 [editor.keybindings.terminal.terminal]
-"hide.terminal.stop" = ["Alt+T"]
+"hide.terminal.stop" = ["Alt+F11"]
 ```
 
 Contexts are `source`, `sidebar`, `conversation`, `messages`, `debugger` and
@@ -101,8 +101,10 @@ The sidebar additionally binds Up/Down and PageUp/PageDown to row movement,
 Enter to activate, Right to expand, Left to collapse, and F6 to return to source.
 Messages uses its own row/page movement, Enter to jump to source, and F6 to leave.
 PTY windows retain window/build shortcuts while ordinary keys, including Ctrl+C,
-Ctrl+Q and Ctrl+S, reach the process. Plain Ctrl character chords cannot be
-assigned to editor commands in the terminal context.
+Ctrl+Q and Ctrl+S, reach the process. Global Ctrl character chords are omitted from PTY maps, so a global Save override
+such as Ctrl+Shift+S still applies to the other contexts. A mixed global list
+retains its transferable PTY chords. Explicit terminal-context Ctrl character
+assignments fail validation.
 
 Use canonical IDs in [the command catalog](../src/Hide/Commands.hs), with Ctrl,
 Alt and Shift modifiers and names such as F2, Insert, Delete, Left and PageDown.
@@ -113,10 +115,19 @@ Escape, F10 and Ctrl+] remain reserved. Conversation Enter retains the configure
 Query/Steer and code-block submission behavior. Modal controls keep their own
 bindings and permission checks.
 
-Start a new session to load changes. Recovery reloads the configuration;
-attaching to an already running session retains its bindings. Put remote project
-settings on the remote host. Source WordStar, native/browser accelerator and
-clipboard routing, modal controls and live reload remain subsequent stages of
+Choose **Options > Reload terminal bindings** after editing TOML. Loading and
+validation run on the session worker; the existing map stays active until a valid
+replacement is ready. A failed reload reports its error and keeps that map.
+Changing the working directory while loading requires another reload. Recovery
+loads current configuration; attaching to a running session retains its map.
+
+**Options > Inspect terminal bindings** opens a read-only buffer containing every
+command's effective chords for the context focused when inspection was requested.
+Unbound commands appear as `[]`. Both operations have canonical IDs
+`hide.bindings.reload` and `hide.bindings.inspect` and can themselves be bound.
+Agents cannot request a reload. Put remote project settings on the remote host.
+Source WordStar, native/browser accelerator and clipboard routing, and modal
+binding customization remain subsequent stages of
 [configurable keybindings](https://github.com/ekmett/hide/issues/3).
 
 ## Environment

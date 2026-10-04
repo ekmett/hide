@@ -83,6 +83,7 @@ guestCommandAllowed cmd=case cmd of
   ChatInputOptions -> False
   AutocompleteCommand{} -> False
   SubmitChat{} -> False
+  ReloadBindings -> False
   AgentPermissions -> False
   AgentGuidance -> False
   OpenLink{} -> False
@@ -98,6 +99,7 @@ agentActionAllowed action=action `elem` ["compile","make","build-stop","run","ru
 guestEffectsAllowed :: [Effect] -> Bool
 guestEffectsAllowed=all allowed
   where
+    allowed ReloadKeyBindings{}=False
     allowed ReadGitDiff=False
     allowed AskGitCommit=False
     allowed WriteGitCommit{}=False

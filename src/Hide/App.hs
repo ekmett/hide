@@ -16,6 +16,7 @@ import Hide.Autocomplete
 import qualified Hide.AutocompleteACP as CompletionACP
 import Hide.BufferView
 import Hide.Defaults
+import Hide.Keybindings
 import Hide.Commands (terminalBindings)
 import Hide.MCPPermissions
 import Hide.ClipboardMCP
@@ -261,9 +262,9 @@ runEditor args = do
           mapM_ (setEnv "THC_EDIT_SESSION") daemon
           font<-Font.loadFont
           let specs=builtinTools++debugTools++chatTools++toolingTools++workspaceTools++fileTools++testsTools++historyTools++runtimeTools++gitTools++controlTools++environmentTools++clipboardTools++docsTools++[screenTool]
-          withPermissions (specs++agentTools) $ \permissions -> withDocsCommands $ \docsCommands -> withConversationAt (startingDirectory protectedDesktop) $ \conversation -> withDebuggerConsoles (let (_,consoles,_)=conversationServices conversation in consoles) $ \debugger -> withTooling $ \tooling -> withGitOperations $ \gitOperations -> withReconciliation $ \reconciliation -> withProjectBrowser $ \projectBrowser -> withHighlighting $ \highlighting -> withAutocomplete (startingDirectory protectedDesktop) $ \autocomplete -> do
+          withPermissions (specs++agentTools) $ \permissions -> withDocsCommands $ \docsCommands -> withConversationAt (startingDirectory protectedDesktop) $ \conversation -> withDebuggerConsoles (let (_,consoles,_)=conversationServices conversation in consoles) $ \debugger -> withTooling $ \tooling -> withGitOperations $ \gitOperations -> withReconciliation $ \reconciliation -> withProjectBrowser $ \projectBrowser -> withHighlighting $ \highlighting -> withKeybindings $ \keybindings -> withAutocomplete (startingDirectory protectedDesktop) $ \autocomplete -> do
             exiting<-newIORef False
-            let runtimeEffects=autocompleteEffects autocomplete (projectBrowserEffects projectBrowser (gitOperationEffects gitOperations (debuggerEffects debugger (conversationEffects conversation (reconciliationEffects reconciliation (toolingEffects tooling applyEffects))))))
+            let runtimeEffects=keybindingEffects keybindings (autocompleteEffects autocomplete (projectBrowserEffects projectBrowser (gitOperationEffects gitOperations (debuggerEffects debugger (conversationEffects conversation (reconciliationEffects reconciliation (toolingEffects tooling applyEffects)))))))
                 core d pending=foldM step (False,d) pending
                   where
                     step result@(True,_) _=pure result
@@ -278,7 +279,7 @@ runEditor args = do
                   (quit,updated)<-policyEffects permissions core d pending
                   approvedExit<-readIORef exiting
                   pure (quit || approvedExit,updated)
-                tick d=tickProjectBrowser projectBrowser d >>= tickGitOperations gitOperations applyEffects >>= tickTooling tooling applyEffects >>= tickReconciliation reconciliation >>= tickConversation conversation >>= tickDebugger debugger (toolingEffects tooling applyEffects) >>= tickPermissions permissions >>= tickHighlighting highlighting >>= tickAutocomplete autocomplete
+                tick d=tickProjectBrowser projectBrowser d >>= tickGitOperations gitOperations applyEffects >>= tickTooling tooling applyEffects >>= tickReconciliation reconciliation >>= tickConversation conversation >>= tickDebugger debugger (toolingEffects tooling applyEffects) >>= tickPermissions permissions >>= tickHighlighting highlighting >>= tickAutocomplete autocomplete >>= tickKeybindings keybindings
                 inspectTool d name parameters
                   | name `elem` ["list_windows","list_buffers","read_buffer","read_selection"] = pure (d,pure (builtinTool d name parameters))
                   | name `elem` chatToolNames = chatTool conversation d name parameters
@@ -519,6 +520,10 @@ applyEffects :: Desktop -> [Effect] -> IO (Bool,Desktop)
 applyEffects = foldM apply . (False,)
   where
     apply state@(True,_) _=pure state
+    -- Reload/inspection belong to the session worker, not this blocking file
+    -- interpreter used by standalone drivers and snapshots.
+    apply (_,d) ReloadKeyBindings{}=pure (False,d {status="Binding reload requires a running session."})
+    apply (_,d) InspectKeyBindings{}=pure (False,d {status="Binding inspection requires a running session."})
     apply (_,d) (EnvironmentAction action args)= (False,) <$> environmentAction action args d
     apply (_,d) AutocompleteAction{}=pure (False,d {status="Autocomplete is unavailable in this preview."})
     apply (_,d) LanguageRequest{}=pure (False,d {status="Language tools are unavailable in this preview."})

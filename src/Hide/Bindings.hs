@@ -5,7 +5,7 @@
 -- Compilation rejects ambiguous chords before publishing a table. Lookup touches
 -- only the chord index, never a buffer or desktop. Modal ownership stays with the
 -- caller. Context selection and ordinary typing remain with the input owner.
-module Hide.Bindings (BindingContext(..), contextName, bindingContexts, Bindings, compileBindings, bindingAction, bindingKeys, chordName, readChord) where
+module Hide.Bindings (BindingContext(..), contextName, bindingContexts, Bindings, compileBindings, bindingAction, bindingKeys, bindingEntries, chordName, readChord) where
 
 import Control.Monad (foldM, unless)
 import Data.Char (toLower, isPrint)
@@ -27,7 +27,7 @@ contextName context = case context of
   SourceKeys -> "source"; SidebarKeys -> "sidebar"; ConversationKeys -> "conversation"
   MessagesKeys -> "messages"; DebuggerKeys -> "debugger"; TerminalKeys -> "terminal"
 
-data Bindings a = Bindings (M.Map Text a) [(a,[Text])] deriving (Eq,Show)
+data Bindings a = Bindings !(M.Map Text a) [(Text,a,[Text])] deriving (Eq,Show)
 
 -- | Resolve command names and reject unknown actions, malformed chords and
 -- collisions. Callers merge configuration layers per command before compiling.
@@ -37,7 +37,7 @@ compileBindings defaults overrides = do
     (Left ("Unknown keybinding command: "<>T.intercalate ", " [name | name<-M.keys overrides,name `notElem` map (\(entry,_,_)->entry) defaults]))
   entries <- traverse prepare defaults
   index <- foldM insert M.empty [(key,(name,action)) | (name,action,keys)<-entries,key<-keys]
-  pure (Bindings (fmap snd index) [(action,keys) | (_,action,keys)<-entries])
+  pure (Bindings (fmap snd index) entries)
   where
     prepare (name,action,keys)=do
       parsed<-traverse parseChord (M.findWithDefault keys name overrides)
@@ -50,7 +50,12 @@ bindingAction :: Bindings a -> V.Key -> [V.Modifier] -> Maybe a
 bindingAction (Bindings index _) key mods=chordName key mods >>= (`M.lookup` index)
 
 bindingKeys :: Eq a => Bindings a -> a -> [Text]
-bindingKeys (Bindings _ entries) action=concat [keys | (candidate,keys)<-entries,candidate==action]
+bindingKeys (Bindings _ entries) action=concat [keys | (_,candidate,keys)<-entries,candidate==action]
+
+-- | The complete effective map in catalog order, including explicit unbinding.
+-- Intended for worker-owned inspection, not a per-frame walk of command labels.
+bindingEntries :: Bindings a -> [(Text,[Text])]
+bindingEntries (Bindings _ entries)=[(name,keys) | (name,_,keys)<-entries]
 
 -- | Canonical labels are also lookup keys. Uppercase character events are
 -- normalized; Shift remains an explicit modifier, independent of list order.
