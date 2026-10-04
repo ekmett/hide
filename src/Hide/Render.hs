@@ -125,7 +125,7 @@ data RenderState = RenderState
 data DocumentKey = DocumentKey (Maybe (FilePath,Bool)) (Maybe Text) Int Bool (Maybe FilePath) Bool deriving Eq
 data ViewKey = ViewKey Int Text Selection (Int,Int) Selection deriving Eq
 data QuestionKey = QuestionKey Int (Maybe Int) Selection Bool deriving Eq
-data FieldKey = InputKey Text Int | ComboBoxKey Text Int (Maybe Int) | CheckBoxKey Text Bool | RadioKey Text Int
+data FieldKey = InputKey Text Int | SelectedInputKey Text Selection | ComboBoxKey Text Int (Maybe Int) | CheckBoxKey Text Bool | RadioKey Text Int
   | ListBoxKey Text Int | FileListKey Int | ReadOnlyKey Text
   | TextAreaKey Text Bool Selection Int Int deriving Eq
 data DialogKey = DialogKey Text Int [Text] [FieldKey] deriving Eq
@@ -167,6 +167,7 @@ renderKey original = do
         pure (QuestionKey (questionToken value) (questionChoice value) (questionSelection value) (questionFocused value))
       field value=case value of
         Input caption text cursor -> payload text >> pure (InputKey caption cursor)
+        SelectedInput caption text sel -> payload text >> pure (SelectedInputKey caption sel)
         ComboBox caption choices choice preview -> payload choices >> pure (ComboBoxKey caption choice preview)
         CheckBox caption checked -> pure (CheckBoxKey caption checked)
         Radio caption choices choice -> payload choices >> pure (RadioKey caption choice)
@@ -350,6 +351,8 @@ renderDesktop d = flattenPicture (screenSize d) ((V.picForLayers (privacyLayers+
       Just dg -> case drop (focus dg) (zip (fieldRects d dg) (fields dg)) of
         (Rect x y w _,Input _ value p):_ -> let offset=max 0 (displayColumn value p-w+1)
                                          in V.Cursor (x+displayColumn value p-offset) (y+1)
+        (Rect x y w _,SelectedInput _ value sel):_ -> let p=caret sel; offset=max 0 (displayColumn value p-w+1)
+                                                   in V.Cursor (x+displayColumn value p-offset) (y+1)
         (rect,f@(TextArea _ True b sel sr sc)):_ ->
           let area=textAreaRect rect f; (line,col)=bufferLineColumn b (caret sel)
               cx=left area+displayColumn (bufferLineAt b line) col-sc; cy=top area+line-sr
@@ -796,6 +799,11 @@ dialogLayers d dg =
         image=case field of
           Input name value p -> let offset=if focus dg==i then max 0 (displayColumn value p-fw+1) else 0
                                in V.vertCat [row paper fw name,V.cropRight fw (V.translateX (negate offset) (label inputColor value) V.<|> V.charFill inputColor ' ' fw 1)]
+          SelectedInput name value sel ->
+            let offset=if focus dg==i then max 0 (displayColumn value (caret sel)-fw+1) else 0
+                (a,z)=ordered sel
+                text=label inputColor (T.take a value) V.<|> label (if focus dg==i then selected else inputColor) (T.take (z-a) (T.drop a value)) V.<|> label inputColor (T.drop z value)
+            in V.vertCat [row paper fw name,V.cropRight fw (V.translateX (negate offset) text V.<|> V.charFill inputColor ' ' fw 1)]
           ComboBox name choices chosen _ -> V.vertCat [row paper fw name,
             row inputColor (fw-2) (fromMaybe "" (atMay choices chosen)) V.<|> label (attr blue scrollCyan) " ▼"]
           ReadOnly name value -> let lw=min 18 (fw `div` 3) in row a lw (name<>":") V.<|> row paper (fw-lw) value

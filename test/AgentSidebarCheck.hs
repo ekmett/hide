@@ -1,0 +1,129 @@
+{-# LANGUAGE OverloadedStrings #-}
+module AgentSidebarCheck (checks) where
+
+import Control.Concurrent (threadDelay)
+import Control.Exception (bracket)
+import Control.Monad (unless)
+import Data.Aeson
+import Data.Aeson.Types (parseMaybe)
+import qualified Data.ByteString.Lazy as BL
+import qualified Data.Map.Strict as M
+import qualified Data.Text as T
+import qualified Graphics.Vty as V
+import System.Directory
+import System.Environment
+import System.FilePath ((</>))
+import System.IO (openTempFile,hClose)
+import System.Timeout (timeout)
+import Hide.AgentSidebar
+import Hide.AgentSidebarTypes
+import qualified Hide.AgentHub as AH
+import qualified Hide.AgentRuntime as AR
+import Hide.App (applyEffects)
+import Hide.Buffer (Selection(..))
+import Hide.Conversation
+import Hide.Model
+import Hide.Sidebar
+import Hide.SidebarCommands
+import Hide.Session
+import Hide.GuestAccess (guestEffectsAllowed)
+import qualified Hide.Plugin.Tree as P
+import qualified AgentIntegrationCheck
+
+checks :: IO ()
+checks=bracket temporary removePathForcibly $ \root->
+  environment "XDG_CONFIG_HOME" (Just (root </> "config")) $
+  environment "XDG_DATA_HOME" (Just (root </> "data")) $ do
+    let config=root </> "config" </> "thc-edit"
+        script=root </> "provider.py"
+    createDirectoryIfMissing True config
+    writeFile script AgentIntegrationCheck.fixture
+    BL.writeFile (config </> "agents.json") (encode (object ["executable" .= ("python3"::T.Text),"arguments" .= [script]]))
+    record<-newSessionRecord Nothing ["--",root]
+    rememberSession record
+    environment "THC_EDIT_SESSION" (Just (sessionId record)) $ withSidebarCommands $ \host->withConversationAt root $ \conversation->
+      withAgentSidebar host (conversationAgents conversation) $ \agents->do
+        let core=conversationEffects conversation applyEffects
+            tick d=tickConversation conversation d >>= tickAgentSidebar agents host >>= tickSidebar host core
+            act (d,effects)=snd <$> sidebarEffects host core d effects
+            hub=AR.agentHub (conversationAgents conversation)
+            primary=AR.primaryAgent (conversationAgents conversation)
+        initial<-initializeSidebar host (installSidebar (emptySidebar root 26 True) ((initialDesktop (100,35)) {defaultDirectory=Just root}))
+        published<-await tick (has "Agents") initial
+        expanded<-act (activateTree True (index "Agents" published) published) >>= await tick (has "Primary")
+        renamed<-act (chooseMenu "Primary  idle" expanded) >>= await tick (maybe False ((=="Rename agent").dialogTitle) . dialog)
+        ensure "rename opens with current name selected" (inputValue renamed==Just ("Primary",Selection 0 7))
+        let typed=fst (handleEvent (V.EvKey (V.KChar 'N') []) renamed)
+        ensure "typing replaces rename selection" (inputValue typed==Just ("N",Selection 1 1))
+        -- Capture the target, then reorder metadata before applying the dialog.
+        let caps=AH.Capabilities False False False []
+            driver=AH.AgentDriver root "private-peer-key" caps (const (pure (Right caps))) (const (pure (Right Null))) (pure ()) (pure ()) (const (pure (Left "unsupported")))
+        peer<-AH.registerAgent hub "A peer" root driver >>= right
+        submitted<-act (handleEvent (V.EvKey V.KEnter []) typed)
+        primaryStatus<-AH.statusAgent hub AH.Human primary >>= right
+        peerStatus<-AH.statusAgent hub AH.Human peer >>= right
+        ensure "rename targets captured ID after directory changes" (field "name" primaryStatus==Just ("N"::T.Text) && field "name" peerStatus==Just ("A peer"::T.Text))
+        refreshed<-await tick (has "N  idle") submitted
+        let foreground=activeWindow refreshed
+        hidden<-await tick (has "A peer") refreshed
+        ensure "background refresh preserves input owner" (fmap windowId (activeWindow hidden)==fmap windowId foreground)
+        childView<-act (activateTree False (index "A peer  idle" hidden) hidden) >>= await tick ((==AH.agentIdText peer).conversationTarget)
+        ensure "captured child navigation opens existing attributed view" (conversationTarget childView==AH.agentIdText peer)
+        primaryView<-act (childView,[AgentSidebarAction (ShowAgent primary)])
+        ensure "Primary navigation restores Primary target" (T.null (conversationTarget primaryView))
+        ensure "agent input cannot manufacture human sidebar controls" (not (guestEffectsAllowed [AgentSidebarAction (RenameAgent primary)]))
+        -- Real New Agent dialog submits through the existing runtime/ACP owner.
+        newDialog<-act (chooseMenu "Agents" primaryView) >>= await tick (maybe False ((=="New agent").dialogTitle) . dialog)
+        let fill=fmapDialog (\dg->dg {fields=[Input "Name" "Child" 5,Input "Task" "Count files" 11]}) newDialog
+        starting<-act (handleEvent (V.EvKey V.KEnter []) fill)
+        let createdAndQueued desktop=do
+              directoryNow<-AH.listAgents hub AH.Human >>= right
+              case [AH.AgentId who | entry<-maybe [] id (field "agents" directoryNow :: Maybe [Value]),field "name" entry==Just ("Child"::T.Text),Just who<-[field "id" entry]] of
+                who:_->do
+                  history<-AH.historyAgent hub AH.Human who 0 100 >>= right
+                  pure (has "Child" desktop && any (\event->field "kind" event==Just ("message_queued"::T.Text)) (maybe [] id (field "events" history :: Maybe [Value])))
+                _->pure False
+        started<-awaitIO tick createdAndQueued starting
+        directory<-AH.listAgents hub AH.Human >>= right
+        let children=[entry | entry<-maybe [] id (field "agents" directory :: Maybe [Value]),field "name" entry==Just ("Child"::T.Text)]
+        ensure "New Agent enqueues its task without selecting its view" (length children==1 && T.null (conversationTarget started))
+        ensure "background completion never steals focus" (fmap windowId (activeWindow started)==fmap windowId (activeWindow primaryView))
+        (subagent,_)<-AH.spawnAgentWithTask hub (AH.Agent primary) (AH.SpawnSpec "Nested" "Count files" root AH.Shared AH.Fresh Nothing Nothing) >>= right
+        parentReady<-await tick (\d->case [row | (_,row)<-visibleRows 0 32768 (tree d),P.infoLabel (rowInfo row)=="N  idle"] of row:_->P.infoBranch (rowInfo row); _->False) started
+        nested<-act (activateTree True (index "N  idle" parentReady) parentReady) >>= await tick (has "Nested")
+        let nestedRows=[row | (_,row)<-visibleRows 0 32768 (tree nested),T.isPrefixOf "Nested" (P.infoLabel (rowInfo row))]
+        ensure "agent parent IDs determine the shared hierarchy" (case nestedRows of
+          [row] | Just node<-M.lookup (keyOf (rowHit row)) (treeNodes (tree nested)),Just (NodeKey _ nodeId)<-stateParent node->P.nodeIdText nodeId==AH.agentIdText primary && rowDepth row==2
+          _->False)
+        ensure "rename paste replaces selected text" (inputValue (fst (handleEvent (V.EvPaste "Replacement") renamed))==Just ("Replacement",Selection 11 11))
+        ensure "rename backspace deletes selected text" (inputValue (fst (handleEvent (V.EvKey V.KBS []) renamed))==Just ("",Selection 0 0))
+        ensure "rename Left collapses selection to its start" (inputValue (fst (handleEvent (V.EvKey V.KLeft []) renamed))==Just ("Primary",Selection 0 0))
+        ensure "rename Shift Left extends existing selection" (inputValue (fst (handleEvent (V.EvKey V.KLeft [V.MShift]) typed))==Just ("N",Selection 1 0))
+        _<-AH.endAgent hub AH.Human subagent
+        putStrLn "agent sidebar checks passed"
+  where
+    ensure label ok=unless ok (error label)
+    right value=either (error.show) pure value
+    field key value=parseMaybe (withObject "field" (.: key)) value
+    has text d=any (T.isPrefixOf text . P.infoLabel . rowInfo . snd) (visibleRows 0 32768 (tree d))
+    index text d=case [i | (i,row)<-visibleRows 0 32768 (tree d),P.infoLabel (rowInfo row)==text] of i:_->i; _->error "missing agent row"
+    tree=maybe (error "missing sidebar") id . sideTree
+    chooseMenu label d=
+      let target=index label d
+          y=2+target-treeScroll (tree d)
+          (popup,_)=handleEvent (V.EvMouseDown 5 y V.BRight []) d
+      in handleEvent (V.EvKey V.KEnter []) popup
+    inputValue d=case dialog d of
+      Just dg | SelectedInput _ value sel:_<-fields dg->Just (value,sel)
+      _->Nothing
+    fmapDialog f d=d {dialog=fmap f (dialog d)}
+    await tick done=awaitIO tick (pure . done)
+    awaitIO tick done initial=timeout 10000000 (go initial) >>= maybe (error "Agent sidebar timeout") pure
+      where go d=do next<-tick d; ready<-done next; if ready then pure next else threadDelay 10000 >> go next
+
+temporary :: IO FilePath
+temporary=do root<-getTemporaryDirectory; (path,h)<-openTempFile root "hide-agent-sidebar"; hClose h; removeFile path; createDirectory path; canonicalizePath path
+
+environment :: String -> Maybe String -> IO a -> IO a
+environment key value action=bracket (lookupEnv key <* set value) set (const action)
+  where set=maybe (unsetEnv key) (setEnv key)

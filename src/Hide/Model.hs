@@ -20,6 +20,8 @@ import qualified Data.Text.Encoding as TE
 import qualified Data.Map.Strict as M
 import qualified Data.Vector as Vec
 import Hide.Sidebar
+import Hide.AgentSidebarTypes
+import qualified Hide.AgentHub
 import qualified Hide.Plugin.Tree as Tree
 import Hide.Plugin.Command (CommandRef)
 import Data.ByteString (ByteString)
@@ -126,14 +128,15 @@ data LanguageAction = TypeInfo | FindDefinition | Completions | ShowProblems | R
 data Completion = Completion Text [(Int,Int,Text)] deriving (Eq,Show)
 data ProjectAction = LoadProject | ProjectPage Int Int | ProjectDetails Int Int deriving (Eq,Show)
 -- | Ordered requests for the host interpreter, produced alongside a new desktop.
-data Effect = ReloadKeyBindings FilePath | InspectKeyBindings (Maybe (Bindings.BindingPlatform,Bindings.BindingContext)) (Maybe (Bindings.Bindings Command)) | FollowLink (Maybe FilePath) Text | FollowTreeLink [Tree.TreeHit] FilePath Text | EnvironmentAction Text [Text] | AutocompleteAction Text [Text] | SaveMacKeySymbols Bool | SaveChatSubmit ChatSubmit | SaveBufferViewDefault BufferView | ProjectRequest ProjectAction | DownloadDocument Int | ReadBrowserClipboard | WriteBrowserClipboard Text | LanguageRequest LanguageAction | RunGit GitAction | ReadMergeBranches | JumpTo FilePath Int Int | ReadPath FilePath | BrowsePath FilePath Text | BrowseDirectories FilePath | ChangeDirectory FilePath | OpenChoice FilePath Text Text | ReadTree FilePath | RefreshTree FilePath [Entry] | LoadTree TreeRequest Plugin.MenuOrigin | InvokeTree [Tree.TreeHit] CommandRef Plugin.MenuOrigin | ReadHelp | InvokeMenu Plugin.MenuRef Plugin.MenuOrigin (Maybe ContextTarget) | RefreshGit FilePath | ReadGitDiff | AskGitCommit | WriteGitCommit Text | SaveDocument Int (Maybe FilePath) (Maybe Command) | ReviewExternal | ResolveConflict Conflict ConflictAction | AgentAction Text [Text] | PermissionAction Text [Text] | DebugAction Text [Text] | SetScreenMode Int | Exit deriving (Eq,Show)
-data Field = Input Text Text Int | ComboBox Text [Text] Int (Maybe Int) | CheckBox Text Bool | Radio Text [Text] Int | ListBox Text [Text] Int | FileList [Entry] Int
+data Effect = AgentSidebarAction !AgentSidebarRequest | ReloadKeyBindings FilePath | InspectKeyBindings (Maybe (Bindings.BindingPlatform,Bindings.BindingContext)) (Maybe (Bindings.Bindings Command)) | FollowLink (Maybe FilePath) Text | FollowTreeLink [Tree.TreeHit] FilePath Text | EnvironmentAction Text [Text] | AutocompleteAction Text [Text] | SaveMacKeySymbols Bool | SaveChatSubmit ChatSubmit | SaveBufferViewDefault BufferView | ProjectRequest ProjectAction | DownloadDocument Int | ReadBrowserClipboard | WriteBrowserClipboard Text | LanguageRequest LanguageAction | RunGit GitAction | ReadMergeBranches | JumpTo FilePath Int Int | ReadPath FilePath | BrowsePath FilePath Text | BrowseDirectories FilePath | ChangeDirectory FilePath | OpenChoice FilePath Text Text | ReadTree FilePath | RefreshTree FilePath [Entry] | LoadTree TreeRequest Plugin.MenuOrigin | InvokeTree [Tree.TreeHit] CommandRef Plugin.MenuOrigin | ReadHelp | InvokeMenu Plugin.MenuRef Plugin.MenuOrigin (Maybe ContextTarget) | RefreshGit FilePath | ReadGitDiff | AskGitCommit | WriteGitCommit Text | SaveDocument Int (Maybe FilePath) (Maybe Command) | ReviewExternal | ResolveConflict Conflict ConflictAction | AgentAction Text [Text] | PermissionAction Text [Text] | DebugAction Text [Text] | SetScreenMode Int | Exit deriving (Eq,Show)
+data Field = Input Text Text Int | SelectedInput Text Text Selection | ComboBox Text [Text] Int (Maybe Int) | CheckBox Text Bool | Radio Text [Text] Int | ListBox Text [Text] Int | FileList [Entry] Int
   | ReadOnly Text Text
   | TextArea Text Bool Buffer Selection Int Int deriving (Eq,Show)
 data Purpose = Opening FilePath Text [Entry] | ChangingDirectory FilePath [Entry] | Committing | Saving Int (Maybe Command) | Searching Bool Text | GoingTo | Renaming
   | ProjectLoading Int | ProjectChoices Int Int
   | CodeActionChoices Int Int [Text]
   | Completing Int Int Int [Completion] | Locations [(FilePath,Int,Int)] | Merging [Text]
+  | AgentRenameDialog !Hide.AgentHub.AgentId | AgentNewDialog
   | EnvironmentDialog Text | AutocompleteDialog Text | DiskConflict Conflict | AgentDialog Text | PermissionDialog Text | DebugDialog Text
   | DiscardDraft | Confirm Command | Information | Settings | ChatInputSettings | Widgets deriving (Eq,Show)
 data Dialog = Dialog
@@ -1110,6 +1113,7 @@ searchTabRects d dg=let Rect x y _ _=dialogRect d dg in [(Rect (x+3) (y+2) 10 1,
 dialogCommandAllowed :: Command -> Desktop -> Bool
 dialogCommandAllowed cmd d=case dialog d of
   Just dg | searching dg,cmd `elem` [Find,Replace] -> True
+          | SelectedInput{}:_<-drop (focus dg) (fields dg) -> cmd `elem` [Copy,Cut,Paste,SelectAll]
           | f:_<-drop (focus dg) (fields dg),editableArea f -> cmd `elem` [Copy,Cut,Paste,SelectAll,Undo,Redo]
   _ -> False
 
@@ -1129,6 +1133,17 @@ applyDialogCommand cmd d
   | not (dialogCommandAllowed cmd d) = (d,[])
   | cmd==Find = (searchPrompt False d,[])
   | cmd==Replace = (searchPrompt True d,[])
+  | Just dg<-dialog d,field@(SelectedInput caption value sel):_<-drop (focus dg) (fields dg) =
+      let (a,z)=ordered sel
+          copied=T.take (z-a) (T.drop a value)
+          edited=case cmd of
+            Cut -> replaceInputSelection "" field
+            Paste -> replaceInputSelection (T.filter textInputChar (clipboard d)) field
+            SelectAll -> SelectedInput caption value (Selection 0 (T.length value))
+            _ -> field
+      in (d {clipboard=if cmd `elem` [Copy,Cut] then copied else clipboard d,
+             clipboardCode=if cmd `elem` [Copy,Cut] then Nothing else clipboardCode d,
+             dialog=Just dg {fields=replaceAt (focus dg) edited (fields dg)}},[])
   | Just dg<-dialog d,field@(TextArea _ True b sel _ _):_<-drop (focus dg) (fields dg) =
       let rect=fromMaybe (Rect 0 0 1 1) (listToMaybe (drop (focus dg) (fieldRects d dg)))
           copied=selectedText sel b
@@ -1160,6 +1175,7 @@ focusedBindingChords d
 
 fieldHeight :: Field -> Int
 fieldHeight Input{} = 3
+fieldHeight SelectedInput{} = 3
 fieldHeight ComboBox{} = 3
 fieldHeight CheckBox{} = 2
 fieldHeight (Radio _ xs _) = length xs+2
@@ -2491,6 +2507,8 @@ dialogEvent :: V.Event -> Dialog -> Desktop -> (Desktop,[Effect])
 dialogEvent ev dg d
   | not prepared, nativeMac d, V.EvKey (V.KChar 'f') mods<-ev, V.MMeta `elem` mods, V.MAlt `elem` mods,
     dialogCommandAllowed Replace d = runCommand Replace d
+  | not prepared, V.EvKey (V.KChar c) mods<-platformEvent, V.MCtrl `elem` mods,
+    SelectedInput{}:_<-drop (focus dg) (fields dg), Just command<-lookup (toLower c) [('a',SelectAll),('c',Copy),('x',Cut),('v',Paste)] = applyDialogCommand command d
   | Just (i,name,choices,chosen,preview)<-openComboBox dg = comboBoxEvent platformEvent dg d i name choices chosen preview
   | otherwise = case platformEvent of
   V.EvKey key mods | DebugDialog action<-purpose dg,"hdb-accept:" `T.isPrefixOf` action,
@@ -2519,7 +2537,7 @@ dialogEvent ev dg d
     Right text -> updateField (textAreaEdit focusedRect (insertText (T.filter (\c -> textInputChar c || c=='\n' || c=='\r' || c=='\t') text)))
     Left _ -> (d,[])
   V.EvPaste bytes | focus dg<count -> case TE.decodeUtf8' bytes of
-    Right text -> updateField (\f -> case f of Input label value pos -> let clean=T.filter textInputChar text in Input label (T.take pos value<>clean<>T.drop pos value) (pos+T.length clean); _ -> f)
+    Right text -> updateField (\f -> case f of Input label value pos -> let clean=T.filter textInputChar text in Input label (T.take pos value<>clean<>T.drop pos value) (pos+T.length clean); SelectedInput{} -> replaceInputSelection (T.filter textInputChar text) f; _ -> f)
     Left _ -> (d,[])
   V.EvMouseDown x y V.BLeft _ | approvalDialog dg, inside (dialogCloseRect d dg) x y -> submitDialog 1 dg d
   V.EvMouseDown x y V.BLeft _ -> case findIndex (\r -> inside r x y) (buttonRects d dg) of
@@ -2529,6 +2547,7 @@ dialogEvent ev dg d
       Just i -> let Rect l t _ _ = fieldRects d dg !! i
                     click (FileList xs selected) = FileList xs (max 0 (min (length xs-1) ((max 0 selected `div` 16)*16+max 0 (y-t-2)+if x-l >= width (fieldRects d dg !! i) `div` 2 then 8 else 0)))
                     click (Input label value pos) = Input label value (columnOffset value (max 0 (x-l)+max 0 (displayColumn value pos-width (fieldRects d dg !! i)+1)))
+                    click (SelectedInput label value sel) = let pos=columnOffset value (max 0 (x-l)+max 0 (displayColumn value (caret sel)-width (fieldRects d dg !! i)+1)) in SelectedInput label value (Selection pos pos)
                     click (ComboBox name choices chosen _) = ComboBox name choices chosen (Just chosen)
                     click (CheckBox label b) = CheckBox label (not b)
                     click (Radio label xs _) = Radio label xs (max 0 (min (length xs-1) (y-t-1)))
@@ -2582,7 +2601,7 @@ dialogEvent ev dg d
                         updated=replaceAt (focus dg) changed (fields dg)
                         clear (FileList entries _) = FileList entries (-1)
                         clear field = field
-                        typed = case (old,changed) of (Input _ a _,Input _ b _) -> a/=b; _ -> False
+                        typed = case (old,changed) of (Input _ a _,Input _ b _) -> a/=b; (SelectedInput _ a _,SelectedInput _ b _) -> a/=b; _ -> False
                     in updateDialog dg {fields=if typed then map clear updated else updated}
                   | otherwise = (d,[])
 
@@ -2592,6 +2611,15 @@ replaceAt i x xs = take i xs ++ [x] ++ drop (i+1) xs
 scrollTextArea :: Int -> Field -> Field
 scrollTextArea delta (TextArea name editable b sel row col) = TextArea name editable b sel (max 0 (min (bufferLineCount b-1) (row+delta))) col
 scrollTextArea _ f = f
+
+-- | Replace the selected single-line range. Ordinary Input editing keeps its
+-- existing caret-only contract; this field is reusable by selected-value dialogs.
+replaceInputSelection :: Text -> Field -> Field
+replaceInputSelection text (SelectedInput caption value sel)=
+  let (a,z)=ordered sel
+      pos=a+T.length text
+  in SelectedInput caption (T.take a value<>text<>T.drop z value) (Selection pos pos)
+replaceInputSelection _ field=field
 
 fieldKey :: V.Key -> [V.Modifier] -> Field -> Field
 fieldKey key mods field = case field of
@@ -2605,6 +2633,23 @@ fieldKey key mods field = case field of
     V.KChar 'u' | V.MCtrl `elem` mods -> set "" 0
     V.KChar c | (null mods || mods==[V.MShift]) && textInputChar c -> set (T.take pos value<>T.singleton c<>T.drop pos value) (pos+1)
     _ -> field
+  SelectedInput label value sel ->
+    let pos=caret sel
+        (a,z)=ordered sel
+        move target=SelectedInput label value (Selection (if V.MShift `elem` mods then anchor sel else target) target)
+        erase=replaceInputSelection "" field
+    in case key of
+      V.KLeft -> move (if V.MShift `notElem` mods && a/=z then a else previousCharacter value pos)
+      V.KRight -> move (if V.MShift `notElem` mods && a/=z then z else nextCharacter value pos)
+      V.KHome -> move 0
+      V.KEnd -> move (T.length value)
+      V.KBS | a/=z -> erase
+            | otherwise -> replaceInputSelection "" (SelectedInput label value (Selection (previousCharacter value pos) pos))
+      V.KDel | a/=z -> erase
+             | otherwise -> replaceInputSelection "" (SelectedInput label value (Selection pos (nextCharacter value pos)))
+      V.KChar 'u' | V.MCtrl `elem` mods -> SelectedInput label "" (Selection 0 0)
+      V.KChar c | (null mods || mods==[V.MShift]) && textInputChar c -> replaceInputSelection (T.singleton c) field
+      _ -> field
   TextArea name editable b sel row col -> case key of
     V.KLeft -> TextArea name editable b sel row (max 0 (col-1))
     V.KRight -> TextArea name editable b sel row (min (bufferLength b) (col+1))
@@ -2652,6 +2697,8 @@ submitDialog button dg original
       branch:_ -> (d,[RunGit (MergeBranch branch)])
       _ -> (d,[])
     Committing -> if T.null (T.strip first) then (original {status="Enter a commit message."},[]) else (original,[WriteGitCommit first])
+    AgentRenameDialog ident -> (d,[AgentSidebarAction (RenameAgentTo ident first)])
+    AgentNewDialog -> (d,[AgentSidebarAction (CreateAgent first second)])
     Renaming -> if T.null (T.strip first) then (original {status="Enter a new name."},[]) else (d,[LanguageRequest (RenameAt (T.strip first))])
     Saving bid after -> if T.null first then (original,[]) else (d,[SaveDocument bid (Just (T.unpack first)) after])
     DiskConflict conflict -> (d,[ResolveConflict conflict ([CompareDisk,ReloadDisk,KeepBuffer,SaveConflictAs] !! button)])
@@ -2704,6 +2751,7 @@ submitDialog button dg original
     selected=fromMaybe 0 (listToMaybe [i | ListBox _ _ i <- fields dg])
     values=concatMap fieldValue (fields dg)
     fieldValue (Input _ value _)=[value]
+    fieldValue (SelectedInput _ value _)=[value]
     fieldValue (ComboBox _ choices chosen _)=take 1 (drop chosen choices)
     fieldValue _=[]
     first=fromMaybe "" (listToMaybe values); second=fromMaybe "" (listToMaybe (drop 1 values))

@@ -147,6 +147,7 @@ agentActionAllowed action=action `elem` ["compile","make","build-stop","run","ru
 guestEffectsAllowed :: [Effect] -> Bool
 guestEffectsAllowed=all allowed
   where
+    allowed AgentSidebarAction{}=False
     allowed ReloadKeyBindings{}=False
     allowed (InvokeMenu _ origin _)=origin==Plugin.AgentMenu
     allowed (InvokeTree _ _ origin)=origin==Plugin.AgentMenu
@@ -168,6 +169,8 @@ guestEffectsAllowed=all allowed
     allowed _=True
 protectedPurpose :: Purpose -> Bool
 protectedPurpose p=case p of
+  AgentRenameDialog{} -> True
+  AgentNewDialog -> True
   EnvironmentDialog{} -> True
   PermissionDialog{} -> True
   ChatInputSettings -> True
