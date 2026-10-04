@@ -651,3 +651,13 @@ field labels. The human frame chooser is conservatively private until it exposes
 prepared public semantic rows. Arbitrary adapter variables/output remain the approved execution
 boundary and are not universally sanitized. Local filesystem source following
 still uses the existing synchronous owner path; its async preparation is separate.
+
+`Hide.SessionSidebar` uses the existing private session catalog on one scoped
+discovery worker. Only bounded public session summaries survive preparation; no
+startup arguments, checkpoints or provider keys enter its snapshot. The UI owner
+publishes forced scalar window IDs/titles through `editorWindowEntries` and
+compares separate catalog/window revisions, invalidating at most two nodes.
+Closed `SessionSidebarRequest` values pass the ordinary tree hit/lifetime/modal
+checks, then the live session owner rechecks session identity and window
+availability via `activateEditorWindow`. No new permission map or attachment
+manager is introduced. Cross-frontend explicit resume remains the next slice.

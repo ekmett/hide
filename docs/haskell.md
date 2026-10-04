@@ -58,11 +58,11 @@ only text edits are confined to unsaved editor buffers.
 Each edit batch rejects changed source, private or unrelated files, and file
 creation/deletion operations as a whole. A later command failure or cancellation
 keeps earlier accepted edits; review the status and changed buffers before saving.
-Only one command runs at a time per project. Every completed, failed, or canceled
-command retires that HLS process, so its late edits cannot affect another action.
-The next command needs a fresh action list and may incur HLS startup time;
-edit-only actions keep the existing server. Actions from an older list expire
-when you request another list or restart HLS.
+Only one command runs at a time per project. HLS stays running after successful
+and failed commands. Cancellation rejects further edits and waits up to two
+seconds for the server's terminal response; an unresponsive server is restarted.
+Action IDs are consumed once and expire when you request another list or restart
+HLS. A changed buffer requires a fresh action against its current revision.
 
 ## Diagnostics
 

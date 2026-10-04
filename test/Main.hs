@@ -51,6 +51,7 @@ import qualified AutocompleteACPCheck
 import qualified CopilotCheck
 import qualified HighlightingCheck
 import qualified AgentSidebarCheck
+import qualified SessionSidebarCheck
 import qualified AgentIntegrationCheck
 import qualified AgentAccessCheck
 import qualified AgentRuntimeCheck
@@ -123,6 +124,7 @@ main = do
   CopilotCheck.checks
   HighlightingCheck.checks
   AgentSidebarCheck.checks
+  SessionSidebarCheck.checks
   AgentIntegrationCheck.checks
   AgentAccessCheck.checks
   AgentRuntimeCheck.checks

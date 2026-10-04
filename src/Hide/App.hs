@@ -11,6 +11,7 @@ module Hide.App (main, demoDesktop, applyEffects) where
 import Hide.Sidebar
 import Hide.PackageSidebar
 import Hide.AgentSidebar
+import Hide.SessionSidebar
 import Hide.SidebarCommands
 import Control.Applicative ((<|>))
 import Data.Maybe (fromMaybe)
@@ -272,14 +273,14 @@ runEditor args = do
           mapM_ (setEnv "THC_EDIT_SESSION") daemon
           font<-Font.loadFont
           let specs=builtinTools++debugTools++chatTools++toolingTools++workspaceTools++fileTools++testsTools++historyTools++runtimeTools++gitTools++controlTools++environmentTools++clipboardTools++docsTools++[screenTool]
-          withPermissions (specs++agentTools) $ \permissions -> withBufferReadCommands $ \bufferCommands -> withBufferDiffCommands $ \diffCommands -> withDocsCommands $ \docsCommands -> withMenuCommands docsCommands $ \menuHost -> withConversationAt (startingDirectory protectedDesktop) $ \conversation -> withDebuggerConsoles (let (_,consoles,_)=conversationServices conversation in consoles) $ \debugger -> withDebuggerSidebar sidebarHost debugger $ \debugSidebar -> withTooling $ \tooling -> withGitOperations $ \gitOperations -> withReconciliation $ \reconciliation -> withProjectBrowser $ \projectBrowser -> withHighlighting $ \highlighting -> withAutocomplete (startingDirectory protectedDesktop) $ \autocomplete -> withPackageSidebar sidebarHost protectedDesktop $ \packageSidebar -> withAgentSidebar sidebarHost (conversationAgents conversation) autocomplete $ \agentSidebar -> do
+          withPermissions (specs++agentTools) $ \permissions -> withBufferReadCommands $ \bufferCommands -> withBufferDiffCommands $ \diffCommands -> withDocsCommands $ \docsCommands -> withMenuCommands docsCommands $ \menuHost -> withSessionSidebar sidebarHost daemon protectedDesktop $ \sessionSidebar -> withConversationAt (startingDirectory protectedDesktop) $ \conversation -> withDebuggerConsoles (let (_,consoles,_)=conversationServices conversation in consoles) $ \debugger -> withDebuggerSidebar sidebarHost debugger $ \debugSidebar -> withTooling $ \tooling -> withGitOperations $ \gitOperations -> withReconciliation $ \reconciliation -> withProjectBrowser $ \projectBrowser -> withHighlighting $ \highlighting -> withAutocomplete (startingDirectory protectedDesktop) $ \autocomplete -> withPackageSidebar sidebarHost protectedDesktop $ \packageSidebar -> withAgentSidebar sidebarHost (conversationAgents conversation) autocomplete $ \agentSidebar -> do
             contributions<-PluginMenu.menuSnapshot (menuContributions menuHost)
             let liveBase=protectedDesktop {contributedMenus=contributions,agentMenuRefs=menuAgentReferences menuHost,menusActive=True}
             keymap<-either (die . T.unpack) pure (configuredBindings (contributedBindingCommands liveBase) keys)
             let liveDesktop=liveBase {keyBindings=keymap}
             withKeybindings keys (contributedBindingCommands liveBase) $ \keybindings -> do
               exiting<-newIORef False
-              let runtimeEffects=sidebarEffects sidebarHost (menuEffects menuHost (keybindingEffects keybindings (autocompleteEffects autocomplete (projectBrowserEffects projectBrowser (gitOperationEffects gitOperations (debuggerEffects debugger (conversationEffects conversation (reconciliationEffects reconciliation (toolingEffects tooling applyEffects)))))))))
+              let runtimeEffects=sidebarEffects sidebarHost (sessionSidebarEffects sessionSidebar (menuEffects menuHost (keybindingEffects keybindings (autocompleteEffects autocomplete (projectBrowserEffects projectBrowser (gitOperationEffects gitOperations (debuggerEffects debugger (conversationEffects conversation (reconciliationEffects reconciliation (toolingEffects tooling applyEffects))))))))))
                   core d pending=foldM step (False,d) pending
                     where
                       step result@(True,_) _=pure result
@@ -294,7 +295,7 @@ runEditor args = do
                     (quit,updated)<-policyEffects permissions core d pending
                     approvedExit<-readIORef exiting
                     pure (quit || approvedExit,updated)
-                  tick d=tickProjectBrowser projectBrowser d >>= tickGitOperations gitOperations applyEffects >>= tickTooling tooling applyEffects >>= tickReconciliation reconciliation (sidebarEffects sidebarHost applyEffects) >>= tickConversation conversation >>= tickDebugger debugger (toolingEffects tooling applyEffects) >>= tickPermissions permissions >>= tickHighlighting highlighting >>= tickAutocomplete autocomplete >>= tickKeybindings keybindings >>= tickMenus menuHost runtimeEffects >>= tickDebuggerSidebar debugSidebar sidebarHost debugger >>= tickPackageSidebar packageSidebar sidebarHost >>= tickAgentSidebar agentSidebar sidebarHost >>= tickSidebar sidebarHost runtimeEffects >>= tickPluginWindows
+                  tick d=tickProjectBrowser projectBrowser d >>= tickGitOperations gitOperations applyEffects >>= tickTooling tooling applyEffects >>= tickReconciliation reconciliation (sidebarEffects sidebarHost applyEffects) >>= tickConversation conversation >>= tickDebugger debugger (toolingEffects tooling applyEffects) >>= tickPermissions permissions >>= tickHighlighting highlighting >>= tickAutocomplete autocomplete >>= tickKeybindings keybindings >>= tickMenus menuHost runtimeEffects >>= tickDebuggerSidebar debugSidebar sidebarHost debugger >>= tickPackageSidebar packageSidebar sidebarHost >>= tickAgentSidebar agentSidebar sidebarHost >>= tickSessionSidebar sessionSidebar sidebarHost >>= tickSidebar sidebarHost runtimeEffects >>= tickPluginWindows
                   inspectTool d name parameters
                     | name `elem` ["list_windows","list_buffers","read_buffer","read_selection"] = pure (d,pure (builtinTool d name parameters))
                     | name `elem` chatToolNames = chatTool conversation d name parameters
@@ -618,6 +619,7 @@ applyEffects = foldM apply . (False,)
     apply (_,d) (ReadTree path)=pure (False,installSidebar (sidebarDirectory path d) d)
     apply (_,d) DebugSourceAction{}=pure (False,d {status="Debugger source actions are unavailable in this preview."})
     apply (_,d) DebugSidebarAction{}=pure (False,d {status="Debugger sidebar is unavailable in this preview."})
+    apply (_,d) SessionSidebarAction{}=pure (False,d {status="Session selection is unavailable in this preview."})
     apply (_,d) AgentSidebarAction{}=pure (False,d {status="Agent navigation is unavailable in this preview."})
     apply (_,d) LoadTree{}=pure (False,d {status="Sidebar provider host is unavailable in this preview."})
     apply (_,d) InvokeTree{}=pure (False,d {status="Sidebar provider host is unavailable in this preview."})
