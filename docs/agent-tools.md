@@ -12,6 +12,43 @@ per tool in **Options > Agent Permissions**. Read-only tools default to Enable;
 other tools default to Prompt. `editor_settings` can write, so even its read form
 uses that tool’s policy.
 
+## Protected content policy
+
+One policy classifies editor authority and protected UI content. It applies to
+agent-facing reads and actions regardless of the human's Streamer setting. Turning
+Streamer mode off does not grant an agent access. The path predicate lives in
+`Hide.Privacy`; resource and UI projections consume it through `Hide.GuestAccess`
+and the model. Path resolution belongs to service workers, not rendering.
+
+**Authority paths** are the host-registered canonical global/project configuration
+files, editor session/recovery store, agent configuration/resume records and live
+session endpoint directory, including descendants of registered roots. Any file
+whose basename is `thc.toml` (case-insensitive) is also authority. Component-wise
+containment excludes similarly prefixed siblings; known symlink paths must be
+resolved before admission. This is one host-maintained set, not a per-tool choice.
+
+**Protected UI content** includes human conversation/question drafts, pending
+approval controls, provider/session credentials and sensitive configuration values.
+Agents may inspect nonsensitive settings but cannot change their own permissions,
+submit a human's answer, or type into a human composer. Generic reads of approval
+and Git-review buffers are refused; structured Git tools provide separately checked
+results. Public conversation transcripts are distinct from their protected spans.
+Plugin windows remain private until the host accepts explicit semantic access.
+
+Structured records whose owning source is an authority path are omitted as records,
+including their path and diagnostic body. Screens preserve geometry with masked
+cells and safe titles. Filter before pagination and serialization; delayed workers
+must recheck the current policy before publishing or applying their result. Apply
+the rule to provenance rather than scanning unrelated source text for strings that
+look like secrets. Per-surface sections below describe output shape and additional
+operation constraints, not alternative definitions of authority.
+
+This is an editor boundary, not a secret scanner or an OS sandbox. Approved
+terminal/build programs, language servers, debugger evaluation and trusted native
+plugins execute with their process account's access. Their arbitrary output cannot
+be made confidential merely by recognizing protected editor paths. Documentation
+reads use a bounded declared corpus, not automatic classification of every word.
+
 ## Buffers, files and search
 
 | Tool | Kind | Arguments | Result / contract |
@@ -31,8 +68,7 @@ Search: `query` is 1–256 characters on one line; `offset` 0–9999; `limit` 1�
 files/matches. Inspect truncation flags. Filesystem mutations stay inside the
 project, refuse overwrite/dirty descendants, protect Git metadata and symlink
 endpoints, and do not recursively delete directories. Save uses disk-conflict
-checks. Private authority files and protected conversation contents are excluded
-or redacted across these surfaces.
+checks. These reads use the [protected content policy](#protected-content-policy).
 
 `workspace_project.cabalPlan` reads only `dist-newstyle/cache/plan.json`; it does
 not invoke Cabal. `status` distinguishes `available`, `missing`, `invalid`,
@@ -170,7 +206,7 @@ Breakpoints use 1-based lines, at most 1000. See the
 | `git_operation_status` | R | `jobId?` | `busy`, job state/exit code, complete review, or commit `head` and `reviewedTreeMatched` |
 
 Diff text is capped at 128 Ki characters. A path filter is a literal file path,
-not a Git glob/magic pathspec. Whole-repository diffs omit private authority files and Git-detected rename/copy
+not a Git glob/magic pathspec. Whole-repository diffs apply the [protected content policy](#protected-content-policy), including Git-detected rename/copy
 destinations derived from them; `omittedFiles` reports a count without their names. Agent mouse/key input cannot
 open the unrestricted human Git review or commit dialog; use `workspace_git`
 for filtered review. `workspace_search` with

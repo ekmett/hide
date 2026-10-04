@@ -23,6 +23,8 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Data.Text.Encoding.Error (lenientDecode)
+import System.Directory (canonicalizePath)
+import System.IO.Error (tryIOError)
 import System.Exit (ExitCode(..))
 import System.FilePath ((</>), isAbsolute, normalise)
 import System.IO (Handle)
@@ -103,15 +105,19 @@ aggregate label root queue latest=loop "" "" False
           truncated=wasTruncated || T.length stdout>1024*1024
           problems=take 1000 (mapMaybe (parseBuildDiagnostic root) (T.lines output))
           buffer=newBuffer output
+      -- Deduplicate path resolution within a batch; canonical provenance belongs
+      -- to this worker, not diagnostic rendering or agent read admission.
+      resolved<-traverse (tryIOError . canonicalizePath) (M.fromList [(diagnosticPath p,diagnosticPath p) | p<-problems])
+      let canonicalProblems=[p {diagnosticPath=path} | p<-problems,Just (Right path)<-[M.lookup (diagnosticPath p) resolved]]
       -- Strict measures prepare the tree once; seeking every row separately
       -- turns a burst of short lines into O(lines * log lines) work.
       evaluate (prepareBuffer buffer)
-      forM_ problems $ \problem -> do
+      forM_ canonicalProblems $ \problem -> do
         void (evaluate (length (diagnosticPath problem)))
         void (evaluate (diagnosticRow problem+diagnosticColumn problem+diagnosticSeverity problem+T.length (diagnosticMessage problem)))
       void (evaluate (T.length retained))
       void (evaluate truncated)
-      let snapshot=Snapshot buffer problems (retained,truncated) outcome
+      let snapshot=Snapshot buffer canonicalProblems (retained,truncated) outcome
       atomically (tryTakeTMVar latest >> putTMVar latest snapshot)
       case outcome of Nothing -> loop output retained truncated; Just _ -> pure ()
 
