@@ -230,7 +230,7 @@ with tempfile.TemporaryDirectory(prefix='hide-session-') as directory:
         send(type='command', command='hide.edit.undo')
         expect_text(display, 'persistent unsaved λ')
         config = root/'thc.toml'
-        config.write_text('[editor.keybindings.macos.source]\n"hide.edit.copy" = ["Cmd+Shift+J"]\n"hide.edit.paste" = ["Cmd+Shift+L"]\n[editor.keybindings.macos.dialog]\n"hide.search.replace" = ["Cmd+Shift+Y"]\n')
+        config.write_text('[editor.keybindings.macos.source]\n"hide.edit.copy" = ["Cmd+Shift+J"]\n"hide.edit.paste" = ["Cmd+Shift+L"]\n"hide.source.copy-location" = ["Cmd+Alt+Shift+U"]\n[editor.keybindings.macos.dialog]\n"hide.search.replace" = ["Cmd+Shift+Y"]\n')
         send(type='menu', command='hide.bindings.reload')
         if ('Cmd+Shift+L','hide.edit.paste') not in map(tuple,display.meta.get('bindings', [])):
             display.until('frame', lambda value: ['Cmd+Shift+L','hide.edit.paste'] in value.get('bindings', []))
@@ -254,6 +254,29 @@ with tempfile.TemporaryDirectory(prefix='hide-session-') as directory:
             display.until('frame', lambda value: ['Cmd+Shift+J','hide.edit.copy'] in value.get('bindings', []))
         expect_text(display, 'persistent unsaved λ')
         send(type='frontend', mode=3, mac=False)
+        # The shared canvas popup paints effective keys in real protocol cells;
+        # clicking the key span must retain the host's context clipboard route.
+        send(type='frontend', mode=3, mac=True)
+        send(type='mouse', action='down', x=30, y=4, button=2)
+        expect_text(display, 'Copy Location')
+        def shortcut_hit():
+            for y, row in enumerate(display.rows):
+                for x, fg, _, chunks in row or []:
+                    text=''.join(chunk if isinstance(chunk,str) else chunk[0] for chunk in chunks)
+                    if fg == 0xaa0000 and '⌥⇧⌘U' in text:
+                        return x+2, y
+        if not shortcut_hit():
+            display.until('frame', lambda _: shortcut_hit() is not None)
+        x, y = shortcut_hit()
+        assert not display.meta.get('bindingsActive'), display.meta
+        serial += 1
+        ws.send(dict(seq=serial, type='mouse', action='down', x=x, y=y, button=0))
+        location = display.until('copy')
+        assert pathlib.Path(location['text'].rsplit(':',2)[0]).resolve() == source.resolve(), location
+        display.until('ack', lambda value: value['seq'] == serial)
+        send(type='frontend', mode=3, mac=False)
+        send(type='key', key='End')
+        print('Live context Mac shortcut cells and shortcut-area clipboard click passed')
         print('Live dialog search remap, removed old chord and action-specific projection passed')
         print('Live macOS-profile clipboard remaps, removed accelerator, and worker reload across browser transport passed')
 
@@ -278,7 +301,7 @@ with tempfile.TemporaryDirectory(prefix='hide-session-') as directory:
 
     try:
         wordstar_keys()
-        (root/'thc.toml').write_text('[editor.keybindings.macos.source]\n"hide.edit.copy" = ["Cmd+Shift+J"]\n"hide.edit.paste" = ["Cmd+Shift+K"]\n[editor.keybindings.macos.dialog]\n"hide.search.replace" = ["Cmd+Shift+Y"]\n')
+        (root/'thc.toml').write_text('[editor.keybindings.macos.source]\n"hide.edit.copy" = ["Cmd+Shift+J"]\n"hide.edit.paste" = ["Cmd+Shift+K"]\n"hide.source.copy-location" = ["Cmd+Alt+Shift+U"]\n[editor.keybindings.macos.dialog]\n"hide.search.replace" = ["Cmd+Shift+Y"]\n')
         process, ws, display = web([str(source)])
         expect_text(display, 'original')
         event(ws, display, 1, type='command', command='hide.edit.select-all')
