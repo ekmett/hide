@@ -17,6 +17,8 @@ import System.Directory
 import System.FilePath ((</>))
 import System.IO (hClose,openTempFile)
 import System.Timeout (timeout)
+import Hide.BufferDiffCommand (withBufferDiffCommands)
+import TypedBufferDiffsCheck (startDiffCall)
 import Hide.Buffer
 import Hide.AgentAccess
 import qualified Hide.AgentHub as AH
@@ -27,7 +29,7 @@ import Hide.Plugin.BufferHost (captureVersion,versionCurrent)
 import Hide.WorkspaceFilesMCP (fileTools)
 
 checks :: IO ()
-checks=bracket temporary removePathForcibly $ \directory -> do
+checks=withBufferDiffCommands $ \commands->bracket temporary removePathForcibly $ \directory -> do
   let path=directory </> "config.toml"
       enable=TIO.writeFile path "[editor.mcp.permissions]\nbuffer_apply_diff = 'enable'\n"
       prompt=TIO.writeFile path "[editor.mcp.permissions]\nbuffer_apply_diff = 'prompt'\n"
@@ -36,7 +38,7 @@ checks=bracket temporary removePathForcibly $ \directory -> do
       patch="@@ -1 +1 @@\n-old\n+agent\n"::T.Text
       corrected="@@ -1 +1 @@\n-old\n+human λ\n"::T.Text
       args text=object ["bufferId" .= bid,"revision" .= (0::Int),"diff" .= text]
-      call runtime=permissionDiffCall runtime (pure (Right ()))
+      call runtime=startDiffCall commands runtime (pure (Right ()))
       core d _=pure (False,d)
       submit runtime button d=case dialog d of
         Just dg->let (next,fx)=submitDialog button dg d in snd <$> policyEffects runtime core next fx
@@ -84,13 +86,15 @@ checks=bracket temporary removePathForcibly $ \directory -> do
     entered<-newEmptyMVar
     release<-newEmptyMVar
     called<-newIORef (0::Int)
-    let caller=modifyIORef' called (+1) >> putMVar entered () >> readMVar release >> pure (Right ())
-    (started,response)<-permissionDiffCall runtime caller base "buffer_apply_diff" (args patch)
+    let caller=do
+          count<-atomicModifyIORef' called (\n->(n+1,n+1))
+          if count==2 then putMVar entered () >> readMVar release >> pure (Right ()) else pure (Right ())
+    (started,response)<-startDiffCall commands runtime caller base "buffer_apply_diff" (args patch)
     withAsync (awaitReply runtime started response) $ \owner->do
       _<-timeout 5000000 (readMVar entered) >>= maybe (error "adoption claim not reached") pure
       withAsync response $ \waiter->do
         let blocked=do s<-threadStatus (asyncThreadId waiter)
-                       case s of ThreadBlocked BlockedOnMVar->pure (); _->threadDelay 1000 >> blocked
+                       case s of ThreadBlocked BlockedOnSTM->pure (); _->threadDelay 1000 >> blocked
         _<-timeout 1000000 blocked >>= maybe (error "reply waiter not blocked") pure
         withAsync (cancel waiter) $ \canceller->do
           let reached=do s<-threadStatus (asyncThreadId canceller)
@@ -101,11 +105,10 @@ checks=bracket temporary removePathForcibly $ \directory -> do
           putMVar release ()
           (adopted,_)<-wait owner
           wait canceller
-          terminal<-response
-          check "adoption-first owns exactly one success reply" (not (isLeft terminal) && activeText adopted=="agent\n")
+          check "adoption-first installs exactly one result" (activeText adopted=="agent\n")
           again<-tickPermissions runtime adopted
           count<-readIORef called
-          check "adoption-first adds exactly one Undo and cannot repeat" (revision (documentBuffer (buffers again M.! bid))==1 && length (undoStack (documentBuffer (buffers again M.! bid)))==1 && count==1)
+          check "adoption-first adds exactly one Undo and cannot repeat" (revision (documentBuffer (buffers again M.! bid))==1 && length (undoStack (documentBuffer (buffers again M.! bid)))==1 && count==2)
   prompt
   withPermissionsAt path fileTools $ \runtime -> do
     (shown,pending)<-call runtime base "buffer_apply_diff" (args patch)
@@ -138,7 +141,7 @@ checks=bracket temporary removePathForcibly $ \directory -> do
       access<-newAgentAccess
       secret<-grantAgentAccess access ident
       let caller=fmap (() <$) (resolveActiveAgentAccess access hub secret)
-      (started,response)<-permissionDiffCall runtime caller base "buffer_apply_diff" (args patch)
+      (started,response)<-startDiffCall commands runtime caller base "buffer_apply_diff" (args patch)
       revokeAgentAccess access ident
       (rejected,result)<-awaitReply runtime started response
       check "actual token revocation before adoption rejects prepared diff" (unchanged rejected && isLeft result)

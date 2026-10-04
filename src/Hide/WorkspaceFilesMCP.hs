@@ -7,7 +7,7 @@
 -- exact context and coordinates: no fuzzy matching or external patch command.
 -- Search and strict diff preparation run on reply/permission workers. Diff adoption
 -- runs in the owning permission tick; filesystem mutations remain initial-phase IO.
-module Hide.WorkspaceFilesMCP (fileTools, fileToolNames, fileTool, applyUnifiedDiff, PatchSource, PreparedPatch, capturePatchSource, preparePatch, commitPatch) where
+module Hide.WorkspaceFilesMCP (fileTools, fileToolNames, fileTool, applyUnifiedDiff, PatchSource, PreparedPatch, capturePatchSource, capturePatchRequest, preparePatch, commitPatch) where
 
 import Control.Exception (IOException, bracket, try, evaluate)
 import Control.Monad (forM, unless, when)
@@ -32,6 +32,7 @@ import System.Timeout (timeout)
 import Text.Read (readMaybe)
 import Hide.Buffer
 import Hide.BufferEdits (PreparedEdit,prepareBufferEdit,commitEdits)
+import Hide.Plugin.BufferHost (DiffResult(..),ContentVersion,captureVersion)
 import Hide.Build (resolveBuildRoot)
 import Hide.Files (FileState(..), saveFile)
 import Hide.GuestAccess (protectedBuffer, protectedPath, protectedPathParent)
@@ -200,6 +201,17 @@ capturePatchSource desktop args=do
   unless (textBuffer old && documentLabel doc==Nothing) (Left "Diff edits require an editable text buffer")
   pure (PatchSource bid old (documentFile doc))
 
+-- | Validate wire arguments and capture only the exact original content identity.
+-- The queued typed service refuses replacement before its source admission.
+capturePatchRequest :: Desktop -> Value -> IO (Either Text (Int,ContentVersion,Text))
+capturePatchRequest desktop args=case capturePatchSource desktop args of
+  Left err->pure (Left err)
+  Right (PatchSource bid old _)->case patchArguments args of
+    Left err->pure (Left err)
+    Right (_,_,patch)->do
+      version<-captureVersion old
+      pure (Right (bid,version,patch))
+
 preparePatch :: PatchSource -> Maybe Text -> Value -> IO (Either Text PreparedPatch)
 preparePatch (PatchSource target old file) original args=case patchArguments args of
   Left err->pure (Left err)
@@ -219,15 +231,14 @@ patchArguments= either (Left . T.pack) Right . parseEither
 
 -- | Recheck current editability and install exactly once through the shared
 -- all-target owner. The caller has rechecked ticket lifetime, actor and policy.
-commitPatch :: PreparedPatch -> Desktop -> IO (Either Text (Desktop,Value))
+commitPatch :: PreparedPatch -> Desktop -> IO (Either Text (Desktop,DiffResult))
 commitPatch (PreparedPatch bid patch modified prepared) desktop=case M.lookup bid (buffers desktop) of
   Just doc | textBuffer (documentBuffer doc),documentLabel doc==Nothing->do
     adopted<-commitEdits [prepared] desktop
     pure $ do
       (updated,_)<-adopted
       let next=updated {windows=map (\w->if bufferId w==bid then w {windowHexLow=False} else w) (windows updated)}
-      pure (next,object ["bufferId" .= bid,"revision" .= revision (documentBuffer (buffers next M.! bid)),"saved" .= False,
-        "appliedDiff" .= patch,"userModified" .= modified])
+      pure (next,DiffResult (revision (documentBuffer (buffers next M.! bid))) patch modified)
   _->pure (Left "Diff target is no longer an editable text buffer")
 
 -- | Validate and apply a single-file unified diff with exact old/new line counts.

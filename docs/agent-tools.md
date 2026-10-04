@@ -402,8 +402,12 @@ diff inserts a newline. Agents cannot read or operate approval controls.
 
 [![Editable diff approval with file metadata and Allow/Deny actions.](site/screenshots/permission-diff.png)](site/screenshots/permission-diff.png)
 
-Allow validates the reviewed diff against the current buffer with the same strict,
-atomic patch checks. Invalid or stale edits remain open with an error and apply
+Allow validates the reviewed diff against the original captured source and checks
+that the live buffer is still that exact version before applying it atomically.
+Replacement is rejected even when text and numeric revision match, including
+while the request waits to begin. Stale requests require a fresh read and new
+request; editing the review never rebases its source. Invalid or stale edits
+remain open with an error and apply
 nothing. A successful prompted patch returns `appliedDiff`, `userModified` and
 the resulting `revision`, so the requesting agent sees the human's actual edit.
 The buffer remains unsaved; approval never writes the file to disk.

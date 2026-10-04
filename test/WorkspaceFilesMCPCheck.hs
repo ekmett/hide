@@ -18,14 +18,16 @@ import System.FilePath ((</>))
 import System.IO (hClose, openTempFile)
 import System.Info (os)
 import System.Process (callProcess)
+import Hide.BufferDiffCommand (withBufferDiffCommands)
+import TypedBufferDiffsCheck (startDiffCall)
 import Hide.Buffer
 import Hide.Files (FileState(..), loadFile)
-import Hide.MCPPermissions (withPermissionsAt,permissionCall,tickPermissions)
+import Hide.MCPPermissions (withPermissionsAt,tickPermissions)
 import Hide.Model
 import Hide.WorkspaceFilesMCP
 
 checks :: IO ()
-checks=do
+checks=withBufferDiffCommands $ \commands->do
   patchChecks
   bracket temporary removePathForcibly $ \directory -> do
     let policy=directory </> "policy.toml"
@@ -35,7 +37,7 @@ checks=do
           outside=directory </> "outside"
           core d _=pure (False,d)
           tool name args d=do
-            (next,response)<-if name=="buffer_apply_diff" then permissionCall runtime (fileTool core) d name (object args) else fileTool core d name (object args)
+            (next,response)<-if name=="buffer_apply_diff" then startDiffCall commands runtime (pure (Right ())) d name (object args) else fileTool core d name (object args)
             withAsync response $ \worker->do
               let await current=do
                     completed<-poll worker

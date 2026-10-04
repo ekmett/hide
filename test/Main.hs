@@ -17,6 +17,7 @@ import qualified RemoteTerminalCheck
 import qualified GuestAccessCheck
 import qualified StreamerCheck
 import qualified ClipboardMCPCheck
+import qualified TypedBufferDiffsCheck
 import qualified TypedBufferReadsCheck
 import qualified BufferReadsCheck
 import qualified WorkerDiffCheck
@@ -125,6 +126,7 @@ main = do
   GuestAccessCheck.checks
   StreamerCheck.checks
   ClipboardMCPCheck.checks
+  TypedBufferDiffsCheck.checks
   TypedBufferReadsCheck.checks
   BufferReadsCheck.checks
   WorkerDiffCheck.checks

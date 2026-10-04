@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 -- Capture actual editor commands over this checkout through the Metal frontend.
 -- Run from the repository root; see docs/contributing.md#documentation-screenshots.
+import Control.Concurrent.Async (withAsync)
 import Control.Monad (forM_, unless, when)
 import qualified Data.Map.Strict as M
 import Data.Aeson (object, (.=))
@@ -11,8 +12,9 @@ import qualified Data.Text.IO as TIO
 import Hide.Buffer (newBuffer, Selection(..), revision, contents, replaceSelection, bufferLineOffset, bufferLineChanges, bufferLineColumn, displayColumn, bufferLineCount)
 import Hide.BufferView (BufferView(SideBySideView))
 import Hide.Files (FileState(..))
-import Hide.MCPPermissions (withPermissionsAt, permissionCall, policyEffects)
-import Hide.WorkspaceFilesMCP (fileTools, fileTool)
+import Hide.MCPPermissions (withPermissionsAt, bufferEditor, tickPermissions, policyEffects)
+import Hide.WorkspaceFilesMCP (fileTools)
+import Hide.BufferDiffCommand (withBufferDiffCommands,bufferDiffTool)
 import qualified Graphics.Vty as V
 import System.Directory
 import System.Environment (getArgs, lookupEnv, setEnv, unsetEnv)
@@ -54,7 +56,7 @@ main = do
   setEnv "hide_datadir" root
   unsetEnv "THC_ROOT"
   setEnv "THC_EDIT_CAPTURE_EXIT" "1"
-  withDebugger $ \debugger -> withPermissionsAt (scratch </> "permissions.toml") fileTools $ \permissions -> do
+  withDebugger $ \debugger -> withPermissionsAt (scratch </> "permissions.toml") fileTools $ \permissions -> withBufferDiffCommands $ \diffCommands -> do
     let effects = policyEffects permissions (debuggerEffects debugger applyEffects)
         command = Driver.command effects
         key k mods = Driver.input effects (V.EvKey k mods)
@@ -133,8 +135,9 @@ main = do
           (Just w,Just doc) | first:rest<-take 6 (T.lines (contents (documentBuffer doc))) -> do
             let patch=T.unlines (["--- a/src/Hide/Buffer.hs","+++ b/src/Hide/Buffer.hs","@@ -1,6 +1,7 @@"] ++
                   ["-"<>first,"+{-# LANGUAGE MultiParamTypeClasses #-}","+{-# LANGUAGE OverloadedStrings #-}"] ++ map (" "<>) rest)
-            fst <$> permissionCall permissions (fileTool applyEffects) d "buffer_apply_diff"
+            (_,reply)<-bufferDiffTool diffCommands (bufferEditor permissions (pure (Right ()))) d "buffer_apply_diff"
               (object ["bufferId" .= bufferId w,"revision" .= revision (documentBuffer doc),"diff" .= patch])
+            withAsync reply $ \_->await "typed diff approval" (tickPermissions permissions) ((/=Nothing).dialog) d
           _ -> fail "Permission screenshot requires the open source buffer"
         shellBlockMenu d = do
           opened <- command Help (fst (handleEvent (V.EvResize 80 25) d {sideTree=Nothing}))
