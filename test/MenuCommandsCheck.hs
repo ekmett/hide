@@ -76,6 +76,7 @@ runChecks=withDocsCommands $ \docs->withRegistry $ \registry->withMenuCommands d
   opened<-run invoked extensionEffects
   check "transported extension installs independent Markdown and links" (maybe False (T.isInfixOf "Independent extension" . contents . documentBuffer) (activeDocument opened) && maybe False (not . null . documentLinks) (activeDocument opened))
   check "extension metadata cannot grant agent invocation" (case applyGuestInput packet (beginGuestInput initial) of Left _->True; _->False)
+  check "contributed Help has no generationless static menu route" (case parseEither parseInput (object ["type" .= ("menu"::T.Text),"command" .= ("hide.help.contents"::T.Text)]) of Left _->True; _->False)
   helpPacket<-either error pure (parseEither parseInput (object ["type" .= ("menu"::T.Text),"command" .= Plugin.menuName helpRef,"registry" .= Plugin.menuEpoch helpRef,"generation" .= Plugin.menuGeneration helpRef]))
   withMenuCommands docs $ \nextHost->do
     nextMetadata<-Plugin.menuSnapshot (menuContributions nextHost)
@@ -95,6 +96,10 @@ runChecks=withDocsCommands $ \docs->withRegistry $ \registry->withMenuCommands d
   check "ordered host retirement precedes late reply adoption" (activeDocument refused==Nothing && all ((/=extension) . Plugin.menuReference) (contributedMenus refused))
   (_,queuedOld)<-menuEffects host (\_ _->error "missing host") refused [InvokeMenu extension Plugin.HumanMenu]
   check "queued retired action has no document and explicit refusal" (activeDocument queuedOld==Nothing && "stale" `T.isInfixOf` status queuedOld)
+  retireMenuFromHost host helpRef
+  withdrawnHelp<-tickMenus host initial
+  check "retired Help fallback row paints unavailable" (not (menuCommandAvailable withdrawnHelp Help))
+  check "F1 cannot bypass retired Help through preview fallback" (null (snd (handleEvent (V.EvKey (V.KFun 1) []) withdrawnHelp)))
   entered<-newEmptyMVar
   finished<-newEmptyMVar
   blocked<-newEmptyMVar

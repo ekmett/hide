@@ -342,7 +342,8 @@ commandDescription cmd = case cmd of
   GitFetch -> "Fetch remote changes without changing the working tree."
   GitPull -> "Pull remote changes with a fast-forward-only update."
   GitMerge -> "Choose a branch to merge into the current branch."
-  RegisteredMenu reference _ -> "Run "<>Plugin.menuName reference<>"."
+  RegisteredMenu reference _ | Plugin.menuName reference=="hide.help.contents" -> "Open the read-only help document."
+                            | otherwise -> "Open the selected extension document."
   Disabled reason -> reason
 
 menuHelp :: Desktop -> Maybe Text
@@ -435,6 +436,7 @@ contributedCommand name epoch generation d=do
 commandEnabled :: Desktop -> Command -> Bool
 commandEnabled d cmd | dialogCommandAllowed cmd d = True
 commandEnabled d Download = browserFrontend d && maybe False ((==Nothing) . documentLabel) (activeDocument d)
+commandEnabled d Help | menusActive d = any ((=="hide.help.contents") . Plugin.menuName . Plugin.menuReference) (contributedMenus d)
 commandEnabled d (RegisteredMenu reference _) = dialog d==Nothing && any ((==reference) . Plugin.menuReference) (contributedMenus d)
 commandEnabled _ Disabled{} = False
 commandEnabled d SidebarMove{} = maybe False treeFocused (sideTree d)

@@ -240,7 +240,7 @@ protocolCommands = [cmd | (_,_,items)<-menus, MenuItem _ _ cmd<-items]
 -- Only named menu actions are remotely invocable through this route; no
 -- arbitrary Read input and no positional command identities.
 protocolMenuCommands :: [(T.Text,Command)]
-protocolMenuCommands = [(name,cmd) | cmd<-nub protocolCommands, Just name<-[commandIdentifier cmd]]
+protocolMenuCommands = [(name,cmd) | cmd<-nub protocolCommands, cmd/=Help, Just name<-[commandIdentifier cmd]]
 
 -- Browser-owned clipboard/search shortcuts use the same identities as menus.
 protocolBrowserCommands :: [(T.Text,Command)]
