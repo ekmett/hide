@@ -6,6 +6,8 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.ByteString as BS
 import Hide.RemoteWindow
+import Hide.Window (nativeMenuEvent)
+import qualified Hide.Model as Model
 #ifdef WITH_REMOTE
 import qualified Data.ByteString.Lazy as BL
 import Data.Aeson.Types (parseEither)
@@ -36,7 +38,8 @@ checks = do
   check "menu invocation uses its public identity" (remoteMenu enabledMenu 0==Just (object ["type" .= ("menu"::T.Text),"command" .= ("hide.file.new"::T.Text)]))
   check "invalid menu positions cannot alias the first command" (remoteMenu enabledMenu (-1)==Nothing && remoteMenu enabledMenu 10000==Nothing)
   check "disabled menu actions cannot be invoked" (remoteMenu (menuMeta ["menuCommands" .= (["hide.file.new"]::[T.Text]),"menuState" .= [("hide.file.new"::T.Text,False)]]) 0==Nothing)
-  check "native menus send names rather than positions" (nativeEventInput [11,0]==Just (object ["type" .= ("menu"::T.Text),"command" .= ("hide.file.new"::T.Text)]))
+  check "native menus resolve command tokens only in their current incarnation" (nativeMenuEvent 7 [11,0,7]==Just Model.New)
+  check "stale, unstamped and unknown native menu events cannot invoke" (all ((==Nothing) . nativeMenuEvent 8) [[11,0,7],[11,0],[11,-1,8],[11,10000,8]] && nativeEventInput [11,0,8]==Nothing)
   check "remote rows must match height" (not (valid (take 24 rows)))
   check "remote span overflow rejected" (not (valid (toJSON [(79::Int,0::Int,0::Int,[String "ab"])] : drop 1 rows)))
   check "remote colors bounded" (not (valid (toJSON [(0::Int,-1::Int,0::Int,[String "a"])] : drop 1 rows)))
@@ -44,7 +47,7 @@ checks = do
   check "remote invalid dimensions rejected" (either (const True) (const False) (parseRemoteFrame (object ["size" .= ([999999,25]::[Int])]) rows))
   check "Control bracket detaches locally" (remoteDetachShortcut [1,fromEnum ']',2] && nativeEventInput [1,fromEnum ']',2]==Nothing)
   check "other bracket shortcuts remain editor input" (all (not . remoteDetachShortcut . (\mods -> [1,fromEnum ']',mods])) [0,1,3,6,8])
-  check "native close requests checked remote quit" (nativeEventInput [6] == Just (object ["type" .= ("command"::T.Text),"command" .= ("quit"::T.Text)]))
+  check "native close requests checked remote quit" (nativeEventInput [6] == Just (object ["type" .= ("command"::T.Text),"command" .= ("hide.app.quit"::T.Text)]))
   check "offline closes detach without queuing remote quit" (remoteCloseDetaches False [6] && not (remoteCloseDetaches True [6]))
   check "offline user input is ignored" (all (not . remoteInputAllowed False) [[1,97,0],[2],[3,1,1,1,0,1],[11,0],[14]])
   check "offline zoom remains local" (remoteInputAllowed False [1,fromEnum '+',2] && remoteInputAllowed True [1,97,0])

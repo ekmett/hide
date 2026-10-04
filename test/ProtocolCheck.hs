@@ -73,7 +73,10 @@ checks = do
       back=fst (applyInput (BrowserCommand Find) filled)
       again=fst (applyInput (BrowserCommand Replace) back)
   check "browser Find and Replace commands switch tabs without losing text" (case dialog again of Just dg -> [value | Input _ value _<-fields dg]==["hello","world"]; _->False)
-  check "browser understands modern search and conversation commands" (and [parseEither parseInput (object ["type" .= ("command"::T.Text),"command" .= name])==Right (BrowserCommand cmd) | (name,cmd)<-[("replace"::T.Text,Replace),("conversation",Conversation),("newConversation",AgentNew)]])
+  check "browser understands modern search and conversation commands" (and [parseEither parseInput (object ["type" .= ("command"::T.Text),"command" .= name])==Right (BrowserCommand cmd) | (name,cmd)<-[("hide.search.replace"::T.Text,Replace),("hide.agents.conversation",Conversation),("hide.agents.new",AgentNew)]])
+  check "browser shortcut aliases are rejected" (all (either (const True) (const False) . parseEither parseInput . (\name->object ["type" .= ("command"::T.Text),"command" .= name])) (["copy","find","newConversation"]::[T.Text]))
+  let unavailable=initialDesktop (80,25)
+  check "queued native and browser menu checks share current availability" (not (menuCommandAvailable unavailable SplitVertical) && null (snd (applyInput (MenuCommand SplitVertical) unavailable)))
   let primary=selectConversationView "" "Primary" (initialDesktop (80,25))
       drafted=primary {composerBuffer=newBuffer "unsent",composerSelection=Selection 6 6}
       child=selectConversationView "child" "Worker" drafted

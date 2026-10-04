@@ -406,6 +406,17 @@ commandEnabled d cmd | cmd `elem` [GoToMessage,CopyAllMessages,NextMessage,Previ
 commandEnabled d Copy | problemsVisible d && problemsFocused d = not (null (diagnostics d))
 commandEnabled d cmd | problemsVisible d && problemsFocused d, cmd `elem` [Undo,Redo,Cut,Paste,SelectAll] = False
 commandEnabled _ _ = True
+-- | Shared current-state gate for menu invocations and frontend hints. Queued
+-- events must check this again when consumed; a painted enabled state is a hint.
+menuCommandAvailable :: Desktop -> Command -> Bool
+menuCommandAvailable d cmd = commandEnabled d cmd && canInvoke
+  where
+    canInvoke | dialogCommandAllowed cmd d = True
+              | cmd==Paste = not (maybe False treeFocused (sideTree d)) || dialog d/=Nothing
+              | otherwise = dialog d==Nothing && (activeWindow d/=Nothing ||
+                  (problemsVisible d && problemsFocused d && cmd==Copy) ||
+                  cmd `elem` [New,Open,ChangeDir,Quit,Help,About,Gallery,EditorOptions,RunTarget,RunOptions,OpenTerminal,StopTerminal,AgentOptions,Conversation,AgentCancel,AgentResume,AgentNew,AgentCopyRaw,ToggleTree,GitDiff,GitCommit,Problems,NextMessage,PreviousMessage,DebugCommand "downloads"])
+
 menuRect :: Desktop -> Int -> Rect
 menuRect d i = Rect (min x (max 0 (sw-w))) 1 w (length (menuItemsFor d i)+2)
   where x = fst (menuPositions !! i)
@@ -1627,7 +1638,7 @@ menuEvent ev (i,j) d = case ev of
   _ -> (d,[])
   where
     choose a b = let a' = a `mod` length menus in (d {menu = Just (a',b `mod` length (menuItemsFor d a'))},[])
-    invoke k = let MenuItem _ _ command = menuItemsFor d i !! k in runCommand command d
+    invoke k = let MenuItem _ _ command = menuItemsFor d i !! k in if menuCommandAvailable d command then runCommand command d else (d {menu=Nothing},[])
 
 menuAt :: Int -> Maybe Int
 menuAt x = findIndex (\(start,w) -> x >= start && x < start+w) menuPositions
