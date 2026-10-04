@@ -12,6 +12,7 @@
 -- as an interaction or redraw gate. Cached text work belongs to its worker.
 module Hide.Model where
 
+import qualified Hide.TextLayout as TextLayout
 import qualified Data.Bifunctor as Bifunctor
 import qualified Graphics.Vty as V
 import qualified Data.Text as T
@@ -101,6 +102,12 @@ data Window = Window
   , windowHexLow :: Bool, windowHexAscii :: Bool
   , windowNumber :: Int, bufferView :: BufferView, reviewSelection :: Maybe ReviewSelection, reviewSplit :: Int
   } deriving (Eq,Show)
+-- | Bounded source/payload identity for a prepared presentation snapshot.
+-- Plugin prepared values compare only their unique identity.
+data PresentationTarget = DocumentPresentation !Int !Int
+  | PluginPresentation !PluginWindow.WindowRef !PluginWindow.PreparedWindow deriving (Eq,Show)
+data WindowPresentation = WindowPresentation !PresentationTarget !Int !TextLayout.TextLayout deriving (Eq,Show)
+
 data Command = New | Open | Download | ChangeDir | Save | SaveAs | Close | Quit | Undo | Redo | Cut | Copy | Paste
   | Find | FindNext | FindPrevious | Replace | GoTo | SelectAll | Zoom | NextWindow | Cascade | Tile
   | OpenLink (Maybe FilePath) Text | SplitVertical | SplitHorizontal | ToggleTerminalPin | About | Help | EditorOptions | ChatInputOptions | Gallery
@@ -140,7 +147,7 @@ data LanguageAction = TypeInfo | FindDefinition | Completions | ShowProblems | R
 data Completion = Completion Text [(Int,Int,Text)] deriving (Eq,Show)
 data ProjectAction = LoadProject | ProjectPage Int Int | ProjectDetails Int Int deriving (Eq,Show)
 -- | Ordered requests for the host interpreter, produced alongside a new desktop.
-data Effect = SessionSidebarAction !SessionSidebarRequest | DebugSourceAction !DebugSourceRequest | RetirePluginWindow !PluginWindow.WindowRef | DebugSidebarAction !DebugSidebarRequest | AgentSidebarAction !AgentSidebarRequest | ReloadKeyBindings FilePath | InspectKeyBindings (Maybe (Bindings.BindingPlatform,Bindings.BindingContext)) (Maybe (Bindings.Bindings Command)) | FollowLink (Maybe FilePath) Text | FollowTreeLink [Tree.TreeHit] FilePath Text | EnvironmentAction Text [Text] | AutocompleteAction Text [Text] | SaveMacKeySymbols Bool | SaveChatSubmit ChatSubmit | SaveBufferViewDefault BufferView | ProjectRequest ProjectAction | DownloadDocument Int | ReadBrowserClipboard | WriteBrowserClipboard Text | LanguageRequest LanguageAction | RunGit GitAction | ReadMergeBranches | JumpTo FilePath Int Int | ReadPath FilePath | BrowsePath FilePath Text | BrowseDirectories FilePath | ChangeDirectory FilePath | OpenChoice FilePath Text Text | ReadTree FilePath | RefreshTree FilePath [Entry] | LoadTree TreeRequest Plugin.MenuOrigin | InvokeTree [Tree.TreeHit] CommandRef Plugin.MenuOrigin | ReadHelp | InvokeMenu Plugin.MenuRef Plugin.MenuOrigin (Maybe ContextTarget) | RefreshGit FilePath | ReadGitDiff | AskGitCommit | WriteGitCommit Text | SaveDocument Int (Maybe FilePath) (Maybe Command) | ReviewExternal | ResolveConflict Conflict ConflictAction | AgentAction Text [Text] | PermissionAction Text [Text] | DebugAction Text [Text] | SetScreenMode Int | Exit deriving (Eq,Show)
+data Effect = SessionSidebarAction !SessionSidebarRequest | DebugSourceAction !DebugSourceRequest | RetirePluginWindow !PluginWindow.WindowRef | DebugSidebarAction !DebugSidebarRequest | AgentSidebarAction !AgentSidebarRequest | ReloadKeyBindings FilePath | InspectKeyBindings (Maybe (Bindings.BindingPlatform,Bindings.BindingContext)) (Maybe (Bindings.Bindings Command)) | FollowLink (Maybe FilePath) Text | FollowTreeLink [Tree.TreeHit] FilePath Text | EnvironmentAction Text [Text] | AutocompleteAction Text [Text] | SaveWideSectionTitles Bool | SaveMacKeySymbols Bool | SaveChatSubmit ChatSubmit | SaveBufferViewDefault BufferView | ProjectRequest ProjectAction | DownloadDocument Int | ReadBrowserClipboard | WriteBrowserClipboard Text | LanguageRequest LanguageAction | RunGit GitAction | ReadMergeBranches | JumpTo FilePath Int Int | ReadPath FilePath | BrowsePath FilePath Text | BrowseDirectories FilePath | ChangeDirectory FilePath | OpenChoice FilePath Text Text | ReadTree FilePath | RefreshTree FilePath [Entry] | LoadTree TreeRequest Plugin.MenuOrigin | InvokeTree [Tree.TreeHit] CommandRef Plugin.MenuOrigin | ReadHelp | InvokeMenu Plugin.MenuRef Plugin.MenuOrigin (Maybe ContextTarget) | RefreshGit FilePath | ReadGitDiff | AskGitCommit | WriteGitCommit Text | SaveDocument Int (Maybe FilePath) (Maybe Command) | ReviewExternal | ResolveConflict Conflict ConflictAction | AgentAction Text [Text] | PermissionAction Text [Text] | DebugAction Text [Text] | SetScreenMode Int | Exit deriving (Eq,Show)
 data Field = Input Text Text Int | SelectedInput Text Text Selection | ComboBox Text [Text] Int (Maybe Int) | CheckBox Text Bool | Radio Text [Text] Int | ListBox Text [Text] Int | FileList [Entry] Int
   | ReadOnly Text Text
   | TextArea Text Bool Buffer Selection Int Int deriving (Eq,Show)
@@ -222,6 +229,7 @@ data Desktop = Desktop
   , keyBindings :: M.Map (Bindings.BindingPlatform,Bindings.BindingContext) (Bindings.Bindings Command)
   , contributedMenus :: [Plugin.MenuItem], agentMenuRefs :: [Plugin.MenuRef], menusActive :: Bool
   , contextTarget :: Maybe ContextTarget
+  , wideSectionTitles :: !Bool, windowPresentations :: M.Map Int WindowPresentation
   , diagnosticsGeneration :: !Integer
   } deriving (Eq,Show)
 
@@ -541,7 +549,7 @@ menuRect d i = Rect (min x (max 0 (sw-w))) 1 w (length (menuItemsFor d i)+2)
         w = min sw (maximum [keyLabelWidth t + keyLabelWidth (menuShortcut d entry) + 5 + (case command of SetBufferView _ -> 4; _ -> 0) | entry@(MenuItem t _ command) <- menuItemsFor d i])
 
 initialDesktop :: (Int,Int) -> Desktop
-initialDesktop size = Desktop size [] M.empty M.empty S.empty 1 Nothing Nothing Nothing "" Nothing False Nothing "" Nothing "" Nothing "" False Nothing Nothing Nothing "" Nothing Nothing Nothing [] False 0 0 False Nothing 0 0 Nothing SourceContext Nothing (newBuffer "") (Selection 0 0) True False False 0 True False False False Nothing Nothing [] 8 Nothing [] False SystemMode True [] Nothing [] Nothing [] False Nothing "" M.empty False (0,Nothing) [] Nothing CurrentView QuerySubmit Nothing 0 M.empty Nothing False (newBuffer "") (Selection 0 0) True False M.empty [] [] False Nothing 0
+initialDesktop size = Desktop size [] M.empty M.empty S.empty 1 Nothing Nothing Nothing "" Nothing False Nothing "" Nothing "" Nothing "" False Nothing Nothing Nothing "" Nothing Nothing Nothing [] False 0 0 False Nothing 0 0 Nothing SourceContext Nothing (newBuffer "") (Selection 0 0) True False False 0 True False False False Nothing Nothing [] 8 Nothing [] False SystemMode True [] Nothing [] Nothing [] False Nothing "" M.empty False (0,Nothing) [] Nothing CurrentView QuerySubmit Nothing 0 M.empty Nothing False (newBuffer "") (Selection 0 0) True False M.empty [] [] False Nothing False M.empty 0
 
 activeWindow :: Desktop -> Maybe Window
 activeWindow d = listToMaybe (filter (windowVisible d) (windows d))
@@ -696,7 +704,7 @@ ensureVisible d = case (activeWindow d, activeDocument d) of
   (Just w, Just doc) -> modifyActive (const w { scrollRow = max 0 row', scrollColumn = max 0 col' }) d
     where
       b = documentBuffer doc
-      (row,dc) = windowCursorCell b w
+      (row,dc) = windowCaretCell d doc w
       rows = max 1 (windowContentRows d doc w); cols = max 1 (if bufferView w==SideBySideView then snd (reviewPaneWidths w) else width (bounds w)-2)
       paneOffset=if bufferView w==SideBySideView then fst (reviewPaneWidths w)+1 else 0
       textColumn=dc-paneOffset
@@ -709,7 +717,7 @@ ensureVisible d = case (activeWindow d, activeDocument d) of
 ensureVisibleAfterLayout :: Desktop -> Desktop -> Desktop
 ensureVisibleAfterLayout before after = case (activeWindow after,activeDocument after) of
   (Just current,Just doc) | Just previous<-find ((==windowId current).windowId) (windows before) ->
-    let (row,column)=windowCursorCell (documentBuffer doc) previous
+    let (row,column)=windowCaretCell before doc previous
         textColumn=column-if bufferView previous==SideBySideView then fst (reviewPaneWidths previous)+1 else 0
         columns=max 1 (if bufferView previous==SideBySideView then snd (reviewPaneWidths previous) else width (bounds previous)-2)
         rowVisible=row>=scrollRow previous && row<scrollRow previous+windowContentRows before doc previous
@@ -871,9 +879,8 @@ linkAt x y d=do
       row=y-t-1+scrollRow w
       col=x-l-1+scrollColumn w
       b=documentBuffer doc
-      text=bufferLineAt b row
-      position=bufferLineOffset b row+columnOffset text col
-  if x<=l || x>=l+ww-1 || y<=t || y>=t+1+windowContentRows d doc w || row>=bufferLineCount b || col>=displayColumn text (T.length text)
+      position=windowTextOffset d w (bufferContent b) row col
+  if x<=l || x>=l+ww-1 || y<=t || y>=t+1+windowContentRows d doc w || row>=windowTextRows d w (bufferContent b) || col>=windowTextRowWidth d w (bufferContent b) row
     then Nothing else do
       (_,_,url)<-find (\(start,end,_)->position>=start && position<end) (documentLinks doc)
       pure (OpenLink (documentMarkdownPath doc) url)
@@ -886,8 +893,8 @@ shellBlockAt x y d=do
   let b=documentBuffer doc
       row=y-top (bounds w)-1+scrollRow w
       col=x-left (bounds w)-1+scrollColumn w
-      position=bufferLineOffset b row+columnOffset (bufferLineAt b row) col
-  if byteMode b || windowChangeView b w || row>=bufferLineCount b then Nothing else do
+      position=windowTextOffset d w (bufferContent b) row col
+  if byteMode b || windowChangeView b w || row>=windowTextRows d w (bufferContent b) then Nothing else do
     block<-find (\(start,end,_,raw)->position>=start && position<end && not (T.null (T.strip raw))) (documentShellBlocks doc)
     bid<-bufferId w
     pure (ExecuteShellBlock bid block)
@@ -1090,7 +1097,7 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
     go EditorOptions d = (prompt "Preferences" Settings
       ([Radio "Key bindings" ["Modern","WordStar"] (if wordStar d then 1 else 0)] ++
        [Radio "Screen size" ["Mode 3 (80x25)","Mode 259 (80x50)"] (if mode == 259 then 1 else 0) | Just mode <- [videoMode d]] ++
-       [Radio "Appearance" ["Light","Dark","System"] (fromEnum (appearance d)),CheckBox "Blinking cursor" (blinkCursor d),CheckBox "Streamer mode" (streamerMode d)] ++
+       [Radio "Appearance" ["Light","Dark","System"] (fromEnum (appearance d)),CheckBox "Wide section titles" (wideSectionTitles d),CheckBox "Blinking cursor" (blinkCursor d),CheckBox "Streamer mode" (streamerMode d)] ++
        [CheckBox "Mac key symbols" (macKeySymbols d) | videoMode d==Nothing] ++
        [field | videoMode d/=Nothing,field<-[CheckBox "CRT filter" (crtFilter d),CheckBox "Pixelate Unicode" (pixelateUnicode d)]]) d,[])
     go (AutocompleteCommand action) d = (d,[AutocompleteAction action []])
@@ -1863,8 +1870,7 @@ conversationClick x y w d=do
   doc<-windowDocument (buffers d) w
   let row=y-top (bounds w)-1+scrollRow w
       b=documentBuffer doc
-      column=columnOffset (bufferLineAt b row) (x-left (bounds w)-1+scrollColumn w)
-      offset=bufferLineOffset b row+column
+      offset=windowTextOffset d w (bufferContent b) row (x-left (bounds w)-1+scrollColumn w)
   if y<=top (bounds w) || y>=top (composerRect d w) || x<=left (bounds w) || x>=left (bounds w)+width (bounds w)-1 then Nothing
   else case find (\(a,z,_,_)->offset>=a && offset<z) (chatActions d) of
     Just (start,_,action,values) -> Just (AgentAction action (values++[T.pack (show (max 0 (offset-start-7))) | action=="question-input"]))
@@ -2386,8 +2392,8 @@ scrollbarRect d vertical doc w
   where Rect x y ww hh=bounds w
 
 scrollbarLimit :: Desktop -> Bool -> Document -> Window -> Int
-scrollbarLimit d vertical doc w = max 0 (if vertical then documentRows doc w-max 1 (windowContentRows d doc w)
-  else windowDocumentWidth doc w-max 1 (if bufferView w==SideBySideView then min (fst (reviewPaneWidths w)) (snd (reviewPaneWidths w)) else width (bounds w)-2)+(if byteMode (documentBuffer doc) then 0 else 1))
+scrollbarLimit d vertical doc w = max 0 (if vertical then (case windowPresentation d w of Just layout->Vec.length (TextLayout.layoutRows layout); Nothing->documentRows doc w)-max 1 (windowContentRows d doc w)
+  else (case windowPresentation d w of Just layout->TextLayout.layoutWidth layout; Nothing->windowDocumentWidth doc w)-max 1 (if bufferView w==SideBySideView then min (fst (reviewPaneWidths w)) (snd (reviewPaneWidths w)) else width (bounds w)-2)+(if byteMode (documentBuffer doc) then 0 else 1))
 
 -- Each split chooses its own layout. Keep the byte viewport and a visible caret
 -- anchored when resizing or docking Files changes the number of bytes per row.
@@ -2411,7 +2417,7 @@ scrollbarThumb len limit position = 1+min limit (max 0 position)*max 0 (len-3) `
 
 changeScroll :: Bool -> Int -> Desktop -> Desktop
 changeScroll vertical delta d | Just view<-activePluginWindow d =
-  modifyActive (\w->if vertical then w {scrollRow=max 0 (min (max 0 (contentLineCount (PluginWindow.preparedWindowText view)-height (bounds w)+2)) (scrollRow w+delta))}
+  modifyActive (\w->if vertical then w {scrollRow=max 0 (min (max 0 (windowTextRows d w (PluginWindow.preparedWindowText view)-height (bounds w)+2)) (scrollRow w+delta))}
     else w {scrollColumn=max 0 (scrollColumn w+delta)}) d
 changeScroll vertical delta d = case (activeWindow d,activeDocument d) of
   (Just w,Just doc) -> let value=max 0 (min (scrollbarLimit d vertical doc w) ((if vertical then scrollRow w else scrollColumn w)+delta))
@@ -2444,9 +2450,9 @@ scrollTrack vertical x y d = case (activeWindow d,activeDocument d) of
 selectAt :: Bool -> Int -> Int -> Desktop -> Desktop
 selectAt extend x y d | Just view<-activePluginWindow d,Just w<-activeWindow d =
   let text=PluginWindow.preparedWindowText view
-      row=max 0 (min (contentLineCount text-1) (y-top (bounds w)-1+scrollRow w))
+      row=max 0 (min (windowTextRows d w text-1) (y-top (bounds w)-1+scrollRow w))
       col=max 0 (x-left (bounds w)-1+scrollColumn w)
-      pos=contentLineOffset text row+columnOffset (contentLineAt text row) col
+      pos=windowTextOffset d w text row col
   in pluginMoveTo extend pos d
 selectAt extend x y d = case activeWindow d of
   Nothing -> d
@@ -2461,39 +2467,40 @@ selectAt extend x y d = case activeWindow d of
                          in modifyActive (\v -> v {selection=live,reviewSelection=Just (ReviewSelection (revision b) (bufferLineChanges b) side (Selection start pos))}) d
   Just w -> moveTo extend pos d where
     b = maybe (newBuffer "") documentBuffer (activeDocument d)
-    row = max 0 (min (bufferLineCount b-1) (y-top (bounds w)-1+scrollRow w))
+    row = max 0 (min (windowTextRows d w (bufferContent b)-1) (y-top (bounds w)-1+scrollRow w))
     col = max 0 (x-left (bounds w)-1+scrollColumn w)
-    pos = bufferLineOffset b row + columnOffset (bufferLineAt b row) col
+    pos = case activeWindow d of Just w->windowTextOffset d w (bufferContent b) row col; Nothing->0
 
 -- | Read-only semantic text navigation; printable keys cannot edit a source behind it.
 pluginKey :: V.Key -> [V.Modifier] -> Desktop -> Desktop
 pluginKey key mods d | Just view<-activePluginWindow d,Just w<-activeWindow d =
   let text=PluginWindow.preparedWindowText view
       pos=caret (selection w)
-      (row,col)=contentPosition text pos
-      vertical delta=let next=max 0 (min (contentLineCount text-1) (row+delta))
-                     in contentLineOffset text next+columnOffset (contentLineAt text next) col
+      (row,col)=windowTextPosition d w text pos
+      (sourceRow,_)=contentPosition text pos
+      vertical delta=let next=max 0 (min (windowTextRows d w text-1) (row+delta))
+                     in windowTextOffset d w text next col
       extend=V.MShift `elem` mods
       move target=pluginMoveTo extend target d
   in case key of
-    V.KLeft->move (if pos==contentLineOffset text row then max 0 (pos-1)
-      else contentLineOffset text row+previousCharacter (contentLineAt text row) (pos-contentLineOffset text row))
-    V.KRight->move (if pos>=contentLineOffset text row+T.length (contentLineAt text row) then min (contentLength text) (pos+1)
-      else contentLineOffset text row+nextCharacter (contentLineAt text row) (pos-contentLineOffset text row))
+    V.KLeft->move (if pos==contentLineOffset text sourceRow then max 0 (pos-1)
+      else contentLineOffset text sourceRow+previousCharacter (contentLineAt text sourceRow) (pos-contentLineOffset text sourceRow))
+    V.KRight->move (if pos>=contentLineOffset text sourceRow+T.length (contentLineAt text sourceRow) then min (contentLength text) (pos+1)
+      else contentLineOffset text sourceRow+nextCharacter (contentLineAt text sourceRow) (pos-contentLineOffset text sourceRow))
     V.KUp->move (vertical (-1))
     V.KDown->move (vertical 1)
     V.KPageUp->move (vertical (negate (max 1 (height (bounds w)-2))))
     V.KPageDown->move (vertical (max 1 (height (bounds w)-2)))
-    V.KHome->move (if V.MCtrl `elem` mods then 0 else contentLineOffset text row)
-    V.KEnd->move (if V.MCtrl `elem` mods then contentLength text else contentLineOffset text row+T.length (contentLineAt text row))
+    V.KHome->move (if V.MCtrl `elem` mods then 0 else windowTextOffset d w text row 0)
+    V.KEnd->move (if V.MCtrl `elem` mods then contentLength text else windowTextOffset d w text row maxBound)
     _->d
 pluginKey _ _ d=d
 
 pluginMoveTo :: Bool -> Int -> Desktop -> Desktop
-pluginMoveTo extend requested d | Just view<-activePluginWindow d =
+pluginMoveTo extend requested d | Just view<-activePluginWindow d, Just w<-activeWindow d =
   let text=PluginWindow.preparedWindowText view
       pos=max 0 (min (contentLength text) requested)
-      (row,col)=contentPosition text pos
+      (row,col)=windowTextPosition d w text pos
       update w=w {selection=Selection (if extend then anchor (selection w) else pos) pos,
       scrollRow=max 0 (min row (max (scrollRow w) (row-height (bounds w)+3))),
       scrollColumn=max 0 (min col (max (scrollColumn w) (col-width (bounds w)+3)))}
@@ -2509,6 +2516,68 @@ contentPosition text pos=(row,displayColumn (contentLineAt text row) (pos-conten
                      | contentLineOffset text middle<=pos=findRow middle high
                      | otherwise=findRow low (middle-1)
       where middle=(low+high+1) `div` 2
+
+-- | Capture only identity/version metadata; styled payloads stay on the worker.
+windowPresentationTarget :: Desktop -> Window -> Maybe PresentationTarget
+windowPresentationTarget d w=case windowContent w of
+  PluginContent reference->do
+    prepared<-M.lookup reference (pluginWindows d)
+    if PluginWindow.preparedWindowHasSections prepared then Just (PluginPresentation reference prepared) else Nothing
+  SourceContent bid->do
+    doc<-M.lookup bid (buffers d)
+    if bufferView w/=CurrentView || byteMode (documentBuffer doc) || syntaxDocument doc || null (documentHighlight doc) ||
+       not (documentLabel doc `elem` [Just "Haskell Help",Just "Conversation"] || documentMarkdownPath doc/=Nothing) then Nothing
+    else Just (DocumentPresentation bid (revision (documentBuffer doc)))
+
+-- | A layout is usable only for this exact payload, width and live preference.
+-- Pending resize/replacement views use ordinary geometry until matching adoption.
+windowPresentation :: Desktop -> Window -> Maybe TextLayout.TextLayout
+windowPresentation d w
+  | not (wideSectionTitles d)=Nothing
+  | otherwise=do
+      WindowPresentation target columns layout<-M.lookup (windowId w) (windowPresentations d)
+      current<-windowPresentationTarget d w
+      if target==current && columns==max 1 (width (bounds w)-2) then Just layout else Nothing
+
+windowTextPosition :: Desktop -> Window -> BufferContent -> Int -> (Int,Int)
+windowTextPosition d w text pos=maybe (contentPosition text pos) (\layout->TextLayout.layoutPosition layout pos) (windowPresentation d w)
+
+windowTextOffset :: Desktop -> Window -> BufferContent -> Int -> Int -> Int
+windowTextOffset d w text row column=case windowPresentation d w of
+  Just layout->TextLayout.layoutOffset layout row column
+  Nothing->let line=max 0 (min (contentLineCount text-1) row)
+           in contentLineOffset text line+columnOffset (contentLineAt text line) column
+
+-- | Preserve the semantic viewport top when prepared geometry adopts or a
+-- preference disables it. Only measured source maps and scalar identities are
+-- compared; manual browsing never becomes an implicit caret-follow operation.
+reprojectWindowPresentations :: Desktop -> Desktop -> Desktop
+reprojectWindowPresentations before after=after {windows=map reposition (windows after)}
+  where
+    reposition w
+      | Just previous<-find ((==windowId w).windowId) (windows before)
+      , windowPresentationTarget before previous==windowPresentationTarget after w
+      , windowPresentation before previous/=windowPresentation after w
+      , Just text<-case windowContent w of
+          SourceContent bid->bufferContent . documentBuffer <$> M.lookup bid (buffers after)
+          PluginContent reference->PluginWindow.preparedWindowText <$> M.lookup reference (pluginWindows after)
+      = let offset=windowTextOffset before previous text (scrollRow previous) (scrollColumn previous)
+            (row,column)=windowTextPosition after w text offset
+        in w {scrollRow=max 0 row,scrollColumn=max 0 column}
+      | otherwise=w
+
+windowTextRows :: Desktop -> Window -> BufferContent -> Int
+windowTextRows d w text=maybe (contentLineCount text) (Vec.length . TextLayout.layoutRows) (windowPresentation d w)
+
+windowCaretCell :: Desktop -> Document -> Window -> (Int,Int)
+windowCaretCell d doc w=case windowPresentation d w of
+  Just layout->TextLayout.layoutPosition layout (caret (selection w))
+  Nothing->windowCursorCell (documentBuffer doc) w
+
+windowTextRowWidth :: Desktop -> Window -> BufferContent -> Int -> Int
+windowTextRowWidth d w text row=case windowPresentation d w of
+  Just layout->maybe 0 TextLayout.layoutRowWidth (TextLayout.layoutRows layout Vec.!? row)
+  Nothing->let line=contentLineAt text row in displayColumn line (T.length line)
 
 -- | Choose the current focused input owner using only small focus metadata.
 -- Captured gestures, popups and human question/completion controls retain priority.
@@ -2615,8 +2684,8 @@ editorKey key mods d = case key of
   V.KDown -> vertical 1
   V.KPageUp -> vertical (negate page)
   V.KPageDown -> vertical page
-  V.KHome -> move (if ctrl then 0 else start)
-  V.KEnd -> move (if ctrl then bufferLength b else start+T.length (bufferLineAt b row))
+  V.KHome -> move (if ctrl then 0 else visualEdge 0 start)
+  V.KEnd -> move (if ctrl then bufferLength b else visualEdge maxBound (start+T.length (bufferLineAt b row)))
   V.KBS -> erase (if ctrl then wordLeft t p else bufferPreviousCharacter b p) p
   V.KDel -> erase p (if ctrl then wordRight t p else bufferNextCharacter b p)
   V.KEnter -> insertText (bufferNewline b) d
@@ -2631,8 +2700,14 @@ editorKey key mods d = case key of
     ctrl = V.MCtrl `elem` mods; shift = V.MShift `elem` mods
     page = maybe 10 (\w -> max 1 (height (bounds w)-3)) (activeWindow d)
     move = (\q -> moveTo shift q d)
-    vertical delta = let r = max 0 (min (bufferLineCount b-1) (row+delta))
-                    in move (bufferLineOffset b r+columnOffset (bufferLineAt b r) (displayColumn (bufferLineAt b row) col))
+    visualEdge column fallback=case activeWindow d of
+      Just w | Just layout<-windowPresentation d w->let (r,_)=TextLayout.layoutPosition layout p in TextLayout.layoutOffset layout r column
+      _->fallback
+    vertical delta = case activeWindow d of
+      Just w | Just layout<-windowPresentation d w -> let (r,c)=TextLayout.layoutPosition layout p
+        in move (TextLayout.layoutOffset layout (max 0 (min (Vec.length (TextLayout.layoutRows layout)-1) (r+delta))) c)
+      _->let r = max 0 (min (bufferLineCount b-1) (row+delta))
+         in move (bufferLineOffset b r+columnOffset (bufferLineAt b r) (displayColumn (bufferLineAt b row) col))
     erase a z = let s = if anchor sel/=caret sel then sel else Selection a z
                 in editActive (\_ -> replaceSelection s "") (Just (fst (ordered s))) d
 
@@ -2944,12 +3019,13 @@ submitDialog button dg original
     AutocompleteDialog action -> (d,[AutocompleteAction action (T.pack (show button):values++[if enabled then "true" else "false" | CheckBox _ enabled<-fields dg])])
     ChatInputSettings -> let chosen=if any (\f -> case f of Radio "Enter action" _ 1 -> True; _ -> False) (fields dg) then SteerSubmit else QuerySubmit
                          in (d {chatSubmit=chosen},[SaveChatSubmit chosen])
-    Settings -> (d {macKeySymbols=fromMaybe (macKeySymbols d) (listToMaybe [value | CheckBox "Mac key symbols" value<-fields dg]),wordStar=any (\f -> case f of Radio "Key bindings" _ 1 -> True; _ -> False) (fields dg),
+    Settings -> (reprojectWindowPresentations d d {wideSectionTitles=fromMaybe (wideSectionTitles d) (listToMaybe [value | CheckBox "Wide section titles" value<-fields dg]),macKeySymbols=fromMaybe (macKeySymbols d) (listToMaybe [value | CheckBox "Mac key symbols" value<-fields dg]),wordStar=any (\f -> case f of Radio "Key bindings" _ 1 -> True; _ -> False) (fields dg),
       appearance=fromMaybe (appearance d) (listToMaybe [toEnum (max 0 (min 2 value)) | Radio "Appearance" _ value<-fields dg]),
       streamerMode=fromMaybe (streamerMode d) (listToMaybe [value | CheckBox "Streamer mode" value<-fields dg]),
       blinkCursor=fromMaybe (blinkCursor d) (listToMaybe [value | CheckBox "Blinking cursor" value<-fields dg]),
       pixelateUnicode=fromMaybe (pixelateUnicode d) (listToMaybe [value | CheckBox "Pixelate Unicode" value<-fields dg]),
       crtFilter=fromMaybe (crtFilter d) (listToMaybe [value | CheckBox "CRT filter" value<-fields dg]),status="Preferences updated."},
+      [SaveWideSectionTitles value | CheckBox "Wide section titles" value<-fields dg,value/=wideSectionTitles d] ++
       [SaveMacKeySymbols value | CheckBox "Mac key symbols" value<-fields dg,value/=macKeySymbols d] ++
       [SetScreenMode mode | Radio "Screen size" _ chosen <- fields dg,
        let mode = if chosen == 1 then 259 else 3, Just mode /= videoMode d])

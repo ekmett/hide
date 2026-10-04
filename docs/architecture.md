@@ -80,7 +80,10 @@ user-facing conflict choices.
 Vty is the common rendering representation. Native windows draw bitmap tiles
 and system-shaped fallback text; the browser draws the same grid with WebGL
 and canvas-shaped fallback. Text terminals provide their own glyph rendering.
-Grapheme segmentation and cell widths use utf8proc.
+Grapheme segmentation and cell widths use utf8proc. Vty bold/italic attributes
+project to shared `TextStyle` paint metadata and strict cell-frame span flags.
+Native and browser glyph cache keys include these traits; the remote terminal
+reconstructs the original attributes. Traits do not change grapheme advances.
 
 The native Pixelate Unicode path shapes at four-times resolution, filters in
 linear light and applies Floyd–Steinberg error diffusion to four coverage

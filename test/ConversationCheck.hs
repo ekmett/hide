@@ -567,7 +567,7 @@ checks = (composerCodeChecks >>) $ bracket temporary removePathForcibly $ \root 
       check "conversation renders streamed Markdown" ("Hello" `T.isInfixOf` conversationText streamed && not ("**bold" `T.isInfixOf` conversationText streamed))
       check "conversation omits speaker headings and session banner once chatting"
         (not (any (`elem` T.lines (conversationText streamed)) ["You","Agent"]) && not ("Session:" `T.isInfixOf` conversationText streamed))
-      check "conversation preserves Markdown styling" (any ((==BubbleText 1 False Keyword).snd) (conversationHighlight streamed))
+      check "conversation preserves Markdown styling" (any ((==BubbleText 1 False (BoldStyle Keyword)).snd) (conversationHighlight streamed))
       check "tool update merges pending record" (T.count "[completed] Local tool" (conversationText streamed)==1 && not ("[pending] Local tool" `T.isInfixOf` conversationText streamed))
       check "tool activity starts collapsed without raw arguments" (not ("rawInput" `T.isInfixOf` conversationText streamed) && "▸" `T.isInfixOf` conversationText streamed)
       let activityAction=case [values | (_,_,name,values)<-chatActions streamed,name=="toggle-activity"] of values:_->values; _->error "missing activity action"
@@ -941,6 +941,8 @@ checks = (composerCodeChecks >>) $ bracket temporary removePathForcibly $ \root 
             sent row=any (\(_,style)->case style of BubbleText _ True _->True; _->False) row
             received row=any (\(_,style)->case style of BubbleText _ False _->True; _->False) row
             columnsOf row=let text=T.pack (map fst row) in displayColumn text (T.length text)
+        check "live conversation publication advances source-map revision"
+          (revision (documentBuffer doc)>maybe (-1) (revision . documentBuffer) (activeDocument answered))
         check "resize then Zoom anchors live user bubbles at the right window edge"
           (not (null (filter sent rows)) && all ((==available).columnsOf) (filter sent rows))
         check "resize then Zoom lets long live replies span the available window"

@@ -26,7 +26,7 @@ import System.FilePath ((</>),takeDirectory,takeExtension,isAbsolute,normalise)
 import System.Info (os)
 import System.IO (withBinaryFile,IOMode(ReadMode),hFileSize,openBinaryTempFile,hClose)
 import System.Process (createProcess,proc,waitForProcess,CreateProcess(..),StdStream(NoStream))
-import Hide.Buffer (Selection(..),bufferLength)
+import Hide.Buffer (Buffer(revision),Selection(..),bufferLength)
 import Hide.LSP (uriFilePath)
 import Hide.Markdown (renderMarkdownWithShellBlocks)
 import Hide.Model
@@ -109,7 +109,7 @@ applyLink (LinkExternal notice packet) d=(d {status=notice},packet)
 applyLink (LinkDocument doc row path) d=
   let opened=addHelp "" d
       installed=case activeWindow opened of
-        Just w | Just bid<-bufferId w->opened {buffers=M.insert bid doc (buffers opened)}
+        Just w | Just bid<-bufferId w,Just previous<-M.lookup bid (buffers opened)->opened {buffers=M.insert bid doc {documentBuffer=(documentBuffer doc) {revision=revision (documentBuffer previous)}} (buffers opened)}
         _->opened
       positioned=modifyActive (\w->w {scrollRow=row,scrollColumn=0,selection=Selection 0 0}) installed
   in (positioned {status=T.pack path},Nothing)

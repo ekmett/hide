@@ -5,7 +5,7 @@
 -- styles. A tokenizer result is accepted only when it preserves the original
 -- characters exactly. Link and bubble annotations remain in the styled stream
 -- so later layout can retain interaction metadata without reparsing text.
-module Hide.Syntax (Style(..), highlight, highlightFor, bubbleTile, linkSpans) where
+module Hide.Syntax (Style(..), fontTraits, sectionTitle, highlight, highlightFor, bubbleTile, linkSpans) where
 
 import Data.List (intercalate)
 import qualified Data.List as List
@@ -16,7 +16,7 @@ import qualified Skylighting as S
 import System.FilePath (takeFileName)
 
 -- | Token color intent plus nested prose, link, bubble or terminal annotations.
-data Style = LinkStyle T.Text Style | Plain | Heading Int | CodeStyle Bool Style | ProseStyle Style | Keyword | Comment | Literal | Number | Constructor | Pragma | BubbleStyle Bool Style | BubbleText Int Bool Style | TerminalStyle Word32 Word32 Word32 deriving (Eq,Show)
+data Style = SectionStyle Int Style | BoldStyle Style | ItalicStyle Style | LinkStyle T.Text Style | Plain | Heading Int | CodeStyle Bool Style | ProseStyle Style | Keyword | Comment | Literal | Number | Constructor | Pragma | BubbleStyle Bool Style | BubbleText Int Bool Style | TerminalStyle Word32 Word32 Word32 deriving (Eq,Show)
 
 highlight :: T.Text -> [(Char,Style)]
 highlight = highlightFor "Main.hs"
@@ -59,6 +59,9 @@ bubbleTile graphical n
 linkSpans :: [(Char,Style)] -> [(Int,Int,T.Text)]
 linkSpans = reverse . snd . List.foldl' collect (0,[])
   where
+    target (SectionStyle _ s)=target s
+    target (BoldStyle s)=target s
+    target (ItalicStyle s)=target s
     target (LinkStyle url _)=Just url
     target (ProseStyle s)=target s
     target (BubbleText _ _ s)=target s
@@ -69,3 +72,30 @@ linkSpans = reverse . snd . List.foldl' collect (0,[])
       Just url->case found of
         (start,end,old):rest | end==offset && url==old -> (start,offset+1,url):rest
         _->(offset,offset+1,url):found)
+
+-- | Separate composable font traits while retaining color/link/bubble semantics.
+-- Combining bold and italic is idempotent; wrapper order does not affect traits.
+fontTraits :: Style -> (Style,Bool,Bool)
+fontTraits (SectionStyle level style)=wrap (SectionStyle level) style
+fontTraits (BoldStyle style)=let (base,_,italic)=fontTraits style in (base,True,italic)
+fontTraits (ItalicStyle style)=let (base,bold,_)=fontTraits style in (base,bold,True)
+fontTraits (LinkStyle target style)=wrap (LinkStyle target) style
+fontTraits (CodeStyle shell style)=wrap (CodeStyle shell) style
+fontTraits (ProseStyle style)=wrap ProseStyle style
+fontTraits (BubbleStyle outgoing style)=wrap (BubbleStyle outgoing) style
+fontTraits (BubbleText offset outgoing style)=wrap (BubbleText offset outgoing) style
+fontTraits style=(style,False,False)
+wrap :: (Style -> Style) -> Style -> (Style,Bool,Bool)
+wrap constructor style=let (base,bold,italic)=fontTraits style in (constructor base,bold,italic)
+
+-- | A CommonMark section-heading annotation, distinct from token colors and
+-- table headers. Nested font/link/bubble wrappers preserve section ownership.
+sectionTitle :: Style -> Bool
+sectionTitle SectionStyle{}=True
+sectionTitle (BoldStyle style)=sectionTitle style
+sectionTitle (ItalicStyle style)=sectionTitle style
+sectionTitle (LinkStyle _ style)=sectionTitle style
+sectionTitle (ProseStyle style)=sectionTitle style
+sectionTitle (BubbleStyle _ style)=sectionTitle style
+sectionTitle (BubbleText _ _ style)=sectionTitle style
+sectionTitle _=False
