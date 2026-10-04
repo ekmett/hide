@@ -121,7 +121,7 @@ data LanguageAction = TypeInfo | FindDefinition | Completions | ShowProblems | R
 data Completion = Completion Text [(Int,Int,Text)] deriving (Eq,Show)
 data ProjectAction = LoadProject | ProjectPage Int Int | ProjectDetails Int Int deriving (Eq,Show)
 -- | Ordered requests for the host interpreter, produced alongside a new desktop.
-data Effect = ReloadKeyBindings FilePath | InspectKeyBindings (Maybe Bindings.BindingContext) (Maybe (Bindings.Bindings Command)) | FollowLink (Maybe FilePath) Text | EnvironmentAction Text [Text] | AutocompleteAction Text [Text] | SaveMacKeySymbols Bool | SaveChatSubmit ChatSubmit | SaveBufferViewDefault BufferView | ProjectRequest ProjectAction | DownloadDocument Int | ReadBrowserClipboard | WriteBrowserClipboard Text | LanguageRequest LanguageAction | RunGit GitAction | ReadMergeBranches | JumpTo FilePath Int Int | ReadPath FilePath | BrowsePath FilePath Text | BrowseDirectories FilePath | ChangeDirectory FilePath | OpenChoice FilePath Text Text | ReadTree FilePath | ExpandTree Int | ReadHelp | InvokeMenu Plugin.MenuRef Plugin.MenuOrigin | RefreshGit FilePath | ReadGitDiff | AskGitCommit | WriteGitCommit Text | SaveDocument Int (Maybe FilePath) (Maybe Command) | ReviewExternal | ResolveConflict Conflict ConflictAction | AgentAction Text [Text] | PermissionAction Text [Text] | DebugAction Text [Text] | SetScreenMode Int | Exit deriving (Eq,Show)
+data Effect = ReloadKeyBindings FilePath | InspectKeyBindings (Maybe (Bindings.BindingPlatform,Bindings.BindingContext)) (Maybe (Bindings.Bindings Command)) | FollowLink (Maybe FilePath) Text | EnvironmentAction Text [Text] | AutocompleteAction Text [Text] | SaveMacKeySymbols Bool | SaveChatSubmit ChatSubmit | SaveBufferViewDefault BufferView | ProjectRequest ProjectAction | DownloadDocument Int | ReadBrowserClipboard | WriteBrowserClipboard Text | LanguageRequest LanguageAction | RunGit GitAction | ReadMergeBranches | JumpTo FilePath Int Int | ReadPath FilePath | BrowsePath FilePath Text | BrowseDirectories FilePath | ChangeDirectory FilePath | OpenChoice FilePath Text Text | ReadTree FilePath | ExpandTree Int | ReadHelp | InvokeMenu Plugin.MenuRef Plugin.MenuOrigin | RefreshGit FilePath | ReadGitDiff | AskGitCommit | WriteGitCommit Text | SaveDocument Int (Maybe FilePath) (Maybe Command) | ReviewExternal | ResolveConflict Conflict ConflictAction | AgentAction Text [Text] | PermissionAction Text [Text] | DebugAction Text [Text] | SetScreenMode Int | Exit deriving (Eq,Show)
 data Field = Input Text Text Int | ComboBox Text [Text] Int (Maybe Int) | CheckBox Text Bool | Radio Text [Text] Int | ListBox Text [Text] Int | FileList [Entry] Int
   | ReadOnly Text Text
   | TextArea Text Bool Buffer Selection Int Int deriving (Eq,Show)
@@ -195,7 +195,7 @@ data Desktop = Desktop
   , dockedTerminals :: M.Map Int (Rect,Maybe Rect), bottomTerminal :: Maybe Int
   , autocompleteACPEnabled :: Bool, autocompleteDraft :: Buffer
   , autocompleteSelection :: Selection, autocompleteFocused :: Bool, macKeySymbols :: Bool
-  , keyBindings :: M.Map Bindings.BindingContext (Bindings.Bindings Command)
+  , keyBindings :: M.Map (Bindings.BindingPlatform,Bindings.BindingContext) (Bindings.Bindings Command)
   , contributedMenus :: [Plugin.MenuItem], agentMenuRefs :: [Plugin.MenuRef], menusActive :: Bool
   , contextTarget :: Maybe ContextTarget
   } deriving (Eq,Show)
@@ -217,7 +217,7 @@ menus =
       mi "Threads..." "" (DebugCommand "threads"),mi "Call stack..." "" (DebugCommand "stack"),mi "Scopes..." "" (DebugCommand "scopes"),
       mi "Exceptions..." "" (DebugCommand "exceptions"),mi "Exception details" "" (DebugCommand "exception-info"),mi "Output" "" (DebugCommand "output"),mi "Disconnect" "" (DebugCommand "disconnect")])
   ,("Tools",'t',[mi "File tree" "Ctrl+B" ToggleTree,mi "Git diff..." "" GitDiff,mi "Approve changes..." "" GitCommit,mi "Inspect type" "Shift+F1" InspectType,mi "Code actions..." "" CodeActions,mi "Messages" "" Problems,mi "Go to next" "Alt+F8" NextMessage,mi "Go to previous" "Alt+F7" PreviousMessage,mi "Restart language server" "" RestartHLS,mi "Conversation" "Ctrl+Shift+C" Conversation,mi "Agents..." "" AgentDirectory,mi "Conversation model..." "" (AgentChoose ""),mi "Cancel reply" "" AgentCancel,mi "Resume session..." "" AgentResume,mi "New conversation" "Ctrl+Shift+N" AgentNew,mi "Copy raw conversation" "" AgentCopyRaw,mi "Widget gallery..." "" Gallery,mi "Project browser..." "" ProjectBrowser,mi "Downloads..." "" (DebugCommand "downloads")])
-  ,("Options",'o',[mi "Preferences..." "" EditorOptions,mi "Environment..." "" EnvironmentOptions,mi "Chat input..." "" ChatInputOptions,mi "Autocomplete..." "" (AutocompleteCommand "settings"),mi "Agents..." "" AgentOptions,mi "Agent Permissions" "" AgentPermissions,mi "Agent Context..." "" AgentGuidance,mi "Reload terminal bindings" "" ReloadBindings,mi "Inspect terminal bindings" "" InspectBindings])
+  ,("Options",'o',[mi "Preferences..." "" EditorOptions,mi "Environment..." "" EnvironmentOptions,mi "Chat input..." "" ChatInputOptions,mi "Autocomplete..." "" (AutocompleteCommand "settings"),mi "Agents..." "" AgentOptions,mi "Agent Permissions" "" AgentPermissions,mi "Agent Context..." "" AgentGuidance,mi "Reload keybindings" "" ReloadBindings,mi "Inspect keybindings" "" InspectBindings])
   ,("Window",'w',[mi "Agents..." "" AgentDirectory,mi "Tile" "" Tile,mi "Cascade" "" Cascade,mi "Split vertically" "" SplitVertical,mi "Split horizontally" "" SplitHorizontal,mi "Zoom" "F5" Zoom,mi "Pin / unpin terminal" "" ToggleTerminalPin,mi "Next" "F6" NextWindow,mi "Close" "Alt+F3" Close,mi "" "" (Disabled ""),mi "Current" "" (SetBufferView CurrentView),mi "Changes" "" (SetBufferView ChangesView),mi "Only Changes" "" (SetBufferView OnlyChangesView),mi "Side by Side" "" (SetBufferView SideBySideView)])
   ,("Help",'h',[mi "Contents" "F1" Help,mi "About Haskell..." "" About])]
   where mi = MenuItem
@@ -238,7 +238,7 @@ keyLabel :: Desktop -> Text -> Text
 keyLabel d text
   | nativeMac d || videoMode d==Nothing && macKeySymbols d =
       foldl' (\s (from,to) -> T.replace from to s) text
-        [("Cmd+Shift+","⇧⌘"),("Cmd+Option+","⌥⌘"),("Cmd+","⌘"),
+        [("Cmd+Alt+Shift+","⌥⇧⌘"),("Cmd+Alt+","⌥⌘"),("Cmd+Shift+","⇧⌘"),("Cmd+Option+","⌥⌘"),("Cmd+","⌘"),
          ("Option+","⌥"),("Alt+","⌥"),("Shift+","⇧"),("Ctrl+","⌃")]
   | otherwise = text
 
@@ -247,15 +247,20 @@ keyLabelWidth text = displayColumn text (T.length text)
 
 menuShortcut :: Desktop -> MenuItem -> Text
 menuShortcut d (MenuItem _ key cmd)
-  | Just bindings<-effectiveBindings d = keyLabel d (fromMaybe "" (listToMaybe (Bindings.bindingKeys bindings shortcutCommand)))
+  | Just _<-effectiveBindings d = keyLabel d (fromMaybe "" (listToMaybe (commandBindingKeys d cmd)))
   | nativeMac d = keyLabel d $ fromMaybe key (lookup cmd [(New,"Cmd+N"),(Open,"Cmd+O"),(Save,"Cmd+S"),(SaveAs,"Cmd+Shift+S"),(Close,"Cmd+W"),(Quit,"Cmd+Q"),(Undo,"Cmd+Z"),(Redo,"Cmd+Shift+Z"),(Copy,"Cmd+C"),(Cut,"Cmd+X"),(Paste,"Cmd+V"),(SelectAll,"Cmd+A"),(Find,"Cmd+F"),(Replace,"Cmd+Option+F"),(FindNext,"Cmd+G"),(FindPrevious,"Cmd+Shift+G"),(Conversation,"Cmd+Shift+C"),(AgentNew,"Cmd+Shift+N")])
   | otherwise = keyLabel d key
+
+-- | Labels and native accelerators share the effective command identity. The
+-- live registered Help action uses the configurable built-in Help key entry.
+commandBindingKeys :: Desktop -> Command -> [Text]
+commandBindingKeys d cmd=maybe [] (\bindings->Bindings.bindingKeys bindings shortcutCommand) (effectiveBindings d)
   where shortcutCommand=case cmd of RegisteredMenu ref _ | Plugin.menuName ref=="hide.help.contents"->Help; _->cmd
 
 commandDescription :: Command -> Text
 commandDescription cmd = case cmd of
-  ReloadBindings -> "Reload and validate terminal bindings from global and project configuration."
-  InspectBindings -> "Show every effective command binding for this terminal context."
+  ReloadBindings -> "Reload and validate bindings from global and project configuration."
+  InspectBindings -> "Show every effective command binding for the focused profile and context."
   SidebarMove _ -> "Move the selected sidebar row."
   SidebarActivate -> "Open the selected file or toggle its directory."
   SidebarExpand -> "Expand the selected directory or open its file."
@@ -799,8 +804,8 @@ runCommand cmd source | questionActive source, cmd `elem` [Undo,Redo,Copy,Cut,Pa
 runCommand cmd source | not (problemsFocused source), composerActive source, cmd `elem` [Undo,Redo,Copy,Cut,Paste,SelectAll] = (composerCommand cmd source,[])
 runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source {menu = Nothing, contextMenu=Nothing, buttonHover=Nothing, buttonPressed=Nothing, prefix = Nothing, drag = Nothing,dragOriginal=Nothing})
   where
-    go ReloadBindings d = (d {status="Reloading terminal bindings..."},[ReloadKeyBindings (startingDirectory d)])
-    go InspectBindings d = (d,[InspectKeyBindings (bindingContext d) (effectiveBindings d)])
+    go ReloadBindings d = (d {status="Reloading keybindings..."},[ReloadKeyBindings (startingDirectory d)])
+    go InspectBindings d = (d,[InspectKeyBindings ((,) (bindingPlatform d) <$> bindingContext d) (effectiveBindings d)])
     go (SidebarMove delta) d = case sideTree d of
       Just tree | treeFocused tree -> moveTree delta tree d
       _ -> (d,[])
@@ -1188,8 +1193,8 @@ inlineMatches d v=inlineEligible d && inlineEpoch d==inlineGeneration v && case 
   _->False
 
 inlineEvent :: V.Event -> Desktop -> Maybe (Desktop,[Effect])
-inlineEvent (V.EvKey (V.KChar '\\') [V.MAlt]) d | inlineEligible d = Just (clearInline d,[AutocompleteAction "propose" []])
-inlineEvent (V.EvKey key mods) d | Just v<-inlinePreview d,inlineMatches d v = case (key,mods) of
+inlineEvent (V.EvKey (V.KChar '\\') mods) d | mods==[if nativeMac d then V.MMeta else V.MAlt], inlineEligible d = Just (clearInline d,[AutocompleteAction "propose" []])
+inlineEvent (V.EvKey key mods) d | Just v<-inlinePreview d,inlineMatches d v = case (key,map (\modifier->if nativeMac d && modifier==V.MMeta then V.MAlt else modifier) mods) of
   (V.KChar '[',[V.MAlt])->Just (cycleOption v (-1))
   (V.KChar ']',[V.MAlt])->Just (cycleOption v 1)
   (V.KChar '\t',[])->Just (d,[AutocompleteAction "accept" []])
@@ -1228,7 +1233,7 @@ dispatchEvent (V.EvResize sw sh) d =
       {width=if left r+width r==oldRight then newRight-left r else width r,
        height=if top r+height r==oldBottom then newBottom-top r else height r}
     resize w=w {bounds=stretch (bounds w),restoredBounds=fmap stretch (restoredBounds w)}
--- A compiled map owns named commands in the focused terminal context. Missing
+-- A compiled map owns named commands in the focused profile and context. Missing
 -- chords fall back to local text/movement, never to removed command defaults.
 dispatchEvent (V.EvKey key mods) d
   | bindingInputAvailable d, not (terminalContextReserved d key mods), Just bindings<-effectiveBindings d =
@@ -2158,25 +2163,31 @@ selectAt extend x y d = case activeWindow d of
     col = max 0 (x-left (bounds w)-1+scrollColumn w)
     pos = bufferLineOffset b row + columnOffset (bufferLineAt b row) col
 
--- | Choose the current terminal input owner using only small focus metadata.
+-- | Choose the current focused input owner using only small focus metadata.
 -- Captured gestures, popups and human question/completion controls retain priority.
+bindingPlatform :: Desktop -> Bindings.BindingPlatform
+bindingPlatform d | nativeMac d = Bindings.MacPlatform
+                  | videoMode d/=Nothing = Bindings.GraphicalPlatform
+                  | otherwise = Bindings.TerminalPlatform
+
 bindingContext :: Desktop -> Maybe Bindings.BindingContext
 bindingContext d
-  | videoMode d/=Nothing || nativeMac d = Nothing
   | problemsFocused d = Just Bindings.MessagesKeys
   | maybe False treeFocused (sideTree d) = Just Bindings.SidebarKeys
   | activeConversation d = Just Bindings.ConversationKeys
   | activeTerminal d/=Nothing = Just Bindings.TerminalKeys
   | Just label<-activeDocument d >>= documentLabel,
     "Debugger " `T.isPrefixOf` label || "Source " `T.isPrefixOf` label = Just Bindings.DebuggerKeys
-  | not (wordStar d), Just doc<-activeDocument d, documentLabel doc==Nothing = Just Bindings.SourceKeys
+  | (not (wordStar d) || bindingPlatform d/=Bindings.TerminalPlatform), Just _<-activeDocument d = Just Bindings.SourceKeys
+  | Nothing<-activeDocument d = Just Bindings.SourceKeys
   | otherwise = Nothing
 
 effectiveBindings :: Desktop -> Maybe (Bindings.Bindings Command)
-effectiveBindings d = bindingContext d >>= (`M.lookup` keyBindings d)
+effectiveBindings d = bindingContext d >>= \context->M.lookup (bindingPlatform d,context) (keyBindings d)
 
 terminalContextReserved :: Desktop -> V.Key -> [V.Modifier] -> Bool
 terminalContextReserved d key mods = terminalSourceReserved key mods ||
+  (wordStar d && bindingContext d==Just Bindings.SourceKeys && V.MCtrl `elem` mods && V.MMeta `notElem` mods) ||
   (bindingContext d==Just Bindings.ConversationKeys && key==V.KEnter)
 
 bindingInputAvailable :: Desktop -> Bool
@@ -2197,7 +2208,7 @@ unboundKey key mods d = case bindingContext d of
 terminalSourceReserved :: V.Key -> [V.Modifier] -> Bool
 terminalSourceReserved key mods=(key==V.KChar ']' && V.MCtrl `elem` mods) || key==V.KEsc || key==V.KFun 10 ||
   key `elem` [V.KChar '\t',V.KBackTab] ||
-  (V.MAlt `elem` mods && case key of
+  (V.MAlt `elem` mods && V.MMeta `notElem` mods && case key of
     V.KChar c->c `elem` ['1'..'9'] || toLower c `elem` [mn | (_,mn,_)<-menus] || c `elem` ['\\','[',']']
     V.KRight->True
     _->False)
@@ -2212,8 +2223,8 @@ keyEvent :: V.Key -> [V.Modifier] -> Desktop -> (Desktop,[Effect])
 keyEvent key mods d
   | key==V.KEsc = (d {prefix=Nothing},[])
   | Just p <- prefix d, V.KChar c <- key = starPrefix p (toLower c) d {prefix=Nothing}
-  | V.MAlt `elem` mods, V.KChar c <- key, Just i <- findIndex (\(_,mn,_) -> mn==toLower c) menus = (d {menu=Just (i,0)},[])
-  | V.MAlt `elem` mods, key==V.KChar 'x' = runCommand Quit d
+  | V.MAlt `elem` mods, V.MMeta `notElem` mods, V.KChar c <- key, Just i <- findIndex (\(_,mn,_) -> mn==toLower c) menus = (d {menu=Just (i,0)},[])
+  | V.MAlt `elem` mods, V.MMeta `notElem` mods, key==V.KChar 'x' = runCommand Quit d
   | V.MAlt `elem` mods, key==V.KFun 3 = runCommand Close d
   | key==V.KFun 1, V.MShift `elem` mods = runCommand InspectType d
   | key==V.KFun 12 = runCommand Definition d
@@ -2333,8 +2344,10 @@ comboBoxEvent ev dg d i name choices chosen preview = case ev of
 
 dialogEvent :: V.Event -> Dialog -> Desktop -> (Desktop,[Effect])
 dialogEvent ev dg d
-  | Just (i,name,choices,chosen,preview)<-openComboBox dg = comboBoxEvent ev dg d i name choices chosen preview
-  | otherwise = case ev of
+  | nativeMac d, V.EvKey (V.KChar 'f') mods<-ev, V.MMeta `elem` mods, V.MAlt `elem` mods,
+    dialogCommandAllowed Replace d = runCommand Replace d
+  | Just (i,name,choices,chosen,preview)<-openComboBox dg = comboBoxEvent platformEvent dg d i name choices chosen preview
+  | otherwise = case platformEvent of
   V.EvKey key mods | DebugDialog action<-purpose dg,"hdb-accept:" `T.isPrefixOf` action,
     key==V.KEsc || key==V.KFun 3 && V.MAlt `elem` mods ->
       (d {dialog=Nothing,buttonHover=Nothing,buttonPressed=Nothing},[DebugAction action ["1"]])
@@ -2394,6 +2407,9 @@ dialogEvent ev dg d
       _ -> (released {buttonHover=Nothing},[])
   _ -> (d,[])
   where
+    platformEvent=case ev of
+      V.EvKey key mods | nativeMac d -> V.EvKey key [if modifier==V.MMeta then V.MCtrl else modifier | modifier<-mods]
+      _ -> ev
     count=length (fields dg)
     areaFocused=case drop (focus dg) (fields dg) of TextArea{}:_ -> True; _ -> False
     focusedRect=fromMaybe (Rect 0 0 1 1) (listToMaybe (drop (focus dg) (fieldRects d dg)))

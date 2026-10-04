@@ -52,7 +52,7 @@ resize it from the corner, or use **Window > Tile** and **Window > Cascade**.
 the same buffer, including its undo history.
 
 These are the default source-editor bindings. The Mac column describes the
-native window: ⌃ Control, ⌥ Option, ⇧ Shift and ⌘ Command, in that order
+native window and browser: ⌃ Control, ⌥ Option, ⇧ Shift and ⌘ Command, in that order
 when combined. Mac keyboards label Enter as Return.
 
 | Action | Windows / Linux | Mac |
@@ -82,21 +82,26 @@ Choose an inline provider in **Options > Autocomplete**. Holding Alt (⌥ on Mac
 alone for a second also requests a suggestion in native windows and browsers.
 Text terminals do not report modifier-only holds; use the explicit shortcut.
 
-In the browser, Ctrl+G / Ctrl+Shift+G (⌘G / ⇧⌘G on Mac) find the next and
-previous matches; use **Search > Go to line** for a line number. Ctrl+R remains a Replace alias in
-native non-Mac windows and text terminals; browsers retain Reload. Native Mac
-menus own their ⌘ shortcuts, including ⌘H for Hide. Other Control bindings stay
+Browser and native editors use the same graphical or macOS profile. Ctrl+L /
+Ctrl+Shift+L (⌘G / ⇧⌘G on Mac) find the next and previous matches; Ctrl+G goes
+to a line. Ctrl+R also opens Replace in native non-Mac windows and text terminals;
+browsers retain Reload. Native Mac menus expose configured accelerators, and
+⌘H retains Hide. Other Control bindings stay
 available; do not substitute ⌘ for every Ctrl shortcut. In a text terminal on
 any OS, use the Windows/Linux column when the terminal forwards those keys:
 ⌘ shortcuts belong to the terminal app. OS-reserved shortcuts may be intercepted.
 **Options > Preferences** can show Mac modifier symbols in text-mode key labels;
 this changes their appearance, not the Control/Alt bindings. See
-[configuration](docs/configuration.md) for the saved setting. Terminal commands
-can be replaced or unbound per source, sidebar, conversation, debugger, Messages
-or PTY context in TOML; the focused context supplies menu and status hints. See
-[terminal keybindings](docs/configuration.md#terminal-keybindings) for examples.
+[configuration](docs/configuration.md) for the saved setting. Commands can be
+replaced or unbound per terminal, graphical or macOS profile and source, sidebar,
+conversation, debugger, Messages or PTY context in TOML. The focused context supplies
+menu and status hints; **Options > Reload keybindings** adopts validated edits,
+and **Inspect keybindings** shows the effective map. See
+[keybindings](docs/configuration.md#keybindings) for examples.
 
-Native and browser frontends use the system clipboard. In a text terminal,
+Native and browser frontends use the system clipboard. Browser remaps may need
+the visible Copy/Paste button when clipboard permission or user activation has
+expired; browser Edit-menu actions also remain available. In a text terminal,
 Copy and Cut also request the system clipboard through OSC 52 where supported;
 paste external text through your terminal. **Options > Preferences** also offers
 WordStar keys.
