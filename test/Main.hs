@@ -17,6 +17,7 @@ import qualified RemoteTerminalCheck
 import qualified GuestAccessCheck
 import qualified StreamerCheck
 import qualified ClipboardMCPCheck
+import qualified PluginCommandCheck
 import qualified DocsMCPCheck
 import qualified EnvironmentCheck
 import qualified ControlMCPCheck
@@ -116,6 +117,7 @@ main = do
   GuestAccessCheck.checks
   StreamerCheck.checks
   ClipboardMCPCheck.checks
+  PluginCommandCheck.checks
   DocsMCPCheck.checks
   EnvironmentCheck.checks
   ControlMCPCheck.checks

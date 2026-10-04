@@ -261,7 +261,7 @@ runEditor args = do
           mapM_ (setEnv "THC_EDIT_SESSION") daemon
           font<-Font.loadFont
           let specs=builtinTools++debugTools++chatTools++toolingTools++workspaceTools++fileTools++testsTools++historyTools++runtimeTools++gitTools++controlTools++environmentTools++clipboardTools++docsTools++[screenTool]
-          withPermissions (specs++agentTools) $ \permissions -> withConversationAt (startingDirectory protectedDesktop) $ \conversation -> withDebuggerConsoles (let (_,consoles,_)=conversationServices conversation in consoles) $ \debugger -> withTooling $ \tooling -> withGitOperations $ \gitOperations -> withReconciliation $ \reconciliation -> withProjectBrowser $ \projectBrowser -> withHighlighting $ \highlighting -> withAutocomplete (startingDirectory protectedDesktop) $ \autocomplete -> do
+          withPermissions (specs++agentTools) $ \permissions -> withDocsCommands $ \docsCommands -> withConversationAt (startingDirectory protectedDesktop) $ \conversation -> withDebuggerConsoles (let (_,consoles,_)=conversationServices conversation in consoles) $ \debugger -> withTooling $ \tooling -> withGitOperations $ \gitOperations -> withReconciliation $ \reconciliation -> withProjectBrowser $ \projectBrowser -> withHighlighting $ \highlighting -> withAutocomplete (startingDirectory protectedDesktop) $ \autocomplete -> do
             exiting<-newIORef False
             let runtimeEffects=autocompleteEffects autocomplete (projectBrowserEffects projectBrowser (gitOperationEffects gitOperations (debuggerEffects debugger (conversationEffects conversation (reconciliationEffects reconciliation (toolingEffects tooling applyEffects))))))
                 core d pending=foldM step (False,d) pending
@@ -290,7 +290,7 @@ runEditor args = do
                   | name `elem` runtimeToolNames = runtimeTool conversation d name parameters
                   | name `elem` gitToolNames = gitTool gitOperations d name parameters
                   | name=="clipboard_write" = clipboardTool d parameters
-                  | name `elem` docsToolNames = docsTool d name parameters
+                  | name `elem` docsToolNames = docsTool docsCommands d name parameters
                   | name `elem` environmentToolNames = pure (d,environmentTool (startingDirectory d) name parameters)
                   | name `elem` controlToolNames = controlTool guestCore d name parameters
                   | name=="editor_screen" = pure (d,case parseEither (withObject "screen" (\o -> o .:? "image" .!= False)) parameters of

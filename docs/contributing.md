@@ -47,6 +47,33 @@ Coverage is preliminary, especially the model's internal helpers and native FFI
 exports. A documentation build checks parsing and links, not the truth of the
 contracts: review those against implementation and the relevant behavioral tests.
 
+## Plugin command implementation
+
+`Hide.Plugin.Command` is the first implemented part of the
+[plugin design](design/haskell-plugins.md). Define a typed `CommandDef` with input
+and output codecs and a narrow host-supplied context. `withRegistry` scopes live
+registrations; `registerCommand` rejects duplicate names. Native callers use the
+typed handle with `invoke`. Wire adapters capture a `CommandRef` before queueing
+and use `invokeJSON`, which validates input and prepares the complete JSON result
+on the calling worker.
+
+Retirement and scope closure refuse later admission. Re-registering the same
+name does not redirect old handles or queued calls. Work already admitted may
+finish; the host's task owner is responsible for cancellation. Codecs and handlers
+run outside the registry lock. Errors are forced before return; successful typed
+values remain lazy and their consumers own later evaluation. Registration grants no authority and does not
+automatically expose an MCP tool.
+
+The first consumer is `hide.docs.read` in `Hide.Documentation`. Its context only
+resolves a documentation corpus root; it neither imports nor receives `Desktop`.
+`Hide.DocsMCP` owns the session registration and adapts the explicit `docs_read`
+tool to it, retaining permission checks and deferred filesystem work. Listing and
+search are not yet registered commands.
+
+This is an implementation slice, not a complete plugin SDK. Activation scopes,
+checked buffer services, menu contributions and custom widget/window types remain
+tracked in [the delivery plan](https://github.com/ekmett/hide/issues/1).
+
 ## Native Windows terminals
 
 With the [pinned Ghostty installation](install.md#embedded-terminal) on `PATH`,

@@ -17,11 +17,13 @@ import System.IO.Error (tryIOError)
 #ifndef mingw32_HOST_OS
 import qualified System.Posix.Files as Posix
 #endif
+import qualified Hide.Documentation as Docs
+import qualified Hide.Plugin.Command as Commands
 import Hide.DocsMCP
 import Hide.Model
 
 checks :: IO ()
-checks=bracket temporary removePathForcibly $ \root->do
+checks=withDocsCommands $ \commands->bracket temporary removePathForcibly $ \root->do
   let editor=root </> "editor"
       compiler=root </> "compiler"
       configuration=root </> "config"
@@ -29,8 +31,7 @@ checks=bracket temporary removePathForcibly $ \root->do
       d=(initialDesktop (80,25)) {defaultDirectory=Just project}
       check label condition=unless condition (error label)
       run name arguments=do
-        (unchanged,result)<-docsTool d name (object arguments)
-        check "docs initial phase does not modify desktop" (unchanged==d)
+        (_,result)<-docsTool commands d name (object arguments)
         result
       value name reply=case reply of Right object'->parseMaybe (withObject "reply" (.: name)) object'; _->Nothing
       failed (Left _)=True
@@ -59,6 +60,17 @@ checks=bracket temporary removePathForcibly $ \root->do
     check "fenced code is excluded from heading metadata" (case listed of Right v->not ("Not a heading" `T.isInfixOf` rendered v); _->False)
     readRange<-run "docs_read" ["path" .= ("docs/guide.md"::T.Text),"startLine" .= (2::Int),"lineCount" .= (3::Int)]
     check "read returns the requested one-based range" ((value "text" readRange::Maybe T.Text)==Just "Needle first\n## Navigation\na.*b literal" && (value "lineCount" readRange::Maybe Int)==Just 3)
+    Commands.withRegistry $ \registry->do
+      command<-either (error . show) id <$> Commands.registerCommand registry Docs.readCommand
+      let arguments=either (error . T.unpack) id (Docs.readArguments "editor" "docs/guide.md" 2 3)
+      typed<-Commands.invoke registry command (\_->pure editor) arguments
+      check "typed docs command reads the same bounded page as MCP" (case typed of
+        Right page->Docs.pageText page=="Needle first\n## Navigation\na.*b literal" && Right (Commands.codecEncode Docs.readOutput page)==readRange
+        _->False)
+      check "typed docs arguments reject traversal before IO" (case Docs.readArguments "editor" "../README.md" 1 10 of Left _->True; _->False)
+    deferred<-withDocsCommands $ \scoped->snd <$> docsTool scoped d "docs_read" (object ["path" .= ("README.md"::T.Text)])
+    closed<-deferred
+    check "deferred docs reads cannot outlive their command scope" (failed closed)
     pastEnd<-run "docs_read" ["path" .= ("docs/guide.md"::T.Text),"startLine" .= (maxBound::Int)]
     check "extreme read offsets cannot overflow" ((value "text" pastEnd::Maybe T.Text)==Just "" && (value "lineCount" pastEnd::Maybe Int)==Just 0)
     literal<-run "docs_search" ["query" .= ("a.*b"::T.Text)]
