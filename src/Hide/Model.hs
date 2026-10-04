@@ -2066,7 +2066,11 @@ windowMouse x y button mods d = case find (\w -> windowVisible d w && inside (bo
                Just command<-shellBlockAt x y focused -> (openContext (ShellContext command) x y focused,[])
     V.BRight | x>l && x<l+ww-1 && y>t && y<t+hh-1,
                maybe False ((==Nothing) . documentLabel) (activeDocument focused) ->
-      (openContext (reviewContext x y focused) x y (selectAt False x y focused),[])
+      let pointed=selectAt False x y focused
+          (a,z)=ordered (selection w)
+          hit=maybe (-1) (caret . selection) (activeWindow pointed)
+          captured=if bufferView w==CurrentView && a<z && hit>=a && hit<z then focused else pointed
+      in (openContext (reviewContext x y focused) x y captured,[])
     V.BLeft
       | not (windowFocused d w), x==l || x==l+ww-1 || y==t || y==t+hh-1 -> (focused,[])
       | y==t && x>=l+2 && x<=l+4 -> runCommand Close focused

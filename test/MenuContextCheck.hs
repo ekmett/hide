@@ -33,7 +33,7 @@ import Hide.Window (nativeCommands,nativeCommandsFor,nativeMenuEventFor)
 import MenuExtension
 
 checks :: IO ()
-checks=bracket temporary removePathForcibly $ \root->withDocsCommands $ \docs->withRegistry $ \registry->withMenuCommands docs $ \host->do
+checks=sourceSelectionCheck >> (bracket temporary removePathForcibly $ \root->withDocsCommands $ \docs->withRegistry $ \registry->withMenuCommands docs $ \host->do
   let check label ok=unless ok (error label)
       right :: Show e => Either e a -> a
       right=either (error . show) id
@@ -233,6 +233,18 @@ checks=bracket temporary removePathForcibly $ \root->withDocsCommands $ \docs->w
   check "context contribution retirement refuses late navigation and paint"
     (problemsFocused withdrawn && not (commandEnabled withdrawn GoToMessage))
   _<-evaluate (diagnosticsGeneration unchanged)
-  putStrLn "live context menu checks passed"
+  putStrLn "live context menu checks passed")
   where
     temporary=do base<-getTemporaryDirectory; (path,h)<-openTempFile base "hide-menu-context"; hClose h; removeFile path; createDirectory path; canonicalizePath path
+
+-- The popup freezes the selected expression before its asynchronous command.
+sourceSelectionCheck :: IO ()
+sourceSelectionCheck=do
+  let base=addDocument Nothing (newBuffer "alpha beta\ngamma delta\n") (initialDesktop (80,25))
+      selected=modifyActive (\w->w {bounds=Rect 0 1 60 20,selection=B.Selection 0 5}) base
+      (popup,_)=handleEvent (V.EvMouseDown 3 2 V.BRight []) selected
+  unless (fmap selection (activeWindow popup)==Just (B.Selection 0 5))
+    (error "source right-click within selection must preserve the captured watch expression")
+  let (elsewhere,_)=handleEvent (V.EvMouseDown 9 2 V.BRight []) selected
+  unless (fmap selection (activeWindow elsewhere)==Just (B.Selection 8 8))
+    (error "source right-click outside selection must capture the clicked location")
