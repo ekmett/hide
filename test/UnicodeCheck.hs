@@ -42,7 +42,7 @@ checks = do
   check "shared GPU rows keep left-clipped original glyph origin"
     (semantic (V.picForImage (V.translateX (-2) image)) (2,1)==[("👩🏽\x200d\&💻",2,1,1)])
   check "opaque occlusion preserves only the visible semantic half"
-    (semantic (V.picForLayers [V.translateX 2 (textImage V.defAttr "│"),image]) (4,1)==[("👩🏽\x200d\&💻",2,0,1),("│",1,0,1)])
+    (semantic (V.picForLayers [V.translateX 2 (textImage V.defAttr "│"),image]) (4,1)==[("👩🏽\x200d\&💻",2,0,1)])
   let halo=cellRowsForLayers [CellHalo (V.defAttr `V.withBackColor` V.black) [(2,0,1,1)],CellImage image] (4,1)
       masked=cellRowsForLayers [CellMask V.defAttr [(2,0,1)],CellImage image] (4,1)
   check "style-only halo preserves semantic glyph identity and clipping"

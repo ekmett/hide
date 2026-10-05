@@ -81,8 +81,8 @@ displayClusters width text=case graphemes text of
   gs -> [(g,clusterWidth g) | g<-gs]
 
 -- | The final visible row representation shared by terminal and GPU frontends.
--- CellText is a complete ASCII run. CellGlyph retains one semantic grapheme,
--- its full allocated cell width, visible start within that glyph, and visible
+-- CellText contains complete one-codepoint, one-cell glyphs. CellGlyph retains
+-- one semantic grapheme, its full allocated width, visible start and visible
 -- width. Its glyph origin is the current row position minus the clip start.
 -- Backend projection happens after composition; privacy masks replace the
 -- semantic glyph before these rows can leave the capture owner.
@@ -162,12 +162,14 @@ cellRowsForLayers layers (w,h)=Vec.generate h (\y->Vec.fromList (runs (Vec.toLis
       mapM_ layer layers
       mapM_ (uncurry mask) [(paint,regions) | CellMask paint regions<-layers]
       Vec.freeze grid
-    asciiCell (AsciiCell a c)=Just (a,c)
-    asciiCell (Unfilled paint)=Just (maybe V.defAttr id paint,' ')
-    asciiCell _=Nothing
+    simpleCell (AsciiCell a c)=Just (a,c)
+    simpleCell (Unfilled paint)=Just (maybe V.defAttr id paint,' ')
+    simpleCell (Cell a text 1 0) | T.length text==1=Just (a,T.head text)
+    simpleCell _=Nothing
     runs []=[]
-    runs (AsciiCell a c:rest)=asciiRun a c rest
-    runs (Unfilled paint:rest)=asciiRun (maybe V.defAttr id paint) ' ' rest
+    runs (AsciiCell a c:rest)=simpleRun a c rest
+    runs (Unfilled paint:rest)=simpleRun (maybe V.defAttr id paint) ' ' rest
+    runs (Cell a t 1 0:rest) | T.length t==1=simpleRun a (T.head t) rest
     runs (Cell a t n offset:rest)=let (count,after)=follow (offset+1) rest
                                 in CellGlyph a t n offset (count+1):runs after
       where
@@ -176,9 +178,9 @@ cellRowsForLayers layers (w,h)=Vec.generate h (\y->Vec.fromList (runs (Vec.toLis
             let (count,after)=follow (expected+1) more in (count+1,after)
         follow _ more=(0,more)
 
-    asciiRun a c rest=
-      let (same,after)=span (\cell->case asciiCell cell of Just (b,_)->a==b; _->False) rest
-      in CellText a (T.pack (c:[ch | Just (_,ch)<-map asciiCell same])):runs after
+    simpleRun a c rest=
+      let (same,after)=span (\cell->case simpleCell cell of Just (b,_)->a==b; _->False) rest
+      in CellText a (T.pack (c:[ch | Just (_,ch)<-map simpleCell same])):runs after
 
 -- | Text-mode projection suppresses partial graphemes with occupied-cell blanks.
 -- A complete explicit-width glyph retains its advance for terminal correction.

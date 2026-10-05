@@ -135,7 +135,7 @@ parseRemoteFrame metadata rows = parseEither (withObject "frame metadata" $ \o -
     parseRun value = do
       (text,w,stretched,start,shown) <- parseJSON value :: Parser (T.Text,Int,Bool,Int,Int)
       unless (not (T.null text) && T.length text<=4096 && not (T.any (\c -> c<' ' || c=='\DEL') text) && graphemes text==[text] && w>0 && w<=2 &&
-        start>=0 && shown>0 && start+shown<=w &&
+        start>=0 && start<w && shown>0 && shown<=w-start &&
         (if stretched then w==2 && clusterWidth text<2 else clusterWidth text==w)) (fail "Invalid grapheme")
       pure [(text,w,start,shown)]
 

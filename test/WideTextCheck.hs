@@ -58,7 +58,7 @@ checks=do
    check "native wire preserves partial glyph origin and full allocated width" (case remoteCells partial of [RemoteCell 0 0 _ "A" 2 offset 1]->offset==start; _->False)
    check "text mode suppresses a partial glyph without shifting following cells"
      (all (not . T.isInfixOf "A") [TL.toStrict text | rowOps<-Vec.toList (displayOpsForPic (remoteTerminalPicture partial) (40,12)),TextSpan _ _ _ text<-Vec.toList rowOps])
- check "clipped wire rejects impossible extents" (all (either (const True) (const False) . parseRemoteFrame metadata . (:replicate 11 (toJSON ([]::[Value])))) [clipped (-1) 1,clipped 2 1,clipped 1 2,clipped 0 0])
+ check "clipped wire rejects impossible extents" (all (either (const True) (const False) . parseRemoteFrame metadata . (:replicate 11 (toJSON ([]::[Value])))) [clipped (-1) 1,clipped 2 1,clipped 1 2,clipped 0 0,clipped maxBound 1,clipped 1 maxBound])
  let bad flag advance text=toJSON [(0::Int,0::Int,0::Int,0::Int,[toJSON (text::T.Text,advance::Int,flag::Bool,0::Int,advance::Int)])]
  check "invalid stretched wire glyphs refuse instead of changing geometry" (all (either (const True) (const False) . parseRemoteFrame metadata . (:replicate 11 (toJSON ([]::[Value])))) [bad True 1 "A",bad True 2 "界",bad True 2 "ab",bad False 2 "A"])
  let heading="ABé界é👩🏽\x200d\&💻"
