@@ -16,8 +16,10 @@ files stay selected.
 
 ## Files and directories
 
-**F3** opens the file dialog. Enter a name or wildcard filter, select a file and
-choose Open. Double-click a directory to browse into it, or a file to open it.
+**File > Open** (Ctrl+O or F3; ⌘O on Mac) opens the file dialog. Enter a
+name or wildcard filter, select a file and choose Open. **File > New**
+(Ctrl+N; ⌘N on Mac) starts an unnamed buffer. Double-click a directory to
+browse into it, or a file to open it.
 The list shows the file's size and local modification time.
 
 **Ctrl+B** (⌃B in the Mac window), or **Tools > File tree**, toggles the
@@ -113,8 +115,8 @@ change your source selection.
 ## Text and selection
 
 Type to insert text. Hold Shift while moving to select it, or drag with the
-mouse. The Mac column below describes the native window: ⌃ Control, ⌥ Option,
-⇧ Shift and ⌘ Command. Text terminals use the Windows/Linux bindings when their
+mouse. The Mac column below describes the native window and browser:
+⌃ Control, ⌥ Option, ⇧ Shift and ⌘ Command. Text terminals use the Windows/Linux bindings when their
 emulator forwards them; Command shortcuts belong to the terminal app.
 **Options > Preferences** can display Mac modifier symbols in text-mode key
 labels. It keeps the actual Control/Alt bindings; it does not remap them to
@@ -125,7 +127,8 @@ Control, Option, Shift, Command (⌃⌥⇧⌘). Symbols are joined without plus 
 so redo is ⇧⌘Z and Replace is ⌥⌘F. Return is the main key labeled Enter on
 Windows keyboards; Esc cancels. Shortcuts written with Ctrl or Alt elsewhere in
 this guide still mean Control or Option on Mac, unless a Mac alternative is given.
-Command is a separate key.
+Command is a separate key. See [keybinding configuration](configuration.md#keybindings)
+to replace or unbind commands, reload the bindings and inspect the effective map.
 
 | Action | Windows / Linux | Mac |
 | --- | --- | --- |
@@ -234,7 +237,8 @@ window shortcuts when the OS intercepts it.
 
 ## Menus and dialogs
 
-Press **F10** to enter the menu bar, then use arrows or letter mnemonics.
+**F1** opens the bundled guide. Press **F10** to enter the menu bar, then use
+arrows or letter mnemonics.
 The status bar describes the highlighted action. Its key labels are clickable.
 On macOS, **Haskell > Settings…** (⌘,) opens **Options > Preferences**;
 **About Haskell** opens the About dialog. The native menu bar provides ⌘
