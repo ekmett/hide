@@ -34,11 +34,30 @@ try {
  mouse=[0,0];dirty=true;present(performance.now());check(pixel(0,0)==='85,85,85','mouse palette '+pixel(0,0));
  mouse=[-1,-1];frame.cursor=[0,0];dirty=true;present(performance.now());check(pixel(0,15)==='0,0,0','cursor shader '+pixel(0,15));
  frame.cursor=null;
+ // Blank bitmap/shaped glyphs make line pixels independent of font contours.
+ glyphs.set('_',[8,Array(16).fill(0)]);
+ const decorations=flags=>[[0,0xffffff,0x0000aa,flags&8,[['_',1,false,0,1]]],[2,0xffffff,0x0000aa,flags&16,[['_',1,false,0,1]]],[4,0xffffff,0x0000aa,flags,[['_',1,false,0,1]]],[8,0xffffff,0x0000aa,flags,[['_',2,true,0,2]]],[12,0xffffff,0x0000aa,flags,[['_',2,true,1,1]]],[14,0xffffff,0x0000aa,flags,[['_',2,true,0,1]]],[17,0xffffff,0x0000aa,3|flags,[[' ',2,true,0,2]]]];
+ drawRows([[3,decorations(0)]]);present(performance.now());const undecoratedTiles=atlasStats.tiles;
+ drawRows([[3,decorations(24)]]);present(performance.now());
+ check(atlasStats.tiles===undecoratedTiles,'decorations allocated atlas tiles');
+ check(pixel(0,63)==='255,255,255'&&pixel(0,55)==='0,0,170','underline row');
+ check(pixel(16,55)==='255,255,255'&&pixel(16,63)==='0,0,170','strike row');
+ for(let x=32;x<40;++x)check(pixel(x,55)==='255,255,255'&&pixel(x,63)==='255,255,255','combined lines');
+ for(let x=64;x<80;++x)check(pixel(x,63)==='255,255,255','two-cell underline');
+ check(pixel(96,63)==='255,255,255'&&pixel(104,63)==='0,0,170','right-half decoration clip');
+ check(pixel(112,63)==='255,255,255'&&pixel(120,63)==='0,0,170','left-half decoration clip');
+ for(let x=136;x<152;++x)check(pixel(x,55)==='255,255,255','shaped two-cell strike');
+ check(pixel(32,53)==='0,0,170','decorations changed other rows');
+ frame.cursor=[4,3];dirty=true;present(performance.now());check(pixel(32,63)==='0,0,0','decorated cursor paint');
+ frame.cursor=null;mouse=[4,3];dirty=true;present(performance.now());check(pixel(32,63)==='85,85,85','decorated mouse paint');mouse=[-1,-1];
+ check(atlasStats.tiles===undecoratedTiles,'cursor/mouse reshaped decorated glyph');
+ mode=259;rows[3]=decorations(24);allocate();present(performance.now());
+ check(pixel(0,31)==='255,255,255'&&pixel(16,27)==='255,255,255'&&pixel(16,31)==='0,0,170','8-row decoration mode');
  for(let i=0;i<520;++i)atlasEntry('e',i,false,128,64,0);
  check(atlasSize>2048,'GPU atlas growth did not occur');dirty=true;present(performance.now());
  check(pixel(0,0)==='255,255,255','growth changed earlier tile rectangle');
  check(gl.getError()===gl.NO_ERROR,'GL final error');
- document.body.textContent='PASS WebGL2 generated HLSL execution: foreground/background, full-origin half clip, warm atlas/grid reuse, bounded row upload, mouse/cursor; '+JSON.stringify(atlasStats)+'; '+gl.getParameter(gl.getExtension('WEBGL_debug_renderer_info').UNMASKED_RENDERER_WEBGL);
+ document.body.textContent='PASS WebGL2 generated HLSL execution: foreground/background, full-origin half clip, warm atlas/grid reuse, bounded row upload, mouse/cursor, cell underline/strike without new atlas tiles; '+JSON.stringify(atlasStats)+'; '+gl.getParameter(gl.getExtension('WEBGL_debug_renderer_info').UNMASKED_RENDERER_WEBGL);
 } catch(error){document.body.textContent='FAIL '+error.stack;}
 `;
 const fixture=await fs.mkdtemp(path.join(os.tmpdir(),'hide-web-gpu-'));

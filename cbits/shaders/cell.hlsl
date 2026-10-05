@@ -53,6 +53,17 @@ float4 main(float4 color : TEXCOORD0, float2 uv : TEXCOORD1) : SV_Target0 {
         float3 foreground = (cell.paint.z & 2) ? rgb(cell.paint.x) : ink.rgb;
         float3 tile = foreground * ink.a;
         float alpha = ink.a;
+        // Lines belong to cell paint, sharing the glyph's ordinary draw and clip.
+        // Round bands to physical pixels. In 8-row mode a pixel center lies
+        // exactly on font row15; interpolated UV rounding must not erase it.
+        float cellPixels = viewport.y / grid.y;
+        float pixelRow = floor(within.y * cellPixels);
+        bool underline = pixelRow >= floor(15 * cellPixels / 16) && pixelRow < cellPixels;
+        bool strike = pixelRow >= floor(7 * cellPixels / 16) && pixelRow < ceil(8 * cellPixels / 16);
+        if (((cell.paint.z & 8) && underline) || ((cell.paint.z & 16) && strike)) {
+            tile = rgb(cell.paint.x);
+            alpha = 1;
+        }
         if (cell.paint.z & 1) { tile += rgb(cell.paint.y) * (1 - alpha); alpha = 1; }
         result += tile * remaining;
         remaining *= 1 - alpha;

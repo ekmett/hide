@@ -89,6 +89,7 @@ function bitmapInk(bitmap,y,x,traits){
    ((traits&1)&&source>0&&source<=bitmap[0]&&!!(row&(1<<(16-source))));
 }
 function tile(text,fg,pixelated,w,h,traits){
+ traits&=7; // Line decorations are cell paint, not shaped glyph identity.
  const bitmap=glyphs.get(text), key=JSON.stringify([text,fg,pixelated,w,h,traits]);
  if(tiles.has(key))return tiles.get(key);
  const t=document.createElement('canvas');
@@ -107,6 +108,7 @@ function tile(text,fg,pixelated,w,h,traits){
  if(tiles.size>=1024)tiles.clear();tiles.set(key,t);return t;
 }
 function atlasEntry(text,fg,pixelated,w,h,traits){
+ traits&=7;
  const bitmap=glyphs.has(text),paint=bitmap?0xffffff:fg;
  const key=JSON.stringify([text,paint,pixelated,w,h,bitmap?traits&3:traits]);
  if(atlasEntries.has(key))return atlasEntries.get(key);
@@ -146,9 +148,9 @@ function drawRows(changed,retried=false){
      for(let x=0;x<cols;++x)cellGrid.set([blank[0],blank[1],1,0,0,0x0000aa,1|blank[2],1],start+x*8);
      for(const [origin,fg,bg,traits,clusters] of spans||[]){let x=origin;
        for(const [text,fullWidth,stretched,clipStart,clipWidth] of clusters){
-         const entry=atlasEntry(text,fg,frame.pixelated,fullWidth*cw,ch,traits|(stretched?4:0));
+         const entry=atlasEntry(text,fg,frame.pixelated,fullWidth*cw,ch,(traits&3)|(stretched?4:0));
          for(let cell=0;cell<clipWidth;++cell)if(x+cell>=0&&x+cell<cols)
-           cellGrid.set([entry[0],entry[1],fullWidth|((clipStart+cell)<<16),0,fg,bg,1|entry[2],1],start+(x+cell)*8);
+           cellGrid.set([entry[0],entry[1],fullWidth|((clipStart+cell)<<16),0,fg,bg,1|entry[2]|(traits&24),1],start+(x+cell)*8);
          x+=clipWidth;
        }
      }
