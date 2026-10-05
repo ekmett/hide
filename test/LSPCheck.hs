@@ -29,6 +29,23 @@ checks = do
         check "measured UTF16 position JSON matches flat text" (bufferPositionValue buffer offset==positionValue text offset)
       forM_ [-1..Buffer.bufferLineCount buffer+2] $ \row -> forM_ [-1..12] $ \column ->
         check "measured UTF16 position conversion matches flat text" (bufferPositionOffset buffer (row,column)==positionOffset text (row,column))
+  -- A partial prefix ending in CR is still source content, not a terminator.
+  let interior=Buffer.newBuffer "a\rb\r\nlast\r"
+      astral=Buffer.newBuffer "a😀b\r\n"
+  check "UTF16 prefix retains an interior CR" (bufferPositionOffset interior (0,2)==2)
+  check "UTF16 prefix stops before the real CRLF" (bufferPositionOffset interior (0,99)==3)
+  check "UTF16 buffer position clamps within an astral scalar" (bufferPositionOffset astral (0,2)==1 && bufferPositionOffset astral (0,3)==2)
+  check "UTF16 buffer position clamps negative and EOF coordinates" (bufferPositionOffset astral (-1,-1)==0 && bufferPositionOffset astral (99,99)==5)
+  let long=Buffer.replaceSelection (Buffer.Selection 6 6) "x"
+        (Buffer.newBuffer ("head\n"<>T.replicate 200000 "a😀b"<>"\r\nlast"))
+  -- Editing promotes the long row before measuring the endpoint lookup.
+  _<-evaluate (Buffer.prepareBuffer long)
+  beforePrefix<-getAllocationCounter
+  forM_ [3..12] $ \column->do
+    actual<-evaluate (bufferPositionOffset long (1,column))
+    check "edited long-row UTF16 prefix matches independent short source" (actual==5+positionOffset "ax😀ba😀ba😀ba😀b" (0,column))
+  afterPrefix<-getAllocationCounter
+  check "UTF16 prefix lookup does not flatten the selected edited row" (beforePrefix-afterPrefix<1024*1024)
   let large=Buffer.newBuffer (T.replicate 200000 "a😀b\r\n")
   _<-evaluate (Buffer.prepareBuffer large)
   allocationBefore<-getAllocationCounter
