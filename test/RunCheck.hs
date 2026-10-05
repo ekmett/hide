@@ -482,7 +482,7 @@ shellBlockChecks = when (terminalAvailable && os/="mingw32") $ bracket temporary
     check "empty shell block reports error" (maybe False ((=="Cannot execute shell block").dialogTitle) (dialog rejected))
 
 -- The real input path captures a delayed build before the same permission owner
--- rechecks its caller/policy. FIFO EOF holds planning, not the owner callback.
+-- rechecks its caller/policy. Adoption ticks are withheld until the state changes.
 admittedBuildChecks :: IO ()
 admittedBuildChecks=when (os/="mingw32") $ bracket temporary removePathForcibly $ \root ->
   withEnv "XDG_CONFIG_HOME" (Just (root </> "config")) $
@@ -541,22 +541,9 @@ admittedBuildChecks=when (os/="mingw32") $ bracket temporary removePathForcibly 
           result<-reply
           check "real editor_input accepted one build event" (case result of Right value->field "appliedEvents" value==Just (1::Int); _->False)
           pure accepted
-        held runtime permissions caller after=do
-          removeFile configPath
-          callProcess "mkfifo" [configPath]
-          opened<-newEmptyMVar
-          release<-newEmptyMVar
-          withAsync (withSettingsWriter configPath $ \handle->do
-            BL.hPut handle (bytes<>BL.replicate 1048577 32); hFlush handle; putMVar opened (); takeMVar release) $ \writer->do
-              pending<-admit runtime permissions caller base
-              reached<-timeout 5000000 (takeMVar opened)
-              check "guest build planning reaches held configuration read" (reached==Just ())
-              stopped<-after pending
-              putMVar release ()
-              wait writer
-              removeFile configPath
-              BL.writeFile configPath bytes
-              pure stopped
+        -- Preparation can complete in the background, but only the serialized
+        -- owner tick may adopt it. Apply revocation/policy/Stop before that tick.
+        held runtime permissions caller after=admit runtime permissions caller base >>= after
         -- Consume the initial wire-policy wake. A subsequent fresh-check wake
         -- then proves a result is ready without invoking the launch callback.
         freshPolicy runtime permissions d=do
