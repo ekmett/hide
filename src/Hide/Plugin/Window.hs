@@ -36,7 +36,7 @@ import Hide.Buffer (contentLength,BufferContent, bufferContent, newBuffer, prepa
 import Hide.Unicode (sourceTextWidth)
 import Hide.Markdown (renderMarkdown)
 import Hide.Plugin.Command (validCommandName)
-import Hide.Syntax (Style(..),SourceRow,plainSourceRow,sourceRowText,sourceRowRanges,sourceRangeCharEnd,sectionTitle,styleScript)
+import Hide.Syntax (Style(..),SourceRow,plainSourceRow,sourceRowText,sourceRowRanges,sourceRangeCharEnd,sectionTitle,styleLayoutMetadata)
 
 -- | Exact content instance. A closed/reopened view cannot reuse this identity.
 data WindowRef = WindowRef Unique WindowScope (TVar (Integer,Bool))
@@ -177,7 +177,7 @@ prepareStyledTextWindow title styled=do
   _<-evaluate (prepareBuffer measured)
   let width=maximum (0:map sourceTextWidth (T.splitOn "\n" source))
   _<-evaluate width
-  evaluate (PreparedWindow ident (safeTitle title) (bufferContent measured) (StyledRows rows) width Nothing (any (sectionTitle . snd) styled) (any (maybe False (const True) . styleScript . snd) styled))
+  evaluate (PreparedWindow ident (safeTitle title) (bufferContent measured) (StyledRows rows) width Nothing (any (sectionTitle . snd) styled) (any (styleLayoutMetadata . snd) styled))
   where
     split chars=case break ((=='\n').fst) chars of
       (line,[])->[line]

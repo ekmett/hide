@@ -23,6 +23,7 @@ import Graphics.Vty.Span (SpanOp(..))
 import Blaze.ByteString.Builder (writeToByteString)
 import qualified Data.Text.Encoding as TE
 import qualified Data.ByteString as BS
+import Hide.Files (FileState(..))
 import Hide.Buffer (Buffer(undoStack),Selection(..),newBuffer,bufferContent,contentSlice,contentLength,contents)
 import Hide.Syntax (Style(..),fontTraits)
 import Hide.TextLayout
@@ -81,6 +82,56 @@ checks=do
      controlStyles=Vec.singleton [(c,SectionStyle 1 (Heading 1)) | c<-T.unpack controls]
  controlLayout<-prepareTextLayout True 40 controlSource controlStyles
  check "prepared rendering sanitizes controls before measuring glyphs" (all (\glyph->not (T.any (\c->c<' ') (layoutDisplayText glyph))) (Vec.toList (layoutGlyphs (Vec.head (layoutRows controlLayout)))) && contentSlice controlSource 0 (contentLength controlSource)==controls)
+ let overflowing=["q"<>T.replicate 70 "\x301","👩🏽\x200d"<>T.intercalate "\x200d" (replicate 40 "👩")]
+ forM_ [1,2] $ \columns->forM_ (overflowing++["a"<>T.replicate 70 "\x301"]) $ \cluster->do
+   let source=cluster<>"🇦🇧🇨Z"
+       expected=if T.take 1 cluster=="a" then "á"<>T.replicate 69 "\x301" else cluster
+       pending=M.modifyActive (\w->w {M.bounds=M.Rect 0 0 (columns+2) 12,M.bufferView=M.MarkdownView})
+         (M.addDocument (Just (FileState "notes.md" Nothing)) (newBuffer source) (M.initialDesktop (40,25)))
+   ready<-prepareTextPresentations pending
+   let view=fromJust (M.activeWindow ready)
+       prepared=fromJust (M.windowPresentation ready view)
+       glyphs=concatMap (Vec.toList . layoutGlyphs) (Vec.toList (layoutRows prepared))
+       fragments=filter ((=="�") . layoutDisplayText) glyphs
+       copied=fst (M.runCommand M.Copy (fst (M.runCommand M.SelectAll ready)))
+       sourceCopied=fst (M.runCommand M.Copy (fst (M.runCommand M.SelectAll (fst (M.runCommand (M.SetBufferView M.CurrentView) ready)))))
+   check "Markdown wrap retains exact overflow extents through GB11 and following flags"
+     (length fragments==3 && T.concat (map layoutText fragments)==expected && all ((==1) . layoutAdvance) fragments &&
+      [layoutText g | g<-glyphs,layoutText g `elem` ["🇦🇧","🇨"]]==["🇦🇧","🇨"])
+   check "rendered Markdown copy retains original fragment characters"
+     (T.filter (/='\n') (M.clipboard copied)==expected<>"🇦🇧🇨Z" && M.clipboard sourceCopied==source && contents (M.documentBuffer (fromJust (M.activeDocument ready)))==source)
+ forM_ [1,2,9] $ \columns->forM_ ["```\n "<>T.replicate 70 "\x301"<>"Z\n```","| H |\n|---|\n| "<>head overflowing<>"Z |"] $ \source->do
+   let chars=renderMarkdown columns source
+       measured=bufferContent (newBuffer (T.pack (map fst chars)))
+   prepared<-prepareTextLayout False columns measured (M.indexedHighlightRows chars)
+   let fragments=[g | row<-Vec.toList (layoutRows prepared),g<-Vec.toList (layoutGlyphs row),layoutDisplayText g=="�"]
+   check "code/table wrapping preserves overflow atoms including leading whitespace"
+     (length fragments==3 && all ((==1) . layoutAdvance) fragments && T.length (T.concat (map layoutText fragments))==71)
+ forM_ [3,5,9] $ \columns->forM_ overflowing $ \cluster->
+   forM_ ["```\n"<>cluster<>"Z\n```","| H |\n|---|\n| "<>cluster<>"Z |","> "<>cluster<>"Z"] $ \source->do
+     let chars=renderMarkdown columns source
+         measured=bufferContent (newBuffer (T.pack (map fst chars)))
+     prepared<-prepareTextLayout False columns measured (M.indexedHighlightRows chars)
+     let fragments=[g | row<-Vec.toList (layoutRows prepared),g<-Vec.toList (layoutGlyphs row),layoutDisplayText g=="�"]
+     check "inserted code/table/indent padding cannot swallow captured combining or ZWJ extents"
+       (length fragments==3 && T.concat (map layoutText fragments)==cluster && all ((==1) . layoutAdvance) fragments)
+ let plainHelp=M.modifyActive (\w->w {M.selection=Selection 2 2,M.scrollRow=2,M.scrollColumn=1})
+       (M.addHelpStyled [(c,Plain) | c<-"plain\ntext"] (M.initialDesktop (40,25)))
+ negative<-prepareTextPresentations plainHelp
+ let negativeView=fromJust (M.activeWindow negative)
+ check "metadata-free generated text retains a negative receipt without layout or viewport change"
+   (case Map.lookup (M.windowId negativeView) (M.windowPresentations negative) of
+      Just M.WindowPresentationUnneeded{}->M.windowPresentation negative negativeView==Nothing &&
+        (M.selection negativeView,M.scrollRow negativeView,M.scrollColumn negativeView)==(Selection 2 2,2,1)
+      _->False)
+ let overflowChars=renderMarkdown 1 (head overflowing<>"Z")
+     transcript=M.addHelpStyled overflowChars (M.initialDesktop (40,25))
+     adopted=transcript {M.buffers=Map.map (\doc->doc {M.documentHasLayoutMetadata=False,M.documentLabel=Just "Conversation"}) (M.buffers transcript)}
+ admitted<-prepareTextPresentations adopted
+ let admittedView=fromJust (M.activeWindow admitted)
+ check "worker discovers generated transcript metadata without a UI-owner admission scan"
+   (not (M.documentHasLayoutMetadata (fromJust (M.activeDocument admitted))) &&
+    maybe False ((==3) . length . filter ((=="�") . layoutDisplayText) . concatMap (Vec.toList . layoutGlyphs) . Vec.toList . layoutRows) (M.windowPresentation admitted admittedView))
  let scripted="A界e\x301👩🏽\x200d\&💻"
      scriptStyles=Vec.singleton [(c,ScriptStyle Superscript (BoldStyle Plain)) | c<-T.unpack scripted]
  scriptLayout<-prepareTextLayout False 40 (bufferContent (newBuffer scripted)) scriptStyles
@@ -102,8 +153,8 @@ checks=do
    (not (M.wideSectionTitles sourceScript) && M.windowPresentationNeeded sourceScript sourceView)
  let scriptDocument=fromJust (M.activeDocument sourceScript)
  check "style installation and invalidation keep cached script admission exact"
-   (M.documentHasScripts scriptDocument && not (M.documentHasScripts (M.restyle scriptDocument)) &&
-    not (M.documentHasScripts (M.setDocumentHighlight [('X',Plain)] scriptDocument)))
+   (M.documentHasLayoutMetadata scriptDocument && not (M.documentHasLayoutMetadata (M.restyle scriptDocument)) &&
+    not (M.documentHasLayoutMetadata (M.setDocumentHighlight [('X',Plain)] scriptDocument)))
  sourceReady<-prepareTextPresentations sourceScript
  let sourceWindow=fromJust (M.activeWindow sourceReady)
      sourceLayout=fromJust (M.windowPresentation sourceReady sourceWindow)
@@ -117,7 +168,7 @@ checks=do
  check "default styled Help copy retains original source" (M.clipboard sourceCopied=="界X")
  let plainReplacement=M.addHelpStyled [('X',Plain)] sourceReady
  check "replacing scripted Help with plain styling retires its cached admission and layout"
-   (maybe False (not . M.documentHasScripts) (M.activeDocument plainReplacement) &&
+   (maybe False (not . M.documentHasLayoutMetadata) (M.activeDocument plainReplacement) &&
     maybe False (\w->not (M.windowPresentationNeeded plainReplacement w) && M.windowPresentation plainReplacement w==Nothing) (M.activeWindow plainReplacement))
  check "script HTML inherits the bold paint through both nested wrappers"
    (all (`T.isInfixOf` snapshotHtml sourceReady) ["font-weight:bold", "font-weight:inherit;display:inline-block;position:relative", "font-weight:inherit;position:absolute"])

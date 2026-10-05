@@ -6,11 +6,11 @@
 -- Clipped GPU cells retain their full semantic glyph. Text-mode partial clusters
 -- become blanks. Terminal output advances
 -- explicitly past two-cell clusters even when the user's font draws them narrowly.
-module Hide.Unicode (graphemes, sourceGraphemesFrom, sourceTextWidth, sourceGlyphAdvance, scalarWidth, clusterWidth, textImage, wideTextImage, displayClusters, terminalProjection, scriptTerminalText, terminalSpan, Script(..), CellSpan(..), CellLayer(..), cellRowsForLayers, cellRowsForPic, cellDisplayOps, flattenPicture, displayOpsForPic, updateDisplayOps, terminalText, textInputChar) where
+module Hide.Unicode (DisplayItem, displayItems, itemSourceText, itemScalarCount, itemDisplayText, itemOverflow, itemWidth, sourceItemAdvance, graphemes, sourceGraphemesFrom, sourceTextWidth, sourceGlyphAdvance, scalarWidth, clusterWidth, textImage, wideTextImage, displayClusters, terminalProjection, scriptTerminalText, terminalSpan, Script(..), CellSpan(..), CellLayer(..), cellRowsForLayers, cellRowsForPic, cellDisplayOps, flattenPicture, displayOpsForPic, updateDisplayOps, terminalText, textInputChar) where
 
 import Control.Monad (forM_, when)
 import Data.Char (isPrint)
-import Data.Bits ((.&.), shiftR)
+import Data.Bits ((.&.), (.|.), shiftL, shiftR)
 import Data.Word (Word64)
 import Data.IORef (readIORef, writeIORef)
 import Blaze.ByteString.Builder (Write, writeToByteString)
@@ -30,79 +30,128 @@ import qualified Data.Text.Lazy as TL
 import qualified Data.Vector as Vec
 import qualified Data.Vector.Mutable as MV
 import Foreign.C (CInt(..))
-import GHC.Exts (Int(I#))
+import GHC.Exts (Int(I#),Char(C#),Int#,Char#)
 import qualified Graphics.Vty as V
 import qualified Graphics.Vty.Image.Internal as I
 
 foreign import ccall unsafe "utf8proc_charwidth" c_width :: CInt -> CInt
 foreign import ccall unsafe "thc_grapheme_step" c_graphemeStep :: CInt -> CInt -> CInt -> Word64
 
--- | Segment extended graphemes into borrowed UTF8 slices. The stateful iterator
--- reads only through the next boundary; taking a prefix never copies or indexes
--- the unconsumed tail. State survives across yielded fragments, including RI
--- pairs and ZWJ sequences. CRLF remains one complete cluster.
+-- | A borrowed source fragment of at most 32 Unicode scalars / 128 UTF8 bytes.
+-- Overflow fragments retain every original byte but display as one visible cell.
+-- The flag remains set until the natural extended-grapheme boundary.
+data DisplayItem = DisplayItem {-# UNPACK #-} !T.Text {-# UNPACK #-} !Int deriving (Eq,Show)
+
+-- | Exact borrowed original bytes, for source offsets and copying.
+itemSourceText :: DisplayItem -> T.Text
+itemSourceText (DisplayItem text _)=text
+-- Low two bits cache natural width; the following flags cache overflow,
+-- single tab, single CR and controls. Scalar count begins at bit six.
+-- | Whether this fragment belongs to a capped natural grapheme.
+itemOverflow :: DisplayItem -> Bool
+itemOverflow (DisplayItem _ meta)=meta .&. 4/=0
+-- | Bounded font/terminal input; overflow is one replacement character.
+itemDisplayText :: DisplayItem -> T.Text
+itemDisplayText item=if itemOverflow item then "�" else itemSourceText item
+-- | Shared natural display width; overflow fragments always occupy one cell.
+itemWidth :: DisplayItem -> Int
+itemWidth (DisplayItem _ meta)=if meta .&. 4/=0 then 1 else meta .&. 3
+-- | Resolve source tabs/controls or the one-cell overflow presentation.
+sourceItemAdvance :: Int -> DisplayItem -> Int
+sourceItemAdvance col (DisplayItem _ meta)
+  | meta .&. 4/=0=1
+  | meta .&. 8/=0=8-col `mod` 8
+  | meta .&. 16/=0=0
+  | meta .&. 32/=0=1
+  | otherwise=meta .&. 3
+
+-- | Original scalar extent, cached by the shared numeric cursor.
+itemScalarCount :: DisplayItem -> Int
+itemScalarCount (DisplayItem _ meta)=meta `shiftR` 6
+
+-- | Lazy bounded display segmentation. Concatenating original fragments returns
+-- the exact input. Only one scalar beyond a fragment is examined; state survives
+-- cap cuts, RI pairs and ZWJ sequences. Normal complete graphemes remain intact.
+displayItems :: T.Text -> [DisplayItem]
+displayItems text=scanItems text 0 (-1) 0 False
+{-# NOINLINE displayItems #-}
+
+-- | Original-byte projection of the shared bounded display segmentation.
+-- This accessor is for source editing/copying, never font shaping.
 graphemes :: T.Text -> [T.Text]
-graphemes text=scanGraphemes text 0 0 (-1) 0
+graphemes=map itemSourceText . displayItems
 {-# NOINLINE graphemes #-}
 
--- The same boundary cursor resumes after a numeric source-prefix seek. Keeping
--- previous/state at the original byte avoids restarting RI/ZWJ segmentation.
-scanGraphemes :: T.Text -> Int -> Int -> CInt -> CInt -> [T.Text]
-scanGraphemes text=scan
+scanItems :: T.Text -> Int -> CInt -> CInt -> Bool -> [DisplayItem]
+scanItems text=scan
   where
     size=TU.lengthWord8 text
-    slice start end=TU.takeWord8 (end-start) (TU.dropWord8 start text)
-    scan !start !byte !previous !state
-      | byte>=size=[slice start size | start<size]
-      | otherwise=case TU.iter text byte of
-          TU.Iter char bytes ->
-            let point=fromIntegral (fromEnum char)
-                step=if previous<0 then 0 else c_graphemeStep previous point state
-                nextState=fromIntegral (step `shiftR` 1)
-                boundary=previous>=0 && step .&. 1/=0
-                rest=scan (if boundary then byte else start) (byte+bytes) point nextState
-            in if boundary then slice start byte:rest else rest
+    scan !start !previous !state !continued
+      | start>=size=[]
+      | otherwise=case itemEnd text start previous state continued of
+          (# end#,count#,first#,natural#,controls,overflow,nextContinued,prev#,nextState# #)->
+            let end=I# end#; prev=fromIntegral (I# prev#); nextState=fromIntegral (I# nextState#) in
+            DisplayItem (TU.takeWord8 (end-start) (TU.dropWord8 start text))
+              ((I# count# `shiftL` 6) .|. I# natural# .|. (if overflow then 4 else 0) .|.
+               (if I# count#==1 && C# first#=='\t' then 8 else 0) .|.
+               (if I# count#==1 && C# first#=='\r' then 16 else 0) .|. (if controls then 32 else 0)):
+              scan end prev nextState nextContinued
 
--- | Seek the first complete source grapheme overlapping a display column.
--- The tuple contains Unicode-character offset, UTF8-byte offset, absolute
--- display column and a lazy borrowed suffix. Skipped glyphs allocate no Text
--- fragments or list nodes. Tabs use absolute columns; zero-width glyphs ending
--- at the requested column are skipped. The suffix concatenates to the original
--- source bytes beginning at the returned byte offset, including partial-wide
--- left edges. Stateful segmentation is identical to 'graphemes'.
-sourceGraphemesFrom :: Int -> T.Text -> (Int,Int,Int,[T.Text])
+-- One numeric cursor owns both emission and seek. The unboxed receipt does not
+-- allocate discarded source fragments. A cap stop leaves the lookahead scalar
+-- unconsumed in the source, but retains its processed codepoint/state. The next
+-- fragment therefore skips that transition and applies it exactly once.
+{-# INLINE itemEnd #-}
+itemEnd :: T.Text -> Int -> CInt -> CInt -> Bool -> (# Int#,Int#,Char#,Int#,Bool,Bool,Bool,Int#,Int# #)
+itemEnd text start previous state continued=go start 0 '\0' 0 False previous state
+  where
+    size=TU.lengthWord8 text
+    finish (I# byte) (I# count) (C# first) (I# natural) controls overflow nextContinued prev st=
+      case fromIntegral prev of
+        I# previous#->case fromIntegral st of
+          I# state#->(# byte,count,first,natural,controls,overflow,nextContinued,previous#,state# #)
+    go !byte !count !first !natural !controls !prev !st
+      | byte>=size=finish byte count first natural controls continued False prev st
+      | otherwise=case TU.iter text byte of
+          TU.Iter char bytes->
+            let point=fromIntegral (fromEnum char)
+                -- The incoming state already includes the first scalar transition.
+                -- Force later FFI results once, avoiding a shared lazy thunk.
+                !step=if count==0 then 0 else c_graphemeStep prev point st
+                nextState=if count==0 then st else fromIntegral (step `shiftR` 1)
+                boundary=prev>=0 && step .&. 1/=0
+            in if count>0 && boundary then finish byte count first natural controls continued False point nextState
+               else if count>=32 || byte+bytes-start>128 then finish byte count first natural controls True True point nextState
+               else go (byte+bytes) (count+1) (if count==0 then char else first)
+                 (max natural (scalarWidth char)) (controls || sourceControl char) point nextState
+
+-- | Seek the bounded source display item overlapping a display column.
+-- Returns scalar offset, byte offset, column and borrowed item suffix. Skipped
+-- items allocate no Text/list fragments. Overflow fragments have one-cell advance
+-- and retain exact source ranges; state and overflow survive prefix seeking.
+sourceGraphemesFrom :: Int -> T.Text -> (Int,Int,Int,[DisplayItem])
 sourceGraphemesFrom requested text=
-  case seek 0 0 0 0 0 (-1) 0 '\0' 0 False of
+  case seek 0 0 0 (-1) 0 False of
     (# char,byte,col,suffix #)->(I# char,I# byte,I# col,suffix)
   where
-    -- Return primitive coordinates so recursive numeric state cannot escape
-    -- boxed through the public tuple; only the final result boxes each Int.
     finish (I# char) (I# byte) (I# col) suffix=(# char,byte,col,suffix #)
     goal=max 0 requested
     size=TU.lengthWord8 text
-    seek !startByte !byte !startChar !char !col !previous !state !first !natural !controls
-      | byte>=size=
-          let advance=sourceAdvance col (char-startChar) first natural controls
-          in if col+advance>goal then finish startChar startByte col (scanGraphemes text startByte byte previous state)
-             else finish char byte (col+advance) []
-      | otherwise=case TU.iter text byte of
-          TU.Iter c bytes ->
-            let point=fromIntegral (fromEnum c)
-                step=if previous<0 then 0 else c_graphemeStep previous point state
-                nextState=fromIntegral (step `shiftR` 1)
-                boundary=previous>=0 && step .&. 1/=0
-            in if boundary then
-                 let advance=sourceAdvance col (char-startChar) first natural controls
-                 in if col+advance>goal then finish startChar startByte col (scanGraphemes text startByte byte previous state)
-                    else seek byte (byte+bytes) char (char+1) (col+advance) point nextState c (scalarWidth c) (sourceControl c)
-               else seek startByte (byte+bytes) startChar (char+1) col point nextState
-                 (if previous<0 then c else first) (max natural (scalarWidth c)) (controls || sourceControl c)
+    seek !byte !char !col !previous !state !continued
+      | byte>=size=finish char byte col []
+      | otherwise=case itemEnd text byte previous state continued of
+          (# end#,count#,first#,natural#,controls,overflow,nextContinued,prev#,nextState# #)->
+            let end=I# end#; count=I# count#; first=C# first#; natural=I# natural#
+                prev=fromIntegral (I# prev#); nextState=fromIntegral (I# nextState#)
+                advance=if overflow then 1 else sourceAdvance col count first natural controls
+            in if col+advance>goal then finish char byte col (scanItems text byte previous state continued)
+               else seek end (char+count) (col+advance) prev nextState nextContinued
 {-# NOINLINE sourceGraphemesFrom #-}
 
 -- | Natural source cell extent, including tab stops and control placeholders.
 -- Reuses numeric UTF8/stateful grapheme seeking; counting width does not allocate
 -- a Text fragment/list node per glyph. Plain viewport emission uses the same law:
--- @sourceTextWidth text ≡ sum of sourceGlyphAdvance at consecutive columns@.
+-- @sourceTextWidth text ≡ sum of sourceItemAdvance at consecutive columns@.
 sourceTextWidth :: T.Text -> Int
 sourceTextWidth text=let (_,_,width,_)=sourceGraphemesFrom maxBound text in width
 
@@ -140,13 +189,13 @@ clusterWidth = T.foldl' (\width c->max width (scalarWidth c)) 0
 
 textImage :: V.Attr -> T.Text -> V.Image
 textImage _ t | T.null t = V.emptyImage
-textImage a t = I.HorizText a (TL.fromStrict t) (if T.all simpleChar t then T.length t else sum (map clusterWidth (graphemes t))) (T.length t)
+textImage a t = I.HorizText a (TL.fromStrict t) (if T.all simpleChar t then T.length t else sum (map itemWidth (displayItems t))) (T.length t)
 
 -- | Render each semantic grapheme in exactly two cells. Naturally wide text
 -- remains two cells. The original text remains in HorizText, whose explicit
 -- advance survives the compositor; no Unicode substitution or attribute marker.
 wideTextImage :: V.Attr -> T.Text -> V.Image
-wideTextImage a=unmergedImages . map (\g->I.HorizText a (TL.fromStrict g) 2 (T.length g)) . graphemes
+wideTextImage a=unmergedImages . map (\item->let g=itemDisplayText item; n=if itemOverflow item then 1 else 2 in I.HorizText a (TL.fromStrict g) n (T.length g)) . displayItems
 
 -- Vty merges adjacent HorizText values by attribute. That optimization assumes
 -- natural advances, so an explicit-width primitive retains a join boundary.
@@ -157,9 +206,9 @@ unmergedImages=foldr (\image rest->I.HorizJoin image rest
 -- | Read a text primitive's explicit advance. A deliberately widened primitive
 -- contains one grapheme; ordinary runs retain natural widths.
 displayClusters :: Int -> T.Text -> [(T.Text,Int)]
-displayClusters width text=case graphemes text of
-  [g] | width==2 -> [(g,2)]
-  gs -> [(g,clusterWidth g) | g<-gs]
+displayClusters width text=case displayItems text of
+  [item] | width==2 && not (itemOverflow item) -> [(itemDisplayText item,2)]
+  items -> [(itemDisplayText item,itemWidth item) | item<-items]
 
 -- | The final visible row representation shared by terminal and GPU frontends.
 -- CellText contains complete one-codepoint, one-cell glyphs. CellGlyph retains
@@ -406,7 +455,7 @@ scriptTerminalText natural text | natural==2="\xfffd"
 
 -- | Encode positioned terminal text with explicit advancement across two-cell clusters.
 terminalText :: (Int -> Write) -> Int -> T.Text -> (Write,Int)
-terminalText move start text = foldl' emit (mempty,start) (graphemes text)
+terminalText move start text = foldl' emit (mempty,start) (map itemDisplayText (displayItems text))
   where
     emit (bytes,x) g =
       let n=clusterWidth g

@@ -40,7 +40,7 @@ import Text.Read (readMaybe)
 import System.FilePath ((</>), takeDirectory, takeFileName, takeExtension, isAbsolute, equalFilePath, splitDirectories, joinPath, normalise)
 import Hide.Browser (Entry(..))
 import Hide.Git (GitReview)
-import Hide.Syntax (Style(..), SourceRow, prepareSourceRow, highlightFor, linkSpans, styleScript)
+import Hide.Syntax (Style(..), SourceRow, prepareSourceRow, highlightFor, linkSpans, styleLayoutMetadata)
 import Hide.Hex
 import Hide.Unicode (textInputChar,sourceGraphemesFrom)
 import Hide.InlineState
@@ -59,20 +59,20 @@ inside (Rect x y w h) a b = a >= x && a < x+w && b >= y && b < y+h
 -- | Shared buffer and prepared presentation metadata; split windows reference its ID.
 -- documentOrigin retains canonical privacy provenance for generated source. It
 -- does not authorize saving, filesystem access or debugger source operations.
-data Document = Document { documentBuffer :: Buffer, documentFile :: Maybe FileState, documentLabel :: Maybe Text, documentHighlight :: [(Char,Style)], documentHasScripts :: !Bool, documentWidth :: Int, documentCursorVisible :: Bool, documentSuggestedName :: Maybe FilePath, documentSourceRows :: Maybe (Vec.Vector SourceRow), documentShellBlocks :: [(Int,Int,Text,Text)], documentLinks :: [(Int,Int,Text)], documentMarkdownPath :: Maybe FilePath, documentOrigin :: Maybe FilePath } deriving (Eq,Show)
+data Document = Document { documentBuffer :: Buffer, documentFile :: Maybe FileState, documentLabel :: Maybe Text, documentHighlight :: [(Char,Style)], documentHasLayoutMetadata :: !Bool, documentWidth :: Int, documentCursorVisible :: Bool, documentSuggestedName :: Maybe FilePath, documentSourceRows :: Maybe (Vec.Vector SourceRow), documentShellBlocks :: [(Int,Int,Text,Text)], documentLinks :: [(Int,Int,Text)], documentMarkdownPath :: Maybe FilePath, documentOrigin :: Maybe FilePath } deriving (Eq,Show)
 -- Source colors are populated by the session worker, never forced by input or drawing.
 newDocument :: Buffer -> Maybe FileState -> Document
 newDocument b file = restyle (Document b file Nothing [] False 0 True Nothing Nothing [] [] Nothing Nothing)
 
 restyle :: Document -> Document
-restyle doc = doc {documentHighlight=[],documentHasScripts=False,documentSourceRows=Nothing,documentShellBlocks=[],documentLinks=[],
+restyle doc = doc {documentHighlight=[],documentHasLayoutMetadata=False,documentSourceRows=Nothing,documentShellBlocks=[],documentLinks=[],
   documentWidth=if byteMode (documentBuffer doc) then hexWidth 16 else documentWidth doc}
 
--- | Install prepared styling and its cached script admission together. The
+-- | Install prepared styling and its cached layout admission together. The
 -- owner replaces content/version before installing new styles; input and layout
 -- admission read this flag without traversing the styled payload.
 setDocumentHighlight :: [(Char,Style)] -> Document -> Document
-setDocumentHighlight styled doc=doc {documentHighlight=styled,documentHasScripts=any ((/=Nothing) . styleScript . snd) styled}
+setDocumentHighlight styled doc=doc {documentHighlight=styled,documentHasLayoutMetadata=any (styleLayoutMetadata . snd) styled}
 
 syntaxDocument :: Document -> Bool
 syntaxDocument doc = not (byteMode (documentBuffer doc)) &&
@@ -86,7 +86,7 @@ documentSyntaxPath doc = maybe (fromMaybe "Main.hs" (documentSuggestedName doc))
 highlightDocument :: Document -> Document
 highlightDocument doc
   | not (syntaxDocument doc) = doc
-  | otherwise = doc {documentHighlight=[],documentHasScripts=False,documentSourceRows=Just (sourceHighlightRows text tokens),documentWidth=measureDocumentWidth text}
+  | otherwise = doc {documentHighlight=[],documentHasLayoutMetadata=False,documentSourceRows=Just (sourceHighlightRows text tokens),documentWidth=measureDocumentWidth text}
   where text=contents (documentBuffer doc)
         tokens=highlightFor (documentSyntaxPath doc) text
 
@@ -129,6 +129,7 @@ data PresentationTarget = DocumentPresentation !Int !Int | MarkdownPresentation 
 data WindowPresentation = WindowPresentation !PresentationTarget !Int !Bool !TextLayout.TextLayout
   | MarkdownWindowPresentation !PresentationTarget !Int !Bool !TextLayout.TextLayout !BufferContent ![(Int,Int,Text)]
   | MarkdownWindowFailure !PresentationTarget !Int !Bool
+  | WindowPresentationUnneeded !PresentationTarget !Int !Bool
 -- Payloads share the layout's immutable identity; never compare rendered text/links.
 instance Eq WindowPresentation where
   a==b=presentationMetadata a==presentationMetadata b && presentationLayout a==presentationLayout b
@@ -138,10 +139,12 @@ presentationMetadata :: WindowPresentation -> (PresentationTarget,Int,Bool)
 presentationMetadata (WindowPresentation target columns wide _)=(target,columns,wide)
 presentationMetadata (MarkdownWindowPresentation target columns wide _ _ _)=(target,columns,wide)
 presentationMetadata (MarkdownWindowFailure target columns wide)=(target,columns,wide)
+presentationMetadata (WindowPresentationUnneeded target columns wide)=(target,columns,wide)
 presentationLayout :: WindowPresentation -> Maybe TextLayout.TextLayout
 presentationLayout (WindowPresentation _ _ _ layout)=Just layout
 presentationLayout (MarkdownWindowPresentation _ _ _ layout _ _)=Just layout
 presentationLayout MarkdownWindowFailure{}=Nothing
+presentationLayout WindowPresentationUnneeded{}=Nothing
 
 -- | Read the displayed selection/viewport without changing source interaction.
 displayWindow :: Window -> Window
@@ -2924,20 +2927,18 @@ windowPresentationTarget d w=case windowContent w of
 -- Pending styled views use ordinary geometry; Markdown stays a read-only
 -- placeholder until a matching derived presentation is adopted.
 windowPresentation :: Desktop -> Window -> Maybe TextLayout.TextLayout
-windowPresentation d w
-  | not (windowPresentationNeeded d w)=Nothing
-  | otherwise=do
-      prepared<-M.lookup (windowId w) (windowPresentations d)
-      current<-windowPresentationTarget d w
-      let (target,columns,wide)=presentationMetadata prepared
-      if target==current && wide==wideSectionTitles d && columns==max 1 (width (bounds w)-2) then presentationLayout prepared else Nothing
+windowPresentation d w=do
+  prepared<-M.lookup (windowId w) (windowPresentations d)
+  current<-windowPresentationTarget d w
+  let (target,columns,wide)=presentationMetadata prepared
+  if target==current && wide==wideSectionTitles d && columns==max 1 (width (bounds w)-2) then presentationLayout prepared else Nothing
 
 -- Cached admission stays separate from payload identity, so preference changes
 -- can still reproject the existing semantic viewport anchor.
 windowPresentationNeeded :: Desktop -> Window -> Bool
 windowPresentationNeeded d w=bufferView w==MarkdownView || wideSectionTitles d || case windowContent w of
   PluginContent reference->maybe False (PluginWindow.preparedWindowNeedsLayout False) (M.lookup reference (pluginWindows d))
-  SourceContent bid->maybe False documentHasScripts (M.lookup bid (buffers d))
+  SourceContent bid->maybe False documentHasLayoutMetadata (M.lookup bid (buffers d))
 
 windowTextPosition :: Desktop -> Window -> BufferContent -> Int -> (Int,Int)
 windowTextPosition d w text pos=maybe (contentPosition text pos) (\layout->TextLayout.layoutPosition layout pos) (windowPresentation d w)

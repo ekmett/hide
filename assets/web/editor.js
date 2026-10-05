@@ -191,6 +191,17 @@ requestAnimationFrame(present);
 // Script runs retain semantic text and natural atlas size while occupying one
 // cell. The host supplies Unicode width; the browser never measures font advance.
 const scriptSegments=new Intl.Segmenter(undefined,{granularity:'grapheme'});
+function boundedGlyphText(text){
+ if(typeof text!=='string'||!text.length||text.length>64)return false;
+ let scalars=0,bytes=0;
+ for(const char of text){
+   const point=char.codePointAt(0);
+   if(point<32||point===127||(point>=0xd800&&point<=0xdfff))return false;
+   bytes+=point<0x80?1:point<0x800?2:point<0x10000?3:4;
+   if(++scalars>32||bytes>128)return false;
+ }
+ return true;
+}
 function decodeRows(changed){
  return changed.map(([y,spans])=>[y,spans.map(span=>{
    if(span.length!==5||!Number.isInteger(span[3])||span[3]<0||(span[3]&27)!==span[3])throw new Error('Invalid font traits');
@@ -199,12 +210,12 @@ function decodeRows(changed){
      if(typeof run==='string')return Array.from(run,c=>[c,1,false,0,1]);
      if(Array.isArray(run)&&run.length===3){
        const [text,natural,mode]=run;
-       if(typeof text!=='string'||!text.length||text.length>8192||/[\u0000-\u001f\u007f]/u.test(text)||
+       if(!boundedGlyphText(text)||
          ![1,2].includes(natural)||!['sup','sub'].includes(mode)||
          scriptSegments.segment(text)[Symbol.iterator]().next().value.segment!==text)throw new Error('Invalid script glyph');
        return [[text,1,false,0,1,mode==='sup'?1:2,natural]];
      }
-     if(!Array.isArray(run)||run.length!==5||typeof run[0]!=='string'||!Number.isInteger(run[1])||run[1]<1||run[1]>2||typeof run[2]!=='boolean'||!Number.isInteger(run[3])||!Number.isInteger(run[4])||run[3]<0||run[4]<1||run[3]+run[4]>run[1])throw new Error('Invalid glyph geometry');
+     if(!Array.isArray(run)||run.length!==5||!boundedGlyphText(run[0])||!Number.isInteger(run[1])||run[1]<1||run[1]>2||typeof run[2]!=='boolean'||!Number.isInteger(run[3])||!Number.isInteger(run[4])||run[3]<0||run[4]<1||run[3]+run[4]>run[1])throw new Error('Invalid glyph geometry');
      return [run];
    })];
  })]);
