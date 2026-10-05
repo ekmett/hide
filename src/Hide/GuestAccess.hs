@@ -212,7 +212,9 @@ guestKeyAllowed d key mods=maybe True (guestCommandAllowedIn d) (boundKeyCommand
     fieldNavigation=isJust (dialog d) && case boundKeyCommand key mods d of
       Just cmd->cmd `elem` [DialogFocusNext,DialogFocusPrevious,DialogCancel]
       Nothing->key `elem` [V.KChar '\t',V.KBackTab,V.KEsc]
-    navigation=dialog d==Nothing && (key==V.KFun 6 || key `elem` [V.KChar '\t',V.KBackTab] && any (`elem` mods) [V.MCtrl,V.MAlt] || V.MAlt `elem` mods && case key of V.KChar c -> c>='1' && c<='9'; _ -> False)
+    navigation=dialog d==Nothing && case boundKeyCommand key mods d of
+      Just cmd -> cmd `elem` [NextWindow,PreviousWindow,FocusSource]
+      Nothing -> key==V.KFun 6 || key `elem` [V.KChar '\t',V.KBackTab] && any (`elem` mods) [V.MCtrl,V.MAlt] || V.MAlt `elem` mods && case key of V.KChar c -> c>='1' && c<='9'; _ -> False
 
 -- Named navigation/editing shortcuts, plus Ctrl/Alt character shortcuts.
 -- Ordinary text is represented by the separate keyboardAllowed metadata.

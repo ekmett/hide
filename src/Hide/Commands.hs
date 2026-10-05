@@ -14,7 +14,7 @@ import Data.List (find,subsequences)
 import qualified Data.Map.Strict as M
 import qualified Hide.Bindings
 import Hide.Bindings (BindingPlatform(..), bindingPlatforms, platformName, BindingContext(..), bindingContexts, contextName, Bindings, compileBindings, readChord)
-import Hide.Model (Desktop(..), Command(..), terminalSourceReserved, wordStarReserved, dialogBindingCommands, dialogReserved, dialogFocusChord, dialogControlChord)
+import Hide.Model (Desktop(..), Command(..), terminalSourceReserved, windowCycleChord, wordStarReserved, dialogBindingCommands, dialogReserved, dialogFocusChord, dialogControlChord)
 import qualified Hide.Plugin.Menu as Plugin
 import Hide.BufferView (BufferView(..))
 
@@ -145,6 +145,7 @@ builtinCommands =
   ,BuiltinCommand "hide.window.zoom" (Zoom)
   ,BuiltinCommand "hide.window.pin-terminal" (ToggleTerminalPin)
   ,BuiltinCommand "hide.window.next" (NextWindow)
+  ,BuiltinCommand "hide.window.previous" (PreviousWindow)
   ,BuiltinCommand "hide.view.current" (SetBufferView CurrentView)
   ,BuiltinCommand "hide.view.changes" (SetBufferView ChangesView)
   ,BuiltinCommand "hide.view.only-changes" (SetBufferView OnlyChangesView)
@@ -222,12 +223,12 @@ platformBindings catalogue platform configuration=do
         let platformReserved = (platform==TerminalPlatform && V.MMeta `elem` mods) ||
               (platform==MacPlatform && ((V.MAlt `elem` mods && V.MCtrl `notElem` mods && V.MMeta `notElem` mods && not (context==DialogKeys && dialogFocusChord key mods) && case key of V.KChar _->True; _->False) || (key `elem` map V.KChar "h\\[]" && V.MMeta `elem` mods))) ||
               (platform/=TerminalPlatform && key `elem` map V.KChar "0+=-" && any (`elem` mods) [V.MCtrl,V.MAlt])
-        unless (not (terminalSourceReserved key mods && not (context==DialogKeys && dialogControlChord key mods) || contextReserved || platformReserved || context==WordStarKeys && wordStarReserved key mods || context==DialogKeys && dialogReserved key mods))
+        unless (not (terminalSourceReserved key mods && not (context==DialogKeys && dialogControlChord key mods) || contextReserved || platformReserved || context==WordStarKeys && wordStarReserved key mods || context==DialogKeys && (dialogReserved key mods || windowCycleChord key mods)))
           (Left ("Reserved "<>contextName context<>" key: "<>raw))
       compiled<-either (Left . (("Keybinding context "<>contextName context<>": ")<>)) Right $ compileBindings ([(builtinIdentifier entry,builtinAction entry,keys context (builtinAction entry)) | entry<-builtinCommands,context/=DialogKeys || builtinAction entry `elem` dialogBindingCommands]++[(name,action,[]) | (name,action)<-catalogue,context/=DialogKeys,name `notElem` map builtinIdentifier builtinCommands]) overrides
       pure ((platform,context),compiled)
     processControl key mods=case key of
-      V.KChar _ -> V.MCtrl `elem` mods && V.MAlt `notElem` mods && V.MMeta `notElem` mods
+      V.KChar _ -> V.MCtrl `elem` mods && V.MAlt `notElem` mods && V.MMeta `notElem` mods && not (windowCycleChord key mods)
       _ -> False
     dialogChord raw=case readChord raw of Right (key,mods)->dialogReserved key mods; _->False
     wordStarChord raw=case readChord raw of Right (key,mods)->wordStarReserved key mods; _->False
@@ -247,15 +248,16 @@ platformBindings catalogue platform configuration=do
         (CursorWordLeft False,["Ctrl+A","Ctrl+Shift+A","Ctrl+Alt+A","Ctrl+Alt+Shift+A"]),(CursorWordRight False,["Ctrl+F","Ctrl+Shift+F"])])) | (action,chords)<-navigationDefaults] ++
       [(DeleteLine,["Ctrl+Y","Ctrl+Shift+Y","Ctrl+Alt+Y","Ctrl+Alt+Shift+Y"])]
       where named raw=case readChord raw of
+              Right (key,mods) | windowCycleChord key mods -> True
               Right (key,mods) | wordStarReserved key mods -> False
               Right (V.KChar c,mods) | V.MCtrl `elem` mods ->
                 c==' ' || c=='z' || V.MShift `elem` mods && c `elem` ("lcn"::String)
               _ -> True
-    defaultsFor TerminalKeys=[(action,filter (/="Ctrl+Q") chords) | (action,chords)<-defaults,action `elem` [Close,Quit,Zoom,NextWindow,NextMessage,PreviousMessage,MakeTarget,CompileTarget,RunTarget] || case action of DebugCommand _->True; _->False]
-    defaultsFor SidebarKeys=filter ((/=NextWindow).fst) defaults ++
+    defaultsFor TerminalKeys=[(action,filter (/="Ctrl+Q") chords) | (action,chords)<-defaults,action `elem` [Close,Quit,Zoom,NextWindow,PreviousWindow,NextMessage,PreviousMessage,MakeTarget,CompileTarget,RunTarget] || case action of DebugCommand _->True; _->False]
+    defaultsFor SidebarKeys=withoutWindowF6 defaults ++
       [(SidebarMove (-1),["Up"]),(SidebarMove 1,["Down"]),(SidebarMove (-10),["PageUp"]),(SidebarMove 10,["PageDown"]),
        (SidebarActivate,["Enter"]),(SidebarExpand,["Right"]),(SidebarCollapse,["Left"]),(FocusSource,["F6"])]
-    defaultsFor MessagesKeys=filter (\(action,_)->action/=NextWindow && case action of DebugCommand _->False; _->True) defaults ++
+    defaultsFor MessagesKeys=withoutWindowF6 (filter (\(action,_)->case action of DebugCommand _->False; _->True) defaults) ++
       [(MessagesMove (-1),["Up"]),(MessagesMove 1,["Down"]),(MessagesPage (-1),["PageUp"]),(MessagesPage 1,["PageDown"]),(GoToMessage,["Enter"]),(FocusSource,["F6"])]
     defaultsFor ConversationKeys=filter (\(action,_)->action `notElem` [Copy,Cut,Paste,SelectAll,Redo,Conversation]) defaults ++
       [(Copy,["Ctrl+C","Ctrl+Shift+C","Ctrl+Insert"]),(Cut,["Ctrl+X","Ctrl+Shift+X","Shift+Delete"]),
@@ -263,6 +265,7 @@ platformBindings catalogue platform configuration=do
        (Redo,["Ctrl+Y","Ctrl+Shift+Y","Ctrl+Shift+Z"])]
     defaultsFor SourceKeys=defaults++navigationDefaults
     defaultsFor _=defaults
+    withoutWindowF6=map (\(action,chords)->(action,if action==NextWindow then filter (/="F6") chords else chords))
     navigationDefaults=horizontalDefaults++edgeDefaults++wordDefaults++
       [(CursorUp False,verticalAliases V.KUp False),(CursorDown False,verticalAliases V.KDown False),
        (CursorUp True,verticalAliases V.KUp True),(CursorDown True,verticalAliases V.KDown True)]
@@ -302,7 +305,7 @@ platformBindings catalogue platform configuration=do
       ,(Find,["Ctrl+F"]),(Replace,["Ctrl+H","Ctrl+R"])
       ,(FindNext,["Ctrl+L"]),(FindPrevious,["Ctrl+Shift+L"]),(GoTo,["Ctrl+G"])
       ,(Help,["F1"]),(InspectType,["Shift+F1"]),(Definition,["F12"])
-      ,(Complete,["Ctrl+Space"]),(Zoom,["F5"]),(NextWindow,["F6"])
+      ,(Complete,["Ctrl+Space"]),(Zoom,["F5"]),(NextWindow,["F6","Ctrl+Tab"]),(PreviousWindow,["Ctrl+Shift+Tab"])
       ,(ToggleTree,["Ctrl+B"]),(Conversation,["Ctrl+Shift+C"]),(AgentNew,["Ctrl+Shift+N"])
       ,(NextMessage,["Alt+F8"]),(PreviousMessage,["Alt+F7"])
       ,(MakeTarget,["F9"]),(CompileTarget,["Alt+F9"]),(RunTarget,["Ctrl+F9"])

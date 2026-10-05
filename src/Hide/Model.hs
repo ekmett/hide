@@ -164,7 +164,7 @@ markdownDocument doc=documentLabel doc==Nothing && textBuffer (documentBuffer do
 
 
 data Command = New | Open | Download | ChangeDir | Save | SaveAs | Close | Quit | Undo | Redo | Cut | Copy | Paste
-  | Find | FindNext | FindPrevious | Replace | GoTo | SelectAll | Zoom | NextWindow | Cascade | Tile
+  | Find | FindNext | FindPrevious | Replace | GoTo | SelectAll | Zoom | NextWindow | PreviousWindow | Cascade | Tile
   | OpenLink (Maybe FilePath) Text | SplitVertical | SplitHorizontal | ToggleTerminalPin | About | Help | EditorOptions | ChatInputOptions | Gallery
   | InspectType | Definition | Complete | Problems | NextMessage | PreviousMessage | RestartHLS | RenameSymbol | CodeActions
   | ProjectBrowser | ToggleTree | GitDiff | GitCommit | GitFetch | GitPull | GitMerge | ReviewDisk
@@ -458,7 +458,7 @@ commandDescription cmd = case cmd of
   Find -> "Find text in the active buffer."; FindNext -> "Find the next occurrence of the last search."
   Replace -> "Find text and replace the next match."; GoTo -> "Move to a line number."
   Zoom -> "Toggle between full workspace and the previous window size."
-  NextWindow -> "Activate the next editor window."; Cascade -> "Arrange windows in an overlapping stack."
+  NextWindow -> "Activate the next editor window."; PreviousWindow -> "Activate the previous editor window."; Cascade -> "Arrange windows in an overlapping stack."
   Tile -> "Arrange windows in horizontal rows."
   SplitVertical -> "Create a side-by-side view of the same buffer."
   SplitHorizontal -> "Create a view of the same buffer above or below."
@@ -1270,6 +1270,7 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
         Just r -> w {bounds = fitWindow d r, restoredBounds = Nothing}
         Nothing -> w {bounds = let (sw,sh) = screenSize d in Rect (treeWidthOf d) 1 (sw-treeWidthOf d) (sh-2-problemsHeight d), restoredBounds = Just (bounds w)}
     go NextWindow d = (cycleEditorWindow False d,[])
+    go PreviousWindow d = (cycleEditorWindow True d,[])
     go Cascade d = (replaceFloating (zipWith cascade [0..] (floatingWindows d)) d,[]) where
       (sw,sh) = screenSize d
       cascade i w = w {bounds = fitWindow d (Rect (treeWidthOf d+i `mod` 6) (1+i `mod` 6) (sw-treeWidthOf d-6) (sh-8)), restoredBounds = Nothing}
@@ -3051,7 +3052,7 @@ terminalContextReserved :: Desktop -> V.Key -> [V.Modifier] -> Bool
 terminalContextReserved d key mods =
   (terminalSourceReserved key mods && not (bindingContext d==Just Bindings.DialogKeys && dialogControlChord key mods)) ||
   (bindingContext d==Just Bindings.WordStarKeys && wordStarReserved key mods) ||
-  (bindingContext d==Just Bindings.DialogKeys && dialogReserved key mods) ||
+  (bindingContext d==Just Bindings.DialogKeys && (dialogReserved key mods || windowCycleChord key mods)) ||
   (bindingContext d==Just Bindings.ConversationKeys && key==V.KEnter)
 
 bindingInputAvailable :: Desktop -> Bool
@@ -3064,6 +3065,7 @@ bindingInputAvailable d=case dialog d of
 -- into a hardcoded named command. PTY fallback retains every ordinary control key.
 unboundKey :: V.Key -> [V.Modifier] -> Desktop -> (Desktop,[Effect])
 unboundKey key mods d
+  | Just _<-effectiveBindings d,dialog d==Nothing,windowCycleChord key mods = (d,[])
   | Just _<-effectiveBindings d,dialog d/=Nothing,dialogControlChord key mods = (d,[])
   | Just _<-effectiveBindings d, sourceNavigationOwner d,
     not (bindingPlatform d==Bindings.TerminalPlatform && V.MMeta `elem` mods),
@@ -3086,9 +3088,15 @@ wordStarReserved (V.KChar c) mods=V.MCtrl `elem` mods && V.MMeta `notElem` mods 
   (toLower c `elem` ("kq"::String) || toLower c=='x' && V.MAlt `elem` mods)
 wordStarReserved _ _=False
 
+-- | Control Tab aliases belong to window commands outside a modal. Alt and Meta
+-- retain their earlier focus/platform owners.
+windowCycleChord :: V.Key -> [V.Modifier] -> Bool
+windowCycleChord key mods=key `elem` [V.KChar '\t',V.KBackTab] &&
+  V.MCtrl `elem` mods && V.MAlt `notElem` mods && V.MMeta `notElem` mods
+
 terminalSourceReserved :: V.Key -> [V.Modifier] -> Bool
 terminalSourceReserved key mods=(key==V.KChar ']' && V.MCtrl `elem` mods) || key==V.KEsc || key==V.KFun 10 ||
-  key `elem` [V.KChar '\t',V.KBackTab] ||
+  (key `elem` [V.KChar '\t',V.KBackTab] && not (windowCycleChord key mods)) ||
   (V.MAlt `elem` mods && V.MMeta `notElem` mods && case key of
     V.KChar c->c `elem` ['1'..'9'] || toLower c `elem` [mn | (_,mn,_)<-menus] || c `elem` ['\\','[',']']
     V.KRight->True
