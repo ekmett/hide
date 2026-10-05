@@ -93,7 +93,12 @@ cache, and no user input is discarded while preparation runs.
 The stream belongs to the immutable source line. Forcing its thunks changes no
 content identity, revision, dirty state or Undo. Only a real edit promotes it to
 the existing persistent measured tree. Scalar metadata and explicit whole-text
-reads remain independent of display preparation. Ordinary short rows keep their
+reads remain independent of display preparation.
+
+LSP UTF-16 position lookup borrows only the requested scalar prefix of its
+measured source row, preserving interior CR and clamping at its actual
+terminator. Small columns do not demand a whole-row projection. Ordinary short
+rows keep their
 compact representation and existing query path.
 
 Exact total width is an exception: loaded rows memoize a numeric full-row scan
