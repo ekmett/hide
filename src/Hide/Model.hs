@@ -3254,7 +3254,7 @@ submitDialog button dg original
     DebugDialog action -> (d,[DebugAction action (T.pack (show button) : values ++
       [if value then "true" else "false" | CheckBox _ value <- fields dg] ++
       [T.pack (show i) | ListBox _ _ i <- fields dg])])
-    PermissionDialog action -> (if button==0 && approvalDialog dg then original else d,[PermissionAction action (T.pack (show button) : values ++
+    PermissionDialog action -> (original,[PermissionAction action (T.pack (show button) : values ++
       [contents b | TextArea _ True b _ _ _ <- fields dg] ++
       [T.pack (show i) | Radio _ _ i <- fields dg] ++
       [T.pack (show i) | ListBox _ _ i <- fields dg])])

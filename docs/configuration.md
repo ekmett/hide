@@ -339,6 +339,13 @@ terminal_start = "disable"
 
 Read-only tools default to Enable; other tools default to Prompt. Omitted tools retain that default. See [session tools](session-tools.md) for the available services.
 
+The editor stays responsive while loading and saving permissions. Each dispatch,
+approval and prepared diff adoption checks fresh policy. Unreadable, oversized or
+invalid configuration rejects the tool. A permission save takes effect before
+queued requests proceed; closing a loading dialog prevents its late reply from
+reopening it. External file edits are observed on the next read, with a finite
+read-to-adoption interval rather than atomic revocation.
+
 The editor preserves unrelated settings and comments when saving its own entries. Additional compiler sections can share this file as they are introduced.
 
 ## Autocomplete

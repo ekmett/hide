@@ -1,6 +1,7 @@
 {-# LANGUAGE CPP, OverloadedStrings #-}
 module ConversationCheck (checks, composerCodeChecks) where
 
+import MCPPermissionsCheck (settledTool,settleDialog)
 import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Concurrent (threadDelay)
 
@@ -388,9 +389,9 @@ checks = (composerCodeChecks >>) $ bracket temporary removePathForcibly $ \root 
       let primary=AR.primaryAgent (conversationAgents runtime)
           actor=fmap (() <$) (AH.statusAgent (AR.agentHub (conversationAgents runtime)) (AH.Agent primary) primary)
           operation=chatToolAs runtime (Just bound)
-          call=Permissions.permissionCallAs actor permissions operation
+          call=settledTool permissions (Permissions.permissionCallAs actor permissions operation)
           approve desktop=case dialog desktop of
-            Just dg->let (next,effects)=submitDialog 0 dg desktop in snd <$> Permissions.policyEffects permissions fallback next effects
+            Just dg->let (next,effects)=submitDialog 0 dg desktop in snd <$> Permissions.policyEffects permissions fallback next effects >>= settleDialog permissions dg
             Nothing->error "Missing question permission review"
       (review,creation)<-call savedDraft "ask_user" (object ["question" .= ("One permission per question"::T.Text)])
       check "question creation retains ordinary permission approval" (dialog review/=Nothing && chatQuestion review==Nothing)

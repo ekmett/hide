@@ -115,7 +115,7 @@ checks=withBufferDiffCommands $ \commands->bracket temporary removePathForcibly 
     (shown,pending)<-call runtime base "buffer_apply_diff" (args patch)
     started<-submit runtime 0 shown
     let newer=started {dialog=fmap (\dg->dg {body=["new review body"],fields=map (\f->case f of TextArea "diff" True b sel sr sc->TextArea "diff" True (replaceSelection (Selection 0 (bufferLength b)) corrected b) sel sr sc; _->f) (fields dg)}) (dialog started)}
-    rejected<-untilResult runtime (\d->status d=="Diff review changed; approve the current review.") newer
+    rejected<-untilResult runtime (\d->status d `elem` ["Permission review changed; approve the current review.","Diff review changed; approve the current review."]) newer
     check "old attempt never overwrites newer editable review/body" (unchanged rejected && maybe False ((==["new review body"]).body) (dialog rejected))
     correctedStart<-submit runtime 0 rejected
     (fixed,fixedResponse)<-awaitReply runtime correctedStart pending

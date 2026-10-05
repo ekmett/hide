@@ -33,6 +33,14 @@ import qualified Hide.Plugin.Buffer as P
 import Hide.Plugin.BufferHost (readerReference)
 import Hide.EditorMCP (builtinTools,readBufferTool,editorResponseOnly)
 
+ownerUntil owner desktop worker=do
+  let loop current=do
+        result<-poll worker
+        case result of
+          Just _->pure current
+          Nothing->threadDelay 1000 >> tickPermissions owner current >>= loop
+  timeout 3000000 (loop desktop) >>= maybe (error "typed read owner did not settle") pure
+
 checks :: IO ()
 checks=do
   temporary<-getTemporaryDirectory
@@ -60,14 +68,14 @@ checks=do
         pending<-poll worker
         check "typed capture waits outside the owner" (case pending of Nothing->True; _->False)
         let current=base {buffers=M.adjust (\doc->doc {documentBuffer=newBuffer "current λ\n"}) ident (buffers base)}
-        _<-tickPermissions owner current
+        _<-ownerUntil owner current worker
         captured<-wait worker >>= either (error . T.unpack) pure
         check "typed capture reads owner current state" (text captured==Right "current λ\n")
         check "granted snapshot retains measured source" (P.capturedRef captured==reference)
       let switched=base {buffers=M.adjust (\doc->doc {documentBuffer=(newBuffer "byte text\n") {byteMode=True,saved=error "dirty comparison reached saved text",undoStack=error "capture retained Undo evaluation"}}) ident (buffers base)}
       withAsync (P.captureBuffer reader reference) $ \worker->do
         queued worker
-        _<-tickPermissions owner switched
+        _<-ownerUntil owner switched worker
         image<-wait worker >>= either (error . T.unpack) pure
         check "mode-switched capture admits without dirty text evaluation" (P.representation (P.capturedContent image)==P.ByteBuffer)
         result<-try (evaluate (P.modified (P.capturedMetadata image))) :: IO (Either SomeException Bool)
@@ -81,6 +89,7 @@ checks=do
         _<-tickPermissions owner switchedLarge
         after<-getAllocationCounter
         check "typed admission does not encode mode-switched full text" (before-after<2000000)
+        _<-ownerUntil owner switchedLarge worker
         _<-wait worker >>= either (error . T.unpack) pure
         pure ()
       actor<-newIORef (Right ())
@@ -88,7 +97,7 @@ checks=do
       withAsync (P.captureBuffer attributed reference) $ \worker->do
         queued worker
         writeIORef actor (Left "actor revoked")
-        _<-tickPermissions owner base
+        _<-ownerUntil owner base worker
         outcome<-wait worker
         check "queued typed read rechecks actor" (case outcome of Left "actor revoked"->True; _->False)
       withAsync (P.captureBuffer reader reference) $ \worker->do
@@ -103,7 +112,7 @@ checks=do
         queued first
         withAsync (P.captureBuffer reader reference) $ \remaining->do
           queued remaining
-          withAsync (tickPermissions owner base) $ \tick->do
+          withAsync (ownerUntil owner base remaining) $ \tick->do
             takeMVar entered
             putMVar release ()
             _<-wait tick
@@ -118,7 +127,7 @@ checks=do
         queued first
         withAsync (P.captureBuffer reader reference) $ \remaining->do
           queued remaining
-          withAsync (tickPermissions owner base) $ \tick->do
+          withAsync (ownerUntil owner base remaining) $ \tick->do
             takeMVar interrupted
             cancel tick
             check "interrupted admission resolves extracted current request" . either (const True) (const False) =<< wait first
@@ -167,7 +176,7 @@ checks=do
               Just result->parseMaybe (withObject "tool result" (.: "isError")) result==Just False
               _->False
             _->False
-      flip finally (S.forgetSession session) $ withAsync (runRemoteDaemon session 1 effects (tickPermissions owner) inspect base) $ \daemon->do
+      flip finally (S.forgetSession session) $ withAsync (runRemoteDaemonWithStartup (pure ()) (awaitPermissionWork owner) session 1 effects (tickPermissions owner) inspect base) $ \daemon->do
         link daemon
         _<-bracket (open (100::Int)) hClose (const (pure ()))
         withLocalPeer session True [] $ \peer->do
