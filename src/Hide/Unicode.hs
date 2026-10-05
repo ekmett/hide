@@ -1,4 +1,4 @@
-{-# LANGUAGE ForeignFunctionInterface, OverloadedStrings #-}
+{-# LANGUAGE ForeignFunctionInterface, OverloadedStrings, BangPatterns #-}
 -- | Shared grapheme segmentation, cell widths and picture composition.
 --
 -- utf8proc supplies segmentation with an ASCII fast path; source offsets remain
@@ -20,6 +20,10 @@ import Graphics.Vty.Span (SpanOp(..), DisplayOps)
 import Control.Monad.ST (runST)
 import qualified Data.ByteString as BS
 import qualified Data.Text as T
+import qualified Data.Text.Unsafe as TU
+import qualified Data.Text.Array as TA
+import qualified Data.Text.Internal as TI
+import qualified Data.Text.Internal.Unsafe.Char as TC
 import qualified Data.Text.Encoding as TE
 import qualified Data.Text.Lazy as TL
 import qualified Data.Vector as Vec
@@ -59,7 +63,7 @@ clusterWidth t
 
 textImage :: V.Attr -> T.Text -> V.Image
 textImage _ t | T.null t = V.emptyImage
-textImage a t = I.HorizText a (TL.fromStrict t) (sum (map clusterWidth (graphemes t))) (T.length t)
+textImage a t = I.HorizText a (TL.fromStrict t) (if T.all simpleChar t then T.length t else sum (map clusterWidth (graphemes t))) (T.length t)
 
 -- | Render each semantic grapheme in exactly two cells. Naturally wide text
 -- remains two cells. The original text remains in HorizText, whose explicit
@@ -91,7 +95,7 @@ data CellSpan = CellText !V.Attr !T.Text | CellGlyph !V.Attr !T.Text !Int !Int !
 
 -- Every occupied cell retains the glyph and its position within that glyph.
 -- Overwriting one cell preserves the visible portion of an underlying glyph.
-data Cell = Cell !V.Attr !T.Text !Int !Int | AsciiCell !V.Attr !Char | Unfilled !(Maybe V.Attr)
+data Cell = Cell !V.Attr !T.Text !Int !Int | CharCell !V.Attr !Char | Unfilled !(Maybe V.Attr)
 
 -- | Ordered opaque images and small style-only halo regions, front to back.
 -- Halo processing preserves glyph origin, identity and allocated width.
@@ -107,81 +111,122 @@ cellRowsForPic picture=cellRowsForLayers (map CellImage (V.picLayers picture))
 -- its bounded exposed bands after occlusion. Front-to-back traversal skips
 -- writes to already occupied cells; only unfilled cells accept a halo style.
 cellRowsForLayers :: [CellLayer] -> (Int,Int) -> Vec.Vector (Vec.Vector CellSpan)
-cellRowsForLayers layers (w,h)=Vec.generate h (\y->Vec.fromList (runs (Vec.toList (Vec.slice (y*w) w cells))))
-  where
-    cells=runST $ do
-      grid<-MV.replicate (w*h) (Unfilled Nothing)
-      let put at cell=do
-            original<-MV.read grid at
+cellRowsForLayers layers size=rowsFromCells (composeCellGrid layers size) size
+
+-- Printable ASCII and box/block drawing codepoints each occupy one cell and
+-- have no internal grapheme boundary interaction; combining/variation text goes
+-- through the full segmenter instead.
+simpleChar :: Char -> Bool
+simpleChar c=(c>=' ' && c<='~') || (c>='\x2500' && c<='\x259f')
+
+forCells :: Monad m => Int -> Int -> (Int -> m ()) -> m ()
+forCells lo hi f=go lo
+  where go !i | i>=hi=pure ()
+              | otherwise=f i >> go (i+1)
+{-# INLINE forCells #-}
+
+composeCellGrid :: [CellLayer] -> (Int,Int) -> Vec.Vector Cell
+composeCellGrid layers (w,h)=runST $ do
+  grid<-MV.replicate (w*h) (Unfilled Nothing)
+  let put at cell=do
+        original<-MV.unsafeRead grid at
+        case original of
+          Unfilled paint->MV.unsafeWrite grid at (maybe cell (dim cell) paint)
+          _->pure ()
+      dim (CharCell old c) paint=CharCell paint {V.attrStyle=V.attrStyle old} c
+      dim (Cell old text width offset) paint=Cell paint {V.attrStyle=V.attrStyle old} text width offset
+      dim cell _=cell
+  let draw (l,top,r,b) x y img=case img of
+        I.HorizText a text advance _ | y>=top && y<b -> do
+          let strict=TL.toStrict text
+          if advance==T.length strict && T.all simpleChar strict
+            then let lo=max l x; hi=min r (x+advance)
+                     visible=T.drop (lo-x) strict
+                     -- visible begins at a codepoint boundary. The character
+                     -- count bounds the cursor; each iteration advances UTF8 bytes.
+                     next !i !byte | i>=hi=pure ()
+                     next !i !byte=case TU.iter visible byte of
+                       TU.Iter c n->put (y*w+i) (CharCell a c) >> next (i+1) (byte+n)
+                 in next lo 0
+            else if advance==T.length strict && not (T.null strict) && T.all (==T.head strict) strict && clusterWidth (T.take 1 strict)==1
+              then let glyph=T.take 1 strict in forCells (max l x) (min r (x+advance)) $ \i->put (y*w+i) (Cell a glyph 1 0)
+            else do
+              let chunks=displayClusters advance strict
+              forM_ (zip (scanl (+) x (map snd chunks)) chunks) $ \(cx,(t,n))->do
+                let lo=max l cx; hi=min r (cx+n)
+                forCells lo hi $ \i->put (y*w+i)
+                  (if n==1 && T.length t==1 && T.head t<'\128' then CharCell a (T.head t) else Cell a t n (i-cx))
+        I.HorizJoin left right _ _->draw (l,top,r,b) x y left >> draw (l,top,r,b) (x+V.imageWidth left) y right
+        I.VertJoin above below _ _->draw (l,top,r,b) x y above >> draw (l,top,r,b) x (y+V.imageHeight above) below
+        I.Crop inside dx dy cw ch->
+          let clip=(max l x,max top y,min r (x+cw),min b (y+ch))
+          in when (max l x<min r (x+cw) && max top y<min b (y+ch)) (draw clip (x-dx) (y-dy) inside)
+        _->pure ()
+  let layer (CellImage image)=draw (0,0,w,h) 0 0 image
+      layer (CellHalo paint regions)=forM_ regions $ \(x,y,columns,rows)->
+        forCells (max 0 y) (min h (y+rows)) $ \cy->
+          forCells (max 0 x) (min w (x+columns)) $ \cx->do
+            original<-MV.unsafeRead grid (cy*w+cx)
             case original of
-              Unfilled paint->MV.write grid at (maybe cell (dim cell) paint)
+              Unfilled Nothing->MV.unsafeWrite grid (cy*w+cx) (Unfilled (Just paint))
               _->pure ()
-          dim (AsciiCell old c) paint=AsciiCell paint {V.attrStyle=V.attrStyle old} c
-          dim (Cell old text width offset) paint=Cell paint {V.attrStyle=V.attrStyle old} text width offset
-          dim cell _=cell
-      let draw (l,top,r,b) x y img=case img of
-            I.HorizText a text advance _ | y>=top && y<b -> do
-              let strict=TL.toStrict text
-              if advance==T.length strict && T.all (< '\128') strict
-                then forM_ [max l x..min r (x+advance)-1] $ \i->
-                  put (y*w+i) (AsciiCell a (T.index strict (i-x)))
-                else if advance==T.length strict && not (T.null strict) && T.all (==T.head strict) strict && clusterWidth (T.take 1 strict)==1
-                  then let glyph=T.take 1 strict in forM_ [max l x..min r (x+advance)-1] $ \i->put (y*w+i) (Cell a glyph 1 0)
-                else do
-                  let chunks=displayClusters advance strict
-                  forM_ (zip (scanl (+) x (map snd chunks)) chunks) $ \(cx,(t,n))->do
-                    let lo=max l cx; hi=min r (cx+n)
-                    forM_ [lo..hi-1] $ \i->put (y*w+i)
-                      (if n==1 && T.length t==1 && T.head t<'\128' then AsciiCell a (T.head t) else Cell a t n (i-cx))
-            I.HorizJoin left right _ _->draw (l,top,r,b) x y left >> draw (l,top,r,b) (x+V.imageWidth left) y right
-            I.VertJoin above below _ _->draw (l,top,r,b) x y above >> draw (l,top,r,b) x (y+V.imageHeight above) below
-            I.Crop inside dx dy cw ch->
-              let clip=(max l x,max top y,min r (x+cw),min b (y+ch))
-              in when (max l x<min r (x+cw) && max top y<min b (y+ch)) (draw clip (x-dx) (y-dy) inside)
-            _->pure ()
-      let layer (CellImage image)=draw (0,0,w,h) 0 0 image
-          layer (CellHalo paint regions)=forM_ regions $ \(x,y,columns,rows)->
-            forM_ [max 0 y..min h (y+rows)-1] $ \cy->
-              forM_ [max 0 x..min w (x+columns)-1] $ \cx->do
-                original<-MV.read grid (cy*w+cx)
-                case original of
-                  Unfilled Nothing->MV.write grid (cy*w+cx) (Unfilled (Just paint))
-                  _->pure ()
-          layer CellMask{}=pure ()
-          mask paint regions=forM_ regions $ \(x,y,columns)->when (y>=0 && y<h) $
-            forM_ [max 0 x..min w (x+columns)-1] $ \cx->do
-              original<-MV.read grid (y*w+cx)
-              case original of
-                Cell _ text width offset->forM_ [max 0 (cx-offset)..min w (cx-offset+width)-1] $ \i->do
-                  visible<-MV.read grid (y*w+i)
-                  case visible of
-                    Cell _ glyph full part | glyph==text && full==width && i-part==cx-offset->
-                      MV.write grid (y*w+i) (AsciiCell paint '*')
-                    _->pure ()
-                _->MV.write grid (y*w+cx) (AsciiCell paint '*')
-      mapM_ layer layers
-      mapM_ (uncurry mask) [(paint,regions) | CellMask paint regions<-layers]
-      Vec.freeze grid
-    simpleCell (AsciiCell a c)=Just (a,c)
-    simpleCell (Unfilled paint)=Just (maybe V.defAttr id paint,' ')
-    simpleCell (Cell a text 1 0) | T.length text==1=Just (a,T.head text)
-    simpleCell _=Nothing
-    runs []=[]
-    runs (AsciiCell a c:rest)=simpleRun a c rest
-    runs (Unfilled paint:rest)=simpleRun (maybe V.defAttr id paint) ' ' rest
-    runs (Cell a t 1 0:rest) | T.length t==1=simpleRun a (T.head t) rest
-    runs (Cell a t n offset:rest)=let (count,after)=follow (offset+1) rest
-                                in CellGlyph a t n offset (count+1):runs after
+      layer CellMask{}=pure ()
+      mask paint regions=forM_ regions $ \(x,y,columns)->when (y>=0 && y<h) $
+        forCells (max 0 x) (min w (x+columns)) $ \cx->do
+          original<-MV.unsafeRead grid (y*w+cx)
+          case original of
+            Cell _ text width offset->forCells (max 0 (cx-offset)) (min w (cx-offset+width)) $ \i->do
+              visible<-MV.unsafeRead grid (y*w+i)
+              case visible of
+                Cell _ glyph full part | glyph==text && full==width && i-part==cx-offset->
+                  MV.unsafeWrite grid (y*w+i) (CharCell paint '*')
+                _->pure ()
+            _->MV.unsafeWrite grid (y*w+cx) (CharCell paint '*')
+  mapM_ layer layers
+  mapM_ (uncurry mask) [(paint,regions) | CellMask paint regions<-layers]
+  Vec.unsafeFreeze grid
+
+rowsFromCells :: Vec.Vector Cell -> (Int,Int) -> Vec.Vector (Vec.Vector CellSpan)
+rowsFromCells cells (w,h)=Vec.generate h row
+  where
+    row y=Vec.unfoldr spanAt 0
       where
-        follow expected (Cell b g width part:more)
-          | expected<n && a==b && t==g && n==width && part==expected=
-            let (count,after)=follow (expected+1) more in (count+1,after)
-        follow _ more=(0,more)
-
-    simpleRun a c rest=
-      let (same,after)=span (\cell->case simpleCell cell of Just (b,_)->a==b; _->False) rest
-      in CellText a (T.pack (c:[ch | Just (_,ch)<-map simpleCell same])):runs after
-
+        at x=Vec.unsafeIndex cells (y*w+x)
+        spanAt x | x>=w=Nothing
+        spanAt x=case at x of
+          CharCell a _->simpleSpan a x
+          Unfilled paint->simpleSpan (maybe V.defAttr id paint) x
+          Cell a t 1 0 | T.length t==1->simpleSpan a x
+          Cell a t n offset->let end=follow a t n (offset+1) (x+1)
+                             in Just (CellGlyph a t n offset (end-x),end)
+        simpleSpan a x=let end=textEnd a (x+1)
+                       in Just(CellText a (packText x end),end)
+        -- Four bytes per admitted codepoint is sufficient even outside the
+        -- BMP. Only this exact run is written, then its array is shrunk/frozen.
+        packText x end=runST $ do
+          bytes<-TA.new ((end-x)*4)
+          let fill !i !offset | i>=end=pure offset
+              fill !i !offset=do
+                written<-TC.unsafeWrite bytes offset (charAt i)
+                fill (i+1) (offset+written)
+          used<-fill x 0
+          TA.shrinkM bytes used
+          array<-TA.unsafeFreeze bytes
+          pure (TI.Text array 0 used)
+        charAt x=case at x of
+          CharCell _ c->c
+          Unfilled _->' '
+          Cell _ t _ _->T.head t
+        textEnd a !x | x>=w=x
+        textEnd a !x=case at x of
+          CharCell b _ | a==b->textEnd a (x+1)
+          Unfilled paint | a==maybe V.defAttr id paint->textEnd a (x+1)
+          Cell b t 1 0 | a==b && T.length t==1->textEnd a (x+1)
+          _->x
+        follow a t n !expected !x
+          | x<w,expected<n,Cell b g width part<-at x,
+            a==b && t==g && n==width && part==expected=follow a t n (expected+1) (x+1)
+          | otherwise=x
 -- | Text-mode projection suppresses partial graphemes with occupied-cell blanks.
 -- A complete explicit-width glyph retains its advance for terminal correction.
 displayOpsForPic :: V.Picture -> (Int,Int) -> DisplayOps
