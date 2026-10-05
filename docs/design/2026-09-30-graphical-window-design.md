@@ -2,9 +2,11 @@
 
 User request: an optional Metal/Vulkan window with the existing UI, tightly joined cells, preferably a classic IBM font. Play the interface straight. Terminal mode stays available and its build need not acquire graphical dependencies.
 
-`hide --window` uses an optional Cabal `window` flag and SDL3 >=3.2. macOS explicitly selects Metal; Linux and Windows select Vulkan. A failed backend is an actionable error, never a silent software fallback. SDL handles the native window, events, HiDPI and presentation through a small C FFI bridge; editor state, widgets and rendering layout remain Haskell.
+`hide --window` uses an optional Cabal `window` flag and SDL3 >=3.4. macOS explicitly selects Metal; Linux and Windows select Vulkan. A failed backend is an actionable error, never a silent software fallback. SDL handles the native window, events, HiDPI and presentation through a small C FFI bridge; editor state, widgets and rendering layout remain Haskell.
 
-The graphical renderer consumes the same Vty display spans used by the terminal and snapshot renderer. Bitmap glyphs and cell backgrounds are composed into a compact pixel buffer and uploaded to a nearest-filtered texture. This deliberately simple renderer redraws on input/exposure, not continuously. No shaders or custom Vulkan device management are needed.
+The native renderer sends a compact cell grid to a fragment shader which samples a persistent glyph atlas and combines foreground and background colors. Bitmap and shaped Unicode tiles are uploaded only on cache misses; repeated presentation reuses the prepared grid. Cursor, mouse highlighting and CRT effects use shader uniforms. Rendering runs on input/exposure rather than continuously.
+
+The sole shader source is HLSL 2021 in `cbits/shaders/cell.hlsl`. `tools/build-cell-shaders.sh` uses DXC, validates SPIR-V, then translates it to Metal and GLSL ES with SPIRV-Cross. Generated native shader assets are packaged, so ordinary builds do not need these tools. Metal and Vulkan share the same 32-byte cell ABI; shader compilation is distinct from execution on each backend. Full glyph origin and clipping remain separate so a graphical window can show the visible half of a wide glyph.
 
 Bundle the IBM VGA 8x16 remake from VileR's font pack with attribution and its font license; include Unicode bitmap fallback where practical. Draw on an 8x16 cell grid, with integer physical pixel scale and no inter-cell spacing. Default window is 80x25 with an appropriate HiDPI scale. Resizes change row/column count; leftover pixels form an outer margin. Pointer positions use the same scale/origin as drawing. `--scale N` chooses an integer physical-pixel scale.
 
