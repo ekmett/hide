@@ -263,8 +263,9 @@ checks = outputOwnerChecks >> outputLifecycleCheck >> terminalLauncherCheck >> t
                     replayed<-snd <$> debuggerEffects runtime core saved outbox
                     (_,_,values)<-debuggerWatches runtime
                     check "watch draft saves once; replay cannot duplicate or revise it"
-                      (case M.toList values of [(_,entry)]->watchExpression entry==expected &&
-                        watchRevision entry==revision; _->False)
+                      (case M.toList values of
+                        [(_,entry)]->watchExpression entry==expected && watchRevision entry==revision
+                        _->False)
                     pure replayed
                   _->error "watch invalidation discarded the draft"
             -- Initial attach and stopped events each request threads. This third

@@ -180,7 +180,7 @@ session mode=bracket (Fixture.fixture mode) Fixture.cleanup $ \(port,logPath,_)-
       check "retained snapshot does not grant unpublished local references" (case denied of Left _->True; _->False)
       secondPage<-more "Locals 11" unpublished >>= wait "second locals page" (has "local211_255")
       check "second locals page adds128 rows" (count "local211_" secondPage==253 && not (has "local211_256" secondPage))
-      let retainedMore=activateTree True (head (moreRows "Locals 11" secondPage)) secondPage
+      let retainedMore=activateTree True (one "retained locals More" (moreRows "Locals 11" secondPage)) secondPage
       lastPage<-more "Locals 11" secondPage >>= wait "last locals page" (\d->has "local211_259" d && null (moreRows "Locals 11" d))
       check "last locals page adds4 rows; sibling frame remains expanded" (count "local211_" lastPage==257 && count "local212_" lastPage==125)
       inspected<-expand "local211_129 = expand" lastPage >>= wait "published later local expands" (has "child211 = later page")
