@@ -22,7 +22,8 @@ import Hide.Sidebar
 import Hide.Model
 import Hide.Render (snapshot)
 import Hide.ScreenCapture
-import Hide.Unicode (clusterWidth, graphemes)
+import Hide.Unicode (clusterWidth, graphemes, Script(..))
+import Hide.Syntax (Style(..))
 
 checks :: IO ()
 checks=do
@@ -63,6 +64,27 @@ checks=do
   check "quarter block retains filled and empty quadrants"
     (pixelAt image (qx*8+1) (qy*16+2)/=pixelAt image (qx*8+6) (qy*16+2) &&
      pixelAt image (qx*8+1) (qy*16+13)==pixelAt image (qx*8+6) (qy*16+13))
+  let scriptInitial=(addHelpStyled [('█',ScriptStyle Superscript Plain),('中',ScriptStyle Subscript Plain),('X',Plain)] (initialDesktop (80,25))) {wideSectionTitles=True}
+  scriptReady<-prepareTextPresentations scriptInitial
+  scriptCapture<-takeCapture scriptReady True
+  scriptImage<-pngImage scriptCapture
+  let scriptView=fromMaybe (error "missing script source view") (activeWindow scriptReady)
+      sx=left (bounds scriptView)+1; sy=top (bounds scriptView)+1
+      scriptPixel column px py=pixelAt scriptImage ((sx+column)*8+px) (sy*16+py)
+      scriptBackground=PixelRGB8 0 0 170
+  check "script screen text uses one-cell projections with the following source sentinel"
+    (maybe False (T.isInfixOf "█\xfffdX") (field "text" (textMetadata scriptCapture)))
+  check "narrow superscript samples the normal tile in the upper-left quarter"
+    (scriptPixel 0 1 1/=scriptBackground && scriptPixel 0 5 1==scriptBackground && scriptPixel 0 1 12==scriptBackground)
+  check "wide subscript samples natural tile ink only in the lower half of one cell"
+    (all (==scriptBackground) [scriptPixel 1 px py | px<-[0..7],py<-[0..7]] &&
+     any (/=scriptBackground) [scriptPixel 1 px py | px<-[0..7],py<-[8..15]])
+  let privateScript=scriptReady {guestPrivatePaths=["/authority"],buffers=M.map (\doc->doc {documentOrigin=Just "/authority/script-secret.hs"}) (buffers scriptReady)}
+  hiddenScript<-takeCapture privateScript True
+  hiddenScriptImage<-pngImage hiddenScript
+  check "script privacy removes semantic text and all ink in the allocated cell"
+    (not (maybe False (T.isInfixOf "█") (field "text" (textMetadata hiddenScript))) &&
+     all (==PixelRGB8 0 0 0) [pixelAt hiddenScriptImage ((sx+column)*8+px) (sy*16+py) | column<-[0,1],px<-[0..7],py<-[0..15]])
   compact<-takeCapture desktop {videoMode=Just 259,screenSize=(80,50)} True
   compactImage<-pngImage compact
   check "mode 259 uses 8x8 cells and preserves 80x50 aspect" (imageWidth compactImage==640 && imageHeight compactImage==400 && field "cellHeight" (textMetadata compact)==Just (8::Int))

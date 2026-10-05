@@ -17,7 +17,7 @@ import Data.List (find, groupBy)
 import qualified Graphics.Vty as V
 import qualified Graphics.Vty.Image.Internal as I
 import qualified Hide.TextLayout as TextLayout
-import Hide.Unicode (CellSpan(..),CellLayer(..),cellRowsForLayers,cellDisplayOps)
+import Hide.Unicode (Script(..),scriptTerminalText,scalarWidth,CellSpan(..),CellLayer(..),cellRowsForLayers,cellDisplayOps)
 import Graphics.Vty.Span (SpanOp(..))
 import qualified Data.Text as T
 import Data.Text (Text)
@@ -319,6 +319,7 @@ renderDesktop d = (V.picForImage (V.vertCat (map (V.horizCat . map image . Vec.t
   where
     (_,cursor)=renderScene d
     image (CellText a text)=textImage a text
+    image (CellScript a text natural _)=textImage a (scriptTerminalText natural text)
     image (CellGlyph a text full start shown)
       | start/=0 || shown/=full=V.charFill a ' ' shown 1
       | otherwise=(if full/=clusterWidth text then wideTextImage else textImage) a text
@@ -360,11 +361,11 @@ renderScene d=(privacyLayers++layers,visibleCursor)
       Just m@(i,_) -> images (menuLayers d m) ++ (if dialog d==Nothing then halo (menuRect d i) else []) ++ base
     images=map CellImage
     halo (Rect x y w h)=[CellHalo shadow [(x+w,y+1,2,max 0 (h-1)),(x+2,y+h,w,1)]]
-    base = images ([place 0 0 menuBar, place 0 (sh-1) statusBar]
+    base = images [place 0 0 menuBar, place 0 (sh-1) statusBar]
       ++ bottomLayers d
-      ++ maybe [] (treeLayers d) (sideTree d))
+      ++ images (maybe [] (treeLayers d) (sideTree d))
       ++ foldr stackWindow (images [V.charFill (attr blue gray) '░' sw sh]) (floatingWindows d)
-    stackWindow w below = images (windowLayers d (windowFocused d w) w) ++
+    stackWindow w below = windowLayers d (windowFocused d w) w ++
       (if fmap windowId (activeWindow d)==Just (windowId w) && dialog d==Nothing && contextMenu d==Nothing && menu d==Nothing then halo (bounds w) else []) ++ below
     menuBar = V.cropRight sw (V.char paper ' ' V.<|> V.horizCat
       [V.char normal ' ' V.<|> label (attr red bg) (T.take 1 title) V.<|> label normal (T.drop 1 title<>" ")
@@ -424,9 +425,9 @@ hostWindowFrame d active w frame=
     number=T.pack (show (windowNumber w))
     moving=case drag d of Just (Moving wid _ _)->wid==windowId w; Just (Resizing wid _ _)->wid==windowId w; _->False
 
-pluginWindowLayers :: Desktop -> Bool -> Window -> PluginWindow.PreparedWindow -> [V.Image]
+pluginWindowLayers :: Desktop -> Bool -> Window -> PluginWindow.PreparedWindow -> [CellLayer]
 pluginWindowLayers d active w prepared=
-  [place (x+1) (y+1) body,place (x+column) y (label frame title)]++hostWindowFrame d active w frame
+  bodyLayers++map CellImage (place (x+column) y (label frame title):hostWindowFrame d active w frame)
   where
     Rect x y ww hh=bounds w
     frame=attr (if active then white else gray) blue
@@ -434,28 +435,32 @@ pluginWindowLayers d active w prepared=
     rows=PluginWindow.preparedWindowRows prepared
     title=" "<>T.take (columnOffset (windowTitle d w) (max 0 (ww-17))) (windowTitle d w)<>" "
     column=max 6 ((ww-keyLabelWidth title) `div` 2)
+    bodyLayers | Just layout<-windowPresentation d w =
+      [styledLayoutRow (darkAppearance d) (const True) active (selection w)
+        (Rect (x+1) (y+1+n-scrollRow w) (max 0 (ww-2)) 1) (scrollColumn w) row
+      | n<-[scrollRow w..scrollRow w+max 0 (hh-3)],Just row<-[TextLayout.layoutRows layout Vec.!? n]]
+      ++[CellImage (place (x+1) (y+1) (V.charFill edit ' ' (max 0 (ww-2)) (max 0 (hh-2))))]
+      | otherwise=[CellImage (place (x+1) (y+1) body)]
     body=V.vertCat [line n | n<-[scrollRow w..scrollRow w+max 0 (hh-3)]]
-    line n | Just layout<-windowPresentation d w = V.cropRight (max 0 (ww-2))
-      (V.translateX (negate (scrollColumn w)) (maybe V.emptyImage (styledLayoutImage (darkAppearance d) (const True) active (selection w)) (TextLayout.layoutRows layout Vec.!? n))
-        V.<|> V.charFill edit ' ' (max 0 (ww-2)) 1)
     line n=V.cropRight (max 0 (ww-2))
       (V.translateX (negate (scrollColumn w)) (styledImage (darkAppearance d) (const True) Nothing active (selection w)
         (contentLineOffset text n) (fromMaybe [] (rows Vec.!? n))) V.<|> V.charFill edit ' ' (max 0 (ww-2)) 1)
 
-windowLayers :: Desktop -> Bool -> Window -> [V.Image]
+windowLayers :: Desktop -> Bool -> Window -> [CellLayer]
 windowLayers d active w | PluginContent reference<-windowContent w = case M.lookup reference (pluginWindows d) of
   Nothing->[]
   Just prepared->pluginWindowLayers d active w prepared
 windowLayers d active w =
-  [place x (y+1+issueRow issue-scrollRow w) (label (attr (if diagnosticSeverity issue==1 then V.RGBColor 255 85 85 else yellow) blue) "▶")
+  map CellImage ([place x (y+1+issueRow issue-scrollRow w) (label (attr (if diagnosticSeverity issue==1 then V.RGBColor 255 85 85 else yellow) blue) "▶")
     | not (byteMode (documentBuffer doc)), issue<-diagnostics d, Just (diagnosticPath issue)==fmap filePath (documentFile doc), issueRow issue>=scrollRow w, issueRow issue<scrollRow w+hh-2]
   ++ (if active then [place (x+windowPositionColumn doc) (y+hh-1) (label frame (T.take (max 0 (ww-windowPositionColumn doc-2)) (windowPositionText d doc w))),scrollbarImage True,scrollbarImage False] else [])
   ++ [place (x+6) y (label frame "[" V.<|> label (attr cyan blue) " " V.<|> label frame "]") | active,terminalWindow d w,not (windowPinned d w)]
   ++ composerLayers
   ++ hexDividerLayers
   ++ reviewDividerLayers
-  ++ [place (x+titleColumn) y titleImage,place (x+1) (y+1) documentImage]
-  ++ hostWindowFrame d active w frame
+  ++ [place (x+titleColumn) y titleImage])
+  ++ documentLayers
+  ++ map CellImage (hostWindowFrame d active w frame)
   where
     Rect x y ww hh=bounds w
     doc=fromMaybe (newDocument (newBuffer "") Nothing) (windowDocument (buffers d) w)
@@ -534,6 +539,12 @@ windowLayers d active w =
         V.charFill frame '│' 1 contentHeight,V.char frame (if active && not moving then '╧' else '┴')])
       | byteMode b, divider<-hexDividers (windowHexBytes w), let column=divider-scrollColumn w, column>=0, column<contentWidth]
     contentWidth=max 0 (ww-2); contentHeight=windowContentRows d doc w
+    documentLayers | Just layout<-windowPresentation d w =
+      [styledLayoutRow (darkAppearance d) selectable active (selection w)
+        (Rect (x+1) (y+1+n-scrollRow w) contentWidth 1) (scrollColumn w) row
+      | n<-[scrollRow w..scrollRow w+contentHeight-1],Just row<-[TextLayout.layoutRows layout Vec.!? n]]
+      ++[CellImage (place (x+1) (y+1) (V.charFill base ' ' contentWidth contentHeight))]
+      | otherwise=[CellImage (place (x+1) (y+1) documentImage)]
     documentImage=V.vertCat [(if windowChangeView b w then renderReview else renderPreview) n
       | n<-[scrollRow w..scrollRow w+contentHeight-1]]
     -- Prepared rows are a bounded overlay, not a replacement Buffer. Preserve
@@ -617,9 +628,6 @@ windowLayers d active w =
       _ -> V.charFill base ' ' columns 1
     selectable style | documentLabel doc==Just "Conversation" = case style of BubbleText{} -> True; _ -> False
                      | otherwise = True
-    renderLine n | Just layout<-windowPresentation d w = V.cropRight contentWidth
-      (V.translateX (negate (scrollColumn w)) (maybe V.emptyImage (styledLayoutImage (darkAppearance d) selectable active (selection w)) (TextLayout.layoutRows layout Vec.!? n))
-        V.<|> V.charFill base ' ' contentWidth 1)
     renderLine n | byteMode b && n>=documentRows doc w = V.charFill base ' ' contentWidth 1
     renderLine n | byteMode b = V.cropRight contentWidth (V.translateX (negate (scrollColumn w)) (V.horizCat
       [V.char (if active && maybe False highlighted offset then selected else if maybe False (\i -> let byte=T.index bytes (i-n*count) in byte<' ' || byte>'~') offset then attr gray blue else edit) ch | (ch,offset)<-hexRowChunk count (n*count) bytes]) V.<|> V.charFill base ' ' contentWidth 1)
@@ -724,16 +732,26 @@ styledImage dark selectable override active sel start chars
               | g=="\r"=0
               | otherwise=clusterWidth text
 
-styledLayoutImage :: Bool -> (Style -> Bool) -> Bool -> Selection -> TextLayout.LayoutRow -> V.Image
-styledLayoutImage dark selectable active sel row=V.horizCat
-  [(if TextLayout.layoutAdvance glyph/=clusterWidth text && TextLayout.layoutAdvance glyph==2 then wideTextImage else textImage) paint text
-  | glyph<-Vec.toList (TextLayout.layoutGlyphs row)
-  , let text=TextLayout.layoutDisplayText glyph
+-- Prepared semantic rows enter the common grid directly. Only the cached
+-- horizontal glyph slice is visited; padding is a separate baseline layer.
+-- Script metadata never passes through a Vty attribute or image round trip.
+styledLayoutRow :: Bool -> (Style -> Bool) -> Bool -> Selection -> Rect -> Int -> TextLayout.LayoutRow -> CellLayer
+styledLayoutRow dark selectable active sel (Rect x y columns _) left row=
+  CellRow (x+origin-left) y x (x+columns) (Vec.map span visible)
+  where
+    visible=TextLayout.layoutVisibleGlyphs left columns row
+    origin=maybe left TextLayout.layoutColumn (visible Vec.!? 0)
+    (lo,hi)=ordered sel
+    span glyph=case TextLayout.layoutScript glyph of
+      Just script->CellScript paint text (TextLayout.layoutNatural glyph) script
+      Nothing | TextLayout.layoutAdvance glyph==T.length text && T.all (\c->c>=' ' && c/='\DEL' && scalarWidth c==1) text->CellText paint text
+              | otherwise->CellGlyph paint text (TextLayout.layoutAdvance glyph) 0 (TextLayout.layoutAdvance glyph)
+      where
+        text=TextLayout.layoutDisplayText glyph
         style=TextLayout.layoutStyle glyph
         normal=syntaxAttr dark style
         paint=if active && selectable style && TextLayout.layoutStart glyph<hi && TextLayout.layoutEnd glyph>lo
-          then normal `V.withForeColor` blue `V.withBackColor` gray else normal]
-  where (lo,hi)=ordered sel
+          then normal `V.withForeColor` blue `V.withBackColor` gray else normal
 
 -- One paint owner for ordinary and prepared semantic glyphs.
 syntaxAttr :: Bool -> Style -> V.Attr
@@ -741,6 +759,7 @@ syntaxAttr dark style=paint style
   where
     paint style=let (base,bold,italic)=fontTraits style in
       foldl V.withStyle (baseAttr base) ([V.bold | bold]++[V.italic | italic])
+    baseAttr (ScriptStyle _ style)=paint style
     baseAttr (SectionStyle _ style)=paint style
     baseAttr (ProseStyle (SectionStyle _ style))=paint (ProseStyle style)
     baseAttr (BubbleStyle outgoing (SectionStyle _ style))=paint (BubbleStyle outgoing style)
@@ -840,11 +859,11 @@ menuRow w a hot name key = V.cropRight w $
     shownName=V.cropRight (max 0 (w-3-V.imageWidth shownKey)) name
     gap=max 1 (w-2-V.imageWidth shownName-V.imageWidth shownKey)
 
-bottomLayers :: Desktop -> [V.Image]
+bottomLayers :: Desktop -> [CellLayer]
 bottomLayers d
   | not (bottomVisible d) || height r<2 = []
-  | M.null (dockedTerminals d) = problemsLayers d
-  | otherwise = tabs++controls++[place 0 y (label frame (cornerLeft<>T.replicate (max 0 (width r-2)) horizontal<>cornerRight))]++content
+  | M.null (dockedTerminals d) = map CellImage (problemsLayers d)
+  | otherwise = map CellImage (tabs++controls++[place 0 y (label frame (cornerLeft<>T.replicate (max 0 (width r-2)) horizontal<>cornerRight))])++content
   where
     r=problemsRect d; y=top r
     pane=bottomTerminal d >>= (\ident -> find ((==ident).windowId) (windows d))
@@ -859,7 +878,7 @@ bottomLayers d
       Nothing -> [place (width r-5) y (label frame "[" V.<|> label (attr cyan blue) "↓" V.<|> label frame "]")]
     content=case pane of
       Just w -> windowLayers d focused w
-      Nothing -> problemsLayers d
+      Nothing -> map CellImage (problemsLayers d)
 
 problemsLayers :: Desktop -> [V.Image]
 problemsLayers d
@@ -983,10 +1002,16 @@ snapshot d = T.unlines [T.concat (map plain (toList ops)) | ops<-toList (cellDis
 snapshotHtml :: Desktop -> Text
 snapshotHtml d = "<!doctype html><meta charset='utf-8'><title>Haskell</title><style>body{background:#111;margin:24px;display:grid;place-content:center;min-height:90vh}pre{background:#0000aa;font:min(20px,calc((100vw - 48px)/48))/1.066667 'Courier New',monospace;margin:0;box-shadow:0 0 0 2px #333;white-space:pre}span{font-weight:normal}</style><pre>" <> T.intercalate "\n" rows <> "</pre>"
   where
-    rows=[T.concat (map spanHtml (toList ops)) | ops<-toList (cellDisplayOps (renderCellRows d))]
-    spanHtml (TextSpan a n _ t)="<span style='color:"<>color (V.attrForeColor a)<>";background:"<>color (V.attrBackColor a)<>(if V.styleMask a .&. V.bold/=0 then ";font-weight:bold" else "")<>(if V.styleMask a .&. V.italic/=0 then ";font-style:italic" else "")<>decoration a<>"'>"<>body n (TL.toStrict t)<>"</span>"
-    spanHtml (Skip n)=T.replicate n " "
-    spanHtml (RowEnd n)=T.replicate n " "
+    rows=[T.concat (map spanHtml (Vec.toList spans)) | spans<-Vec.toList (renderCellRows d)]
+    spanHtml (CellText a text)=colored a (body (T.length text) text)
+    spanHtml (CellGlyph a text full start shown)=colored a
+      (if start/=0 || shown/=full then T.replicate shown " " else body full text)
+    spanHtml (CellScript a text natural script)=colored a
+      ("<span style='display:inline-block;position:relative;width:1ch;height:1em;vertical-align:bottom'><span style='position:absolute;left:0;top:"<>
+       (if script==Superscript then "0" else "0.5em")<>";width:"<>T.pack (show natural)<>"ch;line-height:1em;transform:scale(0.5);transform-origin:top left'>"<>escape text<>"</span></span>")
+    colored a contents="<span style='color:"<>color (V.attrForeColor a)<>";background:"<>color (V.attrBackColor a)<>
+      (if V.styleMask a .&. V.bold/=0 then ";font-weight:bold" else "")<>
+      (if V.styleMask a .&. V.italic/=0 then ";font-style:italic" else "")<>decoration a<>"'>"<>contents<>"</span>"
     body advance text | [(g,2)]<-displayClusters advance text,clusterWidth g<2 = "<span style='display:inline-block;width:2ch'><span style='display:inline-block;transform:scaleX(2);transform-origin:left'>"<>escape g<>"</span></span>"
                       | otherwise=escape text
     decoration a=case [name | (flag,name)<-[(V.underline,"underline"),(V.strikethrough,"line-through")],V.styleMask a .&. flag/=0] of

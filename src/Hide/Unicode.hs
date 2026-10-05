@@ -6,7 +6,7 @@
 -- Clipped GPU cells retain their full semantic glyph. Text-mode partial clusters
 -- become blanks. Terminal output advances
 -- explicitly past two-cell clusters even when the user's font draws them narrowly.
-module Hide.Unicode (graphemes, sourceGraphemesFrom, sourceGlyphAdvance, scalarWidth, clusterWidth, textImage, wideTextImage, displayClusters, terminalProjection, terminalSpan, CellSpan(..), CellLayer(..), cellRowsForLayers, cellRowsForPic, cellDisplayOps, flattenPicture, displayOpsForPic, updateDisplayOps, terminalText, textInputChar) where
+module Hide.Unicode (graphemes, sourceGraphemesFrom, sourceGlyphAdvance, scalarWidth, clusterWidth, textImage, wideTextImage, displayClusters, terminalProjection, scriptTerminalText, terminalSpan, Script(..), CellSpan(..), CellLayer(..), cellRowsForLayers, cellRowsForPic, cellDisplayOps, flattenPicture, displayOpsForPic, updateDisplayOps, terminalText, textInputChar) where
 
 import Control.Monad (forM_, when)
 import Data.Char (isPrint)
@@ -160,17 +160,25 @@ displayClusters width text=case graphemes text of
 -- width. Its glyph origin is the current row position minus the clip start.
 -- Backend projection happens after composition; privacy masks replace the
 -- semantic glyph before these rows can leave the capture owner.
+data Script = Superscript | Subscript deriving (Eq,Show)
+
+-- | Script glyphs retain one complete source grapheme and validated natural
+-- width one or two. Their allocated width is always one cell. Ordinary spans
+-- keep their existing representation.
 data CellSpan = CellText !V.Attr !T.Text | CellGlyph !V.Attr !T.Text !Int !Int !Int
+  | CellScript !V.Attr !T.Text !Int !Script
   deriving (Eq,Show)
 
 -- Every occupied cell retains the glyph and its position within that glyph.
 -- Overwriting one cell preserves the visible portion of an underlying glyph.
-data Cell = Cell !V.Attr !T.Text !Int !Int | CharCell !V.Attr !Char | Unfilled !(Maybe V.Attr)
+data Cell = Cell !V.Attr !T.Text !Int !Int | ScriptCell !V.Attr !T.Text !Int !Script | CharCell !V.Attr !Char | Unfilled !(Maybe V.Attr)
 
 -- | Ordered opaque images and small style-only halo regions, front to back.
 -- Halo processing preserves glyph origin, identity and allocated width.
 data CellLayer = CellImage !V.Image | CellHalo !V.Attr ![(Int,Int,Int,Int)]
                | CellMask !V.Attr ![(Int,Int,Int)]
+               -- Positioned row with absolute left/right clip coordinates.
+               | CellRow !Int !Int !Int !Int !(Vec.Vector CellSpan)
 
 -- | Compose layers once into bounded mutable storage, retaining partial glyphs.
 -- Cost depends on the visible scene, never on Document or Buffer equality.
@@ -205,6 +213,7 @@ composeCellGrid layers (w,h)=runST $ do
           _->pure ()
       dim (CharCell old c) paint=CharCell paint {V.attrStyle=V.attrStyle old} c
       dim (Cell old text width offset) paint=Cell paint {V.attrStyle=V.attrStyle old} text width offset
+      dim (ScriptCell old text natural script) paint=ScriptCell paint {V.attrStyle=V.attrStyle old} text natural script
       dim cell _=cell
   let draw (l,top,r,b) x y img=case img of
         I.HorizText a text advance _ | y>=top && y<b -> do
@@ -233,6 +242,30 @@ composeCellGrid layers (w,h)=runST $ do
           in when (max l x<min r (x+cw) && max top y<min b (y+ch)) (draw clip (x-dx) (y-dy) inside)
         _->pure ()
   let layer (CellImage image)=draw (0,0,w,h) 0 0 image
+      layer (CellRow origin y clipLeft clipRight spans)
+        | y<0 || y>=h || max 0 clipLeft>=min w clipRight=pure ()
+        | otherwise=drawRow origin 0
+        where
+          lo=max 0 clipLeft; hi=min w clipRight
+          drawRow !x !index
+            | x>=hi || index>=Vec.length spans=pure ()
+            | otherwise=case Vec.unsafeIndex spans index of
+                CellText paint text->do
+                  let count=T.length text
+                      left=max lo x; right=min hi (x+count)
+                      visible=T.drop (max 0 (left-x)) text
+                      run !at !byte
+                        | at>=right=pure ()
+                        | otherwise=case TU.iter visible byte of
+                            TU.Iter c bytes->put (y*w+at) (CharCell paint c) >> run (at+1) (byte+bytes)
+                  run left 0
+                  drawRow (x+count) (index+1)
+                CellGlyph paint text full start shown->do
+                  forCells (max lo x) (min hi (x+shown)) $ \at->put (y*w+at) (Cell paint text full (start+at-x))
+                  drawRow (x+shown) (index+1)
+                CellScript paint text natural script->do
+                  when (x>=lo && x<hi) (put (y*w+x) (ScriptCell paint text natural script))
+                  drawRow (x+1) (index+1)
       layer (CellHalo paint regions)=forM_ regions $ \(x,y,columns,rows)->
         forCells (max 0 y) (min h (y+rows)) $ \cy->
           forCells (max 0 x) (min w (x+columns)) $ \cx->do
@@ -267,6 +300,7 @@ rowsFromCells cells (w,h)=Vec.generate h row
           CharCell a _->simpleSpan a x
           Unfilled paint->simpleSpan (maybe V.defAttr id paint) x
           Cell a t 1 0 | T.length t==1->simpleSpan a x
+          ScriptCell a text natural script->Just (CellScript a text natural script,x+1)
           Cell a t n offset->let end=follow a t n (offset+1) (x+1)
                              in Just (CellGlyph a t n offset (end-x),end)
         simpleSpan a x=let end=textEnd a (x+1)
@@ -287,6 +321,7 @@ rowsFromCells cells (w,h)=Vec.generate h row
           CharCell _ c->c
           Unfilled _->' '
           Cell _ t _ _->T.head t
+          ScriptCell{}->error "Script cell entered an ordinary text run."
         textEnd a !x | x>=w=x
         textEnd a !x=case at x of
           CharCell b _ | a==b->textEnd a (x+1)
@@ -308,6 +343,8 @@ cellDisplayOps :: Vec.Vector (Vec.Vector CellSpan) -> DisplayOps
 cellDisplayOps=Vec.map (Vec.map terminal)
   where
     terminal (CellText a text)=TextSpan a (T.length text) (T.length text) (TL.fromStrict text)
+    terminal (CellScript a text natural _)=let shown=scriptTerminalText natural text
+                                           in TextSpan a 1 (T.length shown) (TL.fromStrict shown)
     terminal (CellGlyph a text full start width)
       | start==0 && width==full=TextSpan a full (T.length text) (TL.fromStrict text)
       | otherwise=TextSpan a width width (TL.fromStrict (T.replicate width " "))
@@ -352,6 +389,13 @@ updateDisplayOps output size@(w,h) position ops = do
 -- | Accept printable input and the joiner/tag characters needed by complex graphemes.
 textInputChar :: Char -> Bool
 textInputChar c=isPrint c || c `elem` ['\x200c','\x200d'] || c>='\xe0020' && c<='\xe007f'
+
+-- | Scripts retain one cell in text mode. Natural one-cell glyphs keep their
+-- original text; natural two-cell glyphs use the existing one-cell placeholder.
+-- This is a display projection only; semantic spans and copied source stay whole.
+scriptTerminalText :: Int -> T.Text -> T.Text
+scriptTerminalText natural text | natural==2="\xfffd"
+                                | otherwise=text
 
 -- | Encode positioned terminal text with explicit advancement across two-cell clusters.
 terminalText :: (Int -> Write) -> Int -> T.Text -> (Write,Int)

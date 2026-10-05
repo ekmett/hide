@@ -27,8 +27,8 @@ import Hide.Commands (commandIdentifier)
 import Hide.Model (Desktop(..), MenuItem(..), menus, commandEnabled)
 import Hide.GuestAccess (CellAccess(..), cellAccess, guestKeyboardAllowed, beginGuestInput, guestKeyCombinations)
 import qualified Hide.Protocol as P
-import Hide.Render (renderDesktop, renderCellRows)
-import Hide.Unicode (CellSpan(..), clusterWidth, terminalProjection)
+import Hide.Render (renderCursor, renderCellRows)
+import Hide.Unicode (CellSpan(..), Script(..), clusterWidth, terminalProjection, scriptTerminalText)
 
 screenTool :: Value
 screenTool=object
@@ -59,34 +59,35 @@ capture font desktop includeImage
   where
     (cols,rows)=screenSize desktop
     cellHeight=modeHeight (fromMaybe 3 (videoMode desktop))
-    picture=renderDesktop desktop {streamerMode=True}
+    position=renderCursor desktop {streamerMode=True}
     spans=map toList (toList (renderCellRows desktop {streamerMode=True}))
     maskedRows=[maskRow y line | (y,line)<-zip [0..] spans]
     maskRow y line=snd (mapAccumL (maskCluster y) 0 padded)
       where
         chunks=concatMap spanClusters line
-        occupied=sum [advance | (_,advance,_)<-chunks]
-        padded=chunks++replicate (max 0 (cols-occupied)) (" ",1,V.defAttr)
-    spanClusters (CellText attr text)=[(T.singleton c,1,attr) | c<-T.unpack text]
+        occupied=sum [advance | (_,advance,_,_)<-chunks]
+        padded=chunks++replicate (max 0 (cols-occupied)) (" ",1,V.defAttr,Nothing)
+    spanClusters (CellText attr text)=[(T.singleton c,1,attr,Nothing) | c<-T.unpack text]
+    spanClusters (CellScript attr text natural script)=[(text,1,attr,Just (natural,script))]
     spanClusters (CellGlyph attr text full start shown)=
-      [(if start/=0 || shown/=full then T.replicate shown " " else text,shown,attr)]
-    maskCluster y x (text,width,attr)=
+      [(if start/=0 || shown/=full then T.replicate shown " " else text,shown,attr,Nothing)]
+    maskCluster y x (text,width,attr,script)=
       let access=[cellAccess desktop column y | column<-[x..x+width-1]]
           (shown,safeAccess)=redactCluster text access
           readable=all cellReadable safeAccess
           shownAttr=if readable then attr else V.defAttr `V.withForeColor` V.RGBColor 0 0 0 `V.withBackColor` V.RGBColor 0 0 0
-      in (x+width,(shown,width,shownAttr,safeAccess))
-    plain=T.unlines [T.concat [terminalProjection advance text | (text,advance,_,_)<-line] | line<-maskedRows]
-    accessGrid=Vec.fromList (concatMap (concatMap (\(_,_,_,access)->access)) maskedRows)
+      in (x+width,(shown,width,shownAttr,safeAccess,if readable then script else Nothing))
+    plain=T.unlines [T.concat [case script of Just (natural,_)->scriptTerminalText natural text; Nothing->terminalProjection advance text | (text,advance,_,_,script)<-line] | line<-maskedRows]
+    accessGrid=Vec.fromList (concatMap (concatMap (\(_,_,_,access,_)->access)) maskedRows)
     readableCell x y=cellReadable (accessGrid Vec.! (y*cols+x))
-    accessRows=[object ["y" .= y,"runs" .= runs (concatMap (\(_,_,_,access)->access) line)] | (y,line)<-zip [0::Int ..] maskedRows]
+    accessRows=[object ["y" .= y,"runs" .= runs (concatMap (\(_,_,_,access,_)->access) line)] | (y,line)<-zip [0::Int ..] maskedRows]
     runs entries=snd (mapAccumL run 0 (groupBy same entries))
       where
         same a b=cellReadable a==cellReadable b && cellClickable a==cellClickable b
         run x group=let n=length group
                         access=case group of a:_->a; _->CellAccess False False
                     in (x+n,object ["x" .= x,"length" .= n,"readable" .= cellReadable access,"clickable" .= cellClickable access])
-    cursor=case V.picCursor picture of
+    cursor=case position of
       V.Cursor x y | x>=0 && x<cols && y>=0 && y<rows && readableCell x y -> Just (x,y)
       _ -> Nothing
     inputAllowed input=either (const False) (const True) <$> P.applyGuestInput input (beginGuestInput desktop)
@@ -111,19 +112,22 @@ capture font desktop includeImage
       (object ["type" .= ("text"::Text),"text" .= TE.decodeUtf8 (BL.toStrict (encode (metadata keys commands)))] :
         [object ["type" .= ("image"::Text),"mimeType" .= ("image/png"::Text),
           "data" .= TE.decodeUtf8 (B64.encode (BL.toStrict png))] | includeImage])]
-    blank=(glyph font ' ',PixelRGB8 0 0 0,PixelRGB8 0 0 0,0,False)
-    cells=Vec.fromList (concatMap (take cols . (++repeat blank) . concatMap (\(text,advance,attr,_)->cluster attr advance text)) maskedRows)
-    cluster attr advance text=case T.uncons text of
+    blank=(glyph font ' ',PixelRGB8 0 0 0,PixelRGB8 0 0 0,0,False,Nothing)
+    cells=Vec.fromList (concatMap (take cols . (++repeat blank) . concatMap (\(text,advance,attr,_,script)->cluster attr advance text script)) maskedRows)
+    cluster attr advance text script=case T.uncons text of
       Nothing -> []
       Just (c,_) -> let tile=glyph font c
-                   in [(tile,color (V.attrForeColor attr),color (V.attrBackColor attr),offset*8,advance>clusterWidth text) | offset<-[0..advance-1]]
+                   in [(tile,color (V.attrForeColor attr),color (V.attrBackColor attr),offset*8,advance>clusterWidth text,script) | offset<-[0..advance-1]]
     png=encodePng (generateImage pixel (cols*8) (rows*cellHeight))
-    pixel x y=let (tile,fg,bg,offset,stretched)=cells Vec.! ((y `div` cellHeight)*cols+x `div` 8)
-                  gx=(offset+x `mod` 8) `div` (if stretched then 2 else 1)
-                  gy=(y `mod` cellHeight)*16 `div` cellHeight
-                  ink=gx<glyphWidth tile && gx<16 && testBit (glyphRows tile !! gy) (15-gx)
+    pixel x y=let (tile,fg,bg,offset,stretched,script)=cells Vec.! ((y `div` cellHeight)*cols+x `div` 8)
+                  px=x `mod` 8; py=y `mod` cellHeight
+                  (gx,gy,visible)=case script of
+                    Nothing->((offset+px) `div` (if stretched then 2 else 1),py*16 `div` cellHeight,True)
+                    Just (natural,mode)->let start=if mode==Superscript then 0 else cellHeight `div` 2
+                                         in (px*2,(py-start)*32 `div` cellHeight,px<natural*4 && py>=start && py<start+cellHeight `div` 2)
+                  ink=visible && gx<glyphWidth tile && gx<16 && gy>=0 && gy<16 && testBit (glyphRows tile !! gy) (15-gx)
                   base=if ink then fg else bg
-              in if cursor==Just (x `div` 8,y `div` cellHeight) && y `mod` cellHeight>=cellHeight*14 `div` 16
+              in if cursor==Just (x `div` 8,y `div` cellHeight) && py>=cellHeight*14 `div` 16
                    then invert base else base
     invert (PixelRGB8 r g b)=PixelRGB8 (255-r) (255-g) (255-b)
 

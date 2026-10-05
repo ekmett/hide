@@ -4,7 +4,7 @@
 -- observes its fresh immutable identity, never text or glyph vectors.
 module Hide.TextLayout
   ( TextLayout, LayoutRow(..), LayoutGlyph(..), prepareTextLayout
-  , layoutRows, layoutWidth, layoutPosition, layoutOffset ) where
+  , layoutRows, layoutWidth, layoutPosition, layoutOffset, layoutVisibleGlyphs ) where
 
 import Control.Exception (evaluate)
 import Data.Text (Text)
@@ -12,12 +12,13 @@ import qualified Data.Text as T
 import qualified Data.Vector as V
 import Data.Unique (Unique,newUnique,hashUnique)
 import Hide.Buffer (BufferContent,contentLineOffset)
-import Hide.Syntax (Style(..),fontTraits,sectionTitle)
-import Hide.Unicode (graphemes,clusterWidth)
+import Hide.Syntax (Style(..),fontTraits,sectionTitle,styleScript)
+import Hide.Unicode (graphemes,clusterWidth,Script)
 
 data LayoutGlyph = LayoutGlyph
   { layoutText :: !Text, layoutDisplayText :: !Text, layoutStart :: !Int, layoutEnd :: !Int
   , layoutColumn :: !Int, layoutAdvance :: !Int, layoutStyle :: !Style
+  , layoutNatural :: !Int, layoutScript :: !(Maybe Script)
   } deriving Show
 
 data LayoutRow = LayoutRow
@@ -57,17 +58,41 @@ prepareTextLayout wide requested text styled=do
     wrap current col start []=[finish current col start]
     wrap current col start remaining@((g,a,z,style):rest)
       | not (null current) && wide && sectionTitle style && col+advance>columns = finish current col start:wrap [] 0 a remaining
-      | otherwise=wrap (LayoutGlyph g drawn a z col advance shownStyle:current) (col+advance) start rest
+      | otherwise=wrap (LayoutGlyph g drawn a z col advance shownStyle natural script:current) (col+advance) start rest
       where
         shownStyle
-          | wide && sectionTitle style = let (base,_,italic)=fontTraits style in if italic then ItalicStyle base else base
+          | wide && sectionTitle style && requestedScript==Nothing = let (base,_,italic)=fontTraits style in if italic then ItalicStyle base else base
           | otherwise = style
         natural=sum (map clusterWidth (graphemes drawn))
-        advance=if wide && sectionTitle style && not (T.null drawn) then 2 else natural
+        requestedScript=styleScript style
+        script=case requestedScript of
+          Just mode | natural `elem` [1,2],not (T.any (\c->c<' ' || c=='\DEL') g)->Just mode
+          _->Nothing
+        advance | Just _<-script=1
+                | requestedScript/=Nothing && natural==0=0
+                | wide && sectionTitle style && not (T.null drawn)=2
+                | otherwise=natural
         drawn | g==T.singleton '\r'=T.empty
               | g==T.singleton '\t'=T.replicate (if wide && sectionTitle style then 1 else 8-col `mod` 8) (T.singleton ' ')
               | otherwise=T.map (\c->if c<' ' || c=='\DEL' then '·' else c) g
     finish current col start=LayoutRow start (case current of glyph:_->layoutEnd glyph; _->start) col (V.fromList (reverse current))
+
+-- | Borrow only glyphs overlapping a horizontal cell window. Cached columns
+-- locate both ends logarithmically; clipping never slices a semantic grapheme.
+-- A zero-width window inspects no glyphs. The vector view shares prepared data.
+layoutVisibleGlyphs :: Int -> Int -> LayoutRow -> V.Vector LayoutGlyph
+layoutVisibleGlyphs requested width row
+  | width<=0 || V.null glyphs=V.empty
+  | otherwise=V.slice start (max 0 (end-start)) glyphs
+  where
+    glyphs=layoutGlyphs row
+    count=V.length glyphs
+    left=max 0 requested
+    right=left+min (maxBound-left) width
+    candidate=lastBefore count (\i->layoutColumn (glyphs V.! i)<=left)
+    first=glyphs V.! candidate
+    start=if layoutColumn first+layoutAdvance first<=left then candidate+1 else candidate
+    end=lastBefore count (\i->layoutColumn (glyphs V.! i)<right)+1
 
 -- | Locate an original character offset in prepared visual rows. Both cells of
 -- a wide glyph and its combining characters share the same semantic position.

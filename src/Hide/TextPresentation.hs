@@ -15,7 +15,7 @@ import qualified Hide.Plugin.Window as W
 import Hide.Syntax (Style)
 import Hide.TextLayout (prepareTextLayout)
 
-type Target = (Int,PresentationTarget,Int)
+type Target = (Int,PresentationTarget,Int,Bool)
 data StyledPayload = DocumentStyles ![(Char,Style)] | PluginStyles !(V.Vector [(Char,Style)])
 data Capture = Capture !Target !BufferContent !StyledPayload
 data Pending = Pending [Target] (Async [(Int,WindowPresentation)])
@@ -40,7 +40,7 @@ tickTextPresentation (TextPresentation pending observed) desktop=mask $ \restore
         Right prepared | captured==targets->reprojectWindowPresentations desktop desktop {windowPresentations=M.fromList prepared}
         _->desktop
     _->pure desktop
-  let retained=M.filterWithKey (\ident (WindowPresentation target width _)->(ident,target,width) `elem` targets) (windowPresentations ready)
+  let retained=M.filterWithKey (\ident (WindowPresentation target width wide _)->(ident,target,width,wide) `elem` targets) (windowPresentations ready)
       shown=ready {windowPresentations=retained}
   previous<-readIORef observed
   active<-readIORef pending
@@ -57,9 +57,9 @@ tickTextPresentation (TextPresentation pending observed) desktop=mask $ \restore
       pure shown
 
 prepare :: Capture -> IO (Int,WindowPresentation)
-prepare (Capture (ident,target,width) text styled)=do
-  layout<-prepareTextLayout True width text (case styled of DocumentStyles chars->indexedHighlightRows chars; PluginStyles rows->rows)
-  pure (ident,WindowPresentation target width layout)
+prepare (Capture (ident,target,width,wide) text styled)=do
+  layout<-prepareTextLayout wide width text (case styled of DocumentStyles chars->indexedHighlightRows chars; PluginStyles rows->rows)
+  pure (ident,WindowPresentation target width wide layout)
 
 -- | Prepare deterministic snapshots using the same owner, outside an input lock.
 prepareTextPresentations :: Desktop -> IO Desktop
@@ -68,16 +68,14 @@ prepareTextPresentations desktop=do
   pure (reprojectWindowPresentations desktop desktop {windowPresentations=M.fromList prepared})
 
 metadata :: Desktop -> [Target]
-metadata desktop
-  | not (wideSectionTitles desktop)=[]
-  | otherwise=[(windowId window,target,max 1 (width (bounds window)-2))
-      | window<-windows desktop,Just target<-[windowPresentationTarget desktop window]]
+metadata desktop=[(windowId window,target,max 1 (width (bounds window)-2),wideSectionTitles desktop)
+      | window<-windows desktop,windowPresentationNeeded desktop window,Just target<-[windowPresentationTarget desktop window]]
 
 captures :: Desktop -> [Target] -> [Capture]
 captures desktop=map capture
   where
-    capture target@(_,DocumentPresentation bid _,_)=case M.lookup bid (buffers desktop) of
+    capture target@(_,DocumentPresentation bid _,_,_)=case M.lookup bid (buffers desktop) of
       Just document->Capture target (bufferContent (documentBuffer document))
         (DocumentStyles (documentHighlight document))
       Nothing->error "Text presentation capture lost a document."
-    capture target@(_,PluginPresentation _ prepared,_)=Capture target (W.preparedWindowText prepared) (PluginStyles (W.preparedWindowRows prepared))
+    capture target@(_,PluginPresentation _ prepared,_,_)=Capture target (W.preparedWindowText prepared) (PluginStyles (W.preparedWindowRows prepared))

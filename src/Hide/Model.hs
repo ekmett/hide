@@ -112,7 +112,7 @@ data Window = Window
 -- Plugin prepared values compare only their unique identity.
 data PresentationTarget = DocumentPresentation !Int !Int
   | PluginPresentation !PluginWindow.WindowRef !PluginWindow.PreparedWindow deriving (Eq,Show)
-data WindowPresentation = WindowPresentation !PresentationTarget !Int !TextLayout.TextLayout deriving (Eq,Show)
+data WindowPresentation = WindowPresentation !PresentationTarget !Int !Bool !TextLayout.TextLayout deriving (Eq,Show)
 
 data Command = New | Open | Download | ChangeDir | Save | SaveAs | Close | Quit | Undo | Redo | Cut | Copy | Paste
   | Find | FindNext | FindPrevious | Replace | GoTo | SelectAll | Zoom | NextWindow | Cascade | Tile
@@ -2528,7 +2528,7 @@ windowPresentationTarget :: Desktop -> Window -> Maybe PresentationTarget
 windowPresentationTarget d w=case windowContent w of
   PluginContent reference->do
     prepared<-M.lookup reference (pluginWindows d)
-    if PluginWindow.preparedWindowHasSections prepared then Just (PluginPresentation reference prepared) else Nothing
+    if PluginWindow.preparedWindowNeedsLayout True prepared then Just (PluginPresentation reference prepared) else Nothing
   SourceContent bid->do
     doc<-M.lookup bid (buffers d)
     if bufferView w/=CurrentView || byteMode (documentBuffer doc) || syntaxDocument doc || null (documentHighlight doc) ||
@@ -2539,11 +2539,18 @@ windowPresentationTarget d w=case windowContent w of
 -- Pending resize/replacement views use ordinary geometry until matching adoption.
 windowPresentation :: Desktop -> Window -> Maybe TextLayout.TextLayout
 windowPresentation d w
-  | not (wideSectionTitles d)=Nothing
+  | not (windowPresentationNeeded d w)=Nothing
   | otherwise=do
-      WindowPresentation target columns layout<-M.lookup (windowId w) (windowPresentations d)
+      WindowPresentation target columns wide layout<-M.lookup (windowId w) (windowPresentations d)
       current<-windowPresentationTarget d w
-      if target==current && columns==max 1 (width (bounds w)-2) then Just layout else Nothing
+      if target==current && wide==wideSectionTitles d && columns==max 1 (width (bounds w)-2) then Just layout else Nothing
+
+-- Cached admission stays separate from payload identity, so preference changes
+-- can still reproject the existing semantic viewport anchor.
+windowPresentationNeeded :: Desktop -> Window -> Bool
+windowPresentationNeeded d w=wideSectionTitles d || case windowContent w of
+  PluginContent reference->maybe False (PluginWindow.preparedWindowNeedsLayout False) (M.lookup reference (pluginWindows d))
+  SourceContent _->False
 
 windowTextPosition :: Desktop -> Window -> BufferContent -> Int -> (Int,Int)
 windowTextPosition d w text pos=maybe (contentPosition text pos) (\layout->TextLayout.layoutPosition layout pos) (windowPresentation d w)
