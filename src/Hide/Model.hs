@@ -42,7 +42,7 @@ import Hide.Browser (Entry(..))
 import Hide.Git (GitReview)
 import Hide.Syntax (Style(..), SourceRow, prepareSourceRow, highlightFor, linkSpans, styleLayoutMetadata)
 import Hide.Hex
-import Hide.Unicode (textInputChar,sourceGraphemesFrom)
+import Hide.Unicode (textInputChar)
 import Hide.InlineState
 import qualified Data.Set as S
 import Hide.Buffer
@@ -1834,16 +1834,14 @@ composerRect d w = Rect (x+ww-4-columns) (y+hh-1-rows) columns rows
 draftColumns :: Bool -> Int -> Buffer -> Int
 draftColumns code limit b
   | limit<=12=max 0 limit
-  | otherwise=1+go 11 (bufferRowsFrom b 0)
+  | otherwise=1+go 11 (contentSourceLinesFrom (bufferContent b) 0)
   where
     bound=limit-1
     go widest _ | widest>=bound=widest
     go widest []=widest
-    go widest (raw:rest)=
-      let line=if code && "    " `T.isPrefixOf` raw then T.drop 4 raw else raw
-          (_,_,column,pending)=sourceGraphemesFrom (bound-1) line
-          columns=case pending of []->column; _->bound
-      in go (max widest columns) rest
+    go widest (line:rest)=
+      let start=if code && sourceLineLength line>=4 && sourceLineSlice line 0 4=="    " then 4 else 0
+      in go (max widest (sourceLineSuffixWidth line start bound)) rest
 
 composerSubmit :: [V.Modifier] -> Desktop -> (Desktop,[Effect])
 composerSubmit mods d
@@ -2902,7 +2900,7 @@ markdownMoveTo extend requested d=case activeWindow d of
 
 -- Measured line offsets avoid scanning preceding text on cursor movement.
 contentPosition :: BufferContent -> Int -> (Int,Int)
-contentPosition text pos=(row,displayColumn (contentLineAt text row) (pos-contentLineOffset text row))
+contentPosition text pos=(row,sourceLineDisplayColumn (contentSourceLineAt text row) (pos-contentLineOffset text row))
   where
     row=findRow 0 (max 0 (contentLineCount text-1))
     findRow low high | low>=high=low
@@ -2947,7 +2945,7 @@ windowTextOffset :: Desktop -> Window -> BufferContent -> Int -> Int -> Int
 windowTextOffset d w text row column=case windowPresentation d w of
   Just layout->TextLayout.layoutOffset layout row column
   Nothing->let line=max 0 (min (contentLineCount text-1) row)
-           in contentLineOffset text line+columnOffset (contentLineAt text line) column
+           in contentLineOffset text line+sourceLineColumnOffset (contentSourceLineAt text line) column
 
 -- | Preserve the semantic viewport top when prepared geometry adopts or a
 -- preference disables it. Only measured source maps and scalar identities are
@@ -2979,7 +2977,7 @@ windowCaretCell d doc original=let w=displayWindow original in case windowPresen
 windowTextRowWidth :: Desktop -> Window -> BufferContent -> Int -> Int
 windowTextRowWidth d w text row=case windowPresentation d w of
   Just layout->maybe 0 TextLayout.layoutRowWidth (TextLayout.layoutRows layout Vec.!? row)
-  Nothing->let line=contentLineAt text row in displayColumn line (T.length line)
+  Nothing->sourceLineWidth (contentSourceLineAt text row)
 
 -- | Choose the current focused input owner using only small focus metadata.
 -- Captured gestures, popups and human question/completion controls retain priority.
@@ -3148,14 +3146,15 @@ verticalMove delta extend d
   | Just view<-activePluginWindow d, Just w<-activeWindow d =
       pluginMoveTo extend (verticalTextOffset d w (PluginWindow.preparedWindowText view) (caret (selection w)) delta) d
   | Just w<-activeWindow d, Just doc<-activeDocument d =
-      let b=documentBuffer doc; p=caret (selection w)
+      let b=documentBuffer doc; text=bufferContent b; p=caret (selection w)
           (row,col)=bufferLineColumn b p
           next | byteMode b=p+delta*windowHexBytes w
                | Just layout<-windowPresentation d w =
                    let (r,c)=TextLayout.layoutPosition layout p
                    in TextLayout.layoutOffset layout (max 0 (min (Vec.length (TextLayout.layoutRows layout)-1) (r+delta))) c
                | otherwise=let r=max 0 (min (bufferLineCount b-1) (row+delta))
-                   in bufferLineOffset b r+columnOffset (bufferLineAt b r) (displayColumn (bufferLineAt b row) col)
+                   in bufferLineOffset b r+sourceLineColumnOffset (contentSourceLineAt text r)
+                     (sourceLineDisplayColumn (contentSourceLineAt text row) col)
       in moveTo extend next d
   | otherwise=d
 
@@ -3183,7 +3182,7 @@ rowEdge end extend d
                              in if end then min (bufferLength b) (start+windowHexBytes w-1) else start
                  | Just layout<-windowPresentation d w =
                      TextLayout.layoutOffset layout (fst (TextLayout.layoutPosition layout p)) column
-                 | end=start+T.length (bufferLineAt b row)
+                 | end=start+sourceLineLength (contentSourceLineAt (bufferContent b) row)
                  | otherwise=start
       in moveTo extend target d
   | otherwise=d
@@ -4011,8 +4010,8 @@ hoverAt x y d = (d {hoverTarget=target,typeHint=fromMaybe (if target==hoverTarge
                 (DeletedLine,_,_):_ -> Nothing
                 _ | projected<changeLineOffset b row+T.length (changeLineAt b row) -> Just (bid,revision b,changeToLiveOffset b projected)
                 _ -> Nothing
-            else let line=bufferLineAt b normalRow; offset=columnOffset line normalColumn
-                 in if normalRow>=bufferLineCount b || normalColumn>=displayColumn line (T.length line) then Nothing
+            else let line=contentSourceLineAt (bufferContent b) normalRow; offset=sourceLineColumnOffset line normalColumn
+                 in if normalRow>=bufferLineCount b || normalColumn>=sourceLineWidth line then Nothing
                     else Just (bid,revision b,bufferLineOffset b normalRow+offset)
 
 -- A completion (including imports) is a single undoable transaction.
@@ -4049,7 +4048,7 @@ windowDocumentWidth doc w | byteMode (documentBuffer doc) = hexWidth (windowHexB
                               let entry=viewRowAt (bufferView w) (bufferViewProjection b) visual, row<-maybe [] pure (viewLeftRow entry)++maybe [] pure (viewRightRow entry),let line=changeLineAt b row])
                           | documentSourceRows doc/=Nothing = documentWidth doc
                           | otherwise = maximum (documentWidth doc:caretColumn:
-                              [displayColumn line (T.length line) | n<-[scrollRow w..min (bufferLineCount b-1) (scrollRow w+max 0 (height (bounds w)-2))],let line=bufferLineAt b n])
+                              [sourceLineWidth line | line<-take (max 0 (height (bounds w)-2)+1) (contentSourceLinesFrom (bufferContent b) (scrollRow w))])
   where b=documentBuffer doc
         (_,caretColumn)=windowCursorCell b w
 
@@ -4066,7 +4065,7 @@ windowCursorCell b w
                                 ; visual=viewRowForChange (bufferView w) (bufferViewProjection b) CurrentSide row
                                 ; pane=if bufferView w==SideBySideView then fst (reviewPaneWidths w)+1 else 0 }
                             in (visual,pane+displayColumn (changeLineAt b row) col)
-  | otherwise = let (row,col)=bufferLineColumn b p in (row,displayColumn (bufferLineAt b row) col)
+  | otherwise = let (row,col)=bufferLineColumn b p in (row,sourceLineDisplayColumn (contentSourceLineAt (bufferContent b) row) col)
   where p=caret (selection w)
 
 toggleHex :: Desktop -> Desktop

@@ -7,6 +7,7 @@ import GHC.Conc (getAllocationCounter)
 import System.Mem.StableName (makeStableName)
 import qualified Data.ByteString as BS
 import qualified Data.Text as T
+import qualified Data.Text.Unsafe as TU
 import Hide.Buffer
 import qualified Hide.BufferView as View
 import qualified Hide.Model as Model
@@ -37,6 +38,7 @@ checkIndexed b text = do
 
 checks :: IO ()
 checks = do
+  longLineChecks
   wordChecks
   batchChecks
   lineChangesChecks
@@ -337,3 +339,43 @@ wordChecks=do
   after<-getAllocationCounter
   check "cold local word motion does not flatten unrelated rows"
     (position==p+3 && before-after<524288)
+
+-- Edits in a long physical row share the unchanged storage. Whole-text reads
+-- below are explicit oracle checks, outside the measured preparation boundary.
+longLineChecks :: IO ()
+longLineChecks=do
+  let text=T.replicate (1024*1024) "a"
+      original=newBuffer text
+      middle=bufferLength original `div` 2
+  _<-evaluate (T.length text)
+  constructionBefore<-getAllocationCounter
+  _<-evaluate (prepareBuffer original)
+  constructionAfter<-getAllocationCounter
+  -- Retained span measures cost more than a flat Text carrier. This bound
+  -- detects temporary records per scalar instead of records per stored span.
+  check "long-row construction keeps numeric state between span receipts"
+    (constructionBefore-constructionAfter<20*1024*1024)
+  before<-getAllocationCounter
+  let changed=replaceSelection (Selection middle middle) "X" original
+  _<-evaluate (prepareBuffer changed)
+  after<-getAllocationCounter
+  check "local long-row edit reuses the immutable suffix" (before-after<512*1024)
+  check "long-row edit agrees with exact source splice"
+    (contents changed==T.take middle text<>"X"<>T.drop middle text)
+  check "long-row edit is one provenance change and Undo step"
+    (bufferLineChanges changed==(1,1) && length (undoStack changed)==1 &&
+      contents (undo changed)==text && contents (redo (undo changed))==contents changed)
+  let nonfinal=newBuffer (text<>"\r\ntail\n")
+      changedNonfinal=replaceSelection (Selection middle middle) "X" nonfinal
+  check "long nonfinal edit preserves its terminator and successors"
+    (contents changedNonfinal==T.take middle text<>"X"<>T.drop middle text<>"\r\ntail\n" && bufferLineCount changedNonfinal==3)
+  let capped=T.replicate 60 "a"<>"z"<>T.replicate 31 "\x301"<>T.replicate 42 "\x1d165"<>"X"
+      recut=replaceSelection (Selection (T.length capped) (T.length capped+300)) "" (newBuffer (capped<>T.replicate 300 "b"))
+  forM_ [changed,changedNonfinal,recut,newBuffer (T.replicate 600 "界\t")] $ \b->do
+    let (_,_,groups)=sourceLineWindow (contentSourceLineAt (bufferContent b) 0) 0
+        sizes=map (TU.lengthWord8 . fst) groups
+    check "regular storage keeps bounded locally balanced borrowed spans"
+      (not (null sizes) && all (\n->n>=64 && n<=256) (init sizes) && last sizes<=256)
+  let restored=replaceSelection (Selection middle (middle+1)) "" changed
+  check "restoring long-row contents restores its baseline"
+    (contents restored==text && not (dirty restored) && bufferLineChanges restored==(0,0))

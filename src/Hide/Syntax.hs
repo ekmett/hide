@@ -5,7 +5,7 @@
 -- styles. A tokenizer result is accepted only when it preserves the original
 -- characters exactly. Link and bubble annotations remain in the styled stream
 -- so later layout can retain interaction metadata without reparsing text.
-module Hide.Syntax (Style(..), Grapheme, graphemeText, graphemeDisplayText, Sigils(..), sourceSigilsWindow, SourceRow, SourceRange, prepareSourceRow, plainSourceRow, sourceRowText, sourceRowRanges, sourceRangeCharStart, sourceRangeCharEnd, sourceRangeByteStart, sourceRangeByteEnd, sourceRangeStyle, sourceRangeText, sourceStylesAt, presentationItems, styleOverflowExtent, styleLayoutMetadata, styleScript, fontTraits, sectionTitle, highlight, highlightFor, bubbleTile, linkSpans) where
+module Hide.Syntax (Style(..), Grapheme, graphemeText, graphemeDisplayText, Sigils(..), sourceSigilsWindow, SourceRow, SourceRange, prepareSourceRow, plainSourceRow, plainSourceLine, attachSourceLine, sourceRowText, sourceRowRanges, sourceRangeCharStart, sourceRangeCharEnd, sourceRangeByteStart, sourceRangeByteEnd, sourceRangeStyle, sourceRangeText, sourceStylesAt, presentationItems, styleOverflowExtent, styleLayoutMetadata, styleScript, fontTraits, sectionTitle, highlight, highlightFor, bubbleTile, linkSpans) where
 
 import Data.List (intercalate)
 import qualified Data.List as List
@@ -15,6 +15,7 @@ import qualified Data.Text as T
 import qualified Data.Text.Unsafe as TU
 import qualified Data.Vector as V
 import Hide.Unicode (DisplayItem,itemScalarCount,itemOverflow,itemSourceText,itemDisplayText,itemWidth,sourceGraphemesFrom,sourceItemAdvance,displayItems,Script)
+import Hide.Buffer (SourceLine,sourceLineText,sourceLineRawText,sourceLineLength,sourceLineHasChunks,sourceLineWindow)
 import qualified Skylighting as S
 import System.FilePath (takeFileName)
 
@@ -24,7 +25,7 @@ data Style = OverflowFragment !Int Style | ScriptStyle !Script Style | SectionSt
 -- | Original source row and worker-prepared style ranges. Styling never changes
 -- character positions; range boundaries also name complete UTF8 codepoints.
 -- Concatenating 'sourceRangeText' over 'sourceRowRanges' recovers 'sourceRowText'.
-data SourceRow = SourceRow !T.Text !(V.Vector SourceRange) | PlainSourceRow !T.Text deriving Show
+data SourceRow = SourceRow !T.Text !(V.Vector SourceRange) | PlainSourceRow !T.Text | LiveSourceRow !SourceLine !(Maybe (V.Vector SourceRange)) deriving Show
 
 -- Equality is the public text/range projection, independent of representation.
 -- It is not an identity or an invalidation key.
@@ -35,6 +36,8 @@ instance Eq SourceRow where
 sourceRowText :: SourceRow -> T.Text
 sourceRowText (SourceRow text _)=text
 sourceRowText (PlainSourceRow text)=text
+sourceRowText (LiveSourceRow line Nothing)=sourceLineText line
+sourceRowText (LiveSourceRow line (Just _))=sourceLineRawText line
 
 -- | Exact ordered ranges covering the source. Requesting ranges for an implicit
 -- plain row counts its characters; visible rendering does not need that count.
@@ -43,6 +46,11 @@ sourceRowRanges (SourceRow _ ranges)=ranges
 sourceRowRanges (PlainSourceRow text)
   | T.null text=V.empty
   | otherwise=V.singleton (SourceRange 0 (T.length text) 0 (TU.lengthWord8 text) Plain)
+
+sourceRowRanges (LiveSourceRow _ (Just ranges))=ranges
+sourceRowRanges row@(LiveSourceRow line Nothing)
+  | sourceLineLength line==0=V.empty
+  | otherwise=V.singleton (SourceRange 0 (sourceLineLength line) 0 (TU.lengthWord8 (sourceRowText row)) Plain)
 
 -- | Half-open character and UTF8 byte coordinates in one original source row.
 -- The constructor stays private: ranges are ordered and cover the exact row.
@@ -80,6 +88,24 @@ prepareSourceRow text tokens=SourceRow text (V.fromList (ranges 0 0 tokens))
 -- rebuilding characters. Exact ranges remain available through 'sourceRowRanges'.
 plainSourceRow :: T.Text -> SourceRow
 plainSourceRow=PlainSourceRow
+
+-- | Borrow the current physical source owner without projecting its full Text.
+plainSourceLine :: SourceLine -> SourceRow
+plainSourceLine line
+  | sourceLineHasChunks line=LiveSourceRow line Nothing
+  | otherwise=plainSourceRow (sourceLineText line)
+
+-- | Attach live storage to prepared ranges from this exact source revision.
+-- Public projections remain the original worker row, including a trailing CR.
+attachSourceLine :: SourceLine -> SourceRow -> SourceRow
+attachSourceLine line row | not (sourceLineHasChunks line)=case row of
+  SourceRow {}->row
+  PlainSourceRow {}->plainSourceLine line
+  LiveSourceRow _ Nothing->plainSourceLine line
+  LiveSourceRow _ (Just ranges)->SourceRow (sourceLineRawText line) ranges
+attachSourceLine line (SourceRow _ ranges)=LiveSourceRow line (Just ranges)
+attachSourceLine line (LiveSourceRow _ ranges)=LiveSourceRow line ranges
+attachSourceLine line (PlainSourceRow _)=plainSourceLine line
 
 -- | Slice a range belonging to this row. Both endpoints were established from
 -- the original UTF8 iterator on the preparation worker.
@@ -121,34 +147,63 @@ data Sigils
 sourceSigilsWindow :: Int -> Int -> SourceRow -> (Int,Int,Sigils)
 sourceSigilsWindow requested width row
   | width<=0=(0,0,Nil)
-  | otherwise=let (char,byte,col,pending)=sourceGraphemesFrom left text
-              in (char,col,build col char byte ranges pending)
+  | otherwise=let (char,col,groups)=window
+              in (char,col,nextGroup col char (rangeIndex char) groups)
   where
-    text=sourceRowText row
     left=max 0 requested
     right=left+min (maxBound-left) width
-    ranges=case row of SourceRow _ prepared->V.toList prepared; PlainSourceRow _->[]
-    slice a b=TU.takeWord8 (b-a) (TU.dropWord8 a text)
-    build !col !char !byte current pending
-      | col>=right=Nil
-      | otherwise=case pending of
+    limit=case row of LiveSourceRow line _->sourceLineLength line; _->maxBound
+    window=case row of
+      LiveSourceRow line prepared->
+        let (char,col,groups)=sourceLineWindow line left
+            -- Prepared worker rows retain trailing CR, while editor geometry
+            -- omits it. Preserve the exact source EOF coordinate without paint.
+            end=case prepared >>= (V.!? (maybe 0 V.length prepared-1)) of
+              Just range | null groups->sourceRangeCharEnd range
+              _->char
+        in (end,col,groups)
+      _->let text=sourceRowText row; (char,byte,col,items)=sourceGraphemesFrom left text
+         in (char,col,[(TU.dropWord8 byte text,items)])
+    ranges=case row of
+      SourceRow _ prepared->prepared
+      LiveSourceRow _ (Just prepared)->prepared
+      _->V.empty
+    -- Binary seek keeps a far-horizontal viewport independent of earlier styles.
+    rangeIndex char=seek 0 (V.length ranges)
+      where seek lo hi | lo>=hi=lo
+                       | otherwise=let mid=(lo+hi) `div` 2
+                                   in if sourceRangeCharEnd (ranges V.! mid)<=char then seek (mid+1) hi else seek lo mid
+    activeIndex char index
+      | Just range<-ranges V.!? index,sourceRangeCharEnd range<=char=activeIndex char (index+1)
+      | otherwise=index
+    nextGroup col char index groups
+      | col>=right || char>=limit=Nil
+      | otherwise=case groups of
           []->Nil
-          glyph:rest->emit col char byte current glyph (itemScalarCount glyph) (sourceItemAdvance col glyph) rest
-    emit col char byte current glyph n advance rest=
-      let active=dropWhile ((<=char).sourceRangeCharEnd) current
-          style=case active of range:_->sourceRangeStyle range; _->Plain
+          (text,pending):more->build text col char 0 index pending more
+    build text !col !char !byte index pending more
+      | col>=right || char>=limit=Nil
+      | otherwise=case pending of
+          []->nextGroup col char index more
+          glyph:rest->emit text col char byte index glyph (itemScalarCount glyph) (sourceItemAdvance col glyph) rest more
+    emit text col char byte index glyph n advance rest more=
+      let current=activeIndex char index
+          range=ranges V.!? current
+          style=maybe Plain sourceRangeStyle range
           endByte=byte+TU.lengthWord8 (itemSourceText glyph)
           endChar=char+n
+          slice a b=TU.takeWord8 (b-a) (TU.dropWord8 a text)
       in if not (itemOverflow glyph) && n==1 && advance==1 && T.all (\c->c>=' ' && c/='\DEL') (itemSourceText glyph) then
-           let limit=case active of range:_->sourceRangeCharEnd range; _->maxBound
-               (finishChar,finishByte,after)=gather limit (col+1) endChar endByte rest
-           in ConsChars (slice byte finishByte) style (build (col+finishChar-char) finishChar finishByte active after)
-         else ConsSigil (Grapheme glyph) style advance (build (col+advance) endChar endByte active rest)
-    gather limit !col !char !byte pending
-      | char>=limit || col>=right=(char,byte,pending)
+           let rangeLimit=min limit (maybe maxBound sourceRangeCharEnd range)
+               (finishChar,finishByte,after)=gather rangeLimit (col+1) endChar endByte rest
+           in ConsChars (slice byte finishByte) style (build text (col+finishChar-char) finishChar finishByte current after more)
+         else ConsSigil (Grapheme glyph) style advance (build text (col+advance) endChar endByte current rest more)
+    -- Borrowed ordinary runs stop at both the style and the storage-leaf edge.
+    gather rangeLimit !col !char !byte pending
+      | char>=rangeLimit || col>=right=(char,byte,pending)
       | otherwise=case pending of
           glyph:rest | not (itemOverflow glyph),itemScalarCount glyph==1,itemWidth glyph==1,T.all (\c->c>=' ' && c/='\DEL') (itemSourceText glyph)->
-            gather limit (col+1) (char+1) (byte+TU.lengthWord8 (itemSourceText glyph)) rest
+            gather rangeLimit (col+1) (char+1) (byte+TU.lengthWord8 (itemSourceText glyph)) rest
           _->(char,byte,pending)
 
 highlight :: T.Text -> [(Char,Style)]

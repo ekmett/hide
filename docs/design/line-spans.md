@@ -1,7 +1,10 @@
 # Regular spans for long lines
 
 Status: in progress, 5 October 2026. Tracked in [issue #116](https://github.com/ekmett/hide/issues/116).
-The shared bounded Unicode cursor is implemented; regular span storage and demand-driven indexing are the remaining work.
+The shared bounded Unicode cursor and borrowed regular span storage are implemented.
+Source viewports, coordinates and local edits use the span measures. Construction
+still prepares the complete display index eagerly; demand-driven indexing remains
+open.
 
 We want cheap horizontal seeks and small edits in long lines. Dice the text into
 borrowed spans at roughly **128-byte intervals**. Keep old spans after an edit;
@@ -54,12 +57,16 @@ Unicode context still matters at a join. Reuse a suffix only when its captured
 segmentation state is valid there, and use the immutable edit splice to establish
 that the bytes are unchanged. A run of regional indicators can require a longer
 scan after an edit changes pairing. Keep that rare cost explicit; a small span
-bound is not a proof of constant-time Unicode repair.
+bound is not a proof of constant-time Unicode repair. The current pure edit
+owner performs that fallback, so pathological pairing changes can still delay
+an edit.
 
 Provenance stays line-owned. Original, inserted and deleted lines keep their
 existing ordering and saved baseline. Splitting an internal span does not create
 another changed line. Newline/CRLF, the final empty editor row, byte mode and
-Undo/Redo retain their current contracts. Explicit whole-text exports remain
+Undo/Redo retain their current contracts. Same-row edits repair local spans;
+multiline splices retain the existing full-physical-line fallback. Explicit
+whole-text exports remain
 available to file output, HLS and highlighting on their owning workers.
 
 ## Prepare only what a seek needs

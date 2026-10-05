@@ -6,7 +6,7 @@
 -- Clipped GPU cells retain their full semantic glyph. Text-mode partial clusters
 -- become blanks. Terminal output advances
 -- explicitly past two-cell clusters even when the user's font draws them narrowly.
-module Hide.Unicode (SourceCursor, initialSourceCursor, sourceItemStep, sourceItemsFromCursor, sourceLeafFrom, DisplayItem, displayItems, itemSourceText, itemScalarCount, itemDisplayText, itemOverflow, itemWidth, sourceItemAdvance, graphemes, sourceGraphemesFrom, sourceTextWidth, sourceGlyphAdvance, scalarWidth, clusterWidth, textImage, wideTextImage, displayClusters, terminalProjection, scriptTerminalText, terminalSpan, Script(..), CellSpan(..), CellLayer(..), cellRowsForLayers, cellRowsForPic, cellDisplayOps, flattenPicture, displayOpsForPic, updateDisplayOps, terminalText, textInputChar) where
+module Hide.Unicode (SourceCursor, initialSourceCursor, sourceItemStep, sourceSpanStep, sourceItemsFromCursor, sourceLeafFrom, DisplayItem, displayItems, itemSourceText, itemScalarCount, itemDisplayText, itemOverflow, itemWidth, sourceItemAdvance, graphemes, sourceGraphemesFrom, sourceTextWidth, sourceGlyphAdvance, scalarWidth, clusterWidth, textImage, wideTextImage, displayClusters, terminalProjection, scriptTerminalText, terminalSpan, Script(..), CellSpan(..), CellLayer(..), cellRowsForLayers, cellRowsForPic, cellDisplayOps, flattenPicture, displayOpsForPic, updateDisplayOps, terminalText, textInputChar) where
 
 import Control.Monad (forM_, when)
 import Data.Char (isPrint)
@@ -97,6 +97,45 @@ sourceItemStep text byte cursor@(SourceCursor previous state flags)
               ((if continued then 1 else 0) .|. (if end<TU.lengthWord8 text then 2 else 0))
         in (# end,count,advance,count==1 && first=='\t',overflow,next #)
 {-# INLINE sourceItemStep #-}
+
+-- | Consume complete bounded items until a byte target, scalar limit or real
+-- EOF, returning @(endByte, scalarCount, itemCount, tabPrefix, tabSuffix,
+-- lastOverflow, nextCursor)@. A negative tab prefix denotes an additive advance;
+-- otherwise the transform is @nextTab (column + tabPrefix) + tabSuffix@.
+-- The incoming cursor and byte offset follow 'sourceItemStep' provenance rules.
+-- Limits are tested at item edges, so the last item may cross either target.
+-- With following source, fewer than 132 remaining bytes stops before the next
+-- item: the storage owner must then supply a real lookahead bridge. An initially
+-- stopped call returns zero counts and the unchanged cursor. Only a returned
+-- span receipt constructs a cursor; the inner item loop carries numeric state.
+sourceSpanStep :: T.Text -> Int -> SourceCursor -> Int -> Int -> Bool -> (# Int,Int,Int,Int,Int,Bool,SourceCursor #)
+sourceSpanStep text start incoming@(SourceCursor previous state flags) target limit following=
+  case go start 0 0 (-1) 0 previous state flags False of
+    (# end#,chars#,items#,prefix#,suffix#,receipt,prev#,state#,bits# #)->
+      (# I# end#,I# chars#,I# items#,I# prefix#,I# suffix#,receipt,
+         if I# items#==0 then incoming else SourceCursor
+           (fromIntegral (I# prev#)) (fromIntegral (I# state#)) (I# bits#) #)
+  where
+    size=TU.lengthWord8 text
+    -- Primitive inner results prevent boxed API counters becoming loop state.
+    finish (I# byte) (I# chars) (I# items) (I# prefix) (I# suffix) receipt prev st (I# bits)=
+      case fromIntegral prev of
+        I# previous#->case fromIntegral st of
+          I# state#->(# byte,chars,items,prefix,suffix,receipt,previous#,state#,bits #)
+    go !byte !chars !items !prefix !suffix !prev !st !bits !receipt
+      | byte>=target || chars>=limit || byte>=size || following && size-byte<132=
+          finish byte chars items prefix suffix receipt prev st bits
+      | otherwise=case itemEnd text byte prev st (bits .&. 1/=0) (bits .&. 2/=0) of
+          (# end#,count#,first#,natural#,controls,overflow,continued,prev#,nextState# #)->
+            let end=I# end#; count=I# count#; first=C# first#
+                tab=count==1 && first=='\t'
+                advance=if overflow then 1 else sourceAdvance 0 count first (I# natural#) controls
+                prefix'=if tab && prefix<0 then suffix else prefix
+                suffix'=if tab then if prefix<0 then 0 else 8*(suffix `div` 8+1) else suffix+advance
+                bits'=(if continued then 1 else 0) .|. (if end<size then 2 else 0)
+            in go end (chars+count) (items+1) prefix' suffix'
+              (fromIntegral (I# prev#)) (fromIntegral (I# nextState#)) bits' overflow
+{-# NOINLINE sourceSpanStep #-}
 
 -- | Emit a borrowed storage leaf using its captured incoming checkpoint. The
 -- Boolean is the proven overflow flag of its last item in the complete source;

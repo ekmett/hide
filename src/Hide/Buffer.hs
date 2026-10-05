@@ -15,6 +15,9 @@ module Hide.Buffer
   , BufferSnapshot(..), snapshotBuffer, restoreBuffer
   , BufferContent, bufferContent, contentLength, contentLineCount, contentByteMode
   , contentSlice, contentByteSlice, contentLineOffset, contentLineAt
+  , SourceLine, contentSourceLineAt, contentSourceLinesFrom, sourceLineText, sourceLineRawText
+  , sourceLineLength, sourceLineHasChunks, sourceLineWidth, sourceLineDisplayColumn, sourceLineColumnOffset, sourceLineWindow
+  , sourceLineSlice, sourceLineSuffixWidth
   , newBuffer, newByteBuffer, bufferBytes, markSaved, toggleByteMode, replaceBuffer, textBuffer
   , DirtySnapshot, captureDirty, snapshotDirty
   , contents, dirty, ordered, replaceSelection, replaceRanges, prepareBuffer, undo, redo, selectedText
@@ -28,17 +31,20 @@ module Hide.Buffer
   ) where
 
 import qualified Data.Text as T
+import qualified Data.Text.Unsafe as TU
 import Data.Text (Text)
 import qualified Data.Text.Encoding as TE
 import qualified Data.ByteString as BS
 import Data.Word (Word64)
+import Data.Bits ((.|.), (.&.), shiftL, shiftR)
 import Data.Char (GeneralCategory(..), generalCategory, isAlphaNum, isSpace, ord)
 import Data.Foldable (toList)
 import Control.Monad (unless)
 import qualified Data.FingerTree as FT
 import Graphics.Vty (safeWcwidth)
 import Hide.BufferView (ViewProjection, buildViewProjection, forceViewProjection)
-import Hide.Unicode (graphemes, displayItems, itemSourceText, sourceItemAdvance)
+import qualified Hide.LineChunks as Chunks
+import Hide.Unicode (DisplayItem, graphemes, displayItems, itemSourceText, sourceItemAdvance, sourceGraphemesFrom)
 
 data LineMeasure = LineMeasure
   { characterCount :: !Int, lineCount :: !Int, newLineCount :: !Int, deletedLineCount :: !Int
@@ -51,12 +57,25 @@ instance Monoid LineMeasure where
 data LineOrigin = Original | Added | Deleted deriving (Eq,Show)
 -- Deleted leaves retain baseline text, but occupy no character or visible line.
 -- The final empty editor row is visible and contributes no file-line change.
-data Line = Line !Int !Bool !Bool !LineOrigin !Word64 !Word64 Text deriving (Eq,Show)
+-- Encoding flags include the terminator, so a tree measure never inspects text.
+-- Packing the existing NUL/CRLF flags also leaves the ordinary Text leaf compact.
+data Line = Line !Int !Int !LineOrigin !Word64 !Word64 Text
+  | ChunkedLine !Int !Int !LineOrigin !Word64 !Word64 !Chunks.Chunks
+  deriving Show
+
+-- Public equality is extensional, independent of storage cuts. It is never an
+-- interaction/revision key. Fingerprints reject mismatches, not collisions.
+instance Eq Line where
+  a==b=lineOrigin a==lineOrigin b && lineFlags a==lineFlags b && sameLineText a b
 instance FT.Measured LineMeasure Line where
-  measure (Line n nul crlf origin fingerprint factor text) = case origin of
+  measure line = case lineOrigin line of
     Deleted -> LineMeasure 0 0 0 1 False False 0 1 reviewSize
-    _ -> LineMeasure n 1 (if origin==Added && n>0 then 1 else 0) 0 nul crlf fingerprint factor reviewSize
-    where reviewSize=n+if "\n" `T.isSuffixOf` text then 0 else 1
+    origin -> LineMeasure n 1 (if origin==Added && n>0 then 1 else 0) 0
+      (flags .&. 1/=0) (flags .&. 2/=0) (lineHash line) (lineFactor line) reviewSize
+    where
+      n=lineCharacters line
+      flags=lineFlags line
+      reviewSize=n+if flags .&. 4/=0 then 0 else 1
 type LineTree = FT.FingerTree LineMeasure Line
 
 -- | An editable revision with a saved baseline and at most 100 undo states.
@@ -98,6 +117,90 @@ contentLineOffset (BufferContent tree _) = treeLineOffset tree
 contentLineAt :: BufferContent -> Int -> Text
 contentLineAt (BufferContent tree _) = treeLineAt tree
 
+-- | Opaque borrowed view of the owning physical line; no text or Undo copy.
+-- Scalar offsets, UTF8 bytes and display columns are distinct coordinates.
+type SourceLine = Line
+
+-- | Seek one source row using cached outer-tree measures.
+contentSourceLineAt :: BufferContent -> Int -> SourceLine
+contentSourceLineAt (BufferContent tree _) row=case FT.viewl (FT.dropUntil ((>max 0 row).lineCount) tree) of
+  line FT.:< _->line
+  FT.EmptyL->Line 0 0 Original 0 1 T.empty
+
+-- | One measured seek followed by lazy visible-row successors.
+contentSourceLinesFrom :: BufferContent -> Int -> [SourceLine]
+contentSourceLinesFrom (BufferContent tree _) row=
+  [line | line<-toList (FT.dropUntil ((>max 0 row).lineCount) tree),lineOrigin line/=Deleted]
+
+-- | Whether this physical row uses chunk storage. /O(1)/; this never counts
+-- source bytes, projects text or evaluates display metadata.
+sourceLineHasChunks :: SourceLine -> Bool
+sourceLineHasChunks (Line {})=False
+sourceLineHasChunks (ChunkedLine {})=True
+
+-- | Cached scalar extent of an editor row, excluding trailing CR/LF.
+sourceLineLength :: SourceLine -> Int
+sourceLineLength line=lineCharacters line-(lineFlags line `shiftR` 3)
+
+-- | Explicit editor-row text projection. Visible rendering uses leaf groups.
+sourceLineText :: SourceLine -> Text
+sourceLineText (Line _ _ _ _ _ text)=T.dropWhileEnd (=='\r') (T.dropWhileEnd (=='\n') text)
+sourceLineText line=T.concat (lineFragments line 0 (sourceLineLength line))
+
+-- | Bounded original scalar range, clamped before the editor-row terminator.
+sourceLineSlice :: SourceLine -> Int -> Int -> Text
+sourceLineSlice line requested count=T.concat (lineFragments line start (min (max 0 count) (sourceLineLength line-start)))
+  where start=max 0 (min (sourceLineLength line) requested)
+
+-- | Width up to a display-cell cap after removing a scalar prefix. This explicit
+-- normalization restarts segmentation, preserving code-indentation semantics.
+-- Long unmodified rows use cached width; normalized suffixes borrow local spans.
+sourceLineSuffixWidth :: SourceLine -> Int -> Int -> Int
+sourceLineSuffixWidth line@(ChunkedLine _ _ _ _ _ chunks) requested bound
+  | start==0=min (max 0 bound) (sourceLineWidth line)
+  | otherwise=Chunks.chunksSuffixWidth chunks start (sourceLineLength line-start) bound
+  where start=max 0 (min (sourceLineLength line) requested)
+sourceLineSuffixWidth line requested bound
+  | bound<=0=0
+  | otherwise=let text=T.drop (max 0 requested) (sourceLineText line)
+                  (_,_,column,pending)=sourceGraphemesFrom (bound-1) text
+              in case pending of []->column; _->bound
+
+-- | Exact highlighting-worker row projection: LF is split, CR is retained.
+sourceLineRawText :: SourceLine -> Text
+sourceLineRawText (Line _ _ _ _ _ text)=T.dropWhileEnd (=='\n') text
+sourceLineRawText line=T.concat (lineFragments line 0 (lineCharacters line-if lineTerminated line then 1 else 0))
+
+-- | Cached display extent for long source rows. LF's control cell is excluded;
+-- trailing CR has zero advance. Ordinary short rows use the same Unicode owner.
+sourceLineWidth :: SourceLine -> Int
+sourceLineWidth line@(Line {})=displayColumn (sourceLineText line) maxBound
+sourceLineWidth (ChunkedLine _ flags _ _ _ chunks)=
+  Chunks.applyAdvance (Chunks.chunkAdvance (Chunks.chunksMeasure chunks)) 0-if flags .&. 4/=0 then 1 else 0
+
+-- | Scalar positions inside an item snap to its starting display column.
+sourceLineDisplayColumn :: SourceLine -> Int -> Int
+sourceLineDisplayColumn line@(Line {}) position=displayColumn (sourceLineText line) position
+sourceLineDisplayColumn line@(ChunkedLine _ _ _ _ _ chunks) position=
+  Chunks.chunksDisplayColumn chunks (max 0 (min (sourceLineLength line) position))
+
+-- | Display hit to original scalar boundary, clamped before the terminator.
+sourceLineColumnOffset :: SourceLine -> Int -> Int
+sourceLineColumnOffset line@(Line {}) column=columnOffset (sourceLineText line) column
+sourceLineColumnOffset line@(ChunkedLine _ _ _ _ _ chunks) column=
+  min (sourceLineLength line) (Chunks.chunksColumnOffset chunks column)
+
+-- | Borrow a display suffix grouped by storage leaf. The first coordinates are
+-- original scalars and absolute display columns. Consumers stop at the cached
+-- editor extent; each ordinary run must stay inside its group's source array.
+sourceLineWindow :: SourceLine -> Int -> (Int,Int,[(Text,[DisplayItem])])
+sourceLineWindow line@(Line {}) column=
+  let text=sourceLineText line; (char,byte,col,items)=sourceGraphemesFrom column text
+  in (char,col,case items of []->[]; _->[(TU.dropWord8 byte text,items)])
+sourceLineWindow line@(ChunkedLine _ _ _ _ _ chunks) column
+  | column>=sourceLineWidth line=(sourceLineLength line,sourceLineWidth line,[])
+  | otherwise=Chunks.chunksWindow chunks column
+
 -- | Explicit recovery representation, including flattened histories and provenance.
 -- Constructing or encoding this value may traverse all retained buffer text.
 data BufferSnapshot = BufferSnapshot
@@ -131,16 +234,16 @@ restoreBuffer s
   | maybe False (not . validChange (T.length (snapshotContents s))) (snapshotLastChange s)=Left "Invalid last buffer change"
   | otherwise=do
       (current,history,future)<-case snapshotLineChanges s of
-        Nothing -> pure (fromSaved (snapshotContents s),map inflate (snapshotUndo s),map inflate (snapshotRedo s))
+        Nothing -> pure (fromSaved (snapshotByteMode s) (snapshotContents s),map inflate (snapshotUndo s),map inflate (snapshotRedo s))
         Just (currentChanges,historyChanges,futureChanges) -> do
           unless (length historyChanges==length (snapshotUndo s) && length futureChanges==length (snapshotRedo s))
             (Left "Invalid buffer line-change history")
-          current<-restoreLines (snapshotSaved s) (snapshotContents s) currentChanges
+          current<-restoreLines (snapshotSavedByteMode s) (snapshotSaved s) (snapshotByteMode s) (snapshotContents s) currentChanges
           history<-sequence (zipWith restoreEntry (snapshotUndo s) historyChanges)
           future<-sequence (zipWith restoreEntry (snapshotRedo s) futureChanges)
           pure (current,history,future)
       pure (Buffer current (snapshotContents s) (snapshotSaved s) history future (snapshotRevision s) (snapshotLastChange s)
-        (snapshotByteMode s) (snapshotSavedByteMode s) (linesFromText (snapshotSaved s)) (projectionFor current))
+        (snapshotByteMode s) (snapshotSavedByteMode s) (linesFromText (snapshotSavedByteMode s) (snapshotSaved s)) (projectionFor current))
   where
     validText mode text=not mode || T.all ((<=255).ord) text
     validChange size (a,z,n)=a>=0 && z>=a && n>=0 && toInteger a+toInteger n<=toInteger size
@@ -149,10 +252,10 @@ restoreBuffer s
       toInteger size-toInteger (z-a)+toInteger n==toInteger (T.length text) && validHistory (T.length text) rest
     -- Older checkpoints have no provenance. Reconcile their saved/current line
     -- regions conservatively; all new checkpoints preserve exact edit identity.
-    fromSaved text=normalizeHunks (reconcileTree (linesFromText (snapshotSaved s)) (linesFromText text))
-    inflate (text,mode,change)=(fromSaved text,mode,change)
+    fromSaved mode text=normalizeHunks (reconcileTree (linesFromText (snapshotSavedByteMode s) (snapshotSaved s)) (linesFromText mode text))
+    inflate (text,mode,change)=(fromSaved mode text,mode,change)
     restoreEntry (text,mode,change) changes=do
-      tree<-restoreLines (snapshotSaved s) text changes
+      tree<-restoreLines (snapshotSavedByteMode s) (snapshotSaved s) mode text changes
       pure (tree,mode,change)
 
 -- | Anchor and caret in zero-based character offsets; either end may come first.
@@ -160,11 +263,14 @@ data Selection = Selection { anchor :: Int, caret :: Int } deriving (Eq, Show)
 
 -- | Create a clean text buffer with an empty undo history and one final editor row.
 newBuffer :: Text -> Buffer
-newBuffer t = let tree=linesFromText t in Buffer tree t t [] [] 0 Nothing False False tree (projectionFor tree)
+newBuffer=newBufferMode False
+
+newBufferMode :: Bool -> Text -> Buffer
+newBufferMode mode t = let tree=linesFromText mode t in Buffer tree t t [] [] 0 Nothing mode mode tree (projectionFor tree)
 
 -- | Create a clean byte buffer using one Latin-1 character per byte, without lossy decoding.
 newByteBuffer :: BS.ByteString -> Buffer
-newByteBuffer bytes = (newBuffer (TE.decodeLatin1 bytes)) {byteMode=True,savedByteMode=True}
+newByteBuffer bytes = newBufferMode True (TE.decodeLatin1 bytes)
 
 encodeContents :: Bool -> Text -> BS.ByteString
 encodeContents False = TE.encodeUtf8
@@ -201,29 +307,85 @@ replaceBuffer mode text b
   | otherwise = b {bufferLines=updated,viewProjection=projectionFor updated,cachedContents=text,byteMode=mode,
       undoStack=take 100 ((bufferLines b,byteMode b,(0,T.length text,bufferLength b)):undoStack b),
       redoStack=[],revision=revision b+1,lastChange=Just (0,bufferLength b,T.length text)}
-  where updated=restoreBaseline (baselineLines b) (editTree 0 (bufferLength b) text (bufferLines b))
+  where updated=restoreBaseline (baselineLines b) (editTree mode 0 (bufferLength b) text (bufferLines b))
 
 -- | The shared lazy whole-text projection. Use line/slice accessors for local navigation.
 contents :: Buffer -> Text
 contents = cachedContents
 
 lineText :: Line -> Text
-lineText (Line _ _ _ _ _ _ t) = t
+lineText (Line _ _ _ _ _ t) = t
+lineText (ChunkedLine _ _ _ _ _ chunks) = Chunks.chunksText chunks
+
+lineCharacters :: Line -> Int
+lineCharacters (Line n _ _ _ _ _) = n
+lineCharacters (ChunkedLine n _ _ _ _ _) = n
+
+lineFlags :: Line -> Int
+lineFlags (Line _ flags _ _ _ _) = flags
+lineFlags (ChunkedLine _ flags _ _ _ _) = flags
+
+lineHash, lineFactor :: Line -> Word64
+lineHash (Line _ _ _ hash _ _) = hash
+lineHash (ChunkedLine _ _ _ hash _ _) = hash
+lineFactor (Line _ _ _ _ factor _) = factor
+lineFactor (ChunkedLine _ _ _ _ factor _) = factor
+
+lineFragments :: Line -> Int -> Int -> [Text]
+lineFragments (Line _ _ _ _ _ text) start count=[T.take count (T.drop start text) | count>0]
+lineFragments (ChunkedLine _ _ _ _ _ chunks) start count=Chunks.chunksFragments chunks start count
+
+-- Cached fingerprints only reject unequal lines. Restore/provenance decisions
+-- still check exact borrowed text when the length and fingerprint both match.
+sameLineText :: Line -> Line -> Bool
+sameLineText a b=lineCharacters a==lineCharacters b && lineHash a==lineHash b &&
+  equalFragments (lineFragments a 0 (lineCharacters a)) (lineFragments b 0 (lineCharacters b))
+
+equalFragments :: [Text] -> [Text] -> Bool
+equalFragments [] []=True
+equalFragments [] right=all T.null right
+equalFragments left []=all T.null left
+equalFragments (a:as) (b:bs)
+  | T.null a=equalFragments as (b:bs)
+  | T.null b=equalFragments (a:as) bs
+  | a==b=equalFragments as bs
+  | a `T.isPrefixOf` b=equalFragments as (TU.dropWord8 (TU.lengthWord8 a) b:bs)
+  | b `T.isPrefixOf` a=equalFragments (TU.dropWord8 (TU.lengthWord8 b) a:as) bs
+  | otherwise=False
 
 lineOrigin :: Line -> LineOrigin
-lineOrigin (Line _ _ _ origin _ _ _) = origin
+lineOrigin (Line _ _ origin _ _ _) = origin
+lineOrigin (ChunkedLine _ _ origin _ _ _) = origin
 
 withOrigin :: LineOrigin -> Line -> Line
-withOrigin origin (Line n nul crlf _ fingerprint factor t) = Line n nul crlf origin fingerprint factor t
+withOrigin origin (Line n flags _ fingerprint factor t) = Line n flags origin fingerprint factor t
+withOrigin origin (ChunkedLine n flags _ fingerprint factor chunks) = ChunkedLine n flags origin fingerprint factor chunks
+
+lineTerminated, lineCRLF :: Line -> Bool
+lineTerminated line = lineFlags line .&. 4/=0
+lineCRLF line = lineFlags line .&. 2/=0
 
 treeText :: LineTree -> Text
 treeText = T.concat . map lineText . filter ((/=Deleted) . lineOrigin) . toList
 
-linesFromText :: Text -> LineTree
-linesFromText = FT.fromList . go . T.splitOn "\n"
+-- Byte leaves retain their Latin1 scalar policy and never run segmentation.
+linesFromText :: Bool -> Text -> LineTree
+linesFromText mode = FT.fromList . go . T.splitOn "\n"
   where
-    line t = let n=T.length t in Line n (T.any (=='\0') t) ("\r\n" `T.isSuffixOf` t) Original
-      (T.foldl' (\hash c -> hash*16777619+fromIntegral (ord c)+1) 0 t) (16777619^n) t
+    line t
+      | mode || TU.lengthWord8 t<=512 =
+          let n=T.length t
+              flags=(if T.any (=='\0') t then 1 else 0) .|.
+                    (if "\r\n" `T.isSuffixOf` t then 2 else 0) .|.
+                    (if "\n" `T.isSuffixOf` t then 4 else 0) .|.
+                    ((TU.lengthWord8 t-TU.lengthWord8 (T.dropWhileEnd (\c->c=='\r' || c=='\n') t)) `shiftL` 3)
+          in Line n flags Original
+            (T.foldl' (\hash c -> hash*16777619+fromIntegral (ord c)+1) 0 t) (16777619^n) t
+      | otherwise =
+          let chunks=Chunks.chunksFromText t
+              m=Chunks.chunksMeasure chunks
+          in ChunkedLine (Chunks.chunkCharacters m) (Chunks.chunkFlags m) Original
+            (Chunks.chunkHash m) (Chunks.chunkFactor m) chunks
     go [] = []
     go [t] = [line t]
     go (t:ts) = line (t <> "\n") : go ts
@@ -256,7 +418,7 @@ splitLeaf position tree = case FT.viewl right of
   line FT.:< rest -> (left,line,p-characterCount (FT.measure left),rest)
   FT.EmptyL -> case FT.viewl final of
     line FT.:< rest -> (prefix,line,p-characterCount (FT.measure prefix),rest)
-    FT.EmptyL -> (FT.empty,Line 0 False False Original 0 1 "",0,FT.empty)
+    FT.EmptyL -> (FT.empty,Line 0 0 Original 0 1 "",0,FT.empty)
   where
     p=max 0 (min position (characterCount (FT.measure tree)))
     (left,right)=FT.split ((>p) . characterCount) tree
@@ -264,7 +426,7 @@ splitLeaf position tree = case FT.viewl right of
 
 -- | Locate a character offset as a zero-based row and character column.
 bufferLineColumn :: Buffer -> Int -> (Int,Int)
-bufferLineColumn b p = let (before,_,column,_) = splitLine p (bufferLines b)
+bufferLineColumn b p = let (before,_,column,_) = splitLeaf p (bufferLines b)
                       in (lineCount (FT.measure before),column)
 
 -- | Find the start of a zero-based live row using the tree measure.
@@ -302,32 +464,34 @@ treeLineAt tree row = case FT.viewl remaining of
 -- Character motion inspects the containing line, not a flattened document.
 -- The previous line is needed only at column zero, to preserve CRLF as a unit.
 bufferNextCharacter, bufferPreviousCharacter :: Buffer -> Int -> Int
-bufferNextCharacter b position = p-column+nextCharacter line column
-  where
-    p=max 0 (min (bufferLength b) position)
-    (_,line,column,_)=splitLine p (bufferLines b)
+bufferNextCharacter b position=p+nextCharacter (bufferSlice b p 33) 0
+  where p=max 0 (min (bufferLength b) position)
 bufferPreviousCharacter b position
   | p==0=0
-  | column>0 = p-column+previousCharacter line column
+  | column>0=p-column+case line of
+      ChunkedLine _ _ _ _ _ chunks->Chunks.chunksPreviousCharacter chunks column
+      _->previousCharacter (lineText line) column
   | otherwise = case FT.viewl previousLine of
-      previous FT.:< _ -> p-if "\r\n" `T.isSuffixOf` lineText previous then 2 else 1
+      previous FT.:< _ -> p-if lineCRLF previous then 2 else 1
       FT.EmptyL -> 0
   where
     p=max 0 (min (bufferLength b) position)
-    (before,line,column,_)=splitLine p (bufferLines b)
+    (before,line,column,_)=splitLeaf p (bufferLines b)
     previousLine=FT.dropUntil ((>lineCount (FT.measure before)-1) . lineCount) before
 
 rangeText :: Int -> Int -> LineTree -> Text
 rangeText a z tree
   | z <= a = ""
-  | otherwise = T.take (z-a) (T.drop (a-start) (treeText selected))
+  | otherwise = T.concat (go (a-start) (z-a) (toList remaining))
   where
     (before,remaining)=FT.split ((>a) . characterCount) tree
     start=characterCount (FT.measure before)
-    (middle,after)=FT.split ((>z-start) . characterCount) remaining
-    selected=case FT.viewl after of
-      line FT.:< _ | characterCount (FT.measure middle) < z-start -> middle FT.|> line
-      _ -> middle
+    go _ count _ | count<=0=[]
+    go _ _ []=[]
+    go offset count (line:rest)
+      | lineOrigin line==Deleted=go offset count rest
+      | otherwise=let size=min count (lineCharacters line-offset)
+          in lineFragments line offset size++go 0 (count-size) rest
 
 -- | Narrow immutable inputs for the modified flag. Matching representations
 -- need only the measured changes. A representation switch needs exact encoded
@@ -365,7 +529,7 @@ replaceSelection sel inserted b@Buffer{bufferLines=tree,undoStack=history,revisi
     a=max 0 (min (bufferLength b) rawA)
     z=max 0 (min (bufferLength b) rawZ)
     insertedLength=T.length inserted
-    updated=restoreBaseline (baselineLines b) (editTree a z inserted tree)
+    updated=restoreBaseline (baselineLines b) (editTree (byteMode b) a z inserted tree)
 
 -- | Apply ascending, disjoint character ranges in the original buffer as one
 -- undo step. Starts must be distinct; invalid ranges or byte text reject the
@@ -377,7 +541,7 @@ replaceRanges edits b@Buffer{bufferLines=tree,undoStack=history,revision=version
     [] -> pure b
     changes@((a,_,_):_) ->
       let (_,z,_)=last changes
-          updated=restoreBaseline (baselineLines b) (foldl' (\current (lo,hi,text) -> editTree lo hi text current) tree (reverse changes))
+          updated=restoreBaseline (baselineLines b) (foldl' (\current (lo,hi,text) -> editTree (byteMode b) lo hi text current) tree (reverse changes))
           n=z-a+characterCount (FT.measure updated)-characterCount (FT.measure tree)
       in pure $ if sameText tree updated then b else
         b {bufferLines=updated,viewProjection=projectionFor updated,cachedContents=treeText updated
@@ -399,15 +563,15 @@ prepareBuffer b=FT.measure (bufferLines b) `seq` forceViewProjection (viewProjec
 
 -- Only the edited line region is rebuilt. Include adjacent tombstones so
 -- restoring a replaced/deleted original line can recover its baseline identity.
-editTree :: Int -> Int -> Text -> LineTree -> LineTree
-editTree a z inserted tree=foldl' (flip cancelRestoredLine) updated [firstRow..lastRow]
+editTree :: Bool -> Int -> Int -> Text -> LineTree -> LineTree
+editTree mode a z inserted tree=foldl' (flip cancelRestoredLine) updated [firstRow..lastRow]
   where
     updated=keptBefore FT.>< normalizeHunks (changedBefore FT.>< reconcileTree affected middle FT.>< changedAfter) FT.>< keptAfter
     rowAt position=let (prefix,_,_,_)=splitLeaf position updated in lineCount (FT.measure prefix)
     firstRow=rowAt a
     lastRow=rowAt (a+T.length inserted)
     (rawBefore,first,start,_) = splitLeaf a tree
-    (_,lastLine,end,rawAfter) = splitLeaf z tree
+    (endBefore,lastLine,end,rawAfter) = splitLeaf z tree
     (before,_)=stripDeletedEnd rawBefore
     (_,after)=FT.split ((>0) . lineCount) rawAfter
     (keptBefore,changedBefore)=splitChangedEnd before
@@ -415,7 +579,16 @@ editTree a z inserted tree=foldl' (flip cancelRestoredLine) updated [firstRow..l
     entries m=lineCount m+deletedLineCount m
     (_,rest)=FT.split ((>entries (FT.measure before)) . entries) tree
     (affected,_)=FT.split ((>entries (FT.measure tree)-entries (FT.measure before)-entries (FT.measure after)) . entries) rest
-    joined=linesFromText (T.take start (lineText first) <> inserted <> T.drop end (lineText lastLine))
+    joined
+      | not mode,ChunkedLine _ _ _ _ _ chunks<-first
+      , characterCount (FT.measure rawBefore)==characterCount (FT.measure endBefore)
+      , not (T.any (=='\n') inserted)=
+          let repaired=Chunks.chunksEdit chunks start end inserted; m=Chunks.chunksMeasure repaired
+          in let line=ChunkedLine (Chunks.chunkCharacters m) (Chunks.chunkFlags m) Original (Chunks.chunkHash m) (Chunks.chunkFactor m) repaired
+             in if Chunks.chunkFlags m .&. 4/=0 then FT.fromList [line,Line 0 0 Original 0 1 T.empty] else FT.singleton line
+      -- Multiline edits retain the existing exact splice path. Its physical-line
+      -- projections may be linear; this first repair owner bounds same-row edits.
+      | otherwise=linesFromText mode (T.take start (lineText first) <> inserted <> T.drop end (lineText lastLine))
     middle=if lineCount (FT.measure after)==0 then joined else case FT.viewr joined of rest' FT.:> _ -> rest'; FT.EmptyR -> FT.empty
     stripDeletedEnd input
       | lineCount (FT.measure input)==0=(FT.empty,input)
@@ -442,7 +615,7 @@ cancelRestoredLine row tree=case FT.viewl remaining of
           | candidate<0 || candidate>=removed=restore others
           | otherwise=let (oldBefore,oldRest)=FT.split ((>candidate) . deletedLineCount) hunk
             in case FT.viewl oldRest of
-              old FT.:< oldTail | lineText old==lineText line ->
+              old FT.:< oldTail | sameLineText old line ->
                 let (oldAfter,addedLines)=FT.split ((>0) . newLineCount) oldTail
                     (newBefore,newRest)=FT.split ((>index) . newLineCount) addedLines
                 in case FT.viewl newRest of
@@ -464,23 +637,23 @@ reconcileTree previous current=prefix FT.>< pair oldMiddle newMiddle FT.>< suffi
     (prefix,oldRest,newRest)=matchingLeft originals current
     (oldMiddle,newMiddle,suffix)=matchingRight oldRest newRest
     matchingLeft old new=case (FT.viewl old,FT.viewl new) of
-      (line FT.:< olds,replacement FT.:< news) | lineText line==lineText replacement ->
+      (line FT.:< olds,replacement FT.:< news) | sameLineText line replacement ->
         let (same,remainingOld,remainingNew)=matchingLeft olds news
         in (withOrigin Original line FT.<| same,remainingOld,remainingNew)
       _ -> (FT.empty,old,new)
     matchingRight old new=case (FT.viewr old,FT.viewr new) of
-      (olds FT.:> line,news FT.:> replacement) | lineText line==lineText replacement ->
+      (olds FT.:> line,news FT.:> replacement) | sameLineText line replacement ->
         let (remainingOld,remainingNew,same)=matchingRight olds news
         in (remainingOld,remainingNew,same FT.|> withOrigin Original line)
       _ -> (old,new,FT.empty)
     pair old new=case (FT.viewl old,FT.viewl new) of
       (line FT.:< olds,replacement FT.:< news)
-        | T.null (lineText replacement),FT.null news -> markDeleted old FT.|> withOrigin Original replacement
-        | lineText line==lineText replacement -> withOrigin Original line FT.<| pair olds news
+        | lineCharacters replacement==0,FT.null news -> markDeleted old FT.|> withOrigin Original replacement
+        | sameLineText line replacement -> withOrigin Original line FT.<| pair olds news
         | otherwise -> deleted line FT.>< (asAdded replacement FT.<| pair olds news)
       (_,FT.EmptyL) -> markDeleted old
       (FT.EmptyL,_) -> FT.fromList (map asAdded (toList new))
-    deleted line | T.null (lineText line)=FT.empty
+    deleted line | lineCharacters line==0=FT.empty
                  | otherwise=FT.singleton (withOrigin Deleted line)
     -- Reediting beside a large removed region must retain that subtree rather
     -- than repeatedly flattening or relabelling every old tombstone.
@@ -503,7 +676,7 @@ originalCount :: LineMeasure -> Int
 originalCount measure=lineCount measure-newLineCount measure
 
 asAdded :: Line -> Line
-asAdded line=withOrigin (if T.null (lineText line) then Original else Added) line
+asAdded line=withOrigin (if lineCharacters line==0 then Original else Added) line
 
 splitChangedEnd :: LineTree -> (LineTree,LineTree)
 splitChangedEnd tree
@@ -553,13 +726,15 @@ restoreBaseline baseline current
 
 -- Fingerprints only reject mismatches; equality still checks exact live text.
 sameText :: LineTree -> LineTree -> Bool
-sameText left right=characterCount a==characterCount b && contentHash a==contentHash b && treeText left==treeText right
-  where a=FT.measure left; b=FT.measure right
+sameText left right=characterCount a==characterCount b && contentHash a==contentHash b && equalFragments (live left) (live right)
+  where
+    a=FT.measure left; b=FT.measure right
+    live tree=concat [lineFragments line 0 (lineCharacters line) | line<-toList tree,lineOrigin line/=Deleted]
 
 rebaseHistory :: LineTree -> LineTree -> [(LineTree,Bool,(Int,Int,Int))] -> [(LineTree,Bool,(Int,Int,Int))]
 rebaseHistory _ _ []=[]
 rebaseHistory baseline current ((old,mode,change@(a,z,n)):rest)=
-  let next=restoreBaseline baseline (editTree a z (rangeText a (a+n) old) current)
+  let next=restoreBaseline baseline (editTree mode a z (rangeText a (a+n) old) current)
   in (next,mode,change):rebaseHistory baseline next rest
 
 snapshotLines :: LineTree -> LineChangesSnapshot
@@ -568,24 +743,24 @@ snapshotLines=go 0 . toList
     go _ []=[]
     go row (line:rest)=case lineOrigin line of
       Deleted -> (row,False,lineText line):go row rest
-      Added | not (T.null (lineText line)) -> (row,True,""):go (row+1) rest
+      Added | lineCharacters line/=0 -> (row,True,""):go (row+1) rest
       _ -> go (row+1) rest
 
-restoreLines :: Text -> Text -> LineChangesSnapshot -> Either Text LineTree
-restoreLines baseline text changes=do
-  lines'<-go 0 (toList (linesFromText text)) changes
-  let original=[lineText line | line<-lines',lineOrigin line/=Added,not (T.null (lineText line))]
-      savedLines=filter (not . T.null) (map lineText (toList (linesFromText baseline)))
+restoreLines :: Bool -> Text -> Bool -> Text -> LineChangesSnapshot -> Either Text LineTree
+restoreLines baselineMode baseline mode text changes=do
+  lines'<-go 0 (toList (linesFromText mode text)) changes
+  let original=[lineText line | line<-lines',lineOrigin line/=Added,lineCharacters line/=0]
+      savedLines=filter (not . T.null) (map lineText (toList (linesFromText baselineMode baseline)))
   unless (original==savedLines) (Left "Buffer line changes do not match saved lines")
   unless (canonical False lines') (Left "Invalid buffer change-run ordering")
   pure (FT.fromList lines')
   where
     go _ [] []=Right []
     go row live ((index,False,deleted):rest) | index==row && validDeleted deleted =
-      case toList (linesFromText deleted) of
+      case toList (linesFromText baselineMode deleted) of
         line:_ -> (withOrigin Deleted line:) <$> go row live rest
         [] -> Left "Invalid deleted buffer line"
-    go row (line:live) ((index,True,empty):rest) | index==row && T.null empty && not (T.null (lineText line)) =
+    go row (line:live) ((index,True,empty):rest) | index==row && T.null empty && lineCharacters line/=0 =
       (withOrigin Added line:) <$> go (row+1) live rest
     go row (line:live) []=(line:) <$> go (row+1) live []
     go row (line:live) pending@((index,_,_):_)
@@ -627,12 +802,12 @@ bufferChangeRows b start count=go (lineCount (FT.measure before)) (take (max 0 c
 
 changeLength :: Buffer -> Int
 changeLength b=reviewCharacterCount (FT.measure tree)-case FT.viewr tree of
-  _ FT.:> line | not ("\n" `T.isSuffixOf` lineText line) -> 1
+  _ FT.:> line | not (lineTerminated line) -> 1
   _ -> 0
   where tree=bufferLines b
 
 reviewText :: Line -> Text
-reviewText line=let text=lineText line in if "\n" `T.isSuffixOf` text then text else text<>"\n"
+reviewText line=let text=lineText line in if lineTerminated line then text else text<>"\n"
 
 changeSlice :: Buffer -> Int -> Int -> Text
 changeSlice b start count
@@ -653,7 +828,7 @@ splitReviewLine b position=case FT.viewl remaining of
   line FT.:< _ -> (before,line,p-reviewCharacterCount (FT.measure before))
   FT.EmptyL -> case FT.viewr tree of
     prefix FT.:> line -> (prefix,line,p-reviewCharacterCount (FT.measure prefix))
-    FT.EmptyR -> (FT.empty,Line 0 False False Original 0 1 "",0)
+    FT.EmptyR -> (FT.empty,Line 0 0 Original 0 1 "",0)
   where
     tree=bufferLines b
     p=max 0 (min (changeLength b) position)
@@ -676,7 +851,7 @@ liveToChangeOffset b position=let (before,_,column,_)=splitLeaf position (buffer
 
 changeToLiveOffset :: Buffer -> Int -> Int
 changeToLiveOffset b position=let (before,line,column)=splitReviewLine b position
-  in characterCount (FT.measure before)+if lineOrigin line==Deleted then 0 else min column (T.length (lineText line))
+  in characterCount (FT.measure before)+if lineOrigin line==Deleted then 0 else min column (lineCharacters line)
 
 -- Hunk coordinates are (first projected row, number of projected rows).
 changeHunkAt :: Buffer -> Int -> Maybe (Int,Int)
@@ -769,47 +944,56 @@ wordRight t p = p + T.length word + T.length spaces
 -- whitespace, then a word or punctuation run. Only the containing row and
 -- crossed live leaves are read; deleted provenance never contributes text.
 bufferWordLeft :: Buffer -> Int -> Int
-bufferWordLeft b position=case T.unsnoc remaining of
-  Nothing->0
-  Just (_,c)->let (result,_,_)=spanLeft (if wordChar c then wordChar else punctuation) q remaining earlier in result
+bufferWordLeft b position
+  | q<=0=0
+  | otherwise=case T.unsnoc (bufferSlice b (q-1) 1) of
+      Just (_,c)->spanTreeLeft (if wordChar c then wordChar else punctuation) q (bufferLines b)
+      Nothing->0
   where
     p=max 0 (min (bufferLength b) position)
-    (before,line,column,_)=splitLine p (bufferLines b)
-    (q,remaining,earlier)=spanLeft isSpace p (T.take column line) before
+    q=spanTreeLeft isSpace p (bufferLines b)
     punctuation c=not (wordChar c) && not (isSpace c)
-    spanLeft predicate offset text previous=
-      let rest=T.dropWhileEnd predicate text
-          next=offset-T.length (T.takeWhileEnd predicate text)
-      in next `seq` if not (T.null rest) then (next,rest,previous) else case FT.viewr previous of
-        prefix FT.:> leaf | lineOrigin leaf/=Deleted->spanLeft predicate next (lineText leaf) prefix
-        _ | lineCount (FT.measure previous)<=0->(next,"",FT.empty)
-          | otherwise->let (prefix,trailing)=FT.split ((>lineCount (FT.measure previous)-1) . lineCount) previous
-                       in case FT.viewl trailing of
-                         leaf FT.:< _->spanLeft predicate next (lineText leaf) prefix
-                         FT.EmptyL->(next,"",FT.empty)
 
 -- | Move right by the existing asymmetric scalar word policy.
 -- @bufferWordRight b p == wordRight (contents b) (clamp p)@. A current word
 -- consumes its following whitespace; any other current scalar advances once.
 -- Measured lookup and live neighbors avoid the lazy whole-text projection.
 bufferWordRight :: Buffer -> Int -> Int
-bufferWordRight b position=case T.uncons current of
+bufferWordRight b position=case T.uncons (bufferSlice b p 1) of
   Nothing->p
   Just (c,_) | not (wordChar c)->p+1
-             | otherwise->let (q,rest,later)=spanRight wordChar p current after
-                              (result,_,_)=spanRight isSpace q rest later
-                          in result
+             | otherwise->spanTreeRight isSpace (spanTreeRight wordChar p tree) tree
   where
     p=max 0 (min (bufferLength b) position)
-    (_,line,column,after)=splitLine p (bufferLines b)
-    current=T.drop column line
-    spanRight predicate offset text following=
-      let (consumed,rest)=T.span predicate text
-          next=offset+T.length consumed
-      in next `seq` if not (T.null rest) then (next,rest,following) else case FT.viewl following of
-        leaf FT.:< suffix | lineOrigin leaf==Deleted->spanRight predicate next "" (FT.dropUntil ((>0) . lineCount) following)
-                          | otherwise->spanRight predicate next (lineText leaf) suffix
-        FT.EmptyL->(next,"",FT.empty)
+    tree=bufferLines b
+
+lineSpanLeft, lineSpanRight :: (Char->Bool) -> Line -> Int -> Int
+lineSpanLeft predicate (ChunkedLine _ _ _ _ _ chunks)=Chunks.chunksSpanLeft predicate chunks
+lineSpanLeft predicate line= \position ->position-T.length (T.takeWhileEnd predicate (T.take position (lineText line)))
+lineSpanRight predicate (ChunkedLine _ _ _ _ _ chunks)=Chunks.chunksSpanRight predicate chunks
+lineSpanRight predicate line= \position ->position+T.length (T.takeWhile predicate (T.drop position (lineText line)))
+
+spanTreeLeft :: (Char->Bool) -> Int -> LineTree -> Int
+spanTreeLeft predicate position tree=go (position-column) line column before
+  where
+    (before,line,column,_)=splitLeaf position tree
+    go base current col previous=
+      let next=lineSpanLeft predicate current col
+      in if next>0 then base+next else
+        let (prefix,trailing)=FT.split ((>lineCount (FT.measure previous)-1).lineCount) previous
+        in case FT.viewl trailing of
+          leaf FT.:< _ | lineCount (FT.measure previous)>0->go (base-lineCharacters leaf) leaf (lineCharacters leaf) prefix
+          _->base
+
+spanTreeRight :: (Char->Bool) -> Int -> LineTree -> Int
+spanTreeRight predicate position tree=go (position-column) line column after
+  where
+    (_,line,column,after)=splitLeaf position tree
+    go base current col following=
+      let next=lineSpanRight predicate current col
+      in if next<lineCharacters current then base+next else case FT.viewl (FT.dropUntil ((>0).lineCount) following) of
+        leaf FT.:< later->go (base+lineCharacters current) leaf 0 later
+        FT.EmptyL->base+next
 
 wordChar :: Char -> Bool
 wordChar c = isAlphaNum c || c `elem` ("_'" :: String)
