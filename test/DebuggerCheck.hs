@@ -561,10 +561,23 @@ presentationCheck=bracket (fixture "basic") cleanup $ \(port,_,_) -> withDebugge
     result<-finish
     check "presentation arguments reject missing generation/unknown view/wrong type" (unchanged==stopped && either (const True) (const False) result)
   (requested,_)<-reveal "source" gen stopped
-  shown<-waitFor "explicit source reveal" (\d _ -> "value = λ" `T.isInfixOf` activeText d) requested
+  -- The ordered DAP control response follows the source response. It proves
+  -- preparation was admitted while the human modal still owns input.
+  (queued,barrier)<-debuggerTool runtime requested "debug_inspect" (object ["generation" .= gen,"request" .= ("threads"::T.Text)])
+  held<-withAsync barrier $ \reply->do
+    let loop d=do
+          next<-tickDebugger runtime d
+          done<-poll reply
+          if isJust done then pure next else threadDelay 1000 >> loop next
+    waiting<-timeout debuggerTimeout (loop queued) >>= maybe (error "source/modal response barrier timed out") pure
+    _<-wait reply >>= either (error . T.unpack) pure
+    pure waiting
+  check "prepared adapter source waits without replacing a human modal or source focus"
+    (activeText held=="my editor work" && fmap dialogTitle (dialog held)==Just "Existing debugger view" && length (windows held)==1)
+  shown<-waitFor "explicit source reveal after dismissal" (\d _ -> "value = λ" `T.isInfixOf` activeText d) held {dialog=Nothing}
   shownStatus<-current shown
   check "explicit reveal opens source without changing stopped generation or follow mode"
-    (epoch shownStatus==gen && field "follow" shownStatus==Just False && dialog shown==dialog stopped)
+    (epoch shownStatus==gen && field "follow" shownStatus==Just False && dialog shown==Nothing)
   (stack,stackStatus)<-reveal "stack" gen shown {dialog=Nothing}
   check "cached stack is explicitly visible without resuming" (hasDialog "Call stack" stack && epoch stackStatus==gen)
   (loading,_)<-reveal "scopes" gen stack {dialog=Nothing}
