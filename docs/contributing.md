@@ -338,8 +338,10 @@ Fn, Control, Option, Shift, Command. Write symbol combinations without plus
 signs (⇧⌘Z, ⌥⌘F), or full key names joined by hyphens (Shift-Command-Z).
 Use Return and Esc in Mac columns. Write Ctrl+Shift+Z in Windows/Linux columns.
 Repeat modifiers for each alternative; avoid ambiguous forms such as Ctrl/Cmd+G.
-The README and [editing guide](editing.md#text-and-selection) carry the main
-shortcut tables; update the relevant feature guide when its bindings change.
+Keep shortcut tables in the relevant feature guide: [editing](editing.md#text-and-selection),
+[conversations](conversations.md) or [running and debugging](running.md). Link to
+those guides from the README rather than duplicating the tables. Update the
+owning guide when its bindings change.
 
 ## Documentation screenshots
 
