@@ -260,7 +260,21 @@ for session in range(1, 4 if mode == 'output-owner' else 3 if mode == 'reconnect
                     assert args == dict(variablesReference=reference), args
                     reply(req, dict(variables=[dict(name='counter', value='42', variablesReference=0), dict(name='nested', value='<thunk>', variablesReference=971, presentationHint=dict(lazy=True))]))
                 elif mode in ('sidebar', 'sidebar-exit') and reference in (211, 212, 221):
-                    reply(req, dict(variables=[dict(name='counter%d' % reference, value=str(reference), variablesReference=0), dict(name='lazy', value='<thunk>', variablesReference=900, presentationHint=dict(lazy=True)), dict(name='waiting', value='expand to wait', variablesReference=910)]))
+                    def locals_rows(parent):
+                        rows = [dict(name='counter%d' % parent, value=str(parent), variablesReference=0), dict(name='lazy', value='<thunk>', variablesReference=900, presentationHint=dict(lazy=True)), dict(name='waiting', value='expand to wait', variablesReference=910)]
+                        if mode == 'sidebar':
+                            rows.extend(dict(name='local%d_%d' % (parent, i), value=str(i), variablesReference=0) for i in range(3, 260))
+                            rows[129] = dict(name='local%d_129' % parent, value='expand', variablesReference=1000+parent)
+                        return rows
+                    if mode == 'sidebar' and reference == 211:
+                        pending_variables = req
+                    else:
+                        reply(req, dict(variables=locals_rows(reference)))
+                        if mode == 'sidebar' and pending_variables:
+                            reply(pending_variables, dict(variables=locals_rows(211)))
+                            pending_variables = None
+                elif mode == 'sidebar' and reference in (1211, 1212):
+                    reply(req, dict(variables=[dict(name='child%d' % (reference-1000), value='later page', variablesReference=0)]))
                 elif mode in ('sidebar', 'sidebar-exit') and reference == 900:
                     reply(req, dict(variables=[dict(name='FORCED lazy alias', value='wrong', variablesReference=0)]))
                 elif reference == 21:

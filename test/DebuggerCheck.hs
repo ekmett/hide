@@ -32,6 +32,7 @@ import Hide.Buffer
 import qualified Hide.Plugin.Window as W
 import Hide.PluginWindowHost (tickPluginWindows)
 import Hide.Debugger
+import Hide.DebuggerSidebarTypes (DebugSidebarRequest(..),DebuggerWatch(..))
 import Hide.Files (FileState(..))
 import Hide.Model
 import Hide.Highlighting (withHighlighting,tickHighlighting)
@@ -247,18 +248,48 @@ checks = outputOwnerChecks >> outputLifecycleCheck >> terminalLauncherCheck >> t
             let gen=fromMaybe (error "missing generation") (field "generation" before)::Int
             reject 22 gen blocked
             reject 999 gen blocked
+            let watchAction action d=snd <$> debuggerEffects runtime core d [DebugSidebarAction action]
+                fill expression d=case dialog d of
+                  Just dg->d {dialog=Just dg {fields=[SelectedInput "Expression" expression (Selection 2 5)]}}
+                  _->error "missing persistent watch editor"
+                draft d=case dialog d of
+                  Just dg | DebuggerWatchDialog ident origin private<-purpose dg,
+                    [SelectedInput _ expression selection]<-fields dg->Just (ident,origin,private,expression,selection)
+                  _->Nothing
+                saveOnce expected revision d=case dialog d of
+                  Just dg->do
+                    let (next,outbox)=submitDialog 0 dg d
+                    saved<-snd <$> debuggerEffects runtime core next outbox
+                    replayed<-snd <$> debuggerEffects runtime core saved outbox
+                    (_,_,values)<-debuggerWatches runtime
+                    check "watch draft saves once; replay cannot duplicate or revise it"
+                      (case M.toList values of [(_,entry)]->watchExpression entry==expected &&
+                        watchRevision entry==revision; _->False)
+                    pure replayed
+                  _->error "watch invalidation discarded the draft"
             -- Initial attach and stopped events each request threads. This third
-            -- request causes the fixture to invalidate only variable handles.
-            pending<-send "threads" [] blocked {dialog=Nothing}
+            -- request invalidates variable handles while a real Add Watch owns input.
+            adding<-watchAction AddDebugWatch blocked {dialog=Nothing}
+            let addDraft=fill "counter + λ" adding
+            pending<-send "threads" [] addDraft
             invalidated<-waitForIO "variables invalidation" (\d -> maybe False (>gen) . field "generation" <$> current d) pending
+            check "variables invalidation preserves Add Watch draft, selection and authority"
+              (draft invalidated==draft addDraft && draft invalidated/=Nothing)
             now<-current invalidated
             let gen'=fromMaybe (error "missing generation") (field "generation" now)::Int
             check "variable invalidation preserves stopped source frame" (field "stopped" now==Just True && (field "frame" now::Maybe Value)==field "frame" before)
             reject 21 gen' invalidated
-            pendingThreads<-send "threads" [] invalidated
-            refreshed<-waitForIO "thread invalidation refreshes selected source" (\d -> do
-              state<-current d
-              pure (maybe False (>gen') (field "generation" state) && T.isPrefixOf "Stopped in " (status d))) pendingThreads
+            saved<-saveOnce "counter + λ" 0 invalidated
+            (_,_,values)<-debuggerWatches runtime
+            let [(watchId,entry)]=M.toList values
+            editing<-watchAction (EditDebugWatch watchId (watchRevision entry)) saved
+            let editDraft=fill "counter + 2" editing
+            pendingThreads<-send "threads" [] editDraft
+            retired<-waitForIO "thread invalidation" (\d -> maybe False (>gen') . field "generation" <$> current d) pendingThreads
+            check "thread invalidation preserves Edit Watch draft, selection and authority"
+              (draft retired==draft editDraft && draft retired/=Nothing)
+            committed<-saveOnce "counter + 2" 1 retired
+            refreshed<-waitFor "thread invalidation refreshes selected source" (T.isPrefixOf "Stopped in " . status) committed
             refreshedState<-current refreshed
             check "thread invalidation reloads current stopped frame"
               (field "stopped" refreshedState==Just True && field "threadId" refreshedState==Just (7::Int) && (field "frame" refreshedState::Maybe Value)==field "frame" before)

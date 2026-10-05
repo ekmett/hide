@@ -412,7 +412,8 @@ debuggerSidebarRead (Debugger _ _ _ (SidebarMailbox epoch queue _) _) request@(D
         let (cachedOffset,body)=case result of AdapterPage value->(Nothing,value); CachedPage start value->(Just start,value)
             key=case target of DebugThreads->"threads"; DebugStack{}->"stackFrames"; DebugScopes{}->"scopes"; DebugVariables{}->"variables"; DebugWatchVariables{}->"variables"
             page=case target of
-              DebugWatchVariables{}->watchPage offset cachedOffset body
+              DebugWatchVariables{}->variablePage offset cachedOffset body
+              DebugVariables{}->variablePage offset cachedOffset body
               _->object [fromText key .= take 128 (items key body),"totalFrames" .= (field "totalFrames" body :: Maybe Int)]
         checked<-evaluate (boundedResult page)
         prepared<-case (checked,target,current) of
@@ -423,15 +424,18 @@ debuggerSidebarRead (Debugger _ _ _ (SidebarMailbox epoch queue _) _) request@(D
           Right value->do
             atomically (writeTBQueue queue (CacheDebugPage request value))
             pure (Right (case target of
-              DebugWatchVariables{}->object ["variables" .= take 128 (items "variables" value),"hasMore" .= flag "hasMore" value]
+              DebugWatchVariables{}->published value
+              DebugVariables{}->published value
               _->value))
-  where fromText=K.fromText
+  where
+    fromText=K.fromText
+    published value=object ["variables" .= take 128 (items "variables" value),"hasMore" .= flag "hasMore" value]
 
 -- Page zero owns the single bounded returned snapshot. Later entries retain only
 -- their published rows; slicing/sizing happens on the waiting provider worker.
 -- Adapters may ignore start/count, so continuation never repeats a DAP read.
-watchPage :: Int -> Maybe Int -> Value -> Value
-watchPage offset cachedOffset body=object ["variables" .= retained,"hasMore" .= more]
+variablePage :: Int -> Maybe Int -> Value -> Value
+variablePage offset cachedOffset body=object ["variables" .= retained,"hasMore" .= more]
   where
     start=fromMaybe 0 cachedOffset
     rows=drop (offset-start) (items "variables" body)
@@ -460,8 +464,8 @@ drainSidebarReads runtime@(Debugger ref _ _ (SidebarMailbox _ queue _) _) d=forM
         | not (current request)->atomically (void (tryPutTMVar reply (Left "Debugger node expired or is lazy.")))
         | Just cached<-M.lookup request (sidebarPages s)->atomically (void (tryPutTMVar reply (Right (CachedPage offset cached))))
         | M.size (sidebarPages s)>=64->atomically (void (tryPutTMVar reply (Left "Debugger sidebar page budget reached; resume to refresh.")))
-        | DebugWatchVariables{}<-target,offset>0->atomically (void (tryPutTMVar reply
-            (maybe (Left "Watch child snapshot expired.") (Right . CachedPage 0) (M.lookup (DebugPageRequest epoch target 0) (sidebarPages s)))))
+        | offset>0,(case target of DebugWatchVariables{}->True; DebugVariables{}->True; _->False)->atomically (void (tryPutTMVar reply
+            (maybe (Left "Debugger variable snapshot expired.") (Right . CachedPage 0) (M.lookup (DebugPageRequest epoch target 0) (sidebarPages s)))))
         | otherwise->do
             let (command,args)=sidebarArguments request
             outcome<-try (send runtime (SidebarRead request reply) command args)
@@ -474,7 +478,7 @@ validSidebarRequest s (DebugPageRequest epoch target offset)=generation s==epoch
   DebugThreads->offset==0
   DebugStack tid->M.member tid (sidebarThreads s)
   DebugScopes tid fid->offset==0 && M.member (tid,fid) (sidebarFrames s)
-  DebugVariables tid fid reference->offset==0 && M.lookup (FrameReferences tid fid,reference) (sidebarReferences s)==Just False
+  DebugVariables tid fid reference->offset `mod` 128==0 && M.lookup (FrameReferences tid fid,reference) (sidebarReferences s)==Just False
   DebugWatchVariables ident revision receipt reference->offset `mod` 128==0 && watchCurrent s ident revision receipt && M.lookup (WatchReferences ident revision receipt,reference) (sidebarReferences s)==Just False
 
 sidebarArguments :: DebugPageRequest -> (Text,Value)
@@ -482,7 +486,7 @@ sidebarArguments (DebugPageRequest _ target offset)=case target of
   DebugThreads->("threads",object [])
   DebugStack tid->("stackTrace",object ["threadId" .= tid,"startFrame" .= offset,"levels" .= (128::Int)])
   DebugScopes _ fid->("scopes",object ["frameId" .= fid])
-  DebugVariables _ _ reference->("variables",object ["variablesReference" .= reference,"start" .= offset,"count" .= (128::Int)])
+  DebugVariables _ _ reference->("variables",object ["variablesReference" .= reference])
   DebugWatchVariables _ _ _ reference->("variables",object ["variablesReference" .= reference])
 
 -- Only IDs and shallow immutable DAP rows enter owner maps. Bounded raw response
@@ -635,7 +639,7 @@ prepareWatch (Debugger ref _ _ _ _) operation backing base private result=mask_ 
             let WatchOperation _ _ _ mode=operation
                 (title,reference,lazy,page)=case mode of
                   EvaluateWatch->(text "result" body,integer "variablesReference" body,maybe False (flag "lazy") (field "presentationHint" body),Nothing)
-                  ForceWatch handle->("Forced; expand to inspect",handle,False,Just (watchPage 0 Nothing body))
+                  ForceWatch handle->("Forced; expand to inspect",handle,False,Just (variablePage 0 Nothing body))
                   -- A forcing reply may replace the value and immediately
                   -- invalidate all references. Refresh the expression explicitly;
                   -- neither the requested handle nor reply handles stay live.
@@ -1147,7 +1151,8 @@ initializeSession runtime@(Debugger ref _ _ _ _) directory c address requestName
   resetOutputOwner runtime d
   writeIORef ref emptyState {client=Just c,generation=generation s+1,root=directory,endpoint=address,
     watchProvider=watchProvider s,watchExpressions=watchExpressions s,watchCatalogueRevision=watchCatalogueRevision s,nextWatch=nextWatch s,choiceId=choiceId s,followSource=followSource s,sidebarVisible=followSource s,sidebarSession=generation s+1,breakpoints=persistentBreakpoints s,breakModified=breakModified s,startRequest=(requestName,arguments),managed=owned,adapterId=adapter}
-  pure (automaticDesktop s d) {status="Connecting debugger..."}
+  -- Explicit session replacement retires the old dialog nonce.
+  pure (if followSource s then clearDialog d else d) {status="Connecting debugger..."}
 
 debuggerConsoles :: Debugger -> C.Consoles
 debuggerConsoles (Debugger _ _ (HdbRuntime _ _ _ _ consoles _ _) _ _) = consoles
@@ -1369,7 +1374,7 @@ receive runtime@(Debugger ref clock _ _ _) d event = do
           frame=if stacks then Nothing else frame state,frames=if stacks then [] else frames state})
         if threads then send runtime (Threads False) "threads" (object [])
         else when (stacks && stopped s) $ forM_ (thread s) (\tid -> sendStack runtime False tid)
-        pure (clearDialog d) {status="Debugger values changed; request scopes again."}
+        pure (retireBackgroundDialog d) {status="Debugger values changed; request scopes again."}
     D.Notification "continued" _ -> modifyIORef' ref invalidate >> pure (automaticDesktop s d) {status="Running..."}
     D.Notification "thread" body -> do
       -- DAP thread changes can retire stack owners without a continued event.
@@ -1853,7 +1858,14 @@ chooser title action rows d
 -- Background protocol events keep the editor's existing modal and focus.
 -- Explicit view requests still use the normal source/picker presentation path.
 automaticDesktop :: State -> Desktop -> Desktop
-automaticDesktop s d=if followSource s then clearDialog d else d
+automaticDesktop s d=if followSource s then retireBackgroundDialog d else d
+
+-- Persistent expression drafts are watch-revision owned, not stopped-handle
+-- inspections. Explicit controls still use clearDialog to cancel their modal.
+retireBackgroundDialog :: Desktop -> Desktop
+retireBackgroundDialog d=case dialog d of
+  Just dg | DebuggerWatchDialog{}<-purpose dg->d
+  _->clearDialog d
 
 clearDialog :: Desktop -> Desktop
 clearDialog d = case dialog d of

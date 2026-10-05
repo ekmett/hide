@@ -52,7 +52,8 @@ data DebugPageTarget = DebugThreads | DebugStack !Int | DebugScopes !Int !Int
   | DebugWatchVariables !Int !Int !WatchFrame !Int deriving (Eq,Ord,Show)
 
 -- | Stop epoch, target and zero-based bounded page offset. Stack requests at
--- most 128 frames. Watches page a bounded cached response without another DAP read.
+-- most 128 frames. Locals and Watches page a bounded cached response without
+-- another DAP read.
 data DebugPageRequest = DebugPageRequest !Int !DebugPageTarget !Int deriving (Eq,Ord,Show)
 
 -- | Host-captured source actions. A label or frontend argument cannot supply
