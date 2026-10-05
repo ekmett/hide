@@ -273,7 +273,7 @@ sourceActionCheck host metadata path=withDebugger $ \runtime->do
                               if status next/="Running menu action…" then pure next else threadDelay 1000 >> loop next
       queue title d=let (next,effects)=action title (popup d) in snd <$> menuEffects host core next effects
       run title d=queue title d >>= waitResult
-      inspect d=do (_,finish)<-debuggerTool runtime core d "debug_status" (object []); finish >>= either (error . T.unpack) pure
+      inspect d=do (_,finish)<-debuggerTool runtime d "debug_status" (object []); finish >>= either (error . T.unpack) pure
       check label yes=unless yes (error label)
   let captured=popup base
       (_,breakpointEffects)=action "Toggle breakpoint" captured

@@ -36,6 +36,7 @@ import qualified Data.ByteString.Lazy as BL
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
 import Data.IORef
+import Data.List (find)
 import qualified Data.Map.Strict as M
 import Data.Maybe (fromMaybe, isJust, listToMaybe, maybeToList)
 import Data.Text (Text)
@@ -54,8 +55,8 @@ import Hide.Buffer
 import qualified Hide.Consoles as C
 import qualified Hide.Terminal as Terminal
 import qualified Hide.DAP as D
-import Hide.Files (filePath)
-import Hide.Plugin.BufferHost (versionCurrent)
+import Hide.Files (FileState(..),loadFile)
+import Hide.Plugin.BufferHost (ContentVersion,captureVersion,versionCurrent)
 import Hide.GuestAccess (protectedBuffer,protectedPath,protectedFilePath)
 import qualified Hide.LSP as L
 import Hide.Model
@@ -234,7 +235,10 @@ data PreparedWatch = PreparedWatch !Text !Int !Bool !(Maybe FilePath) !Bool !(Ma
 data WatchProvider = forall context reply. WatchProvider (P.TreeProvider context reply)
 data WatchPreparation = WatchPreparation !WatchOperation !(Async PreparedWatch)
 data ReferenceOwner = FrameReferences !Int !Int | WatchReferences !Int !Int !WatchFrame deriving (Eq,Ord)
-data SourcePreparation = SourcePreparation !Int !Int !Int !Int !Bool !Value !(Async (Either Text (Maybe FilePath,Buffer,Int)))
+data SourcePreparation = SourcePreparation !Int !Int !(Maybe (Int,Int)) !Bool !Value !(Maybe Int) !(Async (Either Text PreparedSource))
+data PreparedSource = AdapterSource !(Maybe FilePath) !Buffer !Int | LocalSource !Bool !FilePath !LocalSourceTarget !Int
+data LocalSourceTarget = ExistingSource !Int !Int !ContentVersion !Bool | NewSource !FileState !Buffer
+data CapturedLocalSource = CapturedLocalSource !FilePath !Int !Int !ContentVersion !BufferContent !DirtySnapshot
 data SourceObservation = SourceObservation !Int !(Maybe FilePath)
 data Breakpoint = Breakpoint { bpLine :: Int, bpResult :: Value } deriving (Eq,Show)
 data State = State
@@ -324,7 +328,7 @@ debuggerEffects runtime fallback = foldM apply . (False,)
   where
     apply result@(True,_) _=pure result
     apply (_,d) (DebugAction action values) = do
-      next<-perform runtime fallback action values d
+      next<-perform runtime action values d
       publishSidebarEpoch runtime
       pure (False,next)
     apply (_,d) (DownloadCancelAction request) = (False,) <$> cancelDownloadRequest runtime request d
@@ -332,7 +336,7 @@ debuggerEffects runtime fallback = foldM apply . (False,)
       next<-sourceAction runtime request d
       pure (False,next)
     apply (_,d) (DebugSidebarAction request) = do
-      next<-sidebarAction runtime fallback request d
+      next<-sidebarAction runtime request d
       publishSidebarEpoch runtime
       pure (False,next)
     apply (_,d) effect@(AgentAction action values)
@@ -474,11 +478,11 @@ recordSidebarResponse ref (DebugPageRequest _ target _) body=modifyIORef' ref $ 
     boundedReferences newer previous=fst (M.splitAt 32768 (M.unionWith (||) newer previous))
     references tid fid key=M.fromListWith (||) [((FrameReferences tid fid,ident),key=="variables" && maybe False (flag "lazy") (field "presentationHint" row)) | row<-take 128 (items key body),let ident=integer "variablesReference" row,ident>0]
 
-sidebarAction :: Debugger -> Core -> DebugSidebarRequest -> Desktop -> IO Desktop
-sidebarAction runtime@(Debugger ref _ _ _ _) core request d
+sidebarAction :: Debugger -> DebugSidebarRequest -> Desktop -> IO Desktop
+sidebarAction runtime@(Debugger ref _ _ _ _) request d
   | dialog d/=Nothing || questionActive d=pure d {status="Debugger action is unavailable while a dialog owns input."}
   | otherwise=case request of
-      SelectDebugFrame epoch tid fid->selectSidebarFrame runtime core epoch tid fid d
+      SelectDebugFrame epoch tid fid->selectSidebarFrame runtime epoch tid fid d
       AddDebugWatch->watchPrompt runtime Nothing d
       EditDebugWatch ident revision->do
         s<-readIORef ref
@@ -627,8 +631,8 @@ tickWatchPreparation (Debugger ref _ (HdbRuntime _ _ _ _ _ retired _) _ _) d=do
                   forM_ page (recordSidebarResponse ref target)
                   pure d {status="Watch result ready."}
 
-selectSidebarFrame :: Debugger -> Core -> Int -> Int -> Int -> Desktop -> IO Desktop
-selectSidebarFrame runtime@(Debugger ref _ _ _ _) core epoch tid fid d=do
+selectSidebarFrame :: Debugger -> Int -> Int -> Int -> Desktop -> IO Desktop
+selectSidebarFrame runtime@(Debugger ref _ _ _ _) epoch tid fid d=do
   s<-readIORef ref
   if not (validSidebarRequest s (DebugPageRequest epoch (DebugScopes tid fid) 0)) || dialog d/=Nothing
     then pure d {status="Debugger frame expired."}
@@ -636,12 +640,12 @@ selectSidebarFrame runtime@(Debugger ref _ _ _ _) core epoch tid fid d=do
       Nothing->pure d {status="Debugger frame expired."}
       Just chosen->do
         modifyIORef' ref (\state->state {thread=Just tid,frame=Just chosen,frameRevision=frameRevision state+1,choices=M.empty})
-        openFrame runtime core True d chosen
+        openFrame runtime True Nothing d chosen
 
 -- | Initiate a tool under desktop serialization and return its outside-lock wait.
 -- Inspection handles must belong to the current stopped generation.
-debuggerTool :: Debugger -> Core -> Desktop -> Text -> Value -> IO (Desktop, IO (Either Text Value))
-debuggerTool runtime@(Debugger ref _ _ _ _) core d name arguments = do
+debuggerTool :: Debugger -> Desktop -> Text -> Value -> IO (Desktop, IO (Either Text Value))
+debuggerTool runtime@(Debugger ref _ _ _ _) d name arguments = do
   s<-readIORef ref
   case parseEither (parseTool s name) arguments of
     Left err -> pure (d,pure (Left (T.pack err)))
@@ -660,20 +664,20 @@ debuggerTool runtime@(Debugger ref _ _ _ _) core d name arguments = do
       current<-readIORef ref
       pure (d,publicDebuggerStatus (root current) (guestPrivatePaths d) (debuggerStatus current))
     run (ToolStart action values)=do
-      desktop<-perform runtime core action values d
+      desktop<-perform runtime action values d
       current<-readIORef ref
       starting<-hdbPending runtime
       if isJust (client current) || starting then snapshot desktop else immediate desktop (Left (status desktop))
-    run (ToolControl command)=perform runtime core command [] d >>= snapshot
+    run (ToolControl command)=perform runtime command [] d >>= snapshot
     run (ToolPresent following view)=do
       when (isJust view) (modifyIORef' ref (\state->state {sidebarVisible=True}))
       forM_ following (\enabled->modifyIORef' ref (\state->state {followSource=enabled}))
       current<-readIORef ref
       shown<-case view of
         Nothing -> pure d
-        Just "source" -> maybe (pure d) (openFrame runtime core True d) (frame current)
+        Just "source" -> maybe (pure d) (openFrame runtime True (Just (guestPrivatePaths d)) d) (frame current)
         Just "stack" -> showChoices runtime "Call stack" "frame" (frames current) (map frameLabel (frames current)) d
-        Just command -> perform runtime core command [] d
+        Just command -> perform runtime command [] d
       snapshot shown
     run (ToolBreakpoints bid rows)=case M.lookup bid (buffers d) of
       Nothing -> immediate d (Left "Unknown bufferId.")
@@ -925,8 +929,8 @@ awaitInspection ref epoch reply=do
       Just err -> pure (Left err)
       Nothing -> maybe (threadDelay 10000 >> awaitInspection ref epoch reply) pure result
 
-perform :: Debugger -> Core -> Text -> [Text] -> Desktop -> IO Desktop
-perform runtime@(Debugger ref clock _ _ _) core action values d = do
+perform :: Debugger -> Text -> [Text] -> Desktop -> IO Desktop
+perform runtime@(Debugger ref clock _ _ _) action values d = do
   when (action `elem` ["launch","launch-config","connect","attach","disconnect"]) (invalidateHdb runtime)
   s<-readIORef ref
   case (action,values) of
@@ -1003,7 +1007,7 @@ perform runtime@(Debugger ref clock _ _ _) core action values d = do
       when (command/="pause") (modifyIORef' ref invalidate)
       send runtime (Control (stopped s)) command (object ["threadId" .= tid])
       pure (clearDialog d) {status=if command=="pause" then "Pausing..." else "Running..."}
-    _ | Just (epoch,choice)<-parseToken action,epoch==generation s -> select runtime core action choice values d
+    _ | Just (epoch,choice)<-parseToken action,epoch==generation s -> select runtime action choice values d
       | "select:" `T.isPrefixOf` action -> pure (clearDialog d) {status="Debugger selection expired."}
       | otherwise -> pure d {status="Debugger is not ready for this command."}
 
@@ -1206,15 +1210,15 @@ sendStack runtime@(Debugger ref _ _ _ _) showPicker tid=do
   send runtime (Stack showPicker tid (frameRevision current)) "stackTrace" (stackArguments tid)
 
 -- | Adopt DAP events, expire pending operations and advance resource retirement.
-tickDebugger :: Debugger -> Core -> Desktop -> IO Desktop
-tickDebugger runtime core original = do
-  updated<-tickDebuggerOwner runtime core original
+tickDebugger :: Debugger -> Desktop -> IO Desktop
+tickDebugger runtime original = do
+  updated<-tickDebuggerOwner runtime original
   publishSidebarEpoch runtime
   drainSidebarReads runtime updated
   pure updated
 
-tickDebuggerOwner :: Debugger -> Core -> Desktop -> IO Desktop
-tickDebuggerOwner runtime@(Debugger ref clock _ _ _) core original = do
+tickDebuggerOwner :: Debugger -> Desktop -> IO Desktop
+tickDebuggerOwner runtime@(Debugger ref clock _ _ _) original = do
   reapRetired runtime
   prepared<-tickTerminalLaunch runtime original
   starting<-tickHdb runtime prepared >>= C.tickConsoles (debuggerConsoles runtime)
@@ -1255,11 +1259,11 @@ tickDebuggerOwner runtime@(Debugger ref clock _ _ _) core original = do
           modifyIORef' ref (\state->state {outputShown=outputShown state || first})
           pure (desktop,T.takeEnd 16384 (batch<>chunk),True,opening || first)
         _->do
-          updated<-receive runtime core desktop event
+          updated<-receive runtime desktop event
           pure (updated,batch,changed,opening)
 
-receive :: Debugger -> Core -> Desktop -> D.Event -> IO Desktop
-receive runtime@(Debugger ref clock _ _ _) core d event = do
+receive :: Debugger -> Desktop -> D.Event -> IO Desktop
+receive runtime@(Debugger ref clock _ _ _) d event = do
   s<-readIORef ref
   case event of
     _ | Nothing<-client s -> pure d
@@ -1384,7 +1388,7 @@ receive runtime@(Debugger ref clock _ _ _) core d event = do
                  forM_ (thread s) (\tid -> sendStack runtime False tid)
                _ -> pure ()
              pure (automaticDesktop s d) {status="DAP: "<>err}
-           Right body -> if isJust (endedAt s) then pure d else response runtime core kind body d
+           Right body -> if isJust (endedAt s) then pure d else response runtime kind body d
   where
     stale kind=case kind of Threads{} -> True; Control{} -> True; Stack{} -> True; Scopes{} -> True; Variables{} -> True; ExceptionDetails -> True; Source{} -> True; Inspection{} -> True; SourceInspection{} -> True; SidebarRead{} -> True; WatchRequest{} -> True; _ -> False
 
@@ -1465,8 +1469,8 @@ configure runtime@(Debugger ref _ _ _ _) = do
     when (flag "supportsConfigurationDoneRequest" (capabilities s)) $
       send runtime Configure "configurationDone" (object [])
 
-response :: Debugger -> Core -> Pending -> Value -> Desktop -> IO Desktop
-response runtime@(Debugger ref _ _ _ _) core kind body d = do
+response :: Debugger -> Pending -> Value -> Desktop -> IO Desktop
+response runtime@(Debugger ref _ _ _ _) kind body d = do
   s<-readIORef ref
   case kind of
     Init -> do
@@ -1500,7 +1504,7 @@ response runtime@(Debugger ref _ _ _ _) core kind body d = do
       modifyIORef' ref (\state -> state {frame=listToMaybe rows,frames=rows})
       if showPicker then showChoices runtime "Call stack" "frame" rows (map frameLabel rows) d
       else if not (followSource s) then pure d
-      else maybe (pure d {status="Stopped; no source frame supplied."}) (openFrame runtime core False d) (listToMaybe rows)
+      else maybe (pure d {status="Stopped; no source frame supplied."}) (openFrame runtime False Nothing d) (listToMaybe rows)
     Scopes _ -> do
       recordVariables ref "scopes" body
       let rows=items "scopes" body
@@ -1514,20 +1518,21 @@ response runtime@(Debugger ref _ _ _ _) core kind body d = do
       | otherwise -> case (field "content" body,M.lookup reference (sourceReferences s)) of
           (Just content,Just (SourceObservation current path)) | stamp==current->do
             retireSourcePreparation runtime
-            worker<-async $ do
-              origin<-canonicalSourcePath (root s) path
-              case (origin,boundedResult body) of
-                (Left err,_)->pure (Left err)
-                (_,Left err)->pure (Left err)
-                (Right canonical,Right _)->do
-                  let prepared=newBuffer (T.copy content)
-                      row=max 0 (min (bufferLineCount prepared-1) (integer "line" selected-1))
-                      offset=bufferLineOffset prepared row+L.positionOffset (bufferLineAt prepared row) (0,max 0 (integer "column" selected-1))
-                  _<-evaluate (prepareBuffer prepared)
-                  _<-evaluate offset
-                  pure (Right (canonical,prepared,offset))
-            modifyIORef' ref (\state->state {sourcePreparing=Just (SourcePreparation (generation s) revision reference stamp explicit selected worker)})
-            pure d
+            mask_ $ do
+              worker<-asyncWithUnmask $ \unmask->unmask $ do
+                origin<-canonicalSourcePath (root s) path
+                case (origin,boundedResult body) of
+                  (Left err,_)->pure (Left err)
+                  (_,Left err)->pure (Left err)
+                  (Right canonical,Right _)->do
+                    let prepared=newBuffer (T.copy content)
+                        row=max 0 (min (bufferLineCount prepared-1) (integer "line" selected-1))
+                        offset=bufferLineOffset prepared row+L.positionOffset (bufferLineAt prepared row) (0,max 0 (integer "column" selected-1))
+                    _<-evaluate (prepareBuffer prepared)
+                    _<-evaluate offset
+                    pure (Right (AdapterSource canonical prepared offset))
+              modifyIORef' ref (\state->state {sourcePreparing=Just (SourcePreparation (generation s) revision (Just (reference,stamp)) explicit selected Nothing worker)})
+              pure d
           _->pure d {status="DAP source response is unavailable or expired."}
       where reference=integer "sourceReference" (fromMaybe Null (field "source" selected))
     Control _ -> pure d
@@ -1544,8 +1549,8 @@ response runtime@(Debugger ref _ _ _ _) core kind body d = do
       modifyIORef' ref (\state -> (invalidate state) {client=Nothing,connected=False,pending=M.empty,ready=False,configured=False,disconnectAt=Nothing})
       pure (clearDialog d) {status=if managed s || fst (startRequest s)=="launch" then "Debugger disconnected; launched session stopped." else "Debugger disconnected; attached program is not terminated."}
 
-select :: Debugger -> Core -> Text -> Text -> [Text] -> Desktop -> IO Desktop
-select runtime@(Debugger ref _ _ _ _) core fullToken action values d = do
+select :: Debugger -> Text -> Text -> [Text] -> Desktop -> IO Desktop
+select runtime@(Debugger ref _ _ _ _) fullToken action values d = do
   s<-readIORef ref
   let rows=fromMaybe [] (M.lookup fullToken (choices s))
       selected=case values of _:index:_ -> readMaybe (T.unpack index); _ -> Nothing
@@ -1561,7 +1566,7 @@ select runtime@(Debugger ref _ _ _ _) core fullToken action values d = do
       pure d
     "frame" | stopped s,Just chosen<-selected >>= at rows -> do
       modifyIORef' ref (\state -> state {frame=Just chosen,frameRevision=frameRevision state+1,choices=M.empty})
-      openFrame runtime core True d chosen
+      openFrame runtime True Nothing d chosen
     "expand" | stopped s,Just chosen<-selected >>= at rows,let ident=integer "variablesReference" chosen,ident>0 ->
       case M.lookup ident (variableRefs s) of
         Just False -> send runtime (Variables (frameRevision s)) "variables" (object ["variablesReference" .= ident]) >> pure d {status="Loading variables..."}
@@ -1575,8 +1580,8 @@ select runtime@(Debugger ref _ _ _ _) core fullToken action values d = do
       pure d {status="Exception breakpoints updated."}
     _ -> pure d {status="No expandable debugger value selected."}
 
-openFrame :: Debugger -> Core -> Bool -> Desktop -> Value -> IO Desktop
-openFrame runtime@(Debugger ref _ _ _ _) core explicit d selected = do
+openFrame :: Debugger -> Bool -> Maybe [FilePath] -> Desktop -> Value -> IO Desktop
+openFrame runtime@(Debugger ref _ _ _ _) explicit private d selected = do
   s<-readIORef ref
   let source=fromMaybe Null (field "source" selected)
       reference=integer "sourceReference" source
@@ -1585,25 +1590,69 @@ openFrame runtime@(Debugger ref _ _ _ _) core explicit d selected = do
   if reference>0 then case M.lookup reference (sourceReferences s) of
     Just (SourceObservation stamp _) | stopped s->send runtime (Source explicit (frameRevision s) stamp selected) "source" (object ["source" .= source,"sourceReference" .= reference]) >> pure d
     _->pure d {status="Debugger source handle expired."}
-  else do
-    exists<-if T.null path then pure False else doesFileExist local
-    if not exists then pure d {status="Stopped: source is unavailable ("<>sourceLabel source<>")."}
-    else do
-      canonical<-canonicalizePath local
-      (_,opened)<-core d [ReadPath canonical]
-      pure $ if fmap filePath (activeDocument opened >>= documentFile)==Just canonical
-        then (position selected opened) {status=if maybe False (dirty.documentBuffer) (activeDocument opened)
-              then "Stopped; unsaved text may differ from the running source." else "Stopped in "<>frameLabel selected}
-        else opened
+  else if T.compareLength path 4096==GT || T.any (=='\0') path then pure d {status="Invalid debugger source path."}
+  else if T.null path || not (stopped s) then pure d {status="Stopped: source is unavailable."} else do
+    retireSourcePreparation runtime
+    captured<-mapM capture [(window,doc,file) | window<-windows d,Just doc<-[windowDocument (buffers d) window],Just file<-[documentFile doc]]
+    let owner=case find (\(CapturedLocalSource file _ _ _ _ _)->file==local) captured of
+          Just (CapturedLocalSource _ wid _ _ _ _)->Just wid
+          Nothing->windowId <$> activeWindow d
+    mask_ $ do
+      worker<-asyncWithUnmask (\unmask->unmask (prepareLocalSource (root s) path selected private captured))
+      modifyIORef' ref (\state->state {sourcePreparing=Just (SourcePreparation (generation s) (frameRevision s) Nothing explicit selected owner worker)})
+      pure d
+  where
+    capture (window,doc,file)=do
+      version<-captureVersion (documentBuffer doc)
+      image<-evaluate (bufferContent (documentBuffer doc))
+      modified<-evaluate (captureDirty (documentBuffer doc))
+      pure (CapturedLocalSource (filePath file) (windowId window) (fromMaybe (error "source window without buffer") (bufferId window)) version image modified)
+
+-- The existing source worker owns canonical paths, disk decoding, dirty-state
+-- evaluation and measured UTF-16 positioning. An open source needs no disk read.
+prepareLocalSource :: FilePath -> Text -> Value -> Maybe [FilePath] -> [CapturedLocalSource] -> IO (Either Text PreparedSource)
+prepareLocalSource base path selected private captured
+  | T.compareLength path 4096==GT || T.any (=='\0') path=pure (Left "Invalid debugger source path.")
+  | Just opened<-find (\(CapturedLocalSource file _ _ _ _ _)->file==local) captured=existing local opened
+  | otherwise=do
+      resolved<-canonicalSourcePath base (Just (T.unpack path))
+      case resolved of
+        Right (Just canonical) | denied canonical->pure (Left "Debugger source is private.")
+        Right (Just canonical) -> case find (\(CapturedLocalSource file _ _ _ _ _)->file==canonical) captured of
+          Just opened->existing canonical opened
+          Nothing->do
+            exists<-doesFileExist canonical
+            if not exists then pure (Left "Debugger source file is unavailable.") else do
+              result<-loadFile canonical
+              case result of
+                Right (file,buffer) | isJust (diskBytes file)->do
+                  _<-evaluate (prepareBuffer buffer)
+                  prepare (filePath file) (NewSource file buffer) (bufferContent buffer)
+                _->pure (Left "Debugger source file is unavailable.")
+        _->pure (Left "Debugger source file is unavailable.")
+  where
+    local=if isAbsolute (T.unpack path) then T.unpack path else base </> T.unpack path
+    denied canonical=maybe False (\paths->protectedFilePath paths canonical) private
+    existing canonical (CapturedLocalSource _ wid bid version image modified)
+      | denied canonical=pure (Left "Debugger source is private.")
+      | otherwise=do
+          changed<-evaluate (snapshotDirty modified)
+          prepare canonical (ExistingSource wid bid version changed) image
+    prepare canonical target image=do
+      let row=max 0 (min (contentLineCount image-1) (integer "line" selected-1))
+          offset | integer "line" selected<=0 = -1
+                 | otherwise=contentLineOffset image row+L.positionOffset (contentLineAt image row) (0,max 0 (integer "column" selected-1))
+      _<-evaluate offset
+      pure (Right (LocalSource (isJust private) canonical target offset))
 
 -- Only this owner adopts a prepared source. Cancellation/join is retired outside
 -- the desktop lock, including superseded selections and stopped generations.
 retireSourcePreparation :: Debugger -> IO ()
-retireSourcePreparation (Debugger ref _ (HdbRuntime _ _ _ _ _ retired _) _ _)=do
+retireSourcePreparation (Debugger ref _ (HdbRuntime _ _ _ _ _ retired _) _ _)=mask_ $ do
   current<-readIORef ref
   modifyIORef' ref (\state->state {sourcePreparing=Nothing})
   forM_ (sourcePreparing current) $ \(SourcePreparation _ _ _ _ _ _ worker)->do
-    cleanup<-async (cancel worker)
+    cleanup<-asyncWithUnmask (\unmask->unmask (cancel worker))
     modifyIORef' retired (cleanup:)
 
 tickSourcePreparation :: Debugger -> Desktop -> IO Desktop
@@ -1611,10 +1660,14 @@ tickSourcePreparation runtime@(Debugger ref _ _ _ _) d=do
   s<-readIORef ref
   case sourcePreparing s of
     Nothing->pure d
-    Just (SourcePreparation epoch selectedRevision reference stamp explicit selected worker)
-      | epoch/=generation s || selectedRevision/=frameRevision s || not (stopped s && sourceStampCurrent s reference stamp)
+    Just (SourcePreparation epoch selectedRevision observation explicit selected owner worker)
+      | epoch/=generation s || selectedRevision/=frameRevision s || not (stopped s && maybe True (uncurry (sourceStampCurrent s)) observation)
         || not (isJust (client s)) || endedAt s/=Nothing || disconnectAt s/=Nothing || not explicit && not (followSource s)->
           retireSourcePreparation runtime >> pure d
+      | maybe False (\wid->not (any ((==wid).windowId) (windows d))) owner->do
+          retireSourcePreparation runtime
+          pure d {status="Debugger source window closed; select the frame again."}
+      | isJust (dialog d) || questionActive d->pure d
       | otherwise->do
           result<-poll worker
           case result of
@@ -1622,10 +1675,13 @@ tickSourcePreparation runtime@(Debugger ref _ _ _ _) d=do
             Just outcome->do
               modifyIORef' ref (\state->state {sourcePreparing=Nothing})
               case outcome of
-                Left err->pure d {status="Debugger source preparation failed: "<>T.pack (show err)}
+                Left err->pure d {status=if isJust observation then "Debugger source preparation failed: "<>T.pack (show err) else "Debugger source preparation failed."}
                 Right (Left err)->pure d {status=err}
-                Right (Right (origin,prepared,offset))->do
+                Right (Right (LocalSource agent path target offset))->adoptLocalSource agent path target offset selected d
+                Right (Right (AdapterSource origin prepared offset))->do
                   let source=fromMaybe Null (field "source" selected)
+                      reference=integer "sourceReference" source
+                      stamp=maybe 0 snd observation
                       title="Source "<>sourceLabel source<>" ["<>tshow reference<>"]"
                       opened=addReadOnlyBuffer title prepared d
                       bid=fromMaybe (nextId d) (activeWindow opened >>= bufferId)
@@ -1635,12 +1691,25 @@ tickSourcePreparation runtime@(Debugger ref _ _ _ _) d=do
                   pure (moveTo False offset styled) {status=if private then "Stopped in private debugger source." else "Stopped in "<>frameLabel selected}
 
 -- Docs: docs/site/screenshots/debug-step.png (docs/running.md) shows the live stopped source.
-position :: Value -> Desktop -> Desktop
-position selected d
-  | row>0 = let source=modifyActive (\w->w {bufferView=CurrentView,reviewSelection=Nothing}) d
-            in moveTo False (L.positionOffset (activeText source) (row-1,max 0 (integer "column" selected-1))) source
-  | otherwise = d
-  where row=integer "line" selected
+-- Only a matching captured source may receive its prepared coordinates. A newly
+-- opened target is never overwritten or positioned from a disk snapshot.
+adoptLocalSource :: Bool -> FilePath -> LocalSourceTarget -> Int -> Value -> Desktop -> IO Desktop
+adoptLocalSource agent path target offset selected d
+  | agent && protectedPath d path=pure d {status="Debugger source is private."}
+  | otherwise=case target of
+    ExistingSource wid bid version changed->case (find ((==wid).windowId) (windows d),M.lookup bid (buffers d)) of
+      (Just window,Just doc) | bufferId window==Just bid && fmap filePath (documentFile doc)==Just path->do
+        current<-versionCurrent version (documentBuffer doc)
+        pure $ if current then position changed (focusWindow wid d) else expired
+      _->pure expired
+    NewSource file prepared
+      | any ((==Just path).fmap filePath.documentFile) (M.elems (buffers d))->pure expired
+      | otherwise->pure (position False (addDocument (Just file) prepared d))
+  where
+    expired=d {status="Debugger source target changed; select the frame again."}
+    position changed desktop=(if offset<0 then desktop else moveTo False offset (modifyActive (\window->window {bufferView=CurrentView,reviewSelection=Nothing}) desktop))
+      {status=if protectedPath desktop path then "Stopped in private debugger source." else if changed
+        then "Stopped; unsaved text may differ from the running source." else "Stopped in "<>frameLabel selected}
 
 sourceCurrent :: DebugSourceRequest -> Desktop -> IO Bool
 sourceCurrent request d=case (activeWindow d,activeDocument d) of

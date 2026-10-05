@@ -192,9 +192,11 @@ and nonlazy list-child expansion through these actions. hdb marks lazy child
 values, but its Evaluate replies do not mark a lazy root, so **Force lazy watch**
 is unavailable for those results. Root Force currently has deterministic adapter
 fixture coverage; it has not been qualified against hdb or THC. Nested lazy-child
-Force and variable continuation pages remain in issue #8. Local-file **Go to source** still
-uses the existing synchronous debugger navigation path; embedded source uses the
-asynchronous DAP transport and prepares its source document on a worker.
+Force and variable continuation pages remain in issue #8. Both local-file and
+embedded **Go to source** prepare their source documents on a worker. Local-file
+navigation preserves open unsaved text and ordinary file/save authority. Changed
+or closed targets and resumed sessions reject late navigation; a prepared source
+waits while a modal owns input.
 
 Lazy values are displayed without forcing them; ordinary expansion refuses a
 lazy handle. hdb remains an external tool, with no GHC API dependency in the editor.

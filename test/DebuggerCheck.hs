@@ -43,7 +43,7 @@ outputOwnerChecks :: IO ()
 outputOwnerChecks=withDebugger $ \runtime->do
   let opened=addReadOnly "Debugger output" "unrelated snapshot" (initialDesktop (80,25))
       trapped=opened {buffers=M.map (\doc->doc {documentBuffer=error "idle debugger forced unrelated output-labelled Buffer"}) (buffers opened)}
-  after<-tickDebugger runtime (\d _->pure (False,d)) trapped
+  after<-tickDebugger runtime trapped
   count<-evaluate (sum [maybe 0 (const 1) (documentLabel doc) | doc<-M.elems (buffers after)])
   check "idle debugger leaves unrelated output-labelled buffers untouched" (count==1)
 -- Real DAP messages exercise automatic opening, exact refresh, closure and a
@@ -52,9 +52,9 @@ outputLifecycleCheck :: IO ()
 outputLifecycleCheck=bracket (fixture "output-owner") cleanup $ \(port,_,_)->do
   escaped<-withDebugger $ \runtime->do
     let core d _=pure (False,d)
-        tick=tickDebugger runtime core
+        tick=tickDebugger runtime
         tool name arguments d=do
-          (next,finish)<-debuggerTool runtime core d name (object arguments)
+          (next,finish)<-debuggerTool runtime d name (object arguments)
           result<-finish >>= either (error . T.unpack) pure
           pure (next,result)
         state d=snd <$> tool "debug_status" [] d
@@ -70,7 +70,7 @@ outputLifecycleCheck=bracket (fixture "output-owner") cleanup $ \(port,_,_)->do
         installed d=case opening d of Just reference->pure reference; _->error "missing semantic output"
         emit expected reveal d=do
           statusValue<-state d
-          (queued,finish)<-debuggerTool runtime core d "debug_inspect" (object ["generation" .= epoch statusValue,"request" .= ("threads"::T.Text)])
+          (queued,finish)<-debuggerTool runtime d "debug_inspect" (object ["generation" .= epoch statusValue,"request" .= ("threads"::T.Text)])
           withAsync finish $ \reply->do
             showing<-if not reveal then pure queued else do
               -- The control response follows the burst on the real DAP stream.
@@ -160,7 +160,7 @@ checks = outputOwnerChecks >> outputLifecycleCheck >> terminalLauncherCheck >> t
     session mode = bracket (fixture mode) cleanup $ \(port,logPath,process) -> withDebugger $ \runtime -> do
       let core d _=pure (False,d)
           send action values d=snd <$> debuggerEffects runtime core d [DebugAction action values]
-          tick=tickDebugger runtime core
+          tick=tickDebugger runtime
           waitForIO label predicate d=do
             result<-timeout debuggerTimeout (loop d)
             maybe (error (label++": timed out")) pure result
@@ -191,20 +191,22 @@ checks = outputOwnerChecks >> outputLifecycleCheck >> terminalLauncherCheck >> t
       if mode=="frame" then do
         stopped<-waitFor "initial stop" (T.isInfixOf "Stopped" . status) attached
         stack<-send "stack" [] stopped >>= waitFor "frame chooser" (hasDialog "Call stack")
-        (_,beforeReply)<-debuggerTool runtime core stack "debug_status" (object [])
+        (_,beforeReply)<-debuggerTool runtime stack "debug_status" (object [])
         before<-beforeReply
         waiting<-send "scopes" [] stack
         chosen<-choose 1 waiting
-        (_,afterReply)<-debuggerTool runtime core chosen "debug_status" (object [])
+        (_,afterReply)<-debuggerTool runtime chosen "debug_status" (object [])
         after<-afterReply
         check "frame selection preserves stopped handles"
           ((before >>= maybe (Left "missing epoch") Right . (field "generation" :: Value -> Maybe Int))==
            (after >>= maybe (Left "missing epoch") Right . (field "generation" :: Value -> Maybe Int)))
         -- This response follows the current source and both delayed old replies.
         drained<-send "threads" [] chosen >>= waitFor "stale frame replies must not open scopes" (hasDialog "Threads")
-        check "late source cannot replace selected frame" (activeText drained=="chosen frame source\n")
-        check "late source does not create an obsolete buffer" (not (any (T.isInfixOf "STALE" . contents . documentBuffer) (M.elems (buffers drained))))
-        finish drained
+        check "selected source waits while the ordered threads modal owns input" (hasDialog "Threads" drained)
+        shown<-waitFor "selected frame source after modal dismissal" ((=="chosen frame source\n").activeText) drained {dialog=Nothing}
+        check "late source cannot replace selected frame" (activeText shown=="chosen frame source\n")
+        check "late source does not create an obsolete buffer" (not (any (T.isInfixOf "STALE" . contents . documentBuffer) (M.elems (buffers shown))))
+        finish shown
       else do
         stopped<-waitFor "initial source" (T.isInfixOf "value = λ" . activeText) attached
         check "sourceReference opens read-only at adapter line" (maybe False ((/=Nothing).documentLabel) (activeDocument stopped) && fmap (caret.selection) (activeWindow stopped)==Just (T.length "module Generated where\n"))
@@ -235,9 +237,9 @@ checks = outputOwnerChecks >> outputLifecycleCheck >> terminalLauncherCheck >> t
             blocked<-choose 0 variables
             check "ordinary UI expansion does not force a lazy variable"
               ("explicit" `T.isInfixOf` status blocked)
-            let current d=do (_,result)<-debuggerTool runtime core d "debug_status" (object []); result >>= either (error . T.unpack) pure
+            let current d=do (_,result)<-debuggerTool runtime d "debug_status" (object []); result >>= either (error . T.unpack) pure
                 reject ref gen d=do
-                  (_,result)<-debuggerTool runtime core d "debug_inspect" (object
+                  (_,result)<-debuggerTool runtime d "debug_inspect" (object
                     ["generation" .= (gen::Int),"request" .= ("variables"::T.Text),"variablesReference" .= (ref::Int)])
                   answer<-result
                   check "read-only inspection rejects forcing or unobserved references" (either (const True) (const False) answer)
@@ -291,7 +293,7 @@ checks = outputOwnerChecks >> outputLifecycleCheck >> terminalLauncherCheck >> t
             pure shown
           "mcp" -> do
             let tool name args desktop=do
-                  (updated,result)<-debuggerTool runtime core desktop name (object args)
+                  (updated,result)<-debuggerTool runtime desktop name (object args)
                   value<-result
                   pure (updated,value)
                 success name args desktop=do
@@ -303,7 +305,7 @@ checks = outputOwnerChecks >> outputLifecycleCheck >> terminalLauncherCheck >> t
                 current desktop=snd <$> success "debug_status" [] desktop
                 epoch value=fromMaybe (error "missing debugger generation") (field "generation" value) :: Int
                 inspect args desktop=do
-                  (updated,result)<-debuggerTool runtime core desktop "debug_inspect" (object args)
+                  (updated,result)<-debuggerTool runtime desktop "debug_inspect" (object args)
                   withAsync result $ \pending -> do
                     drained<-waitForIO "MCP inspection reply" (\_ -> isJust <$> poll pending) updated
                     value<-wait pending >>= either (error . T.unpack) pure
@@ -350,7 +352,7 @@ checks = outputOwnerChecks >> outputLifecycleCheck >> terminalLauncherCheck >> t
             let bps=fromMaybe [] (field "breakpoints" verified) :: [Value]
             check "MCP status exposes verified breakpoints" (length bps==3 && all ((==Just True) . field "verified") bps)
             before<-length . filter ((==Just ("threads"::T.Text)) . field "command") <$> commands
-            (waiting,pending)<-debuggerTool runtime core same "debug_inspect" (object ["generation" .= gen,"request" .= ("variables"::T.Text),"variablesReference" .= (22::Int)])
+            (waiting,pending)<-debuggerTool runtime same "debug_inspect" (object ["generation" .= gen,"request" .= ("variables"::T.Text),"variablesReference" .= (22::Int)])
             (resumed,accepted)<-success "debug_control" ["generation" .= gen,"command" .= ("continue"::T.Text)] waiting
             check "MCP control advances generation" (epoch accepted>gen)
             expired<-timeout 1000000 pending
@@ -423,9 +425,9 @@ launchChecks = do
         core d _=pure (False,d)
         waitFor runtime predicate d=timeout debuggerTimeout (loop d) >>= maybe (error "launch fixture timed out") pure
           where loop state=do
-                  updated<-tickDebugger runtime core state
+                  updated<-tickDebugger runtime state
                   if predicate updated then pure updated else if "DAP:" `T.isPrefixOf` status updated then do
-                    (_,finish)<-debuggerTool runtime core updated "debug_status" (object [])
+                    (_,finish)<-debuggerTool runtime updated "debug_status" (object [])
                     details<-finish
                     error (T.unpack (status updated)++" "++show details)
                   else threadDelay 1000 >> loop updated
@@ -477,17 +479,17 @@ launchDeadlineCheck = do
     withDebuggerClock (readIORef clock) $ \runtime -> do
       (_,started)<-debuggerEffects runtime core (initialDesktop (80,25)) [DebugAction "launch-config" ["1",T.pack path]]
       let loop d=do
-            updated<-tickDebugger runtime core d
-            (_,finish)<-debuggerTool runtime core updated "debug_status" (object [])
+            updated<-tickDebugger runtime d
+            (_,finish)<-debuggerTool runtime updated "debug_status" (object [])
             result<-finish
             if either (const False) (\v -> maybe False (T.isInfixOf "loading cradle") (field "output" v)) result
               then pure updated else threadDelay 1000 >> loop updated
       loading<-timeout debuggerTimeout (loop started) >>= maybe (error "cold launch fixture did not load") pure
       writeIORef clock 16000000000
-      alive<-tickDebugger runtime core loading
+      alive<-tickDebugger runtime loading
       check "cold launch survives ordinary request deadline" (not ("timed out" `T.isInfixOf` status alive))
       writeIORef clock 121000000000
-      expired<-tickDebugger runtime core alive
+      expired<-tickDebugger runtime alive
       check "cold launch retains bounded deadline" ("DAP request timed out" `T.isInfixOf` status expired)
 
 -- Six minutes pass before the UI sees transport readiness. The request clock
@@ -512,13 +514,13 @@ startupDeadlineCheck = do
       check "initialize waits for transport readiness event" (not sentEarly)
       writeIORef clock 360000000000
       let awaitInitialize d=do
-            updated<-tickDebugger runtime core d
+            updated<-tickDebugger runtime d
             check "startup elapsed time does not consume initialize deadline" (not ("timed out" `T.isInfixOf` status updated))
             received<-doesFileExist (path<>".received")
             if received then pure updated else threadDelay 1000 >> awaitInitialize updated
       connected<-timeout debuggerTimeout (awaitInitialize started) >>= maybe (error "initialize was not sent after readiness") pure
       writeIORef clock 376000000000
-      expired<-tickDebugger runtime core connected
+      expired<-tickDebugger runtime connected
       check "connected initialize retains a bounded request deadline" ("DAP request timed out" `T.isInfixOf` status expired)
 
 -- A Windows-owned adapter can require the bounded taskkill /T grace on stop.
@@ -529,14 +531,14 @@ presentationCheck :: IO ()
 presentationCheck=bracket (fixture "basic") cleanup $ \(port,_,_) -> withDebugger $ \runtime -> do
   let core d _=pure (False,d)
       tool name args d=do
-        (updated,finish)<-debuggerTool runtime core d name (object args)
+        (updated,finish)<-debuggerTool runtime d name (object args)
         result<-finish >>= either (error . T.unpack) pure
         pure (updated,result)
       current d=snd <$> tool "debug_status" [] d
       epoch value=fromMaybe (error "missing debugger generation") (field "generation" value) :: Int
       waitFor label predicate d=timeout debuggerTimeout (loop d) >>= maybe (error (label<>" timed out")) pure
         where loop state=do
-                updated<-tickDebugger runtime core state
+                updated<-tickDebugger runtime state
                 snapshot<-current updated
                 if predicate updated snapshot then pure updated else threadDelay 1000 >> loop updated
       reveal view gen d=tool "debug_present" ["generation" .= gen,"view" .= (view::T.Text)] d
@@ -552,19 +554,32 @@ presentationCheck=bracket (fixture "basic") cleanup $ \(port,_,_) -> withDebugge
   let gen=epoch snapshot
   check "background stop keeps windows, focus, buffers and modal"
     (windows stopped==windows working && buffers stopped==buffers working && dialog stopped==dialog working && field "follow" snapshot==Just False)
-  (stale,staleReply)<-debuggerTool runtime core stopped "debug_present" (object ["generation" .= (gen-1),"follow" .= True,"view" .= ("source"::T.Text)])
+  (stale,staleReply)<-debuggerTool runtime stopped "debug_present" (object ["generation" .= (gen-1),"follow" .= True,"view" .= ("source"::T.Text)])
   rejected<-staleReply
   afterRejected<-current stale
   check "stale reveal rejects preference changes atomically" (stale==stopped && either (const True) (const False) rejected && field "follow" afterRejected==Just False)
   forM_ [object ["view" .= ("source"::T.Text)],object ["generation" .= gen,"view" .= ("unknown"::T.Text)],object ["follow" .= ("no"::T.Text)]] $ \args -> do
-    (unchanged,finish)<-debuggerTool runtime core stopped "debug_present" args
+    (unchanged,finish)<-debuggerTool runtime stopped "debug_present" args
     result<-finish
     check "presentation arguments reject missing generation/unknown view/wrong type" (unchanged==stopped && either (const True) (const False) result)
   (requested,_)<-reveal "source" gen stopped
-  shown<-waitFor "explicit source reveal" (\d _ -> "value = λ" `T.isInfixOf` activeText d) requested
+  -- The ordered DAP control response follows the source response. It proves
+  -- preparation was admitted while the human modal still owns input.
+  (queued,barrier)<-debuggerTool runtime requested "debug_inspect" (object ["generation" .= gen,"request" .= ("threads"::T.Text)])
+  held<-withAsync barrier $ \reply->do
+    let loop d=do
+          next<-tickDebugger runtime d
+          done<-poll reply
+          if isJust done then pure next else threadDelay 1000 >> loop next
+    waiting<-timeout debuggerTimeout (loop queued) >>= maybe (error "source/modal response barrier timed out") pure
+    _<-wait reply >>= either (error . T.unpack) pure
+    pure waiting
+  check "prepared adapter source waits without replacing a human modal or source focus"
+    (activeText held=="my editor work" && fmap dialogTitle (dialog held)==Just "Existing debugger view" && length (windows held)==1)
+  shown<-waitFor "explicit source reveal after dismissal" (\d _ -> "value = λ" `T.isInfixOf` activeText d) held {dialog=Nothing}
   shownStatus<-current shown
   check "explicit reveal opens source without changing stopped generation or follow mode"
-    (epoch shownStatus==gen && field "follow" shownStatus==Just False && dialog shown==dialog stopped)
+    (epoch shownStatus==gen && field "follow" shownStatus==Just False && dialog shown==Nothing)
   (stack,stackStatus)<-reveal "stack" gen shown {dialog=Nothing}
   check "cached stack is explicitly visible without resuming" (hasDialog "Call stack" stack && epoch stackStatus==gen)
   (loading,_)<-reveal "scopes" gen stack {dialog=Nothing}
@@ -589,11 +604,11 @@ pendingPresentationCheck :: IO ()
 pendingPresentationCheck=bracket (fixture "basic") cleanup $ \(port,_,_) -> withDebugger $ \runtime -> do
   let core d _=pure (False,d)
       tool name args d=do
-        (updated,finish)<-debuggerTool runtime core d name (object args)
+        (updated,finish)<-debuggerTool runtime d name (object args)
         result<-finish >>= either (error . T.unpack) pure
         pure (updated,result)
       current d=snd <$> tool "debug_status" [] d
-      tick=tickDebugger runtime core
+      tick=tickDebugger runtime
       base=addDocument Nothing (newBuffer "unchanged foreground") (initialDesktop (80,25))
       waitUntil label predicate d=timeout debuggerTimeout (loop d) >>= maybe (error (label<>" timed out")) pure
         where loop desktop=do
@@ -608,7 +623,7 @@ pendingPresentationCheck=bracket (fixture "basic") cleanup $ \(port,_,_) -> with
   (quiet,_)<-tool "debug_present" ["follow" .= False] awaitingSource
   snapshot<-current quiet
   let gen=fromMaybe (error "missing generation") (field "generation" snapshot) :: Int
-  (pending,finish)<-debuggerTool runtime core quiet "debug_inspect" (object ["generation" .= gen,"request" .= ("threads"::T.Text)])
+  (pending,finish)<-debuggerTool runtime quiet "debug_inspect" (object ["generation" .= gen,"request" .= ("threads"::T.Text)])
   drained<-withAsync finish $ \reply -> do
     after<-waitUntil "source reply barrier" (\_ -> isJust <$> poll reply) pending
     result<-wait reply
@@ -627,10 +642,10 @@ completionChecks=forM_ ["exit-first","exit-last","exit-missing"] $ \mode ->
     withDebuggerClock (readIORef clock) $ \runtime -> do
       let core d _=pure (False,d)
           send action values d=snd <$> debuggerEffects runtime core d [DebugAction action values]
-          state d=do (_,finish)<-debuggerTool runtime core d "debug_status" (object []); finish >>= either (error . T.unpack) pure
+          state d=do (_,finish)<-debuggerTool runtime d "debug_status" (object []); finish >>= either (error . T.unpack) pure
           awaitState label predicate d=timeout debuggerTimeout (loop d) >>= maybe (error label) pure
             where loop current=do
-                    next<-tickDebugger runtime core current
+                    next<-tickDebugger runtime current
                     value<-state next
                     if predicate value then pure next else threadDelay 1000 >> loop next
       connected<-send "connect" ["0","127.0.0.1",T.pack port] (initialDesktop (80,25))
@@ -658,7 +673,7 @@ terminalCheck = when Terminal.terminalAvailable $ mapM_ session ["terminal","ter
   where
     session mode = bracket (fixture mode) cleanup $ \(port,logPath,_) -> C.withConsoles $ \consoles -> withDebuggerConsoles consoles $ \runtime -> do
       let core d _=pure (False,d)
-          tick=tickDebugger runtime core
+          tick=tickDebugger runtime
           send action d=snd <$> debuggerEffects runtime core d [DebugAction action []]
           terminalText d=T.concat [contents (documentBuffer doc) | doc<-M.elems (buffers d),maybe False (T.isPrefixOf "Terminal ") (documentLabel doc)]
           outputText d=T.concat [let text=W.preparedWindowText prepared in contentSlice text 0 (contentLength text) | prepared<-M.elems (pluginWindows d),W.preparedWindowTitle prepared=="Debugger output"]
@@ -731,7 +746,7 @@ terminalLauncherCheck = when (Terminal.terminalAvailable && os/="mingw32") $ do
           "server" .= [wrapper,directory<>"/test/dap-session.py",config<>".log","server-"<>mode]]))
         C.withConsoles $ \consoles -> withDebuggerConsoles consoles $ \runtime -> do
           let core d _=pure (False,d)
-              tick=tickDebugger runtime core
+              tick=tickDebugger runtime
               await d=do
                 n<-tick d
                 entries<-C.listConsoles consoles

@@ -38,7 +38,7 @@ watchManagement=withSidebarCommands $ \host->withDebugger $ \runtime->withDebugg
   let fallback d _=pure (False,d)
       core=debuggerEffects runtime fallback
       effects=sidebarEffects host core
-      tick d=tickDebugger runtime fallback d >>= tickDebuggerSidebar provider host runtime >>= tickSidebar host core
+      tick d=tickDebugger runtime d >>= tickDebuggerSidebar provider host runtime >>= tickSidebar host core
       rows d=maybe [] (M.elems . treeRows) (sideTree d)
       labels=map (P.infoLabel . rowInfo) . rows
       has text=any (T.isInfixOf text) . labels
@@ -111,7 +111,7 @@ session mode=bracket (Fixture.fixture mode) Fixture.cleanup $ \(port,logPath,_)-
     let fallback d _=pure (False,d)
         core=debuggerEffects runtime fallback
         effects=sidebarEffects host core
-        tick d=tickDebugger runtime fallback d >>= tickDebuggerSidebar provider host runtime >>= tickSidebar host core
+        tick d=tickDebugger runtime d >>= tickDebuggerSidebar provider host runtime >>= tickSidebar host core
         waitIO label predicate d=timeout 5000000 (loop d) >>= maybe (error (label<>" timed out")) pure
           where loop current=do next<-tick current; done<-predicate next; if done then pure next else threadDelay 1000 >> loop next
         wait label predicate=waitIO label (pure . predicate)
@@ -128,7 +128,7 @@ session mode=bracket (Fixture.fixture mode) Fixture.cleanup $ \(port,logPath,_)-
           next<-waitIO "sidebar page reply" (\_->maybe False (const True) <$> poll worker) d
           result<-Async.wait worker
           pure (next,result)
-        selected d=do (_,finish)<-debuggerTool runtime fallback d "debug_status" (object []); value<-finish
+        selected d=do (_,finish)<-debuggerTool runtime d "debug_status" (object []); value<-finish
                       pure (value >>= maybe (Left "no frame") Right . (field "frame" :: Value -> Maybe Value) >>= maybe (Left "no frame ID") Right . (field "id" :: Value -> Maybe Int))
         decodeStrictText=decodeStrict' . Data.Text.Encoding.encodeUtf8
     initial<-initializeSidebar host (initialDesktop (80,25)) {sideTree=Just (emptySidebar (takeDirectory logPath) 28 False)}

@@ -166,6 +166,8 @@ for session in range(1, 4 if mode == 'output-owner' else 3 if mode == 'reconnect
                              source=dict(name='Generated.hs', sourceReference=9))]
                 if mode.startswith('source-') or mode == 'watches-private':
                     rows[0]['source']['path'] = sys.argv[1] + ('.changed.hs' if mode == 'source-stamp' and stack_count > 1 else '.hs')
+                if mode == 'local-source':
+                    rows[0].update(column=5, source=dict(name='Local.hs', path=sys.argv[1] + '.hs', sourceReference=0))
                 if mode in ('sidebar', 'sidebar-exit'):
                     rows = [dict(id=11 if args['threadId'] == 7 else 21, name='entry λ' if args['threadId'] == 7 else 'worker frame', line=2, column=1, source=dict(name='Generated.hs', sourceReference=9))]
                     if args['threadId'] == 7:
