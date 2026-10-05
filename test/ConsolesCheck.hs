@@ -141,7 +141,8 @@ nativeChecks consoles desktop = do
         [] -> error "missing resize window"
   resizedScreen <- tickConsoles consoles resized
   inputConsole consoles resizing "size\n" >>= requireRight
-  _ <- waitOutput consoles resizing (\(bytes,_,_) -> "10 40" `BS.isInfixOf` bytes)
+  -- stty output can arrive before the shell writes the following cursor-show.
+  _ <- waitOutput consoles resizing (\(bytes,_,_) -> "10 40" `BS.isInfixOf` bytes && "\ESC[?25h" `BS.isInfixOf` bytes)
   visible <- tickConsoles consoles resizedScreen
   check "frontmost view resizes the PTY and snapshot" (maybe False (\resizedDoc -> documentWidth resizedDoc == 40 && bufferLineCount (documentBuffer resizedDoc) == 10 && documentCursorVisible resizedDoc) (activeDocument visible))
   releaseConsole consoles resizing >>= requireRight
