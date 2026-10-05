@@ -140,8 +140,8 @@ queueOutput (Debugger ref _ _ _ (OutputOwner _ slot desired _ _)) opening value=
   modifyIORef' ref (\state->state {outputPending=True})
   request `seq` atomically (writeTVar desired (Just request))
 
-revealOutput :: Debugger -> Text -> Desktop -> IO Desktop
-revealOutput runtime@(Debugger _ _ _ _ (OutputOwner _ slot _ _ _)) value desktop=do
+revealOutput :: Debugger -> Desktop -> IO Desktop
+revealOutput runtime@(Debugger ref _ _ _ (OutputOwner _ slot _ _ _)) desktop=do
   current<-tickOutputOwner runtime desktop
   OutputSlot epoch revision target requested _ frozen<-readIORef slot
   let present=maybe False (\reference->M.member reference (pluginWindows current)) target
@@ -152,14 +152,15 @@ revealOutput runtime@(Debugger _ _ _ _ (OutputOwner _ slot _ _ _)) value desktop
     let old=case frozen of Just reference | M.member reference (pluginWindows current)->Just reference; _->Nothing
     when (old==Nothing) (mapM_ W.retireWindowRef frozen)
     writeIORef slot (OutputSlot epoch revision Nothing True True old)
-    queueOutput runtime True value
+    accepted<-readIORef ref
+    unless (outputPending accepted) (queueOutput runtime True (output accepted))
     pure current
 
 -- Idle ticks inspect only the exact owned slot and a publication receipt; no
 -- source document labels, payloads or histories participate in invalidation.
 tickOutputOwner :: Debugger -> Desktop -> IO Desktop
-tickOutputOwner (Debugger ref _ _ _ (OutputOwner _ slot _ latest _)) desktop=do
-  OutputSlot epoch revision target _ focus frozen<-readIORef slot
+tickOutputOwner runtime@(Debugger ref _ _ _ (OutputOwner _ slot _ latest _)) desktop=do
+  OutputSlot epoch revision target requestedOpen focus frozen<-readIORef slot
   next<-atomically (tryTakeTMVar latest)
   -- Report currentness is independent of the view: a closed or modal-deferred
   -- window must not discard the bounded report or stall the DAP inbox.
@@ -176,12 +177,15 @@ tickOutputOwner (Debugger ref _ _ _ (OutputOwner _ slot _ latest _)) desktop=do
     mapM_ retireOutputOpening next
     pure desktop
   else do
+    let prepareRequested report=when (requestedOpen && target==Nothing) $
+          forM_ (either (const Nothing) Just report) (queueOutput runtime False)
     updated<-case next of
       Nothing->pure desktop
       Just publication@(OutputPublication issued version captured report result)
-        | issued/=epoch || version/=revision || captured/=target->retireOutputOpening publication >> pure desktop
-        | Left err<-report->pure desktop {status=err}
-        | Nothing<-result->pure desktop
+        | issued/=epoch || version/=revision->retireOutputOpening publication >> pure desktop
+        | Left err<-report->writeIORef slot (OutputSlot epoch revision target False False frozen) >> pure desktop {status=err}
+        | captured/=target->retireOutputOpening publication >> prepareRequested report >> pure desktop
+        | Nothing<-result->prepareRequested report >> pure desktop
         | captured==Nothing,Just old<-frozen,not (M.member old (pluginWindows desktop))->do
             W.retireWindowRef old
             retireOutputOpening publication
@@ -904,7 +908,7 @@ perform runtime@(Debugger ref clock _ _ _) core action values d = do
   case (action,values) of
     ("downloads",_) -> hdbDownloadsAction runtime values d
     _ | "hdb-accept:" `T.isPrefixOf` action -> acceptHdb runtime action values d
-    ("output",_) -> modifyIORef' ref (\state -> state {outputShown=True}) >> revealOutput runtime (output s) d
+    ("output",_) -> modifyIORef' ref (\state -> state {outputShown=True}) >> revealOutput runtime d
     -- Docs: docs/site/screenshots/debug-launch.png (docs/running.md).
     ("launch",_) -> pure d {dialog=Just (Dialog "Launch debugger" (DebugDialog "launch-config")
       [Input "Adapter configuration" ".thc-debug.json" 15,Input "DAP port" "4711" 4] 0 ["Selected target","Adapter config","Cancel"]
@@ -1193,7 +1197,11 @@ tickDebuggerOwner runtime@(Debugger ref clock _ _ _) core original = do
   reporting<-tickOutputOwner runtime starting
   s<-readIORef ref
   events<-if outputPending s then pure [] else maybe (pure []) D.pollEvents (client s)
-  receivedEvents<-foldM (receive runtime core) reporting events
+  accepted<-evaluate (output s)
+  -- The pending payload lives only in this already-bounded transport batch and
+  -- then the output worker. Public State.output is always the accepted copy.
+  (receivedEvents,batch,changed,opening)<-foldM receiveBatch (reporting,accepted,False,False) events
+  when changed (queueOutput runtime opening batch)
   sourced<-tickSourcePreparation runtime receivedEvents
   received<-tickWatchPreparation runtime sourced
   updated<-tickOutputOwner runtime received
@@ -1213,6 +1221,18 @@ tickDebuggerOwner runtime@(Debugger ref clock _ _ _) core original = do
     stopTransport runtime current
     modifyIORef' ref (\state -> (invalidate state) {client=Nothing,connected=False,pending=M.empty,ready=False,configured=False,disconnectAt=Nothing,failure=Nothing})
     pure (automaticDesktop current updated) {status=fromMaybe (if detachExpired then "Debugger disconnected." else "DAP request timed out; debugger disconnected.") (failure current)}
+  where
+    receiveBatch (desktop,batch,changed,opening) event=do
+      current<-readIORef ref
+      case event of
+        D.Notification "output" body | isJust (client current)->do
+          chunk<-evaluate (text "output" body)
+          let first=not (outputShown current) && null (debugConsoles current) && not (T.null chunk)
+          modifyIORef' ref (\state->state {outputShown=outputShown state || first})
+          pure (desktop,T.takeEnd 16384 (batch<>chunk),True,opening || first)
+        _->do
+          updated<-receive runtime core desktop event
+          pure (updated,batch,changed,opening)
 
 receive :: Debugger -> Core -> Desktop -> D.Event -> IO Desktop
 receive runtime@(Debugger ref clock _ _ _) core d event = do
@@ -1302,12 +1322,6 @@ receive runtime@(Debugger ref clock _ _ _) core d event = do
       pure (automaticDesktop s d) {status="Debug session ended."}
     D.Notification "exited" body -> do
       modifyIORef' ref (\state -> state {programExitCode=field "exitCode" body})
-      pure d
-    D.Notification "output" body -> do
-      let value=T.takeEnd 16384 (output s<>text "output" body)
-          showFirst=not (outputShown s) && null (debugConsoles s) && not (T.null (text "output" body))
-      modifyIORef' ref (\state -> state {output=value,outputShown=outputShown state || showFirst})
-      queueOutput runtime showFirst value
       pure d
     D.Notification "breakpoint" body -> do
       let bp=fromMaybe Null (field "breakpoint" body)

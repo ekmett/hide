@@ -69,11 +69,23 @@ outputLifecycleCheck=bracket (fixture "output-owner") cleanup $ \(port,_,_)->do
         text reference d=maybe "" (\prepared->let value=W.preparedWindowText prepared in contentSlice value 0 (contentLength value)) (M.lookup reference (pluginWindows d))
         opening d=case [reference | w<-windows d,PluginContent reference<-[windowContent w]] of reference:_->Just reference; _->Nothing
         installed d=case opening d of Just reference->pure reference; _->error "missing semantic output"
-        emit expected d=do
+        emit expected reveal d=do
           statusValue<-state d
           (queued,finish)<-debuggerTool runtime core d "debug_inspect" (object ["generation" .= epoch statusValue,"request" .= ("threads"::T.Text)])
           withAsync finish $ \reply->do
-            delivered<-await "fixture output request" (\current->do observed<-report expected current; done<-poll reply; pure (observed && isJust done)) queued
+            showing<-if not reveal then pure queued else do
+              -- The control response follows the burst on the real DAP stream.
+              -- Reveal may arrive before its copied report publication; it must
+              -- retain that pending payload rather than queue the old report.
+              seen<-await "burst control response before reveal" (\_->isJust <$> poll reply) queued
+              captured<-epoch <$> state seen
+              fst <$> tool "debug_present" ["generation" .= captured,"view" .= ("output"::T.Text)] seen
+            delivered<-await "fixture output request" (\current->do
+              value<-state current
+              check "interleaved status retains only accepted copied report" (maybe False ((<=4*16384).backingBytes) (field "output" value))
+              let observed=maybe False (T.isInfixOf expected) (field "output" value)
+              done<-poll reply
+              pure (observed && isJust done)) showing
             _<-wait reply >>= either (error . T.unpack) pure
             pure delivered
         connect d=snd <$> debuggerEffects runtime core d [DebugAction "connect" ["0","127.0.0.1",T.pack port]]
@@ -91,12 +103,12 @@ outputLifecycleCheck=bracket (fixture "output-owner") cleanup $ \(port,_,_)->do
     first<-installed shown
     check "debugger output has explicit durable semantic identity" (maybe False ((==Just ("hide.debug-output",1)).W.preparedWindowRecovery) (M.lookup first (pluginWindows shown)))
     let background=focusWindow (windowId sourceWindow) shown {dialog=Just modal}
-    updatedReport<-emit "session=1 output=2" background
+    updatedReport<-emit "session=1 output=2" False background
     refreshed<-await "owned output refresh" (pure . T.isInfixOf "output=2" . text first) updatedReport
     check "refresh retains source focus, selection and modal" (fmap windowId (activeWindow refreshed)==Just (windowId sourceWindow) && dialog refreshed==Just modal && sourceKept refreshed)
     let closing=closeActive (focusWindow (fromMaybe (error "missing output window") (windowId <$> (case [w | w<-windows refreshed,windowContent w==PluginContent first] of w:_->Just w; _->Nothing))) refreshed {dialog=Nothing})
     closed<-tick closing
-    afterClose<-emit "session=1 output=3" closed
+    afterClose<-emit "session=1 output=3" False closed
     check "closed output stays closed while MCP retains capped current report" (opening afterClose==Nothing)
     copied<-await "closed output report detaches oversized backing" (\d->do
       value<-state d
@@ -109,7 +121,7 @@ outputLifecycleCheck=bracket (fixture "output-owner") cleanup $ \(port,_,_)->do
     second<-installed reopened
     oldLive<-W.windowRefCurrent first
     check "explicit reopen has fresh identity and current retained text" (second/=first && not oldLive && "output=3" `T.isInfixOf` text second reopened && sourceKept reopened)
-    queuedOld<-emit "session=1 output=4" reopened {dialog=Just modal}
+    queuedOld<-emit "session=1 output=4" False reopened {dialog=Just modal}
     let oldSnapshot=M.lookup second (pluginWindows queuedOld)
     replacement<-connect queuedOld
     oldCurrent<-W.windowRefCurrent second
@@ -131,9 +143,9 @@ outputLifecycleCheck=bracket (fixture "output-owner") cleanup $ \(port,_,_)->do
     finalReport<-await "third session output after frozen slot closes" (report "session=3 output=1") closingFrozen
     frozenClosed<-await "closed frozen capability retired" (\_->not <$> W.windowRefCurrent third) finalReport
     check "closing frozen slot during replacement never resurrects it" (opening frozenClosed==Nothing && sourceKept frozenClosed)
-    finalGeneration<-epoch <$> state frozenClosed
-    (explicitAgain,_)<-tool "debug_present" ["generation" .= finalGeneration,"view" .= ("output"::T.Text)] frozenClosed
-    finalShown<-await "deliberate reopen after frozen close" (pure . isJust . opening) explicitAgain
+    secondReport<-emit "session=3 output=2" False frozenClosed
+    explicitAgain<-emit "session=3 output=3 part=7" True secondReport
+    finalShown<-await "deliberate reopen retains pending burst" (\d->pure (maybe False (\reference->"output=3 part=7" `T.isInfixOf` text reference d) (opening d))) explicitAgain
     fourth<-installed finalShown
     check "deliberate reopen after frozen close cannot reuse old capability" (fourth/=third && "session=3" `T.isInfixOf` text fourth finalShown)
     pure fourth
