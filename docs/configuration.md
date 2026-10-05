@@ -176,7 +176,7 @@ loading. To assign an occupied key, remove or replace its previous command's
 binding too. Ordinary text, menu mnemonics, window navigation, completion controls,
 Escape, F10 and Ctrl+] remain reserved. Conversation Enter retains the configured
 Query/Steer and code-block submission behavior. Dialog `dialog` tables accept only Copy, Cut, Paste, Select all, Undo, Redo,
-Find, Replace, `hide.dialog.focus-next` and `hide.dialog.focus-previous` canonical
+Find, Replace, `hide.dialog.focus-next/previous` and `hide.dialog.accept/cancel` canonical
 command IDs. Editing actions apply to an editable
 TextArea; Find/Replace apply to a search dialog. Plain single-line `Input`
 fields retain their existing text/editing controls and Ctrl/Alt button mnemonics. Defaults are Ctrl+C/X/V/A,
@@ -203,8 +203,23 @@ clickable when unbound. For example:
 "hide.dialog.focus-previous" = ["F14"]
 ```
 
-Dialog editing remaps operate on that field's buffer and undo history. Enter,
-Escape, Ctrl+Tab search switching, Ctrl+U input clearing, text, button
+Dialog Accept/Cancel defaults are Enter/Escape, including their existing modifier
+aliases. Accept keeps the focused control's behavior: it commits or opens a dropdown,
+inserts a newline in an editable TextArea, or submits the current dialog button.
+An approval dialog's input field cannot approve it. Cancel reverts an open dropdown;
+otherwise it closes the dialog through its existing cancellation owner, including
+permission denial. Remapping or `[]` consumes the old Enter/Escape routes. Status
+hints and frontend projections use the effective command, even when unbound.
+For example:
+
+```toml
+[editor.keybindings.terminal.dialog]
+"hide.dialog.accept" = ["F13"]
+"hide.dialog.cancel" = ["F14"]
+```
+
+Dialog editing remaps operate on that field's buffer and undo history. Ctrl+Tab
+search switching, the existing permission-dialog Alt+F3 cancel alias, Ctrl+U input clearing, text, button
 mnemonics and permission decisions retain their control ownership. Sensitive
 agent/approval controls keep their human authority regardless of a remap.
 Source accelerators are inactive while a modal owns input.
@@ -246,8 +261,7 @@ browser permissions or user activation prevent access. Browser/OS reserved short
 characters retain composed text input and cannot be assigned to commands; Cmd+Alt
 chords remain distinct. Local graphical scale keys remain reserved.
 
-WordStar Ctrl+A/F aliases, prefix/block grammar, dialog accept/cancel, Ctrl/Command
-Tab aliases and single-line Input editing remain subsequent stages of
+WordStar Ctrl+A/F aliases, prefix/block grammar, Ctrl/Command Tab aliases and single-line Input editing remain subsequent stages of
 [configurable keybindings](https://github.com/ekmett/hide/issues/3).
 
 ## Environment
