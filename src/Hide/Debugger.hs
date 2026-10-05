@@ -588,8 +588,8 @@ startWatch runtime@(Debugger ref _ _ _ _) ident revision receipt mode d=do
     pure d {status=case mode of EvaluateWatch->"Evaluating watch…"; ForceWatch{}->"Forcing lazy watch…"; ForceWatchChild{}->"Forcing lazy child…"}
 
 prepareWatch :: Debugger -> WatchOperation -> Maybe Text -> FilePath -> [FilePath] -> Either Text Value -> IO ()
-prepareWatch (Debugger ref _ _ _ _) operation backing base private result=do
-  worker<-async $ do
+prepareWatch (Debugger ref _ _ _ _) operation backing base private result=mask_ $ do
+  worker<-asyncWithUnmask $ \unmask->unmask $ do
     origin<-canonicalSourcePath base (T.unpack <$> backing)
     let clean=T.copy . T.take 256 . T.map (\c->if c<' ' then ' ' else c)
         failed canonical privateOrigin err=do
@@ -626,9 +626,9 @@ tickWatchPreparation (Debugger ref _ (HdbRuntime _ _ _ _ _ retired _) _ _) d=do
     Nothing->pure d
     Just (WatchPreparation (WatchOperation ident revision receipt mode) worker)->do
       live<-watchProviderCurrent s
-      if not live || not (watchCurrent s ident revision receipt) || dialog d/=Nothing || questionActive d then do
+      if not live || not (watchCurrent s ident revision receipt) || dialog d/=Nothing || questionActive d then mask_ $ do
           modifyIORef' ref (\state->state {watchPreparing=Nothing,watchExpressions=if watchCurrent state ident revision receipt then M.adjust (\entry->entry {watchValue=WatchPending}) ident (watchExpressions state) else watchExpressions state,watchCatalogueRevision=watchCatalogueRevision state+1})
-          cleanup<-async (cancel worker)
+          cleanup<-asyncWithUnmask (\unmask->unmask (cancel worker))
           modifyIORef' retired (cleanup:)
           pure d
       else do
