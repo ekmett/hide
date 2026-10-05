@@ -646,12 +646,31 @@ splitStyled []=[[]]
 splitStyled xs=let (a,b)=break ((=='\n').fst) xs in a:case b of []->[]; _:rest->splitStyled rest
 
 styledImage :: Bool -> (Style -> Bool) -> Maybe V.Attr -> Bool -> Selection -> Int -> [(Char,Style)] -> V.Image
-styledImage dark selectable override active sel start chars = V.horizCat
+styledImage dark selectable override active sel start chars
+  | all (\(c,_) -> c<'\128' && c/='\n') chars = V.horizCat (ascii 0 start chars)
+  | otherwise = V.horizCat
   [I.HorizText paint (TL.fromStrict (T.concat [text | (_,text,_)<-run]))
     (sum [width | (_,_,width)<-run]) (sum [T.length text | (_,text,_)<-run])
   | run@((paint,_,_):_)<-groupBy (\(a,_,_) (b,_,_)->a==b) (expand 0 start (graphemes (T.pack (map fst chars))) chars)]
   where
     (lo,hi)=ordered sel
+    paintAt offset style = if active && selectable style && offset<hi && offset>=lo
+      then colored `V.withForeColor` blue `V.withBackColor` gray else colored
+      where
+        normal=syntaxAttr dark style
+        colored=maybe normal (\color->color {V.attrStyle=V.attrStyle normal}) override
+    -- Source token rows already carry character offsets. Ordinary ASCII needs
+    -- no grapheme Text per character: collect normalized output into paint runs.
+    -- Newlines retain the general path, including its CRLF cluster semantics.
+    ascii _ _ []=[]
+    ascii col offset tokens@((_,style):_)=collect (paintAt offset style) [] 0 col offset tokens
+    collect a reversed n _ _ []=[image a reversed n]
+    collect a reversed n col offset tokens@((c,style):rest)
+      | paintAt offset style/=a = image a reversed n:ascii col offset tokens
+      | c=='\r' = collect a reversed n col (offset+1) rest
+      | c=='\t' = let width=8-col `mod` 8 in collect a (replicate width ' '++reversed) (n+width) (col+width) (offset+1) rest
+      | otherwise = collect a ((if c<' ' || c=='\DEL' then '·' else c):reversed) (n+1) (col+1) (offset+1) rest
+    image a reversed n=I.HorizText a (TL.fromStrict (T.pack (reverse reversed))) n n
     expand _ _ [] _=[]
     expand col offset (g:gs) styled = (a,text,width) : expand (col+width) (offset+T.length g) gs (drop (T.length g) styled)
       where
