@@ -18,6 +18,7 @@ import qualified Data.Map.Strict as M
 import Data.Maybe (mapMaybe, fromMaybe, listToMaybe)
 import Data.Time (UTCTime(..), fromGregorian, secondsToDiffTime, minutesToTimeZone, addUTCTime)
 import Data.List (findIndex)
+import Data.IORef (newIORef,writeIORef,readIORef)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Graphics.Vty as V
@@ -43,7 +44,7 @@ import qualified Hide.AgentHub as AH
 import qualified Hide.AgentRuntime as AR
 import System.Mem.StableName (makeStableName)
 import Hide.Files
-import Hide.Plugin.BufferHost (captureVersion)
+import Hide.Plugin.BufferHost (captureVersion,versionCurrent)
 import Hide.Sidebar
 import qualified Hide.MCPPermissions as Permissions
 import Hide.Model hiding (prompt)
@@ -145,9 +146,21 @@ draftReceiptChecks=bracket temporary removePathForcibly $ \root->
         send runtime action values desktop=snd <$> conversationEffects runtime (\d _->pure (False,d)) desktop [AgentAction action values]
         configure runtime=send runtime "configure" ["0","python3",json [server],json environment]
         prompt runtime text=send runtime "send" ["0",text,"false","false","false"]
-        await runtime label predicate desktop=timeout 8000000 (loop desktop) >>= maybe (error ("Draft receipt timeout: "++label)) pure
-          where loop d=do next<-tickConversation runtime d; accepted<-predicate next; if accepted then pure next else threadDelay 10000 >> loop next
-        primaryDone runtime=await runtime "primary acceptance" $ \d->do
+        await runtime label predicate desktop=do
+          observed<-newIORef (status desktop,agentReplying desktop,agentQueued desktop)
+          let loop d=do
+                next<-tickConversation runtime d
+                writeIORef observed (status next,agentReplying next,agentQueued next)
+                accepted<-predicate next
+                if accepted then pure next else threadDelay 10000 >> loop next
+          result<-timeout 8000000 (loop desktop)
+          case result of
+            Just accepted->pure accepted
+            Nothing->do
+              lastState<-readIORef observed
+              messages<-readMessages (root </> "messages.jsonl")
+              error ("Draft receipt timeout: "++label++"; state="++show lastState++"; provider="++show (map (field "method" :: Value -> Maybe T.Text) (drop (max 0 (length messages-6)) messages)))
+        primaryDone runtime label=await runtime (label++" primary acceptance") $ \d->do
           (_,reply)<-chatTool runtime d "agent_settings" (object [])
           value<-reply >>= either (error.T.unpack) pure
           pure (field "replying" value==Just False)
@@ -170,39 +183,41 @@ draftReceiptChecks=bracket temporary removePathForcibly $ \root->
           waitForReader opened
           newer<-fresh original
           putMVar release (); wait writer
-          accepted<-primaryDone runtime submitted {composerBuffer=newer}
+          accepted<-primaryDone runtime "connecting replacement" submitted {composerBuffer=newer}
           check "connecting submission cannot clear a same-text new draft" (contents (composerBuffer accepted)=="stream")
         removeFile gate
+    writeFile context "[editor.agent]\ncontext='receipt guidance'\n"
     forM_ [(False,False,False),(False,True,False),(False,True,True),(True,False,False),(True,True,False)] $ \(steer,replaced,requeue)->withConversationAt root $ \runtime->do
+      let scenario=if steer then (if replaced then "steer replacement" else "steer unchanged") else if requeue then "query requeue" else if replaced then "query replacement" else "query unchanged"
       configured<-configure runtime base
-      connected<-prompt runtime "stream" configured >>= primaryDone runtime
+      connected<-prompt runtime "stream" configured >>= primaryDone runtime (scenario++" connect")
       untouched<-evaluate (newBuffer "stream")
-      independent<-prompt runtime "stream" connected {composerBuffer=untouched} >>= primaryDone runtime
+      independent<-prompt runtime "stream" connected {composerBuffer=untouched} >>= primaryDone runtime (scenario++" independent")
       check "independent prompt does not consume the composer" (contents (composerBuffer independent)=="stream")
       active<-if steer then prompt runtime "wait" independent >>= await runtime "active primary turn" (pure . (=="Agent is replying...") . status) else pure independent
       original<-evaluate (newBuffer (if steer then "direction" else "stream"))
-      createNamedPipe context 0o600
-      withHeldContext context $ \opened release writer->do
-        submitted<-send runtime (if steer then "steer-draft" else "send-draft") [] active {composerBuffer=original}
-        takeMVar opened
-        current<-if replaced then fresh original else pure original
-        staged<-if requeue then do
-          queued<-send runtime "send-draft" [] submitted {composerBuffer=current}
-          check "same-text replacement is a new queued query" (agentQueued queued==1 && bufferLength (composerBuffer queued)==0)
-          newest<-fresh original
-          pure queued {composerBuffer=newest}
-          else if not steer && not replaced then do
-            duplicate<-send runtime "send-draft" [] submitted
-            check "unchanged pending draft is submitted once" (agentQueued duplicate==0 && status duplicate=="Preparing the submitted draft...")
-            pure duplicate
-          else pure submitted {composerBuffer=current}
-        let hidden=if steer then selectConversationView "unregistered" "Other" staged else staged
-        putMVar release (); wait writer
-        removeFile context
-        settled<-primaryDone runtime hidden
-        let restored=if steer then selectConversationView "" "Primary" settled else settled
-        check "acceptance preserves a replacement draft and clears only the submitted one"
-          (if replaced then contents (composerBuffer restored)==contents original else bufferLength (composerBuffer restored)==0)
+      -- Preparation may finish off-thread, but only a later serialized tick adopts it.
+      submittedReceipt<-captureVersion original
+      submitted<-send runtime (if steer then "steer-draft" else "send-draft") [] active {composerBuffer=original}
+      sameDraft<-versionCurrent submittedReceipt (composerBuffer submitted)
+      check "submitted draft remains pending before owner adoption" (agentReplying submitted && sameDraft)
+      current<-if replaced then fresh original else pure original
+      staged<-if requeue then do
+        queued<-send runtime "send-draft" [] submitted {composerBuffer=current}
+        check "same-text replacement is a new queued query" (agentQueued queued==1 && bufferLength (composerBuffer queued)==0)
+        newest<-fresh original
+        pure queued {composerBuffer=newest}
+        else if not steer && not replaced then do
+          duplicate<-send runtime "send-draft" [] submitted
+          samePending<-versionCurrent submittedReceipt (composerBuffer duplicate)
+          check "unchanged pending draft is submitted once" (agentQueued duplicate==0 && samePending)
+          pure duplicate
+        else pure submitted {composerBuffer=current}
+      let hidden=if steer then selectConversationView "unregistered" "Other" staged else staged
+      settled<-primaryDone runtime scenario hidden
+      let restored=if steer then selectConversationView "" "Primary" settled else settled
+      check "acceptance preserves a replacement draft and clears only the submitted one"
+        (if replaced then contents (composerBuffer restored)==contents original else bufferLength (composerBuffer restored)==0)
     bracket (lookupEnv "THC_EDIT_SESSION" <* setEnv "THC_EDIT_SESSION" (replicate 48 'c')) (restoreDraftEnvironment "THC_EDIT_SESSION") $ \_->
       bracket (lookupEnv "THC_STEER_GATE" <* setEnv "THC_STEER_GATE" gate) (restoreDraftEnvironment "THC_STEER_GATE") $ \_->
         forM_ [False,True] $ \replaced->withConversationAt root $ \runtime->do
@@ -1153,17 +1168,6 @@ temporary=do
   canonicalizePath path
 
 #ifndef mingw32_HOST_OS
--- Keep the configuration FIFO writable while GHC's file handle opens it;
--- the owner can return before the context worker reaches the actual read.
-withHeldContext :: FilePath -> (MVar () -> MVar () -> Async () -> IO a) -> IO a
-withHeldContext path action=do
-  opened<-newEmptyMVar
-  release<-newEmptyMVar
-  withAsync (bracket (Posix.openFd path Posix.ReadWrite Posix.defaultFileFlags >>= \fd->Posix.setFdOption fd Posix.CloseOnExec True >> Posix.fdToHandle fd) hClose $ \handle->do
-    putMVar opened ()
-    takeMVar release
-    BS.hPut handle "[editor.agent]\ncontext='receipt gate'\n") (action opened release)
-
 -- A child process can block opening the write end without blocking a GHC
 -- capability. Its acknowledgement proves that the capture reader has opened;
 -- only the explicit gate releases the payload and EOF.
