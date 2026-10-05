@@ -49,6 +49,7 @@ checks = isolatedStore $ do
   unless (S.shortSessionId identity []==replicate 12 'a') (error "title session prefix starts at twelve characters")
   unless (S.shortSessionId identity [identity,replicate 12 'a'++"cdefg"]==replicate 12 'a'++"b") (error "title session prefix disambiguates saved sessions")
 
+  requestedPasteReconnectCheck
   linkOpenCheck
   localPeerCheck
   inspectionExitCheck
@@ -557,3 +558,63 @@ linkOpenCheck=do
                 _->error "Missing duplicate acknowledgement"
         onlyAck
   putStrLn "Remote link delivery and duplicate-input checks passed"
+
+-- The attachment generation deliberately survives reconnecting the same client.
+-- Clipboard receipts must nevertheless retire at that connection boundary.
+requestedPasteReconnectCheck :: IO ()
+requestedPasteReconnectCheck=do
+  session<-randomIdentity
+  path<-sessionEndpoint session
+  let initial=addDocument Nothing (newBuffer "source") (initialDesktop (80,25))
+      client=replicate 48 'f'
+      open=connectEndpoint path
+      awaitOpen attempts=open `catch` \(err::IOException)->if attempts<=0 then throwIO err else threadDelay 10000 >> awaitOpen (attempts-1)
+      control h expected=do
+        packet<-timeout 3000000 (readPacket h) >>= maybe (error "clipboard remote timeout") pure
+        case packet of
+          Just (JsonPacket (Object fields)) | KM.lookup "type" fields==Just (String expected)->pure fields
+          Just _->control h expected
+          _->error "clipboard remote connection ended"
+      attach h watermark=do
+        writePacket h (JsonPacket (object ["type" .= ("hello"::T.Text),"version" .= (1::Int),"session" .= session,"client" .= client,"ack" .= (watermark::Int)]))
+        greeting<-control h "hello"
+        void (control h "assets")
+        pure greeting
+      command h serial=writePacket h (JsonPacket (object ["type" .= ("command"::T.Text),"seq" .= (serial::Int),"command" .= ("hide.edit.paste"::T.Text)]))
+      reply h serial token text=writePacket h (JsonPacket (object ["type" .= ("paste-reply"::T.Text),"seq" .= (serial::Int),"request" .= token,"text" .= (text::T.Text)]))
+      receipt :: Handle -> IO T.Text
+      receipt h=control h "paste-request" >>= maybe (error "missing requested paste identity") pure . parseMaybe (.:"request")
+      check name ok=unless ok (error name)
+  observed<-newIORef initial
+  let tick d=writeIORef observed d >> pure d
+      core d _=pure (False,d)
+      inspect d _ _=pure (False,d,pure Nothing)
+      awaitText expected=do
+        d<-readIORef observed
+        if activeText d==expected then pure () else threadDelay 10000 >> awaitText expected
+  withAsync (runRemoteDaemon session 1 core tick inspect initial) $ \daemon->do
+    link daemon
+    first<-awaitOpen (300::Int)
+    greeting<-attach first 0
+    command first 1
+    old<-receipt first
+    void (control first "ack")
+    hClose first
+    threadDelay 100000
+    bracket open hClose $ \second->do
+      resumed<-attach second 1
+      check "Same-client reconnect retains sequence epoch" (KM.lookup "epoch" greeting==KM.lookup "epoch" resumed)
+      reply second 2 old "STALE"
+      void (control second "ack")
+      command second 3
+      fresh<-receipt second
+      check "Reattached clipboard read gets a fresh identity" (fresh/=old)
+      void (control second "ack")
+      reply second 4 old "OLD"
+      void (control second "ack")
+      reply second 5 fresh "accepted"
+      void (control second "ack")
+      reply second 6 fresh "DUPLICATE"
+      void (control second "ack")
+      done<-timeout 3000000 (awaitText "acceptedsource")
+      check "Reconnect/old/duplicate replies cannot edit wrong target or consume fresh receipt" (done==Just ())
