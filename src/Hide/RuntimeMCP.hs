@@ -18,7 +18,7 @@ import Data.Text.Encoding.Error (lenientDecode)
 import System.Directory (canonicalizePath)
 import Hide.Buffer
 import Hide.Model
-import Hide.Conversation (ConversationState,conversationServices)
+import Hide.Conversation (ConversationState,conversationServices,stopConversationBuild)
 import qualified Hide.Consoles as C
 import qualified Hide.Terminal as Term
 import qualified Hide.Build as B
@@ -33,7 +33,7 @@ runtimeTools=
   [ tool "build_status" "Read active build and last completion: exact jobId, semantic windowId when open, retained output character count/truncation and exit code. build_output reads its combined stdout/stderr." True [] []
   , tool "build_output" "Read combined captured output for the exact jobId from build_status. Character offset is relative to the retained tail; default/maximum limit 32768 Unicode characters. Closing the output window keeps the last job readable; a newer job expires its ID." True ["jobId"] [("jobId",str),("offset",integer),("limit",integer)]
   , tool "build_start" "Compile, make or run the selected project using THC/GHC. Requires saved source buffers. Overrides apply only to this job. Captures output by default; terminal=true runs in a shared Ghostty terminal." False ["action"] [("action",enum ["compile","make","run"]),("toolchain",enum ["THC","GHC"]),("target",str),("arguments",strings),("terminal",boolean)]
-  , tool "build_stop" "Stop the active captured build/run and retain its output and completion status." False [] []
+  , tool "build_stop" "Cancel pending editor build preparation and stop the active captured build/run; retain captured output and completion status." False [] []
   , tool "terminal_list" "List shared Ghostty terminals, buffer IDs, and exit codes." True [] []
   , tool "terminal_start" "Start an executable and argument array in a shared Ghostty terminal; no implicit shell. cwd defaults to the project. Returns terminalId and opens its window." False ["command"] [("command",str),("args",strings),("cwd",str),("outputByteLimit",integer)]
   , tool "terminal_output" "Read retained terminal output (at most 128 KiB per call) and exit code. Offset is relative to the retained tail; truncated indicates dropped earlier bytes." True ["terminalId"] [("terminalId",str),("offset",integer),("limit",integer)]
@@ -62,7 +62,7 @@ runtimeTool runtime d name args=case parseEither (withObject "arguments" pure) a
       Left err -> bad err
       Right (ident,offset,limit) -> (d,) <$> Jobs.buildJobOutput jobs ident offset limit
     "build_stop" -> do
-      updated<-Jobs.stopBuildJob jobs d
+      updated<-stopConversationBuild runtime d
       Jobs.buildJobStatus jobs updated >>= done updated . Right
     "build_start" -> case parseEither (\_ -> (,,,,) <$> o .: "action" <*> o .:? "toolchain" <*> o .:? "target" <*> o .:? "arguments" <*> o .:? "terminal" .!= False) args of
       Left err -> bad err

@@ -6,7 +6,7 @@
 -- Project GHC work goes through Cabal; loose-file work uses GHC/runghc. Process
 -- ownership and output collection belong to "Hide.BuildJobs" or consoles.
 module Hide.Build
-  (Toolchain(..), BuildAction(..), BuildConfig(..), loadBuildConfig, isProject, resolveBuildRoot, buildSource, buildPlan, testPlan, buildConfigValue, parseBuildConfig) where
+  (Toolchain(..), BuildAction(..), BuildConfig(..), loadBuildConfig, isProject, buildStartDirectory, resolveBuildRoot, resolveBuildRootFrom, buildSource, buildPlan, testPlan, buildConfigValue, parseBuildConfig) where
 
 import Hide.Sidebar
 import Control.Exception (IOException, try)
@@ -35,11 +35,21 @@ buildSource desktop = listToMaybe [filePath file | window<-windows desktop,
   Just doc<-[windowDocument (buffers desktop) window], documentLabel doc==Nothing,
   Just file<-[documentFile doc]]
 
+-- | Capture the selected build context using only immutable path metadata.
+-- Filesystem discovery belongs to 'resolveBuildRootFrom' on the build worker.
+buildStartDirectory :: Desktop -> FilePath
+buildStartDirectory desktop = maybe fallback treeRoot (sideTree desktop)
+  where fallback=fromMaybe (maybe (startingDirectory desktop) takeDirectory (buildSource desktop)) (defaultDirectory desktop)
+
 -- | Resolve the selected sidebar/default/source context to an enclosing build root.
 resolveBuildRoot :: Desktop -> IO FilePath
-resolveBuildRoot desktop = do
-  let fallback=fromMaybe (maybe (startingDirectory desktop) takeDirectory (buildSource desktop)) (defaultDirectory desktop)
-  start<-canonicalizePath (maybe fallback treeRoot (sideTree desktop))
+resolveBuildRoot = resolveBuildRootFrom . buildStartDirectory
+
+-- | Discover an enclosing build project from a captured starting directory.
+-- No editable desktop or buffer is retained during filesystem discovery.
+resolveBuildRootFrom :: FilePath -> IO FilePath
+resolveBuildRootFrom directory = do
+  start<-canonicalizePath directory
   search start start
   where
     search fallback dir = do

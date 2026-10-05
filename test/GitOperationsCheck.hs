@@ -47,7 +47,7 @@ checks = bracket temporary removePathForcibly $ \base -> do
   void (git base ["clone",upstream,work])
   initial<-open (initialDesktop (100,30))
   (_,configured)<-core initial [RefreshGit work]
-  withGitOperations $ \runtime -> do
+  withGitOperations (pure False) $ \runtime -> do
     let effects=gitOperationEffects runtime core
         tick=tickGitOperations runtime core
         run action desktop=effects desktop [RunGit action] >>= await tick (\d -> " completed." `T.isInfixOf` status d || " failed" `T.isInfixOf` status d) . snd
@@ -255,7 +255,7 @@ cancellationCheck base work=do
   setPermissions wrapper (permissions {executable=True})
   bracket (lookupEnv "PATH") (maybe (unsetEnv "PATH") (setEnv "PATH")) $ \oldPath -> do
     setEnv "PATH" (directory++maybe "" (":"++) oldPath)
-    ended<-timeout 5000000 $ withGitOperations $ \runtime -> do
+    ended<-timeout 5000000 $ withGitOperations (pure False) $ \runtime -> do
       (_,receipt)<-gitTool runtime (initialDesktop (80,25)) {defaultDirectory=Just work} "git_fetch" (object [])
       accepted<-receipt
       unless (either (const False) (const True) accepted) (error "cancellation fixture fetch rejected")
@@ -295,7 +295,7 @@ reviewCommitChecks base=do
   T.writeFile private "authority-secret-marker\n"
   _<-git ["add","-A"]
   _<-git ["commit","-m","initial"]
-  withGitOperations $ \runtime -> do
+  withGitOperations (pure False) $ \runtime -> do
     let initial=(initialDesktop (80,25)) {defaultDirectory=Just root,branchRoot=Just root}
         call d name args=do
           (next,pending)<-gitTool runtime d name args
@@ -430,7 +430,7 @@ integrationChecks base=do
   _<-git work ["config","user.name","Git Test"]
   _<-git work ["config","user.email","test@example.invalid"]
   _<-git work ["config","commit.gpgsign","false"]
-  withGitOperations $ \runtime->do
+  withGitOperations (pure False) $ \runtime->do
     let initial=(initialDesktop (80,25)) {defaultDirectory=Just work,branchRoot=Just work}
         call d name args=do (next,answer)<-gitTool runtime d name args; (next,) <$> answer
         run d name args=do

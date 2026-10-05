@@ -38,13 +38,16 @@ data Result = Branches FilePath [T.Text]
   | Reviewed T.Text [FilePath] (Either T.Text GitReview)
   | Committed FilePath (Either T.Text GitCommit) (Maybe T.Text)
 data Worker = Worker Bool (Maybe Integer) ThreadId (MVar (Either SomeException Result))
-data GitOperations = GitOperations (IORef (Maybe Worker)) (IORef (Maybe FilePath)) (IORef (Integer,M.Map Integer Value)) (IORef (Maybe (T.Text,GitReview)))
+data GitOperations = GitOperations (IORef (Maybe Worker)) (IORef (Maybe FilePath)) (IORef (Integer,M.Map Integer Value)) (IORef (Maybe (T.Text,GitReview))) (IO Bool)
 
--- | Scope the Git worker and pending operation state.
-withGitOperations :: (GitOperations -> IO a) -> IO a
-withGitOperations = bracket (GitOperations <$> newIORef Nothing <*> newIORef Nothing <*> newIORef (0,M.empty) <*> newIORef Nothing) close
+-- | Scope the Git worker and pending operation state. The serialized owner
+-- reserves terminal launch before spawning its worker; mutating Git operations
+-- cannot start until that unadopted/cancelling lifetime releases its reservation.
+-- Already adopted consoles retain their existing independent execution policy.
+withGitOperations :: IO Bool -> (GitOperations -> IO a) -> IO a
+withGitOperations terminalLaunch = bracket (GitOperations <$> newIORef Nothing <*> newIORef Nothing <*> newIORef (0,M.empty) <*> newIORef Nothing <*> pure terminalLaunch) close
   where
-    close (GitOperations ref _ _ _) = readIORef ref >>= mapM_ (\(Worker _ _ thread done) -> killThread thread >> void (readMVar done))
+    close (GitOperations ref _ _ _ _) = readIORef ref >>= mapM_ (\(Worker _ _ thread done) -> killThread thread >> void (readMVar done))
 
 -- readCreateProcessWithExitCode owns and closes its pipes and terminates its child
 -- on cancellation; a normal Quit is deferred until the Git operation completes.
@@ -167,11 +170,12 @@ readBranches root = do
 
 -- | Apply Git serialization/interlocks and delegate other effects.
 gitOperationEffects :: GitOperations -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> [Effect] -> IO (Bool,Desktop)
-gitOperationEffects runtime@(GitOperations ref _ _ _) core = foldM apply . (False,)
+gitOperationEffects runtime@(GitOperations ref _ _ _ terminalLaunch) core = foldM apply . (False,)
   where
     apply state@(True,_) _ = pure state
     apply (_,desktop) effect = do
       worker <- readIORef ref
+      launching<-terminalLaunch
       let busy=maybe False (const True) worker
           mutating=case worker of Just (Worker changes _ _ _) -> changes; Nothing -> False
       case effect of
@@ -179,6 +183,9 @@ gitOperationEffects runtime@(GitOperations ref _ _ _) core = foldM apply . (Fals
         SaveDocument{} | mutating -> pure (False,desktop {status="Wait for the Git operation to finish before saving."})
         AgentAction action _ | mutating, action `elem` ["run","compile","make"] || "approval:" `T.isPrefixOf` action ->
           pure (False,desktop {status="Wait for the Git operation to finish before approving agent actions or running commands."})
+        AdoptPreparedBuild | mutating -> pure (False,desktop {status="Wait for the Git operation to finish before running commands."})
+        RunGit action | launching, action/=FetchRemote -> pure (False,desktop {status="Wait for terminal launch to finish before changing the repository."})
+        WriteGitCommit{} | launching -> pure (False,desktop {status="Wait for terminal launch to finish before changing the repository."})
         WriteGitCommit{} | busy -> pure (False,desktop {status="Wait for the Git operation to finish before committing."})
         RunGit action -> start busy (action/=FetchRemote) desktop (label action) (\root -> runOperation False root action desktop)
         ReadMergeBranches -> start busy False desktop "Reading merge branches" readBranches
@@ -196,7 +203,7 @@ gitOperationEffects runtime@(GitOperations ref _ _ _) core = foldM apply . (Fals
 
 -- | Adopt completed Git results while preserving intervening edits.
 tickGitOperations :: GitOperations -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> IO Desktop
-tickGitOperations (GitOperations ref focused jobs reviews) core initial = do
+tickGitOperations (GitOperations ref focused jobs reviews terminalLaunch) core initial = do
   previous <- readIORef focused
   desktop <- case activeDocument initial of
     Just doc | documentLabel doc==Nothing, Just file<-documentFile doc, let directory=takeDirectory (filePath file), previous/=Just directory -> do
@@ -215,7 +222,7 @@ tickGitOperations (GitOperations ref focused jobs reviews) core initial = do
           let next=if unsaved desktop || either (const True) (/=root) selected
                 then integrationFailure root "preflight" fetched Nothing
                 else integrate root action expected branch target fetched desktop
-          startWorker (GitOperations ref focused jobs reviews) True jobId next
+          startWorker (GitOperations ref focused jobs reviews terminalLaunch) True jobId next
           pure desktop {status="Checking Git integration…"}
         Just finished -> do
           writeIORef ref Nothing
@@ -269,7 +276,7 @@ tickGitOperations (GitOperations ref focused jobs reviews) core initial = do
 -- Both entry points run under the desktop lock and reserve the same worker slot.
 -- Mask registration so session shutdown always owns the started subprocess.
 startWorker :: GitOperations -> Bool -> Maybe Integer -> IO Result -> IO ()
-startWorker (GitOperations ref _ _ _) mutates ident action=mask_ $ do
+startWorker (GitOperations ref _ _ _ _) mutates ident action=mask_ $ do
   done<-newEmptyMVar
   thread<-forkIOWithUnmask $ \unmask -> try (unmask action) >>= putMVar done
   writeIORef ref (Just (Worker mutates ident thread done))
@@ -324,7 +331,7 @@ unsaved=any (dirty . documentBuffer) . M.elems . buffers
 -- | Accept an asynchronous Git job or inspect status/review. A returned job ID
 -- means acceptance, not successful completion; review IDs are consumed once.
 gitTool :: GitOperations -> Desktop -> T.Text -> Value -> IO (Desktop,IO (Either T.Text Value))
-gitTool runtime@(GitOperations ref _ jobs reviews) desktop name args=case parseEither (withObject "arguments" pure) args of
+gitTool runtime@(GitOperations ref _ jobs reviews terminalLaunch) desktop name args=case parseEither (withObject "arguments" pure) args of
   Left _ -> reply desktop (Left "Expected an arguments object.")
   Right fields | any (`notElem` allowed) (KM.keys fields) -> reply desktop (Left "Unexpected Git tool argument.")
   Right fields -> case name of
@@ -376,7 +383,9 @@ gitTool runtime@(GitOperations ref _ jobs reviews) desktop name args=case parseE
     selectedRoot=selectedRepository desktop
     start mutates prepare action=do
       worker<-readIORef ref
+      launching<-terminalLaunch
       case worker of
+        _ | mutates && launching -> reply desktop (Left "Wait for terminal launch to finish before changing the repository.")
         Just _ -> reply desktop (Left "A Git operation is already running.")
         Nothing -> mask_ $ do
           (previous,history)<-readIORef jobs

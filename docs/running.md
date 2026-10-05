@@ -24,6 +24,15 @@ open an output window; output arrives while you keep editing. Compiler errors
 and warnings appear in **Messages**, where **Alt+F8** and **Alt+F7** move between
 source locations. **Compile > Stop build** stops the current job.
 
+Compile, Make, Run and the target dialog prepare project discovery and settings
+in the background. Stop also cancels a pending preparation. Changing its source
+buffers, selected project or build settings saved in the editor cancels that captured intent;
+retry the command with the new state. After execution starts, editing or saving
+settings does not stop the program. Ready results wait while another dialog
+or inline question owns input, and do not replace that surface. External settings
+file edits apply to the next command; an existing preparation uses its captured
+settings.
+
 Captured Build/Run output opens a read-only text window independent of source
 buffers. It supports selection, copy and scrolling; output follows the bottom
 until you scroll away. Later output can refresh behind a dialog without changing

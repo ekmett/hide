@@ -15,7 +15,7 @@
 -- checked saving rather than reformatting unrelated tables and comments.
 -- Project agent limits may tighten global ceilings but cannot raise them.
 module Hide.MCPPermissions
-  ( Permissions, withPermissions, withPermissionsAt, permissionCall, permissionCallAs, policyEffects, tickPermissions, awaitPermissionWork
+  ( Permissions, withPermissions, withPermissionsAt, permissionCall, permissionCallAs, AdmittedBuild, permissionBuildInputAs, reserveAdmittedBuild, stepAdmittedBuild, cancelAdmittedBuild, policyEffects, tickPermissions, awaitPermissionWork
   , ReadAdmission, permissionReadCall, bufferEditor, readReference, resolveReadReference, bufferReader
   , permissionConfigPath, readEditorDefaults, writeEditorDefaults, readEditorDefaultsAt, writeEditorDefaultsAt
   , projectConfigPath, readEditorDefaultsFor, readAgentContextAt, writeAgentContextAt, readAgentContexts
@@ -71,7 +71,16 @@ data Waiting = Waiting
   , active :: IORef Bool
   , approvalRequired :: Bool, patchCaller :: IO (Either Text ()), patchAttempt :: IORef (Maybe DiffAttempt), patchSource :: Maybe PatchSource, requestClaim :: MVar (), policyStage :: IORef PolicyStage }
 data DiffAttempt = DiffAttempt (Maybe ContentVersion) (Async (Either Text PreparedPatch))
-data WaitingOperation = WireOperation Tool (MVar (IO (Either Text Value))) | CaptureOperation CaptureSubmission | DiffOperation DiffSubmission
+data WaitingOperation = WireOperation Tool (MVar (IO (Either Text Value)))
+  | BuildInputOperation (AdmittedBuild -> Tool) (MVar (IO (Either Text Value)))
+  | BuildAdoptionOperation AdmittedBuild
+  | CaptureOperation CaptureSubmission | DiffOperation DiffSubmission
+-- Minted only while the permission owner executes admitted editor input. The
+-- original wire ticket may finish; this separate one-shot intent keeps its
+-- approved policy and exact caller without retaining the original desktop.
+data AdmittedBuild = AdmittedBuild Permissions Text Value Bool (IO (Either Text ())) (IORef BuildAdmissionState)
+data BuildAdmissionState = BuildUnused | BuildReserved | BuildChecking Waiting
+  | BuildAllowed Waiting Int | BuildRejected Text | BuildConsumed
 data CaptureSubmission = CaptureSubmission BufferRef (IO (Either Text ())) (MVar (Either Text CapturedRead)) (IORef Bool) (MVar ())
 data DiffSubmission = DiffSubmission BufferRef ContentVersion Text (IO (Either Text ())) (MVar (Either Text DiffResult)) (IORef Bool) (MVar ()) (IORef (Maybe DiffAttempt))
 data BufferSubmission = ReadSubmission CaptureSubmission | EditSubmission DiffSubmission
@@ -79,7 +88,7 @@ data BufferIngress = BufferIngress (STM.TBQueue BufferSubmission) (STM.TVar Bool
 -- A request retains its policy phase while worker IO is pending. The queue is
 -- transport only: Waiting remains the one request/cancellation owner.
 type Policies = Either Text (M.Map Text Mode)
-data PolicyUse = AdmitPolicy | AllowPolicy Value (Maybe ContentVersion)
+data PolicyUse = AdmitPolicy | BuildAdoptPolicy | AllowPolicy Value (Maybe ContentVersion)
   | AdoptPolicy (Maybe ContentVersion) (Either Text PreparedPatch)
 data PolicyStage = PolicyReady | PolicyPending PolicyUse (Maybe (Int,STM.TMVar Policies))
 data PolicyTask = LoadPolicy (STM.TMVar Policies)
@@ -135,7 +144,18 @@ permissionCall = permissionCallAs (pure (Right ()))
 -- adoption. Extension data cannot provide this validator; bind it at authenticated
 -- transport admission so queued work cannot retain revoked caller authority.
 permissionCallAs :: IO (Either Text ()) -> Permissions -> Tool -> Tool
-permissionCallAs caller runtime@(Permissions _ registry ref _ _ _ _) callback desktop name args=do
+permissionCallAs caller runtime callback=queueWirePermission caller runtime (WireOperation callback)
+
+-- | Bind a one-shot build intent to actual admitted editor_input execution.
+-- Anonymous input retains its existing session-only caller and agent policy;
+-- no guest path is promoted to human authority by omitting an actor token.
+permissionBuildInputAs :: IO (Either Text ()) -> Permissions -> (AdmittedBuild -> Tool) -> Tool
+permissionBuildInputAs caller runtime callback desktop name args
+  | name/="editor_input"=pure (desktop,pure (Left "Build input admission requires editor_input"))
+  | otherwise=queueWirePermission caller runtime (BuildInputOperation callback) desktop name args
+
+queueWirePermission :: IO (Either Text ()) -> Permissions -> (MVar (IO (Either Text Value)) -> WaitingOperation) -> Tool
+queueWirePermission caller runtime@(Permissions _ registry ref _ _ _ _) operationFor desktop name args=do
   closed<-sessionClosed runtime
   case M.lookup name registry of
     Nothing->denied "Unknown MCP tool"
@@ -149,11 +169,114 @@ permissionCallAs caller runtime@(Permissions _ registry ref _ _ _ _) callback de
         attempt<-newIORef Nothing
         claim<-newMVar ()
         stage<-newIORef (PolicyPending AdmitPolicy Nothing)
-        let request=Waiting (nextTicket s) name args (WireOperation callback promise) enabled False caller attempt Nothing claim stage
+        let request=Waiting (nextTicket s) name args (operationFor promise) enabled False caller attempt Nothing claim stage
         writeIORef ref s {waiting=live++[request],nextTicket=nextTicket s+1}
         shown<-tickPermissions runtime desktop
         pure (shown,(readMVar promise >>= id) `onException` finish runtime request (Left "MCP permission request cancelled"))
   where denied reason=pure (desktop,pure (Left reason))
+
+-- | Reserve the admitted input once for a newly captured build intent.
+reserveAdmittedBuild :: AdmittedBuild -> IO Bool
+reserveAdmittedBuild (AdmittedBuild runtime _ _ _ _ state)=do
+  closed<-sessionClosed runtime
+  if closed then pure False else atomicModifyIORef' state $ \current->case current of
+    BuildUnused->(BuildReserved,True)
+    _->(current,False)
+
+-- | Queue fresh policy through the existing owner, then invoke only the fixed
+-- prepared-build effect under its request claim. Nothing is pending/deferred;
+-- Just is consumed, including a refusal. Original Prompt approval is not repeated.
+-- A modal deferral drops the fresh check and queues another after the hold. The
+-- filesystem read-to-adoption interval is finite, not atomic external revocation.
+stepAdmittedBuild :: AdmittedBuild -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> IO (Maybe Desktop)
+stepAdmittedBuild admission@(AdmittedBuild runtime@(Permissions _ _ ref _ _ _ owner) name args _ caller state) core desktop=do
+  current<-readIORef state
+  if dialog desktop/=Nothing || questionActive desktop then do
+    -- A modal hold ends this fresh-check lifetime, not the original intent.
+    -- No policy reads repeat while held; the next open-owner step queues anew.
+    case current of
+      BuildChecking request->defer request
+      BuildAllowed request _->defer request
+      _->pure ()
+    pure Nothing
+  else case current of
+    BuildReserved->do
+      closed<-sessionClosed runtime
+      requests<-readIORef ref
+      live<-filterMActive (waiting requests)
+      if closed || length live>=32 then do
+        atomicModifyIORef' state (\current->((case current of BuildReserved->BuildRejected (if closed then "Editor session closed" else "Too many MCP requests are awaiting permission"); _->current),()))
+        stepAdmittedBuild admission core desktop
+      else do
+        enabled<-newIORef True
+        attempt<-newIORef Nothing
+        claim<-newMVar ()
+        stage<-newIORef (PolicyPending BuildAdoptPolicy Nothing)
+        let request=Waiting (nextTicket requests) name args (BuildAdoptionOperation admission) enabled False caller attempt Nothing claim stage
+        reserved<-atomicModifyIORef' state (\current->case current of BuildReserved->(BuildChecking request,True); _->(current,False))
+        when reserved (writeIORef ref requests {waiting=live++[request],nextTicket=nextTicket requests+1})
+        pure Nothing
+    BuildChecking _->pure Nothing
+    BuildAllowed request issued->withMVar (requestClaim request) $ \()->do
+      fresh<-readIORef state
+      live<-readIORef (active request)
+      epoch<-readIORef (policyEpoch owner)
+      writing<-policyWriting owner
+      actor<-caller
+      closed<-sessionClosed runtime
+      case fresh of
+        BuildAllowed owned checked | ticket owned==ticket request && checked==issued->case actor of
+          Left err->finishOwned runtime request (Left err) >> stepAdmittedBuild admission core desktop
+          Right () | not live || closed->finishOwned runtime request (Left "Build caller or session ended") >> stepAdmittedBuild admission core desktop
+                   | writing || epoch/=issued->do
+                       writeIORef state (BuildChecking request)
+                       writeIORef (policyStage request) (PolicyPending BuildAdoptPolicy Nothing)
+                       pure Nothing
+                   | otherwise->do
+                       writeIORef state BuildConsumed
+                       writeIORef (active request) False
+                       Just . snd <$> core desktop [AdoptPreparedBuild]
+        BuildConsumed->pure (Just desktop)
+        _->pure Nothing
+    BuildRejected err->writeIORef state BuildConsumed >> pure (Just desktop {status=err})
+    BuildConsumed->pure (Just desktop)
+    BuildUnused->pure (Just desktop {status="Build intent was not reserved by admitted input"})
+  where
+    defer request=withMVar (requestClaim request) $ \()->do
+      fresh<-readIORef state
+      when (ownsBuildRequest request fresh) $ do
+        writeIORef (active request) False
+        writeIORef state BuildReserved
+
+ownsBuildRequest :: Waiting -> BuildAdmissionState -> Bool
+ownsBuildRequest request current=case current of
+  BuildChecking owned->ticket owned==ticket request
+  BuildAllowed owned _->ticket owned==ticket request
+  _->False
+
+-- | Retire pending adoption without launching or withdrawing another dialog.
+cancelAdmittedBuild :: AdmittedBuild -> IO ()
+cancelAdmittedBuild admission@(AdmittedBuild runtime _ _ _ _ state)=do
+  current<-readIORef state
+  case current of
+    BuildChecking request->cancelRequest request
+    BuildAllowed request _->cancelRequest request
+    _->do
+      again<-atomicModifyIORef' state (\fresh->case fresh of
+        BuildChecking _->(fresh,True)
+        BuildAllowed _ _->(fresh,True)
+        _->(BuildConsumed,False))
+      when again (cancelAdmittedBuild admission)
+  where
+    cancelRequest request=do
+      again<-withMVar (requestClaim request) $ \()->do
+        fresh<-readIORef state
+        if ownsBuildRequest request fresh then do
+          writeIORef state BuildConsumed
+          finishOwned runtime request (Left "Build preparation cancelled")
+          pure False
+        else pure True
+      when again (cancelAdmittedBuild admission)
 
 -- | Use the ordinary policy/approval owner for one read_buffer capture. The host
 -- supplies its attributed callback; anonymous inspection remains guest input.
@@ -302,6 +425,9 @@ finishOwned runtime request result=mask_ $ do
   stopDiffAttempt runtime request
   case operation request of
     WireOperation _ promise->tryPutMVar promise (pure result) >> pure ()
+    BuildInputOperation _ promise->tryPutMVar promise (pure result) >> pure ()
+    BuildAdoptionOperation (AdmittedBuild _ _ _ _ _ state)->atomicModifyIORef' state $ \current->
+      (if ownsBuildRequest request current then BuildRejected (either id (const "Invalid build admission result") result) else current,())
     CaptureOperation submission->finishSubmissionOwned submission (case result of Left err->Left err; Right _->Left "Invalid capture reply")
     DiffOperation submission->finishDiffSubmissionOwned submission (case result of Left err->Left err; Right _->Left "Invalid diff reply")
 
@@ -601,6 +727,14 @@ drainPolicies runtime@(Permissions _ registry ref _ _ _ owner) original=do
               approved=request {approvalRequired=mode==Prompt && not polling,patchSource=source}
           replaceRequest approved
           if approvalRequired approved then pure desktop else execute desktop approved (arguments request)
+    applyPolicy desktop request BuildAdoptPolicy mode=case operation request of
+      BuildAdoptionOperation (AdmittedBuild _ _ _ approved _ state)
+        | mode==Prompt && not approved->finishOwned runtime request (Left "This MCP tool now requires approval; submit again") >> pure desktop
+        | otherwise->do
+            epoch<-readIORef (policyEpoch owner)
+            writeIORef state (BuildAllowed request epoch)
+            pure desktop
+      _->finishOwned runtime request (Left "Invalid build admission operation") >> pure desktop
     applyPolicy desktop request (AllowPolicy edited review) _=do
       current<-reviewCurrent request review desktop
       let owns=case dialog desktop of Just dg->purpose dg==PermissionDialog (approvalAction request); _->False
@@ -626,14 +760,23 @@ drainPolicies runtime@(Permissions _ registry ref _ _ _ owner) original=do
     execute desktop request edited=case operation request of
       CaptureOperation submission->captureSubmissionOwned runtime submission desktop >> pure (closeReview request desktop)
       DiffOperation _->startDiffAttemptOwned runtime request edited desktop
+      BuildAdoptionOperation _->finishOwned runtime request (Left "Invalid build admission phase") >> pure desktop
+      BuildInputOperation callback promise->do
+        state<-newIORef BuildUnused
+        let admission=AdmittedBuild runtime (toolName request) edited (approvalRequired request) (patchCaller request) state
+        result<-try (callback admission (closeReview request desktop) (toolName request) edited
+          `onException` cancelAdmittedBuild admission)
+          `finally` atomicModifyIORef' state (\current->((case current of BuildUnused->BuildConsumed; _->current),()))
+        completeWire desktop request promise result
       WireOperation callback promise->do
         result<-try (callback (closeReview request desktop) (toolName request) edited)
-        case result of
-          Left (_::IOException)->finishOwned runtime request (Left "MCP tool failed after policy admission") >> pure (closeReview request desktop)
-          Right (updated,continuation)->do
-            writeIORef (active request) False
-            _<-tryPutMVar promise continuation
-            pure updated
+        completeWire desktop request promise result
+    completeWire desktop request promise result=case result of
+      Left (_::IOException)->finishOwned runtime request (Left "MCP tool failed after policy admission") >> pure (closeReview request desktop)
+      Right (updated,continuation)->do
+        writeIORef (active request) False
+        _<-tryPutMVar promise continuation
+        pure updated
     replaceRequest request=modifyIORef' ref (\state->state {waiting=map (\old->if ticket old==ticket request then request else old) (waiting state)})
 
 reviewCurrent :: Waiting -> Maybe ContentVersion -> Desktop -> IO Bool
