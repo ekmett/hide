@@ -174,7 +174,11 @@ and repeated ticks use cached rows and do not fetch or evaluate values.
 Right-click source text for **Toggle breakpoint** or **Add watch**. Clicking
 inside a selection preserves its expression; elsewhere Add watch prefills the
 identifier at the click. Both actions retain that source position and refuse a
-changed source rather than acting on a different caret.
+changed source rather than acting on a different caret. In **Add watch**, edit the
+prefilled expression and choose **Add**. Adding places the expression in Watches;
+it does not run it.
+
+[![Source Add Watch dialog, with counter + 1 entered for the stopped hdb toy.](site/screenshots/debug-add-watch.png)](site/screenshots/debug-add-watch.png)
 
 **Watches** is a persistent collapsible root beneath Debug, available without a
 stopped session. Right-click its root to add an expression, activate a watch to
@@ -191,6 +195,15 @@ child**, a human-only executing action. After forcing, use **Evaluate watch** to
 refresh the expression; old and replacement child handles are retired. Ordinary
 expansion remains inert. No evaluation runs automatically on stop, tree expansion
 or repaint.
+
+[![Expanded values watch in the stopped hdb toy, with its lazy tail and explicit Evaluate watch action.](site/screenshots/debug-watches.png)](site/screenshots/debug-watches.png)
+
+This example stops a small GHC program with `counter = 41` and `values = [1..3]`.
+Evaluating `counter + 1` returns `42`; evaluating `values` exposes its list view.
+Choose a different stack frame before evaluating to use that frame’s bindings.
+hdb invalidates earlier inspection results when another expression is evaluated;
+the first watch is therefore marked stale in this view. Use **Evaluate watch** to
+refresh it in the current frame, or **Edit watch…** to change its expression.
 
 Live hdb 0.14 with GHC 9.14.1 on macOS arm64 has verified scalar watch evaluation
 and nonlazy list-child expansion through these actions. Explicit **Force lazy
