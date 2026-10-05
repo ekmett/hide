@@ -120,7 +120,11 @@ When WordStar is enabled for a text source, its `wordstar` table owns named
 commands such as Save, Open and Undo. Their function-key and existing named
 command defaults remain; other Ctrl character keys stay inactive unless assigned.
 Movement and selection use `hide.cursor.left/right/up/down` and
-`hide.selection.left/right/up/down`; adjacent deletion uses
+`hide.selection.left/right/up/down`. Row edges, document edges and pages use
+`hide.cursor.row-start/row-end/document-start/document-end/page-up/page-down`
+and matching `hide.selection.*` IDs. Home/End keep row edges, Ctrl+Home/End
+keep document edges, and PageUp/PageDown keep the existing view page size. Shift
+extends selection; other existing modifier aliases retain their defaults. Adjacent deletion uses
 `hide.edit.delete-backward` and `hide.edit.delete-forward`. Arrow keys,
 Shift+arrows and Backspace/Delete keep their defaults. WordStar adds Ctrl+S/D/E/X
 to horizontal/vertical movement and Ctrl+Y to `hide.edit.delete-line`; their
@@ -130,8 +134,8 @@ Ctrl+Alt+X retains Exit. Ctrl+A/F word movement and Ctrl+K/Ctrl+Q prefix/block
 grammar stay fixed. Overrides using those owned chords fail validation. Global
 chords owned by this grammar are omitted from its inherited map, preserving their
 use in other contexts. Prefix command steps remain available even when the same
-named command is rebound or unbound in the table. Home/End, page and word movement,
-and configurable prefix/block grammar remain open in #3. Hex buffers use `source`.
+named command is rebound or unbound in the table. Word movement and configurable
+prefix/block grammar remain open in #3. Hex buffers use `source`.
 For example, `[editor.keybindings.terminal.wordstar]` with
 `"hide.file.save" = ["Ctrl+Shift+J"]` replaces F2 for WordStar sources only.
 For example, the `wordstar` table can rebind movement and selection:
@@ -223,8 +227,8 @@ browser permissions or user activation prevent access. Browser/OS reserved short
 characters retain composed text input and cannot be assigned to commands; Cmd+Alt
 chords remain distinct. Local graphical scale keys remain reserved.
 
-Home/End and page movement, WordStar word movement and prefix/block grammar,
-plus dialog-navigation customization, remain subsequent stages of
+Word movement, WordStar prefix/block grammar and dialog-navigation
+customization remain subsequent stages of
 [configurable keybindings](https://github.com/ekmett/hide/issues/3).
 
 ## Environment
