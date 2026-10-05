@@ -14,7 +14,7 @@ import Data.Word (Word32)
 import qualified Data.Text as T
 import qualified Data.Text.Unsafe as TU
 import qualified Data.Vector as V
-import Hide.Unicode (graphemes,clusterWidth)
+import Hide.Unicode (graphemes,clusterWidth,sourceGraphemesFrom,sourceGlyphAdvance)
 import qualified Skylighting as S
 import System.FilePath (takeFileName)
 
@@ -99,25 +99,19 @@ data Sigils
 sourceSigilsWindow :: Int -> Int -> SourceRow -> (Int,Int,Sigils)
 sourceSigilsWindow requested width row
   | width<=0=(0,0,Nil)
-  | otherwise=seek 0 0 0 (graphemes text)
+  | otherwise=let (char,byte,col,pending)=sourceGraphemesFrom left text
+              in (char,col,build col char byte ranges pending)
   where
     text=sourceRowText row
     left=max 0 requested
     right=left+min (maxBound-left) width
     ranges=V.toList (sourceRowRanges row)
     slice a b=TU.takeWord8 (b-a) (TU.dropWord8 a text)
-    seek !col !char !byte pending
-      | col>=right=(char,col,Nil)
-      | otherwise=case pending of
-          []->(char,col,Nil)
-          glyph:rest->let n=T.length glyph; advance=glyphAdvance col glyph
-                     in if col+advance<=left then seek (col+advance) (char+n) (byte+TU.lengthWord8 glyph) rest
-                        else (char,col,emit col char byte ranges glyph n advance rest)
     build !col !char !byte current pending
       | col>=right=Nil
       | otherwise=case pending of
           []->Nil
-          glyph:rest->emit col char byte current glyph (T.length glyph) (glyphAdvance col glyph) rest
+          glyph:rest->emit col char byte current glyph (T.length glyph) (sourceGlyphAdvance col glyph) rest
     emit col char byte current glyph n advance rest=
       let active=dropWhile ((<=char).sourceRangeCharEnd) current
           style=case active of range:_->sourceRangeStyle range; _->Plain
@@ -134,15 +128,6 @@ sourceSigilsWindow requested width row
           glyph:rest | T.length glyph==1,clusterWidth glyph==1,T.all (\c->c>=' ' && c/='\DEL') glyph->
             gather limit (col+1) (char+1) (byte+TU.lengthWord8 glyph) rest
           _->(char,byte,pending)
-
--- Exceptional advance is resolved at the layout boundary, independently of
--- source byte/character counts. A scalar field avoids wrapping recursive Style.
-glyphAdvance :: Int -> T.Text -> Int
-glyphAdvance col text
-  | text=="\r"=0
-  | text=="\t"=8-col `mod` 8
-  | T.any (\c->c<' ' || c=='\DEL') text=1
-  | otherwise=clusterWidth text
 
 highlight :: T.Text -> [(Char,Style)]
 highlight = highlightFor "Main.hs"
