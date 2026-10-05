@@ -191,11 +191,12 @@ expansion remains inert. No evaluation runs automatically on stop, tree expansio
 or repaint.
 
 Live hdb 0.14 with GHC 9.14.1 on macOS arm64 has verified scalar watch evaluation
-and nonlazy list-child expansion through these actions. hdb marks lazy child
-values, but its Evaluate replies do not mark a lazy root, so **Force lazy watch**
-is unavailable for those results. Root and nested-child Force currently have
-deterministic adapter fixture coverage; live Force has not been qualified against
-hdb or THC. Variable continuation pages remain in issue #8. Both local-file and
+and nonlazy list-child expansion through these actions. Explicit **Force lazy
+child** also works on a lazy list tail; after hdb invalidates its references, an
+explicit watch refresh shows fresh children. hdb Evaluate replies do not mark a
+lazy root, so **Force lazy watch** is unavailable for those results and remains
+fixture-tested. THC watch evaluation and Force remain unsupported. Variable
+continuation pages remain in issue #8. Both local-file and
 embedded **Go to source** prepare their source documents on a worker. Local-file
 navigation preserves open unsaved text and ordinary file/save authority. Changed
 or closed targets and resumed sessions reject late navigation; a prepared source
