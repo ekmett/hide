@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE OverloadedStrings, UnboxedTuples #-}
 module UnicodeCheck (checks) where
 import Control.Monad (unless, forM_)
 import Control.Exception (evaluate)
@@ -54,6 +54,50 @@ checks = do
       (sourceTextWidth text==displayColumn text (T.length text) && sourceTextWidth text==widths &&
        all (\column->let (char,_,col,pending)=sourceGraphemesFrom column text in columnOffset text column==char &&
                        col==displayColumn text char && T.concat (map itemSourceText pending)==T.drop char text) [0..widths])
+  let cursorCases=["", "a\tb\r\n界e\x301\tZ", "🇦🇧🇨🇩🇪", "👩🏽\x200d\&💻x", oversized,
+        T.replicate 511 "a"<>"界"<>T.replicate 70 "\x301"<>"🇦🇧🇨Z"]
+      capture text=go 0 0 initialSourceCursor
+        where
+          go byte col cursor | byte>=TU.lengthWord8 text=[]
+          go byte col cursor=case sourceItemStep text byte cursor of
+            (# end,count,advance,tab,overflow,next #)->
+              let width=if tab then 8-col `mod` 8 else advance
+              in (byte,end,col,count,width,overflow,cursor):go end (col+width) next
+      leafReference goal col=go 0 0 col
+        where
+          go char byte column []=(char,byte,column,[])
+          go char byte column pending@(item:rest)
+            | column+sourceItemAdvance column item>max 0 goal=(char,byte,column,pending)
+            | otherwise=go (char+itemScalarCount item) (byte+TU.lengthWord8 (itemSourceText item))
+                (column+sourceItemAdvance column item) rest
+  forM_ cursorCases $ \text->do
+    let captured=capture text
+        flat=displayItems text
+    check "complete-source cursor steps retain byte/count/width/overflow facts"
+      (length captured==length flat && and [end-byte==TU.lengthWord8 (itemSourceText item) && count==itemScalarCount item &&
+        advance==sourceItemAdvance col item && overflow==itemOverflow item | ((byte,end,col,count,advance,overflow,_),item)<-zip captured flat])
+    -- Storage groups are cut only at captured item boundaries. Each resumes its
+    -- Unicode context and restores the known last overflow flag at artificial EOF.
+    forM_ [1,2] $ \groupSize->forM_ [0,groupSize..length flat-1] $ \start->do
+      let group=take groupSize (drop start captured)
+          expected=take groupSize (drop start flat)
+          (byte,_,col,_,_,_,incoming)=head group
+          (_,end,_,_,_,lastOverflow,_)=last group
+          leaf=TU.takeWord8 (end-byte) (TU.dropWord8 byte text)
+      check "resumed storage groups preserve exact original items at artificial EOF"
+        (sourceItemsFromCursor incoming lastOverflow leaf==expected)
+      forM_ [col-1,col,col+1,col+sum [sourceItemAdvance 0 i | i<-expected]+8] $ \goal->
+        check "resumed leaf numeric seek shares absolute tab/overflow geometry"
+          (sourceLeafFrom goal col incoming lastOverflow leaf==leafReference goal col expected)
+  let short="🇦"
+      terminal=case sourceItemStep short 0 initialSourceCursor of (# _,_,_,_,_,next #)->next
+      appended=short<>"🇧🇨"
+  check "real EOF receipt applies the next transition rather than treating it as processed lookahead"
+    (case sourceItemStep appended (TU.lengthWord8 short) terminal of (# _,count,_,_,_,_ #)->count==1)
+  check "empty source step retains the exact numeric cursor"
+    (case sourceItemStep short (TU.lengthWord8 short) terminal of
+      (# end,count,advance,tab,overflow,next #)->
+        end==TU.lengthWord8 short && count==0 && advance==0 && not tab && not overflow && next==terminal)
   check "overflow ends at natural boundary without poisoning the next cluster"
     (map itemDisplayText (displayItems oversized)==["�","�","�","Z"] &&
      map itemDisplayText (displayItems (tagged<>"🇦🇧🇨"))==["�","�","�","🇦🇧","🇨"])

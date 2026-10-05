@@ -6,7 +6,7 @@
 -- Clipped GPU cells retain their full semantic glyph. Text-mode partial clusters
 -- become blanks. Terminal output advances
 -- explicitly past two-cell clusters even when the user's font draws them narrowly.
-module Hide.Unicode (DisplayItem, displayItems, itemSourceText, itemScalarCount, itemDisplayText, itemOverflow, itemWidth, sourceItemAdvance, graphemes, sourceGraphemesFrom, sourceTextWidth, sourceGlyphAdvance, scalarWidth, clusterWidth, textImage, wideTextImage, displayClusters, terminalProjection, scriptTerminalText, terminalSpan, Script(..), CellSpan(..), CellLayer(..), cellRowsForLayers, cellRowsForPic, cellDisplayOps, flattenPicture, displayOpsForPic, updateDisplayOps, terminalText, textInputChar) where
+module Hide.Unicode (SourceCursor, initialSourceCursor, sourceItemStep, sourceItemsFromCursor, sourceLeafFrom, DisplayItem, displayItems, itemSourceText, itemScalarCount, itemDisplayText, itemOverflow, itemWidth, sourceItemAdvance, graphemes, sourceGraphemesFrom, sourceTextWidth, sourceGlyphAdvance, scalarWidth, clusterWidth, textImage, wideTextImage, displayClusters, terminalProjection, scriptTerminalText, terminalSpan, Script(..), CellSpan(..), CellLayer(..), cellRowsForLayers, cellRowsForPic, cellDisplayOps, flattenPicture, displayOpsForPic, updateDisplayOps, terminalText, textInputChar) where
 
 import Control.Monad (forM_, when)
 import Data.Char (isPrint)
@@ -69,11 +69,50 @@ sourceItemAdvance col (DisplayItem _ meta)
 itemScalarCount :: DisplayItem -> Int
 itemScalarCount (DisplayItem _ meta)=meta `shiftR` 6
 
+-- | Numeric segmentation checkpoint, with no source payload. Equality observes
+-- only the previous codepoint, utf8proc state and continuation/lookahead flags.
+-- A cut before real EOF retains the next scalar's already-processed transition;
+-- a real EOF checkpoint has no pending scalar. Appending source still requires
+-- repairing its former last item before reusing that item's boundary.
+data SourceCursor = SourceCursor {-# UNPACK #-} !CInt {-# UNPACK #-} !CInt {-# UNPACK #-} !Int deriving Eq
+
+-- | Start a physical source row with no preceding Unicode context.
+initialSourceCursor :: SourceCursor
+initialSourceCursor=SourceCursor (-1) 0 0
+
+-- | Advance one bounded item in the complete original source. The byte offset
+-- must be zero or a previous returned endpoint in this same source. The unboxed
+-- result is @(endByte, scalarCount, advanceAtColumnZero, singleTab, overflow,
+-- nextCursor)@. Tabs are resolved against the caller's absolute column. At real
+-- EOF count is zero and the cursor is unchanged. This INLINE boundary lets a
+-- numeric consumer retain checkpoints only at actual storage cuts.
+sourceItemStep :: T.Text -> Int -> SourceCursor -> (# Int,Int,Int,Bool,Bool,SourceCursor #)
+sourceItemStep text byte cursor@(SourceCursor previous state flags)
+  | byte>=TU.lengthWord8 text=(# byte,0,0,False,False,cursor #)
+  | otherwise=case itemEnd text byte previous state (flags .&. 1/=0) (flags .&. 2/=0) of
+      (# end#,count#,first#,natural#,controls,overflow,continued,prev#,nextState# #)->
+        let end=I# end#; count=I# count#; first=C# first#
+            advance=if overflow then 1 else sourceAdvance 0 count first (I# natural#) controls
+            next=SourceCursor (fromIntegral (I# prev#)) (fromIntegral (I# nextState#))
+              ((if continued then 1 else 0) .|. (if end<TU.lengthWord8 text then 2 else 0))
+        in (# end,count,advance,count==1 && first=='\t',overflow,next #)
+{-# INLINE sourceItemStep #-}
+
+-- | Emit a borrowed storage leaf using its captured incoming checkpoint. The
+-- Boolean is the proven overflow flag of its last item in the complete source;
+-- storage EOF alone cannot determine that flag. It is used only at leaf EOF.
+-- Concatenating original item bytes returns the exact leaf, including zero-width
+-- leading items. Successive leaves use their own stored incoming checkpoints.
+sourceItemsFromCursor :: SourceCursor -> Bool -> T.Text -> [DisplayItem]
+sourceItemsFromCursor (SourceCursor previous state flags) lastOverflow text=
+  scanItems text lastOverflow 0 previous state (flags .&. 1/=0) (flags .&. 2/=0)
+{-# INLINE sourceItemsFromCursor #-}
+
 -- | Lazy bounded display segmentation. Concatenating original fragments returns
 -- the exact input. Only one scalar beyond a fragment is examined; state survives
 -- cap cuts, RI pairs and ZWJ sequences. Normal complete graphemes remain intact.
 displayItems :: T.Text -> [DisplayItem]
-displayItems text=scanItems text 0 (-1) 0 False
+displayItems=sourceItemsFromCursor initialSourceCursor False
 {-# NOINLINE displayItems #-}
 
 -- | Original-byte projection of the shared bounded display segmentation.
@@ -82,28 +121,29 @@ graphemes :: T.Text -> [T.Text]
 graphemes=map itemSourceText . displayItems
 {-# NOINLINE graphemes #-}
 
-scanItems :: T.Text -> Int -> CInt -> CInt -> Bool -> [DisplayItem]
-scanItems text=scan
+scanItems :: T.Text -> Bool -> Int -> CInt -> CInt -> Bool -> Bool -> [DisplayItem]
+scanItems text lastOverflow=scan
   where
     size=TU.lengthWord8 text
-    scan !start !previous !state !continued
+    scan !start !previous !state !continued !processed
       | start>=size=[]
-      | otherwise=case itemEnd text start previous state continued of
+      | otherwise=case itemEnd text start previous state continued processed of
           (# end#,count#,first#,natural#,controls,overflow,nextContinued,prev#,nextState# #)->
-            let end=I# end#; prev=fromIntegral (I# prev#); nextState=fromIntegral (I# nextState#) in
+            let end=I# end#; prev=fromIntegral (I# prev#); nextState=fromIntegral (I# nextState#)
+                shownOverflow=overflow || end==size && lastOverflow in
             DisplayItem (TU.takeWord8 (end-start) (TU.dropWord8 start text))
-              ((I# count# `shiftL` 6) .|. I# natural# .|. (if overflow then 4 else 0) .|.
+              ((I# count# `shiftL` 6) .|. I# natural# .|. (if shownOverflow then 4 else 0) .|.
                (if I# count#==1 && C# first#=='\t' then 8 else 0) .|.
                (if I# count#==1 && C# first#=='\r' then 16 else 0) .|. (if controls then 32 else 0)):
-              scan end prev nextState nextContinued
+              scan end prev nextState nextContinued True
 
 -- One numeric cursor owns both emission and seek. The unboxed receipt does not
 -- allocate discarded source fragments. A cap stop leaves the lookahead scalar
 -- unconsumed in the source, but retains its processed codepoint/state. The next
 -- fragment therefore skips that transition and applies it exactly once.
 {-# INLINE itemEnd #-}
-itemEnd :: T.Text -> Int -> CInt -> CInt -> Bool -> (# Int#,Int#,Char#,Int#,Bool,Bool,Bool,Int#,Int# #)
-itemEnd text start previous state continued=go start 0 '\0' 0 False previous state
+itemEnd :: T.Text -> Int -> CInt -> CInt -> Bool -> Bool -> (# Int#,Int#,Char#,Int#,Bool,Bool,Bool,Int#,Int# #)
+itemEnd text start previous state continued processed=go start 0 '\0' 0 False previous state
   where
     size=TU.lengthWord8 text
     finish (I# byte) (I# count) (C# first) (I# natural) controls overflow nextContinued prev st=
@@ -117,8 +157,8 @@ itemEnd text start previous state continued=go start 0 '\0' 0 False previous sta
             let point=fromIntegral (fromEnum char)
                 -- The incoming state already includes the first scalar transition.
                 -- Force later FFI results once, avoiding a shared lazy thunk.
-                !step=if count==0 then 0 else c_graphemeStep prev point st
-                nextState=if count==0 then st else fromIntegral (step `shiftR` 1)
+                !step=if count==0 && (processed || prev<0) then 0 else c_graphemeStep prev point st
+                nextState=if count==0 && processed then st else fromIntegral (step `shiftR` 1)
                 boundary=prev>=0 && step .&. 1/=0
             in if count>0 && boundary then finish byte count first natural controls continued False point nextState
                else if count>=32 || byte+bytes-start>128 then finish byte count first natural controls True True point nextState
@@ -130,23 +170,32 @@ itemEnd text start previous state continued=go start 0 '\0' 0 False previous sta
 -- items allocate no Text/list fragments. Overflow fragments have one-cell advance
 -- and retain exact source ranges; state and overflow survive prefix seeking.
 sourceGraphemesFrom :: Int -> T.Text -> (Int,Int,Int,[DisplayItem])
-sourceGraphemesFrom requested text=
-  case seek 0 0 0 (-1) 0 False of
+sourceGraphemesFrom requested=sourceLeafFrom requested 0 initialSourceCursor False
+{-# NOINLINE sourceGraphemesFrom #-}
+
+-- | Seek a borrowed storage leaf with absolute source/tab columns. Returns its
+-- local scalar offset, local UTF8 byte offset, absolute column and item suffix.
+-- The incoming cursor and last-item overflow receipt were captured against the
+-- complete source. Skipped items allocate no Text/list fragments. The law is
+-- @sourceLeafFrom goal 0 initialSourceCursor False text ≡ sourceGraphemesFrom goal text@.
+sourceLeafFrom :: Int -> Int -> SourceCursor -> Bool -> T.Text -> (Int,Int,Int,[DisplayItem])
+sourceLeafFrom requested initialColumn (SourceCursor previous state flags) lastOverflow text=
+  case seek 0 0 initialColumn previous state (flags .&. 1/=0) (flags .&. 2/=0) of
     (# char,byte,col,suffix #)->(I# char,I# byte,I# col,suffix)
   where
     finish (I# char) (I# byte) (I# col) suffix=(# char,byte,col,suffix #)
     goal=max 0 requested
     size=TU.lengthWord8 text
-    seek !byte !char !col !previous !state !continued
+    seek !byte !char !col !prev !st !continued !processed
       | byte>=size=finish char byte col []
-      | otherwise=case itemEnd text byte previous state continued of
-          (# end#,count#,first#,natural#,controls,overflow,nextContinued,prev#,nextState# #)->
+      | otherwise=case itemEnd text byte prev st continued processed of
+          (# end#,count#,first#,natural#,controls,overflow,nextContinued,nextPrev#,nextState# #)->
             let end=I# end#; count=I# count#; first=C# first#; natural=I# natural#
-                prev=fromIntegral (I# prev#); nextState=fromIntegral (I# nextState#)
-                advance=if overflow then 1 else sourceAdvance col count first natural controls
-            in if col+advance>goal then finish char byte col (scanItems text byte previous state continued)
-               else seek end (char+count) (col+advance) prev nextState nextContinued
-{-# NOINLINE sourceGraphemesFrom #-}
+                nextPrev=fromIntegral (I# nextPrev#); nextState=fromIntegral (I# nextState#)
+                advance=if overflow || end==size && lastOverflow then 1 else sourceAdvance col count first natural controls
+            in if col+advance>goal then finish char byte col (scanItems text lastOverflow byte prev st continued processed)
+               else seek end (char+count) (col+advance) nextPrev nextState nextContinued True
+{-# NOINLINE sourceLeafFrom #-}
 
 -- | Natural source cell extent, including tab stops and control placeholders.
 -- Reuses numeric UTF8/stateful grapheme seeking; counting width does not allocate
