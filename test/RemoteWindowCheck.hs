@@ -68,6 +68,8 @@ checks = do
   check "remote rows must match height" (not (valid (take 24 rows)))
   check "remote span overflow rejected" (not (valid (toJSON [(79::Int,0::Int,0::Int,0::Int,[String "ab"])] : drop 1 rows)))
   check "unknown remote font flags rejected" (not (valid (toJSON [(0::Int,0::Int,0::Int,4::Int,[String "a"])] : drop 1 rows)))
+  check "explicit width cannot enter decorated span paint" (not (valid (toJSON [(0::Int,0::Int,0::Int,12::Int,[String "a"])] : drop 1 rows)))
+  check "unknown high font flags rejected" (not (valid (toJSON [(0::Int,0::Int,0::Int,32::Int,[String "a"])] : drop 1 rows)))
   check "remote colors bounded" (not (valid (toJSON [(0::Int,-1::Int,0::Int,0::Int,[String "a"])] : drop 1 rows)))
   check "remote clusters cannot contain NUL" (not (valid (toJSON [(0::Int,0::Int,0::Int,0::Int,[toJSON ("a\0"::T.Text,1::Int,False,0::Int,1::Int)])] : drop 1 rows)))
   check "remote invalid dimensions rejected" (either (const True) (const False) (parseRemoteFrame (object ["size" .= ([999999,25]::[Int]),"bindings" .= ([]::[(T.Text,T.Text)])]) rows))
