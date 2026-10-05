@@ -31,6 +31,12 @@ removed since opening or the last save. Changing an existing line counts as
 one removal and one addition. Split views share these counts; unnamed buffers
 show them in their titles too. Saving establishes a new baseline.
 
+Right-click a saved file in Files and choose **Rename…**. Its basename is
+selected for replacement. Rename keeps open buffers, their selections and undo
+history, and refuses an occupied destination or affected unsaved edits. If the
+file changes while the form is open, reopen Rename. This action renames regular
+files within the same directory; directory moves remain a separate operation.
+
 **File > Change dir** changes the working directory and refreshes Files without
 closing open buffers. Enter browses into the selected directory, Browse opens
 a typed path, and OK accepts the displayed directory.

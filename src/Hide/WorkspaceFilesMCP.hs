@@ -9,6 +9,8 @@
 -- runs in the owning permission tick; filesystem mutations remain initial-phase IO.
 module Hide.WorkspaceFilesMCP (fileTools, fileToolNames, fileTool, applyUnifiedDiff, PatchSource, PreparedPatch, capturePatchSource, capturePatchRequest, preparePatch, commitPatch) where
 
+import Hide.WorkspaceRename (checkedPath,operationPath,within)
+import qualified Hide.WorkspaceRename as Rename
 import Hide.Sidebar
 import Control.Exception (IOException, bracket, try, evaluate)
 import Control.Monad (forM, unless, when)
@@ -27,7 +29,7 @@ import System.Directory
 import System.Exit (ExitCode(..))
 import System.FilePath
 import System.IO (IOMode(ReadMode), withBinaryFile, hClose)
-import System.IO.Error (catchIOError, isDoesNotExistError)
+import System.IO.Error (catchIOError)
 import System.Process
 import System.Timeout (timeout)
 import Text.Read (readMaybe)
@@ -109,75 +111,48 @@ guardIO action=do
   result<-try action
   pure (either (Left . T.pack . show) (>>=bounded) (result::Either IOException (Either Text Value)))
 
--- Strict root containment is checked after resolving symlinks, including the
--- existing ancestors of a new path. Metadata paths and the root itself are never targets.
-checkedPath :: FilePath -> FilePath -> IO FilePath
-checkedPath root raw=do
-  when (null raw || length raw>32768 || '\0' `elem` raw || ".." `elem` splitDirectories raw) (ioError (userError "Invalid workspace path"))
-  let joined=if isAbsolute raw then raw else root </> raw
-  resolved<-canonicalizePath joined
-  unless (within root resolved && resolved/=root && not (metadata raw) && not (metadata (makeRelative root resolved)))
-    (ioError (userError "Path must stay inside the workspace and outside repository metadata"))
-  pure resolved
-  where metadata=any ((`elem` [".git",".hg",".svn"]) . T.toCaseFold . T.pack) . splitDirectories
-
-within :: FilePath -> FilePath -> Bool
-within root path=let relative=makeRelative root path in not (isAbsolute relative) && ".." `notElem` splitDirectories relative
-
-operationPath :: FilePath -> FilePath -> IO FilePath
-operationPath root raw=do
-  path<-checkedPath root raw
-  symlink<-catchIOError (pathIsSymbolicLink (if isAbsolute raw then raw else root </> raw))
-    (\err -> if isDoesNotExistError err then pure False else ioError err)
-  when symlink (ioError (userError "File operations do not follow symlink endpoints"))
-  pure path
-
 fileOperation :: Core -> Desktop -> Text -> FilePath -> Maybe FilePath -> IO (Desktop,Either Text Value)
-fileOperation core desktop operation raw target=do
-  root<-resolveBuildRoot desktop >>= canonicalizePath
-  path<-operationPath root raw
-  rejectPrivate path
-  affected<-fmap catMaybes $ forM (M.toList (buffers desktop)) $ \(bid,doc) -> case documentFile doc of
-    Nothing -> pure Nothing
-    Just file -> do canonical<-canonicalizePath (filePath file)
-                    pure (if within path canonical then Just (bid,doc,canonical) else Nothing)
-  when (any (\(_,doc,_)->dirty (documentBuffer doc)) affected) (ioError (userError "Save or close dirty open buffers before changing their paths"))
-  exists<-doesPathExist path
-  updated<-case operation of
-    "mkdir" -> do
-      when exists (ioError (userError "Path already exists"))
-      createDirectory path
-      pure desktop
-    "create_file" -> do
-      when exists (ioError (userError "Path already exists"))
-      saved<-saveFile (FileState path Nothing) (newBuffer "")
-      either (ioError . userError) (const (pure desktop)) saved
-    "delete" -> do
-      unless exists (ioError (userError "Path does not exist"))
-      directory<-doesDirectoryExist path
-      if directory then removeDirectory path else removeFile path
-      let ids=[bid | (bid,_,_)<-affected]
-          keepDirectory value=if within path value then root else value
-      pure desktop {buffers=foldr M.delete (buffers desktop) ids,windows=filter (maybe True (`notElem` ids) . bufferId) (windows desktop),
-        defaultDirectory=fmap keepDirectory (defaultDirectory desktop),sideTree=fmap (\tree->tree {treeRoot=keepDirectory (treeRoot tree)}) (sideTree desktop)}
-    _ -> do
-      unless exists (ioError (userError "Path does not exist"))
-      destination<-maybe (ioError (userError "rename requires to")) (operationPath root) target
-      rejectPrivate destination
-      destinationExists<-doesPathExist destination
-      destinationLink<-catchIOError (pathIsSymbolicLink destination) (\err -> if isDoesNotExistError err then pure False else ioError err)
-      when (destinationExists || destinationLink || within path destination) (ioError (userError "Rename destination exists or is inside the source"))
-      renamePath path destination
-      let remap oldPath | oldPath==path=destination
-                        | within path oldPath=destination </> makeRelative path oldPath
-                        | otherwise=oldPath
-          replacements=M.fromList [(bid,newPath) | (bid,_,oldPath)<-affected,let newPath=if oldPath==path then destination else destination </> makeRelative path oldPath]
-      pure $ foldr normalizeDocumentViews desktop {buffers=M.mapWithKey (\bid doc -> case M.lookup bid replacements of
-        Nothing -> doc
-        Just newPath -> restyle doc {documentFile=fmap (\file -> file {filePath=newPath}) (documentFile doc)}) (buffers desktop),
-        defaultDirectory=fmap remap (defaultDirectory desktop),sideTree=fmap (\tree->tree {treeRoot=remap (treeRoot tree)}) (sideTree desktop)} (M.keys replacements)
-  refreshed<-case sideTree updated of Nothing -> pure updated; Just tree -> catchIOError (snd <$> core updated [ReadTree (treeRoot tree)]) (\err->pure updated {status="Filesystem operation completed; tree refresh failed: "<>T.pack (show err)})
-  pure (refreshed,Right (object ["operation" .= operation,"path" .= path,"to" .= target,"savedBuffers" .= False]))
+fileOperation core desktop operation raw target
+  | operation=="rename"=do
+      root<-resolveBuildRoot desktop
+      files<-Rename.captureRenameFiles desktop
+      source<-Rename.prepareRenameSource False root (guestPrivatePaths desktop) raw files
+      destination<-maybe (ioError (userError "rename requires to")) pure target
+      prepared<-Rename.prepareWorkspaceRename source destination
+      updated<-Rename.commitWorkspaceRename prepared desktop >>= either (ioError . userError . T.unpack) pure
+      let (old,new)=Rename.renamePaths prepared
+      (_,refreshed)<-core updated [RefreshRenamedPath old new]
+      pure (refreshed,Right (object ["operation" .= operation,"path" .= Rename.renameSourcePath source,"to" .= target,"savedBuffers" .= False]))
+  | otherwise=do
+    root<-resolveBuildRoot desktop >>= canonicalizePath
+    path<-operationPath root raw
+    rejectPrivate path
+    affected<-fmap catMaybes $ forM (M.toList (buffers desktop)) $ \(bid,doc) -> case documentFile doc of
+      Nothing -> pure Nothing
+      Just file -> do canonical<-canonicalizePath (filePath file)
+                      pure (if within path canonical then Just (bid,doc,canonical) else Nothing)
+    when (any (\(_,doc,_)->dirty (documentBuffer doc)) affected) (ioError (userError "Save or close dirty open buffers before changing their paths"))
+    exists<-doesPathExist path
+    updated<-case operation of
+      "mkdir" -> do
+        when exists (ioError (userError "Path already exists"))
+        createDirectory path
+        pure desktop
+      "create_file" -> do
+        when exists (ioError (userError "Path already exists"))
+        saved<-saveFile (FileState path Nothing) (newBuffer "")
+        either (ioError . userError) (const (pure desktop)) saved
+      "delete" -> do
+        unless exists (ioError (userError "Path does not exist"))
+        directory<-doesDirectoryExist path
+        if directory then removeDirectory path else removeFile path
+        let ids=[bid | (bid,_,_)<-affected]
+            keepDirectory value=if within path value then root else value
+        pure desktop {buffers=foldr M.delete (buffers desktop) ids,windows=filter (maybe True (`notElem` ids) . bufferId) (windows desktop),
+          defaultDirectory=fmap keepDirectory (defaultDirectory desktop),sideTree=fmap (\tree->tree {treeRoot=keepDirectory (treeRoot tree)}) (sideTree desktop)}
+      _ -> ioError (userError "Unknown file operation")
+    refreshed<-case sideTree updated of Nothing -> pure updated; Just tree -> catchIOError (snd <$> core updated [ReadTree (treeRoot tree)]) (\err->pure updated {status="Filesystem operation completed; tree refresh failed: "<>T.pack (show err)})
+    pure (refreshed,Right (object ["operation" .= operation,"path" .= path,"to" .= target,"savedBuffers" .= False]))
   where rejectPrivate path=when (protectedPathParent desktop path) (ioError (userError "This path contains private editor configuration or session data"))
 
 -- | A strict diff replacement prepared by a worker, with exact reply metadata.

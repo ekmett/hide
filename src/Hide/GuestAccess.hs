@@ -31,7 +31,7 @@ import Hide.Browser (Entry(..))
 import Hide.Buffer
 import qualified Hide.Plugin.Menu as Plugin
 import Hide.Model
-import Hide.Privacy (protectedFilePath,pathContains)
+import Hide.Privacy (protectedFilePath,protectedFilePathParent)
 
 -- | Trusted host attribution; never accept an origin claimed by input JSON.
 data InputOrigin = HumanInput | GuestInput deriving (Eq,Show)
@@ -51,7 +51,7 @@ protectedPath d=protectedFilePath (guestPrivatePaths d)
 
 -- | Also protect ancestors whose removal could destroy authority stores.
 protectedPathParent :: Desktop -> FilePath -> Bool
-protectedPathParent d path=protectedPath d path || any (pathContains path) (guestPrivatePaths d)
+protectedPathParent d=protectedFilePathParent (guestPrivatePaths d)
 
 -- | Omit private documents and blank private conversation spans, preserving offsets.
 sanitizedBuffer :: Desktop -> Int -> Maybe Text
@@ -133,6 +133,7 @@ validateGuestEffects d=mapM_ check
     check effect=case effect of
       ReadPath name->path name
       ReadTree name->path name
+      RefreshRenamedPath old new->path old >> path new
       LoadTree request _->treePath (requestAncestors request)
       InvokeTree trace _ _->treePath trace
       JumpTo name _ _->path name
