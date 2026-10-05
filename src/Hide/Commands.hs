@@ -10,11 +10,11 @@ module Hide.Commands (BuiltinCommand(..), builtinCommands, commandIdentifier, co
 import Data.Text (Text)
 import Control.Monad (unless, forM_)
 import qualified Graphics.Vty as V
-import Data.List (find)
+import Data.List (find,subsequences)
 import qualified Data.Map.Strict as M
 import qualified Hide.Bindings
 import Hide.Bindings (BindingPlatform(..), bindingPlatforms, platformName, BindingContext(..), bindingContexts, contextName, Bindings, compileBindings, readChord)
-import Hide.Model (Desktop(..), Command(..), terminalSourceReserved, wordStarReserved, dialogBindingCommands, dialogReserved, dialogFocusChord)
+import Hide.Model (Desktop(..), Command(..), terminalSourceReserved, wordStarReserved, dialogBindingCommands, dialogReserved, dialogFocusChord, dialogControlChord)
 import qualified Hide.Plugin.Menu as Plugin
 import Hide.BufferView (BufferView(..))
 
@@ -29,7 +29,9 @@ commandIdentifier command = builtinIdentifier <$> find ((==command) . builtinAct
 
 builtinCommands :: [BuiltinCommand]
 builtinCommands =
-  [BuiltinCommand "hide.dialog.focus-next" DialogFocusNext
+  [BuiltinCommand "hide.dialog.accept" DialogAccept
+  ,BuiltinCommand "hide.dialog.cancel" DialogCancel
+  ,BuiltinCommand "hide.dialog.focus-next" DialogFocusNext
   ,BuiltinCommand "hide.dialog.focus-previous" DialogFocusPrevious
   ,BuiltinCommand "hide.file.new" (New)
   ,BuiltinCommand "hide.file.open" (Open)
@@ -215,11 +217,12 @@ platformBindings catalogue platform configuration=do
               MessagesKeys -> character
               ConversationKeys -> character || key==V.KEnter
               TerminalKeys -> character || processControl key mods
+              DialogKeys -> character
               _ -> character || key==V.KEnter
         let platformReserved = (platform==TerminalPlatform && V.MMeta `elem` mods) ||
               (platform==MacPlatform && ((V.MAlt `elem` mods && V.MCtrl `notElem` mods && V.MMeta `notElem` mods && not (context==DialogKeys && dialogFocusChord key mods) && case key of V.KChar _->True; _->False) || (key `elem` map V.KChar "h\\[]" && V.MMeta `elem` mods))) ||
               (platform/=TerminalPlatform && key `elem` map V.KChar "0+=-" && any (`elem` mods) [V.MCtrl,V.MAlt])
-        unless (not (terminalSourceReserved key mods && not (context==DialogKeys && dialogFocusChord key mods) || contextReserved || platformReserved || context==WordStarKeys && wordStarReserved key mods || context==DialogKeys && dialogReserved key mods))
+        unless (not (terminalSourceReserved key mods && not (context==DialogKeys && dialogControlChord key mods) || contextReserved || platformReserved || context==WordStarKeys && wordStarReserved key mods || context==DialogKeys && dialogReserved key mods))
           (Left ("Reserved "<>contextName context<>" key: "<>raw))
       compiled<-either (Left . (("Keybinding context "<>contextName context<>": ")<>)) Right $ compileBindings ([(builtinIdentifier entry,builtinAction entry,keys context (builtinAction entry)) | entry<-builtinCommands,context/=DialogKeys || builtinAction entry `elem` dialogBindingCommands]++[(name,action,[]) | (name,action)<-catalogue,context/=DialogKeys,name `notElem` map builtinIdentifier builtinCommands]) overrides
       pure ((platform,context),compiled)
@@ -236,7 +239,7 @@ platformBindings catalogue platform configuration=do
       ,(Undo,["Cmd+Z"]),(Redo,["Cmd+Shift+Z"]),(Copy,["Cmd+C"]),(Cut,["Cmd+X"]),(Paste,["Cmd+V"]),(SelectAll,["Cmd+A"])
       ,(Find,["Cmd+F"]),(Replace,["Cmd+Alt+F"]),(FindNext,["Cmd+G"]),(FindPrevious,["Cmd+Shift+G"])
       ,(EditorOptions,["Cmd+,"]),(Conversation,["Cmd+Shift+C"]),(AgentNew,["Cmd+Shift+N"])]
-    defaultsFor DialogKeys=[(DialogFocusNext,["Tab","Alt+Tab"]),(DialogFocusPrevious,["Shift+Tab","Alt+Shift+Tab"]),(Copy,["Ctrl+C","Ctrl+Shift+C"]),(Cut,["Ctrl+X","Ctrl+Shift+X"]),(Paste,["Ctrl+V","Ctrl+Shift+V"]),
+    defaultsFor DialogKeys=[(DialogAccept,controlAliases V.KEnter),(DialogCancel,controlAliases V.KEsc),(DialogFocusNext,["Tab","Alt+Tab"]),(DialogFocusPrevious,["Shift+Tab","Alt+Shift+Tab"]),(Copy,["Ctrl+C","Ctrl+Shift+C"]),(Cut,["Ctrl+X","Ctrl+Shift+X"]),(Paste,["Ctrl+V","Ctrl+Shift+V"]),
       (SelectAll,["Ctrl+A","Ctrl+Shift+A"]),(Undo,["Ctrl+Z"]),(Redo,["Ctrl+Y","Ctrl+Shift+Z"]),
       (Find,["Ctrl+F"]),(Replace,["Ctrl+H","Ctrl+R"])]
     defaultsFor WordStarKeys=[(action,filter named chords) | (action,chords)<-defaults] ++
@@ -278,6 +281,8 @@ platformBindings catalogue platform configuration=do
       (CursorWordLeft True,keyAliases V.KLeft True True),(CursorWordRight True,keyAliases V.KRight True True),
       (DeleteWordBackward,keyAliases V.KBS False True++keyAliases V.KBS True True),
       (DeleteWordForward,keyAliases V.KDel False True++keyAliases V.KDel True True)]
+    controlAliases key=[name | mods<-subsequences [V.MCtrl,V.MShift,V.MAlt,V.MMeta],
+      platform/=TerminalPlatform || V.MMeta `notElem` mods,Just name<-[Hide.Bindings.chordName key mods]]
     verticalAliases key shift=aliases key shift++keyAliases key shift True
     horizontalDefaults=
       [(CursorLeft False,aliases V.KLeft False),(CursorRight False,aliases V.KRight False),
