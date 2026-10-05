@@ -29,7 +29,7 @@ flag terminal
 common settings
   default-language: GHC2021
   ghc-options: -Wall
-  build-depends: base >=4.18 && <4.23, text, containers, bytestring, directory, filepath, time, process, vty >=6.0, vty-crossplatform
+  build-depends: base >=4.18 && <4.23, text >=2.0, containers, bytestring, directory, filepath, time, process, vty >=6.0, vty-crossplatform
 
 library
   import: settings

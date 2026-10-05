@@ -1,6 +1,9 @@
 {-# LANGUAGE OverloadedStrings #-}
 module UnicodeCheck (checks) where
 import Control.Monad (unless, forM_)
+import Control.Exception (evaluate)
+import GHC.Conc (getAllocationCounter)
+import qualified Data.Vector as Vec
 import Blaze.ByteString.Builder (writeToByteString)
 import Blaze.ByteString.Builder.ByteString (writeByteString)
 import qualified Data.ByteString.Char8 as BS
@@ -53,6 +56,22 @@ checks = do
   let hiddenHalf=cellRowsForLayers [CellMask V.defAttr [(1,0,1)],CellImage (V.translateX 2 (textImage V.defAttr "X")),CellImage image] (4,1)
   check "whole-glyph privacy preserves an unrelated opaque foreground cell"
     ([text | row<-toList hiddenHalf,CellText _ text<-toList row]==["A*XB"])
+  let border=textImage V.defAttr ("║"<>T.replicate 178 " "<>"║")
+      prepared=V.vertCat (replicate 55 border)
+  _<-evaluate (V.imageWidth prepared+V.imageHeight prepared)
+  before<-getAllocationCounter
+  let packed=cellRowsForPic (V.picForImage prepared) (180,55)
+  occupied<-evaluate (Vec.foldl' (\n row->Vec.foldl' (\m cell->m+case cell of
+    CellText _ text->T.length text
+    CellGlyph _ _ _ _ shown->shown) n row) 0 packed)
+  after<-getAllocationCounter
+  check "prepared border and padding grid stays within 1.5 MB allocation"
+    (occupied==9900 && before-after<1500000)
+  let mixed=textImage V.defAttr "Aéδ░│𝄞Z"
+  check "compact single-cell Unicode runs preserve UTF8 bytes"
+    ([text | row<-toList (cellRowsForPic (V.picForImage mixed) (7,1)),CellText _ text<-toList row]==["Aéδ░│𝄞Z"])
+  check "combining box drawing stays a complete semantic grapheme"
+    (semantic (V.picForImage (textImage V.defAttr "─\x301\&x")) (2,1)==[("─\x301",1,0,1)])
   let settings=fst (runCommand EditorOptions (initialDesktop (80,25)) {videoMode=Just 3})
       checked=settings {dialog=fmap (\d -> d {fields=[CheckBox "Pixelate Unicode" True]}) (dialog settings)}
   check "preferences apply Unicode pixelation" (pixelateUnicode (fst (handleEvent (V.EvKey V.KEnter []) checked)))
