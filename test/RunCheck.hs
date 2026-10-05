@@ -1,11 +1,15 @@
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE CPP, OverloadedStrings #-}
 module RunCheck (checks) where
 
 import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Concurrent (threadDelay)
+import qualified Control.Concurrent.STM as STM
+import Control.Concurrent.Async (withAsync, wait)
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Exception (bracket)
 import Control.Monad (unless, when, forM_, foldM)
 import Data.Aeson
+import Data.IORef
 import Data.Aeson.Types (parseMaybe)
 import qualified Data.Aeson.Key as K
 import qualified Data.ByteString as BS
@@ -17,7 +21,11 @@ import qualified Graphics.Vty as V
 import System.Directory
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.FilePath ((</>))
-import System.IO (hClose, openTempFile)
+import System.IO (hClose, openTempFile, withBinaryFile, IOMode(..), Handle, hFlush)
+#ifndef mingw32_HOST_OS
+import System.Posix.IO (openFd, closeFd, OpenMode(ReadWrite), OpenFileFlags(nonBlock), defaultFileFlags)
+#endif
+import System.Process (callProcess)
 import System.Timeout (timeout)
 import System.Info (os)
 import qualified Hide.Consoles as C
@@ -26,7 +34,18 @@ import qualified Hide.Build as B
 import Hide.Buffer
 import Hide.Debugger
 import Hide.Conversation
+import Hide.RuntimeMCP (runtimeTool)
+import Hide.GitOperations
+import Hide.GuestAccess (guestEffectsAllowed, validateGuestEffects)
+import Hide.MCPPermissions (withPermissionsAt, permissionBuildInputAs, policyEffects, tickPermissions, awaitPermissionWork)
+import Hide.ControlMCP (controlTool, controlTools)
+import Hide.AgentAccess (grantAgentAccess, revokeAgentAccess, resolveActiveAgentAccess)
+import qualified Hide.AgentRuntime as AR
+import MCPPermissionsCheck (settledTool, settleDialog)
+import qualified Hide.BuildJobs as Jobs
+import Hide.Files (FileState(..))
 import Hide.Sidebar
+import Hide.App (applyEffects)
 import Hide.Model
 import Hide.Terminal (terminalAvailable)
 
@@ -35,6 +54,8 @@ checks = do
   shellBlockChecks
   compilerMenuChecks
   keyboardChecks
+  buildPreparationChecks
+  admittedBuildChecks
   bracket temporary removePathForcibly $ \root ->
     withEnv "XDG_CONFIG_HOME" (Just (root </> "config")) $
     withEnv "THC_ROOT" Nothing $ do
@@ -44,12 +65,20 @@ checks = do
           runtimePath=T.pack (root </> "runtime with spaces")
           target="exe:target with spaces;$(touch should-not-exist)"
           desktop=(initialDesktop (80,25)) {sideTree=Just (emptySidebar root 20 False)}
-          send runtime action values d=snd <$> conversationEffects runtime (\state _ -> pure (False,state)) d [AgentAction action values]
+          core runtime=conversationEffects runtime (\state _ -> pure (False,state))
+          tick runtime d=tickBuildPreparation runtime (core runtime) d >>= tickConversation runtime
+          awaitDialog runtime d=timeout 5000000 (loop d) >>= maybe (error "Build target preparation timed out") pure
+            where loop current=do
+                    next<-tick runtime current
+                    if dialog next/=Nothing then pure next else threadDelay 1000 >> loop next
+          send runtime action values d=do
+            next<-snd <$> core runtime d [AgentAction action values]
+            if action=="run-options" then awaitDialog runtime next else pure next
           awaitRun runtime d=do
             result<-timeout 5000000 (loop d)
             maybe (error "Run fixture timed out") pure result
             where loop state=do
-                    updated<-tickConversation runtime state
+                    updated<-tick runtime state
                     exists<-doesFileExist record
                     value<-if exists then decodeStrict' <$> BS.readFile record else pure Nothing
                     let output=any (T.isInfixOf "fixture run" . contents . documentBuffer) (M.elems (buffers updated))
@@ -60,7 +89,7 @@ checks = do
             result<-timeout 5000000 (loop d)
             maybe (error "Toolchain refresh timed out") pure result
             where loop state=do
-                    updated<-tickConversation runtime state
+                    updated<-tick runtime state
                     if toolchain updated==Just selected then pure updated else threadDelay 10000 >> loop updated
           save runtime values d=send runtime "run-config" ("0":T.pack command:values) d
       writeFile command $ unlines
@@ -122,7 +151,7 @@ checks = do
             ("custom compiler requires an explicit Adapter config" `T.isInfixOf` status refusedDebug)
         _<-send runtime "toolchain" ["THC"] configured
         let dirtyDesktop=insertText "unsaved source" (addDocument Nothing (newBuffer "") configured)
-        refused<-send runtime "run" [] dirtyDesktop
+        refused<-send runtime "run" [] dirtyDesktop >>= awaitDialog runtime
         check "Run rejects dirty source buffers" (maybe False ((=="Save before running").dialogTitle) (dialog refused))
         check "dirty rejection starts no executable" . not =<< doesFileExist record
         when terminalAvailable $ do
@@ -143,6 +172,132 @@ checks = do
         check "Run configuration survives runtime restart" (case dialog restored of
           Just dg -> case fields dg of Input _ savedCommand _: _ -> savedCommand==T.pack command; _ -> False
           Nothing -> False)
+
+-- The existing Run owner must return while filesystem preparation is held,
+-- and only its captured immutable intent may cross the execution gate later.
+buildPreparationChecks :: IO ()
+buildPreparationChecks=when (os/="mingw32") $ bracket temporary removePathForcibly $ \root ->
+  withEnv "XDG_CONFIG_HOME" (Just (root </> "config")) $ do
+    let directory=root </> "config/thc-edit"
+        path=directory </> "run.json"
+        command=root </> "compiler"
+        marker=root </> "executed"
+        file=root </> "Main.hs"
+        base=(addDocument (Just (FileState file Nothing)) ((newBuffer "source") {undoStack=error "build preparation retained Undo"}) (initialDesktop (80,25)))
+          {defaultDirectory=Just root}
+        config=B.BuildConfig THC command "exe:captured" "" "" ["literal argument"]
+        bytes=encode (B.buildConfigValue root config)
+        raw runtime action d=snd <$> conversationEffects runtime (\state _->pure (False,state)) d [AgentAction action []]
+        core runtime=conversationEffects runtime (\state _->pure (False,state))
+        await label runtime predicate d=timeout 5000000 (loop d) >>= maybe (error ("Build preparation: "++label)) pure
+          where loop current=do
+                  next<-tickBuildPreparation runtime (core runtime) current
+                  ready<-predicate next
+                  if ready then pure next else threadDelay 1000 >> loop next
+        freshOptions runtime d=timeout 5000000 (loop d) >>= maybe (error "fresh options after retired preparation") pure
+          where loop current=do
+                  next<-tickBuildPreparation runtime (core runtime) current
+                  queued<-raw runtime "run-options" next
+                  shown<-tickBuildPreparation runtime (core runtime) queued
+                  if dialog shown/=Nothing then pure shown else threadDelay 1000 >> loop shown
+    createDirectoryIfMissing True directory
+    writeFile command ("#!/bin/sh\nprintf 'executed' > '"++marker++"'\nprintf 'prepared run\n'\nIFS= read -r value\n")
+    perms<-getPermissions command
+    setPermissions command perms {executable=True}
+    check "prepared build adoption is host-only" (not (guestEffectsAllowed [AdoptPreparedBuild]))
+    (_,unsupported)<-applyEffects base [AdoptPreparedBuild]
+    check "unowned prepared-build adoption fails closed"
+      (M.keys (buffers unsupported)==M.keys (buffers base) && fmap windowId (activeWindow unsupported)==fmap windowId (activeWindow base))
+
+    -- The writer handshake proves that the real read is waiting for EOF. The
+    -- compiler cannot run while the UI remains responsive to a source edit.
+    callProcess "mkfifo" [path]
+    opened<-newEmptyMVar
+    release<-newEmptyMVar
+    withAsync (withSettingsWriter path $ \handle->do
+      BL.hPut handle (bytes<>BL.replicate 1048577 32); hFlush handle; putMVar opened (); takeMVar release) $ \writer ->
+      withConversationAt root $ \runtime -> do
+        fast<-timeout 500000 (raw runtime "make" base)
+        pending<-maybe (error "build settings read blocked the owner") pure fast
+        reader<-timeout 5000000 (takeMVar opened)
+        check "held build worker reaches settings read" (reader==Just ())
+        let changed=insertText "new" pending
+        _<-tickBuildPreparation runtime (core runtime) changed
+        putMVar release ()
+        wait writer
+        removeFile path
+        BL.writeFile path bytes
+        shown<-freshOptions runtime changed
+        let (_,_,jobs)=conversationServices runtime
+        result<-Jobs.buildJobStatus jobs shown
+        check "stale source preparation cannot start or replace output" (field "outputAvailable" result/=Just True)
+        check "stale source preparation does not execute" . not =<< doesFileExist marker
+
+    withConversationAt root $ \runtime -> do
+      queued<-raw runtime "run-options" base
+      let modal=prompt "Unrelated" Information [SelectedInput "Name" "draft" (Selection 0 5)] queued
+      retained<-foldM (\d _->threadDelay 1000 >> tickBuildPreparation runtime (core runtime) d) modal [1..30::Int]
+      check "ready build options preserve a later modal" (dialog retained==dialog modal)
+      shown<-await "modal-deferred options" runtime (pure . maybe False ((==AgentDialog "run-config") . purpose) . dialog) retained {dialog=Nothing}
+      check "deferred options use the captured compiler" (case dialog shown of
+        Just dg->case fields dg of Input _ selected _:_->selected==T.pack command; _->False
+        _->False)
+
+    withConversationAt root $ \runtime -> do
+      pending<-raw runtime "make" base
+      _<-snd <$> core runtime pending [AgentAction "run-config" ["0",T.pack command,"exe:new","","","[]","0"]]
+      _<-freshOptions runtime pending
+      check "settings Save retires an earlier captured build" . not =<< doesFileExist marker
+
+    -- Refusing the delayed gate consumes the ready intent. A later permissive
+    -- tick cannot resurrect it; Stop also retires a not-yet-adopted intent.
+    withConversationAt root $ \runtime -> do
+      pending<-raw runtime "make" base
+      gated<-newIORef False
+      let refuse state effects=do
+            when (AdoptPreparedBuild `elem` effects) (writeIORef gated True)
+            pure (False,state)
+          loop current=do
+            next<-tickBuildPreparation runtime refuse current
+            seen<-readIORef gated
+            if seen then pure next else threadDelay 1000 >> loop next
+      refused<-timeout 5000000 (loop pending) >>= maybe (error "build result did not reach the refusing gate") pure
+      _<-freshOptions runtime refused
+      check "refused ready build is not retried behind the gate" . not =<< doesFileExist marker
+      waiting<-raw runtime "make" base
+      (stopped,answer)<-runtimeTool runtime waiting "build_stop" (object [])
+      accepted<-answer
+      check "shared tool Stop accepts pending owner cancellation" (either (const False) (const True) accepted)
+      _<-freshOptions runtime stopped
+      check "Stop before adoption starts no process" . not =<< doesFileExist marker
+
+    when terminalAvailable $ withConversationAt root $ \runtime -> do
+      pending<-raw runtime "run" base
+      launching<-await "terminal launch reservation" runtime (const (buildTerminalLaunchPending runtime)) pending
+      withGitOperations (buildTerminalLaunchPending runtime) $ \git -> do
+        (_,denied)<-gitTool git launching "git_pull" (object [])
+        check "mutating Git refuses an unadopted terminal launch" . either (const True) (const False) =<< denied
+        (_,readable)<-gitTool git launching "git_operation_status" (object [])
+        check "Git status remains readable during terminal launch" . either (const False) (const True) =<< readable
+      stopped<-raw runtime "build-stop" launching
+      _<-await "abandoned terminal cleanup" runtime (const (not <$> buildTerminalLaunchPending runtime)) stopped
+      let (_,consoles,_)=conversationServices runtime
+      check "abandoned prepared terminal cannot become a visible console" . null =<< C.listConsoles consoles
+
+      exists<-doesFileExist marker
+      when exists (removeFile marker)
+      again<-raw runtime "run" base
+      started<-await "second terminal launch reservation" runtime (const (buildTerminalLaunchPending runtime)) again
+      let waitMarker=do
+            present<-doesFileExist marker
+            if present then pure () else threadDelay 1000 >> waitMarker
+      processStarted<-timeout 5000000 waitMarker
+      check "terminal worker actually starts the approved process" (processStarted==Just ())
+      let edited=insertText "new" started
+      changed<-snd <$> core runtime edited [AgentAction "run-config" ["0",T.pack command,"exe:next","","","[]","0"]]
+      shown<-await "edited running terminal adoption" runtime (const (not . null <$> C.listConsoles consoles)) changed
+      check "post-launch editing and settings Save preserve program adoption"
+        (contents (documentBuffer (buffers shown M.! 1))=="newsource")
 
 keyboardChecks :: IO ()
 keyboardChecks = do
@@ -175,6 +330,16 @@ check label ok=unless ok (error label)
 withEnv :: String -> Maybe String -> IO a -> IO a
 withEnv name value action=bracket (lookupEnv name <* set value) set (const action)
   where set=maybe (unsetEnv name) (setEnv name)
+-- Keep FIFO EOF held without a blocking open on the sole capability. Writes
+-- larger than its capacity prove the real configuration reader consumed them.
+withSettingsWriter :: FilePath -> (Handle -> IO a) -> IO a
+#ifdef mingw32_HOST_OS
+withSettingsWriter path=withBinaryFile path WriteMode
+#else
+withSettingsWriter path action=bracket (openFd path ReadWrite defaultFileFlags {nonBlock=True}) closeFd $
+  \_->withBinaryFile path WriteMode action
+#endif
+
 temporary :: IO FilePath
 temporary=do
   root<-getTemporaryDirectory
@@ -315,3 +480,159 @@ shellBlockChecks = when (terminalAvailable && os/="mingw32") $ bracket temporary
         emptyDesktop=finished {buffers=M.adjust (\doc->doc {documentShellBlocks=[empty]}) bid (buffers finished)}
     rejected<-execute emptyDesktop empty
     check "empty shell block reports error" (maybe False ((=="Cannot execute shell block").dialogTitle) (dialog rejected))
+
+-- The real input path captures a delayed build before the same permission owner
+-- rechecks its caller/policy. Adoption ticks are withheld until the state changes.
+admittedBuildChecks :: IO ()
+admittedBuildChecks=when (os/="mingw32") $ bracket temporary removePathForcibly $ \root ->
+  withEnv "XDG_CONFIG_HOME" (Just (root </> "config")) $
+  withEnv "THC_EDIT_SESSION" Nothing $ withEnv "THC_ROOT" Nothing $ do
+    let directory=root </> "config/thc-edit"
+        configPath=directory </> "run.json"
+        policyPath=root </> "policy.toml"
+        command=root </> "fixture compiler"
+        marker=root </> "launches"
+        base=(addDocument (Just (FileState (root </> "Main.hs") Nothing)) (newBuffer "source") (initialDesktop (80,25))) {defaultDirectory=Just root}
+        bytes=encode (B.buildConfigValue root (B.BuildConfig THC command "exe:captured" "" "" []))
+        input events=object ["events" .= events]
+        key=object ["type" .= ("key"::T.Text),"key" .= ("F9"::T.Text)]
+        core runtime=conversationEffects runtime (\d _->pure (False,d))
+        tick runtime permissions d=tickBuildPreparation runtime (core runtime) d >>= tickPermissions permissions
+        policy mode=writeFile policyPath ("[editor.mcp.permissions]\neditor_input = '"++mode++"'\n")
+        clearMarker=doesFileExist marker >>= \exists->when exists (removeFile marker)
+        freshOptions runtime permissions d=timeout 5000000 (loop d) >>= maybe (error "admitted build did not retire") pure
+          where loop current=do
+                  next<-tick runtime permissions current
+                  queued<-snd <$> core runtime next [AgentAction "run-options" []]
+                  shown<-tick runtime permissions queued
+                  if maybe False ((==AgentDialog "run-config").purpose) (dialog shown)
+                    then pure shown else threadDelay 1000 >> loop shown
+        noLaunch label=check label . not =<< doesFileExist marker
+        noJob runtime d label=do
+          let (_,_,jobs)=conversationServices runtime
+          facts<-Jobs.buildJobStatus jobs d
+          check label (field "active" facts==Just False && field "outputAvailable" facts/=Just True)
+        launchCount=do
+          found<-doesFileExist marker
+          if found then BS.length <$> BS.readFile marker else pure 0
+        awaitLaunch runtime permissions d=timeout 5000000 (loop d) >>= maybe (error "admitted build never launched") pure
+          where loop current=do
+                  next<-tick runtime permissions current
+                  count<-launchCount
+                  if count>0 then pure next else threadDelay 1000 >> loop next
+        initiate runtime permissions caller apply=permissionBuildInputAs caller permissions
+          (\admission d name args->withBuildAdmission runtime admission (controlTool apply d name args))
+        guest runtime d fx=validateGuestEffects d fx >> core runtime d fx
+        attributed runtime=do
+          let agents=conversationAgents runtime
+          token<-grantAgentAccess (AR.agentAccess agents) (AR.primaryAgent agents)
+          let caller=fmap (() <$) (resolveActiveAgentAccess (AR.agentAccess agents) (AR.agentHub agents) token)
+          live<-caller
+          check "build fixture has a live Primary credential" (live==Right ())
+          pure caller
+        admit runtime permissions caller d=do
+          (shown,reply)<-settledTool permissions (initiate runtime permissions caller (guest runtime)) d "editor_input" (input [key])
+          accepted<-case dialog shown of
+            Just dg | PermissionDialog action<-purpose dg,"approve:" `T.isPrefixOf` action->do
+              let (next,fx)=submitDialog 0 dg shown
+              (_,approved)<-policyEffects permissions (core runtime) next fx
+              settleDialog permissions dg approved
+            _->pure shown
+          result<-reply
+          check "real editor_input accepted one build event" (case result of Right value->field "appliedEvents" value==Just (1::Int); _->False)
+          pure accepted
+        -- Preparation can complete in the background, but only the serialized
+        -- owner tick may adopt it. Apply revocation/policy/Stop before that tick.
+        beforeAdoption runtime permissions caller after=admit runtime permissions caller base >>= after
+        -- Consume the initial wire-policy wake. A subsequent fresh-check wake
+        -- then proves a result is ready without invoking the launch callback.
+        freshPolicy runtime permissions d=do
+          STM.atomically ((awaitPermissionWork permissions >> pure ()) `STM.orElse` pure ())
+          timeout 5000000 (loop d) >>= maybe (error "deferred build policy did not complete") pure
+          where loop current=do
+                  next<-tick runtime permissions current
+                  ready<-STM.atomically ((awaitPermissionWork permissions >> pure True) `STM.orElse` pure False)
+                  if ready then tickPermissions permissions next else threadDelay 1000 >> loop next
+    createDirectoryIfMissing True directory
+    BL.writeFile configPath bytes
+    writeFile command ("#!/bin/sh\nprintf x >> '"++marker++"'\nprintf 'captured build\n'\n")
+    perms<-getPermissions command
+    setPermissions command perms {executable=True}
+
+    -- All four refusals begin as actually admitted, attributed input. They must
+    -- retire before a fresh human options request can occupy the same slot.
+    forM_ ["revoked","disabled","needs-approval","stopped"] $ \reason->do
+      policy "enable"
+      clearMarker
+      withConversationAt root $ \runtime->withPermissionsAt policyPath controlTools $ \permissions->do
+        caller<-attributed runtime
+        pending<-beforeAdoption runtime permissions caller $ \d->case reason of
+          "revoked"->do
+            let agents=conversationAgents runtime
+            revokeAgentAccess (AR.agentAccess agents) (AR.primaryAgent agents)
+            pure d
+          "disabled"->policy "disable" >> pure d
+          "needs-approval"->policy "prompt" >> pure d
+          _->stopConversationBuild runtime d
+        shown<-freshOptions runtime permissions pending
+        noJob runtime shown ("admitted build has no job: "++reason)
+        noLaunch ("admitted build refusal: "++reason)
+
+    policy "prompt"
+    clearMarker
+    withConversationAt root $ \runtime->withPermissionsAt policyPath controlTools $ \permissions->do
+      caller<-attributed runtime
+      pending<-beforeAdoption runtime permissions caller pure
+      launched<-awaitLaunch runtime permissions pending
+      check "approved input final policy does not ask again" (dialog launched==Nothing)
+      _<-freshOptions runtime permissions launched
+      check "approved admitted intent executes once" . (==1) =<< launchCount
+
+    policy "enable"
+    clearMarker
+    withConversationAt root $ \runtime->withPermissionsAt policyPath controlTools $ \permissions->do
+      caller<-attributed runtime
+      pending<-admit runtime permissions caller base
+      allowed<-freshPolicy runtime permissions pending
+      noLaunch "fresh policy result alone does not launch"
+      let modal=prompt "Unrelated" Information [SelectedInput "Name" "draft" (Selection 0 5)] allowed
+      heldModal<-tickBuildPreparation runtime (core runtime) modal
+      policy "disable"
+      _<-tick runtime permissions heldModal
+      shown<-freshOptions runtime permissions heldModal {dialog=Nothing}
+      noJob runtime shown "modal-deferred refusal has no job"
+      noLaunch "modal-deferred build obtains fresh external policy"
+
+    -- The later real input event fails after the first event captured an intent.
+    -- Failure of the original callback must retire that intent, not just its RPC.
+    policy "enable"
+    clearMarker
+    withConversationAt root $ \runtime->withPermissionsAt policyPath controlTools $ \permissions->do
+      caller<-attributed runtime
+      seen<-newIORef (0::Int)
+      let failing d fx=do
+            validateGuestEffects d fx
+            when (AgentAction "make" [] `elem` fx) $ do
+              n<-atomicModifyIORef' seen (\n->(n+1,n+1))
+              when (n==2) (ioError (userError "fixture-only later input failure"))
+            core runtime d fx
+      (failed,reply)<-settledTool permissions (initiate runtime permissions caller failing) base "editor_input" (input [key,key])
+      check "later input exception fails the original call" . either (const True) (const False) =<< reply
+      shown<-freshOptions runtime permissions failed
+      noJob runtime shown "failed input callback has no job"
+      noLaunch "failed input callback cannot leave an executable intent"
+
+    -- Anonymous inspection retains session policy; human input bypasses the
+    -- editor_input receipt but continues through the original execution gates.
+    policy "enable"
+    clearMarker
+    withConversationAt root $ \runtime->withPermissionsAt policyPath controlTools $ \permissions->do
+      pending<-admit runtime permissions (pure (Right ())) base
+      _<-awaitLaunch runtime permissions pending
+      check "anonymous input uses the same admitted lifecycle" . (==1) =<< launchCount
+    policy "disable"
+    clearMarker
+    withConversationAt root $ \runtime->withPermissionsAt policyPath controlTools $ \permissions->do
+      pending<-snd <$> core runtime base [AgentAction "make" []]
+      _<-awaitLaunch runtime permissions pending
+      check "human build remains independent of editor_input policy" . (==1) =<< launchCount
