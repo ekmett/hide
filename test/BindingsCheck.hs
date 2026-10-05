@@ -166,7 +166,11 @@ checks=do
   check "dialog remapped clipboard does not force background buffers" (clipboard (fst (key (V.KChar 'j') [V.MMeta,V.MShift] guarded))=="safe" && dialogText (fst (key (V.KChar 'k') [V.MMeta,V.MShift] guarded {clipboard="replacement"}))=="replacement")
   check "dialog remap cannot admit an agent-owned sensitive control" (not (guestKeyAllowed editing {dialog=fmap (\dg->dg {purpose=AgentDialog "settings"}) (dialog editing)} (V.KChar 'j') [V.MMeta,V.MShift]))
   check "dialog labels and inspection use its effective context" (menuShortcut editing (MenuItem "Copy" "Cmd+C" Copy)=="⇧⌘J" && any ((==" ⇧⌘K Paste").fst) (statusHints editing) && case snd (runCommand InspectBindings editing) of [InspectKeyBindings (Just (MacPlatform,DialogKeys)) (Just table)]->bindingKeys table Copy==["Cmd+Shift+J"]; _->False)
-  check "dialog projection omits actions unavailable to its focused control" (all (\(_,name)->name `elem` ["hide.dialog.focus-next","hide.dialog.focus-previous"]) (focusedBindingChords editing {dialog=fmap (\dg->dg {focus=1}) (dialog editing)}) && not (any ((=="hide.file.save").snd) (focusedBindingChords editing)))
+  let buttonCommands=map snd (focusedBindingChords editing {dialog=fmap (\dg->dg {focus=1}) (dialog editing)})
+  check "focused dialog buttons project controls without field or source editing"
+    (all (`elem` buttonCommands) ["hide.dialog.accept","hide.dialog.cancel"] &&
+     not (any (`elem` buttonCommands) ["hide.edit.copy","hide.edit.cut","hide.edit.paste","hide.file.save"]) &&
+     not (any ((=="hide.file.save").snd) (focusedBindingChords editing)))
   check "dialog cannot bind a background source command" (either (const True) (const False) (platformBindings [] TerminalPlatform (M.singleton "dialog" (M.singleton "hide.file.save" ["Ctrl+Shift+J"]))))
   check "dialog field text and navigation retain their owner" (dialogText (fst (key (V.KChar 'ø') [] editing))=="ø" && dialog (fst (key V.KEsc [] editing))==Nothing)
   let dialogDefaults=either (error . show) id (configuredBindings [] M.empty)
@@ -174,6 +178,7 @@ checks=do
   check "default dialog clipboard matches field-owned behavior" (clipboard (fst (key (V.KChar 'c') [V.MCtrl] editing {nativeMac=False,keyBindings=dialogDefaults}))=="draft")
   check "unavailable dialog editing action retains Input button mnemonic ownership" (dialog (fst (key (V.KChar 'c') [V.MCtrl] searchEditing))==Nothing)
   check "default dialog search retains permitted replacement action" (maybe False (\dg->case purpose dg of Searching True _->True; _->False) (dialog (fst (key (V.KChar 'f') [V.MMeta,V.MAlt] searchEditing))))
+  dialogControlChecks
   dialogFocusChecks
   horizontalChecks
   verticalChecks
@@ -463,6 +468,68 @@ wordChecks=do
   let poisoned=configured {buffers=M.map (\doc->doc {documentBuffer=(documentBuffer doc) {undoStack=error "word movement forced Undo"}}) (buffers configured)}
   check "word movement does not force source history" (range (event (V.KFun 13) [] poisoned)==Just (Selection 5 5))
 
+dialogControlChecks :: IO ()
+dialogControlChecks=do
+  let check label ok=unless ok (error label)
+      prepare entries=either (error . show) id (configuredBindings [] (M.singleton "terminal" (M.singleton "dialog" (M.fromList entries))))
+      remapped=prepare [("hide.dialog.accept",["F13"]),("hide.dialog.cancel",["F14"])]
+      unbound=prepare [("hide.dialog.accept",[]),("hide.dialog.cancel",[])]
+      base=(initialDesktop (80,25)) {keyBindings=remapped}
+      input=prompt "Name" Information [Input "Name" "draft" 5] base
+      event key mods=handleEvent (V.EvKey key mods)
+      closed=maybe True (const False) . dialog . fst
+      table=remapped M.! (TerminalPlatform,DialogKeys)
+      accept=maybe (error "missing dialog Accept") id (bindingAction table (V.KFun 13) [])
+      cancel=maybe (error "missing dialog Cancel") id (bindingAction table (V.KFun 14) [])
+  check "configured dialog controls use their focused semantic owner" (closed (event (V.KFun 13) [] input) && closed (event (V.KFun 14) [] input))
+  check "removed Enter and Escape cannot replay dialog submission or cancellation"
+    (all (\mods->not (closed (event V.KEnter mods input)) && not (closed (event V.KEsc mods input))) (subsequences [V.MCtrl,V.MShift,V.MAlt]))
+  check "explicitly unbound dialog controls retain no physical defaults"
+    (not (closed (event V.KEnter [] input {keyBindings=unbound})) && not (closed (event V.KEsc [] input {keyBindings=unbound})))
+  check "dialog control labels and projection use effective commands"
+    (commandIdentifier accept==Just "hide.dialog.accept" && commandIdentifier cancel==Just "hide.dialog.cancel" &&
+     any ((==Just (Left accept)).snd) (statusHints input) && any ((==Just (Left cancel)).snd) (statusHints input) &&
+     commandBindingKeys input accept==["F13"] && lookup "F14" (focusedBindingChords input)==Just "hide.dialog.cancel" &&
+     null (commandBindingKeys input {keyBindings=unbound} accept))
+  let defaults=either (error . show) id (configuredBindings [] M.empty)
+      dialogs=[input,prompt "Choice" Information [ComboBox "Choice" ["old","new"] 0 Nothing] base,
+        prompt "Choice" Information [ComboBox "Choice" ["old","new"] 0 (Just 1)] base,
+        prompt "Draft" Information [TextArea "Draft" True (newBuffer "draft") (Selection 5 5) 0 0] base,
+        prompt "Approve" (PermissionDialog "approve:test") [Input "Value" "" 0] base]
+      facts (d,effects)=(fmap (\dg->(focus dg,[(case f of Input _ t pos->(t,Just pos,Nothing); ComboBox _ _ chosen preview->("",Just chosen,preview); TextArea _ _ b sel _ _->(contents b,Just (caret sel),Nothing); _->("",Nothing,Nothing)) | f<-fields dg])) (dialog d),effects)
+  forM_ dialogs $ \current->forM_ [V.KEnter,V.KEsc] $ \key->forM_ (subsequences [V.MCtrl,V.MShift,V.MAlt,V.MMeta]) $ \mods->do
+    let configured=current {keyBindings=defaults,nativeMac=V.MMeta `elem` mods,videoMode=if V.MMeta `elem` mods then Just 3 else Nothing}
+    check "default dialog controls preserve the unconfigured focused owner"
+      (facts (event key mods configured)==facts (event key mods configured {keyBindings=M.empty}))
+  let popup=prompt "Choice" Information [ComboBox "Choice" ["old","new"] 0 (Just 1)] base
+      choice current=case dialog (fst current) of Just dg | ComboBox _ _ value preview:_<-fields dg->(value,preview); _->(-1,Nothing)
+  check "semantic Accept commits dropdown preview without submitting" (choice (event (V.KFun 13) [] popup)==(1,Nothing))
+  check "semantic Cancel reverts dropdown preview without closing" (choice (event (V.KFun 14) [] popup)==(0,Nothing))
+  check "unbound dropdown Escape cannot revert through fallback" (choice (event V.KEsc [] popup {keyBindings=unbound})==(0,Just 1))
+  let area=prompt "Edit" Information [TextArea "Draft" True (newBuffer "draft") (Selection 5 5) 0 0] base
+  check "semantic Accept preserves multiline control ownership" (case dialog (fst (event (V.KFun 13) [] area)) of
+    Just dg | TextArea _ _ b _ _ _:_<-fields dg->contents b=="draft\n"; _->False)
+  let protected=prompt "Approve" (PermissionDialog "approve:test") [Input "Value" "" 0] base
+  check "remapped Accept cannot submit an approval from its input field" (null (snd (event (V.KFun 13) [] protected)) && dialog (fst (event (V.KFun 13) [] protected))/=Nothing)
+  check "remapped Cancel keeps the permission denial owner" (snd (event (V.KFun 14) [] protected)==[PermissionAction "approve:test" ["1"]])
+  let protectedButton=protected {dialog=fmap (\dg->dg {focus=length (fields dg)}) (dialog protected)}
+  check "human semantic Accept still reaches the focused approval button" (case snd (event (V.KFun 13) [] protectedButton) of
+    [PermissionAction _ ("0":_)]->True; _->False)
+  refusedAccept<-P.applyGuestInput (P.Key "F13" []) protectedButton
+  refusedCancel<-P.applyGuestInput (P.Key "F14" []) protected
+  check "remapped dialog decisions remain human-only" (case (refusedAccept,refusedCancel) of (Left _,Left _)->True; _->False)
+  let private=prompt "Private" Information [Input "API key" "secret" 6] base
+  denied<-P.applyGuestInput (P.Key "F13" []) private
+  safeCancel<-P.applyGuestInput (P.Key "F14" []) private
+  check "private-field Cancel retains safe Escape authority without granting Accept" (case (denied,safeCancel) of (Left _,Right (d,[]))->dialog d==Nothing; _->False)
+  let macBindings=either (error . show) id (platformBindings [] MacPlatform (M.singleton "dialog" (M.fromList [("hide.dialog.accept",["Cmd+Shift+J"]),("hide.dialog.cancel",["Cmd+Shift+K"])])))
+      macInput=input {keyBindings=macBindings,nativeMac=True,videoMode=Just 3}
+  check "native dialog controls share effective masks and host dispatch"
+    (nativeMenuShortcut macInput accept==("j",9) && lookup "Cmd+Shift+K" (focusedBindingChords macInput)==Just "hide.dialog.cancel" && closed (event (V.KChar 'j') [V.MMeta,V.MShift] macInput))
+  let guarded=input {buffers=error "dialog control forced background source"}
+  check "dialog controls never inspect background source" (closed (event (V.KFun 13) [] guarded) && closed (event (V.KFun 14) [] guarded))
+  check "dialog controls are unavailable outside a modal" (not (commandEnabled base accept) && not (commandEnabled base cancel) && null (snd (runCommand accept base)))
+
 dialogFocusChecks :: IO ()
 dialogFocusChecks=do
   let check label ok=unless ok (error label)
@@ -491,7 +558,7 @@ dialogFocusChecks=do
   check "remapped previous commits dropdown preview before wrapping" (choice (event (V.KFun 14) [] popup)==(1,Nothing,3))
   check "unbound dropdown Tab cannot commit preview" (choice (event (V.KChar '\t') [] popup {keyBindings=unbound})==(0,Just 1,0))
   check "dropdown Escape keeps its revert owner" (choice (event V.KEsc [] popup)==(0,Nothing,0))
-  check "dropdown projection suppresses editing commands" (lookup "F13" (focusedBindingChords popup)==Just "hide.dialog.focus-next" && not (dialogCommandAllowed Copy popup) && all (\(_,name)->name `elem` ["hide.dialog.focus-next","hide.dialog.focus-previous"]) (focusedBindingChords popup))
+  check "dropdown projection suppresses editing commands" (lookup "F13" (focusedBindingChords popup)==Just "hide.dialog.focus-next" && not (dialogCommandAllowed Copy popup) && all (\(_,name)->name `elem` ["hide.dialog.focus-next","hide.dialog.focus-previous","hide.dialog.accept","hide.dialog.cancel"]) (focusedBindingChords popup))
   let area=prompt "Edit" Information [TextArea "Text" True (newBuffer "draft") (Selection 5 5) 0 0] base
   check "TextArea Enter and focus retain distinct owners" ((case dialog (event V.KEnter [] area) of Just dg | TextArea _ _ b _ _ _:_<-fields dg->bufferLength b==6 && bufferLineCount b==2; _->False) && focusOf (event V.KEnter [] area)==0 && focusOf (event (V.KFun 13) [] area)==1)
   let guarded=input {buffers=error "dialog focus forced background buffers"}
@@ -504,7 +571,7 @@ dialogFocusChecks=do
   let inherited=either (error . show) id (platformBindings [] TerminalPlatform (M.fromList [("global",M.singleton "hide.dialog.focus-next" ["F15"]),("dialog",M.singleton "hide.dialog.focus-next" ["F13"])]))
   check "dialog local focus override replaces global chords" (focusOf (event (V.KFun 13) [] input {keyBindings=inherited})==1 && focusOf (event (V.KFun 15) [] input {keyBindings=inherited})==0)
   check "dialog focus conflicts are rejected" (either (const True) (const False) (platformBindings [] TerminalPlatform (M.singleton "dialog" (M.fromList [("hide.dialog.focus-next",["F13"]),("hide.dialog.focus-previous",["F13"])]))))
-  check "dialog focus cannot steal fixed control keys" (all (\chord->either (const True) (const False) (platformBindings [] TerminalPlatform (M.singleton "dialog" (M.singleton "hide.dialog.focus-next" [chord])))) ["Enter","Escape","Ctrl+Tab","Cmd+Tab","Ctrl+U","Alt+A","F10"])
+  check "dialog focus cannot steal reserved field and platform controls" (all (\chord->either (const True) (const False) (platformBindings [] TerminalPlatform (M.singleton "dialog" (M.singleton "hide.dialog.focus-next" [chord])))) ["Ctrl+Tab","Cmd+Tab","Ctrl+U","Alt+A","F10"])
   let search=searchPrompt False base
   check "search Ctrl Tab retains page switching while focus is remapped" (maybe False (\dg->case purpose dg of Searching True _->True; _->False) (dialog (event (V.KChar '\t') [V.MCtrl] search)) && focusOf (event (V.KFun 13) [] search)==1)
   check "dialog focus is unavailable outside its modal owner" (not (commandEnabled base nextCommand) && null (snd (runCommand nextCommand base)))
