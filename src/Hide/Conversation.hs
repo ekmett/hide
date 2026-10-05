@@ -93,7 +93,7 @@ data QueuedQuery = SubmittedQuery !Text | QuestionQuery !Int !AH.AgentId !Provid
 data QuestionTicket = QuestionTicket !Int !AH.AgentId !(Maybe ProviderReceipt)
 data QuestionResult = QuestionResult !AH.AgentId !(Maybe ProviderReceipt) !Value
 
--- One human build intent, captured without retaining editable buffers or Undo.
+-- One caller-bound build intent, captured without retaining editable buffers or Undo.
 data BuildReceipt = BuildReceipt !Int !FilePath !(Maybe FilePath) ![(Int,Maybe FilePath,ContentVersion)] !(Maybe AdmittedBuild)
 data PreparedBuild = BuildOptions !Dialog
   | BuildCommands !B.BuildAction !FilePath ![(FilePath,[String])]
