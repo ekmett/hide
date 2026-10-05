@@ -13,7 +13,7 @@ import qualified Data.Map.Strict as M
 import qualified Data.Vector as V
 import Hide.Buffer (BufferContent,bufferContent,contentSlice,contentLength,newBuffer,prepareBuffer)
 import Hide.Markdown (renderMarkdown)
-import Hide.Syntax (linkSpans)
+import Hide.Syntax (linkSpans,styleLayoutMetadata)
 import qualified Data.Text as T
 import Hide.Model
 import qualified Hide.Plugin.Window as W
@@ -74,6 +74,8 @@ prepare (Capture (ident,target,width,wide) text MarkdownSource)=do
   layout<-prepareTextLayout wide width content (indexedHighlightRows chars)
   _<-evaluate (sum [a+z+T.length url | (a,z,url)<-links])
   pure (ident,MarkdownWindowPresentation target width wide layout content links)
+prepare (Capture (ident,target,width,False) _ (DocumentStyles chars))
+  | not (any (styleLayoutMetadata . snd) chars)=pure (ident,WindowPresentationUnneeded target width False)
 prepare (Capture (ident,target,width,wide) text styled)=do
   layout<-prepareTextLayout wide width text (case styled of DocumentStyles chars->indexedHighlightRows chars; PluginStyles rows->rows; MarkdownSource->error "Unprepared Markdown source")
   pure (ident,WindowPresentation target width wide layout)
@@ -86,7 +88,8 @@ prepareTextPresentations desktop=do
 
 metadata :: Desktop -> [Target]
 metadata desktop=[(windowId window,target,max 1 (width (bounds window)-2),wideSectionTitles desktop)
-      | window<-windows desktop,windowPresentationNeeded desktop window,Just target<-[windowPresentationTarget desktop window]]
+      | window<-windows desktop,Just target<-[windowPresentationTarget desktop window],
+        windowPresentationNeeded desktop window || case target of DocumentPresentation{}->True; _->False]
 
 captures :: Desktop -> [Target] -> [Capture]
 captures desktop=map capture

@@ -33,7 +33,7 @@ import Data.Time (formatTime, defaultTimeLocale)
 import Hide.Hex
 import Hide.Buffer
 import Hide.BufferView
-import Hide.Unicode (graphemes, clusterWidth, textImage, wideTextImage, displayClusters, terminalProjection)
+import Hide.Unicode (clusterWidth, textImage, wideTextImage, displayClusters, terminalProjection)
 import Hide.GuestAccess (streamerReadableAt)
 import qualified Hide.Plugin.Menu as Plugin
 import Hide.Sidebar
@@ -749,7 +749,7 @@ sourceCellSpans project dark override active sel start left columns row=(column,
           n=T.length original
           paint=if active && offset<hi && offset+n>lo then selected (color style) else color style
           shown | T.any (\c->c<' ' || c=='\DEL') original=T.map (\c->if c<' ' || c=='\DEL' then '·' else c) original
-                | otherwise=original
+                | otherwise=graphemeDisplayText glyph
           occupied | advance<=0=[]
                    | original=="\t"=ordinary paint (T.replicate advance " ")
                    | otherwise=[project (CellGlyph paint shown advance 0 advance)]
@@ -761,7 +761,7 @@ styledImage dark selectable override active sel start chars
   | otherwise = V.horizCat
   [I.HorizText paint (TL.fromStrict (T.concat [text | (_,text,_)<-run]))
     (sum [width | (_,_,width)<-run]) (sum [T.length text | (_,text,_)<-run])
-  | run@((paint,_,_):_)<-groupBy (\(a,_,_) (b,_,_)->a==b) (expand 0 start (graphemes (T.pack (map fst chars))) chars)]
+  | run@((paint,_,_):_)<-groupBy (\(a,_,_) (b,_,_)->a==b) (expand 0 start (presentationItems (T.pack (map fst chars)) chars) chars)]
   where
     (lo,hi)=ordered sel
     paintAt offset style = if active && selectable style && offset<hi && offset>=lo
@@ -782,13 +782,14 @@ styledImage dark selectable override active sel start chars
       | otherwise = collect a ((if c<' ' || c=='\DEL' then '·' else c):reversed) (n+1) (col+1) (offset+1) rest
     image a reversed n=I.HorizText a (TL.fromStrict (T.pack (reverse reversed))) n n
     expand _ _ [] _=[]
-    expand col offset (g:gs) styled = (a,text,width) : expand (col+width) (offset+T.length g) gs (drop (T.length g) styled)
+    expand col offset ((g,overflow):gs) styled = (a,text,width) : expand (col+width) (offset+T.length g) gs (drop (T.length g) styled)
       where
         style=case styled of (_,s):_->s; _->Plain
         normal=syntaxAttr dark style
         colored=maybe normal (\color->color {V.attrStyle=V.attrStyle normal}) override
         a=if active && selectable style && offset<hi && offset+T.length g>lo then colored `V.withForeColor` blue `V.withBackColor` gray else colored
-        text | g=="\r"=""
+        text | overflow="�"
+             | g=="\r"=""
              | g=="\t"=T.replicate (8-col `mod` 8) " "
              | otherwise=T.map (\c -> if c<' ' || c=='\DEL' then '·' else c) g
         width | g=="\t"=8-col `mod` 8

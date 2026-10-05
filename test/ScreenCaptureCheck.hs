@@ -30,6 +30,24 @@ checks=do
   font<-loadFont
   let desktop=addDocument Nothing (newBuffer "  λ 中 ▙ é 👩🏽\x200d\&💻 ❤️\n") (initialDesktop (80,25))
       takeCapture d image=capture font d image >>= either (error . T.unpack) pure
+  let overflow="a"<>T.replicate 70 "\x301"<>"Z"
+      overflowView=addDocument Nothing (newBuffer overflow) (initialDesktop (80,25))
+      fallbackView=addDocument Nothing (newBuffer "���Z") (initialDesktop (80,25))
+      view=fromMaybe (error "missing overflow view") (activeWindow overflowView)
+      ox=left (bounds view)+1; oy=top (bounds view)+1
+  overflowCapture<-takeCapture overflowView True
+  fallbackCapture<-takeCapture fallbackView True
+  overflowImage<-pngImage overflowCapture
+  fallbackImage<-pngImage fallbackCapture
+  check "overflow capture text and pixel geometry agree with bounded visible fragments"
+    (maybe False (T.isInfixOf "���Z") (field "text" (textMetadata overflowCapture)) &&
+     all (\(x,y)->pixelAt overflowImage x y==pixelAt fallbackImage x y) [(x,y) | x<-[ox*8..(ox+4)*8-1],y<-[oy*16..(oy+1)*16-1]])
+  let privateOverflow=overflowView {guestPrivatePaths=["/authority"],buffers=M.map (\doc->doc {documentOrigin=Just "/authority/overflow.txt"}) (buffers overflowView)}
+  hiddenOverflow<-takeCapture privateOverflow True
+  hiddenOverflowImage<-pngImage hiddenOverflow
+  check "overflow source privacy masks every fragment and its following cell"
+    (all (==PixelRGB8 0 0 0) [pixelAt hiddenOverflowImage x y | x<-[ox*8..(ox+4)*8-1],y<-[oy*16..(oy+1)*16-1]] &&
+     all (\x->not (cellReadable (cellAccess privateOverflow x oy))) [ox..ox+3])
   let privateMessages=setProblemsVisible True desktop {guestPrivatePaths=["/authority"],
         diagnostics=[Diagnostic "/authority/secret.hs" Nothing 0 0 1 "secret-diagnostic-payload"]}
   safeMessages<-takeCapture privateMessages True

@@ -21,7 +21,7 @@ import Hide.Links (openResource)
 import Hide.Remote (RemotePeer)
 import Hide.TextStyle
 import Hide.RemoteWindow (RemoteFrame(..), RemoteCell(..), remoteBindingInput)
-import Hide.Unicode (CellSpan(..),cellDisplayOps,graphemes,clusterWidth)
+import Hide.Unicode (CellSpan(..),cellDisplayOps,displayItems,itemDisplayText,itemWidth)
 #ifdef WITH_REMOTE
 import Control.Concurrent.Async (withAsync, poll)
 import Control.Concurrent.STM
@@ -87,7 +87,7 @@ remoteTerminalDisplay (columns,linesCount) frame message=(cursor,cellDisplayOps 
         visible=min shown (width-x)
     bannerPaint=V.defAttr `V.withForeColor` V.white `V.withBackColor` V.blue
     banner=[if n==1 && T.length glyph==1 then CellText bannerPaint glyph else CellGlyph bannerPaint glyph n 0 n
-      | glyph<-graphemes (T.filter isPrint message),let n=clusterWidth glyph,n>0]
+      | item<-displayItems (T.filter isPrint message),let glyph=itemDisplayText item,let n=itemWidth item,n>0]
     bannerWidth=min width (sum (map spanWidth banner))
     spanWidth (CellText _ text)=T.length text
     spanWidth (CellGlyph _ _ _ _ shown)=shown

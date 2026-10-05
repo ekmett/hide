@@ -12,8 +12,8 @@ import qualified Data.Text as T
 import qualified Data.Vector as V
 import Data.Unique (Unique,newUnique,hashUnique)
 import Hide.Buffer (BufferContent,contentLineOffset)
-import Hide.Syntax (Style(..),fontTraits,sectionTitle,styleScript)
-import Hide.Unicode (graphemes,clusterWidth,Script)
+import Hide.Syntax (Style(..),fontTraits,sectionTitle,styleScript,presentationItems)
+import Hide.Unicode (displayItems,itemWidth,Script)
 
 data LayoutGlyph = LayoutGlyph
   { layoutText :: !Text, layoutDisplayText :: !Text, layoutStart :: !Int, layoutEnd :: !Int
@@ -49,30 +49,32 @@ prepareTextLayout wide requested text styled=do
   pure (TextLayout identity rows width)
   where
     columns=max 1 requested
-    line number chars=wrap [] 0 (contentLineOffset text number) (glyphs (contentLineOffset text number) (graphemes (T.pack (map fst chars))) chars)
+    line number chars=wrap [] 0 (contentLineOffset text number) (glyphs (contentLineOffset text number) (presentationItems (T.pack (map fst chars)) chars) chars)
     glyphs _ [] _=[]
-    glyphs offset (g:rest) chars=
+    glyphs offset ((g,overflow):rest) chars=
       let style=case chars of (_,value):_->value; _->Plain
           next=offset+T.length g
-      in (g,offset,next,style):glyphs next rest (drop (T.length g) chars)
+      in (g,overflow,offset,next,style):glyphs next rest (drop (T.length g) chars)
     wrap current col start []=[finish current col start]
-    wrap current col start remaining@((g,a,z,style):rest)
+    wrap current col start remaining@((g,overflow,a,z,style):rest)
       | not (null current) && wide && sectionTitle style && col+advance>columns = finish current col start:wrap [] 0 a remaining
       | otherwise=wrap (LayoutGlyph g drawn a z col advance shownStyle natural script:current) (col+advance) start rest
       where
         shownStyle
           | wide && sectionTitle style && requestedScript==Nothing = let (base,_,italic)=fontTraits style in if italic then ItalicStyle base else base
           | otherwise = style
-        natural=sum (map clusterWidth (graphemes drawn))
+        natural=sum (map itemWidth (displayItems drawn))
         requestedScript=styleScript style
         script=case requestedScript of
           Just mode | natural `elem` [1,2],not (T.any (\c->c<' ' || c=='\DEL') g)->Just mode
           _->Nothing
-        advance | Just _<-script=1
+        advance | overflow=1
+                | Just _<-script=1
                 | requestedScript/=Nothing && natural==0=0
                 | wide && sectionTitle style && not (T.null drawn)=2
                 | otherwise=natural
-        drawn | g==T.singleton '\r'=T.empty
+        drawn | overflow=T.singleton '�'
+              | g==T.singleton '\r'=T.empty
               | g==T.singleton '\t'=T.replicate (if wide && sectionTitle style then 1 else 8-col `mod` 8) (T.singleton ' ')
               | otherwise=T.map (\c->if c<' ' || c=='\DEL' then '·' else c) g
     finish current col start=LayoutRow start (case current of glyph:_->layoutEnd glyph; _->start) col (V.fromList (reverse current))

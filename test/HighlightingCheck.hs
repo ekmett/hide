@@ -50,6 +50,14 @@ checks = do
   check "exceptional width is independent of source character count" (case sourceSigils (plainSourceRow "🇯🇵") of
     ConsSigil glyph Plain 2 Nil->T.length (graphemeText glyph)==2
     _->False)
+  forM_ [33,65] $ \count->do
+    let original="a"<>T.replicate (count-1) "\x301"<>"Z"
+        sigils=sourceSigils (plainSourceRow original)
+        shown Nil=[]
+        shown (ConsChars text _ rest)=text:shown rest
+        shown (ConsSigil glyph _ advance rest)=if advance==1 then graphemeDisplayText glyph:shown rest else error "overflow source advance"
+    check "single-scalar overflow tails retain source but emit visible replacement"
+      (T.concat (fragments sigils)==original && T.concat (shown sigils)==T.replicate ((count+31) `div` 32) "�"<>"Z")
   check "zero-width source windows leave the row unforced" (case sourceSigilsWindow 4 0 (error "empty viewport forced source") of
     (0,0,Nil)->True
     _->False)
