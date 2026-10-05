@@ -106,7 +106,7 @@ prepareRenameSource regular rawRoot private raw files=do
   let affected=[(file,current) | (file,current)<-canonical,within path current]
   forM_ affected $ \(RenameFile _ state _ _ image,_)->do
     when (snapshotDirty image) (ioError (userError "Save or close dirty open buffers before changing their paths"))
-    unless (isJust (diskBytes state)) (ioError (userError "Rename requires a saved file"))
+    unless (not regular || isJust (diskBytes state)) (ioError (userError "Rename requires a saved file"))
   after<-fileStamp path
   unless (after==stamp) (ioError (userError "Rename source changed while preparing"))
   _<-evaluate (length root+length path+sum [length current | (_,current)<-canonical])
