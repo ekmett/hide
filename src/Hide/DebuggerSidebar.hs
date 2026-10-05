@@ -88,12 +88,12 @@ withDebuggerSidebar host runtime use=withRegistry $ \registry->do
             let rows=map (watchNode (watchAction edit) (watchAction remove) (watchAction evaluate) (watchAction force) selected (sidebarPrivatePaths ctx)) (M.toList entries)
                 emptyRow=P.NodeDef (P.NodeInfo (ident "watch-empty") "No watches; add an expression" "" False Nothing) Nothing []
             pure (Right (P.NodePage (if null rows then [emptyRow] else rows) Nothing))
-          (_,Just 0) | Just (key,revision,receipt,reference)<-watchTarget selected entries parent->do
+          (_,Just offset) | Just (key,revision,receipt,reference)<-watchTarget selected entries parent->do
             let epoch=case receipt of WatchFrame _ stop _ _ _->stop
-            result<-debuggerSidebarRead runtime (DebugPageRequest epoch (DebugWatchVariables key revision receipt reference) 0)
+            result<-debuggerSidebarRead runtime (DebugPageRequest epoch (DebugWatchVariables key revision receipt reference) offset)
             pure $ case result of
               Left err->Left (CommandRejected err)
-              Right body->Right (P.NodePage [watchChild (watchAction force) key revision receipt reference index row (sidebarPrivatePaths ctx) entry | (index,row)<-zip [0..] (take 128 (items "variables" body)),Just entry<-[M.lookup key entries]] Nothing)
+              Right body->Right (P.NodePage [watchChild (watchAction force) key revision receipt reference offset index row (sidebarPrivatePaths ctx) entry | (index,row)<-zip [0..] (take 128 (items "variables" body)),Just entry<-[M.lookup key entries]] (if flag "hasMore" body then Just (number (offset+128)) else Nothing))
           _->pure (Left (CommandRejected "Watch node expired."))
   watches<-P.registerTree registry "hide.sidebar.watches" watchesRoot watchChildren >>= either (ioError . userError . show) pure
   publishTreeFromHost host watches
@@ -162,10 +162,10 @@ watchTarget selected entries parent=case T.splitOn ":" (P.nodeIdText parent) of
   _->Nothing
 
 watchChild :: (DebugSidebarRequest -> P.TreeAction SidebarContext SidebarReply)
-  -> Int -> Int -> WatchFrame -> Int -> Int -> Value -> [FilePath] -> DebuggerWatch -> P.NodeDef SidebarContext SidebarReply
-watchChild forceAction key revision receipt@(WatchFrame _ epoch selection tid fid) parent index row privatePaths entry=P.NodeDef
-  (P.NodeInfo (node "watchvalue" [key,revision,epoch,selection,tid,fid,parent,reference,index]) title "" (reference>0 && not lazy) origin) Nothing
-  [P.ActionMenu "Force lazy child" (forceAction (ForceDebugWatchChild key revision receipt parent index reference)) | lazy,reference>0]
+  -> Int -> Int -> WatchFrame -> Int -> Int -> Int -> Value -> [FilePath] -> DebuggerWatch -> P.NodeDef SidebarContext SidebarReply
+watchChild forceAction key revision receipt@(WatchFrame _ epoch selection tid fid) parent offset index row privatePaths entry=P.NodeDef
+  (P.NodeInfo (node "watchvalue" [key,revision,epoch,selection,tid,fid,parent,reference,offset+index]) title "" (reference>0 && not lazy) origin) Nothing
+  [P.ActionMenu "Force lazy child" (forceAction (ForceDebugWatchChild key revision receipt parent offset index reference)) | lazy,reference>0]
   where
     reference=integer "variablesReference" row
     lazy=maybe False (flag "lazy") (field "presentationHint" row)
