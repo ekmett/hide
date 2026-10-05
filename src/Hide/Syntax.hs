@@ -5,7 +5,7 @@
 -- styles. A tokenizer result is accepted only when it preserves the original
 -- characters exactly. Link and bubble annotations remain in the styled stream
 -- so later layout can retain interaction metadata without reparsing text.
-module Hide.Syntax (Style(..), Grapheme, graphemeText, Sigils(..), sourceSigilsWindow, SourceRow, SourceRange, prepareSourceRow, plainSourceRow, sourceRowText, sourceRowRanges, sourceRangeCharStart, sourceRangeCharEnd, sourceRangeByteStart, sourceRangeByteEnd, sourceRangeStyle, sourceRangeText, sourceStylesAt, fontTraits, sectionTitle, highlight, highlightFor, bubbleTile, linkSpans) where
+module Hide.Syntax (Style(..), Grapheme, graphemeText, Sigils(..), sourceSigilsWindow, SourceRow, SourceRange, prepareSourceRow, plainSourceRow, sourceRowText, sourceRowRanges, sourceRangeCharStart, sourceRangeCharEnd, sourceRangeByteStart, sourceRangeByteEnd, sourceRangeStyle, sourceRangeText, sourceStylesAt, styleScript, fontTraits, sectionTitle, highlight, highlightFor, bubbleTile, linkSpans) where
 
 import Data.List (intercalate)
 import qualified Data.List as List
@@ -14,12 +14,12 @@ import Data.Word (Word32)
 import qualified Data.Text as T
 import qualified Data.Text.Unsafe as TU
 import qualified Data.Vector as V
-import Hide.Unicode (graphemes,clusterWidth,sourceGraphemesFrom,sourceGlyphAdvance)
+import Hide.Unicode (graphemes,clusterWidth,sourceGraphemesFrom,sourceGlyphAdvance,Script)
 import qualified Skylighting as S
 import System.FilePath (takeFileName)
 
 -- | Token color intent plus nested prose, link, bubble or terminal annotations.
-data Style = SectionStyle Int Style | BoldStyle Style | ItalicStyle Style | LinkStyle T.Text Style | Plain | Heading Int | CodeStyle Bool Style | ProseStyle Style | Keyword | Comment | Literal | Number | Constructor | Pragma | BubbleStyle Bool Style | BubbleText Int Bool Style | TerminalStyle Word32 Word32 Word32 deriving (Eq,Show)
+data Style = ScriptStyle !Script Style | SectionStyle Int Style | BoldStyle Style | ItalicStyle Style | LinkStyle T.Text Style | Plain | Heading Int | CodeStyle Bool Style | ProseStyle Style | Keyword | Comment | Literal | Number | Constructor | Pragma | BubbleStyle Bool Style | BubbleText Int Bool Style | TerminalStyle Word32 Word32 Word32 deriving (Eq,Show)
 
 -- | Original source row and worker-prepared style ranges. Styling never changes
 -- character positions; range boundaries also name complete UTF8 codepoints.
@@ -173,6 +173,7 @@ linkSpans = reverse . snd . List.foldl' collect (0,[])
     target (SectionStyle _ s)=target s
     target (BoldStyle s)=target s
     target (ItalicStyle s)=target s
+    target (ScriptStyle _ s)=target s
     target (LinkStyle url _)=Just url
     target (ProseStyle s)=target s
     target (BubbleText _ _ s)=target s
@@ -184,9 +185,25 @@ linkSpans = reverse . snd . List.foldl' collect (0,[])
         (start,end,old):rest | end==offset && url==old -> (start,offset+1,url):rest
         _->(offset,offset+1,url):found)
 
+-- | Outermost explicit script annotation, preserved through existing color,
+-- font, link and bubble wrappers. A script hint never changes source characters.
+styleScript :: Style -> Maybe Script
+styleScript (ScriptStyle script _)=Just script
+styleScript (SectionStyle _ style)=styleScript style
+styleScript (BoldStyle style)=styleScript style
+styleScript (ItalicStyle style)=styleScript style
+styleScript (LinkStyle _ style)=styleScript style
+styleScript (CodeStyle _ style)=styleScript style
+styleScript (ProseStyle style)=styleScript style
+styleScript (BubbleStyle _ style)=styleScript style
+styleScript (BubbleText _ _ style)=styleScript style
+styleScript _=Nothing
+
 -- | Separate composable font traits while retaining color/link/bubble semantics.
 -- Combining bold and italic is idempotent; wrapper order does not affect traits.
+-- Script geometry is extracted separately by styleScript, not a paint trait.
 fontTraits :: Style -> (Style,Bool,Bool)
+fontTraits (ScriptStyle _ style)=fontTraits style
 fontTraits (SectionStyle level style)=wrap (SectionStyle level) style
 fontTraits (BoldStyle style)=let (base,_,italic)=fontTraits style in (base,True,italic)
 fontTraits (ItalicStyle style)=let (base,bold,_)=fontTraits style in (base,bold,True)
@@ -203,6 +220,7 @@ wrap constructor style=let (base,bold,italic)=fontTraits style in (constructor b
 -- table headers. Nested font/link/bubble wrappers preserve section ownership.
 sectionTitle :: Style -> Bool
 sectionTitle SectionStyle{}=True
+sectionTitle (ScriptStyle _ style)=sectionTitle style
 sectionTitle (BoldStyle style)=sectionTitle style
 sectionTitle (ItalicStyle style)=sectionTitle style
 sectionTitle (LinkStyle _ style)=sectionTitle style

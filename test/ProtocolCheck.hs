@@ -25,6 +25,11 @@ import Hide.GuestAccess (beginGuestInput)
 import Hide.Files (FileState(..))
 import Hide.Buffer
 import Hide.Render (snapshotHtml)
+import qualified Hide.Plugin.Window as PW
+import Hide.TextPresentation (prepareTextPresentations)
+import Hide.Syntax (Style(..))
+import Hide.Unicode (Script(..))
+import Hide.RemoteWindow (RemoteCell(..),RemoteFrame(..),parseRemoteFrame)
 
 checks :: IO ()
 checks = do
@@ -32,6 +37,15 @@ checks = do
       rejects name action=do
         result<-try action :: IO (Either SomeException ())
         check name (either (const True) (const False) result)
+  PW.withWindowScope $ \scope->do
+    prepared<-PW.prepareStyledTextWindow "Script transport" [('A',ScriptStyle Superscript Plain),('界',ScriptStyle Subscript Plain),('X',Plain)]
+    Just update<-PW.openTextWindow scope prepared
+    Just (reference,payload)<-PW.admitWindowUpdate False update
+    ready<-prepareTextPresentations (addPluginWindow reference payload (initialDesktop (80,25)))
+    decoded<-either error pure (parseRemoteFrame (object (frameMetadata "." ready)) (frameRows ready))
+    let scripted=[(text,natural,mode) | RemoteScript _ _ _ text natural mode<-remoteCells decoded]
+    check "actual prepared script window roundtrips through host wire and native receiver"
+      (scripted==[("A",1,Superscript),("界",2,Subscript)])
   dir<-getTemporaryDirectory
   bracket (openBinaryTempFile dir "thc-wire") (\(path,h)->hClose h >> removeFile path) $ \(_,h)->do
     let packets=[JsonPacket (object ["text" .= ("λ 👩🏽\x200d\&💻"::T.Text)]),BinaryPacket (BS.pack [0,1,2,255])]

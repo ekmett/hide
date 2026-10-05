@@ -44,3 +44,18 @@ for(const clipStart of [0,1]){
  assert.deepEqual(shaped.find(([text])=>text==='f'),['f',16,16,4]);
 }
 console.log('Browser original glyph UV offsets, following-cell placement and bounded grid upload checks passed');
+
+vm.runInContext(source.slice(source.indexOf('const scriptSegments='),source.indexOf('function command(')),context);
+for(const mode of ['sup','sub'])for(const [text,natural] of [['A',1],['界',2],['é',1],['👩🏽‍💻',2]]){
+ uploads.length=0;shaped.length=0;
+ const script=mode==='sup'?1:2;
+ vm.runInContext(`drawRows(decodeRows([[0,[[0,0xffffff,0,27,[[${JSON.stringify(text)},${natural},'${mode}'],'Z']]]]]))`,context);
+ assert.equal(uploads[0][2],1|(natural<<2)|(script<<4));
+ assert.equal(uploads[0][8+2],1); // Following text starts in the next cell.
+ assert.deepEqual(shaped.find(([glyph])=>glyph===text),[text,natural*8,16,3]);
+}
+for(const run of [['',1,'sup'],['AB',1,'sup'],['A',0,'sup'],['A',3,'sub'],['A',1,'bad'],['\n',1,'sup']]){
+ assert.throws(()=>vm.runInContext(`decodeRows([[0,[[0,0,0,0,[${JSON.stringify(run)}]]]]])`,context));
+}
+for(const flags of [4,32,-1])assert.throws(()=>vm.runInContext(`decodeRows([[0,[[0,0,0,${flags},['A']]]]])`,context));
+console.log('Browser script runs preserve natural atlas size, one-cell advance and paint; invalid runs rejected');

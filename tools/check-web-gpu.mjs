@@ -53,11 +53,31 @@ try {
  check(atlasStats.tiles===undecoratedTiles,'cursor/mouse reshaped decorated glyph');
  mode=259;rows[3]=decorations(24);allocate();present(performance.now());
  check(pixel(0,31)==='255,255,255'&&pixel(16,27)==='255,255,255'&&pixel(16,31)==='0,0,170','8-row decoration mode');
+ // A solid normal-resolution tile makes the half-size ink geometry exact.
+ glyphs.set('S',[8,Array(16).fill(0xff00)]);glyphs.set('界',[16,Array(16).fill(0xffff)]);
+ for(const pixelated of [false,true]){
+   frame.pixelated=pixelated;
+   drawRows([[5,[[0,0xffffff,0x0000aa,0,[['S',1,false,0,1],['界',2,false,0,2]]]]]]);
+   const scriptTiles=atlasStats.tiles;
+   rows[6]=decodeRows([[6,[[0,0xffffff,0x0000aa,0,[['S',1,'sup'],['S',1,'sub'],['界',2,'sup'],['界',2,'sub'],' ']]]]])[0][1];
+   drawRows([[6,rows[6]]]);present(performance.now());
+   check(atlasStats.tiles===scriptTiles,'script allocated a new atlas tile');
+   const h=cellHeight(),top=6*h;
+   for(let y=0;y<h;++y)for(let x=0;x<40;++x){
+     const cell=Math.floor(x/8),within=x%8;
+     const ink=(cell<2?within<4:true)&&(cell%2===0?y<h/2:y>=h/2)&&cell<4;
+     check(pixel(x,top+y)===(ink?'255,255,255':'0,0,170'),'script ink geometry '+[pixelated,x,y,pixel(x,top+y)]);
+   }
+   mouse=[3,6];dirty=true;present(performance.now());
+   check(pixel(24,top)==='170,85,0'&&pixel(24,top+h-1)==='85,85,85','script mouse transforms the allocated cell');
+   mouse=[-1,-1];frame.cursor=[0,6];dirty=true;present(performance.now());
+   check(pixel(0,top+h-1)==='255,255,85','script cursor keeps the allocated bottom band');frame.cursor=null;
+ }
  for(let i=0;i<520;++i)atlasEntry('e',i,false,128,64,0);
  check(atlasSize>2048,'GPU atlas growth did not occur');dirty=true;present(performance.now());
  check(pixel(0,0)==='255,255,255','growth changed earlier tile rectangle');
  check(gl.getError()===gl.NO_ERROR,'GL final error');
- document.body.textContent='PASS WebGL2 generated HLSL execution: foreground/background, full-origin half clip, warm atlas/grid reuse, bounded row upload, mouse/cursor, cell underline/strike without new atlas tiles; '+JSON.stringify(atlasStats)+'; '+gl.getParameter(gl.getExtension('WEBGL_debug_renderer_info').UNMASKED_RENDERER_WEBGL);
+ document.body.textContent='PASS WebGL2 generated HLSL execution: foreground/background, full-origin half clip, warm atlas/grid reuse, bounded row upload, mouse/cursor, cell underline/strike and one-cell script ink without new atlas tiles; '+JSON.stringify(atlasStats)+'; '+gl.getParameter(gl.getExtension('WEBGL_debug_renderer_info').UNMASKED_RENDERER_WEBGL);
 } catch(error){document.body.textContent='FAIL '+error.stack;}
 `;
 const fixture=await fs.mkdtemp(path.join(os.tmpdir(),'hide-web-gpu-'));

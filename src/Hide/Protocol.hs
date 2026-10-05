@@ -34,7 +34,7 @@ import Hide.Font
 import Hide.Render (renderDesktop, renderCellRows)
 import qualified Hide.Plugin.Menu as Plugin
 import Hide.Commands (commandIdentifier)
-import Hide.Unicode (CellSpan(..), graphemes, clusterWidth)
+import Hide.Unicode (Script(..), CellSpan(..), graphemes, clusterWidth)
 
 data WebInput = Key T.Text [V.Modifier] | Paste T.Text | Mouse T.Text Int Int Int Int [V.Modifier]
               | Wheel Int Int Int [V.Modifier] | SystemTheme Bool | FocusWindow Int | BrowserCommand Command | MenuCommand Command | ContributedMenu T.Text T.Text Integer | UploadFile T.Text BS.ByteString | Frontend (Maybe Int) Bool | OpenPath FilePath | Resize Int Int | SuspendSession | Blur | Modifiers [V.Modifier] deriving (Eq,Show)
@@ -192,6 +192,7 @@ frameRows d = map (toJSON . spans 0 . toList) (toList (renderCellRows d))
       let (a,width,run)=case cell of
             CellText paint text -> (paint,T.length text,String text)
             CellGlyph paint text full start visible -> (paint,visible,toJSON (text,full,full/=clusterWidth text,start,visible))
+            CellScript paint text natural script -> (paint,1,toJSON (text,natural,case script of Superscript -> "sup"::T.Text; Subscript -> "sub"))
           paint=textStyleFromAttr a
       in toJSON (x,textForeground paint,textBackground paint,textFlags paint,[run]):spans (x+width) rest
 

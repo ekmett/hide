@@ -96,6 +96,24 @@ checks = do
   let hiddenHalf=cellRowsForLayers [CellMask V.defAttr [(1,0,1)],CellImage (V.translateX 2 (textImage V.defAttr "X")),CellImage image] (4,1)
   check "whole-glyph privacy preserves an unrelated opaque foreground cell"
     ([text | row<-toList hiddenHalf,CellText _ text<-toList row]==["A*XB"])
+  let scriptRow=CellRow 1 0 0 4 (Vec.fromList [CellScript V.defAttr "界" 2 Superscript,CellText V.defAttr "X"])
+      scriptedRows=cellRowsForLayers [scriptRow] (4,1)
+  check "script cell retains whole semantic text and natural width while advancing one"
+    (Vec.toList (scriptedRows Vec.! 0)==[CellText V.defAttr " ",CellScript V.defAttr "界" 2 Superscript,CellText V.defAttr "X "])
+  check "script terminal projection uses one-cell wide placeholder without moving the sentinel"
+    ([TL.toStrict text | TextSpan _ _ _ text<-Vec.toList (cellDisplayOps scriptedRows Vec.! 0)]==[" ","\xfffd","X "])
+  let clippedScript=cellRowsForLayers [CellRow 0 0 1 3 (Vec.fromList [CellScript V.defAttr "界" 2 Subscript,CellText V.defAttr "X"])] (3,1)
+  check "whole script cell is suppressed outside the positioned row clip"
+    (Vec.toList (clippedScript Vec.! 0)==[CellText V.defAttr " X "])
+  check "an empty prepared row clip never forces hidden glyph payloads"
+    (cellRowsForLayers [CellRow 0 0 3 3 (Vec.singleton (error "empty row clip forced glyph"))] (4,1)==cellRowsForLayers [] (4,1))
+  let scriptMask=cellRowsForLayers [CellMask V.defAttr [(1,0,1)],scriptRow] (4,1)
+  check "privacy masks the whole scripted source grapheme before export"
+    (Vec.toList (scriptMask Vec.! 0)==[CellText V.defAttr " *X "])
+  let paint=V.defAttr `V.withBackColor` V.black
+      scriptHalo=cellRowsForLayers [CellHalo paint [(1,0,1,1)],scriptRow] (4,1)
+  check "halo preserves script and natural width metadata"
+    ([ (text,natural,script) | CellScript _ text natural script<-Vec.toList (scriptHalo Vec.! 0)]==[("界",2,Superscript)])
   let border=textImage V.defAttr ("║"<>T.replicate 178 " "<>"║")
       prepared=V.vertCat (replicate 55 border)
   _<-evaluate (V.imageWidth prepared+V.imageHeight prepared)

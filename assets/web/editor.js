@@ -147,10 +147,10 @@ function drawRows(changed,retried=false){
      const start=y*cols*8;
      for(let x=0;x<cols;++x)cellGrid.set([blank[0],blank[1],1,0,0,0x0000aa,1|blank[2],1],start+x*8);
      for(const [origin,fg,bg,traits,clusters] of spans||[]){let x=origin;
-       for(const [text,fullWidth,stretched,clipStart,clipWidth] of clusters){
-         const entry=atlasEntry(text,fg,frame.pixelated,fullWidth*cw,ch,(traits&3)|(stretched?4:0));
+       for(const [text,fullWidth,stretched,clipStart,clipWidth,script=0,natural=fullWidth] of clusters){
+         const entry=atlasEntry(text,fg,frame.pixelated,natural*cw,ch,(traits&3)|(stretched?4:0));
          for(let cell=0;cell<clipWidth;++cell)if(x+cell>=0&&x+cell<cols)
-           cellGrid.set([entry[0],entry[1],fullWidth|((clipStart+cell)<<16),0,fg,bg,1|entry[2]|(traits&24),1],start+(x+cell)*8);
+           cellGrid.set([entry[0],entry[1],fullWidth|(script?(natural<<2)|(script<<4):0)|((clipStart+cell)<<16),0,fg,bg,1|entry[2]|(traits&24),1],start+(x+cell)*8);
          x+=clipWidth;
        }
      }
@@ -188,6 +188,27 @@ function present(now){
  requestAnimationFrame(present);
 }
 requestAnimationFrame(present);
+// Script runs retain semantic text and natural atlas size while occupying one
+// cell. The host supplies Unicode width; the browser never measures font advance.
+const scriptSegments=new Intl.Segmenter(undefined,{granularity:'grapheme'});
+function decodeRows(changed){
+ return changed.map(([y,spans])=>[y,spans.map(span=>{
+   if(span.length!==5||!Number.isInteger(span[3])||span[3]<0||(span[3]&27)!==span[3])throw new Error('Invalid font traits');
+   const [x,fg,bg,traits,runs]=span;
+   return [x,fg,bg,traits,runs.flatMap(run=>{
+     if(typeof run==='string')return Array.from(run,c=>[c,1,false,0,1]);
+     if(Array.isArray(run)&&run.length===3){
+       const [text,natural,mode]=run;
+       if(typeof text!=='string'||!text.length||text.length>8192||/[\u0000-\u001f\u007f]/u.test(text)||
+         ![1,2].includes(natural)||!['sup','sub'].includes(mode)||
+         scriptSegments.segment(text)[Symbol.iterator]().next().value.segment!==text)throw new Error('Invalid script glyph');
+       return [[text,1,false,0,1,mode==='sup'?1:2,natural]];
+     }
+     if(!Array.isArray(run)||run.length!==5||typeof run[0]!=='string'||!Number.isInteger(run[1])||run[1]<1||run[1]>2||typeof run[2]!=='boolean'||!Number.isInteger(run[3])||!Number.isInteger(run[4])||run[3]<0||run[4]<1||run[3]+run[4]>run[1])throw new Error('Invalid glyph geometry');
+     return [run];
+   })];
+ })]);
+}
 function command(name){send({type:'command',command:name});}
 async function systemClipboard(request){
  try{
@@ -279,15 +300,7 @@ function connect(){
      glyphs=new Map(message.glyphs.map(([c,w,rs])=>[c,[w,rs]]));tiles.clear();atlasEntries.clear();scale=initialScale=message.scale||2;ready=true;status.textContent='Connected';lastSize='';send({type:'theme',dark:systemTheme.matches});
    }else if(message.type==='frame'){
      if(!platformSent){platformSent=true;send({type:'frontend',mode:message.mode||3,mac:navigator.platform.includes('Mac')});}
-     message.rows=message.rows.map(([y,spans])=>[y,spans.map(span=>{
-       if(span.length!==5||!Number.isInteger(span[3])||span[3]<0||span[3]>3)throw new Error('Invalid font traits');
-       const [x,fg,bg,traits,runs]=span;
-       return [x,fg,bg,traits,runs.flatMap(run=>{
-         if(typeof run==='string')return Array.from(run,c=>[c,1,false,0,1]);
-         if(!Array.isArray(run)||run.length!==5||typeof run[0]!=='string'||!Number.isInteger(run[1])||run[1]<1||run[1]>512||typeof run[2]!=='boolean'||!Number.isInteger(run[3])||!Number.isInteger(run[4])||run[3]<0||run[4]<1||run[3]+run[4]>run[1])throw new Error('Invalid glyph geometry');
-         return [run];
-       })];
-     })]);
+     message.rows=decodeRows(message.rows);
      const oldCursor=JSON.stringify(frame?.cursor);
      const changedMode=Object.hasOwn(message,'mode')&&mode!==message.mode;
      frame={...frame,...message};updateTitle();unsaved=frame.dirty;guardLeave();[cols,lines]=frame.size;mode=frame.mode||3;clipboard=frame.selection;

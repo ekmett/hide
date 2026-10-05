@@ -4,8 +4,8 @@ const hideCellFragment = String.raw`#version 300 es
 precision mediump float;
 precision highp int;
 
-uint _82;
-const uint _83[16] = uint[](0u, 11141120u, 43520u, 11162880u, 170u, 11141290u, 43690u, 11184810u, 5592405u, 16733525u, 5635925u, 16777045u, 5592575u, 16733695u, 5636095u, 16777215u);
+uint _85;
+const uint _86[16] = uint[](0u, 11141120u, 43520u, 11162880u, 170u, 11141290u, 43690u, 11184810u, 5592405u, 16733525u, 5635925u, 16777045u, 5592575u, 16733695u, 5636095u, 16777215u);
 
 layout(std140) uniform type_Display
 {
@@ -22,246 +22,290 @@ layout(location = 0) out highp vec4 out_var_SV_Target0;
 
 void main()
 {
-    highp vec2 _94 = vertexUV * Display.grid.xy;
-    uvec2 _96 = uvec2(floor(_94));
-    highp vec2 _97 = fract(_94);
-    uint _101 = uint(Display.grid.x);
-    uint _104 = (_96.y * _101) + _96.x;
-    highp vec3 _106;
-    _106 = vec3(0.0);
-    highp vec3 _107;
-    uint _110;
-    highp float _112;
-    highp vec3 _270;
-    uint _109 = _104;
-    highp float _111 = 1.0;
-    uint _113 = 0u;
+    highp vec2 _97 = vertexUV * Display.grid.xy;
+    uvec2 _99 = uvec2(floor(_97));
+    highp vec2 _100 = fract(_97);
+    uint _104 = uint(Display.grid.x);
+    uint _107 = (_99.y * _104) + _99.x;
+    highp vec3 _109;
+    _109 = vec3(0.0);
+    highp vec3 _110;
+    uint _113;
+    highp float _115;
+    highp vec3 _307;
+    uint _112 = _107;
+    highp float _114 = 1.0;
+    uint _116 = 0u;
     for (;;)
     {
-        bool _121;
-        if (_113 < 16u)
+        bool _124;
+        if (_116 < 16u)
         {
-            _121 = _111 > 0.0;
+            _124 = _114 > 0.0;
         }
         else
         {
-            _121 = false;
+            _124 = false;
         }
-        if (_121)
+        if (_124)
         {
-            uint _124 = (_109 % _101) * 2u;
-            uint _125 = _109 / _101;
-            uvec4 _132 = texelFetch(SPIRV_Cross_CombinedcellDataSPIRV_Cross_DummySampler, ivec3(int(_124), int(_125), 0).xy, 0);
-            uvec2 _133 = uvec2(_124, _125) + uvec2(1u, 0u);
-            uvec4 _141 = texelFetch(SPIRV_Cross_CombinedcellDataSPIRV_Cross_DummySampler, ivec3(int(_133.x), int(_133.y), 0).xy, 0);
-            uint _142 = _132.x;
-            uint _146 = _132.y;
-            uint _150 = _132.z;
-            uint _151 = _150 & 65535u;
-            if (_151 == 0u)
+            uint _127 = (_112 % _104) * 2u;
+            uint _128 = _112 / _104;
+            uvec4 _135 = texelFetch(SPIRV_Cross_CombinedcellDataSPIRV_Cross_DummySampler, ivec3(int(_127), int(_128), 0).xy, 0);
+            uvec2 _136 = uvec2(_127, _128) + uvec2(1u, 0u);
+            uvec4 _144 = texelFetch(SPIRV_Cross_CombinedcellDataSPIRV_Cross_DummySampler, ivec3(int(_136.x), int(_136.y), 0).xy, 0);
+            uint _145 = _135.x;
+            uint _149 = _135.y;
+            uint _153 = _135.z;
+            uint _154 = _153 & 3u;
+            uint _156 = (_153 >> 4u) & 3u;
+            if (_154 == 0u)
             {
-                _270 = _106;
+                _307 = _109;
                 break;
             }
-            highp float _162 = _97.y;
-            highp vec4 _174 = textureLod(SPIRV_Cross_CombinedglyphAtlasglyphSampler, (vec2(uvec2(_142 & 65535u, _142 >> 16u)) + (vec2((float(_150 >> 16u) + _97.x) / float(_151), _162) * vec2(uvec2(_146 & 65535u, _146 >> 16u)))) / vec2(Display.grid.z), 0.0);
-            uint _175 = _141.z;
-            highp vec3 _193;
-            if ((_175 & 2u) != 0u)
+            highp float _164 = _100.x;
+            highp float _168 = _100.y;
+            bool _194;
+            highp vec2 _195;
+            if (_156 != 0u)
             {
-                uint _182 = _141.x;
-                _193 = vec3(float((_182 >> 16u) & 255u), float((_182 >> 8u) & 255u), float(_182 & 255u)) * vec3(0.0039215688593685626983642578125);
+                bool _173 = _156 == 2u;
+                highp float _174 = _173 ? 0.5 : 0.0;
+                highp float _175 = float((_153 >> 2u) & 3u);
+                bool _181;
+                if (_164 < (_175 * 0.5))
+                {
+                    _181 = _168 >= _174;
+                }
+                else
+                {
+                    _181 = false;
+                }
+                bool _188;
+                if (_181)
+                {
+                    highp float _184 = 1.0;
+                    highp float _185 = 0.5;
+                    _188 = _168 < (_173 ? 1.0 : 0.5);
+                }
+                else
+                {
+                    _188 = false;
+                }
+                _194 = _188;
+                _195 = vec2((_164 * 2.0) / _175, (_168 - _174) * 2.0);
             }
             else
             {
-                _193 = _174.xyz;
+                _194 = true;
+                _195 = vec2((float(_153 >> 16u) + _164) / float(_154), _168);
             }
-            highp float _194 = _174.w;
-            highp float _200 = Display.viewport.y / Display.grid.y;
-            highp float _202 = floor(_162 * _200);
-            bool _209;
-            if (_202 >= floor(_200 * 0.9375))
+            highp vec4 _211;
+            if (_194)
             {
-                _209 = _202 < _200;
+                _211 = textureLod(SPIRV_Cross_CombinedglyphAtlasglyphSampler, (vec2(uvec2(_145 & 65535u, _145 >> 16u)) + (_195 * vec2(uvec2(_149 & 65535u, _149 >> 16u)))) / vec2(Display.grid.z), 0.0);
             }
             else
             {
-                _209 = false;
+                _211 = vec4(0.0);
             }
-            bool _218;
-            if (_202 >= floor(_200 * 0.4375))
+            uint _212 = _144.z;
+            highp vec3 _230;
+            if ((_212 & 2u) != 0u)
             {
-                _218 = _202 < ceil(_200 * 0.5);
-            }
-            else
-            {
-                _218 = false;
-            }
-            bool _228;
-            if (!(((_175 & 8u) != 0u) ? _209 : false))
-            {
-                _228 = ((_175 & 16u) != 0u) ? _218 : false;
+                uint _219 = _144.x;
+                _230 = vec3(float((_219 >> 16u) & 255u), float((_219 >> 8u) & 255u), float(_219 & 255u)) * vec3(0.0039215688593685626983642578125);
             }
             else
             {
-                _228 = true;
+                _230 = _211.xyz;
             }
-            highp vec3 _242;
-            if (_228)
+            highp float _237 = Display.viewport.y / Display.grid.y;
+            highp float _239 = floor(_168 * _237);
+            bool _246;
+            if (_239 >= floor(_237 * 0.9375))
             {
-                uint _231 = _141.x;
-                _242 = vec3(float((_231 >> 16u) & 255u), float((_231 >> 8u) & 255u), float(_231 & 255u)) * vec3(0.0039215688593685626983642578125);
-            }
-            else
-            {
-                _242 = _193 * _194;
-            }
-            highp float _243 = _228 ? 1.0 : _194;
-            bool _245 = (_175 & 1u) != 0u;
-            highp vec3 _262;
-            if (_245)
-            {
-                uint _248 = _141.y;
-                _262 = _242 + ((vec3(float((_248 >> 16u) & 255u), float((_248 >> 8u) & 255u), float(_248 & 255u)) * vec3(0.0039215688593685626983642578125)) * (1.0 - _243));
+                _246 = _239 < _237;
             }
             else
             {
-                _262 = _242;
+                _246 = false;
             }
-            _107 = _106 + (_262 * _111);
-            _112 = _111 * (1.0 - (_245 ? 1.0 : _243));
-            uint _266 = _132.w;
-            if (_266 == 0u)
+            bool _255;
+            if (_239 >= floor(_237 * 0.4375))
             {
-                _270 = _107;
+                _255 = _239 < ceil(_237 * 0.5);
+            }
+            else
+            {
+                _255 = false;
+            }
+            bool _265;
+            if (!(((_212 & 8u) != 0u) ? _246 : false))
+            {
+                _265 = ((_212 & 16u) != 0u) ? _255 : false;
+            }
+            else
+            {
+                _265 = true;
+            }
+            highp vec3 _279;
+            if (_265)
+            {
+                uint _268 = _144.x;
+                _279 = vec3(float((_268 >> 16u) & 255u), float((_268 >> 8u) & 255u), float(_268 & 255u)) * vec3(0.0039215688593685626983642578125);
+            }
+            else
+            {
+                _279 = _230 * _211.w;
+            }
+            highp float _280 = _265 ? 1.0 : _211.w;
+            bool _282 = (_212 & 1u) != 0u;
+            highp vec3 _299;
+            if (_282)
+            {
+                uint _285 = _144.y;
+                _299 = _279 + ((vec3(float((_285 >> 16u) & 255u), float((_285 >> 8u) & 255u), float(_285 & 255u)) * vec3(0.0039215688593685626983642578125)) * (1.0 - _280));
+            }
+            else
+            {
+                _299 = _279;
+            }
+            _110 = _109 + (_299 * _114);
+            _115 = _114 * (1.0 - (_282 ? 1.0 : _280));
+            uint _303 = _135.w;
+            if (_303 == 0u)
+            {
+                _307 = _110;
                 break;
             }
-            _110 = _266 - 1u;
-            _106 = _107;
+            _113 = _303 - 1u;
             _109 = _110;
-            _111 = _112;
-            _113++;
+            _112 = _113;
+            _114 = _115;
+            _116++;
             continue;
         }
         else
         {
-            _270 = _106;
+            _307 = _109;
             break;
         }
     }
-    uvec3 _275 = uvec3(floor((clamp(_270, vec3(0.0), vec3(1.0)) * 255.0) + vec3(0.5)));
-    uint _282 = ((_275.x << 16u) | (_275.y << 8u)) | _275.z;
-    bool _294;
+    uvec3 _312 = uvec3(floor((clamp(_307, vec3(0.0), vec3(1.0)) * 255.0) + vec3(0.5)));
+    uint _319 = ((_312.x << 16u) | (_312.y << 8u)) | _312.z;
+    bool _331;
     if (Display.caretMouse.x >= 0.0)
     {
-        _294 = all(equal(_96, uvec2(Display.caretMouse.xy)));
+        _331 = all(equal(_99, uvec2(Display.caretMouse.xy)));
     }
     else
     {
-        _294 = false;
+        _331 = false;
     }
-    bool _299;
-    if (_294)
+    bool _336;
+    if (_331)
     {
-        _299 = _97.y >= 0.875;
+        _336 = _100.y >= 0.875;
     }
     else
     {
-        _299 = false;
+        _336 = false;
     }
-    uint _303;
-    if (_299)
+    uint _340;
+    if (_336)
     {
-        _303 = _282 ^ 16777215u;
+        _340 = _319 ^ 16777215u;
     }
     else
     {
-        _303 = _282;
+        _340 = _319;
     }
-    bool _314;
+    bool _351;
     if (Display.caretMouse.z >= 0.0)
     {
-        _314 = all(equal(_96, uvec2(Display.caretMouse.zw)));
+        _351 = all(equal(_99, uvec2(Display.caretMouse.zw)));
     }
     else
     {
-        _314 = false;
+        _351 = false;
     }
-    uint _339;
-    if (_314)
+    uint _376;
+    if (_351)
     {
-        uint _338;
+        uint _375;
         do
         {
-            uint _334;
-            bool _335;
-            uint _320 = 0u;
+            uint _371;
+            bool _372;
+            uint _357 = 0u;
             for (;;)
             {
-                if (_320 < 16u)
+                if (_357 < 16u)
                 {
-                    if (_303 == _83[_320])
+                    if (_340 == _86[_357])
                     {
-                        _334 = _83[_320 ^ 7u];
-                        _335 = true;
+                        _371 = _86[_357 ^ 7u];
+                        _372 = true;
                         break;
                     }
-                    _320++;
+                    _357++;
                     continue;
                 }
                 else
                 {
-                    _334 = _82;
-                    _335 = false;
+                    _371 = _85;
+                    _372 = false;
                     break;
                 }
             }
-            if (_335)
+            if (_372)
             {
-                _338 = _334;
+                _375 = _371;
                 break;
             }
-            _338 = _303 ^ 11184810u;
+            _375 = _340 ^ 11184810u;
             break;
         } while(false);
-        _339 = _338;
+        _376 = _375;
     }
     else
     {
-        _339 = _303;
+        _376 = _340;
     }
-    highp vec3 _349 = vec3(float((_339 >> 16u) & 255u), float((_339 >> 8u) & 255u), float(_339 & 255u)) * vec3(0.0039215688593685626983642578125);
-    highp vec3 _380;
+    highp vec3 _386 = vec3(float((_376 >> 16u) & 255u), float((_376 >> 8u) & 255u), float(_376 & 255u)) * vec3(0.0039215688593685626983642578125);
+    highp vec3 _417;
     if (Display.viewport.z != 0.0)
     {
-        highp vec2 _356 = (vertexUV * 2.0) - vec2(1.0);
-        highp float _357 = dot(_356, _356);
-        bool _371;
+        highp vec2 _393 = (vertexUV * 2.0) - vec2(1.0);
+        highp float _394 = dot(_393, _393);
+        bool _408;
         if (Display.viewport.w >= 2.0)
         {
-            highp float _368 = floor(vertexUV.y * Display.viewport.y) + 1.0;
-            _371 = (_368 - Display.viewport.w * trunc(_368 / Display.viewport.w)) < 1.0;
+            highp float _405 = floor(vertexUV.y * Display.viewport.y) + 1.0;
+            _408 = (_405 - Display.viewport.w * trunc(_405 / Display.viewport.w)) < 1.0;
         }
         else
         {
-            _371 = false;
+            _408 = false;
         }
-        highp vec3 _375;
-        if (_371)
+        highp vec3 _412;
+        if (_408)
         {
-            _375 = _349 * 0.905882358551025390625;
+            _412 = _386 * 0.905882358551025390625;
         }
         else
         {
-            _375 = _349;
+            _412 = _386;
         }
-        _380 = _375 * (1.0 - (0.098039217293262481689453125 * (_357 * _357)));
+        _417 = _412 * (1.0 - (0.098039217293262481689453125 * (_394 * _394)));
     }
     else
     {
-        _380 = _349;
+        _417 = _386;
     }
-    out_var_SV_Target0 = vec4(_380, 1.0);
+    out_var_SV_Target0 = vec4(_417, 1.0);
 }
 
 `;

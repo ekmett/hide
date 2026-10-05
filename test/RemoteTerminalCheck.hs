@@ -10,7 +10,7 @@ import qualified Data.ByteString.Char8 as BSC
 import Blaze.ByteString.Builder.ByteString (writeByteString)
 import Graphics.Vty.Output (Output(..),DisplayContext(..))
 import Graphics.Vty.Output.Mock (mockTerminal)
-import Hide.Unicode (updateDisplayOps)
+import Hide.Unicode (Script(..), updateDisplayOps)
 import Data.Aeson.Types (parseEither)
 import qualified Data.ByteString as BS
 import qualified Data.Text as T
@@ -61,13 +61,30 @@ checks = do
   dense<-either error pure (parseRemoteFrame denseMetadata denseRows)
   occupied<-evaluate (sum [case cell of
     RemoteText x y paint text n->x+y+textFlags paint+T.length text+n
-    RemoteGlyph x y paint text full start shown->x+y+textFlags paint+T.length text+full+start+shown | cell<-remoteCells dense])
+    RemoteGlyph x y paint text full start shown->x+y+textFlags paint+T.length text+full+start+shown
+    RemoteScript x y paint text natural _->x+y+textFlags paint+T.length text+natural | cell<-remoteCells dense])
   after<-getAllocationCounter
   check "dense receiver retains 55 runs within a 1.5 MB allocation budget"
     (length (remoteCells dense)==55 && occupied==21285 && before-after<1500000)
   let (cursor,ops)=remoteTerminalDisplay (40,12) (Just frame) ""
       rowWidth values=sum [n | TextSpan _ n _ _<-Vec.toList values]
       rowText values=T.concat [TL.toStrict text | TextSpan _ _ _ text<-Vec.toList values]
+  let scripted x runs=toJSON [(x::Int,0x123456::Int,0xffffff::Int,27::Int,runs)]
+      script text natural mode=toJSON (text::T.Text,natural::Int,mode::T.Text)
+      parseScript value=parseRemoteFrame metadata (value:replicate 11 (toJSON ([]::[Value])))
+  scripts<-either error pure (parseScript (scripted 0 [script "A" 1 "sup",script "界" 2 "sub",script "é" 1 "sub",script "👩🏽\x200d\&💻" 2 "sup",String "Z"]))
+  check "script receiver preserves semantic graphemes, natural width, paint and one-cell placement" (case remoteCells scripts of
+    [RemoteScript 0 0 paint "A" 1 Superscript,RemoteScript 1 0 _ "界" 2 Subscript,RemoteScript 2 0 _ "é" 1 Subscript,RemoteScript 3 0 _ "👩🏽\x200d\&💻" 2 Superscript,RemoteText 4 0 _ "Z" 1]->textFlags paint==27
+    _->False)
+  let (_,scriptOps)=remoteTerminalDisplay (5,1) (Just scripts) ""
+      (_,scriptBanner)=remoteTerminalDisplay (5,1) (Just scripts) "Hi"
+  check "script terminal projection keeps narrow text and substitutes wide text without moving the suffix"
+    (rowText (Vec.head scriptOps)=="A\xfffd\&é\xfffd\&Z" && rowWidth (Vec.head scriptOps)==5)
+  check "banner clips scripted cells using allocated width" (rowText (Vec.head scriptBanner)=="Hié\xfffd\&Z")
+  mapM_ (\value->check "invalid script payloads rejected at the receiver" (case parseScript value of Left _->True; _->False))
+    ([scripted 0 [script text natural mode] | (text,natural,mode)<-
+      [("",1,"sup"),("AB",1,"sup"),("界",1,"sup"),("A",2,"sub"),("A",0,"sup"),("A",3,"sup"),("A",1,"bad"),("\n",1,"sup"),("́",1,"sub")]]++
+     [scripted 40 [script "A" 1 "sup"],scripted 39 [script "A" 1 "sup",String "Z"]])
   check "direct terminal spans fill frame dimensions with sparse Unicode cells" (Vec.length ops==12 && Vec.all ((==40).rowWidth) ops)
   check "direct terminal spans preserve remote cursor" (cursor==V.Cursor 5 0)
   let (_,cropped)=remoteTerminalDisplay (4,2) (Just frame) ""

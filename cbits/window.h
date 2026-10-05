@@ -23,10 +23,12 @@ int thc_begin(void);
 /* The next glyph retains its full origin/width; only these visible cells draw. */
 void thc_clip(int visible_x, int clip_cells);
 /* Traits: bold1, italic2, explicit-width4, underline8, strikethrough16.
- * Line decorations are cell paint and never alter glyph atlas identity. */
-void thc_glyph(int x, int y, int cells, int glyph_width, const uint16_t *rows, uint32_t fg, uint32_t bg, uint32_t traits);
+ * Line decorations are cell paint and never alter glyph atlas identity.
+ * Script0 is baseline; script1/2 is upper/lower half-size ink. Scripts allocate
+ * one cell and retain natural_cells1/2 for normal-resolution atlas sampling. */
+void thc_glyph(int x, int y, int cells, int glyph_width, const uint16_t *rows, uint32_t fg, uint32_t bg, uint32_t traits, int script, int natural_cells);
 void thc_pixelate_unicode(int enabled);
-int thc_unicode(int x, int y, int cells, const char *text, uint32_t fg, uint32_t bg, uint32_t traits);
+int thc_unicode(int x, int y, int cells, const char *text, uint32_t fg, uint32_t bg, uint32_t traits, int script, int natural_cells);
 void thc_cursor(int x, int y);
 void thc_cursor_blink(int enabled);
 void thc_crt_filter(int enabled);

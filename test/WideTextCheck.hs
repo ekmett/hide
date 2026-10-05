@@ -10,7 +10,7 @@ import qualified Hide.BufferView as M
 import Hide.TextPresentation
 import Hide.Markdown (renderMarkdown)
 import qualified Hide.Links as Links
-import Hide.Render (snapshot,snapshotHtml,renderKey)
+import Hide.Render (snapshot,snapshotHtml,renderKey,renderCellRows)
 import qualified Hide.Plugin.Window as W
 import Hide.GuestAccess (readableAt,streamerReadableAt)
 import Data.Aeson (Value(..),object,toJSON,(.=))
@@ -81,6 +81,79 @@ checks=do
      controlStyles=Vec.singleton [(c,SectionStyle 1 (Heading 1)) | c<-T.unpack controls]
  controlLayout<-prepareTextLayout True 40 controlSource controlStyles
  check "prepared rendering sanitizes controls before measuring glyphs" (all (\glyph->not (T.any (\c->c<' ') (layoutDisplayText glyph))) (Vec.toList (layoutGlyphs (Vec.head (layoutRows controlLayout)))) && contentSlice controlSource 0 (contentLength controlSource)==controls)
+ let scripted="A界e\x301👩🏽\x200d\&💻"
+     scriptStyles=Vec.singleton [(c,ScriptStyle Superscript (BoldStyle Plain)) | c<-T.unpack scripted]
+ scriptLayout<-prepareTextLayout False 40 (bufferContent (newBuffer scripted)) scriptStyles
+ check "explicit scripted natural one/two-cell graphemes each advance one cell"
+   (map layoutAdvance (Vec.toList (layoutGlyphs (Vec.head (layoutRows scriptLayout))))==[1,1,1,1])
+ check "script layout preserves complete semantic source graphemes"
+   (T.concat (map layoutText (Vec.toList (layoutGlyphs (Vec.head (layoutRows scriptLayout)))))==scripted)
+ check "prepared script metadata separates natural width from allocated advance"
+   (map (\glyph->(layoutNatural glyph,layoutScript glyph)) (Vec.toList (layoutGlyphs (Vec.head (layoutRows scriptLayout))))==[(1,Just Superscript),(2,Just Superscript),(1,Just Superscript),(2,Just Superscript)])
+ zeroScript<-prepareTextLayout True 40 (bufferContent (newBuffer "\x301"))
+   (Vec.singleton [('\x301',ScriptStyle Subscript (SectionStyle 1 Plain))])
+ check "scripted standalone zero-width grapheme retains zero advance and no script cell"
+   (case Vec.toList (layoutGlyphs (Vec.head (layoutRows zeroScript))) of [glyph]->layoutAdvance glyph==0 && layoutScript glyph==Nothing; _->False)
+ check "cached horizontal glyph view retains the whole clipped script target"
+   (map layoutText (Vec.toList (layoutVisibleGlyphs 1 1 (Vec.head (layoutRows scriptLayout))))==["界"])
+ let sourceScript=M.addHelpStyled [('界',ScriptStyle Subscript (BoldStyle Plain)),('X',Plain)] (M.initialDesktop (80,25))
+     sourceView=fromJust (M.activeWindow sourceScript)
+ check "styled Help admits script geometry with the default heading preference"
+   (not (M.wideSectionTitles sourceScript) && M.windowPresentationNeeded sourceScript sourceView)
+ let scriptDocument=fromJust (M.activeDocument sourceScript)
+ check "style installation and invalidation keep cached script admission exact"
+   (M.documentHasScripts scriptDocument && not (M.documentHasScripts (M.restyle scriptDocument)) &&
+    not (M.documentHasScripts (M.setDocumentHighlight [('X',Plain)] scriptDocument)))
+ sourceReady<-prepareTextPresentations sourceScript
+ let sourceWindow=fromJust (M.activeWindow sourceReady)
+     sourceLayout=fromJust (M.windowPresentation sourceReady sourceWindow)
+     sourceX=M.left (M.bounds sourceWindow)+1; sourceY=M.top (M.bounds sourceWindow)+1
+     sourceClicked=M.selectAt False (sourceX+1) sourceY sourceReady
+     sourceSelected=sourceReady {M.windows=[sourceWindow {M.selection=Selection 0 2}]}
+     sourceCopied=fst (M.runCommand M.Copy sourceSelected)
+ check "default styled Help carries a scripted CJK cell and places its suffix one cell later"
+   ([(text,natural,mode) | row<-Vec.toList (renderCellRows sourceReady),CellScript _ text natural mode<-Vec.toList row]==[("界",2,Subscript)] &&
+    layoutPosition sourceLayout 1==(0,1) && caret (M.selection (fromJust (M.activeWindow sourceClicked)))==1)
+ check "default styled Help copy retains original source" (M.clipboard sourceCopied=="界X")
+ let plainReplacement=M.addHelpStyled [('X',Plain)] sourceReady
+ check "replacing scripted Help with plain styling retires its cached admission and layout"
+   (maybe False (not . M.documentHasScripts) (M.activeDocument plainReplacement) &&
+    maybe False (\w->not (M.windowPresentationNeeded plainReplacement w) && M.windowPresentation plainReplacement w==Nothing) (M.activeWindow plainReplacement))
+ check "script HTML inherits the bold paint through both nested wrappers"
+   (all (`T.isInfixOf` snapshotHtml sourceReady) ["font-weight:bold", "font-weight:inherit;display:inline-block;position:relative", "font-weight:inherit;position:absolute"])
+ let privateSource=sourceReady {M.guestPrivatePaths=["/authority"],M.streamerMode=True,
+       M.buffers=Map.map (\doc->doc {M.documentOrigin=Just "/authority/script.hs"}) (M.buffers sourceReady)}
+ check "default scripted Help privacy removes script metadata and original source"
+   (null [() | row<-Vec.toList (renderCellRows privateSource),CellScript{}<-Vec.toList row] && not ("界" `T.isInfixOf` snapshot privateSource))
+ W.withWindowScope $ \scope->withTextPresentation $ \owner->do
+   prepared<-W.prepareStyledTextWindow "Script test" (concat [[(c,ScriptStyle mode Plain) | c<-T.unpack text] | (text,mode)<-[("A",Superscript),("界",Subscript),("e\x301",Superscript),("👩🏽\x200d\&💻",Subscript)]]++[('X',Plain)])
+   check "plugin worker caches script admission independently of wide headings" (W.preparedWindowNeedsLayout False prepared && not (W.preparedWindowHasSections prepared))
+   update<-W.openTextWindow scope prepared >>= maybe (fail "missing scripted plugin open") pure
+   (reference,payload)<-W.admitWindowUpdate False update >>= maybe (fail "missing scripted plugin admission") pure
+   let opened=M.addPluginWindow reference payload (M.initialDesktop (80,25))
+       initial=opened {M.wideSectionTitles=False}
+       settle desktop=do
+         next<-tickTextPresentation owner desktop
+         if M.windowPresentation next (head (M.windows next))/=Nothing then pure next else threadDelay 1000 >> settle next
+   ready<-timeout 5000000 (settle initial) >>= maybe (fail "script-only plugin layout not adopted") pure
+   let view=head (M.windows ready)
+       rows=renderCellRows ready
+       scripts=[(text,natural,mode) | row<-Vec.toList rows,CellScript _ text natural mode<-Vec.toList row]
+       source=W.preparedWindowText payload
+       x=M.left (M.bounds view)+1; y=M.top (M.bounds view)+1
+       clicked=M.selectAt False (x+1) y ready
+       copied=fst (M.runCommand M.Copy (fst (M.runCommand M.SelectAll ready)))
+   check "actual plugin body keeps script metadata in the one common grid"
+     (scripts==[("A",1,Superscript),("界",2,Subscript),("e\x301",1,Superscript),("👩🏽\x200d\&💻",2,Subscript)])
+   check "script hit and caret map to the original complete source position"
+     (caret (M.selection (head (M.windows clicked)))==1 && M.windowTextPosition ready view source 2==(0,2))
+   check "script copy retains original graphemes without placeholders" (M.clipboard copied==scripted<>"X")
+   check "text mode keeps scripts one cell and the following sentinel" ("A\xfffd\&e\x301\xfffdX" `T.isInfixOf` snapshot ready)
+   check "HTML retains script source and explicit half-scale placement" (all (`T.isInfixOf` snapshotHtml ready) ["transform:scale(0.5)","top:0.5em","界","👩🏽\x200d\&💻"])
+   let changed=ready {M.wideSectionTitles=True}
+   check "script prepared layout rejects stale presentation preference" (M.windowPresentation changed view==Nothing)
+   _<-prepareTextPresentations changed
+   check "streamer privacy removes script metadata with the semantic body" (null [() | row<-Vec.toList (renderCellRows ready {M.streamerMode=True}),CellScript{}<-Vec.toList row])
  withTextPresentation $ \owner->do
    let opened=M.addHelpStyled (renderMarkdown 40 "# *ABCDEF*\n\n[link](file.md)") (M.initialDesktop (80,25))
        view=fromJust (M.activeWindow opened)
@@ -102,7 +175,7 @@ checks=do
    queued<-tickTextPresentation owner initial
    let queuedResize=queued {M.windows=[view {M.bounds=M.Rect 2 2 10 12}]}
    pendingReady<-prepare queuedResize
-   check "pending resize cannot adopt the old worker width" (case Map.lookup (M.windowId view) (M.windowPresentations pendingReady) of Just (M.WindowPresentation _ columns _)->columns==8; _->False)
+   check "pending resize cannot adopt the old worker width" (case Map.lookup (M.windowId view) (M.windowPresentations pendingReady) of Just (M.WindowPresentation _ columns _ _)->columns==8; _->False)
    ready<-prepare initial
    let w=fromJust (M.activeWindow ready)
        doc=fromJust (M.activeDocument ready)

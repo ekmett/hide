@@ -16,23 +16,103 @@ static void scene(void) {
     for (int y=0;y<16;++y) glyph[y]=0x9000;
     assert(thc_begin());
     for (int y=0;y<25;++y) for (int x=0;x<80;++x)
-        thc_glyph(x,y,1,8,glyph,0xffffff,0x0000aa,0);
-    assert(thc_unicode(3,2,2,"👩🏽‍💻",0xffffff,0x0000aa,0));
-    assert(thc_unicode(6,2,1,"é",0xffff55,0x0000aa,3));
-    thc_glyph(10,2,2,8,glyph,0xffff55,0x0000aa,4);
+        thc_glyph(x,y,1,8,glyph,0xffffff,0x0000aa,0,0,1);
+    assert(thc_unicode(3,2,2,"👩🏽‍💻",0xffffff,0x0000aa,0,0,2));
+    assert(thc_unicode(6,2,1,"é",0xffff55,0x0000aa,3,0,1));
+    thc_glyph(10,2,2,8,glyph,0xffff55,0x0000aa,4,0,2);
 }
 static void decoration_scene(uint32_t lines) {
     uint16_t blank[16]={0};
     assert(thc_begin());
     for (int y=0;y<25;++y) for (int x=0;x<80;++x)
-        thc_glyph(x,y,1,8,blank,0xffffff,0x0000aa,0);
-    thc_glyph(0,0,1,8,blank,0xffffff,0x0000aa,lines&8);
-    thc_glyph(2,0,1,8,blank,0xffffff,0x0000aa,lines&16);
-    thc_glyph(4,0,1,8,blank,0xffffff,0x0000aa,lines);
-    thc_glyph(8,0,2,8,blank,0xffffff,0x0000aa,4|lines);
-    thc_clip(12,1); thc_glyph(11,0,2,8,blank,0xffffff,0x0000aa,4|lines);
-    thc_clip(14,1); thc_glyph(14,0,2,8,blank,0xffffff,0x0000aa,4|lines);
-    assert(thc_unicode(17,0,2," ",0xffffff,0x0000aa,7|lines));
+        thc_glyph(x,y,1,8,blank,0xffffff,0x0000aa,0,0,1);
+    thc_glyph(0,0,1,8,blank,0xffffff,0x0000aa,lines&8,0,1);
+    thc_glyph(2,0,1,8,blank,0xffffff,0x0000aa,lines&16,0,1);
+    thc_glyph(4,0,1,8,blank,0xffffff,0x0000aa,lines,0,1);
+    thc_glyph(8,0,2,8,blank,0xffffff,0x0000aa,4|lines,0,2);
+    thc_clip(12,1); thc_glyph(11,0,2,8,blank,0xffffff,0x0000aa,4|lines,0,2);
+    thc_clip(14,1); thc_glyph(14,0,2,8,blank,0xffffff,0x0000aa,4|lines,0,2);
+    assert(thc_unicode(17,0,2," ",0xffffff,0x0000aa,7|lines,0,2));
+}
+static void pixel_is(SDL_Surface *image,int x,int y,Uint8 r,Uint8 g,Uint8 b);
+static void script_scene(int script) {
+    uint16_t blank[16]={0},narrow[16],wide[16];
+    for (int y=0;y<16;++y) { narrow[y]=0xff00; wide[y]=0xffff; }
+    assert(thc_begin());
+    for (int y=0;y<25;++y) for (int x=0;x<80;++x)
+        thc_glyph(x,y,1,8,blank,0xffffff,0x0000aa,0,0,1);
+    thc_glyph(0,0,1,8,narrow,0xffffff,0x0000aa,0,script,1);
+    thc_glyph(2,0,script?1:2,16,wide,0xffffff,0x0000aa,0,script,2);
+    thc_glyph(5,0,1,8,narrow,0xffffff,0x0000aa,24,script,1);
+    thc_clip(9,1); thc_glyph(8,0,script?1:2,16,wide,0xffffff,0x0000aa,0,script,2);
+    assert(thc_unicode(12,0,1,"é",0xffffff,0x0000aa,3,script,1));
+    assert(thc_unicode(14,0,script?1:2,"界",0xffffff,0x0000aa,0,script,2));
+    assert(thc_unicode(17,0,script?1:2,"👩🏽‍💻",0xffffff,0x0000aa,0,script,2));
+}
+static void script_pixels(const char *capture,int cell_width,int cell_height,int script) {
+    SDL_Surface *image=SDL_LoadBMP(capture); assert(image);
+    int upper=script==1?0:cell_height/2,other=script==1?cell_height/2:0;
+    for (int y=0;y<cell_height;++y) for (int x=0;x<4*cell_width;++x) {
+        bool ink=(y>=upper && y<upper+cell_height/2) && (x<cell_width/2 || (x>=2*cell_width && x<3*cell_width));
+        pixel_is(image,x,y,ink?255:0,ink?255:0,ink?255:170);
+    }
+    /* Shaping/combining/emoji retain complete tiles, but no ink can occupy the
+     * opposite band, narrow right quarter, or the following cell. */
+    for (int x=12*cell_width;x<13*cell_width;++x) pixel_is(image,x,other,0,0,170);
+    for (int x=12*cell_width+cell_width/2;x<14*cell_width;++x) pixel_is(image,x,upper,0,0,170);
+    for (int x=14*cell_width;x<19*cell_width;++x) pixel_is(image,x,other,0,0,170);
+    for (int x=15*cell_width;x<17*cell_width;++x) pixel_is(image,x,upper,0,0,170);
+    for (int x=18*cell_width;x<19*cell_width;++x) pixel_is(image,x,upper,0,0,170);
+    for (int glyph=0;glyph<3;++glyph) {
+        int column=glyph==0?12:glyph==1?14:17,ink=0;
+        for (int y=upper;y<upper+cell_height/2;++y) for (int x=column*cell_width;x<(column+1)*cell_width;++x) {
+            Uint8 r,g,b,a; assert(SDL_ReadSurfacePixel(image,x,y,&r,&g,&b,&a));
+            if (r!=0 || g!=0 || b!=170) ++ink;
+        }
+        assert(ink>0); /* Never accept an empty shaped/emoji script tile. */
+    }
+    pixel_is(image,5*cell_width+cell_width-1,cell_height-1,255,255,255);
+    pixel_is(image,8*cell_width,upper,0,0,170); pixel_is(image,9*cell_width,upper,0,0,170);
+    SDL_DestroySurface(image);
+}
+static uint32_t mouse_paint(uint32_t rgb) {
+    const uint32_t palette[16]={0,0xaa0000,0x00aa00,0xaa5500,0x0000aa,0xaa00aa,0x00aaaa,0xaaaaaa,
+        0x555555,0xff5555,0x55ff55,0xffff55,0x5555ff,0xff55ff,0x55ffff,0xffffff};
+    for (int i=0;i<16;++i) if (rgb==palette[i]) return palette[i^7];
+    return rgb^0xaaaaaa;
+}
+static void script_pointer_pixels(const char *capture,int cell_width,int cell_height) {
+    script_scene(2); assert(thc_present());
+    SDL_Surface *reference=SDL_LoadBMP(capture); assert(reference);
+    uint64_t before,after,bytes,draws; thc_atlas_stats(&before,&bytes,&draws);
+    for (int phase=0;phase<3;++phase) {
+        int target=phase?17:14;
+        if (phase==1) {
+            int count,logical_w,logical_h; SDL_Window **windows=SDL_GetWindows(&count); assert(windows && count==1);
+            SDL_GetWindowSize(windows[0],&logical_w,&logical_h); SDL_free(windows);
+            SDL_FlushEvents(SDL_EVENT_FIRST,SDL_EVENT_LAST);
+            SDL_Event motion; SDL_zero(motion); motion.type=SDL_EVENT_MOUSE_MOTION;
+            motion.motion.x=(target*cell_width+1.f)*logical_w/reference->w;
+            motion.motion.y=1.f*logical_h/reference->h; assert(SDL_PushEvent(&motion));
+            int32_t event[6]; assert(thc_wait(event) && event[0]==12 && event[1]==target && event[2]==0);
+        }
+        script_scene(2); if (phase!=1) { thc_cursor_blink(0); thc_cursor(target,0); } assert(thc_present());
+        SDL_Surface *actual=SDL_LoadBMP(capture); assert(actual);
+        for (int y=0;y<cell_height;++y) for (int x=target*cell_width;x<(target+1)*cell_width;++x) {
+            Uint8 r,g,b,a; assert(SDL_ReadSurfacePixel(reference,x,y,&r,&g,&b,&a));
+            uint32_t color=((uint32_t)r<<16)|((uint32_t)g<<8)|b;
+            if (phase!=1 && y>=cell_height*14/16) color^=0xffffff;
+            if (phase) color=mouse_paint(color);
+            pixel_is(actual,x,y,color>>16,color>>8,color);
+        }
+        pixel_is(actual,(target+1)*cell_width,cell_height-1,0,0,170);
+        SDL_DestroySurface(actual);
+        thc_atlas_stats(&after,&bytes,&draws); assert(after==before);
+    }
+    SDL_FlushEvents(SDL_EVENT_FIRST,SDL_EVENT_LAST);
+    SDL_Event leave; SDL_zero(leave); leave.type=SDL_EVENT_WINDOW_MOUSE_LEAVE; assert(SDL_PushEvent(&leave));
+    int32_t event[6]; assert(thc_wait(event) && event[0]==12);
+    SDL_DestroySurface(reference);
 }
 static void pixel_is(SDL_Surface *image,int x,int y,Uint8 r,Uint8 g,Uint8 b) {
     Uint8 actual_r,actual_g,actual_b,a;
@@ -55,6 +135,11 @@ int main(int argc,char **argv) {
     expose.common.timestamp=SDL_GetTicksNS()-1000; assert(SDL_PushEvent(&expose));
     assert(thc_wait(event) && event[0]==8 && thc_event_age_ns()>=1000);
 #endif
+    /* Empty baseline draws are no-ops; invalid scripted geometry never is. */
+    assert(thc_unicode(0,0,0,"A",0xffffff,0,0,0,0));
+    assert(!thc_unicode(0,0,0,"A",0xffffff,0,0,1,1));
+    assert(!thc_unicode(0,0,0,"A",0xffffff,0,0,99,1));
+    SDL_ClearError();
     char capture[256]; SDL_snprintf(capture,sizeof(capture),"/tmp/hide-native-atlas-%llu.bmp",(unsigned long long)SDL_GetTicksNS());
     SDL_SetEnvironmentVariable(SDL_GetEnvironment(),"THC_EDIT_CAPTURE",argc>2?argv[2]:capture,true);
     scene();
@@ -81,7 +166,7 @@ int main(int argc,char **argv) {
      * present; assertions read that completed capture, never a reused buffer. */
     SDL_SetEnvironmentVariable(SDL_GetEnvironment(),"THC_EDIT_CAPTURE",capture,true);
     uint16_t half[16]; for (int y=0;y<16;++y) half[y]=0x00ff;
-    assert(thc_begin()); thc_clip(0,1); thc_glyph(-1,0,2,16,half,0xffffff,0,0); assert(thc_present());
+    assert(thc_begin()); thc_clip(0,1); thc_glyph(-1,0,2,16,half,0xffffff,0,0,0,2); assert(thc_present());
     SDL_Surface *image=SDL_LoadBMP(capture); assert(image);
     Uint8 r,g,b,a; assert(SDL_ReadSurfacePixel(image,0,0,&r,&g,&b,&a)); assert(r==255 && g==255 && b==255);
     assert(SDL_ReadSurfacePixel(image,16,0,&r,&g,&b,&a)); assert(r==0 && g==0 && b==0);
@@ -91,10 +176,10 @@ int main(int argc,char **argv) {
          * An early cell must still sample its original rectangle after growth. */
         assert(thc_begin());
         uint16_t tile[16]; for (int y=0;y<16;++y) tile[y]=0xffff;
-        thc_glyph(0,1,1,16,tile,0xffffff,0,0);
+        thc_glyph(0,1,1,16,tile,0xffffff,0,0,0,1);
         for (int i=0;i<17000;++i) {
             tile[0]=0x8000|(i&0x7fff); tile[1]=(uint16_t)i;
-            thc_glyph(1,1,1,16,tile,0xffffff,0,0);
+            thc_glyph(1,1,1,16,tile,0xffffff,0,0,0,1);
         }
         assert(thc_present());
         image=SDL_LoadBMP(capture); assert(image);
@@ -126,6 +211,17 @@ int main(int argc,char **argv) {
     decorated=SDL_LoadBMP(capture); assert(decorated);
     pixel_is(decorated,64,30,0,0,0); pixel_is(decorated,64,14,255,255,255);
     SDL_DestroySurface(decorated);
+    uint64_t script_before,script_after;
+    for (int pixelated=0;pixelated<=1;++pixelated) {
+        thc_pixelate_unicode(pixelated);
+        script_scene(0); assert(thc_present()); thc_atlas_stats(&script_before,&bytes,&batches);
+        for (int script=1;script<=2;++script) {
+            script_scene(script); assert(thc_present()); script_pixels(capture,16,32,script);
+            thc_atlas_stats(&script_after,&bytes,&batches); assert(script_after==script_before);
+        }
+    }
+    thc_pixelate_unicode(0);
+    script_pointer_pixels(capture,16,32);
     /* A short cell still displays both normalized line bands at pixel centers. */
     for (int i=0;i<8;++i) assert(thc_scale(-1));
     assert(thc_mode(8,80,25));
@@ -138,6 +234,14 @@ int main(int argc,char **argv) {
     pixel_is(decorated,16,3,255,255,255); pixel_is(decorated,16,7,0,0,170);
     pixel_is(decorated,96,7,255,255,255); pixel_is(decorated,104,7,0,0,170);
     SDL_DestroySurface(decorated);
+    script_scene(0); assert(thc_present());
+    thc_atlas_stats(&script_before,&bytes,&batches);
+    for (int script=1;script<=2;++script) {
+        script_scene(script); assert(thc_present()); script_pixels(capture,8,8,script);
+        thc_atlas_stats(&script_after,&bytes,&batches); assert(script_after==script_before);
+    }
+    script_pointer_pixels(capture,8,8);
+    puts("Script ink bands/natural widths, mouse/cursor paint, normal-resolution atlas reuse and 8-row geometry passed");
     puts("Cell underline/strikethrough pixels, full/half glyph clips, cursor, 8-row mode and unchanged atlas identity passed");
     thc_close(); remove(capture); return 0;
 }

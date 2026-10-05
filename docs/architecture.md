@@ -88,13 +88,21 @@ user-facing conflict choices.
 
 ## Rendering and text
 
-Vty is the common rendering representation. Native windows draw bitmap tiles
-and system-shaped fallback text; the browser draws the same grid with WebGL
-and canvas-shaped fallback. Text terminals provide their own glyph rendering.
-Grapheme segmentation and cell widths use utf8proc. Vty bold/italic attributes
-project to shared `TextStyle` paint metadata and strict cell-frame span flags.
-Native and browser glyph cache keys include these traits; the remote terminal
-reconstructs the original attributes. Traits do not change grapheme advances.
+A composed cell grid is the shared rendering boundary. Ordinary Vty panels and
+prepared styled rows feed that grid once. Native windows and WebGL draw glyphs
+from retained atlases; text terminals provide their own glyph rendering.
+Grapheme segmentation and cell widths use utf8proc. Bold and italic affect the
+atlas tile; underline and strikethrough are cell paint. These traits do not
+change grapheme advances.
+
+Prepared styled rows can use `ScriptStyle Superscript` or `ScriptStyle Subscript`.
+A scripted grapheme occupies one cell and keeps its complete source text for
+copying and hit testing. Graphical backends scale the normal atlas tile to half
+size, in the upper or lower half of that cell. A narrow glyph occupies the left
+quarter; a naturally wide glyph fills the half. Text terminals print narrow
+script glyphs normally and use a one-cell replacement for wide ones. Explicit
+script geometry survives transport and capture; it does not borrow terminal
+attribute bits or change the privacy mask's cell boundaries.
 
 The native Pixelate Unicode path shapes at four-times resolution, filters in
 linear light and applies Floyd–Steinberg error diffusion to four coverage
