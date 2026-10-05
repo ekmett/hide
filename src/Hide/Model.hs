@@ -3159,7 +3159,7 @@ horizontalMutation cmd=cmd `elem` [DeleteBackward,DeleteForward,DeleteLine,Delet
 -- A global remap cannot edit or move a source behind another focused input owner.
 sourceNavigationOwner :: Desktop -> Bool
 sourceNavigationOwner d=dialog d==Nothing && not (questionActive d) && not (activeAutocomplete d) &&
-  bindingContext d `elem` [Just Bindings.SourceKeys,Just Bindings.WordStarKeys] &&
+  bindingContext d `elem` [Just Bindings.SourceKeys,Just Bindings.WordStarKeys,Just Bindings.DebuggerKeys] &&
   maybe False (windowFocused d) (activeWindow d)
 
 -- | Preserve each window's existing displayed selection and source coordinate owner.

@@ -35,6 +35,7 @@ import Hide.Render (renderKey)
 
 checks :: IO ()
 checks=do
+  debuggerNavigationChecks
   let check name ok=unless ok (error name)
       prepare=either (error . show) id . platformBindings [] TerminalPlatform . M.singleton "source" . M.fromList
       bindings=prepare [("hide.file.save",["Ctrl+Shift+S"]),("hide.file.open",[])]
@@ -657,3 +658,42 @@ dialogFocusChecks=do
   let questionBase=(addReadOnly "Conversation" "Transcript" base) {chatQuestion=Just (ChatQuestion 42 "Question" ["Yes"] Nothing (newBuffer "") (Selection 0 0) True)}
   check "dialog commands do not replace inline question ownership" (not (commandEnabled questionBase nextCommand) && maybe False ((==Just 0).questionChoice) (chatQuestion (event (V.KChar '\t') [] questionBase)) && snd (handleEvent (V.EvKey V.KEnter []) questionBase)==[AgentAction "question-submit" ["42"]] && snd (handleEvent (V.EvKey V.KEsc []) questionBase)==[AgentAction "question-cancel" ["42"]])
   check "dialog focus chords are configurable on every platform" (all (\platform->case platformBindings [] platform (M.singleton "dialog" (M.fromList [("hide.dialog.focus-next",["Alt+Tab"]),("hide.dialog.focus-previous",["Shift+Tab"])])) of Right _->True; _->False) [TerminalPlatform,GraphicalPlatform,MacPlatform])
+
+
+-- Debugger output and adapter sources share the same read-only navigation owner.
+debuggerNavigationChecks :: IO ()
+debuggerNavigationChecks=do
+  let check name ok=unless ok (error name)
+      prepare entries=either (error . show) id (configuredBindings [] (M.fromList
+        [(platform,M.singleton "debugger" (M.fromList entries)) | platform<-["terminal","graphical","macos"]]))
+      remapped=prepare [("hide.cursor.left",["F13"]),("hide.selection.left",["F14"]),("hide.edit.delete-backward",["F15"])]
+      removed=prepare [("hide.cursor.left",[]),("hide.selection.left",[])]
+      defaults=either (error . show) id (configuredBindings [] M.empty)
+      event key mods d=handleEvent (V.EvKey key mods) d
+      selected d=maybe (Selection (-1) (-1)) selection (activeWindow d)
+      pane label=modifyActive (\w->w {selection=Selection 2 2})
+        (addReadOnly label "a界e\x301\&z\nnext" (initialDesktop (80,25)))
+      observations d=(selected (fst (event (V.KFun 13) [] d {keyBindings=remapped}))==Selection 1 1,
+        selected (fst (event V.KLeft [] d {keyBindings=removed}))==Selection 2 2)
+      observed=map (observations . pane) ["Debugger output","Source Generated.hs"]
+  -- Report both actual-route failures in the original library, without stopping
+  -- after the accepted remap and hiding the independent raw-fallback failure.
+  check ("debugger remap executes and unbind consumes raw navigation: "++show observed) (all (\(remap,unbind)->remap && unbind) observed)
+  forM_ ["Debugger output","Source Generated.hs"] $ \label->
+    forM_ [(False,Nothing),(False,Just 3),(True,Just 3)] $ \(mac,video)->do
+      let original=(pane label) {nativeMac=mac,videoMode=video}
+          configured=original {keyBindings=remapped}
+          result key mods=fst (event key mods configured)
+          state (d,effects)=(selected d,effects)
+          modal=prompt "Input" Information [Input "Value" "" 0] configured
+          unfocused=configured {problemsVisible=True,problemsFocused=True}
+          private=configured {guestPrivatePaths=["/authority"],buffers=M.map (\doc->doc {documentOrigin=Just "/authority/secret.hs"}) (buffers configured)}
+      check "debugger remap is projected by exact command ID" (boundKeyCommand (V.KFun 13) [] configured==Just (CursorLeft False) && ("F13","hide.cursor.left") `elem` focusedBindingChords configured)
+      check "debugger selection remap extends from its read-only caret" (selected (result (V.KFun 14) [])==Selection 2 1)
+      check "debugger removed selection cannot fall through" (selected (fst (event V.KLeft [V.MShift] original {keyBindings=removed}))==Selection 2 2)
+      check "debugger navigation defaults preserve existing pane geometry" (all (\(key,mods)->state (event key mods original)==state (event key mods original {keyBindings=defaults}))
+        [(V.KLeft,[]),(V.KRight,[V.MShift]),(V.KUp,[]),(V.KDown,[V.MShift]),(V.KHome,[]),(V.KEnd,[]),(V.KHome,[V.MCtrl]),(V.KEnd,[V.MCtrl]),(V.KPageUp,[]),(V.KPageDown,[V.MShift]),(V.KLeft,[V.MCtrl]),(V.KRight,[V.MCtrl,V.MShift])])
+      check "debugger navigation cannot acquire read-only mutation authority" (not (commandEnabled configured DeleteBackward) && activeText (result (V.KFun 15) [])==activeText configured && maybe (-1) (revision . documentBuffer) (activeDocument (result (V.KFun 15) []))==maybe (-2) (revision . documentBuffer) (activeDocument configured))
+      check "debugger navigation remains behind modal and focus owners" (not (commandEnabled modal (CursorLeft False)) && selected (fst (event (V.KFun 13) [] modal))==Selection 2 2 && not (commandEnabled unfocused (CursorLeft False)) && selected (fst (event (V.KFun 13) [] unfocused))==Selection 2 2)
+      denied<-P.applyGuestInput (P.Key "F13" []) private
+      check "debugger remap retains generated-source privacy" (not (guestKeyAllowed private (V.KFun 13) []) && case denied of Left _->True; _->False)

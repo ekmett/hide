@@ -264,7 +264,7 @@ platformBindings catalogue platform configuration=do
        (Paste,["Ctrl+V","Ctrl+Shift+V","Shift+Insert"]),(SelectAll,["Ctrl+A","Ctrl+Shift+A"]),
        (Redo,["Ctrl+Y","Ctrl+Shift+Y","Ctrl+Shift+Z"])]
     defaultsFor SourceKeys=defaults++navigationDefaults
-    defaultsFor _=defaults
+    defaultsFor DebuggerKeys=defaults++navigationDefaults
     withoutWindowF6=map (\(action,chords)->(action,if action==NextWindow then filter (/="F6") chords else chords))
     navigationDefaults=horizontalDefaults++edgeDefaults++wordDefaults++
       [(CursorUp False,verticalAliases V.KUp False),(CursorDown False,verticalAliases V.KDown False),
