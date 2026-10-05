@@ -6,7 +6,7 @@
 -- Clipped GPU cells retain their full semantic glyph. Text-mode partial clusters
 -- become blanks. Terminal output advances
 -- explicitly past two-cell clusters even when the user's font draws them narrowly.
-module Hide.Unicode (graphemes, clusterWidth, textImage, wideTextImage, displayClusters, terminalProjection, terminalSpan, CellSpan(..), CellLayer(..), cellRowsForLayers, cellRowsForPic, cellDisplayOps, flattenPicture, displayOpsForPic, updateDisplayOps, terminalText, textInputChar) where
+module Hide.Unicode (graphemes, scalarWidth, clusterWidth, textImage, wideTextImage, displayClusters, terminalProjection, terminalSpan, CellSpan(..), CellLayer(..), cellRowsForLayers, cellRowsForPic, cellDisplayOps, flattenPicture, displayOpsForPic, updateDisplayOps, terminalText, textInputChar) where
 
 import Control.Monad (forM_, when)
 import Data.Char (isPrint)
@@ -57,13 +57,18 @@ graphemes text=scan 0 0 (-1) 0
             in if boundary then slice start byte:rest else rest
 {-# NOINLINE graphemes #-}
 
+-- | Width of one Unicode scalar under the shared display overrides. Printable
+-- ASCII occupies one cell; combining/control scalars remain zero-width.
+-- @scalarWidth c ≡ clusterWidth (T.singleton c)@.
+scalarWidth :: Char -> Int
+scalarWidth c
+  | c>=' ' && c<'\127' = 1
+  | c `elem` ['⌥','⌘','\xf024b','\xf0770','\xfe0f','\x20e3'] = 2
+  | c>='\x1f1e6' && c<='\x1f1ff' = 2
+  | otherwise = max 0 (fromIntegral (c_width (fromIntegral (fromEnum c))))
+
 clusterWidth :: T.Text -> Int
-clusterWidth t
-  | T.any (`elem` ['⌥','⌘']) t = 2 -- Mac key legends reserve a two-cell tile in every frontend.
-  | T.any (`elem` ['\xf024b','\xf0770']) t = 2 -- Two-cell Material folder tiles, including terminal cursor correction.
-  | T.any (`elem` ['\xfe0f','\x20e3']) t = 2
-  | T.any (\c -> c>='\x1f1e6' && c<='\x1f1ff') t = 2
-  | otherwise = maximum (0:map (max 0 . fromIntegral . c_width . fromIntegral . fromEnum) (T.unpack t))
+clusterWidth = T.foldl' (\width c->max width (scalarWidth c)) 0
 
 textImage :: V.Attr -> T.Text -> V.Image
 textImage _ t | T.null t = V.emptyImage

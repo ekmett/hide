@@ -1,4 +1,4 @@
-{-# LANGUAGE CPP, OverloadedStrings, ScopedTypeVariables #-}
+{-# LANGUAGE CPP, OverloadedStrings, ScopedTypeVariables, BangPatterns #-}
 -- | Native SDL frontend for remotely owned editor sessions.
 --
 -- A receiver worker validates/decodes frames and downloads; SDL events and drawing
@@ -19,6 +19,7 @@ import Data.Bits ((.&.))
 import qualified Data.ByteString as BS
 import qualified Data.Text.Encoding as TE
 import qualified Data.Text as T
+import qualified Data.Text.Unsafe as TU
 import qualified Graphics.Vty as V
 import Hide.Frontend
 import Hide.Model (Command(..), MenuItem(..), menus)
@@ -27,7 +28,7 @@ import qualified Data.IntSet as IS
 import Data.Maybe (fromMaybe)
 import Hide.Window (nativeCommands, nativeMenuToken, nativeChordShortcut, nativeDockWindow)
 import Hide.Remote (RemotePeer)
-import Hide.Unicode (clusterWidth, graphemes)
+import Hide.Unicode (scalarWidth, clusterWidth, graphemes)
 #if defined(WITH_WINDOW) && defined(WITH_REMOTE)
 import Control.Concurrent.Async (withAsync, poll)
 import Control.Concurrent.STM hiding (check)
@@ -35,7 +36,7 @@ import Control.Exception (bracket, bracket_, throwIO, IOException, catch, finall
 import Control.Monad (forM_, forever, when, foldM)
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.Map.Strict as M
-import Foreign (alloca, allocaArray, peek, peekArray, withArray)
+import Foreign (alloca, allocaArray, peek, peekArray, pokeArray)
 import Foreign.C
 import Data.IORef
 import Data.Word (Word64)
@@ -63,9 +64,16 @@ data RemoteContribution = RemoteContribution
   , contributionTitle :: T.Text, contributionKey :: T.Text, contributionEnabled :: Bool
   } deriving (Eq,Show)
 
--- | Visible x/y, paint, semantic grapheme, full allocated width, clip start and
--- visible width. The glyph origin is x minus clip start; clipping never reshapes it.
-data RemoteCell = RemoteCell Int Int TextStyle T.Text Int Int Int deriving (Eq,Show)
+-- | Validated visible spans. 'RemoteText' borrows a complete run of single
+-- one-cell scalars, with its cell count. 'RemoteGlyph' retains one semantic
+-- grapheme, full allocated width, clip start and visible width. Its origin is
+-- visible x minus clip start; clipping never reshapes the glyph.
+data RemoteCell
+  = RemoteText {-# UNPACK #-} !Int {-# UNPACK #-} !Int !TextStyle !T.Text {-# UNPACK #-} !Int
+  | RemoteGlyph {-# UNPACK #-} !Int {-# UNPACK #-} !Int !TextStyle !T.Text
+      {-# UNPACK #-} !Int {-# UNPACK #-} !Int {-# UNPACK #-} !Int
+  deriving (Eq,Show)
+
 data RemoteFrame = RemoteFrame
   { remoteSize :: (Int,Int), remoteMode :: Maybe Int, remoteTitle :: T.Text
   , remoteCursor :: Maybe (Int,Int), remoteBlink :: Bool, remoteCRT :: Bool
@@ -121,26 +129,30 @@ parseRemoteFrame metadata rows = parseEither (withObject "frame metadata" $ \o -
     parseRow cols y value = do
       spans <- parseJSON value :: Parser [(Int,Int,Int,Int,[Value])]
       unless (length spans<=cols+1) (fail "Too many spans")
-      snd <$> foldRow cols y (0,[]) spans
-    foldRow _ _ acc [] = pure acc
-    foldRow cols y (previous,acc) ((x,fg,bg,flags,runs):rest) = do
+      reverse <$> foldRow cols y 0 [] spans
+    foldRow _ _ _ acc [] = pure acc
+    foldRow cols y previous acc ((x,fg,bg,flags,runs):rest) = do
       unless (x>=previous && x<=cols && flags>=0 && flags .&. 27==flags && all (\c -> c>=0 && c<=0xffffff) [fg,bg] && length runs<=cols+1) (fail "Invalid span")
-      clusters <- concat <$> traverse parseRun runs
-      let visible (_,_,_,shown)=shown
-          width = sum (map visible clusters)
-      unless (width<=cols-x && length clusters<=cols*4) (fail "Span exceeds row")
-      let positions = scanl (+) x (map visible clusters)
-          cells = [RemoteCell at y (TextStyle fg bg flags) text full start shown | (at,(text,full,start,shown)) <- zip positions clusters, shown>0]
-      foldRow cols y (x+width,acc++cells) rest
-    parseRun (String text) = do
-      unless (T.length text<=512 && T.all (\c -> c>=' ' && c/='\DEL' && clusterWidth (T.singleton c)==1) text) (fail "Invalid character run")
-      pure [(T.singleton c,1,0,1) | c<-T.unpack text]
-    parseRun value = do
+      (next,cells)<-foldRuns cols y (TextStyle fg bg flags) x acc runs
+      foldRow cols y next cells rest
+    foldRuns _ _ _ at acc [] = pure (at,acc)
+    foldRuns cols y paint at acc (String text:rest) = do
+      let end=TU.lengthWord8 text
+          count !offset !n
+            | offset==end = Just n
+            | n==512 = Nothing
+            | otherwise = case TU.iter text offset of
+                TU.Iter c bytes | c>=' ' && c/='\DEL' && scalarWidth c==1 -> count (offset+bytes) (n+1)
+                _ -> Nothing
+      case count 0 0 of
+        Just n | n<=cols-at -> foldRuns cols y paint (at+n) (if n==0 then acc else RemoteText at y paint text n:acc) rest
+        _ -> fail "Invalid character run"
+    foldRuns cols y paint at acc (value:rest) = do
       (text,w,stretched,start,shown) <- parseJSON value :: Parser (T.Text,Int,Bool,Int,Int)
       unless (not (T.null text) && T.length text<=4096 && not (T.any (\c -> c<' ' || c=='\DEL') text) && graphemes text==[text] && w>0 && w<=2 &&
-        start>=0 && start<w && shown>0 && shown<=w-start &&
+        start>=0 && start<w && shown>0 && shown<=w-start && shown<=cols-at &&
         (if stretched then w==2 && clusterWidth text<2 else clusterWidth text==w)) (fail "Invalid grapheme")
-      pure [(text,w,start,shown)]
+      foldRuns cols y paint (at+shown) (RemoteGlyph at y paint text w start shown:acc) rest
 
 modifierNames :: Int -> [T.Text]
 modifierNames mask = ["shift" | mask .&. 1/=0] ++ ["ctrl" | mask .&. 2/=0] ++ ["alt" | mask .&. 4/=0] ++ ["cmd" | mask .&. 8/=0]
@@ -265,7 +277,7 @@ sanitizeDownloadName input = case limit (T.map clean (last (T.splitOn "/" (T.rep
                 | otherwise = c
 
 #if defined(WITH_WINDOW) && defined(WITH_REMOTE)
-data Incoming = Frame Int Word64 RemoteFrame | Assets (M.Map T.Text Glyph) | Control Value
+data Incoming = Frame Int Word64 RemoteFrame | Assets (M.Map Char Glyph) | Control Value
 -- Compression and file transfers stay off the SDL thread.
 receiveFrames :: RemotePeer -> TBQueue Incoming -> IO ()
 receiveFrames peer queue = go [] (object []) Nothing 0
@@ -281,7 +293,7 @@ receiveFrames peer queue = go [] (object []) Nothing 0
               glyphs <- o .: "glyphs" :: Parser [(T.Text,Int,[Int])]
               unless (length glyphs<=65536) (fail "Oversized glyph atlas")
               forM_ glyphs $ \(text,w,bits) -> unless (T.length text==1 && w `elem` [8,16] && length bits==16 && all (\n -> n>=0 && n<=65535) bits) (fail "Invalid glyph")
-              pure (M.fromList [(text,Glyph w (map fromIntegral bits)) | (text,w,bits)<-glyphs])) value
+              pure (M.fromList [(T.head text,Glyph w (map fromIntegral bits)) | (text,w,bits)<-glyphs])) value
             supported <- parseIO (withObject "assets" (\o -> o .:? "menuCommands" .!= [])) value :: IO [T.Text]
             unless (length supported<=256 && all ((<=256).T.length) supported) (ioError (userError "Invalid menu commands"))
             emit (Assets atlas)
@@ -314,23 +326,51 @@ receiveFrames peer queue = go [] (object []) Nothing 0
 parseIO :: (Value -> Parser a) -> Value -> IO a
 parseIO parser = either (ioError . userError) pure . parseEither parser
 
-drawRemote :: Font -> M.Map T.Text Glyph -> RemoteFrame -> IO ()
-drawRemote font atlas frame = do
+drawRemote :: Font -> M.Map Char Glyph -> RemoteFrame -> IO ()
+drawRemote font atlas frame = allocaArray 16 $ \scratch -> do
   c_cursor_blink (flag (remoteBlink frame))
   c_crt_filter (flag (remoteCRT frame))
   c_pixelate_unicode (flag (remotePixelated frame))
   check "Allocate remote frame" c_begin
-  forM_ (remoteCells frame) $ \(RemoteCell visible y paint text full start shown) -> do
-    let x=visible-start
-        bitmap = case M.lookup text atlas of
-          Just tile -> Just tile
-          Nothing -> case T.unpack text of [c] | bitmapGlyph font c -> Just (glyph font c); _ -> Nothing
-        fg=fromIntegral (textForeground paint); bg=fromIntegral (textBackground paint)
-        flags=fromIntegral (textFlags paint+if full/=clusterWidth text then 4 else 0)
-    c_clip (fromIntegral visible) (fromIntegral shown)
-    case bitmap of
-      Just (Glyph width bits) -> withArray bits $ \p -> c_glyph (fromIntegral x) (fromIntegral y) (fromIntegral full) (fromIntegral width) p fg bg flags
-      Nothing -> utf8 text $ \p -> check "Draw remote Unicode" (c_unicode (fromIntegral x) (fromIntegral y) (fromIntegral full) p fg bg flags)
+  forM_ (remoteCells frame) $ \cell -> case cell of
+    RemoteText x y paint text _ -> do
+      let !fg=fromIntegral (textForeground paint)
+          !bg=fromIntegral (textBackground paint)
+          !flags=fromIntegral (textFlags paint)
+          end=TU.lengthWord8 text
+          chars !offset !at
+            | offset==end = pure ()
+            | otherwise = case TU.iter text offset of
+                TU.Iter ch bytes -> do
+                  c_clip (fromIntegral at) 1
+                  let bitmap=case M.lookup ch atlas of
+                        Just tile->Just tile
+                        Nothing | bitmapGlyph font ch->Just (glyph font ch)
+                        _->Nothing
+                  case bitmap of
+                    Just (Glyph width bits)->do
+                      pokeArray scratch bits
+                      c_glyph (fromIntegral at) (fromIntegral y) 1 (fromIntegral width) scratch fg bg flags
+                    Nothing->utf8 (TU.takeWord8 bytes (TU.dropWord8 offset text)) $ \p ->
+                      check "Draw remote Unicode" (c_unicode (fromIntegral at) (fromIntegral y) 1 p fg bg flags)
+                  chars (offset+bytes) (at+1)
+      chars 0 x
+    RemoteGlyph visible y paint text full start shown -> do
+      let x=visible-start
+          bitmap = case T.uncons text of
+            Just (c,after) | T.null after -> case M.lookup c atlas of
+              Just tile->Just tile
+              Nothing | bitmapGlyph font c->Just (glyph font c)
+              _->Nothing
+            _->Nothing
+          fg=fromIntegral (textForeground paint); bg=fromIntegral (textBackground paint)
+          flags=fromIntegral (textFlags paint+if full/=clusterWidth text then 4 else 0)
+      c_clip (fromIntegral visible) (fromIntegral shown)
+      case bitmap of
+        Just (Glyph width bits) -> do
+          pokeArray scratch bits
+          c_glyph (fromIntegral x) (fromIntegral y) (fromIntegral full) (fromIntegral width) scratch fg bg flags
+        Nothing -> utf8 text $ \p -> check "Draw remote Unicode" (c_unicode (fromIntegral x) (fromIntegral y) (fromIntegral full) p fg bg flags)
   forM_ (remoteCursor frame) $ \(x,y) -> c_cursor (fromIntegral x) (fromIntegral y)
   check "Present remote frame" c_present
   where flag value = if value then 1 else 0

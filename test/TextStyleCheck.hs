@@ -53,7 +53,7 @@ checks=do
   (_,restored)<-decodeFrame rows (BL.toStrict (framePacket False rows (frameRows regular) (frameMetadata "." regular)))
   check "trait-only changes survive real compressed frame reconstruction" (restored==frameRows regular && restored/=rows)
   frame<-either fail pure (parseRemoteFrame (Data.Aeson.object metadata) rows)
-  check "native receiver retains all terminal traits" ([textFlags paint | RemoteCell _ _ paint text _ _ _<-remoteCells frame,textForeground paint==fromIntegral foreground,text `elem` ["B","I","X","U","S","A","D","R"]]==[1,2,3,8,16,27,0,0])
+  check "native receiver retains all terminal traits" (all (\(char,flags)->any (\cell->case cell of RemoteText _ _ paint text _->textForeground paint==fromIntegral foreground && char `T.isInfixOf` text && textFlags paint==flags; _->False) (remoteCells frame)) [("B",1),("I",2),("X",3),("U",8),("S",16),("A",27),("D",0),("R",0)])
   let (_,terminal)=remoteTerminalDisplay (remoteSize frame) (Just frame) ""
       terminalTraits=[(TL.toStrict text,textFlags (textStyleFromAttr attr)) | ops<-toList terminal, TextSpan {textSpanAttr=attr,textSpanText=text}<-toList ops]
   check "remote TUI restores all four font attributes" (all (\(char,flags)->any (\(text,actual)->char `T.isInfixOf` text && actual==flags) terminalTraits) [("B",1),("I",2),("X",3),("U",8),("S",16),("A",27)])

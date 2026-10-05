@@ -1,6 +1,9 @@
 {-# LANGUAGE OverloadedStrings #-}
 module RemoteTerminalCheck (checks) where
 import Control.Monad (unless)
+import Control.Exception (evaluate)
+import Control.DeepSeq (force)
+import GHC.Conc (getAllocationCounter)
 import Data.Aeson
 import Data.IORef (newIORef,readIORef,writeIORef)
 import qualified Data.ByteString.Char8 as BSC
@@ -16,8 +19,9 @@ import qualified Data.Text.Lazy as TL
 import qualified Data.Vector as Vec
 import Graphics.Vty.Span (SpanOp(..))
 import qualified Graphics.Vty as V
+import Hide.TextStyle (textForeground,textFlags)
 import Hide.RemoteTerminal
-import Hide.RemoteWindow (parseRemoteFrame)
+import Hide.RemoteWindow (parseRemoteFrame, RemoteFrame(..), RemoteCell(..))
 import qualified Hide.Protocol as P
 
 checks :: IO ()
@@ -38,6 +42,29 @@ checks = do
   let metadata=object ["size" .= ([40,12]::[Int]),"bindings" .= ([]::[(T.Text,T.Text)]),"cursor" .= ([5,0]::[Int])]
       row=toJSON [(2::Int,0x123456::Int,0xffffff::Int,0::Int,[String "a",toJSON ("界"::T.Text,2::Int,False,0::Int,2::Int),toJSON ("é"::T.Text,1::Int,False,0::Int,1::Int)])]
   frame <- either error pure (parseRemoteFrame metadata (row:replicate 11 (toJSON ([]::[Value]))))
+  let runText=T.dropEnd 6 (T.drop 6 ("prefixAéδ░│𝄞Zsuffix"::T.Text))
+      textRow text=toJSON [(0::Int,0x123456::Int,0xffffff::Int,0::Int,[String text])]
+      parseText text=parseRemoteFrame metadata (textRow text:replicate 11 (toJSON ([]::[Value])))
+  underlyingRun<-either error pure (parseText runText)
+  mapM_ (\text->check "character runs reject non-cell scalars and controls" (case parseText text of Left _->True; _->False))
+    ["界","e\x301","\x200d","\xfe0f","\x20e3","🇨🇦","⌘","\xf024b","\n","\DEL",T.replicate 41 "a",T.replicate 513 "a"]
+  check "receiver preserves each validated text run rather than allocating per character" (length (remoteCells underlyingRun)==1)
+  check "borrowed nonzero-base run keeps scalar count and paint" (case remoteCells underlyingRun of
+    [RemoteText 0 0 paint text 7]->text==runText && textForeground paint==0x123456
+    _->False)
+  let (_,croppedRun)=remoteTerminalDisplay (4,1) (Just underlyingRun) ""
+  check "terminal clips text runs by cells without splitting UTF8" (T.concat [TL.toStrict text | TextSpan _ _ _ text<-Vec.toList (Vec.head croppedRun)]=="Aéδ░")
+  let denseMetadata=object ["size" .= ([180,55]::[Int]),"bindings" .= ([]::[(T.Text,T.Text)])]
+      denseRows=replicate 55 (textRow ("║"<>T.replicate 178 " "<>"║"))
+  _<-evaluate (force (denseMetadata,denseRows))
+  before<-getAllocationCounter
+  dense<-either error pure (parseRemoteFrame denseMetadata denseRows)
+  occupied<-evaluate (sum [case cell of
+    RemoteText x y paint text n->x+y+textFlags paint+T.length text+n
+    RemoteGlyph x y paint text full start shown->x+y+textFlags paint+T.length text+full+start+shown | cell<-remoteCells dense])
+  after<-getAllocationCounter
+  check "dense receiver retains 55 runs within a 1.5 MB allocation budget"
+    (length (remoteCells dense)==55 && occupied==21285 && before-after<1500000)
   let (cursor,ops)=remoteTerminalDisplay (40,12) (Just frame) ""
       rowWidth values=sum [n | TextSpan _ n _ _<-Vec.toList values]
       rowText values=T.concat [TL.toStrict text | TextSpan _ _ _ text<-Vec.toList values]
