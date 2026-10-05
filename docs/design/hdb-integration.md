@@ -2,8 +2,8 @@
 
 Date: 2026-10-02. Selected direction: use `hdb`, sharing the editor's DAP
 session, source windows and MCP tools. Saved-source launch, breakpoints,
-inspection and stepping have live qualification; the remaining work is listed
-below. Upstream inspected:
+inspection, stepping and explicit scalar Watches have live qualification;
+the remaining work is listed below. Upstream inspected:
 [`af22571`](https://github.com/well-typed/haskell-debugger/tree/af22571abc9d4316ad592815f46d9b430f278014),
 package version 0.14.0.0. See the [options assessment](ghc-debugging-options.md)
 for alternatives and platform qualification.
@@ -50,9 +50,11 @@ A normal GHC native build remains available independently.
 
 Use the same Breakpoints, Threads, Call stack and Scopes controls as THC.
 Expanding an ordinary value shows its children. An unevaluated value displays
-`<thunk>`; read-only expansion refuses to force it. Planned **Force** and
-**Evaluate** actions will be explicit execution operations with stopped-context
-history. Planned watches will require explicit evaluation on each stop.
+`<thunk>`; read-only expansion refuses to force it. Persistent **Watches** now
+have explicit human-only **Evaluate watch** actions with stopped-frame and
+expression-revision provenance. Root Force is implemented for a known lazy root
+result, but remains fixture-qualified; hdb Evaluate does not supply that lazy hint.
+Nested lazy-child Force and the expression console remain planned.
 An agent can inspect in the background and reveal the same source/frame to the
 user with `debug_present`; it never gets a second hidden debugger state.
 
@@ -66,8 +68,8 @@ separately so upstream features are not confused with finished integration.
 | Source breakpoints, step in/over/out, continue | Implemented | Reuse existing UI/MCP; qualify disk sources and cradle loading |
 | Threads, frames, locals/module/globals | Implemented | Existing pickers; preserve frame/thread identity and paging bounds |
 | Ordinary variable children | Implemented | Existing expansion after validating reference provenance |
-| Thunk inspection/forcing | Lazy presentation hint; fetching lazy children forces | Show lazy state; separate Force action and executing MCP tool |
-| Expression evaluation | `evaluate` with optional frame; returns value/type/reference | Explicit console, history, manually evaluated watches; executing MCP tool |
+| Thunk inspection/forcing | Lazy child presentation hint; fetching lazy children forces | Read-only expansion refuses lazy references; root Force has fixture coverage only; nested Force and executing MCP tool remain planned |
+| Expression evaluation | `evaluate` with optional frame; returns value/type/reference without a lazy root hint | Manually evaluated Watches have live scalar/list qualification; console, history and executing MCP tool remain planned |
 | Source conditions, hit counts, logpoints | Implemented; hit count is parsed as an integer | Breakpoint editor; preserve all fields when replacing a source's set |
 | Function breakpoints | Implemented, including condition/hit count | Function breakpoint rows and separate replace operation |
 | Exception filters and details | Implemented | Existing filters plus exception details panel/tool |
@@ -203,7 +205,16 @@ reproduction. Preserve canonical source/root identity in owned launch.
 The shared debugger now records variable-reference provenance from UI and MCP
 responses, denies ordinary expansion of lazy/unknown references, advertises and
 handles variable invalidation, and keeps the stopped source frame when only
-values expire. Explicit Force/Evaluate remains a separate delivery item.
+values expire. On 2026-10-04, the captured Watches provider route also verified
+explicit stopped-frame scalar evaluation and nonlazy list-result expansion with hdb 0.14
+and GHC 9.14.1 on macOS arm64. Lazy children stayed inert; these Evaluate replies
+did not expose a root Force action. Live Force remains unqualified.
+
+The same watch route on THC AST and bytecode reached embedded source stops but
+returned a bounded error for explicit Haskell expression evaluation. Continue
+produced the expected result and exited normally. THC currently has no stopped
+lexical-frame expression evaluator; neither source stepping nor its global
+export scope establishes watch evaluation or Force support.
 
 Owned-server launch is now available through the shared adapter configuration's
 `server` argv field. The existing process transport sets child-only DAP_HOST and

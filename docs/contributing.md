@@ -651,7 +651,13 @@ lock. Adoption rechecks registration, provenance, modal input and current path
 privacy. Nonlazy child pages reuse the existing 128-row/64-page stopped cache;
 root Force publishes its prepared first page, while nested lazy values stay inert.
 Unsupported evaluation remains a local error until explicit retry. These checks
-are fake DAP evidence; live hdb/THC watch execution and nested Force remain open.
+are deterministic DAP evidence. A separate headless live check on hdb 0.14 / GHC
+9.14.1 / macOS arm64 verified a stopped-frame scalar result of `42`, list-result
+expansion with an inert lazy child through the captured provider action route. No
+root Force action was available: hdb Evaluate replies omit the lazy root hint.
+Both THC backends reached a source stop, rejected explicit watch expression
+evaluation with a bounded error, then continued to the expected result and exited.
+These runs do not qualify live Force; nested Force remains open.
 Local source following still uses the existing synchronous owner route.
 
 Debugger source inspection accepts only positive references observed in current
