@@ -173,6 +173,7 @@ checks=do
   check "unavailable dialog editing action retains Input button mnemonic ownership" (dialog (fst (key (V.KChar 'c') [V.MCtrl] searchEditing))==Nothing)
   check "default dialog search retains permitted replacement action" (maybe False (\dg->case purpose dg of Searching True _->True; _->False) (dialog (fst (key (V.KChar 'f') [V.MMeta,V.MAlt] searchEditing))))
   horizontalChecks
+  verticalChecks
   reloadChecks
   putStrLn "keybinding checks passed"
 
@@ -262,3 +263,52 @@ horizontalChecks=do
       renderedRange d=selection . displayWindow <$> activeWindow d
   check "Markdown unbinding consumes physical horizontal fallback" (renderedRange (event V.KLeft [] markdown)==Just (Selection 2 2) && renderedRange (event V.KLeft [V.MShift] markdown)==Just (Selection 2 2))
   check "Markdown remap uses rendered coordinates without moving source selection" (renderedRange (event (V.KChar 'j') [V.MCtrl,V.MShift] markdown)==Just (Selection 3 3) && range (event (V.KChar 'j') [V.MCtrl,V.MShift] markdown)==range markdown && not (commandEnabled markdown DeleteBackward))
+
+verticalChecks :: IO ()
+verticalChecks=do
+  let check name ok=unless ok (error name)
+      event k mods=fst . handleEvent (V.EvKey k mods)
+      range d=selection <$> activeWindow d
+      defaults=either (error . show) id (configuredBindings [] M.empty)
+      compile context entries=either (error . show) id (platformBindings [] TerminalPlatform (M.singleton context (M.fromList entries)))
+      base=modifyActive (\w->w {selection=Selection 8 8}) (addDocument Nothing (newBuffer "ab界e\x301\&z\nx\nab界e\x301\&z\n") (initialDesktop (80,25)))
+      star=base {wordStar=True,keyBindings=defaults}
+      configured=star {keyBindings=compile "wordstar" [("hide.cursor.up",["Ctrl+Shift+J"]),("hide.selection.up",["Ctrl+Shift+I"])]}
+      unbound=star {keyBindings=compile "wordstar" [("hide.cursor.up",[]),("hide.selection.up",[])]}
+  check "WordStar vertical remap executes direct movement and removes former chords"
+    (range (event (V.KChar 'j') [V.MCtrl,V.MShift] configured)==Just (Selection 1 1) && all (\(k,mods)->range (event k mods configured)==range configured)
+      [(V.KUp,[]),(V.KUp,[V.MCtrl]),(V.KChar 'e',[V.MCtrl]),(V.KChar 'e',[V.MCtrl,V.MShift])])
+  check "vertical selection remap preserves the anchor" (range (event (V.KChar 'i') [V.MCtrl,V.MShift] configured)==Just (Selection 8 1))
+  check "explicit vertical unbind consumes arrow and WordStar fallbacks" (all (\(k,mods)->range (event k mods unbound)==range unbound)
+    [(V.KUp,[]),(V.KUp,[V.MShift]),(V.KUp,[V.MCtrl,V.MAlt]),(V.KChar 'e',[V.MCtrl]),(V.KChar 'e',[V.MCtrl,V.MShift])])
+  check "shifted WordStar vertical aliases remain non-extending" (range (event (V.KChar 'e') [V.MCtrl,V.MShift] star)==Just (Selection 1 1) && range (event (V.KChar 'x') [V.MCtrl,V.MShift] star)==Just (Selection 10 10))
+  check "WordStar earlier Alt owners retain Edit and Quit" (menu (event (V.KChar 'e') [V.MCtrl,V.MAlt] star)==Just (1,0) && snd (handleEvent (V.EvKey (V.KChar 'x') [V.MCtrl,V.MAlt]) star)==[Exit])
+  let first=modifyActive (\w->w {selection=Selection 5 5}) base {keyBindings=defaults}
+      down=event V.KDown [] first
+  check "vertical motion retains short-row column reset and grapheme cells" (range down==Just (Selection 8 8) && range (event V.KDown [] down)==Just (Selection 10 10) && range (event V.KUp [V.MShift] down)==Just (Selection 8 1))
+  let top=modifyActive (\w->w {selection=Selection 0 0}) first
+      empty=addDocument Nothing (newBuffer "") (initialDesktop (80,25)) {keyBindings=defaults}
+  check "vertical endpoints remain bounded without edits" (range (event V.KUp [] top)==Just (Selection 0 0) && range (event V.KDown [] empty)==Just (Selection 0 0) && (revision . documentBuffer <$> activeDocument down)==Just 0)
+  let sourceMaps=compile "source" [("hide.cursor.up",[]),("hide.selection.up",[]),("hide.cursor.down",["Ctrl+Shift+J"])]
+      hex=modifyActive (\w->w {selection=Selection 17 17}) (addDocument Nothing (newByteBuffer (BS.pack [0..63])) (initialDesktop (80,25))) {keyBindings=sourceMaps}
+      stride=maybe 0 windowHexBytes (activeWindow hex)
+  check "hex vertical remap keeps the existing byte-row stride" (range (event (V.KChar 'j') [V.MCtrl,V.MShift] hex)==Just (Selection (17+stride) (17+stride)) && range (event V.KUp [] hex)==range hex)
+  let modal=prompt "Edit" Information [Input "Name" "draft" 0] configured
+      private=configured {guestPrivatePaths=["/authority"],buffers=M.map (\doc->doc {documentFile=Just (FileState "/authority/secret.hs" Nothing)}) (buffers configured)}
+      sidebar=installSidebar (emptySidebar "/project" 24 True) configured
+      messages=configured {problemsFocused=True,problemsVisible=True}
+  check "vertical remaps keep modal private sidebar and Messages owners" (range (event (V.KChar 'j') [V.MCtrl,V.MShift] modal)==range modal && not (guestKeyAllowed private (V.KChar 'j') [V.MCtrl,V.MShift]) && all (\d->not (commandEnabled d (CursorUp False)) && range (fst (runCommand (CursorDown False) d))==range d) [sidebar,messages])
+  W.withWindowScope $ \scope->do
+    prepared<-W.prepareTextWindow "Vertical notes" "ab界e\x301\&z\nx\nab界e\x301\&z"
+    update<-W.openTextWindow scope prepared >>= maybe (fail "plugin open failed") pure
+    opened<-adoptWindowUpdate P.HumanMenu update base
+    let plugin=modifyActive (\w->w {selection=Selection 8 8}) opened {keyBindings=sourceMaps}
+    check "plugin vertical remap and unbind use only prepared text" (range (event V.KUp [] plugin)==range plugin && range (event V.KUp [V.MShift] plugin)==range plugin && range (event (V.KChar 'j') [V.MCtrl,V.MShift] plugin)==Just (Selection 10 10) && activeText (event (V.KChar 'j') [V.MCtrl,V.MShift] plugin)==activeText plugin)
+  let mdSource=addDocument (Just (FileState "/tmp/vertical.md" Nothing)) (newBuffer "abcd\n\nx\n\nabcdef\n") (initialDesktop (80,25))
+  ready<-prepareTextPresentations (fst (runCommand (SetBufferView MarkdownView) mdSource))
+  let markdown=modifyActive (modifyDisplayedWindow (\w->w {selection=Selection 0 0})) ready {keyBindings=sourceMaps}
+      renderedRange d=selection . displayWindow <$> activeWindow d
+      moved=event (V.KChar 'j') [V.MCtrl,V.MShift] markdown
+  check "Markdown vertical remap owns rendered selection without source motion" (renderedRange moved/=renderedRange markdown && range moved==range markdown && renderedRange (event V.KUp [] moved)==renderedRange moved && renderedRange (event V.KUp [V.MShift] moved)==renderedRange moved)
+  let mac=base {nativeMac=True,videoMode=Just 3,keyBindings=either (error . show) id (configuredBindings [] (M.singleton "macos" (M.singleton "source" (M.singleton "hide.cursor.up" ["Cmd+Shift+J"]))))}
+  check "vertical platform remap projects the same identity and label" (range (event (V.KChar 'j') [V.MMeta,V.MShift] mac)==Just (Selection 1 1) && lookup "Cmd+Shift+J" (focusedBindingChords mac)==Just "hide.cursor.up" && commandBindingKeys mac (CursorUp False)==["Cmd+Shift+J"])

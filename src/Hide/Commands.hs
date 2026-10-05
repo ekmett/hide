@@ -49,6 +49,10 @@ builtinCommands =
   ,BuiltinCommand "hide.cursor.right" (CursorRight False)
   ,BuiltinCommand "hide.selection.left" (CursorLeft True)
   ,BuiltinCommand "hide.selection.right" (CursorRight True)
+  ,BuiltinCommand "hide.cursor.up" (CursorUp False)
+  ,BuiltinCommand "hide.cursor.down" (CursorDown False)
+  ,BuiltinCommand "hide.selection.up" (CursorUp True)
+  ,BuiltinCommand "hide.selection.down" (CursorDown True)
   ,BuiltinCommand "hide.edit.delete-backward" DeleteBackward
   ,BuiltinCommand "hide.edit.delete-forward" DeleteForward
   ,BuiltinCommand "hide.edit.delete-line" DeleteLine
@@ -216,7 +220,7 @@ platformBindings catalogue platform configuration=do
       (SelectAll,["Ctrl+A","Ctrl+Shift+A"]),(Undo,["Ctrl+Z"]),(Redo,["Ctrl+Y","Ctrl+Shift+Z"]),
       (Find,["Ctrl+F"]),(Replace,["Ctrl+H","Ctrl+R"])]
     defaultsFor WordStarKeys=[(action,filter named chords) | (action,chords)<-defaults] ++
-      [(action,chords++maybe [] id (lookup action [(CursorLeft False,["Ctrl+S","Ctrl+Shift+S"]),(CursorRight False,["Ctrl+D","Ctrl+Shift+D"])])) | (action,chords)<-horizontalDefaults] ++
+      [(action,chords++maybe [] id (lookup action [(CursorLeft False,["Ctrl+S","Ctrl+Shift+S"]),(CursorRight False,["Ctrl+D","Ctrl+Shift+D"]),(CursorUp False,["Ctrl+E","Ctrl+Shift+E"]),(CursorDown False,["Ctrl+X","Ctrl+Shift+X"])])) | (action,chords)<-navigationDefaults] ++
       [(DeleteLine,["Ctrl+Y","Ctrl+Shift+Y","Ctrl+Alt+Y","Ctrl+Alt+Shift+Y"])]
       where named raw=case readChord raw of
               Right (key,mods) | wordStarReserved key mods -> False
@@ -233,14 +237,19 @@ platformBindings catalogue platform configuration=do
       [(Copy,["Ctrl+C","Ctrl+Shift+C","Ctrl+Insert"]),(Cut,["Ctrl+X","Ctrl+Shift+X","Shift+Delete"]),
        (Paste,["Ctrl+V","Ctrl+Shift+V","Shift+Insert"]),(SelectAll,["Ctrl+A","Ctrl+Shift+A"]),
        (Redo,["Ctrl+Y","Ctrl+Shift+Y","Ctrl+Shift+Z"])]
-    defaultsFor SourceKeys=defaults++horizontalDefaults
+    defaultsFor SourceKeys=defaults++navigationDefaults
     defaultsFor _=defaults
+    navigationDefaults=horizontalDefaults++
+      [(CursorUp False,verticalAliases V.KUp False),(CursorDown False,verticalAliases V.KDown False),
+       (CursorUp True,verticalAliases V.KUp True),(CursorDown True,verticalAliases V.KDown True)]
+    verticalAliases key shift=aliases key shift++keyAliases key shift True
     horizontalDefaults=
       [(CursorLeft False,aliases V.KLeft False),(CursorRight False,aliases V.KRight False),
        (CursorLeft True,aliases V.KLeft True),(CursorRight True,aliases V.KRight True),
        (DeleteBackward,aliases V.KBS False++aliases V.KBS True),
        (DeleteForward,aliases V.KDel False++filter (/="Shift+Delete") (aliases V.KDel True))]
-    aliases key shift=[name | mods<-[[V.MShift | shift]++extra | extra<-[[],[V.MAlt],[V.MMeta],[V.MMeta,V.MAlt]]],
+    aliases key shift=keyAliases key shift False
+    keyAliases key shift ctrl=[name | mods<-[[V.MCtrl | ctrl]++[V.MShift | shift]++extra | extra<-[[],[V.MAlt],[V.MMeta],[V.MMeta,V.MAlt]]],
       platform/=TerminalPlatform || V.MMeta `notElem` mods,not (terminalSourceReserved key mods),Just name<-[Hide.Bindings.chordName key mods]]
     defaults=
       [(New,["Ctrl+N"]),(Open,["F3","Ctrl+O"]),(Save,["F2","Ctrl+S"])
