@@ -4,7 +4,7 @@ module DebuggerSourcePolicyCheck (checks) where
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (withAsync,poll,wait)
 import Control.Exception (bracket,finally)
-import Control.Monad (unless)
+import Control.Monad (unless,void)
 import Data.Aeson
 import Data.Aeson.Types (parseMaybe,Parser)
 import qualified Data.Text as T
@@ -70,10 +70,22 @@ localSourceCheck=bracket (Fixture.fixture "local-source") Fixture.cleanup $ \(po
       refused<-await "changed local source was not refused" (T.isInfixOf "target changed" . status) replacement
       unless (activeText refused=="?!"<>text && fmap (caret.selection) (activeWindow refused)==Just 1)
         (fail "Late source coordinates must not jump in a changed buffer")
-      privateQueued<-present refused {guestPrivatePaths=[canonical]}
-      privateShown<-await "local source lost private path policy" ((=="Stopped in private debugger source.").status) privateQueued
-      unless (maybe False (privateDocument privateShown) (activeDocument privateShown))
-        (fail "Local debugger source must retain ordinary document privacy"))
+      publicQueued<-present refused
+      latePrivate<-await "late agent source lost current private path policy" ((=="Debugger source is private.").status) publicQueued {guestPrivatePaths=[canonical]}
+      unless (fmap (caret.selection) (activeWindow latePrivate)==Just 1)
+        (fail "Late private policy change must prevent source navigation")
+      privateQueued<-present latePrivate {status=""}
+      privateRefused<-await "agent local source lost captured private path policy" ((=="Debugger source is private.").status) privateQueued
+      unless (fmap (caret.selection) (activeWindow privateRefused)==Just 1 && maybe False (privateDocument privateRefused) (activeDocument privateRefused))
+        (fail "Agent source presentation must preserve private document authority")
+      -- The human frame chooser retains normal source navigation and privacy.
+      (_,selecting)<-debuggerEffects runtime core privateRefused [DebugAction "stack" []]
+      chooser<-await "human frame chooser missing" (maybe False ((=="Call stack").dialogTitle).dialog) selecting
+      action<-case purpose <$> dialog chooser of Just (DebugDialog token)->pure token; _->fail "Missing frame choice token"
+      (_,humanQueued)<-debuggerEffects runtime core chooser {dialog=Nothing} [DebugAction action ["0","0"]]
+      humanShown<-await "human private source did not navigate" ((=="Stopped in private debugger source.").status) humanQueued
+      unless (fmap (caret.selection) (activeWindow humanShown)==Just 10 && maybe False (privateDocument humanShown) (activeDocument humanShown))
+        (fail "Human local source must retain ordinary document privacy"))
       `finally` TIO.writeFile canonical text
   putStrLn "local debugger source owner checks passed"
 
@@ -126,7 +138,9 @@ delayedLocalSourceCheck=mapM_ scenario ["continue","close","disconnect","opened"
           -- Close the gate before waiting/cancelling the owner even when the
           -- baseline owner is blocked in its read. One-byte consumption proves
           -- a real filesystem reader entered, rather than an early load error.
-          returned<-bracket (openFd source ReadWrite defaultFileFlags {nonBlock=True}) closeFd $ \gate->do
+          -- Final data plus close wakes EOF readiness, also on exception cleanup.
+          returned<-bracket (openFd source ReadWrite defaultFileFlags {nonBlock=True})
+            (\gate->void (fdWrite gate "y") `finally` closeFd gate) $ \gate->do
             _<-fdWrite gate "x"
             let readStarted=do
                   result<-tryIOError (fdRead gate 1)
@@ -148,9 +162,6 @@ delayedLocalSourceCheck=mapM_ scenario ["continue","close","disconnect","opened"
                 responsive<-timeout 1000000 (tick interrupted)
                 unless (maybe False (const True) responsive) (fail "Debugger source retirement blocked the UI owner")
                 pure (Just interrupted)
-            -- Data plus close wakes the held FIFO read on all supported event
-            -- managers; close alone may leave its EOF readiness asleep.
-            _<-fdWrite gate "y"
             pure interruption
           _<-timeout 1000000 (wait owner)
           case returned of

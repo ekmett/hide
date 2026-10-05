@@ -236,7 +236,7 @@ data WatchProvider = forall context reply. WatchProvider (P.TreeProvider context
 data WatchPreparation = WatchPreparation !WatchOperation !(Async PreparedWatch)
 data ReferenceOwner = FrameReferences !Int !Int | WatchReferences !Int !Int !WatchFrame deriving (Eq,Ord)
 data SourcePreparation = SourcePreparation !Int !Int !(Maybe (Int,Int)) !Bool !Value !(Maybe Int) !(Async (Either Text PreparedSource))
-data PreparedSource = AdapterSource !(Maybe FilePath) !Buffer !Int | LocalSource !FilePath !LocalSourceTarget !Int
+data PreparedSource = AdapterSource !(Maybe FilePath) !Buffer !Int | LocalSource !Bool !FilePath !LocalSourceTarget !Int
 data LocalSourceTarget = ExistingSource !Int !Int !ContentVersion !Bool | NewSource !FileState !Buffer
 data CapturedLocalSource = CapturedLocalSource !FilePath !Int !Int !ContentVersion !BufferContent !DirtySnapshot
 data SourceObservation = SourceObservation !Int !(Maybe FilePath)
@@ -640,7 +640,7 @@ selectSidebarFrame runtime@(Debugger ref _ _ _ _) epoch tid fid d=do
       Nothing->pure d {status="Debugger frame expired."}
       Just chosen->do
         modifyIORef' ref (\state->state {thread=Just tid,frame=Just chosen,frameRevision=frameRevision state+1,choices=M.empty})
-        openFrame runtime True d chosen
+        openFrame runtime True Nothing d chosen
 
 -- | Initiate a tool under desktop serialization and return its outside-lock wait.
 -- Inspection handles must belong to the current stopped generation.
@@ -675,7 +675,7 @@ debuggerTool runtime@(Debugger ref _ _ _ _) d name arguments = do
       current<-readIORef ref
       shown<-case view of
         Nothing -> pure d
-        Just "source" -> maybe (pure d) (openFrame runtime True d) (frame current)
+        Just "source" -> maybe (pure d) (openFrame runtime True (Just (guestPrivatePaths d)) d) (frame current)
         Just "stack" -> showChoices runtime "Call stack" "frame" (frames current) (map frameLabel (frames current)) d
         Just command -> perform runtime command [] d
       snapshot shown
@@ -1504,7 +1504,7 @@ response runtime@(Debugger ref _ _ _ _) kind body d = do
       modifyIORef' ref (\state -> state {frame=listToMaybe rows,frames=rows})
       if showPicker then showChoices runtime "Call stack" "frame" rows (map frameLabel rows) d
       else if not (followSource s) then pure d
-      else maybe (pure d {status="Stopped; no source frame supplied."}) (openFrame runtime False d) (listToMaybe rows)
+      else maybe (pure d {status="Stopped; no source frame supplied."}) (openFrame runtime False Nothing d) (listToMaybe rows)
     Scopes _ -> do
       recordVariables ref "scopes" body
       let rows=items "scopes" body
@@ -1565,7 +1565,7 @@ select runtime@(Debugger ref _ _ _ _) fullToken action values d = do
       pure d
     "frame" | stopped s,Just chosen<-selected >>= at rows -> do
       modifyIORef' ref (\state -> state {frame=Just chosen,frameRevision=frameRevision state+1,choices=M.empty})
-      openFrame runtime True d chosen
+      openFrame runtime True Nothing d chosen
     "expand" | stopped s,Just chosen<-selected >>= at rows,let ident=integer "variablesReference" chosen,ident>0 ->
       case M.lookup ident (variableRefs s) of
         Just False -> send runtime (Variables (frameRevision s)) "variables" (object ["variablesReference" .= ident]) >> pure d {status="Loading variables..."}
@@ -1579,8 +1579,8 @@ select runtime@(Debugger ref _ _ _ _) fullToken action values d = do
       pure d {status="Exception breakpoints updated."}
     _ -> pure d {status="No expandable debugger value selected."}
 
-openFrame :: Debugger -> Bool -> Desktop -> Value -> IO Desktop
-openFrame runtime@(Debugger ref _ _ _ _) explicit d selected = do
+openFrame :: Debugger -> Bool -> Maybe [FilePath] -> Desktop -> Value -> IO Desktop
+openFrame runtime@(Debugger ref _ _ _ _) explicit private d selected = do
   s<-readIORef ref
   let source=fromMaybe Null (field "source" selected)
       reference=integer "sourceReference" source
@@ -1596,7 +1596,7 @@ openFrame runtime@(Debugger ref _ _ _ _) explicit d selected = do
     let owner=case find (\(CapturedLocalSource file _ _ _ _ _)->file==local) captured of
           Just (CapturedLocalSource _ wid _ _ _ _)->Just wid
           Nothing->windowId <$> activeWindow d
-    worker<-async (prepareLocalSource (root s) path selected captured)
+    worker<-async (prepareLocalSource (root s) path selected private captured)
     modifyIORef' ref (\state->state {sourcePreparing=Just (SourcePreparation (generation s) (frameRevision s) Nothing explicit selected owner worker)})
     pure d
   where
@@ -1608,13 +1608,14 @@ openFrame runtime@(Debugger ref _ _ _ _) explicit d selected = do
 
 -- The existing source worker owns canonical paths, disk decoding, dirty-state
 -- evaluation and measured UTF-16 positioning. An open source needs no disk read.
-prepareLocalSource :: FilePath -> Text -> Value -> [CapturedLocalSource] -> IO (Either Text PreparedSource)
-prepareLocalSource base path selected captured
+prepareLocalSource :: FilePath -> Text -> Value -> Maybe [FilePath] -> [CapturedLocalSource] -> IO (Either Text PreparedSource)
+prepareLocalSource base path selected private captured
   | T.compareLength path 4096==GT || T.any (=='\0') path=pure (Left "Invalid debugger source path.")
   | Just opened<-find (\(CapturedLocalSource file _ _ _ _ _)->file==local) captured=existing local opened
   | otherwise=do
       resolved<-canonicalSourcePath base (Just (T.unpack path))
       case resolved of
+        Right (Just canonical) | denied canonical->pure (Left "Debugger source is private.")
         Right (Just canonical) -> case find (\(CapturedLocalSource file _ _ _ _ _)->file==canonical) captured of
           Just opened->existing canonical opened
           Nothing->do
@@ -1629,15 +1630,18 @@ prepareLocalSource base path selected captured
         _->pure (Left "Debugger source file is unavailable.")
   where
     local=if isAbsolute (T.unpack path) then T.unpack path else base </> T.unpack path
-    existing canonical (CapturedLocalSource _ wid bid version image modified)=do
-      changed<-evaluate (snapshotDirty modified)
-      prepare canonical (ExistingSource wid bid version changed) image
+    denied canonical=maybe False (\paths->protectedFilePath paths canonical) private
+    existing canonical (CapturedLocalSource _ wid bid version image modified)
+      | denied canonical=pure (Left "Debugger source is private.")
+      | otherwise=do
+          changed<-evaluate (snapshotDirty modified)
+          prepare canonical (ExistingSource wid bid version changed) image
     prepare canonical target image=do
       let row=max 0 (min (contentLineCount image-1) (integer "line" selected-1))
           offset | integer "line" selected<=0 = -1
                  | otherwise=contentLineOffset image row+L.positionOffset (contentLineAt image row) (0,max 0 (integer "column" selected-1))
       _<-evaluate offset
-      pure (Right (LocalSource canonical target offset))
+      pure (Right (LocalSource (isJust private) canonical target offset))
 
 -- Only this owner adopts a prepared source. Cancellation/join is retired outside
 -- the desktop lock, including superseded selections and stopped generations.
@@ -1671,7 +1675,7 @@ tickSourcePreparation runtime@(Debugger ref _ _ _ _) d=do
               case outcome of
                 Left err->pure d {status=if isJust observation then "Debugger source preparation failed: "<>T.pack (show err) else "Debugger source preparation failed."}
                 Right (Left err)->pure d {status=err}
-                Right (Right (LocalSource path target offset))->adoptLocalSource path target offset selected d
+                Right (Right (LocalSource agent path target offset))->adoptLocalSource agent path target offset selected d
                 Right (Right (AdapterSource origin prepared offset))->do
                   let source=fromMaybe Null (field "source" selected)
                       reference=integer "sourceReference" source
@@ -1687,16 +1691,18 @@ tickSourcePreparation runtime@(Debugger ref _ _ _ _) d=do
 -- Docs: docs/site/screenshots/debug-step.png (docs/running.md) shows the live stopped source.
 -- Only a matching captured source may receive its prepared coordinates. A newly
 -- opened target is never overwritten or positioned from a disk snapshot.
-adoptLocalSource :: FilePath -> LocalSourceTarget -> Int -> Value -> Desktop -> IO Desktop
-adoptLocalSource path target offset selected d=case target of
-  ExistingSource wid bid version changed->case (find ((==wid).windowId) (windows d),M.lookup bid (buffers d)) of
-    (Just window,Just doc) | bufferId window==Just bid && fmap filePath (documentFile doc)==Just path->do
-      current<-versionCurrent version (documentBuffer doc)
-      pure $ if current then position changed (focusWindow wid d) else expired
-    _->pure expired
-  NewSource file prepared
-    | any ((==Just path).fmap filePath.documentFile) (M.elems (buffers d))->pure expired
-    | otherwise->pure (position False (addDocument (Just file) prepared d))
+adoptLocalSource :: Bool -> FilePath -> LocalSourceTarget -> Int -> Value -> Desktop -> IO Desktop
+adoptLocalSource agent path target offset selected d
+  | agent && protectedPath d path=pure d {status="Debugger source is private."}
+  | otherwise=case target of
+    ExistingSource wid bid version changed->case (find ((==wid).windowId) (windows d),M.lookup bid (buffers d)) of
+      (Just window,Just doc) | bufferId window==Just bid && fmap filePath (documentFile doc)==Just path->do
+        current<-versionCurrent version (documentBuffer doc)
+        pure $ if current then position changed (focusWindow wid d) else expired
+      _->pure expired
+    NewSource file prepared
+      | any ((==Just path).fmap filePath.documentFile) (M.elems (buffers d))->pure expired
+      | otherwise->pure (position False (addDocument (Just file) prepared d))
   where
     expired=d {status="Debugger source target changed; select the frame again."}
     position changed desktop=(if offset<0 then desktop else moveTo False offset (modifyActive (\window->window {bufferView=CurrentView,reviewSelection=Nothing}) desktop))
