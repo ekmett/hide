@@ -258,8 +258,8 @@ checks | os=="mingw32"=pure () -- Official hdb bindists are currently POSIX only
     quote value="'"<>T.replace "'" "'\\''" (T.pack value)<>"'"
     executableFile path text=do TIO.writeFile path text; permissions<-getPermissions path;setPermissions path permissions {executable=True}
     encodeText=Data.Text.Encoding.encodeUtf8
-    foldTicks :: Debugger -> Core -> Int -> Desktop -> IO Desktop
-    foldTicks _ _ 0 d=pure d
+    foldTicks :: Debugger -> Int -> Desktop -> IO Desktop
+    foldTicks _ 0 d=pure d
     foldTicks runtime n d=tickDebugger runtime d >>= \next->threadDelay 1000>>foldTicks runtime (n-1) next
 
 withEnvironment :: [(String,String)] -> IO a -> IO a
