@@ -204,8 +204,8 @@ buildPreparationChecks=when (os/="mingw32") $ bracket temporary removePathForcib
     writeFile command ("#!/bin/sh\nprintf 'executed' > '"++marker++"'\nprintf 'prepared run\n'\nIFS= read -r value\n")
     perms<-getPermissions command
     setPermissions command perms {executable=True}
-    check "prepared build adoption is host-only" (not (guestEffectsAllowed [AdoptPreparedBuild]))
-    (_,unsupported)<-applyEffects base [AdoptPreparedBuild]
+    check "prepared build adoption is host-only" (not (guestEffectsAllowed [AdoptPreparedBuild Nothing]))
+    (_,unsupported)<-applyEffects base [AdoptPreparedBuild Nothing]
     check "unowned prepared-build adoption fails closed"
       (M.keys (buffers unsupported)==M.keys (buffers base) && fmap windowId (activeWindow unsupported)==fmap windowId (activeWindow base))
 
@@ -255,7 +255,7 @@ buildPreparationChecks=when (os/="mingw32") $ bracket temporary removePathForcib
       pending<-raw runtime "make" base
       gated<-newIORef False
       let refuse state effects=do
-            when (AdoptPreparedBuild `elem` effects) (writeIORef gated True)
+            when (AdoptPreparedBuild Nothing `elem` effects) (writeIORef gated True)
             pure (False,state)
           loop current=do
             next<-tickBuildPreparation runtime refuse current

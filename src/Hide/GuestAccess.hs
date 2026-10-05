@@ -149,7 +149,8 @@ agentActionAllowed action=action `elem` ["compile","make","build-stop","run","ru
 guestEffectsAllowed :: [Effect] -> Bool
 guestEffectsAllowed=all allowed
   where
-    allowed AdoptPreparedBuild=False
+    allowed PackageBuildAction{}=False
+    allowed AdoptPreparedBuild{}=False
     allowed SessionSidebarAction{}=False
     allowed SubmitInputForm{}=False
     allowed RetireInputForm{}=False

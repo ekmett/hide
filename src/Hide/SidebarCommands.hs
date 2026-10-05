@@ -48,9 +48,9 @@ import qualified Hide.Plugin.Menu as Menu
 
 -- | Captured host policy; extension labels and paths grant no authority.
 data SidebarContext = SidebarContext
-  { sidebarOrigin :: !Menu.MenuOrigin, sidebarPrivatePaths :: ![FilePath]
+  { sidebarOrigin :: !Menu.MenuOrigin, sidebarDirectory :: !FilePath, sidebarProvider :: !(Maybe P.TreeRef), sidebarPrivatePaths :: ![FilePath]
   , sidebarColumns :: !Int, sidebarOpened :: !(Maybe (FilePath,Int,Int,ContentVersion)), sidebarRenameFiles :: ![Rename.RenameFile] }
-data SidebarReply = SidebarRename !P.TreeRef !Rename.PreparedRename | SidebarForm !(Form.PreparedInputForm SidebarContext SidebarReply) | SidebarSession !SessionSidebarRequest | SidebarExisting !FilePath !Int !Int !ContentVersion | SidebarDocument !FilePath !Document | SidebarPrepared !LinkResult | SidebarAgent !AgentSidebarRequest | SidebarDebug !DebugSidebarRequest | SidebarWindow !PluginWindow.WindowUpdate
+data SidebarReply = SidebarBuild !BuildAction !PackageBuildTarget | SidebarRename !P.TreeRef !Rename.PreparedRename | SidebarForm !(Form.PreparedInputForm SidebarContext SidebarReply) | SidebarSession !SessionSidebarRequest | SidebarExisting !FilePath !Int !Int !ContentVersion | SidebarDocument !FilePath !Document | SidebarPrepared !LinkResult | SidebarAgent !AgentSidebarRequest | SidebarDebug !DebugSidebarRequest | SidebarWindow !PluginWindow.WindowUpdate
 
 data ChildJob = ChildJob !TreeRequest !Menu.MenuOrigin !(Async (Either CommandError (P.PreparedPage SidebarContext SidebarReply))) !Bool
 data ActionJob = ActionJob ![P.TreeHit] !CommandRef !Menu.MenuOrigin !Int !(Async (Either CommandError SidebarReply)) !Bool
@@ -122,7 +122,7 @@ retireTreeFromHost (SidebarHost _ ref _ _ _ _) owner d=do
   pure d {sideTree=fmap (removeRoot owner) (sideTree d),contextMenu=Nothing,contextTarget=Nothing}
 
 context :: Menu.MenuOrigin -> Desktop -> SidebarContext
-context origin d=SidebarContext origin (guestPrivatePaths d) (max 20 (min 76 (fst (screenSize d)-treeWidthOf d-4))) Nothing []
+context origin d=SidebarContext origin (maybe (startingDirectory d) treeRoot (sideTree d)) Nothing (guestPrivatePaths d) (max 20 (min 76 (fst (screenSize d)-treeWidthOf d-4))) Nothing []
 metadata :: P.NodeDef c r -> (P.NodeInfo,Maybe CommandRef,[(Text,P.TreeMenuTarget)])
 metadata node=(P.nodeInfo node,fmap P.actionReference (P.nodeAction node),map P.menuTarget (P.nodeMenus node))
 addProvider :: P.TreeProvider SidebarContext SidebarReply -> Sidebar -> Sidebar
@@ -354,7 +354,7 @@ captureActionContext origin trace d=do
       version<-captureVersion (documentBuffer doc)
       pure (Just (path,windowId window,bid,version))
     _->pure Nothing
-  pure (context origin d) {sidebarOpened=opened}
+  pure (context origin d) {sidebarOpened=opened,sidebarProvider=case trace of P.TreeHit owner _ _:_->Just owner; _->Nothing}
 
 -- Forget only moved-subtree identities/enumerations; unaffected sibling IDs
 -- remain stable. Existing provider workers refresh both parent listings.
@@ -611,6 +611,7 @@ finishAction host@(SidebarHost _ ref _ cancellation _ _) core d=do
           modifyIORef' ref (\s->s {actionJob=Nothing})
           case result of
             Right (Right (SidebarExisting path wid bid version)) | current->adoptExisting origin path wid bid version d
+            Right (Right (SidebarBuild action target)) | current && origin==Menu.HumanMenu->snd <$> core d [PackageBuildAction action target]
             Right (Right (SidebarDebug request)) | current && origin==Menu.HumanMenu->snd <$> core d [DebugSidebarAction request]
             Right (Right (SidebarSession request)) | current && origin==Menu.HumanMenu->snd <$> core d [SessionSidebarAction request]
             Right (Right (SidebarWindow request)) | current->adoptWindowUpdate origin request d
@@ -620,6 +621,7 @@ finishAction host@(SidebarHost _ ref _ cancellation _ _) core d=do
               Left err->d {status="Sidebar action failed: "<>T.pack (displayException err)}
               Right (Left err)->d {status="Sidebar action failed: "<>T.pack (show err)}
               Right (Right SidebarExisting{})->d {status="Sidebar result expired."}
+              Right (Right SidebarBuild{})->d {status="Sidebar result expired."}
               Right (Right SidebarDebug{})->d {status="Sidebar result expired."}
               Right (Right SidebarSession{})->d {status="Sidebar result expired."}
               Right (Right SidebarWindow{})->d {status="Sidebar result expired."}

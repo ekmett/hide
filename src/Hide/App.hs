@@ -282,7 +282,7 @@ runEditor args = do
             let liveDesktop=liveBase {keyBindings=keymap}
             withKeybindings keys (contributedBindingCommands liveBase) $ \keybindings -> withTextPresentation $ \textPresentation -> do
               exiting<-newIORef False
-              let runtimeEffects=sidebarEffects sidebarHost (sessionSidebarEffects sessionSidebar (menuEffects menuHost (keybindingEffects keybindings (autocompleteEffects autocomplete (projectBrowserEffects projectBrowser (gitOperationEffects gitOperations (debuggerEffects debugger (conversationEffects conversation (reconciliationEffects reconciliation (toolingEffects tooling applyEffects))))))))))
+              let runtimeEffects=sidebarEffects sidebarHost (packageBuildEffects packageSidebar (sessionSidebarEffects sessionSidebar (menuEffects menuHost (keybindingEffects keybindings (autocompleteEffects autocomplete (projectBrowserEffects projectBrowser (gitOperationEffects gitOperations (debuggerEffects debugger (conversationEffects conversation (reconciliationEffects reconciliation (toolingEffects tooling applyEffects)))))))))))
                   core d pending=foldM step (False,d) pending
                     where
                       step result@(True,_) _=pure result
@@ -572,7 +572,8 @@ applyEffects = foldM apply . (False,)
     apply (_,d) DebugAction{}=pure (False,d {status="Debugger unavailable in this preview."})
     apply (_,d) PermissionAction{}=pure (False,d {status="Agent permissions are unavailable in this preview."})
     apply (_,d) AgentAction{}=pure (False,d {status="Agents are unavailable in this preview."})
-    apply (_,d) AdoptPreparedBuild=pure (False,d {status="Build preparation requires its running owner."})
+    apply (_,d) PackageBuildAction{}=pure (False,d {status="Package build requires its running owner."})
+    apply (_,d) AdoptPreparedBuild{}=pure (False,d {status="Build preparation requires its running owner."})
     apply (_,d) DownloadDocument{}=pure (False,d)
     apply (_,d) ReadBrowserClipboard=pure (False,d)
     apply (_,d) WriteBrowserClipboard{}=pure (False,d)

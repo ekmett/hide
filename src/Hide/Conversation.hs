@@ -45,6 +45,7 @@ import qualified Hide.Terminal as Terminal
 import qualified Hide.Consoles as C
 import qualified Hide.Compilers as Compilers
 import qualified Hide.Build as B
+import Hide.PackageSidebar (packageBuildManifestCurrent)
 import qualified Hide.BuildJobs as Jobs
 import System.Info (os)
 import System.Mem.StableName (StableName, makeStableName)
@@ -94,7 +95,7 @@ data QuestionTicket = QuestionTicket !Int !AH.AgentId !(Maybe ProviderReceipt)
 data QuestionResult = QuestionResult !AH.AgentId !(Maybe ProviderReceipt) !Value
 
 -- One caller-bound build intent, captured without retaining editable buffers or Undo.
-data BuildReceipt = BuildReceipt !Int !FilePath !(Maybe FilePath) ![(Int,Maybe FilePath,ContentVersion)] !(Maybe AdmittedBuild)
+data BuildReceipt = BuildReceipt !Int !FilePath !(Maybe FilePath) ![(Int,Maybe FilePath,ContentVersion)] !(Maybe AdmittedBuild) !(Maybe PackageBuildTarget)
 data PreparedBuild = BuildOptions !Dialog
   | BuildCommands !B.BuildAction !FilePath ![(FilePath,[String])]
   | BuildConsole !C.PreparedConsole
@@ -322,7 +323,8 @@ conversationEffects runtime@(ConversationState _ ref _ _ _) fallback original ef
         Right () -> do
           (quit,opened)<-fallback d {guestPrivatePaths=path:guestPrivatePaths d} [ReadPath path]
           pure (quit,opened {status="Edit [editor.agent] context; save to apply with the next query or steer."})
-    apply (_,d) AdoptPreparedBuild = (False,) <$> adoptBuildPreparation runtime d
+    apply (_,d) (PackageBuildAction action target) = (False,) <$> startPackageBuildPreparation runtime action target d
+    apply (_,d) (AdoptPreparedBuild target) = (False,) <$> adoptBuildPreparation runtime target d
     apply (_,d) (AgentAction action values) = do
       updated<-perform runtime action values d
       syncConversationAgent runtime
@@ -1497,7 +1499,13 @@ withBuildAdmission (ConversationState _ ref _ _ _) admission action=bracket
 -- Capture paths and exact immutable source identities on the serialized owner.
 -- Dirty representation comparisons and all filesystem/planning work run outside it.
 startBuildPreparation :: ConversationState -> Maybe B.BuildAction -> Desktop -> IO Desktop
-startBuildPreparation (ConversationState directory ref _ _ _) action d = mask_ $ do
+startBuildPreparation runtime action=startBuildPreparationAt runtime action Nothing
+
+startPackageBuildPreparation :: ConversationState -> B.BuildAction -> PackageBuildTarget -> Desktop -> IO Desktop
+startPackageBuildPreparation runtime action target=startBuildPreparationAt runtime (Just action) (Just target)
+
+startBuildPreparationAt :: ConversationState -> Maybe B.BuildAction -> Maybe PackageBuildTarget -> Desktop -> IO Desktop
+startBuildPreparationAt (ConversationState directory ref _ _ _) action target d = mask_ $ do
   state<-readIORef ref
   case buildPreparation state of
     Just _ -> pure d {status="Build preparation is already pending."}
@@ -1512,43 +1520,47 @@ startBuildPreparation (ConversationState directory ref _ _ _) action d = mask_ $
           pure ((bid,path,version),snapshot)
         let start=B.buildStartDirectory d
             source=B.buildSource d
-            receipt=BuildReceipt (buildSettingsVersion state) start source (map fst captured) (buildAdmission state)
+            receipt=BuildReceipt (buildSettingsVersion state) start source (map fst captured) (buildAdmission state) target
             snapshots=map snd captured
         -- Evaluate pathname selectors here; the worker never captures Desktop
         -- or FileState through an unevaluated source/directory field.
         _<-evaluate (length start)
         mapM_ (evaluate . length) source
-        worker<-asyncWithUnmask (\unmask -> unmask (prepareBuild directory action start source snapshots))
+        worker<-asyncWithUnmask (\unmask -> unmask (prepareBuild directory action target start source snapshots))
         modifyIORef' ref (\current -> current {buildPreparation=Just (BuildPreparing receipt False worker)})
         pure d {status="Preparing build target…"}
 
 buildSourceDocuments :: Desktop -> [(Int,Document)]
 buildSourceDocuments d=[(bid,doc) | (bid,doc)<-M.toList (buffers d),documentLabel doc==Nothing]
 
-prepareBuild :: FilePath -> Maybe B.BuildAction -> FilePath -> Maybe FilePath -> [DirtySnapshot] -> IO (Either Text PreparedBuild)
-prepareBuild directory action start source snapshots = do
+prepareBuild :: FilePath -> Maybe B.BuildAction -> Maybe PackageBuildTarget -> FilePath -> Maybe FilePath -> [DirtySnapshot] -> IO (Either Text PreparedBuild)
+prepareBuild directory action target start source snapshots = do
   result<-try $ do
-    root<-B.resolveBuildRootFrom start
-    config<-B.loadBuildConfig directory root
+    root<-maybe (B.resolveBuildRootFrom start) (pure . packageBuildRoot) target
+    saved<-B.loadBuildConfig directory root
+    let config=maybe saved (\component->saved {B.buildTarget=packageBuildName component}) target
+    before<-maybe (pure True) packageBuildManifestCurrent target
     unsaved<-case action of Nothing->pure False; Just _->evaluate (any snapshotDirty snapshots)
-    prepared<-case action of
+    prepared<-if not before then pure (Left "Package build target changed during preparation.") else case action of
       Nothing -> do
         let options=buildOptions root config
         _<-evaluate (sum [T.length value | Input _ value _<-fields options])
         pure (Right (BuildOptions options))
       Just task | unsaved -> pure (Right (BuildUnsaved task))
-      Just task -> fmap (BuildCommands task root) <$> B.buildPlan task config root source
+      Just task -> fmap (BuildCommands task root) <$> B.buildPlan task config root (if isNothing target then source else Nothing)
     -- Strings/argv may otherwise retain planning thunks until execution on owner.
     _<-evaluate (length root+length (B.buildExecutable config)+T.length (B.buildTarget config)+
       T.length (B.buildTHCRoot config)+T.length (B.buildRuntime config)+sum (map length (B.buildArguments config)))
-    case prepared of
+    after<-maybe (pure True) packageBuildManifestCurrent target
+    _<-case prepared of
       Left err -> evaluate (T.length err) >> pure prepared
       Right (BuildCommands _ _ commands) -> evaluate (sum [length cmd+sum (map length args) | (cmd,args)<-commands]) >> pure prepared
       _ -> pure prepared
+    pure (if after then prepared else Left "Package changed while preparing the build target.")
   pure (either (Left . T.take 512 . T.pack . show) id (result :: Either IOException (Either Text PreparedBuild)))
 
 buildReceiptCurrent :: IORef State -> BuildReceipt -> Desktop -> IO Bool
-buildReceiptCurrent ref (BuildReceipt version start source expected _) d = do
+buildReceiptCurrent ref (BuildReceipt version start source expected _ _) d = do
   state<-readIORef ref
   let current=buildSourceDocuments d
       names=[(bid,filePath <$> documentFile doc) | (bid,doc)<-current]
@@ -1583,7 +1595,7 @@ tickBuildPreparation runtime@(ConversationState _ ref _ _ _) core d = mask_ $ do
             let prepared=either (const (Left "Build preparation failed.")) id outcome
             modifyIORef' ref (\s -> s {buildPreparation=Just (BuildReady receipt launch prepared)})
             tickBuildPreparation runtime core d
-    Just (BuildReady receipt@(BuildReceipt _ _ _ _ admission) launch _) -> do
+    Just (BuildReady receipt@(BuildReceipt _ _ _ _ admission target) launch _) -> do
       current<-if launch then pure True else buildReceiptCurrent ref receipt d
       if not current then retireBuildPreparation ref >> pure d {status="Build preparation cancelled: source or settings changed."}
       else do
@@ -1591,7 +1603,7 @@ tickBuildPreparation runtime@(ConversationState _ ref _ _ _) core d = mask_ $ do
         result<-case admission of
           Just receiptAdmission | not launch->stepAdmittedBuild receiptAdmission core d
           _ | blocked->pure Nothing
-            | otherwise->Just . snd <$> core d [AdoptPreparedBuild]
+            | otherwise->Just . snd <$> core d [AdoptPreparedBuild (if launch then Nothing else target)]
         case result of
           Nothing->pure d
           Just updated->do
@@ -1601,13 +1613,13 @@ tickBuildPreparation runtime@(ConversationState _ ref _ _ _) core d = mask_ $ do
             case remaining of Just BuildReady{} -> retireBuildPreparation ref; _->pure ()
             pure updated
 
-adoptBuildPreparation :: ConversationState -> Desktop -> IO Desktop
-adoptBuildPreparation (ConversationState _ ref consoles jobs _) d = mask_ $ do
+adoptBuildPreparation :: ConversationState -> Maybe PackageBuildTarget -> Desktop -> IO Desktop
+adoptBuildPreparation (ConversationState _ ref consoles jobs _) target d = mask_ $ do
   state<-readIORef ref
   case buildPreparation state of
     Just (BuildReady receipt launch result) -> do
       current<-if launch then pure True else buildReceiptCurrent ref receipt d
-      if not current || not (isNothing (dialog d)) || questionActive d then retireBuildPreparation ref >> pure d
+      if not current || target/= (if launch then Nothing else case receipt of BuildReceipt _ _ _ _ _ captured->captured) || not (isNothing (dialog d)) || questionActive d then retireBuildPreparation ref >> pure d
       else do
         modifyIORef' ref (\s -> s {buildPreparation=Nothing})
         case result of
@@ -1688,7 +1700,7 @@ closeBuildPreparation slot=do
     BuildReady _ _ prepared -> closeResult prepared
     BuildRetiring _ worker -> wait worker
   where
-    cancelReceipt (BuildReceipt _ _ _ _ admission)=mapM_ cancelAdmittedBuild admission
+    cancelReceipt (BuildReceipt _ _ _ _ admission _)=mapM_ cancelAdmittedBuild admission
     closeResult (Right (BuildConsole console))=C.closePreparedConsole console
     closeResult _=pure ()
 
