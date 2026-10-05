@@ -316,6 +316,7 @@ main = do
   TextStyleCheck.checks
   PluginFormCheck.checks
   PluginWindowsCheck.checks
+  PluginWindowsCheck.rowsChecks
   WindowCheck.checks
 #ifdef WITH_FONT
   FontCheck.checks

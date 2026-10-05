@@ -242,9 +242,13 @@ conversationViewParser documents=withObject "conversation view" $ \o->do
   pure (target,ConversationView bid name draft selected (row,col) replySelection)
 
 windowValue :: Window -> Value
-windowValue w=object ["id" .= windowId w,"bufferId" .= bufferId w,"number" .= windowNumber w,"bounds" .= rectValue (bounds w),
+windowValue original=object ["id" .= windowId w,"bufferId" .= bufferId w,"number" .= windowNumber w,"bounds" .= rectValue (bounds w),
   "selection" .= selectionValue (selection w),"scrollRow" .= scrollRow w,"scrollColumn" .= scrollColumn w,
   "restoredBounds" .= fmap rectValue (restoredBounds w),"hexLow" .= windowHexLow w,"hexAscii" .= windowHexAscii w,"bufferView" .= fromEnum (bufferView w),"reviewSplit" .= reviewSplit w,"markdownInteraction" .= fmap (\(MarkdownInteraction selected row column stamp)->(selectionValue selected,row,column,stamp)) (markdownInteraction w)]
+  where
+    -- Rows restore as inert label summaries, so Details offsets cannot address
+    -- the recovered text. Geometry/numbering still belong to the same host slot.
+    w=case rowsInteraction original of Just _->original {selection=Selection 0 0,scrollRow=0,scrollColumn=0}; _->original
 rectValue :: Rect -> Value
 rectValue (Rect x y w h)=toJSON (x,y,w,h)
 selectionValue :: Selection -> Value
@@ -371,7 +375,7 @@ windowParser documents plugins=withObject "window" $ \o->do
     checkedStamp<-traverse (\(version,columns)->(,) <$> boundedInt 0 1073741823 version <*> boundedInt 1 1048576 columns) stamp
     pure (MarkdownInteraction selectedPreview rowPreview colPreview checkedStamp))
   let view=if sourceView && (toEnum viewIndex/=MarkdownView || maybe False markdownDocument (M.lookup (fromMaybe 0 bid) documents)) then toEnum viewIndex else CurrentView
-  Window ident content rectangle selected row column restored <$> o .: "hexLow" <*> o .: "hexAscii" <*> pure number <*> pure view <*> pure Nothing <*> pure split <*> pure preview
+  Window ident content rectangle selected row column restored <$> o .: "hexLow" <*> o .: "hexAscii" <*> pure number <*> pure view <*> pure Nothing <*> pure split <*> pure preview <*> pure Nothing
 rectParser :: Value -> Parser Rect
 rectParser value=do
   (x,y,w,h)<-parseJSON value

@@ -6,6 +6,7 @@ module Hide.PluginWindowHost (adoptWindowUpdate, replaceWindowUpdate, tickPlugin
 
 import qualified Data.Map.Strict as M
 import qualified Data.Set as S
+import qualified Data.Vector as V
 import Control.Monad (filterM)
 import Hide.Buffer (Selection(..),contentLength,contentLineCount)
 import qualified Hide.Plugin.Menu as P
@@ -51,11 +52,11 @@ replaceWindowUpdate origin old update desktop
           Just (reference,prepared)->do
             W.retireWindowRef old
             pure desktop {pluginWindows=M.insert reference prepared (M.delete old (pluginWindows desktop)),
-              retiredPluginWindows=S.delete old (retiredPluginWindows desktop),windows=map (replace reference) (windows desktop)}
+              retiredPluginWindows=S.delete old (retiredPluginWindows desktop),windows=map (replace reference prepared) (windows desktop)}
   where
-    replace reference w | windowContent w==PluginContent old=w {windowContent=PluginContent reference,
-      selection=Selection 0 0,scrollRow=0,scrollColumn=0}
-    replace _ w=w
+    replace reference prepared w | windowContent w==PluginContent old=w {windowContent=PluginContent reference,
+      selection=Selection 0 0,scrollRow=0,scrollColumn=0,rowsInteraction=initialRowsInteraction prepared}
+    replace _ _ w=w
 
 -- Scalar scope checks are bounded by the 256-view admission limit. Retirement
 -- leaves a selectable read-only snapshot; no stale plugin request can revive it.
@@ -67,11 +68,20 @@ tickPluginWindows desktop=do
 clamp :: W.WindowRef -> W.PreparedWindow -> Window -> Window
 clamp reference prepared window
   | windowContent window/=PluginContent reference=window
-  | otherwise=window {selection=Selection (limit (anchor selected)) (limit (caret selected)),
-      scrollRow=min (scrollRow window) (max 0 (contentLineCount text-1))}
+  | otherwise=next {selection=Selection (limit (anchor selected)) (limit (caret selected)),
+      scrollRow=min (scrollRow next) (max 0 (contentLineCount text-1)),scrollColumn=min (scrollColumn next) (W.preparedWindowWidth detail)}
   where
-    selected=selection window
-    text=W.preparedWindowText prepared
+    interaction=case (W.preparedWindowRows prepared,rowsInteraction window) of
+      (W.RowsDetails _ index _,Just old@(RowsInteraction ident _)) | M.member ident index->Just old
+      _->initialRowsInteraction prepared
+    changed=fmap (\(RowsInteraction ident _)->ident) interaction/=fmap (\(RowsInteraction ident _)->ident) (rowsInteraction window)
+    next=if changed then window {rowsInteraction=interaction,selection=Selection 0 0,scrollRow=0,scrollColumn=0} else window {rowsInteraction=interaction}
+    detail=case (W.preparedWindowRows prepared,interaction) of
+      (W.RowsDetails rows index _,Just (RowsInteraction ident _))->case M.lookup ident index >>= (rows V.!?) of
+        Just (W.WindowRow _ _ value)->value; _->prepared
+      _->prepared
+    selected=selection next
+    text=W.preparedWindowText detail
     limit=max 0 . min (contentLength text)
 
 -- | A close effect is harmless unless the exact view is already absent. The

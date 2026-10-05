@@ -26,6 +26,8 @@ import Paths_hide (getDataFileName)
 import System.Directory (canonicalizePath)
 import System.FilePath (takeDirectory)
 import Hide.DebuggerSidebarTypes
+import Hide.DownloadsWindowTypes
+import qualified Hide.Plugin.Tree as Tree
 import Hide.DocsMCP (DocsCommands, readDocs)
 import qualified Hide.LSP as L
 import Hide.Documentation
@@ -43,12 +45,13 @@ import qualified Hide.Plugin.Menu as Plugin
 data MenuContext = MenuContext
   { invocationColumns :: Int, invocationOrigin :: Plugin.MenuOrigin
   , invocationNavigation :: Maybe NavigationInput, invocationSource :: Maybe SourceInput
+  , invocationRow :: Maybe (PluginWindow.WindowRef,Tree.NodeId)
   }
 data SourceInput = SourceInput ContextTarget ContentVersion DirtySnapshot
 data NavigationInput = NavigationInput (FilePath,Int,Int) (Maybe OpenSource) (Maybe [FilePath])
 data OpenSource = OpenSource Int Int ContentVersion BufferContent
 data Navigation = Navigation FilePath Int Int (Maybe Document)
-data MenuReply = PreparedDocument LinkResult | PreparedNavigation Navigation | PreparedDebugSource DebugSourceRequest | PreparedWindow PluginWindow.WindowUpdate
+data MenuReply = PreparedDownloadCancel !DownloadCancelRequest | PreparedDocument LinkResult | PreparedNavigation Navigation | PreparedDebugSource DebugSourceRequest | PreparedWindow PluginWindow.WindowUpdate
 
 data Pending = Pending Plugin.MenuRef (Maybe ContextTarget) MenuContext (Async (Either Plugin.MenuError MenuReply))
 data Publication = Publish Plugin.MenuItem | Withdraw Plugin.MenuRef
@@ -60,7 +63,7 @@ data MenuHost = MenuHost (Plugin.Menus MenuContext MenuReply) [Plugin.MenuRef] [
 -- retireMenuFromHost. Closing cancels and joins the worker before either registry
 -- scope closes, so shutdown cannot race adoption or resurrect a document.
 withMenuCommands :: DocsCommands -> (MenuHost -> IO a) -> IO a
-withMenuCommands docs use=withRegistry $ \registry->Plugin.withMenus ("context.source":"context.messages":[T.toLower title | (title,_,_)<-Model.menus]) $ \menus->do
+withMenuCommands docs use=withRegistry $ \registry->Plugin.withMenus ("context.window-rows":"context.source":"context.messages":[T.toLower title | (title,_,_)<-Model.menus]) $ \menus->do
   command<-either (ioError . userError . show) pure =<< registerCommand registry (helpCommand docs)
   reference<-either (ioError . userError . show) pure =<< Plugin.contributeMenu menus
     (Plugin.MenuDef "hide.help.contents" "help" "contents" 0 "Contents" "F1" True
@@ -235,13 +238,15 @@ menuEffects host@(MenuHost menus permitted _ _ ref) _ original [InvokeMenu refer
   live<-Plugin.menuCurrent menus reference
   let item=find ((==reference) . Plugin.menuReference) (contributedMenus d)
       allowed=dialog d==Nothing && maybe False (\entry->origin==Plugin.HumanMenu || reference `elem` permitted && Plugin.menuAgentAllowed entry) item &&
-        maybe True (\captured->contextTargetCurrent d {contextTarget=Just captured}) target
+        maybe True (\captured->contextTargetCurrent d {contextTarget=Just captured}) target &&
+        maybe True (\entry->Plugin.menuSlot entry/="context.window-rows" || reference `elem` windowRowMenuRefsFor target d) item
   if not live || not allowed then pure (False,d {status="Menu action is stale or unavailable."}) else case pending of
     Just _->pure (False,d {status="A menu action is already running."})
     Nothing->do
       navigation<-captureNavigation origin target d
       source<-captureSource target d
-      let context=MenuContext (columns d) origin navigation source
+      let row=case target of Just (WindowRowTarget reference ident)->Just (reference,ident); _->Nothing
+          context=MenuContext (columns d) origin navigation source row
       worker<-async (restore (Plugin.invokeMenu menus reference context))
       writeIORef ref (Just (Pending reference target context worker))
       pure (False,d {status="Running menu action…"})
@@ -286,12 +291,14 @@ tickMenus host@(MenuHost menus _ sourceRefs _ ref) core original=do
         Just result->do
           writeIORef ref Nothing
           live<-Plugin.menuCurrent menus reference
-          let current=dialog d==Nothing && columns d==invocationColumns context &&
+          let exactRow=case result of Right (Right PreparedDownloadCancel{})->invocationOrigin context==Plugin.HumanMenu && invocationRow context/=Nothing; _->False
+              current=dialog d==Nothing && (not exactRow || reference `elem` windowRowMenuRefsFor target d) && (exactRow || columns d==invocationColumns context) &&
                 any ((==reference) . Plugin.menuReference) (contributedMenus d) &&
                 maybe True (\captured->contextTargetCurrent d {contextTarget=Just captured}) target
           if not live || not current then pure d {status="Menu result expired; invoke it again."} else case result of
             Left err->pure d {status="Menu action failed: "<>T.pack (displayException err)}
             Right (Left err)->pure d {status="Menu action failed: "<>T.pack (show err)}
+            Right (Right (PreparedDownloadCancel request))->snd <$> core d [DownloadCancelAction request]
             Right (Right (PreparedWindow prepared))->adoptWindowUpdate (invocationOrigin context) prepared d
             Right (Right (PreparedDocument prepared))->pure (fst (applyLink prepared d))
             Right (Right (PreparedNavigation prepared))->adoptNavigation context prepared d

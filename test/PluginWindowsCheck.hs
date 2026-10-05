@@ -1,5 +1,5 @@
 {-# LANGUAGE CPP, OverloadedStrings #-}
-module PluginWindowsCheck (checks) where
+module PluginWindowsCheck (checks,rowsChecks) where
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar
 import Control.Exception (evaluate)
@@ -17,6 +17,7 @@ import Hide.Buffer (newBuffer,contents,Selection(..))
 import Hide.Commands (configuredBindings,contributedBindingCommands)
 import Hide.DocsMCP
 import Hide.GuestAccess (guestKeyboardAllowed,pointerAllowedAt,readableAt)
+import Hide.Debugger (withDebugger,withDownloadsCommands)
 import Hide.MenuCommands
 import qualified Hide.Plugin.Window as W
 import Hide.PluginWindowHost (adoptWindowUpdate,replaceWindowUpdate,tickPluginWindows)
@@ -258,3 +259,74 @@ checks=W.withWindowScope $ \scope->withDocsCommands $ \docs->withRegistry $ \reg
     refused<-timeout 5000000 (awaitExpired expired) >>= maybe (fail "late retired menu result timeout") pure
     check "retired originating command cannot adopt late plugin window" (activePluginWindow refused==Nothing && length (windows refused)==1)
   putStrLn "plugin window checks passed"
+
+-- The real host route keeps job selection separate from changing Details text.
+rowsChecks :: IO ()
+rowsChecks=W.withWindowScope $ \scope->withDocsCommands $ \docs->withMenuCommands docs $ \host->withDebugger $ \runtime->withDownloadsCommands host runtime $ do
+  catalogue<-P.menuSnapshot (menuContributions host)
+  let check label condition=unless condition (fail label)
+      ident=either (error . T.unpack) id . PTree.nodeId
+      a=ident "a"; b=ident "b"
+      source=(addDocument Nothing (newBuffer "source stays unchanged") (initialDesktop (80,25))) {contributedMenus=catalogue}
+      sourceSelection=selection <$> activeWindow source
+      install prepared desktop=do
+        update<-W.openTextWindow scope prepared >>= maybe (fail "window scope closed") pure
+        adoptWindowUpdate P.HumanMenu update desktop
+      selected desktop=activeWindow desktop >>= rowsInteraction
+      move event= fst . handleEvent event
+  detailA<-W.prepareTextWindow "A" "AAA details\nnext line"
+  detailB<-W.prepareTextWindow "B" "BBB details"
+  prepared<-W.prepareRecoverableRowsWindow "hide.downloads" 1 "Transfers" []
+    [W.WindowRow a "A" detailA,W.WindowRow b "B" detailB] >>= either (fail . T.unpack) pure
+  opened<-install prepared source
+  check "unrelated readonly rows do not advertise Downloads Cancel" (null (contextItemsFor opened {contextKind=WindowRowsContext}))
+  check "rows open as a nonmodal plugin window" (dialog opened==Nothing && selected opened==Just (RowsInteraction a False))
+  longDetails<-W.prepareTextWindow "Details" (T.intercalate "\n" (replicate 60 "line"))
+  longPage<-W.prepareRowsWindow "Long details" [] [W.WindowRow a "A" longDetails] >>= either (fail . T.unpack) pure
+  longWindow<-install longPage source
+  let current=maybe (error "missing long rows") id (activeWindow longWindow)
+      (bar,_)=maybe (error "missing Details scrollbar") id (windowScrollbar longWindow True current)
+      paged=fst (handleEvent (V.EvMouseDown (left bar) (top bar+2) V.BLeft []) longWindow)
+  check "Details track pages by its viewport rather than the full list window"
+    (fmap scrollRow (activeWindow paged)==Just (height (snd (rowsWindowRects current))))
+  let chosen=move (V.EvKey V.KDown []) opened
+      focused=move (V.EvKey (V.KChar '\t') []) chosen
+      allDetails=fst (runCommand SelectAll focused)
+      copied=fst (runCommand Copy allDetails)
+  check "list selection navigates by ID and Details copies only selected text"
+    (selected copied==Just (RowsInteraction b True) && clipboard copied=="BBB details")
+  changedA<-W.prepareTextWindow "A" "A longer progress details"
+  changedB<-W.prepareTextWindow "B" "BBB details updated"
+  changed<-W.prepareRecoverableRowsWindow "hide.downloads" 1 "Transfers" [] [W.WindowRow b "B progress" changedB,W.WindowRow a "A progress" changedA] >>= either (fail . T.unpack) pure
+  let window=maybe (error "no window") id (activeWindow copied)
+      reference=case windowContent window of PluginContent ref->ref; _->error "no plugin"
+      resized=resizeWindowBounds (windowId window) ((bounds window) {width=60,height=19}) copied
+  publication<-W.refreshTextWindow reference changed >>= maybe (fail "refresh refused") pure
+  refreshed<-adoptWindowUpdate P.HumanMenu publication resized
+  check "progress/reorder/resize retains stable selected ID and Details selection"
+    (selected refreshed==Just (RowsInteraction b True) && fmap selection (activeWindow refreshed)==fmap selection (activeWindow copied))
+  check "bounded painter displays list and selected Details" (all (`T.isInfixOf` snapshot refreshed) ["B progress","A progress","BBB details updated"])
+  let win=maybe (error "no window") id (activeWindow refreshed)
+      listRect=fst (rowsWindowRects win)
+      wheeled=move (V.EvMouseDown (left listRect+1) (top listRect) V.BScrollDown []) refreshed
+  check "wheel over list moves row selection" (selected wheeled==Just (RowsInteraction a False))
+  check "source selection is untouched" (sourceSelection==fmap selection (findSource wheeled))
+  temporary<-getTemporaryDirectory
+  (path,handle)<-openTempFile temporary "hide-rows-recovery"
+  hClose handle
+  writeCheckpoint path refreshed
+  restored<-readCheckpoint path (initialDesktop (80,25)) >>= either (fail . T.unpack) pure
+  removeFile path
+  let inert=activePluginWindow restored
+  check "rows recover only inert labels with no Details offsets or actions"
+    (maybe False (\value->case W.preparedWindowRows value of W.PlainRows{}->True; _->False) inert &&
+      fmap rowsInteraction (activeWindow restored)==Just Nothing && fmap selection (activeWindow restored)==Just (Selection 0 0))
+  let popup=openContext WindowRowsContext (left listRect+2) (top listRect+1) refreshed
+      popupRect=maybe (error "missing rows popup") fst (contextMenu popup)
+  check "private rows popup cannot accept guest input or expose overlay cells"
+    (not (guestKeyboardAllowed popup) && not (readableAt popup (left popupRect+1) (top popupRect+1)))
+  duplicate<-W.prepareRowsWindow "bad" [] [W.WindowRow a "A" detailA,W.WindowRow a "duplicate" detailB]
+  nested<-W.prepareRowsWindow "bad" [] [W.WindowRow a "nested" prepared]
+  check "rows factory rejects duplicate IDs and nested Details" (either (const True) (const False) duplicate && either (const True) (const False) nested)
+  where
+    findSource desktop=case filter ((/=Nothing).bufferId) (windows desktop) of w:_->Just w; _->Nothing
