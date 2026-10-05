@@ -311,7 +311,7 @@ checks = do
   check "status labels highlight green and invoke their menu command"
     ("background:rgb(0,170,0)" `T.isInfixOf` snapshotHtml hoveredStatus && snd clickedStatus==snd (runCommand Open statusDesktop))
   let statusModal=fst (runCommand EditorOptions statusDesktop)
-      escapeRect=case [r | (r,_,Right (V.EvKey V.KEsc []))<-statusItemRects statusModal] of r:_ -> r; _ -> error "Missing modal Cancel status action"
+      escapeRect=case [r | (r,_,Left DialogCancel)<-statusItemRects statusModal] of r:_ -> r; _ -> error "Missing modal Cancel status action"
   check "status bar Cancel works through modal input"
     (dialog (fst (handleEvent (V.EvMouseDown (left escapeRect+3) statusY V.BLeft []) statusModal))==Nothing)
   let withHint=statusDesktop {typeHint="a :: Int"}

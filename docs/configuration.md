@@ -176,8 +176,8 @@ loading. To assign an occupied key, remove or replace its previous command's
 binding too. Ordinary text, menu mnemonics, window navigation, completion controls,
 Escape, F10 and Ctrl+] remain reserved. Conversation Enter retains the configured
 Query/Steer and code-block submission behavior. Dialog `dialog` tables accept only Copy, Cut, Paste, Select all, Undo, Redo,
-Find, Replace, `hide.dialog.focus-next/previous` and `hide.dialog.accept/cancel` canonical
-command IDs. Editing actions apply to an editable
+Find, Replace, `hide.dialog.focus-next`, `hide.dialog.focus-previous`,
+`hide.dialog.accept` and `hide.dialog.cancel` canonical command IDs. Editing actions apply to an editable
 TextArea; Find/Replace apply to a search dialog. Plain single-line `Input`
 fields retain their existing text/editing controls and Ctrl/Alt button mnemonics. Defaults are Ctrl+C/X/V/A,
 Ctrl+Shift+C/X/V/A, Ctrl+Z Undo, Ctrl+Y and Ctrl+Shift+Z Redo, Ctrl+F Find,
