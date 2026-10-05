@@ -336,8 +336,20 @@ sourceLineChecks=do
                        in char+col+sum [T.length text+advance | (text,_,advance,_)<-units sigils]
   _<-evaluate (prepareBuffer b)
   _<-evaluate (forceWindow 0)
+  -- Eager prepareBuffer previously excluded index construction from this
+  -- viewport guard. Loaded rows now construct only the demanded prefix: measure
+  -- that first linear seek independently, then guard a distinct nearby viewport.
+  firstBefore<-getAllocationCounter
+  firstCount<-evaluate (forceWindow 500000)
+  firstAfter<-getAllocationCounter
+  check "first far viewport prepares exact complete source glyphs and coordinates"
+    (firstCount==750270 && window 500000 180 row==(250000,500000,replicate 90 ("界",Plain,2,"界")))
+  check "first far viewport keeps preparation proportional to span receipts"
+    (firstBefore-firstAfter<20*1024*1024)
   before<-getAllocationCounter
-  count<-evaluate (forceWindow 500000)
+  count<-evaluate (forceWindow 500001)
   after<-getAllocationCounter
   check "live source viewport seeks borrowed long-row leaves without a flat projection"
     (count>0 && before-after<128*1024)
+  check "prepared nearby viewport retains clipped wide source glyphs"
+    (window 500001 180 row==(250000,500000,replicate 91 ("界",Plain,2,"界")))

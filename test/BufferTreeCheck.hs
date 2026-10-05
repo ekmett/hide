@@ -38,6 +38,7 @@ checkIndexed b text = do
 
 checks :: IO ()
 checks = do
+  lazyLineChecks
   longLineChecks
   wordChecks
   batchChecks
@@ -342,6 +343,51 @@ wordChecks=do
 
 -- Edits in a long physical row share the unchanged storage. Whole-text reads
 -- below are explicit oracle checks, outside the measured preparation boundary.
+-- Loaded source receipts are memoized by the immutable line, not by a UI cache.
+-- These budgets reject full indexing at load/left viewport and repeated decoding
+-- of a demanded prefix. Exact width is intentionally a separate first-use scan.
+lazyLineChecks :: IO ()
+lazyLineChecks=do
+  let text=T.replicate (1024*1024) "a"
+      loaded=newBuffer text
+  _<-evaluate (T.length text)
+  before<-getAllocationCounter
+  _<-evaluate (prepareBuffer loaded)
+  _<-evaluate (T.length (contents loaded))
+  _<-evaluate (T.length (bufferLineAt loaded 0))
+  after<-getAllocationCounter
+  check "loaded long-row metadata and export do not dice receipts" (before-after<64*1024)
+  let line=contentSourceLineAt (bufferContent loaded) 0
+  leftBefore<-getAllocationCounter
+  let (left,_,groups)=sourceLineWindow line 0
+  _<-evaluate (left+sum [TU.lengthWord8 source | (source,_)<-take 2 groups])
+  leftAfter<-getAllocationCounter
+  check "left viewport forces only bounded receipt prefix" (leftBefore-leftAfter<64*1024)
+  _<-evaluate (sourceLineDisplayColumn line 50000)
+  repeatBefore<-getAllocationCounter
+  let positions=[49960..50000]
+  _<-evaluate (sum [sourceLineDisplayColumn line p | p<-positions])
+  repeatAfter<-getAllocationCounter
+  check "repeated coordinates reuse prepared receipt prefix" (repeatBefore-repeatAfter<128*1024)
+  check "queries retain exact content and revision" (contents loaded==text && revision loaded==0 && null (undoStack loaded))
+  forM_ ["\t界e\x301\x200d😀", "🇦🇧", "z"<>T.replicate 80 "\x301", "a\r"] $ \unit->do
+    let source=T.replicate 350 unit<>"\r\nnext"
+        b=newBuffer source
+        row=lineAt source 0
+        sourceLine=contentSourceLineAt (bufferContent b) 0
+    forM_ [0,1,31,32,127,128,T.length row-1,T.length row] $ \p->
+      check "lazy source coordinates preserve original scalar/item policy"
+        (sourceLineDisplayColumn sourceLine p==displayColumn row p)
+    forM_ [0,1,7,8,127,128,511,4000] $ \col->do
+      check "lazy hits preserve exact scalar boundary"
+        (sourceLineColumnOffset sourceLine col==columnOffset row col)
+      let (char,column,_) = sourceLineWindow sourceLine col
+      check "lazy viewport EOF preserves editor scalar and column endpoint"
+        (char<=T.length row && (char<T.length row || column==displayColumn row (T.length row)))
+    let edited=replaceSelection (Selection 128 129) "X" b
+    check "first-edit promotion preserves physical rows and one Undo"
+      (contents edited==T.take 128 source<>"X"<>T.drop 129 source && contents (undo edited)==source && length (undoStack edited)==1)
+
 longLineChecks :: IO ()
 longLineChecks=do
   let text=T.replicate (1024*1024) "a"
@@ -355,16 +401,27 @@ longLineChecks=do
   -- detects temporary records per scalar instead of records per stored span.
   check "long-row construction keeps numeric state between span receipts"
     (constructionBefore-constructionAfter<20*1024*1024)
+  -- First editing promotes a loaded row once; subsequent edits retain the
+  -- existing local-repair allocation budget against a prepared tree.
+  promotionBefore<-getAllocationCounter
+  let promoted=replaceSelection (Selection 0 0) "!" original
+      indexedText="!"<>text
+  _<-evaluate (prepareBuffer promoted)
+  promotionAfter<-getAllocationCounter
+  check "first long-row edit promotes within the span construction budget" (promotionBefore-promotionAfter<20*1024*1024)
+  check "first promotion preserves exact source and one Undo" (contents promoted==indexedText && contents (undo promoted)==text && length (undoStack promoted)==1)
+  let indexed=markSaved promoted
+  _<-evaluate (prepareBuffer indexed)
   before<-getAllocationCounter
-  let changed=replaceSelection (Selection middle middle) "X" original
+  let changed=replaceSelection (Selection middle middle) "X" indexed
   _<-evaluate (prepareBuffer changed)
   after<-getAllocationCounter
   check "local long-row edit reuses the immutable suffix" (before-after<512*1024)
   check "long-row edit agrees with exact source splice"
-    (contents changed==T.take middle text<>"X"<>T.drop middle text)
+    (contents changed==T.take middle indexedText<>"X"<>T.drop middle indexedText)
   check "long-row edit is one provenance change and Undo step"
-    (bufferLineChanges changed==(1,1) && length (undoStack changed)==1 &&
-      contents (undo changed)==text && contents (redo (undo changed))==contents changed)
+    (bufferLineChanges changed==(1,1) && length (undoStack changed)==2 &&
+      contents (undo changed)==indexedText && contents (redo (undo changed))==contents changed)
   let nonfinal=newBuffer (text<>"\r\ntail\n")
       changedNonfinal=replaceSelection (Selection middle middle) "X" nonfinal
   check "long nonfinal edit preserves its terminator and successors"
@@ -378,4 +435,4 @@ longLineChecks=do
       (not (null sizes) && all (\n->n>=64 && n<=256) (init sizes) && last sizes<=256)
   let restored=replaceSelection (Selection middle (middle+1)) "" changed
   check "restoring long-row contents restores its baseline"
-    (contents restored==text && not (dirty restored) && bufferLineChanges restored==(0,0))
+    (contents restored==indexedText && not (dirty restored) && bufferLineChanges restored==(0,0))

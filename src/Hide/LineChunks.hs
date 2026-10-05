@@ -1,13 +1,15 @@
 {-# LANGUAGE BangPatterns, MagicHash, MultiParamTypeClasses, UnboxedTuples #-}
+-- SPDX-License-Identifier: BSD-3-Clause
 -- | Persistent borrowed storage inside a long physical source line.
 --
--- Chunks contain complete bounded display items and a small shared Unicode
--- checkpoint at each edge. Measures compose source scalar/byte coordinates,
--- tab-dependent display advance and exact-content rejection fingerprints.
--- Whole text is an explicit projection; local reads never flatten the line.
+-- Loaded text shares a lazy stream of complete bounded-item span receipts.
+-- Exact seeks reuse those receipts; first editing promotes them to a measured
+-- tree for persistent local repair. Measures compose source scalar/byte counts,
+-- tab-dependent advance and exact-content rejection fingerprints.
+-- Whole text and exact loaded width remain independent of the receipt stream.
 module Hide.LineChunks
   ( Chunks, ChunkMeasure(..), ColumnAdvance(..), applyAdvance
-  , chunksFromText, chunksEdit, chunksMeasure, chunksText, chunksSlice, chunksFragments
+  , chunksFromText, chunksEdit, chunksMeasure, chunksWidth, chunksText, chunksSlice, chunksFragments
   , chunksWindow, chunksDisplayColumn, chunksColumnOffset
   , chunksPreviousCharacter, chunksSpanLeft, chunksSpanRight, chunksSuffixWidth
   ) where
@@ -22,8 +24,8 @@ import qualified Data.Text as T
 import qualified Data.Text.Unsafe as TU
 import qualified Data.Text.Array as TA
 import qualified Data.Text.Internal as TI
-import GHC.Exts (isTrue#, sameByteArray#, sizeofByteArray#, Int(I#))
-import Hide.Unicode (DisplayItem, SourceCursor, initialSourceCursor, sourceItemStep, sourceSpanStep, sourceLeafFrom, sourceItemsFromCursor)
+import GHC.Exts (isTrue#, sameByteArray#, sizeofByteArray#, Int(I#),Int#)
+import Hide.Unicode (DisplayItem, SourceCursor, initialSourceCursor, sourceItemStep, sourceSpanStep, sourceLeafFrom, sourceItemsFromCursor, sourceGraphemesFrom, sourceScalarColumn)
 
 -- | Concatenated source column transforms. A tab erases the incoming residue.
 -- @applyAdvance (a <> b) c == applyAdvance b (applyAdvance a c)@.
@@ -69,29 +71,53 @@ instance Show Chunk where
   showsPrec p (Chunk m text _ _ overflow)=showsPrec p (m,text,overflow)
 instance FT.Measured ChunkMeasure Chunk where measure (Chunk m _ _ _ _)=m
 
-type Chunks = FT.FingerTree ChunkMeasure Chunk
+type ChunkTree = FT.FingerTree ChunkMeasure Chunk
+
+-- A loaded line memoizes only demanded span receipts. The Text and exact width
+-- remain independent of that stream; exports/outer metadata must not force it.
+-- First editing promotes this line once; no display adoption or Buffer mutation.
+data Chunks = Loaded !T.Text [Chunk] Int | Edited !ChunkTree
+instance Show Chunks where
+  showsPrec p (Loaded text _ _)=showsPrec p text
+  showsPrec p (Edited tree)=showsPrec p tree
+
+chunksTree :: Chunks -> ChunkTree
+chunksTree (Loaded _ spans _)=FT.fromList spans
+chunksTree (Edited tree)=tree
 
 chunksMeasure :: Chunks -> ChunkMeasure
-chunksMeasure=FT.measure
+chunksMeasure=FT.measure . chunksTree
+
+-- | Exact width is memoized independently of loaded receipts. Its first use
+-- scans the original row; it does not dice an undemanded row into spans.
+chunksWidth :: Chunks -> Int
+chunksWidth (Loaded _ _ width)=width
+chunksWidth (Edited tree)=applyAdvance (chunkAdvance (FT.measure tree)) 0
 
 -- | Explicit whole-line read, for serialization and worker-owned consumers.
 chunksText :: Chunks -> T.Text
-chunksText=T.concat . map payload . toList
-  where payload (Chunk _ text _ _ _)=text
+chunksText (Loaded text _ _)=text
+chunksText (Edited tree)=T.concat [text | Chunk _ text _ _ _<-toList tree]
 
 -- | Borrow only the leaves overlapping a clamped scalar range. Both boundary
 -- leaves inspect bounded local byte spans; middle leaves remain whole.
 chunksFragments :: Chunks -> Int -> Int -> [T.Text]
-chunksFragments tree requested count=go offset (max 0 count) (toList suffix)
+chunksFragments (Loaded text spans _) requested count
+  | count<=0=[]
+  | requested<=0=[T.take count text]
+  | otherwise=case seekLoadedScalar (max 0 requested) spans of
+      (# base,_,suffix #)->fragmentsFrom (max 0 requested-I# base) count suffix
+chunksFragments (Edited tree) requested count=fragmentsFrom offset (max 0 count) (toList suffix)
   where
     start=max 0 (min (chunkCharacters (FT.measure tree)) requested)
     (prefix,suffix)=FT.split ((>start).chunkCharacters) tree
     offset=start-chunkCharacters (FT.measure prefix)
-    go _ remaining _ | remaining<=0=[]
-    go _ _ []=[]
-    go skip remaining (Chunk m text _ _ _:rest)=
-      let size=min remaining (chunkCharacters m-skip)
-      in T.take size (T.drop skip text):go 0 (remaining-size) rest
+fragmentsFrom :: Int -> Int -> [Chunk] -> [T.Text]
+fragmentsFrom _ remaining _ | remaining<=0=[]
+fragmentsFrom _ _ []=[]
+fragmentsFrom skip remaining (Chunk m text _ _ _:rest)=
+  let size=min remaining (chunkCharacters m-skip)
+  in T.take size (T.drop skip text):fragmentsFrom 0 (remaining-size) rest
 
 -- | Exact bounded scalar read; source offsets never refer to UTF8 bytes.
 chunksSlice :: Chunks -> Int -> Int -> T.Text
@@ -101,23 +127,61 @@ chunksSlice tree start count=T.concat (chunksFragments tree start count)
 -- leaf suffix and its successors. Offsets count scalars and absolute cells;
 -- each group owns its source array, so ordinary style runs cannot cross leaves.
 chunksWindow :: Chunks -> Int -> (Int,Int,[(T.Text,[DisplayItem])])
-chunksWindow tree requested=case FT.viewl suffix of
+chunksWindow (Loaded _ spans _) requested=case seekLoadedColumn (max 0 requested) spans of
+  (# char,col,[] #)->(I# char,I# col,[])
+  (# char,col,chunk:rest #)->windowSuffix (max 0 requested) (I# char) (I# col) chunk rest
+chunksWindow (Edited tree) requested=case FT.viewl suffix of
   FT.EmptyL->(chunkCharacters measure,applyAdvance (chunkAdvance measure) 0,[])
-  Chunk _ text incoming _ overflow FT.:< rest->
-    let (char,byte,col,items)=sourceLeafFrom goal initialColumn incoming overflow text
-    in (chunkCharacters measure+char,col,(TU.dropWord8 byte text,items):
-      [(source,sourceItemsFromCursor cursor receipt source) | Chunk _ source cursor _ receipt<-toList rest])
+  chunk FT.:< rest->windowSuffix goal (chunkCharacters measure) initialColumn chunk (toList rest)
   where
     goal=max 0 requested
     (prefix,suffix)=FT.split ((>goal).(`applyAdvance` 0).chunkAdvance) tree
     measure=FT.measure prefix
     initialColumn=applyAdvance (chunkAdvance measure) 0
 
+-- Primitive endpoint receipts keep the cached-span walk numeric. Box the
+-- public coordinates only at its selected edge, never once per skipped span.
+seekLoadedColumn :: Int -> [Chunk] -> (# Int#,Int#,[Chunk] #)
+seekLoadedColumn goal=go 0 0
+  where
+    go !char !col []=finish char col []
+    go !char !col suffix@(Chunk m _ _ _ _:rest)
+      | next<=goal=go (char+chunkCharacters m) next rest
+      | otherwise=finish char col suffix
+      where next=applyAdvance (chunkAdvance m) col
+    finish (I# char) (I# col) suffix=(# char,col,suffix #)
+
+seekLoadedScalar :: Int -> [Chunk] -> (# Int#,Int#,[Chunk] #)
+seekLoadedScalar goal=go 0 0
+  where
+    go !char !col []=finish char col []
+    go !char !col suffix@(Chunk m _ _ _ _:rest)
+      | char+chunkCharacters m<=goal=go (char+chunkCharacters m) (applyAdvance (chunkAdvance m) col) rest
+      | otherwise=finish char col suffix
+    finish (I# char) (I# col) suffix=(# char,col,suffix #)
+
+windowSuffix :: Int -> Int -> Int -> Chunk -> [Chunk] -> (Int,Int,[(T.Text,[DisplayItem])])
+windowSuffix goal base col (Chunk _ text incoming _ overflow) rest=
+  let (char,byte,column,items)=sourceLeafFrom goal col incoming overflow text
+  in (base+char,column,(TU.dropWord8 byte text,items):
+    [(source,sourceItemsFromCursor cursor receipt source) | Chunk _ source cursor _ receipt<-rest])
+
 -- | Bounded width after deliberately removing a scalar prefix, as in a code
 -- bubble's indentation. Segmentation restarts at that normalized suffix, exactly
 -- like Text.drop; storage edges still supply real lookahead through borrowed
 -- fragments. No DisplayItem or whole-suffix Text is constructed.
 chunksSuffixWidth :: Chunks -> Int -> Int -> Int -> Int
+chunksSuffixWidth (Loaded original _ _) start count bound=go 0 0 initialSourceCursor 0
+  where
+    text=T.drop start original
+    go !byte !chars !cursor !col
+      | col>=bound=max 0 bound
+      | chars>=count || byte>=TU.lengthWord8 text=col
+      | otherwise=case sourceItemStep text byte cursor of
+          (# end,n,width,tab,_,next #)->
+            if chars+n>count then col else go end (chars+n) next (if tab then nextTab col else col+width)
+chunksSuffixWidth loaded@(Edited tree) 0 _ bound=
+  min (max 0 bound) (chunksWidth loaded-if chunkFlags (FT.measure tree) .&. 4/=0 then 1 else 0)
 chunksSuffixWidth tree start count bound=go first 0 initialSourceCursor 0 rest
   where
     (first,rest)=sourceSpan T.empty (chunksFragments tree start count)
@@ -134,20 +198,21 @@ chunksSuffixWidth tree start count bound=go first 0 initialSourceCursor 0 rest
 -- | Map a scalar position to the start of its complete display item. Interior
 -- scalars never create a partial grapheme; tabs retain the absolute column.
 chunksDisplayColumn :: Chunks -> Int -> Int
-chunksDisplayColumn tree requested=case FT.viewl suffix of
+chunksDisplayColumn (Loaded _ spans _) requested=case seekLoadedScalar (max 0 requested) spans of
+  (# _,col,[] #)->I# col
+  (# char,col,chunk:_ #)->chunkDisplayColumn (max 0 requested-I# char) (I# col) chunk
+chunksDisplayColumn (Edited tree) requested=case FT.viewl suffix of
   FT.EmptyL->initialColumn
-  Chunk _ text cursor _ receipt FT.:< _->go receipt 0 0 initialColumn cursor text
+  chunk FT.:< _->chunkDisplayColumn local initialColumn chunk
   where
     goal=max 0 (min requested (chunkCharacters (FT.measure tree)))
     (prefix,suffix)=FT.split ((>goal).chunkCharacters) tree
     initialColumn=applyAdvance (chunkAdvance (FT.measure prefix)) 0
     local=goal-chunkCharacters (FT.measure prefix)
-    go receipt !byte !char !col !cursor text
-      | byte>=TU.lengthWord8 text=col
-      | otherwise=case sourceItemStep text byte cursor of
-          (# end,count,width,tab,_,next #)->
-            if char+count>local then col
-            else go receipt end (char+count) (if end==TU.lengthWord8 text && receipt then col+1 else if tab then nextTab col else col+width) next text
+
+chunkDisplayColumn :: Int -> Int -> Chunk -> Int
+chunkDisplayColumn local initialColumn (Chunk _ text cursor _ receipt)=
+  sourceScalarColumn local initialColumn cursor receipt text
 
 -- | Display hits return an original scalar boundary, using the same seek as
 -- visible emission. Zero-width items before the hit are consumed identically.
@@ -156,23 +221,45 @@ chunksColumnOffset tree goal=let (char,_,_)=chunksWindow tree goal in char
 
 -- | Previous complete-item boundary, including interior scalar positions.
 chunksPreviousCharacter :: Chunks -> Int -> Int
-chunksPreviousCharacter tree requested
+chunksPreviousCharacter (Loaded _ spans _) requested
+  | requested<=0=0
+  | otherwise=case seekLoadedScalar (requested-1) spans of
+      (# base,_,[] #)->I# base
+      (# base,_,chunk:_ #)->I# base+chunkPreviousCharacter (requested-I# base) chunk
+chunksPreviousCharacter (Edited tree) requested
   | goal<=0=0
   | otherwise=case FT.viewl suffix of
-      Chunk _ text cursor _ _ FT.:< _->base+go text 0 0 cursor
+      chunk FT.:< _->base+chunkPreviousCharacter local chunk
       FT.EmptyL->goal
   where
     goal=min requested (chunkCharacters (FT.measure tree))
     (prefix,suffix)=FT.split ((>=goal).chunkCharacters) tree
     base=chunkCharacters (FT.measure prefix)
     local=goal-base
-    go text !byte !char !cursor=case sourceItemStep text byte cursor of
-      (# end,count,_,_,_,next #)->if char+count>=local then char else go text end (char+count) next
+chunkPreviousCharacter :: Int -> Chunk -> Int
+chunkPreviousCharacter local (Chunk _ text cursor _ _)
+  | local<=0=0
+  | otherwise=go 0 0 cursor
+  where
+    go !byte !char !state=case sourceItemStep text byte state of
+      (# end,count,_,_,_,next #)->if char+count>=local then char else go end (char+count) next
 
 -- | Scalar-class traversal borrows only visited storage leaves. Predicates do
 -- not require grapheme segmentation; offsets remain original source scalars.
 chunksSpanLeft :: (Char->Bool) -> Chunks -> Int -> Int
-chunksSpanLeft predicate tree requested=case FT.viewl suffix of
+chunksSpanLeft predicate (Loaded _ spans _) requested=seek 0 [] spans
+  where
+    goal=max 0 requested
+    seek !base previous []=go base T.empty previous
+    seek !base previous (chunk@(Chunk m text _ _ _):rest)
+      | base+chunkCharacters m<goal=seek (base+chunkCharacters m) (chunk:previous) rest
+      | otherwise=go goal (T.take (goal-base) text) previous
+    go !offset text previous=
+      let consumed=T.takeWhileEnd predicate text; next=offset-T.length consumed
+      in if TU.lengthWord8 consumed<TU.lengthWord8 text then next else case previous of
+        Chunk _ source _ _ _:earlier->go next source earlier
+        []->next
+chunksSpanLeft predicate (Edited tree) requested=case FT.viewl suffix of
   Chunk _ text _ _ _ FT.:< _->go goal (T.take (goal-base) text) prefix
   FT.EmptyL->go goal T.empty prefix
   where
@@ -187,7 +274,16 @@ chunksSpanLeft predicate tree requested=case FT.viewl suffix of
 
 -- | Forward scalar-class traversal, sharing the same physical storage owner.
 chunksSpanRight :: (Char->Bool) -> Chunks -> Int -> Int
-chunksSpanRight predicate tree requested=case FT.viewl suffix of
+chunksSpanRight predicate (Loaded _ spans _) requested=case seekLoadedScalar (max 0 requested) spans of
+  (# base,_,[] #)->I# base
+  (# base,_,Chunk _ text _ _ _:rest #)->go (max 0 requested) (T.drop (max 0 requested-I# base) text) rest
+  where
+    go !offset text following=
+      let consumed=T.takeWhile predicate text; next=offset+T.length consumed
+      in if TU.lengthWord8 consumed<TU.lengthWord8 text then next else case following of
+        Chunk _ source _ _ _:later->go next source later
+        []->next
+chunksSpanRight predicate (Edited tree) requested=case FT.viewl suffix of
   Chunk _ text _ _ _ FT.:< rest->go goal (T.drop (goal-base) text) rest
   FT.EmptyL->goal
   where
@@ -216,10 +312,24 @@ joinAdjacent (TI.Text a@(TA.ByteArray array) start size) (TI.Text (TA.ByteArray 
 -- about 128 UTF8 bytes after the preceding cut; move to the next scalar start
 -- and complete bounded-item boundary. A span therefore ends by byte 255, apart
 -- from bounded local neighbor merging. Cuts are storage choices, not canonical
--- source identity. This storage preparation is eager; demand indexing is a
--- separate follow-up and is not claimed by wrapping this tree in a thunk.
+-- source identity. Loading retains a shared lazy receipt stream; exact queries
+-- force only the prefix they visit. The first edit promotes it to a measured tree.
 chunksFromText :: T.Text -> Chunks
-chunksFromText text=buildChunks initialSourceCursor [text] Nothing
+chunksFromText text=Loaded text (loadedSpans text) width
+  where (_,_,width,_)=sourceGraphemesFrom maxBound text
+
+-- Each tail is shared and remains lazy. The scanner sees the original full
+-- source, so its outgoing cursor/overflow includes real lookahead at every cut.
+loadedSpans :: T.Text -> [Chunk]
+loadedSpans text=go 0 initialSourceCursor
+  where
+    go !byte !cursor
+      | byte>=TU.lengthWord8 text=[]
+      | otherwise=case sourceSpanStep text byte cursor (byte+128) maxBound False of
+          (# end,chars,count,prefix,suffix,overflow,next #)->
+            let source=TU.takeWord8 (end-byte) (TU.dropWord8 byte text)
+                advance=if prefix<0 then Add suffix else Tab prefix suffix
+            in Chunk (leafMeasure source chars count advance) source cursor next overflow:go end next
 
 -- | Repair one physical row. Prefix/suffix trees remain shared. Restart before
 -- the edit, where the saved cursor still names unchanged source; reuse the old
@@ -227,8 +337,9 @@ chunksFromText text=buildChunks initialSourceCursor [text] Nothing
 -- Valid cuts need not reproduce a canonical global cut sequence. Regional
 -- indicator parity can require linear suffix repair, without flattening it.
 chunksEdit :: Chunks -> Int -> Int -> T.Text -> Chunks
-chunksEdit original requestedStart requestedEnd inserted=prefix FT.>< repaired
+chunksEdit loaded requestedStart requestedEnd inserted=Edited (prefix FT.>< repaired)
   where
+    original=chunksTree loaded
     size=chunkCharacters (FT.measure original)
     start=max 0 (min size requestedStart)
     end=max start (min size requestedEnd)
@@ -238,7 +349,7 @@ chunksEdit original requestedStart requestedEnd inserted=prefix FT.>< repaired
       FT.EmptyR->(FT.empty,fromStart)
     offset=chunkCharacters (FT.measure prefix)
     incoming=case FT.viewl restart of Chunk _ _ cursor _ _ FT.:< _->cursor; FT.EmptyL->initialSourceCursor
-    parts=chunksFragments restart 0 (start-offset)++[inserted]++chunksFragments original end (size-end)
+    parts=chunksFragments (Edited restart) 0 (start-offset)++[inserted]++chunksFragments (Edited original) end (size-end)
     (oldBefore,oldAfter)=FT.split ((>end).chunkCharacters) original
     (boundary,candidates)=if chunkCharacters (FT.measure oldBefore)==end
       then (end,oldAfter)
@@ -275,13 +386,13 @@ sourceSpan text rest
 -- A repaired final fragment is not an EOF tail when it precedes reused
 -- storage. Merge or redistribute only the last two repaired chunks; recutting
 -- the whole periodic suffix would defeat persistent sharing.
-prependBalanced :: Chunk -> Chunks -> Chunks
+prependBalanced :: Chunk -> ChunkTree -> ChunkTree
 prependBalanced first rest=case FT.viewl rest of
   second@(Chunk m _ _ _ _) FT.:< suffix | chunkBytes m<64->
     balancePair first second FT.>< suffix
   _->first FT.<| rest
 
-balancePair :: Chunk -> Chunk -> Chunks
+balancePair :: Chunk -> Chunk -> ChunkTree
 balancePair (Chunk a left incoming _ _) (Chunk b right _ outgoing receipt)
   | bytes<=256=FT.singleton (Chunk (a<>b) source incoming outgoing receipt)
   | otherwise=case regularSplit source incoming of
@@ -337,7 +448,7 @@ leafMeasure text chars count advance=ChunkMeasure (TU.lengthWord8 text) chars co
 -- The same streaming owner prepares initial storage and repairs edited source.
 -- Only chunk cuts retain cursors and Text fragments; the item/scalar loops keep
 -- numeric state. An unchanged suffix receipt is checked before consuming it.
-buildChunks :: SourceCursor -> [T.Text] -> Maybe (Int,Chunks) -> Chunks
+buildChunks :: SourceCursor -> [T.Text] -> Maybe (Int,ChunkTree) -> ChunkTree
 buildChunks initial source candidates=items first 0 0 [] 0 0 0 (-1) 0 initial initial False 0 False rest candidates
   where
     slice text start end=TU.takeWord8 (end-start) (TU.dropWord8 start text)

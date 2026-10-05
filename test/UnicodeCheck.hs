@@ -78,6 +78,12 @@ checks = do
             | column+sourceItemAdvance column item>max 0 goal=(char,byte,column,pending)
             | otherwise=go (char+itemScalarCount item) (byte+TU.lengthWord8 (itemSourceText item))
                 (column+sourceItemAdvance column item) rest
+      scalarReference goal col=go 0 col
+        where
+          go _ column []=column
+          go char column (item:rest)
+            | char+itemScalarCount item>max 0 goal=column
+            | otherwise=go (char+itemScalarCount item) (column+sourceItemAdvance column item) rest
   forM_ cursorCases $ \text->do
     let captured=capture text
         flat=displayItems text
@@ -108,6 +114,9 @@ checks = do
       forM_ [col-1,col,col+1,col+sum [sourceItemAdvance 0 i | i<-expected]+8] $ \goal->
         check "resumed leaf numeric seek shares absolute tab/overflow geometry"
           (sourceLeafFrom goal col incoming lastOverflow leaf==leafReference goal col expected)
+      forM_ [0,1,31,32,sum (map itemScalarCount expected)-1,sum (map itemScalarCount expected),sum (map itemScalarCount expected)+1] $ \scalar->
+        check "scalar-target numeric seek preserves interior snapping and captured leaf context"
+          (sourceScalarColumn scalar col incoming lastOverflow leaf==scalarReference scalar col expected)
   let short="🇦"
       terminal=case sourceItemStep short 0 initialSourceCursor of (# _,_,_,_,_,next #)->next
       appended=short<>"🇧🇨"

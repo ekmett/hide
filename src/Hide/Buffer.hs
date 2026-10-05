@@ -132,8 +132,8 @@ contentSourceLinesFrom :: BufferContent -> Int -> [SourceLine]
 contentSourceLinesFrom (BufferContent tree _) row=
   [line | line<-toList (FT.dropUntil ((>max 0 row).lineCount) tree),lineOrigin line/=Deleted]
 
--- | Whether this physical row uses chunk storage. /O(1)/; this never counts
--- source bytes, projects text or evaluates display metadata.
+-- | Whether this row uses the long-row span owner. /O(1)/; this never forces
+-- loaded receipts, counts source bytes or evaluates display metadata.
 sourceLineHasChunks :: SourceLine -> Bool
 sourceLineHasChunks (Line {})=False
 sourceLineHasChunks (ChunkedLine {})=True
@@ -145,7 +145,7 @@ sourceLineLength line=lineCharacters line-(lineFlags line `shiftR` 3)
 -- | Explicit editor-row text projection. Visible rendering uses leaf groups.
 sourceLineText :: SourceLine -> Text
 sourceLineText (Line _ _ _ _ _ text)=T.dropWhileEnd (=='\r') (T.dropWhileEnd (=='\n') text)
-sourceLineText line=T.concat (lineFragments line 0 (sourceLineLength line))
+sourceLineText line=T.dropWhileEnd (=='\r') (T.dropWhileEnd (=='\n') (lineText line))
 
 -- | Bounded original scalar range, clamped before the editor-row terminator.
 sourceLineSlice :: SourceLine -> Int -> Int -> Text
@@ -154,11 +154,11 @@ sourceLineSlice line requested count=T.concat (lineFragments line start (min (ma
 
 -- | Width up to a display-cell cap after removing a scalar prefix. This explicit
 -- normalization restarts segmentation, preserving code-indentation semantics.
--- Long unmodified rows use cached width; normalized suffixes borrow local spans.
+-- Loaded rows stop at the requested cap; edited rows can use their cached width.
+-- Normalized suffixes borrow local spans without constructing display items.
 sourceLineSuffixWidth :: SourceLine -> Int -> Int -> Int
-sourceLineSuffixWidth line@(ChunkedLine _ _ _ _ _ chunks) requested bound
-  | start==0=min (max 0 bound) (sourceLineWidth line)
-  | otherwise=Chunks.chunksSuffixWidth chunks start (sourceLineLength line-start) bound
+sourceLineSuffixWidth line@(ChunkedLine _ _ _ _ _ chunks) requested bound=
+  Chunks.chunksSuffixWidth chunks start (sourceLineLength line-start) bound
   where start=max 0 (min (sourceLineLength line) requested)
 sourceLineSuffixWidth line requested bound
   | bound<=0=0
@@ -169,14 +169,15 @@ sourceLineSuffixWidth line requested bound
 -- | Exact highlighting-worker row projection: LF is split, CR is retained.
 sourceLineRawText :: SourceLine -> Text
 sourceLineRawText (Line _ _ _ _ _ text)=T.dropWhileEnd (=='\n') text
-sourceLineRawText line=T.concat (lineFragments line 0 (lineCharacters line-if lineTerminated line then 1 else 0))
+sourceLineRawText line=T.dropWhileEnd (=='\n') (lineText line)
 
--- | Cached display extent for long source rows. LF's control cell is excluded;
--- trailing CR has zero advance. Ordinary short rows use the same Unicode owner.
+-- | Exact display extent. Loaded long rows memoize a numeric full-row scan,
+-- independently of their lazy receipts; edited rows use the tree measure.
+-- LF's control cell is excluded; trailing CR has zero advance.
 sourceLineWidth :: SourceLine -> Int
 sourceLineWidth line@(Line {})=displayColumn (sourceLineText line) maxBound
 sourceLineWidth (ChunkedLine _ flags _ _ _ chunks)=
-  Chunks.applyAdvance (Chunks.chunkAdvance (Chunks.chunksMeasure chunks)) 0-if flags .&. 4/=0 then 1 else 0
+  Chunks.chunksWidth chunks-if flags .&. 4/=0 then 1 else 0
 
 -- | Scalar positions inside an item snap to its starting display column.
 sourceLineDisplayColumn :: SourceLine -> Int -> Int
@@ -197,9 +198,11 @@ sourceLineWindow :: SourceLine -> Int -> (Int,Int,[(Text,[DisplayItem])])
 sourceLineWindow line@(Line {}) column=
   let text=sourceLineText line; (char,byte,col,items)=sourceGraphemesFrom column text
   in (char,col,case items of []->[]; _->[(TU.dropWord8 byte text,items)])
-sourceLineWindow line@(ChunkedLine _ _ _ _ _ chunks) column
-  | column>=sourceLineWidth line=(sourceLineLength line,sourceLineWidth line,[])
-  | otherwise=Chunks.chunksWindow chunks column
+sourceLineWindow line@(ChunkedLine _ _ _ _ _ chunks) column=
+  let (char,col,groups)=Chunks.chunksWindow chunks column
+  in if char>=sourceLineLength line
+     then (sourceLineLength line,col-if char>=lineCharacters line && lineTerminated line then 1 else 0,[])
+     else (char,col,groups)
 
 -- | Explicit recovery representation, including flattened histories and provenance.
 -- Constructing or encoding this value may traverse all retained buffer text.
@@ -372,20 +375,16 @@ treeText = T.concat . map lineText . filter ((/=Deleted) . lineOrigin) . toList
 linesFromText :: Bool -> Text -> LineTree
 linesFromText mode = FT.fromList . go . T.splitOn "\n"
   where
-    line t
-      | mode || TU.lengthWord8 t<=512 =
-          let n=T.length t
-              flags=(if T.any (=='\0') t then 1 else 0) .|.
-                    (if "\r\n" `T.isSuffixOf` t then 2 else 0) .|.
-                    (if "\n" `T.isSuffixOf` t then 4 else 0) .|.
-                    ((TU.lengthWord8 t-TU.lengthWord8 (T.dropWhileEnd (\c->c=='\r' || c=='\n') t)) `shiftL` 3)
-          in Line n flags Original
-            (T.foldl' (\hash c -> hash*16777619+fromIntegral (ord c)+1) 0 t) (16777619^n) t
-      | otherwise =
-          let chunks=Chunks.chunksFromText t
-              m=Chunks.chunksMeasure chunks
-          in ChunkedLine (Chunks.chunkCharacters m) (Chunks.chunkFlags m) Original
-            (Chunks.chunkHash m) (Chunks.chunkFactor m) chunks
+    line t=
+      let n=T.length t
+          flags=(if T.any (=='\0') t then 1 else 0) .|.
+                (if "\r\n" `T.isSuffixOf` t then 2 else 0) .|.
+                (if "\n" `T.isSuffixOf` t then 4 else 0) .|.
+                ((TU.lengthWord8 t-TU.lengthWord8 (T.dropWhileEnd (\c->c=='\r' || c=='\n') t)) `shiftL` 3)
+          hash=T.foldl' (\fingerprint c->fingerprint*16777619+fromIntegral (ord c)+1) 0 t
+          factor=16777619^n
+      in if mode || TU.lengthWord8 t<=512 then Line n flags Original hash factor t
+         else ChunkedLine n flags Original hash factor (Chunks.chunksFromText t)
     go [] = []
     go [t] = [line t]
     go (t:ts) = line (t <> "\n") : go ts
