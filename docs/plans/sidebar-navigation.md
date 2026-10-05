@@ -1,8 +1,9 @@
 # Unified sidebar navigation
 
-Status: base design approved; the context actions and Cabal package roots below
-incorporate subsequent user refinements. The shared provider core and Files live
-slice are in progress in PR #30; other domain providers remain subsequent work.
+Status: the shared indexed provider tree is implemented for Files, Agents,
+Sessions, Debug, Watches and packages, with scoped actions and lazy loading.
+The keybinding section records implemented named-command configuration and
+remaining grammar and control customization.
 
 ## Intended experience
 
@@ -178,8 +179,9 @@ generic platform table inherited by macOS.
 Named WordStar commands use an editable profile. Movement, deletion and the
 Ctrl+K/Ctrl+Q block grammar remain fixed. Dialog editing/search actions are
 configurable for existing editable TextArea controls; dialog navigation and
-single-line Input ownership remain fixed. Runtime contributed-command binding
-registration remains proposed in the [plugin design](../design/haskell-plugins.md#commands-menus-and-bindings).
+single-line Input ownership remain fixed. Published runtime menu contributions
+use that same configuration and exact registration lifetime; see the
+[plugin design](../design/haskell-plugins.md#commands-menus-and-bindings).
 
 Resolve the most specific active context before global commands. Cover editor,
 sidebar, conversation, debugger, terminal and dialog contexts. Ordinary typing
