@@ -25,6 +25,10 @@ checks = do
       segments=["λ","e\x301","👩🏽\x200d\&💻","🇨🇦","終","\r\n","x"]
       source="prefix"<>T.concat segments<>"suffix"
       fragment=T.dropEnd 6 (T.drop 6 source)
+  check "scalar widths retain controls, combining, wide and display overrides"
+    (map scalarWidth ['a','é','│','\0','\x301','\x200d','界','⌥','⌘','\xf024b','\xf0770','\xfe0f','\x20e3','\x1f1e6']==[1,1,1,0,0,0,2,2,2,2,2,2,2,2])
+  check "cluster width remains the maximum scalar display width"
+    (map clusterWidth ["","abc","e\x301","a⌘","a\xfe0f","a\x20e3","🇨🇦"]==[0,1,1,2,2,2,2])
   check "mixed UTF8 graphemes preserve source slices and CRLF"
     (graphemes fragment==segments && T.concat (graphemes fragment)==fragment)
   forM_ clusters $ \g -> do
