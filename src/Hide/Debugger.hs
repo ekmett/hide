@@ -1518,20 +1518,21 @@ response runtime@(Debugger ref _ _ _ _) kind body d = do
       | otherwise -> case (field "content" body,M.lookup reference (sourceReferences s)) of
           (Just content,Just (SourceObservation current path)) | stamp==current->do
             retireSourcePreparation runtime
-            worker<-async $ do
-              origin<-canonicalSourcePath (root s) path
-              case (origin,boundedResult body) of
-                (Left err,_)->pure (Left err)
-                (_,Left err)->pure (Left err)
-                (Right canonical,Right _)->do
-                  let prepared=newBuffer (T.copy content)
-                      row=max 0 (min (bufferLineCount prepared-1) (integer "line" selected-1))
-                      offset=bufferLineOffset prepared row+L.positionOffset (bufferLineAt prepared row) (0,max 0 (integer "column" selected-1))
-                  _<-evaluate (prepareBuffer prepared)
-                  _<-evaluate offset
-                  pure (Right (AdapterSource canonical prepared offset))
-            modifyIORef' ref (\state->state {sourcePreparing=Just (SourcePreparation (generation s) revision (Just (reference,stamp)) explicit selected Nothing worker)})
-            pure d
+            mask_ $ do
+              worker<-asyncWithUnmask $ \unmask->unmask $ do
+                origin<-canonicalSourcePath (root s) path
+                case (origin,boundedResult body) of
+                  (Left err,_)->pure (Left err)
+                  (_,Left err)->pure (Left err)
+                  (Right canonical,Right _)->do
+                    let prepared=newBuffer (T.copy content)
+                        row=max 0 (min (bufferLineCount prepared-1) (integer "line" selected-1))
+                        offset=bufferLineOffset prepared row+L.positionOffset (bufferLineAt prepared row) (0,max 0 (integer "column" selected-1))
+                    _<-evaluate (prepareBuffer prepared)
+                    _<-evaluate offset
+                    pure (Right (AdapterSource canonical prepared offset))
+              modifyIORef' ref (\state->state {sourcePreparing=Just (SourcePreparation (generation s) revision (Just (reference,stamp)) explicit selected Nothing worker)})
+              pure d
           _->pure d {status="DAP source response is unavailable or expired."}
       where reference=integer "sourceReference" (fromMaybe Null (field "source" selected))
     Control _ -> pure d
@@ -1596,9 +1597,10 @@ openFrame runtime@(Debugger ref _ _ _ _) explicit private d selected = do
     let owner=case find (\(CapturedLocalSource file _ _ _ _ _)->file==local) captured of
           Just (CapturedLocalSource _ wid _ _ _ _)->Just wid
           Nothing->windowId <$> activeWindow d
-    worker<-async (prepareLocalSource (root s) path selected private captured)
-    modifyIORef' ref (\state->state {sourcePreparing=Just (SourcePreparation (generation s) (frameRevision s) Nothing explicit selected owner worker)})
-    pure d
+    mask_ $ do
+      worker<-asyncWithUnmask (\unmask->unmask (prepareLocalSource (root s) path selected private captured))
+      modifyIORef' ref (\state->state {sourcePreparing=Just (SourcePreparation (generation s) (frameRevision s) Nothing explicit selected owner worker)})
+      pure d
   where
     capture (window,doc,file)=do
       version<-captureVersion (documentBuffer doc)
@@ -1646,11 +1648,11 @@ prepareLocalSource base path selected private captured
 -- Only this owner adopts a prepared source. Cancellation/join is retired outside
 -- the desktop lock, including superseded selections and stopped generations.
 retireSourcePreparation :: Debugger -> IO ()
-retireSourcePreparation (Debugger ref _ (HdbRuntime _ _ _ _ _ retired _) _ _)=do
+retireSourcePreparation (Debugger ref _ (HdbRuntime _ _ _ _ _ retired _) _ _)=mask_ $ do
   current<-readIORef ref
   modifyIORef' ref (\state->state {sourcePreparing=Nothing})
   forM_ (sourcePreparing current) $ \(SourcePreparation _ _ _ _ _ _ worker)->do
-    cleanup<-async (cancel worker)
+    cleanup<-asyncWithUnmask (\unmask->unmask (cancel worker))
     modifyIORef' retired (cleanup:)
 
 tickSourcePreparation :: Debugger -> Desktop -> IO Desktop
