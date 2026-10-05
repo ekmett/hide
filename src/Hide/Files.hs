@@ -6,16 +6,17 @@
 -- still has a concurrent-writer race; atomic replacement is not power-loss durability.
 module Hide.Files (FileState(..), loadFile, saveFile) where
 
-import Control.Exception (bracket, mask)
+import Control.Exception (bracket, evaluate, mask)
 import Control.Monad (unless)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as BL
 import qualified Data.Text.Encoding as TE
 import System.Directory (canonicalizePath, copyPermissions, pathIsSymbolicLink, removeFile, renameFile)
 import System.FilePath (takeDirectory)
 import System.IO (hClose, hFlush, openBinaryTempFile)
 import System.IO.Error (catchIOError, isDoesNotExistError, tryIOError)
-import Hide.Buffer (Buffer, newBuffer, newByteBuffer, bufferBytes, byteMode)
+import Hide.Buffer (Buffer, newBuffer, newByteBuffer, bufferByteStream, byteMode, textBuffer)
 
 -- | Canonical path and last observed disk bytes; Nothing denotes a missing file.
 data FileState = FileState { filePath :: FilePath, diskBytes :: Maybe ByteString }
@@ -35,29 +36,33 @@ loadFile path = fileResult path $ do
 
 -- | Save only if the expected path/baseline still matches; adopt the returned
 -- FileState and mark the buffer saved separately on success. Text-mode NUL data
--- is rejected.
+-- is rejected. Raw pieces are batched into byte chunks and streamed without a
+-- whole-text projection. The strict returned byte baseline is prepared before
+-- the final disk check and replacement.
 saveFile :: FileState -> Buffer -> IO (Either String FileState)
 saveFile state buffer = fileResult path $ mask $ \restore -> do
   checkDisk
   bracket (openBinaryTempFile (takeDirectory path) ".hide-")
           (\(temporary, handle) -> ignoreIO (hClose handle) >> ignoreIO (removeFile temporary)) $
     \(temporary, handle) -> do
-      restore $ do
-        unless (byteMode buffer || not (BS.elem 0 bytes))
+      bytes <- restore $ do
+        unless (byteMode buffer || textBuffer buffer)
           (ioError (userError "Text contains NUL bytes; switch to hex mode before saving."))
-        BS.hPut handle bytes
+        BL.hPut handle stream
         hFlush handle
         hClose handle
         case diskBytes state of
           Nothing -> pure ()
           Just _ -> copyPermissions path temporary
+        -- Complete encoding/allocation before replacing the destination.
+        evaluate (BL.toStrict stream)
       -- ponytail: check immediately before rename; platform locking is needed for simultaneous writers.
       checkDisk
       renameFile temporary path
       pure state { diskBytes = Just bytes }
   where
     path = filePath state
-    bytes = bufferBytes buffer
+    stream = bufferByteStream buffer
     checkDisk = do
       resolved <- canonicalizePath path
       symlink <- catchIOError (pathIsSymbolicLink path)
