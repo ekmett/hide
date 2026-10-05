@@ -46,6 +46,7 @@ checks=do
     check "Pending named commands cannot mutate source" (sameSource after)
   forM_ [V.EvKey (V.KChar 'x') [],V.EvKey V.KBS [],V.EvPaste "bad"] $ \event->check "Pending raw input cannot edit background source" (sameSource (fst (handleEvent event pending)))
   check "Source popup cannot remain current after switching to Markdown" (not (contextTargetCurrent pending {contextTarget=captureContextTarget SourceContext current}))
+  check "Preview retains F10 and menu mnemonic ownership" (menu (fst (handleEvent (V.EvKey (V.KFun 10) []) pending))/=Nothing && menu (fst (handleEvent (V.EvKey (V.KChar 'w') [V.MAlt]) pending))/=Nothing)
   check "Pending MCP selection fails closed" (case builtinTool pending "read_selection" (object []) of Left _->True; _->False)
   ready<-prepareTextPresentations pending
   let (_,text,links)=fromJust (windowMarkdown ready (win ready))

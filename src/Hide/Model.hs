@@ -1569,7 +1569,6 @@ dispatchEvent (V.EvPaste bytes) d = case TE.decodeUtf8' bytes of
   Left _ -> (message "Paste failed" ["The pasted text is not valid UTF-8."] d,[])
   Right t -> (insertText (T.filter (\c -> textInputChar c || c `elem` ['\n','\r','\t']) t) d,[])
 dispatchEvent (V.EvKey key mods) d | Just tree <- sideTree d, treeFocused tree = treeKey key mods tree d
-dispatchEvent (V.EvKey key mods) d | activeMarkdown d = (markdownKey key mods d,[])
 dispatchEvent (V.EvKey key mods) d | Just _<-activePluginWindow d = (pluginKey key mods d,[])
 dispatchEvent (V.EvKey key mods) d = keyEvent key mods d
 dispatchEvent _ d = (d,[])
@@ -2667,7 +2666,8 @@ windowPresentationTarget d w=case windowContent w of
     else Just (DocumentPresentation bid (revision (documentBuffer doc)))
 
 -- | A layout is usable only for this exact payload, width and live preference.
--- Pending resize/replacement views use ordinary geometry until matching adoption.
+-- Pending styled views use ordinary geometry; Markdown stays a read-only
+-- placeholder until a matching derived presentation is adopted.
 windowPresentation :: Desktop -> Window -> Maybe TextLayout.TextLayout
 windowPresentation d w
   | not (windowPresentationNeeded d w)=Nothing
@@ -2799,9 +2799,8 @@ boundKeyCommand key mods d
 
 keyEvent :: V.Key -> [V.Modifier] -> Desktop -> (Desktop,[Effect])
 keyEvent key mods d
-  | activeMarkdown d = (markdownKey key mods d,[])
   | key==V.KEsc = (d {prefix=Nothing},[])
-  | Just p <- prefix d, V.KChar c <- key = starPrefix p (toLower c) d {prefix=Nothing}
+  | not (activeMarkdown d), Just p <- prefix d, V.KChar c <- key = starPrefix p (toLower c) d {prefix=Nothing}
   | V.MAlt `elem` mods, V.MMeta `notElem` mods, V.KChar c <- key, Just i <- findIndex (\(_,mn,_) -> mn==toLower c) menus = (d {menu=Just (i,0)},[])
   | V.MAlt `elem` mods, V.MMeta `notElem` mods, key==V.KChar 'x' = runCommand Quit d
   | V.MAlt `elem` mods, key==V.KFun 3 = runCommand Close d
@@ -2818,12 +2817,13 @@ keyEvent key mods d
   | key==V.KIns && V.MShift `elem` mods = runCommand Paste d
   | key==V.KDel && V.MShift `elem` mods = runCommand Cut d
   | ctrl, V.MShift `elem` mods, V.KChar c<-key, Just cmd<-lookup (toLower c) [('z',Redo),('l',FindPrevious),('c',Conversation),('n',AgentNew)] = runCommand cmd d
-  | ctrl, wordStar d, not (activeHex d), V.KChar c <- key = starKey (toLower c) d
+  | not (activeMarkdown d), ctrl, wordStar d, not (activeHex d), V.KChar c <- key = starKey (toLower c) d
   | ctrl, V.KChar c <- key, Just cmd <- lookup (toLower c) [('b',ToggleTree),('s',Save),('o',Open),('n',New),('z',Undo),('y',Redo),('c',Copy),('x',Cut),('v',Paste),('a',SelectAll),('f',Find),('h',Replace),('r',Replace),('g',GoTo),('l',FindNext),('q',Quit)] = runCommand cmd d
   | otherwise = (editorKey key mods d,[])
   where ctrl = V.MCtrl `elem` mods
 
 editorKey :: V.Key -> [V.Modifier] -> Desktop -> Desktop
+editorKey key mods d | activeMarkdown d=markdownKey key mods d
 editorKey key mods d | activeHex d = hexKey key mods d
 editorKey key mods d = case key of
   V.KLeft -> move (if ctrl then wordLeft t p else bufferPreviousCharacter b p)
