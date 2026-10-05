@@ -257,7 +257,7 @@ for session in range(1, 4 if mode == 'output-owner' else 3 if mode == 'reconnect
                         rows[259]['value'] = 'X' * (1024*1024+1)
                     reply(req, dict(variables=rows))
                 elif mode.startswith('watches') and reference in (970, 980):
-                    assert (args == dict(variablesReference=980) if reference == 980 else args.get('start') == 0 and args.get('count') == 128), args
+                    assert args == dict(variablesReference=reference), args
                     reply(req, dict(variables=[dict(name='counter', value='42', variablesReference=0), dict(name='nested', value='<thunk>', variablesReference=971, presentationHint=dict(lazy=True))]))
                 elif mode in ('sidebar', 'sidebar-exit') and reference in (211, 212, 221):
                     reply(req, dict(variables=[dict(name='counter%d' % reference, value=str(reference), variablesReference=0), dict(name='lazy', value='<thunk>', variablesReference=900, presentationHint=dict(lazy=True)), dict(name='waiting', value='expand to wait', variablesReference=910)]))

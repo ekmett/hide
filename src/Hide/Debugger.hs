@@ -435,7 +435,7 @@ watchPage offset cachedOffset body=object ["variables" .= retained,"hasMore" .= 
     start=fromMaybe 0 cachedOffset
     rows=drop (offset-start) (items "variables" body)
     retained=if offset==0 then rows else take 128 rows
-    more=if cachedOffset==Just offset then flag "hasMore" body else length rows>128
+    more=if cachedOffset==Just offset then flag "hasMore" body else not (null (drop 128 rows))
 
 -- At most four small mailbox messages per tick. Backpressure belongs to provider
 -- workers; the session owner never waits for a producer or a DAP socket.
@@ -602,7 +602,7 @@ startWatch runtime@(Debugger ref _ _ _ _) ident revision receipt mode d=do
     let WatchFrame _ _ _ _ fid=fresh
         (command,args)=case mode of
           EvaluateWatch->("evaluate",object ["expression" .= maybe "" watchExpression (M.lookup ident (watchExpressions s)),"frameId" .= fid,"context" .= ("watch"::Text)])
-          ForceWatch reference->variables reference
+          ForceWatch reference->("variables",object ["variablesReference" .= reference])
           ForceWatchChild _ _ _ reference->variables reference
         variables reference=("variables",object ["variablesReference" .= reference,"start" .= (0::Int),"count" .= (128::Int)])
     send runtime (WatchRequest operation backing base private) command args
