@@ -75,7 +75,7 @@ The browser frontend is enabled by default:
 cabal run hide -- --web .
 ```
 
-It opens a WebGL page served by the editor on an ephemeral loopback port. Keep
+It opens a WebGL2 page served by the editor on an ephemeral loopback port. Keep
 the frontend process running while using the page. The editor session runs
 separately, so you can detach and [resume it later](sessions.md). Set `THC_EDIT_WEB_OPEN=0` to print
 the URL without opening a browser automatically.

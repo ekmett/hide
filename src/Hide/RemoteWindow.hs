@@ -312,15 +312,17 @@ drawRemote font atlas frame = do
   c_crt_filter (flag (remoteCRT frame))
   c_pixelate_unicode (flag (remotePixelated frame))
   check "Allocate remote frame" c_begin
-  forM_ (remoteCells frame) $ \(RemoteCell x y paint semantic full start shown) -> do
-    -- Safe text projection until the native atlas adapter consumes clip fields.
-    let (text,w)=if start/=0 || shown/=full then (T.replicate shown " ",shown) else (semantic,full)
+  forM_ (remoteCells frame) $ \(RemoteCell visible y paint text full start shown) -> do
+    let x=visible-start
         bitmap = case M.lookup text atlas of
           Just tile -> Just tile
           Nothing -> case T.unpack text of [c] | bitmapGlyph font c -> Just (glyph font c); _ -> Nothing
+        fg=fromIntegral (textForeground paint); bg=fromIntegral (textBackground paint)
+        flags=fromIntegral (textFlags paint+if full/=clusterWidth text then 4 else 0)
+    c_clip (fromIntegral visible) (fromIntegral shown)
     case bitmap of
-      Just (Glyph width bits) -> withArray bits $ \p -> c_glyph (fromIntegral x) (fromIntegral y) (fromIntegral w) (fromIntegral width) p (fromIntegral (textForeground paint)) (fromIntegral (textBackground paint)) (fromIntegral (textFlags paint+if w/=clusterWidth text then 4 else 0))
-      Nothing -> utf8 text $ \p -> check "Draw remote Unicode" (c_unicode (fromIntegral x) (fromIntegral y) (fromIntegral w) p (fromIntegral (textForeground paint)) (fromIntegral (textBackground paint)) (fromIntegral (textFlags paint+if w/=clusterWidth text then 4 else 0)))
+      Just (Glyph width bits) -> withArray bits $ \p -> c_glyph (fromIntegral x) (fromIntegral y) (fromIntegral full) (fromIntegral width) p fg bg flags
+      Nothing -> utf8 text $ \p -> check "Draw remote Unicode" (c_unicode (fromIntegral x) (fromIntegral y) (fromIntegral full) p fg bg flags)
   forM_ (remoteCursor frame) $ \(x,y) -> c_cursor (fromIntegral x) (fromIntegral y)
   check "Present remote frame" c_present
   where flag value = if value then 1 else 0

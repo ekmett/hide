@@ -9,7 +9,7 @@ module Hide.Window (runWindow, nativeMenuShortcut, nativeChordShortcut, nativeMe
 #ifdef WITH_WINDOW
   , check, utf8, nativeMenus, nativeMenusFor, installNativeMenus, updateDockWindows
   , c_system_dark, c_open, c_mode, c_scale, c_title, c_raise, c_close, c_size
-  , c_begin, c_glyph, c_unicode, c_pixelate_unicode, c_cursor, c_cursor_blink
+  , c_begin, c_clip, c_glyph, c_unicode, c_pixelate_unicode, c_cursor, c_cursor_blink
   , c_crt_filter, c_present, c_wait, c_wake, c_text, c_clipboard, c_set_clipboard
 #ifdef darwin_HOST_OS
   , c_dock_generation, c_menu_enabled, c_menu_prepare, c_menu_generation, c_menu_shortcut
@@ -24,7 +24,6 @@ import qualified Data.Text as Text
 import qualified Graphics.Vty as Keys
 import Data.Char (chr, toLower)
 import Data.Maybe (mapMaybe)
-import Data.Bits ((.|.))
 #ifdef WITH_WINDOW
 import Data.List (elemIndex)
 import Control.Exception (bracket_)
@@ -33,17 +32,14 @@ import Data.Foldable (toList)
 import qualified Data.ByteString as BS
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import qualified Data.Text.Lazy as TL
 import Foreign
 import Foreign.C
 import qualified Graphics.Vty as V
-import Hide.Unicode (displayOpsForPic)
-import Graphics.Vty.Span (SpanOp(..))
 import System.Environment (lookupEnv)
 import System.Directory (getCurrentDirectory)
 import System.Info (os)
 import System.IO (hPutStrLn, stderr)
-import Hide.Unicode (graphemes, clusterWidth, displayClusters)
+import Hide.Unicode (CellSpan(..), clusterWidth)
 import Hide.TextStyle
 import Hide.Font
 import Hide.Render
@@ -93,6 +89,7 @@ foreign import ccall unsafe "thc_error" c_error :: IO CString
 foreign import ccall unsafe "thc_backend" c_backend :: IO CString
 foreign import ccall unsafe "thc_size" c_size :: Ptr CInt -> Ptr CInt -> IO ()
 foreign import ccall unsafe "thc_begin" c_begin :: IO CInt
+foreign import ccall unsafe "thc_clip" c_clip :: CInt -> CInt -> IO ()
 foreign import ccall unsafe "thc_glyph" c_glyph :: CInt -> CInt -> CInt -> CInt -> Ptr Word16 -> Word32 -> Word32 -> Word32 -> IO ()
 foreign import ccall unsafe "thc_unicode" c_unicode :: CInt -> CInt -> CInt -> CString -> Word32 -> Word32 -> Word32 -> IO CInt
 foreign import ccall unsafe "thc_pixelate_unicode" c_pixelate_unicode :: CInt -> IO ()
@@ -183,37 +180,39 @@ updateMenus d = do
 updateMenus _ = pure ()
 #endif
 
--- The same Vty picture used by the terminal is flattened into bitmap cells.
+-- Consume the composed grid directly; partial glyphs retain full origin/width.
 draw :: Font -> Desktop -> IO ()
 draw font d = do
   c_cursor_blink (if blinkCursor d then 1 else 0)
   c_crt_filter (if crtFilter d then 1 else 0)
   c_pixelate_unicode (if pixelateUnicode d then 1 else 0)
   check "Allocate window frame" c_begin
-  let picture = renderDesktop d
-  forM_ (zip [0::Int ..] (toList (displayOpsForPic picture (screenSize d)))) $ \(y,spans) -> go y 0 (toList spans)
-  case V.picCursor picture of
+  forM_ (zip [0::Int ..] (toList (renderCellRows d))) $ \(y,spans) -> go y 0 (toList spans)
+  case renderCursor d of
     V.Cursor x y -> c_cursor (fromIntegral x) (fromIntegral y)
     _ -> pure ()
   check "Present window frame" c_present
   where
+    go :: Int -> Int -> [CellSpan] -> IO ()
     go _ _ [] = pure ()
-    go y x (op:ops) = case op of
-      TextSpan a advance _ t -> do
-        end <- chars y x a (displayClusters advance (TL.toStrict t))
-        go y end ops
-      Skip n -> go y (x+n) ops
-      RowEnd _ -> pure ()
-    chars _ x _ [] = pure x
-    chars y x a ((cluster,width):rest) = do
+    go y x (CellText a text:rest) = do
+      forM_ (zip [x..] (T.unpack text)) $ \(at,ch) -> drawGlyph y at a (T.singleton ch) 1 0 1
+      go y (x+T.length text) rest
+    go y x (CellGlyph a text full start shown:rest) = do
+      drawGlyph y x a text full start shown
+      go y (x+shown) rest
+    drawGlyph :: Int -> Int -> V.Attr -> T.Text -> Int -> Int -> Int -> IO ()
+    drawGlyph y visible a text full start shown = do
       let paint=textStyleFromAttr a
-          fg=fromIntegral (textForeground paint); bg=fromIntegral (textBackground paint); flags=fromIntegral (textFlags paint+if width/=clusterWidth cluster then 4 else 0)
-      case T.unpack cluster of
+          fg=fromIntegral (textForeground paint); bg=fromIntegral (textBackground paint)
+          flags=fromIntegral (textFlags paint+if full/=clusterWidth text then 4 else 0)
+          x=visible-start
+      c_clip (fromIntegral visible) (fromIntegral shown)
+      case T.unpack text of
         [ch] | bitmapGlyph font ch -> do
           let Glyph gw bitmap=glyph font ch
-          withArray bitmap $ \bits -> c_glyph (fromIntegral x) (fromIntegral y) (fromIntegral width) (fromIntegral gw) bits fg bg flags
-        _ -> utf8 cluster $ \text -> check "Draw Unicode" (c_unicode (fromIntegral x) (fromIntegral y) (fromIntegral width) text fg bg flags)
-      chars y (x+width) a rest
+          withArray bitmap $ \bits -> c_glyph (fromIntegral x) (fromIntegral y) (fromIntegral full) (fromIntegral gw) bits fg bg flags
+        _ -> utf8 text $ \encoded -> check "Draw Unicode" (c_unicode (fromIntegral x) (fromIntegral y) (fromIntegral full) encoded fg bg flags)
 
 
 -- | Run on the main bound OS thread and scope native-window cleanup.

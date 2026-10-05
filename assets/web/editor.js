@@ -6,34 +6,12 @@ const input = document.querySelector('#input');
 const fullscreen = document.querySelector('#fullscreen');
 const clipboardAction = document.querySelector('#clipboard-action');
 const resourceAction = document.querySelector('#open-resource');
-const gl = canvas.getContext('webgl', {alpha:false, antialias:false, preserveDrawingBuffer:true});
-if (!gl) {status.textContent='WebGL is unavailable in this browser.';throw new Error(status.textContent);}
-const vertex = `attribute vec2 position; varying vec2 uv; void main(){uv=(position+1.0)*0.5; gl_Position=vec4(position,0,1);}`;
-const fragment = `precision highp float;
-varying vec2 uv; uniform sampler2D image; uniform vec2 resolution,grid; uniform vec2 mouse,caret;
-uniform bool crt,caretOn; uniform float glyphPitch;
-vec3 palette(float i){
- float high=floor(i/8.0)*85.0; float low=mod(i,8.0);
- vec3 c=vec3(mod(low,2.0),mod(floor(low/2.0),2.0),mod(floor(low/4.0),2.0))*170.0+high;
- if(i==3.0)c.g=85.0;return c/255.0;
-}
-void main(){
- vec2 p=vec2(uv.x,1.0-uv.y); vec3 c=texture2D(image,p).rgb;
- vec2 cell=floor(p*grid); vec2 within=fract(p*grid);
- if(caretOn && all(equal(cell,caret)) && within.y>=0.875) c=1.0-c;
- if(all(equal(cell,mouse))) {
-   vec3 b=floor(c*255.0+0.5); vec3 mask=vec3(170.0);
-   vec3 original=c;
-   c=(b+mask-2.0*(mod(floor(b/2.0),2.0)*2.0+mod(floor(b/8.0),2.0)*8.0+mod(floor(b/32.0),2.0)*32.0+mod(floor(b/128.0),2.0)*128.0))/255.0;
-   for(int j=0;j<16;j++){float i=float(j);if(all(lessThan(abs(original-palette(i)),vec3(0.001))))c=palette(i<8.0?7.0-i:23.0-i);}
- }
- if(crt){
-   vec2 n=p*2.0-1.0; float radius=dot(n,n)/2.0;
-   if(glyphPitch>=2.0 && mod(floor(p.y*resolution.y)+1.0,glyphPitch)<1.0) c*=1.0-24.0/255.0;
-   c*=1.0-(100.0/255.0)*radius*radius;
- }
- gl_FragColor=vec4(c,1);
-}`;
+const gl = canvas.getContext('webgl2', {alpha:false, antialias:false, preserveDrawingBuffer:true});
+if (!gl) {status.textContent='WebGL2 is unavailable in this browser.';throw new Error(status.textContent);}
+const vertex = `#version 300 es
+in vec2 position; out highp vec2 vertexUV;
+void main(){vertexUV=vec2((position.x+1.0)*0.5,(1.0-position.y)*0.5);gl_Position=vec4(position,0,1);}`;
+const fragment = hideCellFragment;
 function shader(type, source) {
  const s=gl.createShader(type); gl.shaderSource(s,source); gl.compileShader(s);
  if(!gl.getShaderParameter(s,gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
@@ -44,11 +22,20 @@ if(!gl.getProgramParameter(program,gl.LINK_STATUS)) throw new Error(gl.getProgra
 gl.useProgram(program);
 const vertices=gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER,vertices); gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,1,1]),gl.STATIC_DRAW);
 const pos=gl.getAttribLocation(program,'position'); gl.enableVertexAttribArray(pos); gl.vertexAttribPointer(pos,2,gl.FLOAT,false,0,0);
-const texture=gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D,texture);
-gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.NEAREST);
-gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
-const uniforms=Object.fromEntries(['resolution','grid','mouse','caret','crt','caretOn','glyphPitch'].map(k=>[k,gl.getUniformLocation(program,k)]));
-const surface=document.createElement('canvas'); const ctx=surface.getContext('2d',{alpha:false});
+function nearestTexture(){
+ const texture=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,texture);
+ for(const [parameter,value] of [[gl.TEXTURE_MIN_FILTER,gl.NEAREST],[gl.TEXTURE_MAG_FILTER,gl.NEAREST],[gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE],[gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE]])gl.texParameteri(gl.TEXTURE_2D,parameter,value);
+ return texture;
+}
+let atlasTexture=nearestTexture(),atlasSize=2048,atlasX=1,atlasY=0,atlasRow=0,atlasEntries=new Map();
+gl.texStorage2D(gl.TEXTURE_2D,1,gl.RGBA8,atlasSize,atlasSize);
+const cellTexture=nearestTexture(),displayUniforms=gl.createBuffer();
+gl.bindBuffer(gl.UNIFORM_BUFFER,displayUniforms);gl.bufferData(gl.UNIFORM_BUFFER,48,gl.DYNAMIC_DRAW);gl.bindBufferBase(gl.UNIFORM_BUFFER,0,displayUniforms);
+gl.uniformBlockBinding(program,gl.getUniformBlockIndex(program,'type_Display'),0);
+gl.uniform1i(gl.getUniformLocation(program,'SPIRV_Cross_CombinedglyphAtlasglyphSampler'),0);
+gl.uniform1i(gl.getUniformLocation(program,'SPIRV_Cross_CombinedcellDataSPIRV_Cross_DummySampler'),1);
+let cellGrid=new Uint32Array(),gridCols=0,gridRows=0;
+const atlasStats={tiles:0,tileBytes:0,gridBytes:0,draws:0};
 let glyphs=new Map(), tiles=new Map(), rows=[], frame=null, scale=2, initialScale=2, cols=80, lines=25, mode=3;
 let socket, ready=false, closed=false, mouse=[-1,-1], leftDown=false, cursorEpoch=performance.now(), blinkPhase=-1, dirty=true, composing=false, clipboard='', lastSize='';
 let remoteHost="", sessionFrontend=false, detaching=false, detached=false;
@@ -76,7 +63,7 @@ function send(value){
 }
 function mods(e){return [e.shiftKey?'shift':null,e.ctrlKey?'ctrl':null,e.metaKey?'cmd':null,e.altKey&&!e.getModifierState?.('AltGraph')?'alt':null].filter(Boolean);}
 function cellHeight(){return mode===259?8:16;}
-function metrics(){return [surface.width/cols,surface.height/lines];}
+function metrics(){return [canvas.width/cols,canvas.height/lines];}
 function resize(){
  if(!ready)return;
  const w=Math.max(40,Math.min(512,Math.floor(screen.clientWidth/(8*scale))));
@@ -91,10 +78,10 @@ function allocate(){
  const width=Math.round(cols*8*scale*dpr), height=Math.round(lines*cellHeight()*scale*dpr);
  canvas.style.width=`${cols*8*scale}px`; canvas.style.height=`${lines*cellHeight()*scale}px`;
  if(canvas.width!==width||canvas.height!==height){
-   canvas.width=surface.width=width;canvas.height=surface.height=height;
-   ctx.imageSmoothingEnabled=false;gl.viewport(0,0,width,height);drawRows(rows.map((r,y)=>[y,r]));
+   canvas.width=width;canvas.height=height;
+   gl.viewport(0,0,width,height);drawRows(rows.map((r,y)=>[y,r]));dirty=true;return true;
  }
- dirty=true;
+ dirty=true;return false;
 }
 function bitmapInk(bitmap,y,x,traits){
  const source=x-((traits&2)?Math.floor((15-y)/4):0),row=bitmap[1][y];
@@ -119,30 +106,77 @@ function tile(text,fg,pixelated,w,h,traits){
  }
  if(tiles.size>=1024)tiles.clear();tiles.set(key,t);return t;
 }
-function drawRows(changed){
- if(!frame)return;const started=performance.now();const [cw,ch]=metrics();
- for(const [y,spans] of changed){
-   const y0=Math.round(y*ch), y1=Math.round((y+1)*ch);ctx.fillStyle='#0000aa';ctx.fillRect(0,y0,surface.width,y1-y0);
-   for(const [start,fg,bg,traits,clusters] of spans||[]){let x=start;
-     for(const [text,width,stretched,clipStart=0,clipWidth=width] of clusters){
-       const x0=Math.round(x*cw),x1=Math.round((x+clipWidth)*cw);
-       ctx.fillStyle=rgb(bg);ctx.fillRect(x0,y0,x1-x0,y1-y0);
-       if(width>0&&text!==' '){const glyph=tile(text,fg,frame.pixelated,width*cw,y1-y0,traits+(stretched?4:0));ctx.drawImage(glyph,glyph.width*clipStart/width,0,glyph.width*clipWidth/width,glyph.height,x0,y0,x1-x0,y1-y0);}
-       x+=clipWidth;
-     }
-   }
+function atlasEntry(text,fg,pixelated,w,h,traits){
+ const bitmap=glyphs.has(text),paint=bitmap?0xffffff:fg;
+ const key=JSON.stringify([text,paint,pixelated,w,h,bitmap?traits&3:traits]);
+ if(atlasEntries.has(key))return atlasEntries.get(key);
+ const image=tile(text,paint,pixelated,w,h,bitmap?traits&3:traits);
+ const width=image.width,height=image.height;
+ if(atlasX+width>atlasSize){atlasX=0;atlasY+=atlasRow;atlasRow=0;}
+ while(atlasY+height>atlasSize||width>atlasSize){
+   const size=Math.min(atlasSize*2,8192,gl.getParameter(gl.MAX_TEXTURE_SIZE));
+   if(size<=atlasSize)throw new Error('Glyph atlas full');
+   // Grow by GPU copy; existing grid records keep their pixel rectangles.
+   const previous=atlasTexture,copy=gl.createFramebuffer();
+   gl.bindFramebuffer(gl.FRAMEBUFFER,copy);gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,previous,0);
+   atlasTexture=nearestTexture();gl.texStorage2D(gl.TEXTURE_2D,1,gl.RGBA8,size,size);
+   gl.copyTexSubImage2D(gl.TEXTURE_2D,0,0,0,0,0,atlasSize,atlasSize);
+   gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.deleteFramebuffer(copy);gl.deleteTexture(previous);atlasSize=size;
  }
- gl.bindTexture(gl.TEXTURE_2D,texture);gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,surface);
+ gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,atlasTexture);
+ gl.texSubImage2D(gl.TEXTURE_2D,0,atlasX,atlasY,gl.RGBA,gl.UNSIGNED_BYTE,image);
+ ++atlasStats.tiles;atlasStats.tileBytes+=width*height*4;
+ const entry=[atlasX|(atlasY<<16),width|(height<<16),bitmap?2:0];
+ atlasX+=width;atlasRow=Math.max(atlasRow,height);
+ if(atlasEntries.size>=3072)atlasEntries.clear();
+ atlasEntries.set(key,entry);return entry;
+}
+function drawRows(changed,retried=false){
+ if(!frame)return;const started=performance.now(),[cw,ch]=metrics();
+ if(gridCols!==cols||gridRows!==lines){
+   gridCols=cols;gridRows=lines;cellGrid=new Uint32Array(cols*lines*8);
+   gl.activeTexture(gl.TEXTURE1);gl.bindTexture(gl.TEXTURE_2D,cellTexture);
+   gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA32UI,cols*2,lines,0,gl.RGBA_INTEGER,gl.UNSIGNED_INT,null);
+   changed=rows.map((r,y)=>[y,r]);
+ }
+ try{
+   const blank=atlasEntry(' ',0xffffff,frame.pixelated,cw,ch,0);
+   for(const [y,spans] of changed){
+     const start=y*cols*8;
+     for(let x=0;x<cols;++x)cellGrid.set([blank[0],blank[1],1,0,0,0x0000aa,1|blank[2],1],start+x*8);
+     for(const [origin,fg,bg,traits,clusters] of spans||[]){let x=origin;
+       for(const [text,fullWidth,stretched,clipStart,clipWidth] of clusters){
+         const entry=atlasEntry(text,fg,frame.pixelated,fullWidth*cw,ch,traits|(stretched?4:0));
+         for(let cell=0;cell<clipWidth;++cell)if(x+cell>=0&&x+cell<cols)
+           cellGrid.set([entry[0],entry[1],fullWidth|((clipStart+cell)<<16),0,fg,bg,1|entry[2],1],start+(x+cell)*8);
+         x+=clipWidth;
+       }
+     }
+     gl.activeTexture(gl.TEXTURE1);gl.bindTexture(gl.TEXTURE_2D,cellTexture);
+     const row=cellGrid.subarray(start,start+cols*8);
+     gl.texSubImage2D(gl.TEXTURE_2D,0,0,y,cols*2,1,gl.RGBA_INTEGER,gl.UNSIGNED_INT,row);
+     atlasStats.gridBytes+=row.byteLength;
+   }
+ }catch(error){
+   if(error.message!=='Glyph atlas full'||retried)throw error;
+   // Retire old rectangles only before a complete replay, never midway through
+   // an adopted grid. A single frame larger than the bound fails explicitly.
+   atlasEntries.clear();atlasX=1;atlasY=atlasRow=0;
+   return drawRows(rows.map((r,y)=>[y,r]),true);
+
+ }
  rasterTime+=performance.now()-started;dirty=true;
 }
 function present(now){
  const phase=!frame?.blink||Math.floor((now-cursorEpoch)/500)%2===0;
  if(frame&&(dirty||phase!==blinkPhase)){
    const started=performance.now();
-   gl.uniform2f(uniforms.resolution,canvas.width,canvas.height);gl.uniform2f(uniforms.grid,cols,lines);
-   gl.uniform2f(uniforms.mouse,...(leftDown?[-1,-1]:mouse));gl.uniform2f(uniforms.caret,...(frame.cursor||[-1,-1]));
-   gl.uniform1i(uniforms.caretOn,phase&&!!frame.cursor);gl.uniform1i(uniforms.crt,frame.crt);
-   gl.uniform1f(uniforms.glyphPitch,canvas.height/(lines*16));gl.drawArrays(gl.TRIANGLE_STRIP,0,4);dirty=false;blinkPhase=phase;
+   const caret=phase&&frame.cursor?frame.cursor:[-1,-1],pointer=leftDown?[-1,-1]:mouse;
+   gl.bindBuffer(gl.UNIFORM_BUFFER,displayUniforms);
+   gl.bufferSubData(gl.UNIFORM_BUFFER,0,new Float32Array([cols,lines,atlasSize,0,...caret,...pointer,canvas.width,canvas.height,frame.crt?1:0,canvas.height/(lines*16)]));
+   gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,atlasTexture);
+   gl.activeTexture(gl.TEXTURE1);gl.bindTexture(gl.TEXTURE_2D,cellTexture);
+   gl.drawArrays(gl.TRIANGLE_STRIP,0,4);++atlasStats.draws;dirty=false;blinkPhase=phase;
    drawTimes.push(rasterTime+performance.now()-started);rasterTime=0;if(drawTimes.length>60)drawTimes.shift();
  }
  if(now-titleTick>=1000&&drawTimes.length){
@@ -240,21 +274,25 @@ function connect(){
    }else if(message.type==='connection'){
      ready=message.connected&&glyphs.size>0;status.textContent=message.message|| (ready?'Connected':'Reconnecting…');
    }else if(message.type==='assets'){
-     glyphs=new Map(message.glyphs.map(([c,w,rs])=>[c,[w,rs]]));tiles.clear();scale=initialScale=message.scale||2;ready=true;status.textContent='Connected';lastSize='';send({type:'theme',dark:systemTheme.matches});
+     glyphs=new Map(message.glyphs.map(([c,w,rs])=>[c,[w,rs]]));tiles.clear();atlasEntries.clear();scale=initialScale=message.scale||2;ready=true;status.textContent='Connected';lastSize='';send({type:'theme',dark:systemTheme.matches});
    }else if(message.type==='frame'){
      if(!platformSent){platformSent=true;send({type:'frontend',mode:message.mode||3,mac:navigator.platform.includes('Mac')});}
      message.rows=message.rows.map(([y,spans])=>[y,spans.map(span=>{
        if(span.length!==5||!Number.isInteger(span[3])||span[3]<0||span[3]>3)throw new Error('Invalid font traits');
        const [x,fg,bg,traits,runs]=span;
-       return [x,fg,bg,traits,runs.flatMap(run=>typeof run==='string'?Array.from(run,c=>[c,1]):[run])];
+       return [x,fg,bg,traits,runs.flatMap(run=>{
+         if(typeof run==='string')return Array.from(run,c=>[c,1,false,0,1]);
+         if(!Array.isArray(run)||run.length!==5||typeof run[0]!=='string'||!Number.isInteger(run[1])||run[1]<1||run[1]>512||typeof run[2]!=='boolean'||!Number.isInteger(run[3])||!Number.isInteger(run[4])||run[3]<0||run[4]<1||run[3]+run[4]>run[1])throw new Error('Invalid glyph geometry');
+         return [run];
+       })];
      })]);
      const oldCursor=JSON.stringify(frame?.cursor);
      const changedMode=Object.hasOwn(message,'mode')&&mode!==message.mode;
      frame={...frame,...message};updateTitle();unsaved=frame.dirty;guardLeave();[cols,lines]=frame.size;mode=frame.mode||3;clipboard=frame.selection;
-     if(message.reset){rows=Array(lines).fill(null);tiles.clear();}
+     if(message.reset){rows=Array(lines).fill(null);}
      for(const [y,r] of message.rows)rows[y]=r;
      if(oldCursor!==JSON.stringify(frame.cursor))cursorEpoch=performance.now();
-     allocate();drawRows(message.rows);
+     if(!allocate())drawRows(message.rows);
      if(changedMode)lastSize='';resize();
    }else if(message.type==='download'){
      downloadName=message.name;
