@@ -11,6 +11,7 @@ import System.Environment (lookupEnv,setEnv,unsetEnv)
 import Hide.Buffer
 import qualified Hide.Build as B
 import Hide.Conversation
+import Hide.Plugin.BufferHost (captureVersion,versionCurrent)
 import qualified Hide.Plugin.Menu as Menu
 import qualified Data.Map.Strict as M
 import qualified Data.Text as T
@@ -156,10 +157,17 @@ checks=bracket temporary removePathForcibly $ \root->do
         row:_->pure row
         _->fail "Source row disappeared"
       sourceAction<-maybe (fail "Source action missing") pure (rowCommand sourceRow)
+      (sourceId,sourceDocument)<-case [(bid,doc) | (bid,doc)<-M.toList (buffers opened),(filePath <$> documentFile doc)==Just mainFile] of
+        entry:_->pure entry; _->fail "Opened source identity missing"
+      sourceVersion<-captureVersion (documentBuffer sourceDocument)
       let sourceTrace=maybe [] (hitTrace (keyOf (rowHit sourceRow))) (sideTree opened)
-          (staleRequest,staleEffects)=runCommand (TreeCommand sourceTrace sourceAction) opened {sideTree=fmap (\tree->tree {treeFocused=True}) (sideTree opened)}
+          (staleRequest,staleEffects)=runCommand (TreeCommand sourceTrace sourceAction) opened {status="Checking stale source",sideTree=fmap (\tree->tree {treeFocused=True}) (sideTree opened)}
       (_,staleQueued)<-sidebarEffects host core staleRequest staleEffects
-      stale<-wait "changed manifest rejects old source action" (T.isInfixOf "Package source changed" . status) staleQueued
+      -- Worker stamp rejection or an expired snapshot both refuse this intent.
+      stale<-wait "changed manifest rejects old source action" (\d->T.isPrefixOf "Sidebar action failed:" (status d) || status d=="Sidebar result expired." || status d=="Sidebar action expired.") staleQueued
+      unchanged<-maybe (pure False) (versionCurrent sourceVersion . documentBuffer) (M.lookup sourceId (buffers stale))
+      unless (unchanged && (windowId <$> activeWindow stale)==(windowId <$> activeWindow opened))
+        (fail "Refused source action cannot replace content or change focused window")
       threadDelay 600000
       refreshed<-wait "refreshed package projection" ready =<< tick stale
       packageRow<-case [row | row<-rows refreshed,P.infoLabel (rowInfo row)=="sample"] of
