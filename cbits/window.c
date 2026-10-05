@@ -243,8 +243,9 @@ void thc_glyph(int x,int y,int cells,int glyph_width,const uint16_t *bits,uint32
 }
 void thc_pixelate_unicode(int enabled) { pixelate_unicode=enabled!=0; }
 int thc_unicode(int x,int y,int cells,const char *text,uint32_t fg,uint32_t bg,uint32_t traits,int script,int natural_cells) {
-    if (y<0 || y>=rows || cells<1) return 1;
+    if (y<0 || y>=rows) return 1;
     if (script && ((script!=1 && script!=2) || cells!=1 || (natural_cells!=1 && natural_cells!=2))) return SDL_SetError("Invalid script glyph geometry");
+    if (cells<1) return 1;
     GlyphCommand *c=command(); if (!c) return 0;
     c->script=script; c->natural=natural_cells;
     c->x=x; c->y=y; c->cells=cells; c->fg=fg; c->bg=bg; c->traits=traits; c->pixelated=pixelate_unicode;

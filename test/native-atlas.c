@@ -135,6 +135,11 @@ int main(int argc,char **argv) {
     expose.common.timestamp=SDL_GetTicksNS()-1000; assert(SDL_PushEvent(&expose));
     assert(thc_wait(event) && event[0]==8 && thc_event_age_ns()>=1000);
 #endif
+    /* Empty baseline draws are no-ops; invalid scripted geometry never is. */
+    assert(thc_unicode(0,0,0,"A",0xffffff,0,0,0,0));
+    assert(!thc_unicode(0,0,0,"A",0xffffff,0,0,1,1));
+    assert(!thc_unicode(0,0,0,"A",0xffffff,0,0,99,1));
+    SDL_ClearError();
     char capture[256]; SDL_snprintf(capture,sizeof(capture),"/tmp/hide-native-atlas-%llu.bmp",(unsigned long long)SDL_GetTicksNS());
     SDL_SetEnvironmentVariable(SDL_GetEnvironment(),"THC_EDIT_CAPTURE",argc>2?argv[2]:capture,true);
     scene();
