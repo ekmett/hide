@@ -64,7 +64,7 @@ static int cell_x(int x) { return (int)floor(x*8*scale); }
 static int cell_y(int y) { return (int)floor(y*cell_height*scale); }
 
 
-static int cols, rows, origin_x, origin_y, pixel_w, pixel_h;
+static int cols, rows, origin_x, origin_y, pixel_w, pixel_h, renderer_w, renderer_h;
 static int mouse_x = -1, mouse_y = -1;
 static char *input_text;
 static char *clipboard_text;
@@ -112,7 +112,7 @@ void thc_close(void) {
     SDL_DestroyTexture(texture); texture = NULL;
     SDL_DestroyTexture(vignette); vignette = NULL;
     SDL_DestroyTexture(script_transform); script_transform=NULL; script_transform_format=SDL_PIXELFORMAT_UNKNOWN;
-    SDL_DestroyRenderer(renderer); renderer = NULL;
+    SDL_DestroyRenderer(renderer); renderer = NULL; renderer_w=renderer_h=0;
     SDL_DestroyWindow(window); window = NULL;
     SDL_DestroyGPUDevice(gpu); gpu=NULL;
     clear_commands(); free(commands); commands=NULL; command_capacity=0;
@@ -169,7 +169,7 @@ int thc_open(const char *backend, double requested_scale, int requested_cols, in
         glyph_shader=SDL_CreateGPUShader(gpu,&shader);
         if (!glyph_shader) return 0;
     } else renderer=SDL_CreateRenderer(window,backend);
-    if (!renderer) return 0;
+    if (!renderer || !SDL_GetRenderOutputSize(renderer,&renderer_w,&renderer_h)) return 0;
     SDL_SetRenderVSync(renderer, 1);
     int pw, ph, ww, wh;
     SDL_GetWindowSizeInPixels(window, &pw, &ph);
@@ -221,7 +221,16 @@ int thc_scale(int direction) {
 
 void thc_size(int *w, int *h) { geometry(); *w = cols; *h = rows; }
 int thc_begin(void) {
-    geometry(); cursor_present=false; clear_commands(); draw_failed=false; grid_ready=false;
+    geometry();
+    /* SDL's GPU renderer recreates its backbuffer only at present, after
+     * acquiring the resized swapchain. Refresh that boundary before authoring
+     * the first new-size frame; otherwise drawing/capture uses the old extent.
+     * Ordinary frames still prepare and present their grid exactly once. */
+    if (gpu && (pixel_w!=renderer_w || pixel_h!=renderer_h)) {
+        if (!SDL_RenderPresent(renderer)) return 0;
+        renderer_w=pixel_w; renderer_h=pixel_h;
+    }
+    cursor_present=false; clear_commands(); draw_failed=false; grid_ready=false;
     if (!texture) {
         /* Tile uploads never lock a streaming CPU mirror of the whole atlas. */
         texture=SDL_CreateTexture(renderer,SDL_PIXELFORMAT_ARGB8888,SDL_TEXTUREACCESS_STATIC,atlas_size,atlas_size);
