@@ -44,7 +44,7 @@ localSourceCheck=bracket (Fixture.fixture "local-source") Fixture.cleanup $ \(po
           loaded<-loadFile target
           pure (False,either (const d) (\(state,image)->addDocument (Just state) image d) loaded)
         core d _=pure (False,d)
-        tick=tickDebugger runtime core
+        tick=tickDebugger runtime
         await label predicate d=timeout 5000000 (loop d) >>= maybe (fail label) pure
           where loop current=do next<-tick current; if predicate next then pure next else threadDelay 1000 >> loop next
     (_,attached)<-debuggerEffects runtime core (initialDesktop (80,25)) [DebugAction "connect" ["0","127.0.0.1",T.pack port]]
@@ -52,13 +52,11 @@ localSourceCheck=bracket (Fixture.fixture "local-source") Fixture.cleanup $ \(po
     unless ((activeDocument opened >>= documentFile)==Just file && (activeDocument opened >>= documentLabel)==Nothing && fmap (caret.selection) (activeWindow opened)==Just 8)
       (fail "Local source must retain regular FileState and UTF-16 caret coordinates")
     let changed=insertText "!" (moveTo False 0 opened)
-        trapped _ [ReadPath _]=fail "Debugger source UI owner called ReadPath"
-        trapped d _=pure (False,d)
         present d=do
-          (_,stateReply)<-debuggerTool runtime trapped d "debug_status" (object [])
+          (_,stateReply)<-debuggerTool runtime d "debug_status" (object [])
           state<-stateReply >>= either (fail . T.unpack) pure
           generation<-maybe (fail "Missing stopped generation") pure (parseMaybe (withObject "status" (.:"generation")) state :: Maybe Int)
-          (queued,reply)<-debuggerTool runtime trapped d "debug_present" (object ["generation" .= generation,"view" .= ("source"::T.Text)])
+          (queued,reply)<-debuggerTool runtime d "debug_present" (object ["generation" .= generation,"view" .= ("source"::T.Text)])
           _<-reply >>= either (fail . T.unpack) pure
           pure queued
     removeFile canonical
@@ -89,7 +87,7 @@ missingLocalSourceCheck=bracket (Fixture.fixture "local-source") Fixture.cleanup
     let core d _=pure (False,d)
         base=addDocument Nothing (newBuffer "foreground") (initialDesktop (80,25))
         loop d=do
-          next<-tickDebugger runtime core d
+          next<-tickDebugger runtime d
           if T.isInfixOf "unavailable" (status next) then pure next else threadDelay 1000 >> loop next
     (_,attached)<-debuggerEffects runtime core base [DebugAction "connect" ["0","127.0.0.1",T.pack port]]
     refused<-timeout 5000000 (loop attached) >>= maybe (fail "Missing debugger source was not refused") pure
@@ -115,9 +113,9 @@ delayedLocalSourceCheck=mapM_ scenario ["continue","close","disconnect","opened"
               loaded<-loadFile target
               pure (False,either (const d) (\(state,image)->addDocument (Just state) image d) loaded)
             core d _=pure (False,d)
-            tick=tickDebugger runtime core
+            tick=tickDebugger runtime
             frameReady d=do
-              (_,reply)<-debuggerTool runtime core d "debug_status" (object [])
+              (_,reply)<-debuggerTool runtime d "debug_status" (object [])
               value<-reply >>= either (fail . T.unpack) pure
               pure (parseMaybe (withObject "status" (\o->o .: "frame" >>= withObject "frame" (.:"id"))) value==Just (11::Int))
             awaitFrame d=do next<-tick d; ready<-frameReady next; if ready then pure next else threadDelay 1000 >> awaitFrame next
@@ -140,7 +138,7 @@ delayedLocalSourceCheck=mapM_ scenario ["continue","close","disconnect","opened"
             entered<-timeout 1000000 readStarted
             unless (maybe False (const True) entered) (fail "Local source worker did not enter its file read")
             queued<-timeout 1000000 (wait owner)
-            case queued of
+            interruption<-case queued of
               Nothing->pure Nothing
               Just current->do
                 interrupted<-if action=="close" then pure (fst (runCommand Close current))
@@ -150,6 +148,10 @@ delayedLocalSourceCheck=mapM_ scenario ["continue","close","disconnect","opened"
                 responsive<-timeout 1000000 (tick interrupted)
                 unless (maybe False (const True) responsive) (fail "Debugger source retirement blocked the UI owner")
                 pure (Just interrupted)
+            -- Data plus close wakes the held FIFO read on all supported event
+            -- managers; close alone may leave its EOF readiness asleep.
+            _<-fdWrite gate "y"
+            pure interruption
           _<-timeout 1000000 (wait owner)
           case returned of
             Nothing->fail "Debugger UI owner blocked on local source read"
@@ -162,12 +164,17 @@ delayedLocalSourceCheck=mapM_ scenario ["continue","close","disconnect","opened"
                 (fail "Prepared source replaced a human modal")
               if action=="modal" then do
                 resumed<-timeout 5000000 (awaitSource settled {dialog=Nothing}) >>= maybe (fail "Valid prepared local source was lost while modal") pure
-                unless (activeText resumed=="x" && (activeDocument resumed >>= documentFile)/=Nothing)
+                unless (activeText resumed=="xy" && (activeDocument resumed >>= documentFile)/=Nothing)
                   (fail "Dismissed modal did not adopt its prepared file source")
               else do
                 cancelled<-if action=="modal-continue" then snd <$> debuggerEffects runtime core settled [DebugAction "continue" []] else pure settled
                 released<-foldTicks 30 tick cancelled {dialog=Nothing}
-                if action=="opened" then unless (activeText released=="!new open" && T.isInfixOf "target changed" (status released))
+                if action=="opened" then do
+                  let rejected current=do
+                        next<-tick current
+                        if T.isInfixOf "target changed" (status next) then pure next else threadDelay 1000 >> rejected next
+                  refused<-timeout 5000000 (rejected released) >>= maybe (fail "Newly opened source was not refused") pure
+                  unless (activeText refused=="!new open" && fmap (caret.selection) (activeWindow refused)==Just 1)
                     (fail "Late source read changed a newly opened dirty target")
                 else unless (not (any ((==Just source).fmap filePath.documentFile) (M.elems (buffers released))) &&
                   (action=="close" || activeText released=="foreground"))
@@ -179,27 +186,27 @@ delayedLocalSourceCheck=mapM_ scenario ["continue","close","disconnect","opened"
 sourceHandleCheck :: IO ()
 sourceHandleCheck=bracket (Fixture.fixture "mcp") Fixture.cleanup $ \(port,_,_)->withDebugger $ \runtime->do
   let core d _=pure (False,d)
-      tick=tickDebugger runtime core
+      tick=tickDebugger runtime
       await predicate d=timeout 5000000 (loop d) >>= maybe (fail "debugger policy fixture timed out") pure
         where loop current=do next<-tick current; yes<-predicate next; if yes then pure next else threadDelay 1000 >> loop next
   (_,connected)<-debuggerEffects runtime core (initialDesktop (80,25)) [DebugAction "connect" ["0","127.0.0.1",T.pack port]]
   stopped<-await (pure . T.isPrefixOf "Stopped in " . status) connected
-  (_,statusReply)<-debuggerTool runtime core stopped "debug_status" (object [])
+  (_,statusReply)<-debuggerTool runtime stopped "debug_status" (object [])
   snapshot<-statusReply >>= either (fail . T.unpack) pure
   generation<-maybe (fail "missing generation") pure (parseMaybe (withObject "status" (.:"generation")) snapshot :: Maybe Int)
-  (admitted,reply)<-debuggerTool runtime core stopped "debug_inspect" (object ["generation" .= generation,"request" .= ("source"::T.Text),"sourceReference" .= (999::Int)])
+  (admitted,reply)<-debuggerTool runtime stopped "debug_inspect" (object ["generation" .= generation,"request" .= ("source"::T.Text),"sourceReference" .= (999::Int)])
   result<-withAsync reply $ \worker->do
     _<-await (\_->maybe False (const True) <$> poll worker) admitted
     wait worker
   unless (either (const True) (const False) result) (fail "Guessed sourceReference must not read adapter source content")
-  (known,knownReply)<-debuggerTool runtime core stopped "debug_inspect" (object ["generation" .= generation,"request" .= ("source"::T.Text),"sourceReference" .= (9::Int)])
+  (known,knownReply)<-debuggerTool runtime stopped "debug_inspect" (object ["generation" .= generation,"request" .= ("source"::T.Text),"sourceReference" .= (9::Int)])
   public<-withAsync knownReply $ \worker->do
     _<-await (\_->maybe False (const True) <$> poll worker) known
     wait worker
   unless (either (const False) (T.isInfixOf "module Generated where" . T.pack . show) public) (fail "Observed human stack source remains inspectable")
   (_,running)<-debuggerEffects runtime core stopped [DebugAction "continue" []]
   resumed<-await (pure . T.isPrefixOf "Running" . status) running
-  (_,expired)<-debuggerTool runtime core resumed "debug_inspect" (object ["generation" .= generation,"request" .= ("source"::T.Text),"sourceReference" .= (9::Int)])
+  (_,expired)<-debuggerTool runtime resumed "debug_inspect" (object ["generation" .= generation,"request" .= ("source"::T.Text),"sourceReference" .= (9::Int)])
   denied<-expired
   unless (either (const True) (const False) denied) (fail "Previous stop source handle must expire")
 
@@ -227,7 +234,7 @@ generatedOriginCheck :: IO ()
 generatedOriginCheck=bracket (Fixture.fixture "source-origin") Fixture.cleanup $ \(port,path,_)->withDebugger $ \runtime->do
   canonical<-canonicalizePath (path<>".hs")
   let core d _=pure (False,d)
-      tick=tickDebugger runtime core
+      tick=tickDebugger runtime
       await predicate d=timeout 5000000 (loop d) >>= maybe (fail "generated source fixture timed out") pure
         where loop current=do next<-tick current; yes<-predicate next; if yes then pure next else threadDelay 1000 >> loop next
       base=(initialDesktop (80,25)) {guestPrivatePaths=[canonical]}
@@ -236,7 +243,7 @@ generatedOriginCheck=bracket (Fixture.fixture "source-origin") Fixture.cleanup $
   let bid=maybe (error "missing generated source buffer") id (activeWindow stopped >>= bufferId)
   unless ((activeDocument stopped >>= documentOrigin)==Just canonical) (fail "Generated DAP source must retain canonical backing origin before publication")
   unless ((activeDocument stopped >>= documentFile)==Nothing && protectedBuffer stopped bid && sanitizedBuffer stopped bid==Nothing) (fail "Generated source origin protects reads without granting file authority")
-  (_,statusReply)<-debuggerTool runtime core stopped "debug_status" (object [])
+  (_,statusReply)<-debuggerTool runtime stopped "debug_status" (object [])
   snapshot<-statusReply >>= either (fail . T.unpack) pure
   unless (parseMaybe (withObject "status" (.:"frame")) snapshot==Just Null && parseMaybe (withObject "status" (.:"source")) snapshot==Just Null) (fail "Private frame/source metadata must be omitted as complete records")
   let doc=maybe (error "missing generated source") id (activeDocument stopped)
@@ -250,13 +257,13 @@ generatedOriginCheck=bracket (Fixture.fixture "source-origin") Fixture.cleanup $
   unless (not (streamerReadableAt prompted x y) && not (readableAt prompted x y) && guestModalBlocked prompted) (fail "Frozen private source expression must be masked and protected in watch prompt")
   unless (not (streamerReadableAt prompted {guestPrivatePaths=[]} x y)) (fail "Captured watch privacy must survive later policy removal")
   epoch<-maybe (fail "missing generation") pure (parseMaybe (withObject "status" (.:"generation")) snapshot :: Maybe Int)
-  (_,reply)<-debuggerTool runtime core stopped "debug_inspect" (object ["generation" .= epoch,"request" .= ("source"::T.Text),"sourceReference" .= (9::Int)])
+  (_,reply)<-debuggerTool runtime stopped "debug_inspect" (object ["generation" .= epoch,"request" .= ("source"::T.Text),"sourceReference" .= (9::Int)])
   result<-reply
   unless (either (const True) (const False) result) (fail "Observed private source handle must refuse adapter read")
-  (_,breakReply)<-debuggerTool runtime core stopped "debug_set_breakpoints" (object ["generation" .= epoch,"bufferId" .= bid,"lines" .= ([1]::[Int])])
+  (_,breakReply)<-debuggerTool runtime stopped "debug_set_breakpoints" (object ["generation" .= epoch,"bufferId" .= bid,"lines" .= ([1]::[Int])])
   breakResult<-breakReply
   unless (either (T.isInfixOf "private") (const False) breakResult) (fail "Private generated source must refuse agent breakpoint mutation")
-  (stack,stackReply)<-debuggerTool runtime core stopped "debug_inspect" (object ["generation" .= epoch,"request" .= ("stackTrace"::T.Text)])
+  (stack,stackReply)<-debuggerTool runtime stopped "debug_inspect" (object ["generation" .= epoch,"request" .= ("stackTrace"::T.Text)])
   withAsync stackReply $ \worker->do
     _<-await (\_->maybe False (const True) <$> poll worker) stack
     resultValue<-wait worker >>= either (fail . T.unpack) pure
@@ -281,24 +288,24 @@ delayedPolicyCheck :: IO ()
 delayedPolicyCheck=bracket (Fixture.fixture "source-policy-delay") Fixture.cleanup $ \(port,path,_)->withDebugger $ \runtime->do
   canonical<-canonicalizePath (path<>".hs")
   let core d _=pure (False,d)
-      tick=tickDebugger runtime core
+      tick=tickDebugger runtime
       await predicate d=timeout 5000000 (loop d) >>= maybe (fail "delayed source fixture timed out") pure
         where loop current=do next<-tick current; yes<-predicate next; if yes then pure next else threadDelay 1000 >> loop next
       requests=length . filter (T.isInfixOf "\"command\": \"source\"") . T.lines . T.pack <$> readFile path
   (_,connected)<-debuggerEffects runtime core (initialDesktop (80,25)) [DebugAction "connect" ["0","127.0.0.1",T.pack port]]
   stopped<-await (pure . T.isPrefixOf "Stopped in " . status) connected
-  (_,statusReply)<-debuggerTool runtime core stopped "debug_status" (object [])
+  (_,statusReply)<-debuggerTool runtime stopped "debug_status" (object [])
   snapshot<-statusReply >>= either (fail . T.unpack) pure
   epoch<-maybe (fail "missing generation") pure (parseMaybe (withObject "status" (.:"generation")) snapshot :: Maybe Int)
   let args=object ["generation" .= epoch,"request" .= ("source"::T.Text),"sourceReference" .= (9::Int)]
-  (queued,reply)<-debuggerTool runtime core stopped "debug_inspect" args
+  (queued,reply)<-debuggerTool runtime stopped "debug_inspect" args
   withAsync reply $ \worker->do
     _<-await (\_->maybe False (const True) <$> poll worker) queued {guestPrivatePaths=[canonical]}
     result<-wait worker
     unless (either (const True) (const False) result) (fail "Policy change before owner admission must refuse source read")
   count<-requests
   unless (count==1) (fail "Refused source admission must not issue DAP source")
-  (late,lateReply)<-debuggerTool runtime core stopped "debug_inspect" args
+  (late,lateReply)<-debuggerTool runtime stopped "debug_inspect" args
   withAsync lateReply $ \worker->do
     pending<-await (\_->(>=2) <$> requests) late
     writeFile (path<>".release") "release"
@@ -310,19 +317,19 @@ delayedPolicyCheck=bracket (Fixture.fixture "source-policy-delay") Fixture.clean
 sourceStampCheck :: IO ()
 sourceStampCheck=bracket (Fixture.fixture "source-stamp") Fixture.cleanup $ \(port,path,_)->withDebugger $ \runtime->do
   let core d _=pure (False,d)
-      tick=tickDebugger runtime core
+      tick=tickDebugger runtime
       await predicate d=timeout 5000000 (loop d) >>= maybe (fail "source stamp fixture timed out") pure
         where loop current=do next<-tick current; yes<-predicate next; if yes then pure next else threadDelay 1000 >> loop next
       requests=length . filter (T.isInfixOf "\"command\": \"source\"") . T.lines . T.pack <$> readFile path
   (_,connected)<-debuggerEffects runtime core (initialDesktop (80,25)) [DebugAction "connect" ["0","127.0.0.1",T.pack port]]
   stopped<-await (pure . T.isPrefixOf "Stopped in " . status) connected
-  (_,statusReply)<-debuggerTool runtime core stopped "debug_status" (object [])
+  (_,statusReply)<-debuggerTool runtime stopped "debug_status" (object [])
   snapshot<-statusReply >>= either (fail . T.unpack) pure
   epoch<-maybe (fail "missing generation") pure (parseMaybe (withObject "status" (.:"generation")) snapshot :: Maybe Int)
-  (queued,reply)<-debuggerTool runtime core stopped "debug_inspect" (object ["generation" .= epoch,"request" .= ("source"::T.Text),"sourceReference" .= (9::Int)])
+  (queued,reply)<-debuggerTool runtime stopped "debug_inspect" (object ["generation" .= epoch,"request" .= ("source"::T.Text),"sourceReference" .= (9::Int)])
   withAsync reply $ \worker->do
     pending<-await (\_->(>=2) <$> requests) queued
-    (stack,stackReply)<-debuggerTool runtime core pending "debug_inspect" (object ["generation" .= epoch,"request" .= ("stackTrace"::T.Text)])
+    (stack,stackReply)<-debuggerTool runtime pending "debug_inspect" (object ["generation" .= epoch,"request" .= ("stackTrace"::T.Text)])
     withAsync stackReply $ \stackWorker->do
       _<-await (\_->maybe False (const True) <$> poll worker) stack
       result<-wait worker

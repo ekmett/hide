@@ -67,7 +67,7 @@ checks | os=="mingw32"=pure () -- Official hdb bindists are currently POSIX only
             Just dg->let (next,effects)=submitDialog button dg d in snd <$> debuggerEffects runtime core next effects
           waitFor runtime label predicate d=timeout 5000000 (loop d) >>= maybe (error ("hdb UI timed out: "++label)) pure
             where loop state=do
-                    next<-tickDebugger runtime core state
+                    next<-tickDebugger runtime state
                     done<-predicate next
                     if done then pure next else threadDelay 1000 >> loop next
           has text d=pure (any (\prepared->case W.preparedWindowRows prepared of
@@ -159,7 +159,7 @@ checks | os=="mingw32"=pure () -- Official hdb bindists are currently POSIX only
             progress<-waitFor runtime "progress" (has "Downloading") accepted
             count<-readIORef calls
             check "accept starts exactly one background transfer" (count==1)
-            responsive<-timeout 1000000 (tickDebugger runtime core progress)
+            responsive<-timeout 1000000 (tickDebugger runtime progress)
             check "held transfer never blocks editor tick" (maybe False (const True) responsive)
             changed<-case mode of
               "cancel"->do
@@ -172,7 +172,7 @@ checks | os=="mingw32"=pure () -- Official hdb bindists are currently POSIX only
                       rowsInteraction=fmap (\(RowsInteraction ident _)->RowsInteraction ident True) (rowsInteraction w)}) progress
                 captured<-captureCancel selected
                 before<-evaluate (details selected) >>= makeStableName
-                idle<-tickDebugger runtime core captured
+                idle<-tickDebugger runtime captured
                 after<-evaluate (details idle) >>= makeStableName
                 check "idle Downloads preserves exact prepared Details snapshot" (before==after)
                 check "Downloads window remains private and human-only" (not (guestKeyboardAllowed idle) && not (cellReadable (cellAccess idle 20 10)))
@@ -180,7 +180,7 @@ checks | os=="mingw32"=pure () -- Official hdb bindists are currently POSIX only
                 refreshed<-waitFor runtime "progress refresh" (has "Downloading more") selected {screenSize=(96,31)}
                 check "progress and resize retain Details selection/scroll/focus" (detailState refreshed==detailState selected)
                 let (closed,closeEffects)=runCommand Close refreshed
-                escaped<-snd <$> debuggerEffects runtime core closed closeEffects >>= tickDebugger runtime core
+                escaped<-snd <$> debuggerEffects runtime core closed closeEffects >>= tickDebugger runtime
                 check "close leaves transfer alive and progress cannot reopen" (activePluginWindow escaped==Nothing)
                 reopened<-send runtime "downloads" [] escaped >>= waitFor runtime "reopened Downloads" (has "Downloading more")
                 rejected<-awaitMenu "old closed cancel expires" ((=="Menu result expired; invoke it again.").status) reopened
@@ -227,7 +227,7 @@ checks | os=="mingw32"=pure () -- Official hdb bindists are currently POSIX only
               "stop"->send runtime "disconnect" [] progress
               "newer"->send runtime "launch" [] progress
               _->pure progress
-            observed<-tickDebugger runtime core changed
+            observed<-tickDebugger runtime changed
             if mode `elem` ["cancel","two-jobs"] then do
               _<-waitFor runtime "cancelled" (has "Cancelled") observed
               cleaned<-timeout 1000000 (readMVar finished)
@@ -248,7 +248,7 @@ checks | os=="mingw32"=pure () -- Official hdb bindists are currently POSIX only
               else do
                 _<-timeout 1000000 (readMVar finished) >>= maybe (error "download did not finish") pure
                 -- Observe both completion and possible queued continuation.
-                final<-foldTicks runtime core 20 observed
+                final<-foldTicks runtime 20 observed
                 logText<-TIO.readFile logFile
                 check ("stale "++mode++" never launches") (T.null logText && status final=="Debugger installed; the original launch is no longer current.")
   putStrLn "Debugger acquisition checks passed"
@@ -260,7 +260,7 @@ checks | os=="mingw32"=pure () -- Official hdb bindists are currently POSIX only
     encodeText=Data.Text.Encoding.encodeUtf8
     foldTicks :: Debugger -> Core -> Int -> Desktop -> IO Desktop
     foldTicks _ _ 0 d=pure d
-    foldTicks runtime core n d=tickDebugger runtime core d >>= \next->threadDelay 1000>>foldTicks runtime core (n-1) next
+    foldTicks runtime n d=tickDebugger runtime d >>= \next->threadDelay 1000>>foldTicks runtime (n-1) next
 
 withEnvironment :: [(String,String)] -> IO a -> IO a
 withEnvironment entries action=bracket (mapM (\(name,_)->(name,) <$> lookupEnv name) entries)

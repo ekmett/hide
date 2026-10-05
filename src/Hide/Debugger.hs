@@ -328,7 +328,7 @@ debuggerEffects runtime fallback = foldM apply . (False,)
   where
     apply result@(True,_) _=pure result
     apply (_,d) (DebugAction action values) = do
-      next<-perform runtime fallback action values d
+      next<-perform runtime action values d
       publishSidebarEpoch runtime
       pure (False,next)
     apply (_,d) (DownloadCancelAction request) = (False,) <$> cancelDownloadRequest runtime request d
@@ -336,7 +336,7 @@ debuggerEffects runtime fallback = foldM apply . (False,)
       next<-sourceAction runtime request d
       pure (False,next)
     apply (_,d) (DebugSidebarAction request) = do
-      next<-sidebarAction runtime fallback request d
+      next<-sidebarAction runtime request d
       publishSidebarEpoch runtime
       pure (False,next)
     apply (_,d) effect@(AgentAction action values)
@@ -478,8 +478,8 @@ recordSidebarResponse ref (DebugPageRequest _ target _) body=modifyIORef' ref $ 
     boundedReferences newer previous=fst (M.splitAt 32768 (M.unionWith (||) newer previous))
     references tid fid key=M.fromListWith (||) [((FrameReferences tid fid,ident),key=="variables" && maybe False (flag "lazy") (field "presentationHint" row)) | row<-take 128 (items key body),let ident=integer "variablesReference" row,ident>0]
 
-sidebarAction :: Debugger -> Core -> DebugSidebarRequest -> Desktop -> IO Desktop
-sidebarAction runtime@(Debugger ref _ _ _ _) core request d
+sidebarAction :: Debugger -> DebugSidebarRequest -> Desktop -> IO Desktop
+sidebarAction runtime@(Debugger ref _ _ _ _) request d
   | dialog d/=Nothing || questionActive d=pure d {status="Debugger action is unavailable while a dialog owns input."}
   | otherwise=case request of
       SelectDebugFrame epoch tid fid->selectSidebarFrame runtime epoch tid fid d
@@ -644,8 +644,8 @@ selectSidebarFrame runtime@(Debugger ref _ _ _ _) epoch tid fid d=do
 
 -- | Initiate a tool under desktop serialization and return its outside-lock wait.
 -- Inspection handles must belong to the current stopped generation.
-debuggerTool :: Debugger -> Core -> Desktop -> Text -> Value -> IO (Desktop, IO (Either Text Value))
-debuggerTool runtime@(Debugger ref _ _ _ _) core d name arguments = do
+debuggerTool :: Debugger -> Desktop -> Text -> Value -> IO (Desktop, IO (Either Text Value))
+debuggerTool runtime@(Debugger ref _ _ _ _) d name arguments = do
   s<-readIORef ref
   case parseEither (parseTool s name) arguments of
     Left err -> pure (d,pure (Left (T.pack err)))
@@ -664,11 +664,11 @@ debuggerTool runtime@(Debugger ref _ _ _ _) core d name arguments = do
       current<-readIORef ref
       pure (d,publicDebuggerStatus (root current) (guestPrivatePaths d) (debuggerStatus current))
     run (ToolStart action values)=do
-      desktop<-perform runtime core action values d
+      desktop<-perform runtime action values d
       current<-readIORef ref
       starting<-hdbPending runtime
       if isJust (client current) || starting then snapshot desktop else immediate desktop (Left (status desktop))
-    run (ToolControl command)=perform runtime core command [] d >>= snapshot
+    run (ToolControl command)=perform runtime command [] d >>= snapshot
     run (ToolPresent following view)=do
       when (isJust view) (modifyIORef' ref (\state->state {sidebarVisible=True}))
       forM_ following (\enabled->modifyIORef' ref (\state->state {followSource=enabled}))
@@ -677,7 +677,7 @@ debuggerTool runtime@(Debugger ref _ _ _ _) core d name arguments = do
         Nothing -> pure d
         Just "source" -> maybe (pure d) (openFrame runtime True d) (frame current)
         Just "stack" -> showChoices runtime "Call stack" "frame" (frames current) (map frameLabel (frames current)) d
-        Just command -> perform runtime core command [] d
+        Just command -> perform runtime command [] d
       snapshot shown
     run (ToolBreakpoints bid rows)=case M.lookup bid (buffers d) of
       Nothing -> immediate d (Left "Unknown bufferId.")
@@ -929,8 +929,8 @@ awaitInspection ref epoch reply=do
       Just err -> pure (Left err)
       Nothing -> maybe (threadDelay 10000 >> awaitInspection ref epoch reply) pure result
 
-perform :: Debugger -> Core -> Text -> [Text] -> Desktop -> IO Desktop
-perform runtime@(Debugger ref clock _ _ _) core action values d = do
+perform :: Debugger -> Text -> [Text] -> Desktop -> IO Desktop
+perform runtime@(Debugger ref clock _ _ _) action values d = do
   when (action `elem` ["launch","launch-config","connect","attach","disconnect"]) (invalidateHdb runtime)
   s<-readIORef ref
   case (action,values) of
@@ -1007,7 +1007,7 @@ perform runtime@(Debugger ref clock _ _ _) core action values d = do
       when (command/="pause") (modifyIORef' ref invalidate)
       send runtime (Control (stopped s)) command (object ["threadId" .= tid])
       pure (clearDialog d) {status=if command=="pause" then "Pausing..." else "Running..."}
-    _ | Just (epoch,choice)<-parseToken action,epoch==generation s -> select runtime core action choice values d
+    _ | Just (epoch,choice)<-parseToken action,epoch==generation s -> select runtime action choice values d
       | "select:" `T.isPrefixOf` action -> pure (clearDialog d) {status="Debugger selection expired."}
       | otherwise -> pure d {status="Debugger is not ready for this command."}
 
@@ -1210,15 +1210,15 @@ sendStack runtime@(Debugger ref _ _ _ _) showPicker tid=do
   send runtime (Stack showPicker tid (frameRevision current)) "stackTrace" (stackArguments tid)
 
 -- | Adopt DAP events, expire pending operations and advance resource retirement.
-tickDebugger :: Debugger -> Core -> Desktop -> IO Desktop
-tickDebugger runtime core original = do
-  updated<-tickDebuggerOwner runtime core original
+tickDebugger :: Debugger -> Desktop -> IO Desktop
+tickDebugger runtime original = do
+  updated<-tickDebuggerOwner runtime original
   publishSidebarEpoch runtime
   drainSidebarReads runtime updated
   pure updated
 
-tickDebuggerOwner :: Debugger -> Core -> Desktop -> IO Desktop
-tickDebuggerOwner runtime@(Debugger ref clock _ _ _) core original = do
+tickDebuggerOwner :: Debugger -> Desktop -> IO Desktop
+tickDebuggerOwner runtime@(Debugger ref clock _ _ _) original = do
   reapRetired runtime
   prepared<-tickTerminalLaunch runtime original
   starting<-tickHdb runtime prepared >>= C.tickConsoles (debuggerConsoles runtime)
@@ -1259,11 +1259,11 @@ tickDebuggerOwner runtime@(Debugger ref clock _ _ _) core original = do
           modifyIORef' ref (\state->state {outputShown=outputShown state || first})
           pure (desktop,T.takeEnd 16384 (batch<>chunk),True,opening || first)
         _->do
-          updated<-receive runtime core desktop event
+          updated<-receive runtime desktop event
           pure (updated,batch,changed,opening)
 
-receive :: Debugger -> Core -> Desktop -> D.Event -> IO Desktop
-receive runtime@(Debugger ref clock _ _ _) core d event = do
+receive :: Debugger -> Desktop -> D.Event -> IO Desktop
+receive runtime@(Debugger ref clock _ _ _) d event = do
   s<-readIORef ref
   case event of
     _ | Nothing<-client s -> pure d
@@ -1388,7 +1388,7 @@ receive runtime@(Debugger ref clock _ _ _) core d event = do
                  forM_ (thread s) (\tid -> sendStack runtime False tid)
                _ -> pure ()
              pure (automaticDesktop s d) {status="DAP: "<>err}
-           Right body -> if isJust (endedAt s) then pure d else response runtime core kind body d
+           Right body -> if isJust (endedAt s) then pure d else response runtime kind body d
   where
     stale kind=case kind of Threads{} -> True; Control{} -> True; Stack{} -> True; Scopes{} -> True; Variables{} -> True; ExceptionDetails -> True; Source{} -> True; Inspection{} -> True; SourceInspection{} -> True; SidebarRead{} -> True; WatchRequest{} -> True; _ -> False
 
@@ -1469,8 +1469,8 @@ configure runtime@(Debugger ref _ _ _ _) = do
     when (flag "supportsConfigurationDoneRequest" (capabilities s)) $
       send runtime Configure "configurationDone" (object [])
 
-response :: Debugger -> Core -> Pending -> Value -> Desktop -> IO Desktop
-response runtime@(Debugger ref _ _ _ _) core kind body d = do
+response :: Debugger -> Pending -> Value -> Desktop -> IO Desktop
+response runtime@(Debugger ref _ _ _ _) kind body d = do
   s<-readIORef ref
   case kind of
     Init -> do
@@ -1548,8 +1548,8 @@ response runtime@(Debugger ref _ _ _ _) core kind body d = do
       modifyIORef' ref (\state -> (invalidate state) {client=Nothing,connected=False,pending=M.empty,ready=False,configured=False,disconnectAt=Nothing})
       pure (clearDialog d) {status=if managed s || fst (startRequest s)=="launch" then "Debugger disconnected; launched session stopped." else "Debugger disconnected; attached program is not terminated."}
 
-select :: Debugger -> Core -> Text -> Text -> [Text] -> Desktop -> IO Desktop
-select runtime@(Debugger ref _ _ _ _) core fullToken action values d = do
+select :: Debugger -> Text -> Text -> [Text] -> Desktop -> IO Desktop
+select runtime@(Debugger ref _ _ _ _) fullToken action values d = do
   s<-readIORef ref
   let rows=fromMaybe [] (M.lookup fullToken (choices s))
       selected=case values of _:index:_ -> readMaybe (T.unpack index); _ -> Nothing
