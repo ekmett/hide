@@ -569,6 +569,7 @@ storeWatch (Debugger ref _ _ _ _) target expression origin private d=do
 watchCurrent :: State -> Int -> Int -> WatchFrame -> Bool
 watchCurrent s ident revision receipt=selectedWatchFrame s==Just receipt && maybe False ((==revision).watchRevision) (M.lookup ident (watchExpressions s))
 
+-- Docs: docs/site/screenshots/debug-watches.png (docs/running.md) shows explicit evaluation and cached children.
 startWatch :: Debugger -> Int -> Int -> WatchFrame -> WatchMode -> Desktop -> IO Desktop
 startWatch runtime@(Debugger ref _ _ _ _) ident revision receipt mode d=do
   s<-readIORef ref
@@ -1780,6 +1781,7 @@ sourceAction runtime@(Debugger ref _ _ _ _) request d=do
     Nothing->pure d {status="Buffer has no live debugger source."}
     Just captured->case debugSourceOperation request of
       ToggleSourceBreakpoint->toggleBreakpointSource runtime captured (debugSourceRow request) (debugSourceModified request) d
+      -- Docs: docs/site/screenshots/debug-add-watch.png (docs/running.md) shows the source-prefilled expression.
       AddSourceWatch->do
         let ident=choiceId state+1
             expression=fromMaybe "" (debugSourceExpression request)

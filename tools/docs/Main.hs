@@ -63,7 +63,7 @@ site = "build/site"
 screenshotNames :: [FilePath]
 screenshotNames = "editor-conversation.png" : map (<.> "png")
   ["environment","find-replace","hdb-download","downloads", "permission-diff", "file-menu", "split", "preferences", "build-target", "debug-launch", "git-commit",
-   "conversation", "debug-step", "debug-menu", "debug-stack", "side-by-side", "window-views-menu", "markdown-view", "shell-block-menu", "documentation-links"]
+   "conversation", "debug-step", "debug-menu", "debug-stack", "debug-add-watch", "debug-watches", "side-by-side", "window-views-menu", "markdown-view", "shell-block-menu", "documentation-links"]
 
 repo :: String
 repo = "https://github.com/ekmett/hide"

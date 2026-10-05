@@ -2,14 +2,14 @@
 -- Capture actual editor commands over this checkout through the Metal frontend.
 -- Run from the repository root; see docs/contributing.md#documentation-screenshots.
 import Control.Concurrent.Async (withAsync)
-import Control.Monad (forM_, unless, when)
+import Control.Monad (forM_, unless, when, (>=>))
 import qualified Data.Map.Strict as M
 import Data.Aeson (object, (.=))
 import Data.List (intersperse)
 import Hide.Syntax (Style(Plain))
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
-import Hide.Buffer (newBuffer, Selection(..), revision, contents, replaceSelection, bufferLineOffset, bufferLineChanges, bufferLineColumn, displayColumn, bufferLineCount)
+import Hide.Buffer (newBuffer, Selection(..), revision, contents, replaceSelection, bufferLineOffset, bufferLineChanges, bufferLineColumn, displayColumn, bufferLineCount, bufferLineAt)
 import Hide.BufferView (BufferView(SideBySideView,MarkdownView))
 import Hide.Files (FileState(..))
 import Hide.TextPresentation (prepareTextPresentations)
@@ -20,19 +20,27 @@ import qualified Graphics.Vty as V
 import System.Directory
 import System.Environment (getArgs, lookupEnv, setEnv, unsetEnv)
 import System.FilePath ((</>))
+import System.IO (hSetBuffering,stdout,BufferMode(LineBuffering))
 import Hide.App (applyEffects)
 import Hide.Conversation (withConversationAt, conversationEffects, tickConversation, renderReply)
-import Hide.Debugger (withDebugger, debuggerEffects, tickDebugger, hdbOfferDialog)
+import Hide.Debugger (withDebugger, debuggerEffects, tickDebugger, hdbOfferDialog, debuggerTool)
+import Hide.DebuggerSidebar (withDebuggerSidebar,tickDebuggerSidebar)
+import Hide.DocsMCP (withDocsCommands)
+import Hide.MenuCommands (withMenuCommands,menuEffects,tickMenus,menuContributions,menuAgentReferences)
+import Hide.Sidebar (emptySidebar,treeRows,treeScroll,treeWidth,rowInfo,rowHit)
+import Hide.SidebarCommands (withSidebarCommands,sidebarEffects,initializeSidebar,tickSidebar)
 import qualified Hide.Compilers as Compilers
 import qualified Hide.HdbAcquisition as Hdb
 import qualified Hide.Plugin.Window as PluginWindow
 import qualified Hide.Plugin.Tree as PluginTree
+import qualified Hide.Plugin.Menu as PluginMenu
 import Hide.Environment (environmentAction)
 import Hide.Model
 import qualified EditorDriver as Driver
 
 main :: IO ()
 main = PluginWindow.withWindowScope $ \downloadScope -> do
+  hSetBuffering stdout LineBuffering
   root <- getCurrentDirectory
   requested <- getArgs
   captureDirectory <- lookupEnv "THC_DOCS_CAPTURE_DIR"
@@ -58,12 +66,17 @@ main = PluginWindow.withWindowScope $ \downloadScope -> do
   setEnv "hide_datadir" root
   unsetEnv "THC_ROOT"
   setEnv "THC_EDIT_CAPTURE_EXIT" "1"
-  withDebugger $ \debugger -> withPermissionsAt (scratch </> "permissions.toml") fileTools $ \permissions -> withBufferDiffCommands $ \diffCommands -> do
-    let effects = policyEffects permissions (debuggerEffects debugger applyEffects)
+  withDocsCommands $ \docs -> withMenuCommands docs $ \menuHost -> withSidebarCommands $ \sidebarHost -> withDebugger $ \debugger -> withDebuggerSidebar sidebarHost debugger $ \debugSidebar -> withPermissionsAt (scratch </> "permissions.toml") fileTools $ \permissions -> withBufferDiffCommands $ \diffCommands -> do
+    contributions <- PluginMenu.menuSnapshot (menuContributions menuHost)
+    let core = policyEffects permissions (debuggerEffects debugger applyEffects)
+        effects = sidebarEffects sidebarHost (menuEffects menuHost core)
+        tick = tickDebugger debugger >=> tickMenus menuHost core >=> tickDebuggerSidebar debugSidebar sidebarHost debugger >=> tickSidebar sidebarHost core
         command = Driver.command effects
         key k mods = Driver.input effects (V.EvKey k mods)
         typeText = Driver.typeText effects
-        await = Driver.await
+        await label pump predicate d=do
+          putStrLn ("Waiting for "<>label<>"; "<>T.unpack (status d))
+          Driver.await label pump predicate d
         chat d = case agentConfig of
           Nothing -> recordedChat d
           Just _ -> withConversationAt root $ \conversation -> do
@@ -127,13 +140,83 @@ main = PluginWindow.withWindowScope $ \downloadScope -> do
         debug d = do
           port <- maybe (fail "Set THC_DOCS_DAP_PORT to a suspended local THC program.") pure =<< lookupEnv "THC_DOCS_DAP_PORT"
           connected <- snd <$> effects d [DebugAction "connect" ["0","127.0.0.1",T.pack port]]
-          let tick=tickDebugger debugger effects
           stopped <- await "initial source stop" tick (T.isPrefixOf "Stopped in " . status) connected
           stepped <- command (DebugCommand "stepIn") stopped
           next <- await "source step" tick (T.isPrefixOf "Stopped in " . status) stepped
           wide <- command ToggleTree next
           full <- command Zoom (fst (handleEvent (V.EvResize 100 24) wide))
           pure full
+        debugWatches = do
+          toy <- maybe (fail "Set THC_DOCS_WATCH_ROOT to the live hdb toy project.") pure =<< lookupEnv "THC_DOCS_WATCH_ROOT"
+          config <- maybe (fail "Set THC_DOCS_HDB_CONFIG to its existing hdb adapter config.") pure =<< lookupEnv "THC_DOCS_HDB_CONFIG"
+          (_,opened) <- applyEffects start {contributedMenus=contributions,agentMenuRefs=menuAgentReferences menuHost,menusActive=True} [ReadPath (toy </> "Main.hs")]
+          mountedTree <- initializeSidebar sidebarHost opened {sideTree=Just (emptySidebar toy 38 False)} >>= tick
+          mounted <- command Zoom mountedTree
+          let rows d=maybe [] (M.elems.treeRows) (sideTree d)
+              has text=any (T.isInfixOf text . PluginTree.infoLabel . rowInfo) . rows
+              findRow title d=case [r | r<-rows d,title `T.isPrefixOf` PluginTree.infoLabel (rowInfo r)] of
+                [r]->pure r
+                _->fail ("Missing watch row: "<>T.unpack title)
+              invoke title target d=do
+                index<-case [i | (i,r)<-zip [0..] (rows d),rowHit r==rowHit target] of
+                  i:_->pure i
+                  []->fail "Watch target disappeared before its context menu"
+                let y=2+index-maybe 0 treeScroll (sideTree d)
+                popup<-Driver.input effects (V.EvMouseDown 20 y V.BRight []) d
+                case [i | (i,(label,_))<-zip [0..] (contextItemsFor popup),label==title] of
+                  i:_->key V.KEnter [] popup {contextMenu=fmap (\(rect,_)->(rect,i)) (contextMenu popup)}
+                  _->fail ("Missing watch action: "<>T.unpack title)
+              expand title d=case [i | (i,r)<-zip [0..] (rows d),title `T.isPrefixOf` PluginTree.infoLabel (rowInfo r)] of
+                i:_->let (next,pending)=activateTree True i d in snd <$> effects next pending
+                _->fail ("Missing watch branch: "<>T.unpack title)
+              tool name args d=do
+                (next,finish)<-debuggerTool debugger d name (object args)
+                _<-finish >>= either (fail . T.unpack) pure
+                pure next
+          window<-maybe (fail "Missing toy source") pure (activeWindow mounted)
+          bid<-maybe (fail "Toy source is not an editable file") pure (bufferId window)
+          prepared<-tool "debug_set_breakpoints" ["generation" .= (0::Int),"bufferId" .= bid,"lines" .= ([7]::[Int])] mounted
+          launched<-tool "debug_launch" ["adapterConfig" .= config] prepared
+          stopped<-await "live hdb source stop" tick (T.isPrefixOf "Stopped in " . status) launched
+          ready<-expand "Watches" stopped >>= await "Watches root" tick (has "No watches")
+          case (activeWindow ready,activeDocument ready) of
+            (Just w,Just doc)->do
+              let row=6; line=bufferLineAt (documentBuffer doc) row
+                  (prefix,suffix)=T.breakOn "counter" line
+                  offset=bufferLineOffset (documentBuffer doc) row+T.length prefix
+                  selected=modifyActive (\value->value {selection=Selection offset (offset+7),scrollRow=0}) ready
+              unless ("counter" `T.isPrefixOf` suffix) (fail "hdb toy source anchor changed")
+              popup<-Driver.input effects (V.EvMouseDown (left (bounds w)+1+T.length prefix+1) (top (bounds w)+1+row) V.BRight []) selected
+              chosen<-case [i | (i,(title,_))<-zip [0..] (contextItemsFor popup),"Add watch" `T.isPrefixOf` title] of
+                i:_->key V.KEnter [] popup {contextMenu=fmap (\(rect,_)->(rect,i)) (contextMenu popup)}
+                _->fail "Source Add Watch contribution missing"
+              editing<-await "source Add Watch dialog" tick ((/=Nothing).dialog) chosen
+              unless (case dialog editing of Just dg->[SelectedInput "Expression" "counter" (Selection 0 7)]==fields dg; _->False)
+                (fail "Source selection did not prefill the watch expression")
+              filled<-typeText "counter + 1" editing
+              capture effects scratch output "debug-add-watch" filled
+              saved<-key V.KEnter [] filled >>= await "saved source watch" tick (has "counter + 1")
+              watch<-findRow "counter + 1" saved
+              evaluated<-invoke "Evaluate watch" watch saved >>= await "live scalar watch result" tick (has "counter + 1 = 42")
+              rootRow<-findRow "Watches" evaluated
+              adding<-invoke "Add watch…" rootRow evaluated >>= await "list watch dialog" tick ((/=Nothing).dialog)
+              listDraft<-typeText "values" adding
+              listSaved<-key V.KEnter [] listDraft >>= await "saved list watch" tick (has "values")
+              listRow<-findRow "values" listSaved
+              list<-invoke "Evaluate watch" listRow listSaved >>= await "live list result" tick (has "values =")
+              expanded<-expand "values =" list >>= await "live expanded list" tick (has "tail =")
+              target<-findRow "values =" expanded
+              index<-case [i | (i,r)<-zip [0..] (rows expanded),rowHit r==rowHit target] of
+                i:_->pure i
+                []->fail "Evaluated watch disappeared before its menu"
+              let y=2+index-maybe 0 treeScroll (sideTree expanded)
+              shown<-Driver.input effects (V.EvMouseDown 20 y V.BRight []) expanded
+              unless (any ((=="Evaluate watch").fst) (contextItemsFor shown)) (fail "Evaluated watch has no refresh action")
+              capture effects scratch output "debug-watches" shown
+              resumed<-command (DebugCommand "continue") expanded
+              _<-await "hdb toy termination" tick (T.isPrefixOf "Debug session ended" . status) resumed
+              pure ()
+            _->fail "Live hdb source was not opened"
         permissionDiff d = case (activeWindow d,activeDocument d) of
           (Just w,Just doc) | first:rest<-take 6 (T.lines (contents (documentBuffer doc))) -> do
             let patch=T.unlines (["--- a/src/Hide/Buffer.hs","+++ b/src/Hide/Buffer.hs","@@ -1,6 +1,7 @@"] ++
@@ -223,6 +306,7 @@ main = PluginWindow.withWindowScope $ \downloadScope -> do
             [] -> fail "Missing Window menu"
         start = (initialDesktop (100,32))
           {videoMode=Just 3, crtFilter=True, pixelateUnicode=True, blinkCursor=False, streamerMode=True, nativeMac=True}
+    when ("debug-watches" `elem` requested) debugWatches
     (_, loaded) <- applyEffects start [ReadPath root, ReadPath (root </> "src/Hide/Buffer.hs")]
     -- Start on a short source declaration, with the package visible behind it.
     let desktop = modifyActive (\w -> w {scrollRow=23}) loaded
@@ -268,10 +352,10 @@ main = PluginWindow.withWindowScope $ \downloadScope -> do
       when (name=="debug-step") $ do
         capture effects scratch output "debug-menu" shown {menu=Just (5,6)}
         pending <- command (DebugCommand "stack") shown
-        stack <- await "call stack" (tickDebugger debugger effects) (maybe False ((=="Call stack") . dialogTitle) . dialog) pending
+        stack <- await "call stack" tick (maybe False ((=="Call stack") . dialogTitle) . dialog) pending
         capture effects scratch output "debug-stack" stack
         resumed <- command (DebugCommand "continue") shown
-        _ <- await "program termination" (tickDebugger debugger effects) (\d -> T.isPrefixOf "Debug session ended" (status d) && status d/="Debug session ended.") resumed
+        _ <- await "program termination" tick (\d -> T.isPrefixOf "Debug session ended" (status d) && status d/="Debug session ended.") resumed
         pure ()
 
 capture :: (Desktop -> [Effect] -> IO (Bool,Desktop)) -> FilePath -> FilePath -> String -> Desktop -> IO ()
@@ -282,6 +366,11 @@ capture effects scratch output name shown = do
   -- Include the actual shadow and eight pixels of context; menus retain their heading.
   let crop = case dialog shown of
         _ | name `elem` ["shell-block-menu","documentation-links"] -> bounds <$> activeWindow shown
+        _ | name=="debug-watches",Just tree<-sideTree shown ->
+          let Rect x y w h=maybe (Rect 0 1 (treeWidth tree) (snd (screenSize shown)-2)) fst (contextMenu shown)
+              first=case [i | (i,row)<-zip [0..] (M.elems (treeRows tree)),PluginTree.infoLabel (rowInfo row)=="Watches"] of i:_->max 1 (2+i-treeScroll tree); []->1
+              bottom=max (y+h+1) (2+M.size (treeRows tree)-treeScroll tree)
+          in Just (Rect 0 first (max (treeWidth tree) (x+w)) (bottom-first))
         Just dg -> Just (dialogRect shown dg)
         Nothing | Just (r,_)<-contextMenu shown -> Just r
         Nothing -> case menu shown of
