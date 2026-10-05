@@ -185,20 +185,22 @@ updateMenus _ = pure ()
 
 -- Consume the composed grid directly; partial glyphs retain full origin/width.
 draw :: Font -> Desktop -> IO ()
-draw font d = do
+-- C copies all sixteen scanlines before returning. One frame-owned array can
+-- stage every bitmap glyph without retaining a pointer into temporary storage.
+draw font d = allocaArray 16 $ \scratch -> do
   c_cursor_blink (if blinkCursor d then 1 else 0)
   c_crt_filter (if crtFilter d then 1 else 0)
   c_pixelate_unicode (if pixelateUnicode d then 1 else 0)
   check "Allocate window frame" c_begin
-  forM_ (zip [0::Int ..] (toList (renderCellRows d))) $ \(y,spans) -> go y 0 (toList spans)
+  forM_ (zip [0::Int ..] (toList (renderCellRows d))) $ \(y,spans) -> go scratch y 0 (toList spans)
   case renderCursor d of
     V.Cursor x y -> c_cursor (fromIntegral x) (fromIntegral y)
     _ -> pure ()
   check "Present window frame" c_present
   where
-    go :: Int -> Int -> [CellSpan] -> IO ()
-    go _ _ [] = pure ()
-    go y x (CellText a text:rest) = do
+    go :: Ptr Word16 -> Int -> Int -> [CellSpan] -> IO ()
+    go _ _ _ [] = pure ()
+    go scratch y x (CellText a text:rest) = do
       -- CellText contains complete single-codepoint, one-cell glyphs. Advancing
       -- by iter's byte delta keeps fallback slices on original UTF-8 boundaries.
       let paint=textStyleFromAttr a
@@ -213,20 +215,20 @@ draw font d = do
                   c_clip (fromIntegral at) 1
                   if bitmapGlyph font ch then do
                     let Glyph gw bitmap=glyph font ch
-                    withArray bitmap $ \bits ->
-                      c_glyph (fromIntegral at) (fromIntegral y) 1
-                        (fromIntegral gw) bits fg bg flags
+                    pokeArray scratch bitmap
+                    c_glyph (fromIntegral at) (fromIntegral y) 1
+                      (fromIntegral gw) scratch fg bg flags
                   else utf8 (TU.takeWord8 bytes (TU.dropWord8 offset text)) $ \encoded ->
                     check "Draw Unicode"
                       (c_unicode (fromIntegral at) (fromIntegral y) 1 encoded fg bg flags)
                   chars (offset+bytes) (at+1)
       next<-chars 0 x
-      go y next rest
-    go y x (CellGlyph a text full start shown:rest) = do
-      drawGlyph y x a text full start shown
-      go y (x+shown) rest
-    drawGlyph :: Int -> Int -> V.Attr -> T.Text -> Int -> Int -> Int -> IO ()
-    drawGlyph y visible a text full start shown = do
+      go scratch y next rest
+    go scratch y x (CellGlyph a text full start shown:rest) = do
+      drawGlyph scratch y x a text full start shown
+      go scratch y (x+shown) rest
+    drawGlyph :: Ptr Word16 -> Int -> Int -> V.Attr -> T.Text -> Int -> Int -> Int -> IO ()
+    drawGlyph scratch y visible a text full start shown = do
       let paint=textStyleFromAttr a
           fg=fromIntegral (textForeground paint); bg=fromIntegral (textBackground paint)
           flags=fromIntegral (textFlags paint+if full/=clusterWidth text then 4 else 0)
@@ -235,7 +237,8 @@ draw font d = do
       case T.unpack text of
         [ch] | bitmapGlyph font ch -> do
           let Glyph gw bitmap=glyph font ch
-          withArray bitmap $ \bits -> c_glyph (fromIntegral x) (fromIntegral y) (fromIntegral full) (fromIntegral gw) bits fg bg flags
+          pokeArray scratch bitmap
+          c_glyph (fromIntegral x) (fromIntegral y) (fromIntegral full) (fromIntegral gw) scratch fg bg flags
         _ -> utf8 text $ \encoded -> check "Draw Unicode" (c_unicode (fromIntegral x) (fromIntegral y) (fromIntegral full) encoded fg bg flags)
 
 
