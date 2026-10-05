@@ -32,7 +32,7 @@ import qualified Hide.Plugin.Tree as Tree
 import Hide.Plugin.Command (CommandRef)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
-import Data.Maybe (listToMaybe, fromMaybe)
+import Data.Maybe (listToMaybe, fromMaybe, isJust)
 import Data.List (find, findIndex, sortOn, mapAccumL, groupBy)
 import Data.Char (toLower, isAlphaNum, chr, ord, toUpper, isHexDigit, digitToInt)
 import Text.Read (readMaybe)
@@ -567,6 +567,7 @@ commandEnabled d (RegisteredMenu reference _) = dialog d==Nothing && case find (
     _ -> False
   Just _ -> True
 commandEnabled d cmd | sourceKeyCommand cmd = sourceNavigationOwner d &&
+  (not (activeMarkdown d) || maybe False (isJust . windowMarkdown d) (activeWindow d)) &&
   (not (horizontalMutation cmd) || maybe False ((==Nothing) . documentLabel) (activeDocument d) && not (activeMarkdown d)) &&
   (cmd/=DeleteLine || not (activeHex d))
 commandEnabled _ Disabled{} = False
@@ -1857,8 +1858,8 @@ composerEventWith code (V.EvKey key mods) d
   | effectiveBindings d==Nothing, ctrl, V.KChar c<-key, Just cmd<-lookup (toLower c) [('c',Copy),('x',Cut),('v',Paste),('a',SelectAll),('z',Undo),('y',Redo)] = Just (if code then runCommand cmd d else (composerCommandWith False cmd d,[]))
   | otherwise = case key of
       V.KLeft | marker>0 && p==start+marker -> move (if r>0 then bufferLineOffset b r-1 else p)
-      V.KLeft -> move (if ctrl then wordLeft text p else bufferPreviousCharacter b p)
-      V.KRight -> move (if ctrl then wordRight text p else bufferNextCharacter b p)
+      V.KLeft -> move (if ctrl then bufferWordLeft b p else bufferPreviousCharacter b p)
+      V.KRight -> move (if ctrl then bufferWordRight b p else bufferNextCharacter b p)
       V.KUp -> vertical (-1)
       V.KDown | marker>0, r+1==bufferLineCount b ->
         done (composerInsert "\n" d {composerSelection=Selection (bufferLength b) (bufferLength b)})
@@ -1867,13 +1868,13 @@ composerEventWith code (V.EvKey key mods) d
       V.KEnd -> move (if ctrl then bufferLength b else bufferLineOffset b r+T.length (bufferLineAt b r))
       V.KBS | anchor sel==p, marker>0, p==start+marker -> erase start p
       V.KBS | anchor sel==p, marker==0, column==0, r>0, fst (composerLine b (r-1))>0 -> move (start-1)
-      V.KBS -> erase (if ctrl then wordLeft text p else bufferPreviousCharacter b p) p
+      V.KBS -> erase (if ctrl then bufferWordLeft b p else bufferPreviousCharacter b p) p
       V.KDel | anchor sel==p, marker>0, p==start+T.length (bufferLineAt b r), r+1<bufferLineCount b, T.null (bufferLineAt b (r+1)) -> move (bufferLineOffset b (r+1))
-      V.KDel -> erase p (if ctrl then wordRight text p else bufferNextCharacter b p)
+      V.KDel -> erase p (if ctrl then bufferWordRight b p else bufferNextCharacter b p)
       _ -> Nothing
   where
     done next=Just (next,[])
-    b=composerBuffer d; text=contents b; sel=composerSelection d; p=caret sel
+    b=composerBuffer d; sel=composerSelection d; p=caret sel
     (r,column)=bufferLineColumn b p; ctrl=V.MCtrl `elem` mods
     start=bufferLineOffset b r; (marker,line)=if code then composerLine b r else (0,bufferLineAt b r)
     move n=let bounded=max 0 (min (bufferLength b) n); row=fst (bufferLineColumn b bounded)
@@ -2901,8 +2902,10 @@ sourceNavigationOwner d=dialog d==Nothing && not (questionActive d) && not (acti
 -- | Preserve each window's existing displayed selection and source coordinate owner.
 horizontalMove :: Bool -> Bool -> Desktop -> Desktop
 horizontalMove forward extend d
-  | activeMarkdown d, Just w<-activeWindow d, Just (_,text,_)<-windowMarkdown d w =
-      markdownMoveTo extend (horizontalTextOffset forward text (caret (selection (displayWindow w)))) d
+  | activeMarkdown d = case activeWindow d of
+      Just w | Just (_,text,_)<-windowMarkdown d w ->
+        markdownMoveTo extend (horizontalTextOffset forward text (caret (selection (displayWindow w)))) d
+      _->d
   | Just view<-activePluginWindow d, Just w<-activeWindow d =
       pluginMoveTo extend (horizontalTextOffset forward (PluginWindow.preparedWindowText view) (caret (selection w))) d
   | Just w<-activeWindow d, Just doc<-activeDocument d =
@@ -2925,8 +2928,10 @@ horizontalTextOffset forward text pos
 -- | Preserve each owner's existing row geometry, selection and visibility.
 verticalMove :: Int -> Bool -> Desktop -> Desktop
 verticalMove delta extend d
-  | activeMarkdown d, Just w<-activeWindow d, Just (_,text,_)<-windowMarkdown d w =
-      markdownMoveTo extend (verticalTextOffset d (displayWindow w) text (caret (selection (displayWindow w))) delta) d
+  | activeMarkdown d = case activeWindow d of
+      Just w | Just (_,text,_)<-windowMarkdown d w ->
+        markdownMoveTo extend (verticalTextOffset d (displayWindow w) text (caret (selection (displayWindow w))) delta) d
+      _->d
   | Just view<-activePluginWindow d, Just w<-activeWindow d =
       pluginMoveTo extend (verticalTextOffset d w (PluginWindow.preparedWindowText view) (caret (selection w)) delta) d
   | Just w<-activeWindow d, Just doc<-activeDocument d =
@@ -2972,9 +2977,9 @@ editorKey :: V.Key -> [V.Modifier] -> Desktop -> Desktop
 editorKey key mods d | activeMarkdown d=markdownKey key mods d
 editorKey key mods d | activeHex d = hexKey key mods d
 editorKey key mods d = case key of
-  V.KLeft | ctrl -> move (wordLeft t p)
+  V.KLeft | ctrl -> move (bufferWordLeft b p)
           | otherwise -> horizontalMove False shift d
-  V.KRight | ctrl -> move (wordRight t p)
+  V.KRight | ctrl -> move (bufferWordRight b p)
            | otherwise -> horizontalMove True shift d
   V.KUp -> verticalMove (-1) shift d
   V.KDown -> verticalMove 1 shift d
@@ -2982,9 +2987,9 @@ editorKey key mods d = case key of
   V.KPageDown -> vertical page
   V.KHome -> move (if ctrl then 0 else visualEdge 0 start)
   V.KEnd -> move (if ctrl then bufferLength b else visualEdge maxBound (start+T.length (bufferLineAt b row)))
-  V.KBS | ctrl -> erase (wordLeft t p) p
+  V.KBS | ctrl -> erase (bufferWordLeft b p) p
         | otherwise -> deleteAdjacent False d
-  V.KDel | ctrl -> erase p (wordRight t p)
+  V.KDel | ctrl -> erase p (bufferWordRight b p)
          | otherwise -> deleteAdjacent True d
   V.KEnter -> insertText (bufferNewline b) d
   V.KChar '\t' -> insertText "  " d
@@ -2992,7 +2997,6 @@ editorKey key mods d = case key of
   _ -> d
   where
     b = maybe (newBuffer "") documentBuffer (activeDocument d)
-    t = contents b
     sel = maybe (Selection 0 0) selection (activeWindow d); p = caret sel
     (row,_) = bufferLineColumn b p; start = bufferLineOffset b row
     ctrl = V.MCtrl `elem` mods; shift = V.MShift `elem` mods

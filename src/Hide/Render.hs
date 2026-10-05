@@ -443,7 +443,7 @@ pluginWindowLayers d active w prepared=
       | n<-[scrollRow w..scrollRow w+max 0 (hh-3)],Just row<-[TextLayout.layoutRows layout Vec.!? n]]
       ++[CellImage (place (x+1) (y+1) (V.charFill edit ' ' (max 0 (ww-2)) (max 0 (hh-2))))]
       | PluginWindow.PlainRows plain<-rows =
-      [sourceCellRow (darkAppearance d) active (selection w) (contentLineOffset text n)
+      [sourceCellRow (darkAppearance d) Nothing active (selection w) (contentLineOffset text n)
         (Rect (x+1) (y+1+n-scrollRow w) (max 0 (ww-2)) 1) (scrollColumn w) row
       | n<-[scrollRow w..scrollRow w+max 0 (hh-3)],Just row<-[plain Vec.!? n]]
       ++[CellImage (place (x+1) (y+1) (V.charFill edit ' ' (max 0 (ww-2)) (max 0 (hh-2))))]
@@ -566,6 +566,11 @@ windowLayers d active original =
         (Rect (x+1) (y+1+n-scrollRow w) contentWidth 1) (scrollColumn w) row
       | n<-[scrollRow w..scrollRow w+contentHeight-1],Just row<-[TextLayout.layoutRows layout Vec.!? n]]
       ++[CellImage (place (x+1) (y+1) (V.charFill base ' ' contentWidth contentHeight))]
+      | bufferView w==CurrentView,syntaxDocument doc,Nothing<-inlineOption =
+      [sourceCellRow (darkAppearance d) (lineColor n) active (selection w) (bufferLineOffset b n)
+        (Rect (x+1) (y+1+n-scrollRow w) contentWidth 1) (scrollColumn w) (sourceRow n)
+      | n<-[scrollRow w..scrollRow w+contentHeight-1]]
+      ++[CellImage (place (x+1) (y+1) (V.charFill base ' ' contentWidth contentHeight))]
       | otherwise=[CellImage (place (x+1) (y+1) documentImage)]
     documentImage=V.vertCat [(if windowChangeView b w then renderReview else renderPreview) n
       | n<-[scrollRow w..scrollRow w+contentHeight-1]]
@@ -662,9 +667,11 @@ windowLayers d active original =
         plain=bufferLineAt b n
         lineImage
           | syntaxDocument doc = styledSourceImage (darkAppearance d) (lineColor n) active (selection w) (bufferLineOffset b n) (scrollColumn w) contentWidth
-              (fromMaybe (plainSourceRow plain) (documentSourceRows doc >>= (Vec.!? n)))
+              (sourceRow n)
           | otherwise = V.translateX (negate (scrollColumn w)) (styledImage (darkAppearance d) selectable (lineColor n) active (selection w) (bufferLineOffset b n)
               (if useStyles && not (null (documentHighlight doc)) then fromMaybe [] (atMay styledLines n) else [(ch,Plain) | ch<-T.unpack plain]))
+
+    sourceRow n=fromMaybe (plainSourceRow (bufferLineAt b n)) (documentSourceRows doc >>= (Vec.!? n))
 
     lineColor n = case documentLabel doc of
       Just "Git diff" -> Just (diffLineAttr (bufferLineAt b n))
@@ -694,12 +701,12 @@ styledSourceImage dark override active sel start left columns row=
     image (CellGlyph paint text advance _ _)=I.HorizText paint (TL.fromStrict text) advance (T.length text)
     image (CellScript _ _ _ _)=V.emptyImage -- Source Sigils never contain scripted presentation.
 
--- Both source images and plain plugin rows share paint and source-selection cuts.
+-- Source images, direct source rows and plain plugin rows share paint and selection cuts.
 -- The compositor owns clipping; glyphs retain their complete semantic identity.
-sourceCellRow :: Bool -> Bool -> Selection -> Int -> Rect -> Int -> SourceRow -> CellLayer
-sourceCellRow dark active sel start (Rect x y columns _) left row=
+sourceCellRow :: Bool -> Maybe V.Attr -> Bool -> Selection -> Int -> Rect -> Int -> SourceRow -> CellLayer
+sourceCellRow dark override active sel start (Rect x y columns _) left row=
   CellRow (x+column-left) y x (x+columns) (Vec.fromList spans)
-  where (column,spans)=sourceCellSpans id dark Nothing active sel start left columns row
+  where (column,spans)=sourceCellSpans id dark override active sel start left columns row
 
 -- Project at emission so image callers do not retain an intermediate span list.
 {-# INLINE sourceCellSpans #-}
