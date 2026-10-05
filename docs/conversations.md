@@ -82,6 +82,10 @@ Child conversations use their own advertised settings and usage; model changes
 also wait until their message queue is empty.
 
 Steering keeps the draft until the provider accepts it into the active turn.
+Acceptance clears only the submitted draft. Editing or replacing it while a query
+is connecting or preparing, or while steering waits, preserves the newer draft
+even when its text is identical. Switching conversations keeps each draft with
+its original conversation.
 If that turn has already finished, use Query to send the retained draft. The
 editor does not automatically replay it. A legacy provider that starts an
 unowned turn, or fails to confirm the outcome, is stopped; inspect the retained

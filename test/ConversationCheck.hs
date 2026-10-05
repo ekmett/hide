@@ -1,5 +1,5 @@
 {-# LANGUAGE CPP, OverloadedStrings #-}
-module ConversationCheck (checks, composerCodeChecks) where
+module ConversationCheck (checks, composerCodeChecks, draftReceiptChecks) where
 
 import MCPPermissionsCheck (settledTool,settleDialog)
 import SourceWindowFixture (sourceFixtureBuffer)
@@ -18,6 +18,7 @@ import qualified Data.Map.Strict as M
 import Data.Maybe (mapMaybe, fromMaybe, listToMaybe)
 import Data.Time (UTCTime(..), fromGregorian, secondsToDiffTime, minutesToTimeZone, addUTCTime)
 import Data.List (findIndex)
+import Data.IORef (newIORef,writeIORef,readIORef)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Graphics.Vty as V
@@ -43,6 +44,7 @@ import qualified Hide.AgentHub as AH
 import qualified Hide.AgentRuntime as AR
 import System.Mem.StableName (makeStableName)
 import Hide.Files
+import Hide.Plugin.BufferHost (captureVersion,versionCurrent)
 import Hide.Sidebar
 import qualified Hide.MCPPermissions as Permissions
 import Hide.Model hiding (prompt)
@@ -125,8 +127,131 @@ composerCodeChecks=do
     (chatQuestion ignoredQuestion==chatQuestion answered && composerBuffer ignoredQuestion==composerBuffer answered)
   putStrLn "composer code checks passed"
 
+
+-- Acceptance consumes only the submitted immutable draft, including hidden views.
+-- Gates use the same ACP process and held-read fixture as the other owner checks.
+draftReceiptChecks :: IO ()
+#ifdef mingw32_HOST_OS
+draftReceiptChecks=pure ()
+#else
+draftReceiptChecks=bracket temporary removePathForcibly $ \root->
+  bracket (lookupEnv "XDG_CONFIG_HOME" <* setEnv "XDG_CONFIG_HOME" (root </> "config")) (restoreDraftEnvironment "XDG_CONFIG_HOME") $ \_->
+  bracket (lookupEnv "XDG_DATA_HOME" <* setEnv "XDG_DATA_HOME" (root </> "data")) (restoreDraftEnvironment "XDG_DATA_HOME") $ \_->
+  bracket (lookupEnv "THC_EDIT_SESSION" <* unsetEnv "THC_EDIT_SESSION") (restoreDraftEnvironment "THC_EDIT_SESSION") $ \_->do
+    let server=root </> "provider.py"
+        context=root </> "thc.toml"
+        gate=root </> "steer-gate"
+        source=root </> "Source.hs"
+        environment=object ["THC_LOG" .= (root </> "messages.jsonl"),"THC_SOURCE" .= source,"THC_SECOND" .= source,"THC_RESUME" .= ("yes"::T.Text)]
+        send runtime action values desktop=snd <$> conversationEffects runtime (\d _->pure (False,d)) desktop [AgentAction action values]
+        configure runtime=send runtime "configure" ["0","python3",json [server],json environment]
+        prompt runtime text=send runtime "send" ["0",text,"false","false","false"]
+        await runtime label predicate desktop=do
+          observed<-newIORef (status desktop,agentReplying desktop,agentQueued desktop)
+          let loop d=do
+                next<-tickConversation runtime d
+                writeIORef observed (status next,agentReplying next,agentQueued next)
+                accepted<-predicate next
+                if accepted then pure next else threadDelay 10000 >> loop next
+          result<-timeout 8000000 (loop desktop)
+          case result of
+            Just accepted->pure accepted
+            Nothing->do
+              lastState<-readIORef observed
+              messages<-readMessages (root </> "messages.jsonl")
+              error ("Draft receipt timeout: "++label++"; state="++show lastState++"; provider="++show (map (field "method" :: Value -> Maybe T.Text) (drop (max 0 (length messages-6)) messages)))
+        primaryDone runtime label=await runtime (label++" primary acceptance") $ \d->do
+          (_,reply)<-chatTool runtime d "agent_settings" (object [])
+          value<-reply >>= either (error.T.unpack) pure
+          pure (field "replying" value==Just False)
+        fresh original=do
+          replacement<-evaluate (newBuffer (T.copy (contents original)))
+          old<-captureVersion original; new<-captureVersion replacement
+          check "draft fixture replaces equal text at equal revision" (old/=new && revision original==revision replacement)
+          pure replacement
+    BS.writeFile server (TE.encodeUtf8 (T.pack providerScript))
+    BS.writeFile source "main=1\n"
+    let base=(addDocument (Just (FileState source Nothing)) (newBuffer "main=1\n") (initialDesktop (100,35))) {sideTree=Just (emptySidebar root 20 False)}
+    -- Submission identity is captured before the initial provider handshake.
+    bracket (lookupEnv "THC_CONNECT_GATE" <* setEnv "THC_CONNECT_GATE" gate) (restoreDraftEnvironment "THC_CONNECT_GATE") $ \_->
+      withConversationAt root $ \runtime->do
+        configured<-configure runtime base
+        original<-evaluate (newBuffer "stream")
+        createNamedPipe gate 0o600
+        withHeldRead server gate "connected" $ \opened release writer->do
+          submitted<-send runtime "send-draft" [] configured {composerBuffer=original}
+          waitForReader opened
+          newer<-fresh original
+          putMVar release (); wait writer
+          accepted<-primaryDone runtime "connecting replacement" submitted {composerBuffer=newer}
+          check "connecting submission cannot clear a same-text new draft" (contents (composerBuffer accepted)=="stream")
+        removeFile gate
+    writeFile context "[editor.agent]\ncontext='receipt guidance'\n"
+    forM_ [(False,False,False),(False,True,False),(False,True,True),(True,False,False),(True,True,False)] $ \(steer,replaced,requeue)->withConversationAt root $ \runtime->do
+      let scenario=if steer then (if replaced then "steer replacement" else "steer unchanged") else if requeue then "query requeue" else if replaced then "query replacement" else "query unchanged"
+      configured<-configure runtime base
+      connected<-prompt runtime "stream" configured >>= primaryDone runtime (scenario++" connect")
+      untouched<-evaluate (newBuffer "stream")
+      independent<-prompt runtime "stream" connected {composerBuffer=untouched} >>= primaryDone runtime (scenario++" independent")
+      check "independent prompt does not consume the composer" (contents (composerBuffer independent)=="stream")
+      active<-if steer then prompt runtime "wait" independent >>= await runtime "active primary turn" (pure . (=="Agent is replying...") . status) else pure independent
+      original<-evaluate (newBuffer (if steer then "direction" else "stream"))
+      -- Preparation may finish off-thread, but only a later serialized tick adopts it.
+      submittedReceipt<-captureVersion original
+      submitted<-send runtime (if steer then "steer-draft" else "send-draft") [] active {composerBuffer=original}
+      sameDraft<-versionCurrent submittedReceipt (composerBuffer submitted)
+      check "submitted draft remains pending before owner adoption" (agentReplying submitted && sameDraft)
+      current<-if replaced then fresh original else pure original
+      staged<-if requeue then do
+        queued<-send runtime "send-draft" [] submitted {composerBuffer=current}
+        check "same-text replacement is a new queued query" (agentQueued queued==1 && bufferLength (composerBuffer queued)==0)
+        newest<-fresh original
+        pure queued {composerBuffer=newest}
+        else if not steer && not replaced then do
+          duplicate<-send runtime "send-draft" [] submitted
+          samePending<-versionCurrent submittedReceipt (composerBuffer duplicate)
+          check "unchanged pending draft is submitted once" (agentQueued duplicate==0 && samePending)
+          pure duplicate
+        else pure submitted {composerBuffer=current}
+      let hidden=if steer then selectConversationView "unregistered" "Other" staged else staged
+      settled<-primaryDone runtime scenario hidden
+      let restored=if steer then selectConversationView "" "Primary" settled else settled
+      check "acceptance preserves a replacement draft and clears only the submitted one"
+        (if replaced then contents (composerBuffer restored)==contents original else bufferLength (composerBuffer restored)==0)
+    bracket (lookupEnv "THC_EDIT_SESSION" <* setEnv "THC_EDIT_SESSION" (replicate 48 'c')) (restoreDraftEnvironment "THC_EDIT_SESSION") $ \_->
+      bracket (lookupEnv "THC_STEER_GATE" <* setEnv "THC_STEER_GATE" gate) (restoreDraftEnvironment "THC_STEER_GATE") $ \_->
+        forM_ [False,True] $ \replaced->withConversationAt root $ \runtime->do
+          _<-configure runtime base
+          let hub=AR.agentHub (conversationAgents runtime)
+          ident<-AH.spawnAgent hub AH.Human (AH.SpawnSpec "Receipt child" "wait" root AH.Shared AH.Fresh Nothing Nothing) >>= either (error.T.unpack) pure
+          _<-AH.sendAgent hub AH.Human ident "wait" >>= either (error.T.unpack) pure
+          let running=do value<-AH.statusAgent hub AH.Human ident >>= either (error.T.unpack) pure
+                         if field "status" value==Just ("running"::T.Text) then pure () else threadDelay 10000 >> running
+          timeout 3000000 running >>= maybe (error "Receipt child did not start") pure
+          original<-evaluate (newBuffer "child direction")
+          let target=AH.agentIdText ident
+              selected=(selectConversationView target "Receipt child" base) {composerBuffer=original}
+          createNamedPipe gate 0o600
+          withHeldRead server gate "accepted" $ \opened release writer->do
+            submitted<-send runtime "steer-draft" [] selected
+            waitForReader opened
+            current<-if replaced then fresh original else pure original
+            let hidden=selectConversationView "" "Primary" submitted {composerBuffer=current}
+            putMVar release (); wait writer
+            let accepted d=do
+                  value<-AH.statusAgent hub AH.Human ident >>= either (error.T.unpack) pure
+                  pure (field "status" value==Just ("idle"::T.Text))
+            settled<-await runtime "child acceptance" accepted hidden
+            restored<-await runtime "child control completion" (pure . not . agentReplying) (selectConversationView target "Receipt child" settled)
+            check "child acceptance preserves a replacement draft and clears only its submitted draft"
+              (if replaced then contents (composerBuffer restored)==contents original else bufferLength (composerBuffer restored)==0)
+          removeFile gate
+    putStrLn "draft receipt checks passed"
+  where restoreDraftEnvironment name=maybe (unsetEnv name) (setEnv name)
+#endif
+
 checks :: IO ()
-checks = (composerCodeChecks >>) $ bracket temporary removePathForcibly $ \root ->
+checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary removePathForcibly $ \root ->
   bracket (lookupEnv "XDG_CONFIG_HOME" <* setEnv "XDG_CONFIG_HOME" (root </> "config")) restore $ \_ ->
   bracket (lookupEnv "XDG_DATA_HOME" <* setEnv "XDG_DATA_HOME" (root </> "data")) (restoreEnvironment "XDG_DATA_HOME") $ \_ ->
   bracket (lookupEnv "THC_EDIT_SESSION" <* unsetEnv "THC_EDIT_SESSION") (restoreEnvironment "THC_EDIT_SESSION") $ \_ -> do
@@ -465,7 +590,7 @@ checks = (composerCodeChecks >>) $ bracket temporary removePathForcibly $ \root 
     -- made while its request was waiting behind that read.
     let pipe=root </> "slow-source"
     createNamedPipe pipe 0o600
-    withHeldRead server pipe $ \opened release writer -> withConversation $ \runtime -> do
+    withHeldRead server pipe "held read\n" $ \opened release writer -> withConversation $ \runtime -> do
         configured<-configure runtime ("yes"::T.Text) desktop
         started<-prompt runtime "slow-files" configured
         responsive<-await runtime "provider update behind held file read"
@@ -490,7 +615,7 @@ checks = (composerCodeChecks >>) $ bracket temporary removePathForcibly $ \root 
           (maybe False hasError writeResult && dialog completed==Nothing)
         check "stale asynchronous write leaves disk intact" . (=="disk original\n") =<< BS.readFile source
     forM_ ["slow-replaced","slow-private"] $ \scenario -> do
-      withHeldRead server pipe $ \held releaseCapture writer -> withConversation $ \runtime -> do
+      withHeldRead server pipe "held read\n" $ \held releaseCapture writer -> withConversation $ \runtime -> do
           configured<-configure runtime ("yes"::T.Text) desktop
           started<-prompt runtime scenario configured
           waiting<-await runtime "prepared read behind FIFO head" (T.isInfixOf "guarded requests sent" . conversationText) started
@@ -1046,9 +1171,9 @@ temporary=do
 -- A child process can block opening the write end without blocking a GHC
 -- capability. Its acknowledgement proves that the capture reader has opened;
 -- only the explicit gate releases the payload and EOF.
-withHeldRead :: FilePath -> FilePath -> (MVar () -> MVar () -> Async () -> IO a) -> IO a
-withHeldRead server pipe action =
-  withCreateProcess (proc "python3" [server,"held-pipe-writer",pipe])
+withHeldRead :: FilePath -> FilePath -> String -> (MVar () -> MVar () -> Async () -> IO a) -> IO a
+withHeldRead server pipe payload action =
+  withCreateProcess (proc "python3" [server,"held-pipe-writer",pipe,payload])
     {std_in=CreatePipe,std_out=CreatePipe} $ \input output _ child ->
       case (input,output) of
         (Just gate,Just ready) -> do
@@ -1074,11 +1199,11 @@ waitForReader ready = do
 providerScript :: String
 providerScript=unlines
   [ "import json,os,sys"
-  , "if len(sys.argv)==3 and sys.argv[1]=='held-pipe-writer':"
+  , "if len(sys.argv)==4 and sys.argv[1]=='held-pipe-writer':"
   , "  with open(sys.argv[2],'wb',buffering=0) as output:"
   , "    print('reader-ready',flush=True)"
   , "    assert sys.stdin.buffer.read(1)==b'!'"
-  , "    output.write(b'held read\\n')"
+  , "    output.write(sys.argv[3].encode('utf-8'))"
   , "  sys.exit(0)"
   , "log=open(os.environ['THC_LOG'],'a',buffering=1)"
   , "sid='fixture-session'; prompt=None; serial=0; terminal_serial=0; scenario=''"
@@ -1095,7 +1220,9 @@ providerScript=unlines
   , "for line in sys.stdin:"
   , "  msg=json.loads(line); log.write(json.dumps(msg,ensure_ascii=False)+'\\n')"
   , "  method=msg.get('method'); ident=msg.get('id'); params=msg.get('params',{})"
-  , "  if method=='initialize': reply(ident,{'protocolVersion':1,'agentCapabilities':{'loadSession':os.environ['THC_RESUME']=='yes'},'_meta':{'steering':{'supported':os.environ['THC_RESUME']=='yes'}}})"
+  , "  if method=='initialize':"
+  , "    if os.environ.get('THC_CONNECT_GATE'): open(os.environ['THC_CONNECT_GATE'],'rb').read()"
+  , "    reply(ident,{'protocolVersion':1,'agentCapabilities':{'loadSession':os.environ['THC_RESUME']=='yes'},'_meta':{'steering':{'supported':os.environ['THC_RESUME']=='yes'}}})"
   , "  elif method=='session/new': sid='fixture-session'; reply(ident,{'sessionId':sid,'configOptions':settings()})"
   , "  elif method=='session/load': sid=params['sessionId']; reply(ident,{})"
   , "  elif method=='session/set_config_option':"
@@ -1103,7 +1230,9 @@ providerScript=unlines
   , "    else: effort=params['value']"
   , "    reply(ident,{'configOptions':settings()})"
   , "  elif method=='session/cancel': finish('cancelled')"
-  , "  elif method=='_session/steering': reply(ident,{'outcome':'failed' if params['prompt'][0]['text']=='reject-context' else 'promptRequired' if params['prompt'][0]['text']=='idle-race' else 'startedNewTurn' if params['prompt'][0]['text']=='legacy-steer' else 'injected'}); finish()"
+  , "  elif method=='_session/steering':"
+  , "    if os.environ.get('THC_STEER_GATE'): open(os.environ['THC_STEER_GATE'],'rb').read()"
+  , "    reply(ident,{'outcome':'failed' if params['prompt'][0]['text']=='reject-context' else 'promptRequired' if params['prompt'][0]['text']=='idle-race' else 'startedNewTurn' if params['prompt'][0]['text']=='legacy-steer' else 'injected'}); finish()"
   , "  elif method=='session/prompt':"
   , "    prompt=ident; scenario=params['prompt'][0]['text'].splitlines()[0]"
   , "    if scenario=='stream':"
