@@ -27,7 +27,8 @@ import Hide.Debugger (withDebugger, debuggerEffects, tickDebugger, hdbOfferDialo
 import Hide.DebuggerSidebar (withDebuggerSidebar,tickDebuggerSidebar)
 import Hide.DocsMCP (withDocsCommands)
 import Hide.MenuCommands (withMenuCommands,menuEffects,tickMenus,menuContributions,menuAgentReferences)
-import Hide.Sidebar (emptySidebar,treeRows,treeScroll,treeWidth,rowInfo,rowHit)
+import Hide.Sidebar (emptySidebar,treeRows,treeScroll,treeWidth,rowInfo,rowHit,rowDepth,rowExpanded,rowAt,treeSelected)
+import Hide.PackageSidebar (withPackageSidebar,tickPackageSidebar)
 import Hide.SidebarCommands (withSidebarCommands,sidebarEffects,initializeSidebar,tickSidebar)
 import qualified Hide.Compilers as Compilers
 import qualified Hide.HdbAcquisition as Hdb
@@ -217,6 +218,31 @@ main = PluginWindow.withWindowScope $ \downloadScope -> do
               _<-await "hdb toy termination" tick (T.isPrefixOf "Debug session ended" . status) resumed
               pure ()
             _->fail "Live hdb source was not opened"
+        packageTargetMenu d = withPackageSidebar sidebarHost d $ \packages -> do
+          let pump=tickPackageSidebar packages sidebarHost >=> tick
+              rows=maybe [] (M.elems.treeRows) . sideTree
+              matches label depth row=PluginTree.infoLabel (rowInfo row)==label && rowDepth row==depth
+              has label depth=any (matches label depth) . rows
+              click label depth shown=case [i | (i,row)<-zip [0..] (rows shown),matches label depth row] of
+                [index]->Driver.input effects (V.EvMouseDown 10 (2+index-maybe 0 treeScroll (sideTree shown)) V.BLeft []) shown
+                _->fail ("Missing package row: "<>T.unpack label)
+          mounted<-initializeSidebar sidebarHost d {sideTree=Just (emptySidebar root 32 False)}
+            >>= await "package roots" pump (\shown->has "Files" 0 shown && has "hide" 0 shown)
+          compact<-case [row | row<-rows mounted,matches "Files" 0 row] of
+            row:_ | rowExpanded row->click "Files" 0 mounted
+            _->pure mounted
+          full<-command Zoom compact
+          expanded<-click "hide" 0 full >>= await "package components" pump (\shown->has "lib:hide" 1 shown && has "exe:hide" 1 shown)
+          selected<-key V.KDown [] expanded >>= key V.KDown []
+          unless (maybe False (\tree->maybe False (matches "exe:hide" 1) (rowAt (treeSelected tree) tree)) (sideTree selected))
+            (fail "Executable target was not selected by sidebar navigation")
+          index<-case [i | (i,row)<-zip [0..] (rows selected),matches "exe:hide" 1 row] of
+            [value]->pure value
+            _->fail "Missing executable target"
+          shown<-Driver.input effects (V.EvMouseDown 20 (2+index-maybe 0 treeScroll (sideTree selected)) V.BRight []) selected
+          unless (map fst (contextItemsFor shown)==["Build","Run"] && contextMenu shown/=Nothing)
+            (fail "Executable target context menu did not offer Build and Run")
+          capture effects scratch output "package-target-menu" shown
         permissionDiff d = case (activeWindow d,activeDocument d) of
           (Just w,Just doc) | first:rest<-take 6 (T.lines (contents (documentBuffer doc))) -> do
             let patch=T.unlines (["--- a/src/Hide/Buffer.hs","+++ b/src/Hide/Buffer.hs","@@ -1,6 +1,7 @@"] ++
@@ -310,7 +336,8 @@ main = PluginWindow.withWindowScope $ \downloadScope -> do
     (_, loaded) <- applyEffects start [ReadPath root, ReadPath (root </> "src/Hide/Buffer.hs")]
     -- Start on a short source declaration, with the package visible behind it.
     let desktop = modifyActive (\w -> w {scrollRow=23}) loaded
-        scenes =
+    when (null requested || "package-target-menu" `elem` requested) (packageTargetMenu desktop)
+    let scenes =
           [ ("hdb-download", \d -> case hdbPlan of
               Just plan->pure d {dialog=Just (hdbOfferDialog 1 plan)}
               Nothing->fail "Request hdb-download explicitly")
@@ -370,6 +397,15 @@ capture effects scratch output name shown = do
           let Rect x y w h=maybe (Rect 0 1 (treeWidth tree) (snd (screenSize shown)-2)) fst (contextMenu shown)
               first=case [i | (i,row)<-zip [0..] (M.elems (treeRows tree)),PluginTree.infoLabel (rowInfo row)=="Watches"] of i:_->max 1 (2+i-treeScroll tree); []->1
               bottom=max (y+h+1) (2+M.size (treeRows tree)-treeScroll tree)
+          in Just (Rect 0 first (max (treeWidth tree) (x+w)) (bottom-first))
+        _ | name=="package-target-menu",Just tree<-sideTree shown ->
+          let Rect x y w h=maybe (Rect 0 1 (treeWidth tree) 1) fst (contextMenu shown)
+              indexed=zip [0..] (M.elems (treeRows tree))
+              packageRows=case dropWhile (\(_,row)->rowDepth row/=0 || PluginTree.infoLabel (rowInfo row)/="hide") indexed of
+                first:rest->first:takeWhile ((>0).rowDepth.snd) rest
+                []->[]
+              first=case packageRows of (i,_):_->max 1 (2+i-treeScroll tree); []->1
+              bottom=max (y+h) (maximum (first:[3+i-treeScroll tree | (i,_)<-packageRows]))
           in Just (Rect 0 first (max (treeWidth tree) (x+w)) (bottom-first))
         Just dg -> Just (dialogRect shown dg)
         Nothing | Just (r,_)<-contextMenu shown -> Just r

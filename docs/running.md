@@ -52,6 +52,15 @@ Outside a Cabal project, Compile checks the current `.hs` or `.lhs` file with
 `Main`), and Run uses
 `runghc` with the selected GHC.
 
+For a component in the Cabal sidebar, right-click its row and choose **Build**
+or, for an executable, **Run**. The action uses that captured package and component
+with the compiler selected in **Run > Target**, without changing the saved target.
+Save modified source files first. If the package, source or editor build settings
+change during preparation, choose the action again. Tests and benchmarks remain
+browsable but do not offer these actions.
+
+[![The hide package's executable row, with Build and Run in its context menu.](site/screenshots/package-target-menu.png)](site/screenshots/package-target-menu.png)
+
 The target dialog also accepts an optional THC root and runtime path, and
 program arguments as a JSON array, for example `["input.txt", "--verbose"]`.
 Arguments go directly to the process; shell syntax is not interpreted. Settings
