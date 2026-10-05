@@ -3,15 +3,15 @@
 #include <utf8proc.h>
 
 int thc_graphemes(const char *utf8, int bytes, int *boundaries) {
-    int count=0, offset=0;
+    int count=0;
     utf8proc_int32_t previous=-1, state=0, point;
     for (int i=0;i<bytes;) {
         utf8proc_ssize_t n=utf8proc_iterate((const utf8proc_uint8_t *)utf8+i, bytes-i, &point);
         if (n<0) return 0;
-        if (previous<0 || utf8proc_grapheme_break_stateful(previous,point,&state)) boundaries[count++]=offset;
-        previous=point; i+=(int)n; ++offset;
+        if (previous<0 || utf8proc_grapheme_break_stateful(previous,point,&state)) boundaries[count++]=i;
+        previous=point; i+=(int)n;
     }
-    boundaries[count++]=offset;
+    boundaries[count++]=bytes;
     return count;
 }
 
