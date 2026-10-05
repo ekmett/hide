@@ -23,7 +23,7 @@ The native window and browser use the bundled bitmap font for its repertoire
 and system or browser font fallback for other text. The terminal uses its own
 font. Combining characters, joined emoji, skin tones and flags are handled as
 complete graphemes when editing and clipping; exact rendering follows the
-frontend. Wide characters partly covered by a frame become blank cells.
+frontend. Metal, Vulkan and WebGL2 preserve the visible half of a wide glyph when a frame partly covers it. Text terminals use blank cells for a partial glyph, since terminal glyphs cannot be clipped.
 
 The title shows the active relative filename, a distinguishing session ID prefix,
 and the average `ms/frame` over the last 60 actual draws. The timing refreshes
