@@ -297,8 +297,10 @@ static void check_geometry(int lines, int cell_height) {
     SDL_zero(e); e.type = SDL_EVENT_MOUSE_BUTTON_DOWN; e.button.button = SDL_BUTTON_LEFT;
     assert(SDL_PushEvent(&e));
     assert(thc_wait(out) && out[0] == 3);
+    Uint64 oldest_motion=SDL_GetTicksNS()-100000000;
     for (int i=0;i<1000;++i) {
         SDL_zero(e); e.type = SDL_EVENT_MOUSE_MOTION;
+        if (!i) e.common.timestamp=oldest_motion;
         e.motion.x = 16 + i % 500; e.motion.y = 100;
         assert(SDL_PushEvent(&e));
     }
@@ -307,14 +309,18 @@ static void check_geometry(int lines, int cell_height) {
     SDL_zero(e); e.type = SDL_EVENT_MOUSE_MOTION; e.motion.x = 100; e.motion.y = 100;
     assert(SDL_PushEvent(&e));
     assert(thc_wait(out) && out[0] == 3 && out[1] == 32);
+    assert(thc_event_age_ns()>=100000000); /* Latest position retains oldest demand. */
     assert(thc_wait(out) && out[0] == 4); /* Never coalesce across release. */
     assert(thc_wait(out) && out[0] == 12 && out[1] == 6);
+    Uint64 oldest_wheel=SDL_GetTicksNS()-100000000;
     for (int i=0;i<1000;++i) {
-        SDL_zero(e); e.type = SDL_EVENT_MOUSE_WHEEL; e.wheel.y = 0.125f;
+        SDL_zero(e); e.type = SDL_EVENT_MOUSE_WHEEL;
+        if (!i) e.common.timestamp=oldest_wheel; e.wheel.y = 0.125f;
         e.wheel.mouse_x = 20; e.wheel.mouse_y = 100; assert(SDL_PushEvent(&e));
     }
     SDL_zero(e); e.type = SDL_EVENT_QUIT; assert(SDL_PushEvent(&e));
     assert(thc_wait(out) && out[0] == 9 && out[3] == 125);
+    assert(thc_event_age_ns()>=100000000); /* Summed travel retains oldest demand. */
     assert(thc_wait(out) && out[0] == 6);
     SDL_zero(e); e.type = SDL_EVENT_MOUSE_WHEEL; e.wheel.y = 0.5f;
     assert(SDL_PushEvent(&e));
