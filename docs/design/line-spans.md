@@ -44,7 +44,11 @@ not choose span boundaries or prove that source bytes are equal.
 
 Keep ordinary short lines as compact `Text`. A loaded long line keeps its original
 `Text`, cached scalar/encoding/provenance metadata and a shared lazy stream of
-borrowed spans. Loading and whole-text export do not force that stream. A span
+borrowed spans. Loading and whole-text export do not force that stream. Saving
+encodes raw stored pieces directly: the original loaded text or an edited row's
+borrowed leaves, without scalar slicing, display indexing or an intermediate
+whole-line `Text`. The saved disk baseline remains a strict byte string, prepared
+before atomic replacement. A span
 stores no absolute source position: prefix measures supply it, so an insertion
 does not renumber the suffix. New typed text supplies
 new backing storage. Adjacent slices of the same array can be joined without a

@@ -9,7 +9,7 @@
 -- Whole text and exact loaded width remain independent of the receipt stream.
 module Hide.LineChunks
   ( Chunks, ChunkMeasure(..), ColumnAdvance(..), applyAdvance
-  , chunksFromText, chunksEdit, chunksMeasure, chunksWidth, chunksText, chunksSlice, chunksFragments
+  , chunksFromText, chunksEdit, chunksMeasure, chunksWidth, chunksText, chunksPieces, chunksSlice, chunksFragments
   , chunksWindow, chunksDisplayColumn, chunksColumnOffset
   , chunksPreviousCharacter, chunksSpanLeft, chunksSpanRight, chunksSuffixWidth
   ) where
@@ -98,6 +98,21 @@ chunksWidth (Edited tree)=applyAdvance (chunkAdvance (FT.measure tree)) 0
 chunksText :: Chunks -> T.Text
 chunksText (Loaded text _ _)=text
 chunksText (Edited tree)=T.concat [text | Chunk _ text _ _ _<-toList tree]
+
+-- | Raw stored payloads in source order, without scalar slicing or display
+-- preparation. A loaded row yields its original text without forcing receipts;
+-- an edited row joins adjacent leaves of the same immutable array without
+-- copying. Independent arrays remain separate.
+chunksPieces :: Chunks -> [T.Text]
+chunksPieces (Loaded text _ _)=[text]
+chunksPieces (Edited tree)=case toList tree of
+  []->[]
+  Chunk _ text _ _ _:rest->gather text rest
+  where
+    gather text []=[text]
+    gather text (Chunk _ next _ _ _:rest)=case joinAdjacent text next of
+      Just joined->gather joined rest
+      Nothing->text:gather next rest
 
 -- | Borrow only the leaves overlapping a clamped scalar range. Both boundary
 -- leaves inspect bounded local byte spans; middle leaves remain whole.

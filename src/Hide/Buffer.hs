@@ -18,7 +18,7 @@ module Hide.Buffer
   , SourceLine, contentSourceLineAt, contentSourceLinesFrom, sourceLineText, sourceLineRawText
   , sourceLineLength, sourceLineHasChunks, sourceLineWidth, sourceLineDisplayColumn, sourceLineColumnOffset, sourceLineWindow
   , sourceLineSlice, sourceLineSuffixWidth
-  , newBuffer, newByteBuffer, bufferBytes, markSaved, toggleByteMode, replaceBuffer, textBuffer
+  , newBuffer, newByteBuffer, bufferBytes, bufferByteStream, markSaved, toggleByteMode, replaceBuffer, textBuffer
   , DirtySnapshot, captureDirty, snapshotDirty
   , contents, dirty, ordered, replaceSelection, replaceRanges, prepareBuffer, undo, redo, selectedText
   , bufferLineChanges, bufferViewProjection, bufferLength, bufferLineCount,
@@ -35,6 +35,8 @@ import qualified Data.Text.Unsafe as TU
 import Data.Text (Text)
 import qualified Data.Text.Encoding as TE
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as BL
+import qualified Data.ByteString.Builder as BB
 import Data.Word (Word64)
 import Data.Bits ((.|.), (.&.), shiftL, shiftR)
 import Data.Char (GeneralCategory(..), generalCategory, isAlphaNum, isSpace, ord)
@@ -81,11 +83,24 @@ type LineTree = FT.FingerTree LineMeasure Line
 -- | An editable revision with a saved baseline and at most 100 undo states.
 -- Use buffer operations to preserve line provenance and cached projections.
 data Buffer = Buffer
-  { bufferLines :: !LineTree, cachedContents :: Text, saved :: Text
+  { bufferLines :: !LineTree, cachedContents :: ContentsProjection, saved :: Text
   , undoStack :: [(LineTree,Bool,(Int,Int,Int))], redoStack :: [(LineTree,Bool,(Int,Int,Int))]
   , revision :: !Int, lastChange :: Maybe (Int,Int,Int), byteMode :: Bool, savedByteMode :: Bool
   , baselineLines :: !LineTree, viewProjection :: ViewProjection
   } deriving (Eq, Show)
+-- Raw source is already contiguous; a tree projection is kept lazy after edits.
+-- Both denote exactly the current live text. The tag affects serialization only,
+-- never extensional equality or the existing Show representation.
+data ContentsProjection = RawContents Text | ProjectedContents Text
+instance Eq ContentsProjection where
+  a==b=projectionText a==projectionText b
+instance Show ContentsProjection where
+  showsPrec p=showsPrec p . projectionText
+
+projectionText :: ContentsProjection -> Text
+projectionText (RawContents text)=text
+projectionText (ProjectedContents text)=text
+
 -- | Immutable tree and representation; excludes separate baseline/Undo roots.
 -- Deleted provenance leaves remain retained but occupy no live range or row.
 -- Capture is shallow. Local reads use the same measured algorithms as editing.
@@ -245,7 +260,7 @@ restoreBuffer s
           history<-sequence (zipWith restoreEntry (snapshotUndo s) historyChanges)
           future<-sequence (zipWith restoreEntry (snapshotRedo s) futureChanges)
           pure (current,history,future)
-      pure (Buffer current (snapshotContents s) (snapshotSaved s) history future (snapshotRevision s) (snapshotLastChange s)
+      pure (Buffer current (RawContents (snapshotContents s)) (snapshotSaved s) history future (snapshotRevision s) (snapshotLastChange s)
         (snapshotByteMode s) (snapshotSavedByteMode s) (linesFromText (snapshotSavedByteMode s) (snapshotSaved s)) (projectionFor current))
   where
     validText mode text=not mode || T.all ((<=255).ord) text
@@ -269,7 +284,7 @@ newBuffer :: Text -> Buffer
 newBuffer=newBufferMode False
 
 newBufferMode :: Bool -> Text -> Buffer
-newBufferMode mode t = let tree=linesFromText mode t in Buffer tree t t [] [] 0 Nothing mode mode tree (projectionFor tree)
+newBufferMode mode t = let tree=linesFromText mode t in Buffer tree (RawContents t) t [] [] 0 Nothing mode mode tree (projectionFor tree)
 
 -- | Create a clean byte buffer using one Latin-1 character per byte, without lossy decoding.
 newByteBuffer :: BS.ByteString -> Buffer
@@ -282,6 +297,21 @@ encodeContents True = BS.pack . map (fromIntegral . ord) . T.unpack
 -- | Encode the current representation for file output: UTF-8 text or original byte values.
 bufferBytes :: Buffer -> BS.ByteString
 bufferBytes b = encodeContents (byteMode b) (contents b)
+
+-- | Encode live raw storage into lazy byte chunks for file output. Deleted
+-- provenance and Undo are excluded. Loaded rows use their original text without
+-- demanding span receipts; edited rows use existing leaves without flattening
+-- whole text. The standard builder batches small leaves into output chunks.
+-- @BL.toStrict (bufferByteStream b) == bufferBytes b@ in either encoding mode.
+bufferByteStream :: Buffer -> BL.ByteString
+bufferByteStream b = case cachedContents b of
+  RawContents text -> BL.fromStrict (encodeContents (byteMode b) text)
+  ProjectedContents _ -> BB.toLazyByteString (foldMap encode
+    [text | line<-toList (bufferLines b),lineOrigin line/=Deleted,text<-pieces line])
+  where
+    encode = if byteMode b then BB.byteString . encodeContents True else TE.encodeUtf8Builder
+    pieces (Line _ _ _ _ _ text)=[text]
+    pieces (ChunkedLine _ _ _ _ _ chunks)=Chunks.chunksPieces chunks
 
 -- | Establish the current contents as baseline through measured changed-leaf traversal.
 -- Undo/redo provenance is rebased lazily, replaying stored inverse edits only
@@ -306,15 +336,15 @@ toggleByteMode b
 replaceBuffer :: Bool -> Text -> Buffer -> Buffer
 replaceBuffer mode text b
   | mode && T.any ((>255) . ord) text = b {lastChange=Nothing}
-  | mode==byteMode b = replaceSelection (Selection 0 (bufferLength b)) text b
-  | otherwise = b {bufferLines=updated,viewProjection=projectionFor updated,cachedContents=text,byteMode=mode,
+  | mode==byteMode b = (replaceSelection (Selection 0 (bufferLength b)) text b) {cachedContents=RawContents text}
+  | otherwise = b {bufferLines=updated,viewProjection=projectionFor updated,cachedContents=RawContents text,byteMode=mode,
       undoStack=take 100 ((bufferLines b,byteMode b,(0,T.length text,bufferLength b)):undoStack b),
       redoStack=[],revision=revision b+1,lastChange=Just (0,bufferLength b,T.length text)}
   where updated=restoreBaseline (baselineLines b) (editTree mode 0 (bufferLength b) text (bufferLines b))
 
 -- | The shared lazy whole-text projection. Use line/slice accessors for local navigation.
 contents :: Buffer -> Text
-contents = cachedContents
+contents = projectionText . cachedContents
 
 lineText :: Line -> Text
 lineText (Line _ _ _ _ _ t) = t
@@ -502,7 +532,7 @@ data DirtySnapshot = MeasuredDirty !Bool | EncodedDirty !Bool Text !Bool Text
 captureDirty :: Buffer -> DirtySnapshot
 captureDirty Buffer{bufferLines=tree,cachedContents=current,saved=baseline,byteMode=mode,savedByteMode=savedMode}
   | mode==savedMode=let measure=FT.measure tree in MeasuredDirty ((newLineCount measure,deletedLineCount measure)/=(0,0))
-  | otherwise=EncodedDirty mode current savedMode baseline
+  | otherwise=EncodedDirty mode (projectionText current) savedMode baseline
 
 snapshotDirty :: DirtySnapshot -> Bool
 snapshotDirty (MeasuredDirty changed)=changed
@@ -520,7 +550,7 @@ replaceSelection :: Selection -> Text -> Buffer -> Buffer
 replaceSelection sel inserted b@Buffer{bufferLines=tree,undoStack=history,revision=version}
   | byteMode b && T.any ((>255) . ord) inserted = b {lastChange=Nothing}
   | insertedLength == z-a && rangeText a z tree == inserted = b {lastChange=Nothing}
-  | otherwise = b { bufferLines = updated, viewProjection=projectionFor updated, cachedContents = treeText updated
+  | otherwise = b { bufferLines = updated, viewProjection=projectionFor updated, cachedContents = ProjectedContents (treeText updated)
                   , undoStack = take 100 ((tree,byteMode b,(a,a+insertedLength,z-a)) : history)
                   , redoStack = [], revision = version + 1, lastChange = Just (a,z,insertedLength) }
   where
@@ -543,7 +573,7 @@ replaceRanges edits b@Buffer{bufferLines=tree,undoStack=history,revision=version
           updated=restoreBaseline (baselineLines b) (foldl' (\current (lo,hi,text) -> editTree (byteMode b) lo hi text current) tree (reverse changes))
           n=z-a+characterCount (FT.measure updated)-characterCount (FT.measure tree)
       in pure $ if sameText tree updated then b else
-        b {bufferLines=updated,viewProjection=projectionFor updated,cachedContents=treeText updated
+        b {bufferLines=updated,viewProjection=projectionFor updated,cachedContents=ProjectedContents (treeText updated)
           ,undoStack=take 100 ((tree,byteMode b,(a,a+n,z-a)):history),redoStack=[]
           ,revision=version+1,lastChange=Just (a,z,n)}
   where
@@ -775,10 +805,10 @@ restoreLines baselineMode baseline mode text changes=do
 undo, redo :: Buffer -> Buffer
 undo b@Buffer{bufferLines=current,undoStack=history,redoStack=future,revision=version} = case history of
   [] -> b {lastChange=Nothing}
-  (t,mode,change@(a,z,n)):ts -> b { bufferLines = t, viewProjection=projectionFor t, byteMode=mode, cachedContents = treeText t, undoStack = ts, redoStack = (current,byteMode b,(a,a+n,z-a)) : future, revision = version + 1, lastChange = Just change }
+  (t,mode,change@(a,z,n)):ts -> b { bufferLines = t, viewProjection=projectionFor t, byteMode=mode, cachedContents = ProjectedContents (treeText t), undoStack = ts, redoStack = (current,byteMode b,(a,a+n,z-a)) : future, revision = version + 1, lastChange = Just change }
 redo b@Buffer{bufferLines=current,undoStack=history,redoStack=future,revision=version} = case future of
   [] -> b {lastChange=Nothing}
-  (t,mode,change@(a,z,n)):ts -> b { bufferLines = t, viewProjection=projectionFor t, byteMode=mode, cachedContents = treeText t, redoStack = ts, undoStack = (current,byteMode b,(a,a+n,z-a)) : history, revision = version + 1, lastChange = Just change }
+  (t,mode,change@(a,z,n)):ts -> b { bufferLines = t, viewProjection=projectionFor t, byteMode=mode, cachedContents = ProjectedContents (treeText t), redoStack = ts, undoStack = (current,byteMode b,(a,a+n,z-a)) : history, revision = version + 1, lastChange = Just change }
 
 -- The review projection walks stored leaves, with synthetic line separators
 -- where a deleted unterminated final line precedes its replacement.

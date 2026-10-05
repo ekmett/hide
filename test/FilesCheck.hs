@@ -2,10 +2,11 @@
 module FilesCheck (checks) where
 
 import Control.Exception (SomeException, bracket, try)
-import Control.Monad (unless)
+import Control.Monad (foldM, unless)
 import Data.List (sort)
 import qualified Data.ByteString as BS
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
 import System.Directory
 import System.FilePath ((</>))
 import System.IO (hClose, openBinaryTempFile)
@@ -100,6 +101,50 @@ checks = bracket makeDirectory removePathForcibly $ \dir -> do
   finalEntries <- sort <$> listDirectory dir
   check "exception after opening temporary file cleans it and keeps original"
     (isLeft encodingFailure && finalBytes == before && finalEntries == beforeEntries)
+  let piecesPath = dir </> "pieces.hs"
+      row = T.replicate 500 "λx"
+      originalText = "removed\r\n" <> row <> "\r\nlast"
+  BS.writeFile piecesPath (TE.encodeUtf8 originalText)
+  (piecesState, loadedPieces) <- loadFile piecesPath >>= right "load long raw row"
+  loadedSaved <- saveFile piecesState loadedPieces >>= right "save loaded raw row"
+  loadedBytes <- BS.readFile piecesPath
+  check "loaded long row saves exact raw bytes and baseline"
+    (loadedBytes == TE.encodeUtf8 originalText && diskBytes loadedSaved == Just loadedBytes)
+  let withoutFirst = replaceSelection (Selection 0 9) T.empty loadedPieces
+      edited = replaceSelection (Selection 400 402) "界é\r\n" withoutFirst
+      expected = TE.encodeUtf8 (T.take 400 row <> "界é\r\n" <> T.drop 402 row <> "\r\nlast")
+      independent = edited {saved=error "save forced saved text",undoStack=error "save forced Undo",redoStack=error "save forced Redo"}
+  piecesSaved <- saveFile loadedSaved independent >>= right "save edited raw pieces"
+  piecesBytes <- BS.readFile piecesPath
+  check "edited spans save exact UTF-8 and CRLF, excluding deleted provenance"
+    (piecesBytes == expected && diskBytes piecesSaved == Just expected)
+
+  let switched = replaceBuffer True "\NUL\255\r\n" edited
+      restored = either (error . T.unpack) id (restoreBuffer (snapshotBuffer switched))
+      transitions =
+        [ ("Undo", undo edited, TE.encodeUtf8 (row <> "\r\nlast"))
+        , ("Redo", redo (undo edited), expected)
+        , ("explicit replacement", replaceBuffer False "replacement\r\nλ" edited, TE.encodeUtf8 "replacement\r\nλ")
+        , ("byte mode replacement", switched, BS.pack [0,255,13,10])
+        , ("mode Undo", undo switched, expected)
+        , ("recovered representation", restored, BS.pack [0,255,13,10])
+        ]
+  _ <- foldM (\state (name, candidate, wanted) -> do
+    result <- saveFile state candidate >>= right ("save " ++ name)
+    actual <- BS.readFile piecesPath
+    check (name ++ " saves exact bytes and strict baseline")
+      (actual == wanted && diskBytes result == Just wanted)
+    pure result) piecesSaved transitions
+
+  let hexPath = dir </> "pieces.bin"
+      raw = BS.pack [0,255,13,10,128,0,65]
+      hex = replaceSelection (Selection 1 2) "\254\NUL" (newByteBuffer raw)
+      hexExpected = BS.pack [0,254,0,13,10,128,0,65]
+  (hexState, _) <- loadFile hexPath >>= right "prepare hex save"
+  hexSaved <- saveFile hexState hex >>= right "save edited byte pieces"
+  hexBytes <- BS.readFile hexPath
+  check "hex pieces retain all bytes including NUL and invalid UTF-8"
+    (hexBytes == hexExpected && diskBytes hexSaved == Just hexExpected)
   putStrLn "file checks passed"
   where
     makeDirectory = do
