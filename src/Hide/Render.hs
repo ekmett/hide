@@ -1007,9 +1007,9 @@ dialogLayers d dg =
           TextArea name editable b sel sr sc ->
             let area=textAreaRect rect field
                 pane=attr white blue
-                line n=V.cropRight (width area) (V.translateX (negate sc)
-                  (styledImage False (const True) (Just (if editable then diffLineAttr (bufferLineAt b n) else pane))
-                    (focus dg==i && editable) sel (bufferLineOffset b n) [(c,Plain) | c<-T.unpack (bufferLineAt b n)])
+                line n=V.cropRight (width area)
+                  (styledSourceImage False (Just (if editable then diffLineAttr (bufferLineAt b n) else pane))
+                    (focus dg==i && editable) sel (bufferLineOffset b n) sc (width area) (plainSourceRow (bufferLineAt b n))
                   V.<|> V.charFill pane ' ' (width area) 1)
                 thumb=sr*max 0 (height area-1) `div` max 1 (bufferLineCount b-height area)
                 content=V.vertCat [line n V.<|> label (attr blue scrollCyan) (if n-sr==thumb then "■" else "│") | n<-[sr..sr+height area-1]]
