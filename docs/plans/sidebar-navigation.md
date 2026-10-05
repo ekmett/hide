@@ -180,8 +180,9 @@ Named WordStar commands, horizontal/vertical movement and selection, row/documen
 edges, pages, word movement/selection, word deletion, adjacent deletion and line
 deletion use an editable profile. WordStar Ctrl+A/F aliases and Ctrl+K/Ctrl+Q
 block grammar remain fixed. Dialog editing/search actions are
-configurable for existing editable TextArea controls; dialog navigation and
-single-line Input ownership remain fixed. Published runtime menu contributions
+configurable for existing editable TextArea controls. Dialog next/previous focus
+commands cover single-line fields, dropdowns and buttons. Dialog accept/cancel,
+Ctrl/Command Tab aliases and single-line Input editing remain fixed. Published runtime menu contributions
 use that same configuration and exact registration lifetime; see the
 [plugin design](../design/haskell-plugins.md#commands-menus-and-bindings).
 

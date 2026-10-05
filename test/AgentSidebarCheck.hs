@@ -24,6 +24,7 @@ import Hide.AgentSidebarTypes
 import qualified Hide.AgentHub as AH
 import qualified Hide.AgentRuntime as AR
 import Hide.App (applyEffects)
+import Hide.Commands (configuredBindings)
 import Hide.Buffer (Selection(..),newBuffer)
 import Hide.Plugin.Command (withRegistry,registerCommand,CommandDef(..),Codec(..))
 import qualified FormExtension
@@ -94,6 +95,13 @@ checks=bracket temporary removePathForcibly $ \root->
         ensure "agent-origin form submission leaves human draft intact" (inputValue deniedAgent==Just ("Primary",Selection 0 7))
         let renamed=deniedAgent
         ensure "rename opens with current name selected" (inputValue renamed==Just ("Primary",Selection 0 7))
+        let focusMaps=either (error . show) id (configuredBindings [] (M.singleton "terminal" (M.singleton "dialog" (M.fromList [("hide.dialog.focus-next",["F13"]),("hide.dialog.focus-previous",["F14"])]))))
+            navigable=renamed {keyBindings=focusMaps}
+        focusedForm<-act (handleEvent (V.EvKey (V.KFun 13) []) navigable)
+        ensure "remapped form focus retains exact form and draft" (formRef focusedForm==formRef renamed && inputValue focusedForm==Just ("Primary",Selection 0 7) && maybe False ((==1).focus) (dialog focusedForm))
+        returnedForm<-act (handleEvent (V.EvKey (V.KFun 14) []) focusedForm)
+        ensure "form focus never claims submission" (formRef returnedForm==formRef renamed && maybe False ((==0).focus) (dialog returnedForm))
+        let renamed=returnedForm
         let typed=fst (handleEvent (V.EvKey (V.KChar 'N') []) renamed)
         ensure "typing replaces rename selection" (inputValue typed==Just ("N",Selection 1 1))
         let pasted=fst (handleEvent (V.EvPaste (TE.encodeUtf8 "界x")) typed)
