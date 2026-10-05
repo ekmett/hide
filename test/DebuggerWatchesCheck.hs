@@ -27,10 +27,10 @@ import qualified Hide.Plugin.Tree as P
 import qualified Hide.Plugin.Menu as Menu
 
 checks :: IO ()
-checks=mapM_ session ["child","child-invalidated","child-error","child-edit","child-remove","child-resume","child-frame","child-retire","child-modal","child-policy","normal","edit","remove","resume","frame","retire","modal","policy"] >> putStrLn "Debugger watch execution checks passed"
+checks=mapM_ session ["pages","pages-edit","pages-remove","pages-resume","pages-frame","pages-retire","pages-oversized","child","child-invalidated","child-error","child-edit","child-remove","child-resume","child-frame","child-retire","child-modal","child-policy","normal","edit","remove","resume","frame","retire","modal","policy"] >> putStrLn "Debugger watch execution checks passed"
 
 session :: String -> IO ()
-session scenario=bracket (Fixture.fixture (if take 5 scenario=="child" then "watches-"<>scenario else if scenario=="policy" then "watches-private" else "watches")) cleanup $ \(port,path,_)->withSidebarCommands $ \host->withDebugger $ \runtime->withDebuggerSidebar host runtime $ \provider->do
+session scenario=bracket (Fixture.fixture (if take 5 scenario=="child" || take 5 scenario=="pages" then "watches-"<>scenario else if scenario=="policy" then "watches-private" else "watches")) cleanup $ \(port,path,_)->withSidebarCommands $ \host->withDebugger $ \runtime->withDebuggerSidebar host runtime $ \provider->do
   origin<-canonicalizePath (path<>".hs")
   putStrLn ("watch scenario "<>scenario)
   let fallback d _=pure (False,d)
@@ -99,7 +99,7 @@ session scenario=bracket (Fixture.fixture (if take 5 scenario=="child" then "wat
   stopped<-await "stopped selected frame" (T.isPrefixOf "Stopped in ".status) attached
   empty<-expand "Watches" stopped >>= await "empty watches" (has "No watches")
   let childScenario=take 5 scenario=="child"
-      expression=if scenario=="normal" then "counter + 1" else if childScenario then "record" else "delay"
+      expression=if scenario=="normal" then "counter + 1" else if childScenario || take 5 scenario=="pages" then "record" else "delay"
   created<-add expression empty
   quiet<-foldM (\d _->tick d) created [1..20::Int]
   check "passive stop/tree/tick never evaluates" . null =<< executing
@@ -110,7 +110,68 @@ session scenario=bracket (Fixture.fixture (if take 5 scenario=="child" then "wat
   check "agent origin does not gain executing sidebar authority" ("stale, protected or busy" `T.isInfixOf` status agentRejected)
   check "agent attempt did not evaluate" . null =<< executing
   evaluated<-invoke "Evaluate watch" (row expression quiet) quiet >>= await "explicit request" (T.isPrefixOf "Evaluating watch".status)
-  if childScenario then do
+  if take 5 scenario=="pages" then do
+    loaded<-await "pageable watch" (has "record = Record") evaluated
+    expanded<-expand "record" loaded
+    if scenario=="pages-oversized" then do
+      failed<-await "oversized child snapshot is refused" (has "exceeds 1 MiB") expanded
+      check "oversized snapshot does not publish a silently truncated page" (not (has "item0 =" failed))
+    else do
+      let hasWatchMore d=any (\r->case rowAction r of LoadNext{}->rowHit r==rowHit (row "record" d); _->False) (rows d)
+      first<-await "first watch page and More" (\d->has "item127 =" d && hasWatchMore d) expanded
+      let childRows=filter (T.isPrefixOf "item".P.infoLabel.rowInfo).rows
+          watchMore d=[i | (i,r)<-zip [0..] (rows d),LoadNext{}<-[rowAction r],rowHit r==rowHit (row "record" d)]
+          more d=case watchMore d of
+            [i]->pure (activateTree True i d)
+            _->fail "missing Watch More row"
+      check "first watch page contains exactly128 children" (length (childRows first)==128 && not (has "item128 =" first))
+      (firstSelected,firstValues)<-entries
+      let [(firstKey,firstEntry)]=M.toList firstValues
+          firstReceipt=maybe (error "missing first page frame") id firstSelected
+      (_,unpublished)<-core first [DebugSidebarAction (ForceDebugWatchChild firstKey (watchRevision firstEntry) firstReceipt 980 128 1 971)]
+      check "retained snapshot tail does not grant unpublished child authority" ("expired" `T.isInfixOf` status unpublished)
+      (loading,outbox)<-more first
+      second<-snd <$> effects loading outbox >>= await "second watch page" (\d->has "item255 =" d && hasWatchMore d)
+      check "second page adds exactly128 children" (length (childRows second)==256 && not (has "item256 =" second))
+      (loadingLast,oldMore)<-more second
+      lastPage<-snd <$> effects loadingLast oldMore >>= await "last watch page" (\d->has "item259 =" d && not (hasWatchMore d))
+      check "final page preserves all260 children" (length (childRows lastPage)==260)
+      sent<-requests
+      let parentReads=[r | r<-sent,field "command" r==Just ("variables"::T.Text),(field "arguments" r >>= field "variablesReference")==Just (980::Int)]
+      check "More pages do not resend DAP variables" (length parentReads==1)
+      (selected,values)<-entries
+      let [(key,entry)]=M.toList values
+          receipt@(WatchFrame _ epoch _ _ _)=maybe (error "missing page frame") id selected
+          request=DebugPageRequest epoch (DebugWatchVariables key (watchRevision entry) receipt 980) 256
+          force=ForceDebugWatchChild key (watchRevision entry) receipt 980 128 1 971
+      forM_ [ForceDebugWatchChild key (watchRevision entry) receipt 980 0 1 971,
+        ForceDebugWatchChild key (watchRevision entry) receipt 980 128 0 971,
+        ForceDebugWatchChild key (watchRevision entry) receipt 980 129 1 971] $ \guessed->do
+        (_,refused)<-core lastPage [DebugSidebarAction guessed]
+        check "later child Force requires exact page offset and position" ("expired" `T.isInfixOf` status refused)
+      changed<-case scenario of
+        "pages"->invoke "Force lazy child" (row "item129 =" lastPage) lastPage >>= await "later-page child forced" (has "Child forced; evaluate watch")
+        "pages-edit"->snd <$> core lastPage [DebugSidebarAction (EditDebugWatch key (watchRevision entry))] >>= save "replacement"
+        "pages-remove"->snd <$> core lastPage [DebugSidebarAction (RemoveDebugWatch key (watchRevision entry))]
+        "pages-resume"->snd <$> core lastPage [DebugAction "continue" []]
+        "pages-retire"->retireTreeFromHost host (case receipt of WatchFrame owner _ _ _ _->owner) lastPage
+        _->snd <$> core lastPage [DebugAction "stack" []] >>= await "page frame chooser" ((/=Nothing).dialog) >>= \d->case dialog d of
+          Just dg->let chosen=dg {fields=map (\field->case field of ListBox title values _->ListBox title values 1; _->field) (fields dg)}
+                       (next,outbox)=submitDialog 0 chosen d
+                   in snd <$> core next outbox
+          _->fail "missing page frame chooser"
+      (_,oldForce)<-core changed [DebugSidebarAction force]
+      _<-effects oldForce oldMore
+      -- Poll the actual owner refusal, rather than infer retirement from a quiet
+      -- UI before a delayed request has reached the debugger mailbox.
+      withAsync (debuggerSidebarRead runtime request) $ \reply->do
+        _<-awaitIO "stale page receipt resolves" (\_->maybe False (const True) <$> poll reply) changed
+        result<-wait reply
+        check "old stopped/watch/provider receipt cannot read cached children" (either (const True) (const False) result)
+      after<-requests
+      check "retained More/Force cannot revive a retired snapshot" (length [r | r<-after,field "command" r==Just ("variables"::T.Text)]==length [r | r<-sent,field "command" r==Just ("variables"::T.Text)]+if scenario=="pages" then 1 else 0)
+      check "later-page Force sends only the captured lazy reference" (length [r | r<-after,field "command" r==Just ("variables"::T.Text),(field "arguments" r >>= field "variablesReference")==Just (971::Int)]==if scenario=="pages" then 1 else 0)
+  else if childScenario then do
     loaded<-await "nonlazy parent watch" (has "record = Record") evaluated
     expanded<-expand "record" loaded >>= await "nested lazy child" (has "nested =")
     let child=row "nested =" expanded
@@ -127,12 +188,12 @@ session scenario=bracket (Fixture.fixture (if take 5 scenario=="child" then "wat
     (selected,values)<-entries
     let [(key,entry)]=M.toList values
         receipt=maybe (error "missing child frame") id selected
-        command=ForceDebugWatchChild key (watchRevision entry) receipt 980 1 971
-    forM_ [ForceDebugWatchChild key (watchRevision entry) receipt 980 (-1) 971,
-      ForceDebugWatchChild key (watchRevision entry) receipt 980 128 971,
-      ForceDebugWatchChild key (watchRevision entry) receipt 980 0 971,
-      ForceDebugWatchChild key (watchRevision entry) receipt 999 1 971,
-      ForceDebugWatchChild key (watchRevision entry) receipt 980 1 972] $ \guessed->do
+        command=ForceDebugWatchChild key (watchRevision entry) receipt 980 0 1 971
+    forM_ [ForceDebugWatchChild key (watchRevision entry) receipt 980 0 (-1) 971,
+      ForceDebugWatchChild key (watchRevision entry) receipt 980 0 128 971,
+      ForceDebugWatchChild key (watchRevision entry) receipt 980 0 0 971,
+      ForceDebugWatchChild key (watchRevision entry) receipt 999 0 1 971,
+      ForceDebugWatchChild key (watchRevision entry) receipt 980 0 1 972] $ \guessed->do
       (_,rejected)<-core refused [DebugSidebarAction guessed]
       check "child Force requires exact cached page and position" ("expired" `T.isInfixOf` status rejected)
     forcing<-invoke "Force lazy child" child refused

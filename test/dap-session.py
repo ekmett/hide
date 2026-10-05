@@ -239,18 +239,25 @@ for session in range(1, 4 if mode == 'output-owner' else 3 if mode == 'reconnect
                     reply(req, dict(result='42', variablesReference=0))
             elif cmd == 'variables':
                 reference = args['variablesReference']
-                if mode.startswith('watches-child') and reference == 971:
+                if (mode.startswith('watches-child') or mode == 'watches-pages') and reference == 971:
                     assert args.get('start') == 0 and args.get('count') == 128, args
                     if mode == 'watches-child-error':
                         reply(req, success=False)
-                    elif mode in ('watches-child', 'watches-child-invalidated'):
+                    elif mode in ('watches-child', 'watches-child-invalidated', 'watches-pages'):
                         reply(req, dict(variables=[dict(name='nested', value='ForcedNode', variablesReference=972)]))
                         if mode == 'watches-child-invalidated':
                             event('invalidated', dict(areas=['variables']))
                     else:
                         pending_variables = req
+                elif mode.startswith('watches-pages') and reference == 980:
+                    assert args == dict(variablesReference=980), args
+                    rows = [dict(name='item%d' % i, value=str(i), variablesReference=0) for i in range(260)]
+                    rows[129] = dict(name='item129', value='<thunk>', variablesReference=971, presentationHint=dict(lazy=True))
+                    if mode == 'watches-pages-oversized':
+                        rows[259]['value'] = 'X' * (1024*1024+1)
+                    reply(req, dict(variables=rows))
                 elif mode.startswith('watches') and reference in (970, 980):
-                    assert args.get('start') == 0 and args.get('count') == 128, args
+                    assert args == dict(variablesReference=reference), args
                     reply(req, dict(variables=[dict(name='counter', value='42', variablesReference=0), dict(name='nested', value='<thunk>', variablesReference=971, presentationHint=dict(lazy=True))]))
                 elif mode in ('sidebar', 'sidebar-exit') and reference in (211, 212, 221):
                     reply(req, dict(variables=[dict(name='counter%d' % reference, value=str(reference), variablesReference=0), dict(name='lazy', value='<thunk>', variablesReference=900, presentationHint=dict(lazy=True)), dict(name='waiting', value='expand to wait', variablesReference=910)]))

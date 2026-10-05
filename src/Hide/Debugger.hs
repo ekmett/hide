@@ -41,6 +41,7 @@ import qualified Data.Map.Strict as M
 import Data.Maybe (fromMaybe, isJust, listToMaybe, maybeToList)
 import Data.Text (Text)
 import qualified Data.Text as T
+import qualified Data.Vector as V
 import GHC.Clock (getMonotonicTimeNSec)
 import System.Directory (XdgDirectory(XdgConfig), canonicalizePath, doesFileExist, getXdgDirectory)
 import System.IO (IOMode(ReadMode), withBinaryFile)
@@ -221,14 +222,15 @@ tickOutputOwner runtime@(Debugger ref _ _ _ (OutputOwner _ slot _ latest _)) des
 type Core = Desktop -> [Effect] -> IO (Bool,Desktop)
 data Debugger = Debugger (IORef State) (IO Integer) HdbRuntime SidebarMailbox OutputOwner
 data SidebarMailbox = SidebarMailbox !(TVar (Maybe (Int,Int,FilePath))) !(TBQueue SidebarIngress) !(TVar (Int,Maybe WatchFrame,M.Map Int DebuggerWatch))
-data SidebarIngress = ReadDebugPage !DebugPageRequest !(TMVar (Either Text Value)) | CacheDebugPage !DebugPageRequest !Value
+data DebugPageBody = AdapterPage !Value | CachedPage !Int !Value
+data SidebarIngress = ReadDebugPage !DebugPageRequest !(TMVar (Either Text DebugPageBody)) | CacheDebugPage !DebugPageRequest !Value
   | ReadDebugSource !Int !Int !Int !(Maybe FilePath) !(MVar (Either Text Value))
 data Pending = Init | Attach | Configure | Breaks Text [Int] | Exceptions | Threads Bool
   | Stack Bool Int Int | Scopes Int | Variables Int | ExceptionDetails | Source Bool Int Int Value | Control Bool | Detach
-  | Inspection Text (MVar (Either Text Value)) | SourceInspection !Int !Int !(Maybe FilePath) (MVar (Either Text Value)) | SidebarRead DebugPageRequest (TMVar (Either Text Value))
+  | Inspection Text (MVar (Either Text Value)) | SourceInspection !Int !Int !(Maybe FilePath) (MVar (Either Text Value)) | SidebarRead DebugPageRequest (TMVar (Either Text DebugPageBody))
   | WatchRequest !WatchOperation !(Maybe Text) !FilePath ![FilePath]
   deriving (Eq)
-data WatchMode = EvaluateWatch | ForceWatch !Int | ForceWatchChild !Int !Int !Int deriving Eq
+data WatchMode = EvaluateWatch | ForceWatch !Int | ForceWatchChild !Int !Int !Int !Int deriving Eq
 data WatchOperation = WatchOperation !Int !Int !WatchFrame !WatchMode deriving Eq
 data PreparedWatch = PreparedWatch !Text !Int !Bool !(Maybe FilePath) !Bool !(Maybe Value)
   | PreparedWatchError !Text !(Maybe FilePath) !Bool
@@ -396,7 +398,7 @@ watchProviderCurrent s=case watchProvider s of Nothing->pure False; Just (WatchP
 -- enqueues its ordinary DAP request. Response sizing/cache preparation happen here,
 -- outside the UI lock; owner cache admission retains at most 64 pages of 1 MiB.
 debuggerSidebarRead :: Debugger -> DebugPageRequest -> IO (Either Text Value)
-debuggerSidebarRead (Debugger _ _ _ (SidebarMailbox epoch queue _) _) request@(DebugPageRequest captured target _)=do
+debuggerSidebarRead (Debugger _ _ _ (SidebarMailbox epoch queue _) _) request@(DebugPageRequest captured target offset)=do
   current<-readTVarIO epoch
   if fmap (\(_,value,_)->value) current/=Just captured then pure (Left "Debugger node expired.") else do
     reply<-newEmptyTMVarIO
@@ -405,10 +407,13 @@ debuggerSidebarRead (Debugger _ _ _ (SidebarMailbox epoch queue _) _) request@(D
     case completed of
       Nothing->pure (Left "Debugger sidebar request timed out.")
       Just (Left err)->pure (Left err)
-      Just (Right body)->do
-        -- Keep the requested rows and stack total, not arbitrary adapter metadata.
-        let key=case target of DebugThreads->"threads"; DebugStack{}->"stackFrames"; DebugScopes{}->"scopes"; DebugVariables{}->"variables"; DebugWatchVariables{}->"variables"
-            page=object [fromText key .= take 128 (items key body),"totalFrames" .= (field "totalFrames" body :: Maybe Int)]
+      Just (Right result)->do
+        -- Cache provenance comes from the host receipt, never adapter JSON.
+        let (cachedOffset,body)=case result of AdapterPage value->(Nothing,value); CachedPage start value->(Just start,value)
+            key=case target of DebugThreads->"threads"; DebugStack{}->"stackFrames"; DebugScopes{}->"scopes"; DebugVariables{}->"variables"; DebugWatchVariables{}->"variables"
+            page=case target of
+              DebugWatchVariables{}->watchPage offset cachedOffset body
+              _->object [fromText key .= take 128 (items key body),"totalFrames" .= (field "totalFrames" body :: Maybe Int)]
         checked<-evaluate (boundedResult page)
         prepared<-case (checked,target,current) of
           (Right value,DebugStack{},Just (_,_,base))->prepareStackPaths base value
@@ -417,8 +422,21 @@ debuggerSidebarRead (Debugger _ _ _ (SidebarMailbox epoch queue _) _) request@(D
           Left err->pure (Left err)
           Right value->do
             atomically (writeTBQueue queue (CacheDebugPage request value))
-            pure (Right value)
+            pure (Right (case target of
+              DebugWatchVariables{}->object ["variables" .= take 128 (items "variables" value),"hasMore" .= flag "hasMore" value]
+              _->value))
   where fromText=K.fromText
+
+-- Page zero owns the single bounded returned snapshot. Later entries retain only
+-- their published rows; slicing/sizing happens on the waiting provider worker.
+-- Adapters may ignore start/count, so continuation never repeats a DAP read.
+watchPage :: Int -> Maybe Int -> Value -> Value
+watchPage offset cachedOffset body=object ["variables" .= retained,"hasMore" .= more]
+  where
+    start=fromMaybe 0 cachedOffset
+    rows=drop (offset-start) (items "variables" body)
+    retained=if offset==0 then rows else take 128 rows
+    more=if cachedOffset==Just offset then flag "hasMore" body else not (null (drop 128 rows))
 
 -- At most four small mailbox messages per tick. Backpressure belongs to provider
 -- workers; the session owner never waits for a producer or a DAP socket.
@@ -427,19 +445,23 @@ drainSidebarReads runtime@(Debugger ref _ _ (SidebarMailbox _ queue _) _) d=forM
   next<-atomically (tryReadTBQueue queue)
   forM_ next $ \ingress->do
     s<-readIORef ref
+    watchLive<-watchProviderCurrent s
+    let current request@(DebugPageRequest _ target _)=validSidebarRequest s request && case target of DebugWatchVariables{}->watchLive; _->True
     case ingress of
       ReadDebugSource captured reference stamp origin reply
         | generation s/=captured || not (stopped s && ready s && configured s && isJust (client s) && endedAt s==Nothing && disconnectAt s==Nothing) || not (sourceStampCurrent s reference stamp) || maybe False (protectedPath d) origin ->void (tryPutMVar reply (Left "Debugger source is private or expired."))
         | length [() | (SourceInspection{},_,_)<-M.elems (pending s)]>=4 ->void (tryPutMVar reply (Left "Debugger source inspection is busy."))
         | otherwise->send runtime (SourceInspection reference stamp origin reply) "source" (object ["sourceReference" .= reference])
-      CacheDebugPage request value | validSidebarRequest s request && (M.member request (sidebarPages s) || M.size (sidebarPages s)<64)->do
+      CacheDebugPage request value | current request && (M.member request (sidebarPages s) || M.size (sidebarPages s)<64)->do
         recordSidebarResponse ref request value
         modifyIORef' ref (\state->state {sidebarPages=M.insert request value (sidebarPages state)})
       CacheDebugPage{}->pure ()
-      ReadDebugPage request reply
-        | not (validSidebarRequest s request)->atomically (void (tryPutTMVar reply (Left "Debugger node expired or is lazy.")))
-        | Just cached<-M.lookup request (sidebarPages s)->atomically (void (tryPutTMVar reply (Right cached)))
+      ReadDebugPage request@(DebugPageRequest epoch target offset) reply
+        | not (current request)->atomically (void (tryPutTMVar reply (Left "Debugger node expired or is lazy.")))
+        | Just cached<-M.lookup request (sidebarPages s)->atomically (void (tryPutTMVar reply (Right (CachedPage offset cached))))
         | M.size (sidebarPages s)>=64->atomically (void (tryPutTMVar reply (Left "Debugger sidebar page budget reached; resume to refresh.")))
+        | DebugWatchVariables{}<-target,offset>0->atomically (void (tryPutTMVar reply
+            (maybe (Left "Watch child snapshot expired.") (Right . CachedPage 0) (M.lookup (DebugPageRequest epoch target 0) (sidebarPages s)))))
         | otherwise->do
             let (command,args)=sidebarArguments request
             outcome<-try (send runtime (SidebarRead request reply) command args)
@@ -453,7 +475,7 @@ validSidebarRequest s (DebugPageRequest epoch target offset)=generation s==epoch
   DebugStack tid->M.member tid (sidebarThreads s)
   DebugScopes tid fid->offset==0 && M.member (tid,fid) (sidebarFrames s)
   DebugVariables tid fid reference->offset==0 && M.lookup (FrameReferences tid fid,reference) (sidebarReferences s)==Just False
-  DebugWatchVariables ident revision receipt reference->offset==0 && watchCurrent s ident revision receipt && M.lookup (WatchReferences ident revision receipt,reference) (sidebarReferences s)==Just False
+  DebugWatchVariables ident revision receipt reference->offset `mod` 128==0 && watchCurrent s ident revision receipt && M.lookup (WatchReferences ident revision receipt,reference) (sidebarReferences s)==Just False
 
 sidebarArguments :: DebugPageRequest -> (Text,Value)
 sidebarArguments (DebugPageRequest _ target offset)=case target of
@@ -461,22 +483,26 @@ sidebarArguments (DebugPageRequest _ target offset)=case target of
   DebugStack tid->("stackTrace",object ["threadId" .= tid,"startFrame" .= offset,"levels" .= (128::Int)])
   DebugScopes _ fid->("scopes",object ["frameId" .= fid])
   DebugVariables _ _ reference->("variables",object ["variablesReference" .= reference,"start" .= offset,"count" .= (128::Int)])
-  DebugWatchVariables _ _ _ reference->("variables",object ["variablesReference" .= reference,"start" .= offset,"count" .= (128::Int)])
+  DebugWatchVariables _ _ _ reference->("variables",object ["variablesReference" .= reference])
 
 -- Only IDs and shallow immutable DAP rows enter owner maps. Bounded raw response
 -- fields are prepared/sized by the waiting worker before page cache admission.
 recordSidebarResponse :: IORef State -> DebugPageRequest -> Value -> IO ()
 recordSidebarResponse ref (DebugPageRequest _ target _) body=modifyIORef' ref $ \s->case target of
-  DebugThreads->s {sidebarThreads=M.fromList [(ident,()) | row<-take 128 (items "threads" body),let ident=integer "id" row,ident>0]}
-  DebugStack tid->s {sidebarFrames=boundedUnion (M.fromList [((tid,fid),row) | row<-take 128 (items "stackFrames" body),let fid=integer "id" row,fid>0]) (sidebarFrames s)}
+  DebugThreads->s {sidebarThreads=M.fromList [(ident,()) | row<-rows "threads",let ident=integer "id" row,ident>0]}
+  DebugStack tid->s {sidebarFrames=boundedUnion (M.fromList [((tid,fid),row) | row<-rows "stackFrames",let fid=integer "id" row,fid>0]) (sidebarFrames s)}
   DebugScopes tid fid->s {sidebarReferences=boundedReferences (references tid fid "scopes") (sidebarReferences s)}
   DebugVariables tid fid _->s {sidebarReferences=boundedReferences (references tid fid "variables") (sidebarReferences s)}
   DebugWatchVariables ident revision receipt _->s {sidebarReferences=boundedReferences
-    (M.fromListWith (||) [((WatchReferences ident revision receipt,reference),maybe False (flag "lazy") (field "presentationHint" row)) | row<-take 128 (items "variables" body),let reference=integer "variablesReference" row,reference>0]) (sidebarReferences s)}
+    (M.fromListWith (||) [((WatchReferences ident revision receipt,reference),maybe False (flag "lazy") (field "presentationHint" row)) | row<-rows "variables",let reference=integer "variablesReference" row,reference>0]) (sidebarReferences s)}
   where
+    -- Page zero may retain more rows, but admission never decodes its full array.
+    rows key=case body of
+      Object object | Just (Array values)<-KM.lookup (K.fromText key) object->V.toList (V.take 128 values)
+      _->[]
     boundedUnion newer previous=fst (M.splitAt 32768 (M.union newer previous))
     boundedReferences newer previous=fst (M.splitAt 32768 (M.unionWith (||) newer previous))
-    references tid fid key=M.fromListWith (||) [((FrameReferences tid fid,ident),key=="variables" && maybe False (flag "lazy") (field "presentationHint" row)) | row<-take 128 (items key body),let ident=integer "variablesReference" row,ident>0]
+    references tid fid key=M.fromListWith (||) [((FrameReferences tid fid,ident),key=="variables" && maybe False (flag "lazy") (field "presentationHint" row)) | row<-rows key,let ident=integer "variablesReference" row,ident>0]
 
 sidebarAction :: Debugger -> DebugSidebarRequest -> Desktop -> IO Desktop
 sidebarAction runtime@(Debugger ref _ _ _ _) request d
@@ -491,7 +517,7 @@ sidebarAction runtime@(Debugger ref _ _ _ _) request d
           _->pure d {status="Watch expired."}
       EvaluateDebugWatch ident revision receipt->startWatch runtime ident revision receipt EvaluateWatch d
       ForceDebugWatch ident revision receipt reference->startWatch runtime ident revision receipt (ForceWatch reference) d
-      ForceDebugWatchChild ident revision receipt parent position reference->startWatch runtime ident revision receipt (ForceWatchChild parent position reference) d
+      ForceDebugWatchChild ident revision receipt parent offset position reference->startWatch runtime ident revision receipt (ForceWatchChild parent offset position reference) d
       RemoveDebugWatch ident revision->do
         s<-readIORef ref
         case M.lookup ident (watchExpressions s) of
@@ -550,20 +576,22 @@ startWatch runtime@(Debugger ref _ _ _ _) ident revision receipt mode d=do
       forceAllowed reference=case watchValue <$> M.lookup ident (watchExpressions s) of
         Just (WatchResult current _ rootReference True _)->current==receipt && rootReference==reference && M.lookup (WatchReferences ident revision receipt,reference) (sidebarReferences s)==Just True
         _->False
-      childAllowed parent position reference=position>=0 && position<128 && reference>0 &&
+      childAllowed parent offset position reference=offset>=0 && offset<=32768 && offset `mod` 128==0 && position>=0 && position<128 && reference>0 &&
         M.lookup (WatchReferences ident revision receipt,parent) (sidebarReferences s)==Just False &&
         M.lookup (WatchReferences ident revision receipt,reference) (sidebarReferences s)==Just True &&
-        case M.lookup (DebugPageRequest epoch (DebugWatchVariables ident revision receipt parent) 0) (sidebarPages s) >>= atRows position of
+        case M.lookup (DebugPageRequest epoch (DebugWatchVariables ident revision receipt parent) offset) (sidebarPages s) >>= atRows position of
           Just row->integer "variablesReference" row==reference && maybe False (flag "lazy") (field "presentationHint" row)
           _->False
       epoch=case receipt of WatchFrame _ value _ _ _->value
-      atRows position body=at (items "variables" body) position
+      atRows position body=case body of
+        Object object | Just (Array values)<-KM.lookup "variables" object->values V.!? position
+        _->Nothing
   live<-watchProviderCurrent s
   if not live || not (watchCurrent s ident revision receipt) then pure d {status="Watch or stopped frame expired."}
   else if busy then pure d {status="Watch execution is busy."}
   else if case mode of
     ForceWatch reference->not (forceAllowed reference)
-    ForceWatchChild parent position reference->not (childAllowed parent position reference)
+    ForceWatchChild parent offset position reference->not (childAllowed parent offset position reference)
     EvaluateWatch->False
     then pure d {status="Lazy watch reference expired."}
   else do
@@ -581,8 +609,8 @@ startWatch runtime@(Debugger ref _ _ _ _) ident revision receipt mode d=do
     let WatchFrame _ _ _ _ fid=fresh
         (command,args)=case mode of
           EvaluateWatch->("evaluate",object ["expression" .= maybe "" watchExpression (M.lookup ident (watchExpressions s)),"frameId" .= fid,"context" .= ("watch"::Text)])
-          ForceWatch reference->variables reference
-          ForceWatchChild _ _ reference->variables reference
+          ForceWatch reference->("variables",object ["variablesReference" .= reference])
+          ForceWatchChild _ _ _ reference->variables reference
         variables reference=("variables",object ["variablesReference" .= reference,"start" .= (0::Int),"count" .= (128::Int)])
     send runtime (WatchRequest operation backing base private) command args
     pure d {status=case mode of EvaluateWatch->"Evaluating watch…"; ForceWatch{}->"Forcing lazy watch…"; ForceWatchChild{}->"Forcing lazy child…"}
@@ -606,7 +634,7 @@ prepareWatch (Debugger ref _ _ _ _) operation backing base private result=mask_ 
             let WatchOperation _ _ _ mode=operation
                 (title,reference,lazy,page)=case mode of
                   EvaluateWatch->(text "result" body,integer "variablesReference" body,maybe False (flag "lazy") (field "presentationHint" body),Nothing)
-                  ForceWatch handle->("Forced; expand to inspect",handle,False,Just (object ["variables" .= take 128 (items "variables" body)]))
+                  ForceWatch handle->("Forced; expand to inspect",handle,False,Just (watchPage 0 Nothing body))
                   -- A forcing reply may replace the value and immediately
                   -- invalidate all references. Refresh the expression explicitly;
                   -- neither the requested handle nor reply handles stay live.
@@ -935,7 +963,7 @@ boundedResult value | BL.length (encode value)>=1024*1024 = Left "Debugger respo
 completeInspection :: Pending -> Either Text Value -> IO ()
 completeInspection (SourceInspection _ _ _ reply) result=void (tryPutMVar reply result)
 completeInspection (Inspection _ reply) result=tryPutMVar reply result >> pure ()
-completeInspection (SidebarRead _ reply) result=atomically (void (tryPutTMVar reply result))
+completeInspection (SidebarRead _ reply) result=atomically (void (tryPutTMVar reply (AdapterPage <$> result)))
 completeInspection _ _=pure ()
 
 awaitInspection :: IORef State -> Int -> MVar (Either Text Value) -> IO (Either Text Value)
@@ -1388,7 +1416,7 @@ receive runtime@(Debugger ref clock _ _ _) d event = do
           SourceInspection _ _ _ reply->void (tryPutMVar reply result) >> pure d
           SidebarRead (DebugPageRequest _ target _) reply -> do
             case target of DebugStack{}->forM_ result (recordSourceReferences ref); _->pure ()
-            atomically (void (tryPutTMVar reply result))
+            atomically (void (tryPutTMVar reply (AdapterPage <$> result)))
             pure d
           Inspection command reply -> do
             forM_ result $ \body->do
@@ -1563,7 +1591,7 @@ response runtime@(Debugger ref _ _ _ _) kind body d = do
       when (command=="stackTrace") (recordSourceReferences ref body)
       _<-tryPutMVar reply (boundedResult body)
       pure d
-    SidebarRead _ reply -> atomically (void (tryPutTMVar reply (Right body))) >> pure d
+    SidebarRead _ reply -> atomically (void (tryPutTMVar reply (Right (AdapterPage body)))) >> pure d
     Detach -> do
       stopTransport runtime s
       modifyIORef' ref (\state -> (invalidate state) {client=Nothing,connected=False,pending=M.empty,ready=False,configured=False,disconnectAt=Nothing})

@@ -163,9 +163,11 @@ source. Resume, disconnect or a thread change expires the values and pending
 replies. Existing
 Debug menu inspection windows remain available.
 
-Stack pages contain at most 128 frames. Scopes and variables currently expose the
-first 128 rows; adapters without a variable paging contract cannot silently
-produce an unbounded tree. Lazy references display their state without an expand
+Stack pages contain at most 128 frames. Scopes and locals expose the first 128
+rows. Nested Watches use **More…** to show 128 children at a time from one cached
+adapter response, without another debugger request. The response must fit the
+existing 1 MiB bound; the shared cache retains at most 64 entries. These are local
+pages, so adapters need no variable paging capability. Lazy references display their state without an expand
 action, so passive expansion does not force Haskell thunks. Painting, scrolling
 and repeated ticks use cached rows and do not fetch or evaluate values.
 
@@ -195,8 +197,8 @@ and nonlazy list-child expansion through these actions. Explicit **Force lazy
 child** also works on a lazy list tail; after hdb invalidates its references, an
 explicit watch refresh shows fresh children. hdb Evaluate replies do not mark a
 lazy root, so **Force lazy watch** is unavailable for those results and remains
-fixture-tested. THC watch evaluation and Force remain unsupported. Variable
-continuation pages remain in issue #8. Both local-file and
+fixture-tested. THC watch evaluation and Force remain unsupported. Adapter-backed
+variable continuation for locals remains in issue #8. Both local-file and
 embedded **Go to source** prepare their source documents on a worker. Local-file
 navigation preserves open unsaved text and ordinary file/save authority. Changed
 or closed targets and resumed sessions reject late navigation; a prepared source
