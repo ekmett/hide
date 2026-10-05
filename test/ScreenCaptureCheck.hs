@@ -64,7 +64,7 @@ checks=do
   check "quarter block retains filled and empty quadrants"
     (pixelAt image (qx*8+1) (qy*16+2)/=pixelAt image (qx*8+6) (qy*16+2) &&
      pixelAt image (qx*8+1) (qy*16+13)==pixelAt image (qx*8+6) (qy*16+13))
-  let scriptInitial=(addHelpStyled [('█',ScriptStyle Superscript Plain),('中',ScriptStyle Subscript Plain),('X',Plain)] (initialDesktop (80,25))) {wideSectionTitles=True}
+  let scriptInitial=(addHelpStyled [('█',ScriptStyle Superscript Plain),('中',ScriptStyle Subscript Plain),('X',Plain)] (initialDesktop (80,25)))
   scriptReady<-prepareTextPresentations scriptInitial
   scriptCapture<-takeCapture scriptReady True
   scriptImage<-pngImage scriptCapture

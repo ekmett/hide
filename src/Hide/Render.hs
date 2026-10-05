@@ -1007,7 +1007,7 @@ snapshotHtml d = "<!doctype html><meta charset='utf-8'><title>Haskell</title><st
     spanHtml (CellGlyph a text full start shown)=colored a
       (if start/=0 || shown/=full then T.replicate shown " " else body full text)
     spanHtml (CellScript a text natural script)=colored a
-      ("<span style='display:inline-block;position:relative;width:1ch;height:1em;vertical-align:bottom'><span style='position:absolute;left:0;top:"<>
+      ("<span style='font-weight:inherit;display:inline-block;position:relative;width:1ch;height:1em;vertical-align:bottom'><span style='font-weight:inherit;position:absolute;left:0;top:"<>
        (if script==Superscript then "0" else "0.5em")<>";width:"<>T.pack (show natural)<>"ch;line-height:1em;transform:scale(0.5);transform-origin:top left'>"<>escape text<>"</span></span>")
     colored a contents="<span style='color:"<>color (V.attrForeColor a)<>";background:"<>color (V.attrBackColor a)<>
       (if V.styleMask a .&. V.bold/=0 then ";font-weight:bold" else "")<>

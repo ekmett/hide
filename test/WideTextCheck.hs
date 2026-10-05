@@ -96,6 +96,35 @@ checks=do
    (case Vec.toList (layoutGlyphs (Vec.head (layoutRows zeroScript))) of [glyph]->layoutAdvance glyph==0 && layoutScript glyph==Nothing; _->False)
  check "cached horizontal glyph view retains the whole clipped script target"
    (map layoutText (Vec.toList (layoutVisibleGlyphs 1 1 (Vec.head (layoutRows scriptLayout))))==["界"])
+ let sourceScript=M.addHelpStyled [('界',ScriptStyle Subscript (BoldStyle Plain)),('X',Plain)] (M.initialDesktop (80,25))
+     sourceView=fromJust (M.activeWindow sourceScript)
+ check "styled Help admits script geometry with the default heading preference"
+   (not (M.wideSectionTitles sourceScript) && M.windowPresentationNeeded sourceScript sourceView)
+ let scriptDocument=fromJust (M.activeDocument sourceScript)
+ check "style installation and invalidation keep cached script admission exact"
+   (M.documentHasScripts scriptDocument && not (M.documentHasScripts (M.restyle scriptDocument)) &&
+    not (M.documentHasScripts (M.setDocumentHighlight [('X',Plain)] scriptDocument)))
+ sourceReady<-prepareTextPresentations sourceScript
+ let sourceWindow=fromJust (M.activeWindow sourceReady)
+     sourceLayout=fromJust (M.windowPresentation sourceReady sourceWindow)
+     sourceX=M.left (M.bounds sourceWindow)+1; sourceY=M.top (M.bounds sourceWindow)+1
+     sourceClicked=M.selectAt False (sourceX+1) sourceY sourceReady
+     sourceSelected=sourceReady {M.windows=[sourceWindow {M.selection=Selection 0 2}]}
+     sourceCopied=fst (M.runCommand M.Copy sourceSelected)
+ check "default styled Help carries a scripted CJK cell and places its suffix one cell later"
+   ([(text,natural,mode) | row<-Vec.toList (renderCellRows sourceReady),CellScript _ text natural mode<-Vec.toList row]==[("界",2,Subscript)] &&
+    layoutPosition sourceLayout 1==(0,1) && caret (M.selection (fromJust (M.activeWindow sourceClicked)))==1)
+ check "default styled Help copy retains original source" (M.clipboard sourceCopied=="界X")
+ let plainReplacement=M.addHelpStyled [('X',Plain)] sourceReady
+ check "replacing scripted Help with plain styling retires its cached admission and layout"
+   (maybe False (not . M.documentHasScripts) (M.activeDocument plainReplacement) &&
+    maybe False (\w->not (M.windowPresentationNeeded plainReplacement w) && M.windowPresentation plainReplacement w==Nothing) (M.activeWindow plainReplacement))
+ check "script HTML inherits the bold paint through both nested wrappers"
+   (all (`T.isInfixOf` snapshotHtml sourceReady) ["font-weight:bold", "font-weight:inherit;display:inline-block;position:relative", "font-weight:inherit;position:absolute"])
+ let privateSource=sourceReady {M.guestPrivatePaths=["/authority"],M.streamerMode=True,
+       M.buffers=Map.map (\doc->doc {M.documentOrigin=Just "/authority/script.hs"}) (M.buffers sourceReady)}
+ check "default scripted Help privacy removes script metadata and original source"
+   (null [() | row<-Vec.toList (renderCellRows privateSource),CellScript{}<-Vec.toList row] && not ("界" `T.isInfixOf` snapshot privateSource))
  W.withWindowScope $ \scope->withTextPresentation $ \owner->do
    prepared<-W.prepareStyledTextWindow "Script test" (concat [[(c,ScriptStyle mode Plain) | c<-T.unpack text] | (text,mode)<-[("A",Superscript),("界",Subscript),("e\x301",Superscript),("👩🏽\x200d\&💻",Subscript)]]++[('X',Plain)])
    check "plugin worker caches script admission independently of wide headings" (W.preparedWindowNeedsLayout False prepared && not (W.preparedWindowHasSections prepared))

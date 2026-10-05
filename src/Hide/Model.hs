@@ -38,7 +38,7 @@ import Text.Read (readMaybe)
 import System.FilePath ((</>), takeDirectory, takeFileName, takeExtension, isAbsolute, equalFilePath, splitDirectories, joinPath, normalise)
 import Hide.Browser (Entry(..))
 import Hide.Git (GitReview)
-import Hide.Syntax (Style(..), SourceRow, prepareSourceRow, highlightFor, linkSpans)
+import Hide.Syntax (Style(..), SourceRow, prepareSourceRow, highlightFor, linkSpans, styleScript)
 import Hide.Hex
 import Hide.Unicode (textInputChar)
 import Hide.InlineState
@@ -57,14 +57,20 @@ inside (Rect x y w h) a b = a >= x && a < x+w && b >= y && b < y+h
 -- | Shared buffer and prepared presentation metadata; split windows reference its ID.
 -- documentOrigin retains canonical privacy provenance for generated source. It
 -- does not authorize saving, filesystem access or debugger source operations.
-data Document = Document { documentBuffer :: Buffer, documentFile :: Maybe FileState, documentLabel :: Maybe Text, documentHighlight :: [(Char,Style)], documentWidth :: Int, documentCursorVisible :: Bool, documentSuggestedName :: Maybe FilePath, documentSourceRows :: Maybe (Vec.Vector SourceRow), documentShellBlocks :: [(Int,Int,Text,Text)], documentLinks :: [(Int,Int,Text)], documentMarkdownPath :: Maybe FilePath, documentOrigin :: Maybe FilePath } deriving (Eq,Show)
+data Document = Document { documentBuffer :: Buffer, documentFile :: Maybe FileState, documentLabel :: Maybe Text, documentHighlight :: [(Char,Style)], documentHasScripts :: !Bool, documentWidth :: Int, documentCursorVisible :: Bool, documentSuggestedName :: Maybe FilePath, documentSourceRows :: Maybe (Vec.Vector SourceRow), documentShellBlocks :: [(Int,Int,Text,Text)], documentLinks :: [(Int,Int,Text)], documentMarkdownPath :: Maybe FilePath, documentOrigin :: Maybe FilePath } deriving (Eq,Show)
 -- Source colors are populated by the session worker, never forced by input or drawing.
 newDocument :: Buffer -> Maybe FileState -> Document
-newDocument b file = restyle (Document b file Nothing [] 0 True Nothing Nothing [] [] Nothing Nothing)
+newDocument b file = restyle (Document b file Nothing [] False 0 True Nothing Nothing [] [] Nothing Nothing)
 
 restyle :: Document -> Document
-restyle doc = doc {documentHighlight=[],documentSourceRows=Nothing,documentShellBlocks=[],documentLinks=[],
+restyle doc = doc {documentHighlight=[],documentHasScripts=False,documentSourceRows=Nothing,documentShellBlocks=[],documentLinks=[],
   documentWidth=if byteMode (documentBuffer doc) then hexWidth 16 else documentWidth doc}
+
+-- | Install prepared styling and its cached script admission together. The
+-- owner replaces content/version before installing new styles; input and layout
+-- admission read this flag without traversing the styled payload.
+setDocumentHighlight :: [(Char,Style)] -> Document -> Document
+setDocumentHighlight styled doc=doc {documentHighlight=styled,documentHasScripts=any ((/=Nothing) . styleScript . snd) styled}
 
 syntaxDocument :: Document -> Bool
 syntaxDocument doc = not (byteMode (documentBuffer doc)) &&
@@ -78,7 +84,7 @@ documentSyntaxPath doc = maybe (fromMaybe "Main.hs" (documentSuggestedName doc))
 highlightDocument :: Document -> Document
 highlightDocument doc
   | not (syntaxDocument doc) = doc
-  | otherwise = doc {documentHighlight=[],documentSourceRows=Just (sourceHighlightRows text tokens),documentWidth=measureDocumentWidth text}
+  | otherwise = doc {documentHighlight=[],documentHasScripts=False,documentSourceRows=Just (sourceHighlightRows text tokens),documentWidth=measureDocumentWidth text}
   where text=contents (documentBuffer doc)
         tokens=highlightFor (documentSyntaxPath doc) text
 
@@ -2550,7 +2556,7 @@ windowPresentation d w
 windowPresentationNeeded :: Desktop -> Window -> Bool
 windowPresentationNeeded d w=wideSectionTitles d || case windowContent w of
   PluginContent reference->maybe False (PluginWindow.preparedWindowNeedsLayout False) (M.lookup reference (pluginWindows d))
-  SourceContent _->False
+  SourceContent bid->maybe False documentHasScripts (M.lookup bid (buffers d))
 
 windowTextPosition :: Desktop -> Window -> BufferContent -> Int -> (Int,Int)
 windowTextPosition d w text pos=maybe (contentPosition text pos) (\layout->TextLayout.layoutPosition layout pos) (windowPresentation d w)
@@ -3398,7 +3404,7 @@ addHelpStyled :: [(Char,Style)] -> Desktop -> Desktop
 addHelpStyled chars d = let opened=addHelp (T.pack (map fst chars)) d
                        in case activeWindow opened of
                          Nothing -> opened
-                         Just w | Just bid<-bufferId w -> opened {buffers=M.adjust (\doc -> doc {documentHighlight=[(c,ProseStyle style) | (c,style)<-chars],documentLinks=linkSpans chars}) bid (buffers opened)}
+                         Just w | Just bid<-bufferId w -> opened {buffers=M.adjust (\doc -> (setDocumentHighlight [(c,ProseStyle style) | (c,style)<-chars] doc) {documentLinks=linkSpans chars}) bid (buffers opened)}
                          _ -> opened
 
 addHelp :: Text -> Desktop -> Desktop

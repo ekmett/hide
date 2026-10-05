@@ -178,7 +178,7 @@ tickBuildJobs (BuildJobs ref report stdoutReport) desktop = do
         Nothing -> pure desktop
         Just (Snapshot buffer problems stdout outcome) -> do
           let old=buildDiagnostics desktop
-              update doc=doc {documentBuffer=buffer,documentHighlight=[]}
+              update doc=doc {documentBuffer=buffer,documentHighlight=[],documentHasScripts=False}
               oldLines=maybe 0 (bufferLineCount . documentBuffer) (M.lookup bid (buffers desktop))
               newLines=bufferLineCount buffer
               follow window
