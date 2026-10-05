@@ -177,8 +177,9 @@ replacement lists and explicit unbinding. Profiles are independent; there is no
 generic platform table inherited by macOS.
 
 Named WordStar commands, horizontal/vertical movement and selection, row/document
-edges, pages, adjacent deletion and line deletion use an editable profile. Word
-movement and Ctrl+K/Ctrl+Q block grammar remain fixed. Dialog editing/search actions are
+edges, pages, word movement/selection, word deletion, adjacent deletion and line
+deletion use an editable profile. WordStar Ctrl+A/F aliases and Ctrl+K/Ctrl+Q
+block grammar remain fixed. Dialog editing/search actions are
 configurable for existing editable TextArea controls; dialog navigation and
 single-line Input ownership remain fixed. Published runtime menu contributions
 use that same configuration and exact registration lifetime; see the

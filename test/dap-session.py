@@ -15,7 +15,7 @@ else:
     server.listen(2)
     print(server.getsockname()[1], flush=True)
 
-for session in range(1, 3 if mode == 'reconnect' else 2):
+for session in range(1, 4 if mode == 'output-owner' else 3 if mode == 'reconnect' else 2):
     if stdio:
         stream = sys.stdin.buffer
     else:
@@ -28,6 +28,7 @@ for session in range(1, 3 if mode == 'reconnect' else 2):
     source_count = 0
     stack_count = 0
     thread_count = 0
+    output_count = 0
     thread_exited = False
 
     def send(value):
@@ -154,6 +155,10 @@ for session in range(1, 3 if mode == 'reconnect' else 2):
                     event('invalidated', dict(areas=['variables']))
                 if mode == 'lazy' and thread_count == 4:
                     event('invalidated', dict(areas=['threads']))
+                if mode == 'output-owner' and thread_count != 2:
+                    output_count += 1
+                    for part in range(8 if output_count == 3 else 1):
+                        event('output', dict(output=('x' * (1024 * 1024) if output_count == 3 else '') + '\nsession=%d output=%d part=%d\n' % (session, output_count, part)))
                 reply(req, dict(threads=[dict(id=7, name='main λ'), dict(id=8, name='worker')] if mode in ('sidebar', 'sidebar-exit') and not thread_exited else [dict(id=7, name='main λ')]))
             elif cmd == 'stackTrace':
                 stack_count += 1

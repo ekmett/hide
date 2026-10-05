@@ -1,10 +1,10 @@
-{-# LANGUAGE OverloadedStrings #-}
-module DebuggerCheck (checks,fixture,cleanup) where
+{-# LANGUAGE MagicHash, OverloadedStrings #-}
+module DebuggerCheck (checks,fixture,cleanup,outputOwnerChecks,outputLifecycleCheck) where
 
 import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (withAsync, poll, wait)
-import Control.Exception (bracket)
+import Control.Exception (bracket,evaluate)
 import Control.Monad (unless, when, forM_)
 import Data.Aeson
 import Data.IORef
@@ -12,6 +12,9 @@ import qualified Data.ByteString.Lazy as BL
 import Data.Aeson.Types (parseMaybe)
 import qualified Data.Map.Strict as M
 import Data.Maybe (fromMaybe, isJust)
+import Data.Array.Byte (ByteArray(..))
+import GHC.Exts (Int(..),sizeofByteArray#)
+import qualified Data.Text.Internal as TI
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
 import qualified Network.Socket as Socket
@@ -26,14 +29,134 @@ import qualified Data.ByteString as BS
 import qualified Data.Text.Encoding as TE
 import qualified Hide.Terminal as Terminal
 import Hide.Buffer
+import qualified Hide.Plugin.Window as W
+import Hide.PluginWindowHost (tickPluginWindows)
 import Hide.Debugger
 import Hide.Files (FileState(..))
 import Hide.Model
 import Hide.Highlighting (withHighlighting,tickHighlighting)
 import Hide.Render (snapshotHtml)
 
+-- Exercise the real idle owner, not a content-version helper. A matching title
+-- grants no debugger ownership of an unrelated source document.
+outputOwnerChecks :: IO ()
+outputOwnerChecks=withDebugger $ \runtime->do
+  let opened=addReadOnly "Debugger output" "unrelated snapshot" (initialDesktop (80,25))
+      trapped=opened {buffers=M.map (\doc->doc {documentBuffer=error "idle debugger forced unrelated output-labelled Buffer"}) (buffers opened)}
+  after<-tickDebugger runtime (\d _->pure (False,d)) trapped
+  count<-evaluate (sum [maybe 0 (const 1) (documentLabel doc) | doc<-M.elems (buffers after)])
+  check "idle debugger leaves unrelated output-labelled buffers untouched" (count==1)
+
+-- Real DAP messages exercise automatic opening, exact refresh, closure and a
+-- replacement transport. No callback or prepared-window test seam is exposed.
+outputLifecycleCheck :: IO ()
+outputLifecycleCheck=bracket (fixture "output-owner") cleanup $ \(port,_,_)->do
+  escaped<-withDebugger $ \runtime->do
+    let core d _=pure (False,d)
+        tick=tickDebugger runtime core
+        tool name arguments d=do
+          (next,finish)<-debuggerTool runtime core d name (object arguments)
+          result<-finish >>= either (error . T.unpack) pure
+          pure (next,result)
+        state d=snd <$> tool "debug_status" [] d
+        epoch value=fromMaybe (error "missing generation") (field "generation" value) :: Int
+        await label predicate d=timeout debuggerTimeout (loop d) >>= maybe (error label) pure
+          where loop current=do
+                  next<-tick current
+                  yes<-predicate next
+                  if yes then pure next else threadDelay 1000 >> loop next
+        report expected d=state d >>= pure . maybe False (T.isInfixOf expected) . field "output"
+        text reference d=maybe "" (\prepared->let value=W.preparedWindowText prepared in contentSlice value 0 (contentLength value)) (M.lookup reference (pluginWindows d))
+        opening d=case [reference | w<-windows d,PluginContent reference<-[windowContent w]] of reference:_->Just reference; _->Nothing
+        installed d=case opening d of Just reference->pure reference; _->error "missing semantic output"
+        emit expected reveal d=do
+          statusValue<-state d
+          (queued,finish)<-debuggerTool runtime core d "debug_inspect" (object ["generation" .= epoch statusValue,"request" .= ("threads"::T.Text)])
+          withAsync finish $ \reply->do
+            showing<-if not reveal then pure queued else do
+              -- The control response follows the burst on the real DAP stream.
+              -- Reveal may arrive before its copied report publication; it must
+              -- retain that pending payload rather than queue the old report.
+              seen<-await "burst control response before reveal" (\_->isJust <$> poll reply) queued
+              captured<-epoch <$> state seen
+              fst <$> tool "debug_present" ["generation" .= captured,"view" .= ("output"::T.Text)] seen
+            delivered<-await "fixture output request" (\current->do
+              value<-state current
+              check "interleaved status retains only accepted copied report" (maybe False ((<=4*16384).backingBytes) (field "output" value))
+              let observed=maybe False (T.isInfixOf expected) (field "output" value)
+              done<-poll reply
+              pure (observed && isJust done)) showing
+            _<-wait reply >>= either (error . T.unpack) pure
+            pure delivered
+        connect d=snd <$> debuggerEffects runtime core d [DebugAction "connect" ["0","127.0.0.1",T.pack port]]
+        modal=Dialog "Human draft" (Searching False "draft") [SelectedInput "Name" "draft" (Selection 0 5)] 0 ["OK"] []
+        base=modifyActive (\w->w {selection=Selection 2 7}) (addReadOnly "Debugger output" "unrelated snapshot" (initialDesktop (80,25)))
+        sourceId=maybe (error "missing source") sourceFixtureBuffer (activeWindow base)
+        sourceWindow=fromMaybe (error "missing source window") (activeWindow base)
+        sourceKept d=fmap (contents . documentBuffer) (M.lookup sourceId (buffers d))==Just "unrelated snapshot" &&
+          maybe False ((==selection sourceWindow).selection) (findWindow (windowId sourceWindow) d)
+    (quiet,_)<-tool "debug_present" ["follow" .= False] base
+    attached<-connect quiet {dialog=Just modal}
+    deferred<-await "automatic output while modal" (report "session=1 output=1") attached
+    check "automatic output preserves protected modal and unrelated same-title source" (dialog deferred==Just modal && opening deferred==Nothing && sourceKept deferred)
+    shown<-await "deferred semantic opening" (pure . isJust . opening) deferred {dialog=Nothing}
+    first<-installed shown
+    check "debugger output has explicit durable semantic identity" (maybe False ((==Just ("hide.debug-output",1)).W.preparedWindowRecovery) (M.lookup first (pluginWindows shown)))
+    let background=focusWindow (windowId sourceWindow) shown {dialog=Just modal}
+    updatedReport<-emit "session=1 output=2" False background
+    refreshed<-await "owned output refresh" (pure . T.isInfixOf "output=2" . text first) updatedReport
+    check "refresh retains source focus, selection and modal" (fmap windowId (activeWindow refreshed)==Just (windowId sourceWindow) && dialog refreshed==Just modal && sourceKept refreshed)
+    let closing=closeActive (focusWindow (fromMaybe (error "missing output window") (windowId <$> (case [w | w<-windows refreshed,windowContent w==PluginContent first] of w:_->Just w; _->Nothing))) refreshed {dialog=Nothing})
+    closed<-tick closing
+    afterClose<-emit "session=1 output=3" False closed
+    check "closed output stays closed while MCP retains capped current report" (opening afterClose==Nothing)
+    copied<-await "closed output report detaches oversized backing" (\d->do
+      value<-state d
+      pure (maybe False (\reportText->T.length reportText==16384 && backingBytes reportText<=4*16384) (field "output" value))) afterClose
+    capped<-state copied
+    check "closed burst advances the capped report through its final chunk" (maybe False (T.isInfixOf "output=3 part=7") (field "output" capped))
+    gen<-epoch <$> state copied
+    (requested,_)<-tool "debug_present" ["generation" .= gen,"view" .= ("output"::T.Text)] copied
+    reopened<-await "explicit output reopen" (pure . isJust . opening) requested
+    second<-installed reopened
+    oldLive<-W.windowRefCurrent first
+    check "explicit reopen has fresh identity and current retained text" (second/=first && not oldLive && "output=3" `T.isInfixOf` text second reopened && sourceKept reopened)
+    queuedOld<-emit "session=1 output=4" False reopened {dialog=Just modal}
+    let oldSnapshot=M.lookup second (pluginWindows queuedOld)
+    replacement<-connect queuedOld
+    oldCurrent<-W.windowRefCurrent second
+    check "session replacement freezes exact output slot during preparation" (oldCurrent && M.lookup second (pluginWindows replacement)==oldSnapshot)
+    secondGeneration<-epoch <$> state replacement
+    (revealed,_)<-tool "debug_present" ["generation" .= secondGeneration,"view" .= ("output"::T.Text)] (focusWindow (windowId sourceWindow) replacement {dialog=Nothing})
+    focusedReplacement<-await "explicit output focuses prepared replacement slot" (\d->pure (maybe False (\w->case windowContent w of PluginContent reference->reference/=second; _->False) (activeWindow d))) revealed
+    newReport<-await "new session report" (report "session=2 output=1") focusedReplacement {dialog=Just modal}
+    check "session preparation preserves unrelated human modal" (dialog newReport==Just modal)
+    newShown<-await "new session semantic output" (\d->pure (maybe False (\reference->reference/=second && "session=2" `T.isInfixOf` text reference d) (opening d))) newReport {dialog=Nothing}
+    third<-installed newShown
+    retired<-tickPluginWindows newShown
+    let oldWindow=case [w | w<-windows queuedOld,windowContent w==PluginContent second] of w:_->w; _->error "missing old output slot"
+        newWindow=case [w | w<-windows retired,windowContent w==PluginContent third] of w:_->w; _->error "missing replacement output slot"
+    revoked<-W.windowRefCurrent second
+    check "new session replaces same display slot with fresh content lifetime" (third/=second && not revoked && not (M.member second (pluginWindows retired)) && windowId newWindow==windowId oldWindow && bounds newWindow==bounds oldWindow && length (windows retired)==length (windows queuedOld) && "session=2" `T.isInfixOf` text third retired)
+    preparingAgain<-connect retired
+    let closingFrozen=closeActive (focusWindow (windowId newWindow) preparingAgain)
+    finalReport<-await "third session output after frozen slot closes" (report "session=3 output=1") closingFrozen
+    frozenClosed<-await "closed frozen capability retired" (\_->not <$> W.windowRefCurrent third) finalReport
+    check "closing frozen slot during replacement never resurrects it" (opening frozenClosed==Nothing && sourceKept frozenClosed)
+    secondReport<-emit "session=3 output=2" False frozenClosed
+    explicitAgain<-emit "session=3 output=3 part=7" True secondReport
+    finalShown<-await "deliberate reopen retains pending burst" (\d->pure (maybe False (\reference->"output=3 part=7" `T.isInfixOf` text reference d) (opening d))) explicitAgain
+    fourth<-installed finalShown
+    check "deliberate reopen after frozen close cannot reuse old capability" (fourth/=third && "session=3" `T.isInfixOf` text fourth finalShown)
+    pure fourth
+  live<-W.windowRefCurrent escaped
+  check "debugger scope shutdown retires output publication lifetime" (not live)
+  where
+    backingBytes (TI.Text (ByteArray bytes) _ _)=I# (sizeofByteArray# bytes)
+    findWindow ident d=case [w | w<-windows d,windowId w==ident] of w:_->Just w; _->Nothing
+
 checks :: IO ()
-checks = terminalLauncherCheck >> terminalCheck >> completionChecks >> presentationCheck >> pendingPresentationCheck >> startupDeadlineCheck >> launchDeadlineCheck >> launchChecks >> mapM_ session ["basic", "frame", "choices", "breakpoints", "reconnect", "mcp", "lazy", "exception"] >> putStrLn "Debugger checks passed"
+checks = outputOwnerChecks >> outputLifecycleCheck >> terminalLauncherCheck >> terminalCheck >> completionChecks >> presentationCheck >> pendingPresentationCheck >> startupDeadlineCheck >> launchDeadlineCheck >> launchChecks >> mapM_ session ["basic", "frame", "choices", "breakpoints", "reconnect", "mcp", "lazy", "exception"] >> putStrLn "Debugger checks passed"
   where
     session mode = bracket (fixture mode) cleanup $ \(port,logPath,process) -> withDebugger $ \runtime -> do
       let core d _=pure (False,d)
@@ -447,8 +570,9 @@ presentationCheck=bracket (fixture "basic") cleanup $ \(port,_,_) -> withDebugge
   check "cached stack is explicitly visible without resuming" (hasDialog "Call stack" stack && epoch stackStatus==gen)
   (loading,_)<-reveal "scopes" gen stack {dialog=Nothing}
   scopes<-waitFor "explicit scopes reveal" (\d _ -> hasDialog "Scopes" d) loading
-  (output,_)<-reveal "output" gen scopes {dialog=Nothing}
-  check "explicit output uses existing debugger session" (fmap documentLabel (activeDocument output)==Just (Just "Debugger output"))
+  (preparingOutput,_)<-reveal "output" gen scopes {dialog=Nothing}
+  output<-waitFor "explicit semantic output" (\d _->case activeWindow d >>= (\w->case windowContent w of PluginContent reference->Just reference; _->Nothing) of Just _->True; _->False) preparingOutput
+  check "explicit output uses existing debugger session" (case activeWindow output >>= (\w->case windowContent w of PluginContent reference->M.lookup reference (pluginWindows output); _->Nothing) of Just prepared->W.preparedWindowTitle prepared=="Debugger output"; _->False)
   (following,_)<-tool "debug_present" ["follow" .= True] output
   (running,_)<-tool "debug_control" ["generation" .= gen,"command" .= ("continue"::T.Text)] following
   ready<-waitFor "resume processed" (\d _ -> status d=="Running...") running
@@ -538,7 +662,7 @@ terminalCheck = when Terminal.terminalAvailable $ mapM_ session ["terminal","ter
           tick=tickDebugger runtime core
           send action d=snd <$> debuggerEffects runtime core d [DebugAction action []]
           terminalText d=T.concat [contents (documentBuffer doc) | doc<-M.elems (buffers d),maybe False (T.isPrefixOf "Terminal ") (documentLabel doc)]
-          outputText d=T.concat [contents (documentBuffer doc) | doc<-M.elems (buffers d),documentLabel doc==Just "Debugger output"]
+          outputText d=T.concat [let text=W.preparedWindowText prepared in contentSlice text 0 (contentLength text) | prepared<-M.elems (pluginWindows d),W.preparedWindowTitle prepared=="Debugger output"]
           await label predicate d=timeout debuggerTimeout (loop d) >>= maybe (error label) pure
             where loop state=do n<-tick state; done<-predicate n; if done then pure n else threadDelay 1000 >> loop n
           raw ident predicate _=C.consoleOutput consoles ident >>= pure . either (const False) predicate
