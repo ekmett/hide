@@ -2,7 +2,8 @@
 module DebuggerAcquisitionCheck (checks) where
 
 import Control.Concurrent
-import Control.Exception (bracket,finally,getMaskingState,MaskingState(Unmasked))
+import Control.Exception (bracket,finally,getMaskingState,MaskingState(Unmasked),evaluate)
+import System.Mem.StableName (makeStableName)
 import Control.Monad (unless,forM_,void)
 import Data.Aeson
 import Data.Aeson.Types (parseMaybe)
@@ -132,10 +133,11 @@ checks | os=="mingw32"=pure () -- Official hdb bindists are currently POSIX only
       forM_ ["cancel","toolchain","project","edit","reload","settings","stop","newer","success"] $ \mode->do
         reset
         gate<-newEmptyMVar
+        reportReady<-newEmptyMVar
         finished<-newEmptyMVar
         writeIORef calls 0
         withDebuggerHdb (pure 0) (pure . Right . plan)
-          (\_ report->(modifyIORef' calls (+1)>>install report gate) `finally` void (tryPutMVar finished ())) $ \runtime->do
+          (\_ report->(modifyIORef' calls (+1)>>putMVar reportReady report>>install report gate) `finally` void (tryPutMVar finished ())) $ \runtime->do
             opened<-start runtime
             accepted<-submit runtime 0 opened
             progress<-waitFor runtime "progress" (has "Downloading") accepted
@@ -144,7 +146,45 @@ checks | os=="mingw32"=pure () -- Official hdb bindists are currently POSIX only
             responsive<-timeout 1000000 (tickDebugger runtime core progress)
             check "held transfer never blocks editor tick" (maybe False (const True) responsive)
             changed<-case mode of
-              "cancel"->send runtime "downloads" ["0","0"] progress
+              "cancel"->do
+                report<-takeMVar reportReady
+                let details d=case dialog d of
+                      Just dg->case fields dg of _:TextArea _ _ buffer _ _ _:_ ->buffer; _->error "missing Details"
+                      _->error "missing Downloads"
+                    detailState d=case dialog d of
+                      Just dg->case fields dg of _:TextArea _ _ _ selection top left:_ ->(selection,top,left,focus dg); _->error "missing Details"
+                      _->error "missing Downloads"
+                    decorate dg=dg {focus=1,fields=map (\control->case control of
+                      TextArea title editable buffer _ _ _->TextArea title editable buffer (Selection 0 5) 1 2
+                      _->control) (fields dg)}
+                    selected=progress {dialog=decorate <$> dialog progress}
+                    (_,captured)=case dialog selected of Just dg->submitDialog 0 dg selected; _->error "missing Downloads"
+                before<-evaluate (details selected) >>= makeStableName
+                idle<-tickDebugger runtime core selected
+                after<-evaluate (details idle) >>= makeStableName
+                check "idle Downloads preserves exact prepared Details Buffer" (before==after)
+                let poison=selected {dialog=fmap (\dg->dg {fields=map (\control->case control of
+                      TextArea title editable _ selection top left->TextArea title editable (error "idle live Downloads forced Details") selection top left
+                      _->control) (fields dg)}) (dialog selected)}
+                untouched<-tickDebugger runtime core poison
+                _<-case dialog untouched of
+                  Just dg->case fields dg of _:TextArea title _ _ _ _ _:_ ->evaluate (T.length title); _->error "missing Details"
+                  _->error "missing Downloads"
+                pure ()
+                check "Downloads receipt remains private and human-only" (guestModalBlocked idle && not (guestKeyAllowed idle V.KEnter []) && not (cellReadable (cellAccess idle 20 10)))
+                report (DownloadProgress "Downloading more" 12 (Just 20))
+                refreshed<-waitFor runtime "progress refresh" (has "Downloading more") selected {screenSize=(96,31)}
+                check "progress and resize retain Details selection/scroll/focus" (detailState refreshed==(Selection 0 5,1,2,1))
+                let (closed,closeEffects)=handleEvent (V.EvKey V.KEsc []) refreshed
+                escaped<-snd <$> debuggerEffects runtime core closed closeEffects >>= tickDebugger runtime core
+                check "close leaves transfer alive and progress cannot reopen" (dialog escaped==Nothing)
+                reopened<-send runtime "downloads" [] escaped >>= waitFor runtime "reopened Downloads" (has "Downloading more")
+                rejected<-snd <$> debuggerEffects runtime core reopened captured
+                check "old closed receipt cannot cancel or replace reopened modal" ((purpose <$> dialog rejected)==(purpose <$> dialog reopened) && status rejected=="This download selection expired.")
+                let (_,held)=case dialog reopened of Just dg->submitDialog 0 dg reopened; _->error "missing Downloads"
+                report (DownloadProgress "Download still running" 15 (Just 20))
+                advanced<-waitFor runtime "progress after captured cancel" (has "Download still running") reopened
+                snd <$> debuggerEffects runtime core advanced held
               "toolchain"->pure progress {toolchain=Just THC}
               "project"->pure progress {defaultDirectory=Just library}
               "edit"->pure (insertText "x" progress)
@@ -166,7 +206,8 @@ checks | os=="mingw32"=pure () -- Official hdb bindists are currently POSIX only
                 let launches=[args | entry<-entries,Just request<-[field "request" entry],field "command" request==Just ("launch"::T.Text),Just args<-[field "arguments" request]]
                 check "success continues captured launch arguments" (any (\args->field "projectRoot" args==Just root && field "entryFile" args==Just ("Main.hs"::String) && field "entryArgs" args==Just (["original argument"]::[String])) launches)
                 completed<-send runtime "downloads" [] observed
-                noCancel<-send runtime "downloads" ["0","0"] completed
+                readyDownloads<-waitFor runtime "prepared completed downloads" (has "Installed") completed
+                noCancel<-submit runtime 0 readyDownloads
                 check "finished transfer never claims to be cancelling" (status noCancel=="This download has already finished.")
               else do
                 _<-timeout 1000000 (readMVar finished) >>= maybe (error "download did not finish") pure
