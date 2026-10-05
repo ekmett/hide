@@ -213,6 +213,15 @@ contents = cachedContents
 lineText :: Line -> Text
 lineText (Line _ _ _ _ _ t) = t
 
+lineCharacters :: Line -> Int
+lineCharacters (Line n _ _ _ _ _) = n
+
+-- Cached fingerprints only reject unequal lines. Restore/provenance decisions
+-- still check the exact text when the length and fingerprint both match.
+sameLineText :: Line -> Line -> Bool
+sameLineText a@(Line n _ _ hash _ _) b@(Line m _ _ other _ _) =
+  n==m && hash==other && lineText a==lineText b
+
 lineOrigin :: Line -> LineOrigin
 lineOrigin (Line _ _ origin _ _ _) = origin
 
@@ -455,7 +464,7 @@ cancelRestoredLine row tree=case FT.viewl remaining of
           | candidate<0 || candidate>=removed=restore others
           | otherwise=let (oldBefore,oldRest)=FT.split ((>candidate) . deletedLineCount) hunk
             in case FT.viewl oldRest of
-              old FT.:< oldTail | lineText old==lineText line ->
+              old FT.:< oldTail | sameLineText old line ->
                 let (oldAfter,addedLines)=FT.split ((>0) . newLineCount) oldTail
                     (newBefore,newRest)=FT.split ((>index) . newLineCount) addedLines
                 in case FT.viewl newRest of
@@ -477,23 +486,23 @@ reconcileTree previous current=prefix FT.>< pair oldMiddle newMiddle FT.>< suffi
     (prefix,oldRest,newRest)=matchingLeft originals current
     (oldMiddle,newMiddle,suffix)=matchingRight oldRest newRest
     matchingLeft old new=case (FT.viewl old,FT.viewl new) of
-      (line FT.:< olds,replacement FT.:< news) | lineText line==lineText replacement ->
+      (line FT.:< olds,replacement FT.:< news) | sameLineText line replacement ->
         let (same,remainingOld,remainingNew)=matchingLeft olds news
         in (withOrigin Original line FT.<| same,remainingOld,remainingNew)
       _ -> (FT.empty,old,new)
     matchingRight old new=case (FT.viewr old,FT.viewr new) of
-      (olds FT.:> line,news FT.:> replacement) | lineText line==lineText replacement ->
+      (olds FT.:> line,news FT.:> replacement) | sameLineText line replacement ->
         let (remainingOld,remainingNew,same)=matchingRight olds news
         in (remainingOld,remainingNew,same FT.|> withOrigin Original line)
       _ -> (old,new,FT.empty)
     pair old new=case (FT.viewl old,FT.viewl new) of
       (line FT.:< olds,replacement FT.:< news)
-        | T.null (lineText replacement),FT.null news -> markDeleted old FT.|> withOrigin Original replacement
-        | lineText line==lineText replacement -> withOrigin Original line FT.<| pair olds news
+        | lineCharacters replacement==0,FT.null news -> markDeleted old FT.|> withOrigin Original replacement
+        | sameLineText line replacement -> withOrigin Original line FT.<| pair olds news
         | otherwise -> deleted line FT.>< (asAdded replacement FT.<| pair olds news)
       (_,FT.EmptyL) -> markDeleted old
       (FT.EmptyL,_) -> FT.fromList (map asAdded (toList new))
-    deleted line | T.null (lineText line)=FT.empty
+    deleted line | lineCharacters line==0=FT.empty
                  | otherwise=FT.singleton (withOrigin Deleted line)
     -- Reediting beside a large removed region must retain that subtree rather
     -- than repeatedly flattening or relabelling every old tombstone.
@@ -516,7 +525,7 @@ originalCount :: LineMeasure -> Int
 originalCount measure=lineCount measure-newLineCount measure
 
 asAdded :: Line -> Line
-asAdded line=withOrigin (if T.null (lineText line) then Original else Added) line
+asAdded line=withOrigin (if lineCharacters line==0 then Original else Added) line
 
 splitChangedEnd :: LineTree -> (LineTree,LineTree)
 splitChangedEnd tree
@@ -581,13 +590,13 @@ snapshotLines=go 0 . toList
     go _ []=[]
     go row (line:rest)=case lineOrigin line of
       Deleted -> (row,False,lineText line):go row rest
-      Added | not (T.null (lineText line)) -> (row,True,""):go (row+1) rest
+      Added | lineCharacters line/=0 -> (row,True,""):go (row+1) rest
       _ -> go (row+1) rest
 
 restoreLines :: Text -> Text -> LineChangesSnapshot -> Either Text LineTree
 restoreLines baseline text changes=do
   lines'<-go 0 (toList (linesFromText text)) changes
-  let original=[lineText line | line<-lines',lineOrigin line/=Added,not (T.null (lineText line))]
+  let original=[lineText line | line<-lines',lineOrigin line/=Added,lineCharacters line/=0]
       savedLines=filter (not . T.null) (map lineText (toList (linesFromText baseline)))
   unless (original==savedLines) (Left "Buffer line changes do not match saved lines")
   unless (canonical False lines') (Left "Invalid buffer change-run ordering")
@@ -598,7 +607,7 @@ restoreLines baseline text changes=do
       case toList (linesFromText deleted) of
         line:_ -> (withOrigin Deleted line:) <$> go row live rest
         [] -> Left "Invalid deleted buffer line"
-    go row (line:live) ((index,True,empty):rest) | index==row && T.null empty && not (T.null (lineText line)) =
+    go row (line:live) ((index,True,empty):rest) | index==row && T.null empty && lineCharacters line/=0 =
       (withOrigin Added line:) <$> go (row+1) live rest
     go row (line:live) []=(line:) <$> go (row+1) live []
     go row (line:live) pending@((index,_,_):_)
@@ -689,7 +698,7 @@ liveToChangeOffset b position=let (before,_,column,_)=splitLeaf position (buffer
 
 changeToLiveOffset :: Buffer -> Int -> Int
 changeToLiveOffset b position=let (before,line,column)=splitReviewLine b position
-  in characterCount (FT.measure before)+if lineOrigin line==Deleted then 0 else min column (T.length (lineText line))
+  in characterCount (FT.measure before)+if lineOrigin line==Deleted then 0 else min column (lineCharacters line)
 
 -- Hunk coordinates are (first projected row, number of projected rows).
 changeHunkAt :: Buffer -> Int -> Maybe (Int,Int)
