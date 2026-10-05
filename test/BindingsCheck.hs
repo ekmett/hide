@@ -430,9 +430,17 @@ wordChecks=do
   forM_ [(10,9,16),(14,9,15),(19,18,20),(20,19,21)] $ \(p,left,right)->do
     let placed=modifyActive (\w->w {selection=Selection p p}) configured
     check "word boundaries preserve punctuation CRLF and Unicode scalar policy" (range (event (V.KFun 13) [] placed)==Just (Selection left left) && range (event (V.KFun 14) [] placed)==Just (Selection right right))
-  let star=unbound {wordStar=True,keyBindings=compile "wordstar" [(name,[]) | (name,_)<-actions]}
-  check "fixed WordStar A F aliases remain non-extending" (map (\c->range (event (V.KChar c) [V.MCtrl,V.MShift] star)) ['a','f']==map Just [Selection 5 5,Selection 8 8])
-  check "fixed WordStar A F cannot be reassigned" (either (const True) (const False) (platformBindings [] TerminalPlatform (M.singleton "wordstar" (M.singleton "hide.cursor.word-left" ["Ctrl+A"]))))
+  let starMaps=compile "wordstar" [(name,["F"<>T.pack (show n)]) | ((name,_),n)<-zip actions [13::Int ..]]
+      star=base {wordStar=True,keyBindings=starMaps}
+      aliases=[(V.KChar 'a',[V.MCtrl]),(V.KChar 'a',[V.MCtrl,V.MShift]),(V.KChar 'a',[V.MCtrl,V.MAlt]),(V.KChar 'a',[V.MCtrl,V.MAlt,V.MShift]),(V.KChar 'f',[V.MCtrl]),(V.KChar 'f',[V.MCtrl,V.MShift])]
+      starUnbound=star {keyBindings=compile "wordstar" [(name,[]) | (name,_)<-actions]}
+      starDefaults=base {wordStar=True,keyBindings=compile "wordstar" []}
+  check "WordStar word remaps consume former A F aliases" (range (event (V.KFun 13) [] star)==Just (Selection 5 5) && range (event (V.KFun 14) [] star)==Just (Selection 8 8) && all (\(k,mods)->state (event k mods star)==state star) aliases)
+  check "WordStar word unbinding consumes A F and arrow aliases" (all (\(k,mods)->state (event k mods starUnbound)==state starUnbound) (aliases++sourceWordKeys))
+  check "WordStar default shifted A F aliases remain non-extending" (map (\c->range (event (V.KChar c) [V.MCtrl,V.MShift] starDefaults)) ['a','f']==map Just [Selection 5 5,Selection 8 8])
+  check "WordStar A F can be assigned through the existing chord parser" (range (event (V.KChar 'f') [V.MCtrl] star {keyBindings=compile "wordstar" [("hide.cursor.word-left",["Ctrl+F"]),("hide.cursor.word-right",["Ctrl+A"])]})==Just (Selection 5 5))
+  check "WordStar File menu and prefix owners survive word remapping" (menu (event (V.KChar 'f') [V.MCtrl,V.MAlt] star)==Just (0,0) && prefix (event (V.KChar 'k') [V.MCtrl] star)==Just 'k' && prefix (event (V.KChar 'q') [V.MCtrl] star)==Just 'q')
+  check "ordinary source Control A retains SelectAll" (range (event (V.KChar 'a') [V.MCtrl] base {keyBindings=compile "source" []})==Just (Selection 0 (T.length text)))
   let hex=modifyActive (\w->w {selection=Selection 7 7}) (addDocument Nothing (newByteBuffer (BS.pack [0..31])) (initialDesktop (80,25))) {keyBindings=maps}
   check "word actions preserve hex byte steps" (range (event (V.KFun 13) [] hex)==Just (Selection 6 6) && bufferLength (docBuffer (event (V.KFun 17) [] hex))==31)
   let readonly=modifyActive (\w->w {selection=Selection 7 7}) (addHelp text (initialDesktop (80,25))) {keyBindings=maps}
