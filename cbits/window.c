@@ -594,7 +594,9 @@ static void latest_motion(SDL_Event *event) {
     while (SDL_PeepEvents(&next, 1, SDL_PEEKEVENT, SDL_EVENT_FIRST, SDL_EVENT_LAST) == 1 &&
            next.type == SDL_EVENT_MOUSE_MOTION && next.motion.windowID == event->motion.windowID &&
            next.motion.which == event->motion.which && next.motion.state == event->motion.state) {
+        Uint64 oldest=event->common.timestamp;
         SDL_PeepEvents(event, 1, SDL_GETEVENT, SDL_EVENT_MOUSE_MOTION, SDL_EVENT_MOUSE_MOTION);
+        if (oldest && (!event->common.timestamp || oldest<event->common.timestamp)) event->common.timestamp=oldest;
     }
 }
 static double wheel_delta(const SDL_Event *event) {
@@ -708,7 +710,7 @@ int thc_wait(int32_t *out) {
                    next.wheel.mouse_y == e.wheel.mouse_y && wheel_delta(&next) * delta > 0) {
                 SDL_PeepEvents(&next, 1, SDL_GETEVENT, SDL_EVENT_MOUSE_WHEEL, SDL_EVENT_MOUSE_WHEEL);
                 delta += wheel_delta(&next);
-                e.common.timestamp=next.common.timestamp;
+                if (next.common.timestamp && (!e.common.timestamp || next.common.timestamp<e.common.timestamp)) e.common.timestamp=next.common.timestamp;
             }
             if (!isfinite(delta) || delta == 0) break;
             /* Retain fractional travel; a tiny momentum sample is not a wheel notch. */
