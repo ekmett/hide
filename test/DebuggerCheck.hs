@@ -202,9 +202,11 @@ checks = outputOwnerChecks >> outputLifecycleCheck >> terminalLauncherCheck >> t
            (after >>= maybe (Left "missing epoch") Right . (field "generation" :: Value -> Maybe Int)))
         -- This response follows the current source and both delayed old replies.
         drained<-send "threads" [] chosen >>= waitFor "stale frame replies must not open scopes" (hasDialog "Threads")
-        check "late source cannot replace selected frame" (activeText drained=="chosen frame source\n")
-        check "late source does not create an obsolete buffer" (not (any (T.isInfixOf "STALE" . contents . documentBuffer) (M.elems (buffers drained))))
-        finish drained
+        check "selected source waits while the ordered threads modal owns input" (hasDialog "Threads" drained)
+        shown<-waitFor "selected frame source after modal dismissal" ((=="chosen frame source\n").activeText) drained {dialog=Nothing}
+        check "late source cannot replace selected frame" (activeText shown=="chosen frame source\n")
+        check "late source does not create an obsolete buffer" (not (any (T.isInfixOf "STALE" . contents . documentBuffer) (M.elems (buffers shown))))
+        finish shown
       else do
         stopped<-waitFor "initial source" (T.isInfixOf "value = λ" . activeText) attached
         check "sourceReference opens read-only at adapter line" (maybe False ((/=Nothing).documentLabel) (activeDocument stopped) && fmap (caret.selection) (activeWindow stopped)==Just (T.length "module Generated where\n"))
