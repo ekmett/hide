@@ -320,7 +320,7 @@ decodeFrame old packet = do
       decoded=BL.take (67108864+1) (BL.drop (fromIntegral n) (Z.decompress (prefix<>BL.fromStrict compressed)))
   count<-evaluate (BL.length decoded)
   unless (count<=67108864) (bad "Display frame exceeds 64 MiB")
-  value<-either (bad . ("Invalid display JSON: "++)) pure (eitherDecode decoded)
+  value<-either (bad . ("Invalid display JSON: "++)) pure (eitherDecodeStrict (BL.toStrict decoded))
   rowPairs<-either bad pure (parseEither (withObject "frame" (\o -> o .: "rows")) value :: Either String [(Int,Value)])
   unless (all (\(y,_)->y>=0 && y<256) rowPairs && length rowPairs==M.size (M.fromList rowPairs)) (bad "Invalid display row indices")
   let rows=M.union (M.fromList rowPairs) (if tag==2 then M.fromList (zip [0..] old) else M.empty)

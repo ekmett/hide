@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 module ProtocolCheck (checks) where
-import Control.Exception (SomeException, bracket, try, evaluate)
+import Control.Exception (SomeException, bracket, try, evaluate, displayException)
 import Control.DeepSeq (force)
 import GHC.Conc (getAllocationCounter)
 import Hide.Sidebar (emptySidebar)
@@ -9,12 +9,13 @@ import Data.Aeson
 import Data.Aeson.Types (parseEither, parseMaybe)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
+import qualified Codec.Compression.Zlib.Raw as Z
 import qualified Data.Text as T
 import System.Directory (getTemporaryDirectory, removeFile)
 import System.IO
 import qualified Hide.Commands as Commands
 import qualified Hide.Bindings as Bindings
-import Data.List (nub, findIndex)
+import Data.List (nub, findIndex, isInfixOf)
 import qualified Data.Map.Strict as M
 import qualified Graphics.Vty as V
 import Hide.Protocol
@@ -154,6 +155,15 @@ checks = do
   _<-foldFrames check [] screens
   rejects "unknown display encoding rejected" (decodeFrame [] (BS.pack [9]) >> pure ())
   rejects "bad compressed stream rejected" (decodeFrame [] (BS.pack [0,255,255]) >> pure ())
+  let compressed bytes=BS.cons 0 (BL.toStrict (Z.compress bytes))
+      rejectsWith reason bytes=do
+        result<-try (decodeFrame [] (compressed bytes)) :: IO (Either SomeException (Value,[Value]))
+        check reason (case result of Left err->reason `isInfixOf` displayException err; Right _->False)
+  rejectsWith "Invalid display JSON" "{not json}"
+  rejectsWith "Invalid display JSON" "{\"rows\":[[0,[]]]} null"
+  rejectsWith "Invalid display row indices" "{\"rows\":[[0,[]],[0,[]]]}"
+  rejectsWith "Incomplete display frame" "{\"rows\":[[1,[]]]}"
+  rejectsWith "Display frame exceeds 64 MiB" (BL.replicate 67108865 32)
   putStrLn "protocol checks passed"
   where
     foldFrames _ old []=pure old
