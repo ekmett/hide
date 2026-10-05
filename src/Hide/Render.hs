@@ -442,14 +442,18 @@ pluginWindowLayers d active w prepared=
         (Rect (x+1) (y+1+n-scrollRow w) (max 0 (ww-2)) 1) (scrollColumn w) row
       | n<-[scrollRow w..scrollRow w+max 0 (hh-3)],Just row<-[TextLayout.layoutRows layout Vec.!? n]]
       ++[CellImage (place (x+1) (y+1) (V.charFill edit ' ' (max 0 (ww-2)) (max 0 (hh-2))))]
+      | PluginWindow.PlainRows plain<-rows =
+      [sourceCellRow (darkAppearance d) active (selection w) (contentLineOffset text n)
+        (Rect (x+1) (y+1+n-scrollRow w) (max 0 (ww-2)) 1) (scrollColumn w) row
+      | n<-[scrollRow w..scrollRow w+max 0 (hh-3)],Just row<-[plain Vec.!? n]]
+      ++[CellImage (place (x+1) (y+1) (V.charFill edit ' ' (max 0 (ww-2)) (max 0 (hh-2))))]
       | otherwise=[CellImage (place (x+1) (y+1) body)]
     body=V.vertCat [line n | n<-[scrollRow w..scrollRow w+max 0 (hh-3)]]
     line n=V.cropRight (max 0 (ww-2)) (lineImage V.<|> V.charFill edit ' ' (max 0 (ww-2)) 1)
       where
         start=contentLineOffset text n
         lineImage=case rows of
-          PluginWindow.PlainRows plain->maybe V.emptyImage
-            (styledSourceImage (darkAppearance d) Nothing active (selection w) start (scrollColumn w) (max 0 (ww-2))) (plain Vec.!? n)
+          PluginWindow.PlainRows _->V.emptyImage
           PluginWindow.StyledRows styled->V.translateX (negate (scrollColumn w))
             (styledImage (darkAppearance d) (const True) Nothing active (selection w) start (fromMaybe [] (styled Vec.!? n)))
 
@@ -682,14 +686,32 @@ splitStyled xs=let (a,b)=break ((=='\n').fst) xs in a:case b of []->[]; _:rest->
 -- character boundaries; exceptional graphemes keep one complete source target
 -- and the advance already resolved by sourceSigils, including tab stops.
 styledSourceImage :: Bool -> Maybe V.Attr -> Bool -> Selection -> Int -> Int -> Int -> SourceRow -> V.Image
-styledSourceImage dark override active sel start left columns row=V.translateX (column-left) (V.horizCat (draw (start+char) sigils))
+styledSourceImage dark override active sel start left columns row=
+  V.translateX (column-left) (V.horizCat spans)
+  where
+    (column,spans)=sourceCellSpans image dark override active sel start left columns row
+    image (CellText paint text)=I.HorizText paint (TL.fromStrict text) (T.length text) (T.length text)
+    image (CellGlyph paint text advance _ _)=I.HorizText paint (TL.fromStrict text) advance (T.length text)
+    image (CellScript _ _ _ _)=V.emptyImage -- Source Sigils never contain scripted presentation.
+
+-- Both source images and plain plugin rows share paint and source-selection cuts.
+-- The compositor owns clipping; glyphs retain their complete semantic identity.
+sourceCellRow :: Bool -> Bool -> Selection -> Int -> Rect -> Int -> SourceRow -> CellLayer
+sourceCellRow dark active sel start (Rect x y columns _) left row=
+  CellRow (x+column-left) y x (x+columns) (Vec.fromList spans)
+  where (column,spans)=sourceCellSpans id dark Nothing active sel start left columns row
+
+-- Project at emission so image callers do not retain an intermediate span list.
+{-# INLINE sourceCellSpans #-}
+sourceCellSpans :: (CellSpan -> a) -> Bool -> Maybe V.Attr -> Bool -> Selection -> Int -> Int -> Int -> SourceRow -> (Int,[a])
+sourceCellSpans project dark override active sel start left columns row=(column,draw (start+char) sigils)
   where
     (char,column,sigils)=sourceSigilsWindow left columns row
     (lo,hi)=ordered sel
     color style=maybe normal (\paint->paint {V.attrStyle=V.attrStyle normal}) override
       where normal=syntaxAttr dark style
     selected paint=paint `V.withForeColor` blue `V.withBackColor` gray
-    image paint text advance=I.HorizText paint (TL.fromStrict text) advance (T.length text)
+    ordinary paint text=[project (CellText paint text) | not (T.null text)]
     draw _ Nil=[]
     draw offset (ConsChars text style rest)=
       let n=T.length text
@@ -697,18 +719,18 @@ styledSourceImage dark override active sel start left columns row=V.translateX (
           a=max 0 (min n (lo-offset)); z=max a (min n (hi-offset))
           (before,tailText)=T.splitAt a text
           (chosen,after)=T.splitAt (z-a) tailText
-          ordinary=[image paint text n]
-          highlighted=[image paint before a,image (selected paint) chosen (z-a),image paint after (n-z)]
-      in (if active && z>a then highlighted else ordinary)++draw (offset+n) rest
+          highlighted=ordinary paint before++ordinary (selected paint) chosen++ordinary paint after
+      in (if active && z>a then highlighted else ordinary paint text)++draw (offset+n) rest
     draw offset (ConsSigil glyph style advance rest)=
       let original=graphemeText glyph
           n=T.length original
-          paint=color style
-          shown | original=="\r"=""
-                | original=="\t"=T.replicate advance " "
-                | T.any (\c->c<' ' || c=='\DEL') original=T.map (\c->if c<' ' || c=='\DEL' then '·' else c) original
+          paint=if active && offset<hi && offset+n>lo then selected (color style) else color style
+          shown | T.any (\c->c<' ' || c=='\DEL') original=T.map (\c->if c<' ' || c=='\DEL' then '·' else c) original
                 | otherwise=original
-      in image (if active && offset<hi && offset+n>lo then selected paint else paint) shown advance:draw (offset+n) rest
+          occupied | advance<=0=[]
+                   | original=="\t"=ordinary paint (T.replicate advance " ")
+                   | otherwise=[project (CellGlyph paint shown advance 0 advance)]
+      in occupied++draw (offset+n) rest
 
 styledImage :: Bool -> (Style -> Bool) -> Maybe V.Attr -> Bool -> Selection -> Int -> [(Char,Style)] -> V.Image
 styledImage dark selectable override active sel start chars

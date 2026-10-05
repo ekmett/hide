@@ -6,6 +6,7 @@ import Control.Exception (evaluate)
 import Control.Monad (unless)
 import qualified Data.Map.Strict as M
 import qualified Data.Text as T
+import qualified Data.Vector as Vec
 import qualified Graphics.Vty as V
 import System.Directory (removeFile,getTemporaryDirectory)
 import System.IO (openTempFile,hClose)
@@ -25,7 +26,8 @@ import Hide.Model
 import Hide.Plugin.Command (withRegistry)
 import qualified Hide.Plugin.Menu as P
 import qualified Hide.Plugin.Tree as PTree
-import Hide.Render (snapshot,renderKey)
+import Hide.Render (snapshot,renderKey,renderCellRows)
+import Hide.Unicode (CellSpan(..))
 import WindowExtension
 #ifdef WITH_PROTOCOL
 import Data.Aeson (object,(.=))
@@ -83,6 +85,25 @@ checks=W.withWindowScope $ \scope->withDocsCommands $ \docs->withRegistry $ \reg
   check "native, terminal and browser clipboard routes agree on plugin text"
     (all ((==clipboard copied) . clipboard) [wireCopy,macCopy,browserCopy])
 #endif
+  plain<-W.prepareTextWindow "Plain row" "a界e\x0301\t👩🏽\x200d\&💻z\r\nnext"
+  plainOpening<-W.openTextWindow scope plain >>= maybe (fail "plain row opening refused") pure
+  plainDesktop<-adoptWindowUpdate P.HumanMenu plainOpening (initialDesktop (30,12))
+  let selectedPlain=modifyActive (\w->w {bounds=Rect 0 1 14 7,selection=Selection 1 2}) plainDesktop
+      glyphs desktop=[(paint,text,full,start,shown) | CellGlyph paint text full start shown<-Vec.toList (renderCellRows desktop Vec.! 2)]
+      clippedPlain=modifyActive (\w->w {scrollColumn=2}) selectedPlain
+  check "plain prepared row retains whole selected glyph and borrowed grapheme text"
+    (any (\(paint,text,full,start,shown)->text=="界" && (full,start,shown)==(2,0,2) &&
+      V.attrForeColor paint==V.SetTo (V.RGBColor 0 0 170) && V.attrBackColor paint==V.SetTo (V.RGBColor 170 170 170)) (glyphs selectedPlain) &&
+      any (\(_,text,_,_,_)->text=="e\x0301") (glyphs selectedPlain) &&
+      any (\(_,text,_,_,_)->text=="👩🏽\x200d\&💻") (glyphs selectedPlain))
+  check "plain row clipping preserves semantic glyph origin while text blanks the half"
+    (any (\(_,text,full,start,shown)->text=="界" && (full,start,shown)==(2,1,1)) (glyphs clippedPlain) &&
+      not ("界" `T.isInfixOf` snapshot clippedPlain))
+  check "private plain row masks complete glyphs before export"
+    (null (glyphs clippedPlain {streamerMode=True}))
+  let selectedAll=fst (runCommand SelectAll selectedPlain)
+  check "plain row display transformations leave copied source unchanged"
+    (clipboard (fst (runCommand Copy selectedAll))=="a界e\x0301\t👩🏽\x200d\&💻z\r\nnext")
   let private=opened {streamerMode=True}
   check "private plugin title is masked in application and Dock metadata"
     (applicationTitle "/tmp" private=="th Private plugin window" && all (\(_,title,_,_)->title/="Plugin notes") (editorWindowEntries private))
