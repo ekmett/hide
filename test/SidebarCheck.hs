@@ -116,7 +116,11 @@ fileRenameChecks=bracket temporary removePathForcibly $ \dir->withSidebarCommand
   untouched<-BS.readFile (dir </> "Taken.hs")
   check "Rename refuses an occupied destination" (path refusedCollision==Just renamed && untouched=="keep me")
   dirtyForm<-open "Renamedλ.hs" refusedCollision
-  refusedDirty<-submit "Dirty.hs" (insertText "local " dirtyForm) >>= refused
+  dirtyVersion<-captureVersion (documentBuffer (doc dirtyForm))
+  let changedSource=insertText "local " dirtyForm {sideTree=fmap (\tree->tree {treeFocused=False}) (sideTree dirtyForm)}
+  unchangedSource<-versionCurrent dirtyVersion (documentBuffer (doc changedSource))
+  check "The source really changes while its rename form remains open" (not unchangedSource && dirty (documentBuffer (doc changedSource)))
+  refusedDirty<-submit "Dirty.hs" changedSource >>= refused
   dirtyTarget<-doesPathExist (dir </> "Dirty.hs")
   check "Rename refuses a source edited after its form opened" (not dirtyTarget && path refusedDirty==Just renamed && dirty (documentBuffer (doc refusedDirty)))
   clean<-pure (sourceCommand Undo refusedDirty)
