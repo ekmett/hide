@@ -37,6 +37,7 @@ import Hide.Files (filePath)
 import Hide.Font
 import Hide.Frontend (modeSize)
 import Hide.Render (renderKey)
+import Hide.RequestedPaste
 
 -- | Serve a browser frontend, intercepting clipboard, download, link and mode
 -- effects. Acknowledge input after its effects have been applied.
@@ -47,6 +48,7 @@ runWeb scale effects tick initial = do
   done<-newEmptyMVar
   let
       session conn = do
+        pasteReads<-newRequestedPaste
         queue<-newTBQueueIO 128
         disconnected<-newEmptyTMVarIO
         let send=WS.sendTextData conn . encode
@@ -62,9 +64,10 @@ runWeb scale effects tick initial = do
                 Right event -> atomically (writeTBQueue queue (Just event))
         send (assetsPacket font scale)
         WS.withPingThread conn 15 (pure ()) $ withAsync (finally receive (atomically (void (tryPutTMVar disconnected ())))) $ \_ ->
-          readIORef state >>= loop conn send queue disconnected Nothing
-      loop conn send queue disconnected previous d = do
+          readIORef state >>= loop pasteReads conn send queue disconnected Nothing
+      loop pasteReads conn send queue disconnected previous d = do
         current<-tick d
+        refreshRequestedPaste pasteReads current
         cwd<-getCurrentDirectory
         writeIORef state current
         -- Never compare desktops here: even idle equality would walk buffers
@@ -84,22 +87,31 @@ runWeb scale effects tick initial = do
         case event of
           Just Nothing -> pure ()
           _ -> do
-            let (next,requests)=maybe (current,[]) (\(_,inputEvent) -> applyInput inputEvent current) (event >>= id)
-            (exit,updated)<-foldM (effect conn send) (False,next) requests
+            (next,requests)<-case event >>= id of
+              Just (_,PasteReply token text)->applyRequestedPaste pasteReads token text current
+              Just (_,inputEvent)->pure (applyInput inputEvent current)
+              Nothing->pure (current,[])
+            refreshRequestedPaste pasteReads next
+            (exit,updated)<-foldM (effect pasteReads conn send) (False,next) requests
+            refreshRequestedPaste pasteReads updated
             writeIORef state updated
             case event >>= id of
               Just (serial,_) -> send (object ["type" .= ("ack"::T.Text),"seq" .= serial,"dirty" .= webDirty updated])
               Nothing -> pure ()
             if exit then send (object ["type" .= ("closed"::T.Text)]) >> void (tryPutMVar done ())
-              else loop conn send queue disconnected (Just (key,resetKey,rows,metadata)) updated
-      effect _ _ result@(True,_) _ = pure result
-      effect _ send (_,d) (FollowLink origin target) = do
+              else loop pasteReads conn send queue disconnected (Just (key,resetKey,rows,metadata)) updated
+      effect _ _ _ result@(True,_) _ = pure result
+      effect pasteReads _ send (_,d) (FollowLink origin target) = do
         (opened,packet)<-followLink True d origin target
         mapM_ send packet
+        refreshRequestedPaste pasteReads opened
         pure (False,opened)
-      effect _ send (_,d) ReadBrowserClipboard = send (object ["type" .= ("paste-request"::T.Text)]) >> pure (False,d)
-      effect _ send (_,d) (WriteBrowserClipboard text) = send (object ["type" .= ("copy"::T.Text),"text" .= text]) >> pure (False,d)
-      effect conn send (_,d) (DownloadDocument bid) = do
+      effect pasteReads _ send (_,d) ReadBrowserClipboard = do
+        token<-requestPaste pasteReads d
+        mapM_ (\value->send (object ["type" .= ("paste-request"::T.Text),"request" .= value])) token
+        pure (False,d)
+      effect _ _ send (_,d) (WriteBrowserClipboard text) = send (object ["type" .= ("copy"::T.Text),"text" .= text]) >> pure (False,d)
+      effect _ conn send (_,d) (DownloadDocument bid) = do
         case M.lookup bid (buffers d) of
           Nothing -> pure ()
           Just doc -> do
@@ -107,8 +119,11 @@ runWeb scale effects tick initial = do
             _ <- send (object ["type" .= ("download"::T.Text),"name" .= name])
             WS.sendBinaryData conn (bufferBytes (documentBuffer doc))
         pure (False,d)
-      effect _ _ (_,d) (SetScreenMode mode) = pure (False,(resizeScreenMode (modeSize mode) d) {videoMode=Just mode})
-      effect _ _ (_,d) request = effects d [request]
+      effect _ _ _ (_,d) (SetScreenMode mode) = pure (False,(resizeScreenMode (modeSize mode) d) {videoMode=Just mode})
+      effect pasteReads _ _ (_,d) request = do
+        result@(_,updated)<-effects d [request]
+        refreshRequestedPaste pasteReads updated
+        pure result
   serveBrowser done session
 #else
 runWeb :: Double -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> (Desktop -> IO Desktop) -> Desktop -> IO ()

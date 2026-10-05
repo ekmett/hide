@@ -51,6 +51,7 @@ import Paths_hide (getDataFileName)
 import Hide.Model hiding (Paste, message)
 import Hide.Protocol
 import Hide.RemoteEndpoint
+import Hide.RequestedPaste
 import Hide.Session
 import System.Directory (getCurrentDirectory, doesFileExist, doesDirectoryExist, removeFile, listDirectory)
 import Hide.Recovery (writeCheckpoint, readCheckpoint, checkpointKey)
@@ -223,6 +224,7 @@ runRemoteDaemonWithStartup owned session scale effects tick inspect initial = do
     let label = T.pack (shortSessionId session (map dropExtension names))
     epoch <- randomIdentity
     font <- loadFont
+    pasteReads <- newRequestedPaste
     state <- newMVar (Session recovered {browserFrontend=True} Nothing 0 [] 0 False)
     writer <- newMVar ()
     done <- newEmptyMVar
@@ -238,7 +240,7 @@ runRemoteDaemonWithStartup owned session scale effects tick inspect initial = do
           result <- try $ modifyMVar state $ \original -> do
             unless (serial>=0 && serial<=acknowledged original+1 && received>=0 && received<=acknowledged original) (failure "Remote input sequence gap")
             let s=if serial==0 then original else original {savedReplies=filter ((>received).fst) (savedReplies original)}
-            if serial==0 then pure (s {desktop=fst (applyInput Blur (desktop s))},([],stopped s,acknowledged s,webDirty (desktop s)))
+            if serial==0 then cancelRequestedPaste pasteReads >> pure (s {desktop=fst (applyInput Blur (desktop s))},([],stopped s,acknowledged s,webDirty (desktop s)))
             else if stopped s then pure (s,([],True,acknowledged s,webDirty (desktop s)))
             else if input==SuspendSession && serial>acknowledged s then do
               -- A failed checkpoint must leave the daemon alive with its buffers.
@@ -246,20 +248,24 @@ runRemoteDaemonWithStartup owned session scale effects tick inspect initial = do
               atomically (writeTVar preserveCheckpoint True)
               pure (s {stopped=True,acknowledged=serial},([],True,serial,webDirty (desktop s)))
             else if serial<=acknowledged s then pure (s,(concatMap snd (savedReplies s),stopped s,acknowledged s,webDirty (desktop s))) else do
-              let (next,requests)=applyInput input (desktop s)
-                  anticipated=concatMap (responsePackets next) requests
+              (next,requests)<-case input of
+                PasteReply token text->applyRequestedPaste pasteReads token text (desktop s)
+                _->pure (applyInput input (desktop s))
+              refreshRequestedPaste pasteReads next
+              let anticipated=concatMap (responsePackets next) requests
                   retained=concatMap snd (savedReplies s)
                   tooLarge=any ((>=maxPacketSize) . packetSize) anticipated
                   full=not (null anticipated) && (length (savedReplies s)>=128 || sum (map packetSize (retained++anticipated))>33554432)
               (exited,updated,replies) <- if tooLarge || full
                 then pure (False,(desktop s) {status=if tooLarge then "Clipboard or download exceeds 16 MiB; the command was not applied." else "Remote reply journal is full; reconnect before retrying this command."},[])
                 else foldM (effect (owner s,generation s)) (False,next,[]) requests
+              refreshRequestedPaste pasteReads updated
               -- Replaying a clipboard read could produce a second, distinct paste input.
               let retainedReplies=filter (\packet -> packetType packet `notElem` [Just "paste-request",Just "open-resource"]) replies
                   saved=savedReplies s++[(serial,retainedReplies) | not (null retainedReplies)]
               pure (s {desktop=updated,acknowledged=serial,stopped=exited,savedReplies=saved},(replies,exited,serial,webDirty updated))
           case result of
-            Left (_::IOException) -> modifyMVar_ state (\s -> pure s {generation=generation s+1})
+            Left (_::IOException) -> modifyMVar_ state (\s -> cancelRequestedPaste pasteReads >> pure s {generation=generation s+1})
             Right _ -> pure ()
           atomically (putTMVar reply (result :: Either IOException ([WirePacket],Bool,Int,Bool)))
         linkLoop = forever $ do
@@ -274,11 +280,13 @@ runRemoteDaemonWithStartup owned session scale effects tick inspect initial = do
                 Just value->atomically $ do
                   full<-isFullTBQueue linkReplies
                   if full then pure False else writeTBQueue linkReplies (stamp,JsonPacket value) >> pure True
+              refreshRequestedPaste pasteReads updated
               pure s {desktop=if delivered then updated else updated {status="Too many pending links; try again shortly."}}
         tickLoop = forever $ do
           threadDelay 50000
           modifyMVar_ state $ \s -> if stopped s then pure s else do
             d <- tick (desktop s)
+            refreshRequestedPaste pasteReads d
             pure s {desktop=d}
         serve shutdown connection = flip finally (quietClose connection) $ handle (\(err::IOException) -> writePacket connection (json "error" ["message" .= show err])) $ do
           first <- readFirstPacket connection
@@ -310,6 +318,7 @@ runRemoteDaemonWithStartup owned session scale effects tick inspect initial = do
                     -- approval/Exit, so accepted replies cannot miss the drain.
                     atomically (modifyTVar' inspections (M.insert thread stop))
                     (exited,updated,reply) <- inspect (desktop s) agentToken request
+                    refreshRequestedPaste pasteReads updated
                     pure (s {desktop=updated,stopped=stopped s || exited},(exited,reply))
                   -- Start deferred work masked before accepting cancellation. Its
                   -- interruptible waits install their cleanup before EOF can stop it.
@@ -344,6 +353,7 @@ runRemoteDaemonWithStartup owned session scale effects tick inspect initial = do
                   putMVar writer ())
         attachment connection client clientAck = do
           (ack,attachmentEpoch,replay) <- modifyMVar state $ \s -> do
+            cancelRequestedPaste pasteReads
             when (stopped s) (failure "Editor session is closing")
             let switched=owner s/=Just client
                 ack=if switched then 0 else acknowledged s
@@ -447,7 +457,7 @@ runRemoteDaemonWithStartup owned session scale effects tick inspect initial = do
             s <- readMVar state
             when (stopped s) (void (tryPutMVar done ()))
         responsePackets d request = case request of
-          ReadBrowserClipboard -> [json "paste-request" []]
+          ReadBrowserClipboard -> [json "paste-request" ["request" .= T.replicate 48 "0"]]
           WriteBrowserClipboard text -> [json "copy" ["text" .= text]]
           DownloadDocument bid -> case M.lookup bid (buffers d) of
             Nothing -> []
@@ -465,7 +475,9 @@ runRemoteDaemonWithStartup owned session scale effects tick inspect initial = do
           ReadHelp -> getDataFileName "README.md" >>= \helpPath -> queueLink stamp Nothing d replies (Just helpPath) ""
           FollowTreeLink trace resource target -> queueLink stamp (Just trace) d replies (Just resource) target
           FollowLink origin target -> queueLink stamp Nothing d replies origin target
-          ReadBrowserClipboard -> pure (False,d,replies++[json "paste-request" []])
+          ReadBrowserClipboard -> do
+            token<-requestPaste pasteReads d
+            pure (False,d,replies++[json "paste-request" ["request" .= value] | Just value<-[token]])
           WriteBrowserClipboard text -> pure (False,d,replies++[json "copy" ["text" .= text]])
           DownloadDocument bid -> case M.lookup bid (buffers d) of
             Nothing -> pure (False,d,replies)
@@ -476,7 +488,10 @@ runRemoteDaemonWithStartup owned session scale effects tick inspect initial = do
                 then pure (False,d {status="Download exceeds 16 MiB; save the file on the remote host."},replies)
                 else pure (False,d,replies++[json "download" ["name" .= name],BinaryPacket bytes])
           SetScreenMode mode -> pure (False,(resizeScreenMode (modeSize mode) d) {videoMode=Just mode},replies)
-          _ -> do (exited,updated) <- effects d [request]; pure (exited,updated,replies)
+          _ -> do
+            (exited,updated) <- effects d [request]
+            refreshRequestedPaste pasteReads updated
+            pure (exited,updated,replies)
     let checkpointNow d = do
           result <- writeCheckpoint checkpoint d
           case result of

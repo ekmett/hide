@@ -35,7 +35,7 @@ import System.Directory (getHomeDirectory, createDirectoryIfMissing)
 import System.FilePath ((</>))
 import System.IO (stdout, stderr, hPutStrLn, hFlush, openBinaryTempFile, hClose)
 import System.Timeout (timeout)
-import Hide.Protocol (WirePacket(..), decodeFrame)
+import Hide.Protocol (WirePacket(..), decodeFrame,parseClipboardRequest,clipboardReplyInput)
 import Hide.Remote (peerReceive, peerSend)
 import Hide.RemoteWindow (parseRemoteFrame, sanitizeDownloadName)
 import Hide.Unicode (updateDisplayOps)
@@ -189,7 +189,8 @@ runRemoteTerminal peer = bracket (mkVty V.defaultConfig) (\vty -> V.shutdown vty
                 render frame notification
                 loop receiver sender frame connected clipboard notification
               "paste-request" -> do
-                forM_ clipboard $ \text -> send (object ["type" .= ("paste"::T.Text),"text" .= text])
+                request<-parseIO parseClipboardRequest value
+                forM_ (clipboard >>= clipboardReplyInput request) send
                 let hint=if clipboard==Nothing then "Paste with your terminal's paste shortcut; Ctrl+] detaches" else ""
                 render frame hint
                 loop receiver sender frame connected clipboard hint
