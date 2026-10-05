@@ -24,6 +24,7 @@ import Hide.Syntax
 
 checks :: IO ()
 checks = do
+  composerWidthChecks
   let exact="aé𝄞\t─\x301\r"
       row=prepareSourceRow exact (zip (T.unpack exact) (cycle [Keyword,Keyword,Plain]))
       pieces=[sourceRangeText row r | r<-V.toList (sourceRowRanges row)]
@@ -233,3 +234,33 @@ await label worker done start=timeout 4000000 (loop start) >>= maybe (error (lab
 
 check :: String -> Bool -> IO ()
 check label ok=unless ok (error label)
+
+-- Bubble sizing stops at the available width, before rendering its visible rows.
+composerWidthChecks :: IO ()
+composerWidthChecks=do
+  let size hint b columns=
+        let d=(addReadOnly "Conversation" "" (initialDesktop (100,35))) {composerBuffer=b,autocompleteDraft=b}
+            w=(fromJust (activeWindow d)) {bounds=Rect 0 1 (columns+6) 30}
+        in width ((if hint then autocompleteComposerRect else composerRect) d w)
+  forM_ [False,True] $ \hint->do
+    let draft=(newBuffer (T.replicate 100000 "界"<>"\nshort"))
+          {undoStack=error "composer width forced undo",saved=error "composer width forced baseline"}
+    _<-evaluate (prepareBuffer draft)
+    before<-getAllocationCounter
+    columns<-evaluate (size hint draft 94)
+    after<-getAllocationCounter
+    check "bubble width stops measuring when its window is full" (columns==94 && before-after<100000)
+    -- Repeated indexed lookups make this quadratic in line-tree depth/allocation.
+    let short=newBuffer (T.replicate 10000 "x\n")
+    _<-evaluate (prepareBuffer short)
+    shortBefore<-getAllocationCounter
+    shortColumns<-evaluate (size hint short 94)
+    shortAfter<-getAllocationCounter
+    check "bubble width visits short rows sequentially" (shortColumns==12 && shortBefore-shortAfter<4000000)
+    check "DEL placeholder occupies one source cell" (size hint (newBuffer "abcdefghijkl\DEL") 94==14)
+    forM_ [0,8,12,13,20,94] $ \limit->
+      forM_ ["","short","    x = 1\n","\r\n","a\r","\t","👩🏽\x200d\&💻","a界e\x301\txyz\r\n","\x301","x\NULz",T.replicate 50 "界 e\x301 "] $ \text->do
+        let lineWidth raw=let line=if not hint && "    " `T.isPrefixOf` raw then T.drop 4 raw else raw
+                          in displayColumn line (T.length line)
+            expected=min limit (max 12 (maximum (0:map lineWidth (textLines text))+1))
+        check "bubble geometry keeps tabs, Unicode and code indentation" (size hint (newBuffer text) limit==expected)
