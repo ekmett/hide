@@ -11,7 +11,6 @@ import qualified Data.Vector as V
 import qualified Data.Text.Lazy as TL
 import qualified Data.ByteString.Lazy as BL
 import Data.Foldable (toList)
-import qualified Graphics.Vty as VT
 import Graphics.Vty.Span (SpanOp(..))
 import Hide.Buffer (newBuffer,Selection(..))
 import Hide.Model
@@ -21,8 +20,7 @@ import Hide.TextStyle
 import Hide.Markdown (renderMarkdown)
 import Hide.Render (snapshotHtml)
 import Hide.RemoteWindow (parseRemoteFrame,RemoteFrame(..),RemoteCell(..))
-import Hide.RemoteTerminal (remoteTerminalPicture)
-import Hide.Unicode (displayOpsForPic)
+import Hide.RemoteTerminal (remoteTerminalDisplay)
 
 checks :: IO ()
 checks=do
@@ -49,8 +47,8 @@ checks=do
   check "trait-only changes survive real compressed frame reconstruction" (restored==frameRows regular && restored/=rows)
   frame<-either fail pure (parseRemoteFrame (Data.Aeson.object metadata) rows)
   check "native receiver retains all terminal traits" ([textFlags paint | RemoteCell _ _ paint text _ _ _<-remoteCells frame,textForeground paint==fromIntegral foreground,text `elem` ["B","I","X","R"]]==[1,2,3,0])
-  let terminal=remoteTerminalPicture frame
-      terminalTraits=[(TL.toStrict text,textFlags (textStyleFromAttr attr)) | ops<-toList (displayOpsForPic terminal (remoteSize frame)), TextSpan {textSpanAttr=attr,textSpanText=text}<-toList ops]
+  let (_,terminal)=remoteTerminalDisplay (remoteSize frame) (Just frame) ""
+      terminalTraits=[(TL.toStrict text,textFlags (textStyleFromAttr attr)) | ops<-toList terminal, TextSpan {textSpanAttr=attr,textSpanText=text}<-toList ops]
   check "remote TUI restores bold and italic attributes" (all (\(char,flags)->any (\(text,actual)->char `T.isInfixOf` text && actual==flags) terminalTraits) [("B",1),("I",2),("X",3)])
   let markdown=addHelpStyled (renderMarkdown 80 "# Heading\n\n***both*** regular") (initialDesktop (80,25))
       selected=modifyActive (\w->w {selection=Selection 9 13}) markdown
@@ -59,5 +57,5 @@ checks=do
   check "selection keeps composed traits" (3 `elem` selectedFlags)
   check "styling keeps copied semantic text" (clipboard (fst (runCommand Copy selected))=="both")
   check "HTML snapshots carry both font traits" ("font-weight:bold;font-style:italic" `T.isInfixOf` snapshotHtml markdown)
-  check "trait-only terminal round trip keeps dimensions" (case VT.picLayers terminal of [image]->VT.imageWidth image==80 && VT.imageHeight image==25; _->False)
+  check "direct terminal projection keeps dimensions" (V.length terminal==25 && V.all ((==80).sum.map textSpanOutputWidth.toList) terminal)
   putStrLn "text style checks passed"
