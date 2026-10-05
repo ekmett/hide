@@ -257,8 +257,9 @@ window, also available through **Debug > Output**. This read-only view is separa
 from source buffers. Updates preserve its placement and your foreground work;
 closing it keeps captured output available through Debug > Output without
 reopening it when more output arrives. A later session reuses an existing output
-slot with fresh content identity. This output view does not accept program input. The inspected hdb release disables terminal requests on
-Windows; that platform's program input remains unqualified.
+slot with fresh content identity. This output view does not accept program input.
+The inspected hdb release disables terminal requests on Windows; that platform's
+program input remains unqualified.
 
 ## Step through a program
 

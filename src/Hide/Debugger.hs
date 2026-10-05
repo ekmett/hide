@@ -65,10 +65,11 @@ data OutputOwner = OutputOwner !W.WindowScope !(IORef OutputSlot)
 data OutputSlot = OutputSlot !Int !Int !(Maybe W.WindowRef) !Bool !Bool !(Maybe W.WindowRef)
 -- The two flags request a pending open or deferred explicit refocus.
 -- Capping/concatenating output is deliberately lazy until the worker prepares
--- the snapshot; request admission forces only the small receipt constructor.
-data OutputRequest = OutputRequest !Int !Int !(Maybe W.WindowRef) Text
+-- a copied bounded report; request admission forces only the small receipt.
+-- Until that receipt returns, the existing bounded DAP inbox holds later events.
+data OutputRequest = OutputRequest !Int !Int !(Maybe W.WindowRef) !Bool Text
 data OutputPublication = OutputPublication !Int !Int !(Maybe W.WindowRef)
-  !(Either Text W.WindowUpdate)
+  !(Either Text Text) !(Maybe (Either Text W.WindowUpdate))
 
 newOutputOwner :: W.WindowScope -> IO OutputOwner
 newOutputOwner scope=mask_ $ do
@@ -79,25 +80,30 @@ newOutputOwner scope=mask_ $ do
   pure (OutputOwner scope slot desired latest worker)
   where
     loop desired latest=do
-      OutputRequest epoch revision target value<-atomically $ do
+      OutputRequest epoch revision target prepareView value<-atomically $ do
         next<-readTVar desired
         maybe retry (\request->writeTVar desired Nothing >> pure request) next
-      result<-(do
-        prepared<-W.prepareRecoverableTextWindow "hide.debug-output" 1 "Debugger output" value
-        case prepared of
-          Left err->pure (Left err)
-          Right snapshot->do
-            update<-maybe (W.openTextWindow scope snapshot) (\reference->W.refreshTextWindow reference snapshot) target
-            pure (maybe (Left "Debugger output view closed.") Right update))
-        `catch` \(err::SomeException)->case fromException err :: Maybe SomeAsyncException of
-          Just _->throwIO err
-          Nothing->pure (Left "Debugger output preparation failed.")
+      report<-(Right <$> evaluate (T.copy (T.takeEnd 16384 value))) `catch` synchronous "Debugger output preparation failed."
+      result<-case report of
+        Left _->pure Nothing
+        Right _ | not prepareView->pure Nothing
+        Right bounded->Just <$> ((do
+          prepared<-W.prepareRecoverableTextWindow "hide.debug-output" 1 "Debugger output" bounded
+          case prepared of
+            Left err->pure (Left err)
+            Right snapshot->do
+              update<-maybe (W.openTextWindow scope snapshot) (\reference->W.refreshTextWindow reference snapshot) target
+              pure (maybe (Left "Debugger output view closed.") Right update))
+          `catch` synchronous "Debugger output view preparation failed.")
       previous<-atomically $ do
         old<-tryTakeTMVar latest
-        putTMVar latest (OutputPublication epoch revision target result)
+        putTMVar latest (OutputPublication epoch revision target report result)
         pure old
       mapM_ retireOutputOpening previous
       loop desired latest
+    synchronous detail (err::SomeException)=case fromException err :: Maybe SomeAsyncException of
+      Just _->throwIO err
+      Nothing->pure (Left detail)
 
 closeOutputOwner :: OutputOwner -> IO ()
 closeOutputOwner (OutputOwner _ slot _ _ worker)=do
@@ -107,7 +113,7 @@ closeOutputOwner (OutputOwner _ slot _ _ worker)=do
   void (waitCatch worker)
 
 retireOutputOpening :: OutputPublication -> IO ()
-retireOutputOpening (OutputPublication _ _ Nothing (Right update))=W.retireWindowRef (W.updateWindowRef update)
+retireOutputOpening (OutputPublication _ _ Nothing _ (Just (Right update)))=W.retireWindowRef (W.updateWindowRef update)
 retireOutputOpening _=pure ()
 
 -- Replacement freezes the prior durable snapshot in its exact display slot. Late
@@ -125,13 +131,14 @@ resetOutputOwner (Debugger _ _ _ _ (OutputOwner _ slot desired latest _)) deskto
   mapM_ retireOutputOpening obsolete
 
 queueOutput :: Debugger -> Bool -> Text -> IO ()
-queueOutput (Debugger _ _ _ _ (OutputOwner _ slot desired _ _)) opening value=do
+queueOutput (Debugger ref _ _ _ (OutputOwner _ slot desired _ _)) opening value=do
   OutputSlot epoch revision target requested focus frozen<-readIORef slot
-  when (opening || requested || isJust target) $ do
-    let next=revision+1
-        request=OutputRequest epoch next target value
-    writeIORef slot (OutputSlot epoch next target (opening || requested) focus frozen)
-    request `seq` atomically (writeTVar desired (Just request))
+  let next=revision+1
+      prepareView=opening || requested || isJust target
+      request=OutputRequest epoch next target prepareView value
+  writeIORef slot (OutputSlot epoch next target (opening || requested) focus frozen)
+  modifyIORef' ref (\state->state {outputPending=True})
+  request `seq` atomically (writeTVar desired (Just request))
 
 revealOutput :: Debugger -> Text -> Desktop -> IO Desktop
 revealOutput runtime@(Debugger _ _ _ _ (OutputOwner _ slot _ _ _)) value desktop=do
@@ -151,23 +158,30 @@ revealOutput runtime@(Debugger _ _ _ _ (OutputOwner _ slot _ _ _)) value desktop
 -- Idle ticks inspect only the exact owned slot and a publication receipt; no
 -- source document labels, payloads or histories participate in invalidation.
 tickOutputOwner :: Debugger -> Desktop -> IO Desktop
-tickOutputOwner (Debugger _ _ _ _ (OutputOwner _ slot _ latest _)) desktop=do
+tickOutputOwner (Debugger ref _ _ _ (OutputOwner _ slot _ latest _)) desktop=do
   OutputSlot epoch revision target _ focus frozen<-readIORef slot
+  next<-atomically (tryTakeTMVar latest)
+  -- Report currentness is independent of the view: a closed or modal-deferred
+  -- window must not discard the bounded report or stall the DAP inbox.
+  forM_ next $ \(OutputPublication issued version _ report _)->when (issued==epoch && version==revision) $
+    modifyIORef' ref (\state->state {output=either (const "") id report,outputPending=False})
   live<-maybe (pure True) W.windowRefCurrent target
   let present=maybe False (\reference->M.member reference (pluginWindows desktop)) target
       protected=dialog desktop/=Nothing || questionActive desktop || activeAutocomplete desktop
   if isJust target && (not live || not present) then do
     mapM_ W.retireWindowRef target
-    writeIORef slot (OutputSlot epoch (revision+1) Nothing False False Nothing)
-    obsolete<-atomically (tryTakeTMVar latest)
-    mapM_ retireOutputOpening obsolete
+    -- The view closes independently; the outstanding report still owns this
+    -- revision and will unblock further events once its receipt is ready.
+    writeIORef slot (OutputSlot epoch revision Nothing False False Nothing)
+    mapM_ retireOutputOpening next
     pure desktop
   else do
-    next<-atomically (tryTakeTMVar latest)
     updated<-case next of
       Nothing->pure desktop
-      Just publication@(OutputPublication issued version captured result)
+      Just publication@(OutputPublication issued version captured report result)
         | issued/=epoch || version/=revision || captured/=target->retireOutputOpening publication >> pure desktop
+        | Left err<-report->pure desktop {status=err}
+        | Nothing<-result->pure desktop
         | captured==Nothing,Just old<-frozen,not (M.member old (pluginWindows desktop))->do
             W.retireWindowRef old
             retireOutputOpening publication
@@ -177,7 +191,7 @@ tickOutputOwner (Debugger _ _ _ _ (OutputOwner _ slot _ latest _)) desktop=do
             retained<-atomically (tryPutTMVar latest publication)
             unless retained (retireOutputOpening publication)
             pure desktop
-        | otherwise->case result of
+        | otherwise->case fromMaybe (Left "Debugger output view preparation failed.") result of
           Left err->writeIORef slot (OutputSlot epoch revision target False False frozen) >> pure desktop {status=err}
           Right update->do
             adopted<-case (captured,frozen) of
@@ -188,12 +202,13 @@ tickOutputOwner (Debugger _ _ _ _ (OutputOwner _ slot _ latest _)) desktop=do
             writeIORef slot (OutputSlot epoch revision (if installed then Just reference else target) False focus (if installed then Nothing else frozen))
             unless installed (retireOutputOpening publication)
             pure adopted
-    if not focus || protected then pure updated else do
-      OutputSlot currentEpoch currentRevision currentTarget requested _ previous<-readIORef slot
-      writeIORef slot (OutputSlot currentEpoch currentRevision currentTarget requested False previous)
-      pure $ case [windowId w | w<-windows updated,Just (windowContent w)==(PluginContent <$> currentTarget)] of
-        ident:_->focusWindow ident updated
-        _->updated
+    OutputSlot currentEpoch currentRevision currentTarget requested wantFocus previous<-readIORef slot
+    if not wantFocus || protected then pure updated else
+      case [windowId w | w<-windows updated,Just (windowContent w)==(PluginContent <$> currentTarget)] of
+        ident:_->do
+          writeIORef slot (OutputSlot currentEpoch currentRevision currentTarget requested False previous)
+          pure (focusWindow ident updated)
+        _->pure updated
 
 type Core = Desktop -> [Effect] -> IO (Bool,Desktop)
 data Debugger = Debugger (IORef State) (IO Integer) HdbRuntime SidebarMailbox OutputOwner
@@ -223,7 +238,7 @@ data State = State
   , breakpoints :: M.Map Text (Value,[Breakpoint]), sources :: M.Map Int (Int,Int,Value)
   , root :: FilePath, endpoint :: (Text,Int), output :: Text
   , startRequest :: (Text,Value), managed :: Bool, adapterId :: Text
-  , hdbLauncher :: Maybe FilePath, debugEnvironment :: [(String,String)], debugConsoles :: [Text], terminalLaunch :: Maybe (Int,Text,Async (),TMVar (Either Text C.PreparedConsole)), outputShown :: Bool
+  , hdbLauncher :: Maybe FilePath, debugEnvironment :: [(String,String)], debugConsoles :: [Text], terminalLaunch :: Maybe (Int,Text,Async (),TMVar (Either Text C.PreparedConsole)), outputShown :: Bool, outputPending :: Bool
   , failure :: Maybe Text, disconnectAt :: Maybe Integer
   , endedAt :: Maybe Integer, programExitCode :: Maybe Int
   , choices :: M.Map Text [Value], choiceId :: Int, breakRequests :: M.Map Text Int
@@ -241,7 +256,7 @@ emptyState :: State
 emptyState = State {client=Nothing,connected=False,capabilities=Null,ready=False,configured=False,pending=M.empty,generation=0,frameRevision=0,
   stopped=False,thread=Nothing,frame=Nothing,frames=[],followSource=True,exceptionFilters=[],breakpoints=M.empty,sources=M.empty,
   root=".",endpoint=("127.0.0.1",4711),output="",failure=Nothing,disconnectAt=Nothing,endedAt=Nothing,programExitCode=Nothing,
-  hdbLauncher=Nothing,debugEnvironment=[],debugConsoles=[],terminalLaunch=Nothing,outputShown=False,choices=M.empty,choiceId=0,breakRequests=M.empty,breakModified=M.empty,startRequest=("attach",object []),managed=False,adapterId="",variableRefs=M.empty,sidebarVisible=False,sidebarSession=0,sidebarPages=M.empty,sidebarThreads=M.empty,sidebarFrames=M.empty,sidebarReferences=M.empty,watchProvider=Nothing,watchPreparing=Nothing,sourcePreparing=Nothing,sourceReferences=M.empty,nextSourceObservation=1,watchExpressions=M.empty,watchCatalogueRevision=0,nextWatch=1,watchDialog=Nothing,sourceWatchDialog=Nothing}
+  hdbLauncher=Nothing,debugEnvironment=[],debugConsoles=[],terminalLaunch=Nothing,outputShown=False,outputPending=False,choices=M.empty,choiceId=0,breakRequests=M.empty,breakModified=M.empty,startRequest=("attach",object []),managed=False,adapterId="",variableRefs=M.empty,sidebarVisible=False,sidebarSession=0,sidebarPages=M.empty,sidebarThreads=M.empty,sidebarFrames=M.empty,sidebarReferences=M.empty,watchProvider=Nothing,watchPreparing=Nothing,sourcePreparing=Nothing,sourceReferences=M.empty,nextSourceObservation=1,watchExpressions=M.empty,watchCatalogueRevision=0,nextWatch=1,watchDialog=Nothing,sourceWatchDialog=Nothing}
 
 withDebugger :: (Debugger -> IO a) -> IO a
 withDebugger action = C.withConsoles (\consoles -> withDebuggerConsoles consoles action)
@@ -1175,9 +1190,10 @@ tickDebuggerOwner runtime@(Debugger ref clock _ _ _) core original = do
   reapRetired runtime
   prepared<-tickTerminalLaunch runtime original
   starting<-tickHdb runtime prepared >>= C.tickConsoles (debuggerConsoles runtime)
+  reporting<-tickOutputOwner runtime starting
   s<-readIORef ref
-  events<-maybe (pure []) D.pollEvents (client s)
-  receivedEvents<-foldM (receive runtime core) starting events
+  events<-if outputPending s then pure [] else maybe (pure []) D.pollEvents (client s)
+  receivedEvents<-foldM (receive runtime core) reporting events
   sourced<-tickSourcePreparation runtime receivedEvents
   received<-tickWatchPreparation runtime sourced
   updated<-tickOutputOwner runtime received

@@ -155,10 +155,11 @@ for session in range(1, 4 if mode == 'output-owner' else 3 if mode == 'reconnect
                     event('invalidated', dict(areas=['variables']))
                 if mode == 'lazy' and thread_count == 4:
                     event('invalidated', dict(areas=['threads']))
-                reply(req, dict(threads=[dict(id=7, name='main λ'), dict(id=8, name='worker')] if mode in ('sidebar', 'sidebar-exit') and not thread_exited else [dict(id=7, name='main λ')]))
                 if mode == 'output-owner' and thread_count != 2:
                     output_count += 1
-                    event('output', dict(output=('x' * 20000 if output_count == 3 else '') + '\nsession=%d output=%d\n' % (session, output_count)))
+                    for part in range(8 if output_count == 3 else 1):
+                        event('output', dict(output=('x' * (1024 * 1024) if output_count == 3 else '') + '\nsession=%d output=%d part=%d\n' % (session, output_count, part)))
+                reply(req, dict(threads=[dict(id=7, name='main λ'), dict(id=8, name='worker')] if mode in ('sidebar', 'sidebar-exit') and not thread_exited else [dict(id=7, name='main λ')]))
             elif cmd == 'stackTrace':
                 stack_count += 1
                 rows = [dict(id=11, name='entry λ', line=2, column=1,

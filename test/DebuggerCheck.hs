@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE MagicHash, OverloadedStrings #-}
 module DebuggerCheck (checks,fixture,cleanup,outputOwnerChecks,outputLifecycleCheck) where
 
 import SourceWindowFixture (sourceFixtureBuffer)
@@ -12,6 +12,9 @@ import qualified Data.ByteString.Lazy as BL
 import Data.Aeson.Types (parseMaybe)
 import qualified Data.Map.Strict as M
 import Data.Maybe (fromMaybe, isJust)
+import Data.Array.Byte (ByteArray(..))
+import GHC.Exts (Int(..),sizeofByteArray#)
+import qualified Data.Text.Internal as TI
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
 import qualified Network.Socket as Socket
@@ -95,10 +98,13 @@ outputLifecycleCheck=bracket (fixture "output-owner") cleanup $ \(port,_,_)->do
     closed<-tick closing
     afterClose<-emit "session=1 output=3" closed
     check "closed output stays closed while MCP retains capped current report" (opening afterClose==Nothing)
-    capped<-state afterClose
-    check "debugger MCP output remains capped at16KiB" (maybe False ((==16384).T.length) (field "output" capped))
-    gen<-epoch <$> state afterClose
-    (requested,_)<-tool "debug_present" ["generation" .= gen,"view" .= ("output"::T.Text)] afterClose
+    copied<-await "closed output report detaches oversized backing" (\d->do
+      value<-state d
+      pure (maybe False (\reportText->T.length reportText==16384 && backingBytes reportText<=4*16384) (field "output" value))) afterClose
+    capped<-state copied
+    check "closed burst advances the capped report through its final chunk" (maybe False (T.isInfixOf "output=3 part=7") (field "output" capped))
+    gen<-epoch <$> state copied
+    (requested,_)<-tool "debug_present" ["generation" .= gen,"view" .= ("output"::T.Text)] copied
     reopened<-await "explicit output reopen" (pure . isJust . opening) requested
     second<-installed reopened
     oldLive<-W.windowRefCurrent first
@@ -108,9 +114,12 @@ outputLifecycleCheck=bracket (fixture "output-owner") cleanup $ \(port,_,_)->do
     replacement<-connect queuedOld
     oldCurrent<-W.windowRefCurrent second
     check "session replacement freezes exact output slot during preparation" (oldCurrent && M.lookup second (pluginWindows replacement)==oldSnapshot)
-    newReport<-await "new session report" (report "session=2 output=1") replacement {dialog=Just modal}
+    secondGeneration<-epoch <$> state replacement
+    (revealed,_)<-tool "debug_present" ["generation" .= secondGeneration,"view" .= ("output"::T.Text)] (focusWindow (windowId sourceWindow) replacement {dialog=Nothing})
+    focusedReplacement<-await "explicit output focuses prepared replacement slot" (\d->pure (maybe False (\w->case windowContent w of PluginContent reference->reference/=second; _->False) (activeWindow d))) revealed
+    newReport<-await "new session report" (report "session=2 output=1") focusedReplacement {dialog=Just modal}
     check "session preparation preserves unrelated human modal" (dialog newReport==Just modal)
-    newShown<-await "new session semantic output" (\d->pure (maybe False (/=second) (opening d))) newReport {dialog=Nothing}
+    newShown<-await "new session semantic output" (\d->pure (maybe False (\reference->reference/=second && "session=2" `T.isInfixOf` text reference d) (opening d))) newReport {dialog=Nothing}
     third<-installed newShown
     retired<-tickPluginWindows newShown
     let oldWindow=case [w | w<-windows queuedOld,windowContent w==PluginContent second] of w:_->w; _->error "missing old output slot"
@@ -131,6 +140,7 @@ outputLifecycleCheck=bracket (fixture "output-owner") cleanup $ \(port,_,_)->do
   live<-W.windowRefCurrent escaped
   check "debugger scope shutdown retires output publication lifetime" (not live)
   where
+    backingBytes (TI.Text (ByteArray bytes) _ _)=I# (sizeofByteArray# bytes)
     findWindow ident d=case [w | w<-windows d,windowId w==ident] of w:_->Just w; _->Nothing
 
 checks :: IO ()
