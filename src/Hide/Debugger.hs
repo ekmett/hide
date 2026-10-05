@@ -23,6 +23,8 @@ import Control.Exception (IOException, SomeException, SomeAsyncException, fromEx
 import Control.Concurrent.Async (Async, async, asyncWithUnmask, cancel, poll, race, waitCatch)
 import Control.Concurrent.STM
 import qualified Hide.Downloads as Downloads
+import Hide.DownloadsDialog (downloadsDialog)
+import qualified Hide.DownloadsDialog as DownloadsDialog
 import qualified Hide.HdbAcquisition as Hdb
 import Control.Monad (foldM, filterM, forM_, unless, when, void)
 import Data.Aeson
@@ -32,7 +34,6 @@ import qualified Data.ByteString.Lazy as BL
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
 import Data.IORef
-import Data.List (findIndex)
 import qualified Data.Map.Strict as M
 import Data.Maybe (fromMaybe, isJust, listToMaybe, maybeToList)
 import Data.Text (Text)
@@ -283,11 +284,11 @@ withDebuggerHdb clock prepare acquire action = C.withConsoles $ \consoles ->
 withDebuggerHdbConsoles :: C.Consoles -> IO Integer -> (Compilers.Compiler -> IO (Either Text Hdb.HdbPlan))
   -> (Hdb.HdbPlan -> (Downloads.DownloadProgress -> IO ()) -> IO (Either Text FilePath))
   -> (Debugger -> IO a) -> IO a
-withDebuggerHdbConsoles consoles clock prepare acquire action = Downloads.withDownloads $ \downloads -> W.withWindowScope $ \scope -> bracket (newOutputOwner scope) closeOutputOwner $ \outputOwner -> do
-  jobs<-newIORef (HdbState 0 Nothing Nothing Nothing Nothing [])
+withDebuggerHdbConsoles consoles clock prepare acquire action = Downloads.withDownloads $ \downloads -> W.withWindowScope $ \scope -> bracket (newOutputOwner scope) closeOutputOwner $ \outputOwner -> DownloadsDialog.withOwner downloads $ \downloadView -> do
+  jobs<-newIORef (HdbState 0 Nothing Nothing Nothing Nothing)
   retired<-newIORef []
   mailbox<-SidebarMailbox <$> newTVarIO Nothing <*> newTBQueueIO 32 <*> newTVarIO (0,Nothing,M.empty)
-  let runtime=HdbRuntime downloads jobs prepare acquire consoles retired
+  let runtime=HdbRuntime downloads jobs prepare acquire consoles retired downloadView
   bracket ((\ref -> Debugger ref clock runtime mailbox outputOwner) <$> newIORef emptyState)
     (\debugger@(Debugger ref _ _ _ _) -> do
       h<-readIORef jobs
@@ -573,7 +574,7 @@ prepareWatch (Debugger ref _ _ _ _) operation backing base private result=do
   modifyIORef' ref (\s->s {watchPreparing=Just (WatchPreparation operation worker)})
 
 tickWatchPreparation :: Debugger -> Desktop -> IO Desktop
-tickWatchPreparation (Debugger ref _ (HdbRuntime _ _ _ _ _ retired) _ _) d=do
+tickWatchPreparation (Debugger ref _ (HdbRuntime _ _ _ _ _ retired _) _ _) d=do
   s<-readIORef ref
   case watchPreparing s of
     Nothing->pure d
@@ -906,7 +907,8 @@ perform runtime@(Debugger ref clock _ _ _) core action values d = do
   when (action `elem` ["launch","launch-config","connect","attach","disconnect"]) (invalidateHdb runtime)
   s<-readIORef ref
   case (action,values) of
-    ("downloads",_) -> hdbDownloadsAction runtime values d
+    ("downloads",[]) -> showDownloads runtime d
+    _ | "downloads:" `T.isPrefixOf` action -> hdbDownloadsAction runtime action values d
     _ | "hdb-accept:" `T.isPrefixOf` action -> acceptHdb runtime action values d
     ("output",_) -> modifyIORef' ref (\state -> state {outputShown=True}) >> revealOutput runtime d
     -- Docs: docs/site/screenshots/debug-launch.png (docs/running.md).
@@ -1074,12 +1076,12 @@ initializeSession runtime@(Debugger ref _ _ _ _) directory c address requestName
   pure (automaticDesktop s d) {status="Connecting debugger..."}
 
 debuggerConsoles :: Debugger -> C.Consoles
-debuggerConsoles (Debugger _ _ (HdbRuntime _ _ _ _ consoles _) _ _) = consoles
+debuggerConsoles (Debugger _ _ (HdbRuntime _ _ _ _ consoles _ _) _ _) = consoles
 
 -- Session ownership survives frontend detach. Stop/replacement also retires a
 -- terminal still being prepared, so it cannot appear in a newer session.
 stopTransport :: Debugger -> State -> IO ()
-stopTransport runtime@(Debugger ref _ (HdbRuntime _ _ _ _ _ retired) _ _) s = mask $ \restore -> do
+stopTransport runtime@(Debugger ref _ (HdbRuntime _ _ _ _ _ retired _) _ _) s = mask $ \restore -> do
   -- No old worker can publish into the replacement session. Process cleanup is
   -- joined only at daemon teardown, outside the desktop lock.
   modifyIORef' ref (\state -> state {client=Nothing,terminalLaunch=Nothing,debugConsoles=[],sourcePreparing=Nothing,watchPreparing=Nothing})
@@ -1096,13 +1098,13 @@ stopTransport runtime@(Debugger ref _ (HdbRuntime _ _ _ _ _ retired) _ _) s = ma
     modifyIORef' retired (task:)
 
 reapRetired :: Debugger -> IO ()
-reapRetired (Debugger _ _ (HdbRuntime _ _ _ _ _ retired) _ _) = do
+reapRetired (Debugger _ _ (HdbRuntime _ _ _ _ _ retired _) _ _) = do
   tasks<-readIORef retired
   running<-filterM (fmap (not . isJust) . poll) tasks
   writeIORef retired running
 
 awaitRetired :: Debugger -> IO ()
-awaitRetired (Debugger _ _ (HdbRuntime _ _ _ _ _ retired) _ _) = readIORef retired >>= mapM_ waitCatch
+awaitRetired (Debugger _ _ (HdbRuntime _ _ _ _ _ retired _) _ _) = readIORef retired >>= mapM_ waitCatch
 
 replyReverse :: Debugger -> Int -> Text -> Either Text Value -> IO ()
 replyReverse (Debugger ref _ _ _ _) ident command result = do
@@ -1575,7 +1577,7 @@ openFrame runtime@(Debugger ref _ _ _ _) core explicit d selected = do
 -- Only this owner adopts a prepared source. Cancellation/join is retired outside
 -- the desktop lock, including superseded selections and stopped generations.
 retireSourcePreparation :: Debugger -> IO ()
-retireSourcePreparation (Debugger ref _ (HdbRuntime _ _ _ _ _ retired) _ _)=do
+retireSourcePreparation (Debugger ref _ (HdbRuntime _ _ _ _ _ retired _) _ _)=do
   current<-readIORef ref
   modifyIORef' ref (\state->state {sourcePreparing=Nothing})
   forM_ (sourcePreparing current) $ \(SourcePreparation _ _ _ _ _ _ worker)->do
@@ -1772,12 +1774,12 @@ data GhcLaunch=GhcLaunch FilePath Build.BuildConfig FilePath Int HdbContext
 data HdbPrepared=HdbReady FilePath [(String,String)] | HdbOffer Hdb.HdbPlan
 data HdbRuntime=HdbRuntime Downloads.Downloads (IORef HdbState)
   (Compilers.Compiler -> IO (Either Text Hdb.HdbPlan))
-  (Hdb.HdbPlan -> (Downloads.DownloadProgress -> IO ()) -> IO (Either Text FilePath)) C.Consoles (IORef [Async ()])
+  (Hdb.HdbPlan -> (Downloads.DownloadProgress -> IO ()) -> IO (Either Text FilePath)) C.Consoles (IORef [Async ()]) DownloadsDialog.Owner
 data HdbState=HdbState
   { hdbSerial :: Int, hdbWanted :: Maybe (Int,GhcLaunch,Bool)
   , hdbPreparing :: Maybe (Int,GhcLaunch,TMVar (),Async (Either () (Either Text HdbPrepared)))
   , hdbOffer :: Maybe (Int,GhcLaunch,Hdb.HdbPlan)
-  , hdbWaiting :: Maybe (Int,GhcLaunch,Int), hdbShown :: [Int] }
+  , hdbWaiting :: Maybe (Int,GhcLaunch,Int) }
 
 hdbContext :: Desktop -> IO HdbContext
 hdbContext d=do
@@ -1791,20 +1793,20 @@ hdbCurrent :: GhcLaunch -> HdbContext -> Bool
 hdbCurrent (GhcLaunch _ _ _ _ context) current@(_,_,_,_,identities)=context==current &&
   not (any (\(_,_,_,_,modified)->modified) identities)
 hdbPending :: Debugger -> IO Bool
-hdbPending (Debugger _ _ (HdbRuntime _ ref _ _ _ _) _ _)=do
+hdbPending (Debugger _ _ (HdbRuntime _ ref _ _ _ _ _) _ _)=do
   h<-readIORef ref
   pure (any (==hdbSerial h) ([ident | (ident,_,_)<-maybeToList (hdbWanted h)]++
     [ident | (ident,_,_,_)<-maybeToList (hdbPreparing h)]++[ident | (ident,_,_)<-maybeToList (hdbOffer h)]++
     [ident | (ident,_,_)<-maybeToList (hdbWaiting h)]))
 
 invalidateHdb :: Debugger -> IO ()
-invalidateHdb (Debugger _ _ (HdbRuntime _ ref _ _ _ _) _ _)=do
+invalidateHdb (Debugger _ _ (HdbRuntime _ ref _ _ _ _ _) _ _)=do
   h<-readIORef ref
   forM_ (hdbPreparing h) (\(_,_,stop,_)->atomically (void (tryPutTMVar stop ())))
   writeIORef ref h {hdbSerial=hdbSerial h+1,hdbWanted=Nothing,hdbOffer=Nothing}
 
 queueHdb :: Debugger -> GhcLaunch -> Desktop -> IO Desktop
-queueHdb runtime@(Debugger _ _ (HdbRuntime _ ref _ _ _ _) _ _) request d=do
+queueHdb runtime@(Debugger _ _ (HdbRuntime _ ref _ _ _ _ _) _ _) request d=do
   invalidateHdb runtime
   h<-readIORef ref
   writeIORef ref h {hdbWanted=Just (hdbSerial h,request,True)}
@@ -1812,7 +1814,7 @@ queueHdb runtime@(Debugger _ _ (HdbRuntime _ ref _ _ _ _) _ _) request d=do
   pure d {status="Resolving the selected GHC and its debugger..."}
 
 startHdbPreparation :: Debugger -> IO ()
-startHdbPreparation (Debugger _ _ (HdbRuntime _ ref prepare _ _ _) _ _)=mask $ \restore->do
+startHdbPreparation (Debugger _ _ (HdbRuntime _ ref prepare _ _ _ _) _ _)=mask $ \restore->do
   h<-readIORef ref
   case (hdbPreparing h,hdbWanted h) of
     (Nothing,Just (ident,request@(GhcLaunch directory config _ _ _),allowOffer))->do
@@ -1856,7 +1858,7 @@ hdbOfferDialog ident plan=Dialog "Download Haskell debugger?" (DebugDialog ("hdb
     area name value=TextArea name False (newBuffer (T.intercalate "\n" (T.chunksOf 36 value))) (Selection 0 0) 0 0
 
 acceptHdb :: Debugger -> Text -> [Text] -> Desktop -> IO Desktop
-acceptHdb runtime@(Debugger _ _ (HdbRuntime downloads ref _ acquire _ _) _ _) action values d=do
+acceptHdb runtime@(Debugger _ _ (HdbRuntime downloads ref _ acquire _ _ _) _ _) action values d=do
   h<-readIORef ref
   case hdbOffer h of
     Just (ident,request,plan) | action=="hdb-accept:"<>tshow ident,ident==hdbSerial h->do
@@ -1873,59 +1875,26 @@ acceptHdb runtime@(Debugger _ _ (HdbRuntime downloads ref _ acquire _ _) _ _) ac
               showDownloads runtime d {status="Downloading debugger; launch will continue when ready."}
     _->pure d {status="This debugger download offer expired."}
 
-hdbDownloadsAction :: Debugger -> [Text] -> Desktop -> IO Desktop
-hdbDownloadsAction runtime@(Debugger _ _ (HdbRuntime downloads ref _ _ _ _) _ _) values d=case values of
-  []->showDownloads runtime d
+hdbDownloadsAction :: Debugger -> Text -> [Text] -> Desktop -> IO Desktop
+hdbDownloadsAction runtime@(Debugger _ _ (HdbRuntime downloads ref _ _ _ _ view) _ _) token values d=case values of
   "0":index:_->do
-    h<-readIORef ref
-    case readMaybe (T.unpack index) >>= \n->listToMaybe (drop (max 0 n) (hdbShown h)) of
+    target<-maybe (pure Nothing) (\n->DownloadsDialog.cancelTarget view token n d) (readMaybe (T.unpack index))
+    case target of
       Just ident->do
         cancelled<-Downloads.cancelDownload downloads ident
+        h<-readIORef ref
         when (cancelled && maybe False (\(serial,_,job)->serial==hdbSerial h && job==ident) (hdbWaiting h)) (invalidateHdb runtime)
         showDownloads runtime d {status=if cancelled then "Cancelling download..." else "This download has already finished."}
-      Nothing->showDownloads runtime d
-  _->pure d
+      Nothing->pure d {status="This download selection expired."}
+  _->DownloadsDialog.close view token >> pure d
 
 showDownloads :: Debugger -> Desktop -> IO Desktop
-showDownloads (Debugger _ _ (HdbRuntime downloads ref _ _ _ _) _ _) d=do
-  rows<-Downloads.downloadSnapshot downloads
-  h<-readIORef ref
-  let oldIndex=case dialog d of Just dg | purpose dg==DebugDialog "downloads",ListBox _ _ n:_<-fields dg->n; _->0
-      oldId=listToMaybe (drop oldIndex (hdbShown h))
-      index=fromMaybe 0 (oldId >>= \ident->findIndex ((==ident).Downloads.downloadId) rows)
-  modifyIORef' ref (\state->state {hdbShown=map Downloads.downloadId rows})
-  pure d {dialog=Just (downloadsDialog rows index (dialog d))}
-
--- doc-artifact: tools/docs-screenshots.hs downloads -> docs/site/screenshots/downloads.png
-downloadsDialog :: [Downloads.Download] -> Int -> Maybe Dialog -> Dialog
-downloadsDialog rows index previous=Dialog "Downloads" (DebugDialog "downloads")
-  [ListBox "Transfers" labels index,details] focused ["Cancel selected","Close"]
-  ["Transfers continue while this window is closed."]
-  where
-    labels=map (\row->Downloads.downloadLabel row<>" — "<>downloadStateLabel (Downloads.downloadState row)) rows
-    detail=maybe "No downloads." downloadDetail (listToMaybe (drop index rows))
-    details=case previous of
-      Just dg | purpose dg==DebugDialog "downloads",_:area@(TextArea _ _ buffer _ _ _):_<-fields dg,contents buffer==detail->area
-      _->TextArea "Details" False (newBuffer detail) (Selection 0 0) 0 0
-    focused=case previous of Just dg | purpose dg==DebugDialog "downloads"->focus dg; _->0
-    downloadStateLabel state=case state of
-      Downloads.DownloadQueued->"Queued"
-      Downloads.DownloadRunning progress->Downloads.downloadPhase progress
-      Downloads.DownloadCancelling->"Cancelling"
-      Downloads.DownloadComplete _->"Installed"
-      Downloads.DownloadFailed _->"Failed"
-      Downloads.DownloadCancelled->"Cancelled"
-    downloadDetail row=case Downloads.downloadState row of
-      Downloads.DownloadRunning progress->Downloads.downloadPhase progress<>"\n"<>tshow (Downloads.downloadBytes progress)<>
-        maybe " bytes received" (\total->" / "<>tshow total<>" bytes received") (Downloads.downloadTotal progress)
-      Downloads.DownloadComplete path->"Installed: "<>T.pack path
-      Downloads.DownloadFailed err->err
-      state->downloadStateLabel state
+showDownloads (Debugger _ _ (HdbRuntime _ _ _ _ _ _ view) _ _) = DownloadsDialog.open view
 
 -- Every poll is nonblocking. Cancellation cleanup and GHC/Cabal queries stay on
 -- the one preparation worker; a replacement waits for that worker to retire.
 tickHdb :: Debugger -> Desktop -> IO Desktop
-tickHdb runtime@(Debugger _ _ (HdbRuntime downloads ref _ _ _ _) _ _) original=do
+tickHdb runtime@(Debugger _ _ (HdbRuntime downloads ref _ _ _ _ view) _ _) original=do
   h<-readIORef ref
   let requests=[request | (ident,request,_)<-maybeToList (hdbWanted h),ident==hdbSerial h]++
         [request | (ident,request,_)<-maybeToList (hdbOffer h),ident==hdbSerial h]++
@@ -1934,19 +1903,20 @@ tickHdb runtime@(Debugger _ _ (HdbRuntime downloads ref _ _ _ _) _ _) original=d
   context<-if null requests then pure Nothing else Just <$> hdbContext original
   let matches request=maybe False (hdbCurrent request) context
   when (any (not . matches) requests) (invalidateHdb runtime)
-  rows<-Downloads.downloadSnapshot downloads
   current<-readIORef ref
   let finished ident=do
         modifyIORef' ref (\state->state {hdbWaiting=Nothing})
         when (ident==hdbSerial current) (invalidateHdb runtime)
   waited<-case hdbWaiting current of
-    Just (ident,request,job)->case [Downloads.downloadState row | row<-rows,Downloads.downloadId row==job] of
-      Downloads.DownloadComplete _:_->do
-        modifyIORef' ref (\state->state {hdbWaiting=Nothing,hdbWanted=if ident==hdbSerial state && matches request then Just (ident,request,False) else hdbWanted state})
-        pure original {status=if ident==hdbSerial current && matches request then "Debugger installed; validating the original launch..." else "Debugger installed; the original launch is no longer current."}
-      Downloads.DownloadFailed err:_->finished ident >> pure original {status="Debugger download failed: "<>err}
-      Downloads.DownloadCancelled:_->finished ident >> pure original {status="Debugger download cancelled."}
-      _->pure original
+    Just (ident,request,job)->do
+      jobState<-Downloads.downloadStateFor downloads job
+      case jobState of
+        Just (Downloads.DownloadComplete _)->do
+          modifyIORef' ref (\state->state {hdbWaiting=Nothing,hdbWanted=if ident==hdbSerial state && matches request then Just (ident,request,False) else hdbWanted state})
+          pure original {status=if ident==hdbSerial current && matches request then "Debugger installed; validating the original launch..." else "Debugger installed; the original launch is no longer current."}
+        Just (Downloads.DownloadFailed err)->finished ident >> pure original {status="Debugger download failed: "<>err}
+        Just Downloads.DownloadCancelled->finished ident >> pure original {status="Debugger download cancelled."}
+        _->pure original
     Nothing->pure original
   startHdbPreparation runtime
   state<-readIORef ref
@@ -1967,7 +1937,7 @@ tickHdb runtime@(Debugger _ _ (HdbRuntime downloads ref _ _ _ _) _ _) original=d
             Right (Left ())->pure waited
             Left _->pure waited {status="Debugger preparation failed."}
   latest<-readIORef ref
-  case dialog prepared of
-    Just dg | purpose dg==DebugDialog "downloads"->showDownloads runtime prepared
-    Nothing | Just (ident,_,plan)<-hdbOffer latest->pure prepared {dialog=Just (hdbOfferDialog ident plan)}
-    _->pure prepared
+  shown<-DownloadsDialog.tick view prepared
+  case dialog shown of
+    Nothing | Just (ident,_,plan)<-hdbOffer latest->pure shown {dialog=Just (hdbOfferDialog ident plan)}
+    _->pure shown
