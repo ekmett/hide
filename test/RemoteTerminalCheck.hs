@@ -2,10 +2,19 @@
 module RemoteTerminalCheck (checks) where
 import Control.Monad (unless)
 import Data.Aeson
+import Data.IORef (newIORef,readIORef,writeIORef)
+import qualified Data.ByteString.Char8 as BSC
+import Blaze.ByteString.Builder.ByteString (writeByteString)
+import Graphics.Vty.Output (Output(..),DisplayContext(..))
+import Graphics.Vty.Output.Mock (mockTerminal)
+import Hide.Unicode (updateDisplayOps)
 import Data.Aeson.Types (parseEither)
 import qualified Data.ByteString as BS
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
+import qualified Data.Text.Lazy as TL
+import qualified Data.Vector as Vec
+import Graphics.Vty.Span (SpanOp(..))
 import qualified Graphics.Vty as V
 import Hide.RemoteTerminal
 import Hide.RemoteWindow (parseRemoteFrame)
@@ -29,6 +38,35 @@ checks = do
   let metadata=object ["size" .= ([40,12]::[Int]),"bindings" .= ([]::[(T.Text,T.Text)]),"cursor" .= ([5,0]::[Int])]
       row=toJSON [(2::Int,0x123456::Int,0xffffff::Int,0::Int,[String "a",toJSON ("界"::T.Text,2::Int,False,0::Int,2::Int),toJSON ("é"::T.Text,1::Int,False,0::Int,1::Int)])]
   frame <- either error pure (parseRemoteFrame metadata (row:replicate 11 (toJSON ([]::[Value]))))
-  let picture=remoteTerminalPicture frame
-  check "terminal picture preserves frame dimensions with sparse Unicode cells" (case V.picLayers picture of [image] -> V.imageWidth image==40 && V.imageHeight image==12; _ -> False)
-  check "terminal picture preserves remote cursor" (V.picCursor picture==V.Cursor 5 0)
+  let (cursor,ops)=remoteTerminalDisplay (40,12) (Just frame) ""
+      rowWidth values=sum [n | TextSpan _ n _ _<-Vec.toList values]
+      rowText values=T.concat [TL.toStrict text | TextSpan _ _ _ text<-Vec.toList values]
+  check "direct terminal spans fill frame dimensions with sparse Unicode cells" (Vec.length ops==12 && Vec.all ((==40).rowWidth) ops)
+  check "direct terminal spans preserve remote cursor" (cursor==V.Cursor 5 0)
+  let (_,cropped)=remoteTerminalDisplay (4,2) (Just frame) ""
+      (_,expanded)=remoteTerminalDisplay (43,14) (Just frame) ""
+      (hidden,notice)=remoteTerminalDisplay (6,2) (Just frame) "Hi"
+  check "terminal resize clips wide glyph at actual right edge" (Vec.length cropped==2 && Vec.all ((==4).rowWidth) cropped && rowText (Vec.head cropped)=="  a ")
+  check "terminal larger bounds clear newly exposed rows and columns" (Vec.length expanded==14 && Vec.all ((==43).rowWidth) expanded && rowText (Vec.last expanded)==T.replicate 43 " ")
+  check "terminal banner uses actual bottom row and hides cursor" (hidden==V.NoCursor && rowText (notice Vec.! 1)=="Hi    " && rowText (Vec.head notice)=="  a界é")
+  let bannerRow=toJSON [(0::Int,0x123456::Int,0xffffff::Int,0::Int,[toJSON ("界"::T.Text,2::Int,False,0::Int,2::Int),String "tail"])]
+  underlying<-either error pure (parseRemoteFrame metadata (replicate 1 (toJSON ([]::[Value]))++[bannerRow]++replicate 10 (toJSON ([]::[Value]))))
+  let (_,covered)=remoteTerminalDisplay (6,2) (Just underlying) "X"
+      (_,clippedBanner)=remoteTerminalDisplay (1,1) Nothing "界"
+  check "banner preserves suffix and blanks partially covered underlying glyph" (rowText (covered Vec.! 1)=="X tail")
+  check "banner partial glyph occupies blank rather than overflow" (rowText (Vec.head clippedBanner)==" " && rowWidth (Vec.head clippedBanner)==1)
+  (_,mock)<-mockTerminal (6,2)
+  captured<-newIORef BS.empty
+  let output=mock {outputByteBuffer=writeIORef captured,mkDisplayContext = \device size->do
+        dc<-mkDisplayContext mock device size
+        pure dc {writeMoveCursor = \x y->writeByteString (BSC.pack ("<"<>show x<>","<>show y<>">"))}}
+      (visibleCursor,visible)=remoteTerminalDisplay (6,2) (Just frame) ""
+  updateDisplayOps output (6,2) visibleCursor visible
+  emitted<-readIORef captured
+  check "direct writer keeps explicit two-cell cursor correction" (TE.encodeUtf8 "  <3,0>界<5,0>" `BS.isInfixOf` emitted)
+  updateDisplayOps output (6,2) visibleCursor visible
+  unchanged<-readIORef captured
+  check "direct writer unchanged rows emit only cursor operations" (unchanged=="HS<5,0>")
+  updateDisplayOps output (6,2) hidden notice
+  overlay<-readIORef captured
+  check "direct writer banner changes only bottom row and suppresses cursor" ("Hi" `BS.isInfixOf` overlay && not (TE.encodeUtf8 "界" `BS.isInfixOf` overlay) && not ("S" `BS.isInfixOf` overlay))

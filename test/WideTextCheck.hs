@@ -30,7 +30,7 @@ import Hide.Unicode
 import qualified Hide.Protocol as Protocol
 import Hide.TextStyle (textBold)
 import Hide.RemoteWindow
-import Hide.RemoteTerminal (remoteTerminalPicture)
+import Hide.RemoteTerminal (remoteTerminalDisplay)
 
 checks :: IO ()
 checks=do
@@ -51,13 +51,13 @@ checks=do
      row=toJSON [(0::Int,0xffffff::Int,0::Int,3::Int,[toJSON ("A"::T.Text,2::Int,True,0::Int,2::Int)])]
  frame<-either fail pure (parseRemoteFrame metadata (row:replicate 11 (toJSON ([]::[Value]))))
  check "native receiver keeps stretched semantic glyph width" (case remoteCells frame of [RemoteCell 0 0 _ "A" 2 0 2]->True; _->False)
- check "remote TUI retains the same original glyph/advance before output projection" (case [ (TL.toStrict text,width) | rowOps<-Vec.toList (displayOpsForPic (remoteTerminalPicture frame) (40,12)),TextSpan _ width _ text<-Vec.toList rowOps,text=="A"] of [("A",2)]->True; _->False)
+ check "remote TUI retains the same original glyph/advance before output projection" (case [ (TL.toStrict text,width) | rowOps<-Vec.toList (snd (remoteTerminalDisplay (40,12) (Just frame) "")),TextSpan _ width _ text<-Vec.toList rowOps,text=="A"] of [("A",2)]->True; _->False)
  let clipped start shown=toJSON [(0::Int,0xffffff::Int,0::Int,3::Int,[toJSON ("A"::T.Text,2::Int,True,start::Int,shown::Int)])]
  forM_ [0,1] $ \start->do
    partial<-either fail pure (parseRemoteFrame metadata (clipped start 1:replicate 11 (toJSON ([]::[Value]))))
    check "native wire preserves partial glyph origin and full allocated width" (case remoteCells partial of [RemoteCell 0 0 _ "A" 2 offset 1]->offset==start; _->False)
    check "text mode suppresses a partial glyph without shifting following cells"
-     (all (not . T.isInfixOf "A") [TL.toStrict text | rowOps<-Vec.toList (displayOpsForPic (remoteTerminalPicture partial) (40,12)),TextSpan _ _ _ text<-Vec.toList rowOps])
+     (all (not . T.isInfixOf "A") [TL.toStrict text | rowOps<-Vec.toList (snd (remoteTerminalDisplay (40,12) (Just partial) "")),TextSpan _ _ _ text<-Vec.toList rowOps])
  check "clipped wire rejects impossible extents" (all (either (const True) (const False) . parseRemoteFrame metadata . (:replicate 11 (toJSON ([]::[Value])))) [clipped (-1) 1,clipped 2 1,clipped 1 2,clipped 0 0,clipped maxBound 1,clipped 1 maxBound])
  let bad flag advance text=toJSON [(0::Int,0::Int,0::Int,0::Int,[toJSON (text::T.Text,advance::Int,flag::Bool,0::Int,advance::Int)])]
  check "invalid stretched wire glyphs refuse instead of changing geometry" (all (either (const True) (const False) . parseRemoteFrame metadata . (:replicate 11 (toJSON ([]::[Value])))) [bad True 1 "A",bad True 2 "界",bad True 2 "ab",bad False 2 "A"])
