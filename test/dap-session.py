@@ -22,7 +22,7 @@ for session in range(1, 3 if mode == 'reconnect' else 2):
         conn, _ = server.accept()
         stream = conn.makefile('rb')
     seq = 0
-    pending_attach = pending_variables = pending_source = pending_scopes = None
+    pending_attach = pending_variables = pending_source = pending_scopes = pending_evaluate = None
     configured, breakpoint_requests = [], []
     scope_count = 0
     source_count = 0
@@ -147,6 +147,9 @@ for session in range(1, 3 if mode == 'reconnect' else 2):
                                  innerException=[dict(typeName='Inner', message='nested cause')])) )
             elif cmd == 'threads':
                 thread_count += 1
+                if pending_evaluate and os.path.exists(sys.argv[1] + '.release'):
+                    reply(pending_evaluate, dict(result='STALE delayed watch', variablesReference=0))
+                    pending_evaluate = None
                 if mode == 'lazy' and thread_count == 3:
                     event('invalidated', dict(areas=['variables']))
                 if mode == 'lazy' and thread_count == 4:
@@ -156,13 +159,13 @@ for session in range(1, 3 if mode == 'reconnect' else 2):
                 stack_count += 1
                 rows = [dict(id=11, name='entry λ', line=2, column=1,
                              source=dict(name='Generated.hs', sourceReference=9))]
-                if mode.startswith('source-'):
+                if mode.startswith('source-') or mode == 'watches-private':
                     rows[0]['source']['path'] = sys.argv[1] + ('.changed.hs' if mode == 'source-stamp' and stack_count > 1 else '.hs')
                 if mode in ('sidebar', 'sidebar-exit'):
                     rows = [dict(id=11 if args['threadId'] == 7 else 21, name='entry λ' if args['threadId'] == 7 else 'worker frame', line=2, column=1, source=dict(name='Generated.hs', sourceReference=9))]
                     if args['threadId'] == 7:
                         rows.append(dict(id=12, name='sibling frame', line=1, column=1, source=dict(name='Other.hs', sourceReference=10)))
-                if mode == 'frame':
+                if mode == 'frame' or mode.startswith('watches'):
                     rows.append(dict(id=12, name='other frame', line=1, column=1,
                                      source=dict(name='Other.hs', sourceReference=10)))
                 reply(req, dict(stackFrames=rows, totalFrames=len(rows)))
@@ -209,9 +212,27 @@ for session in range(1, 3 if mode == 'reconnect' else 2):
                     changed = mode == 'choices' and scope_count > 1
                     reply(req, dict(scopes=[dict(name='Replacement' if changed else 'Locals',
                                                 variablesReference=31 if changed else 21, expensive=False)]))
+            elif cmd == 'evaluate' and mode.startswith('watches'):
+                assert args['context'] == 'watch' and args['frameId'] in (11, 12), args
+                expression = args['expression']
+                if expression == 'delay':
+                    pending_evaluate = req
+                elif expression == 'unsupported':
+                    reply(req, success=False)
+                elif expression == 'oversized':
+                    reply(req, dict(result='X' * (1024*1024+1), variablesReference=0))
+                elif expression == 'lazy':
+                    reply(req, dict(result='<thunk>', variablesReference=970, presentationHint=dict(lazy=True)))
+                elif expression == 'record':
+                    reply(req, dict(result='Record', variablesReference=980))
+                else:
+                    reply(req, dict(result='42', variablesReference=0))
             elif cmd == 'variables':
                 reference = args['variablesReference']
-                if mode in ('sidebar', 'sidebar-exit') and reference in (211, 212, 221):
+                if mode.startswith('watches') and reference in (970, 980):
+                    assert args.get('start') == 0 and args.get('count') == 128, args
+                    reply(req, dict(variables=[dict(name='counter', value='42', variablesReference=0), dict(name='nested', value='<thunk>', variablesReference=971, presentationHint=dict(lazy=True))]))
+                elif mode in ('sidebar', 'sidebar-exit') and reference in (211, 212, 221):
                     reply(req, dict(variables=[dict(name='counter%d' % reference, value=str(reference), variablesReference=0), dict(name='lazy', value='<thunk>', variablesReference=900, presentationHint=dict(lazy=True)), dict(name='waiting', value='expand to wait', variablesReference=910)]))
                 elif mode in ('sidebar', 'sidebar-exit') and reference == 900:
                     reply(req, dict(variables=[dict(name='FORCED lazy alias', value='wrong', variablesReference=0)]))
@@ -237,6 +258,9 @@ for session in range(1, 3 if mode == 'reconnect' else 2):
                             event('exited', dict(exitCode=42))
                     continue
                 event('continued', dict(threadId=7, allThreadsContinued=True))
+                if pending_evaluate:
+                    reply(pending_evaluate, dict(result='STALE resumed watch', variablesReference=0))
+                    pending_evaluate = None
                 if pending_variables:
                     reply(pending_variables, dict(variables=[dict(name='STALE', value='must not display', variablesReference=0)]))
                     pending_variables = None

@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ExistentialQuantification, OverloadedStrings #-}
 -- | DAP orchestration, editor inspection views and debugger terminal ownership.
 --
 -- Stopped-state generations scope stack and variable handles; late replies cannot
@@ -6,9 +6,10 @@
 -- them may execute target code. Replacements retire transport/consoles before
 -- reusing endpoints. Consented hdb acquisition retains the exact launch context
 -- and cannot revive a superseded launch after installation completes.
-module Hide.Debugger (Debugger, Core, withDebugger, withDebuggerConsoles, withDebuggerClock, withDebuggerHdb, hdbOfferDialog, downloadsDialog, debuggerEffects, tickDebugger, debuggerTool, debuggerSidebarEpoch, debuggerSidebarSession, debuggerSidebarRead, debuggerWatches) where
+module Hide.Debugger (Debugger, Core, withDebugger, withDebuggerConsoles, withDebuggerClock, withDebuggerHdb, hdbOfferDialog, downloadsDialog, debuggerEffects, tickDebugger, debuggerTool, debuggerSidebarEpoch, debuggerSidebarSession, debuggerSidebarRead, debuggerWatches, withDebuggerWatchProvider) where
 
 import Hide.Sidebar
+import qualified Hide.Plugin.Tree as P
 import Hide.DebuggerSidebarTypes
 import Control.Concurrent (MVar, newEmptyMVar, tryPutMVar, tryReadMVar, threadDelay)
 import Control.Exception (IOException, bracket, try, evaluate, mask, mask_, finally)
@@ -51,13 +52,21 @@ import Hide.Model
 
 type Core = Desktop -> [Effect] -> IO (Bool,Desktop)
 data Debugger = Debugger (IORef State) (IO Integer) HdbRuntime SidebarMailbox
-data SidebarMailbox = SidebarMailbox !(TVar (Maybe (Int,Int,FilePath))) !(TBQueue SidebarIngress) !(TVar (Int,M.Map Int DebuggerWatch))
+data SidebarMailbox = SidebarMailbox !(TVar (Maybe (Int,Int,FilePath))) !(TBQueue SidebarIngress) !(TVar (Int,Maybe WatchFrame,M.Map Int DebuggerWatch))
 data SidebarIngress = ReadDebugPage !DebugPageRequest !(TMVar (Either Text Value)) | CacheDebugPage !DebugPageRequest !Value
   | ReadDebugSource !Int !Int !Int !(Maybe FilePath) !(MVar (Either Text Value))
 data Pending = Init | Attach | Configure | Breaks Text [Int] | Exceptions | Threads Bool
   | Stack Bool Int Int | Scopes Int | Variables Int | ExceptionDetails | Source Bool Int Int Value | Control Bool | Detach
   | Inspection Text (MVar (Either Text Value)) | SourceInspection !Int !Int !(Maybe FilePath) (MVar (Either Text Value)) | SidebarRead DebugPageRequest (TMVar (Either Text Value))
+  | WatchRequest !WatchOperation !(Maybe Text) !FilePath ![FilePath]
   deriving (Eq)
+data WatchMode = EvaluateWatch | ForceWatch !Int deriving Eq
+data WatchOperation = WatchOperation !Int !Int !WatchFrame !WatchMode deriving Eq
+data PreparedWatch = PreparedWatch !Text !Int !Bool !(Maybe FilePath) !Bool !(Maybe Value)
+  | PreparedWatchError !Text !(Maybe FilePath) !Bool
+data WatchProvider = forall context reply. WatchProvider (P.TreeProvider context reply)
+data WatchPreparation = WatchPreparation !WatchOperation !(Async PreparedWatch)
+data ReferenceOwner = FrameReferences !Int !Int | WatchReferences !Int !Int !WatchFrame deriving (Eq,Ord)
 data SourcePreparation = SourcePreparation !Int !Int !Int !Int !Bool !Value !(Async (Either Text (Maybe FilePath,Buffer,Int)))
 data SourceObservation = SourceObservation !Int !(Maybe FilePath)
 data Breakpoint = Breakpoint { bpLine :: Int, bpResult :: Value } deriving (Eq,Show)
@@ -76,7 +85,8 @@ data State = State
   , breakModified :: M.Map Text Bool, variableRefs :: M.Map Int Bool
   , sidebarVisible :: Bool, sidebarSession :: Int, sidebarPages :: M.Map DebugPageRequest Value
   , sidebarThreads :: M.Map Int (), sidebarFrames :: M.Map (Int,Int) Value
-  , sidebarReferences :: M.Map (Int,Int,Int) Bool
+  , sidebarReferences :: M.Map (ReferenceOwner,Int) Bool
+  , watchProvider :: Maybe WatchProvider, watchPreparing :: Maybe WatchPreparation
   , sourcePreparing :: Maybe SourcePreparation
   , sourceReferences :: M.Map Int SourceObservation, nextSourceObservation :: Int
   , watchExpressions :: M.Map Int DebuggerWatch, watchCatalogueRevision :: Int, nextWatch :: Int, watchDialog :: Maybe (Int,Maybe (Int,Int)), sourceWatchDialog :: Maybe (Int,DebugSourceRequest)
@@ -86,7 +96,7 @@ emptyState :: State
 emptyState = State {client=Nothing,connected=False,capabilities=Null,ready=False,configured=False,pending=M.empty,generation=0,frameRevision=0,
   stopped=False,thread=Nothing,frame=Nothing,frames=[],followSource=True,exceptionFilters=[],breakpoints=M.empty,sources=M.empty,
   root=".",endpoint=("127.0.0.1",4711),output="",failure=Nothing,disconnectAt=Nothing,endedAt=Nothing,programExitCode=Nothing,
-  hdbLauncher=Nothing,debugEnvironment=[],debugConsoles=[],terminalLaunch=Nothing,outputShown=False,choices=M.empty,choiceId=0,breakRequests=M.empty,breakModified=M.empty,startRequest=("attach",object []),managed=False,adapterId="",variableRefs=M.empty,sidebarVisible=False,sidebarSession=0,sidebarPages=M.empty,sidebarThreads=M.empty,sidebarFrames=M.empty,sidebarReferences=M.empty,sourcePreparing=Nothing,sourceReferences=M.empty,nextSourceObservation=1,watchExpressions=M.empty,watchCatalogueRevision=0,nextWatch=1,watchDialog=Nothing,sourceWatchDialog=Nothing}
+  hdbLauncher=Nothing,debugEnvironment=[],debugConsoles=[],terminalLaunch=Nothing,outputShown=False,choices=M.empty,choiceId=0,breakRequests=M.empty,breakModified=M.empty,startRequest=("attach",object []),managed=False,adapterId="",variableRefs=M.empty,sidebarVisible=False,sidebarSession=0,sidebarPages=M.empty,sidebarThreads=M.empty,sidebarFrames=M.empty,sidebarReferences=M.empty,watchProvider=Nothing,watchPreparing=Nothing,sourcePreparing=Nothing,sourceReferences=M.empty,nextSourceObservation=1,watchExpressions=M.empty,watchCatalogueRevision=0,nextWatch=1,watchDialog=Nothing,sourceWatchDialog=Nothing}
 
 withDebugger :: (Debugger -> IO a) -> IO a
 withDebugger action = C.withConsoles (\consoles -> withDebuggerConsoles consoles action)
@@ -112,7 +122,7 @@ withDebuggerHdbConsoles :: C.Consoles -> IO Integer -> (Compilers.Compiler -> IO
 withDebuggerHdbConsoles consoles clock prepare acquire action = Downloads.withDownloads $ \downloads -> do
   jobs<-newIORef (HdbState 0 Nothing Nothing Nothing Nothing [])
   retired<-newIORef []
-  mailbox<-SidebarMailbox <$> newTVarIO Nothing <*> newTBQueueIO 32 <*> newTVarIO (0,M.empty)
+  mailbox<-SidebarMailbox <$> newTVarIO Nothing <*> newTBQueueIO 32 <*> newTVarIO (0,Nothing,M.empty)
   let runtime=HdbRuntime downloads jobs prepare acquire consoles retired
   bracket ((\ref -> Debugger ref clock runtime mailbox) <$> newIORef emptyState)
     (\debugger@(Debugger ref _ _ _) -> do
@@ -153,14 +163,42 @@ debuggerSidebarSession (Debugger _ _ _ (SidebarMailbox epoch _ _))=fmap (fmap (\
 
 -- | /O(1)/ borrow of the bounded immutable expression catalogue. Sidebar workers
 -- prepare presentation; this projection never reads mutable debugger state.
-debuggerWatches :: Debugger -> IO (Int,M.Map Int DebuggerWatch)
+debuggerWatches :: Debugger -> IO (Int,Maybe WatchFrame,M.Map Int DebuggerWatch)
 debuggerWatches (Debugger _ _ _ (SidebarMailbox _ _ watches))=readTVarIO watches
 
 publishSidebarEpoch :: Debugger -> IO ()
 publishSidebarEpoch (Debugger ref _ _ (SidebarMailbox epoch _ watches))=do
-  s<-readIORef ref
+  currentState<-readIORef ref
+  live<-watchProviderCurrent currentState
+  let s=if live then currentState else currentState {watchProvider=Nothing}
   atomically (writeTVar epoch (if sidebarVisible s && stopped s && configured s && isJust (client s) && endedAt s==Nothing && disconnectAt s==Nothing then Just (sidebarSession s,generation s,root s) else Nothing))
-  atomically (writeTVar watches (watchCatalogueRevision s,watchExpressions s))
+  (_,previous,_)<-readTVarIO watches
+  let selected=selectedWatchFrame s
+      changed=previous/=selected
+      expire entry=entry {watchValue=case watchValue entry of
+        WatchResult receipt title _ _ origin | Just receipt/=selected->WatchStale title origin
+        WatchLoading receipt | Just receipt/=selected->WatchPending
+        WatchError receipt _ _ | Just receipt/=selected->WatchPending
+        value->value}
+      current=if changed then s {watchExpressions=M.map expire (watchExpressions s),watchCatalogueRevision=watchCatalogueRevision s+1} else s
+  when changed (writeIORef ref current)
+  atomically (writeTVar watches (watchCatalogueRevision current,selected,watchExpressions current))
+
+selectedWatchFrame :: State -> Maybe WatchFrame
+selectedWatchFrame s
+  | sidebarVisible s && stopped s && configured s && ready s && isJust (client s) && endedAt s==Nothing && disconnectAt s==Nothing,
+    Just (WatchProvider provider)<-watchProvider s,Just tid<-thread s,Just fid<-frame s >>= field "id",fid>0=Just (WatchFrame (P.treeReference provider) (generation s) (frameRevision s) tid fid)
+  | otherwise=Nothing
+
+-- | Borrow the existing provider lifetime. No handlers or metadata are invoked
+-- by currentness checks; scope closure/retirement refuses late owner adoption.
+withDebuggerWatchProvider :: Debugger -> P.TreeProvider context reply -> IO a -> IO a
+withDebuggerWatchProvider (Debugger ref _ _ _) provider use=bracket
+  (modifyIORef' ref (\s->s {watchProvider=Just (WatchProvider provider)}))
+  (const (modifyIORef' ref (\s->s {watchProvider=Nothing}))) (const use)
+
+watchProviderCurrent :: State -> IO Bool
+watchProviderCurrent s=case watchProvider s of Nothing->pure False; Just (WatchProvider provider)->P.treeCurrent provider
 
 -- | Wait on a sidebar worker. Only the debugger owner validates provenance and
 -- enqueues its ordinary DAP request. Response sizing/cache preparation happen here,
@@ -177,7 +215,7 @@ debuggerSidebarRead (Debugger _ _ _ (SidebarMailbox epoch queue _)) request@(Deb
       Just (Left err)->pure (Left err)
       Just (Right body)->do
         -- Keep the requested rows and stack total, not arbitrary adapter metadata.
-        let key=case target of DebugThreads->"threads"; DebugStack{}->"stackFrames"; DebugScopes{}->"scopes"; DebugVariables{}->"variables"
+        let key=case target of DebugThreads->"threads"; DebugStack{}->"stackFrames"; DebugScopes{}->"scopes"; DebugVariables{}->"variables"; DebugWatchVariables{}->"variables"
             page=object [fromText key .= take 128 (items key body),"totalFrames" .= (field "totalFrames" body :: Maybe Int)]
         checked<-evaluate (boundedResult page)
         prepared<-case (checked,target,current) of
@@ -222,7 +260,8 @@ validSidebarRequest s (DebugPageRequest epoch target offset)=generation s==epoch
   DebugThreads->offset==0
   DebugStack tid->M.member tid (sidebarThreads s)
   DebugScopes tid fid->offset==0 && M.member (tid,fid) (sidebarFrames s)
-  DebugVariables tid fid reference->offset==0 && M.lookup (tid,fid,reference) (sidebarReferences s)==Just False
+  DebugVariables tid fid reference->offset==0 && M.lookup (FrameReferences tid fid,reference) (sidebarReferences s)==Just False
+  DebugWatchVariables ident revision receipt reference->offset==0 && watchCurrent s ident revision receipt && M.lookup (WatchReferences ident revision receipt,reference) (sidebarReferences s)==Just False
 
 sidebarArguments :: DebugPageRequest -> (Text,Value)
 sidebarArguments (DebugPageRequest _ target offset)=case target of
@@ -230,6 +269,7 @@ sidebarArguments (DebugPageRequest _ target offset)=case target of
   DebugStack tid->("stackTrace",object ["threadId" .= tid,"startFrame" .= offset,"levels" .= (128::Int)])
   DebugScopes _ fid->("scopes",object ["frameId" .= fid])
   DebugVariables _ _ reference->("variables",object ["variablesReference" .= reference,"start" .= offset,"count" .= (128::Int)])
+  DebugWatchVariables _ _ _ reference->("variables",object ["variablesReference" .= reference,"start" .= offset,"count" .= (128::Int)])
 
 -- Only IDs and shallow immutable DAP rows enter owner maps. Bounded raw response
 -- fields are prepared/sized by the waiting worker before page cache admission.
@@ -239,10 +279,12 @@ recordSidebarResponse ref (DebugPageRequest _ target _) body=modifyIORef' ref $ 
   DebugStack tid->s {sidebarFrames=boundedUnion (M.fromList [((tid,fid),row) | row<-take 128 (items "stackFrames" body),let fid=integer "id" row,fid>0]) (sidebarFrames s)}
   DebugScopes tid fid->s {sidebarReferences=boundedReferences (references tid fid "scopes") (sidebarReferences s)}
   DebugVariables tid fid _->s {sidebarReferences=boundedReferences (references tid fid "variables") (sidebarReferences s)}
+  DebugWatchVariables ident revision receipt _->s {sidebarReferences=boundedReferences
+    (M.fromListWith (||) [((WatchReferences ident revision receipt,reference),maybe False (flag "lazy") (field "presentationHint" row)) | row<-take 128 (items "variables" body),let reference=integer "variablesReference" row,reference>0]) (sidebarReferences s)}
   where
     boundedUnion newer previous=fst (M.splitAt 32768 (M.union newer previous))
     boundedReferences newer previous=fst (M.splitAt 32768 (M.unionWith (||) newer previous))
-    references tid fid key=M.fromListWith (||) [((tid,fid,ident),key=="variables" && maybe False (flag "lazy") (field "presentationHint" row)) | row<-take 128 (items key body),let ident=integer "variablesReference" row,ident>0]
+    references tid fid key=M.fromListWith (||) [((FrameReferences tid fid,ident),key=="variables" && maybe False (flag "lazy") (field "presentationHint" row)) | row<-take 128 (items key body),let ident=integer "variablesReference" row,ident>0]
 
 sidebarAction :: Debugger -> Core -> DebugSidebarRequest -> Desktop -> IO Desktop
 sidebarAction runtime@(Debugger ref _ _ _) core request d
@@ -255,6 +297,8 @@ sidebarAction runtime@(Debugger ref _ _ _) core request d
         case M.lookup ident (watchExpressions s) of
           Just entry | watchRevision entry==revision->watchPrompt runtime (Just (ident,entry)) d
           _->pure d {status="Watch expired."}
+      EvaluateDebugWatch ident revision receipt->startWatch runtime ident revision receipt EvaluateWatch d
+      ForceDebugWatch ident revision receipt reference->startWatch runtime ident revision receipt (ForceWatch reference) d
       RemoveDebugWatch ident revision->do
         s<-readIORef ref
         case M.lookup ident (watchExpressions s) of
@@ -268,13 +312,21 @@ watchPrompt (Debugger ref _ _ _) chosen d=do
   s<-readIORef ref
   let ident=choiceId s+1
       expression=maybe "" (watchExpression.snd) chosen
-      origin=chosen >>= watchOrigin.snd
-      private=maybe False (watchPrivate.snd) chosen
+      origins=maybe [] (watchOrigins.snd) chosen
+      origin=listToMaybe (filter (protectedPath d) origins++origins)
+      private=maybe False (watchPrivate.snd) chosen || any (protectedPath d) origins
       target=fmap (\(key,entry)->(key,watchRevision entry)) chosen
   modifyIORef' ref (\current->current {choiceId=ident,watchDialog=Just (ident,target)})
   pure d {dialog=Just (Dialog (if isJust chosen then "Edit watch" else "Add watch") (DebuggerWatchDialog ident origin private)
     [SelectedInput "Expression" expression (Selection 0 (T.length expression))] 0 ["Save","Cancel"]
     ["Evaluation is explicit and can execute program code."]),status="Enter a watch expression."}
+
+watchOrigins :: DebuggerWatch -> [FilePath]
+watchOrigins entry=maybeToList (watchOrigin entry)++case watchValue entry of
+  WatchResult _ _ _ _ origin->maybeToList origin
+  WatchStale _ origin->maybeToList origin
+  WatchError _ _ origin->maybeToList origin
+  _->[]
 
 storeWatch :: Debugger -> Maybe (Int,Int) -> Text -> Maybe FilePath -> Bool -> Desktop -> IO Desktop
 storeWatch (Debugger ref _ _ _) target expression origin private d=do
@@ -289,11 +341,103 @@ storeWatch (Debugger ref _ _ _) target expression origin private d=do
   else do
     let ident=maybe (nextWatch s) fst chosen
         entry=case chosen of
-          Nothing->DebuggerWatch (T.copy expression) 0 origin private
-          Just (_,previous)->previous {watchExpression=T.copy expression,watchRevision=watchRevision previous+1}
+          Nothing->DebuggerWatch (T.copy expression) 0 origin private WatchPending
+          Just (_,previous)->previous {watchExpression=T.copy expression,watchRevision=watchRevision previous+1,watchValue=WatchPending}
     modifyIORef' ref (\current->current {watchExpressions=M.insert ident entry (watchExpressions current),
       nextWatch=if isJust chosen then nextWatch current else nextWatch current+1,watchCatalogueRevision=watchCatalogueRevision current+1})
     pure d {status=if isJust chosen then "Watch updated." else "Watch added."}
+
+watchCurrent :: State -> Int -> Int -> WatchFrame -> Bool
+watchCurrent s ident revision receipt=selectedWatchFrame s==Just receipt && maybe False ((==revision).watchRevision) (M.lookup ident (watchExpressions s))
+
+startWatch :: Debugger -> Int -> Int -> WatchFrame -> WatchMode -> Desktop -> IO Desktop
+startWatch runtime@(Debugger ref _ _ _) ident revision receipt mode d=do
+  s<-readIORef ref
+  let busy=isJust (watchPreparing s) || any (\(kind,_,_)->case kind of WatchRequest{}->True; _->False) (M.elems (pending s))
+      forceAllowed reference=case watchValue <$> M.lookup ident (watchExpressions s) of
+        Just (WatchResult current _ rootReference True _)->current==receipt && rootReference==reference && M.lookup (WatchReferences ident revision receipt,reference) (sidebarReferences s)==Just True
+        _->False
+  live<-watchProviderCurrent s
+  if not live || not (watchCurrent s ident revision receipt) then pure d {status="Watch or stopped frame expired."}
+  else if busy then pure d {status="Watch execution is busy."}
+  else if case mode of ForceWatch reference->not (forceAllowed reference); _->False then pure d {status="Lazy watch reference expired."}
+  else do
+    -- Executing requests invalidate every retained value handle before dispatch.
+    -- Keep the chosen frame, but never keep its old selection/stop receipt.
+    let invalid=(invalidate s) {stopped=True,frame=frame s,frames=frames s}
+        fresh=maybe (error "validated watch frame missing") id (selectedWatchFrame invalid)
+        next=invalid {watchExpressions=M.adjust (\entry->entry {watchValue=WatchLoading fresh}) ident (watchExpressions invalid),watchCatalogueRevision=watchCatalogueRevision invalid+1}
+        operation=WatchOperation ident revision fresh mode
+        rawPath=frame s >>= field "source" >>= field "path"
+    backing<-traverse evaluate rawPath
+    base<-evaluate (root s)
+    private<-evaluate (guestPrivatePaths d)
+    writeIORef ref next
+    let WatchFrame _ _ _ _ fid=fresh
+        (command,args)=case mode of
+          EvaluateWatch->("evaluate",object ["expression" .= maybe "" watchExpression (M.lookup ident (watchExpressions s)),"frameId" .= fid,"context" .= ("watch"::Text)])
+          ForceWatch reference->("variables",object ["variablesReference" .= reference,"start" .= (0::Int),"count" .= (128::Int)])
+    send runtime (WatchRequest operation backing base private) command args
+    pure d {status=case mode of EvaluateWatch->"Evaluating watch…"; ForceWatch{}->"Forcing lazy watch…"}
+
+prepareWatch :: Debugger -> WatchOperation -> Maybe Text -> FilePath -> [FilePath] -> Either Text Value -> IO ()
+prepareWatch (Debugger ref _ _ _) operation backing base private result=do
+  worker<-async $ do
+    origin<-canonicalSourcePath base (T.unpack <$> backing)
+    let clean=T.copy . T.take 256 . T.map (\c->if c<' ' then ' ' else c)
+        failed canonical privateOrigin err=do
+          let detail=clean err
+          _<-evaluate (T.length detail)
+          pure (PreparedWatchError detail canonical privateOrigin)
+    case origin of
+      Left _->failed Nothing True "Watch source provenance could not be prepared."
+      Right canonical->do
+        let privateOrigin=maybe False (protectedFilePath private) canonical
+        case result >>= boundedResult of
+          Left err->failed canonical privateOrigin err
+          Right body->do
+            let WatchOperation _ _ _ mode=operation
+                (title,reference,lazy,page)=case mode of
+                  EvaluateWatch->(text "result" body,integer "variablesReference" body,maybe False (flag "lazy") (field "presentationHint" body),Nothing)
+                  ForceWatch handle->("Forced; expand to inspect",handle,False,Just (object ["variables" .= take 128 (items "variables" body)]))
+                prepared=clean title
+            _<-evaluate (T.length prepared)
+            checked<-traverse (evaluate . boundedResult) page
+            case checked of
+              Just (Left err)->failed canonical privateOrigin err
+              _->pure (PreparedWatch prepared reference lazy canonical privateOrigin (case checked of Just (Right value)->Just value; _->Nothing))
+  modifyIORef' ref (\s->s {watchPreparing=Just (WatchPreparation operation worker)})
+
+tickWatchPreparation :: Debugger -> Desktop -> IO Desktop
+tickWatchPreparation (Debugger ref _ (HdbRuntime _ _ _ _ _ retired) _) d=do
+  s<-readIORef ref
+  case watchPreparing s of
+    Nothing->pure d
+    Just (WatchPreparation (WatchOperation ident revision receipt mode) worker)->do
+      live<-watchProviderCurrent s
+      if not live || not (watchCurrent s ident revision receipt) || dialog d/=Nothing || questionActive d then do
+          modifyIORef' ref (\state->state {watchPreparing=Nothing,watchExpressions=if watchCurrent state ident revision receipt then M.adjust (\entry->entry {watchValue=WatchPending}) ident (watchExpressions state) else watchExpressions state,watchCatalogueRevision=watchCatalogueRevision state+1})
+          cleanup<-async (cancel worker)
+          modifyIORef' retired (cleanup:)
+          pure d
+      else do
+          completed<-poll worker
+          case completed of
+            Nothing->pure d
+            Just outcome->do
+              modifyIORef' ref (\state->state {watchPreparing=Nothing})
+              let result=case outcome of Left _->PreparedWatchError "Watch result preparation failed." Nothing True; Right value->value
+              case result of
+                PreparedWatchError err origin private->do
+                  modifyIORef' ref (\state->state {watchExpressions=M.adjust (\entry->entry {watchValue=WatchError receipt err origin,watchPrivate=watchPrivate entry || private || maybe False (protectedPath d) origin}) ident (watchExpressions state),watchCatalogueRevision=watchCatalogueRevision state+1})
+                  pure d {status="Watch evaluation failed."}
+                PreparedWatch title reference lazy origin private page->do
+                  let target=DebugPageRequest (case receipt of WatchFrame _ epoch _ _ _->epoch) (DebugWatchVariables ident revision receipt reference) 0
+                      refs=if reference>0 then M.insert (WatchReferences ident revision receipt,reference) lazy (sidebarReferences s) else sidebarReferences s
+                  modifyIORef' ref (\state->state {watchExpressions=M.adjust (\entry->entry {watchValue=WatchResult receipt title reference lazy origin,watchPrivate=watchPrivate entry || private || maybe False (protectedPath d) origin}) ident (watchExpressions state),watchCatalogueRevision=watchCatalogueRevision state+1,sidebarReferences=refs,
+                    variableRefs=if reference>0 then M.insertWith (||) reference (lazy || case mode of ForceWatch{}->True; _->False) (variableRefs state) else variableRefs state,sidebarPages=maybe (sidebarPages state) (\value->M.insert target value (sidebarPages state)) page})
+                  forM_ page (recordSidebarResponse ref target)
+                  pure d {status="Watch result ready."}
 
 selectSidebarFrame :: Debugger -> Core -> Int -> Int -> Int -> Desktop -> IO Desktop
 selectSidebarFrame runtime@(Debugger ref _ _ _) core epoch tid fid d=do
@@ -761,7 +905,7 @@ initializeSession runtime@(Debugger ref _ _ _) directory c address requestName a
   s<-readIORef ref
   stopTransport runtime s
   writeIORef ref emptyState {client=Just c,generation=generation s+1,root=directory,endpoint=address,
-    watchExpressions=watchExpressions s,watchCatalogueRevision=watchCatalogueRevision s,nextWatch=nextWatch s,choiceId=choiceId s,followSource=followSource s,sidebarVisible=followSource s,sidebarSession=generation s+1,breakpoints=persistentBreakpoints s,breakModified=breakModified s,startRequest=(requestName,arguments),managed=owned,adapterId=adapter}
+    watchProvider=watchProvider s,watchExpressions=watchExpressions s,watchCatalogueRevision=watchCatalogueRevision s,nextWatch=nextWatch s,choiceId=choiceId s,followSource=followSource s,sidebarVisible=followSource s,sidebarSession=generation s+1,breakpoints=persistentBreakpoints s,breakModified=breakModified s,startRequest=(requestName,arguments),managed=owned,adapterId=adapter}
   pure (automaticDesktop s d) {status="Connecting debugger..."}
 
 debuggerConsoles :: Debugger -> C.Consoles
@@ -773,15 +917,16 @@ stopTransport :: Debugger -> State -> IO ()
 stopTransport runtime@(Debugger ref _ (HdbRuntime _ _ _ _ _ retired) _) s = mask $ \restore -> do
   -- No old worker can publish into the replacement session. Process cleanup is
   -- joined only at daemon teardown, outside the desktop lock.
-  modifyIORef' ref (\state -> state {client=Nothing,terminalLaunch=Nothing,debugConsoles=[],sourcePreparing=Nothing})
+  modifyIORef' ref (\state -> state {client=Nothing,terminalLaunch=Nothing,debugConsoles=[],sourcePreparing=Nothing,watchPreparing=Nothing})
   cleanups<-mapM (C.retireConsole (debuggerConsoles runtime)) (debugConsoles s)
-  when (isJust (client s) || isJust (terminalLaunch s) || isJust (sourcePreparing s) || not (null cleanups)) $ do
+  when (isJust (client s) || isJust (terminalLaunch s) || isJust (sourcePreparing s) || isJust (watchPreparing s) || not (null cleanups)) $ do
     task<-async $ restore $ flip finally (mapM_ D.stopClient (client s)) $ do
       forM_ (terminalLaunch s) $ \(_,_,worker,result) -> do
         cancel worker
         completed<-atomically (tryTakeTMVar result)
         forM_ completed (mapM_ C.closePreparedConsole)
       forM_ (sourcePreparing s) $ \(SourcePreparation _ _ _ _ _ _ worker)->cancel worker
+      forM_ (watchPreparing s) $ \(WatchPreparation _ worker)->cancel worker
       mapM_ (either (const (pure ())) id) cleanups
     modifyIORef' retired (task:)
 
@@ -887,7 +1032,8 @@ tickDebuggerOwner runtime@(Debugger ref clock _ _) core original = do
   s<-readIORef ref
   events<-maybe (pure []) D.pollEvents (client s)
   receivedEvents<-foldM (receive runtime core) starting events
-  received<-tickSourcePreparation runtime receivedEvents
+  sourced<-tickSourcePreparation runtime receivedEvents
+  received<-tickWatchPreparation runtime sourced
   finalOutput<-output <$> readIORef ref
   let updated=received {buffers=M.map (\doc -> if documentLabel doc==Just "Debugger output" && contents (documentBuffer doc)/=finalOutput
         then doc {documentBuffer=newBuffer finalOutput} else doc) (buffers received)}
@@ -1010,11 +1156,13 @@ receive runtime@(Debugger ref clock _ _) core d event = do
     D.Response ident result -> case M.lookup ident (pending s) of
       Nothing -> pure d
       Just (kind,epoch,_) -> do
+        watchLive<-watchProviderCurrent s
         modifyIORef' ref (\state -> state {pending=M.delete ident (pending state)})
-        if (stale kind && epoch/=generation s) || selectionExpired s kind || sourceInspectionExpired s d kind || (case kind of Breaks key _ -> M.lookup key (breakRequests s)/=Just ident; _ -> False) then do
+        if (case kind of WatchRequest{}->not watchLive; _->False) || (stale kind && epoch/=generation s) || selectionExpired s kind || sourceInspectionExpired s d kind || (case kind of Breaks key _ -> M.lookup key (breakRequests s)/=Just ident; _ -> False) then do
           completeInspection kind (Left "Debugger inspection expired; refresh debug_status.")
           pure d
         else case kind of
+          WatchRequest operation backing base private->prepareWatch runtime operation backing base private result >> pure d
           SourceInspection _ _ _ reply->void (tryPutMVar reply result) >> pure d
           SidebarRead (DebugPageRequest _ target _) reply -> do
             case target of DebugStack{}->forM_ result (recordSourceReferences ref); _->pure ()
@@ -1039,7 +1187,7 @@ receive runtime@(Debugger ref clock _ _) core d event = do
              pure (automaticDesktop s d) {status="DAP: "<>err}
            Right body -> if isJust (endedAt s) then pure d else response runtime core kind body d
   where
-    stale kind=case kind of Threads{} -> True; Control{} -> True; Stack{} -> True; Scopes{} -> True; Variables{} -> True; ExceptionDetails -> True; Source{} -> True; Inspection{} -> True; SourceInspection{} -> True; SidebarRead{} -> True; _ -> False
+    stale kind=case kind of Threads{} -> True; Control{} -> True; Stack{} -> True; Scopes{} -> True; Variables{} -> True; ExceptionDetails -> True; Source{} -> True; Inspection{} -> True; SourceInspection{} -> True; SidebarRead{} -> True; WatchRequest{} -> True; _ -> False
 
 -- Selection controls presentation/source follow only. Stopped handles remain
 -- valid for sibling frames until the stop epoch itself expires.
@@ -1048,6 +1196,7 @@ selectionExpired s kind=case kind of
   Scopes revision -> revision/=frameRevision s
   Variables revision -> revision/=frameRevision s
   Source _ revision _ _ -> revision/=frameRevision s
+  WatchRequest (WatchOperation ident revision receipt _) _ _ _->not (watchCurrent s ident revision receipt)
   _ -> False
 
 -- Captured backing paths are resolved only on a waiting tool/source worker.
@@ -1183,6 +1332,7 @@ response runtime@(Debugger ref _ _ _) core kind body d = do
           _->pure d {status="DAP source response is unavailable or expired."}
       where reference=integer "sourceReference" (fromMaybe Null (field "source" selected))
     Control _ -> pure d
+    WatchRequest{}->pure d
     SourceInspection _ _ _ reply->void (tryPutMVar reply (Right body)) >> pure d
     Inspection command reply -> do
       recordVariables ref command body
