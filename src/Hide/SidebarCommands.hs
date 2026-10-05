@@ -674,7 +674,12 @@ submitForm (SidebarHost _ ref _ _ _) reference text origin d=mask $ \restore->do
 -- Other typed form handlers require their own checked host result route.
 -- Fixed replies are forced at their owning worker before the UI receives them.
 forceFormReply :: SidebarReply -> IO SidebarReply
-forceFormReply reply@(SidebarAgent (RenameAgentTo who value))=evaluate (T.length (Hide.AgentHub.agentIdText who)+T.length value) >> evaluate reply
+forceFormReply (SidebarAgent (RenameAgentTo who value))
+  | T.length (Hide.AgentHub.agentIdText who)>128 || T.length value>8192=ioError (userError "Oversized single-line form result.")
+  | otherwise=do
+      let copied=T.copy value
+      _<-evaluate (T.length copied)
+      evaluate (SidebarAgent (RenameAgentTo who copied))
 forceFormReply _=ioError (userError "Unsupported single-line form reply.")
 finishFormJob :: SidebarHost -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> Form.FormRef
   -> Async (Either CommandError SidebarReply) -> Bool -> IO Desktop
