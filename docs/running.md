@@ -186,7 +186,8 @@ stopped session. Right-click its root to add an expression, activate a watch to
 edit it, or use its context menu to remove it. Expressions survive session
 replacement; at most 128 watches with 4096 characters each are retained. Private
 source expressions stay masked in the tree and protected in the editor.
-Background value invalidation preserves an unfinished Add/Edit Watch expression.
+An Add/Edit dialog opened from Watches retains its expression when background
+debugger values change; source-captured dialogs still expire with their source.
 Managing watches does not evaluate program code. At a revealed stop, use a watch’s
 **Evaluate watch** context action to run its expression in the selected frame.
 Results belong to that stop, frame selection and expression revision; changes
