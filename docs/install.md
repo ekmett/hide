@@ -6,7 +6,7 @@ editing, HLS, Git and conversations do not require the THC compiler or runtime.
 ## Build the editor
 
 You need GHC 9.6 or newer, Cabal, `pkg-config` and the development files for
-utf8proc 2.10 or newer, SDL3 3.2 or newer, and libghostty-vt.
+utf8proc 2.10 or newer, SDL3 3.4 or newer, and libghostty-vt.
 Set up Ghostty using the [embedded terminal instructions](#embedded-terminal)
 below before building, or omit it with `-f-terminal`. On macOS:
 
@@ -49,7 +49,7 @@ appropriate build flags before `hide`.
 
 ## Native window
 
-Native windows are enabled by default. Install SDL3 3.2 or newer. On macOS:
+Native windows are enabled by default. Install SDL3 3.4 or newer. Packaged Metal and Vulkan shaders are included; DXC and SPIRV-Cross are needed only when regenerating the HLSL shader assets. On macOS:
 
 ```sh
 brew install sdl3
@@ -75,7 +75,7 @@ The browser frontend is enabled by default:
 cabal run hide -- --web .
 ```
 
-It opens a WebGL page served by the editor on an ephemeral loopback port. Keep
+It opens a WebGL2 page served by the editor on an ephemeral loopback port. Keep
 the frontend process running while using the page. The editor session runs
 separately, so you can detach and [resume it later](sessions.md). Set `THC_EDIT_WEB_OPEN=0` to print
 the URL without opening a browser automatically.

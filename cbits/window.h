@@ -20,6 +20,8 @@ const char *thc_error(void);
 const char *thc_backend(void);
 void thc_size(int *cols, int *rows);
 int thc_begin(void);
+/* The next glyph retains its full origin/width; only these visible cells draw. */
+void thc_clip(int visible_x, int clip_cells);
 void thc_glyph(int x, int y, int cells, int glyph_width, const uint16_t *rows, uint32_t fg, uint32_t bg, uint32_t traits);
 void thc_pixelate_unicode(int enabled);
 int thc_unicode(int x, int y, int cells, const char *text, uint32_t fg, uint32_t bg, uint32_t traits);
@@ -33,6 +35,9 @@ int thc_present(void);
  * Button-down kind 3 has click count in slot 3 and SDL button number in slot 5.
  * Hover (-1,-1) leaves the window. A zero return indicates an SDL error. */
 int thc_wait(int32_t *event);
+uint64_t thc_event_age_ns(void);
+void thc_atlas_stats(uint64_t *uploads, uint64_t *bytes, uint64_t *batches);
+void thc_grid_stats(uint64_t *uploads, uint64_t *bytes);
 const char *thc_text(void);
 const char *thc_clipboard(void);
 void thc_set_clipboard(const char *text);
