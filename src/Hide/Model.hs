@@ -168,6 +168,7 @@ data Command = New | Open | Download | ChangeDir | Save | SaveAs | Close | Quit 
   | SetBufferView BufferView | SetDefaultBufferView BufferView | RevertChange Int Int (Int,Int) Int
   | ToggleHex | GoToMessage | CopyAllMessages | CopyLocation | SubmitChat ChatSubmit
   | ReloadBindings | InspectBindings
+  | CursorLeft Bool | CursorRight Bool | DeleteBackward | DeleteForward | DeleteLine
   | SidebarMove Int | SidebarActivate | SidebarExpand | SidebarCollapse | FocusSource | MessagesMove Int | MessagesPage Int
   | ToolchainOptions | SelectToolchain Toolchain | SelectCompiler Text
   | DebugCommand Text | AutocompleteCommand Text
@@ -346,6 +347,13 @@ commandBindingKeys d cmd
 
 commandDescription :: Command -> Text
 commandDescription cmd = case cmd of
+  CursorLeft False -> "Move to the previous character."
+  CursorRight False -> "Move to the next character."
+  CursorLeft True -> "Extend selection to the previous character."
+  CursorRight True -> "Extend selection to the next character."
+  DeleteBackward -> "Delete the selected range or previous character."
+  DeleteForward -> "Delete the selected range or next character."
+  DeleteLine -> "Delete the current source line."
   ReloadBindings -> "Reload and validate bindings from global and project configuration."
   InspectBindings -> "Show every effective command binding for the focused profile and context."
   TreeCommand _ _ -> "Run the captured sidebar action."
@@ -554,6 +562,9 @@ commandEnabled d (RegisteredMenu reference _) = dialog d==Nothing && case find (
       (Plugin.menuName reference/="hide.messages.go-to" || location/=Nothing)
     _ -> False
   Just _ -> True
+commandEnabled d cmd | horizontalCommand cmd = sourceHorizontalOwner d &&
+  (not (horizontalMutation cmd) || maybe False ((==Nothing) . documentLabel) (activeDocument d) && not (activeMarkdown d)) &&
+  (cmd/=DeleteLine || not (activeHex d))
 commandEnabled _ Disabled{} = False
 commandEnabled d SidebarMove{} = maybe False treeFocused (sideTree d)
 commandEnabled d cmd | cmd `elem` [SidebarActivate,SidebarExpand,SidebarCollapse] = maybe False treeFocused (sideTree d)
@@ -584,7 +595,7 @@ markdownSourceCommand cmd=sourceOnlyCommand cmd && cmd `notElem` [Save,SaveAs,Do
   _->False
 
 sourceOnlyCommand :: Command -> Bool
-sourceOnlyCommand cmd=cmd `elem` [Save,SaveAs,Download,Undo,Redo,Cut,Paste,Find,FindNext,FindPrevious,Replace,GoTo,
+sourceOnlyCommand cmd=horizontalMutation cmd || cmd `elem` [Save,SaveAs,Download,Undo,Redo,Cut,Paste,Find,FindNext,FindPrevious,Replace,GoTo,
   InspectType,Definition,Complete,RenameSymbol,CodeActions,ToggleHex,SplitVertical,SplitHorizontal]
 
 -- | Shared current-state gate for menu invocations and frontend hints. Queued
@@ -1005,6 +1016,10 @@ prompt title p fs d = d {dialog = Just (Dialog title p fs 0 ["OK","Cancel"] []),
 
 -- | Apply a semantic editor command and return any required host effects.
 runCommand :: Command -> Desktop -> (Desktop,[Effect])
+runCommand cmd source | horizontalCommand cmd, not (commandEnabled source cmd) =
+  (if horizontalMutation cmd && sourceHorizontalOwner source && not (activeMarkdown source) &&
+      maybe False ((/=Nothing) . documentLabel) (activeDocument source)
+    then source {status="This window is read-only."} else source,[])
 runCommand cmd source | dialog source==Nothing, activeMarkdown source, markdownSourceCommand cmd = (source {status="Markdown view is read-only. Switch to Current to edit."},[])
 runCommand cmd source | dialog source==Nothing, Just _<-activePluginWindow source, sourceOnlyCommand cmd = (source {status="This plugin window is read-only."},[])
 runCommand cmd source | browserFrontend source, cmd `elem` [Copy,Cut,CopyAllMessages,CopyLocation] =
@@ -1111,6 +1126,11 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
       | commandEnabled d command = (editActive (\_ -> revertChangeHunk row) Nothing d,[])
       | otherwise = (d {status="The change is no longer current."},[])
     go ToggleHex d = (toggleHex d,[])
+    go (CursorLeft extend) d = (horizontalMove False extend d,[])
+    go (CursorRight extend) d = (horizontalMove True extend d,[])
+    go DeleteBackward d = (deleteAdjacent False d,[])
+    go DeleteForward d = (deleteAdjacent True d,[])
+    go DeleteLine d = (deleteSourceLine d,[])
     go Undo d = (editActive (const undo) Nothing d,[])
     go Redo d = (editActive (const redo) Nothing d,[])
     go GoToMessage d | menusActive d = case find ((=="hide.messages.go-to") . Plugin.menuName . Plugin.menuReference) (contributedMenus d) of
@@ -1546,7 +1566,7 @@ dispatchEvent (V.EvKey key mods) d
   | bindingInputAvailable d, not (terminalContextReserved d key mods), Just bindings<-effectiveBindings d =
       case Bindings.bindingAction bindings key mods of
         Just cmd | dialog d/=Nothing, not (dialogCommandAllowed cmd d) -> unboundKey key mods d
-                 | commandEnabled d cmd -> runCommand cmd d
+                 | horizontalCommand cmd || commandEnabled d cmd -> runCommand cmd d
                  | otherwise -> (d,[])
         Nothing -> unboundKey key mods d
 dispatchEvent (V.EvKey key mods) d | key `elem` [V.KChar '\t',V.KBackTab], V.MAlt `elem` mods =
@@ -2603,16 +2623,13 @@ readOnlyTextKey :: BufferContent -> Window -> (Bool -> Int -> Desktop) -> V.Key 
 readOnlyTextKey text w moveToText key mods d=
   let pos=caret (selection w)
       (row,col)=windowTextPosition d w text pos
-      (sourceRow,_)=contentPosition text pos
       vertical delta=let next=max 0 (min (windowTextRows d w text-1) (row+delta))
                      in windowTextOffset d w text next col
       extend=V.MShift `elem` mods
       move target=moveToText extend target
   in case key of
-    V.KLeft->move (if pos==contentLineOffset text sourceRow then max 0 (pos-1)
-      else contentLineOffset text sourceRow+previousCharacter (contentLineAt text sourceRow) (pos-contentLineOffset text sourceRow))
-    V.KRight->move (if pos>=contentLineOffset text sourceRow+T.length (contentLineAt text sourceRow) then min (contentLength text) (pos+1)
-      else contentLineOffset text sourceRow+nextCharacter (contentLineAt text sourceRow) (pos-contentLineOffset text sourceRow))
+    V.KLeft->move (horizontalTextOffset False text pos)
+    V.KRight->move (horizontalTextOffset True text pos)
     V.KUp->move (vertical (-1))
     V.KDown->move (vertical 1)
     V.KPageUp->move (vertical (negate (max 1 (height (bounds w)-2))))
@@ -2795,6 +2812,10 @@ bindingInputAvailable d=case dialog d of
 -- | Plain movement/text is handled by its owner. No removed chord falls through
 -- into a hardcoded named command. PTY fallback retains every ordinary control key.
 unboundKey :: V.Key -> [V.Modifier] -> Desktop -> (Desktop,[Effect])
+unboundKey key mods d
+  | Just _<-effectiveBindings d, sourceHorizontalOwner d, V.MCtrl `notElem` mods,
+    not (bindingPlatform d==Bindings.TerminalPlatform && V.MMeta `elem` mods),
+    key `elem` [V.KLeft,V.KRight,V.KBS,V.KDel] = (d,[])
 unboundKey key mods d | activeMarkdown d, dialog d==Nothing,maybe False (windowFocused d) (activeWindow d) = (markdownKey key mods d,[])
 unboundKey key mods d | Just _<-activePluginWindow d, dialog d==Nothing,maybe False (windowFocused d) (activeWindow d) = (pluginKey key mods d,[])
 unboundKey key mods d = case bindingContext d of
@@ -2806,10 +2827,10 @@ unboundKey key mods d = case bindingContext d of
   Just Bindings.WordStarKeys | wordStarReserved key mods -> keyEvent key mods d
   _ -> (editorKey key mods d,[])
 
--- | WordStar movement, deletion and prefix/block grammar remain local owners.
--- Named commands use the prepared WordStar table instead of claiming these keys.
+-- | Unmigrated WordStar vertical/word movement and prefix/block grammar stay
+-- with their local owner; horizontal editing uses the prepared table.
 wordStarReserved :: V.Key -> [V.Modifier] -> Bool
-wordStarReserved (V.KChar c) mods=V.MCtrl `elem` mods && V.MMeta `notElem` mods && toLower c `elem` ("aesdxfykq"::String)
+wordStarReserved (V.KChar c) mods=V.MCtrl `elem` mods && V.MMeta `notElem` mods && toLower c `elem` ("aexfkq"::String)
 wordStarReserved _ _=False
 
 terminalSourceReserved :: V.Key -> [V.Modifier] -> Bool
@@ -2854,20 +2875,83 @@ keyEvent key mods d
   | otherwise = (editorKey key mods d,[])
   where ctrl = V.MCtrl `elem` mods
 
+-- | Finite source operations resolve semantic positions, never replay key events.
+horizontalCommand :: Command -> Bool
+horizontalCommand CursorLeft{}=True
+horizontalCommand CursorRight{}=True
+horizontalCommand cmd=horizontalMutation cmd
+
+horizontalMutation :: Command -> Bool
+horizontalMutation cmd=cmd `elem` [DeleteBackward,DeleteForward,DeleteLine]
+
+-- A global remap cannot edit or move a source behind another focused input owner.
+sourceHorizontalOwner :: Desktop -> Bool
+sourceHorizontalOwner d=dialog d==Nothing && not (questionActive d) && not (activeAutocomplete d) &&
+  bindingContext d `elem` [Just Bindings.SourceKeys,Just Bindings.WordStarKeys] &&
+  maybe False (windowFocused d) (activeWindow d)
+
+-- | Preserve each window's existing displayed selection and source coordinate owner.
+horizontalMove :: Bool -> Bool -> Desktop -> Desktop
+horizontalMove forward extend d
+  | activeMarkdown d, Just w<-activeWindow d, Just (_,text,_)<-windowMarkdown d w =
+      markdownMoveTo extend (horizontalTextOffset forward text (caret (selection (displayWindow w)))) d
+  | Just view<-activePluginWindow d, Just w<-activeWindow d =
+      pluginMoveTo extend (horizontalTextOffset forward (PluginWindow.preparedWindowText view) (caret (selection w))) d
+  | Just w<-activeWindow d, Just doc<-activeDocument d =
+      let b=documentBuffer doc; p=caret (selection w)
+          next | byteMode b=p+if forward then 1 else -1
+               | forward=bufferNextCharacter b p
+               | otherwise=bufferPreviousCharacter b p
+      in moveTo extend next d
+  | otherwise=d
+
+-- | Return a source character offset at the existing grapheme/line boundary.
+horizontalTextOffset :: Bool -> BufferContent -> Int -> Int
+horizontalTextOffset forward text pos
+  | forward, pos>=start+T.length line=min (contentLength text) (pos+1)
+  | forward=start+nextCharacter line (pos-start)
+  | pos==start=max 0 (pos-1)
+  | otherwise=start+previousCharacter line (pos-start)
+  where row=fst (contentPosition text pos); start=contentLineOffset text row; line=contentLineAt text row
+
+-- | Delete a selected range first, otherwise one existing character (or hex byte).
+deleteAdjacent :: Bool -> Desktop -> Desktop
+deleteAdjacent forward d=case (activeWindow d,activeDocument d) of
+  (Just w,Just doc)->let
+      b=documentBuffer doc; sel=selection w; p=caret sel
+      previous=if byteMode b then max 0 (p-1) else bufferPreviousCharacter b p
+      next=if byteMode b then min (bufferLength b) (p+1) else bufferNextCharacter b p
+      range=if anchor sel/=p then sel else if forward then Selection p next else Selection previous p
+    in editActive (\_ -> replaceSelection range "") (Just (fst (ordered range))) d
+  _->d
+
+-- | WordStar line deletion keeps its measured range and single Undo owner.
+deleteSourceLine :: Desktop -> Desktop
+deleteSourceLine d=case (activeWindow d,activeDocument d) of
+  (Just w,Just doc)->let
+      b=documentBuffer doc; row=fst (bufferLineColumn b (caret (selection w)))
+      start=bufferLineOffset b row; end=bufferLineOffset b (row+1)
+    in editActive (\_ -> replaceSelection (Selection start end) "") (Just start) d
+  _->d
+
 editorKey :: V.Key -> [V.Modifier] -> Desktop -> Desktop
 editorKey key mods d | activeMarkdown d=markdownKey key mods d
 editorKey key mods d | activeHex d = hexKey key mods d
 editorKey key mods d = case key of
-  V.KLeft -> move (if ctrl then wordLeft t p else bufferPreviousCharacter b p)
-  V.KRight -> move (if ctrl then wordRight t p else bufferNextCharacter b p)
+  V.KLeft | ctrl -> move (wordLeft t p)
+          | otherwise -> horizontalMove False shift d
+  V.KRight | ctrl -> move (wordRight t p)
+           | otherwise -> horizontalMove True shift d
   V.KUp -> vertical (-1)
   V.KDown -> vertical 1
   V.KPageUp -> vertical (negate page)
   V.KPageDown -> vertical page
   V.KHome -> move (if ctrl then 0 else visualEdge 0 start)
   V.KEnd -> move (if ctrl then bufferLength b else visualEdge maxBound (start+T.length (bufferLineAt b row)))
-  V.KBS -> erase (if ctrl then wordLeft t p else bufferPreviousCharacter b p) p
-  V.KDel -> erase p (if ctrl then wordRight t p else bufferNextCharacter b p)
+  V.KBS | ctrl -> erase (wordLeft t p) p
+        | otherwise -> deleteAdjacent False d
+  V.KDel | ctrl -> erase p (wordRight t p)
+         | otherwise -> deleteAdjacent True d
   V.KEnter -> insertText (bufferNewline b) d
   V.KChar '\t' -> insertText "  " d
   V.KChar c | null mods || mods==[V.MShift], textInputChar c -> insertText (T.singleton c) d
@@ -2892,15 +2976,16 @@ editorKey key mods d = case key of
                 in editActive (\_ -> replaceSelection s "") (Just (fst (ordered s))) d
 
 starKey :: Char -> Desktop -> (Desktop,[Effect])
-starKey c d = case lookup c [('e',V.KUp),('s',V.KLeft),('d',V.KRight),('x',V.KDown)] of
+starKey c d = case lookup c [('e',V.KUp),('x',V.KDown)] of
   Just k -> (editorKey k [] d,[])
   Nothing -> case c of
+    's' -> runCommand (CursorLeft False) d
+    'd' -> runCommand (CursorRight False) d
     'k' -> (d {prefix=Just 'k'},[])
     'q' -> (d {prefix=Just 'q'},[])
     'a' -> (editorKey V.KLeft [V.MCtrl] d,[])
     'f' -> (editorKey V.KRight [V.MCtrl] d,[])
-    'y' -> let b=maybe (newBuffer "") documentBuffer (activeDocument d); p=maybe 0 (caret . selection) (activeWindow d); row=fst (bufferLineColumn b p); a=bufferLineOffset b row; z=bufferLineOffset b (row+1)
-           in (editActive (\_ -> replaceSelection (Selection a z) "") (Just a) d,[])
+    'y' -> runCommand DeleteLine d
     'z' -> runCommand Undo d
     _ -> (d,[])
 
