@@ -241,7 +241,7 @@ main = PluginWindow.withWindowScope $ \downloadScope -> do
                 update<-PluginWindow.openTextWindow downloadScope prepared >>= maybe (fail "Downloads scope closed") pure
                 value<-PluginWindow.admitWindowUpdate False update >>= maybe (fail "Downloads publication expired") pure
                 let shown=uncurry addPluginWindow value d {streamerMode=False}
-                pure (case activeWindow shown of Just w->resizeWindowBounds (windowId w) (Rect 12 4 76 23) shown; _->shown)
+                pure (case activeWindow shown of Just w->resizeWindowBounds (windowId w) (Rect 8 3 64 19) shown; _->shown)
               Nothing->fail "Request downloads explicitly")
           , ("find-replace", \d -> command Find d >>= typeText "bufferLineAt" >>= key (V.KChar 'h') [V.MCtrl] >>= typeText "lineAt")
           , ("permission-diff", permissionDiff)
