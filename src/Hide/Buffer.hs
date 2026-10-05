@@ -776,8 +776,8 @@ bufferWordLeft b position=case T.unsnoc remaining of
       in next `seq` if not (T.null rest) then (next,rest,previous) else case FT.viewr previous of
         prefix FT.:> leaf | lineOrigin leaf/=Deleted->spanLeft predicate next (lineText leaf) prefix
         _ | lineCount (FT.measure previous)<=0->(next,"",FT.empty)
-          | otherwise->let (prefix,remaining)=FT.split ((>lineCount (FT.measure previous)-1) . lineCount) previous
-                       in case FT.viewl remaining of
+          | otherwise->let (prefix,trailing)=FT.split ((>lineCount (FT.measure previous)-1) . lineCount) previous
+                       in case FT.viewl trailing of
                          leaf FT.:< _->spanLeft predicate next (lineText leaf) prefix
                          FT.EmptyL->(next,"",FT.empty)
 
