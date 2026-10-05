@@ -20,14 +20,15 @@ static bool grid_ready;
 static uint64_t grid_uploads,grid_bytes;
 _Static_assert(sizeof(struct HideGlyphCell)==32,"Shader cell ABI");
 static SDL_Renderer *renderer;
-static SDL_Texture *texture, *vignette;
+static SDL_Texture *texture, *vignette, *script_transform;
+static SDL_PixelFormat script_transform_format;
 static bool crt_filter;
 static double scale;
 static int cell_height;
 
 static bool pixelate_unicode;
 /* Semantic draw commands survive repeated present/blink; only atlas misses rasterize. */
-typedef struct { int x,y,cells,width,clip_x,clip_width; uint16_t bits[16]; char *text; uint32_t fg,bg,traits; bool pixelated; } GlyphCommand;
+typedef struct { int x,y,cells,width,clip_x,clip_width,script,natural; uint16_t bits[16]; char *text; uint32_t fg,bg,traits; bool pixelated; } GlyphCommand;
 static GlyphCommand *commands;
 static size_t command_count, command_capacity;
 typedef struct { uint64_t hash; int x,y,w,h; uint32_t fg,bg,traits; int hover,cursor; bool pixelated; uint16_t bits[16]; char *text; } AtlasEntry;
@@ -110,6 +111,7 @@ void thc_close(void) {
     free(cell_grid); cell_grid=NULL; cell_count=cell_capacity=cell_buffer_capacity=0;
     SDL_DestroyTexture(texture); texture = NULL;
     SDL_DestroyTexture(vignette); vignette = NULL;
+    SDL_DestroyTexture(script_transform); script_transform=NULL; script_transform_format=SDL_PIXELFORMAT_UNKNOWN;
     SDL_DestroyRenderer(renderer); renderer = NULL;
     SDL_DestroyWindow(window); window = NULL;
     SDL_DestroyGPUDevice(gpu); gpu=NULL;
@@ -231,16 +233,20 @@ int thc_begin(void) {
     return 1;
 }
 void thc_clip(int visible_x,int clip_cells) { next_clip_x=visible_x; next_clip_width=clip_cells; }
-void thc_glyph(int x,int y,int cells,int glyph_width,const uint16_t *bits,uint32_t fg,uint32_t bg,uint32_t traits) {
+void thc_glyph(int x,int y,int cells,int glyph_width,const uint16_t *bits,uint32_t fg,uint32_t bg,uint32_t traits,int script,int natural_cells) {
     if (y<0 || y>=rows) return;
+    if (script && ((script!=1 && script!=2) || cells!=1 || (natural_cells!=1 && natural_cells!=2))) { SDL_SetError("Invalid script glyph geometry"); draw_failed=true; return; }
     GlyphCommand *c=command(); if (!c) return;
+    c->script=script; c->natural=natural_cells;
     c->x=x; c->y=y; c->cells=cells; c->width=glyph_width; c->fg=fg; c->bg=bg; c->traits=traits;
     memcpy(c->bits,bits,sizeof(c->bits));
 }
 void thc_pixelate_unicode(int enabled) { pixelate_unicode=enabled!=0; }
-int thc_unicode(int x,int y,int cells,const char *text,uint32_t fg,uint32_t bg,uint32_t traits) {
+int thc_unicode(int x,int y,int cells,const char *text,uint32_t fg,uint32_t bg,uint32_t traits,int script,int natural_cells) {
     if (y<0 || y>=rows || cells<1) return 1;
+    if (script && ((script!=1 && script!=2) || cells!=1 || (natural_cells!=1 && natural_cells!=2))) return SDL_SetError("Invalid script glyph geometry");
     GlyphCommand *c=command(); if (!c) return 0;
+    c->script=script; c->natural=natural_cells;
     c->x=x; c->y=y; c->cells=cells; c->fg=fg; c->bg=bg; c->traits=traits; c->pixelated=pixelate_unicode;
     c->text=strdup(text); return c->text!=NULL;
 }
@@ -338,7 +344,8 @@ static bool grow_atlas(void) {
     SDL_DestroyTexture(texture); texture=next; atlas_size=size; return true;
 }
 static AtlasEntry *atlas_entry(const GlyphCommand *c,int hover,int cursor) {
-    int w=c->text?(c->pixelated?8*c->cells:cell_x(c->x+c->cells)-cell_x(c->x)):c->width;
+    int raster_cells=c->script?c->natural:c->cells;
+    int w=c->text?(c->pixelated?8*raster_cells:cell_x(c->x+raster_cells)-cell_x(c->x)):c->width;
     int h=c->text && !c->pixelated?cell_y(c->y+1)-cell_y(c->y):16;
     /* Line decorations are cell paint, never atlas glyph identity. */
     uint32_t glyph_traits=c->traits&7;
@@ -426,13 +433,52 @@ static bool draw_decorations(const GlyphCommand *c,int count,float y,float heigh
     }
     return true;
 }
+/* The software renderer has no final-cell shader. Only a targeted script cell
+ * needs this bounded readback: shrinking a pre-inverted normal glyph would move
+ * its cursor band. Keep normal atlas identity and transform composed cell paint. */
+static bool transform_script_cell(const GlyphCommand *c,int hover,int cursor) {
+    if (gpu) return true; /* GPU kernels already transform final cell paint. */
+    if (hover<0 && cursor<0) return true;
+    if (c->x<0 || c->x>=cols || (c->clip_width>=0 && (c->x<c->clip_x || c->x>=c->clip_x+c->clip_width))) return true;
+    SDL_Rect area={origin_x+cell_x(c->x),origin_y+cell_y(c->y),cell_x(c->x+1)-cell_x(c->x),cell_y(c->y+1)-cell_y(c->y)};
+    SDL_Surface *painted=SDL_RenderReadPixels(renderer,&area); if (!painted) return false;
+    bool ok=true;
+    for (int y=0;ok && y<painted->h;++y) for (int x=0;ok && x<painted->w;++x) {
+        Uint8 r=0,g=0,b=0,a=0;
+        ok=SDL_ReadSurfacePixel(painted,x,y,&r,&g,&b,&a);
+        uint32_t color=((uint32_t)r<<16)|((uint32_t)g<<8)|b;
+        if (cursor>=0 && y>=area.h*14/16) color^=0xffffff;
+        if (hover>=0) color=mouse_color(color);
+        if (ok) ok=SDL_WriteSurfacePixel(painted,x,y,color>>16,color>>8,color,255);
+    }
+    float w=0,h=0;
+    if (script_transform) SDL_GetTextureSize(script_transform,&w,&h);
+    if (!script_transform || w!=painted->w || h!=painted->h || script_transform_format!=painted->format) {
+        SDL_DestroyTexture(script_transform);
+        script_transform=SDL_CreateTexture(renderer,painted->format,SDL_TEXTUREACCESS_STREAMING,painted->w,painted->h);
+        script_transform_format=painted->format;
+        if (script_transform) ok=ok && SDL_SetTextureScaleMode(script_transform,SDL_SCALEMODE_NEAREST) && SDL_SetTextureBlendMode(script_transform,SDL_BLENDMODE_NONE);
+    }
+    SDL_FRect target={(float)area.x,(float)area.y,(float)area.w,(float)area.h};
+    ok=ok && script_transform && SDL_UpdateTexture(script_transform,NULL,painted->pixels,painted->pitch) && SDL_RenderTexture(renderer,script_transform,NULL,&target);
+    SDL_DestroySurface(painted);
+    return ok;
+}
 static bool draw_command(const GlyphCommand *c) {
     draw_clip_x=c->clip_x; draw_clip_width=c->clip_width;
-    int hover=!left_down && mouse_y==c->y && mouse_x>=c->x && mouse_x<c->x+SDL_max(c->cells,(c->width+7)/8)?mouse_x-c->x:-1;
-    int cursor=cursor_present && cursor_drawn && cursor_y==c->y && cursor_x>=c->x && cursor_x<c->x+SDL_max(c->cells,(c->width+7)/8)?cursor_x-c->x:-1;
-    AtlasEntry *entry=atlas_entry(c,hover,cursor); if (!entry) return false;
-    int count=SDL_max(c->cells,(c->width+7)/8);
+    int count=c->script?1:SDL_max(c->cells,(c->width+7)/8);
+    int hover=!left_down && mouse_y==c->y && mouse_x>=c->x && mouse_x<c->x+count?mouse_x-c->x:-1;
+    int cursor=cursor_present && cursor_drawn && cursor_y==c->y && cursor_x>=c->x && cursor_x<c->x+count?cursor_x-c->x:-1;
+    AtlasEntry *entry=atlas_entry(c,c->script?-1:hover,c->script?-1:cursor); if (!entry) return false;
     float y=origin_y+cell_y(c->y),height=cell_y(c->y+1)-cell_y(c->y);
+    if (c->script) {
+        float x=origin_x+cell_x(c->x),width=cell_x(c->x+1)-cell_x(c->x);
+        if (!quad(x,y,width,height,0.5f/atlas_size,0.5f/atlas_size,0,0,c->bg) ||
+            !quad(x,y+(c->script==2?height/2:0),width*c->natural/2,height/2,
+                (entry->x+0.5f)/atlas_size,(entry->y+0.5f)/atlas_size,entry->w/(float)atlas_size,entry->h/(float)atlas_size,c->text?0xffffff:c->fg) ||
+            !draw_decorations(c,1,y,height,-1,-1)) return false;
+        return transform_script_cell(c,hover,cursor);
+    }
     if (c->text) {
         float x=origin_x+cell_x(c->x),width=cell_x(c->x+c->cells)-cell_x(c->x);
         if (!quad(x,y,width,height,0.5f/atlas_size,0.5f/atlas_size,0,0,c->bg)) return false;
@@ -478,7 +524,7 @@ restart:
             clear_atlas_entries(); atlas_x=1; atlas_y=atlas_row=0; retried=true;
             goto restart;
         }
-        int full=SDL_max(c->cells,(c->width+7)/8);
+        int full=c->script?1:SDL_max(c->cells,(c->width+7)/8);
         int lo=SDL_max(0,c->x),hi=SDL_min(cols,c->x+full);
         if (c->clip_width>=0) { lo=SDL_max(lo,c->clip_x); hi=SDL_min(hi,c->clip_x+c->clip_width); }
         for (int x=lo;x<hi;++x) {
@@ -493,7 +539,7 @@ restart:
             }
             cell_grid[index]=(struct HideGlyphCell){
                 {(uint32_t)entry->x|((uint32_t)entry->y<<16),(uint32_t)entry->w|((uint32_t)entry->h<<16),
-                 (uint32_t)full|((uint32_t)(x-c->x)<<16),previous},
+                 (uint32_t)full|((uint32_t)(x-c->x)<<16)|((uint32_t)(c->script?c->natural:0)<<HIDE_CELL_NATURAL_SHIFT)|((uint32_t)c->script<<HIDE_CELL_SCRIPT_SHIFT),previous},
                 {c->fg,c->bg,(c->cells?1u:0u)|(c->text?0u:2u)|(c->traits&24u),depth}};
         }
     }

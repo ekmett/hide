@@ -45,11 +45,20 @@ float4 main(float4 color : TEXCOORD0, float2 uv : TEXCOORD1) : SV_Target0 {
         HideGlyphCell cell = readCell(index);
         uint2 origin = uint2(cell.geometry.x & 65535, cell.geometry.x >> 16);
         uint2 extent = uint2(cell.geometry.y & 65535, cell.geometry.y >> 16);
-        uint fullCells = cell.geometry.z & 65535;
+        uint fullCells = cell.geometry.z & HIDE_CELL_WIDTH_MASK;
+        uint script = (cell.geometry.z >> HIDE_CELL_SCRIPT_SHIFT) & HIDE_CELL_SCRIPT_MASK;
+        uint natural = (cell.geometry.z >> HIDE_CELL_NATURAL_SHIFT) & HIDE_CELL_SCRIPT_MASK;
         uint offset = cell.geometry.z >> 16;
         if (fullCells == 0) break;
-        float2 glyphUV = (float2(origin) + float2((float(offset) + within.x) / float(fullCells), within.y) * float2(extent)) / grid.z;
-        float4 ink = glyphAtlas.SampleLevel(glyphSampler, glyphUV, 0);
+        float2 source = float2((float(offset) + within.x) / float(fullCells), within.y);
+        bool visibleInk = true;
+        if (script != 0) {
+            float band = script == 2 ? 0.5 : 0;
+            visibleInk = within.x < float(natural) * 0.5 && within.y >= band && within.y < band + 0.5;
+            source = float2(within.x * 2 / float(natural), (within.y - band) * 2);
+        }
+        float2 glyphUV = (float2(origin) + source * float2(extent)) / grid.z;
+        float4 ink = visibleInk ? glyphAtlas.SampleLevel(glyphSampler, glyphUV, 0) : float4(0, 0, 0, 0);
         float3 foreground = (cell.paint.z & 2) ? rgb(cell.paint.x) : ink.rgb;
         float3 tile = foreground * ink.a;
         float alpha = ink.a;

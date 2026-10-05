@@ -51,9 +51,9 @@ static void check_mouse_cell(SDL_Renderer *renderer, int row, int cell_height, b
     for (int i = 0; i < 16; ++i) { glyph[i] = 0xc000; accent[i] = 0x3000; bright[i] = 0x0c00; }
     assert(thc_begin());
     for (int x = 0; x < 2; ++x) {
-        thc_glyph(x, row, 1, 8, glyph, 0xaaaaaa, 0x0000aa, 0);
-        thc_glyph(x, row, 0, 8, accent, 0x00aaaa, 0, 0);
-        thc_glyph(x, row, 0, 8, bright, 0xffffff, 0, 0);
+        thc_glyph(x, row, 1, 8, glyph, 0xaaaaaa, 0x0000aa, 0,0,1);
+        thc_glyph(x, row, 0, 8, accent, 0x00aaaa, 0, 0,0,0);
+        thc_glyph(x, row, 0, 8, bright, 0xffffff, 0, 0,0,0);
     }
     for (int repeat = 0; repeat < 2; ++repeat) {
         assert(thc_present());
@@ -91,7 +91,7 @@ static void check_crt(SDL_Renderer *renderer, int lines, double pitch) {
     for (int i = 0; i < 16; ++i) solid[i] = 0xffff;
     assert(thc_begin());
     for (int y = 0; y < lines; ++y) for (int x = 0; x < 80; ++x)
-        thc_glyph(x, y, 1, 8, solid, 0xffffff, 0, 0);
+        thc_glyph(x, y, 1, 8, solid, 0xffffff, 0, 0,0,1);
     for (int enabled = 0; enabled < 3; ++enabled) {
         thc_crt_filter(enabled == 1);
         for (int repeat = 0; repeat < 2; ++repeat) {
@@ -139,8 +139,8 @@ static void check_unicode(SDL_Renderer *renderer) {
     uint64_t hashes[3]={0};
     for (int mode=0;mode<3;++mode) {
         assert(thc_begin()); thc_pixelate_unicode(mode==1);
-        assert(thc_unicode(1,1,2,"👩🏽‍💻",0xffffff,0x0000aa,0));
-        assert(thc_unicode(3,1,1,"é",0xffff55,0x0000aa,0));
+        assert(thc_unicode(1,1,2,"👩🏽‍💻",0xffffff,0x0000aa,0,0,2));
+        assert(thc_unicode(3,1,1,"é",0xffff55,0x0000aa,0,0,1));
         assert(thc_present());
         SDL_Surface *image=SDL_RenderReadPixels(renderer,NULL);
         assert(image);
@@ -165,8 +165,8 @@ static void check_font_traits(SDL_Renderer *renderer) {
         for (int style=0;style<5;++style) {
             unsigned traits=style==4?0:(unsigned)style;
             assert(thc_begin());
-            if (!bitmap) thc_glyph(1,1,1,8,glyph,0xffffff,0,traits);
-            else assert(thc_unicode(1,1,1,"f",0xffffff,0,traits));
+            if (!bitmap) thc_glyph(1,1,1,8,glyph,0xffffff,0,traits,0,1);
+            else assert(thc_unicode(1,1,1,"f",0xffffff,0,traits,0,1));
             assert(thc_present());
             SDL_Surface *image=SDL_RenderReadPixels(renderer,NULL);
             assert(image);
@@ -181,8 +181,8 @@ static void check_font_traits(SDL_Renderer *renderer) {
     }
     thc_pixelate_unicode(0);
     assert(thc_begin());
-    thc_glyph(1,1,2,8,glyph,0xffffff,0,4); /* Narrow bitmap stretched into two cells. */
-    assert(thc_unicode(4,1,2,"f",0xffffff,0,4));
+    thc_glyph(1,1,2,8,glyph,0xffffff,0,4,0,2); /* Narrow bitmap stretched into two cells. */
+    assert(thc_unicode(4,1,2,"f",0xffffff,0,4,0,2));
     assert(thc_present());
     SDL_Surface *wide=SDL_RenderReadPixels(renderer,NULL);
     assert(wide);
@@ -219,7 +219,7 @@ static void check_geometry(int lines, int cell_height) {
     assert(thc_begin());
     uint16_t glyph[16];
     for (int i = 0; i < 16; ++i) glyph[i] = 0xffff;
-    thc_glyph(0, lines - 1, 1, 8, glyph, 0xff0000, 0, 0);
+    thc_glyph(0, lines - 1, 1, 8, glyph, 0xff0000, 0, 0,0,1);
     thc_cursor(0, lines - 1);
     assert(thc_present());
     SDL_Surface *frame = SDL_RenderReadPixels(SDL_GetRenderer(windows[0]), NULL);
@@ -232,7 +232,7 @@ static void check_geometry(int lines, int cell_height) {
     SDL_free(windows);
     wait_cursor_blink();
     assert(thc_begin());
-    thc_glyph(0, lines - 1, 1, 8, glyph, 0xff0000, 0, 0);
+    thc_glyph(0, lines - 1, 1, 8, glyph, 0xff0000, 0, 0,0,1);
     thc_cursor(0, lines - 1);
     assert(thc_present());
     frame = SDL_RenderReadPixels(test_renderer, NULL);
@@ -242,7 +242,7 @@ static void check_geometry(int lines, int cell_height) {
     thc_cursor_blink(0);
     wait_cursor_blink();
     assert(thc_begin());
-    thc_glyph(0, lines - 1, 1, 8, glyph, 0xff0000, 0, 0);
+    thc_glyph(0, lines - 1, 1, 8, glyph, 0xff0000, 0, 0,0,1);
     thc_cursor(0, lines - 1);
     assert(thc_present());
     frame = SDL_RenderReadPixels(test_renderer, NULL);
