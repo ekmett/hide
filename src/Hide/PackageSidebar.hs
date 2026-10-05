@@ -186,29 +186,31 @@ createSlot registry root _private serial file=do
         after<-stamp file
         pure $ if maybe False (/=latest) version || observed/=after
           then Left (CommandRejected "Package changed while opening source; refresh the tree.") else result) >>= required
-  build<-registerCommand registry (CommandDef (namespace<>".build") "Build component" codec codec $ \ctx (version,name,action)->do
-    Snapshot current capturedStamp package _<-readIORef ref
-    observed<-stamp file
-    case (sidebarOrigin ctx,sidebarProvider ctx,package) of
-      (Menu.HumanMenu,Just owner,Right parsedPackage)
-        | current==version,observed==capturedStamp
-        , component:_<-[item | item<-sourceComponents parsedPackage,sourceTarget item==name]
-        , sourceBuildable (condTreeData (sourceTree component))
-        , sourceKind component `elem` [LibraryComponent,ExecutableComponent]
-        , action==Make || action==Run && sourceKind component==ExecutableComponent->do
-            let target=PackageBuildTarget owner version
-                  (sidebarContextDirectory ctx,sidebarPrivatePaths ctx) root file observed
-                  (sourcePackageName parsedPackage<>":"<>name)
-            -- Construct and force fixed receipt metadata on the action worker.
-            _<-evaluate (T.length (packageBuildName target)+length root+length file
-              +length (sidebarContextDirectory ctx)+sum (map length (sidebarPrivatePaths ctx)))
-            reply<-evaluate (SidebarBuild action target)
-            pure (Right reply)
-      _->pure (Left (CommandRejected "Package build target changed or is not a human action."))) >>= required
+  let registerBuild action suffix label=registerCommand registry (CommandDef (namespace<>suffix) label codec codec $ \ctx (version,name)->do
+      Snapshot current capturedStamp package _<-readIORef ref
+      observed<-stamp file
+      case (sidebarOrigin ctx,sidebarProvider ctx,package) of
+        (Menu.HumanMenu,Just owner,Right parsedPackage)
+          | current==version,observed==capturedStamp
+          , component:_<-[item | item<-sourceComponents parsedPackage,sourceTarget item==name]
+          , sourceBuildable (condTreeData (sourceTree component))
+          , sourceKind component `elem` [LibraryComponent,ExecutableComponent]
+          , action==Make || action==Run && sourceKind component==ExecutableComponent->do
+              let target=PackageBuildTarget owner version
+                    (sidebarContextDirectory ctx,sidebarPrivatePaths ctx) root file observed
+                    (sourcePackageName parsedPackage<>":"<>name)
+              -- Construct and force fixed receipt metadata on the action worker.
+              _<-evaluate (T.length (packageBuildName target)+length root+length file
+                +length (sidebarContextDirectory ctx)+sum (map length (sidebarPrivatePaths ctx)))
+              reply<-evaluate (SidebarBuild action target)
+              pure (Right reply)
+        _->pure (Left (CommandRejected "Package build target changed or is not a human action."))) >>= required
+  build<-registerBuild Make ".build" "Build component"
+  run<-registerBuild Run ".run" "Run component"
   -- doc-artifact: tools/docs-screenshots.hs package-target-menu -> docs/site/screenshots/package-target-menu.png (docs/running.md)
   let targetActions version component=
-        [P.ActionMenu label (P.treeAction registry build (version,sourceTarget component,action) (\_ result->pure result))
-        | (label,action)<-[("Build",Make),("Run",Run)]
+        [P.ActionMenu label (P.treeAction registry command (version,sourceTarget component) (\_ result->pure result))
+        | (label,action,command)<-[("Build",Make,build),("Run",Run,run)]
         , sourceBuildable (condTreeData (sourceTree component))
         , sourceKind component `elem` [LibraryComponent,ExecutableComponent]
         , action/=Run || sourceKind component==ExecutableComponent]
@@ -241,7 +243,7 @@ createSlot registry root _private serial file=do
                 storeCache ref version key nodes
                 pure (Right (P.NodePage (take 128 (drop offset nodes)) (if null (drop (offset+128) nodes) then Nothing else Just (T.pack (show (offset+128))))))
   provider<-P.registerTree registry namespace rootNode children >>= required
-  pure (Slot file provider [commandRef open,commandRef build] ref ids)
+  pure (Slot file provider [commandRef open,commandRef build,commandRef run] ref ids)
   where required=either (ioError . userError . show) pure
 
 sourceNode :: IORef (M.Map (Text,Source,Text,FilePath) P.NodeId,Int)
