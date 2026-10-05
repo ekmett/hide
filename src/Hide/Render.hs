@@ -541,6 +541,7 @@ windowLayers d active original =
         V.charFill frame '│' 1 contentHeight,V.char frame (if active && not moving then '╧' else '┴')])
       | byteMode b, divider<-hexDividers (windowHexBytes w), let column=divider-scrollColumn w, column>=0, column<contentWidth]
     contentWidth=max 0 (ww-2); contentHeight=windowContentRows d doc w
+    -- Docs: tools/docs-screenshots.hs markdown-view -> docs/site/screenshots/markdown-view.png (docs/editing.md).
     documentLayers | bufferView w==MarkdownView,Nothing<-windowMarkdown d w =
       [CellImage (place (x+1) (y+1) (label base (case M.lookup (windowId w) (windowPresentations d) of
           Just failed@MarkdownWindowFailure{} | let (target,columns,wide)=presentationMetadata failed,Just target==windowPresentationTarget d w,columns==max 1 (ww-2),wide==wideSectionTitles d -> "Markdown view preparation failed."

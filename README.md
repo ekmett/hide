@@ -49,7 +49,8 @@ bar. Mac function keys may need Fn/Globe.
 The Files pane follows the selected directory. Drag a window by its title,
 resize it from the corner, or use **Window > Tile** and **Window > Cascade**.
 **Window > Split vertically** and **Split horizontally** open another view of
-the same buffer, including its undo history.
+the same buffer, including its undo history. **Window > Markdown** renders a
+Markdown file in place; keep another split in **Current** to edit while you read.
 
 These are the default source-editor bindings. The Mac column describes the
 native window and browser: ⌃ Control, ⌥ Option, ⇧ Shift and ⌘ Command, in that order

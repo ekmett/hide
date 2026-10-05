@@ -109,6 +109,13 @@ linear light and applies Floyd–Steinberg error diffusion to four coverage
 levels before enlargement. The browser's pixelated fallback does not use that
 native filter. Bundled bitmap glyphs retain nearest-neighbor scaling.
 
+A Markdown buffer view keeps its original source document and undo history.
+`TextPresentation` captures immutable source content, revision, width and title
+preferences, then parses and lays it out on its existing background worker.
+Adoption checks those small keys; rendering and input consume the prepared rows.
+Each window holds separate rendered selection and scrolling, while Current keeps
+its source interaction. A pending or failed preview stays read-only.
+
 Markdown links retain their targets through wrapping, tables and chat-bubble
 layout. That layout records character spans once; hit testing uses the buffer's
 line index. A bounded session worker loads and lays out linked documents outside

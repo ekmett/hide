@@ -38,8 +38,10 @@ windows and Mac browsers use symbol labels automatically.
 
 Command-line options override environment variables, which override project defaults, which override global defaults. For example, `THC_EDIT_BACKEND=web` overrides `backend = "metal"`, and `--terminal` overrides both. `--mode` selects its usual dimensions unless `--size` is also supplied. `--no-crt`, `--classic-icons`, `--standard-keys`, `--no-blink-cursor` and `--no-pixelate-unicode` override enabled defaults.
 
-`bufferView` accepts `current`, `changes`, `only-changes`, or `side-by-side`.
-The radio controls in the Window menu save this default for newly opened buffers.
+`bufferView` accepts `current`, `changes`, `only-changes`, `side-by-side`, or
+`markdown`. Markdown renders `.md` and `.markdown` files; other files open in
+Current when this is the default. The radio controls in the Window menu save
+this default for newly opened buffers.
 
 Startup defaults apply when a session is created. Resuming keeps that session's editing state; the frontend can still use your chosen backend and scale. To change a running session, use **Options > Preferences**. An agent can read and update non-agent settings through `editor_settings`; its `defaults` object updates the startup section without changing the current session.
 
