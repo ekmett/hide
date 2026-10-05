@@ -10,7 +10,7 @@ import Hide.Commands (configuredBindings)
 import Hide.BufferView
 import Hide.Sidebar
 import Hide.Model
-import Hide.Render (snapshotHtml, snapshot, renderDesktop)
+import Hide.Render (snapshotHtml, snapshot, renderDesktop, renderCellRows)
 import Hide.Buffer (revision, newBuffer, columnOffset, contents, markSaved, replaceSelection, saved, undoStack, redoStack, Selection(..))
 import Hide.Window (nativeChordShortcut)
 import qualified Data.Text.Encoding as TE
@@ -19,7 +19,7 @@ import Hide.Files (FileState(..))
 import qualified Data.Text as T
 import qualified Data.Map.Strict as M
 import qualified Graphics.Vty as V
-import Hide.Unicode (displayOpsForPic)
+import Hide.Unicode (CellSpan(..), displayOpsForPic)
 import Graphics.Vty.Span (SpanOp(..))
 import Data.Foldable (toList)
 import qualified Data.Text.Lazy as TL
@@ -38,6 +38,18 @@ checks = do
       (pressed,requests) = handleEvent (V.EvMouseDown bx by V.BLeft []) modal
       (released,_) = handleEvent (V.EvMouseUp bx by (Just V.BLeft)) pressed
       (cancelled,_) = handleEvent (V.EvMouseUp 0 0 (Just V.BLeft)) pressed
+  let separate=addDocument Nothing (newBuffer "second") desktop
+      apart=separate {windows=[w {bounds=if windowId w==2 then Rect 45 5 25 14 else Rect 5 3 25 14} | w<-windows separate]}
+      paintAt d x y=pick x (toList (toList (renderCellRows d) !! y))
+        where
+          pick column (cell:rest)=let (paint,width)=case cell of CellText a text->(a,T.length text); CellGlyph a _ _ _ shown->(a,shown)
+                                 in if column<width then paint else pick (column-width) rest
+          pick _ []=error "missing composed test cell"
+      shadowed d x y=V.attrBackColor (paintAt d x y)==V.SetTo (V.RGBColor 0 0 0)
+      menuOpen=apart {menu=Just (0,0)}
+      about=fst (runCommand About apart)
+  check "only the active floating window casts an exposed halo" (shadowed apart 70 8 && not (shadowed apart 30 5))
+  check "topmost menu and dialog remove background window halos" (not (shadowed menuOpen 70 8) && not (shadowed about 70 8))
   let terminal=addReadOnly "Terminal draw" "visible terminal content" desktop
       terminalId=maybe (error "missing terminal") windowId (activeWindow terminal)
       pinnedTerminal=setTerminalPinned True terminalId terminal

@@ -48,11 +48,18 @@ checks=do
    let (bytes,end)=terminalSpan (const mempty) 0 2 semantic
    check "terminal projection reserves two cells and keeps semantic text separate" (end==2 && TE.encodeUtf8 projected `BS.isInfixOf` writeToByteString bytes)
  let metadata=object ["size" .= ([40,12]::[Int]),"bindings" .= ([]::[(T.Text,T.Text)])]
-     row=toJSON [(0::Int,0xffffff::Int,0::Int,3::Int,[toJSON ("A"::T.Text,2::Int,True)])]
+     row=toJSON [(0::Int,0xffffff::Int,0::Int,3::Int,[toJSON ("A"::T.Text,2::Int,True,0::Int,2::Int)])]
  frame<-either fail pure (parseRemoteFrame metadata (row:replicate 11 (toJSON ([]::[Value]))))
- check "native receiver keeps stretched semantic glyph width" (case remoteCells frame of [RemoteCell 0 0 _ "A" 2]->True; _->False)
+ check "native receiver keeps stretched semantic glyph width" (case remoteCells frame of [RemoteCell 0 0 _ "A" 2 0 2]->True; _->False)
  check "remote TUI retains the same original glyph/advance before output projection" (case [ (TL.toStrict text,width) | rowOps<-Vec.toList (displayOpsForPic (remoteTerminalPicture frame) (40,12)),TextSpan _ width _ text<-Vec.toList rowOps,text=="A"] of [("A",2)]->True; _->False)
- let bad flag advance text=toJSON [(0::Int,0::Int,0::Int,0::Int,[toJSON (text::T.Text,advance::Int,flag::Bool)])]
+ let clipped start shown=toJSON [(0::Int,0xffffff::Int,0::Int,3::Int,[toJSON ("A"::T.Text,2::Int,True,start::Int,shown::Int)])]
+ forM_ [0,1] $ \start->do
+   partial<-either fail pure (parseRemoteFrame metadata (clipped start 1:replicate 11 (toJSON ([]::[Value]))))
+   check "native wire preserves partial glyph origin and full allocated width" (case remoteCells partial of [RemoteCell 0 0 _ "A" 2 offset 1]->offset==start; _->False)
+   check "text mode suppresses a partial glyph without shifting following cells"
+     (all (not . T.isInfixOf "A") [TL.toStrict text | rowOps<-Vec.toList (displayOpsForPic (remoteTerminalPicture partial) (40,12)),TextSpan _ _ _ text<-Vec.toList rowOps])
+ check "clipped wire rejects impossible extents" (all (either (const True) (const False) . parseRemoteFrame metadata . (:replicate 11 (toJSON ([]::[Value])))) [clipped (-1) 1,clipped 2 1,clipped 1 2,clipped 0 0,clipped maxBound 1,clipped 1 maxBound])
+ let bad flag advance text=toJSON [(0::Int,0::Int,0::Int,0::Int,[toJSON (text::T.Text,advance::Int,flag::Bool,0::Int,advance::Int)])]
  check "invalid stretched wire glyphs refuse instead of changing geometry" (all (either (const True) (const False) . parseRemoteFrame metadata . (:replicate 11 (toJSON ([]::[Value])))) [bad True 1 "A",bad True 2 "界",bad True 2 "ab",bad False 2 "A"])
  let heading="ABé界é👩🏽\x200d\&💻"
      semantic=heading<>"\nplain"
@@ -116,9 +123,9 @@ checks=do
    check "plain snapshot projects terminal fullwidth headings" ("ＡＢＣ" `T.isInfixOf` snapshot ready)
    check "HTML snapshots preserve stretch geometry and font traits" (all (`T.isInfixOf` snapshotHtml ready) ["width:2ch","scaleX(2)","font-style:italic"])
    native<-either fail pure (parseRemoteFrame (object (Protocol.frameMetadata "." ready)) (Protocol.frameRows ready))
-   check "actual native widened heading retains span and italic without bold" (any (\cell->case cell of RemoteCell _ _ paint "A" 2->not (textBold paint) && textItalic paint; _->False) (remoteCells native))
+   check "actual native widened heading retains span and italic without bold" (any (\cell->case cell of RemoteCell _ _ paint "A" 2 0 2->not (textBold paint) && textItalic paint; _->False) (remoteCells native))
    normalNative<-either fail pure (parseRemoteFrame (object (Protocol.frameMetadata "." (ready {M.wideSectionTitles=False}))) (Protocol.frameRows (ready {M.wideSectionTitles=False})))
-   check "actual native normal-width heading remains bold and italic" (any (\cell->case cell of RemoteCell _ _ paint "A" 1->textBold paint && textItalic paint; _->False) (remoteCells normalNative))
+   check "actual native normal-width heading remains bold and italic" (any (\cell->case cell of RemoteCell _ _ paint "A" 1 0 1->textBold paint && textItalic paint; _->False) (remoteCells normalNative))
    let originalRows=Protocol.frameRows (ready {M.wideSectionTitles=False})
    (_,rebuilt)<-Protocol.decodeFrame originalRows (BL.toStrict (Protocol.framePacket False originalRows (Protocol.frameRows ready) (Protocol.frameMetadata "." ready)))
    check "actual geometry change survives production compressed patch reconstruction" (rebuilt==Protocol.frameRows ready)

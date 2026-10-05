@@ -69,11 +69,13 @@ remoteTerminalPicture frame = (V.picForImage (V.vertCat [row (IM.findWithDefault
   {V.picCursor=maybe V.NoCursor (uncurry V.Cursor) (remoteCursor frame)}
   where
     (width,height)=remoteSize frame
-    rows=IM.fromListWith (++) [(y,[cell]) | cell@(RemoteCell _ y _ _ _)<-remoteCells frame]
+    rows=IM.fromListWith (++) [(y,[cell]) | cell@(RemoteCell _ y _ _ _ _ _)<-remoteCells frame]
     row = V.horizCat . spans 0 . reverse
     spaces n=V.charFill V.defAttr ' ' n 1
     spans at []=[spaces (width-at)]
-    spans at (RemoteCell x _ paint text w:rest)=spaces (x-at):(if w/=clusterWidth text then wideTextImage else textImage) (textStyleAttr paint) text:spans (x+w) rest
+    spans at (RemoteCell x _ paint text w start shown:rest)=spaces (x-at):image:spans (x+shown) rest
+      where image | start/=0 || shown/=w=V.charFill (textStyleAttr paint) ' ' shown 1
+                  | otherwise=(if w/=clusterWidth text then wideTextImage else textImage) (textStyleAttr paint) text
 
 -- | Construct a base64 OSC 52 clipboard-write sequence; no clipboard read is performed.
 terminalClipboard :: T.Text -> BS.ByteString

@@ -8,15 +8,16 @@
 -- The redraw gate is a separate explicit metadata projection. Immutable payloads
 -- are compared by stable identity, including hidden documents needed by native
 -- menus; adding a model field must not silently introduce a text/history scan.
-module Hide.Render (renderDesktop, snapshot, snapshotHtml, RenderKey, renderKey) where
+module Hide.Render (renderDesktop, renderCellRows, snapshot, snapshotHtml, RenderKey, renderKey) where
 
 import Control.Exception (evaluate)
 import Data.IORef
 import System.Mem.StableName (StableName, makeStableName, eqStableName)
-import Data.List (find)
+import Data.List (find, groupBy)
 import qualified Graphics.Vty as V
+import qualified Graphics.Vty.Image.Internal as I
 import qualified Hide.TextLayout as TextLayout
-import Hide.Unicode (displayOpsForPic)
+import Hide.Unicode (CellSpan(..),CellLayer(..),cellRowsForLayers,cellDisplayOps)
 import Graphics.Vty.Span (SpanOp(..))
 import qualified Data.Text as T
 import Data.Text (Text)
@@ -32,7 +33,7 @@ import Data.Time (formatTime, defaultTimeLocale)
 import Hide.Hex
 import Hide.Buffer
 import Hide.BufferView
-import Hide.Unicode (graphemes, clusterWidth, textImage, flattenPicture, wideTextImage, displayClusters, terminalProjection)
+import Hide.Unicode (graphemes, clusterWidth, textImage, wideTextImage, displayClusters, terminalProjection)
 import Hide.GuestAccess (streamerReadableAt)
 import qualified Hide.Plugin.Menu as Plugin
 import Hide.Sidebar
@@ -311,15 +312,30 @@ box a double w h
   where (tl,tr,bl,br,hz,vt)=if double then ('╔','╗','╚','╝','═','║') else ('┌','┐','└','┘','─','│')
         line l m r=V.char a l V.<|> V.charFill a m (w-2) 1 V.<|> V.char a r
 
--- | Paint the current model and flatten overlapping wide graphemes into one picture.
+-- | Compatibility picture for text-mode Vty callers. Display frontends and
+-- captures consume renderCellRows directly, avoiding this image projection.
 renderDesktop :: Desktop -> V.Picture
-renderDesktop d = flattenPicture (screenSize d) ((V.picForLayers (privacyLayers++layers)) {V.picCursor=visibleCursor})
+renderDesktop d = (V.picForImage (V.vertCat (map (V.horizCat . map image . Vec.toList) (Vec.toList (renderCellRows d))))) {V.picCursor=cursor}
+  where
+    (_,cursor)=renderScene d
+    image (CellText a text)=textImage a text
+    image (CellGlyph a text full start shown)
+      | start/=0 || shown/=full=V.charFill a ' ' shown 1
+      | otherwise=(if full/=clusterWidth text then wideTextImage else textImage) a text
+
+-- | The one composed visible grid consumed by GPU and frame transports. Shadows
+-- update tile colors in place; no text/image reconstruction or payload equality.
+renderCellRows :: Desktop -> Vec.Vector (Vec.Vector CellSpan)
+renderCellRows d=cellRowsForLayers (fst (renderScene d)) (screenSize d)
+
+renderScene :: Desktop -> ([CellLayer],V.Cursor)
+renderScene d=(privacyLayers++layers,visibleCursor)
   where
     (sw,sh)=screenSize d
     privacyLayers
       | not (streamerMode d) = []
-      | otherwise = [place x y (V.charFill (attr gray blue) '*' n 1)
-          | y<-[0..sh-1],(x,n)<-hiddenRuns 0 [streamerReadableAt d x y | x<-[0..sw-1]]]
+      | otherwise = [CellMask (attr gray blue) [(x,y,n)
+          | y<-[0..sh-1],(x,n)<-hiddenRuns 0 [streamerReadableAt d x y | x<-[0..sw-1]]]]
     hiddenRuns _ []=[]
     hiddenRuns x cells=
       let (shown,rest)=span id cells
@@ -331,18 +347,21 @@ renderDesktop d = flattenPicture (screenSize d) ((V.picForLayers (privacyLayers+
       _ -> cursor
     layers = case dialog d of
       Nothing -> withMenu
-      Just dg -> dialogLayers d dg ++ [castShadow (screenSize d) (dialogRect d dg) withMenu] ++ withMenu
+      Just dg -> images (dialogLayers d dg) ++ halo (dialogRect d dg) ++ withMenu
     withMenu = case contextMenu d of
-      Just popup@(r,_) -> contextLayers d popup ++ [castShadow (screenSize d) r base] ++ base
+      Just popup@(r,_) -> images (contextLayers d popup) ++ (if dialog d==Nothing then halo r else []) ++ base
       Nothing -> withMainMenu
     withMainMenu = case menu d of
       Nothing -> base
-      Just m@(i,_) -> menuLayers d m ++ [castShadow (screenSize d) (menuRect d i) base] ++ base
-    base = [place 0 0 menuBar, place 0 (sh-1) statusBar]
+      Just m@(i,_) -> images (menuLayers d m) ++ (if dialog d==Nothing then halo (menuRect d i) else []) ++ base
+    images=map CellImage
+    halo (Rect x y w h)=[CellHalo shadow [(x+w,y+1,2,max 0 (h-1)),(x+2,y+h,w,1)]]
+    base = images ([place 0 0 menuBar, place 0 (sh-1) statusBar]
       ++ bottomLayers d
-      ++ maybe [] (treeLayers d) (sideTree d)
-      ++ foldr stackWindow [V.charFill (attr blue gray) '░' sw sh] (floatingWindows d)
-    stackWindow w below = windowLayers d (windowFocused d w) w ++ [castShadow (screenSize d) (bounds w) below] ++ below
+      ++ maybe [] (treeLayers d) (sideTree d))
+      ++ foldr stackWindow (images [V.charFill (attr blue gray) '░' sw sh]) (floatingWindows d)
+    stackWindow w below = images (windowLayers d (windowFocused d w) w) ++
+      (if fmap windowId (activeWindow d)==Just (windowId w) && dialog d==Nothing && contextMenu d==Nothing && menu d==Nothing then halo (bounds w) else []) ++ below
     menuBar = V.cropRight sw (V.char paper ' ' V.<|> V.horizCat
       [V.char normal ' ' V.<|> label (attr red bg) (T.take 1 title) V.<|> label normal (T.drop 1 title<>" ")
        | (i,(title,_,_))<-zip [0..] menus,let bg=if fmap fst (menu d)==Just i then green else gray,let normal=attr black bg]
@@ -389,20 +408,6 @@ renderDesktop d = flattenPicture (screenSize d) ((V.picForLayers (privacyLayers+
                                                   liveRow=not (windowChangeView b w) || viewRightRow (viewRowAt (bufferView w) (bufferViewProjection b) r)/=Nothing }
                             in if liveRow && inside (Rect (left (bounds w)+1) (top (bounds w)+1) (width (bounds w)-2) (windowContentRows d doc w)) x y then V.Cursor x y else V.NoCursor
         _ -> V.NoCursor
-
--- A DOS shadow changes the underlying cell attributes, preserving its glyph.
--- Flatten only the layers below the popup, so stacked popups shadow correctly.
-castShadow :: (Int,Int) -> Rect -> [V.Image] -> V.Image
-castShadow size (Rect x y w h) below =
-  place (x+2) (y+1) (V.crop w h (V.translate (negate (x+2)) (negate (y+1)) dimmed))
-  where
-    dimmed = V.vertCat [V.horizCat (map dim (toList spans)) | spans <- toList (displayOpsForPic (flattenPicture size (V.picForLayers below)) size)]
-    dim (TextSpan original advance _ text) = V.horizCat
-      [(if cells/=clusterWidth glyph then wideTextImage else textImage) paint glyph
-      | (glyph,cells)<-displayClusters advance (TL.toStrict text)]
-      where paint=shadow {V.attrStyle=V.attrStyle original}
-    dim (Skip n) = V.charFill shadow ' ' n 1
-    dim (RowEnd n) = V.charFill shadow ' ' n 1
 
 -- The same host buttons and border geometry are shared by source and plugin text.
 hostWindowFrame :: Desktop -> Bool -> Window -> V.Attr -> [V.Image]
@@ -641,11 +646,14 @@ splitStyled []=[[]]
 splitStyled xs=let (a,b)=break ((=='\n').fst) xs in a:case b of []->[]; _:rest->splitStyled rest
 
 styledImage :: Bool -> (Style -> Bool) -> Maybe V.Attr -> Bool -> Selection -> Int -> [(Char,Style)] -> V.Image
-styledImage dark selectable override active sel start chars = V.horizCat (expand 0 start (graphemes (T.pack (map fst chars))) chars)
+styledImage dark selectable override active sel start chars = V.horizCat
+  [I.HorizText paint (TL.fromStrict (T.concat [text | (_,text,_)<-run]))
+    (sum [width | (_,_,width)<-run]) (sum [T.length text | (_,text,_)<-run])
+  | run@((paint,_,_):_)<-groupBy (\(a,_,_) (b,_,_)->a==b) (expand 0 start (graphemes (T.pack (map fst chars))) chars)]
   where
     (lo,hi)=ordered sel
     expand _ _ [] _=[]
-    expand col offset (g:gs) styled = image : expand (col+width) (offset+T.length g) gs (drop (T.length g) styled)
+    expand col offset (g:gs) styled = (a,text,width) : expand (col+width) (offset+T.length g) gs (drop (T.length g) styled)
       where
         style=case styled of (_,s):_->s; _->Plain
         normal=syntaxAttr dark style
@@ -654,8 +662,9 @@ styledImage dark selectable override active sel start chars = V.horizCat (expand
         text | g=="\r"=""
              | g=="\t"=T.replicate (8-col `mod` 8) " "
              | otherwise=T.map (\c -> if c<' ' || c=='\DEL' then '·' else c) g
-        width=sum (map clusterWidth (graphemes text))
-        image=label a text
+        width | g=="\t"=8-col `mod` 8
+              | g=="\r"=0
+              | otherwise=clusterWidth text
 
 styledLayoutImage :: Bool -> (Style -> Bool) -> Bool -> Selection -> TextLayout.LayoutRow -> V.Image
 styledLayoutImage dark selectable active sel row=V.horizCat
@@ -907,7 +916,7 @@ dialogLayers d dg =
 
 -- | Render a colorless character-grid snapshot for inspection and tests.
 snapshot :: Desktop -> Text
-snapshot d = T.unlines [T.concat (map plain (toList ops)) | ops<-toList (displayOpsForPic (renderDesktop d) (screenSize d))]
+snapshot d = T.unlines [T.concat (map plain (toList ops)) | ops<-toList (cellDisplayOps (renderCellRows d))]
   where plain (TextSpan _ n _ t)=terminalProjection n (TL.toStrict t)
         plain (Skip n)=T.replicate n " "
         plain (RowEnd n)=T.replicate n " "
@@ -916,7 +925,7 @@ snapshot d = T.unlines [T.concat (map plain (toList ops)) | ops<-toList (display
 snapshotHtml :: Desktop -> Text
 snapshotHtml d = "<!doctype html><meta charset='utf-8'><title>Haskell</title><style>body{background:#111;margin:24px;display:grid;place-content:center;min-height:90vh}pre{background:#0000aa;font:min(20px,calc((100vw - 48px)/48))/1.066667 'Courier New',monospace;margin:0;box-shadow:0 0 0 2px #333;white-space:pre}span{font-weight:normal}</style><pre>" <> T.intercalate "\n" rows <> "</pre>"
   where
-    rows=[T.concat (map spanHtml (toList ops)) | ops<-toList (displayOpsForPic (renderDesktop d) (screenSize d))]
+    rows=[T.concat (map spanHtml (toList ops)) | ops<-toList (cellDisplayOps (renderCellRows d))]
     spanHtml (TextSpan a n _ t)="<span style='color:"<>color (V.attrForeColor a)<>";background:"<>color (V.attrBackColor a)<>(if V.styleMask a .&. V.bold/=0 then ";font-weight:bold" else "")<>(if V.styleMask a .&. V.italic/=0 then ";font-style:italic" else "")<>"'>"<>body n (TL.toStrict t)<>"</span>"
     spanHtml (Skip n)=T.replicate n " "
     spanHtml (RowEnd n)=T.replicate n " "
