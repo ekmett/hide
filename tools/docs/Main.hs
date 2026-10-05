@@ -62,7 +62,7 @@ site = "build/site"
 -- tools/docs-screenshots.hs.
 screenshotNames :: [FilePath]
 screenshotNames = "editor-conversation.png" : map (<.> "png")
-  ["environment","find-replace","hdb-download","downloads", "permission-diff", "file-menu", "split", "preferences", "build-target", "debug-launch", "git-commit",
+  ["environment","find-replace","hdb-download","downloads", "permission-diff", "file-menu", "split", "preferences", "build-target", "package-target-menu", "debug-launch", "git-commit",
    "conversation", "debug-step", "debug-menu", "debug-stack", "debug-add-watch", "debug-watches", "side-by-side", "window-views-menu", "markdown-view", "shell-block-menu", "documentation-links"]
 
 repo :: String

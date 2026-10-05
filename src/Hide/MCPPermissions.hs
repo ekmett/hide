@@ -235,7 +235,7 @@ stepAdmittedBuild admission@(AdmittedBuild runtime@(Permissions _ _ ref _ _ _ ow
                    | otherwise->do
                        writeIORef state BuildConsumed
                        writeIORef (active request) False
-                       Just . snd <$> core desktop [AdoptPreparedBuild]
+                       Just . snd <$> core desktop [AdoptPreparedBuild Nothing]
         BuildConsumed->pure (Just desktop)
         _->pure Nothing
     BuildRejected err->writeIORef state BuildConsumed >> pure (Just desktop {status=err})

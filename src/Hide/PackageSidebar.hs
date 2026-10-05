@@ -3,11 +3,11 @@
 -- selected directory and package files; lazy tree workers resolve source paths.
 -- The UI owner only publishes scope changes and four invalidations per tick.
 -- Source actions retain the package revision, then use the common file adopter.
-module Hide.PackageSidebar (PackageSidebar, withPackageSidebar, tickPackageSidebar) where
+module Hide.PackageSidebar (PackageSidebar, withPackageSidebar, tickPackageSidebar, packageBuildEffects, packageBuildManifestCurrent) where
 
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (withAsync)
-import Control.Exception (finally)
+import Control.Exception (evaluate,finally)
 import Control.Monad (filterM,foldM,forM,forM_,unless)
 import Data.Aeson (Value(Null))
 import qualified Data.ByteString as BS
@@ -17,7 +17,7 @@ import qualified Data.Map.Strict as M
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time.Clock (UTCTime)
-import Distribution.PackageDescription (Condition(..))
+import Distribution.PackageDescription (Condition(..),CondTree(..))
 import Distribution.Types.Condition (cOr)
 import System.Directory (canonicalizePath,doesFileExist,getFileSize,getModificationTime,listDirectory)
 import System.FilePath ((</>),isAbsolute,makeRelative,splitDirectories,takeDirectory,takeExtension,takeFileName)
@@ -25,12 +25,13 @@ import System.IO (withBinaryFile,IOMode(ReadMode))
 import System.IO.Error (tryIOError)
 import Text.Read (readMaybe)
 import Hide.GuestAccess (protectedFilePath)
-import Hide.Model (Desktop(..),startingDirectory)
+import Hide.Model (Desktop(..),Effect(..),BuildAction(..),PackageBuildTarget(..),startingDirectory)
 import Hide.PackagePaths
 import Hide.PackageSources
 import Hide.Plugin.Command
 import qualified Hide.Plugin.Tree as P
 import Hide.Sidebar (treeRoot)
+import qualified Hide.Plugin.Menu as Menu
 import Hide.SidebarCommands
 
 type Scope = (FilePath,[FilePath])
@@ -39,8 +40,8 @@ type Stamp = Maybe (UTCTime,Integer)
 data Snapshot = Snapshot !Int !Stamp !(Either Text PackageSources)
   !(M.Map P.NodeId [Node])
 data Slot = Slot !FilePath !(P.TreeProvider SidebarContext SidebarReply)
-  !CommandRef !(IORef Snapshot) !(IORef (M.Map (Text,Source,Text,FilePath) P.NodeId,Int))
-data PackageSidebar = PackageSidebar !(IORef Scope) !(IORef (M.Map (P.TreeRef,P.NodeId) ()))
+  ![CommandRef] !(IORef Snapshot) !(IORef (M.Map (Text,Source,Text,FilePath) P.NodeId,Int))
+data PackageSidebar = PackageSidebar !(IORef Scope) !(IORef (M.Map (P.TreeRef,P.NodeId) ())) !(IORef [Slot])
 
 rootId :: P.NodeId
 rootId=ident "package"
@@ -58,8 +59,8 @@ withPackageSidebar host initial use=withRegistry $ \registry->do
   desired<-newIORef (scope initial)
   dirty<-newIORef M.empty
   slots<-newIORef []
-  let service=PackageSidebar desired dirty
-      retire (Slot _ provider command _ _)=P.retireTree provider >> retireCommand registry command >> pure ()
+  let service=PackageSidebar desired dirty slots
+      retire (Slot _ provider command _ _)=P.retireTree provider >> mapM_ (retireCommand registry) command >> pure ()
       clear=readIORef slots >>= mapM_ retire
       loop previous next=do
         requested@(directory,private)<-readIORef desired
@@ -97,12 +98,47 @@ withPackageSidebar host initial use=withRegistry $ \registry->do
 
 -- | Only small scope metadata and prepared invalidation IDs cross the UI owner.
 tickPackageSidebar :: PackageSidebar -> SidebarHost -> Desktop -> IO Desktop
-tickPackageSidebar (PackageSidebar desired dirty) host d=do
+tickPackageSidebar (PackageSidebar desired dirty _) host d=do
   old<-readIORef desired
   let current=scope d
   unless (old==current) (writeIORef desired current)
   changes<-atomicModifyIORef' dirty (\pending->let (now,later)=M.splitAt 4 pending in (later,M.keys now))
   foldM (\value (owner,node)->refreshTreeFromHost host owner node value) d changes
+
+-- | Validate only bounded provider/snapshot/scope metadata at the execution gate.
+-- Stat/canonical checks occur on the worker. External changes after that check
+-- have a finite observation interval; this is not an atomic filesystem grant.
+packageBuildEffects :: PackageSidebar -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> [Effect] -> IO (Bool,Desktop)
+packageBuildEffects service core original=foldM step (False,original)
+  where
+    step state@(True,_) _=pure state
+    step (_,d) effect=case effect of
+      PackageBuildAction _ target->checked d target effect
+      AdoptPreparedBuild (Just target)->checked d target effect
+      _->core d [effect]
+    checked d target effect=do
+      live<-packageBuildCurrent service target d
+      if live then core d [effect] else pure (False,d {status="Package build target expired; refresh the tree."})
+
+packageBuildCurrent :: PackageSidebar -> PackageBuildTarget -> Desktop -> IO Bool
+packageBuildCurrent (PackageSidebar _ _ slots) target d
+  | packageBuildScope target/=scope d=pure False
+  | otherwise=do
+      active<-readIORef slots
+      case [slot | slot@(Slot file provider _ _ _)<-active,
+            file==packageBuildManifest target,P.treeReference provider==packageBuildProvider target] of
+        Slot _ provider _ ref _:_->do
+          live<-P.treeCurrent provider
+          Snapshot version signature _ _<-readIORef ref
+          pure (live && version==packageBuildVersion target && signature==packageBuildStamp target)
+        _->pure False
+
+-- | Worker-only path/stamp validation around captured component planning.
+packageBuildManifestCurrent :: PackageBuildTarget -> IO Bool
+packageBuildManifestCurrent target=do
+  observed<-stamp (packageBuildManifest target)
+  checked<-safePath (packageBuildRoot target) (snd (packageBuildScope target)) (packageBuildManifest target)
+  pure (observed==packageBuildStamp target && observed/=Nothing && checked==Just (packageBuildManifest target))
 
 stamp :: FilePath -> IO Stamp
 stamp file=either (const Nothing) Just <$> tryIOError ((,) <$> getModificationTime file <*> getFileSize file)
@@ -150,7 +186,35 @@ createSlot registry root _private serial file=do
         after<-stamp file
         pure $ if maybe False (/=latest) version || observed/=after
           then Left (CommandRejected "Package changed while opening source; refresh the tree.") else result) >>= required
-  let action version path=P.treeAction registry open (Just version,path) (\_ result->pure result)
+  let registerBuild action suffix label=registerCommand registry (CommandDef (namespace<>suffix) label codec codec $ \ctx (version,name)->do
+        Snapshot current capturedStamp package _<-readIORef ref
+        observed<-stamp file
+        case (sidebarOrigin ctx,sidebarProvider ctx,package) of
+          (Menu.HumanMenu,Just owner,Right parsedPackage)
+            | current==version,observed==capturedStamp
+            , component:_<-[item | item<-sourceComponents parsedPackage,sourceTarget item==name]
+            , sourceBuildable (condTreeData (sourceTree component))
+            , sourceKind component `elem` [LibraryComponent,ExecutableComponent]
+            , action==Make || action==Run && sourceKind component==ExecutableComponent->do
+                let target=PackageBuildTarget owner version
+                      (sidebarContextDirectory ctx,sidebarPrivatePaths ctx) root file observed
+                      (sourcePackageName parsedPackage<>":"<>name)
+                -- Construct and force fixed receipt metadata on the action worker.
+                _<-evaluate (T.length (packageBuildName target)+length root+length file
+                  +length (sidebarContextDirectory ctx)+sum (map length (sidebarPrivatePaths ctx)))
+                reply<-evaluate (SidebarBuild action target)
+                pure (Right reply)
+          _->pure (Left (CommandRejected "Package build target changed or is not a human action."))) >>= required
+  build<-registerBuild Make ".build" "Build component"
+  run<-registerBuild Run ".run" "Run component"
+  -- doc-artifact: tools/docs-screenshots.hs package-target-menu -> docs/site/screenshots/package-target-menu.png (docs/running.md)
+  let targetActions version component=
+        [P.ActionMenu label (P.treeAction registry command (version,sourceTarget component) (\_ result->pure result))
+        | (label,action,command)<-[("Build",Make,build),("Run",Run,run)]
+        , sourceBuildable (condTreeData (sourceTree component))
+        , sourceKind component `elem` [LibraryComponent,ExecutableComponent]
+        , action/=Run || sourceKind component==ExecutableComponent]
+      action version path=P.treeAction registry open (Just version,path) (\_ result->pure result)
       rootNode=P.NodeDef (P.NodeInfo rootId title "" True (Just file)) Nothing
         [P.ActionMenu "Open package file" (P.treeAction registry open (Nothing,file) (\_ result->pure result))]
       children ctx (P.ChildRequest key cursor)=do
@@ -162,7 +226,7 @@ createSlot registry root _private serial file=do
               Just nodes->pure (Right nodes)
               Nothing | key==rootId->pure $ Right $ case package of
                 Left _->[P.NodeDef (P.NodeInfo (ident "error") "Package description unavailable; reopen the package file" "" False Nothing) Nothing []]
-                Right value->[P.NodeDef (P.NodeInfo (componentId index) (T.take 256 (sourceTarget component)) "" True Nothing) Nothing [] | (index,component)<-zip [0..] (take 4096 (sourceComponents value))]
+                Right value->[P.NodeDef (P.NodeInfo (componentId index) (T.take 256 (sourceTarget component)) "" True Nothing) Nothing (targetActions version component) | (index,component)<-zip [0..] (take 4096 (sourceComponents value))]
               Nothing->case package of
                 Right value | component:_<-[component | (index,component)<-zip [0..] (sourceComponents value),componentId index==key]->do
                   resolved<-resolveSources root (sidebarPrivatePaths ctx) (takeDirectory file) component
@@ -179,7 +243,7 @@ createSlot registry root _private serial file=do
                 storeCache ref version key nodes
                 pure (Right (P.NodePage (take 128 (drop offset nodes)) (if null (drop (offset+128) nodes) then Nothing else Just (T.pack (show (offset+128))))))
   provider<-P.registerTree registry namespace rootNode children >>= required
-  pure (Slot file provider (commandRef open) ref ids)
+  pure (Slot file provider [commandRef open,commandRef build,commandRef run] ref ids)
   where required=either (ioError . userError . show) pure
 
 sourceNode :: IORef (M.Map (Text,Source,Text,FilePath) P.NodeId,Int)

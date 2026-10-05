@@ -20,10 +20,9 @@ import qualified Data.Text.Encoding
 import System.Directory (canonicalizePath, doesFileExist, findExecutable, listDirectory)
 import System.Environment (lookupEnv)
 import System.FilePath ((</>), isAbsolute, takeFileName, takeExtension, takeDirectory)
-import Hide.Model (Desktop(..), Document(..), Toolchain(..), startingDirectory, windowDocument)
+import Hide.Model (Desktop(..), Document(..), Toolchain(..), BuildAction(..), startingDirectory, windowDocument)
 import Hide.Files (filePath)
 
-data BuildAction = Compile | Make | Run deriving (Eq,Show)
 data BuildConfig = BuildConfig
   { buildToolchain :: Toolchain, buildExecutable :: FilePath, buildTarget :: Text
   , buildTHCRoot :: Text, buildRuntime :: Text, buildArguments :: [String]
