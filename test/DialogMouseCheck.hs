@@ -3,6 +3,7 @@ module DialogMouseCheck (checks) where
 
 import Control.Monad (unless, forM_)
 import Control.Exception (evaluate)
+import GHC.Conc (getAllocationCounter)
 import System.Timeout (timeout)
 import Data.List (findIndex)
 import Data.Maybe (fromMaybe)
@@ -21,11 +22,12 @@ import qualified Data.Map.Strict as M
 import qualified Graphics.Vty as V
 import Hide.Unicode (CellSpan(..), displayOpsForPic)
 import Graphics.Vty.Span (SpanOp(..))
-import Data.Foldable (toList)
+import Data.Foldable (toList,foldl')
 import qualified Data.Text.Lazy as TL
 
 checks :: IO ()
 checks = do
+  textAreaRenderChecks
   contextShortcutChecks
   searchChecks
   previousSearchChecks
@@ -511,3 +513,24 @@ contextShortcutChecks=do
   check "scrolling a clipped popup preserves shortcut-area hit targets" (width narrowRect==18 && left narrowRect==0 && "Entry 5" `T.isInfixOf` popupRow scrolled 0 && case effects of [SaveDocument{}]->True; _->False)
   let poisoned=base {buffers=M.map (\doc->doc {documentBuffer=(documentBuffer doc) {saved=error "context geometry forced baseline",undoStack=error "context geometry forced Undo",redoStack=error "context geometry forced Redo"}}) (buffers base)}
   check "context label geometry does not force baseline or histories" (width (popupRect (openContext SourceContext 10 5 poisoned))==width (popupRect popup))
+
+-- A clipped dialog must not reconstruct every character beyond its viewport.
+-- Preparation and the first draw are outside the measured interaction.
+textAreaRenderChecks :: IO ()
+textAreaRenderChecks=do
+  let text=T.intercalate "\n" (replicate 25 (T.replicate 300 "words 界 e\x301 👩🏽\x200d\&💻 "))
+      buffer=newBuffer text
+      frame n=(initialDesktop (100,35)) {sideTree=Nothing,blinkCursor=False,dialog=Just
+        (Dialog "Review" (AgentDialog "preview") [TextArea "Changes" True buffer (Selection n n) n n] 0 ["OK"] [])}
+      occupied=foldl' (foldl' (\n cell->case cell of
+        CellText paint body->paint `seq` n+T.length body
+        CellGlyph paint body full start shown->paint `seq` n+T.length body+full+start+shown
+        CellScript paint body natural script->paint `seq` script `seq` n+T.length body+natural)) 0
+  _<-evaluate (occupied (renderCellRows (frame 0)))
+  let moved=frame 1
+  _<-evaluate moved
+  before<-getAllocationCounter
+  count<-evaluate (occupied (renderCellRows moved))
+  after<-getAllocationCounter
+  unless (count>0 && before-after<4000000)
+    (error "TextArea viewport reconstructs offscreen character lists")
