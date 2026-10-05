@@ -103,4 +103,4 @@ test-suite editor-tests
   type: exitcode-stdio-1.0
   hs-source-dirs: test
   main-is: Main.hs
-  build-depends: JuicyPixels, base64-bytestring, blaze-builder, hide, aeson, vector, network, async, stm
+  build-depends: JuicyPixels, base64-bytestring, blaze-builder, deepseq, hide, aeson, vector, network, async, stm
