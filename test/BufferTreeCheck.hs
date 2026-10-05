@@ -401,7 +401,7 @@ lazyLineChecks=do
         width=displayColumn row (T.length row)
         expectedLimit=max 0 (width-(Model.width (Model.bounds window)-2)+1)
     check "prepared source geometry retains exact proportional scrollbar extent"
-      (sourceLineWidth sourceLine==width && Model.scrollbarLimit False document window==expectedLimit)
+      (sourceLineWidth sourceLine==width && Model.scrollbarLimit desktop False document window==expectedLimit)
     forM_ [0,1,31,32,127,128,T.length row-1,T.length row] $ \p->
       check "lazy source coordinates preserve original scalar/item policy"
         (sourceLineDisplayColumn sourceLine p==displayColumn row p)

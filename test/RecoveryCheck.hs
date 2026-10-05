@@ -167,7 +167,7 @@ checks=bracket temporary removePathForcibly $ \root->do
       expectedWidth=displayColumn (lineAt longText 0) maxBound
       expectedLimit=max 0 (expectedWidth-(width (bounds longWindow)-2)+1)
   check "recovered long-source geometry and original bytes remain exact"
-    (contents (documentBuffer longDocument)==longText && scrollbarLimit False longDocument longWindow==expectedLimit)
+    (contents (documentBuffer longDocument)==longText && scrollbarLimit longRecovered False longDocument longWindow==expectedLimit)
   let badSnapshot=(snapshotBuffer edited) {snapshotByteMode=True,snapshotContents="中"}
   check "invalid byte representation cannot silently truncate on recovery" (case restoreBuffer badSnapshot of Left _->True; _->False)
 #ifndef mingw32_HOST_OS
