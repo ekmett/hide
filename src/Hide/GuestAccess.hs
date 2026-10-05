@@ -207,7 +207,9 @@ guestKeyboardAllowed d=not (guestModalBlocked d) && not (focusedPrivateField d) 
 guestKeyAllowed :: Desktop -> V.Key -> [V.Modifier] -> Bool
 guestKeyAllowed d key mods=maybe True (guestCommandAllowedIn d) (boundKeyCommand key mods d) && not (guestModalBlocked d) && (guestKeyboardAllowed d || navigation || fieldNavigation)
   where
-    fieldNavigation=isJust (dialog d) && key `elem` [V.KChar '\t',V.KBackTab,V.KEsc]
+    fieldNavigation=isJust (dialog d) && case boundKeyCommand key mods d of
+      Just cmd->cmd `elem` [DialogFocusNext,DialogFocusPrevious]
+      Nothing->key `elem` [V.KChar '\t',V.KBackTab,V.KEsc]
     navigation=dialog d==Nothing && (key==V.KFun 6 || key `elem` [V.KChar '\t',V.KBackTab] && any (`elem` mods) [V.MCtrl,V.MAlt] || V.MAlt `elem` mods && case key of V.KChar c -> c>='1' && c<='9'; _ -> False)
 
 -- Named navigation/editing shortcuts, plus Ctrl/Alt character shortcuts.

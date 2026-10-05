@@ -83,7 +83,9 @@ bindingChordsWhere allowed (Bindings _ entries _)=[(chord,name) | (name,action,k
 
 -- | Canonical labels are also lookup keys. Uppercase character events are
 -- normalized; Shift remains an explicit modifier, independent of list order.
+-- BackTab is the same lookup chord as shifted Tab across frontend encodings.
 chordName :: V.Key -> [V.Modifier] -> Maybe Text
+chordName V.KBackTab mods=chordName (V.KChar '\t') (V.MShift:mods)
 chordName key mods
   | any (`notElem` [V.MCtrl,V.MMeta,V.MAlt,V.MShift]) mods = Nothing
   | otherwise = (prefix<>) <$> name
