@@ -8,6 +8,7 @@ import Data.IORef
 import qualified Data.Map.Strict as M
 import Data.Maybe (fromJust,isJust)
 import qualified Data.Text as T
+import qualified Data.Text.Unsafe as TU
 import qualified Data.Vector as V
 import System.Timeout (timeout)
 import System.Mem.StableName (makeStableName)
@@ -15,16 +16,41 @@ import Hide.Buffer
 import Hide.Files
 import Hide.Highlighting
 import Hide.Model
-import Hide.Render (snapshot)
+import Hide.Render (snapshot,snapshotHtml)
 import Hide.Syntax
 
 checks :: IO ()
 checks = do
+  let exact="aé𝄞\t─\x301\r"
+      row=prepareSourceRow exact (zip (T.unpack exact) (cycle [Keyword,Keyword,Plain]))
+      pieces=[sourceRangeText row r | r<-V.toList (sourceRowRanges row)]
+      ends=scanl (\(chars,bytes) text->(chars+T.length text,bytes+TU.lengthWord8 text)) (0,0) pieces
+  check "source ranges preserve original UTF8 and character boundaries"
+    (sourceRowText row==exact && T.concat pieces==exact &&
+      [(sourceRangeCharEnd r,sourceRangeByteEnd r) | r<-V.toList (sourceRowRanges row)]==tail ends &&
+      take (T.length exact) (sourceStylesAt row 0)==take (T.length exact) (cycle [Keyword,Keyword,Plain]))
+  let fragments Nil=[]
+      fragments (ConsChars text _ rest)=text:fragments rest
+      fragments (ConsSigil glyph _ _ rest)=graphemeText glyph:fragments rest
+      display=sourceSigils row
+  check "fused visible fragments borrow exact source runs and complete graphemes" (T.concat (fragments display)==exact)
+  check "ordinary non-ASCII glyphs coalesce into a borrowed source run" (case sourceSigils (plainSourceRow "éδ─") of
+    ConsChars "éδ─" Plain Nil->True
+    _->False)
+  let cluster=sourceSigils (prepareSourceRow "a\x301z" [('a',Keyword),('\x301',Plain),('z',Plain)])
+  check "style boundary cannot split a combining source grapheme" (case cluster of
+    ConsSigil glyph Keyword 1 (ConsChars "z" Plain Nil)->graphemeText glyph=="a\x301"
+    _->False)
+  check "exceptional width is independent of source character count" (case sourceSigils (plainSourceRow "🇯🇵") of
+    ConsSigil glyph Plain 2 Nil->T.length (graphemeText glyph)==2
+    _->False)
   let initial=addDocument (Just (FileState "example.py" Nothing)) (newBuffer "def old():\n    return 1\n") (initialDesktop (80,25))
       doc d=fromJust (activeDocument d)
       replace text d=d {buffers=M.adjust (\old->restyle old {documentBuffer=newBuffer text}) 1 (buffers d)}
       ready=isJust . documentSourceRows . doc
   check "new source has no lazy tokenizer to force on the display thread" (null (documentHighlight (doc initial)) && not (ready initial))
+  let decorated=initial {buffers=M.map (\d->d {documentSourceRows=Just (V.singleton (prepareSourceRow "decorated" [(c,TerminalStyle 0x123456 0x654321 15) | c<-"decorated"]))}) (buffers initial)}
+  check "HTML source capture keeps underline and strikethrough together" ("text-decoration:underline line-through" `T.isInfixOf` snapshotHtml decorated)
   firstStarted<-newEmptyMVar
   nextStarted<-newEmptyMVar
   releaseFirst<-newEmptyMVar
@@ -53,7 +79,7 @@ checks = do
     requested<-readIORef calls
     check "rapid edits coalesce to first and newest requests" (length requested==2 && last requested==contents (documentBuffer (doc edited)))
     let rows=fromJust (documentSourceRows (doc colored))
-    check "accepted rows contain current source and injected styles" (map fst (rows V.! 0)=="def newest20():" && take 3 (map snd (rows V.! 0))==replicate 3 Keyword)
+    check "accepted rows contain current source and injected styles" (sourceRowText (rows V.! 0)=="def newest20():" && take 3 (sourceStylesAt (rows V.! 0) 0)==replicate 3 Keyword)
     before<-evaluate (buffers colored) >>= makeStableName
     unchanged<-tickHighlighting worker colored
     after<-evaluate (buffers unchanged) >>= makeStableName
@@ -74,7 +100,7 @@ checks = do
       colored<-await "newest request after catalog initialization" worker ready queued
       requested<-readIORef initializedCalls
       check "initialization coalesces all queued replacements to the newest source"
-        (requested==["newest 20"] && map fst (fromJust (documentSourceRows (doc colored)) V.! 0)=="newest 20")
+        (requested==["newest 20"] && sourceRowText (fromJust (documentSourceRows (doc colored)) V.! 0)=="newest 20")
   initializingStopped<-newEmptyMVar
   initializingEntered<-newEmptyMVar
   neverInitialized<-newEmptyMVar
@@ -87,10 +113,10 @@ checks = do
     colored<-await "cold real Python grammar result" worker ready initial
     let pythonRows=fromJust (documentSourceRows (doc colored))
     check "production worker applies real Python grammar on its cold first request"
-      (map fst (pythonRows V.! 0)=="def old():" && take 3 (map snd (pythonRows V.! 0))==replicate 3 Keyword)
+      (sourceRowText (pythonRows V.! 0)=="def old():" && take 3 (sourceStylesAt (pythonRows V.! 0) 0)==replicate 3 Keyword)
     let renamed=colored {buffers=M.map (\d->restyle d {documentFile=Just (FileState "example.unknown" Nothing)}) (buffers colored)}
     plain<-await "unknown filename result" worker ready renamed
-    check "filename changes invalidate syntax selection" (all ((==Plain).snd) (V.concatMap V.fromList (fromJust (documentSourceRows (doc plain)))))
+    check "filename changes invalidate syntax selection" (all ((==Plain).sourceRangeStyle) (V.concatMap sourceRowRanges (fromJust (documentSourceRows (doc plain)))))
   attempts<-newIORef (0::Int)
   timedOut<-newEmptyMVar
   withHighlightingUsing (pure ()) (\path text->do
@@ -117,7 +143,7 @@ checks = do
       text=T.replicate lineCount "prefix\n"<>"TAIL"
       deep=addDocument Nothing (newBuffer text) (initialDesktop (80,25))
       indexed=deep {buffers=M.map (\d->d {documentHighlight=error "flat syntax traversed",documentWidth=8,
-        documentSourceRows=Just (V.generate (lineCount+1) (\n->if n==lineCount then [('T',Keyword),('A',Keyword),('I',Keyword),('L',Keyword)] else error "offscreen syntax forced"))}) (buffers deep),
+        documentSourceRows=Just (V.generate (lineCount+1) (\n->if n==lineCount then prepareSourceRow "TAIL" [('T',Keyword),('A',Keyword),('I',Keyword),('L',Keyword)] else error "offscreen syntax forced"))}) (buffers deep),
         windows=map (\w->w {scrollRow=lineCount}) (windows deep)}
   check "deep source scroll indexes only the visible highlighted row" ("TAIL" `T.isInfixOf` snapshot indexed)
   let pending=indexed {buffers=M.map (\d->d {documentSourceRows=Nothing}) (buffers indexed)}

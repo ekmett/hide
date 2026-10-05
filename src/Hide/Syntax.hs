@@ -1,22 +1,139 @@
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE OverloadedStrings, BangPatterns #-}
 -- | Source token styles and presentation annotations shared by renderers.
 --
 -- Skylighting supplies language grammars; this module maps token classes to editor
 -- styles. A tokenizer result is accepted only when it preserves the original
 -- characters exactly. Link and bubble annotations remain in the styled stream
 -- so later layout can retain interaction metadata without reparsing text.
-module Hide.Syntax (Style(..), fontTraits, sectionTitle, highlight, highlightFor, bubbleTile, linkSpans) where
+module Hide.Syntax (Style(..), Grapheme, graphemeText, Sigils(..), sourceSigils, SourceRow, SourceRange, prepareSourceRow, plainSourceRow, sourceRowText, sourceRowRanges, sourceRangeCharStart, sourceRangeCharEnd, sourceRangeByteStart, sourceRangeByteEnd, sourceRangeStyle, sourceRangeText, sourceStylesAt, fontTraits, sectionTitle, highlight, highlightFor, bubbleTile, linkSpans) where
 
 import Data.List (intercalate)
 import qualified Data.List as List
 import Data.Char (chr)
 import Data.Word (Word32)
 import qualified Data.Text as T
+import qualified Data.Text.Unsafe as TU
+import qualified Data.Vector as V
+import Hide.Unicode (graphemes,clusterWidth)
 import qualified Skylighting as S
 import System.FilePath (takeFileName)
 
 -- | Token color intent plus nested prose, link, bubble or terminal annotations.
 data Style = SectionStyle Int Style | BoldStyle Style | ItalicStyle Style | LinkStyle T.Text Style | Plain | Heading Int | CodeStyle Bool Style | ProseStyle Style | Keyword | Comment | Literal | Number | Constructor | Pragma | BubbleStyle Bool Style | BubbleText Int Bool Style | TerminalStyle Word32 Word32 Word32 deriving (Eq,Show)
+
+-- | Original source row and worker-prepared style ranges. Styling never changes
+-- character positions; range boundaries also name complete UTF8 codepoints.
+-- Concatenating 'sourceRangeText' over 'sourceRowRanges' recovers 'sourceRowText'.
+data SourceRow = SourceRow
+  { sourceRowText :: !T.Text
+  , sourceRowRanges :: !(V.Vector SourceRange)
+  } deriving (Eq,Show)
+
+-- | Half-open character and UTF8 byte coordinates in one original source row.
+-- The constructor stays private: ranges are ordered and cover the exact row.
+data SourceRange = SourceRange
+  { sourceRangeCharStart :: {-# UNPACK #-} !Int
+  , sourceRangeCharEnd :: {-# UNPACK #-} !Int
+  , sourceRangeByteStart :: {-# UNPACK #-} !Int
+  , sourceRangeByteEnd :: {-# UNPACK #-} !Int
+  , sourceRangeStyle :: !Style
+  } deriving (Eq,Show)
+
+-- | Prepare compact ranges on the tokenizer worker. The source remains
+-- authoritative; missing style positions are Plain, and no token character is
+-- copied into the retained representation.
+prepareSourceRow :: T.Text -> [(Char,Style)] -> SourceRow
+prepareSourceRow text tokens=SourceRow text (V.fromList (ranges 0 0 tokens))
+  where
+    size=TU.lengthWord8 text
+    ranges !char !byte rest
+      | byte>=size=[]
+      | otherwise=let style=case rest of (_,s):_->s; _->Plain
+                      (endChar,endByte,after)=consume style char byte rest
+                  in SourceRange char endChar byte endByte style:ranges endChar endByte after
+    consume style !char !byte rest
+      | byte>=size=(char,byte,rest)
+      | otherwise=case rest of
+          (_,s):more | s/=style->(char,byte,rest)
+                     | otherwise->step more
+          [] | style/=Plain->(char,byte,rest)
+             | otherwise->step []
+      where step more=case TU.iter text byte of TU.Iter _ bytes->consume style (char+1) (byte+bytes) more
+
+-- | Plain visible rows keep their original Text, without rebuilding characters.
+plainSourceRow :: T.Text -> SourceRow
+plainSourceRow text=SourceRow text (if T.null text then V.empty else V.singleton (SourceRange 0 (T.length text) 0 (TU.lengthWord8 text) Plain))
+
+-- | Slice a range belonging to this row. Both endpoints were established from
+-- the original UTF8 iterator on the preparation worker.
+sourceRangeText :: SourceRow -> SourceRange -> T.Text
+sourceRangeText row range=TU.takeWord8 (sourceRangeByteEnd range-sourceRangeByteStart range)
+  (TU.dropWord8 (sourceRangeByteStart range) (sourceRowText row))
+
+-- | Stream styles starting at a character position. Inline preview consumes
+-- only its requested chunk; ordinary rendering consumes the ranges directly.
+sourceStylesAt :: SourceRow -> Int -> [Style]
+sourceStylesAt row offset=concat
+  [replicate (sourceRangeCharEnd range-max offset (sourceRangeCharStart range)) (sourceRangeStyle range)
+  | range<-V.toList (sourceRowRanges row),sourceRangeCharEnd range>offset]
+
+-- | One complete source grapheme, borrowed directly from the original row.
+newtype Grapheme = Grapheme { graphemeText :: T.Text } deriving (Eq,Show)
+
+-- | Visible source display stream. Each character in ConsChars independently
+-- occupies one cell; ConsSigil retains one complete exceptional grapheme. Both
+-- borrow source bytes. Strict tails avoid a separate pair/list payload layer.
+-- Concatenated fragments recover the original row, regardless of style splits.
+data Sigils
+  = ConsChars {-# UNPACK #-} !T.Text {-# UNPACK #-} !Style !Sigils
+  | ConsSigil {-# UNPACK #-} !Grapheme {-# UNPACK #-} !Style {-# UNPACK #-} !Int !Sigils
+  | Nil
+
+-- | Build only for visible rows. Segment the whole row before assigning styles:
+-- a combining suffix across a range boundary belongs to its preceding grapheme.
+sourceSigils :: SourceRow -> Sigils
+sourceSigils row
+  | T.all (\c->c<'\128' && c/='\n') text = ascii 0 0 (V.toList (sourceRowRanges row))
+  | otherwise = general 0 0 0 (V.toList (sourceRowRanges row)) (graphemes text)
+  where
+    text=sourceRowText row
+    slice a b=TU.takeWord8 (b-a) (TU.dropWord8 a text)
+    ascii _ _ []=Nil
+    ascii !col !byte ranges@(range:more)
+      | byte>=sourceRangeByteEnd range=ascii col byte more
+      | otherwise=let tailText=TU.dropWord8 byte (TU.takeWord8 (sourceRangeByteEnd range) text)
+                      (ordinary,rest)=T.span (\c->c>=' ' && c<='~') tailText
+                      end=byte+TU.lengthWord8 ordinary
+                  in if T.null ordinary then
+                       let glyph=TU.takeWord8 1 rest; advance=glyphAdvance col glyph
+                       in ConsSigil (Grapheme glyph) (sourceRangeStyle range) advance (ascii (col+advance) (byte+1) ranges)
+                     else ConsChars ordinary (sourceRangeStyle range) (ascii (col+end-byte) end ranges)
+    general _ _ _ _ []=Nil
+    general !col !char !byte ranges (glyph:rest)=
+      let current=dropWhile ((<=char).sourceRangeCharEnd) ranges
+          style=case current of range:_->sourceRangeStyle range; _->Plain
+          endByte=byte+TU.lengthWord8 glyph
+          endChar=char+T.length glyph
+          advance=glyphAdvance col glyph
+          ordinary g=T.length g==1 && advance==1 && T.all (\c->c>=' ' && c/='\DEL') g
+      in if ordinary glyph then
+           let limit=case current of range:_->sourceRangeCharEnd range; _->maxBound
+               (finishChar,finishByte,after)=gather limit endChar endByte rest
+           in ConsChars (slice byte finishByte) style (general (col+finishChar-char) finishChar finishByte current after)
+         else ConsSigil (Grapheme (slice byte endByte)) style advance (general (col+advance) endChar endByte current rest)
+    gather limit !char !byte (glyph:rest)
+      | char<limit,T.length glyph==1,clusterWidth glyph==1,T.all (\c->c>=' ' && c/='\DEL') glyph=
+          gather limit (char+1) (byte+TU.lengthWord8 glyph) rest
+    gather _ char byte rest=(char,byte,rest)
+
+-- Exceptional advance is resolved at the layout boundary, independently of
+-- source byte/character counts. A scalar field avoids wrapping recursive Style.
+glyphAdvance :: Int -> T.Text -> Int
+glyphAdvance col text
+  | text=="\r"=0
+  | text=="\t"=8-col `mod` 8
+  | T.any (\c->c<' ' || c=='\DEL') text=1
+  | otherwise=clusterWidth text
 
 highlight :: T.Text -> [(Char,Style)]
 highlight = highlightFor "Main.hs"

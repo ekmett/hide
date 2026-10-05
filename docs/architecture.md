@@ -43,8 +43,14 @@ copies. Split windows refer to the same buffer.
 Indexed line lookup serves navigation and cursor placement. A lazy text
 projection is cached per revision for highlighting, file output and HLS.
 Highlighting and LSP full-document synchronization consume the whole document
-after an edit. Cached syntax tokens are shared between split views and reused
-for cursor-only redraws. UTF-16 position conversion uses measured line lookup
+after an edit. The bounded highlighting worker retains original source-row Text
+and compact style ranges with character and UTF8 byte boundaries. Split views
+share these prepared rows. Only visible rows form fused display runs: ordinary
+one-cell characters borrow a same-style source slice, while exceptional
+graphemes retain a complete source slice and an explicit display advance.
+Segmentation precedes styling so a combining suffix cannot split at a style
+boundary. Tabs and control placeholders synthesize display text; source offsets
+and copied text remain unchanged. Cursor-only redraws reuse prepared styling. UTF-16 position conversion uses measured line lookup
 and scans only the prefix of the target line. Disjoint edit batches share
 untouched subtrees and create one undo step.
 
