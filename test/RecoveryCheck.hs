@@ -157,6 +157,17 @@ checks=bracket temporary removePathForcibly $ \root->do
   check "corrupt checkpoint returns an error" (case corrupted of Left _->True; _->False)
   switched<-right (toggleByteMode (newBuffer "λ中") >>= restoreBuffer . snapshotBuffer)
   check "mode-switch recovery keeps text saved baseline and reversible representation" (byteMode switched && not (savedByteMode switched) && contents (undo switched)=="λ中" && not (byteMode (undo switched)))
+  let longPath=root </> "long-source.checkpoint"
+      longText=T.replicate 400 "\t界e\x301"<>"\r\nlast"
+      longDesktop=addDocument Nothing (newBuffer longText) (initialDesktop (80,25))
+  writeCheckpoint longPath longDesktop >>= right
+  longRecovered<-readCheckpoint longPath fresh >>= right
+  let longWindow=fromJust (activeWindow longRecovered)
+      longDocument=fromJust (activeDocument longRecovered)
+      expectedWidth=displayColumn (lineAt longText 0) maxBound
+      expectedLimit=max 0 (expectedWidth-(width (bounds longWindow)-2)+1)
+  check "recovered long-source geometry and original bytes remain exact"
+    (contents (documentBuffer longDocument)==longText && scrollbarLimit False longDocument longWindow==expectedLimit)
   let badSnapshot=(snapshotBuffer edited) {snapshotByteMode=True,snapshotContents="中"}
   check "invalid byte representation cannot silently truncate on recovery" (case restoreBuffer badSnapshot of Left _->True; _->False)
 #ifndef mingw32_HOST_OS

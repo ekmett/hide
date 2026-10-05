@@ -17,7 +17,7 @@ module Hide.Buffer
   , contentSlice, contentByteSlice, contentLineOffset, contentLineAt
   , SourceLine, contentSourceLineAt, contentSourceLinesFrom, sourceLineText, sourceLineRawText
   , sourceLineLength, sourceLineHasChunks, sourceLineWidth, sourceLineDisplayColumn, sourceLineColumnOffset, sourceLineWindow
-  , sourceLineSlice, sourceLineSuffixWidth
+  , sourceLineSlice, sourceLineSuffixWidth, prepareSourceWidths
   , newBuffer, newByteBuffer, bufferBytes, bufferByteStream, markSaved, toggleByteMode, replaceBuffer, textBuffer
   , DirtySnapshot, captureDirty, snapshotDirty
   , contents, dirty, ordered, replaceSelection, replaceRanges, prepareBuffer, undo, redo, selectedText
@@ -193,6 +193,19 @@ sourceLineWidth :: SourceLine -> Int
 sourceLineWidth line@(Line {})=displayColumn (sourceLineText line) maxBound
 sourceLineWidth (ChunkedLine _ flags _ _ _ chunks)=
   Chunks.chunksWidth chunks-if flags .&. 4/=0 then 1 else 0
+
+-- | Worker-owned preparation of expensive cached source widths. Only long live
+-- text rows are forced; byte buffers and bounded compact rows need no receipt.
+-- This forces each loaded row's independent numeric width, not its lazy span
+-- stream, text projection, saved baseline or history. Subsequent exact width
+-- demands reuse that receipt; source bytes and coordinates remain unchanged.
+prepareSourceWidths :: BufferContent -> ()
+prepareSourceWidths image
+  | contentByteMode image=()
+  | otherwise=foldl' prepare () (contentSourceLinesFrom image 0)
+  where
+    prepare () line@ChunkedLine{}=sourceLineWidth line `seq` ()
+    prepare () _=()
 
 -- | Scalar positions inside an item snap to its starting display column.
 sourceLineDisplayColumn :: SourceLine -> Int -> Int
