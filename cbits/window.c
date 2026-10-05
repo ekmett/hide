@@ -221,7 +221,8 @@ void thc_size(int *w, int *h) { geometry(); *w = cols; *h = rows; }
 int thc_begin(void) {
     geometry(); cursor_present=false; clear_commands(); draw_failed=false; grid_ready=false;
     if (!texture) {
-        texture=SDL_CreateTexture(renderer,SDL_PIXELFORMAT_ARGB8888,SDL_TEXTUREACCESS_STREAMING,atlas_size,atlas_size);
+        /* Tile uploads never lock a streaming CPU mirror of the whole atlas. */
+        texture=SDL_CreateTexture(renderer,SDL_PIXELFORMAT_ARGB8888,SDL_TEXTUREACCESS_STATIC,atlas_size,atlas_size);
         if (!texture || !SDL_SetTextureScaleMode(texture,SDL_SCALEMODE_NEAREST) ||
             !SDL_SetTextureBlendMode(texture,SDL_BLENDMODE_BLEND)) return 0;
         uint32_t white=0xffffffff; SDL_Rect pixel={0,0,1,1};
@@ -317,26 +318,23 @@ static uint64_t hash_bytes(uint64_t hash,const void *bytes,size_t count) {
     for (size_t i=0;i<count;++i) hash=(hash^p[i])*1099511628211ULL;
     return hash;
 }
-/* Preserve tile pixel coordinates while enlarging the GPU atlas. No glyph
- * is reshaped or read back; subsequent commands observe the ordered GPU copy. */
+/* Keep growth in the renderer's command stream: SDL_UpdateTexture records
+ * uploads there, and SDL_FlushRenderer does not submit that GPU buffer. An
+ * independent GPU copy could therefore run before the source uploads. */
 static bool grow_atlas(void) {
     if (atlas_size>=8192) { atlas_full=true; return false; }
     int size=atlas_size*2;
-    SDL_Texture *next=SDL_CreateTexture(renderer,SDL_PIXELFORMAT_ARGB8888,SDL_TEXTUREACCESS_STREAMING,size,size);
+    SDL_Texture *next=SDL_CreateTexture(renderer,SDL_PIXELFORMAT_ARGB8888,SDL_TEXTUREACCESS_TARGET,size,size);
     if (!next) return false;
-    if (!SDL_SetTextureScaleMode(next,SDL_SCALEMODE_NEAREST) || !SDL_SetTextureBlendMode(next,SDL_BLENDMODE_BLEND) || !SDL_FlushRenderer(renderer)) {
-        SDL_DestroyTexture(next); return false;
-    }
-    SDL_GPUTextureLocation source={0},destination={0};
-    source.texture=SDL_GetPointerProperty(SDL_GetTextureProperties(texture),SDL_PROP_TEXTURE_GPU_TEXTURE_POINTER,NULL);
-    destination.texture=SDL_GetPointerProperty(SDL_GetTextureProperties(next),SDL_PROP_TEXTURE_GPU_TEXTURE_POINTER,NULL);
-    if (!source.texture || !destination.texture) { SDL_DestroyTexture(next); return SDL_SetError("Missing GPU atlas texture"); }
-    SDL_GPUCommandBuffer *buffer=SDL_AcquireGPUCommandBuffer(gpu);
-    if (!buffer) { SDL_DestroyTexture(next); return false; }
-    SDL_GPUCopyPass *copy=SDL_BeginGPUCopyPass(buffer);
-    SDL_CopyGPUTextureToTexture(copy,&source,&destination,atlas_size,atlas_size,1,false);
-    SDL_EndGPUCopyPass(copy);
-    if (!SDL_SubmitGPUCommandBuffer(buffer)) { SDL_DestroyTexture(next); return false; }
+    SDL_Texture *previous=SDL_GetRenderTarget(renderer);
+    SDL_FRect area={0,0,(float)atlas_size,(float)atlas_size};
+    bool ok=SDL_SetTextureScaleMode(next,SDL_SCALEMODE_NEAREST) &&
+        SDL_SetTextureBlendMode(next,SDL_BLENDMODE_BLEND) &&
+        SDL_SetTextureBlendMode(texture,SDL_BLENDMODE_NONE) &&
+        SDL_SetRenderTarget(renderer,next) && SDL_SetRenderClipRect(renderer,NULL) &&
+        SDL_RenderTexture(renderer,texture,NULL,&area) && SDL_FlushRenderer(renderer);
+    if (!SDL_SetRenderTarget(renderer,previous)) ok=false;
+    if (!ok) { SDL_DestroyTexture(next); return false; }
     SDL_DestroyTexture(texture); texture=next; atlas_size=size; return true;
 }
 static AtlasEntry *atlas_entry(const GlyphCommand *c,int hover,int cursor) {
