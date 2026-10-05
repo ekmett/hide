@@ -687,7 +687,11 @@ windowLayers d active original =
           | otherwise = V.translateX (negate (scrollColumn w)) (styledImage (darkAppearance d) selectable (lineColor n) active (selection w) (bufferLineOffset b n)
               (if useStyles && not (null (documentHighlight doc)) then fromMaybe [] (atMay styledLines n) else [(ch,Plain) | ch<-T.unpack plain]))
 
-    sourceRow n=fromMaybe (plainSourceRow (bufferLineAt b n)) (documentSourceRows doc >>= (Vec.!? n))
+    sourceLines=contentSourceLinesFrom (bufferContent b) (max 0 (scrollRow w))
+    sourceRow n=let line=if n>=max 0 (scrollRow w)
+                          then fromMaybe (contentSourceLineAt (bufferContent b) n) (atMay sourceLines (n-max 0 (scrollRow w)))
+                          else contentSourceLineAt (bufferContent b) n
+                in maybe (plainSourceLine line) (attachSourceLine line) (documentSourceRows doc >>= (Vec.!? n))
 
     lineColor n = case documentLabel doc of
       Just "Git diff" -> Just (diffLineAttr (bufferLineAt b n))

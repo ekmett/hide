@@ -24,6 +24,7 @@ import Hide.Syntax
 
 checks :: IO ()
 checks = do
+  sourceLineChecks
   composerWidthChecks
   plainSourceRowChecks
   let exact="aé𝄞\t─\x301\r"
@@ -265,10 +266,10 @@ composerWidthChecks=do
     shortBefore<-getAllocationCounter
     shortColumns<-evaluate (size hint short 94)
     shortAfter<-getAllocationCounter
-    check "bubble width visits short rows sequentially" (shortColumns==12 && shortBefore-shortAfter<4000000)
+    check ("bubble width visits short rows sequentially "++show (hint,shortColumns,shortBefore-shortAfter)) (shortColumns==12 && shortBefore-shortAfter<4000000)
     check "DEL placeholder occupies one source cell" (size hint (newBuffer "abcdefghijkl\DEL") 94==14)
     forM_ [0,8,12,13,20,94] $ \limit->
-      forM_ ["","short","    x = 1\n","\r\n","a\r","\t","👩🏽\x200d\&💻","a界e\x301\txyz\r\n","\x301","x\NULz",T.replicate 50 "界 e\x301 "] $ \text->do
+      forM_ ["","short","    x = 1\n","    "<>T.replicate 65 "\x301"<>"abcdefghijkl\n","    \x301"<>T.replicate 20 "界"<>"\n","\r\n","a\r","\t","👩🏽\x200d\&💻","a界e\x301\txyz\r\n","\x301","x\NULz",T.replicate 50 "界 e\x301 "] $ \text->do
         let lineWidth raw=let line=if not hint && "    " `T.isPrefixOf` raw then T.drop 4 raw else raw
                           in displayColumn line (T.length line)
             expected=min limit (max 12 (maximum (0:map lineWidth (textLines text))+1))
@@ -299,3 +300,44 @@ plainSourceRowChecks=forM_ ["","abc","éδ─","a界e\x301\t👩🏽\x200d\&💻
     check "implicit Plain style projection preserves character offsets" (sourceStylesAt implicit offset==sourceStylesAt explicit offset)
     forM_ [0,1,2,8,32] $ \width->check "implicit Plain windows preserve complete fragments and original coordinates"
       (window offset width implicit==window offset width explicit)
+
+-- The live source row consumes borrowed storage groups, preserving the same
+-- complete-item paint/selection coordinates as its explicit flat projection.
+sourceLineChecks :: IO ()
+sourceLineChecks=do
+  let samples=[T.replicate 1050 "a",T.replicate 260 "界a\t",T.replicate 540 "🇦",
+        T.replicate 17 ("z"<>T.replicate 80 "\x301"),
+        T.replicate 511 "a"<>"界"<>T.replicate 70 "\x301"<>"tail\r\n"]
+      units Nil=[]
+      units (ConsChars text style rest)=[(T.singleton c,style,1,T.singleton c) | c<-T.unpack text]++units rest
+      units (ConsSigil glyph style advance rest)
+        | advance==0=units rest
+        | otherwise=(graphemeText glyph,style,advance,graphemeDisplayText glyph):units rest
+      window left width row=let (char,col,sigils)=sourceSigilsWindow left width row in (char,col,units sigils)
+  let capped=T.replicate 60 "a"<>"z"<>T.replicate 31 "\x301"<>T.replicate 42 "\x1d165"<>"X"
+      recut=replaceSelection (Selection (T.length capped) (T.length capped+300)) "" (newBuffer (capped<>T.replicate 300 "b"))
+  forM_ (map newBuffer samples++[recut]) $ \b->do
+    let source=contents b
+        line=contentSourceLineAt (bufferContent b) 0
+        visible=lineAt source 0
+        raw=head (T.splitOn "\n" source)
+        prepared=prepareSourceRow raw (zip (T.unpack raw) (cycle [Plain,Keyword,Comment]))
+        live=attachSourceLine line prepared
+    check "live source row keeps exact public text and ranges" (live==prepared)
+    check "implicit live source row keeps exact plain projection" (plainSourceLine line==plainSourceRow visible)
+    forM_ [0,1,6,31,511,512,1024] $ \left->forM_ [0,1,2,80,180] $ \width->do
+      check ("borrowed prepared storage preserves clipped complete-item styles and coordinates "++show (T.take 20 source,left,width))
+        (window left width live==window left width prepared)
+      check "borrowed plain storage preserves clipped complete-item coordinates"
+        (window left width (plainSourceLine line)==window left width (plainSourceRow visible))
+  let b=newBuffer (T.replicate (1024*1024) "界")
+      row=plainSourceLine (contentSourceLineAt (bufferContent b) 0)
+      forceWindow left=let (char,col,sigils)=sourceSigilsWindow left 180 row
+                       in char+col+sum [T.length text+advance | (text,_,advance,_)<-units sigils]
+  _<-evaluate (prepareBuffer b)
+  _<-evaluate (forceWindow 0)
+  before<-getAllocationCounter
+  count<-evaluate (forceWindow 500000)
+  after<-getAllocationCounter
+  check "live source viewport seeks borrowed long-row leaves without a flat projection"
+    (count>0 && before-after<128*1024)

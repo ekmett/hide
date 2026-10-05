@@ -20,6 +20,7 @@ import qualified Data.Vector as Vec
 import qualified Graphics.Vty as V
 checks :: IO ()
 checks = do
+  sourceCoordinateChecks
   let check name ok = unless ok (error name)
   let original=newBuffer "same revision source"
       opaque=original {B.undoStack=error "redraw key forced Undo history",B.redoStack=error "redraw key forced Redo history"}
@@ -515,3 +516,65 @@ checks = do
   check "outer title handles empty desktops and unnamed files"
     (applicationTitle "/project" (initialDesktop (80,25))=="th" &&
      applicationTitle "/project" desktop=="th NONAME1.HS")
+
+-- Coordinate references intentionally project the small fixture's original
+-- rows; production source windows must query measured rows instead.
+sourceCoordinateChecks :: IO ()
+sourceCoordinateChecks=do
+  let check name ok=unless ok (error name)
+      first=T.replicate 600 "ab"<>"\t界e\x301\&👩🏽\x200d\&💻q"<>T.replicate 70 "\x301"<>"Z"
+      original=first<>"\r\nshort\t界\n\n"<>T.replicate 600 "x"<>"\r\ntail\r"
+      source=newBuffer original
+      removed=B.replaceSelection (Selection (T.length first+2) (T.length first+11)) "" source
+      changed=T.take (T.length first+2) original<>T.drop (T.length first+11) original
+      win d=fromMaybe (error "source coordinate window") (activeWindow d)
+      doc d=fromMaybe (error "source coordinate document") (activeDocument d)
+      pos d=caret (selection (win d))
+  forM_ [(source,original),(removed,changed),(B.undo removed,original)] $ \(buffer,flat)->do
+    _<-evaluate (B.prepareBuffer buffer)
+    let rows=map (T.dropWhileEnd (=='\r')) (T.splitOn "\n" flat)
+        starts=scanl (\offset row->offset+T.length row+1) 0 (T.splitOn "\n" flat)
+        offset row=starts !! row
+        reference p=let row=length (takeWhile (<=p) (take (length rows) starts))-1
+                    in (row,B.displayColumn (rows !! row) (p-offset row))
+        base=modifyActive (\w->w {bounds=Rect 2 2 42 8}) $
+          addDocument (Just (FileState "Coordinates.hs" Nothing))
+            buffer {B.undoStack=error "source coordinates forced undo",B.redoStack=error "source coordinates forced redo"}
+            (initialDesktop (100,25))
+        text=B.bufferContent buffer
+        cases=[(r,c) | r<-[0..length rows-1],c<-let size=T.length (rows !! r) in
+          [n | n<-[0,1,size `div` 2,size]++[1200..1220]++[size-40,size-8],n>=0,n<=size]]
+    forM_ cases $ \(row,column)->do
+      let p=offset row+column
+          focused=modifyActive (\w->w {selection=Selection p p}) base
+          w=win focused
+          expected=reference p
+          visible=ensureVisible focused
+          (r,c)=expected
+      check "source forward coordinates match original scalar/grapheme geometry"
+        (contentPosition text p==expected && windowTextPosition focused w text p==expected &&
+         windowCursorCell buffer w==expected && windowCaretCell focused (doc focused) w==expected)
+      check "source caret visibility follows the measured coordinate"
+        (r>=scrollRow (win visible) && r<scrollRow (win visible)+6 &&
+         c>=scrollColumn (win visible) && c<scrollColumn (win visible)+40)
+      let destination=min (length rows-1) (row+1)
+          moved=verticalMove 1 False focused
+          expectedNext=offset destination+B.columnOffset (rows !! destination) c
+      check "vertical source movement retains the flat display column"
+        (pos moved==expectedNext && B.revision (documentBuffer (doc moved))==B.revision buffer)
+      check "source End excludes CRLF and preserves selection anchor"
+        (selection (win (rowEdge True True focused))==Selection p (offset row+T.length (rows !! row)))
+    forM_ (zip [0..] rows) $ \(row,line)->do
+      let extent=B.displayColumn line (T.length line)
+      check "source row and fallback scrollbar widths match visible flat rows"
+        (windowTextRowWidth base (win base) text row==extent &&
+         windowDocumentWidth (doc base) (win base)==maximum (documentWidth (doc base):map (\t->B.displayColumn t (T.length t)) rows))
+      forM_ ([0,1,7,8,max 0 (extent-1),extent,extent+1]++[1200..min 1220 extent]) $ \column->do
+        let p=offset row+B.columnOffset line column
+            pan=max 0 (column-3)
+            located=modifyActive (\w->w {scrollRow=row,scrollColumn=pan}) base
+            w=win located; x=left (bounds w)+1+column-pan; y=top (bounds w)+1
+            hovered=fst (hoverAt x y located)
+            target=if column>=extent then Nothing else Just (sourceFixtureBuffer w,B.revision buffer,p)
+        check "source hit and hover share scalar offsets and reject past-row hover"
+          (windowTextOffset located w text row column==p && pos (selectAt False x y located)==p && hoverTarget hovered==target)
