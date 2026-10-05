@@ -124,11 +124,11 @@ function drawRows(changed){
  for(const [y,spans] of changed){
    const y0=Math.round(y*ch), y1=Math.round((y+1)*ch);ctx.fillStyle='#0000aa';ctx.fillRect(0,y0,surface.width,y1-y0);
    for(const [start,fg,bg,traits,clusters] of spans||[]){let x=start;
-     for(const [text,width,stretched] of clusters){
-       const x0=Math.round(x*cw),x1=Math.round((x+width)*cw);
+     for(const [text,width,stretched,clipStart=0,clipWidth=width] of clusters){
+       const x0=Math.round(x*cw),x1=Math.round((x+clipWidth)*cw);
        ctx.fillStyle=rgb(bg);ctx.fillRect(x0,y0,x1-x0,y1-y0);
-       if(width>0&&text!==' ')ctx.drawImage(tile(text,fg,frame.pixelated,x1-x0,y1-y0,traits+(stretched?4:0)),x0,y0,x1-x0,y1-y0);
-       x+=width;
+       if(width>0&&text!==' '){const glyph=tile(text,fg,frame.pixelated,width*cw,y1-y0,traits+(stretched?4:0));ctx.drawImage(glyph,glyph.width*clipStart/width,0,glyph.width*clipWidth/width,glyph.height,x0,y0,x1-x0,y1-y0);}
+       x+=clipWidth;
      }
    }
  }

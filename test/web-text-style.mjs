@@ -25,3 +25,18 @@ const wide=vm.runInContext("tile('f',0xffffff,false,16,16,4)",context);
 assert.equal(wide.width,16);assert.deepEqual(wide.transform,[2,1]);
 assert.notEqual(wide,vm.runInContext("tile('f',0xffffff,false,16,16,0)",context));
 console.log('Browser two-cell glyph stretch and cache checks passed');
+
+// Exercise actual row drawing with a half-visible semantic glyph. Shape/cache
+// the original full tile, crop source pixels, then advance only visible cells.
+const drawn=[],fills=[];
+Object.assign(context,{frame:{pixelated:false},metrics:()=>[8,16],ctx:{fillRect:(...args)=>fills.push(args),drawImage:(...args)=>drawn.push(args)},surface:{width:40},performance:{now:()=>0},gl:{TEXTURE_2D:0,RGBA:0,UNSIGNED_BYTE:0,bindTexture:()=>{},texImage2D:()=>{}},texture:{},rasterTime:0,dirty:false});
+vm.runInContext(source.slice(source.indexOf('function drawRows('),source.indexOf('function present(')),context);
+for(const clipStart of [0,1]){
+ drawn.length=0;fills.length=0;
+ vm.runInContext(`drawRows([[0,[[0,0xffffff,0,0,[['f',2,true,${clipStart},1],['A',1,false,0,1]]]]]])`,context);
+ assert.equal(drawn[0][0].width,16);
+ assert.deepEqual(drawn[0].slice(1),[clipStart*8,0,8,16,0,0,8,16]);
+ assert.deepEqual(fills.slice(1),[[0,0,8,16],[8,0,8,16]]);
+ assert.equal(drawn[1][5],8);
+}
+console.log('Browser partial glyph UV crop, original tile and following-cell placement checks passed');

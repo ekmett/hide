@@ -36,6 +36,23 @@ checks = do
   check "wide clusters are blanked at the left edge" (plain (V.picForImage (V.translateX (-2) image)) (2,1)==" B")
   check "a window covering half a glyph blanks the exposed half"
     (plain (V.picForLayers [V.translateX 2 (textImage V.defAttr "│"),image]) (4,1)=="A │B")
+  let semantic pic size=[(text,full,start,shown) | row<-toList (cellRowsForPic pic size),CellGlyph _ text full start shown<-toList row]
+  check "shared GPU rows keep right-clipped semantic glyph and width"
+    (semantic (V.picForImage (V.cropRight 2 image)) (2,1)==[("👩🏽\x200d\&💻",2,0,1)])
+  check "shared GPU rows keep left-clipped original glyph origin"
+    (semantic (V.picForImage (V.translateX (-2) image)) (2,1)==[("👩🏽\x200d\&💻",2,1,1)])
+  check "opaque occlusion preserves only the visible semantic half"
+    (semantic (V.picForLayers [V.translateX 2 (textImage V.defAttr "│"),image]) (4,1)==[("👩🏽\x200d\&💻",2,0,1),("│",1,0,1)])
+  let halo=cellRowsForLayers [CellHalo (V.defAttr `V.withBackColor` V.black) [(2,0,1,1)],CellImage image] (4,1)
+      masked=cellRowsForLayers [CellMask V.defAttr [(2,0,1)],CellImage image] (4,1)
+  check "style-only halo preserves semantic glyph identity and clipping"
+    ([(text,full,start,shown) | row<-toList halo,CellGlyph _ text full start shown<-toList row]==[("👩🏽\x200d\&💻",2,0,1),("👩🏽\x200d\&💻",2,1,1)])
+  check "privacy masks both semantic glyph halves before export"
+    (null [text | row<-toList masked,CellGlyph _ text _ _ _<-toList row] &&
+     [text | row<-toList masked,CellText _ text<-toList row]==["A**B"])
+  let hiddenHalf=cellRowsForLayers [CellMask V.defAttr [(1,0,1)],CellImage (V.translateX 2 (textImage V.defAttr "X")),CellImage image] (4,1)
+  check "whole-glyph privacy preserves an unrelated opaque foreground cell"
+    ([text | row<-toList hiddenHalf,CellText _ text<-toList row]==["A*XB"])
   let settings=fst (runCommand EditorOptions (initialDesktop (80,25)) {videoMode=Just 3})
       checked=settings {dialog=fmap (\d -> d {fields=[CheckBox "Pixelate Unicode" True]}) (dialog settings)}
   check "preferences apply Unicode pixelation" (pixelateUnicode (fst (handleEvent (V.EvKey V.KEnter []) checked)))
