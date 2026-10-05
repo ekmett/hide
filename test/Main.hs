@@ -7,6 +7,7 @@ import qualified WebCheck
 import qualified FontCheck
 #endif
 #ifdef WITH_PROTOCOL
+import qualified RequestedPasteCheck
 import qualified ProtocolCheck
 #endif
 #ifdef WITH_REMOTE
@@ -171,6 +172,7 @@ main = do
   TestsMCPCheck.checks
 #endif
 #ifdef WITH_PROTOCOL
+  RequestedPasteCheck.checks
   ProtocolCheck.checks
 #endif
 #ifdef WITH_WEB

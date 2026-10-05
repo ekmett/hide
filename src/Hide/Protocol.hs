@@ -36,8 +36,25 @@ import qualified Hide.Plugin.Menu as Plugin
 import Hide.Commands (commandIdentifier)
 import Hide.Unicode (Script(..), CellSpan(..), graphemes, clusterWidth)
 
-data WebInput = Key T.Text [V.Modifier] | Paste T.Text | Mouse T.Text Int Int Int Int [V.Modifier]
+data WebInput = Key T.Text [V.Modifier] | Paste T.Text | PasteReply T.Text T.Text | Mouse T.Text Int Int Int Int [V.Modifier]
               | Wheel Int Int Int [V.Modifier] | SystemTheme Bool | FocusWindow Int | BrowserCommand Command | MenuCommand Command | ContributedMenu T.Text T.Text Integer | UploadFile T.Text BS.ByteString | Frontend (Maybe Int) Bool | OpenPath FilePath | Resize Int Int | SuspendSession | Blur | Modifiers [V.Modifier] deriving (Eq,Show)
+
+-- | The requested read has one required, bounded host-issued identity.
+parseClipboardRequest :: Value -> Parser T.Text
+parseClipboardRequest=withObject "clipboard request" $ \o->do
+  token<-o .: "request"
+  unless (validClipboardRequest token) (fail "Invalid clipboard request identity")
+  pure token
+
+validClipboardRequest :: T.Text -> Bool
+validClipboardRequest token=T.length token==48 && T.all (`elem` ("0123456789abcdef"::String)) token
+
+-- | Native/TUI requested reads use the same distinct reply schema and bounds.
+-- Direct user paste retains its ordinary input packet and has no receipt.
+clipboardReplyInput :: T.Text -> T.Text -> Maybe Value
+clipboardReplyInput token text
+  | validClipboardRequest token && T.length text<=1048576=Just (object ["type" .= ("paste-reply"::T.Text),"request" .= token,"text" .= text])
+  | otherwise=Nothing
 
 -- | Validate an input packet and its bounds. Upload metadata starts with an empty
 -- payload that transport code fills from the following binary packet.
@@ -74,6 +91,11 @@ parseInput = withObject "browser event" $ \o -> do
       key <- o .: "key"
       unless (T.length key<=24) (fail "Invalid key")
       Key key <$> mods
+    "paste-reply" -> do
+      request<-o .: "request"
+      text<-o .: "text"
+      unless (validClipboardRequest request && T.length text<=1048576) (fail "Invalid requested paste reply")
+      pure (PasteReply request text)
     "paste" -> do
       text <- o .: "text"
       unless (T.length text<=1048576) (fail "Paste too large")
@@ -156,6 +178,7 @@ applyInputUnchecked input d = case input of
         opened=addDocument Nothing b d
     in (opened {buffers=M.adjust (\doc -> restyle doc {documentSuggestedName=Just (T.unpack name)}) (nextId d) (buffers opened),status="Dropped file opened; Download exports changes."},[])
   Key name mods -> maybe (d,[]) (\key -> handleEvent (V.EvKey key mods) d) (inputKey name mods)
+  PasteReply _ _ -> (d,[]) -- Only the serialized human owner can consume a receipt.
   Paste text -> handleEvent (V.EvPaste (TE.encodeUtf8 text)) d
   Frontend mode mac -> (d {videoMode=mode,nativeMac=mac && mode/=Nothing},[])
   OpenPath path -> (d,[ReadPath path])

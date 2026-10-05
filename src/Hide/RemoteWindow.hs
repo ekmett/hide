@@ -52,7 +52,7 @@ import System.Timeout (timeout)
 import System.IO (withBinaryFile, IOMode(ReadMode), hFileSize, openBinaryTempFile, hClose, hPutStrLn, stderr)
 import Hide.TextStyle
 import Hide.Font
-import Hide.Protocol (WirePacket(..), decodeFrame)
+import Hide.Protocol (WirePacket(..), decodeFrame,parseClipboardRequest,clipboardReplyInput)
 import Hide.Links (openResource)
 import Hide.Remote (peerSendBatch, peerReceive)
 import Hide.Window hiding (nativeCommands, nativeMenuToken, nativeChordShortcut, nativeDockWindow)
@@ -419,6 +419,11 @@ runRemoteWindow backend scale (cols,rows) mode host peer = do
           else hPutStrLn stderr "Remote input queue full; input was not sent."
       sendJSON value = send [JsonPacket value]
       sendEvent = maybe (pure ()) sendJSON . nativeEventInput
+      pasteReply request = do
+        bytes <- c_clipboard >>= BS.packCString
+        case TE.decodeUtf8' bytes of
+          Right text | Just packet<-clipboardReplyInput request text -> sendJSON packet
+          _ -> hPutStrLn stderr "Clipboard text is invalid or exceeds 1 MiB."
       paste = do
         bytes <- c_clipboard >>= BS.packCString
         case TE.decodeUtf8' bytes of
@@ -517,7 +522,10 @@ runRemoteWindow backend scale (cols,rows) mode host peer = do
             "open-resource" -> do
               result<-openResource value
               pure (frame,atlas,either id (const connection) result,changed,closed)
-            "paste-request" -> paste >> pure (frame,atlas,connection,changed,closed)
+            "paste-request" -> do
+              request<-parseIO parseClipboardRequest value
+              pasteReply request
+              pure (frame,atlas,connection,changed,closed)
             "connection" -> do
               connected <- parseIO (withObject "connection" (.: "connected")) value
               when connected resize
