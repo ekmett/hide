@@ -15,6 +15,8 @@ import System.IO.Error (catchIOError, isDoesNotExistError)
 import System.Timeout (timeout)
 import Hide.App (applyEffects)
 import Hide.Buffer
+import Hide.BufferView
+import Hide.TextPresentation (prepareTextPresentations)
 import Hide.Browser (Entry(..))
 import Hide.Files
 import Hide.Sidebar
@@ -109,7 +111,7 @@ checks = bracket temporary removePathForcibly $ \dir -> withReconciliation $ \ru
 -- External binary replacements use the same baseline and conflict protocol as text.
 binaryReload :: FilePath -> IO ()
 binaryReload dir = withReconciliation $ \runtime -> do
-  let path=dir </> "binary.dat"
+  let path=dir </> "binary.md"
       tick=tickReconciliation runtime applyEffects
       effects=reconciliationEffects runtime applyEffects
       check name ok=unless ok (error name)
@@ -117,9 +119,11 @@ binaryReload dir = withReconciliation $ \runtime -> do
       raw=BS.pack [0,255,65]
   externalWrite path "text"
   (file,b)<-loadFile path >>= either error pure
-  opened<-tick (addDocument (Just file) b (initialDesktop (80,25)))
+  preview<-prepareTextPresentations (fst (runCommand (SetBufferView MarkdownView) (addDocument (Just file) b (initialDesktop (80,25)))))
+  opened<-tick preview
   externalWrite path raw
   reloaded<-await tick ((==raw) . bufferBytes . buffer) opened
+  check "binary replacement retires Markdown preview" (maybe False ((==CurrentView).bufferView) (activeWindow reloaded) && M.null (windowPresentations reloaded))
   check "binary external reload is clean lossless and undoable" (byteMode (buffer reloaded) && not (dirty (buffer reloaded)) && bufferBytes (undo (buffer reloaded))=="text" && not (byteMode (undo (buffer reloaded))))
   let edited=fst (handleEvent (V.EvKey (V.KChar '1') []) reloaded)
       local=bufferBytes (buffer edited)

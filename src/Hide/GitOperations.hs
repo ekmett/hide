@@ -263,7 +263,7 @@ tickGitOperations (GitOperations ref focused jobs reviews) core initial = do
                     fresh=markSaved (replaceBuffer (byteMode loaded) (contents loaded) original)
                     clamp n=max 0 (min (bufferLength fresh) n)
                     adjust w=if bufferId w==Just (bid) then w {selection=let Selection a c=selection w in Selection (clamp a) (clamp c)} else w
-                in (ensureVisible d {buffers=M.insert bid (restyle doc {documentFile=Just file,documentBuffer=fresh}) (buffers d),windows=map adjust (windows d)},notes)
+                in (ensureVisible (normalizeDocumentViews bid d {buffers=M.insert bid (restyle doc {documentFile=Just file,documentBuffer=fresh}) (buffers d),windows=map adjust (windows d)}),notes)
       _ -> state
 
 -- Both entry points run under the desktop lock and reserve the same worker slot.

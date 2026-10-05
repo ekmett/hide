@@ -22,6 +22,8 @@ import System.Process (callProcess)
 import Hide.BufferDiffCommand (withBufferDiffCommands)
 import TypedBufferDiffsCheck (startDiffCall)
 import Hide.Buffer
+import Hide.BufferView
+import Hide.TextPresentation (prepareTextPresentations)
 import Hide.Files (FileState(..), loadFile)
 import Hide.MCPPermissions (withPermissionsAt,tickPermissions)
 import Hide.Sidebar
@@ -87,6 +89,12 @@ checks=withBufferDiffCommands $ \commands->do
       rejected "workspace_files" (operation "rename" "source.hs"++["to" .= ("renamed.hs"::T.Text)]) dirtyDesktop
       (renamedDesktop,renamedResult)<-success "workspace_files" (operation "rename" "source.hs"++["to" .= ("renamed.hs"::T.Text)]) clean
       check "rename reports success and updates open buffer paths" (field "operation" renamedResult==Just ("rename"::T.Text) && fmap filePath (activeDocument renamedDesktop >>= documentFile)==Just (root </> "renamed.hs"))
+      TIO.writeFile (root </> "notes.md") "# Heading\n"
+      markdown<-loadFile (root </> "notes.md") >>= either error pure
+      preview<-prepareTextPresentations (fst (runCommand SplitVertical (fst (runCommand (SetBufferView MarkdownView) (uncurry (\state buffer->addDocument (Just state) buffer initial) markdown)))))
+      (renamedPreview,_)<-success "workspace_files" (operation "rename" "notes.md"++["to" .= ("notes.txt"::T.Text)]) preview
+      check "workspace rename retires every incompatible Markdown preview"
+        (all (\w->bufferView w==CurrentView && markdownInteraction w==Nothing) (windows renamedPreview) && M.null (windowPresentations renamedPreview) && activeText renamedPreview=="# Heading\n")
       -- Reload the renamed path, then prove deleting closes every clean shared view.
       renamed<-canonicalizePath (root </> "renamed.hs")
       state<-loadFile renamed >>= either error pure

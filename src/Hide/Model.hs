@@ -890,6 +890,19 @@ setBufferView mode d
                  | otherwise=viewRowForChange mode projection CurrentSide oldFull
       _ -> d
 
+-- | Retire incompatible per-window views when a source path/content is adopted.
+-- Source interaction and Undo stay authoritative; only presentation metadata is
+-- discarded. Byte replacement also normalizes review modes, as direct edits do.
+normalizeDocumentViews :: Int -> Desktop -> Desktop
+normalizeDocumentViews bid d=case M.lookup bid (buffers d) of
+  Nothing->d
+  Just doc->let incompatible w=bufferId w==Just bid &&
+                 (byteMode (documentBuffer doc) || (bufferView w==MarkdownView && not (markdownDocument doc)))
+                retired=[windowId w | w<-windows d,incompatible w]
+                normalize w | incompatible w=w {bufferView=CurrentView,reviewSelection=Nothing,markdownInteraction=Nothing}
+                            | otherwise=w
+            in d {windows=map normalize (windows d),windowPresentations=M.filterWithKey (\ident _->ident `notElem` retired) (windowPresentations d)}
+
 clampReviewWindows :: Desktop -> Desktop
 clampReviewWindows d=d {windows=map clamp (windows d)}
   where

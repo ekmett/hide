@@ -11,7 +11,10 @@ import Data.Maybe (fromJust,isNothing)
 import qualified Data.Text as T
 import qualified Data.Vector as Vec
 import qualified Graphics.Vty as V
-import System.Directory (getTemporaryDirectory,removeFile)
+import System.Directory (getTemporaryDirectory,removeFile,removePathForcibly,createDirectory)
+import System.FilePath ((</>))
+import qualified Data.Text.IO as TIO
+import Hide.App (applyEffects)
 import System.IO (openTempFile,hClose)
 import System.Timeout (timeout)
 import Hide.Buffer
@@ -102,6 +105,7 @@ checks=do
     check "Recovery retains mode and source state without prepared payload" (bufferView (win recovered)==MarkdownView && isNothing (windowMarkdown recovered (win recovered)) && selection (win recovered)==selection (win current))
     recoveredReady<-prepareTextPresentations recovered
     check "Recovered preview prepares and retains rendered selection" (selection (displayWindow (win recoveredReady))==selection shown)
+  saveAsChecks
   putStrLn "markdown view checks passed"
   where
     await owner d=do
@@ -111,3 +115,28 @@ checks=do
         Nothing->threadDelay 10000 >> await owner next
     temporary=do directory<-getTemporaryDirectory; (path,h)<-openTempFile directory "hide-markdown-recovery"; hClose h; pure path
     textLayoutFirst layout=case layoutRows layout Vec.!? 0 of Just row->maybe 0 layoutAdvance (layoutGlyphs row Vec.!? 0); _->0
+
+-- Successful Save As adopts the path for every shared view, preserving Current's
+-- source interaction while retiring previews that the new file cannot support.
+saveAsChecks :: IO ()
+saveAsChecks=bracket temporary removePathForcibly $ \dir->do
+  let check name ok=unless ok (fail name)
+      win=fromJust . activeWindow
+      apply d request=snd <$> applyEffects d [request]
+  opened<-apply (initialDesktop (80,25)) (ReadPath (dir </> "notes.md"))
+  let edited=insertText "# Heading\n\nbody\n" opened
+      bid=fromJust (bufferId (win edited))
+  saved<-apply edited (SaveDocument bid Nothing Nothing)
+  let positioned=modifyActive (\w->w {selection=Selection 3 8,scrollRow=1,scrollColumn=2}) saved
+      previews=fst (runCommand SplitVertical (fst (runCommand (SetBufferView MarkdownView) positioned)))
+  ready<-prepareTextPresentations previews
+  eligible<-apply ready (SaveDocument bid (Just (dir </> "copy.markdown")) Nothing)
+  check "Save As to Markdown retains per-window previews" (all ((==MarkdownView).bufferView) (windows eligible))
+  eligibleReady<-prepareTextPresentations eligible
+  adopted<-apply eligibleReady (SaveDocument bid (Just (dir </> "notes.txt")) Nothing)
+  text<-TIO.readFile (dir </> "notes.txt")
+  check "Save As retires all incompatible previews and preserves source interaction"
+    (all (\w->bufferView w==CurrentView && markdownInteraction w==Nothing && selection w==Selection 3 8 && scrollRow w==1 && scrollColumn w==2) (windows adopted) && M.null (windowPresentations adopted) && text=="# Heading\n\nbody\n")
+  check "Source remains editable after incompatible Save As" (activeText (insertText "EDIT" adopted)/=activeText adopted)
+  where
+    temporary=do directory<-getTemporaryDirectory; (path,h)<-openTempFile directory "hide-markdown-saveas-check"; hClose h; removeFile path; createDirectory path; pure path
