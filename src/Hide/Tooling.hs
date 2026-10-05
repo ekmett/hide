@@ -1242,9 +1242,11 @@ preparePatches t snapshot result d = case workspaceEdits result of
 jump :: (Desktop -> [Effect] -> IO (Bool,Desktop)) -> FilePath -> Int -> Int -> Desktop -> IO Desktop
 jump core path row col d = do
   (_,opened)<-core d [ReadPath path]
-  pure $ if fmap filePath (activeDocument opened >>= documentFile)==Just path
-    then let source=modifyActive (\w->w {bufferView=CurrentView,reviewSelection=Nothing}) opened
-         in moveTo False (L.positionOffset (activeText source) (row,col)) source else opened
+  pure $ case activeDocument opened of
+    Just doc | fmap filePath (documentFile doc)==Just path->
+      let source=modifyActive (\w->w {bufferView=CurrentView,reviewSelection=Nothing}) opened
+      in moveTo False (L.bufferPositionOffset (documentBuffer doc) (row,col)) source
+    _->opened
 
 toolingEffects :: Tooling -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> [Effect] -> IO (Bool,Desktop)
 toolingEffects t core d effects = foldM apply (False,d) effects
