@@ -41,6 +41,7 @@ import qualified Data.Map.Strict as M
 import Data.Maybe (fromMaybe, isJust, listToMaybe, maybeToList)
 import Data.Text (Text)
 import qualified Data.Text as T
+import qualified Data.Vector as V
 import GHC.Clock (getMonotonicTimeNSec)
 import System.Directory (XdgDirectory(XdgConfig), canonicalizePath, doesFileExist, getXdgDirectory)
 import System.IO (IOMode(ReadMode), withBinaryFile)
@@ -488,16 +489,20 @@ sidebarArguments (DebugPageRequest _ target offset)=case target of
 -- fields are prepared/sized by the waiting worker before page cache admission.
 recordSidebarResponse :: IORef State -> DebugPageRequest -> Value -> IO ()
 recordSidebarResponse ref (DebugPageRequest _ target _) body=modifyIORef' ref $ \s->case target of
-  DebugThreads->s {sidebarThreads=M.fromList [(ident,()) | row<-take 128 (items "threads" body),let ident=integer "id" row,ident>0]}
-  DebugStack tid->s {sidebarFrames=boundedUnion (M.fromList [((tid,fid),row) | row<-take 128 (items "stackFrames" body),let fid=integer "id" row,fid>0]) (sidebarFrames s)}
+  DebugThreads->s {sidebarThreads=M.fromList [(ident,()) | row<-rows "threads",let ident=integer "id" row,ident>0]}
+  DebugStack tid->s {sidebarFrames=boundedUnion (M.fromList [((tid,fid),row) | row<-rows "stackFrames",let fid=integer "id" row,fid>0]) (sidebarFrames s)}
   DebugScopes tid fid->s {sidebarReferences=boundedReferences (references tid fid "scopes") (sidebarReferences s)}
   DebugVariables tid fid _->s {sidebarReferences=boundedReferences (references tid fid "variables") (sidebarReferences s)}
   DebugWatchVariables ident revision receipt _->s {sidebarReferences=boundedReferences
-    (M.fromListWith (||) [((WatchReferences ident revision receipt,reference),maybe False (flag "lazy") (field "presentationHint" row)) | row<-take 128 (items "variables" body),let reference=integer "variablesReference" row,reference>0]) (sidebarReferences s)}
+    (M.fromListWith (||) [((WatchReferences ident revision receipt,reference),maybe False (flag "lazy") (field "presentationHint" row)) | row<-rows "variables",let reference=integer "variablesReference" row,reference>0]) (sidebarReferences s)}
   where
+    -- Page zero may retain more rows, but admission never decodes its full array.
+    rows key=case body of
+      Object object | Just (Array values)<-KM.lookup (K.fromText key) object->V.toList (V.take 128 values)
+      _->[]
     boundedUnion newer previous=fst (M.splitAt 32768 (M.union newer previous))
     boundedReferences newer previous=fst (M.splitAt 32768 (M.unionWith (||) newer previous))
-    references tid fid key=M.fromListWith (||) [((FrameReferences tid fid,ident),key=="variables" && maybe False (flag "lazy") (field "presentationHint" row)) | row<-take 128 (items key body),let ident=integer "variablesReference" row,ident>0]
+    references tid fid key=M.fromListWith (||) [((FrameReferences tid fid,ident),key=="variables" && maybe False (flag "lazy") (field "presentationHint" row)) | row<-rows key,let ident=integer "variablesReference" row,ident>0]
 
 sidebarAction :: Debugger -> DebugSidebarRequest -> Desktop -> IO Desktop
 sidebarAction runtime@(Debugger ref _ _ _ _) request d
@@ -578,7 +583,9 @@ startWatch runtime@(Debugger ref _ _ _ _) ident revision receipt mode d=do
           Just row->integer "variablesReference" row==reference && maybe False (flag "lazy") (field "presentationHint" row)
           _->False
       epoch=case receipt of WatchFrame _ value _ _ _->value
-      atRows position body=at (items "variables" body) position
+      atRows position body=case body of
+        Object object | Just (Array values)<-KM.lookup "variables" object->values V.!? position
+        _->Nothing
   live<-watchProviderCurrent s
   if not live || not (watchCurrent s ident revision receipt) then pure d {status="Watch or stopped frame expired."}
   else if busy then pure d {status="Watch execution is busy."}
