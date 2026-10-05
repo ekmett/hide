@@ -112,6 +112,7 @@ import Hide.Sidebar
 import Hide.Model
 import qualified Graphics.Vty as V
 import qualified Data.Map.Strict as M
+import qualified Data.Vector as Vec
 
 check :: String -> Bool -> IO ()
 check name ok = unless ok (error name)
@@ -215,8 +216,9 @@ main = do
     ["", "\n", "\n\n", "module Main where\r\n\tmain = print \"λ界\"\r\n", "x = '\\x03bb'", "x = [1..10] -- unfinished", "{- open comment\n"]
   let python=highlightDocument $ newDocument (newBuffer "def f():\n    return 42\n") (Just (FileState "test.py" Nothing))
       renamed=highlightDocument $ restyle python {documentFile=Just (FileState "notes.unknown" Nothing)}
-  check "document filename chooses syntax" (take 3 (map snd (documentHighlight python)) == replicate 3 Keyword)
-  check "renaming refreshes syntax" (all ((== Plain) . snd) (documentHighlight renamed))
+  let sourceStyles doc=maybe [] (concatMap (\row->sourceStylesAt row 0) . Vec.toList) (documentSourceRows doc)
+  check "document filename chooses syntax" (take 3 (sourceStyles python) == replicate 3 Keyword)
+  check "renaming refreshes syntax" (sourceStyles renamed == replicate (T.length "def f():    return 42") Plain)
   check "CRLF input is highlighted, not just preserved" (take 6 (map snd (highlight "module Main where\r\n")) == replicate 6 Keyword)
   let d = initialDesktop (80,25)
       key k ms s = fst (handleEvent (V.EvKey k ms) s)
