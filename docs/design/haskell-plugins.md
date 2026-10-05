@@ -471,6 +471,10 @@ expandability, actions and optional context-menu contributions. IDs are scoped b
 plugin and provider instance. They are not overloaded filesystem paths. Agent
 nodes use agent IDs; debugger nodes additionally carry stop/frame epochs.
 
+The current sidebar host orders tree and form metadata publications through a
+bounded queue. Closing its scope releases blocked publishers with an explicit
+error; later publications are rejected and late ticks cannot restore providers.
+
 Child loading is asynchronous, bounded and paged. Expanding twice shares an
 in-flight request. Results match the parent's request generation before adoption;
 collapse/refresh/removal cancels obsolete work. Loading and failed states are
