@@ -253,12 +253,20 @@ sidebarValue :: Sidebar -> Value
 sidebarValue tree=object ["root" .= treeRoot tree,"selected" .= selected,"scroll" .= scrolled,"width" .= treeWidth tree,
   "focused" .= treeFocused tree,"rows" .= rows]
   where
-    prepared=[(index,(P.infoLabel info,path,rowDepth row,P.infoBranch info,rowExpanded row)) | (index,row)<-zip [0..] (M.elems (treeRows tree)),let info=rowInfo row,Just path<-[P.infoResource info]]
-    resourceIndex index=fromMaybe 0 (findIndex ((==index).fst) prepared)
-    (values,selected,scrolled)=case treeHints tree of
-      Just (SidebarHints hints chosen topPath)->let locate wanted=maybe 0 (\path->fromMaybe 0 (findIndex ((==path).fst) hints)) wanted
-        in ([(T.pack (takeFileName path),path,0,expanded,expanded) | (path,expanded)<-hints],locate chosen,locate topPath)
-      _->(map snd prepared,resourceIndex (treeSelected tree),resourceIndex (treeScroll tree))
+    prepared=[(P.infoLabel info,path,rowDepth row,P.infoBranch info,rowExpanded row) | row<-M.elems (treeRows tree),NodeRow{}<-[rowKey row],let info=rowInfo row,Just path<-[P.infoResource info]]
+    current=M.fromList [(path,()) | (_,path,_,_,_)<-prepared]
+    (pending,chosen,topPath)=case treeHints tree of
+      Just (SidebarHints hints selected top)->(hints,selected,top)
+      Nothing->(M.empty,Nothing,Nothing)
+    savedExpansion path expanded=case M.lookup path pending of
+      Just True->True
+      Just False | path==treeRoot tree->False
+      _->expanded
+    values=[(name,path,depth,directory,savedExpansion path expanded) | (name,path,depth,directory,expanded)<-prepared]++[(T.pack (takeFileName path),path,0,expanded,expanded) | (path,expanded)<-M.toAscList (M.difference pending current)]
+    locate wanted=maybe 0 (\path->fromMaybe 0 (findIndex (\(_,resource,_,_,_)->resource==path) values)) wanted
+    resourceAt index=P.infoResource . rowInfo =<< rowAt index tree
+    selected=locate (case chosen of Just path->Just path; Nothing->resourceAt (treeSelected tree))
+    scrolled=locate (case topPath of Just path->Just path; Nothing->resourceAt (treeScroll tree))
     rows=[object ["name" .= name,"path" .= path,"depth" .= depth,"directory" .= directory,"expanded" .= expanded] | (name,path,depth,directory,expanded)<-values]
 
 desktopParser :: Desktop -> Value -> Parser Desktop
@@ -386,7 +394,7 @@ sidebarParser=withObject "sidebar" $ \o->do
   width'<-o .: "width" >>= boundedInt 1 4096
   focused<-o .: "focused"
   let pathAt index=case drop index entries of (path,_):_->Just path; _->Nothing
-  pure (emptySidebar root width' focused) {treeHints=Just (SidebarHints entries (pathAt chosen) (pathAt scroll))}
+  pure (emptySidebar root width' focused) {treeHints=Just (SidebarHints (M.fromListWith (\_ first->first) entries) (pathAt chosen) (pathAt scroll))}
   where rowParser=withObject "tree row" $ \o->do
           _<-o .: "name" >>= boundedText 32768
           path<-o .: "path" >>= checkedPath True

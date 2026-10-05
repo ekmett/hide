@@ -50,7 +50,7 @@ checks=bracket temporary removePathForcibly $ \root->do
       approvalId=sourceFixtureBuffer (fromJust (activeWindow approval))
       draft=replaceSelection (Selection 0 0) "private draft λ\n\n    main = 1\n      continuation\n" (newBuffer "")
       desktop=approval {composerBuffer=draft,composerSelection=Selection 1 5,composerFocused=True,defaultDirectory=Just root,
-        sideTree=Just ((emptySidebar root 23 True) {treeHints=Just (SidebarHints [(sourcePath,False)] (Just sourcePath) (Just sourcePath))}),problemsVisible=True,problemsPreferredHeight=9,
+        sideTree=Just ((emptySidebar root 23 True) {treeHints=Just (SidebarHints (M.singleton sourcePath False) (Just sourcePath) (Just sourcePath))}),problemsVisible=True,problemsPreferredHeight=9,
         wordStar=True,wideSectionTitles=True,blinkCursor=False,pixelateUnicode=True,materialIcons=True,appearance=DarkMode,streamerMode=True,chatSubmit=SteerSubmit,
         dialog=Just (Dialog "Pending permission" (PermissionDialog "approve:secret") [] 0 ["Allow"] []),
         menu=Just (0,0),drag=Just (Selecting sourceId),clipboard="transient clipboard",clipboardCode=Just "transient clipboard",clipboardExport=(3,Just "export"),

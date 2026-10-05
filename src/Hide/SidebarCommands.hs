@@ -16,7 +16,7 @@ import Control.Exception (bracket,evaluate,displayException,mask,onException)
 import Control.Monad (foldM,forever,forM,filterM,when)
 import Data.Aeson (Value(Null))
 import Data.IORef
-import Data.List (find,sortOn)
+import Data.List (find)
 import qualified Data.Map.Strict as M
 import qualified Data.Text as T
 import Data.Text (Text)
@@ -59,11 +59,14 @@ data State = State
   { providers :: !(M.Map P.TreeRef (P.TreeProvider SidebarContext SidebarReply))
   , definitions :: !(M.Map NodeKey (P.NodeDef SidebarContext SidebarReply))
   , jobs :: ![ChildJob], waiting :: ![(TreeRequest,Menu.MenuOrigin)]
-  , projection :: !(Maybe (Integer,Async (Projection,M.Map NodeKey (P.NodeDef SidebarContext SidebarReply))))
+  , projection :: !(Maybe (Integer,Async (Projection,M.Map NodeKey (P.NodeDef SidebarContext SidebarReply),RecoveryProjection)))
   , actionJob :: !(Maybe ActionJob), filesProvider :: !(Maybe FilesProvider)
   , badgeStamp :: !(Maybe (StableName (M.Map Int Document)))
   , badgeJob :: !(Maybe (StableName (M.Map Int Document),Async (M.Map FilePath (Bool,Int,Int))))
   , sidebarRevision :: !Integer, inputForm :: !(Maybe (Form.PreparedInputForm SidebarContext SidebarReply)) }
+-- Prepared alongside visible rows; owner applies at most four branch changes.
+data RecoveryProjection = RecoveryProjection !(Maybe SidebarHints)
+  ![(P.TreeHit,[P.TreeHit],Bool)] !(Maybe RowKey) !(Maybe RowKey)
 data Cancellation = forall a. Cancellation (Async a)
 data SidebarHost = SidebarHost !(Registry SidebarContext) !(IORef State)
   !(TBQueue Publication) !(TBQueue Cancellation) !(Async ())
@@ -191,26 +194,8 @@ createFiles host root=do
 initializeSidebar :: SidebarHost -> Desktop -> IO Desktop
 initializeSidebar host d=do
   (_,mounted)<-sidebarEffects host (\x _->pure (False,x)) d []
-  prepared<-await mounted
-  case sideTree prepared >>= treeHints of
-    Nothing->pure prepared
-    Just (SidebarHints hints chosen topPath)->do
-      restored<-foldM restoreHint prepared (sortOn (length . fst) [(path,expanded) | (path,expanded)<-hints,expanded])
-      let tree=maybe (error "Sidebar disappeared during recovery") id (sideTree restored)
-          locate wanted fallback=maybe fallback (\path->maybe fallback fst (find ((==Just path).P.infoResource.rowInfo.snd) (visibleRows 0 32768 tree))) wanted
-          positioned=tree {treeHints=Nothing,treeSelected=locate chosen (treeSelected tree),treeScroll=locate topPath (treeScroll tree)}
-          closeRoot=lookup (treeRoot tree) hints==Just False
-      pure restored {sideTree=Just (if closeRoot then collapseAt 0 positioned else positioned)}
+  await mounted
   where
-    restoreHint current (path,_)=case sideTree current of
-      Nothing->pure current
-      Just tree->case find ((==Just path).P.infoResource.rowInfo.snd) (visibleRows 0 32768 tree) of
-        Nothing->pure current
-        Just (index,_)->do
-          let (changed,effects)=activateTree True index current
-          (_,loading)<-sidebarEffects host (\value _->pure (False,value)) changed effects
-          await loading
-
     await current=do
       next<-tickSidebar host (\value _->pure (False,value)) current
       case sideTree next of
@@ -458,7 +443,7 @@ startLoads host@(SidebarHost _ ref _ _ _) original=do
       _->(,started) <$> releaseRequest host request origin d
 
 finishProjection :: SidebarHost -> Desktop -> IO Desktop
-finishProjection (SidebarHost _ ref _ _ _) d=do
+finishProjection host@(SidebarHost _ ref _ _ _) d=do
   state<-readIORef ref
   case projection state of
     Nothing->pure d
@@ -469,11 +454,11 @@ finishProjection (SidebarHost _ ref _ _ _) d=do
         Just result->do
           modifyIORef' ref (\s->s {projection=Nothing})
           case (result,sideTree d) of
-            (Right (Projection revision _ _ _ _,defs),Just tree) | revision==treeRevision tree->modifyIORef' ref (\s->s {definitions=defs})
-            _->pure ()
-          pure $ case result of
-            Left err->d {status="Sidebar projection failed: "<>T.pack (displayException err)}
-            Right (prepared,_)->d {sideTree=fmap (adoptProjection prepared) (sideTree d)}
+            (Right (prepared@(Projection revision _ _ _ _),defs,recovery),Just tree) | revision==treeRevision tree->do
+              modifyIORef' ref (\s->s {definitions=defs})
+              adoptRecovery host recovery d {sideTree=Just (adoptProjection prepared tree)}
+            (Left err,_)->pure d {status="Sidebar projection failed: "<>T.pack (displayException err)}
+            _->pure d
 startProjection :: SidebarHost -> Desktop -> IO ()
 startProjection (SidebarHost _ ref _ _ _) d=do
   state<-readIORef ref
@@ -482,9 +467,64 @@ startProjection (SidebarHost _ ref _ _ _) d=do
       worker<-async $ do
         prepared@(Projection _ _ _ retained _)<-prepareProjection tree
         defs<-evaluate (M.intersection (definitions state) retained)
-        pure (prepared,defs)
+        recovery<-prepareRecovery prepared tree
+        pure (prepared,defs,recovery)
       modifyIORef' ref (\s->s {projection=Just (treeRevision tree,worker)})
     _->pure ()
+
+-- Recovery shares the existing projection worker, never a tick/paint tree scan.
+-- Only reachable nodes participate; opaque More cursors remain user-driven.
+prepareRecovery :: Projection -> Sidebar -> IO RecoveryProjection
+prepareRecovery (Projection _ rows _ retained _) tree=case treeHints tree of
+  Nothing->pure (RecoveryProjection Nothing [] Nothing Nothing)
+  Just (SidebarHints hints selected top)->do
+    let resources=M.fromListWith (\_ first->first)
+          [(path,row) | row<-M.elems rows,NodeRow{}<-[rowKey row],Just path<-[P.infoResource (rowInfo row)]]
+        differs row expanded=P.infoBranch (rowInfo row) && (expanded || P.infoResource (rowInfo row)==Just (treeRoot tree)) && rowExpanded row/=expanded
+        changes=take 4 [(path,row,expanded) | (path,expanded)<-M.toAscList hints,Just row<-[M.lookup path resources],differs row expanded]
+        admitted=M.fromList [(path,()) | (path,_,_)<-changes]
+        consumed=M.filterWithKey (\path expanded->case M.lookup path resources of
+          Nothing->False; Just row->not (differs row expanded) || M.member path admitted) hints
+        remaining=M.difference hints consumed
+        locate path=rowKey <$> (path >>= (`M.lookup` resources))
+        chosen=locate selected; scrolled=locate top
+        pending=SidebarHints remaining (if chosen==Nothing then selected else Nothing) (if scrolled==Nothing then top else Nothing)
+        next=case pending of SidebarHints values Nothing Nothing | M.null values->Nothing; _->Just pending
+        preparedTree=tree {treeRows=rows,treeNodes=retained}
+        transitions=[(rowHit row,hitTrace (keyOf (rowHit row)) preparedTree,expanded) | (_,row,expanded)<-changes]
+    _<-evaluate (force (M.toAscList remaining,case pending of SidebarHints _ a b->(a,b)))
+    mapM_ (\(_,trace,_)->evaluate (length trace)) transitions
+    mapM_ evaluate [key | Just key<-[chosen,scrolled]]
+    evaluate (RecoveryProjection next transitions chosen scrolled)
+
+adoptRecovery :: SidebarHost -> RecoveryProjection -> Desktop -> IO Desktop
+adoptRecovery host@(SidebarHost _ ref _ _ _) (RecoveryProjection hints transitions selected top) original=do
+  changed<-foldM restore original {sideTree=fmap (\tree->tree {treeHints=hints}) (sideTree original)} transitions
+  chosen<-position True selected changed
+  position False top chosen
+  where
+    live hit=do
+      state<-readIORef ref
+      let P.TreeHit owner _ _=hit
+      maybe (pure False) P.treeCurrent (M.lookup owner (providers state))
+    restore d (hit,trace,expanded)=case sideTree d of
+      Just tree | hitCurrent trace tree,Just node<-nodeAt hit tree->do
+        current<-live hit
+        if not current then pure d else
+          if not expanded then pure d {sideTree=Just (case M.lookupIndex (stateAddress node) (treeRows tree) of
+            Just index->collapseAt index tree; Nothing->tree)}
+          else case stateLoad node of
+            Loaded{}->pure d {sideTree=Just tree {treeNodes=M.adjust (\value->value {stateExpanded=True}) (keyOf hit) (treeNodes tree),treeRevision=treeRevision tree+1}}
+            _->let (opened,request)=requestChildren hit Nothing tree
+              in maybe (pure d {sideTree=Just opened}) (\value->enqueue host value Menu.HumanMenu d {sideTree=Just opened}) request
+      _->pure d
+    position _ Nothing d=pure d
+    position choose (Just (NodeRow key)) d=case sideTree d of
+      Just tree | Just node<-M.lookup key (treeNodes tree),Just index<-M.lookupIndex (stateAddress node) (treeRows tree)->do
+        current<-live (nodeHit key node)
+        pure $ if not current then d else d {sideTree=Just (if choose then tree {treeSelected=index} else tree {treeScroll=index})}
+      _->pure d
+    position _ _ d=pure d
 
 finishAction :: SidebarHost -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> IO Desktop
 finishAction host@(SidebarHost _ ref _ cancellation _) core d=do
