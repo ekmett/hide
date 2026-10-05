@@ -10,7 +10,7 @@
 -- Independent session/publication receipts reject late content without inspecting
 -- unrelated Documents. Replacement freezes the prior snapshot until prepared
 -- content adopts into the same display slot; closing never reopens from output.
-module Hide.Debugger (Debugger, Core, withDebugger, withDebuggerConsoles, withDebuggerClock, withDebuggerHdb, hdbOfferDialog, downloadsDialog, debuggerEffects, tickDebugger, debuggerTool, debuggerSidebarEpoch, debuggerSidebarSession, debuggerSidebarRead, debuggerWatches, withDebuggerWatchProvider) where
+module Hide.Debugger (Debugger, Core, withDebugger, withDebuggerConsoles, withDownloadsCommands, withDebuggerClock, withDebuggerHdb, hdbOfferDialog, debuggerEffects, tickDebugger, debuggerTool, debuggerSidebarEpoch, debuggerSidebarSession, debuggerSidebarRead, debuggerWatches, withDebuggerWatchProvider) where
 
 import qualified Hide.Plugin.Window as W
 import qualified Hide.Plugin.Menu as Menu
@@ -23,8 +23,10 @@ import Control.Exception (IOException, SomeException, SomeAsyncException, fromEx
 import Control.Concurrent.Async (Async, async, asyncWithUnmask, cancel, poll, race, waitCatch)
 import Control.Concurrent.STM
 import qualified Hide.Downloads as Downloads
-import Hide.DownloadsDialog (downloadsDialog)
-import qualified Hide.DownloadsDialog as DownloadsDialog
+import Hide.DownloadsWindowTypes
+import Hide.MenuCommands (MenuHost,MenuContext(..),MenuReply(..),menuContributions)
+import Hide.Plugin.Command
+import qualified Hide.DownloadsWindow as DownloadsWindow
 import qualified Hide.HdbAcquisition as Hdb
 import Control.Monad (foldM, filterM, forM_, unless, when, void)
 import Data.Aeson
@@ -284,7 +286,7 @@ withDebuggerHdb clock prepare acquire action = C.withConsoles $ \consoles ->
 withDebuggerHdbConsoles :: C.Consoles -> IO Integer -> (Compilers.Compiler -> IO (Either Text Hdb.HdbPlan))
   -> (Hdb.HdbPlan -> (Downloads.DownloadProgress -> IO ()) -> IO (Either Text FilePath))
   -> (Debugger -> IO a) -> IO a
-withDebuggerHdbConsoles consoles clock prepare acquire action = Downloads.withDownloads $ \downloads -> W.withWindowScope $ \scope -> bracket (newOutputOwner scope) closeOutputOwner $ \outputOwner -> DownloadsDialog.withOwner downloads $ \downloadView -> do
+withDebuggerHdbConsoles consoles clock prepare acquire action = Downloads.withDownloads $ \downloads -> W.withWindowScope $ \scope -> bracket (newOutputOwner scope) closeOutputOwner $ \outputOwner -> DownloadsWindow.withOwner downloads $ \downloadView -> do
   jobs<-newIORef (HdbState 0 Nothing Nothing Nothing Nothing)
   retired<-newIORef []
   mailbox<-SidebarMailbox <$> newTVarIO Nothing <*> newTBQueueIO 32 <*> newTVarIO (0,Nothing,M.empty)
@@ -297,6 +299,26 @@ withDebuggerHdbConsoles consoles clock prepare acquire action = Downloads.withDo
       readIORef ref >>= stopTransport debugger
       readIORef retired >>= mapM_ waitCatch) action
 
+-- | Register the human-only exact-row Cancel action for this manager lifetime.
+-- The existing menu worker prepares a closed request; only the Downloads owner
+-- can perform its side effect after contribution/window/modal revalidation.
+withDownloadsCommands :: MenuHost -> Debugger -> IO a -> IO a
+withDownloadsCommands host (Debugger _ _ (HdbRuntime _ _ _ _ _ _ view) _ _) action=withRegistry $ \registry->do
+  command<-either (fail . show) pure =<< registerCommand registry definition
+  reference<-either (fail . show) pure =<< Menu.contributeMenu (menuContributions host)
+    (Menu.MenuDef "hide.downloads.cancel" "context.window-rows" "downloads" 0 "Cancel transfer" "" False
+      (Menu.menuAction registry command (const (Right ())) (\_ request->evaluate (PreparedDownloadCancel request))))
+  DownloadsWindow.setMenuReference view (Just reference)
+  action `finally` (DownloadsWindow.setMenuReference view Nothing >> void (Menu.retireMenu (menuContributions host) reference))
+  where
+    unit=Codec (object []) (const (Right ())) (const (object []))
+    result=Codec (object []) (const (Left "Download cancellation is a host-owned request.")) (const (object []))
+    definition=CommandDef "hide.downloads.cancel" "Cancel transfer" unit result $ \context ()->pure $ do
+      if invocationOrigin context/=Menu.HumanMenu then Left (CommandRejected "Downloads actions require human input.") else Right ()
+      (reference,node)<-maybe (Left (CommandRejected "No transfer row was captured.")) Right (invocationRow context)
+      ident<-maybe (Left (CommandRejected "Invalid transfer ID.")) Right (readMaybe (T.unpack (P.nodeIdText node)))
+      if ident<=0 then Left (CommandRejected "Invalid transfer ID.") else Right (DownloadCancelRequest reference ident)
+
 debuggerEffects :: Debugger -> Core -> Core
 debuggerEffects runtime fallback = foldM apply . (False,)
   where
@@ -305,6 +327,7 @@ debuggerEffects runtime fallback = foldM apply . (False,)
       next<-perform runtime fallback action values d
       publishSidebarEpoch runtime
       pure (False,next)
+    apply (_,d) (DownloadCancelAction request) = (False,) <$> cancelDownloadRequest runtime request d
     apply (_,d) (DebugSourceAction request) = do
       next<-sourceAction runtime request d
       pure (False,next)
@@ -908,7 +931,6 @@ perform runtime@(Debugger ref clock _ _ _) core action values d = do
   s<-readIORef ref
   case (action,values) of
     ("downloads",[]) -> showDownloads runtime d
-    _ | "downloads:" `T.isPrefixOf` action -> hdbDownloadsAction runtime action values d
     _ | "hdb-accept:" `T.isPrefixOf` action -> acceptHdb runtime action values d
     ("output",_) -> modifyIORef' ref (\state -> state {outputShown=True}) >> revealOutput runtime d
     -- Docs: docs/site/screenshots/debug-launch.png (docs/running.md).
@@ -1774,7 +1796,7 @@ data GhcLaunch=GhcLaunch FilePath Build.BuildConfig FilePath Int HdbContext
 data HdbPrepared=HdbReady FilePath [(String,String)] | HdbOffer Hdb.HdbPlan
 data HdbRuntime=HdbRuntime Downloads.Downloads (IORef HdbState)
   (Compilers.Compiler -> IO (Either Text Hdb.HdbPlan))
-  (Hdb.HdbPlan -> (Downloads.DownloadProgress -> IO ()) -> IO (Either Text FilePath)) C.Consoles (IORef [Async ()]) DownloadsDialog.Owner
+  (Hdb.HdbPlan -> (Downloads.DownloadProgress -> IO ()) -> IO (Either Text FilePath)) C.Consoles (IORef [Async ()]) DownloadsWindow.Owner
 data HdbState=HdbState
   { hdbSerial :: Int, hdbWanted :: Maybe (Int,GhcLaunch,Bool)
   , hdbPreparing :: Maybe (Int,GhcLaunch,TMVar (),Async (Either () (Either Text HdbPrepared)))
@@ -1875,21 +1897,17 @@ acceptHdb runtime@(Debugger _ _ (HdbRuntime downloads ref _ acquire _ _ _) _ _) 
               showDownloads runtime d {status="Downloading debugger; launch will continue when ready."}
     _->pure d {status="This debugger download offer expired."}
 
-hdbDownloadsAction :: Debugger -> Text -> [Text] -> Desktop -> IO Desktop
-hdbDownloadsAction runtime@(Debugger _ _ (HdbRuntime downloads ref _ _ _ _ view) _ _) token values d=case values of
-  "0":index:_->do
-    target<-maybe (pure Nothing) (\n->DownloadsDialog.cancelTarget view token n d) (readMaybe (T.unpack index))
-    case target of
-      Just ident->do
-        cancelled<-Downloads.cancelDownload downloads ident
-        h<-readIORef ref
-        when (cancelled && maybe False (\(serial,_,job)->serial==hdbSerial h && job==ident) (hdbWaiting h)) (invalidateHdb runtime)
-        showDownloads runtime d {status=if cancelled then "Cancelling download..." else "This download has already finished."}
-      Nothing->pure d {status="This download selection expired."}
-  _->DownloadsDialog.close view token >> pure d
+cancelDownloadRequest :: Debugger -> DownloadCancelRequest -> Desktop -> IO Desktop
+cancelDownloadRequest runtime@(Debugger _ _ (HdbRuntime downloads ref _ _ _ _ view) _ _) (DownloadCancelRequest target ident) d=do
+  owned<-DownloadsWindow.cancelTarget view target d
+  if not owned then pure d {status="This Downloads action expired."} else do
+    cancelled<-Downloads.cancelDownload downloads ident
+    h<-readIORef ref
+    when (cancelled && maybe False (\(serial,_,job)->serial==hdbSerial h && job==ident) (hdbWaiting h)) (invalidateHdb runtime)
+    pure d {status=if cancelled then "Cancelling download..." else "This download has already finished."}
 
 showDownloads :: Debugger -> Desktop -> IO Desktop
-showDownloads (Debugger _ _ (HdbRuntime _ _ _ _ _ _ view) _ _) = DownloadsDialog.open view
+showDownloads (Debugger _ _ (HdbRuntime _ _ _ _ _ _ view) _ _) = DownloadsWindow.open view
 
 -- Every poll is nonblocking. Cancellation cleanup and GHC/Cabal queries stay on
 -- the one preparation worker; a replacement waits for that worker to retire.
@@ -1937,7 +1955,7 @@ tickHdb runtime@(Debugger _ _ (HdbRuntime downloads ref _ _ _ _ view) _ _) origi
             Right (Left ())->pure waited
             Left _->pure waited {status="Debugger preparation failed."}
   latest<-readIORef ref
-  shown<-DownloadsDialog.tick view prepared
+  shown<-DownloadsWindow.tick view prepared
   case dialog shown of
     Nothing | Just (ident,_,plan)<-hdbOffer latest->pure shown {dialog=Just (hdbOfferDialog ident plan)}
     _->pure shown

@@ -24,6 +24,7 @@ import qualified Hide.Plugin.Window as PluginWindow
 import qualified Hide.Privacy as Privacy
 import Hide.Sidebar
 import Hide.DebuggerSidebarTypes
+import Hide.DownloadsWindowTypes
 import qualified Hide.Plugin.Form as Form
 import Hide.AgentSidebarTypes
 import Hide.SessionSidebarTypes
@@ -113,8 +114,11 @@ data Window = Window
   { windowId :: Int, windowContent :: WindowContent, bounds :: Rect, selection :: Selection
   , scrollRow :: Int, scrollColumn :: Int, restoredBounds :: Maybe Rect
   , windowHexLow :: Bool, windowHexAscii :: Bool
-  , windowNumber :: Int, bufferView :: BufferView, reviewSelection :: Maybe ReviewSelection, reviewSplit :: Int, markdownInteraction :: Maybe MarkdownInteraction
+  , windowNumber :: Int, bufferView :: BufferView, reviewSelection :: Maybe ReviewSelection, reviewSplit :: Int, markdownInteraction :: Maybe MarkdownInteraction, rowsInteraction :: Maybe RowsInteraction
   } deriving (Eq,Show)
+-- | Only the selected stable row and pane focus; Details uses Window selection/scroll.
+data RowsInteraction = RowsInteraction !Tree.NodeId !Bool deriving (Eq,Show)
+
 -- | Bounded source/payload identity for a prepared presentation snapshot.
 -- Plugin prepared values compare only their unique identity.
 data MarkdownInteraction = MarkdownInteraction !Selection !Int !Int !(Maybe (Int,Int)) deriving (Eq,Show)
@@ -183,7 +187,7 @@ data ConflictAction = CompareDisk | ReloadDisk | KeepBuffer | SaveConflictAs der
 data Conflict = Conflict { conflictBuffer :: Int, conflictRevision :: Int, conflictBaseline :: FileState, conflictDisk :: Maybe ByteString } deriving (Eq,Show)
 data GitAction = FetchRemote | PullRemote | MergeBranch Text deriving (Eq,Show)
 data Toolchain = THC | GHC deriving (Eq,Show)
-data ContextKind = TreeContext [Tree.TreeHit] [(Text,Command)] | ToolchainContext [(Text,Command)] | LinkContext Command | ShellContext Command | ChangeContext Command | SourceContext | GitContext | MessagesContext | AgentContext [(Text,Command)] deriving (Eq,Show)
+data ContextKind = TreeContext [Tree.TreeHit] [(Text,Command)] | ToolchainContext [(Text,Command)] | LinkContext Command | ShellContext Command | ChangeContext Command | WindowRowsContext | SourceContext | GitContext | MessagesContext | AgentContext [(Text,Command)] deriving (Eq,Show)
 -- | Bounded hit target retained while a context popup is open. Messages use a
 -- projection generation and optional frozen source location, never message text. The
 -- source target keeps a copied expression of at most 4096 characters, never a
@@ -191,7 +195,7 @@ data ContextKind = TreeContext [Tree.TreeHit] [(Text,Command)] | ToolchainContex
 -- advance revision; admission additionally captures exact ContentVersion.
 -- Reconcile reload guarantees old+1, and checked edits/Git reload derive their
 -- replacement from the original buffer.
-data ContextTarget = SidebarTarget [Tree.TreeHit] | SourceTarget
+data ContextTarget = WindowRowTarget !PluginWindow.WindowRef !Tree.NodeId | SidebarTarget [Tree.TreeHit] | SourceTarget
   { sourceTargetWindow :: !Int, sourceTargetBuffer :: !Int, sourceTargetRevision :: !Int
   , sourceTargetSelection :: !Selection, sourceTargetRow :: !Int
   , sourceTargetExpression :: !(Maybe Text), sourceTargetFile :: !(Maybe FilePath) } | ConversationTarget Text | MessagesTarget !Integer !Int !(Maybe (FilePath,Int,Int)) | UnavailableMessagesTarget | UnavailableSourceTarget deriving (Eq,Show)
@@ -200,7 +204,7 @@ data LanguageAction = TypeInfo | FindDefinition | Completions | ShowProblems | R
 data Completion = Completion Text [(Int,Int,Text)] deriving (Eq,Show)
 data ProjectAction = LoadProject | ProjectPage Int Int | ProjectDetails Int Int deriving (Eq,Show)
 -- | Ordered requests for the host interpreter, produced alongside a new desktop.
-data Effect = SubmitInputForm !Form.FormRef !Text !Plugin.MenuOrigin | RetireInputForm !Form.FormRef | SessionSidebarAction !SessionSidebarRequest | DebugSourceAction !DebugSourceRequest | RetirePluginWindow !PluginWindow.WindowRef | DebugSidebarAction !DebugSidebarRequest | AgentSidebarAction !AgentSidebarRequest | ReloadKeyBindings FilePath | InspectKeyBindings (Maybe (Bindings.BindingPlatform,Bindings.BindingContext)) (Maybe (Bindings.Bindings Command)) | FollowLink (Maybe FilePath) Text | FollowTreeLink [Tree.TreeHit] FilePath Text | EnvironmentAction Text [Text] | AutocompleteAction Text [Text] | SaveWideSectionTitles Bool | SaveMacKeySymbols Bool | SaveChatSubmit ChatSubmit | SaveBufferViewDefault BufferView | ProjectRequest ProjectAction | DownloadDocument Int | ReadBrowserClipboard | WriteBrowserClipboard Text | LanguageRequest LanguageAction | RunGit GitAction | ReadMergeBranches | JumpTo FilePath Int Int | ReadPath FilePath | BrowsePath FilePath Text | BrowseDirectories FilePath | ChangeDirectory FilePath | OpenChoice FilePath Text Text | ReadTree FilePath | RefreshTree FilePath [Entry] | LoadTree TreeRequest Plugin.MenuOrigin | InvokeTree [Tree.TreeHit] CommandRef Plugin.MenuOrigin | ReadHelp | InvokeMenu Plugin.MenuRef Plugin.MenuOrigin (Maybe ContextTarget) | RefreshGit FilePath | ReadGitDiff | AskGitCommit | WriteGitCommit Text | SaveDocument Int (Maybe FilePath) (Maybe Command) | ReviewExternal | ResolveConflict Conflict ConflictAction | AgentAction Text [Text] | PermissionAction Text [Text] | DebugAction Text [Text] | SetScreenMode Int | Exit deriving (Eq,Show)
+data Effect = DownloadCancelAction !DownloadCancelRequest | SubmitInputForm !Form.FormRef !Text !Plugin.MenuOrigin | RetireInputForm !Form.FormRef | SessionSidebarAction !SessionSidebarRequest | DebugSourceAction !DebugSourceRequest | RetirePluginWindow !PluginWindow.WindowRef | DebugSidebarAction !DebugSidebarRequest | AgentSidebarAction !AgentSidebarRequest | ReloadKeyBindings FilePath | InspectKeyBindings (Maybe (Bindings.BindingPlatform,Bindings.BindingContext)) (Maybe (Bindings.Bindings Command)) | FollowLink (Maybe FilePath) Text | FollowTreeLink [Tree.TreeHit] FilePath Text | EnvironmentAction Text [Text] | AutocompleteAction Text [Text] | SaveWideSectionTitles Bool | SaveMacKeySymbols Bool | SaveChatSubmit ChatSubmit | SaveBufferViewDefault BufferView | ProjectRequest ProjectAction | DownloadDocument Int | ReadBrowserClipboard | WriteBrowserClipboard Text | LanguageRequest LanguageAction | RunGit GitAction | ReadMergeBranches | JumpTo FilePath Int Int | ReadPath FilePath | BrowsePath FilePath Text | BrowseDirectories FilePath | ChangeDirectory FilePath | OpenChoice FilePath Text Text | ReadTree FilePath | RefreshTree FilePath [Entry] | LoadTree TreeRequest Plugin.MenuOrigin | InvokeTree [Tree.TreeHit] CommandRef Plugin.MenuOrigin | ReadHelp | InvokeMenu Plugin.MenuRef Plugin.MenuOrigin (Maybe ContextTarget) | RefreshGit FilePath | ReadGitDiff | AskGitCommit | WriteGitCommit Text | SaveDocument Int (Maybe FilePath) (Maybe Command) | ReviewExternal | ResolveConflict Conflict ConflictAction | AgentAction Text [Text] | PermissionAction Text [Text] | DebugAction Text [Text] | SetScreenMode Int | Exit deriving (Eq,Show)
 data Field = Input Text Text Int | SelectedInput Text Text Selection | ComboBox Text [Text] Int (Maybe Int) | CheckBox Text Bool | Radio Text [Text] Int | ListBox Text [Text] Int | FileList [Entry] Int
   | ReadOnly Text Text
   | TextArea Text Bool Buffer Selection Int Int deriving (Eq,Show)
@@ -586,6 +590,7 @@ commandEnabled d (RegisteredMenu reference _) = dialog d==Nothing && case find (
   Just item | Plugin.menuSlot item=="context.source" -> case sourceInvocationTarget d of
     Just target@SourceTarget{} -> contextTargetCurrent d {contextTarget=Just target} && maybe False (textBuffer . documentBuffer) (activeDocument d)
     _ -> False
+  Just item | Plugin.menuSlot item=="context.window-rows" -> reference `elem` windowRowMenuRefs d && maybe False (\target->contextTargetCurrent d {contextTarget=Just target}) (rowInvocationTarget d)
   Just item | Plugin.menuSlot item=="context.messages" -> case messageInvocationTarget d of
     Just target@(MessagesTarget _ _ location) -> contextTargetCurrent d {contextTarget=Just target} &&
       (Plugin.menuName reference/="hide.messages.go-to" || location/=Nothing)
@@ -669,14 +674,63 @@ addPluginWindow reference prepared d=d {windows=w:windows d,pluginWindows=M.inse
     i=nextId d
     (sw,sh)=screenSize d
     w=Window i (PluginContent reference) (fitWindow d (Rect 0 1 sw (sh-2))) (Selection 0 0) 0 0 Nothing False False
-      (nextWindowNumber d) CurrentView Nothing 50 Nothing
+      (nextWindowNumber d) CurrentView Nothing 50 Nothing (initialRowsInteraction prepared)
+
+-- | Current Details text for rows, or the original plain/styled view. This reads
+-- only the selected NodeId and the prepared ordinal index, never content.
+windowPluginText :: Desktop -> Window -> Maybe PluginWindow.PreparedWindow
+windowPluginText d w=do
+  PluginContent reference<-pure (windowContent w)
+  prepared<-M.lookup reference (pluginWindows d)
+  pure $ case (PluginWindow.preparedWindowRows prepared,rowsInteraction w) of
+    (PluginWindow.RowsDetails rows index _,Just (RowsInteraction ident _))->
+      case M.lookup ident index >>= (rows Vec.!?) of Just (PluginWindow.WindowRow _ _ detail)->detail; _->prepared
+    _->prepared
 
 activePluginWindow :: Desktop -> Maybe PluginWindow.PreparedWindow
-activePluginWindow d=do
-  w<-activeWindow d
-  case windowContent w of
-    PluginContent reference->M.lookup reference (pluginWindows d)
-    SourceContent _->Nothing
+activePluginWindow d=activeWindow d >>= windowPluginText d
+
+initialRowsInteraction :: PluginWindow.PreparedWindow -> Maybe RowsInteraction
+initialRowsInteraction prepared=case PluginWindow.preparedWindowRows prepared of
+  PluginWindow.RowsDetails rows _ _->case rows Vec.!? 0 of Just (PluginWindow.WindowRow ident _ _)->Just (RowsInteraction ident False); _->Nothing
+  _->Nothing
+
+-- | Shared fixed list/Details geometry. Both painting and pointer input use it.
+rowsWindowRects :: Window -> (Rect,Rect)
+rowsWindowRects w=(Rect (x+1) (y+1) inner listHeight,Rect (x+1) (y+listHeight+2) inner (max 0 (bodyHeight-listHeight-1)))
+  where Rect x y ww hh=bounds w
+        inner=max 0 (ww-2)
+        bodyHeight=max 0 (hh-2)
+        listHeight=min 8 (max 1 (bodyHeight `div` 3))
+
+pluginTextRect :: Window -> Rect
+pluginTextRect w=case rowsInteraction w of
+  Just _->snd (rowsWindowRects w)
+  _->let Rect x y ww hh=bounds w in Rect (x+1) (y+1) (max 0 (ww-2)) (max 0 (hh-2))
+
+windowRows :: Desktop -> Window -> Maybe (Vec.Vector PluginWindow.WindowRow,M.Map Tree.NodeId Int,Tree.NodeId,Bool)
+windowRows d w=do
+  PluginContent reference<-pure (windowContent w)
+  prepared<-M.lookup reference (pluginWindows d)
+  PluginWindow.RowsDetails rows index _<-pure (PluginWindow.preparedWindowRows prepared)
+  RowsInteraction ident details<-rowsInteraction w
+  pure (rows,index,ident,details)
+
+rowsListOffset :: Window -> Int -> Int
+rowsListOffset w chosen=max 0 (chosen-height (fst (rowsWindowRects w))+1)
+
+selectWindowRow :: Int -> Desktop -> Desktop
+selectWindowRow requested d=case activeWindow d of
+  Just w | Just (rows,_,ident,_)<-windowRows d w,
+    Just (PluginWindow.WindowRow next _ _)<-rows Vec.!? max 0 (min (Vec.length rows-1) requested)->
+      modifyActive (\v->if next==ident then v {rowsInteraction=Just (RowsInteraction next False)} else
+        v {rowsInteraction=Just (RowsInteraction next False),selection=Selection 0 0,scrollRow=0,scrollColumn=0}) d
+  _->d
+
+moveWindowRow :: Int -> Desktop -> Desktop
+moveWindowRow delta d=case activeWindow d of
+  Just w | Just (_,index,ident,_)<-windowRows d w,Just chosen<-M.lookup ident index->selectWindowRow (chosen+delta) d
+  _->d
 
 -- | Shared document authority classification. Titles, buffer reads and screen
 -- masks use the same canonical path and host-owned document-role rules.
@@ -713,7 +767,7 @@ addDocument file b d = d { windows = w : windows d, buffers = M.insert i (newDoc
     i = nextId d
     offset = length (windows d) `mod` 5
     (sw,sh) = screenSize d
-    w = Window i (SourceContent i) (fitWindow d (Rect offset (1+offset) (sw-offset) (sh-2-offset))) (Selection 0 0) 0 0 Nothing False False (nextWindowNumber d) (if byteMode b || (defaultBufferView d==MarkdownView && not (markdownDocument (newDocument b file))) then CurrentView else defaultBufferView d) Nothing 50 Nothing
+    w = Window i (SourceContent i) (fitWindow d (Rect offset (1+offset) (sw-offset) (sh-2-offset))) (Selection 0 0) 0 0 Nothing False False (nextWindowNumber d) (if byteMode b || (defaultBufferView d==MarkdownView && not (markdownDocument (newDocument b file))) then CurrentView else defaultBufferView d) Nothing 50 Nothing Nothing
 
 nextWindowNumber :: Desktop -> Int
 nextWindowNumber d = choose 1
@@ -1241,6 +1295,7 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
       | otherwise = (d {status="Menu action is unavailable."},[])
       where target=case find ((==reference) . Plugin.menuReference) (contributedMenus source) of
               Just item | Plugin.menuSlot item=="context.source" -> sourceInvocationTarget source
+              Just item | Plugin.menuSlot item=="context.window-rows" -> rowInvocationTarget source
               Just item | Plugin.menuSlot item=="context.messages" -> messageInvocationTarget source
               _ -> Nothing
     go ToggleTree d = case sideTree d of Just _ -> (setTree Nothing d,[]); Nothing -> (d,[ReadTree (startingDirectory d)])
@@ -2161,6 +2216,7 @@ contextItems (ToolchainContext items) = items
 contextItems (LinkContext command) = [("Open",command)]
 contextItems (ShellContext command) = [("Execute in terminal",command)]
 contextItems (ChangeContext command) = ("Revert this change",command):contextItems SourceContext
+contextItems WindowRowsContext = []
 contextItems SourceContext = [("Copy Location",CopyLocation),("Rename symbol...",RenameSymbol),("Code actions...",CodeActions),("Go to definition",Definition),("Inspect type",InspectType),("Complete identifier",Complete)]
 contextItems MessagesContext = [("Go to source",GoToMessage),("Copy message",Copy),("Copy all messages",CopyAllMessages),("Hide Messages",Problems)]
 contextItems (AgentContext items) = items
@@ -2178,6 +2234,7 @@ contextItemsFor d | contextKind d==MessagesContext = map replace base++extras
     extras=[entry | entry@(_,command)<-additions,case command of RegisteredMenu ref _->Plugin.menuName ref/="hide.messages.go-to"; _->True]
 contextItemsFor d | sourceContextKind (contextKind d) =
   contextItems (contextKind d)++[(Plugin.menuTitle item,contributionCommand d item) | item<-contributedMenus d,Plugin.menuSlot item=="context.source"]
+contextItemsFor d | contextKind d==WindowRowsContext = [(Plugin.menuTitle item,contributionCommand d item) | item<-contributedMenus d,Plugin.menuSlot item=="context.window-rows",Plugin.menuReference item `elem` windowRowMenuRefs d]
 contextItemsFor d=contextItems (contextKind d)
 
 sourceContextDocument :: Document -> Bool
@@ -2199,6 +2256,23 @@ messageInvocationTarget :: Desktop -> Maybe ContextTarget
 messageInvocationTarget d
   | contextMenu d/=Nothing && contextKind d==MessagesContext = contextTarget d
   | otherwise = captureContextTarget MessagesContext d
+
+-- Prepared metadata alone scopes row menu visibility. An unrelated list has
+-- no attached refs; labels, durable type and NodeId spelling confer no actions.
+windowRowMenuRefs :: Desktop -> [Plugin.MenuRef]
+windowRowMenuRefs d=windowRowMenuRefsFor (rowInvocationTarget d) d
+
+windowRowMenuRefsFor :: Maybe ContextTarget -> Desktop -> [Plugin.MenuRef]
+windowRowMenuRefsFor (Just (WindowRowTarget reference _)) d=case M.lookup reference (pluginWindows d) of
+  Just prepared | PluginWindow.RowsDetails _ _ references<-PluginWindow.preparedWindowRows prepared->references
+  _->[]
+windowRowMenuRefsFor _ _=[]
+
+-- An open rows popup keeps its captured job; direct invocation takes current ID.
+rowInvocationTarget :: Desktop -> Maybe ContextTarget
+rowInvocationTarget d
+  | contextMenu d/=Nothing && contextKind d==WindowRowsContext=contextTarget d
+  | otherwise=captureContextTarget WindowRowsContext d
 
 conversationSettings :: Desktop -> [AgentSetting]
 conversationSettings d=if T.null (conversationTarget d) then agentSettings d else childAgentSettings d
@@ -2252,6 +2326,11 @@ openContext kind x y d = d {contextKind=kind,contextTarget=captureContextTarget 
 -- Focus or edits while a popup is open refuse it instead of redirecting it.
 captureContextTarget :: ContextKind -> Desktop -> Maybe ContextTarget
 captureContextTarget kind d = case kind of
+  WindowRowsContext -> do
+    w<-activeWindow d
+    PluginContent reference<-pure (windowContent w)
+    (_,_,ident,_)<-windowRows d w
+    pure (WindowRowTarget reference ident)
   TreeContext trace _ -> Just (SidebarTarget trace)
   SourceContext -> source
   ChangeContext{} -> source
@@ -2297,6 +2376,10 @@ messagesOwner d=messagesDisplayed d && problemsFocused d && not (maybe False tre
 
 contextTargetCurrent :: Desktop -> Bool
 contextTargetCurrent d = case contextTarget d of
+  Just (WindowRowTarget reference ident) -> reference `S.notMember` retiredPluginWindows d &&
+    any ((==PluginContent reference).windowContent) (windows d) && case M.lookup reference (pluginWindows d) of
+      Just prepared | PluginWindow.RowsDetails _ index _<-PluginWindow.preparedWindowRows prepared->M.member ident index
+      _->False
   Just (SidebarTarget trace) -> maybe False (\tree->treeFocused tree && hitCurrent trace tree) (sideTree d)
   Nothing -> True
   Just (ConversationTarget target) -> conversationTarget d==target
@@ -2425,8 +2508,12 @@ windowMouse :: Int -> Int -> V.Button -> [V.Modifier] -> Desktop -> (Desktop,[Ef
 windowMouse x y button mods d = case find (\w -> windowVisible d w && inside (bounds w) x y) (windows d) of
   Nothing -> (d,[])
   Just w -> let focused = focusWindow (windowId w) d {sideTree=fmap (\sidebar -> sidebar {treeFocused=False}) (sideTree d)}; Rect l t ww hh = bounds w in case button of
+    V.BScrollUp | Just _<-windowRows focused w,inside (fst (rowsWindowRects w)) x y -> (moveWindowRow (-3) focused,[])
     V.BScrollUp -> (changeScroll True (-3) focused,[])
+    V.BScrollDown | Just _<-windowRows focused w,inside (fst (rowsWindowRects w)) x y -> (moveWindowRow 3 focused,[])
     V.BScrollDown -> (changeScroll True 3 focused,[])
+    V.BRight | Just _<-windowRows focused w,inside (fst (rowsWindowRects w)) x y ->
+      (openContext WindowRowsContext x y (selectAt False x y focused),[])
     V.BRight | Just command<-linkAt x y focused -> (openContext (LinkContext command) x (y+1) focused,[])
     V.BRight | x>l && x<l+ww-1 && y>t && y<t+hh-1,
                Just command<-shellBlockAt x y focused -> (openContext (ShellContext command) x y focused,[])
@@ -2630,14 +2717,15 @@ windowScrollbar d vertical original=case windowContent original of
   SourceContent _->do
     doc<-windowDocument (buffers d) original
     pure (scrollbarRect d vertical doc w,scrollbarLimit d vertical doc w)
-  PluginContent reference->do
-    prepared<-M.lookup reference (pluginWindows d)
-    let Rect x y ww hh=bounds w
-        rect=if vertical then Rect (x+ww-1) (y+1) 1 (max 0 (hh-2))
+  PluginContent _->do
+    prepared<-windowPluginText d w
+    let Rect x y ww hh= bounds w
+        detail=pluginTextRect w
+        rect=if vertical then Rect (x+ww-1) (top detail) 1 (height detail)
           else Rect (x+2) (y+hh-1) (max 0 (ww-4)) 1
         extent=if vertical then windowTextRows d w (PluginWindow.preparedWindowText prepared)
           else maybe (PluginWindow.preparedWindowWidth prepared) TextLayout.layoutWidth (windowPresentation d w)
-        viewport=if vertical then max 1 (hh-2) else max 1 (ww-2)
+        viewport=if vertical then max 1 (height detail) else max 1 (ww-2)
     pure (rect,max 0 (extent-viewport+(if vertical then 0 else 1)))
   where w=displayWindow original
 
@@ -2680,7 +2768,7 @@ scrollClick vertical x y d = case activeWindow d of
         len=if vertical then height r else width r
         offset=if vertical then y-top r else x-left r
         thumb=scrollbarThumb len limit (if vertical then scrollRow w else scrollColumn w)
-        page=max 1 ((if vertical then height else width) (bounds w)-2)
+        page=max 1 (case windowContent w of PluginContent _->(if vertical then height else width) (pluginTextRect w); _->(if vertical then height else width) (bounds w)-2)
     in if offset==0 then changeScroll vertical (-1) d
        else if offset==len-1 then changeScroll vertical 1 d
        else if offset==thumb then d {drag=Just (Scrolling (windowId w) vertical)}
@@ -2701,12 +2789,15 @@ selectAt extend x y d | activeMarkdown d,Just original<-activeWindow d,Just (_,t
   let w=displayWindow original; row=y-top (bounds w)-1+scrollRow w; col=x-left (bounds w)-1+scrollColumn w
   in markdownMoveTo extend (windowTextOffset d w text row col) d
 selectAt _ _ _ d | activeMarkdown d=d
+selectAt _ x y d | Just w<-activeWindow d,Just (_,index,ident,_)<-windowRows d w,
+  inside (fst (rowsWindowRects w)) x y = selectWindowRow (rowsListOffset w (fromMaybe 0 (M.lookup ident index))+y-top (fst (rowsWindowRects w))) d
 selectAt extend x y d | Just view<-activePluginWindow d,Just w<-activeWindow d =
   let text=PluginWindow.preparedWindowText view
-      row=max 0 (min (windowTextRows d w text-1) (y-top (bounds w)-1+scrollRow w))
-      col=max 0 (x-left (bounds w)-1+scrollColumn w)
+      row=max 0 (min (windowTextRows d w text-1) (y-top (pluginTextRect w)+scrollRow w))
+      col=max 0 (x-left (pluginTextRect w)+scrollColumn w)
       pos=windowTextOffset d w text row col
-  in pluginMoveTo extend pos d
+      focused=modifyActive (\v->v {rowsInteraction=fmap (\(RowsInteraction ident _)->RowsInteraction ident True) (rowsInteraction v)}) d
+  in pluginMoveTo extend pos focused
 selectAt extend x y d = case activeWindow d of
   Nothing -> d
   Just w | activeHex d -> let { col=max 0 (x-left (bounds w)-1+scrollColumn w)
@@ -2726,8 +2817,16 @@ selectAt extend x y d = case activeWindow d of
 
 -- | Read-only semantic text navigation; printable keys cannot edit a source behind it.
 pluginKey :: V.Key -> [V.Modifier] -> Desktop -> Desktop
-pluginKey key mods d | Just view<-activePluginWindow d,Just w<-activeWindow d = readOnlyTextKey (PluginWindow.preparedWindowText view) w (\extend target->pluginMoveTo extend target d) key mods d
-pluginKey _ _ d=d
+pluginKey key mods d | Just w<-activeWindow d,Just (rows,index,ident,details)<-windowRows d w =
+  if key==V.KChar '\t' || key==V.KBackTab then
+    modifyActive (\v->v {rowsInteraction=Just (RowsInteraction ident (not details))}) d
+  else if not details then selectWindowRow (listChoice key (Vec.length rows) (fromMaybe 0 (M.lookup ident index))) d
+  else pluginDetailsKey key mods d
+pluginKey key mods d=pluginDetailsKey key mods d
+
+pluginDetailsKey :: V.Key -> [V.Modifier] -> Desktop -> Desktop
+pluginDetailsKey key mods d | Just view<-activePluginWindow d,Just w<-activeWindow d = readOnlyTextKey (PluginWindow.preparedWindowText view) w (\extend target->pluginMoveTo extend target d) key mods d
+pluginDetailsKey _ _ d=d
 
 readOnlyTextKey :: BufferContent -> Window -> (Bool -> Int -> Desktop) -> V.Key -> [V.Modifier] -> Desktop -> Desktop
 readOnlyTextKey text w moveToText key mods d=
@@ -2751,7 +2850,7 @@ pluginMoveTo extend requested d | Just view<-activePluginWindow d, Just w<-activ
       pos=max 0 (min (contentLength text) requested)
       (row,col)=windowTextPosition d w text pos
       update w=w {selection=Selection (if extend then anchor (selection w) else pos) pos,
-      scrollRow=max 0 (min row (max (scrollRow w) (row-height (bounds w)+3))),
+      scrollRow=max 0 (min row (max (scrollRow w) (row-height (pluginTextRect w)+1))),
       scrollColumn=max 0 (min col (max (scrollColumn w) (col-width (bounds w)+3)))}
   in modifyActive update d
 pluginMoveTo _ _ d=d
@@ -3013,6 +3112,7 @@ sourceNavigationOwner d=dialog d==Nothing && not (questionActive d) && not (acti
 -- | Preserve each window's existing displayed selection and source coordinate owner.
 horizontalMove :: Bool -> Bool -> Desktop -> Desktop
 horizontalMove forward extend d
+  | Just w<-activeWindow d,Just (_,_,_,False)<-windowRows d w=moveWindowRow (if forward then 1 else -1) d
   | activeMarkdown d = case activeWindow d of
       Just w | Just (_,text,_)<-windowMarkdown d w ->
         markdownMoveTo extend (horizontalTextOffset forward text (caret (selection (displayWindow w)))) d
@@ -3039,6 +3139,7 @@ horizontalTextOffset forward text pos
 -- | Preserve each owner's existing row geometry, selection and visibility.
 verticalMove :: Int -> Bool -> Desktop -> Desktop
 verticalMove delta extend d
+  | Just w<-activeWindow d,Just (_,_,_,False)<-windowRows d w=moveWindowRow delta d
   | activeMarkdown d = case activeWindow d of
       Just w | Just (_,text,_)<-windowMarkdown d w ->
         markdownMoveTo extend (verticalTextOffset d (displayWindow w) text (caret (selection (displayWindow w))) delta) d
@@ -3067,6 +3168,7 @@ verticalTextOffset d w text pos delta=windowTextOffset d w text next col
 -- | Resolve row edges in the current displayed geometry; hex End keeps its last-byte convention.
 rowEdge :: Bool -> Bool -> Desktop -> Desktop
 rowEdge end extend d
+  | Just w<-activeWindow d,Just (rows,_,_,False)<-windowRows d w=selectWindowRow (if end then Vec.length rows-1 else 0) d
   | activeMarkdown d = case activeWindow d of
       Just w | Just (_,text,_)<-windowMarkdown d w ->
         markdownMoveTo extend (textEdge (displayWindow w) text) d
@@ -3091,6 +3193,7 @@ rowEdge end extend d
 -- | Document edges use measured lengths in their owning source or prepared text.
 documentEdge :: Bool -> Bool -> Desktop -> Desktop
 documentEdge end extend d
+  | Just w<-activeWindow d,Just (rows,_,_,False)<-windowRows d w=selectWindowRow (if end then Vec.length rows-1 else 0) d
   | activeMarkdown d = case activeWindow d of
       Just w | Just (_,text,_)<-windowMarkdown d w ->markdownMoveTo extend (edge (contentLength text)) d
       _->d
@@ -3102,7 +3205,7 @@ documentEdge end extend d
 -- | Source/hex pages reserve three chrome rows; prepared read-only text reserves two.
 pageMove :: Bool -> Bool -> Desktop -> Desktop
 pageMove forward extend d=verticalMove (if forward then page else negate page) extend d
-  where page=maybe 10 (\w->max 1 (height (bounds w)-if activeMarkdown d || isJust (activePluginWindow d) then 2 else 3)) (activeWindow d)
+  where page=maybe 10 (\w->case windowRows d w of Just (_,_,_,details)->max 1 (height (if details then snd (rowsWindowRects w) else fst (rowsWindowRects w))); _->max 1 (height (bounds w)-if activeMarkdown d || isJust (activePluginWindow d) then 2 else 3)) (activeWindow d)
 
 -- | Use measured scalar word boundaries in source; preserve byte/grapheme steps in other views.
 wordMove :: Bool -> Bool -> Desktop -> Desktop
@@ -3393,11 +3496,18 @@ fieldKey key mods field = case field of
     V.KEnd -> TextArea name editable b sel (max 0 (bufferLineCount b-1)) col
     _ -> scrollTextArea (case key of V.KUp -> -1; V.KDown -> 1; V.KPageUp -> -8; V.KPageDown -> 8; _ -> 0) field
   CheckBox label value | key==V.KChar ' ' -> CheckBox label (not value)
-  Radio label values chosen -> Radio label values (choose values chosen)
-  FileList values chosen -> FileList values (max 0 (min (length values-1) (case key of V.KLeft -> chosen-8; V.KRight -> chosen+8; V.KPageUp -> chosen-16; V.KPageDown -> chosen+16; V.KHome -> 0; V.KEnd -> length values-1; _ -> choose values chosen)))
+  Radio label values chosen -> Radio label values (step values chosen)
+  FileList values chosen -> FileList values (max 0 (min (length values-1) (case key of V.KLeft -> chosen-8; V.KRight -> chosen+8; V.KPageUp -> chosen-16; V.KPageDown -> chosen+16; V.KHome -> 0; V.KEnd -> length values-1; _ -> step values chosen)))
   ListBox label values chosen -> ListBox label values (choose values chosen)
   _ -> field
-  where choose xs n = max 0 (min (length xs-1) (n + case key of V.KUp -> -1; V.KDown -> 1; V.KLeft -> -1; V.KRight -> 1; V.KChar ' ' -> 1; _ -> 0))
+  where choose xs n = listChoice key (length xs) n
+        step xs n=max 0 (min (length xs-1) (n+case key of V.KUp -> -1; V.KDown -> 1; V.KLeft -> -1; V.KRight -> 1; V.KChar ' ' -> 1; _ -> 0))
+
+-- | Shared bounded chosen-row navigation for modal lists and fixed row windows.
+listChoice :: V.Key -> Int -> Int -> Int
+listChoice key count chosen=max 0 (min (count-1) (case key of
+  V.KHome->0; V.KEnd->count-1; V.KPageUp->chosen-8; V.KPageDown->chosen+8
+  V.KUp->chosen-1; V.KDown->chosen+1; V.KLeft->chosen-1; V.KRight->chosen+1; V.KChar ' '->chosen+1; _->chosen))
 
 submitDialog :: Int -> Dialog -> Desktop -> (Desktop,[Effect])
 submitDialog button dg original

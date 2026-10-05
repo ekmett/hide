@@ -437,23 +437,40 @@ pluginWindowLayers d active w prepared=
     rows=PluginWindow.preparedWindowRows prepared
     title=" "<>T.take (columnOffset (windowTitle d w) (max 0 (ww-17))) (windowTitle d w)<>" "
     column=max 6 ((ww-keyLabelWidth title) `div` 2)
-    bodyLayers | Just layout<-windowPresentation d w =
+    bodyLayers | PluginWindow.RowsDetails listed index _<-rows =
+      let (listRect,detailRect)=rowsWindowRects w
+          chosen=case rowsInteraction w of Just (RowsInteraction ident _)->fromMaybe 0 (M.lookup ident index); _->0
+          offset=rowsListOffset w chosen
+          detailsFocused=case rowsInteraction w of Just (RowsInteraction _ focused)->focused; _->False
+          detail=fromMaybe prepared (windowPluginText d w)
+          detailText=PluginWindow.preparedWindowText detail
+          listImages=[place (left listRect) (top listRect+n-offset)
+            (V.cropRight (width listRect) (label (if active && n==chosen then attr blue white else edit) caption V.<|>V.charFill edit ' ' (width listRect) 1))
+            | n<-[offset..offset+height listRect-1],Just (PluginWindow.WindowRow _ caption _)<-[listed Vec.!? n]]
+          detailLayers=case PluginWindow.preparedWindowRows detail of
+            PluginWindow.PlainRows plain->plainLayers detailRect detailText plain (active && detailsFocused)
+            _->[]
+      in detailLayers++map CellImage (listImages++[place (x+1) (top detailRect-1) (label frame " Details " V.<|>V.charFill frame '─' (max 0 (ww-11)) 1),
+        place (x+1) (y+1) (V.charFill edit ' ' (max 0 (ww-2)) (max 0 (hh-2)))])
+      | Just layout<-windowPresentation d w =
       [styledLayoutRow (darkAppearance d) (const True) active (selection w)
         (Rect (x+1) (y+1+n-scrollRow w) (max 0 (ww-2)) 1) (scrollColumn w) row
       | n<-[scrollRow w..scrollRow w+max 0 (hh-3)],Just row<-[TextLayout.layoutRows layout Vec.!? n]]
       ++[CellImage (place (x+1) (y+1) (V.charFill edit ' ' (max 0 (ww-2)) (max 0 (hh-2))))]
-      | PluginWindow.PlainRows plain<-rows =
-      [sourceCellRow (darkAppearance d) Nothing active (selection w) (contentLineOffset text n)
-        (Rect (x+1) (y+1+n-scrollRow w) (max 0 (ww-2)) 1) (scrollColumn w) row
-      | n<-[scrollRow w..scrollRow w+max 0 (hh-3)],Just row<-[plain Vec.!? n]]
-      ++[CellImage (place (x+1) (y+1) (V.charFill edit ' ' (max 0 (ww-2)) (max 0 (hh-2))))]
+      | PluginWindow.PlainRows plain<-rows =plainLayers (pluginTextRect w) text plain active
       | otherwise=[CellImage (place (x+1) (y+1) body)]
+    plainLayers rect content plain focused=
+      [sourceCellRow (darkAppearance d) Nothing focused (selection w) (contentLineOffset content n)
+        (Rect (left rect) (top rect+n-scrollRow w) (width rect) 1) (scrollColumn w) row
+      | n<-[scrollRow w..scrollRow w+height rect-1],Just row<-[plain Vec.!? n]]
+      ++[CellImage (place (left rect) (top rect) (V.charFill edit ' ' (width rect) (height rect)))]
     body=V.vertCat [line n | n<-[scrollRow w..scrollRow w+max 0 (hh-3)]]
     line n=V.cropRight (max 0 (ww-2)) (lineImage V.<|> V.charFill edit ' ' (max 0 (ww-2)) 1)
       where
         start=contentLineOffset text n
         lineImage=case rows of
           PluginWindow.PlainRows _->V.emptyImage
+          PluginWindow.RowsDetails{}->V.emptyImage
           PluginWindow.StyledRows styled->V.translateX (negate (scrollColumn w))
             (styledImage (darkAppearance d) (const True) Nothing active (selection w) start (fromMaybe [] (styled Vec.!? n)))
 

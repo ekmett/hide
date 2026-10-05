@@ -22,16 +22,17 @@ import System.Environment (getArgs, lookupEnv, setEnv, unsetEnv)
 import System.FilePath ((</>))
 import Hide.App (applyEffects)
 import Hide.Conversation (withConversationAt, conversationEffects, tickConversation, renderReply)
-import Hide.Debugger (withDebugger, debuggerEffects, tickDebugger, hdbOfferDialog, downloadsDialog)
+import Hide.Debugger (withDebugger, debuggerEffects, tickDebugger, hdbOfferDialog)
 import qualified Hide.Compilers as Compilers
 import qualified Hide.HdbAcquisition as Hdb
-import qualified Hide.Downloads as Downloads
+import qualified Hide.Plugin.Window as PluginWindow
+import qualified Hide.Plugin.Tree as PluginTree
 import Hide.Environment (environmentAction)
 import Hide.Model
 import qualified EditorDriver as Driver
 
 main :: IO ()
-main = do
+main = PluginWindow.withWindowScope $ \downloadScope -> do
   root <- getCurrentDirectory
   requested <- getArgs
   captureDirectory <- lookupEnv "THC_DOCS_CAPTURE_DIR"
@@ -232,9 +233,15 @@ main = do
           -- Render the runtime's actual Downloads view from a deterministic
           -- progress snapshot; documentation capture never fetches an asset.
           , ("downloads", \d -> case hdbPlan of
-              Just plan->pure d {dialog=Just (downloadsDialog [Downloads.Download 1
-                ("hdb for GHC "<>Compilers.compilerVersion (Hdb.hdbCompiler plan))
-                (Downloads.DownloadRunning (Downloads.DownloadProgress "Downloading hdb" 5242880 (Just (Hdb.hdbAssetSize (Hdb.hdbAsset plan)))))] 0 Nothing)}
+              Just plan->do
+                details<-PluginWindow.prepareTextWindow "Details" ("Downloading hdb\n5242880 / "<>T.pack (show (Hdb.hdbAssetSize (Hdb.hdbAsset plan)))<>" bytes received")
+                ident<-either (fail . T.unpack) pure (PluginTree.nodeId "1")
+                prepared<-PluginWindow.prepareRecoverableRowsWindow "hide.downloads" 1 "Downloads" []
+                  [PluginWindow.WindowRow ident ("hdb for GHC "<>Compilers.compilerVersion (Hdb.hdbCompiler plan)<>" — Downloading hdb") details] >>= either (fail . T.unpack) pure
+                update<-PluginWindow.openTextWindow downloadScope prepared >>= maybe (fail "Downloads scope closed") pure
+                value<-PluginWindow.admitWindowUpdate False update >>= maybe (fail "Downloads publication expired") pure
+                let shown=uncurry addPluginWindow value d {streamerMode=False}
+                pure (case activeWindow shown of Just w->resizeWindowBounds (windowId w) (Rect 8 3 64 19) shown; _->shown)
               Nothing->fail "Request downloads explicitly")
           , ("find-replace", \d -> command Find d >>= typeText "bufferLineAt" >>= key (V.KChar 'h') [V.MCtrl] >>= typeText "lineAt")
           , ("permission-diff", permissionDiff)
@@ -279,7 +286,7 @@ capture effects scratch output name shown = do
         Nothing | Just (r,_)<-contextMenu shown -> Just r
         Nothing -> case menu shown of
           Just (i,_) -> Just (menuRect shown i)
-          Nothing | name `elem` ["conversation","debug-step","side-by-side"] -> bounds <$> activeWindow shown
+          Nothing | name `elem` ["conversation","debug-step","side-by-side","downloads"] -> bounds <$> activeWindow shown
                   | otherwise -> Nothing
       pixels = case crop of
         Nothing -> Nothing

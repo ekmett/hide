@@ -2,7 +2,8 @@
 
 Status: implemented typed command registration, immutable buffer reads and checked
 strict diffs, scoped menus/bindings, shared sidebar trees, prepared plugin text
-windows, and one host-owned single-line form. The current APIs are in
+windows, fixed rows with readonly Details, and one host-owned single-line form.
+The current APIs are in
 `Hide.Plugin.Command`, `Buffer`, `Menu`, `Tree`, `Window` and `Form`. The signatures
 below sketch the broader proposed contracts and are not a compilable SDK. The
 approved [sidebar design](../plans/sidebar-navigation.md) supplies the navigation
@@ -239,6 +240,31 @@ selection and navigation with the same attribution and version rules. Decoration
 are scoped overlays, not edits, and carry a source version or host-managed anchor.
 
 ## Custom windows
+
+### Current fixed rows and readonly Details
+
+`Hide.Plugin.Window.prepareRowsWindow` prepares a bounded selectable list above
+one readonly Details pane. Each `WindowRow` contains a stable `NodeId`, a caption
+and an already-prepared plain text snapshot. Explicit existing `MenuRef`s scope
+row actions to that prepared window; ordinary readonly lists pass `[]`. At most
+16 unique references are accepted, with command and contribution lifetime checked
+again on admission/adoption. These references grant no agent authority. The worker
+rejects duplicate IDs, more than 64 rows, control characters in captions, captions over 240 characters,
+nested/styled Details and Details over 16384 characters. The host keeps the
+selected ID across reorder/progress, and preserves or clamps the existing Details
+selection and scroll. Switching rows resets that same text-area state; resize
+changes only geometry. Arrows and the mouse wheel select list rows, while Tab or
+clicking Details enters its normal readonly selection/copy route.
+
+Downloads uses this fixed surface and the existing typed menu worker. Cancel
+captures the exact window lifetime and job ID; the Downloads owner rechecks the
+live window, human input policy and job before signaling cancellation. Progress
+and selecting another row cannot retarget a captured action. Close/reopen and
+registration retirement reject late actions. Closing the manager leaves transfers
+running and progress cannot reopen it. Durable rows restore only a private inert
+label summary; recovery does not reconnect jobs or restore actions/Details.
+
+### Broader proposed window contract
 
 Separate a window's content from its chrome. The host supplies the title, number,
 frame, focus, drag/resize/docking, scrollbars and close negotiation. A content view

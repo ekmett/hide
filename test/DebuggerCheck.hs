@@ -46,16 +46,6 @@ outputOwnerChecks=withDebugger $ \runtime->do
   after<-tickDebugger runtime (\d _->pure (False,d)) trapped
   count<-evaluate (sum [maybe 0 (const 1) (documentLabel doc) | doc<-M.elems (buffers after)])
   check "idle debugger leaves unrelated output-labelled buffers untouched" (count==1)
-  let downloads=downloadsDialog [] 0 Nothing
-      protected=downloads {fields=[ListBox "Transfers" [] 0,TextArea "Details" False
-        (error "idle Downloads tick forced retained details Buffer") (Selection 0 0) 0 0]}
-  retained<-tickDebugger runtime (\d _->pure (False,d)) (initialDesktop (80,25)) {dialog=Just protected}
-  case dialog retained of
-    Just dg->case fields dg of
-      _:TextArea title _ _ _ _ _:_ ->evaluate (T.length title) >> pure ()
-      _->error "missing retained Downloads details"
-    _->error "Downloads dialog unexpectedly closed"
-
 -- Real DAP messages exercise automatic opening, exact refresh, closure and a
 -- replacement transport. No callback or prepared-window test seam is exposed.
 outputLifecycleCheck :: IO ()

@@ -166,6 +166,7 @@ guestEffectsAllowed=all allowed
     allowed SaveWideSectionTitles{}=False
     allowed SaveChatSubmit{}=False
     allowed AutocompleteAction{}=False
+    allowed DownloadCancelAction{}=False
     allowed (DebugAction action _)=not (privateDebuggerAction action)
     allowed (AgentAction action _)=agentActionAllowed action
     allowed (SaveDocument _ _ follow)=maybe True guestCommandAllowed follow
@@ -201,6 +202,7 @@ privateFrameChooserAction action=case T.splitOn ":" action of
 guestModalBlocked :: Desktop -> Bool
 guestModalBlocked d=maybe False (protectedPurpose . purpose) (dialog d) || case (contextMenu d,contextKind d) of
   (Just _,AgentContext{}) -> True
+  (Just _,WindowRowsContext) -> True
   _ -> False
 guestKeyboardAllowed :: Desktop -> Bool
 guestKeyboardAllowed d=not (guestModalBlocked d) && not (focusedPrivateField d) && (isJust (dialog d) || problemsFocused d || maybe False treeFocused (sideTree d) || maybe True (not . protectedWindow d) (activeWindow d))
@@ -329,6 +331,7 @@ readableAt d x y
 -- Labels remain visible; only sensitive value rows are blanked.
 streamerReadableAt :: Desktop -> Int -> Int -> Bool
 streamerReadableAt d x y
+  | contextKind d==WindowRowsContext,Just (rect,_)<-contextMenu d,inside rect x y=False
   | Just dg<-dialog d,pluginForm dg,inside (dialogRect d dg) x y || y==snd (screenSize d)-1=False
   | Just dg<-dialog d, DebugDialog action<-purpose dg, (action=="downloads" || "downloads:" `T.isPrefixOf` action || privateFrameChooserAction action),
     inside (dialogRect d dg) x y || y==snd (screenSize d)-1=False

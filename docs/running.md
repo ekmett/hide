@@ -231,9 +231,11 @@ downloads nothing. The checksum and compiler ABI are checked before installation
 
 [![Concrete hdb download offer with compiler, source and destination.](site/screenshots/hdb-download.png)](site/screenshots/hdb-download.png)
 
-**Tools > Downloads** shows progress, received bytes and failures. Progress prepares
+**Tools > Downloads** opens a nonmodal transfer list above a readonly Details pane.
+Select a row with the arrows or mouse wheel, then use Tab or click Details to select
+and copy text. The source remains available in its own window. Progress prepares
 in the background; refreshing keeps the selected transfer and Details selection.
-**Cancel selected** targets that captured transfer even if progress or rows change;
+Right-click the transfer row and choose **Cancel transfer** to target that captured transfer even if progress or rows change;
 closing and reopening retires old Cancel actions. Closing the window lets transfers
 continue and background progress never reopens it. Downloads remain protected from
 agent input and screen reads; Streamer mode also hides the manager. After installation,
@@ -243,7 +245,7 @@ or stopping the debugger invalidates that continuation. The installed tool
 remains available for a later launch. See [Installation](install.md#matching-haskell-debugger)
 for the cache location and supported binary releases.
 
-[![Downloads progress with received bytes and Cancel selected.](site/screenshots/downloads.png)](site/screenshots/downloads.png)
+[![Downloads transfer list and readonly Details.](site/screenshots/downloads.png)](site/screenshots/downloads.png)
 
 hdb uses that file's cradle/component and its own compiled-in
 GHC version. A customized GHC executable requires explicit **Adapter config**,

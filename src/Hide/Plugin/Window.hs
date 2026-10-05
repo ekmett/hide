@@ -1,5 +1,14 @@
 {-# LANGUAGE OverloadedStrings #-}
--- | Prepared read-only plugin content, independent of source documents.
+-- SPDX-License-Identifier: BSD-3-Clause
+-- |
+-- Module      : Hide.Plugin.Window
+-- Copyright   : (c) Edward Kmett
+-- License     : BSD-3-Clause
+-- Maintainer  : Edward Kmett
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- Prepared read-only plugin content, independent of source documents.
 --
 -- Preparation belongs to a command/reply worker. The opaque instance identity
 -- is fresh for each open request; the host owns geometry, focus and selection.
@@ -9,6 +18,7 @@ module Hide.Plugin.Window
   ( WindowRef, WindowScope, WindowUpdate, withWindowScope, openTextWindow, refreshTextWindow
   , updateWindowRef, admitWindowUpdate, windowRefCurrent, retireWindowRef
   , PreparedWindow, prepareTextWindow, prepareMarkdownWindow, prepareStyledTextWindow, prepareRecoverableTextWindow
+  , WindowRow(..), prepareRowsWindow, prepareRecoverableRowsWindow
   , WindowRows(..), preparedWindowTitle, preparedWindowText, preparedWindowRows, preparedWindowWidth, preparedWindowHasSections, preparedWindowNeedsLayout, preparedWindowRecovery
   ) where
 
@@ -18,7 +28,11 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Unique (Unique, newUnique, hashUnique)
 import qualified Data.Vector as V
-import Hide.Buffer (BufferContent, bufferContent, newBuffer, prepareBuffer)
+import qualified Data.Map.Strict as M
+import Hide.Plugin.Tree (NodeId)
+import Hide.Plugin.Menu (MenuRef)
+import Data.List (nub)
+import Hide.Buffer (contentLength,BufferContent, bufferContent, newBuffer, prepareBuffer)
 import Hide.Unicode (sourceTextWidth)
 import Hide.Markdown (renderMarkdown)
 import Hide.Plugin.Command (validCommandName)
@@ -35,7 +49,11 @@ instance Show WindowRef where
 
 -- | Fully prepared immutable text and styled display rows. Equality observes
 -- the unique prepared identity only, never text or styled payloads.
+-- | One stable selectable row and its already-prepared plain Details snapshot.
+-- IDs are local to the containing WindowRef; labels never identify actions.
+data WindowRow = WindowRow !NodeId !Text !PreparedWindow
 data WindowRows = PlainRows !(V.Vector SourceRow) | StyledRows !(V.Vector [(Char,Style)])
+  | RowsDetails !(V.Vector WindowRow) !(M.Map NodeId Int) ![MenuRef]
 data PreparedWindow = PreparedWindow !Unique !Text !BufferContent !WindowRows !Int !(Maybe (Text,Int)) !Bool !Bool
 preparedWindowRef :: PreparedWindow -> Unique
 preparedWindowRef (PreparedWindow ident _ _ _ _ _ _ _)=ident
@@ -76,6 +94,51 @@ prepareRecoverableTextWindow kind version title text
   | otherwise=do
       PreparedWindow ident caption measured rows width _ sections scripts<-prepareTextWindow title text
       pure (Right (PreparedWindow ident caption measured rows width (Just (kind,version)) sections scripts))
+
+-- | Prepare a fixed selectable list above one readonly Details pane on a worker.
+-- Refresh preserves the selected ID if present; host geometry, draft selection
+-- and scroll are independent of publication identity. Explicit menu references
+-- scope row actions to this prepared view; readonly lists pass @[]@. Up to 16
+-- distinct refs are allowed; they grant no execution or agent authority.
+-- Details must be ordinary prepared text, never nested rows or styled layout.
+-- At most 64 unique rows with control-free captions of at most 240 characters
+-- and Details of at most 16384 characters are accepted. The fallback is a label
+-- summary, never a duplicate Details body.
+prepareRowsWindow :: Text -> [MenuRef] -> [WindowRow] -> IO (Either Text PreparedWindow)
+prepareRowsWindow title references entries
+  | length (take 17 references)>16 || length (nub references)/=length references=pure (Left "Window rows require at most 16 unique menu references.")
+  | length (take 65 entries)>64=pure (Left "Too many window rows.")
+  | otherwise=case validate entries M.empty 0 of
+      Left err->pure (Left err)
+      Right index->do
+        -- Force captions, IDs and shape before the host can receive this page.
+        _<-evaluate (M.size index)
+        mapM_ evaluate references
+        let rows=V.fromList entries
+        _<-evaluate (V.foldl' (\n (WindowRow ident caption detail)->ident `seq` detail `seq` n+T.length caption) 0 rows)
+        PreparedWindow ident caption text _ width recovery sections scripts<-prepareTextWindow title
+          (T.intercalate "\n" [label | WindowRow _ label _<-entries])
+        pure (Right (PreparedWindow ident caption text (RowsDetails rows index references) width recovery sections scripts))
+  where
+    validate [] index _=Right index
+    validate (WindowRow ident caption detail:rest) index n
+      | M.member ident index=Left "Duplicate window row ID."
+      | T.length caption>240 || T.any (\c->c<' ' || c=='\DEL') caption=Left "Invalid window row caption."
+      | contentLength (preparedWindowText detail)>16384=Left "Window row Details exceed 16384 characters."
+      | PlainRows{}<-preparedWindowRows detail=validate rest (M.insert ident n index) (n+1)
+      | otherwise=Left "Window row Details require plain prepared text."
+
+-- | Durable rows restore only their private inert label summary; IDs, actions
+-- and Details are not checkpointed or reconnected by recovery.
+prepareRecoverableRowsWindow :: Text -> Int -> Text -> [MenuRef] -> [WindowRow] -> IO (Either Text PreparedWindow)
+prepareRecoverableRowsWindow kind version title references entries
+  | not (validCommandName kind) || T.length kind>128 || version<=0=pure (Left "Invalid durable plugin window type/version.")
+  | otherwise=do
+      result<-prepareRowsWindow title references entries
+      pure $ case result of
+        Left err->Left err
+        Right (PreparedWindow ident caption text rows width _ sections scripts)->
+          Right (PreparedWindow ident caption text rows width (Just (kind,version)) sections scripts)
 
 instance Eq PreparedWindow where
   a==b=preparedWindowRef a==preparedWindowRef b
