@@ -97,6 +97,7 @@ import Hide.Browser (Entry(..))
 import qualified MarkdownViewCheck
 import qualified WideTextCheck
 import qualified TextStyleCheck
+import qualified PluginFormCheck
 import qualified PluginWindowsCheck
 import qualified WindowCheck
 import qualified FilesCheck
@@ -311,6 +312,7 @@ main = do
   MarkdownViewCheck.checks
   WideTextCheck.checks
   TextStyleCheck.checks
+  PluginFormCheck.checks
   PluginWindowsCheck.checks
   WindowCheck.checks
 #ifdef WITH_FONT

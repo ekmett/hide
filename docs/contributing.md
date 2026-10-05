@@ -563,8 +563,15 @@ filesystem observation refresh. Other domain providers remain subsequent work.
 return only closed `AgentSidebarRequest` values. After exact hit/lifetime/modal
 validation, `tickSidebar` dispatches one `AgentSidebarAction` through the existing
 Conversation interpreter. Plugin handlers receive no Desktop or unrestricted
-effect-list callback. Conversation owns captured-ID dialogs/views and one creation
-attempt; AgentHub owns rename validation and the shared spawn/task rollback.
+effect-list callback. Conversation owns captured-ID views and one creation attempt; AgentHub owns
+rename validation and the shared spawn/task rollback. Agents Rename uses public
+`Hide.Plugin.Form` preparation and the existing Sidebar action worker. The host
+retains its SelectedInput draft/selection, validates exact FormRef ownership,
+claims a human submission once and rechecks registration before dispatching the
+closed RenameAgentTo result. Form metadata refresh carries no callback, cannot
+open a modal, and preserves draft/selection through resize. Scope retirement or
+a newer modal rejects a delayed reply. `PluginFormCheck` exercises public
+lifetime laws; `AgentSidebarCheck` covers the real input/adoption route.
 
 A single metadata worker prepares only names, parent IDs and states from
 `agentSummaries`; tasks, histories, transcripts and private provider keys never

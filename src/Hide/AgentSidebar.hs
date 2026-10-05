@@ -16,7 +16,8 @@ import Control.Concurrent.Async (withAsync)
 import Control.DeepSeq (force)
 import Control.Exception (evaluate)
 import Control.Monad (forever,foldM)
-import Data.Aeson (Value(Null))
+import Data.Aeson (Value(Null),withObject,(.:))
+import Data.Aeson.Types (parseMaybe)
 import Data.IORef
 import qualified Data.Map.Strict as M
 import qualified Data.Set as S
@@ -29,6 +30,7 @@ import Hide.AgentRuntime (AgentRuntime,agentHub)
 import Hide.Autocomplete (Autocomplete,completionSummary)
 import Hide.AgentSidebarTypes
 import Hide.Model (Desktop)
+import qualified Hide.Plugin.Form as Form
 import Hide.Plugin.Command
 import qualified Hide.Plugin.Menu as Menu
 import qualified Hide.Plugin.Tree as P
@@ -57,7 +59,20 @@ withAgentSidebar host runtime autocomplete use=withRegistry $ \registry->do
   let command name title run=registerCommand registry (CommandDef name title hidden hidden run) >>= either (ioError . userError . show) pure
       human ctx value=if sidebarOrigin ctx==Menu.HumanMenu then pure (Right (SidebarAgent value)) else pure (Left (CommandRejected "Agent sidebar actions require the human."))
   open<-command "hide.sidebar.agents.open" "Conversation" (\ctx who->human ctx (ShowAgent who))
-  rename<-command "hide.sidebar.agents.rename" "Rename" (\ctx who->human ctx (RenameAgent who))
+  renameTo<-command "hide.sidebar.agents.rename-to" "Rename agent" (\ctx (who,name)->do
+    let copied=T.copy name
+    _<-evaluate (T.length copied)
+    human ctx (RenameAgentTo who copied))
+  rename<-command "hide.sidebar.agents.rename" "Rename" (\ctx who->
+    if sidebarOrigin ctx/=Menu.HumanMenu then pure (Left (CommandRejected "Agent forms require the human.")) else do
+      selected<-A.statusAgent (agentHub runtime) A.Human who
+      case selected of
+        Left err->pure (Left (CommandRejected err))
+        Right entry->do
+          let name=case parseMaybe (withObject "Agent" (.: "name")) entry of Just value->value; Nothing->A.agentIdText who
+          prepared<-Form.prepareInputForm (Form.InputFormSpec "Rename agent" "Name" name "Rename")
+            (Form.formAction registry renameTo (\text->(who,text)) (\_ reply->pure reply))
+          pure (SidebarForm <$> prepared))
   let configurationCommand category ctx who=do
         captured<-A.agentConfiguration (agentHub runtime) who
         case captured of

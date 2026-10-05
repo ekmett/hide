@@ -5,14 +5,14 @@
 module Hide.SidebarCommands
   ( SidebarHost, SidebarContext(..), SidebarReply(..), withSidebarCommands
   , sidebarRegistry, publishTreeFromHost, retireTreeFromHost, sidebarEffects
-  , tickSidebar, refreshTreeFromHost, initializeSidebar, prepareSidebarFile
+  , tickSidebar, refreshTreeFromHost, initializeSidebar, prepareSidebarFile, publishFormRefreshFromHost
   ) where
 
 import Control.Concurrent.Async (Async,async,cancel,poll)
 import qualified Control.Concurrent.Async
 import Control.Concurrent.STM
 import Control.DeepSeq (force)
-import Control.Exception (bracket,evaluate,displayException)
+import Control.Exception (bracket,evaluate,displayException,mask,onException)
 import Control.Monad (foldM,forever,forM,filterM,when)
 import Data.Aeson (Value(Null))
 import Data.IORef
@@ -26,7 +26,7 @@ import Data.Char (toLower)
 import System.Mem.StableName
 import Text.Read (readMaybe)
 import Hide.Browser
-import Hide.Buffer (captureDirty,snapshotDirty,bufferLineChanges,prepareBuffer)
+import Hide.Buffer (captureDirty,snapshotDirty,bufferLineChanges,prepareBuffer,Selection(..))
 import Hide.Plugin.BufferHost (ContentVersion,captureVersion,versionCurrent)
 import Hide.Files (FileState(..),loadFile)
 import Hide.GuestAccess (protectedPath,protectedFilePath,protectedBuffer)
@@ -35,6 +35,8 @@ import Hide.PluginWindowHost (adoptWindowUpdate)
 import qualified Hide.Plugin.Window as PluginWindow
 import Hide.Model
 import Hide.DebuggerSidebarTypes
+import qualified Hide.AgentHub
+import qualified Hide.Plugin.Form as Form
 import Hide.AgentSidebarTypes
 import Hide.SessionSidebarTypes
 import Hide.Sidebar
@@ -46,10 +48,12 @@ import qualified Hide.Plugin.Menu as Menu
 data SidebarContext = SidebarContext
   { sidebarOrigin :: !Menu.MenuOrigin, sidebarPrivatePaths :: ![FilePath]
   , sidebarColumns :: !Int, sidebarOpened :: !(Maybe (FilePath,Int,Int,ContentVersion)) }
-data SidebarReply = SidebarSession !SessionSidebarRequest | SidebarExisting !FilePath !Int !Int !ContentVersion | SidebarDocument !FilePath !Document | SidebarPrepared !LinkResult | SidebarAgent !AgentSidebarRequest | SidebarDebug !DebugSidebarRequest | SidebarWindow !PluginWindow.WindowUpdate
+data SidebarReply = SidebarForm !(Form.PreparedInputForm SidebarContext SidebarReply) | SidebarSession !SessionSidebarRequest | SidebarExisting !FilePath !Int !Int !ContentVersion | SidebarDocument !FilePath !Document | SidebarPrepared !LinkResult | SidebarAgent !AgentSidebarRequest | SidebarDebug !DebugSidebarRequest | SidebarWindow !PluginWindow.WindowUpdate
 
 data ChildJob = ChildJob !TreeRequest !Menu.MenuOrigin !(Async (Either CommandError (P.PreparedPage SidebarContext SidebarReply))) !Bool
 data ActionJob = ActionJob ![P.TreeHit] !CommandRef !Menu.MenuOrigin !Int !(Async (Either CommandError SidebarReply)) !Bool
+  | FormJob !Form.FormRef !(Async (Either CommandError SidebarReply)) !Bool
+data Publication = TreePublication !(P.TreeProvider SidebarContext SidebarReply) | FormRefresh !Form.InputFormUpdate
 data FilesProvider = FilesProvider !(P.TreeProvider SidebarContext SidebarReply) !FilePath !CommandRef !(IORef (M.Map P.NodeId FilePath,M.Map FilePath P.NodeId,Int,M.Map FilePath [Entry]))
 data State = State
   { providers :: !(M.Map P.TreeRef (P.TreeProvider SidebarContext SidebarReply))
@@ -59,10 +63,10 @@ data State = State
   , actionJob :: !(Maybe ActionJob), filesProvider :: !(Maybe FilesProvider)
   , badgeStamp :: !(Maybe (StableName (M.Map Int Document)))
   , badgeJob :: !(Maybe (StableName (M.Map Int Document),Async (M.Map FilePath (Bool,Int,Int))))
-  , sidebarRevision :: !Integer }
+  , sidebarRevision :: !Integer, inputForm :: !(Maybe (Form.PreparedInputForm SidebarContext SidebarReply)) }
 data Cancellation = forall a. Cancellation (Async a)
 data SidebarHost = SidebarHost !(Registry SidebarContext) !(IORef State)
-  !(TBQueue (P.TreeProvider SidebarContext SidebarReply)) !(TBQueue Cancellation) !(Async ())
+  !(TBQueue Publication) !(TBQueue Cancellation) !(Async ())
 
 sidebarRegistry :: SidebarHost -> Registry SidebarContext
 sidebarRegistry (SidebarHost registry _ _ _ _)=registry
@@ -70,7 +74,7 @@ withSidebarCommands :: (SidebarHost -> IO a) -> IO a
 withSidebarCommands use=withRegistry $ \registry->bracket (acquire registry) close use
   where
     acquire registry=do
-      state<-newIORef (State M.empty M.empty [] [] Nothing Nothing Nothing Nothing Nothing 0)
+      state<-newIORef (State M.empty M.empty [] [] Nothing Nothing Nothing Nothing Nothing 0 Nothing)
       publications<-newTBQueueIO 32
       cancellation<-newTBQueueIO 32
       canceller<-async (forever (do Cancellation worker<-atomically (readTBQueue cancellation); cancel worker))
@@ -79,14 +83,22 @@ withSidebarCommands use=withRegistry $ \registry->bracket (acquire registry) clo
       state<-readIORef ref
       mapM_ (\(ChildJob _ _ worker _)->cancel worker) (jobs state)
       mapM_ (cancel . snd) (projection state)
-      mapM_ (\(ActionJob _ _ _ _ worker _)->cancel worker) (actionJob state)
+      mapM_ (cancel . actionWorker) (actionJob state)
+      mapM_ (Form.retireForm . Form.formReference) (inputForm state)
       mapM_ (cancel . snd) (badgeJob state)
       cancel canceller
 
 -- | Register/prepare metadata outside the owner, then publish an ordered bounded
 -- delta. Backpressure applies to the registration worker, never an input tick.
 publishTreeFromHost :: SidebarHost -> P.TreeProvider SidebarContext SidebarReply -> IO ()
-publishTreeFromHost (SidebarHost _ _ queue _ _) provider=atomically (writeTBQueue queue provider)
+publishTreeFromHost (SidebarHost _ _ queue _ _) provider=atomically (writeTBQueue queue (TreePublication provider))
+-- | Queue metadata for an already installed exact form. This cannot open a
+-- modal or grant submission authority; ordered transport reuses the root queue.
+publishFormRefreshFromHost :: SidebarHost -> Form.InputFormUpdate -> IO ()
+publishFormRefreshFromHost (SidebarHost _ _ queue _ _) prepared=atomically (writeTBQueue queue (FormRefresh prepared))
+actionWorker :: ActionJob -> Async (Either CommandError SidebarReply)
+actionWorker (ActionJob _ _ _ _ worker _)=worker
+actionWorker (FormJob _ worker _)=worker
 -- | Withdrawal belongs to the session owner, so queued/late results cannot race
 -- adoption. Cancellation is scheduled to a worker and never waits under UI lock.
 retireTreeFromHost :: SidebarHost -> P.TreeRef -> Desktop -> IO Desktop
@@ -222,6 +234,10 @@ sidebarEffects host core d effects=do
     step (_,current) effect=case effect of
       LoadTree request origin->(False,) <$> enqueue host request origin current
       InvokeTree trace reference origin->(False,) <$> invokeAction host trace reference origin current
+      SubmitInputForm reference text origin->(False,) <$> submitForm host reference text origin current
+      RetireInputForm reference->do
+        Form.retireForm reference
+        pure (False,current)
       RefreshTree path entries->(False,) <$> refreshFiles host path entries current
       _->core current [effect]
 
@@ -347,12 +363,14 @@ refreshTreeFromHost host@(SidebarHost _ ref _ _ _) owner ident d=do
 -- explicit ceilings; slow providers cannot starve input with a recursive drain.
 tickSidebar :: SidebarHost -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> IO Desktop
 tickSidebar host@(SidebarHost _ ref publications cancellation _) core initial=do
-  mounted<-mount host initial
+  validForm<-tickForm host initial
+  mounted<-mount host validForm
   published<-foldM (\d _->do
     supplied<-atomically (tryReadTBQueue publications)
     case supplied of
       Nothing->pure d
-      Just provider->do
+      Just (FormRefresh update)->refreshForm host update d
+      Just (TreePublication provider)->do
         live<-P.treeCurrent provider
         registered<-readIORef ref
         let accepted=live && (M.member (P.treeReference provider) (providers registered) || M.size (providers registered)<32)
@@ -469,10 +487,11 @@ startProjection (SidebarHost _ ref _ _ _) d=do
     _->pure ()
 
 finishAction :: SidebarHost -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> IO Desktop
-finishAction (SidebarHost _ ref _ cancellation _) core d=do
+finishAction host@(SidebarHost _ ref _ cancellation _) core d=do
   state<-readIORef ref
   case actionJob state of
     Nothing->pure d
+    Just (FormJob reference worker cancelled)->finishFormJob host core d reference worker cancelled
     Just (ActionJob trace reference origin columns worker cancelled)->do
       let owner=case trace of P.TreeHit value _ _:_->Just value; _->Nothing
       live<-maybe (pure False) P.treeCurrent (owner >>= (`M.lookup` providers state))
@@ -497,6 +516,7 @@ finishAction (SidebarHost _ ref _ cancellation _) core d=do
             Right (Right (SidebarDebug request)) | current && origin==Menu.HumanMenu->snd <$> core d [DebugSidebarAction request]
             Right (Right (SidebarSession request)) | current && origin==Menu.HumanMenu->snd <$> core d [SessionSidebarAction request]
             Right (Right (SidebarWindow request)) | current->adoptWindowUpdate origin request d
+            Right (Right (SidebarForm prepared)) | current && origin==Menu.HumanMenu->adoptForm host True prepared d
             Right (Right (SidebarAgent request)) | current && origin==Menu.HumanMenu->snd <$> core d [AgentSidebarAction request]
             _->pure $ if not current then d {status="Sidebar result expired."} else case result of
               Left err->d {status="Sidebar action failed: "<>T.pack (displayException err)}
@@ -505,6 +525,7 @@ finishAction (SidebarHost _ ref _ cancellation _) core d=do
               Right (Right SidebarDebug{})->d {status="Sidebar result expired."}
               Right (Right SidebarSession{})->d {status="Sidebar result expired."}
               Right (Right SidebarWindow{})->d {status="Sidebar result expired."}
+              Right (Right SidebarForm{})->d {status="Sidebar form expired."}
               Right (Right SidebarAgent{})->d {status="Sidebar result expired."}
               Right (Right (SidebarPrepared value))->fst (applyLink value d)
               Right (Right (SidebarDocument path doc))
@@ -550,3 +571,95 @@ badges (SidebarHost _ ref _ _ _) d=do
       evaluate (M.fromList values)
     modifyIORef' ref (\s->s {badgeStamp=Just stamp,badgeJob=Just (stamp,worker)})
   pure adopted
+
+-- Form ownership is independent of the source tree once the human accepted it.
+formDialog :: Form.FormRef -> Desktop -> Bool
+formDialog reference d=case dialog d of
+  Just dg | PluginInputForm owned<-purpose dg->owned==reference
+  _->False
+adoptForm :: SidebarHost -> Bool -> Form.PreparedInputForm SidebarContext SidebarReply -> Desktop -> IO Desktop
+adoptForm (SidebarHost _ ref _ _ _) opening prepared d=do
+  state<-readIORef ref
+  let reference=Form.formReference prepared
+      present=maybe False ((==reference).Form.formReference) (inputForm state)
+      owned=if opening then dialog d==Nothing && not (questionActive d) && not (activeAutocomplete d) else present && formDialog reference d
+  accepted<-if owned then Form.admitInputForm present prepared else pure False
+  if not accepted then pure d else do
+    when opening (mapM_ (Form.retireForm . Form.formReference) (inputForm state))
+    modifyIORef' ref (\s->s {inputForm=Just prepared})
+    let spec=Form.formSpec prepared
+        build=Dialog (Form.inputFormTitle spec) (PluginInputForm reference)
+          [SelectedInput (Form.inputFormLabel spec) (Form.inputFormInitial spec) (Selection 0 (T.length (Form.inputFormInitial spec)))]
+          0 [Form.inputFormSubmit spec,"Cancel"] []
+        refresh dg=dg {dialogTitle=Form.inputFormTitle spec,buttons=[Form.inputFormSubmit spec,"Cancel"],
+          fields=[case field of SelectedInput _ text selected->SelectedInput (Form.inputFormLabel spec) text selected; _->field | field<-fields dg]}
+    pure d {dialog=if opening then Just build else refresh <$> dialog d,contextMenu=Nothing,contextTarget=Nothing}
+-- Refresh transport is metadata-only and cannot create a modal by escaped ref.
+refreshForm :: SidebarHost -> Form.InputFormUpdate -> Desktop -> IO Desktop
+refreshForm host@(SidebarHost _ ref _ _ _) update d=do
+  state<-readIORef ref
+  case inputForm state of
+    Just original | formDialog (Form.updateFormReference update) d->do
+      merged<-Form.admitFormRefresh original update
+      case merged of Nothing->pure d; Just prepared->adoptForm host False prepared d
+    _->pure d
+tickForm :: SidebarHost -> Desktop -> IO Desktop
+tickForm (SidebarHost _ ref _ _ _) d=do
+  state<-readIORef ref
+  case inputForm state of
+    Nothing->pure d
+    Just prepared->do
+      live<-Form.formCurrent prepared
+      submitted<-Form.submissionCurrent prepared
+      let owned=formDialog (Form.formReference prepared) d
+      if live && (owned || submitted) then pure d else do
+        Form.retireForm (Form.formReference prepared)
+        modifyIORef' ref (\s->s {inputForm=Nothing})
+        pure (if owned then d {dialog=Nothing,status="Input form expired."} else d)
+submitForm :: SidebarHost -> Form.FormRef -> Text -> Menu.MenuOrigin -> Desktop -> IO Desktop
+submitForm (SidebarHost _ ref _ _ _) reference text origin d=mask $ \restore->do
+  state<-readIORef ref
+  case inputForm state of
+    Just prepared | origin==Menu.HumanMenu,Form.formReference prepared==reference,formDialog reference d->
+      case actionJob state of
+        Just _->pure d {status="Sidebar worker is busy; submit again."}
+        Nothing->do
+          accepted<-Form.claimFormSubmission prepared
+          if not accepted then pure d {status="Input form expired."} else do
+            worker<-async (restore (Form.invokeFormAction prepared (context origin d) text >>= traverse forceFormReply)) `onException` Form.retireForm reference
+            modifyIORef' ref (\s->s {actionJob=Just (FormJob reference worker False)})
+            pure d {dialog=Nothing,status="Submitting input form..."}
+    _->pure d {status="Input form expired."}
+-- This first host form consumer supports only the closed RenameAgentTo reply.
+-- Other typed form handlers require their own checked host result route.
+-- Fixed replies are forced at their owning worker before the UI receives them.
+forceFormReply :: SidebarReply -> IO SidebarReply
+forceFormReply (SidebarAgent (RenameAgentTo who value))
+  | T.length (Hide.AgentHub.agentIdText who)>128 || T.length value>8192=ioError (userError "Oversized single-line form result.")
+  | otherwise=do
+      let copied=T.copy value
+      _<-evaluate (T.length copied)
+      evaluate (SidebarAgent (RenameAgentTo who copied))
+forceFormReply _=ioError (userError "Unsupported single-line form reply.")
+finishFormJob :: SidebarHost -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> Form.FormRef
+  -> Async (Either CommandError SidebarReply) -> Bool -> IO Desktop
+finishFormJob (SidebarHost _ ref _ cancellation _) core d reference worker cancelled=do
+  state<-readIORef ref
+  live<-case inputForm state of
+    Just prepared | Form.formReference prepared==reference->Form.submissionCurrent prepared
+    _->pure False
+  let current=live && not cancelled && dialog d==Nothing
+  completed<-poll worker
+  case completed of
+    Nothing | not current && not cancelled->do
+      Form.retireForm reference
+      queued<-atomically $ do full<-isFullTBQueue cancellation; if full then pure False else writeTBQueue cancellation (Cancellation worker) >> pure True
+      modifyIORef' ref (\s->s {actionJob=Just (FormJob reference worker queued)})
+      pure d
+    Nothing->pure d
+    Just result->do
+      modifyIORef' ref (\s->s {actionJob=Nothing})
+      consumed<-if current then Form.finishFormSubmission reference else Form.retireForm reference >> pure False
+      case result of
+        Right (Right (SidebarAgent request@RenameAgentTo{})) | consumed->snd <$> core d [AgentSidebarAction request]
+        _->pure d {status=if not consumed then "Input form expired." else "Input form submission failed."}

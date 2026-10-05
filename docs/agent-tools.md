@@ -482,7 +482,10 @@ Expand **Agents** in the shared sidebar to see agent names, parent relationships
 and current states. A leaf opens its existing conversation; an agent with children
 expands to show them and offers **Conversation** in its context menu. **Rename**
 starts with the current name selected, and keeps the captured agent ID while the
-directory changes. Names remain unique.
+directory changes. Resize and background label refresh preserve the draft and
+selection. Closing and reopening expires the old form; a delayed submission
+cannot rename through a closed registration or replace a newer dialog. Rename
+submission is human-only. Names remain unique.
 
 Right-click **Agents** and choose **New Agent** to enter a name and task. This starts
 a fresh agent in the current shared workspace and queues that task. Creation and

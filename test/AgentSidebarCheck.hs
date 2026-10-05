@@ -2,6 +2,7 @@
 module AgentSidebarCheck (checks) where
 
 import Control.Concurrent (threadDelay)
+import Control.Concurrent.MVar
 import Control.Exception (bracket)
 import Control.Monad (unless)
 import Data.Aeson
@@ -9,6 +10,7 @@ import Data.Aeson.Types (parseMaybe)
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.Map.Strict as M
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
 import qualified Graphics.Vty as V
 import System.Directory
 import System.Environment
@@ -22,7 +24,13 @@ import Hide.AgentSidebarTypes
 import qualified Hide.AgentHub as AH
 import qualified Hide.AgentRuntime as AR
 import Hide.App (applyEffects)
-import Hide.Buffer (Selection(..))
+import Hide.Buffer (Selection(..),newBuffer)
+import Hide.Plugin.Command (withRegistry,registerCommand,CommandDef(..),Codec(..))
+import qualified FormExtension
+import Hide.Plugin.BufferHost (captureVersion,versionCurrent)
+import qualified Hide.Plugin.Form as Form
+import qualified Hide.Plugin.Menu as Menu
+import Hide.GuestAccess (readableAt,streamerReadableAt,guestKeyboardAllowed)
 import Hide.Conversation
 import Hide.Model
 import Hide.Sidebar
@@ -51,7 +59,7 @@ checks=bracket temporary removePathForcibly $ \root->
             act (d,effects)=snd <$> sidebarEffects host core d effects
             hub=AR.agentHub (conversationAgents conversation)
             primary=AR.primaryAgent (conversationAgents conversation)
-        initial<-initializeSidebar host (installSidebar (emptySidebar root 26 True) ((initialDesktop (100,35)) {defaultDirectory=Just root}))
+        initial<-initializeSidebar host (installSidebar (emptySidebar root 26 True) (modifyActive (\w->w {selection=Selection 2 4}) ((addDocument Nothing (newBuffer "source payload") (initialDesktop (100,35))) {defaultDirectory=Just root})))
         published<-await tick (has "Agents") initial
         expanded<-act (activateTree True (index "Agents" published) published) >>= await tick (has "Primary")
         ensure "disconnected agents offer no unadvertised model actions"
@@ -70,18 +78,76 @@ checks=bracket temporary removePathForcibly $ \root->
         let staleSubmission=handleEvent (V.EvKey V.KEnter []) choose
         stale<-act (configured,snd staleSubmission) >>= await tick (T.isInfixOf "expired" . status)
         renamed<-act (chooseMenu "Primary  idle" stale) >>= await tick (maybe False ((=="Rename agent").dialogTitle) . dialog)
+        sourceVersion<-captureVersion (maybe (error "Missing source") documentBuffer (activeDocument renamed))
+        let originalSelection=selection <$> activeWindow renamed
+            formRef desktop=case dialog desktop of Just dg | PluginInputForm reference<-purpose dg->reference; _->error "Missing typed form"
+            captured=formRef renamed
+        ensure "typed form is private to guest input and capture" (not (guestKeyboardAllowed renamed) &&
+          not (readableAt renamed (left (dialogRect renamed (maybe (error "dialog") id (dialog renamed)))) (top (dialogRect renamed (maybe (error "dialog") id (dialog renamed))))) &&
+          not (streamerReadableAt renamed 2 34))
+        cancelled<-act (handleEvent (V.EvKey V.KEsc []) renamed)
+        reopened<-act (chooseMenu "Primary  idle" cancelled) >>= await tick (maybe False ((=="Rename agent").dialogTitle) . dialog)
+        ensure "reopened form has a fresh lifetime" (captured/=formRef reopened)
+        refusedOld<-act (reopened,snd (handleEvent (V.EvKey V.KEnter []) renamed))
+        ensure "old form submission leaves reopened draft intact" (inputValue refusedOld==Just ("Primary",Selection 0 7))
+        deniedAgent<-act (refusedOld,[SubmitInputForm (formRef refusedOld) "Agent edit" Menu.AgentMenu])
+        ensure "agent-origin form submission leaves human draft intact" (inputValue deniedAgent==Just ("Primary",Selection 0 7))
+        let renamed=deniedAgent
         ensure "rename opens with current name selected" (inputValue renamed==Just ("Primary",Selection 0 7))
         let typed=fst (handleEvent (V.EvKey (V.KChar 'N') []) renamed)
         ensure "typing replaces rename selection" (inputValue typed==Just ("N",Selection 1 1))
+        let pasted=fst (handleEvent (V.EvPaste (TE.encodeUtf8 "界x")) typed)
+            backed=fst (handleEvent (V.EvKey V.KBS []) pasted)
+            moved=fst (handleEvent (V.EvKey V.KLeft [V.MShift]) backed)
+        ensure "rename paste backspace and selection use the real dialog owner" (inputValue moved==Just ("N界",Selection 2 1))
+        update<-Form.refreshInputForm (formRef moved) (Form.InputFormSpec "Updated rename" "Label" "RESET" "Apply") >>= right >>= maybe (fail "No refresh") pure
+        publishFormRefreshFromHost host update
+        let resized=fst (handleEvent (V.EvResize 90 30) moved)
+        refreshedForm<-await tick (maybe False ((=="Updated rename").dialogTitle) . dialog) resized
+        ensure "metadata refresh and resize preserve newer draft selection" (inputValue refreshedForm==Just ("N界",Selection 2 1))
+        let typed=fst (runCommand Paste refreshedForm {clipboard=""})
+        ensure "selected rename range remains editable after refresh" (inputValue typed==Just ("N",Selection 1 1))
         -- Capture the target, then reorder metadata before applying the dialog.
         let caps=AH.Capabilities False False False []
             driver=AH.AgentDriver root "private-peer-key" caps (const (pure (Right caps))) (const (pure (Right Null))) (pure ()) (pure ()) (const (pure (Left "unsupported")))
         peer<-AH.registerAgent hub "A peer" root driver >>= right
-        submitted<-act (handleEvent (V.EvKey V.KEnter []) typed)
+        submitted<-act (handleEvent (V.EvKey V.KEnter []) typed) >>= await tick (T.isInfixOf "Agent renamed" . status)
+        unchanged<-versionCurrent sourceVersion (maybe (error "Missing source") documentBuffer (activeDocument submitted))
+        ensure "rename preserves source content and selection" (unchanged && (selection <$> activeWindow submitted)==originalSelection)
         primaryStatus<-AH.statusAgent hub AH.Human primary >>= right
         peerStatus<-AH.statusAgent hub AH.Human peer >>= right
         ensure "rename targets captured ID after directory changes" (field "name" primaryStatus==Just ("N"::T.Text) && field "name" peerStatus==Just ("A peer"::T.Text))
-        refreshed<-await tick (has "N  idle") submitted
+        _<-AH.renameAgent hub AH.Human primary "Fresh" >>= right
+        replayed<-act (submitted,snd (handleEvent (V.EvKey V.KEnter []) typed))
+        replayStatus<-AH.statusAgent hub AH.Human primary >>= right
+        ensure "consumed rename form cannot replay its captured submission" (field "name" replayStatus==Just ("Fresh"::T.Text))
+        _<-AH.renameAgent hub AH.Human primary "N" >>= right
+        gate<-newEmptyMVar
+        started<-newEmptyMVar
+        (pending,reference)<-withRegistry $ \registry->do
+          prepared<-FormExtension.prepareForm registry (Form.InputFormSpec "Delayed rename" "Name" "N" "Rename")
+            (\_ value->putMVar started () >> takeMVar gate >> pure (Right (SidebarAgent (RenameAgentTo primary value)))) >>= right
+          let codec=Codec Null (const (Left "Typed only")) (const Null)
+          opening<-registerCommand registry (CommandDef "test.form.open" "Open form" codec codec (\_ ()->pure (Right (SidebarForm prepared)))) >>= right
+          ident<-right (P.nodeId "delayed-form")
+          provider<-P.registerTree registry "test.form.root"
+            (P.NodeDef (P.NodeInfo ident "Form fixture" "" False Nothing) (Just (P.treeAction registry opening () (\_ reply->pure reply))) [])
+            (\_ _->pure (Right (P.NodePage [] Nothing))) >>= right
+          publishTreeFromHost host provider
+          visible<-await tick (has "Form fixture") replayed
+          opened<-act (activateTree False (index "Form fixture" visible) visible) >>= await tick (maybe False ((=="Delayed rename").dialogTitle) . dialog)
+          running<-act (handleEvent (V.EvKey V.KEnter []) opened)
+          entered<-timeout 10000000 (takeMVar started)
+          ensure "typed form action runs outside the owner" (entered==Just ())
+          pure (running,formRef opened)
+        -- A newer modal must survive a reply from the retired registration.
+        let newer=Dialog "Newer dialog" Information [] 0 ["Cancel"] []
+        putMVar gate ()
+        expired<-await tick (T.isInfixOf "expired" . status) pending {dialog=Just newer}
+        lateStatus<-AH.statusAgent hub AH.Human primary >>= right
+        ensure "retired form cannot rename or replace a newer dialog" (field "name" lateStatus==Just ("N"::T.Text) && fmap dialogTitle (dialog expired)==Just "Newer dialog")
+        Form.retireForm reference
+        refreshed<-await tick (has "N  idle") expired {dialog=Nothing}
         let foreground=activeWindow refreshed
         hidden<-await tick (has "A peer") refreshed
         ensure "background refresh preserves input owner" (fmap windowId (activeWindow hidden)==fmap windowId foreground)
@@ -89,7 +155,7 @@ checks=bracket temporary removePathForcibly $ \root->
         ensure "captured child navigation opens existing attributed view" (conversationTarget childView==AH.agentIdText peer)
         primaryView<-act (childView,[AgentSidebarAction (ShowAgent primary)])
         ensure "Primary navigation restores Primary target" (T.null (conversationTarget primaryView))
-        ensure "agent input cannot manufacture human sidebar controls" (not (guestEffectsAllowed [AgentSidebarAction (RenameAgent primary)]))
+        ensure "agent input cannot manufacture human sidebar controls" (not (guestEffectsAllowed [AgentSidebarAction NewAgent]))
         connecting<-act (primaryView,[AgentAction "send" ["0","Count files","false","false","false"]])
         connected<-await tick (\d->not (agentReplying d) && has "N  idle" d && any ((=="model").settingId) (agentSettings d) &&
           "Model" `elem` map fst (contextItemsFor (popupFor "N  idle" d))) connecting

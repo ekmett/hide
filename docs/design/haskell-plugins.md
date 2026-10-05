@@ -1,10 +1,22 @@
 # Haskell plugin API
 
-Status: design proposal with implemented command registration and immutable
-buffer read and strict-diff slices. `Hide.Plugin.Command` and `Hide.Plugin.Buffer` document those
-current APIs; the signatures below sketch the full proposed contracts and are
-not a compilable SDK. The approved
-[sidebar design](../plans/sidebar-navigation.md) supplies the navigation model.
+Status: implemented typed command registration, immutable buffer reads and checked
+strict diffs, scoped menus/bindings, shared sidebar trees, prepared plugin text
+windows, and one host-owned single-line form. The current APIs are in
+`Hide.Plugin.Command`, `Buffer`, `Menu`, `Tree`, `Window` and `Form`. The signatures
+below sketch the broader proposed contracts and are not a compilable SDK. The
+approved [sidebar design](../plans/sidebar-navigation.md) supplies the navigation
+model.
+
+The current form consumer is **Agents > Rename**. A linked handler prepares an
+`InputFormSpec` and a typed registered action, then returns a `SidebarForm` on the
+existing sidebar worker route. The host owns the draft, selected range and modal
+geometry. Metadata-only refresh keeps those values and the same `FormRef`; close
+and reopen use distinct references. Human submission claims the form once, and a
+reply is adopted only while that form and its registration remain current. The
+closed host result currently supports `RenameAgentTo`; arbitrary widget actions
+and embedded editable plugin windows remain separate work. Forms are private by
+default to agent input and public capture, including their title and status.
 
 ## Direction
 
