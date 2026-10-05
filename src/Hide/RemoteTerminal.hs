@@ -73,17 +73,17 @@ remoteTerminalDisplay (columns,linesCount) frame message=(cursor,cellDisplayOps 
   where
     width=max 0 columns; height=max 0 linesCount
     cells=maybe [] remoteCells frame
-    rows=IM.fromListWith (++) [(y,[cell]) | cell@(RemoteCell _ y _ _ _ _ _)<-cells,y<height]
+    rows=IM.fromListWith (++) [(y,[cell]) | cell<-cells,let y=case cell of RemoteText _ row _ _ _->row; RemoteGlyph _ row _ _ _ _ _->row,y<height]
     blanks n=[CellText V.defAttr (T.replicate n " ") | n>0]
     spans at []=blanks (width-at)
-    spans at (RemoteCell x _ paint text full start shown:rest)
+    spans at (cell:rest)
       | x>=width=blanks (width-at)
       | otherwise=blanks (x-at)++glyph:spans (x+visible) rest
       where
+        (x,shown,glyph)=case cell of
+          RemoteText left _ paint text n->(left,n,CellText (textStyleAttr paint) (T.take (min n (width-left)) text))
+          RemoteGlyph left _ paint text full start n->(left,n,CellGlyph (textStyleAttr paint) text full start (min n (width-left)))
         visible=min shown (width-x)
-        attr=textStyleAttr paint
-        glyph | full==1 && start==0 && T.length text==1=CellText attr text
-              | otherwise=CellGlyph attr text full start visible
     bannerPaint=V.defAttr `V.withForeColor` V.white `V.withBackColor` V.blue
     banner=[if n==1 && T.length glyph==1 then CellText bannerPaint glyph else CellGlyph bannerPaint glyph n 0 n
       | glyph<-graphemes (T.filter isPrint message),let n=clusterWidth glyph,n>0]
@@ -96,7 +96,7 @@ remoteTerminalDisplay (columns,linesCount) frame message=(cursor,cellDisplayOps 
     cursor | not (T.null message)=V.NoCursor
            | otherwise=maybe V.NoCursor (maybe V.NoCursor (uncurry V.Cursor) . remoteCursor) frame
     compact (CellText attr text:rest)=let (same,after)=span (\value->case value of CellText paint _->paint==attr; _->False) rest
-                                    in CellText attr (T.concat (text:[value | CellText _ value<-same])):compact after
+                                    in CellText attr (if null same then text else T.concat (text:[value | CellText _ value<-same])):compact after
     compact (value:rest)=value:compact rest
     compact []=[]
     clip lo hi=go 0
