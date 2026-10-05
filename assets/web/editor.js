@@ -46,7 +46,7 @@ function updateTitle(){
  const base=remoteHost?frame.title.replace(/^th(?: |$)/,`th ${remoteHost}:`):frame.title;
  document.title=base+timingText;
 }
-let downloadName=null, clipboardRequest=null, nativeCopies=[];
+let downloadName=null, clipboardRequest=null, clipboardEpoch=0, nativeCopies=[];
 let unsaved=false, serial=0, pendingEdit=0, acknowledged=0;
 function beforeLeave(event){event.preventDefault();event.returnValue=true;}
 function guardLeave(){
@@ -211,15 +211,19 @@ function decodeRows(changed){
 }
 function command(name){send({type:'command',command:name});}
 async function systemClipboard(request){
+ const connection=socket,epoch=++clipboardEpoch;
  try{
    if(request.type==='copy')await navigator.clipboard.writeText(request.text);
-   else send({type:'paste',text:await navigator.clipboard.readText()});
+   else {const text=await navigator.clipboard.readText();if(connection!==socket||epoch!==clipboardEpoch||!ready)return;send({type:'paste-reply',request:request.request,text});}
+   if(connection!==socket||epoch!==clipboardEpoch||!ready)return;
    clipboardRequest=null;clipboardAction.hidden=true;input.focus({preventScroll:true});
  }catch(error){
+   if(connection!==socket||epoch!==clipboardEpoch||!ready)return;
    clipboardRequest=request;clipboardAction.textContent=request.type==='copy'?'Copy to clipboard':'Paste from clipboard';clipboardAction.hidden=false;
    status.textContent='Clipboard access needs a click, or use the browser Edit menu.';
  }
 }
+function clearClipboardRequest(){clipboardEpoch++;clipboardRequest=null;clipboardAction.hidden=true;}
 clipboardAction.addEventListener('click',()=>{if(clipboardRequest)systemClipboard(clipboardRequest);});
 // WebSocket replies may arrive after browser user activation expires. Keep an
 // explicit button available when opening a new tab needs another human click.
@@ -295,7 +299,7 @@ function connect(){
    }else message=JSON.parse(e.data);
    if(message.type==='remote'){remoteHost=message.host;sessionFrontend=true;
    }else if(message.type==='connection'){
-     ready=message.connected&&glyphs.size>0;status.textContent=message.message|| (ready?'Connected':'Reconnecting…');
+     ready=message.connected&&glyphs.size>0;if(!ready)clearClipboardRequest();status.textContent=message.message|| (ready?'Connected':'Reconnecting…');
    }else if(message.type==='assets'){
      glyphs=new Map(message.glyphs.map(([c,w,rs])=>[c,[w,rs]]));tiles.clear();atlasEntries.clear();scale=initialScale=message.scale||2;ready=true;status.textContent='Connected';lastSize='';send({type:'theme',dark:systemTheme.matches});
    }else if(message.type==='frame'){
@@ -329,7 +333,7 @@ function connect(){
      navigator.keyboard?.unlock?.();socket.close();window.close();
    }
  };
- socket.onclose=event=>{console.info('Editor connection closed',event.code,event.reason);ready=false;mouse=[-1,-1];dirty=true;if(!closed){detaching=false;status.textContent='Disconnected — reconnecting…';setTimeout(connect,1000);}};
+ socket.onclose=event=>{console.info('Editor connection closed',event.code,event.reason);ready=false;clearClipboardRequest();mouse=[-1,-1];dirty=true;if(!closed){detaching=false;status.textContent='Disconnected — reconnecting…';setTimeout(connect,1000);}};
  socket.onerror=()=>{status.textContent='Connection unavailable';};
 }
 connect();

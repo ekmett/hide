@@ -465,7 +465,7 @@ statusHintsRaw d
       [command (if nativeMac d then "  Cmd+Alt+F Replace" else "  Ctrl+H Replace") Replace]
   | dialog d/=Nothing = [key " Tab Next" (V.KChar '\t') [],key "  Enter Select" V.KEnter [],key "  Esc Cancel" V.KEsc []] ++
       [command ((if nativeMac d then "  Cmd+" else "  Ctrl+")<>keyName<>" "<>label) cmd | (keyName,label,cmd)<-[("C","Copy",Copy),("V","Paste",Paste)],dialogCommandAllowed cmd d]
-  | problemsVisible d && problemsFocused d = [key " Enter Source" V.KEnter [],command (if nativeMac d then "  Cmd+C Copy" else "  Ctrl+C Copy") Copy,command "  Copy all" CopyAllMessages]
+  | problemsVisible d && problemsFocused d = [command " Enter Source" GoToMessage,command (if nativeMac d then "  Cmd+C Copy" else "  Ctrl+C Copy") Copy,command "  Copy all" CopyAllMessages]
   | Just v<-inlinePreview d,inlineMatches d v = [key " Tab Accept" (V.KChar '\t') [],key "  Alt+Right Word" V.KRight [V.MAlt],key (if nativeMac d then "  Cmd+[ Previous" else "  Alt+[ Previous") (V.KChar '[') [V.MAlt],key (if nativeMac d then "  Cmd+] Next" else "  Alt+] Next") (V.KChar ']') [V.MAlt],key "  Esc Dismiss" V.KEsc []]
   | activeAutocomplete d = [key " Enter Send hint" V.KEnter [],key "  Shift+Enter Newline" V.KEnter [V.MShift],key "  Tab Transcript / hint" (V.KChar '\t') []]
   | questionActive d = [key " Enter Answer" V.KEnter [],key "  Tab Choices" (V.KChar '\t') [],key "  Esc Cancel" V.KEsc []]

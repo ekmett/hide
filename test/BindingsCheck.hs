@@ -116,6 +116,20 @@ checks=do
       messageState (d,effects)=(problemsSelected d,problemsScroll d,problemsFocused d,clipboard d,effects)
   check "default Messages selection/copy/jump retain ownership" (all (\(k,m)->messageState (key k m messagePane)==messageState (key k m (compiled messagePane)))
     [(V.KDown,[]),(V.KPageDown,[]),(V.KEnter,[]),(V.KChar 'c',[V.MCtrl]),(V.KFun 4,[]),(V.KFun 6,[])])
+  let messageKeys keys=either (error . show) id (platformBindings [] TerminalPlatform (M.singleton "messages" (M.singleton "hide.messages.go-to" keys)))
+      messageRemap=messagePane {keyBindings=messageKeys ["Ctrl+Shift+J"]}
+      messageUnbound=messagePane {keyBindings=messageKeys []}
+      clickSourceHint d=case statusItemRects d of
+        (Rect x y _ _,_,_):_ -> snd (handleEvent (V.EvMouseDown x y V.BLeft []) d)
+        _ -> error "missing Messages source hint"
+  check "Messages Source status shares its remapped command and clickable action"
+    (take 1 (statusHints messageRemap)==[(" Ctrl+Shift+J Source",Just (Left GoToMessage))] &&
+     snd (key (V.KChar 'j') [V.MCtrl,V.MShift] messageRemap)==[JumpTo "/project/Main.hs" 0 0] &&
+     noEffects (key V.KEnter [] messageRemap) && clickSourceHint messageRemap==snd (runCommand GoToMessage messageRemap))
+  check "unbound Messages Source status retains a semantic click without an old key"
+    (take 1 (statusHints messageUnbound)==[(" Source",Just (Left GoToMessage))] &&
+     noEffects (key V.KEnter [] messageUnbound) && noEffects (key (V.KChar 'j') [V.MCtrl,V.MShift] messageUnbound) &&
+     clickSourceHint messageUnbound==[JumpTo "/project/Main.hs" 0 0])
   check "default PTY input and editor controls retain ownership" (all (\(k,m)->snd (key k m pty {keyBindings=M.empty})==snd (key k m (compiled pty)))
     [(V.KChar 'c',[V.MCtrl]),(V.KChar 'q',[V.MCtrl]),(V.KFun 1,[]),(V.KFun 4,[]),(V.KFun 7,[]),(V.KFun 9,[]),(V.KUp,[])])
   check "resolved reload retains guest origin policy" (not (guestKeyAllowed source {keyBindings=either (error . show) id (platformBindings [] TerminalPlatform (M.singleton "source" (M.singleton "hide.bindings.reload" ["Alt+F11"])))} (V.KFun 11) [V.MAlt]))

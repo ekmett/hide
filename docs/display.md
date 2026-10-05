@@ -127,7 +127,10 @@ in System Settings.
 
 Native windows use the system clipboard. The browser also uses the system
 clipboard; if permission needs a fresh gesture, click the displayed Copy or
-Paste toolbar button to retry.
+Paste toolbar button to retry. A requested clipboard read applies once to its
+unchanged input target. Closing its dialog, editing or moving the selection,
+switching input focus, or reconnecting retires it; request Paste again. Direct
+terminal/browser paste and text composition still go to the current input.
 
 The browser frontend handles these shortcuts when its editor has focus:
 

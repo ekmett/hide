@@ -57,14 +57,36 @@ console.log('Browser configured-key, clipboard gesture, Option text and PTY owne
 let clipboardAllowed=false,click;
 const clipboardPackets=[];
 const action={hidden:true,addEventListener:(_,handler)=>click=handler};
-const clipboardContext=vm.createContext({
+const clipboardContext=vm.createContext({socket:{},ready:true,clipboardEpoch:0,
  navigator:{clipboard:{readText:async()=>{if(!clipboardAllowed)throw Error('activation expired');return 'authorized paste';},writeText:async()=>{if(!clipboardAllowed)throw Error('activation expired');}}},
  clipboardRequest:null,clipboardAction:action,status:{textContent:''},input:{focus:()=>{}},send:packet=>clipboardPackets.push(packet),
 });
 vm.runInContext(source.slice(source.indexOf('async function systemClipboard('),source.indexOf('// WebSocket replies')),clipboardContext);
-await vm.runInContext("systemClipboard({type:'paste-request'})",clipboardContext);
+await vm.runInContext("systemClipboard({type:'paste-request',request:'a'.repeat(48)})",clipboardContext);
 assert.equal(action.hidden,false);assert.equal(action.textContent,'Paste from clipboard');assert.equal(clipboardPackets.length,0);
 clipboardAllowed=true;await click();await new Promise(resolve=>setImmediate(resolve));
-assert.equal(action.hidden,true);assert.equal(clipboardPackets.at(-1).text,'authorized paste');
+assert.equal(action.hidden,true);assert.equal(clipboardPackets.at(-1).text,'authorized paste');assert.equal(clipboardPackets.at(-1).type,'paste-reply');assert.equal(clipboardPackets.at(-1).request,'a'.repeat(48));
 clipboardAllowed=false;await vm.runInContext("systemClipboard({type:'copy',text:'selected'})",clipboardContext);assert.equal(action.hidden,false);assert.equal(action.textContent,'Copy to clipboard');
 console.log('Delayed clipboard permission-button fallback checks passed');
+
+// A same relay socket may reconnect while a clipboard read is still pending.
+clipboardPackets.length=0;
+let finishRead;clipboardContext.navigator.clipboard.readText=()=>new Promise(resolve=>{finishRead=resolve;});
+const pending=vm.runInContext("systemClipboard({type:'paste-request',request:'a'.repeat(48)})",clipboardContext);
+vm.runInContext('clearClipboardRequest();ready=false;ready=true;',clipboardContext);
+finishRead('stale');await pending;
+assert.equal(clipboardPackets.length,0);assert.equal(clipboardContext.clipboardRequest,null);
+console.log('requested clipboard reconnect checks passed');
+
+// An old completion must not hide the permission button for a newer operation.
+clipboardPackets.length=0;
+let finishOld,reads=0;
+clipboardContext.navigator.clipboard.readText=()=>++reads===1?new Promise(resolve=>{finishOld=resolve;}):Promise.reject(Error('click needed'));
+const older=vm.runInContext("systemClipboard({type:'paste-request',request:'a'.repeat(48)})",clipboardContext);
+await vm.runInContext("systemClipboard({type:'paste-request',request:'b'.repeat(48)})",clipboardContext);
+finishOld('older');await older;
+assert.equal(clipboardPackets.length,0);assert.equal(action.hidden,false);assert.equal(clipboardContext.clipboardRequest.request,'b'.repeat(48));
+clipboardContext.navigator.clipboard.readText=async()=> 'newer';
+click();await new Promise(setImmediate);
+assert.equal(clipboardPackets.at(-1).request,'b'.repeat(48));assert.equal(action.hidden,true);
+console.log('overlapping requested clipboard completion checks passed');
