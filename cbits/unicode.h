@@ -1,8 +1,8 @@
 #ifndef THC_UNICODE_H
 #define THC_UNICODE_H
 #include <stdint.h>
-/* UTF8 byte offsets of extended grapheme boundaries; room for characters+1. */
-int thc_graphemes(const char *utf8, int bytes, int *boundaries);
+/* Pure stateful boundary step: low bit is break, remaining bits retain the 32-bit utf8proc state. */
+uint64_t thc_grapheme_step(int previous, int current, int state);
 /* Rasterize a whole cluster to premultiplied ARGB, with system font fallback. */
 int thc_unicode_bitmap(const char *utf8, int width, int height, uint32_t fg, uint32_t traits, uint32_t *pixels);
 /* Four-times oversampling followed by area filtering and error diffusion. */

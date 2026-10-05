@@ -5,6 +5,7 @@ import Control.Concurrent
 import Control.Exception (evaluate,finally)
 import Control.Monad (unless,foldM)
 import Data.IORef
+import GHC.Conc (getAllocationCounter)
 import qualified Data.Map.Strict as M
 import Data.Maybe (fromJust,isJust)
 import qualified Data.Text as T
@@ -29,7 +30,8 @@ checks = do
     (sourceRowText row==exact && T.concat pieces==exact &&
       [(sourceRangeCharEnd r,sourceRangeByteEnd r) | r<-V.toList (sourceRowRanges row)]==tail ends &&
       take (T.length exact) (sourceStylesAt row 0)==take (T.length exact) (cycle [Keyword,Keyword,Plain]))
-  let fragments Nil=[]
+  let sourceSigils row=let (_,_,sigils)=sourceSigilsWindow 0 maxBound row in sigils
+      fragments Nil=[]
       fragments (ConsChars text _ rest)=text:fragments rest
       fragments (ConsSigil glyph _ _ rest)=graphemeText glyph:fragments rest
       display=sourceSigils row
@@ -44,6 +46,18 @@ checks = do
   check "exceptional width is independent of source character count" (case sourceSigils (plainSourceRow "🇯🇵") of
     ConsSigil glyph Plain 2 Nil->T.length (graphemeText glyph)==2
     _->False)
+  check "zero-width source windows leave the row unforced" (case sourceSigilsWindow 4 0 (error "empty viewport forced source") of
+    (0,0,Nil)->True
+    _->False)
+  check "clipped wide window retains complete source and original starts" (case sourceSigilsWindow 1 1 (plainSourceRow "界x") of
+    (0,0,ConsSigil glyph Plain 2 Nil)->graphemeText glyph=="界"
+    _->False)
+  check "source window retains absolute tab stops" (case sourceSigilsWindow 6 2 (plainSourceRow "a\tb") of
+    (1,1,ConsSigil glyph Plain 7 Nil)->graphemeText glyph=="\t"
+    _->False)
+  check "leading zero-width source preserves character selection coordinates" (case sourceSigilsWindow 0 2 (plainSourceRow "\rabc") of
+    (1,0,ConsChars "ab" Plain Nil)->True
+    _->False)
   let initial=addDocument (Just (FileState "example.py" Nothing)) (newBuffer "def old():\n    return 1\n") (initialDesktop (80,25))
       doc d=fromJust (activeDocument d)
       replace text d=d {buffers=M.adjust (\old->restyle old {documentBuffer=newBuffer text}) 1 (buffers d)}
@@ -51,6 +65,15 @@ checks = do
   check "new source has no lazy tokenizer to force on the display thread" (null (documentHighlight (doc initial)) && not (ready initial))
   let decorated=initial {buffers=M.map (\d->d {documentSourceRows=Just (V.singleton (prepareSourceRow "decorated" [(c,TerminalStyle 0x123456 0x654321 15) | c<-"decorated"]))}) (buffers initial)}
   check "HTML source capture keeps underline and strikethrough together" ("text-decoration:underline line-through" `T.isInfixOf` snapshotHtml decorated)
+  let longText=T.replicate 100000 "界"
+      longBase=addDocument Nothing (newBuffer longText) (initialDesktop (180,55))
+      longView=longBase {buffers=M.map (\d->d {documentSourceRows=Just (V.singleton (plainSourceRow longText)),documentWidth=200000}) (buffers longBase)}
+  _<-evaluate (T.length (snapshot longView))
+  viewBefore<-getAllocationCounter
+  viewCount<-evaluate (T.length (snapshot (modifyActive (\w->w {scrollColumn=1}) longView)))
+  viewAfter<-getAllocationCounter
+  check "a long source row prepares only the horizontally visible glyphs"
+    (viewCount>0 && viewBefore-viewAfter<4000000)
   firstStarted<-newEmptyMVar
   nextStarted<-newEmptyMVar
   releaseFirst<-newEmptyMVar

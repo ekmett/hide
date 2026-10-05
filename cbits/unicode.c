@@ -2,17 +2,10 @@
 #include <string.h>
 #include <utf8proc.h>
 
-int thc_graphemes(const char *utf8, int bytes, int *boundaries) {
-    int count=0;
-    utf8proc_int32_t previous=-1, state=0, point;
-    for (int i=0;i<bytes;) {
-        utf8proc_ssize_t n=utf8proc_iterate((const utf8proc_uint8_t *)utf8+i, bytes-i, &point);
-        if (n<0) return 0;
-        if (previous<0 || utf8proc_grapheme_break_stateful(previous,point,&state)) boundaries[count++]=i;
-        previous=point; i+=(int)n;
-    }
-    boundaries[count++]=bytes;
-    return count;
+uint64_t thc_grapheme_step(int previous, int current, int state) {
+    utf8proc_int32_t next=state;
+    int boundary=utf8proc_grapheme_break_stateful(previous,current,&next);
+    return ((uint64_t)(uint32_t)next<<1) | (boundary!=0);
 }
 
 #ifdef __APPLE__

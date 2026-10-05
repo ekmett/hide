@@ -27,6 +27,15 @@ checks = do
       fragment=T.dropEnd 6 (T.drop 6 source)
   check "mixed UTF8 graphemes preserve source slices and CRLF"
     (graphemes fragment==segments && T.concat (graphemes fragment)==fragment)
+  check "stateful iterator retains parity across yielded flag pairs"
+    (graphemes "🇦🇧🇨🇩🇪"==["🇦🇧","🇨🇩","🇪"])
+  let longPrefix=T.replicate 100000 "é"
+  _<-evaluate (T.length longPrefix)
+  prefixBefore<-getAllocationCounter
+  prefixCount<-evaluate (sum (map T.length (take 3 (graphemes longPrefix))))
+  prefixAfter<-getAllocationCounter
+  check "a grapheme prefix does not prepare the unconsumed UTF8 tail"
+    (prefixCount==3 && prefixBefore-prefixAfter<262144)
   forM_ clusters $ \g -> do
     check "platform segments a complete grapheme" (graphemes g==[g])
     check "cursor crosses a complete grapheme" (nextCharacter (g<>"x") 0==T.length g && previousCharacter ("x"<>g) (1+T.length g)==1)

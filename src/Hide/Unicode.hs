@@ -1,7 +1,7 @@
 {-# LANGUAGE ForeignFunctionInterface, OverloadedStrings, BangPatterns #-}
 -- | Shared grapheme segmentation, cell widths and picture composition.
 --
--- utf8proc supplies segmentation with an ASCII fast path; source offsets remain
+-- utf8proc supplies stateful, lazy segmentation; source offsets remain
 -- Unicode characters while display widths follow graphemes and editor overrides.
 -- Clipped GPU cells retain their full semantic glyph. Text-mode partial clusters
 -- become blanks. Terminal output advances
@@ -10,6 +10,8 @@ module Hide.Unicode (graphemes, clusterWidth, textImage, wideTextImage, displayC
 
 import Control.Monad (forM_, when)
 import Data.Char (isPrint)
+import Data.Bits ((.&.), shiftR)
+import Data.Word (Word64)
 import Data.IORef (readIORef, writeIORef)
 import Blaze.ByteString.Builder (Write, writeToByteString)
 import Blaze.ByteString.Builder.ByteString (writeByteString)
@@ -18,7 +20,6 @@ import Graphics.Vty.Attributes (FixedAttr(..), defaultStyleMask)
 import Graphics.Vty.DisplayAttributes (fixDisplayAttr, displayAttrDiffs)
 import Graphics.Vty.Span (SpanOp(..), DisplayOps)
 import Control.Monad.ST (runST)
-import qualified Data.ByteString as BS
 import qualified Data.Text as T
 import qualified Data.Text.Unsafe as TU
 import qualified Data.Text.Array as TA
@@ -28,35 +29,32 @@ import qualified Data.Text.Encoding as TE
 import qualified Data.Text.Lazy as TL
 import qualified Data.Vector as Vec
 import qualified Data.Vector.Mutable as MV
-import Foreign
-import Foreign.C
-import System.IO.Unsafe (unsafePerformIO)
+import Foreign.C (CInt(..))
 import qualified Graphics.Vty as V
 import qualified Graphics.Vty.Image.Internal as I
 
 foreign import ccall unsafe "utf8proc_charwidth" c_width :: CInt -> CInt
-foreign import ccall unsafe "thc_graphemes" c_graphemes :: CString -> CInt -> Ptr CInt -> IO CInt
+foreign import ccall unsafe "thc_grapheme_step" c_graphemeStep :: CInt -> CInt -> CInt -> Word64
 
--- | Segment extended graphemes into slices sharing the source UTF8 array.
--- CRLF remains one cluster, including on the ASCII fast path.
+-- | Segment extended graphemes into borrowed UTF8 slices. The stateful iterator
+-- reads only through the next boundary; taking a prefix never copies or indexes
+-- the unconsumed tail. State survives across yielded fragments, including RI
+-- pairs and ZWJ sequences. CRLF remains one complete cluster.
 graphemes :: T.Text -> [T.Text]
-graphemes t
-  | T.all (<'\128') t = ascii t
-  | otherwise = unsafePerformIO $ BS.useAsCStringLen (TE.encodeUtf8 t) $ \(s,n) ->
-      allocaArray (T.length t+1) $ \p -> do
-        count <- fromIntegral <$> c_graphemes s (fromIntegral n) p
-        let slices !i !end acc
-              | i<0 = pure acc
-              | otherwise = do
-                  start <- fromIntegral <$> peekElemOff p i
-                  let !fragment=TU.takeWord8 (end-start) (TU.dropWord8 start t)
-                  slices (i-1) start (fragment:acc)
-        slices (count-2) n []
+graphemes text=scan 0 0 (-1) 0
   where
-    ascii s = case T.uncons s of
-      Nothing -> []
-      Just ('\r',rest) | Just ('\n',after)<-T.uncons rest -> TU.takeWord8 2 s:ascii after
-      Just (_,rest) -> TU.takeWord8 1 s:ascii rest
+    size=TU.lengthWord8 text
+    slice start end=TU.takeWord8 (end-start) (TU.dropWord8 start text)
+    scan !start !byte !previous !state
+      | byte>=size=[slice start size | start<size]
+      | otherwise=case TU.iter text byte of
+          TU.Iter char bytes ->
+            let point=fromIntegral (fromEnum char)
+                step=if previous<0 then 0 else c_graphemeStep previous point state
+                nextState=fromIntegral (step `shiftR` 1)
+                boundary=previous>=0 && step .&. 1/=0
+                rest=scan (if boundary then byte else start) (byte+bytes) point nextState
+            in if boundary then slice start byte:rest else rest
 {-# NOINLINE graphemes #-}
 
 clusterWidth :: T.Text -> Int
