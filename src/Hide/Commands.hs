@@ -265,7 +265,6 @@ platformBindings catalogue platform configuration=do
        (Redo,["Ctrl+Y","Ctrl+Shift+Y","Ctrl+Shift+Z"])]
     defaultsFor SourceKeys=defaults++navigationDefaults
     defaultsFor DebuggerKeys=defaults++navigationDefaults
-    defaultsFor _=defaults
     withoutWindowF6=map (\(action,chords)->(action,if action==NextWindow then filter (/="F6") chords else chords))
     navigationDefaults=horizontalDefaults++edgeDefaults++wordDefaults++
       [(CursorUp False,verticalAliases V.KUp False),(CursorDown False,verticalAliases V.KDown False),
