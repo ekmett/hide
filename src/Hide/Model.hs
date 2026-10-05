@@ -171,6 +171,7 @@ data Command = New | Open | Download | ChangeDir | Save | SaveAs | Close | Quit 
   | CursorLeft Bool | CursorRight Bool | CursorUp Bool | CursorDown Bool
   | CursorRowStart Bool | CursorRowEnd Bool | CursorDocumentStart Bool | CursorDocumentEnd Bool | CursorPageUp Bool | CursorPageDown Bool
   | CursorWordLeft Bool | CursorWordRight Bool | DeleteWordBackward | DeleteWordForward
+  | DialogFocusNext | DialogFocusPrevious
   | DeleteBackward | DeleteForward | DeleteLine
   | SidebarMove Int | SidebarActivate | SidebarExpand | SidebarCollapse | FocusSource | MessagesMove Int | MessagesPage Int
   | ToolchainOptions | SelectToolchain Toolchain | SelectCompiler Text
@@ -350,6 +351,8 @@ commandBindingKeys d cmd
 
 commandDescription :: Command -> Text
 commandDescription cmd = case cmd of
+  DialogFocusNext -> "Focus the next dialog control, committing an open dropdown preview."
+  DialogFocusPrevious -> "Focus the previous dialog control, committing an open dropdown preview."
   CursorLeft False -> "Move to the previous character."
   CursorRight False -> "Move to the next character."
   CursorLeft True -> "Extend selection to the previous character."
@@ -493,10 +496,10 @@ statusHintsRaw d
   | dragOriginal d/=Nothing = [(keyLabel d " ↑↓→← Move  Shift+↑↓→← Resize",Nothing),key "  ↵ Done" V.KEnter [],key "  Esc Cancel" V.KEsc []]
   | Just text<-menuHelp d = [command " F1 Help" Help,(" | "<>text,Nothing)]
   | Just c<-prefix d = [(keyLabel d (" Ctrl+"<>T.singleton c<>"- "),Nothing),key " Esc Cancel" V.KEsc []]
-  | Just dg<-dialog d, approvalDialog dg = [key " Tab Next" (V.KChar '\t') [],key "  Alt+A Allow" (V.KChar 'a') [V.MAlt],key "  Alt+D Deny" (V.KChar 'd') [V.MAlt],key "  Esc Deny" V.KEsc []]
-  | Just dg<-dialog d, searching dg = [key " Ctrl+Tab Find/Replace" (V.KChar '\t') [V.MCtrl],key "  Tab Next" (V.KChar '\t') [],key "  Enter Apply" V.KEnter [],key "  Esc Cancel" V.KEsc []] ++
+  | Just dg<-dialog d, approvalDialog dg = [command " Tab Next" DialogFocusNext,key "  Alt+A Allow" (V.KChar 'a') [V.MAlt],key "  Alt+D Deny" (V.KChar 'd') [V.MAlt],key "  Esc Deny" V.KEsc []]
+  | Just dg<-dialog d, searching dg = [key " Ctrl+Tab Find/Replace" (V.KChar '\t') [V.MCtrl],command "  Tab Next" DialogFocusNext,key "  Enter Apply" V.KEnter [],key "  Esc Cancel" V.KEsc []] ++
       [command (if nativeMac d then "  Cmd+Alt+F Replace" else "  Ctrl+H Replace") Replace]
-  | dialog d/=Nothing = [key " Tab Next" (V.KChar '\t') [],key "  Enter Select" V.KEnter [],key "  Esc Cancel" V.KEsc []] ++
+  | dialog d/=Nothing = [command " Tab Next" DialogFocusNext,key "  Enter Select" V.KEnter [],key "  Esc Cancel" V.KEsc []] ++
       [command ((if nativeMac d then "  Cmd+" else "  Ctrl+")<>keyName<>" "<>label) cmd | (keyName,label,cmd)<-[("C","Copy",Copy),("V","Paste",Paste)],dialogCommandAllowed cmd d]
   | problemsVisible d && problemsFocused d = [command " Enter Source" GoToMessage,command (if nativeMac d then "  Cmd+C Copy" else "  Ctrl+C Copy") Copy,command "  Copy all" CopyAllMessages]
   | Just v<-inlinePreview d,inlineMatches d v = [key " Tab Accept" (V.KChar '\t') [],key "  Alt+Right Word" V.KRight [V.MAlt],key (if nativeMac d then "  Cmd+[ Previous" else "  Alt+[ Previous") (V.KChar '[') [V.MAlt],key (if nativeMac d then "  Cmd+] Next" else "  Alt+] Next") (V.KChar ']') [V.MAlt],key "  Esc Dismiss" V.KEsc []]
@@ -569,6 +572,7 @@ contributedCommand name epoch generation d=do
   pure (contributionCommand d item)
 
 commandEnabled :: Desktop -> Command -> Bool
+commandEnabled d cmd | cmd `elem` [DialogFocusNext,DialogFocusPrevious] = dialogCommandAllowed cmd d
 commandEnabled d cmd | dialogCommandAllowed cmd d = True
 commandEnabled d cmd | activeMarkdown d, markdownSourceCommand cmd = False
 commandEnabled d cmd | activePluginWindow d/=Nothing, sourceOnlyCommand cmd = False
@@ -1073,6 +1077,8 @@ runCommand SelectAll source | dialog source==Nothing,Just view<-activePluginWind
   (modifyActive (\w->w {selection=Selection 0 (contentLength (PluginWindow.preparedWindowText view))}) source,[])
 runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source {menu = Nothing, contextMenu=Nothing, buttonHover=Nothing, buttonPressed=Nothing, prefix = Nothing, drag = Nothing,dragOriginal=Nothing})
   where
+    go DialogFocusNext d = applyDialogCommand DialogFocusNext d
+    go DialogFocusPrevious d = applyDialogCommand DialogFocusPrevious d
     go ReloadBindings d = (d {status="Reloading keybindings..."},[ReloadKeyBindings (startingDirectory d)])
     go InspectBindings d = (d,[InspectKeyBindings ((,) (bindingPlatform d) <$> bindingContext d) (effectiveBindings d)])
     go (SidebarMove delta) d = case sideTree d of
@@ -1363,25 +1369,47 @@ searchTabRects d dg=let Rect x y _ _=dialogRect d dg in [(Rect (x+3) (y+2) 10 1,
 
 dialogCommandAllowed :: Command -> Desktop -> Bool
 dialogCommandAllowed cmd d=case dialog d of
-  Just dg | searching dg,cmd `elem` [Find,Replace] -> True
+  Just dg | cmd `elem` [DialogFocusNext,DialogFocusPrevious] -> not (null (fields dg) && null (buttons dg))
+          | Just _<-openComboBox dg -> False
+          | searching dg,cmd `elem` [Find,Replace] -> True
           | SelectedInput{}:_<-drop (focus dg) (fields dg) -> cmd `elem` [Copy,Cut,Paste,SelectAll]
           | f:_<-drop (focus dg) (fields dg),editableArea f -> cmd `elem` [Copy,Cut,Paste,SelectAll,Undo,Redo]
   _ -> False
 
--- | Only existing field editing/search actions participate in dialog bindings.
--- Navigation, text, mnemonics and permission decisions retain their control owner.
+-- | Modal focus and existing field editing/search commands share this catalogue.
+-- Text, submission, cancellation and permission decisions retain their owner.
 dialogBindingCommands :: [Command]
-dialogBindingCommands=[Copy,Cut,Paste,SelectAll,Undo,Redo,Find,Replace]
+dialogBindingCommands=[DialogFocusNext,DialogFocusPrevious,Copy,Cut,Paste,SelectAll,Undo,Redo,Find,Replace]
 
 dialogReserved :: V.Key -> [V.Modifier] -> Bool
 dialogReserved key mods=key==V.KChar 'u' && V.MCtrl `elem` mods ||
-  (V.MAlt `elem` mods && V.MMeta `notElem` mods && case key of V.KChar _->True; _->False)
+  (V.MAlt `elem` mods && V.MMeta `notElem` mods && not (dialogFocusChord key mods) && case key of V.KChar _->True; _->False)
+
+-- | Chords owned by configurable dialog focus. Control/Command Tab retains
+-- its existing search-page and focus aliases, outside this bounded catalogue.
+dialogFocusChord :: V.Key -> [V.Modifier] -> Bool
+dialogFocusChord key mods=key `elem` [V.KChar '\t',V.KBackTab] &&
+  not (any (`elem` mods) [V.MCtrl,V.MMeta])
+
+-- | Advance within the current modal controls. An open dropdown commits its
+-- preview before moving; focus alone never submits or retires a typed form.
+moveDialogFocus :: Int -> Desktop -> (Desktop,[Effect])
+moveDialogFocus delta d=case dialog d of
+  Just dg | total<-length (fields dg)+length (buttons dg),total>0 ->
+    case openComboBox dg of
+      Just (i,name,choices,_,preview) ->
+        (d {dialog=Just dg {fields=replaceAt i (ComboBox name choices preview Nothing) (fields dg),
+                           focus=(i+delta) `mod` total},buttonHover=Nothing,buttonPressed=Nothing},[])
+      Nothing -> (d {dialog=Just dg {focus=(focus dg+delta) `mod` total}},[])
+  _ -> (d,[])
 
 -- | Apply a permitted action to its dialog field without replaying a key through
 -- configurable dispatch. The text-area adapter owns its isolated buffer/undo.
 applyDialogCommand :: Command -> Desktop -> (Desktop,[Effect])
 applyDialogCommand cmd d
   | not (dialogCommandAllowed cmd d) = (d,[])
+  | cmd==DialogFocusNext = moveDialogFocus 1 d
+  | cmd==DialogFocusPrevious = moveDialogFocus (-1) d
   | cmd==Find = (searchPrompt False d,[])
   | cmd==Replace = (searchPrompt True d,[])
   | Just dg<-dialog d,field@(SelectedInput caption value sel):_<-drop (focus dg) (fields dg) =
@@ -2861,14 +2889,15 @@ effectiveBindings :: Desktop -> Maybe (Bindings.Bindings Command)
 effectiveBindings d = bindingContext d >>= \context->M.lookup (bindingPlatform d,context) (keyBindings d)
 
 terminalContextReserved :: Desktop -> V.Key -> [V.Modifier] -> Bool
-terminalContextReserved d key mods = terminalSourceReserved key mods ||
+terminalContextReserved d key mods =
+  (terminalSourceReserved key mods && not (bindingContext d==Just Bindings.DialogKeys && dialogFocusChord key mods)) ||
   (bindingContext d==Just Bindings.WordStarKeys && wordStarReserved key mods) ||
   (bindingContext d==Just Bindings.DialogKeys && dialogReserved key mods) ||
   (bindingContext d==Just Bindings.ConversationKeys && key==V.KEnter)
 
 bindingInputAvailable :: Desktop -> Bool
 bindingInputAvailable d=case dialog d of
-  Just dg -> openComboBox dg==Nothing && any (`dialogCommandAllowed` d) dialogBindingCommands
+  Just _ -> any (`dialogCommandAllowed` d) dialogBindingCommands
   Nothing -> menu d==Nothing && contextMenu d==Nothing && drag d==Nothing &&
     dragOriginal d==Nothing && prefix d==Nothing && not (questionActive d) && not (activeAutocomplete d)
 
@@ -2876,6 +2905,7 @@ bindingInputAvailable d=case dialog d of
 -- into a hardcoded named command. PTY fallback retains every ordinary control key.
 unboundKey :: V.Key -> [V.Modifier] -> Desktop -> (Desktop,[Effect])
 unboundKey key mods d
+  | Just _<-effectiveBindings d,dialog d/=Nothing,dialogFocusChord key mods = (d,[])
   | Just _<-effectiveBindings d, sourceNavigationOwner d,
     not (bindingPlatform d==Bindings.TerminalPlatform && V.MMeta `elem` mods),
     key `elem` [V.KUp,V.KDown,V.KHome,V.KEnd,V.KPageUp,V.KPageDown,V.KLeft,V.KRight,V.KBS,V.KDel] = (d,[])
@@ -3191,7 +3221,7 @@ comboBoxEvent ev dg d i name choices chosen preview = case ev of
     update selection opened=(d {dialog=Just dg {fields=replaceAt i (ComboBox name choices selection opened) (fields dg)},buttonHover=Nothing,buttonPressed=Nothing},[])
     finish selection=update selection Nothing
     highlight selection=update chosen (Just (max 0 (min (length choices-1) selection)))
-    advance delta=let (next,effects)=finish preview in (next {dialog=fmap (\value->value {focus=(i+delta) `mod` (length (fields dg)+length (buttons dg))}) (dialog next)},effects)
+    advance delta=moveDialogFocus delta d
 
 dialogEvent :: V.Event -> Dialog -> Desktop -> (Desktop,[Effect])
 dialogEvent ev dg d
@@ -3283,7 +3313,7 @@ dialogEvent ev dg d
     wheel x y delta = case findIndex (\r -> inside r x y && y<top (dialogRect d dg)+height (dialogRect d dg)-3) (fieldRects d dg) of
       Just i | f@TextArea{}<-fields dg !! i -> updateDialog dg {focus=i,fields=replaceAt i (clampArea (fieldRects d dg !! i) (scrollTextArea delta f)) (fields dg)}
       _ -> updateField (fieldKey (if delta>0 then V.KDown else V.KUp) [])
-    setFocus i = updateDialog dg {focus=i `mod` (count+length (buttons dg))}
+    setFocus i = moveDialogFocus (i-focus dg) d
     updateDialog new = (d {dialog=Just new},[])
     updateField f | focus dg<count =
                     let old=fields dg !! focus dg
