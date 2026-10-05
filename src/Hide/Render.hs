@@ -8,7 +8,7 @@
 -- The redraw gate is a separate explicit metadata projection. Immutable payloads
 -- are compared by stable identity, including hidden documents needed by native
 -- menus; adding a model field must not silently introduce a text/history scan.
-module Hide.Render (renderDesktop, renderCellRows, snapshot, snapshotHtml, RenderKey, renderKey) where
+module Hide.Render (renderDesktop, renderCellRows, renderCursor, snapshot, snapshotHtml, RenderKey, renderKey) where
 
 import Control.Exception (evaluate)
 import Data.IORef
@@ -327,6 +327,10 @@ renderDesktop d = (V.picForImage (V.vertCat (map (V.horizCat . map image . Vec.t
 -- update tile colors in place; no text/image reconstruction or payload equality.
 renderCellRows :: Desktop -> Vec.Vector (Vec.Vector CellSpan)
 renderCellRows d=cellRowsForLayers (fst (renderScene d)) (screenSize d)
+
+-- | Cursor from the same scene, without projecting its cell grid into an image.
+renderCursor :: Desktop -> V.Cursor
+renderCursor=snd . renderScene
 
 renderScene :: Desktop -> ([CellLayer],V.Cursor)
 renderScene d=(privacyLayers++layers,visibleCursor)

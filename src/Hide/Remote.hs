@@ -360,6 +360,7 @@ runRemoteDaemonWithStartup owned session scale effects tick inspect initial = do
           outgoing <- newTBQueueIO 128
           pending <- newTBQueueIO 128
           inflight <- newTVarIO (0::Int)
+          settledFrame <- newIORef (-1::Int)
           let receive = forever $ do
                 packet <- readPacket connection >>= maybe (failure "Remote client detached") pure
                 value <- case packet of JsonPacket v -> pure v; _ -> failure "Unexpected remote binary input"
@@ -410,7 +411,15 @@ runRemoteDaemonWithStartup owned session scale effects tick inspect initial = do
                       in pure $ if fst (clipboardExport latest)==serial
                         then current {desktop=latest {clipboardExport=(serial,Nothing)}} else current
                   _ -> pure ()
-                when (reset || (not sameFrame && (rows/=oldRows || metadata/=oldMeta))) $
+                let changed=reset || (not sameFrame && (rows/=oldRows || metadata/=oldMeta))
+                settled<-readIORef settledFrame
+                when (changed || settled/=acknowledged s) $ do
+                  -- This marker belongs to the exact snapshot above, not a later
+                  -- input acknowledgement. It also settles no-op input without
+                  -- manufacturing a frame or including an idle wait in timings.
+                  writePacket connection (json "frame-ready" ["seq" .= acknowledged s,"changed" .= changed])
+                  writeIORef settledFrame (acknowledged s)
+                when changed $
                   writePacket connection (BinaryPacket (BL.toStrict (framePacket reset oldRows rows (if reset then metadata else filter (`notElem` oldMeta) metadata))))
                 next <- timeout 50000 $ atomically $
                   (do first<-readTBQueue outgoing
@@ -538,6 +547,7 @@ data Journal = Journal
   , lastAck :: Int
   , pending :: [(Int,[WirePacket])]
   , aliases :: M.Map Int Value
+  , acknowledgedAlias :: Maybe Value
   , pendingUpload :: Maybe Value
   , serverEpoch :: Maybe String
   , terminalError :: Maybe String
@@ -574,7 +584,7 @@ withSessionPeer host session resume remoteArgs action = do
     fresh <- newSessionRecord host remoteArgs
     pure fresh {sessionId=session}) pure
   client <- randomIdentity
-  journal <- newTVarIO (Journal 1 0 [] M.empty Nothing Nothing Nothing)
+  journal <- newTVarIO (Journal 1 0 [] M.empty Nothing Nothing Nothing Nothing)
   incoming <- newTBQueueIO 8
   -- The callback borrows the Handle's socket descriptor. Clear it under this
   -- lock before closing handles, so it can never act on a reused descriptor.
@@ -624,7 +634,8 @@ withSessionPeer host session resume remoteArgs action = do
           j <- readTVar journal
           unless (serial>=lastAck j && serial<nextSequence j) (throwSTM (userError "Invalid remote acknowledgement"))
           let (finished,remaining)=M.partitionWithKey (\n _ -> n<=serial) (aliases j)
-          writeTVar journal j {lastAck=serial,pending=filter ((>serial).fst) (pending j),aliases=remaining}
+          writeTVar journal j {lastAck=serial,pending=filter ((>serial).fst) (pending j),aliases=remaining,
+            acknowledgedAlias=case M.lookupMax finished of Just (_,value)->Just value; Nothing->acknowledgedAlias j}
           pure (M.elems finished)
         mapM_ (\value -> emit (json "ack" (["seq" .= value]++maybe [] (\dirty -> ["dirty" .= (dirty::Bool)]) dirtyState))) forwarded
       fatal message=atomically (modifyTVar' journal (\j -> j {terminalError=Just message})) >> failure message
@@ -719,6 +730,14 @@ withSessionPeer host session resume remoteArgs action = do
                       dirtyState <- decodeValue (withObject "ack" (\o -> o .:? "dirty")) v
                       retire serial dirtyState
                     _ -> pure ()
+                  Just "frame-ready" -> case packet of
+                    JsonPacket v -> do
+                      (serial,changed)<-decodeValue (withObject "frame readiness" (\o -> (,) <$> o .: "seq" <*> o .: "changed")) v
+                      j<-readTVarIO journal
+                      unless (serial>=lastAck j && serial<nextSequence j) (failure "Invalid frame input sequence")
+                      let alias=if serial==lastAck j then acknowledgedAlias j else M.lookup serial (aliases j)
+                      emit (json "frame-ready" ["seq" .= fromMaybe (Number 0) alias,"changed" .= (changed::Bool)])
+                    _ -> failure "Invalid frame readiness marker"
                   Just "download" -> do
                     payload <- readPacket output
                     case payload of

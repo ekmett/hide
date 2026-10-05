@@ -1,5 +1,7 @@
 #include "window.h"
 #include "unicode.h"
+#include "shaders/cell.h"
+#include "shaders/cell.generated.h"
 #include <SDL3/SDL.h>
 #include <limits.h>
 #include <math.h>
@@ -7,20 +9,55 @@
 #include <string.h>
 
 static SDL_Window *window;
+static SDL_GPUDevice *gpu;
+static SDL_GPUShader *glyph_shader;
+static SDL_GPURenderState *glyph_state;
+static SDL_GPUBuffer *cell_buffer;
+static SDL_GPUTransferBuffer *cell_transfer;
+static struct HideGlyphCell *cell_grid;
+static size_t cell_count,cell_capacity,cell_buffer_capacity;
+static bool grid_ready;
+static uint64_t grid_uploads,grid_bytes;
+_Static_assert(sizeof(struct HideGlyphCell)==32,"Shader cell ABI");
 static SDL_Renderer *renderer;
 static SDL_Texture *texture, *vignette;
 static bool crt_filter;
 static double scale;
 static int cell_height;
-static uint32_t *pixels;
-static int frame_w, frame_h;
+
 static bool pixelate_unicode;
-typedef struct { char *text; int w, h; bool pixelated; uint32_t fg, traits, *pixels; } UnicodeTile;
-static UnicodeTile unicode_tiles[512];
-static unsigned tile_next;
-static void clear_unicode(void) {
-    for (int i=0;i<512;++i) { free(unicode_tiles[i].text); free(unicode_tiles[i].pixels); unicode_tiles[i]=(UnicodeTile){0}; }
-    tile_next=0;
+/* Semantic draw commands survive repeated present/blink; only atlas misses rasterize. */
+typedef struct { int x,y,cells,width,clip_x,clip_width; uint16_t bits[16]; char *text; uint32_t fg,bg,traits; bool pixelated; } GlyphCommand;
+static GlyphCommand *commands;
+static size_t command_count, command_capacity;
+typedef struct { uint64_t hash; int x,y,w,h; uint32_t fg,bg,traits; int hover,cursor; bool pixelated; uint16_t bits[16]; char *text; } AtlasEntry;
+#define INITIAL_ATLAS_SIZE 2048
+static int atlas_size=INITIAL_ATLAS_SIZE;
+static bool atlas_full;
+#define ATLAS_SLOTS 4096
+static AtlasEntry atlas[ATLAS_SLOTS];
+static size_t atlas_keys;
+static int atlas_x=1,atlas_y,atlas_row;
+static void clear_atlas_entries(void) {
+    for (size_t i=0;i<ATLAS_SLOTS;++i) free(atlas[i].text);
+    memset(atlas,0,sizeof(atlas)); atlas_keys=0;
+}
+
+static bool draw_failed;
+static int next_clip_x,next_clip_width=-1,draw_clip_x,draw_clip_width;
+static uint64_t atlas_uploads,atlas_bytes,draw_batches,event_age;
+static void clear_commands(void) {
+    for (size_t i=0;i<command_count;++i) free(commands[i].text);
+    command_count=0;
+}
+static GlyphCommand *command(void) {
+    if (command_count==command_capacity) {
+        size_t capacity=command_capacity?command_capacity*2:1024;
+        GlyphCommand *next=realloc(commands,capacity*sizeof(*commands));
+        if (!next) { SDL_SetError("Cannot allocate glyph commands"); draw_failed=true; return NULL; }
+        commands=next; command_capacity=capacity;
+    }
+    GlyphCommand *next=&commands[command_count++]; memset(next,0,sizeof(*next)); next->clip_x=next_clip_x; next->clip_width=next_clip_width; next_clip_width=-1; return next;
 }
 static int cell_x(int x) { return (int)floor(x*8*scale); }
 static int cell_y(int y) { return (int)floor(y*cell_height*scale); }
@@ -45,7 +82,7 @@ static void clear_pointer(void) {
 }
 
 const char *thc_error(void) { return SDL_GetError(); }
-const char *thc_backend(void) { return SDL_GetRendererName(renderer); }
+const char *thc_backend(void) { return gpu?SDL_GetGPUDeviceDriver(gpu):SDL_GetRendererName(renderer); }
 const char *thc_text(void) { return input_text ? input_text : ""; }
 const char *thc_clipboard(void) {
     SDL_free(clipboard_text);
@@ -64,12 +101,20 @@ void thc_close(void) {
     suppress_option_text = false;
     cursor_present = false; cursor_x = cursor_y = -1;
     SDL_StopTextInput(window);
+    SDL_DestroyGPURenderState(glyph_state); glyph_state=NULL;
+    if (gpu) {
+        SDL_ReleaseGPUShader(gpu,glyph_shader); glyph_shader=NULL;
+        SDL_ReleaseGPUBuffer(gpu,cell_buffer); cell_buffer=NULL;
+        SDL_ReleaseGPUTransferBuffer(gpu,cell_transfer); cell_transfer=NULL;
+    }
+    free(cell_grid); cell_grid=NULL; cell_count=cell_capacity=cell_buffer_capacity=0;
     SDL_DestroyTexture(texture); texture = NULL;
     SDL_DestroyTexture(vignette); vignette = NULL;
     SDL_DestroyRenderer(renderer); renderer = NULL;
     SDL_DestroyWindow(window); window = NULL;
-    free(pixels); pixels = NULL;
-    clear_unicode();
+    SDL_DestroyGPUDevice(gpu); gpu=NULL;
+    clear_commands(); free(commands); commands=NULL; command_capacity=0;
+    clear_atlas_entries(); atlas_x=1; atlas_y=atlas_row=0; atlas_size=INITIAL_ATLAS_SIZE;
     SDL_free(input_text); input_text = NULL;
     SDL_free(clipboard_text); clipboard_text = NULL;
     SDL_Quit();
@@ -108,7 +153,20 @@ int thc_open(const char *backend, double requested_scale, int requested_cols, in
     if (capture_exit && strcmp(capture_exit, "1") == 0) flags |= SDL_WINDOW_HIDDEN;
     window = SDL_CreateWindow("Haskell", 1280, 800, flags);
     if (!window) return 0;
-    renderer = SDL_CreateRenderer(window, backend);
+    if (strcmp(backend,"software")) {
+        gpu=SDL_CreateGPUDevice(SDL_GPU_SHADERFORMAT_SPIRV|SDL_GPU_SHADERFORMAT_MSL,false,backend);
+        if (!gpu) return 0;
+        renderer=SDL_CreateGPURenderer(gpu,window);
+        bool metal=!strcmp(SDL_GetGPUDeviceDriver(gpu),"metal");
+        SDL_GPUShaderCreateInfo shader={0};
+        shader.code=metal?hide_cell_msl:hide_cell_spv;
+        shader.code_size=metal?sizeof(hide_cell_msl):sizeof(hide_cell_spv);
+        shader.entrypoint=metal?"main0":"main";
+        shader.format=metal?SDL_GPU_SHADERFORMAT_MSL:SDL_GPU_SHADERFORMAT_SPIRV;
+        shader.stage=SDL_GPU_SHADERSTAGE_FRAGMENT; shader.num_samplers=1; shader.num_storage_buffers=1; shader.num_uniform_buffers=1;
+        glyph_shader=SDL_CreateGPUShader(gpu,&shader);
+        if (!glyph_shader) return 0;
+    } else renderer=SDL_CreateRenderer(window,backend);
     if (!renderer) return 0;
     SDL_SetRenderVSync(renderer, 1);
     int pw, ph, ww, wh;
@@ -161,70 +219,29 @@ int thc_scale(int direction) {
 
 void thc_size(int *w, int *h) { geometry(); *w = cols; *h = rows; }
 int thc_begin(void) {
-    geometry();
-    cursor_present = false;
-    int w = cell_x(cols), h = cell_y(rows);
-    frame_w=w; frame_h=h;
-    float tw = 0, th = 0;
-    if (texture) SDL_GetTextureSize(texture, &tw, &th);
-    if (!texture || tw != w || th != h) {
-        SDL_DestroyTexture(texture); texture = NULL;
-        free(pixels); pixels = NULL;
-        texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, w, h);
-        if (!texture) return 0;
-        SDL_SetTextureScaleMode(texture, SDL_SCALEMODE_NEAREST);
-        SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_NONE);
-        pixels = calloc((size_t)w * h, sizeof(*pixels));
-        if (!pixels) { SDL_SetError("Cannot allocate cell framebuffer"); return 0; }
+    geometry(); cursor_present=false; clear_commands(); draw_failed=false; grid_ready=false;
+    if (!texture) {
+        texture=SDL_CreateTexture(renderer,SDL_PIXELFORMAT_ARGB8888,SDL_TEXTUREACCESS_STREAMING,atlas_size,atlas_size);
+        if (!texture || !SDL_SetTextureScaleMode(texture,SDL_SCALEMODE_NEAREST) ||
+            !SDL_SetTextureBlendMode(texture,SDL_BLENDMODE_BLEND)) return 0;
+        uint32_t white=0xffffffff; SDL_Rect pixel={0,0,1,1};
+        if (!SDL_UpdateTexture(texture,&pixel,&white,4)) return 0;
     }
-    for (int i = 0; i < w * h; ++i) pixels[i] = 0xff000000;
     return 1;
 }
-
-/* Bitmap composition keeps all glyph/background edges on the same cell grid.
- * ponytail: upload one small frame per event; use an atlas if profiling demands it. */
-void thc_glyph(int x, int y, int cells, int glyph_width, const uint16_t *bits, uint32_t fg, uint32_t bg, uint32_t traits) {
-    if (!pixels || y < 0 || y >= rows) return;
-    int x0=cell_x(x), x1=cell_x(x+SDL_max(cells,(glyph_width+7)/8));
-    int y0=cell_y(y), y1=cell_y(y+1);
-    for (int py=y0;py<y1;++py) for (int px=SDL_max(0,x0);px<SDL_min(frame_w,x1);++px) {
-        int dx=(int)((px-x0)/scale), dy=(py-y0)*16/SDL_max(1,y1-y0);
-        int source=((traits&4)?dx/2:dx)-((traits&2)?(15-dy)/4:0);
-        bool ink=source>=0 && source<glyph_width && source<16 && (bits[dy] & (0x8000u>>source));
-        if ((traits&1) && source>0 && source<=glyph_width && source<=16)
-            ink=ink || (bits[dy] & (0x8000u>>(source-1)));
-        if (ink || cells) pixels[py*frame_w+px]=0xff000000 | (ink?fg:bg);
-    }
+void thc_clip(int visible_x,int clip_cells) { next_clip_x=visible_x; next_clip_width=clip_cells; }
+void thc_glyph(int x,int y,int cells,int glyph_width,const uint16_t *bits,uint32_t fg,uint32_t bg,uint32_t traits) {
+    if (y<0 || y>=rows) return;
+    GlyphCommand *c=command(); if (!c) return;
+    c->x=x; c->y=y; c->cells=cells; c->width=glyph_width; c->fg=fg; c->bg=bg; c->traits=traits;
+    memcpy(c->bits,bits,sizeof(c->bits));
 }
 void thc_pixelate_unicode(int enabled) { pixelate_unicode=enabled!=0; }
-int thc_unicode(int x, int y, int cells, const char *text, uint32_t fg, uint32_t bg, uint32_t traits) {
-    if (!pixels || x<0 || y<0 || x+cells>cols || y>=rows || cells<1) return 1;
-    int x0=cell_x(x), y0=cell_y(y), width=cell_x(x+cells)-x0, height=cell_y(y+1)-y0;
-    int w=pixelate_unicode?8*cells:width, h=pixelate_unicode?16:height;
-    UnicodeTile *tile=NULL;
-    for (int i=0;i<512;++i) {
-        UnicodeTile *candidate=&unicode_tiles[i];
-        if (candidate->text && candidate->w==w && candidate->h==h && candidate->pixelated==pixelate_unicode && candidate->fg==fg && candidate->traits==traits && !strcmp(candidate->text,text)) { tile=candidate; break; }
-    }
-    if (!tile) {
-        tile=&unicode_tiles[tile_next++%512];
-        free(tile->text); free(tile->pixels); *tile=(UnicodeTile){0};
-        tile->text=strdup(text); tile->pixels=calloc((size_t)w*h,sizeof(uint32_t));
-        tile->w=w; tile->h=h; tile->fg=fg; tile->traits=traits; tile->pixelated=pixelate_unicode;
-        if (!tile->text || !tile->pixels || !(pixelate_unicode ? thc_unicode_pixelated(text,w,h,fg,traits,tile->pixels) : thc_unicode_bitmap(text,w,h,fg,traits,tile->pixels))) {
-            free(tile->text); free(tile->pixels); *tile=(UnicodeTile){0};
-            return SDL_SetError("Cannot rasterize Unicode text");
-        }
-    }
-    for (int dy=0;dy<height;++dy) for (int dx=0;dx<width;++dx) {
-        uint32_t ink=tile->pixels[(dy*h/height)*w+dx*w/width];
-        unsigned alpha=ink>>24, inverse=255-alpha;
-        unsigned r=((ink>>16)&255)+((bg>>16)&255)*inverse/255;
-        unsigned g=((ink>>8)&255)+((bg>>8)&255)*inverse/255;
-        unsigned b=(ink&255)+(bg&255)*inverse/255;
-        pixels[(y0+dy)*frame_w+x0+dx]=0xff000000|(r<<16)|(g<<8)|b;
-    }
-    return 1;
+int thc_unicode(int x,int y,int cells,const char *text,uint32_t fg,uint32_t bg,uint32_t traits) {
+    if (y<0 || y>=rows || cells<1) return 1;
+    GlyphCommand *c=command(); if (!c) return 0;
+    c->x=x; c->y=y; c->cells=cells; c->fg=fg; c->bg=bg; c->traits=traits; c->pixelated=pixelate_unicode;
+    c->text=strdup(text); return c->text!=NULL;
 }
 static bool cursor_phase(void) {
     return !blink_cursor || ((SDL_GetTicks() - cursor_epoch) / 500) % 2 == 0;
@@ -233,15 +250,10 @@ void thc_cursor_blink(int enabled) {
     if (blink_cursor != (enabled != 0)) cursor_epoch = SDL_GetTicks();
     blink_cursor = enabled != 0;
 }
-void thc_cursor(int x, int y) {
-    if (!pixels || x < 0 || x >= cols || y < 0 || y >= rows) return;
-    if (cursor_x != x || cursor_y != y) cursor_epoch = SDL_GetTicks();
-    cursor_x = x; cursor_y = y; cursor_present = true;
-    cursor_drawn = cursor_phase();
-    if (!cursor_drawn) return;
-    int y0=cell_y(y), y1=cell_y(y+1);
-    for (int py=y0+(y1-y0)*14/16;py<y1;++py) for (int px=cell_x(x);px<cell_x(x+1);++px)
-        pixels[py*frame_w+px]^=0x00ffffff;
+void thc_cursor(int x,int y) {
+    if (x<0 || x>=cols || y<0 || y>=rows) return;
+    if (cursor_x!=x || cursor_y!=y) cursor_epoch=SDL_GetTicks();
+    cursor_x=x; cursor_y=y; cursor_present=true;
 }
 static uint32_t mouse_color(uint32_t pixel) {
     /* DOS text mouse: screen mask FFFF, cursor mask 7700. Keep glyph/intensity. */
@@ -285,26 +297,241 @@ static bool draw_crt(const SDL_FRect *target) {
     }
     return SDL_RenderTexture(renderer, vignette, NULL, target);
 }
-static void invert_pointer(void) {
-    if (left_down || mouse_x<0 || mouse_x>=cols || mouse_y<0 || mouse_y>=rows) return;
-    for (int y=cell_y(mouse_y);y<cell_y(mouse_y+1);++y)
-        for (int x=cell_x(mouse_x);x<cell_x(mouse_x+1);++x)
-            pixels[y*frame_w+x]=mouse_color(pixels[y*frame_w+x]);
+static bool quad(float x,float y,float w,float h,float u,float v,float uw,float vh,uint32_t color) {
+    if (draw_clip_width>=0) {
+        float lo=origin_x+cell_x(draw_clip_x),hi=origin_x+cell_x(draw_clip_x+draw_clip_width);
+        float start=SDL_max(x,lo),end=SDL_min(x+w,hi);
+        if (start>=end) return true;
+        u+=(start-x)*uw/w; uw*=(end-start)/w; x=start; w=end-start;
+    }
+    /* The software test renderer's triangle sampler rounds atlas UV edges;
+     * explicit source rectangles preserve the exact same clipped texels. */
+    SDL_FRect source={floorf(u*atlas_size),floorf(v*atlas_size),SDL_max(1.f,uw*atlas_size),SDL_max(1.f,vh*atlas_size)};
+    SDL_FRect destination={x,y,w,h};
+    ++draw_batches;
+    return SDL_SetTextureColorMod(texture,(color>>16)&255,(color>>8)&255,color&255) && SDL_RenderTexture(renderer,texture,&source,&destination);
+}
+
+static uint64_t hash_bytes(uint64_t hash,const void *bytes,size_t count) {
+    const unsigned char *p=bytes;
+    for (size_t i=0;i<count;++i) hash=(hash^p[i])*1099511628211ULL;
+    return hash;
+}
+/* Preserve tile pixel coordinates while enlarging the GPU atlas. No glyph
+ * is reshaped or read back; subsequent commands observe the ordered GPU copy. */
+static bool grow_atlas(void) {
+    if (atlas_size>=8192) { atlas_full=true; return false; }
+    int size=atlas_size*2;
+    SDL_Texture *next=SDL_CreateTexture(renderer,SDL_PIXELFORMAT_ARGB8888,SDL_TEXTUREACCESS_STREAMING,size,size);
+    if (!next) return false;
+    if (!SDL_SetTextureScaleMode(next,SDL_SCALEMODE_NEAREST) || !SDL_SetTextureBlendMode(next,SDL_BLENDMODE_BLEND) || !SDL_FlushRenderer(renderer)) {
+        SDL_DestroyTexture(next); return false;
+    }
+    SDL_GPUTextureLocation source={0},destination={0};
+    source.texture=SDL_GetPointerProperty(SDL_GetTextureProperties(texture),SDL_PROP_TEXTURE_GPU_TEXTURE_POINTER,NULL);
+    destination.texture=SDL_GetPointerProperty(SDL_GetTextureProperties(next),SDL_PROP_TEXTURE_GPU_TEXTURE_POINTER,NULL);
+    if (!source.texture || !destination.texture) { SDL_DestroyTexture(next); return SDL_SetError("Missing GPU atlas texture"); }
+    SDL_GPUCommandBuffer *buffer=SDL_AcquireGPUCommandBuffer(gpu);
+    if (!buffer) { SDL_DestroyTexture(next); return false; }
+    SDL_GPUCopyPass *copy=SDL_BeginGPUCopyPass(buffer);
+    SDL_CopyGPUTextureToTexture(copy,&source,&destination,atlas_size,atlas_size,1,false);
+    SDL_EndGPUCopyPass(copy);
+    if (!SDL_SubmitGPUCommandBuffer(buffer)) { SDL_DestroyTexture(next); return false; }
+    SDL_DestroyTexture(texture); texture=next; atlas_size=size; return true;
+}
+static AtlasEntry *atlas_entry(const GlyphCommand *c,int hover,int cursor) {
+    int w=c->text?(c->pixelated?8*c->cells:cell_x(c->x+c->cells)-cell_x(c->x)):c->width;
+    int h=c->text && !c->pixelated?cell_y(c->y+1)-cell_y(c->y):16;
+    uint64_t hash=hash_bytes(14695981039346656037ULL,&w,sizeof(w));
+    hash=hash_bytes(hash,&h,sizeof(h)); hash=hash_bytes(hash,&c->traits,sizeof(c->traits));
+    if (c->text) {
+        hash=hash_bytes(hash,c->text,strlen(c->text)); hash=hash_bytes(hash,&c->fg,sizeof(c->fg));
+        hash=hash_bytes(hash,&c->pixelated,sizeof(c->pixelated)); hash=hash_bytes(hash,&hover,sizeof(hover)); hash=hash_bytes(hash,&cursor,sizeof(cursor));
+        if (hover>=0 || cursor>=0) hash=hash_bytes(hash,&c->bg,sizeof(c->bg));
+    } else hash=hash_bytes(hash,c->bits,sizeof(c->bits));
+    if (!hash) hash=1;
+    size_t slot=hash%ATLAS_SLOTS;
+    for (size_t n=0;atlas[slot].hash && n<ATLAS_SLOTS;++n,slot=(slot+1)%ATLAS_SLOTS)
+        if (atlas[slot].hash==hash && atlas[slot].w==w && atlas[slot].h==h && atlas[slot].traits==c->traits &&
+            (c->text?atlas[slot].text && !strcmp(atlas[slot].text,c->text) && atlas[slot].fg==c->fg &&
+                atlas[slot].pixelated==c->pixelated && atlas[slot].hover==hover && atlas[slot].cursor==cursor &&
+                ((hover<0 && cursor<0) || atlas[slot].bg==c->bg):!atlas[slot].text && !memcmp(atlas[slot].bits,c->bits,sizeof(c->bits)))) return &atlas[slot];
+    if (w<1 || h<1 || w>8192 || h>8192) { SDL_SetError("Glyph exceeds atlas dimensions"); return NULL; }
+    if (gpu) {
+        while (w>atlas_size || h>atlas_size) if (!grow_atlas()) return NULL;
+        if (atlas_x+w>atlas_size) { atlas_x=0; atlas_y+=atlas_row; atlas_row=0; }
+        while (atlas_y+h>atlas_size) if (!grow_atlas()) return NULL;
+        /* Forgetting keys never reuses pixels: prepared cells own rectangles.
+         * Retire the bounded key table before it becomes a full-table probe. */
+        if (atlas_keys>=ATLAS_SLOTS*3/4) { clear_atlas_entries(); slot=hash%ATLAS_SLOTS; }
+    } else {
+        if (w>atlas_size || h>atlas_size) { SDL_SetError("Glyph exceeds atlas dimensions"); return NULL; }
+        if (atlas_x+w>atlas_size) { atlas_x=0; atlas_y+=atlas_row; atlas_row=0; }
+        if (atlas_y+h>atlas_size || atlas[slot].hash) {
+            if (!SDL_FlushRenderer(renderer)) return NULL;
+            clear_atlas_entries(); atlas_x=1; atlas_y=atlas_row=0; slot=hash%ATLAS_SLOTS;
+        }
+    }
+    uint32_t *pixels=calloc((size_t)w*h,sizeof(*pixels));
+    if (!pixels) { SDL_SetError("Cannot allocate glyph tile"); return NULL; }
+    bool ok=true;
+    if (c->text) {
+        ok=c->pixelated?thc_unicode_pixelated(c->text,w,h,c->fg,c->traits,pixels):thc_unicode_bitmap(c->text,w,h,c->fg,c->traits,pixels);
+        if (ok && (hover>=0 || cursor>=0)) for (int y=0;y<h;++y) for (int x=0;x<w;++x) {
+            uint32_t ink=pixels[y*w+x]; unsigned alpha=ink>>24,inverse=255-alpha;
+            uint32_t rgb=((((ink>>16)&255)+((c->bg>>16)&255)*inverse/255)<<16)|
+                ((((ink>>8)&255)+((c->bg>>8)&255)*inverse/255)<<8)|((ink&255)+(c->bg&255)*inverse/255);
+            int cell=x*c->cells/w;
+            if (cell==cursor && y>=h*14/16) rgb^=0xffffff;
+            if (cell==hover) rgb=mouse_color(rgb);
+            pixels[y*w+x]=0xff000000|rgb;
+        }
+    } else for (int y=0;y<16;++y) for (int x=0;x<w;++x) {
+        int source=x-((c->traits&2)?(15-y)/4:0);
+        bool ink=source>=0 && source<16 && (c->bits[y]&(0x8000u>>source));
+        if ((c->traits&1) && source>0 && source<=16) ink=ink || (c->bits[y]&(0x8000u>>(source-1)));
+        pixels[y*w+x]=ink?0xffffffff:0;
+    }
+    /* Portable SDL geometry blending uses straight alpha; shaping remains premultiplied. */
+    if (c->text && ok && hover<0 && cursor<0) for (int i=0;i<w*h;++i) {
+        unsigned a=pixels[i]>>24;
+        if (a && a<255) pixels[i]=(a<<24)|((SDL_min(255,((pixels[i]>>16&255)*255+a/2)/a))<<16)|
+            ((SDL_min(255,((pixels[i]>>8&255)*255+a/2)/a))<<8)|SDL_min(255,((pixels[i]&255)*255+a/2)/a);
+    }
+    SDL_Rect region={atlas_x,atlas_y,w,h};
+    if (ok) ok=SDL_UpdateTexture(texture,&region,pixels,w*4);
+    free(pixels); if (!ok) return NULL;
+    ++atlas_uploads; atlas_bytes+=(uint64_t)w*h*4;
+    AtlasEntry cached={0}; cached.hash=hash; cached.x=atlas_x; cached.y=atlas_y; cached.w=w; cached.h=h;
+    cached.fg=c->fg; cached.bg=c->bg; cached.traits=c->traits; cached.hover=hover; cached.cursor=cursor; cached.pixelated=c->pixelated;
+    memcpy(cached.bits,c->bits,sizeof(cached.bits));
+    if (c->text) { cached.text=strdup(c->text); if (!cached.text) return NULL; }
+    atlas[slot]=cached; ++atlas_keys; atlas_x+=w; atlas_row=SDL_max(atlas_row,h);
+    return &atlas[slot];
+}
+static bool draw_command(const GlyphCommand *c) {
+    draw_clip_x=c->clip_x; draw_clip_width=c->clip_width;
+    int hover=!left_down && mouse_y==c->y && mouse_x>=c->x && mouse_x<c->x+SDL_max(c->cells,(c->width+7)/8)?mouse_x-c->x:-1;
+    int cursor=cursor_present && cursor_drawn && cursor_y==c->y && cursor_x>=c->x && cursor_x<c->x+SDL_max(c->cells,(c->width+7)/8)?cursor_x-c->x:-1;
+    AtlasEntry *entry=atlas_entry(c,hover,cursor); if (!entry) return false;
+    int count=SDL_max(c->cells,(c->width+7)/8);
+    float y=origin_y+cell_y(c->y),height=cell_y(c->y+1)-cell_y(c->y);
+    if (c->text) {
+        float x=origin_x+cell_x(c->x),width=cell_x(c->x+c->cells)-cell_x(c->x);
+        if (!quad(x,y,width,height,0.5f/atlas_size,0.5f/atlas_size,0,0,c->bg)) return false;
+        return quad(x,y,width,height,(entry->x+0.5f)/atlas_size,(entry->y+0.5f)/atlas_size,entry->w/(float)atlas_size,entry->h/(float)atlas_size,0xffffff);
+    }
+    for (int cell=0;cell<count;++cell) for (int part=0;part<2;++part) {
+        float x=origin_x+cell_x(c->x+cell),width=cell_x(c->x+cell+1)-cell_x(c->x+cell);
+        float py=y+(part?height*14/16:0),ph=height*(part?2:14)/16;
+        uint32_t fg=c->fg,bg=c->bg;
+        if (cell==cursor && part) { fg^=0xffffff; bg^=0xffffff; }
+        if (cell==hover) { fg=mouse_color(fg); bg=mouse_color(bg); }
+        if (c->cells && !quad(x,py,width,ph,0.5f/atlas_size,0.5f/atlas_size,0,0,bg)) return false;
+        float source=cell*8.f/((c->traits&4)?2:1),sourceWidth=8.f/((c->traits&4)?2:1);
+        if (source<entry->w && !quad(x,py,width,ph,(entry->x+source+0.5f)/atlas_size,(entry->y+(part?14:0)+0.5f)/atlas_size,
+            SDL_min(sourceWidth,entry->w-source)/atlas_size,(part?2.f:14.f)/atlas_size,fg)) return false;
+    }
+    return true;
+}
+static bool reserve_cells(size_t capacity) {
+    if (capacity<=cell_capacity) return true;
+    size_t size=SDL_max(capacity,cell_capacity?cell_capacity*2:1024);
+    struct HideGlyphCell *next=realloc(cell_grid,size*sizeof(*next));
+    if (!next) return SDL_SetError("Cannot allocate cell grid");
+    cell_grid=next; cell_capacity=size; return true;
+}
+static bool prepare_grid(void) {
+    size_t base=(size_t)cols*rows;
+    if (!reserve_cells(base)) return false;
+    bool retried=false;
+restart:
+    atlas_full=false;
+    cell_count=base; memset(cell_grid,0,base*sizeof(*cell_grid));
+    for (size_t i=0;i<command_count;++i) {
+        const GlyphCommand *c=&commands[i];
+        AtlasEntry *entry=atlas_entry(c,-1,-1);
+        if (!entry) {
+            if (!atlas_full) return false;
+            if (retried) return SDL_SetError("Visible glyphs exceed the bounded atlas");
+            /* Retire allocations between complete preparations, then replay
+             * once so no cell keeps an overwritten atlas rectangle. */
+            if (!SDL_FlushRenderer(renderer)) return false;
+            clear_atlas_entries(); atlas_x=1; atlas_y=atlas_row=0; retried=true;
+            goto restart;
+        }
+        int full=SDL_max(c->cells,(c->width+7)/8);
+        int lo=SDL_max(0,c->x),hi=SDL_min(cols,c->x+full);
+        if (c->clip_width>=0) { lo=SDL_max(lo,c->clip_x); hi=SDL_min(hi,c->clip_x+c->clip_width); }
+        for (int x=lo;x<hi;++x) {
+            size_t index=(size_t)c->y*cols+x;
+            struct HideGlyphCell prior=cell_grid[index];
+            uint32_t previous=0,depth=1;
+            if (!c->cells && prior.geometry.z) {
+                depth=prior.paint.w+1;
+                if (depth>16) return SDL_SetError("Too many zero-advance glyph overlays");
+                if (!reserve_cells(cell_count+1)) return false;
+                cell_grid[cell_count]=prior; previous=(uint32_t)++cell_count;
+            }
+            cell_grid[index]=(struct HideGlyphCell){
+                {(uint32_t)entry->x|((uint32_t)entry->y<<16),(uint32_t)entry->w|((uint32_t)entry->h<<16),
+                 (uint32_t)full|((uint32_t)(x-c->x)<<16),previous},
+                {c->fg,c->bg,(c->cells?1u:0u)|(c->text?0u:2u),depth}};
+        }
+    }
+    size_t bytes=cell_count*sizeof(*cell_grid);
+    if (bytes>UINT32_MAX) return SDL_SetError("Cell grid is too large");
+    if (bytes>cell_buffer_capacity) {
+        SDL_DestroyGPURenderState(glyph_state); glyph_state=NULL;
+        SDL_ReleaseGPUBuffer(gpu,cell_buffer); SDL_ReleaseGPUTransferBuffer(gpu,cell_transfer);
+        SDL_GPUBufferCreateInfo buffer={SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ,(Uint32)bytes,0};
+        SDL_GPUTransferBufferCreateInfo transfer={SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD,(Uint32)bytes,0};
+        cell_buffer=SDL_CreateGPUBuffer(gpu,&buffer); cell_transfer=SDL_CreateGPUTransferBuffer(gpu,&transfer);
+        if (!cell_buffer || !cell_transfer) return false;
+        cell_buffer_capacity=bytes;
+        SDL_GPURenderStateCreateInfo state={0}; state.fragment_shader=glyph_shader; state.num_storage_buffers=1; state.storage_buffers=&cell_buffer;
+        glyph_state=SDL_CreateGPURenderState(renderer,&state); if (!glyph_state) return false;
+    }
+    void *mapped=SDL_MapGPUTransferBuffer(gpu,cell_transfer,true); if (!mapped) return false;
+    memcpy(mapped,cell_grid,bytes); SDL_UnmapGPUTransferBuffer(gpu,cell_transfer);
+    SDL_GPUCommandBuffer *upload=SDL_AcquireGPUCommandBuffer(gpu); if (!upload) return false;
+    SDL_GPUCopyPass *copy=SDL_BeginGPUCopyPass(upload);
+    SDL_GPUTransferBufferLocation source={cell_transfer,0}; SDL_GPUBufferRegion destination={cell_buffer,0,(Uint32)bytes};
+    SDL_UploadToGPUBuffer(copy,&source,&destination,true); SDL_EndGPUCopyPass(copy);
+    if (!SDL_SubmitGPUCommandBuffer(upload)) return false;
+    ++grid_uploads; grid_bytes+=bytes; grid_ready=true; return true;
 }
 int thc_present(void) {
-    invert_pointer();
-    bool uploaded = SDL_UpdateTexture(texture, NULL, pixels, frame_w * sizeof(*pixels));
-    invert_pointer();
-    if (!uploaded) return 0;
-    SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+    if (draw_failed) return 0;
+    SDL_SetRenderDrawColor(renderer,0,0,0,255);
     if (!SDL_RenderClear(renderer)) return 0;
-    SDL_FRect target = {(float)origin_x, (float)origin_y, (float)(cols * 8 * scale), (float)(rows * cell_height * scale)};
-    if (!SDL_RenderTexture(renderer, texture, NULL, &target)) return 0;
-    if (crt_filter && !draw_crt(&target)) return 0;
-    const char *capture = SDL_getenv("THC_EDIT_CAPTURE");
+    SDL_Rect clip={origin_x,origin_y,cell_x(cols),cell_y(rows)};
+    if (!SDL_SetRenderClipRect(renderer,&clip)) return 0;
+    cursor_drawn=cursor_phase();
+    SDL_FRect target={(float)origin_x,(float)origin_y,(float)cell_x(cols),(float)cell_y(rows)};
+    if (gpu) {
+        if (!grid_ready && !prepare_grid()) return 0;
+        float uniforms[12]={(float)cols,(float)rows,atlas_size,0,
+            cursor_present && cursor_drawn?(float)cursor_x:-1,cursor_present && cursor_drawn?(float)cursor_y:-1,
+            left_down?-1:(float)mouse_x,left_down?-1:(float)mouse_y,
+            (float)cell_x(cols),(float)cell_y(rows),crt_filter?1.f:0.f,(float)(cell_height*scale/16)};
+        if (!SDL_SetGPURenderStateFragmentUniforms(glyph_state,0,uniforms,sizeof(uniforms)) || !SDL_SetGPURenderState(renderer,glyph_state) ||
+            !SDL_RenderTexture(renderer,texture,NULL,&target) || !SDL_SetGPURenderState(renderer,NULL)) return 0;
+        ++draw_batches;
+    } else {
+        for (size_t i=0;i<command_count;++i) if (!draw_command(&commands[i])) return 0;
+
+    }
+    if (!SDL_SetRenderClipRect(renderer,NULL)) return 0;
+    if (!gpu && crt_filter && !draw_crt(&target)) return 0;
+    const char *capture=SDL_getenv("THC_EDIT_CAPTURE");
     if (capture && *capture && !thc_capture(capture)) return 0;
     return SDL_RenderPresent(renderer);
 }
+uint64_t thc_event_age_ns(void) { return event_age; }
+/* Diagnostic counters for native regression/profiling, never an editor input. */
+void thc_atlas_stats(uint64_t *uploads,uint64_t *bytes,uint64_t *batches) { *uploads=atlas_uploads; *bytes=atlas_bytes; *batches=draw_batches; }
+void thc_grid_stats(uint64_t *uploads,uint64_t *bytes) { *uploads=grid_uploads; *bytes=grid_bytes; }
 int thc_capture(const char *path) {
     SDL_Surface *surface = SDL_RenderReadPixels(renderer, NULL);
     if (!surface) return 0;
@@ -367,18 +594,27 @@ static void latest_motion(SDL_Event *event) {
     while (SDL_PeepEvents(&next, 1, SDL_PEEKEVENT, SDL_EVENT_FIRST, SDL_EVENT_LAST) == 1 &&
            next.type == SDL_EVENT_MOUSE_MOTION && next.motion.windowID == event->motion.windowID &&
            next.motion.which == event->motion.which && next.motion.state == event->motion.state) {
+        Uint64 oldest=event->common.timestamp;
         SDL_PeepEvents(event, 1, SDL_GETEVENT, SDL_EVENT_MOUSE_MOTION, SDL_EVENT_MOUSE_MOTION);
+        if (oldest && (!event->common.timestamp || oldest<event->common.timestamp)) event->common.timestamp=oldest;
     }
 }
 static double wheel_delta(const SDL_Event *event) {
     return event->wheel.y * (event->wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -1 : 1);
 }
+static int delivered(const SDL_Event *event,int32_t *out) {
+    Uint64 now=SDL_GetTicksNS(),stamp=event->common.timestamp;
+    event_age=out[0]!=0 && stamp && now>=stamp?now-stamp:0;
+    return 1;
+}
 static int idle_event(int32_t *out) {
+    event_age=0;
     out[0] = cursor_present && cursor_drawn != cursor_phase() ? 8 : 0;
     return 1;
 }
 int thc_wait(int32_t *out) {
     SDL_Event e;
+    event_age=0;
     memset(out, 0, 6 * sizeof(*out));
     Uint64 deadline = SDL_GetTicks() + 100;
     for (;;) {
@@ -386,29 +622,29 @@ int thc_wait(int32_t *out) {
         if (now >= deadline) return idle_event(out);
         SDL_ClearError();
         if (!SDL_WaitEventTimeout(&e, (Sint32)(deadline - now))) return *SDL_GetError() ? 0 : idle_event(out);
-        if (e.type == wake_event) return 1;
-        if (e.type == command_event) { out[0] = 11; out[1] = e.user.code; out[2] = (int32_t)(intptr_t)e.user.data1; return 1; }
-        if (e.type == dock_event) { out[0] = 16; out[1] = e.user.code; out[2] = (int32_t)(intptr_t)e.user.data1; return 1; }
+        if (e.type == wake_event) return delivered(&e,out);
+        if (e.type == command_event) { out[0] = 11; out[1] = e.user.code; out[2] = (int32_t)(intptr_t)e.user.data1; return delivered(&e,out); }
+        if (e.type == dock_event) { out[0] = 16; out[1] = e.user.code; out[2] = (int32_t)(intptr_t)e.user.data1; return delivered(&e,out); }
         switch (e.type) {
-        case SDL_EVENT_QUIT: case SDL_EVENT_WINDOW_CLOSE_REQUESTED: out[0] = 6; return 1;
+        case SDL_EVENT_QUIT: case SDL_EVENT_WINDOW_CLOSE_REQUESTED: out[0] = 6; return delivered(&e,out);
         case SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED: case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
-            geometry(); refresh_pointer(); out[0] = 5; out[1] = cols; out[2] = rows; return 1;
-        case SDL_EVENT_WINDOW_EXPOSED: out[0] = 8; return 1;
+            geometry(); refresh_pointer(); out[0] = 5; out[1] = cols; out[2] = rows; return delivered(&e,out);
+        case SDL_EVENT_WINDOW_EXPOSED: out[0] = 8; return delivered(&e,out);
         case SDL_EVENT_WINDOW_MOUSE_ENTER:
-            refresh_pointer(); out[0] = 12; out[1] = mouse_x; out[2] = mouse_y; return 1;
+            refresh_pointer(); out[0] = 12; out[1] = mouse_x; out[2] = mouse_y; return delivered(&e,out);
         case SDL_EVENT_WINDOW_MOUSE_LEAVE:
             clear_pointer();
-            out[0] = 12; out[1] = out[2] = -1; return 1;
+            out[0] = 12; out[1] = out[2] = -1; return delivered(&e,out);
         case SDL_EVENT_WINDOW_FOCUS_GAINED:
-            out[0] = 13; out[1] = modifiers(SDL_GetModState()); return 1;
+            out[0] = 13; out[1] = modifiers(SDL_GetModState()); return delivered(&e,out);
         case SDL_EVENT_WINDOW_FOCUS_LOST:
             clear_pointer(); left_down = false; suppress_option_text = false;
-            SDL_CaptureMouse(false); out[0] = 7; return 1;
+            SDL_CaptureMouse(false); out[0] = 7; return delivered(&e,out);
         case SDL_EVENT_KEY_DOWN: {
             suppress_option_text = false;
             cursor_epoch = SDL_GetTicks();
             int key = keycode(e.key.key), mods = modifiers(e.key.mod);
-            if (modifier_key(e.key.key)) { out[0] = 13; out[1] = mods; return 1; }
+            if (modifier_key(e.key.key)) { out[0] = 13; out[1] = mods; return delivered(&e,out); }
 #ifdef SDL_PLATFORM_MACOS
             /* Command shortcuts use the layout's unmodified scalar; Option
              * may otherwise compose a different printable character. */
@@ -432,38 +668,38 @@ int thc_wait(int32_t *out) {
                 if (e.key.mod & (SDL_KMOD_MODE | SDL_KMOD_RALT)) break;
 #endif
             }
-            out[0] = 1; out[1] = key; out[2] = mods; return 1;
+            out[0] = 1; out[1] = key; out[2] = mods; return delivered(&e,out);
         }
         case SDL_EVENT_KEY_UP:
             suppress_option_text = false;
-            if (modifier_key(e.key.key)) { out[0] = 13; out[1] = modifiers(e.key.mod); return 1; }
+            if (modifier_key(e.key.key)) { out[0] = 13; out[1] = modifiers(e.key.mod); return delivered(&e,out); }
             break;
         case SDL_EVENT_DROP_FILE:
             SDL_free(input_text); input_text = SDL_strdup(e.drop.data);
             if (!input_text) return 0;
-            out[0] = 14; return 1;
+            out[0] = 14; return delivered(&e,out);
         case SDL_EVENT_TEXT_INPUT:
             if (suppress_option_text) { suppress_option_text = false; break; }
             cursor_epoch = SDL_GetTicks();
             SDL_free(input_text); input_text = SDL_strdup(e.text.text);
             if (!input_text) return 0;
-            out[0] = 2; return 1;
+            out[0] = 2; return delivered(&e,out);
         case SDL_EVENT_MOUSE_BUTTON_DOWN:
             if (e.button.button != SDL_BUTTON_LEFT && e.button.button != SDL_BUTTON_RIGHT) break;
             if (e.button.button == SDL_BUTTON_LEFT) { left_down = true; SDL_CaptureMouse(true); }
             out[0] = 3; out[3] = e.button.clicks; out[5] = e.button.button;
-            pointer(e.button.x, e.button.y, out); return 1;
+            pointer(e.button.x, e.button.y, out); return delivered(&e,out);
         case SDL_EVENT_MOUSE_BUTTON_UP:
             if (e.button.button != SDL_BUTTON_LEFT) break;
             left_down = false; SDL_CaptureMouse(false);
-            out[0] = 4; pointer(e.button.x, e.button.y, out); return 1;
+            out[0] = 4; pointer(e.button.x, e.button.y, out); return delivered(&e,out);
         case SDL_EVENT_MOUSE_MOTION: {
             latest_motion(&e);
             int old_x = mouse_x, old_y = mouse_y;
             bool was_visible = SDL_CursorVisible();
             pointer(e.motion.x, e.motion.y, out);
             if (mouse_x == old_x && mouse_y == old_y && SDL_CursorVisible() == was_visible) break;
-            out[0] = left_down ? 3 : 12; return 1;
+            out[0] = left_down ? 3 : 12; return delivered(&e,out);
         }
         case SDL_EVENT_MOUSE_WHEEL: {
             double delta = wheel_delta(&e);
@@ -474,6 +710,7 @@ int thc_wait(int32_t *out) {
                    next.wheel.mouse_y == e.wheel.mouse_y && wheel_delta(&next) * delta > 0) {
                 SDL_PeepEvents(&next, 1, SDL_GETEVENT, SDL_EVENT_MOUSE_WHEEL, SDL_EVENT_MOUSE_WHEEL);
                 delta += wheel_delta(&next);
+                if (next.common.timestamp && (!e.common.timestamp || next.common.timestamp<e.common.timestamp)) e.common.timestamp=next.common.timestamp;
             }
             if (!isfinite(delta) || delta == 0) break;
             /* Retain fractional travel; a tiny momentum sample is not a wheel notch. */
@@ -484,7 +721,7 @@ int thc_wait(int32_t *out) {
             if (!steps) break;
             out[0] = 9; pointer(e.wheel.mouse_x, e.wheel.mouse_y, out);
             out[3] = steps;
-            return 1;
+            return delivered(&e,out);
         }
         default: break;
         }

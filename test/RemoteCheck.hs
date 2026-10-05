@@ -95,6 +95,8 @@ checks = isolatedStore $ do
         let count=maybe 0 id (parseMaybe (\o -> o .:? "replay" .!= 0) greeting)
         replies <- replicateM count (receive h)
         writeIORef replayed replies
+        marker<-control h "frame-ready"
+        assert "reset frame records its exact committed input" (KM.lookup "seq" marker==KM.lookup "ack" greeting && KM.lookup "changed" marker==Just (Bool True))
         frame <- receive h
         assert "reattach starts with a reset frame" (case frame of Just (BinaryPacket bytes) -> not (BS.null bytes) && BS.head bytes==0; _ -> False)
         pure greeting
@@ -321,6 +323,11 @@ localPeerCheck = do
       awaitReady (100::Int)
       withLocalPeer session True [] $ \peer -> do
         void (receive peer "assets")
+        initialFrame<-receive peer "frame-ready"
+        assert "initial frame has no input demand" (KM.lookup "seq" initialFrame==Just (toJSON (0::Int)) && KM.lookup "changed" initialFrame==Just (Bool True))
+        send peer ["type" .= ("key"::T.Text),"key" .= ("ArrowLeft"::T.Text),"seq" .= (777::Int)]
+        noFrame<-receive peer "frame-ready"
+        assert "unchanged input retires its frontend demand without a fake frame" (KM.lookup "seq" noFrame==Just (toJSON (777::Int)) && KM.lookup "changed" noFrame==Just (Bool False))
         records' <- S.listSessions
         assert "live local session listed while writer attached" (any ((==session).S.sessionId) records')
         send peer ["type" .= ("frontend"::T.Text),"mode" .= (Nothing::Maybe Int)]
