@@ -1,7 +1,8 @@
 {-# LANGUAGE OverloadedStrings #-}
 -- | Human approval policy and bounded, layered TOML configuration.
 --
--- Calls consult current policy under desktop serialization and return waits as
+-- Calls read fresh policy bytes on a bounded worker; admission stays serialized.
+-- The owner never waits for policy IO. Calls return waits as
 -- continuations. The oldest live approval is shown; cancellation withdraws it.
 -- Diff tickets retain their original source and own separate worker attempts.
 -- Adoption/reply and cancellation share one short request claim; invalid attempts
@@ -10,7 +11,7 @@
 -- checked saving rather than reformatting unrelated tables and comments.
 -- Project agent limits may tighten global ceilings but cannot raise them.
 module Hide.MCPPermissions
-  ( Permissions, withPermissions, withPermissionsAt, permissionCall, permissionCallAs, policyEffects, tickPermissions
+  ( Permissions, withPermissions, withPermissionsAt, permissionCall, permissionCallAs, policyEffects, tickPermissions, awaitPermissionWork
   , ReadAdmission, permissionReadCall, bufferEditor, readReference, resolveReadReference, bufferReader
   , permissionConfigPath, readEditorDefaults, writeEditorDefaults, readEditorDefaultsAt, writeEditorDefaultsAt
   , projectConfigPath, readEditorDefaultsFor, readAgentContextAt, writeAgentContextAt, readAgentContexts
@@ -64,15 +65,29 @@ data Mode = Enable | Prompt | Disable deriving (Eq,Show)
 data Waiting = Waiting
   { ticket :: Int, toolName :: Text, arguments :: Value, operation :: WaitingOperation
   , active :: IORef Bool
-  , approvalRequired :: Bool, patchCaller :: IO (Either Text ()), patchAttempt :: IORef (Maybe DiffAttempt), patchSource :: Maybe PatchSource, requestClaim :: MVar () }
+  , approvalRequired :: Bool, patchCaller :: IO (Either Text ()), patchAttempt :: IORef (Maybe DiffAttempt), patchSource :: Maybe PatchSource, requestClaim :: MVar (), policyStage :: IORef PolicyStage }
 data DiffAttempt = DiffAttempt (Maybe ContentVersion) (Async (Either Text PreparedPatch))
 data WaitingOperation = WireOperation Tool (MVar (IO (Either Text Value))) | CaptureOperation CaptureSubmission | DiffOperation DiffSubmission
 data CaptureSubmission = CaptureSubmission BufferRef (IO (Either Text ())) (MVar (Either Text CapturedRead)) (IORef Bool) (MVar ())
 data DiffSubmission = DiffSubmission BufferRef ContentVersion Text (IO (Either Text ())) (MVar (Either Text DiffResult)) (IORef Bool) (MVar ()) (IORef (Maybe DiffAttempt))
 data BufferSubmission = ReadSubmission CaptureSubmission | EditSubmission DiffSubmission
 data BufferIngress = BufferIngress (STM.TBQueue BufferSubmission) (STM.TVar Bool)
+-- A request retains its policy phase while worker IO is pending. The queue is
+-- transport only: Waiting remains the one request/cancellation owner.
+type Policies = Either Text (M.Map Text Mode)
+data PolicyUse = AdmitPolicy | AllowPolicy Value (Maybe ContentVersion)
+  | AdoptPolicy (Maybe ContentVersion) (Either Text PreparedPatch)
+data PolicyStage = PolicyReady | PolicyPending PolicyUse (Maybe (Int,STM.TMVar Policies))
+data PolicyTask = LoadPolicy (STM.TMVar Policies)
+  | SavePolicy Text Mode (STM.TMVar Policies)
+data SettingsUse = ListPolicies | EditPolicy Text Bool | SaveSetting Text Mode
+data SettingsJob = SettingsJob Int SettingsUse (Maybe (STM.TMVar Policies))
+data PolicyOwner = PolicyOwner
+  { policyInbox :: STM.TBQueue PolicyTask, policyClosed :: STM.TVar Bool
+  , policyWorker :: Async (), policyWake :: STM.TMVar (), policyEpoch :: IORef Int
+  , settingsGeneration :: IORef Int, settingsJob :: IORef (Maybe SettingsJob) }
 data PermissionState = PermissionState { waiting :: [Waiting], nextTicket :: Int, displayed :: Maybe Text }
-data Permissions = Permissions FilePath (M.Map Text Bool) (IORef PermissionState) BufferNamespace (IORef [MVar ()]) BufferIngress
+data Permissions = Permissions FilePath (M.Map Text Bool) (IORef PermissionState) BufferNamespace (IORef [MVar ()]) BufferIngress PolicyOwner
 
 permissionConfigPath :: IO FilePath
 permissionConfigPath=do
@@ -89,13 +104,22 @@ withPermissions specs action=permissionConfigPath >>= \path -> withPermissionsAt
 withPermissionsAt :: FilePath -> [Value] -> (Permissions -> IO a) -> IO a
 withPermissionsAt path specs=bracket acquire release
   where
-    acquire=Permissions path registry <$> newIORef (PermissionState [] 1 Nothing) <*> newBufferNamespace <*> newIORef [] <*> (BufferIngress <$> STM.newTBQueueIO 32 <*> STM.newTVarIO False)
+    acquire=do
+      owner<-newPolicyOwner path registry
+      Permissions path registry <$> newIORef (PermissionState [] 1 Nothing) <*> newBufferNamespace <*> newIORef [] <*> (BufferIngress <$> STM.newTBQueueIO 32 <*> STM.newTVarIO False) <*> pure owner
     registry=M.fromList [(name,fromMaybe False (field "annotations" spec >>= field "readOnlyHint")) | spec<-specs,Just name<-[field "name" spec]]
-    release runtime@(Permissions _ _ ref _ retired (BufferIngress inbox closed))=do
-      incoming<-STM.atomically $ STM.writeTVar closed True >> STM.flushTBQueue inbox
+    release runtime@(Permissions _ _ ref _ retired (BufferIngress inbox closed) policy)=do
+      incoming<-STM.atomically $ do
+        STM.writeTVar closed True
+        STM.writeTVar (policyClosed policy) True
+        queued<-STM.flushTBQueue (policyInbox policy)
+        mapM_ (resolvePolicy (Left "Editor session closed before policy decision")) queued
+        STM.flushTBQueue inbox
       mapM_ (\submission->finishBufferSubmission runtime submission "Editor session closed before admission") incoming
       requests<-waiting <$> readIORef ref
       mapM_ (\request->finish runtime request (Left "Editor session closed before approval")) requests
+      cancel (policyWorker policy)
+      _<-waitCatch (policyWorker policy)
       readIORef retired >>= mapM_ readMVar
 
 -- | Initiate an allowed operation or queue approval under the desktop lock.
@@ -107,55 +131,45 @@ permissionCall = permissionCallAs (pure (Right ()))
 -- Extension data cannot provide this validator; use it only at authenticated
 -- transport admission. Immediate calls already passed that transport check.
 permissionCallAs :: IO (Either Text ()) -> Permissions -> Tool -> Tool
-permissionCallAs caller runtime@(Permissions path registry ref _ _ _) callback desktop name args=do
+permissionCallAs caller runtime@(Permissions _ registry ref _ _ _ _) callback desktop name args=do
   closed<-sessionClosed runtime
-  loaded<-if closed then pure (Left "Editor session closed") else readPolicies path
   case M.lookup name registry of
-    Nothing -> denied "Unknown MCP tool"
-    Just readonly -> case loaded of
-      Left err -> denied err
-      Right policies -> case M.findWithDefault (if readonly then Enable else Prompt) name policies of
-        Disable -> denied "This MCP tool is disabled in Options > Agent Permissions"
-        Enable -> callback desktop name args
-        Prompt | name=="ask_user",Object fields<-args,KM.keys fields==["questionId"] -> do
-          actor<-caller
-          case actor of Left err->denied err; Right ()->callback desktop name args
-        Prompt -> enqueue True
-  where
-    enqueue needsApproval=do
+    Nothing->denied "Unknown MCP tool"
+    Just _ | closed->denied "Editor session closed"
+    Just _->do
       s<-readIORef ref
       live<-filterMActive (waiting s)
-      if length live>=32 then denied "Too many MCP requests are awaiting permission" else
-        do
-          promise<-newEmptyMVar
-          enabled<-newIORef True
-          attempt<-newIORef Nothing
-          claim<-newMVar ()
-          let request=Waiting (nextTicket s) name args (WireOperation callback promise) enabled needsApproval caller attempt Nothing claim
-          writeIORef ref s {waiting=live++[request],nextTicket=nextTicket s+1}
-          shown<-tickPermissions runtime desktop
-          pure (shown,(readMVar promise >>= id) `onException` finish runtime request (Left "MCP permission request cancelled"))
-    denied reason=pure (desktop,pure (Left reason))
+      if length live>=32 then denied "Too many MCP requests are awaiting permission" else do
+        promise<-newEmptyMVar
+        enabled<-newIORef True
+        attempt<-newIORef Nothing
+        claim<-newMVar ()
+        stage<-newIORef (PolicyPending AdmitPolicy Nothing)
+        let request=Waiting (nextTicket s) name args (WireOperation callback promise) enabled False caller attempt Nothing claim stage
+        writeIORef ref s {waiting=live++[request],nextTicket=nextTicket s+1}
+        shown<-tickPermissions runtime desktop
+        pure (shown,(readMVar promise >>= id) `onException` finish runtime request (Left "MCP permission request cancelled"))
+  where denied reason=pure (desktop,pure (Left reason))
 
 -- | Use the ordinary policy/approval owner for one read_buffer capture. The host
 -- supplies its attributed callback; anonymous inspection remains guest input.
 -- No receipt exists while a request waits for approval. Work returned by the
 -- callback runs later and can consume its snapshot, but cannot capture again.
 permissionReadCall :: Permissions -> (ReadAdmission -> Tool) -> Tool
-permissionReadCall runtime@(Permissions _ _ _ namespace _ _) callback desktop name args
+permissionReadCall runtime@(Permissions _ _ _ namespace _ _ _) callback desktop name args
   | name/="read_buffer" = pure (desktop,pure (Left "Read admission requires read_buffer"))
   | otherwise = permissionCall runtime admitted desktop name args
   where admitted d tool parameters=withReadAdmission namespace (sessionClosed runtime)
           (\receipt->callback receipt d tool parameters)
 
 sessionClosed :: Permissions -> IO Bool
-sessionClosed (Permissions _ _ _ _ _ (BufferIngress _ closed))=STM.readTVarIO closed
+sessionClosed (Permissions _ _ _ _ _ (BufferIngress _ closed) _)=STM.readTVarIO closed
 
 -- | Host-bound session reader. It requests fresh policy for every capture and
 -- grants no Human provenance or reusable approval. Linked handlers only enqueue
 -- and await; the owning tick admits the fixed operation under serialization.
 bufferReader :: Permissions -> IO (Either Text ()) -> BufferReader
-bufferReader (Permissions _ _ _ namespace _ (BufferIngress inbox closed)) caller=newBufferReader namespace $ \reference->mask $ \restore->do
+bufferReader (Permissions _ _ _ namespace _ (BufferIngress inbox closed) owner) caller=newBufferReader namespace $ \reference->mask $ \restore->do
   promise<-newEmptyMVar
   enabled<-newIORef True
   claim<-newMVar ()
@@ -165,7 +179,7 @@ bufferReader (Permissions _ _ _ namespace _ (BufferIngress inbox closed)) caller
     full<-STM.isFullTBQueue inbox
     if stopped then pure (Left "Editor session closed before capture")
     else if full then pure (Left "Too many buffer captures are awaiting admission")
-    else STM.writeTBQueue inbox (ReadSubmission submission) >> pure (Right ())
+    else STM.writeTBQueue inbox (ReadSubmission submission) >> STM.tryPutTMVar (policyWake owner) () >> pure (Right ())
   case accepted of
     Left err->pure (Left err)
     Right ()->restore (readMVar promise) `onException` finishSubmission submission (Left "Buffer capture cancelled")
@@ -182,7 +196,7 @@ finishSubmissionOwned (CaptureSubmission _ _ promise enabled _) result=mask_ $ d
 -- | Host-only fixed actor binding. Public callers submit exact read versions;
 -- this transport grants neither Human authority nor reusable approval.
 bufferEditor :: Permissions -> IO (Either Text ()) -> BufferEditor
-bufferEditor (Permissions _ _ _ namespace retired (BufferIngress inbox closed)) caller=newBufferEditor namespace $ \reference version patch->mask $ \restore->do
+bufferEditor (Permissions _ _ _ namespace retired (BufferIngress inbox closed) owner) caller=newBufferEditor namespace $ \reference version patch->mask $ \restore->do
   if T.length patch>1048576 then pure (Left "Diff exceeds 1 MiB characters") else do
     promise<-newEmptyMVar
     enabled<-newIORef True
@@ -194,7 +208,7 @@ bufferEditor (Permissions _ _ _ namespace retired (BufferIngress inbox closed)) 
       full<-STM.isFullTBQueue inbox
       if stopped then pure (Left "Editor session closed before diff admission")
       else if full then pure (Left "Too many buffer requests are awaiting admission")
-      else STM.writeTBQueue inbox (EditSubmission submission) >> pure (Right ())
+      else STM.writeTBQueue inbox (EditSubmission submission) >> STM.tryPutTMVar (policyWake owner) () >> pure (Right ())
     case accepted of
       Left err->pure (Left err)
       Right ()->restore (readMVar promise) `onException` finishDiffSubmission retired submission (Left "Buffer diff cancelled")
@@ -212,78 +226,59 @@ finishDiffSubmissionOwned (DiffSubmission _ _ _ _ promise enabled _ _) result=ma
 
 finishBufferSubmission :: Permissions -> BufferSubmission -> Text -> IO ()
 finishBufferSubmission _ (ReadSubmission submission) err=finishSubmission submission (Left err)
-finishBufferSubmission (Permissions _ _ _ _ retired _) (EditSubmission submission) err=finishDiffSubmission retired submission (Left err)
+finishBufferSubmission (Permissions _ _ _ _ retired _ _) (EditSubmission submission) err=finishDiffSubmission retired submission (Left err)
 
 -- Fixed bounded transport only; PermissionState still has one serialized owner.
 -- An interrupted extracted batch resolves every accepted reply before unwinding.
 drainBufferRequests :: Permissions -> Desktop -> IO Desktop
-drainBufferRequests runtime@(Permissions path registry state namespace _ (BufferIngress inbox _)) desktop=mask_ $ do
+drainBufferRequests runtime@(Permissions _ _ state namespace _ (BufferIngress inbox _) _) desktop=mask_ $ do
   incoming<-STM.atomically (STM.flushTBQueue inbox)
-  let admitBatch=if null incoming then pure desktop else do
-        policies<-readPolicies path
-        foldM (admitSafely policies) desktop incoming
-  admitBatch `onException` mapM_ (\submission->finishBufferSubmission runtime submission "Buffer request owner interrupted") incoming
+  foldM admitSafely desktop incoming `onException`
+    mapM_ (\submission->finishBufferSubmission runtime submission "Buffer request owner interrupted") incoming
   where
-    admitSafely policies current submission=admit policies current submission `catch` \(err::SomeException)->
+    admitSafely current submission=admit current submission `catch` \(err::SomeException)->
       case fromException err :: Maybe SomeAsyncException of
         Just _->throwIO err
         Nothing->finishBufferSubmission runtime submission "Buffer request admission failed" >> pure current
-    decision policies name reference caller=do
-      stopped<-sessionClosed runtime
-      actor<-caller
-      pure $ do
-        readonly<-maybe (Left "Unknown MCP tool") Right (M.lookup name registry)
-        ident<-maybe (Left "Buffer reference belongs to another editor session") Right (referenceId namespace reference)
-        when stopped (Left "Editor session closed before admission")
-        modes<-policies
-        actor
-        pure (ident,M.findWithDefault (if readonly then Enable else Prompt) name modes)
-    admit policies current (ReadSubmission submission@(CaptureSubmission reference caller _ enabled claim))=withMVar claim $ \()->mask_ $ do
-      live<-readIORef enabled
-      when live $ do
-        selected<-decision policies "read_buffer" reference caller
-        case selected of
-          Left err->finishSubmissionOwned submission (Left err)
-          Right (_,Disable)->finishSubmissionOwned submission (Left "This MCP tool is disabled in Options > Agent Permissions")
-          Right (_,Enable)->captureSubmissionOwned runtime submission current
-          Right (ident,Prompt)->do
+    admit current submission=do
+      let (reference,enabled,claim,caller)=case submission of
+            ReadSubmission (CaptureSubmission r c _ e k)->(r,e,k,c)
+            EditSubmission (DiffSubmission r _ _ c _ e k _)->(r,e,k,c)
+      withMVar claim $ \()->do
+        live<-readIORef enabled
+        when live $ case referenceId namespace reference of
+          Nothing->finishBufferSubmissionOwned submission "Buffer reference belongs to another editor session"
+          Just ident->do
             original<-readIORef state
             liveRequests<-filterMActive (waiting original)
-            if length liveRequests>=32 then finishSubmissionOwned submission (Left "Too many MCP requests are awaiting permission") else do
-              attempt<-newIORef Nothing
-              let request=Waiting (nextTicket original) "read_buffer" (object ["bufferId" .= ident]) (CaptureOperation submission) enabled True caller attempt Nothing claim
-              writeIORef state original {waiting=liveRequests++[request],nextTicket=nextTicket original+1}
-      pure current
-    admit policies current (EditSubmission submission@(DiffSubmission reference expected patch caller _ enabled claim attempt))=withMVar claim $ \()->mask_ $ do
-      live<-readIORef enabled
-      if not live then pure current else do
-        selected<-decision policies "buffer_apply_diff" reference caller
-        case selected of
-          Left err->reject err
-          Right (_,Disable)->reject "This MCP tool is disabled in Options > Agent Permissions"
-          Right (ident,mode)->do
-            doc<-pure (M.lookup ident (buffers current))
-            matches<-maybe (pure False) (versionCurrent expected . documentBuffer) doc
-            if not matches then reject "Buffer identity or revision changed; read the buffer again" else do
-              let args=object ["bufferId" .= ident,"revision" .= maybe 0 (revision . documentBuffer) doc,"diff" .= patch]
-              case capturePatchSource current args of
-                Left err->reject err
-                Right captured->do
-                  source<-evaluate captured
-                  original<-readIORef state
-                  liveRequests<-filterMActive (waiting original)
-                  if length liveRequests>=32 then reject "Too many MCP requests are awaiting permission" else do
-                    let request=Waiting (nextTicket original) "buffer_apply_diff" args (DiffOperation submission) enabled (mode==Prompt) caller attempt (Just source) claim
-                    writeIORef state original {waiting=liveRequests++[request],nextTicket=nextTicket original+1}
-                    -- Transfer is complete. Starting an attempt reacquires the
-                    -- same claim after this admission releases it, on the tick.
-                    pure current
-      where reject err=finishDiffSubmissionOwned submission (Left err) >> pure current
+            if length liveRequests>=32 then finishBufferSubmissionOwned submission "Too many MCP requests are awaiting permission" else do
+              attempt<-case submission of ReadSubmission _->newIORef Nothing; EditSubmission (DiffSubmission _ _ _ _ _ _ _ a)->pure a
+              stage<-newIORef (PolicyPending AdmitPolicy Nothing)
+              let (name,args,op)=case submission of
+                    ReadSubmission capture->("read_buffer",object ["bufferId" .= ident],CaptureOperation capture)
+                    EditSubmission diff@(DiffSubmission _ _ patch _ _ _ _ _)->
+                      ("buffer_apply_diff",object ["bufferId" .= ident,"revision" .= maybe 0 (revision.documentBuffer) (M.lookup ident (buffers current)),"diff" .= patch],DiffOperation diff)
+              captured<-case submission of
+                ReadSubmission _->pure (Right Nothing)
+                EditSubmission (DiffSubmission _ expected _ _ _ _ _ _)->do
+                  matches<-maybe (pure False) (versionCurrent expected . documentBuffer) (M.lookup ident (buffers current))
+                  if not matches then pure (Left "Buffer identity or revision changed; read the buffer again") else
+                    case capturePatchSource current args of
+                      Left err->pure (Left err)
+                      Right source->Right . Just <$> evaluate source
+              case captured of
+                Left err->finishBufferSubmissionOwned submission err
+                Right source->do
+                  let request=Waiting (nextTicket original) name args op enabled False caller attempt source claim stage
+                  writeIORef state original {waiting=liveRequests++[request],nextTicket=nextTicket original+1}
+        pure current
+    finishBufferSubmissionOwned (ReadSubmission submission) err=finishSubmissionOwned submission (Left err)
+    finishBufferSubmissionOwned (EditSubmission submission) err=finishDiffSubmissionOwned submission (Left err)
 
 -- Caller holds the same short request claim used by cancellation. Only known
 -- host capture/actor operations run here; no extension handler or reply wait.
 captureSubmissionOwned :: Permissions -> CaptureSubmission -> Desktop -> IO ()
-captureSubmissionOwned runtime@(Permissions _ _ _ namespace _ _) submission@(CaptureSubmission reference caller _ _ _) desktop=do
+captureSubmissionOwned runtime@(Permissions _ _ _ namespace _ _ _) submission@(CaptureSubmission reference caller _ _ _) desktop=do
   actor<-caller
   outcome<-case actor of
     Left err->pure (Left err)
@@ -310,7 +305,7 @@ finishOwned runtime request result=mask_ $ do
 -- joins run on their own thread; neither tick nor dialog submission waits for a
 -- worker's cancellation/finalizer while holding the desktop lock.
 stopDiffAttempt :: Permissions -> Waiting -> IO ()
-stopDiffAttempt (Permissions _ _ _ _ retired _) request=stopAttempt retired (patchAttempt request)
+stopDiffAttempt (Permissions _ _ _ _ retired _ _) request=stopAttempt retired (patchAttempt request)
 
 -- The transport and Waiting ticket share this single attempt cell from birth.
 stopAttempt :: IORef [MVar ()] -> IORef (Maybe DiffAttempt) -> IO ()
@@ -332,22 +327,22 @@ reviewVersion request desktop=case dialog desktop of
   _->pure Nothing
 
 startDiffAttempt :: Permissions -> Waiting -> Value -> Desktop -> IO Desktop
-startDiffAttempt runtime request edited desktop=case patchSource request of
-  Nothing->diffFailure runtime request "Missing original diff source" desktop
-  Just source->withMVar (requestClaim request) $ \()->mask_ $ do
+startDiffAttempt runtime request edited desktop=withMVar (requestClaim request) (\()->startDiffAttemptOwned runtime request edited desktop)
+
+startDiffAttemptOwned :: Permissions -> Waiting -> Value -> Desktop -> IO Desktop
+startDiffAttemptOwned runtime request edited desktop=case patchSource request of
+  Nothing->diffFailureOwned runtime request "Missing original diff source" desktop
+  Just source->mask_ $ do
     live<-readIORef (active request)
     if not live then pure desktop else do
       stopDiffAttempt runtime request
       let prepare=preparePatch source (if approvalRequired request then field "diff" (arguments request) else Nothing) edited
       review<-reviewVersion request desktop
-      worker<-asyncWithUnmask (\unmask->unmask prepare)
+      worker<-asyncWithUnmask (\unmask->unmask prepare `finally` signalPermissionWork runtime)
       writeIORef (patchAttempt request) (Just (DiffAttempt review worker))
       pure desktop {status="Preparing exact buffer diff...",dialog=fmap (\dg->if purpose dg==PermissionDialog (approvalAction request) then dg {body=[]} else dg) (dialog desktop)}
 
-diffFailure :: Permissions -> Waiting -> Text -> Desktop -> IO Desktop
 -- Preserve current fields/selection/review Undo and the live correction ticket.
-diffFailure runtime request err desktop=withMVar (requestClaim request) (\()->diffFailureOwned runtime request err desktop)
-
 diffFailureOwned :: Permissions -> Waiting -> Text -> Desktop -> IO Desktop
 diffFailureOwned runtime request err desktop
   | approvalRequired request = pure desktop {status="Diff not applied: "<>err,
@@ -356,7 +351,7 @@ diffFailureOwned runtime request err desktop
   | otherwise = finishOwned runtime request (Left err) >> pure desktop {status="Diff not applied: "<>err}
 
 drainDiffAttempts :: Permissions -> Desktop -> IO Desktop
-drainDiffAttempts runtime@(Permissions path _ ref _ retired _) initial=do
+drainDiffAttempts runtime@(Permissions _ _ ref _ retired _ _) initial=do
   s<-readIORef ref
   live<-filterMActive (waiting s)
   result<-foldM step initial live
@@ -370,7 +365,8 @@ drainDiffAttempts runtime@(Permissions path _ ref _ retired _) initial=do
       case attempt of
         Nothing->do
           enabled<-readIORef (active request)
-          if enabled && not (approvalRequired request) && toolName request=="buffer_apply_diff"
+          stage<-readIORef (policyStage request)
+          if enabled && isPolicyReady stage && not (approvalRequired request) && toolName request=="buffer_apply_diff"
             then startDiffAttempt runtime request (arguments request) desktop else pure desktop
         Just (DiffAttempt review worker)->do
           completed<-poll worker
@@ -379,46 +375,17 @@ drainDiffAttempts runtime@(Permissions path _ ref _ retired _) initial=do
             Just outcome->withMVar (requestClaim request) $ \()->mask_ $ do
               writeIORef (patchAttempt request) Nothing
               live<-readIORef (active request)
-              currentReview<-case review of
-                Nothing->pure (not (approvalRequired request))
-                Just expected->case dialog desktop of
-                  Just dg | purpose dg==PermissionDialog (approvalAction request)->case [b | TextArea "diff" True b _ _ _<-fields dg] of
-                    b:_->versionCurrent expected b
-                    _->pure False
-                  _->pure False
-              if not live then pure desktop else if not currentReview then
-                pure desktop {status="Diff review changed; approve the current review."}
-              else do
-                policies<-readPolicies path
-                caller<-patchCaller request
-                let admitted=do
-                      modes<-policies
-                      unless (M.lookup "buffer_apply_diff" modes/=Just Disable) (Left "This MCP tool was disabled before adoption")
-                      unless (approvalRequired request || M.lookup "buffer_apply_diff" modes==Just Enable) (Left "This MCP tool now requires approval; submit again")
-                      caller
-                case admitted of
-                  Left err->finishOwned runtime request (Left err) >> pure (closeReview request desktop) {status="Diff not applied: "<>err}
-                  Right ()->case outcome of
-                    Left _->diffFailureOwned runtime request "Diff preparation failed" desktop
-                    Right (Left err)->diffFailureOwned runtime request err desktop
-                    Right (Right prepared)->do
-                      adopted<-commitPatch prepared desktop
-                      case adopted of
-                        Left err->diffFailureOwned runtime request err desktop
-                        Right (updated,response)->do
-                          stopDiffAttempt runtime request
-                          case operation request of
-                            DiffOperation submission->finishDiffSubmissionOwned submission (Right response)
-                            _->finishOwned runtime request (Left "Invalid diff operation")
-                          pure (closeReview request updated) {status="Applied exact buffer diff."}
-    closeReview request desktop=case dialog desktop of
-      Just dg | purpose dg==PermissionDialog (approvalAction request)->desktop {dialog=Nothing}
-      _->desktop
+              if not live then pure desktop else do
+                let prepared=case outcome of
+                      Left _->Left "Diff preparation failed"
+                      Right value->value
+                writeIORef (policyStage request) (PolicyPending (AdoptPolicy review prepared) Nothing)
+                pure desktop
 
 -- | Display the oldest live approval and withdraw stale or cancelled prompts.
 tickPermissions :: Permissions -> Desktop -> IO Desktop
-tickPermissions runtime@(Permissions _ _ ref _ _ _) original=do
-  desktop<-drainBufferRequests runtime original >>= drainDiffAttempts runtime
+tickPermissions runtime@(Permissions _ _ ref _ _ _ _) original=do
+  desktop<-drainSettings runtime original >>= drainBufferRequests runtime >>= drainDiffAttempts runtime >>= drainPolicies runtime
   s<-readIORef ref
   live<-filterMActive (waiting s)
   let staleApproval=case dialog desktop of
@@ -426,7 +393,8 @@ tickPermissions runtime@(Permissions _ _ ref _ _ _) original=do
         _ -> False
       cleared=if staleApproval then desktop {dialog=Nothing} else desktop
   writeIORef ref s {waiting=live,displayed=if staleApproval then Nothing else displayed s}
-  case (dialog cleared,filter approvalRequired live) of
+  ready<-filterMReady live
+  case (dialog cleared,filter approvalRequired ready) of
     (Nothing,request:_) -> do
       modifyIORef' ref (\state->state {displayed=Just (approvalAction request)})
       pure cleared {dialog=Just (approvalReview cleared request)}
@@ -463,82 +431,219 @@ policyEffects runtime fallback desktop effects=foldM apply (False,desktop) effec
     apply (_,d) effect=fallback d [effect]
 
 permissionAction :: Permissions -> Text -> [Text] -> Desktop -> IO Desktop
-permissionAction runtime@(Permissions path registry ref _ _ _) action values desktop=do
+permissionAction runtime@(Permissions _ registry ref _ _ _ owner) action values desktop=do
   s<-readIORef ref
-  if action=="show" then showSettings runtime desktop else
+  generation<-readIORef (settingsGeneration owner)
+  let settingsAction="settings:"<>T.pack (show generation)
+      settingName=T.stripPrefix ("set:"<>T.pack (show generation)<>":") action
+  if action=="show" then queueSettings ListPolicies desktop else
     if displayed s/=Just action then pure desktop {status="Permission dialog expired."} else
+      if not ("approve:" `T.isPrefixOf` action) && values==["1"] && modalAbsent then close else
       case action of
-        "settings" -> case values of
-          "0":index:_ | Just n<-readMaybe (T.unpack index),Just (name,readonly)<-at (M.toList registry) n -> do
-            policies<-readPolicies path
-            let mode=either (const (if readonly then Enable else Prompt)) (M.findWithDefault (if readonly then Enable else Prompt) name) policies
-                token="set:"<>name
-            modifyIORef' ref (\state->state {displayed=Just token})
-            pure desktop {dialog=Just (Dialog "Agent permission setting" (PermissionDialog token)
-              [Radio name ["Enable","Prompt","Disable"] (modeIndex mode)] 0 ["Save","Back"]
-              ["Enable runs immediately; Prompt asks once per request; Disable rejects.","Saved globally in thc/config.toml."])}
-          _ -> close
-        _ | Just name<-T.stripPrefix "set:" action,Just _<-M.lookup name registry -> case values of
-          "0":selected:_ | Just mode<-readMaybe (T.unpack selected) >>= at [Enable,Prompt,Disable] -> do
-            saved<-writeTable path ["editor","mcp","permissions"] (object [K.fromText name .= modeText mode])
-            case saved of
-              Left err -> pure desktop {status=err,dialog=Nothing} >>= showSettings runtime
-              Right () -> do
-                when (mode==Disable) $ readIORef ref >>= mapM_ (\request->when (toolName request==name) (finish runtime request (Left "This MCP tool was disabled before approval"))) . waiting
-                showSettings runtime desktop {status="Agent permission saved."}
-          _ -> showSettings runtime desktop
-        _ | "approve:" `T.isPrefixOf` action -> case find ((==action).approvalAction) (waiting s) of
-          Nothing -> close
-          Just request -> do
-            policies<-readPolicies path
-            enabled<-readIORef (active request)
+        _ | action==settingsAction,not ownsModal->pure desktop {status="Permission dialog expired."}
+          | action==settingsAction->case values of
+          "0":index:_ | Just n<-readMaybe (T.unpack index),Just (name,readonly)<-at (M.toList registry) n ->queueSettings (EditPolicy name readonly) desktop
+          _->close
+        _ | Just name<-settingName,Just _<-M.lookup name registry,not ownsModal->pure desktop {status="Permission dialog expired."}
+          | Just name<-settingName,Just _<-M.lookup name registry ->case values of
+          "0":selected:_ | Just mode<-readMaybe (T.unpack selected) >>= at [Enable,Prompt,Disable] ->do
+            modifyIORef' (policyEpoch owner) (+1)
+            queueSettings (SaveSetting name mode) desktop
+          _->queueSettings ListPolicies desktop
+        _ | "approve:" `T.isPrefixOf` action ->case find ((==action).approvalAction) (waiting s) of
+          Nothing->close
+          Just request | take 1 values/=["0"]->finish runtime request (Left "MCP request denied") >> tickPermissions runtime (closeReview request desktop)
+          Just request->do
             let edited=case (toolName request,arguments request,drop 1 values) of
-                  ("buffer_apply_diff",Object args,text:_) -> Object (KM.insert "diff" (String text) args)
-                  _ -> arguments request
-                denied=case policies of
-                  Left err -> Just err
-                  Right modes | M.lookup (toolName request) modes==Just Disable -> Just "This MCP tool is disabled"
-                  _ -> Nothing
-            case operation request of
-              CaptureOperation submission->do
-                withMVar (requestClaim request) $ \()->mask_ $ do
-                  live<-readIORef (active request)
-                  if not live || take 1 values/=["0"] then finishOwned runtime request (Left "MCP request denied")
-                  else case denied of
-                    Just err->finishOwned runtime request (Left err)
-                    Nothing->captureSubmissionOwned runtime submission desktop {dialog=Nothing}
-                modifyIORef' ref (\state->state {waiting=filter ((/=ticket request).ticket) (waiting state),displayed=Nothing})
-                tickPermissions runtime desktop {dialog=Nothing}
-              DiffOperation _->if enabled && denied==Nothing && take 1 values==["0"]
-                then startDiffAttempt runtime request edited desktop
-                else finish runtime request (Left (fromMaybe "MCP request denied" denied)) >> tickPermissions runtime desktop {dialog=Nothing}
-              WireOperation callback promise->do
-                  claimed<-atomicModifyIORef' (active request) (\live->(False,live))
-                  modifyIORef' ref (\state->state {waiting=filter ((/=ticket request).ticket) (waiting state),displayed=Nothing})
-                  if not claimed || take 1 values/=["0"] then finish runtime request (Left "MCP request denied") >> tickPermissions runtime desktop {dialog=Nothing}
-                  else case denied of
-                    Just err -> finish runtime request (Left err) >> tickPermissions runtime desktop {dialog=Nothing}
-                    Nothing -> do
-                      actor<-patchCaller request
-                      result<-try (case actor of
-                        Left err->pure (desktop {dialog=Nothing},pure (Left err))
-                        Right ()->callback desktop {dialog=Nothing} (toolName request) edited)
-                      case result of
-                        Left (_::IOException) -> finish runtime request (Left "MCP tool failed after approval") >> tickPermissions runtime desktop {dialog=Nothing}
-                        Right (updated,continuation) -> do
-                          _<-tryPutMVar promise continuation
-                          tickPermissions runtime updated
-        _ -> close
+                  ("buffer_apply_diff",Object args,text:_)->Object (KM.insert "diff" (String text) args)
+                  _->arguments request
+            withMVar (requestClaim request) $ \()->do
+              live<-readIORef (active request)
+              when live $ do
+                -- A newly accepted review supersedes the old worker attempt.
+                -- Its completion must not overwrite this fresh Allow phase.
+                stopDiffAttempt runtime request
+                review<-reviewVersion request desktop
+                writeIORef (policyStage request) (PolicyPending (AllowPolicy edited review) Nothing)
+            tickPermissions runtime desktop {status="Checking current permission policy...",dialog=fmap
+              (\dg->if purpose dg==PermissionDialog action then dg {body=[]} else dg) (dialog desktop)}
+        _->close
   where
-    close=modifyIORef' ref (\state->state {displayed=Nothing}) >> tickPermissions runtime desktop {dialog=Nothing}
+    -- Escape already removed this modal in the pure input transition. It can
+    -- retire its exact displayed settings receipt, but never starts a new job.
+    modalAbsent=case dialog desktop of Nothing->True; _->False
+    ownsModal=case dialog desktop of Just dg->purpose dg==PermissionDialog action; _->False
+    queueSettings use d=do
+      busy<-policyWriting owner
+      if busy then pure d {status="Agent permission save is still pending."} else do
+       generation<-atomicModifyIORef' (settingsGeneration owner) (\n->(n+1,n+1))
+       writeIORef (settingsJob owner) (Just (SettingsJob generation use Nothing))
+       let token="loading:"<>T.pack (show generation)
+       modifyIORef' ref (\state->state {displayed=Just token})
+       drainSettings runtime d {status="Loading agent permissions...",dialog=Just
+         (Dialog "Agent Permissions" (PermissionDialog token) [ReadOnly "Status" "Loading current policy..."] 0 ["Close"] [])}
+    close=do
+      modifyIORef' (settingsGeneration owner) (+1)
+      -- An accepted Save still completes on the worker; only its UI receipt retires.
+      modifyIORef' ref (\state->state {displayed=Nothing})
+      tickPermissions runtime (case dialog desktop of
+        Just dg | purpose dg==PermissionDialog action->desktop {dialog=Nothing}
+        _->desktop)
 
-showSettings :: Permissions -> Desktop -> IO Desktop
-showSettings (Permissions path registry ref _ _ _) desktop=do
-  policies<-readPolicies path
-  let rows=[name<>"  ["<>modeText (either (const (if readonly then Enable else Prompt)) (M.findWithDefault (if readonly then Enable else Prompt) name) policies)<>"]" | (name,readonly)<-M.toList registry]
-      notes=either (:[]) (const ["Select a tool to set Enable, Prompt or Disable.","Policies apply to every request, including cached tool schemas."]) policies
-  modifyIORef' ref (\state->state {displayed=Just "settings"})
-  pure desktop {dialog=Just (Dialog "Agent Permissions" (PermissionDialog "settings") [ListBox "Tool" rows 0] 0 ["Edit","Close"] notes)}
+isPolicyReady :: PolicyStage -> Bool
+isPolicyReady PolicyReady=True
+isPolicyReady _=False
+filterMReady :: [Waiting] -> IO [Waiting]
+filterMReady requests=fmap (map fst . filter snd) (mapM (\request->(request,) . isPolicyReady <$> readIORef (policyStage request)) requests)
+
+-- Save is a component-owned mutation barrier: epoch advances before submission,
+-- and no policy decision adopts while the write is pending. Queue submission is
+-- nonblocking; a full worker mailbox leaves this fixed phase for a later tick.
+drainSettings :: Permissions -> Desktop -> IO Desktop
+drainSettings runtime@(Permissions _ registry ref _ _ _ owner) desktop=do
+  job<-readIORef (settingsJob owner)
+  case job of
+    Nothing->pure desktop
+    Just (SettingsJob generation use Nothing)->do
+      pending<-submitPolicy owner (case use of SaveSetting name mode->SavePolicy name mode; _->LoadPolicy)
+      writeIORef (settingsJob owner) (Just (SettingsJob generation use pending))
+      pure desktop
+    Just (SettingsJob generation use (Just promise))->do
+      completed<-STM.atomically (STM.tryReadTMVar promise)
+      case completed of
+        Nothing->pure desktop
+        Just policies->do
+          writeIORef (settingsJob owner) Nothing
+          case use of
+            SaveSetting name Disable->when (either (const False) (const True) policies) $
+              readIORef ref >>= mapM_ (\request->when (toolName request==name) (finish runtime request (Left "This MCP tool was disabled before approval"))) . waiting
+            _->pure ()
+          current<-readIORef (settingsGeneration owner)
+          let ownsModal=case dialog desktop of
+                Nothing->True
+                Just dg->purpose dg==PermissionDialog ("loading:"<>T.pack (show generation))
+          if current/=generation || not ownsModal then pure desktop else do
+            let token=case use of EditPolicy name _->"set:"<>T.pack (show generation)<>":"<>name; _->"settings:"<>T.pack (show generation)
+                mode name readonly=either (const (if readonly then Enable else Prompt)) (M.findWithDefault (if readonly then Enable else Prompt) name) policies
+                notes=either (:[]) (const ["Select a tool to set Enable, Prompt or Disable.","Policies apply to every request, including cached tool schemas."]) policies
+                dg=case use of
+                  EditPolicy name readonly->Dialog "Agent permission setting" (PermissionDialog token)
+                    [Radio name ["Enable","Prompt","Disable"] (modeIndex (mode name readonly))] 0 ["Save","Back"]
+                    ["Enable runs immediately; Prompt asks once per request; Disable rejects.","Saved globally in thc/config.toml."]
+                  _->Dialog "Agent Permissions" (PermissionDialog token)
+                    [ListBox "Tool" [name<>"  ["<>modeText (mode name readonly)<>"]" | (name,readonly)<-M.toList registry] 0] 0 ["Edit","Close"] notes
+            modifyIORef' ref (\state->state {displayed=Just token})
+            pure desktop {dialog=Just dg,status=case use of SaveSetting _ _->either id (const "Agent permission saved.") policies; _->status desktop}
+
+policyWriting :: PolicyOwner -> IO Bool
+policyWriting owner=do
+  job<-readIORef (settingsJob owner)
+  pure (case job of Just (SettingsJob _ (SaveSetting _ _) _)->True; _->False)
+
+drainPolicies :: Permissions -> Desktop -> IO Desktop
+drainPolicies runtime@(Permissions _ registry ref _ _ _ owner) original=do
+  requests<-readIORef ref >>= filterMActive . waiting
+  foldM stepSafely original requests `onException` mapM_ (\request->finish runtime request (Left "Permission request owner interrupted")) requests
+  where
+    stepSafely desktop request=step desktop request `catch` \(err::SomeException)->
+      case fromException err :: Maybe SomeAsyncException of
+        Just _->throwIO err
+        Nothing->finish runtime request (Left "Permission request admission failed") >> pure (closeReview request desktop)
+    step desktop request=do
+      stage<-readIORef (policyStage request)
+      epoch<-readIORef (policyEpoch owner)
+      writing<-policyWriting owner
+      case stage of
+        PolicyReady->pure desktop
+        PolicyPending use pending | writing->pure desktop
+                                  | otherwise->case pending of
+          Nothing->do
+            queued<-submitPolicy owner LoadPolicy
+            writeIORef (policyStage request) (PolicyPending use ((epoch,) <$> queued))
+            pure desktop
+          Just (issued,promise) | issued/=epoch->writeIORef (policyStage request) (PolicyPending use Nothing) >> step desktop request
+                               | otherwise->do
+            completed<-STM.atomically (STM.tryReadTMVar promise)
+            case completed of
+              Nothing->pure desktop
+              Just policies->withMVar (requestClaim request) $ \()->do
+                live<-readIORef (active request)
+                if not live then pure desktop else do
+                  writeIORef (policyStage request) PolicyReady
+                  caller<-patchCaller request
+                  stopped<-sessionClosed runtime
+                  let selected=do
+                        when stopped (Left "Editor session closed before policy admission")
+                        readonly<-maybe (Left "Unknown MCP tool") Right (M.lookup (toolName request) registry)
+                        modes<-policies
+                        caller
+                        let mode=M.findWithDefault (if readonly then Enable else Prompt) (toolName request) modes
+                        when (mode==Disable) (Left "This MCP tool is disabled in Options > Agent Permissions")
+                        pure mode
+                  case selected of
+                    Left err->finishOwned runtime request (Left err) >> pure (closeReview request desktop) {status=err}
+                    Right mode->applyPolicy desktop request use mode
+    applyPolicy desktop request AdmitPolicy mode=do
+      prepared<-case operation request of
+        DiffOperation (DiffSubmission _ expected _ _ _ _ _ _)->do
+          let doc=field "bufferId" (arguments request) >>= (`M.lookup` buffers desktop)
+          current<-maybe (pure False) (versionCurrent expected . documentBuffer) doc
+          pure (if not current then Left "Buffer identity or revision changed; read the buffer again" else Right (patchSource request))
+        _->pure (Right (patchSource request))
+      case prepared of
+        Left err->finishOwned runtime request (Left err) >> pure desktop {status=err}
+        Right source->do
+          let polling=toolName request=="ask_user" && case arguments request of Object fields->KM.keys fields==["questionId"]; _->False
+              approved=request {approvalRequired=mode==Prompt && not polling,patchSource=source}
+          replaceRequest approved
+          if approvalRequired approved then pure desktop else execute desktop approved (arguments request)
+    applyPolicy desktop request (AllowPolicy edited review) _=do
+      current<-reviewCurrent request review desktop
+      let owns=case dialog desktop of Just dg->purpose dg==PermissionDialog (approvalAction request); _->False
+      if not current || not owns then pure desktop {status="Permission review changed; approve the current review."}
+      else execute desktop request edited
+    applyPolicy desktop request (AdoptPolicy review prepared) mode=do
+      current<-reviewCurrent request review desktop
+      if not current then pure desktop {status="Diff review changed; approve the current review."}
+      else if not (approvalRequired request) && mode/=Enable then
+        finishOwned runtime request (Left "This MCP tool now requires approval; submit again") >> pure desktop {status="Diff now requires approval."}
+      else case prepared of
+        Left err->diffFailureOwned runtime request err desktop
+        Right patch->do
+          adopted<-commitPatch patch desktop
+          case adopted of
+            Left err->diffFailureOwned runtime request err desktop
+            Right (updated,response)->do
+              stopDiffAttempt runtime request
+              case operation request of
+                DiffOperation submission->finishDiffSubmissionOwned submission (Right response)
+                _->finishOwned runtime request (Left "Invalid diff operation")
+              pure (closeReview request updated) {status="Applied exact buffer diff."}
+    execute desktop request edited=case operation request of
+      CaptureOperation submission->captureSubmissionOwned runtime submission desktop >> pure (closeReview request desktop)
+      DiffOperation _->startDiffAttemptOwned runtime request edited desktop
+      WireOperation callback promise->do
+        result<-try (callback (closeReview request desktop) (toolName request) edited)
+        case result of
+          Left (_::IOException)->finishOwned runtime request (Left "MCP tool failed after policy admission") >> pure (closeReview request desktop)
+          Right (updated,continuation)->do
+            writeIORef (active request) False
+            _<-tryPutMVar promise continuation
+            pure updated
+    replaceRequest request=modifyIORef' ref (\state->state {waiting=map (\old->if ticket old==ticket request then request else old) (waiting state)})
+
+reviewCurrent :: Waiting -> Maybe ContentVersion -> Desktop -> IO Bool
+reviewCurrent request Nothing _=pure (not (approvalRequired request) || toolName request/="buffer_apply_diff")
+reviewCurrent request (Just expected) desktop=case dialog desktop of
+  Just dg | purpose dg==PermissionDialog (approvalAction request)->case [b | TextArea "diff" True b _ _ _<-fields dg] of
+    b:_->versionCurrent expected b
+    _->pure False
+  _->pure False
+
+closeReview :: Waiting -> Desktop -> Desktop
+closeReview request desktop=case dialog desktop of
+  Just dg | purpose dg==PermissionDialog (approvalAction request)->desktop {dialog=Nothing}
+  _->desktop
 
 modeText :: Mode -> Text
 modeText Enable="enable"
@@ -554,13 +659,88 @@ field key=parseMaybe (withObject "object" (.:key))
 at :: [a] -> Int -> Maybe a
 at rows n | n<0=Nothing | otherwise=case drop n rows of value:_->Just value; _->Nothing
 
-readPolicies :: FilePath -> IO (Either Text (M.Map Text Mode))
-readPolicies path=do
-  config<-readConfig path
-  pure $ do
-    (_,_,table)<-config
-    policies<-lookupTable ["editor","mcp","permissions"] table
-    traverse parseMode (maybe M.empty (fmap snd . tableMap) policies)
+-- Fresh bytes are read for every decision. Only unchanged bytes reuse parsing;
+-- errors never fall back to an earlier Enable. The external read-to-adoption
+-- interval is finite, not an atomic filesystem revocation guarantee.
+newPolicyOwner :: FilePath -> M.Map Text Bool -> IO PolicyOwner
+newPolicyOwner path registry=mask_ $ do
+  inbox<-STM.newTBQueueIO 32
+  closed<-STM.newTVarIO False
+  epoch<-newIORef 0
+  generation<-newIORef 0
+  job<-newIORef Nothing
+  wake<-STM.newEmptyTMVarIO
+  worker<-asyncWithUnmask (\unmask->unmask (loop inbox wake Nothing))
+  pure (PolicyOwner inbox closed worker wake epoch generation job)
+  where
+    loop inbox wake cached=do
+      task<-STM.atomically (STM.readTBQueue inbox)
+      let run=do
+            saved<-case task of
+              LoadPolicy _->pure (Right ())
+              SavePolicy name mode _->writeTable path ["editor","mcp","permissions"] (object [K.fromText name .= modeText mode])
+            bytes<-readConfigBytes path
+            let parsed=case bytes of
+                  Left err->Left err
+                  Right source->case cached of
+                    Just (old,modes) | old==source->modes
+                    _->parsePolicies source
+                policies=saved >> parsed
+                bounded=fmap (\modes->M.mapMaybeWithKey (\name _->M.lookup name modes) registry) policies
+                retained=fmap (\modes->M.mapMaybeWithKey (\name _->M.lookup name modes) registry) parsed
+            forcePolicies bounded
+            forcePolicies retained
+            STM.atomically (resolvePolicy bounded task >> STM.tryPutTMVar wake () >> pure ())
+            pure (case bytes of Right source->Just (source,retained); Left _->Nothing)
+      next<-run `catch` \(err::SomeException)->do
+        STM.atomically (resolvePolicy (Left "Permission policy worker interrupted") task >> STM.tryPutTMVar wake () >> pure ())
+        case fromException err :: Maybe SomeAsyncException of
+          Just _->throwIO err
+          Nothing->pure Nothing
+      loop inbox wake next
+
+-- | Coalesced completion wake for the owning session scheduler. Waiting consumes
+-- no desktop lock; a completion published before its waiter is retained. Taking
+-- the signal consumes it once, so an idle worker cannot make the owner spin.
+awaitPermissionWork :: Permissions -> STM.STM ()
+awaitPermissionWork (Permissions _ _ _ _ _ _ owner)=STM.takeTMVar (policyWake owner)
+
+signalPermissionWork :: Permissions -> IO ()
+signalPermissionWork (Permissions _ _ _ _ _ _ owner)=STM.atomically (STM.tryPutTMVar (policyWake owner) () >> pure ())
+
+resolvePolicy :: Policies -> PolicyTask -> STM.STM ()
+resolvePolicy result task=do
+  let promise=case task of LoadPolicy p->p; SavePolicy _ _ p->p
+  _<-STM.tryPutTMVar promise result
+  pure ()
+
+forcePolicies :: Policies -> IO ()
+forcePolicies result=evaluate (case result of
+  Left err->T.length err
+  Right modes->M.foldlWithKey' (\n name mode->mode `seq` n+T.length name) 0 modes) >> pure ()
+
+submitPolicy :: PolicyOwner -> (STM.TMVar Policies -> PolicyTask) -> IO (Maybe (STM.TMVar Policies))
+submitPolicy owner task=STM.atomically $ do
+  closed<-STM.readTVar (policyClosed owner)
+  full<-STM.isFullTBQueue (policyInbox owner)
+  if closed || full then pure Nothing else do
+    promise<-STM.newEmptyTMVar
+    STM.writeTBQueue (policyInbox owner) (task promise)
+    pure (Just promise)
+
+readConfigBytes :: FilePath -> IO (Either Text (Maybe BS.ByteString))
+readConfigBytes path=do
+  loaded<-try (catchIOError (Just <$> withBinaryFile path ReadMode (\h->BS.hGet h 1048577)) (\err->if isDoesNotExistError err then pure Nothing else ioError err))
+  pure $ case loaded of
+    Left (_::IOException)->Left "Could not read thc/config.toml"
+    Right bytes | maybe False ((>1048576).BS.length) bytes->Left "thc/config.toml exceeds 1 MiB"
+                | otherwise->Right bytes
+
+parsePolicies :: Maybe BS.ByteString -> Policies
+parsePolicies bytes=do
+  (_,table)<-parseConfigBytes bytes
+  policies<-lookupTable ["editor","mcp","permissions"] table
+  traverse parseMode (maybe M.empty (fmap snd . tableMap) policies)
   where
     parseMode (Toml.Text' _ value)=case value of "enable"->Right Enable; "prompt"->Right Prompt; "disable"->Right Disable; _->Left "Invalid MCP permission mode in thc/config.toml"
     parseMode _=Left "MCP permission modes in thc/config.toml must be strings"
@@ -767,14 +947,17 @@ lookupTable (key:rest) table=case M.lookup key (tableMap table) of
 
 readConfig :: FilePath -> IO (Either Text (Maybe BS.ByteString,Text,Toml.Table' Toml.Position))
 readConfig path=do
-  loaded<-try (catchIOError (Just <$> withBinaryFile path ReadMode (\h->BS.hGet h 1048577)) (\err->if isDoesNotExistError err then pure Nothing else ioError err))
-  pure $ case loaded of
-    Left (_::IOException) -> Left "Could not read thc/config.toml"
-    Right bytes -> do
-      unless (maybe True ((<=1048576).BS.length) bytes) (Left "thc/config.toml exceeds 1 MiB")
-      text<-either (const (Left "thc/config.toml is not valid UTF-8")) Right (TE.decodeUtf8' (fromMaybe BS.empty bytes))
-      table<-either (const (Left "Invalid TOML in thc/config.toml; existing configuration was not changed")) Right (Toml.parse text)
-      pure (bytes,text,table)
+  loaded<-readConfigBytes path
+  pure $ do
+    bytes<-loaded
+    (text,table)<-parseConfigBytes bytes
+    pure (bytes,text,table)
+
+parseConfigBytes :: Maybe BS.ByteString -> Either Text (Text,Toml.Table' Toml.Position)
+parseConfigBytes bytes=do
+  text<-either (const (Left "thc/config.toml is not valid UTF-8")) Right (TE.decodeUtf8' (fromMaybe BS.empty bytes))
+  table<-either (const (Left "Invalid TOML in thc/config.toml; existing configuration was not changed")) Right (Toml.parse text)
+  pure (text,table)
 
 -- Serialize configuration writers in this process. saveFile also checks the freshly
 -- read disk baseline before its atomic rename, preserving other settings.

@@ -10,6 +10,7 @@ module Hide.Remote
   ( RemotePeer(..), withLocalPeer, withSSHPeer, withSSHSession, runRemoteRelay, runRemoteDaemon, runRemoteDaemonWithStartup ) where
 
 #ifndef WITH_REMOTE
+import Control.Concurrent.STM (STM,retry)
 import Hide.Model (Desktop, Effect)
 import Hide.Protocol (WirePacket(..))
 import qualified Data.Text as T
@@ -201,8 +202,8 @@ data Session = Session
 
 -- | Acquire the session lifetime lock, recover state and serve attachments.
 -- Invoke startup only after taking ownership; reclaim only eligible stale endpoints.
-runRemoteDaemonWithStartup :: IO () -> String -> Double -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> (Desktop -> IO Desktop) -> (Desktop -> Maybe T.Text -> Value -> IO (Bool, Desktop, IO (Maybe Value))) -> Desktop -> IO ()
-runRemoteDaemonWithStartup owned session scale effects tick inspect initial = do
+runRemoteDaemonWithStartup :: IO () -> STM () -> String -> Double -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> (Desktop -> IO Desktop) -> (Desktop -> Maybe T.Text -> Value -> IO (Bool, Desktop, IO (Maybe Value))) -> Desktop -> IO ()
+runRemoteDaemonWithStartup owned wake session scale effects tick inspect initial = do
   checkpoint <- checkpointPath session
   withSessionLock (checkpoint++".lock") $ runOwned checkpoint
  where
@@ -283,7 +284,8 @@ runRemoteDaemonWithStartup owned session scale effects tick inspect initial = do
               refreshRequestedPaste pasteReads updated
               pure s {desktop=if delivered then updated else updated {status="Too many pending links; try again shortly."}}
         tickLoop = forever $ do
-          threadDelay 50000
+          timer<-registerDelay 50000
+          atomically (wake `orElse` (readTVar timer >>= check))
           modifyMVar_ state $ \s -> if stopped s then pure s else do
             d <- tick (desktop s)
             refreshRequestedPaste pasteReads d
@@ -815,9 +817,9 @@ withSSHPeer :: String -> [String] -> (RemotePeer -> IO ()) -> IO ()
 withSSHPeer _ _ _ = ioError (userError "Remote support is not built. Rebuild with cabal build -fremote")
 runRemoteRelay :: [String] -> IO ()
 runRemoteRelay _ = ioError (userError "Remote support is not built. Rebuild with cabal build -fremote")
-runRemoteDaemonWithStartup :: IO () -> String -> Double -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> (Desktop -> IO Desktop) -> (Desktop -> Maybe T.Text -> Value -> IO (Bool, Desktop, IO (Maybe Value))) -> Desktop -> IO ()
-runRemoteDaemonWithStartup _ _ _ _ _ _ _ = ioError (userError "Remote support is not built. Rebuild with cabal build -fremote")
+runRemoteDaemonWithStartup :: IO () -> STM () -> String -> Double -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> (Desktop -> IO Desktop) -> (Desktop -> Maybe T.Text -> Value -> IO (Bool, Desktop, IO (Maybe Value))) -> Desktop -> IO ()
+runRemoteDaemonWithStartup _ _ _ _ _ _ _ _ = ioError (userError "Remote support is not built. Rebuild with cabal build -fremote")
 #endif
 
 runRemoteDaemon :: String -> Double -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> (Desktop -> IO Desktop) -> (Desktop -> Maybe T.Text -> Value -> IO (Bool, Desktop, IO (Maybe Value))) -> Desktop -> IO ()
-runRemoteDaemon=runRemoteDaemonWithStartup (pure ())
+runRemoteDaemon=runRemoteDaemonWithStartup (pure ()) retry

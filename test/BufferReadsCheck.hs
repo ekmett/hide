@@ -1,8 +1,10 @@
 {-# LANGUAGE OverloadedStrings #-}
 module BufferReadsCheck (checks) where
 
+import MCPPermissionsCheck (settledTool,settleDialog)
 import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Exception (bracket,onException)
+import qualified Control.Concurrent.STM as STM
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async
 import GHC.Conc (threadStatus,ThreadStatus(..),BlockReason(..))
@@ -36,7 +38,7 @@ checks=bracket temporary removePathForcibly $ \directory -> do
       args=object ["bufferId" .= bid]
       core d _=pure (False,d)
       submit runtime d=case dialog d of
-        Just dg -> let (next,fx)=submitDialog 0 dg d in snd <$> policyEffects runtime core next fx
+        Just dg -> let (next,fx)=submitDialog 0 dg d in snd <$> policyEffects runtime core next fx >>= settleDialog runtime dg
         _ -> error "missing read approval"
       text image=P.readText (capturedContent image) (P.TextRange (P.CharOffset 0) (P.CharOffset 6))
   saved<-newIORef Nothing
@@ -51,27 +53,32 @@ checks=bracket temporary removePathForcibly $ \directory -> do
                 ThreadDied->pure ()
                 _->threadDelay 1000 >> queued
           timeout 3000000 queued >>= maybe (error "read consumer did not enqueue") pure
-          shown<-tickPermissions runtime d
-          let reply=(waitCatch worker >>= pure . either (const (Left "Read worker cancelled")) id) `onException` cancel worker
+          first<-race (STM.atomically (awaitPermissionWork runtime)) (waitCatch worker)
+          admitted<-case first of Left ()->tickPermissions runtime d; Right _->pure d
+          next<-case first of
+            Right _->pure admitted
+            Left ()->race (STM.atomically (awaitPermissionWork runtime)) (waitCatch worker) >>= \done->case done of Left ()->tickPermissions runtime admitted; Right _->pure admitted
+          let shown=next
+              reply=(waitCatch worker >>= pure . either (const (Left "Read worker cancelled")) id) `onException` cancel worker
           pure (shown,reply)
     let capture admission d _ _=do
           ref<-readReference admission bid >>= either (error . T.unpack) pure
           image<-captureBuffer admission d ref >>= either (error . T.unpack) pure
           writeIORef saved (Just (admission,ref,image))
           pure (d,pure (Right Null))
-    (_,finish)<-permissionReadCall runtime capture base "read_buffer" args
+    (_,finish)<-settledTool runtime (permissionReadCall runtime capture) base "read_buffer" args
     check "enabled read dispatch captures current immutable tree" . isRight =<< finish
     Just (expired,ref,image)<-readIORef saved
     check "captured read survives receipt expiry" (text image==Right "old λ\n")
     check "read receipt expires when admitted callback returns" . isLeft =<< captureBuffer expired base ref
     withPermissionsAt (directory </> "other.toml") builtinTools $ \other -> do
-      (_,cross)<-permissionReadCall other (\admission d _ _->do
+      (_,cross)<-settledTool other (permissionReadCall other (\admission d _ _->do
         result<-captureBuffer admission d ref
-        pure (d,pure (either Left (const (Right Null)) result))) base "read_buffer" args
+        pure (d,pure (either Left (const (Right Null)) result)))) base "read_buffer" args
       check "same numeric buffer ID cannot cross session namespaces" . isLeft =<< cross
     let changed=base {buffers=M.adjust (\doc->doc {documentBuffer=newBuffer "new λ\n"}) bid (buffers base)}
     check "same revision replacement changes source content identity" . not =<< versionCurrent (capturedVersion image) (documentBuffer (buffers changed M.! bid))
-    (_,next)<-permissionReadCall runtime (\admission d _ _->do
+    (_,next)<-settledTool runtime (permissionReadCall runtime (\admission d _ _->do
       live<-captureBuffer admission d ref
       check "reference remains logical document handle across replacement" (either (const False) ((==Right "new λ\n").text) live)
       closed<-captureBuffer admission (d {buffers=M.delete bid (buffers d)}) ref
@@ -80,7 +87,7 @@ checks=bracket temporary removePathForcibly $ \directory -> do
       check "reopen receives a different instance ID" (not (M.member bid (buffers reopened)))
       stale<-captureBuffer admission reopened ref
       check "reopen cannot resurrect closed reference" (isLeft stale)
-      pure (d,pure (Right Null))) changed "read_buffer" args
+      pure (d,pure (Right Null)))) changed "read_buffer" args
     _<-next
     let private=base {buffers=M.adjust (\doc->doc {documentLabel=Just "Agent request"}) bid (buffers base)}
         conversation=base {buffers=M.adjust (\doc->doc {documentLabel=Just "Conversation",documentBuffer=newBuffer "Session: private-token\npublic λ\n"}) bid (buffers base)}

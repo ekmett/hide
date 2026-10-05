@@ -325,8 +325,7 @@ runEditor args = do
                           | name=="read_buffer" = readBufferTool bufferCommands (bufferReader permissions currentCaller) current name parameters
                           | name=="buffer_apply_diff" = bufferDiffTool diffCommands (bufferEditor permissions currentCaller) current name parameters
                           | name=="ask_user",Nothing<-token = pure (current,pure (Left "ask_user requires the authenticated requesting agent."))
-                          | name=="ask_user" = permissionCallAs currentCaller permissions callback current name parameters
-                          | otherwise = permissionCall permissions callback current name parameters
+                          | otherwise = permissionCallAs currentCaller permissions callback current name parameters
                         currentCaller=case token of
                           Nothing->pure (Right ())
                           Just secret->fmap (() <$) (resolveActiveAgentAccess (AR.agentAccess agents) hub secret)
@@ -357,7 +356,7 @@ runEditor args = do
                     quit<-readIORef exiting
                     pure (quit,updated,finish)
               case daemon of
-                Just sid -> runRemoteDaemonWithStartup (AR.activateAgentCheckpoint (conversationAgents conversation)) sid scale effects tick inspect liveDesktop
+                Just sid -> runRemoteDaemonWithStartup (AR.activateAgentCheckpoint (conversationAgents conversation)) (awaitPermissionWork permissions) sid scale effects tick inspect liveDesktop
                 Nothing -> die "Missing session process identity."
 
   where
