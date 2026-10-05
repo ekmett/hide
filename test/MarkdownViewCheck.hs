@@ -19,6 +19,7 @@ import System.IO (openTempFile,hClose)
 import System.Timeout (timeout)
 import Hide.Buffer
 import Hide.BufferView
+import Hide.Commands (configuredBindings)
 import Hide.Files (FileState(..))
 import Hide.EditorMCP (builtinTool)
 import Hide.GuestAccess (readableAt)
@@ -39,7 +40,15 @@ checks=do
       win d=fromJust (activeWindow d)
       doc d=fromJust (activeDocument d)
       mode view d=fst (runCommand (SetBufferView view) d)
-      pending=mode MarkdownView current
+      bindings=either (error . show) id (configuredBindings [] M.empty)
+      pending=(mode MarkdownView current) {keyBindings=bindings}
+      navigation=[CursorLeft False,CursorLeft True,CursorRight False,CursorRight True,CursorUp False,CursorUp True,CursorDown False,CursorDown True]
+      navigationKeys=[V.EvKey key mods | key<-[V.KLeft,V.KRight,V.KUp,V.KDown],mods<-[[],[V.MShift]]]
+      interaction d=(selection (win d),scrollRow (win d),scrollColumn (win d),markdownInteraction (win d),revision (documentBuffer (doc d)))
+      navigationBlocked d=all (not . commandEnabled d) navigation &&
+        all ((==interaction d) . interaction . (\command->fst (runCommand command d))) navigation &&
+        all ((==interaction d) . interaction . (\event->fst (handleEvent event d))) navigationKeys &&
+        all ((==interaction d) . interaction) [horizontalMove True False d,verticalMove 1 True d]
       sameSource d=contents (documentBuffer (doc d))==source && revision (documentBuffer (doc d))==revision original && selection (win d)==selection (win current) && scrollRow (win d)==1 && scrollColumn (win d)==2
   check "Markdown view is named and preserves existing review enum values" (parseBufferView "markdown"==Just MarkdownView && fromEnum SideBySideView==3)
   check "Markdown preview keeps source identity and Current interaction" (bufferId (win pending)==bufferId (win current) && sameSource pending && not (windowChangeView original (win pending)))
@@ -48,6 +57,7 @@ checks=do
     let after=fst (runCommand command pending {clipboard="poison",browserFrontend=True})
     check "Pending named commands cannot mutate source" (sameSource after)
   forM_ [V.EvKey (V.KChar 'x') [],V.EvKey V.KBS [],V.EvPaste "bad"] $ \event->check "Pending raw input cannot edit background source" (sameSource (fst (handleEvent event pending)))
+  check "Pending compiled navigation refuses source fallback" (navigationBlocked pending)
   check "Source popup cannot remain current after switching to Markdown" (not (contextTargetCurrent pending {contextTarget=captureContextTarget SourceContext current}))
   check "Preview retains F10 and menu mnemonic ownership" (menu (fst (handleEvent (V.EvKey (V.KFun 10) []) pending))/=Nothing && menu (fst (handleEvent (V.EvKey (V.KChar 'w') [V.MAlt]) pending))/=Nothing)
   check "Pending MCP selection fails closed" (case builtinTool pending "read_selection" (object []) of Left _->True; _->False)
@@ -71,6 +81,7 @@ checks=do
   let navigated=fst (handleEvent (V.EvKey V.KRight []) ready)
       scrolled=changeScroll True 5 navigated
       restored=mode CurrentView scrolled
+  check "Ready compiled navigation keeps rendered movement available" (commandEnabled ready (CursorRight False) && selection (displayWindow (win navigated))/=selection (displayWindow (win ready)) && sameSource navigated)
   check "Preview movement/scroll preserves exact Current state" (sameSource restored && markdownInteraction (win scrolled)/=markdownInteraction (win ready))
   let wideBase=selected {wideSectionTitles=True}
   wide<-prepareTextPresentations wideBase
@@ -78,6 +89,7 @@ checks=do
       heading=textLayoutFirst layout
   check "Wide heading has measured two-cell geometry and preserves rendered selection" (heading==2 && selection (displayWindow (win wide))==selection shown)
   let resized=modifyActive (\w->w {bounds=(bounds w) {width=28}}) selected
+  check "Stale width navigation refuses source fallback" (isNothing (windowMarkdown resized (win resized)) && navigationBlocked resized)
   resizedReady<-prepareTextPresentations resized
   check "Reflow clears preview selection without changing Current" (selection (displayWindow (win resizedReady))==Selection 0 0 && sameSource resizedReady)
   let split=fst (runCommand SplitVertical ready)
@@ -86,7 +98,9 @@ checks=do
       other=focusWindow (last ids) separate
       changed=insertText "EDIT" separate
   check "Split windows choose source and Markdown independently" (length ids==2 && bufferView (win separate)==CurrentView && bufferView (win other)==MarkdownView)
-  changedReady<-prepareTextPresentations (focusWindow (last ids) changed)
+  let staleRevision=(focusWindow (last ids) changed) {keyBindings=bindings}
+  check "Stale revision navigation refuses source fallback" (isNothing (windowMarkdown staleRevision (win staleRevision)) && navigationBlocked staleRevision)
+  changedReady<-prepareTextPresentations staleRevision
   check "Sibling source edit retires old preview" (isNothing (windowMarkdown (focusWindow (last ids) changed) (win (focusWindow (last ids) changed))) && maybe False (\(_,content,_)->"EDIT" `T.isInfixOf` contentSlice content 0 (contentLength content)) (windowMarkdown changedReady (win changedReady)))
   _<-renderKey ready {buffers=M.map (\d->d {documentBuffer=(documentBuffer d) {undoStack=error "render forced source Undo"}}) (buffers ready)}
   let private=ready {guestPrivatePaths=["/tmp/notes.md"]}

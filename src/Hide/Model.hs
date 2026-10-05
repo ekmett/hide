@@ -32,7 +32,7 @@ import qualified Hide.Plugin.Tree as Tree
 import Hide.Plugin.Command (CommandRef)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
-import Data.Maybe (listToMaybe, fromMaybe)
+import Data.Maybe (listToMaybe, fromMaybe, isJust)
 import Data.List (find, findIndex, sortOn, mapAccumL, groupBy)
 import Data.Char (toLower, isAlphaNum, chr, ord, toUpper, isHexDigit, digitToInt)
 import Text.Read (readMaybe)
@@ -567,6 +567,7 @@ commandEnabled d (RegisteredMenu reference _) = dialog d==Nothing && case find (
     _ -> False
   Just _ -> True
 commandEnabled d cmd | sourceKeyCommand cmd = sourceNavigationOwner d &&
+  (not (activeMarkdown d) || maybe False (isJust . windowMarkdown d) (activeWindow d)) &&
   (not (horizontalMutation cmd) || maybe False ((==Nothing) . documentLabel) (activeDocument d) && not (activeMarkdown d)) &&
   (cmd/=DeleteLine || not (activeHex d))
 commandEnabled _ Disabled{} = False
@@ -2901,8 +2902,10 @@ sourceNavigationOwner d=dialog d==Nothing && not (questionActive d) && not (acti
 -- | Preserve each window's existing displayed selection and source coordinate owner.
 horizontalMove :: Bool -> Bool -> Desktop -> Desktop
 horizontalMove forward extend d
-  | activeMarkdown d, Just w<-activeWindow d, Just (_,text,_)<-windowMarkdown d w =
-      markdownMoveTo extend (horizontalTextOffset forward text (caret (selection (displayWindow w)))) d
+  | activeMarkdown d = case activeWindow d of
+      Just w | Just (_,text,_)<-windowMarkdown d w ->
+        markdownMoveTo extend (horizontalTextOffset forward text (caret (selection (displayWindow w)))) d
+      _->d
   | Just view<-activePluginWindow d, Just w<-activeWindow d =
       pluginMoveTo extend (horizontalTextOffset forward (PluginWindow.preparedWindowText view) (caret (selection w))) d
   | Just w<-activeWindow d, Just doc<-activeDocument d =
@@ -2925,8 +2928,10 @@ horizontalTextOffset forward text pos
 -- | Preserve each owner's existing row geometry, selection and visibility.
 verticalMove :: Int -> Bool -> Desktop -> Desktop
 verticalMove delta extend d
-  | activeMarkdown d, Just w<-activeWindow d, Just (_,text,_)<-windowMarkdown d w =
-      markdownMoveTo extend (verticalTextOffset d (displayWindow w) text (caret (selection (displayWindow w))) delta) d
+  | activeMarkdown d = case activeWindow d of
+      Just w | Just (_,text,_)<-windowMarkdown d w ->
+        markdownMoveTo extend (verticalTextOffset d (displayWindow w) text (caret (selection (displayWindow w))) delta) d
+      _->d
   | Just view<-activePluginWindow d, Just w<-activeWindow d =
       pluginMoveTo extend (verticalTextOffset d w (PluginWindow.preparedWindowText view) (caret (selection w)) delta) d
   | Just w<-activeWindow d, Just doc<-activeDocument d =
