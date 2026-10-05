@@ -187,24 +187,24 @@ createSlot registry root _private serial file=do
         pure $ if maybe False (/=latest) version || observed/=after
           then Left (CommandRejected "Package changed while opening source; refresh the tree.") else result) >>= required
   let registerBuild action suffix label=registerCommand registry (CommandDef (namespace<>suffix) label codec codec $ \ctx (version,name)->do
-      Snapshot current capturedStamp package _<-readIORef ref
-      observed<-stamp file
-      case (sidebarOrigin ctx,sidebarProvider ctx,package) of
-        (Menu.HumanMenu,Just owner,Right parsedPackage)
-          | current==version,observed==capturedStamp
-          , component:_<-[item | item<-sourceComponents parsedPackage,sourceTarget item==name]
-          , sourceBuildable (condTreeData (sourceTree component))
-          , sourceKind component `elem` [LibraryComponent,ExecutableComponent]
-          , action==Make || action==Run && sourceKind component==ExecutableComponent->do
-              let target=PackageBuildTarget owner version
-                    (sidebarContextDirectory ctx,sidebarPrivatePaths ctx) root file observed
-                    (sourcePackageName parsedPackage<>":"<>name)
-              -- Construct and force fixed receipt metadata on the action worker.
-              _<-evaluate (T.length (packageBuildName target)+length root+length file
-                +length (sidebarContextDirectory ctx)+sum (map length (sidebarPrivatePaths ctx)))
-              reply<-evaluate (SidebarBuild action target)
-              pure (Right reply)
-        _->pure (Left (CommandRejected "Package build target changed or is not a human action."))) >>= required
+        Snapshot current capturedStamp package _<-readIORef ref
+        observed<-stamp file
+        case (sidebarOrigin ctx,sidebarProvider ctx,package) of
+          (Menu.HumanMenu,Just owner,Right parsedPackage)
+            | current==version,observed==capturedStamp
+            , component:_<-[item | item<-sourceComponents parsedPackage,sourceTarget item==name]
+            , sourceBuildable (condTreeData (sourceTree component))
+            , sourceKind component `elem` [LibraryComponent,ExecutableComponent]
+            , action==Make || action==Run && sourceKind component==ExecutableComponent->do
+                let target=PackageBuildTarget owner version
+                      (sidebarContextDirectory ctx,sidebarPrivatePaths ctx) root file observed
+                      (sourcePackageName parsedPackage<>":"<>name)
+                -- Construct and force fixed receipt metadata on the action worker.
+                _<-evaluate (T.length (packageBuildName target)+length root+length file
+                  +length (sidebarContextDirectory ctx)+sum (map length (sidebarPrivatePaths ctx)))
+                reply<-evaluate (SidebarBuild action target)
+                pure (Right reply)
+          _->pure (Left (CommandRejected "Package build target changed or is not a human action."))) >>= required
   build<-registerBuild Make ".build" "Build component"
   run<-registerBuild Run ".run" "Run component"
   -- doc-artifact: tools/docs-screenshots.hs package-target-menu -> docs/site/screenshots/package-target-menu.png (docs/running.md)
