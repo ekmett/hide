@@ -6,7 +6,7 @@
 -- Clipped GPU cells retain their full semantic glyph. Text-mode partial clusters
 -- become blanks. Terminal output advances
 -- explicitly past two-cell clusters even when the user's font draws them narrowly.
-module Hide.Unicode (graphemes, sourceGraphemesFrom, sourceGlyphAdvance, scalarWidth, clusterWidth, textImage, wideTextImage, displayClusters, terminalProjection, scriptTerminalText, terminalSpan, Script(..), CellSpan(..), CellLayer(..), cellRowsForLayers, cellRowsForPic, cellDisplayOps, flattenPicture, displayOpsForPic, updateDisplayOps, terminalText, textInputChar) where
+module Hide.Unicode (graphemes, sourceGraphemesFrom, sourceTextWidth, sourceGlyphAdvance, scalarWidth, clusterWidth, textImage, wideTextImage, displayClusters, terminalProjection, scriptTerminalText, terminalSpan, Script(..), CellSpan(..), CellLayer(..), cellRowsForLayers, cellRowsForPic, cellDisplayOps, flattenPicture, displayOpsForPic, updateDisplayOps, terminalText, textInputChar) where
 
 import Control.Monad (forM_, when)
 import Data.Char (isPrint)
@@ -98,6 +98,13 @@ sourceGraphemesFrom requested text=
                else seek startByte (byte+bytes) startChar (char+1) col point nextState
                  (if previous<0 then c else first) (max natural (scalarWidth c)) (controls || sourceControl c)
 {-# NOINLINE sourceGraphemesFrom #-}
+
+-- | Natural source cell extent, including tab stops and control placeholders.
+-- Reuses numeric UTF8/stateful grapheme seeking; counting width does not allocate
+-- a Text fragment/list node per glyph. Plain viewport emission uses the same law:
+-- @sourceTextWidth text ≡ sum of sourceGlyphAdvance at consecutive columns@.
+sourceTextWidth :: T.Text -> Int
+sourceTextWidth text=let (_,_,width,_)=sourceGraphemesFrom maxBound text in width
 
 -- | Source display advance, independent of UTF8 bytes and scalar count.
 -- CR alone has zero advance, tabs reach the next eight-cell stop, and control

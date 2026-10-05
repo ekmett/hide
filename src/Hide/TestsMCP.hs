@@ -4,7 +4,7 @@
 -- Cabal suite outcomes and explicit TAP 13 streams provide evidence; arbitrary
 -- console prose is not treated as individual tests. Truncation and incomplete TAP
 -- plans remain visible. The latest non-test job replaces the status report, while
--- its predecessor's output document can remain open.
+-- its predecessor's semantic output window can remain open.
 module Hide.TestsMCP (testsTools, testsToolNames, testsTool, testResults, parseTestSuites) where
 
 import Data.Aeson
@@ -28,7 +28,7 @@ testsTools=
   [object ["name" .= ("test_start"::T.Text),"description" .= ("Run Cabal tests as a shared captured job; source buffers must be saved. Uses selected GHC settings; THC has no configured test runner. Optional target overrides the configured Cabal target, for example test:unit or all. Use build_stop to stop; test_status reports suites, explicit TAP 13 test points, and process exit."::T.Text),
     "inputSchema" .= object ["type" .= ("object"::T.Text),"properties" .= object ["target" .= object ["type" .= ("string"::T.Text)],"toolchain" .= object ["type" .= ("string"::T.Text),"enum" .= (["GHC"]::[T.Text])]],"additionalProperties" .= False],
     "annotations" .= object ["readOnlyHint" .= False,"destructiveHint" .= True,"openWorldHint" .= True]],
-   object ["name" .= ("test_status"::T.Text),"description" .= ("Read the latest shared job when it is a test run: Cabal suite statuses, captured output buffer ID, compiler diagnostic count and authoritative exit code. Starting another build replaces this report; prior output buffers remain readable. TAP 13 on stdout supplies individual test points; incomplete streams are identified."::T.Text),
+   object ["name" .= ("test_status"::T.Text),"description" .= ("Read the latest shared job when it is a test run: Cabal suite statuses, captured job/semantic window IDs, compiler diagnostic count and authoritative exit code. Starting another build replaces this report; the last job remains readable through build_output after completion or window close. TAP 13 on stdout supplies individual test points; incomplete streams are identified."::T.Text),
     "inputSchema" .= object ["type" .= ("object"::T.Text),"properties" .= object [],"additionalProperties" .= False],
     "annotations" .= object ["readOnlyHint" .= True,"destructiveHint" .= False,"openWorldHint" .= False]]]
 
@@ -41,7 +41,7 @@ testsTool runtime d name arguments = case parseEither (withObject "test argument
     "test_start" -> case parseEither (\_ -> (,) <$> fields .:? "target" <*> fields .:? "toolchain") arguments of
       Left err -> done d (Left (T.pack err))
       Right (target,toolchain) -> do
-        current<-Jobs.buildJobStatus jobs
+        current<-Jobs.buildJobStatus jobs d
         if field "active" current==Just True then done d (Left "A build, run or test is already active; use build_stop first.")
         else if any (\doc -> documentLabel doc==Nothing && dirty (documentBuffer doc)) (M.elems (buffers d)) then done d (Left "Save modified source buffers before testing files on disk.")
         else do
@@ -63,7 +63,7 @@ testsTool runtime d name arguments = case parseEither (withObject "test argument
     (directory,_,jobs)=conversationServices runtime
     done desktop result=pure (desktop,pure result)
     results desktop=do
-      job<-Jobs.buildJobStatus jobs
+      job<-Jobs.buildJobStatus jobs desktop
       output<-Jobs.buildJobStdout jobs
       done desktop (Right (testResults job output desktop))
 
@@ -94,12 +94,10 @@ testResults job (stdoutText,stdoutTruncated) d
            | (index,stream)<-zip [1::Int ..] streams,(number,name,outcome,reason)<-reverse (tapCases stream)],
        "tapStreams" .= [object ["stream" .= index,"planned" .= tapPlan stream,"observed" .= tapCount stream,
            "state" .= tapState stream,"reason" .= tapBailout stream] | (index,stream)<-zip [1::Int ..] streams],
-       "testResultsTruncated" .= (stdoutTruncated || length allStreams>500 || sum (map tapCount allStreams)>500),"outputAvailable" .= maybe False (const True) document,
+       "testResultsTruncated" .= (stdoutTruncated || length allStreams>500 || sum (map tapCount allStreams)>500),"outputAvailable" .= fromMaybe False (field "outputAvailable" job),
        "outputTruncated" .= truncated,"stdoutTruncated" .= stdoutTruncated,"suiteResultsTruncated" .= (length suites>=500),"compilerDiagnosticCount" .= length (buildDiagnostics d)]
   where
-    document=field "bufferId" job >>= (`M.lookup` buffers d)
-    output=maybe "" (contents . documentBuffer) document
-    truncated=T.length output>=1024*1024
+    truncated=fromMaybe False (field "outputTruncated" job)
     suites=parseTestSuites stdoutText
     streams=take 500 allStreams
     allStreams=parseTAP (if field "active" job==Just True then fst (T.breakOnEnd "\n" stdoutText) else stdoutText)

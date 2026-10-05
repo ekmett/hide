@@ -1,7 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 module TestsMCPCheck (checks) where
 
-import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Concurrent (threadDelay)
 import Control.Exception (bracket)
 import Control.Monad (unless, when)
@@ -23,6 +22,7 @@ import Hide.Conversation (withConversation, conversationServices)
 import Hide.Files (FileState(..))
 import Hide.Model
 import Hide.TestsMCP
+import qualified Hide.Plugin.Window as W
 
 checks :: IO ()
 checks = bracket temporary removePathForcibly $ \root -> do
@@ -30,8 +30,7 @@ checks = bracket temporary removePathForcibly $ \root -> do
       initial=initialDesktop (80,25)
       check label ok=unless ok (error label)
       field key=parseMaybe (withObject "value" (.: key))
-      report output active code failure=let d=addReadOnly "Test output" output initial
-        in testResults (object ["action" .= ("Test"::T.Text),"active" .= active,"exitCode" .= (code::Maybe Int),"error" .= (failure::Maybe T.Text),"bufferId" .= maybe (-1) sourceFixtureBuffer (activeWindow d)]) (output,False) d
+      report output active code failure=testResults (object ["action" .= ("Test"::T.Text),"active" .= active,"exitCode" .= (code::Maybe Int),"error" .= (failure::Maybe T.Text),"outputAvailable" .= True,"outputTruncated" .= False]) (output,False) initial
       state output active code failure=field "state" (report output active code failure) :: Maybe T.Text
   noProject<-B.testPlan ghc root
   check "tests reject standalone files" (either (const True) (const False) noProject)
@@ -75,7 +74,7 @@ checks = bracket temporary removePathForcibly $ \root -> do
   check "oversized TAP numbers cannot wrap" (state "TAP version 13\n1..18446744073709551617\nok 1\n" False (Just 0) Nothing==Just "failed" && state "TAP version 13\n1..1\nok 18446744073709551617\n" False (Just 0) Nothing==Just "failed")
   check "indented suite-like text is not suite evidence" (null (parseTestSuites "  Test suite fake: PASS\n"))
   check "partial streaming TAP line is not a completed case" (caseStates (report "TAP version 13\n1..1\nok 1 - unfinished" True Nothing Nothing)==[])
-  let truncatedDesktop=addReadOnly "Test output" "TAP version 13\n1..1\nok 1\n" initial
+  let truncatedDesktop=initial
       truncatedJob=object ["action" .= ("Test"::T.Text),"active" .= False,"exitCode" .= (0::Int)]
   check "truncated stdout never proves a complete passing run" (field "state" (testResults truncatedJob ("TAP version 13\n1..1\nok 1\n",True) truncatedDesktop)==Just ("incomplete"::T.Text))
   check "passing TAP cannot finish an unfinished Cabal suite" (state "Test suite pending: RUNNING...\nTAP version 13\n1..1\nok 1\n" False (Just 0) Nothing==Just "incomplete")
@@ -111,7 +110,7 @@ checks = bracket temporary removePathForcibly $ \root -> do
         check "only stdout produces individual test points" (either (const False) (\value -> caseStates value==["passed"]) result)
         check "test failure is structured with exact exit code" (either (const False) (\value -> (field "job" value >>= field "exitCode")==Just (7::Int)) result)
         check "test compiler errors reach Messages" (not (null (buildDiagnostics after)))
-        check "captured tests retain a readable output buffer" (any (\doc -> "Test suite unit: FAIL" `T.isInfixOf` contents (documentBuffer doc)) (M.elems (buffers after)))
+        check "captured tests retain a semantic output window" (M.size (buffers after)==1 && maybe False (\p->let text=W.preparedWindowText p in "Test suite unit: FAIL" `T.isInfixOf` contentSlice text 0 (contentLength text)) (activePluginWindow after))
   putStrLn "structured test tools checks passed"
   where
     temporary=do

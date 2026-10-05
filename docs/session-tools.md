@@ -34,7 +34,7 @@ Editor positions are 1-based Unicode character positions. Raw LSP results retain
 
 ## Build, test and run
 
-`build_start` uses the selected THC/GHC configuration for compile, make or run. It requires saved source buffers and captures output in an editor window. `build_status` reports the output buffer and actual exit code; `build_stop` stops the job. A run can request a shared terminal instead.
+`build_start` uses the selected THC/GHC configuration for compile, make or run. It requires saved source buffers and captures output in an editor window. `build_status` reports the exact job ID, semantic output window when open, retained character count/truncation and actual exit code; `build_output` pages its combined stdout/stderr by that job ID (Unicode character offsets, up to 32768 characters). Closing the view does not stop the job or discard its retained output, and late output cannot reopen it; `build_stop` stops the job. A run can request a shared terminal instead.
 
 `test_start` runs Cabal tests with GHC; `test_status` reports explicit Cabal suite outcomes alongside the process result and compiler diagnostic count. A successful process without suite output is reported as completed, not as invented individual passing tests. Test and build commands share one job slot.
 

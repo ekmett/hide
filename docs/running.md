@@ -24,6 +24,14 @@ open an output window; output arrives while you keep editing. Compiler errors
 and warnings appear in **Messages**, where **Alt+F8** and **Alt+F7** move between
 source locations. **Compile > Stop build** stops the current job.
 
+Captured Build/Run output opens a read-only text window independent of source
+buffers. It supports selection, copy and scrolling; output follows the bottom
+until you scroll away. Later output can refresh behind a dialog without changing
+its input or focus. A new captured job reuses its output view geometry with a fresh content lifetime. Completed output is retained in checkpoints as an ended read-only view; recovery
+does not restart its process or restore a live job ID. Closing the view
+keeps the job running and prevents late output from reopening it; use **Compile > Stop build** or **Run > Stop build/run** to stop it. Agents can page the last job’s combined output with
+[`build_output`](agent-tools.md#build-test-and-execution).
+
 For THC, Compile and Make invoke `thc build`: Cabal builds the selected
 component and THC acquires its dependency Core. Leave the target empty to build
 the current package, or name a Cabal library or executable target. Run invokes
