@@ -176,6 +176,7 @@ checks=do
   horizontalChecks
   verticalChecks
   edgePageChecks
+  wordChecks
   reloadChecks
   putStrLn "keybinding checks passed"
 
@@ -387,3 +388,75 @@ edgePageChecks=do
   check "PTY edges and pages retain transport ownership" (map (\(k,mods)->terminalInput (V.EvKey k mods)) [(V.KHome,[]),(V.KEnd,[V.MCtrl]),(V.KPageUp,[]),(V.KPageDown,[])]==map Just ["\ESC[H","\ESC[1;5F","\ESC[5~","\ESC[6~"])
   let conflict=platformBindings [] TerminalPlatform (M.singleton "source" (M.singleton "hide.file.save" ["Home"]))
   check "edge chord reassignment must explicitly release its owner" (either (const True) (const False) conflict)
+
+wordChecks :: IO ()
+wordChecks=do
+  let check name ok=unless ok (error name)
+      event k mods=fst . handleEvent (V.EvKey k mods)
+      range d=selection <$> activeWindow d
+      renderedRange d=selection . displayWindow <$> activeWindow d
+      text="one  two,three\r\n界 e\x301\& \tend\n"
+      base=modifyActive (\w->w {selection=Selection 7 7}) (addDocument Nothing (newBuffer text) (initialDesktop (80,25)))
+      actions=[("hide.cursor.word-left",CursorWordLeft False),("hide.cursor.word-right",CursorWordRight False),
+        ("hide.selection.word-left",CursorWordLeft True),("hide.selection.word-right",CursorWordRight True),
+        ("hide.edit.delete-word-backward",DeleteWordBackward),("hide.edit.delete-word-forward",DeleteWordForward)]
+      compile context entries=either (error . show) id (platformBindings [] TerminalPlatform (M.singleton context (M.fromList entries)))
+      maps=compile "source" [(name,["F"<>T.pack (show n)]) | ((name,_),n)<-zip actions [13::Int ..]]
+      configured=base {keyBindings=maps}
+      unbound=base {keyBindings=compile "source" [(name,[]) | (name,_)<-actions]}
+      state d=(range d,(\doc->(revision (documentBuffer doc),bufferLength (documentBuffer doc))) <$> activeDocument d)
+      sourceWordKeys=[(k,mods) | k<-[V.KLeft,V.KRight,V.KBS,V.KDel],extra<-subsequences [V.MAlt,V.MShift],let mods=V.MCtrl:extra,not (terminalSourceReserved k mods)]
+      docBuffer d=maybe (error "word source missing") documentBuffer (activeDocument d)
+  check "word remaps execute measured scalar boundaries" (range (event (V.KFun 13) [] configured)==Just (Selection 5 5) && range (event (V.KFun 14) [] configured)==Just (Selection 8 8))
+  check "word selection remaps retain reversed anchors" (map (\n->range (event (V.KFun n) [] (modifyActive (\w->w {selection=Selection 10 7}) configured))) [15,16]==map Just [Selection 10 5,Selection 10 8])
+  forM_ (zip actions [13::Int ..]) $ \((name,command),n)->
+    check "word labels and projections resolve effective identities" (commandIdentifier command==Just name && commandBindingKeys configured command==["F"<>T.pack (show n)] && menuShortcut configured (MenuItem "Word" "Ctrl+Left" command)=="F"<>T.pack (show n) && lookup ("F"<>T.pack (show n)) (focusedBindingChords configured)==Just name)
+  check "word replacement consumes former physical aliases" (all (\(k,mods)->state (event k mods configured)==state configured) sourceWordKeys)
+  check "word unbind consumes former physical aliases" (all (\(k,mods)->state (event k mods unbound)==state unbound) sourceWordKeys)
+  let backward=event (V.KFun 17) [] configured
+      forward=event (V.KFun 18) [] configured
+      restored=fst (runCommand Undo backward)
+      selected=event (V.KFun 18) [] (modifyActive (\w->w {selection=Selection 10 7}) configured)
+  check "word deletion keeps independent local fragments" (bufferSlice (docBuffer backward) 3 5=="  o,t" && bufferLength (docBuffer backward)==T.length text-2 && bufferSlice (docBuffer forward) 3 5=="  tw," && bufferLength (docBuffer forward)==T.length text-1)
+  check "word deletion makes one undoable edit" (revision (docBuffer backward)==1 && bufferLength (docBuffer restored)==T.length text && bufferSlice (docBuffer restored) 3 6=="  two,")
+  check "word deletion prioritizes the selected range" (bufferLength (docBuffer selected)==T.length text-3 && range selected==Just (Selection 7 7))
+  forM_ [(10,9,16),(14,9,15),(19,18,20),(20,19,21)] $ \(p,left,right)->do
+    let placed=modifyActive (\w->w {selection=Selection p p}) configured
+    check "word boundaries preserve punctuation CRLF and Unicode scalar policy" (range (event (V.KFun 13) [] placed)==Just (Selection left left) && range (event (V.KFun 14) [] placed)==Just (Selection right right))
+  let star=unbound {wordStar=True,keyBindings=compile "wordstar" [(name,[]) | (name,_)<-actions]}
+  check "fixed WordStar A F aliases remain non-extending" (map (\c->range (event (V.KChar c) [V.MCtrl,V.MShift] star)) ['a','f']==map Just [Selection 5 5,Selection 8 8])
+  check "fixed WordStar A F cannot be reassigned" (either (const True) (const False) (platformBindings [] TerminalPlatform (M.singleton "wordstar" (M.singleton "hide.cursor.word-left" ["Ctrl+A"]))))
+  let hex=modifyActive (\w->w {selection=Selection 7 7}) (addDocument Nothing (newByteBuffer (BS.pack [0..31])) (initialDesktop (80,25))) {keyBindings=maps}
+  check "word actions preserve hex byte steps" (range (event (V.KFun 13) [] hex)==Just (Selection 6 6) && bufferLength (docBuffer (event (V.KFun 17) [] hex))==31)
+  let readonly=modifyActive (\w->w {selection=Selection 7 7}) (addHelp text (initialDesktop (80,25))) {keyBindings=maps}
+  check "word deletion retains readonly source authority" (not (commandEnabled readonly DeleteWordForward) && state (event (V.KFun 18) [] readonly)==state readonly)
+  W.withWindowScope $ \scope->do
+    prepared<-W.prepareTextWindow "Word notes" text
+    update<-W.openTextWindow scope prepared >>= maybe (fail "plugin word open failed") pure
+    opened<-adoptWindowUpdate P.HumanMenu update base
+    let plugin=modifyActive (\w->w {selection=Selection 7 7}) opened {keyBindings=maps}
+    check "plugin word route preserves its complete-grapheme step" (range (event (V.KFun 13) [] plugin)==Just (Selection 6 6) && not (commandEnabled plugin DeleteWordBackward))
+    check "plugin word unbind consumes readonly fallback" (range (event V.KLeft [V.MCtrl] plugin {keyBindings=keyBindings unbound})==range plugin)
+  let mdSource=addDocument (Just (FileState "/tmp/word.md" Nothing)) (newBuffer "*one two*\n\nnext\n") (initialDesktop (80,25))
+      pending=(fst (runCommand (SetBufferView MarkdownView) mdSource)) {keyBindings=maps}
+      inert d=all (\(_,command)->not (commandEnabled d command) && range (fst (runCommand command d))==range d && renderedRange (fst (runCommand command d))==renderedRange d) actions
+  check "pending Markdown word routes remain terminal" (inert pending)
+  ready<-prepareTextPresentations pending
+  let markdown=modifyActive (modifyDisplayedWindow (\w->w {selection=Selection 5 5})) ready
+      moved=event (V.KFun 13) [] markdown
+      stale=modifyActive (\w->w {bounds=(bounds w) {width=28}}) markdown
+  check "Markdown word route preserves rendered grapheme and source coordinates" (renderedRange moved==Just (Selection 4 4) && range moved==range markdown && not (commandEnabled markdown DeleteWordForward))
+  check "Markdown word unbind consumes readonly fallback" (renderedRange (event V.KLeft [V.MCtrl] markdown {keyBindings=keyBindings unbound})==renderedRange markdown)
+  check "stale Markdown word routes remain terminal" (inert stale)
+  let global=base {keyBindings=either (error . show) id (platformBindings [] TerminalPlatform (M.singleton "global" (M.fromList [("hide.cursor.word-left",["F13"]),("hide.edit.delete-word-forward",["F14"])])))}
+      modal=prompt "Edit" Information [Input "Name" "draft" 0] global
+      chat=(addReadOnly "Conversation" "reply" global) {composerBuffer=newBuffer "draft",composerSelection=Selection 2 2,composerFocused=True}
+      pty=addReadOnly "Terminal test" "output" global
+      sidebar=installSidebar (emptySidebar "/project" 24 True) global
+      messages=global {problemsVisible=True,problemsFocused=True}
+      private=global {guestPrivatePaths=["/authority"],buffers=M.map (\doc->doc {documentOrigin=Just "/authority/secret.hs"}) (buffers global)}
+  check "global word remaps cannot acquire another input owner" (all (\d->all (\n->state (event (V.KFun n) [] d)==state d) [13,14] && not (commandEnabled d (CursorWordLeft False))) [modal,chat,pty,sidebar,messages])
+  check "word remaps retain private origin policy" (all (\n->not (guestKeyAllowed private (V.KFun n) [])) [13,14])
+  check "word remaps do not change composer drafts" (composerSelection (event (V.KFun 13) [] chat)==composerSelection chat)
+  let poisoned=configured {buffers=M.map (\doc->doc {documentBuffer=(documentBuffer doc) {undoStack=error "word movement forced Undo"}}) (buffers configured)}
+  check "word movement does not force source history" (range (event (V.KFun 13) [] poisoned)==Just (Selection 5 5))

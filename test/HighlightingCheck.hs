@@ -3,7 +3,7 @@ module HighlightingCheck (checks) where
 
 import Control.Concurrent
 import Control.Exception (evaluate,finally)
-import Control.Monad (unless,foldM)
+import Control.Monad (unless,foldM,forM_)
 import Data.IORef
 import GHC.Conc (getAllocationCounter)
 import qualified Data.Map.Strict as M
@@ -95,6 +95,19 @@ checks = do
   viewportAfter<-getAllocationCounter
   check "ordinary source viewport avoids rebuilding prepared Unicode image rows"
     (viewportCount>0 && viewportBefore-viewportAfter<6000000)
+  -- Chat and autocomplete share the visible-row renderer. Keep long draft
+  -- lines borrowed even when moving the selection without changing their text.
+  forM_ [False,True] $ \hint->do
+    let draft=newBuffer (T.intercalate "\n" (replicate 12 (T.replicate 100 "words 界 e\x301 👩🏽\x200d\&💻 ")))
+        base=addReadOnly (if hint then "Autocomplete" else "Conversation") "reply" (initialDesktop (100,35))
+        chat=base {sideTree=Nothing,blinkCursor=False,appearance=LightMode,
+          composerBuffer=draft,composerSelection=Selection 0 0,composerFocused=True,
+          autocompleteACPEnabled=True,autocompleteDraft=draft,autocompleteSelection=Selection 0 0,autocompleteFocused=True}
+    _<-evaluate (occupied (renderCellRows chat))
+    before<-getAllocationCounter
+    count<-evaluate (occupied (renderCellRows chat {composerSelection=Selection 1 1,autocompleteSelection=Selection 1 1}))
+    after<-getAllocationCounter
+    check "draft viewport avoids rebuilding offscreen character/style pairs" (count>0 && before-after<12000000)
   let mixedText="a界e\x301\t👩🏽\x200d\&💻z"
       mixedSource=addDocument (Just (FileState "Mixed.hs" Nothing)) (newBuffer mixedText) (initialDesktop (30,12))
       styledMixed=mixedSource {sideTree=Nothing,buffers=M.map (\d->d {documentLabel=Just "Source Mixed",documentSourceRows=Just
