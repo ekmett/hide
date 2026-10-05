@@ -134,7 +134,9 @@ full request/update JSON; click again to collapse it.
 
 An agent can ask a question inline with suggested choices and a free-text answer.
 Choose an option or enter your own reply, then submit. Cancel dismisses the
-question. Your unfinished conversation draft is retained separately.
+question. Your unfinished conversation draft is retained separately. Free-text
+answers are single-line and limited to 4096 characters; pasted line breaks and
+tabs become spaces. Normalized or capped insertions remain one Undo step.
 
 ## Review requested work
 

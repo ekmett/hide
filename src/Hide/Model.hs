@@ -1061,7 +1061,7 @@ runCommand cmd source | problemsVisible source && problemsFocused source, cmd `e
 runCommand Copy source | activeConversation source, Just w<-activeWindow source, anchor (selection w)/=caret (selection w) =
   ((copyClipboard False (conversationSelection source) source) {status="Conversation text copied.",menu=Nothing,contextMenu=Nothing},[])
 runCommand cmd source | activeAutocomplete source, autocompleteFocused source, cmd `elem` [Undo,Redo,Copy,Cut,Paste,SelectAll] = (autocompleteEdit (composerCommandWith False cmd) source,[])
-runCommand cmd source | questionActive source, cmd `elem` [Undo,Redo,Copy,Cut,Paste,SelectAll] = (questionEdit (composerCommandWith False cmd) source,[])
+runCommand cmd source | questionActive source, cmd `elem` [Undo,Redo,Copy,Cut,Paste,SelectAll] = (questionCommand cmd source,[])
 runCommand cmd source | not (problemsFocused source), composerActive source, cmd `elem` [Undo,Redo,Copy,Cut,Paste,SelectAll] = (composerCommand cmd source,[])
 runCommand Copy source | dialog source==Nothing,activeMarkdown source,maybe False (windowFocused source) (activeWindow source) =
   let text=case activeWindow source >>= windowMarkdown source of
@@ -2023,12 +2023,34 @@ questionEdit edit d=case chatQuestion d of
   Nothing -> d
   Just q -> let temporary=d {chatQuestion=Nothing,composerBuffer=questionBuffer q,composerSelection=questionSelection q,composerFocused=True}
                 changed=edit temporary
-                bounded=T.take 4096 (T.map (\c->if c `elem` ['\n','\r','\t'] then ' ' else c) (contents (composerBuffer changed)))
-                b=if bounded==contents (composerBuffer changed) then composerBuffer changed else newBuffer bounded
-                bound n=max 0 (min (T.length bounded) n)
+                b=composerBuffer changed
+                bound n=max 0 (min (bufferLength b) n)
                 sel=composerSelection changed
             in d {clipboard=clipboard changed,clipboardCode=clipboardCode changed,chatQuestion=Just q {questionChoice=Nothing,questionFocused=True,questionBuffer=b,
                 questionSelection=Selection (bound (anchor sel)) (bound (caret sel))}}
+
+-- Only insertion normalizes input. Empty creation and these bounded edits keep
+-- all history states single-line and at most 4096 characters, so navigation and
+-- Undo never need to scan or repair the existing draft.
+questionInsert :: Text -> Desktop -> Desktop
+questionInsert text=questionEdit $ \d->
+  let b=composerBuffer d; size=bufferLength b
+      (rawA,rawZ)=ordered (composerSelection d)
+      a=max 0 (min size rawA); z=max 0 (min size rawZ)
+      inserted=T.map (\c->if c `elem` ['\n','\r','\t'] then ' ' else c) (T.take (4096-a) text)
+      n=T.length inserted
+      tailStart=min size (z+max 0 (4096-a-n))
+      -- Preserve take 4096 (prefix<>inserted<>suffix), deleting the actual old
+      -- tail rather than the characters immediately after the insertion.
+      edits | tailStart<=z=[(a,size,inserted)]
+            | otherwise=[(a,z,inserted),(tailStart,size,"")]
+      changed | tailStart<size=either (const b) id (replaceRanges edits b)
+              | otherwise=replaceSelection (Selection a z) inserted b
+  in d {composerBuffer=changed,composerSelection=Selection (a+n) (a+n)}
+
+questionCommand :: Command -> Desktop -> Desktop
+questionCommand Paste d=questionInsert (clipboard d) d
+questionCommand cmd d=questionEdit (composerCommandWith False cmd) d
 
 questionInputStart :: Int -> ChatQuestion -> Int
 questionInputStart width q=columnOffset text (max 0 (displayColumn text (caret (questionSelection q))-max 1 (width-9)+1))
@@ -2050,6 +2072,12 @@ questionEvent event d=case chatQuestion d of
     V.EvKey V.KBackTab [] -> choose (-1) q
     V.EvMouseDown{} -> Nothing
     V.EvMouseUp{} -> Nothing
+    V.EvPaste bytes -> Just (either (const (questionEdit id d))
+      (\text->questionInsert (T.filter (\c->textInputChar c || c `elem` ['\n','\r','\t']) text) d) (TE.decodeUtf8' bytes),[])
+    V.EvKey (V.KChar c) mods | textInputChar c, null mods || mods==[V.MShift] -> Just (questionInsert (T.singleton c) d,[])
+    V.EvKey V.KEnter mods | V.MShift `elem` mods, all (`elem` [V.MCtrl,V.MShift]) mods -> Just (questionInsert " " d,[])
+    V.EvKey (V.KChar c) mods | effectiveBindings d==Nothing, toLower c=='v', V.MCtrl `elem` mods,
+      V.MAlt `notElem` mods, V.MMeta `notElem` mods -> Just (questionCommand Paste d,[])
     _ -> let temporary=d {chatQuestion=Nothing,composerBuffer=questionBuffer q,composerSelection=questionSelection q,composerFocused=True}
          in case composerEventWith False event temporary of
            Just (_,effects) | not (null effects) -> Just (d,[])
