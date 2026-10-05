@@ -107,6 +107,7 @@ checks=bracket temporary removePathForcibly $ \dir->withSidebarCommands $ \host-
   refresh host dir expanded
   edgeChecks dir
   recoveryChecks dir
+  recoveryPagingChecks
   budgetChecks dir
   putStrLn "shared sidebar checks passed"
 
@@ -279,6 +280,70 @@ recoveryChecks dir=withSidebarCommands $ \host->withRegistry $ \registry->do
     let moved=after {treeSelected=0,treeScroll=0}
         adopted=adoptProjection prepared moved
     check "projection adoption preserves later viewport and selection input" (treeSelected adopted==0 && treeScroll adopted==0)
+
+-- Recover across an actual Files continuation page and a second fresh scope.
+recoveryPagingChecks :: IO ()
+recoveryPagingChecks=bracket temporary removePathForcibly $ \base->do
+  let dir=base </> "files"; checkpoint=base </> "checkpoint"
+      name n="d"++replicate (3-length (show n)) '0'++show n
+      target=dir </> "d129" </> "inner" </> "target.hs"
+      blank=initialDesktop (100,30)
+  createDirectory dir
+  forM_ [0..129::Int] $ \n->createDirectory (dir </> name n)
+  createDirectory (dir </> "d129" </> "inner")
+  writeFile target "main = pure ()\n"
+  recovered<-withSidebarCommands $ \host->do
+    initial<-initializeSidebar host (installSidebar (emptySidebar dir 24 True) blank)
+    paged<-act host (activateTree False (atLabel "More…" initial) initial) >>= settle host
+    branch<-act host (activateTree True (atLabel "d129" paged) paged) >>= settle host
+    nested<-act host (activateTree True (atLabel "inner" branch) branch) >>= settle host
+    let selected=atLabel "target.hs" nested
+        positioned=nested {sideTree=Just (treeOf nested) {treeSelected=selected,treeScroll=selected}}
+    writeCheckpoint checkpoint positioned >>= right
+    readCheckpoint checkpoint blank >>= right
+  withSidebarCommands $ \host->do
+    restored<-initializeSidebar host recovered
+    check "recovery does not automatically chase Files pages" (not (any ((=="d129").P.infoLabel.rowInfo.snd) (visibleRows 0 32768 (treeOf restored))))
+    -- A visible branch may still await its bounded recovery batch. Its saved
+    -- expansion must survive checkpointing rather than losing to rowExpanded.
+    let boundary=restored {sideTree=Just (treeOf restored) {treeHints=case treeHints (treeOf restored) of
+          Just (SidebarHints hints selected top)->Just (SidebarHints (M.insert (dir </> "d000") True hints) selected top)
+          Nothing->error "missing pending recovery"}}
+    writeCheckpoint checkpoint boundary >>= right
+    pending<-readCheckpoint checkpoint blank >>= right
+    check "checkpoint merges current resources with unresolved hints" (case treeHints (treeOf pending) of
+      Just (SidebarHints hints _ _)->M.member (dir </> "d001") hints && M.lookup (dir </> "d000") hints==Just True && M.lookup (dir </> "d129") hints==Just True
+      _->False)
+    withSidebarCommands $ \freshHost->do
+      fresh<-initializeSidebar freshHost pending
+      let (continuation,_) = handleEvent (V.EvKey V.KEnd []) fresh
+      hydrated<-act freshHost (handleEvent (V.EvKey V.KEnter []) continuation) >>= settle freshHost
+      let tree=treeOf hydrated
+          resource index=P.infoResource . rowInfo =<< rowAt index tree
+      check "paging recovers the saved nested resource selection" (resource (treeSelected tree)==Just target)
+      check "paging recovers the saved top resource" (resource (treeScroll tree)==Just target)
+
+  withSidebarCommands $ \host->do
+    restored<-initializeSidebar host recovered
+    loading<-act host (activateTree False (atLabel "More…" restored) restored)
+    started<-tickSidebar host applyEffects loading
+    let (selected,_) = selectTreeRow (atLabel "d000" started) (treeOf started) started
+        scrolled=scrollTreeTo 5 (treeOf selected) selected
+    hydrated<-settle host scrolled
+    let tree=treeOf hydrated
+        resource index=P.infoResource . rowInfo =<< rowAt index tree
+    check "new selection wins over deferred recovery" (resource (treeSelected tree)==Just (dir </> "d000"))
+    check "new scroll wins over deferred recovery" (treeScroll tree==5)
+    check "new navigation retains unrelated saved expansion" (any ((==Just target).P.infoResource.rowInfo.snd) (visibleRows 0 32768 tree))
+  withSidebarCommands $ \host->do
+    restored<-initializeSidebar host recovered
+    let adjacent=dismissRecoveryBranch (dir </> "d12") (treeOf recovered)
+    check "collapse prefix preserves an adjacent branch" (case treeHints adjacent of Just (SidebarHints hints _ _)->M.member (dir </> "d120") hints && M.member (dir </> "d129") hints; _->False)
+    loading<-act host (activateTree False (atLabel "More…" restored) restored)
+    collapsed<-act host (activateTree False (atLabel "Files" loading) loading) >>= settle host
+    reopened<-act host (activateTree True (atLabel "Files" collapsed) collapsed) >>= settle host
+    paged<-act host (activateTree False (atLabel "More…" reopened) reopened) >>= settle host
+    check "explicit collapse prevents late recovery from reopening its subtree" (not (rowExpanded (maybe (error "late branch") id (rowAt (atLabel "d129" paged) (treeOf paged)))))
 
 -- Valid scoped roots fill the public bound; Files mounting must refuse safely.
 budgetChecks :: FilePath -> IO ()

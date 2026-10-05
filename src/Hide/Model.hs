@@ -3446,7 +3446,7 @@ installSidebar tree d=setTree (Just tree) d {problemsFocused=False}
 activateTree :: Bool -> Int -> Desktop -> (Desktop,[Effect])
 activateTree forceOpen index d=case sideTree d of
   Just tree | Just row<-rowAt index tree->
-    let chosen=tree {treeSelected=index,treeFocused=True}
+    let chosen=(case rowAction row of ActivateNode->dismissRecoveryAnchors tree; _->tree) {treeSelected=index,treeFocused=True}
         selected=d {sideTree=Just chosen,problemsFocused=False}
         expand cursor=let (next,request)=requestChildren (currentHit row chosen) cursor chosen
                       in (selected {sideTree=Just next},maybe [] (\value->[LoadTree value Plugin.HumanMenu]) request)
@@ -3455,7 +3455,7 @@ activateTree forceOpen index d=case sideTree d of
       RetryLoad->expand Nothing
       LoadNext cursor->expand (Just cursor)
       ActivateNode | Tree.infoBranch (rowInfo row)->case M.lookup (keyOf (rowHit row)) (treeNodes chosen) of
-        Just node | stateExpanded node && not forceOpen->(selected {sideTree=Just (collapseAt index chosen)},[])
+        Just node | stateExpanded node && not forceOpen->(selected {sideTree=Just (collapseAt index (maybe chosen (`dismissRecoveryBranch` chosen) (Tree.infoResource (rowInfo row))))},[])
                   | stateExpanded node->(selected,[])
                   | Loaded{}<-stateLoad node->(selected {sideTree=Just chosen {treeNodes=M.adjust (\value->value {stateExpanded=True}) (keyOf (rowHit row)) (treeNodes chosen),treeRevision=treeRevision chosen+1}},[])
         _->expand Nothing
@@ -3493,14 +3493,18 @@ moveTree :: Int -> Sidebar -> Desktop -> (Desktop,[Effect])
 moveTree delta tree d = selectTreeRow (treeSelected tree+delta) tree d
 
 selectTreeRow :: Int -> Sidebar -> Desktop -> (Desktop,[Effect])
-selectTreeRow i tree d = (d {sideTree=Just tree {treeSelected=chosen,treeScroll=scroll}},[])
-  where chosen=max 0 (min (M.size (treeRows tree)-1) i)
+selectTreeRow i tree d = (d {sideTree=Just intent {treeSelected=chosen,treeScroll=scroll}},[])
+  where intent=case rowAt chosen tree of
+          Just row | ActivateNode<-rowAction row->dismissRecoveryAnchors tree
+          _->tree
+        chosen=max 0 (min (M.size (treeRows tree)-1) i)
         visible=max 1 (treeContentRows d)
         scroll=max 0 (min chosen (max (treeScroll tree) (chosen-visible+1)))
 
 collapseTree :: Sidebar -> Desktop -> (Desktop,[Effect])
 collapseTree tree d=case rowAt (treeSelected tree) tree of
-  Just row | rowExpanded row->(d {sideTree=Just (collapseAt (treeSelected tree) tree)},[])
+  Just row | rowExpanded row->let chosen=dismissRecoveryAnchors tree
+    in (d {sideTree=Just (collapseAt (treeSelected tree) (maybe chosen (`dismissRecoveryBranch` chosen) (Tree.infoResource (rowInfo row))))},[])
   Just row | Just node<-M.lookup (keyOf (rowHit row)) (treeNodes tree), Just parent<-stateParent node->
     let ancestor=M.lookup parent (treeNodes tree) >>= (\value->M.lookupIndex (stateAddress value) (treeRows tree))
     in maybe (d,[]) (\index->selectTreeRow index tree d) ancestor
@@ -3513,7 +3517,7 @@ treeScrollLimit :: Desktop -> Sidebar -> Int
 treeScrollLimit d tree = max 0 (M.size (treeRows tree)-treeContentRows d)
 
 scrollTreeTo :: Int -> Sidebar -> Desktop -> Desktop
-scrollTreeTo position tree d = d {sideTree=Just tree {treeScroll=max 0 (min (treeScrollLimit d tree) position)}}
+scrollTreeTo position tree d = d {sideTree=Just (dismissRecoveryScroll tree) {treeScroll=max 0 (min (treeScrollLimit d tree) position)}}
 
 treeMouse :: Int -> Int -> V.Button -> Sidebar -> Desktop -> (Desktop,[Effect])
 treeMouse x y button tree d = case button of

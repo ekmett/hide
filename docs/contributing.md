@@ -554,7 +554,12 @@ target. Moving that transport into the typed reply path is a separate slice.
 Recovery stores bounded path/expansion/viewport hints, never live provider handles.
 Selection and top-row indices are remapped after filtering resource entries.
 It restores targets reachable through initial directory pages; hints beyond those
-pages wait for interactive paging.
+pages remain pending until interactive paging makes them reachable. Reachable
+saved expansions are restored through the existing projection worker in bounded
+batches; recovery never automatically follows a More cursor. New selection or
+scrolling replaces the corresponding saved viewport intent, and an explicit
+collapse discards that branch's deferred expansions. Checkpoints combine current
+resource rows with unresolved hints, so another restart does not lose them.
 `SidebarCheck` exercises Files and an independently declared test provider through
 actual keyboard input, delayed/collapsed loads, paging, retirement, privacy and
 filesystem observation refresh. Other domain providers remain subsequent work.
