@@ -166,7 +166,11 @@ checks=do
   check "dialog remapped clipboard does not force background buffers" (clipboard (fst (key (V.KChar 'j') [V.MMeta,V.MShift] guarded))=="safe" && dialogText (fst (key (V.KChar 'k') [V.MMeta,V.MShift] guarded {clipboard="replacement"}))=="replacement")
   check "dialog remap cannot admit an agent-owned sensitive control" (not (guestKeyAllowed editing {dialog=fmap (\dg->dg {purpose=AgentDialog "settings"}) (dialog editing)} (V.KChar 'j') [V.MMeta,V.MShift]))
   check "dialog labels and inspection use its effective context" (menuShortcut editing (MenuItem "Copy" "Cmd+C" Copy)=="⇧⌘J" && any ((==" ⇧⌘K Paste").fst) (statusHints editing) && case snd (runCommand InspectBindings editing) of [InspectKeyBindings (Just (MacPlatform,DialogKeys)) (Just table)]->bindingKeys table Copy==["Cmd+Shift+J"]; _->False)
-  check "dialog projection omits actions unavailable to its focused control" (all (\(_,name)->name `elem` ["hide.dialog.focus-next","hide.dialog.focus-previous"]) (focusedBindingChords editing {dialog=fmap (\dg->dg {focus=1}) (dialog editing)}) && not (any ((=="hide.file.save").snd) (focusedBindingChords editing)))
+  let buttonCommands=map snd (focusedBindingChords editing {dialog=fmap (\dg->dg {focus=1}) (dialog editing)})
+  check "focused dialog buttons project controls without field or source editing"
+    (all (`elem` buttonCommands) ["hide.dialog.accept","hide.dialog.cancel"] &&
+     not (any (`elem` buttonCommands) ["hide.edit.copy","hide.edit.cut","hide.edit.paste","hide.file.save"]) &&
+     not (any ((=="hide.file.save").snd) (focusedBindingChords editing)))
   check "dialog cannot bind a background source command" (either (const True) (const False) (platformBindings [] TerminalPlatform (M.singleton "dialog" (M.singleton "hide.file.save" ["Ctrl+Shift+J"]))))
   check "dialog field text and navigation retain their owner" (dialogText (fst (key (V.KChar 'ø') [] editing))=="ø" && dialog (fst (key V.KEsc [] editing))==Nothing)
   let dialogDefaults=either (error . show) id (configuredBindings [] M.empty)
