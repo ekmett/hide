@@ -182,7 +182,8 @@ deletion use an editable profile, including WordStar Ctrl+A/F aliases.
 Ctrl+K/Ctrl+Q block grammar remains fixed. Dialog editing/search actions are
 configurable for existing editable TextArea controls. Dialog next/previous focus
 and accept/cancel commands preserve the existing field, dropdown and button
-owners. Single-line Input editing remains fixed. Published runtime menu contributions
+owners. Caret-only Input movement and adjacent deletion use the editable profile;
+Ctrl+U and other field controls retain their existing grammar. Published runtime menu contributions
 use that same configuration and exact registration lifetime; see the
 [plugin design](../design/haskell-plugins.md#commands-menus-and-bindings).
 
