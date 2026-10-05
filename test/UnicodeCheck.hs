@@ -34,6 +34,45 @@ checks = do
     (graphemes fragment==segments && T.concat (graphemes fragment)==fragment)
   check "stateful iterator retains parity across yielded flag pairs"
     (graphemes "🇦🇧🇨🇩🇪"==["🇦🇧","🇨🇩","🇪"])
+  let oversized="a"<>T.replicate 70 "\x301"<>"Z"
+      fragments=graphemes oversized
+  check "display fragments are bounded and retain every original byte"
+    (all (\g->T.length g<=32 && TU.lengthWord8 g<=128) fragments && T.concat fragments==oversized)
+  let exact="a"<>T.replicate 31 "\x301"
+      excess=exact<>"\x301"
+      tagged="🏴"<>T.replicate 65 "\xe0061"<>"\xe007f"
+      joined=T.intercalate "\x200d" (replicate 40 "👩")
+  check "a complete cap-sized cluster retains normal presentation"
+    (map itemDisplayText (displayItems exact)==[exact] && not (any itemOverflow (displayItems exact)))
+  forM_ [excess,oversized,tagged<>"🇦🇧🇨",joined<>"Z"] $ \text->do
+    let items=displayItems text
+        widths=sum (map itemWidth items)
+    check "overflow fragments retain original bytes with bounded visible fallback"
+      (T.concat (map itemSourceText items)==text && all (\i->T.length (itemSourceText i)<=32 && TU.lengthWord8 (itemSourceText i)<=128) items &&
+       all (\i->not (itemOverflow i) || itemDisplayText i=="�" && itemWidth i==1) items)
+    check "source columns and numeric seek agree across overflow fragments"
+      (sourceTextWidth text==displayColumn text (T.length text) && sourceTextWidth text==widths &&
+       all (\column->let (char,_,col,pending)=sourceGraphemesFrom column text in columnOffset text column==char &&
+                       col==displayColumn text char && T.concat (map itemSourceText pending)==T.drop char text) [0..widths])
+  check "overflow ends at natural boundary without poisoning the next cluster"
+    (map itemDisplayText (displayItems oversized)==["�","�","�","Z"] &&
+     map itemDisplayText (displayItems (tagged<>"🇦🇧🇨"))==["�","�","�","🇦🇧","🇨"])
+  let overflowBase=addDocument Nothing (newBuffer oversized) (initialDesktop (80,25))
+      copied=fst (runCommand Copy (modifyActive (\w->w {selection=Selection 0 (T.length oversized)}) overflowBase))
+      deleted=fst (handleEvent (V.EvKey V.KDel []) overflowBase)
+  check "overflow presentation preserves source copy and undo bytes"
+    (clipboard copied==oversized && activeText deleted==T.drop 32 oversized && activeText (fst (runCommand Undo deleted))==oversized)
+  let emitted=cellRowsForPic (V.picForImage (textImage V.defAttr oversized)) (4,1)
+      shown=T.concat [case span of CellText _ t->t; CellGlyph _ t _ _ _->t; CellScript _ t _ _->t | span<-toList (emitted Vec.! 0)]
+  check "common visible grid sends bounded fallback glyphs instead of original overflow"
+    (shown=="���Z")
+  let longOverflow="a"<>T.replicate 100000 "\x301"
+  _<-evaluate (T.length longOverflow)
+  firstBefore<-getAllocationCounter
+  firstLength<-evaluate (sum (map (T.length . itemSourceText) (take 1 (displayItems longOverflow))))
+  firstAfter<-getAllocationCounter
+  check "the first overflow fragment does not prepare its unconsumed tail"
+    (firstLength==32 && firstBefore-firstAfter<262144)
   let longPrefix=T.replicate 100000 "é"
   _<-evaluate (T.length longPrefix)
   prefixBefore<-getAllocationCounter
@@ -41,27 +80,27 @@ checks = do
   prefixAfter<-getAllocationCounter
   check "a grapheme prefix does not prepare the unconsumed UTF8 tail"
     (prefixCount==3 && prefixBefore-prefixAfter<262144)
-  let sourceReference goal text=go 0 0 0 (graphemes text)
+  let sourceReference goal text=go 0 0 0 (displayItems text)
         where
           go char byte col []=(char,byte,col,[])
           go char byte col pending@(glyph:rest)=
-            let advance=sourceGlyphAdvance col glyph
+            let advance=sourceItemAdvance col glyph
             in if col+advance>max 0 goal then (char,byte,col,pending)
-               else go (char+T.length glyph) (byte+TU.lengthWord8 glyph) (col+advance) rest
+               else go (char+T.length (itemSourceText glyph)) (byte+TU.lengthWord8 (itemSourceText glyph)) (col+advance) rest
       palette=["a","é","界","\t","\r","\0","e\x301","─\x301","👩🏽\x200d\&💻","🇦","🇧","\x301"]
       generated seed=T.concat [palette!!(n `mod` length palette) | n<-take 24 (iterate (\n->(n*73+19) `mod` 65521) seed)]
       sourceCases=["", "a\tb", "\rabc", "ab\r\ncd", "a\x301界x", "🇦🇧🇨🇩🇪"]++map generated [1..80]
   forM_ sourceCases $ \text->forM_ [-1..90] $ \column->do
     let actual@(char,byte,_,suffix)=sourceGraphemesFrom column text
     check "numeric source seek preserves the original stateful grapheme suffix"
-      (actual==sourceReference column text && T.concat suffix==TU.dropWord8 byte text &&
+      (actual==sourceReference column text && T.concat (map itemSourceText suffix)==TU.dropWord8 byte text &&
         T.length (TU.takeWord8 byte text)==char)
   forM_ ["", "a\tb", "\rabc", "a\x301界x", "👩🏽\x200d\&💻界", "🇦🇧", "a\r\n"] $ \text->
     check "cached source extent agrees with ordinary display columns"
       (sourceTextWidth text==displayColumn text (T.length text))
   beforeSeek<-getAllocationCounter
   seekCount<-evaluate (let (char,byte,col,suffix)=sourceGraphemesFrom 50000 longPrefix
-                       in char+byte+col+sum (map T.length (take 3 suffix)))
+                       in char+byte+col+sum (map (T.length . itemSourceText) (take 3 suffix)))
   afterSeek<-getAllocationCounter
   check "numeric source seek does not allocate discarded prefix fragments"
     (seekCount==200003 && beforeSeek-afterSeek<262144)

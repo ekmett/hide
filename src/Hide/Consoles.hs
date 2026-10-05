@@ -187,7 +187,7 @@ showConsole console desktop = case M.lookup bid (buffers desktop) of
         text = T.pack (map fst styled)
         -- Terminal snapshots only produce TerminalStyle, never script hints.
         rendered = if documentHighlight original == styled then original else original
-          {documentBuffer=newBuffer text,documentHighlight=styled,documentHasScripts=False}
+          {documentBuffer=newBuffer text,documentHighlight=styled,documentHasLayoutMetadata=False}
         document = rendered {documentWidth=snapshotColumns snapshot,documentCursorVisible=snapshotCursor snapshot /= Nothing}
         buffer = documentBuffer document
         count = bufferLength buffer

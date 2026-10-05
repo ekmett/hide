@@ -18,9 +18,9 @@ import Data.Foldable (toList)
 import Data.Maybe (fromMaybe, listToMaybe)
 import qualified Data.Text as T
 import qualified Skylighting as S
-import Hide.Unicode (graphemes, clusterWidth)
+import Hide.Unicode (displayItems, itemSourceText, itemWidth,sourceGlyphAdvance)
 import Hide.Buffer (columnOffset, displayColumn, nextCharacter)
-import Hide.Syntax (Style(..), highlightFor)
+import Hide.Syntax (Style(..), presentationItems, styleOverflowExtent, highlightFor)
 
 type Styled = [(Char,Style)]
 newtype Inline = Inline (Seq.Seq (Char,Style)) deriving (Show, Semigroup, Monoid)
@@ -111,7 +111,7 @@ textOf :: Styled -> T.Text
 textOf = T.pack . map fst
 
 columns :: Styled -> Int
-columns chars = let text = textOf chars in displayColumn text (T.length text)
+columns chars=foldl (\col (text,overflow)->col+if overflow then 1 else sourceGlyphAdvance col text) 0 (presentationItems (textOf chars) chars)
 
 trim :: Blocks -> Blocks
 trim (Blocks blocks) = Blocks (reverse (dropWhile gap (reverse blocks)))
@@ -161,9 +161,12 @@ renderTable width aligns header body
     rowLines isHeader cells=
       let wrapped=zipWith wrapWords sizes (take count (cells++repeat []))
           height=maximum (1:map length wrapped)
-          line j=paint Comment "│"++concat [paint Plain " "++pad alignment n (if isHeader then [(c,case s of LinkStyle url _->LinkStyle url (Heading 2); _->Heading 2) | (c,s)<-part] else part)++paint Comment " │"
+          line j=paint Comment "│"++concat [paint Plain " "++pad alignment n (if isHeader then [(c,headerStyle s) | (c,s)<-part] else part)++paint Comment " │"
             | (n,alignment,parts)<-zip3 sizes (aligns++repeat DefaultAlignedCol) wrapped, let part=case drop j parts of x:_->x; _->[]]
       in map line [0..height-1]
+    headerStyle (OverflowFragment n style)=OverflowFragment n (headerStyle style)
+    headerStyle (LinkStyle url _)=LinkStyle url (Heading 2)
+    headerStyle _=Heading 2
     pad alignment n chars=paint Plain (T.replicate left " ")++chars++paint Plain (T.replicate (extra-left) " ")
       where extra=max 0 (n-columns chars)
             left=case alignment of RightAlignedCol->extra; CenterAlignedCol->extra `div` 2; _->0
@@ -175,7 +178,7 @@ stripFinalNewline :: Styled -> Styled
 stripFinalNewline chars = case reverse chars of ('\n',_):rest -> reverse rest; _ -> chars
 
 wrapWords :: Int -> Styled -> [Styled]
-wrapWords width = go [] . wordsStyled
+wrapWords width = go [] . wordsStyled . boundedStyles
   where
     go current [] = [current]
     go [] (word:rest)
@@ -184,34 +187,50 @@ wrapWords width = go [] . wordsStyled
     go current remaining@(word:rest)
       | columns current + 1 + columns word <= width = go (current ++ [(' ',Plain)] ++ word) rest
       | otherwise = current : go [] remaining
-    wordsStyled chars = case dropWhile (isSpace . fst) chars of
-      [] -> []
-      remaining -> let (word,rest) = break (isSpace . fst) remaining in word : wordsStyled rest
+    wordsStyled=wordsOf . parts
+    wordsOf pending=case dropWhile whitespace pending of
+      []->[]
+      remaining->let (word,rest)=break whitespace remaining in concat word:wordsOf rest
+    whitespace part=all (isSpace . fst) part && all ((==Nothing) . styleOverflowExtent . snd) part
+
+-- Capture overflow boundaries before any operation introduces row breaks or
+-- trims whitespace. Each part remains atomic, including space + combining runs.
+boundedStyles :: Styled -> Styled
+boundedStyles chars=concat (zipWith mark (presentationItems (textOf chars) chars) (parts chars))
+  where
+    mark (_,True) ((c,style):rest)
+      | styleOverflowExtent style==Nothing=(c,OverflowFragment (1+length rest) style):rest
+    mark _ part=part
+
+parts :: Styled -> [Styled]
+parts chars=go (presentationItems (textOf chars) chars) chars
+  where
+    go [] _=[]
+    go ((text,_):rest) remaining=let (part,after)=splitAt (T.length text) remaining in part:go rest after
 
 wrapExact :: Int -> Styled -> [Styled]
-wrapExact width chars = go (textOf chars) chars
+wrapExact width chars=go [] 0 (parts (boundedStyles chars))
   where
-    go _ [] = [[]]
-    go text remaining =
-      let offset = max (nextCharacter text 0) (columnOffset text width)
-          (part,rest) = splitAt offset remaining
-          (marks,after) = span (\(c,_) -> displayColumn (T.singleton c) 1 == 0) rest
-          row = part ++ marks
-      in row : [line | not (null after), line <- go (T.drop (length row) text) after]
+    go current _ []=[concat (reverse current)]
+    go current col pending@(part:rest)
+      | not (null current) && col+advance>width=concat (reverse current):go [] 0 pending
+      | otherwise=go (part:current) (col+advance) rest
+      where advance=columns part
 
 expandTabs :: Styled -> Styled
-expandTabs chars = go 0 (graphemes (textOf chars)) chars
+expandTabs chars = go 0 (displayItems (textOf chars)) chars
   where
     go _ [] _=[]
-    go col (g:gs) remaining = expanded ++ go next gs rest
+    go col (item:gs) remaining = expanded ++ go next gs rest
       where
+        g=itemSourceText item
         (part,rest)=splitAt (T.length g) remaining
         style=case part of (_,s):_->s; _->Plain
         count=8-col `mod` 8
         expanded=if g=="\t" then replicate count (' ',style) else part
         next | g=="\n"=0
              | g=="\t"=col+count
-             | otherwise=col+clusterWidth g
+             | otherwise=col+itemWidth item
 
 shellBlock :: T.Text -> Bool
 shellBlock info = case T.words (T.toLower info) of

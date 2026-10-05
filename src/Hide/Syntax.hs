@@ -5,7 +5,7 @@
 -- styles. A tokenizer result is accepted only when it preserves the original
 -- characters exactly. Link and bubble annotations remain in the styled stream
 -- so later layout can retain interaction metadata without reparsing text.
-module Hide.Syntax (Style(..), Grapheme, graphemeText, Sigils(..), sourceSigilsWindow, SourceRow, SourceRange, prepareSourceRow, plainSourceRow, sourceRowText, sourceRowRanges, sourceRangeCharStart, sourceRangeCharEnd, sourceRangeByteStart, sourceRangeByteEnd, sourceRangeStyle, sourceRangeText, sourceStylesAt, styleScript, fontTraits, sectionTitle, highlight, highlightFor, bubbleTile, linkSpans) where
+module Hide.Syntax (Style(..), Grapheme, graphemeText, graphemeDisplayText, Sigils(..), sourceSigilsWindow, SourceRow, SourceRange, prepareSourceRow, plainSourceRow, sourceRowText, sourceRowRanges, sourceRangeCharStart, sourceRangeCharEnd, sourceRangeByteStart, sourceRangeByteEnd, sourceRangeStyle, sourceRangeText, sourceStylesAt, presentationItems, styleOverflowExtent, styleLayoutMetadata, styleScript, fontTraits, sectionTitle, highlight, highlightFor, bubbleTile, linkSpans) where
 
 import Data.List (intercalate)
 import qualified Data.List as List
@@ -14,12 +14,12 @@ import Data.Word (Word32)
 import qualified Data.Text as T
 import qualified Data.Text.Unsafe as TU
 import qualified Data.Vector as V
-import Hide.Unicode (graphemes,clusterWidth,sourceGraphemesFrom,sourceGlyphAdvance,Script)
+import Hide.Unicode (DisplayItem,itemScalarCount,itemOverflow,itemSourceText,itemDisplayText,itemWidth,sourceGraphemesFrom,sourceItemAdvance,displayItems,Script)
 import qualified Skylighting as S
 import System.FilePath (takeFileName)
 
 -- | Token color intent plus nested prose, link, bubble or terminal annotations.
-data Style = ScriptStyle !Script Style | SectionStyle Int Style | BoldStyle Style | ItalicStyle Style | LinkStyle T.Text Style | Plain | Heading Int | CodeStyle Bool Style | ProseStyle Style | Keyword | Comment | Literal | Number | Constructor | Pragma | BubbleStyle Bool Style | BubbleText Int Bool Style | TerminalStyle Word32 Word32 Word32 deriving (Eq,Show)
+data Style = OverflowFragment !Int Style | ScriptStyle !Script Style | SectionStyle Int Style | BoldStyle Style | ItalicStyle Style | LinkStyle T.Text Style | Plain | Heading Int | CodeStyle Bool Style | ProseStyle Style | Keyword | Comment | Literal | Number | Constructor | Pragma | BubbleStyle Bool Style | BubbleText Int Bool Style | TerminalStyle Word32 Word32 Word32 deriving (Eq,Show)
 
 -- | Original source row and worker-prepared style ranges. Styling never changes
 -- character positions; range boundaries also name complete UTF8 codepoints.
@@ -94,8 +94,14 @@ sourceStylesAt row offset=concat
   [replicate (sourceRangeCharEnd range-max offset (sourceRangeCharStart range)) (sourceRangeStyle range)
   | range<-V.toList (sourceRowRanges row),sourceRangeCharEnd range>offset]
 
--- | One complete source grapheme, borrowed directly from the original row.
-newtype Grapheme = Grapheme { graphemeText :: T.Text } deriving (Eq,Show)
+-- | One bounded source display item, borrowed from the original row.
+-- Normal graphemes stay complete; capped fragments keep separate display text.
+newtype Grapheme = Grapheme DisplayItem deriving (Eq,Show)
+
+graphemeText :: Grapheme -> T.Text
+graphemeText (Grapheme item)=itemSourceText item
+graphemeDisplayText :: Grapheme -> T.Text
+graphemeDisplayText (Grapheme item)=itemDisplayText item
 
 -- | Visible source display stream. Each character in ConsChars independently
 -- occupies one cell; ConsSigil retains one complete exceptional grapheme. Both
@@ -107,7 +113,7 @@ data Sigils
   | ConsSigil {-# UNPACK #-} !Grapheme {-# UNPACK #-} !Style {-# UNPACK #-} !Int !Sigils
   | Nil
 
--- | Prepare only complete graphemes overlapping a display-column window.
+-- | Prepare bounded display items overlapping a display-column window.
 -- Returns the original character and display-column start of the first fragment.
 -- Translation/cropping may hide a half glyph; its source fragment stays complete.
 -- Tab advances use absolute columns. Styling is assigned after segmentation.
@@ -127,22 +133,22 @@ sourceSigilsWindow requested width row
       | col>=right=Nil
       | otherwise=case pending of
           []->Nil
-          glyph:rest->emit col char byte current glyph (T.length glyph) (sourceGlyphAdvance col glyph) rest
+          glyph:rest->emit col char byte current glyph (itemScalarCount glyph) (sourceItemAdvance col glyph) rest
     emit col char byte current glyph n advance rest=
       let active=dropWhile ((<=char).sourceRangeCharEnd) current
           style=case active of range:_->sourceRangeStyle range; _->Plain
-          endByte=byte+TU.lengthWord8 glyph
+          endByte=byte+TU.lengthWord8 (itemSourceText glyph)
           endChar=char+n
-      in if n==1 && advance==1 && T.all (\c->c>=' ' && c/='\DEL') glyph then
+      in if not (itemOverflow glyph) && n==1 && advance==1 && T.all (\c->c>=' ' && c/='\DEL') (itemSourceText glyph) then
            let limit=case active of range:_->sourceRangeCharEnd range; _->maxBound
                (finishChar,finishByte,after)=gather limit (col+1) endChar endByte rest
            in ConsChars (slice byte finishByte) style (build (col+finishChar-char) finishChar finishByte active after)
-         else ConsSigil (Grapheme (slice byte endByte)) style advance (build (col+advance) endChar endByte active rest)
+         else ConsSigil (Grapheme glyph) style advance (build (col+advance) endChar endByte active rest)
     gather limit !col !char !byte pending
       | char>=limit || col>=right=(char,byte,pending)
       | otherwise=case pending of
-          glyph:rest | T.length glyph==1,clusterWidth glyph==1,T.all (\c->c>=' ' && c/='\DEL') glyph->
-            gather limit (col+1) (char+1) (byte+TU.lengthWord8 glyph) rest
+          glyph:rest | not (itemOverflow glyph),itemScalarCount glyph==1,itemWidth glyph==1,T.all (\c->c>=' ' && c/='\DEL') (itemSourceText glyph)->
+            gather limit (col+1) (char+1) (byte+TU.lengthWord8 (itemSourceText glyph)) rest
           _->(char,byte,pending)
 
 highlight :: T.Text -> [(Char,Style)]
@@ -186,6 +192,7 @@ bubbleTile graphical n
 linkSpans :: [(Char,Style)] -> [(Int,Int,T.Text)]
 linkSpans = reverse . snd . List.foldl' collect (0,[])
   where
+    target (OverflowFragment _ s)=target s
     target (SectionStyle _ s)=target s
     target (BoldStyle s)=target s
     target (ItalicStyle s)=target s
@@ -201,9 +208,51 @@ linkSpans = reverse . snd . List.foldl' collect (0,[])
         (start,end,old):rest | end==offset && url==old -> (start,offset+1,url):rest
         _->(offset,offset+1,url):found)
 
+-- | Captured scalar extent of a capped presentation fragment, at its first
+-- character. Wrapping retains the marker and original characters together.
+styleOverflowExtent :: Style -> Maybe Int
+styleOverflowExtent (OverflowFragment n _)=Just n
+styleOverflowExtent (ScriptStyle _ s)=styleOverflowExtent s
+styleOverflowExtent (SectionStyle _ s)=styleOverflowExtent s
+styleOverflowExtent (BoldStyle s)=styleOverflowExtent s
+styleOverflowExtent (ItalicStyle s)=styleOverflowExtent s
+styleOverflowExtent (LinkStyle _ s)=styleOverflowExtent s
+styleOverflowExtent (CodeStyle _ s)=styleOverflowExtent s
+styleOverflowExtent (ProseStyle s)=styleOverflowExtent s
+styleOverflowExtent (BubbleStyle _ s)=styleOverflowExtent s
+styleOverflowExtent (BubbleText _ _ s)=styleOverflowExtent s
+styleOverflowExtent _=Nothing
+
+-- | Cached admission for geometry metadata; inspecting styled payloads belongs
+-- to preparation, never the render/input owner.
+styleLayoutMetadata :: Style -> Bool
+styleLayoutMetadata s=styleScript s/=Nothing || styleOverflowExtent s/=Nothing
+
+-- | Borrow bounded presentation items, respecting captured overflow extents
+-- after wrapping. Fresh Unicode segmentation cannot recover a fragment's GB11
+-- context, so annotated fragments consume their exact original scalar range.
+-- Ordinary items retain the shared stateful cursor; no source bytes are changed.
+presentationItems :: T.Text -> [(Char,Style)] -> [(T.Text,Bool)]
+presentationItems text=go text (map (\i->(itemSourceText i,itemOverflow i)) (displayItems text))
+  where
+    go _ [] _=[]
+    go remaining pending@((glyph,overflow):rest) styles=
+      case styles of
+        (_,style):_ | Just n<-styleOverflowExtent style,n>0,n<=32,
+                      let original=T.take n remaining,T.length original==n ->
+          (original,True):go (T.drop n remaining) (skip n pending) (drop n styles)
+        _->let n=T.length glyph in (glyph,overflow):go (T.drop n remaining) rest (drop n styles)
+    skip _ []=[]
+    skip n pending@((glyph,overflow):rest)
+      | n<=0=pending
+      | n>=size=skip (n-size) rest
+      | otherwise=(T.drop n glyph,overflow):rest
+      where size=T.length glyph
+
 -- | Outermost explicit script annotation, preserved through existing color,
 -- font, link and bubble wrappers. A script hint never changes source characters.
 styleScript :: Style -> Maybe Script
+styleScript (OverflowFragment _ style)=styleScript style
 styleScript (ScriptStyle script _)=Just script
 styleScript (SectionStyle _ style)=styleScript style
 styleScript (BoldStyle style)=styleScript style
@@ -219,6 +268,7 @@ styleScript _=Nothing
 -- Combining bold and italic is idempotent; wrapper order does not affect traits.
 -- Script geometry is extracted separately by styleScript, not a paint trait.
 fontTraits :: Style -> (Style,Bool,Bool)
+fontTraits (OverflowFragment _ style)=fontTraits style
 fontTraits (ScriptStyle _ style)=fontTraits style
 fontTraits (SectionStyle level style)=wrap (SectionStyle level) style
 fontTraits (BoldStyle style)=let (base,_,italic)=fontTraits style in (base,True,italic)
@@ -236,6 +286,7 @@ wrap constructor style=let (base,bold,italic)=fontTraits style in (constructor b
 -- table headers. Nested font/link/bubble wrappers preserve section ownership.
 sectionTitle :: Style -> Bool
 sectionTitle SectionStyle{}=True
+sectionTitle (OverflowFragment _ style)=sectionTitle style
 sectionTitle (ScriptStyle _ style)=sectionTitle style
 sectionTitle (BoldStyle style)=sectionTitle style
 sectionTitle (ItalicStyle style)=sectionTitle style

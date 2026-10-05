@@ -153,12 +153,12 @@ parseRemoteFrame metadata rows = parseEither (withObject "frame metadata" $ \o -
     foldRuns cols y paint at acc (value@(Array fields):rest) | Vec.length fields==3 = do
       (text,natural,mode) <- parseJSON value :: Parser (T.Text,Int,T.Text)
       script <- case mode of "sup" -> pure Superscript; "sub" -> pure Subscript; _ -> fail "Invalid script placement"
-      unless (not (T.null text) && T.length text<=4096 && not (T.any (\c -> c<' ' || c=='\DEL') text) &&
+      unless (not (T.null text) && T.length text<=32 && TU.lengthWord8 text<=128 && not (T.any (\c -> c<' ' || c=='\DEL') text) &&
         graphemes text==[text] && natural `elem` [1,2] && clusterWidth text==natural && at<cols) (fail "Invalid script grapheme")
       foldRuns cols y paint (at+1) (RemoteScript at y paint text natural script:acc) rest
     foldRuns cols y paint at acc (value:rest) = do
       (text,w,stretched,start,shown) <- parseJSON value :: Parser (T.Text,Int,Bool,Int,Int)
-      unless (not (T.null text) && T.length text<=4096 && not (T.any (\c -> c<' ' || c=='\DEL') text) && graphemes text==[text] && w>0 && w<=2 &&
+      unless (not (T.null text) && T.length text<=32 && TU.lengthWord8 text<=128 && not (T.any (\c -> c<' ' || c=='\DEL') text) && graphemes text==[text] && w>0 && w<=2 &&
         start>=0 && start<w && shown>0 && shown<=w-start && shown<=cols-at &&
         (if stretched then w==2 && clusterWidth text<2 else clusterWidth text==w)) (fail "Invalid grapheme")
       foldRuns cols y paint (at+shown) (RemoteGlyph at y paint text w start shown:acc) rest

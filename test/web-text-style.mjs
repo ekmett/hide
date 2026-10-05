@@ -59,3 +59,12 @@ for(const run of [['',1,'sup'],['AB',1,'sup'],['A',0,'sup'],['A',3,'sub'],['A',1
 }
 for(const flags of [4,32,-1])assert.throws(()=>vm.runInContext(`decodeRows([[0,[[0,0,0,${flags},['A']]]]])`,context));
 console.log('Browser script runs preserve natural atlas size, one-cell advance and paint; invalid runs rejected');
+
+const capTag='🏴'+String.fromCodePoint(0xe0061).repeat(30)+String.fromCodePoint(0xe007f);
+for(const text of ['e'+'\u0301'.repeat(31),capTag])for(const run of [[text,2,false,0,2],[text,2,'sup']]){
+ assert.doesNotThrow(()=>vm.runInContext(`decodeRows([[0,[[0,0,0,0,[${JSON.stringify(run)}]]]]])`,context));
+}
+for(const text of ['e'+'\u0301'.repeat(32),capTag+String.fromCodePoint(0xe0061),'\ud800','\n'])for(const run of [[text,1,false,0,1],[text,1,'sup']]){
+ assert.throws(()=>vm.runInContext(`decodeRows([[0,[[0,0,0,0,[${JSON.stringify(run)}]]]]])`,context));
+}
+console.log('Browser glyph boundary accepts32scalars/surrogate pairs and refuses overflow or malformed text');

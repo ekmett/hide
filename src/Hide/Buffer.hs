@@ -38,7 +38,7 @@ import Control.Monad (unless)
 import qualified Data.FingerTree as FT
 import Graphics.Vty (safeWcwidth)
 import Hide.BufferView (ViewProjection, buildViewProjection, forceViewProjection)
-import Hide.Unicode (graphemes, clusterWidth)
+import Hide.Unicode (graphemes, displayItems, itemSourceText, sourceItemAdvance)
 
 data LineMeasure = LineMeasure
   { characterCount :: !Int, lineCount :: !Int, newLineCount :: !Int, deletedLineCount :: !Int
@@ -722,29 +722,22 @@ lineAt :: Text -> Int -> Text
 lineAt t row = case drop (max 0 row) (textLines t) of x:_ -> T.dropWhileEnd (== '\r') x; [] -> ""
 
 displayColumn :: Text -> Int -> Int
-displayColumn t p = go 0 0 (graphemes t)
+displayColumn t p = go 0 0 (displayItems t)
   where
     go _ col [] = col
     go offset col (g:gs)
-      | offset+T.length g>p = col
-      | otherwise = go (offset+T.length g) (col+width col g) gs
-    width col "\t"=8-col `mod` 8
-    width _ "\r"=0
-    width _ g | T.any (<' ') g=1
-              | otherwise=clusterWidth g
+      | offset+T.length (itemSourceText g)>p = col
+      | otherwise = go (offset+T.length (itemSourceText g)) (col+sourceItemAdvance col g) gs
 
 columnOffset :: Text -> Int -> Int
-columnOffset t goal = go 0 0 (graphemes t)
+columnOffset t goal = go 0 0 (displayItems t)
   where
     go i _ [] = i
     go i col (g:gs)
       | col>=goal && width>0 = i
       | col+width>goal = i
-      | otherwise = go (i+T.length g) (col+width) gs
-      where width | g=="\t"=8-col `mod` 8
-                  | g=="\r"=0
-                  | T.any (<' ') g=1
-                  | otherwise=clusterWidth g
+      | otherwise = go (i+T.length (itemSourceText g)) (col+width) gs
+      where width=sourceItemAdvance col g
 
 combining :: Char -> Bool
 combining c = generalCategory c `elem` [NonSpacingMark, SpacingCombiningMark, EnclosingMark]
