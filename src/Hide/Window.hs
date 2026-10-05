@@ -40,7 +40,7 @@ import System.Environment (lookupEnv)
 import System.Directory (getCurrentDirectory)
 import System.Info (os)
 import System.IO (hPutStrLn, stderr)
-import Hide.Unicode (CellSpan(..), clusterWidth)
+import Hide.Unicode (Script(..), CellSpan(..), clusterWidth)
 import Hide.TextStyle
 import Hide.Font
 import Hide.Render
@@ -91,8 +91,8 @@ foreign import ccall unsafe "thc_backend" c_backend :: IO CString
 foreign import ccall unsafe "thc_size" c_size :: Ptr CInt -> Ptr CInt -> IO ()
 foreign import ccall unsafe "thc_begin" c_begin :: IO CInt
 foreign import ccall unsafe "thc_clip" c_clip :: CInt -> CInt -> IO ()
-foreign import ccall unsafe "thc_glyph" c_glyph :: CInt -> CInt -> CInt -> CInt -> Ptr Word16 -> Word32 -> Word32 -> Word32 -> IO ()
-foreign import ccall unsafe "thc_unicode" c_unicode :: CInt -> CInt -> CInt -> CString -> Word32 -> Word32 -> Word32 -> IO CInt
+foreign import ccall unsafe "thc_glyph" c_glyph :: CInt -> CInt -> CInt -> CInt -> Ptr Word16 -> Word32 -> Word32 -> Word32 -> CInt -> CInt -> IO ()
+foreign import ccall unsafe "thc_unicode" c_unicode :: CInt -> CInt -> CInt -> CString -> Word32 -> Word32 -> Word32 -> CInt -> CInt -> IO CInt
 foreign import ccall unsafe "thc_pixelate_unicode" c_pixelate_unicode :: CInt -> IO ()
 foreign import ccall unsafe "thc_cursor" c_cursor :: CInt -> CInt -> IO ()
 foreign import ccall unsafe "thc_cursor_blink" c_cursor_blink :: CInt -> IO ()
@@ -217,29 +217,32 @@ draw font d = allocaArray 16 $ \scratch -> do
                     let Glyph gw bitmap=glyph font ch
                     pokeArray scratch bitmap
                     c_glyph (fromIntegral at) (fromIntegral y) 1
-                      (fromIntegral gw) scratch fg bg flags
+                      (fromIntegral gw) scratch fg bg flags 0 1
                   else utf8 (TU.takeWord8 bytes (TU.dropWord8 offset text)) $ \encoded ->
                     check "Draw Unicode"
-                      (c_unicode (fromIntegral at) (fromIntegral y) 1 encoded fg bg flags)
+                      (c_unicode (fromIntegral at) (fromIntegral y) 1 encoded fg bg flags 0 1)
                   chars (offset+bytes) (at+1)
       next<-chars 0 x
       go scratch y next rest
     go scratch y x (CellGlyph a text full start shown:rest) = do
-      drawGlyph scratch y x a text full start shown
+      drawGlyph scratch y x a text full start shown 0 full
       go scratch y (x+shown) rest
-    drawGlyph :: Ptr Word16 -> Int -> Int -> V.Attr -> T.Text -> Int -> Int -> Int -> IO ()
-    drawGlyph scratch y visible a text full start shown = do
+    go scratch y x (CellScript a text natural script:rest) = do
+      drawGlyph scratch y x a text 1 0 1 (case script of Superscript -> 1; Subscript -> 2) natural
+      go scratch y (x+1) rest
+    drawGlyph :: Ptr Word16 -> Int -> Int -> V.Attr -> T.Text -> Int -> Int -> Int -> CInt -> Int -> IO ()
+    drawGlyph scratch y visible a text full start shown script natural = do
       let paint=textStyleFromAttr a
           fg=fromIntegral (textForeground paint); bg=fromIntegral (textBackground paint)
-          flags=fromIntegral (textFlags paint+if full/=clusterWidth text then 4 else 0)
+          flags=fromIntegral (textFlags paint+if script==0 && full/=clusterWidth text then 4 else 0)
           x=visible-start
       c_clip (fromIntegral visible) (fromIntegral shown)
       case T.unpack text of
         [ch] | bitmapGlyph font ch -> do
           let Glyph gw bitmap=glyph font ch
           pokeArray scratch bitmap
-          c_glyph (fromIntegral x) (fromIntegral y) (fromIntegral full) (fromIntegral gw) scratch fg bg flags
-        _ -> utf8 text $ \encoded -> check "Draw Unicode" (c_unicode (fromIntegral x) (fromIntegral y) (fromIntegral full) encoded fg bg flags)
+          c_glyph (fromIntegral x) (fromIntegral y) (fromIntegral full) (fromIntegral gw) scratch fg bg flags script (fromIntegral natural)
+        _ -> utf8 text $ \encoded -> check "Draw Unicode" (c_unicode (fromIntegral x) (fromIntegral y) (fromIntegral full) encoded fg bg flags script (fromIntegral natural))
 
 
 -- | Run on the main bound OS thread and scope native-window cleanup.

@@ -28,7 +28,8 @@ import qualified Data.IntSet as IS
 import Data.Maybe (fromMaybe)
 import Hide.Window (nativeCommands, nativeMenuToken, nativeChordShortcut, nativeDockWindow)
 import Hide.Remote (RemotePeer)
-import Hide.Unicode (scalarWidth, clusterWidth, graphemes)
+import Hide.Unicode (Script(..), scalarWidth, clusterWidth, graphemes)
+import qualified Data.Vector as Vec
 #if defined(WITH_WINDOW) && defined(WITH_REMOTE)
 import Control.Concurrent.Async (withAsync, poll)
 import Control.Concurrent.STM hiding (check)
@@ -67,11 +68,13 @@ data RemoteContribution = RemoteContribution
 -- | Validated visible spans. 'RemoteText' borrows a complete run of single
 -- one-cell scalars, with its cell count. 'RemoteGlyph' retains one semantic
 -- grapheme, full allocated width, clip start and visible width. Its origin is
--- visible x minus clip start; clipping never reshapes the glyph.
+-- visible x minus clip start; clipping never reshapes the glyph. 'RemoteScript'
+-- retains natural atlas width and placement with an implicit one-cell advance.
 data RemoteCell
   = RemoteText {-# UNPACK #-} !Int {-# UNPACK #-} !Int !TextStyle !T.Text {-# UNPACK #-} !Int
   | RemoteGlyph {-# UNPACK #-} !Int {-# UNPACK #-} !Int !TextStyle !T.Text
       {-# UNPACK #-} !Int {-# UNPACK #-} !Int {-# UNPACK #-} !Int
+  | RemoteScript {-# UNPACK #-} !Int {-# UNPACK #-} !Int !TextStyle !T.Text {-# UNPACK #-} !Int !Script
   deriving (Eq,Show)
 
 data RemoteFrame = RemoteFrame
@@ -147,6 +150,12 @@ parseRemoteFrame metadata rows = parseEither (withObject "frame metadata" $ \o -
       case count 0 0 of
         Just n | n<=cols-at -> foldRuns cols y paint (at+n) (if n==0 then acc else RemoteText at y paint text n:acc) rest
         _ -> fail "Invalid character run"
+    foldRuns cols y paint at acc (value@(Array fields):rest) | Vec.length fields==3 = do
+      (text,natural,mode) <- parseJSON value :: Parser (T.Text,Int,T.Text)
+      script <- case mode of "sup" -> pure Superscript; "sub" -> pure Subscript; _ -> fail "Invalid script placement"
+      unless (not (T.null text) && T.length text<=4096 && not (T.any (\c -> c<' ' || c=='\DEL') text) &&
+        graphemes text==[text] && natural `elem` [1,2] && clusterWidth text==natural && at<cols) (fail "Invalid script grapheme")
+      foldRuns cols y paint (at+1) (RemoteScript at y paint text natural script:acc) rest
     foldRuns cols y paint at acc (value:rest) = do
       (text,w,stretched,start,shown) <- parseJSON value :: Parser (T.Text,Int,Bool,Int,Int)
       unless (not (T.null text) && T.length text<=4096 && not (T.any (\c -> c<' ' || c=='\DEL') text) && graphemes text==[text] && w>0 && w<=2 &&
@@ -350,12 +359,19 @@ drawRemote font atlas frame = allocaArray 16 $ \scratch -> do
                   case bitmap of
                     Just (Glyph width bits)->do
                       pokeArray scratch bits
-                      c_glyph (fromIntegral at) (fromIntegral y) 1 (fromIntegral width) scratch fg bg flags
+                      c_glyph (fromIntegral at) (fromIntegral y) 1 (fromIntegral width) scratch fg bg flags 0 1
                     Nothing->utf8 (TU.takeWord8 bytes (TU.dropWord8 offset text)) $ \p ->
-                      check "Draw remote Unicode" (c_unicode (fromIntegral at) (fromIntegral y) 1 p fg bg flags)
+                      check "Draw remote Unicode" (c_unicode (fromIntegral at) (fromIntegral y) 1 p fg bg flags 0 1)
                   chars (offset+bytes) (at+1)
       chars 0 x
-    RemoteGlyph visible y paint text full start shown -> do
+    RemoteGlyph visible y paint text full start shown -> drawGlyph scratch visible y paint text full start shown 0 full
+    RemoteScript x y paint text natural script ->
+      drawGlyph scratch x y paint text 1 0 1 (case script of Superscript -> 1; Subscript -> 2) natural
+  forM_ (remoteCursor frame) $ \(x,y) -> c_cursor (fromIntegral x) (fromIntegral y)
+  check "Present remote frame" c_present
+  where
+    flag value = if value then 1 else 0
+    drawGlyph scratch visible y paint text full start shown script natural = do
       let x=visible-start
           bitmap = case T.uncons text of
             Just (c,after) | T.null after -> case M.lookup c atlas of
@@ -364,16 +380,13 @@ drawRemote font atlas frame = allocaArray 16 $ \scratch -> do
               _->Nothing
             _->Nothing
           fg=fromIntegral (textForeground paint); bg=fromIntegral (textBackground paint)
-          flags=fromIntegral (textFlags paint+if full/=clusterWidth text then 4 else 0)
+          flags=fromIntegral (textFlags paint+if script==0 && full/=clusterWidth text then 4 else 0)
       c_clip (fromIntegral visible) (fromIntegral shown)
       case bitmap of
         Just (Glyph width bits) -> do
           pokeArray scratch bits
-          c_glyph (fromIntegral x) (fromIntegral y) (fromIntegral full) (fromIntegral width) scratch fg bg flags
-        Nothing -> utf8 text $ \p -> check "Draw remote Unicode" (c_unicode (fromIntegral x) (fromIntegral y) (fromIntegral full) p fg bg flags)
-  forM_ (remoteCursor frame) $ \(x,y) -> c_cursor (fromIntegral x) (fromIntegral y)
-  check "Present remote frame" c_present
-  where flag value = if value then 1 else 0
+          c_glyph (fromIntegral x) (fromIntegral y) (fromIntegral full) (fromIntegral width) scratch fg bg flags script (fromIntegral natural)
+        Nothing -> utf8 text $ \p -> check "Draw remote Unicode" (c_unicode (fromIntegral x) (fromIntegral y) (fromIntegral full) p fg bg flags script (fromIntegral natural))
 
 runRemoteWindow :: Backend -> Double -> (Int,Int) -> Int -> String -> RemotePeer -> IO ()
 runRemoteWindow backend scale (cols,rows) mode host peer = do

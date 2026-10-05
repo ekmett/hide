@@ -73,7 +73,7 @@ remoteTerminalDisplay (columns,linesCount) frame message=(cursor,cellDisplayOps 
   where
     width=max 0 columns; height=max 0 linesCount
     cells=maybe [] remoteCells frame
-    rows=IM.fromListWith (++) [(y,[cell]) | cell<-cells,let y=case cell of RemoteText _ row _ _ _->row; RemoteGlyph _ row _ _ _ _ _->row,y<height]
+    rows=IM.fromListWith (++) [(y,[cell]) | cell<-cells,let y=case cell of RemoteText _ row _ _ _->row; RemoteGlyph _ row _ _ _ _ _->row; RemoteScript _ row _ _ _ _->row,y<height]
     blanks n=[CellText V.defAttr (T.replicate n " ") | n>0]
     spans at []=blanks (width-at)
     spans at (cell:rest)
@@ -83,6 +83,7 @@ remoteTerminalDisplay (columns,linesCount) frame message=(cursor,cellDisplayOps 
         (x,shown,glyph)=case cell of
           RemoteText left _ paint text n->(left,n,CellText (textStyleAttr paint) (T.take (min n (width-left)) text))
           RemoteGlyph left _ paint text full start n->(left,n,CellGlyph (textStyleAttr paint) text full start (min n (width-left)))
+          RemoteScript left _ paint text natural script->(left,1,CellScript (textStyleAttr paint) text natural script)
         visible=min shown (width-x)
     bannerPaint=V.defAttr `V.withForeColor` V.white `V.withBackColor` V.blue
     banner=[if n==1 && T.length glyph==1 then CellText bannerPaint glyph else CellGlyph bannerPaint glyph n 0 n
@@ -90,6 +91,7 @@ remoteTerminalDisplay (columns,linesCount) frame message=(cursor,cellDisplayOps 
     bannerWidth=min width (sum (map spanWidth banner))
     spanWidth (CellText _ text)=T.length text
     spanWidth (CellGlyph _ _ _ _ shown)=shown
+    spanWidth CellScript{}=1
     row y=Vec.fromList (compact (if not (T.null message) && y==height-1
       then clip 0 width banner++clip bannerWidth width base else base))
       where base=spans 0 (reverse (IM.findWithDefault [] y rows))
@@ -112,6 +114,7 @@ remoteTerminalDisplay (columns,linesCount) frame message=(cursor,cellDisplayOps 
             part=case value of
               CellText paint text->CellText paint (T.take (right-left) (T.drop (left-at) text))
               CellGlyph paint text full start _->CellGlyph paint text full (start+left-at) (right-left)
+              CellScript{}->value
 
 -- | Construct a base64 OSC 52 clipboard-write sequence; no clipboard read is performed.
 terminalClipboard :: T.Text -> BS.ByteString
