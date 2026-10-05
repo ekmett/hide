@@ -53,6 +53,18 @@ builtinCommands =
   ,BuiltinCommand "hide.cursor.down" (CursorDown False)
   ,BuiltinCommand "hide.selection.up" (CursorUp True)
   ,BuiltinCommand "hide.selection.down" (CursorDown True)
+  ,BuiltinCommand "hide.cursor.row-start" (CursorRowStart False)
+  ,BuiltinCommand "hide.selection.row-start" (CursorRowStart True)
+  ,BuiltinCommand "hide.cursor.row-end" (CursorRowEnd False)
+  ,BuiltinCommand "hide.selection.row-end" (CursorRowEnd True)
+  ,BuiltinCommand "hide.cursor.document-start" (CursorDocumentStart False)
+  ,BuiltinCommand "hide.selection.document-start" (CursorDocumentStart True)
+  ,BuiltinCommand "hide.cursor.document-end" (CursorDocumentEnd False)
+  ,BuiltinCommand "hide.selection.document-end" (CursorDocumentEnd True)
+  ,BuiltinCommand "hide.cursor.page-up" (CursorPageUp False)
+  ,BuiltinCommand "hide.selection.page-up" (CursorPageUp True)
+  ,BuiltinCommand "hide.cursor.page-down" (CursorPageDown False)
+  ,BuiltinCommand "hide.selection.page-down" (CursorPageDown True)
   ,BuiltinCommand "hide.edit.delete-backward" DeleteBackward
   ,BuiltinCommand "hide.edit.delete-forward" DeleteForward
   ,BuiltinCommand "hide.edit.delete-line" DeleteLine
@@ -239,9 +251,21 @@ platformBindings catalogue platform configuration=do
        (Redo,["Ctrl+Y","Ctrl+Shift+Y","Ctrl+Shift+Z"])]
     defaultsFor SourceKeys=defaults++navigationDefaults
     defaultsFor _=defaults
-    navigationDefaults=horizontalDefaults++
+    navigationDefaults=horizontalDefaults++edgeDefaults++
       [(CursorUp False,verticalAliases V.KUp False),(CursorDown False,verticalAliases V.KDown False),
        (CursorUp True,verticalAliases V.KUp True),(CursorDown True,verticalAliases V.KDown True)]
+    edgeDefaults=[(CursorRowStart False,keyAliases V.KHome False False),
+      (CursorRowStart True,keyAliases V.KHome True False),
+      (CursorRowEnd False,keyAliases V.KEnd False False),
+      (CursorRowEnd True,keyAliases V.KEnd True False),
+      (CursorDocumentStart False,keyAliases V.KHome False True),
+      (CursorDocumentStart True,keyAliases V.KHome True True),
+      (CursorDocumentEnd False,keyAliases V.KEnd False True),
+      (CursorDocumentEnd True,keyAliases V.KEnd True True),
+      (CursorPageUp False,verticalAliases V.KPageUp False),
+      (CursorPageUp True,verticalAliases V.KPageUp True),
+      (CursorPageDown False,verticalAliases V.KPageDown False),
+      (CursorPageDown True,verticalAliases V.KPageDown True)]
     verticalAliases key shift=aliases key shift++keyAliases key shift True
     horizontalDefaults=
       [(CursorLeft False,aliases V.KLeft False),(CursorRight False,aliases V.KRight False),
