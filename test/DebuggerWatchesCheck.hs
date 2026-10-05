@@ -117,8 +117,7 @@ session scenario=bracket (Fixture.fixture (if take 5 scenario=="child" || take 5
       failed<-await "oversized child snapshot is refused" (has "exceeds 1 MiB") expanded
       check "oversized snapshot does not publish a silently truncated page" (not (has "item0 =" failed))
     else do
-      let hasWatchMore d=any (
-->case rowAction r of LoadNext{}->rowHit r==rowHit (row "record" d); _->False) (rows d)
+      let hasWatchMore d=any (\r->case rowAction r of LoadNext{}->rowHit r==rowHit (row "record" d); _->False) (rows d)
       first<-await "first watch page and More" (\d->has "item127 =" d && hasWatchMore d) expanded
       let childRows=filter (T.isPrefixOf "item".P.infoLabel.rowInfo).rows
           watchMore d=[i | (i,r)<-zip [0..] (rows d),LoadNext{}<-[rowAction r],rowHit r==rowHit (row "record" d)]
