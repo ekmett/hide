@@ -93,7 +93,7 @@ withDebuggerSidebar host runtime use=withRegistry $ \registry->do
             result<-debuggerSidebarRead runtime (DebugPageRequest epoch (DebugWatchVariables key revision receipt reference) 0)
             pure $ case result of
               Left err->Left (CommandRejected err)
-              Right body->Right (P.NodePage [watchChild key revision receipt reference index row (sidebarPrivatePaths ctx) entry | (index,row)<-zip [0..] (take 128 (items "variables" body)),Just entry<-[M.lookup key entries]] Nothing)
+              Right body->Right (P.NodePage [watchChild (watchAction force) key revision receipt reference index row (sidebarPrivatePaths ctx) entry | (index,row)<-zip [0..] (take 128 (items "variables" body)),Just entry<-[M.lookup key entries]] Nothing)
           _->pure (Left (CommandRejected "Watch node expired."))
   watches<-P.registerTree registry "hide.sidebar.watches" watchesRoot watchChildren >>= either (ioError . userError . show) pure
   publishTreeFromHost host watches
@@ -161,9 +161,11 @@ watchTarget selected entries parent=case T.splitOn ":" (P.nodeIdText parent) of
       Just receipt@(WatchFrame _ epochNow selectionNow tidNow fidNow)<-selected,(epoch,selection,tid,fid)==(epochNow,selectionNow,tidNow,fidNow),Just entry<-M.lookup key entries,watchRevision entry==revision,reference>0->Just (key,revision,receipt,reference)
   _->Nothing
 
-watchChild :: Int -> Int -> WatchFrame -> Int -> Int -> Value -> [FilePath] -> DebuggerWatch -> P.NodeDef SidebarContext SidebarReply
-watchChild key revision (WatchFrame _ epoch selection tid fid) parent index row privatePaths entry=P.NodeDef
-  (P.NodeInfo (node "watchvalue" [key,revision,epoch,selection,tid,fid,parent,reference,index]) title "" (reference>0 && not lazy) origin) Nothing []
+watchChild :: (DebugSidebarRequest -> P.TreeAction SidebarContext SidebarReply)
+  -> Int -> Int -> WatchFrame -> Int -> Int -> Value -> [FilePath] -> DebuggerWatch -> P.NodeDef SidebarContext SidebarReply
+watchChild forceAction key revision receipt@(WatchFrame _ epoch selection tid fid) parent index row privatePaths entry=P.NodeDef
+  (P.NodeInfo (node "watchvalue" [key,revision,epoch,selection,tid,fid,parent,reference,index]) title "" (reference>0 && not lazy) origin) Nothing
+  [P.ActionMenu "Force lazy child" (forceAction (ForceDebugWatchChild key revision receipt parent index reference)) | lazy,reference>0]
   where
     reference=integer "variablesReference" row
     lazy=maybe False (flag "lazy") (field "presentationHint" row)

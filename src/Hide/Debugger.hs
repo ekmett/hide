@@ -228,7 +228,7 @@ data Pending = Init | Attach | Configure | Breaks Text [Int] | Exceptions | Thre
   | Inspection Text (MVar (Either Text Value)) | SourceInspection !Int !Int !(Maybe FilePath) (MVar (Either Text Value)) | SidebarRead DebugPageRequest (TMVar (Either Text Value))
   | WatchRequest !WatchOperation !(Maybe Text) !FilePath ![FilePath]
   deriving (Eq)
-data WatchMode = EvaluateWatch | ForceWatch !Int deriving Eq
+data WatchMode = EvaluateWatch | ForceWatch !Int | ForceWatchChild !Int !Int !Int deriving Eq
 data WatchOperation = WatchOperation !Int !Int !WatchFrame !WatchMode deriving Eq
 data PreparedWatch = PreparedWatch !Text !Int !Bool !(Maybe FilePath) !Bool !(Maybe Value)
   | PreparedWatchError !Text !(Maybe FilePath) !Bool
@@ -491,6 +491,7 @@ sidebarAction runtime@(Debugger ref _ _ _ _) request d
           _->pure d {status="Watch expired."}
       EvaluateDebugWatch ident revision receipt->startWatch runtime ident revision receipt EvaluateWatch d
       ForceDebugWatch ident revision receipt reference->startWatch runtime ident revision receipt (ForceWatch reference) d
+      ForceDebugWatchChild ident revision receipt parent position reference->startWatch runtime ident revision receipt (ForceWatchChild parent position reference) d
       RemoveDebugWatch ident revision->do
         s<-readIORef ref
         case M.lookup ident (watchExpressions s) of
@@ -549,10 +550,22 @@ startWatch runtime@(Debugger ref _ _ _ _) ident revision receipt mode d=do
       forceAllowed reference=case watchValue <$> M.lookup ident (watchExpressions s) of
         Just (WatchResult current _ rootReference True _)->current==receipt && rootReference==reference && M.lookup (WatchReferences ident revision receipt,reference) (sidebarReferences s)==Just True
         _->False
+      childAllowed parent position reference=position>=0 && position<128 && reference>0 &&
+        M.lookup (WatchReferences ident revision receipt,parent) (sidebarReferences s)==Just False &&
+        M.lookup (WatchReferences ident revision receipt,reference) (sidebarReferences s)==Just True &&
+        case M.lookup (DebugPageRequest epoch (DebugWatchVariables ident revision receipt parent) 0) (sidebarPages s) >>= atRows position of
+          Just row->integer "variablesReference" row==reference && maybe False (flag "lazy") (field "presentationHint" row)
+          _->False
+      epoch=case receipt of WatchFrame _ value _ _ _->value
+      atRows position body=at (items "variables" body) position
   live<-watchProviderCurrent s
   if not live || not (watchCurrent s ident revision receipt) then pure d {status="Watch or stopped frame expired."}
   else if busy then pure d {status="Watch execution is busy."}
-  else if case mode of ForceWatch reference->not (forceAllowed reference); _->False then pure d {status="Lazy watch reference expired."}
+  else if case mode of
+    ForceWatch reference->not (forceAllowed reference)
+    ForceWatchChild parent position reference->not (childAllowed parent position reference)
+    EvaluateWatch->False
+    then pure d {status="Lazy watch reference expired."}
   else do
     -- Executing requests invalidate every retained value handle before dispatch.
     -- Keep the chosen frame, but never keep its old selection/stop receipt.
@@ -568,13 +581,15 @@ startWatch runtime@(Debugger ref _ _ _ _) ident revision receipt mode d=do
     let WatchFrame _ _ _ _ fid=fresh
         (command,args)=case mode of
           EvaluateWatch->("evaluate",object ["expression" .= maybe "" watchExpression (M.lookup ident (watchExpressions s)),"frameId" .= fid,"context" .= ("watch"::Text)])
-          ForceWatch reference->("variables",object ["variablesReference" .= reference,"start" .= (0::Int),"count" .= (128::Int)])
+          ForceWatch reference->variables reference
+          ForceWatchChild _ _ reference->variables reference
+        variables reference=("variables",object ["variablesReference" .= reference,"start" .= (0::Int),"count" .= (128::Int)])
     send runtime (WatchRequest operation backing base private) command args
-    pure d {status=case mode of EvaluateWatch->"Evaluating watch…"; ForceWatch{}->"Forcing lazy watch…"}
+    pure d {status=case mode of EvaluateWatch->"Evaluating watch…"; ForceWatch{}->"Forcing lazy watch…"; ForceWatchChild{}->"Forcing lazy child…"}
 
 prepareWatch :: Debugger -> WatchOperation -> Maybe Text -> FilePath -> [FilePath] -> Either Text Value -> IO ()
-prepareWatch (Debugger ref _ _ _ _) operation backing base private result=do
-  worker<-async $ do
+prepareWatch (Debugger ref _ _ _ _) operation backing base private result=mask_ $ do
+  worker<-asyncWithUnmask $ \unmask->unmask $ do
     origin<-canonicalSourcePath base (T.unpack <$> backing)
     let clean=T.copy . T.take 256 . T.map (\c->if c<' ' then ' ' else c)
         failed canonical privateOrigin err=do
@@ -592,6 +607,10 @@ prepareWatch (Debugger ref _ _ _ _) operation backing base private result=do
                 (title,reference,lazy,page)=case mode of
                   EvaluateWatch->(text "result" body,integer "variablesReference" body,maybe False (flag "lazy") (field "presentationHint" body),Nothing)
                   ForceWatch handle->("Forced; expand to inspect",handle,False,Just (object ["variables" .= take 128 (items "variables" body)]))
+                  -- A forcing reply may replace the value and immediately
+                  -- invalidate all references. Refresh the expression explicitly;
+                  -- neither the requested handle nor reply handles stay live.
+                  ForceWatchChild{}->("Child forced; evaluate watch to refresh",0,False,Nothing)
                 prepared=clean title
             _<-evaluate (T.length prepared)
             checked<-traverse (evaluate . boundedResult) page
@@ -607,9 +626,9 @@ tickWatchPreparation (Debugger ref _ (HdbRuntime _ _ _ _ _ retired _) _ _) d=do
     Nothing->pure d
     Just (WatchPreparation (WatchOperation ident revision receipt mode) worker)->do
       live<-watchProviderCurrent s
-      if not live || not (watchCurrent s ident revision receipt) || dialog d/=Nothing || questionActive d then do
+      if not live || not (watchCurrent s ident revision receipt) || dialog d/=Nothing || questionActive d then mask_ $ do
           modifyIORef' ref (\state->state {watchPreparing=Nothing,watchExpressions=if watchCurrent state ident revision receipt then M.adjust (\entry->entry {watchValue=WatchPending}) ident (watchExpressions state) else watchExpressions state,watchCatalogueRevision=watchCatalogueRevision state+1})
-          cleanup<-async (cancel worker)
+          cleanup<-asyncWithUnmask (\unmask->unmask (cancel worker))
           modifyIORef' retired (cleanup:)
           pure d
       else do
@@ -626,7 +645,7 @@ tickWatchPreparation (Debugger ref _ (HdbRuntime _ _ _ _ _ retired _) _ _) d=do
                 PreparedWatch title reference lazy origin private page->do
                   let target=DebugPageRequest (case receipt of WatchFrame _ epoch _ _ _->epoch) (DebugWatchVariables ident revision receipt reference) 0
                       refs=if reference>0 then M.insert (WatchReferences ident revision receipt,reference) lazy (sidebarReferences s) else sidebarReferences s
-                  modifyIORef' ref (\state->state {watchExpressions=M.adjust (\entry->entry {watchValue=WatchResult receipt title reference lazy origin,watchPrivate=watchPrivate entry || private || maybe False (protectedPath d) origin}) ident (watchExpressions state),watchCatalogueRevision=watchCatalogueRevision state+1,sidebarReferences=refs,
+                  modifyIORef' ref (\state->state {watchExpressions=M.adjust (\entry->entry {watchValue=case mode of ForceWatchChild{}->WatchStale title origin; _->WatchResult receipt title reference lazy origin,watchPrivate=watchPrivate entry || private || maybe False (protectedPath d) origin}) ident (watchExpressions state),watchCatalogueRevision=watchCatalogueRevision state+1,sidebarReferences=refs,
                     variableRefs=if reference>0 then M.insertWith (||) reference (lazy || case mode of ForceWatch{}->True; _->False) (variableRefs state) else variableRefs state,sidebarPages=maybe (sidebarPages state) (\value->M.insert target value (sidebarPages state)) page})
                   forM_ page (recordSidebarResponse ref target)
                   pure d {status="Watch result ready."}

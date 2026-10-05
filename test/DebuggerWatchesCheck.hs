@@ -2,8 +2,9 @@
 module DebuggerWatchesCheck (checks) where
 
 import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async (poll,wait,withAsync)
 import Control.Exception (bracket)
-import Control.Monad (unless,foldM,when)
+import Control.Monad (unless,foldM,forM_,when)
 import qualified Data.Map.Strict as M
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
@@ -26,10 +27,10 @@ import qualified Hide.Plugin.Tree as P
 import qualified Hide.Plugin.Menu as Menu
 
 checks :: IO ()
-checks=mapM_ session ["normal","edit","remove","resume","frame","retire","modal","policy"] >> putStrLn "Debugger watch execution checks passed"
+checks=mapM_ session ["child","child-invalidated","child-error","child-edit","child-remove","child-resume","child-frame","child-retire","child-modal","child-policy","normal","edit","remove","resume","frame","retire","modal","policy"] >> putStrLn "Debugger watch execution checks passed"
 
 session :: String -> IO ()
-session scenario=bracket (Fixture.fixture (if scenario=="policy" then "watches-private" else "watches")) cleanup $ \(port,path,_)->withSidebarCommands $ \host->withDebugger $ \runtime->withDebuggerSidebar host runtime $ \provider->do
+session scenario=bracket (Fixture.fixture (if take 5 scenario=="child" then "watches-"<>scenario else if scenario=="policy" then "watches-private" else "watches")) cleanup $ \(port,path,_)->withSidebarCommands $ \host->withDebugger $ \runtime->withDebuggerSidebar host runtime $ \provider->do
   origin<-canonicalizePath (path<>".hs")
   putStrLn ("watch scenario "<>scenario)
   let fallback d _=pure (False,d)
@@ -39,11 +40,13 @@ session scenario=bracket (Fixture.fixture (if scenario=="policy" then "watches-p
       rows d=maybe [] (M.elems.treeRows) (sideTree d)
       labels=map (P.infoLabel.rowInfo).rows
       has value=any (T.isInfixOf value).labels
-      await label predicate d=timeout 5000000 (loop d) >>= maybe (fail (label<>" timed out")) pure
+      await label predicate=awaitIO label (pure.predicate)
+      awaitIO label predicate d=timeout 5000000 (loop d) >>= maybe (fail (label<>" timed out")) pure
         where
           loop current=do
             next<-tick current
-            if predicate next then pure next else do
+            ready<-predicate next
+            if ready then pure next else do
               threadDelay 1000 >> loop next
       row title d=case [r | r<-rows d,title `T.isPrefixOf` P.infoLabel (rowInfo r)] of [value]->value; _->error ("missing watch row "<>T.unpack title)
       invoke action value d=case lookup action (rowActions value) of
@@ -72,27 +75,108 @@ session scenario=bracket (Fixture.fixture (if scenario=="policy" then "watches-p
         outcome<-finish
         check "read-only MCP cannot execute or force a watch" (either (const True) (const False) outcome)
       entries=do (_,selected,values)<-debuggerWatches runtime; pure (selected,values)
-      release d=do
-        writeFile (path<>".release") "release"
+      release d=writeFile (path<>".release") "release" >> barrier d
+      barrier d=do
         (_,current)<-debuggerTool runtime d "debug_status" (object [])
         value<-current >>= either (fail.T.unpack) pure
-        (_,_)<-debuggerTool runtime d "debug_inspect" (object ["generation" .= maybe (0::Int) id (field "generation" value),"request" .= ("threads"::T.Text)])
-        foldM (\desktop _->threadDelay 1000 >> tick desktop) d [1..80::Int]
+        (_,finish)<-debuggerTool runtime d "debug_inspect" (object ["generation" .= maybe (0::Int) id (field "generation" value),"request" .= ("threads"::T.Text)])
+        withAsync finish $ \reply->do
+          let loop current=do
+                next<-tick current
+                result<-poll reply
+                if maybe False (const True) result then pure next else threadDelay 1000 >> loop next
+          drained<-timeout 5000000 (loop d) >>= maybe (fail "ordered watch response barrier timed out") pure
+          -- Continue can expire this receipt before its ordered response.
+          -- The response handler still resolves it only after consuming the reply.
+          outcome<-wait reply
+          case outcome of
+            Right _->pure ()
+            Left "Debugger inspection expired; refresh debug_status."->pure ()
+            Left err->fail (T.unpack err)
+          pure drained
   mounted<-initializeSidebar host (initialDesktop (90,30)) {sideTree=Just (emptySidebar (takeDirectory path) 28 False)} >>= await "Watches provider" (has "Watches")
   (_,attached)<-core mounted [DebugAction "connect" ["0","127.0.0.1",T.pack port]]
   stopped<-await "stopped selected frame" (T.isPrefixOf "Stopped in ".status) attached
   empty<-expand "Watches" stopped >>= await "empty watches" (has "No watches")
-  created<-add (if scenario=="normal" then "counter + 1" else "delay") empty
+  let childScenario=take 5 scenario=="child"
+      expression=if scenario=="normal" then "counter + 1" else if childScenario then "record" else "delay"
+  created<-add expression empty
   quiet<-foldM (\d _->tick d) created [1..20::Int]
   check "passive stop/tree/tick never evaluates" . null =<< executing
-  let initialRow=row (if scenario=="normal" then "counter + 1" else "delay") quiet
+  let initialRow=row expression quiet
       agentRef=case lookup "Evaluate watch" (rowActions initialRow) of Just (P.RegisteredAction ref)->ref; _->error "missing evaluate action"
       agentTrace=maybe [] (hitTrace (keyOf (rowHit initialRow))) (sideTree quiet)
   (_,agentRejected)<-effects quiet [InvokeTree agentTrace agentRef Menu.AgentMenu]
   check "agent origin does not gain executing sidebar authority" ("stale, protected or busy" `T.isInfixOf` status agentRejected)
   check "agent attempt did not evaluate" . null =<< executing
-  evaluated<-invoke "Evaluate watch" (row (if scenario=="normal" then "counter + 1" else "delay") quiet) quiet >>= await "explicit request" (T.isPrefixOf "Evaluating watch".status)
-  if scenario=="normal" then do
+  evaluated<-invoke "Evaluate watch" (row expression quiet) quiet >>= await "explicit request" (T.isPrefixOf "Evaluating watch".status)
+  if childScenario then do
+    loaded<-await "nonlazy parent watch" (has "record = Record") evaluated
+    expanded<-expand "record" loaded >>= await "nested lazy child" (has "nested =")
+    let child=row "nested =" expanded
+    check "lazy child stays inert but offers explicit Force" (not (P.infoBranch (rowInfo child)) && any ((=="Force lazy child").fst) (rowActions child))
+    before<-requests
+    idle<-foldM (\d _->tick d) expanded [1..20::Int]
+    check "passive child display never forces" . (==length before) . length =<< requests
+    rejectInspect "variables" ["variablesReference" .= (971::Int)] idle
+    let childRef=case lookup "Force lazy child" (rowActions child) of Just (P.RegisteredAction ref)->ref; _->error "missing child force"
+        childTrace=maybe [] (hitTrace (keyOf (rowHit child))) (sideTree idle)
+    (_,refused)<-effects idle [InvokeTree childTrace childRef Menu.AgentMenu]
+    afterAgent<-requests
+    check "agent cannot force a lazy child" (length before==length afterAgent && "stale, protected or busy" `T.isInfixOf` status refused)
+    (selected,values)<-entries
+    let [(key,entry)]=M.toList values
+        receipt=maybe (error "missing child frame") id selected
+        command=ForceDebugWatchChild key (watchRevision entry) receipt 980 1 971
+    forM_ [ForceDebugWatchChild key (watchRevision entry) receipt 980 (-1) 971,
+      ForceDebugWatchChild key (watchRevision entry) receipt 980 128 971,
+      ForceDebugWatchChild key (watchRevision entry) receipt 980 0 971,
+      ForceDebugWatchChild key (watchRevision entry) receipt 999 1 971,
+      ForceDebugWatchChild key (watchRevision entry) receipt 980 1 972] $ \guessed->do
+      (_,rejected)<-core refused [DebugSidebarAction guessed]
+      check "child Force requires exact cached page and position" ("expired" `T.isInfixOf` status rejected)
+    forcing<-invoke "Force lazy child" child refused
+    pending<-awaitIO "real child request reaches adapter" (\_->any (\request->(field "arguments" request >>= field "variablesReference")==Just (971::Int)) <$> requests) forcing
+    let changing action=case action of
+          "edit"->snd <$> core pending [DebugSidebarAction (EditDebugWatch key (watchRevision entry))] >>= save "replacement"
+          "remove"->snd <$> core pending [DebugSidebarAction (RemoveDebugWatch key (watchRevision entry))]
+          "resume"->snd <$> core pending [DebugAction "continue" []]
+          "frame"->snd <$> core pending [DebugAction "stack" []] >>= await "child frame chooser" ((/=Nothing).dialog) >>= \d->case dialog d of
+            Just dg->let chosen=dg {fields=map (\field->case field of ListBox title values _->ListBox title values 1; _->field) (fields dg)}
+                         (next,outbox)=submitDialog 0 chosen d
+                     in snd <$> core next outbox
+            _->fail "missing child frame chooser"
+          "retire"->retireTreeFromHost host (case receipt of WatchFrame owner _ _ _ _->owner) pending
+          "policy"->pure pending {guestPrivatePaths=[origin]}
+          _->pure pending {dialog=Just (Dialog "Human child modal" (DebuggerWatchDialog 999 Nothing False) [Input "Expression" "" 0] 0 ["Cancel"] [])}
+    outcome<-if scenario=="child" then await "forced child refresh marker" (has "Child forced; evaluate watch") pending
+      else if scenario=="child-error" then await "child local error" (has "error: fixture refused") pending
+      else if scenario=="child-invalidated" then barrier pending
+      else changing (drop 6 scenario) >>= release
+    finished<-await "retired child projection" (not.has "nested =") outcome
+    sent<-requests
+    let childRequests=[request | request<-sent,(field "arguments" request >>= field "variablesReference")==Just (971::Int)]
+    check "captured child forces exactly once" (length childRequests==1)
+    check "child forcing retires the old displayed subtree" (not (has "nested =" finished))
+    (_,oldOwner)<-core finished [DebugSidebarAction command]
+    afterOwner<-requests
+    check "old stopped child receipt cannot force twice" (length sent==length afterOwner && ("expired" `T.isInfixOf` status oldOwner || scenario=="child-modal" && "dialog owns input" `T.isInfixOf` status oldOwner))
+    _<-effects finished [InvokeTree childTrace childRef Menu.HumanMenu]
+    afterOld<-requests
+    check "retained child action cannot force twice" (length sent==length afterOld)
+    rejectInspect "variables" ["variablesReference" .= (971::Int)] finished
+    rejectInspect "variables" ["variablesReference" .= (972::Int)] finished
+    (_,after)<-entries
+    check "Force never republishes a requested or replacement handle" (all (\value->case watchValue value of WatchResult _ _ ref _ _->ref/=971 && ref/=972; _->True) (M.elems after))
+    when (scenario=="child" || scenario=="child-invalidated") $ do
+      refreshed<-invoke "Evaluate watch" (row "record" finished) finished >>= await "explicit parent refresh" (has "record = Record")
+      _<-expand "record" refreshed >>= await "fresh parent children" (has "nested =")
+      pure ()
+    when (scenario=="child-policy") $ do
+      private<-await "private child outcome" (has "Private watch") finished
+      publicAgain<-foldM (\d _->tick d) private {guestPrivatePaths=[]} [1..20::Int]
+      check "child outcome privacy remains sticky" (has "Private watch" publicAgain && not (has "record" publicAgain))
+  else if scenario=="normal" then do
     result<-await "scalar watch reply" (has "counter + 1 = 42") evaluated
     sent<-executing
     check "exact captured selected frame and watch context reach DAP" (length sent==1 && case sent of [request]->((field "arguments" request :: Maybe Value) >>= field "frameId")==Just (11::Int); _->False)

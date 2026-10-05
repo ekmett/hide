@@ -25,7 +25,9 @@ import Hide.Plugin.BufferHost (ContentVersion)
 data DebugSidebarRequest = SelectDebugFrame !Int !Int !Int
   | AddDebugWatch | EditDebugWatch !Int !Int | RemoveDebugWatch !Int !Int
   | EvaluateDebugWatch !Int !Int !WatchFrame
-  | ForceDebugWatch !Int !Int !WatchFrame !Int deriving (Eq,Show)
+  | ForceDebugWatch !Int !Int !WatchFrame !Int
+  -- Watch ID/revision, stopped receipt, parent reference, page position, child.
+  | ForceDebugWatchChild !Int !Int !WatchFrame !Int !Int !Int deriving (Eq,Show)
 
 -- | Bounded immutable expression metadata published by the existing debugger
 -- owner. IDs are monotonic; an edit advances its revision, removal never reuses it.
