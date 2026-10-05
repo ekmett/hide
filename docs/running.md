@@ -184,15 +184,18 @@ Managing watches does not evaluate program code. At a revealed stop, use a watch
 Results belong to that stop, frame selection and expression revision; changes
 make them stale until another explicit evaluation. **Force lazy watch** is a
 separate executing action for a known lazy root result. Nonlazy values expand
-through bounded read-only pages; nested lazy values remain inert. No evaluation
-runs automatically on stop, tree expansion or repaint.
+through bounded read-only pages. A lazy child beneath Watches offers **Force lazy
+child**, a human-only executing action. After forcing, use **Evaluate watch** to
+refresh the expression; old and replacement child handles are retired. Ordinary
+expansion remains inert. No evaluation runs automatically on stop, tree expansion
+or repaint.
 
 Live hdb 0.14 with GHC 9.14.1 on macOS arm64 has verified scalar watch evaluation
 and nonlazy list-child expansion through these actions. hdb marks lazy child
 values, but its Evaluate replies do not mark a lazy root, so **Force lazy watch**
-is unavailable for those results. Root Force currently has deterministic adapter
-fixture coverage; it has not been qualified against hdb or THC. Nested lazy-child
-Force and variable continuation pages remain in issue #8. Both local-file and
+is unavailable for those results. Root and nested-child Force currently have
+deterministic adapter fixture coverage; live Force has not been qualified against
+hdb or THC. Variable continuation pages remain in issue #8. Both local-file and
 embedded **Go to source** prepare their source documents on a worker. Local-file
 navigation preserves open unsaved text and ordinary file/save authority. Changed
 or closed targets and resumed sessions reject late navigation; a prepared source

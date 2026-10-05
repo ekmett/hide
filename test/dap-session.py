@@ -151,6 +151,9 @@ for session in range(1, 4 if mode == 'output-owner' else 3 if mode == 'reconnect
                 if pending_evaluate and os.path.exists(sys.argv[1] + '.release'):
                     reply(pending_evaluate, dict(result='STALE delayed watch', variablesReference=0))
                     pending_evaluate = None
+                if mode.startswith('watches-child') and pending_variables and os.path.exists(sys.argv[1] + '.release'):
+                    reply(pending_variables, dict(variables=[dict(name='STALE forced child', value='ForcedNode', variablesReference=972)]))
+                    pending_variables = None
                 if mode == 'lazy' and thread_count == 3:
                     event('invalidated', dict(areas=['variables']))
                 if mode == 'lazy' and thread_count == 4:
@@ -164,7 +167,7 @@ for session in range(1, 4 if mode == 'output-owner' else 3 if mode == 'reconnect
                 stack_count += 1
                 rows = [dict(id=11, name='entry λ', line=2, column=1,
                              source=dict(name='Generated.hs', sourceReference=9))]
-                if mode.startswith('source-') or mode == 'watches-private':
+                if mode.startswith('source-') or mode in ('watches-private', 'watches-child-policy'):
                     rows[0]['source']['path'] = sys.argv[1] + ('.changed.hs' if mode == 'source-stamp' and stack_count > 1 else '.hs')
                 if mode == 'local-source':
                     rows[0].update(column=5, source=dict(name='Local.hs', path=sys.argv[1] + '.hs', sourceReference=0))
@@ -236,7 +239,17 @@ for session in range(1, 4 if mode == 'output-owner' else 3 if mode == 'reconnect
                     reply(req, dict(result='42', variablesReference=0))
             elif cmd == 'variables':
                 reference = args['variablesReference']
-                if mode.startswith('watches') and reference in (970, 980):
+                if mode.startswith('watches-child') and reference == 971:
+                    assert args.get('start') == 0 and args.get('count') == 128, args
+                    if mode == 'watches-child-error':
+                        reply(req, success=False)
+                    elif mode in ('watches-child', 'watches-child-invalidated'):
+                        reply(req, dict(variables=[dict(name='nested', value='ForcedNode', variablesReference=972)]))
+                        if mode == 'watches-child-invalidated':
+                            event('invalidated', dict(areas=['variables']))
+                    else:
+                        pending_variables = req
+                elif mode.startswith('watches') and reference in (970, 980):
                     assert args.get('start') == 0 and args.get('count') == 128, args
                     reply(req, dict(variables=[dict(name='counter', value='42', variablesReference=0), dict(name='nested', value='<thunk>', variablesReference=971, presentationHint=dict(lazy=True))]))
                 elif mode in ('sidebar', 'sidebar-exit') and reference in (211, 212, 221):

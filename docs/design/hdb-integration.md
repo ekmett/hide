@@ -54,7 +54,9 @@ Expanding an ordinary value shows its children. An unevaluated value displays
 have explicit human-only **Evaluate watch** actions with stopped-frame and
 expression-revision provenance. Root Force is implemented for a known lazy root
 result, but remains fixture-qualified; hdb Evaluate does not supply that lazy hint.
-Nested lazy-child Force and the expression console remain planned.
+Nested lazy watch children have a human-only Force action; it retires the old
+subtree and requires explicit expression refresh. Live Force qualification and
+the expression console remain planned.
 An agent can inspect in the background and reveal the same source/frame to the
 user with `debug_present`; it never gets a second hidden debugger state.
 
@@ -68,7 +70,7 @@ separately so upstream features are not confused with finished integration.
 | Source breakpoints, step in/over/out, continue | Implemented | Reuse existing UI/MCP; qualify disk sources and cradle loading |
 | Threads, frames, locals/module/globals | Implemented | Existing pickers; preserve frame/thread identity and paging bounds |
 | Ordinary variable children | Implemented | Existing expansion after validating reference provenance |
-| Thunk inspection/forcing | Lazy child presentation hint; fetching lazy children forces | Read-only expansion refuses lazy references; root Force has fixture coverage only; nested Force and executing MCP tool remain planned |
+| Thunk inspection/forcing | Lazy child presentation hint; fetching lazy children forces | Read-only expansion refuses lazy references; root and nested-watch Force have fixture coverage only; live qualification and executing MCP tool remain planned |
 | Expression evaluation | `evaluate` with optional frame; returns value/type/reference without a lazy root hint | Manually evaluated Watches have live scalar/list qualification; console, history and executing MCP tool remain planned |
 | Source conditions, hit counts, logpoints | Implemented; hit count is parsed as an integer | Breakpoint editor; preserve all fields when replacing a source's set |
 | Function breakpoints | Implemented, including condition/hit count | Function breakpoint rows and separate replace operation |
