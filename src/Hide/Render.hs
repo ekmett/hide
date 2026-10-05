@@ -428,10 +428,11 @@ hostWindowFrame d active w frame=
 
 pluginWindowLayers :: Desktop -> Bool -> Window -> PluginWindow.PreparedWindow -> [CellLayer]
 pluginWindowLayers d active w prepared=
-  bodyLayers++map CellImage (place (x+column) y (label frame title):hostWindowFrame d active w frame)
+  bodyLayers++map CellImage ((if active then [windowScrollbarImage d True w,windowScrollbarImage d False w] else [])++(place (x+column) y (label frame title):hostWindowFrame d active w frame))
   where
     Rect x y ww hh=bounds w
-    frame=attr (if active then white else gray) blue
+    moving=case drag d of Just (Moving wid _ _) -> wid==windowId w; Just (Resizing wid _ _) -> wid==windowId w; _ -> False
+    frame=attr (if moving then cyan else if active then white else gray) blue
     text=PluginWindow.preparedWindowText prepared
     rows=PluginWindow.preparedWindowRows prepared
     title=" "<>T.take (columnOffset (windowTitle d w) (max 0 (ww-17))) (windowTitle d w)<>" "
@@ -443,9 +444,26 @@ pluginWindowLayers d active w prepared=
       ++[CellImage (place (x+1) (y+1) (V.charFill edit ' ' (max 0 (ww-2)) (max 0 (hh-2))))]
       | otherwise=[CellImage (place (x+1) (y+1) body)]
     body=V.vertCat [line n | n<-[scrollRow w..scrollRow w+max 0 (hh-3)]]
-    line n=V.cropRight (max 0 (ww-2))
-      (V.translateX (negate (scrollColumn w)) (styledImage (darkAppearance d) (const True) Nothing active (selection w)
-        (contentLineOffset text n) (fromMaybe [] (rows Vec.!? n))) V.<|> V.charFill edit ' ' (max 0 (ww-2)) 1)
+    line n=V.cropRight (max 0 (ww-2)) (lineImage V.<|> V.charFill edit ' ' (max 0 (ww-2)) 1)
+      where
+        start=contentLineOffset text n
+        lineImage=case rows of
+          PluginWindow.PlainRows plain->maybe V.emptyImage
+            (styledSourceImage (darkAppearance d) Nothing active (selection w) start (scrollColumn w) (max 0 (ww-2))) (plain Vec.!? n)
+          PluginWindow.StyledRows styled->V.translateX (negate (scrollColumn w))
+            (styledImage (darkAppearance d) (const True) Nothing active (selection w) start (fromMaybe [] (styled Vec.!? n)))
+
+-- Shared frame chrome uses the same semantic geometry as pointer dispatch.
+windowScrollbarImage :: Desktop -> Bool -> Window -> V.Image
+windowScrollbarImage d vertical w=case windowScrollbar d vertical w of
+  Nothing->V.emptyImage
+  Just (Rect sx sy bw bh,limit)->
+    let len=if vertical then bh else bw
+        shown=displayWindow w
+        thumb=scrollbarThumb len limit (if vertical then scrollRow shown else scrollColumn shown)
+        cell n=V.char (if n==0 || n==len-1 then attr blue scrollCyan else attr scrollCyan blue)
+          (if n==0 then if vertical then '▲' else '◄' else if n==len-1 then if vertical then '▼' else '►' else if n==thumb then '█' else '░')
+    in place sx sy ((if vertical then V.vertCat else V.horizCat) [cell n | n<-[0..len-1]])
 
 windowLayers :: Desktop -> Bool -> Window -> [CellLayer]
 windowLayers d active w | PluginContent reference<-windowContent w = case M.lookup reference (pluginWindows d) of
@@ -454,7 +472,7 @@ windowLayers d active w | PluginContent reference<-windowContent w = case M.look
 windowLayers d active original =
   map CellImage ([place x (y+1+issueRow issue-scrollRow w) (label (attr (if diagnosticSeverity issue==1 then V.RGBColor 255 85 85 else yellow) blue) "▶")
     | bufferView w/=MarkdownView,not (byteMode (documentBuffer doc)), issue<-diagnostics d, Just (diagnosticPath issue)==fmap filePath (documentFile doc), issueRow issue>=scrollRow w, issueRow issue<scrollRow w+hh-2]
-  ++ (if active then [place (x+windowPositionColumn doc) (y+hh-1) (label frame (T.take (max 0 (ww-windowPositionColumn doc-2)) (windowPositionText d doc w))),scrollbarImage True,scrollbarImage False] else [])
+  ++ (if active then [place (x+windowPositionColumn doc) (y+hh-1) (label frame (T.take (max 0 (ww-windowPositionColumn doc-2)) (windowPositionText d doc w))),windowScrollbarImage d True w,windowScrollbarImage d False w] else [])
   ++ [place (x+6) y (label frame "[" V.<|> label (attr cyan blue) " " V.<|> label frame "]") | active,terminalWindow d w,not (windowPinned d w)]
   ++ composerLayers
   ++ hexDividerLayers
@@ -502,13 +520,6 @@ windowLayers d active original =
       Nothing -> True
       Just title -> title `elem` ["Conversation","Haskell Help"] || any (`T.isPrefixOf` title) ["Terminal ","Source "]
     styledLines=splitStyled (documentHighlight doc)
-    scrollbarImage vertical =
-      let Rect sx sy bw bh=scrollbarRect d vertical doc w
-          len=if vertical then bh else bw
-          thumb=scrollbarThumb len (scrollbarLimit d vertical doc w) (if vertical then scrollRow w else scrollColumn w)
-          cell n=V.char (if n==0 || n==len-1 then attr blue scrollCyan else attr scrollCyan blue)
-            (if n==0 then if vertical then '▲' else '◄' else if n==len-1 then if vertical then '▼' else '►' else if n==thumb then '█' else '░')
-      in place sx sy ((if vertical then V.vertCat else V.horizCat) [cell n | n<-[0..len-1]])
     composerLayers
       | documentLabel doc/=Just "Conversation" && not hintComposer = []
       | otherwise = [place (left rect) (top rect) inputImage] ++ thoughtEdges

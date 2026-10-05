@@ -2341,8 +2341,8 @@ windowMouse x y button mods d = case find (\w -> windowVisible d w && inside (bo
       | y==t && (x==l || x==l+ww-1) -> (beginWindowDrag (EdgeSizing (windowId w) True True 0) focused,[])
       | y==t -> (beginWindowDrag (Moving (windowId w) (x-l) (y-t)) focused,[])
       | x>=l+ww-2 && y==t+hh-1 -> (beginWindowDrag (Resizing (windowId w) (l+ww-x) (t+hh-y)) focused,[])
-      | Just doc<-activeDocument focused, inside (scrollbarRect focused True doc w) x y -> (scrollClick True x y focused,[])
-      | Just doc<-activeDocument focused, inside (scrollbarRect focused False doc w) x y -> (scrollClick False x y focused,[])
+      | Just (rect,_)<-windowScrollbar focused True w, inside rect x y -> (scrollClick True x y focused,[])
+      | Just (rect,_)<-windowScrollbar focused False w, inside rect x y -> (scrollClick False x y focused,[])
       | x==l -> (beginWindowDrag (EdgeSizing (windowId w) False True 0) focused,[])
       | x==l+ww-1 -> (beginWindowDrag (EdgeSizing (windowId w) False False 1) focused,[])
       | y==t+hh-1 -> (beginWindowDrag (EdgeSizing (windowId w) True False 1) focused,[])
@@ -2513,6 +2513,24 @@ scrollbarLimit d vertical doc w | bufferView w==MarkdownView=markdownScrollLimit
 scrollbarLimit d vertical doc w = max 0 (if vertical then (case windowPresentation d w of Just layout->Vec.length (TextLayout.layoutRows layout); Nothing->documentRows doc w)-max 1 (windowContentRows d doc w)
   else (case windowPresentation d w of Just layout->TextLayout.layoutWidth layout; Nothing->windowDocumentWidth doc w)-max 1 (if bufferView w==SideBySideView then min (fst (reviewPaneWidths w)) (snd (reviewPaneWidths w)) else width (bounds w)-2)+(if byteMode (documentBuffer doc) then 0 else 1))
 
+-- | Frame scrollbar geometry and limits for the actual semantic view. Plain
+-- plugin extents are prepared/cached by their worker; no content is scanned here.
+windowScrollbar :: Desktop -> Bool -> Window -> Maybe (Rect,Int)
+windowScrollbar d vertical original=case windowContent original of
+  SourceContent _->do
+    doc<-windowDocument (buffers d) original
+    pure (scrollbarRect d vertical doc w,scrollbarLimit d vertical doc w)
+  PluginContent reference->do
+    prepared<-M.lookup reference (pluginWindows d)
+    let Rect x y ww hh=bounds w
+        rect=if vertical then Rect (x+ww-1) (y+1) 1 (max 0 (hh-2))
+          else Rect (x+2) (y+hh-1) (max 0 (ww-4)) 1
+        extent=if vertical then windowTextRows d w (PluginWindow.preparedWindowText prepared)
+          else maybe (PluginWindow.preparedWindowWidth prepared) TextLayout.layoutWidth (windowPresentation d w)
+        viewport=if vertical then max 1 (hh-2) else max 1 (ww-2)
+    pure (rect,max 0 (extent-viewport+(if vertical then 0 else 1)))
+  where w=displayWindow original
+
 -- Each split chooses its own layout. Keep the byte viewport and a visible caret
 -- anchored when resizing or docking Files changes the number of bytes per row.
 clampHexScroll :: Desktop -> Desktop -> Desktop
@@ -2537,21 +2555,21 @@ changeScroll :: Bool -> Int -> Desktop -> Desktop
 changeScroll vertical delta d | activeMarkdown d,Just w<-activeWindow d =
   modifyActive (modifyDisplayedWindow (\shown->if vertical then shown {scrollRow=max 0 (min (markdownScrollLimit d True w) (scrollRow shown+delta))}
     else shown {scrollColumn=max 0 (min (markdownScrollLimit d False w) (scrollColumn shown+delta))})) d
-changeScroll vertical delta d | Just view<-activePluginWindow d =
-  modifyActive (\w->if vertical then w {scrollRow=max 0 (min (max 0 (windowTextRows d w (PluginWindow.preparedWindowText view)-height (bounds w)+2)) (scrollRow w+delta))}
-    else w {scrollColumn=max 0 (scrollColumn w+delta)}) d
+changeScroll vertical delta d | Just w<-activeWindow d,PluginContent{}<-windowContent w,Just (_,limit)<-windowScrollbar d vertical w =
+  modifyActive (\shown->if vertical then shown {scrollRow=max 0 (min limit (scrollRow shown+delta))}
+    else shown {scrollColumn=max 0 (min limit (scrollColumn shown+delta))}) d
 changeScroll vertical delta d = case (activeWindow d,activeDocument d) of
   (Just w,Just doc) -> let value=max 0 (min (scrollbarLimit d vertical doc w) ((if vertical then scrollRow w else scrollColumn w)+delta))
     in modifyActive (\v -> if vertical then v {scrollRow=value} else v {scrollColumn=value}) d
   _ -> d
 
 scrollClick :: Bool -> Int -> Int -> Desktop -> Desktop
-scrollClick vertical x y d = case (displayWindow <$> activeWindow d,activeDocument d) of
-  (Just w,Just doc) ->
-    let r=scrollbarRect d vertical doc w
+scrollClick vertical x y d = case activeWindow d of
+  Just original | Just (r,limit)<-windowScrollbar d vertical original ->
+    let w=displayWindow original
         len=if vertical then height r else width r
         offset=if vertical then y-top r else x-left r
-        thumb=scrollbarThumb len (scrollbarLimit d vertical doc w) (if vertical then scrollRow w else scrollColumn w)
+        thumb=scrollbarThumb len limit (if vertical then scrollRow w else scrollColumn w)
         page=max 1 ((if vertical then height else width) (bounds w)-2)
     in if offset==0 then changeScroll vertical (-1) d
        else if offset==len-1 then changeScroll vertical 1 d
@@ -2560,11 +2578,11 @@ scrollClick vertical x y d = case (displayWindow <$> activeWindow d,activeDocume
   _ -> d
 
 scrollTrack :: Bool -> Int -> Int -> Desktop -> Desktop
-scrollTrack vertical x y d = case (displayWindow <$> activeWindow d,activeDocument d) of
-  (Just w,Just doc) -> let { r=scrollbarRect d vertical doc w
+scrollTrack vertical x y d = case activeWindow d of
+  Just original | Just (r,limit)<-windowScrollbar d vertical original -> let { w=displayWindow original
                          ; len=if vertical then height r else width r
                          ; offset=if vertical then y-top r else x-left r
-                         ; value=max 0 (min (scrollbarLimit d vertical doc w) ((offset-1)*scrollbarLimit d vertical doc w `div` max 1 (len-3))) }
+                         ; value=max 0 (min limit ((offset-1)*limit `div` max 1 (len-3))) }
                      in modifyActive (modifyDisplayedWindow (\v -> if vertical then v {scrollRow=value} else v {scrollColumn=value})) d
   _ -> d
 

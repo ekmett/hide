@@ -112,7 +112,10 @@ retrying. See the [command contract](agent-tools.md#haskell-language-service-and
 
 **Do:** inspect unsaved buffers; save the intended source changes.
 `build_start` chooses `compile`, `make` or `run`, with optional job-local
-`toolchain`, `target` and `arguments`. Poll `build_status`; read its output buffer.
+`toolchain`, `target` and `arguments`. Poll `build_status`; page combined stdout/stderr with `build_output` and its
+exact `jobId`. Offsets count Unicode characters; each read is limited to 32768
+characters. A new job expires the previous ID; closing its window does not stop
+the job or discard the last retained output.
 Use `test_start` for GHC/Cabal tests and `test_status` for suite outcomes and explicit TAP 13 cases. For an
 interactive program, use a shared terminal: `terminal_start`, `terminal_input`,
 `terminal_output`; `terminal_list` finds existing terminals.

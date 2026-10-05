@@ -9,7 +9,7 @@ module Hide.Plugin.Window
   ( WindowRef, WindowScope, WindowUpdate, withWindowScope, openTextWindow, refreshTextWindow
   , updateWindowRef, admitWindowUpdate, windowRefCurrent, retireWindowRef
   , PreparedWindow, prepareTextWindow, prepareMarkdownWindow, prepareStyledTextWindow, prepareRecoverableTextWindow
-  , preparedWindowTitle, preparedWindowText, preparedWindowRows, preparedWindowHasSections, preparedWindowNeedsLayout, preparedWindowRecovery
+  , WindowRows(..), preparedWindowTitle, preparedWindowText, preparedWindowRows, preparedWindowWidth, preparedWindowHasSections, preparedWindowNeedsLayout, preparedWindowRecovery
   ) where
 
 import Control.Exception (evaluate, bracket)
@@ -19,9 +19,10 @@ import qualified Data.Text as T
 import Data.Unique (Unique, newUnique, hashUnique)
 import qualified Data.Vector as V
 import Hide.Buffer (BufferContent, bufferContent, newBuffer, prepareBuffer)
+import Hide.Unicode (sourceTextWidth)
 import Hide.Markdown (renderMarkdown)
 import Hide.Plugin.Command (validCommandName)
-import Hide.Syntax (Style(..),sectionTitle,styleScript)
+import Hide.Syntax (Style(..),SourceRow,plainSourceRow,sourceRowText,sourceRowRanges,sourceRangeCharEnd,sectionTitle,styleScript)
 
 -- | Exact content instance. A closed/reopened view cannot reuse this identity.
 data WindowRef = WindowRef Unique WindowScope (TVar (Integer,Bool))
@@ -34,31 +35,37 @@ instance Show WindowRef where
 
 -- | Fully prepared immutable text and styled display rows. Equality observes
 -- the unique prepared identity only, never text or styled payloads.
-data PreparedWindow = PreparedWindow !Unique !Text !BufferContent !(V.Vector [(Char,Style)]) !(Maybe (Text,Int)) !Bool !Bool
+data WindowRows = PlainRows !(V.Vector SourceRow) | StyledRows !(V.Vector [(Char,Style)])
+data PreparedWindow = PreparedWindow !Unique !Text !BufferContent !WindowRows !Int !(Maybe (Text,Int)) !Bool !Bool
 preparedWindowRef :: PreparedWindow -> Unique
-preparedWindowRef (PreparedWindow ident _ _ _ _ _ _)=ident
+preparedWindowRef (PreparedWindow ident _ _ _ _ _ _ _)=ident
 preparedWindowTitle :: PreparedWindow -> Text
-preparedWindowTitle (PreparedWindow _ title _ _ _ _ _)=title
+preparedWindowTitle (PreparedWindow _ title _ _ _ _ _ _)=title
 preparedWindowText :: PreparedWindow -> BufferContent
-preparedWindowText (PreparedWindow _ _ text _ _ _ _)=text
-preparedWindowRows :: PreparedWindow -> V.Vector [(Char,Style)]
-preparedWindowRows (PreparedWindow _ _ _ rows _ _ _)=rows
+preparedWindowText (PreparedWindow _ _ text _ _ _ _ _)=text
+preparedWindowRows :: PreparedWindow -> WindowRows
+preparedWindowRows (PreparedWindow _ _ _ rows _ _ _ _)=rows
+
+-- | Worker-cached natural cell extent; querying it never scans content. Semantic
+-- heading/script layouts override this extent with their own prepared width.
+preparedWindowWidth :: PreparedWindow -> Int
+preparedWindowWidth (PreparedWindow _ _ _ _ width _ _ _)=width
 
 -- | Cached heading presence, forced during preparation; input never scans rows.
 preparedWindowHasSections :: PreparedWindow -> Bool
-preparedWindowHasSections (PreparedWindow _ _ _ _ _ sections _)=sections
+preparedWindowHasSections (PreparedWindow _ _ _ _ _ _ sections _)=sections
 
 -- | Cached semantic layout admission, forced by the preparation worker. Input
 -- observes only these scalar flags; it never scans styled rows. Script geometry
 -- is independent of the wide-heading preference.
 preparedWindowNeedsLayout :: Bool -> PreparedWindow -> Bool
-preparedWindowNeedsLayout wide (PreparedWindow _ _ _ _ _ sections scripts)=scripts || wide && sections
+preparedWindowNeedsLayout wide (PreparedWindow _ _ _ _ _ _ sections scripts)=scripts || wide && sections
 
 -- | Explicit durable type/version. Ordinary prepared views are transient: their
 -- text is never checkpointed implicitly. The host restores durable text as an
 -- inert unavailable view; it does not invoke a plugin from the recovery parser.
 preparedWindowRecovery :: PreparedWindow -> Maybe (Text,Int)
-preparedWindowRecovery (PreparedWindow _ _ _ _ recovery _ _)=recovery
+preparedWindowRecovery (PreparedWindow _ _ _ _ _ recovery _ _)=recovery
 
 -- | Prepare text whose title and content may be written to private recovery.
 -- Use only non-secret state declared durable by the view's owner. Type IDs are
@@ -67,8 +74,8 @@ prepareRecoverableTextWindow :: Text -> Int -> Text -> Text -> IO (Either Text P
 prepareRecoverableTextWindow kind version title text
   | not (validCommandName kind) || T.length kind>128 || version<=0=pure (Left "Invalid durable plugin window type/version.")
   | otherwise=do
-      PreparedWindow ident caption measured rows _ sections scripts<-prepareTextWindow title text
-      pure (Right (PreparedWindow ident caption measured rows (Just (kind,version)) sections scripts))
+      PreparedWindow ident caption measured rows width _ sections scripts<-prepareTextWindow title text
+      pure (Right (PreparedWindow ident caption measured rows width (Just (kind,version)) sections scripts))
 
 instance Eq PreparedWindow where
   a==b=preparedWindowRef a==preparedWindowRef b
@@ -77,7 +84,17 @@ instance Show PreparedWindow where
 
 -- | Prepare ordinary selectable text on the calling worker.
 prepareTextWindow :: Text -> Text -> IO PreparedWindow
-prepareTextWindow title text=prepareStyledTextWindow title [(c,Plain) | c<-T.unpack text]
+prepareTextWindow title text=do
+  ident<-newUnique
+  let measured=newBuffer text
+      rows=V.fromList (map plainSourceRow (T.splitOn "\n" text))
+      -- plainSourceRow counts UTF8 characters. Force that metadata and the cell
+      -- extent here once, never while rendering a long line or using a scrollbar.
+      width=V.foldl' (\longest row->let count=V.foldl' (\_ range->sourceRangeCharEnd range) 0 (sourceRowRanges row)
+        in count `seq` max longest (sourceTextWidth (sourceRowText row))) 0 rows
+  _<-evaluate width
+  _<-evaluate (prepareBuffer measured)
+  evaluate (PreparedWindow ident (safeTitle title) (bufferContent measured) (PlainRows rows) width Nothing False False)
 
 -- | Prepare CommonMark at a requested cell width on the calling worker.
 -- Copy addresses the laid-out semantic text, excluding host chrome.
@@ -92,15 +109,19 @@ prepareStyledTextWindow title styled=do
   ident<-newUnique
   let rows=V.fromList (split styled)
   _<-evaluate (V.foldl' (\n row->foldl' (\m (c,s)->c `seq` s `seq` m+1) n row) (0::Int) rows)
-  let measured=newBuffer (T.pack (map fst styled))
+  let source=T.pack (map fst styled)
+      measured=newBuffer source
   _<-evaluate (prepareBuffer measured)
-  evaluate (PreparedWindow ident (T.take 8192 (T.map safe title)) (bufferContent measured) rows Nothing (any (sectionTitle . snd) styled) (any (maybe False (const True) . styleScript . snd) styled))
+  let width=maximum (0:map sourceTextWidth (T.splitOn "\n" source))
+  _<-evaluate width
+  evaluate (PreparedWindow ident (safeTitle title) (bufferContent measured) (StyledRows rows) width Nothing (any (sectionTitle . snd) styled) (any (maybe False (const True) . styleScript . snd) styled))
   where
-    safe c | c<' ' || c=='\DEL'=' '
-           | otherwise=c
     split chars=case break ((=='\n').fst) chars of
       (line,[])->[line]
       (line,_:rest)->line:split rest
+
+safeTitle :: Text -> Text
+safeTitle=T.take 8192 . T.map (\c->if c<' ' || c=='\DEL' then ' ' else c)
 
 -- | A publication lifetime. Closing revokes every escaped instance without
 -- invoking callbacks. Existing command/sidebar workers own preparation and join
