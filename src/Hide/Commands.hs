@@ -12,6 +12,7 @@ import Control.Monad (unless, forM_)
 import qualified Graphics.Vty as V
 import Data.List (find)
 import qualified Data.Map.Strict as M
+import qualified Hide.Bindings
 import Hide.Bindings (BindingPlatform(..), bindingPlatforms, platformName, BindingContext(..), bindingContexts, contextName, Bindings, compileBindings, readChord)
 import Hide.Model (Desktop(..), Command(..), terminalSourceReserved, wordStarReserved, dialogBindingCommands, dialogReserved)
 import qualified Hide.Plugin.Menu as Plugin
@@ -44,6 +45,13 @@ builtinCommands =
   ,BuiltinCommand "hide.edit.copy" (Copy)
   ,BuiltinCommand "hide.edit.paste" (Paste)
   ,BuiltinCommand "hide.edit.select-all" (SelectAll)
+  ,BuiltinCommand "hide.cursor.left" (CursorLeft False)
+  ,BuiltinCommand "hide.cursor.right" (CursorRight False)
+  ,BuiltinCommand "hide.selection.left" (CursorLeft True)
+  ,BuiltinCommand "hide.selection.right" (CursorRight True)
+  ,BuiltinCommand "hide.edit.delete-backward" DeleteBackward
+  ,BuiltinCommand "hide.edit.delete-forward" DeleteForward
+  ,BuiltinCommand "hide.edit.delete-line" DeleteLine
   ,BuiltinCommand "hide.edit.toggle-hex" (ToggleHex)
   ,BuiltinCommand "hide.language.complete" (Complete)
   ,BuiltinCommand "hide.search.find" (Find)
@@ -207,7 +215,9 @@ platformBindings catalogue platform configuration=do
     defaultsFor DialogKeys=[(Copy,["Ctrl+C","Ctrl+Shift+C"]),(Cut,["Ctrl+X","Ctrl+Shift+X"]),(Paste,["Ctrl+V","Ctrl+Shift+V"]),
       (SelectAll,["Ctrl+A","Ctrl+Shift+A"]),(Undo,["Ctrl+Z"]),(Redo,["Ctrl+Y","Ctrl+Shift+Z"]),
       (Find,["Ctrl+F"]),(Replace,["Ctrl+H","Ctrl+R"])]
-    defaultsFor WordStarKeys=[(action,filter named chords) | (action,chords)<-defaults]
+    defaultsFor WordStarKeys=[(action,filter named chords) | (action,chords)<-defaults] ++
+      [(action,chords++maybe [] id (lookup action [(CursorLeft False,["Ctrl+S","Ctrl+Shift+S"]),(CursorRight False,["Ctrl+D","Ctrl+Shift+D"])])) | (action,chords)<-horizontalDefaults] ++
+      [(DeleteLine,["Ctrl+Y","Ctrl+Shift+Y","Ctrl+Alt+Y","Ctrl+Alt+Shift+Y"])]
       where named raw=case readChord raw of
               Right (key,mods) | wordStarReserved key mods -> False
               Right (V.KChar c,mods) | V.MCtrl `elem` mods ->
@@ -223,7 +233,15 @@ platformBindings catalogue platform configuration=do
       [(Copy,["Ctrl+C","Ctrl+Shift+C","Ctrl+Insert"]),(Cut,["Ctrl+X","Ctrl+Shift+X","Shift+Delete"]),
        (Paste,["Ctrl+V","Ctrl+Shift+V","Shift+Insert"]),(SelectAll,["Ctrl+A","Ctrl+Shift+A"]),
        (Redo,["Ctrl+Y","Ctrl+Shift+Y","Ctrl+Shift+Z"])]
+    defaultsFor SourceKeys=defaults++horizontalDefaults
     defaultsFor _=defaults
+    horizontalDefaults=
+      [(CursorLeft False,aliases V.KLeft False),(CursorRight False,aliases V.KRight False),
+       (CursorLeft True,aliases V.KLeft True),(CursorRight True,aliases V.KRight True),
+       (DeleteBackward,aliases V.KBS False++aliases V.KBS True),
+       (DeleteForward,aliases V.KDel False++filter (/="Shift+Delete") (aliases V.KDel True))]
+    aliases key shift=[name | mods<-[[V.MShift | shift]++extra | extra<-[[],[V.MAlt],[V.MMeta],[V.MMeta,V.MAlt]]],
+      platform/=TerminalPlatform || V.MMeta `notElem` mods,not (terminalSourceReserved key mods),Just name<-[Hide.Bindings.chordName key mods]]
     defaults=
       [(New,["Ctrl+N"]),(Open,["F3","Ctrl+O"]),(Save,["F2","Ctrl+S"])
       ,(Close,["Alt+F3"]),(Quit,["Alt+X","Ctrl+Q"])
