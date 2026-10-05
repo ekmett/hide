@@ -149,6 +149,8 @@ guestEffectsAllowed :: [Effect] -> Bool
 guestEffectsAllowed=all allowed
   where
     allowed SessionSidebarAction{}=False
+    allowed SubmitInputForm{}=False
+    allowed RetireInputForm{}=False
     allowed AgentSidebarAction{}=False
     allowed ReloadKeyBindings{}=False
     allowed (InvokeMenu _ origin _)=origin==Plugin.AgentMenu
@@ -174,7 +176,7 @@ protectedPurpose :: Purpose -> Bool
 protectedPurpose p=case p of
   AgentChoiceDialog{} -> True
   CompletionChoiceDialog{} -> True
-  AgentRenameDialog{} -> True
+  PluginInputForm{} -> True
   AgentNewDialog -> True
   EnvironmentDialog{} -> True
   PermissionDialog{} -> True
@@ -256,8 +258,10 @@ privateField :: Field -> Bool
 privateField field | Just (label,_)<-inputValue field=sensitiveLabel label
 privateField (CheckBox "Streamer mode" _)=True
 privateField _=False
+pluginForm :: Dialog -> Bool
+pluginForm dg=case purpose dg of PluginInputForm{}->True; _->False
 privateDialogField :: Desktop -> Dialog -> Field -> Bool
-privateDialogField d dg field=privateSourceWatch d dg || privateField field || case inputValue field of
+privateDialogField d dg field=pluginForm dg || privateSourceWatch d dg || privateField field || case inputValue field of
   Just (_,value) -> case purpose dg of
     Opening base _ _ -> privateName base value
     ChangingDirectory base _ -> privateName base value
@@ -305,6 +309,7 @@ cellAccess :: Desktop -> Int -> Int -> CellAccess
 cellAccess d x y=CellAccess (readableAt d x y) (pointerAllowedAt d x y)
 readableAt :: Desktop -> Int -> Int -> Bool
 readableAt d x y
+  | Just dg<-dialog d,pluginForm dg,inside (dialogRect d dg) x y || y==snd (screenSize d)-1=False
   | Just dg<-dialog d, DebugDialog action<-purpose dg, privateDebuggerAction action,
     inside (dialogRect d dg) x y || y==snd (screenSize d)-1=False
   | Just dg<-dialog d, PermissionDialog{}<-purpose dg, inside (dialogRect d dg) x y || y==snd (screenSize d)-1=False
@@ -322,6 +327,7 @@ readableAt d x y
 -- Labels remain visible; only sensitive value rows are blanked.
 streamerReadableAt :: Desktop -> Int -> Int -> Bool
 streamerReadableAt d x y
+  | Just dg<-dialog d,pluginForm dg,inside (dialogRect d dg) x y || y==snd (screenSize d)-1=False
   | Just dg<-dialog d, DebugDialog action<-purpose dg, privateFrameChooserAction action,
     inside (dialogRect d dg) x y || y==snd (screenSize d)-1=False
   | y==snd (screenSize d)-1, "Session " `T.isPrefixOf` status d=False

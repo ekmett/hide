@@ -23,6 +23,7 @@ import Hide.BufferView
 import Hide.Defaults
 import qualified Hide.Plugin.Menu as PluginMenu
 import Hide.TextPresentation
+import qualified Hide.Plugin.Form as Form
 import Hide.PluginWindowHost (tickPluginWindows,retireClosedWindow)
 import Hide.MenuCommands
 import Hide.Keybindings
@@ -553,6 +554,8 @@ applyEffects = foldM apply . (False,)
     apply (_,d) (RetirePluginWindow reference)=(False,) <$> retireClosedWindow reference d
     -- Reload/inspection belong to the session worker, not this blocking file
     -- interpreter used by standalone drivers and snapshots.
+    apply (_,d) SubmitInputForm{}=pure (False,d {status="Input form submission requires its sidebar owner."})
+    apply (_,d) (RetireInputForm reference)=Form.retireForm reference >> pure (False,d)
     apply (_,d) ReloadKeyBindings{}=pure (False,d {status="Binding reload requires a running session."})
     apply (_,d) InspectKeyBindings{}=pure (False,d {status="Binding inspection requires a running session."})
     apply (_,d) (EnvironmentAction action args)= (False,) <$> environmentAction action args d

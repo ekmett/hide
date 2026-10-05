@@ -328,13 +328,6 @@ applyAgentSidebar runtime@(ConversationState _ ref _ _ agents) request d=case re
         current<-AH.agentConfigurationCurrent hub receipt
         if current then performPrimary runtime "set-config" [option,value] d else pure d {status="Agent setting expired."}
     | otherwise->startChildControl runtime (AH.agentConfigAgent receipt) Nothing (AH.configureAgentAt hub receipt option value) d
-  RenameAgent ident->do
-    selected<-AH.statusAgent hub AH.Human ident
-    pure $ case selected of
-      Left err->d {status=err}
-      Right entry->let name=fromMaybe (AH.agentIdText ident) (field "name" entry)
-        in d {dialog=Just (Dialog "Rename agent" (AgentRenameDialog ident)
-          [SelectedInput "Name" name (Selection 0 (T.length name))] 0 ["Rename","Cancel"] []),contextMenu=Nothing,contextTarget=Nothing}
   RenameAgentTo ident name->do
     result<-AH.renameAgent hub AH.Human ident name
     pure d {status=either id (const "Agent renamed.") result}
