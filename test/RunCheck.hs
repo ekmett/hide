@@ -21,9 +21,9 @@ import qualified Graphics.Vty as V
 import System.Directory
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.FilePath ((</>))
-import System.IO (hClose, openTempFile, withBinaryFile, IOMode(..), hFlush)
+import System.IO (hClose, openTempFile, withBinaryFile, IOMode(..), Handle, hFlush)
 #ifndef mingw32_HOST_OS
-import System.Posix.IO (openFd, fdToHandle, OpenMode(WriteOnly), defaultFileFlags)
+import System.Posix.IO (openFd, closeFd, OpenMode(ReadWrite), OpenFileFlags(nonBlock), defaultFileFlags)
 #endif
 import System.Process (callProcess)
 import System.Timeout (timeout)
@@ -211,7 +211,7 @@ buildPreparationChecks=when (os/="mingw32") $ bracket temporary removePathForcib
     opened<-newEmptyMVar
     release<-newEmptyMVar
     withAsync (withSettingsWriter path $ \handle->do
-      BL.hPut handle bytes; hFlush handle; putMVar opened (); takeMVar release) $ \writer ->
+      BL.hPut handle (bytes<>BL.replicate 1048577 32); hFlush handle; putMVar opened (); takeMVar release) $ \writer ->
       withConversationAt root $ \runtime -> do
         fast<-timeout 500000 (raw runtime "make" base)
         pending<-maybe (error "build settings read blocked the owner") pure fast
@@ -326,13 +326,14 @@ check label ok=unless ok (error label)
 withEnv :: String -> Maybe String -> IO a -> IO a
 withEnv name value action=bracket (lookupEnv name <* set value) set (const action)
   where set=maybe (unsetEnv name) (setEnv name)
--- A blocking writer open proves the actual reader exists. GHC's ordinary
--- WriteMode FIFO open can fail with ENXIO before that reader is acquired.
+-- Keep FIFO EOF held without a blocking open on the sole capability. Writes
+-- larger than its capacity prove the real configuration reader consumed them.
 withSettingsWriter :: FilePath -> (Handle -> IO a) -> IO a
 #ifdef mingw32_HOST_OS
 withSettingsWriter path=withBinaryFile path WriteMode
 #else
-withSettingsWriter path=bracket (openFd path WriteOnly defaultFileFlags >>= fdToHandle) hClose
+withSettingsWriter path action=bracket (openFd path ReadWrite defaultFileFlags {nonBlock=True}) closeFd $
+  \_->withBinaryFile path WriteMode action
 #endif
 
 temporary :: IO FilePath
@@ -542,7 +543,7 @@ admittedBuildChecks=when (os/="mingw32") $ bracket temporary removePathForcibly 
           opened<-newEmptyMVar
           release<-newEmptyMVar
           withAsync (withSettingsWriter configPath $ \handle->do
-            BL.hPut handle bytes; hFlush handle; putMVar opened (); takeMVar release) $ \writer->do
+            BL.hPut handle (bytes<>BL.replicate 1048577 32); hFlush handle; putMVar opened (); takeMVar release) $ \writer->do
               pending<-admit runtime permissions caller base
               reached<-timeout 5000000 (takeMVar opened)
               check "guest build planning reaches held configuration read" (reached==Just ())
