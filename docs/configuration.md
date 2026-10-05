@@ -135,12 +135,14 @@ one-grapheme movement and refuse deletion. WordStar adds Ctrl+S/D/E/X
 to horizontal/vertical movement and Ctrl+Y to `hide.edit.delete-line`; their
 Ctrl+Shift variants retain the same non-extending movement or line deletion.
 These commands can be replaced or unbound. Ctrl+Alt+E retains the Edit menu and
-Ctrl+Alt+X retains Exit. WordStar Ctrl+A/F aliases and Ctrl+K/Ctrl+Q prefix/block
-grammar stay fixed. Overrides using those owned chords fail validation. Global
-chords owned by this grammar are omitted from its inherited map, preserving their
-use in other contexts. Prefix command steps remain available even when the same
-named command is rebound or unbound in the table. WordStar Ctrl+A/F aliases and
-configurable prefix/block grammar remain open in #3. Hex buffers use `source`.
+Ctrl+Alt+X retains Exit. Ctrl+A/F and their shifted, non-extending aliases use
+`hide.cursor.word-left/right`, so replacing or unbinding those commands also
+replaces or removes the WordStar aliases. Ctrl+Alt+F retains the File menu.
+Ctrl+K/Ctrl+Q prefix/block grammar stays fixed. Overrides using those owned chords
+fail validation. Global chords owned by this grammar are omitted from its
+inherited map, preserving their use in other contexts. Prefix command steps remain
+available even when the same named command is rebound or unbound in the table.
+Configurable prefix/block grammar remains open in #3. Hex buffers use `source`.
 For example, `[editor.keybindings.terminal.wordstar]` with
 `"hide.file.save" = ["Ctrl+Shift+J"]` replaces F2 for WordStar sources only.
 For example, the `wordstar` table can rebind movement and selection:

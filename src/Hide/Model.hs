@@ -3079,11 +3079,11 @@ unboundKey key mods d = case bindingContext d of
   Just Bindings.WordStarKeys | wordStarReserved key mods -> keyEvent key mods d
   _ -> (editorKey key mods d,[])
 
--- | Unmigrated WordStar word movement and prefix/block grammar stay with
--- their local owner. Ctrl+Alt+X also retains its earlier Quit owner.
+-- | WordStar prefix/block grammar stays with its local owner.
+-- Ctrl+Alt+X also retains its earlier Quit owner.
 wordStarReserved :: V.Key -> [V.Modifier] -> Bool
 wordStarReserved (V.KChar c) mods=V.MCtrl `elem` mods && V.MMeta `notElem` mods &&
-  (toLower c `elem` ("afkq"::String) || toLower c=='x' && V.MAlt `elem` mods)
+  (toLower c `elem` ("kq"::String) || toLower c=='x' && V.MAlt `elem` mods)
 wordStarReserved _ _=False
 
 terminalSourceReserved :: V.Key -> [V.Modifier] -> Bool

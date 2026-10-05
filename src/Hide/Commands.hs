@@ -243,7 +243,8 @@ platformBindings catalogue platform configuration=do
       (SelectAll,["Ctrl+A","Ctrl+Shift+A"]),(Undo,["Ctrl+Z"]),(Redo,["Ctrl+Y","Ctrl+Shift+Z"]),
       (Find,["Ctrl+F"]),(Replace,["Ctrl+H","Ctrl+R"])]
     defaultsFor WordStarKeys=[(action,filter named chords) | (action,chords)<-defaults] ++
-      [(action,chords++maybe [] id (lookup action [(CursorLeft False,["Ctrl+S","Ctrl+Shift+S"]),(CursorRight False,["Ctrl+D","Ctrl+Shift+D"]),(CursorUp False,["Ctrl+E","Ctrl+Shift+E"]),(CursorDown False,["Ctrl+X","Ctrl+Shift+X"])])) | (action,chords)<-navigationDefaults] ++
+      [(action,chords++maybe [] id (lookup action [(CursorLeft False,["Ctrl+S","Ctrl+Shift+S"]),(CursorRight False,["Ctrl+D","Ctrl+Shift+D"]),(CursorUp False,["Ctrl+E","Ctrl+Shift+E"]),(CursorDown False,["Ctrl+X","Ctrl+Shift+X"]),
+        (CursorWordLeft False,["Ctrl+A","Ctrl+Shift+A","Ctrl+Alt+A","Ctrl+Alt+Shift+A"]),(CursorWordRight False,["Ctrl+F","Ctrl+Shift+F"])])) | (action,chords)<-navigationDefaults] ++
       [(DeleteLine,["Ctrl+Y","Ctrl+Shift+Y","Ctrl+Alt+Y","Ctrl+Alt+Shift+Y"])]
       where named raw=case readChord raw of
               Right (key,mods) | wordStarReserved key mods -> False
