@@ -8,6 +8,7 @@ import Blaze.ByteString.Builder (writeToByteString)
 import Blaze.ByteString.Builder.ByteString (writeByteString)
 import qualified Data.ByteString.Char8 as BS
 import qualified Data.Text as T
+import qualified Data.Text.Unsafe as TU
 import qualified Data.Text.Lazy as TL
 import qualified Data.Text.Encoding as TE
 import Data.Foldable (toList)
@@ -40,6 +41,27 @@ checks = do
   prefixAfter<-getAllocationCounter
   check "a grapheme prefix does not prepare the unconsumed UTF8 tail"
     (prefixCount==3 && prefixBefore-prefixAfter<262144)
+  let sourceReference goal text=go 0 0 0 (graphemes text)
+        where
+          go char byte col []=(char,byte,col,[])
+          go char byte col pending@(glyph:rest)=
+            let advance=sourceGlyphAdvance col glyph
+            in if col+advance>max 0 goal then (char,byte,col,pending)
+               else go (char+T.length glyph) (byte+TU.lengthWord8 glyph) (col+advance) rest
+      palette=["a","é","界","\t","\r","\0","e\x301","─\x301","👩🏽\x200d\&💻","🇦","🇧","\x301"]
+      generated seed=T.concat [palette!!(n `mod` length palette) | n<-take 24 (iterate (\n->(n*73+19) `mod` 65521) seed)]
+      sourceCases=["", "a\tb", "\rabc", "ab\r\ncd", "a\x301界x", "🇦🇧🇨🇩🇪"]++map generated [1..80]
+  forM_ sourceCases $ \text->forM_ [-1..90] $ \column->do
+    let actual@(char,byte,_,suffix)=sourceGraphemesFrom column text
+    check "numeric source seek preserves the original stateful grapheme suffix"
+      (actual==sourceReference column text && T.concat suffix==TU.dropWord8 byte text &&
+        T.length (TU.takeWord8 byte text)==char)
+  beforeSeek<-getAllocationCounter
+  seekCount<-evaluate (let (char,byte,col,suffix)=sourceGraphemesFrom 50000 longPrefix
+                       in char+byte+col+sum (map T.length (take 3 suffix)))
+  afterSeek<-getAllocationCounter
+  check "numeric source seek does not allocate discarded prefix fragments"
+    (seekCount==200003 && beforeSeek-afterSeek<262144)
   forM_ clusters $ \g -> do
     check "platform segments a complete grapheme" (graphemes g==[g])
     check "cursor crosses a complete grapheme" (nextCharacter (g<>"x") 0==T.length g && previousCharacter ("x"<>g) (1+T.length g)==1)

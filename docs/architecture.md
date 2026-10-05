@@ -45,8 +45,10 @@ projection is cached per revision for highlighting, file output and HLS.
 Highlighting and LSP full-document synchronization consume the whole document
 after an edit. The bounded highlighting worker retains original source-row Text
 and compact style ranges with character and UTF8 byte boundaries. Split views
-share these prepared rows. A lazy UTF8 iterator stops after complete graphemes
-overlapping the horizontal viewport; only those glyphs form fused display runs.
+share these prepared rows. A numeric UTF8 seek scans the horizontal prefix
+without creating discarded fragments, preserving the original utf8proc state.
+A lazy iterator then stops after complete graphemes overlapping the viewport;
+only those glyphs form fused display runs.
 The returned source-character and display starts preserve absolute tab columns
 and selection coordinates when a window clips part of a glyph. Ordinary
 one-cell characters borrow a same-style source slice, while exceptional

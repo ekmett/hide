@@ -74,6 +74,11 @@ checks = do
   viewAfter<-getAllocationCounter
   check "a long source row prepares only the horizontally visible glyphs"
     (viewCount>0 && viewBefore-viewAfter<4000000)
+  deepBefore<-getAllocationCounter
+  deepCount<-evaluate (T.length (snapshot (modifyActive (\w->w {scrollColumn=50000}) longView)))
+  deepAfter<-getAllocationCounter
+  check "far horizontal source scrolling skips prefix fragments without allocating them"
+    (deepCount>0 && deepBefore-deepAfter<4000000)
   firstStarted<-newEmptyMVar
   nextStarted<-newEmptyMVar
   releaseFirst<-newEmptyMVar

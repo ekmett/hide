@@ -1,4 +1,4 @@
-{-# LANGUAGE ForeignFunctionInterface, OverloadedStrings, BangPatterns #-}
+{-# LANGUAGE ForeignFunctionInterface, OverloadedStrings, BangPatterns, UnboxedTuples, MagicHash #-}
 -- | Shared grapheme segmentation, cell widths and picture composition.
 --
 -- utf8proc supplies stateful, lazy segmentation; source offsets remain
@@ -6,7 +6,7 @@
 -- Clipped GPU cells retain their full semantic glyph. Text-mode partial clusters
 -- become blanks. Terminal output advances
 -- explicitly past two-cell clusters even when the user's font draws them narrowly.
-module Hide.Unicode (graphemes, scalarWidth, clusterWidth, textImage, wideTextImage, displayClusters, terminalProjection, terminalSpan, CellSpan(..), CellLayer(..), cellRowsForLayers, cellRowsForPic, cellDisplayOps, flattenPicture, displayOpsForPic, updateDisplayOps, terminalText, textInputChar) where
+module Hide.Unicode (graphemes, sourceGraphemesFrom, sourceGlyphAdvance, scalarWidth, clusterWidth, textImage, wideTextImage, displayClusters, terminalProjection, terminalSpan, CellSpan(..), CellLayer(..), cellRowsForLayers, cellRowsForPic, cellDisplayOps, flattenPicture, displayOpsForPic, updateDisplayOps, terminalText, textInputChar) where
 
 import Control.Monad (forM_, when)
 import Data.Char (isPrint)
@@ -30,6 +30,7 @@ import qualified Data.Text.Lazy as TL
 import qualified Data.Vector as Vec
 import qualified Data.Vector.Mutable as MV
 import Foreign.C (CInt(..))
+import GHC.Exts (Int(I#))
 import qualified Graphics.Vty as V
 import qualified Graphics.Vty.Image.Internal as I
 
@@ -41,7 +42,13 @@ foreign import ccall unsafe "thc_grapheme_step" c_graphemeStep :: CInt -> CInt -
 -- the unconsumed tail. State survives across yielded fragments, including RI
 -- pairs and ZWJ sequences. CRLF remains one complete cluster.
 graphemes :: T.Text -> [T.Text]
-graphemes text=scan 0 0 (-1) 0
+graphemes text=scanGraphemes text 0 0 (-1) 0
+{-# NOINLINE graphemes #-}
+
+-- The same boundary cursor resumes after a numeric source-prefix seek. Keeping
+-- previous/state at the original byte avoids restarting RI/ZWJ segmentation.
+scanGraphemes :: T.Text -> Int -> Int -> CInt -> CInt -> [T.Text]
+scanGraphemes text=scan
   where
     size=TU.lengthWord8 text
     slice start end=TU.takeWord8 (end-start) (TU.dropWord8 start text)
@@ -55,7 +62,61 @@ graphemes text=scan 0 0 (-1) 0
                 boundary=previous>=0 && step .&. 1/=0
                 rest=scan (if boundary then byte else start) (byte+bytes) point nextState
             in if boundary then slice start byte:rest else rest
-{-# NOINLINE graphemes #-}
+
+-- | Seek the first complete source grapheme overlapping a display column.
+-- The tuple contains Unicode-character offset, UTF8-byte offset, absolute
+-- display column and a lazy borrowed suffix. Skipped glyphs allocate no Text
+-- fragments or list nodes. Tabs use absolute columns; zero-width glyphs ending
+-- at the requested column are skipped. The suffix concatenates to the original
+-- source bytes beginning at the returned byte offset, including partial-wide
+-- left edges. Stateful segmentation is identical to 'graphemes'.
+sourceGraphemesFrom :: Int -> T.Text -> (Int,Int,Int,[T.Text])
+sourceGraphemesFrom requested text=
+  case seek 0 0 0 0 0 (-1) 0 '\0' 0 False of
+    (# char,byte,col,suffix #)->(I# char,I# byte,I# col,suffix)
+  where
+    -- Return primitive coordinates so recursive numeric state cannot escape
+    -- boxed through the public tuple; only the final result boxes each Int.
+    finish (I# char) (I# byte) (I# col) suffix=(# char,byte,col,suffix #)
+    goal=max 0 requested
+    size=TU.lengthWord8 text
+    seek !startByte !byte !startChar !char !col !previous !state !first !natural !controls
+      | byte>=size=
+          let advance=sourceAdvance col (char-startChar) first natural controls
+          in if col+advance>goal then finish startChar startByte col (scanGraphemes text startByte byte previous state)
+             else finish char byte (col+advance) []
+      | otherwise=case TU.iter text byte of
+          TU.Iter c bytes ->
+            let point=fromIntegral (fromEnum c)
+                step=if previous<0 then 0 else c_graphemeStep previous point state
+                nextState=fromIntegral (step `shiftR` 1)
+                boundary=previous>=0 && step .&. 1/=0
+            in if boundary then
+                 let advance=sourceAdvance col (char-startChar) first natural controls
+                 in if col+advance>goal then finish startChar startByte col (scanGraphemes text startByte byte previous state)
+                    else seek byte (byte+bytes) char (char+1) (col+advance) point nextState c (scalarWidth c) (sourceControl c)
+               else seek startByte (byte+bytes) startChar (char+1) col point nextState
+                 (if previous<0 then c else first) (max natural (scalarWidth c)) (controls || sourceControl c)
+{-# NOINLINE sourceGraphemesFrom #-}
+
+-- | Source display advance, independent of UTF8 bytes and scalar count.
+-- CR alone has zero advance, tabs reach the next eight-cell stop, and control
+-- graphemes use the existing one-cell placeholder. Other glyphs use the shared
+-- maximum scalar width. Numeric prefix seeking and visible emission share this
+-- policy; CRLF therefore remains a single one-cell control grapheme.
+sourceGlyphAdvance :: Int -> T.Text -> Int
+sourceGlyphAdvance col text=sourceAdvance col (T.length text)
+  (maybe '\0' fst (T.uncons text)) (clusterWidth text) (T.any sourceControl text)
+
+sourceControl :: Char -> Bool
+sourceControl c=c<' ' || c=='\DEL'
+
+sourceAdvance :: Int -> Int -> Char -> Int -> Bool -> Int
+sourceAdvance col count first natural controls
+  | count==1 && first=='\r'=0
+  | count==1 && first=='\t'=8-col `mod` 8
+  | controls=1
+  | otherwise=natural
 
 -- | Width of one Unicode scalar under the shared display overrides. Printable
 -- ASCII occupies one cell; combining/control scalars remain zero-width.
