@@ -63,6 +63,14 @@ checks = do
             (# end,count,advance,tab,overflow,next #)->
               let width=if tab then 8-col `mod` 8 else advance
               in (byte,end,col,count,width,overflow,cursor):go end (col+width) next
+      spanReference text start cursor target limit following=go start 0 0 [] False cursor
+        where
+          size=TU.lengthWord8 text
+          go byte chars count advances receipt current
+            | byte>=target || chars>=limit || byte>=size || following && size-byte<132=
+                (byte,chars,count,reverse advances,receipt,current)
+            | otherwise=case sourceItemStep text byte current of
+                (# end,n,width,tab,overflow,next #)->go end (chars+n) (count+1) ((width,tab):advances) overflow next
       leafReference goal col=go 0 0 col
         where
           go char byte column []=(char,byte,column,[])
@@ -76,6 +84,17 @@ checks = do
     check "complete-source cursor steps retain byte/count/width/overflow facts"
       (length captured==length flat && and [end-byte==TU.lengthWord8 (itemSourceText item) && count==itemScalarCount item &&
         advance==sourceItemAdvance col item && overflow==itemOverflow item | ((byte,end,col,count,advance,overflow,_),item)<-zip captured flat])
+    let starts=(0,initialSourceCursor):[(byte,cursor) | index<-[1,31,511,length captured-1],
+          (byte,_,_,_,_,_,cursor):_<-[drop index captured],index>=0]
+    forM_ starts $ \(start,cursor)->forM_ [start,start+1,start+128] $ \target->
+      forM_ [0,1,32,maxBound] $ \limit->forM_ [False,True] $ \following->do
+        let (end,chars,count,advances,overflow,next)=spanReference text start cursor target limit following
+            apply col=foldl (\c (width,tab)->if tab then 8*(c `div` 8+1) else c+width) col advances
+        check "numeric span receipt matches single-item stepping and absolute tab transforms"
+          (case sourceSpanStep text start cursor target limit following of
+            (# actualEnd,actualChars,actualCount,prefix,suffix,actualOverflow,actualNext #)->
+              (actualEnd,actualChars,actualCount,actualOverflow,actualNext)==(end,chars,count,overflow,next) &&
+              all (\col->(if prefix<0 then col+suffix else 8*((col+prefix) `div` 8+1)+suffix)==apply col) [0..15])
     -- Storage groups are cut only at captured item boundaries. Each resumes its
     -- Unicode context and restores the known last overflow flag at artificial EOF.
     forM_ [1,2] $ \groupSize->forM_ [0,groupSize..length flat-1] $ \start->do
