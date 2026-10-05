@@ -15,7 +15,7 @@ import Hide.Buffer (newBuffer, Selection(..))
 import qualified Hide.Buffer as B
 import Hide.BufferView
 import Hide.Files (FileState(..))
-import Hide.Syntax (Style(..))
+import Hide.Syntax (Style(..),prepareSourceRow)
 import qualified Data.Vector as Vec
 import qualified Graphics.Vty as V
 checks :: IO ()
@@ -34,7 +34,7 @@ checks = do
   forM_ [changeDoc (\doc->doc {documentBuffer=newBuffer "replacement with same revision"}) base,
          changeDoc (\doc->doc {documentHighlight=[('x',Keyword)]}) base,
          changeDoc (\doc->doc {documentLinks=[(0,1,"new target")]}) base,
-         changeDoc (\doc->doc {documentSourceRows=Just (Vec.singleton [('x',Comment)])}) base,
+         changeDoc (\doc->doc {documentSourceRows=Just (Vec.singleton (prepareSourceRow "x" [('x',Comment)]))}) base,
          changeDoc (\doc->doc {documentBuffer=B.markSaved original}) base,
          base {composerBuffer=newBuffer "new draft"},
          setDiagnostics (diagnostics base) base,

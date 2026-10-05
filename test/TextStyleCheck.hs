@@ -15,7 +15,7 @@ import Graphics.Vty.Span (SpanOp(..))
 import Hide.Buffer (newBuffer,Selection(..))
 import Hide.Model
 import Hide.Protocol (frameRows,framePacket,frameMetadata,decodeFrame)
-import Hide.Syntax (Style(..),fontTraits,linkSpans)
+import Hide.Syntax (Style(..),prepareSourceRow,fontTraits,linkSpans)
 import Hide.TextStyle
 import Hide.Markdown (renderMarkdown)
 import Hide.Render (snapshotHtml,renderCellRows)
@@ -30,7 +30,7 @@ checks=do
       foreground=0x123456
       row=[(c,TerminalStyle foreground 0x654321 flags) | (c,flags)<-[('B',1),('I',2),('X',3),('R',0)]]
       original=addDocument Nothing (newBuffer "BIXR") (initialDesktop (80,25))
-      desktop=original {buffers=M.adjust (\doc->doc {documentSourceRows=Just (V.singleton row)}) 1 (buffers original)}
+      desktop=original {buffers=M.adjust (\doc->doc {documentSourceRows=Just (V.singleton (prepareSourceRow "BIXR" row))}) 1 (buffers original)}
       parsed=traverse (parseEither parseJSON) (frameRows desktop)::Either String [[(Int,Int,Int,Int,[Value])]]
       traits ch=[flags | spans<-either (const []) id parsed,(_,fg,_,flags,runs)<-spans,fg==fromIntegral foreground,String text<-runs,ch `T.isInfixOf` text]
   check "real frame carries terminal bold trait" (traits "B"==[1])
@@ -44,7 +44,7 @@ checks=do
   check "styled links retain destinations" (linkSpans nested==[(5,9,"https://example.test")])
   let metadata=frameMetadata "." desktop
       rows=frameRows desktop
-      regular=desktop {buffers=M.adjust (\doc->doc {documentSourceRows=Just (V.singleton [(c,TerminalStyle foreground 0x654321 0) | c<-"BIXR"])}) 1 (buffers desktop)}
+      regular=desktop {buffers=M.adjust (\doc->doc {documentSourceRows=Just (V.singleton (prepareSourceRow "BIXR" [(c,TerminalStyle foreground 0x654321 0) | c<-"BIXR"]))}) 1 (buffers desktop)}
   (_,restored)<-decodeFrame rows (BL.toStrict (framePacket False rows (frameRows regular) (frameMetadata "." regular)))
   check "trait-only changes survive real compressed frame reconstruction" (restored==frameRows regular && restored/=rows)
   frame<-either fail pure (parseRemoteFrame (Data.Aeson.object metadata) rows)
@@ -55,7 +55,7 @@ checks=do
   let asciiText="abc\tde\r\DEL\SOH"
       asciiBase=addDocument Nothing (newBuffer asciiText) (initialDesktop (80,25))
       asciiDesktop=modifyActive (\w->w {selection=Selection 1 5}) asciiBase
-        {buffers=M.adjust (\doc->doc {documentSourceRows=Just (V.singleton [(c,TerminalStyle foreground 0x654321 3) | c<-T.unpack asciiText])}) 1 (buffers asciiBase)}
+        {buffers=M.adjust (\doc->doc {documentSourceRows=Just (V.singleton (prepareSourceRow asciiText [(c,TerminalStyle foreground 0x654321 3) | c<-T.unpack asciiText]))}) 1 (buffers asciiBase)}
       Just asciiWindow=activeWindow asciiDesktop
       Rect ax ay _ _=bounds asciiWindow
       cells=concatMap (\span->case span of

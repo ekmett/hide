@@ -38,7 +38,7 @@ import Text.Read (readMaybe)
 import System.FilePath ((</>), takeDirectory, takeFileName, takeExtension, isAbsolute, equalFilePath, splitDirectories, joinPath, normalise)
 import Hide.Browser (Entry(..))
 import Hide.Git (GitReview)
-import Hide.Syntax (Style(..), highlightFor, linkSpans)
+import Hide.Syntax (Style(..), SourceRow, prepareSourceRow, highlightFor, linkSpans)
 import Hide.Hex
 import Hide.Unicode (textInputChar)
 import Hide.InlineState
@@ -57,7 +57,7 @@ inside (Rect x y w h) a b = a >= x && a < x+w && b >= y && b < y+h
 -- | Shared buffer and prepared presentation metadata; split windows reference its ID.
 -- documentOrigin retains canonical privacy provenance for generated source. It
 -- does not authorize saving, filesystem access or debugger source operations.
-data Document = Document { documentBuffer :: Buffer, documentFile :: Maybe FileState, documentLabel :: Maybe Text, documentHighlight :: [(Char,Style)], documentWidth :: Int, documentCursorVisible :: Bool, documentSuggestedName :: Maybe FilePath, documentSourceRows :: Maybe (Vec.Vector [(Char,Style)]), documentShellBlocks :: [(Int,Int,Text,Text)], documentLinks :: [(Int,Int,Text)], documentMarkdownPath :: Maybe FilePath, documentOrigin :: Maybe FilePath } deriving (Eq,Show)
+data Document = Document { documentBuffer :: Buffer, documentFile :: Maybe FileState, documentLabel :: Maybe Text, documentHighlight :: [(Char,Style)], documentWidth :: Int, documentCursorVisible :: Bool, documentSuggestedName :: Maybe FilePath, documentSourceRows :: Maybe (Vec.Vector SourceRow), documentShellBlocks :: [(Int,Int,Text,Text)], documentLinks :: [(Int,Int,Text)], documentMarkdownPath :: Maybe FilePath, documentOrigin :: Maybe FilePath } deriving (Eq,Show)
 -- Source colors are populated by the session worker, never forced by input or drawing.
 newDocument :: Buffer -> Maybe FileState -> Document
 newDocument b file = restyle (Document b file Nothing [] 0 True Nothing Nothing [] [] Nothing Nothing)
@@ -78,7 +78,7 @@ documentSyntaxPath doc = maybe (fromMaybe "Main.hs" (documentSuggestedName doc))
 highlightDocument :: Document -> Document
 highlightDocument doc
   | not (syntaxDocument doc) = doc
-  | otherwise = doc {documentHighlight=tokens,documentSourceRows=Just (indexedHighlightRows tokens),documentWidth=measureDocumentWidth text}
+  | otherwise = doc {documentHighlight=[],documentSourceRows=Just (sourceHighlightRows text tokens),documentWidth=measureDocumentWidth text}
   where text=contents (documentBuffer doc)
         tokens=highlightFor (documentSyntaxPath doc) text
 
@@ -86,6 +86,12 @@ indexedHighlightRows :: [(Char,Style)] -> Vec.Vector [(Char,Style)]
 indexedHighlightRows = Vec.fromList . rows
   where rows []=[[]]
         rows xs=let (line,rest)=break ((=='\n').fst) xs in line:case rest of []->[]; _:more->rows more
+
+-- | Preserve original source Text while compressing tokenizer style positions.
+-- Prepare on the highlighting worker; Markdown keeps its semantic styled rows.
+sourceHighlightRows :: Text -> [(Char,Style)] -> Vec.Vector SourceRow
+sourceHighlightRows text tokens=Vec.imap (\i row->prepareSourceRow row (fromMaybe [] (styles Vec.!? i))) (Vec.fromList (T.splitOn "\n" text))
+  where styles=indexedHighlightRows tokens
 
 measureDocumentWidth :: Text -> Int
 measureDocumentWidth text=maximum (0:[displayColumn line (T.length line) | raw<-textLines text,let line=T.dropWhileEnd (=='\r') raw])

@@ -30,7 +30,7 @@ checks=do
       base=modifyActive (\win->win {selection=Selection 11 11,bounds=Rect 0 1 70 18}) raw
       w=fromJust (activeWindow base)
       colored=base {buffers=M.adjust (\doc->doc {documentSourceRows=Just (Vec.fromList
-        [[(c,if c=='l' then Keyword else Literal) | c<-T.unpack row] | row<-T.lines source])}) (sourceFixtureBuffer w) (buffers base)}
+        [prepareSourceRow row [(c,if c=='l' then Keyword else Literal) | c<-T.unpack row] | row<-T.lines source])}) (sourceFixtureBuffer w) (buffers base)}
       preview option=colored {inlinePreview=Just (InlineView (windowId w) (sourceFixtureBuffer w) (revision b) (selection w) (inlineEpoch colored) [option] 0)}
       rows d=let win=fromJust (activeWindow d); Rect x y width' _=bounds win
              in map (\line->let content=T.drop (columnOffset line (x+1)) line in T.stripEnd (T.take (columnOffset content (width'-2)) content)) (take 8 (drop (y+1) (T.lines (snapshot d))))

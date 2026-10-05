@@ -565,7 +565,7 @@ windowLayers d active w =
                | otherwise = proposalEnd (optionProposal option)
         (sourceRow,sourceColumn)=bufferLineColumn b offset
         styles=case documentSourceRows doc >>= (Vec.!? sourceRow) of
-          Just tokens -> map snd (drop sourceColumn tokens)++repeat Plain
+          Just row -> sourceStylesAt row sourceColumn++repeat Plain
           Nothing -> repeat Plain
         (lo,hi)=ordered (selection w)
     -- Docs: docs/editing.md (buffer views). Shared compact projections skip
@@ -597,7 +597,7 @@ windowLayers d active w =
       (if opposite then attr gray (if side==OriginalSide then V.RGBColor 0 85 0 else V.RGBColor 85 0 0) else base) ' ' columns 1
     reviewLine side columns (Just fullRow) _=case bufferChangeRows b fullRow 1 of
       (kind,liveRow,_):_ ->
-        let plain=[(ch,Plain) | ch<-T.unpack (changeLineAt b fullRow)]
+        let plain=plainSourceRow (changeLineAt b fullRow)
             tokens=case liveRow of
               Just n | syntaxDocument doc -> maybe plain (\rows->fromMaybe plain (rows Vec.!? n)) (documentSourceRows doc)
               _ -> plain
@@ -613,7 +613,7 @@ windowLayers d active w =
                 Just n | side/=OriginalSide -> (selection w,bufferLineOffset b n,active && windowReviewSelection b w==Nothing)
                 _ -> (Selection 0 0,0,False)
         in V.cropRight columns (V.translateX (negate (scrollColumn w))
-          (styledImage (darkAppearance d) (const True) color canSelect sel start tokens)
+          (styledSourceImage (darkAppearance d) color canSelect sel start tokens)
           V.<|> V.charFill base ' ' columns 1)
       _ -> V.charFill base ' ' columns 1
     selectable style | documentLabel doc==Just "Conversation" = case style of BubbleText{} -> True; _ -> False
@@ -628,10 +628,14 @@ windowLayers d active w =
         count=windowHexBytes w
         bytes=bufferSlice b (n*count) count
         highlighted offset = offset==caret (selection w) || let (a,z)=ordered (selection w) in offset>=a && offset<z
-    renderLine n=V.cropRight contentWidth (V.translateX (negate (scrollColumn w)) (styledImage (darkAppearance d) selectable (lineColor n) active (selection w) (bufferLineOffset b n) (if syntaxDocument doc then maybe plainRow (\rows->fromMaybe plainRow (rows Vec.!? n)) (documentSourceRows doc)
-        else if useStyles && not (null (documentHighlight doc)) then fromMaybe [] (atMay styledLines n) else plainRow)) V.<|> V.charFill base ' ' contentWidth 1)
-
-      where plainRow=[(ch,Plain) | ch<-T.unpack (bufferLineAt b n)]
+    renderLine n=V.cropRight contentWidth (V.translateX (negate (scrollColumn w)) lineImage V.<|> V.charFill base ' ' contentWidth 1)
+      where
+        plain=bufferLineAt b n
+        lineImage
+          | syntaxDocument doc = styledSourceImage (darkAppearance d) (lineColor n) active (selection w) (bufferLineOffset b n)
+              (fromMaybe (plainSourceRow plain) (documentSourceRows doc >>= (Vec.!? n)))
+          | otherwise = styledImage (darkAppearance d) selectable (lineColor n) active (selection w) (bufferLineOffset b n)
+              (if useStyles && not (null (documentHighlight doc)) then fromMaybe [] (atMay styledLines n) else [(ch,Plain) | ch<-T.unpack plain])
 
     lineColor n = case documentLabel doc of
       Just "Git diff" -> Just (diffLineAttr (bufferLineAt b n))
@@ -648,6 +652,37 @@ atMay xs n = case drop n xs of a:_ -> Just a; [] -> Nothing
 splitStyled :: [(Char,Style)] -> [[(Char,Style)]]
 splitStyled []=[[]]
 splitStyled xs=let (a,b)=break ((=='\n').fst) xs in a:case b of []->[]; _:rest->splitStyled rest
+
+-- Source runs retain original UTF8 slices. Selection cuts ordinary runs at
+-- character boundaries; exceptional graphemes keep one complete source target
+-- and the advance already resolved by sourceSigils, including tab stops.
+styledSourceImage :: Bool -> Maybe V.Attr -> Bool -> Selection -> Int -> SourceRow -> V.Image
+styledSourceImage dark override active sel start=V.horizCat . draw start . sourceSigils
+  where
+    (lo,hi)=ordered sel
+    color style=maybe normal (\paint->paint {V.attrStyle=V.attrStyle normal}) override
+      where normal=syntaxAttr dark style
+    selected paint=paint `V.withForeColor` blue `V.withBackColor` gray
+    image paint text advance=I.HorizText paint (TL.fromStrict text) advance (T.length text)
+    draw _ Nil=[]
+    draw offset (ConsChars text style rest)=
+      let n=T.length text
+          paint=color style
+          a=max 0 (min n (lo-offset)); z=max a (min n (hi-offset))
+          (before,tailText)=T.splitAt a text
+          (chosen,after)=T.splitAt (z-a) tailText
+          ordinary=[image paint text n]
+          highlighted=[image paint before a,image (selected paint) chosen (z-a),image paint after (n-z)]
+      in (if active && z>a then highlighted else ordinary)++draw (offset+n) rest
+    draw offset (ConsSigil glyph style advance rest)=
+      let original=graphemeText glyph
+          n=T.length original
+          paint=color style
+          shown | original=="\r"=""
+                | original=="\t"=T.replicate advance " "
+                | T.any (\c->c<' ' || c=='\DEL') original=T.map (\c->if c<' ' || c=='\DEL' then '·' else c) original
+                | otherwise=original
+      in image (if active && offset<hi && offset+n>lo then selected paint else paint) shown advance:draw (offset+n) rest
 
 styledImage :: Bool -> (Style -> Bool) -> Maybe V.Attr -> Bool -> Selection -> Int -> [(Char,Style)] -> V.Image
 styledImage dark selectable override active sel start chars
@@ -949,11 +984,14 @@ snapshotHtml :: Desktop -> Text
 snapshotHtml d = "<!doctype html><meta charset='utf-8'><title>Haskell</title><style>body{background:#111;margin:24px;display:grid;place-content:center;min-height:90vh}pre{background:#0000aa;font:min(20px,calc((100vw - 48px)/48))/1.066667 'Courier New',monospace;margin:0;box-shadow:0 0 0 2px #333;white-space:pre}span{font-weight:normal}</style><pre>" <> T.intercalate "\n" rows <> "</pre>"
   where
     rows=[T.concat (map spanHtml (toList ops)) | ops<-toList (cellDisplayOps (renderCellRows d))]
-    spanHtml (TextSpan a n _ t)="<span style='color:"<>color (V.attrForeColor a)<>";background:"<>color (V.attrBackColor a)<>(if V.styleMask a .&. V.bold/=0 then ";font-weight:bold" else "")<>(if V.styleMask a .&. V.italic/=0 then ";font-style:italic" else "")<>"'>"<>body n (TL.toStrict t)<>"</span>"
+    spanHtml (TextSpan a n _ t)="<span style='color:"<>color (V.attrForeColor a)<>";background:"<>color (V.attrBackColor a)<>(if V.styleMask a .&. V.bold/=0 then ";font-weight:bold" else "")<>(if V.styleMask a .&. V.italic/=0 then ";font-style:italic" else "")<>decoration a<>"'>"<>body n (TL.toStrict t)<>"</span>"
     spanHtml (Skip n)=T.replicate n " "
     spanHtml (RowEnd n)=T.replicate n " "
     body advance text | [(g,2)]<-displayClusters advance text,clusterWidth g<2 = "<span style='display:inline-block;width:2ch'><span style='display:inline-block;transform:scaleX(2);transform-origin:left'>"<>escape g<>"</span></span>"
                       | otherwise=escape text
+    decoration a=case [name | (flag,name)<-[(V.underline,"underline"),(V.strikethrough,"line-through")],V.styleMask a .&. flag/=0] of
+      []->""
+      styles->";text-decoration:"<>T.unwords styles
     color (V.SetTo (V.RGBColor r g b))="rgb("<>T.intercalate "," (map (T.pack.show) [r,g,b])<>")"
     color _="#aaa"
     escape=T.concatMap (\c -> case c of '&'->"&amp;"; '<'->"&lt;"; '>'->"&gt;"; _->T.singleton c)

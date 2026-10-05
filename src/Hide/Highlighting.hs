@@ -16,18 +16,19 @@ import Control.Monad (forever)
 import qualified Data.Map.Strict as M
 import qualified Data.Set as S
 import Data.Text (Text)
+import qualified Data.Text as T
 import qualified Data.Vector as V
 import qualified Skylighting as Syntax
 import System.Mem.StableName
 import System.Timeout (timeout)
 import Hide.Buffer
 import Hide.Model
-import Hide.Syntax (Style,highlightFor)
+import Hide.Syntax (Style,SourceRow,sourceRowText,sourceRowRanges,sourceRangeByteEnd,sourceRangeStyle,highlightFor)
 
 -- Stable identity distinguishes replacements/reloads with equal revisions.
 data Key = Key Int Int FilePath (StableName Buffer) deriving Eq
 data Request = Request Key Buffer
-type Result = (V.Vector [(Char,Style)],Int)
+type Result = (V.Vector SourceRow,Int)
 data Work = Work [Request] (Maybe Key) (M.Map Int (Key,Maybe Result))
 newtype Highlighting = Highlighting (TVar Work)
 
@@ -67,9 +68,9 @@ withHighlightingUsing initialize tokenize action = do
         Just () -> bounded 2000000 $ do
           let text=contents buffer
           tokens<-tokenize path text
-          let rows=indexedHighlightRows tokens
+          let rows=sourceHighlightRows text tokens
               width=measureDocumentWidth text
-          _<-evaluate (V.foldl' (\() row->foldl' (\() (c,style)->c `seq` style `seq` ()) () row) () rows)
+          _<-evaluate (V.foldl' (\() row->T.length (sourceRowText row) `seq` V.foldl' (\() range->sourceRangeByteEnd range `seq` sourceRangeStyle range `seq` ()) () (sourceRowRanges row)) () rows)
           _<-evaluate width
           pure (rows,width)
       atomically $ do
