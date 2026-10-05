@@ -91,6 +91,7 @@ checks=bracket temporary removePathForcibly $ \root->do
         writeFile compiler ("#!/bin/sh\nprintf '%s\n' \"$PWD\" \"$@\" > '"<>invocation<>".tmp'\nmv '"<>invocation<>".tmp' '"<>invocation<>"'\nprintf 'component output\n'\n")
         permissions<-getPermissions compiler
         setPermissions compiler permissions {executable=True}
+        createDirectoryIfMissing True (takeDirectory configPath)
         BL.writeFile configPath bytes
         let otherFile=root </> "Other.hs"
             other=addDocument (Just (Hide.Files.FileState otherFile Nothing)) (newBuffer "other source") sourceOpened
