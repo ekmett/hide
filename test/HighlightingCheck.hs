@@ -250,7 +250,7 @@ composerWidthChecks=do
     columns<-evaluate (size hint draft 94)
     after<-getAllocationCounter
     check "bubble width stops measuring when its window is full" (columns==94 && before-after<100000)
-    -- Repeated indexed lookups make this quadratic in line-tree depth/allocation.
+    -- Avoid repeated root seeks when none of the short rows reaches the cap.
     let short=newBuffer (T.replicate 10000 "x\n")
     _<-evaluate (prepareBuffer short)
     shortBefore<-getAllocationCounter
