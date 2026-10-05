@@ -1,6 +1,9 @@
 {-# LANGUAGE OverloadedStrings #-}
 module ProtocolCheck (checks) where
-import Control.Exception (SomeException, bracket, try)
+import Control.Exception (SomeException, bracket, try, evaluate)
+import Control.DeepSeq (force)
+import GHC.Conc (getAllocationCounter)
+import Hide.Sidebar (emptySidebar)
 import Control.Monad (unless, forM_)
 import Data.Aeson
 import Data.Aeson.Types (parseEither, parseMaybe)
@@ -38,6 +41,19 @@ checks = do
     forM_ [BS.pack [0],BS.pack [0,0,0,3,0,123],BS.pack [255,255,255,255],BS.pack [0,0,0,1,9]] $ \bad->do
       hSetFileSize h 0; hSeek h AbsoluteSeek 0; BS.hPut h bad; hSeek h AbsoluteSeek 0
       rejects "truncated, oversized and unknown-kind packets fail" (readPacket h >> pure ())
+  let source=T.replicate 200 "main = putStrLn \"hello 👩🏽\x200d\&💻\"\n"
+      opened=addDocument (Just (FileState "/project/Main.hs" Nothing)) (newBuffer source) (initialDesktop (180,55))
+      docked=opened {sideTree=Just (emptySidebar "/project" 24 False),
+        windows=[w {bounds=Rect 23 1 157 53} | w<-windows opened],buffers=M.map highlightDocument (buffers opened)}
+  _<-evaluate (sum [documentWidth doc+maybe 0 length (documentSourceRows doc) | doc<-M.elems (buffers docked)])
+  -- Drag starts from an already presented source. Do not include lazy initial
+  -- syntax preparation in this compositor allocation receipt.
+  _<-evaluate (force (frameRows docked))
+  let resized=fst (handleEvent (V.EvMouseDown 31 20 V.BLeft []) docked {drag=Just DockSizing})
+  before<-getAllocationCounter
+  _<-evaluate (force (frameRows resized))
+  after<-getAllocationCounter
+  check "dock-neighbor frame export avoids repeated cell-grid materialization" (before-after<80000000)
   let d=addDocument Nothing (newBuffer "λ\nhello") (initialDesktop (80,25))
       screens=map frameRows [d,insertText "world " d,d {screenSize=(100,30)}]
   check "frame exposes editor window metadata for the real native session frontend"

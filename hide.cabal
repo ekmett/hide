@@ -95,7 +95,7 @@ test-suite editor-tests
   if !os(windows)
     build-depends: unix
   ghc-options: -threaded
-  other-modules: SessionSidebarCheck, WideTextCheck, TextStyleCheck, PluginWindowsCheck, SourceWindowFixture, WindowExtension, AgentSidebarCheck, TypedBufferDiffsCheck, TypedBufferReadsCheck, WorkerDiffCheck, BufferEditsCheck, BufferReadsCheck, PluginBufferCheck, PluginCommandCheck, PluginTreeCheck, SidebarCheck, SidebarFixture, TreeExtension, PluginMenuCheck, MenuExtension, MenuCommandsCheck, MenuContextCheck, BindingsCheck, HintComposerCheck, AutocompleteCheck, InlineCheck, InlineRenderCheck, AutocompleteACPCheck, CopilotCheck, HighlightingCheck, AgentIntegrationCheck, AgentAccessCheck, AgentRuntimeCheck, AgentHubCheck, AgentACPCheck, AgentMCPCheck, AgentWorkspaceCheck, CompletionCheck, CompilersCheck, DownloadsCheck, HdbAcquisitionCheck, DebuggerAcquisitionCheck, BuildCheck, ProjectBrowserCheck, UnicodeCheck, HexCheck, DAPCheck, DebuggerCheck, DebuggerSidebarCheck, DebuggerSourcePolicyCheck, RunCheck, ConversationCheck, AgentFilesCheck, TerminalCheck, ConsolesCheck, FilesCheck, WindowCheck, BrowserCheck, HelpCheck, GitCheck, GitOperationsCheck, LSPCheck, ToolingCheck, DialogMouseCheck, BufferViewCheck, BufferTreeCheck, ExternalCheck, ReconcileCheck, ACPCheck, MarkdownCheck
+  other-modules: SessionSidebarCheck, WideTextCheck, TextStyleCheck, PluginWindowsCheck, SourceWindowFixture, WindowExtension, AgentSidebarCheck, TypedBufferDiffsCheck, TypedBufferReadsCheck, WorkerDiffCheck, BufferEditsCheck, BufferReadsCheck, PluginBufferCheck, PluginCommandCheck, PluginTreeCheck, SidebarCheck, SidebarFixture, TreeExtension, PluginMenuCheck, MenuExtension, MenuCommandsCheck, MenuContextCheck, BindingsCheck, HintComposerCheck, AutocompleteCheck, InlineCheck, InlineRenderCheck, AutocompleteACPCheck, CopilotCheck, HighlightingCheck, AgentIntegrationCheck, AgentAccessCheck, AgentRuntimeCheck, AgentHubCheck, AgentACPCheck, AgentMCPCheck, AgentWorkspaceCheck, CompletionCheck, CompilersCheck, DownloadsCheck, HdbAcquisitionCheck, DebuggerAcquisitionCheck, BuildCheck, ProjectBrowserCheck, UnicodeCheck, HexCheck, DAPCheck, DebuggerCheck, DebuggerSidebarCheck, DebuggerWatchesCheck, DebuggerSourcePolicyCheck, RunCheck, ConversationCheck, AgentFilesCheck, TerminalCheck, ConsolesCheck, FilesCheck, WindowCheck, BrowserCheck, HelpCheck, GitCheck, GitOperationsCheck, LSPCheck, ToolingCheck, DialogMouseCheck, BufferViewCheck, BufferTreeCheck, ExternalCheck, ReconcileCheck, ACPCheck, MarkdownCheck
   if flag(window)
     cpp-options: -DWITH_WINDOW
   if flag(terminal)
@@ -103,4 +103,4 @@ test-suite editor-tests
   type: exitcode-stdio-1.0
   hs-source-dirs: test
   main-is: Main.hs
-  build-depends: JuicyPixels, base64-bytestring, blaze-builder, hide, aeson, vector, network, async, stm
+  build-depends: JuicyPixels, base64-bytestring, blaze-builder, deepseq, hide, aeson, vector, network, async, stm

@@ -37,7 +37,7 @@ and submission; browser GPU execution continues asynchronously.
 
 ## Text styles
 
-Markdown headings and strong text use bold; emphasis uses italic. These traits
+Normal-width Markdown headings and strong text use bold; emphasis uses italic. These traits
 travel with colors through native, browser and terminal frames. The bitmap font
 uses deterministic stroke/slant variants; system fallback fonts use their own
 bold and italic faces. Terminal output uses SGR, with the terminal font deciding
@@ -45,7 +45,8 @@ the appearance.
 
 **Options > Preferences > Wide section titles** widens Markdown headings to two
 cells per grapheme and saves `wideSectionTitles` in `[editor.defaults]`. It is off
-by default. Native and browser displays stretch naturally narrow glyphs across
+by default. Widened headings omit bold, retaining italic if present. Native and
+browser displays stretch naturally narrow glyphs across
 those cells. The terminal uses fullwidth ASCII and ideographic spaces; other
 narrow graphemes keep their original text followed by padding. CJK and emoji that
 already occupy two cells stay two cells. Combining marks remain attached.

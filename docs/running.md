@@ -94,8 +94,10 @@ THC initially stops at an instrumented source location. Embedded source opens
 read-only, where **Ctrl+F8** sets a breakpoint in the running program. Both
 the AST and bytecode runtimes carry source locations; optimized Core can
 repeat or combine locations, so a step need not advance to a different line.
-Scopes and values depend on the runtime: THC source stepping is available,
-while lexical scopes and value inspection remain runtime work.
+Scopes and values depend on the runtime. Both THC backends have verified source
+stops and Continue, but stopped-frame lexical scopes and Haskell watch expression
+evaluation remain unavailable. An explicit THC watch evaluation displays a bounded
+adapter error; source stepping does not imply evaluation or Force support.
 
 For another debugger, put its command and DAP arguments in `.thc-debug.json`
 in the project directory, or choose another configuration path:
@@ -169,10 +171,20 @@ stopped session. Right-click its root to add an expression, activate a watch to
 edit it, or use its context menu to remove it. Expressions survive session
 replacement; at most 128 watches with 4096 characters each are retained. Private
 source expressions stay masked in the tree and protected in the editor.
-Managing or expanding watches does not evaluate program code.
+Managing watches does not evaluate program code. At a revealed stop, use a watch’s
+**Evaluate watch** context action to run its expression in the selected frame.
+Results belong to that stop, frame selection and expression revision; changes
+make them stale until another explicit evaluation. **Force lazy watch** is a
+separate executing action for a known lazy root result. Nonlazy values expand
+through bounded read-only pages; nested lazy values remain inert. No evaluation
+runs automatically on stop, tree expansion or repaint.
 
-Explicit stopped-frame evaluation, lazy Force, variable continuation pages and
-new sidebar screenshots remain in issue #8. Local-file **Go to source** still
+Live hdb 0.14 with GHC 9.14.1 on macOS arm64 has verified scalar watch evaluation
+and nonlazy list-child expansion through these actions. hdb marks lazy child
+values, but its Evaluate replies do not mark a lazy root, so **Force lazy watch**
+is unavailable for those results. Root Force currently has deterministic adapter
+fixture coverage; it has not been qualified against hdb or THC. Nested lazy-child
+Force and variable continuation pages remain in issue #8. Local-file **Go to source** still
 uses the existing synchronous debugger navigation path; embedded source uses the
 asynchronous DAP transport and prepares its source document on a worker.
 

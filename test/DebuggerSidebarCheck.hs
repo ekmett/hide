@@ -63,7 +63,7 @@ watchManagement=withSidebarCommands $ \host->withDebugger $ \runtime->withDebugg
   mounted<-wait "persistent Watches provider" (has "Watches") initial
   empty<-expand mounted >>= wait "empty Watches" (has "No watches")
   added<-add "counter + 1" empty >>= wait "added watch row" (has "counter + 1")
-  (revision,entries)<-debuggerWatches runtime
+  (revision,_,entries)<-debuggerWatches runtime
   let [(ident,entry)]=M.toList entries
       selected=row "counter + 1" added
       stale=command "Remove watch" selected added
@@ -71,20 +71,20 @@ watchManagement=withSidebarCommands $ \host->withDebugger $ \runtime->withDebugg
   editing<-invoke (TreeCommand (rowHit selected:drop 1 (maybe [] (hitTrace (keyOf (rowHit selected))) (sideTree added))) (maybe (error "missing watch edit") id (rowCommand selected))) added >>= wait "Edit watch dialog" ((/=Nothing).dialog)
   check "watch editor is protected human input" (guestModalBlocked editing && case fields <$> dialog editing of Just [SelectedInput _ text _]->text=="counter + 1"; _->False)
   updated<-save "counter + 2" editing >>= wait "updated watch row" (has "counter + 2")
-  (_,edited)<-debuggerWatches runtime
+  (_,_,edited)<-debuggerWatches runtime
   check "edit retains watch identity and increments its revision" (M.keys edited==[ident] && maybe False ((==1).watchRevision) (M.lookup ident edited))
   staleAction<-invoke stale updated >>= wait "stale captured action refusal" ((/="Running sidebar action…").status)
-  (_,afterStale)<-debuggerWatches runtime
+  (_,_,afterStale)<-debuggerWatches runtime
   check "previous watch row cannot remove edited expression" (M.member ident afterStale)
   removed<-action "Remove watch" (row "counter + 2" staleAction) staleAction >>= wait "removed watch row" (has "No watches")
   again<-add "second" removed >>= wait "second watch row" (has "second")
-  (_,newEntries)<-debuggerWatches runtime
+  (_,_,newEntries)<-debuggerWatches runtime
   check "removed watch IDs are never reused" (M.keys newEntries/= [ident])
   invalid<-add (T.replicate 4097 "x") again
-  (_,afterInvalid)<-debuggerWatches runtime
+  (_,_,afterInvalid)<-debuggerWatches runtime
   check "oversized expression is refused rather than truncated" (M.size afterInvalid==1 && "1–4096" `T.isInfixOf` status invalid)
   valid<-add (T.replicate 4096 "v") invalid >>= wait "maximum-length watch row" (has (T.replicate 128 "v"))
-  (_,boundedEntries)<-debuggerWatches runtime
+  (_,_,boundedEntries)<-debuggerWatches runtime
   check "maximum-length expression remains exact while its display is bounded" (any ((==4096).T.length.watchExpression) (M.elems boundedEntries) && all ((<=256).T.length) (labels valid))
   let private=valid {dialog=Just (Dialog "Edit watch" (DebuggerWatchDialog 99 (Just "/private/watch.hs") True)
         [SelectedInput "Expression" "private-expression" (Selection 0 18)] 0 ["Save","Cancel"] []),guestPrivatePaths=["/private"]}
@@ -100,7 +100,7 @@ watchManagement=withSidebarCommands $ \host->withDebugger $ \runtime->withDebugg
     (Just "/private/watch.hs") (Just "/private/watch.hs") 1 (Just "private-source-expression") False)]
   storedPrivate<-save "private-source-expression" sourceEditor
   protected<-wait "private watch row" (has "Private watch") storedPrivate {guestPrivatePaths=[]}
-  (_,privateEntries)<-debuggerWatches runtime
+  (_,_,privateEntries)<-debuggerWatches runtime
   check "captured source privacy remains decisive after origin becomes public" (all (not.T.isInfixOf "private-source-expression") (labels protected) && any (\entry->watchPrivate entry && watchOrigin entry==Just "/private/watch.hs") (M.elems privateEntries))
   _<-foldM (\d _->tick d) protected [1..20::Int]
   check "management does not create a stopped session or evaluation handles" . (==Nothing) =<< debuggerSidebarEpoch runtime
@@ -140,7 +140,7 @@ session mode=bracket (Fixture.fixture mode) Fixture.cleanup $ \(port,logPath,_)-
     (_,withWatch)<-core accepted watchEffects
     (_,connected)<-core withWatch [DebugAction "connect" ["0","127.0.0.1",T.pack port]]
     stopped<-wait "stopped debugger" (T.isInfixOf "Stopped in " . status) connected
-    (_,retainedWatches)<-debuggerWatches runtime
+    (_,_,retainedWatches)<-debuggerWatches runtime
     check "expressions survive session initialization without evaluation" (map watchExpression (M.elems retainedWatches)==["persistent"])
     root<-expand "Debug" stopped >>= wait "threads" (has "main λ")
     if mode=="sidebar-exit" then do

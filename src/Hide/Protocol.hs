@@ -18,14 +18,12 @@ import Data.Aeson.Types (Parser, Pair, parseEither)
 import Data.Bits ((.|.), (.&.), shiftL, shiftR)
 import Data.Char (toLower)
 import Data.Foldable (toList)
-import Data.List (groupBy, nub)
+import Data.List (nub)
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.Map.Strict as M
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import qualified Data.Text.Lazy as TL
 import qualified Graphics.Vty as V
-import Graphics.Vty.Span (SpanOp(..))
 import System.IO (Handle, hFlush)
 import Hide.GuestAccess
 import Hide.Model hiding (Paste)
@@ -33,10 +31,10 @@ import qualified Hide.Model as Model
 import Hide.Buffer (dirty, newBuffer, newByteBuffer, selectedText)
 import Hide.TextStyle
 import Hide.Font
-import Hide.Render (renderDesktop)
+import Hide.Render (renderDesktop, renderCellRows)
 import qualified Hide.Plugin.Menu as Plugin
 import Hide.Commands (commandIdentifier)
-import Hide.Unicode (displayOpsForPic, graphemes, clusterWidth, displayClusters)
+import Hide.Unicode (CellSpan(..), graphemes, clusterWidth)
 
 data WebInput = Key T.Text [V.Modifier] | Paste T.Text | Mouse T.Text Int Int Int Int [V.Modifier]
               | Wheel Int Int Int [V.Modifier] | SystemTheme Bool | FocusWindow Int | BrowserCommand Command | MenuCommand Command | ContributedMenu T.Text T.Text Integer | UploadFile T.Text BS.ByteString | Frontend (Maybe Int) Bool | OpenPath FilePath | Resize Int Int | SuspendSession | Blur | Modifiers [V.Modifier] deriving (Eq,Show)
@@ -187,22 +185,15 @@ inputKey name keyMods = case T.unpack name of
 -- Complete row-major snapshots feed DEFLATE in a stable order, refreshing its
 -- history with unchanged cells as well as edits. No application-level move search.
 frameRows :: Desktop -> [Value]
-frameRows d = map (toJSON . spans 0 . toList) (toList (displayOpsForPic (renderDesktop d) (screenSize d)))
+frameRows d = map (toJSON . spans 0 . toList) (toList (renderCellRows d))
   where
-    spans _ [] = []
-    spans x (op:rest) = case op of
-      TextSpan a advance _ t ->
-        let paint=textStyleFromAttr a
-            clusters=displayClusters advance (TL.toStrict t)
-        in toJSON (x,textForeground paint,textBackground paint,textFlags paint,packClusters clusters):spans (x+sum (map snd clusters)) rest
-      Skip n -> toJSON (x,0xffffff::Int,0x0000aa::Int,0::Int,[String (T.replicate n " ")]):spans (x+n) rest
-      RowEnd n -> toJSON (x,0xffffff::Int,0x0000aa::Int,0::Int,[String (T.replicate n " ")]):spans (x+n) rest
-    packClusters = concatMap pack . groupBy (\a b -> ordinary a==ordinary b)
-    ordinary (cluster,w)=w==1 && T.length cluster==1
-    pack []=[]
-    pack xs@(first:_)
-      | ordinary first = [String (T.concat (map fst xs))]
-      | otherwise = [if w/=clusterWidth text then toJSON (text,w,True) else toJSON (text,w) | (text,w)<-xs]
+    spans _ []=[]
+    spans x (cell:rest)=
+      let (a,width,run)=case cell of
+            CellText paint text -> (paint,T.length text,String text)
+            CellGlyph paint text full start visible -> (paint,visible,toJSON (text,full,full/=clusterWidth text,start,visible))
+          paint=textStyleFromAttr a
+      in toJSON (x,textForeground paint,textBackground paint,textFlags paint,[run]):spans (x+width) rest
 
 -- Both encodings use the reconstructed previous screen, never the previous
 -- packet, as their dictionary. Screen rows contain only arrays, bounded integer

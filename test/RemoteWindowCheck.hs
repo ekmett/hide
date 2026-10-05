@@ -33,7 +33,7 @@ checks = do
   check "no-op receipt clears its demand without poisoning next frame timing" (afterNoopStart==Just 150)
   check "replayed frame receipt cannot produce another sample" (duplicate==Nothing)
   let meta = object ["size" .= ([80,25]::[Int]), "bindings" .= ([]::[(T.Text,T.Text)]),"mode" .= (3::Int)]
-      row = toJSON [(0::Int,0xffffff::Int,0::Int,0::Int,[String "abc",toJSON ("界"::T.Text,2::Int)])]
+      row = toJSON [(0::Int,0xffffff::Int,0::Int,0::Int,[String "abc",toJSON ("界"::T.Text,2::Int,False,0::Int,2::Int)])]
       rows = row : replicate 24 (toJSON ([]::[Value]))
       valid = either (const False) (const True) . parseRemoteFrame meta
   let windowMeta=object ["size" .= ([80,25]::[Int]),"bindings" .= ([]::[(T.Text,T.Text)]),"editorWindows" .= [object ["id" .= (71::Int),"title" .= ("Main.hs"::T.Text),"selected" .= True,"enabled" .= True]]]
@@ -69,7 +69,7 @@ checks = do
   check "remote span overflow rejected" (not (valid (toJSON [(79::Int,0::Int,0::Int,0::Int,[String "ab"])] : drop 1 rows)))
   check "unknown remote font flags rejected" (not (valid (toJSON [(0::Int,0::Int,0::Int,4::Int,[String "a"])] : drop 1 rows)))
   check "remote colors bounded" (not (valid (toJSON [(0::Int,-1::Int,0::Int,0::Int,[String "a"])] : drop 1 rows)))
-  check "remote clusters cannot contain NUL" (not (valid (toJSON [(0::Int,0::Int,0::Int,0::Int,[toJSON ("a\0"::T.Text,1::Int)])] : drop 1 rows)))
+  check "remote clusters cannot contain NUL" (not (valid (toJSON [(0::Int,0::Int,0::Int,0::Int,[toJSON ("a\0"::T.Text,1::Int,False,0::Int,1::Int)])] : drop 1 rows)))
   check "remote invalid dimensions rejected" (either (const True) (const False) (parseRemoteFrame (object ["size" .= ([999999,25]::[Int]),"bindings" .= ([]::[(T.Text,T.Text)])]) rows))
   check "Control bracket detaches locally" (remoteDetachShortcut [1,fromEnum ']',2] && nativeEventInput [1,fromEnum ']',2]==Nothing)
   check "other bracket shortcuts remain editor input" (all (not . remoteDetachShortcut . (\mods -> [1,fromEnum ']',mods])) [0,1,3,6,8])

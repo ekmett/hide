@@ -63,6 +63,7 @@ import qualified UnicodeCheck
 import qualified HexCheck
 import qualified DAPCheck
 import qualified DebuggerSourcePolicyCheck
+import qualified DebuggerWatchesCheck
 import qualified DebuggerSidebarCheck
 import qualified DebuggerCheck
 import qualified CompletionCheck
@@ -175,6 +176,7 @@ main = do
   HexCheck.checks
   DAPCheck.checks
   DebuggerCheck.checks
+  DebuggerWatchesCheck.checks
   DebuggerSidebarCheck.checks
   DebuggerSourcePolicyCheck.checks
   CompletionCheck.checks

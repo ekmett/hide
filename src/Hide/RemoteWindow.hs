@@ -63,8 +63,9 @@ data RemoteContribution = RemoteContribution
   , contributionTitle :: T.Text, contributionKey :: T.Text, contributionEnabled :: Bool
   } deriving (Eq,Show)
 
--- | A positioned grapheme with explicit cell width, RGB colors and bold/italic traits.
-data RemoteCell = RemoteCell Int Int TextStyle T.Text Int deriving (Eq,Show)
+-- | Visible x/y, paint, semantic grapheme, full allocated width, clip start and
+-- visible width. The glyph origin is x minus clip start; clipping never reshapes it.
+data RemoteCell = RemoteCell Int Int TextStyle T.Text Int Int Int deriving (Eq,Show)
 data RemoteFrame = RemoteFrame
   { remoteSize :: (Int,Int), remoteMode :: Maybe Int, remoteTitle :: T.Text
   , remoteCursor :: Maybe (Int,Int), remoteBlink :: Bool, remoteCRT :: Bool
@@ -125,21 +126,21 @@ parseRemoteFrame metadata rows = parseEither (withObject "frame metadata" $ \o -
     foldRow cols y (previous,acc) ((x,fg,bg,flags,runs):rest) = do
       unless (x>=previous && x<=cols && flags>=0 && flags<=3 && all (\c -> c>=0 && c<=0xffffff) [fg,bg] && length runs<=cols+1) (fail "Invalid span")
       clusters <- concat <$> traverse parseRun runs
-      let width = sum (map snd clusters)
+      let visible (_,_,_,shown)=shown
+          width = sum (map visible clusters)
       unless (width<=cols-x && length clusters<=cols*4) (fail "Span exceeds row")
-      let positions = scanl (+) x (map snd clusters)
-          cells = [RemoteCell at y (TextStyle fg bg (flags .&. 1/=0) (flags .&. 2/=0)) text w | (at,(text,w)) <- zip positions clusters, w>0]
+      let positions = scanl (+) x (map visible clusters)
+          cells = [RemoteCell at y (TextStyle fg bg (flags .&. 1/=0) (flags .&. 2/=0)) text full start shown | (at,(text,full,start,shown)) <- zip positions clusters, shown>0]
       foldRow cols y (x+width,acc++cells) rest
     parseRun (String text) = do
       unless (T.length text<=512 && T.all (\c -> c>=' ' && c/='\DEL' && clusterWidth (T.singleton c)==1) text) (fail "Invalid character run")
-      pure [(T.singleton c,1) | c<-T.unpack text]
+      pure [(T.singleton c,1,0,1) | c<-T.unpack text]
     parseRun value = do
-      (text,w,stretched) <- case value of
-        Array fields | length fields==3 -> parseJSON value :: Parser (T.Text,Int,Bool)
-        _ -> (\(text,w)->(text,w,False)) <$> (parseJSON value :: Parser (T.Text,Int))
-      unless (not (T.null text) && T.length text<=4096 && not (T.any (\c -> c<' ' || c=='\DEL') text) && graphemes text==[text] && w>=0 && w<=2 &&
+      (text,w,stretched,start,shown) <- parseJSON value :: Parser (T.Text,Int,Bool,Int,Int)
+      unless (not (T.null text) && T.length text<=4096 && not (T.any (\c -> c<' ' || c=='\DEL') text) && graphemes text==[text] && w>0 && w<=2 &&
+        start>=0 && start<w && shown>0 && shown<=w-start &&
         (if stretched then w==2 && clusterWidth text<2 else clusterWidth text==w)) (fail "Invalid grapheme")
-      pure [(text,w)]
+      pure [(text,w,start,shown)]
 
 modifierNames :: Int -> [T.Text]
 modifierNames mask = ["shift" | mask .&. 1/=0] ++ ["ctrl" | mask .&. 2/=0] ++ ["alt" | mask .&. 4/=0] ++ ["cmd" | mask .&. 8/=0]
@@ -319,8 +320,10 @@ drawRemote font atlas frame = do
   c_crt_filter (flag (remoteCRT frame))
   c_pixelate_unicode (flag (remotePixelated frame))
   check "Allocate remote frame" c_begin
-  forM_ (remoteCells frame) $ \(RemoteCell x y paint text w) -> do
-    let bitmap = case M.lookup text atlas of
+  forM_ (remoteCells frame) $ \(RemoteCell x y paint semantic full start shown) -> do
+    -- Safe text projection until the native atlas adapter consumes clip fields.
+    let (text,w)=if start/=0 || shown/=full then (T.replicate shown " ",shown) else (semantic,full)
+        bitmap = case M.lookup text atlas of
           Just tile -> Just tile
           Nothing -> case T.unpack text of [c] | bitmapGlyph font c -> Just (glyph font c); _ -> Nothing
     case bitmap of
