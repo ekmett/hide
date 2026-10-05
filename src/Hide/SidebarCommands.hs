@@ -26,7 +26,7 @@ import Data.Char (toLower)
 import System.Mem.StableName
 import Text.Read (readMaybe)
 import Hide.Browser
-import Hide.Buffer (captureDirty,snapshotDirty,bufferLineChanges,prepareBuffer,Selection(..))
+import Hide.Buffer (captureDirty,snapshotDirty,bufferLineChanges,prepareBuffer,prepareSourceWidths,bufferContent,Selection(..))
 import Hide.Plugin.BufferHost (ContentVersion,captureVersion,versionCurrent)
 import Hide.Files (FileState(..),loadFile)
 import Hide.GuestAccess (protectedPath,protectedFilePath,protectedBuffer)
@@ -134,6 +134,7 @@ prepareSidebarFile ctx path=case sidebarOpened ctx of
             Left err->pure (Left (CommandRejected (T.pack err)))
             Right (file,buffer)->do
               _<-evaluate (prepareBuffer buffer)
+              _<-evaluate (prepareSourceWidths (bufferContent buffer))
               doc<-evaluate (newDocument buffer (Just file))
               pure (Right (SidebarDocument (filePath file) doc))
 

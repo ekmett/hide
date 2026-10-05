@@ -4,8 +4,9 @@ Status: in progress, 5 October 2026. Tracked in [issue #116](https://github.com/
 Loaded long rows retain their original text and share a lazy stream of regular
 span receipts. Exact queries prepare only the prefix they visit. The first edit
 promotes that row to a measured tree for persistent local repair. Exact width
-remains a separate memoized full-row calculation; removing that first-use scan
-is still open.
+remains a separate memoized full-row calculation. Files sidebar, diagnostic-menu
+opening, debugger source following and recovery prepare those numeric receipts
+before UI adoption; other opening routes can still demand them on first paint.
 
 We want cheap horizontal seeks and small edits in long lines. Dice the text into
 borrowed spans at roughly **128-byte intervals**. Keep old spans after an edit;
@@ -96,11 +97,15 @@ reads remain independent of display preparation. Ordinary short rows keep their
 compact representation and existing query path.
 
 Exact total width is an exception: loaded rows memoize a numeric full-row scan
-independently of span receipts. A scrollbar can demand that width on first paint;
-this still reads the entire row once, but does not construct an undemanded span
-index. Repeated width requests reuse the result. Bounded draft sizing stops at
-its requested cap instead of demanding total width. Eliminating the first exact
-width scan remains a concrete follow-up, not a claim of this implementation.
+independently of span receipts. The Files sidebar, diagnostic-menu opening,
+debugger source following and recovery force cached long-row widths on their
+preparation owner before adopting
+source windows. They leave short-row widths, source bytes and lazy span receipts
+alone. Raw buffer construction stays lazy; other opening routes, including the
+synchronous ReadPath route, can still demand total width on first paint. Repeated
+width requests reuse the numeric result. The scrollbar retains its existing
+visible-row maximum and exact proportional extent. Bounded draft sizing stops
+at its requested cap instead of demanding total width.
 
 Hover rejects EOF using the reached source scalar offset and cached row length.
 Viewport queries normalize consumed line terminators to the editor's EOF without
