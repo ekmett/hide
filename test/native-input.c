@@ -26,6 +26,8 @@ static void check(SDL_Keycode key, SDL_Keymod mods, const char *text, int expect
     if (expected == 1 && key >= SDLK_0 && key <= SDLK_9 && (mods & SDL_KMOD_ALT))
         assert(out[1] == (int32_t)key && (out[2] & 4));
     if (expected == 2) assert(strcmp(thc_text(), text) == 0);
+    /* Own the sentinel and prove any paired shortcut text was consumed. */
+    if (expected != 6) assert(thc_wait(out) && out[0] == 6);
 }
 
 #ifdef SDL_PLATFORM_MACOS
@@ -458,8 +460,6 @@ int main(void) {
     const char *option_digits[] = {"¡", "™", "£", "¢", "∞", "§", "¶", "•", "ª"};
     for (int i = 0; i < 9; ++i) {
         check(SDLK_1 + i, SDL_KMOD_ALT, option_digits[i], 1);
-        int32_t out[6];
-        assert(thc_wait(out) && out[0] == 6); /* Shortcut must consume its composed text. */
     }
     check(SDLK_1, SDL_KMOD_ALT, NULL, 1);
     check(SDLK_A, SDL_KMOD_NONE, "a", 2); /* A later key must not lose its text. */
@@ -476,7 +476,6 @@ int main(void) {
     const char *scale_text[] = {"º", "≠", "±", "–"};
     for (int i = 0; i < 4; ++i) {
         check(scale_keys[i], SDL_KMOD_ALT, scale_text[i], 1);
-        assert(thc_wait(out) && out[0] == 6);
     }
     check_command_completion(SDL_SCANCODE_BACKSLASH, 0x00ab, "«", '\\');
     check_command_completion(SDL_SCANCODE_LEFTBRACKET, 0x201c, "“", '[');
