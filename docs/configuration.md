@@ -310,6 +310,7 @@ Source files are not scanned for secrets by this display option.
 ```toml
 [editor.mcp.permissions]
 read_buffer = "enable"
+build_output = "enable"
 buffer_apply_diff = "prompt"
 terminal_start = "disable"
 ```

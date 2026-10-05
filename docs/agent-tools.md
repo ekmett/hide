@@ -144,7 +144,8 @@ paths and revisions; this is not isolation from a malicious language server.
 
 | Tool | Kind | Arguments | Result / contract |
 | --- | --- | --- | --- |
-| `build_status` | R | `{}` | Active job/last completion, output buffer ID, actual exit code |
+| `build_status` | R | `{}` | Active job/last completion, exact job ID, semantic window ID when open, retained character count/truncation, actual exit code |
+| `build_output` | R | `jobId`, `offset?`, `limit?` | Combined command echoes/stdout/stderr for that job; offsets count Unicode characters in the retained tail; default/maximum 32768 characters |
 | `build_start` | X | `action`, `toolchain?`, `target?`, `arguments?`, `terminal?` | `compile`, `make`, `run`; `THC` or `GHC`; overrides apply to this job |
 | `build_stop` | X | `{}` | Stop captured build/run; keep output and completion status |
 | `test_start` | X | `target?`, `toolchain?` | Cabal test job; supported toolchain `GHC` |
@@ -156,16 +157,23 @@ paths and revisions; this is not isolation from a malicious language server.
 | `terminal_stop` | X | `terminalId` | Terminate process; keep output window |
 
 Builds require saved source buffers. Build/tests share one job slot. Read build
-output through `read_buffer`. Terminal output offsets refer to the retained tail;
+output through `build_output` using the exact `jobId` from `build_status`.
+The last job remains readable after completion or window closure; starting a new
+job expires its ID. An already admitted read returns its captured snapshot with
+the original job ID. The owner reuses its read-only text view geometry with a fresh content lifetime
+for a new job, without a source buffer ID. Checkpoints retain the output as an
+inert ended view, without restarting a process or restoring a live job ID. Closing it does not stop the process or let late
+output reopen it. Terminal output offsets refer to the retained tail;
 `truncated` reports discarded earlier output. Execution runs with the editor
-account’s access. UI privacy masks are not an OS execution sandbox.
+account’s access. Captured job output is readable under its own tool permission;
+it is not scanned for secrets. This grants no access to other plugin windows. UI
+privacy masks are not an OS execution sandbox.
 
 `test_status` recognizes [TAP 13](https://testanything.org/tap-version-13-specification.html)
 on stdout beginning with `TAP version 13`. It reports top-level test numbers,
 names, pass/fail, skip reasons, TODOs, and unexpected TODO successes. Each stream
 reports its planned and observed counts and whether it is complete, incomplete,
-invalid, or bailed out. Nested subtests and YAML diagnostics remain in the output
-buffer. Stderr never supplies test points. At most 500 cases and streams are
+invalid, or bailed out. Nested subtests and YAML diagnostics remain in captured output. Stderr never supplies test points. At most 500 cases and streams are
 returned, with truncation flags; failures beyond the case limit still fail the
 run. Missing/truncated output cannot establish completeness, and process failure
 always wins. Other runners retain suite-level results without guessed cases.
