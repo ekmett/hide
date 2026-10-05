@@ -490,7 +490,9 @@ runRemoteWindow backend scale (cols,rows) mode host peer = do
           dark <- (/=0) <$> c_system_dark
           when (previousTheme/=Just dark && (connected || previousTheme==Nothing)) (sendJSON (object ["type" .= ("theme"::T.Text),"dark" .= dark]))
           event <- allocaArray 6 $ \p -> check "Read remote window event" (c_wait p) >> map fromIntegral <$> peekArray 6 p
-          requested<-getMonotonicTimeNSec
+          observed<-getMonotonicTimeNSec
+          queuedAge<-c_event_age_ns
+          let requested=observed-min observed queuedAge
           when (nativeRepaint event) (modifyIORef' presentationDemand (Just . maybe requested (min requested)))
           unless (remoteDetachShortcut event || remoteCloseDetaches connected event) $ do
             writeIORef inputDemand (Just requested)

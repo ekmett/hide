@@ -10,7 +10,7 @@ module Hide.Window (runWindow, nativeMenuShortcut, nativeChordShortcut, nativeMe
   , check, utf8, nativeMenus, nativeMenusFor, installNativeMenus, updateDockWindows
   , c_system_dark, c_open, c_mode, c_scale, c_title, c_raise, c_close, c_size
   , c_begin, c_glyph, c_unicode, c_pixelate_unicode, c_cursor, c_cursor_blink
-  , c_crt_filter, c_present, c_wait, c_wake, c_text, c_clipboard, c_set_clipboard
+  , c_crt_filter, c_present, c_wait, c_event_age_ns, c_wake, c_text, c_clipboard, c_set_clipboard
 #ifdef darwin_HOST_OS
   , c_dock_generation, c_menu_enabled, c_menu_prepare, c_menu_generation, c_menu_shortcut
 #endif
@@ -103,6 +103,8 @@ foreign import ccall unsafe "thc_crt_filter" c_crt_filter :: CInt -> IO ()
 foreign import ccall safe "thc_present" c_present :: IO CInt
 foreign import ccall unsafe "thc_wake" c_wake :: IO ()
 foreign import ccall safe "thc_wait" c_wait :: Ptr Int32 -> IO CInt
+-- Relative SDL event age avoids comparing SDL and Haskell clock epochs.
+foreign import ccall unsafe "thc_event_age_ns" c_event_age_ns :: IO Word64
 foreign import ccall unsafe "thc_text" c_text :: IO CString
 foreign import ccall unsafe "thc_clipboard" c_clipboard :: IO CString
 foreign import ccall unsafe "thc_set_clipboard" c_set_clipboard :: CString -> IO ()
