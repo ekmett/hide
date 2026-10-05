@@ -40,7 +40,7 @@ parseDefaults=withObject "editor.defaults" $ \o -> do
   appearance<-o .:? "appearance"
   unless (maybe True (`elem` ["light","dark","system"]) appearance) (fail "appearance must be light, dark or system")
   viewName<-o .:? "bufferView"
-  view<-traverse (maybe (fail "bufferView must be current, changes, only-changes or side-by-side") pure . parseBufferView) viewName
+  view<-traverse (maybe (fail "bufferView must be current, changes, only-changes, side-by-side or markdown") pure . parseBufferView) viewName
   submitName<-o .:? "chatSubmit"
   submit<-traverse (maybe (fail "chatSubmit must be query or steer") pure . parseChatSubmit) submitName
   Defaults backend scale mode columns rows appearance <$> o .:? "wordStar" <*> o .:? "blinkCursor" <*> o .:? "crtFilter" <*> o .:? "pixelateUnicode" <*> o .:? "materialIcons" <*> o .:? "streamerMode" <*> pure view <*> pure submit <*> o .:? "wideSectionTitles" <*> o .:? "macKeySymbols"

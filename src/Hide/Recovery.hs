@@ -244,7 +244,7 @@ conversationViewParser documents=withObject "conversation view" $ \o->do
 windowValue :: Window -> Value
 windowValue w=object ["id" .= windowId w,"bufferId" .= bufferId w,"number" .= windowNumber w,"bounds" .= rectValue (bounds w),
   "selection" .= selectionValue (selection w),"scrollRow" .= scrollRow w,"scrollColumn" .= scrollColumn w,
-  "restoredBounds" .= fmap rectValue (restoredBounds w),"hexLow" .= windowHexLow w,"hexAscii" .= windowHexAscii w,"bufferView" .= fromEnum (bufferView w),"reviewSplit" .= reviewSplit w]
+  "restoredBounds" .= fmap rectValue (restoredBounds w),"hexLow" .= windowHexLow w,"hexAscii" .= windowHexAscii w,"bufferView" .= fromEnum (bufferView w),"reviewSplit" .= reviewSplit w,"markdownInteraction" .= fmap (\(MarkdownInteraction selected row column stamp)->(selectionValue selected,row,column,stamp)) (markdownInteraction w)]
 rectValue :: Rect -> Value
 rectValue (Rect x y w h)=toJSON (x,y,w,h)
 selectionValue :: Selection -> Value
@@ -355,7 +355,15 @@ windowParser documents plugins=withObject "window" $ \o->do
   restored<-o .: "restoredBounds" >>= traverse rectParser
   viewIndex<-o .:? "bufferView" .!= 0 >>= boundedInt 0 (fromEnum (maxBound :: BufferView))
   split<-o .:? "reviewSplit" .!= 50 >>= boundedInt 0 100
-  Window ident content rectangle selected row column restored <$> o .: "hexLow" <*> o .: "hexAscii" <*> pure number <*> pure (if sourceView then toEnum viewIndex else CurrentView) <*> pure Nothing <*> pure split
+  preview<-o .:? "markdownInteraction" >>= traverse (\value->do
+    (range,r,c,stamp)<-parseJSON value
+    selectedPreview<-selectionParser 1073741823 range
+    rowPreview<-boundedInt 0 1073741823 r
+    colPreview<-boundedInt 0 1073741823 c
+    checkedStamp<-traverse (\(version,columns)->(,) <$> boundedInt 0 1073741823 version <*> boundedInt 1 1048576 columns) stamp
+    pure (MarkdownInteraction selectedPreview rowPreview colPreview checkedStamp))
+  let view=if sourceView && (toEnum viewIndex/=MarkdownView || maybe False markdownDocument (M.lookup (fromMaybe 0 bid) documents)) then toEnum viewIndex else CurrentView
+  Window ident content rectangle selected row column restored <$> o .: "hexLow" <*> o .: "hexAscii" <*> pure number <*> pure view <*> pure Nothing <*> pure split <*> pure preview
 rectParser :: Value -> Parser Rect
 rectParser value=do
   (x,y,w,h)<-parseJSON value
