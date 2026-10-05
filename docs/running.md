@@ -231,8 +231,12 @@ downloads nothing. The checksum and compiler ABI are checked before installation
 
 [![Concrete hdb download offer with compiler, source and destination.](site/screenshots/hdb-download.png)](site/screenshots/hdb-download.png)
 
-**Tools > Downloads** shows progress, received bytes and failures. **Cancel selected**
-stops a pending transfer; closing the window lets it continue. After installation,
+**Tools > Downloads** shows progress, received bytes and failures. Progress prepares
+in the background; refreshing keeps the selected transfer and Details selection.
+**Cancel selected** targets that captured transfer even if progress or rows change;
+closing and reopening retires old Cancel actions. Closing the window lets transfers
+continue and background progress never reopens it. Downloads remain protected from
+agent input and screen reads; Streamer mode also hides the manager. After installation,
 the accepted launch continues with its original source, project, arguments and
 port. Changing the source, project or compiler settings, starting another launch,
 or stopping the debugger invalidates that continuation. The installed tool

@@ -14,7 +14,7 @@ import Data.List (find)
 import qualified Data.Map.Strict as M
 import qualified Hide.Bindings
 import Hide.Bindings (BindingPlatform(..), bindingPlatforms, platformName, BindingContext(..), bindingContexts, contextName, Bindings, compileBindings, readChord)
-import Hide.Model (Desktop(..), Command(..), terminalSourceReserved, wordStarReserved, dialogBindingCommands, dialogReserved)
+import Hide.Model (Desktop(..), Command(..), terminalSourceReserved, wordStarReserved, dialogBindingCommands, dialogReserved, dialogFocusChord)
 import qualified Hide.Plugin.Menu as Plugin
 import Hide.BufferView (BufferView(..))
 
@@ -29,7 +29,9 @@ commandIdentifier command = builtinIdentifier <$> find ((==command) . builtinAct
 
 builtinCommands :: [BuiltinCommand]
 builtinCommands =
-  [BuiltinCommand "hide.file.new" (New)
+  [BuiltinCommand "hide.dialog.focus-next" DialogFocusNext
+  ,BuiltinCommand "hide.dialog.focus-previous" DialogFocusPrevious
+  ,BuiltinCommand "hide.file.new" (New)
   ,BuiltinCommand "hide.file.open" (Open)
   ,BuiltinCommand "hide.file.download" (Download)
   ,BuiltinCommand "hide.file.save" (Save)
@@ -207,7 +209,7 @@ platformBindings catalogue platform configuration=do
           overrides=M.union (M.findWithDefault M.empty (contextName context) configuration) inherited
       forM_ (concat (M.elems overrides)) $ \raw->do
         (key,mods)<-readChord raw
-        let character=case key of V.KChar _->not (any (`elem` mods) [V.MCtrl,V.MAlt,V.MMeta]); _->False
+        let character=case key of V.KChar _->not (any (`elem` mods) [V.MCtrl,V.MAlt,V.MMeta]) && not (context==DialogKeys && dialogFocusChord key mods); _->False
             contextReserved=case context of
               SidebarKeys -> character
               MessagesKeys -> character
@@ -215,9 +217,9 @@ platformBindings catalogue platform configuration=do
               TerminalKeys -> character || processControl key mods
               _ -> character || key==V.KEnter
         let platformReserved = (platform==TerminalPlatform && V.MMeta `elem` mods) ||
-              (platform==MacPlatform && ((V.MAlt `elem` mods && V.MCtrl `notElem` mods && V.MMeta `notElem` mods && case key of V.KChar _->True; _->False) || (key `elem` map V.KChar "h\\[]" && V.MMeta `elem` mods))) ||
+              (platform==MacPlatform && ((V.MAlt `elem` mods && V.MCtrl `notElem` mods && V.MMeta `notElem` mods && not (context==DialogKeys && dialogFocusChord key mods) && case key of V.KChar _->True; _->False) || (key `elem` map V.KChar "h\\[]" && V.MMeta `elem` mods))) ||
               (platform/=TerminalPlatform && key `elem` map V.KChar "0+=-" && any (`elem` mods) [V.MCtrl,V.MAlt])
-        unless (not (terminalSourceReserved key mods || contextReserved || platformReserved || context==WordStarKeys && wordStarReserved key mods || context==DialogKeys && dialogReserved key mods))
+        unless (not (terminalSourceReserved key mods && not (context==DialogKeys && dialogFocusChord key mods) || contextReserved || platformReserved || context==WordStarKeys && wordStarReserved key mods || context==DialogKeys && dialogReserved key mods))
           (Left ("Reserved "<>contextName context<>" key: "<>raw))
       compiled<-either (Left . (("Keybinding context "<>contextName context<>": ")<>)) Right $ compileBindings ([(builtinIdentifier entry,builtinAction entry,keys context (builtinAction entry)) | entry<-builtinCommands,context/=DialogKeys || builtinAction entry `elem` dialogBindingCommands]++[(name,action,[]) | (name,action)<-catalogue,context/=DialogKeys,name `notElem` map builtinIdentifier builtinCommands]) overrides
       pure ((platform,context),compiled)
@@ -234,7 +236,7 @@ platformBindings catalogue platform configuration=do
       ,(Undo,["Cmd+Z"]),(Redo,["Cmd+Shift+Z"]),(Copy,["Cmd+C"]),(Cut,["Cmd+X"]),(Paste,["Cmd+V"]),(SelectAll,["Cmd+A"])
       ,(Find,["Cmd+F"]),(Replace,["Cmd+Alt+F"]),(FindNext,["Cmd+G"]),(FindPrevious,["Cmd+Shift+G"])
       ,(EditorOptions,["Cmd+,"]),(Conversation,["Cmd+Shift+C"]),(AgentNew,["Cmd+Shift+N"])]
-    defaultsFor DialogKeys=[(Copy,["Ctrl+C","Ctrl+Shift+C"]),(Cut,["Ctrl+X","Ctrl+Shift+X"]),(Paste,["Ctrl+V","Ctrl+Shift+V"]),
+    defaultsFor DialogKeys=[(DialogFocusNext,["Tab","Alt+Tab"]),(DialogFocusPrevious,["Shift+Tab","Alt+Shift+Tab"]),(Copy,["Ctrl+C","Ctrl+Shift+C"]),(Cut,["Ctrl+X","Ctrl+Shift+X"]),(Paste,["Ctrl+V","Ctrl+Shift+V"]),
       (SelectAll,["Ctrl+A","Ctrl+Shift+A"]),(Undo,["Ctrl+Z"]),(Redo,["Ctrl+Y","Ctrl+Shift+Z"]),
       (Find,["Ctrl+F"]),(Replace,["Ctrl+H","Ctrl+R"])]
     defaultsFor WordStarKeys=[(action,filter named chords) | (action,chords)<-defaults] ++

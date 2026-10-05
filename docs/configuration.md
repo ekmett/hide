@@ -108,7 +108,7 @@ Contexts are `source`, `wordstar`, `dialog`, `sidebar`, `conversation`, `message
 `terminal`. A `global` table supplies explicitly configured commands to all of
 those contexts where the command and chord belong to the input owner; a context
 entry takes precedence over the same global command. Dialogs inherit only their
-editing/search actions, and omit chords owned by dialog controls.
+focus and editing/search actions, and omit chords owned by dialog controls.
 Within each table a project entry replaces the global configuration's entry.
 An override replaces all shortcuts for its command; `[]` explicitly unbinds it.
 Omitted commands retain their inherited defaults. Menu, context-menu and command status labels
@@ -176,7 +176,8 @@ loading. To assign an occupied key, remove or replace its previous command's
 binding too. Ordinary text, menu mnemonics, window navigation, completion controls,
 Escape, F10 and Ctrl+] remain reserved. Conversation Enter retains the configured
 Query/Steer and code-block submission behavior. Dialog `dialog` tables accept only Copy, Cut, Paste, Select all, Undo, Redo,
-Find and Replace canonical command IDs. Editing actions apply to an editable
+Find, Replace, `hide.dialog.focus-next` and `hide.dialog.focus-previous` canonical
+command IDs. Editing actions apply to an editable
 TextArea; Find/Replace apply to a search dialog. Plain single-line `Input`
 fields retain their existing text/editing controls and Ctrl/Alt button mnemonics. Defaults are Ctrl+C/X/V/A,
 Ctrl+Shift+C/X/V/A, Ctrl+Z Undo, Ctrl+Y and Ctrl+Shift+Z Redo, Ctrl+F Find,
@@ -189,8 +190,21 @@ are projected to native/browser accelerators for the current field. For example:
 "hide.edit.paste" = ["Cmd+Shift+K"]
 ```
 
+Dialog focus defaults are Tab/Alt+Tab for the next control and
+Shift+Tab/Alt+Shift+Tab for the previous control. Terminal BackTab uses the same
+Shift+Tab binding. These commands also work in single-line fields and button-only
+dialogs; leaving an open dropdown commits its preview. Remapping or `[]` removes
+the old focus chords. The **Next** status hint shows the effective key and stays
+clickable when unbound. For example:
+
+```toml
+[editor.keybindings.terminal.dialog]
+"hide.dialog.focus-next" = ["F13"]
+"hide.dialog.focus-previous" = ["F14"]
+```
+
 Dialog editing remaps operate on that field's buffer and undo history. Enter,
-Escape, Tab, Ctrl+Tab search switching, Ctrl+U input clearing, text, button
+Escape, Ctrl+Tab search switching, Ctrl+U input clearing, text, button
 mnemonics and permission decisions retain their control ownership. Sensitive
 agent/approval controls keep their human authority regardless of a remap.
 Source accelerators are inactive while a modal owns input.
@@ -232,8 +246,8 @@ browser permissions or user activation prevent access. Browser/OS reserved short
 characters retain composed text input and cannot be assigned to commands; Cmd+Alt
 chords remain distinct. Local graphical scale keys remain reserved.
 
-WordStar Ctrl+A/F aliases, prefix/block grammar and dialog-navigation
-customization remain subsequent stages of
+WordStar Ctrl+A/F aliases, prefix/block grammar, dialog accept/cancel, Ctrl/Command
+Tab aliases and single-line Input editing remain subsequent stages of
 [configurable keybindings](https://github.com/ekmett/hide/issues/3).
 
 ## Environment

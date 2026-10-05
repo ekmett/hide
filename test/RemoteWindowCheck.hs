@@ -1,13 +1,14 @@
 {-# LANGUAGE CPP, OverloadedStrings #-}
 module RemoteWindowCheck (checks) where
 import Control.Monad (unless)
+import Data.List (elemIndex)
 import Data.Aeson
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.ByteString as BS
 import Hide.RemoteWindow
 import Hide.FrameTiming
-import Hide.Window (nativeMenuEvent)
+import Hide.Window (nativeMenuEvent,nativeCommands)
 import qualified Hide.Model as Model
 import qualified Data.Map.Strict
 #ifdef WITH_REMOTE
@@ -55,16 +56,20 @@ checks = do
   check "remote Unicode rows validate" (valid rows)
   let menuMeta fields=object (["size" .= ([80,25]::[Int]), "bindings" .= ([]::[(T.Text,T.Text)]) ]++fields)
       states metadata=either (const []) remoteMenus (parseRemoteFrame metadata rows)
+      commandToken command=maybe (error "missing native command") id (elemIndex command nativeCommands)
+      newToken=commandToken Model.New
+      quitToken=commandToken Model.Quit
   check "menus are disabled without named metadata" (not (or (states (menuMeta []))))
   check "menu state requires advertised command capability" (not (or (states (menuMeta ["menuState" .= [("hide.file.new"::T.Text,True)]]))))
-  check "menu enable state maps by command name across reordered layouts" (take 1 (states (menuMeta ["menuCommands" .= (["hide.app.quit","hide.file.new"]::[T.Text]),"menuState" .= [("hide.app.quit"::T.Text,False),("hide.file.new",True)]]))==[True])
+  let reordered=states (menuMeta ["menuCommands" .= (["hide.app.quit","hide.file.new"]::[T.Text]),"menuState" .= [("hide.app.quit"::T.Text,False),("hide.file.new",True)]])
+  check "menu enable state maps by command name across reordered layouts" (take 1 (drop newToken reordered)==[True] && take 1 (drop quitToken reordered)==[False])
   let remoteMenu metadata index= either (const Nothing) (\frame -> remoteMenuInput frame index) (parseRemoteFrame metadata rows)
       enabledMenu=menuMeta ["menuCommands" .= (["hide.file.new"]::[T.Text]),"menuState" .= [("hide.file.new"::T.Text,True)]]
-  check "menu invocation uses its public identity" (remoteMenu enabledMenu 0==Just (object ["type" .= ("menu"::T.Text),"command" .= ("hide.file.new"::T.Text)]))
+  check "menu invocation uses its public identity" (remoteMenu enabledMenu newToken==Just (object ["type" .= ("menu"::T.Text),"command" .= ("hide.file.new"::T.Text)]))
   check "invalid menu positions cannot alias the first command" (remoteMenu enabledMenu (-1)==Nothing && remoteMenu enabledMenu 10000==Nothing)
-  check "disabled menu actions cannot be invoked" (remoteMenu (menuMeta ["menuCommands" .= (["hide.file.new"]::[T.Text]),"menuState" .= [("hide.file.new"::T.Text,False)]]) 0==Nothing)
-  check "native menus resolve command tokens only in their current incarnation" (nativeMenuEvent 7 [11,0,7]==Just Model.New)
-  check "stale, unstamped and unknown native menu events cannot invoke" (all ((==Nothing) . nativeMenuEvent 8) [[11,0,7],[11,0],[11,-1,8],[11,10000,8]] && nativeEventInput [11,0,8]==Nothing)
+  check "disabled menu actions cannot be invoked" (remoteMenu (menuMeta ["menuCommands" .= (["hide.file.new"]::[T.Text]),"menuState" .= [("hide.file.new"::T.Text,False)]]) newToken==Nothing)
+  check "native menus resolve command tokens only in their current incarnation" (nativeMenuEvent 7 [11,newToken,7]==Just Model.New)
+  check "stale, unstamped and unknown native menu events cannot invoke" (all ((==Nothing) . nativeMenuEvent 8) [[11,newToken,7],[11,newToken],[11,-1,8],[11,10000,8]] && nativeEventInput [11,newToken,8]==Nothing)
   check "remote rows must match height" (not (valid (take 24 rows)))
   check "remote span overflow rejected" (not (valid (toJSON [(79::Int,0::Int,0::Int,0::Int,[String "ab"])] : drop 1 rows)))
   check "unknown remote font flags rejected" (not (valid (toJSON [(0::Int,0::Int,0::Int,4::Int,[String "a"])] : drop 1 rows)))
@@ -93,7 +98,7 @@ checks = do
       actualRows = P.frameRows desktop
   (decoded,reconstructed) <- P.decodeFrame [] (BL.toStrict (P.framePacket True [] actualRows (P.frameMetadata "/remote/project" desktop)))
   check "compressed editor Unicode frame validates for native rendering" (either (const False) ((==(80,25)).remoteSize) (parseRemoteFrame decoded reconstructed))
-  check "validated native menu route uses shared protocol" (case remoteMenu enabledMenu 0 of Just value -> parseEither P.parseInput value==Right (P.MenuCommand Model.New); _ -> False)
+  check "validated native menu route uses shared protocol" (case remoteMenu enabledMenu newToken of Just value -> parseEither P.parseInput value==Right (P.MenuCommand Model.New); _ -> False)
   check "native events use shared protocol" (all (maybe False (either (const False) (const True) . parseEither P.parseInput) . nativeEventInput)
     [[1,-9,1],[3,10,4,2,2,1],[3,11,4,0,1,1],[4,11,4],[5,80,25],[6],[7],[9,10,4,-1,4],[12,-1,-1],[13,15]])
 #endif
