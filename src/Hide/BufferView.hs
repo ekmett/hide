@@ -12,7 +12,7 @@ module Hide.BufferView
 import qualified Data.Vector as V
 
 -- | Per-window choice of live text, full changes, contextual changes or aligned sides.
-data BufferView = CurrentView | ChangesView | OnlyChangesView | SideBySideView
+data BufferView = CurrentView | ChangesView | OnlyChangesView | SideBySideView | MarkdownView
   deriving (Eq,Show,Enum,Bounded)
 data ReviewSide = UnifiedSide | OriginalSide | CurrentSide
   deriving (Eq,Show,Enum,Bounded)
@@ -138,6 +138,7 @@ bufferViewName CurrentView="current"
 bufferViewName ChangesView="changes"
 bufferViewName OnlyChangesView="only-changes"
 bufferViewName SideBySideView="side-by-side"
+bufferViewName MarkdownView="markdown"
 
 parseBufferView :: String -> Maybe BufferView
 parseBufferView value=lookup value [(bufferViewName mode,mode) | mode<-[minBound..maxBound]]

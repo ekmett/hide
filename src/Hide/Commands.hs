@@ -115,6 +115,7 @@ builtinCommands =
   ,BuiltinCommand "hide.view.changes" (SetBufferView ChangesView)
   ,BuiltinCommand "hide.view.only-changes" (SetBufferView OnlyChangesView)
   ,BuiltinCommand "hide.view.side-by-side" (SetBufferView SideBySideView)
+  ,BuiltinCommand "hide.view.markdown" (SetBufferView MarkdownView)
   ,BuiltinCommand "hide.bindings.reload" ReloadBindings
   ,BuiltinCommand "hide.bindings.inspect" InspectBindings
   ,BuiltinCommand "hide.source.copy-location" CopyLocation

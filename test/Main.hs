@@ -94,6 +94,7 @@ import qualified GitCheck
 import qualified HelpCheck
 import qualified BrowserCheck
 import Hide.Browser (Entry(..))
+import qualified MarkdownViewCheck
 import qualified WideTextCheck
 import qualified TextStyleCheck
 import qualified PluginWindowsCheck
@@ -307,6 +308,7 @@ main = do
   DialogMouseCheck.checks
   GitOperationsCheck.checks
   GitCheck.checks
+  MarkdownViewCheck.checks
   WideTextCheck.checks
   TextStyleCheck.checks
   PluginWindowsCheck.checks

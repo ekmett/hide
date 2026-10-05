@@ -10,8 +10,9 @@ import Hide.Syntax (Style(Plain))
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
 import Hide.Buffer (newBuffer, Selection(..), revision, contents, replaceSelection, bufferLineOffset, bufferLineChanges, bufferLineColumn, displayColumn, bufferLineCount)
-import Hide.BufferView (BufferView(SideBySideView))
+import Hide.BufferView (BufferView(SideBySideView,MarkdownView))
 import Hide.Files (FileState(..))
+import Hide.TextPresentation (prepareTextPresentations)
 import Hide.MCPPermissions (withPermissionsAt, bufferEditor, tickPermissions, policyEffects)
 import Hide.WorkspaceFilesMCP (fileTools)
 import Hide.BufferDiffCommand (withBufferDiffCommands,bufferDiffTool)
@@ -92,6 +93,7 @@ main = do
           case activeWindow full of
             Nothing -> fail "Recorded conversation window is missing"
             Just window -> do
+              bid <- maybe (fail "Recorded conversation has no source buffer") pure (bufferId window)
               let replies=
                     [ (False,T.unlines
                         [ "- Each leaf stores one line’s text and length, including its newline; the final leaf has no newline and may be empty."
@@ -109,7 +111,7 @@ main = do
                   styled=concat (intersperse [('\n',Plain),('\n',Plain)] bubbles)
                   text=T.pack (map fst styled)
                   draft="How would you benchmark edits to a large file?"
-                  shown=full {buffers=M.adjust (\doc -> doc {documentBuffer=newBuffer text,documentHighlight=styled,documentCursorVisible=False}) (bufferId window) (buffers full)
+                  shown=full {buffers=M.adjust (\doc -> doc {documentBuffer=newBuffer text,documentHighlight=styled,documentCursorVisible=False}) bid (buffers full)
                     ,composerFocused=True,composerBuffer=newBuffer draft,composerSelection=Selection (T.length draft) (T.length draft)
                     ,agentSettings=[AgentSetting "model" "Model" "model" "gpt-6-astra" [("gpt-6-astra","gpt-6-astra")],AgentSetting "effort" "Effort" "thought_level" "medium" [("medium","medium")]]
                     ,agentContextUsage=Just (33000,258000),status="Recorded conversation"}
@@ -142,14 +144,14 @@ main = do
         shellBlockMenu d = do
           opened <- command Help (fst (handleEvent (V.EvResize 80 25) d {sideTree=Nothing}))
           case (activeWindow opened,activeDocument opened) of
-            (Just w,Just doc) | block@(blockStart,_,_,raw):_<-documentShellBlocks doc -> do
+            (Just w,Just doc) | Just bid<-bufferId w,block@(blockStart,_,_,raw):_<-documentShellBlocks doc -> do
               unless (raw=="hide .\n") (fail "Help shell screenshot source anchor changed")
               let (row,_)=bufferLineColumn (documentBuffer doc) blockStart
                   scroll=max 0 (row-2)
                   positioned=modifyActive (\window -> window {bounds=Rect 1 1 78 11,scrollRow=scroll}) opened
                   -- Open the real context menu, without invoking its command.
                   (shown,pending)=handleEvent (V.EvMouseDown 26 (2+row-scroll+1) V.BRight []) positioned
-                  expected=ExecuteShellBlock (bufferId w) block
+                  expected=ExecuteShellBlock bid block
               unless (null pending && contextKind shown==ShellContext expected &&
                 contextItems (contextKind shown)==[("Execute in terminal",expected)] && contextMenu shown/=Nothing)
                 (fail "Shell block context menu did not open without executing")
@@ -203,6 +205,16 @@ main = do
               unless (maybe False (\window -> reviewSplit window>=38 && reviewSplit window<=41) (activeWindow dragged))
                 (fail "Review screenshot divider drag did not apply")
               pure dragged
+        markdownPreview d = do
+          let file=root </> "docs/editing.md"
+          source <- TIO.readFile file
+          let resized=fst (handleEvent (V.EvResize 126 29) d)
+              opened=addDocument (Just (FileState file Nothing)) (newBuffer source)
+                resized {sideTree=Nothing,windows=[],wideSectionTitles=True,branchStatus=""}
+              styled=opened {buffers=M.map highlightDocument (buffers opened)}
+          split <- command SplitVertical styled
+          preview <- command (SetBufferView MarkdownView) split
+          prepareTextPresentations preview
         reviewMenu d = do
           shown <- review d
           case [i | (i,(name,_,_))<-zip [0..] menus,name=="Window"] of
@@ -230,6 +242,7 @@ main = do
           , ("documentation-links", documentationLinks)
           , ("side-by-side", review)
           , ("window-views-menu", reviewMenu)
+          , ("markdown-view", markdownPreview)
           , ("conversation", chat)
           , ("debug-step", debug)
           , ("file-menu", pure . (\d -> d {menu=Just (0,1)}))

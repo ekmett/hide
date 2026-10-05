@@ -67,7 +67,7 @@ Linked Markdown and transferred images/PDFs are limited to 8 MiB each.
 ## Buffer views
 
 The section at the bottom of **Window** changes how the selected source window
-shows unsaved edits:
+displays its contents:
 
 - **Current** shows the editable file with deleted text hidden.
 - **Changes** includes deleted originals in red and additions in green.
@@ -76,6 +76,8 @@ shows unsaved edits:
 - **Side by Side** aligns saved text on the left and current text on the right.
   Red and green blank regions show where the other side has no corresponding
   line. Drag the center divider to give either side more room.
+- **Markdown** renders headings, lists, tables, links and code blocks in `.md`
+  and `.markdown` files. It shows the current buffer, including unsaved edits.
 
 Click a view name to change this window. Click its radio control, or highlight
 the row and press Space, to choose the default for newly opened buffers. The
@@ -91,6 +93,22 @@ stays in current text; Cut removes only selected live text and does not delete
 lines hidden by Only Changes. Right-click a changed region and choose
 **Revert this change** to restore its originals and remove its additions in one
 undoable operation. Saving establishes a new baseline and clears the change view.
+
+### Reading Markdown
+
+Open a Markdown file and choose **Window > Markdown**. Select and copy the
+rendered text, or follow links relative to the file's location. **Options >
+Preferences > Wide section titles** applies here as it does in Help. In
+**Current**, the file keeps its Markdown syntax and normal source highlighting.
+
+The Markdown view is read-only. Switch back to **Current** to edit; your source
+cursor, selection and scroll position are preserved. You can also split the
+window, keeping Current in one half and Markdown in the other. Edits refresh
+the preview in the background. Both windows share the same file and undo history.
+Resizing or refreshing the preview clears its rendered selection; it does not
+change your source selection.
+
+[![The editing guide open as Markdown source and a rendered view, with wide section titles.](site/screenshots/markdown-view.png)](site/screenshots/markdown-view.png)
 
 ## Text and selection
 

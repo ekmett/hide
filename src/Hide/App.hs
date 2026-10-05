@@ -690,7 +690,7 @@ applyEffects = foldM apply . (False,)
           Right file->do
             let b=documentBuffer doc
                 clean=restyle doc {documentFile=Just file,documentBuffer=markSaved b}
-                updated=clampReviewWindows d {buffers=M.insert bid clean (buffers d),status="File saved."}
+                updated=clampReviewWindows (normalizeDocumentViews bid d {buffers=M.insert bid clean (buffers d),status="File saved."})
             (_,refreshed)<-apply (False,updated) (RefreshGit (takeDirectory (filePath file)))
             case after of
               Nothing->pure (False,refreshed)

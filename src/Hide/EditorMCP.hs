@@ -35,6 +35,7 @@ import qualified Hide.Plugin.Buffer as P
 import Hide.Files (filePath)
 import Hide.GuestAccess (protectedWindow, sanitizedBufferContent)
 import Hide.Model
+import Hide.BufferView (BufferView(..))
 import Hide.Protocol (WirePacket(..), readPacket, writePacket)
 import Hide.RemoteEndpoint (sessionEndpoint, connectEndpointWithShutdown)
 
@@ -196,10 +197,13 @@ builtinTool desktop=tool
         (\ident -> maybe (Left "Window not found") Right (findWindow ident)) wanted
       doc <- maybe (Left "Buffer not found") Right (windowDocument (buffers desktop) w)
       unless (not (protectedWindow desktop w)) (Left "Selections from private conversation or approval buffers are unavailable.")
-      let b=documentBuffer doc
-          text=selectedText (selection w) b
-      Right (object ["windowId" .= windowId w,"bufferId" .= bufferId w,"anchor" .= anchor (selection w),
-        "caret" .= caret (selection w),"text" .= T.take 131072 text,"truncated" .= (T.length text>131072)])
+      (range,text,space)<-if bufferView w==MarkdownView then case windowMarkdown desktop w of
+        Nothing->Left "Markdown view is still preparing."
+        Just (_,content,_)->let range=selection (displayWindow w); (a,z)=ordered range
+          in Right (range,contentSlice content a (z-a),"rendered-markdown"::T.Text)
+        else Right (selection w,selectedText (selection w) (documentBuffer doc),"source")
+      Right (object ["windowId" .= windowId w,"bufferId" .= bufferId w,"anchor" .= anchor range,
+        "caret" .= caret range,"coordinateSpace" .= space,"text" .= T.take 131072 text,"truncated" .= (T.length text>131072)])
     tool _ _=Left "Unknown editor tool"
     parseArgs :: (Value -> Parser a) -> Value -> Either T.Text a
     parseArgs parser=either (Left . T.pack) Right . parseEither parser
@@ -341,7 +345,7 @@ tools =
   [ describe "list_windows" "List editor window IDs, titles, buffer IDs, geometry, active window and side panels." []
   , describe "list_buffers" "List open buffers with paths and unsaved-change state, including untitled buffers." []
   , describe "read_buffer" "Read live buffer contents including unsaved edits; private conversation fields are redacted and approval buffers are unavailable. Text is paged by 1-based lines (200 default, 1000 maximum); binary buffers return up to 4096 hex bytes from byteOffset." [("bufferId","integer"),("startLine","integer"),("lineCount","integer"),("byteOffset","integer")]
-  , describe "read_selection" "Read selection and cursor offsets in an editor window (defaults to the active window)." [("windowId","integer")]
+  , describe "read_selection" "Read selected text and cursor offsets in an editor window. coordinateSpace distinguishes source from rendered-markdown offsets; a pending Markdown view refuses the read. Defaults to the active window." [("windowId","integer")]
   ]
   where
     describe :: T.Text -> T.Text -> [(T.Text,T.Text)] -> Value

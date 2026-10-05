@@ -391,6 +391,7 @@ renderScene d=(privacyLayers++layers,visibleCursor)
           in if inside area cx cy && cy<top (dialogRect d dg)+height (dialogRect d dg)-3 then V.Cursor cx cy else V.NoCursor
         _ -> V.NoCursor
       Nothing | menu d/=Nothing || contextMenu d/=Nothing || problemsFocused d || maybe False treeFocused (sideTree d) -> V.NoCursor
+      Nothing | activeMarkdown d,Just w<-activeWindow d,Nothing<-windowMarkdown d w -> V.NoCursor
       Nothing -> case (activeWindow d,activeDocument d) of
         (Just w,Just doc) | questionActive d,Just q<-chatQuestion d,questionChoice q==Nothing,Just offset<-chatInputOffset d -> let
           (inputRow,column)=windowTextPosition d w (bufferContent (documentBuffer doc)) offset
@@ -409,7 +410,7 @@ renderScene d=(privacyLayers++layers,visibleCursor)
           rect=composerRect d w; (marker,line)=composerLine b r
           in if height rect>0 && width rect>0 then V.Cursor (left rect+displayColumn line (max 0 (c-marker))-sc) (top rect+r-sr) else V.NoCursor
         (_,Just doc) | not (documentCursorVisible doc) -> V.NoCursor
-        (Just w,Just doc) -> let { b=documentBuffer doc; (r,c)=windowCaretCell d doc w; x=left (bounds w)+1+c-scrollColumn w; y=top (bounds w)+1+r-scrollRow w;
+        (Just original,Just doc) -> let { w=displayWindow original; b=documentBuffer doc; (r,c)=windowCaretCell d doc w; x=left (bounds w)+1+c-scrollColumn w; y=top (bounds w)+1+r-scrollRow w;
                                                   liveRow=not (windowChangeView b w) || viewRightRow (viewRowAt (bufferView w) (bufferViewProjection b) r)/=Nothing }
                             in if liveRow && inside (Rect (left (bounds w)+1) (top (bounds w)+1) (width (bounds w)-2) (windowContentRows d doc w)) x y then V.Cursor x y else V.NoCursor
         _ -> V.NoCursor
@@ -450,9 +451,9 @@ windowLayers :: Desktop -> Bool -> Window -> [CellLayer]
 windowLayers d active w | PluginContent reference<-windowContent w = case M.lookup reference (pluginWindows d) of
   Nothing->[]
   Just prepared->pluginWindowLayers d active w prepared
-windowLayers d active w =
+windowLayers d active original =
   map CellImage ([place x (y+1+issueRow issue-scrollRow w) (label (attr (if diagnosticSeverity issue==1 then V.RGBColor 255 85 85 else yellow) blue) "▶")
-    | not (byteMode (documentBuffer doc)), issue<-diagnostics d, Just (diagnosticPath issue)==fmap filePath (documentFile doc), issueRow issue>=scrollRow w, issueRow issue<scrollRow w+hh-2]
+    | bufferView w/=MarkdownView,not (byteMode (documentBuffer doc)), issue<-diagnostics d, Just (diagnosticPath issue)==fmap filePath (documentFile doc), issueRow issue>=scrollRow w, issueRow issue<scrollRow w+hh-2]
   ++ (if active then [place (x+windowPositionColumn doc) (y+hh-1) (label frame (T.take (max 0 (ww-windowPositionColumn doc-2)) (windowPositionText d doc w))),scrollbarImage True,scrollbarImage False] else [])
   ++ [place (x+6) y (label frame "[" V.<|> label (attr cyan blue) " " V.<|> label frame "]") | active,terminalWindow d w,not (windowPinned d w)]
   ++ composerLayers
@@ -462,6 +463,7 @@ windowLayers d active w =
   ++ documentLayers
   ++ map CellImage (hostWindowFrame d active w frame)
   where
+    w=displayWindow original
     Rect x y ww hh=bounds w
     doc=fromMaybe (newDocument (newBuffer "") Nothing) (windowDocument (buffers d) w)
     b=documentBuffer doc
@@ -539,7 +541,12 @@ windowLayers d active w =
         V.charFill frame '│' 1 contentHeight,V.char frame (if active && not moving then '╧' else '┴')])
       | byteMode b, divider<-hexDividers (windowHexBytes w), let column=divider-scrollColumn w, column>=0, column<contentWidth]
     contentWidth=max 0 (ww-2); contentHeight=windowContentRows d doc w
-    documentLayers | Just layout<-windowPresentation d w =
+    -- Docs: tools/docs-screenshots.hs markdown-view -> docs/site/screenshots/markdown-view.png (docs/editing.md).
+    documentLayers | bufferView w==MarkdownView,Nothing<-windowMarkdown d w =
+      [CellImage (place (x+1) (y+1) (label base (case M.lookup (windowId w) (windowPresentations d) of
+          Just failed@MarkdownWindowFailure{} | let (target,columns,wide)=presentationMetadata failed,Just target==windowPresentationTarget d w,columns==max 1 (ww-2),wide==wideSectionTitles d -> "Markdown view preparation failed."
+          _->"Preparing Markdown view..."))),CellImage (place (x+1) (y+1) (V.charFill base ' ' contentWidth contentHeight))]
+      | Just layout<-windowPresentation d w =
       [styledLayoutRow (darkAppearance d) selectable active (selection w)
         (Rect (x+1) (y+1+n-scrollRow w) contentWidth 1) (scrollColumn w) row
       | n<-[scrollRow w..scrollRow w+contentHeight-1],Just row<-[TextLayout.layoutRows layout Vec.!? n]]

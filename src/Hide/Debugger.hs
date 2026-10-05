@@ -49,6 +49,7 @@ import Hide.Plugin.BufferHost (versionCurrent)
 import Hide.GuestAccess (protectedBuffer,protectedPath,protectedFilePath)
 import qualified Hide.LSP as L
 import Hide.Model
+import Hide.BufferView (BufferView(..))
 
 type Core = Desktop -> [Effect] -> IO (Bool,Desktop)
 data Debugger = Debugger (IORef State) (IO Integer) HdbRuntime SidebarMailbox
@@ -1438,13 +1439,14 @@ tickSourcePreparation runtime@(Debugger ref _ _ _) d=do
 -- Docs: docs/site/screenshots/debug-step.png (docs/running.md) shows the live stopped source.
 position :: Value -> Desktop -> Desktop
 position selected d
-  | row>0 = moveTo False (L.positionOffset (activeText d) (row-1,max 0 (integer "column" selected-1))) d
+  | row>0 = let source=modifyActive (\w->w {bufferView=CurrentView,reviewSelection=Nothing}) d
+            in moveTo False (L.positionOffset (activeText source) (row-1,max 0 (integer "column" selected-1))) source
   | otherwise = d
   where row=integer "line" selected
 
 sourceCurrent :: DebugSourceRequest -> Desktop -> IO Bool
 sourceCurrent request d=case (activeWindow d,activeDocument d) of
-  (Just window,Just doc) | windowFocused d window, windowId window==debugSourceWindow request,
+  (Just window,Just doc) | bufferView window/=MarkdownView, windowFocused d window, windowId window==debugSourceWindow request,
       bufferId window==Just (debugSourceBuffer request),selection window==debugSourceSelection request,
       (filePath <$> documentFile doc)==debugSourceFile request,not (byteMode (documentBuffer doc))->
     versionCurrent (debugSourceVersion request) (documentBuffer doc)

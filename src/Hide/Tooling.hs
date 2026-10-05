@@ -39,6 +39,7 @@ import Hide.BufferEdits (PreparedEdit, prepareEdit, commitEdits)
 import Hide.Files
 import Hide.GuestAccess (protectedBuffer, protectedPath)
 import Hide.Model
+import Hide.BufferView (BufferView(..))
 import qualified Hide.LSP as L
 
 type Target = (Int,Int,Int)
@@ -1242,7 +1243,8 @@ jump :: (Desktop -> [Effect] -> IO (Bool,Desktop)) -> FilePath -> Int -> Int -> 
 jump core path row col d = do
   (_,opened)<-core d [ReadPath path]
   pure $ if fmap filePath (activeDocument opened >>= documentFile)==Just path
-    then moveTo False (L.positionOffset (activeText opened) (row,col)) opened else opened
+    then let source=modifyActive (\w->w {bufferView=CurrentView,reviewSelection=Nothing}) opened
+         in moveTo False (L.positionOffset (activeText source) (row,col)) source else opened
 
 toolingEffects :: Tooling -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> [Effect] -> IO (Bool,Desktop)
 toolingEffects t core d effects = foldM apply (False,d) effects

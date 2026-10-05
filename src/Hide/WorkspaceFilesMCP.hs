@@ -172,10 +172,10 @@ fileOperation core desktop operation raw target=do
                         | within path oldPath=destination </> makeRelative path oldPath
                         | otherwise=oldPath
           replacements=M.fromList [(bid,newPath) | (bid,_,oldPath)<-affected,let newPath=if oldPath==path then destination else destination </> makeRelative path oldPath]
-      pure desktop {buffers=M.mapWithKey (\bid doc -> case M.lookup bid replacements of
+      pure $ foldr normalizeDocumentViews desktop {buffers=M.mapWithKey (\bid doc -> case M.lookup bid replacements of
         Nothing -> doc
         Just newPath -> restyle doc {documentFile=fmap (\file -> file {filePath=newPath}) (documentFile doc)}) (buffers desktop),
-        defaultDirectory=fmap remap (defaultDirectory desktop),sideTree=fmap (\tree->tree {treeRoot=remap (treeRoot tree)}) (sideTree desktop)}
+        defaultDirectory=fmap remap (defaultDirectory desktop),sideTree=fmap (\tree->tree {treeRoot=remap (treeRoot tree)}) (sideTree desktop)} (M.keys replacements)
   refreshed<-case sideTree updated of Nothing -> pure updated; Just tree -> catchIOError (snd <$> core updated [ReadTree (treeRoot tree)]) (\err->pure updated {status="Filesystem operation completed; tree refresh failed: "<>T.pack (show err)})
   pure (refreshed,Right (object ["operation" .= operation,"path" .= path,"to" .= target,"savedBuffers" .= False]))
   where rejectPrivate path=when (protectedPathParent desktop path) (ioError (userError "This path contains private editor configuration or session data"))

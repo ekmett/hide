@@ -112,13 +112,48 @@ data Window = Window
   { windowId :: Int, windowContent :: WindowContent, bounds :: Rect, selection :: Selection
   , scrollRow :: Int, scrollColumn :: Int, restoredBounds :: Maybe Rect
   , windowHexLow :: Bool, windowHexAscii :: Bool
-  , windowNumber :: Int, bufferView :: BufferView, reviewSelection :: Maybe ReviewSelection, reviewSplit :: Int
+  , windowNumber :: Int, bufferView :: BufferView, reviewSelection :: Maybe ReviewSelection, reviewSplit :: Int, markdownInteraction :: Maybe MarkdownInteraction
   } deriving (Eq,Show)
 -- | Bounded source/payload identity for a prepared presentation snapshot.
 -- Plugin prepared values compare only their unique identity.
-data PresentationTarget = DocumentPresentation !Int !Int
+data MarkdownInteraction = MarkdownInteraction !Selection !Int !Int !(Maybe (Int,Int)) deriving (Eq,Show)
+
+-- Source selection and scroll remain authoritative while preview interaction is separate.
+data PresentationTarget = DocumentPresentation !Int !Int | MarkdownPresentation !Int !Int
   | PluginPresentation !PluginWindow.WindowRef !PluginWindow.PreparedWindow deriving (Eq,Show)
-data WindowPresentation = WindowPresentation !PresentationTarget !Int !Bool !TextLayout.TextLayout deriving (Eq,Show)
+data WindowPresentation = WindowPresentation !PresentationTarget !Int !Bool !TextLayout.TextLayout
+  | MarkdownWindowPresentation !PresentationTarget !Int !Bool !TextLayout.TextLayout !BufferContent ![(Int,Int,Text)]
+  | MarkdownWindowFailure !PresentationTarget !Int !Bool
+-- Payloads share the layout's immutable identity; never compare rendered text/links.
+instance Eq WindowPresentation where
+  a==b=presentationMetadata a==presentationMetadata b && presentationLayout a==presentationLayout b
+instance Show WindowPresentation where
+  show p="WindowPresentation "++show (presentationMetadata p,presentationLayout p)
+presentationMetadata :: WindowPresentation -> (PresentationTarget,Int,Bool)
+presentationMetadata (WindowPresentation target columns wide _)=(target,columns,wide)
+presentationMetadata (MarkdownWindowPresentation target columns wide _ _ _)=(target,columns,wide)
+presentationMetadata (MarkdownWindowFailure target columns wide)=(target,columns,wide)
+presentationLayout :: WindowPresentation -> Maybe TextLayout.TextLayout
+presentationLayout (WindowPresentation _ _ _ layout)=Just layout
+presentationLayout (MarkdownWindowPresentation _ _ _ layout _ _)=Just layout
+presentationLayout MarkdownWindowFailure{}=Nothing
+
+-- | Read the displayed selection/viewport without changing source interaction.
+displayWindow :: Window -> Window
+displayWindow w | bufferView w==MarkdownView,Just (MarkdownInteraction selected row column _)<-markdownInteraction w =
+  w {selection=selected,scrollRow=row,scrollColumn=column}
+displayWindow w=w
+modifyDisplayedWindow :: (Window -> Window) -> Window -> Window
+modifyDisplayedWindow f w | bufferView w==MarkdownView =
+  let shown=f (displayWindow w) in w {markdownInteraction=Just (MarkdownInteraction (selection shown) (scrollRow shown) (scrollColumn shown) (case markdownInteraction w of Just (MarkdownInteraction _ _ _ stamp)->stamp; Nothing->Nothing))}
+modifyDisplayedWindow f w=f w
+activeMarkdown :: Desktop -> Bool
+activeMarkdown d=maybe False ((==MarkdownView).bufferView) (activeWindow d)
+markdownDocument :: Document -> Bool
+markdownDocument doc=documentLabel doc==Nothing && textBuffer (documentBuffer doc) &&
+  maybe False ((`elem` [".md",".markdown"]) . map toLower . takeExtension) (fmap filePath (documentFile doc) `orName` documentSuggestedName doc)
+  where orName (Just value) _=Just value; orName Nothing value=value
+
 
 data Command = New | Open | Download | ChangeDir | Save | SaveAs | Close | Quit | Undo | Redo | Cut | Copy | Paste
   | Find | FindNext | FindPrevious | Replace | GoTo | SelectAll | Zoom | NextWindow | Cascade | Tile
@@ -263,7 +298,7 @@ menus =
       mi "Exceptions..." "" (DebugCommand "exceptions"),mi "Exception details" "" (DebugCommand "exception-info"),mi "Output" "" (DebugCommand "output"),mi "Disconnect" "" (DebugCommand "disconnect")])
   ,("Tools",'t',[mi "File tree" "Ctrl+B" ToggleTree,mi "Git diff..." "" GitDiff,mi "Approve changes..." "" GitCommit,mi "Inspect type" "Shift+F1" InspectType,mi "Code actions..." "" CodeActions,mi "Messages" "" Problems,mi "Go to next" "Alt+F8" NextMessage,mi "Go to previous" "Alt+F7" PreviousMessage,mi "Restart language server" "" RestartHLS,mi "Conversation" "Ctrl+Shift+C" Conversation,mi "Agents..." "" AgentDirectory,mi "Conversation model..." "" (AgentChoose ""),mi "Cancel reply" "" AgentCancel,mi "Resume session..." "" AgentResume,mi "New conversation" "Ctrl+Shift+N" AgentNew,mi "Copy raw conversation" "" AgentCopyRaw,mi "Widget gallery..." "" Gallery,mi "Project browser..." "" ProjectBrowser,mi "Downloads..." "" (DebugCommand "downloads")])
   ,("Options",'o',[mi "Preferences..." "" EditorOptions,mi "Environment..." "" EnvironmentOptions,mi "Chat input..." "" ChatInputOptions,mi "Autocomplete..." "" (AutocompleteCommand "settings"),mi "Agents..." "" AgentOptions,mi "Agent Permissions" "" AgentPermissions,mi "Agent Context..." "" AgentGuidance,mi "Reload keybindings" "" ReloadBindings,mi "Inspect keybindings" "" InspectBindings])
-  ,("Window",'w',[mi "Agents..." "" AgentDirectory,mi "Tile" "" Tile,mi "Cascade" "" Cascade,mi "Split vertically" "" SplitVertical,mi "Split horizontally" "" SplitHorizontal,mi "Zoom" "F5" Zoom,mi "Pin / unpin terminal" "" ToggleTerminalPin,mi "Next" "F6" NextWindow,mi "Close" "Alt+F3" Close,mi "" "" (Disabled ""),mi "Current" "" (SetBufferView CurrentView),mi "Changes" "" (SetBufferView ChangesView),mi "Only Changes" "" (SetBufferView OnlyChangesView),mi "Side by Side" "" (SetBufferView SideBySideView)])
+  ,("Window",'w',[mi "Agents..." "" AgentDirectory,mi "Tile" "" Tile,mi "Cascade" "" Cascade,mi "Split vertically" "" SplitVertical,mi "Split horizontally" "" SplitHorizontal,mi "Zoom" "F5" Zoom,mi "Pin / unpin terminal" "" ToggleTerminalPin,mi "Next" "F6" NextWindow,mi "Close" "Alt+F3" Close,mi "" "" (Disabled ""),mi "Current" "" (SetBufferView CurrentView),mi "Changes" "" (SetBufferView ChangesView),mi "Only Changes" "" (SetBufferView OnlyChangesView),mi "Side by Side" "" (SetBufferView SideBySideView),mi "Markdown" "" (SetBufferView MarkdownView)])
   ,("Help",'h',[mi "Contents" "F1" Help,mi "About Haskell..." "" About])]
   where mi = MenuItem
 
@@ -501,6 +536,7 @@ contributedCommand name epoch generation d=do
 
 commandEnabled :: Desktop -> Command -> Bool
 commandEnabled d cmd | dialogCommandAllowed cmd d = True
+commandEnabled d cmd | activeMarkdown d, markdownSourceCommand cmd = False
 commandEnabled d cmd | activePluginWindow d/=Nothing, sourceOnlyCommand cmd = False
 commandEnabled d Download = browserFrontend d && maybe False ((==Nothing) . documentLabel) (activeDocument d)
 commandEnabled d GoToMessage | menusActive d = maybe False (commandEnabled d . contributionCommand d) (find ((=="hide.messages.go-to") . Plugin.menuName . Plugin.menuReference) (contributedMenus d))
@@ -523,6 +559,7 @@ commandEnabled d cmd | cmd `elem` [SidebarActivate,SidebarExpand,SidebarCollapse
 commandEnabled d MessagesMove{} = problemsFocused d
 commandEnabled d MessagesPage{} = problemsFocused d
 commandEnabled d (ExecuteShellBlock bid block) = maybe False (elem block . documentShellBlocks) (M.lookup bid (buffers d))
+commandEnabled d (SetBufferView MarkdownView) = maybe False markdownDocument (activeDocument d)
 commandEnabled d (SetBufferView _) = maybe False (\doc -> documentLabel doc==Nothing && textBuffer (documentBuffer doc)) (activeDocument d)
 commandEnabled d (RevertChange bid version counts _) = case activeDocument d of
   Just doc -> documentLabel doc==Nothing && textBuffer (documentBuffer doc) && (activeWindow d >>= bufferId)==Just bid && revision (documentBuffer doc)==version && bufferLineChanges (documentBuffer doc)==counts
@@ -539,6 +576,12 @@ commandEnabled d Copy | problemsVisible d && problemsFocused d = case messageInv
 commandEnabled d cmd | problemsVisible d && problemsFocused d, cmd `elem` [Undo,Redo,Cut,Paste,SelectAll] = False
 commandEnabled _ _ = True
 -- | Actions requiring editable source identity never act on plugin text.
+markdownSourceCommand :: Command -> Bool
+markdownSourceCommand cmd=sourceOnlyCommand cmd && cmd `notElem` [Save,SaveAs,Download,SplitVertical,SplitHorizontal] || case cmd of
+  RevertChange{}->True
+  ExecuteShellBlock{}->True
+  _->False
+
 sourceOnlyCommand :: Command -> Bool
 sourceOnlyCommand cmd=cmd `elem` [Save,SaveAs,Download,Undo,Redo,Cut,Paste,Find,FindNext,FindPrevious,Replace,GoTo,
   InspectType,Definition,Complete,RenameSymbol,CodeActions,ToggleHex,SplitVertical,SplitHorizontal]
@@ -584,7 +627,7 @@ addPluginWindow reference prepared d=d {windows=w:windows d,pluginWindows=M.inse
     i=nextId d
     (sw,sh)=screenSize d
     w=Window i (PluginContent reference) (fitWindow d (Rect 0 1 sw (sh-2))) (Selection 0 0) 0 0 Nothing False False
-      (nextWindowNumber d) CurrentView Nothing 50
+      (nextWindowNumber d) CurrentView Nothing 50 Nothing
 
 activePluginWindow :: Desktop -> Maybe PluginWindow.PreparedWindow
 activePluginWindow d=do
@@ -628,7 +671,7 @@ addDocument file b d = d { windows = w : windows d, buffers = M.insert i (newDoc
     i = nextId d
     offset = length (windows d) `mod` 5
     (sw,sh) = screenSize d
-    w = Window i (SourceContent i) (fitWindow d (Rect offset (1+offset) (sw-offset) (sh-2-offset))) (Selection 0 0) 0 0 Nothing False False (nextWindowNumber d) (if byteMode b then CurrentView else defaultBufferView d) Nothing 50
+    w = Window i (SourceContent i) (fitWindow d (Rect offset (1+offset) (sw-offset) (sh-2-offset))) (Selection 0 0) 0 0 Nothing False False (nextWindowNumber d) (if byteMode b || (defaultBufferView d==MarkdownView && not (markdownDocument (newDocument b file))) then CurrentView else defaultBufferView d) Nothing 50 Nothing
 
 nextWindowNumber :: Desktop -> Int
 nextWindowNumber d = choose 1
@@ -712,6 +755,7 @@ modifyActive :: (Window -> Window) -> Desktop -> Desktop
 modifyActive f d = maybe d (\w -> mapWindow (windowId w) f d) (activeWindow d)
 
 ensureVisible :: Desktop -> Desktop
+ensureVisible d | activeMarkdown d,Just w<-activeWindow d = markdownMoveTo True (caret (selection (displayWindow w))) d
 ensureVisible d = case (activeWindow d, activeDocument d) of
   (Just w, Just doc) -> modifyActive (const w { scrollRow = max 0 row', scrollColumn = max 0 col' }) d
     where
@@ -727,6 +771,7 @@ ensureVisible d = case (activeWindow d, activeDocument d) of
 -- A layout change follows only caret axes that were visible beforehand.
 -- Manual scrollbar browsing must survive Messages appearing or being resized.
 ensureVisibleAfterLayout :: Desktop -> Desktop -> Desktop
+ensureVisibleAfterLayout _ after | activeMarkdown after=after {windows=map (clampMarkdownInteraction after) (windows after)}
 ensureVisibleAfterLayout before after = case (activeWindow after,activeDocument after) of
   (Just current,Just doc) | Just previous<-find ((==windowId current).windowId) (windows before) ->
     let (row,column)=windowCaretCell before doc previous
@@ -741,6 +786,7 @@ ensureVisibleAfterLayout before after = case (activeWindow after,activeDocument 
 
 -- Map other view positions through the changed character interval.
 editActive :: (Selection -> Buffer -> Buffer) -> Maybe Int -> Desktop -> Desktop
+editActive _ _ d | activeMarkdown d=d {status="Markdown view is read-only. Switch to Current to edit."}
 editActive _ _ d | maybe False treeFocused (sideTree d) || problemsFocused d = d
 editActive f cursor d = case (activeWindow d, activeDocument d) of
   (Just _, Just doc) | documentLabel doc /= Nothing -> d {status="This window is read-only."}
@@ -780,7 +826,7 @@ moveTo extend pos d = ensureVisible (modifyActive update d)
 -- Review selections use display offsets; editable selections always use live text.
 windowReviewSelection :: Buffer -> Window -> Maybe ReviewSelection
 windowReviewSelection b w = case reviewSelection w of
-  Just selected | bufferView w/=CurrentView, not (byteMode b),
+  Just selected | windowChangeView b w,
     reviewRevision selected==revision b, reviewCounts selected==bufferLineChanges b,
     let (a,z)=ordered (reviewRange selected), a>=0, z<=changeLength b -> Just selected
   _ -> Nothing
@@ -789,7 +835,7 @@ windowReviewRange :: Buffer -> Window -> Maybe Selection
 windowReviewRange b w=reviewRange <$> windowReviewSelection b w
 
 windowChangeView :: Buffer -> Window -> Bool
-windowChangeView b w=bufferView w/=CurrentView && not (byteMode b)
+windowChangeView b w=bufferView w `elem` [ChangesView,OnlyChangesView,SideBySideView] && not (byteMode b)
 
 reviewVisibleRanges :: Buffer -> Window -> ReviewSelection -> [(Int,Int)]
 reviewVisibleRanges b w selected=
@@ -825,6 +871,9 @@ cutReviewSelection d=case (activeWindow d,activeDocument d) of
 
 setBufferView :: BufferView -> Desktop -> Desktop
 setBufferView mode d
+  | mode==MarkdownView && commandEnabled d (SetBufferView mode)=modifyActive (\w->w {bufferView=mode,reviewSelection=Nothing,markdownInteraction=Just (fromMaybe (MarkdownInteraction (Selection 0 0) 0 0 Nothing) (markdownInteraction w))}) d
+  | activeMarkdown d && mode==CurrentView=modifyActive (\w->w {bufferView=CurrentView,reviewSelection=Nothing}) d
+  | activeMarkdown d=setBufferView mode (setBufferView CurrentView d)
   | not (commandEnabled d (SetBufferView mode))=d
   | otherwise=case (activeWindow d,activeDocument d) of
       (Just w,Just doc) -> ensureVisible (modifyActive update d)
@@ -840,6 +889,19 @@ setBufferView mode d
           newRow | mode==CurrentView=fst (bufferLineColumn b (changeToLiveOffset b (changeLineOffset b oldFull)))
                  | otherwise=viewRowForChange mode projection CurrentSide oldFull
       _ -> d
+
+-- | Retire incompatible per-window views when a source path/content is adopted.
+-- Source interaction and Undo stay authoritative; only presentation metadata is
+-- discarded. Byte replacement also normalizes review modes, as direct edits do.
+normalizeDocumentViews :: Int -> Desktop -> Desktop
+normalizeDocumentViews bid d=case M.lookup bid (buffers d) of
+  Nothing->d
+  Just doc->let incompatible w=bufferId w==Just bid &&
+                 (byteMode (documentBuffer doc) || (bufferView w==MarkdownView && not (markdownDocument doc)))
+                retired=[windowId w | w<-windows d,incompatible w]
+                normalize w | incompatible w=w {bufferView=CurrentView,reviewSelection=Nothing,markdownInteraction=Nothing}
+                            | otherwise=w
+            in d {windows=map normalize (windows d),windowPresentations=M.filterWithKey (\ident _->ident `notElem` retired) (windowPresentations d)}
 
 clampReviewWindows :: Desktop -> Desktop
 clampReviewWindows d=d {windows=map clamp (windows d)}
@@ -883,6 +945,15 @@ reviewHit x y b w=do
 
 -- Docs: tools/docs-screenshots.hs documentation-links -> docs/site/screenshots/documentation-links.png (docs/editing.md).
 linkAt :: Int -> Int -> Desktop -> Maybe Command
+linkAt x y d | activeMarkdown d=do
+  original<-activeWindow d
+  (_,text,links)<-windowMarkdown d original
+  let w=displayWindow original; Rect l t ww hh=bounds w; row=y-t-1+scrollRow w; col=x-l-1+scrollColumn w
+      offset=windowTextOffset d w text row col
+  if x<=l || x>=l+ww-1 || y<=t || y>=t+hh-1 || row>=windowTextRows d w text || col>=windowTextRowWidth d w text row then Nothing else do
+    (_,_,url)<-find (\(a,z,_)->offset>=a && offset<z) links
+    doc<-activeDocument d
+    pure (OpenLink (filePath <$> documentFile doc) url)
 linkAt x y d=do
   w<-activeWindow d
   doc<-activeDocument d
@@ -899,6 +970,7 @@ linkAt x y d=do
 
 -- Docs: tools/docs-screenshots.hs shell-block-menu -> docs/site/screenshots/shell-block-menu.png (docs/conversations.md).
 shellBlockAt :: Int -> Int -> Desktop -> Maybe Command
+shellBlockAt _ _ d | activeMarkdown d=Nothing
 shellBlockAt x y d=do
   w<-activeWindow d
   doc<-activeDocument d
@@ -932,6 +1004,7 @@ prompt title p fs d = d {dialog = Just (Dialog title p fs 0 ["OK","Cancel"] []),
 
 -- | Apply a semantic editor command and return any required host effects.
 runCommand :: Command -> Desktop -> (Desktop,[Effect])
+runCommand cmd source | dialog source==Nothing, activeMarkdown source, markdownSourceCommand cmd = (source {status="Markdown view is read-only. Switch to Current to edit."},[])
 runCommand cmd source | dialog source==Nothing, Just _<-activePluginWindow source, sourceOnlyCommand cmd = (source {status="This plugin window is read-only."},[])
 runCommand cmd source | browserFrontend source, cmd `elem` [Copy,Cut,CopyAllMessages,CopyLocation] =
   let (next,requests)=runCommand cmd source {browserFrontend=False}
@@ -944,6 +1017,13 @@ runCommand Copy source | activeConversation source, Just w<-activeWindow source,
 runCommand cmd source | activeAutocomplete source, autocompleteFocused source, cmd `elem` [Undo,Redo,Copy,Cut,Paste,SelectAll] = (autocompleteEdit (composerCommandWith False cmd) source,[])
 runCommand cmd source | questionActive source, cmd `elem` [Undo,Redo,Copy,Cut,Paste,SelectAll] = (questionEdit (composerCommandWith False cmd) source,[])
 runCommand cmd source | not (problemsFocused source), composerActive source, cmd `elem` [Undo,Redo,Copy,Cut,Paste,SelectAll] = (composerCommand cmd source,[])
+runCommand Copy source | dialog source==Nothing,activeMarkdown source,maybe False (windowFocused source) (activeWindow source) =
+  let text=case activeWindow source >>= windowMarkdown source of
+        Just (_,content,_)->let (a,z)=ordered (selection (displayWindow (fromMaybe (error "Missing Markdown window") (activeWindow source)))) in contentSlice content a (z-a)
+        Nothing->""
+  in (copyClipboard False text source {menu=Nothing,contextMenu=Nothing},[])
+runCommand SelectAll source | dialog source==Nothing,activeMarkdown source,maybe False (windowFocused source) (activeWindow source) =
+  (modifyActive (modifyDisplayedWindow (\w->w {selection=Selection 0 (maybe 0 (\(_,text,_)->contentLength text) (windowMarkdown source w))})) source,[])
 runCommand Copy source | dialog source==Nothing,Just view<-activePluginWindow source, Just w<-activeWindow source =
   let (a,b)=ordered (selection w)
   in (copyClipboard False (contentSlice (PluginWindow.preparedWindowText view) a b) source {menu=Nothing,contextMenu=Nothing},[])
@@ -1496,6 +1576,7 @@ dispatchEvent (V.EvMouseUp x y button) d | Just (FollowingLink _ a b origin targ
     (d {drag=Nothing,dragOriginal=Nothing},[FollowLink origin target | x==a && y==b])
 dispatchEvent (V.EvMouseUp _ _ _) d = (d {drag = Nothing,dragOriginal=Nothing},[])
 dispatchEvent (V.EvMouseDown x y button mods) d = mouseEvent x y button mods d
+dispatchEvent V.EvPaste{} d | activeMarkdown d = (d {status="Markdown view is read-only."},[])
 dispatchEvent (V.EvPaste bytes) d | activeHex d = (either (const (d {status="Paste hexadecimal text."})) (`pasteHex` d) (TE.decodeUtf8' bytes),[])
 dispatchEvent (V.EvPaste bytes) d = case TE.decodeUtf8' bytes of
   Left _ -> (message "Paste failed" ["The pasted text is not valid UTF-8."] d,[])
@@ -2053,7 +2134,7 @@ captureContextTarget kind d = case kind of
   _ -> Nothing -- These actions already carry arguments or have session scope.
   where
     source=Just $ case (activeWindow d,activeDocument d) of
-      (Just w,Just doc) | sourceContextDocument doc, windowFocused d w, Just bid<-bufferId w ->
+      (Just w,Just doc) | bufferView w/=MarkdownView, sourceContextDocument doc, windowFocused d w, Just bid<-bufferId w ->
         let b=documentBuffer doc
             selected=selection w
             row=1+fst (bufferLineColumn b (caret selected))
@@ -2089,7 +2170,7 @@ contextTargetCurrent d = case contextTarget d of
   Nothing -> True
   Just (ConversationTarget target) -> conversationTarget d==target
   Just target@SourceTarget{} -> case (activeWindow d,activeDocument d) of
-    (Just window,Just doc) -> sourceContextDocument doc && windowFocused d window &&
+    (Just window,Just doc) -> bufferView window/=MarkdownView && sourceContextDocument doc && windowFocused d window &&
       windowId window==sourceTargetWindow target && bufferId window==Just (sourceTargetBuffer target) &&
       revision (documentBuffer doc)==sourceTargetRevision target && selection window==sourceTargetSelection target &&
       fmap filePath (documentFile doc)==sourceTargetFile target
@@ -2219,7 +2300,7 @@ windowMouse x y button mods d = case find (\w -> windowVisible d w && inside (bo
     V.BRight | x>l && x<l+ww-1 && y>t && y<t+hh-1,
                Just command<-shellBlockAt x y focused -> (openContext (ShellContext command) x y focused,[])
     V.BRight | x>l && x<l+ww-1 && y>t && y<t+hh-1,
-               maybe False sourceContextDocument (activeDocument focused) ->
+               not (activeMarkdown focused), maybe False sourceContextDocument (activeDocument focused) ->
       let pointed=selectAt False x y focused
           (a,z)=ordered (selection w)
           hit=maybe (-1) (caret . selection) (activeWindow pointed)
@@ -2375,6 +2456,9 @@ windowPositionText :: Desktop -> Document -> Window -> Text
 windowPositionText d doc _ | documentLabel doc==Just "Conversation" = " "<>case conversationContextUsage d of
   Just (used,size) | used>=0 && size>0 -> T.pack (show (used*100 `div` size))<>"% · "<>formatTokenCount used<>"/"<>formatTokenCount size<>" "
   _ -> "-- "
+windowPositionText d _ w | bufferView w==MarkdownView = case windowMarkdown d w of
+  Nothing->" Markdown "
+  Just (layout,_,_)->let (r,c)=TextLayout.layoutPosition layout (caret (selection (displayWindow w))) in " Markdown "<>T.pack (show (r+1))<>":"<>T.pack (show (c+1))<>" "
 windowPositionText _ doc w | byteMode (documentBuffer doc) = " HEX "<>hexNumber 8 (caret (selection w))<>" "<>(if windowHexAscii w then "ASCII" else "HEX")<>" "
 windowPositionText _ doc w = let (r,c)=bufferLineColumn (documentBuffer doc) (caret (selection w))
   in " "<>T.pack (show (r+1))<>":"<>T.pack (show (c+1))<>" "
@@ -2404,6 +2488,7 @@ scrollbarRect d vertical doc w
   where Rect x y ww hh=bounds w
 
 scrollbarLimit :: Desktop -> Bool -> Document -> Window -> Int
+scrollbarLimit d vertical doc w | bufferView w==MarkdownView=markdownScrollLimit d vertical w
 scrollbarLimit d vertical doc w = max 0 (if vertical then (case windowPresentation d w of Just layout->Vec.length (TextLayout.layoutRows layout); Nothing->documentRows doc w)-max 1 (windowContentRows d doc w)
   else (case windowPresentation d w of Just layout->TextLayout.layoutWidth layout; Nothing->windowDocumentWidth doc w)-max 1 (if bufferView w==SideBySideView then min (fst (reviewPaneWidths w)) (snd (reviewPaneWidths w)) else width (bounds w)-2)+(if byteMode (documentBuffer doc) then 0 else 1))
 
@@ -2428,6 +2513,9 @@ scrollbarThumb :: Int -> Int -> Int -> Int
 scrollbarThumb len limit position = 1+min limit (max 0 position)*max 0 (len-3) `div` max 1 limit
 
 changeScroll :: Bool -> Int -> Desktop -> Desktop
+changeScroll vertical delta d | activeMarkdown d,Just w<-activeWindow d =
+  modifyActive (modifyDisplayedWindow (\shown->if vertical then shown {scrollRow=max 0 (min (markdownScrollLimit d True w) (scrollRow shown+delta))}
+    else shown {scrollColumn=max 0 (min (markdownScrollLimit d False w) (scrollColumn shown+delta))})) d
 changeScroll vertical delta d | Just view<-activePluginWindow d =
   modifyActive (\w->if vertical then w {scrollRow=max 0 (min (max 0 (windowTextRows d w (PluginWindow.preparedWindowText view)-height (bounds w)+2)) (scrollRow w+delta))}
     else w {scrollColumn=max 0 (scrollColumn w+delta)}) d
@@ -2437,7 +2525,7 @@ changeScroll vertical delta d = case (activeWindow d,activeDocument d) of
   _ -> d
 
 scrollClick :: Bool -> Int -> Int -> Desktop -> Desktop
-scrollClick vertical x y d = case (activeWindow d,activeDocument d) of
+scrollClick vertical x y d = case (displayWindow <$> activeWindow d,activeDocument d) of
   (Just w,Just doc) ->
     let r=scrollbarRect d vertical doc w
         len=if vertical then height r else width r
@@ -2451,15 +2539,19 @@ scrollClick vertical x y d = case (activeWindow d,activeDocument d) of
   _ -> d
 
 scrollTrack :: Bool -> Int -> Int -> Desktop -> Desktop
-scrollTrack vertical x y d = case (activeWindow d,activeDocument d) of
+scrollTrack vertical x y d = case (displayWindow <$> activeWindow d,activeDocument d) of
   (Just w,Just doc) -> let { r=scrollbarRect d vertical doc w
                          ; len=if vertical then height r else width r
                          ; offset=if vertical then y-top r else x-left r
                          ; value=max 0 (min (scrollbarLimit d vertical doc w) ((offset-1)*scrollbarLimit d vertical doc w `div` max 1 (len-3))) }
-                     in modifyActive (\v -> if vertical then v {scrollRow=value} else v {scrollColumn=value}) d
+                     in modifyActive (modifyDisplayedWindow (\v -> if vertical then v {scrollRow=value} else v {scrollColumn=value})) d
   _ -> d
 
 selectAt :: Bool -> Int -> Int -> Desktop -> Desktop
+selectAt extend x y d | activeMarkdown d,Just original<-activeWindow d,Just (_,text,_)<-windowMarkdown d original =
+  let w=displayWindow original; row=y-top (bounds w)-1+scrollRow w; col=x-left (bounds w)-1+scrollColumn w
+  in markdownMoveTo extend (windowTextOffset d w text row col) d
+selectAt _ _ _ d | activeMarkdown d=d
 selectAt extend x y d | Just view<-activePluginWindow d,Just w<-activeWindow d =
   let text=PluginWindow.preparedWindowText view
       row=max 0 (min (windowTextRows d w text-1) (y-top (bounds w)-1+scrollRow w))
@@ -2485,15 +2577,18 @@ selectAt extend x y d = case activeWindow d of
 
 -- | Read-only semantic text navigation; printable keys cannot edit a source behind it.
 pluginKey :: V.Key -> [V.Modifier] -> Desktop -> Desktop
-pluginKey key mods d | Just view<-activePluginWindow d,Just w<-activeWindow d =
-  let text=PluginWindow.preparedWindowText view
-      pos=caret (selection w)
+pluginKey key mods d | Just view<-activePluginWindow d,Just w<-activeWindow d = readOnlyTextKey (PluginWindow.preparedWindowText view) w (\extend target->pluginMoveTo extend target d) key mods d
+pluginKey _ _ d=d
+
+readOnlyTextKey :: BufferContent -> Window -> (Bool -> Int -> Desktop) -> V.Key -> [V.Modifier] -> Desktop -> Desktop
+readOnlyTextKey text w moveToText key mods d=
+  let pos=caret (selection w)
       (row,col)=windowTextPosition d w text pos
       (sourceRow,_)=contentPosition text pos
       vertical delta=let next=max 0 (min (windowTextRows d w text-1) (row+delta))
                      in windowTextOffset d w text next col
       extend=V.MShift `elem` mods
-      move target=pluginMoveTo extend target d
+      move target=moveToText extend target
   in case key of
     V.KLeft->move (if pos==contentLineOffset text sourceRow then max 0 (pos-1)
       else contentLineOffset text sourceRow+previousCharacter (contentLineAt text sourceRow) (pos-contentLineOffset text sourceRow))
@@ -2506,7 +2601,6 @@ pluginKey key mods d | Just view<-activePluginWindow d,Just w<-activeWindow d =
     V.KHome->move (if V.MCtrl `elem` mods then 0 else windowTextOffset d w text row 0)
     V.KEnd->move (if V.MCtrl `elem` mods then contentLength text else windowTextOffset d w text row maxBound)
     _->d
-pluginKey _ _ d=d
 
 pluginMoveTo :: Bool -> Int -> Desktop -> Desktop
 pluginMoveTo extend requested d | Just view<-activePluginWindow d, Just w<-activeWindow d =
@@ -2518,6 +2612,48 @@ pluginMoveTo extend requested d | Just view<-activePluginWindow d, Just w<-activ
       scrollColumn=max 0 (min col (max (scrollColumn w) (col-width (bounds w)+3)))}
   in modifyActive update d
 pluginMoveTo _ _ d=d
+
+-- | Ready Markdown content shares exactly the target used for paint and hits.
+windowMarkdown :: Desktop -> Window -> Maybe (TextLayout.TextLayout,BufferContent,[(Int,Int,Text)])
+windowMarkdown d w=do
+  layout<-windowPresentation d w
+  MarkdownWindowPresentation _ _ _ _ text links<-M.lookup (windowId w) (windowPresentations d)
+  pure (layout,text,links)
+
+markdownScrollLimit :: Desktop -> Bool -> Window -> Int
+markdownScrollLimit d vertical w=case windowMarkdown d w of
+  Nothing->0
+  Just (layout,_,_)->max 0 (if vertical then Vec.length (TextLayout.layoutRows layout)-max 1 (height (bounds w)-2)
+    else TextLayout.layoutWidth layout-max 1 (width (bounds w)-2))
+
+clampMarkdownInteraction :: Desktop -> Window -> Window
+clampMarkdownInteraction _ w | bufferView w/=MarkdownView=w
+clampMarkdownInteraction d w=case windowMarkdown d w of
+  Nothing->w
+  Just (_,text,_)->case M.lookup (windowId w) (windowPresentations d) of
+    Just prepared | (MarkdownPresentation _ version,columns,_)<-presentationMetadata prepared ->
+      let stamp=Just (version,columns)
+          currentStamp=case markdownInteraction w of Just (MarkdownInteraction _ _ _ old)->old; Nothing->Nothing
+          shown=displayWindow w
+          Selection a c=if currentStamp==stamp then selection shown else Selection 0 0
+          end=contentLength text
+      in w {markdownInteraction=Just (MarkdownInteraction (Selection (max 0 (min end a)) (max 0 (min end c)))
+        (min (markdownScrollLimit d True w) (scrollRow shown)) (min (markdownScrollLimit d False w) (scrollColumn shown)) stamp)}
+    _->w
+
+markdownKey :: V.Key -> [V.Modifier] -> Desktop -> Desktop
+markdownKey key mods d=case activeWindow d of
+  Just original | Just (_,text,_)<-windowMarkdown d original->readOnlyTextKey text (displayWindow original) (\extend target->markdownMoveTo extend target d) key mods d
+  _->d
+
+markdownMoveTo :: Bool -> Int -> Desktop -> Desktop
+markdownMoveTo extend requested d=case activeWindow d of
+  Just original | Just (_,text,_)<-windowMarkdown d original ->
+    let pos=max 0 (min (contentLength text) requested); (row,col)=windowTextPosition d original text pos
+    in modifyActive (modifyDisplayedWindow (\w->w {selection=Selection (if extend then anchor (selection w) else pos) pos,
+      scrollRow=max 0 (min row (max (scrollRow w) (row-height (bounds w)+3))),
+      scrollColumn=max 0 (min col (max (scrollColumn w) (col-width (bounds w)+3)))})) d
+  _->d
 
 -- Measured line offsets avoid scanning preceding text on cursor movement.
 contentPosition :: BufferContent -> Int -> (Int,Int)
@@ -2537,24 +2673,27 @@ windowPresentationTarget d w=case windowContent w of
     if PluginWindow.preparedWindowNeedsLayout True prepared then Just (PluginPresentation reference prepared) else Nothing
   SourceContent bid->do
     doc<-M.lookup bid (buffers d)
-    if bufferView w/=CurrentView || byteMode (documentBuffer doc) || syntaxDocument doc || null (documentHighlight doc) ||
+    if bufferView w==MarkdownView && markdownDocument doc then Just (MarkdownPresentation bid (revision (documentBuffer doc)))
+    else if bufferView w/=CurrentView || byteMode (documentBuffer doc) || syntaxDocument doc || null (documentHighlight doc) ||
        not (documentLabel doc `elem` [Just "Haskell Help",Just "Conversation"] || documentMarkdownPath doc/=Nothing) then Nothing
     else Just (DocumentPresentation bid (revision (documentBuffer doc)))
 
 -- | A layout is usable only for this exact payload, width and live preference.
--- Pending resize/replacement views use ordinary geometry until matching adoption.
+-- Pending styled views use ordinary geometry; Markdown stays a read-only
+-- placeholder until a matching derived presentation is adopted.
 windowPresentation :: Desktop -> Window -> Maybe TextLayout.TextLayout
 windowPresentation d w
   | not (windowPresentationNeeded d w)=Nothing
   | otherwise=do
-      WindowPresentation target columns wide layout<-M.lookup (windowId w) (windowPresentations d)
+      prepared<-M.lookup (windowId w) (windowPresentations d)
       current<-windowPresentationTarget d w
-      if target==current && wide==wideSectionTitles d && columns==max 1 (width (bounds w)-2) then Just layout else Nothing
+      let (target,columns,wide)=presentationMetadata prepared
+      if target==current && wide==wideSectionTitles d && columns==max 1 (width (bounds w)-2) then presentationLayout prepared else Nothing
 
 -- Cached admission stays separate from payload identity, so preference changes
 -- can still reproject the existing semantic viewport anchor.
 windowPresentationNeeded :: Desktop -> Window -> Bool
-windowPresentationNeeded d w=wideSectionTitles d || case windowContent w of
+windowPresentationNeeded d w=bufferView w==MarkdownView || wideSectionTitles d || case windowContent w of
   PluginContent reference->maybe False (PluginWindow.preparedWindowNeedsLayout False) (M.lookup reference (pluginWindows d))
   SourceContent bid->maybe False documentHasScripts (M.lookup bid (buffers d))
 
@@ -2574,6 +2713,7 @@ reprojectWindowPresentations :: Desktop -> Desktop -> Desktop
 reprojectWindowPresentations before after=after {windows=map reposition (windows after)}
   where
     reposition w
+      | bufferView w==MarkdownView = clampMarkdownInteraction after w
       | Just previous<-find ((==windowId w).windowId) (windows before)
       , windowPresentationTarget before previous==windowPresentationTarget after w
       , windowPresentation before previous/=windowPresentation after w
@@ -2589,7 +2729,7 @@ windowTextRows :: Desktop -> Window -> BufferContent -> Int
 windowTextRows d w text=maybe (contentLineCount text) (Vec.length . TextLayout.layoutRows) (windowPresentation d w)
 
 windowCaretCell :: Desktop -> Document -> Window -> (Int,Int)
-windowCaretCell d doc w=case windowPresentation d w of
+windowCaretCell d doc original=let w=displayWindow original in case windowPresentation d w of
   Just layout->TextLayout.layoutPosition layout (caret (selection w))
   Nothing->windowCursorCell (documentBuffer doc) w
 
@@ -2636,6 +2776,7 @@ bindingInputAvailable d=case dialog d of
 -- | Plain movement/text is handled by its owner. No removed chord falls through
 -- into a hardcoded named command. PTY fallback retains every ordinary control key.
 unboundKey :: V.Key -> [V.Modifier] -> Desktop -> (Desktop,[Effect])
+unboundKey key mods d | activeMarkdown d, dialog d==Nothing,maybe False (windowFocused d) (activeWindow d) = (markdownKey key mods d,[])
 unboundKey key mods d | Just _<-activePluginWindow d, dialog d==Nothing,maybe False (windowFocused d) (activeWindow d) = (pluginKey key mods d,[])
 unboundKey key mods d = case bindingContext d of
   Just Bindings.DialogKeys | Just dg<-dialog d -> dialogEvent (V.EvKey key mods) dg d
@@ -2672,7 +2813,7 @@ boundKeyCommand key mods d
 keyEvent :: V.Key -> [V.Modifier] -> Desktop -> (Desktop,[Effect])
 keyEvent key mods d
   | key==V.KEsc = (d {prefix=Nothing},[])
-  | Just p <- prefix d, V.KChar c <- key = starPrefix p (toLower c) d {prefix=Nothing}
+  | not (activeMarkdown d), Just p <- prefix d, V.KChar c <- key = starPrefix p (toLower c) d {prefix=Nothing}
   | V.MAlt `elem` mods, V.MMeta `notElem` mods, V.KChar c <- key, Just i <- findIndex (\(_,mn,_) -> mn==toLower c) menus = (d {menu=Just (i,0)},[])
   | V.MAlt `elem` mods, V.MMeta `notElem` mods, key==V.KChar 'x' = runCommand Quit d
   | V.MAlt `elem` mods, key==V.KFun 3 = runCommand Close d
@@ -2689,12 +2830,13 @@ keyEvent key mods d
   | key==V.KIns && V.MShift `elem` mods = runCommand Paste d
   | key==V.KDel && V.MShift `elem` mods = runCommand Cut d
   | ctrl, V.MShift `elem` mods, V.KChar c<-key, Just cmd<-lookup (toLower c) [('z',Redo),('l',FindPrevious),('c',Conversation),('n',AgentNew)] = runCommand cmd d
-  | ctrl, wordStar d, not (activeHex d), V.KChar c <- key = starKey (toLower c) d
+  | not (activeMarkdown d), ctrl, wordStar d, not (activeHex d), V.KChar c <- key = starKey (toLower c) d
   | ctrl, V.KChar c <- key, Just cmd <- lookup (toLower c) [('b',ToggleTree),('s',Save),('o',Open),('n',New),('z',Undo),('y',Redo),('c',Copy),('x',Cut),('v',Paste),('a',SelectAll),('f',Find),('h',Replace),('r',Replace),('g',GoTo),('l',FindNext),('q',Quit)] = runCommand cmd d
   | otherwise = (editorKey key mods d,[])
   where ctrl = V.MCtrl `elem` mods
 
 editorKey :: V.Key -> [V.Modifier] -> Desktop -> Desktop
+editorKey key mods d | activeMarkdown d=markdownKey key mods d
 editorKey key mods d | activeHex d = hexKey key mods d
 editorKey key mods d = case key of
   V.KLeft -> move (if ctrl then wordLeft t p else bufferPreviousCharacter b p)
