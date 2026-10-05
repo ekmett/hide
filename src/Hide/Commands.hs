@@ -65,6 +65,12 @@ builtinCommands =
   ,BuiltinCommand "hide.selection.page-up" (CursorPageUp True)
   ,BuiltinCommand "hide.cursor.page-down" (CursorPageDown False)
   ,BuiltinCommand "hide.selection.page-down" (CursorPageDown True)
+  ,BuiltinCommand "hide.cursor.word-left" (CursorWordLeft False)
+  ,BuiltinCommand "hide.cursor.word-right" (CursorWordRight False)
+  ,BuiltinCommand "hide.selection.word-left" (CursorWordLeft True)
+  ,BuiltinCommand "hide.selection.word-right" (CursorWordRight True)
+  ,BuiltinCommand "hide.edit.delete-word-backward" DeleteWordBackward
+  ,BuiltinCommand "hide.edit.delete-word-forward" DeleteWordForward
   ,BuiltinCommand "hide.edit.delete-backward" DeleteBackward
   ,BuiltinCommand "hide.edit.delete-forward" DeleteForward
   ,BuiltinCommand "hide.edit.delete-line" DeleteLine
@@ -251,7 +257,7 @@ platformBindings catalogue platform configuration=do
        (Redo,["Ctrl+Y","Ctrl+Shift+Y","Ctrl+Shift+Z"])]
     defaultsFor SourceKeys=defaults++navigationDefaults
     defaultsFor _=defaults
-    navigationDefaults=horizontalDefaults++edgeDefaults++
+    navigationDefaults=horizontalDefaults++edgeDefaults++wordDefaults++
       [(CursorUp False,verticalAliases V.KUp False),(CursorDown False,verticalAliases V.KDown False),
        (CursorUp True,verticalAliases V.KUp True),(CursorDown True,verticalAliases V.KDown True)]
     edgeDefaults=[(CursorRowStart False,keyAliases V.KHome False False),
@@ -266,6 +272,10 @@ platformBindings catalogue platform configuration=do
       (CursorPageUp True,verticalAliases V.KPageUp True),
       (CursorPageDown False,verticalAliases V.KPageDown False),
       (CursorPageDown True,verticalAliases V.KPageDown True)]
+    wordDefaults=[(CursorWordLeft False,keyAliases V.KLeft False True),(CursorWordRight False,keyAliases V.KRight False True),
+      (CursorWordLeft True,keyAliases V.KLeft True True),(CursorWordRight True,keyAliases V.KRight True True),
+      (DeleteWordBackward,keyAliases V.KBS False True++keyAliases V.KBS True True),
+      (DeleteWordForward,keyAliases V.KDel False True++keyAliases V.KDel True True)]
     verticalAliases key shift=aliases key shift++keyAliases key shift True
     horizontalDefaults=
       [(CursorLeft False,aliases V.KLeft False),(CursorRight False,aliases V.KRight False),

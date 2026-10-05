@@ -170,6 +170,7 @@ data Command = New | Open | Download | ChangeDir | Save | SaveAs | Close | Quit 
   | ReloadBindings | InspectBindings
   | CursorLeft Bool | CursorRight Bool | CursorUp Bool | CursorDown Bool
   | CursorRowStart Bool | CursorRowEnd Bool | CursorDocumentStart Bool | CursorDocumentEnd Bool | CursorPageUp Bool | CursorPageDown Bool
+  | CursorWordLeft Bool | CursorWordRight Bool | DeleteWordBackward | DeleteWordForward
   | DeleteBackward | DeleteForward | DeleteLine
   | SidebarMove Int | SidebarActivate | SidebarExpand | SidebarCollapse | FocusSource | MessagesMove Int | MessagesPage Int
   | ToolchainOptions | SelectToolchain Toolchain | SelectCompiler Text
@@ -369,6 +370,12 @@ commandDescription cmd = case cmd of
   CursorPageUp True -> "Extend selection to the previous page."
   CursorPageDown False -> "Move to the next page."
   CursorPageDown True -> "Extend selection to the next page."
+  CursorWordLeft False -> "Move left by the source word or current view step."
+  CursorWordRight False -> "Move right by the source word or current view step."
+  CursorWordLeft True -> "Extend selection left by the source word or current view step."
+  CursorWordRight True -> "Extend selection right by the source word or current view step."
+  DeleteWordBackward -> "Delete the selected range or previous source word (one hex byte)."
+  DeleteWordForward -> "Delete the selected range or next source word (one hex byte)."
   DeleteBackward -> "Delete the selected range or previous character."
   DeleteForward -> "Delete the selected range or next character."
   DeleteLine -> "Delete the current source line."
@@ -1155,6 +1162,10 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
     go (CursorDocumentEnd extend) d = (documentEdge True extend d,[])
     go (CursorPageUp extend) d = (pageMove False extend d,[])
     go (CursorPageDown extend) d = (pageMove True extend d,[])
+    go (CursorWordLeft extend) d = (wordMove False extend d,[])
+    go (CursorWordRight extend) d = (wordMove True extend d,[])
+    go DeleteWordBackward d = (deleteWord False d,[])
+    go DeleteWordForward d = (deleteWord True d,[])
     go DeleteBackward d = (deleteAdjacent False d,[])
     go DeleteForward d = (deleteAdjacent True d,[])
     go DeleteLine d = (deleteSourceLine d,[])
@@ -2839,7 +2850,7 @@ unboundKey :: V.Key -> [V.Modifier] -> Desktop -> (Desktop,[Effect])
 unboundKey key mods d
   | Just _<-effectiveBindings d, sourceNavigationOwner d,
     not (bindingPlatform d==Bindings.TerminalPlatform && V.MMeta `elem` mods),
-    key `elem` [V.KUp,V.KDown,V.KHome,V.KEnd,V.KPageUp,V.KPageDown] || V.MCtrl `notElem` mods && key `elem` [V.KLeft,V.KRight,V.KBS,V.KDel] = (d,[])
+    key `elem` [V.KUp,V.KDown,V.KHome,V.KEnd,V.KPageUp,V.KPageDown,V.KLeft,V.KRight,V.KBS,V.KDel] = (d,[])
 unboundKey key mods d | activeMarkdown d, dialog d==Nothing,maybe False (windowFocused d) (activeWindow d) = (markdownKey key mods d,[])
 unboundKey key mods d | Just _<-activePluginWindow d, dialog d==Nothing,maybe False (windowFocused d) (activeWindow d) = (pluginKey key mods d,[])
 unboundKey key mods d = case bindingContext d of
@@ -2912,10 +2923,12 @@ sourceKeyCommand CursorDocumentStart{}=True
 sourceKeyCommand CursorDocumentEnd{}=True
 sourceKeyCommand CursorPageUp{}=True
 sourceKeyCommand CursorPageDown{}=True
+sourceKeyCommand CursorWordLeft{}=True
+sourceKeyCommand CursorWordRight{}=True
 sourceKeyCommand cmd=horizontalMutation cmd
 
 horizontalMutation :: Command -> Bool
-horizontalMutation cmd=cmd `elem` [DeleteBackward,DeleteForward,DeleteLine]
+horizontalMutation cmd=cmd `elem` [DeleteBackward,DeleteForward,DeleteLine,DeleteWordBackward,DeleteWordForward]
 
 -- A global remap cannot edit or move a source behind another focused input owner.
 sourceNavigationOwner :: Desktop -> Bool
@@ -3017,6 +3030,26 @@ pageMove :: Bool -> Bool -> Desktop -> Desktop
 pageMove forward extend d=verticalMove (if forward then page else negate page) extend d
   where page=maybe 10 (\w->max 1 (height (bounds w)-if activeMarkdown d || isJust (activePluginWindow d) then 2 else 3)) (activeWindow d)
 
+-- | Use measured scalar word boundaries in source; preserve byte/grapheme steps in other views.
+wordMove :: Bool -> Bool -> Desktop -> Desktop
+wordMove forward extend d
+  | activeMarkdown d || isJust (activePluginWindow d) || activeHex d=horizontalMove forward extend d
+  | Just w<-activeWindow d,Just doc<-activeDocument d =
+      let b=documentBuffer doc; p=caret (selection w)
+      in moveTo extend (if forward then bufferWordRight b p else bufferWordLeft b p) d
+  | otherwise=d
+
+-- | Delete the selected range first, otherwise one measured source word or hex byte.
+deleteWord :: Bool -> Desktop -> Desktop
+deleteWord forward d
+  | activeHex d=deleteAdjacent forward d
+  | Just w<-activeWindow d,Just doc<-activeDocument d =
+      let b=documentBuffer doc; sel=selection w; p=caret sel
+          target=if forward then bufferWordRight b p else bufferWordLeft b p
+          range=if anchor sel/=p then sel else Selection p target
+      in editActive (\_ -> replaceSelection range "") (Just (fst (ordered range))) d
+  | otherwise=d
+
 -- | Delete a selected range first, otherwise one existing character (or hex byte).
 deleteAdjacent :: Bool -> Desktop -> Desktop
 deleteAdjacent forward d=case (activeWindow d,activeDocument d) of
@@ -3041,9 +3074,9 @@ editorKey :: V.Key -> [V.Modifier] -> Desktop -> Desktop
 editorKey key mods d | activeMarkdown d=markdownKey key mods d
 editorKey key mods d | activeHex d = hexKey key mods d
 editorKey key mods d = case key of
-  V.KLeft | ctrl -> move (bufferWordLeft b p)
+  V.KLeft | ctrl -> wordMove False shift d
           | otherwise -> horizontalMove False shift d
-  V.KRight | ctrl -> move (bufferWordRight b p)
+  V.KRight | ctrl -> wordMove True shift d
            | otherwise -> horizontalMove True shift d
   V.KUp -> verticalMove (-1) shift d
   V.KDown -> verticalMove 1 shift d
@@ -3051,9 +3084,9 @@ editorKey key mods d = case key of
   V.KPageDown -> pageMove True shift d
   V.KHome -> if ctrl then documentEdge False shift d else rowEdge False shift d
   V.KEnd -> if ctrl then documentEdge True shift d else rowEdge True shift d
-  V.KBS | ctrl -> erase (bufferWordLeft b p) p
+  V.KBS | ctrl -> deleteWord False d
         | otherwise -> deleteAdjacent False d
-  V.KDel | ctrl -> erase p (bufferWordRight b p)
+  V.KDel | ctrl -> deleteWord True d
          | otherwise -> deleteAdjacent True d
   V.KEnter -> insertText (bufferNewline b) d
   V.KChar '\t' -> insertText "  " d
@@ -3061,11 +3094,7 @@ editorKey key mods d = case key of
   _ -> d
   where
     b = maybe (newBuffer "") documentBuffer (activeDocument d)
-    sel = maybe (Selection 0 0) selection (activeWindow d); p = caret sel
     ctrl = V.MCtrl `elem` mods; shift = V.MShift `elem` mods
-    move = (\q -> moveTo shift q d)
-    erase a z = let s = if anchor sel/=caret sel then sel else Selection a z
-                in editActive (\_ -> replaceSelection s "") (Just (fst (ordered s))) d
 
 starKey :: Char -> Desktop -> (Desktop,[Effect])
 starKey c d = case c of
@@ -3075,8 +3104,8 @@ starKey c d = case c of
     'd' -> runCommand (CursorRight False) d
     'k' -> (d {prefix=Just 'k'},[])
     'q' -> (d {prefix=Just 'q'},[])
-    'a' -> (editorKey V.KLeft [V.MCtrl] d,[])
-    'f' -> (editorKey V.KRight [V.MCtrl] d,[])
+    'a' -> (wordMove False False d,[])
+    'f' -> (wordMove True False d,[])
     'y' -> runCommand DeleteLine d
     'z' -> runCommand Undo d
     _ -> (d,[])
