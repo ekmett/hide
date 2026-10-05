@@ -5,7 +5,7 @@
 -- styles. A tokenizer result is accepted only when it preserves the original
 -- characters exactly. Link and bubble annotations remain in the styled stream
 -- so later layout can retain interaction metadata without reparsing text.
-module Hide.Syntax (Style(..), Grapheme, graphemeText, Sigils(..), sourceSigils, SourceRow, SourceRange, prepareSourceRow, plainSourceRow, sourceRowText, sourceRowRanges, sourceRangeCharStart, sourceRangeCharEnd, sourceRangeByteStart, sourceRangeByteEnd, sourceRangeStyle, sourceRangeText, sourceStylesAt, fontTraits, sectionTitle, highlight, highlightFor, bubbleTile, linkSpans) where
+module Hide.Syntax (Style(..), Grapheme, graphemeText, Sigils(..), sourceSigilsWindow, SourceRow, SourceRange, prepareSourceRow, plainSourceRow, sourceRowText, sourceRowRanges, sourceRangeCharStart, sourceRangeCharEnd, sourceRangeByteStart, sourceRangeByteEnd, sourceRangeStyle, sourceRangeText, sourceStylesAt, fontTraits, sectionTitle, highlight, highlightFor, bubbleTile, linkSpans) where
 
 import Data.List (intercalate)
 import qualified Data.List as List
@@ -39,7 +39,8 @@ data SourceRange = SourceRange
   , sourceRangeStyle :: !Style
   } deriving (Eq,Show)
 
--- | Prepare compact ranges on the tokenizer worker. The source remains
+-- | Prepare compact ranges for one physical row (LF already split by the
+-- owning worker; a trailing CR may remain). The source remains
 -- authoritative; missing style positions are Plain, and no token character is
 -- copied into the retained representation.
 prepareSourceRow :: T.Text -> [(Char,Style)] -> SourceRow
@@ -83,48 +84,56 @@ newtype Grapheme = Grapheme { graphemeText :: T.Text } deriving (Eq,Show)
 -- | Visible source display stream. Each character in ConsChars independently
 -- occupies one cell; ConsSigil retains one complete exceptional grapheme. Both
 -- borrow source bytes. Strict tails avoid a separate pair/list payload layer.
--- Concatenated fragments recover the original row, regardless of style splits.
+-- Window fragments retain their exact source bytes and original coordinates;
+-- segmentation always precedes styling, regardless of range boundaries.
 data Sigils
   = ConsChars {-# UNPACK #-} !T.Text {-# UNPACK #-} !Style !Sigils
   | ConsSigil {-# UNPACK #-} !Grapheme {-# UNPACK #-} !Style {-# UNPACK #-} !Int !Sigils
   | Nil
 
--- | Build only for visible rows. Segment the whole row before assigning styles:
--- a combining suffix across a range boundary belongs to its preceding grapheme.
-sourceSigils :: SourceRow -> Sigils
-sourceSigils row
-  | T.all (\c->c<'\128' && c/='\n') text = ascii 0 0 (V.toList (sourceRowRanges row))
-  | otherwise = general 0 0 0 (V.toList (sourceRowRanges row)) (graphemes text)
+-- | Prepare only complete graphemes overlapping a display-column window.
+-- Returns the original character and display-column start of the first fragment.
+-- Translation/cropping may hide a half glyph; its source fragment stays complete.
+-- Tab advances use absolute columns. Styling is assigned after segmentation.
+-- A zero-width window never inspects source metadata or text.
+sourceSigilsWindow :: Int -> Int -> SourceRow -> (Int,Int,Sigils)
+sourceSigilsWindow requested width row
+  | width<=0=(0,0,Nil)
+  | otherwise=seek 0 0 0 (graphemes text)
   where
     text=sourceRowText row
+    left=max 0 requested
+    right=left+min (maxBound-left) width
+    ranges=V.toList (sourceRowRanges row)
     slice a b=TU.takeWord8 (b-a) (TU.dropWord8 a text)
-    ascii _ _ []=Nil
-    ascii !col !byte ranges@(range:more)
-      | byte>=sourceRangeByteEnd range=ascii col byte more
-      | otherwise=let tailText=TU.dropWord8 byte (TU.takeWord8 (sourceRangeByteEnd range) text)
-                      (ordinary,rest)=T.span (\c->c>=' ' && c<='~') tailText
-                      end=byte+TU.lengthWord8 ordinary
-                  in if T.null ordinary then
-                       let glyph=TU.takeWord8 1 rest; advance=glyphAdvance col glyph
-                       in ConsSigil (Grapheme glyph) (sourceRangeStyle range) advance (ascii (col+advance) (byte+1) ranges)
-                     else ConsChars ordinary (sourceRangeStyle range) (ascii (col+end-byte) end ranges)
-    general _ _ _ _ []=Nil
-    general !col !char !byte ranges (glyph:rest)=
-      let current=dropWhile ((<=char).sourceRangeCharEnd) ranges
-          style=case current of range:_->sourceRangeStyle range; _->Plain
+    seek !col !char !byte pending
+      | col>=right=(char,col,Nil)
+      | otherwise=case pending of
+          []->(char,col,Nil)
+          glyph:rest->let n=T.length glyph; advance=glyphAdvance col glyph
+                     in if col+advance<=left then seek (col+advance) (char+n) (byte+TU.lengthWord8 glyph) rest
+                        else (char,col,emit col char byte ranges glyph n advance rest)
+    build !col !char !byte current pending
+      | col>=right=Nil
+      | otherwise=case pending of
+          []->Nil
+          glyph:rest->emit col char byte current glyph (T.length glyph) (glyphAdvance col glyph) rest
+    emit col char byte current glyph n advance rest=
+      let active=dropWhile ((<=char).sourceRangeCharEnd) current
+          style=case active of range:_->sourceRangeStyle range; _->Plain
           endByte=byte+TU.lengthWord8 glyph
-          endChar=char+T.length glyph
-          advance=glyphAdvance col glyph
-          ordinary g=T.length g==1 && advance==1 && T.all (\c->c>=' ' && c/='\DEL') g
-      in if ordinary glyph then
-           let limit=case current of range:_->sourceRangeCharEnd range; _->maxBound
-               (finishChar,finishByte,after)=gather limit endChar endByte rest
-           in ConsChars (slice byte finishByte) style (general (col+finishChar-char) finishChar finishByte current after)
-         else ConsSigil (Grapheme (slice byte endByte)) style advance (general (col+advance) endChar endByte current rest)
-    gather limit !char !byte (glyph:rest)
-      | char<limit,T.length glyph==1,clusterWidth glyph==1,T.all (\c->c>=' ' && c/='\DEL') glyph=
-          gather limit (char+1) (byte+TU.lengthWord8 glyph) rest
-    gather _ char byte rest=(char,byte,rest)
+          endChar=char+n
+      in if n==1 && advance==1 && T.all (\c->c>=' ' && c/='\DEL') glyph then
+           let limit=case active of range:_->sourceRangeCharEnd range; _->maxBound
+               (finishChar,finishByte,after)=gather limit (col+1) endChar endByte rest
+           in ConsChars (slice byte finishByte) style (build (col+finishChar-char) finishChar finishByte active after)
+         else ConsSigil (Grapheme (slice byte endByte)) style advance (build (col+advance) endChar endByte active rest)
+    gather limit !col !char !byte pending
+      | char>=limit || col>=right=(char,byte,pending)
+      | otherwise=case pending of
+          glyph:rest | T.length glyph==1,clusterWidth glyph==1,T.all (\c->c>=' ' && c/='\DEL') glyph->
+            gather limit (col+1) (char+1) (byte+TU.lengthWord8 glyph) rest
+          _->(char,byte,pending)
 
 -- Exceptional advance is resolved at the layout boundary, independently of
 -- source byte/character counts. A scalar field avoids wrapping recursive Style.

@@ -612,8 +612,7 @@ windowLayers d active w =
               Nothing -> case liveRow of
                 Just n | side/=OriginalSide -> (selection w,bufferLineOffset b n,active && windowReviewSelection b w==Nothing)
                 _ -> (Selection 0 0,0,False)
-        in V.cropRight columns (V.translateX (negate (scrollColumn w))
-          (styledSourceImage (darkAppearance d) color canSelect sel start tokens)
+        in V.cropRight columns (styledSourceImage (darkAppearance d) color canSelect sel start (scrollColumn w) columns tokens
           V.<|> V.charFill base ' ' columns 1)
       _ -> V.charFill base ' ' columns 1
     selectable style | documentLabel doc==Just "Conversation" = case style of BubbleText{} -> True; _ -> False
@@ -628,14 +627,14 @@ windowLayers d active w =
         count=windowHexBytes w
         bytes=bufferSlice b (n*count) count
         highlighted offset = offset==caret (selection w) || let (a,z)=ordered (selection w) in offset>=a && offset<z
-    renderLine n=V.cropRight contentWidth (V.translateX (negate (scrollColumn w)) lineImage V.<|> V.charFill base ' ' contentWidth 1)
+    renderLine n=V.cropRight contentWidth (lineImage V.<|> V.charFill base ' ' contentWidth 1)
       where
         plain=bufferLineAt b n
         lineImage
-          | syntaxDocument doc = styledSourceImage (darkAppearance d) (lineColor n) active (selection w) (bufferLineOffset b n)
+          | syntaxDocument doc = styledSourceImage (darkAppearance d) (lineColor n) active (selection w) (bufferLineOffset b n) (scrollColumn w) contentWidth
               (fromMaybe (plainSourceRow plain) (documentSourceRows doc >>= (Vec.!? n)))
-          | otherwise = styledImage (darkAppearance d) selectable (lineColor n) active (selection w) (bufferLineOffset b n)
-              (if useStyles && not (null (documentHighlight doc)) then fromMaybe [] (atMay styledLines n) else [(ch,Plain) | ch<-T.unpack plain])
+          | otherwise = V.translateX (negate (scrollColumn w)) (styledImage (darkAppearance d) selectable (lineColor n) active (selection w) (bufferLineOffset b n)
+              (if useStyles && not (null (documentHighlight doc)) then fromMaybe [] (atMay styledLines n) else [(ch,Plain) | ch<-T.unpack plain]))
 
     lineColor n = case documentLabel doc of
       Just "Git diff" -> Just (diffLineAttr (bufferLineAt b n))
@@ -656,9 +655,10 @@ splitStyled xs=let (a,b)=break ((=='\n').fst) xs in a:case b of []->[]; _:rest->
 -- Source runs retain original UTF8 slices. Selection cuts ordinary runs at
 -- character boundaries; exceptional graphemes keep one complete source target
 -- and the advance already resolved by sourceSigils, including tab stops.
-styledSourceImage :: Bool -> Maybe V.Attr -> Bool -> Selection -> Int -> SourceRow -> V.Image
-styledSourceImage dark override active sel start=V.horizCat . draw start . sourceSigils
+styledSourceImage :: Bool -> Maybe V.Attr -> Bool -> Selection -> Int -> Int -> Int -> SourceRow -> V.Image
+styledSourceImage dark override active sel start left columns row=V.translateX (column-left) (V.horizCat (draw (start+char) sigils))
   where
+    (char,column,sigils)=sourceSigilsWindow left columns row
     (lo,hi)=ordered sel
     color style=maybe normal (\paint->paint {V.attrStyle=V.attrStyle normal}) override
       where normal=syntaxAttr dark style
