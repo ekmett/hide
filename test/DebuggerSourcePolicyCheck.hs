@@ -52,20 +52,27 @@ localSourceCheck=bracket (Fixture.fixture "local-source") Fixture.cleanup $ \(po
     unless ((activeDocument opened >>= documentFile)==Just file && (activeDocument opened >>= documentLabel)==Nothing && fmap (caret.selection) (activeWindow opened)==Just 8)
       (fail "Local source must retain regular FileState and UTF-16 caret coordinates")
     let changed=insertText "!" (moveTo False 0 opened)
-        trapped d [ReadPath _]=fail "Debugger source UI owner called ReadPath"
+        trapped _ [ReadPath _]=fail "Debugger source UI owner called ReadPath"
         trapped d _=pure (False,d)
+        present d=do
+          (_,stateReply)<-debuggerTool runtime trapped d "debug_status" (object [])
+          state<-stateReply >>= either (fail . T.unpack) pure
+          generation<-maybe (fail "Missing stopped generation") pure (parseMaybe (withObject "status" (.:"generation")) state :: Maybe Int)
+          (queued,reply)<-debuggerTool runtime trapped d "debug_present" (object ["generation" .= generation,"view" .= ("source"::T.Text)])
+          _<-reply >>= either (fail . T.unpack) pure
+          pure queued
     removeFile canonical
     (do
-      (_,queued)<-debuggerEffects runtime trapped changed [DebugAction "source" []]
+      queued<-present changed
       retained<-await "dirty open source did not navigate without disk" (T.isPrefixOf "Stopped; unsaved" . status) queued
       unless (activeText retained=="!"<>text && fmap (caret.selection) (activeWindow retained)==Just 9 && (activeDocument retained >>= documentFile)==Just file)
         (fail "Local source follow must preserve dirty open text and file authority")
-      (_,pending)<-debuggerEffects runtime trapped retained [DebugAction "source" []]
+      pending<-present retained
       let replacement=insertText "?" (moveTo False 0 pending)
       refused<-await "changed local source was not refused" (T.isInfixOf "target changed" . status) replacement
       unless (activeText refused=="?!"<>text && fmap (caret.selection) (activeWindow refused)==Just 1)
         (fail "Late source coordinates must not jump in a changed buffer")
-      (_,privateQueued)<-debuggerEffects runtime trapped refused {guestPrivatePaths=[canonical]} [DebugAction "source" []]
+      privateQueued<-present refused {guestPrivatePaths=[canonical]}
       privateShown<-await "local source lost private path policy" ((=="Stopped in private debugger source.").status) privateQueued
       unless (maybe False (privateDocument privateShown) (activeDocument privateShown))
         (fail "Local debugger source must retain ordinary document privacy"))
