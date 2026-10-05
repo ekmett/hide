@@ -68,7 +68,7 @@ restyle :: Document -> Document
 restyle doc = doc {documentHighlight=[],documentHasLayoutMetadata=False,documentSourceRows=Nothing,documentShellBlocks=[],documentLinks=[],
   documentWidth=if byteMode (documentBuffer doc) then hexWidth 16 else documentWidth doc}
 
--- | Install prepared styling and its cached script admission together. The
+-- | Install prepared styling and its cached layout admission together. The
 -- owner replaces content/version before installing new styles; input and layout
 -- admission read this flag without traversing the styled payload.
 setDocumentHighlight :: [(Char,Style)] -> Document -> Document

@@ -107,6 +107,14 @@ checks=do
    let fragments=[g | row<-Vec.toList (layoutRows prepared),g<-Vec.toList (layoutGlyphs row),layoutDisplayText g=="�"]
    check "code/table wrapping preserves overflow atoms including leading whitespace"
      (length fragments==3 && all ((==1) . layoutAdvance) fragments && T.length (T.concat (map layoutText fragments))==71)
+ forM_ [3,5,9] $ \columns->forM_ overflowing $ \cluster->
+   forM_ ["```\n"<>cluster<>"Z\n```","| H |\n|---|\n| "<>cluster<>"Z |","> "<>cluster<>"Z"] $ \source->do
+     let chars=renderMarkdown columns source
+         measured=bufferContent (newBuffer (T.pack (map fst chars)))
+     prepared<-prepareTextLayout False columns measured (M.indexedHighlightRows chars)
+     let fragments=[g | row<-Vec.toList (layoutRows prepared),g<-Vec.toList (layoutGlyphs row),layoutDisplayText g=="�"]
+     check "inserted code/table/indent padding cannot swallow captured combining or ZWJ extents"
+       (length fragments==3 && T.concat (map layoutText fragments)==cluster && all ((==1) . layoutAdvance) fragments)
  let plainHelp=M.modifyActive (\w->w {M.selection=Selection 2 2,M.scrollRow=2,M.scrollColumn=1})
        (M.addHelpStyled [(c,Plain) | c<-"plain\ntext"] (M.initialDesktop (40,25)))
  negative<-prepareTextPresentations plainHelp

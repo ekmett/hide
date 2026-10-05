@@ -241,7 +241,17 @@ presentationItems text=go text (map (\i->(itemSourceText i,itemOverflow i)) (dis
         (_,style):_ | Just n<-styleOverflowExtent style,n>0,n<=32,
                       let original=T.take n remaining,T.length original==n ->
           (original,True):go (T.drop n remaining) (skip n pending) (drop n styles)
-        _->let n=T.length glyph in (glyph,overflow):go (T.drop n remaining) rest (drop n styles)
+        _->case markerBefore (T.length glyph) 1 (drop 1 styles) of
+          Just n->(T.take n glyph,False):go (T.drop n remaining) (skip n pending) (drop n styles)
+          Nothing->let n=T.length glyph in (glyph,overflow):go (T.drop n remaining) rest (drop n styles)
+    -- Inserted padding can join a leading mark/ZWJ under GB9. Captured fragment
+    -- boundaries take precedence; that borrowed prefix is ordinary presentation.
+    markerBefore limit n styles
+      | n>=limit=Nothing
+      | otherwise=case styles of
+          (_,style):more | styleOverflowExtent style/=Nothing->Just n
+                         | otherwise->markerBefore limit (n+1) more
+          []->Nothing
     skip _ []=[]
     skip n pending@((glyph,overflow):rest)
       | n<=0=pending
