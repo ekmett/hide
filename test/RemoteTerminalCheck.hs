@@ -27,7 +27,7 @@ checks = do
   check "terminal OSC52 uses UTF8 base64" (terminalClipboard "λ"=="\ESC]52;c;zrs=\BEL")
   check "terminal OSC52 handles base64 padding" (map terminalClipboard ["","f","fo","foo","foobar"]==map (\s -> "\ESC]52;c;"<>s<>"\BEL") ["","Zg==","Zm8=","Zm9v","Zm9vYmFy"])
   let metadata=object ["size" .= ([40,12]::[Int]),"bindings" .= ([]::[(T.Text,T.Text)]),"cursor" .= ([5,0]::[Int])]
-      row=toJSON [(2::Int,0x123456::Int,0xffffff::Int,0::Int,[String "a",toJSON ("界"::T.Text,2::Int),toJSON ("é"::T.Text,1::Int)])]
+      row=toJSON [(2::Int,0x123456::Int,0xffffff::Int,0::Int,[String "a",toJSON ("界"::T.Text,2::Int,False,0::Int,2::Int),toJSON ("é"::T.Text,1::Int,False,0::Int,1::Int)])]
   frame <- either error pure (parseRemoteFrame metadata (row:replicate 11 (toJSON ([]::[Value]))))
   let picture=remoteTerminalPicture frame
   check "terminal picture preserves frame dimensions with sparse Unicode cells" (case V.picLayers picture of [image] -> V.imageWidth image==40 && V.imageHeight image==12; _ -> False)

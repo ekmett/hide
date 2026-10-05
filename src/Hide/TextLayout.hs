@@ -12,7 +12,7 @@ import qualified Data.Text as T
 import qualified Data.Vector as V
 import Data.Unique (Unique,newUnique,hashUnique)
 import Hide.Buffer (BufferContent,contentLineOffset)
-import Hide.Syntax (Style(..),sectionTitle)
+import Hide.Syntax (Style(..),fontTraits,sectionTitle)
 import Hide.Unicode (graphemes,clusterWidth)
 
 data LayoutGlyph = LayoutGlyph
@@ -34,6 +34,7 @@ layoutWidth (TextLayout _ _ width)=width
 
 -- | Prepare complete heading wrapping and cell/source maps outside input. Only
 -- semantic section titles widen; already-wide graphemes remain two cells.
+-- Widened titles use stretch instead of bold, retaining italic and annotations.
 -- Ordinary rows retain their original line geometry. A one-cell viewport still
 -- consumes a whole two-cell title grapheme, which clipping safely blanks.
 prepareTextLayout :: Bool -> Int -> BufferContent -> V.Vector [(Char,Style)] -> IO TextLayout
@@ -56,8 +57,11 @@ prepareTextLayout wide requested text styled=do
     wrap current col start []=[finish current col start]
     wrap current col start remaining@((g,a,z,style):rest)
       | not (null current) && wide && sectionTitle style && col+advance>columns = finish current col start:wrap [] 0 a remaining
-      | otherwise=wrap (LayoutGlyph g drawn a z col advance style:current) (col+advance) start rest
+      | otherwise=wrap (LayoutGlyph g drawn a z col advance shownStyle:current) (col+advance) start rest
       where
+        shownStyle
+          | wide && sectionTitle style = let (base,_,italic)=fontTraits style in if italic then ItalicStyle base else base
+          | otherwise = style
         natural=sum (map clusterWidth (graphemes drawn))
         advance=if wide && sectionTitle style && not (T.null drawn) then 2 else natural
         drawn | g==T.singleton '\r'=T.empty

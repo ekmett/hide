@@ -640,8 +640,25 @@ and captured privacy protect the expression editor and shared row projection.
 Owner ticks compare only the catalogue revision; provider workers prepare labels.
 `DebuggerSidebarCheck` covers the live management route, stale Remove after Edit,
 expression bounds and private editor fields. Management and passive expansion do
-not evaluate. Explicit evaluation/Force remain the next slice. Local source
-following still uses the existing synchronous owner route.
+not evaluate. `DebuggerWatchesCheck` uses the actual captured provider action
+route for explicit Evaluate and root Force, with deterministic DAP replies.
+Executing requests invalidate old value handles before dispatch and retain the
+exact provider registration, stop, selected frame and watch edit revision. One
+pending executing request and one bounded preparation worker use the existing
+debugger owner; no new session registry or executing MCP tool is introduced.
+Metadata/error preparation and canonical origin resolution happen off the UI
+lock. Adoption rechecks registration, provenance, modal input and current path
+privacy. Nonlazy child pages reuse the existing 128-row/64-page stopped cache;
+root Force publishes its prepared first page, while nested lazy values stay inert.
+Unsupported evaluation remains a local error until explicit retry. These checks
+are deterministic DAP evidence. A separate headless live check on hdb 0.14 / GHC
+9.14.1 / macOS arm64 verified a stopped-frame scalar result of `42`, list-result
+expansion with an inert lazy child through the captured provider action route. No
+root Force action was available: hdb Evaluate replies omit the lazy root hint.
+Both THC backends reached a source stop, rejected explicit watch expression
+evaluation with a bounded error, then continued to the expected result and exited.
+These runs do not qualify live Force; nested Force remains open.
+Local source following still uses the existing synchronous owner route.
 
 Debugger source inspection accepts only positive references observed in current
 stopped stack metadata, including human, inspector and sidebar stacks. Source

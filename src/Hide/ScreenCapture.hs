@@ -19,18 +19,16 @@ import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import qualified Data.Text.Lazy as TL
 import qualified Data.Vector as Vec
 import qualified Graphics.Vty as V
-import Graphics.Vty.Span (SpanOp(..))
 import Hide.Font
 import Hide.Frontend (modeHeight)
 import Hide.Commands (commandIdentifier)
 import Hide.Model (Desktop(..), MenuItem(..), menus, commandEnabled)
 import Hide.GuestAccess (CellAccess(..), cellAccess, guestKeyboardAllowed, beginGuestInput, guestKeyCombinations)
 import qualified Hide.Protocol as P
-import Hide.Render (renderDesktop)
-import Hide.Unicode (clusterWidth, displayClusters, displayOpsForPic, terminalProjection)
+import Hide.Render (renderDesktop, renderCellRows)
+import Hide.Unicode (CellSpan(..), clusterWidth, terminalProjection)
 
 screenTool :: Value
 screenTool=object
@@ -62,17 +60,16 @@ capture font desktop includeImage
     (cols,rows)=screenSize desktop
     cellHeight=modeHeight (fromMaybe 3 (videoMode desktop))
     picture=renderDesktop desktop {streamerMode=True}
-    spans=map toList (toList (displayOpsForPic picture (cols,rows)))
+    spans=map toList (toList (renderCellRows desktop {streamerMode=True}))
     maskedRows=[maskRow y line | (y,line)<-zip [0..] spans]
     maskRow y line=snd (mapAccumL (maskCluster y) 0 padded)
       where
         chunks=concatMap spanClusters line
         occupied=sum [advance | (_,advance,_)<-chunks]
         padded=chunks++replicate (max 0 (cols-occupied)) (" ",1,V.defAttr)
-    spanClusters (TextSpan attr advance _ t)=
-      [(text,width,attr) | (text,width)<-displayClusters advance (TL.toStrict t)]
-    spanClusters (Skip n)=replicate n (" ",1,V.defAttr)
-    spanClusters (RowEnd n)=replicate n (" ",1,V.defAttr)
+    spanClusters (CellText attr text)=[(T.singleton c,1,attr) | c<-T.unpack text]
+    spanClusters (CellGlyph attr text full start shown)=
+      [(if start/=0 || shown/=full then T.replicate shown " " else text,shown,attr)]
     maskCluster y x (text,width,attr)=
       let access=[cellAccess desktop column y | column<-[x..x+width-1]]
           (shown,safeAccess)=redactCluster text access

@@ -24,11 +24,11 @@ import Blaze.ByteString.Builder (writeToByteString)
 import qualified Data.Text.Encoding as TE
 import qualified Data.ByteString as BS
 import Hide.Buffer (Buffer(undoStack),Selection(..),newBuffer,bufferContent,contentSlice,contentLength,contents)
-import Hide.Syntax (Style(..))
+import Hide.Syntax (Style(..),fontTraits)
 import Hide.TextLayout
 import Hide.Unicode
 import qualified Hide.Protocol as Protocol
-import Hide.TextStyle (textBold)
+import Hide.TextStyle (textBold,textItalic)
 import Hide.RemoteWindow
 import Hide.RemoteTerminal (remoteTerminalPicture)
 
@@ -48,16 +48,23 @@ checks=do
    let (bytes,end)=terminalSpan (const mempty) 0 2 semantic
    check "terminal projection reserves two cells and keeps semantic text separate" (end==2 && TE.encodeUtf8 projected `BS.isInfixOf` writeToByteString bytes)
  let metadata=object ["size" .= ([40,12]::[Int]),"bindings" .= ([]::[(T.Text,T.Text)])]
-     row=toJSON [(0::Int,0xffffff::Int,0::Int,3::Int,[toJSON ("A"::T.Text,2::Int,True)])]
+     row=toJSON [(0::Int,0xffffff::Int,0::Int,3::Int,[toJSON ("A"::T.Text,2::Int,True,0::Int,2::Int)])]
  frame<-either fail pure (parseRemoteFrame metadata (row:replicate 11 (toJSON ([]::[Value]))))
- check "native receiver keeps stretched semantic glyph width" (case remoteCells frame of [RemoteCell 0 0 _ "A" 2]->True; _->False)
+ check "native receiver keeps stretched semantic glyph width" (case remoteCells frame of [RemoteCell 0 0 _ "A" 2 0 2]->True; _->False)
  check "remote TUI retains the same original glyph/advance before output projection" (case [ (TL.toStrict text,width) | rowOps<-Vec.toList (displayOpsForPic (remoteTerminalPicture frame) (40,12)),TextSpan _ width _ text<-Vec.toList rowOps,text=="A"] of [("A",2)]->True; _->False)
- let bad flag advance text=toJSON [(0::Int,0::Int,0::Int,0::Int,[toJSON (text::T.Text,advance::Int,flag::Bool)])]
+ let clipped start shown=toJSON [(0::Int,0xffffff::Int,0::Int,3::Int,[toJSON ("A"::T.Text,2::Int,True,start::Int,shown::Int)])]
+ forM_ [0,1] $ \start->do
+   partial<-either fail pure (parseRemoteFrame metadata (clipped start 1:replicate 11 (toJSON ([]::[Value]))))
+   check "native wire preserves partial glyph origin and full allocated width" (case remoteCells partial of [RemoteCell 0 0 _ "A" 2 offset 1]->offset==start; _->False)
+   check "text mode suppresses a partial glyph without shifting following cells"
+     (all (not . T.isInfixOf "A") [TL.toStrict text | rowOps<-Vec.toList (displayOpsForPic (remoteTerminalPicture partial) (40,12)),TextSpan _ _ _ text<-Vec.toList rowOps])
+ check "clipped wire rejects impossible extents" (all (either (const True) (const False) . parseRemoteFrame metadata . (:replicate 11 (toJSON ([]::[Value])))) [clipped (-1) 1,clipped 2 1,clipped 1 2,clipped 0 0,clipped maxBound 1,clipped 1 maxBound])
+ let bad flag advance text=toJSON [(0::Int,0::Int,0::Int,0::Int,[toJSON (text::T.Text,advance::Int,flag::Bool,0::Int,advance::Int)])]
  check "invalid stretched wire glyphs refuse instead of changing geometry" (all (either (const True) (const False) . parseRemoteFrame metadata . (:replicate 11 (toJSON ([]::[Value])))) [bad True 1 "A",bad True 2 "界",bad True 2 "ab",bad False 2 "A"])
  let heading="ABé界é👩🏽\x200d\&💻"
      semantic=heading<>"\nplain"
      source=bufferContent (newBuffer semantic)
-     styles=Vec.fromList [[(c,SectionStyle 1 (BoldStyle (Heading 1))) | c<-T.unpack heading],[(c,Plain) | c<-"plain"]]
+     styles=Vec.fromList [[(c,SectionStyle 1 (BoldStyle (ItalicStyle (Heading 1)))) | c<-T.unpack heading],[(c,Plain) | c<-"plain"]]
  layout<-prepareTextLayout True 5 source styles
  ordinary<-prepareTextLayout False 5 source styles
  check "wide layout wraps without changing semantic source" (Vec.length (layoutRows layout)==4 && contentSlice source 0 (contentLength source)==semantic && Vec.length (layoutRows ordinary)==2)
@@ -66,6 +73,8 @@ checks=do
      check "prepared source ranges retain complete original graphemes" (contentSlice source (layoutStart glyph) (layoutEnd glyph-layoutStart glyph)==layoutText glyph)
      check "render and navigation share the prepared position map" (layoutPosition layout (layoutStart glyph)==(rowNumber,layoutColumn glyph))
      forM_ [0..layoutAdvance glyph-1] $ \cell->check "all glyph cells hit one original source range" (layoutOffset layout rowNumber (layoutColumn glyph+cell)==layoutStart glyph)
+ check "widening removes bold while retaining italic and heading semantics" (all (\glyph->let (_,bold,italic)=fontTraits (layoutStyle glyph) in not bold && italic) [glyph | row<-Vec.toList (layoutRows layout),glyph<-Vec.toList (layoutGlyphs row),layoutStart glyph<T.length heading])
+ check "ordinary heading styles retain bold and italic" (all (\glyph->let (_,bold,italic)=fontTraits (layoutStyle glyph) in bold && italic) (Vec.toList (layoutGlyphs (Vec.head (layoutRows ordinary)))))
  check "ordinary rows do not acquire title geometry" (layoutRowWidth (Vec.last (layoutRows layout))==5)
  let controls="A\ESC#6B\r"
      controlSource=bufferContent (newBuffer controls)
@@ -73,7 +82,7 @@ checks=do
  controlLayout<-prepareTextLayout True 40 controlSource controlStyles
  check "prepared rendering sanitizes controls before measuring glyphs" (all (\glyph->not (T.any (\c->c<' ') (layoutDisplayText glyph))) (Vec.toList (layoutGlyphs (Vec.head (layoutRows controlLayout)))) && contentSlice controlSource 0 (contentLength controlSource)==controls)
  withTextPresentation $ \owner->do
-   let opened=M.addHelpStyled (renderMarkdown 40 "# ABCDEF\n\n[link](file.md)") (M.initialDesktop (80,25))
+   let opened=M.addHelpStyled (renderMarkdown 40 "# *ABCDEF*\n\n[link](file.md)") (M.initialDesktop (80,25))
        view=fromJust (M.activeWindow opened)
        initial=opened {M.wideSectionTitles=True,M.windows=[view {M.bounds=M.Rect 2 2 8 12}]}
        settle desktop=do
@@ -112,9 +121,11 @@ checks=do
        copied=fst (M.runCommand M.Copy allText)
    check "copy retains original ASCII without fullwidth substitution or wrap newlines" (M.clipboard copied==contents (M.documentBuffer doc) && not ("Ａ" `T.isInfixOf` M.clipboard copied))
    check "plain snapshot projects terminal fullwidth headings" ("ＡＢＣ" `T.isInfixOf` snapshot ready)
-   check "HTML snapshots preserve stretch geometry and font traits" (all (`T.isInfixOf` snapshotHtml ready) ["width:2ch","scaleX(2)","font-weight:bold"])
+   check "HTML snapshots preserve stretch geometry and font traits" (all (`T.isInfixOf` snapshotHtml ready) ["width:2ch","scaleX(2)","font-style:italic"])
    native<-either fail pure (parseRemoteFrame (object (Protocol.frameMetadata "." ready)) (Protocol.frameRows ready))
-   check "actual native heading frames preserve original glyph, span and bold paint" (any (\cell->case cell of RemoteCell _ _ paint "A" 2->textBold paint; _->False) (remoteCells native))
+   check "actual native widened heading retains span and italic without bold" (any (\cell->case cell of RemoteCell _ _ paint "A" 2 0 2->not (textBold paint) && textItalic paint; _->False) (remoteCells native))
+   normalNative<-either fail pure (parseRemoteFrame (object (Protocol.frameMetadata "." (ready {M.wideSectionTitles=False}))) (Protocol.frameRows (ready {M.wideSectionTitles=False})))
+   check "actual native normal-width heading remains bold and italic" (any (\cell->case cell of RemoteCell _ _ paint "A" 1 0 1->textBold paint && textItalic paint; _->False) (remoteCells normalNative))
    let originalRows=Protocol.frameRows (ready {M.wideSectionTitles=False})
    (_,rebuilt)<-Protocol.decodeFrame originalRows (BL.toStrict (Protocol.framePacket False originalRows (Protocol.frameRows ready) (Protocol.frameMetadata "." ready)))
    check "actual geometry change survives production compressed patch reconstruction" (rebuilt==Protocol.frameRows ready)
