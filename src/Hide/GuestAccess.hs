@@ -192,7 +192,7 @@ protectedPurpose p=case p of
 privateDebuggerAction :: Text -> Bool
 -- Frame chooser labels are adapter metadata, not prepared public semantic rows.
 -- Keep the host-owned chooser private until it carries canonical row provenance.
-privateDebuggerAction action=action=="downloads" || "hdb-" `T.isPrefixOf` action || privateFrameChooserAction action
+privateDebuggerAction action=action=="downloads" || "downloads:" `T.isPrefixOf` action || "hdb-" `T.isPrefixOf` action || privateFrameChooserAction action
 privateFrameChooserAction :: Text -> Bool
 privateFrameChooserAction action=case T.splitOn ":" action of
   ["select",_,_,"frame"]->True
@@ -330,7 +330,7 @@ readableAt d x y
 streamerReadableAt :: Desktop -> Int -> Int -> Bool
 streamerReadableAt d x y
   | Just dg<-dialog d,pluginForm dg,inside (dialogRect d dg) x y || y==snd (screenSize d)-1=False
-  | Just dg<-dialog d, DebugDialog action<-purpose dg, privateFrameChooserAction action,
+  | Just dg<-dialog d, DebugDialog action<-purpose dg, (action=="downloads" || "downloads:" `T.isPrefixOf` action || privateFrameChooserAction action),
     inside (dialogRect d dg) x y || y==snd (screenSize d)-1=False
   | y==snd (screenSize d)-1, "Session " `T.isPrefixOf` status d=False
   | otherwise=case dialog d of
