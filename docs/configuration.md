@@ -263,7 +263,14 @@ browser permissions or user activation prevent access. Browser/OS reserved short
 characters retain composed text input and cannot be assigned to commands; Cmd+Alt
 chords remain distinct. Local graphical scale keys remain reserved.
 
-WordStar Ctrl+A/F aliases, prefix/block grammar, Ctrl/Command Tab aliases and single-line Input editing remain subsequent stages of
+Ctrl+Tab and Ctrl+Shift+Tab use `hide.window.next` and `hide.window.previous`.
+Remapping or unbinding these commands removes their old aliases without typing
+into the editor or sending PTY input. F6 retains its Files/Messages focus action;
+dialog Tab controls and Alt+Tab focus navigation keep their existing owners.
+WordStar Ctrl+A/F aliases use the configurable word movement commands.
+
+macOS Command+Tab remains owned by application switching. WordStar prefix/block
+grammar and single-line Input editing remain subsequent stages of
 [configurable keybindings](https://github.com/ekmett/hide/issues/3).
 
 ## Environment

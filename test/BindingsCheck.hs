@@ -184,8 +184,59 @@ checks=do
   verticalChecks
   edgePageChecks
   wordChecks
+  windowChecks
   reloadChecks
   putStrLn "keybinding checks passed"
+
+windowChecks :: IO ()
+windowChecks=do
+  let check name ok=unless ok (error name)
+      compile entries=either (error . show) id (platformBindings [] TerminalPlatform (M.singleton "global" (M.fromList entries)))
+      defaults=compile []
+      remapped=compile [("hide.window.next",["F13"]),("hide.window.previous",["F14"])]
+      removed=compile [("hide.window.next",[]),("hide.window.previous",[])]
+      first=addDocument Nothing (newBuffer "first") (initialDesktop (80,25))
+      second=addDocument Nothing (newBuffer "second") first
+      base=modifyActive (\w->w {selection=Selection 1 3}) (addDocument Nothing (newBuffer "third") second)
+      current d=windowId <$> activeWindow d
+      event k mods=handleEvent (V.EvKey k mods)
+      step k mods=fst . event k mods
+      state d=(current d,selection <$> activeWindow d,(\doc->(revision (documentBuffer doc),bufferLength (documentBuffer doc))) <$> activeDocument d)
+      aliases=[(V.KChar '\t',[V.MCtrl]),(V.KChar '\t',[V.MCtrl,V.MShift]),(V.KBackTab,[V.MCtrl])]
+      configured=base {keyBindings=remapped}
+  check "window defaults cycle both directions through stable IDs"
+    (current (step (V.KChar '\t') [V.MCtrl] base {keyBindings=defaults})==current second &&
+     current (step (V.KChar '\t') [V.MCtrl,V.MShift] base {keyBindings=defaults})==current first &&
+     current (step V.KBackTab [V.MCtrl] base {keyBindings=defaults})==current first)
+  check "window remaps use the existing cycle owner"
+    (current (step (V.KFun 13) [] configured)==current second && current (step (V.KFun 14) [] configured)==current first)
+  forM_ [configured,base {keyBindings=removed},configured {wordStar=True}] $ \d->
+    check "removed window aliases neither cycle nor edit source"
+      (all (\(k,mods)->state (step k mods d)==state d && null (snd (event k mods d))) aliases)
+  let terminal=(addReadOnly "Terminal test" "output" base) {keyBindings=removed}
+      chat=(addReadOnly "Conversation" "reply" base) {keyBindings=removed,composerBuffer=newBuffer "draft",composerSelection=Selection 1 3,composerFocused=True}
+  check "unbound PTY window aliases send no bytes"
+    (all (\(k,mods)->current (step k mods terminal)==current terminal && null (snd (event k mods terminal))) aliases &&
+     snd (event (V.KChar 'c') [V.MCtrl] terminal)==[AgentAction "terminal-input" ["test","\ETX"]])
+  check "unbound chat window aliases preserve the draft selection"
+    (all (\(k,mods)->let (d,effects)=event k mods chat in current d==current chat && composerSelection d==composerSelection chat && revision (composerBuffer d)==revision (composerBuffer chat) && bufferLength (composerBuffer d)==bufferLength (composerBuffer chat) && null effects) aliases)
+  let tree=installSidebar (emptySidebar "/project" 24 True) base {keyBindings=defaults}
+      messages=base {keyBindings=defaults,problemsVisible=True,problemsFocused=True}
+      modal=fst (runCommand Find base {keyBindings=defaults})
+  check "Files and Messages retain F6 focus with configurable window cycling"
+    (all (\d->boundKeyCommand (V.KFun 6) [] d==Just FocusSource && current (step (V.KChar '\t') [V.MCtrl] d)==current second) [tree,messages])
+  check "modal Control Tab retains search ownership"
+    (current (step (V.KChar '\t') [V.MCtrl] modal)==current modal && maybe False (\dg->case purpose dg of Searching True _->True; _->False) (dialog (step (V.KChar '\t') [V.MCtrl] modal)))
+  check "Alt and Meta Tab retain their earlier owners"
+    (menu (step (V.KChar '\t') [V.MCtrl,V.MAlt] configured)==Just (0,0) && state (step (V.KChar '\t') [V.MMeta] configured)==state (step (V.KChar '\t') [V.MMeta] base))
+  let private=base {keyBindings=remapped,guestPrivatePaths=["/authority"],buffers=M.map (\doc->doc {documentFile=Just (FileState "/authority/secret.hs" Nothing)}) (buffers base)}
+      rebound=private {keyBindings=either (error . show) id (platformBindings [] TerminalPlatform (M.singleton "source" (M.fromList [("hide.window.next",[]),("hide.edit.copy",["Ctrl+Tab"])])))}
+  navigation<-P.applyGuestInput (P.Key "F13" []) private
+  copy<-P.applyGuestInput (P.Key "Tab" [V.MCtrl]) rebound
+  check "protected-view navigation follows the resolved command"
+    (case navigation of Right (d,_)->current d==current second; _->False)
+  check "physical Control Tab cannot grant a protected non-navigation remap"
+    (case copy of Left _->True; _->False)
 
 reloadChecks :: IO ()
 reloadChecks=bracket temporary removePathForcibly $ \directory->do
