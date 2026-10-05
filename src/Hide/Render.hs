@@ -546,10 +546,9 @@ windowLayers d active original =
           | n<-[0..height rect-1], let corner=n==0 || n==height rect-1,
             let shape=if height rect==1 then if leftSide then 4 else 5
                       else (if n==0 then 0 else 2)+(if leftSide then 0 else 1)]
-        inputImage=V.vertCat [V.cropRight (width rect) (V.translateX (negate sc)
-          (styledImage (darkAppearance d) (const True) Nothing (active && draftFocused) draftSelection (bufferLineOffset draft n+marker) [(c,style) | c<-T.unpack line]) V.<|> V.charFill fill ' ' (width rect) 1)
+        inputImage=V.vertCat [V.cropRight (width rect)
+          (styledSourceImage (darkAppearance d) (Just fill) (active && draftFocused) draftSelection (bufferLineOffset draft n+marker) sc (width rect) (plainSourceRow line) V.<|> V.charFill fill ' ' (width rect) 1)
           | n<-[sr..sr+height rect-1],let (marker,line)=draftLine n,
-            let style=BubbleStyle True (if marker>0 then CodeStyle False Plain else Plain),
             let fill=if marker>0 then attr yellow (if darkAppearance d then black else blue) else attr black scrollCyan]
     hexDividerLayers =
       [place (x+1+column) y (V.vertCat [V.char frame (if active && not moving then '╤' else '┬'),
