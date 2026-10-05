@@ -243,5 +243,23 @@ int main(int argc,char **argv) {
     script_pointer_pixels(capture,8,8);
     puts("Script ink bands/natural widths, mouse/cursor paint, normal-resolution atlas reuse and 8-row geometry passed");
     puts("Cell underline/strikethrough pixels, full/half glyph clips, cursor, 8-row mode and unchanged atlas identity passed");
+    /* The first frame after an enlargement must fill the new backbuffer before
+     * capture, including the far corner beyond the preceding drawable size. */
+    const int resized[][2]={{126,29},{132,31},{80,25}};
+    uint16_t stripe[16]; for (int y=0;y<16;++y) stripe[y]=0x9000;
+    for (size_t i=0;i<sizeof(resized)/sizeof(*resized);++i) {
+        int columns=resized[i][0],rows=resized[i][1];
+        assert(thc_mode(16,columns,rows));
+        assert(thc_begin());
+        for (int y=0;y<rows;++y) for (int x=0;x<columns;++x)
+            thc_glyph(x,y,1,8,stripe,0xffffff,0x0000aa,0,0,1);
+        assert(thc_present());
+        image=SDL_LoadBMP(capture); assert(image);
+        assert(image->w==columns*8 && image->h==rows*16);
+        pixel_is(image,(columns-1)*8,(rows-1)*16,255,255,255);
+        pixel_is(image,(columns-1)*8+2,(rows-1)*16,0,0,170);
+        SDL_DestroySurface(image);
+    }
+    puts("First enlarged/shrunk GPU frame captures the exact new drawable extent");
     thc_close(); remove(capture); return 0;
 }
