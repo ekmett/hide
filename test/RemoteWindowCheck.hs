@@ -6,6 +6,7 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.ByteString as BS
 import Hide.RemoteWindow
+import Hide.FrameTiming
 import Hide.Window (nativeMenuEvent)
 import qualified Hide.Model as Model
 import qualified Data.Map.Strict
@@ -20,7 +21,18 @@ import Hide.Model (initialDesktop, addDocument, Desktop(..))
 checks :: IO ()
 checks = do
   let check name good = unless good (error name)
-      meta = object ["size" .= ([80,25]::[Int]), "bindings" .= ([]::[(T.Text,T.Text)]),"mode" .= (3::Int)]
+      (first,one)=requestFrame 100 emptyFrameTiming
+      (second,two)=requestFrame 150 one
+      (third,three)=requestFrame 300 two
+      (coalesced,remaining)=settleFrame second three
+      (lastStart,empty)=settleFrame third remaining
+      (duplicate,_)=settleFrame third empty
+      (_,afterNoop)=settleFrame first three
+      (afterNoopStart,_)=settleFrame third afterNoop
+  check "coalesced frame counts oldest represented demand and retains later input" (coalesced==Just 100 && lastStart==Just 300)
+  check "no-op receipt clears its demand without poisoning next frame timing" (afterNoopStart==Just 150)
+  check "replayed frame receipt cannot produce another sample" (duplicate==Nothing)
+  let meta = object ["size" .= ([80,25]::[Int]), "bindings" .= ([]::[(T.Text,T.Text)]),"mode" .= (3::Int)]
       row = toJSON [(0::Int,0xffffff::Int,0::Int,0::Int,[String "abc",toJSON ("界"::T.Text,2::Int)])]
       rows = row : replicate 24 (toJSON ([]::[Value]))
       valid = either (const False) (const True) . parseRemoteFrame meta

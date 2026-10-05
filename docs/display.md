@@ -27,9 +27,13 @@ frontend. Wide characters partly covered by a frame become blank cells.
 
 The title shows the active relative filename, a distinguishing session ID prefix,
 and the average `ms/frame` over the last 60 actual draws. The timing refreshes
-about once a second and keeps its last value while idle. It measures frontend
-drawing and submission time, including cursor-blink draws; browser GPU execution
-continues asynchronously.
+about once a second and keeps its last value while idle. In native windows, input
+frames measure the demand through session processing, frame transport and decoding,
+and the presentation call. Coalesced input is counted once; input that changes no
+visible content adds no sample. Unsolicited frames start at frontend receipt, and
+local cursor/expose redraws start at their event. This is not a measurement of when
+pixels reach the physical display. Browser timing still measures frontend drawing
+and submission; browser GPU execution continues asynchronously.
 
 ## Text styles
 
