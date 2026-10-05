@@ -1,5 +1,6 @@
 {-# LANGUAGE CPP, OverloadedStrings, ScopedTypeVariables #-}
 module RemoteCheck (checks) where
+import Control.Concurrent.STM (retry)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar
 import Control.Concurrent.Async (withAsync, wait, link)
@@ -106,7 +107,7 @@ checks = isolatedStore $ do
         value <- control h "ack"
         assert "remote acknowledgement tracks committed sequence" (KM.lookup "seq" value==Just (toJSON (serial::Int)))
   ownership<-newIORef False
-  withAsync (runRemoteDaemonWithStartup (writeIORef ownership True) session 1 effects tick inspectLive initial) $ \daemon -> do
+  withAsync (runRemoteDaemonWithStartup (writeIORef ownership True) retry session 1 effects tick inspectLive initial) $ \daemon -> do
     link daemon
     first <- awaitOpen (100::Int)
     assert "session ownership hook runs before serving" =<< readIORef ownership

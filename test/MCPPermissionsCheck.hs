@@ -1,10 +1,14 @@
-{-# LANGUAGE OverloadedStrings #-}
-module MCPPermissionsCheck (checks) where
+{-# LANGUAGE CPP, OverloadedStrings #-}
+module MCPPermissionsCheck (checks,policyResponsivenessChecks,policyWakeChecks,settledTool,settleDialog) where
 
 import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Concurrent (threadDelay)
-import Control.Concurrent.Async (concurrently, withAsync, poll, wait)
-import Control.Exception (bracket)
+import qualified Control.Concurrent.STM as STM
+import Control.Concurrent.MVar
+import GHC.Conc (threadStatus,ThreadStatus(..),BlockReason(..))
+import Control.Concurrent.Async (concurrently, withAsync, poll, wait, async, cancel)
+import qualified Control.Concurrent.Async
+import Control.Exception (bracket, onException, catch, IOException, SomeAsyncException,fromException,throwIO)
 import Control.Monad (foldM, unless)
 import Data.Aeson
 import Data.Aeson.Types (parseMaybe)
@@ -18,8 +22,14 @@ import qualified Graphics.Vty as V
 import System.Directory
 import System.FilePath ((</>))
 import System.Environment (lookupEnv, setEnv, unsetEnv)
-import System.IO (hClose, openTempFile)
+import System.IO (hClose,openTempFile)
+#ifndef mingw32_HOST_OS
+import System.Posix.Files (createNamedPipe)
+import System.Posix.IO (openFd,closeFd,fdWrite,OpenMode(ReadWrite),OpenFileFlags(nonBlock),defaultFileFlags)
+#endif
 import System.Timeout (timeout)
+import qualified Hide.Plugin.Buffer as P
+import Hide.Plugin.BufferHost (readerReference)
 import Hide.BufferDiffCommand (withBufferDiffCommands)
 import TypedBufferDiffsCheck (startDiffCall)
 import Hide.Buffer
@@ -32,6 +42,8 @@ import Hide.WorkspaceFilesMCP (fileTools, fileTool)
 
 checks :: IO ()
 checks=do
+  policyResponsivenessChecks
+  policyWakeChecks
   reviewChecks
   configChecks
   keybindingConfigChecks
@@ -45,9 +57,9 @@ checks=do
         bid=fromMaybe (error "missing initial buffer") (sourceFixtureBuffer <$> activeWindow base)
         changed=base {buffers=M.adjust (\doc->doc {documentBuffer=replaceBuffer False "current" (documentBuffer doc)}) bid (buffers base)}
         submit runtime button desktop=case dialog desktop of
-          Just dg -> let (next,effects)=submitDialog button dg desktop in snd <$> policyEffects runtime core next effects
-          _ -> error "missing permission dialog"
-        showSettings runtime desktop=snd <$> policyEffects runtime core desktop [PermissionAction "show" []]
+          Just dg -> let (next,effects)=submitDialog button dg desktop in snd <$> policyEffects runtime core next effects >>= settleDialog runtime dg
+          _ -> error ("missing permission dialog: "++T.unpack (status desktop))
+        showSettings runtime desktop=snd <$> policyEffects runtime core desktop [PermissionAction "show" []] >>= awaitPermissionUI runtime
         isLeft (Left _)=True
         isLeft _=False
     seen<-newIORef []
@@ -55,10 +67,10 @@ checks=do
           modifyIORef' seen (++[(name,activeText desktop)])
           pure (desktop {status="executed"},pure (Right (object ["text" .= activeText desktop])))
     withPermissionsAt path specs $ \runtime -> do
-      (_,readonly)<-permissionCall runtime execute base "read" (object [])
+      (_,readonly)<-settledCall runtime execute base "read" (object [])
       first<-readonly
       check "read-only tools default to Enable" (not (isLeft first))
-      (prompted,pending)<-permissionCall runtime execute base "mutate" (object ["revision" .= (0::Int),"command" .= T.unlines ["line "<>T.pack (show n) | n<-[1..20::Int]]])
+      (prompted,pending)<-settledCall runtime execute base "mutate" (object ["revision" .= (0::Int),"command" .= T.unlines ["line "<>T.pack (show n) | n<-[1..20::Int]]])
       let readOnlyReview=prompted {dialog=fmap (\dg->dg {focus=1}) (dialog prompted)}
           afterTyping=fst (handleEvent (V.EvKey (V.KChar 'x') []) readOnlyReview)
           (_,selectEffects)=handleEvent (V.EvKey (V.KChar 'a') [V.MCtrl]) prompted
@@ -80,13 +92,13 @@ checks=do
           ((either (const Nothing) (field "text") result::Maybe T.Text)==Just "current")
         pure next
       check "approved effect returns the updated desktop" (status executed=="executed")
-      (again,denied)<-permissionCall runtime execute base "mutate" (object [])
+      (again,denied)<-settledCall runtime execute base "mutate" (object [])
       let (escaped,effects)=handleEvent (V.EvKey V.KEsc []) again
       _<-policyEffects runtime core escaped effects
       check "Escape denies a pending request" . isLeft =<< denied
       countBefore<-length <$> readIORef seen
       check "Allow once did not enable subsequent requests" (countBefore==2)
-      (cancelPrompt,cancelled)<-permissionCall runtime execute base "mutate" (object [])
+      (cancelPrompt,cancelled)<-settledCall runtime execute base "mutate" (object [])
       interrupted<-timeout 10000 cancelled
       check "cancelled deferred permission wait exits" (interrupted==Nothing)
       _<-submit runtime 0 cancelPrompt
@@ -94,44 +106,52 @@ checks=do
       afterCancel<-length <$> readIORef seen
       check "cancelled request cannot execute after later approval" (isLeft cancelledResult && afterCancel==countBefore)
       settings<-showSettings runtime base
-      editing<-submit runtime 0 settings
+      firstEdit<-submit runtime 0 settings
+      backed<-submit runtime 1 firstEdit
+      check "human Back returns to current permission settings" (case dialog backed of Just dg->dialogTitle dg=="Agent Permissions"; _->False)
+      escapedEdit<-submit runtime 0 backed
+      let (closedEdit,closeEffects)=handleEvent (V.EvKey V.KEsc []) escapedEdit
+      (_,retiredEdit)<-policyEffects runtime core closedEdit closeEffects
+      check "human settings Escape retires receipt without expiry error" (case dialog retiredEdit of Nothing->not ("expired" `T.isInfixOf` status retiredEdit); _->False)
+      settingsAgain<-showSettings runtime retiredEdit
+      editing<-submit runtime 0 settingsAgain
       let disabled=editing {dialog=fmap (\dg->dg {fields=[Radio "mutate" ["Enable","Prompt","Disable"] 2]}) (dialog editing)}
       _<-submit runtime 0 disabled
-      (_,blocked)<-permissionCall runtime execute base "mutate" (object [])
+      (_,blocked)<-settledCall runtime execute base "mutate" (object [])
       check "saved Disable rejects tools even with a cached registry" . isLeft =<< blocked
       persisted<-TIO.readFile path
       check "permission policy persists in its TOML namespace" ("disable" `T.isInfixOf` persisted && "permissions" `T.isInfixOf` persisted)
-      (_,unknown)<-permissionCall runtime execute base "not_registered" (object [])
+      (_,unknown)<-settledCall runtime execute base "not_registered" (object [])
       check "unknown tools cannot bypass permission checks" . isLeft =<< unknown
     -- Changing the shared file is observed on every dispatch and approval.
     TIO.writeFile path "[editor.mcp.permissions]\nmutate = 'prompt'\n"
     withPermissionsAt path specs $ \runtime -> do
       before<-length <$> readIORef seen
-      (prompted,pending)<-permissionCall runtime execute base "mutate" (object [])
+      (prompted,pending)<-settledCall runtime execute base "mutate" (object [])
       TIO.writeFile path "[editor.mcp.permissions]\nmutate = 'disable'\n"
       _<-submit runtime 0 prompted
       check "Disable written while queued is enforced before execution" . isLeft =<< pending
       after<-length <$> readIORef seen
       check "disabled pending callback never runs" (after==before)
       TIO.writeFile path "[broken\nsecret = 'do not leak'\n"
-      (_,invalid)<-permissionCall runtime execute base "read" (object [])
+      (_,invalid)<-settledCall runtime execute base "read" (object [])
       invalidResult<-invalid
       check "invalid config fails closed without exposing its contents" (case invalidResult of Left err->not ("secret" `T.isInfixOf` err); _->False)
     TIO.writeFile path "[editor.mcp.permissions]\nbuild_output = 'disable'\n"
     withPermissionsAt path runtimeTools $ \runtime -> do
-      (_,disabledOutput)<-permissionCall runtime execute base "build_output" (object ["jobId" .= ("fixture"::T.Text)])
+      (_,disabledOutput)<-settledCall runtime execute base "build_output" (object ["jobId" .= ("fixture"::T.Text)])
       check "build output honors its ordinary configured permission" . isLeft =<< disabledOutput
       settings<-showSettings runtime base
       check "build output is listed by Agent Permissions" (case dialog settings of Just dg->any (\f->case f of ListBox _ rows _->any (T.isPrefixOf "build_output") rows; _->False) (fields dg); _->False)
       TIO.writeFile path "[editor.mcp.permissions]\n"
-      (_,enabledOutput)<-permissionCall runtime execute base "build_output" (object ["jobId" .= ("fixture"::T.Text)])
+      (_,enabledOutput)<-settledCall runtime execute base "build_output" (object ["jobId" .= ("fixture"::T.Text)])
       check "build output defaults to permitted read-only routing" . not . isLeft =<< enabledOutput
     removeFile path
     pendingAfterClose<-withPermissionsAt path specs $ \runtime -> do
       (desktop,requests)<-foldM (\(d,results) _->do
-        (next,pending)<-permissionCall runtime execute d "mutate" (object [])
+        (next,pending)<-settledCall runtime execute d "mutate" (object [])
         pure (next,results++[pending])) (base,[]) [1..32::Int]
-      (_,overflow)<-permissionCall runtime execute desktop "mutate" (object [])
+      (_,overflow)<-settledCall runtime execute desktop "mutate" (object [])
       check "permission queue is capped at 32 requests" . isLeft =<< overflow
       let other=desktop {dialog=Just (Dialog "Other editor work" (Searching False "") [] 0 ["Close"] [])}
       preserved<-tickPermissions runtime other
@@ -140,6 +160,185 @@ checks=do
     closed<-mapM (timeout 1000000) pendingAfterClose
     check "session shutdown completes every pending waiter" (all (maybe False isLeft) closed)
   putStrLn "MCP permission checks passed"
+
+-- A live writer withholds data from the actual configuration read. The first
+-- owner tick must return while that read waits, then the same request completes.
+-- Exercise the real asynchronous owner until a reply or human approval appears.
+settledCall runtime callback=settledTool runtime (permissionCall runtime callback)
+settledTool runtime initiate desktop name args=do
+  (initial,continuation)<-initiate desktop name args
+  worker<-async continuation
+  let reply=(Control.Concurrent.Async.waitCatch worker >>= \result->case result of
+        Right value->pure value
+        Left err->case fromException err :: Maybe SomeAsyncException of
+          -- Cancellation retires the actual request promise. Re-reading that
+          -- terminal promise preserves the original reusable-reply assertion.
+          Just _->continuation
+          Nothing->throwIO err) `onException` cancel worker
+      loop current=do
+        outcome<-poll worker
+        case outcome of
+          Just _->pure (current,reply)
+          Nothing | Just dg<-dialog current,PermissionDialog action<-purpose dg,"approve:" `T.isPrefixOf` action->pure (current,reply)
+                  | otherwise->threadDelay 1000 >> tickPermissions runtime current >>= loop
+  timeout 3000000 (loop initial) >>= maybe (cancel worker >> error "policy dispatch did not settle") pure
+
+awaitPermissionUI runtime desktop=do
+  let loop current=case dialog current of
+        Just dg | PermissionDialog action<-purpose dg,not ("loading:" `T.isPrefixOf` action)->pure current
+        _->threadDelay 1000 >> tickPermissions runtime current >>= loop
+  timeout 3000000 (loop desktop) >>= maybe (error "permission UI did not settle") pure
+
+settleDialog runtime original desktop
+  | any (\field->case field of TextArea "diff" True _ _ _ _->True; _->False) (fields original)=pure desktop
+  | otherwise=do
+      let loop current=case dialog current of
+            Just dg | purpose dg==purpose original || (case purpose dg of PermissionDialog action->"loading:" `T.isPrefixOf` action; _->False)->threadDelay 1000 >> tickPermissions runtime current >>= loop
+            _->pure current
+      timeout 3000000 (loop desktop) >>= maybe (error "permission dialog action did not settle") pure
+
+policyResponsivenessChecks :: IO ()
+#ifdef mingw32_HOST_OS
+policyResponsivenessChecks=pure ()
+#else
+policyResponsivenessChecks=bracket temporary removePathForcibly $ \directory->do
+  let path=directory </> "held-policy.toml"
+      specs=[object ["name" .= ("read_buffer"::T.Text),"annotations" .= object ["readOnlyHint" .= True]]]
+      base=addDocument Nothing (newBuffer "source") (initialDesktop (80,25))
+      bid=fromMaybe (error "Missing source") (sourceFixtureBuffer <$> activeWindow base)
+  createNamedPipe path 0o600
+  -- Keep a kernel writer alive before admission. A capped oversized release
+  -- ends hGet without EOF, so closing the writer cannot race reader startup.
+  bracket (openFd path ReadWrite defaultFileFlags {nonBlock=True}) closeFd $ \gate->withPermissionsAt path specs $ \owner->do
+    let reader=bufferReader owner (pure (Right ()))
+    withAsync (P.captureBuffer reader (readerReference reader bid)) $ \capture->do
+      let queued=do
+            observed<-threadStatus (Control.Concurrent.Async.asyncThreadId capture)
+            case observed of ThreadBlocked BlockedOnMVar->pure (); _->threadDelay 1000 >> queued
+      timeout 1000000 queued >>= maybe (fail "Capture did not reach admission") pure
+      state<-newMVar base
+      withAsync (modifyMVar_ state (tickPermissions owner)) $ \tick->do
+        returned<-timeout 100000 (wait tick)
+        available<-tryReadMVar state
+        pending<-poll capture
+        let writeAll []=pure ()
+            writeAll bytes=do
+              written<-fdWrite gate bytes `catch` \(_::IOException)->pure 0
+              threadDelay 1000
+              writeAll (drop (fromIntegral written) bytes)
+        -- Release before asserting so the RED fixture tears down cleanly too.
+        timeout 3000000 (writeAll (replicate 1048577 'x')) >>= maybe (fail "Held policy read never consumed release") pure
+        _<-timeout 1000000 (wait tick) >>= maybe (fail "Released read did not finish") pure
+        check "permission owner returns while actual policy read is held"
+          (case (returned,available,pending) of (Just (),Just _,Nothing)->True; _->False)
+        let await=do
+              outcome<-poll capture
+              case outcome of
+                Just (Right (Left "thc/config.toml exceeds 1 MiB"))->pure ()
+                Just _->fail "Held policy release did not fail closed"
+                Nothing->modifyMVar_ state (tickPermissions owner) >> threadDelay 1000 >> await
+        timeout 1000000 await >>= maybe (fail "Released policy never admitted capture") pure
+#endif
+
+-- Completion signals retain publication before a waiter and wake an existing
+-- waiter once. The same real owner route rechecks callers, modal receipts and a
+-- settings Save barrier before executing a formerly enabled wire operation.
+policyWakeChecks :: IO ()
+policyWakeChecks=bracket temporary removePathForcibly $ \directory->do
+  let path=directory </> "wake.toml"
+      specs=[object ["name" .= name,"annotations" .= object ["readOnlyHint" .= readonly]] | (name,readonly)<-[("read_buffer"::T.Text,True),("read",True),("mutate",False)]]
+      base=addDocument Nothing (newBuffer "source") (initialDesktop (80,25))
+      ident=fromMaybe (error "Missing source") (sourceFixtureBuffer <$> activeWindow base)
+      core d _=pure (False,d)
+      action owner token values d=snd <$> policyEffects owner core d [PermissionAction token values]
+      advance owner d=do
+        timeout 3000000 (STM.atomically (awaitPermissionWork owner)) >>= maybe (error ("Permission completion did not wake owner: "++T.unpack (status d))) pure
+        tickPermissions owner d
+      token d=case dialog d of Just dg | PermissionDialog value<-purpose dg->value; _->error "Missing permission modal"
+      replacement=Dialog "Replacement modal" (Searching False "unrelated") [] 0 ["Close"] []
+      retained d=case dialog d of Just dg->dialogTitle dg=="Replacement modal"; _->False
+  withPermissionsAt path specs $ \owner->do
+    let reader=bufferReader owner (pure (Right ()))
+    withAsync (P.captureBuffer reader (readerReference reader ident)) $ \capture->do
+      -- Accepted ingress publishes before this waiter is installed.
+      let queued=do
+            state<-threadStatus (Control.Concurrent.Async.asyncThreadId capture)
+            case state of ThreadBlocked BlockedOnMVar->pure (); _->threadDelay 1000 >> queued
+      timeout 3000000 queued >>= maybe (error "Capture did not enqueue") pure
+      timeout 3000000 (STM.atomically (awaitPermissionWork owner)) >>= maybe (error "Accepted capture did not wake owner") pure
+      noSpin<-timeout 10000 (STM.atomically (awaitPermissionWork owner))
+      check "consumed permission wake does not spin" (noSpin==Nothing)
+      queued<-tickPermissions owner base
+      captured<-advance owner queued
+      image<-timeout 3000000 (wait capture)
+      check "policy completion admits typed capture without periodic polling" (case image of Just (Right _)->True; _->False)
+      check "typed capture preserves source selection" (fmap selection (activeWindow captured)==fmap selection (activeWindow base))
+    withAsync (STM.atomically (awaitPermissionWork owner)) $ \wake->do
+      let parked=do
+            state<-threadStatus (Control.Concurrent.Async.asyncThreadId wake)
+            case state of ThreadBlocked BlockedOnSTM->pure (); _->threadDelay 1000 >> parked
+      timeout 3000000 parked >>= maybe (error "Permission wake waiter did not park") pure
+      withAsync (P.captureBuffer reader (readerReference reader ident)) $ \capture->do
+        timeout 3000000 (wait wake) >>= maybe (error "Ingress failed to wake existing waiter") pure
+        admitted<-tickPermissions owner base
+        _<-advance owner admitted
+        timeout 3000000 (wait capture) >>= maybe (error "Awakened capture did not finish") (either (error . T.unpack) (const (pure ())))
+    actor<-newIORef (Right ())
+    seen<-newIORef (0::Int)
+    let execute d _ _=modifyIORef' seen (+1) >> pure (d,pure (Right Null))
+    (queued,reply)<-permissionCallAs (readIORef actor) owner execute base "read" (object [])
+    timeout 3000000 (STM.atomically (awaitPermissionWork owner)) >>= maybe (error "Enabled wire policy did not finish") pure
+    writeIORef actor (Left "actor revoked")
+    _<-tickPermissions owner queued
+    check "enabled wire operation rechecks revoked caller after policy IO" . (==Left "actor revoked") =<< reply
+    check "revoked wire callback never runs" . (==0) =<< readIORef seen
+    (admission,pending)<-permissionCall owner execute base "mutate" (object [])
+    prompted<-advance owner admission
+    denied<-action owner (token prompted) ["1"] prompted {dialog=Just replacement}
+    check "stale Deny preserves newer modal" (retained denied)
+    check "stale Deny still resolves original request" . either (const True) (const False) =<< pending
+    loading<-action owner "show" [] base
+    closed<-action owner (token loading) [] loading {dialog=Just replacement}
+    late<-advance owner closed
+    check "closed loading receipt cannot replace newer modal" (retained late)
+    loadingSettings<-action owner "show" [] base
+    settings<-advance owner loadingSettings
+    staleEdit<-action owner (token settings) ["0","0"] settings {dialog=Just replacement}
+    check "stale settings Edit preserves newer modal" (retained staleEdit)
+    loadingEdit<-action owner (token settings) ["0","1"] settings
+    editing<-advance owner loadingEdit
+    staleSave<-action owner (token editing) ["0","2"] editing {dialog=Just replacement}
+    check "stale settings Save preserves newer modal" (retained staleSave)
+    exists<-doesFileExist path
+    check "stale settings Save does not write policy" (not exists)
+    reopenedLoading<-action owner "show" [] editing
+    reopenedSettings<-advance owner reopenedLoading
+    reopenedEditLoading<-action owner (token reopenedSettings) ["0","1"] reopenedSettings
+    reopenedEdit<-advance owner reopenedEditLoading
+    staleReopen<-action owner (token editing) ["0","2"] reopenedEdit
+    check "reopened same setting rejects old Save receipt" (token staleReopen==token reopenedEdit && token editing/=token reopenedEdit)
+    existsAgain<-doesFileExist path
+    check "old same-purpose Save cannot write through reopen" (not existsAgain)
+    -- Its old Enable reply is ready, but has
+    -- not yet been adopted when the human accepts Disable through actual UI.
+    (oldPolicy,oldReply)<-permissionCall owner execute reopenedEdit "read" (object [])
+    timeout 3000000 (STM.atomically (awaitPermissionWork owner)) >>= maybe (error "Old policy did not complete") pure
+    saving<-action owner (token reopenedEdit) ["0","2"] oldPolicy
+    whileSaving<-tickPermissions owner saving
+    check "Save barrier blocks old enabled policy reply" . (==0) =<< readIORef seen
+    (revoked,result)<-withAsync oldReply $ \reply->do
+      let await current=do
+            completed<-Control.Concurrent.Async.race (wait reply) (STM.atomically (awaitPermissionWork owner))
+            case completed of Left value->pure (current,value); Right ()->tickPermissions owner current >>= await
+      timeout 3000000 (await whileSaving) >>= maybe (error "Saved policy did not resolve queued request") pure
+    check "fresh Disable replaces pre-save policy result" (either (const True) (const False) result)
+    check "old policy never executes after accepted Disable" . (==0) =<< readIORef seen
+    check "policy settings remain current after save" (case dialog revoked of Just dg->dialogTitle dg=="Agent Permissions"; _->False)
+  -- Shutdown terminally resolves a request whose initial admission is queued.
+  pending<-withPermissionsAt path specs $ \owner->do
+    (_,reply)<-permissionCall owner (\d _ _->pure (d,pure (Right Null))) base "mutate" (object [])
+    pure reply
+  check "shutdown resolves pending policy admission once" . either (const True) (const False) =<< pending
 
 reviewChecks :: IO ()
 reviewChecks=withBufferDiffCommands $ \commands->bracket temporary removePathForcibly $ \directory ->
@@ -369,7 +568,7 @@ projectConfigChecks=bracket temporary removePathForcibly $ \directory -> do
           base=(initialDesktop (80,25)) {defaultDirectory=Just root}
       TIO.appendFile globalPath "\n[editor.mcp.permissions]\nmutate = 'disable'\n"
       withPermissions [spec] $ \runtime -> do
-        (_,reply)<-permissionCall runtime execute base "mutate" (object [])
+        (_,reply)<-settledCall runtime execute base "mutate" (object [])
         result<-reply
         count<-readIORef calls
         check "project permissions never override global permissions" (isLeft result && count==0)

@@ -2,6 +2,7 @@
 module TypedBufferDiffsCheck (checks,startDiffCall) where
 
 import SourceWindowFixture (sourceFixtureBuffer)
+import qualified Control.Concurrent.STM as STM
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async
 import Control.Exception (bracket,onException)
@@ -81,8 +82,13 @@ checks=bracket temporary removePathForcibly $ \directory->do
     withAsync (P.applyBufferDiff attributed reference version patch) $ \worker->do
       _<-timeout 5000000 (queued worker) >>= maybe (error "attributed diff did not queue") pure
       writeIORef actor (Left "actor revoked")
-      unchanged<-tickPermissions owner base
-      result<-timeout 5000000 (wait worker) >>= maybe (error "revoked diff reply timed out") pure
+      let await current=do
+            done<-poll worker
+            case done of
+              Just (Right value)->pure (current,value)
+              Just (Left err)->error (show err)
+              Nothing->threadDelay 1000 >> tickPermissions owner current >>= await
+      (unchanged,result)<-timeout 5000000 (await base) >>= maybe (error "revoked diff reply timed out") pure
       check "typed diff rechecks queued actor before source admission" (activeText unchanged=="old\n" && case result of Left "actor revoked"->True; _->False)
   (closed,reference,version)<-withPermissionsAt config fileTools $ \owner->do
     let editor=bufferEditor owner (pure (Right ()))
@@ -133,5 +139,8 @@ startDiffCall commands owner caller desktop name args=do
           ThreadDied->pure ()
           _->threadDelay 1000 >> queued
   _<-timeout 5000000 queued >>= maybe (cancel worker >> error "diff reply did not queue") pure
-  admitted<-tickPermissions owner current
+  let advance d=do
+        completed<-race (STM.atomically (awaitPermissionWork owner)) (waitCatch worker)
+        case completed of Left ()->tickPermissions owner d; Right _->pure d
+  admitted<-timeout 5000000 (advance current >>= advance) >>= maybe (cancel worker >> error "diff policy admission did not settle") pure
   pure (admitted,(waitCatch worker >>= either (pure . Left . T.pack . show) pure) `onException` cancel worker)
