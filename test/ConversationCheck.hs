@@ -1,5 +1,5 @@
 {-# LANGUAGE CPP, OverloadedStrings #-}
-module ConversationCheck (checks, composerCodeChecks, draftReceiptChecks) where
+module ConversationCheck (checks, composerCodeChecks, draftReceiptChecks, questionInsertionChecks) where
 
 import MCPPermissionsCheck (settledTool,settleDialog)
 import SourceWindowFixture (sourceFixtureBuffer)
@@ -19,6 +19,7 @@ import Data.Maybe (mapMaybe, fromMaybe, listToMaybe)
 import Data.Time (UTCTime(..), fromGregorian, secondsToDiffTime, minutesToTimeZone, addUTCTime)
 import Data.List (findIndex)
 import Data.IORef (newIORef,writeIORef,readIORef)
+import GHC.Conc (getAllocationCounter)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Graphics.Vty as V
@@ -57,6 +58,7 @@ import Hide.Session (checkpointPath)
 -- user edits and submitted/copy payloads, without depending on bubble artwork.
 composerCodeChecks :: IO ()
 composerCodeChecks=do
+  questionInsertionChecks
   let check label ok=unless ok (error label)
       press key mods=fst . handleEvent (V.EvKey key mods)
       typeText text desktop=foldl (\d c->press (V.KChar c) [] d) desktop (T.unpack text)
@@ -127,6 +129,52 @@ composerCodeChecks=do
     (chatQuestion ignoredQuestion==chatQuestion answered && composerBuffer ignoredQuestion==composerBuffer answered)
   putStrLn "composer code checks passed"
 
+
+-- Normalization and the cap belong to the inserted fragment, with one Undo.
+questionInsertionChecks :: IO ()
+questionInsertionChecks=do
+  let ordinary=newBuffer "independent draft"
+      chat=(selectConversationView "" "Primary" (initialDesktop (100,35))) {composerBuffer=ordinary}
+      question text sel=chat {chatQuestion=Just (ChatQuestion 1 "Answer?" [] Nothing (newBuffer text) sel True)}
+      answer d=maybe (error "Missing inline answer") questionBuffer (chatQuestion d)
+      pasted text d=fst (runCommand Paste d {clipboard=text})
+      textOf=contents.answer
+      expected source sel inserted=let (a,z)=ordered sel in
+        T.take 4096 (T.map (\c->if c `elem` ['\n','\r','\t'] then ' ' else c) (T.take a source<>inserted<>T.drop z source))
+      checkEdit source sel inserted result=do
+        let wanted=expected source sel inserted
+            undone=fst (runCommand Undo result)
+            redone=fst (runCommand Redo undone)
+        check "inline insertion keeps normalization and cap result" (textOf result==wanted)
+        check "inline normalized/capped insertion is one Undo step" (textOf undone==source && textOf (fst (runCommand Undo undone))==source)
+        check "inline insertion Redo restores the bounded answer" (textOf redone==wanted)
+        receipt<-captureVersion ordinary
+        current<-versionCurrent receipt (composerBuffer result)
+        check "inline insertion does not borrow the ordinary draft" current
+  let before="before"
+      inserted="\nnext\tpart\r"
+      initial=question before (Selection 6 6)
+  checkEdit before (Selection 6 6) inserted (pasted inserted initial)
+  checkEdit before (Selection 6 6) inserted (fst (handleEvent (V.EvPaste (TE.encodeUtf8 inserted)) initial))
+  checkEdit before (Selection 6 6) inserted (fst (handleEvent (V.EvKey (V.KChar 'v') [V.MCtrl]) initial {clipboard=inserted}))
+  checkEdit before (Selection 6 6) "\n" (fst (handleEvent (V.EvKey V.KEnter [V.MShift]) initial))
+  let nonuniform=T.take 4096 (T.concat (replicate 500 "012α界e\x301\&😀XYZ"))
+  forM_ [(Selection 0 0,"front"),(Selection 17 17,T.replicate 30 "λ界"),
+         (Selection 31 8,"selected λ界\ttext"),(Selection 25 25,T.replicate 5000 "界"),
+         (Selection 4096 4096,"full end")] $ \(sel,addition)->
+    checkEdit nonuniform sel addition (pasted addition (question nonuniform sel))
+  let large=(newBuffer (T.replicate 4096 "界")) {saved=error "question selection forced baseline",undoStack=error "question selection forced Undo"}
+      focused=chat {chatQuestion=Just (ChatQuestion 1 "Answer?" [] Nothing large (Selection 0 0) True)}
+  _<-evaluate (prepareBuffer large)
+  _<-evaluate (questionActive focused)
+  beforeAllocation<-getAllocationCounter
+  selected<-evaluate (maybe (-1) (caret.questionSelection) (chatQuestion (fst (runCommand SelectAll focused))))
+  afterAllocation<-getAllocationCounter
+  check "inline selection does not normalize the existing answer" (selected==4096 && beforeAllocation-afterAllocation<8000)
+  let first=pasted inserted initial
+      second=pasted "more" first
+  check "successive inline edits retain earlier Undo" (textOf (fst (runCommand Undo second))==textOf first && textOf (fst (runCommand Undo (fst (runCommand Undo second))))==before)
+  putStrLn "inline question insertion checks passed"
 
 -- Acceptance consumes only the submitted immutable draft, including hidden views.
 -- Gates use the same ACP process and held-read fixture as the other owner checks.
