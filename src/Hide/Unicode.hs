@@ -6,7 +6,7 @@
 -- Clipped GPU cells retain their full semantic glyph. Text-mode partial clusters
 -- become blanks. Terminal output advances
 -- explicitly past two-cell clusters even when the user's font draws them narrowly.
-module Hide.Unicode (graphemes, clusterWidth, textImage, wideTextImage, displayClusters, terminalProjection, terminalSpan, CellSpan(..), CellLayer(..), cellRowsForLayers, cellRowsForPic, cellDisplayOps, flattenPicture, displayOpsForPic, updatePicture, terminalText, textInputChar) where
+module Hide.Unicode (graphemes, clusterWidth, textImage, wideTextImage, displayClusters, terminalProjection, terminalSpan, CellSpan(..), CellLayer(..), cellRowsForLayers, cellRowsForPic, cellDisplayOps, flattenPicture, displayOpsForPic, updateDisplayOps, terminalText, textInputChar) where
 
 import Control.Monad (forM_, when)
 import Data.Char (isPrint)
@@ -250,16 +250,15 @@ flattenPicture size picture=picture {V.picLayers=[V.vertCat (map row (Vec.toList
         image (TextSpan a tWidth chars text)=I.HorizText a text tWidth chars
         image _=V.emptyImage
 
--- | Emit grapheme-aware spans through Vty capabilities and its row-diff cache.
-updatePicture :: V.Vty -> V.Picture -> IO ()
-updatePicture vty picture = do
-  let output=V.outputIface vty
-  size@(w,h) <- displayBounds output
+-- | Emit already prepared spans at captured terminal bounds through Vty
+-- capabilities and its row-diff cache. Rows must fill those bounds. Explicit
+-- advances survive terminal font correction; no picture composition occurs here.
+updateDisplayOps :: Output -> (Int,Int) -> V.Cursor -> DisplayOps -> IO ()
+updateDisplayOps output size@(w,h) position ops = do
   dc <- displayContext output size
   previous <- readIORef (assumedStateRef output)
   urls <- getModeStatus output Hyperlink
-  let ops=displayOpsForPic picture size
-      initial=FixedAttr defaultStyleMask Nothing Nothing Nothing
+  let initial=FixedAttr defaultStyleMask Nothing Nothing Nothing
       changed y row=case prevOutputOps previous of
         Just old | Vec.length old==Vec.length ops -> old Vec.! y/=row
         _ -> True
@@ -271,7 +270,7 @@ updatePicture vty picture = do
       emit _ state _=state
       rowBytes y row=let (text,_,_)=foldl' (emit y) (mempty,initial,0) (Vec.toList row)
                      in writeMoveCursor dc 0 y <> writeDefaultAttr dc urls <> text
-      cursor=case V.picCursor picture of
+      cursor=case position of
         V.Cursor x y -> at x y
         V.AbsoluteCursor x y -> at x y
         _ -> mempty
