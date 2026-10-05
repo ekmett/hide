@@ -53,7 +53,9 @@ checks = do
   before<-getAllocationCounter
   _<-evaluate (force (frameRows resized))
   after<-getAllocationCounter
-  check "dock-neighbor frame export avoids repeated cell-grid materialization" (before-after<80000000)
+  -- Keep a prepared redraw within its allocation budget. A larger allowance
+  -- requires measured attribution and a feature benefit, not a silent rebaseline.
+  check "prepared dock-neighbor frame export stays within 6 MB" (before-after<6000000)
   let d=addDocument Nothing (newBuffer "λ\nhello") (initialDesktop (80,25))
       screens=map frameRows [d,insertText "world " d,d {screenSize=(100,30)}]
   check "frame exposes editor window metadata for the real native session frontend"
