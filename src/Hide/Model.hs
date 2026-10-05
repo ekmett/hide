@@ -168,7 +168,9 @@ data Command = New | Open | Download | ChangeDir | Save | SaveAs | Close | Quit 
   | SetBufferView BufferView | SetDefaultBufferView BufferView | RevertChange Int Int (Int,Int) Int
   | ToggleHex | GoToMessage | CopyAllMessages | CopyLocation | SubmitChat ChatSubmit
   | ReloadBindings | InspectBindings
-  | CursorLeft Bool | CursorRight Bool | CursorUp Bool | CursorDown Bool | DeleteBackward | DeleteForward | DeleteLine
+  | CursorLeft Bool | CursorRight Bool | CursorUp Bool | CursorDown Bool
+  | CursorRowStart Bool | CursorRowEnd Bool | CursorDocumentStart Bool | CursorDocumentEnd Bool | CursorPageUp Bool | CursorPageDown Bool
+  | DeleteBackward | DeleteForward | DeleteLine
   | SidebarMove Int | SidebarActivate | SidebarExpand | SidebarCollapse | FocusSource | MessagesMove Int | MessagesPage Int
   | ToolchainOptions | SelectToolchain Toolchain | SelectCompiler Text
   | DebugCommand Text | AutocompleteCommand Text
@@ -355,6 +357,18 @@ commandDescription cmd = case cmd of
   CursorDown False -> "Move to the next displayed row."
   CursorUp True -> "Extend selection to the previous displayed row."
   CursorDown True -> "Extend selection to the next displayed row."
+  CursorRowStart False -> "Move to the start of the displayed row."
+  CursorRowStart True -> "Extend selection to the start of the displayed row."
+  CursorRowEnd False -> "Move to the end of the displayed row."
+  CursorRowEnd True -> "Extend selection to the end of the displayed row."
+  CursorDocumentStart False -> "Move to the start of the displayed document."
+  CursorDocumentStart True -> "Extend selection to the start of the displayed document."
+  CursorDocumentEnd False -> "Move to the end of the displayed document."
+  CursorDocumentEnd True -> "Extend selection to the end of the displayed document."
+  CursorPageUp False -> "Move to the previous page."
+  CursorPageUp True -> "Extend selection to the previous page."
+  CursorPageDown False -> "Move to the next page."
+  CursorPageDown True -> "Extend selection to the next page."
   DeleteBackward -> "Delete the selected range or previous character."
   DeleteForward -> "Delete the selected range or next character."
   DeleteLine -> "Delete the current source line."
@@ -1135,6 +1149,12 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
     go (CursorRight extend) d = (horizontalMove True extend d,[])
     go (CursorUp extend) d = (verticalMove (-1) extend d,[])
     go (CursorDown extend) d = (verticalMove 1 extend d,[])
+    go (CursorRowStart extend) d = (rowEdge False extend d,[])
+    go (CursorRowEnd extend) d = (rowEdge True extend d,[])
+    go (CursorDocumentStart extend) d = (documentEdge False extend d,[])
+    go (CursorDocumentEnd extend) d = (documentEdge True extend d,[])
+    go (CursorPageUp extend) d = (pageMove False extend d,[])
+    go (CursorPageDown extend) d = (pageMove True extend d,[])
     go DeleteBackward d = (deleteAdjacent False d,[])
     go DeleteForward d = (deleteAdjacent True d,[])
     go DeleteLine d = (deleteSourceLine d,[])
@@ -2629,8 +2649,6 @@ pluginKey _ _ d=d
 readOnlyTextKey :: BufferContent -> Window -> (Bool -> Int -> Desktop) -> V.Key -> [V.Modifier] -> Desktop -> Desktop
 readOnlyTextKey text w moveToText key mods d=
   let pos=caret (selection w)
-      (row,_)=windowTextPosition d w text pos
-      vertical delta=verticalTextOffset d w text pos delta
       extend=V.MShift `elem` mods
       move target=moveToText extend target
   in case key of
@@ -2638,10 +2656,10 @@ readOnlyTextKey text w moveToText key mods d=
     V.KRight->move (horizontalTextOffset True text pos)
     V.KUp->verticalMove (-1) extend d
     V.KDown->verticalMove 1 extend d
-    V.KPageUp->move (vertical (negate (max 1 (height (bounds w)-2))))
-    V.KPageDown->move (vertical (max 1 (height (bounds w)-2)))
-    V.KHome->move (if V.MCtrl `elem` mods then 0 else windowTextOffset d w text row 0)
-    V.KEnd->move (if V.MCtrl `elem` mods then contentLength text else windowTextOffset d w text row maxBound)
+    V.KPageUp->pageMove False extend d
+    V.KPageDown->pageMove True extend d
+    V.KHome->if V.MCtrl `elem` mods then documentEdge False extend d else rowEdge False extend d
+    V.KEnd->if V.MCtrl `elem` mods then documentEdge True extend d else rowEdge True extend d
     _->d
 
 pluginMoveTo :: Bool -> Int -> Desktop -> Desktop
@@ -2821,7 +2839,7 @@ unboundKey :: V.Key -> [V.Modifier] -> Desktop -> (Desktop,[Effect])
 unboundKey key mods d
   | Just _<-effectiveBindings d, sourceNavigationOwner d,
     not (bindingPlatform d==Bindings.TerminalPlatform && V.MMeta `elem` mods),
-    key `elem` [V.KUp,V.KDown] || V.MCtrl `notElem` mods && key `elem` [V.KLeft,V.KRight,V.KBS,V.KDel] = (d,[])
+    key `elem` [V.KUp,V.KDown,V.KHome,V.KEnd,V.KPageUp,V.KPageDown] || V.MCtrl `notElem` mods && key `elem` [V.KLeft,V.KRight,V.KBS,V.KDel] = (d,[])
 unboundKey key mods d | activeMarkdown d, dialog d==Nothing,maybe False (windowFocused d) (activeWindow d) = (markdownKey key mods d,[])
 unboundKey key mods d | Just _<-activePluginWindow d, dialog d==Nothing,maybe False (windowFocused d) (activeWindow d) = (pluginKey key mods d,[])
 unboundKey key mods d = case bindingContext d of
@@ -2888,6 +2906,12 @@ sourceKeyCommand CursorLeft{}=True
 sourceKeyCommand CursorRight{}=True
 sourceKeyCommand CursorUp{}=True
 sourceKeyCommand CursorDown{}=True
+sourceKeyCommand CursorRowStart{}=True
+sourceKeyCommand CursorRowEnd{}=True
+sourceKeyCommand CursorDocumentStart{}=True
+sourceKeyCommand CursorDocumentEnd{}=True
+sourceKeyCommand CursorPageUp{}=True
+sourceKeyCommand CursorPageDown{}=True
 sourceKeyCommand cmd=horizontalMutation cmd
 
 horizontalMutation :: Command -> Bool
@@ -2953,6 +2977,46 @@ verticalTextOffset d w text pos delta=windowTextOffset d w text next col
     (row,col)=windowTextPosition d w text pos
     next=max 0 (min (windowTextRows d w text-1) (row+delta))
 
+-- | Resolve row edges in the current displayed geometry; hex End keeps its last-byte convention.
+rowEdge :: Bool -> Bool -> Desktop -> Desktop
+rowEdge end extend d
+  | activeMarkdown d = case activeWindow d of
+      Just w | Just (_,text,_)<-windowMarkdown d w ->
+        markdownMoveTo extend (textEdge (displayWindow w) text) d
+      _->d
+  | Just view<-activePluginWindow d, Just w<-activeWindow d =
+      pluginMoveTo extend (textEdge w (PluginWindow.preparedWindowText view)) d
+  | Just w<-activeWindow d, Just doc<-activeDocument d =
+      let b=documentBuffer doc; p=caret (selection w); row=fst (bufferLineColumn b p)
+          start=bufferLineOffset b row
+          target | byteMode b=let start=p-p `mod` windowHexBytes w
+                             in if end then min (bufferLength b) (start+windowHexBytes w-1) else start
+                 | Just layout<-windowPresentation d w =
+                     TextLayout.layoutOffset layout (fst (TextLayout.layoutPosition layout p)) column
+                 | end=start+T.length (bufferLineAt b row)
+                 | otherwise=start
+      in moveTo extend target d
+  | otherwise=d
+  where
+    column=if end then maxBound else 0
+    textEdge w text=windowTextOffset d w text (fst (windowTextPosition d w text (caret (selection w)))) column
+
+-- | Document edges use measured lengths in their owning source or prepared text.
+documentEdge :: Bool -> Bool -> Desktop -> Desktop
+documentEdge end extend d
+  | activeMarkdown d = case activeWindow d of
+      Just w | Just (_,text,_)<-windowMarkdown d w ->markdownMoveTo extend (edge (contentLength text)) d
+      _->d
+  | Just view<-activePluginWindow d =pluginMoveTo extend (edge (contentLength (PluginWindow.preparedWindowText view))) d
+  | Just doc<-activeDocument d =moveTo extend (edge (bufferLength (documentBuffer doc))) d
+  | otherwise=d
+  where edge size=if end then size else 0
+
+-- | Source/hex pages reserve three chrome rows; prepared read-only text reserves two.
+pageMove :: Bool -> Bool -> Desktop -> Desktop
+pageMove forward extend d=verticalMove (if forward then page else negate page) extend d
+  where page=maybe 10 (\w->max 1 (height (bounds w)-if activeMarkdown d || isJust (activePluginWindow d) then 2 else 3)) (activeWindow d)
+
 -- | Delete a selected range first, otherwise one existing character (or hex byte).
 deleteAdjacent :: Bool -> Desktop -> Desktop
 deleteAdjacent forward d=case (activeWindow d,activeDocument d) of
@@ -2983,10 +3047,10 @@ editorKey key mods d = case key of
            | otherwise -> horizontalMove True shift d
   V.KUp -> verticalMove (-1) shift d
   V.KDown -> verticalMove 1 shift d
-  V.KPageUp -> vertical (negate page)
-  V.KPageDown -> vertical page
-  V.KHome -> move (if ctrl then 0 else visualEdge 0 start)
-  V.KEnd -> move (if ctrl then bufferLength b else visualEdge maxBound (start+T.length (bufferLineAt b row)))
+  V.KPageUp -> pageMove False shift d
+  V.KPageDown -> pageMove True shift d
+  V.KHome -> if ctrl then documentEdge False shift d else rowEdge False shift d
+  V.KEnd -> if ctrl then documentEdge True shift d else rowEdge True shift d
   V.KBS | ctrl -> erase (bufferWordLeft b p) p
         | otherwise -> deleteAdjacent False d
   V.KDel | ctrl -> erase p (bufferWordRight b p)
@@ -2998,14 +3062,8 @@ editorKey key mods d = case key of
   where
     b = maybe (newBuffer "") documentBuffer (activeDocument d)
     sel = maybe (Selection 0 0) selection (activeWindow d); p = caret sel
-    (row,_) = bufferLineColumn b p; start = bufferLineOffset b row
     ctrl = V.MCtrl `elem` mods; shift = V.MShift `elem` mods
-    page = maybe 10 (\w -> max 1 (height (bounds w)-3)) (activeWindow d)
     move = (\q -> moveTo shift q d)
-    visualEdge column fallback=case activeWindow d of
-      Just w | Just layout<-windowPresentation d w->let (r,_)=TextLayout.layoutPosition layout p in TextLayout.layoutOffset layout r column
-      _->fallback
-    vertical delta = verticalMove delta shift d
     erase a z = let s = if anchor sel/=caret sel then sel else Selection a z
                 in editActive (\_ -> replaceSelection s "") (Just (fst (ordered s))) d
 
@@ -3036,10 +3094,10 @@ starPrefix 'k' c d = case c of
   'd' -> runCommand Close d
   _ -> (d {status="Unknown Ctrl+K command."},[])
 starPrefix 'q' c d = case c of
-  's' -> (editorKey V.KHome [] d,[])
-  'd' -> (editorKey V.KEnd [] d,[])
-  'r' -> (moveTo False 0 d,[])
-  'c' -> (moveTo False (maybe 0 (bufferLength . documentBuffer) (activeDocument d)) d,[])
+  's' -> (rowEdge False False d,[])
+  'd' -> (rowEdge True False d,[])
+  'r' -> (documentEdge False False d,[])
+  'c' -> (documentEdge True False d,[])
   'f' -> runCommand Find d
   'a' -> runCommand Replace d
   _ -> (d {status="Unknown Ctrl+Q command."},[])
@@ -3825,17 +3883,15 @@ hexKey key mods d = case (activeWindow d,activeDocument d) of
           (Just (if low then fst (ordered sel) else fst (ordered sel)+1)) d
       start=fst (ordered sel)
       old=if start<size then maybe 0 (ord.fst) (T.uncons (bufferSlice b start 1)) else 0
-      count=windowHexBytes w
-      page=max 1 (height (bounds w)-3)*count
     in case key of
       V.KLeft -> move (p-1)
       V.KRight -> move (p+1)
       V.KUp -> verticalMove (-1) shift d
       V.KDown -> verticalMove 1 shift d
-      V.KPageUp -> move (p-page)
-      V.KPageDown -> move (p+page)
-      V.KHome -> move (if ctrl then 0 else p-p `mod` count)
-      V.KEnd -> move (if ctrl then size else min size (p-p `mod` count+count-1))
+      V.KPageUp -> pageMove False shift d
+      V.KPageDown -> pageMove True shift d
+      V.KHome -> if ctrl then documentEdge False shift d else rowEdge False shift d
+      V.KEnd -> if ctrl then documentEdge True shift d else rowEdge True shift d
       V.KBS -> erase (max 0 (p-1)) p
       V.KDel -> erase p (min size (p+1))
       V.KIns -> editActive (\_ -> replaceSelection (Selection p p) "\0") (Just p) d

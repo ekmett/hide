@@ -1,7 +1,8 @@
 {-# LANGUAGE OverloadedStrings #-}
 module BindingsCheck (checks) where
 import SourceWindowFixture (sourceFixtureBuffer)
-import Control.Monad (unless)
+import Control.Monad (unless,forM_)
+import Data.List (subsequences)
 import Control.Concurrent (threadDelay)
 import Control.Exception (bracket, bracket_)
 import System.Directory (getTemporaryDirectory, removePathForcibly, removeFile, createDirectory, canonicalizePath)
@@ -174,6 +175,7 @@ checks=do
   check "default dialog search retains permitted replacement action" (maybe False (\dg->case purpose dg of Searching True _->True; _->False) (dialog (fst (key (V.KChar 'f') [V.MMeta,V.MAlt] searchEditing))))
   horizontalChecks
   verticalChecks
+  edgePageChecks
   reloadChecks
   putStrLn "keybinding checks passed"
 
@@ -312,3 +314,76 @@ verticalChecks=do
   check "Markdown vertical remap owns rendered selection without source motion" (renderedRange moved/=renderedRange markdown && range moved==range markdown && renderedRange (event V.KUp [] moved)==renderedRange moved && renderedRange (event V.KUp [V.MShift] moved)==renderedRange moved)
   let mac=base {nativeMac=True,videoMode=Just 3,keyBindings=either (error . show) id (configuredBindings [] (M.singleton "macos" (M.singleton "source" (M.singleton "hide.cursor.up" ["Cmd+Shift+J"]))))}
   check "vertical platform remap projects the same identity and label" (range (event (V.KChar 'j') [V.MMeta,V.MShift] mac)==Just (Selection 1 1) && lookup "Cmd+Shift+J" (focusedBindingChords mac)==Just "hide.cursor.up" && commandBindingKeys mac (CursorUp False)==["Cmd+Shift+J"])
+
+edgePageChecks :: IO ()
+edgePageChecks=do
+  let check name ok=unless ok (error name)
+      event k mods=fst . handleEvent (V.EvKey k mods)
+      range d=selection <$> activeWindow d
+      renderedRange d=selection . displayWindow <$> activeWindow d
+      narrow=modifyActive (\w->w {bounds=(bounds w) {height=12,width=34}})
+      line="abcd界e\x301\&z\tmore"
+      text=T.replicate 60 (line<>"\r\n")
+      stride=T.length line+2
+      pos=20*stride+2
+      base=narrow (modifyActive (\w->w {selection=Selection (pos+4) pos}) (addDocument Nothing (newBuffer text) (initialDesktop (80,25))))
+      operations=[("row-start",CursorRowStart,20*stride),("row-end",CursorRowEnd,20*stride+T.length line),
+        ("document-start",CursorDocumentStart,0),("document-end",CursorDocumentEnd,T.length text),
+        ("page-up",CursorPageUp,11*stride+2),("page-down",CursorPageDown,29*stride+2)]
+      actions=[("hide."<>space<>"."<>name,command extend,target,extend) | (name,command,target)<-operations,(space,extend)<-[("cursor",False),("selection",True)]]
+      overrides=[(name,["F"<>T.pack (show n)]) | ((name,_,_,_),n)<-zip actions [13::Int ..]]
+      compile context entries=either (error . show) id (platformBindings [] TerminalPlatform (M.singleton context (M.fromList entries)))
+      maps=compile "source" overrides
+      configured=base {keyBindings=maps}
+      unbound=base {keyBindings=compile "source" [(name,[]) | (name,_,_,_)<-actions]}
+      originalKeys=[(k,mods) | k<-[V.KHome,V.KEnd,V.KPageUp,V.KPageDown],mods<-subsequences [V.MCtrl,V.MAlt,V.MShift]]
+      expected target extend=Selection (if extend then pos+4 else target) target
+  forM_ (zip actions [13::Int ..]) $ \((name,command,target,extend),n)->do
+    let moved=event (V.KFun n) [] configured
+    check "edge/page remaps execute semantic source positions" (range moved==Just (expected target extend) && commandIdentifier command==Just name && (revision . documentBuffer <$> activeDocument moved)==Just 0)
+    check "edge/page labels and frontend projection use the effective binding" (commandBindingKeys configured command==["F"<>T.pack (show n)] && menuShortcut configured (MenuItem "Edge" "Home" command)=="F"<>T.pack (show n) && lookup ("F"<>T.pack (show n)) (focusedBindingChords configured)==Just name)
+  check "edge/page replacement consumes every former modifier alias" (all (\(k,mods)->range (event k mods configured)==range configured) originalKeys)
+  check "explicit edge/page unbind consumes physical fallback" (all (\(k,mods)->range (event k mods unbound)==range unbound) originalKeys)
+  let star=base {wordStar=True,keyBindings=compile "wordstar" [(name,[]) | (name,_,_,_)<-actions]}
+      prefixStep c=event (V.KChar c) [] (event (V.KChar 'q') [V.MCtrl] star)
+  check "WordStar Q edges remain fixed non-extending semantic steps" (map (range . prefixStep) ['s','d','r','c']==map (Just . (\p->Selection p p)) [20*stride,20*stride+T.length line,0,T.length text])
+  let hex=narrow (modifyActive (\w->w {selection=Selection 17 17}) (addDocument Nothing (newByteBuffer (BS.pack (take 1600 (cycle [0..255])))) (initialDesktop (80,25)))) {keyBindings=maps}
+      count=maybe 0 windowHexBytes (activeWindow hex)
+  check "hex remapped End keeps last byte and document End keeps insertion EOF" (range (event (V.KFun 15) [] hex)==Just (Selection (17-17 `mod` count+count-1) (17-17 `mod` count+count-1)) && range (event (V.KFun 19) [] hex)==Just (Selection 1600 1600))
+  check "hex remapped page keeps measured byte-row stride" (range (event (V.KFun 23) [] hex)==Just (Selection (17+9*count) (17+9*count)))
+  W.withWindowScope $ \scope->do
+    prepared<-W.prepareTextWindow "Edge notes" text
+    update<-W.openTextWindow scope prepared >>= maybe (fail "plugin edge open failed") pure
+    opened<-adoptWindowUpdate P.HumanMenu update base
+    let plugin=modifyActive (\w->w {selection=Selection (pos+4) pos}) (narrow opened) {keyBindings=maps}
+        pluginUnbound=plugin {keyBindings=keyBindings unbound}
+    check "plugin edge unbind consumes readonly fallback" (all (\(k,mods)->range (event k mods pluginUnbound)==range pluginUnbound) originalKeys)
+    check "plugin page reserves its existing two chrome rows" (range (event (V.KFun 23) [] plugin)==Just (Selection (30*stride+2) (30*stride+2)))
+    check "plugin document selection uses its prepared content" (range (event (V.KFun 20) [] plugin)==Just (Selection (pos+4) (T.length text)))
+  let mdSource=narrow (addDocument (Just (FileState "/tmp/edge.md" Nothing)) (newBuffer (T.replicate 60 "abcd界e\x301\&z\n\n")) (initialDesktop (80,25)))
+      pending=(fst (runCommand (SetBufferView MarkdownView) mdSource)) {keyBindings=maps}
+      inert d=all (\(_,command,_,_)->not (commandEnabled d command) && renderedRange (fst (runCommand command d))==renderedRange d && range (fst (runCommand command d))==range d) actions
+  check "pending Markdown edges and pages remain unavailable" (inert pending)
+  ready<-prepareTextPresentations pending
+  let Just (_,rendered,_)=activeWindow ready >>= windowMarkdown ready
+      mdPos=contentLineOffset rendered 20+2
+      markdown=modifyActive (modifyDisplayedWindow (\w->w {selection=Selection (mdPos+4) mdPos})) ready
+      markdownUnbound=markdown {keyBindings=keyBindings unbound}
+      down=event (V.KFun 23) [] markdown
+      stale=modifyActive (\w->w {bounds=(bounds w) {width=28}}) markdown
+  check "Markdown edge unbind consumes readonly fallback" (all (\(k,mods)->renderedRange (event k mods markdownUnbound)==renderedRange markdownUnbound) originalKeys)
+  check "Markdown page keeps rendered ten-row geometry without source motion" (renderedRange down==Just (Selection (contentLineOffset rendered 30+2) (contentLineOffset rendered 30+2)) && range down==range markdown)
+  check "stale Markdown edges and pages remain unavailable" (inert stale)
+  let modal=prompt "Edit" Information [Input "Name" "draft" 0] configured
+      private=configured {guestPrivatePaths=["/authority"],buffers=M.map (\doc->doc {documentFile=Just (FileState "/authority/secret.hs" Nothing)}) (buffers configured)}
+      sidebar=installSidebar (emptySidebar "/project" 24 True) configured
+      messages=configured {problemsFocused=True,problemsVisible=True}
+      global=base {keyBindings=either (error . show) id (platformBindings [] TerminalPlatform (M.singleton "global" (M.singleton "hide.cursor.document-end" ["F13"])))}
+      chat=(addReadOnly "Conversation" "reply" global) {composerBuffer=newBuffer "draft",composerSelection=Selection 2 2,composerFocused=True}
+      pty=addReadOnly "Terminal test" "output" global
+  check "edge remap respects private source policy" (not (guestKeyAllowed private (V.KFun 13) []))
+  check "edge global remap cannot move behind other input owners" (all (\d->range (event (V.KFun 13) [] d)==range d && not (commandEnabled d (CursorDocumentEnd False))) [modal,sidebar {keyBindings=keyBindings global},messages {keyBindings=keyBindings global},chat,pty])
+  check "global source remap cannot change the composer selection" (composerSelection (event (V.KFun 13) [] chat)==composerSelection chat)
+  check "PTY edges and pages retain transport ownership" (map (\(k,mods)->terminalInput (V.EvKey k mods)) [(V.KHome,[]),(V.KEnd,[V.MCtrl]),(V.KPageUp,[]),(V.KPageDown,[])]==map Just ["\ESC[H","\ESC[1;5F","\ESC[5~","\ESC[6~"])
+  let conflict=platformBindings [] TerminalPlatform (M.singleton "source" (M.singleton "hide.file.save" ["Home"]))
+  check "edge chord reassignment must explicitly release its owner" (either (const True) (const False) conflict)
