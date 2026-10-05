@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE CPP, OverloadedStrings #-}
 module RunCheck (checks) where
 
 import SourceWindowFixture (sourceFixtureBuffer)
@@ -22,6 +22,9 @@ import System.Directory
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.FilePath ((</>))
 import System.IO (hClose, openTempFile, withBinaryFile, IOMode(..), hFlush)
+#ifndef mingw32_HOST_OS
+import System.Posix.IO (openFd, fdToHandle, OpenMode(WriteOnly), defaultFileFlags)
+#endif
 import System.Process (callProcess)
 import System.Timeout (timeout)
 import System.Info (os)
@@ -207,7 +210,7 @@ buildPreparationChecks=when (os/="mingw32") $ bracket temporary removePathForcib
     callProcess "mkfifo" [path]
     opened<-newEmptyMVar
     release<-newEmptyMVar
-    withAsync (withBinaryFile path WriteMode $ \handle->do
+    withAsync (withSettingsWriter path $ \handle->do
       BL.hPut handle bytes; hFlush handle; putMVar opened (); takeMVar release) $ \writer ->
       withConversationAt root $ \runtime -> do
         fast<-timeout 500000 (raw runtime "make" base)
@@ -323,6 +326,15 @@ check label ok=unless ok (error label)
 withEnv :: String -> Maybe String -> IO a -> IO a
 withEnv name value action=bracket (lookupEnv name <* set value) set (const action)
   where set=maybe (unsetEnv name) (setEnv name)
+-- A blocking writer open proves the actual reader exists. GHC's ordinary
+-- WriteMode FIFO open can fail with ENXIO before that reader is acquired.
+withSettingsWriter :: FilePath -> (Handle -> IO a) -> IO a
+#ifdef mingw32_HOST_OS
+withSettingsWriter path=withBinaryFile path WriteMode
+#else
+withSettingsWriter path=bracket (openFd path WriteOnly defaultFileFlags >>= fdToHandle) hClose
+#endif
+
 temporary :: IO FilePath
 temporary=do
   root<-getTemporaryDirectory
@@ -529,7 +541,7 @@ admittedBuildChecks=when (os/="mingw32") $ bracket temporary removePathForcibly 
           callProcess "mkfifo" [configPath]
           opened<-newEmptyMVar
           release<-newEmptyMVar
-          withAsync (withBinaryFile configPath WriteMode $ \handle->do
+          withAsync (withSettingsWriter configPath $ \handle->do
             BL.hPut handle bytes; hFlush handle; putMVar opened (); takeMVar release) $ \writer->do
               pending<-admit runtime permissions caller base
               reached<-timeout 5000000 (takeMVar opened)
