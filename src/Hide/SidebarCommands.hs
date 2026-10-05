@@ -69,10 +69,10 @@ data RecoveryProjection = RecoveryProjection !(Maybe SidebarHints)
   ![(P.TreeHit,[P.TreeHit],Bool)] !(Maybe RowKey) !(Maybe RowKey)
 data Cancellation = forall a. Cancellation (Async a)
 data SidebarHost = SidebarHost !(Registry SidebarContext) !(IORef State)
-  !(TBQueue Publication) !(TBQueue Cancellation) !(Async ())
+  !(TBQueue Publication) !(TBQueue Cancellation) !(Async ()) !(TVar Bool)
 
 sidebarRegistry :: SidebarHost -> Registry SidebarContext
-sidebarRegistry (SidebarHost registry _ _ _ _)=registry
+sidebarRegistry (SidebarHost registry _ _ _ _ _)=registry
 withSidebarCommands :: (SidebarHost -> IO a) -> IO a
 withSidebarCommands use=withRegistry $ \registry->bracket (acquire registry) close use
   where
@@ -80,9 +80,11 @@ withSidebarCommands use=withRegistry $ \registry->bracket (acquire registry) clo
       state<-newIORef (State M.empty M.empty [] [] Nothing Nothing Nothing Nothing Nothing 0 Nothing)
       publications<-newTBQueueIO 32
       cancellation<-newTBQueueIO 32
+      closed<-newTVarIO False
       canceller<-async (forever (do Cancellation worker<-atomically (readTBQueue cancellation); cancel worker))
-      pure (SidebarHost registry state publications cancellation canceller)
-    close (SidebarHost _ ref _ _ canceller)=do
+      pure (SidebarHost registry state publications cancellation canceller closed)
+    close (SidebarHost _ ref publications _ canceller closed)=do
+      atomically (writeTVar closed True >> flushTBQueue publications >> pure ())
       state<-readIORef ref
       mapM_ (\(ChildJob _ _ worker _)->cancel worker) (jobs state)
       mapM_ (cancel . snd) (projection state)
@@ -93,19 +95,25 @@ withSidebarCommands use=withRegistry $ \registry->bracket (acquire registry) clo
 
 -- | Register/prepare metadata outside the owner, then publish an ordered bounded
 -- delta. Backpressure applies to the registration worker, never an input tick.
+-- Closing the host wakes blocked publishers and rejects them with an IOError.
 publishTreeFromHost :: SidebarHost -> P.TreeProvider SidebarContext SidebarReply -> IO ()
-publishTreeFromHost (SidebarHost _ _ queue _ _) provider=atomically (writeTBQueue queue (TreePublication provider))
+publishTreeFromHost (SidebarHost _ _ queue _ _ closed) provider=atomically $ do
+  stopped<-readTVar closed
+  if stopped then throwSTM (userError "Sidebar host closed.") else writeTBQueue queue (TreePublication provider)
 -- | Queue metadata for an already installed exact form. This cannot open a
 -- modal or grant submission authority; ordered transport reuses the root queue.
+-- Blocked and later refresh publishers receive an IOError when the host closes.
 publishFormRefreshFromHost :: SidebarHost -> Form.InputFormUpdate -> IO ()
-publishFormRefreshFromHost (SidebarHost _ _ queue _ _) prepared=atomically (writeTBQueue queue (FormRefresh prepared))
+publishFormRefreshFromHost (SidebarHost _ _ queue _ _ closed) prepared=atomically $ do
+  stopped<-readTVar closed
+  if stopped then throwSTM (userError "Sidebar host closed.") else writeTBQueue queue (FormRefresh prepared)
 actionWorker :: ActionJob -> Async (Either CommandError SidebarReply)
 actionWorker (ActionJob _ _ _ _ worker _)=worker
 actionWorker (FormJob _ worker _)=worker
 -- | Withdrawal belongs to the session owner, so queued/late results cannot race
 -- adoption. Cancellation is scheduled to a worker and never waits under UI lock.
 retireTreeFromHost :: SidebarHost -> P.TreeRef -> Desktop -> IO Desktop
-retireTreeFromHost (SidebarHost _ ref _ _ _) owner d=do
+retireTreeFromHost (SidebarHost _ ref _ _ _ _) owner d=do
   state<-readIORef ref
   mapM_ P.retireTree (M.lookup owner (providers state))
   writeIORef ref state {providers=M.delete owner (providers state)}
@@ -209,10 +217,12 @@ initializeSidebar host d=do
           await next
     ready node=case stateLoad node of Loading{}->False; _->True
 readState :: SidebarHost -> IO State
-readState (SidebarHost _ ref _ _ _)=readIORef ref
+readState (SidebarHost _ ref _ _ _ _)=readIORef ref
 
 sidebarEffects :: SidebarHost -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> [Effect] -> IO (Bool,Desktop)
-sidebarEffects host core d effects=do
+sidebarEffects host@(SidebarHost _ _ _ _ _ closed) core d effects=do
+  stopped<-readTVarIO closed
+  when stopped (ioError (userError "Sidebar host closed."))
   mounted<-mount host d
   foldM step (False,mounted) effects >>= \(quit,next)->(quit,) <$> (mount host next >>= rememberSidebar host)
   where
@@ -228,7 +238,7 @@ sidebarEffects host core d effects=do
       _->core current [effect]
 
 mount :: SidebarHost -> Desktop -> IO Desktop
-mount host@(SidebarHost _ ref _ _ _) d=case sideTree d of
+mount host@(SidebarHost _ ref _ _ _ _) d=case sideTree d of
   Nothing->pure d
   Just visible->do
     state<-readIORef ref
@@ -265,12 +275,12 @@ mount host@(SidebarHost _ ref _ _ _) d=case sideTree d of
 -- request generations inherit that epoch, so reopening cannot alias old traces,
 -- queued child tokens or projection results. Remembering is constant-time.
 rememberSidebar :: SidebarHost -> Desktop -> IO Desktop
-rememberSidebar (SidebarHost _ ref _ _ _) d=do
+rememberSidebar (SidebarHost _ ref _ _ _ _) d=do
   mapM_ (\tree->modifyIORef' ref (\state->state {sidebarRevision=max (sidebarRevision state) (treeRevision tree)})) (sideTree d)
   pure d
 
 enqueue :: SidebarHost -> TreeRequest -> Menu.MenuOrigin -> Desktop -> IO Desktop
-enqueue (SidebarHost _ ref _ _ _) request origin d=case sideTree d of
+enqueue (SidebarHost _ ref _ _ _ _) request origin d=case sideTree d of
   Just tree | requestCurrent request tree->do
     state<-readIORef ref
     let P.TreeHit owner _ _=requestHit request
@@ -283,7 +293,7 @@ enqueue (SidebarHost _ ref _ _ _) request origin d=case sideTree d of
   _->pure d
 
 invokeAction :: SidebarHost -> [P.TreeHit] -> CommandRef -> Menu.MenuOrigin -> Desktop -> IO Desktop
-invokeAction (SidebarHost _ ref _ _ _) trace reference origin d=case (trace,sideTree d) of
+invokeAction (SidebarHost _ ref _ _ _ _) trace reference origin d=case (trace,sideTree d) of
   (hit:_,Just tree) | hitCurrent trace tree && dialog d==Nothing->do
     state<-readIORef ref
     let P.TreeHit owner _ _=hit
@@ -318,7 +328,7 @@ captureActionContext origin trace d=do
   pure (context origin d) {sidebarOpened=opened}
 
 refreshFiles :: SidebarHost -> FilePath -> [Entry] -> Desktop -> IO Desktop
-refreshFiles host@(SidebarHost _ ref _ _ _) path entries d=do
+refreshFiles host@(SidebarHost _ ref _ _ _ _) path entries d=do
   state<-readIORef ref
   case (filesProvider state,sideTree d) of
     (Just (FilesProvider provider _ _ cache),Just tree)->do
@@ -332,7 +342,7 @@ refreshFiles host@(SidebarHost _ ref _ _ _) path entries d=do
 -- | Invalidate one expanded scoped node through the ordinary request owner.
 -- Nothing runs a provider here; closed nodes load the latest metadata on expansion.
 refreshTreeFromHost :: SidebarHost -> P.TreeRef -> P.NodeId -> Desktop -> IO Desktop
-refreshTreeFromHost host@(SidebarHost _ ref _ _ _) owner ident d=do
+refreshTreeFromHost host@(SidebarHost _ ref _ _ _ _) owner ident d=do
   state<-readIORef ref
   live<-maybe (pure False) P.treeCurrent (M.lookup owner (providers state))
   case sideTree d of
@@ -348,7 +358,8 @@ refreshTreeFromHost host@(SidebarHost _ ref _ _ _) owner ident d=do
 -- Publication drains four deltas per tick. All queues and retained UI nodes have
 -- explicit ceilings; slow providers cannot starve input with a recursive drain.
 tickSidebar :: SidebarHost -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> IO Desktop
-tickSidebar host@(SidebarHost _ ref publications cancellation _) core initial=do
+tickSidebar host@(SidebarHost _ ref publications cancellation _ closed) core initial=
+  readTVarIO closed >>= \stopped->if stopped then pure initial else do
   validForm<-tickForm host initial
   mounted<-mount host validForm
   published<-foldM (\d _->do
@@ -425,7 +436,7 @@ releaseRequest host request origin d=case sideTree d of
   where key=keyOf (requestHit request)
 
 startLoads :: SidebarHost -> Desktop -> IO Desktop
-startLoads host@(SidebarHost _ ref _ _ _) original=do
+startLoads host@(SidebarHost _ ref _ _ _ _) original=do
   state<-readIORef ref
   let (begin,rest)=splitAt (max 0 (4-length (jobs state))) (waiting state)
   modifyIORef' ref (\s->s {waiting=rest})
@@ -444,7 +455,7 @@ startLoads host@(SidebarHost _ ref _ _ _) original=do
       _->(,started) <$> releaseRequest host request origin d
 
 finishProjection :: SidebarHost -> Desktop -> IO Desktop
-finishProjection host@(SidebarHost _ ref _ _ _) d=do
+finishProjection host@(SidebarHost _ ref _ _ _ _) d=do
   state<-readIORef ref
   case projection state of
     Nothing->pure d
@@ -461,7 +472,7 @@ finishProjection host@(SidebarHost _ ref _ _ _) d=do
             (Left err,_)->pure d {status="Sidebar projection failed: "<>T.pack (displayException err)}
             _->pure d
 startProjection :: SidebarHost -> Desktop -> IO ()
-startProjection (SidebarHost _ ref _ _ _) d=do
+startProjection (SidebarHost _ ref _ _ _ _) d=do
   state<-readIORef ref
   case (projection state,sideTree d) of
     (Nothing,Just tree) | treeProjectionRevision tree/=treeRevision tree->do
@@ -499,7 +510,7 @@ prepareRecovery (Projection _ rows _ retained _) tree=case treeHints tree of
     evaluate (RecoveryProjection next transitions chosen scrolled)
 
 adoptRecovery :: SidebarHost -> RecoveryProjection -> Desktop -> IO Desktop
-adoptRecovery host@(SidebarHost _ ref _ _ _) (RecoveryProjection hints transitions selected top) original=do
+adoptRecovery host@(SidebarHost _ ref _ _ _ _) (RecoveryProjection hints transitions selected top) original=do
   changed<-foldM restore original {sideTree=fmap (\tree->tree {treeHints=hints}) (sideTree original)} transitions
   chosen<-position True selected changed
   position False top chosen
@@ -528,7 +539,7 @@ adoptRecovery host@(SidebarHost _ ref _ _ _) (RecoveryProjection hints transitio
     position _ _ d=pure d
 
 finishAction :: SidebarHost -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> IO Desktop
-finishAction host@(SidebarHost _ ref _ cancellation _) core d=do
+finishAction host@(SidebarHost _ ref _ cancellation _ _) core d=do
   state<-readIORef ref
   case actionJob state of
     Nothing->pure d
@@ -587,7 +598,7 @@ adoptExisting origin path wid bid version d=case (find ((==wid).windowId) (windo
   _->pure d {status="Existing sidebar file expired."}
 
 badges :: SidebarHost -> Desktop -> IO Desktop
-badges (SidebarHost _ ref _ _ _) d=do
+badges (SidebarHost _ ref _ _ _ _) d=do
   stamp<-makeStableName $! buffers d
   state<-readIORef ref
   adopted<-case badgeJob state of
@@ -619,7 +630,7 @@ formDialog reference d=case dialog d of
   Just dg | PluginInputForm owned<-purpose dg->owned==reference
   _->False
 adoptForm :: SidebarHost -> Bool -> Form.PreparedInputForm SidebarContext SidebarReply -> Desktop -> IO Desktop
-adoptForm (SidebarHost _ ref _ _ _) opening prepared d=do
+adoptForm (SidebarHost _ ref _ _ _ _) opening prepared d=do
   state<-readIORef ref
   let reference=Form.formReference prepared
       present=maybe False ((==reference).Form.formReference) (inputForm state)
@@ -637,7 +648,7 @@ adoptForm (SidebarHost _ ref _ _ _) opening prepared d=do
     pure d {dialog=if opening then Just build else refresh <$> dialog d,contextMenu=Nothing,contextTarget=Nothing}
 -- Refresh transport is metadata-only and cannot create a modal by escaped ref.
 refreshForm :: SidebarHost -> Form.InputFormUpdate -> Desktop -> IO Desktop
-refreshForm host@(SidebarHost _ ref _ _ _) update d=do
+refreshForm host@(SidebarHost _ ref _ _ _ _) update d=do
   state<-readIORef ref
   case inputForm state of
     Just original | formDialog (Form.updateFormReference update) d->do
@@ -645,7 +656,7 @@ refreshForm host@(SidebarHost _ ref _ _ _) update d=do
       case merged of Nothing->pure d; Just prepared->adoptForm host False prepared d
     _->pure d
 tickForm :: SidebarHost -> Desktop -> IO Desktop
-tickForm (SidebarHost _ ref _ _ _) d=do
+tickForm (SidebarHost _ ref _ _ _ _) d=do
   state<-readIORef ref
   case inputForm state of
     Nothing->pure d
@@ -658,7 +669,7 @@ tickForm (SidebarHost _ ref _ _ _) d=do
         modifyIORef' ref (\s->s {inputForm=Nothing})
         pure (if owned then d {dialog=Nothing,status="Input form expired."} else d)
 submitForm :: SidebarHost -> Form.FormRef -> Text -> Menu.MenuOrigin -> Desktop -> IO Desktop
-submitForm (SidebarHost _ ref _ _ _) reference text origin d=mask $ \restore->do
+submitForm (SidebarHost _ ref _ _ _ _) reference text origin d=mask $ \restore->do
   state<-readIORef ref
   case inputForm state of
     Just prepared | origin==Menu.HumanMenu,Form.formReference prepared==reference,formDialog reference d->
@@ -684,7 +695,7 @@ forceFormReply (SidebarAgent (RenameAgentTo who value))
 forceFormReply _=ioError (userError "Unsupported single-line form reply.")
 finishFormJob :: SidebarHost -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> Form.FormRef
   -> Async (Either CommandError SidebarReply) -> Bool -> IO Desktop
-finishFormJob (SidebarHost _ ref _ cancellation _) core d reference worker cancelled=do
+finishFormJob (SidebarHost _ ref _ cancellation _ _) core d reference worker cancelled=do
   state<-readIORef ref
   live<-case inputForm state of
     Just prepared | Form.formReference prepared==reference->Form.submissionCurrent prepared

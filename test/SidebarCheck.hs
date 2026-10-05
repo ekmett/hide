@@ -1,10 +1,12 @@
 {-# LANGUAGE OverloadedStrings #-}
 module SidebarCheck (checks) where
 import Control.Concurrent (threadDelay)
-import Control.Concurrent.Async (withAsync,wait,poll)
+import Control.Concurrent.Async (withAsync,wait,poll,waitCatch,asyncThreadId)
 import Data.IORef
 import Control.Concurrent.MVar
-import Control.Exception (bracket,evaluate)
+import Control.Exception (bracket,evaluate,fromException)
+import GHC.Conc (threadStatus,ThreadStatus(..),BlockReason(..))
+import System.IO.Error (tryIOError,isUserError)
 import Control.Monad (unless,forM,forM_,void,replicateM_)
 import qualified Data.Map.Strict as M
 import qualified Data.Sequence as S
@@ -32,6 +34,8 @@ import qualified Hide.Protocol as Wire
 import Hide.Plugin.Command
 import qualified Hide.Plugin.Tree as P
 import qualified Hide.Plugin.Menu as Menu
+import qualified Hide.Plugin.Form as Form
+import qualified FormExtension
 import qualified TreeExtension
 
 check :: String -> Bool -> IO ()
@@ -64,6 +68,7 @@ select index d=d {sideTree=Just (treeOf d) {treeSelected=index,treeFocused=True}
 
 checks :: IO ()
 checks=bracket temporary removePathForcibly $ \dir->withSidebarCommands $ \host->do
+  publicationLifetimeChecks
   createDirectory (dir </> "src")
   TIO.writeFile (dir </> "Main.hs") "main = 1\n"
   TIO.writeFile (dir </> "Readme.md") "# Documentation\n"
@@ -110,6 +115,50 @@ checks=bracket temporary removePathForcibly $ \dir->withSidebarCommands $ \host-
   recoveryPagingChecks
   budgetChecks dir
   putStrLn "shared sidebar checks passed"
+
+-- A publisher belongs to its caller, not the host's owned preparation jobs.
+-- Saturating the real queue must not strand that caller when the host closes.
+publicationLifetimeChecks :: IO ()
+publicationLifetimeChecks=withRegistry $ \registry->do
+  (provider,_)<-TreeExtension.declare registry (const (error "not invoked")) (const (pure (Right (P.NodePage [] Nothing))))
+  prepared<-FormExtension.prepareForm registry (Form.InputFormSpec "Rename" "Name" "Old" "Rename") (\_ _->pure (Right ())) >>= right
+  admitted<-Form.admitInputForm False prepared
+  check "publication fixture opens its exact form" admitted
+  update<-Form.refreshInputForm (Form.formReference prepared) (Form.InputFormSpec "Refresh" "Name" "Ignored" "Rename") >>= right >>= maybe (error "missing refresh") pure
+  hostReady<-newEmptyMVar
+  withAsync (readMVar hostReady >>= \host->publishTreeFromHost host provider) $ \treeWriter->
+    withAsync (readMVar hostReady >>= \host->publishFormRefreshFromHost host update) $ \formWriter->do
+      escaped<-withSidebarCommands $ \host->do
+        replicateM_ 32 (publishTreeFromHost host provider)
+        putMVar hostReady host
+        mapM_ blocked [treeWriter,formWriter]
+        pure host
+      mapM_ rejected [treeWriter,formWriter]
+      treeLate<-tryIOError (publishTreeFromHost escaped provider)
+      formLate<-tryIOError (publishFormRefreshFromHost escaped update)
+      check "closed host explicitly rejects late tree and form publications" (closedError treeLate && closedError formLate)
+      let initial=installSidebar (emptySidebar "/" 24 True) (initialDesktop (100,30))
+      effectsLate<-tryIOError (sidebarEffects escaped (\_ _->error "closed host dispatched effects") initial [])
+      check "closed host rejects effect dispatch before mounting" (case effectsLate of Left err->closedError (Left err); Right _->False)
+      next<-tickSidebar escaped (\_ _->error "closed tick dispatched effects") initial
+      check "late tick cannot mount or resurrect queued providers" (null (treeRoots (treeOf next)) && M.null (treeNodes (treeOf next)))
+  where
+    blocked worker=do
+      ready<-timeout 1000000 (awaitBlocked worker)
+      check "full publication queue blocks each producer in STM" (ready==Just ())
+    awaitBlocked worker=do
+      state<-threadStatus (asyncThreadId worker)
+      case state of
+        ThreadBlocked BlockedOnSTM->pure ()
+        ThreadFinished->error "publisher finished before host close"
+        ThreadDied->error "publisher failed before host close"
+        _->threadDelay 1000 >> awaitBlocked worker
+    rejected worker=do
+      result<-timeout 1000000 (waitCatch worker)
+      check "host close resolves a saturated publisher with an explicit failure" (case result of Just (Left err)->maybe False (closedError . Left) (fromException err); _->False)
+    closedError result=case result of
+      Left err->isUserError err
+      Right ()->False
 
 independent :: SidebarHost -> Desktop -> IO ()
 independent host d=withRegistry $ \registry->do
