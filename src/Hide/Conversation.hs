@@ -60,6 +60,7 @@ import qualified Hide.AgentACP as AP
 import Hide.Session (checkpointPath)
 import Hide.AgentFiles
 import Hide.Buffer
+import Hide.Plugin.BufferHost (ContentVersion,captureVersion,versionCurrent)
 import Hide.Markdown (renderMarkdownWithShellBlocks)
 import Hide.AgentSidebarTypes
 import Hide.Model hiding (prompt)
@@ -67,7 +68,11 @@ import System.Environment (lookupEnv)
 import Hide.Syntax (linkSpans,Style(..), bubbleTile)
 
 -- One configured stdio provider; its protocol supplies models and tools.
-data Phase = Initializing (Maybe Text) | Starting (Maybe Text) | Prompting | Steering Text | Setting deriving Eq
+data Phase = Initializing (Maybe Text) | Starting (Maybe Text) | Prompting | Steering Text (Maybe DraftReceipt) | Setting deriving Eq
+-- A human submission can consume only its captured immutable draft. Stable
+-- names in ContentVersion retain no Buffer/Undo; selection/focus are independent.
+data DraftReceipt = DraftReceipt !Text !ContentVersion deriving Eq
+
 data Record = Reply Text Text | Activity Text Value [Value] Bool | Pause Text deriving (Eq,Show)
 
 activity :: Text -> Value -> Record
@@ -90,7 +95,7 @@ data QuestionResult = QuestionResult !AH.AgentId !(Maybe ProviderReceipt) !Value
 
 data State = State
   { provider :: A.Launch, connection :: Maybe A.Client, session :: Maybe Text, project :: FilePath
-  , pending :: M.Map Int Phase, queuedPrompt :: Maybe Text, transcript :: [Record]
+  , pending :: M.Map Int Phase, queuedPrompt :: Maybe (Text,Maybe DraftReceipt), transcript :: [Record]
   , reads :: M.Map FilePath Snapshot, approvals :: [(Int,Approval)], presented :: Maybe Int, deferredApproval :: Bool, nextApproval :: Int
   , queuedQueries :: [QueuedQuery]
   , ownedTerminals :: S.Set Text
@@ -106,11 +111,11 @@ data State = State
   , lastAgentSync :: Maybe (FilePath,Text,AH.Capabilities,Bool)
   , childRecords :: M.Map Text [Record], childRender :: Maybe (Text,Int,Value), childWidths :: M.Map Text Int
   , expandedToolRuns :: S.Set (Text,Text)
-  , childControls :: M.Map Text (Maybe Text,Async (Either Text ()))
+  , childControls :: M.Map Text (Maybe DraftReceipt,Async (Either Text ()))
   , childCancels :: M.Map Text (Async (Either Text ()))
   , compilerDiscovery :: Maybe (Async [Compilers.Compiler])
   , fileCaptures :: [FileCapture], retiringRequests :: [(Int,Async ())]
-  , promptPreparation :: Maybe (Bool,Text,Async (Either Text ([Value],Value)))
+  , promptPreparation :: Maybe (Bool,Text,Maybe DraftReceipt,Async (Either Text ([Value],Value)))
   , buildSettingsCache :: Maybe Toolchain, buildSettingsVersion :: Int
   , buildSettingsWorker :: Maybe (Int,Async Toolchain), buildSettingsChecked :: Maybe UTCTime
   , shellLaunches :: [Async (Either Text C.PreparedConsole)]
@@ -165,7 +170,7 @@ closeConversation (ConversationState _ ref _ _ _) = do
   finishAgentDelivery ref (Left "Editor session closed.")
   mapM_ denyChild (map snd (approvals s))
   mapM_ (cancel . snd) (buildSettingsWorker s)
-  mapM_ (\(_,_,worker) -> cancel worker) (promptPreparation s)
+  mapM_ (\(_,_,_,worker) -> cancel worker) (promptPreparation s)
   mapM_ cancel (creatingAgent s)
   mapM_ cancel (compilerDiscovery s)
   mapM_ (\(FileCapture _ worker) -> cancel worker) (fileCaptures s)
@@ -396,6 +401,9 @@ performPrimary runtime@(ConversationState directory ref consoles jobs _) action 
   now<-getCurrentTime
   zone<-getCurrentTimeZone
   let s=if action `elem` ["send","send-draft","steer-draft"] then stampReply now zone previous else previous
+  submitted<-if action/="send-draft" then pure False else case queuedPrompt s of
+    Just (_,Just receipt)->draftCurrent receipt d
+    _->pure False
   case (action,values) of
     ("directory",_) -> showAgentDirectory runtime d
     ("directory-select",button:index:_) | Just n<-readMaybe (T.unpack index), n>=0,
@@ -541,29 +549,25 @@ performPrimary runtime@(ConversationState directory ref consoles jobs _) action 
       | otherwise -> pure d {status="This conversation setting is unavailable."}
     ("copy",_) -> pure d {clipboard=rawTranscript (transcript s),clipboardCode=Nothing,status="Raw conversation copied."}
     ("send-draft",_) | steeringPending s -> pure d {status="Wait for the steering result before sending another message."}
-    ("send-draft",_) | queuedPrompt s==Just (contents (composerBuffer d)) -> pure d {status="Preparing the submitted draft..."}
+    ("send-draft",_) | submitted -> pure d {status="Preparing the submitted draft..."}
     ("send-draft",_) | busy s, let text=contents (composerBuffer d), not (T.null (T.strip text)) -> do
       let next=s {queuedQueries=queuedQueries s++[SubmittedQuery text],transcript=transcript s++[Reply "You" (composerMarkdown text)]}
       writeIORef ref next
       painted<-paint True next d
       pure painted {composerBuffer=newBuffer "",composerSelection=Selection 0 0,composerFocused=True,agentQueued=length (queuedQueries next),status="Query queued."}
     ("send-draft",_) | not (T.null (T.strip (contents (composerBuffer d)))) -> do
-      next<-perform runtime "send" ["0",contents (composerBuffer d),"false","false","false"] d
+      receipt<-captureDraft d
+      next<-submitPrimaryPrompt runtime s (Just receipt) (contents (composerBuffer d)) (False,False,False) d
       latest<-readIORef ref
       pure next {agentReplying=busy latest,composerFocused=True}
     ("steer-draft",_) | not (agentSteering d) -> pure d {status="This provider does not advertise steering support."}
     ("steer-draft",_) | Prompting `notElem` M.elems (pending s) -> pure d {status="No active turn to steer; use Query to send the draft."}
     ("steer-draft",_) | steeringPending s -> pure d {status="A steering request is already pending."}
-    ("steer-draft",_) | let text=contents (composerBuffer d), not (T.null (T.strip text)) ->
-      beginPromptPreparation ref True text d
-    ("send",_:prompt:selectionFlag:fileFlag:diagnosticFlag:_) | not (T.null (T.strip prompt)), not (busy s) -> do
-      let context=contextText (selectionFlag=="true") (fileFlag=="true") (diagnosticFlag=="true") d
-          full=prompt<>(if T.null context then "" else "\n\n"<>context)
-          next=s {queuedPrompt=Just full,reads=sourceSnapshots d,transcript=transcript s++[Reply "You" (composerMarkdown prompt)]}
-      writeIORef ref next
-      opened<-if isNothing (connection s) then start runtime Nothing d else sendQueued runtime d
-      latest<-readIORef ref
-      paint True latest opened
+    ("steer-draft",_) | let text=contents (composerBuffer d), not (T.null (T.strip text)) -> do
+      receipt<-captureDraft d
+      beginPromptPreparation ref True text (Just receipt) d
+    ("send",_:prompt:selectionFlag:fileFlag:diagnosticFlag:_) | not (T.null (T.strip prompt)),not (busy s) ->
+      submitPrimaryPrompt runtime s Nothing prompt (selectionFlag=="true",fileFlag=="true",diagnosticFlag=="true") d
     ("cancel",_) -> do
       let child (_,ChildPermission{})=True
           child _=False
@@ -597,12 +601,23 @@ performPrimary runtime@(ConversationState directory ref consoles jobs _) action 
     _ -> pure d
   where input label text=Input label text (T.length text)
 
+-- Direct prompts and already-enqueued queries carry no draft consumption right.
+submitPrimaryPrompt :: ConversationState -> State -> Maybe DraftReceipt -> Text -> (Bool,Bool,Bool) -> Desktop -> IO Desktop
+submitPrimaryPrompt runtime@(ConversationState _ ref _ _ _) s receipt prompt (selectionFlag,fileFlag,diagnosticFlag) d=do
+  let context=contextText selectionFlag fileFlag diagnosticFlag d
+      full=prompt<>(if T.null context then "" else "\n\n"<>context)
+      next=s {queuedPrompt=Just (full,receipt),reads=sourceSnapshots d,transcript=transcript s++[Reply "You" (composerMarkdown prompt)]}
+  writeIORef ref next
+  opened<-if isNothing (connection s) then start runtime Nothing d else sendQueued runtime d
+  latest<-readIORef ref
+  paint True latest opened
+
 isSteering :: Phase -> Bool
 isSteering Steering{}=True
 isSteering _=False
 
 steeringPending :: State -> Bool
-steeringPending s=any isSteering (M.elems (pending s)) || maybe False (\(steering,_,_) -> steering) (promptPreparation s)
+steeringPending s=any isSteering (M.elems (pending s)) || maybe False (\(steering,_,_,_) -> steering) (promptPreparation s)
 
 busy :: State -> Bool
 busy s=not (M.null (pending s)) || queuedPrompt s/=Nothing || not (isNothing (promptPreparation s))
@@ -635,7 +650,7 @@ restorePrimaryDraft text d
 
 restoreEmptyPrimaryDraft :: Text -> Desktop -> Desktop
 restoreEmptyPrimaryDraft text d
-  | maybe False (T.null . contents) draft = restorePrimaryDraft text d
+  | maybe False ((==0) . bufferLength) draft = restorePrimaryDraft text d
   | otherwise = d
   where draft=if T.null (conversationTarget d) then Just (composerBuffer d)
               else conversationDraft <$> M.lookup "" (conversationViews d)
@@ -644,17 +659,17 @@ sendQueued :: ConversationState -> Desktop -> IO Desktop
 sendQueued (ConversationState _ ref _ _ _) d = do
   s<-readIORef ref
   case (connection s,session s,queuedPrompt s) of
-    (Just _,Just _,Just prompt) -> beginPromptPreparation ref False prompt d
+    (Just _,Just _,Just (prompt,receipt)) -> beginPromptPreparation ref False prompt receipt d
     _ -> pure d
 
-beginPromptPreparation :: IORef State -> Bool -> Text -> Desktop -> IO Desktop
-beginPromptPreparation ref steering text d = mask $ \restore -> do
+beginPromptPreparation :: IORef State -> Bool -> Text -> Maybe DraftReceipt -> Desktop -> IO Desktop
+beginPromptPreparation ref steering text receipt d = mask $ \restore -> do
   s<-readIORef ref
   if not (isNothing (promptPreparation s)) || not (null (retiringRequests s))
     then pure d {status="Waiting for the previous agent request to stop."}
     else do
       worker<-async (restore (preparePrompt s text))
-      modifyIORef' ref (\state -> state {promptPreparation=Just (steering,text,worker)})
+      modifyIORef' ref (\state -> state {promptPreparation=Just (steering,text,receipt,worker)})
       pure d {status="Preparing agent context...",agentReplying=True}
 
 pollPromptPreparation :: ConversationState -> Desktop -> IO Desktop
@@ -662,7 +677,7 @@ pollPromptPreparation runtime@(ConversationState _ ref _ _ _) d = do
   s<-readIORef ref
   case promptPreparation s of
     Nothing -> sendQueued runtime d
-    Just (steering,text,worker) -> do
+    Just (steering,text,receipt,worker) -> do
       result<-poll worker
       case result of
         Nothing -> pure d
@@ -682,9 +697,9 @@ pollPromptPreparation runtime@(ConversationState _ ref _ _ _) d = do
                     meta=["_meta" .= object ["steering" .= object ["idleBehavior" .= ("promptRequired"::Text)]] | steering]
                 ident<-A.request client method (object (["sessionId" .= sid,"prompt" .= blocks]++meta))
                 modifyIORef' ref (\state -> state {queuedPrompt=if steering then queuedPrompt state else Nothing,
-                  pending=M.insert ident (if steering then Steering text else Prompting) (pending state),deliveredContext=Just context})
-                pure (if steering then d else clearSubmittedDraft "" text d)
-                  {status=if steering then "Steering request sent; draft kept until accepted." else "Agent is replying...",agentReplying=True}
+                  pending=M.insert ident (if steering then Steering text receipt else Prompting) (pending state),deliveredContext=Just context})
+                cleared<-if steering then pure d else clearSubmittedDraft receipt d
+                pure cleared {status=if steering then "Steering request sent; draft kept until accepted." else "Agent is replying...",agentReplying=True}
             _ -> pure d
 
 -- Supply guidance once per connection and again when its saved value changes.
@@ -755,7 +770,7 @@ tickConversation runtime@(ConversationState directory ref consoles jobs _) origi
           active<-AH.statusAgent (AR.agentHub (conversationAgents runtime)) (AH.Agent actor) actor
           pure $ if live && either (const False) (const True) active
             then Just ("Human answer to ask_user question "<>T.pack (show ident)<>" (submitted explicitly):\n\n"<>answer) else Nothing
-      writeIORef ref afterEvents {queuedQueries=rest,queuedPrompt=text,reads=sourceSnapshots updated}
+      writeIORef ref afterEvents {queuedQueries=rest,queuedPrompt=(\value->(value,Nothing)) <$> text,reads=sourceSnapshots updated}
       maybe (pure updated) (const (sendQueued runtime updated)) text
     _ -> pure updated
   current<-readIORef ref
@@ -845,7 +860,7 @@ receive runtime@(ConversationState _ ref consoles _ _) d event = do
           redact<-conversationRedactor runtime s
           when (M.lookup ident (pending s)==Just Prompting) (completeConversationDelivery runtime (Left "Agent prompt failed."))
           modifyIORef' ref (\state -> state {queuedPrompt=Nothing,deliveredContext=Nothing,transcript=transcript state++[activity "Request failed" (redactValue redact err)]})
-          let restored=case M.lookup ident (pending s) of Just (Steering text) -> restoreEmptyPrimaryDraft text d; _ -> d
+          let restored=case M.lookup ident (pending s) of Just (Steering text _) -> restoreEmptyPrimaryDraft text d; _ -> d
           pure restored {status="Agent request failed; see Conversation."}
         (Just (Initializing resume),Right value,Just client)
           | field "protocolVersion" value /= Just (1::Int) -> do
@@ -874,10 +889,11 @@ receive runtime@(ConversationState _ ref consoles _ _) d event = do
           modifyIORef' ref (\state -> state {agentConfig=value})
           safeSettings<-publicAgentSettings runtime value
           pure d {agentSettings=safeSettings,contextMenu=Nothing,status="Conversation settings updated."}
-        (Just (Steering text),Right value,_) -> case field "outcome" value :: Maybe Text of
+        (Just (Steering text receipt),Right value,_) -> case field "outcome" value :: Maybe Text of
           Just "injected" -> do
             modifyIORef' ref (\state->state {transcript=transcript state++[Reply "You" (composerMarkdown text)]})
-            pure (clearSubmittedDraft "" text d) {status="Follow-up added to the active turn."}
+            cleared<-clearSubmittedDraft receipt d
+            pure cleared {status="Follow-up added to the active turn."}
           Just outcome | outcome `elem` ["promptRequired","failed"] -> do
             modifyIORef' ref (\state->state {deliveredContext=Nothing})
             pure d {status="Steering was not applied; the draft remains. Use Query to send it."}
@@ -1061,7 +1077,7 @@ retireRequests :: IORef State -> IO State
 retireRequests ref = mask $ \restore -> do
   s<-readIORef ref
   let captures=fileCaptures s
-      workers=[cancel worker | FileCapture _ worker<-captures]++[cancel worker | (_,_,worker)<-maybe [] pure (promptPreparation s)]
+      workers=[cancel worker | FileCapture _ worker<-captures]++[cancel worker | (_,_,_,worker)<-maybe [] pure (promptPreparation s)]
   if null workers then pure s else do
     forM_ (connection s) $ \client -> forM_ captures $ \(FileCapture ident _) ->
       A.respond client ident (Left (failure "File request cancelled."))
@@ -1376,12 +1392,23 @@ publicAgentSettings runtime@(ConversationState _ ref _ _ _) value=do
         ([settingId option,settingName option,settingCategory option,settingCurrent option]++concatMap (\(ident,label)->[ident,label]) (settingChoices option)))
   pure (filter public (parseAgentSettings value))
 
-clearSubmittedDraft :: Text -> Text -> Desktop -> Desktop
-clearSubmittedDraft target submitted d
-  | target==conversationTarget d = if contents (composerBuffer d)==submitted then d {composerBuffer=newBuffer "",composerSelection=Selection 0 0} else d
-  | otherwise = d {conversationViews=M.adjust clear target (conversationViews d)}
-  where clear view | contents (conversationDraft view)==submitted=view {conversationDraft=newBuffer "",conversationDraftSelection=Selection 0 0}
-                   | otherwise=view
+captureDraft :: Desktop -> IO DraftReceipt
+captureDraft d=DraftReceipt (conversationTarget d) <$> captureVersion (composerBuffer d)
+
+draftCurrent :: DraftReceipt -> Desktop -> IO Bool
+draftCurrent (DraftReceipt target expected) d=case current of
+  Nothing->pure False
+  Just buffer->versionCurrent expected buffer
+  where current=if target==conversationTarget d then Just (composerBuffer d)
+                else conversationDraft <$> M.lookup target (conversationViews d)
+
+clearSubmittedDraft :: Maybe DraftReceipt -> Desktop -> IO Desktop
+clearSubmittedDraft Nothing d=pure d
+clearSubmittedDraft (Just receipt@(DraftReceipt target _)) d=do
+  current<-draftCurrent receipt d
+  pure $ if not current then d else
+    if target==conversationTarget d then d {composerBuffer=newBuffer "",composerSelection=Selection 0 0}
+    else d {conversationViews=M.adjust (\view->view {conversationDraft=newBuffer "",conversationDraftSelection=Selection 0 0}) target (conversationViews d)}
 
 parseAgentSettings :: Value -> [AgentSetting]
 parseAgentSettings value=mapMaybe parseOption (fromMaybe [] (field "configOptions" value))
@@ -1679,7 +1706,7 @@ drainConversationAgents runtime@(ConversationState _ ref _ _ agents) d=do
       else do
         let author=case AH.messageAuthor msg of AH.Human -> "Human"; AH.Agent ident -> "Agent "<>AH.agentIdText ident
             attribution=if AH.messageIsUserSeat msg then "Human message" else author<>" sent a peer message, not the human user seat"
-        writeIORef ref s {agentDelivery=Just (msg,reply),queuedPrompt=Just (attribution<>"\n\n"<>AH.messageText msg),
+        writeIORef ref s {agentDelivery=Just (msg,reply),queuedPrompt=Just (attribution<>"\n\n"<>AH.messageText msg,Nothing),
           transcript=transcript s++[Reply author (AH.messageText msg)],reads=sourceSnapshots desktop}
         sendQueued runtime desktop
     apply desktop AR.CancelPrimary=performPrimary runtime "cancel" [] desktop
@@ -1745,10 +1772,14 @@ performChild runtime@(ConversationState _ ref _ _ agents) action values d=do
       text=if action=="send" then case values of _:body:_->body; _->"" else contents (composerBuffer d)
   case action of
     "send" | M.member target (childControls state) -> pure d {status="Wait for the child operation before sending."}
-    "send" -> send hub ident text
+    "send" -> send hub ident text Nothing
     "send-draft" | M.member target (childControls state) -> pure d {status="Wait for the child operation before sending."}
-    "send-draft" -> send hub ident text
-    "steer-draft" -> startControl (Just text) (fmap (fmap (const ())) (AH.steerAgent hub ident (composerMarkdown text)))
+    "send-draft" -> do
+      receipt<-captureDraft d
+      send hub ident text (Just receipt)
+    "steer-draft" -> do
+      receipt<-captureDraft d
+      startControl (Just receipt) (fmap (fmap (const ())) (AH.steerAgent hub ident (composerMarkdown text)))
     "set-config" | [option,value]<-values -> startControl Nothing (AH.configureAgent hub ident option value)
     "cancel" -> case M.lookup target (childCancels state) of
       Just _ -> pure d {status="Cancellation requested."}
@@ -1766,15 +1797,17 @@ performChild runtime@(ConversationState _ ref _ _ agents) action values d=do
     _ -> pure d {status="Switch to Primary for provider settings or session controls; use Agents to reconnect a child."}
   where
     startControl submitted operation=startChildControl runtime (AH.AgentId (conversationTarget d)) submitted operation d
-    send hub ident text = do
+    send hub ident text receipt = do
       result<-AH.sendAgent hub AH.Human ident (composerMarkdown text)
       case result of
         Left err -> pure d {status=err}
-        Right _ -> refreshChildConversation runtime d {composerBuffer=newBuffer "",composerSelection=Selection 0 0,status="Human message queued."}
+        Right _ -> do
+          cleared<-clearSubmittedDraft receipt d
+          refreshChildConversation runtime cleared {status="Human message queued."}
 
 -- Exact target is independent of the selected conversation. Worker ownership is
 -- the same childControls map polled and retired by the existing conversation.
-startChildControl :: ConversationState -> AH.AgentId -> Maybe Text -> IO (Either Text ()) -> Desktop -> IO Desktop
+startChildControl :: ConversationState -> AH.AgentId -> Maybe DraftReceipt -> IO (Either Text ()) -> Desktop -> IO Desktop
 startChildControl (ConversationState _ ref _ _ _) ident submitted operation d=mask $ \restore->do
   state<-readIORef ref
   let target=AH.agentIdText ident
@@ -1791,13 +1824,13 @@ refreshChildConversation (ConversationState _ ref _ _ agents) d=do
     result<-poll worker
     pure (target,submitted,result)
   let controlsDone=[target | (target,_,Just _)<-controls]
-      applyControl desktop (target,submitted,Just outcome)=
+      applyControl desktop (target,submitted,Just outcome)=do
         let result=either (const (Left "Child operation interrupted.")) id outcome
-            cleared=case (submitted,result) of (Just text,Right ())->clearSubmittedDraft target text desktop; _->desktop
-            notice=either id (const (if submitted==Nothing then "Child settings updated." else "Follow-up added to child's active turn.")) result
-        in if target==conversationTarget desktop || submitted==Nothing then cleared {status=notice} else cleared
-      applyControl desktop _=desktop
-      controlled=foldl applyControl d controls
+        cleared<-case result of Right ()->clearSubmittedDraft submitted desktop; _->pure desktop
+        let notice=either id (const (if isNothing submitted then "Child settings updated." else "Follow-up added to child's active turn.")) result
+        pure $ if target==conversationTarget desktop || isNothing submitted then cleared {status=notice} else cleared
+      applyControl desktop _=pure desktop
+  controlled<-foldM applyControl d controls
   modifyIORef' ref (\current->current {childControls=foldr M.delete (childControls current) controlsDone})
   completed<-forM (M.toList (childCancels state)) $ \(target,worker)->do
     result<-poll worker
