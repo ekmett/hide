@@ -160,21 +160,41 @@ session mode=bracket (Fixture.fixture mode) Fixture.cleanup $ \(port,logPath,_)-
           trace=maybe [] (hitTrace (keyOf (rowHit frameRow))) (sideTree prepared)
           reference=one "frame action" [ref | (_,P.RegisteredAction ref)<-rowActions frameRow]
           captured=TreeCommand (rowHit frameRow:drop 1 trace) reference
-          (selectedFrame,activation)=runCommand captured prepared
-      (_,queued)<-effects selectedFrame activation
+          (_,activation)=runCommand captured prepared
+      firstLocals<-expand "Locals 11" prepared
+      pendingFirst<-waitIO "first frame locals request" (\_->any (\request->(field "arguments" request >>= field "variablesReference")==Just (211::Int)) <$> requests) firstLocals
+      (_,queued)<-effects pendingFirst activation
       navigated<-waitIO "captured frame activation" (fmap (==Right 12) . selected) queued
       scopes<-wait "interleaved frame scopes" (\d->has "Locals 11" d && has "Locals 12" d) navigated
-      one<-expand "Locals 11" scopes
-      two<-expand "Locals 12" one
+      two<-expand "Locals 12" scopes
       locals<-wait "both frame locals" (\d->has "counter211" d && has "counter212" d) two
+      let moreRows title d=[i | (i,row)<-zip [0..] (rows d),LoadNext{}<-[rowAction row],
+                    rowHit row==rowHit (one "locals root" [r | r<-rows d,P.infoLabel (rowInfo r)==title])]
+          more title d=case moreRows title d of
+            [i]->let (next,outbox)=activateTree True i d in snd <$> effects next outbox
+            _->error ("missing locals More: "<>T.unpack title)
+          count title=length.filter (T.isPrefixOf title.P.infoLabel.rowInfo).rows
+      check "both frame locals expose first128 rows and continuation" (count "local211_" locals==125 && count "local212_" locals==125 && length (moreRows "Locals 11" locals)==1 && length (moreRows "Locals 12" locals)==1)
+      epoch0<-maybe (error "missing stopped epoch") pure =<< debuggerSidebarEpoch runtime
+      (unpublished,denied)<-readPage locals (DebugPageRequest epoch0 (DebugVariables 7 11 1211) 0)
+      check "retained snapshot does not grant unpublished local references" (case denied of Left _->True; _->False)
+      secondPage<-more "Locals 11" unpublished >>= wait "second locals page" (has "local211_255")
+      check "second locals page adds128 rows" (count "local211_" secondPage==253 && not (has "local211_256" secondPage))
+      let retainedMore=activateTree True (one "retained locals More" (moreRows "Locals 11" secondPage)) secondPage
+      lastPage<-more "Locals 11" secondPage >>= wait "last locals page" (\d->has "local211_259" d && null (moreRows "Locals 11" d))
+      check "last locals page adds4 rows; sibling frame remains expanded" (count "local211_" lastPage==257 && count "local212_" lastPage==125)
+      inspected<-expand "local211_129 = expand" lastPage >>= wait "published later local expands" (has "child211 = later page")
+      sent<-requests
+      check "locals continuation reuses one unpaged response per frame" (all (\ref->[field "arguments" r :: Maybe Value | r<-sent,field "command" r==Just ("variables"::T.Text),(field "arguments" r >>= field "variablesReference")==Just ref]==[Just (object ["variablesReference" .= ref])]) [211::Int,212])
+      check "delayed locals and paging do not change selected frame" . (==Right 12) =<< selected inspected
       before<-commands
-      _<-foldM (\d _->snapshot d `seq` tick d) locals [1..20::Int]
+      _<-foldM (\d _->snapshot d `seq` tick d) inspected [1..20::Int]
       after<-commands
       check "cached render/ticks do not issue DAP reads" (before==after)
       let lazyRows=[row | row<-rows locals,"lazy =" `T.isPrefixOf` P.infoLabel (rowInfo row)]
       check "lazy values have no passive expansion or action" (not (null lazyRows) && all (\row->not (P.infoBranch (rowInfo row)) && rowCommand row==Nothing) lazyRows)
       epoch<-maybe (error "missing stopped epoch") pure =<< debuggerSidebarEpoch runtime
-      (replayed,_)<-readPage locals (DebugPageRequest epoch (DebugScopes 7 11) 0)
+      (replayed,_)<-readPage inspected (DebugPageRequest epoch (DebugScopes 7 11) 0)
       (checked,lazyReply)<-readPage replayed (DebugPageRequest epoch (DebugVariables 7 11 900) 0)
       check "cached scope replay cannot weaken lazy reference policy" (case lazyReply of Left _->True; Right _->False)
       waiting<-expand "waiting = expand to wait" checked
@@ -182,7 +202,9 @@ session mode=bracket (Fixture.fixture mode) Fixture.cleanup $ \(port,logPath,_)-
       (_,resuming)<-core pending [DebugAction "continue" []]
       resumed<-wait "resume expires handles" (T.isPrefixOf "Running" . status) resuming
       drained<-foldM (\d _->threadDelay 1000 >> tick d) resumed [1..30::Int]
-      let (late,oldAction)=runCommand captured drained
+      (_,oldPage)<-effects drained (snd retainedMore)
+      check "retained continuation cannot restore resumed locals" (not (has "local211_" oldPage))
+      let (late,oldAction)=runCommand captured oldPage
       (_,refused)<-effects late oldAction
       check "previous-stop frame action cannot select a source" (null oldAction || "stale" `T.isInfixOf` T.toLower (status refused) || "expired" `T.isInfixOf` T.toLower (status refused))
       check "late previous-stop locals cannot revive" (not (has "STALE" drained) && not (has "counter211" drained))

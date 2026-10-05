@@ -229,7 +229,7 @@ continuation request offset body count
   | DebugStack{}<-request,Just total<-(field "totalFrames" body :: Maybe Int),offset+count>=total=Nothing
   | DebugThreads<-request=Nothing
   | DebugScopes{}<-request=Nothing
-  | DebugVariables{}<-request=Nothing -- Adapters without a paging contract expose the bounded first page.
+  | DebugVariables{}<-request=if flag "hasMore" body then Just (number (offset+count)) else Nothing
   | otherwise=Just (number (offset+count))
 rowField :: DebugPageTarget -> Key
 rowField request=case request of DebugThreads->"threads"; DebugStack{}->"stackFrames"; DebugScopes{}->"scopes"; DebugVariables{}->"variables"; DebugWatchVariables{}->"variables"
