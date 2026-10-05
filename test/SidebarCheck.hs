@@ -155,7 +155,9 @@ fileRenameChecks=bracket temporary removePathForcibly $ \dir->withSidebarCommand
       any (\(_,row)->P.infoResource (rowInfo row)==Just (dir </> "archive/bytes.dat")) (visibleRows 0 32768 (treeOf refreshedMove)))
   lateForm<-open "Renamedλ.hs" refreshedMove
   late<-submit "Late.hs" lateForm
-  let newer=fst (runCommand Find late)
+  let newer=sourceCommand Find (focusWindow (windowId (head (windows mounted))) late)
+  check "The late rename fixture opens a newer source modal"
+    (maybe False (\dg->case purpose dg of Searching{}->True; _->False) (dialog newer))
   retired<-tickSidebar host applyEffects newer
   lateTarget<-doesPathExist (dir </> "Late.hs")
   check "A newer modal retires pending Rename before its filesystem effect"
