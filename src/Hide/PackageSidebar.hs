@@ -197,11 +197,11 @@ createSlot registry root _private serial file=do
         , sourceKind component `elem` [LibraryComponent,ExecutableComponent]
         , action==Make || action==Run && sourceKind component==ExecutableComponent->do
             let target=PackageBuildTarget owner version
-                  (sidebarDirectory ctx,sidebarPrivatePaths ctx) root file observed
+                  (sidebarContextDirectory ctx,sidebarPrivatePaths ctx) root file observed
                   (sourcePackageName parsedPackage<>":"<>name)
             -- Construct and force fixed receipt metadata on the action worker.
             _<-evaluate (T.length (packageBuildName target)+length root+length file
-              +length (sidebarDirectory ctx)+sum (map length (sidebarPrivatePaths ctx)))
+              +length (sidebarContextDirectory ctx)+sum (map length (sidebarPrivatePaths ctx)))
             reply<-evaluate (SidebarBuild action target)
             pure (Right reply)
       _->pure (Left (CommandRejected "Package build target changed or is not a human action."))) >>= required

@@ -118,7 +118,8 @@ checks=bracket temporary removePathForcibly $ \root->do
         exists<-doesFileExist invocation
         unless (not exists) (fail "Dirty source cannot launch a captured package build")
         let reopened=blocked {dialog=Nothing}
-        -- Even an explicitly advertised agent tree cannot invoke this Human-only result.
+        -- A component has no agent-readable resource: even an advertised tree is
+        -- refused by the existing host boundary, before its Human-only handler.
         row<-case [row | row<-rows reopened,P.infoLabel (rowInfo row)=="exe:demo"] of
           row:_->pure row; _->fail "Executable row missing"
         reference<-case [ref | ("Build",P.RegisteredAction ref)<-rowActions row] of
@@ -128,7 +129,7 @@ checks=bracket temporary removePathForcibly $ \root->do
             advertised=reopened {status="agent action pending",sideTree=fmap (\tree->tree {treeFocused=True,treeAgentRefs=[owner]}) (sideTree reopened)}
         writeIORef captured Nothing
         (_,agentQueued)<-sidebarEffects host core advertised [InvokeTree trace reference Menu.AgentMenu]
-        agentRefused<-wait "agent target refusal" ((/="agent action pending").status) agentQueued
+        agentRefused<-wait "agent target refusal" ((=="Sidebar action is stale, protected or busy.").status) agentQueued
         guestTarget<-readIORef captured
         unless (guestTarget==Nothing) (fail "Agent sidebar action must never acquire human build authority")
         -- Freeze a current intent, then advance its package snapshot before adoption.
