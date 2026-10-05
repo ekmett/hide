@@ -24,10 +24,25 @@ data Style = ScriptStyle !Script Style | SectionStyle Int Style | BoldStyle Styl
 -- | Original source row and worker-prepared style ranges. Styling never changes
 -- character positions; range boundaries also name complete UTF8 codepoints.
 -- Concatenating 'sourceRangeText' over 'sourceRowRanges' recovers 'sourceRowText'.
-data SourceRow = SourceRow
-  { sourceRowText :: !T.Text
-  , sourceRowRanges :: !(V.Vector SourceRange)
-  } deriving (Eq,Show)
+data SourceRow = SourceRow !T.Text !(V.Vector SourceRange) | PlainSourceRow !T.Text deriving Show
+
+-- Equality is the public text/range projection, independent of representation.
+-- It is not an identity or an invalidation key.
+instance Eq SourceRow where
+  a==b=sourceRowText a==sourceRowText b && sourceRowRanges a==sourceRowRanges b
+
+-- | Original source text, borrowed by either representation.
+sourceRowText :: SourceRow -> T.Text
+sourceRowText (SourceRow text _)=text
+sourceRowText (PlainSourceRow text)=text
+
+-- | Exact ordered ranges covering the source. Requesting ranges for an implicit
+-- plain row counts its characters; visible rendering does not need that count.
+sourceRowRanges :: SourceRow -> V.Vector SourceRange
+sourceRowRanges (SourceRow _ ranges)=ranges
+sourceRowRanges (PlainSourceRow text)
+  | T.null text=V.empty
+  | otherwise=V.singleton (SourceRange 0 (T.length text) 0 (TU.lengthWord8 text) Plain)
 
 -- | Half-open character and UTF8 byte coordinates in one original source row.
 -- The constructor stays private: ranges are ordered and cover the exact row.
@@ -61,9 +76,10 @@ prepareSourceRow text tokens=SourceRow text (V.fromList (ranges 0 0 tokens))
              | otherwise->step []
       where step more=case TU.iter text byte of TU.Iter _ bytes->consume style (char+1) (byte+bytes) more
 
--- | Plain visible rows keep their original Text, without rebuilding characters.
+-- | /O(1)/. Plain visible rows borrow their original Text without counting or
+-- rebuilding characters. Exact ranges remain available through 'sourceRowRanges'.
 plainSourceRow :: T.Text -> SourceRow
-plainSourceRow text=SourceRow text (if T.null text then V.empty else V.singleton (SourceRange 0 (T.length text) 0 (TU.lengthWord8 text) Plain))
+plainSourceRow=PlainSourceRow
 
 -- | Slice a range belonging to this row. Both endpoints were established from
 -- the original UTF8 iterator on the preparation worker.
@@ -105,7 +121,7 @@ sourceSigilsWindow requested width row
     text=sourceRowText row
     left=max 0 requested
     right=left+min (maxBound-left) width
-    ranges=V.toList (sourceRowRanges row)
+    ranges=case row of SourceRow _ prepared->V.toList prepared; PlainSourceRow _->[]
     slice a b=TU.takeWord8 (b-a) (TU.dropWord8 a text)
     build !col !char !byte current pending
       | col>=right=Nil

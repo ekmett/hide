@@ -25,6 +25,7 @@ import Hide.Syntax
 checks :: IO ()
 checks = do
   composerWidthChecks
+  plainSourceRowChecks
   let exact="aé𝄞\t─\x301\r"
       row=prepareSourceRow exact (zip (T.unpack exact) (cycle [Keyword,Keyword,Plain]))
       pieces=[sourceRangeText row r | r<-V.toList (sourceRowRanges row)]
@@ -264,3 +265,29 @@ composerWidthChecks=do
                           in displayColumn line (T.length line)
             expected=min limit (max 12 (maximum (0:map lineWidth (textLines text))+1))
         check "bubble geometry keeps tabs, Unicode and code indentation" (size hint (newBuffer text) limit==expected)
+
+-- Implicit plain rows have the same finite public projection and visible stream
+-- as explicitly prepared Plain styling, including exceptional grapheme edges.
+plainSourceRowChecks :: IO ()
+plainSourceRowChecks=forM_ ["","abc","éδ─","a界e\x301\t👩🏽\x200d\&💻z","\rabc","a\r\n","\x301\&x","a\NUL\DELz"] $ \text->do
+  let implicit=plainSourceRow text
+      explicit=prepareSourceRow text [(c,Plain) | c<-T.unpack text]
+      ranges=sourceRowRanges implicit
+      pieces=[sourceRangeText implicit range | range<-V.toList ranges]
+      fragments Nil=[]
+      fragments (ConsChars run style rest)=Left (run,style):fragments rest
+      fragments (ConsSigil glyph style advance rest)=Right (graphemeText glyph,style,advance):fragments rest
+      window left width row=let (char,col,sigils)=sourceSigilsWindow left width row in (char,col,fragments sigils)
+  check "implicit Plain range projection covers exact source characters and bytes"
+    (sourceRowText implicit==text && T.concat pieces==text &&
+      if T.null text then V.null ranges else case V.toList ranges of
+        [range]->sourceRangeCharStart range==0 && sourceRangeCharEnd range==T.length text &&
+          sourceRangeByteStart range==0 && sourceRangeByteEnd range==TU.lengthWord8 text && sourceRangeStyle range==Plain
+        _->False)
+  check "SourceRow equality is extensional across implicit and prepared Plain rows"
+    (implicit==explicit && explicit==implicit && implicit==prepareSourceRow text [] &&
+      (T.null text || implicit/=prepareSourceRow text [(c,Keyword) | c<-T.unpack text]))
+  forM_ [0,1,2,6,8,12] $ \offset->do
+    check "implicit Plain style projection preserves character offsets" (sourceStylesAt implicit offset==sourceStylesAt explicit offset)
+    forM_ [0,1,2,8,32] $ \width->check "implicit Plain windows preserve complete fragments and original coordinates"
+      (window offset width implicit==window offset width explicit)
