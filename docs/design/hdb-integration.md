@@ -54,7 +54,9 @@ Expanding an ordinary value shows its children. An unevaluated value displays
 have explicit human-only **Evaluate watch** actions with stopped-frame and
 expression-revision provenance. Root Force is implemented for a known lazy root
 result, but remains fixture-qualified; hdb Evaluate does not supply that lazy hint.
-Nested lazy-child Force and the expression console remain planned.
+Nested lazy watch children have a human-only Force action; it retires the old
+subtree and requires explicit expression refresh. This route has live hdb list-tail
+qualification. The expression console remains planned.
 An agent can inspect in the background and reveal the same source/frame to the
 user with `debug_present`; it never gets a second hidden debugger state.
 
@@ -68,7 +70,7 @@ separately so upstream features are not confused with finished integration.
 | Source breakpoints, step in/over/out, continue | Implemented | Reuse existing UI/MCP; qualify disk sources and cradle loading |
 | Threads, frames, locals/module/globals | Implemented | Existing pickers; preserve frame/thread identity and paging bounds |
 | Ordinary variable children | Implemented | Existing expansion after validating reference provenance |
-| Thunk inspection/forcing | Lazy child presentation hint; fetching lazy children forces | Read-only expansion refuses lazy references; root Force has fixture coverage only; nested Force and executing MCP tool remain planned |
+| Thunk inspection/forcing | Lazy child presentation hint; fetching lazy children forces | Read-only expansion refuses lazy references; nested-watch Force has live hdb list-tail qualification; root Force is fixture-tested, executing MCP tool remains planned |
 | Expression evaluation | `evaluate` with optional frame; returns value/type/reference without a lazy root hint | Manually evaluated Watches have live scalar/list qualification; console, history and executing MCP tool remain planned |
 | Source conditions, hit counts, logpoints | Implemented; hit count is parsed as an integer | Breakpoint editor; preserve all fields when replacing a source's set |
 | Function breakpoints | Implemented, including condition/hit count | Function breakpoint rows and separate replace operation |
@@ -208,7 +210,9 @@ handles variable invalidation, and keeps the stopped source frame when only
 values expire. On 2026-10-04, the captured Watches provider route also verified
 explicit stopped-frame scalar evaluation and nonlazy list-result expansion with hdb 0.14
 and GHC 9.14.1 on macOS arm64. Lazy children stayed inert; these Evaluate replies
-did not expose a root Force action. Live Force remains unqualified.
+did not expose a root Force action. Explicit nested-child Force also works on a
+lazy list tail: hdb invalidates the old variable references, and a subsequent
+explicit watch refresh exposes fresh children. Root Force remains fixture-tested.
 
 The same watch route on THC AST and bytecode reached embedded source stops but
 returned a bounded error for explicit Haskell expression evaluation. Continue

@@ -9,13 +9,15 @@ below sketch the broader proposed contracts and are not a compilable SDK. The
 approved [sidebar design](../plans/sidebar-navigation.md) supplies the navigation
 model.
 
-The current form consumer is **Agents > Rename**. A linked handler prepares an
+The current form consumers are **Agents > Rename** and **Files > Rename**. A linked
+handler prepares an
 `InputFormSpec` and a typed registered action, then returns a `SidebarForm` on the
 existing sidebar worker route. The host owns the draft, selected range and modal
 geometry. Metadata-only refresh keeps those values and the same `FormRef`; close
 and reopen use distinct references. Human submission claims the form once, and a
 reply is adopted only while that form and its registration remain current. The
-closed host result currently supports `RenameAgentTo`; arbitrary widget actions
+closed host results currently support captured agent rename and checked saved-file
+basename rename; arbitrary widget actions
 and embedded editable plugin windows remain separate work. Forms are private by
 default to agent input and public capture, including their title and status.
 
@@ -470,6 +472,10 @@ Nodes have provider-local stable IDs, parent identity, prepared styled labels,
 expandability, actions and optional context-menu contributions. IDs are scoped by
 plugin and provider instance. They are not overloaded filesystem paths. Agent
 nodes use agent IDs; debugger nodes additionally carry stop/frame epochs.
+
+The current sidebar host orders tree and form metadata publications through a
+bounded queue. Closing its scope releases blocked publishers with an explicit
+error; later publications are rejected and late ticks cannot restore providers.
 
 Child loading is asynchronous, bounded and paged. Expanding twice shares an
 in-flight request. Results match the parent's request generation before adoption;

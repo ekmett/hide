@@ -78,7 +78,12 @@ readCheckpoint path baseline=do
       Left _->pure (Left "Invalid plugin recovery state.")
       Right snapshots->W.withWindowScope $ \scope->do
         prepared<-foldM (restore scope) baseline {windows=[],pluginWindows=M.empty,retiredPluginWindows=S.empty} snapshots
-        pure (either (const (Left "Invalid or unsupported recovery checkpoint.")) Right (parseEither (desktopParser prepared) value))
+        case parseEither (desktopParser prepared) value of
+          Left _->pure (Left "Invalid or unsupported recovery checkpoint.")
+          Right recovered->do
+            _<-evaluate (M.foldl' (\() doc->if syntaxDocument doc
+              then prepareSourceWidths (bufferContent (documentBuffer doc)) else ()) () (buffers recovered))
+            pure (Right recovered)
   where
     decode bytes=do
       unless (BS.length bytes<=checkpointLimit) (Left "Recovery checkpoint exceeds 256 MiB.")

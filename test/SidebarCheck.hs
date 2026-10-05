@@ -1,10 +1,18 @@
 {-# LANGUAGE OverloadedStrings #-}
 module SidebarCheck (checks) where
 import Control.Concurrent (threadDelay)
-import Control.Concurrent.Async (withAsync,wait,poll)
+import Control.Concurrent.Async (withAsync,wait,poll,waitCatch,asyncThreadId)
 import Data.IORef
+import Data.List (findIndex)
+import Data.Aeson (object,(.=))
+import Hide.WorkspaceFilesMCP (fileTool)
+import qualified Data.ByteString as BS
+import qualified Data.Text.Encoding as TE
+import Hide.Plugin.BufferHost (captureVersion,versionCurrent)
 import Control.Concurrent.MVar
-import Control.Exception (bracket,evaluate)
+import Control.Exception (bracket,evaluate,fromException)
+import GHC.Conc (threadStatus,ThreadStatus(..),BlockReason(..))
+import System.IO.Error (tryIOError,isUserError)
 import Control.Monad (unless,forM,forM_,void,replicateM_)
 import qualified Data.Map.Strict as M
 import qualified Data.Sequence as S
@@ -32,6 +40,8 @@ import qualified Hide.Protocol as Wire
 import Hide.Plugin.Command
 import qualified Hide.Plugin.Tree as P
 import qualified Hide.Plugin.Menu as Menu
+import qualified Hide.Plugin.Form as Form
+import qualified FormExtension
 import qualified TreeExtension
 
 check :: String -> Bool -> IO ()
@@ -62,8 +72,101 @@ atLabel label d=case [i | (i,row)<-visibleRows 0 32768 (treeOf d),P.infoLabel (r
 select :: Int -> Desktop -> Desktop
 select index d=d {sideTree=Just (treeOf d) {treeSelected=index,treeFocused=True}}
 
+-- One real Files popup/form workflow, including its filesystem refusal paths.
+fileRenameChecks :: IO ()
+fileRenameChecks=bracket temporary removePathForcibly $ \dir->withSidebarCommands $ \host->do
+  let original=dir </> "Main.hs"
+      renamed=dir </> "Renamedλ.hs"
+      popupFor name d=
+        let selected=select (atLabel name d) d
+            y=2+treeSelected (treeOf selected)-treeScroll (treeOf selected)
+        in fst (handleEvent (V.EvMouseDown 5 y V.BRight []) selected)
+      chooseRename popup=case findIndex ((=="Rename…").fst) (contextItemsFor popup) of
+        Nothing->error "Files has no Rename context action"
+        Just index->handleEvent (V.EvKey V.KEnter []) (iterate (fst . handleEvent (V.EvKey V.KDown [])) popup!!index)
+      open name d=act host (chooseRename (popupFor name d)) >>= await (tickSidebar host applyEffects) (\next->dialog next/=Nothing)
+      submit name d=act host (handleEvent (V.EvKey V.KEnter []) (fst (handleEvent (V.EvPaste (TE.encodeUtf8 name)) d)))
+      refused d=await (tickSidebar host applyEffects) (\next->any (`T.isInfixOf` status next) ["failed","changed","expired"]) d
+      path d=filePath <$> (activeDocument d >>= documentFile)
+      doc d=maybe (error "rename source missing") id (activeDocument d)
+      sourceCommand command d=fst (runCommand command d {sideTree=fmap (\tree->tree {treeFocused=False}) (sideTree d)})
+      ids d=map (\w->(windowId w,bufferId w,selection w,scrollRow w,scrollColumn w)) (windows d)
+  createDirectory (dir </> "archive")
+  TIO.writeFile original "main = 1\n"
+  BS.writeFile (dir </> "bytes.bin") (BS.pack [0,255,13,10])
+  (file,buffer)<-loadFile original >>= either error pure
+  -- A clean buffer with retained redo proves path adoption does not replace Undo.
+  let source=fst (runCommand Undo (insertText "x" (addDocument (Just file) buffer (initialDesktop (100,30)))))
+  mounted<-initializeSidebar host (installSidebar (emptySidebar dir 24 True) source)
+  version<-captureVersion (documentBuffer (doc mounted))
+  form<-open "Main.hs" mounted
+  check "Files Rename opens the basename preselected"
+    (case dialog form of Just dg | PluginInputForm{}<-purpose dg,[SelectedInput label name selected]<-fields dg->label=="Name" && name=="Main.hs" && selected==Selection 0 7; _->False)
+  pending<-submit "Renamedλ.hs" form
+  result<-await (tickSidebar host applyEffects) ((==Just renamed).path) pending >>= settle host
+  same<-versionCurrent version (documentBuffer (doc result))
+  oldExists<-doesPathExist original
+  bytes<-BS.readFile renamed
+  check "Files Rename keeps open IDs, live buffer identity and exact bytes"
+    (same && ids result==ids mounted && not oldExists && bytes=="main = 1\n" && not (dirty (documentBuffer (doc result))))
+  check "Files Rename preserves Undo and Redo history" (activeText (sourceCommand Redo result)=="xmain = 1\n")
+  collision<-open "Renamedλ.hs" result
+  TIO.writeFile (dir </> "Taken.hs") "keep me"
+  refusedCollision<-submit "Taken.hs" collision >>= refused
+  untouched<-BS.readFile (dir </> "Taken.hs")
+  check "Rename refuses an occupied destination" (path refusedCollision==Just renamed && untouched=="keep me")
+  dirtyForm<-open "Renamedλ.hs" refusedCollision
+  dirtyVersion<-captureVersion (documentBuffer (doc dirtyForm))
+  let changedSource=insertText "local " dirtyForm {sideTree=fmap (\tree->tree {treeFocused=False}) (sideTree dirtyForm)}
+  unchangedSource<-versionCurrent dirtyVersion (documentBuffer (doc changedSource))
+  check "The source really changes while its rename form remains open" (not unchangedSource && dirty (documentBuffer (doc changedSource)))
+  refusedDirty<-submit "Dirty.hs" changedSource >>= refused
+  dirtyTarget<-doesPathExist (dir </> "Dirty.hs")
+  check "Rename refuses a source edited after its form opened" (not dirtyTarget && path refusedDirty==Just renamed && dirty (documentBuffer (doc refusedDirty)))
+  clean<-pure (sourceCommand Undo refusedDirty)
+  staleForm<-open "Renamedλ.hs" clean
+  TIO.writeFile renamed "external replacement\n"
+  refusedStale<-submit "Stale.hs" staleForm >>= refused
+  staleTarget<-doesPathExist (dir </> "Stale.hs")
+  check "Rename refuses a changed filesystem source" (not staleTarget && path refusedStale==Just renamed)
+  TIO.writeFile renamed "main = 1\n"
+  let oldPopup=popupFor "Renamedλ.hs" refusedStale
+      (captured,effects)=chooseRename oldPopup
+      collapsed=captured {sideTree=Just (collapseAt 0 (treeOf captured))}
+  staleNode<-act host (collapsed,effects)
+  check "Rename refuses a stale captured tree node" (dialog staleNode==Nothing)
+  expanded<-act host (activateTree True 0 staleNode) >>= settle host
+  -- Ordinary binary files use the same basename form without decoding bytes.
+  (binaryFile,binaryBuffer)<-loadFile (dir </> "bytes.bin") >>= either error pure
+  let binarySource=addDocument (Just binaryFile) binaryBuffer expanded
+  binaryForm<-open "bytes.bin" binarySource
+  binaryPending<-submit "bytes.dat" binaryForm
+  binaryResult<-await (tickSidebar host applyEffects) ((==Just (dir </> "bytes.dat")).path) binaryPending >>= settle host
+  binaryBytes<-BS.readFile (dir </> "bytes.dat")
+  check "Files Rename preserves byte-mode files" (byteMode (documentBuffer (doc binaryResult)) && binaryBytes==BS.pack [0,255,13,10])
+  cachedDestination<-act host (activateTree True (atLabel "archive" binaryResult) binaryResult) >>= settle host
+  (moved,answer)<-fileTool (sidebarEffects host applyEffects) cachedDestination "workspace_files"
+    (object ["operation" .= ("rename"::T.Text),"path" .= (dir </> "bytes.dat"),"to" .= (dir </> "archive/bytes.dat")])
+  _<-answer >>= right
+  refreshedMove<-settle host moved
+  check "Cross-directory MCP rename refreshes both cached parent listings"
+    (path refreshedMove==Just (dir </> "archive/bytes.dat") &&
+      length [() | (_,row)<-visibleRows 0 32768 (treeOf refreshedMove),P.infoLabel (rowInfo row)=="bytes.dat"]==1 &&
+      any (\(_,row)->P.infoResource (rowInfo row)==Just (dir </> "archive/bytes.dat")) (visibleRows 0 32768 (treeOf refreshedMove)))
+  lateForm<-open "Renamedλ.hs" refreshedMove
+  late<-submit "Late.hs" lateForm
+  let newer=sourceCommand Find (focusWindow (windowId (head (windows mounted))) late)
+  check "The late rename fixture opens a newer source modal"
+    (maybe False (\dg->case purpose dg of Searching{}->True; _->False) (dialog newer))
+  retired<-tickSidebar host applyEffects newer
+  lateTarget<-doesPathExist (dir </> "Late.hs")
+  check "A newer modal retires pending Rename before its filesystem effect"
+    (not lateTarget && maybe False (\dg->case purpose dg of Searching{}->True; _->False) (dialog retired))
+
 checks :: IO ()
 checks=bracket temporary removePathForcibly $ \dir->withSidebarCommands $ \host->do
+  publicationLifetimeChecks
+  fileRenameChecks
   createDirectory (dir </> "src")
   TIO.writeFile (dir </> "Main.hs") "main = 1\n"
   TIO.writeFile (dir </> "Readme.md") "# Documentation\n"
@@ -110,6 +213,50 @@ checks=bracket temporary removePathForcibly $ \dir->withSidebarCommands $ \host-
   recoveryPagingChecks
   budgetChecks dir
   putStrLn "shared sidebar checks passed"
+
+-- A publisher belongs to its caller, not the host's owned preparation jobs.
+-- Saturating the real queue must not strand that caller when the host closes.
+publicationLifetimeChecks :: IO ()
+publicationLifetimeChecks=withRegistry $ \registry->do
+  (provider,_)<-TreeExtension.declare registry (const (error "not invoked")) (const (pure (Right (P.NodePage [] Nothing))))
+  prepared<-FormExtension.prepareForm registry (Form.InputFormSpec "Rename" "Name" "Old" "Rename") (\_ _->pure (Right ())) >>= right
+  admitted<-Form.admitInputForm False prepared
+  check "publication fixture opens its exact form" admitted
+  update<-Form.refreshInputForm (Form.formReference prepared) (Form.InputFormSpec "Refresh" "Name" "Ignored" "Rename") >>= right >>= maybe (error "missing refresh") pure
+  hostReady<-newEmptyMVar
+  withAsync (readMVar hostReady >>= \host->publishTreeFromHost host provider) $ \treeWriter->
+    withAsync (readMVar hostReady >>= \host->publishFormRefreshFromHost host update) $ \formWriter->do
+      escaped<-withSidebarCommands $ \host->do
+        replicateM_ 32 (publishTreeFromHost host provider)
+        putMVar hostReady host
+        mapM_ blocked [treeWriter,formWriter]
+        pure host
+      mapM_ rejected [treeWriter,formWriter]
+      treeLate<-tryIOError (publishTreeFromHost escaped provider)
+      formLate<-tryIOError (publishFormRefreshFromHost escaped update)
+      check "closed host explicitly rejects late tree and form publications" (closedError treeLate && closedError formLate)
+      let initial=installSidebar (emptySidebar "/" 24 True) (initialDesktop (100,30))
+      effectsLate<-tryIOError (sidebarEffects escaped (\_ _->error "closed host dispatched effects") initial [])
+      check "closed host rejects effect dispatch before mounting" (case effectsLate of Left err->closedError (Left err); Right _->False)
+      next<-tickSidebar escaped (\_ _->error "closed tick dispatched effects") initial
+      check "late tick cannot mount or resurrect queued providers" (null (treeRoots (treeOf next)) && M.null (treeNodes (treeOf next)))
+  where
+    blocked worker=do
+      ready<-timeout 1000000 (awaitBlocked worker)
+      check "full publication queue blocks each producer in STM" (ready==Just ())
+    awaitBlocked worker=do
+      state<-threadStatus (asyncThreadId worker)
+      case state of
+        ThreadBlocked BlockedOnSTM->pure ()
+        ThreadFinished->error "publisher finished before host close"
+        ThreadDied->error "publisher failed before host close"
+        _->threadDelay 1000 >> awaitBlocked worker
+    rejected worker=do
+      result<-timeout 1000000 (waitCatch worker)
+      check "host close resolves a saturated publisher with an explicit failure" (case result of Just (Left err)->maybe False (closedError . Left) (fromException err); _->False)
+    closedError result=case result of
+      Left err->isUserError err
+      Right ()->False
 
 independent :: SidebarHost -> Desktop -> IO ()
 independent host d=withRegistry $ \registry->do

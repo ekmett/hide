@@ -106,10 +106,15 @@ checks=withBufferDiffCommands $ \commands->do
       exists<-doesDirectoryExist (root </> "new")
       check "delete removes an empty directory" (not exists)
       _<-file "mkdir" "tree" initial
-      let treeDesktop=initial {defaultDirectory=Just (root </> "tree"),sideTree=Just (emptySidebar (root </> "tree") 24 False)}
+      let missingPath=root </> "tree/missing.hs"
+          treeDesktop=(addDocument (Just (FileState missingPath Nothing)) (newBuffer "") initial)
+            {defaultDirectory=Just (root </> "tree"),sideTree=Just (emptySidebar (root </> "tree") 24 False)}
       (movedTree,_)<-success "workspace_files" (operation "rename" "tree"++["to" .= ("moved"::T.Text)]) treeDesktop
       check "renaming a directory updates current directory and files tree root"
-        (defaultDirectory movedTree==Just (root </> "moved") && fmap treeRoot (sideTree movedTree)==Just (root </> "moved"))
+        (defaultDirectory movedTree==Just (root </> "moved") && fmap treeRoot (sideTree movedTree)==Just (root </> "moved") &&
+          fmap filePath (activeDocument movedTree >>= documentFile)==Just (root </> "moved/missing.hs") &&
+          maybe False ((==Nothing).diskBytes) (activeDocument movedTree >>= documentFile) &&
+          map windowId (windows movedTree)==map windowId (windows treeDesktop))
       removedTree<-file "delete" "moved" movedTree
       check "deleting the selected subdirectory returns directory views to the project root"
         (defaultDirectory removedTree==Just root && fmap treeRoot (sideTree removedTree)==Just root)

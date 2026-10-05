@@ -383,6 +383,10 @@ build/docs-capture/screenshots conversation
 # Optional live exchange (contacts the configured provider):
 THC_DOCS_AGENT_CONFIG="$HOME/.config/thc-edit/agents.json" build/docs-capture/screenshots conversation
 THC_DOCS_DAP_PORT=4730 build/docs-capture/screenshots debug-step
+# Existing disposable hdb toy/config: counter = 41, values = [1..3],
+# stopped before print counter on Main.hs line 7.
+THC_DOCS_WATCH_ROOT=/path/to/toy THC_DOCS_HDB_CONFIG=/path/to/toy/debug.json \
+  build/docs-capture/screenshots debug-watches
 ```
 
 Set `THC_DOCS_CAPTURE_DIR` to a temporary directory to preview captures before
@@ -393,10 +397,12 @@ follow-up about edit costs. Use a provider permitted to read this checkout; its
 configuration is copied only into ignored capture scratch space. The debugger attaches to an
 already-running, suspended local DAP endpoint, steps into the program, captures
 the source, Debug menu and call-stack picker, then continues it to termination.
-Use a disposable toy program that terminates, not an interactive debugging
-session. Live modes close their connections on exit. Their compact desktops
-keep the status-bar instructions visible. Never stage provider configuration or
-session records with the images.
+The `debug-watches` recipe launches the supplied hdb configuration, opens the
+source’s real Add Watch action, evaluates scalar and list expressions, and captures
+both the expression dialog and the expanded Watches result. Use a disposable toy
+program that terminates, not an interactive debugging session. Live modes close
+their connections on exit. Their compact desktops keep the status-bar instructions
+visible. Never stage provider configuration or session records with the images.
 
 Dialog and menu images are cropped to their actual UI rectangles plus the shadow
 and a small margin. Keep full desktops only when window arrangement is the subject.

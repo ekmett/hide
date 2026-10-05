@@ -35,6 +35,8 @@ import Hide.Render (renderKey)
 
 checks :: IO ()
 checks=do
+  dialogInputChecks
+  debuggerNavigationChecks
   let check name ok=unless ok (error name)
       prepare=either (error . show) id . platformBindings [] TerminalPlatform . M.singleton "source" . M.fromList
       bindings=prepare [("hide.file.save",["Ctrl+Shift+S"]),("hide.file.open",[])]
@@ -138,6 +140,16 @@ checks=do
     (take 1 (statusHints messageUnbound)==[(" Source",Just (Left GoToMessage))] &&
      noEffects (key V.KEnter [] messageUnbound) && noEffects (key (V.KChar 'j') [V.MCtrl,V.MShift] messageUnbound) &&
      clickSourceHint messageUnbound==[JumpTo "/project/Main.hs" 0 0])
+  forM_ [[],["F13"]] $ \keys->do
+    let copyMaps=either (error . show) id (platformBindings [] TerminalPlatform (M.singleton "messages" (M.singleton "hide.messages.copy-all" keys)))
+        pane=messagePane {keyBindings=copyMaps}
+        expected="Error /project/Main.hs:1:1 first\n\nError /project/Main.hs:2:1 second"
+        clicked=case [r | (r,_,Left CopyAllMessages)<-statusItemRects pane] of
+          r:_->fst (handleEvent (V.EvMouseDown (left r) (top r) V.BLeft []) pane)
+          []->error "missing Copy all status action"
+    check "Copy all status preserves its caption through remap and unbind"
+      (any (\(label,action)->T.strip label==T.unwords (keys++["Copy all"]) && action==Just (Left CopyAllMessages)) (statusHints pane) &&
+       clipboard clicked==expected && (null keys || clipboard (fst (key (V.KFun 13) [] pane))==expected))
   check "default PTY input and editor controls retain ownership" (all (\(k,m)->snd (key k m pty {keyBindings=M.empty})==snd (key k m (compiled pty)))
     [(V.KChar 'c',[V.MCtrl]),(V.KChar 'q',[V.MCtrl]),(V.KFun 1,[]),(V.KFun 4,[]),(V.KFun 7,[]),(V.KFun 9,[]),(V.KUp,[])])
   check "resolved reload retains guest origin policy" (not (guestKeyAllowed source {keyBindings=either (error . show) id (platformBindings [] TerminalPlatform (M.singleton "source" (M.singleton "hide.bindings.reload" ["Alt+F11"])))} (V.KFun 11) [V.MAlt]))
@@ -184,8 +196,59 @@ checks=do
   verticalChecks
   edgePageChecks
   wordChecks
+  windowChecks
   reloadChecks
   putStrLn "keybinding checks passed"
+
+windowChecks :: IO ()
+windowChecks=do
+  let check name ok=unless ok (error name)
+      compile entries=either (error . show) id (platformBindings [] TerminalPlatform (M.singleton "global" (M.fromList entries)))
+      defaults=compile []
+      remapped=compile [("hide.window.next",["F13"]),("hide.window.previous",["F14"])]
+      removed=compile [("hide.window.next",[]),("hide.window.previous",[])]
+      first=addDocument Nothing (newBuffer "first") (initialDesktop (80,25))
+      second=addDocument Nothing (newBuffer "second") first
+      base=modifyActive (\w->w {selection=Selection 1 3}) (addDocument Nothing (newBuffer "third") second)
+      current d=windowId <$> activeWindow d
+      event k mods=handleEvent (V.EvKey k mods)
+      step k mods=fst . event k mods
+      state d=(current d,selection <$> activeWindow d,(\doc->(revision (documentBuffer doc),bufferLength (documentBuffer doc))) <$> activeDocument d)
+      aliases=[(V.KChar '\t',[V.MCtrl]),(V.KChar '\t',[V.MCtrl,V.MShift]),(V.KBackTab,[V.MCtrl])]
+      configured=base {keyBindings=remapped}
+  check "window defaults cycle both directions through stable IDs"
+    (current (step (V.KChar '\t') [V.MCtrl] base {keyBindings=defaults})==current second &&
+     current (step (V.KChar '\t') [V.MCtrl,V.MShift] base {keyBindings=defaults})==current first &&
+     current (step V.KBackTab [V.MCtrl] base {keyBindings=defaults})==current first)
+  check "window remaps use the existing cycle owner"
+    (current (step (V.KFun 13) [] configured)==current second && current (step (V.KFun 14) [] configured)==current first)
+  forM_ [configured,base {keyBindings=removed},configured {wordStar=True}] $ \d->
+    check "removed window aliases neither cycle nor edit source"
+      (all (\(k,mods)->state (step k mods d)==state d && null (snd (event k mods d))) aliases)
+  let terminal=(addReadOnly "Terminal test" "output" base) {keyBindings=removed}
+      chat=(addReadOnly "Conversation" "reply" base) {keyBindings=removed,composerBuffer=newBuffer "draft",composerSelection=Selection 1 3,composerFocused=True}
+  check "unbound PTY window aliases send no bytes"
+    (all (\(k,mods)->current (step k mods terminal)==current terminal && null (snd (event k mods terminal))) aliases &&
+     snd (event (V.KChar 'c') [V.MCtrl] terminal)==[AgentAction "terminal-input" ["test","\ETX"]])
+  check "unbound chat window aliases preserve the draft selection"
+    (all (\(k,mods)->let (d,effects)=event k mods chat in current d==current chat && composerSelection d==composerSelection chat && revision (composerBuffer d)==revision (composerBuffer chat) && bufferLength (composerBuffer d)==bufferLength (composerBuffer chat) && null effects) aliases)
+  let tree=installSidebar (emptySidebar "/project" 24 True) base {keyBindings=defaults}
+      messages=base {keyBindings=defaults,problemsVisible=True,problemsFocused=True}
+      modal=fst (runCommand Find base {keyBindings=defaults})
+  check "Files and Messages retain F6 focus with configurable window cycling"
+    (all (\d->boundKeyCommand (V.KFun 6) [] d==Just FocusSource && current (step (V.KChar '\t') [V.MCtrl] d)==current second) [tree,messages])
+  check "modal Control Tab retains search ownership"
+    (current (step (V.KChar '\t') [V.MCtrl] modal)==current modal && maybe False (\dg->case purpose dg of Searching True _->True; _->False) (dialog (step (V.KChar '\t') [V.MCtrl] modal)))
+  check "Alt and Meta Tab retain their earlier owners"
+    (menu (step (V.KChar '\t') [V.MCtrl,V.MAlt] configured)==Just (0,0) && state (step (V.KChar '\t') [V.MMeta] configured)==state (step (V.KChar '\t') [V.MMeta] base))
+  let private=base {keyBindings=remapped,guestPrivatePaths=["/authority"],buffers=M.map (\doc->doc {documentFile=Just (FileState "/authority/secret.hs" Nothing)}) (buffers base)}
+      rebound=private {keyBindings=either (error . show) id (platformBindings [] TerminalPlatform (M.singleton "source" (M.fromList [("hide.window.next",[]),("hide.edit.copy",["Ctrl+Tab"])])))}
+  navigation<-P.applyGuestInput (P.Key "F13" []) private
+  copy<-P.applyGuestInput (P.Key "Tab" [V.MCtrl]) rebound
+  check "protected-view navigation follows the resolved command"
+    (case navigation of Right (d,_)->current d==current second; _->False)
+  check "physical Control Tab cannot grant a protected non-navigation remap"
+    (case copy of Left _->True; _->False)
 
 reloadChecks :: IO ()
 reloadChecks=bracket temporary removePathForcibly $ \directory->do
@@ -430,9 +493,17 @@ wordChecks=do
   forM_ [(10,9,16),(14,9,15),(19,18,20),(20,19,21)] $ \(p,left,right)->do
     let placed=modifyActive (\w->w {selection=Selection p p}) configured
     check "word boundaries preserve punctuation CRLF and Unicode scalar policy" (range (event (V.KFun 13) [] placed)==Just (Selection left left) && range (event (V.KFun 14) [] placed)==Just (Selection right right))
-  let star=unbound {wordStar=True,keyBindings=compile "wordstar" [(name,[]) | (name,_)<-actions]}
-  check "fixed WordStar A F aliases remain non-extending" (map (\c->range (event (V.KChar c) [V.MCtrl,V.MShift] star)) ['a','f']==map Just [Selection 5 5,Selection 8 8])
-  check "fixed WordStar A F cannot be reassigned" (either (const True) (const False) (platformBindings [] TerminalPlatform (M.singleton "wordstar" (M.singleton "hide.cursor.word-left" ["Ctrl+A"]))))
+  let starMaps=compile "wordstar" [(name,["F"<>T.pack (show n)]) | ((name,_),n)<-zip actions [13::Int ..]]
+      star=base {wordStar=True,keyBindings=starMaps}
+      aliases=[(V.KChar 'a',[V.MCtrl]),(V.KChar 'a',[V.MCtrl,V.MShift]),(V.KChar 'a',[V.MCtrl,V.MAlt]),(V.KChar 'a',[V.MCtrl,V.MAlt,V.MShift]),(V.KChar 'f',[V.MCtrl]),(V.KChar 'f',[V.MCtrl,V.MShift])]
+      starUnbound=star {keyBindings=compile "wordstar" [(name,[]) | (name,_)<-actions]}
+      starDefaults=base {wordStar=True,keyBindings=compile "wordstar" []}
+  check "WordStar word remaps consume former A F aliases" (range (event (V.KFun 13) [] star)==Just (Selection 5 5) && range (event (V.KFun 14) [] star)==Just (Selection 8 8) && all (\(k,mods)->state (event k mods star)==state star) aliases)
+  check "WordStar word unbinding consumes A F and arrow aliases" (all (\(k,mods)->state (event k mods starUnbound)==state starUnbound) (aliases++sourceWordKeys))
+  check "WordStar default shifted A F aliases remain non-extending" (map (\c->range (event (V.KChar c) [V.MCtrl,V.MShift] starDefaults)) ['a','f']==map Just [Selection 5 5,Selection 8 8])
+  check "WordStar A F can be assigned through the existing chord parser" (range (event (V.KChar 'f') [V.MCtrl] star {keyBindings=compile "wordstar" [("hide.cursor.word-left",["Ctrl+F"]),("hide.cursor.word-right",["Ctrl+A"])]})==Just (Selection 5 5))
+  check "WordStar File menu and prefix owners survive word remapping" (menu (event (V.KChar 'f') [V.MCtrl,V.MAlt] star)==Just (0,0) && prefix (event (V.KChar 'k') [V.MCtrl] star)==Just 'k' && prefix (event (V.KChar 'q') [V.MCtrl] star)==Just 'q')
+  check "ordinary source Control A retains SelectAll" (range (event (V.KChar 'a') [V.MCtrl] base {keyBindings=compile "source" []})==Just (Selection 0 (T.length text)))
   let hex=modifyActive (\w->w {selection=Selection 7 7}) (addDocument Nothing (newByteBuffer (BS.pack [0..31])) (initialDesktop (80,25))) {keyBindings=maps}
   check "word actions preserve hex byte steps" (range (event (V.KFun 13) [] hex)==Just (Selection 6 6) && bufferLength (docBuffer (event (V.KFun 17) [] hex))==31)
   let readonly=modifyActive (\w->w {selection=Selection 7 7}) (addHelp text (initialDesktop (80,25))) {keyBindings=maps}
@@ -588,3 +659,89 @@ dialogFocusChecks=do
   let questionBase=(addReadOnly "Conversation" "Transcript" base) {chatQuestion=Just (ChatQuestion 42 "Question" ["Yes"] Nothing (newBuffer "") (Selection 0 0) True)}
   check "dialog commands do not replace inline question ownership" (not (commandEnabled questionBase nextCommand) && maybe False ((==Just 0).questionChoice) (chatQuestion (event (V.KChar '\t') [] questionBase)) && snd (handleEvent (V.EvKey V.KEnter []) questionBase)==[AgentAction "question-submit" ["42"]] && snd (handleEvent (V.EvKey V.KEsc []) questionBase)==[AgentAction "question-cancel" ["42"]])
   check "dialog focus chords are configurable on every platform" (all (\platform->case platformBindings [] platform (M.singleton "dialog" (M.fromList [("hide.dialog.focus-next",["Alt+Tab"]),("hide.dialog.focus-previous",["Shift+Tab"])])) of Right _->True; _->False) [TerminalPlatform,GraphicalPlatform,MacPlatform])
+
+
+-- Debugger output and adapter sources share the same read-only navigation owner.
+debuggerNavigationChecks :: IO ()
+debuggerNavigationChecks=do
+  let check name ok=unless ok (error name)
+      prepare entries=either (error . show) id (configuredBindings [] (M.fromList
+        [(platform,M.singleton "debugger" (M.fromList entries)) | platform<-["terminal","graphical","macos"]]))
+      remapped=prepare [("hide.cursor.left",["F13"]),("hide.selection.left",["F14"]),("hide.edit.delete-backward",["F15"])]
+      removed=prepare [("hide.cursor.left",[]),("hide.selection.left",[])]
+      defaults=either (error . show) id (configuredBindings [] M.empty)
+      event key mods d=handleEvent (V.EvKey key mods) d
+      selected d=maybe (Selection (-1) (-1)) selection (activeWindow d)
+      pane label=modifyActive (\w->w {selection=Selection 2 2})
+        (addReadOnly label "a界e\x301\&z\nnext" (initialDesktop (80,25)))
+      observations d=(selected (fst (event (V.KFun 13) [] d {keyBindings=remapped}))==Selection 1 1,
+        selected (fst (event V.KLeft [] d {keyBindings=removed}))==Selection 2 2)
+      observed=map (observations . pane) ["Debugger output","Source Generated.hs"]
+  -- Report both actual-route failures in the original library, without stopping
+  -- after the accepted remap and hiding the independent raw-fallback failure.
+  check ("debugger remap executes and unbind consumes raw navigation: "++show observed) (all (\(remap,unbind)->remap && unbind) observed)
+  forM_ ["Debugger output","Source Generated.hs"] $ \label->
+    forM_ [(False,Nothing),(False,Just 3),(True,Just 3)] $ \(mac,video)->do
+      let original=(pane label) {nativeMac=mac,videoMode=video}
+          configured=original {keyBindings=remapped}
+          result key mods=fst (event key mods configured)
+          state (d,effects)=(selected d,effects)
+          modal=prompt "Input" Information [Input "Value" "" 0] configured
+          unfocused=configured {problemsVisible=True,problemsFocused=True}
+          private=configured {guestPrivatePaths=["/authority"],buffers=M.map (\doc->doc {documentOrigin=Just "/authority/secret.hs"}) (buffers configured)}
+      check "debugger remap is projected by exact command ID" (boundKeyCommand (V.KFun 13) [] configured==Just (CursorLeft False) && ("F13","hide.cursor.left") `elem` focusedBindingChords configured)
+      check "debugger selection remap extends from its read-only caret" (selected (result (V.KFun 14) [])==Selection 2 1)
+      check "debugger removed selection cannot fall through" (selected (fst (event V.KLeft [V.MShift] original {keyBindings=removed}))==Selection 2 2)
+      check "debugger navigation defaults preserve existing pane geometry" (all (\(key,mods)->state (event key mods original)==state (event key mods original {keyBindings=defaults}))
+        [(V.KLeft,[]),(V.KRight,[V.MShift]),(V.KUp,[]),(V.KDown,[V.MShift]),(V.KHome,[]),(V.KEnd,[]),(V.KHome,[V.MCtrl]),(V.KEnd,[V.MCtrl]),(V.KPageUp,[]),(V.KPageDown,[V.MShift]),(V.KLeft,[V.MCtrl]),(V.KRight,[V.MCtrl,V.MShift])])
+      check "debugger navigation cannot acquire read-only mutation authority" (not (commandEnabled configured DeleteBackward) && activeText (result (V.KFun 15) [])==activeText configured && maybe (-1) (revision . documentBuffer) (activeDocument (result (V.KFun 15) []))==maybe (-2) (revision . documentBuffer) (activeDocument configured))
+      check "debugger navigation remains behind modal and focus owners" (boundKeyCommand (V.KFun 13) [] modal==Nothing && selected (fst (event (V.KFun 13) [] modal))==Selection 2 2 && not (commandEnabled unfocused (CursorLeft False)) && selected (fst (event (V.KFun 13) [] unfocused))==Selection 2 2)
+      denied<-P.applyGuestInput (P.Key "F13" []) private
+      check "debugger remap retains generated-source privacy" (not (guestKeyAllowed private (V.KFun 13) []) && case denied of Left _->True; _->False)
+
+
+-- Caret-only fields retain their exact field operations and control precedence.
+dialogInputChecks :: IO ()
+dialogInputChecks=do
+  let check name ok=unless ok (error name)
+      configured entries=either (error . show) id (configuredBindings [] (M.fromList
+        [(platform,M.singleton "dialog" (M.fromList entries)) | platform<-["terminal","graphical","macos"]]))
+      globals entries=either (error . show) id (platformBindings [] TerminalPlatform (M.singleton "global" (M.fromList entries)))
+      event key mods d=handleEvent (V.EvKey key mods) d
+      field d=case dialog d of Just dg | f:_<-fields dg -> f; _->error "missing Input"
+      base=prompt "Name" Information [Input "Name" "a界e\x301\&z" 2,FileList [Entry "old.hs" False Nothing Nothing] 0] (initialDesktop (80,25))
+      local=platformBindings [] TerminalPlatform (M.singleton "dialog" (M.singleton "hide.cursor.left" ["F13"]))
+      observed=(either (const False) (const True) local,
+        field (fst (event (V.KFun 13) [] base {keyBindings=globals [("hide.cursor.left",["F13"])]}))==Input "Name" "a界e\x301\&z" 1,
+        field (fst (event V.KLeft [] base {keyBindings=globals [("hide.cursor.left",[])]}))==field base)
+  check ("single-line Input configuration, remap and unbind: "++show observed) (case observed of (a,b,c)->a && b && c)
+  let entries=[("hide.cursor.left",["F13"]),("hide.cursor.right",["F14"]),("hide.cursor.row-start",["F15"]),("hide.cursor.row-end",["F16"]),("hide.edit.delete-backward",["F17"]),("hide.edit.delete-forward",["F18"])]
+      remapped=configured entries
+      removed=configured [(name,[]) | (name,_)<-entries]
+      altRemapped=configured [("hide.cursor.left",["Alt+Right"]),("hide.cursor.right",[])]
+      defaults=either (error . show) id (configuredBindings [] M.empty)
+      keys=[V.KLeft,V.KRight,V.KHome,V.KEnd,V.KBS,V.KDel]
+  forM_ [(False,Nothing),(False,Just 3),(True,Just 3)] $ \(mac,video)->do
+    let original=base {nativeMac=mac,videoMode=video}
+        current=original {keyBindings=remapped,buffers=error "Input command touched background documents"}
+        edited key=fst (event key [] current)
+        outcome (d,effects)=(fmap (\dg->(fields dg,focus dg)) (dialog d),effects)
+    check "Input command defaults preserve modifier and grapheme semantics" (all (\(key,mods,pos)->let d=original {dialog=fmap (\dg->dg {fields=replaceAt 0 (Input "Name" "a界e\x301\&z" pos) (fields dg)}) (dialog original)} in outcome (event key mods d)==outcome (event key mods d {keyBindings=defaults}))
+      ([(key,[],pos) | key<-keys,pos<-[0,2,5]]++[(V.KLeft,[V.MShift],2),(V.KRight,[V.MAlt],2),(V.KHome,[V.MCtrl],4),(V.KEnd,[V.MMeta],1),(V.KBS,[V.MCtrl,V.MShift],4),(V.KDel,[V.MShift],2)]))
+    check "Input remaps move by grapheme and row edges" (map (field . edited . V.KFun) [13,14,15,16]==[Input "Name" "a界e\x301\&z" 1,Input "Name" "a界e\x301\&z" 4,Input "Name" "a界e\x301\&z" 0,Input "Name" "a界e\x301\&z" 5])
+    check "Input remapped deletion clears stale filename selection" (field (edited (V.KFun 17))==Input "Name" "ae\x301\&z" 1 && field (edited (V.KFun 18))==Input "Name" "a界z" 2 && all (\key->case dialog (edited key) of Just dg | [FileList _ (-1)]<-drop 1 (fields dg)->True; _->False) [V.KFun 17,V.KFun 18])
+    check "Input explicit unbinding consumes old physical defaults" (all (\key->outcome (event key [] original {keyBindings=removed})==outcome (original,[])) keys && outcome (event V.KRight [V.MAlt] original {keyBindings=removed})==outcome (original,[]))
+    check "Input reserved chord cannot be assigned to dialog acceptance" (either (const True) (const False) (platformBindings [] (bindingPlatform original) (M.singleton "dialog" (M.singleton "hide.dialog.accept" ["Alt+Right"]))))
+    check "Input Alt Right can be remapped through its field owner" (field (fst (event V.KRight [V.MAlt] original {keyBindings=altRemapped}))==Input "Name" "a界e\x301\&z" 1)
+    check "Input projection and labels expose its effective commands" (lookup "F13" (focusedBindingChords current)==Just "hide.cursor.left" && menuShortcut current (MenuItem "Left" "Left" (CursorLeft False))=="F13")
+    let other f=current {buffers=M.empty,dialog=fmap (\dg->dg {fields=[f]}) (dialog current)}
+        selected=other (SelectedInput "Expression" "abc" (Selection 1 1))
+        area=other (TextArea "Text" True (newBuffer "abc") (Selection 1 1) 0 0)
+        combo=other (ComboBox "Choice" ["one","two"] 0 (Just 1))
+    check "Input bindings leave selected and multiline field owners fixed" (field (fst (event V.KLeft [V.MShift] selected))==SelectedInput "Expression" "abc" (Selection 1 0) && outcome (event (V.KFun 13) [] selected)==outcome (selected,[]) && case field (fst (event V.KLeft [] area)) of TextArea _ _ _ sel _ _->sel==Selection 0 0; _->False)
+    check "Input bindings leave open dropdowns and buttons fixed" (field (fst (event V.KHome [] combo))==ComboBox "Choice" ["one","two"] 0 (Just 0) && outcome (event (V.KFun 13) [] combo)==outcome (combo,[]) && let buttons=current {dialog=fmap (\dg->dg {fields=[],focus=1}) (dialog current)} in maybe False ((==0).focus) (dialog (fst (event V.KLeft [] buttons))))
+    let search=fst (runCommand Find original {keyBindings=remapped})
+    check "Input bindings preserve search page and Ctrl U owners" (maybe False (\dg->case purpose dg of Searching True _->True; _->False) (dialog (fst (event (V.KChar '\t') [V.MCtrl] search))) && field (fst (event (V.KChar 'u') [V.MCtrl] current))==Input "Name" "" 0)
+    forM_ [current {dialog=fmap (\dg->dg {fields=[Input "API key" "secret" 3]}) (dialog current)},current {dialog=fmap (\dg->dg {purpose=PermissionDialog "approve:test"}) (dialog current)}] $ \private->do
+      denied<-P.applyGuestInput (P.Key "F17" []) private
+      check "Input remapping cannot acquire private or approval authority" (case denied of Left _->True; _->False)

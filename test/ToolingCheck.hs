@@ -19,7 +19,10 @@ import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.FilePath ((</>))
 import System.IO (openTempFile, hClose)
 import System.Timeout (timeout)
+import GHC.Conc (getAllocationCounter)
 import Hide.Buffer
+import Hide.BufferView (BufferView(..))
+import qualified Hide.App as App
 import Hide.Files (FileState(..), loadFile, saveFile)
 import Hide.Model
 import qualified Hide.LSP as L
@@ -48,6 +51,28 @@ checks = do
   check "hover keeps identifiers and quoted arrows" (hover "forallValue :: Proxy \"->\" -> a"=="forallValue :: Proxy \"->\" → a")
   check "unversioned diagnostics cannot masquerade as current edits" (not (diagnosticsCurrent Nothing [1]) && diagnosticsCurrent Nothing [0] && not (diagnosticsCurrent (Just 0) [1]))
   check "split buffer count unaffected" (M.size (buffers applied)==1)
+  -- Exercise JumpTo itself without splitting preceding rows. The flat oracle
+  -- and initial buffer preparation are outside the measured interaction.
+  let jumpPath="/measured-jump.hs"
+      original=newBuffer (T.replicate 50000 "a😀b\r\n"<>"last\r")
+      edited=replaceSelection (Selection 0 1) "λ\n" original
+  withTooling $ \tooling->forM_ [original,edited,undo edited] $ \buffer->do
+    let text=contents buffer
+        positions=[(-1,-1),(0,2),(49999,2),(49999,3),(50000,99),(99999,99)]
+    _<-evaluate (T.length text)
+    _<-evaluate (prepareBuffer buffer)
+    let opaque=buffer {undoStack=error "JumpTo forced Undo",redoStack=error "JumpTo forced Redo"}
+        opened=addDocument (Just (FileState jumpPath Nothing)) opaque (initialDesktop (80,25))
+    forM_ positions $ \(row,column)->do
+      expected<-evaluate (L.positionOffset text (row,column))
+      beforeJump<-getAllocationCounter
+      (_,moved)<-toolingEffects tooling App.applyEffects opened [JumpTo jumpPath row column]
+      check "JumpTo uses measured UTF16 positions on loaded/edited/Undo source"
+        (fmap (caret.selection) (activeWindow moved)==Just expected &&
+         fmap windowId (activeWindow moved)==fmap windowId (activeWindow opened) &&
+         fmap bufferView (activeWindow moved)==Just CurrentView)
+      afterJump<-getAllocationCounter
+      check "JumpTo does not traverse or split preceding document rows" (beforeJump-afterJump<1024*1024)
   bracket temporary removePathForcibly $ \root -> do
     let server=root </> "fake-hls"
         source=root </> "Main.hs"

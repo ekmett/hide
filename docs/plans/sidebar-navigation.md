@@ -178,11 +178,12 @@ generic platform table inherited by macOS.
 
 Named WordStar commands, horizontal/vertical movement and selection, row/document
 edges, pages, word movement/selection, word deletion, adjacent deletion and line
-deletion use an editable profile. WordStar Ctrl+A/F aliases and Ctrl+K/Ctrl+Q
-block grammar remain fixed. Dialog editing/search actions are
+deletion use an editable profile, including WordStar Ctrl+A/F aliases.
+Ctrl+K/Ctrl+Q block grammar remains fixed. Dialog editing/search actions are
 configurable for existing editable TextArea controls. Dialog next/previous focus
-commands cover single-line fields, dropdowns and buttons. Dialog accept/cancel,
-Ctrl/Command Tab aliases and single-line Input editing remain fixed. Published runtime menu contributions
+and accept/cancel commands preserve the existing field, dropdown and button
+owners. Caret-only Input movement and adjacent deletion use the editable profile;
+Ctrl+U and other field controls retain their existing grammar. Published runtime menu contributions
 use that same configuration and exact registration lifetime; see the
 [plugin design](../design/haskell-plugins.md#commands-menus-and-bindings).
 

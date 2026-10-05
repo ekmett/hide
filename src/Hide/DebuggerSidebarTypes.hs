@@ -25,7 +25,9 @@ import Hide.Plugin.BufferHost (ContentVersion)
 data DebugSidebarRequest = SelectDebugFrame !Int !Int !Int
   | AddDebugWatch | EditDebugWatch !Int !Int | RemoveDebugWatch !Int !Int
   | EvaluateDebugWatch !Int !Int !WatchFrame
-  | ForceDebugWatch !Int !Int !WatchFrame !Int deriving (Eq,Show)
+  | ForceDebugWatch !Int !Int !WatchFrame !Int
+  -- Watch ID/revision, stopped receipt, parent reference, page offset/position, child.
+  | ForceDebugWatchChild !Int !Int !WatchFrame !Int !Int !Int !Int deriving (Eq,Show)
 
 -- | Bounded immutable expression metadata published by the existing debugger
 -- owner. IDs are monotonic; an edit advances its revision, removal never reuses it.
@@ -49,8 +51,9 @@ data DebugPageTarget = DebugThreads | DebugStack !Int | DebugScopes !Int !Int
   | DebugVariables !Int !Int !Int
   | DebugWatchVariables !Int !Int !WatchFrame !Int deriving (Eq,Ord,Show)
 
--- | Stop epoch, target and zero-based bounded page offset. Stack and variables
--- request at most 128 rows; non-paged adapters are capped at that same boundary.
+-- | Stop epoch, target and zero-based bounded page offset. Stack requests at
+-- most 128 frames. Locals and Watches page a bounded cached response without
+-- another DAP read.
 data DebugPageRequest = DebugPageRequest !Int !DebugPageTarget !Int deriving (Eq,Ord,Show)
 
 -- | Host-captured source actions. A label or frontend argument cannot supply

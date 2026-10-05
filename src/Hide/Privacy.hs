@@ -1,7 +1,7 @@
 -- SPDX-License-Identifier: BSD-3-Clause
 -- | Canonical authority-path policy shared by UI projections and service workers.
 -- Callers resolve filesystem paths before admission; pure rendering never does IO.
-module Hide.Privacy (protectedFilePath, pathContains) where
+module Hide.Privacy (protectedFilePath, protectedFilePathParent, pathContains) where
 
 import Data.Char (toLower)
 import System.FilePath (takeFileName,makeRelative,isAbsolute,splitDirectories)
@@ -15,3 +15,7 @@ protectedFilePath roots path=map toLower (takeFileName path)=="thc.toml" || any 
 -- | Component-wise containment of canonical absolute paths.
 pathContains :: FilePath -> FilePath -> Bool
 pathContains root path=let relative=makeRelative root path in not (isAbsolute relative) && ".." `notElem` splitDirectories relative
+
+-- | Protect canonical paths and ancestors containing private authority stores.
+protectedFilePathParent :: [FilePath] -> FilePath -> Bool
+protectedFilePathParent roots path=protectedFilePath roots path || any (pathContains path) roots

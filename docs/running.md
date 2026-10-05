@@ -172,38 +172,61 @@ source. Resume, disconnect or a thread change expires the values and pending
 replies. Existing
 Debug menu inspection windows remain available.
 
-Stack pages contain at most 128 frames. Scopes and variables currently expose the
-first 128 rows; adapters without a variable paging contract cannot silently
-produce an unbounded tree. Lazy references display their state without an expand
+Stack pages contain at most 128 frames. Scopes expose the first 128 rows.
+Locals and nested Watches use **More…** to show 128 children at a time from one
+cached adapter response, without another debugger request. Expanded frames retain
+their own locals while you select a different frame. The response must fit the
+existing 1 MiB bound; the shared cache retains at most 64 entries. These are local
+pages, so adapters need no variable paging capability. Lazy references display their state without an expand
 action, so passive expansion does not force Haskell thunks. Painting, scrolling
 and repeated ticks use cached rows and do not fetch or evaluate values.
 
 Right-click source text for **Toggle breakpoint** or **Add watch**. Clicking
 inside a selection preserves its expression; elsewhere Add watch prefills the
 identifier at the click. Both actions retain that source position and refuse a
-changed source rather than acting on a different caret.
+changed source rather than acting on a different caret. In **Add watch**, edit the
+prefilled expression and choose **Add**. Adding places the expression in Watches;
+it does not run it.
+
+[![Source Add Watch dialog, with counter + 1 entered for the stopped hdb toy.](site/screenshots/debug-add-watch.png)](site/screenshots/debug-add-watch.png)
 
 **Watches** is a persistent collapsible root beneath Debug, available without a
 stopped session. Right-click its root to add an expression, activate a watch to
 edit it, or use its context menu to remove it. Expressions survive session
 replacement; at most 128 watches with 4096 characters each are retained. Private
 source expressions stay masked in the tree and protected in the editor.
+An Add/Edit dialog opened from Watches retains its expression when background
+debugger values change; source-captured dialogs still expire with their source.
 Managing watches does not evaluate program code. At a revealed stop, use a watch’s
 **Evaluate watch** context action to run its expression in the selected frame.
 Results belong to that stop, frame selection and expression revision; changes
 make them stale until another explicit evaluation. **Force lazy watch** is a
 separate executing action for a known lazy root result. Nonlazy values expand
-through bounded read-only pages; nested lazy values remain inert. No evaluation
-runs automatically on stop, tree expansion or repaint.
+through bounded read-only pages. A lazy child beneath Watches offers **Force lazy
+child**, a human-only executing action. After forcing, use **Evaluate watch** to
+refresh the expression; old and replacement child handles are retired. Ordinary
+expansion remains inert. No evaluation runs automatically on stop, tree expansion
+or repaint.
+
+[![Expanded values watch in the stopped hdb toy, with its lazy tail and explicit Evaluate watch action.](site/screenshots/debug-watches.png)](site/screenshots/debug-watches.png)
+
+This example stops a small GHC program with `counter = 41` and `values = [1..3]`.
+Evaluating `counter + 1` returns `42`; evaluating `values` exposes its list view.
+Choose a different stack frame before evaluating to use that frame’s bindings.
+hdb invalidates earlier inspection results when another expression is evaluated;
+the first watch is therefore marked stale in this view. Use **Evaluate watch** to
+refresh it in the current frame, or **Edit watch…** to change its expression.
 
 Live hdb 0.14 with GHC 9.14.1 on macOS arm64 has verified scalar watch evaluation
-and nonlazy list-child expansion through these actions. hdb marks lazy child
-values, but its Evaluate replies do not mark a lazy root, so **Force lazy watch**
-is unavailable for those results. Root Force currently has deterministic adapter
-fixture coverage; it has not been qualified against hdb or THC. Nested lazy-child
-Force and variable continuation pages remain in issue #8. Local-file **Go to source** still
-uses the existing synchronous debugger navigation path; embedded source uses the
-asynchronous DAP transport and prepares its source document on a worker.
+and nonlazy list-child expansion through these actions. Explicit **Force lazy
+child** also works on a lazy list tail; after hdb invalidates its references, an
+explicit watch refresh shows fresh children. hdb Evaluate replies do not mark a
+lazy root, so **Force lazy watch** is unavailable for those results and remains
+fixture-tested. THC watch evaluation and Force remain unsupported. Both local-file and
+embedded **Go to source** prepare their source documents on a worker. Local-file
+navigation preserves open unsaved text and ordinary file/save authority. Changed
+or closed targets and resumed sessions reject late navigation; a prepared source
+waits while a modal owns input.
 
 Lazy values are displayed without forcing them; ordinary expansion refuses a
 lazy handle. hdb remains an external tool, with no GHC API dependency in the editor.
