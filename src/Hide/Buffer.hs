@@ -200,11 +200,11 @@ sourceLineWidth (ChunkedLine _ flags _ _ _ chunks)=
 -- stream, text projection, saved baseline or history. Subsequent exact width
 -- demands reuse that receipt; source bytes and coordinates remain unchanged.
 prepareSourceWidths :: BufferContent -> ()
-prepareSourceWidths image
-  | contentByteMode image=()
-  | otherwise=foldl' prepare () (contentSourceLinesFrom image 0)
+prepareSourceWidths (BufferContent tree mode)
+  | mode=()
+  | otherwise=foldl' prepare () tree
   where
-    prepare () line@ChunkedLine{}=sourceLineWidth line `seq` ()
+    prepare () line@ChunkedLine{} | lineOrigin line/=Deleted=sourceLineWidth line `seq` ()
     prepare () _=()
 
 -- | Scalar positions inside an item snap to its starting display column.
