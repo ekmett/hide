@@ -11,13 +11,15 @@ import Data.Maybe (fromJust,isJust)
 import qualified Data.Text as T
 import qualified Data.Text.Unsafe as TU
 import qualified Data.Vector as V
+import qualified Graphics.Vty as VT
 import System.Timeout (timeout)
 import System.Mem.StableName (makeStableName)
 import Hide.Buffer
 import Hide.Files
 import Hide.Highlighting
 import Hide.Model
-import Hide.Render (snapshot,snapshotHtml)
+import Hide.Render (snapshot,snapshotHtml,renderCellRows)
+import Hide.Unicode (CellSpan(..))
 import Hide.Syntax
 
 checks :: IO ()
@@ -79,6 +81,31 @@ checks = do
   deepAfter<-getAllocationCounter
   check "far horizontal source scrolling skips prefix fragments without allocating them"
     (deepCount>0 && deepBefore-deepAfter<4000000)
+  let viewportText=T.replicate 200 (T.replicate 20 "Haskell λ ⌘ "<>"\n")
+      viewportSource=addDocument Nothing (newBuffer viewportText) (initialDesktop (180,55))
+      preparedViewport=viewportSource {sideTree=Nothing,blinkCursor=False,buffers=M.map (\d->d
+        {documentSourceRows=Just (V.fromList [prepareSourceRow line [(c,if c=='H' then Keyword else Plain) | c<-T.unpack line] | line<-T.lines viewportText])}) (buffers viewportSource)}
+      occupied=V.foldl' (V.foldl' (\n span->case span of
+        CellText paint text->paint `seq` n+T.length text
+        CellGlyph paint text full start shown->paint `seq` n+T.length text+full+start+shown
+        CellScript paint text natural script->paint `seq` script `seq` n+T.length text+natural)) 0
+  _<-evaluate (occupied (renderCellRows preparedViewport))
+  viewportBefore<-getAllocationCounter
+  viewportCount<-evaluate (occupied (renderCellRows (modifyActive (\w->w {scrollRow=1,scrollColumn=1,selection=Selection 243 417}) preparedViewport)))
+  viewportAfter<-getAllocationCounter
+  check "ordinary source viewport avoids rebuilding prepared Unicode image rows"
+    (viewportCount>0 && viewportBefore-viewportAfter<6000000)
+  let mixedText="a界e\x301\t👩🏽\x200d\&💻z"
+      mixedSource=addDocument (Just (FileState "Mixed.hs" Nothing)) (newBuffer mixedText) (initialDesktop (30,12))
+      styledMixed=mixedSource {sideTree=Nothing,buffers=M.map (\d->d {documentLabel=Just "Source Mixed",documentSourceRows=Just
+        (V.singleton (prepareSourceRow mixedText [(c,TerminalStyle 0x123456 0x654321 15) | c<-T.unpack mixedText]))}) (buffers mixedSource)}
+      clipped=modifyActive (\w->w {bounds=Rect 1 1 14 7,scrollColumn=2,selection=Selection 1 2}) styledMixed
+      glyphs=[(paint,text,full,start,shown) | CellGlyph paint text full start shown<-V.toList (renderCellRows clipped V.! 2)]
+  check "source clipping keeps selected whole glyph and font traits"
+    (any (\(paint,text,full,start,shown)->text=="界" && (full,start,shown)==(2,1,1) &&
+      VT.attrForeColor paint==VT.SetTo (VT.RGBColor 0 0 170) && VT.attrBackColor paint==VT.SetTo (VT.RGBColor 170 170 170) &&
+      VT.attrStyle paint==VT.SetTo (VT.bold+VT.italic+VT.underline+VT.strikethrough)) glyphs &&
+      any (\(_,text,_,_,_)->text=="e\x301") glyphs && any (\(_,text,_,_,_)->text=="👩🏽\x200d\&💻") glyphs)
   firstStarted<-newEmptyMVar
   nextStarted<-newEmptyMVar
   releaseFirst<-newEmptyMVar
