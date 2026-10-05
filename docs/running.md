@@ -169,10 +169,16 @@ stopped session. Right-click its root to add an expression, activate a watch to
 edit it, or use its context menu to remove it. Expressions survive session
 replacement; at most 128 watches with 4096 characters each are retained. Private
 source expressions stay masked in the tree and protected in the editor.
-Managing or expanding watches does not evaluate program code.
+Managing watches does not evaluate program code. At a revealed stop, use a watch’s
+**Evaluate watch** context action to run its expression in the selected frame.
+Results belong to that stop, frame selection and expression revision; changes
+make them stale until another explicit evaluation. **Force lazy watch** is a
+separate executing action for a known lazy root result. Nonlazy values expand
+through bounded read-only pages; nested lazy values remain inert. No evaluation
+runs automatically on stop, tree expansion or repaint.
 
-Explicit stopped-frame evaluation, lazy Force, variable continuation pages and
-new sidebar screenshots remain in issue #8. Local-file **Go to source** still
+Nested lazy-child Force, variable continuation pages and live adapter validation
+remain in issue #8. Local-file **Go to source** still
 uses the existing synchronous debugger navigation path; embedded source uses the
 asynchronous DAP transport and prepares its source document on a worker.
 

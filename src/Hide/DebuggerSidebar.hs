@@ -23,8 +23,9 @@ import qualified Data.Map.Strict as M
 import Data.Text (Text)
 import qualified Data.Text as T
 import Text.Read (readMaybe)
-import Hide.Debugger (Debugger,debuggerSidebarEpoch,debuggerSidebarSession,debuggerSidebarRead,debuggerWatches)
+import Hide.Debugger (Debugger,debuggerSidebarEpoch,debuggerSidebarSession,debuggerSidebarRead,debuggerWatches,withDebuggerWatchProvider)
 import Hide.DebuggerSidebarTypes
+import Hide.GuestAccess (protectedFilePath)
 import Hide.Model (Desktop(..),Effect(LoadTree))
 import Hide.Sidebar
 import Hide.Plugin.Command
@@ -76,25 +77,34 @@ withDebuggerSidebar host runtime use=withRegistry $ \registry->do
   add<-registerWatch "hide.sidebar.debug.watch-add" "Add watch"
   edit<-registerWatch "hide.sidebar.debug.watch-edit" "Edit watch"
   remove<-registerWatch "hide.sidebar.debug.watch-remove" "Remove watch"
+  evaluate<-registerWatch "hide.sidebar.debug.watch-evaluate" "Evaluate watch"
+  force<-registerWatch "hide.sidebar.debug.watch-force" "Force lazy watch"
   let watchAction command captured=P.treeAction registry command captured (\_ value->pure value)
       watchesRoot=P.NodeDef (P.NodeInfo watchesId "Watches" "" True Nothing) Nothing [P.ActionMenu "Add watch…" (watchAction add AddDebugWatch)]
-      watchChildren _ (P.ChildRequest parent cursor)
-        | parent/=watchesId || cursor/=Nothing=pure (Left (CommandRejected "Watch node expired."))
-        | otherwise=do
-            (_,entries)<-debuggerWatches runtime
-            let rows=map (watchNode (watchAction edit) (watchAction remove)) (M.toList entries)
+      watchChildren ctx (P.ChildRequest parent cursor)=do
+        (_,selected,entries)<-debuggerWatches runtime
+        case (parent,pageOffset cursor) of
+          (root,Just 0) | root==watchesId->do
+            let rows=map (watchNode (watchAction edit) (watchAction remove) (watchAction evaluate) (watchAction force) selected (sidebarPrivatePaths ctx)) (M.toList entries)
                 emptyRow=P.NodeDef (P.NodeInfo (ident "watch-empty") "No watches; add an expression" "" False Nothing) Nothing []
             pure (Right (P.NodePage (if null rows then [emptyRow] else rows) Nothing))
+          (_,Just 0) | Just (key,revision,receipt,reference)<-watchTarget selected entries parent->do
+            let epoch=case receipt of WatchFrame _ stop _ _ _->stop
+            result<-debuggerSidebarRead runtime (DebugPageRequest epoch (DebugWatchVariables key revision receipt reference) 0)
+            pure $ case result of
+              Left err->Left (CommandRejected err)
+              Right body->Right (P.NodePage [watchChild key revision receipt reference index row (sidebarPrivatePaths ctx) entry | (index,row)<-zip [0..] (take 128 (items "variables" body)),Just entry<-[M.lookup key entries]] Nothing)
+          _->pure (Left (CommandRejected "Watch node expired."))
   watches<-P.registerTree registry "hide.sidebar.watches" watchesRoot watchChildren >>= either (ioError . userError . show) pure
   publishTreeFromHost host watches
-  use (DebuggerSidebar (P.treeReference provider) selected shownSession (P.treeReference watches) watchRevisionSeen)
+  withDebuggerWatchProvider runtime watches $ use (DebuggerSidebar (P.treeReference provider) selected shownSession (P.treeReference watches) watchRevisionSeen)
   where hidden=Codec Null (const (Left "Debug sidebar arguments are host-captured.")) (const Null)
 
 -- | /O(1)/ stopped projection comparison. Scoped refresh performs metadata
 -- invalidation; cached indexed rows retain selection and viewport anchors.
 tickDebuggerSidebar :: DebuggerSidebar -> SidebarHost -> Debugger -> Desktop -> IO Desktop
 tickDebuggerSidebar (DebuggerSidebar owner ref shown watchOwner watchSeen) host runtime original=do
-  (revision,_)<-debuggerWatches runtime
+  (revision,_,_)<-debuggerWatches runtime
   oldRevision<-readIORef watchSeen
   d<-if oldRevision==Just revision then pure original else do
     writeIORef watchSeen (Just revision)
@@ -119,16 +129,59 @@ watchesId=ident "watches"
 
 watchNode :: (DebugSidebarRequest -> P.TreeAction SidebarContext SidebarReply)
   -> (DebugSidebarRequest -> P.TreeAction SidebarContext SidebarReply)
-  -> (Int,DebuggerWatch) -> P.NodeDef SidebarContext SidebarReply
-watchNode editAction removeAction (key,entry)=P.NodeDef
-  (P.NodeInfo (node "watch" [key]) title "" False (watchOrigin entry)) (Just edit)
-  [P.ActionMenu "Remove watch" (removeAction (RemoveDebugWatch key (watchRevision entry)))]
+  -> (DebugSidebarRequest -> P.TreeAction SidebarContext SidebarReply)
+  -> (DebugSidebarRequest -> P.TreeAction SidebarContext SidebarReply)
+  -> Maybe WatchFrame -> [FilePath] -> (Int,DebuggerWatch) -> P.NodeDef SidebarContext SidebarReply
+watchNode editAction removeAction evaluateAction forceAction selected privatePaths (key,entry)=P.NodeDef
+  (P.NodeInfo (node "watch" [key]) title "" branch origin) (if branch then Nothing else Just edit)
+  ([P.ActionMenu "Edit watch…" edit | branch]++[P.ActionMenu "Remove watch" (removeAction (RemoveDebugWatch key revision))]++
+    [P.ActionMenu "Evaluate watch" (evaluateAction (EvaluateDebugWatch key revision receipt)) | receipt<-maybeToList selected,not loading]++
+    [P.ActionMenu "Force lazy watch" (forceAction (ForceDebugWatch key revision receipt reference)) | WatchResult receipt _ reference True _<-[watchValue entry],selected==Just receipt,reference>0])
   where
-    edit=editAction (EditDebugWatch key (watchRevision entry))
-    -- Captured privacy is sticky even if its origin later becomes public.
-    -- Public captures still use the shared current canonical-path policy.
-    expression=if watchPrivate entry then "Private watch" else watchExpression entry
-    title=bounded (expression<>" [pending; evaluate explicitly]")
+    revision=watchRevision entry
+    edit=editAction (EditDebugWatch key revision)
+    loading=case watchValue entry of WatchLoading{}->True; _->False
+    branch=case watchValue entry of WatchResult receipt _ reference False _->selected==Just receipt && reference>0; _->False
+    origin=watchResource privatePaths entry
+    description=case watchValue entry of
+      WatchPending->" [pending; evaluate explicitly]"
+      WatchLoading{}->" [evaluating…]"
+      WatchError _ err _->" [error: "<>err<>"]"
+      WatchStale value _->" = "<>value<>" [stale; evaluate explicitly]"
+      WatchResult _ value _ lazy _->" = "<>value<>if lazy then " [lazy; explicit Force]" else ""
+    title=if watchPrivate entry then "Private watch" else bounded (watchExpression entry<>description)
+    maybeToList Nothing=[]
+    maybeToList (Just value)=[value]
+
+watchTarget :: Maybe WatchFrame -> M.Map Int DebuggerWatch -> P.NodeId -> Maybe (Int,Int,WatchFrame,Int)
+watchTarget selected entries parent=case T.splitOn ":" (P.nodeIdText parent) of
+  ["watch",identText] | Just key<-readMaybe (T.unpack identText),Just entry<-M.lookup key entries,
+      WatchResult receipt _ reference False _<-watchValue entry,selected==Just receipt,reference>0->Just (key,watchRevision entry,receipt,reference)
+  "watchvalue":parts | Just [key,revision,epoch,selection,tid,fid,_,reference,_]<-traverse (readMaybe . T.unpack) parts,
+      Just receipt@(WatchFrame _ epochNow selectionNow tidNow fidNow)<-selected,(epoch,selection,tid,fid)==(epochNow,selectionNow,tidNow,fidNow),Just entry<-M.lookup key entries,watchRevision entry==revision,reference>0->Just (key,revision,receipt,reference)
+  _->Nothing
+
+watchChild :: Int -> Int -> WatchFrame -> Int -> Int -> Value -> [FilePath] -> DebuggerWatch -> P.NodeDef SidebarContext SidebarReply
+watchChild key revision (WatchFrame _ epoch selection tid fid) parent index row privatePaths entry=P.NodeDef
+  (P.NodeInfo (node "watchvalue" [key,revision,epoch,selection,tid,fid,parent,reference,index]) title "" (reference>0 && not lazy) origin) Nothing []
+  where
+    reference=integer "variablesReference" row
+    lazy=maybe False (flag "lazy") (field "presentationHint" row)
+    title=if watchPrivate entry then "Private value" else bounded (label "name" row<>" = "<>label "value" row<>if lazy then " [lazy; explicit evaluation required]" else "")
+    origin=watchResource privatePaths entry
+
+watchResource :: [FilePath] -> DebuggerWatch -> Maybe FilePath
+watchResource privatePaths entry=case filter (protectedFilePath privatePaths) origins++origins of
+  path:_->Just path
+  []->Nothing
+  where
+    origins=maybeToList (watchOrigin entry)++case watchValue entry of
+      WatchResult _ _ _ _ origin->maybeToList origin
+      WatchStale _ origin->maybeToList origin
+      WatchError _ _ origin->maybeToList origin
+      _->[]
+    maybeToList Nothing=[]
+    maybeToList (Just value)=[value]
 
 pageOffset :: Maybe Text -> Maybe Int
 pageOffset token=do
@@ -165,6 +218,7 @@ makeNode action epoch request offset row=case request of
         -- plus parent/reference distinguishes equal labels without payload equality.
         position=offset
     in plain (node "value" [epoch,tid,fid,parent,reference,position]) description (reference>0 && not lazy)
+  DebugWatchVariables{}->plain (node "invalid-watch-page" [epoch,offset]) "Watch page belongs to Watches" False
   where plain key title branch=P.NodeDef (P.NodeInfo key (bounded title) "" branch Nothing) Nothing []
 
 continuation :: DebugPageTarget -> Int -> Value -> Int -> Maybe Text
@@ -176,7 +230,7 @@ continuation request offset body count
   | DebugVariables{}<-request=Nothing -- Adapters without a paging contract expose the bounded first page.
   | otherwise=Just (number (offset+count))
 rowField :: DebugPageTarget -> Key
-rowField request=case request of DebugThreads->"threads"; DebugStack{}->"stackFrames"; DebugScopes{}->"scopes"; DebugVariables{}->"variables"
+rowField request=case request of DebugThreads->"threads"; DebugStack{}->"stackFrames"; DebugScopes{}->"scopes"; DebugVariables{}->"variables"; DebugWatchVariables{}->"variables"
 field :: FromJSON a => Key -> Value -> Maybe a
 field key=parseMaybe (withObject "object" (.:key))
 items :: Key -> Value -> [Value]
