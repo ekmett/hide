@@ -113,7 +113,7 @@ checks=bracket temporary removePathForcibly $ \root->do
         removeFile invocation
         readyToReuse<-timeout 5000000 (let loop current=do next<-tick current; pending<-buildTerminalLaunchPending runtime; if pending then threadDelay 1000 >> loop next else pure next in loop stopped) >>= maybe (fail "Run preparation did not retire") pure
         let focused=maybe readyToReuse (\window->focusWindow (windowId window) readyToReuse) (activeWindow other)
-            dirty=editActive (replaceSelection "changed") focused
+            dirty=editActive (\sel->replaceSelection sel "changed") Nothing focused
         blocked<-request "exe:demo" "Build" dirty >>= admitted >>= wait "dirty target refusal" (maybe False (const True) . dialog)
         exists<-doesFileExist invocation
         unless (not exists) (fail "Dirty source cannot launch a captured package build")
