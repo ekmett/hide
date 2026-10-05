@@ -157,7 +157,7 @@ session scenario=bracket (Fixture.fixture (if take 5 scenario=="child" || take 5
         "pages-resume"->snd <$> core lastPage [DebugAction "continue" []]
         "pages-retire"->retireTreeFromHost host (case receipt of WatchFrame owner _ _ _ _->owner) lastPage
         _->snd <$> core lastPage [DebugAction "stack" []] >>= await "page frame chooser" ((/=Nothing).dialog) >>= \d->case dialog d of
-          Just dg->let chosen=dg {fields=map (ield->case field of ListBox title values _->ListBox title values 1; _->field) (fields dg)}
+          Just dg->let chosen=dg {fields=map (\field->case field of ListBox title values _->ListBox title values 1; _->field) (fields dg)}
                        (next,outbox)=submitDialog 0 chosen d
                    in snd <$> core next outbox
           _->fail "missing page frame chooser"
@@ -165,8 +165,7 @@ session scenario=bracket (Fixture.fixture (if take 5 scenario=="child" || take 5
       _<-effects oldForce oldMore
       -- Poll the actual owner refusal, rather than infer retirement from a quiet
       -- UI before a delayed request has reached the debugger mailbox.
-      withAsync (debuggerSidebarRead runtime request) $ 
-eply->do
+      withAsync (debuggerSidebarRead runtime request) $ \reply->do
         _<-awaitIO "stale page receipt resolves" (\_->maybe False (const True) <$> poll reply) changed
         result<-wait reply
         check "old stopped/watch/provider receipt cannot read cached children" (either (const True) (const False) result)
