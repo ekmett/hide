@@ -35,6 +35,7 @@ import Hide.Render (renderKey)
 
 checks :: IO ()
 checks=do
+  dialogInputChecks
   debuggerNavigationChecks
   let check name ok=unless ok (error name)
       prepare=either (error . show) id . platformBindings [] TerminalPlatform . M.singleton "source" . M.fromList
@@ -697,3 +698,49 @@ debuggerNavigationChecks=do
       check "debugger navigation remains behind modal and focus owners" (not (commandEnabled modal (CursorLeft False)) && selected (fst (event (V.KFun 13) [] modal))==Selection 2 2 && not (commandEnabled unfocused (CursorLeft False)) && selected (fst (event (V.KFun 13) [] unfocused))==Selection 2 2)
       denied<-P.applyGuestInput (P.Key "F13" []) private
       check "debugger remap retains generated-source privacy" (not (guestKeyAllowed private (V.KFun 13) []) && case denied of Left _->True; _->False)
+
+
+-- Caret-only fields retain their exact field operations and control precedence.
+dialogInputChecks :: IO ()
+dialogInputChecks=do
+  let check name ok=unless ok (error name)
+      configured entries=either (error . show) id (configuredBindings [] (M.fromList
+        [(platform,M.singleton "dialog" (M.fromList entries)) | platform<-["terminal","graphical","macos"]]))
+      globals entries=either (error . show) id (platformBindings [] TerminalPlatform (M.singleton "global" (M.fromList entries)))
+      event key mods d=handleEvent (V.EvKey key mods) d
+      field d=case dialog d of Just dg | f:_<-fields dg -> f; _->error "missing Input"
+      base=prompt "Name" Information [Input "Name" "a界e\x301\&z" 2,FileList [Entry "old.hs" False Nothing Nothing] 0] (initialDesktop (80,25))
+      local=platformBindings [] TerminalPlatform (M.singleton "dialog" (M.singleton "hide.cursor.left" ["F13"]))
+      observed=(either (const False) (const True) local,
+        field (fst (event (V.KFun 13) [] base {keyBindings=globals [("hide.cursor.left",["F13"])]}))==Input "Name" "a界e\x301\&z" 1,
+        field (fst (event V.KLeft [] base {keyBindings=globals [("hide.cursor.left",[])]}))==field base)
+  check ("single-line Input configuration, remap and unbind: "++show observed) (case observed of (a,b,c)->a && b && c)
+  let entries=[("hide.cursor.left",["F13"]),("hide.cursor.right",["F14"]),("hide.cursor.row-start",["F15"]),("hide.cursor.row-end",["F16"]),("hide.edit.delete-backward",["F17"]),("hide.edit.delete-forward",["F18"])]
+      remapped=configured entries
+      removed=configured [(name,[]) | (name,_)<-entries]
+      altRemapped=configured [("hide.cursor.left",["Alt+Right"]),("hide.cursor.right",[])]
+      defaults=either (error . show) id (configuredBindings [] M.empty)
+      keys=[V.KLeft,V.KRight,V.KHome,V.KEnd,V.KBS,V.KDel]
+  forM_ [(False,Nothing),(False,Just 3),(True,Just 3)] $ \(mac,video)->do
+    let original=base {nativeMac=mac,videoMode=video}
+        current=original {keyBindings=remapped,buffers=error "Input command touched background documents"}
+        edited key=fst (event key [] current)
+        outcome (d,effects)=(fmap (\dg->(fields dg,focus dg)) (dialog d),effects)
+    check "Input command defaults preserve modifier and grapheme semantics" (all (\(key,mods,pos)->let d=original {dialog=fmap (\dg->dg {fields=replaceAt 0 (Input "Name" "a界e\x301\&z" pos) (fields dg)}) (dialog original)} in outcome (event key mods d)==outcome (event key mods d {keyBindings=defaults}))
+      ([(key,[],pos) | key<-keys,pos<-[0,2,5]]++[(V.KLeft,[V.MShift],2),(V.KRight,[V.MAlt],2),(V.KHome,[V.MCtrl],4),(V.KEnd,[V.MMeta],1),(V.KBS,[V.MCtrl,V.MShift],4),(V.KDel,[V.MShift],2)]))
+    check "Input remaps move by grapheme and row edges" (map (field . edited . V.KFun) [13,14,15,16]==[Input "Name" "a界e\x301\&z" 1,Input "Name" "a界e\x301\&z" 4,Input "Name" "a界e\x301\&z" 0,Input "Name" "a界e\x301\&z" 5])
+    check "Input remapped deletion clears stale filename selection" (field (edited (V.KFun 17))==Input "Name" "ae\x301\&z" 1 && field (edited (V.KFun 18))==Input "Name" "a界z" 2 && all (\key->case dialog (edited key) of Just dg | [FileList _ (-1)]<-drop 1 (fields dg)->True; _->False) [V.KFun 17,V.KFun 18])
+    check "Input explicit unbinding consumes old physical defaults" (all (\key->outcome (event key [] original {keyBindings=removed})==outcome (original,[])) keys && outcome (event V.KRight [V.MAlt] original {keyBindings=removed})==outcome (original,[]))
+    check "Input Alt Right can be remapped through its field owner" (field (fst (event V.KRight [V.MAlt] original {keyBindings=altRemapped}))==Input "Name" "a界e\x301\&z" 1)
+    check "Input projection and labels expose its effective commands" (lookup "F13" (focusedBindingChords current)==Just "hide.cursor.left" && menuShortcut current (MenuItem "Left" "Left" (CursorLeft False))=="F13")
+    let other f=current {buffers=M.empty,dialog=fmap (\dg->dg {fields=[f]}) (dialog current)}
+        selected=other (SelectedInput "Expression" "abc" (Selection 1 1))
+        area=other (TextArea "Text" True (newBuffer "abc") (Selection 1 1) 0 0)
+        combo=other (ComboBox "Choice" ["one","two"] 0 (Just 1))
+    check "Input bindings leave selected and multiline field owners fixed" (field (fst (event V.KLeft [V.MShift] selected))==SelectedInput "Expression" "abc" (Selection 1 0) && outcome (event (V.KFun 13) [] selected)==outcome (selected,[]) && case field (fst (event V.KLeft [] area)) of TextArea _ _ _ sel _ _->sel==Selection 0 0; _->False)
+    check "Input bindings leave open dropdowns and buttons fixed" (field (fst (event V.KHome [] combo))==ComboBox "Choice" ["one","two"] 0 (Just 0) && outcome (event (V.KFun 13) [] combo)==outcome (combo,[]) && let buttons=current {dialog=fmap (\dg->dg {fields=[],focus=1}) (dialog current)} in maybe False ((==0).focus) (dialog (fst (event V.KLeft [] buttons))))
+    let search=fst (runCommand Find original {keyBindings=remapped})
+    check "Input bindings preserve search page and Ctrl U owners" (maybe False (\dg->case purpose dg of Searching True _->True; _->False) (dialog (fst (event (V.KChar '\t') [V.MCtrl] search))) && field (fst (event (V.KChar 'u') [V.MCtrl] current))==Input "Name" "" 0)
+    forM_ [current {dialog=fmap (\dg->dg {fields=[Input "API key" "secret" 3]}) (dialog current)},current {dialog=fmap (\dg->dg {purpose=PermissionDialog "approve:test"}) (dialog current)}] $ \private->do
+      denied<-P.applyGuestInput (P.Key "F17" []) private
+      check "Input remapping cannot acquire private or approval authority" (case denied of Left _->True; _->False)

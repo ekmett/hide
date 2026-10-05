@@ -1442,6 +1442,7 @@ dialogCommandAllowed cmd d=case dialog d of
           | cmd `elem` [DialogFocusNext,DialogFocusPrevious] -> not (null (fields dg) && null (buttons dg))
           | Just _<-openComboBox dg -> False
           | searching dg,cmd `elem` [Find,Replace] -> True
+          | Input{}:_<-drop (focus dg) (fields dg) -> cmd `elem` map snd dialogInputKeys
           | SelectedInput{}:_<-drop (focus dg) (fields dg) -> cmd `elem` [Copy,Cut,Paste,SelectAll]
           | f:_<-drop (focus dg) (fields dg),editableArea f -> cmd `elem` [Copy,Cut,Paste,SelectAll,Undo,Redo]
   _ -> False
@@ -1449,7 +1450,19 @@ dialogCommandAllowed cmd d=case dialog d of
 -- | Modal controls and field editing/search share this catalogue.
 -- Semantic Accept/Cancel retain each focused control and permission owner.
 dialogBindingCommands :: [Command]
-dialogBindingCommands=[DialogFocusNext,DialogFocusPrevious,DialogAccept,DialogCancel,Copy,Cut,Paste,SelectAll,Undo,Redo,Find,Replace]
+dialogBindingCommands=[DialogFocusNext,DialogFocusPrevious,DialogAccept,DialogCancel,Copy,Cut,Paste,SelectAll,Undo,Redo,Find,Replace]++map snd dialogInputKeys
+
+-- | Caret-only Input defaults ignore modifiers, retaining the original field law.
+dialogInputKeys :: [(V.Key,Command)]
+dialogInputKeys=[(V.KLeft,CursorLeft False),(V.KRight,CursorRight False),
+  (V.KHome,CursorRowStart False),(V.KEnd,CursorRowEnd False),
+  (V.KBS,DeleteBackward),(V.KDel,DeleteForward)]
+
+-- | An open dropdown retains input ownership even if another field has focus.
+dialogInputOwner :: Desktop -> Bool
+dialogInputOwner d=case dialog d of
+  Just dg | Nothing<-openComboBox dg,Input{}:_<-drop (focus dg) (fields dg) -> True
+  _ -> False
 
 dialogReserved :: V.Key -> [V.Modifier] -> Bool
 dialogReserved key mods=key==V.KChar 'u' && V.MCtrl `elem` mods ||
@@ -1517,6 +1530,8 @@ applyDialogCommand cmd d
   | cmd==DialogFocusPrevious = moveDialogFocus (-1) d
   | cmd==Find = (searchPrompt False d,[])
   | cmd==Replace = (searchPrompt True d,[])
+  | Just dg<-dialog d,field@Input{}:_<-drop (focus dg) (fields dg) =
+      (d {dialog=Just (replaceDialogField (inputCommand cmd field) dg)},[])
   | Just dg<-dialog d,field@(SelectedInput caption value sel):_<-drop (focus dg) (fields dg) =
       let (a,z)=ordered sel
           copied=T.take (z-a) (T.drop a value)
@@ -3051,7 +3066,8 @@ effectiveBindings d = bindingContext d >>= \context->M.lookup (bindingPlatform d
 
 terminalContextReserved :: Desktop -> V.Key -> [V.Modifier] -> Bool
 terminalContextReserved d key mods =
-  (terminalSourceReserved key mods && not (bindingContext d==Just Bindings.DialogKeys && dialogControlChord key mods)) ||
+  (terminalSourceReserved key mods && not (bindingContext d==Just Bindings.DialogKeys &&
+    (dialogControlChord key mods || dialogInputOwner d && key `elem` map fst dialogInputKeys))) ||
   (bindingContext d==Just Bindings.WordStarKeys && wordStarReserved key mods) ||
   (bindingContext d==Just Bindings.DialogKeys && (dialogReserved key mods || windowCycleChord key mods)) ||
   (bindingContext d==Just Bindings.ConversationKeys && key==V.KEnter)
@@ -3068,6 +3084,8 @@ unboundKey :: V.Key -> [V.Modifier] -> Desktop -> (Desktop,[Effect])
 unboundKey key mods d
   | Just _<-effectiveBindings d,dialog d==Nothing,windowCycleChord key mods = (d,[])
   | Just _<-effectiveBindings d,dialog d/=Nothing,dialogControlChord key mods = (d,[])
+  | Just _<-effectiveBindings d,dialogInputOwner d, key `elem` map fst dialogInputKeys,
+    not (bindingPlatform d==Bindings.TerminalPlatform && V.MMeta `elem` mods) = (d,[])
   | Just _<-effectiveBindings d, sourceNavigationOwner d,
     not (bindingPlatform d==Bindings.TerminalPlatform && V.MMeta `elem` mods),
     key `elem` [V.KUp,V.KDown,V.KHome,V.KEnd,V.KPageUp,V.KPageDown,V.KLeft,V.KRight,V.KBS,V.KDel] = (d,[])
@@ -3485,15 +3503,19 @@ dialogEvent ev dg d
       _ -> updateField (fieldKey (if delta>0 then V.KDown else V.KUp) [])
     setFocus i = moveDialogFocus (i-focus dg) d
     updateDialog new = (d {dialog=Just new},[])
-    updateField f | focus dg<count =
-                    let old=fields dg !! focus dg
-                        changed=f old
-                        updated=replaceAt (focus dg) changed (fields dg)
-                        clear (FileList entries _) = FileList entries (-1)
-                        clear field = field
-                        typed = case (old,changed) of (Input _ a _,Input _ b _) -> a/=b; (SelectedInput _ a _,SelectedInput _ b _) -> a/=b; _ -> False
-                    in updateDialog dg {fields=if typed then map clear updated else updated}
+    updateField f | focus dg<count = updateDialog (replaceDialogField (f (fields dg !! focus dg)) dg)
                   | otherwise = (d,[])
+
+-- | Changed entry text invalidates the file dialog's old chosen filename.
+-- Caret movement alone preserves it, through both raw and configured editing.
+replaceDialogField :: Field -> Dialog -> Dialog
+replaceDialogField changed dg=case drop (focus dg) (fields dg) of
+  old:_ -> let updated=replaceAt (focus dg) changed (fields dg)
+               clear (FileList entries _) = FileList entries (-1)
+               clear field = field
+               typed=case (old,changed) of (Input _ a _,Input _ b _) -> a/=b; (SelectedInput _ a _,SelectedInput _ b _) -> a/=b; _ -> False
+           in dg {fields=if typed then map clear updated else updated}
+  _ -> dg
 
 replaceAt :: Int -> a -> [a] -> [a]
 replaceAt i x xs = take i xs ++ [x] ++ drop (i+1) xs
@@ -3511,15 +3533,25 @@ replaceInputSelection text (SelectedInput caption value sel)=
   in SelectedInput caption (T.take a value<>text<>T.drop z value) (Selection pos pos)
 replaceInputSelection _ field=field
 
+-- | Apply the six existing caret-only operations directly, without key replay.
+-- Source scalar positions and complete grapheme deletion match raw Input editing.
+inputCommand :: Command -> Field -> Field
+inputCommand cmd field@(Input label value pos)=
+  let set s p=Input label s (max 0 (min (T.length s) p))
+  in case cmd of
+    CursorLeft False -> set value (previousCharacter value pos)
+    CursorRight False -> set value (nextCharacter value pos)
+    CursorRowStart False -> set value 0
+    CursorRowEnd False -> set value (T.length value)
+    DeleteBackward -> let p=previousCharacter value pos in set (T.take p value<>T.drop pos value) p
+    DeleteForward -> set (T.take pos value<>T.drop (nextCharacter value pos) value) pos
+    _ -> field
+inputCommand _ field=field
+
 fieldKey :: V.Key -> [V.Modifier] -> Field -> Field
 fieldKey key mods field = case field of
+  Input{} | Just cmd<-lookup key dialogInputKeys -> inputCommand cmd field
   Input label value pos -> let set s p = Input label s (max 0 (min (T.length s) p)) in case key of
-    V.KLeft -> set value (previousCharacter value pos)
-    V.KRight -> set value (nextCharacter value pos)
-    V.KHome -> set value 0
-    V.KEnd -> set value (T.length value)
-    V.KBS -> let p=previousCharacter value pos in set (T.take p value<>T.drop pos value) p
-    V.KDel -> set (T.take pos value<>T.drop (nextCharacter value pos) value) pos
     V.KChar 'u' | V.MCtrl `elem` mods -> set "" 0
     V.KChar c | (null mods || mods==[V.MShift]) && textInputChar c -> set (T.take pos value<>T.singleton c<>T.drop pos value) (pos+1)
     _ -> field
