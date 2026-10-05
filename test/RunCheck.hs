@@ -543,7 +543,7 @@ admittedBuildChecks=when (os/="mingw32") $ bracket temporary removePathForcibly 
           pure accepted
         -- Preparation can complete in the background, but only the serialized
         -- owner tick may adopt it. Apply revocation/policy/Stop before that tick.
-        held runtime permissions caller after=admit runtime permissions caller base >>= after
+        beforeAdoption runtime permissions caller after=admit runtime permissions caller base >>= after
         -- Consume the initial wire-policy wake. A subsequent fresh-check wake
         -- then proves a result is ready without invoking the launch callback.
         freshPolicy runtime permissions d=do
@@ -566,7 +566,7 @@ admittedBuildChecks=when (os/="mingw32") $ bracket temporary removePathForcibly 
       clearMarker
       withConversationAt root $ \runtime->withPermissionsAt policyPath controlTools $ \permissions->do
         caller<-attributed runtime
-        pending<-held runtime permissions caller $ \d->case reason of
+        pending<-beforeAdoption runtime permissions caller $ \d->case reason of
           "revoked"->do
             let agents=conversationAgents runtime
             revokeAgentAccess (AR.agentAccess agents) (AR.primaryAgent agents)
@@ -582,7 +582,7 @@ admittedBuildChecks=when (os/="mingw32") $ bracket temporary removePathForcibly 
     clearMarker
     withConversationAt root $ \runtime->withPermissionsAt policyPath controlTools $ \permissions->do
       caller<-attributed runtime
-      pending<-held runtime permissions caller pure
+      pending<-beforeAdoption runtime permissions caller pure
       launched<-awaitLaunch runtime permissions pending
       check "approved input final policy does not ask again" (dialog launched==Nothing)
       _<-freshOptions runtime permissions launched
