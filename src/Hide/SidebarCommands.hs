@@ -16,12 +16,12 @@ import Control.Exception (bracket,evaluate,displayException,mask,onException)
 import Control.Monad (foldM,forever,forM,filterM,when)
 import Data.Aeson (Value(Null))
 import Data.IORef
-import Data.List (find)
+import Data.List (find,nub)
 import qualified Data.Map.Strict as M
 import qualified Data.Text as T
 import Data.Text (Text)
 import System.Directory (canonicalizePath)
-import System.FilePath ((</>),takeExtension)
+import System.FilePath ((</>),takeExtension,takeFileName,takeDirectory)
 import Data.Char (toLower)
 import System.Mem.StableName
 import Text.Read (readMaybe)
@@ -29,6 +29,8 @@ import Hide.Browser
 import Hide.Buffer (captureDirty,snapshotDirty,bufferLineChanges,prepareBuffer,prepareSourceWidths,bufferContent,Selection(..))
 import Hide.Plugin.BufferHost (ContentVersion,captureVersion,versionCurrent)
 import Hide.Files (FileState(..),loadFile)
+import qualified Hide.WorkspaceRename as Rename
+import System.IO.Error (tryIOError)
 import Hide.GuestAccess (protectedPath,protectedFilePath,protectedBuffer)
 import Hide.Links (LinkResult,applyLink)
 import Hide.PluginWindowHost (adoptWindowUpdate)
@@ -47,14 +49,14 @@ import qualified Hide.Plugin.Menu as Menu
 -- | Captured host policy; extension labels and paths grant no authority.
 data SidebarContext = SidebarContext
   { sidebarOrigin :: !Menu.MenuOrigin, sidebarPrivatePaths :: ![FilePath]
-  , sidebarColumns :: !Int, sidebarOpened :: !(Maybe (FilePath,Int,Int,ContentVersion)) }
-data SidebarReply = SidebarForm !(Form.PreparedInputForm SidebarContext SidebarReply) | SidebarSession !SessionSidebarRequest | SidebarExisting !FilePath !Int !Int !ContentVersion | SidebarDocument !FilePath !Document | SidebarPrepared !LinkResult | SidebarAgent !AgentSidebarRequest | SidebarDebug !DebugSidebarRequest | SidebarWindow !PluginWindow.WindowUpdate
+  , sidebarColumns :: !Int, sidebarOpened :: !(Maybe (FilePath,Int,Int,ContentVersion)), sidebarRenameFiles :: ![Rename.RenameFile] }
+data SidebarReply = SidebarRename !P.TreeRef !Rename.PreparedRename | SidebarForm !(Form.PreparedInputForm SidebarContext SidebarReply) | SidebarSession !SessionSidebarRequest | SidebarExisting !FilePath !Int !Int !ContentVersion | SidebarDocument !FilePath !Document | SidebarPrepared !LinkResult | SidebarAgent !AgentSidebarRequest | SidebarDebug !DebugSidebarRequest | SidebarWindow !PluginWindow.WindowUpdate
 
 data ChildJob = ChildJob !TreeRequest !Menu.MenuOrigin !(Async (Either CommandError (P.PreparedPage SidebarContext SidebarReply))) !Bool
 data ActionJob = ActionJob ![P.TreeHit] !CommandRef !Menu.MenuOrigin !Int !(Async (Either CommandError SidebarReply)) !Bool
   | FormJob !Form.FormRef !(Async (Either CommandError SidebarReply)) !Bool
 data Publication = TreePublication !(P.TreeProvider SidebarContext SidebarReply) | FormRefresh !Form.InputFormUpdate
-data FilesProvider = FilesProvider !(P.TreeProvider SidebarContext SidebarReply) !FilePath !CommandRef !(IORef (M.Map P.NodeId FilePath,M.Map FilePath P.NodeId,Int,M.Map FilePath [Entry]))
+data FilesProvider = FilesProvider !(P.TreeProvider SidebarContext SidebarReply) !FilePath !CommandRef !CommandRef !CommandRef !(IORef (M.Map P.NodeId FilePath,M.Map FilePath P.NodeId,Int,M.Map FilePath [Entry]))
 data State = State
   { providers :: !(M.Map P.TreeRef (P.TreeProvider SidebarContext SidebarReply))
   , definitions :: !(M.Map NodeKey (P.NodeDef SidebarContext SidebarReply))
@@ -120,7 +122,7 @@ retireTreeFromHost (SidebarHost _ ref _ _ _ _) owner d=do
   pure d {sideTree=fmap (removeRoot owner) (sideTree d),contextMenu=Nothing,contextTarget=Nothing}
 
 context :: Menu.MenuOrigin -> Desktop -> SidebarContext
-context origin d=SidebarContext origin (guestPrivatePaths d) (max 20 (min 76 (fst (screenSize d)-treeWidthOf d-4))) Nothing
+context origin d=SidebarContext origin (guestPrivatePaths d) (max 20 (min 76 (fst (screenSize d)-treeWidthOf d-4))) Nothing []
 metadata :: P.NodeDef c r -> (P.NodeInfo,Maybe CommandRef,[(Text,P.TreeMenuTarget)])
 metadata node=(P.nodeInfo node,fmap P.actionReference (P.nodeAction node),map P.menuTarget (P.nodeMenus node))
 addProvider :: P.TreeProvider SidebarContext SidebarReply -> Sidebar -> Sidebar
@@ -152,7 +154,27 @@ createFiles host root=do
   let registry=sidebarRegistry host
   rootId<-either (ioError . userError . T.unpack) pure (P.nodeId "root")
   cache<-newIORef (M.singleton rootId root,M.singleton root rootId,1,M.empty)
+  owner<-newIORef Nothing
   open<-either (ioError . userError . show) pure =<< registerCommand registry (CommandDef "hide.sidebar.files.open" "Open file" codec codec prepareSidebarFile)
+  renameTo<-either (ioError . userError . show) pure =<< registerCommand registry
+    (CommandDef "hide.sidebar.files.rename-to" "Rename file" codec codec (\ctx (source,name)->
+      if sidebarOrigin ctx/=Menu.HumanMenu then pure (Left (CommandRejected "File rename requires the human.")) else do
+        prepared<-tryIOError (Rename.prepareBasenameRename source name)
+        current<-readIORef owner
+        pure $ case (prepared,current) of
+          (Right value,Just reference)->Right (SidebarRename reference value)
+          (Left err,_)->Left (CommandRejected (T.pack (show err)))
+          _->Left (CommandRejected "Files provider expired.")))
+  rename<-either (ioError . userError . show) pure =<< registerCommand registry
+    (CommandDef "hide.sidebar.files.rename" "Rename" codec codec (\ctx path->
+      if sidebarOrigin ctx/=Menu.HumanMenu then pure (Left (CommandRejected "File rename requires the human.")) else do
+        source<-tryIOError (Rename.prepareRenameSource True root (sidebarPrivatePaths ctx) path (sidebarRenameFiles ctx))
+        case source of
+          Left err->pure (Left (CommandRejected (T.pack (show err))))
+          Right captured->do
+            prepared<-Form.prepareInputForm (Form.InputFormSpec "Rename file" "Name" (T.pack (takeFileName (Rename.renameSourcePath captured))) "Rename")
+              (Form.formAction registry renameTo (\name->(captured,name)) (\_ value->pure value))
+            pure (SidebarForm <$> prepared)))
   provider<-either (ioError . userError . show) pure =<< P.registerTree registry "hide.sidebar.files"
     (P.NodeDef (P.NodeInfo rootId "Files" "" True (Just root)) Nothing [])
     (\ctx (P.ChildRequest ident cursor)->do
@@ -190,12 +212,14 @@ createFiles host root=do
                         pure (P.NodeDef (P.NodeInfo node (T.take 256 (T.filter (>= ' ') (entryName entry))) (if entryDirectory entry then "📁" else "📄")
                           (entryDirectory entry) (Just resource))
                           (if entryDirectory entry then Nothing else Just (P.treeAction registry open resource (\_ ->pure)))
-                          [P.ResourceMenu "Open" resource "" | not (entryDirectory entry),map toLower (takeExtension resource) `elem` [".md",".markdown",".png",".jpg",".jpeg",".gif",".webp",".bmp",".svg",".pdf"]])
+                          ([P.ResourceMenu "Open" resource "" | not (entryDirectory entry),map toLower (takeExtension resource) `elem` [".md",".markdown",".png",".jpg",".jpeg",".gif",".webp",".bmp",".svg",".pdf"]]++
+                           [P.ActionMenu "Rename…" (P.treeAction registry rename resource (\_ value->pure value)) | not (entryDirectory entry)]))
                       -- Cache bounded directory pages at the filesystem owner. Old
                       -- directories may be re-enumerated after their cache expires.
                       atomicModifyIORef' cache $ \(a,b,c,dirs)->((M.insert ident base a,M.insert base ident b,c,M.insert base visible (if M.size dirs>=32 then M.empty else dirs)),())
                       pure (Right (P.NodePage values (if length (drop (offset+128) visible)>0 then Just (T.pack (show (offset+128))) else Nothing))))
-  pure (FilesProvider provider root (commandRef open) cache)
+  writeIORef owner (Just (P.treeReference provider))
+  pure (FilesProvider provider root (commandRef open) (commandRef rename) (commandRef renameTo) cache)
   where codec=Codec Null (const (Left "Files arguments are host-captured.")) (const Null)
 
 -- | Mount initial Files and prepare its first projection outside the UI boundary.
@@ -235,6 +259,7 @@ sidebarEffects host@(SidebarHost _ _ _ _ _ closed) core d effects=do
         Form.retireForm reference
         pure (False,current)
       RefreshTree path entries->(False,) <$> refreshFiles host path entries current
+      RefreshRenamedPath old new->(False,) <$> refreshRenamedPath host old new current
       _->core current [effect]
 
 mount :: SidebarHost -> Desktop -> IO Desktop
@@ -247,7 +272,7 @@ mount host@(SidebarHost _ ref _ _ _ _) d=case sideTree d of
         basis=if M.null (treeNodes visible) then visible {treeEpoch=epoch,treeRevision=epoch} else visible
         tree=foldl (flip addProvider) basis live
     case filesProvider state of
-      Just (FilesProvider provider root _ _) | root==treeRoot tree->do
+      Just (FilesProvider provider root _ _ _ _) | root==treeRoot tree->do
         let key=NodeKey (P.treeReference provider) (P.infoId (P.nodeInfo (P.treeRoot provider)))
             next=if M.member (P.treeReference provider) (providers state) then addProvider provider tree else tree
         if M.member key (treeNodes visible) then pure d {sideTree=Just next}
@@ -255,10 +280,10 @@ mount host@(SidebarHost _ ref _ _ _ _) d=case sideTree d of
       _->do
         -- This path is startup/directory selection, which already belongs to the
         -- host's file effect owner. Registration and root validation are bounded.
-        mapM_ (\(FilesProvider provider _ command _)->P.retireTree provider >> retireCommand (sidebarRegistry host) command) (filesProvider state)
-        created@(FilesProvider provider _ _ _)<-createFiles host (treeRoot tree)
+        mapM_ (\(FilesProvider provider _ open rename renameTo _)->P.retireTree provider >> mapM_ (retireCommand (sidebarRegistry host)) [open,rename,renameTo]) (filesProvider state)
+        created@(FilesProvider provider _ _ _ _ _)<-createFiles host (treeRoot tree)
         let owner=P.treeReference provider
-            withdrawn=maybe tree (\(FilesProvider old _ _ _)->removeRoot (P.treeReference old) tree) (filesProvider state)
+            withdrawn=maybe tree (\(FilesProvider old _ _ _ _ _)->removeRoot (P.treeReference old) tree) (filesProvider state)
             fresh=addProvider provider withdrawn {treeAgentRefs=[owner]}
             key=NodeKey owner (P.infoId (P.nodeInfo (P.treeRoot provider)))
             defs=M.insert key (P.treeRoot provider) (definitions state)
@@ -306,7 +331,11 @@ invokeAction (SidebarHost _ ref _ _ _ _) trace reference origin d=case (trace,si
     live<-maybe (pure False) P.treeCurrent (M.lookup owner (providers state))
     case (actionJob state,action) of
       (Nothing,Just command) | live && allowed->do
-        ctx<-captureActionContext origin trace d
+        captured<-captureActionContext origin trace d
+        files<-case filesProvider state of
+          Just (FilesProvider _ _ _ rename _ _) | origin==Menu.HumanMenu,reference==rename->Rename.captureRenameFiles d
+          _->pure []
+        let ctx=captured {sidebarRenameFiles=files}
         worker<-async (P.invokeTreeAction command ctx)
         writeIORef ref state {actionJob=Just (ActionJob trace reference origin (sidebarColumns ctx) worker False)}
         pure d {status="Opening sidebar target…"}
@@ -327,11 +356,28 @@ captureActionContext origin trace d=do
     _->pure Nothing
   pure (context origin d) {sidebarOpened=opened}
 
+-- Forget only moved-subtree identities/enumerations; unaffected sibling IDs
+-- remain stable. Existing provider workers refresh both parent listings.
+refreshRenamedPath :: SidebarHost -> FilePath -> FilePath -> Desktop -> IO Desktop
+refreshRenamedPath host@(SidebarHost _ ref _ _ _ _) old new d=do
+  state<-readIORef ref
+  case filesProvider state of
+    Just (FilesProvider provider _ _ _ _ cache)->do
+      let parents=nub [takeDirectory old,takeDirectory new]
+          moved path=Rename.within old path || Rename.within new path
+      paths<-atomicModifyIORef' cache $ \(a,b,c,dirs)->
+        ((M.filter (not . moved) a,M.filterWithKey (\path _->not (moved path)) b,c,
+          M.filterWithKey (\path _->path `notElem` parents && not (moved path)) dirs),b)
+      foldM (\current path->case M.lookup path paths of
+        Just ident->refreshTreeFromHost host (P.treeReference provider) ident current
+        Nothing->pure current) d parents
+    _->pure d
+
 refreshFiles :: SidebarHost -> FilePath -> [Entry] -> Desktop -> IO Desktop
 refreshFiles host@(SidebarHost _ ref _ _ _ _) path entries d=do
   state<-readIORef ref
   case (filesProvider state,sideTree d) of
-    (Just (FilesProvider provider _ _ cache),Just tree)->do
+    (Just (FilesProvider provider _ _ _ _ cache),Just tree)->do
       (_,paths,_,_)<-readIORef cache
       atomicModifyIORef' cache (\(a,b,c,dirs)->((a,b,c,M.insert path entries (if M.size dirs>=32 && not (M.member path dirs) then M.empty else dirs)),()))
       case M.lookup path paths >>= \ident->let key=NodeKey (P.treeReference provider) ident in (key,) <$> M.lookup key (treeNodes tree) of
@@ -391,7 +437,7 @@ tickSidebar host@(SidebarHost _ ref publications cancellation _ closed) core ini
     finishChild state (d,keep) job@(ChildJob request origin worker cancelled)=do
       live<-maybe (pure False) P.treeCurrent (M.lookup (owner request) (providers state))
       allowed<-if origin==Menu.HumanMenu then pure True else case filesProvider state of
-        Just (FilesProvider provider _ _ cache) | P.treeReference provider==owner request->do
+        Just (FilesProvider provider _ _ _ _ cache) | P.treeReference provider==owner request->do
           (paths,_,_,_)<-readIORef cache
           let P.TreeHit _ ident _=requestHit request
           pure (maybe False (not . protectedPath d) (M.lookup ident paths))
@@ -579,6 +625,7 @@ finishAction host@(SidebarHost _ ref _ cancellation _ _) core d=do
               Right (Right SidebarWindow{})->d {status="Sidebar result expired."}
               Right (Right SidebarForm{})->d {status="Sidebar form expired."}
               Right (Right SidebarAgent{})->d {status="Sidebar result expired."}
+              Right (Right SidebarRename{})->d {status="Sidebar result expired."}
               Right (Right (SidebarPrepared value))->fst (applyLink value d)
               Right (Right (SidebarDocument path doc))
                 | origin==Menu.AgentMenu && protectedPath d path->d {status="Sidebar target is now protected."}
@@ -682,7 +729,7 @@ submitForm (SidebarHost _ ref _ _ _ _) reference text origin d=mask $ \restore->
             modifyIORef' ref (\s->s {actionJob=Just (FormJob reference worker False)})
             pure d {dialog=Nothing,status="Submitting input form..."}
     _->pure d {status="Input form expired."}
--- This first host form consumer supports only the closed RenameAgentTo reply.
+-- Fixed agent/file rename replies require their owning checked adoption routes.
 -- Other typed form handlers require their own checked host result route.
 -- Fixed replies are forced at their owning worker before the UI receives them.
 forceFormReply :: SidebarReply -> IO SidebarReply
@@ -692,10 +739,11 @@ forceFormReply (SidebarAgent (RenameAgentTo who value))
       let copied=T.copy value
       _<-evaluate (T.length copied)
       evaluate (SidebarAgent (RenameAgentTo who copied))
+forceFormReply reply@SidebarRename{}=evaluate reply
 forceFormReply _=ioError (userError "Unsupported single-line form reply.")
 finishFormJob :: SidebarHost -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> Form.FormRef
   -> Async (Either CommandError SidebarReply) -> Bool -> IO Desktop
-finishFormJob (SidebarHost _ ref _ cancellation _ _) core d reference worker cancelled=do
+finishFormJob host@(SidebarHost _ ref _ cancellation _ _) core d reference worker cancelled=do
   state<-readIORef ref
   live<-case inputForm state of
     Just prepared | Form.formReference prepared==reference->Form.submissionCurrent prepared
@@ -714,4 +762,13 @@ finishFormJob (SidebarHost _ ref _ cancellation _ _) core d reference worker can
       consumed<-if current then Form.finishFormSubmission reference else Form.retireForm reference >> pure False
       case result of
         Right (Right (SidebarAgent request@RenameAgentTo{})) | consumed->snd <$> core d [AgentSidebarAction request]
+        Right (Right (SidebarRename owner prepared)) | consumed->do
+          provider<-maybe (pure False) P.treeCurrent (M.lookup owner (providers state))
+          if not provider then pure d {status="Files provider expired."} else do
+            changed<-Rename.commitWorkspaceRename prepared d
+            case changed of
+              Left err->pure d {status=err}
+              Right renamed->let (old,new)=Rename.renamePaths prepared in
+                refreshRenamedPath host old new renamed {status="File renamed."}
+        Right (Left err) | consumed->pure d {status="Input form submission failed: "<>T.pack (show err)}
         _->pure d {status=if not consumed then "Input form expired." else "Input form submission failed."}

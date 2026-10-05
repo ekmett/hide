@@ -637,6 +637,7 @@ applyEffects = foldM apply . (False,)
     apply (_,d) LoadTree{}=pure (False,d {status="Sidebar provider host is unavailable in this preview."})
     apply (_,d) InvokeTree{}=pure (False,d {status="Sidebar provider host is unavailable in this preview."})
     apply (_,d) RefreshTree{}=pure (False,d)
+    apply (_,d) RefreshRenamedPath{}=pure (False,d)
     apply (_,d) InvokeMenu{}=pure (False,d {status="Registered menu actions are unavailable in this preview."})
     apply (_,d) ReadHelp=do
       path<-getDataFileName "README.md"
