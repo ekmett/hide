@@ -695,7 +695,7 @@ debuggerNavigationChecks=do
       check "debugger navigation defaults preserve existing pane geometry" (all (\(key,mods)->state (event key mods original)==state (event key mods original {keyBindings=defaults}))
         [(V.KLeft,[]),(V.KRight,[V.MShift]),(V.KUp,[]),(V.KDown,[V.MShift]),(V.KHome,[]),(V.KEnd,[]),(V.KHome,[V.MCtrl]),(V.KEnd,[V.MCtrl]),(V.KPageUp,[]),(V.KPageDown,[V.MShift]),(V.KLeft,[V.MCtrl]),(V.KRight,[V.MCtrl,V.MShift])])
       check "debugger navigation cannot acquire read-only mutation authority" (not (commandEnabled configured DeleteBackward) && activeText (result (V.KFun 15) [])==activeText configured && maybe (-1) (revision . documentBuffer) (activeDocument (result (V.KFun 15) []))==maybe (-2) (revision . documentBuffer) (activeDocument configured))
-      check "debugger navigation remains behind modal and focus owners" (not (commandEnabled modal (CursorLeft False)) && selected (fst (event (V.KFun 13) [] modal))==Selection 2 2 && not (commandEnabled unfocused (CursorLeft False)) && selected (fst (event (V.KFun 13) [] unfocused))==Selection 2 2)
+      check "debugger navigation remains behind modal and focus owners" (boundKeyCommand (V.KFun 13) [] modal==Nothing && selected (fst (event (V.KFun 13) [] modal))==Selection 2 2 && not (commandEnabled unfocused (CursorLeft False)) && selected (fst (event (V.KFun 13) [] unfocused))==Selection 2 2)
       denied<-P.applyGuestInput (P.Key "F13" []) private
       check "debugger remap retains generated-source privacy" (not (guestKeyAllowed private (V.KFun 13) []) && case denied of Left _->True; _->False)
 
