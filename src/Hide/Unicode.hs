@@ -6,7 +6,7 @@
 -- Clipped GPU cells retain their full semantic glyph. Text-mode partial clusters
 -- become blanks. Terminal output advances
 -- explicitly past two-cell clusters even when the user's font draws them narrowly.
-module Hide.Unicode (SourceCursor, initialSourceCursor, sourceItemStep, sourceSpanStep, sourceItemsFromCursor, sourceLeafFrom, DisplayItem, displayItems, itemSourceText, itemScalarCount, itemDisplayText, itemOverflow, itemWidth, sourceItemAdvance, graphemes, sourceGraphemesFrom, sourceTextWidth, sourceGlyphAdvance, scalarWidth, clusterWidth, textImage, wideTextImage, displayClusters, terminalProjection, scriptTerminalText, terminalSpan, Script(..), CellSpan(..), CellLayer(..), cellRowsForLayers, cellRowsForPic, cellDisplayOps, flattenPicture, displayOpsForPic, updateDisplayOps, terminalText, textInputChar) where
+module Hide.Unicode (SourceCursor, initialSourceCursor, sourceItemStep, sourceSpanStep, sourceItemsFromCursor, sourceLeafFrom, sourceScalarColumn, DisplayItem, displayItems, itemSourceText, itemScalarCount, itemDisplayText, itemOverflow, itemWidth, sourceItemAdvance, graphemes, sourceGraphemesFrom, sourceTextWidth, sourceGlyphAdvance, scalarWidth, clusterWidth, textImage, wideTextImage, displayClusters, terminalProjection, scriptTerminalText, terminalSpan, Script(..), CellSpan(..), CellLayer(..), cellRowsForLayers, cellRowsForPic, cellDisplayOps, flattenPicture, displayOpsForPic, updateDisplayOps, terminalText, textInputChar) where
 
 import Control.Monad (forM_, when)
 import Data.Char (isPrint)
@@ -235,6 +235,28 @@ sourceLeafFrom requested initialColumn (SourceCursor previous state flags) lastO
             in if col+advance>goal then finish char byte col (scanItems text lastOverflow byte prev st continued processed)
                else seek end (char+count) (col+advance) nextPrev nextState nextContinued True
 {-# NOINLINE sourceLeafFrom #-}
+
+-- | Exact absolute column for a local source-scalar position in a captured leaf.
+-- An interior position snaps to its complete item's starting column. Incoming
+-- cursor and artificial-EOF overflow facts follow 'sourceLeafFrom'. The numeric
+-- loop retains no per-item cursor or source fragments; only the final column is
+-- boxed. Tabs resolve against the supplied absolute column.
+sourceScalarColumn :: Int -> Int -> SourceCursor -> Bool -> T.Text -> Int
+sourceScalarColumn requested initialColumn (SourceCursor previous state flags) lastOverflow text=
+  I# (seek 0 0 initialColumn previous state (flags .&. 1/=0) (flags .&. 2/=0))
+  where
+    goal=max 0 requested
+    size=TU.lengthWord8 text
+    finish (I# col)=col
+    seek !byte !char !col !prev !st !continued !processed
+      | char>=goal || byte>=size=finish col
+      | otherwise=case itemEnd text byte prev st continued processed of
+          (# end#,count#,first#,natural#,controls,overflow,nextContinued,nextPrev#,nextState# #)->
+            let end=I# end#; count=I# count#
+                advance=if overflow || end==size && lastOverflow then 1 else sourceAdvance col count (C# first#) (I# natural#) controls
+            in if char+count>goal then finish col else seek end (char+count) (col+advance)
+              (fromIntegral (I# nextPrev#)) (fromIntegral (I# nextState#)) nextContinued True
+{-# NOINLINE sourceScalarColumn #-}
 
 -- | Natural source cell extent, including tab stops and control placeholders.
 -- Reuses numeric UTF8/stateful grapheme seeking; counting width does not allocate

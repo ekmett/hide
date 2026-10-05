@@ -4011,7 +4011,7 @@ hoverAt x y d = (d {hoverTarget=target,typeHint=fromMaybe (if target==hoverTarge
                 _ | projected<changeLineOffset b row+T.length (changeLineAt b row) -> Just (bid,revision b,changeToLiveOffset b projected)
                 _ -> Nothing
             else let line=contentSourceLineAt (bufferContent b) normalRow; offset=sourceLineColumnOffset line normalColumn
-                 in if normalRow>=bufferLineCount b || normalColumn>=sourceLineWidth line then Nothing
+                 in if normalRow>=bufferLineCount b || offset>=sourceLineLength line then Nothing
                     else Just (bid,revision b,bufferLineOffset b normalRow+offset)
 
 -- A completion (including imports) is a single undoable transaction.

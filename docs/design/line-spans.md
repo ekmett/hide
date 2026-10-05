@@ -1,10 +1,11 @@
 # Regular spans for long lines
 
 Status: in progress, 5 October 2026. Tracked in [issue #116](https://github.com/ekmett/hide/issues/116).
-The shared bounded Unicode cursor and borrowed regular span storage are implemented.
-Source viewports, coordinates and local edits use the span measures. Construction
-still prepares the complete display index eagerly; demand-driven indexing remains
-open.
+Loaded long rows retain their original text and share a lazy stream of regular
+span receipts. Exact queries prepare only the prefix they visit. The first edit
+promotes that row to a measured tree for persistent local repair. Exact width
+remains a separate memoized full-row calculation; removing that first-use scan
+is still open.
 
 We want cheap horizontal seeks and small edits in long lines. Dice the text into
 borrowed spans at roughly **128-byte intervals**. Keep old spans after an edit;
@@ -41,13 +42,18 @@ not choose span boundaries or prove that source bytes are equal.
 
 ## Borrowed storage and edits
 
-Keep ordinary short lines as compact `Text`. Long lines can share spans of
-immutable UTF8 arrays. A span stores no absolute source position: prefix measures
-supply it, so an insertion does not renumber the suffix. New typed text supplies
+Keep ordinary short lines as compact `Text`. A loaded long line keeps its original
+`Text`, cached scalar/encoding/provenance metadata and a shared lazy stream of
+borrowed spans. Loading and whole-text export do not force that stream. A span
+stores no absolute source position: prefix measures supply it, so an insertion
+does not renumber the suffix. New typed text supplies
 new backing storage. Adjacent slices of the same array can be joined without a
 copy; crossing arrays requires copying only the small repaired region.
 
-A local edit locates the affected spans, splices the new text, and repairs the
+The first edit of a loaded long row forces its remaining span receipts and
+promotes the row to a measured finger tree. This preparation is linear in that
+row; its span payloads remain shared with the previous immutable line in Undo.
+Later local edits locate the affected spans, splice the new text, and repair the
 join and adjacent short or oversized spans. Reuse the untouched suffix. Editing
 one character must not make us recut an otherwise unchanged periodic line.
 Chunk boundaries may depend on edit history; bytes, coordinates and rendering
@@ -71,34 +77,32 @@ available to file output, HLS and highlighting on their owning workers.
 
 ## Prepare only what a seek needs
 
-Horizontal scrolling is uncommon. Do not eagerly build a complete display index
-for every line just because it was loaded. Keep an indexed prefix and a borrowed
-unindexed tail with its Unicode checkpoint. Extend through the requested source
-position or the right edge of the viewport, then stop. A first distant seek has
-to inspect the uncached prefix; later seeks should reuse that work.
+Horizontal scrolling is uncommon. Do not eagerly dice every loaded long line
+into a complete display index. Its shared lazy span stream extends through the
+requested source position or viewport, with bounded item lookahead, then stops.
+A first distant seek inspects the uncached prefix synchronously. Later seeks walk
+small cached receipts in O(reached spans), decoding only the selected bounded
+span and visible successors. There is no second complete tree or presentation
+cache, and no user input is discarded while preparation runs.
 
-A strict width-measured finger tree built in a thunk is still eager when its root
-measure is demanded. Only the prepared prefix belongs in that measured index.
-Byte/scalar storage and its editing metadata must not force display preparation
-as a side effect.
+The stream belongs to the immutable source line. Forcing its thunks changes no
+content identity, revision, dirty state or Undo. Only a real edit promotes it to
+the existing persistent measured tree. Scalar metadata and explicit whole-text
+reads remain independent of display preparation. Ordinary short rows keep their
+compact representation and existing query path.
 
-Use the existing presentation worker and small source/version keys to prepare
-and adopt derived indexes. Retain useful prefix work when a viewport moves;
-changing the request does not invalidate the unchanged source. Retain the latest
-prefix, not a history of all intermediate prefixes. Derived index adoption must
-not dirty the file, add Undo entries or compare a whole desktop.
+Exact total width is an exception: loaded rows memoize a numeric full-row scan
+independently of span receipts. A scrollbar can demand that width on first paint;
+this still reads the entire row once, but does not construct an undemanded span
+index. Repeated width requests reuse the result. Bounded draft sizing stops at
+its requested cap instead of demanding total width. Eliminating the first exact
+width scan remains a concrete follow-up, not a claim of this implementation.
 
-The exact first uncached hit or navigation query may use the existing numeric
-source cursor while preparation catches up. Do not guess coordinates or claim
-that a pure query cached its progress. Its first-use cost must be measured.
-Avoid an extra full-prefix pass when the reached state can be retained through
-the existing owner.
-
-Audit callers as well as the index. Hover can use the reached source offset and
-cached row length to reject EOF; it does not need the full display width. A
-scrollbar uses a known worker-computed extent or an explicit pending extent.
-Neither should force every unfinished line index through EOF. Prepared Markdown
-and other transformed layouts keep their own geometry.
+Hover rejects EOF using the reached source scalar offset and cached row length.
+Viewport queries normalize consumed line terminators to the editor's EOF without
+asking for total width. Tabs, partial wide glyphs, scalar positions inside an
+item and artificial versus real EOF retain the shared Unicode policy. Prepared
+Markdown and other transformed layouts keep their own geometry.
 
 ## Display advance
 
