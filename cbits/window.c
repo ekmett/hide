@@ -342,8 +342,10 @@ static bool grow_atlas(void) {
 static AtlasEntry *atlas_entry(const GlyphCommand *c,int hover,int cursor) {
     int w=c->text?(c->pixelated?8*c->cells:cell_x(c->x+c->cells)-cell_x(c->x)):c->width;
     int h=c->text && !c->pixelated?cell_y(c->y+1)-cell_y(c->y):16;
+    /* Line decorations are cell paint, never atlas glyph identity. */
+    uint32_t glyph_traits=c->traits&7;
     uint64_t hash=hash_bytes(14695981039346656037ULL,&w,sizeof(w));
-    hash=hash_bytes(hash,&h,sizeof(h)); hash=hash_bytes(hash,&c->traits,sizeof(c->traits));
+    hash=hash_bytes(hash,&h,sizeof(h)); hash=hash_bytes(hash,&glyph_traits,sizeof(glyph_traits));
     if (c->text) {
         hash=hash_bytes(hash,c->text,strlen(c->text)); hash=hash_bytes(hash,&c->fg,sizeof(c->fg));
         hash=hash_bytes(hash,&c->pixelated,sizeof(c->pixelated)); hash=hash_bytes(hash,&hover,sizeof(hover)); hash=hash_bytes(hash,&cursor,sizeof(cursor));
@@ -352,7 +354,7 @@ static AtlasEntry *atlas_entry(const GlyphCommand *c,int hover,int cursor) {
     if (!hash) hash=1;
     size_t slot=hash%ATLAS_SLOTS;
     for (size_t n=0;atlas[slot].hash && n<ATLAS_SLOTS;++n,slot=(slot+1)%ATLAS_SLOTS)
-        if (atlas[slot].hash==hash && atlas[slot].w==w && atlas[slot].h==h && atlas[slot].traits==c->traits &&
+        if (atlas[slot].hash==hash && atlas[slot].w==w && atlas[slot].h==h && atlas[slot].traits==glyph_traits &&
             (c->text?atlas[slot].text && !strcmp(atlas[slot].text,c->text) && atlas[slot].fg==c->fg &&
                 atlas[slot].pixelated==c->pixelated && atlas[slot].hover==hover && atlas[slot].cursor==cursor &&
                 ((hover<0 && cursor<0) || atlas[slot].bg==c->bg):!atlas[slot].text && !memcmp(atlas[slot].bits,c->bits,sizeof(c->bits)))) return &atlas[slot];
@@ -376,7 +378,7 @@ static AtlasEntry *atlas_entry(const GlyphCommand *c,int hover,int cursor) {
     if (!pixels) { SDL_SetError("Cannot allocate glyph tile"); return NULL; }
     bool ok=true;
     if (c->text) {
-        ok=c->pixelated?thc_unicode_pixelated(c->text,w,h,c->fg,c->traits,pixels):thc_unicode_bitmap(c->text,w,h,c->fg,c->traits,pixels);
+        ok=c->pixelated?thc_unicode_pixelated(c->text,w,h,c->fg,glyph_traits,pixels):thc_unicode_bitmap(c->text,w,h,c->fg,glyph_traits,pixels);
         if (ok && (hover>=0 || cursor>=0)) for (int y=0;y<h;++y) for (int x=0;x<w;++x) {
             uint32_t ink=pixels[y*w+x]; unsigned alpha=ink>>24,inverse=255-alpha;
             uint32_t rgb=((((ink>>16)&255)+((c->bg>>16)&255)*inverse/255)<<16)|
@@ -403,11 +405,28 @@ static AtlasEntry *atlas_entry(const GlyphCommand *c,int hover,int cursor) {
     free(pixels); if (!ok) return NULL;
     ++atlas_uploads; atlas_bytes+=(uint64_t)w*h*4;
     AtlasEntry cached={0}; cached.hash=hash; cached.x=atlas_x; cached.y=atlas_y; cached.w=w; cached.h=h;
-    cached.fg=c->fg; cached.bg=c->bg; cached.traits=c->traits; cached.hover=hover; cached.cursor=cursor; cached.pixelated=c->pixelated;
+    cached.fg=c->fg; cached.bg=c->bg; cached.traits=glyph_traits; cached.hover=hover; cached.cursor=cursor; cached.pixelated=c->pixelated;
     memcpy(cached.bits,c->bits,sizeof(cached.bits));
     if (c->text) { cached.text=strdup(c->text); if (!cached.text) return NULL; }
     atlas[slot]=cached; ++atlas_keys; atlas_x+=w; atlas_row=SDL_max(atlas_row,h);
     return &atlas[slot];
+}
+/* Software fallback mirrors the shader's normalized font-row decorations.
+ * These strips use the same clip and paint transforms as their owning cells. */
+static bool draw_decorations(const GlyphCommand *c,int count,float y,float height,int hover,int cursor) {
+    for (int line=0;line<2;++line) {
+        if (!(c->traits&(line?16:8))) continue;
+        int row=line?7:15;
+        float top=floorf(height*row/16),bottom=ceilf(height*(row+1)/16);
+        for (int cell=0;cell<count;++cell) {
+            uint32_t fg=c->fg;
+            if (cell==cursor && row>=14) fg^=0xffffff;
+            if (cell==hover) fg=mouse_color(fg);
+            float x=origin_x+cell_x(c->x+cell),width=cell_x(c->x+cell+1)-cell_x(c->x+cell);
+            if (!quad(x,y+top,width,SDL_max(1.f,bottom-top),0.5f/atlas_size,0.5f/atlas_size,0,0,fg)) return false;
+        }
+    }
+    return true;
 }
 static bool draw_command(const GlyphCommand *c) {
     draw_clip_x=c->clip_x; draw_clip_width=c->clip_width;
@@ -419,7 +438,8 @@ static bool draw_command(const GlyphCommand *c) {
     if (c->text) {
         float x=origin_x+cell_x(c->x),width=cell_x(c->x+c->cells)-cell_x(c->x);
         if (!quad(x,y,width,height,0.5f/atlas_size,0.5f/atlas_size,0,0,c->bg)) return false;
-        return quad(x,y,width,height,(entry->x+0.5f)/atlas_size,(entry->y+0.5f)/atlas_size,entry->w/(float)atlas_size,entry->h/(float)atlas_size,0xffffff);
+        if (!quad(x,y,width,height,(entry->x+0.5f)/atlas_size,(entry->y+0.5f)/atlas_size,entry->w/(float)atlas_size,entry->h/(float)atlas_size,0xffffff)) return false;
+        return draw_decorations(c,count,y,height,hover,cursor);
     }
     for (int cell=0;cell<count;++cell) for (int part=0;part<2;++part) {
         float x=origin_x+cell_x(c->x+cell),width=cell_x(c->x+cell+1)-cell_x(c->x+cell);
@@ -432,7 +452,7 @@ static bool draw_command(const GlyphCommand *c) {
         if (source<entry->w && !quad(x,py,width,ph,(entry->x+source+0.5f)/atlas_size,(entry->y+(part?14:0)+0.5f)/atlas_size,
             SDL_min(sourceWidth,entry->w-source)/atlas_size,(part?2.f:14.f)/atlas_size,fg)) return false;
     }
-    return true;
+    return draw_decorations(c,count,y,height,hover,cursor);
 }
 static bool reserve_cells(size_t capacity) {
     if (capacity<=cell_capacity) return true;
@@ -476,7 +496,7 @@ restart:
             cell_grid[index]=(struct HideGlyphCell){
                 {(uint32_t)entry->x|((uint32_t)entry->y<<16),(uint32_t)entry->w|((uint32_t)entry->h<<16),
                  (uint32_t)full|((uint32_t)(x-c->x)<<16),previous},
-                {c->fg,c->bg,(c->cells?1u:0u)|(c->text?0u:2u),depth}};
+                {c->fg,c->bg,(c->cells?1u:0u)|(c->text?0u:2u)|(c->traits&24u),depth}};
         }
     }
     size_t bytes=cell_count*sizeof(*cell_grid);

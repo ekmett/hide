@@ -13,7 +13,7 @@ struct HideUInt4 { uint32_t x,y,z,w; };
  * only zero-advance combining overlays use an append-only tail, at most 16 deep. */
 struct HideGlyphCell {
     HIDE_UINT4 geometry; /* packed atlas x/y, width/height, full cells/offset, predecessor+1 */
-    HIDE_UINT4 paint; /* foreground RGB, background RGB, background/bitmap flags, overlay depth */
+    HIDE_UINT4 paint; /* foreground RGB, background RGB, background/bitmap flags + underline8/strike16, overlay depth */
 };
 #undef HIDE_UINT4
 #endif
