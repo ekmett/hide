@@ -503,32 +503,33 @@ statusHints d = [(if action==Nothing then text else keyLabel d text,action) | (t
 statusHintsRaw :: Desktop -> [(Text,Maybe (Either Command V.Event))]
 statusHintsRaw d
   | dragOriginal d/=Nothing = [(keyLabel d " ↑↓→← Move  Shift+↑↓→← Resize",Nothing),key "  ↵ Done" V.KEnter [],key "  Esc Cancel" V.KEsc []]
-  | Just text<-menuHelp d = [command " F1 Help" Help,(" | "<>text,Nothing)]
+  | Just text<-menuHelp d = [command " F1" "Help" Help,(" | "<>text,Nothing)]
   | Just c<-prefix d = [(keyLabel d (" Ctrl+"<>T.singleton c<>"- "),Nothing),key " Esc Cancel" V.KEsc []]
-  | Just dg<-dialog d, approvalDialog dg = [command " Tab Next" DialogFocusNext,key "  Alt+A Allow" (V.KChar 'a') [V.MAlt],key "  Alt+D Deny" (V.KChar 'd') [V.MAlt],command "  Esc Deny" DialogCancel]
-  | Just dg<-dialog d, searching dg = [key " Ctrl+Tab Find/Replace" (V.KChar '\t') [V.MCtrl],command "  Tab Next" DialogFocusNext,command "  Enter Apply" DialogAccept,command "  Esc Cancel" DialogCancel] ++
-      [command (if nativeMac d then "  Cmd+Alt+F Replace" else "  Ctrl+H Replace") Replace]
-  | dialog d/=Nothing = [command " Tab Next" DialogFocusNext,command "  Enter Select" DialogAccept,command "  Esc Cancel" DialogCancel] ++
-      [command ((if nativeMac d then "  Cmd+" else "  Ctrl+")<>keyName<>" "<>label) cmd | (keyName,label,cmd)<-[("C","Copy",Copy),("V","Paste",Paste)],dialogCommandAllowed cmd d]
-  | problemsVisible d && problemsFocused d = [command " Enter Source" GoToMessage,command (if nativeMac d then "  Cmd+C Copy" else "  Ctrl+C Copy") Copy,command "  Copy all" CopyAllMessages]
+  | Just dg<-dialog d, approvalDialog dg = [command " Tab" "Next" DialogFocusNext,key "  Alt+A Allow" (V.KChar 'a') [V.MAlt],key "  Alt+D Deny" (V.KChar 'd') [V.MAlt],command "  Esc" "Deny" DialogCancel]
+  | Just dg<-dialog d, searching dg = [key " Ctrl+Tab Find/Replace" (V.KChar '\t') [V.MCtrl],command "  Tab" "Next" DialogFocusNext,command "  Enter" "Apply" DialogAccept,command "  Esc" "Cancel" DialogCancel] ++
+      [command (if nativeMac d then "  Cmd+Alt+F" else "  Ctrl+H") "Replace" Replace]
+  | dialog d/=Nothing = [command " Tab" "Next" DialogFocusNext,command "  Enter" "Select" DialogAccept,command "  Esc" "Cancel" DialogCancel] ++
+      [command ((if nativeMac d then "  Cmd+" else "  Ctrl+")<>keyName) label cmd | (keyName,label,cmd)<-[("C","Copy",Copy),("V","Paste",Paste)],dialogCommandAllowed cmd d]
+  | problemsVisible d && problemsFocused d = [command " Enter" "Source" GoToMessage,command (if nativeMac d then "  Cmd+C" else "  Ctrl+C") "Copy" Copy,command " " "Copy all" CopyAllMessages]
   | Just v<-inlinePreview d,inlineMatches d v = [key " Tab Accept" (V.KChar '\t') [],key "  Alt+Right Word" V.KRight [V.MAlt],key (if nativeMac d then "  Cmd+[ Previous" else "  Alt+[ Previous") (V.KChar '[') [V.MAlt],key (if nativeMac d then "  Cmd+] Next" else "  Alt+] Next") (V.KChar ']') [V.MAlt],key "  Esc Dismiss" V.KEsc []]
   | activeAutocomplete d = [key " Enter Send hint" V.KEnter [],key "  Shift+Enter Newline" V.KEnter [V.MShift],key "  Tab Transcript / hint" (V.KChar '\t') []]
   | questionActive d = [key " Enter Answer" V.KEnter [],key "  Tab Choices" (V.KChar '\t') [],key "  Esc Cancel" V.KEsc []]
   | composerActive d, composerInCode d =
-      [key " Enter Newline" V.KEnter [],command ("  "<>submitHint QuerySubmit) (SubmitChat QuerySubmit),
-       command ("  "<>submitHint SteerSubmit) (SubmitChat SteerSubmit)] ++ [key "  Esc Cancel" V.KEsc [] | agentReplying d]
+      [key " Enter Newline" V.KEnter []] ++
+      [("  "<>submitHint action,Just (Left (SubmitChat action))) | action<-[QuerySubmit,SteerSubmit]] ++
+      [key "  Esc Cancel" V.KEsc [] | agentReplying d]
   | activeConversation d =
       [key (" Enter "<>submitLabel False) V.KEnter [],key ("  Ctrl+Enter "<>submitLabel True) V.KEnter [V.MCtrl],
        key "  Shift+Enter Newline" V.KEnter [V.MShift]] ++ [key "  Esc Cancel" V.KEsc [] | agentReplying d]
   | not (T.null (typeHint d)) = [(" "<>typeHint d,Nothing)]
-  | not (T.null (status d)) = [command " F1 Help" Help,(" | "<>status d,Nothing)]
-  | Just _<-activePluginWindow d = [command " Ctrl+C Copy" Copy,command "  Alt+F3 Close" Close,(" | Read-only plugin text",Nothing)]
-  | otherwise = [command " F1 Help" Help,command "  F2 Save" Save,command "  F3 Open" Open,
-      command "  Alt+F9 Compile" CompileTarget,command "  F9 Make" MakeTarget,command "  Ctrl+F9 Run" RunTarget]
-  where command label cmd=(effective label cmd,Just (Left cmd))
-        effective label cmd | Just bindings<-effectiveBindings d =
-          " "<>maybe "" (<>" ") (listToMaybe (Bindings.bindingKeys bindings cmd))<>T.stripStart (snd (T.breakOn " " (T.stripStart label)))
-        effective label _=label
+  | not (T.null (status d)) = [command " F1" "Help" Help,(" | "<>status d,Nothing)]
+  | Just _<-activePluginWindow d = [command " Ctrl+C" "Copy" Copy,command "  Alt+F3" "Close" Close,(" | Read-only plugin text",Nothing)]
+  | otherwise = [command " F1" "Help" Help,command "  F2" "Save" Save,command "  F3" "Open" Open,
+      command "  Alt+F9" "Compile" CompileTarget,command "  F9" "Make" MakeTarget,command "  Ctrl+F9" "Run" RunTarget]
+  where command shortcut caption cmd=(effective shortcut caption cmd,Just (Left cmd))
+        effective _ caption cmd | Just bindings<-effectiveBindings d =
+          " "<>maybe "" (<>" ") (listToMaybe (Bindings.bindingKeys bindings cmd))<>caption
+        effective shortcut caption _=shortcut<>" "<>caption
         key label k mods=(label,Just (Right (V.EvKey k mods)))
         submitHint action=(if action/=chatSubmit d then "Ctrl+Enter " else "")<>(if action==SteerSubmit then "Steer" else if agentReplying d then "Queue query" else "Query")
         submitLabel opposite=if composerQuery opposite d then if agentReplying d then "Queue query" else "Query" else "Steer"
