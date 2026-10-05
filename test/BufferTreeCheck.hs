@@ -9,6 +9,10 @@ import qualified Data.ByteString as BS
 import qualified Data.Text as T
 import Hide.Buffer
 import qualified Hide.BufferView as View
+import qualified Hide.Model as Model
+import qualified Graphics.Vty as V
+import qualified Data.Map.Strict as M
+import Hide.Commands (configuredBindings)
 
 check :: String -> Bool -> IO ()
 check name ok = unless ok (error ("buffer tree: " ++ name))
@@ -32,6 +36,7 @@ checkIndexed b text = do
 
 checks :: IO ()
 checks = do
+  wordChecks
   batchChecks
   lineChangesChecks
   let clipped = replaceSelection (Selection (-3) 99) "界" (newBuffer "abc")
@@ -281,3 +286,53 @@ batchChecks = do
   after<-getAllocationCounter
   check "preparing sparse batch shares unchanged tree and does not flatten text" (before-after<2*1024*1024)
   check "sparse batch counts only changed lines" (bufferLineChanges sparse==(2,2))
+
+-- Check the existing Text policy independently at every scalar position, including
+-- inside combining/ZWJ sequences. Word motion intentionally is not grapheme motion.
+wordChecks :: IO ()
+wordChecks=do
+  let fixtures=["", "alpha beta\n gamma", "a\r\n\r\n b", "a!! ???b\n", "界e\x301\x200d😀  \n_z'\t+", "  \n \n", "one\n two\n"]
+      verify b=let text=contents b in forM_ [0..T.length text] $ \p->
+        check "measured scalar word motion matches Text"
+          ((bufferWordLeft b p,bufferWordRight b p)==(wordLeft text p,wordRight text p))
+  forM_ fixtures $ \text->do
+    let base=newBuffer text
+        edited=replaceSelection (Selection 0 (min 3 (T.length text))) "x!\n \n" base
+        removed=replaceSelection (Selection 0 5) "" edited
+    mapM_ verify [base,edited,removed,undo removed,redo (undo removed),markSaved removed]
+  let deleted=replaceSelection (Selection 5 13) "" (newBuffer "left\nremoved\n right")
+  check "word fixture retains deleted provenance"
+    (any (\(kind,_,_)->kind==DeletedLine) (bufferChangeRows deleted 0 (changeRowCount deleted)))
+  verify deleted
+  let source="alpha beta gamma"
+      base=Model.addDocument Nothing (newBuffer source) (Model.initialDesktop (80,25))
+      selected=Model.modifyActive (\w->w {Model.selection=Selection 6 10}) base
+      erased=fst (Model.handleEvent (V.EvKey V.KBS [V.MCtrl]) selected)
+      Just result=Model.activeDocument erased
+  check "selected word deletion remains one ordinary undo"
+    (contents (Model.documentBuffer result)=="alpha  gamma" && length (undoStack (Model.documentBuffer result))==1 &&
+      contents (undo (Model.documentBuffer result))==source)
+  let wordStar=Model.modifyActive (\w->w {Model.selection=Selection 8 8}) base {Model.wordStar=True}
+      star=fst (Model.handleEvent (V.EvKey (V.KChar 'f') [V.MCtrl]) wordStar)
+      composer=(Model.addReadOnly "Conversation" "trace" base) {Model.composerFocused=True,Model.composerBuffer=newBuffer source,Model.composerSelection=Selection 8 8}
+      moved=fst (Model.handleEvent (V.EvKey V.KRight [V.MCtrl]) composer)
+  check "WordStar and composer retain their word owner"
+    (fmap (caret . Model.selection) (Model.activeWindow star)==Just (wordRight source 8) &&
+      caret (Model.composerSelection moved)==wordRight source 8)
+  -- A changed buffer's first projection is still lazy. Only the tiny movement
+  -- result is demanded here; forcing the whole source would exceed this bound.
+  let maps=either (error . show) id (configuredBindings [] M.empty)
+      right desktop=maybe 0 (caret . Model.selection) (Model.activeWindow (fst (Model.handleEvent (V.EvKey V.KRight [V.MCtrl]) desktop)))
+  _<-evaluate (right base {Model.keyBindings=maps})
+  let large=newBuffer (T.replicate 10000 "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu\n")
+      p=bufferLineOffset large 5000+8
+      changed=replaceSelection (Selection 0 1) "A" large
+      desktop=Model.modifyActive (\w->w {Model.selection=Selection p p})
+        (Model.addDocument Nothing changed (Model.initialDesktop (80,25))) {Model.keyBindings=maps}
+  _<-evaluate (prepareBuffer changed)
+  _<-evaluate (maybe 0 (caret . Model.selection) (Model.activeWindow desktop))
+  before<-getAllocationCounter
+  position<-evaluate (right desktop)
+  after<-getAllocationCounter
+  check "cold local word motion does not flatten unrelated rows"
+    (position==p+3 && before-after<524288)

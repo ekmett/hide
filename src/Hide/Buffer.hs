@@ -22,7 +22,7 @@ module Hide.Buffer
     ChangeKind(..), changeRowCount, bufferChangeRows, changeLength, changeSlice
   , changeLineColumn, changeLineOffset, changeLineAt, liveToChangeOffset, changeToLiveOffset
   , changeHunkAt, nextChangeHunk, revertChangeHunk, bufferLineColumn, bufferLineOffset, bufferLineAt
-  , bufferNextCharacter, bufferPreviousCharacter, bufferNewline, bufferSlice
+  , bufferNextCharacter, bufferPreviousCharacter, bufferWordLeft, bufferWordRight, bufferNewline, bufferSlice
   , lineColumn, textLines, lineOffset, lineAt, displayColumn, columnOffset
   , combining, nextCharacter, previousCharacter, wordLeft, wordRight, wordChar, characterWidth
   ) where
@@ -756,6 +756,53 @@ wordRight t p = p + T.length word + T.length spaces
   where
     (word, rest) = T.span wordChar (T.drop p t)
     spaces = if T.null word then T.take 1 rest else T.takeWhile isSpace rest
+
+-- | Move left by the existing scalar word policy, with a clamped live offset.
+-- @bufferWordLeft b p == wordLeft (contents b) (clamp p)@. Skips preceding
+-- whitespace, then a word or punctuation run. Only the containing row and
+-- crossed live leaves are read; deleted provenance never contributes text.
+bufferWordLeft :: Buffer -> Int -> Int
+bufferWordLeft b position=case T.unsnoc remaining of
+  Nothing->0
+  Just (_,c)->let (result,_,_)=spanLeft (if wordChar c then wordChar else punctuation) q remaining earlier in result
+  where
+    p=max 0 (min (bufferLength b) position)
+    (before,line,column,_)=splitLine p (bufferLines b)
+    (q,remaining,earlier)=spanLeft isSpace p (T.take column line) before
+    punctuation c=not (wordChar c) && not (isSpace c)
+    spanLeft predicate offset text previous=
+      let rest=T.dropWhileEnd predicate text
+          next=offset-T.length (T.takeWhileEnd predicate text)
+      in next `seq` if not (T.null rest) then (next,rest,previous) else case FT.viewr previous of
+        prefix FT.:> leaf | lineOrigin leaf/=Deleted->spanLeft predicate next (lineText leaf) prefix
+        _ | lineCount (FT.measure previous)<=0->(next,"",FT.empty)
+          | otherwise->let (prefix,remaining)=FT.split ((>lineCount (FT.measure previous)-1) . lineCount) previous
+                       in case FT.viewl remaining of
+                         leaf FT.:< _->spanLeft predicate next (lineText leaf) prefix
+                         FT.EmptyL->(next,"",FT.empty)
+
+-- | Move right by the existing asymmetric scalar word policy.
+-- @bufferWordRight b p == wordRight (contents b) (clamp p)@. A current word
+-- consumes its following whitespace; any other current scalar advances once.
+-- Measured lookup and live neighbors avoid the lazy whole-text projection.
+bufferWordRight :: Buffer -> Int -> Int
+bufferWordRight b position=case T.uncons current of
+  Nothing->p
+  Just (c,_) | not (wordChar c)->p+1
+             | otherwise->let (q,rest,later)=spanRight wordChar p current after
+                              (result,_,_)=spanRight isSpace q rest later
+                          in result
+  where
+    p=max 0 (min (bufferLength b) position)
+    (_,line,column,after)=splitLine p (bufferLines b)
+    current=T.drop column line
+    spanRight predicate offset text following=
+      let (consumed,rest)=T.span predicate text
+          next=offset+T.length consumed
+      in next `seq` if not (T.null rest) then (next,rest,following) else case FT.viewl following of
+        leaf FT.:< suffix | lineOrigin leaf==Deleted->spanRight predicate next "" (FT.dropUntil ((>0) . lineCount) following)
+                          | otherwise->spanRight predicate next (lineText leaf) suffix
+        FT.EmptyL->(next,"",FT.empty)
 
 wordChar :: Char -> Bool
 wordChar c = isAlphaNum c || c `elem` ("_'" :: String)
