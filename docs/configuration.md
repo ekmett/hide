@@ -181,15 +181,16 @@ binding too. Ordinary text, menu mnemonics, window navigation, completion contro
 Escape, F10 and Ctrl+] remain reserved. Conversation Enter retains the configured
 Query/Steer and code-block submission behavior. Dialog `dialog` tables accept only Copy, Cut, Paste, Select all, Undo, Redo,
 Find, Replace, `hide.dialog.focus-next`, `hide.dialog.focus-previous`,
-`hide.dialog.accept` and `hide.dialog.cancel`, plus the six caret-only Input commands
+`hide.dialog.accept` and `hide.dialog.cancel`, plus six commands for caret-only single-line fields
 `hide.cursor.left/right`, `hide.cursor.row-start/row-end` and
-`hide.edit.delete-backward/forward`. Clipboard and Undo/Redo apply to an editable
-TextArea; Find/Replace apply to a search dialog. Plain single-line `Input` fields
+`hide.edit.delete-backward/forward`. Clipboard and Undo/Redo apply to editable
+multiline text boxes; Find/Replace apply to a search dialog. Single-line fields
+such as **Text to find** and Save As **Name**
 use their existing grapheme movement/deletion and Home/End defaults, including
 modifier aliases. Remapping or `[]` consumes the old physical keys only while
-that Input owns focus. Ctrl+U, ordinary typing and Ctrl/Alt button mnemonics retain
-their existing owners. SelectedInput, TextArea, dropdown, list and button navigation
-remain with their current field controls. Defaults for clipboard/search are Ctrl+C/X/V/A,
+that field owns focus. Ctrl+U, ordinary typing and Ctrl/Alt button mnemonics retain
+their existing owners. Fields with selection, multiline text boxes, dropdowns, lists and buttons
+retain their current navigation controls. Defaults for clipboard/search are Ctrl+C/X/V/A,
 Ctrl+Shift+C/X/V/A, Ctrl+Z Undo, Ctrl+Y and Ctrl+Shift+Z Redo, Ctrl+F Find,
 and Ctrl+H/R Replace, with the macOS Cmd counterparts. Only permitted actions
 are projected to native/browser accelerators for the current field. For example:
@@ -280,8 +281,8 @@ WordStar Ctrl+A/F aliases use the configurable word movement commands.
 macOS Command+Tab remains owned by application switching. WordStar prefix/block
 grammar and the remaining field controls stay outside this command catalogue;
 see [configurable keybindings](https://github.com/ekmett/hide/issues/3).
-Caret-only Input movement/deletion does not introduce selection, clipboard or Undo
-semantics for that field.
+Caret-only single-line movement/deletion does not introduce selection, clipboard
+or Undo behavior for those fields.
 
 ## Environment
 

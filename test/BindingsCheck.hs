@@ -731,6 +731,7 @@ dialogInputChecks=do
     check "Input remaps move by grapheme and row edges" (map (field . edited . V.KFun) [13,14,15,16]==[Input "Name" "a界e\x301\&z" 1,Input "Name" "a界e\x301\&z" 4,Input "Name" "a界e\x301\&z" 0,Input "Name" "a界e\x301\&z" 5])
     check "Input remapped deletion clears stale filename selection" (field (edited (V.KFun 17))==Input "Name" "ae\x301\&z" 1 && field (edited (V.KFun 18))==Input "Name" "a界z" 2 && all (\key->case dialog (edited key) of Just dg | [FileList _ (-1)]<-drop 1 (fields dg)->True; _->False) [V.KFun 17,V.KFun 18])
     check "Input explicit unbinding consumes old physical defaults" (all (\key->outcome (event key [] original {keyBindings=removed})==outcome (original,[])) keys && outcome (event V.KRight [V.MAlt] original {keyBindings=removed})==outcome (original,[]))
+    check "Input reserved chord cannot be assigned to dialog acceptance" (either (const True) (const False) (platformBindings [] (bindingPlatform original) (M.singleton "dialog" (M.singleton "hide.dialog.accept" ["Alt+Right"]))))
     check "Input Alt Right can be remapped through its field owner" (field (fst (event V.KRight [V.MAlt] original {keyBindings=altRemapped}))==Input "Name" "a界e\x301\&z" 1)
     check "Input projection and labels expose its effective commands" (lookup "F13" (focusedBindingChords current)==Just "hide.cursor.left" && menuShortcut current (MenuItem "Left" "Left" (CursorLeft False))=="F13")
     let other f=current {buffers=M.empty,dialog=fmap (\dg->dg {fields=[f]}) (dialog current)}

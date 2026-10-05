@@ -210,7 +210,7 @@ platformBindings catalogue platform configuration=do
             WordStarKeys -> fmap (filter (not . wordStarChord)) global
             _ -> global
           overrides=M.union (M.findWithDefault M.empty (contextName context) configuration) inherited
-      forM_ (concat (M.elems overrides)) $ \raw->do
+      forM_ [(name,raw) | (name,chords)<-M.toList overrides,raw<-chords] $ \(name,raw)->do
         (key,mods)<-readChord raw
         let character=case key of V.KChar _->not (any (`elem` mods) [V.MCtrl,V.MAlt,V.MMeta]) && not (context==DialogKeys && dialogFocusChord key mods); _->False
             contextReserved=case context of
@@ -223,13 +223,14 @@ platformBindings catalogue platform configuration=do
         let platformReserved = (platform==TerminalPlatform && V.MMeta `elem` mods) ||
               (platform==MacPlatform && ((V.MAlt `elem` mods && V.MCtrl `notElem` mods && V.MMeta `notElem` mods && not (context==DialogKeys && dialogFocusChord key mods) && case key of V.KChar _->True; _->False) || (key `elem` map V.KChar "h\\[]" && V.MMeta `elem` mods))) ||
               (platform/=TerminalPlatform && key `elem` map V.KChar "0+=-" && any (`elem` mods) [V.MCtrl,V.MAlt])
-        unless (not (terminalSourceReserved key mods && not (context==DialogKeys && (dialogControlChord key mods || key `elem` map fst dialogInputKeys)) || contextReserved || platformReserved || context==WordStarKeys && wordStarReserved key mods || context==DialogKeys && (dialogReserved key mods || windowCycleChord key mods)))
+        unless (not (terminalSourceReserved key mods && not (context==DialogKeys && (dialogControlChord key mods || name `elem` inputNames && key `elem` map fst dialogInputKeys)) || contextReserved || platformReserved || context==WordStarKeys && wordStarReserved key mods || context==DialogKeys && (dialogReserved key mods || windowCycleChord key mods)))
           (Left ("Reserved "<>contextName context<>" key: "<>raw))
       compiled<-either (Left . (("Keybinding context "<>contextName context<>": ")<>)) Right $ compileBindings ([(builtinIdentifier entry,builtinAction entry,keys context (builtinAction entry)) | entry<-builtinCommands,context/=DialogKeys || builtinAction entry `elem` dialogBindingCommands]++[(name,action,[]) | (name,action)<-catalogue,context/=DialogKeys,name `notElem` map builtinIdentifier builtinCommands]) overrides
       pure ((platform,context),compiled)
     processControl key mods=case key of
       V.KChar _ -> V.MCtrl `elem` mods && V.MAlt `notElem` mods && V.MMeta `notElem` mods && not (windowCycleChord key mods)
       _ -> False
+    inputNames=[builtinIdentifier entry | entry<-builtinCommands,builtinAction entry `elem` map snd dialogInputKeys]
     dialogChord raw=case readChord raw of Right (key,mods)->dialogReserved key mods; _->False
     wordStarChord raw=case readChord raw of Right (key,mods)->wordStarReserved key mods; _->False
     processControlChord raw=case readChord raw of Right (key,mods)->processControl key mods; _->False
