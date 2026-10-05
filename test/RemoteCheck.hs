@@ -22,7 +22,7 @@ import System.Posix.Files (setFileMode)
 import Data.List (isInfixOf)
 #endif
 import System.Timeout (timeout)
-import Hide.Buffer (newBuffer, markSaved)
+import Hide.Buffer (Selection(..), newBuffer, markSaved)
 import qualified Data.Map.Strict as M
 import Hide.EditorMCP (editorResponse, runEditorMCPWithHandles, runEditorMCPWithToken, readMCPLine)
 import Hide.Markdown (renderMarkdown)
@@ -565,7 +565,8 @@ requestedPasteReconnectCheck :: IO ()
 requestedPasteReconnectCheck=do
   session<-randomIdentity
   path<-sessionEndpoint session
-  let initial=addDocument Nothing (newBuffer "source") (initialDesktop (80,25))
+  let initial=(addDocument Nothing (newBuffer "source") (initialDesktop (80,25)))
+        {dialog=Just (Dialog "Rename" Information [SelectedInput "Name" "old" (Selection 0 3)] 0 ["OK","Cancel"] [])}
       client=replicate 48 'f'
       open=connectEndpoint path
       awaitOpen attempts=open `catch` \(err::IOException)->if attempts<=0 then throwIO err else threadDelay 10000 >> awaitOpen (attempts-1)
@@ -597,24 +598,31 @@ requestedPasteReconnectCheck=do
     first<-awaitOpen (300::Int)
     greeting<-attach first 0
     command first 1
+    closedReceipt<-receipt first
+    void (control first "ack")
+    writePacket first (JsonPacket (object ["type" .= ("key"::T.Text),"seq" .= (2::Int),"key" .= ("Escape"::T.Text)]))
+    void (control first "ack")
+    reply first 3 closedReceipt "WRONG-BUFFER"
+    void (control first "ack")
+    command first 4
     old<-receipt first
     void (control first "ack")
     hClose first
     threadDelay 100000
     bracket open hClose $ \second->do
-      resumed<-attach second 1
+      resumed<-attach second 4
       check "Same-client reconnect retains sequence epoch" (KM.lookup "epoch" greeting==KM.lookup "epoch" resumed)
-      reply second 2 old "STALE"
+      reply second 5 old "STALE"
       void (control second "ack")
-      command second 3
+      command second 6
       fresh<-receipt second
       check "Reattached clipboard read gets a fresh identity" (fresh/=old)
       void (control second "ack")
-      reply second 4 old "OLD"
+      reply second 7 old "OLD"
       void (control second "ack")
-      reply second 5 fresh "accepted"
+      reply second 8 fresh "accepted"
       void (control second "ack")
-      reply second 6 fresh "DUPLICATE"
+      reply second 9 fresh "DUPLICATE"
       void (control second "ack")
       done<-timeout 3000000 (awaitText "acceptedsource")
-      check "Reconnect/old/duplicate replies cannot edit wrong target or consume fresh receipt" (done==Just ())
+      check "Closed-dialog/reconnect/old/duplicate replies cannot edit wrong target or consume fresh receipt" (done==Just ())
