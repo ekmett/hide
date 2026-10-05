@@ -38,6 +38,9 @@ import qualified Data.Map.Strict as M
 import Foreign (alloca, allocaArray, peek, peekArray, withArray)
 import Foreign.C
 import Data.IORef
+import Data.Word (Word64)
+import Data.List (mapAccumL)
+import Hide.FrameTiming
 import GHC.Clock (getMonotonicTimeNSec)
 import Text.Printf (printf)
 import System.Directory (getHomeDirectory, createDirectoryIfMissing)
@@ -262,13 +265,13 @@ sanitizeDownloadName input = case limit (T.map clean (last (T.splitOn "/" (T.rep
                 | otherwise = c
 
 #if defined(WITH_WINDOW) && defined(WITH_REMOTE)
-data Incoming = Frame RemoteFrame | Assets (M.Map T.Text Glyph) | Control Value
+data Incoming = Frame Int Word64 RemoteFrame | Assets (M.Map T.Text Glyph) | Control Value
 -- Compression and file transfers stay off the SDL thread.
 receiveFrames :: RemotePeer -> TBQueue Incoming -> IO ()
-receiveFrames peer queue = go [] (object []) Nothing
+receiveFrames peer queue = go [] (object []) Nothing 0
   where
     emit item = atomically (writeTBQueue queue item) >> c_wake
-    go rows metadata download = peerReceive peer >>= \packet -> case packet of
+    go rows metadata download demand = peerReceive peer >>= \packet -> case packet of
       Nothing -> emit (Control (object ["type" .= ("closed"::T.Text)]))
       Just (JsonPacket value) -> do
         kind <- parseIO (withObject "control" (.: "type")) value :: IO T.Text
@@ -282,22 +285,27 @@ receiveFrames peer queue = go [] (object []) Nothing
             supported <- parseIO (withObject "assets" (\o -> o .:? "menuCommands" .!= [])) value :: IO [T.Text]
             unless (length supported<=256 && all ((<=256).T.length) supported) (ioError (userError "Invalid menu commands"))
             emit (Assets atlas)
-            go [] (object ["menuCommands" .= supported]) Nothing
+            go [] (object ["menuCommands" .= supported]) Nothing 0
           "download" -> do
             name <- parseIO (withObject "download" (.: "name")) value
-            go rows metadata (Just name)
-          "connection" -> emit (Control value) >> go rows metadata Nothing
-          _ -> emit (Control value) >> go rows metadata download
+            go rows metadata (Just name) demand
+          "frame-ready" -> do
+            (serial,changed)<-parseIO (withObject "frame readiness" (\o -> (,) <$> o .: "seq" <*> o .: "changed")) value
+            if changed then go rows metadata download serial
+              else emit (Control value) >> go rows metadata download demand
+          "connection" -> emit (Control value) >> go rows metadata Nothing 0
+          _ -> emit (Control value) >> go rows metadata download demand
       Just (BinaryPacket bytes) -> case download of
         Just name -> do
           saveDownload name bytes `catch` \(e::IOException) -> hPutStrLn stderr ("Download failed: "++show e)
-          go rows metadata Nothing
+          go rows metadata Nothing demand
         Nothing -> do
+          received<-getMonotonicTimeNSec
           (delta,newRows) <- decodeFrame rows bytes
           let merged = case (delta,metadata) of (Object new,Object old) -> Object (KM.union new old); _ -> delta
           frame <- either (ioError . userError) pure (parseRemoteFrame merged newRows)
-          emit (Frame frame)
-          go newRows merged Nothing
+          emit (Frame demand received frame)
+          go newRows merged Nothing demand
     saveDownload name bytes = do
       directory <- (</> "Downloads") <$> getHomeDirectory
       createDirectoryIfMissing True directory
@@ -312,15 +320,17 @@ drawRemote font atlas frame = do
   c_crt_filter (flag (remoteCRT frame))
   c_pixelate_unicode (flag (remotePixelated frame))
   check "Allocate remote frame" c_begin
-  forM_ (remoteCells frame) $ \(RemoteCell x y paint semantic full start shown) -> do
-    -- Safe text projection until the native atlas adapter consumes clip fields.
-    let (text,w)=if start/=0 || shown/=full then (T.replicate shown " ",shown) else (semantic,full)
+  forM_ (remoteCells frame) $ \(RemoteCell visible y paint text full start shown) -> do
+    let x=visible-start
         bitmap = case M.lookup text atlas of
           Just tile -> Just tile
           Nothing -> case T.unpack text of [c] | bitmapGlyph font c -> Just (glyph font c); _ -> Nothing
+        fg=fromIntegral (textForeground paint); bg=fromIntegral (textBackground paint)
+        flags=fromIntegral (textFlags paint+if full/=clusterWidth text then 4 else 0)
+    c_clip (fromIntegral visible) (fromIntegral shown)
     case bitmap of
-      Just (Glyph width bits) -> withArray bits $ \p -> c_glyph (fromIntegral x) (fromIntegral y) (fromIntegral w) (fromIntegral width) p (fromIntegral (textForeground paint)) (fromIntegral (textBackground paint)) (fromIntegral (textFlags paint+if w/=clusterWidth text then 4 else 0))
-      Nothing -> utf8 text $ \p -> check "Draw remote Unicode" (c_unicode (fromIntegral x) (fromIntegral y) (fromIntegral w) p (fromIntegral (textForeground paint)) (fromIntegral (textBackground paint)) (fromIntegral (textFlags paint+if w/=clusterWidth text then 4 else 0)))
+      Just (Glyph width bits) -> withArray bits $ \p -> c_glyph (fromIntegral x) (fromIntegral y) (fromIntegral full) (fromIntegral width) p fg bg flags
+      Nothing -> utf8 text $ \p -> check "Draw remote Unicode" (c_unicode (fromIntegral x) (fromIntegral y) (fromIntegral full) p fg bg flags)
   forM_ (remoteCursor frame) $ \(x,y) -> c_cursor (fromIntegral x) (fromIntegral y)
   check "Present remote frame" c_present
   where flag value = if value then 1 else 0
@@ -329,19 +339,31 @@ runRemoteWindow :: Backend -> Double -> (Int,Int) -> Int -> String -> RemotePeer
 runRemoteWindow backend scale (cols,rows) mode host peer = do
   font <- loadFont
   drawTimes <- newIORef ([]::[Double])
+  demands <- newIORef emptyFrameTiming
+  inputDemand <- newIORef Nothing
+  presentationDemand <- newIORef Nothing
   titleTiming <- newIORef (0::Double,""::T.Text)
   incoming <- newTBQueueIO 8
   outgoing <- newTBQueueIO 256
   queuedBytes <- newTVarIO (0::Int)
   let driver = case backend of Metal -> "metal"; Vulkan -> "vulkan"; _ -> if os=="darwin" then "metal" else "vulkan"
       send packets = do
-        let size = sum [case packet of JsonPacket value -> fromIntegral (BL.length (encode value)); BinaryPacket bytes -> BS.length bytes | packet<-packets]
+        now<-getMonotonicTimeNSec
+        started<-fromMaybe now <$> readIORef inputDemand
+        before<-readIORef demands
+        let tag state (JsonPacket (Object fields))=
+              let (serial,next)=requestFrame started state
+              in (next,JsonPacket (Object (KM.insert "seq" (toJSON serial) fields)))
+            tag state packet=(state,packet)
+            (after,tagged)=mapAccumL tag before packets
+            size = sum [case packet of JsonPacket value -> fromIntegral (BL.length (encode value)); BinaryPacket bytes -> BS.length bytes | packet<-tagged]
         accepted <- atomically $ do
           full <- isFullTBQueue outgoing
           used <- readTVar queuedBytes
           if full || used+size>33554432 then pure False
-          else writeTBQueue outgoing (size,packets) >> writeTVar queuedBytes (used+size) >> pure True
-        unless accepted (hPutStrLn stderr "Remote input queue full; input was not sent.")
+          else writeTBQueue outgoing (size,tagged) >> writeTVar queuedBytes (used+size) >> pure True
+        if accepted then writeIORef demands after
+          else hPutStrLn stderr "Remote input queue full; input was not sent."
       sendJSON value = send [JsonPacket value]
       sendEvent = maybe (pure ()) sendJSON . nativeEventInput
       paste = do
@@ -411,7 +433,9 @@ runRemoteWindow backend scale (cols,rows) mode host peer = do
             title connection frame
       controls (frame,atlas,connection,changed,closed) item = case item of
         Assets glyphs -> pure (frame,glyphs,connection,True,closed)
-        Frame value -> do
+        Frame serial received value -> do
+          started<-atomicModifyIORef' demands (\pending -> let (time,next)=settleFrame serial pending in (next,time))
+          modifyIORef' presentationDemand (Just . maybe (fromMaybe received started) (min (fromMaybe received started)))
           when (maybe (Just mode) remoteMode frame /= remoteMode value) $ do
             let (w,h) = remoteSize value
             check "Change remote screen mode" (c_mode (fromIntegral (modeHeight (maybe mode id (remoteMode value)))) (fromIntegral w) (fromIntegral h))
@@ -428,6 +452,10 @@ runRemoteWindow backend scale (cols,rows) mode host peer = do
         Control value -> do
           kind <- parseIO (withObject "control" (.: "type")) value :: IO T.Text
           case kind of
+            "frame-ready" -> do
+              serial<-parseIO (withObject "frame readiness" (.: "seq")) value
+              modifyIORef' demands (snd . settleFrame serial)
+              pure (frame,atlas,connection,changed,closed)
             "closed" -> pure (frame,atlas,connection,changed,True)
             "copy" -> do
               text <- parseIO (withObject "copy" (.: "text")) value
@@ -453,7 +481,8 @@ runRemoteWindow backend scale (cols,rows) mode host peer = do
           when changed $ do
             title status current
             forM_ current $ \value -> do
-              start<-getMonotonicTimeNSec
+              now<-getMonotonicTimeNSec
+              start<-fromMaybe now <$> atomicModifyIORef' presentationDemand (\time -> (Nothing,time))
               drawRemote font glyphs value
               end<-getMonotonicTimeNSec
               modifyIORef' drawTimes (take 60 . (fromIntegral (end-start)/1000000:))
@@ -466,8 +495,13 @@ runRemoteWindow backend scale (cols,rows) mode host peer = do
           dark <- (/=0) <$> c_system_dark
           when (previousTheme/=Just dark && (connected || previousTheme==Nothing)) (sendJSON (object ["type" .= ("theme"::T.Text),"dark" .= dark]))
           event <- allocaArray 6 $ \p -> check "Read remote window event" (c_wait p) >> map fromIntegral <$> peekArray 6 p
+          observed<-getMonotonicTimeNSec
+          queuedAge<-c_event_age_ns
+          let requested=observed-min observed queuedAge
+          when (nativeRepaint event) (modifyIORef' presentationDemand (Just . maybe requested (min requested)))
           unless (remoteDetachShortcut event || remoteCloseDetaches connected event) $ do
-            when (remoteInputAllowed connected event) (dispatch connected current event)
+            writeIORef inputDemand (Just requested)
+            when (remoteInputAllowed connected event) (dispatch connected current event) `finally` writeIORef inputDemand Nothing
             loop receiver sender current glyphs status (if connected || previousTheme==Nothing then Just dark else previousTheme) (nativeRepaint event)
   bracket_ (pure ()) c_close $ do
 #ifdef darwin_HOST_OS

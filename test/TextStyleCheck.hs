@@ -18,7 +18,9 @@ import Hide.Protocol (frameRows,framePacket,frameMetadata,decodeFrame)
 import Hide.Syntax (Style(..),fontTraits,linkSpans)
 import Hide.TextStyle
 import Hide.Markdown (renderMarkdown)
-import Hide.Render (snapshotHtml)
+import Hide.Render (snapshotHtml,renderCellRows)
+import Hide.Unicode (CellSpan(..))
+import qualified Graphics.Vty as VT
 import Hide.RemoteWindow (parseRemoteFrame,RemoteFrame(..),RemoteCell(..))
 import Hide.RemoteTerminal (remoteTerminalDisplay)
 
@@ -50,6 +52,21 @@ checks=do
   let (_,terminal)=remoteTerminalDisplay (remoteSize frame) (Just frame) ""
       terminalTraits=[(TL.toStrict text,textFlags (textStyleFromAttr attr)) | ops<-toList terminal, TextSpan {textSpanAttr=attr,textSpanText=text}<-toList ops]
   check "remote TUI restores bold and italic attributes" (all (\(char,flags)->any (\(text,actual)->char `T.isInfixOf` text && actual==flags) terminalTraits) [("B",1),("I",2),("X",3)])
+  let asciiText="abc\tde\r\DEL\SOH"
+      asciiBase=addDocument Nothing (newBuffer asciiText) (initialDesktop (80,25))
+      asciiDesktop=modifyActive (\w->w {selection=Selection 1 5}) asciiBase
+        {buffers=M.adjust (\doc->doc {documentSourceRows=Just (V.singleton [(c,TerminalStyle foreground 0x654321 3) | c<-T.unpack asciiText])}) 1 (buffers asciiBase)}
+      Just asciiWindow=activeWindow asciiDesktop
+      Rect ax ay _ _=bounds asciiWindow
+      cells=concatMap (\span->case span of
+        CellText paint text->[(c,paint) | c<-T.unpack text]
+        CellGlyph paint _ _ _ shown->replicate shown (' ',paint))
+        (toList (renderCellRows asciiDesktop V.! (ay+1)))
+      displayed=take 12 (drop (ax+1) cells)
+      normal=textStyleAttr (TextStyle (fromIntegral foreground) 0x654321 True True)
+      chosen=normal `VT.withForeColor` VT.RGBColor 0 0 170 `VT.withBackColor` VT.RGBColor 170 170 170
+  check "ASCII styled runs retain tab, control, selection and font geometry"
+    (map fst displayed=="abc     de··" && map snd displayed==[if i>=1 && i<=8 then chosen else normal | i<-[0..11]])
   let markdown=addHelpStyled (renderMarkdown 80 "# Heading\n\n***both*** regular") (initialDesktop (80,25))
       selected=modifyActive (\w->w {selection=Selection 9 13}) markdown
       selectedFrame=frameRows selected
