@@ -32,6 +32,7 @@ import Data.Text (Text)
 import qualified Data.Text.Encoding as TE
 import qualified Data.ByteString as BS
 import Data.Word (Word64)
+import Data.Bits ((.|.), (.&.))
 import Data.Char (GeneralCategory(..), generalCategory, isAlphaNum, isSpace, ord)
 import Data.Foldable (toList)
 import Control.Monad (unless)
@@ -51,12 +52,14 @@ instance Monoid LineMeasure where
 data LineOrigin = Original | Added | Deleted deriving (Eq,Show)
 -- Deleted leaves retain baseline text, but occupy no character or visible line.
 -- The final empty editor row is visible and contributes no file-line change.
-data Line = Line !Int !Bool !Bool !LineOrigin !Word64 !Word64 Text deriving (Eq,Show)
+-- Encoding flags include the terminator, so a tree measure never inspects text.
+-- Packing the existing NUL/CRLF flags also leaves the ordinary Text leaf compact.
+data Line = Line !Int !Int !LineOrigin !Word64 !Word64 Text deriving (Eq,Show)
 instance FT.Measured LineMeasure Line where
-  measure (Line n nul crlf origin fingerprint factor text) = case origin of
+  measure (Line n flags origin fingerprint factor _) = case origin of
     Deleted -> LineMeasure 0 0 0 1 False False 0 1 reviewSize
-    _ -> LineMeasure n 1 (if origin==Added && n>0 then 1 else 0) 0 nul crlf fingerprint factor reviewSize
-    where reviewSize=n+if "\n" `T.isSuffixOf` text then 0 else 1
+    _ -> LineMeasure n 1 (if origin==Added && n>0 then 1 else 0) 0 (flags .&. 1/=0) (flags .&. 2/=0) fingerprint factor reviewSize
+    where reviewSize=n+if flags .&. 4/=0 then 0 else 1
 type LineTree = FT.FingerTree LineMeasure Line
 
 -- | An editable revision with a saved baseline and at most 100 undo states.
@@ -208,13 +211,19 @@ contents :: Buffer -> Text
 contents = cachedContents
 
 lineText :: Line -> Text
-lineText (Line _ _ _ _ _ _ t) = t
+lineText (Line _ _ _ _ _ t) = t
 
 lineOrigin :: Line -> LineOrigin
-lineOrigin (Line _ _ _ origin _ _ _) = origin
+lineOrigin (Line _ _ origin _ _ _) = origin
 
 withOrigin :: LineOrigin -> Line -> Line
-withOrigin origin (Line n nul crlf _ fingerprint factor t) = Line n nul crlf origin fingerprint factor t
+withOrigin origin (Line n flags _ fingerprint factor t) = Line n flags origin fingerprint factor t
+
+lineTerminated :: Line -> Bool
+lineTerminated (Line _ flags _ _ _ _) = flags .&. 4/=0
+
+lineCRLF :: Line -> Bool
+lineCRLF (Line _ flags _ _ _ _) = flags .&. 2/=0
 
 treeText :: LineTree -> Text
 treeText = T.concat . map lineText . filter ((/=Deleted) . lineOrigin) . toList
@@ -222,7 +231,11 @@ treeText = T.concat . map lineText . filter ((/=Deleted) . lineOrigin) . toList
 linesFromText :: Text -> LineTree
 linesFromText = FT.fromList . go . T.splitOn "\n"
   where
-    line t = let n=T.length t in Line n (T.any (=='\0') t) ("\r\n" `T.isSuffixOf` t) Original
+    line t = let n=T.length t
+                 flags=(if T.any (=='\0') t then 1 else 0) .|.
+                       (if "\r\n" `T.isSuffixOf` t then 2 else 0) .|.
+                       (if "\n" `T.isSuffixOf` t then 4 else 0)
+             in Line n flags Original
       (T.foldl' (\hash c -> hash*16777619+fromIntegral (ord c)+1) 0 t) (16777619^n) t
     go [] = []
     go [t] = [line t]
@@ -256,7 +269,7 @@ splitLeaf position tree = case FT.viewl right of
   line FT.:< rest -> (left,line,p-characterCount (FT.measure left),rest)
   FT.EmptyL -> case FT.viewl final of
     line FT.:< rest -> (prefix,line,p-characterCount (FT.measure prefix),rest)
-    FT.EmptyL -> (FT.empty,Line 0 False False Original 0 1 "",0,FT.empty)
+    FT.EmptyL -> (FT.empty,Line 0 0 Original 0 1 "",0,FT.empty)
   where
     p=max 0 (min position (characterCount (FT.measure tree)))
     (left,right)=FT.split ((>p) . characterCount) tree
@@ -264,7 +277,7 @@ splitLeaf position tree = case FT.viewl right of
 
 -- | Locate a character offset as a zero-based row and character column.
 bufferLineColumn :: Buffer -> Int -> (Int,Int)
-bufferLineColumn b p = let (before,_,column,_) = splitLine p (bufferLines b)
+bufferLineColumn b p = let (before,_,column,_) = splitLeaf p (bufferLines b)
                       in (lineCount (FT.measure before),column)
 
 -- | Find the start of a zero-based live row using the tree measure.
@@ -310,7 +323,7 @@ bufferPreviousCharacter b position
   | p==0=0
   | column>0 = p-column+previousCharacter line column
   | otherwise = case FT.viewl previousLine of
-      previous FT.:< _ -> p-if "\r\n" `T.isSuffixOf` lineText previous then 2 else 1
+      previous FT.:< _ -> p-if lineCRLF previous then 2 else 1
       FT.EmptyL -> 0
   where
     p=max 0 (min (bufferLength b) position)
@@ -627,12 +640,12 @@ bufferChangeRows b start count=go (lineCount (FT.measure before)) (take (max 0 c
 
 changeLength :: Buffer -> Int
 changeLength b=reviewCharacterCount (FT.measure tree)-case FT.viewr tree of
-  _ FT.:> line | not ("\n" `T.isSuffixOf` lineText line) -> 1
+  _ FT.:> line | not (lineTerminated line) -> 1
   _ -> 0
   where tree=bufferLines b
 
 reviewText :: Line -> Text
-reviewText line=let text=lineText line in if "\n" `T.isSuffixOf` text then text else text<>"\n"
+reviewText line=let text=lineText line in if lineTerminated line then text else text<>"\n"
 
 changeSlice :: Buffer -> Int -> Int -> Text
 changeSlice b start count
@@ -653,7 +666,7 @@ splitReviewLine b position=case FT.viewl remaining of
   line FT.:< _ -> (before,line,p-reviewCharacterCount (FT.measure before))
   FT.EmptyL -> case FT.viewr tree of
     prefix FT.:> line -> (prefix,line,p-reviewCharacterCount (FT.measure prefix))
-    FT.EmptyR -> (FT.empty,Line 0 False False Original 0 1 "",0)
+    FT.EmptyR -> (FT.empty,Line 0 0 Original 0 1 "",0)
   where
     tree=bufferLines b
     p=max 0 (min (changeLength b) position)
