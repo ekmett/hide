@@ -138,6 +138,16 @@ checks=do
     (take 1 (statusHints messageUnbound)==[(" Source",Just (Left GoToMessage))] &&
      noEffects (key V.KEnter [] messageUnbound) && noEffects (key (V.KChar 'j') [V.MCtrl,V.MShift] messageUnbound) &&
      clickSourceHint messageUnbound==[JumpTo "/project/Main.hs" 0 0])
+  forM_ [[],["F13"]] $ \keys->do
+    let copyMaps=either (error . show) id (platformBindings [] TerminalPlatform (M.singleton "messages" (M.singleton "hide.messages.copy-all" keys)))
+        pane=messagePane {keyBindings=copyMaps}
+        expected="Error /project/Main.hs:1:1 first\n\nError /project/Main.hs:2:1 second"
+        clicked=case [r | (r,_,Left CopyAllMessages)<-statusItemRects pane] of
+          r:_->fst (handleEvent (V.EvMouseDown (left r) (top r) V.BLeft []) pane)
+          []->error "missing Copy all status action"
+    check "Copy all status preserves its caption through remap and unbind"
+      (any (\(label,action)->T.strip label==T.unwords (keys++["Copy all"]) && action==Just (Left CopyAllMessages)) (statusHints pane) &&
+       clipboard clicked==expected && (null keys || clipboard (fst (key (V.KFun 13) [] pane))==expected))
   check "default PTY input and editor controls retain ownership" (all (\(k,m)->snd (key k m pty {keyBindings=M.empty})==snd (key k m (compiled pty)))
     [(V.KChar 'c',[V.MCtrl]),(V.KChar 'q',[V.MCtrl]),(V.KFun 1,[]),(V.KFun 4,[]),(V.KFun 7,[]),(V.KFun 9,[]),(V.KUp,[])])
   check "resolved reload retains guest origin policy" (not (guestKeyAllowed source {keyBindings=either (error . show) id (platformBindings [] TerminalPlatform (M.singleton "source" (M.singleton "hide.bindings.reload" ["Alt+F11"])))} (V.KFun 11) [V.MAlt]))

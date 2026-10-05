@@ -49,6 +49,7 @@ import Hide.Plugin.BufferHost (captureVersion,versionCurrent)
 import Hide.Sidebar
 import qualified Hide.MCPPermissions as Permissions
 import Hide.Model hiding (prompt)
+import Hide.Commands (configuredBindings)
 import Hide.Markdown (renderMarkdown)
 import Hide.Syntax (Style(..))
 import Hide.Terminal (terminalAvailable)
@@ -90,6 +91,19 @@ composerCodeChecks=do
   check "Control Enter keeps the configured opposite submit action inside code"
     (snd (handleEvent (V.EvKey V.KEnter [V.MCtrl]) extended)==[AgentAction "steer-draft" []] &&
      snd (handleEvent (V.EvKey V.KEnter [V.MCtrl]) extended {chatSubmit=SteerSubmit})==[AgentAction "send-draft" []])
+  let maps=either (error . show) id (configuredBindings [] M.empty)
+      clickHint action desktop=case [r | (r,_,Left command)<-statusItemRects desktop,command==SubmitChat action] of
+        r:_->snd (handleEvent (V.EvMouseDown (left r) (top r) V.BLeft []) desktop)
+        []->error "missing code submission status action"
+  forM_ [QuerySubmit,SteerSubmit] $ \chosen->forM_ [False,True] $ \replying->do
+    let desktop=extended {keyBindings=maps,chatSubmit=chosen,agentReplying=replying}
+        caption action=(if action==chosen then "" else "Ctrl+Enter ")<>
+          (if action==SteerSubmit then "Steer" else if replying then "Queue query" else "Query")
+    check "code status preserves both fixed submission captions with compiled bindings"
+      (all (\action->any (\(label,target)->T.strip label==caption action && target==Just (Left (SubmitChat action))) (statusHints desktop)) [QuerySubmit,SteerSubmit])
+    check "code status clicks keep query and steer ownership with compiled bindings"
+      (clickHint QuerySubmit desktop==[AgentAction "send-draft" []] && clickHint SteerSubmit desktop==[AgentAction "steer-draft" []] &&
+       snd (handleEvent (V.EvKey V.KEnter [V.MCtrl]) desktop)==[AgentAction (if chosen==QuerySubmit then "steer-draft" else "send-draft") []])
   let copied=fst (runCommand Copy (fst (runCommand SelectAll extended)))
       unwrapped=press V.KBS [] (press V.KHome [] code)
       backIn=press V.KBS [] (press V.KDown [] code)
