@@ -42,7 +42,7 @@ import Hide.Browser (Entry(..))
 import Hide.Git (GitReview)
 import Hide.Syntax (Style(..), SourceRow, prepareSourceRow, highlightFor, linkSpans, styleScript)
 import Hide.Hex
-import Hide.Unicode (textInputChar)
+import Hide.Unicode (textInputChar,sourceGraphemesFrom)
 import Hide.InlineState
 import qualified Data.Set as S
 import Hide.Buffer
@@ -1115,7 +1115,7 @@ runCommand cmd source | problemsVisible source && problemsFocused source, cmd `e
 runCommand Copy source | activeConversation source, Just w<-activeWindow source, anchor (selection w)/=caret (selection w) =
   ((copyClipboard False (conversationSelection source) source) {status="Conversation text copied.",menu=Nothing,contextMenu=Nothing},[])
 runCommand cmd source | activeAutocomplete source, autocompleteFocused source, cmd `elem` [Undo,Redo,Copy,Cut,Paste,SelectAll] = (autocompleteEdit (composerCommandWith False cmd) source,[])
-runCommand cmd source | questionActive source, cmd `elem` [Undo,Redo,Copy,Cut,Paste,SelectAll] = (questionEdit (composerCommandWith False cmd) source,[])
+runCommand cmd source | questionActive source, cmd `elem` [Undo,Redo,Copy,Cut,Paste,SelectAll] = (questionCommand cmd source,[])
 runCommand cmd source | not (problemsFocused source), composerActive source, cmd `elem` [Undo,Redo,Copy,Cut,Paste,SelectAll] = (composerCommand cmd source,[])
 runCommand Copy source | dialog source==Nothing,activeMarkdown source,maybe False (windowFocused source) (activeWindow source) =
   let text=case activeWindow source >>= windowMarkdown source of
@@ -1823,8 +1823,24 @@ composerRect d w = Rect (x+ww-4-columns) (y+hh-1-rows) columns rows
     Rect x y ww hh=bounds w
     draft=composerBuffer d
     rows=min (min 12 (bufferLineCount draft)) (max 0 (hh-6))
-    columns=min (max 0 (ww-6)) (max 12 (longest+1))
-    longest=maximum (0:[displayColumn line (T.length line) | raw<-textLines (contents draft),let line=if "    " `T.isPrefixOf` raw then T.drop 4 raw else raw])
+    columns=draftColumns True (max 0 (ww-6)) draft
+
+-- Measure only up to the window cap. One measured seek streams borrowed rows;
+-- once a row fills the bubble, neither its suffix nor later rows are needed.
+-- Use the source renderer's width rules, including one-cell control placeholders.
+draftColumns :: Bool -> Int -> Buffer -> Int
+draftColumns code limit b
+  | limit<=12=max 0 limit
+  | otherwise=1+go 11 (bufferRowsFrom b 0)
+  where
+    bound=limit-1
+    go widest _ | widest>=bound=widest
+    go widest []=widest
+    go widest (raw:rest)=
+      let line=if code && "    " `T.isPrefixOf` raw then T.drop 4 raw else raw
+          (_,_,column,pending)=sourceGraphemesFrom (bound-1) line
+          columns=case pending of []->column; _->bound
+      in go (max widest columns) rest
 
 composerSubmit :: [V.Modifier] -> Desktop -> (Desktop,[Effect])
 composerSubmit mods d
@@ -2036,7 +2052,7 @@ autocompleteComposerRect d w=Rect (x+ww-4-columns) (y+hh-1-rows) columns rows
     Rect x y ww hh=bounds w
     b=autocompleteDraft d
     rows=min (min 12 (bufferLineCount b)) (max 0 (hh-6))
-    columns=min (max 0 (ww-6)) (max 12 (maximum (0:[displayColumn line (T.length line) | line<-textLines (contents b)])+1))
+    columns=draftColumns False (max 0 (ww-6)) b
 
 autocompleteComposerScroll :: Desktop -> Window -> (Int,Int)
 autocompleteComposerScroll d w=(max 0 (r-height rect+1),max 0 (displayColumn (bufferLineAt b r) c-width rect+1))
@@ -2062,12 +2078,34 @@ questionEdit edit d=case chatQuestion d of
   Nothing -> d
   Just q -> let temporary=d {chatQuestion=Nothing,composerBuffer=questionBuffer q,composerSelection=questionSelection q,composerFocused=True}
                 changed=edit temporary
-                bounded=T.take 4096 (T.map (\c->if c `elem` ['\n','\r','\t'] then ' ' else c) (contents (composerBuffer changed)))
-                b=if bounded==contents (composerBuffer changed) then composerBuffer changed else newBuffer bounded
-                bound n=max 0 (min (T.length bounded) n)
+                b=composerBuffer changed
+                bound n=max 0 (min (bufferLength b) n)
                 sel=composerSelection changed
             in d {clipboard=clipboard changed,clipboardCode=clipboardCode changed,chatQuestion=Just q {questionChoice=Nothing,questionFocused=True,questionBuffer=b,
                 questionSelection=Selection (bound (anchor sel)) (bound (caret sel))}}
+
+-- Only insertion normalizes input. Empty creation and these bounded edits keep
+-- all history states single-line and at most 4096 characters, so navigation and
+-- Undo never need to scan or repair the existing draft.
+questionInsert :: Text -> Desktop -> Desktop
+questionInsert text=questionEdit $ \d->
+  let b=composerBuffer d; size=bufferLength b
+      (rawA,rawZ)=ordered (composerSelection d)
+      a=max 0 (min size rawA); z=max 0 (min size rawZ)
+      inserted=T.map (\c->if c `elem` ['\n','\r','\t'] then ' ' else c) (T.take (4096-a) text)
+      n=T.length inserted
+      tailStart=min size (z+max 0 (4096-a-n))
+      -- Preserve take 4096 (prefix<>inserted<>suffix), deleting the actual old
+      -- tail rather than the characters immediately after the insertion.
+      edits | tailStart<=z=[(a,size,inserted)]
+            | otherwise=[(a,z,inserted),(tailStart,size,"")]
+      changed | tailStart<size=either (const b) id (replaceRanges edits b)
+              | otherwise=replaceSelection (Selection a z) inserted b
+  in d {composerBuffer=changed,composerSelection=Selection (a+n) (a+n)}
+
+questionCommand :: Command -> Desktop -> Desktop
+questionCommand Paste d=questionInsert (clipboard d) d
+questionCommand cmd d=questionEdit (composerCommandWith False cmd) d
 
 questionInputStart :: Int -> ChatQuestion -> Int
 questionInputStart width q=columnOffset text (max 0 (displayColumn text (caret (questionSelection q))-max 1 (width-9)+1))
@@ -2089,6 +2127,12 @@ questionEvent event d=case chatQuestion d of
     V.EvKey V.KBackTab [] -> choose (-1) q
     V.EvMouseDown{} -> Nothing
     V.EvMouseUp{} -> Nothing
+    V.EvPaste bytes -> Just (either (const (questionEdit id d))
+      (\text->questionInsert (T.filter (\c->textInputChar c || c `elem` ['\n','\r','\t']) text) d) (TE.decodeUtf8' bytes),[])
+    V.EvKey (V.KChar c) mods | textInputChar c, null mods || mods==[V.MShift] -> Just (questionInsert (T.singleton c) d,[])
+    V.EvKey V.KEnter mods | V.MShift `elem` mods, all (`elem` [V.MCtrl,V.MShift]) mods -> Just (questionInsert " " d,[])
+    V.EvKey (V.KChar c) mods | effectiveBindings d==Nothing, toLower c=='v', V.MCtrl `elem` mods,
+      V.MAlt `notElem` mods, V.MMeta `notElem` mods -> Just (questionCommand Paste d,[])
     _ -> let temporary=d {chatQuestion=Nothing,composerBuffer=questionBuffer q,composerSelection=questionSelection q,composerFocused=True}
          in case composerEventWith False event temporary of
            Just (_,effects) | not (null effects) -> Just (d,[])

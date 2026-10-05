@@ -33,6 +33,7 @@ checkIndexed b text = do
   forM_ [-1..length (textLines text)+1] $ \row -> do
     check "indexed line offset matches Text" (bufferLineOffset b row == lineOffset text row)
     check "indexed CRLF line content matches Text" (bufferLineAt b row == lineAt text row)
+    check "borrowed live rows match Text" (bufferRowsFrom b row == map (T.dropWhileEnd (=='\r')) (drop (max 0 row) (textLines text)))
 
 checks :: IO ()
 checks = do
