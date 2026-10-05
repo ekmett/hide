@@ -253,8 +253,11 @@ its output, colors, Unicode and resize behavior use the same terminal as Run.
 The terminal survives detaching and resuming the editor display. **Debug > Disconnect**
 ends the owned debugger and its terminal process, retaining the displayed output.
 Adapters that send output without a terminal use the live **Debugger output**
-window, also available through **Debug > Output**. This output view does not
-accept program input. The inspected hdb release disables terminal requests on
+window, also available through **Debug > Output**. This read-only view is separate
+from source buffers. Updates preserve its placement and your foreground work;
+closing it keeps captured output available through Debug > Output without
+reopening it when more output arrives. A later session reuses an existing output
+slot with fresh content identity. This output view does not accept program input. The inspected hdb release disables terminal requests on
 Windows; that platform's program input remains unqualified.
 
 ## Step through a program
