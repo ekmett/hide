@@ -45,6 +45,7 @@ import MCPPermissionsCheck (settledTool, settleDialog)
 import qualified Hide.BuildJobs as Jobs
 import Hide.Files (FileState(..))
 import Hide.Sidebar
+import Hide.App (applyEffects)
 import Hide.Model
 import Hide.Terminal (terminalAvailable)
 
@@ -204,6 +205,9 @@ buildPreparationChecks=when (os/="mingw32") $ bracket temporary removePathForcib
     perms<-getPermissions command
     setPermissions command perms {executable=True}
     check "prepared build adoption is host-only" (not (guestEffectsAllowed [AdoptPreparedBuild]))
+    (_,unsupported)<-applyEffects base [AdoptPreparedBuild]
+    check "unowned prepared-build adoption fails closed"
+      (M.keys (buffers unsupported)==M.keys (buffers base) && fmap windowId (activeWindow unsupported)==fmap windowId (activeWindow base))
 
     -- The writer handshake proves that the real read is waiting for EOF. The
     -- compiler cannot run while the UI remains responsive to a source edit.

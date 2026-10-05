@@ -205,7 +205,7 @@ stepAdmittedBuild admission@(AdmittedBuild runtime@(Permissions _ _ ref _ _ _ ow
       requests<-readIORef ref
       live<-filterMActive (waiting requests)
       if closed || length live>=32 then do
-        atomicModifyIORef' state (\current->((case current of BuildReserved->BuildRejected (if closed then "Editor session closed" else "Too many MCP requests are awaiting permission"); _->current),()))
+        atomicModifyIORef' state (\fresh->((case fresh of BuildReserved->BuildRejected (if closed then "Editor session closed" else "Too many MCP requests are awaiting permission"); _->fresh),()))
         stepAdmittedBuild admission core desktop
       else do
         enabled<-newIORef True
@@ -213,7 +213,7 @@ stepAdmittedBuild admission@(AdmittedBuild runtime@(Permissions _ _ ref _ _ _ ow
         claim<-newMVar ()
         stage<-newIORef (PolicyPending BuildAdoptPolicy Nothing)
         let request=Waiting (nextTicket requests) name args (BuildAdoptionOperation admission) enabled False caller attempt Nothing claim stage
-        reserved<-atomicModifyIORef' state (\current->case current of BuildReserved->(BuildChecking request,True); _->(current,False))
+        reserved<-atomicModifyIORef' state (\fresh->case fresh of BuildReserved->(BuildChecking request,True); _->(fresh,False))
         when reserved (writeIORef ref requests {waiting=live++[request],nextTicket=nextTicket requests+1})
         pure Nothing
     BuildChecking _->pure Nothing

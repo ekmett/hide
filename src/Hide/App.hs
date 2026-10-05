@@ -325,7 +325,7 @@ runEditor args = do
                           | name=="read_buffer" = readBufferTool bufferCommands (bufferReader permissions currentCaller) current name parameters
                           | name=="buffer_apply_diff" = bufferDiffTool diffCommands (bufferEditor permissions currentCaller) current name parameters
                           | name=="editor_input" = permissionBuildInputAs currentCaller permissions
-                              (\admission current tool parameters->withBuildAdmission conversation admission (controlTool guestCore current tool parameters)) current name parameters
+                              (\admission admittedDesktop admittedTool admittedArgs->withBuildAdmission conversation admission (controlTool guestCore admittedDesktop admittedTool admittedArgs)) current name parameters
                           | name=="ask_user",Nothing<-token = pure (current,pure (Left "ask_user requires the authenticated requesting agent."))
                           | otherwise = permissionCallAs currentCaller permissions callback current name parameters
                         currentCaller=case token of
@@ -572,6 +572,7 @@ applyEffects = foldM apply . (False,)
     apply (_,d) DebugAction{}=pure (False,d {status="Debugger unavailable in this preview."})
     apply (_,d) PermissionAction{}=pure (False,d {status="Agent permissions are unavailable in this preview."})
     apply (_,d) AgentAction{}=pure (False,d {status="Agents are unavailable in this preview."})
+    apply (_,d) AdoptPreparedBuild=pure (False,d {status="Build preparation requires its running owner."})
     apply (_,d) DownloadDocument{}=pure (False,d)
     apply (_,d) ReadBrowserClipboard=pure (False,d)
     apply (_,d) WriteBrowserClipboard{}=pure (False,d)
