@@ -30,7 +30,7 @@ main = do
   withDebugger $ \runtime -> do
     let effects = debuggerEffects runtime applyEffects
         tool name values d = do
-          (next,finish) <- debuggerTool runtime effects d name (object values)
+          (next,finish) <- debuggerTool runtime d name (object values)
           result <- finish >>= either (fail . T.unpack) pure
           pure (next,result)
         current d = snd <$> tool "debug_status" [] d
@@ -39,7 +39,7 @@ main = do
           BL.putStrLn (encode (object ["stage" .= (label::String),"status" .= status d,"debug" .= state]))
           pure state
         tick d = do
-          next <- tickDebugger runtime effects d
+          next <- tickDebugger runtime d
           state <- current next
           unless (flag "active" state || T.isPrefixOf "Debug session ended" (status next)) $ do
             _ <- report "failure" next

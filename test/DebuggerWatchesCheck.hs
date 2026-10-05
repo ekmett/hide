@@ -35,7 +35,7 @@ session scenario=bracket (Fixture.fixture (if scenario=="policy" then "watches-p
   let fallback d _=pure (False,d)
       core=debuggerEffects runtime fallback
       effects=sidebarEffects host core
-      tick d=tickDebugger runtime fallback d >>= tickDebuggerSidebar provider host runtime >>= tickSidebar host core
+      tick d=tickDebugger runtime d >>= tickDebuggerSidebar provider host runtime >>= tickSidebar host core
       rows d=maybe [] (M.elems.treeRows) (sideTree d)
       labels=map (P.infoLabel.rowInfo).rows
       has value=any (T.isInfixOf value).labels
@@ -65,18 +65,18 @@ session scenario=bracket (Fixture.fixture (if scenario=="policy" then "watches-p
                   pure [request | line<-logLines,Just body<-[decodeStrict' (TE.encodeUtf8 line)],Just request<-[field "request" body]] :: IO [Value]
       executing=filter ((==Just ("evaluate"::T.Text)).field "command") <$> requests
       rejectInspect target extra d=do
-        (_,current)<-debuggerTool runtime fallback d "debug_status" (object [])
+        (_,current)<-debuggerTool runtime d "debug_status" (object [])
         value<-current >>= either (fail.T.unpack) pure
         let gen=maybe (error "missing generation") id (field "generation" value :: Maybe Int)
-        (_,finish)<-debuggerTool runtime fallback d "debug_inspect" (object (["generation" .= gen,"request" .= (target::T.Text)]++extra))
+        (_,finish)<-debuggerTool runtime d "debug_inspect" (object (["generation" .= gen,"request" .= (target::T.Text)]++extra))
         outcome<-finish
         check "read-only MCP cannot execute or force a watch" (either (const True) (const False) outcome)
       entries=do (_,selected,values)<-debuggerWatches runtime; pure (selected,values)
       release d=do
         writeFile (path<>".release") "release"
-        (_,current)<-debuggerTool runtime fallback d "debug_status" (object [])
+        (_,current)<-debuggerTool runtime d "debug_status" (object [])
         value<-current >>= either (fail.T.unpack) pure
-        (_,_)<-debuggerTool runtime fallback d "debug_inspect" (object ["generation" .= maybe (0::Int) id (field "generation" value),"request" .= ("threads"::T.Text)])
+        (_,_)<-debuggerTool runtime d "debug_inspect" (object ["generation" .= maybe (0::Int) id (field "generation" value),"request" .= ("threads"::T.Text)])
         foldM (\desktop _->threadDelay 1000 >> tick desktop) d [1..80::Int]
   mounted<-initializeSidebar host (initialDesktop (90,30)) {sideTree=Just (emptySidebar (takeDirectory path) 28 False)} >>= await "Watches provider" (has "Watches")
   (_,attached)<-core mounted [DebugAction "connect" ["0","127.0.0.1",T.pack port]]
