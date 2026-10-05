@@ -15,6 +15,7 @@ import Data.Foldable (toList)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Maybe (fromMaybe)
+import System.FilePath (addTrailingPathSeparator)
 import Hide.Plugin.Command (CommandRef)
 import Hide.Plugin.Tree
 
@@ -41,7 +42,7 @@ data TreeRequest = TreeRequest
   , requestAncestors :: ![TreeHit]
   } deriving (Eq,Show)
 -- | Checkpoint hints deliberately contain no live command/provider reference.
-data SidebarHints = SidebarHints [(FilePath,Bool)] (Maybe FilePath) (Maybe FilePath) deriving (Eq,Show)
+data SidebarHints = SidebarHints !(M.Map FilePath Bool) !(Maybe FilePath) !(Maybe FilePath) deriving (Eq,Show)
 data Sidebar = Sidebar
   { treeRoot :: FilePath, treeRows :: !(M.Map [Int] TreeRow), treeSelected :: !Int
   , treeScroll :: !Int, treeWidth :: !Int, treeFocused :: !Bool
@@ -54,6 +55,33 @@ data Projection = Projection !Integer !(M.Map [Int] TreeRow) !(M.Map RowKey Int)
 
 emptySidebar :: FilePath -> Int -> Bool -> Sidebar
 emptySidebar path width focused=Sidebar path M.empty 0 0 width focused M.empty S.empty 1 0 (-1) Nothing [] [] M.empty
+-- | New selection replaces saved viewport intent, leaving unrelated expansions.
+-- Advancing metadata revision also rejects any in-flight recovery projection.
+dismissRecoveryAnchors :: Sidebar -> Sidebar
+dismissRecoveryAnchors tree=case treeHints tree of
+  Just (SidebarHints hints selected top) | selected/=Nothing || top/=Nothing->
+    tree {treeHints=Just (SidebarHints hints Nothing Nothing),treeRevision=treeRevision tree+1}
+  _->tree
+-- | Scrolling supersedes only the saved top row.
+dismissRecoveryScroll :: Sidebar -> Sidebar
+dismissRecoveryScroll tree=case treeHints tree of
+  Just (SidebarHints hints selected (Just _))->
+    tree {treeHints=Just (SidebarHints hints selected Nothing),treeRevision=treeRevision tree+1}
+  _->tree
+-- | A deliberate collapse discards only that branch's deferred expansions.
+-- Canonical resource paths let ordered-map splits remove the subtree without
+-- filtering every pending path on the input owner.
+dismissRecoveryBranch :: FilePath -> Sidebar -> Sidebar
+dismissRecoveryBranch path tree=case treeHints tree of
+  Just (SidebarHints hints selected top) | M.size remaining/=M.size hints->
+    tree {treeHints=Just (SidebarHints remaining selected top),treeRevision=treeRevision tree+1}
+    where prefix=addTrailingPathSeparator path
+          upper=init prefix++[succ (last prefix)]
+          (_,boundary,after)=M.splitLookup upper hints
+          suffix=maybe after (\value->M.insert upper value after) boundary
+          remaining=M.delete path (M.union (fst (M.split prefix hints)) suffix)
+  _->tree
+
 nodeHit :: NodeKey -> NodeState -> TreeHit
 nodeHit (NodeKey ref ident) node=TreeHit ref ident (stateGeneration node)
 rowAt :: Int -> Sidebar -> Maybe TreeRow
