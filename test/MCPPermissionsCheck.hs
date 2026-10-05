@@ -37,6 +37,7 @@ import Hide.MCPPermissions
 import Hide.Model
 import Hide.Render (snapshot, snapshotHtml)
 import Hide.GuestAccess (readableAt, guestKeyboardAllowed, guestEffectsAllowed)
+import Hide.RuntimeMCP (runtimeTools)
 import Hide.WorkspaceFilesMCP (fileTools, fileTool)
 
 checks :: IO ()
@@ -136,6 +137,15 @@ checks=do
       (_,invalid)<-settledCall runtime execute base "read" (object [])
       invalidResult<-invalid
       check "invalid config fails closed without exposing its contents" (case invalidResult of Left err->not ("secret" `T.isInfixOf` err); _->False)
+    TIO.writeFile path "[editor.mcp.permissions]\nbuild_output = 'disable'\n"
+    withPermissionsAt path runtimeTools $ \runtime -> do
+      (_,disabledOutput)<-permissionCall runtime execute base "build_output" (object ["jobId" .= ("fixture"::T.Text)])
+      check "build output honors its ordinary configured permission" . isLeft =<< disabledOutput
+      settings<-showSettings runtime base
+      check "build output is listed by Agent Permissions" (case dialog settings of Just dg->any (\f->case f of ListBox _ rows _->any (T.isPrefixOf "build_output") rows; _->False) (fields dg); _->False)
+      TIO.writeFile path "[editor.mcp.permissions]\n"
+      (_,enabledOutput)<-permissionCall runtime execute base "build_output" (object ["jobId" .= ("fixture"::T.Text)])
+      check "build output defaults to permitted read-only routing" . not . isLeft =<< enabledOutput
     removeFile path
     pendingAfterClose<-withPermissionsAt path specs $ \runtime -> do
       (desktop,requests)<-foldM (\(d,results) _->do

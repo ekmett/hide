@@ -56,6 +56,9 @@ checks = do
     check "numeric source seek preserves the original stateful grapheme suffix"
       (actual==sourceReference column text && T.concat suffix==TU.dropWord8 byte text &&
         T.length (TU.takeWord8 byte text)==char)
+  forM_ ["", "a\tb", "\rabc", "a\x301界x", "👩🏽\x200d\&💻界", "🇦🇧", "a\r\n"] $ \text->
+    check "cached source extent agrees with ordinary display columns"
+      (sourceTextWidth text==displayColumn text (T.length text))
   beforeSeek<-getAllocationCounter
   seekCount<-evaluate (let (char,byte,col,suffix)=sourceGraphemesFrom 50000 longPrefix
                        in char+byte+col+sum (map T.length (take 3 suffix)))

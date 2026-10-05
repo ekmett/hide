@@ -98,4 +98,4 @@ captures desktop=map capture
       Just document->Capture target (bufferContent (documentBuffer document))
         (DocumentStyles (documentHighlight document))
       Nothing->error "Text presentation capture lost a document."
-    capture target@(_,PluginPresentation _ prepared,_,_)=Capture target (W.preparedWindowText prepared) (PluginStyles (W.preparedWindowRows prepared))
+    capture target@(_,PluginPresentation _ prepared,_,_)=Capture target (W.preparedWindowText prepared) (case W.preparedWindowRows prepared of W.StyledRows rows->PluginStyles rows; W.PlainRows _->DocumentStyles [])

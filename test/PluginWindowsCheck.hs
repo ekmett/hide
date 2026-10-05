@@ -6,6 +6,7 @@ import Control.Exception (evaluate)
 import Control.Monad (unless)
 import qualified Data.Map.Strict as M
 import qualified Data.Text as T
+import qualified Data.Vector as Vec
 import qualified Graphics.Vty as V
 import System.Directory (removeFile,getTemporaryDirectory)
 import System.IO (openTempFile,hClose)
@@ -18,14 +19,15 @@ import Hide.DocsMCP
 import Hide.GuestAccess (guestKeyboardAllowed,pointerAllowedAt,readableAt)
 import Hide.MenuCommands
 import qualified Hide.Plugin.Window as W
-import Hide.PluginWindowHost (adoptWindowUpdate,tickPluginWindows)
+import Hide.PluginWindowHost (adoptWindowUpdate,replaceWindowUpdate,tickPluginWindows)
 import Hide.Sidebar
 import Hide.SidebarCommands
 import Hide.Model
 import Hide.Plugin.Command (withRegistry)
 import qualified Hide.Plugin.Menu as P
 import qualified Hide.Plugin.Tree as PTree
-import Hide.Render (snapshot,renderKey)
+import Hide.Render (snapshot,renderKey,renderCellRows)
+import Hide.Unicode (CellSpan(..))
 import WindowExtension
 #ifdef WITH_PROTOCOL
 import Data.Aeson (object,(.=))
@@ -83,6 +85,25 @@ checks=W.withWindowScope $ \scope->withDocsCommands $ \docs->withRegistry $ \reg
   check "native, terminal and browser clipboard routes agree on plugin text"
     (all ((==clipboard copied) . clipboard) [wireCopy,macCopy,browserCopy])
 #endif
+  plain<-W.prepareTextWindow "Plain row" "a界e\x0301\t👩🏽\x200d\&💻z\r\nnext"
+  plainOpening<-W.openTextWindow scope plain >>= maybe (fail "plain row opening refused") pure
+  plainDesktop<-adoptWindowUpdate P.HumanMenu plainOpening (initialDesktop (30,12))
+  let selectedPlain=modifyActive (\w->w {bounds=Rect 0 1 14 7,selection=Selection 1 2}) plainDesktop
+      glyphs desktop=[(paint,text,full,start,shown) | CellGlyph paint text full start shown<-Vec.toList (renderCellRows desktop Vec.! 2)]
+      clippedPlain=modifyActive (\w->w {scrollColumn=2}) selectedPlain
+  check "plain prepared row retains whole selected glyph and borrowed grapheme text"
+    (any (\(paint,text,full,start,shown)->text=="界" && (full,start,shown)==(2,0,2) &&
+      V.attrForeColor paint==V.SetTo (V.RGBColor 0 0 170) && V.attrBackColor paint==V.SetTo (V.RGBColor 170 170 170)) (glyphs selectedPlain) &&
+      any (\(_,text,_,_,_)->text=="e\x0301") (glyphs selectedPlain) &&
+      any (\(_,text,_,_,_)->text=="👩🏽\x200d\&💻") (glyphs selectedPlain))
+  check "plain row clipping preserves semantic glyph origin while text blanks the half"
+    (any (\(_,text,full,start,shown)->text=="界" && (full,start,shown)==(2,1,1)) (glyphs clippedPlain) &&
+      not ("界" `T.isInfixOf` snapshot clippedPlain))
+  check "private plain row masks complete glyphs before export"
+    (null (glyphs clippedPlain {streamerMode=True}))
+  let selectedAll=fst (runCommand SelectAll selectedPlain)
+  check "plain row display transformations leave copied source unchanged"
+    (clipboard (fst (runCommand Copy selectedAll))=="a界e\x0301\t👩🏽\x200d\&💻z\r\nnext")
   let private=opened {streamerMode=True}
   check "private plugin title is masked in application and Dock metadata"
     (applicationTitle "/tmp" private=="th Private plugin window" && all (\(_,title,_,_)->title/="Plugin notes") (editorWindowEntries private))
@@ -104,6 +125,28 @@ checks=W.withWindowScope $ \scope->withDocsCommands $ \docs->withRegistry $ \reg
   refreshed<-adoptWindowUpdate P.HumanMenu refresh selected
   check "refresh preserves host geometry and semantic selection"
     (fmap (\w->(windowId w,bounds w,selection w)) (activeWindow refreshed)==fmap (\w->(windowId w,bounds w,selection w)) (activeWindow selected) && "Updated text" `T.isInfixOf` snapshot refreshed)
+  modalPublication<-W.refreshTextWindow reference prepared >>= maybe (fail "prepare modal refresh") pure
+  let selectedModal=prompt "Draft" Information [SelectedInput "Name" "keep draft" (Selection 2 7)] refreshed
+  behindModal<-adoptWindowUpdate P.HumanMenu modalPublication selectedModal
+  check "exact existing window refresh preserves modal and focused window"
+    (dialog behindModal==dialog selectedModal && fmap windowId (activeWindow behindModal)==fmap windowId (activeWindow selectedModal) && M.lookup reference (pluginWindows behindModal)==Just prepared)
+  longPrepared<-W.prepareTextWindow "Scrollable output" (T.unlines (replicate 100 (T.replicate 120 "x")))
+  longUpdate<-W.openTextWindow scope longPrepared >>= maybe (fail "prepare scrollable output") pure
+  longOpened<-adoptWindowUpdate P.HumanMenu longUpdate source
+  let longView=modifyActive (\w->w {bounds=Rect 2 2 40 12}) longOpened
+      click x y desktop=fst (handleEvent (V.EvMouseDown x y V.BLeft []) desktop)
+      currentAxis vertical=maybe (-1) (if vertical then scrollRow else scrollColumn) . activeWindow
+  mapM_ (\vertical->case activeWindow longView >>= windowScrollbar longView vertical of
+    Nothing->fail "semantic output scrollbar missing"
+    Just (Rect x y ww hh,limit)->do
+      let bottom=click (x+ww-1) (y+hh-1) longView
+          thumb=click (if vertical then x else x+1) (if vertical then y+1 else y) longView
+          dragged=fst (handleEvent (V.EvMouseDown (if vertical then x else x+ww-2) (if vertical then y+hh-2 else y) V.BLeft []) thumb)
+      check "semantic output scrollbar arrow uses live extent" (limit>0 && currentAxis vertical bottom==1)
+      check "semantic output scrollbar thumb retains drag owner" (drag thumb==fmap (\w->Scrolling (windowId w) vertical) (activeWindow longView))
+      check "semantic output scrollbar drag changes viewport" (currentAxis vertical dragged>1)) [True,False]
+  check "semantic output frame paints both scrollbar affordances"
+    (all (`T.isInfixOf` snapshot longView) ["▲","▼","◄","►"])
   let (start,_)=runCommand SelectAll refreshed
       caretStart=start {windows=map (\w->w {selection=Selection 0 0}) (windows start)}
       (advanced,_)=handleEvent (V.EvKey V.KRight []) caretStart
@@ -126,6 +169,25 @@ checks=W.withWindowScope $ \scope->withDocsCommands $ \docs->withRegistry $ \reg
   originalOpened<-adoptWindowUpdate P.HumanMenu originalUpdate source
   duplicate<-adoptWindowUpdate P.HumanMenu originalUpdate originalOpened
   check "duplicate open reply cannot create another window" (length (windows duplicate)==length (windows originalOpened))
+  let slotRef=case windowContent <$> activeWindow originalOpened of Just (PluginContent ref)->ref; _->error "missing slot ref"
+      slotModal=prompt "Keep draft" Information [SelectedInput "Name" "draft" (Selection 0 5)] originalOpened
+  replacementPrepared<-W.prepareTextWindow "New lifetime" "fresh output"
+  replacementOpening<-W.openTextWindow scope replacementPrepared >>= maybe (fail "prepare slot replacement") pure
+  queuedOld<-W.refreshTextWindow slotRef prepared >>= maybe (fail "prepare old slot reply") pure
+  invalidSelf<-replaceWindowUpdate P.HumanMenu slotRef queuedOld slotModal
+  invalidInstalled<-replaceWindowUpdate P.HumanMenu slotRef longUpdate slotModal {pluginWindows=pluginWindows longOpened `M.union` pluginWindows slotModal}
+  selfLive<-W.windowRefCurrent slotRef
+  installedLive<-W.windowRefCurrent (W.updateWindowRef longUpdate)
+  check "invalid replacement metadata never retires installed lifetimes"
+    (selfLive && installedLive && M.lookup slotRef (pluginWindows invalidSelf)==M.lookup slotRef (pluginWindows slotModal) &&
+      M.lookup (W.updateWindowRef longUpdate) (pluginWindows invalidInstalled)==Just longPrepared)
+  replaced<-replaceWindowUpdate P.HumanMenu slotRef replacementOpening slotModal
+  replacementRef<-maybe (fail "missing replacement ref") pure (case windowContent <$> activeWindow replaced of Just (PluginContent ref)->Just ref; _->Nothing)
+  oldLate<-adoptWindowUpdate P.HumanMenu queuedOld replaced
+  check "owned slot replacement preserves modal, numbering and geometry with a fresh lifetime"
+    (dialog replaced==dialog slotModal && length (windows replaced)==length (windows slotModal) &&
+      fmap (\w->(windowId w,windowNumber w,bounds w)) (activeWindow replaced)==fmap (\w->(windowId w,windowNumber w,bounds w)) (activeWindow slotModal) && replacementRef/=slotRef)
+  check "old slot publication cannot alter replacement" (M.lookup replacementRef (pluginWindows oldLate)==Just replacementPrepared && M.notMember slotRef (pluginWindows oldLate))
   actorPrepared<-W.prepareTextWindow "Private notes" "private"
   actorUpdate<-W.openTextWindow scope actorPrepared >>= maybe (fail "prepare actor update") pure
   denied<-adoptWindowUpdate P.AgentMenu actorUpdate source

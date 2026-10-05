@@ -119,14 +119,36 @@ Source, conversation and debugger panes retain the standard command defaults.
 When WordStar is enabled for a text source, its `wordstar` table owns named
 commands such as Save, Open and Undo. Their function-key and existing named
 command defaults remain; other Ctrl character keys stay inactive unless assigned.
-Ctrl+E/S/D/X movement, Ctrl+A/F word movement, Ctrl+Y
-line deletion, and Ctrl+K/Ctrl+Q prefix/block grammar stay fixed. Overrides using
+Horizontal movement and selection use `hide.cursor.left/right` and
+`hide.selection.left/right`; adjacent deletion uses `hide.edit.delete-backward`
+and `hide.edit.delete-forward`. Left/Right, Shift+Left/Right and Backspace/Delete
+keep their defaults. WordStar adds Ctrl+S/D to horizontal movement and Ctrl+Y to
+`hide.edit.delete-line`; their Ctrl+Shift variants retain the same non-extending
+movement or line deletion. These commands can be replaced or unbound. Ctrl+E/X
+vertical movement, Ctrl+A/F word movement, and Ctrl+K/Ctrl+Q prefix/block grammar
+stay fixed. Overrides using
 those owned chords fail validation. Global chords owned by this grammar are
 omitted from its inherited map, preserving their use in other contexts. Prefix command steps remain available even
 when the same named command is rebound or unbound in the table; customizable
-prefix/movement grammar remains open in #3. Hex buffers use `source`.
+prefix, vertical and word movement grammar remains open in #3. Hex buffers use `source`.
 For example, `[editor.keybindings.terminal.wordstar]` with
 `"hide.file.save" = ["Ctrl+Shift+J"]` replaces F2 for WordStar sources only.
+For example, the `wordstar` table can rebind horizontal movement and selection:
+
+```toml
+[editor.keybindings.terminal.wordstar]
+"hide.cursor.left" = ["Ctrl+Shift+J"]
+"hide.selection.left" = ["Ctrl+Shift+I"]
+"hide.edit.delete-line" = ["Ctrl+Shift+U"]
+```
+
+Removing a command's list consumes its former default keys instead of replaying
+hardcoded editing. A global Save override using Ctrl+Shift+S must explicitly
+release its WordStar owner with `"hide.cursor.left" = []` in the `wordstar` table.
+Hex and read-only Markdown/plugin windows keep their existing horizontal
+coordinate and selection owners; read-only windows cannot delete, and Delete line
+is only available in editable text sources.
+
 The sidebar additionally binds Up/Down and PageUp/PageDown to row movement,
 Enter to activate, Right to expand, Left to collapse, and F6 to return to source.
 Messages uses its own row/page movement, Enter to jump to source, and F6 to leave.
@@ -199,7 +221,7 @@ browser permissions or user activation prevent access. Browser/OS reserved short
 characters retain composed text input and cannot be assigned to commands; Cmd+Alt
 chords remain distinct. Local graphical scale keys remain reserved.
 
-WordStar movement/prefix/block grammar and dialog-navigation customization remain subsequent stages of
+WordStar vertical/word movement and prefix/block grammar, plus dialog-navigation customization, remain subsequent stages of
 [configurable keybindings](https://github.com/ekmett/hide/issues/3).
 
 ## Environment
@@ -310,6 +332,7 @@ Source files are not scanned for secrets by this display option.
 ```toml
 [editor.mcp.permissions]
 read_buffer = "enable"
+build_output = "enable"
 buffer_apply_diff = "prompt"
 terminal_start = "disable"
 ```

@@ -20,6 +20,10 @@ import Hide.BuildJobs
 import Hide.Files (FileState(..))
 import Hide.Buffer
 import Hide.Model
+import qualified Hide.Plugin.Window as W
+import Hide.Plugin.BufferHost (captureVersion)
+import Hide.PluginWindowHost (adoptWindowUpdate)
+import qualified Hide.Plugin.Menu as P
 
 checks :: IO ()
 checks = bracket temporary removePathForcibly $ \root -> do
@@ -27,7 +31,7 @@ checks = bracket temporary removePathForcibly $ \root -> do
       ghc=B.BuildConfig B.GHC "ghc" "" "" "" []
       thc=B.BuildConfig B.THC "thc with spaces" "exe:hello world;literal" "compiler root" "runtime path" ["one two"]
       file=root </> "Main.hs"
-      output d=T.concat [contents (documentBuffer doc) | doc<-M.elems (buffers d),documentLabel doc/=Nothing]
+      output d=maybe "" (\p->let text=W.preparedWindowText p in contentSlice text 0 (contentLength text)) (activePluginWindow d)
       await jobs desktop done=do
         answer<-timeout 15000000 (loop desktop)
         maybe (error "build worker did not finish") pure answer
@@ -47,15 +51,20 @@ checks = bracket temporary removePathForcibly $ \root -> do
   check "reject invalid program arguments" (case B.parseBuildConfig ["ghc","","","", "not JSON", "1"] of Left _ -> True; _ -> False)
   check "switch default compiler with toolchain" (fmap B.buildExecutable (B.parseBuildConfig ["thc","","","", "[]", "1"])==Right "ghc")
   writeFile file "module Main where\nmain :: IO ()\nmain = putStrLn \"build-check\"\n"
-  let sourceDesktop=addDocument (Just (FileState file Nothing)) (newBuffer "main = pure ()") initial
-      outputFocused=addReadOnly "Make output" "log" sourceDesktop
-  check "output focus keeps standalone source" (B.buildSource outputFocused==Just file)
-  check "output focus keeps project directory without Files" . (==root) =<< B.resolveBuildRoot outputFocused
+  let sourceDesktop=addDocument (Just (FileState file Nothing)) ((newBuffer "main = pure ()") {undoStack=error "captured build touched source Undo"}) initial
+  W.withWindowScope $ \scope->do
+    prepared<-W.prepareTextWindow "Make output" "log"
+    opening<-W.openTextWindow scope prepared >>= maybe (fail "prepare output focus") pure
+    outputFocused<-adoptWindowUpdate P.HumanMenu opening sourceDesktop
+    check "output focus keeps standalone source" (B.buildSource outputFocused==Just file)
+    check "output focus keeps project directory without Files" . (==root) =<< B.resolveBuildRoot outputFocused
 
   installed<-findExecutable "ghc"
   forM_ installed $ \_ -> withBuildJobs $ \jobs -> do
     Right run<-B.buildPlan B.Run ghc root (Just file)
     running<-startBuildJob jobs "Run" root run initial
+    check "captured job opens semantic output without source buffers"
+      (M.null (buffers running) && maybe False ((==Nothing) . bufferId) (activeWindow running))
     ran<-await jobs running finished
     check "real GHC Run resolves the named compiler on PATH" (status ran=="Run completed." && "build-check" `T.isInfixOf` output ran)
 
@@ -81,14 +90,22 @@ checks = bracket temporary removePathForcibly $ \root -> do
   check "path spaces and warning location" (parseBuildDiagnostic root "src/My File.hs:12:3: warning: unused name" == Just (Diagnostic (root </> "src" </> "My File.hs") Nothing 11 2 2 "warning: unused name"))
   python<-findExecutable "python3" >>= maybe (findExecutable "python") (pure . Just)
   forM_ python $ \command -> withBuildJobs $ \jobs -> do
-    started<-startBuildJob jobs "Make" root [(command,["-u","-c","import sys,time; print('live λ',flush=True); time.sleep(.25); print('Main.hs:2:1: error: fixture',file=sys.stderr); sys.exit(3)"])] initial
+    sourceVersion<-captureVersion (documentBuffer (buffers sourceDesktop M.! 1))
+    started<-startBuildJob jobs "Make" root [(command,["-u","-c","import sys,time; print('live λ',flush=True); time.sleep(.25); print('Main.hs:2:1: error: fixture',file=sys.stderr); sys.exit(3)"])] sourceDesktop
     streaming<-await jobs started (T.isInfixOf "live λ" . output)
     check "output arrives before completion" (not (finished streaming))
-    completed<-await jobs streaming finished
+    let copied=fst (runCommand Copy (fst (runCommand SelectAll streaming)))
+    check "captured output keeps semantic selection/copy" ("live λ" `T.isInfixOf` clipboard copied)
+    let modal=prompt "Retained draft" Information [SelectedInput "Name" "draft" (Selection 0 5)] streaming
+    completedModal<-await jobs modal finished
+    check "captured output refresh preserves a focused modal" (dialog completedModal==dialog modal && fmap windowId (activeWindow completedModal)==fmap windowId (activeWindow modal))
+    sourceAfter<-captureVersion (documentBuffer (buffers completedModal M.! 1))
+    check "captured output preserves authoritative source and Undo identity" (sourceVersion==sourceAfter && M.size (buffers completedModal)==1)
+    let completed=completedModal {dialog=Nothing}
     check "failed output and Messages" ("exit 3" `T.isInfixOf` status completed && length (buildDiagnostics completed)==1 && problemsVisible completed)
     repeated<-startBuildJob jobs "Make" root [(command,["-u","-c","print('second invocation')"])] completed
     rebuilt<-await jobs repeated finished
-    check "repeated build refreshes existing output window" ("second invocation" `T.isInfixOf` output rebuilt)
+    check "new build reuses its host slot with a fresh content lifetime" ("second invocation" `T.isInfixOf` output rebuilt && length (windows rebuilt)==length (windows completed) && fmap (\w->(windowId w,windowNumber w,bounds w)) (activeWindow rebuilt)==fmap (\w->(windowId w,windowNumber w,bounds w)) (activeWindow completed) && fmap windowContent (activeWindow rebuilt)/=fmap windowContent (activeWindow completed))
 
     when (os/="mingw32") $ do
       createFileLink file (root </> "diagnostic-alias.hs")
@@ -103,7 +120,7 @@ checks = bracket temporary removePathForcibly $ \root -> do
     stopped<-timeout 100000 $ stopBuildJob jobs running
     stopping<-maybe (error "stop request blocked the UI") pure stopped
     check "stop returns a request before joining" ("Stopping" `T.isInfixOf` status stopping)
-    active<-buildJobStatus jobs
+    active<-buildJobStatus jobs stopping
     check "stop retains worker ownership until completion" (parseMaybe (withObject "status" (.: "active")) active==Just True)
     _<-await jobs stopping (T.isInfixOf "Stopped." . status)
     -- POSIX process groups remain addressable after the group leader exits.
@@ -126,7 +143,7 @@ checks = bracket temporary removePathForcibly $ \root -> do
           fresh<-tickBuildJobs jobs d
           -- Demand the same fields rendering and diagnostic navigation use.
           forM_ (M.elems (buffers fresh)) $ \doc -> evaluate (prepareBuffer (documentBuffer doc))
-          let visible=sum [bufferLineCount b+sum [T.length (bufferLineAt b row) | row<-[0,bufferLineCount b `div` 2,bufferLineCount b-1]] | doc<-M.elems (buffers fresh),let b=documentBuffer doc]
+          let visible=sum [contentLineCount text+sum [T.length (contentLineAt text row) | row<-[0,contentLineCount text `div` 2,contentLineCount text-1]] | prepared<-M.elems (pluginWindows fresh),let text=W.preparedWindowText prepared]
               messages=sum [length (diagnosticPath p)+T.length (diagnosticMessage p) | p<-buildDiagnostics fresh]
           _<-evaluate (visible+messages+sum (map scrollRow (windows fresh))+T.length (status fresh))
           after<-getAllocationCounter
@@ -153,10 +170,10 @@ checks = bracket temporary removePathForcibly $ \root -> do
     removeFile release
     closing<-startBuildJob jobs "Run" root [(command,["-u","-c","import os,sys,time; print('close-ready',flush=True)\nwhile not os.path.exists(sys.argv[1]): time.sleep(.01)\nprint('closed-final')",release])] initial
     closeReady<-await jobs closing (T.isInfixOf "close-ready\n" . output)
-    let closed=closeReady {windows=[],buffers=M.empty}
+    let closed=fst (runCommand Close closeReady)
     writeFile release "continue"
     closedFinal<-await jobs closed finished
-    check "completion does not reopen a closed output window" (null (windows closedFinal) && M.null (buffers closedFinal))
+    check "completion does not reopen a closed output window" (null (windows closedFinal) && M.null (buffers closedFinal) && M.null (pluginWindows closedFinal))
     missing<-startBuildJob jobs "Compile" root [(root </> "absent-compiler",[])] initial
     result<-await jobs missing finished
     check "missing compiler is reported" ("Compile:" `T.isPrefixOf` status result)

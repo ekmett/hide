@@ -428,10 +428,11 @@ hostWindowFrame d active w frame=
 
 pluginWindowLayers :: Desktop -> Bool -> Window -> PluginWindow.PreparedWindow -> [CellLayer]
 pluginWindowLayers d active w prepared=
-  bodyLayers++map CellImage (place (x+column) y (label frame title):hostWindowFrame d active w frame)
+  bodyLayers++map CellImage ((if active then [windowScrollbarImage d True w,windowScrollbarImage d False w] else [])++(place (x+column) y (label frame title):hostWindowFrame d active w frame))
   where
     Rect x y ww hh=bounds w
-    frame=attr (if active then white else gray) blue
+    moving=case drag d of Just (Moving wid _ _) -> wid==windowId w; Just (Resizing wid _ _) -> wid==windowId w; _ -> False
+    frame=attr (if moving then cyan else if active then white else gray) blue
     text=PluginWindow.preparedWindowText prepared
     rows=PluginWindow.preparedWindowRows prepared
     title=" "<>T.take (columnOffset (windowTitle d w) (max 0 (ww-17))) (windowTitle d w)<>" "
@@ -441,11 +442,32 @@ pluginWindowLayers d active w prepared=
         (Rect (x+1) (y+1+n-scrollRow w) (max 0 (ww-2)) 1) (scrollColumn w) row
       | n<-[scrollRow w..scrollRow w+max 0 (hh-3)],Just row<-[TextLayout.layoutRows layout Vec.!? n]]
       ++[CellImage (place (x+1) (y+1) (V.charFill edit ' ' (max 0 (ww-2)) (max 0 (hh-2))))]
+      | PluginWindow.PlainRows plain<-rows =
+      [sourceCellRow (darkAppearance d) active (selection w) (contentLineOffset text n)
+        (Rect (x+1) (y+1+n-scrollRow w) (max 0 (ww-2)) 1) (scrollColumn w) row
+      | n<-[scrollRow w..scrollRow w+max 0 (hh-3)],Just row<-[plain Vec.!? n]]
+      ++[CellImage (place (x+1) (y+1) (V.charFill edit ' ' (max 0 (ww-2)) (max 0 (hh-2))))]
       | otherwise=[CellImage (place (x+1) (y+1) body)]
     body=V.vertCat [line n | n<-[scrollRow w..scrollRow w+max 0 (hh-3)]]
-    line n=V.cropRight (max 0 (ww-2))
-      (V.translateX (negate (scrollColumn w)) (styledImage (darkAppearance d) (const True) Nothing active (selection w)
-        (contentLineOffset text n) (fromMaybe [] (rows Vec.!? n))) V.<|> V.charFill edit ' ' (max 0 (ww-2)) 1)
+    line n=V.cropRight (max 0 (ww-2)) (lineImage V.<|> V.charFill edit ' ' (max 0 (ww-2)) 1)
+      where
+        start=contentLineOffset text n
+        lineImage=case rows of
+          PluginWindow.PlainRows _->V.emptyImage
+          PluginWindow.StyledRows styled->V.translateX (negate (scrollColumn w))
+            (styledImage (darkAppearance d) (const True) Nothing active (selection w) start (fromMaybe [] (styled Vec.!? n)))
+
+-- Shared frame chrome uses the same semantic geometry as pointer dispatch.
+windowScrollbarImage :: Desktop -> Bool -> Window -> V.Image
+windowScrollbarImage d vertical w=case windowScrollbar d vertical w of
+  Nothing->V.emptyImage
+  Just (Rect sx sy bw bh,limit)->
+    let len=if vertical then bh else bw
+        shown=displayWindow w
+        thumb=scrollbarThumb len limit (if vertical then scrollRow shown else scrollColumn shown)
+        cell n=V.char (if n==0 || n==len-1 then attr blue scrollCyan else attr scrollCyan blue)
+          (if n==0 then if vertical then '▲' else '◄' else if n==len-1 then if vertical then '▼' else '►' else if n==thumb then '█' else '░')
+    in place sx sy ((if vertical then V.vertCat else V.horizCat) [cell n | n<-[0..len-1]])
 
 windowLayers :: Desktop -> Bool -> Window -> [CellLayer]
 windowLayers d active w | PluginContent reference<-windowContent w = case M.lookup reference (pluginWindows d) of
@@ -454,7 +476,7 @@ windowLayers d active w | PluginContent reference<-windowContent w = case M.look
 windowLayers d active original =
   map CellImage ([place x (y+1+issueRow issue-scrollRow w) (label (attr (if diagnosticSeverity issue==1 then V.RGBColor 255 85 85 else yellow) blue) "▶")
     | bufferView w/=MarkdownView,not (byteMode (documentBuffer doc)), issue<-diagnostics d, Just (diagnosticPath issue)==fmap filePath (documentFile doc), issueRow issue>=scrollRow w, issueRow issue<scrollRow w+hh-2]
-  ++ (if active then [place (x+windowPositionColumn doc) (y+hh-1) (label frame (T.take (max 0 (ww-windowPositionColumn doc-2)) (windowPositionText d doc w))),scrollbarImage True,scrollbarImage False] else [])
+  ++ (if active then [place (x+windowPositionColumn doc) (y+hh-1) (label frame (T.take (max 0 (ww-windowPositionColumn doc-2)) (windowPositionText d doc w))),windowScrollbarImage d True w,windowScrollbarImage d False w] else [])
   ++ [place (x+6) y (label frame "[" V.<|> label (attr cyan blue) " " V.<|> label frame "]") | active,terminalWindow d w,not (windowPinned d w)]
   ++ composerLayers
   ++ hexDividerLayers
@@ -502,13 +524,6 @@ windowLayers d active original =
       Nothing -> True
       Just title -> title `elem` ["Conversation","Haskell Help"] || any (`T.isPrefixOf` title) ["Terminal ","Source "]
     styledLines=splitStyled (documentHighlight doc)
-    scrollbarImage vertical =
-      let Rect sx sy bw bh=scrollbarRect d vertical doc w
-          len=if vertical then bh else bw
-          thumb=scrollbarThumb len (scrollbarLimit d vertical doc w) (if vertical then scrollRow w else scrollColumn w)
-          cell n=V.char (if n==0 || n==len-1 then attr blue scrollCyan else attr scrollCyan blue)
-            (if n==0 then if vertical then '▲' else '◄' else if n==len-1 then if vertical then '▼' else '►' else if n==thumb then '█' else '░')
-      in place sx sy ((if vertical then V.vertCat else V.horizCat) [cell n | n<-[0..len-1]])
     composerLayers
       | documentLabel doc/=Just "Conversation" && not hintComposer = []
       | otherwise = [place (left rect) (top rect) inputImage] ++ thoughtEdges
@@ -671,14 +686,32 @@ splitStyled xs=let (a,b)=break ((=='\n').fst) xs in a:case b of []->[]; _:rest->
 -- character boundaries; exceptional graphemes keep one complete source target
 -- and the advance already resolved by sourceSigils, including tab stops.
 styledSourceImage :: Bool -> Maybe V.Attr -> Bool -> Selection -> Int -> Int -> Int -> SourceRow -> V.Image
-styledSourceImage dark override active sel start left columns row=V.translateX (column-left) (V.horizCat (draw (start+char) sigils))
+styledSourceImage dark override active sel start left columns row=
+  V.translateX (column-left) (V.horizCat spans)
+  where
+    (column,spans)=sourceCellSpans image dark override active sel start left columns row
+    image (CellText paint text)=I.HorizText paint (TL.fromStrict text) (T.length text) (T.length text)
+    image (CellGlyph paint text advance _ _)=I.HorizText paint (TL.fromStrict text) advance (T.length text)
+    image (CellScript _ _ _ _)=V.emptyImage -- Source Sigils never contain scripted presentation.
+
+-- Both source images and plain plugin rows share paint and source-selection cuts.
+-- The compositor owns clipping; glyphs retain their complete semantic identity.
+sourceCellRow :: Bool -> Bool -> Selection -> Int -> Rect -> Int -> SourceRow -> CellLayer
+sourceCellRow dark active sel start (Rect x y columns _) left row=
+  CellRow (x+column-left) y x (x+columns) (Vec.fromList spans)
+  where (column,spans)=sourceCellSpans id dark Nothing active sel start left columns row
+
+-- Project at emission so image callers do not retain an intermediate span list.
+{-# INLINE sourceCellSpans #-}
+sourceCellSpans :: (CellSpan -> a) -> Bool -> Maybe V.Attr -> Bool -> Selection -> Int -> Int -> Int -> SourceRow -> (Int,[a])
+sourceCellSpans project dark override active sel start left columns row=(column,draw (start+char) sigils)
   where
     (char,column,sigils)=sourceSigilsWindow left columns row
     (lo,hi)=ordered sel
     color style=maybe normal (\paint->paint {V.attrStyle=V.attrStyle normal}) override
       where normal=syntaxAttr dark style
     selected paint=paint `V.withForeColor` blue `V.withBackColor` gray
-    image paint text advance=I.HorizText paint (TL.fromStrict text) advance (T.length text)
+    ordinary paint text=[project (CellText paint text) | not (T.null text)]
     draw _ Nil=[]
     draw offset (ConsChars text style rest)=
       let n=T.length text
@@ -686,18 +719,18 @@ styledSourceImage dark override active sel start left columns row=V.translateX (
           a=max 0 (min n (lo-offset)); z=max a (min n (hi-offset))
           (before,tailText)=T.splitAt a text
           (chosen,after)=T.splitAt (z-a) tailText
-          ordinary=[image paint text n]
-          highlighted=[image paint before a,image (selected paint) chosen (z-a),image paint after (n-z)]
-      in (if active && z>a then highlighted else ordinary)++draw (offset+n) rest
+          highlighted=ordinary paint before++ordinary (selected paint) chosen++ordinary paint after
+      in (if active && z>a then highlighted else ordinary paint text)++draw (offset+n) rest
     draw offset (ConsSigil glyph style advance rest)=
       let original=graphemeText glyph
           n=T.length original
-          paint=color style
-          shown | original=="\r"=""
-                | original=="\t"=T.replicate advance " "
-                | T.any (\c->c<' ' || c=='\DEL') original=T.map (\c->if c<' ' || c=='\DEL' then '·' else c) original
+          paint=if active && offset<hi && offset+n>lo then selected (color style) else color style
+          shown | T.any (\c->c<' ' || c=='\DEL') original=T.map (\c->if c<' ' || c=='\DEL' then '·' else c) original
                 | otherwise=original
-      in image (if active && offset<hi && offset+n>lo then selected paint else paint) shown advance:draw (offset+n) rest
+          occupied | advance<=0=[]
+                   | original=="\t"=ordinary paint (T.replicate advance " ")
+                   | otherwise=[project (CellGlyph paint shown advance 0 advance)]
+      in occupied++draw (offset+n) rest
 
 styledImage :: Bool -> (Style -> Bool) -> Maybe V.Attr -> Bool -> Selection -> Int -> [(Char,Style)] -> V.Image
 styledImage dark selectable override active sel start chars

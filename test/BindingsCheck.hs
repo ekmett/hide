@@ -9,6 +9,12 @@ import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.FilePath ((</>))
 import System.IO (hClose, openTempFile)
 import System.Timeout (timeout)
+import qualified Data.ByteString as BS
+import qualified Hide.Plugin.Window as W
+import qualified Hide.Plugin.Menu as P
+import Hide.PluginWindowHost (adoptWindowUpdate)
+import Hide.TextPresentation (prepareTextPresentations)
+import Hide.BufferView (BufferView(..))
 import Hide.Window (nativeMenuShortcut)
 import Hide.Keybindings
 import qualified Data.Text.IO as TIO
@@ -46,7 +52,7 @@ checks=do
       replaceMac=mac {keyBindings=replaceMaps}
   check "configured Command Option Replace dispatches through its owner" (maybe False (\dg->case purpose dg of Searching True _->True; _->False) (dialog (fst (key (V.KChar 'f') [V.MMeta,V.MAlt] replaceMac))))
   check "unbound Command copy cannot fall through to a fixed shortcut" (clipboard (fst (key (V.KChar 'c') [V.MMeta] (modifyActive (\w->w {selection=Selection 0 5}) replaceMac)))=="")
-  let modalMaps=either (error . show) id (configuredBindings [] (M.singleton "macos" (M.singleton "source" (M.singleton "hide.edit.copy" ["Cmd+Left"]))))
+  let modalMaps=either (error . show) id (configuredBindings [] (M.singleton "macos" (M.singleton "source" (M.fromList [("hide.edit.copy",["Cmd+Left"]),("hide.cursor.left",[])]))))
       sourceModal=mac {keyBindings=modalMaps}
       editorModal=prompt "Edit" Information [TextArea "Text" True (newBuffer "draft") (Selection 0 5) 0 0] sourceModal
   check "native source accelerators cannot hijack modal movement" (nativeMenuShortcut sourceModal Copy==("\xf702",8) && nativeMenuShortcut editorModal Copy==("c",8) && clipboard (fst (key V.KLeft [V.MMeta] editorModal))=="")
@@ -99,7 +105,7 @@ checks=do
   check "terminal control chords cannot be assigned to commands" (either (const True) (const False) (platformBindings [] TerminalPlatform (M.singleton "terminal" (M.singleton "hide.terminal.stop" ["Ctrl+C"]))))
   let debug=addReadOnly "Debugger output" "stopped" contextBase
   check "debugger override drives dispatch and menu labels" (snd (key (V.KChar 'd') [V.MCtrl,V.MShift] debug)==[DebugAction "continue" []] && noEffects (key (V.KFun 4) [] debug) && menuShortcut debug (MenuItem "Continue" "F4" (DebugCommand "continue"))=="Ctrl+Shift+D")
-  let global=either (error . show) id (platformBindings [] TerminalPlatform (M.singleton "global" (M.singleton "hide.file.save" ["Ctrl+Shift+S","Alt+F11"])))
+  let global=either (error . show) id (platformBindings [] TerminalPlatform (M.fromList [("global",M.singleton "hide.file.save" ["Ctrl+Shift+S","Alt+F11"]),("wordstar",M.singleton "hide.cursor.left" [])]))
   check "global control overrides apply outside PTYs" (all (\context->bindingAction (global M.! (TerminalPlatform,context)) (V.KChar 's') [V.MCtrl,V.MShift]==Just Save) [SourceKeys,SidebarKeys,ConversationKeys,MessagesKeys,DebuggerKeys])
   check "PTY inherits transferable global chords and omits process controls" (bindingKeys (global M.! (TerminalPlatform,TerminalKeys)) Save==["Alt+F11"] && snd (key (V.KChar 'c') [V.MCtrl] (pty {keyBindings=global}))==[AgentAction "terminal-input" ["test","\ETX"]])
   check "unknown contexts fail instead of disappearing" (either (const True) (const False) (platformBindings [] TerminalPlatform (M.singleton "sidebaar" M.empty)))
@@ -166,6 +172,7 @@ checks=do
   check "default dialog clipboard matches field-owned behavior" (clipboard (fst (key (V.KChar 'c') [V.MCtrl] editing {nativeMac=False,keyBindings=dialogDefaults}))=="draft")
   check "unavailable dialog editing action retains Input button mnemonic ownership" (dialog (fst (key (V.KChar 'c') [V.MCtrl] searchEditing))==Nothing)
   check "default dialog search retains permitted replacement action" (maybe False (\dg->case purpose dg of Searching True _->True; _->False) (dialog (fst (key (V.KChar 'f') [V.MMeta,V.MAlt] searchEditing))))
+  horizontalChecks
   reloadChecks
   putStrLn "keybinding checks passed"
 
@@ -204,3 +211,54 @@ reloadChecks=bracket temporary removePathForcibly $ \directory->do
       removeFile path
       createDirectory path
       canonicalizePath path
+
+horizontalChecks :: IO ()
+horizontalChecks=do
+  let check label ok=unless ok (error label)
+      compile entries=either (error . show) id (platformBindings [] TerminalPlatform (M.singleton "wordstar" (M.fromList entries)))
+      base=modifyActive (\w->w {selection=Selection 2 2}) (addDocument Nothing (newBuffer "abc\ndef\n") (initialDesktop (80,25)))
+      configured=base {wordStar=True,keyBindings=compile [("hide.cursor.left",["Ctrl+Shift+J"]),("hide.selection.left",["Ctrl+Shift+I"]),("hide.edit.delete-line",["Ctrl+Shift+U"])]}
+      event key mods d=fst (handleEvent (V.EvKey key mods) d)
+      range d=selection <$> activeWindow d
+  check "horizontal remap invokes its semantic cursor owner" (range (event (V.KChar 'j') [V.MCtrl,V.MShift] configured)==Just (Selection 1 1))
+  check "horizontal remap consumes the removed WordStar and arrow keys" (all (\(key,mods)->range (event key mods configured)==Just (Selection 2 2)) [(V.KLeft,[]),(V.KChar 's',[V.MCtrl]),(V.KChar 's',[V.MCtrl,V.MShift])])
+  check "selection remap preserves its anchor" (range (event (V.KChar 'i') [V.MCtrl,V.MShift] configured)==Just (Selection 2 1))
+  let deleted=event (V.KChar 'u') [V.MCtrl,V.MShift] configured
+  check "remapped line deletion uses one existing undo operation" (activeText deleted=="def\n" && activeText (fst (runCommand Undo deleted))=="abc\ndef\n")
+  let unbound=base {wordStar=True,keyBindings=compile [("hide.cursor.left",[]),("hide.selection.left",[]),("hide.edit.delete-backward",[]),("hide.edit.delete-line",[])]}
+  check "unbound horizontal editing cannot replay physical defaults" (all (\(key,mods)->let d=event key mods unbound in range d==Just (Selection 2 2) && activeText d=="abc\ndef\n") [(V.KLeft,[]),(V.KLeft,[V.MShift]),(V.KBS,[]),(V.KChar 's',[V.MCtrl]),(V.KChar 'y',[V.MCtrl])])
+  let defaults=either (error . show) id (configuredBindings [] M.empty)
+      position text p=modifyActive (\w->w {selection=Selection p p}) (addDocument Nothing (newBuffer text) (initialDesktop (80,25)))
+      unicode=position "a界e\x301\&z\r\n" 4
+  check "horizontal commands preserve complete combining boundaries" (range (event V.KLeft [] unicode {keyBindings=defaults})==Just (Selection 2 2) && activeText (event V.KBS [] unicode {keyBindings=defaults})=="a界z\r\n")
+  check "selection extension and reverse selections keep the original anchor" (range (event V.KRight [V.MShift] base {keyBindings=defaults})==Just (Selection 2 3) && range (event V.KLeft [] (modifyActive (\w->w {selection=Selection 3 1}) base {keyBindings=defaults}))==Just (Selection 0 0))
+  check "empty and end-of-file editing stays bounded" (range (event V.KLeft [] (position "" 0) {keyBindings=defaults})==Just (Selection 0 0) && activeText (event V.KDel [] (position "a" 1) {keyBindings=defaults})=="a")
+  let star=base {wordStar=True,keyBindings=defaults}
+  check "default shifted WordStar movement retains its non-extending semantics" (all (\(c,expected)->range (event (V.KChar c) [V.MCtrl,V.MShift] star)==Just (Selection expected expected)) [('s',1),('d',3)])
+  check "default shifted WordStar line deletion retains its owner" (activeText (event (V.KChar 'y') [V.MCtrl,V.MShift] star)=="def\n")
+  let selected=modifyActive (\w->w {selection=Selection 1 3}) base {keyBindings=defaults}
+  check "adjacent deletion removes a selection first and undo restores it" (all (\k->let edited=event k [] selected in activeText edited=="a\ndef\n" && activeText (fst (runCommand Undo edited))=="abc\ndef\n") [V.KBS,V.KDel])
+  let sourceRemap=base {keyBindings=either (error . show) id (configuredBindings [] (M.singleton "macos" (M.singleton "source" (M.singleton "hide.cursor.left" ["Cmd+Shift+J"])))),nativeMac=True,videoMode=Just 3}
+  check "source platform remap shares frontend projection and labels" (range (event (V.KChar 'j') [V.MMeta,V.MShift] sourceRemap)==Just (Selection 1 1) && lookup "Cmd+Shift+J" (focusedBindingChords sourceRemap)==Just "hide.cursor.left" && commandBindingKeys sourceRemap (CursorLeft False)==["Cmd+Shift+J"])
+  let modal=prompt "Edit" Information [Input "Name" "draft" 0] configured
+      private=configured {guestPrivatePaths=["/authority"],buffers=M.map (\doc->doc {documentFile=Just (FileState "/authority/secret.hs" Nothing)}) (buffers configured)}
+      sidebar=installSidebar (emptySidebar "/project" 24 True) configured
+  check "rebound source operations keep modal private and sidebar authority" (range (event (V.KChar 'j') [V.MCtrl,V.MShift] modal)==Just (Selection 2 2) && not (guestKeyAllowed private (V.KChar 'j') [V.MCtrl,V.MShift]) && not (commandEnabled sidebar (CursorLeft False)) && range (fst (runCommand DeleteLine sidebar))==Just (Selection 2 2))
+  check "global overrides must explicitly release new WordStar chord owners" (either (const True) (const False) (platformBindings [] TerminalPlatform (M.singleton "global" (M.singleton "hide.file.save" ["Ctrl+Shift+S"]))))
+  let viewMaps=either (error . show) id (platformBindings [] TerminalPlatform (M.singleton "source" (M.fromList [("hide.cursor.left",[]),("hide.selection.left",[]),("hide.cursor.right",["Ctrl+Shift+J"])])))
+      hex=modifyActive (\w->w {selection=Selection 2 2}) (addDocument Nothing (newByteBuffer (BS.pack [65,13,10,66])) (initialDesktop (80,25))) {keyBindings=defaults}
+  check "hex horizontal commands keep one-byte boundaries" (range (event V.KLeft [] hex)==Just (Selection 1 1) && range (event V.KRight [] hex)==Just (Selection 3 3) && (bufferBytes . documentBuffer <$> activeDocument (event V.KBS [] hex))==Just (BS.pack [65,10,66]))
+  check "delete line is unavailable in hex" (not (commandEnabled hex DeleteLine) && activeText (fst (runCommand DeleteLine hex))==activeText hex)
+  W.withWindowScope $ \scope->do
+    prepared<-W.prepareTextWindow "Horizontal notes" "a界e\x301\&z"
+    update<-W.openTextWindow scope prepared >>= maybe (fail "plugin open failed") pure
+    opened<-adoptWindowUpdate P.HumanMenu update base
+    let plugin=modifyActive (\w->w {selection=Selection 2 2}) opened {keyBindings=viewMaps}
+    check "plugin unbinding consumes physical horizontal fallback" (range (event V.KLeft [] plugin)==Just (Selection 2 2) && range (event V.KLeft [V.MShift] plugin)==Just (Selection 2 2))
+    check "plugin remap navigates prepared text and never its background source" (range (event (V.KChar 'j') [V.MCtrl,V.MShift] plugin)==Just (Selection 4 4) && not (commandEnabled plugin DeleteBackward))
+  let mdSource=addDocument (Just (FileState "/tmp/horizontal.md" Nothing)) (newBuffer "*a界e\x301\&z*\n") (initialDesktop (80,25))
+  ready<-prepareTextPresentations (fst (runCommand (SetBufferView MarkdownView) mdSource))
+  let markdown=modifyActive (modifyDisplayedWindow (\w->w {selection=Selection 2 2})) ready {keyBindings=viewMaps}
+      renderedRange d=selection . displayWindow <$> activeWindow d
+  check "Markdown unbinding consumes physical horizontal fallback" (renderedRange (event V.KLeft [] markdown)==Just (Selection 2 2) && renderedRange (event V.KLeft [V.MShift] markdown)==Just (Selection 2 2))
+  check "Markdown remap uses rendered coordinates without moving source selection" (renderedRange (event (V.KChar 'j') [V.MCtrl,V.MShift] markdown)==Just (Selection 3 3) && range (event (V.KChar 'j') [V.MCtrl,V.MShift] markdown)==range markdown && not (commandEnabled markdown DeleteBackward))
