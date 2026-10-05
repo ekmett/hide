@@ -39,7 +39,7 @@ import System.IO
 import System.Process
 import System.Timeout (timeout)
 import Text.Read (readMaybe)
-import Hide.Buffer (Buffer, bufferLineColumn, bufferLineOffset, bufferLineAt, bufferSlice)
+import Hide.Buffer (Buffer, bufferLineColumn, bufferLineOffset, bufferSlice, bufferContent, contentSourceLineAt, sourceLineSlice)
 
 data Event = Response Int Value | ApplyEdit Int Value Value | Diagnostics FilePath (Maybe Int) Value | ServerError Text
   deriving (Eq, Show)
@@ -316,11 +316,17 @@ offsetPosition contents offset = T.foldl' step (0,0) (T.take (max 0 offset) cont
                             | otherwise = (line,column + if ord c > 0xffff then 2 else 1)
 
 positionOffset :: Text -> (Int,Int) -> Int
-positionOffset contents (line,column) = min (T.length contents) (prefix + units 0 (max 0 column) (T.unpack text))
+positionOffset contents (line,column) = min (T.length contents) (prefix + utf16Offset text column)
   where
     rows = T.splitOn "\n" contents
     prefix = sum (map ((+1) . T.length) (take (max 0 line) rows))
     text = case drop (max 0 line) rows of row:_ -> T.dropWhileEnd (== '\r') row; [] -> ""
+
+-- Count whole source scalars fitting the requested UTF-16 extent. Unlike the
+-- flat position helper, this scanner never strips a partial prefix's trailing CR.
+utf16Offset :: Text -> Int -> Int
+utf16Offset text column=units 0 (max 0 column) (T.unpack text)
+  where
     units count _ [] = count
     units count remaining (c:cs)
       | remaining < width = count
@@ -339,11 +345,15 @@ bufferOffsetPosition buffer offset=(row,snd (offsetPosition prefix column))
     (row,column)=bufferLineColumn buffer offset
     prefix=bufferSlice buffer (bufferLineOffset buffer row) column
 
--- | Convert a clamped UTF-16 position without traversing preceding lines.
+-- | Convert a clamped UTF-16 position by measured row lookup and a scalar prefix
+-- bounded by the requested column, rather than projecting the entire row first.
 -- Strict protocol ranges should round-trip through 'bufferOffsetPosition' to
 -- reject out-of-range positions and positions inside a surrogate pair.
 bufferPositionOffset :: Buffer -> (Int,Int) -> Int
-bufferPositionOffset buffer (row,column)=bufferLineOffset buffer row+positionOffset (bufferLineAt buffer row) (0,column)
+bufferPositionOffset buffer (row,column)=bufferLineOffset buffer row+utf16Offset prefix column
+  where
+    line=contentSourceLineAt (bufferContent buffer) row
+    prefix=sourceLineSlice line 0 (max 0 column)
 
 -- | The LSP JSON position for a buffer character offset.
 bufferPositionValue :: Buffer -> Int -> Value
