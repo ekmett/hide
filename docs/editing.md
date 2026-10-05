@@ -311,6 +311,10 @@ Select WordStar under **Options > Preferences**, or start with `--wordstar`.
 | Start / end of file | Ctrl+Q, then R / C | ⌃Q, then R / C |
 | Find / replace | Ctrl+Q, then F / A | ⌃Q, then F / A |
 
-Escape cancels a prefix. This is a useful subset of WordStar's commands.
+These are defaults. Configure the starters in `wordstar` and second strokes in
+`wordstar-block` / `wordstar-quick`; see [keybinding configuration](configuration.md).
+Second letters also accept Ctrl and Shift. Escape cancels a prefix; unknown or
+unbound steps end it without editing. Alt/Command menu and platform shortcuts
+retain their own priority.
 
 See also [Haskell tools](haskell.md), [Git](git.md) and [hex editing](hex.md).

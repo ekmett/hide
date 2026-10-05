@@ -301,9 +301,7 @@ runWindow backend scale effects tick initial = do
       | not (activeTerminal d/=Nothing && mods .&. 15==2), Just direction <- zoomDirection key mods = changeScale (fromIntegral direction) d
       | otherwise = case decodeKey key mods of
           Nothing -> pure (d,[])
-          Just (V.EvKey k ms) | boundKeyCommand k ms d==Just Paste && commandEnabled d Paste -> paste d
-          Just (V.EvKey (V.KChar 'v') ms) | dialog d/=Nothing && effectiveBindings d==Nothing && any (`elem` ms) [V.MCtrl,V.MMeta] && dialogCommandAllowed Paste d -> paste d
-          Just ev -> clipboardResult (copies ev d) d (handleEvent ev d)
+          Just ev -> dispatchKey ev d
     dispatch (14:_) d = do
       path <- c_text >>= BS.packCString
       pure (d,[ReadPath (T.unpack (TE.decodeUtf8 path))])
@@ -311,7 +309,7 @@ runWindow backend scale effects tick initial = do
       bytes <- c_text >>= BS.packCString
       case TE.decodeUtf8' bytes of
         Left _ -> pure (d,[])
-        Right text -> clipboardResult (any (\c -> copies (V.EvKey (V.KChar c) []) d) (T.unpack text)) d (foldText (T.unpack text) d)
+        Right text -> foldText text d
     dispatch (3:x:y:clicks:mods:button:_) d
       | button == 3 = pure (handleEvent (V.EvMouseDown x y V.BRight (keyMods mods)) d)
       | clicks == 0, dialog d /= Nothing || drag d == Nothing = pure (hoverAt x y d)
@@ -351,6 +349,12 @@ runWindow backend scale effects tick initial = do
         err <- c_error >>= peekCString
         pure (message "Cannot resize character tiles" [T.pack err] d,[])
     keyMods m = case decodeKey 0 m of Just (V.EvKey _ ms) -> ms; _ -> []
+    dispatchKey ev@(V.EvKey k ms) d
+      | boundKeyCommand k ms d==Just Paste && commandEnabled d Paste = paste d {prefix=Nothing}
+      | k==V.KChar 'v', dialog d/=Nothing, effectiveBindings d==Nothing,
+        any (`elem` ms) [V.MCtrl,V.MMeta], dialogCommandAllowed Paste d = paste d
+      | otherwise = clipboardResult (copies ev d) d (handleEvent ev d)
+    dispatchKey ev d = pure (handleEvent ev d)
     paste d = do bytes <- c_clipboard >>= BS.packCString; pure (handleEvent (V.EvPaste bytes) d)
     clipboardResult force before result@(after,_) = do
       when (force || clipboard before /= clipboard after) (utf8 (clipboard after) c_set_clipboard)
@@ -368,9 +372,11 @@ runWindow backend scale effects tick initial = do
       (prefix d == Just 'k' && key `elem` [V.KChar 'c',V.KChar 'v'])
     copies _ _ = False
     -- Text events still pass through key handling for menu mnemonics and WordStar prefixes.
-    foldText [] d = (d,[])
-    foldText (c:cs) d = let (d',fx)=handleEvent (V.EvKey (V.KChar c) []) d
-                       in if null fx then foldText cs d' else (d',fx)
+    foldText text d = case T.uncons text of
+      Nothing -> pure (d,[])
+      Just (c,rest) -> do
+        result@(d',fx)<-dispatchKey (V.EvKey (V.KChar c) []) d
+        if null fx then foldText rest d' else pure result
 #else
 runWindow :: Backend -> Double -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> (Desktop -> IO Desktop) -> Desktop -> IO ()
 runWindow _ _ _ _ _ = ioError (userError "Graphical support is not built. Install SDL3 and rebuild with: cabal build -fwindow")
@@ -380,6 +386,7 @@ runWindow _ _ _ _ _ = ioError (userError "Graphical support is not built. Instal
 -- Empty bindings remove the accelerator; every additional chord remains raw input.
 nativeMenuShortcut :: Desktop -> Command -> (String,Int)
 nativeMenuShortcut d cmd
+  | prefix d/=Nothing = ("",0)
   | bindingInputAvailable d = nativeChordShortcut (commandBindingKeys d cmd)
   | otherwise = ("",0)
 

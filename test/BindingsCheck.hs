@@ -28,13 +28,14 @@ import Hide.Commands
 import Hide.Sidebar
 import Hide.Model
 import Hide.Browser (Entry(..))
-import Hide.GuestAccess (guestKeyAllowed)
+import Hide.GuestAccess (guestKeyAllowed, beginGuestInput, endGuestInput)
 import Hide.Files (FileState(..))
 import Hide.Buffer
 import Hide.Render (renderKey)
 
 checks :: IO ()
 checks=do
+  prefixChecks
   dialogInputChecks
   debuggerNavigationChecks
   let check name ok=unless ok (error name)
@@ -109,7 +110,7 @@ checks=do
   check "terminal control chords cannot be assigned to commands" (either (const True) (const False) (platformBindings [] TerminalPlatform (M.singleton "terminal" (M.singleton "hide.terminal.stop" ["Ctrl+C"]))))
   let debug=addReadOnly "Debugger output" "stopped" contextBase
   check "debugger override drives dispatch and menu labels" (snd (key (V.KChar 'd') [V.MCtrl,V.MShift] debug)==[DebugAction "continue" []] && noEffects (key (V.KFun 4) [] debug) && menuShortcut debug (MenuItem "Continue" "F4" (DebugCommand "continue"))=="Ctrl+Shift+D")
-  let global=either (error . show) id (platformBindings [] TerminalPlatform (M.fromList [("global",M.singleton "hide.file.save" ["Ctrl+Shift+S","Alt+F11"]),("wordstar",M.singleton "hide.cursor.left" [])]))
+  let global=either (error . show) id (platformBindings [] TerminalPlatform (M.fromList [("global",M.singleton "hide.file.save" ["Ctrl+Shift+S","Alt+F11"]),("wordstar",M.singleton "hide.cursor.left" []),("wordstar-quick",M.singleton "hide.cursor.row-start" [])]))
   check "global control overrides apply outside PTYs" (all (\context->bindingAction (global M.! (TerminalPlatform,context)) (V.KChar 's') [V.MCtrl,V.MShift]==Just Save) [SourceKeys,SidebarKeys,ConversationKeys,MessagesKeys,DebuggerKeys])
   check "PTY inherits transferable global chords and omits process controls" (bindingKeys (global M.! (TerminalPlatform,TerminalKeys)) Save==["Alt+F11"] && snd (key (V.KChar 'c') [V.MCtrl] (pty {keyBindings=global}))==[AgentAction "terminal-input" ["test","\ETX"]])
   check "unknown contexts fail instead of disappearing" (either (const True) (const False) (platformBindings [] TerminalPlatform (M.singleton "sidebaar" M.empty)))
@@ -161,7 +162,7 @@ checks=do
   check "WordStar fixed movement retains its input owner" (maybe (-1) (caret . selection) (activeWindow (fst (key (V.KChar 'd') [V.MCtrl] star)))==1)
   check "WordStar prefix block grammar retains its input owner" (prefix (fst (key (V.KChar 'k') [V.MCtrl] star))==Just 'k' && blockStart (fst (key (V.KChar 'b') [] (fst (key (V.KChar 'k') [V.MCtrl] star))))==Just (maybe (-1) sourceFixtureBuffer (activeWindow star),0))
   check "WordStar remap uses effective menu and status labels" (menuShortcut star (MenuItem "Save" "F2" Save)=="Ctrl+Shift+J" && any ((==" Ctrl+Shift+J Save").fst) (statusHints star))
-  check "WordStar owned grammar chords reject named overrides" (either (const True) (const False) (platformBindings [] TerminalPlatform (M.singleton "wordstar" (M.singleton "hide.file.save" ["Ctrl+K"]))))
+  check "WordStar starter chord conflicts require explicitly releasing its owner" (either (const True) (const False) (platformBindings [] TerminalPlatform (M.singleton "wordstar" (M.singleton "hide.file.save" ["Ctrl+K"]))))
   let dialogMaps=either (error . show) id (configuredBindings [] (M.singleton "macos" (M.singleton "dialog" (M.fromList [("hide.edit.copy",["Cmd+Shift+J"]),("hide.edit.paste",["Cmd+Shift+K"]),("hide.edit.undo",["Cmd+Shift+L"])]))))
       background=modifyActive (\w->w {selection=Selection 0 5}) base {nativeMac=True,videoMode=Just 3,keyBindings=dialogMaps}
       editing=prompt "Edit" Information [TextArea "Text" True (newBuffer "draft") (Selection 0 5) 0 0] background
@@ -417,7 +418,7 @@ edgePageChecks=do
   check "explicit edge/page unbind consumes physical fallback" (all (\(k,mods)->range (event k mods unbound)==range unbound) originalKeys)
   let star=base {wordStar=True,keyBindings=compile "wordstar" [(name,[]) | (name,_,_,_)<-actions]}
       prefixStep c=event (V.KChar c) [] (event (V.KChar 'q') [V.MCtrl] star)
-  check "WordStar Q edges remain fixed non-extending semantic steps" (map (range . prefixStep) ['s','d','r','c']==map (Just . (\p->Selection p p)) [20*stride,20*stride+T.length line,0,T.length text])
+  check "WordStar quick defaults are independent non-extending semantic steps" (map (range . prefixStep) ['s','d','r','c']==map (Just . (\p->Selection p p)) [20*stride,20*stride+T.length line,0,T.length text])
   let hex=narrow (modifyActive (\w->w {selection=Selection 17 17}) (addDocument Nothing (newByteBuffer (BS.pack (take 1600 (cycle [0..255])))) (initialDesktop (80,25)))) {keyBindings=maps}
       count=maybe 0 windowHexBytes (activeWindow hex)
   check "hex remapped End keeps last byte and document End keeps insertion EOF" (range (event (V.KFun 15) [] hex)==Just (Selection (17-17 `mod` count+count-1) (17-17 `mod` count+count-1)) && range (event (V.KFun 19) [] hex)==Just (Selection 1600 1600))
@@ -745,3 +746,65 @@ dialogInputChecks=do
     forM_ [current {dialog=fmap (\dg->dg {fields=[Input "API key" "secret" 3]}) (dialog current)},current {dialog=fmap (\dg->dg {purpose=PermissionDialog "approve:test"}) (dialog current)}] $ \private->do
       denied<-P.applyGuestInput (P.Key "F17" []) private
       check "Input remapping cannot acquire private or approval authority" (case denied of Left _->True; _->False)
+
+-- Finite prefix contexts share actual dispatch, labels and guest resolution.
+prefixChecks :: IO ()
+prefixChecks=do
+  let check name ok=unless ok (error name)
+      prepare platform=either (error . show) id . platformBindings [] platform
+      configuration=M.fromList [("wordstar",M.fromList [("hide.wordstar.block-prefix",["Ctrl+J"]),("hide.edit.copy",[])])
+        ,("wordstar-block",M.fromList [("hide.edit.copy",["Y"]),("hide.edit.delete-selection",[]),("hide.edit.undo",["Z"]),("hide.edit.paste",["P"]),("hide.cursor.right",[])])]
+      base=modifyActive (\w->w {selection=Selection 0 5}) $ addDocument Nothing (newBuffer "hello") (initialDesktop (80,25))
+      configured=base {wordStar=True,keyBindings=prepare TerminalPlatform configuration}
+      event key mods=fst . handleEvent (V.EvKey key mods)
+      pending=event (V.KChar 'j') [V.MCtrl] configured
+      copied=event (V.KChar 'y') [] pending
+      defaults=base {wordStar=True,keyBindings=prepare TerminalPlatform M.empty}
+      started=event (V.KChar 'k') [V.MCtrl] defaults
+      selected d=selection <$> activeWindow d
+  check "remapped WordStar starter and continuation copy the selected source" (prefix pending==Just 'k' && clipboard copied=="hello" && prefix copied==Nothing && activeText copied=="hello")
+  check "removed starter and continuation cannot reach old grammar" (prefix (event (V.KChar 'k') [V.MCtrl] configured)==Nothing && clipboard (event (V.KChar 'c') [] pending)=="" && activeText (event (V.KChar 'c') [] pending)=="hello")
+  check "prefix labels are compound while frontend input stays a single stroke"
+    (menuShortcut configured (MenuItem "Copy" "Ctrl+C" Copy)=="Ctrl+J Y" && commandBindingKeys pending Copy==["Ctrl+J Y"] &&
+     lookup "Y" (focusedBindingChords pending)==Just "hide.edit.copy" && boundKeyCommand (V.KChar 'p') [] pending==Just Paste &&
+     nativeMenuShortcut pending Copy==("",0) && any ((==" Ctrl+J … ").fst) (statusHints pending))
+  let replaced=event (V.KChar '!') [] configured
+      undoPending=event (V.KChar 'j') [V.MCtrl] replaced
+  check "a configured ordinary command is eligible as a second stroke" (activeText replaced=="!" && activeText (event (V.KChar 'z') [] undoPending)=="hello")
+  check "unknown removed noncharacter and cancelled steps consume prefix without editing"
+    (all (\d->prefix d==Nothing && activeText d=="hello" && selected d==selected pending && clipboard d=="")
+      [event (V.KChar 'c') [] pending,event V.KRight [] pending,event V.KEsc [] pending])
+  forM_ [[],[V.MShift],[V.MCtrl],[V.MCtrl,V.MShift]] $ \mods->
+    check "default bare Control and Shift block aliases resolve the same action" (clipboard (event (V.KChar 'C') mods started)=="hello")
+  let marks=modifyActive (\w->w {selection=Selection 1 1}) defaults
+      marked=event (V.KChar 'b') [] (event (V.KChar 'k') [V.MCtrl] marks)
+      moved=modifyActive (\w->w {selection=Selection 4 4}) marked
+      block=event (V.KChar 'k') [] (event (V.KChar 'k') [V.MCtrl] moved)
+      removed=event (V.KChar 'y') [] (event (V.KChar 'k') [V.MCtrl] block)
+  check "block markers and deletion retain source selection and one Undo"
+    (selected block==Just (Selection 1 4) && activeText removed=="ho" && activeText (fst (runCommand Undo removed))=="hello")
+  check "explicit global overrides apply inside the finite prefix table"
+    (boundKeyCommand (V.KFun 13) [] started {keyBindings=prepare TerminalPlatform (M.singleton "global" (M.singleton "hide.edit.undo" ["F13"]))}==Just Undo)
+  check "duplicate second strokes reject the complete configuration"
+    (either (const True) (const False) (platformBindings [] TerminalPlatform (M.singleton "wordstar-block" (M.singleton "hide.edit.undo" ["C"]))))
+  let noQuick=defaults {keyBindings=prepare TerminalPlatform (M.singleton "wordstar" (M.singleton "hide.wordstar.quick-prefix" []))}
+      quick=event (V.KChar 'q') [V.MCtrl] defaults
+  check "quick starter unbinding prevents the old alias and default quick edge remains semantic"
+    (prefix (event (V.KChar 'q') [V.MCtrl] noQuick)==Nothing && selected (event (V.KChar 'c') [] quick)==Just (Selection 5 5))
+  let modal=prompt "Edit" Information [Input "Name" "draft" 5] pending
+      terminal=addReadOnly "Terminal test" "output" configured
+      readonly=addReadOnly "Help" "protected" configured
+      private=pending {guestPrivatePaths=["/authority"],buffers=M.map (\doc->doc {documentOrigin=Just "/authority/secret.hs"}) (buffers pending)}
+  check "prefix state cannot move into modal terminal or readonly owners"
+    (not (commandEnabled modal WordStarBlockPrefix) && not (commandEnabled readonly MarkBlockStart) &&
+     snd (handleEvent (V.EvKey (V.KChar 'c') [V.MCtrl]) terminal)==[AgentAction "terminal-input" ["test","\ETX"]] &&
+     not (guestKeyAllowed private (V.KChar 'y') []))
+  check "menu mnemonic priority does not become a prefix continuation" (menu (event (V.KChar 'f') [V.MAlt] started)/=Nothing && prefix (event (V.KChar 'f') [V.MAlt] started)==Nothing)
+  let batch=event (V.KChar 'y') [] (event (V.KChar 'j') [V.MCtrl] (beginGuestInput configured))
+  check "guest prefix lifetime remains one authorized batch"
+    (clipboard batch=="hello" && prefix (endGuestInput configured pending)==Nothing && clipboard (endGuestInput configured batch)==clipboard configured)
+  let mac=configured {nativeMac=True,videoMode=Just 3,keyBindings=prepare MacPlatform configuration}
+      macPending=event (V.KChar 'j') [V.MCtrl] mac
+  check "macOS prefix has no inherited Command clipboard default"
+    (boundKeyCommand (V.KChar 'c') [V.MMeta] macPending==Nothing && menuShortcut mac (MenuItem "Copy" "Cmd+C" Copy)=="⌃J Y")
+  where activeText d=maybe "" (contents . documentBuffer) (activeDocument d)

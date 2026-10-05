@@ -180,7 +180,8 @@ data Command = New | Open | Download | ChangeDir | Save | SaveAs | Close | Quit 
   | CursorRowStart Bool | CursorRowEnd Bool | CursorDocumentStart Bool | CursorDocumentEnd Bool | CursorPageUp Bool | CursorPageDown Bool
   | CursorWordLeft Bool | CursorWordRight Bool | DeleteWordBackward | DeleteWordForward
   | DialogFocusNext | DialogFocusPrevious | DialogAccept | DialogCancel
-  | DeleteBackward | DeleteForward | DeleteLine
+  | DeleteBackward | DeleteForward | DeleteLine | DeleteSelection
+  | WordStarBlockPrefix | WordStarQuickPrefix | MarkBlockStart | MarkBlockEnd
   | SidebarMove Int | SidebarActivate | SidebarExpand | SidebarCollapse | FocusSource | MessagesMove Int | MessagesPage Int
   | ToolchainOptions | SelectToolchain Toolchain | SelectCompiler Text
   | DebugCommand Text | AutocompleteCommand Text
@@ -360,8 +361,14 @@ menuShortcut d (MenuItem _ key cmd)
 commandBindingKeys :: Desktop -> Command -> [Text]
 commandBindingKeys d cmd
   | dialog d/=Nothing, not (dialogCommandAllowed cmd d) = []
+  | wordStarPrefixOwner d, Just _<-table Bindings.WordStarKeys =
+      maybe (keys Bindings.WordStarKeys shortcutCommand++sequences Bindings.WordStarBlockKeys WordStarBlockPrefix++sequences Bindings.WordStarQuickKeys WordStarQuickPrefix)
+        (\context->sequences context (if context==Bindings.WordStarBlockKeys then WordStarBlockPrefix else WordStarQuickPrefix)) (wordStarPrefixContext d)
   | otherwise = maybe [] (\bindings->Bindings.bindingKeys bindings shortcutCommand) (effectiveBindings d)
-  where shortcutCommand=case cmd of
+  where table context=M.lookup (bindingPlatform d,context) (keyBindings d)
+        keys context action=maybe [] (\bindings->Bindings.bindingKeys bindings action) (table context)
+        sequences context starter=[first<>" "<>second | first<-keys Bindings.WordStarKeys starter,second<-keys context shortcutCommand]
+        shortcutCommand=case cmd of
           RegisteredMenu ref _ | Plugin.menuName ref=="hide.help.contents" -> Help
                                | Plugin.menuName ref=="hide.messages.go-to" -> GoToMessage
                                | Plugin.menuName ref=="hide.debug.toggle-breakpoint" -> DebugCommand "breakpoint"
@@ -369,6 +376,11 @@ commandBindingKeys d cmd
 
 commandDescription :: Command -> Text
 commandDescription cmd = case cmd of
+  WordStarBlockPrefix -> "Begin a WordStar block command."
+  WordStarQuickPrefix -> "Begin a WordStar quick command."
+  MarkBlockStart -> "Mark the current source caret as the block start."
+  MarkBlockEnd -> "Select from the marked source block start to the current caret."
+  DeleteSelection -> "Delete the current source selection."
   DialogAccept -> "Accept the focused dialog control or submit its current button."
   DialogCancel -> "Revert an open dropdown or cancel the current dialog."
   DialogFocusNext -> "Focus the next dialog control, committing an open dropdown preview."
@@ -515,7 +527,7 @@ statusHintsRaw :: Desktop -> [(Text,Maybe (Either Command V.Event))]
 statusHintsRaw d
   | dragOriginal d/=Nothing = [(keyLabel d " ↑↓→← Move  Shift+↑↓→← Resize",Nothing),key "  ↵ Done" V.KEnter [],key "  Esc Cancel" V.KEsc []]
   | Just text<-menuHelp d = [command " F1" "Help" Help,(" | "<>text,Nothing)]
-  | Just c<-prefix d = [(keyLabel d (" Ctrl+"<>T.singleton c<>"- "),Nothing),key " Esc Cancel" V.KEsc []]
+  | Just c<-prefix d = [(prefixHint c,Nothing),key " Esc Cancel" V.KEsc []]
   | Just dg<-dialog d, approvalDialog dg = [command " Tab" "Next" DialogFocusNext,key "  Alt+A Allow" (V.KChar 'a') [V.MAlt],key "  Alt+D Deny" (V.KChar 'd') [V.MAlt],command "  Esc" "Deny" DialogCancel]
   | Just dg<-dialog d, searching dg = [key " Ctrl+Tab Find/Replace" (V.KChar '\t') [V.MCtrl],command "  Tab" "Next" DialogFocusNext,command "  Enter" "Apply" DialogAccept,command "  Esc" "Cancel" DialogCancel] ++
       [command (if nativeMac d then "  Cmd+Alt+F" else "  Ctrl+H") "Replace" Replace]
@@ -537,9 +549,12 @@ statusHintsRaw d
   | Just _<-activePluginWindow d = [command " Ctrl+C" "Copy" Copy,command "  Alt+F3" "Close" Close,(" | Read-only plugin text",Nothing)]
   | otherwise = [command " F1" "Help" Help,command "  F2" "Save" Save,command "  F3" "Open" Open,
       command "  Alt+F9" "Compile" CompileTarget,command "  F9" "Make" MakeTarget,command "  Ctrl+F9" "Run" RunTarget]
-  where command shortcut caption cmd=(effective shortcut caption cmd,Just (Left cmd))
-        effective _ caption cmd | Just bindings<-effectiveBindings d =
-          " "<>maybe "" (<>" ") (listToMaybe (Bindings.bindingKeys bindings cmd))<>caption
+  where prefixHint c=case M.lookup (bindingPlatform d,Bindings.WordStarKeys) (keyBindings d) of
+          Just bindings -> " "<>fromMaybe "" (listToMaybe (Bindings.bindingKeys bindings (if c=='k' then WordStarBlockPrefix else WordStarQuickPrefix)))<>" … "
+          Nothing -> " Ctrl+"<>T.singleton c<>"- "
+        command shortcut caption cmd=(effective shortcut caption cmd,Just (Left cmd))
+        effective _ caption cmd | Just _<-effectiveBindings d =
+          " "<>maybe "" (<>" ") (listToMaybe (commandBindingKeys d cmd))<>caption
         effective shortcut caption _=shortcut<>" "<>caption
         key label k mods=(label,Just (Right (V.EvKey k mods)))
         submitHint action=(if action/=chatSubmit d then "Ctrl+Enter " else "")<>(if action==SteerSubmit then "Steer" else if agentReplying d then "Queue query" else "Query")
@@ -613,6 +628,8 @@ commandEnabled d (RegisteredMenu reference _) = dialog d==Nothing && case find (
       (Plugin.menuName reference/="hide.messages.go-to" || location/=Nothing)
     _ -> False
   Just _ -> True
+commandEnabled d cmd | cmd `elem` [WordStarBlockPrefix,WordStarQuickPrefix] = wordStarPrefixOwner d
+commandEnabled d cmd | cmd `elem` [MarkBlockStart,MarkBlockEnd] = sourceNavigationOwner d && not (activeHex d) && not (activeMarkdown d) && maybe False ((==Nothing) . documentLabel) (activeDocument d)
 commandEnabled d cmd | sourceKeyCommand cmd = sourceNavigationOwner d &&
   (not (activeMarkdown d) || maybe False (isJust . windowMarkdown d) (activeWindow d)) &&
   (not (horizontalMutation cmd) || maybe False ((==Nothing) . documentLabel) (activeDocument d) && not (activeMarkdown d)) &&
@@ -1117,6 +1134,7 @@ prompt title p fs d = d {dialog = Just (Dialog title p fs 0 ["OK","Cancel"] []),
 
 -- | Apply a semantic editor command and return any required host effects.
 runCommand :: Command -> Desktop -> (Desktop,[Effect])
+runCommand cmd source | cmd `elem` [WordStarBlockPrefix,WordStarQuickPrefix], not (commandEnabled source cmd) = (source,[])
 runCommand cmd source | sourceKeyCommand cmd, not (commandEnabled source cmd) =
   (if horizontalMutation cmd && sourceNavigationOwner source && not (activeMarkdown source) &&
       maybe False ((/=Nothing) . documentLabel) (activeDocument source)
@@ -1152,6 +1170,13 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
     go DialogCancel d = applyDialogCommand DialogCancel d
     go DialogFocusNext d = applyDialogCommand DialogFocusNext d
     go DialogFocusPrevious d = applyDialogCommand DialogFocusPrevious d
+    go WordStarBlockPrefix d = (d {prefix=Just 'k'},[])
+    go WordStarQuickPrefix d = (d {prefix=Just 'q'},[])
+    go MarkBlockStart d = (d {blockStart=(\w -> (,caret (selection w)) <$> bufferId w) =<< activeWindow d},[])
+    go MarkBlockEnd d = (case (blockStart d,activeWindow d) of
+      (Just (bid,p),Just w) | Just bid==bufferId w -> modifyActive (\v -> v {selection=Selection (min p (maybe 0 (bufferLength . documentBuffer) (activeDocument d))) (caret (selection v))}) d
+      _ -> d,[])
+    go DeleteSelection d = (insertText "" d,[])
     go ReloadBindings d = (d {status="Reloading keybindings..."},[ReloadKeyBindings (startingDirectory d)])
     go InspectBindings d = (d,[InspectKeyBindings ((,) (bindingPlatform d) <$> bindingContext d) (effectiveBindings d)])
     go (SidebarMove delta) d = case sideTree d of
@@ -1759,11 +1784,13 @@ dispatchEvent (V.EvResize sw sh) d =
     resize w=w {bounds=stretch (bounds w),restoredBounds=fmap stretch (restoredBounds w)}
 -- A compiled map owns named commands in the focused profile and context. Missing
 -- chords fall back to local text/movement, never to removed command defaults.
+dispatchEvent ev d | prefix d/=Nothing, not (wordStarPrefixOwner d) = dispatchEvent ev d {prefix=Nothing}
 dispatchEvent (V.EvKey key mods) d
+  | prefix d/=Nothing, terminalContextReserved d key mods = dispatchEvent (V.EvKey key mods) d {prefix=Nothing}
   | bindingInputAvailable d, not (terminalContextReserved d key mods), Just bindings<-effectiveBindings d =
       case Bindings.bindingAction bindings key mods of
         Just cmd | dialog d/=Nothing, not (dialogCommandAllowed cmd d) -> unboundKey key mods d
-                 | sourceKeyCommand cmd || commandEnabled d cmd -> runCommand cmd d
+                 | sourceKeyCommand cmd || commandEnabled d cmd -> runCommand cmd d {prefix=Nothing}
                  | otherwise -> (d,[])
         Nothing -> unboundKey key mods d
 dispatchEvent (V.EvKey key mods) d | key `elem` [V.KChar '\t',V.KBackTab], V.MAlt `elem` mods =
@@ -3068,9 +3095,20 @@ bindingContext d
   | activeTerminal d/=Nothing = Just Bindings.TerminalKeys
   | Just label<-activeDocument d >>= documentLabel,
     "Debugger " `T.isPrefixOf` label || "Source " `T.isPrefixOf` label = Just Bindings.DebuggerKeys
-  | Just _<-activeDocument d = Just (if wordStar d && not (activeHex d) then Bindings.WordStarKeys else Bindings.SourceKeys)
+  | Just _<-activeDocument d = Just (if wordStar d && not (activeHex d) then fromMaybe Bindings.WordStarKeys (wordStarPrefixContext d) else Bindings.SourceKeys)
   | Nothing<-activeDocument d = Just Bindings.SourceKeys
   | otherwise = Nothing
+
+-- Only the current ordinary WordStar source owner admits finite prefix steps.
+wordStarPrefixOwner :: Desktop -> Bool
+wordStarPrefixOwner d=wordStar d && not (activeHex d) && not (activeMarkdown d) &&
+  dialog d==Nothing && not (questionActive d) && not (activeAutocomplete d) && not (problemsFocused d) &&
+  not (maybe False treeFocused (sideTree d)) && not (activeConversation d) && activeTerminal d==Nothing &&
+  maybe False (windowFocused d) (activeWindow d) && maybe False ((==Nothing) . documentLabel) (activeDocument d)
+
+wordStarPrefixContext :: Desktop -> Maybe Bindings.BindingContext
+wordStarPrefixContext d | wordStarPrefixOwner d = case prefix d of Just 'k'->Just Bindings.WordStarBlockKeys; Just 'q'->Just Bindings.WordStarQuickKeys; _->Nothing
+                       | otherwise = Nothing
 
 effectiveBindings :: Desktop -> Maybe (Bindings.Bindings Command)
 effectiveBindings d = bindingContext d >>= \context->M.lookup (bindingPlatform d,context) (keyBindings d)
@@ -3087,12 +3125,14 @@ bindingInputAvailable :: Desktop -> Bool
 bindingInputAvailable d=case dialog d of
   Just _ -> any (`dialogCommandAllowed` d) dialogBindingCommands
   Nothing -> menu d==Nothing && contextMenu d==Nothing && drag d==Nothing &&
-    dragOriginal d==Nothing && prefix d==Nothing && not (questionActive d) && not (activeAutocomplete d)
+    dragOriginal d==Nothing && (prefix d==Nothing || isJust (wordStarPrefixContext d)) && not (questionActive d) && not (activeAutocomplete d)
 
 -- | Plain movement/text is handled by its owner. No removed chord falls through
 -- into a hardcoded named command. PTY fallback retains every ordinary control key.
 unboundKey :: V.Key -> [V.Modifier] -> Desktop -> (Desktop,[Effect])
 unboundKey key mods d
+  | Just _<-effectiveBindings d, Just _<-wordStarPrefixContext d =
+      (d {prefix=Nothing,status="Unknown WordStar prefix command."},[])
   | Just _<-effectiveBindings d,dialog d==Nothing,windowCycleChord key mods = (d,[])
   | Just _<-effectiveBindings d,dialog d/=Nothing,dialogControlChord key mods = (d,[])
   | Just _<-effectiveBindings d,dialogInputOwner d, key `elem` map fst dialogInputKeys,
@@ -3111,11 +3151,10 @@ unboundKey key mods d = case bindingContext d of
   Just Bindings.WordStarKeys | wordStarReserved key mods -> keyEvent key mods d
   _ -> (editorKey key mods d,[])
 
--- | WordStar prefix/block grammar stays with its local owner.
--- Ctrl+Alt+X also retains its earlier Quit owner.
+-- | The earlier Ctrl+Alt+X Quit owner remains outside compiled WordStar maps.
 wordStarReserved :: V.Key -> [V.Modifier] -> Bool
 wordStarReserved (V.KChar c) mods=V.MCtrl `elem` mods && V.MMeta `notElem` mods &&
-  (toLower c `elem` ("kq"::String) || toLower c=='x' && V.MAlt `elem` mods)
+  (toLower c=='x' && V.MAlt `elem` mods)
 wordStarReserved _ _=False
 
 -- | Control Tab aliases belong to window commands outside a modal. Alt and Meta
@@ -3144,7 +3183,7 @@ boundKeyCommand key mods d
 keyEvent :: V.Key -> [V.Modifier] -> Desktop -> (Desktop,[Effect])
 keyEvent key mods d
   | key==V.KEsc = (d {prefix=Nothing},[])
-  | not (activeMarkdown d), Just p <- prefix d, V.KChar c <- key = starPrefix p (toLower c) d {prefix=Nothing}
+  | wordStarPrefixOwner d, effectiveBindings d==Nothing, Just p <- prefix d, V.KChar c <- key, all (`elem` [V.MCtrl,V.MShift]) mods = starPrefix p (toLower c) d {prefix=Nothing}
   | V.MAlt `elem` mods, V.MMeta `notElem` mods, V.KChar c <- key, Just i <- findIndex (\(_,mn,_) -> mn==toLower c) menus = (d {menu=Just (i,0)},[])
   | V.MAlt `elem` mods, V.MMeta `notElem` mods, key==V.KChar 'x' = runCommand Quit d
   | V.MAlt `elem` mods, key==V.KFun 3 = runCommand Close d
@@ -3180,15 +3219,17 @@ sourceKeyCommand CursorPageUp{}=True
 sourceKeyCommand CursorPageDown{}=True
 sourceKeyCommand CursorWordLeft{}=True
 sourceKeyCommand CursorWordRight{}=True
+sourceKeyCommand MarkBlockStart=True
+sourceKeyCommand MarkBlockEnd=True
 sourceKeyCommand cmd=horizontalMutation cmd
 
 horizontalMutation :: Command -> Bool
-horizontalMutation cmd=cmd `elem` [DeleteBackward,DeleteForward,DeleteLine,DeleteWordBackward,DeleteWordForward]
+horizontalMutation cmd=cmd `elem` [DeleteBackward,DeleteForward,DeleteLine,DeleteSelection,DeleteWordBackward,DeleteWordForward]
 
 -- A global remap cannot edit or move a source behind another focused input owner.
 sourceNavigationOwner :: Desktop -> Bool
 sourceNavigationOwner d=dialog d==Nothing && not (questionActive d) && not (activeAutocomplete d) &&
-  bindingContext d `elem` [Just Bindings.SourceKeys,Just Bindings.WordStarKeys,Just Bindings.DebuggerKeys] &&
+  bindingContext d `elem` [Just Bindings.SourceKeys,Just Bindings.WordStarKeys,Just Bindings.WordStarBlockKeys,Just Bindings.WordStarQuickKeys,Just Bindings.DebuggerKeys] &&
   maybe False (windowFocused d) (activeWindow d)
 
 -- | Preserve each window's existing displayed selection and source coordinate owner.
@@ -3372,13 +3413,11 @@ starKey c d = case c of
 
 starPrefix :: Char -> Char -> Desktop -> (Desktop,[Effect])
 starPrefix 'k' c d = case c of
-  'b' -> (d {blockStart=(\w -> (,caret (selection w)) <$> bufferId w) =<< activeWindow d},[])
-  'k' -> (case (blockStart d,activeWindow d) of
-    (Just (bid,p),Just w) | Just bid==bufferId w -> modifyActive (\v -> v {selection=Selection (min p (maybe 0 (bufferLength . documentBuffer) (activeDocument d))) (caret (selection v))}) d
-    _ -> d,[])
+  'b' -> runCommand MarkBlockStart d
+  'k' -> runCommand MarkBlockEnd d
   'c' -> runCommand Copy d
   'v' -> runCommand Cut d
-  'y' -> (insertText "" d,[])
+  'y' -> runCommand DeleteSelection d
   's' -> runCommand Save d
   'd' -> runCommand Close d
   _ -> (d {status="Unknown Ctrl+K command."},[])
