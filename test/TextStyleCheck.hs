@@ -2,6 +2,7 @@
 module TextStyleCheck (checks) where
 
 import Control.Monad (unless)
+import Data.Bits ((.&.))
 import Data.Aeson (Value(..),parseJSON)
 import qualified Data.Aeson
 import Data.Aeson.Types (parseEither)
@@ -28,30 +29,41 @@ checks :: IO ()
 checks=do
   let check label ok=unless ok (fail label)
       foreground=0x123456
-      row=[(c,TerminalStyle foreground 0x654321 flags) | (c,flags)<-[('B',1),('I',2),('X',3),('R',0)]]
-      original=addDocument Nothing (newBuffer "BIXR") (initialDesktop (80,25))
-      desktop=original {buffers=M.adjust (\doc->doc {documentSourceRows=Just (V.singleton (prepareSourceRow "BIXR" row))}) 1 (buffers original)}
+      row=[(c,TerminalStyle foreground 0x654321 flags) | (c,flags)<-[('B',1),('I',2),('X',3),('U',4),('S',8),('A',15),('D',16),('R',0)]]
+      original=addDocument Nothing (newBuffer "BIXUSADR") (initialDesktop (80,25))
+      desktop=original {buffers=M.adjust (\doc->doc {documentSourceRows=Just (V.singleton (prepareSourceRow "BIXUSADR" row))}) 1 (buffers original)}
       parsed=traverse (parseEither parseJSON) (frameRows desktop)::Either String [[(Int,Int,Int,Int,[Value])]]
       traits ch=[flags | spans<-either (const []) id parsed,(_,fg,_,flags,runs)<-spans,fg==fromIntegral foreground,String text<-runs,ch `T.isInfixOf` text]
   check "real frame carries terminal bold trait" (traits "B"==[1])
   check "real frame carries terminal italic trait" (traits "I"==[2])
   check "real frame carries combined traits" (traits "X"==[3])
+  check "real frame converts terminal underline4 to wire8" (traits "U"==[8])
+  check "real frame converts terminal strike8 to wire16" (traits "S"==[16])
+  check "real frame composes all four traits" (traits "A"==[27])
+  check "terminal dim stays outside the font paint mask" (traits "D"==[0])
   check "regular negative control remains regular" (traits "R"==[0])
   mapM_ (\style->check "paint/Attr round-trip law" (textStyleFromAttr (textStyleAttr style)==style))
-    [TextStyle fg bg bold italic | fg<-[0,0x123456,0xffffff],bg<-[0,0x654321],bold<-[False,True],italic<-[False,True]]
+    [TextStyle fg bg flags | fg<-[0,0x123456,0xffffff],bg<-[0,0x654321],flags<-[0,1,2,3,8,9,10,11,16,17,18,19,24,25,26,27]]
   let nested=renderMarkdown 80 "***both*** [**link**](https://example.test)"
   check "nested Markdown bold and italic compose" (all (\(_,style)->let (_,b,i)=fontTraits style in b && i) (take 4 nested))
   check "styled links retain destinations" (linkSpans nested==[(5,9,"https://example.test")])
   let metadata=frameMetadata "." desktop
       rows=frameRows desktop
-      regular=desktop {buffers=M.adjust (\doc->doc {documentSourceRows=Just (V.singleton (prepareSourceRow "BIXR" [(c,TerminalStyle foreground 0x654321 0) | c<-"BIXR"]))}) 1 (buffers desktop)}
+      regular=desktop {buffers=M.adjust (\doc->doc {documentSourceRows=Just (V.singleton (prepareSourceRow "BIXUSADR" [(c,TerminalStyle foreground 0x654321 0) | c<-"BIXUSADR"]))}) 1 (buffers desktop)}
   (_,restored)<-decodeFrame rows (BL.toStrict (framePacket False rows (frameRows regular) (frameMetadata "." regular)))
   check "trait-only changes survive real compressed frame reconstruction" (restored==frameRows regular && restored/=rows)
   frame<-either fail pure (parseRemoteFrame (Data.Aeson.object metadata) rows)
-  check "native receiver retains all terminal traits" ([textFlags paint | RemoteCell _ _ paint text _ _ _<-remoteCells frame,textForeground paint==fromIntegral foreground,text `elem` ["B","I","X","R"]]==[1,2,3,0])
+  check "native receiver retains all terminal traits" ([textFlags paint | RemoteCell _ _ paint text _ _ _<-remoteCells frame,textForeground paint==fromIntegral foreground,text `elem` ["B","I","X","U","S","A","D","R"]]==[1,2,3,8,16,27,0,0])
   let (_,terminal)=remoteTerminalDisplay (remoteSize frame) (Just frame) ""
       terminalTraits=[(TL.toStrict text,textFlags (textStyleFromAttr attr)) | ops<-toList terminal, TextSpan {textSpanAttr=attr,textSpanText=text}<-toList ops]
-  check "remote TUI restores bold and italic attributes" (all (\(char,flags)->any (\(text,actual)->char `T.isInfixOf` text && actual==flags) terminalTraits) [("B",1),("I",2),("X",3)])
+  check "remote TUI restores all four font attributes" (all (\(char,flags)->any (\(text,actual)->char `T.isInfixOf` text && actual==flags) terminalTraits) [("B",1),("I",2),("X",3),("U",8),("S",16),("A",27)])
+  check "remote TUI carries the actual Vty underline and strike bits"
+    (all (\(character,trait)->any (\ops->any (\span->case span of
+      TextSpan attr _ _ text->character `T.isInfixOf` TL.toStrict text && VT.styleMask attr .&. trait/=0
+      _->False) (toList ops)) (toList terminal)) [("U",VT.underline),("S",VT.strikethrough)])
+  let allPaint=TextStyle (fromIntegral foreground) 0x654321 27
+  check "packed trait accessors expose all four traits"
+    (textBold allPaint && textItalic allPaint && textUnderline allPaint && textStrikethrough allPaint)
   let asciiText="abc\tde\r\DEL\SOH"
       asciiBase=addDocument Nothing (newBuffer asciiText) (initialDesktop (80,25))
       asciiDesktop=modifyActive (\w->w {selection=Selection 1 5}) asciiBase
@@ -63,7 +75,7 @@ checks=do
         CellGlyph paint _ _ _ shown->replicate shown (' ',paint))
         (toList (renderCellRows asciiDesktop V.! (ay+1)))
       displayed=take 12 (drop (ax+1) cells)
-      normal=textStyleAttr (TextStyle (fromIntegral foreground) 0x654321 True True)
+      normal=textStyleAttr (TextStyle (fromIntegral foreground) 0x654321 3)
       chosen=normal `VT.withForeColor` VT.RGBColor 0 0 170 `VT.withBackColor` VT.RGBColor 170 170 170
   check "ASCII styled runs retain tab, control, selection and font geometry"
     (map fst displayed=="abc     de··" && map snd displayed==[if i>=1 && i<=8 then chosen else normal | i<-[0..11]])

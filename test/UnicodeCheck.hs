@@ -22,6 +22,11 @@ checks = do
   let check name ok=unless ok (error name)
       clusters=["👩🏽\x200d\&💻","👨\x200d\&👩\x200d\&👧\x200d\&👦","🏳️\x200d\&🌈","🇯🇵","❤️","1️⃣","e\x301","क्\x200d\&ष"]
       wide=take 6 clusters
+      segments=["λ","e\x301","👩🏽\x200d\&💻","🇨🇦","終","\r\n","x"]
+      source="prefix"<>T.concat segments<>"suffix"
+      fragment=T.dropEnd 6 (T.drop 6 source)
+  check "mixed UTF8 graphemes preserve source slices and CRLF"
+    (graphemes fragment==segments && T.concat (graphemes fragment)==fragment)
   forM_ clusters $ \g -> do
     check "platform segments a complete grapheme" (graphemes g==[g])
     check "cursor crosses a complete grapheme" (nextCharacter (g<>"x") 0==T.length g && previousCharacter ("x"<>g) (1+T.length g)==1)

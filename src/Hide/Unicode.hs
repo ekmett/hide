@@ -37,20 +37,26 @@ import qualified Graphics.Vty.Image.Internal as I
 foreign import ccall unsafe "utf8proc_charwidth" c_width :: CInt -> CInt
 foreign import ccall unsafe "thc_graphemes" c_graphemes :: CString -> CInt -> Ptr CInt -> IO CInt
 
--- | Segment extended graphemes, preserving CRLF as one cluster on the ASCII fast path.
+-- | Segment extended graphemes into slices sharing the source UTF8 array.
+-- CRLF remains one cluster, including on the ASCII fast path.
 graphemes :: T.Text -> [T.Text]
 graphemes t
   | T.all (<'\128') t = ascii t
   | otherwise = unsafePerformIO $ BS.useAsCStringLen (TE.encodeUtf8 t) $ \(s,n) ->
       allocaArray (T.length t+1) $ \p -> do
         count <- fromIntegral <$> c_graphemes s (fromIntegral n) p
-        offsets <- map fromIntegral <$> peekArray count p
-        pure [T.take (z-a) (T.drop a t) | (a,z)<-zip offsets (drop 1 offsets)]
+        let slices !i !end acc
+              | i<0 = pure acc
+              | otherwise = do
+                  start <- fromIntegral <$> peekElemOff p i
+                  let !fragment=TU.takeWord8 (end-start) (TU.dropWord8 start t)
+                  slices (i-1) start (fragment:acc)
+        slices (count-2) n []
   where
     ascii s = case T.uncons s of
       Nothing -> []
-      Just ('\r',rest) | Just ('\n',after)<-T.uncons rest -> "\r\n":ascii after
-      Just (c,rest) -> T.singleton c:ascii rest
+      Just ('\r',rest) | Just ('\n',after)<-T.uncons rest -> TU.takeWord8 2 s:ascii after
+      Just (_,rest) -> TU.takeWord8 1 s:ascii rest
 {-# NOINLINE graphemes #-}
 
 clusterWidth :: T.Text -> Int

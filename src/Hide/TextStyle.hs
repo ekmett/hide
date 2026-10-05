@@ -1,34 +1,54 @@
--- | Foreground/background and the font traits shared by display frontends.
--- For 24-bit colors, @textStyleFromAttr (textStyleAttr s) == s@. Conversion
--- projects bold/italic only; unrelated terminal attributes remain owned by Vty.
+-- | Packed colors and four font traits shared by display frontends.
+-- For 24-bit colors and flags drawn from bold1/italic2/underline8/strike16,
+-- @textStyleFromAttr (textStyleAttr s) == s@. Bit4 belongs to explicit glyph
+-- width, not paint. Other terminal attributes remain owned by Vty.
 module Hide.TextStyle
-  ( TextStyle(..), textFlags, textStyleFromAttr, textStyleAttr ) where
+  ( TextStyle(..), textBold, textItalic, textUnderline, textStrikethrough
+  , textStyleFromAttr, textStyleAttr ) where
 
 import Data.Bits ((.&.), (.|.), shiftL)
 import qualified Graphics.Vty as V
 
--- | Small immutable paint metadata. No text, layout or backend handles.
+-- | Three unpacked scalar fields; no text, layout or backend handles.
+-- Flags use transport/FFI bits, independent of Vty's internal allocation.
 data TextStyle = TextStyle
-  { textForeground :: !Int, textBackground :: !Int
-  , textBold :: !Bool, textItalic :: !Bool } deriving (Eq,Show)
+  { textForeground :: {-# UNPACK #-} !Int
+  , textBackground :: {-# UNPACK #-} !Int
+  , textFlags :: {-# UNPACK #-} !Int } deriving (Eq,Show)
 
--- | Stable transport/FFI flags; independent of Vty's internal bit allocation.
-textFlags :: TextStyle -> Int
-textFlags style=(if textBold style then 1 else 0)+(if textItalic style then 2 else 0)
+-- | Whether the packed paint requests bold text.
+textBold :: TextStyle -> Bool
+textBold style=textFlags style .&. 1/=0
 
--- | Project colors and existing font attributes without changing geometry.
+-- | Whether the packed paint requests italic text.
+textItalic :: TextStyle -> Bool
+textItalic style=textFlags style .&. 2/=0
+
+-- | Whether the packed paint requests an underline.
+textUnderline :: TextStyle -> Bool
+textUnderline style=textFlags style .&. 8/=0
+
+-- | Whether the packed paint requests strikethrough text.
+textStrikethrough :: TextStyle -> Bool
+textStrikethrough style=textFlags style .&. 16/=0
+
+-- | Project colors and all four supported traits without changing geometry.
 textStyleFromAttr :: V.Attr -> TextStyle
 textStyleFromAttr attr=TextStyle (rgb (V.attrForeColor attr)) (rgb (V.attrBackColor attr))
-  (V.styleMask attr .&. V.bold/=0) (V.styleMask attr .&. V.italic/=0)
+  (flag V.bold 1 .|. flag V.italic 2 .|. flag V.underline 8 .|. flag V.strikethrough 16)
   where
+    flag trait bit=if V.styleMask attr .&. trait/=0 then bit else 0
     rgb (V.SetTo (V.RGBColor r g b))=fromIntegral r `shiftL` 16 .|. fromIntegral g `shiftL` 8 .|. fromIntegral b
     rgb (V.SetTo (V.ISOColor n))=[0,0xaa0000,0x00aa00,0xaa5500,0x0000aa,0xaa00aa,0x00aaaa,0xaaaaaa,0x555555,0xff5555,0x55ff55,0xffff55,0x5555ff,0xff55ff,0x55ffff,0xffffff] !! (fromIntegral n `mod` 16)
     rgb _=0
 
--- | Reconstruct ordinary terminal attributes from validated paint metadata.
+-- | Restore validated paint to terminal attributes. Explicit glyph width is
+-- handled by the span, so transport bit4 never becomes a Vty underline.
 textStyleAttr :: TextStyle -> V.Attr
-textStyleAttr style=foldl V.withStyle colored
-  ([V.bold | textBold style]++[V.italic | textItalic style])
+textStyleAttr style=if traits==0 then colored else V.withStyle colored traits
   where
+    traits=flag (textBold style) V.bold .|. flag (textItalic style) V.italic
+      .|. flag (textUnderline style) V.underline .|. flag (textStrikethrough style) V.strikethrough
+    flag enabled trait=if enabled then trait else 0
     rgb n=V.RGBColor (fromIntegral (n `div` 65536)) (fromIntegral (n `div` 256)) (fromIntegral n)
     colored=V.defAttr `V.withForeColor` rgb (textForeground style) `V.withBackColor` rgb (textBackground style)

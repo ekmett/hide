@@ -1,4 +1,4 @@
-{-# LANGUAGE CPP, ForeignFunctionInterface, OverloadedStrings #-}
+{-# LANGUAGE BangPatterns, CPP, ForeignFunctionInterface, OverloadedStrings #-}
 -- | SDL/Metal/Vulkan adapter for the common Vty picture and input model.
 --
 -- Grapheme-aware spans select exact bitmap tiles for interface geometry and native
@@ -32,6 +32,7 @@ import Data.Foldable (toList)
 import qualified Data.ByteString as BS
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
+import qualified Data.Text.Unsafe as TU
 import Foreign
 import Foreign.C
 import qualified Graphics.Vty as V
@@ -198,8 +199,29 @@ draw font d = do
     go :: Int -> Int -> [CellSpan] -> IO ()
     go _ _ [] = pure ()
     go y x (CellText a text:rest) = do
-      forM_ (zip [x..] (T.unpack text)) $ \(at,ch) -> drawGlyph y at a (T.singleton ch) 1 0 1
-      go y (x+T.length text) rest
+      -- CellText contains complete single-codepoint, one-cell glyphs. Advancing
+      -- by iter's byte delta keeps fallback slices on original UTF-8 boundaries.
+      let paint=textStyleFromAttr a
+          !fg=fromIntegral (textForeground paint)
+          !bg=fromIntegral (textBackground paint)
+          !flags=fromIntegral (textFlags paint)
+          end=TU.lengthWord8 text
+          chars !offset !at
+            | offset==end = pure at
+            | otherwise = case TU.iter text offset of
+                TU.Iter ch bytes -> do
+                  c_clip (fromIntegral at) 1
+                  if bitmapGlyph font ch then do
+                    let Glyph gw bitmap=glyph font ch
+                    withArray bitmap $ \bits ->
+                      c_glyph (fromIntegral at) (fromIntegral y) 1
+                        (fromIntegral gw) bits fg bg flags
+                  else utf8 (TU.takeWord8 bytes (TU.dropWord8 offset text)) $ \encoded ->
+                    check "Draw Unicode"
+                      (c_unicode (fromIntegral at) (fromIntegral y) 1 encoded fg bg flags)
+                  chars (offset+bytes) (at+1)
+      next<-chars 0 x
+      go y next rest
     go y x (CellGlyph a text full start shown:rest) = do
       drawGlyph y x a text full start shown
       go y (x+shown) rest

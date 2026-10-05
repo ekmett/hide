@@ -124,13 +124,13 @@ parseRemoteFrame metadata rows = parseEither (withObject "frame metadata" $ \o -
       snd <$> foldRow cols y (0,[]) spans
     foldRow _ _ acc [] = pure acc
     foldRow cols y (previous,acc) ((x,fg,bg,flags,runs):rest) = do
-      unless (x>=previous && x<=cols && flags>=0 && flags<=3 && all (\c -> c>=0 && c<=0xffffff) [fg,bg] && length runs<=cols+1) (fail "Invalid span")
+      unless (x>=previous && x<=cols && flags>=0 && flags .&. 27==flags && all (\c -> c>=0 && c<=0xffffff) [fg,bg] && length runs<=cols+1) (fail "Invalid span")
       clusters <- concat <$> traverse parseRun runs
       let visible (_,_,_,shown)=shown
           width = sum (map visible clusters)
       unless (width<=cols-x && length clusters<=cols*4) (fail "Span exceeds row")
       let positions = scanl (+) x (map visible clusters)
-          cells = [RemoteCell at y (TextStyle fg bg (flags .&. 1/=0) (flags .&. 2/=0)) text full start shown | (at,(text,full,start,shown)) <- zip positions clusters, shown>0]
+          cells = [RemoteCell at y (TextStyle fg bg flags) text full start shown | (at,(text,full,start,shown)) <- zip positions clusters, shown>0]
       foldRow cols y (x+width,acc++cells) rest
     parseRun (String text) = do
       unless (T.length text<=512 && T.all (\c -> c>=' ' && c/='\DEL' && clusterWidth (T.singleton c)==1) text) (fail "Invalid character run")
