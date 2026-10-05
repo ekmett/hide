@@ -89,6 +89,7 @@ fileRenameChecks=bracket temporary removePathForcibly $ \dir->withSidebarCommand
       refused d=await (tickSidebar host applyEffects) (\next->any (`T.isInfixOf` status next) ["failed","changed","expired"]) d
       path d=filePath <$> (activeDocument d >>= documentFile)
       doc d=maybe (error "rename source missing") id (activeDocument d)
+      sourceCommand command d=fst (runCommand command d {sideTree=fmap (\tree->tree {treeFocused=False}) (sideTree d)})
       ids d=map (\w->(windowId w,bufferId w,selection w,scrollRow w,scrollColumn w)) (windows d)
   createDirectory (dir </> "archive")
   TIO.writeFile original "main = 1\n"
@@ -108,7 +109,7 @@ fileRenameChecks=bracket temporary removePathForcibly $ \dir->withSidebarCommand
   bytes<-BS.readFile renamed
   check "Files Rename keeps open IDs, live buffer identity and exact bytes"
     (same && ids result==ids mounted && not oldExists && bytes=="main = 1\n" && not (dirty (documentBuffer (doc result))))
-  check "Files Rename preserves Undo and Redo history" (activeText (fst (runCommand Redo result))=="xmain = 1\n")
+  check "Files Rename preserves Undo and Redo history" (activeText (sourceCommand Redo result)=="xmain = 1\n")
   collision<-open "Renamedλ.hs" result
   TIO.writeFile (dir </> "Taken.hs") "keep me"
   refusedCollision<-submit "Taken.hs" collision >>= refused
@@ -118,7 +119,7 @@ fileRenameChecks=bracket temporary removePathForcibly $ \dir->withSidebarCommand
   refusedDirty<-submit "Dirty.hs" (insertText "local " dirtyForm) >>= refused
   dirtyTarget<-doesPathExist (dir </> "Dirty.hs")
   check "Rename refuses a source edited after its form opened" (not dirtyTarget && path refusedDirty==Just renamed && dirty (documentBuffer (doc refusedDirty)))
-  clean<-pure (fst (runCommand Undo refusedDirty))
+  clean<-pure (sourceCommand Undo refusedDirty)
   staleForm<-open "Renamedλ.hs" clean
   TIO.writeFile renamed "external replacement\n"
   refusedStale<-submit "Stale.hs" staleForm >>= refused

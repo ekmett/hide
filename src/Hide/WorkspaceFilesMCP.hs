@@ -29,7 +29,7 @@ import System.Directory
 import System.Exit (ExitCode(..))
 import System.FilePath
 import System.IO (IOMode(ReadMode), withBinaryFile, hClose)
-import System.IO.Error (catchIOError, isDoesNotExistError)
+import System.IO.Error (catchIOError)
 import System.Process
 import System.Timeout (timeout)
 import Text.Read (readMaybe)
