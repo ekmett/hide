@@ -11,7 +11,6 @@ import System.Environment (lookupEnv,setEnv,unsetEnv)
 import Hide.Buffer
 import qualified Hide.Build as B
 import Hide.Conversation
-import qualified Hide.Consoles as C
 import qualified Hide.Plugin.Menu as Menu
 import qualified Data.Map.Strict as M
 import qualified Data.Text as T
@@ -58,13 +57,13 @@ checks=bracket temporary removePathForcibly $ \root->do
       mounted<-wait "package root" (has "sample") started
       targets<-activate "sample" mounted >>= wait "Cabal target" (has "exe:demo")
       let componentActions label=[title | row<-rows targets,P.infoLabel (rowInfo row)==label,(title,_)<-rowActions row]
-      unless ("Build" `elem` componentActions "exe:demo" && "Run" `elem` componentActions "exe:demo" && "Build" `elem` componentActions "lib:sample" && "Run" `notElem` componentActions "lib:sample" && null (componentActions "test:ignored"))
+      unless ("Build" `elem` componentActions "exe:demo" && "Run" `elem` componentActions "exe:demo" && "Build" `elem` componentActions "lib:sample" && "Run" `notElem` componentActions "lib:sample" && null (componentActions "test:ignored") && null (componentActions "exe:disabled"))
         (fail "Cabal executable exposes captured Build and Run actions")
       sources<-activate "exe:demo" targets >>= wait "Cabal source" (\d->any (\row->P.infoLabel (rowInfo row)=="Main.hs" && rowDepth row==2) (rows d) && ready d)
       unless (has "Missing (missing)" sources && has "Paths_sample (generated)" sources)
         (fail ("Missing/generated sources stay visible without a build: "<>show (map (P.infoLabel.rowInfo) (rows sources))))
-      opened<-activate "Main.hs" sources >>= wait "source opens through host" (\d->(filePath <$> (activeDocument d >>= documentFile))==Just mainFile)
-      afterBuilds<-if os=="mingw32" then pure opened else do
+      sourceOpened<-activate "Main.hs" sources >>= wait "source opens through host" (\d->(filePath <$> (activeDocument d >>= documentFile))==Just mainFile)
+      afterBuilds<-if os=="mingw32" then pure sourceOpened else do
         let configPath=root </> "config/thc-edit/run.json"
             compiler=root </> "chosen compiler"
             invocation=root </> "invocation"
@@ -94,7 +93,7 @@ checks=bracket temporary removePathForcibly $ \root->do
         setPermissions compiler permissions {executable=True}
         BL.writeFile configPath bytes
         let otherFile=root </> "Other.hs"
-            other=addDocument (Just (Hide.Files.FileState otherFile Nothing)) (newBuffer "other source") opened
+            other=addDocument (Just (Hide.Files.FileState otherFile Nothing)) (newBuffer "other source") sourceOpened
         writeFile otherFile "other source"
         built<-request "lib:sample" "Build" other >>= admitted >>= waitInvocation
         arguments<-lines <$> readFile invocation
@@ -179,7 +178,7 @@ checks=bracket temporary removePathForcibly $ \root->do
       pure ()
   putStrLn "package sidebar checks passed"
   where
-    manifest name=unlines ["cabal-version: 3.0","name: "<>name,"version: 0.1","library","  exposed-modules: Main","executable second","  main-is: Other.hs","test-suite ignored","  type: exitcode-stdio-1.0","  main-is: Main.hs","executable demo","  main-is: Main.hs","  other-modules: Missing","  autogen-modules: Paths_sample"]
+    manifest name=unlines ["cabal-version: 3.0","name: "<>name,"version: 0.1","library","  exposed-modules: Main","executable disabled","  main-is: Main.hs","  buildable: False","  if os(linux)","    buildable: True","executable second","  main-is: Other.hs","test-suite ignored","  type: exitcode-stdio-1.0","  main-is: Main.hs","executable demo","  main-is: Main.hs","  other-modules: Missing","  autogen-modules: Paths_sample"]
     temporary=do
       base<-getTemporaryDirectory
       (path,handle)<-openTempFile base "hide-package-sidebar"

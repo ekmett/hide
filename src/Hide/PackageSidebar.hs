@@ -7,7 +7,7 @@ module Hide.PackageSidebar (PackageSidebar, withPackageSidebar, tickPackageSideb
 
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (withAsync)
-import Control.Exception (finally)
+import Control.Exception (evaluate,finally)
 import Control.Monad (filterM,foldM,forM,forM_,unless)
 import Data.Aeson (Value(Null))
 import qualified Data.ByteString as BS
@@ -17,7 +17,7 @@ import qualified Data.Map.Strict as M
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time.Clock (UTCTime)
-import Distribution.PackageDescription (Condition(..))
+import Distribution.PackageDescription (Condition(..),CondTree(..))
 import Distribution.Types.Condition (cOr)
 import System.Directory (canonicalizePath,doesFileExist,getFileSize,getModificationTime,listDirectory)
 import System.FilePath ((</>),isAbsolute,makeRelative,splitDirectories,takeDirectory,takeExtension,takeFileName)
@@ -189,19 +189,27 @@ createSlot registry root _private serial file=do
   build<-registerCommand registry (CommandDef (namespace<>".build") "Build component" codec codec $ \ctx (version,name,action)->do
     Snapshot current capturedStamp package _<-readIORef ref
     observed<-stamp file
-    pure $ case (sidebarOrigin ctx,sidebarProvider ctx,package) of
+    case (sidebarOrigin ctx,sidebarProvider ctx,package) of
       (Menu.HumanMenu,Just owner,Right parsedPackage)
         | current==version,observed==capturedStamp
         , component:_<-[item | item<-sourceComponents parsedPackage,sourceTarget item==name]
+        , sourceBuildable (condTreeData (sourceTree component))
         , sourceKind component `elem` [LibraryComponent,ExecutableComponent]
-        , action==Make || action==Run && sourceKind component==ExecutableComponent->
-            Right (SidebarBuild action (PackageBuildTarget owner version
-              (sidebarDirectory ctx,sidebarPrivatePaths ctx) root file observed
-              (sourcePackageName parsedPackage<>":"<>name)))
-      _->Left (CommandRejected "Package build target changed or is not a human action.")) >>= required
+        , action==Make || action==Run && sourceKind component==ExecutableComponent->do
+            let target=PackageBuildTarget owner version
+                  (sidebarDirectory ctx,sidebarPrivatePaths ctx) root file observed
+                  (sourcePackageName parsedPackage<>":"<>name)
+            -- Construct and force fixed receipt metadata on the action worker.
+            _<-evaluate (T.length (packageBuildName target)+length root+length file
+              +length (sidebarDirectory ctx)+sum (map length (sidebarPrivatePaths ctx)))
+            reply<-evaluate (SidebarBuild action target)
+            pure (Right reply)
+      _->pure (Left (CommandRejected "Package build target changed or is not a human action."))) >>= required
+  -- doc-artifact: tools/docs-screenshots.hs package-target-menu -> docs/site/screenshots/package-target-menu.png (docs/running.md)
   let targetActions version component=
         [P.ActionMenu label (P.treeAction registry build (version,sourceTarget component,action) (\_ result->pure result))
         | (label,action)<-[("Build",Make),("Run",Run)]
+        , sourceBuildable (condTreeData (sourceTree component))
         , sourceKind component `elem` [LibraryComponent,ExecutableComponent]
         , action/=Run || sourceKind component==ExecutableComponent]
       action version path=P.treeAction registry open (Just version,path) (\_ result->pure result)
