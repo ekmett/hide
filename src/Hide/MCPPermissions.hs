@@ -2,8 +2,12 @@
 -- | Human approval policy and bounded, layered TOML configuration.
 --
 -- Calls read fresh policy bytes on a bounded worker; admission stays serialized.
--- The owner never waits for policy IO. Calls return waits as
--- continuations. The oldest live approval is shown; cancellation withdraws it.
+-- The owner never waits for policy IO. Fresh bytes may reuse a parsed decision
+-- only when unchanged on the worker. Settings writes advance the owner epoch
+-- before enqueueing and block adoption until the write completes. External edits
+-- retain a finite read-to-adoption interval, not atomic filesystem revocation.
+-- Accepted ingress and worker completion wake the session scheduler. Calls return
+-- waits as continuations. The oldest live approval is shown; cancellation withdraws it.
 -- Diff tickets retain their original source and own separate worker attempts.
 -- Adoption/reply and cancellation share one short request claim; invalid attempts
 -- keep the same editable approval. Worker retirement joins run outside UI locks.
@@ -127,9 +131,9 @@ withPermissionsAt path specs=bracket acquire release
 permissionCall :: Permissions -> Tool -> Tool
 permissionCall = permissionCallAs (pure (Right ()))
 
--- | Host-owned live caller validation for requests deferred by policy approval.
--- Extension data cannot provide this validator; use it only at authenticated
--- transport admission. Immediate calls already passed that transport check.
+-- | Host-owned live caller validation after fresh policy IO and at final diff
+-- adoption. Extension data cannot provide this validator; bind it at authenticated
+-- transport admission so queued work cannot retain revoked caller authority.
 permissionCallAs :: IO (Either Text ()) -> Permissions -> Tool -> Tool
 permissionCallAs caller runtime@(Permissions _ registry ref _ _ _ _) callback desktop name args=do
   closed<-sessionClosed runtime

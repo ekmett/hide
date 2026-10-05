@@ -202,6 +202,8 @@ data Session = Session
 
 -- | Acquire the session lifetime lock, recover state and serve attachments.
 -- Invoke startup only after taking ownership; reclaim only eligible stale endpoints.
+-- The fixed component wake interrupts the background tick delay for accepted
+-- permission ingress and completed work; STM retains signals before a waiter.
 runRemoteDaemonWithStartup :: IO () -> STM () -> String -> Double -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> (Desktop -> IO Desktop) -> (Desktop -> Maybe T.Text -> Value -> IO (Bool, Desktop, IO (Maybe Value))) -> Desktop -> IO ()
 runRemoteDaemonWithStartup owned wake session scale effects tick inspect initial = do
   checkpoint <- checkpointPath session
