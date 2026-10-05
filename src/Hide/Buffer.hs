@@ -21,7 +21,7 @@ module Hide.Buffer
   , bufferLineChanges, bufferViewProjection, bufferLength, bufferLineCount,
     ChangeKind(..), changeRowCount, bufferChangeRows, changeLength, changeSlice
   , changeLineColumn, changeLineOffset, changeLineAt, liveToChangeOffset, changeToLiveOffset
-  , changeHunkAt, nextChangeHunk, revertChangeHunk, bufferLineColumn, bufferLineOffset, bufferLineAt
+  , changeHunkAt, nextChangeHunk, revertChangeHunk, bufferLineColumn, bufferLineOffset, bufferLineAt, bufferRowsFrom
   , bufferNextCharacter, bufferPreviousCharacter, bufferWordLeft, bufferWordRight, bufferNewline, bufferSlice
   , lineColumn, textLines, lineOffset, lineAt, displayColumn, columnOffset
   , combining, nextCharacter, previousCharacter, wordLeft, wordRight, wordChar, characterWidth
@@ -278,6 +278,20 @@ treeLineOffset tree row = characterCount (FT.measure before)
 -- | Read one live row without its line terminator; out-of-range rows return empty text.
 bufferLineAt :: Buffer -> Int -> Text
 bufferLineAt b = treeLineAt (bufferLines b)
+
+-- | Borrow live rows from one measured seek, without flattening the buffer.
+-- Negative starts clamp to zero; past EOF yields no rows. Terminators are
+-- stripped as in 'bufferLineAt', including the final empty editor row.
+--
+-- @bufferRowsFrom b n == map (bufferLineAt b) [max 0 n .. bufferLineCount b - 1]@
+--
+-- Seeking is /O(log n)/; consuming rows visits their physical leaves, including
+-- deleted tombstones, and strips their terminators. Text storage remains shared.
+bufferRowsFrom :: Buffer -> Int -> [Text]
+bufferRowsFrom b row =
+  [T.dropWhileEnd (=='\r') (T.dropWhileEnd (=='\n') (lineText line))
+  | line<-toList (FT.dropUntil ((>max 0 row) . lineCount) (bufferLines b))
+  , lineOrigin line/=Deleted]
 
 treeLineAt :: LineTree -> Int -> Text
 treeLineAt tree row = case FT.viewl remaining of

@@ -41,7 +41,7 @@ import Hide.Browser (Entry(..))
 import Hide.Git (GitReview)
 import Hide.Syntax (Style(..), SourceRow, prepareSourceRow, highlightFor, linkSpans, styleScript)
 import Hide.Hex
-import Hide.Unicode (textInputChar)
+import Hide.Unicode (textInputChar,sourceGraphemesFrom)
 import Hide.InlineState
 import qualified Data.Set as S
 import Hide.Buffer
@@ -1768,8 +1768,24 @@ composerRect d w = Rect (x+ww-4-columns) (y+hh-1-rows) columns rows
     Rect x y ww hh=bounds w
     draft=composerBuffer d
     rows=min (min 12 (bufferLineCount draft)) (max 0 (hh-6))
-    columns=min (max 0 (ww-6)) (max 12 (longest+1))
-    longest=maximum (0:[displayColumn line (T.length line) | raw<-textLines (contents draft),let line=if "    " `T.isPrefixOf` raw then T.drop 4 raw else raw])
+    columns=draftColumns True (max 0 (ww-6)) draft
+
+-- Measure only up to the window cap. One measured seek streams borrowed rows;
+-- once a row fills the bubble, neither its suffix nor later rows are needed.
+-- Use the source renderer's width rules, including one-cell control placeholders.
+draftColumns :: Bool -> Int -> Buffer -> Int
+draftColumns code limit b
+  | limit<=12=max 0 limit
+  | otherwise=1+go 11 (bufferRowsFrom b 0)
+  where
+    bound=limit-1
+    go widest _ | widest>=bound=widest
+    go widest []=widest
+    go widest (raw:rest)=
+      let line=if code && "    " `T.isPrefixOf` raw then T.drop 4 raw else raw
+          (_,_,column,pending)=sourceGraphemesFrom (bound-1) line
+          columns=case pending of []->column; _->bound
+      in go (max widest columns) rest
 
 composerSubmit :: [V.Modifier] -> Desktop -> (Desktop,[Effect])
 composerSubmit mods d
@@ -1981,7 +1997,7 @@ autocompleteComposerRect d w=Rect (x+ww-4-columns) (y+hh-1-rows) columns rows
     Rect x y ww hh=bounds w
     b=autocompleteDraft d
     rows=min (min 12 (bufferLineCount b)) (max 0 (hh-6))
-    columns=min (max 0 (ww-6)) (max 12 (maximum (0:[displayColumn line (T.length line) | line<-textLines (contents b)])+1))
+    columns=draftColumns False (max 0 (ww-6)) b
 
 autocompleteComposerScroll :: Desktop -> Window -> (Int,Int)
 autocompleteComposerScroll d w=(max 0 (r-height rect+1),max 0 (displayColumn (bufferLineAt b r) c-width rect+1))
