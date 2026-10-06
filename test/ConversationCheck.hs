@@ -299,14 +299,17 @@ draftReceiptChecks=bracket temporary removePathForcibly $ \root->
       active<-if steer then prompt runtime "wait" independent >>= await runtime "active primary turn" (pure . (=="Agent is replying...") . status) else pure independent
       original<-evaluate (newBuffer (if steer then "direction" else "stream"))
       -- Preparation may finish off-thread, but only a later serialized tick adopts it.
+      beforeSubmission<-readMessages (root </> "messages.jsonl")
       submittedReceipt<-captureVersion original
       submitted<-submit runtime (if steer then SteerSubmit else QuerySubmit) (draftBuffer original active)
       sameDraft<-versionCurrent submittedReceipt (composerBuffer submitted)
       check "submitted draft remains pending before owner adoption" (agentReplying submitted && sameDraft)
       current<-if replaced then fresh original else pure original
       staged<-if requeue then do
-        queued<-submit runtime QuerySubmit (draftBuffer current submitted) >>= await runtime "replacement queued acceptance" (pure . (==0) . bufferLength . composerBuffer)
-        check "same-text replacement is a new queued query" (agentQueued queued==1 && bufferLength (composerBuffer queued)==0)
+        queuedIntent<-submit runtime QuerySubmit (draftBuffer current submitted)
+        pendingCurrent<-captureVersion current >>= \version->versionCurrent version (composerBuffer queuedIntent)
+        check "same-text replacement is a new queued query before adoption" (agentQueued queuedIntent==1 && pendingCurrent)
+        queued<-await runtime "replacement queued acceptance" (pure . (==0) . bufferLength . composerBuffer) queuedIntent
         newest<-fresh original
         pure (draftBuffer newest queued)
         else if not steer && not replaced then do
@@ -319,6 +322,12 @@ draftReceiptChecks=bracket temporary removePathForcibly $ \root->
           hidden=if steer then focusWindow (windowId sourceFrame) staged else staged
       settled<-primaryDone runtime scenario hidden
       let restored=if steer then selectConversationView "" "Primary" settled else settled
+      when requeue $ do
+        afterSubmission<-readMessages (root </> "messages.jsonl")
+        let prompts values=[params | entry<-values,field "method" entry==Just ("session/prompt"::T.Text),Just params<-[field "params" entry::Maybe Value]]
+            added=drop (length (prompts beforeSubmission)) (prompts afterSubmission)
+            firstText params=case (field "prompt" params::Maybe [Value]) of Just (first:_)->field "text" first; _->Nothing
+        check "replacement query reaches the provider once in submission order" (length added==2 && all ((==Just ("stream"::T.Text)).firstText) added)
       check "acceptance preserves a replacement draft and clears only the submitted one"
         (if replaced then contents (composerBuffer restored)==contents original else bufferLength (composerBuffer restored)==0)
     bracket (lookupEnv "THC_EDIT_SESSION" <* setEnv "THC_EDIT_SESSION" (replicate 48 'c')) (restoreDraftEnvironment "THC_EDIT_SESSION") $ \_->

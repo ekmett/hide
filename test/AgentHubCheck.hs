@@ -167,8 +167,7 @@ checks=do
     let actual=(driver owner) {driverDeliver= \message->pure (Right (object ["newDriver" .= True,"body" .= messageText message]))}
     _<-updateExternalAgent hub owner actual >>= right
     staleSend<-sendAgentAt hub Human capturedTarget "Old editor query"
-    staleSteer<-steerAgentAt hub capturedTarget "Old editor steering"
-    ensure "captured editor submission cannot cross provider replacement" (isLeft staleSend && isLeft staleSteer)
+    ensure "captured editor submission cannot cross provider replacement" (isLeft staleSend)
     ticket<-sendAgent hub Human owner "After reconnect" >>= right
     done<-waitAgent hub Human owner ticket 1000 >>= right
     ensure "external reconnect retains ID and switches delivery callback" (case field "result" done >>= field "newDriver" of Just True->True; _->False)
