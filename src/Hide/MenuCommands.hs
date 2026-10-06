@@ -9,9 +9,10 @@ module Hide.MenuCommands
   ( MenuHost, withMenuCommands, menuContributions, menuAgentReferences, publishMenuFromHost, requestMenuRetirement, retireMenuFromHost, MenuContext(..), MenuReply(..), menuEffects, tickMenus
   ) where
 
-import Control.Concurrent.STM (TBQueue, atomically, newTBQueueIO, writeTBQueue, tryReadTBQueue)
+import Control.Concurrent.STM (TBQueue, atomically, newTBQueueIO, writeTBQueue, tryReadTBQueue, TVar, newTVarIO, readTVar, readTVarIO, writeTVar, flushTBQueue)
 import Control.Concurrent.Async (Async, async, cancel, poll)
 import Control.Exception (bracket, displayException, mask, evaluate)
+import Control.Monad (when)
 import Data.Aeson
 import Data.Aeson.Types (parseEither)
 import Data.IORef
@@ -55,7 +56,7 @@ data MenuReply = PreparedDownloadCancel !DownloadCancelRequest | PreparedDocumen
 
 data Pending = Pending Plugin.MenuRef (Maybe ContextTarget) MenuContext (Async (Either Plugin.MenuError MenuReply))
 data Publication = Publish Plugin.MenuItem | Withdraw Plugin.MenuRef
-data MenuHost = MenuHost (Plugin.Menus MenuContext MenuReply) [Plugin.MenuRef] [Plugin.MenuRef] (TBQueue Publication) (IORef (Maybe Pending))
+data MenuHost = MenuHost (Plugin.Menus MenuContext MenuReply) [Plugin.MenuRef] [Plugin.MenuRef] (TBQueue Publication) (IORef (Maybe Pending)) !(TVar Bool)
 
 -- | Keep the registry independent of frontend attachments. The host may add
 -- linked extension declarations to menuContributions before taking its snapshot.
@@ -78,36 +79,50 @@ withMenuCommands docs use=withRegistry $ \registry->Plugin.withMenus ("context.w
       (Plugin.MenuDef name "context.source" "debug" 0 title "" False
         (Plugin.menuAction registry source (const (Right ())) (\_ ->pure . PreparedDebugSource)))
     pure item) [("hide.debug.toggle-breakpoint","Toggle breakpoint",ToggleSourceBreakpoint),("hide.debug.add-watch","Add watch…",AddSourceWatch)]
-  bracket (MenuHost menus [reference,navigationRef] sourceReferences <$> newTBQueueIO 256 <*> newIORef Nothing) close use
-  where close (MenuHost _ _ _ _ ref)=readIORef ref >>= mapM_ (\(Pending _ _ _ worker)->cancel worker)
+  bracket (MenuHost menus [reference,navigationRef] sourceReferences <$> newTBQueueIO 256 <*> newIORef Nothing <*> newTVarIO False) close use
+  where close (MenuHost _ _ _ changes ref closed)=do
+          atomically (writeTVar closed True >> flushTBQueue changes >> pure ())
+          readIORef ref >>= mapM_ (\(Pending _ _ _ worker)->cancel worker)
 
 menuContributions :: MenuHost -> Plugin.Menus MenuContext MenuReply
-menuContributions (MenuHost menus _ _ _ _)=menus
+menuContributions (MenuHost menus _ _ _ _ _)=menus
 
 -- | Exact first-party refs allowed by host policy. Contribution metadata can
 -- further restrict these; it cannot grant agent authority to new registrations.
 menuAgentReferences :: MenuHost -> [Plugin.MenuRef]
-menuAgentReferences (MenuHost _ permitted _ _ _)=permitted
+menuAgentReferences (MenuHost _ permitted _ _ _ _)=permitted
 
 -- | Prepare bounded metadata on the caller's registration worker, then queue an
 -- exact delta. Never call this while holding the desktop/session lock. Deltas
 -- cannot clobber newer publications, unlike delayed whole-catalogue snapshots.
+-- Shutdown wakes blocked callers with MenusClosed and rejects later publication.
 publishMenuFromHost :: MenuHost -> Plugin.MenuRef -> IO (Either Plugin.MenuError ())
-publishMenuFromHost (MenuHost menus _ _ changes _) reference=do
+publishMenuFromHost host@(MenuHost menus _ _ _ _ _) reference=do
   metadata<-Plugin.menuMetadata menus reference
   case metadata of
     Left err->pure (Left err)
-    Right item->atomically (writeTBQueue changes (Publish item)) >> pure (Right ())
+    Right item->enqueuePublication host (Publish item)
 
 -- | Registration workers request ordered retirement with bounded backpressure.
 -- Never call this queueing operation while holding the session/UI lock.
+-- Shutdown wakes blocked callers and rejects later retirement with an IOError.
 requestMenuRetirement :: MenuHost -> Plugin.MenuRef -> IO ()
-requestMenuRetirement (MenuHost _ _ _ changes _)=atomically . writeTBQueue changes . Withdraw
+requestMenuRetirement host reference=enqueuePublication host (Withdraw reference) >>= either (ioError . userError . show) pure
+
+-- Ordered transport admission and scope close share one STM boundary.
+enqueuePublication :: MenuHost -> Publication -> IO (Either Plugin.MenuError ())
+enqueuePublication (MenuHost _ _ _ changes _ closed) publication=atomically $ do
+  stopped<-readTVar closed
+  if stopped then pure (Left Plugin.MenusClosed) else writeTBQueue changes publication >> pure (Right ())
+
+requireOpen :: MenuHost -> IO ()
+requireOpen (MenuHost _ _ _ _ _ closed)=readTVarIO closed >>= \stopped->when stopped (ioError (userError "Menu host closed."))
 
 -- | Withdraw directly at the session owner. UI callers do not enqueue or wait for
 -- capacity, even if registration workers have filled the publication queue.
 retireMenuFromHost :: MenuHost -> Plugin.MenuRef -> Desktop -> IO Desktop
-retireMenuFromHost (MenuHost menus _ _ _ _) reference d=do
+retireMenuFromHost host@(MenuHost menus _ _ _ _ _) reference d=do
+  requireOpen host
   _<-Plugin.retireMenu menus reference
   pure d {contributedMenus=filter ((/=reference) . Plugin.menuReference) (contributedMenus d),
     agentMenuRefs=filter (/=reference) (agentMenuRefs d),menu=Nothing,contextMenu=Nothing,contextTarget=Nothing}
@@ -115,7 +130,7 @@ retireMenuFromHost (MenuHost menus _ _ _ _) reference d=do
 -- Input remains schedulable under producer load: at most 16 bounded deltas are
 -- admitted at one owner boundary. Metadata/handlers were prepared elsewhere.
 adoptPublications :: MenuHost -> Desktop -> IO Desktop
-adoptPublications host@(MenuHost menus _ _ changes _)=drain (16::Int)
+adoptPublications host@(MenuHost menus _ _ changes _ _)=drain (16::Int)
   where
     drain 0 d=pure d
     drain remaining d=do
@@ -232,7 +247,8 @@ captureNavigation _ _ _=pure Nothing
 -- | Admission checks only policy/lifetimes and captures immutable read handles.
 -- Busy calls refuse instead of replacing another prepared result.
 menuEffects :: MenuHost -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> [Effect] -> IO (Bool,Desktop)
-menuEffects host@(MenuHost menus permitted _ _ ref) _ original [InvokeMenu reference origin target]=mask $ \restore->do
+menuEffects host@(MenuHost menus permitted _ _ ref _) _ original [InvokeMenu reference origin target]=mask $ \restore->do
+  requireOpen host
   d<-adoptPublications host original
   pending<-readIORef ref
   live<-Plugin.menuCurrent menus reference
@@ -250,7 +266,7 @@ menuEffects host@(MenuHost menus permitted _ _ ref) _ original [InvokeMenu refer
       worker<-async (restore (Plugin.invokeMenu menus reference context))
       writeIORef ref (Just (Pending reference target context worker))
       pure (False,d {status="Running menu action…"})
-menuEffects _ core d requests=core d requests
+menuEffects host core d requests=requireOpen host >> core d requests
 
 -- | Check captured identity before applying prepared geometry. Dirty open files
 -- stay in memory; disk preparation can never replace an intervening open buffer.
@@ -279,7 +295,8 @@ adoptNavigation context (Navigation path row offset loaded) d
 -- | Drain ordered publication/retirement before late reply adoption. No handler
 -- or lazy extension metadata executes here, and no file work runs under the lock.
 tickMenus :: MenuHost -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> IO Desktop
-tickMenus host@(MenuHost menus _ sourceRefs _ ref) core original=do
+tickMenus host@(MenuHost menus _ sourceRefs _ ref closed) core original=
+  readTVarIO closed >>= \stopped->if stopped then pure original else do
   d<-adoptPublications host original
   pending<-readIORef ref
   case pending of

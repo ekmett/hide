@@ -151,6 +151,10 @@ can add a named top-level menu, but cannot replace another plugin's entries by
 returning an entire menu. Duplicate IDs are rejected. Missing optional anchors
 fall back to the declared group with a diagnostic, not a disappearing command.
 
+The session menu host queues prepared publications and retirements in order.
+Closing it releases blocked publishers with `MenusClosed`; retirement requests
+fail with an `IOError`. Late ticks cannot restore the closed host's contributions.
+
 A context-menu contribution receives a frozen, bounded hit context: window and
 buffer identities, source revision, clicked position and any selected range.
 Its action retains those identities. It must not rediscover whichever file is

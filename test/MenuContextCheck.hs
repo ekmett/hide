@@ -3,8 +3,8 @@ module MenuContextCheck (checks) where
 
 import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Concurrent (threadDelay)
-import Control.Concurrent.Async (async,wait,poll)
-import Control.Exception (bracket,evaluate,try,ErrorCall,IOException)
+import Control.Concurrent.Async (async,wait,poll,cancel,asyncThreadId)
+import Control.Exception (bracket,evaluate,try,ErrorCall,IOException,finally)
 import Control.Monad (unless,replicateM_,foldM)
 import Data.Aeson
 import Data.Aeson.Types (parseEither)
@@ -16,6 +16,8 @@ import System.Directory
 import System.FilePath ((</>),takeDirectory)
 import System.IO
 import System.Timeout (timeout)
+import System.IO.Error (tryIOError,isUserError)
+import GHC.Conc (threadStatus,ThreadStatus(..),BlockReason(..))
 import qualified Hide.Buffer as B
 import Hide.Buffer (newBuffer,contents,caret,bufferContent,contentLineOffset)
 import Hide.Commands (configuredBindings)
@@ -242,8 +244,31 @@ checks=sourceSelectionCheck >> (bracket temporary removePathForcibly $ \root->wi
   check "context contribution retirement refuses late navigation and paint"
     (problemsFocused withdrawn && not (commandEnabled withdrawn GoToMessage))
   _<-evaluate (diagnosticsGeneration unchanged)
-  putStrLn "live context menu checks passed")
+  -- Leave the real saturated transport without draining it. Closing the host
+  -- must resolve the caller-owned publisher rather than strand it in STM.
+  replicateM_ 256 (publishMenuFromHost host second >>= either (error . show) pure)
+  blockedOnClose<-async (publishMenuFromHost host second)
+  ready<-timeout 1000000 (awaitBlocked blockedOnClose)
+  check "shutdown fixture publisher waits on the full queue" (ready==Just ())
+  pure (host,second,blockedOnClose)) >>= \(host,reference,blocked)->flip finally (cancel blocked) $ do
+    result<-timeout 1000000 (wait blocked)
+    unless (result==Just (Left Plugin.MenusClosed)) (error "host shutdown must resolve its blocked publisher as closed")
+    retired<-tryIOError (requestMenuRetirement host reference)
+    unless (either isUserError (const False) retired) (error "closed menu host must refuse retirement")
+    published<-publishMenuFromHost host reference
+    unless (published==Left Plugin.MenusClosed) (error "closed menu host must refuse publication")
+    let initial=(initialDesktop (80,25)) {menu=Just (0,0)}
+    late<-tickMenus host (\_ _->error "closed menu tick dispatched effects") initial
+    unless (menu late==menu initial && null (contributedMenus late)) (error "closed tick must leave queued menu deltas inert")
+    putStrLn "live context menu checks passed"
   where
+    awaitBlocked worker=do
+      state<-threadStatus (asyncThreadId worker)
+      case state of
+        ThreadBlocked BlockedOnSTM->pure ()
+        ThreadFinished->error "publisher finished before host close"
+        ThreadDied->error "publisher failed before host close"
+        _->threadDelay 1000 >> awaitBlocked worker
     temporary=do base<-getTemporaryDirectory; (path,h)<-openTempFile base "hide-menu-context"; hClose h; removeFile path; createDirectory path; canonicalizePath path
 
 -- The popup freezes the selected expression before its asynchronous command.
