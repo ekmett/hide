@@ -11,6 +11,7 @@ import Hide.Sidebar
 import Hide.Model
 import Hide.Render (snapshot, renderKey)
 import qualified Hide.Plugin.Editor as E
+import qualified Hide.Plugin.Window as W
 import qualified Data.Text as T
 import Hide.Buffer (newBuffer, Selection(..))
 import qualified Hide.Buffer as B
@@ -24,6 +25,7 @@ checks = do
   sourceCoordinateChecks
   sourceScrollChecks
   ref<-E.newDraftRef
+  childBody<-W.prepareTextWindow "Child" "history"
   let check name ok = unless ok (error name)
   let original=newBuffer "same revision source"
       opaque=original {B.undoStack=error "redraw key forced Undo history",B.redoStack=error "redraw key forced Redo history"}
@@ -52,7 +54,7 @@ checks = do
   let textArea=base {dialog=Just (Dialog "Details" Information [TextArea "Text" True original (Selection 0 0) 0 0] 0 ["OK"] [])}
       areaChanged=textArea {dialog=fmap (\dg->dg {fields=[TextArea "Text" True (newBuffer "other") (Selection 0 0) 0 0]}) (dialog textArea)}
       areaWrapped=textArea {dialog=fmap (\dg->dg {fields=map id (fields dg)}) (dialog textArea)}
-      view=ConversationView 1 "Child" ref Nothing Nothing (0,0) (Selection 0 0)
+      view=ConversationView (InertBody childBody) "Child" ref Nothing Nothing (0,0) (Selection 0 0)
       child=base {conversationViews=M.singleton "child" view,editorDrafts=M.singleton ref (EditorDraft opaque (Selection 0 0) True Nothing)}
       childChanged=child {editorDrafts=M.adjust (\draft->draft {editorDraftBuffer=newBuffer "other draft"}) ref (editorDrafts child)}
   areaKey<-renderKey textArea
@@ -62,6 +64,9 @@ checks = do
   childKey<-renderKey child
   childChangedKey<-renderKey childChanged
   check "hidden child draft changes invalidate native menus and rendering" (childKey/=childChangedKey)
+  replacementBody<-W.prepareTextWindow "Child" "history"
+  replacementKey<-renderKey child {conversationViews=M.adjust (\v->v {conversationBody=InertBody replacementBody}) "child" (conversationViews child)}
+  check "replacing a retained body invalidates even with identical text" (childKey/=replacementKey)
   forM_ [child {editorDrafts=M.adjust (\draft->draft {editorDraftSelection=Selection 0 1}) ref (editorDrafts child)},
          child {editorDrafts=M.adjust (\draft->draft {editorDraftFocused=False}) ref (editorDrafts child)}] $ \changed->do
     next<-renderKey changed
