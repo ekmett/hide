@@ -80,10 +80,7 @@ readCheckpoint path baseline=do
         prepared<-foldM (restore scope) baseline {windows=[],pluginWindows=M.empty,retiredPluginWindows=S.empty} snapshots
         case parseEither (desktopParser prepared) value of
           Left _->pure (Left "Invalid or unsupported recovery checkpoint.")
-          Right recovered->do
-            _<-evaluate (M.foldl' (\() doc->if syntaxDocument doc
-              then prepareSourceWidths (bufferContent (documentBuffer doc)) else ()) () (buffers recovered))
-            pure (Right recovered)
+          Right recovered->pure (Right recovered)
   where
     decode bytes=do
       unless (BS.length bytes<=checkpointLimit) (Left "Recovery checkpoint exceeds 256 MiB.")
@@ -380,7 +377,7 @@ windowParser documents plugins=withObject "window" $ \o->do
     checkedStamp<-traverse (\(version,columns)->(,) <$> boundedInt 0 1073741823 version <*> boundedInt 1 1048576 columns) stamp
     pure (MarkdownInteraction selectedPreview rowPreview colPreview checkedStamp))
   let view=if sourceView && (toEnum viewIndex/=MarkdownView || maybe False markdownDocument (M.lookup (fromMaybe 0 bid) documents)) then toEnum viewIndex else CurrentView
-  Window ident content rectangle selected row column restored <$> o .: "hexLow" <*> o .: "hexAscii" <*> pure number <*> pure view <*> pure Nothing <*> pure split <*> pure preview <*> pure Nothing
+  Window ident content rectangle selected row column restored <$> o .: "hexLow" <*> o .: "hexAscii" <*> pure number <*> pure view <*> pure Nothing <*> pure split <*> pure preview <*> pure Nothing <*> pure Nothing
 rectParser :: Value -> Parser Rect
 rectParser value=do
   (x,y,w,h)<-parseJSON value

@@ -2,7 +2,7 @@
 -- SPDX-License-Identifier: BSD-3-Clause
 -- | Bounded background source highlighting with identity-checked adoption.
 --
--- One worker initializes Skylighting and evaluates rows/widths before publication.
+-- One worker initializes Skylighting and evaluates rows before publication.
 -- The desktop tick coalesces pending visible-buffer requests and installs only
 -- results matching buffer identity, revision and syntax path. Failed or timed-out
 -- work leaves plain text rather than moving tokenization onto the UI thread.
@@ -28,7 +28,7 @@ import Hide.Syntax (Style,SourceRow,sourceRowText,sourceRowRanges,sourceRangeByt
 -- Stable identity distinguishes replacements/reloads with equal revisions.
 data Key = Key Int Int FilePath (StableName Buffer) deriving Eq
 data Request = Request Key Buffer
-type Result = (V.Vector SourceRow,Int)
+type Result = V.Vector SourceRow
 data Work = Work [Request] (Maybe Key) (M.Map Int (Key,Maybe Result))
 newtype Highlighting = Highlighting (TVar Work)
 
@@ -69,10 +69,8 @@ withHighlightingUsing initialize tokenize action = do
           let text=contents buffer
           tokens<-tokenize path text
           let rows=sourceHighlightRows text tokens
-              width=measureDocumentWidth text
           _<-evaluate (V.foldl' (\() row->T.length (sourceRowText row) `seq` V.foldl' (\() range->sourceRangeByteEnd range `seq` sourceRangeStyle range `seq` ()) () (sourceRowRanges row)) () rows)
-          _<-evaluate width
-          pure (rows,width)
+          pure rows
       atomically $ do
         Work pending _ done<-readTVar state
         writeTVar state (Work pending Nothing (M.insert ident (key,result) done))
@@ -112,7 +110,7 @@ tickHighlighting (Highlighting state) desktop = do
       identity<-makeStableName buffer
       pure (Request (Key ident (revision buffer) (documentSyntaxPath doc) identity) buffer)
     install ready docs (Request key@(Key ident _ _ _) _) = case M.lookup ident ready of
-      Just (completed,Just (rows,width))
+      Just (completed,Just rows)
         | key==completed, Just doc<-M.lookup ident docs, Nothing<-documentSourceRows doc ->
-            M.insert ident doc {documentSourceRows=Just rows,documentWidth=width} docs
+            M.insert ident doc {documentSourceRows=Just rows} docs
       _ -> docs

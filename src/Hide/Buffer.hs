@@ -16,8 +16,8 @@ module Hide.Buffer
   , BufferContent, bufferContent, contentLength, contentLineCount, contentByteMode
   , contentSlice, contentByteSlice, contentLineOffset, contentLineAt
   , SourceLine, contentSourceLineAt, contentSourceLinesFrom, sourceLineText, sourceLineRawText
-  , sourceLineLength, sourceLineHasChunks, sourceLineWidth, sourceLineDisplayColumn, sourceLineColumnOffset, sourceLineWindow
-  , sourceLineSlice, sourceLineSuffixWidth, prepareSourceWidths
+  , sourceLineLength, sourceLineHasChunks, sourceLineWidth, sourceLineExtentThrough, sourceLineDisplayColumn, sourceLineColumnOffset, sourceLineWindow
+  , sourceLineSlice, sourceLineSuffixWidth
   , newBuffer, newByteBuffer, bufferBytes, bufferByteStream, markSaved, toggleByteMode, replaceBuffer, textBuffer
   , DirtySnapshot, captureDirty, snapshotDirty
   , contents, dirty, ordered, replaceSelection, replaceRanges, prepareBuffer, undo, redo, selectedText
@@ -194,18 +194,18 @@ sourceLineWidth line@(Line {})=displayColumn (sourceLineText line) maxBound
 sourceLineWidth (ChunkedLine _ flags _ _ _ chunks)=
   Chunks.chunksWidth chunks-if flags .&. 4/=0 then 1 else 0
 
--- | Worker-owned preparation of expensive cached source widths. Only long live
--- text rows are forced; byte buffers and bounded compact rows need no receipt.
--- This forces each loaded row's independent numeric width, not its lazy span
--- stream, text projection, saved baseline or history. Subsequent exact width
--- demands reuse that receipt; source bytes and coordinates remain unchanged.
-prepareSourceWidths :: BufferContent -> ()
-prepareSourceWidths (BufferContent tree mode)
-  | mode=()
-  | otherwise=foldl' prepare () tree
-  where
-    prepare () line@ChunkedLine{} | lineOrigin line/=Deleted=sourceLineWidth line `seq` ()
-    prepare () _=()
+-- | Horizontal geometry through a demanded column, with an exact-EOF flag.
+-- Untouched long rows estimate their unindexed suffix from cached UTF8 bytes;
+-- edited rows use their exact measure. CR/LF never contribute editor cells.
+sourceLineExtentThrough :: SourceLine -> Int -> (Int,Bool)
+sourceLineExtentThrough line@Line{} _=
+  let (_,_,column,_)=sourceGraphemesFrom maxBound (sourceLineText line)
+  in (column,True)
+sourceLineExtentThrough line@(ChunkedLine _ _ _ _ _ chunks) column=
+  let (char,reached,upper)=Chunks.chunksExtentThrough chunks column
+  in if char>=sourceLineLength line
+     then (reached-if char>=lineCharacters line && lineTerminated line then 1 else 0,True)
+     else (upper,False)
 
 -- | Scalar positions inside an item snap to its starting display column.
 sourceLineDisplayColumn :: SourceLine -> Int -> Int

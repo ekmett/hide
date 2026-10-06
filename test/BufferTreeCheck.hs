@@ -370,38 +370,19 @@ lazyLineChecks=do
   repeatAfter<-getAllocationCounter
   check "repeated coordinates reuse prepared receipt prefix" (repeatBefore-repeatAfter<128*1024)
   check "queries retain exact content and revision" (contents loaded==text && revision loaded==0 && null (undoStack loaded))
-  -- Geometry preparation belongs to the opening worker, while raw creation
-  -- and exports above deliberately retain their cheap independent path.
-  let preparedText=T.replicate (1024*1024) "b"
-      preparedBuffer=newBuffer preparedText
-      preparedImage=bufferContent preparedBuffer
-  _<-evaluate (T.length preparedText)
-  _<-evaluate (prepareBuffer preparedBuffer)
-  geometryBefore<-getAllocationCounter
-  _<-evaluate (prepareSourceWidths preparedImage)
-  geometryAfter<-getAllocationCounter
-  check "worker geometry does not construct the loaded span stream" (geometryBefore-geometryAfter<64*1024)
-  let preparedLine=contentSourceLineAt preparedImage 0
-  viewportBefore<-getAllocationCounter
-  let (_,_,preparedGroups)=sourceLineWindow preparedLine 0
-  _<-evaluate (sum [TU.lengthWord8 source | (source,_)<-take 2 preparedGroups])
-  viewportAfter<-getAllocationCounter
-  check "prepared geometry leaves receipt demand bounded to the viewport" (viewportBefore-viewportAfter<64*1024)
-  check "worker geometry preserves raw bytes and buffer state"
-    (bufferBytes preparedBuffer==bufferBytes (newBuffer preparedText) && revision preparedBuffer==0 && null (undoStack preparedBuffer))
   forM_ ["\t界e\x301\x200d😀", "🇦🇧", "z"<>T.replicate 80 "\x301", "a\r"] $ \unit->do
     let source=T.replicate 350 unit<>"\r\nnext"
         b=newBuffer source
         row=lineAt source 0
         sourceLine=contentSourceLineAt (bufferContent b) 0
-    _<-evaluate (prepareSourceWidths (bufferContent b))
     let desktop=Model.addDocument Nothing b (Model.initialDesktop (80,25))
         window=maybe (error "missing geometry window") id (Model.activeWindow desktop)
         document=maybe (error "missing geometry document") id (Model.activeDocument desktop)
         width=displayColumn row (T.length row)
         expectedLimit=max 0 (width-(Model.width (Model.bounds window)-2)+1)
-    check "prepared source geometry retains exact proportional scrollbar extent"
-      (sourceLineWidth sourceLine==width && Model.scrollbarLimit desktop False document window==expectedLimit)
+    check "source extent is exact when the requested prefix reaches EOF"
+      (sourceLineWidth sourceLine==width && sourceLineExtentThrough sourceLine (width+1)==(width,True) &&
+       Model.scrollbarLimit desktop False document window {Model.scrollColumn=width}==expectedLimit)
     forM_ [0,1,31,32,127,128,T.length row-1,T.length row] $ \p->
       check "lazy source coordinates preserve original scalar/item policy"
         (sourceLineDisplayColumn sourceLine p==displayColumn row p)

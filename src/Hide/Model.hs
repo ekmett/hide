@@ -115,8 +115,13 @@ data Window = Window
   { windowId :: Int, windowContent :: WindowContent, bounds :: Rect, selection :: Selection
   , scrollRow :: Int, scrollColumn :: Int, restoredBounds :: Maybe Rect
   , windowHexLow :: Bool, windowHexAscii :: Bool
-  , windowNumber :: Int, bufferView :: BufferView, reviewSelection :: Maybe ReviewSelection, reviewSplit :: Int, markdownInteraction :: Maybe MarkdownInteraction, rowsInteraction :: Maybe RowsInteraction
+  , windowNumber :: Int, bufferView :: BufferView, reviewSelection :: Maybe ReviewSelection, reviewSplit :: Int, markdownInteraction :: Maybe MarkdownInteraction, rowsInteraction :: Maybe RowsInteraction, sourceWidthHint :: Maybe SourceWidthHint
   } deriving (Eq,Show)
+-- Only a thumb estimate, never source identity or proof of EOF. A matching
+-- revision/range retains a discovered extent when scrolling left; every actual
+-- scroll independently queries live source, including equal-revision replacement.
+data SourceWidthHint = SourceWidthHint !Int !Int !Int !Int !Int deriving (Eq,Show)
+
 -- | Only the selected stable row and pane focus; Details uses Window selection/scroll.
 data RowsInteraction = RowsInteraction !Tree.NodeId !Bool deriving (Eq,Show)
 
@@ -708,7 +713,7 @@ addPluginWindow reference prepared d=d {windows=w:windows d,pluginWindows=M.inse
     i=nextId d
     (sw,sh)=screenSize d
     w=Window i (PluginContent reference) (fitWindow d (Rect 0 1 sw (sh-2))) (Selection 0 0) 0 0 Nothing False False
-      (nextWindowNumber d) CurrentView Nothing 50 Nothing (initialRowsInteraction prepared)
+      (nextWindowNumber d) CurrentView Nothing 50 Nothing (initialRowsInteraction prepared) Nothing
 
 -- | Current Details text for rows, or the original plain/styled view. This reads
 -- only the selected NodeId and the prepared ordinal index, never content.
@@ -801,7 +806,7 @@ addDocument file b d = d { windows = w : windows d, buffers = M.insert i (newDoc
     i = nextId d
     offset = length (windows d) `mod` 5
     (sw,sh) = screenSize d
-    w = Window i (SourceContent i) (fitWindow d (Rect offset (1+offset) (sw-offset) (sh-2-offset))) (Selection 0 0) 0 0 Nothing False False (nextWindowNumber d) (if byteMode b || (defaultBufferView d==MarkdownView && not (markdownDocument (newDocument b file))) then CurrentView else defaultBufferView d) Nothing 50 Nothing Nothing
+    w = Window i (SourceContent i) (fitWindow d (Rect offset (1+offset) (sw-offset) (sh-2-offset))) (Selection 0 0) 0 0 Nothing False False (nextWindowNumber d) (if byteMode b || (defaultBufferView d==MarkdownView && not (markdownDocument (newDocument b file))) then CurrentView else defaultBufferView d) Nothing 50 Nothing Nothing Nothing
 
 nextWindowNumber :: Desktop -> Int
 nextWindowNumber d = choose 1
@@ -887,7 +892,7 @@ modifyActive f d = maybe d (\w -> mapWindow (windowId w) f d) (activeWindow d)
 ensureVisible :: Desktop -> Desktop
 ensureVisible d | activeMarkdown d,Just w<-activeWindow d = markdownMoveTo True (caret (selection (displayWindow w))) d
 ensureVisible d = case (activeWindow d, activeDocument d) of
-  (Just w, Just doc) -> modifyActive (const w { scrollRow = max 0 row', scrollColumn = max 0 col' }) d
+  (Just w, Just doc) -> modifyActive (const (rememberSourceWidth d doc w { scrollRow = max 0 row', scrollColumn = max 0 col' })) d
     where
       b = documentBuffer doc
       (row,dc) = windowCaretCell d doc w
@@ -911,7 +916,7 @@ ensureVisibleAfterLayout before after = case (activeWindow after,activeDocument 
         columnVisible=textColumn>=scrollColumn previous && textColumn<scrollColumn previous+columns
     in modifyActive (\shown -> shown
       {scrollRow=if rowVisible then scrollRow shown else min (scrollbarLimit after True doc current) (scrollRow current),
-       scrollColumn=if columnVisible then scrollColumn shown else min (scrollbarLimit after False doc current) (scrollColumn current)}) (ensureVisible after)
+       scrollColumn=if columnVisible then scrollColumn shown else min (scrollbarLimit after False doc current {sourceWidthHint=Nothing}) (scrollColumn current)}) (ensureVisible after)
   _ -> after
 
 -- Map other view positions through the changed character interval.
@@ -2859,8 +2864,14 @@ changeScroll vertical delta d | Just w<-activeWindow d,PluginContent{}<-windowCo
   modifyActive (\shown->if vertical then shown {scrollRow=max 0 (min limit (scrollRow shown+delta))}
     else shown {scrollColumn=max 0 (min limit (scrollColumn shown+delta))}) d
 changeScroll vertical delta d = case (activeWindow d,activeDocument d) of
-  (Just w,Just doc) -> let value=max 0 (min (scrollbarLimit d vertical doc w) ((if vertical then scrollRow w else scrollColumn w)+delta))
-    in modifyActive (\v -> if vertical then v {scrollRow=value} else v {scrollColumn=value}) d
+  (Just w,Just doc) ->
+    let requested=max 0 ((if vertical then scrollRow w else scrollColumn w)+delta)
+        prospective=if vertical then w {scrollRow=requested} else w {scrollColumn=requested}
+        -- Hints affect only the drawn thumb. Never cap a prospective seek by
+        -- an old receipt: replacement may have the same numeric revision.
+        value=min (scrollbarLimit d vertical doc prospective {sourceWidthHint=Nothing}) requested
+        changed=if vertical then w {scrollRow=value} else w {scrollColumn=value}
+    in modifyActive (const (rememberSourceWidth d doc changed)) d
   _ -> d
 
 scrollClick :: Bool -> Int -> Int -> Desktop -> Desktop
@@ -2882,8 +2893,11 @@ scrollTrack vertical x y d = case activeWindow d of
   Just original | Just (r,limit)<-windowScrollbar d vertical original -> let { w=displayWindow original
                          ; len=if vertical then height r else width r
                          ; offset=if vertical then y-top r else x-left r
-                         ; value=max 0 (min limit ((offset-1)*limit `div` max 1 (len-3))) }
-                     in modifyActive (modifyDisplayedWindow (\v -> if vertical then v {scrollRow=value} else v {scrollColumn=value})) d
+                         ; liveLimit=case (not vertical && offset>=len-2,activeDocument d) of
+                             (True,Just doc)->scrollbarLimit d False doc w {sourceWidthHint=Nothing}
+                             _->limit
+                         ; value=max 0 (min liveLimit ((offset-1)*liveLimit `div` max 1 (len-3))) }
+                     in changeScroll vertical (value-(if vertical then scrollRow w else scrollColumn w)) d
   _ -> d
 
 selectAt :: Bool -> Int -> Int -> Desktop -> Desktop
@@ -4180,11 +4194,42 @@ windowDocumentWidth :: Document -> Window -> Int
 windowDocumentWidth doc w | byteMode (documentBuffer doc) = hexWidth (windowHexBytes w)
                           | windowChangeView b w = maximum (documentWidth doc:[displayColumn line (T.length line) | visual<-[scrollRow w..min (documentRows doc w-1) (scrollRow w+max 0 (height (bounds w)-2))],
                               let entry=viewRowAt (bufferView w) (bufferViewProjection b) visual, row<-maybe [] pure (viewLeftRow entry)++maybe [] pure (viewRightRow entry),let line=changeLineAt b row])
+                          | sourceScrollbarDocument doc w = fromMaybe (fst (sourceWindowExtent doc w)) (sourceWidthEstimate doc w)
                           | documentSourceRows doc/=Nothing = documentWidth doc
                           | otherwise = maximum (documentWidth doc:caretColumn:
                               [sourceLineWidth line | line<-take (max 0 (height (bounds w)-2)+1) (contentSourceLinesFrom (bufferContent b) (scrollRow w))])
   where b=documentBuffer doc
         (_,caretColumn)=windowCursorCell b w
+
+-- Ordinary Current source geometry borrows only the demanded row prefixes.
+-- Review, prepared layouts, byte buffers and semantic documents keep their own
+-- extents. A prospective seek can discover EOF and refine the estimate at once.
+sourceScrollbarDocument :: Document -> Window -> Bool
+sourceScrollbarDocument doc w=bufferView w==CurrentView && syntaxDocument doc
+
+sourceWidthEstimate :: Document -> Window -> Maybe Int
+sourceWidthEstimate doc w=do
+  bid<-bufferId w
+  SourceWidthHint ident version row count extent<-sourceWidthHint w
+  if bid==ident && revision (documentBuffer doc)==version && row==scrollRow w && count==sourceWidthRows w
+    then Just extent else Nothing
+
+sourceWidthRows :: Window -> Int
+sourceWidthRows w=max 0 (height (bounds w)-2)+1
+
+rememberSourceWidth :: Desktop -> Document -> Window -> Window
+rememberSourceWidth d doc w
+  | sourceScrollbarDocument doc w,Nothing<-windowPresentation d w,Just bid<-bufferId w,
+    (extent,True)<-sourceWindowExtent doc w =
+      w {sourceWidthHint=Just (SourceWidthHint bid (revision (documentBuffer doc)) (scrollRow w) (sourceWidthRows w) extent)}
+  | otherwise=w
+
+sourceWindowExtent :: Document -> Window -> (Int,Bool)
+sourceWindowExtent doc w=foldl' combine (0,True)
+  [sourceLineExtentThrough line (scrollColumn w+max 1 (width (bounds w)-2)) |
+    line<-take (sourceWidthRows w)
+      (contentSourceLinesFrom (bufferContent (documentBuffer doc)) (scrollRow w))]
+  where combine (extent,exact) (next,known)=(max extent next,exact && known)
 
 documentRows :: Document -> Window -> Int
 documentRows doc w | byteMode b = bufferLength b `div` windowHexBytes w+1

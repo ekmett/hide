@@ -267,8 +267,8 @@ checks = do
         _ -> error "missing width fixture"
   check "wider layout clamps manual pan to the shorter horizontal range"
     (column expanded==Just (scrollbarLimit expanded False ed ew) && column expanded==Just 18)
-  check "background source width includes long lines outside the viewport"
-    (widthLimit ready==48 && widthLimit (modifyActive (\w -> w {scrollRow=20}) offscreen)==48)
+  check "source scrollbar measures visible rows independently of background highlighting"
+    (widthLimit ready==0 && widthLimit (modifyActive (\w -> w {scrollRow=20}) offscreen)==48)
   check "keyboard caret movement deliberately returns the viewport to the caret"
     (column (fst (handleEvent (V.EvKey V.KRight []) panned))==Just 8)
   let resizing=fst (handleEvent (V.EvMouseDown 33 14 V.BLeft []) scrolling)

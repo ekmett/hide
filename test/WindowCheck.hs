@@ -21,6 +21,7 @@ import qualified Graphics.Vty as V
 checks :: IO ()
 checks = do
   sourceCoordinateChecks
+  sourceScrollChecks
   let check name ok = unless ok (error name)
   let original=newBuffer "same revision source"
       opaque=original {B.undoStack=error "redraw key forced Undo history",B.redoStack=error "redraw key forced Redo history"}
@@ -566,9 +567,8 @@ sourceCoordinateChecks=do
         (selection (win (rowEdge True True focused))==Selection p (offset row+T.length (rows !! row)))
     forM_ (zip [0..] rows) $ \(row,line)->do
       let extent=B.displayColumn line (T.length line)
-      check "source row and fallback scrollbar widths match visible flat rows"
-        (windowTextRowWidth base (win base) text row==extent &&
-         windowDocumentWidth (doc base) (win base)==maximum (documentWidth (doc base):map (\t->B.displayColumn t (T.length t)) rows))
+      check "source row width matches the explicit flat extent"
+        (windowTextRowWidth base (win base) text row==extent)
       forM_ ([0,1,7,8,max 0 (extent-1),extent,extent+1]++[1200..min 1220 extent]) $ \column->do
         let p=offset row+B.columnOffset line column
             pan=max 0 (column-3)
@@ -578,3 +578,49 @@ sourceCoordinateChecks=do
             target=if column>=extent then Nothing else Just (sourceFixtureBuffer w,B.revision buffer,p)
         check "source hit and hover share scalar offsets and reject past-row hover"
           (windowTextOffset located w text row column==p && pos (selectAt False x y located)==p && hoverTarget hovered==target)
+
+-- Cold source geometry must stop at the displayed prefix, while an explicit
+-- end seek refines and clamps immediately. The thumb receipt is only a hint:
+-- replacing a buffer at the same revision cannot cap subsequent navigation.
+sourceScrollChecks :: IO ()
+sourceScrollChecks=do
+  let check name ok=unless ok (error name)
+      body=T.replicate 1200 "a\t界e\x301\&👩🏽\x200d\&💻"<>"tail"
+      source=body<>"\r\nshort\r\n"
+      base=modifyActive (\w->w {bounds=Rect 0 1 42 8}) $
+        addDocument Nothing (newBuffer source) (initialDesktop (80,25))
+      win d=fromMaybe (error "source scrollbar window") (activeWindow d)
+      doc d=fromMaybe (error "source scrollbar document") (activeDocument d)
+      limit d=scrollbarLimit d False (doc d) (win d)
+      exact=B.displayColumn body (T.length body)-40+1
+      estimate=limit base
+      page=changeScroll False 40 base
+      arrow=changeScroll False 1 page
+      (bar,_)=fromMaybe (error "source scrollbar missing") (windowScrollbar base False (win base))
+      ended=scrollTrack False (left bar+width bar-2) (top bar) arrow
+      back=changeScroll False (-200) ended
+      sourceState d=(selection (win d),B.revision (documentBuffer (doc d)))
+  check "cold source scrollbar estimates the untouched suffix" (estimate>exact)
+  check "source scrollbar page and arrow preserve ordinary movement"
+    (scrollColumn (win page)==40 && scrollColumn (win arrow)==41)
+  check "source scrollbar end drag discovers EOF and clamps immediately"
+    (scrollColumn (win ended)==exact && limit ended==exact)
+  check "moving left retains the discovered thumb extent"
+    (scrollColumn (win back)==max 0 (exact-200) && limit back==exact)
+  check "scrolling preserves source selection, revision and original bytes"
+    (sourceState ended==sourceState base && B.contents (documentBuffer (doc ended))==source)
+  let larger=body<>T.replicate 1200 "界\t"<>"end"
+      replaced=back {buffers=M.adjust (\d->restyle d {documentBuffer=newBuffer larger})
+        (sourceFixtureBuffer (win back)) (buffers back)}
+      moved=changeScroll False 250 replaced
+      (freshBar,_)=fromMaybe (error "replacement scrollbar missing") (windowScrollbar replaced False (win replaced))
+      freshEnd=scrollTrack False (left freshBar+width freshBar-2) (top freshBar) replaced
+      freshExact=B.displayColumn larger (T.length larger)-40+1
+  check "equal-revision replacement cannot be clamped by a stale thumb hint"
+    (scrollColumn (win moved)>exact && scrollColumn (win freshEnd)==freshExact && limit freshEnd==freshExact)
+  check "layout changes preserve manual pan past a replaced source's old thumb hint"
+    (scrollColumn (win (resizeScreenMode (100,25) moved))==scrollColumn (win moved))
+  let shrunk=back {buffers=M.adjust (\d->restyle d {documentBuffer=newBuffer "short\t界\r\n"})
+        (sourceFixtureBuffer (win back)) (buffers back)}
+  check "a prospective seek clamps a shorter replacement immediately"
+    (scrollColumn (win (changeScroll False 1 shrunk))==0)

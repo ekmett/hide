@@ -19,7 +19,7 @@ import Data.IORef
 import Data.List (find, sortOn)
 import qualified Data.Text as T
 import qualified Data.Map.Strict as M
-import Hide.Buffer (BufferContent, bufferContent, contentLength, contentLineAt, contentLineOffset, contentLineCount, contentByteMode, prepareBuffer,prepareSourceWidths, Selection(..),DirtySnapshot,captureDirty,snapshotDirty)
+import Hide.Buffer (BufferContent, bufferContent, contentLength, contentLineAt, contentLineOffset, contentLineCount, contentByteMode, prepareBuffer, Selection(..),DirtySnapshot,captureDirty,snapshotDirty)
 import Hide.GuestAccess (protectedPath,protectedFilePath,protectedBuffer)
 import Hide.Files (FileState(..),loadFile)
 import Hide.Plugin.BufferHost (ContentVersion,captureVersion,versionCurrent)
@@ -211,7 +211,6 @@ navigationCommand=CommandDef "hide.messages.go-to" "Go to diagnostic source" loc
             Right (file,_) | maybe False (\paths -> protectedFilePath paths (filePath file)) authority->pure forbidden
             Right (file,buffer)->do
               _<-evaluate (prepareBuffer buffer)
-              _<-evaluate (prepareSourceWidths (bufferContent buffer))
               doc<-evaluate (newDocument buffer (Just file))
               prepare (filePath file) row col (bufferContent buffer) (Just doc)
     _->pure (Left (CommandRejected "Navigation arguments were not admitted by the host."))
