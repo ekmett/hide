@@ -54,9 +54,9 @@ checks=bracket temporary removePathForcibly $ \root->
     record<-newSessionRecord Nothing ["--",root]
     rememberSession record
     environment "THC_EDIT_SESSION" (Just (sessionId record)) $ withSidebarCommands $ \host->withConversationAt root $ \conversation->
-      withAutocomplete root $ \autocomplete->withAgentSidebar host (conversationAgents conversation) autocomplete $ \agents->do
+      withAutocomplete root $ \autocomplete->withAgentSidebar (sidebarCapabilities host) SidebarAgent (conversationAgents conversation) autocomplete $ \agents->do
         let core=autocompleteEffects autocomplete (conversationEffects conversation applyEffects)
-            tick d=tickConversation conversation d >>= tickAutocomplete autocomplete >>= tickAgentSidebar agents host >>= tickSidebar host core
+            tick d=tickConversation conversation d >>= tickAutocomplete autocomplete >>= \current->tickAgentSidebar agents >> tickSidebar host core current
             act (d,effects)=snd <$> sidebarEffects host core d effects
             hub=AR.agentHub (conversationAgents conversation)
             primary=AR.primaryAgent (conversationAgents conversation)

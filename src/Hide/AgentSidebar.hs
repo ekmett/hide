@@ -15,7 +15,7 @@ import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (withAsync)
 import Control.DeepSeq (force)
 import Control.Exception (evaluate)
-import Control.Monad (forever,foldM)
+import Control.Monad (forever)
 import Data.Aeson (Value(Null),withObject,(.:))
 import Data.Aeson.Types (parseMaybe)
 import Data.IORef
@@ -29,15 +29,14 @@ import qualified Hide.AgentHub as A
 import Hide.AgentRuntime (AgentRuntime,agentHub)
 import Hide.Autocomplete (Autocomplete,completionSummary,completionChoices)
 import Hide.AgentSidebarTypes
-import Hide.Model (Desktop)
 import qualified Hide.Plugin.Form as Form
 import Hide.Plugin.Command
 import qualified Hide.Plugin.Menu as Menu
 import qualified Hide.Plugin.Tree as P
-import Hide.SidebarCommands
+import qualified Hide.Plugin.Sidebar as Sidebar
 
 data Snapshot = Snapshot !Integer ![P.NodeId] !(M.Map A.AgentId A.AgentSummary) !(Maybe CompletionSummary)
-data AgentSidebar = AgentSidebar !P.TreeRef !(IORef Snapshot) !(IORef (Integer,[P.NodeId]))
+data AgentSidebar c r = AgentSidebar !(Sidebar.Sidebar c r) !P.TreeRef !(IORef Snapshot) !(IORef (Integer,[P.NodeId]))
 rootId :: P.NodeId
 rootId=ident "agents"
 ident :: Text -> P.NodeId
@@ -50,21 +49,21 @@ completionNodeId (CompletionTarget epoch _)=ident ("acp-completion-"<>T.pack (sh
 
 -- | Scope commands and one metadata preparation worker. Closing the view never
 -- closes agents; closing this registration rejects retained hits and commands.
-withAgentSidebar :: SidebarHost -> AgentRuntime -> Autocomplete -> (AgentSidebar -> IO a) -> IO a
-withAgentSidebar host runtime autocomplete use=withRegistry $ \registry->do
+withAgentSidebar :: Sidebar.Sidebar c r -> (AgentSidebarRequest -> r) -> AgentRuntime -> Autocomplete -> (AgentSidebar c r -> IO a) -> IO a
+withAgentSidebar host inject runtime autocomplete use=withRegistry $ \registry->do
   (initial,initialCompletion)<-prepare
   affected<-prepareParents M.empty initial
   source<-newIORef (Snapshot 1 affected initial initialCompletion)
   pending<-newIORef (0,[])
   let command name title run=registerCommand registry (CommandDef name title hidden hidden run) >>= either (ioError . userError . show) pure
-      human ctx value=if sidebarOrigin ctx==Menu.HumanMenu then pure (Right (SidebarAgent value)) else pure (Left (CommandRejected "Agent sidebar actions require the human."))
+      human ctx value=if Sidebar.sidebarOrigin host ctx==Menu.HumanMenu then pure (Right (inject value)) else pure (Left (CommandRejected "Agent sidebar actions require the human."))
   open<-command "hide.sidebar.agents.open" "Conversation" (\ctx who->human ctx (ShowAgent who))
   renameTo<-command "hide.sidebar.agents.rename-to" "Rename agent" (\ctx (who,name)->do
     let copied=T.copy name
     _<-evaluate (T.length copied)
     human ctx (RenameAgentTo who copied))
   rename<-command "hide.sidebar.agents.rename" "Rename" (\ctx who->
-    if sidebarOrigin ctx/=Menu.HumanMenu then pure (Left (CommandRejected "Agent forms require the human.")) else do
+    if Sidebar.sidebarOrigin host ctx/=Menu.HumanMenu then pure (Left (CommandRejected "Agent forms require the human.")) else do
       selected<-A.statusAgent (agentHub runtime) A.Human who
       case selected of
         Left err->pure (Left (CommandRejected err))
@@ -72,7 +71,7 @@ withAgentSidebar host runtime autocomplete use=withRegistry $ \registry->do
           let name=case parseMaybe (withObject "Agent" (.: "name")) entry of Just value->value; Nothing->A.agentIdText who
           prepared<-Form.prepareForm Form.PrivateForm (Form.InputFormSpec "Rename agent" "Name" name "Rename")
             (Form.formAction registry renameTo (\text->(who,text)) (\_ reply->pure reply))
-          pure (SidebarForm <$> prepared))
+          pure (Sidebar.formReply host <$> prepared))
   configureAgent<-command "hide.sidebar.agents.configure" "Apply agent setting"
     (\ctx (receipt,option,value)->human ctx (ConfigureAgent receipt option value))
   configureCompletion<-command "hide.sidebar.completion.configure" "Apply completion setting"
@@ -81,7 +80,7 @@ withAgentSidebar host runtime autocomplete use=withRegistry $ \registry->do
         [(ident,T.take 256 (T.map (\c->if c<' ' || c=='\DEL' then ' ' else c) label)) | (ident,label)<-options]
         (if current `elem` map fst options then current else maybe "" fst (listToMaybe options)) "Apply"
       configurationCommand category ctx who
-        | sidebarOrigin ctx/=Menu.HumanMenu=pure (Left (CommandRejected "Agent forms require the human."))
+        | Sidebar.sidebarOrigin host ctx/=Menu.HumanMenu=pure (Left (CommandRejected "Agent forms require the human."))
         | otherwise=do
             -- tickConversation keeps the primary hub advertisement current.
             -- Opening may show old metadata; final ConfigureAgent sync/currentness
@@ -91,10 +90,10 @@ withAgentSidebar host runtime autocomplete use=withRegistry $ \registry->do
               Right (receipt,choices) | [choice]<-[choice | choice<-choices,A.configCategory choice==category]->do
                 prepared<-Form.prepareForm Form.ReadableForm (choiceSpec "Agent setting" (A.configValues choice) (A.configCurrent choice))
                   (Form.formAction registry configureAgent (\value->(receipt,A.configId choice,value)) (\_ reply->pure reply))
-                pure (SidebarForm <$> prepared)
+                pure (Sidebar.formReply host <$> prepared)
               _->pure (Left (CommandRejected "The agent has not advertised these choices."))
       completionCommand category ctx target
-        | sidebarOrigin ctx/=Menu.HumanMenu=pure (Left (CommandRejected "Completion forms require the human."))
+        | Sidebar.sidebarOrigin host ctx/=Menu.HumanMenu=pure (Left (CommandRejected "Completion forms require the human."))
         | otherwise=do
             captured<-completionChoices autocomplete target category
             case captured of
@@ -102,7 +101,7 @@ withAgentSidebar host runtime autocomplete use=withRegistry $ \registry->do
               Right (receipt,option,choices,current)->do
                 prepared<-Form.prepareForm Form.ReadableForm (choiceSpec "Completion setting" choices current)
                   (Form.formAction registry configureCompletion (\value->(receipt,option,value)) (\_ reply->pure reply))
-                pure (SidebarForm <$> prepared)
+                pure (Sidebar.formReply host <$> prepared)
   model<-command "hide.sidebar.agents.model" "Model" (configurationCommand "model")
   effort<-command "hide.sidebar.agents.effort" "Effort" (configurationCommand "thought_level")
   completionOpen<-command "hide.sidebar.completion.open" "Completion conversation" (\ctx target->human ctx (ShowCompletion target))
@@ -132,7 +131,7 @@ withAgentSidebar host runtime autocomplete use=withRegistry $ \registry->do
                        nodes=[completionNode value | parent==rootId,Just value<-[completion]]++map (node values) children
                        page=take 128 (drop start nodes)
         in pure (Right (P.NodePage page (if length (drop (start+128) nodes)>0 then Just (T.pack (show (start+128))) else Nothing)))) >>= either (ioError . userError . show) pure
-  publishTreeFromHost host provider
+  Sidebar.publishTree host provider
   let worker=forever $ do
         threadDelay 250000
         (next,nextCompletion)<-prepare
@@ -140,7 +139,7 @@ withAgentSidebar host runtime autocomplete use=withRegistry $ \registry->do
         if next==previous && nextCompletion==oldCompletion then pure () else do
           affectedNodes<-prepareParents previous next
           writeIORef source (Snapshot (revision+1) affectedNodes next nextCompletion)
-  withAsync worker (const (use (AgentSidebar (P.treeReference provider) source pending)))
+  withAsync worker (const (use (AgentSidebar host (P.treeReference provider) source pending)))
   where
     hidden=Codec Null (const (Left "Agent arguments are host-captured.")) (const Null)
     prepare=do
@@ -158,11 +157,16 @@ withAgentSidebar host runtime autocomplete use=withRegistry $ \registry->do
 
 -- | /O(1)/ revision admission, then at most four scoped invalidations. Provider
 -- callbacks and metadata/history scans never run on this owner tick.
-tickAgentSidebar :: AgentSidebar -> SidebarHost -> Desktop -> IO Desktop
-tickAgentSidebar (AgentSidebar owner source ref) host d=do
+tickAgentSidebar :: AgentSidebar c r -> IO ()
+tickAgentSidebar (AgentSidebar host owner source ref)=do
   Snapshot revision changed _ _<-readIORef source
   (adopted,waiting)<-readIORef ref
   let requested=if revision==adopted then waiting else changed
-      (begin,rest)=splitAt 4 requested
-  writeIORef ref (revision,rest)
-  foldM (\current node->refreshTreeFromHost host owner node current) d begin
+  retained<-submit (4::Int) requested
+  writeIORef ref (revision,retained)
+  where
+    submit _ []=pure []
+    submit 0 pending=pure pending
+    submit budget pending@(node:rest)=do
+      accepted<-Sidebar.tryInvalidateTree host owner node
+      if accepted then submit (budget-1) rest else pure pending

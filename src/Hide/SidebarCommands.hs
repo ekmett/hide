@@ -4,7 +4,7 @@
 -- cached viewport never evaluates a provider or inspects buffer payloads.
 module Hide.SidebarCommands
   ( SidebarHost, SidebarContext(..), SidebarReply(..), withSidebarCommands
-  , sidebarRegistry, publishTreeFromHost, retireTreeFromHost, sidebarEffects
+  , sidebarRegistry, sidebarCapabilities, publishTreeFromHost, retireTreeFromHost, sidebarEffects
   , tickSidebar, refreshTreeFromHost, initializeSidebar, prepareSidebarFile, publishFormRefreshFromHost
   ) where
 
@@ -39,6 +39,7 @@ import Hide.Model
 import Hide.DebuggerSidebarTypes
 import qualified Hide.AgentHub
 import qualified Hide.Plugin.Form as Form
+import qualified Hide.Plugin.Sidebar as PluginSidebar
 import Hide.AgentSidebarTypes
 import Hide.SessionSidebarTypes
 import Hide.Sidebar
@@ -55,7 +56,7 @@ data SidebarReply = SidebarPackageDebug !PackageBuildTarget !(Either Text FilePa
 data ChildJob = ChildJob !TreeRequest !Menu.MenuOrigin !(Async (Either CommandError (P.PreparedPage SidebarContext SidebarReply))) !Bool
 data ActionJob = ActionJob ![P.TreeHit] !CommandRef !Menu.MenuOrigin !Int !(Async (Either CommandError SidebarReply)) !Bool
   | FormJob !Form.FormRef !(Async (Either CommandError SidebarReply)) !Bool
-data Publication = TreePublication !(P.TreeProvider SidebarContext SidebarReply) | FormRefresh !Form.FormUpdate
+data Publication = TreePublication !(P.TreeProvider SidebarContext SidebarReply) | FormRefresh !Form.FormUpdate | TreeInvalidation !P.TreeRef !P.NodeId
 data FilesProvider = FilesProvider !(P.TreeProvider SidebarContext SidebarReply) !FilePath !CommandRef !CommandRef !CommandRef !(IORef (M.Map P.NodeId FilePath,M.Map FilePath P.NodeId,Int,M.Map FilePath [Entry]))
 data State = State
   { providers :: !(M.Map P.TreeRef (P.TreeProvider SidebarContext SidebarReply))
@@ -75,6 +76,20 @@ data SidebarHost = SidebarHost !(Registry SidebarContext) !(IORef State)
 
 sidebarRegistry :: SidebarHost -> Registry SidebarContext
 sidebarRegistry (SidebarHost registry _ _ _ _ _)=registry
+-- | Public contribution capabilities reuse this host's ordered close-aware
+-- queue. The host retains all currentness, privacy and presentation decisions.
+sidebarCapabilities :: SidebarHost -> PluginSidebar.Sidebar SidebarContext SidebarReply
+sidebarCapabilities host=PluginSidebar.Sidebar sidebarOrigin SidebarForm
+  (publishTreeFromHost host) (publishFormRefreshFromHost host) (tryInvalidateTree host)
+
+-- Nonblocking because metadata-owner ticks call this while input is serialized.
+tryInvalidateTree :: SidebarHost -> P.TreeRef -> P.NodeId -> IO Bool
+tryInvalidateTree (SidebarHost _ _ queue _ _ closed) owner node=atomically $ do
+  stopped<-readTVar closed
+  if stopped then throwSTM (userError "Sidebar host closed.") else do
+    full<-isFullTBQueue queue
+    if full then pure False else writeTBQueue queue (TreeInvalidation owner node) >> pure True
+
 withSidebarCommands :: (SidebarHost -> IO a) -> IO a
 withSidebarCommands use=withRegistry $ \registry->bracket (acquire registry) close use
   where
@@ -314,7 +329,13 @@ enqueue (SidebarHost _ ref _ _ _ _) request origin d=case sideTree d of
     if not permitted then pure d {sideTree=Just (failRequest request "Protected sidebar target." tree)}
     else if duplicate then pure d else if length (waiting state)>=64 then pure d {sideTree=Just (failRequest request "Sidebar loader is busy; retry." tree)} else do
       writeIORef ref state {waiting=waiting state++[(request,origin)]}
-      pure d
+      -- Origin is acquired only by this permitted, nonduplicate admission.
+      -- Projection snapshots contain nodes, so a changed receipt advances revision.
+      let key=keyOf (requestHit request)
+          node=treeNodes tree M.! key
+          changed=tree {treeNodes=M.insert key node {stateLoadOrigin=Just origin} (treeNodes tree),
+            treeRevision=treeRevision tree+if stateLoadOrigin node==Just origin then 0 else 1}
+      pure d {sideTree=Just changed}
   _->pure d
 
 invokeAction :: SidebarHost -> [P.TreeHit] -> CommandRef -> Menu.MenuOrigin -> Desktop -> IO Desktop
@@ -387,6 +408,8 @@ refreshFiles host@(SidebarHost _ ref _ _ _ _) path entries d=do
 
 -- | Invalidate one expanded scoped node through the ordinary request owner.
 -- Nothing runs a provider here; closed nodes load the latest metadata on expansion.
+-- Automatic reload keeps the admitted origin. With no receipt it only invalidates;
+-- explicit expansion, startup and recovery perform their own fresh admissions.
 refreshTreeFromHost :: SidebarHost -> P.TreeRef -> P.NodeId -> Desktop -> IO Desktop
 refreshTreeFromHost host@(SidebarHost _ ref _ _ _ _) owner ident d=do
   state<-readIORef ref
@@ -395,8 +418,11 @@ refreshTreeFromHost host@(SidebarHost _ ref _ _ _ _) owner ident d=do
     Just tree | live,Just node<-M.lookup key (treeNodes tree),stateExpanded node->do
       let invalid=collapseNode (nodeHit key node) tree
           current=treeNodes invalid M.! key
-          (changed,request)=requestChildren (nodeHit key current) Nothing invalid
-      maybe (pure d) (\value->enqueue host value Menu.HumanMenu d {sideTree=Just changed,contextMenu=Nothing,contextTarget=Nothing}) request
+          cleared=d {sideTree=Just invalid,contextMenu=Nothing,contextTarget=Nothing}
+      case stateLoadOrigin node of
+        Nothing->pure cleared
+        Just origin->let (changed,request)=requestChildren (nodeHit key current) Nothing invalid
+          in maybe (pure cleared) (\value->enqueue host value origin cleared {sideTree=Just changed}) request
     _->pure d
   where key=NodeKey owner ident
 
@@ -413,6 +439,7 @@ tickSidebar host@(SidebarHost _ ref publications cancellation _ closed) core ini
     case supplied of
       Nothing->pure d
       Just (FormRefresh update)->refreshForm host update d
+      Just (TreeInvalidation owner node)->refreshTreeFromHost host owner node d
       Just (TreePublication provider)->do
         live<-P.treeCurrent provider
         registered<-readIORef ref

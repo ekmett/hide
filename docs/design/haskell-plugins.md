@@ -4,16 +4,16 @@ Status: implemented typed command registration, immutable buffer reads and check
 strict diffs, scoped menus/bindings, shared sidebar trees, prepared plugin text
 windows, fixed rows with readonly Details, and host-owned input and choice forms.
 The current APIs are in
-`Hide.Plugin.Command`, `Buffer`, `Menu`, `Tree`, `Window` and `Form`. The signatures
+`Hide.Plugin.Command`, `Buffer`, `Menu`, `Tree`, `Sidebar`, `Window` and `Form`. The signatures
 below sketch the broader proposed contracts and are not a compilable SDK. The
 approved [sidebar design](../plans/sidebar-navigation.md) supplies the navigation
 model.
 
 **Agents > Rename** and **Files > Rename** use input forms. The Agents tree’s
 **Model** and **Effort** actions use choice forms for primary, child and ACP
-completion agents. A linked
-handler prepares an `InputFormSpec` or `ChoiceFormSpec` with a typed registered
-action, then returns a `SidebarForm` through the existing sidebar worker.
+completion agents. A linked handler prepares an `InputFormSpec` or
+`ChoiceFormSpec` with a typed registered action, then embeds the form in a host
+reply through the supplied sidebar capability.
 The host owns the draft, selection, focus and modal geometry.
 
 Choices submit provider IDs, not labels or row numbers. Metadata refresh can
@@ -32,6 +32,14 @@ change that declaration. Rename forms are private. Model/effort forms expose
 already-filtered public capability labels, preserving readable agent settings
 without allowing agent input. A readable form is no authority to expose protected
 source or session keys; its owner must remove those before preparation.
+
+`Hide.Plugin.Sidebar` connects those prepared trees and forms to the session.
+Its `Sidebar c r` capability keeps the invocation context and host reply types
+opaque to the provider. The host supplies origin inspection, form replies and
+scoped publication; domain operations use a separate typed reply injection.
+`AgentSidebar` uses this boundary without importing the desktop model or its
+sidebar interpreter. Agent transports and the separate API package remain
+independent work.
 
 ## Direction
 
@@ -492,6 +500,15 @@ nodes use agent IDs; debugger nodes additionally carry stop/frame epochs.
 The current sidebar host orders tree and form metadata publications through a
 bounded queue. Closing its scope releases blocked publishers with an explicit
 error; later publications are rejected and late ticks cannot restore providers.
+Single-node invalidation is nonblocking: a full queue leaves the request with its
+caller for a later tick. The host adopts at most four publication events per tick.
+No provider callback runs during adoption.
+
+Automatic child refresh reuses the admitted load’s origin and repeats its current
+privacy checks. It never turns an agent expansion into a human request. Fresh
+loads require admission; changed resources and restored hints carry no old
+receipt. A node with no admitted origin is invalidated without an automatic
+reload. Explicit expansion can admit a new request.
 
 Child loading is asynchronous, bounded and paged. Expanding twice shares an
 in-flight request. Results match the parent's request generation before adoption;
