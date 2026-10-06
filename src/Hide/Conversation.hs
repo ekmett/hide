@@ -9,10 +9,10 @@
 -- Shared consoles are injected; retirement closes only ACP-owned terminal IDs.
 -- Tool initiation returns a desktop plus a continuation, so questions wait outside the
 -- desktop lock while the rest of the session continues.
-module Hide.Conversation (ConversationState, conversationAgents, withConversationAt, chatTools, chatToolNames, chatTool, QuestionCaller, captureQuestionCaller, chatToolAs, withConversation, conversationEffects, tickConversation, parseLaunch, renderReply, pauseLabel, renderTimestamp) where
+module Hide.Conversation (ConversationState, conversationAgents, withConversationAt, chatTools, chatToolNames, chatTool, QuestionCaller, captureQuestionCaller, chatToolAs, withConversation, conversationEffects, tickConversation, conversationBodyRequests, adoptConversationBodies, parseLaunch, renderReply, pauseLabel, renderTimestamp) where
 
 import Hide.Sidebar
-import Hide.ConversationBody (Record(..),ToolExpansion(..),QuestionProjection(..))
+import Hide.ConversationBody
 import Hide.SessionServices (persist)
 import Prelude hiding (reads)
 import Control.Exception (IOException, bracket, try, onException, mask, mask_, evaluate)
@@ -35,7 +35,7 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
 import Data.Time (UTCTime, TimeZone, getCurrentTime, getCurrentTimeZone, diffUTCTime, utcToLocalTime, formatTime, defaultTimeLocale)
 import Data.IORef
-import Data.List (mapAccumL,find, sortOn)
+import Data.List (find, sortOn)
 import qualified Data.Map.Strict as M
 import qualified Data.Set as S
 import Data.Maybe (fromMaybe, mapMaybe, isNothing)
@@ -61,14 +61,16 @@ import Hide.Session (checkpointPath)
 import Hide.AgentFiles
 import Hide.Buffer
 import Hide.Plugin.BufferHost (versionCurrent)
-import Hide.Markdown (renderMarkdownWithShellBlocks)
 import Hide.AgentSidebarTypes
 import Hide.Model hiding (prompt)
 import qualified Hide.Plugin.EditorHost as Editor
 import qualified Hide.Plugin.Command as Command
-import Hide.PluginWindowHost (installEditorDraft,applyEditorUpdate)
+import Hide.PluginWindowHost (installEditorDraft,applyEditorUpdate,adoptWindowUpdate)
+import qualified Hide.Plugin.Window as W
+import qualified Data.Vector as V
+import qualified Hide.TextLayout as Layout
 import System.Environment (lookupEnv)
-import Hide.Syntax (linkSpans,Style(..), bubbleTile)
+import Hide.Syntax (Style(..))
 
 -- One configured stdio provider; its protocol supplies models and tools.
 data Phase = Initializing (Maybe Text) | Starting (Maybe Text) | Prompting | Steering Text (Maybe DraftReceipt) | Setting deriving Eq
@@ -117,7 +119,7 @@ data State = State
   , ownedTerminals :: S.Set Text
   , terminalWaiters :: M.Map Text [Value]
   , lastMessageAt :: Maybe UTCTime
-  , lastRender :: Maybe (Int,Bool,Maybe Text,StableName [Record]), lastSession :: Maybe (A.Launch,FilePath,Text)
+  , lastSession :: Maybe (A.Launch,FilePath,Text)
   , waitingQuestion :: Maybe QuestionTicket, questionResults :: M.Map Int QuestionResult, questionsClosed :: Bool, lastQuestion :: Maybe Int, lastQuestionInteraction :: Maybe (StableName ChatQuestion)
   , deliveredContext :: Maybe Value
   , directoryAgents :: [AH.AgentId]
@@ -125,7 +127,7 @@ data State = State
   , agentInitialized :: Value, agentConfig :: Value
   , streamTails :: M.Map Text Text
   , lastAgentSync :: Maybe (FilePath,Text,AH.Capabilities,Bool)
-  , childRecords :: M.Map Text [Record], childRender :: Maybe (Text,Int,Value), childWidths :: M.Map Text Int
+  , childRecords :: M.Map Text [Record], childRender :: Maybe (Text,Int,Value)
   , toolExpansions :: S.Set (Text,ToolExpansion)
   , childControls :: M.Map Text (Maybe DraftReceipt,Async (Either Text ()))
   , childCancels :: M.Map Text (Async (Either Text ()))
@@ -135,6 +137,7 @@ data State = State
   , editorRegistry :: Command.Registry ChatEditorContext
   , editorCommand :: Command.Command ChatEditorContext (Editor.DraftSubmission,Bool) ChatInput
   , conversationEditors :: IORef (M.Map Text (Editor.PreparedEditor ChatEditorContext ChatInput))
+  , bodyScope :: !W.WindowScope, loadingBody :: !W.PreparedWindow
   , resumeRecordPath :: FilePath
   }
 -- | Provider/transcript ownership with injected session consoles.
@@ -151,7 +154,9 @@ withConversation consoles action = getCurrentDirectory >>= \root -> withConversa
 
 -- | Load conversation configuration and scope only provider and agent workers.
 withConversationAt :: C.Consoles -> FilePath -> (ConversationState -> IO a) -> IO a
-withConversationAt consoles root action = Command.withRegistry $ \registry->do
+withConversationAt consoles root action = W.withWindowScope $ \scope->Command.withRegistry $ \registry->do
+  loading<-W.prepareSemanticTextWindow "Conversation" (map (,Comment) (T.unpack "Preparing conversation…"))
+    (W.TextSemantics (W.CopyMessages W.UserBotAttribution) (Just root) V.empty V.empty W.ReadableWindow V.empty V.empty V.empty) >>= either (ioError . userError . T.unpack) pure
   command<-Command.registerCommand registry chatEditorCommand >>= either (ioError . userError . show) pure
   directory<-getXdgDirectory XdgConfig "thc-edit"
   loaded<-try (BS.readFile (directory </> "agents.json")) :: IO (Either IOException BS.ByteString)
@@ -167,9 +172,9 @@ withConversationAt consoles root action = Command.withRegistry $ \registry->do
     , pending=M.empty,queuedPrompt=Nothing,transcript=[],reads=M.empty
     , approvals=[],presented=Nothing,deferredApproval=False,nextApproval=1,queuedQueries=[]
     , ownedTerminals=S.empty,terminalWaiters=M.empty,lastMessageAt=Nothing
-    , lastRender=Nothing,lastSession=remembered,waitingQuestion=Nothing,questionResults=M.empty,questionsClosed=False,lastQuestion=Nothing,lastQuestionInteraction=Nothing
+    , lastSession=remembered,waitingQuestion=Nothing,questionResults=M.empty,questionsClosed=False,lastQuestion=Nothing,lastQuestionInteraction=Nothing
     , deliveredContext=Nothing,fileCaptures=[],retiringRequests=[],promptPreparation=Nothing,resumeRecordPath=resumePath,creatingAgent=Nothing,directoryAgents=[],agentDelivery=Nothing
-    , agentInitialized=Null,agentConfig=Null,streamTails=M.empty,lastAgentSync=Nothing,childRecords=M.empty,childRender=Nothing,childWidths=M.empty,childCancels=M.empty,childControls=M.empty,toolExpansions=S.empty,editorRegistry=registry,editorCommand=command,conversationEditors=editors }
+    , agentInitialized=Null,agentConfig=Null,streamTails=M.empty,lastAgentSync=Nothing,childRecords=M.empty,childRender=Nothing,childCancels=M.empty,childControls=M.empty,toolExpansions=S.empty,editorRegistry=registry,editorCommand=command,conversationEditors=editors,bodyScope=scope,loadingBody=loading }
   AR.withAgentRuntime root (provider <$> readIORef ref) $ \agents ->
     bracket (pure (ConversationState directory ref consoles agents)) closeConversation action
 
@@ -404,13 +409,7 @@ performPrimary runtime@(ConversationState directory ref consoles _) action value
       modifyIORef' ref (\state -> state {deferredApproval=False})
       -- A recovered transcript belongs to the checkpoint until a provider
       -- connects. Opening its window must not repaint it from empty state.
-      let recoveredWindow=do
-            (bid,_)<-find ((==Just "Conversation") . documentLabel . snd) (M.toList (buffers d))
-            find ((==Just bid) . bufferId) (windows d)
-      case recoveredWindow of
-        Just win | isNothing (connection s), null (transcript s), isNothing (chatQuestion d) ->
-          pure (focusComposer (focusWindow (windowId win) d))
-        _ -> paint True s d
+      ensureEditorWithState True s "" "Primary" d
     ("set-config",[ident,value])
       | busy s -> pure d {status="Wait for the current reply before changing its model."}
       | Just client<-connection s, Just sid<-session s,
@@ -627,34 +626,83 @@ tickConversation runtime@(ConversationState _ ref _ _) original = do
 -- before returning that desktop, so its bubbles and composer use the same bounds.
 -- The immutable transcript key keeps mouse motion and idle ticks parse-free.
 refreshConversationLayout :: ConversationState -> Desktop -> IO Desktop
-refreshConversationLayout runtime@(ConversationState _ ref _ _) original = do
+refreshConversationLayout runtime original=revealQuestion runtime original
+
+-- Capture only immutable roots and small presentation/lifetime receipts. Every
+-- installed target owns one payload; closed inert snapshots are not scheduled.
+conversationBodyRequests :: ConversationState -> Desktop -> IO [BodyRequest]
+conversationBodyRequests (ConversationState _ ref _ agents) desktop=do
   state<-readIORef ref
-  transcriptIdentity<-makeStableName =<< evaluate (transcript state)
-  let questionKey=questionToken <$> chatQuestion original
-      widthNow=conversationWidthFor "" original
-      renderKey=(widthNow,videoMode original/=Nothing,session state,transcriptIdentity)
-      -- A recovered view has no raw transcript owned by this runtime yet.
-      ownsView=not (isNothing (connection state)) || not (null (transcript state)) || not (isNothing questionKey) || not (isNothing (lastQuestion state))
-      redraw=ownsView && (lastRender state/=Just renderKey || lastQuestion state/=questionKey)
-  primary<-if redraw then paint False state original else pure original
-  when redraw (modifyIORef' ref (\current -> current {lastRender=Just renderKey,lastQuestion=questionKey}))
-  -- Cached children can remain visible beside the selected conversation. Their
-  -- geometry is independent, and reflow needs no provider/history round trip.
-  revealed<-revealQuestion runtime primary
-  foldM (reflowChild state) revealed (M.toList (childRecords state))
+  launch<-makeStableName =<< evaluate (provider state)
+  sessionName<-traverse evaluate (session state)
+  primary<-traverse (\client->do
+    ident<-makeStableName =<< evaluate client
+    evaluate (ident,sessionName)) (connection state)
+  expansion<-makeStableName =<< evaluate (toolExpansions state)
+  fmap concat $ forM (M.toList (conversationViews desktop)) $ \(target,view)->case conversationBodyRef view of
+    Nothing->pure []
+    Just reference->do
+      live<-W.windowRefCurrent reference
+      let question=if T.null target then chatQuestion desktop else Nothing
+          records=if T.null target then transcript state else M.findWithDefault [] target (childRecords state)
+          owns=if T.null target then not (isNothing (connection state)) || not (null records) || not (isNothing question) || not (isNothing (lastQuestion state)) else M.member target (childRecords state)
+      captured<-if T.null target then pure (Just (PrimaryBodyProvider launch primary)) else fmap (either (const Nothing) (Just.ChildBodyProvider.fst)) (AH.agentConfiguration (AR.agentHub agents) (AH.AgentId target))
+      schema<-traverse (\q->evaluate (QuestionSchema (questionToken q) (questionText q) (questionChoices q))) question
+      -- Retain the pending question lifetime until a question-free body is
+      -- adopted, even if cancellation races its first preparation.
+      case schema of
+        Just (QuestionSchema token _ _) | live->modifyIORef' ref (\current->current {lastQuestion=Just token})
+        _->pure ()
+      identity<-makeStableName =<< evaluate records
+      pure $ case captured of
+        Just owner | live && owns->[BodyRequest (BodyKey reference target owner identity (case schema of Just (QuestionSchema token _ _)->Just token; Nothing->Nothing) (conversationWidthFor target desktop) (videoMode desktop/=Nothing) (wideSectionTitles desktop) expansion)
+          (BodyInput (if T.null target then "Conversation" else conversationName view) (project state) sessionName records
+            schema (toolExpansions state))]
+        _->[]
+
+-- Completed streaming text may trail the latest root while the single worker
+-- prepares its successor. Owner/question/UI expansion identities remain exact.
+adoptConversationBodies :: ConversationState -> [BodyResult] -> Desktop -> IO Desktop
+adoptConversationBodies runtime results desktop=do
+  desired<-conversationBodyRequests runtime desktop
+  foldM (adopt desired) desktop results
   where
-    reflowChild state desktop (target,records) =
-      case conversationDocument target desktop of
-        Just (bid,_) | any ((==Just bid) . bufferId) (windows desktop),
-            let columns=conversationWidthFor target desktop,
-            M.lookup target (childWidths state)/=Just columns -> do
-          modifyIORef' ref (\current->current
-            { childWidths=M.insert target columns (childWidths current)
-            , childRender=case childRender current of
-                Just (shown,_,entry) | shown==target -> Just (shown,columns,entry)
-                other -> other })
-          paintView target False state {transcript=records} desktop
-        _ -> pure desktop
+    adopt desired current (BodyResult key result)=case [wanted | BodyRequest wanted _<-desired,bodyOwnerMatches key wanted] of
+      []->pure current
+      _->case result of
+        Left err->pure current {status=err}
+        Right (PreparedBody body layout controls)->do
+          update<-W.refreshTextWindow (bodyWindow key) body
+          case update of
+            Nothing->pure current
+            Just prepared->do
+              next<-adoptWindowUpdate Plugin.HumanMenu prepared current
+              if M.lookup (bodyWindow key) (pluginWindows next)/=Just body then pure current else do
+                let target=bodyTarget key
+                    before=M.lookup (bodyWindow key) (pluginWindows current)
+                    extent=contentLength (W.preparedWindowText body)
+                    boundSelection (Selection a z)=Selection (max 0 (min extent a)) (max 0 (min extent z))
+                    count=maybe (contentLineCount (W.preparedWindowText body)) (V.length.Layout.layoutRows) layout
+                    adjust window | windowContent window/=PluginContent (bodyWindow key)=window
+                                  | otherwise=let old=fromMaybe window (find ((==windowId window).windowId) (windows current))
+                                                  rows=max 1 (pluginBodyRows next window)
+                                                  previous=maybe 0 (\prepared->windowTextRows current old (W.preparedWindowText prepared)) before
+                                                  atEnd=scrollRow old>=max 0 (previous-rows)
+                                              in window {scrollRow=if atEnd then max 0 (count-rows) else min (scrollRow old) (max 0 (count-rows))}
+                    frames=map adjust (windows next)
+                    retain view=let visible=find ((==PluginContent (bodyWindow key)).windowContent) frames
+                                    (row,column)=conversationScroll view
+                                in view {conversationBody=InstalledBody (bodyWindow key) (Just (BodyControlReceipt body (bodyColumns key) (bodyWide key) layout controls)),
+                                  conversationReplySelection=boundSelection (maybe (conversationReplySelection view) selection visible),
+                                  conversationScroll=maybe (max 0 (min row (max 0 (count-1))),column) (\w->(scrollRow w,scrollColumn w)) visible}
+                    presented=next {conversationViews=M.adjust retain target (conversationViews next),windows=frames}
+                let previousQuestion=do
+                      view<-M.lookup target (conversationViews current)
+                      InstalledBody _ (Just (BodyControlReceipt _ _ _ _ oldControls))<-pure (conversationBody view)
+                      projectedQuestionToken <$> hostBodyQuestion oldControls
+                    next=presented
+                when (T.null target) (modifyIORef' (case runtime of ConversationState _ owner _ _->owner) (\state->state {lastQuestion=bodyQuestionToken key}))
+                pure (if previousQuestion/=bodyQuestionToken key then ensureQuestionVisible next else next)
 
 receive :: ConversationState -> Desktop -> A.Event -> IO Desktop
 receive runtime@(ConversationState _ ref consoles _) d event = do
@@ -786,9 +834,6 @@ pauseLabel previous now zone = case previous of
 stampReply :: UTCTime -> TimeZone -> State -> State
 stampReply now zone s = s {lastMessageAt=Just now,
   transcript=transcript s++maybe [] (\label -> [Pause label]) (pauseLabel (lastMessageAt s) now zone)}
-
-renderTimestamp :: Int -> Text -> [(Char,Style)]
-renderTimestamp width label = map (,Comment) (T.unpack (T.replicate (max 0 ((width-T.length label) `div` 2)) " "<>T.take (max 0 width) label))
 
 -- Tool records never pass through the Markdown parser.
 appendChunk :: Text -> Text -> [Record] -> [Record]
@@ -1032,14 +1077,9 @@ dismissPermission d=case dialog d of
 keepConversationPosition :: Desktop -> Desktop -> Desktop
 keepConversationPosition before after=after {windows=map keep (windows after)}
   where
-    keep w=case (find ((==windowId w).windowId) (windows before),windowDocument (buffers after) w) of
-      (Just old,Just doc) | documentLabel doc==Just "Conversation" -> w {scrollRow=min (scrollRow old) (scrollbarLimit after True doc w),scrollColumn=0,selection=Selection 0 0}
+    keep w=case find ((==windowId w).windowId) (windows before) of
+      Just old | conversationTargetFor after w/=Nothing -> w {scrollRow=scrollRow old,scrollColumn=0,selection=Selection 0 0}
       _ -> w
-
-isToolRecord :: Record -> Bool
-isToolRecord (Activity _ value _)=field "status" value `elem`
-  [Just ("pending"::Text),Just "in_progress",Just "completed",Just "failed"]
-isToolRecord _=False
 
 -- Prompt and choices are immutable for the authenticated question token.
 -- Only immutable question identity asks for a local reveal; idle ticks preserve
@@ -1058,162 +1098,9 @@ paint :: Bool -> State -> Desktop -> IO Desktop
 paint=paintView ""
 
 paintView :: Text -> Bool -> State -> Desktop -> IO Desktop
-paintView target force s original
-  | not force && isNothing (conversationDocument target base) = pure original
-  | otherwise = do
-    let shown=target==conversationTarget original &&
-          (isNothing (conversationDocument target base) || any (\w->maybe False (\(bid,_)->bufferId w==Just bid) (conversationDocument target base)) (windows base))
-    prepared<-ensureEditorWithState shown s target (if T.null target then "Primary" else target) base
-    pure $ let
-      d=prepared
-      width=conversationWidthFor target d
-      header=if T.null target then "Session: "<>fromMaybe "not connected" (session s)<>"\n" else "No messages yet.\n"
-      records=zip [0..] (transcript s)
-      chunks=if null records then [(plain Comment header,Nothing,[]) | isNothing (chatQuestion d)] else renderRecords width records
-      questionChunks=maybe [] (renderQuestion width (length records)) (chatQuestion d)
-      allChunks=chunks++[ (plain Plain "\n\n",Nothing,[]) | not (null chunks) && not (null questionChunks)]++questionChunks
-      styled=concatMap (\(cells,_,_)->cells) allChunks
-      (_,shellBlocks)=foldl (\(offset,found) (cells,_,blocks)->(offset+length cells,found++[(offset+a,offset+b,dialect,body) | (a,b,dialect,body)<-blocks])) (0,[]) allChunks
-      (_,actions)=foldl (\(offset,found) (cells,action,_)->(offset+length cells,found++maybe [] (\(name,values)->[(offset,offset+length cells,name,values)]) action)) (0,[]) allChunks
-      inputOffset=case [a+7 | (a,_,action,_)<-actions,action=="question-input"] of offset:_->Just offset; _->Nothing
-      text=T.pack (map fst styled)
-      questionProjection=do
-        q<-chatQuestion d
-        input<-inputOffset
-        let starts index label=case [a | (a,_,action,values)<-actions,action=="question-choice",values==[T.pack (show (questionToken q)),T.pack (show index)]] of
-              first:_->snd (mapAccumL (\offset line->(offset+T.length line+1,offset)) first
-                (T.splitOn "\n" (questionChoiceLines width False label)))
-              _->[]
-        pure (QuestionProjection (questionToken q) width input
-          [starts index label | (index,label)<-zip [0::Int ..] (questionChoices q)])
-      existing=conversationDocument target d
-      opened=case existing of
-        Nothing -> let added=addConversationDocument d in added {buffers=M.adjust (\doc->restyle doc {documentBuffer=newBuffer text}) (nextId d) (buffers added)}
-        Just (existingId,_) -> d {buffers=M.adjust (\doc->restyle doc {documentBuffer=(newBuffer text) {revision=revision (documentBuffer doc)+1}}) existingId (buffers d)}
-      bid=maybe (nextId d) fst existing
-      adjust w | bufferId w/=Just bid = w
-               | otherwise =
-                   let rows=max 1 (windowContentRows opened (fromMaybe (newDocument (newBuffer "") Nothing) (M.lookup bid (buffers opened))) w)
-                       oldLines=maybe 0 (bufferLineCount . documentBuffer . snd) existing
-                       newLines=length (T.splitOn "\n" text)
-                       atEnd=scrollRow w>=max 0 (oldLines-rows)
-                       bounded n=max 0 (min (T.length text) n)
-                       previousRow=if atEnd then max 0 (newLines-rows) else min (max 0 (newLines-rows)) (scrollRow w)
-                   in w {scrollRow=previousRow,
-                         selection=Selection (bounded (anchor (selection w))) (bounded (caret (selection w)))}
-      visible=target==conversationTarget original
-      view=fromMaybe (error "Conversation editor was not prepared") (M.lookup target (conversationViews opened))
-      -- Generated Markdown admission is checked by the presentation worker;
-      -- never scan the styled transcript while adopting it on the UI owner.
-      colored=opened {conversationViews=M.insert target view {conversationBufferId=bid,conversationReplySelection=let Selection a c=conversationReplySelection view in Selection (min (T.length text) a) (min (T.length text) c)} (conversationViews opened),chatQuestion=chatQuestion original,chatActions=if visible then actions else chatActions original,buffers=M.adjust (\doc -> doc {documentHighlight=styled,documentHasLayoutMetadata=False,documentCursorVisible=False,documentLinks=linkSpans styled,documentMarkdownPath=Just (project s </> "conversation.md"),documentShellBlocks=shellBlocks,documentQuestionProjection=questionProjection}) bid (buffers opened),windows=map adjust (windows opened)}
-      focused=case find ((==Just bid) . bufferId) (windows colored) of Just w | force && visible -> focusComposer (focusWindow (windowId w) colored); _ -> colored
-      -- Force the bounded numeric receipt before installing it; its closures
-      -- must not retain the former live answer/Undo through ChatQuestion.
-      in maybe () (\projection->foldr (\row done->foldr seq done row) ()
-           (projectedQuestionChoices projection)) questionProjection `seq`
-         if (questionToken <$> chatQuestion focused)/=lastQuestion s then ensureQuestionVisible focused else focused
-  where
-    base=if T.null target && T.null (conversationTarget original) then original else original {chatQuestion=Nothing}
-    plain style=map (,style).T.unpack
-    renderRecords _ []=[]
-    renderRecords width rows@(record:rest)
-      | (calls@(_:_:_),after)<-span (isToolRecord.snd) rows = renderRun width calls++continue (last calls) after
-      | otherwise = renderRecord width record++continue record rest
-      where
-        continue _ []=[]
-        continue previous remaining@(next:_)=
-          [(plain Plain (if sameSpeaker (snd previous) (snd next) then "\n" else "\n\n"),Nothing,[])]++renderRecords width remaining
-    renderRun width calls=case calls of
-      (_,Activity ident _ _):_ ->
-        let expanded=S.member (target,RunExpansion ident) (toolExpansions s)
-            titles=[fromMaybe label (field "title" value) | (_,Activity label value _)<-calls]
-            running=length [() | (_,Activity _ value _)<-calls,field "status" value `elem` [Just ("pending"::Text),Just "in_progress"]]
-            failed=length [() | (_,Activity _ value _)<-calls,field "status" value==Just ("failed"::Text)]
-            count n label=[T.pack (show n)<>label | n>0]
-            summary=T.intercalate " · " (T.pack (show (length calls))<>" tool calls":count running " running"++count failed " failed"++[T.intercalate ", " (take 3 titles)])
-            heading=clipCells width ((if expanded then "▾▾ " else "▸▸ ")<>T.unwords (T.words summary))
-        in [(plain Pragma heading,Just ("toggle-tool-run",[ident]),[])]++
-           (if expanded then concatMap (\call->(plain Plain "\n  ",Nothing,[]):renderRecord (max 1 (width-2)) call) calls else [])
-      _ -> []
-    sameSpeaker (Reply a _) (Reply b _)=a==b
-    sameSpeaker _ _=False
-    renderRecord width (recordId,record)=case record of
-      Pause label -> [(renderTimestamp width label,Nothing,[])]
-      Reply role text -> [replyChunk width recordId (role=="You") text]
-      Activity ident value history ->
-        let expanded=S.member (target,ActivityExpansion ident) (toolExpansions s)
-            title=T.unwords (T.words ("["<>fromMaybe "activity" (field "status" value)<>"] "<>fromMaybe ident (field "title" value)))
-            heading=(if expanded then "▾ " else "▸ ")<>clipCells (max 1 (width-2)) title
-        in [(plain Pragma heading,Just ("toggle-activity",[ident]),[])]++
-          [(plain Plain ("\n"<>T.intercalate "\n" (map jsonText history)),Nothing,[]) | expanded]
-    renderQuestion width recordId q=
-      [replyChunk width recordId False (questionText q)]++
-      concat [[(plain Plain "\n",Nothing,[]),(plain Plain
-        (questionChoiceLines width False text),Just ("question-choice",[token,T.pack (show index)]),[])] | (index,text)<-zip [0::Int ..] (questionChoices q)]++
-      [(plain Plain "\n",Nothing,[]),(plain Plain
-        ("Other: "<>T.replicate (max 1 (width-8)+1) " "),Just ("question-input",[token]),[]),
-       (plain Plain "\n",Nothing,[]),(plain Keyword "[Submit answer]",Just ("question-submit",[token]),[]),
-       (plain Plain "  ",Nothing,[]),(plain Comment "[Cancel]",Just ("question-cancel",[token]),[])]
-      where token=T.pack (show (questionToken q))
-
-    replyChunk width recordId outgoing text =
-      let (cells,blocks)=renderReplyWithShellBlocks (videoMode original/=Nothing) width outgoing text
-      in (map (\(c,style)->(c,case style of BubbleText _ sent base->BubbleText recordId sent base; _->style)) cells,Nothing,blocks)
-
-clipCells :: Int -> Text -> Text
-clipCells count text=T.take (columnOffset text (max 0 count)) text
-
-
--- | Lay out Markdown as styled response-bubble characters for the chosen frontend.
-renderReply :: Bool -> Int -> Bool -> Text -> [(Char,Style)]
-renderReply graphical width outgoing = fst . renderReplyWithShellBlocks graphical width outgoing
-
-renderReplyWithShellBlocks :: Bool -> Int -> Bool -> Text -> ([(Char,Style)],[(Int,Int,Text,Text)])
-renderReplyWithShellBlocks graphical requested outgoing text
-  | width<6 = (recolor markdown,blocks)
-  | otherwise = (concat rendered,[(position blockStart,position blockEnd,dialect,body) | (blockStart,blockEnd,dialect,body)<-blocks])
-  where
-    width=max 1 requested
-    (markdown,blocks)=renderMarkdownWithShellBlocks (if width<6 then width else width-5) text
-    contentRows=splitRows (recolor markdown)
-    rendered=zipWith renderLine [0::Int ..] rows
-    -- Every source cell survives bubble decoration; only row prefixes change.
-    position offset =
-      let (row,column)=lineColumn (T.pack (map fst markdown)) offset
-          renderedRow=row+if leadingCode then 1 else 0
-          prefix=if outgoing then max 0 (width-bubbleWidth-3)+1 else 2
-      in sum (map length (take renderedRow rendered)) + (if renderedRow>0 then 1 else 0) + prefix + column
-    codeRow=any (\(_,style)->case style of BubbleText _ _ (CodeStyle _ _)->True; _->False)
-    leadingCode=case contentRows of first:_->codeRow first; []->False
-    trailingCode=case reverse contentRows of lastRow:_->codeRow lastRow; []->False
-    rows=[[] | leadingCode]++contentRows++[[] | trailingCode]
-    columns chars=let t=T.pack (map fst chars) in displayColumn t (T.length t)
-    bubbleWidth=maximum (0:map columns rows)
-    background=BubbleStyle outgoing Plain
-    edge=TerminalStyle (if outgoing then 0x00aaaa else 0xaaaaaa) 0x0000aa 0
-    recolor=map (\(c,style)->(c,BubbleText 0 outgoing style))
-    spaces style n=replicate (max 0 n) (' ',style)
-    tile n=(bubbleTile graphical n,edge)
-    side first lastRow leftSide
-      | first && lastRow = if leftSide then if outgoing then tile 4 else tile 2
-                                            else if outgoing then tile 3 else tile 5
-      | first = if leftSide then if outgoing then tile 0 else (' ',background)
-                             else if outgoing then (' ',background) else tile 1
-      | lastRow = tile (if leftSide then 2 else 3)
-      | otherwise = (' ',background)
-    lastIndex=length rows-1
-    -- Margins belong to the bubble, never to copied text or shell-block spans.
-    renderLine i chars =
-      [('\n',if (leadingCode && i==1) || (trailingCode && i==lastIndex) then background else BubbleText 0 outgoing Plain) | i>0] ++ line i chars
-    line i chars =
-      let first=i==0; lastRow=i==lastIndex
-          body=side first lastRow True:chars++spaces background (bubbleWidth-columns chars)++[side first lastRow False]
-          tailCell=if first then tile (if outgoing then 7 else 6) else (' ',Plain)
-      in if outgoing then spaces Plain (width-bubbleWidth-3)++body++[tailCell]
-                     else tailCell:body
-    splitRows chars=case break ((=='\n').fst) chars of
-      (row,[]) -> [row]
-      (row,_:rest) -> row:splitRows rest
+paintView target opening state desktop
+  | not opening && M.notMember target (conversationViews desktop)=pure desktop
+  | otherwise=ensureEditorWithState opening state target (if T.null target then "Primary" else target) desktop
 
 publicAgentSettings :: ConversationState -> Value -> IO [AgentSetting]
 publicAgentSettings runtime@(ConversationState _ ref _ _) value=do
@@ -1300,8 +1187,8 @@ conversationWidthFor target d = max 1 $ case matching++available of
   w:_ -> width (bounds w)-2
   [] -> fst (screenSize d)-treeWidthOf d-4
   where
-    matching=[w | Just (bid,_)<-[conversationDocument target d],w<-windows d,bufferId w==Just (bid)]
-    available=[w | w<-windows d,Just doc<-[windowDocument (buffers d) w],documentLabel doc==Just "Conversation"]
+    matching=[w | w<-windows d,conversationTargetFor d w==Just target]
+    available=[w | w<-windows d,maybe False (const True) (conversationTargetFor d w)]
 
 chatToolNames :: [Text]
 chatToolNames=["ask_user","agent_settings"]
@@ -1545,7 +1432,7 @@ showAgentHistory runtime@(ConversationState _ ref _ agents) ident d=do
       -- Remove transient question rendering before its document becomes hidden;
       -- the private answer remains in chatQuestion and returns with Primary.
       primary<-if isNothing (chatQuestion d) then pure d else paint False state d {chatQuestion=Nothing}
-      withPrimary<-if isNothing (conversationDocument "" primary) then paint True state primary else pure primary
+      withPrimary<-if M.notMember "" (conversationViews primary) then paint True state primary else pure primary
       let target=AH.agentIdText ident
           name=fromMaybe target (field "name" entry)
       prepared<-ensureConversationEditor runtime target name withPrimary
@@ -1571,7 +1458,7 @@ performChild runtime@(ConversationState _ ref _ agents) action values d=do
         worker<-async (AH.cancelAgent hub AH.Human ident)
         modifyIORef' ref (\s->s {childCancels=M.insert target worker (childCancels s),queuedQueries=filter ((/=target).queryTarget) (queuedQueries s)})
         pure d {status="Cancellation requested."}
-    "copy" -> pure d {clipboardCode=Nothing,clipboard=if M.member target (childRecords state) then rawTranscript records else maybe "" (contents.documentBuffer.snd) (conversationDocument target d),status="Conversation copied with sender attribution."}
+    "copy" -> pure d {clipboardCode=Nothing,clipboard=if M.member target (childRecords state) then rawTranscript records else maybe "" (\body->W.copyPreparedSelection body 0 (contentLength (W.preparedWindowText body))) (conversationBodySnapshot target d),status="Conversation copied with sender attribution."}
     "toggle-activity" | [activityId]<-values -> do
       let next=toggleExpansion target (ActivityExpansion activityId) state
       writeIORef ref next
@@ -1643,7 +1530,7 @@ refreshChildConversation (ConversationState _ ref _ agents) d=do
         -- until a live/reconnected child owns its transcript again.
         let frozen=M.notMember target (childRecords current) &&
               field "status" entry `elem` [Just ("recovered"::Text),Just "ended"] &&
-              maybe False (not . T.null . contents . documentBuffer . snd) (conversationDocument target projected)
+              maybe False ((>0).contentLength.W.preparedWindowText) (conversationBodySnapshot target projected)
         if frozen || childRender current==Just signature then pure projected else do
           history<-recentChildHistory hub (AH.AgentId target) (fromMaybe 1 (field "nextEvent" entry))
           case history of
@@ -1655,7 +1542,7 @@ refreshChildConversation (ConversationState _ ref _ agents) d=do
                   metadata=T.intercalate " · " ([fromMaybe "" (field "status" entry)]++
                     maybe [] (\parent->["parent: "<>parent]) (field "parentName" entry)++models++["recent history" | trimmed])
                   records=Pause metadata:foldl (childHistoryRecord name) [] events
-              modifyIORef' ref (\s->s {childRecords=M.insert target records (childRecords s),childRender=Just signature,childWidths=M.insert target (conversationWidthFor target projected) (childWidths s)})
+              modifyIORef' ref (\s->s {childRecords=M.insert target records (childRecords s),childRender=Just signature})
               paintView target False current {transcript=records} projected
 
 -- The Hub caps each page by bytes as well as count. Follow pages within the
@@ -1756,39 +1643,60 @@ ensureConversationEditor (ConversationState _ ref _ _) target name d=readIORef r
 -- Recovery transfers its existing root directly. Installation drops the seed
 -- from the callable binding, leaving precisely one editable Buffer owner.
 ensureEditorWithState :: Bool -> State -> Text -> Text -> Desktop -> IO Desktop
-ensureEditorWithState opening s target name original=do
+ensureEditorWithState opening state target name original=do
   let found=M.lookup target (conversationViews original)
   draftRef<-maybe Editor.newDraftRef (pure.conversationDraftRef) found
   let initial=fromMaybe (EditorDraft (newBuffer "") (Selection 0 0) True Nothing) (M.lookup draftRef (editorDrafts original))
-      existing=conversationDocument target original
-      added=case existing of
-        Just _->original
-        Nothing->let next=addConversationDocument original in
-          if any (maybe False ((==Just "Conversation").documentLabel).windowDocument (buffers original)) (windows original)
-            then next {windows=windows original} else next
-      bid=maybe (nextId original) fst existing
-      view=maybe (ConversationView bid name draftRef Nothing Nothing (0,0) (Selection 0 0)) (\old->old {conversationName=name}) found
-      seeded=added {conversationViews=M.insert target view (conversationViews added),editorDrafts=M.insert draftRef initial (editorDrafts added)}
-  retained<-readIORef (conversationEditors s)
+      body=fromMaybe (loadingBody state) (conversationBodySnapshot target original)
+      view=maybe (ConversationView (InertBody body) name draftRef Nothing Nothing (0,0) (Selection 0 0)) (\old->old {conversationName=name}) found
+      seeded=original {conversationViews=M.insert target view (conversationViews original),editorDrafts=M.insert draftRef initial (editorDrafts original)}
+  retained<-readIORef (conversationEditors state)
   binding<-case M.lookup target retained of
     Just editor | Editor.mountDraft (Editor.editorMount editor)==draftRef->pure editor
     _->do
-      let action steering=Editor.editorAction (editorRegistry s) (editorCommand s) (\submitted->Right (submitted,steering)) (\_ value->pure value)
-      prepared<-Editor.prepareEditorBuffer draftRef (Editor.EditorSpec True "Query" "Steer") (editorDraftBuffer initial) (action False) (action True)
-      either (ioError . userError . show) pure prepared
+      let action steering=Editor.editorAction (editorRegistry state) (editorCommand state) (\submitted->Right (submitted,steering)) (\_ value->pure value)
+      Editor.prepareEditorBuffer draftRef (Editor.EditorSpec True "Query" "Steer") (editorDraftBuffer initial) (action False) (action True) >>= either (ioError . userError . show) pure
   live<-Editor.mountCurrent (Editor.editorMount binding)
-  nextBinding<-if opening && not live then do
-    pending<-Editor.editorCurrent binding
-    if pending then pure binding else Editor.remountEditor binding
+  bodyLive<-maybe (pure False) W.windowRefCurrent (conversationBodyRef view)
+  when (opening && not bodyLive && live) (Editor.retireEditorMount (Editor.editorMount binding))
+  nextBinding<-if opening && (not live || not bodyLive) then do
+    current<-Editor.editorCurrent binding
+    if current && bodyLive then pure binding else Editor.remountEditor binding
     else pure binding
-  admitted<-if opening && not live then atomically (Editor.claimEditorMount (Editor.editorMount nextBinding)) else pure live
   let mount=Editor.editorMount nextBinding
-      mounted=if admitted then installEditorDraft mount Nothing seeded else seeded
-      result=mounted {conversationViews=M.adjust (\v->v {conversationEditor=if admitted then Just mount else conversationEditor v,
-        conversationEditorFrame=if admitted then windowId <$> find ((==Just bid).bufferId) (windows mounted) else conversationEditorFrame v}) target (conversationViews mounted),
-        windows=if admitted && target==conversationTarget mounted then map (\w->if bufferId w==Just bid then w {windowEditorMount=Just mount} else w) (windows mounted) else windows mounted}
-  modifyIORef' (conversationEditors s) (M.insert target (Editor.installedEditor nextBinding))
-  pure result
+  opened<-case conversationBodyRef view of
+    Just reference | bodyLive->do
+      admitted<-if opening && not live then atomically (Editor.claimEditorMount mount) else pure live
+      let mounted=if admitted then installEditorDraft mount Nothing seeded else seeded
+      pure mounted {conversationViews=M.adjust (\v->v {conversationEditor=if admitted then Just mount else conversationEditor v}) target (conversationViews mounted)}
+    _ | opening->do
+      update<-W.openEditorWindow (bodyScope state) body nextBinding
+      admitted<-maybe (pure Nothing) W.admitEditorWindowUpdate update
+      pure $ case admitted of
+        Nothing->seeded {status="Conversation window expired."}
+        Just (reference,prepared,_)->
+          let mounted=installEditorDraft mount Nothing seeded
+              installed=mounted {pluginWindows=M.insert reference prepared (maybe (pluginWindows mounted) (`M.delete` pluginWindows mounted) (conversationBodyRef view)),
+                retiredPluginWindows=maybe (retiredPluginWindows mounted) (`S.delete` retiredPluginWindows mounted) (conversationBodyRef view),
+                windows=map (\window->if maybe False ((==windowContent window).PluginContent) (conversationBodyRef view)
+                  then window {windowContent=PluginContent reference,windowEditorMount=Just mount} else window) (windows mounted),
+                conversationViews=M.adjust (\v->v {conversationBody=InstalledBody reference Nothing,conversationEditor=Just mount}) target (conversationViews mounted)}
+          in installed
+    _->pure seeded
+  let visible=if opening then showConversationFrame target opened else opened
+  modifyIORef' (conversationEditors state) (M.insert target (Editor.installedEditor nextBinding))
+  pure visible
+
+-- Explicit Show is the only path that creates a frame; hidden snapshots remain
+-- installed once and retain their own draft. Selection merely switches that frame.
+showConversationFrame :: Text -> Desktop -> Desktop
+showConversationFrame target desktop=case M.lookup target (conversationViews desktop) >>= conversationBodyRef of
+  Nothing->desktop
+  Just reference->
+    let existing=any (maybe False (const True).conversationTargetFor desktop) (windows desktop)
+        prepared=M.lookup reference (pluginWindows desktop)
+        opened=if existing then desktop else maybe desktop (\body->addPluginWindow reference body desktop) prepared
+    in selectConversationView target (maybe target conversationName (M.lookup target (conversationViews opened))) opened
 
 preparingSteer :: PromptPreparation -> Bool
 preparingSteer (ContextPrompt steering _ _ _)=steering

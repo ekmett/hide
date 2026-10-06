@@ -8,7 +8,7 @@
 -- when the human has disabled streamer mode.
 module Hide.GuestAccess
   ( InputOrigin(..), CellAccess(..), cellAccess, readableAt, pointerAllowedAt
-  , streamerReadableAt, sensitiveLabel, sanitizedStatus, protectedPath, protectedFilePath, protectedPathParent, protectedBuffer, protectedWindow, privateDocument, sanitizedBuffer, sanitizedBufferContent
+  , streamerReadableAt, sensitiveLabel, sanitizedStatus, protectedPath, protectedFilePath, protectedPathParent, protectedBuffer, protectedWindow, privateDocument, sanitizedBuffer, sanitizedBufferContent, sanitizedPreparedContent
   , validateGuestEffects, guestCommandAllowed, guestCommandAllowedIn, guestEffectsAllowed, guestKeyboardAllowed, guestKeyAllowed, guestKeyCombinations
   , guestModalBlocked, guestTransitionAllowed, beginGuestInput, endGuestInput
   ) where
@@ -32,6 +32,10 @@ import Hide.Buffer
 import qualified Hide.Plugin.Menu as Plugin
 import qualified Hide.Plugin.Form as Form
 import Hide.Model
+import qualified Hide.Plugin.Window as W
+import qualified Data.Vector as Vec
+import qualified Hide.TextLayout as Layout
+import Hide.Unicode (sourceGraphemesFrom,itemScalarCount,sourceItemAdvance)
 import Hide.Privacy (protectedFilePath,protectedFilePathParent)
 
 -- | Trusted host attribution; never accept an origin claimed by input JSON.
@@ -61,32 +65,31 @@ sanitizedBuffer d bid=do
   let text=contents (documentBuffer doc)
   if privateDocument d doc then Nothing else case documentLabel doc of
     Just label | label `elem` ["Agent request","Proposed agent edit"] -> Nothing
-    Just "Conversation" | byteMode (documentBuffer doc) -> Nothing
-    Just "Conversation" -> Just (T.pack [if privateOffset d text n && c/='\n' && c/='\r' then ' ' else c | (n,c)<-zip [0..] (T.unpack text)])
     _ -> Just text
 -- | Policy-checked immutable content and whether privacy masking changed text.
 -- Ordinary buffers retain their measured tree without projecting whole text.
--- Conversation masking remains an explicit full-text worker operation.
+-- Prepared-window masking is a separate full-text worker operation.
 sanitizedBufferContent :: Desktop -> Int -> Maybe (Bool,BufferContent)
 sanitizedBufferContent d bid=do
   doc<-M.lookup bid (buffers d)
-  safe<-sanitizedBuffer d bid
+  _<-sanitizedBuffer d bid
   let original=documentBuffer doc
-  pure $ if documentLabel doc==Just "Conversation"
-    then (safe/=contents original,bufferContent (newBuffer safe))
-    else (False,bufferContent original)
+  pure (False,bufferContent original)
 
-privateOffset :: Desktop -> Text -> Int -> Bool
-privateOffset d text n=sessionOffset text n || any private (chatActions d)
+-- | Immutable readable body projection. Evaluation may walk its logical text:
+-- invoke on the read formatter worker, never while capturing Desktop metadata.
+-- Drafts and live control buffers are not part of PreparedWindow.
+sanitizedPreparedContent :: W.PreparedWindow -> Maybe (Bool,BufferContent)
+sanitizedPreparedContent prepared
+  | W.preparedWindowDisclosure prepared/=W.ReadableWindow=Nothing
+  | Vec.null hidden=Just (False,source)
+  | otherwise=Just (True,bufferContent (newBuffer (T.pack
+      [if c/='\n' && c/='\r' && Vec.any (\(a,z)->n>=a && n<z) hidden then ' ' else c
+      | (n,c)<-zip [0..] (T.unpack (contentSlice source 0 (contentLength source)))])))
   where
-    -- A leading zero-width answer can join the separating blank after Other:.
-    -- That guard cell is private too, so capture hides the whole grapheme.
-    private (a,z,"question-input",_)=n>=a+6 && n<z
-    -- The selected choice changes the color of its entire label, not just (*).
-    private (a,z,"question-choice",_)=n>=a && n<z
-    private _=False
-sessionOffset :: Text -> Int -> Bool
-sessionOffset text n="Session: " `T.isPrefixOf` text && n<T.length (T.takeWhile (/='\n') text)
+    source=W.preparedWindowText prepared
+    hidden=maybe Vec.empty W.textGuestHidden (W.preparedWindowSemantics prepared)
+
 
 guestCommandAllowed :: Command -> Bool
 guestCommandAllowed cmd=case cmd of
@@ -154,6 +157,7 @@ serviceActionAllowed action=action `elem` ["compile","make","build-stop","run","
 guestEffectsAllowed :: [Effect] -> Bool
 guestEffectsAllowed=all allowed
   where
+    allowed ExecuteShellBlockAction{}=False
     allowed PackageDebugAction{}=False
     allowed AdoptPreparedDebug{}=False
     allowed PackageBuildAction{}=False
@@ -345,9 +349,11 @@ readableAt d x y
   _ | overlayAt d x y -> True
     | otherwise -> case topWindow d x y of
         Just w | windowHasEditor d w,inside (composerRect d w) x y -> False
+        Just w | PluginContent _<-windowContent w ->case windowPluginText d w of
+          Just prepared | W.preparedWindowDisclosure prepared==W.ReadableWindow->not (preparedCellPrivate W.textGuestHidden d prepared w x y)
+          _->False
         Just w | protectedWindow d w -> case windowDocument (buffers d) w of
           Just doc | documentLabel doc==Just "Autocomplete" -> not (autocompletePane d w && inside (autocompleteComposerRect d w) x y)
-          Just doc | documentLabel doc==Just "Conversation" -> not (byteMode (documentBuffer doc)) && not (inside (composerRect d w) x y) && not (contentPrivate privateOffset d doc w x y)
           _ -> False
         _ -> True
 
@@ -367,9 +373,10 @@ streamerReadableAt d x y
     | privateMessageCell d x y -> False
     | overlayAt d x y -> True
     | otherwise -> case topWindow d x y of
-        Just w | PluginContent _<-windowContent w,streamerMode d -> False
+        Just w | PluginContent _<-windowContent w ->case windowPluginText d w of
+          Just prepared | W.preparedWindowDisclosure prepared==W.ReadableWindow->not (preparedCellPrivate W.textStreamerHidden d prepared w x y)
+          _->not (streamerMode d)
         Just w | Just doc<-windowDocument (buffers d) w,privateDocument d doc -> False
-        Just w | Just doc<-windowDocument (buffers d) w,documentLabel doc==Just "Conversation" -> not (contentPrivate (\_ -> sessionOffset) d doc w x y)
         _ -> True
   where
     sensitiveValue dg (r,f)=privateDialogField d dg f && y>top r && inside r x y && y>=top (dialogRect d dg)+2 && y<top (dialogRect d dg)+height (dialogRect d dg)-3
@@ -450,13 +457,32 @@ overlayAt :: Desktop -> Int -> Int -> Bool
 overlayAt d x y=y==0 || y==snd (screenSize d)-1 || (messagesDisplayed d && inside (problemsRect d) x y) || maybe False (\tree->x<treeWidth tree) (sideTree d) || maybe False (\(r,_)->inside r x y) (contextMenu d) || maybe False (\(index,_)->inside (menuRect d index) x y) (menu d)
 topWindow :: Desktop -> Int -> Int -> Maybe Window
 topWindow d x y=find (\w->windowVisible d w && inside (bounds w) x y) (windows d)
-contentPrivate :: (Desktop -> Text -> Int -> Bool) -> Desktop -> Document -> Window -> Int -> Int -> Bool
-contentPrivate predicate d doc w x y
-  | x<=left r || x>=left r+width r-1 || y<=top r || y>=top r+1+windowContentRows d doc w=False
-  | otherwise=predicate d (contents b) offset
+-- Mask any grapheme intersecting a hidden logical interval, including a
+-- private zero-width scalar joined to a public base. Layout receipts expose
+-- exact original extents; ordinary rows use the same bounded Unicode cursor.
+preparedCellPrivate :: (W.TextSemantics -> Vec.Vector (Int,Int)) -> Desktop -> W.PreparedWindow -> Window -> Int -> Int -> Bool
+preparedCellPrivate select d prepared w x y
+  | not (inside rect x y)=False
+  | Vec.null hidden=False
+  | otherwise=any (\(a,z)->Vec.any (\(start,end)->a<end && start<z) hidden) extents
   where
-    r=bounds w; b=documentBuffer doc
-    row=y-top r-1+scrollRow w
-    offset=windowTextOffset d w (bufferContent b) row (x-left r-1+scrollColumn w)
+    rect=pluginTextRect d w
+    row=y-top rect+scrollRow w
+    column=x-left rect+scrollColumn w
+    text=W.preparedWindowText prepared
+    hidden=maybe Vec.empty select (W.preparedWindowSemantics prepared)
+    extents=case windowPresentation d w of
+      Just layout->case Layout.layoutRows layout Vec.!? row of
+        Just line->[(Layout.layoutStart glyph,Layout.layoutEnd glyph) | glyph<-Vec.toList (Layout.layoutVisibleGlyphs column 1 line)]
+        _->[]
+      Nothing | row>=0 && row<contentLineCount text->
+        let (offset,_,col,items)=sourceGraphemesFrom column (contentLineAt text row)
+            begin=contentLineOffset text row
+            first n c (item:rest) | sourceItemAdvance c item==0=first (n+itemScalarCount item) c rest
+                                 | otherwise=[(begin+n,begin+n+itemScalarCount item)]
+            first _ _ []=[]
+        in first offset col items
+      _->[]
+
 at :: [a] -> Int -> Maybe a
 at values index | index<0=Nothing | otherwise=case drop index values of value:_->Just value; _->Nothing
