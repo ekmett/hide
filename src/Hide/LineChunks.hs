@@ -17,7 +17,6 @@ module Hide.LineChunks
 import Data.Bits ((.&.), (.|.), shiftR, shiftL)
 import Data.Char (ord)
 import Data.Foldable (toList)
-import Data.List (foldl')
 import Data.Word (Word64)
 import qualified Data.FingerTree as FT
 import qualified Data.Vector as V
@@ -368,7 +367,6 @@ seekEditedColumn goal tree
             (# _,_,selected #)->finish (base+scalar-start)
               (applyAdvance (ownerRangeAdvance owner (ownerReceiptEdge owner start) edge) initial)
               (rawBytes before+offset-byte) (takeChunks (start+rawCharacters measure-scalar) selected++treeChunks rest)
-            _->finish size (prefixColumn size) (rawBytes (FT.measure tree)) []
       FT.EmptyL->finish size (prefixColumn size) (rawBytes (FT.measure tree)) []
   where
     size=rawCharacters (FT.measure tree)

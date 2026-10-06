@@ -428,6 +428,13 @@ longLineChecks=do
       (firstHit,firstColumn,firstGroups)=sourceLineWindow promotedLine 0
   _<-evaluate (firstHit+firstColumn+sum [T.length (itemSourceText item) | (_,items)<-take 2 firstGroups,item<-items])
   _<-evaluate (sourceLineColumnOffset promotedLine 60+fst (sourceLineExtentThrough promotedLine 180))
+  let hover=Model.addDocument Nothing promoted (Model.initialDesktop (80,25))
+      linked=hover {Model.buffers=M.adjust (\doc->doc {Model.documentLinks=[(0,100,"target")]}) 1 (Model.buffers hover)}
+  case Model.activeWindow linked of
+    Nothing->error "buffer tree: missing hover source window"
+    Just window->let rect=Model.bounds window in
+      check "edited source link hover uses its bounded column"
+        (case Model.linkAt (Model.left rect+61) (Model.top rect+1) linked of Just (Model.OpenLink _ "target")->True; _->False)
   promotionAfter<-getAllocationCounter
   check "first prefix edit and source viewport leave the suffix unprepared" (promotionBefore-promotionAfter<512*1024)
   check "first promotion preserves exact source and one Undo" (contents promoted==indexedText && contents (undo promoted)==text && length (undoStack promoted)==1)
