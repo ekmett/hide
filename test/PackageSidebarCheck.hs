@@ -152,7 +152,8 @@ checks=bracket temporary removePathForcibly $ \root->do
           benchArguments<-lines <$> readFile invocation
           unless (benchArguments==[root,"bench","--with-compiler="<>compiler,"sample:bench:measure"])
             (fail "Benchmark uses captured component without Run program/runtime arguments")
-          visible<-wait "captured Benchmark output" (maybe False (\window->let text=W.preparedWindowText window in "captured runner output" `T.isInfixOf` contentSlice text 0 (contentLength text)) . activePluginWindow) benchmarked
+          visible<-wait "captured Benchmark output" (any (\window->let text=W.preparedWindowText window in W.preparedWindowTitle window=="Benchmark output" && "captured runner output" `T.isInfixOf` contentSlice text 0 (contentLength text)) . M.elems . pluginWindows) benchmarked
+          unless ((windowId <$> activeWindow visible)==(windowId <$> activeWindow other)) (fail "A reused captured output slot must preserve unrelated source focus")
           cancelled<-stopConversationBuild runtime visible
           wait "captured Benchmark Stop" (T.isInfixOf "Stopped." . status) cancelled
         unchangedConfig<-BL.readFile configPath
