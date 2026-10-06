@@ -34,7 +34,7 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
 import Data.Time (UTCTime, TimeZone, getCurrentTime, getCurrentTimeZone, diffUTCTime, utcToLocalTime, formatTime, defaultTimeLocale)
 import Data.IORef
-import Data.List (find, sortOn)
+import Data.List (mapAccumL,find, sortOn)
 import qualified Data.Map.Strict as M
 import qualified Data.Set as S
 import Data.Maybe (fromMaybe, mapMaybe, isNothing)
@@ -113,8 +113,8 @@ data State = State
   , ownedTerminals :: S.Set Text
   , terminalWaiters :: M.Map Text [Value]
   , lastMessageAt :: Maybe UTCTime
-  , lastRender :: Maybe (Int,Maybe Text,StableName [Record]), lastSession :: Maybe (A.Launch,FilePath,Text)
-  , waitingQuestion :: Maybe QuestionTicket, questionResults :: M.Map Int QuestionResult, questionsClosed :: Bool, lastQuestion :: Maybe (StableName ChatQuestion)
+  , lastRender :: Maybe (Int,Bool,Maybe Text,StableName [Record]), lastSession :: Maybe (A.Launch,FilePath,Text)
+  , waitingQuestion :: Maybe QuestionTicket, questionResults :: M.Map Int QuestionResult, questionsClosed :: Bool, lastQuestion :: Maybe Int, lastQuestionInteraction :: Maybe (StableName ChatQuestion)
   , deliveredContext :: Maybe Value
   , directoryAgents :: [AH.AgentId]
   , agentDelivery :: Maybe (AH.HubMessage,MVar (Either Text Value))
@@ -163,7 +163,7 @@ withConversationAt consoles root action = Command.withRegistry $ \registry->do
     , pending=M.empty,queuedPrompt=Nothing,transcript=[],reads=M.empty
     , approvals=[],presented=Nothing,deferredApproval=False,nextApproval=1,queuedQueries=[]
     , ownedTerminals=S.empty,terminalWaiters=M.empty,lastMessageAt=Nothing
-    , lastRender=Nothing,lastSession=remembered,waitingQuestion=Nothing,questionResults=M.empty,questionsClosed=False,lastQuestion=Nothing
+    , lastRender=Nothing,lastSession=remembered,waitingQuestion=Nothing,questionResults=M.empty,questionsClosed=False,lastQuestion=Nothing,lastQuestionInteraction=Nothing
     , deliveredContext=Nothing,fileCaptures=[],retiringRequests=[],promptPreparation=Nothing,resumeRecordPath=resumePath,creatingAgent=Nothing,directoryAgents=[],agentDelivery=Nothing
     , agentInitialized=Null,agentConfig=Null,streamTails=M.empty,lastAgentSync=Nothing,childRecords=M.empty,childRender=Nothing,childWidths=M.empty,childCancels=M.empty,childControls=M.empty,expandedToolRuns=S.empty,editorRegistry=registry,editorCommand=command,conversationEditors=editors }
   AR.withAgentRuntime root (provider <$> readIORef ref) $ \agents ->
@@ -353,12 +353,12 @@ performPrimary runtime@(ConversationState directory ref consoles _) action value
       keepConversationPosition d <$> paint False next d
     ("question-choice",[token,index]) | Just ident<-readMaybe (T.unpack token),Just chosen<-readMaybe (T.unpack index),
         Just q<-chatQuestion d,questionToken q==ident,chosen>=0,chosen<length (questionChoices q) ->
-      clearReplySelection <$> paint False s d {chatQuestion=Just q {questionChoice=Just chosen,questionFocused=True}}
+      revealQuestion runtime (clearReplySelection d {chatQuestion=Just q {questionChoice=Just chosen,questionFocused=True}})
     ("question-input",token:rest) | Just q<-chatQuestion d,token==T.pack (show (questionToken q)) ->
       let p=case rest of
             offset:_ | Just n<-readMaybe (T.unpack offset) -> min (bufferLength (questionBuffer q)) (questionInputStart (conversationWidth d) q+max 0 n)
             _ -> caret (questionSelection q)
-      in clearReplySelection <$> paint False s d {chatQuestion=Just q {questionChoice=Nothing,questionSelection=Selection p p,questionFocused=True}}
+      in revealQuestion runtime (clearReplySelection d {chatQuestion=Just q {questionChoice=Nothing,questionSelection=Selection p p,questionFocused=True}})
     ("question-submit",[token]) | Just q<-chatQuestion d,token==T.pack (show (questionToken q)),
         Just (QuestionTicket ident actor receipt)<-waitingQuestion s,ident==questionToken q -> do
       let answer=case questionChoice q of
@@ -376,7 +376,7 @@ performPrimary runtime@(ConversationState directory ref consoles _) action value
                 next=(rememberQuestion ident actor receipt value s) {waitingQuestion=Nothing,queuedQueries=queued,
                   transcript=transcript s++[Reply "Agent" (questionText q),Reply "You" answer]}
             writeIORef ref next
-            paint False next d {chatQuestion=Nothing,chatInputOffset=Nothing,status="Answer submitted.",agentQueued=queryCount "" queued}
+            paint False next d {chatQuestion=Nothing,status="Answer submitted.",agentQueued=queryCount "" queued}
     ("question-cancel",[token]) | Just q<-chatQuestion d,token==T.pack (show (questionToken q)) ->
       cancelQuestion runtime "Question cancelled by user." d
     ("context",_) -> pure d {dialog=Just (Dialog "Agent Context" (AgentDialog "edit-context")
@@ -627,12 +627,12 @@ tickConversation runtime@(ConversationState _ ref _ _) original = do
 -- before returning that desktop, so its bubbles and composer use the same bounds.
 -- The immutable transcript key keeps mouse motion and idle ticks parse-free.
 refreshConversationLayout :: ConversationState -> Desktop -> IO Desktop
-refreshConversationLayout (ConversationState _ ref _ _) original = do
+refreshConversationLayout runtime@(ConversationState _ ref _ _) original = do
   state<-readIORef ref
   transcriptIdentity<-makeStableName =<< evaluate (transcript state)
-  questionKey<-questionIdentity (chatQuestion original)
-  let widthNow=conversationWidthFor "" original
-      renderKey=(widthNow,session state,transcriptIdentity)
+  let questionKey=questionToken <$> chatQuestion original
+      widthNow=conversationWidthFor "" original
+      renderKey=(widthNow,videoMode original/=Nothing,session state,transcriptIdentity)
       -- A recovered view has no raw transcript owned by this runtime yet.
       ownsView=not (isNothing (connection state)) || not (null (transcript state)) || not (isNothing questionKey) || not (isNothing (lastQuestion state))
       redraw=ownsView && (lastRender state/=Just renderKey || lastQuestion state/=questionKey)
@@ -640,7 +640,8 @@ refreshConversationLayout (ConversationState _ ref _ _) original = do
   when redraw (modifyIORef' ref (\current -> current {lastRender=Just renderKey,lastQuestion=questionKey}))
   -- Cached children can remain visible beside the selected conversation. Their
   -- geometry is independent, and reflow needs no provider/history round trip.
-  foldM (reflowChild state) primary (M.toList (childRecords state))
+  revealed<-revealQuestion runtime primary
+  foldM (reflowChild state) revealed (M.toList (childRecords state))
   where
     reflowChild state desktop (target,records) =
       case conversationDocument target desktop of
@@ -1040,10 +1041,18 @@ isToolRecord (Activity _ value _ _)=field "status" value `elem`
   [Just ("pending"::Text),Just "in_progress",Just "completed",Just "failed"]
 isToolRecord _=False
 
--- The immutable question key detects replacement without comparing its answer
--- buffer or retaining separate baseline/Undo roots in the presentation cache.
-questionIdentity :: Maybe ChatQuestion -> IO (Maybe (StableName ChatQuestion))
-questionIdentity=traverse (\q->makeStableName =<< evaluate q)
+-- Prompt and choices are immutable for the authenticated question token.
+-- Only immutable question identity asks for a local reveal; idle ticks preserve
+-- manual transcript scrolling and never inspect answer text or retained Undo.
+questionInteraction :: Maybe ChatQuestion -> IO (Maybe (StableName ChatQuestion))
+questionInteraction=traverse (\q->makeStableName =<< evaluate q)
+
+revealQuestion :: ConversationState -> Desktop -> IO Desktop
+revealQuestion (ConversationState _ ref _ _) d=do
+  previous<-lastQuestionInteraction <$> readIORef ref
+  current<-questionInteraction (chatQuestion d)
+  modifyIORef' ref (\s->s {lastQuestionInteraction=current})
+  pure (if current/=previous then ensureQuestionVisible d else d)
 
 paint :: Bool -> State -> Desktop -> IO Desktop
 paint=paintView ""
@@ -1055,7 +1064,6 @@ paintView target force s original
     let shown=target==conversationTarget original &&
           (isNothing (conversationDocument target base) || any (\w->maybe False (\(bid,_)->bufferId w==Just bid) (conversationDocument target base)) (windows base))
     prepared<-ensureEditorWithState shown s target (if T.null target then "Primary" else target) base
-    questionKey<-questionIdentity (chatQuestion prepared)
     pure $ let
       d=prepared
       width=conversationWidthFor target d
@@ -1069,13 +1077,15 @@ paintView target force s original
       (_,actions)=foldl (\(offset,found) (cells,action,_)->(offset+length cells,found++maybe [] (\(name,values)->[(offset,offset+length cells,name,values)]) action)) (0,[]) allChunks
       inputOffset=case [a+7 | (a,_,action,_)<-actions,action=="question-input"] of offset:_->Just offset; _->Nothing
       text=T.pack (map fst styled)
-      questionRow=do
+      questionProjection=do
         q<-chatQuestion d
-        if not (questionFocused q) || lastQuestion s==questionKey then Nothing else do
-          offset<-case questionChoice q of
-            Nothing -> inputOffset
-            Just index -> case [a | (a,_,action,values)<-actions,action=="question-choice",values==[T.pack (show (questionToken q)),T.pack (show index)]] of a:_->Just a; _->Nothing
-          pure (fst (lineColumn text offset)+if isNothing (questionChoice q) then 1 else 0)
+        input<-inputOffset
+        let starts index label=case [a | (a,_,action,values)<-actions,action=="question-choice",values==[T.pack (show (questionToken q)),T.pack (show index)]] of
+              first:_->snd (mapAccumL (\offset line->(offset+T.length line+1,offset)) first
+                (T.splitOn "\n" (questionChoiceLines width False label)))
+              _->[]
+        pure (QuestionProjection (questionToken q) width input
+          [starts index label | (index,label)<-zip [0::Int ..] (questionChoices q)])
       existing=conversationDocument target d
       opened=case existing of
         Nothing -> let added=addConversationDocument d in added {buffers=M.adjust (\doc->restyle doc {documentBuffer=newBuffer text}) (nextId d) (buffers added)}
@@ -1089,16 +1099,19 @@ paintView target force s original
                        atEnd=scrollRow w>=max 0 (oldLines-rows)
                        bounded n=max 0 (min (T.length text) n)
                        previousRow=if atEnd then max 0 (newLines-rows) else min (max 0 (newLines-rows)) (scrollRow w)
-                       visibleRow=maybe previousRow (\r->max 0 (if r<previousRow then r else if r>=previousRow+rows then r-rows+1 else previousRow)) questionRow
-                   in w {scrollRow=visibleRow,
+                   in w {scrollRow=previousRow,
                          selection=Selection (bounded (anchor (selection w))) (bounded (caret (selection w)))}
       visible=target==conversationTarget original
       view=fromMaybe (error "Conversation editor was not prepared") (M.lookup target (conversationViews opened))
       -- Generated Markdown admission is checked by the presentation worker;
       -- never scan the styled transcript while adopting it on the UI owner.
-      colored=opened {conversationViews=M.insert target view {conversationBufferId=bid,conversationReplySelection=let Selection a c=conversationReplySelection view in Selection (min (T.length text) a) (min (T.length text) c)} (conversationViews opened),chatQuestion=chatQuestion original,chatActions=if visible then actions else chatActions original,chatInputOffset=if visible then inputOffset else chatInputOffset original,buffers=M.adjust (\doc -> doc {documentHighlight=styled,documentHasLayoutMetadata=False,documentCursorVisible=False,documentLinks=linkSpans styled,documentMarkdownPath=Just (project s </> "conversation.md"),documentShellBlocks=shellBlocks}) bid (buffers opened),windows=map adjust (windows opened)}
+      colored=opened {conversationViews=M.insert target view {conversationBufferId=bid,conversationReplySelection=let Selection a c=conversationReplySelection view in Selection (min (T.length text) a) (min (T.length text) c)} (conversationViews opened),chatQuestion=chatQuestion original,chatActions=if visible then actions else chatActions original,buffers=M.adjust (\doc -> doc {documentHighlight=styled,documentHasLayoutMetadata=False,documentCursorVisible=False,documentLinks=linkSpans styled,documentMarkdownPath=Just (project s </> "conversation.md"),documentShellBlocks=shellBlocks,documentQuestionProjection=questionProjection}) bid (buffers opened),windows=map adjust (windows opened)}
       focused=case find ((==Just bid) . bufferId) (windows colored) of Just w | force && visible -> focusComposer (focusWindow (windowId w) colored); _ -> colored
-      in focused
+      -- Force the bounded numeric receipt before installing it; its closures
+      -- must not retain the former live answer/Undo through ChatQuestion.
+      in maybe () (\projection->foldr (\row done->foldr seq done row) ()
+           (projectedQuestionChoices projection)) questionProjection `seq`
+         if (questionToken <$> chatQuestion focused)/=lastQuestion s then ensureQuestionVisible focused else focused
   where
     base=if T.null target && T.null (conversationTarget original) then original else original {chatQuestion=Nothing}
     plain style=map (,style).T.unpack
@@ -1134,10 +1147,10 @@ paintView target force s original
           [(plain Plain ("\n"<>T.intercalate "\n" (map jsonText history)),Nothing,[]) | expanded]
     renderQuestion width recordId q=
       [replyChunk width recordId False (questionText q)]++
-      concat [[(plain Plain "\n",Nothing,[]),(plain (if questionChoice q==Just index then Keyword else Plain)
-        (choiceLines width (questionChoice q==Just index) text),Just ("question-choice",[token,T.pack (show index)]),[])] | (index,text)<-zip [0::Int ..] (questionChoices q)]++
-      [(plain Plain "\n",Nothing,[]),(plain (if isNothing (questionChoice q) then Literal else Plain)
-        ("Other: "<>questionVisibleInput width q<>" "),Just ("question-input",[token]),[]),
+      concat [[(plain Plain "\n",Nothing,[]),(plain Plain
+        (questionChoiceLines width False text),Just ("question-choice",[token,T.pack (show index)]),[])] | (index,text)<-zip [0::Int ..] (questionChoices q)]++
+      [(plain Plain "\n",Nothing,[]),(plain Plain
+        ("Other: "<>T.replicate (max 1 (width-8)+1) " "),Just ("question-input",[token]),[]),
        (plain Plain "\n",Nothing,[]),(plain Keyword "[Submit answer]",Just ("question-submit",[token]),[]),
        (plain Plain "  ",Nothing,[]),(plain Comment "[Cancel]",Just ("question-cancel",[token]),[])]
       where token=T.pack (show (questionToken q))
@@ -1145,14 +1158,6 @@ paintView target force s original
     replyChunk width recordId outgoing text =
       let (cells,blocks)=renderReplyWithShellBlocks (videoMode original/=Nothing) width outgoing text
       in (map (\(c,style)->(c,case style of BubbleText _ sent base->BubbleText recordId sent base; _->style)) cells,Nothing,blocks)
-
-choiceLines :: Int -> Bool -> Text -> Text
-choiceLines width selected text=T.intercalate "\n" (zipWith (<>) ((if selected then "(*) " else "( ) "):repeat "    ") (wrap text))
-  where
-    wrap remaining
-      | T.null remaining=[]
-      | otherwise=let count=max 1 (columnOffset remaining (max 1 (width-4)))
-                  in T.take count remaining:wrap (T.drop count remaining)
 
 clipCells :: Int -> Text -> Text
 clipCells count text=T.take (columnOffset text (max 0 count)) text
@@ -1444,7 +1449,7 @@ cancelQuestion (ConversationState _ ref _ _) reason d=do
     Just _->do
       let next=abandonQuestion reason s
       writeIORef ref next
-      paint False next d {chatQuestion=Nothing,chatInputOffset=Nothing,status=reason}
+      paint False next d {chatQuestion=Nothing,status=reason}
 
 -- Provider workers exchange requests through the mailbox; only the editor tick
 -- mutates conversation state or presents a permission dialog.

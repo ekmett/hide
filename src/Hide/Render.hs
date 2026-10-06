@@ -109,7 +109,6 @@ data RenderState = RenderState
   , keyBrowserFrontend :: Bool
   , keyAppearance :: Appearance
   , keySystemDark :: Bool
-  , keyChatInputOffset :: Maybe Int
   , keyChildAgentSettings :: [AgentSetting]
   , keyChildAgentSteering :: Bool
   , keyChildAgentContextUsage :: Maybe (Integer,Integer)
@@ -263,7 +262,6 @@ renderKey original = do
         , keyBrowserFrontend=browserFrontend original
         , keyAppearance=appearance original
         , keySystemDark=systemDark original
-        , keyChatInputOffset=chatInputOffset original
         , keyChildAgentSettings=childAgentSettings original
         , keyChildAgentSteering=childAgentSteering original
         , keyChildAgentContextUsage=childAgentContextUsage original
@@ -392,14 +390,13 @@ renderScene d=(privacyLayers++layers,visibleCursor)
       Nothing | menu d/=Nothing || contextMenu d/=Nothing || problemsFocused d || maybe False treeFocused (sideTree d) -> V.NoCursor
       Nothing | activeMarkdown d,Just w<-activeWindow d,Nothing<-windowMarkdown d w -> V.NoCursor
       Nothing -> case (activeWindow d,activeDocument d) of
-        (Just w,Just doc) | questionActive d,Just q<-chatQuestion d,questionChoice q==Nothing,Just offset<-chatInputOffset d -> let
-          (inputRow,column)=windowTextPosition d w (bufferContent (documentBuffer doc)) offset
+        (Just w,Just doc) | questionActive d,Just (rect,q,projected)<-questionInputGeometry d w,questionChoice q==Nothing -> let
           text=contents (questionBuffer q)
-          shownWidth=max 1 (width (bounds w)-2)
-          delta=displayColumn text (caret (questionSelection q))-displayColumn text (questionInputStart shownWidth q)
-          cx=left (bounds w)+1+column+delta-scrollColumn w
-          cy=top (bounds w)+1+inputRow-scrollRow w
-          in if inside (Rect (left (bounds w)+1) (top (bounds w)+1) (width (bounds w)-2) (windowContentRows d doc w)) cx cy then V.Cursor cx cy else V.NoCursor
+          delta=displayColumn text (caret (questionSelection q))-displayColumn text (questionInputStart (projectedQuestionWidth projected) q)
+          cx=left rect+delta
+          cy=top rect
+          body=Rect (left (bounds w)+1) (top (bounds w)+1) (width (bounds w)-2) (windowContentRows d doc w)
+          in if inside body cx cy then V.Cursor cx cy else V.NoCursor
         (Just w,_) | activeAutocomplete d && autocompleteFocused d -> let
           b=autocompleteDraft d; (r,c)=bufferLineColumn b (caret (autocompleteSelection d)); (sr,sc)=autocompleteComposerScroll d w
           rect=autocompleteComposerRect d w
@@ -413,6 +410,20 @@ renderScene d=(privacyLayers++layers,visibleCursor)
                                                   liveRow=not (windowChangeView b w) || viewRightRow (viewRowAt (bufferView w) (bufferViewProjection b) r)/=Nothing }
                             in if liveRow && inside (Rect (left (bounds w)+1) (top (bounds w)+1) (width (bounds w)-2) (windowContentRows d doc w)) x y then V.Cursor x y else V.NoCursor
         _ -> V.NoCursor
+
+-- The static body owns all question offsets; bounded live rows use exactly
+-- that body's current layout and clip, without rebuilding transcript Markdown.
+questionLayers :: Desktop -> Window -> [V.Image]
+questionLayers d w=case windowDocument (buffers d) w of
+  Nothing->[]
+  Just doc->
+    [place (left (bounds w)+1) (top (bounds w)+1+row-scrollRow w)
+      (V.cropRight columns (V.translateX (column-scrollColumn w)
+        (styledImage (darkAppearance d) (const False) Nothing False (Selection 0 0) offset chars)))
+    | (offset,chars)<-questionOverlayRows d w
+    , let (row,column)=windowTextPosition d w (bufferContent (documentBuffer doc)) offset
+    , row>=scrollRow w,row<scrollRow w+windowContentRows d doc w]
+    where columns=max 0 (width (bounds w)-2)
 
 -- The same host buttons and border geometry are shared by source and plugin text.
 hostWindowFrame :: Desktop -> Bool -> Window -> V.Attr -> [V.Image]
@@ -523,6 +534,7 @@ windowLayers d active original =
     | bufferView w/=MarkdownView,not (byteMode (documentBuffer doc)), issue<-diagnostics d, Just (diagnosticPath issue)==fmap filePath (documentFile doc), issueRow issue>=scrollRow w, issueRow issue<scrollRow w+hh-2]
   ++ (if active then [place (x+windowPositionColumn doc) (y+hh-1) (label frame (T.take (max 0 (ww-windowPositionColumn doc-2)) (windowPositionText d doc w))),windowScrollbarImage d True w,windowScrollbarImage d False w] else [])
   ++ [place (x+6) y (label frame "[" V.<|> label (attr cyan blue) " " V.<|> label frame "]") | active,terminalWindow d w,not (windowPinned d w)]
+  ++ questionLayers d w
   ++ composerLayers d active w
   ++ hexDividerLayers
   ++ reviewDividerLayers

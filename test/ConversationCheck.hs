@@ -40,10 +40,12 @@ import qualified System.Posix.IO as Posix
 #endif
 import System.Info (os)
 import System.Timeout (timeout)
-import Hide.Render (snapshot, snapshotHtml)
+import Hide.Render (snapshot, snapshotHtml, renderCursor)
+import Hide.Font (loadFont)
+import qualified Hide.ScreenCapture as ScreenCapture
 import Hide.Buffer
 import qualified Hide.App as App
-import Hide.GuestAccess (guestCommandAllowed, protectedBuffer)
+import Hide.GuestAccess (guestCommandAllowed, protectedBuffer, readableAt)
 import Hide.Conversation
 import Hide.SessionServices
 import qualified Hide.BuildJobs as Jobs
@@ -560,7 +562,7 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary remov
     C.withConsoles $ \consoles -> withConversation consoles $ \runtime -> do
       preparedDraft<-send runtime "show" [] draftBase
       let savedDraft=draftAt (newBuffer "existing draft") (Selection 4 4) preparedDraft
-      (asked,reply)<-questionTool runtime savedDraft (object ["question" .= ("Question presentation identity"::T.Text)])
+      (asked,reply)<-questionTool runtime savedDraft (object ["question" .= ("Question presentation identity"::T.Text),"choices" .= (["First","Second"]::[T.Text])])
       _<-questionId reply
       let q=fromMaybe (error "Missing presentation question") (chatQuestion asked)
           answer=(newBuffer "kept answer") {saved=error "Question presentation forced saved answer",
@@ -577,8 +579,59 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary remov
           replaced=unchanged {chatQuestion=Just q {questionBuffer=replacement}}
       redrawn<-tickConversation runtime replaced
       replacementIdentity<-makeStableName =<< evaluate (documentBuffer (questionDocument redrawn))
-      check "equal-revision answer replacement invalidates question presentation"
-        (revision answer==revision replacement && originalIdentity/=replacementIdentity && "fresh answer" `T.isInfixOf` conversationText redrawn)
+      check "equal-revision answer replacement paints live input without rebuilding history"
+        (revision answer==revision replacement && originalIdentity==replacementIdentity &&
+          "fresh answer" `T.isInfixOf` snapshot redrawn && not ("kept answer" `T.isInfixOf` snapshot redrawn))
+      selected<-clickAction runtime "question-choice" redrawn
+      selectedIdentity<-makeStableName =<< evaluate (documentBuffer (questionDocument selected))
+      check "direct choice click paints its marker without rebuilding history"
+        (selectedIdentity==originalIdentity && "(*) First" `T.isInfixOf` snapshot selected)
+      custom<-clickAction runtime "question-input" selected
+      let entered=custom {chatQuestion=fmap (\value->value {questionBuffer=newBuffer "界λ",questionSelection=Selection 2 2}) (chatQuestion custom)}
+      live<-tickConversation runtime entered
+      let win=fromMaybe (error "Missing projected window") (activeWindow live)
+      case questionInputGeometry live win of
+        Nothing->error "Missing live question geometry"
+        Just (rect,_,_)->do
+          let (clicked,effects)=handleEvent (V.EvMouseDown (left rect+2) (top rect) V.BLeft []) live
+          hit<-snd <$> conversationEffects runtime fallback clicked effects
+          check "live wide answer shares cursor, hit and private cell geometry"
+            (renderCursor live==V.Cursor (left rect+3) (top rect) &&
+              maybe False ((==Selection 1 1).questionSelection) (chatQuestion hit) &&
+              "界λ" `T.isInfixOf` snapshot live && all (\x->not (readableAt live x (top rect))) [left rect..left rect+2])
+          let marked=live {chatQuestion=fmap (\value->value {questionBuffer=newBuffer (T.replicate 33 "\x301"<>"private"),questionSelection=Selection 0 0}) (chatQuestion live)}
+          font<-loadFont
+          captured<-ScreenCapture.capture font marked False >>= either (error . T.unpack) pure
+          let capturedText=do
+                blocks<-field "content" captured
+                block<-listToMaybe blocks
+                encoded<-field "text" block
+                metadata<-decodeStrict' (TE.encodeUtf8 encoded)
+                field "text" metadata
+          let guardCell text=T.index (T.lines text!!top rect) (left rect-1)
+          check "capture hides leading answer fragments joined to the label guard cell"
+            (guardCell (snapshot marked {streamerMode=True})=='�' &&
+              not (readableAt marked (left rect-1) (top rect)) &&
+              maybe False (\text->guardCell text==' ' && not ("private" `T.isInfixOf` text)) capturedText)
+          let inputRow=top rect-top (bounds win)-1+scrollRow win
+              oneRow=ensureQuestionVisible (modifyActive (\w->w {bounds=(bounds w) {height=4},scrollRow=inputRow+1}) live)
+              shortWindow=fromMaybe (error "Missing one-row question window") (activeWindow oneRow)
+          check "one-row body reveals the actual answer before Submit"
+            (windowContentRows oneRow (questionDocument oneRow) shortWindow==1 &&
+              case questionInputGeometry oneRow shortWindow of
+                Just (input,_,_)->top input==top (bounds shortWindow)+1
+                _->False)
+          let spacer=top (bounds win)+1+windowContentRows live (questionDocument live) win
+              (_,outside)=handleEvent (V.EvMouseDown (left rect) spacer V.BLeft []) live
+          check "question controls do not hit the reserved composer spacer"
+            (not (any (\effect->case effect of AgentAction action _->"question-" `T.isPrefixOf` action; _->False) outside))
+      let restyled=live {buffers=M.adjust restyle (fromMaybe (-1) (bufferId win)) (buffers live)}
+      check "restyled body cannot reuse question projection or accept stale input"
+        (case questionInputGeometry live win of
+          Just (rect,_,_)->case (windowQuestion restyled win,conversationClick (left rect) (top rect) win restyled) of
+            (Nothing,Nothing)->True
+            _->False
+          _->False)
     C.withConsoles $ \consoles -> withConversation consoles $ \runtime -> do
       preparedDraft<-send runtime "show" [] draftBase
       let savedDraft=draftAt (newBuffer "existing draft") (Selection 4 4) preparedDraft
@@ -650,7 +703,20 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary remov
           choiceRows=[fst (bufferLineColumn (documentBuffer document) a) | (a,_,action,values)<-chatActions visibleChoice,action=="question-choice",last values=="0"]
       check "keyboard choices stay visible in a small conversation window" (case choiceRows of row:_->row>=scrollRow active && row<scrollRow active+windowContentRows visibleChoice document active; _->False)
       check "long choice labels wrap without being discarded" (T.count "z" (conversationText visibleChoice)==100)
-      smallCancelled<-clickAction runtime "question-cancel" =<< tickConversation runtime (fst (handleEvent (V.EvKey V.KUp []) visibleChoice))
+      customInput<-tickConversation runtime (fst (handleEvent (V.EvKey V.KUp []) visibleChoice))
+      let browsing=modifyActive (\w->w {scrollRow=0}) customInput
+      retainedScroll<-tickConversation runtime browsing
+      check "idle question overlay preserves manual history scrolling"
+        (maybe False ((==0).scrollRow) (activeWindow retainedScroll))
+      typedInput<-tickConversation runtime (fst (handleEvent (V.EvKey (V.KChar 'x') []) retainedScroll))
+      let inputWindow=fromMaybe (error "question input window") (activeWindow typedInput)
+          inputDocument=fromMaybe (error "question input document") (activeDocument typedInput)
+      inputSame<-captureVersion (documentBuffer document) >>= \receipt->versionCurrent receipt (documentBuffer inputDocument)
+      check "typing reveals an already-focused answer without reflowing history"
+        (inputSame && case questionInputGeometry typedInput inputWindow of
+          Just (rect,_,_)->top rect>top (bounds inputWindow) && top rect<top (bounds inputWindow)+1+windowContentRows typedInput inputDocument inputWindow
+          _->False)
+      smallCancelled<-clickAction runtime "question-cancel" typedInput
       check "small-window custom input leaves Cancel reachable" (chatQuestion smallCancelled==Nothing)
       (_,invalid)<-questionTool runtime savedDraft (object ["question" .= ("Unsupported"::T.Text),"allowMultiple" .= True])
       check "unsupported multi-select is explicit" . isLeft =<< invalid

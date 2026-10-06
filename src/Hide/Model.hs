@@ -60,13 +60,13 @@ inside (Rect x y w h) a b = a >= x && a < x+w && b >= y && b < y+h
 -- | Shared buffer and prepared presentation metadata; split windows reference its ID.
 -- documentOrigin retains canonical privacy provenance for generated source. It
 -- does not authorize saving, filesystem access or debugger source operations.
-data Document = Document { documentBuffer :: Buffer, documentFile :: Maybe FileState, documentLabel :: Maybe Text, documentHighlight :: [(Char,Style)], documentHasLayoutMetadata :: !Bool, documentWidth :: Int, documentCursorVisible :: Bool, documentSuggestedName :: Maybe FilePath, documentSourceRows :: Maybe (Vec.Vector SourceRow), documentShellBlocks :: [(Int,Int,Text,Text)], documentLinks :: [(Int,Int,Text)], documentMarkdownPath :: Maybe FilePath, documentOrigin :: Maybe FilePath } deriving (Eq,Show)
+data Document = Document { documentBuffer :: Buffer, documentFile :: Maybe FileState, documentLabel :: Maybe Text, documentHighlight :: [(Char,Style)], documentHasLayoutMetadata :: !Bool, documentWidth :: Int, documentCursorVisible :: Bool, documentSuggestedName :: Maybe FilePath, documentSourceRows :: Maybe (Vec.Vector SourceRow), documentShellBlocks :: [(Int,Int,Text,Text)], documentLinks :: [(Int,Int,Text)], documentMarkdownPath :: Maybe FilePath, documentOrigin :: Maybe FilePath, documentQuestionProjection :: Maybe QuestionProjection } deriving (Eq,Show)
 -- Source colors are populated by the session worker, never forced by input or drawing.
 newDocument :: Buffer -> Maybe FileState -> Document
-newDocument b file = restyle (Document b file Nothing [] False 0 True Nothing Nothing [] [] Nothing Nothing)
+newDocument b file = restyle (Document b file Nothing [] False 0 True Nothing Nothing [] [] Nothing Nothing Nothing)
 
 restyle :: Document -> Document
-restyle doc = doc {documentHighlight=[],documentHasLayoutMetadata=False,documentSourceRows=Nothing,documentShellBlocks=[],documentLinks=[],
+restyle doc = doc {documentHighlight=[],documentHasLayoutMetadata=False,documentSourceRows=Nothing,documentShellBlocks=[],documentLinks=[],documentQuestionProjection=Nothing,
   documentWidth=if byteMode (documentBuffer doc) then hexWidth 16 else documentWidth doc}
 
 -- | Install prepared styling and its cached layout admission together. The
@@ -267,6 +267,14 @@ data ChatQuestion = ChatQuestion
   , questionFocused :: Bool
   } deriving (Eq,Show)
 
+-- | Fixed question furniture belongs to the generated body, never its live
+-- answer. All intervals address that body's scalar space; geometry consumers
+-- resolve them through the current window presentation. Restyling drops it.
+data QuestionProjection = QuestionProjection
+  { projectedQuestionToken :: !Int, projectedQuestionWidth :: !Int
+  , projectedQuestionInput :: !Int, projectedQuestionChoices :: [[Int]]
+  } deriving (Eq,Show)
+
 -- Transcript documents remain in the normal buffer store when another agent is
 -- selected; only the shared conversation window and composer change target.
 data ConversationView = ConversationView
@@ -304,7 +312,7 @@ data Desktop = Desktop
   , messagesNumber :: Maybe Int
   , editorDrafts :: M.Map Editor.DraftRef EditorDraft, editingInput :: EditingInput, agentSteering :: Bool, agentReplying :: Bool, agentQueued :: Int
   , blinkCursor :: Bool, crtFilter :: Bool, pixelateUnicode :: Bool, materialIcons :: Bool, defaultDirectory :: Maybe FilePath, statusHover :: Maybe Int, heldModifiers :: [V.Modifier], problemsPreferredHeight :: Int, agentContextUsage :: Maybe (Integer,Integer), agentSettings :: [AgentSetting], browserFrontend :: Bool, appearance :: Appearance, systemDark :: Bool, buildDiagnostics :: [Diagnostic]
-  , chatQuestion :: Maybe ChatQuestion, chatActions :: [(Int,Int,Text,[Text])], chatInputOffset :: Maybe Int
+  , chatQuestion :: Maybe ChatQuestion, chatActions :: [(Int,Int,Text,[Text])]
   , childAgentSettings :: [AgentSetting], childAgentSteering :: Bool, childAgentContextUsage :: Maybe (Integer,Integer)
   , conversationTarget :: Text, conversationViews :: M.Map Text ConversationView
   , streamerMode :: Bool, clipboardExport :: (Int,Maybe Text), guestPrivatePaths :: [FilePath]
@@ -705,7 +713,7 @@ menuRect d i = Rect (min x (max 0 (sw-w))) 1 w (length (menuItemsFor d i)+2)
         w = min sw (maximum [keyLabelWidth t + keyLabelWidth (menuShortcut d entry) + 5 + (case command of SetBufferView _ -> 4; _ -> 0) | entry@(MenuItem t _ command) <- menuItemsFor d i])
 
 initialDesktop :: (Int,Int) -> Desktop
-initialDesktop size = Desktop size [] M.empty M.empty S.empty 1 Nothing Nothing Nothing "" Nothing False Nothing "" Nothing "" Nothing "" False Nothing Nothing Nothing "" Nothing Nothing Nothing [] False 0 0 False Nothing 0 0 Nothing SourceContext Nothing M.empty MountedInput False False 0 True False False False Nothing Nothing [] 8 Nothing [] False SystemMode True [] Nothing [] Nothing [] False Nothing "" M.empty False (0,Nothing) [] Nothing CurrentView QuerySubmit Nothing 0 M.empty Nothing False (newBuffer "") (Selection 0 0) True False M.empty [] [] False Nothing False M.empty 0
+initialDesktop size = Desktop size [] M.empty M.empty S.empty 1 Nothing Nothing Nothing "" Nothing False Nothing "" Nothing "" Nothing "" False Nothing Nothing Nothing "" Nothing Nothing Nothing [] False 0 0 False Nothing 0 0 Nothing SourceContext Nothing M.empty MountedInput False False 0 True False False False Nothing Nothing [] 8 Nothing [] False SystemMode True [] Nothing [] [] False Nothing "" M.empty False (0,Nothing) [] Nothing CurrentView QuerySubmit Nothing 0 M.empty Nothing False (newBuffer "") (Selection 0 0) True False M.empty [] [] False Nothing False M.empty 0
 
 activeWindow :: Desktop -> Maybe Window
 activeWindow d = listToMaybe (filter (windowVisible d) (windows d))
@@ -1970,7 +1978,7 @@ selectConversationView target name original
       result=prepared {windows=views, childAgentSettings=[], childAgentSteering=False, childAgentContextUsage=Nothing,
         conversationTarget=target,conversationViews=M.insert target view {conversationEditorFrame=windowId <$> find ((==Just bid).bufferId) views} (conversationViews prepared),
         editorDrafts=M.adjust (\draft->draft {editorDraftFocused=True}) (conversationDraftRef view) (editorDrafts prepared),
-        chatActions=[],chatInputOffset=Nothing,contextMenu=Nothing,menu=Nothing}
+        chatActions=[],contextMenu=Nothing,menu=Nothing}
   in maybe result (\w->focusWindow (windowId w) result) (find ((==Just bid) . bufferId) views)
 
 conversationHasDraft :: Desktop -> Bool
@@ -2327,6 +2335,70 @@ questionVisibleInput :: Int -> ChatQuestion -> Text
 questionVisibleInput width q=T.take (columnOffset suffix (max 1 (width-8))) suffix
   where suffix=T.drop (questionInputStart width q) (contents (questionBuffer q))
 
+-- | A question projection is usable only in its actual primary source view.
+-- Hidden/child views and restyled replacement bodies cannot borrow its offsets.
+windowQuestion :: Desktop -> Window -> Maybe (ChatQuestion,QuestionProjection)
+windowQuestion d w=do
+  q<-chatQuestion d
+  (bid,doc)<-conversationDocument "" d
+  projected<-documentQuestionProjection doc
+  if T.null (conversationTarget d) && bufferId w==Just bid &&
+      questionToken q==projectedQuestionToken projected &&
+      projectedQuestionWidth projected==max 1 (width (bounds w)-2)
+    then Just (q,projected) else Nothing
+
+-- | The same scalar-wrapped labels prepare the static body and live paint.
+questionChoiceLines :: Int -> Bool -> Text -> Text
+questionChoiceLines columns selected text=T.intercalate "\n" (zipWith (<>)
+  ((if selected then "(*) " else "( ) "):repeat "    ") (wrap text))
+  where
+    wrap remaining
+      | T.null remaining=[]
+      | otherwise=let count=max 1 (columnOffset remaining (max 1 (columns-4)))
+                  in T.take count remaining:wrap (T.drop count remaining)
+
+-- | Only bounded question rows are projected; transcript/Markdown is untouched.
+questionOverlayRows :: Desktop -> Window -> [(Int,[(Char,Style)])]
+questionOverlayRows d w=case windowQuestion d w of
+  Nothing->[]
+  Just (q,projected)->
+    [(offset,map (,Keyword) (T.unpack line))
+    | (index,(starts,text))<-zip [0..] (zip (projectedQuestionChoices projected) (questionChoices q))
+    , questionChoice q==Just index
+    , (offset,line)<-zip starts (T.splitOn "\n" (questionChoiceLines columns True text))]
+    ++[(projectedQuestionInput projected-7,map (,if questionChoice q==Nothing then Literal else Plain)
+      (T.unpack ("Other: "<>shown<>T.replicate (max 1 (columns-7-displayColumn shown (T.length shown))) " ")))]
+    where columns=projectedQuestionWidth projected; shown=questionVisibleInput columns q
+
+-- | The live input starts at this body coordinate. Its width is also used for
+-- clipping, reverse hits and the cursor, including narrow and panned windows.
+questionInputGeometry :: Desktop -> Window -> Maybe (Rect,ChatQuestion,QuestionProjection)
+questionInputGeometry d w=do
+  (q,projected)<-windowQuestion d w
+  doc<-windowDocument (buffers d) w
+  let (row,column)=windowTextPosition d w (bufferContent (documentBuffer doc)) (projectedQuestionInput projected)
+  pure (Rect (left (bounds w)+1+column-scrollColumn w) (top (bounds w)+1+row-scrollRow w)
+    (max 1 (projectedQuestionWidth projected-8)) 1,q,projected)
+
+-- | Reveal a newly focused choice/input without reflowing transcript history.
+-- The owner calls this only for a new interaction, never an idle/manual scroll.
+ensureQuestionVisible :: Desktop -> Desktop
+ensureQuestionVisible d=d {windows=map reveal (windows d)}
+  where
+    reveal w=case windowQuestion d w of
+      Just (q,projected) | questionFocused q,Just doc<-windowDocument (buffers d) w ->
+        let offset=case questionChoice q of
+              Just index->fromMaybe (projectedQuestionInput projected) (listToMaybe =<< listToMaybe (drop index (projectedQuestionChoices projected)))
+              Nothing->projectedQuestionInput projected
+            row=fst (windowTextPosition d w (bufferContent (documentBuffer doc)) offset)
+            rows=max 1 (windowContentRows d doc w)
+            previous=scrollRow w
+            revealed=if row<previous then row else if row>=previous+rows then row-rows+1 else previous
+            -- Include Submit when it fits, but never scroll Other out of view.
+            followed=if questionChoice q==Nothing && rows>1 && row+1>=revealed+rows then row-rows+2 else revealed
+        in w {scrollRow=max 0 followed}
+      _->w
+
 questionEvent :: V.Event -> Desktop -> Maybe (Desktop,[Effect])
 questionEvent event d=case chatQuestion d of
   Nothing -> Nothing
@@ -2362,9 +2434,14 @@ conversationClick x y w d=do
   let row=y-top (bounds w)-1+scrollRow w
       b=documentBuffer doc
       offset=windowTextOffset d w (bufferContent b) row (x-left (bounds w)-1+scrollColumn w)
-  if y<=top (bounds w) || y>=top (composerRect d w) || x<=left (bounds w) || x>=left (bounds w)+width (bounds w)-1 then Nothing
+  if not (inside (Rect (left (bounds w)+1) (top (bounds w)+1) (max 0 (width (bounds w)-2)) (windowContentRows d doc w)) x y) then Nothing
   else case find (\(a,z,_,_)->offset>=a && offset<z) (chatActions d) of
-    Just (start,_,action,values) -> Just (AgentAction action (values++[T.pack (show (max 0 (offset-start-7))) | action=="question-input"]))
+    Just (_,_,action,_) | "question-" `T.isPrefixOf` action,Nothing<-windowQuestion d w -> Nothing
+    Just (_,_,"question-input",values) -> do
+      (rect,q,projected)<-questionInputGeometry d w
+      let input=columnOffset (questionVisibleInput (projectedQuestionWidth projected) q) (max 0 (x-left rect))
+      pure (AgentAction "question-input" (values++[T.pack (show input)]))
+    Just (_,_,action,values) -> Just (AgentAction action values)
     Nothing -> Nothing
 
 activeTerminal :: Desktop -> Maybe Text
