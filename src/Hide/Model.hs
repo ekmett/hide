@@ -1144,7 +1144,7 @@ runCommand cmd source | dialog source==Nothing, Just _<-activePluginWindow sourc
 runCommand cmd source | browserFrontend source, cmd `elem` [Copy,Cut,CopyAllMessages,CopyLocation] =
   let (next,requests)=runCommand cmd source {browserFrontend=False}
   in (next {browserFrontend=True},requests++[WriteBrowserClipboard (clipboard next)])
-runCommand Paste source | browserFrontend source = (source {menu=Nothing,contextMenu=Nothing},[ReadBrowserClipboard])
+runCommand Paste source | browserFrontend source = (source {menu=Nothing,contextMenu=Nothing,prefix=Nothing},[ReadBrowserClipboard])
 runCommand cmd source | dialogCommandAllowed cmd source = applyDialogCommand cmd source
 runCommand cmd source | problemsVisible source && problemsFocused source, cmd `elem` [Undo,Redo,Cut,Paste,SelectAll] = (source {menu=Nothing,contextMenu=Nothing},[])
 runCommand Copy source | activeConversation source, Just w<-activeWindow source, anchor (selection w)/=caret (selection w) =
@@ -1821,6 +1821,7 @@ dispatchEvent (V.EvMouseUp x y button) d | Just (FollowingLink _ a b origin targ
     (d {drag=Nothing,dragOriginal=Nothing},[FollowLink origin target | x==a && y==b])
 dispatchEvent (V.EvMouseUp _ _ _) d = (d {drag = Nothing,dragOriginal=Nothing},[])
 dispatchEvent (V.EvMouseDown x y button mods) d = mouseEvent x y button mods d
+dispatchEvent ev@V.EvPaste{} d | prefix d/=Nothing = dispatchEvent ev d {prefix=Nothing}
 dispatchEvent V.EvPaste{} d | activeMarkdown d = (d {status="Markdown view is read-only."},[])
 dispatchEvent (V.EvPaste bytes) d | activeHex d = (either (const (d {status="Paste hexadecimal text."})) (`pasteHex` d) (TE.decodeUtf8' bytes),[])
 dispatchEvent (V.EvPaste bytes) d = case TE.decodeUtf8' bytes of
@@ -3117,7 +3118,7 @@ terminalContextReserved :: Desktop -> V.Key -> [V.Modifier] -> Bool
 terminalContextReserved d key mods =
   (terminalSourceReserved key mods && not (bindingContext d==Just Bindings.DialogKeys &&
     (dialogControlChord key mods || dialogInputOwner d && key `elem` map fst dialogInputKeys))) ||
-  (bindingContext d==Just Bindings.WordStarKeys && wordStarReserved key mods) ||
+  (bindingContext d `elem` [Just Bindings.WordStarKeys,Just Bindings.WordStarBlockKeys,Just Bindings.WordStarQuickKeys] && wordStarReserved key mods) ||
   (bindingContext d==Just Bindings.DialogKeys && (dialogReserved key mods || windowCycleChord key mods)) ||
   (bindingContext d==Just Bindings.ConversationKeys && key==V.KEnter)
 

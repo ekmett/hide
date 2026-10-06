@@ -230,7 +230,7 @@ platformBindings catalogue platform configuration=do
         let platformReserved = (platform==TerminalPlatform && V.MMeta `elem` mods) ||
               (platform==MacPlatform && ((V.MAlt `elem` mods && V.MCtrl `notElem` mods && V.MMeta `notElem` mods && not (context==DialogKeys && dialogFocusChord key mods) && case key of V.KChar _->True; _->False) || (key `elem` map V.KChar "h\\[]" && V.MMeta `elem` mods))) ||
               (platform/=TerminalPlatform && key `elem` map V.KChar "0+=-" && any (`elem` mods) [V.MCtrl,V.MAlt])
-        unless (not (terminalSourceReserved key mods && not (context==DialogKeys && (dialogControlChord key mods || name `elem` inputNames && key `elem` map fst dialogInputKeys)) || contextReserved || platformReserved || context==WordStarKeys && wordStarReserved key mods || context==DialogKeys && (dialogReserved key mods || windowCycleChord key mods)))
+        unless (not (terminalSourceReserved key mods && not (context==DialogKeys && (dialogControlChord key mods || name `elem` inputNames && key `elem` map fst dialogInputKeys)) || contextReserved || platformReserved || context `elem` [WordStarKeys,WordStarBlockKeys,WordStarQuickKeys] && wordStarReserved key mods || context==DialogKeys && (dialogReserved key mods || windowCycleChord key mods)))
           (Left ("Reserved "<>contextName context<>" key: "<>raw))
       compiled<-either (Left . (("Keybinding context "<>contextName context<>": ")<>)) Right $ compileBindings ([(builtinIdentifier entry,builtinAction entry,keys context (builtinAction entry)) | entry<-builtinCommands,context/=DialogKeys || builtinAction entry `elem` dialogBindingCommands]++[(name,action,[]) | (name,action)<-catalogue,context/=DialogKeys,name `notElem` map builtinIdentifier builtinCommands]) overrides
       pure ((platform,context),compiled)
@@ -238,7 +238,7 @@ platformBindings catalogue platform configuration=do
     -- explicit prefix override/unbinding cannot reach a second fallback map.
     secondStrokes entries=[(action,maybe [] (\letter->[modifier<>letter | modifier<-["","Shift+","Ctrl+","Ctrl+Shift+"]]) (lookup action entries)++maybe [] id (lookup action controls)) | action<-nub (map fst entries++map fst controls)]
       where controls=[(action,filter nonCharacter chords) | (action,chords)<-defaultsFor WordStarKeys,any nonCharacter chords]
-            nonCharacter raw=case readChord raw of Right (V.KChar _,_)->False; Right _->True; _->False
+            nonCharacter raw=case readChord raw of Right (key,mods) | windowCycleChord key mods->True; Right (V.KChar _,_)->False; Right _->True; _->False
     processControl key mods=case key of
       V.KChar _ -> V.MCtrl `elem` mods && V.MAlt `notElem` mods && V.MMeta `notElem` mods && not (windowCycleChord key mods)
       _ -> False

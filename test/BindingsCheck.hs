@@ -787,6 +787,20 @@ prefixChecks=do
     (boundKeyCommand (V.KFun 13) [] started {keyBindings=prepare TerminalPlatform (M.singleton "global" (M.singleton "hide.edit.undo" ["F13"]))}==Just Undo)
   check "duplicate second strokes reject the complete configuration"
     (either (const True) (const False) (platformBindings [] TerminalPlatform (M.singleton "wordstar-block" (M.singleton "hide.edit.undo" ["C"]))))
+  let two=addDocument Nothing (newBuffer "second") defaults
+      cycling=event (V.KChar 'k') [V.MCtrl] two
+      noCycle=cycling {keyBindings=prepare TerminalPlatform (M.singleton "wordstar-block" (M.singleton "hide.window.next" []))}
+      ident d=windowId <$> activeWindow d
+  check "pending prefix window cycling remains in its effective table"
+    (ident (event (V.KChar '\t') [V.MCtrl] cycling)/=ident cycling && prefix (event (V.KChar '\t') [V.MCtrl] cycling)==Nothing)
+  check "prefix window cycling unbinding cannot reach its old fallback"
+    (ident (event (V.KChar '\t') [V.MCtrl] noCycle)==ident noCycle && prefix (event (V.KChar '\t') [V.MCtrl] noCycle)==Nothing)
+  let pasted=fst (handleEvent (V.EvPaste "replacement") pending)
+      requested=runCommand Paste pending {browserFrontend=True}
+  check "native browser paste and requested paste consume the active prefix"
+    (activeText pasted=="replacement" && prefix pasted==Nothing && prefix (fst requested)==Nothing && snd requested==[ReadBrowserClipboard])
+  check "prefix cannot steal the earlier Ctrl Alt Exit owner"
+    (prefix (event (V.KChar 'x') [V.MCtrl,V.MAlt] started)==Nothing && snd (handleEvent (V.EvKey (V.KChar 'x') [V.MCtrl,V.MAlt]) started)==[Exit])
   let noQuick=defaults {keyBindings=prepare TerminalPlatform (M.singleton "wordstar" (M.singleton "hide.wordstar.quick-prefix" []))}
       quick=event (V.KChar 'q') [V.MCtrl] defaults
   check "quick starter unbinding prevents the old alias and default quick edge remains semantic"
