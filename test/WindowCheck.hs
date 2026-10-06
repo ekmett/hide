@@ -10,6 +10,7 @@ import Hide.Frontend
 import Hide.Sidebar
 import Hide.Model
 import Hide.Render (snapshot, renderKey)
+import qualified Hide.Plugin.Editor as E
 import qualified Data.Text as T
 import Hide.Buffer (newBuffer, Selection(..))
 import qualified Hide.Buffer as B
@@ -22,6 +23,7 @@ checks :: IO ()
 checks = do
   sourceCoordinateChecks
   sourceScrollChecks
+  ref<-E.newDraftRef
   let check name ok = unless ok (error name)
   let original=newBuffer "same revision source"
       opaque=original {B.undoStack=error "redraw key forced Undo history",B.redoStack=error "redraw key forced Redo history"}
@@ -38,7 +40,7 @@ checks = do
          changeDoc (\doc->doc {documentLinks=[(0,1,"new target")]}) base,
          changeDoc (\doc->doc {documentSourceRows=Just (Vec.singleton (prepareSourceRow "x" [('x',Comment)]))}) base,
          changeDoc (\doc->doc {documentBuffer=B.markSaved original}) base,
-         base {composerBuffer=newBuffer "new draft"},
+         base {editorDrafts=M.singleton ref (EditorDraft (newBuffer "new draft") (Selection 0 0) True Nothing)},
          setDiagnostics (diagnostics base) base,
          base {diagnostics=[Diagnostic "Fixture.hs" Nothing 0 0 1 "new problem"]},
          base {systemDark=not (systemDark base)},
@@ -50,9 +52,9 @@ checks = do
   let textArea=base {dialog=Just (Dialog "Details" Information [TextArea "Text" True original (Selection 0 0) 0 0] 0 ["OK"] [])}
       areaChanged=textArea {dialog=fmap (\dg->dg {fields=[TextArea "Text" True (newBuffer "other") (Selection 0 0) 0 0]}) (dialog textArea)}
       areaWrapped=textArea {dialog=fmap (\dg->dg {fields=map id (fields dg)}) (dialog textArea)}
-      view=ConversationView 1 "Child" original (Selection 0 0) (0,0) (Selection 0 0)
-      child=base {conversationViews=M.singleton "child" view}
-      childChanged=child {conversationViews=M.singleton "child" view {conversationDraft=newBuffer "other draft"}}
+      view=ConversationView 1 "Child" ref Nothing Nothing (0,0) (Selection 0 0)
+      child=base {conversationViews=M.singleton "child" view,editorDrafts=M.singleton ref (EditorDraft opaque (Selection 0 0) True Nothing)}
+      childChanged=child {editorDrafts=M.adjust (\draft->draft {editorDraftBuffer=newBuffer "other draft"}) ref (editorDrafts child)}
   areaKey<-renderKey textArea
   areaWrappedKey<-renderKey areaWrapped
   areaChangedKey<-renderKey areaChanged
@@ -60,12 +62,17 @@ checks = do
   childKey<-renderKey child
   childChangedKey<-renderKey childChanged
   check "hidden child draft changes invalidate native menus and rendering" (childKey/=childChangedKey)
+  forM_ [child {editorDrafts=M.adjust (\draft->draft {editorDraftSelection=Selection 0 1}) ref (editorDrafts child)},
+         child {editorDrafts=M.adjust (\draft->draft {editorDraftFocused=False}) ref (editorDrafts child)}] $ \changed->do
+    next<-renderKey changed
+    check "draft selection and focus invalidate without inspecting history" (next/=childKey)
   let idle=child {dialog=dialog textArea,
         chatQuestion=Just (ChatQuestion 7 "Question" ["One","Two"] Nothing original (Selection 0 0) True),
         sideTree=Just (emptySidebar "/project" 20 False)}
       idleWrapper d=d {systemDark=systemDark d,
         buffers=M.map (\doc->doc {documentFile=fmap (\f->f {filePath=filePath f}) (documentFile doc),documentSourceRows=fmap id (documentSourceRows doc)}) (buffers d),
-        conversationViews=M.map (\v->v {conversationDraft=conversationDraft v}) (conversationViews d),
+        conversationViews=M.map (\v->v {conversationDraftRef=conversationDraftRef v}) (conversationViews d),
+        editorDrafts=M.map (\draft->draft {editorDraftBuffer=editorDraftBuffer draft}) (editorDrafts d),
         chatQuestion=fmap (\q->q {questionFocused=questionFocused q}) (chatQuestion d),
         dialog=fmap (\dg->dg {fields=map wrapField (fields dg)}) (dialog d),
         sideTree=fmap (\tree->tree {treeSelected=treeSelected tree}) (sideTree d)}

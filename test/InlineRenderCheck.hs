@@ -19,11 +19,13 @@ import Hide.InlineTypes
 import Hide.Sidebar
 import Hide.Model
 import Hide.Render
+import qualified Hide.Plugin.Editor as E
 import Hide.Syntax
 import Hide.Unicode (displayOpsForPic)
 
 checks :: IO ()
 checks=do
+  ref<-E.newDraftRef
   let source="before\nlet old tail\nfollowing\nlast"
       b=newBuffer source
       raw=addDocument (Just (FileState "Preview.hs" Nothing)) b (initialDesktop (80,25))
@@ -52,7 +54,7 @@ checks=do
   forM_ [shown {inlineEpoch=inlineEpoch shown+1},
          modifyActive (\win->win {selection=Selection 12 12}) shown,
          shown {buffers=M.adjust (\doc->doc {documentBuffer=replaceSelection (Selection 0 0) "edited " b}) (sourceFixtureBuffer w) (buffers shown)},
-         shown {menu=Just (0,0)},shown {composerFocused=True,problemsFocused=True}] $ \stale->
+         shown {menu=Just (0,0)},shown {problemsFocused=True}] $ \stale->
     check "stale or obstructed inline preview is not rendered" (snapshot stale==snapshot stale {inlinePreview=Nothing})
   let split=shown {windows=[w {bounds=Rect 0 1 35 18},w {windowId=windowId w+1,bounds=Rect 36 1 35 18}]}
       splitRow=T.lines (snapshot split)!!3
@@ -81,7 +83,9 @@ checks=do
     check "inline identity, dismissal and validation epoch invalidate redraw" (key/=next)
   let hint=colored {buffers=M.adjust (\doc->doc {documentLabel=Just "Autocomplete"}) (sourceFixtureBuffer w) (buffers colored),
         autocompleteACPEnabled=True,autocompleteDraft=newBuffer "    hint",autocompleteSelection=Selection 2 2,
-        autocompleteFocused=True,composerBuffer=newBuffer "CHAT_ONLY",inlinePreview=Nothing}
+        autocompleteFocused=True,inlinePreview=Nothing,
+        conversationViews=M.singleton "" (ConversationView (sourceFixtureBuffer w) "Chat" ref Nothing Nothing (0,0) (Selection 0 0)),
+        editorDrafts=M.singleton ref (EditorDraft (newBuffer "CHAT_ONLY") (Selection 0 0) True Nothing)}
       hintRect=autocompleteComposerRect hint w
   check "ACP hint composer retains plain indentation and does not render the chat draft"
     ("    hint" `T.isInfixOf` snapshot hint && not ("CHAT_ONLY" `T.isInfixOf` snapshot hint) &&
