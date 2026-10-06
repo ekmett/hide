@@ -599,7 +599,7 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary remov
             (renderCursor live==V.Cursor (left rect+3) (top rect) &&
               maybe False ((==Selection 1 1).questionSelection) (chatQuestion hit) &&
               "界λ" `T.isInfixOf` snapshot live && all (\x->not (readableAt live x (top rect))) [left rect..left rect+2])
-          let marked=live {chatQuestion=fmap (\value->value {questionBuffer=newBuffer "\x301\&private",questionSelection=Selection 0 0}) (chatQuestion live)}
+          let marked=live {chatQuestion=fmap (\value->value {questionBuffer=newBuffer (T.replicate 33 "\x301"<>"private"),questionSelection=Selection 0 0}) (chatQuestion live)}
           font<-loadFont
           captured<-ScreenCapture.capture font marked False >>= either (error . T.unpack) pure
           let capturedText=do
@@ -608,10 +608,11 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary remov
                 encoded<-field "text" block
                 metadata<-decodeStrict' (TE.encodeUtf8 encoded)
                 field "text" metadata
-          check "capture hides leading answer marks joined to the label guard cell"
-            ("\x301" `T.isInfixOf` snapshot marked {streamerMode=True} &&
+          let guardCell text=T.index (T.lines text!!top rect) (left rect-1)
+          check "capture hides leading answer fragments joined to the label guard cell"
+            (guardCell (snapshot marked {streamerMode=True})=='�' &&
               not (readableAt marked (left rect-1) (top rect)) &&
-              maybe False (\text->not ("\x301" `T.isInfixOf` text) && not ("private" `T.isInfixOf` text)) capturedText)
+              maybe False (\text->guardCell text==' ' && not ("private" `T.isInfixOf` text)) capturedText)
           let inputRow=top rect-top (bounds win)-1+scrollRow win
               oneRow=ensureQuestionVisible (modifyActive (\w->w {bounds=(bounds w) {height=4},scrollRow=inputRow+1}) live)
               shortWindow=fromMaybe (error "Missing one-row question window") (activeWindow oneRow)
