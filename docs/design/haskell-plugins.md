@@ -336,6 +336,12 @@ copy, relative links, shell blocks and protected question controls into prepared
 semantic content is a separate migration. Human input and approval authority
 remain host-owned throughout.
 
+Inline questions keep their prompt and choice labels in the transcript body;
+the host draws the live answer and selected choice over their reserved regions.
+Editing an answer does not rebuild the Markdown history. The question token
+identifies its immutable prompt and choices. Field positions belong to that body
+and use the current layout for painting, clicks, caret and privacy masking.
+
 ### Broader proposed window contract
 
 Separate a window's content from its chrome. The host supplies the title, number,
