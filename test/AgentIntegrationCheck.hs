@@ -9,6 +9,7 @@ import Data.Aeson
 import Data.Aeson.Types (parseMaybe)
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
 import System.Directory
 import System.Environment
 import System.FilePath ((</>))
@@ -191,7 +192,10 @@ checks=bracket temporary removePathForcibly $ \root ->
       ensure "child transcript carries no provider keys" (not ("private-main-key" `T.isInfixOf` activeText replied))
       firstQueued<-submit QuerySubmit (draft "permission" (Selection 10 10) replied)
       secondQueued<-submit QuerySubmit (draft "must-not-replay" (Selection 15 15) firstQueued)
-      awaiting<-tickUntil (pure . maybe False (T.isPrefixOf "Agent permission:" . dialogTitle) . dialog) secondQueued
+      primaryWhileQueued<-ui "show" [] secondQueued
+      configuredPrimary<-ui "configure" ["0","python3",TE.decodeUtf8 (BL.toStrict (encode [script])),"{}"] primaryWhileQueued
+      childAfterPrimaryConfig<-select liveChild configuredPrimary
+      awaiting<-tickUntil (pure . maybe False (T.isPrefixOf "Agent permission:" . dialogTitle) . dialog) childAfterPrimaryConfig
       ensure "human can queue a followup while child is running" (agentQueued awaiting>=1)
       _<-AH.cancelAgent hub AH.Human primary >>= right
       childStillWaiting<-tickConversation conversation awaiting
