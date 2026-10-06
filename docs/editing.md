@@ -47,7 +47,8 @@ The sidebar shows each `.cabal` package in the selected directory as a separate
 root beside Files and Agents. Expand a package to browse its library, executable,
 test and benchmark targets, then expand a target to open its source files.
 Right-click the package name to open its package description. For component
-actions, see [Build and Run from the sidebar](running.md#compile-make-run).
+actions, including GHC Test and Benchmark, see
+[running from the sidebar](running.md#compile-make-run).
 
 Source entries follow Cabal declarations, including common stanzas and conditional
 source directories. A `?` marks conditional entries; multiple existing candidates
