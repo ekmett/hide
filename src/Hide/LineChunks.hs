@@ -10,7 +10,7 @@
 module Hide.LineChunks
   ( Chunks, ChunkMeasure(..), ColumnAdvance(..), applyAdvance
   , chunksFromText, chunksEdit, chunksMeasure, chunksWidth, chunksText, chunksPieces, chunksSlice, chunksFragments
-  , chunksWindow, chunksDisplayColumn, chunksColumnOffset
+  , chunksWindow, chunksExtentThrough, chunksDisplayColumn, chunksColumnOffset
   , chunksPreviousCharacter, chunksSpanLeft, chunksSpanRight, chunksSuffixWidth
   ) where
 
@@ -143,8 +143,8 @@ chunksSlice tree start count=T.concat (chunksFragments tree start count)
 -- each group owns its source array, so ordinary style runs cannot cross leaves.
 chunksWindow :: Chunks -> Int -> (Int,Int,[(T.Text,[DisplayItem])])
 chunksWindow (Loaded _ spans _) requested=case seekLoadedColumn (max 0 requested) spans of
-  (# char,col,[] #)->(I# char,I# col,[])
-  (# char,col,chunk:rest #)->windowSuffix (max 0 requested) (I# char) (I# col) chunk rest
+  (# char,col,_,[] #)->(I# char,I# col,[])
+  (# char,col,_,chunk:rest #)->windowSuffix (max 0 requested) (I# char) (I# col) chunk rest
 chunksWindow (Edited tree) requested=case FT.viewl suffix of
   FT.EmptyL->(chunkCharacters measure,applyAdvance (chunkAdvance measure) 0,[])
   chunk FT.:< rest->windowSuffix goal (chunkCharacters measure) initialColumn chunk (toList rest)
@@ -156,15 +156,32 @@ chunksWindow (Edited tree) requested=case FT.viewl suffix of
 
 -- Primitive endpoint receipts keep the cached-span walk numeric. Box the
 -- public coordinates only at its selected edge, never once per skipped span.
-seekLoadedColumn :: Int -> [Chunk] -> (# Int#,Int#,[Chunk] #)
-seekLoadedColumn goal=go 0 0
+seekLoadedColumn :: Int -> [Chunk] -> (# Int#,Int#,Int#,[Chunk] #)
+seekLoadedColumn goal=go 0 0 0
   where
-    go !char !col []=finish char col []
-    go !char !col suffix@(Chunk m _ _ _ _:rest)
-      | next<=goal=go (char+chunkCharacters m) next rest
-      | otherwise=finish char col suffix
+    go !char !col !byte []=finish char col byte []
+    go !char !col !byte suffix@(Chunk m _ _ _ _:rest)
+      | next<=goal=go (char+chunkCharacters m) next (byte+chunkBytes m) rest
+      | otherwise=finish char col byte suffix
       where next=applyAdvance (chunkAdvance m) col
-    finish (I# char) (I# col) suffix=(# char,col,suffix #)
+    finish (I# char) (I# col) (I# byte) suffix=(# char,col,byte,suffix #)
+
+-- | Seek only through the requested column. Return reached scalar/column and
+-- an upper extent: known prefix plus at most eight cells per remaining byte.
+-- Tabs are the largest source advance; edited rows already have an exact root
+-- measure. This never demands the loaded row's independent exact-width thunk.
+chunksExtentThrough :: Chunks -> Int -> (Int,Int,Int)
+chunksExtentThrough (Loaded text spans _) requested=case seekLoadedColumn goal spans of
+  (# char,col,_,[] #)->(I# char,I# col,I# col)
+  (# char,col,byte,Chunk _ leaf incoming _ overflow:_ #)->
+    let (local,used,column,_)=sourceLeafFrom goal (I# col) incoming overflow leaf
+        remaining=TU.lengthWord8 text-I# byte-used
+        upper=if remaining>(maxBound-column) `div` 8 then maxBound else column+remaining*8
+    in (I# char+local,column,upper)
+  where goal=max 0 requested
+chunksExtentThrough (Edited tree) _=
+  let m=FT.measure tree; column=applyAdvance (chunkAdvance m) 0
+  in (chunkCharacters m,column,column)
 
 seekLoadedScalar :: Int -> [Chunk] -> (# Int#,Int#,[Chunk] #)
 seekLoadedScalar goal=go 0 0

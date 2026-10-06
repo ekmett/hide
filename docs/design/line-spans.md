@@ -4,9 +4,9 @@ Status: in progress, 5 October 2026. Tracked in [issue #116](https://github.com/
 Loaded long rows retain their original text and share a lazy stream of regular
 span receipts. Exact queries prepare only the prefix they visit. The first edit
 promotes that row to a measured tree for persistent local repair. Exact width
-remains a separate memoized full-row calculation. Files sidebar, diagnostic-menu
-opening, debugger source following and recovery prepare those numeric receipts
-before UI adoption; other opening routes can still demand them on first paint.
+remains available as a separate memoized full-row calculation for explicit
+queries. Ordinary Current source scrollbars estimate unvisited suffixes rather
+than demand that calculation on opening or paint.
 
 We want cheap horizontal seeks and small edits in long lines. Dice the text into
 borrowed spans at roughly **128-byte intervals**. Keep old spans after an edit;
@@ -101,16 +101,23 @@ terminator. Small columns do not demand a whole-row projection. Ordinary short
 rows keep their
 compact representation and existing query path.
 
-Exact total width is an exception: loaded rows memoize a numeric full-row scan
-independently of span receipts. The Files sidebar, diagnostic-menu opening,
-debugger source following and recovery force cached long-row widths on their
-preparation owner before adopting
-source windows. They leave short-row widths, source bytes and lazy span receipts
-alone. Raw buffer construction stays lazy; other opening routes, including the
-synchronous ReadPath route, can still demand total width on first paint. Repeated
-width requests reuse the numeric result. The scrollbar retains its existing
-visible-row maximum and exact proportional extent. Bounded draft sizing stops
-at its requested cap instead of demanding total width.
+Ordinary Current source scrollbars use the indexed prefix plus a conservative
+byte-derived estimate for the unvisited suffix. Arrow/page scrolling and drag
+seeks query the real prospective viewport; reaching EOF immediately clamps to
+its actual extent. An end drag can demand the whole row. Edited rows already
+have an exact measured extent. Tabs, Unicode and CR/LF use the same source
+coordinate rules as rendering and hit testing.
+
+A small per-window thumb hint retains a discovered extent when moving left. It
+is not source identity or proof of EOF: each actual scroll queries current source
+independently, so even an equal-revision replacement cannot clamp navigation to
+an old width. The thumb can briefly show an old estimate until the next seek
+refines it. Review and prepared Markdown geometry remain unchanged. File opening,
+recovery, debugger source preparation and interactive highlighting no longer
+prewarm total widths just for source scrollbars. Explicit exact width queries
+still perform a memoized numeric full-row scan; no hidden background scan is
+scheduled to stabilize the thumb. The first edit promotion described above
+remains linear in the loaded row.
 
 Hover rejects EOF using the reached source scalar offset and cached row length.
 Viewport queries normalize consumed line terminators to the editor's EOF without

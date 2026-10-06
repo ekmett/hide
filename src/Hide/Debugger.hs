@@ -1589,7 +1589,6 @@ response runtime@(Debugger ref _ _ _ _) kind body d = do
                         row=max 0 (min (bufferLineCount prepared-1) (integer "line" selected-1))
                         offset=bufferLineOffset prepared row+L.positionOffset (bufferLineAt prepared row) (0,max 0 (integer "column" selected-1))
                     _<-evaluate (prepareBuffer prepared)
-                    _<-evaluate (prepareSourceWidths (bufferContent prepared))
                     _<-evaluate offset
                     pure (Right (AdapterSource canonical prepared offset))
               modifyIORef' ref (\state->state {sourcePreparing=Just (SourcePreparation (generation s) revision (Just (reference,stamp)) explicit selected Nothing worker)})
@@ -1700,7 +1699,6 @@ prepareLocalSource base path selected private captured
           changed<-evaluate (snapshotDirty modified)
           prepare canonical (ExistingSource wid bid version changed) image
     prepare canonical target image=do
-      _<-evaluate (prepareSourceWidths image)
       let row=max 0 (min (contentLineCount image-1) (integer "line" selected-1))
           offset | integer "line" selected<=0 = -1
                  | otherwise=contentLineOffset image row+L.positionOffset (contentLineAt image row) (0,max 0 (integer "column" selected-1))
