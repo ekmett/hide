@@ -12,7 +12,7 @@
 module Hide.Conversation (ConversationState, conversationAgents, withConversationAt, chatTools, chatToolNames, chatTool, QuestionCaller, captureQuestionCaller, chatToolAs, withConversation, conversationEffects, tickConversation, parseLaunch, renderReply, pauseLabel, renderTimestamp) where
 
 import Hide.Sidebar
-import Hide.ConversationBody (Record(..),QuestionProjection(..))
+import Hide.ConversationBody (Record(..),ToolExpansion(..),QuestionProjection(..))
 import Hide.SessionServices (persist)
 import Prelude hiding (reads)
 import Control.Exception (IOException, bracket, try, onException, mask, mask_, evaluate)
@@ -87,7 +87,11 @@ preparationCancel (DraftPrompt _ _ worker)=cancel worker
 
 
 activity :: Text -> Value -> Record
-activity ident value=Activity ident value [value] False
+activity ident value=Activity ident value [value]
+
+toggleExpansion :: Text -> ToolExpansion -> State -> State
+toggleExpansion target item state=state {toolExpansions=if S.member key expanded then S.delete key expanded else S.insert key expanded}
+  where key=(target,item); expanded=toolExpansions state
 data Approval = ChildPermission AH.AgentId AP.ACPPermission (MVar (Maybe Text)) | Permission Value [(Text,Text)] Value | Write Value Snapshot Text | Execute Value Terminal.TerminalConfig Int
 
 data FileRequest = ReadFile Int (Maybe Int) | WriteFile Text
@@ -122,7 +126,7 @@ data State = State
   , streamTails :: M.Map Text Text
   , lastAgentSync :: Maybe (FilePath,Text,AH.Capabilities,Bool)
   , childRecords :: M.Map Text [Record], childRender :: Maybe (Text,Int,Value), childWidths :: M.Map Text Int
-  , expandedToolRuns :: S.Set (Text,Text)
+  , toolExpansions :: S.Set (Text,ToolExpansion)
   , childControls :: M.Map Text (Maybe DraftReceipt,Async (Either Text ()))
   , childCancels :: M.Map Text (Async (Either Text ()))
   , fileCaptures :: [FileCapture], retiringRequests :: [(Int,Async ())]
@@ -165,7 +169,7 @@ withConversationAt consoles root action = Command.withRegistry $ \registry->do
     , ownedTerminals=S.empty,terminalWaiters=M.empty,lastMessageAt=Nothing
     , lastRender=Nothing,lastSession=remembered,waitingQuestion=Nothing,questionResults=M.empty,questionsClosed=False,lastQuestion=Nothing,lastQuestionInteraction=Nothing
     , deliveredContext=Nothing,fileCaptures=[],retiringRequests=[],promptPreparation=Nothing,resumeRecordPath=resumePath,creatingAgent=Nothing,directoryAgents=[],agentDelivery=Nothing
-    , agentInitialized=Null,agentConfig=Null,streamTails=M.empty,lastAgentSync=Nothing,childRecords=M.empty,childRender=Nothing,childWidths=M.empty,childCancels=M.empty,childControls=M.empty,expandedToolRuns=S.empty,editorRegistry=registry,editorCommand=command,conversationEditors=editors }
+    , agentInitialized=Null,agentConfig=Null,streamTails=M.empty,lastAgentSync=Nothing,childRecords=M.empty,childRender=Nothing,childWidths=M.empty,childCancels=M.empty,childControls=M.empty,toolExpansions=S.empty,editorRegistry=registry,editorCommand=command,conversationEditors=editors }
   AR.withAgentRuntime root (provider <$> readIORef ref) $ \agents ->
     bracket (pure (ConversationState directory ref consoles agents)) closeConversation action
 
@@ -291,9 +295,7 @@ perform (ConversationState _ ref _ _) "focus" [] d=do
 perform (ConversationState _ ref _ _) "toggle-tool-run" [ident] d=do
   state<-readIORef ref
   let target=conversationTarget d
-      key=(target,ident)
-      expanded=expandedToolRuns state
-      next=state {expandedToolRuns=if S.member key expanded then S.delete key expanded else S.insert key expanded}
+      next=toggleExpansion target (RunExpansion ident) state
       records=if T.null target then transcript next else M.findWithDefault [] target (childRecords next)
   writeIORef ref next
   keepConversationPosition d <$> paintView target False next {transcript=records} d
@@ -345,10 +347,8 @@ performPrimary runtime@(ConversationState directory ref consoles _) action value
         pure d {status=either id (const "Reconnecting saved agent session...") result}
       "3" -> showAgentDirectory runtime d
       _ -> pure d
-    ("toggle-activity",[index]) | Just ident<-readMaybe (T.unpack index) -> do
-      let toggle (i,Activity title value history expanded) | i==ident=Activity title value history (not expanded)
-          toggle (_,record)=record
-          next=s {transcript=map toggle (zip [0::Int ..] (transcript s))}
+    ("toggle-activity",[ident]) -> do
+      let next=toggleExpansion "" (ActivityExpansion ident) s
       writeIORef ref next
       keepConversationPosition d <$> paint False next d
     ("question-choice",[token,index]) | Just ident<-readMaybe (T.unpack token),Just chosen<-readMaybe (T.unpack index),
@@ -439,7 +439,7 @@ performPrimary runtime@(ConversationState directory ref consoles _) action value
       mapM_ (C.releaseConsole consoles) (S.toList (ownedTerminals s))
       retired<-retireRequests ref
       mapM_ A.stopClient (connection s)
-      writeIORef ref retired {connection=Nothing,session=Nothing,agentDelivery=Nothing,streamTails=M.empty,pending=M.empty,queuedPrompt=Nothing,queuedQueries=childQueries (queuedQueries retired),transcript=[],expandedToolRuns=S.filter ((/="").fst) (expandedToolRuns s),lastMessageAt=Nothing,reads=M.empty,approvals=[],presented=Nothing,deferredApproval=False,ownedTerminals=S.empty,terminalWaiters=M.empty}
+      writeIORef ref retired {connection=Nothing,session=Nothing,agentDelivery=Nothing,streamTails=M.empty,pending=M.empty,queuedPrompt=Nothing,queuedQueries=childQueries (queuedQueries retired),transcript=[],toolExpansions=S.filter ((/="").fst) (toolExpansions s),lastMessageAt=Nothing,reads=M.empty,approvals=[],presented=Nothing,deferredApproval=False,ownedTerminals=S.empty,terminalWaiters=M.empty}
       start runtime Nothing d
     ("resume",_) | busy s -> pure d {status="Cancel the current reply before resuming a session."}
     ("resume",_) -> pure d {dialog=Just (Dialog "Resume conversation" (AgentDialog "load")
@@ -449,7 +449,7 @@ performPrimary runtime@(ConversationState directory ref consoles _) action value
       mapM_ (C.releaseConsole consoles) (S.toList (ownedTerminals s))
       retired<-retireRequests ref
       mapM_ A.stopClient (connection s)
-      writeIORef ref retired {connection=Nothing,session=Nothing,agentDelivery=Nothing,streamTails=M.empty,pending=M.empty,queuedPrompt=Nothing,queuedQueries=childQueries (queuedQueries retired),transcript=[],expandedToolRuns=S.filter ((/="").fst) (expandedToolRuns s),lastMessageAt=Nothing,reads=sourceSnapshots d,approvals=[],presented=Nothing,deferredApproval=False,ownedTerminals=S.empty,terminalWaiters=M.empty}
+      writeIORef ref retired {connection=Nothing,session=Nothing,agentDelivery=Nothing,streamTails=M.empty,pending=M.empty,queuedPrompt=Nothing,queuedQueries=childQueries (queuedQueries retired),transcript=[],toolExpansions=S.filter ((/="").fst) (toolExpansions s),lastMessageAt=Nothing,reads=sourceSnapshots d,approvals=[],presented=Nothing,deferredApproval=False,ownedTerminals=S.empty,terminalWaiters=M.empty}
       start runtime (Just (T.strip sid)) d
     _ | Just suffix<-T.stripPrefix "approval:" action, Just token<-readMaybe (T.unpack suffix) -> decide runtime token values d
     _ -> pure d
@@ -800,10 +800,10 @@ mergeTool :: Value -> [Record] -> [Record]
 mergeTool update records = case field "toolCallId" update :: Maybe Text of
   Nothing -> records
   Just ident ->
-    let merge (Activity old (Object previous) history expanded)
-          | old==ident, Object new<-update = Activity old (Object (KM.union (KM.filter (/=Null) new) previous)) (history++[update]) expanded
+    let merge (Activity old (Object previous) history)
+          | old==ident, Object new<-update = Activity old (Object (KM.union (KM.filter (/=Null) new) previous)) (history++[update])
         merge other=other
-    in if any (\record -> case record of Activity old _ _ _ -> old==ident; _ -> False) records
+    in if any (\record -> case record of Activity old _ _ -> old==ident; _ -> False) records
        then map merge records else records++[activity ident update]
 
 incoming :: ConversationState -> A.Client -> Value -> Text -> Value -> Desktop -> IO Desktop
@@ -1037,7 +1037,7 @@ keepConversationPosition before after=after {windows=map keep (windows after)}
       _ -> w
 
 isToolRecord :: Record -> Bool
-isToolRecord (Activity _ value _ _)=field "status" value `elem`
+isToolRecord (Activity _ value _)=field "status" value `elem`
   [Just ("pending"::Text),Just "in_progress",Just "completed",Just "failed"]
 isToolRecord _=False
 
@@ -1124,11 +1124,11 @@ paintView target force s original
         continue previous remaining@(next:_)=
           [(plain Plain (if sameSpeaker (snd previous) (snd next) then "\n" else "\n\n"),Nothing,[])]++renderRecords width remaining
     renderRun width calls=case calls of
-      (_,Activity ident _ _ _):_ ->
-        let expanded=S.member (target,ident) (expandedToolRuns s)
-            titles=[fromMaybe label (field "title" value) | (_,Activity label value _ _)<-calls]
-            running=length [() | (_,Activity _ value _ _)<-calls,field "status" value `elem` [Just ("pending"::Text),Just "in_progress"]]
-            failed=length [() | (_,Activity _ value _ _)<-calls,field "status" value==Just ("failed"::Text)]
+      (_,Activity ident _ _):_ ->
+        let expanded=S.member (target,RunExpansion ident) (toolExpansions s)
+            titles=[fromMaybe label (field "title" value) | (_,Activity label value _)<-calls]
+            running=length [() | (_,Activity _ value _)<-calls,field "status" value `elem` [Just ("pending"::Text),Just "in_progress"]]
+            failed=length [() | (_,Activity _ value _)<-calls,field "status" value==Just ("failed"::Text)]
             count n label=[T.pack (show n)<>label | n>0]
             summary=T.intercalate " · " (T.pack (show (length calls))<>" tool calls":count running " running"++count failed " failed"++[T.intercalate ", " (take 3 titles)])
             heading=clipCells width ((if expanded then "▾▾ " else "▸▸ ")<>T.unwords (T.words summary))
@@ -1140,10 +1140,11 @@ paintView target force s original
     renderRecord width (recordId,record)=case record of
       Pause label -> [(renderTimestamp width label,Nothing,[])]
       Reply role text -> [replyChunk width recordId (role=="You") text]
-      Activity ident value history expanded ->
-        let title=T.unwords (T.words ("["<>fromMaybe "activity" (field "status" value)<>"] "<>fromMaybe ident (field "title" value)))
+      Activity ident value history ->
+        let expanded=S.member (target,ActivityExpansion ident) (toolExpansions s)
+            title=T.unwords (T.words ("["<>fromMaybe "activity" (field "status" value)<>"] "<>fromMaybe ident (field "title" value)))
             heading=(if expanded then "▾ " else "▸ ")<>clipCells (max 1 (width-2)) title
-        in [(plain Pragma heading,Just ("toggle-activity",[T.pack (show recordId)]),[])]++
+        in [(plain Pragma heading,Just ("toggle-activity",[ident]),[])]++
           [(plain Plain ("\n"<>T.intercalate "\n" (map jsonText history)),Nothing,[]) | expanded]
     renderQuestion width recordId q=
       [replyChunk width recordId False (questionText q)]++
@@ -1250,7 +1251,7 @@ parseAgentSettings value=mapMaybe parseOption (fromMaybe [] (field "configOption
       _ -> concatMap choice (fromMaybe [] (field "options" option))
 
 rawTranscript :: [Record] -> Text
-rawTranscript=T.intercalate "\n\n" . mapMaybe (\record -> case record of Reply role text -> Just (role<>"\n"<>text); Activity ident _ history _ -> Just (ident<>"\n"<>T.intercalate "\n" (map jsonText history)); Pause _ -> Nothing)
+rawTranscript=T.intercalate "\n\n" . mapMaybe (\record -> case record of Reply role text -> Just (role<>"\n"<>text); Activity ident _ history -> Just (ident<>"\n"<>T.intercalate "\n" (map jsonText history)); Pause _ -> Nothing)
 
 field :: FromJSON a => Text -> Value -> Maybe a
 field name=parseMaybe (withObject "object" (.: K.fromText name))
@@ -1571,12 +1572,10 @@ performChild runtime@(ConversationState _ ref _ agents) action values d=do
         modifyIORef' ref (\s->s {childCancels=M.insert target worker (childCancels s),queuedQueries=filter ((/=target).queryTarget) (queuedQueries s)})
         pure d {status="Cancellation requested."}
     "copy" -> pure d {clipboardCode=Nothing,clipboard=if M.member target (childRecords state) then rawTranscript records else maybe "" (contents.documentBuffer.snd) (conversationDocument target d),status="Conversation copied with sender attribution."}
-    "toggle-activity" | [index]<-values,Just chosen<-readMaybe (T.unpack index) -> do
-      let toggle (i,Activity title value history expanded) | i==chosen=Activity title value history (not expanded)
-          toggle (_,record)=record
-          changed=map toggle (zip [0::Int ..] records)
-      modifyIORef' ref (\s->s {childRecords=M.insert target changed (childRecords s)})
-      keepConversationPosition d <$> paintView target False state {transcript=changed} d
+    "toggle-activity" | [activityId]<-values -> do
+      let next=toggleExpansion target (ActivityExpansion activityId) state
+      writeIORef ref next
+      keepConversationPosition d <$> paintView target False next {transcript=records} d
     _ -> pure d {status="Switch to Primary for provider settings or session controls; use Agents to reconnect a child."}
   where
     startControl submitted operation=startChildControl runtime (AH.AgentId (conversationTarget d)) submitted operation d
@@ -1655,10 +1654,7 @@ refreshChildConversation (ConversationState _ ref _ agents) d=do
                   trimmed=fromMaybe (0::Int) (field "nextEvent" entry)>101 || dropped
                   metadata=T.intercalate " · " ([fromMaybe "" (field "status" entry)]++
                     maybe [] (\parent->["parent: "<>parent]) (field "parentName" entry)++models++["recent history" | trimmed])
-                  oldExpanded=S.fromList [ident | Activity ident _ _ True<-M.findWithDefault [] target (childRecords current)]
-                  retain (Activity ident value updates _)=Activity ident value updates (S.member ident oldExpanded)
-                  retain record=record
-                  records=Pause metadata:map retain (foldl (childHistoryRecord name) [] events)
+                  records=Pause metadata:foldl (childHistoryRecord name) [] events
               modifyIORef' ref (\s->s {childRecords=M.insert target records (childRecords s),childRender=Just signature,childWidths=M.insert target (conversationWidthFor target projected) (childWidths s)})
               paintView target False current {transcript=records} projected
 
@@ -1693,7 +1689,7 @@ childHistoryRecord name records value=let detail=fromMaybe Null (field "detail" 
   Just "thought" -> records -- Thoughts stay in the bounded history API.
   Just "tool" -> case field "toolCallId" detail :: Maybe Text of
     Just _ -> mergeTool detail records
-    Nothing -> records++[Activity ("event-"<>T.pack (show (fromMaybe (length records) (field "index" value)::Int))) detail [detail] False]
+    Nothing -> records++[Activity ("event-"<>T.pack (show (fromMaybe (length records) (field "index" value)::Int))) detail [detail]]
   Just "message_finished" | field "status" detail/=Just ("completed"::Text) -> records++[Pause (fromMaybe "Stopped" (field "error" detail))]
   _ -> records
   where lastRole xs=case reverse xs of Reply role _:_->Just role; _->Nothing

@@ -4,7 +4,7 @@
 -- TextPresentation's existing serial worker will consume these closed requests;
 -- Conversation retains task/control authority and adopts their exact results.
 module Hide.ConversationBody
-  ( Record(..), QuestionSchema(..), QuestionProjection(..)
+  ( Record(..), ToolExpansion(..), QuestionSchema(..), QuestionProjection(..)
   , BodyProvider(..), BodyKey(..), bodyOwnerMatches, BodyInput(..)
   , BodyRequest(..), BodyResult(..), PreparedBody(..), HostBodyControls(..)
   , BodyControlReceipt(..), ConversationBody(..)
@@ -21,7 +21,11 @@ import Hide.TextLayout (TextLayout)
 
 -- Records retain immutable transcript data only; copy identities are local to
 -- one rendering and do not identify a provider or grant input authority.
-data Record = Reply Text Text | Activity Text Value [Value] Bool | Pause Text deriving (Eq,Show)
+data Record = Reply Text Text | Activity Text Value [Value] | Pause Text deriving (Eq,Show)
+
+-- One existing UI expansion owner covers individual activities and grouped runs.
+-- Transcript updates contain data only and cannot overwrite this interaction.
+data ToolExpansion = ActivityExpansion !Text | RunExpansion !Text deriving (Eq,Ord)
 
 -- The authenticated question token owns immutable prompt/choices. No live
 -- answer, selection, focus or Undo can enter a background body capture.
@@ -46,7 +50,7 @@ data BodyKey = BodyKey
   { bodyWindow :: !W.WindowRef, bodyTarget :: !Text, bodyProvider :: !BodyProvider
   , bodyTranscript :: !(StableName [Record]), bodyQuestionToken :: !(Maybe Int)
   , bodyColumns :: !Int, bodyGraphical :: !Bool, bodyWide :: !Bool
-  , bodyExpansion :: !(StableName (Set (Text,Text)))
+  , bodyExpansion :: !(StableName (Set (Text,ToolExpansion)))
   } deriving Eq
 
 -- | A completed stream snapshot may be shown while its successor is preparing.
@@ -63,7 +67,7 @@ bodyOwnerMatches a b=bodyWindow a==bodyWindow b && bodyTarget a==bodyTarget b &&
 data BodyInput = BodyInput
   { bodyTitle :: !Text, bodyProject :: !FilePath, bodySession :: !(Maybe Text)
   , bodyRecords :: ![Record], bodyQuestion :: !(Maybe QuestionSchema)
-  , bodyExpandedTools :: !(Set (Text,Text))
+  , bodyExpandedTools :: !(Set (Text,ToolExpansion))
   }
 data BodyRequest = BodyRequest !BodyKey !BodyInput
 data BodyResult = BodyResult !BodyKey !(Either Text PreparedBody)
