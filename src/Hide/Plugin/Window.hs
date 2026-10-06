@@ -17,6 +17,7 @@
 module Hide.Plugin.Window
   ( WindowRef, WindowScope, WindowUpdate, withWindowScope, openTextWindow, refreshTextWindow
   , updateWindowRef, admitWindowUpdate, windowRefCurrent, retireWindowRef
+  , EditorWindowUpdate, openEditorWindow, editorWindowBody, editorWindowEditor, admitEditorWindowUpdate
   , PreparedWindow, prepareTextWindow, prepareMarkdownWindow, prepareStyledTextWindow, prepareRecoverableTextWindow
   , WindowRow(..), prepareRowsWindow, prepareRecoverableRowsWindow
   , WindowRows(..), preparedWindowTitle, preparedWindowText, preparedWindowRows, preparedWindowWidth, preparedWindowHasSections, preparedWindowNeedsLayout, preparedWindowRecovery
@@ -36,6 +37,7 @@ import Hide.Buffer (contentLength,BufferContent, bufferContent, newBuffer, prepa
 import Hide.Unicode (sourceTextWidth)
 import Hide.Markdown (renderMarkdown)
 import Hide.Plugin.Command (validCommandName)
+import qualified Hide.Plugin.EditorHost as E
 import Hide.Syntax (Style(..),SourceRow,plainSourceRow,sourceRowText,sourceRowRanges,sourceRangeCharEnd,sectionTitle,styleLayoutMetadata)
 
 -- | Exact content instance. A closed/reopened view cannot reuse this identity.
@@ -242,3 +244,40 @@ admitWindowUpdate present (WindowUpdate reference@(WindowRef _ (WindowScope scop
 -- | Host close invalidates the exact instance. Idempotent and callback-free.
 retireWindowRef :: WindowRef -> IO ()
 retireWindowRef (WindowRef _ _ state)=atomically (writeTVar state (0,False))
+
+-- | A joint readonly body and typed editor attachment. Only this reply carrier
+-- is parameterized; body content never retains an extension callback. It is an
+-- opening, not an ordinary body refresh or an action replacement.
+data EditorWindowUpdate c r = EditorWindowUpdate !WindowUpdate !(E.PreparedEditor c r)
+
+-- | Prepare an exact body/attachment pair on the existing reply worker. The
+-- mount is consumed only during joint host adoption, never while constructing a
+-- reply. Publishing the same pair twice cannot create two editable frames.
+openEditorWindow :: WindowScope -> PreparedWindow -> E.PreparedEditor c r -> IO (Maybe (EditorWindowUpdate c r))
+openEditorWindow scope body editor=fmap (`EditorWindowUpdate` editor) <$> openTextWindow scope body
+
+-- | /O(1)/. Readonly publication paired to this exact attachment.
+editorWindowBody :: EditorWindowUpdate c r -> WindowUpdate
+editorWindowBody (EditorWindowUpdate body _)=body
+
+-- | /O(1)/. Callable binding retained only by the typed reply owner, never by
+-- Desktop or prepared readonly content. Its initial Buffer transfers once.
+editorWindowEditor :: EditorWindowUpdate c r -> E.PreparedEditor c r
+editorWindowEditor (EditorWindowUpdate _ editor)=editor
+
+-- | Host joint opening after current actor/geometry/budget checks. Check every
+-- body condition before attempting the mount claim; after that claim succeeds,
+-- the only remaining operation commits the body in the same transaction.
+-- Returning Nothing cannot leave either lifetime partly adopted. Command
+-- retirement can leave an inert view, but submission rechecks registration.
+admitEditorWindowUpdate :: EditorWindowUpdate c r -> IO (Maybe (WindowRef,PreparedWindow,E.PreparedEditor c r))
+admitEditorWindowUpdate (EditorWindowUpdate (WindowUpdate reference@(WindowRef _ (WindowScope scope) state) revision opening prepared) editor)=do
+  current<-E.editorCurrent editor
+  if not current then pure Nothing else atomically $ do
+    live<-readTVar scope
+    (latest,opened)<-readTVar state
+    if not live || latest<=0 || latest/=revision || not opening || opened then pure Nothing else do
+      claimed<-E.claimEditorMount (E.editorMount editor)
+      if not claimed then pure Nothing else do
+        writeTVar state (latest,True)
+        pure (Just (reference,prepared,editor))
