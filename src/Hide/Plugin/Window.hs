@@ -128,7 +128,7 @@ prepareSemanticTextWindow title styled semantics=do
         V.map (\(a,z,_,_)->(a,z)) (textShellBlocks semantics) V.++
         textGuestHidden semantics V.++ textStreamerHidden semantics V.++ textRecoveryHidden semantics
   if not (V.all valid ranges) then pure (Left "Invalid prepared window semantic range.") else do
-    _<-evaluate (maybe 0 length (textLinkBase semantics)+
+    _<-evaluate (maybe 0 (foldl' (\n c->c `seq` n+1) 0) (textLinkBase semantics)+
       V.foldl' (\n (a,z,url)->n+a+z+T.length url) 0 (textLinks semantics)+
       V.foldl' (\n (a,z,dialect,body)->n+a+z+T.length dialect+T.length body) 0 (textShellBlocks semantics)+
       V.foldl' (\n (a,z)->n+a+z) 0 ranges)
