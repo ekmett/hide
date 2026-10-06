@@ -159,7 +159,10 @@ loadedSuffix start entries rest=go start
 -- Binary predicates inspect those scalars directly; no per-probe transform is
 -- composed and no source receipt is replayed.
 loadedIndex :: (Int->Bool) -> V.Vector LoadedEntry -> Int
-loadedIndex predicate entries=go 0 (V.length entries)
+loadedIndex predicate entries=loadedSearch predicate 0 (V.length entries)
+
+loadedSearch :: (Int->Bool) -> Int -> Int -> Int
+loadedSearch predicate=go
   where
     go !lo !hi | lo>=hi=lo
                | predicate mid=go lo mid
@@ -239,10 +242,15 @@ ownerRangeMeasure owner@(SourceOwner _ seed _ _ _ _) a@(ReceiptEdge start firstB
 -- receipt using monotone cached counts; its local Tab prefix and endpoint
 -- columns yield an exact transform for every incoming column residue.
 ownerRangeAdvance :: SourceOwner -> ReceiptEdge -> ReceiptEdge -> ColumnAdvance
-ownerRangeAdvance (SourceOwner _ _ _ _ _ blocks) (ReceiptEdge _ _ _ firstColumn firstTabs _ _) (ReceiptEdge _ _ _ lastColumn lastTabs _ _)
+ownerRangeAdvance owner (ReceiptEdge _ _ _ firstColumn firstTabs _ _) (ReceiptEdge _ _ _ lastColumn lastTabs _ _)
   | firstTabs==lastTabs=Add (lastColumn-firstColumn)
-  | otherwise=case firstTab 0 0 blocks of
+  | otherwise=case ownerFirstTab owner firstTabs of
       (column,prefix)->Tab (column-firstColumn+prefix) (lastColumn-nextTab (column+prefix))
+
+-- Demand only after an already visited endpoint proves that a tab exists in
+-- the range. Early tab-free seeks must not search an unprepared suffix for it.
+ownerFirstTab :: SourceOwner -> Int -> (Int,Int)
+ownerFirstTab (SourceOwner _ _ _ _ _ blocks) firstTabs=firstTab 0 0 blocks
   where
     firstTab !tabs !col (LoadedBlock _ _ advance _ count entries rest)
       | tabs+count<=firstTabs=firstTab (tabs+count) (applyAdvance advance col) rest
@@ -358,38 +366,64 @@ takeChunks remaining (chunk:rest)=chunk:takeChunks (remaining-chunkCharacters (F
 treeChunks :: PieceTree -> [Chunk]
 treeChunks=concatMap pieceChunks . toList
 
--- A column query probes bounded scalar prefixes, then normalizes once through
--- the selected receipt. The selected piece's full advance is never demanded.
+-- Select a raw lower bound first: no source scalar advances more than eight
+-- cells, so the skipped prefix is definitely before the requested column. The
+-- remaining search uses each immutable owner's existing vectors directly.
+-- Exhausting a piece repeats this safe jump in the remaining raw FT; it does
+-- not promise logarithmic traversal of every possible disjoint piece layout.
 seekEditedColumn :: Int -> PieceTree -> (# Int#,Int#,Int#,[Chunk] #)
-seekEditedColumn goal tree
-  | point>=size=finish size (prefixColumn size) (rawBytes (FT.measure tree)) []
-  | otherwise=case FT.viewl suffix of
-      Piece measure owner@(SourceOwner _ _ _ _ _ blocks) start byte FT.:< rest->
-        case ownerReceiptEdge owner (start+local) of
-          edge@(ReceiptEdge scalar offset _ _ _ _ _)->case seekLoadedScalar scalar blocks of
-            (# _,_,selected #)->finish (base+scalar-start)
-              (applyAdvance (ownerRangeAdvance owner (ownerReceiptEdge owner start) edge) initial)
-              (rawBytes before+offset-byte) (takeChunks (start+rawCharacters measure-scalar) selected++treeChunks rest)
-      FT.EmptyL->finish size (prefixColumn size) (rawBytes (FT.measure tree)) []
+seekEditedColumn goal=go 0 0 0
   where
-    size=rawCharacters (FT.measure tree)
-    prefixColumn=editedDisplayColumn tree
-    point=gallop 0 (min 1 size)
-    gallop !lo !hi
-      | prefixColumn hi>goal=binary lo hi
-      | hi>=size=size
-      | otherwise=gallop hi (if hi>size `div` 2 then size else hi*2)
-    binary !lo !hi
-      | hi-lo<=1=editedPreviousCharacter tree hi
-      | prefixColumn mid>goal=binary lo mid
-      | otherwise=binary mid hi
-      where mid=lo+(hi-lo) `div` 2
-    (prefix,suffix)=FT.split ((>point).rawCharacters) tree
-    before=FT.measure prefix
-    base=rawCharacters before
-    local=point-base
-    initial=applyAdvance (rawAdvance before) 0
-    finish (I# char) (I# col) (I# byte) chunks=(# char,col,byte,chunks #)
+    go !char !col !byte tree=case FT.viewl suffix of
+      FT.EmptyL->finish (char+rawCharacters before) initial (byte+rawBytes before) []
+      piece FT.:< rest->case seekPieceColumn goal initial piece of
+        (# local,column,used,selected #)->
+          if I# local>=rawCharacters (FT.measure piece)
+            then go (char+rawCharacters before+I# local) (I# column) (byte+rawBytes before+I# used) rest
+            else finish (char+rawCharacters before+I# local) (I# column)
+              (byte+rawBytes before+I# used) (selected++treeChunks rest)
+      where
+        lower=max 0 (goal-col) `div` 8
+        (prefix,suffix)=FT.split ((>lower).rawCharacters) tree
+        before=FT.measure prefix
+        initial=applyAdvance (rawAdvance before) col
+    finish (I# char) (I# col) (I# byte) selected=(# char,col,byte,selected #)
+
+-- Direct monotone endpoint search with the piece's actual incoming column.
+-- Cached prefixes are measured at owner column zero; after the first tab the
+-- incoming residue changes every later endpoint by one fixed multiple of eight.
+-- No range endpoint hash or unseen owner EOF is needed for numeric seeking.
+seekPieceColumn :: Int -> Int -> Piece -> (# Int#,Int#,Int#,[Chunk] #)
+seekPieceColumn goal initial (Piece measure owner@(SourceOwner _ _ _ _ _ blocks) start firstByte)=go 0 0 0 0 blocks
+  where
+    end=start+rawCharacters measure
+    ReceiptEdge _ _ _ firstColumn firstTabs _ _=ownerReceiptEdge owner start
+    (tabColumn,tabPrefix)=ownerFirstTab owner firstTabs
+    columnAt column tabs
+      | tabs==firstTabs=initial+column-firstColumn
+      | otherwise=column+nextTab (initial+tabColumn-firstColumn+tabPrefix)-nextTab (tabColumn+tabPrefix)
+    go !char !byte !col !tabs (LoadedBlock chars bytes advance _ tabCount entries rest)
+      | char+chars<=start=go (char+chars) (byte+bytes) (applyAdvance advance col) (tabs+tabCount) rest
+      | reached<=goal=
+          if limit>=end then finish (rawCharacters measure) reached (rawBytes measure) []
+          else go (char+chars) (byte+bytes) (applyAdvance advance col) (tabs+tabCount) rest
+      | otherwise=case V.unsafeIndex entries index of
+          LoadedEntry scalar offset prefix _ count _->finish (char+scalar-start)
+            (columnAt (applyAdvance prefix col) (tabs+count)) (byte+offset-firstByte)
+            (takeChunks (end-char-scalar) (loadedSuffix index entries rest))
+      where
+        first=if start<=char then 0 else loadedIndex (\i->scalarEnd i>start-char) entries
+        limit=min end (char+chars)
+        lastIndex=if limit>=char+chars then V.length entries else 1+loadedIndex (\i->char+scalarEnd i>=limit) entries
+        index=loadedSearch (\i->columnEnd i>goal) first lastIndex
+        reached=columnEnd (lastIndex-1)
+        scalarEnd i | i+1==V.length entries=chars
+                    | otherwise=case V.unsafeIndex entries (i+1) of LoadedEntry scalar _ _ _ _ _->scalar
+        columnEnd i | i+1==V.length entries=columnAt (applyAdvance advance col) (tabs+tabCount)
+                    | otherwise=case V.unsafeIndex entries (i+1) of
+                        LoadedEntry _ _ prefix _ count _->columnAt (applyAdvance prefix col) (tabs+count)
+    go _ _ _ _ LoadedEnd=error "Piece extends beyond its immutable owner."
+    finish (I# char) (I# col) (I# byte) selected=(# char,col,byte,selected #)
 
 -- Primitive endpoint receipts keep the cached-span walk numeric. Box the
 -- public coordinates only at its selected edge, never once per skipped block.
