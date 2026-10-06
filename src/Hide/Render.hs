@@ -163,7 +163,7 @@ renderKey original = do
           (documentCursorVisible value) (documentSuggestedName value) (present (documentSourceRows value)))
       view value=do
         case conversationBody value of
-          InstalledBody _ receipt->mapM_ (\(BodyControlReceipt prepared _)->payload prepared) receipt
+          InstalledBody _ receipt->mapM_ (\(BodyControlReceipt prepared _ _ _ _)->payload prepared) receipt
           InertBody prepared->payload prepared
         pure (ViewKey (conversationBodyRef value) (conversationName value) (conversationDraftRef value)
           (conversationEditor value) (conversationEditorFrame value) (conversationScroll value) (conversationReplySelection value))

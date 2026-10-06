@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module HighlightingCheck (checks) where
 
-import EditorFixture (withEditorFixture)
+import EditorFixture (withEditorFixture,withEditorTextFixture)
 import Control.Concurrent
 import Control.Exception (evaluate,finally)
 import Control.Monad (unless,foldM,forM_)
@@ -24,7 +24,7 @@ import Hide.Unicode (CellSpan(..))
 import Hide.Syntax
 
 checks :: IO ()
-checks = withEditorFixture "" (addReadOnly "Conversation" "reply" (initialDesktop (100,35))) $ \chatBase->do
+checks = withEditorTextFixture "" "reply" (initialDesktop (100,35)) $ \chatBase->do
   sourceLineChecks
   composerWidthChecks
   plainSourceRowChecks

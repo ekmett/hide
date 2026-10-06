@@ -158,12 +158,12 @@ checks = do
       shellDesktop=let opened=addReadOnly "Help" "printf abc" (initialDesktop (80,25))
                    in opened {buffers=M.adjust (\doc->doc {documentShellBlocks=[shellTuple]}) 1 (buffers opened)}
       shellMenu=fst (windowMouse 2 2 V.BRight [] shellDesktop)
-      shellCommand=ExecuteShellBlock 1 shellTuple
+      shellCommand=ExecuteShellBlock (SourceShell 1) shellTuple
       shellEffects=snd (runCommand shellCommand shellDesktop)
       expiredShell=shellDesktop {buffers=M.adjust restyle 1 (buffers shellDesktop)}
   check "shell code-block context forwards exact raw body and rejects stale renderer metadata"
     (contextKind shellMenu==ShellContext shellCommand &&
-     shellEffects==[ServiceAction "execute-shell-block" ["1","0","10","bash",shellRaw]] &&
+     shellEffects==[ExecuteShellBlockAction (SourceShell 1) shellTuple] &&
      null (snd (runCommand shellCommand expiredShell)))
   let terminal=modifyActive (\w->w {bounds=Rect 3 4 50 12,selection=Selection 1 4})
         (addReadOnly "Terminal 1" "terminal text" (addDocument Nothing (newBuffer "source") (initialDesktop (100,35))))
