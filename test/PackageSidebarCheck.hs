@@ -97,6 +97,7 @@ checks=bracket temporary removePathForcibly $ \root->do
         BL.writeFile configPath bytes
         let otherFile=root </> "Other.hs"
             other=addDocument (Just (Hide.Files.FileState otherFile Nothing)) (newBuffer "other source") sourceOpened
+            focusOther d=maybe d (\window->focusWindow (windowId window) d) (activeWindow other)
         writeFile otherFile "other source"
         built<-request "lib:sample" "Build" other >>= admitted >>= waitInvocation
         arguments<-lines <$> readFile invocation
@@ -136,18 +137,18 @@ checks=bracket temporary removePathForcibly $ \root->do
         BL.writeFile configPath ghcBytes
         path<-lookupEnv "PATH"
         afterRunners<-withEnv "PATH" (Just (cabalBin<>[searchPathSeparator]<>maybe "" id path)) $ do
-          tested<-request "test:check" "Test" afterRefusals >>= admitted >>= waitInvocation
+          tested<-request "test:check" "Test" (focusOther afterRefusals) >>= admitted >>= waitInvocation
           testArguments<-lines <$> readFile invocation
           unless (testArguments==[root,"test","--with-compiler="<>compiler,"--test-show-details=direct","sample:test:check"])
             (fail "Test uses captured qualified component/root and selected GHC")
           testDone<-wait "captured Test completes" (T.isInfixOf "completed." . status) tested
           removeFile invocation
-          driver<-request "test:driver" "Test" testDone >>= admitted >>= waitInvocation
+          driver<-request "test:driver" "Test" (focusOther testDone) >>= admitted >>= waitInvocation
           driverArguments<-lines <$> readFile invocation
           unless (driverArguments==[root,"test","--with-compiler="<>compiler,"--test-show-details=direct","sample:test:driver"]) (fail "Detailed Test delegates its captured component to Cabal")
           driverDone<-wait "captured driver Test completes" (T.isInfixOf "completed." . status) driver
           removeFile invocation
-          benchmarked<-request "bench:measure" "Benchmark" driverDone >>= admitted >>= waitInvocation
+          benchmarked<-request "bench:measure" "Benchmark" (focusOther driverDone) >>= admitted >>= waitInvocation
           benchArguments<-lines <$> readFile invocation
           unless (benchArguments==[root,"bench","--with-compiler="<>compiler,"sample:bench:measure"])
             (fail "Benchmark uses captured component without Run program/runtime arguments")
@@ -157,7 +158,7 @@ checks=bracket temporary removePathForcibly $ \root->do
         unchangedConfig<-BL.readFile configPath
         unless (unchangedConfig==ghcBytes) (fail "Test/Benchmark must not replace the saved target")
         removeFile invocation
-        let focused=maybe afterRunners (\window->focusWindow (windowId window) afterRunners) (activeWindow other)
+        let focused=focusOther afterRunners
             dirty=editActive (\sel->replaceSelection sel "changed") Nothing focused
         blocked<-request "test:check" "Test" dirty >>= admitted >>= wait "dirty target refusal" (maybe False (const True) . dialog)
         exists<-doesFileExist invocation
