@@ -10,7 +10,7 @@
 -- Independent session/publication receipts reject late content without inspecting
 -- unrelated Documents. Replacement freezes the prior snapshot until prepared
 -- content adopts into the same display slot; closing never reopens from output.
-module Hide.Debugger (Debugger, Core, withDebugger, withDebuggerConsoles, withDownloadsCommands, withDebuggerClock, withDebuggerHdb, hdbOfferDialog, debuggerEffects, tickDebugger, debuggerTool, debuggerSidebarEpoch, debuggerSidebarSession, debuggerSidebarRead, debuggerWatches, withDebuggerWatchProvider) where
+module Hide.Debugger (Debugger, Core, withDebugger, withDebuggerConsoles, withDownloadsCommands, withDebuggerClock, withDebuggerHdb, hdbOfferDialog, debuggerEffects, tickDebugger, tickPreparedDebug, debuggerTool, debuggerSidebarEpoch, debuggerSidebarSession, debuggerSidebarRead, debuggerWatches, withDebuggerWatchProvider) where
 
 import qualified Hide.Plugin.Window as W
 import qualified Hide.Plugin.Menu as Menu
@@ -43,9 +43,11 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Vector as V
 import GHC.Clock (getMonotonicTimeNSec)
-import System.Directory (XdgDirectory(XdgConfig), canonicalizePath, doesFileExist, getXdgDirectory)
-import System.IO (IOMode(ReadMode), withBinaryFile)
-import System.FilePath (isAbsolute, takeFileName, takeExtension, makeRelative, (</>))
+import System.Directory (XdgDirectory(XdgConfig), canonicalizePath, doesFileExist, getXdgDirectory, removeFile)
+import System.IO (IOMode(ReadMode), withBinaryFile, openTempFile, hClose)
+import System.IO.Error (tryIOError)
+import Hide.PackageSidebar (packageBuildManifestCurrent)
+import System.FilePath (isAbsolute, takeFileName, takeExtension, takeDirectory, makeRelative, (</>))
 import System.Timeout (timeout)
 import System.Mem.StableName
 import Text.Read (readMaybe)
@@ -251,6 +253,7 @@ data State = State
   , breakpoints :: M.Map Text (Value,[Breakpoint]), sources :: M.Map Int (Int,Int,Value)
   , root :: FilePath, endpoint :: (Text,Int), output :: Text
   , startRequest :: (Text,Value), managed :: Bool, adapterId :: Text
+  , debugCradle :: Maybe FilePath
   , hdbLauncher :: Maybe FilePath, debugEnvironment :: [(String,String)], debugConsoles :: [Text], terminalLaunch :: Maybe (Int,Text,Async (),TMVar (Either Text C.PreparedConsole)), outputShown :: Bool, outputPending :: Bool
   , failure :: Maybe Text, disconnectAt :: Maybe Integer
   , endedAt :: Maybe Integer, programExitCode :: Maybe Int
@@ -269,7 +272,7 @@ emptyState :: State
 emptyState = State {client=Nothing,connected=False,capabilities=Null,ready=False,configured=False,pending=M.empty,generation=0,frameRevision=0,
   stopped=False,thread=Nothing,frame=Nothing,frames=[],followSource=True,exceptionFilters=[],breakpoints=M.empty,sources=M.empty,
   root=".",endpoint=("127.0.0.1",4711),output="",failure=Nothing,disconnectAt=Nothing,endedAt=Nothing,programExitCode=Nothing,
-  hdbLauncher=Nothing,debugEnvironment=[],debugConsoles=[],terminalLaunch=Nothing,outputShown=False,outputPending=False,choices=M.empty,choiceId=0,breakRequests=M.empty,breakModified=M.empty,startRequest=("attach",object []),managed=False,adapterId="",variableRefs=M.empty,sidebarVisible=False,sidebarSession=0,sidebarPages=M.empty,sidebarThreads=M.empty,sidebarFrames=M.empty,sidebarReferences=M.empty,watchProvider=Nothing,watchPreparing=Nothing,sourcePreparing=Nothing,sourceReferences=M.empty,nextSourceObservation=1,watchExpressions=M.empty,watchCatalogueRevision=0,nextWatch=1,watchDialog=Nothing,sourceWatchDialog=Nothing}
+  debugCradle=Nothing,hdbLauncher=Nothing,debugEnvironment=[],debugConsoles=[],terminalLaunch=Nothing,outputShown=False,outputPending=False,choices=M.empty,choiceId=0,breakRequests=M.empty,breakModified=M.empty,startRequest=("attach",object []),managed=False,adapterId="",variableRefs=M.empty,sidebarVisible=False,sidebarSession=0,sidebarPages=M.empty,sidebarThreads=M.empty,sidebarFrames=M.empty,sidebarReferences=M.empty,watchProvider=Nothing,watchPreparing=Nothing,sourcePreparing=Nothing,sourceReferences=M.empty,nextSourceObservation=1,watchExpressions=M.empty,watchCatalogueRevision=0,nextWatch=1,watchDialog=Nothing,sourceWatchDialog=Nothing}
 
 withDebugger :: (Debugger -> IO a) -> IO a
 withDebugger action = C.withConsoles (\consoles -> withDebuggerConsoles consoles action)
@@ -293,12 +296,13 @@ withDebuggerHdbConsoles :: C.Consoles -> IO Integer -> (Compilers.Compiler -> IO
   -> (Hdb.HdbPlan -> (Downloads.DownloadProgress -> IO ()) -> IO (Either Text FilePath))
   -> (Debugger -> IO a) -> IO a
 withDebuggerHdbConsoles consoles clock prepare acquire action = Downloads.withDownloads $ \downloads -> W.withWindowScope $ \scope -> bracket (newOutputOwner scope) closeOutputOwner $ \outputOwner -> DownloadsWindow.withOwner downloads $ \downloadView -> do
-  jobs<-newIORef (HdbState 0 Nothing Nothing Nothing Nothing)
+  jobs<-newIORef (HdbState 0 Nothing Nothing Nothing Nothing Nothing)
   retired<-newIORef []
   mailbox<-SidebarMailbox <$> newTVarIO Nothing <*> newTBQueueIO 32 <*> newTVarIO (0,Nothing,M.empty)
   let runtime=HdbRuntime downloads jobs prepare acquire consoles retired downloadView
   bracket ((\ref -> Debugger ref clock runtime mailbox outputOwner) <$> newIORef emptyState)
     (\debugger@(Debugger ref _ _ _ _) -> do
+      invalidateHdb debugger
       h<-readIORef jobs
       mapM_ (\(_,_,_,task)->cancel task) (hdbPreparing h)
       atomically $ case mailbox of SidebarMailbox epoch _ _->writeTVar epoch Nothing
@@ -333,6 +337,8 @@ debuggerEffects runtime fallback = foldM apply . (False,)
       next<-perform runtime action values d
       publishSidebarEpoch runtime
       pure (False,next)
+    apply (_,d) (PackageDebugAction target entry) = (False,) <$> queuePackageDebug runtime target entry d
+    apply (_,d) (AdoptPreparedDebug target) = (False,) <$> adoptPackageDebug runtime target d
     apply (_,d) (DownloadCancelAction request) = (False,) <$> cancelDownloadRequest runtime request d
     apply (_,d) (DebugSourceAction request) = do
       next<-sourceAction runtime request d
@@ -1163,10 +1169,11 @@ stopTransport :: Debugger -> State -> IO ()
 stopTransport runtime@(Debugger ref _ (HdbRuntime _ _ _ _ _ retired _) _ _) s = mask $ \restore -> do
   -- No old worker can publish into the replacement session. Process cleanup is
   -- joined only at daemon teardown, outside the desktop lock.
-  modifyIORef' ref (\state -> state {client=Nothing,terminalLaunch=Nothing,debugConsoles=[],sourcePreparing=Nothing,watchPreparing=Nothing})
+  modifyIORef' ref (\state -> state {client=Nothing,terminalLaunch=Nothing,debugConsoles=[],sourcePreparing=Nothing,watchPreparing=Nothing,debugCradle=Nothing})
   cleanups<-mapM (C.retireConsole (debuggerConsoles runtime)) (debugConsoles s)
-  when (isJust (client s) || isJust (terminalLaunch s) || isJust (sourcePreparing s) || isJust (watchPreparing s) || not (null cleanups)) $ do
-    task<-async $ restore $ flip finally (mapM_ D.stopClient (client s)) $ do
+  when (isJust (client s) || isJust (terminalLaunch s) || isJust (sourcePreparing s) || isJust (watchPreparing s) || not (null cleanups) || isJust (debugCradle s)) $ do
+    task<-async $ restore $ flip finally
+      (mapM_ D.stopClient (client s) `finally` mapM_ (void . tryIOError . removeFile) (debugCradle s)) $ do
       forM_ (terminalLaunch s) $ \(_,_,worker,result) -> do
         cancel worker
         completed<-atomically (tryTakeTMVar result)
@@ -1925,7 +1932,14 @@ exceptionText body=T.unlines (filter (not . T.null)
 -- the exact launch it was accepted for, never the current selection by accident.
 type HdbContext=(Maybe FilePath,Maybe FilePath,Maybe FilePath,Toolchain,[(Int,Maybe FilePath,Int,StableName Buffer,Bool)])
 data GhcLaunch=GhcLaunch FilePath Build.BuildConfig FilePath Int HdbContext
+  | PackageLaunch !PackageBuildTarget !(Either Text FilePath) !Int !PackageDebugContext
+      ![DirtySnapshot] !(Maybe Build.BuildConfig) !(IORef (Maybe FilePath))
+-- Source identity, path and current toolchain only. No source/draft/history Eq.
+type PackageDebugContext=(Maybe FilePath,Maybe FilePath,Toolchain,[(Int,Maybe FilePath,ContentVersion)])
+data PackagePrepared=PackageGhc !Build.BuildConfig !FilePath ![(String,String)] !FilePath
+  | PackageThc !FilePath ![String]
 data HdbPrepared=HdbReady FilePath [(String,String)] | HdbOffer Hdb.HdbPlan
+  | PackageReady !GhcLaunch !PackagePrepared | PackageOffer !GhcLaunch !Hdb.HdbPlan
 data HdbRuntime=HdbRuntime Downloads.Downloads (IORef HdbState)
   (Compilers.Compiler -> IO (Either Text Hdb.HdbPlan))
   (Hdb.HdbPlan -> (Downloads.DownloadProgress -> IO ()) -> IO (Either Text FilePath)) C.Consoles (IORef [Async ()]) DownloadsWindow.Owner
@@ -1933,7 +1947,8 @@ data HdbState=HdbState
   { hdbSerial :: Int, hdbWanted :: Maybe (Int,GhcLaunch,Bool)
   , hdbPreparing :: Maybe (Int,GhcLaunch,TMVar (),Async (Either () (Either Text HdbPrepared)))
   , hdbOffer :: Maybe (Int,GhcLaunch,Hdb.HdbPlan)
-  , hdbWaiting :: Maybe (Int,GhcLaunch,Int) }
+  , hdbWaiting :: Maybe (Int,GhcLaunch,Int)
+  , hdbReady :: Maybe (Int,GhcLaunch,PackagePrepared) }
 
 hdbContext :: Desktop -> IO HdbContext
 hdbContext d=do
@@ -1944,20 +1959,69 @@ hdbContext d=do
           stable<-makeStableName buffer
           pure (bid,filePath <$> documentFile doc,revision buffer,stable,dirty buffer)
 hdbCurrent :: GhcLaunch -> HdbContext -> Bool
+hdbCurrent PackageLaunch{} _=False
 hdbCurrent (GhcLaunch _ _ _ _ context) current@(_,_,_,_,identities)=context==current &&
   not (any (\(_,_,_,_,modified)->modified) identities)
+packageDebugContext :: Desktop -> IO (PackageDebugContext,[DirtySnapshot])
+packageDebugContext d=do
+  entries<-mapM capture [(bid,doc) | (bid,doc)<-M.toAscList (buffers d),documentLabel doc==Nothing]
+  let directory=defaultDirectory d; tree=treeRoot <$> sideTree d
+  mapM_ (evaluate . length) directory
+  mapM_ (evaluate . length) tree
+  pure ((directory,tree,fromMaybe GHC (toolchain d),map fst entries),map snd entries)
+  where capture (bid,doc)=do
+          version<-captureVersion (documentBuffer doc)
+          snapshot<-evaluate (captureDirty (documentBuffer doc))
+          path<-evaluate (filePath <$> documentFile doc)
+          mapM_ (evaluate . length) path
+          pure ((bid,path,version),snapshot)
+
+launchCurrent :: GhcLaunch -> Desktop -> IO Bool
+launchCurrent request@GhcLaunch{} d=hdbCurrent request <$> hdbContext d
+launchCurrent (PackageLaunch _ _ _ (directory,tree,compiler,entries) _ _ _) d
+  | directory/=defaultDirectory d || tree/=(treeRoot <$> sideTree d) || compiler/=fromMaybe GHC (toolchain d)=pure False
+  | length entries/=length [() | doc<-M.elems (buffers d),documentLabel doc==Nothing]=pure False
+  | otherwise=and <$> mapM current entries
+  where current (bid,path,version)=case M.lookup bid (buffers d) of
+          Just doc | documentLabel doc==Nothing,path==(filePath <$> documentFile doc)->versionCurrent version (documentBuffer doc)
+          _->pure False
+
+queuePackageDebug :: Debugger -> PackageBuildTarget -> Either Text FilePath -> Desktop -> IO Desktop
+queuePackageDebug runtime target entry d=do
+  (context,snapshots)<-packageDebugContext d
+  owned<-newIORef Nothing
+  queueHdb runtime (PackageLaunch target entry 4711 context snapshots Nothing owned) d
+
+-- One request owns its temporary cradle until adopted into the DAP session.
+-- Invalidation joins the preparation on the existing off-owner retired pool
+-- before removing the file; a canceled worker cannot create after cleanup.
+retirePackageLaunch :: Debugger -> Maybe (Async a) -> GhcLaunch -> IO ()
+retirePackageLaunch (Debugger _ _ (HdbRuntime _ _ _ _ _ retired _) _ _) worker request=case request of
+  PackageLaunch _ _ _ _ _ _ owned->mask_ $ do
+    task<-async $ do
+      mapM_ waitCatch worker
+      file<-atomicModifyIORef' owned (\value->(Nothing,value))
+      mapM_ (void . tryIOError . removeFile) file
+    modifyIORef' retired (task:)
+  _->pure ()
+
 hdbPending :: Debugger -> IO Bool
 hdbPending (Debugger _ _ (HdbRuntime _ ref _ _ _ _ _) _ _)=do
   h<-readIORef ref
   pure (any (==hdbSerial h) ([ident | (ident,_,_)<-maybeToList (hdbWanted h)]++
     [ident | (ident,_,_,_)<-maybeToList (hdbPreparing h)]++[ident | (ident,_,_)<-maybeToList (hdbOffer h)]++
-    [ident | (ident,_,_)<-maybeToList (hdbWaiting h)]))
+    [ident | (ident,_,_)<-maybeToList (hdbWaiting h)]++[ident | (ident,_,_)<-maybeToList (hdbReady h)]))
 
 invalidateHdb :: Debugger -> IO ()
-invalidateHdb (Debugger _ _ (HdbRuntime _ ref _ _ _ _ _) _ _)=do
+invalidateHdb runtime@(Debugger _ _ (HdbRuntime _ ref _ _ _ _ _) _ _)=do
   h<-readIORef ref
   forM_ (hdbPreparing h) (\(_,_,stop,_)->atomically (void (tryPutTMVar stop ())))
-  writeIORef ref h {hdbSerial=hdbSerial h+1,hdbWanted=Nothing,hdbOffer=Nothing}
+  forM_ (hdbPreparing h) (\(_,request,_,task)->retirePackageLaunch runtime (Just task) request)
+  forM_ ([request | (_,request,_)<-maybeToList (hdbWanted h)]++
+         [request | (_,request,_)<-maybeToList (hdbOffer h)]++
+         [request | (_,request,_)<-maybeToList (hdbWaiting h)]++
+         [request | (_,request,_)<-maybeToList (hdbReady h)]) (retirePackageLaunch runtime Nothing)
+  writeIORef ref h {hdbSerial=hdbSerial h+1,hdbWanted=Nothing,hdbOffer=Nothing,hdbReady=Nothing}
 
 queueHdb :: Debugger -> GhcLaunch -> Desktop -> IO Desktop
 queueHdb runtime@(Debugger _ _ (HdbRuntime _ ref _ _ _ _ _) _ _) request d=do
@@ -1971,23 +2035,160 @@ startHdbPreparation :: Debugger -> IO ()
 startHdbPreparation (Debugger _ _ (HdbRuntime _ ref prepare _ _ _ _) _ _)=mask $ \restore->do
   h<-readIORef ref
   case (hdbPreparing h,hdbWanted h) of
-    (Nothing,Just (ident,request@(GhcLaunch directory config _ _ _),allowOffer))->do
+    (Nothing,Just (ident,request,allowOffer))->do
       stop<-newEmptyTMVarIO
       task<-async $ restore $ race (atomically (readTMVar stop)) $ do
         result<-try $ do
-          settings<-getXdgDirectory XdgConfig "thc-edit"
-          current<-Build.loadBuildConfig settings directory
-          if current/=config then pure (Left "The build configuration changed; launch again.") else do
-            project<-Build.isProject directory
-            resolved<-Compilers.debuggerCompilerInfo directory project (Build.buildExecutable config)
-            case resolved of
-              Left err->pure (Left err)
-              Right (_,Just (executable,environment))->pure (Right (HdbReady executable environment))
-              Right (compiler,Nothing) | allowOffer->fmap HdbOffer <$> prepare compiler
-                                       | otherwise->pure (Left "The installed debugger is unavailable; launch again.")
+          case request of
+            PackageLaunch{}->preparePackageDebug prepare allowOffer request
+            GhcLaunch directory config _ _ _->do
+              settings<-getXdgDirectory XdgConfig "thc-edit"
+              current<-Build.loadBuildConfig settings directory
+              if current/=config then pure (Left "The build configuration changed; launch again.") else do
+                project<-Build.isProject directory
+                resolved<-Compilers.debuggerCompilerInfo directory project (Build.buildExecutable config)
+                case resolved of
+                  Left err->pure (Left err)
+                  Right (_,Just (executable,environment))->pure (Right (HdbReady executable environment))
+                  Right (compiler,Nothing) | allowOffer->fmap HdbOffer <$> prepare compiler
+                                           | otherwise->pure (Left "The installed debugger is unavailable; launch again.")
         pure $ either (\(err::IOException)->Left (T.pack (show err))) id result
       writeIORef ref h {hdbWanted=Nothing,hdbPreparing=Just (ident,request,stop,task)}
     _->pure ()
+
+-- Package-only preparation. The generic source/Adapter routes retain their
+-- original authority and launch contract; these receipts are Human sidebar work.
+preparePackageDebug :: (Compilers.Compiler -> IO (Either Text Hdb.HdbPlan)) -> Bool -> GhcLaunch -> IO (Either Text HdbPrepared)
+preparePackageDebug prepare allowOffer (PackageLaunch target entry port context snapshots expected owned)=do
+  settings<-getXdgDirectory XdgConfig "thc-edit"
+  saved<-Build.loadBuildConfig settings (packageBuildRoot target)
+  before<-packageBuildManifestCurrent target
+  unsaved<-evaluate (any snapshotDirty snapshots)
+  let config=saved {Build.buildTarget=packageBuildName target}
+      captured=PackageLaunch target entry port context snapshots (Just saved) owned
+  result<-if not before then pure (Left "Package debug target changed; refresh the tree.")
+    else if maybe False (/=saved) expected then pure (Left "The build configuration changed; launch again.")
+    else if unsaved then pure (Left "Save modified source files before debugging.")
+    else case Build.buildToolchain config of
+      THC->do
+        planned<-Build.buildPlan Run config (packageBuildRoot target) Nothing
+        pure $ case planned of
+          Right [(executable,args)]->let (driver,guest)=break (=="--") args
+            in Right (PackageReady captured (PackageThc executable (driver++["--dap-port",show port]++guest)))
+          Left err->Left err
+          _->Left "The selected THC target did not produce a debugger command."
+      GHC->case entry of
+        Left err->pure (Left err)
+        Right file->do
+          exists<-doesFileExist file
+          governing<-governingCradle file
+          if not exists then pure (Left "The captured main-is no longer exists; refresh the tree.")
+            else if governing then pure (Left "This main-is has a custom hie.yaml or .hie-bios; use an explicit Adapter configuration.")
+            else do
+              resolved<-Compilers.debuggerCompilerInfo (packageBuildRoot target) True (Build.buildExecutable config)
+              case resolved of
+                Left err->pure (Left err)
+                Right (_,Just (executable,environment))->do
+                  cradle<-mask_ $ do
+                    (path,handle)<-openTempFile (packageBuildRoot target) ".hide-debug-cradle.json"
+                    writeIORef owned (Just path)
+                    (BL.hPut handle (encode (object ["cradle" .= object ["cabal" .= object
+                      ["component" .= packageBuildName target]]])) >> hClose handle)
+                      `finally` void (tryIOError (hClose handle))
+                    pure path
+                  pure (Right (PackageReady captured (PackageGhc config executable environment cradle)))
+                Right (compiler,Nothing) | allowOffer->fmap (PackageOffer captured) <$> prepare compiler
+                                         | otherwise->pure (Left "The installed debugger is unavailable; launch again.")
+  -- Force only fixed launch metadata on this worker; final owner work is scalar.
+  _<-evaluate (length (Build.buildExecutable config)+T.length (Build.buildTarget config)+
+    T.length (Build.buildTHCRoot config)+T.length (Build.buildRuntime config)+sum (map length (Build.buildArguments config)))
+  _<-case result of
+    Left err->evaluate (T.length err) >> pure ()
+    Right (PackageReady _ (PackageThc executable args))->evaluate (length executable+sum (map length args)) >> pure ()
+    Right (PackageReady _ (PackageGhc _ executable environment cradle))->
+      evaluate (length executable+length cradle+sum [length key+length value | (key,value)<-environment]) >> pure ()
+    _->pure ()
+  after<-packageBuildManifestCurrent target
+  current<-Build.loadBuildConfig settings (packageBuildRoot target)
+  pure $ if not after || current/=saved then Left "Package or build configuration changed during debugger preparation." else result
+preparePackageDebug _ _ _=pure (Left "Invalid package debugger request.")
+
+-- The actual entry's ancestor chain governs hie-bios discovery. An unrelated
+-- package-root file is not used as a proxy for the entry's cradle ownership.
+governingCradle :: FilePath -> IO Bool
+governingCradle file=go (takeDirectory file)
+  where go directory=do
+          yaml<-doesFileExist (directory </> "hie.yaml")
+          bios<-doesFileExist (directory </> ".hie-bios")
+          if yaml || bios then pure True else
+            let parent=takeDirectory directory in if parent==directory then pure False else go parent
+
+-- | Adopt a prepared Human package launch through the full host effect chain.
+-- A modal defers it. Provider/Git refusal consumes the request once and retires
+-- its cradle; ticks never invent an origin or retry a refused side effect.
+tickPreparedDebug :: Debugger -> Core -> Desktop -> IO Desktop
+tickPreparedDebug runtime@(Debugger _ _ (HdbRuntime _ ref _ _ _ _ _) _ _) core d=do
+  h<-readIORef ref
+  case hdbReady h of
+    Just (ident,request@(PackageLaunch target _ _ _ _ _ _),_) | ident==hdbSerial h->do
+      current<-launchCurrent request d
+      if not current then invalidateHdb runtime >> pure d {status="Debug preparation cancelled: source or settings changed."}
+        else if dialog d/=Nothing || questionActive d || activeAutocomplete d then pure d
+        else do
+          (_,next)<-core d [AdoptPreparedDebug target]
+          -- Successful adoption cleared the slot. A rejected effect still owns
+          -- the ready receipt here and must not be replayed on the next tick.
+          remaining<-readIORef ref
+          when (isJust (hdbReady remaining)) (invalidateHdb runtime)
+          pure next
+    _->pure d
+
+adoptPackageDebug :: Debugger -> PackageBuildTarget -> Desktop -> IO Desktop
+adoptPackageDebug runtime@(Debugger stateRef _ (HdbRuntime _ ref _ _ _ _ _) _ _) target d=mask_ $ do
+  h<-readIORef ref
+  case hdbReady h of
+    Just (ident,request@(PackageLaunch captured entry port _ _ _ owned),launch)
+      | ident==hdbSerial h,captured==target->do
+          current<-launchCurrent request d
+          if not current then invalidateHdb runtime >> pure d {status="Package debug source changed; launch again."}
+            else do
+              -- Keep request ownership until the handoff is protected, and
+              -- track a new connection before initialization can fail.
+              cradle<-readIORef owned
+              created<-newIORef Nothing
+              result<-try $ do
+                writeIORef ref h {hdbReady=Nothing}
+                atomicModifyIORef' owned (\_->(Nothing,()))
+                readIORef stateRef >>= stopTransport runtime
+                let directory=packageBuildRoot target
+                next<-case launch of
+                  PackageThc executable args->do
+                    connection<-D.startManagedWithAfter (awaitRetired runtime) (pure (executable,args,[])) directory "127.0.0.1" port
+                    writeIORef created (Just connection)
+                    initializeSession runtime directory connection ("127.0.0.1",port) "attach" (object []) "graalvm" True d
+                  PackageGhc config executable environment path->case entry of
+                    Left _->pure d {status="The captured entry is unavailable."}
+                    Right file->do
+                      connection<-D.startManagedWithAfter (awaitRetired runtime) (pure (executable,["server","--port",show port],environment)) directory "127.0.0.1" port
+                      writeIORef created (Just connection)
+                      let args=object ["projectRoot" .= directory,"entryFile" .= makeRelative directory file,
+                            "entryPoint" .= ("main"::Text),"entryArgs" .= Build.buildArguments config,
+                            "extraGhcArgs" .= ([]::[String]),"cradleFile" .= path]
+                      next<-initializeSession runtime directory connection ("127.0.0.1",port) "launch" args "hdb" True d
+                      modifyIORef' stateRef (\state->state {debugEnvironment=environment,hdbLauncher=Just executable})
+                      pure next
+                modifyIORef' stateRef (\state->state {debugCradle=cradle})
+                pure next
+              case result of
+                Right next->pure next
+                Left (err::SomeException)->do
+                  connection<-readIORef created
+                  state<-readIORef stateRef
+                  stopTransport runtime state {client=connection,debugCradle=cradle}
+                  case fromException err of
+                    Just (io::IOException)->pure d {status="Debugger: "<>T.pack (show io)}
+                    Nothing->throwIO err
+    _->pure d {status="This prepared package Debug action expired."}
 
 startPreparedGhc :: Debugger -> GhcLaunch -> FilePath -> [(String,String)] -> Desktop -> IO Desktop
 startPreparedGhc runtime@(Debugger ref _ _ _ _) (GhcLaunch directory config file port _) executable environment d=do
@@ -1998,6 +2199,7 @@ startPreparedGhc runtime@(Debugger ref _ _ _ _) (GhcLaunch directory config file
   started<-initializeSession runtime directory connection ("127.0.0.1",port) "launch" arguments "hdb" True d
   modifyIORef' ref (\state -> state {debugEnvironment=environment,hdbLauncher=Just executable})
   pure started {status="Starting the selected GHC debugger..."}
+startPreparedGhc _ PackageLaunch{} _ _ d=pure d {status="Package debugger requires its captured launch gate."}
 
 -- doc-artifact: tools/docs-screenshots.hs hdb-download -> docs/site/screenshots/hdb-download.png
 hdbOfferDialog :: Int -> Hdb.HdbPlan -> Dialog
@@ -2017,8 +2219,8 @@ acceptHdb runtime@(Debugger _ _ (HdbRuntime downloads ref _ acquire _ _ _) _ _) 
   case hdbOffer h of
     Just (ident,request,plan) | action=="hdb-accept:"<>tshow ident,ident==hdbSerial h->do
       writeIORef ref h {hdbOffer=Nothing}
-      current<-hdbContext d
-      if take 1 values/=["0"] || not (hdbCurrent request current)
+      current<-launchCurrent request d
+      if take 1 values/=["0"] || not current
         then invalidateHdb runtime >> pure d {status="Debugger download declined; no files downloaded."}
         else do
           result<-Downloads.startDownload downloads ("hdb for GHC "<>Compilers.compilerVersion (Hdb.hdbCompiler plan)) (acquire plan)
@@ -2049,21 +2251,23 @@ tickHdb runtime@(Debugger _ _ (HdbRuntime downloads ref _ _ _ _ view) _ _) origi
   let requests=[request | (ident,request,_)<-maybeToList (hdbWanted h),ident==hdbSerial h]++
         [request | (ident,request,_)<-maybeToList (hdbOffer h),ident==hdbSerial h]++
         [request | (ident,request,_)<-maybeToList (hdbWaiting h),ident==hdbSerial h]++
-        [request | (ident,request,_,_)<-maybeToList (hdbPreparing h),ident==hdbSerial h]
-  context<-if null requests then pure Nothing else Just <$> hdbContext original
-  let matches request=maybe False (hdbCurrent request) context
-  when (any (not . matches) requests) (invalidateHdb runtime)
+        [request | (ident,request,_,_)<-maybeToList (hdbPreparing h),ident==hdbSerial h]++
+        [request | (ident,request,_)<-maybeToList (hdbReady h),ident==hdbSerial h]
+  validity<-mapM (`launchCurrent` original) requests
+  -- Constructors carry no Eq payloads; validate each continuation when needed.
+  when (any not validity) (invalidateHdb runtime)
   current<-readIORef ref
   let finished ident=do
         modifyIORef' ref (\state->state {hdbWaiting=Nothing})
         when (ident==hdbSerial current) (invalidateHdb runtime)
   waited<-case hdbWaiting current of
     Just (ident,request,job)->do
+      matches<-launchCurrent request original
       jobState<-Downloads.downloadStateFor downloads job
       case jobState of
         Just (Downloads.DownloadComplete _)->do
-          modifyIORef' ref (\state->state {hdbWaiting=Nothing,hdbWanted=if ident==hdbSerial state && matches request then Just (ident,request,False) else hdbWanted state})
-          pure original {status=if ident==hdbSerial current && matches request then "Debugger installed; validating the original launch..." else "Debugger installed; the original launch is no longer current."}
+          modifyIORef' ref (\state->state {hdbWaiting=Nothing,hdbWanted=if ident==hdbSerial state && matches then Just (ident,request,False) else hdbWanted state})
+          pure original {status=if ident==hdbSerial current && matches then "Debugger installed; validating the original launch..." else "Debugger installed; the original launch is no longer current."}
         Just (Downloads.DownloadFailed err)->finished ident >> pure original {status="Debugger download failed: "<>err}
         Just Downloads.DownloadCancelled->finished ident >> pure original {status="Debugger download cancelled."}
         _->pure original
@@ -2077,15 +2281,22 @@ tickHdb runtime@(Debugger _ _ (HdbRuntime downloads ref _ _ _ _ view) _ _) origi
       case outcome of
         Nothing->pure waited
         Just result->do
+          matches<-launchCurrent request waited
           modifyIORef' ref (\latest->latest {hdbPreparing=Nothing})
-          if ident/=hdbSerial state || not (matches request) then pure waited else case result of
+          if ident/=hdbSerial state || not matches then retirePackageLaunch runtime Nothing request >> pure waited else case result of
             Right (Right (Right (HdbReady executable environment)))->startPreparedGhc runtime request executable environment waited
+            Right (Right (Right (PackageReady captured launch)))->do
+              modifyIORef' ref (\latest->latest {hdbReady=Just (ident,captured,launch)})
+              pure waited {status="Component debugger prepared; waiting for launch admission."}
+            Right (Right (Right (PackageOffer captured plan)))->do
+              modifyIORef' ref (\latest->latest {hdbOffer=Just (ident,captured,plan)})
+              pure waited {status="A matching debugger is available to download."}
             Right (Right (Right (HdbOffer plan)))->do
               modifyIORef' ref (\latest->latest {hdbOffer=Just (ident,request,plan)})
               pure waited {status="A matching debugger is available to download."}
-            Right (Right (Left err))->pure waited {status="Debugger: "<>err}
-            Right (Left ())->pure waited
-            Left _->pure waited {status="Debugger preparation failed."}
+            Right (Right (Left err))->retirePackageLaunch runtime Nothing request >> pure waited {status="Debugger: "<>err}
+            Right (Left ())->retirePackageLaunch runtime Nothing request >> pure waited
+            Left _->retirePackageLaunch runtime Nothing request >> pure waited {status="Debugger preparation failed."}
   latest<-readIORef ref
   shown<-DownloadsWindow.tick view prepared
   case dialog shown of

@@ -297,7 +297,7 @@ runEditor args = do
                     (quit,updated)<-policyEffects permissions core d pending
                     approvedExit<-readIORef exiting
                     pure (quit || approvedExit,updated)
-                  tick d=tickProjectBrowser projectBrowser d >>= tickGitOperations gitOperations applyEffects >>= tickTooling tooling applyEffects >>= tickReconciliation reconciliation (sidebarEffects sidebarHost applyEffects) >>= tickConversation conversation >>= tickBuildPreparation conversation runtimeEffects >>= tickDebugger debugger >>= tickPermissions permissions >>= tickHighlighting highlighting >>= tickAutocomplete autocomplete >>= tickKeybindings keybindings >>= tickMenus menuHost runtimeEffects >>= tickDebuggerSidebar debugSidebar sidebarHost debugger >>= tickPackageSidebar packageSidebar sidebarHost >>= tickAgentSidebar agentSidebar sidebarHost >>= tickSessionSidebar sessionSidebar sidebarHost >>= tickSidebar sidebarHost runtimeEffects >>= tickPluginWindows >>= tickTextPresentation textPresentation
+                  tick d=tickProjectBrowser projectBrowser d >>= tickGitOperations gitOperations applyEffects >>= tickTooling tooling applyEffects >>= tickReconciliation reconciliation (sidebarEffects sidebarHost applyEffects) >>= tickConversation conversation >>= tickBuildPreparation conversation runtimeEffects >>= tickDebugger debugger >>= tickPreparedDebug debugger runtimeEffects >>= tickPermissions permissions >>= tickHighlighting highlighting >>= tickAutocomplete autocomplete >>= tickKeybindings keybindings >>= tickMenus menuHost runtimeEffects >>= tickDebuggerSidebar debugSidebar sidebarHost debugger >>= tickPackageSidebar packageSidebar sidebarHost >>= tickAgentSidebar agentSidebar sidebarHost >>= tickSessionSidebar sessionSidebar sidebarHost >>= tickSidebar sidebarHost runtimeEffects >>= tickPluginWindows >>= tickTextPresentation textPresentation
                   inspectTool d name parameters
                     | name `elem` ["list_windows","list_buffers","read_buffer","read_selection"] = pure (d,pure (builtinTool d name parameters))
                     | name `elem` chatToolNames = chatTool conversation d name parameters
@@ -572,6 +572,8 @@ applyEffects = foldM apply . (False,)
     apply (_,d) DebugAction{}=pure (False,d {status="Debugger unavailable in this preview."})
     apply (_,d) PermissionAction{}=pure (False,d {status="Agent permissions are unavailable in this preview."})
     apply (_,d) AgentAction{}=pure (False,d {status="Agents are unavailable in this preview."})
+    apply (_,d) PackageDebugAction{}=pure (False,d {status="Package debug requires its running owner."})
+    apply (_,d) AdoptPreparedDebug{}=pure (False,d {status="Debug preparation requires its running owner."})
     apply (_,d) PackageBuildAction{}=pure (False,d {status="Package build requires its running owner."})
     apply (_,d) AdoptPreparedBuild{}=pure (False,d {status="Build preparation requires its running owner."})
     apply (_,d) DownloadDocument{}=pure (False,d)

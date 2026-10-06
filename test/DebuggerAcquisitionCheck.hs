@@ -24,6 +24,9 @@ import System.Timeout
 import Hide.Buffer
 import Hide.Build
 import Hide.Debugger
+import Hide.Plugin.Command (withRegistry)
+import qualified Hide.Plugin.Tree as P
+import Data.List (isPrefixOf)
 import Hide.MenuCommands
 import Hide.DocsMCP (withDocsCommands)
 import qualified Hide.Plugin.Menu as Menu
@@ -251,6 +254,78 @@ checks | os=="mingw32"=pure () -- Official hdb bindists are currently POSIX only
                 final<-foldTicks runtime 20 observed
                 logText<-TIO.readFile logFile
                 check ("stale "++mode++" never launches") (T.null logText && status final=="Debugger installed; the original launch is no longer current.")
+      -- A closed Human package request enters the same acquisition slot, but
+      -- its final launch re-enters the host gate and uses the captured main.
+      reset
+      executableFile (commands </> "cabal") ("#!/bin/sh\nprintf '%s\\n' '{\"compiler\":{\"flavour\":\"ghc\",\"id\":\"ghc-9.14.1\",\"path\":\""<>T.pack ghc<>"\"}}'\n")
+      let manifest=root </> "sample.cabal"
+      TIO.writeFile manifest "cabal-version: 3.0\nname: sample\nversion: 0.1\nexecutable first\n  main-is: Main.hs\n"
+      withRegistry $ \registry->do
+        provider<-P.registerTree registry "package-debug.fixture"
+          (P.NodeDef (P.NodeInfo (either (error.T.unpack) id (P.nodeId "root")) "Package" "" True Nothing) Nothing [])
+          (\() _->pure (Right (P.NodePage [] Nothing))) >>= either (error.show) pure
+        signature<-(,) <$> getModificationTime manifest <*> getFileSize manifest
+        let target=PackageBuildTarget (P.treeReference provider) 0 (root,[]) root manifest (Just signature) "sample:exe:first"
+            otherFile=root </> "Other.hs"
+        TIO.writeFile otherFile "main = print (42::Int)\n"
+        let other=addDocument (Just (FileState otherFile Nothing)) (newBuffer "main = print (42::Int)\n") base
+            launchRequest runtime d=snd <$> debuggerEffects runtime core d [PackageDebugAction target (Right source)]
+            cradleFiles=filter (".hide-debug-cradle" `isPrefixOf`) <$> listDirectory root
+            packetRequests=do
+              entries<-mapM (either error pure.eitherDecodeStrict'.encodeText) . T.lines =<< TIO.readFile logFile
+              pure [args | entry<-entries,Just request<-[field "request" entry],field "command" request==Just ("launch"::T.Text),Just args<-[field "arguments" request]]
+        gate<-newEmptyMVar
+        withDebuggerHdb (pure 0) (pure . Right . plan) (\_ report->install report gate) $ \runtime->do
+          pending<-launchRequest runtime other >>= waitFor runtime "package offer" (pure.offer)
+          before<-cradleFiles
+          check "package offer has no owned cradle before consent" (null before)
+          accepted<-submit runtime 0 pending
+          putMVar gate ()
+          prepared<-waitFor runtime "component preparation" (\d->pure ("prepared" `T.isInfixOf` status d)) accepted
+          files<-cradleFiles
+          check "one owned project-root cradle prepared" (length files==1)
+          let modal=Dialog "Unrelated" (Searching False "") [Input "Find" "name" 4] 0 ["Find"] []
+          held<-tickPreparedDebug runtime (debuggerEffects runtime core) prepared {dialog=Just modal}
+          launchesBefore<-packetRequests
+          check "modal postpones final launch" (null launchesBefore && fmap dialogTitle (dialog held)==Just "Unrelated")
+          admitted<-tickPreparedDebug runtime (debuggerEffects runtime core) held {dialog=Nothing}
+          launched<-waitFor runtime "captured component launch" (\_->not.null <$> packetRequests) admitted
+          launches<-packetRequests
+          check "Debug uses captured component main instead of active Other.hs" (any (\args->field "entryFile" args==Just ("Main.hs"::String) && field "projectRoot" args==Just root) launches)
+          cradle<-case [path | args<-launches,Just path<-[field "cradleFile" args]] of path:_->pure path; _->error "launch omitted exact cradle"
+          document<-BL.readFile cradle
+          check "owned cradle preserves qualified target" ("sample:exe:first" `T.isInfixOf` Data.Text.Encoding.decodeUtf8 (BL.toStrict document))
+          stopped<-send runtime "disconnect" [] launched
+          _<-waitFor runtime "owned cradle retirement" (\_->null <$> cradleFiles) stopped
+          pure ()
+        -- A refused final host gate consumes the receipt and cleans its file.
+        TIO.writeFile logFile ""
+        withDebuggerHdb (pure 0) (pure . Right . plan) (\_ _->pure (Left "unexpected acquisition")) $ \runtime->do
+          pending<-launchRequest runtime other
+          prepared<-waitFor runtime "installed component preparation" (\d->pure ("prepared" `T.isInfixOf` status d)) pending
+          refused<-tickPreparedDebug runtime (\d _->pure (False,d {status="Git gate refused"})) prepared
+          _<-waitFor runtime "refused cradle retirement" (\_->null <$> cradleFiles) refused
+          _<-tickPreparedDebug runtime (debuggerEffects runtime core) refused
+          launches<-packetRequests
+          check "refused launch is not replayed" (null launches)
+        -- Custom governing cradle is never overwritten by captured Debug.
+        TIO.writeFile (root </> "hie.yaml") "custom sentinel\n"
+        withDebuggerHdb (pure 0) (pure . Right . plan) (\_ _->pure (Left "unexpected acquisition")) $ \runtime->do
+          pending<-launchRequest runtime other
+          _<-waitFor runtime "governing custom cradle refusal" (pure . T.isInfixOf "custom hie.yaml" . status) pending
+          sentinel<-TIO.readFile (root </> "hie.yaml")
+          check "custom governing cradle stays unchanged" (sentinel=="custom sentinel\n")
+        removeFile (root </> "hie.yaml")
+        -- Same numeric revision replacements invalidate the captured source.
+        TIO.writeFile logFile ""
+        withDebuggerHdb (pure 0) (pure . Right . plan) (\_ _->pure (Left "unexpected acquisition")) $ \runtime->do
+          pending<-launchRequest runtime other
+          prepared<-waitFor runtime "stale component preparation" (\d->pure ("prepared" `T.isInfixOf` status d)) pending
+          let replaced=prepared {buffers=M.map (\doc->doc {documentBuffer=newBuffer "replacement"}) (buffers prepared)}
+          _<-tickPreparedDebug runtime (debuggerEffects runtime core) replaced
+          _<-waitFor runtime "stale source cradle retirement" (\_->null <$> cradleFiles) replaced
+          launches<-packetRequests
+          check "equal-revision replacement cannot launch" (null launches)
   putStrLn "Debugger acquisition checks passed"
   where
     check label okay=unless okay (error label)
