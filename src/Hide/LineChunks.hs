@@ -8,8 +8,8 @@
 -- tab-dependent advance and exact-content rejection fingerprints.
 -- Whole text and exact loaded width remain independent of the receipt stream.
 module Hide.LineChunks
-  ( Chunks, ChunkMeasure(..), ColumnAdvance(..), applyAdvance
-  , chunksFromText, chunksEdit, chunksMeasure, chunksWidth, chunksText, chunksPieces, chunksSlice, chunksFragments
+  ( Chunks, ChunkMeasure(..), RawMeasure(..), ColumnAdvance(..), applyAdvance
+  , chunksFromText, chunksEdit, chunksMeasure, chunksRawMeasure, chunksFlags, chunksWidth, chunksText, chunksPieces, chunksSlice, chunksFragments
   , chunksWindow, chunksExtentThrough, chunksDisplayColumn, chunksColumnOffset
   , chunksPreviousCharacter, chunksSpanLeft, chunksSpanRight, chunksSuffixWidth
   ) where
@@ -84,13 +84,29 @@ type ChunkTree = FT.FingerTree ChunkMeasure Chunk
 data LoadedEntry = LoadedEntry {-# UNPACK #-} !Int {-# UNPACK #-} !Int !ColumnAdvance !Chunk
 data LoadedBlocks = LoadedBlock {-# UNPACK #-} !Int {-# UNPACK #-} !Int !ColumnAdvance !(V.Vector LoadedEntry) LoadedBlocks | LoadedEnd
 
-data Chunks = Loaded !T.Text LoadedBlocks Int | Edited !ChunkTree
+-- Raw storage measures never demand display preparation. The final field MUST
+-- remain lazy: scalar/byte/hash tree splits must not inspect a suffix advance.
+-- @rawHash (a <> b) == rawHash a * rawFactor b + rawHash b@ (Word64 arithmetic).
+data RawMeasure = RawMeasure
+  { rawBytes :: !Int, rawCharacters :: !Int, rawHash :: !Word64, rawFactor :: !Word64
+  , rawAdvance :: ColumnAdvance
+  }
+instance Semigroup RawMeasure where
+  RawMeasure a b h p w <> RawMeasure c d g q v=RawMeasure (a+c) (b+d) (h*q+g) (p*q) (w<>v)
+instance Monoid RawMeasure where mempty=RawMeasure 0 0 0 1 mempty
+
+-- An immutable receipt owner, never a previous Edited root or pending recipe.
+-- Its complete advance closes over this index independently of range queries;
+-- reusing the raw seed cannot recursively demand that same seed's advance.
+data SourceOwner = SourceOwner !T.Text !RawMeasure !Int !SourceCursor !Bool LoadedBlocks
+
+data Chunks = Loaded !SourceOwner Int | Edited !ChunkTree
 instance Show Chunks where
-  showsPrec p (Loaded text _ _)=showsPrec p text
+  showsPrec p (Loaded (SourceOwner text _ _ _ _ _) _)=showsPrec p text
   showsPrec p (Edited tree)=showsPrec p tree
 
 chunksTree :: Chunks -> ChunkTree
-chunksTree (Loaded _ blocks _)=loadedTree blocks
+chunksTree (Loaded (SourceOwner _ _ _ _ _ blocks) _)=loadedTree blocks
 chunksTree (Edited tree)=tree
 
 -- Explicit first-edit promotion alone enumerates the remaining loaded blocks.
@@ -145,15 +161,28 @@ loadedIndex predicate entries=go 0 (V.length entries)
 chunksMeasure :: Chunks -> ChunkMeasure
 chunksMeasure=FT.measure . chunksTree
 
+-- | Owning raw metadata. Loaded storage returns its original seed without
+-- preparing receipts; byte/scalar/hash fields never demand 'rawAdvance'.
+chunksRawMeasure :: Chunks -> RawMeasure
+chunksRawMeasure (Loaded (SourceOwner _ seed _ _ _ _) _)=seed
+chunksRawMeasure (Edited tree)=let m=FT.measure tree in
+  RawMeasure (chunkBytes m) (chunkCharacters m) (chunkHash m) (chunkFactor m) (chunkAdvance m)
+
+-- | Exact line-owned NUL/CRLF/LF/trailing-terminator flags, independent of the
+-- loaded display index. Trailing CR/LF count may be arbitrarily long.
+chunksFlags :: Chunks -> Int
+chunksFlags (Loaded (SourceOwner _ _ flags _ _ _) _)=flags
+chunksFlags (Edited tree)=chunkFlags (FT.measure tree)
+
 -- | Exact width is memoized independently of loaded receipts. Its first use
 -- scans the original row; it does not dice an undemanded row into spans.
 chunksWidth :: Chunks -> Int
-chunksWidth (Loaded _ _ width)=width
+chunksWidth (Loaded _ width)=width
 chunksWidth (Edited tree)=applyAdvance (chunkAdvance (FT.measure tree)) 0
 
 -- | Explicit whole-line read, for serialization and worker-owned consumers.
 chunksText :: Chunks -> T.Text
-chunksText (Loaded text _ _)=text
+chunksText (Loaded (SourceOwner text _ _ _ _ _) _)=text
 chunksText (Edited tree)=T.concat [text | Chunk _ text _ _ _<-toList tree]
 
 -- | Raw stored payloads in source order, without scalar slicing or display
@@ -161,7 +190,7 @@ chunksText (Edited tree)=T.concat [text | Chunk _ text _ _ _<-toList tree]
 -- an edited row joins adjacent leaves of the same immutable array without
 -- copying. Independent arrays remain separate.
 chunksPieces :: Chunks -> [T.Text]
-chunksPieces (Loaded text _ _)=[text]
+chunksPieces (Loaded (SourceOwner text _ _ _ _ _) _)=[text]
 chunksPieces (Edited tree)=case toList tree of
   []->[]
   Chunk _ text _ _ _:rest->gather text rest
@@ -174,7 +203,7 @@ chunksPieces (Edited tree)=case toList tree of
 -- | Borrow only the leaves overlapping a clamped scalar range. Both boundary
 -- leaves inspect bounded local byte spans; middle leaves remain whole.
 chunksFragments :: Chunks -> Int -> Int -> [T.Text]
-chunksFragments (Loaded text spans _) requested count
+chunksFragments (Loaded (SourceOwner text _ _ _ _ spans) _) requested count
   | count<=0=[]
   | requested<=0=[T.take count text]
   | otherwise=case seekLoadedScalar (max 0 requested) spans of
@@ -199,7 +228,7 @@ chunksSlice tree start count=T.concat (chunksFragments tree start count)
 -- leaf suffix and its successors. Offsets count scalars and absolute cells;
 -- each group owns its source array, so ordinary style runs cannot cross leaves.
 chunksWindow :: Chunks -> Int -> (Int,Int,[(T.Text,[DisplayItem])])
-chunksWindow (Loaded _ spans _) requested=case seekLoadedColumn (max 0 requested) spans of
+chunksWindow (Loaded (SourceOwner _ _ _ _ _ spans) _) requested=case seekLoadedColumn (max 0 requested) spans of
   (# char,col,_,[] #)->(I# char,I# col,[])
   (# char,col,_,chunk:rest #)->windowSuffix (max 0 requested) (I# char) (I# col) chunk rest
 chunksWindow (Edited tree) requested=case FT.viewl suffix of
@@ -234,7 +263,7 @@ seekLoadedColumn goal=go 0 0 0
 -- Tabs are the largest source advance; edited rows already have an exact root
 -- measure. This never demands the loaded row's independent exact-width thunk.
 chunksExtentThrough :: Chunks -> Int -> (Int,Int,Int)
-chunksExtentThrough (Loaded text spans _) requested=case seekLoadedColumn goal spans of
+chunksExtentThrough (Loaded (SourceOwner text _ _ _ _ spans) _) requested=case seekLoadedColumn goal spans of
   (# char,col,_,[] #)->(I# char,I# col,I# col)
   (# char,col,byte,Chunk _ leaf incoming _ overflow:_ #)->
     let (local,used,column,_)=sourceLeafFrom goal (I# col) incoming overflow leaf
@@ -272,7 +301,7 @@ windowSuffix goal base col (Chunk _ text incoming _ overflow) rest=
 -- like Text.drop; storage edges still supply real lookahead through borrowed
 -- fragments. No DisplayItem or whole-suffix Text is constructed.
 chunksSuffixWidth :: Chunks -> Int -> Int -> Int -> Int
-chunksSuffixWidth (Loaded original _ _) start count bound=go 0 0 initialSourceCursor 0
+chunksSuffixWidth (Loaded (SourceOwner original _ _ _ _ _) _) start count bound=go 0 0 initialSourceCursor 0
   where
     text=T.drop start original
     go !byte !chars !cursor !col
@@ -299,7 +328,7 @@ chunksSuffixWidth tree start count bound=go first 0 initialSourceCursor 0 rest
 -- | Map a scalar position to the start of its complete display item. Interior
 -- scalars never create a partial grapheme; tabs retain the absolute column.
 chunksDisplayColumn :: Chunks -> Int -> Int
-chunksDisplayColumn (Loaded _ spans _) requested=case seekLoadedScalar (max 0 requested) spans of
+chunksDisplayColumn (Loaded (SourceOwner _ _ _ _ _ spans) _) requested=case seekLoadedScalar (max 0 requested) spans of
   (# _,col,[] #)->I# col
   (# char,col,chunk:_ #)->chunkDisplayColumn (max 0 requested-I# char) (I# col) chunk
 chunksDisplayColumn (Edited tree) requested=case FT.viewl suffix of
@@ -322,7 +351,7 @@ chunksColumnOffset tree goal=let (char,_,_)=chunksWindow tree goal in char
 
 -- | Previous complete-item boundary, including interior scalar positions.
 chunksPreviousCharacter :: Chunks -> Int -> Int
-chunksPreviousCharacter (Loaded _ spans _) requested
+chunksPreviousCharacter (Loaded (SourceOwner _ _ _ _ _ spans) _) requested
   | requested<=0=0
   | otherwise=case seekLoadedScalar (requested-1) spans of
       (# base,_,[] #)->I# base
@@ -348,7 +377,7 @@ chunkPreviousCharacter local (Chunk _ text cursor _ _)
 -- | Scalar-class traversal borrows only visited storage leaves. Predicates do
 -- not require grapheme segmentation; offsets remain original source scalars.
 chunksSpanLeft :: (Char->Bool) -> Chunks -> Int -> Int
-chunksSpanLeft predicate (Loaded _ blocks _) requested=find 0 [] blocks
+chunksSpanLeft predicate (Loaded (SourceOwner _ _ _ _ _ blocks) _) requested=find 0 [] blocks
   where
     goal=max 0 requested
     find !base previous LoadedEnd=go base T.empty previous
@@ -384,7 +413,7 @@ chunksSpanLeft predicate (Edited tree) requested=case FT.viewl suffix of
 
 -- | Forward scalar-class traversal, sharing the same physical storage owner.
 chunksSpanRight :: (Char->Bool) -> Chunks -> Int -> Int
-chunksSpanRight predicate (Loaded _ spans _) requested=case seekLoadedScalar (max 0 requested) spans of
+chunksSpanRight predicate (Loaded (SourceOwner _ _ _ _ _ spans) _) requested=case seekLoadedScalar (max 0 requested) spans of
   (# base,_,[] #)->I# base
   (# base,_,Chunk _ text _ _ _:rest #)->go (max 0 requested) (T.drop (max 0 requested-I# base) text) rest
   where
@@ -426,13 +455,36 @@ joinAdjacent (TI.Text a@(TA.ByteArray array) start size) (TI.Text (TA.ByteArray 
 -- prepare a covering checkpoint with <2x receipt-count overscan. The first edit
 -- still promotes the whole row to a measured tree.
 chunksFromText :: T.Text -> Chunks
-chunksFromText text=Loaded text (loadedBlocks (loadedSpans text)) width
-  where (_,_,width,_)=sourceGraphemesFrom maxBound text
+chunksFromText text=Loaded (SourceOwner text seed flags initialSourceCursor False blocks) width
+  where
+    blocks=loadedBlocks (loadedSpans text initialSourceCursor)
+    (seed,flags)=rawSeed text (loadedAdvance blocks)
+    (_,_,width,_)=sourceGraphemesFrom maxBound text
+
+-- Independent complete-owner transform, demanded only by an explicit full
+-- advance. Never implemented through ownerRangeMeasure's whole-seed shortcut.
+loadedAdvance :: LoadedBlocks -> ColumnAdvance
+loadedAdvance LoadedEnd=mempty
+loadedAdvance (LoadedBlock _ _ advance _ rest)=advance<>loadedAdvance rest
+
+-- One raw numeric pass supplies the outer Buffer long-line leaf as well as the
+-- immutable owner. No Unicode segmentation, source copies or per-scalar records.
+rawSeed :: T.Text -> ColumnAdvance -> (RawMeasure,Int)
+rawSeed text advance=go 0 0 0 1 0 False 0 False
+  where
+    size=TU.lengthWord8 text
+    go !byte !chars !hash !factor !flags !previousCR !trailing !lastLF
+      | byte>=size=(RawMeasure size chars hash factor advance,
+          flags .|. (if lastLF then 4 else 0) .|. (trailing `shiftL` 3))
+      | otherwise=case TU.iter text byte of
+          TU.Iter c delta->go (byte+delta) (chars+1) (hash*16777619+fromIntegral (ord c)+1)
+            (factor*16777619) (flags .|. (if c=='\0' then 1 else 0) .|. (if previousCR && c=='\n' then 2 else 0))
+            (c=='\r') (if c=='\r' || c=='\n' then trailing+1 else 0) (c=='\n')
 
 -- Each tail is shared and remains lazy. The scanner sees the original full
 -- source, so its outgoing cursor/overflow includes real lookahead at every cut.
-loadedSpans :: T.Text -> [Chunk]
-loadedSpans text=go 0 initialSourceCursor
+loadedSpans :: T.Text -> SourceCursor -> [Chunk]
+loadedSpans text=go 0
   where
     go !byte !cursor
       | byte>=TU.lengthWord8 text=[]

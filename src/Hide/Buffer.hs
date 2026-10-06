@@ -418,16 +418,20 @@ treeText = T.concat . map lineText . filter ((/=Deleted) . lineOrigin) . toList
 linesFromText :: Bool -> Text -> LineTree
 linesFromText mode = FT.fromList . go . T.splitOn "\n"
   where
-    line t=
-      let n=T.length t
-          flags=(if T.any (=='\0') t then 1 else 0) .|.
-                (if "\r\n" `T.isSuffixOf` t then 2 else 0) .|.
-                (if "\n" `T.isSuffixOf` t then 4 else 0) .|.
-                ((TU.lengthWord8 t-TU.lengthWord8 (T.dropWhileEnd (\c->c=='\r' || c=='\n') t)) `shiftL` 3)
-          hash=T.foldl' (\fingerprint c->fingerprint*16777619+fromIntegral (ord c)+1) 0 t
-          factor=16777619^n
-      in if mode || TU.lengthWord8 t<=512 then Line n flags Original hash factor t
-         else ChunkedLine n flags Original hash factor (Chunks.chunksFromText t)
+    line t
+      | not mode && TU.lengthWord8 t>512=
+          let chunks=Chunks.chunksFromText t; raw=Chunks.chunksRawMeasure chunks
+          in ChunkedLine (Chunks.rawCharacters raw) (Chunks.chunksFlags chunks) Original
+            (Chunks.rawHash raw) (Chunks.rawFactor raw) chunks
+      | otherwise=
+          let n=T.length t
+              flags=(if T.any (=='\0') t then 1 else 0) .|.
+                    (if "\r\n" `T.isSuffixOf` t then 2 else 0) .|.
+                    (if "\n" `T.isSuffixOf` t then 4 else 0) .|.
+                    ((TU.lengthWord8 t-TU.lengthWord8 (T.dropWhileEnd (\c->c=='\r' || c=='\n') t)) `shiftL` 3)
+              hash=T.foldl' (\fingerprint c->fingerprint*16777619+fromIntegral (ord c)+1) 0 t
+              factor=16777619^n
+          in Line n flags Original hash factor t
     go [] = []
     go [t] = [line t]
     go (t:ts) = line (t <> "\n") : go ts
