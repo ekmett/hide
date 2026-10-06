@@ -3,6 +3,7 @@ module BufferReadsCheck (checks) where
 
 import MCPPermissionsCheck (settledTool,settleDialog)
 import SourceWindowFixture (sourceFixtureBuffer)
+import EditorFixture (withEditorBodyFixture)
 import Control.Exception (bracket,onException)
 import qualified Control.Concurrent.STM as STM
 import Control.Concurrent (threadDelay)
@@ -24,7 +25,10 @@ import Hide.Buffer
 import Hide.AgentAccess
 import qualified Hide.AgentHub as AH
 import Hide.BufferReads
-import Hide.EditorMCP (builtinTools,readBufferTool)
+import Hide.EditorMCP (builtinTools,readBufferTool,readWindowTool)
+import qualified Hide.Plugin.Window as W
+import qualified Data.Vector as V
+import Hide.Syntax (Style(..))
 import Hide.MCPPermissions
 import Hide.Model
 import qualified Hide.Plugin.Buffer as P
@@ -44,8 +48,10 @@ checks=bracket temporary removePathForcibly $ \directory -> do
   saved<-newIORef Nothing
   withPermissionsAt path builtinTools $ \runtime -> withBufferReadCommands $ \commands->do
     let reader=bufferReader runtime (pure (Right ()))
-        begin reader' d=do
-          (_,finish)<-readBufferTool commands reader' d "read_buffer" args
+        begin reader' d=beginRequest d (readBufferTool commands reader' d "read_buffer" args)
+        beginWindow d=beginRequest d (readWindowTool commands (windowReader runtime (pure (Right ()))) d "read_window" (object []))
+        beginRequest d request=do
+          (_,finish)<-request
           worker<-async finish
           let queued=threadStatus (asyncThreadId worker) >>= \state->case state of
                 ThreadBlocked BlockedOnMVar->pure ()
@@ -90,18 +96,25 @@ checks=bracket temporary removePathForcibly $ \directory -> do
       pure (d,pure (Right Null)))) changed "read_buffer" args
     _<-next
     let private=base {buffers=M.adjust (\doc->doc {documentLabel=Just "Agent request"}) bid (buffers base)}
-        conversation=base {buffers=M.adjust (\doc->doc {documentLabel=Just "Conversation",documentBuffer=newBuffer "Session: private-token\npublic λ\n"}) bid (buffers base)}
-        poisoned=conversation {chatActions=error "worker mask evaluated"}
+        conversationText="Session: private-token\npublic λ\nOther: unsent-secret\n"
+        answerStart=T.length "Session: private-token\npublic λ\nOther: "
+        semantics=W.TextSemantics W.CopyText Nothing V.empty V.empty W.ReadableWindow
+          (V.fromList [(0,T.length "Session: private-token"),(answerStart,T.length conversationText-1)]) V.empty V.empty
     (_,hidden)<-begin reader private
     check "admitted reads retain private-buffer refusal" . isLeft =<< hidden
-    (_,masked)<-begin reader conversation
-    maskedResult<-masked
-    check "admitted conversation read applies existing mask" (either (const False) (\value->case parseMaybe (withObject "read result" (.: "text")) value of
-      Just output->not ("private-token" `T.isInfixOf` output) && "public λ" `T.isInfixOf` output
-      Nothing->False) maskedResult)
-    (_,maskWorker)<-begin reader poisoned
-    maskResult<-maskWorker
-    check "conversation mask is forced only by returned worker, not admission" (isLeft maskResult)
+    body<-W.prepareSemanticTextWindow "Conversation" [(c,Plain) | c<-T.unpack conversationText] semantics
+      >>= either (error . T.unpack) pure
+    withEditorBodyFixture "" body base $ \conversation->do
+      target<-either (error . T.unpack) pure (windowReadTarget conversation (maybe (error "missing conversation frame") windowId (activeWindow conversation)))
+      image<-captureWindow conversation target >>= either (error . T.unpack) pure
+      check "window admission captures raw immutable body without applying masks"
+        (contentSlice (W.preparedWindowText (capturedWindowPrepared image)) 0 (T.length conversationText)==conversationText)
+      (_,masked)<-beginWindow conversation
+      maskedResult<-masked
+      check "admitted conversation window read applies semantic privacy masks"
+        (either (const False) (\value->case parseMaybe (withObject "read result" (.: "text")) value of
+          Just output->not ("private-token" `T.isInfixOf` output) && not ("unsent-secret" `T.isInfixOf` output) && "public λ" `T.isInfixOf` output
+          Nothing->False) maskedResult)
     TIO.writeFile path "[editor.mcp.permissions]\nread_buffer = 'prompt'\n"
     (prompt,pending)<-begin reader base
     check "read policy Prompt uses owning approval queue" (dialog prompt/=Nothing)
