@@ -190,25 +190,31 @@ submissionSlot (DraftSubmission _ slot _ _ _ _)=slot
 sameDraftSubmission :: DraftSubmission -> DraftSubmission -> Bool
 sameDraftSubmission a b=submissionDraft a==submissionDraft b && submissionVersion a==submissionVersion b && submissionSlot a==submissionSlot b
 -- | Invoke on the existing action worker. Recheck the original mount before
--- registry admission. Once the command accepts, its ordinary drain law applies;
+-- registry admission, after evaluating its argument adapter. This one-shot claim
+-- is the host input handoff; registry admission still refuses retired commands.
+-- Once the command accepts, its ordinary drain law applies;
 -- closing a frame cannot recall committed work or an immutable granted read.
 invokeEditorAction :: PreparedEditor c r -> c -> DraftSubmission -> IO (Either CommandError r)
-invokeEditorAction (PreparedEditor mount@(EditorMount _ (DraftRef _ draftLive) _ _ _ mountState) _ normal alternate) context submitted@(DraftSubmission _ _ _ _ _ state)=do
-  accepted<-atomically $ do
-    live<-readTVar draftLive
-    phase<-readTVar mountState
-    claimed<-readTVar state
-    if mount/=submissionMount submitted || not live || phase/=MountOpen || claimed/=Captured
-      then pure False else writeTVar state Invoked >> pure True
-  if not accepted then pure (Left (CommandRejected "Editor submission expired."))
-  else case selected of
+invokeEditorAction (PreparedEditor mount@(EditorMount _ (DraftRef _ draftLive) _ _ _ mountState) _ normal alternate) context submitted@(DraftSubmission _ _ _ _ _ state)=
+  case selected of
     EditorAction registry command arguments reply
       | commandRef command/=submissionAction submitted->pure (Left (CommandRejected "Editor action changed."))
       | otherwise->case arguments submitted of
           Left err->pure (Left err)
-          Right captured->do
-            result<-invoke registry command context captured
-            case result of Left err->pure (Left err); Right value->Right <$> reply context value
+          Right value->do
+            -- Force the argument adapter before the short input handoff. It may
+            -- inspect the immutable read, so it belongs on this worker, never
+            -- inside STM or after claiming a mount which could close meanwhile.
+            captured<-evaluate value
+            accepted<-atomically $ do
+              live<-readTVar draftLive
+              phase<-readTVar mountState
+              claimed<-readTVar state
+              if mount/=submissionMount submitted || not live || phase/=MountOpen || claimed/=Captured
+                then pure False else writeTVar state Invoked >> pure True
+            if not accepted then pure (Left (CommandRejected "Editor submission expired.")) else do
+              result<-invoke registry command context captured
+              case result of Left err->pure (Left err); Right resultValue->Right <$> reply context resultValue
   where selected=case submissionSlot submitted of DefaultEditor->normal; AlternateEditor->alternate
 
 -- | A result for one exact submitted draft. This cannot select another target,

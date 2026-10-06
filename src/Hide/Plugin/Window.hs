@@ -16,7 +16,7 @@
 -- saved baseline, Undo history or editable source document.
 module Hide.Plugin.Window
   ( WindowRef, WindowScope, WindowUpdate, withWindowScope, openTextWindow, refreshTextWindow
-  , updateWindowRef, admitWindowUpdate, windowRefCurrent, retireWindowRef
+  , updateWindowRef, admitWindowUpdate, windowRefCurrent, windowScopeCurrent, retireWindowRef
   , EditorWindowUpdate, openEditorWindow, editorWindowBody, editorWindowEditor, admitEditorWindowUpdate
   , PreparedWindow, prepareTextWindow, prepareMarkdownWindow, prepareStyledTextWindow, prepareRecoverableTextWindow
   , WindowRow(..), prepareRowsWindow, prepareRecoverableRowsWindow
@@ -228,6 +228,12 @@ windowRefCurrent (WindowRef _ (WindowScope scope) state)=atomically $ do
   (revision,_)<-readTVar state
   pure (live && revision>0)
 
+-- | /O(1)/. Publication scope liveness independently of a closed frame. Typed
+-- owners retain one draft binding until this scope or its registration retires;
+-- closing a mount must not lose the receipt needed to release its hidden state.
+windowScopeCurrent :: WindowRef -> IO Bool
+windowScopeCurrent (WindowRef _ (WindowScope scope) _)=readTVarIO scope
+
 -- | Host adoption primitive. The supplied flag records whether the exact view
 -- is already installed; false cannot turn a refresh into an open operation.
 -- A missing refresh retires its instance. Caller must check actor/modal policy
@@ -265,7 +271,10 @@ editorWindowBody (EditorWindowUpdate body _)=body
 editorWindowEditor :: EditorWindowUpdate c r -> E.PreparedEditor c r
 editorWindowEditor (EditorWindowUpdate _ editor)=editor
 
--- | Host joint opening after current actor/geometry/budget checks. Check every
+-- | Host joint opening after current actor/geometry/budget and exact draft-owner
+-- checks. One widget has one live attachment; another owner or a second frame
+-- must be refused before this operation, without stealing/resetting its draft.
+-- Check every
 -- body condition before attempting the mount claim; after that claim succeeds,
 -- the only remaining operation commits the body in the same transaction.
 -- Returning Nothing cannot leave either lifetime partly adopted. Command
