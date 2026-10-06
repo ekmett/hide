@@ -33,7 +33,7 @@ import qualified Data.Vector as V
 import qualified Data.Map.Strict as M
 import Hide.Plugin.Tree (NodeId)
 import Hide.Plugin.Menu (MenuRef)
-import Data.List (nub)
+import Data.List (nub,foldl')
 import Hide.Buffer (contentLength,BufferContent, bufferContent, newBuffer, prepareBuffer)
 import Hide.Unicode (sourceTextWidth)
 import Hide.Markdown (renderMarkdown)
