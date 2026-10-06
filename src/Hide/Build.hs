@@ -150,8 +150,6 @@ testPlan config root
 benchmarkPlan :: BuildConfig -> FilePath -> IO (Either Text [(FilePath,[String])])
 benchmarkPlan config root
   | buildToolchain config/=GHC = pure (Left "THC has no configured benchmark runner. Select GHC to run Cabal benchmarks.")
-  | null (buildExecutable config) || any (elem '\0') [buildExecutable config,T.unpack (buildTarget config)] = pure (Left "Invalid benchmark compiler or target.")
-  | "-" `T.isPrefixOf` buildTarget config = pure (Left "A benchmark target cannot start with '-'.")
   | otherwise = do
       project<-isProject root
       pure $ if not project then Left "Benchmarks require a Cabal project." else

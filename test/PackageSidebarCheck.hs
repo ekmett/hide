@@ -144,7 +144,7 @@ checks=bracket temporary removePathForcibly $ \root->do
           removeFile invocation
           driver<-request "test:driver" "Test" testDone >>= admitted >>= waitInvocation
           driverArguments<-lines <$> readFile invocation
-          unless (last driverArguments=="sample:test:driver") (fail "Detailed Test delegates its captured component to Cabal")
+          unless (driverArguments==[root,"test","--with-compiler="<>compiler,"--test-show-details=direct","sample:test:driver"]) (fail "Detailed Test delegates its captured component to Cabal")
           driverDone<-wait "captured driver Test completes" (T.isInfixOf "completed." . status) driver
           removeFile invocation
           benchmarked<-request "bench:measure" "Benchmark" driverDone >>= admitted >>= waitInvocation
