@@ -299,11 +299,17 @@ label summary; recovery does not reconnect jobs or restore actions/Details.
 
 ### Embedded editor ownership
 
-The next window primitive is a persistent editor attachment. Its draft belongs
-to the host, separately from the window's prepared body. Updating a transcript
-must not replace the draft's text, Undo history, selection or scroll position.
-The same attachment should work in a prepared plugin window and in the existing
-conversation window.
+`Hide.Plugin.Editor` attaches persistent multiline input to a window. The host
+owns its draft, Undo history, caret, selection and focus separately from the
+prepared body. Both prepared plugin windows and conversation windows use this
+input path. Body refreshes preserve the draft.
+
+Prepare a draft under `withDraftRef` and bind its default and alternate slots to
+ordinary typed commands with `editorAction`. `prepareEditor` supplies initial
+text; `remountEditor` reuses retained input. Publish the body and attachment
+together through `Hide.Plugin.Window.openEditorWindow`. The menu or sidebar
+owner accepts both in one operation, or neither. Refreshing ordinary prepared
+content cannot install new actions or reset input.
 
 A draft outlives its visible mount. Switching conversations retains each draft;
 closing and reopening a window creates a fresh mount. Ending the owning session
@@ -315,8 +321,12 @@ change, even if the user switches back before the reply arrives.
 Submission captures the action, target, provider and exact draft version before
 worker execution. An accepted response can clear that version even while its
 draft is hidden, but cannot clear newer typing or a same-text replacement.
-Existing command and provider workers own execution. Recovery restores private
-drafts into fresh identities and never replays a submission.
+Existing command and provider workers own execution; input preparation never
+runs plugin callbacks on the UI owner. A plugin reply uses `clearEditorDraft` or
+`replacementEditorDraft` with the captured submission. Refused or stale replies
+preserve the draft. Two slots may invoke the same command with different typed
+arguments; labels do not resolve commands. Recovery restores conversation drafts
+into fresh identities and never restores callable bindings or replays submissions.
 
 This step retains the current transcript representation. Moving its bubble-aware
 copy, relative links, shell blocks and protected question controls into prepared
