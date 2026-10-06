@@ -297,6 +297,32 @@ registration retirement reject late actions. Closing the manager leaves transfer
 running and progress cannot reopen it. Durable rows restore only a private inert
 label summary; recovery does not reconnect jobs or restore actions/Details.
 
+### Embedded editor ownership
+
+The next window primitive is a persistent editor attachment. Its draft belongs
+to the host, separately from the window's prepared body. Updating a transcript
+must not replace the draft's text, Undo history, selection or scroll position.
+The same attachment should work in a prepared plugin window and in the existing
+conversation window.
+
+A draft outlives its visible mount. Switching conversations retains each draft;
+closing and reopening a window creates a fresh mount. Ending the owning session
+or plugin scope releases the retained draft. A widget has one live attachment;
+opening it through another owner must not take over its state. Input requires the
+current focused mount. Outstanding clipboard reads expire on a focus or target
+change, even if the user switches back before the reply arrives.
+
+Submission captures the action, target, provider and exact draft version before
+worker execution. An accepted response can clear that version even while its
+draft is hidden, but cannot clear newer typing or a same-text replacement.
+Existing command and provider workers own execution. Recovery restores private
+drafts into fresh identities and never replays a submission.
+
+This step retains the current transcript representation. Moving its bubble-aware
+copy, relative links, shell blocks and protected question controls into prepared
+semantic content is a separate migration. Human input and approval authority
+remain host-owned throughout.
+
 ### Broader proposed window contract
 
 Separate a window's content from its chrome. The host supplies the title, number,
