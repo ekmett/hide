@@ -412,10 +412,10 @@ finishMenuEditor host@(MenuHost _ _ _ _ ref _) core d submitted worker=do
     _->pure False
   completed<-poll worker
   case completed of
-    Nothing->do
+    Nothing->mask $ \_->do
       live<-Editor.mountCurrent (Editor.submissionMount submitted)
       aborted<-if live && owning then pure False else Editor.abortEditorSubmission submitted
-      if not aborted then pure d else mask $ \_->do
+      if not aborted then pure d else do
         reaper<-asyncWithUnmask (\unmask->unmask (cancel worker))
         modifyIORef' ref (\s->s {menuPending=Just (RetiringEditor worker reaper)})
         pure d
