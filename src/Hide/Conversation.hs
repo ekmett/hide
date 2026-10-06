@@ -14,7 +14,7 @@ module Hide.Conversation (ConversationState, conversationAgents, withConversatio
 import Hide.Sidebar
 import Hide.SessionServices (persist)
 import Prelude hiding (reads)
-import Control.Exception (IOException, bracket, try, onException, mask, evaluate)
+import Control.Exception (IOException, bracket, try, onException, mask, mask_, evaluate)
 #ifdef WITH_WINDOW
 import Control.Concurrent (forkIO)
 import System.Process (createProcess, proc, waitForProcess)
@@ -1593,7 +1593,7 @@ startChildControl (ConversationState _ ref _ _) ident submitted operation d=mask
     worker<-asyncWithUnmask (\unmask->unmask operation)
     modifyIORef' ref (\current->current {childControls=M.insert target (submitted,worker) (childControls current)})
     pure d {agentReplying=agentReplying d || target==conversationTarget d,contextMenu=Nothing,
-      status=if submitted==Nothing then "Updating child settings..." else "Steering child; draft kept until accepted."}
+      status=case Editor.submissionSlot <$> submitted of Nothing->"Updating child settings..."; Just Editor.DefaultEditor->"Preparing child query; draft kept until accepted."; Just Editor.AlternateEditor->"Steering child; draft kept until accepted."}
 
 refreshChildConversation :: ConversationState -> Desktop -> IO Desktop
 refreshChildConversation (ConversationState _ ref _ agents) d=do
