@@ -567,8 +567,6 @@ sourceCoordinateChecks=do
         (selection (win (rowEdge True True focused))==Selection p (offset row+T.length (rows !! row)))
     forM_ (zip [0..] rows) $ \(row,line)->do
       let extent=B.displayColumn line (T.length line)
-      check "source row width matches the explicit flat extent"
-        (windowTextRowWidth base (win base) text row==extent)
       forM_ ([0,1,7,8,max 0 (extent-1),extent,extent+1]++[1200..min 1220 extent]) $ \column->do
         let p=offset row+B.columnOffset line column
             pan=max 0 (column-3)
@@ -576,8 +574,9 @@ sourceCoordinateChecks=do
             w=win located; x=left (bounds w)+1+column-pan; y=top (bounds w)+1
             hovered=fst (hoverAt x y located)
             target=if column>=extent then Nothing else Just (sourceFixtureBuffer w,B.revision buffer,p)
-        check "source hit and hover share scalar offsets and reject past-row hover"
-          (windowTextOffset located w text row column==p && pos (selectAt False x y located)==p && hoverTarget hovered==target)
+        check "source hit, link eligibility and hover retain flat scalar boundaries"
+          (windowTextContainsColumn located w text row column==(column<extent) &&
+           windowTextOffset located w text row column==p && pos (selectAt False x y located)==p && hoverTarget hovered==target)
 
 -- Cold source geometry must stop at the displayed prefix, while an explicit
 -- end seek refines and clamps immediately. The thumb receipt is only a hint:
