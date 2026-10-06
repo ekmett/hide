@@ -1936,7 +1936,7 @@ data GhcLaunch=GhcLaunch FilePath Build.BuildConfig FilePath Int HdbContext
       ![DirtySnapshot] !(Maybe Build.BuildConfig) !(IORef (Maybe FilePath))
 -- Source identity, path and current toolchain only. No source/draft/history Eq.
 type PackageDebugContext=(Maybe FilePath,Maybe FilePath,Toolchain,[(Int,Maybe FilePath,ContentVersion)])
-data PackagePrepared=PackageGhc !Build.BuildConfig !FilePath ![(String,String)] !FilePath
+data PackagePrepared=PackageGhc !FilePath ![(String,String)] !Value
   | PackageThc !FilePath ![String]
 data HdbPrepared=HdbReady FilePath [(String,String)] | HdbOffer Hdb.HdbPlan
   | PackageReady !GhcLaunch !PackagePrepared | PackageOffer !GhcLaunch !Hdb.HdbPlan
@@ -2096,7 +2096,11 @@ preparePackageDebug prepare allowOffer (PackageLaunch target entry port context 
                       ["component" .= packageBuildName target]]])) >> hClose handle)
                       `finally` void (tryIOError (hClose handle))
                     pure path
-                  pure (Right (PackageReady captured (PackageGhc config executable environment cradle)))
+                  let arguments=object ["projectRoot" .= packageBuildRoot target,"entryFile" .= makeRelative (packageBuildRoot target) file,
+                        "entryPoint" .= ("main"::Text),"entryArgs" .= Build.buildArguments config,
+                        "extraGhcArgs" .= ([]::[String]),"cradleFile" .= cradle]
+                  _<-evaluate (BL.length (encode arguments))
+                  pure (Right (PackageReady captured (PackageGhc executable environment arguments)))
                 Right (compiler,Nothing) | allowOffer->fmap (PackageOffer captured) <$> prepare compiler
                                          | otherwise->pure (Left "The installed debugger is unavailable; launch again.")
   -- Force only fixed launch metadata on this worker; final owner work is scalar.
@@ -2105,8 +2109,8 @@ preparePackageDebug prepare allowOffer (PackageLaunch target entry port context 
   _<-case result of
     Left err->evaluate (T.length err) >> pure ()
     Right (PackageReady _ (PackageThc executable args))->evaluate (length executable+sum (map length args)) >> pure ()
-    Right (PackageReady _ (PackageGhc _ executable environment cradle))->
-      evaluate (length executable+length cradle+sum [length key+length value | (key,value)<-environment]) >> pure ()
+    Right (PackageReady _ (PackageGhc executable environment _))->
+      evaluate (length executable+sum [length key+length value | (key,value)<-environment]) >> pure ()
     _->pure ()
   after<-packageBuildManifestCurrent target
   current<-Build.loadBuildConfig settings (packageBuildRoot target)
@@ -2147,7 +2151,7 @@ adoptPackageDebug :: Debugger -> PackageBuildTarget -> Desktop -> IO Desktop
 adoptPackageDebug runtime@(Debugger stateRef _ (HdbRuntime _ ref _ _ _ _ _) _ _) target d=mask_ $ do
   h<-readIORef ref
   case hdbReady h of
-    Just (ident,request@(PackageLaunch captured entry port _ _ _ owned),launch)
+    Just (ident,request@(PackageLaunch captured _ port _ _ _ owned),launch)
       | ident==hdbSerial h,captured==target->do
           current<-launchCurrent request d
           if not current then invalidateHdb runtime >> pure d {status="Package debug source changed; launch again."}
@@ -2166,17 +2170,12 @@ adoptPackageDebug runtime@(Debugger stateRef _ (HdbRuntime _ ref _ _ _ _ _) _ _)
                     connection<-D.startManagedWithAfter (awaitRetired runtime) (pure (executable,args,[])) directory "127.0.0.1" port
                     writeIORef created (Just connection)
                     initializeSession runtime directory connection ("127.0.0.1",port) "attach" (object []) "graalvm" True d
-                  PackageGhc config executable environment path->case entry of
-                    Left _->pure d {status="The captured entry is unavailable."}
-                    Right file->do
-                      connection<-D.startManagedWithAfter (awaitRetired runtime) (pure (executable,["server","--port",show port],environment)) directory "127.0.0.1" port
-                      writeIORef created (Just connection)
-                      let args=object ["projectRoot" .= directory,"entryFile" .= makeRelative directory file,
-                            "entryPoint" .= ("main"::Text),"entryArgs" .= Build.buildArguments config,
-                            "extraGhcArgs" .= ([]::[String]),"cradleFile" .= path]
-                      next<-initializeSession runtime directory connection ("127.0.0.1",port) "launch" args "hdb" True d
-                      modifyIORef' stateRef (\state->state {debugEnvironment=environment,hdbLauncher=Just executable})
-                      pure next
+                  PackageGhc executable environment arguments->do
+                    connection<-D.startManagedWithAfter (awaitRetired runtime) (pure (executable,["server","--port",show port],environment)) directory "127.0.0.1" port
+                    writeIORef created (Just connection)
+                    next<-initializeSession runtime directory connection ("127.0.0.1",port) "launch" arguments "hdb" True d
+                    modifyIORef' stateRef (\state->state {debugEnvironment=environment,hdbLauncher=Just executable})
+                    pure next
                 modifyIORef' stateRef (\state->state {debugCradle=cradle})
                 pure next
               case result of

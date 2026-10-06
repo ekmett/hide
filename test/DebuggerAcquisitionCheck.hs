@@ -298,6 +298,25 @@ checks | os=="mingw32"=pure () -- Official hdb bindists are currently POSIX only
           stopped<-send runtime "disconnect" [] launched
           _<-waitFor runtime "owned cradle retirement" (\_->null <$> cradleFiles) stopped
           pure ()
+        -- Installation may finish, but a source replacement during consented
+        -- acquisition must not continue the old captured component request.
+        reset
+        staleGate<-newEmptyMVar
+        staleFinished<-newEmptyMVar
+        withDebuggerHdb (pure 0) (pure . Right . plan)
+          (\_ report->install report staleGate `finally` void (tryPutMVar staleFinished ())) $ \runtime->do
+            pending<-launchRequest runtime other >>= waitFor runtime "stale package offer" (pure.offer)
+            accepted<-submit runtime 0 pending
+            before<-cradleFiles
+            check "acquisition waits without creating a cradle" (null before)
+            let changed=accepted {buffers=M.map (\doc->doc {documentBuffer=newBuffer "replacement"}) (buffers accepted)}
+            observed<-tickDebugger runtime changed
+            putMVar staleGate ()
+            timeout 1000000 (readMVar staleFinished) >>= maybe (error "stale package download did not complete") pure
+            final<-foldTicks runtime 20 observed >>= tickPreparedDebug runtime (debuggerEffects runtime core)
+            launches<-packetRequests
+            after<-cradleFiles
+            check "stale package acquisition cannot revive or create cradle" (null launches && null after && T.isInfixOf "no longer current" (status final))
         -- A refused final host gate consumes the receipt and cleans its file.
         TIO.writeFile logFile ""
         withDebuggerHdb (pure 0) (pure . Right . plan) (\_ _->pure (Left "unexpected acquisition")) $ \runtime->do
