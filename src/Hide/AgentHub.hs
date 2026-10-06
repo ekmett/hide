@@ -89,7 +89,7 @@ data Entry = Entry
   , entryResults :: M.Map Int (Either Text Value), entryNextTicket :: Int
   , entryHistory :: Q.Seq HistoryEvent, entryHistoryBytes :: Int, entryNextEvent :: Int
   , entryDropped :: Int, entryExternal :: Bool, entryCancelPending :: Bool, entryExternalBusy :: Bool
-  , entryControl :: Maybe (Int,Text), entryUsage :: Maybe (Integer,Integer), entryEpoch :: Int, entryCapsVersion :: Int, entryCancelVersion :: Int }
+  , entryControl :: Maybe (Int,Text), entryUsage :: Maybe (Integer,Integer), entryEpoch :: Int, entryCapsVersion :: Int, entryCancelVersion :: !Int }
 data HubState = HubState { hubEntries :: M.Map AgentId Entry, hubNextId :: Int, hubClosed :: Bool, hubLastLimits :: HubLimits }
 data AgentHub = AgentHub (FilePath -> IO (Either Text HubLimits)) StartProvider (TVar HubState)
 

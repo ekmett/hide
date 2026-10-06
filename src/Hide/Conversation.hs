@@ -1586,11 +1586,11 @@ performChild runtime@(ConversationState _ ref _ agents) action values d=do
 -- Exact target is independent of the selected conversation. Worker ownership is
 -- the same childControls map polled and retired by the existing conversation.
 startChildControl :: ConversationState -> AH.AgentId -> Maybe DraftReceipt -> IO (Either Text ()) -> Desktop -> IO Desktop
-startChildControl (ConversationState _ ref _ _) ident submitted operation d=mask $ \restore->do
+startChildControl (ConversationState _ ref _ _) ident submitted operation d=mask_ $ do
   state<-readIORef ref
   let target=AH.agentIdText ident
   if M.member target (childControls state) then pure d {status="A child operation is already pending."} else do
-    worker<-async (restore operation)
+    worker<-asyncWithUnmask (\unmask->unmask operation)
     modifyIORef' ref (\current->current {childControls=M.insert target (submitted,worker) (childControls current)})
     pure d {agentReplying=agentReplying d || target==conversationTarget d,contextMenu=Nothing,
       status=if submitted==Nothing then "Updating child settings..." else "Steering child; draft kept until accepted."}
@@ -1831,7 +1831,7 @@ submitConversationEditor runtime@(ConversationState _ ref _ _) mount slot origin
                 [submitted | DraftPrompt submitted _ _<-maybe [] pure (promptPreparation state)]++
                 [submitted | EditorQuery submitted _ _<-queuedQueries state]++
                 [submitted | (Just submitted,_)<-M.elems (childControls state)]
-          previous<-or <$> mapM (\submitted->draftCurrent submitted d) pendingDrafts
+          previous<-or <$> mapM (\submitted->draftCurrent submitted d) (filter ((==Editor.mountDraft mount).Editor.submissionDraft) pendingDrafts)
           if previous then pure d {status="Preparing the submitted draft..."}
           else if M.member target (childControls state) && (slot/=Editor.DefaultEditor || maybe True ((/=Editor.DefaultEditor).Editor.submissionSlot) (fst =<< M.lookup target (childControls state)))
             then pure d {status="A conversation input operation is already pending."}
@@ -1885,7 +1885,7 @@ startChildEditor runtime@(ConversationState _ _ _ agents) submitted context@(Cha
 -- Transfer at most one queued child intent into its existing worker slot. It
 -- does not wait for, or consume, the independent primary prompt preparation.
 pollQueuedChildEditor :: ConversationState -> Desktop -> IO Desktop
-pollQueuedChildEditor runtime@(ConversationState _ ref _ _) d=do
+pollQueuedChildEditor runtime@(ConversationState _ ref _ _) d=mask_ $ do
   state<-readIORef ref
   case [(submitted,context,editor) | EditorQuery submitted context@(ChatEditorContext target _ _ _) editor<-queuedQueries state,
         not (T.null target),M.notMember target (childControls state),M.notMember target (childCancels state)] of
@@ -1895,7 +1895,8 @@ pollQueuedChildEditor runtime@(ConversationState _ ref _ _) d=do
     []->pure d
 
 -- Queued editor input is still immutable intent, not accepted text. The
--- existing queue is cleared at every provider reset. Its original launch and,
+-- primary intents retire at provider reset; child intents keep their own target.
+-- The original primary launch and,
 -- when already connected, exact client receipt remain authoritative; a request
 -- captured before first connect follows only that queue's initial connection.
 prepareQueuedEditor :: ConversationState -> State -> Desktop -> IO Desktop
