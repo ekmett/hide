@@ -1185,7 +1185,7 @@ runCommand SelectAll source | dialog source==Nothing,activeMarkdown source,maybe
   (modifyActive (modifyDisplayedWindow (\w->w {selection=Selection 0 (maybe 0 (\(_,text,_)->contentLength text) (windowMarkdown source w))})) source,[])
 runCommand Copy source | dialog source==Nothing,Just view<-activePluginWindow source, Just w<-activeWindow source =
   let (a,b)=ordered (selection w)
-  in (copyClipboard False (contentSlice (PluginWindow.preparedWindowText view) a b) source {menu=Nothing,contextMenu=Nothing},[])
+  in (copyClipboard False (contentSlice (PluginWindow.preparedWindowText view) a (b-a)) source {menu=Nothing,contextMenu=Nothing},[])
 runCommand SelectAll source | dialog source==Nothing,Just view<-activePluginWindow source =
   (modifyActive (\w->w {selection=Selection 0 (contentLength (PluginWindow.preparedWindowText view))}) source,[])
 runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source {menu = Nothing, contextMenu=Nothing, buttonHover=Nothing, buttonPressed=Nothing, prefix = Nothing, drag = Nothing,dragOriginal=Nothing})
@@ -2192,7 +2192,7 @@ composerEvent event d=composerEventWith (composerCodeInput d) event d
 composerEventWith :: Bool -> V.Event -> Desktop -> Maybe (Desktop,[Effect])
 composerEventWith code (V.EvPaste bytes) d = Just (either (const d) (\text -> (if code then composerPaste else composerInsert) (T.filter (\c -> textInputChar c || c `elem` ['\n','\r','\t']) text) d) (TE.decodeUtf8' bytes),[])
 composerEventWith code (V.EvKey key mods) d
-  | key==V.KEsc, composerFocused d, agentReplying d = Just (d,[AgentAction "cancel" []])
+  | key==V.KEsc, activeConversation d, composerFocused d, agentReplying d = Just (d,[AgentAction "cancel" []])
   | key==V.KChar '\t', null mods = Just ((setComposerInput (composerBuffer d) (composerSelection d) (not (composerFocused d)) d),[])
   | key==V.KEnter, composerFocused d, all (`elem` [V.MCtrl,V.MShift]) mods = Just (if code || editingInput d==MountedInput then composerSubmit mods d else if V.MShift `elem` mods then (composerInsert "\n" d,[]) else (d,[]))
   | V.KChar c<-key, textInputChar c, null mods || mods==[V.MShift] = done ((if code then composerTyped else composerInsert) (T.singleton c) d)
