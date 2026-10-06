@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module ScreenCaptureCheck (checks) where
 
-import EditorFixture (withEditorFixture)
+import EditorFixture (withEditorBodyFixture)
 import Codec.Picture (Image, PixelRGB8(..), convertRGB8, decodePng, imageHeight, imageWidth, pixelAt)
 import Control.Monad (unless)
 import Data.Aeson
@@ -14,6 +14,9 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Hide.Browser (Entry(..))
 import Hide.Buffer (newBuffer, Selection(..))
+import qualified Hide.Plugin.Window as W
+import qualified Data.Vector as Vec
+import Hide.TextLayout (prepareTextLayout)
 import Hide.GuestAccess (CellAccess(..), cellAccess)
 import Hide.Markdown (renderMarkdown)
 import Hide.TextPresentation (prepareTextPresentations)
@@ -27,7 +30,16 @@ import Hide.Unicode (clusterWidth, graphemes, Script(..))
 import Hide.Syntax (Style(..))
 
 checks :: IO ()
-checks=withEditorFixture "" (addReadOnly "Conversation" "Session: provider-secret\nPublic assistant response 中" (initialDesktop (80,25))) $ \chatBase->do
+checks=do
+  let text="Session: provider-secret\nPublic assistant response 中"
+      hidden=Vec.singleton (0,T.length "Session: provider-secret")
+      semantics=W.TextSemantics W.CopyText Nothing Vec.empty Vec.empty W.ReadableWindow hidden hidden Vec.empty
+  body<-W.prepareSemanticTextWindow "Conversation" [(c,Plain) | c<-T.unpack text] semantics
+    >>= either (error . T.unpack) pure
+  withEditorBodyFixture "" body (initialDesktop (80,25)) checksWithBody
+
+checksWithBody :: Desktop -> IO ()
+checksWithBody chatBase=do
   font<-loadFont
   let desktop=addDocument Nothing (newBuffer "  λ 中 ▙ é 👩🏽\x200d\&💻 ❤️\n") (initialDesktop (80,25))
       takeCapture d image=capture font d image >>= either (error . T.unpack) pure
@@ -131,46 +143,54 @@ checks=withEditorFixture "" (addReadOnly "Conversation" "Session: provider-secre
   -- this styled payload to exercise capture's actual grapheme path as well.
   let styled=concatMap (\(c,style)->if c=='é' then [('e',style),('\x0301',style)] else [(c,style)])
         (renderMarkdown 40 "# ABC界é👩🏽\x200d\&💻❤️\n\npublic")
-      opened=addHelpStyled styled (initialDesktop (80,25))
-      view=fromMaybe (error "missing heading window") (activeWindow opened)
-      heading=opened {wideSectionTitles=True,windows=[view {bounds=Rect 2 2 12 12}],
-        buffers=M.map (\doc->doc {documentLabel=Just "Conversation"}) (buffers opened)}
-  prepared<-prepareTextPresentations heading
-  let guarded=prepared {chatActions=[(1,2,"question-choice",[]),(6,10,"question-choice",[])]}
-      plainHeading=prepared {wideSectionTitles=False}
-  wideCapture<-takeCapture guarded True
-  ordinaryCapture<-takeCapture plainHeading True
-  wideImage<-pngImage wideCapture
-  ordinaryImage<-pngImage ordinaryCapture
-  let wideMetadata=textMetadata wideCapture
-      wideRows=T.lines (fromMaybe "" (field "text" wideMetadata))
-      wideAccess=accessCells wideMetadata
-      atCell x y=[(readable,clickable) | (cx',cy',readable,clickable)<-wideAccess,cx'==x,cy'==y]
-      cellPixels picture x y=[pixelAt picture px py | px<-[x*8..x*8+7],py<-[y*16..y*16+15]]
-  check ("capture text preserves explicit heading advances around private cells: "++show (take 2 (drop 3 wideRows)))
-    ("Ａ  Ｃ界ｅ́" `T.isInfixOf` (wideRows!!3) && "  ❤️" `T.isInfixOf` (wideRows!!4) && not ("👩🏽" `T.isInfixOf` T.unlines wideRows) && all ((==80) . sum . map clusterWidth . graphemes) wideRows)
-  check "capture masks agree with prepared source positions in both heading cells"
-    (all (\x->atCell x 3==[(False,False)] && not (cellReadable (cellAccess guarded x 3))) [5,6] &&
-     all (\x->atCell x 3==[(True,False)] && cellReadable (cellAccess guarded x 3)) [3,4,7,8,9,10])
-  check "private stretched glyph is black in both PNG cells"
-    (all (all (==PixelRGB8 0 0 0) . (\x->cellPixels wideImage x 3)) [5,6])
-  check "natural ZWJ emoji is wholly redacted while the following variation-selector emoji keeps its cells"
-    (all (\x->atCell x 4==[(False,False)] && all (==PixelRGB8 0 0 0) (cellPixels wideImage x 4)) [3,4] &&
-     all (\x->atCell x 4==[(True,False)] && cellReadable (cellAccess guarded x 4)) [5,6])
-  check "combining heading grapheme and natural CJK retain their complete two-cell spans"
-    (all (\x->atCell x 3==[(True,False)]) [9,10,11,12])
-  check "public stretched glyph draws in both cells and leaves following border fixed"
-    (all (\x->length (nub (cellPixels wideImage x 3))>1) [7,8] &&
-      cellPixels wideImage 13 3==cellPixels ordinaryImage 13 3)
-  naturalCapture<-takeCapture prepared {wideSectionTitles=False,
-    chatActions=[(3,4,"question-choice",[]),(6,10,"question-choice",[]),(10,12,"question-choice",[])]} True
-  naturalImage<-pngImage naturalCapture
-  let naturalMetadata=textMetadata naturalCapture
-      naturalCells=accessCells naturalMetadata
-      naturalText=fromMaybe "" (field "text" naturalMetadata)
-  check "ordinary natural CJK and ZWJ/variation-selector emoji redact both occupied cells"
-    (not (any (`T.isInfixOf` naturalText) ["界","👩🏽","❤️"]) &&
-      all (\x->(x,3,False,False) `elem` naturalCells && all (==PixelRGB8 0 0 0) (cellPixels naturalImage x 3)) [6,7,9,10,11,12])
+      withHeading hidden wide run=do
+        let semantics=W.TextSemantics W.CopyText Nothing Vec.empty Vec.empty W.ReadableWindow
+              (Vec.fromList hidden) Vec.empty Vec.empty
+        body<-W.prepareSemanticTextWindow "Conversation" styled semantics >>= either (error . T.unpack) pure
+        withEditorBodyFixture "" body (initialDesktop (80,25)) $ \mounted->do
+          let view=fromMaybe (error "missing heading window") (activeWindow mounted)
+              rows=case W.preparedWindowRows body of W.StyledRows preparedRows->preparedRows; _->error "heading is not styled"
+          layout<-prepareTextLayout wide 10 (W.preparedWindowText body) rows
+          let receipt reference=InstalledBody reference (Just (BodyControlReceipt body 10 wide (Just layout) (HostBodyControls Nothing [])))
+              heading=mounted {wideSectionTitles=wide,windows=[view {bounds=Rect 2 2 12 12}],
+                conversationViews=M.adjust (\value->case conversationBodyRef value of
+                  Just reference->value {conversationBody=receipt reference}
+                  Nothing->error "missing heading body reference") "" (conversationViews mounted)}
+          run heading
+  withHeading [(1,2),(6,10)] True $ \guarded->do
+    wideCapture<-takeCapture guarded True
+    ordinaryCapture<-withHeading [] False (\plainHeading->takeCapture plainHeading True)
+    wideImage<-pngImage wideCapture
+    ordinaryImage<-pngImage ordinaryCapture
+    let wideMetadata=textMetadata wideCapture
+        wideRows=T.lines (fromMaybe "" (field "text" wideMetadata))
+        wideAccess=accessCells wideMetadata
+        atCell x y=[(readable,clickable) | (cx',cy',readable,clickable)<-wideAccess,cx'==x,cy'==y]
+        cellPixels picture x y=[pixelAt picture px py | px<-[x*8..x*8+7],py<-[y*16..y*16+15]]
+    check ("capture text preserves explicit heading advances around private cells: "++show (take 2 (drop 3 wideRows)))
+      ("Ａ  Ｃ界ｅ́" `T.isInfixOf` (wideRows!!3) && "  ❤️" `T.isInfixOf` (wideRows!!4) && not ("👩🏽" `T.isInfixOf` T.unlines wideRows) && all ((==80) . sum . map clusterWidth . graphemes) wideRows)
+    check "capture masks agree with prepared source positions in both heading cells"
+      (all (\x->atCell x 3==[(False,False)] && not (cellReadable (cellAccess guarded x 3))) [5,6] &&
+       all (\x->atCell x 3==[(True,False)] && cellReadable (cellAccess guarded x 3)) [3,4,7,8,9,10])
+    check "private stretched glyph is black in both PNG cells"
+      (all (all (==PixelRGB8 0 0 0) . (\x->cellPixels wideImage x 3)) [5,6])
+    check "natural ZWJ emoji is wholly redacted while the following variation-selector emoji keeps its cells"
+      (all (\x->atCell x 4==[(False,False)] && all (==PixelRGB8 0 0 0) (cellPixels wideImage x 4)) [3,4] &&
+       all (\x->atCell x 4==[(True,False)] && cellReadable (cellAccess guarded x 4)) [5,6])
+    check "combining heading grapheme and natural CJK retain their complete two-cell spans"
+      (all (\x->atCell x 3==[(True,False)]) [9,10,11,12])
+    check "public stretched glyph draws in both cells and leaves following border fixed"
+      (all (\x->length (nub (cellPixels wideImage x 3))>1) [7,8] &&
+        cellPixels wideImage 13 3==cellPixels ordinaryImage 13 3)
+    -- An interior modifier/selector interval must redact the entire grapheme.
+    naturalCapture<-withHeading [(3,4),(7,8),(11,12)] False (\heading->takeCapture heading True)
+    naturalImage<-pngImage naturalCapture
+    let naturalMetadata=textMetadata naturalCapture
+        naturalCells=accessCells naturalMetadata
+        naturalText=fromMaybe "" (field "text" naturalMetadata)
+    check "ordinary natural CJK and ZWJ/variation-selector emoji redact both occupied cells"
+      (not (any (`T.isInfixOf` naturalText) ["界","👩🏽","❤️"]) &&
+        all (\x->(x,3,False,False) `elem` naturalCells && all (==PixelRGB8 0 0 0) (cellPixels naturalImage x 3)) [6,7,9,10,11,12])
   let config=desktop {dialog=Just (Dialog "Agents" (AgentDialog "configure")
         [Input "Executable" "public-command" 0,Input "Environment (JSON object)" "private-env-token" 0] 0 ["OK","Cancel"] [])}
   configCapture<-takeCapture config False
