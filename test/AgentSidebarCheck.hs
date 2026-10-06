@@ -225,7 +225,8 @@ checks=bracket temporary removePathForcibly $ \root->
         refusedWorkspace<-awaitIO tick staleAdopted staleStarting {defaultDirectory=Just other}
         afterStale<-AH.listAgents hub AH.Human >>= right
         ensure "changed workspace refuses the captured spawn"
-          (not (any (\entry->field "name" entry==Just ("Stale child"::T.Text)) (maybe [] id (field "agents" afterStale :: Maybe [Value]))))
+          ("workspace changed" `T.isInfixOf` status refusedWorkspace &&
+           not (any (\entry->field "name" entry==Just ("Stale child"::T.Text)) (maybe [] id (field "agents" afterStale :: Maybe [Value]))))
         -- A Files directory is not the editor's captured workspace.
         relocated<-act (refusedWorkspace {defaultDirectory=Just root},[ReadTree other]) >>= await tick (\desktop->treeRoot (tree desktop)==other && has "Agents" desktop)
         reopenedCreate<-act (chooseMenu "Agents" relocated) >>= await tick (maybe False ((=="New agent").dialogTitle) . dialog)
