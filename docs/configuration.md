@@ -104,7 +104,7 @@ changing attachments selects the focused profile and context immediately:
 "hide.file.save" = ["Ctrl+Shift+S"]
 ```
 
-Contexts are `source`, `wordstar`, `dialog`, `sidebar`, `conversation`, `messages`, `debugger` and
+Contexts are `source`, `wordstar`, `wordstar-block`, `wordstar-quick`, `dialog`, `sidebar`, `conversation`, `messages`, `debugger` and
 `terminal`. A `global` table supplies explicitly configured commands to all of
 those contexts where the command and chord belong to the input owner; a context
 entry takes precedence over the same global command. Dialogs inherit only their
@@ -140,11 +140,30 @@ These commands can be replaced or unbound. Ctrl+Alt+E retains the Edit menu and
 Ctrl+Alt+X retains Exit. Ctrl+A/F and their shifted, non-extending aliases use
 `hide.cursor.word-left/right`, so replacing or unbinding those commands also
 replaces or removes the WordStar aliases. Ctrl+Alt+F retains the File menu.
-Ctrl+K/Ctrl+Q prefix/block grammar stays fixed. Overrides using those owned chords
-fail validation. Global chords owned by this grammar are omitted from its
-inherited map, preserving their use in other contexts. Prefix command steps remain
-available even when the same named command is rebound or unbound in the table.
-Configurable prefix/block grammar remains open in #3. Hex buffers use `source`.
+WordStar prefix starters use `hide.wordstar.block-prefix` (Ctrl+K) and
+`hide.wordstar.quick-prefix` (Ctrl+Q). Their second strokes have independent
+`wordstar-block` and `wordstar-quick` tables, with bare, Shift, Ctrl and Ctrl+Shift
+letter defaults. These tables do not inherit ordinary source or macOS defaults;
+explicit global entries still apply. Noncharacter source controls are defaults in
+these tables too. Escape cancels; an unknown or unbound step consumes the prefix
+without typing or replaying a removed command. Hex buffers use `source`.
+
+```toml
+[editor.keybindings.terminal.wordstar]
+"hide.wordstar.block-prefix" = ["Ctrl+J"]
+[editor.keybindings.terminal.wordstar-block]
+"hide.edit.copy" = ["Y"]
+"hide.edit.delete-selection" = []
+"hide.edit.undo" = ["Z"]
+```
+
+Select text, then Ctrl+J Y copies it; Ctrl+J Z undoes an edit. The old Ctrl+K
+starter, C copy step and selected-block deletion step are removed. Block marking
+uses `hide.selection.block-start` and `hide.selection.block-end`. Menu labels show
+the effective two-stroke shortcut; inspection and frontend input use the active
+single-stroke table. Compound labels do not become native menu accelerators.
+Alt menu mnemonics and macOS Command/Option ownership retain their earlier priority.
+
 For example, `[editor.keybindings.terminal.wordstar]` with
 `"hide.file.save" = ["Ctrl+Shift+J"]` replaces F2 for WordStar sources only.
 For example, the `wordstar` table can rebind movement and selection:
@@ -159,7 +178,8 @@ For example, the `wordstar` table can rebind movement and selection:
 
 Removing a command's list consumes its former default keys instead of replaying
 hardcoded editing. A global Save override using Ctrl+Shift+S must explicitly
-release its WordStar owner with `"hide.cursor.left" = []` in the `wordstar` table.
+release its WordStar owners with `"hide.cursor.left" = []` in `wordstar` and
+`"hide.cursor.row-start" = []` in `wordstar-quick`.
 Hex and read-only Markdown/plugin windows keep their existing byte-row or
 displayed-text coordinate and selection owners; read-only windows cannot delete, and Delete line
 is only available in editable text sources.

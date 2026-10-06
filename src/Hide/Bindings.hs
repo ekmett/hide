@@ -26,14 +26,14 @@ platformName :: BindingPlatform -> Text
 platformName platform = case platform of TerminalPlatform -> "terminal"; GraphicalPlatform -> "graphical"; MacPlatform -> "macos"
 
 -- | Focused input owners. Modal controls keep their separate authority boundary.
-data BindingContext = SourceKeys | WordStarKeys | DialogKeys | SidebarKeys | ConversationKeys | MessagesKeys | DebuggerKeys | TerminalKeys deriving (Eq,Ord,Show)
+data BindingContext = SourceKeys | WordStarKeys | WordStarBlockKeys | WordStarQuickKeys | DialogKeys | SidebarKeys | ConversationKeys | MessagesKeys | DebuggerKeys | TerminalKeys deriving (Eq,Ord,Show)
 
 bindingContexts :: [BindingContext]
-bindingContexts = [SourceKeys,WordStarKeys,DialogKeys,SidebarKeys,ConversationKeys,MessagesKeys,DebuggerKeys,TerminalKeys]
+bindingContexts = [SourceKeys,WordStarKeys,WordStarBlockKeys,WordStarQuickKeys,DialogKeys,SidebarKeys,ConversationKeys,MessagesKeys,DebuggerKeys,TerminalKeys]
 
 contextName :: BindingContext -> Text
 contextName context = case context of
-  SourceKeys -> "source"; WordStarKeys -> "wordstar"; DialogKeys -> "dialog"; SidebarKeys -> "sidebar"; ConversationKeys -> "conversation"
+  SourceKeys -> "source"; WordStarKeys -> "wordstar"; WordStarBlockKeys -> "wordstar-block"; WordStarQuickKeys -> "wordstar-quick"; DialogKeys -> "dialog"; SidebarKeys -> "sidebar"; ConversationKeys -> "conversation"
   MessagesKeys -> "messages"; DebuggerKeys -> "debugger"; TerminalKeys -> "terminal"
 
 data Bindings a = Bindings !(M.Map Text a) [(Text,a,[Text])] [(Text,Text)] deriving (Eq,Show)

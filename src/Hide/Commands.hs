@@ -10,7 +10,7 @@ module Hide.Commands (BuiltinCommand(..), builtinCommands, commandIdentifier, co
 import Data.Text (Text)
 import Control.Monad (unless, forM_)
 import qualified Graphics.Vty as V
-import Data.List (find,subsequences)
+import Data.List (find,nub,subsequences)
 import qualified Data.Map.Strict as M
 import qualified Hide.Bindings
 import Hide.Bindings (BindingPlatform(..), bindingPlatforms, platformName, BindingContext(..), bindingContexts, contextName, Bindings, compileBindings, readChord)
@@ -33,6 +33,11 @@ builtinCommands =
   ,BuiltinCommand "hide.dialog.cancel" DialogCancel
   ,BuiltinCommand "hide.dialog.focus-next" DialogFocusNext
   ,BuiltinCommand "hide.dialog.focus-previous" DialogFocusPrevious
+  ,BuiltinCommand "hide.wordstar.block-prefix" WordStarBlockPrefix
+  ,BuiltinCommand "hide.wordstar.quick-prefix" WordStarQuickPrefix
+  ,BuiltinCommand "hide.selection.block-start" MarkBlockStart
+  ,BuiltinCommand "hide.selection.block-end" MarkBlockEnd
+  ,BuiltinCommand "hide.edit.delete-selection" DeleteSelection
   ,BuiltinCommand "hide.file.new" (New)
   ,BuiltinCommand "hide.file.open" (Open)
   ,BuiltinCommand "hide.file.download" (Download)
@@ -207,7 +212,7 @@ platformBindings catalogue platform configuration=do
           inherited=case context of
             TerminalKeys -> fmap (filter (not . processControlChord)) global
             DialogKeys -> fmap (filter (not . dialogChord)) $ M.filterWithKey (\name _->name `elem` [builtinIdentifier entry | entry<-builtinCommands,builtinAction entry `elem` dialogBindingCommands]) global
-            WordStarKeys -> fmap (filter (not . wordStarChord)) global
+            owner | owner `elem` [WordStarKeys,WordStarBlockKeys,WordStarQuickKeys] -> fmap (filter (not . wordStarChord)) global
             _ -> global
           overrides=M.union (M.findWithDefault M.empty (contextName context) configuration) inherited
       forM_ [(name,raw) | (name,chords)<-M.toList overrides,raw<-chords] $ \(name,raw)->do
@@ -219,14 +224,21 @@ platformBindings catalogue platform configuration=do
               ConversationKeys -> character || key==V.KEnter
               TerminalKeys -> character || processControl key mods
               DialogKeys -> character
+              WordStarBlockKeys -> False
+              WordStarQuickKeys -> False
               _ -> character || key==V.KEnter
         let platformReserved = (platform==TerminalPlatform && V.MMeta `elem` mods) ||
               (platform==MacPlatform && ((V.MAlt `elem` mods && V.MCtrl `notElem` mods && V.MMeta `notElem` mods && not (context==DialogKeys && dialogFocusChord key mods) && case key of V.KChar _->True; _->False) || (key `elem` map V.KChar "h\\[]" && V.MMeta `elem` mods))) ||
               (platform/=TerminalPlatform && key `elem` map V.KChar "0+=-" && any (`elem` mods) [V.MCtrl,V.MAlt])
-        unless (not (terminalSourceReserved key mods && not (context==DialogKeys && (dialogControlChord key mods || name `elem` inputNames && key `elem` map fst dialogInputKeys)) || contextReserved || platformReserved || context==WordStarKeys && wordStarReserved key mods || context==DialogKeys && (dialogReserved key mods || windowCycleChord key mods)))
+        unless (not (terminalSourceReserved key mods && not (context==DialogKeys && (dialogControlChord key mods || name `elem` inputNames && key `elem` map fst dialogInputKeys)) || contextReserved || platformReserved || context `elem` [WordStarKeys,WordStarBlockKeys,WordStarQuickKeys] && wordStarReserved key mods || context==DialogKeys && (dialogReserved key mods || windowCycleChord key mods)))
           (Left ("Reserved "<>contextName context<>" key: "<>raw))
       compiled<-either (Left . (("Keybinding context "<>contextName context<>": ")<>)) Right $ compileBindings ([(builtinIdentifier entry,builtinAction entry,keys context (builtinAction entry)) | entry<-builtinCommands,context/=DialogKeys || builtinAction entry `elem` dialogBindingCommands]++[(name,action,[]) | (name,action)<-catalogue,context/=DialogKeys,name `notElem` map builtinIdentifier builtinCommands]) overrides
       pure ((platform,context),compiled)
+    -- Non-character source controls are prepared in this same table so an
+    -- explicit prefix override/unbinding cannot reach a second fallback map.
+    secondStrokes entries=[(action,maybe [] (\letter->[modifier<>letter | modifier<-["","Shift+","Ctrl+","Ctrl+Shift+"]]) (lookup action entries)++maybe [] id (lookup action controls)) | action<-nub (map fst entries++map fst controls)]
+      where controls=[(action,filter nonCharacter chords) | (action,chords)<-defaultsFor WordStarKeys,any nonCharacter chords]
+            nonCharacter raw=case readChord raw of Right (key,mods) | windowCycleChord key mods->True; Right (V.KChar _,_)->False; Right _->True; _->False
     processControl key mods=case key of
       V.KChar _ -> V.MCtrl `elem` mods && V.MAlt `notElem` mods && V.MMeta `notElem` mods && not (windowCycleChord key mods)
       _ -> False
@@ -235,6 +247,7 @@ platformBindings catalogue platform configuration=do
     wordStarChord raw=case readChord raw of Right (key,mods)->wordStarReserved key mods; _->False
     processControlChord raw=case readChord raw of Right (key,mods)->processControl key mods; _->False
     keys context action=maybe [] id (lookup action (if platform==MacPlatform then macDefaults context else defaultsFor context))
+    macDefaults context | context `elem` [WordStarBlockKeys,WordStarQuickKeys] = defaultsFor context
     macDefaults context = [(action,chords++maybe [] id (lookup action (defaultsFor context))) | (action,chords)<-macCommands,context/=DialogKeys || action `elem` dialogBindingCommands] ++ filter (\(action,_)->action `notElem` map fst macCommands) (defaultsFor context)
     macCommands =
       [(New,["Cmd+N"]),(Open,["Cmd+O"]),(Save,["Cmd+S"]),(SaveAs,["Cmd+Shift+S"]),(Close,["Cmd+W"]),(Quit,["Cmd+Q"])
@@ -244,10 +257,12 @@ platformBindings catalogue platform configuration=do
     defaultsFor DialogKeys=[(DialogAccept,controlAliases V.KEnter),(DialogCancel,controlAliases V.KEsc),(DialogFocusNext,["Tab","Alt+Tab"]),(DialogFocusPrevious,["Shift+Tab","Alt+Shift+Tab"]),(Copy,["Ctrl+C","Ctrl+Shift+C"]),(Cut,["Ctrl+X","Ctrl+Shift+X"]),(Paste,["Ctrl+V","Ctrl+Shift+V"]),
       (SelectAll,["Ctrl+A","Ctrl+Shift+A"]),(Undo,["Ctrl+Z"]),(Redo,["Ctrl+Y","Ctrl+Shift+Z"]),
       (Find,["Ctrl+F"]),(Replace,["Ctrl+H","Ctrl+R"])]++[(cmd,controlAliases key) | (key,cmd)<-dialogInputKeys]
+    defaultsFor WordStarBlockKeys=secondStrokes [(MarkBlockStart,"B"),(MarkBlockEnd,"K"),(Copy,"C"),(Cut,"V"),(DeleteSelection,"Y"),(Save,"S"),(Close,"D")]
+    defaultsFor WordStarQuickKeys=secondStrokes [(CursorRowStart False,"S"),(CursorRowEnd False,"D"),(CursorDocumentStart False,"R"),(CursorDocumentEnd False,"C"),(Find,"F"),(Replace,"A")]
     defaultsFor WordStarKeys=[(action,filter named chords) | (action,chords)<-defaults] ++
       [(action,chords++maybe [] id (lookup action [(CursorLeft False,["Ctrl+S","Ctrl+Shift+S"]),(CursorRight False,["Ctrl+D","Ctrl+Shift+D"]),(CursorUp False,["Ctrl+E","Ctrl+Shift+E"]),(CursorDown False,["Ctrl+X","Ctrl+Shift+X"]),
         (CursorWordLeft False,["Ctrl+A","Ctrl+Shift+A","Ctrl+Alt+A","Ctrl+Alt+Shift+A"]),(CursorWordRight False,["Ctrl+F","Ctrl+Shift+F"])])) | (action,chords)<-navigationDefaults] ++
-      [(DeleteLine,["Ctrl+Y","Ctrl+Shift+Y","Ctrl+Alt+Y","Ctrl+Alt+Shift+Y"])]
+      [(DeleteLine,["Ctrl+Y","Ctrl+Shift+Y","Ctrl+Alt+Y","Ctrl+Alt+Shift+Y"]),(WordStarBlockPrefix,["Ctrl+K","Ctrl+Shift+K"]),(WordStarQuickPrefix,["Ctrl+Q","Ctrl+Shift+Q"])]
       where named raw=case readChord raw of
               Right (key,mods) | windowCycleChord key mods -> True
               Right (key,mods) | wordStarReserved key mods -> False

@@ -23,6 +23,10 @@ context.frame.bindings=[['Cmd+C','hide.edit.copy'],['Cmd+V','hide.edit.paste']];
 assert.equal(key('c',{metaKey:true}).prevented,undefined); // Native clipboard event owns activation.
 context.frame.wordstar=true;context.frame.bindings=[['Ctrl+C','hide.edit.copy']];
 assert.equal(key('c',{ctrlKey:true}).prevented,undefined); // Explicit WordStar or dialog Copy keeps its clipboard gesture.
+context.frame.bindings=[['Y','hide.edit.copy'],['P','hide.edit.paste']];
+assert.equal(key('y').prevented,true);assert.equal(packets.at(-1).type,'key');assert.equal(packets.at(-1).key,'y');
+assert.equal(key('p').prevented,true);assert.equal(packets.at(-1).key,'p');
+assert.equal(key('c',{ctrlKey:true}).prevented,true);assert.equal(packets.at(-1).type,'key'); // Removed prefix Copy does not delegate native activation.
 context.frame.wordstar=false;
 context.frame.bindings=[['Cmd+Shift+J','hide.edit.copy'],['Cmd+Shift+K','hide.edit.paste']];
 assert.equal(key('c',{metaKey:true}).prevented,true); // Removed Cmd+C cannot trigger a browser Copy event.
