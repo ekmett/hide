@@ -1085,7 +1085,7 @@ linkAt x y d | activeMarkdown d=do
   (_,text,links)<-windowMarkdown d original
   let w=displayWindow original; Rect l t ww hh=bounds w; row=y-t-1+scrollRow w; col=x-l-1+scrollColumn w
       offset=windowTextOffset d w text row col
-  if x<=l || x>=l+ww-1 || y<=t || y>=t+hh-1 || row>=windowTextRows d w text || col>=windowTextRowWidth d w text row then Nothing else do
+  if x<=l || x>=l+ww-1 || y<=t || y>=t+hh-1 || row>=windowTextRows d w text || not (windowTextContainsColumn d w text row col) then Nothing else do
     (_,_,url)<-find (\(a,z,_)->offset>=a && offset<z) links
     doc<-activeDocument d
     pure (OpenLink (filePath <$> documentFile doc) url)
@@ -1098,7 +1098,7 @@ linkAt x y d=do
       col=x-l-1+scrollColumn w
       b=documentBuffer doc
       position=windowTextOffset d w (bufferContent b) row col
-  if x<=l || x>=l+ww-1 || y<=t || y>=t+1+windowContentRows d doc w || row>=windowTextRows d w (bufferContent b) || col>=windowTextRowWidth d w (bufferContent b) row
+  if x<=l || x>=l+ww-1 || y<=t || y>=t+1+windowContentRows d doc w || row>=windowTextRows d w (bufferContent b) || not (windowTextContainsColumn d w (bufferContent b) row col)
     then Nothing else do
       (_,_,url)<-find (\(start,end,_)->position>=start && position<end) (documentLinks doc)
       pure (OpenLink (documentMarkdownPath doc) url)
@@ -3089,10 +3089,12 @@ windowCaretCell d doc original=let w=displayWindow original in case windowPresen
   Just layout->TextLayout.layoutPosition layout (caret (selection w))
   Nothing->windowCursorCell (documentBuffer doc) w
 
-windowTextRowWidth :: Desktop -> Window -> BufferContent -> Int -> Int
-windowTextRowWidth d w text row=case windowPresentation d w of
-  Just layout->maybe 0 TextLayout.layoutRowWidth (TextLayout.layoutRows layout Vec.!? row)
-  Nothing->sourceLineWidth (contentSourceLineAt text row)
+-- Link eligibility needs only the demanded column, never an exact whole-row
+-- width. A source seek reaches real EOF if the column lies past its contents.
+windowTextContainsColumn :: Desktop -> Window -> BufferContent -> Int -> Int -> Bool
+windowTextContainsColumn d w text row column=column>=0 && case windowPresentation d w of
+  Just layout->column<maybe 0 TextLayout.layoutRowWidth (TextLayout.layoutRows layout Vec.!? row)
+  Nothing->column<fst (sourceLineExtentThrough (contentSourceLineAt text row) column)
 
 -- | Choose the current focused input owner using only small focus metadata.
 -- Captured gestures, popups and human question/completion controls retain priority.

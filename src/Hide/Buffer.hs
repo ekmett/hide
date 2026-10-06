@@ -169,7 +169,7 @@ sourceLineSlice line requested count=T.concat (lineFragments line start (min (ma
 
 -- | Width up to a display-cell cap after removing a scalar prefix. This explicit
 -- normalization restarts segmentation, preserving code-indentation semantics.
--- Loaded rows stop at the requested cap; edited rows can use their cached width.
+-- Loaded and edited rows both stop at the requested cap.
 -- Normalized suffixes borrow local spans without constructing display items.
 sourceLineSuffixWidth :: SourceLine -> Int -> Int -> Int
 sourceLineSuffixWidth line@(ChunkedLine _ _ _ _ _ chunks) requested bound=
@@ -187,7 +187,8 @@ sourceLineRawText (Line _ _ _ _ _ text)=T.dropWhileEnd (=='\n') text
 sourceLineRawText line=T.dropWhileEnd (=='\n') (lineText line)
 
 -- | Exact display extent. Loaded long rows memoize a numeric full-row scan,
--- independently of their lazy receipts; edited rows use the tree measure.
+-- independently of their lazy receipts; edited rows explicitly demand the
+-- complete raw-piece advance. Neither path belongs in prefix geometry.
 -- LF's control cell is excluded; trailing CR has zero advance.
 sourceLineWidth :: SourceLine -> Int
 sourceLineWidth line@(Line {})=displayColumn (sourceLineText line) maxBound
@@ -195,8 +196,8 @@ sourceLineWidth (ChunkedLine _ flags _ _ _ chunks)=
   Chunks.chunksWidth chunks-if flags .&. 4/=0 then 1 else 0
 
 -- | Horizontal geometry through a demanded column, with an exact-EOF flag.
--- Untouched long rows estimate their unindexed suffix from cached UTF8 bytes;
--- edited rows use their exact measure. CR/LF never contribute editor cells.
+-- Long rows estimate their unprepared suffix from cached UTF8 bytes, including
+-- after editing. CR/LF never contribute editor cells.
 sourceLineExtentThrough :: SourceLine -> Int -> (Int,Bool)
 sourceLineExtentThrough line@Line{} _=
   let (_,_,column,_)=sourceGraphemesFrom maxBound (sourceLineText line)
@@ -418,16 +419,20 @@ treeText = T.concat . map lineText . filter ((/=Deleted) . lineOrigin) . toList
 linesFromText :: Bool -> Text -> LineTree
 linesFromText mode = FT.fromList . go . T.splitOn "\n"
   where
-    line t=
-      let n=T.length t
-          flags=(if T.any (=='\0') t then 1 else 0) .|.
-                (if "\r\n" `T.isSuffixOf` t then 2 else 0) .|.
-                (if "\n" `T.isSuffixOf` t then 4 else 0) .|.
-                ((TU.lengthWord8 t-TU.lengthWord8 (T.dropWhileEnd (\c->c=='\r' || c=='\n') t)) `shiftL` 3)
-          hash=T.foldl' (\fingerprint c->fingerprint*16777619+fromIntegral (ord c)+1) 0 t
-          factor=16777619^n
-      in if mode || TU.lengthWord8 t<=512 then Line n flags Original hash factor t
-         else ChunkedLine n flags Original hash factor (Chunks.chunksFromText t)
+    line t
+      | not mode && TU.lengthWord8 t>512=
+          let chunks=Chunks.chunksFromText t; raw=Chunks.chunksRawMeasure chunks
+          in ChunkedLine (Chunks.rawCharacters raw) (Chunks.chunksFlags chunks) Original
+            (Chunks.rawHash raw) (Chunks.rawFactor raw) chunks
+      | otherwise=
+          let n=T.length t
+              flags=(if T.any (=='\0') t then 1 else 0) .|.
+                    (if "\r\n" `T.isSuffixOf` t then 2 else 0) .|.
+                    (if "\n" `T.isSuffixOf` t then 4 else 0) .|.
+                    ((TU.lengthWord8 t-TU.lengthWord8 (T.dropWhileEnd (\c->c=='\r' || c=='\n') t)) `shiftL` 3)
+              hash=T.foldl' (\fingerprint c->fingerprint*16777619+fromIntegral (ord c)+1) 0 t
+              factor=16777619^n
+          in Line n flags Original hash factor t
     go [] = []
     go [t] = [line t]
     go (t:ts) = line (t <> "\n") : go ts
@@ -625,9 +630,9 @@ editTree mode a z inserted tree=foldl' (flip cancelRestoredLine) updated [firstR
       | not mode,ChunkedLine _ _ _ _ _ chunks<-first
       , characterCount (FT.measure rawBefore)==characterCount (FT.measure endBefore)
       , not (T.any (=='\n') inserted)=
-          let repaired=Chunks.chunksEdit chunks start end inserted; m=Chunks.chunksMeasure repaired
-          in let line=ChunkedLine (Chunks.chunkCharacters m) (Chunks.chunkFlags m) Original (Chunks.chunkHash m) (Chunks.chunkFactor m) repaired
-             in if Chunks.chunkFlags m .&. 4/=0 then FT.fromList [line,Line 0 0 Original 0 1 T.empty] else FT.singleton line
+          let repaired=Chunks.chunksEdit chunks start end inserted; m=Chunks.chunksRawMeasure repaired
+          in let line=ChunkedLine (Chunks.rawCharacters m) (Chunks.chunksFlags repaired) Original (Chunks.rawHash m) (Chunks.rawFactor m) repaired
+             in if Chunks.chunksFlags repaired .&. 4/=0 then FT.fromList [line,Line 0 0 Original 0 1 T.empty] else FT.singleton line
       -- Multiline edits retain the existing exact splice path. Its physical-line
       -- projections may be linear; this first repair owner bounds same-row edits.
       | otherwise=linesFromText mode (T.take start (lineText first) <> inserted <> T.drop end (lineText lastLine))

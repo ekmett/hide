@@ -14,6 +14,7 @@ import qualified Hide.Model as Model
 import qualified Graphics.Vty as V
 import qualified Data.Map.Strict as M
 import Hide.Commands (configuredBindings)
+import Hide.Unicode (itemSourceText, itemOverflow, sourceGraphemesFrom)
 
 check :: String -> Bool -> IO ()
 check name ok = unless ok (error ("buffer tree: " ++ name))
@@ -417,17 +418,31 @@ longLineChecks=do
   -- detects temporary records per scalar instead of records per stored span.
   check "long-row construction keeps numeric state between span receipts"
     (constructionBefore-constructionAfter<20*1024*1024)
-  -- First editing promotes a loaded row once; subsequent edits retain the
-  -- existing local-repair allocation budget against a prepared tree.
+  -- First prefix editing must leave the untouched display suffix lazy. The
+  -- source viewport, hit and extent are real first-paint demands, not raw export.
   promotionBefore<-getAllocationCounter
   let promoted=replaceSelection (Selection 0 0) "!" original
       indexedText="!"<>text
   _<-evaluate (prepareBuffer promoted)
+  let promotedLine=contentSourceLineAt (bufferContent promoted) 0
+      (firstHit,firstColumn,firstGroups)=sourceLineWindow promotedLine 0
+  _<-evaluate (firstHit+firstColumn+sum [T.length (itemSourceText item) | (_,items)<-take 2 firstGroups,item<-items])
+  _<-evaluate (sourceLineColumnOffset promotedLine 60+fst (sourceLineExtentThrough promotedLine 180))
+  let hover=Model.addDocument Nothing promoted (Model.initialDesktop (80,25))
+      linked=hover {Model.buffers=M.adjust (\doc->doc {Model.documentLinks=[(0,100,"target")]}) 1 (Model.buffers hover)}
+  case Model.activeWindow linked of
+    Nothing->error "buffer tree: missing hover source window"
+    Just window->let rect=Model.bounds window in
+      check "edited source link hover uses its bounded column"
+        (case Model.linkAt (Model.left rect+61) (Model.top rect+1) linked of Just (Model.OpenLink _ "target")->True; _->False)
   promotionAfter<-getAllocationCounter
-  check "first long-row edit promotes within the span construction budget" (promotionBefore-promotionAfter<20*1024*1024)
+  check "first prefix edit and source viewport leave the suffix unprepared" (promotionBefore-promotionAfter<512*1024)
   check "first promotion preserves exact source and one Undo" (contents promoted==indexedText && contents (undo promoted)==text && length (undoStack promoted)==1)
   let indexed=markSaved promoted
   _<-evaluate (prepareBuffer indexed)
+  -- This checks repair of a demanded midpoint. markSaved/raw contents alone
+  -- deliberately do not prepare the edited row's immutable receipt owner.
+  _<-evaluate (sourceLineDisplayColumn (contentSourceLineAt (bufferContent indexed) 0) (middle+256))
   before<-getAllocationCounter
   let changed=replaceSelection (Selection middle middle) "X" indexed
   _<-evaluate (prepareBuffer changed)
@@ -442,6 +457,23 @@ longLineChecks=do
       changedNonfinal=replaceSelection (Selection middle middle) "X" nonfinal
   check "long nonfinal edit preserves its terminator and successors"
     (contents changedNonfinal==T.take middle text<>"X"<>T.drop middle text<>"\r\ntail\n" && bufferLineCount changedNonfinal==3)
+  -- The first 128-byte receipt ends at a proven overflowing capped item.
+  -- A prefix edit retains that edge inside a direct immutable-owner range.
+  let overflowSource=T.replicate 65 "x"<>"q"<>T.replicate 70 "\x301"<>"Z"<>T.replicate 600 "a"
+      overflowExpected="!"<>overflowSource
+      overflowEdited=replaceSelection (Selection 0 0) "!" (newBuffer overflowSource)
+      overflowLine=contentSourceLineAt (bufferContent overflowEdited) 0
+  forM_ [0,1,65,66,96,97,98,128,136,137,500,800] $ \position->
+    check "retained capped endpoint preserves scalar columns"
+      (sourceLineDisplayColumn overflowLine position==displayColumn overflowExpected position)
+  forM_ [0,1,65,66,67,68,69,128,700,800] $ \column->do
+    let (char,col,groups)=sourceLineWindow overflowLine column
+        (expectedChar,_,expectedCol,items)=sourceGraphemesFrom column overflowExpected
+        actualItems=concatMap snd groups
+    check "retained capped endpoint preserves hit, overflow and exact source"
+      (char==expectedChar && col==expectedCol && sourceLineColumnOffset overflowLine column==expectedChar &&
+       map itemOverflow actualItems==map itemOverflow items &&
+       T.concat (map itemSourceText actualItems)==T.concat (map itemSourceText items))
   let capped=T.replicate 60 "a"<>"z"<>T.replicate 31 "\x301"<>T.replicate 42 "\x1d165"<>"X"
       recut=replaceSelection (Selection (T.length capped) (T.length capped+300)) "" (newBuffer (capped<>T.replicate 300 "b"))
   forM_ [changed,changedNonfinal,recut,newBuffer (T.replicate 600 "界\t")] $ \b->do
