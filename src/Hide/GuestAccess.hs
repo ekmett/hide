@@ -114,6 +114,8 @@ guestCommandAllowed cmd=case cmd of
 -- no filesystem effect. Screen masks alone cannot protect Messages copy actions.
 guestCommandAllowedIn :: Desktop -> Command -> Bool
 guestCommandAllowedIn d cmd=guestCommandAllowed cmd && case cmd of
+  Copy | composerActive d->False
+  Cut | composerActive d->False
   Copy | messagesDisplayed d && problemsFocused d->all public (take 1 (drop (problemsSelected d) (diagnostics d)))
   CopyAllMessages->all public (diagnostics d)
   _->True
@@ -155,6 +157,8 @@ guestEffectsAllowed=all allowed
     allowed PackageBuildAction{}=False
     allowed AdoptPreparedBuild{}=False
     allowed SessionSidebarAction{}=False
+    allowed SubmitEditor{}=False
+    allowed RetireEditorMount{}=False
     allowed SubmitInputForm{}=False
     allowed SubmitChoiceForm{}=False
     allowed RetireInputForm{}=False
@@ -213,7 +217,7 @@ guestModalBlocked d=maybe False (protectedPurpose . purpose) (dialog d) || case 
   (Just _,WindowRowsContext) -> True
   _ -> False
 guestKeyboardAllowed :: Desktop -> Bool
-guestKeyboardAllowed d=not (guestModalBlocked d) && not (focusedPrivateField d) && (isJust (dialog d) || problemsFocused d || maybe False treeFocused (sideTree d) || maybe True (not . protectedWindow d) (activeWindow d))
+guestKeyboardAllowed d=not (guestModalBlocked d) && not (focusedPrivateField d) && (isJust (dialog d) || problemsFocused d || maybe False treeFocused (sideTree d) || (not (composerActive d) && maybe True (not . protectedWindow d) (activeWindow d)))
 guestKeyAllowed :: Desktop -> V.Key -> [V.Modifier] -> Bool
 guestKeyAllowed d key mods=maybe True (guestCommandAllowedIn d) (boundKeyCommand key mods d) && not (guestModalBlocked d) && (guestKeyboardAllowed d || navigation || fieldNavigation)
   where
@@ -238,22 +242,28 @@ guestTransitionAllowed :: Desktop -> Desktop -> [Effect] -> IO Bool
 guestTransitionAllowed before after effects
   | not metadataUnchanged = pure False
   | otherwise = do
-      composer<-sameContent (composerBuffer before) (composerBuffer after)
+      drafts<-foldM sameDraft True (M.toList (editorDrafts before))
       autocomplete<-sameContent (autocompleteDraft before) (autocompleteDraft after)
       question<-case (chatQuestion before,chatQuestion after) of
         (Nothing,Nothing)->pure True
         (Just a,Just b)->sameConstructor a b
         _->pure False
-      if not (composer && autocomplete && question) then pure False else
+      if not (drafts && autocomplete && question) then pure False else
         foldM unchanged True (M.toList (buffers before))
   where
     metadataUnchanged=guestEffectsAllowed effects && not (guestModalBlocked after) &&
       streamerMode before==streamerMode after && chatSubmit before==chatSubmit after && privateFieldsUnchanged before after &&
-      composerSelection before==composerSelection after &&
+      M.keys (editorDrafts before)==M.keys (editorDrafts after) &&
+      editingInput before==editingInput after &&
       autocompleteACPEnabled before==autocompleteACPEnabled after &&
       autocompleteSelection before==autocompleteSelection after && autocompleteFocused before==autocompleteFocused after &&
       agentSettings before==agentSettings after && childAgentSettings before==childAgentSettings after &&
       childAgentSteering before==childAgentSteering after && childAgentContextUsage before==childAgentContextUsage after
+    sameDraft False _=pure False
+    sameDraft True (reference,old)=case M.lookup reference (editorDrafts after) of
+      Nothing->pure False
+      Just new | editorDraftSelection old/=editorDraftSelection new || editorDraftFocused old/=editorDraftFocused new || editorDraftMount old/=editorDraftMount new->pure False
+               | otherwise->sameContent (editorDraftBuffer old) (editorDraftBuffer new)
     sameContent a b=BufferHost.captureVersion a >>= \version->BufferHost.versionCurrent version b
     sameConstructor a b=(==) <$> (evaluate a >>= makeStableName) <*> (evaluate b >>= makeStableName)
     unchanged False _=pure False
@@ -332,6 +342,7 @@ readableAt d x y
   Just dg | inside (dialogRect d dg) x y -> True
   _ | overlayAt d x y -> True
     | otherwise -> case topWindow d x y of
+        Just w | windowHasEditor d w,inside (composerRect d w) x y -> False
         Just w | protectedWindow d w -> case windowDocument (buffers d) w of
           Just doc | documentLabel doc==Just "Autocomplete" -> not (autocompletePane d w && inside (autocompleteComposerRect d w) x y)
           Just doc | documentLabel doc==Just "Conversation" -> not (byteMode (documentBuffer doc)) && not (inside (composerRect d w) x y) && not (contentPrivate privateOffset d doc w x y)
@@ -429,7 +440,7 @@ pointerAllowedAt d x y
       Right (V.EvKey key mods)->guestKeyAllowed d key mods
       Right _->False
   | overlayAt d x y=True
-  | Just w<-topWindow d x y=not (protectedWindow d w)
+  | Just w<-topWindow d x y=not (protectedWindow d w) && not (windowHasEditor d w && inside (composerRect d w) x y)
   | otherwise=True
 onScreen :: Desktop -> Int -> Int -> Bool
 onScreen d=inside (uncurry (Rect 0 0) (screenSize d))
