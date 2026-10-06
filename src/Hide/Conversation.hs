@@ -14,7 +14,7 @@ module Hide.Conversation (ConversationState, conversationAgents, withConversatio
 import Hide.Sidebar
 import Hide.SessionServices (persist)
 import Prelude hiding (reads)
-import Control.Exception (IOException, bracket, try, onException, mask, mask_, evaluate)
+import Control.Exception (IOException, bracket, try, onException, mask, evaluate)
 #ifdef WITH_WINDOW
 import Control.Concurrent (forkIO)
 import System.Process (createProcess, proc, waitForProcess)
@@ -567,7 +567,7 @@ preparePrompt state query=do
 -- | Advance mailboxes, protocol replies, approvals and transcript views.
 -- The caller serializes access to both desktop and conversation state.
 tickConversation :: ConversationState -> Desktop -> IO Desktop
-tickConversation runtime@(ConversationState directory ref consoles _) original = do
+tickConversation runtime@(ConversationState _ ref _ _) original = do
   fresh<-pruneChildApprovals runtime original
   initial<-drainConversationAgents runtime fresh
   currentQuestion<-readIORef ref

@@ -67,7 +67,7 @@ import System.IO (hPutStrLn, stderr, hFlush, stdout, stdin, hIsTerminalDevice)
 import Hide.Debugger
 import Hide.DebuggerSidebar
 import Hide.Conversation
-import Hide.SessionServices
+import Hide.SessionServices hiding (sessionDirectory)
 import Hide.Tooling
 import Hide.GitOperations
 import qualified Data.Map.Strict as M
