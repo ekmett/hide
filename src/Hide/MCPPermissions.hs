@@ -16,7 +16,7 @@
 -- Project agent limits may tighten global ceilings but cannot raise them.
 module Hide.MCPPermissions
   ( Permissions, withPermissions, withPermissionsAt, permissionCall, permissionCallAs, AdmittedBuild, permissionBuildInputAs, reserveAdmittedBuild, stepAdmittedBuild, cancelAdmittedBuild, policyEffects, tickPermissions, awaitPermissionWork
-  , ReadAdmission, permissionReadCall, bufferEditor, readReference, resolveReadReference, bufferReader
+  , ReadAdmission, permissionReadCall, bufferEditor, readReference, resolveReadReference, bufferReader, windowReader
   , permissionConfigPath, readEditorDefaults, writeEditorDefaults, readEditorDefaultsAt, writeEditorDefaultsAt
   , projectConfigPath, readEditorDefaultsFor, readAgentContextAt, writeAgentContextAt, readAgentContexts
   , readEnvironmentAt, writeEnvironmentAt, readKeybindingsAt, readKeybindingsFor
@@ -82,6 +82,7 @@ data AdmittedBuild = AdmittedBuild Permissions Text Value Bool (IO (Either Text 
 data BuildAdmissionState = BuildUnused | BuildReserved | BuildChecking Waiting
   | BuildAllowed Waiting Int | BuildRejected Text | BuildConsumed
 data CaptureSubmission = CaptureSubmission BufferRef (IO (Either Text ())) (MVar (Either Text CapturedRead)) (IORef Bool) (MVar ())
+  | WindowCaptureSubmission Reads.WindowReadTarget (IO (Either Text ())) (MVar (Either Text Reads.CapturedWindowRead)) (IORef Bool) (MVar ())
 data DiffSubmission = DiffSubmission BufferRef ContentVersion Text (IO (Either Text ())) (MVar (Either Text DiffResult)) (IORef Bool) (MVar ()) (IORef (Maybe DiffAttempt))
 data BufferSubmission = ReadSubmission CaptureSubmission | EditSubmission DiffSubmission
 data BufferIngress = BufferIngress (STM.TBQueue BufferSubmission) (STM.TVar Bool)
@@ -309,16 +310,42 @@ bufferReader (Permissions _ _ _ namespace _ (BufferIngress inbox closed) owner) 
     else STM.writeTBQueue inbox (ReadSubmission submission) >> STM.tryPutTMVar (policyWake owner) () >> pure (Right ())
   case accepted of
     Left err->pure (Left err)
-    Right ()->restore (readMVar promise) `onException` finishSubmission submission (Left "Buffer capture cancelled")
+    Right ()->restore (readMVar promise) `onException` finishCapture enabled claim promise (Left "Buffer capture cancelled")
 
-finishSubmission :: CaptureSubmission -> Either Text CapturedRead -> IO ()
-finishSubmission submission@(CaptureSubmission _ _ _ _ claim) result=withMVar claim (\()->finishSubmissionOwned submission result)
+-- | Same fixed ingress/claim/policy owner as buffer reads. The target retains
+-- exact immutable body identity, never a Desktop or a live input capability.
+windowReader :: Permissions -> IO (Either Text ()) -> Reads.WindowReadTarget -> IO (Either Text Reads.CapturedWindowRead)
+windowReader (Permissions _ _ _ _ _ (BufferIngress inbox closed) owner) caller target=mask $ \restore->do
+  promise<-newEmptyMVar
+  enabled<-newIORef True
+  claim<-newMVar ()
+  let submission=WindowCaptureSubmission target caller promise enabled claim
+  accepted<-STM.atomically $ do
+    stopped<-STM.readTVar closed
+    full<-STM.isFullTBQueue inbox
+    if stopped then pure (Left "Editor session closed before capture")
+    else if full then pure (Left "Too many captures are awaiting admission")
+    else STM.writeTBQueue inbox (ReadSubmission submission) >> STM.tryPutTMVar (policyWake owner) () >> pure (Right ())
+  case accepted of
+    Left err->pure (Left err)
+    Right ()->restore (readMVar promise) `onException` finishCapture enabled claim promise (Left "Window capture cancelled")
 
-finishSubmissionOwned :: CaptureSubmission -> Either Text CapturedRead -> IO ()
-finishSubmissionOwned (CaptureSubmission _ _ promise enabled _) result=mask_ $ do
+finishCapture :: IORef Bool -> MVar () -> MVar (Either Text a) -> Either Text a -> IO ()
+finishCapture enabled claim promise result=withMVar claim (\()->finishCaptureOwned enabled promise result)
+
+finishCaptureOwned :: IORef Bool -> MVar (Either Text a) -> Either Text a -> IO ()
+finishCaptureOwned enabled promise result=mask_ $ do
   writeIORef enabled False
   _<-tryPutMVar promise result
   pure ()
+
+captureLifetime :: CaptureSubmission -> (IORef Bool,MVar (),IO (Either Text ()))
+captureLifetime (CaptureSubmission _ caller _ enabled claim)=(enabled,claim,caller)
+captureLifetime (WindowCaptureSubmission _ caller _ enabled claim)=(enabled,claim,caller)
+
+rejectCaptureOwned :: CaptureSubmission -> Text -> IO ()
+rejectCaptureOwned (CaptureSubmission _ _ promise enabled _) err=finishCaptureOwned enabled promise (Left err)
+rejectCaptureOwned (WindowCaptureSubmission _ _ promise enabled _) err=finishCaptureOwned enabled promise (Left err)
 
 -- | Host-only fixed actor binding. Public callers submit exact read versions;
 -- this transport grants neither Human authority nor reusable approval.
@@ -352,7 +379,8 @@ finishDiffSubmissionOwned (DiffSubmission _ _ _ _ promise enabled _ _) result=ma
   pure ()
 
 finishBufferSubmission :: Permissions -> BufferSubmission -> Text -> IO ()
-finishBufferSubmission _ (ReadSubmission submission) err=finishSubmission submission (Left err)
+finishBufferSubmission _ (ReadSubmission submission) err=let (_,claim,_)=captureLifetime submission
+  in withMVar claim (\()->rejectCaptureOwned submission err)
 finishBufferSubmission (Permissions _ _ _ _ retired _ _) (EditSubmission submission) err=finishDiffSubmission retired submission (Left err)
 
 -- Fixed bounded transport only; PermissionState still has one serialized owner.
@@ -368,12 +396,16 @@ drainBufferRequests runtime@(Permissions _ _ state namespace _ (BufferIngress in
         Just _->throwIO err
         Nothing->finishBufferSubmission runtime submission "Buffer request admission failed" >> pure current
     admit current submission=do
-      let (reference,enabled,claim,caller)=case submission of
-            ReadSubmission (CaptureSubmission r c _ e k)->(r,e,k,c)
-            EditSubmission (DiffSubmission r _ _ c _ e k _)->(r,e,k,c)
+      let (enabled,claim,caller)=case submission of
+            ReadSubmission capture->captureLifetime capture
+            EditSubmission (DiffSubmission _ _ _ c _ e k _)->(e,k,c)
+          target=case submission of
+            ReadSubmission (CaptureSubmission reference _ _ _ _)->referenceId namespace reference
+            ReadSubmission (WindowCaptureSubmission reference _ _ _ _)->Just (Reads.windowReadIdentifier reference)
+            EditSubmission (DiffSubmission reference _ _ _ _ _ _ _)->referenceId namespace reference
       withMVar claim $ \()->do
         live<-readIORef enabled
-        when live $ case referenceId namespace reference of
+        when live $ case target of
           Nothing->finishBufferSubmissionOwned submission "Buffer reference belongs to another editor session"
           Just ident->do
             original<-readIORef state
@@ -382,7 +414,8 @@ drainBufferRequests runtime@(Permissions _ _ state namespace _ (BufferIngress in
               attempt<-case submission of ReadSubmission _->newIORef Nothing; EditSubmission (DiffSubmission _ _ _ _ _ _ _ a)->pure a
               stage<-newIORef (PolicyPending AdmitPolicy Nothing)
               let (name,args,op)=case submission of
-                    ReadSubmission capture->("read_buffer",object ["bufferId" .= ident],CaptureOperation capture)
+                    ReadSubmission capture@CaptureSubmission{}->("read_buffer",object ["bufferId" .= ident],CaptureOperation capture)
+                    ReadSubmission capture@WindowCaptureSubmission{}->("read_window",object ["windowId" .= ident],CaptureOperation capture)
                     EditSubmission diff@(DiffSubmission _ _ patch _ _ _ _ _)->
                       ("buffer_apply_diff",object ["bufferId" .= ident,"revision" .= maybe 0 (revision.documentBuffer) (M.lookup ident (buffers current)),"diff" .= patch],DiffOperation diff)
               captured<-case submission of
@@ -399,18 +432,25 @@ drainBufferRequests runtime@(Permissions _ _ state namespace _ (BufferIngress in
                   let request=Waiting (nextTicket original) name args op enabled False caller attempt source claim stage
                   writeIORef state original {waiting=liveRequests++[request],nextTicket=nextTicket original+1}
         pure current
-    finishBufferSubmissionOwned (ReadSubmission submission) err=finishSubmissionOwned submission (Left err)
+    finishBufferSubmissionOwned (ReadSubmission submission) err=rejectCaptureOwned submission err
     finishBufferSubmissionOwned (EditSubmission submission) err=finishDiffSubmissionOwned submission (Left err)
 
 -- Caller holds the same short request claim used by cancellation. Only known
 -- host capture/actor operations run here; no extension handler or reply wait.
 captureSubmissionOwned :: Permissions -> CaptureSubmission -> Desktop -> IO ()
-captureSubmissionOwned runtime@(Permissions _ _ _ namespace _ _ _) submission@(CaptureSubmission reference caller _ _ _) desktop=do
+captureSubmissionOwned runtime@(Permissions _ _ _ namespace _ _ _) submission desktop=do
+  let (_,_,caller)=captureLifetime submission
   actor<-caller
-  outcome<-case actor of
-    Left err->pure (Left err)
-    Right ()->withReadAdmission namespace (sessionClosed runtime) (\receipt->Reads.captureBuffer receipt desktop reference)
-  finishSubmissionOwned submission outcome
+  case actor of
+    Left err->rejectCaptureOwned submission err
+    Right ()->case submission of
+      CaptureSubmission reference _ promise enabled _->do
+        outcome<-withReadAdmission namespace (sessionClosed runtime) (\receipt->Reads.captureBuffer receipt desktop reference)
+        finishCaptureOwned enabled promise outcome
+      WindowCaptureSubmission target _ promise enabled _->do
+        closed<-sessionClosed runtime
+        outcome<-if closed then pure (Left "Editor session closed before capture") else Reads.captureWindow desktop target
+        finishCaptureOwned enabled promise outcome
 
 filterMActive :: [Waiting] -> IO [Waiting]
 filterMActive requests=fmap (map fst . filter snd) (mapM (\request->(request,) <$> readIORef (active request)) requests)
@@ -428,7 +468,7 @@ finishOwned runtime request result=mask_ $ do
     BuildInputOperation _ promise->tryPutMVar promise (pure result) >> pure ()
     BuildAdoptionOperation (AdmittedBuild _ _ _ _ _ state)->atomicModifyIORef' state $ \current->
       (if ownsBuildRequest request current then BuildRejected (either id (const "Invalid build admission result") result) else current,())
-    CaptureOperation submission->finishSubmissionOwned submission (case result of Left err->Left err; Right _->Left "Invalid capture reply")
+    CaptureOperation submission->rejectCaptureOwned submission (either id (const "Invalid capture reply") result)
     DiffOperation submission->finishDiffSubmissionOwned submission (case result of Left err->Left err; Right _->Left "Invalid diff reply")
 
 -- An attempt belongs to a ticket, but failure does not end that ticket. Retire

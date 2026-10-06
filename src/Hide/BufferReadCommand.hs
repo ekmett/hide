@@ -3,12 +3,16 @@
 -- reader plus an opaque target, never Desktop. Capture waits and complete JSON
 -- formatting run on the invoking worker; registration follows session lifetime.
 module Hide.BufferReadCommand
-  ( BufferReadCommands, withBufferReadCommands, ReadPage, readPage, readBufferCommand, formatBufferRead ) where
+  ( BufferReadCommands, withBufferReadCommands, ReadPage, readPage, readBufferCommand, readWindowCommand, formatBufferRead ) where
 
 import Control.DeepSeq (force)
 import Control.Exception (evaluate)
 import Data.Aeson
 import Data.Aeson.Types (parseEither)
+import qualified Data.Aeson.Key as K
+import Hide.BufferReads (CapturedWindowRead(..))
+import Hide.GuestAccess (sanitizedPreparedContent)
+import qualified Hide.Plugin.Window as W
 import qualified Data.ByteString as BS
 import Data.Char (intToDigit)
 import qualified Data.Text as T
@@ -17,7 +21,10 @@ import Hide.Plugin.Command
 
 data ReadPage = ReadPage !Int !Int !Int
 
-data BufferReadCommands = BufferReadCommands (Registry (P.BufferReader,P.BufferRef)) (Command (P.BufferReader,P.BufferRef) ReadPage Value)
+data ReadContext = BufferReadContext P.BufferReader P.BufferRef
+  | WindowReadContext (IO (Either T.Text CapturedWindowRead))
+data BufferReadCommands = BufferReadCommands (Registry ReadContext)
+  (Command ReadContext ReadPage Value) (Command ReadContext ReadPage Value)
 
 -- | Validate page coordinates on either wire or typed routes.
 readPage :: Int -> Int -> Int -> Either T.Text ReadPage
@@ -27,28 +34,48 @@ readPage start count offset
 
 withBufferReadCommands :: (BufferReadCommands -> IO a) -> IO a
 withBufferReadCommands use=withRegistry $ \registry->do
-  command<-registerCommand registry definition >>= either (ioError . userError . show) pure
-  use (BufferReadCommands registry command)
+  buffer<-registerCommand registry (definition "hide.buffer.read" "Read buffer page") >>= either (ioError . userError . show) pure
+  window<-registerCommand registry (definition "hide.window.read" "Read window page") >>= either (ioError . userError . show) pure
+  use (BufferReadCommands registry buffer window)
 
 readBufferCommand :: BufferReadCommands -> P.BufferReader -> P.BufferRef -> ReadPage -> IO (Either T.Text Value)
-readBufferCommand (BufferReadCommands registry command) reader reference page=fmap (either (Left . message) Right) (invoke registry command (reader,reference) page)
-  where
-    message (CommandRejected err)=err
-    message (CommandFailed err)=err
-    message err=T.pack (show err)
+readBufferCommand (BufferReadCommands registry command _) reader reference page=
+  fmap (either (Left . message) Right) (invoke registry command (BufferReadContext reader reference) page)
 
-definition :: CommandDef (P.BufferReader,P.BufferRef) ReadPage Value
-definition=CommandDef "hide.buffer.read" "Read buffer page" input output $ \(reader,reference) (ReadPage start count offset)->do
-  captured<-P.captureBuffer reader reference
-  case captured of
+-- | Run an exact window capture and privacy-aware formatting on the invoking
+-- worker. The fixed host capture only queues/awaits; it retains no Desktop.
+readWindowCommand :: BufferReadCommands -> IO (Either T.Text CapturedWindowRead) -> ReadPage -> IO (Either T.Text Value)
+readWindowCommand (BufferReadCommands registry _ command) capture page=
+  fmap (either (Left . message) Right) (invoke registry command (WindowReadContext capture) page)
+
+message :: CommandError -> T.Text
+message (CommandRejected err)=err
+message (CommandFailed err)=err
+message err=T.pack (show err)
+
+definition :: T.Text -> T.Text -> CommandDef ReadContext ReadPage Value
+definition name title=CommandDef name title input output $ \context (ReadPage start count offset)->do
+  result<-case context of
+    BufferReadContext reader reference->do
+      captured<-P.captureBuffer reader reference
+      pure $ do
+        image<-captured
+        let info=P.capturedMetadata image
+            metadata=object ["bufferId" .= P.bufferIdentifier info,"title" .= P.displayName info,
+              "path" .= P.path info,"modified" .= P.modified info,"binary" .= (P.representation (P.capturedContent image)==P.ByteBuffer),"revision" .= P.editRevision info]
+        formatBufferRead metadata start count offset (P.capturedRedacted image) (P.capturedContent image)
+    WindowReadContext capture->do
+      captured<-capture
+      pure $ do
+        image<-captured
+        let prepared=capturedWindowPrepared image
+            metadata=object ["windowId" .= capturedWindowIdentifier image,"title" .= W.preparedWindowTitle prepared,
+              "coordinateSpace" .= ("window-text"::T.Text)]
+        (redacted,content)<-maybe (Left "This window is private.") Right (sanitizedPreparedContent prepared)
+        formatTextRead "window" metadata start count redacted content
+  case result of
     Left err->pure (Left (CommandRejected err))
-    Right image->do
-      let info=P.capturedMetadata image
-          metadata=object ["bufferId" .= P.bufferIdentifier info,"title" .= P.displayName info,
-            "path" .= P.path info,"modified" .= P.modified info,"binary" .= (P.representation (P.capturedContent image)==P.ByteBuffer),"revision" .= P.editRevision info]
-      case formatBufferRead metadata start count offset (P.capturedRedacted image) (P.capturedContent image) of
-        Left err->pure (Left (CommandRejected err))
-        Right result->Right <$> evaluate (force result)
+    Right value->Right <$> evaluate (force value)
   where
     input=Codec (object ["type" .= ("object"::T.Text),"additionalProperties" .= False,
       "properties" .= object [name .= object ["type" .= ("integer"::T.Text)] | name<-["startLine","lineCount","byteOffset"]]])
@@ -67,15 +94,22 @@ formatBufferRead metadata start count offset redacted b
     bytes<-readResult (P.readBytes b (P.ByteRange (P.ByteOffset a) (P.ByteOffset z)))
     Right (object ["buffer" .= metadata,"byteOffset" .= offset,"bytes" .= BS.length bytes,
       "hex" .= T.pack (drop 1 (BS.foldr hex [] bytes)),"totalBytes" .= size])
-  | otherwise = do
-    total<-readResult (P.readLineCount b)
-    let available=if start>total then 0 else min count (total-start+1)
-    rows<-mapM (readResult . P.readLine b . P.LineNumber . (start-1+)) [0..available-1]
-    let text=T.intercalate "\n" rows
-        limited=T.take 131072 text
-    Right (object ["buffer" .= metadata,"startLine" .= start,"lineCount" .= available,
-      "totalLines" .= total,"text" .= limited,"redacted" .= redacted,"truncated" .= (T.length limited<T.length text)])
+  | otherwise = formatTextRead "buffer" metadata start count redacted b
   where
     hex byte rest=let n=fromIntegral byte in ' ':intToDigit (n `div` 16):intToDigit (n `mod` 16):rest
+    readResult :: Either P.RangeError a -> Either T.Text a
+    readResult=either (Left . T.pack . show) Right
+
+-- Shared logical text paging; window responses never fabricate buffer metadata.
+formatTextRead :: K.Key -> Value -> Int -> Int -> Bool -> P.BufferRead -> Either T.Text Value
+formatTextRead kind metadata start count redacted b=do
+  total<-readResult (P.readLineCount b)
+  let available=if start>total then 0 else min count (total-start+1)
+  rows<-mapM (readResult . P.readLine b . P.LineNumber . (start-1+)) [0..available-1]
+  let text=T.intercalate "\n" rows
+      limited=T.take 131072 text
+  Right (object [kind .= metadata,"startLine" .= start,"lineCount" .= available,
+    "totalLines" .= total,"text" .= limited,"redacted" .= redacted,"truncated" .= (T.length limited<T.length text)])
+  where
     readResult :: Either P.RangeError a -> Either T.Text a
     readResult=either (Left . T.pack . show) Right

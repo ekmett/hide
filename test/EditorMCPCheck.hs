@@ -33,7 +33,7 @@ checks = do
       text=TE.decodeUtf8 . BL.toStrict . encode
       names=editorResponse edited (rpc "tools/list" (object []))
       content=call "read_buffer" (object ["bufferId" .= sourceFixtureBuffer win,"startLine" .= (1::Int),"lineCount" .= (1::Int)])
-  check "MCP lists live windows and buffers" (all (\name->maybe False (T.isInfixOf name . text) names) ["list_windows","list_buffers","read_buffer","read_selection"])
+  check "MCP lists live windows and buffers" (all (\name->maybe False (T.isInfixOf name . text) names) ["list_windows","list_buffers","read_buffer","read_window","read_selection"])
   check "MCP returns unsaved Unicode text" (maybe False (T.isInfixOf "unsaved λ" . text) content && not (maybe False (T.isInfixOf "second" . text) content))
   check "MCP does not fabricate saved paths for untitled buffers" (maybe False (T.isInfixOf "Untitled" . text) (call "list_windows" (object [])))
   check "MCP missing buffer is a tool error" (maybe False (T.isInfixOf "Buffer not found" . text) (call "read_buffer" (object ["bufferId" .= (999::Int)])))

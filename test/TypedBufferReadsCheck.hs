@@ -21,7 +21,11 @@ import Hide.Protocol
 import Hide.Remote
 import Hide.RemoteEndpoint
 import qualified Hide.Session as S
-import Hide.BufferReadCommand (withBufferReadCommands)
+import Hide.BufferReadCommand (withBufferReadCommands,readPage,readWindowCommand)
+import Hide.BufferReads (windowReadTarget,capturedWindowPrepared)
+import qualified Hide.Plugin.Window as W
+import qualified Data.Vector as V
+import Hide.Syntax (Style(..))
 import Hide.BufferDiffCommand (withBufferDiffCommands,bufferDiffTool)
 import Hide.WorkspaceFilesMCP (fileTools)
 import qualified Data.Text.Encoding as TE
@@ -31,7 +35,7 @@ import Hide.Model
 import Hide.MCPPermissions
 import qualified Hide.Plugin.Buffer as P
 import Hide.Plugin.BufferHost (readerReference)
-import Hide.EditorMCP (builtinTools,readBufferTool,editorResponseOnly)
+import Hide.EditorMCP (builtinTools,readBufferTool,readWindowTool,editorResponseOnly)
 
 ownerUntil owner desktop worker=do
   let loop current=do
@@ -59,6 +63,7 @@ checks=do
         timeout 3000000 observe >>= maybe (error "typed read did not enqueue") pure
       text image=P.readText (P.capturedContent image) (P.TextRange (P.CharOffset 0) (P.CharOffset (P.readLength (P.capturedContent image))))
   bracket (createDirectoryIfMissing True root) (const (removePathForcibly root)) $ \_->do
+    windowReadChecks path
     TIO.writeFile path "[editor.mcp.permissions]\nread_buffer = 'enable'\n"
     withPermissionsAt path builtinTools $ \owner->do
       let reader=bufferReader owner (pure (Right ()))
@@ -202,3 +207,90 @@ checks=do
     rejected<-P.captureBuffer reader reference
     check "closed service rejects new capture" (case rejected of Left _->True; _->False)
   putStrLn "typed buffer reader checks passed"
+
+-- One actual prepared-window read workflow, sharing the existing admission pump.
+windowReadChecks :: FilePath -> IO ()
+windowReadChecks path=W.withWindowScope $ \scope->do
+  let check label ok=unless ok (error label)
+      semantics=W.TextSemantics W.CopyText Nothing V.empty V.empty W.ReadableWindow
+        (V.singleton (7,13)) V.empty V.empty
+      prepare text=W.prepareSemanticTextWindow "Transcript" [(c,Plain) | c<-T.unpack text] semantics >>= either (error . T.unpack) pure
+      rejected result=case result of Left _->True; _->False
+      queued worker=do
+        let observe=threadStatus (asyncThreadId worker) >>= \state->case state of
+              ThreadBlocked BlockedOnMVar->pure ()
+              ThreadFinished->error "window reader finished before owner capture"
+              ThreadDied->error "window reader died before owner capture"
+              _->threadDelay 1000 >> observe
+        timeout 3000000 observe >>= maybe (error "window read did not enqueue") pure
+      wait worker=timeout 3000000 (Control.Concurrent.Async.wait worker) >>= maybe (error "window read timed out") pure
+      text result=result >>= parseMaybe (withObject "read" (.: "text"))
+  prepared<-prepare "public\nsecret\nvisible"
+  update<-W.openTextWindow scope prepared >>= maybe (error "window read opening failed") pure
+  (reference,_)<-W.admitWindowUpdate False update >>= maybe (error "window read admission failed") pure
+  let base=addPluginWindow reference prepared (initialDesktop (80,25))
+      ident=maybe (error "window read frame missing") windowId (activeWindow base)
+      closed=base {windows=[],pluginWindows=M.empty}
+  target<-either (error . T.unpack) pure (windowReadTarget base ident)
+  page<-either (error . T.unpack) pure (readPage 1 200 0)
+  privateBody<-W.prepareTextWindow "Private metadata" "private text"
+  check "private prepared window refuses read selection"
+    (rejected (windowReadTarget (base {pluginWindows=M.singleton reference privateBody}) ident))
+  TIO.writeFile path "[editor.mcp.permissions]\nread_buffer = 'enable'\nread_window = 'enable'\n"
+  withPermissionsAt path builtinTools $ \owner->withBufferReadCommands $ \commands->do
+    let reader=windowReader owner (pure (Right ()))
+    (_,reply)<-readWindowTool commands reader base "read_window" (object ["windowId" .= ident])
+    withAsync reply $ \worker->do
+      queued worker
+      _<-ownerUntil owner base worker
+      result<-wait worker >>= either (error . T.unpack) pure
+      check "typed window page uses central guest masking" (text (Just result)==Just ("public\n      \nvisible"::T.Text))
+      check "typed window read has window coordinates without buffer identity" $ case result of
+        Object fields->case KM.lookup "window" fields of
+          Just (Object meta)->KM.lookup "windowId" meta==Just (toJSON ident) && KM.lookup "coordinateSpace" meta==Just (String "window-text") && not (KM.member "bufferId" meta)
+          _->False
+        _->False
+    withAsync (reader target) $ \worker->do
+      queued worker
+      _<-ownerUntil owner base worker
+      image<-wait worker >>= either (error . T.unpack) pure
+      check "captured window retains exact prepared identity" (capturedWindowPrepared image==prepared)
+      check "closed frame rejects a new target" (rejected (windowReadTarget closed ident))
+      result<-readWindowCommand commands (pure (Right image)) page >>= either (error . T.unpack) pure
+      check "accepted immutable window snapshot formats after close" (text (Just result)==Just ("public\n      \nvisible"::T.Text))
+    refreshed<-prepare "public\nsecret\nnew body"
+    refresh<-W.refreshTextWindow reference refreshed >>= maybe (error "window read refresh failed") pure
+    _<-W.admitWindowUpdate True refresh >>= maybe (error "window read refresh admission failed") pure
+    let current=base {pluginWindows=M.singleton reference refreshed}
+    withAsync (reader target) $ \worker->do
+      queued worker
+      _<-ownerUntil owner current worker
+      check "queued window read refuses prepared refresh" . rejected =<< wait worker
+    withAsync (reader target) $ \worker->do
+      queued worker
+      _<-ownerUntil owner closed worker
+      check "queued window read refuses closed frame" . rejected =<< wait worker
+    actor<-newIORef (Right ())
+    withAsync (windowReader owner (readIORef actor) target) $ \worker->do
+      queued worker
+      writeIORef actor (Left "actor revoked")
+      _<-ownerUntil owner base worker
+      outcome<-wait worker
+      check "window read rechecks the captured caller" (case outcome of Left "actor revoked"->True; _->False)
+    withAsync (reader target) $ \worker->do
+      queued worker
+      cancel worker
+      _<-tickPermissions owner base
+      check "window cancellation resolves its capture claim" . either (const True) (const False) =<< waitCatch worker
+    W.retireWindowRef reference
+    withAsync (reader target) $ \worker->do
+      queued worker
+      _<-ownerUntil owner base worker
+      check "inert installed readable text survives action retirement" . either (const False) (const True) =<< wait worker
+  (reader,pending)<-withPermissionsAt path builtinTools $ \owner->do
+    let reader=windowReader owner (pure (Right ()))
+    pending<-async (reader target)
+    queued pending
+    pure (reader,pending)
+  check "shutdown resolves accepted window capture" . rejected =<< wait pending
+  check "closed service refuses new window capture" . rejected =<< reader target
