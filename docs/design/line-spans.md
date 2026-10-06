@@ -102,10 +102,12 @@ remain independent of display preparation.
 
 For an edited row, a scalar seek splits the raw piece tree and measures only the
 selected owner's prefix. Complete preceding pieces contribute their cached
-column transforms. A cell seek brackets the requested column with scalar probes,
-then searches for its complete display-item boundary. This composes piece-tree
-and owner-index lookups; it is not the single Loaded checkpoint search described
-above. A first distant query can still prepare the intervening source prefix.
+column transforms. A cell seek skips a safe raw prefix: each scalar advances at
+most eight cells. It then searches the owner's cached vector endpoints using the
+piece's actual incoming column. Exhausting a piece repeats the raw skip on the
+remaining tree. This does not promise logarithmic work across every disjoint
+piece layout. A first distant query can still prepare the intervening source
+prefix.
 
 LSP UTF-16 position lookup borrows only the requested scalar prefix of its
 measured source row, preserving interior CR and clamping at its actual
