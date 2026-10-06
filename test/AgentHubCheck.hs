@@ -324,6 +324,17 @@ controlChecks directory=do
     _<-waitAgent hub Human child ticket 2000 >>= right
     idleSteer<-steerAgent hub child "must remain a draft"
     ensure "idle steering never creates an unowned prompt" (left idleSteer)
+    (beforeCancel,_)<-agentConfiguration hub child >>= right
+    _<-cancelAgent hub Human child >>= right
+    staleQuery<-sendAgentAt hub Human beforeCancel "must not resume after cancellation"
+    ensure "cancellation retires a captured editor query even after returning idle" (left staleQuery)
+    (afterCancel,_)<-agentConfiguration hub child >>= right
+    freshTicket<-sendAgentAt hub Human afterCancel "fresh editor query" >>= right
+    _<-waitAgent hub Human child freshTicket 2000 >>= right
+    waitSignal prompting
+    directTicket<-sendAgent hub Human child "direct message after cancellation" >>= right
+    _<-waitAgent hub Human child directTicket 2000 >>= right
+    waitSignal prompting
     atomically (writeTVar configGate True)
     withAsync (configureAgent hub child "model" "a") $ \setting->do
       waitSignal configuring

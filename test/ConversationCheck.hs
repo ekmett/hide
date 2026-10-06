@@ -292,7 +292,7 @@ draftReceiptChecks=bracket temporary removePathForcibly $ \root->
           connectedMessages<-readMessages (root </> "messages.jsonl")
           let sent=[params | entry<-connectedMessages,field "method" entry==Just ("session/prompt"::T.Text),Just params<-[field "params" entry::Maybe Value]]
               sentText params=case (field "prompt" params::Maybe [Value]) of Just (first:_)->field "text" first; _->Nothing
-          check "initial connection accepts queued input in order" (map sentText sent==[Just "stream",Just "connecting followup"])
+          check "initial connection accepts queued input in order" (map sentText sent==[Just ("stream"::T.Text),Just "connecting followup"])
           check "connecting submission cannot clear a same-text new draft" (contents (composerBuffer accepted)=="stream")
         removeFile gate
     writeFile context "[editor.agent]\ncontext='receipt guidance'\n"
