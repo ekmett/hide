@@ -5,7 +5,7 @@
 -- Loaded text shares lazy geometric vector blocks of complete bounded-item receipts.
 -- Exact seeks reuse those receipts; editing shares raw ranges of immutable
 -- owners in a measured tree with persistent local repair. Measures compose raw
--- tab-dependent advance and exact-content rejection fingerprints.
+-- scalar/byte counts, tab-dependent advance and rejection fingerprints.
 -- Whole text and exact loaded width remain independent of the receipt stream.
 module Hide.LineChunks
   ( Chunks, RawMeasure(..), ColumnAdvance(..), applyAdvance
@@ -302,9 +302,11 @@ pieceFragments piece@(Piece measure owner scalar byte) skip count
 -- | Borrow only the leaves overlapping a clamped scalar range. Both boundary
 -- leaves inspect bounded local byte spans; middle leaves remain whole.
 chunksFragments :: Chunks -> Int -> Int -> [T.Text]
-chunksFragments (Loaded (SourceOwner text _ _ _ _ spans) _) requested count
+chunksFragments (Loaded owner@(SourceOwner text seed _ _ _ spans) _) requested count
   | count<=0=[]
-  | requested<=0=[T.take count text]
+  | requested<=0=[if count>=rawCharacters seed then text else T.take count text]
+  | requested>=rawCharacters seed=[]
+  | count>=rawCharacters seed-requested=[TU.dropWord8 (ownerByteAt owner requested) text]
   | otherwise=case seekLoadedScalar (max 0 requested) spans of
       (# base,_,suffix #)->fragmentsFrom (max 0 requested-I# base) count suffix
 chunksFragments (Edited tree _) requested count=go offset (max 0 count) (toList suffix)

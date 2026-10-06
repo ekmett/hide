@@ -169,7 +169,7 @@ sourceLineSlice line requested count=T.concat (lineFragments line start (min (ma
 
 -- | Width up to a display-cell cap after removing a scalar prefix. This explicit
 -- normalization restarts segmentation, preserving code-indentation semantics.
--- Loaded rows stop at the requested cap; edited rows can use their cached width.
+-- Loaded and edited rows both stop at the requested cap.
 -- Normalized suffixes borrow local spans without constructing display items.
 sourceLineSuffixWidth :: SourceLine -> Int -> Int -> Int
 sourceLineSuffixWidth line@(ChunkedLine _ _ _ _ _ chunks) requested bound=
@@ -187,7 +187,8 @@ sourceLineRawText (Line _ _ _ _ _ text)=T.dropWhileEnd (=='\n') text
 sourceLineRawText line=T.dropWhileEnd (=='\n') (lineText line)
 
 -- | Exact display extent. Loaded long rows memoize a numeric full-row scan,
--- independently of their lazy receipts; edited rows use the tree measure.
+-- independently of their lazy receipts; edited rows explicitly demand the
+-- complete raw-piece advance. Neither path belongs in prefix geometry.
 -- LF's control cell is excluded; trailing CR has zero advance.
 sourceLineWidth :: SourceLine -> Int
 sourceLineWidth line@(Line {})=displayColumn (sourceLineText line) maxBound
@@ -195,8 +196,8 @@ sourceLineWidth (ChunkedLine _ flags _ _ _ chunks)=
   Chunks.chunksWidth chunks-if flags .&. 4/=0 then 1 else 0
 
 -- | Horizontal geometry through a demanded column, with an exact-EOF flag.
--- Untouched long rows estimate their unindexed suffix from cached UTF8 bytes;
--- edited rows use their exact measure. CR/LF never contribute editor cells.
+-- Long rows estimate their unprepared suffix from cached UTF8 bytes, including
+-- after editing. CR/LF never contribute editor cells.
 sourceLineExtentThrough :: SourceLine -> Int -> (Int,Bool)
 sourceLineExtentThrough line@Line{} _=
   let (_,_,column,_)=sourceGraphemesFrom maxBound (sourceLineText line)
