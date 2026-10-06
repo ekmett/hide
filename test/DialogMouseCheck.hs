@@ -460,7 +460,9 @@ searchChecks=withEditorFixture "child" (initialDesktop (80,25)) $ \child->do
     (sameFocused && length (windows focused)==length (windows drafted) &&
       conversationTarget focused=="child" && contents (composerBuffer focused)=="keep draft" && focusEffects==[AgentAction "focus" []])
   check "Conversation opens through the existing runtime when absent" (snd (runCommand Conversation base)==[AgentAction "show" []])
-  check "New conversation goes directly to the primary runtime session action" (conversationTarget new=="" && newEffects==[AgentAction "new" []])
+  check "New conversation delegates primary selection to the runtime owner without replacing the child draft"
+    (newEffects==[AgentAction "new" []] && conversationTarget new==conversationTarget drafted &&
+     contents (composerBuffer new)=="keep draft" && composerSelection new==Selection 10 10)
   check "conversation shortcuts invoke explicit actions" (snd (handleEvent (V.EvKey (V.KChar 'c') [V.MCtrl,V.MShift]) base)==[AgentAction "show" []] && snd (handleEvent (V.EvKey (V.KChar 'n') [V.MCtrl,V.MShift]) base)==[AgentAction "new" []])
   let terminal=addReadOnly "Terminal 1" "" base
   check "modern shortcuts do not consume PTY control bytes" (and [snd (handleEvent (V.EvKey (V.KChar c) mods) terminal)==[ServiceAction "terminal-input" ["1",text]] |

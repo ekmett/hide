@@ -365,6 +365,14 @@ draftReceiptChecks=bracket temporary removePathForcibly $ \root->
             restored<-await runtime "child control completion" (pure . not . agentReplying) (selectConversationView target "Receipt child" settled)
             check "child acceptance preserves a replacement draft and clears only its submitted draft"
               (if replaced then contents (composerBuffer restored)==contents original else bufferLength (composerBuffer restored)==0)
+            when replaced $ do
+              let (requested,effects)=runCommand AgentNew restored
+              restarted<-snd <$> conversationEffects runtime (\value _->pure (False,value)) requested effects
+              let childAgain=selectConversationView target "Receipt child" restarted
+              retained<-sameDraftRoot restored childAgain
+              check "New conversation selects the real primary editor and retains the child draft"
+                (T.null (conversationTarget restarted) && activeConversation restarted && activeEditorMount restarted/=Nothing &&
+                 retained && composerSelection childAgain==composerSelection restored)
           removeFile gate
     putStrLn "draft receipt checks passed"
   where restoreDraftEnvironment name=maybe (unsetEnv name) (setEnv name)
