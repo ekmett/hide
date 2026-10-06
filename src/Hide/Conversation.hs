@@ -1142,7 +1142,7 @@ paintView target force s original
       where token=T.pack (show (questionToken q))
 
     replyChunk width recordId outgoing text =
-      let (cells,blocks)=renderReplyWithShellBlocks (videoMode d/=Nothing) width outgoing text
+      let (cells,blocks)=renderReplyWithShellBlocks (videoMode original/=Nothing) width outgoing text
       in (map (\(c,style)->(c,case style of BubbleText _ sent base->BubbleText recordId sent base; _->style)) cells,Nothing,blocks)
 
 choiceLines :: Int -> Bool -> Text -> Text
