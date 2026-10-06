@@ -100,7 +100,7 @@ loadedTree (LoadedBlock tree rest)=tree FT.>< loadedTree rest
 -- strictly less than twice the first demanded receipt count at each expansion.
 -- Collect directly into a FT so no temporary prefix list is retained by a tail.
 loadedBlocks :: [Chunk] -> LoadedBlocks
-loadedBlocks=build 1
+loadedBlocks=build (1::Int)
   where
     build count source=case collect count FT.empty source of
       (tree,rest) | FT.null tree->LoadedEnd
