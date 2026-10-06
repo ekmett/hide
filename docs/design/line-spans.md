@@ -1,8 +1,8 @@
 # Regular spans for long lines
 
 Status: in progress, 5 October 2026. Tracked in [issue #116](https://github.com/ekmett/hide/issues/116).
-Loaded long rows retain their original text and share a lazy stream of regular
-span receipts. Exact queries prepare only the prefix they visit. The first edit
+Loaded long rows retain their original text and share lazy measured blocks of
+regular span receipts. Queries extend the cached prefix as needed. The first edit
 promotes that row to a measured tree for persistent local repair. Exact width
 remains available as a separate memoized full-row calculation for explicit
 queries. Ordinary Current source scrollbars estimate unvisited suffixes rather
@@ -83,12 +83,17 @@ available to file output, HLS and highlighting on their owning workers.
 ## Prepare only what a seek needs
 
 Horizontal scrolling is uncommon. Do not eagerly dice every loaded long line
-into a complete display index. Its shared lazy span stream extends through the
-requested source position or viewport, with bounded item lookahead, then stops.
-A first distant seek inspects the uncached prefix synchronously. Later seeks walk
-small cached receipts in O(reached spans), decoding only the selected bounded
-span and visible successors. There is no second complete tree or presentation
-cache, and no user input is discarded while preparation runs.
+into a complete display index. Group its receipts into disjoint vector
+checkpoints containing 1, 2, 4, 8, ... spans. The next block stays lazy. A first distant
+seek prepares fewer than twice the number of receipts needed to reach it, plus
+bounded item lookahead. A left-edge viewport starts with one span.
+
+Later seeks skip whole blocks by their cached scalar counts or column transforms,
+then binary-search cached prefix coordinates within one block. This takes logarithmic index work in the reached
+span count; only the selected bounded span and visible successors need decoding.
+Each receipt belongs to one block, with no duplicate retained receipt list or
+second complete presentation tree. The first uncached seek still runs
+synchronously; grouping does not move that work onto a background worker.
 
 The stream belongs to the immutable source line. Forcing its thunks changes no
 content identity, revision, dirty state or Undo. Only a real edit promotes it to

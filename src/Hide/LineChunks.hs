@@ -2,7 +2,7 @@
 -- SPDX-License-Identifier: BSD-3-Clause
 -- | Persistent borrowed storage inside a long physical source line.
 --
--- Loaded text shares a lazy stream of complete bounded-item span receipts.
+-- Loaded text shares lazy geometric vector blocks of complete bounded-item receipts.
 -- Exact seeks reuse those receipts; first editing promotes them to a measured
 -- tree for persistent local repair. Measures compose source scalar/byte counts,
 -- tab-dependent advance and exact-content rejection fingerprints.
@@ -20,6 +20,7 @@ import Data.Foldable (toList)
 import Data.List (foldl')
 import Data.Word (Word64)
 import qualified Data.FingerTree as FT
+import qualified Data.Vector as V
 import qualified Data.Text as T
 import qualified Data.Text.Unsafe as TU
 import qualified Data.Text.Array as TA
@@ -73,17 +74,73 @@ instance FT.Measured ChunkMeasure Chunk where measure (Chunk m _ _ _ _)=m
 
 type ChunkTree = FT.FingerTree ChunkMeasure Chunk
 
--- A loaded line memoizes only demanded span receipts. The Text and exact width
--- remain independent of that stream; exports/outer metadata must not force it.
+-- A loaded line memoizes only demanded receipt blocks. The Text and exact width
+-- remain independent of that index; exports/outer metadata must not force it.
 -- First editing promotes this line once; no display adoption or Buffer mutation.
-data Chunks = Loaded !T.Text [Chunk] Int | Edited !ChunkTree
+-- Disjoint geometric blocks hold 1,2,4,... complete receipts. The tail MUST
+-- remain lazy: a small query must not construct the next checkpoint. There is
+-- no separately retained receipt list. Each entry owns its cached prefix once;
+-- immutable binary searches never construct split trees or cumulative measures.
+data LoadedEntry = LoadedEntry {-# UNPACK #-} !Int {-# UNPACK #-} !Int !ColumnAdvance !Chunk
+data LoadedBlocks = LoadedBlock {-# UNPACK #-} !Int {-# UNPACK #-} !Int !ColumnAdvance !(V.Vector LoadedEntry) LoadedBlocks | LoadedEnd
+
+data Chunks = Loaded !T.Text LoadedBlocks Int | Edited !ChunkTree
 instance Show Chunks where
   showsPrec p (Loaded text _ _)=showsPrec p text
   showsPrec p (Edited tree)=showsPrec p tree
 
 chunksTree :: Chunks -> ChunkTree
-chunksTree (Loaded _ spans _)=FT.fromList spans
+chunksTree (Loaded _ blocks _)=loadedTree blocks
 chunksTree (Edited tree)=tree
+
+-- Explicit first-edit promotion alone enumerates the remaining loaded blocks.
+-- Word/range/display queries must not call this whole-index conversion.
+loadedTree :: LoadedBlocks -> ChunkTree
+loadedTree LoadedEnd=FT.empty
+loadedTree (LoadedBlock _ _ _ entries rest)=
+  V.foldl' (\tree (LoadedEntry _ _ _ chunk)->tree FT.|> chunk) FT.empty entries FT.>< loadedTree rest
+
+-- Start at one receipt. Cumulative checkpoint sizes are 1,3,7,... receipts,
+-- strictly less than twice the first demanded receipt count at each expansion.
+-- The temporary reverse list is consumed into an exactly sized vector, leaving
+-- only the unconsumed source tail in the next lazy checkpoint.
+loadedBlocks :: [Chunk] -> LoadedBlocks
+loadedBlocks=build (1::Int)
+  where
+    build count source=case collect count 0 0 mempty [] source of
+      (_,_,_,[],_)->LoadedEnd
+      (chars,bytes,advance,entries,rest)->
+        LoadedBlock chars bytes advance (V.fromListN (length entries) (reverse entries)) (build next rest)
+      where next=if count>maxBound `div` 2 then maxBound else count*2
+    collect 0 !chars !bytes !advance entries rest=(chars,bytes,advance,entries,rest)
+    collect _ !chars !bytes !advance entries []=(chars,bytes,advance,entries,[])
+    collect count !chars !bytes !advance entries (chunk:rest)=
+      let m=FT.measure chunk
+          entry=LoadedEntry chars bytes advance chunk
+      in entry `seq` collect (count-1) (chars+chunkCharacters m) (bytes+chunkBytes m)
+        (advance<>chunkAdvance m) (entry:entries) rest
+
+loadedChunks :: LoadedBlocks -> [Chunk]
+loadedChunks LoadedEnd=[]
+loadedChunks (LoadedBlock _ _ _ entries rest)=loadedSuffix 0 entries rest
+
+loadedSuffix :: Int -> V.Vector LoadedEntry -> LoadedBlocks -> [Chunk]
+loadedSuffix start entries rest=go start
+  where
+    go index | index>=V.length entries=loadedChunks rest
+             | otherwise=case V.unsafeIndex entries index of
+                 LoadedEntry _ _ _ chunk->chunk:go (index+1)
+
+-- The endpoint of an entry is the following cached prefix, or the block total.
+-- Binary predicates inspect those scalars directly; no per-probe transform is
+-- composed and no source receipt is replayed.
+loadedIndex :: (Int->Bool) -> V.Vector LoadedEntry -> Int
+loadedIndex predicate entries=go 0 (V.length entries)
+  where
+    go !lo !hi | lo>=hi=lo
+               | predicate mid=go lo mid
+               | otherwise=go (mid+1) hi
+      where mid=lo+(hi-lo) `div` 2
 
 chunksMeasure :: Chunks -> ChunkMeasure
 chunksMeasure=FT.measure . chunksTree
@@ -155,15 +212,21 @@ chunksWindow (Edited tree) requested=case FT.viewl suffix of
     initialColumn=applyAdvance (chunkAdvance measure) 0
 
 -- Primitive endpoint receipts keep the cached-span walk numeric. Box the
--- public coordinates only at its selected edge, never once per skipped span.
-seekLoadedColumn :: Int -> [Chunk] -> (# Int#,Int#,Int#,[Chunk] #)
+-- public coordinates only at its selected edge, never once per skipped block.
+seekLoadedColumn :: Int -> LoadedBlocks -> (# Int#,Int#,Int#,[Chunk] #)
 seekLoadedColumn goal=go 0 0 0
   where
-    go !char !col !byte []=finish char col byte []
-    go !char !col !byte suffix@(Chunk m _ _ _ _:rest)
-      | next<=goal=go (char+chunkCharacters m) next (byte+chunkBytes m) rest
-      | otherwise=finish char col byte suffix
-      where next=applyAdvance (chunkAdvance m) col
+    go !char !col !byte LoadedEnd=finish char col byte []
+    go !char !col !byte (LoadedBlock chars bytes advance entries rest)
+      | next<=goal=go (char+chars) next (byte+bytes) rest
+      | otherwise=case V.unsafeIndex entries index of
+          LoadedEntry scalar offset prefix _->finish (char+scalar) (applyAdvance prefix col)
+            (byte+offset) (loadedSuffix index entries rest)
+      where
+        next=applyAdvance advance col
+        index=loadedIndex (\i->applyAdvance (endpoint i) col>goal) entries
+        endpoint i | i+1==V.length entries=advance
+                   | otherwise=case V.unsafeIndex entries (i+1) of LoadedEntry _ _ prefix _->prefix
     finish (I# char) (I# col) (I# byte) suffix=(# char,col,byte,suffix #)
 
 -- | Seek only through the requested column. Return reached scalar/column and
@@ -183,13 +246,19 @@ chunksExtentThrough (Edited tree) _=
   let m=FT.measure tree; column=applyAdvance (chunkAdvance m) 0
   in (chunkCharacters m,column,column)
 
-seekLoadedScalar :: Int -> [Chunk] -> (# Int#,Int#,[Chunk] #)
+seekLoadedScalar :: Int -> LoadedBlocks -> (# Int#,Int#,[Chunk] #)
 seekLoadedScalar goal=go 0 0
   where
-    go !char !col []=finish char col []
-    go !char !col suffix@(Chunk m _ _ _ _:rest)
-      | char+chunkCharacters m<=goal=go (char+chunkCharacters m) (applyAdvance (chunkAdvance m) col) rest
-      | otherwise=finish char col suffix
+    go !char !col LoadedEnd=finish char col []
+    go !char !col (LoadedBlock chars _ advance entries rest)
+      | char+chars<=goal=go (char+chars) (applyAdvance advance col) rest
+      | otherwise=case V.unsafeIndex entries index of
+          LoadedEntry scalar _ prefix _->finish (char+scalar) (applyAdvance prefix col)
+            (loadedSuffix index entries rest)
+      where
+        index=loadedIndex (\i->char+endpoint i>goal) entries
+        endpoint i | i+1==V.length entries=chars
+                   | otherwise=case V.unsafeIndex entries (i+1) of LoadedEntry scalar _ _ _->scalar
     finish (I# char) (I# col) suffix=(# char,col,suffix #)
 
 windowSuffix :: Int -> Int -> Int -> Chunk -> [Chunk] -> (Int,Int,[(T.Text,[DisplayItem])])
@@ -279,18 +348,27 @@ chunkPreviousCharacter local (Chunk _ text cursor _ _)
 -- | Scalar-class traversal borrows only visited storage leaves. Predicates do
 -- not require grapheme segmentation; offsets remain original source scalars.
 chunksSpanLeft :: (Char->Bool) -> Chunks -> Int -> Int
-chunksSpanLeft predicate (Loaded _ spans _) requested=seek 0 [] spans
+chunksSpanLeft predicate (Loaded _ blocks _) requested=find 0 [] blocks
   where
     goal=max 0 requested
-    seek !base previous []=go base T.empty previous
-    seek !base previous (chunk@(Chunk m text _ _ _):rest)
-      | base+chunkCharacters m<goal=seek (base+chunkCharacters m) (chunk:previous) rest
-      | otherwise=go goal (T.take (goal-base) text) previous
+    find !base previous LoadedEnd=go base T.empty previous
+    find !base previous (LoadedBlock chars _ _ entries rest)
+      | base+chars<goal=find (base+chars) ((entries,V.length entries-1):previous) rest
+      | otherwise=case V.unsafeIndex entries index of
+          LoadedEntry scalar _ _ (Chunk _ text _ _ _)->
+            go goal (T.take (goal-base-scalar) text) ((entries,index-1):previous)
+      where
+        index=loadedIndex (\i->base+endpoint i>=goal) entries
+        endpoint i | i+1==V.length entries=chars
+                   | otherwise=case V.unsafeIndex entries (i+1) of LoadedEntry scalar _ _ _->scalar
     go !offset text previous=
       let consumed=T.takeWhileEnd predicate text; next=offset-T.length consumed
-      in if TU.lengthWord8 consumed<TU.lengthWord8 text then next else case previous of
-        Chunk _ source _ _ _:earlier->go next source earlier
-        []->next
+      in if TU.lengthWord8 consumed<TU.lengthWord8 text then next else earlier next previous
+    earlier !offset []=offset
+    earlier !offset ((entries,index):rest)
+      | index<0=earlier offset rest
+      | otherwise=case V.unsafeIndex entries index of
+          LoadedEntry _ _ _ (Chunk _ source _ _ _)->go offset source ((entries,index-1):rest)
 chunksSpanLeft predicate (Edited tree) requested=case FT.viewl suffix of
   Chunk _ text _ _ _ FT.:< _->go goal (T.take (goal-base) text) prefix
   FT.EmptyL->go goal T.empty prefix
@@ -345,9 +423,10 @@ joinAdjacent (TI.Text a@(TA.ByteArray array) start size) (TI.Text (TA.ByteArray 
 -- and complete bounded-item boundary. A span therefore ends by byte 255, apart
 -- from bounded local neighbor merging. Cuts are storage choices, not canonical
 -- source identity. Loading retains a shared lazy receipt stream; exact queries
--- force only the prefix they visit. The first edit promotes it to a measured tree.
+-- prepare a covering checkpoint with <2x receipt-count overscan. The first edit
+-- still promotes the whole row to a measured tree.
 chunksFromText :: T.Text -> Chunks
-chunksFromText text=Loaded text (loadedSpans text) width
+chunksFromText text=Loaded text (loadedBlocks (loadedSpans text)) width
   where (_,_,width,_)=sourceGraphemesFrom maxBound text
 
 -- Each tail is shared and remains lazy. The scanner sees the original full
