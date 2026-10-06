@@ -618,6 +618,8 @@ sourceScrollChecks=do
       freshExact=B.displayColumn larger (T.length larger)-40+1
   check "equal-revision replacement cannot be clamped by a stale thumb hint"
     (scrollColumn (win moved)>exact && scrollColumn (win freshEnd)==freshExact && limit freshEnd==freshExact)
+  check "layout changes preserve manual pan past a replaced source's old thumb hint"
+    (scrollColumn (win (resizeScreenMode (100,25) moved))==scrollColumn (win moved))
   let shrunk=back {buffers=M.adjust (\d->restyle d {documentBuffer=newBuffer "short\t界\r\n"})
         (sourceFixtureBuffer (win back)) (buffers back)}
   check "a prospective seek clamps a shorter replacement immediately"

@@ -916,7 +916,7 @@ ensureVisibleAfterLayout before after = case (activeWindow after,activeDocument 
         columnVisible=textColumn>=scrollColumn previous && textColumn<scrollColumn previous+columns
     in modifyActive (\shown -> shown
       {scrollRow=if rowVisible then scrollRow shown else min (scrollbarLimit after True doc current) (scrollRow current),
-       scrollColumn=if columnVisible then scrollColumn shown else min (scrollbarLimit after False doc current) (scrollColumn current)}) (ensureVisible after)
+       scrollColumn=if columnVisible then scrollColumn shown else min (scrollbarLimit after False doc current {sourceWidthHint=Nothing}) (scrollColumn current)}) (ensureVisible after)
   _ -> after
 
 -- Map other view positions through the changed character interval.
