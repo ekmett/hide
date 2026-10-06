@@ -5,6 +5,7 @@ import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (withAsync, cancel)
 import System.Timeout (timeout)
 import Control.Monad (unless)
+import qualified Data.Text as T
 import System.Directory
 import System.Environment
 import System.FilePath ((</>), searchPathSeparator)
@@ -73,6 +74,34 @@ checks=do
       withEnv "TEST_COMPILER_ID" "ghc-9.8.2" $ withEnv "TEST_LIBDIR" libdir $ do
         mismatch<-debuggerCompiler root True ghc
         check "changed Cabal compiler identity fails before hdb launch" (case mismatch of Left _ -> True; _ -> False)
+    let ambient=root </> "ambient"
+        ambientPath=ambient++[searchPathSeparator]++bin
+    createDirectory ambient
+    createFileLink ghc (bin </> "ghc")
+    compilerPermissions<-getPermissions compiler
+    setPermissions compiler compilerPermissions {executable=True}
+    createFileLink compiler (ambient </> "ghc")
+    script "cabal" $ unlines
+      ["import sys,json,os,shutil", "assert '--compiler-info' in sys.argv",
+       "selected=[x[len('--with-compiler='):] for x in sys.argv if x.startswith('--with-compiler=')]",
+       "if selected: path=selected[0]",
+       "else:", " assert os.environ['GHC_BIN']==os.environ['TEST_COMPILER']",
+       " assert os.environ['PATH'].split(os.pathsep)[0]==os.path.dirname(os.environ['GHC_BIN'])",
+       " path=os.environ.get('TEST_PROJECT_COMPILER') or shutil.which('ghc')",
+       "print(json.dumps({'compiler':{'flavour':'ghc','id':'ghc-9.14.1','path':path}}))"]
+    withEnv "PATH" ambientPath $ withEnv "TEST_COMPILER" ghc $ withEnv "TEST_LIBDIR" libdir $
+      withEnv "TEST_PROJECT_COMPILER" "" $ do
+        selected<-debuggerCompilerInfo root True ghc
+        check "project debugger uses selected PATH before resolving Cabal's compiler" (case selected of
+          Right (actual,Just (_,environment)) -> actual==Compiler "9.14.1" ghc &&
+            lookup "PATH" environment==Just (bin++[searchPathSeparator]++ambientPath)
+          _ -> False)
+        withEnv "TEST_PROJECT_COMPILER" compiler $ do
+          conflict<-debuggerCompilerInfo root True ghc
+          check "explicit Cabal project compiler conflict is refused" (case conflict of
+            Left err -> "conflicts" `T.isInfixOf` err && "with-compiler" `T.isInfixOf` err
+            _ -> False)
+        check "project compiler probe keeps parent PATH unchanged" . (==Just ambientPath) =<< lookupEnv "PATH"
     let ready=root </> "probe-ready"
     script "ghcup" $ unlines ["import os,time", "open(os.environ['TEST_READY'],'w').close()", "time.sleep(60)"]
     withEnv "PATH" bin $ withEnv "TEST_READY" ready $ withAsync installedCompilers $ \worker -> do

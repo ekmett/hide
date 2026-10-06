@@ -39,11 +39,15 @@ checks=bracket temporary removePathForcibly $ \root->do
     let initial=(initialDesktop (100,35)) {sideTree=Just (emptySidebar root 28 False)}
     withPackageSidebar host initial $ \provider->do
       captured<-newIORef Nothing
+      capturedDebug<-newIORef Nothing
       attempted<-newIORef False
       let core d effects=do
             when (any (\effect->case effect of AdoptPreparedBuild (Just _)->True; _->False) effects) (writeIORef attempted True)
             packageBuildEffects provider (\value pending->do
-              mapM_ (\effect->case effect of PackageBuildAction _ target->writeIORef captured (Just target); _->pure ()) pending
+              mapM_ (\effect->case effect of
+                PackageBuildAction _ target->writeIORef captured (Just target)
+                PackageDebugAction target entry->writeIORef capturedDebug (Just (target,entry))
+                _->pure ()) pending
               conversationEffects runtime (\state _->pure (False,state)) value pending) d effects
           sidebarTick d=tickPackageSidebar provider host d >>= tickSidebar host core
           tick d=tickConversation runtime d >>= tickBuildPreparation runtime core >>= sidebarTick
@@ -59,7 +63,7 @@ checks=bracket temporary removePathForcibly $ \root->do
       mounted<-wait "package root" (has "sample") started
       targets<-activate "sample" mounted >>= wait "Cabal target" (has "exe:demo")
       let componentActions label=[title | row<-rows targets,P.infoLabel (rowInfo row)==label,(title,_)<-rowActions row]
-      unless ("Build" `elem` componentActions "exe:demo" && "Run" `elem` componentActions "exe:demo" && "Build" `elem` componentActions "lib:sample" && "Run" `notElem` componentActions "lib:sample" && componentActions "test:check"==["Test"] && componentActions "test:driver"==["Test"] && componentActions "bench:measure"==["Benchmark"] && null (componentActions "exe:disabled"))
+      unless ("Build" `elem` componentActions "exe:demo" && "Run" `elem` componentActions "exe:demo" && "Build" `elem` componentActions "lib:sample" && "Run" `notElem` componentActions "lib:sample" && componentActions "test:check"==["Build","Run","Test","Debug"] && componentActions "test:driver"==["Build","Test"] && componentActions "bench:measure"==["Build","Run","Benchmark","Debug"] && null (componentActions "exe:disabled"))
         (fail "Cabal components expose only their supported captured actions")
       sources<-activate "exe:demo" targets >>= wait "Cabal source" (\d->any (\row->P.infoLabel (rowInfo row)=="Main.hs" && rowDepth row==2) (rows d) && ready d)
       unless (has "Missing (missing)" sources && has "Paths_sample (generated)" sources)
@@ -90,6 +94,19 @@ checks=bracket temporary removePathForcibly $ \root->do
                       next<-tick current
                       exists<-doesFileExist invocation
                       if exists then pure next else threadDelay 1000 >> loop next
+        debugQueued<-request "exe:demo" "Debug" sourceOpened
+        let waitDebug d=do
+              next<-sidebarTick d
+              receipt<-readIORef capturedDebug
+              if maybe False (const True) receipt then pure next else threadDelay 1000 >> waitDebug next
+        debugAdmitted<-timeout 5000000 (waitDebug debugQueued)
+          >>= maybe (fail "Captured package Debug did not reach host") pure
+        receipt<-readIORef capturedDebug
+        unless (maybe False (\(target,entry)->packageBuildName target=="sample:exe:demo" &&
+          packageBuildRoot target==root && entry==Right mainFile) receipt)
+          (fail "Sidebar Debug carries exact qualified component and worker-checked main-is")
+        unless ((windowId <$> activeWindow debugAdmitted)==(windowId <$> activeWindow sourceOpened))
+          (fail "Preparing a captured Debug action must preserve source focus")
         writeFile compiler ("#!/bin/sh\nprintf '%s\n' \"$PWD\" \"$@\" > '"<>invocation<>".tmp'\nmv '"<>invocation<>".tmp' '"<>invocation<>"'\nprintf 'component output\n'\n")
         permissions<-getPermissions compiler
         setPermissions compiler permissions {executable=True}

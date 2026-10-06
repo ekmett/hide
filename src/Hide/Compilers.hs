@@ -15,7 +15,7 @@ import Control.Monad (forM, void)
 import Data.Aeson
 import Data.Aeson.Types (parseMaybe)
 import qualified Data.ByteString as BS
-import Data.Char (isDigit)
+import Data.Char (isDigit, toLower)
 import Data.List (nub, sortOn)
 import Data.Maybe (catMaybes, fromMaybe, isJust)
 import Data.Ord (Down(..))
@@ -23,7 +23,7 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Data.Text.Encoding.Error (lenientDecode)
 import System.Directory (findExecutable, getHomeDirectory, doesFileExist, doesDirectoryExist, canonicalizePath)
-import System.Environment (lookupEnv)
+import System.Environment (lookupEnv, getEnvironment)
 import System.Exit (ExitCode(..))
 import System.FilePath ((</>), isAbsolute, takeDirectory, takeFileName, searchPathSeparator)
 import System.Info (os)
@@ -85,12 +85,7 @@ discoverInstalled = do
 compilerInfo :: FilePath -> Bool -> FilePath -> IO (Either T.Text Compiler)
 compilerInfo root project command
   | not (recognizedCompiler command) = pure (Left "hdb uses its own GHC build; a custom compiler requires an explicit Adapter config.")
-  | project = do
-      result<-queryWithin 30000000 root "cabal" (["path","--output-format=json","--compiler-info","-v0"]++
-        ["--with-compiler="++command | command/="ghc"])
-      case result >>= parseInformation of
-        Left err -> pure (Left err)
-        Right compiler -> validate compiler
+  | project = cabalCompilerInfo root Nothing ["--with-compiler="++command | command/="ghc"]
   | otherwise = do
       path<-findExecutable (if isAbsolute command then command else if takeFileName command/=command then root </> command else command)
       case path of
@@ -100,6 +95,15 @@ compilerInfo root project command
           pure $ result >>= \output -> let version=T.strip (T.pack output) in
             if isJust (numericVersion (T.unpack version)) then Right (Compiler version executable)
             else Left "The selected executable did not report a GHC version."
+
+-- Cabal owns project compiler resolution. Probe under the intended adapter
+-- environment as well as with the user's explicit initial compiler choice.
+cabalCompilerInfo :: FilePath -> Maybe [(String,String)] -> [String] -> IO (Either T.Text Compiler)
+cabalCompilerInfo root environment arguments=do
+  result<-queryWithin 30000000 environment root "cabal" (["path","--output-format=json","--compiler-info","-v0"]++arguments)
+  case result >>= parseInformation of
+    Left err -> pure (Left err)
+    Right compiler -> validate compiler
   where
     parseInformation output=case decodeStrict' (TE.encodeUtf8 (T.pack output)) >>= parseMaybe parser of
       Just compiler -> Right compiler
@@ -128,6 +132,7 @@ debuggerCompiler root project command = do
     Nothing->Left ("No hdb-"<>compilerVersion compiler<>" or hdb executable found; install a matching debugger or use Adapter config.")
 
 -- | Prepare verified compiler details and discover an optional hdb executable.
+-- Project compiler resolution must agree under the private adapter environment.
 -- Its wrapper checks compiler ABI when launched.
 -- A missing adapter is a successful result with Nothing, not a compiler failure.
 debuggerCompilerInfo :: FilePath -> Bool -> FilePath -> IO (Either T.Text (Compiler,Maybe (FilePath,[(String,String)])))
@@ -143,16 +148,26 @@ debuggerCompilerInfo root project command = do
         (Right version,Right library) | T.strip (T.pack version)==compilerVersion compiler -> do
           let directory=T.unpack (T.strip (T.pack library))
           exists<-if isAbsolute directory && cleanPath directory then doesDirectoryExist directory else pure False
-          versioned<-findExecutable ("hdb-"++T.unpack (compilerVersion compiler))
-          external<-maybe (findExecutable "hdb") (pure . Just) versioned
-          managed<-managedToolRoot
-          adapter<-case (external,managed) of
-            (Nothing,Right cache)->findExecutable (cache </> "bin" </> ("hdb-"++T.unpack (compilerVersion compiler)))
-            _->pure external
           path<-fromMaybe "" <$> lookupEnv "PATH"
-          pure $ if not exists then Left "The selected GHC reported an invalid library directory." else
-            Right (compiler {compilerPath=executable},fmap (\binary->(binary,[("GHC_BIN",executable),("GHC_LIBDIR",directory),
-                ("PATH",takeDirectory executable++[searchPathSeparator]++path)])) adapter)
+          inherited<-getEnvironment
+          let overrides=[("GHC_BIN",executable),("GHC_LIBDIR",directory),
+                ("PATH",takeDirectory executable++[searchPathSeparator]++path)]
+              environment=overrides++filter (\(name,_)->map toLower name `notElem` map (map toLower . fst) overrides) inherited
+          projectCompiler<-if project && exists
+            then cabalCompilerInfo root (Just environment) [] >>= traverse (canonicalizePath . compilerPath)
+            else pure (Right executable)
+          case projectCompiler of
+            Left err->pure (Left err)
+            Right actualPath | actualPath/=executable->pure (Left "Cabal's project compiler conflicts with the selected GHC. Select that compiler in Run > Target or change Cabal's with-compiler setting.")
+            _ | not exists->pure (Left "The selected GHC reported an invalid library directory.")
+              | otherwise->do
+                  versioned<-findExecutable ("hdb-"++T.unpack (compilerVersion compiler))
+                  external<-maybe (findExecutable "hdb") (pure . Just) versioned
+                  managed<-managedToolRoot
+                  adapter<-case (external,managed) of
+                    (Nothing,Right cache)->findExecutable (cache </> "bin" </> ("hdb-"++T.unpack (compilerVersion compiler)))
+                    _->pure external
+                  pure (Right (compiler {compilerPath=executable},fmap (\binary->(binary,overrides)) adapter))
         (Left err,_) -> pure (Left err)
         (_,Left err) -> pure (Left err)
         _ -> pure (Left "The selected compiler changed version during debugger preparation; retry.")
@@ -163,10 +178,10 @@ cleanPath value=not (null value) && all (`notElem` ['\0','\r','\n']) value
 -- Own the process group so cancellation/timeouts also release inherited pipes.
 -- Both captured streams are bounded; a noisy or stalled probe cannot retain UI.
 query :: FilePath -> FilePath -> [String] -> IO (Either T.Text String)
-query=queryWithin 5000000
+query=queryWithin 5000000 Nothing
 
-queryWithin :: Int -> FilePath -> FilePath -> [String] -> IO (Either T.Text String)
-queryWithin micros root command args=do
+queryWithin :: Int -> Maybe [(String,String)] -> FilePath -> FilePath -> [String] -> IO (Either T.Text String)
+queryWithin micros environment root command args=do
   result<-try $ bracket acquire release $ \(output,errors,process,stop) ->
     withAsync (capture (1024*1024) output) $ \out -> withAsync (capture 65536 errors) $ \err ->
       timeout micros ((,,) <$> waitForProcess process <*> wait out <*> wait err) `finally` stop
@@ -178,7 +193,7 @@ queryWithin micros root command args=do
   where
     acquire=do
       (_,Just output,Just errors,process)<-createProcess (proc command args)
-        {cwd=Just root,std_in=NoStream,std_out=CreatePipe,std_err=CreatePipe,create_group=True}
+        {cwd=Just root,env=environment,std_in=NoStream,std_out=CreatePipe,std_err=CreatePipe,create_group=True}
       stop<-processCleanup process
       pure (output,errors,process,stop)
     release (output,errors,_,stop)=stop >> mapM_ (ignore . hClose) [output,errors]

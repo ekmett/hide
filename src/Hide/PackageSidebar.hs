@@ -113,6 +113,8 @@ packageBuildEffects service core original=foldM step (False,original)
   where
     step state@(True,_) _=pure state
     step (_,d) effect=case effect of
+      PackageDebugAction target _->checked d target effect
+      AdoptPreparedDebug target->checked d target effect
       PackageBuildAction _ target->checked d target effect
       AdoptPreparedBuild (Just target)->checked d target effect
       _->core d [effect]
@@ -189,8 +191,10 @@ createSlot registry root _private serial file=do
   let eligible action component=
         let group=condTreeData (sourceTree component)
         in sourceBuildable group && case action of
-          Make->sourceKind component `elem` [LibraryComponent,ExecutableComponent]
-          Run->sourceKind component==ExecutableComponent
+          Make->sourceKind component `elem` [LibraryComponent,ExecutableComponent] ||
+            sourceKind component==TestComponent && sourceRunKind group `elem` [ExecutableRun,DriverRun] ||
+            sourceKind component==BenchmarkComponent && sourceRunKind group==ExecutableRun
+          Run->debugEligible component
           Test->sourceKind component==TestComponent && sourceRunKind group `elem` [ExecutableRun,DriverRun]
           Benchmark->sourceKind component==BenchmarkComponent && sourceRunKind group==ExecutableRun
           Compile->False
@@ -215,11 +219,33 @@ createSlot registry root _private serial file=do
   run<-registerBuild Run ".run" "Run component"
   test<-registerBuild Test ".test" "Test component"
   benchmark<-registerBuild Benchmark ".benchmark" "Benchmark component"
+  debug<-registerCommand registry (CommandDef (namespace<>".debug") "Debug component" codec codec $ \ctx (version,name)->do
+    Snapshot current signature package _<-readIORef ref
+    observed<-stamp file
+    case (sidebarOrigin ctx,sidebarProvider ctx,package) of
+      (Menu.HumanMenu,Just owner,Right value)
+        | current==version,observed==signature
+        , component:_<-[item | item<-sourceComponents value,sourceTarget item==name]
+        , debugEligible component->do
+            entry<-debugEntry root (sidebarPrivatePaths ctx) file component
+            let target=PackageBuildTarget owner version (sidebarContextDirectory ctx,sidebarPrivatePaths ctx)
+                  root file observed (sourcePackageName value<>":"<>name)
+            _<-evaluate (T.length (packageBuildName target)+length root+length file
+              +length (sidebarContextDirectory ctx)+sum (map length (sidebarPrivatePaths ctx))
+              +either T.length length entry)
+            Snapshot latest _ _ _<-readIORef ref
+            after<-stamp file
+            pure $ if latest/=version || after/=observed
+              then Left (CommandRejected "Package changed while preparing Debug; refresh the tree.")
+              else Right (SidebarPackageDebug target entry)
+      _->pure (Left (CommandRejected "Package debug target changed or is not a human action."))) >>= required
   -- doc-artifact: tools/docs-screenshots.hs package-target-menu -> docs/site/screenshots/package-target-menu.png (docs/running.md)
   let targetActions version component=
         [P.ActionMenu label (P.treeAction registry command (version,sourceTarget component) (\_ result->pure result))
         | (label,action,command)<-[("Build",Make,build),("Run",Run,run),("Test",Test,test),("Benchmark",Benchmark,benchmark)]
-        , eligible action component]
+        , eligible action component]++
+        [P.ActionMenu "Debug" (P.treeAction registry debug (version,sourceTarget component) (\_ result->pure result))
+        | debugEligible component]
       action version path=P.treeAction registry open (Just version,path) (\_ result->pure result)
       rootNode=P.NodeDef (P.NodeInfo rootId title "" True (Just file)) Nothing
         [P.ActionMenu "Open package file" (P.treeAction registry open (Nothing,file) (\_ result->pure result))]
@@ -249,8 +275,31 @@ createSlot registry root _private serial file=do
                 storeCache ref version key nodes
                 pure (Right (P.NodePage (take 128 (drop offset nodes)) (if null (drop (offset+128) nodes) then Nothing else Just (T.pack (show (offset+128))))))
   provider<-P.registerTree registry namespace rootNode children >>= required
-  pure (Slot file provider [commandRef open,commandRef build,commandRef run,commandRef test,commandRef benchmark] ref ids)
+  pure (Slot file provider [commandRef open,commandRef build,commandRef run,commandRef test,commandRef benchmark,commandRef debug] ref ids)
   where required=either (ioError . userError . show) pure
+
+-- Entry selection is a worker operation. File existence cannot select a Cabal
+-- conditional branch; an unresolved/ambiguous main remains a GHC refusal.
+debugEligible :: ComponentSources -> Bool
+debugEligible component=let group=condTreeData (sourceTree component)
+  in sourceBuildable group && sourceRunKind group==ExecutableRun &&
+     sourceKind component `elem` [ExecutableComponent,TestComponent,BenchmarkComponent]
+
+debugEntry :: FilePath -> [FilePath] -> FilePath -> ComponentSources -> IO (Either Text FilePath)
+debugEntry root private manifest component=do
+  let mainsOnly group=group {sourceEntries=[entry | entry@MainSource{}<-sourceEntries group]}
+      selected=component {sourceTree=fmap mainsOnly (sourceTree component)}
+  resolved<-resolveSources root private (takeDirectory manifest) selected
+  pure $ do
+    candidates<-resolved
+    let mains=[candidate | candidate<-candidates,MainSource _<-[candidateSource candidate]]
+        paths=[entry | candidate<-mains,entry<-candidatePaths candidate]
+        existing=M.keys (M.fromList [(path,()) | entry<-paths,Just path<-[existingPath entry]])
+    if any ((/=Lit True).candidateCondition) mains || any ((/=Lit True).pathCondition) paths
+      then Left "Debug needs an unconditional main-is and source directory. Use an explicit Adapter configuration for this component."
+      else case existing of
+        [path] | takeExtension path `elem` [".hs",".lhs"]->Right path
+        _->Left "Debug needs one existing Haskell main-is for this component. Use an explicit Adapter configuration."
 
 sourceNode :: IORef (M.Map (Text,Source,Text,FilePath) P.NodeId,Int)
   -> (Int -> FilePath -> P.TreeAction SidebarContext SidebarReply)

@@ -50,7 +50,7 @@ import qualified Hide.Plugin.Menu as Menu
 data SidebarContext = SidebarContext
   { sidebarOrigin :: !Menu.MenuOrigin, sidebarContextDirectory :: !FilePath, sidebarProvider :: !(Maybe P.TreeRef), sidebarPrivatePaths :: ![FilePath]
   , sidebarColumns :: !Int, sidebarOpened :: !(Maybe (FilePath,Int,Int,ContentVersion)), sidebarRenameFiles :: ![Rename.RenameFile] }
-data SidebarReply = SidebarBuild !BuildAction !PackageBuildTarget | SidebarRename !P.TreeRef !Rename.PreparedRename | SidebarForm !(Form.PreparedInputForm SidebarContext SidebarReply) | SidebarSession !SessionSidebarRequest | SidebarExisting !FilePath !Int !Int !ContentVersion | SidebarDocument !FilePath !Document | SidebarPrepared !LinkResult | SidebarAgent !AgentSidebarRequest | SidebarDebug !DebugSidebarRequest | SidebarWindow !PluginWindow.WindowUpdate
+data SidebarReply = SidebarPackageDebug !PackageBuildTarget !(Either Text FilePath) | SidebarBuild !BuildAction !PackageBuildTarget | SidebarRename !P.TreeRef !Rename.PreparedRename | SidebarForm !(Form.PreparedInputForm SidebarContext SidebarReply) | SidebarSession !SessionSidebarRequest | SidebarExisting !FilePath !Int !Int !ContentVersion | SidebarDocument !FilePath !Document | SidebarPrepared !LinkResult | SidebarAgent !AgentSidebarRequest | SidebarDebug !DebugSidebarRequest | SidebarWindow !PluginWindow.WindowUpdate
 
 data ChildJob = ChildJob !TreeRequest !Menu.MenuOrigin !(Async (Either CommandError (P.PreparedPage SidebarContext SidebarReply))) !Bool
 data ActionJob = ActionJob ![P.TreeHit] !CommandRef !Menu.MenuOrigin !Int !(Async (Either CommandError SidebarReply)) !Bool
@@ -611,6 +611,7 @@ finishAction host@(SidebarHost _ ref _ cancellation _ _) core d=do
           modifyIORef' ref (\s->s {actionJob=Nothing})
           case result of
             Right (Right (SidebarExisting path wid bid version)) | current->adoptExisting origin path wid bid version d
+            Right (Right (SidebarPackageDebug target entry)) | current && origin==Menu.HumanMenu->snd <$> core d [PackageDebugAction target entry]
             Right (Right (SidebarBuild action target)) | current && origin==Menu.HumanMenu->snd <$> core d [PackageBuildAction action target]
             Right (Right (SidebarDebug request)) | current && origin==Menu.HumanMenu->snd <$> core d [DebugSidebarAction request]
             Right (Right (SidebarSession request)) | current && origin==Menu.HumanMenu->snd <$> core d [SessionSidebarAction request]
@@ -621,6 +622,7 @@ finishAction host@(SidebarHost _ ref _ cancellation _ _) core d=do
               Left err->d {status="Sidebar action failed: "<>T.pack (displayException err)}
               Right (Left err)->d {status="Sidebar action failed: "<>T.pack (show err)}
               Right (Right SidebarExisting{})->d {status="Sidebar result expired."}
+              Right (Right SidebarPackageDebug{})->d {status="Sidebar result expired."}
               Right (Right SidebarBuild{})->d {status="Sidebar result expired."}
               Right (Right SidebarDebug{})->d {status="Sidebar result expired."}
               Right (Right SidebarSession{})->d {status="Sidebar result expired."}
