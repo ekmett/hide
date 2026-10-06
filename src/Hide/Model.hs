@@ -1161,7 +1161,7 @@ shellBlockAt x y d | Just w<-activeWindow d,PluginContent reference<-windowConte
       col=x-left rect+scrollColumn w
       position=windowTextOffset d w (PluginWindow.preparedWindowText prepared) row col
   if not (inside rect x y) || reference `S.member` retiredPluginWindows d then Nothing else do
-    block<-find (\(start,end,_,raw)->position>=start && position<end && not (T.null (T.strip raw))) (Vec.toList (PluginWindow.textShellBlocks semantics))
+    block<-find (\(start,end,_,_)->position>=start && position<end) (Vec.toList (PluginWindow.textShellBlocks semantics))
     pure (ExecuteShellBlock (WindowShell reference prepared) block)
 shellBlockAt x y d=do
   w<-activeWindow d

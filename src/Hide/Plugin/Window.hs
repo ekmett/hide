@@ -168,9 +168,13 @@ prepareSemanticTextWindow title styled semantics=do
       V.foldl' (\n (a,z,url)->n+a+z+T.length url) 0 (textLinks semantics)+
       V.foldl' (\n (a,z,dialect,body)->n+a+z+T.length dialect+T.length body) 0 (textShellBlocks semantics)+
       V.foldl' (\n (a,z)->n+a+z) 0 ranges)
-    let messages=case textCopy semantics of CopyText->V.empty; CopyMessages{}->messageIntervals styled
+    -- Eligibility is immutable worker-prepared metadata; menu/launch admission
+    -- must not rescan raw code bodies while holding the Desktop owner.
+    let eligible=semantics {textShellBlocks=V.filter (\(_,_,_,body)->not (T.null (T.strip body))) (textShellBlocks semantics)}
+        messages=case textCopy semantics of CopyText->V.empty; CopyMessages{}->messageIntervals styled
+    _<-evaluate eligible
     _<-evaluate (V.foldl' (\n (a,z,message,outgoing)->outgoing `seq` n+a+z+message) 0 messages)
-    result<-evaluate (PreparedWindow ident caption text rows width recovery sections scripts (Just (semantics,messages)))
+    result<-evaluate (PreparedWindow ident caption text rows width recovery sections scripts (Just (eligible,messages)))
     pure (Right result)
 
 -- | Prepare text whose title and content may be written to private recovery.

@@ -211,7 +211,7 @@ executeShellBlock (SessionServices _ _ _ ref) origin requested d
       Nothing->pure d
       Just (_,_,dialect,body)
         | not Terminal.terminalAvailable->pure (message "Cannot execute shell block" ["Embedded terminals are unavailable in this build."] d)
-        | T.null (T.strip body)->pure (message "Cannot execute shell block" ["This shell block is empty."] d)
+        | SourceShell{}<-origin,T.null (T.strip body)->pure (message "Cannot execute shell block" ["This shell block is empty."] d)
         | dialect `notElem` ["sh","bash","zsh"]->pure (message "Cannot execute shell block" ["This shell dialect is unavailable."] d)
         | otherwise->mask_ $ do
             worker<-async $ mask_ $ do

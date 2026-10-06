@@ -227,7 +227,7 @@ parseLaunch command args env = do
 conversationEffects :: ConversationState -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> [Effect] -> IO (Bool,Desktop)
 conversationEffects runtime@(ConversationState _ ref _ _) fallback original effects = do
   (quit,updated)<-foldM apply (False,original) effects
-  if quit then pure (True,updated) else (False,) <$> refreshConversationLayout runtime updated
+  if quit then pure (True,updated) else (False,) <$> revealQuestion runtime updated
   where
     apply state@(True,_) _=pure state
     apply (_,d) effect@(SubmitEditor mount slot origin)=do
@@ -612,7 +612,7 @@ tickConversation runtime@(ConversationState _ ref _ _) original = do
       forM_ (lookup token (approvals current)) $ \approval -> denyChild approval >> mapM_ (\client -> cancelApproval client approval) (connection current)
       modifyIORef' ref (\state -> state {approvals=filter ((/=token).fst) (approvals state),presented=Nothing})
     _ -> pure ()
-  laidOut<-refreshConversationLayout runtime advanced
+  laidOut<-revealQuestion runtime advanced
   afterDismiss<-readIORef ref
   let rendered=laidOut {agentReplying=busy afterDismiss,agentQueued=queryCount "" (queuedQueries afterDismiss)}
   syncConversationAgent runtime
@@ -621,12 +621,6 @@ tickConversation runtime@(ConversationState _ ref _ _) original = do
   shown<-present runtime created
   notice<-AR.runtimeNotice (conversationAgents runtime)
   pure (maybe shown (\text -> shown {status=text}) notice)
-
--- Window changes also arrive in effect batches with no protocol actions. Reflow
--- before returning that desktop, so its bubbles and composer use the same bounds.
--- The immutable transcript key keeps mouse motion and idle ticks parse-free.
-refreshConversationLayout :: ConversationState -> Desktop -> IO Desktop
-refreshConversationLayout runtime original=revealQuestion runtime original
 
 -- Capture only immutable roots and small presentation/lifetime receipts. Every
 -- installed target owns one payload; closed inert snapshots are not scheduled.
