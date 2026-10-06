@@ -21,13 +21,13 @@ import Data.Aeson.Types (parseMaybe)
 import Data.IORef
 import qualified Data.Map.Strict as M
 import qualified Data.Set as S
-import Data.Maybe (mapMaybe)
+import Data.Maybe (mapMaybe,listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Text.Read (readMaybe)
 import qualified Hide.AgentHub as A
 import Hide.AgentRuntime (AgentRuntime,agentHub)
-import Hide.Autocomplete (Autocomplete,completionSummary)
+import Hide.Autocomplete (Autocomplete,completionSummary,completionChoices)
 import Hide.AgentSidebarTypes
 import Hide.Model (Desktop)
 import qualified Hide.Plugin.Form as Form
@@ -70,23 +70,44 @@ withAgentSidebar host runtime autocomplete use=withRegistry $ \registry->do
         Left err->pure (Left (CommandRejected err))
         Right entry->do
           let name=case parseMaybe (withObject "Agent" (.: "name")) entry of Just value->value; Nothing->A.agentIdText who
-          prepared<-Form.prepareInputForm (Form.InputFormSpec "Rename agent" "Name" name "Rename")
+          prepared<-Form.prepareForm Form.PrivateForm (Form.InputFormSpec "Rename agent" "Name" name "Rename")
             (Form.formAction registry renameTo (\text->(who,text)) (\_ reply->pure reply))
           pure (SidebarForm <$> prepared))
-  let configurationCommand category ctx who=do
-        captured<-A.agentConfiguration (agentHub runtime) who
-        case captured of
-          Right (receipt,choices) | [choice]<-[choice | choice<-choices,A.configCategory choice==category]->do
-            let options=A.configValues choice
-                selected=length (takeWhile ((/=A.configCurrent choice).fst) options)
-            _<-evaluate (force options)
-            human ctx (ShowAgentConfiguration receipt (A.configId choice) options selected)
-          _->pure (Left (CommandRejected "The agent has not advertised these choices."))
+  configureAgent<-command "hide.sidebar.agents.configure" "Apply agent setting"
+    (\ctx (receipt,option,value)->human ctx (ConfigureAgent receipt option value))
+  configureCompletion<-command "hide.sidebar.completion.configure" "Apply completion setting"
+    (\ctx (target,option,value)->human ctx (ConfigureCompletion target option value))
+  let choiceSpec title options current=Form.ChoiceFormSpec title "Provider choices"
+        [(ident,T.take 256 (T.map (\c->if c<' ' || c=='\DEL' then ' ' else c) label)) | (ident,label)<-options]
+        (if current `elem` map fst options then current else maybe "" fst (listToMaybe options)) "Apply"
+      configurationCommand category ctx who
+        | sidebarOrigin ctx/=Menu.HumanMenu=pure (Left (CommandRejected "Agent forms require the human."))
+        | otherwise=do
+            -- tickConversation keeps the primary hub advertisement current.
+            -- Opening may show old metadata; final ConfigureAgent sync/currentness
+            -- remains the authority and cannot apply a replaced receipt.
+            captured<-A.agentConfiguration (agentHub runtime) who
+            case captured of
+              Right (receipt,choices) | [choice]<-[choice | choice<-choices,A.configCategory choice==category]->do
+                prepared<-Form.prepareForm Form.ReadableForm (choiceSpec "Agent setting" (A.configValues choice) (A.configCurrent choice))
+                  (Form.formAction registry configureAgent (\value->(receipt,A.configId choice,value)) (\_ reply->pure reply))
+                pure (SidebarForm <$> prepared)
+              _->pure (Left (CommandRejected "The agent has not advertised these choices."))
+      completionCommand category ctx target
+        | sidebarOrigin ctx/=Menu.HumanMenu=pure (Left (CommandRejected "Completion forms require the human."))
+        | otherwise=do
+            captured<-completionChoices autocomplete target category
+            case captured of
+              Left err->pure (Left (CommandRejected err))
+              Right (receipt,option,choices,current)->do
+                prepared<-Form.prepareForm Form.ReadableForm (choiceSpec "Completion setting" choices current)
+                  (Form.formAction registry configureCompletion (\value->(receipt,option,value)) (\_ reply->pure reply))
+                pure (SidebarForm <$> prepared)
   model<-command "hide.sidebar.agents.model" "Model" (configurationCommand "model")
   effort<-command "hide.sidebar.agents.effort" "Effort" (configurationCommand "thought_level")
   completionOpen<-command "hide.sidebar.completion.open" "Completion conversation" (\ctx target->human ctx (ShowCompletion target))
-  completionModel<-command "hide.sidebar.completion.model" "Completion model" (\ctx target->human ctx (ChooseCompletion target "model"))
-  completionEffort<-command "hide.sidebar.completion.effort" "Completion effort" (\ctx target->human ctx (ChooseCompletion target "thought_level"))
+  completionModel<-command "hide.sidebar.completion.model" "Completion model" (completionCommand "model")
+  completionEffort<-command "hide.sidebar.completion.effort" "Completion effort" (completionCommand "thought_level")
   create<-command "hide.sidebar.agents.new" "New Agent" (\ctx ()->human ctx NewAgent)
   let root=P.NodeDef (P.NodeInfo rootId "Agents" "" True Nothing) Nothing [P.ActionMenu "New Agent" (P.treeAction registry create () (\_ value->pure value))]
       node values summary=

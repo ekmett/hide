@@ -17,8 +17,8 @@ import Hide.AgentHub (AgentId,AgentConfigRef)
 -- retains the captured ID even if directory rows are renamed or reordered.
 data AgentSidebarRequest = ShowAgent !AgentId | NewAgent
   | RenameAgentTo !AgentId !Text | CreateAgent !Text !Text
-  | ShowAgentConfiguration !AgentConfigRef !Text ![(Text,Text)] !Int | ConfigureAgent !AgentConfigRef !Text !Text
-  | ShowCompletion !CompletionTarget | ChooseCompletion !CompletionTarget !Text
+  | ConfigureAgent !AgentConfigRef !Text !Text
+  | ShowCompletion !CompletionTarget
   | ConfigureCompletion !CompletionTarget !Text !Text deriving (Eq,Show)
 
 -- | Settings incarnation plus optional live ACP session/configuration receipt.

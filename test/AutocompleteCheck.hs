@@ -117,6 +117,8 @@ checks=bracket temporary removePathForcibly $ \root->do
       writeFile (root </> T.unpack fifthId) "complete"
       waitRetired runtime fifthId
       warm<-tickAutocomplete runtime continued
+      staleChoices<-timeout 5000000 (completionChoices runtime (CompletionTarget (-1) Nothing) "model")
+      check "expired choice query resolves without a dialog publication" (case staleChoices of Just (Left _)->True; _->False)
       warmEntries<-logs
       check "revealing completion chat preserves the existing provider instance"
         (length [() | entry<-warmEntries,field "method" entry==Just ("session/new"::T.Text)]==1)
@@ -144,6 +146,9 @@ checks=bracket temporary removePathForcibly $ \root->do
         (inlinePreview preserved==inlinePreview newerPreview && activeText preserved=="x\n")
       entries<-logs
       check "autocomplete configuration is independent of the main agent" (length [() | entry<-entries,field "method" entry==Just ("initialize"::T.Text)]==1)
+  closed<-withAutocomplete root pure
+  closedChoices<-timeout 5000000 (completionChoices closed (CompletionTarget 0 Nothing) "model")
+  check "choice requests refuse after owner shutdown" (case closedChoices of Just (Left _)->True; _->False)
   putStrLn "Autocomplete runtime checks passed"
 
 field :: FromJSON a => Key -> Value -> Maybe a

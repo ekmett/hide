@@ -220,9 +220,9 @@ publicationLifetimeChecks :: IO ()
 publicationLifetimeChecks=withRegistry $ \registry->do
   (provider,_)<-TreeExtension.declare registry (const (error "not invoked")) (const (pure (Right (P.NodePage [] Nothing))))
   prepared<-FormExtension.prepareForm registry (Form.InputFormSpec "Rename" "Name" "Old" "Rename") (\_ _->pure (Right ())) >>= right
-  admitted<-Form.admitInputForm False prepared
+  admitted<-Form.admitForm False prepared
   check "publication fixture opens its exact form" admitted
-  update<-Form.refreshInputForm (Form.formReference prepared) (Form.InputFormSpec "Refresh" "Name" "Ignored" "Rename") >>= right >>= maybe (error "missing refresh") pure
+  update<-Form.refreshForm (Form.formReference prepared) (Form.InputFormSpec "Refresh" "Name" "Ignored" "Rename") >>= right >>= maybe (error "missing refresh") pure
   hostReady<-newEmptyMVar
   withAsync (readMVar hostReady >>= \host->publishTreeFromHost host provider) $ \treeWriter->
     withAsync (readMVar hostReady >>= \host->publishFormRefreshFromHost host update) $ \formWriter->do
