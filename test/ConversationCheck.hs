@@ -41,6 +41,11 @@ import Hide.Buffer
 import qualified Hide.App as App
 import Hide.GuestAccess (guestCommandAllowed, protectedBuffer)
 import Hide.Conversation
+import Hide.SessionServices
+import qualified Hide.BuildJobs as Jobs
+import qualified Hide.Build as Build
+import qualified Hide.Terminal as Terminal
+import qualified Hide.Consoles as C
 import qualified Hide.AgentHub as AH
 import qualified Hide.AgentRuntime as AR
 import System.Mem.StableName (makeStableName)
@@ -236,7 +241,7 @@ draftReceiptChecks=bracket temporary removePathForcibly $ \root->
     let base=(addDocument (Just (FileState source Nothing)) (newBuffer "main=1\n") (initialDesktop (100,35))) {sideTree=Just (emptySidebar root 20 False)}
     -- Submission identity is captured before the initial provider handshake.
     bracket (lookupEnv "THC_CONNECT_GATE" <* setEnv "THC_CONNECT_GATE" gate) (restoreDraftEnvironment "THC_CONNECT_GATE") $ \_->
-      withConversationAt root $ \runtime->do
+      C.withConsoles $ \consoles -> withConversationAt consoles root $ \runtime->do
         configured<-configure runtime base
         original<-evaluate (newBuffer "stream")
         createNamedPipe gate 0o600
@@ -249,7 +254,7 @@ draftReceiptChecks=bracket temporary removePathForcibly $ \root->
           check "connecting submission cannot clear a same-text new draft" (contents (composerBuffer accepted)=="stream")
         removeFile gate
     writeFile context "[editor.agent]\ncontext='receipt guidance'\n"
-    forM_ [(False,False,False),(False,True,False),(False,True,True),(True,False,False),(True,True,False)] $ \(steer,replaced,requeue)->withConversationAt root $ \runtime->do
+    forM_ [(False,False,False),(False,True,False),(False,True,True),(True,False,False),(True,True,False)] $ \(steer,replaced,requeue)->C.withConsoles $ \consoles -> withConversationAt consoles root $ \runtime->do
       let scenario=if steer then (if replaced then "steer replacement" else "steer unchanged") else if requeue then "query requeue" else if replaced then "query replacement" else "query unchanged"
       configured<-configure runtime base
       connected<-prompt runtime "stream" configured >>= primaryDone runtime (scenario++" connect")
@@ -282,7 +287,7 @@ draftReceiptChecks=bracket temporary removePathForcibly $ \root->
         (if replaced then contents (composerBuffer restored)==contents original else bufferLength (composerBuffer restored)==0)
     bracket (lookupEnv "THC_EDIT_SESSION" <* setEnv "THC_EDIT_SESSION" (replicate 48 'c')) (restoreDraftEnvironment "THC_EDIT_SESSION") $ \_->
       bracket (lookupEnv "THC_STEER_GATE" <* setEnv "THC_STEER_GATE" gate) (restoreDraftEnvironment "THC_STEER_GATE") $ \_->
-        forM_ [False,True] $ \replaced->withConversationAt root $ \runtime->do
+        forM_ [False,True] $ \replaced->C.withConsoles $ \consoles -> withConversationAt consoles root $ \runtime->do
           _<-configure runtime base
           let hub=AR.agentHub (conversationAgents runtime)
           ident<-AH.spawnAgent hub AH.Human (AH.SpawnSpec "Receipt child" "wait" root AH.Shared AH.Fresh Nothing Nothing) >>= either (error.T.unpack) pure
@@ -439,7 +444,7 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary remov
             next<-snd <$> conversationEffects runtime fallback changed effects
             if settle then tickConversation runtime next else pure next
           _ -> error ("Missing inline action "++T.unpack action)
-    withConversation $ \runtime -> do
+    C.withConsoles $ \consoles -> withConversation consoles $ \runtime -> do
       let longReply=T.unwords (replicate 90 "window-width")
           rawShell="printf '%s\\n' 'literal λ'\n\tprintf 'tail  '  \n"
           question=longReply<>"\n\n```sh\n"<>rawShell<>"```"
@@ -471,7 +476,7 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary remov
       check "wide user bubbles anchor on the right and replies on the left"
         (length (firstRow outgoing)==columns && maybe False (\(_,style)->case style of BubbleText _ False _->False; _->True) (listToMaybe incoming) &&
          maximum (map (length . filter (\(_,style)->case style of BubbleText{}->True; _->False)) (splitStyled incoming))>columns-20)
-    withConversation $ \runtime -> do
+    C.withConsoles $ \consoles -> withConversation consoles $ \runtime -> do
       agents <- send runtime "directory" [] savedDraft
       check "Agents directory exposes an explicit reconnect action"
         (maybe False (elem "Reconnect" . buttons) (dialog agents))
@@ -483,7 +488,7 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary remov
       shown<-send runtime "show" [] resized
       check "opening a recovered conversation preserves its transcript and draft"
         (buffers shown==buffers recovered && composerBuffer shown==composerBuffer recovered && composerSelection shown==composerSelection recovered && composerFocused shown)
-    withConversation $ \runtime -> do
+    C.withConsoles $ \consoles -> withConversation consoles $ \runtime -> do
       (asked,reply)<-questionTool runtime savedDraft (object ["question" .= ("Question presentation identity"::T.Text)])
       _<-questionId reply
       let q=fromMaybe (error "Missing presentation question") (chatQuestion asked)
@@ -503,11 +508,11 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary remov
       replacementIdentity<-makeStableName =<< evaluate (documentBuffer (questionDocument redrawn))
       check "equal-revision answer replacement invalidates question presentation"
         (revision answer==revision replacement && originalIdentity/=replacementIdentity && "fresh answer" `T.isInfixOf` conversationText redrawn)
-    withConversation $ \runtime -> do
+    C.withConsoles $ \consoles -> withConversation consoles $ \runtime -> do
       (_,anonymous)<-chatTool runtime savedDraft "ask_user" (object ["question" .= ("Anonymous question"::T.Text)])
       refused<-timeout 100000 anonymous
       check "anonymous ask_user cannot acquire a private answer" (case refused of Just (Left _)->True; _->False)
-    withConversation $ \runtime -> do
+    C.withConsoles $ \consoles -> withConversation consoles $ \runtime -> do
       (asked,answer)<-questionTool runtime savedDraft (object ["question" .= ("Pick a direction"::T.Text),"choices" .= (["Left","Right"]::[T.Text])])
       check "ask_user renders inline choices and custom entry without a modal" (dialog asked==Nothing && chatQuestion asked/=Nothing && all (`T.isInfixOf` conversationText asked) ["Pick a direction","Left","Right","Other:","Submit answer","Cancel"])
       check "question footer describes answer actions" ("Enter Answer" `T.isInfixOf` snapshot asked && not ("Session: not connected" `T.isInfixOf` conversationText asked))
@@ -571,7 +576,7 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary remov
       check "small-window custom input leaves Cancel reachable" (chatQuestion smallCancelled==Nothing)
       (_,invalid)<-questionTool runtime savedDraft (object ["question" .= ("Unsupported"::T.Text),"allowMultiple" .= True])
       check "unsupported multi-select is explicit" . isLeft =<< invalid
-    withConversation $ \runtime->Permissions.withPermissionsAt (root </> "question-permissions.toml") chatTools $ \permissions->do
+    C.withConsoles $ \consoles -> withConversation consoles $ \runtime->Permissions.withPermissionsAt (root </> "question-permissions.toml") chatTools $ \permissions->do
       bound<-captureQuestionCaller runtime (AR.primaryAgent (conversationAgents runtime)) >>= either (error . T.unpack) pure
       let primary=AR.primaryAgent (conversationAgents runtime)
           actor=fmap (() <$) (AH.statusAgent (AR.agentHub (conversationAgents runtime)) (AH.Agent primary) primary)
@@ -601,7 +606,7 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary remov
         refused<-approve review
         result<-wait request
         check "deferred approval cannot resurrect an ended question requester" (chatQuestion refused==Nothing && isLeft result)
-    (closedRuntime,closedId)<-withConversation $ \runtime->do
+    (closedRuntime,closedId)<-C.withConsoles $ \consoles -> withConversation consoles $ \runtime->do
       (_,reply)<-questionTool runtime savedDraft (object ["question" .= ("Session closes"::T.Text)])
       ident<-questionId reply
       pure (runtime,ident)
@@ -612,9 +617,77 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary remov
     (secondFile,secondBuffer)<-loadFile secondSource >>= either error pure
     (file,b)<-loadFile source >>= either error pure
     let desktop=insertText "unsaved " (addDocument (Just file) b (addDocument (Just secondFile) secondBuffer (initialDesktop (90,28))) {sideTree=Just (emptySidebar root 20 False)})
+    -- Services belong to the editor session, not its mounted ACP provider.
+    -- Use the same real peer/approval route as the terminal checks below.
+    when (terminalAvailable && os/="mingw32") $ withSessionServices $ \services->do
+      let consoles=sessionConsoles services
+          jobs=sessionBuildJobs services
+          base=(initialDesktop (90,28)) {defaultDirectory=Just root}
+          serviceCore=sessionEffects services App.applyEffects
+          awaitService label pump predicate current=timeout 8000000 (loop current) >>= maybe (error ("Session ownership: "++label)) pure
+            where loop d=do
+                    next<-pump d
+                    ready<-predicate next
+                    if ready then pure next else threadDelay 10000 >> loop next
+      sharedJob<-Jobs.startBuildJob jobs "Session fixture" root
+        [("python3",["-u","-c","import time; print('shared captured output',flush=True); time.sleep(30)"])] base
+      (sharedId,sharedDesktop)<-C.startConsole consoles
+        (Terminal.TerminalConfig "python3" ["-u","-c","import time; print('shared terminal output',flush=True); time.sleep(30)"] [] root 80 24)
+        65536 sharedJob >>= either (error.T.unpack) pure
+      warm<-awaitService "shared output" (tickSessionServices services) (\_->do
+        (out,_)<-Jobs.buildJobStdout jobs
+        terminal<-C.consoleOutput consoles sharedId
+        pure ("shared captured output" `T.isInfixOf` out && either (const False) (\(bytes,_,_)->"shared terminal output" `BS.isInfixOf` bytes) terminal)) sharedDesktop
+      before<-Jobs.buildJobStatus jobs warm
+      jobId<-maybe (error "Missing shared job ID") pure (field "jobId" before :: Maybe T.Text)
+      (providerId,retired)<-withConversationAt consoles root $ \runtime->do
+        configured<-configure runtime ("yes"::T.Text) warm
+        approval<-prompt runtime "terminal-hold" configured >>= modal runtime
+        accepted<-actDialog runtime 0 approval
+        let pump d=tickSessionServices services d >>= tickConversation runtime
+        owned<-awaitService "approved ACP terminal" pump (\_->do
+          entries<-C.listConsoles consoles
+          pure (any (\(ident,_,_)->ident/=sharedId) entries)) accepted
+        entries<-C.listConsoles consoles
+        providerId<-case [ident | (ident,_,_)<-entries,ident/=sharedId] of
+          [ident]->pure ident
+          _->error "Expected one ACP-owned terminal"
+        pure (providerId,owned)
+      entries<-C.listConsoles consoles
+      after<-Jobs.buildJobStatus jobs retired
+      check "provider retirement releases only its own terminal and preserves shared job"
+        (all (\(ident,_,_)->ident/=providerId) entries && any (\(ident,_,code)->ident==sharedId && code==Nothing) entries &&
+         field "jobId" after==Just jobId && field "active" after==Just True)
+      let closeView d ident=fst (runCommand Close (focusWindow ident d))
+          outputWindows=[windowId w | w<-windows retired,case windowContent w of PluginContent{}->True; _->False]
+          terminalWindows=[windowId w | w<-windows retired,Just doc<-[windowDocument (buffers retired) w],documentLabel doc==Just ("Terminal "<>sharedId)]
+          closed=foldl closeView retired (outputWindows++terminalWindows)
+      stayedClosed<-tickSessionServices services closed
+      output<-Jobs.buildJobStdout jobs
+      terminal<-C.consoleOutput consoles sharedId
+      check "closed shared views retain exact output without reopening"
+        (all (`notElem` map windowId (windows stayedClosed)) (outputWindows++terminalWindows) &&
+         "shared captured output" `T.isInfixOf` fst output && either (const False) (\(bytes,_,_)->"shared terminal output" `BS.isInfixOf` bytes) terminal)
+      stopping<-stopSessionBuild services stayedClosed
+      stopped<-awaitService "shared job Stop" (tickSessionServices services)
+        (\d->(==Just False) . field "active" <$> Jobs.buildJobStatus jobs d) stopping
+      let compiler=root </> "session-compiler"
+      writeFile compiler "#!/bin/sh\nprintf 'build without conversation\\n'\n"
+      permissions<-getPermissions compiler
+      setPermissions compiler permissions {executable=True}
+      _<-persist (sessionDirectory services </> "run.json")
+        (Build.buildConfigValue root (Build.BuildConfig THC compiler "" "" "" [])) >>= either (error.T.unpack) pure
+      queued<-snd <$> serviceCore stopped [ServiceAction "make" []]
+      completed<-awaitService "build without Conversation" (\d->tickSessionServices services d >>= tickBuildPreparation services serviceCore)
+        (\d->do facts<-Jobs.buildJobStatus jobs d; (text,_)<-Jobs.buildJobStdout jobs
+                pure (field "jobId" facts/=Just jobId && field "active" facts==Just False && "build without conversation" `T.isInfixOf` text)) queued
+      check "session build runs after provider retirement" (dialog completed==Nothing)
+      _<-C.releaseConsole consoles sharedId
+      removeFile (sessionDirectory services </> "run.json")
+      pure ()
     -- A submitted answer resumes the original idle provider through its existing
     -- query owner. A replacement with the same provider session ID cannot replay it.
-    withConversation $ \runtime -> do
+    C.withConsoles $ \consoles -> withConversation consoles $ \runtime -> do
       configured<-configure runtime ("yes"::T.Text) desktop
       connected<-prompt runtime "stream" configured >>= done runtime
       let liveDraft=connected {composerBuffer=newBuffer "newer independent draft",composerSelection=Selection 6 6}
@@ -652,7 +725,7 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary remov
     -- made while its request was waiting behind that read.
     let pipe=root </> "slow-source"
     createNamedPipe pipe 0o600
-    withHeldRead server pipe "held read\n" $ \opened release writer -> withConversation $ \runtime -> do
+    withHeldRead server pipe "held read\n" $ \opened release writer -> C.withConsoles $ \consoles -> withConversation consoles $ \runtime -> do
         configured<-configure runtime ("yes"::T.Text) desktop
         started<-prompt runtime "slow-files" configured
         responsive<-await runtime "provider update behind held file read"
@@ -677,7 +750,7 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary remov
           (maybe False hasError writeResult && dialog completed==Nothing)
         check "stale asynchronous write leaves disk intact" . (=="disk original\n") =<< BS.readFile source
     forM_ ["slow-replaced","slow-private"] $ \scenario -> do
-      withHeldRead server pipe "held read\n" $ \held releaseCapture writer -> withConversation $ \runtime -> do
+      withHeldRead server pipe "held read\n" $ \held releaseCapture writer -> C.withConsoles $ \consoles -> withConversation consoles $ \runtime -> do
           configured<-configure runtime ("yes"::T.Text) desktop
           started<-prompt runtime scenario configured
           waiting<-await runtime "prepared read behind FIFO head" (T.isInfixOf "guarded requests sent" . conversationText) started
@@ -697,7 +770,7 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary remov
     withAsync (bracket (Posix.openFd pipe Posix.ReadWrite Posix.defaultFileFlags >>= \fd -> Posix.setFdOption fd Posix.CloseOnExec True >> Posix.fdToHandle fd) hClose $ \_ -> do
       putMVar cancelOpened ()
       takeMVar cancelRelease) $ \writer -> do
-        closed<-timeout 3000000 $ withConversation $ \runtime -> do
+        closed<-timeout 3000000 $ C.withConsoles $ \consoles -> withConversation consoles $ \runtime -> do
           takeMVar cancelOpened
           configured<-configure runtime ("yes"::T.Text) desktop
           started<-prompt runtime "slow-cancel" configured
@@ -720,20 +793,23 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary remov
     withAsync (bracket (Posix.openFd runSettings Posix.ReadWrite Posix.defaultFileFlags >>= \fd -> Posix.setFdOption fd Posix.CloseOnExec True >> Posix.fdToHandle fd) hClose $ \handle -> do
       putMVar settingsOpened ()
       takeMVar settingsRelease
-      BS.hPut handle "{\"toolchain\":\"GHC\"}") $ \writer -> withConversation $ \runtime -> do
+      BS.hPut handle "{\"toolchain\":\"GHC\"}") $ \writer -> withSessionServices $ \runtime -> do
         takeMVar settingsOpened
-        ready<-timeout 1000000 (tickConversation runtime desktop)
+        ready<-timeout 1000000 (tickSessionServices runtime desktop)
         responsive<-maybe (error "Idle tick blocked on build settings read") pure ready
-        next<-timeout 1000000 (tickConversation runtime responsive)
+        next<-timeout 1000000 (tickSessionServices runtime responsive)
         check "repeated ticks do not join or duplicate blocked settings discovery" (maybe False (const True) next)
         putMVar settingsRelease ()
         wait writer
-        _<-await runtime "asynchronous persisted toolchain" ((==Just GHC).toolchain) responsive
+        _<-timeout 8000000 (let loop current=do
+              next<-tickSessionServices runtime current
+              if toolchain next==Just GHC then pure next else threadDelay 10000 >> loop next
+            in loop responsive) >>= maybe (error "asynchronous persisted toolchain timed out") pure
         pure ()
     removeFile runSettings
     -- Context reads happen before enqueueing a prompt. Holding one must leave
     -- the draft editable, and cancelling it must never send the stale prompt.
-    withConversation $ \runtime -> do
+    C.withConsoles $ \consoles -> withConversation consoles $ \runtime -> do
       configured<-configure runtime ("yes"::T.Text) desktop
       connected<-prompt runtime "stream" configured >>= done runtime
       let contextPath=root </> "thc.toml"
@@ -761,7 +837,7 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary remov
           check "cancelled context result never sends a prompt"
             (not (any (T.isInfixOf "cancel before send" . json) entries) && contents (composerBuffer settled)=="newer human draft")
 #endif
-    withConversation $ \runtime -> do
+    C.withConsoles $ \consoles -> withConversation consoles $ \runtime -> do
       configured<-configure runtime ("yes"::T.Text) desktop
       check "configuration saved to isolated XDG directory" =<< doesFileExist (settings </> "agents.json")
       streamed<-prompt runtime "stream" configured >>= done runtime
@@ -1025,7 +1101,7 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary remov
     createDirectoryIfMissing True (root </> "config/thc")
     writeFile (root </> "config/thc/config.toml") "[editor.agent]\ncontext = 'Global guidance marker'\n"
     writeFile (root </> "thc.toml") "[editor.agent]\ncontext = 'Project guidance marker'\n"
-    withConversation $ \runtime -> do
+    C.withConsoles $ \consoles -> withConversation consoles $ \runtime -> do
       configured<-configure runtime ("yes"::T.Text) desktop
       guided<-prompt runtime "stream" configured >>= done runtime
       entries<-logged
@@ -1090,14 +1166,14 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary remov
       _<-prompt runtime "stream" failed >>= done runtime
       pure ()
     -- A new runtime reads the saved provider configuration, without reconfiguring it.
-    withConversation $ \runtime -> do
+    C.withConsoles $ \consoles -> withConversation consoles $ \runtime -> do
       restored<-send runtime "new" [] desktop >>= await runtime "persisted provider configuration" ((=="Session fixture-session").status)
       _<-send runtime "resume" [] restored
       pure ()
     let editorSessions=[(replicate 48 'a',"resume-a"::T.Text,root),(replicate 48 'b',"resume-b",root </> "other-project")]
         withEditor ident action=bracket (lookupEnv "THC_EDIT_SESSION" <* setEnv "THC_EDIT_SESSION" ident) (restoreEnvironment "THC_EDIT_SESSION") (const action)
         resumeId d=case [value | Just dg<-[dialog d],Input "Session ID" value _<-fields dg] of value:_->Just value; _->Nothing
-    forM_ editorSessions $ \(ident,providerId,providerRoot) -> withEditor ident $ withConversation $ \runtime -> do
+    forM_ editorSessions $ \(ident,providerId,providerRoot) -> withEditor ident $ C.withConsoles $ \consoles -> withConversation consoles $ \runtime -> do
       offered<-send runtime "resume" [] desktop
       check "new editor session does not inherit another session resume ID" (resumeId offered==Just "")
       configured<-configure runtime ("yes"::T.Text) desktop {sideTree=fmap (\tree->tree {treeRoot=providerRoot}) (sideTree desktop)}
@@ -1106,11 +1182,11 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary remov
       saved<-decodeStrict' <$> BS.readFile sidecar
       check "provider resume record is saved beside its editor checkpoint"
         ((saved >>= field "sessionId")==Just providerId && (saved >>= field "cwd")==Just providerRoot)
-    withConversation $ \runtime -> do
+    C.withConsoles $ \consoles -> withConversation consoles $ \runtime -> do
       _<-send runtime "configure" ["0","not-the-saved-provider", "[]", "{}"] desktop
       pure ()
     beforeRecovery<-logged
-    forM_ editorSessions $ \(ident,providerId,_) -> withEditor ident $ withConversation $ \runtime -> do
+    forM_ editorSessions $ \(ident,providerId,_) -> withEditor ident $ C.withConsoles $ \consoles -> withConversation consoles $ \runtime -> do
       let recovered=addReadOnly "Conversation" "Retained conversation after a daemon crash" savedDraft
       idle<-tickConversation runtime recovered
       offered<-send runtime "resume" [] idle
@@ -1119,7 +1195,7 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary remov
         (buffers offered==buffers recovered && composerBuffer offered==composerBuffer recovered)
     afterRecovery<-logged
     check "recovery never starts a provider or sends a prompt automatically" (afterRecovery==beforeRecovery)
-    forM_ editorSessions $ \(ident,providerId,providerRoot) -> withEditor ident $ withConversation $ \runtime -> do
+    forM_ editorSessions $ \(ident,providerId,providerRoot) -> withEditor ident $ C.withConsoles $ \consoles -> withConversation consoles $ \runtime -> do
       unrelated<-send runtime "load" ["0","unrelated-session-id"] desktop
       check "an unrelated resume ID does not select another saved provider"
         (maybe False ((=="Cannot start agent").dialogTitle) (dialog unrelated))
@@ -1134,7 +1210,7 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary remov
     globalProvider<-decodeStrict' <$> BS.readFile (settings </> "agents.json")
     check "resuming a saved provider does not rewrite global configuration"
       ((globalProvider >>= field "executable")==Just ("not-the-saved-provider"::T.Text))
-    withConversation $ \runtime -> do
+    C.withConsoles $ \consoles -> withConversation consoles $ \runtime -> do
       configured<-configure runtime ("yes"::T.Text) desktop
       answered<-prompt runtime ("wide\n"<>T.unwords (replicate 90 "user-width")) configured >>= done runtime
       forM_ [150,36,120] $ \columns -> do

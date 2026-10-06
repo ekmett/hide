@@ -18,7 +18,7 @@ import System.Timeout (timeout)
 import Hide.Buffer
 import qualified Hide.Build as B
 import qualified Hide.BuildJobs as Jobs
-import Hide.Conversation (withConversation, conversationServices)
+import Hide.SessionServices
 import Hide.Files (FileState(..))
 import Hide.Model
 import Hide.TestsMCP
@@ -91,8 +91,8 @@ checks = bracket temporary removePathForcibly $ \root -> do
     setPermissions server permissions {executable=True}
     bracket (lookupEnv "PATH") (maybe (unsetEnv "PATH") (setEnv "PATH")) $ \oldPath -> do
       setEnv "PATH" (root++":"++maybe "" id oldPath)
-      withConversation $ \runtime -> do
-        let (_,_,jobs)=conversationServices runtime
+      withSessionServices $ \runtime -> do
+        let jobs=sessionBuildJobs runtime
             call d name fields=do (next,answer)<-testsTool runtime d name fields; result<-answer; pure (next,result)
         (_,dirtyResult)<-call (insertText "x" desktop) "test_start" args
         check "tests reject unsaved source" (either (T.isInfixOf "Save modified") (const False) dirtyResult)

@@ -224,7 +224,7 @@ data PackageBuildTarget = PackageBuildTarget
   , packageBuildName :: !Text } deriving (Eq,Show)
 
 -- | Ordered requests for the host interpreter, produced alongside a new desktop.
-data Effect = PackageDebugAction !PackageBuildTarget !(Either Text FilePath) | AdoptPreparedDebug !PackageBuildTarget | PackageBuildAction !BuildAction !PackageBuildTarget | AdoptPreparedBuild !(Maybe PackageBuildTarget) | DownloadCancelAction !DownloadCancelRequest | SubmitInputForm !Form.FormRef !Form.FormValue !Plugin.MenuOrigin | SubmitChoiceForm !Form.FormRef !Integer !Int !Plugin.MenuOrigin | RetireInputForm !Form.FormRef | SessionSidebarAction !SessionSidebarRequest | DebugSourceAction !DebugSourceRequest | RetirePluginWindow !PluginWindow.WindowRef | DebugSidebarAction !DebugSidebarRequest | AgentSidebarAction !AgentSidebarRequest | ReloadKeyBindings FilePath | InspectKeyBindings (Maybe (Bindings.BindingPlatform,Bindings.BindingContext)) (Maybe (Bindings.Bindings Command)) | FollowLink (Maybe FilePath) Text | FollowTreeLink [Tree.TreeHit] FilePath Text | EnvironmentAction Text [Text] | AutocompleteAction Text [Text] | SaveWideSectionTitles Bool | SaveMacKeySymbols Bool | SaveChatSubmit ChatSubmit | SaveBufferViewDefault BufferView | ProjectRequest ProjectAction | DownloadDocument Int | ReadBrowserClipboard | WriteBrowserClipboard Text | LanguageRequest LanguageAction | RunGit GitAction | ReadMergeBranches | JumpTo FilePath Int Int | ReadPath FilePath | BrowsePath FilePath Text | BrowseDirectories FilePath | ChangeDirectory FilePath | OpenChoice FilePath Text Text | ReadTree FilePath | RefreshRenamedPath FilePath FilePath | RefreshTree FilePath [Entry] | LoadTree TreeRequest Plugin.MenuOrigin | InvokeTree [Tree.TreeHit] CommandRef Plugin.MenuOrigin | ReadHelp | InvokeMenu Plugin.MenuRef Plugin.MenuOrigin (Maybe ContextTarget) | RefreshGit FilePath | ReadGitDiff | AskGitCommit | WriteGitCommit Text | SaveDocument Int (Maybe FilePath) (Maybe Command) | ReviewExternal | ResolveConflict Conflict ConflictAction | AgentAction Text [Text] | PermissionAction Text [Text] | DebugAction Text [Text] | SetScreenMode Int | Exit deriving (Eq,Show)
+data Effect = PackageDebugAction !PackageBuildTarget !(Either Text FilePath) | AdoptPreparedDebug !PackageBuildTarget | PackageBuildAction !BuildAction !PackageBuildTarget | AdoptPreparedBuild !(Maybe PackageBuildTarget) | DownloadCancelAction !DownloadCancelRequest | SubmitInputForm !Form.FormRef !Form.FormValue !Plugin.MenuOrigin | SubmitChoiceForm !Form.FormRef !Integer !Int !Plugin.MenuOrigin | RetireInputForm !Form.FormRef | SessionSidebarAction !SessionSidebarRequest | DebugSourceAction !DebugSourceRequest | RetirePluginWindow !PluginWindow.WindowRef | DebugSidebarAction !DebugSidebarRequest | AgentSidebarAction !AgentSidebarRequest | ReloadKeyBindings FilePath | InspectKeyBindings (Maybe (Bindings.BindingPlatform,Bindings.BindingContext)) (Maybe (Bindings.Bindings Command)) | FollowLink (Maybe FilePath) Text | FollowTreeLink [Tree.TreeHit] FilePath Text | EnvironmentAction Text [Text] | AutocompleteAction Text [Text] | SaveWideSectionTitles Bool | SaveMacKeySymbols Bool | SaveChatSubmit ChatSubmit | SaveBufferViewDefault BufferView | ProjectRequest ProjectAction | DownloadDocument Int | ReadBrowserClipboard | WriteBrowserClipboard Text | LanguageRequest LanguageAction | RunGit GitAction | ReadMergeBranches | JumpTo FilePath Int Int | ReadPath FilePath | BrowsePath FilePath Text | BrowseDirectories FilePath | ChangeDirectory FilePath | OpenChoice FilePath Text Text | ReadTree FilePath | RefreshRenamedPath FilePath FilePath | RefreshTree FilePath [Entry] | LoadTree TreeRequest Plugin.MenuOrigin | InvokeTree [Tree.TreeHit] CommandRef Plugin.MenuOrigin | ReadHelp | InvokeMenu Plugin.MenuRef Plugin.MenuOrigin (Maybe ContextTarget) | RefreshGit FilePath | ReadGitDiff | AskGitCommit | WriteGitCommit Text | SaveDocument Int (Maybe FilePath) (Maybe Command) | ReviewExternal | ResolveConflict Conflict ConflictAction | ServiceAction Text [Text] | AgentAction Text [Text] | PermissionAction Text [Text] | DebugAction Text [Text] | SetScreenMode Int | Exit deriving (Eq,Show)
 data Field = Input Text Text Int | SelectedInput Text Text Selection | ComboBox Text [Text] Int (Maybe Int) | CheckBox Text Bool | Radio Text [Text] Int | ListBox Text [Text] Int | FileList [Entry] Int
   | ReadOnly Text Text
   | TextArea Text Bool Buffer Selection Int Int deriving (Eq,Show)
@@ -234,7 +234,7 @@ data Purpose = Opening FilePath Text [Entry] | ChangingDirectory FilePath [Entry
   | Completing Int Int Int [Completion] | Locations [(FilePath,Int,Int)] | Merging [Text]
   | PluginInputForm !Form.FormRef | PluginInputsForm !Form.FormRef ![Text]
   | PluginChoiceForm !Form.FormRef !Integer
-  | EnvironmentDialog Text | AutocompleteDialog Text | DiskConflict Conflict | AgentDialog Text | PermissionDialog Text | DebugDialog Text
+  | EnvironmentDialog Text | AutocompleteDialog Text | DiskConflict Conflict | ServiceDialog Text | AgentDialog Text | PermissionDialog Text | DebugDialog Text
   | DebugSourceWatchDialog !Int !Int !(Maybe FilePath) !Bool
   | DebuggerWatchDialog !Int !(Maybe FilePath) !Bool
   | DiscardDraft | Confirm Command | Information | Settings | ChatInputSettings | Widgets deriving (Eq,Show)
@@ -1209,20 +1209,20 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
       Just item->go (contributionCommand source item) d
       Nothing->(d {status="Breakpoint command is unavailable."},[])
     go (DebugCommand action) d = (d,[DebugAction action []])
-    go CompileTarget d = (d,[AgentAction "compile" []])
-    go MakeTarget d = (d,[AgentAction "make" []])
-    go StopBuild d = (d,[AgentAction "build-stop" []])
-    go RunTarget d = (d,[AgentAction "run" []])
+    go CompileTarget d = (d,[ServiceAction "compile" []])
+    go MakeTarget d = (d,[ServiceAction "make" []])
+    go StopBuild d = (d,[ServiceAction "build-stop" []])
+    go RunTarget d = (d,[ServiceAction "run" []])
     go ToolchainOptions d | dialog d/=Nothing = (d,[])
     go ToolchainOptions d =
       let Rect x y _ _=toolchainBadgeRect d
           opened=openContext (ToolchainContext [("THC",SelectToolchain THC),("GHC Automatic",SelectCompiler "ghc"),("Target settings...",RunOptions)]) x y d
-      in (opened {contextMenu=fmap (\(r,_) -> (r,if toolchain d==Just GHC then 1 else 0)) (contextMenu opened)},[AgentAction "toolchain" []])
-    go (SelectToolchain choice) d = (d,[AgentAction "toolchain" [T.pack (show choice)]])
-    go (SelectCompiler command) d = (d,[AgentAction "toolchain" ["GHC",command]])
-    go RunOptions d = (d,[AgentAction "run-options" []])
-    go OpenTerminal d = (d,[AgentAction "terminal" []])
-    go StopTerminal d = (d,[AgentAction "terminal-stop" []])
+      in (opened {contextMenu=fmap (\(r,_) -> (r,if toolchain d==Just GHC then 1 else 0)) (contextMenu opened)},[ServiceAction "toolchain" []])
+    go (SelectToolchain choice) d = (d,[ServiceAction "toolchain" [T.pack (show choice)]])
+    go (SelectCompiler command) d = (d,[ServiceAction "toolchain" ["GHC",command]])
+    go RunOptions d = (d,[ServiceAction "run-options" []])
+    go OpenTerminal d = (d,[ServiceAction "terminal" []])
+    go StopTerminal d = (d,[ServiceAction "terminal-stop" []])
     go AgentDirectory d = (d,[AgentAction "directory" []])
     go AgentOptions d = (d,[AgentAction "options" []])
     go AgentPermissions d = (d,[PermissionAction "show" []])
@@ -1252,7 +1252,7 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
       (Just w, Just doc) | dirty (documentBuffer doc) && length (filter ((==bufferId w) . bufferId) (windows d)) == 1 -> confirm Close d
       _ -> (closeActive d,[])
     go command@(ExecuteShellBlock bid (start,end,dialect,raw)) d
-      | commandEnabled d command = (d,[AgentAction "execute-shell-block" [T.pack (show bid),T.pack (show start),T.pack (show end),dialect,raw]])
+      | commandEnabled d command = (d,[ServiceAction "execute-shell-block" [T.pack (show bid),T.pack (show start),T.pack (show end),dialect,raw]])
       | otherwise = (d {status="The shell code block is no longer current."},[])
     go (SetBufferView mode) d = (setBufferView mode d,[])
     go (SetDefaultBufferView mode) d = (d {defaultBufferView=mode,status="Default buffer view updated."},[SaveBufferViewDefault mode])
@@ -1289,7 +1289,7 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
     go Copy d = ((copyClipboard (maybe False syntaxDocument (activeDocument d)) (selected d) d) {status="Block copied."},[])
     go Cut d | activeHex d = let copied=fst (go Copy d) in (insertText "" copied,[])
     go Cut d = (cutReviewSelection d,[])
-    go Paste d | Just ident<-activeTerminal d = (d,[AgentAction "terminal-input" [ident,clipboard d]])
+    go Paste d | Just ident<-activeTerminal d = (d,[ServiceAction "terminal-input" [ident,clipboard d]])
     go Paste d | activeHex d = (pasteHex (clipboard d) d,[])
     go Paste d = (insertText (clipboard d) d,[])
     go SelectAll d = (modifyActive (\w -> case activeDocument d of
@@ -1819,7 +1819,7 @@ dispatchEvent (V.EvKey (V.KFun key) mods) d
 dispatchEvent ev d | activeAutocomplete d, Just result<-autocompleteEvent ev d = result
 dispatchEvent ev d | questionActive d, Just result<-questionEvent ev d = result
 dispatchEvent ev d | activeConversation d, Just result<-composerEvent ev d = result
-dispatchEvent ev d | Just ident<-activeTerminal d,Just text<-terminalInput ev = (d,[AgentAction "terminal-input" [ident,text]])
+dispatchEvent ev d | Just ident<-activeTerminal d,Just text<-terminalInput ev = (d,[ServiceAction "terminal-input" [ident,text]])
 dispatchEvent (V.EvMouseUp x y button) d | Just (FollowingLink _ a b origin target)<-drag d,
   button==Nothing || button==Just V.BLeft =
     (d {drag=Nothing,dragOriginal=Nothing},[FollowLink origin target | x==a && y==b])
@@ -3163,7 +3163,7 @@ unboundKey key mods d = case bindingContext d of
   Just Bindings.SidebarKeys -> (d,[])
   Just Bindings.MessagesKeys -> (d,[])
   Just Bindings.ConversationKeys -> fromMaybe (editorKey key mods d,[]) (composerEvent (V.EvKey key mods) d)
-  Just Bindings.TerminalKeys -> (d,maybe [] (\text->[AgentAction "terminal-input" [fromMaybe "" (activeTerminal d),text]]) (terminalInput (V.EvKey key mods)))
+  Just Bindings.TerminalKeys -> (d,maybe [] (\text->[ServiceAction "terminal-input" [fromMaybe "" (activeTerminal d),text]]) (terminalInput (V.EvKey key mods)))
   Just Bindings.WordStarKeys | wordStarReserved key mods -> keyEvent key mods d
   _ -> (editorKey key mods d,[])
 
@@ -3711,6 +3711,10 @@ submitDialog button dg original
       [T.pack (show i) | Radio _ _ i <- fields dg] ++
       [T.pack (show i) | ListBox _ _ i <- fields dg])])
     EnvironmentDialog action -> (d,[EnvironmentAction action (T.pack (show button):values++[if value then "true" else "false" | CheckBox _ value<-fields dg]++concat [take 1 (drop i choices) | ListBox _ choices i<-fields dg])])
+    ServiceDialog action -> (d,[ServiceAction action (T.pack (show button) : values ++
+      [if value then "true" else "false" | CheckBox _ value <- fields dg] ++
+      [T.pack (show i) | Radio _ _ i <- fields dg] ++
+      [T.pack (show i) | ListBox _ _ i <- fields dg])])
     AgentDialog action -> (d,[AgentAction action (T.pack (show button) : values ++
       [if value then "true" else "false" | CheckBox _ value <- fields dg] ++
       [T.pack (show i) | Radio _ _ i <- fields dg] ++

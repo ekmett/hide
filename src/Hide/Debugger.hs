@@ -347,7 +347,7 @@ debuggerEffects runtime fallback = foldM apply . (False,)
       next<-sidebarAction runtime request d
       publishSidebarEpoch runtime
       pure (False,next)
-    apply (_,d) effect@(AgentAction action values)
+    apply (_,d) effect@(ServiceAction action values)
       | action `elem` ["build-stop","run-config"] || action=="toolchain" && not (null values) =
           invalidateHdb runtime >> fallback d [effect]
     apply (_,d) effect=fallback d [effect]

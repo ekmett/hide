@@ -6,12 +6,13 @@
 -- not authorize an action. Prepared results must still match source identity and
 -- privacy policy. Child cancellation/configuration/steering completes through ticks.
 --
--- Conversation state also owns shared build and console services. Tool initiation
--- returns a desktop plus a continuation, so human questions can wait outside the
+-- Shared consoles are injected; retirement closes only ACP-owned terminal IDs.
+-- Tool initiation returns a desktop plus a continuation, so questions wait outside the
 -- desktop lock while the rest of the session continues.
-module Hide.Conversation (ConversationState, conversationServices, conversationAgents, withConversationAt, chatTools, chatToolNames, chatTool, QuestionCaller, captureQuestionCaller, chatToolAs, withConversation, conversationEffects, tickConversation, tickBuildPreparation, buildTerminalLaunchPending, stopConversationBuild, withBuildAdmission, parseLaunch, renderReply, pauseLabel, renderTimestamp) where
+module Hide.Conversation (ConversationState, conversationAgents, withConversationAt, chatTools, chatToolNames, chatTool, QuestionCaller, captureQuestionCaller, chatToolAs, withConversation, conversationEffects, tickConversation, parseLaunch, renderReply, pauseLabel, renderTimestamp) where
 
 import Hide.Sidebar
+import Hide.SessionServices (persist)
 import Prelude hiding (reads)
 import Control.Exception (IOException, bracket, try, onException, mask, mask_, evaluate)
 #ifdef WITH_WINDOW
@@ -20,7 +21,7 @@ import System.Process (createProcess, proc, waitForProcess)
 import System.Environment (getExecutablePath)
 #endif
 import Hide.Session (SessionRecord(..))
-import Control.Concurrent.Async (Async, async, asyncWithUnmask, cancel, poll, wait, waitCatch)
+import Control.Concurrent.Async (Async, async, cancel, poll, wait)
 import Control.Concurrent.MVar (MVar, tryPutMVar, isEmptyMVar)
 import Control.Monad (foldM, filterM, forM, forM_, void, when, unless)
 import Data.Aeson
@@ -31,30 +32,25 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
 import Data.Time (UTCTime, TimeZone, getCurrentTime, getCurrentTimeZone, diffUTCTime, utcToLocalTime, formatTime, defaultTimeLocale)
 import Data.IORef
-import Data.List (find, findIndex, sortOn)
+import Data.List (find, sortOn)
 import qualified Data.Map.Strict as M
 import qualified Data.Set as S
-import Data.Maybe (fromMaybe, mapMaybe, isNothing, listToMaybe)
+import Data.Maybe (fromMaybe, mapMaybe, isNothing)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import System.Directory (XdgDirectory(..), getXdgDirectory, createDirectoryIfMissing, canonicalizePath, getCurrentDirectory, renameFile, removeFile)
-import System.FilePath ((</>), takeDirectory, isAbsolute, makeRelative, splitDirectories)
+import System.Directory (XdgDirectory(..), getXdgDirectory, canonicalizePath, getCurrentDirectory)
+import System.FilePath ((</>), isAbsolute, makeRelative, splitDirectories)
 import Data.Text.Encoding.Error (lenientDecode)
 import qualified Hide.Terminal as Terminal
 import qualified Hide.Consoles as C
-import qualified Hide.Compilers as Compilers
 import qualified Hide.Build as B
-import Hide.PackageSidebar (packageBuildManifestCurrent)
-import qualified Hide.BuildJobs as Jobs
-import System.Info (os)
 import System.Mem.StableName (StableName, makeStableName)
-import System.IO (openBinaryTempFile, hClose)
 import Text.Read (readMaybe)
 import qualified Hide.ACP as A
 import Hide.GuestAccess (sensitiveLabel, protectedPath, protectedBuffer)
 import Hide.Files (filePath)
-import Hide.MCPPermissions (AdmittedBuild, reserveAdmittedBuild, stepAdmittedBuild, cancelAdmittedBuild, permissionConfigPath, projectConfigPath, readAgentContextAt, writeAgentContextAt, readAgentContexts)
+import Hide.MCPPermissions (permissionConfigPath, projectConfigPath, readAgentContextAt, writeAgentContextAt, readAgentContexts)
 import qualified Hide.AgentRuntime as AR
 import qualified Hide.AgentHub as AH
 import qualified Hide.AgentACP as AP
@@ -94,16 +90,6 @@ data QueuedQuery = SubmittedQuery !Text | QuestionQuery !Int !AH.AgentId !Provid
 data QuestionTicket = QuestionTicket !Int !AH.AgentId !(Maybe ProviderReceipt)
 data QuestionResult = QuestionResult !AH.AgentId !(Maybe ProviderReceipt) !Value
 
--- One caller-bound build intent, captured without retaining editable buffers or Undo.
-data BuildReceipt = BuildReceipt !Int !FilePath !(Maybe FilePath) ![(Int,Maybe FilePath,ContentVersion)] !(Maybe AdmittedBuild) !(Maybe PackageBuildTarget)
-data PreparedBuild = BuildOptions !Dialog
-  | BuildCommands !B.BuildAction !FilePath ![(FilePath,[String])]
-  | BuildConsole !C.PreparedConsole
-  | BuildUnsaved !B.BuildAction
-data BuildPreparation = BuildPreparing !BuildReceipt !Bool !(Async (Either Text PreparedBuild))
-  | BuildReady !BuildReceipt !Bool !(Either Text PreparedBuild)
-  | BuildRetiring !Bool !(Async ())
-
 data State = State
   { provider :: A.Launch, connection :: Maybe A.Client, session :: Maybe Text, project :: FilePath
   , pending :: M.Map Int Phase, queuedPrompt :: Maybe (Text,Maybe DraftReceipt), transcript :: [Record]
@@ -124,32 +110,26 @@ data State = State
   , expandedToolRuns :: S.Set (Text,Text)
   , childControls :: M.Map Text (Maybe DraftReceipt,Async (Either Text ()))
   , childCancels :: M.Map Text (Async (Either Text ()))
-  , compilerDiscovery :: Maybe (Async [Compilers.Compiler])
   , fileCaptures :: [FileCapture], retiringRequests :: [(Int,Async ())]
   , promptPreparation :: Maybe (Bool,Text,Maybe DraftReceipt,Async (Either Text ([Value],Value)))
-  , buildSettingsCache :: Maybe Toolchain, buildSettingsVersion :: Int
-  , buildSettingsWorker :: Maybe (Int,Async Toolchain), buildSettingsChecked :: Maybe UTCTime
-  , buildAdmission :: Maybe AdmittedBuild
-  , buildPreparation :: Maybe BuildPreparation
-  , shellLaunches :: [Async (Either Text C.PreparedConsole)]
   , creatingAgent :: Maybe (Async (Either Text (AH.AgentId,Int)))
   , resumeRecordPath :: FilePath
   }
--- | Session-scoped provider, transcript and shared service ownership.
-data ConversationState = ConversationState FilePath (IORef State) C.Consoles Jobs.BuildJobs AR.AgentRuntime
+-- | Provider/transcript ownership with injected session consoles.
+data ConversationState = ConversationState FilePath (IORef State) C.Consoles AR.AgentRuntime
 
 conversationAgents :: ConversationState -> AR.AgentRuntime
-conversationAgents (ConversationState _ _ _ _ agents)=agents
+conversationAgents (ConversationState _ _ _ agents)=agents
 
 defaultLaunch :: A.Launch
 defaultLaunch = A.Launch "codex-acp" [] []
 
-withConversation :: (ConversationState -> IO a) -> IO a
-withConversation action = getCurrentDirectory >>= \root -> withConversationAt root action
+withConversation :: C.Consoles -> (ConversationState -> IO a) -> IO a
+withConversation consoles action = getCurrentDirectory >>= \root -> withConversationAt consoles root action
 
--- | Load conversation configuration and scope provider, service and worker lifetimes.
-withConversationAt :: FilePath -> (ConversationState -> IO a) -> IO a
-withConversationAt root action = C.withConsoles $ \consoles -> Jobs.withBuildJobs $ \jobs -> do
+-- | Load conversation configuration and scope only provider and agent workers.
+withConversationAt :: C.Consoles -> FilePath -> (ConversationState -> IO a) -> IO a
+withConversationAt consoles root action = do
   directory<-getXdgDirectory XdgConfig "thc-edit"
   loaded<-try (BS.readFile (directory </> "agents.json")) :: IO (Either IOException BS.ByteString)
   let launch=either (const defaultLaunch) (either (const defaultLaunch) id . decodeLaunch) loaded
@@ -164,10 +144,10 @@ withConversationAt root action = C.withConsoles $ \consoles -> Jobs.withBuildJob
     , approvals=[],presented=Nothing,deferredApproval=False,nextApproval=1,queuedQueries=[]
     , ownedTerminals=S.empty,terminalWaiters=M.empty,lastMessageAt=Nothing
     , lastRender=Nothing,lastSession=remembered,waitingQuestion=Nothing,questionResults=M.empty,questionsClosed=False,lastQuestion=Nothing
-    , deliveredContext=Nothing,compilerDiscovery=Nothing,fileCaptures=[],retiringRequests=[],promptPreparation=Nothing,buildSettingsCache=Nothing,buildSettingsVersion=0,buildSettingsWorker=Nothing,buildSettingsChecked=Nothing,resumeRecordPath=resumePath,creatingAgent=Nothing,buildAdmission=Nothing,buildPreparation=Nothing,shellLaunches=[],directoryAgents=[],agentDelivery=Nothing
+    , deliveredContext=Nothing,fileCaptures=[],retiringRequests=[],promptPreparation=Nothing,resumeRecordPath=resumePath,creatingAgent=Nothing,directoryAgents=[],agentDelivery=Nothing
     , agentInitialized=Null,agentConfig=Null,streamTails=M.empty,lastAgentSync=Nothing,childRecords=M.empty,childRender=Nothing,childWidths=M.empty,childCancels=M.empty,childControls=M.empty,expandedToolRuns=S.empty }
   AR.withAgentRuntime root (provider <$> readIORef ref) $ \agents ->
-    bracket (pure (ConversationState directory ref consoles jobs agents)) closeConversation action
+    bracket (pure (ConversationState directory ref consoles agents)) closeConversation action
 
 -- Provider configuration remains global, but a recovered editor must resume
 -- its own conversation. Standalone/legacy callers retain their existing file.
@@ -177,24 +157,18 @@ conversationSessionPath directory=lookupEnv "THC_EDIT_SESSION" >>= maybe
   (fmap (++".agent.json") . checkpointPath)
 
 closeConversation :: ConversationState -> IO ()
-closeConversation (ConversationState _ ref _ _ _) = do
+closeConversation (ConversationState _ ref consoles _) = do
   s<-readIORef ref
   writeIORef ref (abandonQuestion "Editor session closed." s) {questionsClosed=True}
   finishAgentDelivery ref (Left "Editor session closed.")
   mapM_ denyChild (map snd (approvals s))
-  mapM_ closeBuildPreparation (buildPreparation s)
-  mapM_ (cancel . snd) (buildSettingsWorker s)
   mapM_ (\(_,_,_,worker) -> cancel worker) (promptPreparation s)
   mapM_ cancel (creatingAgent s)
-  mapM_ cancel (compilerDiscovery s)
   mapM_ (\(FileCapture _ worker) -> cancel worker) (fileCaptures s)
   mapM_ (wait . snd) (retiringRequests s)
   mapM_ cancel (childCancels s)
   mapM_ (cancel . snd) (childControls s)
-  forM_ (shellLaunches s) $ \worker -> do
-    cancel worker
-    result<-waitCatch worker
-    case result of Right (Right prepared)->C.closePreparedConsole prepared; _->pure ()
+  mapM_ (C.releaseConsole consoles) (S.toList (ownedTerminals s))
   mapM_ A.stopClient (connection s)
 
 launchValue :: A.Launch -> Value
@@ -219,93 +193,9 @@ parseLaunch command args env = do
   environment<-eitherDecodeStrict' (TE.encodeUtf8 env)
   validateLaunch (A.Launch (T.unpack (T.strip command)) arguments (M.toList environment))
 
--- Temp files start private; never persist environment overrides to the project.
-persist :: FilePath -> Value -> IO (Either Text ())
-persist path value = do
-  result<-try $ do
-    createDirectoryIfMissing True (takeDirectory path)
-    bracket (openBinaryTempFile (takeDirectory path) ".thc-settings-")
-      (\(temporary,handle) -> ignore (hClose handle) >> ignore (removeFile temporary)) $ \(temporary,handle) -> do
-        BL.hPut handle (encode value); hClose handle; renameFile temporary path
-  pure (either (Left . T.pack . show) Right (result :: Either IOException ()))
-  where ignore task=void (try task :: IO (Either IOException ()))
-
--- Keep backend settings independently. The flat selected record remains readable
--- by existing build/run clients; never save loadBuildConfig's root-filtered view
--- merely to switch backend. Legacy flat run.json becomes the first saved choice.
-readRunSettings :: FilePath -> IO Value
-readRunSettings directory = do
-  result<-try (BS.readFile (directory </> "run.json")) :: IO (Either IOException BS.ByteString)
-  pure (either (const (object [])) (fromMaybe (object []) . decodeStrict') result)
-
-buildChoices :: Value -> M.Map Text Value
-buildChoices saved = M.insert (fromMaybe "THC" (field "toolchain" saved)) (flat saved)
-  (fromMaybe M.empty (field "toolchains" saved))
-  where flat (Object fields')=Object (KM.delete "toolchains" fields'); flat _=object []
-
-rememberBuildChoices :: Value -> Value -> Value
-rememberBuildChoices saved selected = case combined of
-  Object fields' -> Object (KM.insert "toolchains" (toJSON choices) fields')
-  _ -> combined
-  where
-    name=fromMaybe "THC" (field "toolchain" selected)
-    previous=M.findWithDefault (object []) name (buildChoices saved)
-    combined=mergeSettings previous selected
-    choices=M.insert name combined (buildChoices saved)
-
-mergeSettings :: Value -> Value -> Value
-mergeSettings (Object old) (Object new)=Object (KM.union new old)
-mergeSettings _ new=new
-
--- One bounded discovery worker belongs to this conversation runtime. Reopening
--- while it runs shares the catalogue query; results never reopen a closed menu.
-openCompilerMenu :: ConversationState -> Desktop -> IO Desktop
-openCompilerMenu (ConversationState directory ref _ _ _) d
-  | dialog d/=Nothing = pure d
-  | otherwise = do
-      mask $ \restore -> do
-        current<-readIORef ref
-        when (isNothing (compilerDiscovery current)) $ do
-          worker<-async (restore Compilers.installedCompilers)
-          modifyIORef' ref (\state -> state {compilerDiscovery=Just worker})
-      saved<-readRunSettings directory
-      pure (compilerMenu False saved [] d) {status="Finding installed GHC compilers..."}
-
-pollCompilerMenu :: ConversationState -> Desktop -> IO Desktop
-pollCompilerMenu (ConversationState directory ref _ _ _) d = do
-  current<-readIORef ref
-  result<-maybe (pure Nothing) poll (compilerDiscovery current)
-  case result of
-    Nothing -> pure d
-    Just outcome -> do
-      modifyIORef' ref (\state -> state {compilerDiscovery=Nothing})
-      case contextKind d of
-        ToolchainContext _ | contextMenu d/=Nothing,dialog d==Nothing -> do
-          saved<-readRunSettings directory
-          let compilers=either (const []) id outcome
-          pure (compilerMenu True saved compilers d) {status=if null compilers then "Automatic uses project settings; no GHCup compilers found." else "Select an installed GHC or Automatic."}
-        _ -> pure d
-
-compilerMenu :: Bool -> Value -> [Compilers.Compiler] -> Desktop -> Desktop
-compilerMenu preserve saved compilers d = opened {contextMenu=fmap (\(r,_) -> (r,chosen)) (contextMenu opened)}
-  where
-    ghc=M.findWithDefault (object []) "GHC" (buildChoices saved)
-    command=fromMaybe "ghc" (field "command" ghc)
-    selected=if (field "toolchain" saved :: Maybe Text)==Just "GHC" then SelectCompiler command else SelectToolchain THC
-    installed=[("GHC "<>Compilers.compilerVersion compiler,SelectCompiler (T.pack (Compilers.compilerPath compiler))) | compiler<-compilers]
-    custom=[("GHC saved compiler",SelectCompiler command) | command/="ghc",SelectCompiler command `notElem` map snd installed]
-    entries=[("THC",SelectToolchain THC),("GHC Automatic",SelectCompiler "ghc")]++installed++custom++[("Target settings...",RunOptions)]
-    rows=[(if action==selected then "✓ "<>label else "  "<>label,action) | (label,action)<-entries]
-    previous=case (preserve,contextMenu d) of
-      (True,Just (_,index)) -> snd <$> listToMaybe (drop index (contextItemsFor d))
-      _ -> Nothing
-    chosen=fromMaybe 0 (findIndex ((==fromMaybe selected previous).snd) entries)
-    Rect x y _ _=toolchainBadgeRect d
-    opened=openContext (ToolchainContext rows) x y d
-
 -- | Consume conversation effects and delegate unrelated effects to the next interpreter.
 conversationEffects :: ConversationState -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> [Effect] -> IO (Bool,Desktop)
-conversationEffects runtime@(ConversationState _ ref _ _ _) fallback original effects = do
+conversationEffects runtime@(ConversationState _ ref _ _) fallback original effects = do
   (quit,updated)<-foldM apply (False,original) effects
   if quit then pure (True,updated) else (False,) <$> refreshConversationLayout runtime updated
   where
@@ -323,8 +213,6 @@ conversationEffects runtime@(ConversationState _ ref _ _ _) fallback original ef
         Right () -> do
           (quit,opened)<-fallback d {guestPrivatePaths=path:guestPrivatePaths d} [ReadPath path]
           pure (quit,opened {status="Edit [editor.agent] context; save to apply with the next query or steer."})
-    apply (_,d) (PackageBuildAction action target) = (False,) <$> startPackageBuildPreparation runtime action target d
-    apply (_,d) (AdoptPreparedBuild target) = (False,) <$> adoptBuildPreparation runtime target d
     apply (_,d) (AgentAction action values) = do
       updated<-perform runtime action values d
       syncConversationAgent runtime
@@ -334,7 +222,7 @@ conversationEffects runtime@(ConversationState _ ref _ _ _) fallback original ef
 -- Sidebar requests are fixed human operations, adopted after host hit/lifetime
 -- validation. Dialog purposes carry the exact ID instead of a directory index.
 applyAgentSidebar :: ConversationState -> AgentSidebarRequest -> Desktop -> IO Desktop
-applyAgentSidebar runtime@(ConversationState _ ref _ _ agents) request d=case request of
+applyAgentSidebar runtime@(ConversationState _ ref _ agents) request d=case request of
   ShowAgent ident | ident==AR.primaryAgent agents->perform runtime "show" [] d
                   | otherwise->showAgentHistory runtime ident d
   ConfigureAgent receipt option value
@@ -360,7 +248,7 @@ applyAgentSidebar runtime@(ConversationState _ ref _ _ agents) request d=case re
   where hub=AR.agentHub agents
 
 pollAgentCreation :: ConversationState -> Desktop -> IO Desktop
-pollAgentCreation (ConversationState _ ref _ _ _) d=do
+pollAgentCreation (ConversationState _ ref _ _) d=do
   state<-readIORef ref
   case creatingAgent state of
     Nothing->pure d
@@ -371,10 +259,10 @@ pollAgentCreation (ConversationState _ ref _ _ _) d=do
         pure d {status=either (const "Agent creation interrupted.") (either id (const "Agent created; task queued.")) outcome}
 
 perform :: ConversationState -> Text -> [Text] -> Desktop -> IO Desktop
-perform (ConversationState _ ref _ _ _) "focus" [] d=do
+perform (ConversationState _ ref _ _) "focus" [] d=do
   modifyIORef' ref (\state -> state {deferredApproval=False})
   pure d
-perform (ConversationState _ ref _ _ _) "toggle-tool-run" [ident] d=do
+perform (ConversationState _ ref _ _) "toggle-tool-run" [ident] d=do
   state<-readIORef ref
   let target=conversationTarget d
       key=(target,ident)
@@ -383,27 +271,13 @@ perform (ConversationState _ ref _ _ _) "toggle-tool-run" [ident] d=do
       records=if T.null target then transcript next else M.findWithDefault [] target (childRecords next)
   writeIORef ref next
   keepConversationPosition d <$> paintView target False next {transcript=records} d
-perform (ConversationState _ ref _ _ _) "execute-shell-block" [bidText,startText,endText,dialect,body] d
-  | Just bid<-readMaybe (T.unpack bidText), Just blockStart<-readMaybe (T.unpack startText), Just blockEnd<-readMaybe (T.unpack endText),
-    Just doc<-M.lookup bid (buffers d), (blockStart,blockEnd,dialect,body) `elem` documentShellBlocks doc =
-      if not Terminal.terminalAvailable then pure (message "Cannot execute shell block" ["Embedded terminals are unavailable in this build."] d)
-      else if T.null (T.strip body) then pure (message "Cannot execute shell block" ["This shell block is empty."] d)
-      else if dialect `notElem` ["sh","bash","zsh"] then pure (message "Cannot execute shell block" ["This shell dialect is unavailable."] d)
-      else mask_ $ do
-        worker<-async $ mask_ $ do
-          root<-B.resolveBuildRoot d
-          C.prepareConsole [] (Terminal.TerminalConfig (T.unpack dialect) ["-c",T.unpack body] [] root 80 24) (1024*1024)
-        modifyIORef' ref (\state->state {shellLaunches=shellLaunches state++[worker]})
-        pure d {status="Starting shell block in terminal..."}
-perform _ "execute-shell-block" _ d = pure (message "Cannot execute shell block" ["The code block changed; open its context menu again."] d)
-
 perform runtime action values d
   | action=="show" = performPrimary runtime action values (selectConversationView "" "Primary" d)
   | not (T.null (conversationTarget d)) && action `elem` ["send","send-draft","steer-draft","cancel","copy","toggle-activity","new","resume","load","set-config"] = performChild runtime action values d
   | otherwise = performPrimary runtime action values d
 
 performPrimary :: ConversationState -> Text -> [Text] -> Desktop -> IO Desktop
-performPrimary runtime@(ConversationState directory ref consoles jobs _) action values original = do
+performPrimary runtime@(ConversationState directory ref consoles _) action values original = do
   d<-if action `elem` ["cancel","new","load","configure"] then cancelQuestion runtime "Question cancelled." original else pure original
   previous<-readIORef ref
   now<-getCurrentTime
@@ -479,40 +353,6 @@ performPrimary runtime@(ConversationState directory ref consoles jobs _) action 
             paint False next d {chatQuestion=Nothing,chatInputOffset=Nothing,status="Answer submitted.",agentQueued=length queued}
     ("question-cancel",[token]) | Just q<-chatQuestion d,token==T.pack (show (questionToken q)) ->
       cancelQuestion runtime "Question cancelled by user." d
-    ("terminal",_) -> do
-      shell<-if os=="mingw32" then fromMaybe "cmd.exe" <$> lookupEnv "COMSPEC" else fromMaybe "/bin/sh" <$> lookupEnv "SHELL"
-      root<-canonicalizePath (maybe (startingDirectory d) treeRoot (sideTree d))
-      openConsole consoles (Terminal.TerminalConfig shell [] [] root 80 24) d
-    ("run",_) -> startBuildPreparation runtime (Just B.Run) d
-    ("compile",_) -> startBuildPreparation runtime (Just B.Compile) d
-    ("make",_) -> startBuildPreparation runtime (Just B.Make) d
-    ("build-stop",_) -> stopConversationBuild runtime d
-    ("toolchain",[]) -> openCompilerMenu runtime d
-    ("toolchain",choice:commands) | choice `elem` ["THC","GHC"],length commands<=1,
-      all (\command -> not (T.null command) && T.length command<=4096 && not (T.any (== '\0') command)) commands -> do
-      saved<-readRunSettings directory
-      let selected=if choice=="GHC" then B.GHC else B.THC
-          defaults=object ["toolchain" .= choice,"command" .= (if selected==B.GHC then "ghc" else "thc"::Text)]
-          previousChoice=M.findWithDefault defaults choice (buildChoices saved)
-          chosen=mergeSettings previousChoice (object (["toolchain" .= choice]++["command" .= command | command<-commands]))
-      result<-persist (directory </> "run.json") (rememberBuildChoices saved chosen)
-      when (result==Right ()) (buildSettingsChanged ref selected)
-      pure $ either (\err -> d {status=err}) (const d {toolchain=Just selected,status=choice<>" selected. F9 builds; Ctrl+F9 runs."}) result
-    ("run-options",_) -> startBuildPreparation runtime Nothing d
-    ("run-config",_:settings) -> case B.parseBuildConfig settings of
-      Left err -> pure (message "Build target" [err] d)
-      Right config -> do
-        root<-B.resolveBuildRoot d
-        saved<-readRunSettings directory
-        result<-persist (directory </> "run.json") (rememberBuildChoices saved (B.buildConfigValue root config))
-        when (result==Right ()) (buildSettingsChanged ref (B.buildToolchain config))
-        pure $ either (\err -> d {status=err}) (const d {toolchain=Just (B.buildToolchain config),status="Target saved. F9 builds; Ctrl+F9 runs."}) result
-    ("terminal-input",[tid,text]) -> do
-      result<-C.inputConsole consoles tid (TE.encodeUtf8 text)
-      pure (either (\err -> d {status=err}) (const d) result)
-    ("terminal-stop",_) -> case activeDocument d >>= documentLabel >>= T.stripPrefix "Terminal " of
-      Just tid -> do result<-C.killConsole consoles tid; pure d {status=either id (const "Terminal command stopped.") result}
-      Nothing -> pure d {status="Select a terminal window first."}
     ("context",_) -> pure d {dialog=Just (Dialog "Agent Context" (AgentDialog "edit-context")
       [Radio "Scope" ["Global","Project"] 1] 0 ["Edit","Cancel"]
       ["Edit [editor.agent] context in the selected TOML file.","Use triple quotes for multiple lines. Save before sending.","Project context follows global context; permissions do not change."])}
@@ -609,7 +449,7 @@ performPrimary runtime@(ConversationState directory ref consoles jobs _) action 
 
 -- Direct prompts and already-enqueued queries carry no draft consumption right.
 submitPrimaryPrompt :: ConversationState -> State -> Maybe DraftReceipt -> Text -> (Bool,Bool,Bool) -> Desktop -> IO Desktop
-submitPrimaryPrompt runtime@(ConversationState _ ref _ _ _) s receipt prompt (selectionFlag,fileFlag,diagnosticFlag) d=do
+submitPrimaryPrompt runtime@(ConversationState _ ref _ _) s receipt prompt (selectionFlag,fileFlag,diagnosticFlag) d=do
   let context=contextText selectionFlag fileFlag diagnosticFlag d
       full=prompt<>(if T.null context then "" else "\n\n"<>context)
       next=s {queuedPrompt=Just (full,receipt),reads=sourceSnapshots d,transcript=transcript s++[Reply "You" (composerMarkdown prompt)]}
@@ -629,7 +469,7 @@ busy :: State -> Bool
 busy s=not (M.null (pending s)) || queuedPrompt s/=Nothing || not (isNothing (promptPreparation s))
 
 start :: ConversationState -> Maybe Text -> Desktop -> IO Desktop
-start (ConversationState _ ref _ _ _) resume d = do
+start (ConversationState _ ref _ _) resume d = do
   s<-readIORef ref
   let (launch,directory)=case (resume,lastSession s) of
         (Just wanted,Just (savedProvider,savedDirectory,savedId)) | wanted==savedId -> (savedProvider,savedDirectory)
@@ -662,7 +502,7 @@ restoreEmptyPrimaryDraft text d
               else conversationDraft <$> M.lookup "" (conversationViews d)
 
 sendQueued :: ConversationState -> Desktop -> IO Desktop
-sendQueued (ConversationState _ ref _ _ _) d = do
+sendQueued (ConversationState _ ref _ _) d = do
   s<-readIORef ref
   case (connection s,session s,queuedPrompt s) of
     (Just _,Just _,Just (prompt,receipt)) -> beginPromptPreparation ref False prompt receipt d
@@ -679,7 +519,7 @@ beginPromptPreparation ref steering text receipt d = mask $ \restore -> do
       pure d {status="Preparing agent context...",agentReplying=True}
 
 pollPromptPreparation :: ConversationState -> Desktop -> IO Desktop
-pollPromptPreparation runtime@(ConversationState _ ref _ _ _) d = do
+pollPromptPreparation runtime@(ConversationState _ ref _ _) d = do
   s<-readIORef ref
   case promptPreparation s of
     Nothing -> sendQueued runtime d
@@ -724,34 +564,11 @@ preparePrompt state query=do
         extra=[guidance | deliveredContext state/=Just context]++[catalog | deliveredContext state==Nothing]
     pure (map block (composerMarkdown query:extra),context)
 
--- The badge uses only the global toolchain field, so it need not resolve a
--- project or load its targets. One worker refreshes at most once per second.
--- Explicit saves advance the version so an older read cannot undo that choice.
-pollBuildSettings :: FilePath -> IORef State -> Desktop -> IO Desktop
-pollBuildSettings directory ref d = mask $ \restore -> do
-  now<-getCurrentTime
-  s<-readIORef ref
-  forM_ (buildSettingsWorker s) $ \(version,worker) -> do
-    result<-poll worker
-    forM_ result $ \outcome -> modifyIORef' ref (\state -> state
-      {buildSettingsWorker=Nothing,
-       buildSettingsCache=if version==buildSettingsVersion state
-         then either (const (buildSettingsCache state)) Just outcome else buildSettingsCache state})
-  current<-readIORef ref
-  when (isNothing (buildSettingsWorker current) && maybe True (\checked -> diffUTCTime now checked>=1) (buildSettingsChecked current)) $ do
-    worker<-async (restore (B.buildToolchain <$> B.loadBuildConfig directory ""))
-    modifyIORef' ref (\state -> state {buildSettingsWorker=Just (buildSettingsVersion state,worker),buildSettingsChecked=Just now})
-  latest<-readIORef ref
-  pure d {toolchain=Just (fromMaybe (fromMaybe THC (toolchain d)) (buildSettingsCache latest))}
-
 -- | Advance mailboxes, protocol replies, approvals and transcript views.
 -- The caller serializes access to both desktop and conversation state.
 tickConversation :: ConversationState -> Desktop -> IO Desktop
-tickConversation runtime@(ConversationState directory ref consoles jobs _) original = do
-  launched<-pollShellLaunches runtime original
-  loaded<-pollBuildSettings directory ref launched
-  menuReady<-pollCompilerMenu runtime loaded
-  fresh<-pruneChildApprovals runtime menuReady
+tickConversation runtime@(ConversationState directory ref consoles _) original = do
+  fresh<-pruneChildApprovals runtime original
   initial<-drainConversationAgents runtime fresh
   currentQuestion<-readIORef ref
   ready<-case waitingQuestion currentQuestion of
@@ -759,7 +576,7 @@ tickConversation runtime@(ConversationState directory ref consoles jobs _) origi
       live<-providerCurrent receipt currentQuestion
       if live then pure initial else cancelQuestion runtime "Question requester ended." initial
     _->pure initial
-  d<-C.tickConsoles consoles ready >>= Jobs.tickBuildJobs jobs
+  let d=ready
   flushTerminalWaiters runtime
   s<-readIORef ref
   events<-maybe (pure []) A.pollEvents (connection s)
@@ -800,7 +617,7 @@ tickConversation runtime@(ConversationState directory ref consoles jobs _) origi
 -- before returning that desktop, so its bubbles and composer use the same bounds.
 -- The immutable transcript key keeps mouse motion and idle ticks parse-free.
 refreshConversationLayout :: ConversationState -> Desktop -> IO Desktop
-refreshConversationLayout (ConversationState _ ref _ _ _) original = do
+refreshConversationLayout (ConversationState _ ref _ _) original = do
   state<-readIORef ref
   transcriptIdentity<-makeStableName =<< evaluate (transcript state)
   questionKey<-questionIdentity (chatQuestion original)
@@ -828,21 +645,8 @@ refreshConversationLayout (ConversationState _ ref _ _ _) original = do
           paintView target False state {transcript=records} desktop
         _ -> pure desktop
 
--- Acquisition owns each child until the UI adopts it. Session teardown cancels
--- pending launches and closes any completed child that has not been adopted.
-pollShellLaunches :: ConversationState -> Desktop -> IO Desktop
-pollShellLaunches (ConversationState _ ref consoles _ _) original = mask_ $ do
-  state<-readIORef ref
-  results<-mapM (\worker->(worker,) <$> poll worker) (shellLaunches state)
-  modifyIORef' ref (\current->current {shellLaunches=[worker | (worker,Nothing)<-results]})
-  foldM adopt original [result | (_,Just result)<-results]
-  where
-    adopt d (Right (Right prepared)) = snd <$> C.adoptConsole consoles prepared d `onException` C.closePreparedConsole prepared
-    adopt d (Right (Left err)) = pure (message "Cannot execute shell block" (wrapMessage err) d)
-    adopt d (Left _) = pure (message "Cannot execute shell block" ["Terminal launch failed."] d)
-
 receive :: ConversationState -> Desktop -> A.Event -> IO Desktop
-receive runtime@(ConversationState _ ref consoles _ _) d event = do
+receive runtime@(ConversationState _ ref consoles _) d event = do
   s<-readIORef ref
   case event of
     A.Disconnected reason -> do
@@ -992,7 +796,7 @@ mergeTool update records = case field "toolCallId" update :: Maybe Text of
        then map merge records else records++[activity ident update]
 
 incoming :: ConversationState -> A.Client -> Value -> Text -> Value -> Desktop -> IO Desktop
-incoming runtime@(ConversationState _ ref consoles _ _) client ident method params d = do
+incoming runtime@(ConversationState _ ref consoles _) client ident method params d = do
   s<-readIORef ref
   case method of
     "session/request_permission" -> case permissionOptions params of
@@ -1093,7 +897,7 @@ retireRequests ref = mask $ \restore -> do
     pure next
 
 pollFileCaptures :: ConversationState -> Desktop -> IO Desktop
-pollFileCaptures runtime@(ConversationState _ ref _ _ _) d = do
+pollFileCaptures runtime@(ConversationState _ ref _ _) d = do
   s<-readIORef ref
   retiring<-filterM (fmap isNothing . poll . snd) (retiringRequests s)
   modifyIORef' ref (\state -> state {retiringRequests=retiring})
@@ -1131,10 +935,10 @@ permissionOptions params=map (\(_,ident,name)->(ident,name)) . sortOn (\(kind,_,
   mapMaybe (parseMaybe (withObject "permission" $ \o -> (,,) <$> o .: "kind" <*> o .: "optionId" <*> o .: "name")) (fromMaybe [] (field "options" params))
 
 enqueueApproval :: ConversationState -> Approval -> IO ()
-enqueueApproval (ConversationState _ ref _ _ _) approval=modifyIORef' ref (\s -> s {approvals=approvals s++[(nextApproval s,approval)],nextApproval=nextApproval s+1})
+enqueueApproval (ConversationState _ ref _ _) approval=modifyIORef' ref (\s -> s {approvals=approvals s++[(nextApproval s,approval)],nextApproval=nextApproval s+1})
 
 present :: ConversationState -> Desktop -> IO Desktop
-present (ConversationState _ ref _ _ _) d = do
+present (ConversationState _ ref _ _) d = do
   s<-readIORef ref
   case (dialog d,presented s,approvals s) of
     (Nothing,Nothing,(token,approval):_) | not (deferredApproval s) -> do
@@ -1155,7 +959,7 @@ present (ConversationState _ ref _ _ _) d = do
     _ -> pure d
 
 decide :: ConversationState -> Int -> [Text] -> Desktop -> IO Desktop
-decide (ConversationState _ ref consoles _ _) token values d = do
+decide (ConversationState _ ref consoles _) token values d = do
   s<-readIORef ref
   case (connection s,lookup token (approvals s)) of
     (_,Just (ChildPermission _ request reply)) -> do
@@ -1392,7 +1196,7 @@ renderReplyWithShellBlocks graphical requested outgoing text
       (row,_:rest) -> row:splitRows rest
 
 publicAgentSettings :: ConversationState -> Value -> IO [AgentSetting]
-publicAgentSettings runtime@(ConversationState _ ref _ _ _) value=do
+publicAgentSettings runtime@(ConversationState _ ref _ _) value=do
   current<-readIORef ref
   keys<-conversationKeys runtime current
   let public option=not (any (\text->any (`T.isInfixOf` text) keys)
@@ -1466,7 +1270,7 @@ exitStatus :: Int -> Value
 exitStatus code=object ["exitCode" .= code,"signal" .= Null]
 
 flushTerminalWaiters :: ConversationState -> IO ()
-flushTerminalWaiters (ConversationState _ ref consoles _ _) = do
+flushTerminalWaiters (ConversationState _ ref consoles _) = do
   s<-readIORef ref
   forM_ (connection s) $ \client -> forM_ (M.toList (terminalWaiters s)) $ \(tid,waiters) -> do
     result<-C.consoleOutput consoles tid
@@ -1474,237 +1278,6 @@ flushTerminalWaiters (ConversationState _ ref consoles _ _) = do
     forM_ ready $ \reply -> do
       mapM_ (\ident -> A.respond client ident reply) waiters
       modifyIORef' ref (\state -> state {terminalWaiters=M.delete tid (terminalWaiters state)})
-
-openConsole :: C.Consoles -> Terminal.TerminalConfig -> Desktop -> IO Desktop
-openConsole consoles config d = do
-  result<-C.startConsole consoles config (1024*1024) d
-  pure (either (\err -> message "Cannot start terminal" (wrapMessage err) d) snd result)
-
--- | Bind only the serialized admitted guest-input invocation. Human commands
--- have no admission; asynchronous work captures the one-shot receipt explicitly.
-withBuildAdmission :: ConversationState -> AdmittedBuild -> IO a -> IO a
-withBuildAdmission (ConversationState _ ref _ _ _) admission action=bracket
-  (atomicModifyIORef' ref (\state->(state {buildAdmission=Just admission},buildAdmission state)))
-  (\previous->modifyIORef' ref (\state->state {buildAdmission=previous}))
-  (const action)
-
--- Capture paths and exact immutable source identities on the serialized owner.
--- Dirty representation comparisons and all filesystem/planning work run outside it.
-startBuildPreparation :: ConversationState -> Maybe B.BuildAction -> Desktop -> IO Desktop
-startBuildPreparation runtime action=startBuildPreparationAt runtime action Nothing
-
-startPackageBuildPreparation :: ConversationState -> B.BuildAction -> PackageBuildTarget -> Desktop -> IO Desktop
-startPackageBuildPreparation runtime action target=startBuildPreparationAt runtime (Just action) (Just target)
-
-startBuildPreparationAt :: ConversationState -> Maybe B.BuildAction -> Maybe PackageBuildTarget -> Desktop -> IO Desktop
-startBuildPreparationAt (ConversationState directory ref _ _ _) action target d = mask_ $ do
-  state<-readIORef ref
-  case buildPreparation state of
-    Just _ -> pure d {status="Build preparation is already pending."}
-    Nothing -> do
-      admitted<-maybe (pure True) reserveAdmittedBuild (buildAdmission state)
-      if not admitted then pure d {status="Admitted input can start only one build intent."} else do
-        captured<-forM (buildSourceDocuments d) $ \(bid,doc) -> do
-          version<-captureVersion (documentBuffer doc)
-          snapshot<-evaluate (captureDirty (documentBuffer doc))
-          let path=filePath <$> documentFile doc
-          mapM_ (evaluate . length) path
-          pure ((bid,path,version),snapshot)
-        let start=B.buildStartDirectory d
-            source=B.buildSource d
-            receipt=BuildReceipt (buildSettingsVersion state) start source (map fst captured) (buildAdmission state) target
-            snapshots=map snd captured
-        -- Evaluate pathname selectors here; the worker never captures Desktop
-        -- or FileState through an unevaluated source/directory field.
-        _<-evaluate (length start)
-        mapM_ (evaluate . length) source
-        worker<-asyncWithUnmask (\unmask -> unmask (prepareBuild directory action target start source snapshots))
-        modifyIORef' ref (\current -> current {buildPreparation=Just (BuildPreparing receipt False worker)})
-        pure d {status="Preparing build target…"}
-
-buildSourceDocuments :: Desktop -> [(Int,Document)]
-buildSourceDocuments d=[(bid,doc) | (bid,doc)<-M.toList (buffers d),documentLabel doc==Nothing]
-
-prepareBuild :: FilePath -> Maybe B.BuildAction -> Maybe PackageBuildTarget -> FilePath -> Maybe FilePath -> [DirtySnapshot] -> IO (Either Text PreparedBuild)
-prepareBuild directory action target start source snapshots = do
-  result<-try $ do
-    root<-maybe (B.resolveBuildRootFrom start) (pure . packageBuildRoot) target
-    saved<-B.loadBuildConfig directory root
-    let config=maybe saved (\component->saved {B.buildTarget=packageBuildName component}) target
-    before<-maybe (pure True) packageBuildManifestCurrent target
-    unsaved<-case action of Nothing->pure False; Just _->evaluate (any snapshotDirty snapshots)
-    prepared<-if not before then pure (Left "Package build target changed during preparation.") else case action of
-      Nothing -> do
-        let options=buildOptions root config
-        _<-evaluate (sum [T.length value | Input _ value _<-fields options])
-        pure (Right (BuildOptions options))
-      Just task | unsaved -> pure (Right (BuildUnsaved task))
-      Just task -> fmap (BuildCommands task root) <$> B.buildPlan task config root (if isNothing target then source else Nothing)
-    -- Strings/argv may otherwise retain planning thunks until execution on owner.
-    _<-evaluate (length root+length (B.buildExecutable config)+T.length (B.buildTarget config)+
-      T.length (B.buildTHCRoot config)+T.length (B.buildRuntime config)+sum (map length (B.buildArguments config)))
-    after<-maybe (pure True) packageBuildManifestCurrent target
-    _<-case prepared of
-      Left err -> evaluate (T.length err) >> pure prepared
-      Right (BuildCommands _ _ commands) -> evaluate (sum [length cmd+sum (map length args) | (cmd,args)<-commands]) >> pure prepared
-      _ -> pure prepared
-    pure (if after then prepared else Left "Package changed while preparing the build target.")
-  pure (either (Left . T.take 512 . T.pack . show) id (result :: Either IOException (Either Text PreparedBuild)))
-
-buildReceiptCurrent :: IORef State -> BuildReceipt -> Desktop -> IO Bool
-buildReceiptCurrent ref (BuildReceipt version start source expected _ _) d = do
-  state<-readIORef ref
-  let current=buildSourceDocuments d
-      names=[(bid,filePath <$> documentFile doc) | (bid,doc)<-current]
-  if buildSettingsVersion state/=version || B.buildStartDirectory d/=start || B.buildSource d/=source ||
-     names/=[(bid,path) | (bid,path,_)<-expected]
-    then pure False
-    else and <$> sequence [versionCurrent receipt (documentBuffer doc) | ((_,_,receipt),(_,doc))<-zip expected current]
-
--- | Poll the single build preparation lifetime. Completed work re-enters the
--- same runtime/Git boundary once only. Execution authority was admitted with
--- the original command; this re-entry grants no fresh MCP approval. A modal
--- defers adoption; stale settings/source receipts retire planning without
--- execution. After the checked launch gate starts a terminal process, ordinary
--- edits/settings saves do not cancel it; Stop and session teardown still do.
-tickBuildPreparation :: ConversationState -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> IO Desktop
-tickBuildPreparation runtime@(ConversationState _ ref _ _ _) core d = mask_ $ do
-  state<-readIORef ref
-  case buildPreparation state of
-    Nothing -> pure d
-    Just (BuildRetiring _ worker) -> do
-      done<-poll worker
-      when (not (isNothing done)) (modifyIORef' ref (\current -> current {buildPreparation=Nothing}))
-      pure d
-    Just (BuildPreparing receipt launch worker) -> do
-      current<-if launch then pure True else buildReceiptCurrent ref receipt d
-      if not current then retireBuildPreparation ref >> pure d {status="Build preparation cancelled: source or settings changed."}
-      else do
-        result<-poll worker
-        case result of
-          Nothing -> pure d
-          Just outcome -> do
-            let prepared=either (const (Left "Build preparation failed.")) id outcome
-            modifyIORef' ref (\s -> s {buildPreparation=Just (BuildReady receipt launch prepared)})
-            tickBuildPreparation runtime core d
-    Just (BuildReady receipt@(BuildReceipt _ _ _ _ admission target) launch _) -> do
-      current<-if launch then pure True else buildReceiptCurrent ref receipt d
-      if not current then retireBuildPreparation ref >> pure d {status="Build preparation cancelled: source or settings changed."}
-      else do
-        let blocked=not (isNothing (dialog d)) || questionActive d
-        result<-case admission of
-          Just receiptAdmission | not launch->stepAdmittedBuild receiptAdmission core d
-          _ | blocked->pure Nothing
-            | otherwise->Just . snd <$> core d [AdoptPreparedBuild (if launch then Nothing else target)]
-        case result of
-          Nothing->pure d
-          Just updated->do
-            remaining<-buildPreparation <$> readIORef ref
-            -- A refusing gate does not see the slot. Consume that refused result;
-            -- it must not launch later when the gate becomes permissive.
-            case remaining of Just BuildReady{} -> retireBuildPreparation ref; _->pure ()
-            pure updated
-
-adoptBuildPreparation :: ConversationState -> Maybe PackageBuildTarget -> Desktop -> IO Desktop
-adoptBuildPreparation (ConversationState _ ref consoles jobs _) target d = mask_ $ do
-  state<-readIORef ref
-  case buildPreparation state of
-    Just (BuildReady receipt launch result) -> do
-      current<-if launch then pure True else buildReceiptCurrent ref receipt d
-      if not current || target/= (if launch then Nothing else case receipt of BuildReceipt _ _ _ _ _ captured->captured) || not (isNothing (dialog d)) || questionActive d then retireBuildPreparation ref >> pure d
-      else do
-        modifyIORef' ref (\s -> s {buildPreparation=Nothing})
-        case result of
-          Left err -> pure (message "Build target" [err] d)
-          Right (BuildOptions options) -> pure d {dialog=Just options}
-          Right (BuildUnsaved task) -> pure (message (if task==B.Run then "Save before running" else "Save before building")
-            ["Save modified source files before building the files on disk."] d)
-          Right (BuildCommands task root [(command,args)]) | task==B.Run && Terminal.terminalAvailable -> do
-            -- Keep prepare-to-publication masked, as for shell launch ownership:
-            -- cancellation must not lose a successfully created console handle.
-            worker<-async $ mask_ $
-              fmap BuildConsole <$> C.prepareConsole [] (Terminal.TerminalConfig command args [] root 80 24) (1024*1024)
-            modifyIORef' ref (\s -> s {buildPreparation=Just (BuildPreparing receipt True worker)})
-            pure d {status="Starting terminal…"}
-          Right (BuildCommands task root commands) -> Jobs.startBuildJob jobs (T.pack (show task)) root commands d
-          Right (BuildConsole console) -> snd <$> C.adoptConsole consoles console d `onException` (do
-            modifyIORef' ref (\s -> s {buildPreparation=Just (BuildReady receipt True (Right (BuildConsole console)))})
-            retireBuildPreparation ref)
-    _ -> pure d
-
--- Successful in-app run.json writes share this invalidation boundary. External
--- file edits retain the worker's captured settings snapshot for this intent.
-buildSettingsChanged :: IORef State -> Toolchain -> IO ()
-buildSettingsChanged ref selected=mask_ $ do
-  modifyIORef' ref (\state -> state {buildSettingsCache=Just selected,
-    buildSettingsVersion=buildSettingsVersion state+1,buildSettingsChecked=Nothing})
-  slot<-buildPreparation <$> readIORef ref
-  -- Once the checked gate starts Run, editing/saving is ordinary program use.
-  -- Only planning still depends on the captured source/settings receipt.
-  case slot of
-    Just (BuildPreparing _ False _) -> retireBuildPreparation ref
-    Just (BuildReady _ False _) -> retireBuildPreparation ref
-    _ -> pure ()
-
--- | Request cancellation of pending command preparation and the shared captured
--- job. Both retain their owner until asynchronous cleanup; no UI join is required.
-stopConversationBuild :: ConversationState -> Desktop -> IO Desktop
-stopConversationBuild (ConversationState _ ref _ jobs _) d=do
-  pending<-not . isNothing . buildPreparation <$> readIORef ref
-  retireBuildPreparation ref
-  stopped<-Jobs.stopBuildJob jobs d
-  pure (if pending then stopped {status="Stopping build preparation…"} else stopped)
-
--- | Cheap cross-owner reservation for terminal launch only. Prepared terminals
--- remain owned until adoption or cancellation cleanup; adopted consoles retain
--- the existing independent execution policy.
-buildTerminalLaunchPending :: ConversationState -> IO Bool
-buildTerminalLaunchPending (ConversationState _ ref _ _ _) = do
-  state<-readIORef ref
-  pure $ case buildPreparation state of
-    Just (BuildPreparing _ launch _) -> launch
-    Just (BuildReady _ launch _) -> launch
-    Just (BuildRetiring launch _) -> launch
-    Nothing -> False
-
-retireBuildPreparation :: IORef State -> IO ()
-retireBuildPreparation ref = mask_ $ do
-  state<-readIORef ref
-  case buildPreparation state of
-    Nothing -> pure ()
-    Just BuildRetiring{} -> pure ()
-    Just slot -> do
-      let launch=case slot of BuildPreparing _ active _->active; BuildReady _ active _->active; _->False
-      worker<-asyncWithUnmask (\unmask -> unmask (closeBuildPreparation slot))
-      modifyIORef' ref (\s -> s {buildPreparation=Just (BuildRetiring launch worker)})
-
-closeBuildPreparation :: BuildPreparation -> IO ()
-closeBuildPreparation slot=do
-  case slot of
-    BuildPreparing receipt _ _->cancelReceipt receipt
-    BuildReady receipt _ _->cancelReceipt receipt
-    _->pure ()
-  case slot of
-    BuildPreparing _ _ worker -> do
-      cancel worker
-      result<-waitCatch worker
-      case result of Right prepared->closeResult prepared; _->pure ()
-    BuildReady _ _ prepared -> closeResult prepared
-    BuildRetiring _ worker -> wait worker
-  where
-    cancelReceipt (BuildReceipt _ _ _ _ admission _)=mapM_ cancelAdmittedBuild admission
-    closeResult (Right (BuildConsole console))=C.closePreparedConsole console
-    closeResult _=pure ()
-
--- Docs: docs/site/screenshots/build-target.png (docs/running.md) shows the target dialog.
-buildOptions :: FilePath -> B.BuildConfig -> Dialog
-buildOptions root config=Dialog "Build target" (AgentDialog "run-config")
-  [setting "Compiler executable" (T.pack (B.buildExecutable config)),setting "Cabal target (optional)" (B.buildTarget config),
-   setting "THC root (optional)" (B.buildTHCRoot config),setting "Runtime (THC only)" (B.buildRuntime config),
-   ListBox "Toolchain" ["THC","GHC"] (if B.buildToolchain config==B.THC then 0 else 1),
-   setting "Program arguments (JSON)" (jsonText (B.buildArguments config))]
-  0 ["OK","Cancel"] ["F9 Make   Alt+F9 Compile   Ctrl+F9 Run",T.pack root]
-  where setting label text=Input label text (T.length text)
 
 conversationWidth :: Desktop -> Int
 conversationWidth d = conversationWidthFor (conversationTarget d) d
@@ -1716,10 +1289,6 @@ conversationWidthFor target d = max 1 $ case matching++available of
   where
     matching=[w | Just (bid,_)<-[conversationDocument target d],w<-windows d,bufferId w==Just (bid)]
     available=[w | w<-windows d,Just doc<-[windowDocument (buffers d) w],documentLabel doc==Just "Conversation"]
-
-conversationServices :: ConversationState -> (FilePath,C.Consoles,Jobs.BuildJobs)
-conversationServices (ConversationState directory _ consoles jobs _)=(directory,consoles,jobs)
-
 
 chatToolNames :: [Text]
 chatToolNames=["ask_user","agent_settings"]
@@ -1748,7 +1317,7 @@ chatTool runtime=chatToolAs runtime Nothing
 -- The transport resolves bearer credentials first; this operation checks the
 -- owning actor and captures only the original provider incarnation metadata.
 captureQuestionCaller :: ConversationState -> AH.AgentId -> IO (Either Text QuestionCaller)
-captureQuestionCaller (ConversationState _ ref _ _ agents) actor
+captureQuestionCaller (ConversationState _ ref _ agents) actor
   | actor/=AR.primaryAgent agents=pure (Left "ask_user belongs to this editor's primary agent.")
   | otherwise=do
       active<-AH.statusAgent (AR.agentHub agents) (AH.Agent actor) actor
@@ -1766,7 +1335,7 @@ captureQuestionCaller (ConversationState _ ref _ _ agents) actor
 -- actor and runtime scope; the exact optional provider receipt also qualifies
 -- polling/admission and answer delivery. This function never waits for a human.
 chatToolAs :: ConversationState -> Maybe QuestionCaller -> Desktop -> Text -> Value -> IO (Desktop,IO (Either Text Value))
-chatToolAs (ConversationState _ ref _ _ agents) caller d name args
+chatToolAs (ConversationState _ ref _ agents) caller d name args
   | name=="agent_settings" = if args/=object [] then pure (d,pure (Left "agent_settings accepts no arguments.")) else do
       s<-readIORef ref
       root<-if isNothing (connection s) then B.resolveBuildRoot d else pure (project s)
@@ -1861,7 +1430,7 @@ providerCurrent (ProviderReceipt identity sid) s=case (connection s,session s) o
   _->pure False
 
 cancelQuestion :: ConversationState -> Text -> Desktop -> IO Desktop
-cancelQuestion (ConversationState _ ref _ _ _) reason d=do
+cancelQuestion (ConversationState _ ref _ _) reason d=do
   s<-readIORef ref
   case waitingQuestion s of
     Nothing->pure d
@@ -1873,7 +1442,7 @@ cancelQuestion (ConversationState _ ref _ _ _) reason d=do
 -- Provider workers exchange requests through the mailbox; only the editor tick
 -- mutates conversation state or presents a permission dialog.
 syncConversationAgent :: ConversationState -> IO ()
-syncConversationAgent runtime@(ConversationState _ ref _ _ _) = do
+syncConversationAgent runtime@(ConversationState _ ref _ _) = do
   s<-readIORef ref
   keys<-conversationKeys runtime s
   let key=fromMaybe "" (session s)
@@ -1897,7 +1466,7 @@ denyChild (ChildPermission _ _ reply)=void (tryPutMVar reply Nothing)
 denyChild _=pure ()
 
 drainConversationAgents :: ConversationState -> Desktop -> IO Desktop
-drainConversationAgents runtime@(ConversationState _ ref _ _ agents) d=do
+drainConversationAgents runtime@(ConversationState _ ref _ agents) d=do
   requests<-AR.drainAgentRequests agents
   foldM apply d requests
   where
@@ -1939,7 +1508,7 @@ drainConversationAgents runtime@(ConversationState _ ref _ _ agents) d=do
       pure desktop
 
 showAgentDirectory :: ConversationState -> Desktop -> IO Desktop
-showAgentDirectory (ConversationState _ ref _ _ agents) d=do
+showAgentDirectory (ConversationState _ ref _ agents) d=do
   result<-AH.listAgents (AR.agentHub agents) AH.Human
   case result of
     Left err -> pure d {status=err}
@@ -1954,7 +1523,7 @@ showAgentDirectory (ConversationState _ ref _ _ agents) d=do
         ["Conversation shows live messages and a human composer.","Reconnect explicitly loads a saved child without replaying work.","Workspace opens its files, terminals and debugger."])}
 
 showAgentHistory :: ConversationState -> AH.AgentId -> Desktop -> IO Desktop
-showAgentHistory runtime@(ConversationState _ ref _ _ agents) ident d=do
+showAgentHistory runtime@(ConversationState _ ref _ agents) ident d=do
   selected<-AH.statusAgent (AR.agentHub agents) AH.Human ident
   case selected of
     Left err -> pure d {status=err}
@@ -1971,7 +1540,7 @@ showAgentHistory runtime@(ConversationState _ ref _ _ agents) ident d=do
       refreshChildConversation runtime selectedView
 
 performChild :: ConversationState -> Text -> [Text] -> Desktop -> IO Desktop
-performChild runtime@(ConversationState _ ref _ _ agents) action values d=do
+performChild runtime@(ConversationState _ ref _ agents) action values d=do
   state<-readIORef ref
   let target=conversationTarget d
       ident=AH.AgentId target
@@ -2016,7 +1585,7 @@ performChild runtime@(ConversationState _ ref _ _ agents) action values d=do
 -- Exact target is independent of the selected conversation. Worker ownership is
 -- the same childControls map polled and retired by the existing conversation.
 startChildControl :: ConversationState -> AH.AgentId -> Maybe DraftReceipt -> IO (Either Text ()) -> Desktop -> IO Desktop
-startChildControl (ConversationState _ ref _ _ _) ident submitted operation d=mask $ \restore->do
+startChildControl (ConversationState _ ref _ _) ident submitted operation d=mask $ \restore->do
   state<-readIORef ref
   let target=AH.agentIdText ident
   if M.member target (childControls state) then pure d {status="A child operation is already pending."} else do
@@ -2026,7 +1595,7 @@ startChildControl (ConversationState _ ref _ _ _) ident submitted operation d=ma
       status=if submitted==Nothing then "Updating child settings..." else "Steering child; draft kept until accepted."}
 
 refreshChildConversation :: ConversationState -> Desktop -> IO Desktop
-refreshChildConversation (ConversationState _ ref _ _ agents) d=do
+refreshChildConversation (ConversationState _ ref _ agents) d=do
   state<-readIORef ref
   controls<-forM (M.toList (childControls state)) $ \(target,(submitted,worker))->do
     result<-poll worker
@@ -2126,13 +1695,13 @@ childHistoryRecord name records value=let detail=fromMaybe Null (field "detail" 
 -- Publish the next human turn before releasing the Hub ticket. Otherwise its
 -- worker can dequeue another peer in the gap before the editor's next tick.
 completeConversationDelivery :: ConversationState -> Either Text Value -> IO ()
-completeConversationDelivery (ConversationState _ ref _ _ agents) result=do
+completeConversationDelivery (ConversationState _ ref _ agents) result=do
   s<-readIORef ref
   AH.setExternalAgentBusy (AR.agentHub agents) (AR.primaryAgent agents) (busy s || not (null (queuedQueries s)))
   finishAgentDelivery ref result
 
 pruneChildApprovals :: ConversationState -> Desktop -> IO Desktop
-pruneChildApprovals (ConversationState _ ref _ _ _) d=do
+pruneChildApprovals (ConversationState _ ref _ _) d=do
   s<-readIORef ref
   live<-filterM (\(_,approval)->case approval of ChildPermission _ _ reply -> isEmptyMVar reply; _ -> pure True) (approvals s)
   let expired=maybe False (\ident -> ident `notElem` map fst live) (presented s)

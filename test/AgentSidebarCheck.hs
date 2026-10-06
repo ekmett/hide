@@ -34,6 +34,7 @@ import qualified Hide.Plugin.Form as Form
 import qualified Hide.Plugin.Menu as Menu
 import Hide.GuestAccess (readableAt,streamerReadableAt,guestKeyboardAllowed)
 import Hide.Conversation
+import qualified Hide.Consoles as C
 import Hide.Model
 import Hide.Sidebar
 import Hide.SidebarCommands
@@ -54,7 +55,7 @@ checks=bracket temporary removePathForcibly $ \root->
     writeFile (root </> "thc.toml") (unlines ["[editor.autocomplete]","provider = 'acp'","executable = 'python3'","arguments = '"++show [script]++"'","debug = false"])
     record<-newSessionRecord Nothing ["--",root]
     rememberSession record
-    environment "THC_EDIT_SESSION" (Just (sessionId record)) $ withSidebarCommands $ \host->withConversationAt root $ \conversation->
+    environment "THC_EDIT_SESSION" (Just (sessionId record)) $ withSidebarCommands $ \host->C.withConsoles $ \consoles -> withConversationAt consoles root $ \conversation->
       withAutocomplete root $ \autocomplete->withAgentSidebar (sidebarCapabilities host) SidebarAgent (conversationAgents conversation) autocomplete $ \agents->do
         createRequests<-newIORef []
         let core desktop effects=do
