@@ -9,7 +9,6 @@ import qualified Data.ByteString as BS
 import qualified Data.Text as T
 import qualified Data.Text.Unsafe as TU
 import Hide.Buffer
-import qualified Hide.LineChunks as Chunks
 import qualified Hide.BufferView as View
 import qualified Hide.Model as Model
 import qualified Graphics.Vty as V
@@ -377,7 +376,7 @@ lazyLineChecks=do
       (sourceLineDisplayColumn line position==expected && sourceLineColumnOffset line position==expected &&
        hit==expected && column==expected)
   check "loaded backwards word traversal clamps beyond EOF"
-    (Chunks.chunksSpanLeft (=='z') (Chunks.chunksFromText (T.replicate 600 "a"<>" z")) 700==601)
+    (bufferWordLeft (newBuffer (T.replicate 600 "a"<>" z")) 700==601)
   check "queries retain exact content and revision" (contents loaded==text && revision loaded==0 && null (undoStack loaded))
   forM_ ["\t界e\x301\x200d😀", "🇦🇧", "z"<>T.replicate 80 "\x301", "a\r"] $ \unit->do
     let source=T.replicate 350 unit<>"\r\nnext"
