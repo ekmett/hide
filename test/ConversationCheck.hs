@@ -283,7 +283,7 @@ draftReceiptChecks=bracket temporary removePathForcibly $ \root->
                 if openedNow then pure d else tickConversation runtime d >>= \next->threadDelay 1000 >> awaitConnection next
           connecting<-timeout 3000000 (awaitConnection submitted) >>= maybe (error "Initial editor connection did not reach its gate") pure
           waitForReader opened
-          followup<-evaluate (newBuffer "connecting followup")
+          followup<-evaluate (newBuffer "stream\nconnecting followup")
           queuedConnecting<-submit runtime QuerySubmit (draftBuffer followup connecting)
           check "input while initializing joins the original provider queue" (agentQueued queuedConnecting==1)
           newer<-fresh original
@@ -292,7 +292,7 @@ draftReceiptChecks=bracket temporary removePathForcibly $ \root->
           connectedMessages<-readMessages (root </> "messages.jsonl")
           let sent=[params | entry<-connectedMessages,field "method" entry==Just ("session/prompt"::T.Text),Just params<-[field "params" entry::Maybe Value]]
               sentText params=case (field "prompt" params::Maybe [Value]) of Just (first:_)->field "text" first; _->Nothing
-          check "initial connection accepts queued input in order" (map sentText sent==[Just ("stream"::T.Text),Just "connecting followup"])
+          check "initial connection accepts queued input in order" (map sentText sent==[Just ("stream"::T.Text),Just "stream\nconnecting followup"])
           check "connecting submission cannot clear a same-text new draft" (contents (composerBuffer accepted)=="stream")
         removeFile gate
     writeFile context "[editor.agent]\ncontext='receipt guidance'\n"
