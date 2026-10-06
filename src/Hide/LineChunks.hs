@@ -17,6 +17,7 @@ module Hide.LineChunks
 import Data.Bits ((.&.), (.|.), shiftR, shiftL)
 import Data.Char (ord)
 import Data.Foldable (toList)
+import qualified Data.List as List
 import Data.Word (Word64)
 import qualified Data.FingerTree as FT
 import qualified Data.Vector as V
@@ -796,7 +797,7 @@ editedFlags original start end inserted tree=nul .|. terminal .|. (trailing `shi
 borrowedConcat :: [T.Text] -> T.Text
 borrowedConcat input=case filter (not.T.null) input of
   []->T.empty
-  first:rest->case foldl' (\joined next->joined >>= (`joinAdjacent` next)) (Just first) rest of
+  first:rest->case List.foldl' (\joined next->joined >>= (`joinAdjacent` next)) (Just first) rest of
     Just joined->joined
     Nothing->T.concat (first:rest)
 
