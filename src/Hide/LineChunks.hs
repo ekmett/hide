@@ -197,7 +197,7 @@ chunksWindow (Edited tree) requested=case FT.viewl suffix of
     initialColumn=applyAdvance (chunkAdvance measure) 0
 
 -- Primitive endpoint receipts keep the cached-span walk numeric. Box the
--- public coordinates only at its selected edge, never once per skipped span.
+-- public coordinates only at its selected edge, never once per skipped block.
 seekLoadedColumn :: Int -> LoadedBlocks -> (# Int#,Int#,Int#,[Chunk] #)
 seekLoadedColumn goal=go 0 0 0
   where
@@ -396,7 +396,8 @@ joinAdjacent (TI.Text a@(TA.ByteArray array) start size) (TI.Text (TA.ByteArray 
 -- and complete bounded-item boundary. A span therefore ends by byte 255, apart
 -- from bounded local neighbor merging. Cuts are storage choices, not canonical
 -- source identity. Loading retains a shared lazy receipt stream; exact queries
--- force only the prefix they visit. The first edit promotes it to a measured tree.
+-- prepare a covering checkpoint with <2x receipt-count overscan. The first edit
+-- still promotes the whole row to a measured tree.
 chunksFromText :: T.Text -> Chunks
 chunksFromText text=Loaded text (loadedBlocks (loadedSpans text)) width
   where (_,_,width,_)=sourceGraphemesFrom maxBound text
