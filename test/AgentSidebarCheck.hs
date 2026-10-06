@@ -71,6 +71,10 @@ checks=bracket temporary removePathForcibly $ \root->
         let closed=fst (runCommand Close revealed)
         ensure "closing completion transcript leaves its provider node" (not (hasCompletionChat closed) && has "ACP completion" closed)
         choicesDialog<-act (chooseMenu "ACP completion  configured" closed) >>= await tick (maybe False completionPurpose . dialog)
+        ensure "advertised completion choices remain readable but human-controlled"
+          (not (guestKeyboardAllowed choicesDialog) && case dialog choicesDialog of
+            Just dg->readableAt choicesDialog (left (dialogRect choicesDialog dg)+2) (top (dialogRect choicesDialog dg)+2)
+            _->False)
         let choose=fmapDialog (\dg->dg {fields=[ListBox "Provider choices" ["Small","Large"] 1]}) choicesDialog
         acceptedChoice<-act (handleEvent (V.EvKey V.KEnter []) choose)
         let modelSaved _=readAutocompleteFor root >>= pure . (\value->case value of Right configValue->field "model" configValue==Just ("large"::T.Text); _->False)
@@ -81,7 +85,12 @@ checks=bracket temporary removePathForcibly $ \root->
         renamed<-act (chooseMenu "Primary  idle" stale) >>= await tick (maybe False ((=="Rename agent").dialogTitle) . dialog)
         sourceVersion<-captureVersion (maybe (error "Missing source") documentBuffer (activeDocument renamed))
         let originalSelection=selection <$> activeWindow renamed
-            formRef desktop=case dialog desktop of Just dg | PluginInputForm reference<-purpose dg->reference; _->error "Missing typed form"
+            formRef desktop=case dialog desktop of
+              Just dg->case purpose dg of
+                PluginInputForm reference->reference
+                PluginChoiceForm reference _->reference
+                _->error "Missing typed form"
+              _->error "Missing typed form"
             captured=formRef renamed
         ensure "typed form is private to guest input and capture" (not (guestKeyboardAllowed renamed) &&
           not (readableAt renamed (left (dialogRect renamed (maybe (error "dialog") id (dialog renamed)))) (top (dialogRect renamed (maybe (error "dialog") id (dialog renamed))))) &&
@@ -108,7 +117,7 @@ checks=bracket temporary removePathForcibly $ \root->
             backed=fst (handleEvent (V.EvKey V.KBS []) pasted)
             moved=fst (handleEvent (V.EvKey V.KLeft [V.MShift]) backed)
         ensure "rename paste backspace and selection use the real dialog owner" (inputValue moved==Just ("N界",Selection 2 1))
-        update<-Form.refreshInputForm (formRef moved) (Form.InputFormSpec "Updated rename" "Label" "RESET" "Apply") >>= right >>= maybe (fail "No refresh") pure
+        update<-Form.refreshForm (formRef moved) (Form.InputFormSpec "Updated rename" "Label" "RESET" "Apply") >>= right >>= maybe (fail "No refresh") pure
         publishFormRefreshFromHost host update
         let resized=fst (handleEvent (V.EvResize 90 30) moved)
         refreshedForm<-await tick (maybe False ((=="Updated rename").dialogTitle) . dialog) resized
@@ -168,8 +177,16 @@ checks=bracket temporary removePathForcibly $ \root->
         connected<-await tick (\d->not (agentReplying d) && has "N  idle" d && any ((=="model").settingId) (agentSettings d) &&
           "Model" `elem` map fst (contextItemsFor (popupFor "N  idle" d))) connecting
         primaryChoices<-act (chooseMenuAt 1 "N  idle" connected) >>= await tick (maybe False agentChoicePurpose . dialog)
-        let selectLarge=fmapDialog (\dg->dg {fields=[ListBox "Provider choices" ["Small","Large"] 1]}) primaryChoices
-            capturedPrimary=handleEvent (V.EvKey V.KEnter []) selectLarge
+        let selectLarge=fmapDialog (\dg->dg {fields=[ListBox "Provider choices" ["Small","Large"] 1],focus=1}) primaryChoices
+        changedLabels<-Form.refreshForm (formRef selectLarge) (Form.ChoiceFormSpec "Agent setting" "Provider choices" [("large","L"),("small","S")] "small" "Apply") >>= right >>= maybe (fail "Missing choice refresh") pure
+        publishFormRefreshFromHost host changedLabels
+        selectedLarge<-await tick (\d->case dialog d of Just dg | [ListBox _ labels selected]<-fields dg->labels==["L","S"] && selected==0 && focus dg==1; _->False) selectLarge
+        ensure "choice form keeps its exact lifetime and refuses guest submission"
+          (formRef selectedLarge==formRef primaryChoices && not (guestEffectsAllowed [SubmitChoiceForm (formRef selectedLarge) 0 0 Menu.AgentMenu]))
+        staleIndex<-act (selectedLarge,snd (handleEvent (V.EvKey V.KEnter []) selectLarge))
+        ensure "old numeric submission cannot choose a different ID after reorder"
+          (formRef staleIndex==formRef selectedLarge && any (\option->settingId option=="model" && settingCurrent option=="small") (agentSettings staleIndex))
+        let capturedPrimary=handleEvent (V.EvKey V.KEnter []) staleIndex
         primaryUpdated<-act capturedPrimary >>= await tick (any (\option->settingId option=="model" && settingCurrent option=="large") . agentSettings)
         stalePrimary<-act (primaryUpdated,snd capturedPrimary) >>= await tick (T.isInfixOf "expired" . status)
         ensure "Primary model change retains its exact conversation" (T.null (conversationTarget stalePrimary))
@@ -233,8 +250,8 @@ checks=bracket temporary removePathForcibly $ \root->
           selectedPopup=popup {contextMenu=fmap (\(rectangle,_)->(rectangle,selected)) (contextMenu popup)}
       in handleEvent (V.EvKey V.KEnter []) selectedPopup
     hasCompletionChat d=any ((==Just "Autocomplete").documentLabel) (M.elems (buffers d))
-    agentChoicePurpose dg=case purpose dg of AgentChoiceDialog{}->True; _->False
-    completionPurpose dg=case purpose dg of CompletionChoiceDialog{}->True; _->False
+    agentChoicePurpose dg=case purpose dg of PluginChoiceForm{}->dialogTitle dg=="Agent setting"; _->False
+    completionPurpose dg=case purpose dg of PluginChoiceForm{}->dialogTitle dg=="Completion setting"; _->False
     inputValue d=case dialog d of
       Just dg | SelectedInput _ value sel:_<-fields dg->Just (value,sel)
       _->Nothing

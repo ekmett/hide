@@ -50,12 +50,12 @@ import qualified Hide.Plugin.Menu as Menu
 data SidebarContext = SidebarContext
   { sidebarOrigin :: !Menu.MenuOrigin, sidebarContextDirectory :: !FilePath, sidebarProvider :: !(Maybe P.TreeRef), sidebarPrivatePaths :: ![FilePath]
   , sidebarColumns :: !Int, sidebarOpened :: !(Maybe (FilePath,Int,Int,ContentVersion)), sidebarRenameFiles :: ![Rename.RenameFile] }
-data SidebarReply = SidebarPackageDebug !PackageBuildTarget !(Either Text FilePath) | SidebarBuild !BuildAction !PackageBuildTarget | SidebarRename !P.TreeRef !Rename.PreparedRename | SidebarForm !(Form.PreparedInputForm SidebarContext SidebarReply) | SidebarSession !SessionSidebarRequest | SidebarExisting !FilePath !Int !Int !ContentVersion | SidebarDocument !FilePath !Document | SidebarPrepared !LinkResult | SidebarAgent !AgentSidebarRequest | SidebarDebug !DebugSidebarRequest | SidebarWindow !PluginWindow.WindowUpdate
+data SidebarReply = SidebarPackageDebug !PackageBuildTarget !(Either Text FilePath) | SidebarBuild !BuildAction !PackageBuildTarget | SidebarRename !P.TreeRef !Rename.PreparedRename | SidebarForm !(Form.PreparedForm SidebarContext SidebarReply) | SidebarSession !SessionSidebarRequest | SidebarExisting !FilePath !Int !Int !ContentVersion | SidebarDocument !FilePath !Document | SidebarPrepared !LinkResult | SidebarAgent !AgentSidebarRequest | SidebarDebug !DebugSidebarRequest | SidebarWindow !PluginWindow.WindowUpdate
 
 data ChildJob = ChildJob !TreeRequest !Menu.MenuOrigin !(Async (Either CommandError (P.PreparedPage SidebarContext SidebarReply))) !Bool
 data ActionJob = ActionJob ![P.TreeHit] !CommandRef !Menu.MenuOrigin !Int !(Async (Either CommandError SidebarReply)) !Bool
   | FormJob !Form.FormRef !(Async (Either CommandError SidebarReply)) !Bool
-data Publication = TreePublication !(P.TreeProvider SidebarContext SidebarReply) | FormRefresh !Form.InputFormUpdate
+data Publication = TreePublication !(P.TreeProvider SidebarContext SidebarReply) | FormRefresh !Form.FormUpdate
 data FilesProvider = FilesProvider !(P.TreeProvider SidebarContext SidebarReply) !FilePath !CommandRef !CommandRef !CommandRef !(IORef (M.Map P.NodeId FilePath,M.Map FilePath P.NodeId,Int,M.Map FilePath [Entry]))
 data State = State
   { providers :: !(M.Map P.TreeRef (P.TreeProvider SidebarContext SidebarReply))
@@ -65,7 +65,7 @@ data State = State
   , actionJob :: !(Maybe ActionJob), filesProvider :: !(Maybe FilesProvider)
   , badgeStamp :: !(Maybe (StableName (M.Map Int Document)))
   , badgeJob :: !(Maybe (StableName (M.Map Int Document),Async (M.Map FilePath (Bool,Int,Int))))
-  , sidebarRevision :: !Integer, inputForm :: !(Maybe (Form.PreparedInputForm SidebarContext SidebarReply)) }
+  , sidebarRevision :: !Integer, inputForm :: !(Maybe (Form.PreparedForm SidebarContext SidebarReply)) }
 -- Prepared alongside visible rows; owner applies at most four branch changes.
 data RecoveryProjection = RecoveryProjection !(Maybe SidebarHints)
   ![(P.TreeHit,[P.TreeHit],Bool)] !(Maybe RowKey) !(Maybe RowKey)
@@ -105,7 +105,7 @@ publishTreeFromHost (SidebarHost _ _ queue _ _ closed) provider=atomically $ do
 -- | Queue metadata for an already installed exact form. This cannot open a
 -- modal or grant submission authority; ordered transport reuses the root queue.
 -- Blocked and later refresh publishers receive an IOError when the host closes.
-publishFormRefreshFromHost :: SidebarHost -> Form.InputFormUpdate -> IO ()
+publishFormRefreshFromHost :: SidebarHost -> Form.FormUpdate -> IO ()
 publishFormRefreshFromHost (SidebarHost _ _ queue _ _ closed) prepared=atomically $ do
   stopped<-readTVar closed
   if stopped then throwSTM (userError "Sidebar host closed.") else writeTBQueue queue (FormRefresh prepared)
@@ -171,7 +171,7 @@ createFiles host root=do
         case source of
           Left err->pure (Left (CommandRejected (T.pack (show err))))
           Right captured->do
-            prepared<-Form.prepareInputForm (Form.InputFormSpec "Rename file" "Name" (T.pack (takeFileName (Rename.renameSourcePath captured))) "Rename")
+            prepared<-Form.prepareForm Form.PrivateForm (Form.InputFormSpec "Rename file" "Name" (T.pack (takeFileName (Rename.renameSourcePath captured))) "Rename")
               (Form.formAction registry renameTo (\name->(captured,name)) (\_ value->pure value))
             pure (SidebarForm <$> prepared)))
   provider<-either (ioError . userError . show) pure =<< P.registerTree registry "hide.sidebar.files"
@@ -253,6 +253,7 @@ sidebarEffects host@(SidebarHost _ _ _ _ _ closed) core d effects=do
     step (_,current) effect=case effect of
       LoadTree request origin->(False,) <$> enqueue host request origin current
       InvokeTree trace reference origin->(False,) <$> invokeAction host trace reference origin current
+      SubmitChoiceForm reference version selected origin->(False,) <$> submitChoiceForm host reference version selected origin current
       SubmitInputForm reference text origin->(False,) <$> submitForm host reference text origin current
       RetireInputForm reference->do
         Form.retireForm reference
@@ -677,27 +678,36 @@ badges (SidebarHost _ ref _ _ _ _) d=do
 -- Form ownership is independent of the source tree once the human accepted it.
 formDialog :: Form.FormRef -> Desktop -> Bool
 formDialog reference d=case dialog d of
-  Just dg | PluginInputForm owned<-purpose dg->owned==reference
+  Just dg->case purpose dg of PluginInputForm owned->owned==reference; PluginChoiceForm owned _->owned==reference; _->False
   _->False
-adoptForm :: SidebarHost -> Bool -> Form.PreparedInputForm SidebarContext SidebarReply -> Desktop -> IO Desktop
+adoptForm :: SidebarHost -> Bool -> Form.PreparedForm SidebarContext SidebarReply -> Desktop -> IO Desktop
 adoptForm (SidebarHost _ ref _ _ _ _) opening prepared d=do
   state<-readIORef ref
   let reference=Form.formReference prepared
       present=maybe False ((==reference).Form.formReference) (inputForm state)
       owned=if opening then dialog d==Nothing && not (questionActive d) && not (activeAutocomplete d) else present && formDialog reference d
-  accepted<-if owned then Form.admitInputForm present prepared else pure False
+  accepted<-if owned then Form.admitForm present prepared else pure False
   if not accepted then pure d else do
     when opening (mapM_ (Form.retireForm . Form.formReference) (inputForm state))
     modifyIORef' ref (\s->s {inputForm=Just prepared})
     let spec=Form.formSpec prepared
-        build=Dialog (Form.inputFormTitle spec) (PluginInputForm reference)
-          [SelectedInput (Form.inputFormLabel spec) (Form.inputFormInitial spec) (Selection 0 (T.length (Form.inputFormInitial spec)))]
-          0 [Form.inputFormSubmit spec,"Cancel"] []
-        refresh dg=dg {dialogTitle=Form.inputFormTitle spec,buttons=[Form.inputFormSubmit spec,"Cancel"],
-          fields=[case field of SelectedInput _ text selected->SelectedInput (Form.inputFormLabel spec) text selected; _->field | field<-fields dg]}
+        choiceIndex value=maybe 0 id (Form.formChoiceIndex prepared value)
+        build=case spec of
+          Form.InputFormSpec _ label initial _->Dialog (Form.formTitle spec) (PluginInputForm reference)
+            [SelectedInput label initial (Selection 0 (T.length initial))] 0 [Form.formSubmit spec,"Cancel"] []
+          Form.ChoiceFormSpec _ label choices initial _->Dialog (Form.formTitle spec) (PluginChoiceForm reference (Form.formRevision prepared))
+            [ListBox label (map snd choices) (choiceIndex initial)] 0 [Form.formSubmit spec,"Cancel"] []
+        refresh dg=dg {purpose=case spec of Form.ChoiceFormSpec{}->PluginChoiceForm reference (Form.formRevision prepared); _->purpose dg,dialogTitle=Form.formTitle spec,buttons=[Form.formSubmit spec,"Cancel"],fields=case spec of
+          Form.InputFormSpec _ label _ _->[case field of SelectedInput _ text selected->SelectedInput label text selected; _->field | field<-fields dg]
+          Form.ChoiceFormSpec _ label choices _ _->[case field of
+            ListBox _ _ selected->
+              let ident=inputForm state >>= \old->Form.formChoiceAt old selected
+                  retained=maybe 0 choiceIndex ident
+              in ListBox label (map snd choices) retained
+            _->field | field<-fields dg]}
     pure d {dialog=if opening then Just build else refresh <$> dialog d,contextMenu=Nothing,contextTarget=Nothing}
 -- Refresh transport is metadata-only and cannot create a modal by escaped ref.
-refreshForm :: SidebarHost -> Form.InputFormUpdate -> Desktop -> IO Desktop
+refreshForm :: SidebarHost -> Form.FormUpdate -> Desktop -> IO Desktop
 refreshForm host@(SidebarHost _ ref _ _ _ _) update d=do
   state<-readIORef ref
   case inputForm state of
@@ -718,6 +728,13 @@ tickForm (SidebarHost _ ref _ _ _ _) d=do
         Form.retireForm (Form.formReference prepared)
         modifyIORef' ref (\s->s {inputForm=Nothing})
         pure (if owned then d {dialog=Nothing,status="Input form expired."} else d)
+-- Resolve indices only through the exact installed form; labels grant no action.
+submitChoiceForm :: SidebarHost -> Form.FormRef -> Integer -> Int -> Menu.MenuOrigin -> Desktop -> IO Desktop
+submitChoiceForm host@(SidebarHost _ ref _ _ _ _) reference version selected origin d=do
+  state<-readIORef ref
+  case inputForm state of
+    Just prepared | Form.formReference prepared==reference,Form.formRevision prepared==version,Just value<-Form.formChoiceAt prepared selected->submitForm host reference value origin d
+    _->pure d {status="Choice form expired."}
 submitForm :: SidebarHost -> Form.FormRef -> Text -> Menu.MenuOrigin -> Desktop -> IO Desktop
 submitForm (SidebarHost _ ref _ _ _ _) reference text origin d=mask $ \restore->do
   state<-readIORef ref
@@ -742,8 +759,20 @@ forceFormReply (SidebarAgent (RenameAgentTo who value))
       let copied=T.copy value
       _<-evaluate (T.length copied)
       evaluate (SidebarAgent (RenameAgentTo who copied))
+forceFormReply reply@(SidebarAgent request)=case request of
+  ConfigureAgent _ option value->checked option value
+  ConfigureCompletion _ option value->checked option value
+  _->ioError (userError "Unsupported form reply.")
+  where checked option value
+          | T.length option>4096 || T.length value>4096=ioError (userError "Oversized choice form result.")
+          | otherwise=evaluate (T.length option+T.length value) >> evaluate reply
 forceFormReply reply@SidebarRename{}=evaluate reply
 forceFormReply _=ioError (userError "Unsupported single-line form reply.")
+acceptedFormRequest :: AgentSidebarRequest -> Bool
+acceptedFormRequest RenameAgentTo{}=True
+acceptedFormRequest ConfigureAgent{}=True
+acceptedFormRequest ConfigureCompletion{}=True
+acceptedFormRequest _=False
 finishFormJob :: SidebarHost -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> Form.FormRef
   -> Async (Either CommandError SidebarReply) -> Bool -> IO Desktop
 finishFormJob host@(SidebarHost _ ref _ cancellation _ _) core d reference worker cancelled=do
@@ -764,7 +793,7 @@ finishFormJob host@(SidebarHost _ ref _ cancellation _ _) core d reference worke
       modifyIORef' ref (\s->s {actionJob=Nothing})
       consumed<-if current then Form.finishFormSubmission reference else Form.retireForm reference >> pure False
       case result of
-        Right (Right (SidebarAgent request@RenameAgentTo{})) | consumed->snd <$> core d [AgentSidebarAction request]
+        Right (Right (SidebarAgent request)) | consumed,acceptedFormRequest request->snd <$> core d [AgentSidebarAction request]
         Right (Right (SidebarRename owner prepared)) | consumed->do
           provider<-maybe (pure False) P.treeCurrent (M.lookup owner (providers state))
           if not provider then pure d {status="Files provider expired."} else do

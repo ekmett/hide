@@ -555,6 +555,7 @@ applyEffects = foldM apply . (False,)
     apply (_,d) (RetirePluginWindow reference)=(False,) <$> retireClosedWindow reference d
     -- Reload/inspection belong to the session worker, not this blocking file
     -- interpreter used by standalone drivers and snapshots.
+    apply (_,d) SubmitChoiceForm{}=pure (False,d {status="Choice form submission requires its sidebar owner."})
     apply (_,d) SubmitInputForm{}=pure (False,d {status="Input form submission requires its sidebar owner."})
     apply (_,d) (RetireInputForm reference)=Form.retireForm reference >> pure (False,d)
     apply (_,d) ReloadKeyBindings{}=pure (False,d {status="Binding reload requires a running session."})

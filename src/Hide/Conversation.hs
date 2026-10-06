@@ -337,12 +337,6 @@ applyAgentSidebar :: ConversationState -> AgentSidebarRequest -> Desktop -> IO D
 applyAgentSidebar runtime@(ConversationState _ ref _ _ agents) request d=case request of
   ShowAgent ident | ident==AR.primaryAgent agents->perform runtime "show" [] d
                   | otherwise->showAgentHistory runtime ident d
-  ShowAgentConfiguration receipt option choices selected->do
-    when (AH.agentConfigAgent receipt==AR.primaryAgent agents) (syncConversationAgent runtime)
-    current<-AH.agentConfigurationCurrent hub receipt
-    pure $ if not current then d {status="Agent choices expired."} else d {dialog=Just (Dialog "Agent setting"
-      (AgentChoiceDialog receipt option choices) [ListBox "Provider choices" (map (T.take 256 . snd) choices) selected]
-      0 ["Apply","Cancel"] []),contextMenu=Nothing,contextTarget=Nothing}
   ConfigureAgent receipt option value
     | AH.agentConfigAgent receipt==AR.primaryAgent agents->do
         syncConversationAgent runtime

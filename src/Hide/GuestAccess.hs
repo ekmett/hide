@@ -30,6 +30,7 @@ import System.FilePath ((</>), isAbsolute, normalise)
 import Hide.Browser (Entry(..))
 import Hide.Buffer
 import qualified Hide.Plugin.Menu as Plugin
+import qualified Hide.Plugin.Form as Form
 import Hide.Model
 import Hide.Privacy (protectedFilePath,protectedFilePathParent)
 
@@ -155,6 +156,7 @@ guestEffectsAllowed=all allowed
     allowed AdoptPreparedBuild{}=False
     allowed SessionSidebarAction{}=False
     allowed SubmitInputForm{}=False
+    allowed SubmitChoiceForm{}=False
     allowed RetireInputForm{}=False
     allowed AgentSidebarAction{}=False
     allowed ReloadKeyBindings{}=False
@@ -180,8 +182,7 @@ guestEffectsAllowed=all allowed
     allowed _=True
 protectedPurpose :: Purpose -> Bool
 protectedPurpose p=case p of
-  AgentChoiceDialog{} -> True
-  CompletionChoiceDialog{} -> True
+  PluginChoiceForm{} -> True
   PluginInputForm{} -> True
   AgentNewDialog -> True
   EnvironmentDialog{} -> True
@@ -270,7 +271,8 @@ privateField field | Just (label,_)<-inputValue field=sensitiveLabel label
 privateField (CheckBox "Streamer mode" _)=True
 privateField _=False
 pluginForm :: Dialog -> Bool
-pluginForm dg=case purpose dg of PluginInputForm{}->True; _->False
+pluginForm dg=case purpose dg of PluginInputForm reference->private reference; PluginChoiceForm reference _->private reference; _->False
+  where private reference=Form.formDisclosure reference==Form.PrivateForm
 privateDialogField :: Desktop -> Dialog -> Field -> Bool
 privateDialogField d dg field=pluginForm dg || privateSourceWatch d dg || privateField field || case inputValue field of
   Just (_,value) -> case purpose dg of

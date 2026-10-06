@@ -2,24 +2,36 @@
 
 Status: implemented typed command registration, immutable buffer reads and checked
 strict diffs, scoped menus/bindings, shared sidebar trees, prepared plugin text
-windows, fixed rows with readonly Details, and one host-owned single-line form.
+windows, fixed rows with readonly Details, and host-owned input and choice forms.
 The current APIs are in
 `Hide.Plugin.Command`, `Buffer`, `Menu`, `Tree`, `Window` and `Form`. The signatures
 below sketch the broader proposed contracts and are not a compilable SDK. The
 approved [sidebar design](../plans/sidebar-navigation.md) supplies the navigation
 model.
 
-The current form consumers are **Agents > Rename** and **Files > Rename**. A linked
-handler prepares an
-`InputFormSpec` and a typed registered action, then returns a `SidebarForm` on the
-existing sidebar worker route. The host owns the draft, selected range and modal
-geometry. Metadata-only refresh keeps those values and the same `FormRef`; close
-and reopen use distinct references. Human submission claims the form once, and a
-reply is adopted only while that form and its registration remain current. The
-closed host results currently support captured agent rename and checked saved-file
-basename rename; arbitrary widget actions
-and embedded editable plugin windows remain separate work. Forms are private by
-default to agent input and public capture, including their title and status.
+**Agents > Rename** and **Files > Rename** use input forms. The Agents tree’s
+**Model** and **Effort** actions use choice forms for primary, child and ACP
+completion agents. A linked
+handler prepares an `InputFormSpec` or `ChoiceFormSpec` with a typed registered
+action, then returns a `SidebarForm` through the existing sidebar worker.
+The host owns the draft, selection, focus and modal geometry.
+
+Choices submit provider IDs, not labels or row numbers. Metadata refresh can
+relabel or reorder the same choices while preserving the selected ID. Changing
+the available IDs requires a new form. Input refresh preserves the typed draft
+and selected range. Both keep the same `FormRef`; closing and reopening creates a
+new reference. A human submission is claimed once, and its reply is adopted only
+while that form and its command registration remain current. Agent configuration
+also rechecks the captured provider/session receipt at its owning operation.
+
+The checked host results support agent rename, saved-file basename rename and
+agent configuration. Arbitrary widget actions and embedded editable plugin
+windows remain separate work. Agent input cannot operate either kind of form.
+The linked owner declares capture disclosure when preparing it; refresh cannot
+change that declaration. Rename forms are private. Model/effort forms expose
+already-filtered public capability labels, preserving readable agent settings
+without allowing agent input. A readable form is no authority to expose protected
+source or session keys; its owner must remove those before preparation.
 
 ## Direction
 
