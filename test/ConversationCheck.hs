@@ -801,10 +801,10 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary remov
         check "repeated ticks do not join or duplicate blocked settings discovery" (maybe False (const True) next)
         putMVar settingsRelease ()
         wait writer
-        _<-timeout 8000000 (let loop current=do
+        let loop current=do
               next<-tickSessionServices runtime current
               if toolchain next==Just GHC then pure next else threadDelay 10000 >> loop next
-            in loop responsive) >>= maybe (error "asynchronous persisted toolchain timed out") pure
+        _<-timeout 8000000 (loop responsive) >>= maybe (error "asynchronous persisted toolchain timed out") pure
         pure ()
     removeFile runSettings
     -- Context reads happen before enqueueing a prompt. Holding one must leave
