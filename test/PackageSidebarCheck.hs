@@ -3,7 +3,7 @@ module PackageSidebarCheck (checks) where
 
 import Control.Concurrent (threadDelay)
 import Control.Exception (bracket)
-import Control.Monad (unless,when)
+import Control.Monad (unless,when,foldM)
 import Data.IORef
 import qualified Data.Aeson as A
 import qualified Data.ByteString.Lazy as BL
@@ -25,6 +25,7 @@ import Hide.Files (filePath)
 import Hide.Model
 import Hide.PackageSidebar
 import qualified Hide.Plugin.Tree as P
+import qualified Hide.Plugin.Window as W
 import Hide.Sidebar
 import Hide.SidebarCommands
 
@@ -58,8 +59,8 @@ checks=bracket temporary removePathForcibly $ \root->do
       mounted<-wait "package root" (has "sample") started
       targets<-activate "sample" mounted >>= wait "Cabal target" (has "exe:demo")
       let componentActions label=[title | row<-rows targets,P.infoLabel (rowInfo row)==label,(title,_)<-rowActions row]
-      unless ("Build" `elem` componentActions "exe:demo" && "Run" `elem` componentActions "exe:demo" && "Build" `elem` componentActions "lib:sample" && "Run" `notElem` componentActions "lib:sample" && null (componentActions "test:ignored") && null (componentActions "exe:disabled"))
-        (fail "Cabal executable exposes captured Build and Run actions")
+      unless ("Build" `elem` componentActions "exe:demo" && "Run" `elem` componentActions "exe:demo" && "Build" `elem` componentActions "lib:sample" && "Run" `notElem` componentActions "lib:sample" && componentActions "test:check"==["Test"] && componentActions "test:driver"==["Test"] && componentActions "bench:measure"==["Benchmark"] && null (componentActions "exe:disabled"))
+        (fail "Cabal components expose only their supported captured actions")
       sources<-activate "exe:demo" targets >>= wait "Cabal source" (\d->any (\row->P.infoLabel (rowInfo row)=="Main.hs" && rowDepth row==2) (rows d) && ready d)
       unless (has "Missing (missing)" sources && has "Paths_sample (generated)" sources)
         (fail ("Missing/generated sources stay visible without a build: "<>show (map (P.infoLabel.rowInfo) (rows sources))))
@@ -114,9 +115,51 @@ checks=bracket temporary removePathForcibly $ \root->do
         -- Dirty source is captured before preparation: no target process is launched.
         removeFile invocation
         readyToReuse<-timeout 5000000 (let loop current=do next<-tick current; pending<-buildTerminalLaunchPending runtime; if pending then threadDelay 1000 >> loop next else pure next in loop stopped) >>= maybe (fail "Run preparation did not retire") pure
-        let focused=maybe readyToReuse (\window->focusWindow (windowId window) readyToReuse) (activeWindow other)
+        -- These component actions must refuse THC, rather than silently using
+        -- Cabal/GHC or changing the saved toolchain.
+        afterRefusals<-foldM (\current (label,action)->do
+          refused<-request label action current {dialog=Nothing} >>= admitted >>= wait "THC runner refusal" (maybe False (const True) . dialog)
+          spawned<-doesFileExist invocation
+          savedConfig<-BL.readFile configPath
+          unless (not spawned && savedConfig==bytes) (fail "Unsupported THC runner must not spawn or rewrite settings")
+          pure refused {dialog=Nothing}) readyToReuse [("test:check","Test"),("bench:measure","Benchmark")]
+        -- A Cabal fixture records the real package-action job boundary; it does
+        -- not qualify Cabal itself. Other.hs remains the focused source.
+        let cabalBin=root </> "bin"
+            cabal=cabalBin </> "cabal"
+            ghcConfig=B.BuildConfig GHC compiler "exe:not-selected" "compiler root" "runtime path" ["program argument"]
+            ghcBytes=A.encode (B.buildConfigValue root ghcConfig)
+        createDirectory cabalBin
+        writeFile cabal ("#!/bin/sh\nprintf '%s\n' \"$PWD\" \"$@\" > '"<>invocation<>".tmp'\nmv '"<>invocation<>".tmp' '"<>invocation<>"'\nprintf 'captured runner output\n'\nif [ \"$1\" = bench ]; then while :; do sleep 1; done; fi\n")
+        cabalPermissions<-getPermissions cabal
+        setPermissions cabal cabalPermissions {executable=True}
+        BL.writeFile configPath ghcBytes
+        path<-lookupEnv "PATH"
+        afterRunners<-withEnv "PATH" (Just (cabalBin<>[searchPathSeparator]<>maybe "" id path)) $ do
+          tested<-request "test:check" "Test" afterRefusals >>= admitted >>= waitInvocation
+          testArguments<-lines <$> readFile invocation
+          unless (testArguments==[root,"test","--with-compiler="<>compiler,"--test-show-details=direct","sample:test:check"])
+            (fail "Test uses captured qualified component/root and selected GHC")
+          testDone<-wait "captured Test completes" (T.isInfixOf "completed." . status) tested
+          removeFile invocation
+          driver<-request "test:driver" "Test" testDone >>= admitted >>= waitInvocation
+          driverArguments<-lines <$> readFile invocation
+          unless (last driverArguments=="sample:test:driver") (fail "Detailed Test delegates its captured component to Cabal")
+          driverDone<-wait "captured driver Test completes" (T.isInfixOf "completed." . status) driver
+          removeFile invocation
+          benchmarked<-request "bench:measure" "Benchmark" driverDone >>= admitted >>= waitInvocation
+          benchArguments<-lines <$> readFile invocation
+          unless (benchArguments==[root,"bench","--with-compiler="<>compiler,"sample:bench:measure"])
+            (fail "Benchmark uses captured component without Run program/runtime arguments")
+          visible<-wait "captured Benchmark output" (maybe False (\window->let text=W.preparedWindowText window in "captured runner output" `T.isInfixOf` contentSlice text 0 (contentLength text)) . activePluginWindow) benchmarked
+          cancelled<-stopConversationBuild runtime visible
+          wait "captured Benchmark Stop" (T.isInfixOf "Stopped." . status) cancelled
+        unchangedConfig<-BL.readFile configPath
+        unless (unchangedConfig==ghcBytes) (fail "Test/Benchmark must not replace the saved target")
+        removeFile invocation
+        let focused=maybe afterRunners (\window->focusWindow (windowId window) afterRunners) (activeWindow other)
             dirty=editActive (\sel->replaceSelection sel "changed") Nothing focused
-        blocked<-request "exe:demo" "Build" dirty >>= admitted >>= wait "dirty target refusal" (maybe False (const True) . dialog)
+        blocked<-request "test:check" "Test" dirty >>= admitted >>= wait "dirty target refusal" (maybe False (const True) . dialog)
         exists<-doesFileExist invocation
         unless (not exists) (fail "Dirty source cannot launch a captured package build")
         let reopened=blocked {dialog=Nothing}
@@ -137,11 +180,11 @@ checks=bracket temporary removePathForcibly $ \root->do
         -- Freeze a current intent, then advance its package snapshot before adoption.
         let clean=agentRefused {dialog=Nothing,buffers=buffers other}
             rootHit d=case [rowHit row | row<-rows d,P.infoLabel (rowInfo row)=="sample"] of hit:_->Just hit; _->Nothing
-        pending<-request "exe:demo" "Build" clean >>= admitted
+        pending<-request "bench:measure" "Benchmark" clean >>= admitted
         writeIORef attempted False
         writeFile file (manifest "sample"<>"-- new captured snapshot\n")
         refreshed<-timeout 5000000 (let loop d=do next<-sidebarTick d; if rootHit next/=rootHit pending && rootHit next/=Nothing then pure next else threadDelay 1000 >> loop next in loop pending) >>= maybe (fail "Package snapshot did not refresh") pure
-        refused<-timeout 5000000 (let loop d=do next<-tick d; reached<-readIORef attempted; if reached then pure next else threadDelay 1000 >> loop next in loop refreshed) >>= maybe (fail "Stale captured target did not reach its host gate") pure
+        refused<-withEnv "PATH" (Just (cabalBin<>[searchPathSeparator]<>maybe "" id path)) $ timeout 5000000 (let loop d=do next<-tick d; reached<-readIORef attempted; if reached then pure next else threadDelay 1000 >> loop next in loop refreshed) >>= maybe (fail "Stale captured target did not reach its host gate") pure
         staleLaunch<-doesFileExist invocation
         unless (not staleLaunch) (fail "A changed package snapshot cannot execute a captured target")
         -- Keep the original source/navigation lifecycle checks on the fresh projection.
@@ -188,7 +231,7 @@ checks=bracket temporary removePathForcibly $ \root->do
       pure ()
   putStrLn "package sidebar checks passed"
   where
-    manifest name=unlines ["cabal-version: 3.0","name: "<>name,"version: 0.1","library","  exposed-modules: Main","executable disabled","  main-is: Main.hs","  buildable: False","  if os(linux)","    buildable: True","executable second","  main-is: Other.hs","test-suite ignored","  type: exitcode-stdio-1.0","  main-is: Main.hs","executable demo","  main-is: Main.hs","  other-modules: Missing","  autogen-modules: Paths_sample"]
+    manifest name=unlines ["cabal-version: 3.0","name: "<>name,"version: 0.1","library","  exposed-modules: Main","executable disabled","  main-is: Main.hs","  buildable: False","  if os(linux)","    buildable: True","executable second","  main-is: Other.hs","test-suite check","  type: exitcode-stdio-1.0","  main-is: Main.hs","test-suite driver","  type: detailed-0.9","  test-module: Main","benchmark measure","  type: exitcode-stdio-1.0","  main-is: Main.hs","executable demo","  main-is: Main.hs","  other-modules: Missing","  autogen-modules: Paths_sample"]
     temporary=do
       base<-getTemporaryDirectory
       (path,handle)<-openTempFile base "hide-package-sidebar"

@@ -209,7 +209,7 @@ data LanguageAction = TypeInfo | FindDefinition | Completions | ShowProblems | R
 data Completion = Completion Text [(Int,Int,Text)] deriving (Eq,Show)
 data ProjectAction = LoadProject | ProjectPage Int Int | ProjectDetails Int Int deriving (Eq,Show)
 -- | Existing build operation selected by the admitted host command.
-data BuildAction = Compile | Make | Run deriving (Eq,Show)
+data BuildAction = Compile | Make | Run | Test | Benchmark deriving (Eq,Show)
 -- | Captured component identity and provider/snapshot scope. The manifest stamp
 -- is checked on the preparation worker; final owner checks use only metadata.
 data PackageBuildTarget = PackageBuildTarget
