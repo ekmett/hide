@@ -41,6 +41,8 @@ import qualified System.Posix.IO as Posix
 import System.Info (os)
 import System.Timeout (timeout)
 import Hide.Render (snapshot, snapshotHtml, renderCursor)
+import Hide.Font (loadFont)
+import qualified Hide.ScreenCapture as ScreenCapture
 import Hide.Buffer
 import qualified Hide.App as App
 import Hide.GuestAccess (guestCommandAllowed, protectedBuffer, readableAt)
@@ -597,6 +599,27 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary remov
             (renderCursor live==V.Cursor (left rect+3) (top rect) &&
               maybe False ((==Selection 1 1).questionSelection) (chatQuestion hit) &&
               "界λ" `T.isInfixOf` snapshot live && all (\x->not (readableAt live x (top rect))) [left rect..left rect+2])
+          let marked=live {chatQuestion=fmap (\value->value {questionBuffer=newBuffer "\x301\&private",questionSelection=Selection 0 0}) (chatQuestion live)}
+          font<-loadFont
+          captured<-ScreenCapture.capture font marked False >>= either (error . T.unpack) pure
+          let capturedText=do
+                blocks<-field "content" captured
+                block<-listToMaybe blocks
+                encoded<-field "text" block
+                metadata<-decodeStrict' (TE.encodeUtf8 encoded)
+                field "text" metadata
+          check "capture hides leading answer marks joined to the label guard cell"
+            ("\x301" `T.isInfixOf` snapshot marked {streamerMode=True} &&
+              not (readableAt marked (left rect-1) (top rect)) &&
+              maybe False (\text->not ("\x301" `T.isInfixOf` text) && not ("private" `T.isInfixOf` text)) capturedText)
+          let inputRow=top rect-top (bounds win)-1+scrollRow win
+              oneRow=ensureQuestionVisible (modifyActive (\w->w {bounds=(bounds w) {height=4},scrollRow=inputRow+1}) live)
+              shortWindow=fromMaybe (error "Missing one-row question window") (activeWindow oneRow)
+          check "one-row body reveals the actual answer before Submit"
+            (windowContentRows oneRow (questionDocument oneRow) shortWindow==1 &&
+              case questionInputGeometry oneRow shortWindow of
+                Just (input,_,_)->top input==top (bounds shortWindow)+1
+                _->False)
           let spacer=top (bounds win)+1+windowContentRows live (questionDocument live) win
               (_,outside)=handleEvent (V.EvMouseDown (left rect) spacer V.BLeft []) live
           check "question controls do not hit the reserved composer spacer"

@@ -2391,10 +2391,12 @@ ensureQuestionVisible d=d {windows=map reveal (windows d)}
               Just index->fromMaybe (projectedQuestionInput projected) (listToMaybe =<< listToMaybe (drop index (projectedQuestionChoices projected)))
               Nothing->projectedQuestionInput projected
             row=fst (windowTextPosition d w (bufferContent (documentBuffer doc)) offset)
-              +if questionChoice q==Nothing then 1 else 0
             rows=max 1 (windowContentRows d doc w)
             previous=scrollRow w
-        in w {scrollRow=max 0 (if row<previous then row else if row>=previous+rows then row-rows+1 else previous)}
+            revealed=if row<previous then row else if row>=previous+rows then row-rows+1 else previous
+            -- Include Submit when it fits, but never scroll Other out of view.
+            followed=if questionChoice q==Nothing && rows>1 && row+1>=revealed+rows then row-rows+2 else revealed
+        in w {scrollRow=max 0 followed}
       _->w
 
 questionEvent :: V.Event -> Desktop -> Maybe (Desktop,[Effect])

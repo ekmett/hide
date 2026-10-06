@@ -79,7 +79,9 @@ sanitizedBufferContent d bid=do
 privateOffset :: Desktop -> Text -> Int -> Bool
 privateOffset d text n=sessionOffset text n || any private (chatActions d)
   where
-    private (a,z,"question-input",_)=n>=a+7 && n<z
+    -- A leading zero-width answer can join the separating blank after Other:.
+    -- That guard cell is private too, so capture hides the whole grapheme.
+    private (a,z,"question-input",_)=n>=a+6 && n<z
     -- The selected choice changes the color of its entire label, not just (*).
     private (a,z,"question-choice",_)=n>=a && n<z
     private _=False
