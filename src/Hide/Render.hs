@@ -206,7 +206,6 @@ renderKey original = do
   tree<-traverse sidebar (sideTree original)
   payload (diagnostics original)
   payload (buildDiagnostics original)
-  payload (chatActions original)
   mapM_ payload (gitReview original)
   payload (clipboard original)
   mapM_ payload (snd (clipboardExport original))
