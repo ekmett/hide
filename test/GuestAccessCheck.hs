@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 module GuestAccessCheck (checks) where
+import EditorFixture (withEditorFixture)
 import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Monad (unless,forM_)
 import Data.Aeson (object,(.=),withObject,(.:))
@@ -20,13 +21,12 @@ import Hide.Model
 import qualified Hide.Protocol as P
 
 checks :: IO ()
-checks=do
+checks=withEditorFixture "" (addReadOnly "Conversation" "Session: provider-secret\nPublic transcript\nOther: private answer" (addDocument Nothing (newBuffer "file") (initialDesktop (100,35)))) $ \conversation->do
   let check label ok=unless ok (error label)
       base=(addDocument Nothing (newBuffer "file") (initialDesktop (100,35))) {wordStar=False}
       sourceId=maybe (-1) sourceFixtureBuffer (activeWindow base)
       firstRect d dg=case fieldRects d dg of r:_->r; _->error "missing field rectangle"
-      conversation=addReadOnly "Conversation" "Session: provider-secret\nPublic transcript\nOther: private answer" base
-      chat=conversation {composerBuffer=newBuffer "private draft",composerFocused=True,
+      chat=(setComposerInput (newBuffer "private draft") (Selection 0 0) True conversation) {
         chatActions=[(43,64,"question-input",[])],chatInputOffset=Just 50}
       window=case activeWindow chat of Just w->w; _->error "no chat window"
       ident=sourceFixtureBuffer window
@@ -38,7 +38,7 @@ checks=do
       hidden=(newDocument poison Nothing) {documentLabel=Just "Agent request",documentHighlight=error "guest guard forced highlighting",documentSourceRows=error "guest guard forced source rows"}
       q=ChatQuestion 42 "Human question" ["Yes"] Nothing poison (Selection 0 0) False
       conflict=Conflict 1 0 (FileState "/public/source.hs" (Just (error "guest guard forced disk baseline"))) (Just (error "guest guard forced disk conflict"))
-      retained=base {buffers=M.insert 99 hidden (buffers base),composerBuffer=poison,autocompleteDraft=poison,chatQuestion=Just q,
+      retained=(setComposerInput poison (Selection 0 0) False conversation) {windows=windows base,buffers=M.insert 99 hidden (buffers conversation),autocompleteDraft=poison,chatQuestion=Just q,
         dialog=Just (Dialog "Conflict" (DiskConflict conflict) [Input "Name" "source.hs" 0] 0 ["OK"] [])}
   (_,reply)<-controlTool (\d _->pure (False,d)) retained "editor_input"
     (object ["events" .= [object ["type" .= ("blur"::T.Text)]]])
@@ -48,10 +48,16 @@ checks=do
   forM_ [retained {buffers=M.adjust (\doc->doc {documentBuffer=newBuffer "replacement"}) 99 (buffers retained)},
          retained {buffers=M.adjust (\doc->doc {documentLabel=Just "Public"}) 99 (buffers retained)},
          retained {buffers=M.delete 99 (buffers retained)},
-         retained {composerBuffer=newBuffer "replacement"},
+         setComposerInput (newBuffer "replacement") (Selection 0 0) False retained,
          retained {autocompleteDraft=newBuffer "replacement"},
-         retained {chatQuestion=Just q {questionBuffer=newBuffer "replacement"}}] $ \changed->
+         retained {chatQuestion=Just q {questionBuffer=newBuffer "replacement"}},
+         retained {editorDrafts=M.map (\draftState->draftState {editorDraftSelection=Selection 1 1}) (editorDrafts retained)},
+         retained {editorDrafts=M.map (\draftState->draftState {editorDraftFocused=True}) (editorDrafts retained)},
+         retained {editorDrafts=M.empty}] $ \changed->
     check "protected replacement rejects unchanged numeric revisions" . not =<< guestTransitionAllowed retained changed []
+  let rewrapped=retained {editorDrafts=M.map (\draftState->draftState
+        {editorDraftBuffer=editorDraftBuffer draftState,editorDraftSelection=editorDraftSelection draftState}) (editorDrafts retained)}
+  check "unchanged hidden draft wrappers do not force saved contents or Undo" =<< guestTransitionAllowed retained rewrapped []
   let publicInput=retained {dialog=Nothing,chatQuestion=Nothing}
   (_,typedReply)<-controlTool (\d _->pure (False,d)) publicInput "editor_input"
     (object ["events" .= [object ["type" .= ("key"::T.Text),"key" .= ("x"::T.Text)]]])
@@ -94,6 +100,19 @@ checks=do
     (not (pointerAllowedAt chat (x+2) (y+2)) && not (pointerAllowedAt chat (x+2) (top draft)))
   forM_ [P.Key "Enter" [],P.Key "x" [],P.Paste "answer",P.Mouse "down" (left draft) (top draft) 0 1 [],P.Mouse "down" (x+2) (top draft) 0 1 []] $ \event ->
     checkDenied "guest cannot type or click into human draft/answer controls" chat [event]
+  let generic=chat {buffers=M.adjust (\doc->doc {documentLabel=Nothing}) ident (buffers chat),chatActions=[],chatInputOffset=Nothing}
+      genericWindow=maybe (error "generic editor missing") id (activeWindow generic)
+      genericDraft=composerRect generic genericWindow
+  check "source-attached input is private regardless of document title while its body stays readable"
+    (readableAt generic (x+2) (y+2) && not (readableAt generic (left genericDraft) (top genericDraft)) &&
+     not (pointerAllowedAt generic (left genericDraft) (top genericDraft)) &&
+     not (guestKeyboardAllowed generic) && not (guestCommandAllowedIn generic Copy) &&
+     sanitizedBuffer generic ident==Just (activeText generic))
+  checkDenied "generic attached editor rejects guest text, clipboard and pointer routes" generic
+    [P.Paste "guest",P.Key "x" [],P.Key "c" [V.MCtrl],P.MenuCommand Copy,P.BrowserCommand Copy,
+     P.Mouse "down" (left genericDraft) (top genericDraft) 0 1 []]
+  check "human streamer presentation keeps the attached draft visible"
+    (streamerReadableAt generic {streamerMode=True} (left genericDraft) (top genericDraft))
   let (human,_) = P.applyInput (P.Paste "human") chat
   check "human input still edits the conversation draft" (contents (composerBuffer human)/=contents (composerBuffer chat))
   moved<-either (error . T.unpack) pure =<< P.applyGuestInput (P.Key "F6" []) chat

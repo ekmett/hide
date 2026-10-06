@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module RequestedPasteCheck (checks) where
 
+import EditorFixture (withEditorFixture)
 import Control.Monad (unless,forM_)
 import Data.Aeson (object,(.=))
 import Data.Aeson.Types (parseEither)
@@ -81,4 +82,34 @@ checks=do
   refreshRequestedPaste reads output
   (_,effects)<-applyRequestedPaste reads terminalToken "terminal input" output
   check "PTY output does not expire requested input" (effects==[ServiceAction "terminal-input" ["test","terminal input"]])
+  withEditorFixture "" source $ \mounted->do
+    let chat=setComposerInput (newBuffer "draft") (Selection 5 5) True mounted
+    matching<-token chat
+    refreshRequestedPaste reads chat
+    (inserted,_)<-applyRequestedPaste reads matching " accepted" chat
+    check "a matching requested reply edits only its actual host-owned draft"
+      (contents (composerBuffer inserted)=="draft accepted" && activeText inserted==activeText chat)
+    leaving<-token chat
+    refreshRequestedPaste reads source
+    (returned,_)<-applyRequestedPaste reads leaving "stale" chat
+    check "returning to the same draft cannot revive a clipboard receipt"
+      (revision (composerBuffer returned)==revision (composerBuffer chat) && composerSelection returned==composerSelection chat)
+    editedDraft<-token chat
+    refreshRequestedPaste reads (setComposerInput (replaceSelection (Selection 0 0) "x" (composerBuffer chat)) (Selection 5 5) True chat)
+    (restoredDraft,_)<-applyRequestedPaste reads editedDraft "stale" chat
+    check "restoring an old immutable draft after an edit cannot revive requested input"
+      (revision (composerBuffer restoredDraft)==revision (composerBuffer chat))
+    replacedFrame<-token chat
+    -- A newly prepared frame for the same named target receives distinct opaque
+    -- editor ownership, even when its input tree and selection are transferred.
+    withEditorFixture "" chat $ \newFrame->do
+      let replacement=setComposerInput (composerBuffer chat) (composerSelection chat) True newFrame
+      refreshRequestedPaste reads replacement
+      (obsolete,_)<-applyRequestedPaste reads replacedFrame "stale" chat
+      check "a replacement editor attachment cannot preserve a prior clipboard receipt"
+        (activeEditorMount replacement/=activeEditorMount chat && revision (composerBuffer obsolete)==revision (composerBuffer chat))
+    let poisonDraft=(composerBuffer chat) {undoStack=error "editor paste receipt forced Undo",saved=error "editor paste receipt forced saved contents"}
+        retained=setComposerInput poisonDraft (composerSelection chat) True chat
+    _<-token retained
+    refreshRequestedPaste reads retained
   putStrLn "requested paste checks passed"

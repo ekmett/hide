@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module HintComposerCheck (checks) where
 
+import EditorFixture (withEditorFixture)
 import Control.Exception (bracket)
 import Control.Monad (unless)
 import qualified Data.ByteString as BS
@@ -16,9 +17,9 @@ import Hide.Model
 import Hide.Recovery
 
 checks :: IO ()
-checks=do
-  let base=(addReadOnly "Autocomplete" "completion trace\nresponse\n" (initialDesktop (90,30)))
-        {autocompleteACPEnabled=True,composerBuffer=newBuffer "main chat draft",composerSelection=Selection 2 5,
+checks=withEditorFixture "" (initialDesktop (90,30)) $ \chatBase->do
+  let base=(addReadOnly "Autocomplete" "completion trace\nresponse\n" (closeActive (setComposerInput (newBuffer "main chat draft") (Selection 2 5) True chatBase)))
+        {autocompleteACPEnabled=True,
          agentReplying=True,agentQueued=2,agentSteering=True}
       paste text d=fst (handleEvent (V.EvPaste (TE.encodeUtf8 text)) d)
       key k mods d=handleEvent (V.EvKey k mods) d

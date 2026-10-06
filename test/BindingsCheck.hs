@@ -1,5 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module BindingsCheck (checks) where
+import EditorFixture (withEditorFixture)
+import qualified Hide.Plugin.Editor as E
 import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Monad (unless,forM_)
 import Data.List (subsequences)
@@ -34,7 +36,7 @@ import Hide.Buffer
 import Hide.Render (renderKey)
 
 checks :: IO ()
-checks=do
+checks=withEditorFixture "" (addReadOnly "Conversation" "reply" (initialDesktop (80,25))) $ \chatBase->do
   prefixChecks
   dialogInputChecks
   debuggerNavigationChecks
@@ -100,10 +102,10 @@ checks=do
   check "removed sidebar movement stays removed" (maybe (-1) treeSelected (sideTree (fst (key V.KDown [] tree)))==0)
   check "context entry replaces global command chords" (boundKeyCommand (V.KChar 'p') [V.MCtrl,V.MShift] tree==Just AgentPermissions && boundKeyCommand (V.KChar 'p') [V.MAlt] tree==Nothing)
   check "rebound sidebar protected action retains guest policy" (not (guestKeyAllowed tree (V.KChar 'p') [V.MCtrl,V.MShift]))
-  let chat=(addReadOnly "Conversation" "reply" contextBase) {composerBuffer=newBuffer "draft",composerSelection=Selection 0 5,composerFocused=True}
+  let chat=setComposerInput (newBuffer "draft") (Selection 0 5) True chatBase {keyBindings=maps}
   check "conversation copy dispatches its effective chord" (clipboard (fst (key (V.KChar 'j') [V.MCtrl,V.MShift] chat))=="draft" && T.null (clipboard (fst (key (V.KChar 'c') [V.MCtrl] chat))))
   check "conversation commands remain protected after remapping" (not (guestKeyAllowed chat (V.KChar 'k') [V.MCtrl,V.MShift]))
-  check "conversation Enter keeps draft submission ownership" (snd (key V.KEnter [] chat)==[AgentAction "send-draft" []])
+  check "conversation Enter keeps draft submission ownership" (case snd (key V.KEnter [] chat) of [SubmitEditor mount E.DefaultEditor _]->Just mount==activeEditorMount chat; _->False)
   let pty=addReadOnly "Terminal test" "output" contextBase
   check "terminal editor actions can be rebound" (snd (key (V.KFun 11) [V.MAlt] pty)==[ServiceAction "terminal-stop" []])
   check "terminal control characters retain process ownership" (all (\(c,text)->snd (key (V.KChar c) [V.MCtrl] pty)==[ServiceAction "terminal-input" ["test",text]]) [('c',"\ETX"),('q',"\DC1"),('s',"\DC3")])
@@ -116,11 +118,11 @@ checks=do
   check "unknown contexts fail instead of disappearing" (either (const True) (const False) (platformBindings [] TerminalPlatform (M.singleton "sidebaar" M.empty)))
   let defaults=either (error . show) id (platformBindings [] TerminalPlatform M.empty)
       compiled d=d {keyBindings=defaults}
-      draft=chat {keyBindings=M.empty,composerSelection=Selection 5 5}
+      draft=setComposerInput (composerBuffer chat) (Selection 5 5) True chat {keyBindings=M.empty}
       chatState (d,effects)=(contents (composerBuffer d),composerSelection d,composerFocused d,clipboard d,effects)
   check "default conversation text and selection retain owner behavior" (all (\(k,m)->chatState (key k m draft)==chatState (key k m (compiled draft)))
     [(V.KLeft,[V.MShift]),(V.KChar 'a',[V.MCtrl]),(V.KEnter,[V.MShift]),(V.KChar 'x',[]),(V.KChar '\t',[]),(V.KEnter,[V.MCtrl])])
-  let selectedDraft=draft {composerSelection=Selection 0 5}
+  let selectedDraft=setComposerInput (composerBuffer draft) (Selection 0 5) True draft
   check "default conversation shifted clipboard keys retain owner behavior" (all (\c->chatState (key (V.KChar c) [V.MCtrl,V.MShift] selectedDraft)==chatState (key (V.KChar c) [V.MCtrl,V.MShift] (compiled selectedDraft))) ['c','x','v'])
   check "default debugger controls retain ownership" (all (\(k,m)->snd (key k m debug {keyBindings=M.empty})==snd (key k m (compiled debug))) [(V.KFun 4,[]),(V.KFun 7,[]),(V.KFun 8,[]),(V.KFun 7,[V.MCtrl])])
   let messagePane=base {problemsVisible=True,problemsFocused=True,diagnostics=[Diagnostic "/project/Main.hs" Nothing 0 0 1 "first",Diagnostic "/project/Main.hs" Nothing 1 0 1 "second"]}
@@ -202,7 +204,7 @@ checks=do
   putStrLn "keybinding checks passed"
 
 windowChecks :: IO ()
-windowChecks=do
+windowChecks=withEditorFixture "" (addReadOnly "Conversation" "reply" (initialDesktop (80,25))) $ \chatBase->do
   let check name ok=unless ok (error name)
       compile entries=either (error . show) id (platformBindings [] TerminalPlatform (M.singleton "global" (M.fromList entries)))
       defaults=compile []
@@ -227,7 +229,7 @@ windowChecks=do
     check "removed window aliases neither cycle nor edit source"
       (all (\(k,mods)->state (step k mods d)==state d && null (snd (event k mods d))) aliases)
   let terminal=(addReadOnly "Terminal test" "output" base) {keyBindings=removed}
-      chat=(addReadOnly "Conversation" "reply" base) {keyBindings=removed,composerBuffer=newBuffer "draft",composerSelection=Selection 1 3,composerFocused=True}
+      chat=setComposerInput (newBuffer "draft") (Selection 1 3) True chatBase {keyBindings=removed}
   check "unbound PTY window aliases send no bytes"
     (all (\(k,mods)->current (step k mods terminal)==current terminal && null (snd (event k mods terminal))) aliases &&
      snd (event (V.KChar 'c') [V.MCtrl] terminal)==[ServiceAction "terminal-input" ["test","\ETX"]])
@@ -388,7 +390,7 @@ verticalChecks=do
   check "vertical platform remap projects the same identity and label" (range (event (V.KChar 'j') [V.MMeta,V.MShift] mac)==Just (Selection 1 1) && lookup "Cmd+Shift+J" (focusedBindingChords mac)==Just "hide.cursor.up" && commandBindingKeys mac (CursorUp False)==["Cmd+Shift+J"])
 
 edgePageChecks :: IO ()
-edgePageChecks=do
+edgePageChecks=withEditorFixture "" (addReadOnly "Conversation" "reply" (initialDesktop (80,25))) $ \chatBase->do
   let check name ok=unless ok (error name)
       event k mods=fst . handleEvent (V.EvKey k mods)
       range d=selection <$> activeWindow d
@@ -451,7 +453,7 @@ edgePageChecks=do
       sidebar=installSidebar (emptySidebar "/project" 24 True) configured
       messages=configured {problemsFocused=True,problemsVisible=True}
       global=base {keyBindings=either (error . show) id (platformBindings [] TerminalPlatform (M.singleton "global" (M.singleton "hide.cursor.document-end" ["F13"])))}
-      chat=(addReadOnly "Conversation" "reply" global) {composerBuffer=newBuffer "draft",composerSelection=Selection 2 2,composerFocused=True}
+      chat=setComposerInput (newBuffer "draft") (Selection 2 2) True chatBase {keyBindings=keyBindings global}
       pty=addReadOnly "Terminal test" "output" global
   check "edge remap respects private source policy" (not (guestKeyAllowed private (V.KFun 13) []))
   check "edge global remap cannot move behind other input owners" (all (\d->range (event (V.KFun 13) [] d)==range d && not (commandEnabled d (CursorDocumentEnd False))) [modal,sidebar {keyBindings=keyBindings global},messages {keyBindings=keyBindings global},chat,pty])
@@ -461,7 +463,7 @@ edgePageChecks=do
   check "edge chord reassignment must explicitly release its owner" (either (const True) (const False) conflict)
 
 wordChecks :: IO ()
-wordChecks=do
+wordChecks=withEditorFixture "" (addReadOnly "Conversation" "reply" (initialDesktop (80,25))) $ \chatBase->do
   let check name ok=unless ok (error name)
       event k mods=fst . handleEvent (V.EvKey k mods)
       range d=selection <$> activeWindow d
@@ -529,7 +531,7 @@ wordChecks=do
   check "stale Markdown word routes remain terminal" (inert stale)
   let global=base {keyBindings=either (error . show) id (platformBindings [] TerminalPlatform (M.singleton "global" (M.fromList [("hide.cursor.word-left",["F13"]),("hide.edit.delete-word-forward",["F14"])])))}
       modal=prompt "Edit" Information [Input "Name" "draft" 0] global
-      chat=(addReadOnly "Conversation" "reply" global) {composerBuffer=newBuffer "draft",composerSelection=Selection 2 2,composerFocused=True}
+      chat=setComposerInput (newBuffer "draft") (Selection 2 2) True chatBase {keyBindings=keyBindings global}
       pty=addReadOnly "Terminal test" "output" global
       sidebar=installSidebar (emptySidebar "/project" 24 True) global
       messages=global {problemsVisible=True,problemsFocused=True}

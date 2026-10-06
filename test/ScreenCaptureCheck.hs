@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module ScreenCaptureCheck (checks) where
 
+import EditorFixture (withEditorFixture)
 import Codec.Picture (Image, PixelRGB8(..), convertRGB8, decodePng, imageHeight, imageWidth, pixelAt)
 import Control.Monad (unless)
 import Data.Aeson
@@ -26,7 +27,7 @@ import Hide.Unicode (clusterWidth, graphemes, Script(..))
 import Hide.Syntax (Style(..))
 
 checks :: IO ()
-checks=do
+checks=withEditorFixture "" (addReadOnly "Conversation" "Session: provider-secret\nPublic assistant response 中" (initialDesktop (80,25))) $ \chatBase->do
   font<-loadFont
   let desktop=addDocument Nothing (newBuffer "  λ 中 ▙ é 👩🏽\x200d\&💻 ❤️\n") (initialDesktop (80,25))
       takeCapture d image=capture font d image >>= either (error . T.unpack) pure
@@ -108,8 +109,7 @@ checks=do
   check "mode 259 uses 8x8 cells and preserves 80x50 aspect" (imageWidth compactImage==640 && imageHeight compactImage==400 && field "cellHeight" (textMetadata compact)==Just (8::Int))
   stable<-takeCapture desktop {blinkCursor=not (blinkCursor desktop),crtFilter=not (crtFilter desktop)} True
   check "capture is independent of cursor blink phase and CRT effects" (withImage==stable)
-  let conversation=(addReadOnly "Conversation" "Session: provider-secret\nPublic assistant response 中" (initialDesktop (80,25)))
-        {composerBuffer=newBuffer "private draft 中é",composerSelection=Selection 7 7,composerFocused=True}
+  let conversation=setComposerInput (newBuffer "private draft 中é") (Selection 7 7) True chatBase
   privateCapture<-takeCapture conversation True
   privateImage<-pngImage privateCapture
   let privateMetadata=textMetadata privateCapture

@@ -83,7 +83,8 @@ main = PluginWindow.withWindowScope $ \downloadScope -> do
           Nothing -> recordedChat d
           Just _ -> C.withConsoles $ \consoles -> withConversationAt consoles root $ \conversation -> do
             let liveEffects=conversationEffects conversation effects
-            sent <- snd <$> liveEffects d [AgentAction "send" ["0",
+            shown <- snd <$> liveEffects d [AgentAction "show" []]
+            sent <- snd <$> liveEffects shown [AgentAction "send" ["0",
               "Read src/Hide/Buffer.hs and explain its finger tree of lines in three short bullets (under 70 words). Read-only, please.",
               "false","false","false"]]
             reply <- await "agent reply" (tickConversation conversation) ((=="Agent: end_turn") . status) sent
@@ -98,13 +99,13 @@ main = PluginWindow.withWindowScope $ \downloadScope -> do
                   Just doc -> modifyActive (\w -> w {scrollRow=scrollbarLimit reflowed True doc w}) reflowed
                   Nothing -> reflowed
                 draft = "How would you benchmark edits to a large file?"
-            pure bottom {composerFocused=True,composerBuffer=newBuffer draft,composerSelection=Selection (T.length draft) (T.length draft)}
+            pure (setComposerInput (newBuffer draft) (Selection (T.length draft) (T.length draft)) True bottom)
         -- Visible messages transcribed from the original real capture's
         -- build/docs-capture/conversation.txt. Tool output was truncated there,
         -- so replay only the complete exchange, model and rounded usage.
-        recordedChat d = do
+        recordedChat d = C.withConsoles $ \consoles -> withConversationAt consoles root $ \conversation -> do
           let resized=fst (handleEvent (V.EvResize 100 21) d {sideTree=Nothing})
-              opened=selectConversationView "" "Primary" resized
+          opened <- snd <$> conversationEffects conversation effects resized [AgentAction "show" []]
           full <- command Zoom opened
           case activeWindow full of
             Nothing -> fail "Recorded conversation window is missing"
@@ -127,8 +128,8 @@ main = PluginWindow.withWindowScope $ \downloadScope -> do
                   styled=concat (intersperse [('\n',Plain),('\n',Plain)] bubbles)
                   text=T.pack (map fst styled)
                   draft="How would you benchmark edits to a large file?"
-                  shown=full {buffers=M.adjust (\doc -> doc {documentBuffer=newBuffer text,documentHighlight=styled,documentCursorVisible=False}) bid (buffers full)
-                    ,composerFocused=True,composerBuffer=newBuffer draft,composerSelection=Selection (T.length draft) (T.length draft)
+                  shown=(setComposerInput (newBuffer draft) (Selection (T.length draft) (T.length draft)) True full) {buffers=M.adjust (\doc -> doc {documentBuffer=newBuffer text,documentHighlight=styled,documentCursorVisible=False}) bid (buffers full)
+
                     ,agentSettings=[AgentSetting "model" "Model" "model" "gpt-6-astra" [("gpt-6-astra","gpt-6-astra")],AgentSetting "effort" "Effort" "thought_level" "medium" [("medium","medium")]]
                     ,agentContextUsage=Just (33000,258000),status="Recorded conversation"}
               let rowWidths=[displayColumn row (T.length row) | cells<-bubbles,row<-T.lines (T.pack (map fst cells))]
