@@ -1,7 +1,11 @@
 {-# LANGUAGE CPP, OverloadedStrings #-}
 module ConversationCheck (checks, composerCodeChecks, draftReceiptChecks, questionInsertionChecks) where
 
-import EditorFixture (withEditorFixture,sameBufferVersions)
+import EditorFixture (withEditorFixture,withEditorBodyFixture,sameBufferVersions)
+import qualified Hide.Plugin.Window as W
+import qualified Data.Vector as Vec
+import Hide.TextPresentation (withTextPresentation,tickTextPresentation,TextPresentation)
+import qualified Hide.Conversation as Conversation
 import qualified Hide.Plugin.Menu as HideMenu
 import qualified Hide.Plugin.Editor as Editor
 import Hide.AgentSidebarTypes (AgentSidebarRequest(..))
@@ -19,9 +23,10 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as B8
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.Map.Strict as M
+import qualified Data.Set as S
 import Data.Maybe (mapMaybe, fromMaybe, listToMaybe)
 import Data.Time (UTCTime(..), fromGregorian, secondsToDiffTime, minutesToTimeZone, addUTCTime)
-import Data.List (findIndex)
+import Data.List (find,findIndex,intersperse)
 import Data.IORef (newIORef,writeIORef,readIORef)
 import GHC.Conc (getAllocationCounter)
 import qualified Data.Text as T
@@ -54,7 +59,6 @@ import qualified Hide.Terminal as Terminal
 import qualified Hide.Consoles as C
 import qualified Hide.AgentHub as AH
 import qualified Hide.AgentRuntime as AR
-import System.Mem.StableName (makeStableName)
 import Hide.Files
 import Hide.Plugin.BufferHost (captureVersion,versionCurrent)
 import Hide.Sidebar
@@ -98,7 +102,7 @@ composerCodeChecks=do
           typeText text desktop=foldl (\d c->press (V.KChar c) [] d) desktop (T.unpack text)
           paste text=fst . handleEvent (V.EvPaste (TE.encodeUtf8 text))
           chat=selectConversationView "" "Primary" fixtures
-          toChat source=selectConversationView "" "Primary" source {conversationViews=conversationViews chat,editorDrafts=editorDrafts chat,windows=windows source++windows chat}
+          toChat source=selectConversationView "" "Primary" source {conversationViews=conversationViews chat,editorDrafts=editorDrafts chat,pluginWindows=M.union (pluginWindows chat) (pluginWindows source),windows=windows source++windows chat}
           block=typeText "> " chat
           code=typeText "x = 1" block
           extended=paste "  y = 2\nz = 3" (press V.KEnter [] code)
@@ -234,7 +238,9 @@ draftReceiptChecks :: IO ()
 #ifdef mingw32_HOST_OS
 draftReceiptChecks=pure ()
 #else
-draftReceiptChecks=bracket temporary removePathForcibly $ \root->
+draftReceiptChecks=withTextPresentation $ \presentation->
+  let tickConversation=tickPresented presentation
+  in bracket temporary removePathForcibly $ \root->
   bracket (lookupEnv "XDG_CONFIG_HOME" <* setEnv "XDG_CONFIG_HOME" (root </> "config")) (restoreDraftEnvironment "XDG_CONFIG_HOME") $ \_->
   bracket (lookupEnv "XDG_DATA_HOME" <* setEnv "XDG_DATA_HOME" (root </> "data")) (restoreDraftEnvironment "XDG_DATA_HOME") $ \_->
   bracket (lookupEnv "THC_EDIT_SESSION" <* unsetEnv "THC_EDIT_SESSION") (restoreDraftEnvironment "THC_EDIT_SESSION") $ \_->do
@@ -381,7 +387,9 @@ draftReceiptChecks=bracket temporary removePathForcibly $ \root->
 #endif
 
 checks :: IO ()
-checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary removePathForcibly $ \root ->
+checks = (draftReceiptChecks >> composerCodeChecks >>) $ withTextPresentation $ \presentation->
+  let tickConversation=tickPresented presentation
+  in bracket temporary removePathForcibly $ \root ->
   bracket (lookupEnv "XDG_CONFIG_HOME" <* setEnv "XDG_CONFIG_HOME" (root </> "config")) restore $ \_ ->
   bracket (lookupEnv "XDG_DATA_HOME" <* setEnv "XDG_DATA_HOME" (root </> "data")) (restoreEnvironment "XDG_DATA_HOME") $ \_ ->
   bracket (lookupEnv "THC_EDIT_SESSION" <* unsetEnv "THC_EDIT_SESSION") (restoreEnvironment "THC_EDIT_SESSION") $ \_ -> do
@@ -395,7 +403,14 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary remov
         prompt runtime text=send runtime "send" ["0",text,"false","false","false"]
         questionTool runtime desktop args=do
           caller<-captureQuestionCaller runtime (AR.primaryAgent (conversationAgents runtime))
-          case caller of Left err->pure (desktop,pure (Left err)); Right context->chatToolAs runtime (Just context) desktop "ask_user" args
+          case caller of
+            Left err->pure (desktop,pure (Left err))
+            Right context->do
+              (asked,reply)<-chatToolAs runtime (Just context) desktop "ask_user" args
+              shown<-case chatQuestion asked of
+                Just q | chatQuestion desktop==Nothing->await runtime "prepared question body" (\d->maybe False ((==questionToken q).questionToken.fst) (activeWindow d >>= windowQuestion d)) asked
+                _->pure asked
+              pure (shown,reply)
         questionId reply=reply >>= either (error . T.unpack) (maybe (error "Missing questionId") pure . (field "questionId" :: Value -> Maybe Int))
         questionPoll runtime desktop ident=questionTool runtime desktop (object ["questionId" .= ident]) >>= snd
         await runtime label predicate desktop=do
@@ -432,9 +447,10 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary remov
         (T.pack (map fst (renderTimestamp 20 "12:05"))=="       12:05" && length (renderTimestamp 3 "12:05")==3)
       let tag ident=map (\(c,s) -> (c,case s of BubbleText _ out base -> BubbleText ident out base; _ -> s))
           cells=renderReply False 54 True "one"++[('\n',Plain),('\n',Plain)]++renderTimestamp 54 "12:05"++[('\n',Plain)]++tag 1 (renderReply False 54 False "two")
-          initialChat=addReadOnly "Conversation" (T.pack (map fst cells)) (initialDesktop (60,18))
-      withEditorFixture "" initialChat $ \base->do
-        let chat=draftAt (newBuffer "draft") (Selection 2 2) base {buffers=M.map (\doc -> doc {documentHighlight=cells}) (buffers base)}
+      preparedCopy<-W.prepareSemanticTextWindow "Conversation" cells
+        (W.TextSemantics (W.CopyMessages W.UserBotAttribution) Nothing Vec.empty Vec.empty W.ReadableWindow Vec.empty Vec.empty Vec.empty) >>= either (error.T.unpack) pure
+      withEditorBodyFixture "" preparedCopy (initialDesktop (60,18)) $ \base->do
+        let chat=draftAt (newBuffer "draft") (Selection 2 2) base
             positions ident=[i | (i,(_,BubbleText j _ _))<-zip [0..] cells,j==ident]
             a=head (positions 0); z=last (positions 1)+1
             selectedReply lo hi=modifyActive (\w -> w {selection=Selection lo hi}) chat
@@ -444,8 +460,8 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary remov
         check "cross-bubble copies label speakers and omit timestamps and furniture"
           (copiedReply 0 (length cells)=="User: one\n\nBot: two" && copiedReply z a=="User: one\n\nBot: two")
         let w=fromMaybe (error "conversation window") (activeWindow chat)
-            b=fromMaybe (newBuffer "") (documentBuffer <$> activeDocument chat)
-            clickAt p state=let (row,col)=bufferLineColumn b p in fst (handleEvent (V.EvMouseDown (left (bounds w)+1+col) (top (bounds w)+1+row) V.BLeft []) state)
+            b=W.preparedWindowText preparedCopy
+            clickAt p state=let (row,col)=windowTextPosition chat w b p in fst (handleEvent (V.EvMouseDown (left (bounds w)+1+col) (top (bounds w)+1+row) V.BLeft []) state)
             dragging=clickAt z (clickAt a chat)
             released=fst (handleEvent (V.EvMouseUp 0 0 (Just V.BLeft)) dragging)
             keyCopied=fst (handleEvent (V.EvKey (V.KChar 'c') [V.MCtrl]) released)
@@ -494,18 +510,21 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary remov
     check "Escape explicitly denies permission requests" (snd (handleEvent (V.EvKey V.KEsc []) permissionBase {dialog=Just approval})==[PermissionAction "approve:fixture" ["1"]])
     let modeDialog=Dialog "Agent Permissions" (PermissionDialog "set:editor_file") [Radio "Permission" ["Enable","Prompt","Disable"] 2] 0 ["Save","Back"] []
     check "permission mode submission includes selected radio" (snd (submitDialog 0 modeDialog permissionBase {dialog=Just modeDialog})==[PermissionAction "set:editor_file" ["0","2"]])
-    let draftBase=addReadOnly "Conversation" "" (initialDesktop (90,30))
+    let draftBase=initialDesktop (90,30)
         isLeft (Left _)=True
         isLeft _=False
         clickAction runtime=clickActionBeforeTick runtime True
-        clickActionBeforeTick runtime settle action desktop=case [(a,values) | (a,_,name,values)<-chatActions desktop,name==action] of
+        clickActionBeforeTick runtime settle action desktop=case [(a,values) | (a,_,name,values)<-conversationActions desktop,name==action] of
           (offset,_):_ -> do
             let win=fromMaybe (error "question window") (activeWindow desktop)
-                buffer=maybe (newBuffer "") documentBuffer (activeDocument desktop)
-                (row,column)=bufferLineColumn buffer offset
+                body=fromMaybe (error "question body") (windowPluginText desktop win)
+                (row,column)=windowTextPosition desktop win (W.preparedWindowText body) offset
                 (changed,effects)=handleEvent (V.EvMouseDown (left (bounds win)+1+column) (top (bounds win)+1+row-scrollRow win) V.BLeft []) desktop
             next<-snd <$> conversationEffects runtime fallback changed effects
-            if settle then tickConversation runtime next else pure next
+            if settle then case conversationBodySnapshot (conversationTarget desktop) desktop of
+              Just previous | action `elem` ["toggle-activity","toggle-tool-run"]->await runtime "expanded body" (\d->conversationBodySnapshot (conversationTarget desktop) d/=Just previous) next
+              _->tickConversation runtime next
+            else pure next
           _ -> error ("Missing inline action "++T.unpack action)
     C.withConsoles $ \consoles -> withConversation consoles $ \runtime -> do
       let longReply=T.unwords (replicate 90 "window-width")
@@ -514,14 +533,15 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary remov
       (initial,_)<-questionTool runtime (initialDesktop (80,25)) (object ["question" .= question])
       forM_ [150,32,120] $ \columns -> do
         let resized=modifyActive (\w->w {bounds=Rect 0 1 columns 23}) initial {screenSize=(columns,25)}
-        (_,reflowed)<-conversationEffects runtime fallback resized []
-        let doc=fromMaybe (error "missing reflowed conversation") (activeDocument reflowed)
-            text=contents (documentBuffer doc)
-            bubbleRows=[T.pack [c | (c,BubbleText _ _ _) <- row] | row<-splitStyled (documentHighlight doc)]
+        (_,pending)<-conversationEffects runtime fallback resized []
+        reflowed<-await runtime "resized question body" (bodyAtWidth "") pending
+        let prepared=targetBody "" reflowed
+            text=conversationText reflowed
+            bubbleRows=[T.pack [c | (c,BubbleText _ _ _) <- row] | row<-splitStyled (bodyHighlight prepared)]
             nonempty=filter (not . T.null) bubbleRows
-            blockRows=[(i,c) | (i,(c,BubbleText _ _ (CodeStyle True _)))<-zip [0..] (documentHighlight doc)]
-            blocks=documentShellBlocks doc
-        check "chat reflows to the resized window before the next timer tick"
+            blockRows=[(i,c) | (i,(c,BubbleText _ _ (CodeStyle True _)))<-zip [0..] (bodyHighlight prepared)]
+            blocks=bodyShellBlocks prepared
+        check "background chat preparation adopts the resized window width"
           (maximum (0:map T.length nonempty)>columns-22 && all ((<=columns-2).T.length) nonempty)
         check "reflow preserves the whole shell source and maps its decorated cells"
           (map (\(_,_,dialect,raw)->(dialect,raw)) blocks==[("sh",rawShell)] &&
@@ -531,9 +551,7 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary remov
         check "copy after chat reflow still excludes bubble furniture"
           ("window-width" `T.isInfixOf` clipboard copied && not ("┌" `T.isInfixOf` clipboard copied) && not ("```" `T.isInfixOf` clipboard copied))
         stable<-tickConversation runtime reflowed
-        receipt<-captureVersion (documentBuffer doc)
-        unchanged<-maybe (pure False) (versionCurrent receipt . documentBuffer) (activeDocument stable)
-        check "timer tick keeps immediately reflowed layout stable" unchanged
+        check "timer tick keeps adopted body identity stable" (conversationBodySnapshot "" stable==Just prepared)
     forM_ [32,120,150] $ \columns -> do
       let outgoing=renderReply False columns True (T.unwords (replicate 90 "window-width"))
           incoming=renderReply False columns False (T.unwords (replicate 90 "window-width"))
@@ -547,18 +565,18 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary remov
       agents <- send runtime "directory" [] savedDraft
       check "Agents directory exposes an explicit reconnect action"
         (maybe False (elem "Reconnect" . buttons) (dialog agents))
-      let recovered=addReadOnly "Conversation" "Recovered user and agent transcript" savedDraft
+      recovered<-recoveredBody "Recovered user and agent transcript" savedDraft
       idle<-tickConversation runtime recovered
       resized<-tickConversation runtime idle {screenSize=(100,35)}
       sourceSame<-sameBufferVersions recovered resized
       draftSame<-sameDraftRoot recovered resized
       check "idle fresh conversation runtime preserves recovered transcript and draft"
-        (sourceSame && draftSame && composerSelection resized==composerSelection recovered)
+        (sourceSame && draftSame && conversationText resized=="Recovered user and agent transcript" && composerSelection resized==composerSelection recovered)
       shown<-send runtime "show" [] resized
       shownSources<-sameBufferVersions recovered shown
       shownDraft<-sameDraftRoot recovered shown
       check "opening a recovered conversation preserves its transcript and draft"
-        (shownSources && shownDraft && composerSelection shown==composerSelection recovered && composerFocused shown)
+        (shownSources && shownDraft && conversationText shown=="Recovered user and agent transcript" && map windowId (windows shown)==map windowId (windows recovered) && composerSelection shown==composerSelection recovered && composerFocused shown)
     C.withConsoles $ \consoles -> withConversation consoles $ \runtime -> do
       preparedDraft<-send runtime "show" [] draftBase
       let savedDraft=draftAt (newBuffer "existing draft") (Selection 4 4) preparedDraft
@@ -568,22 +586,22 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary remov
           answer=(newBuffer "kept answer") {saved=error "Question presentation forced saved answer",
             undoStack=error "Question presentation forced answer Undo",redoStack=error "Question presentation forced answer Redo"}
           poisoned=asked {chatQuestion=Just q {questionBuffer=answer}}
-          questionDocument d=fromMaybe (error "Missing question presentation document") (activeDocument d)
+          questionBody d=targetBody "" d
       first<-tickConversation runtime poisoned
-      originalIdentity<-makeStableName =<< evaluate (documentBuffer (questionDocument first))
+      let originalIdentity=questionBody first
       unchanged<-tickConversation runtime first
-      unchangedIdentity<-makeStableName =<< evaluate (documentBuffer (questionDocument unchanged))
+      let unchangedIdentity=questionBody unchanged
       check "unchanged question redraw never compares retained answer history"
         (originalIdentity==unchangedIdentity && map scrollRow (windows first)==map scrollRow (windows unchanged))
       let replacement=newBuffer "fresh answer"
           replaced=unchanged {chatQuestion=Just q {questionBuffer=replacement}}
       redrawn<-tickConversation runtime replaced
-      replacementIdentity<-makeStableName =<< evaluate (documentBuffer (questionDocument redrawn))
+      let replacementIdentity=questionBody redrawn
       check "equal-revision answer replacement paints live input without rebuilding history"
         (revision answer==revision replacement && originalIdentity==replacementIdentity &&
           "fresh answer" `T.isInfixOf` snapshot redrawn && not ("kept answer" `T.isInfixOf` snapshot redrawn))
       selected<-clickAction runtime "question-choice" redrawn
-      selectedIdentity<-makeStableName =<< evaluate (documentBuffer (questionDocument selected))
+      let selectedIdentity=questionBody selected
       check "direct choice click paints its marker without rebuilding history"
         (selectedIdentity==originalIdentity && "(*) First" `T.isInfixOf` snapshot selected)
       custom<-clickAction runtime "question-input" selected
@@ -617,15 +635,17 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary remov
               oneRow=ensureQuestionVisible (modifyActive (\w->w {bounds=(bounds w) {height=4},scrollRow=inputRow+1}) live)
               shortWindow=fromMaybe (error "Missing one-row question window") (activeWindow oneRow)
           check "one-row body reveals the actual answer before Submit"
-            (windowContentRows oneRow (questionDocument oneRow) shortWindow==1 &&
+            (pluginBodyRows oneRow shortWindow==1 &&
               case questionInputGeometry oneRow shortWindow of
                 Just (input,_,_)->top input==top (bounds shortWindow)+1
                 _->False)
-          let spacer=top (bounds win)+1+windowContentRows live (questionDocument live) win
+          let spacer=top (bounds win)+1+pluginBodyRows live win
               (_,outside)=handleEvent (V.EvMouseDown (left rect) spacer V.BLeft []) live
           check "question controls do not hit the reserved composer spacer"
             (not (any (\effect->case effect of AgentAction action _->"question-" `T.isPrefixOf` action; _->False) outside))
-      let restyled=live {buffers=M.adjust restyle (fromMaybe (-1) (bufferId win)) (buffers live)}
+      replacementBody<-W.prepareTextWindow "Replacement" "different immutable body"
+      let reference=fromMaybe (error "missing body ref") (M.lookup "" (conversationViews live) >>= conversationBodyRef)
+          restyled=live {pluginWindows=M.insert reference replacementBody (pluginWindows live)}
       check "restyled body cannot reuse question projection or accept stale input"
         (case questionInputGeometry live win of
           Just (rect,_,_)->case (windowQuestion restyled win,conversationClick (left rect) (top rect) win restyled) of
@@ -695,13 +715,13 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary remov
         pure ()
       expired<-questionPoll runtime cleaned ident
       check "old terminal results explicitly expire" (case expired of Left message->"expired" `T.isInfixOf` message; _->False)
-      let narrow=addReadOnly "Conversation" "" (initialDesktop (40,12))
+      let narrow=initialDesktop (40,12)
       (manyChoices,_)<-questionTool runtime narrow (object ["question" .= ("Choose"::T.Text),"choices" .= (T.replicate 100 "z":["Option "<>T.pack (show n) | n<-[1..11::Int]])])
       visibleChoice<-tickConversation runtime (fst (handleEvent (V.EvKey V.KDown []) manyChoices))
       let active=fromMaybe (error "question window") (activeWindow visibleChoice)
-          document=fromMaybe (error "question document") (activeDocument visibleChoice)
-          choiceRows=[fst (bufferLineColumn (documentBuffer document) a) | (a,_,action,values)<-chatActions visibleChoice,action=="question-choice",last values=="0"]
-      check "keyboard choices stay visible in a small conversation window" (case choiceRows of row:_->row>=scrollRow active && row<scrollRow active+windowContentRows visibleChoice document active; _->False)
+          body=targetBody "" visibleChoice
+          choiceRows=[fst (windowTextPosition visibleChoice active (W.preparedWindowText body) a) | (a,_,action,values)<-conversationActions visibleChoice,action=="question-choice",last values=="0"]
+      check "keyboard choices stay visible in a small conversation window" (case choiceRows of row:_->row>=scrollRow active && row<scrollRow active+pluginBodyRows visibleChoice active; _->False)
       check "long choice labels wrap without being discarded" (T.count "z" (conversationText visibleChoice)==100)
       customInput<-tickConversation runtime (fst (handleEvent (V.EvKey V.KUp []) visibleChoice))
       let browsing=modifyActive (\w->w {scrollRow=0}) customInput
@@ -710,11 +730,11 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary remov
         (maybe False ((==0).scrollRow) (activeWindow retainedScroll))
       typedInput<-tickConversation runtime (fst (handleEvent (V.EvKey (V.KChar 'x') []) retainedScroll))
       let inputWindow=fromMaybe (error "question input window") (activeWindow typedInput)
-          inputDocument=fromMaybe (error "question input document") (activeDocument typedInput)
-      inputSame<-captureVersion (documentBuffer document) >>= \receipt->versionCurrent receipt (documentBuffer inputDocument)
+          inputBody=targetBody "" typedInput
+          inputSame=body==inputBody
       check "typing reveals an already-focused answer without reflowing history"
         (inputSame && case questionInputGeometry typedInput inputWindow of
-          Just (rect,_,_)->top rect>top (bounds inputWindow) && top rect<top (bounds inputWindow)+1+windowContentRows typedInput inputDocument inputWindow
+          Just (rect,_,_)->top rect>top (bounds inputWindow) && top rect<top (bounds inputWindow)+1+pluginBodyRows typedInput inputWindow
           _->False)
       smallCancelled<-clickAction runtime "question-cancel" typedInput
       check "small-window custom input leaves Cancel reachable" (chatQuestion smallCancelled==Nothing)
@@ -990,7 +1010,7 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary remov
     C.withConsoles $ \consoles -> withConversation consoles $ \runtime -> do
       configured<-configure runtime ("yes"::T.Text) desktop
       check "configuration saved to isolated XDG directory" =<< doesFileExist (settings </> "agents.json")
-      streamed<-prompt runtime "stream" configured >>= done runtime
+      streamed<-prompt runtime "stream" configured >>= done runtime >>= await runtime "adopted streamed body" (\d->"[completed] Local tool" `T.isInfixOf` conversationText d && "Hello" `T.isInfixOf` conversationText d)
       entries<-logged
       let initParams=[params | entry<-entries,field "method" entry==Just ("initialize"::T.Text),Just params<-[field "params" entry]]
       check "initialize advertises actual terminal capability" (case initParams of p:_ -> (field "clientCapabilities" p >>= field "terminal")==Just terminalAvailable; [] -> False)
@@ -1004,17 +1024,17 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary remov
       check "conversation preserves Markdown styling" (any ((==BubbleText 1 False (BoldStyle Keyword)).snd) (conversationHighlight streamed))
       check "tool update merges pending record" (T.count "[completed] Local tool" (conversationText streamed)==1 && not ("[pending] Local tool" `T.isInfixOf` conversationText streamed))
       check "tool activity starts collapsed without raw arguments" (not ("rawInput" `T.isInfixOf` conversationText streamed) && "▸" `T.isInfixOf` conversationText streamed)
-      let activityAction=case [values | (_,_,name,values)<-chatActions streamed,name=="toggle-activity"] of values:_->values; _->error "missing activity action"
+      let activityAction=case [values | (_,_,name,values)<-conversationActions streamed,name=="toggle-activity"] of values:_->values; _->error "missing activity action"
       expanded<-clickAction runtime "toggle-activity" streamed
       check "expanded activity retains original request and response JSON" (all (`T.isInfixOf` conversationText expanded) ["rawInput","rawOutput","original argument","exact response"])
-      let selectedActivity=modifyActive (\w->w {selection=Selection 0 (maybe 0 (bufferLength.documentBuffer) (activeDocument expanded))}) expanded
+      let selectedActivity=modifyActive (\w->w {selection=Selection 0 (maybe 0 (contentLength.W.preparedWindowText) (conversationBodySnapshot "" expanded))}) expanded
           selectedTextOnly=clipboard (fst (runCommand Copy selectedActivity))
       check "conversation copies omit activity chevrons and raw JSON" (not ("rawInput" `T.isInfixOf` selectedTextOnly) && not ("▾" `T.isInfixOf` selectedTextOnly) && "Hello" `T.isInfixOf` selectedTextOnly)
-      collapsed<-send runtime "toggle-activity" activityAction expanded
+      collapsed<-send runtime "toggle-activity" activityAction expanded >>= await runtime "adopted expansion" (\d->conversationBodySnapshot "" d/=conversationBodySnapshot "" expanded)
       check "activity collapses without changing prose" (conversationText collapsed==conversationText streamed)
-      grouped<-prompt runtime "tool-run" collapsed >>= done runtime
-      let groupActions d=[values | (_,_,name,values)<-chatActions d,name=="toggle-tool-run"]
-          singleActions d=[values | (_,_,name,values)<-chatActions d,name=="toggle-activity"]
+      grouped<-prompt runtime "tool-run" collapsed >>= done runtime >>= await runtime "adopted tool run" (T.isInfixOf "▸▸ 3 tool calls · 1 failed".conversationText)
+      let groupActions d=[values | (_,_,name,values)<-conversationActions d,name=="toggle-tool-run"]
+          singleActions d=[values | (_,_,name,values)<-conversationActions d,name=="toggle-activity"]
       check "consecutive calls collapse to one double chevron with visible failures"
         (length (groupActions grouped)==1 && "▸▸ 3 tool calls · 1 failed" `T.isInfixOf` conversationText grouped &&
          length (singleActions grouped)==2 && not ("run argument" `T.isInfixOf` conversationText grouped))
@@ -1024,13 +1044,13 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary remov
          "[completed] Read files\n  ▸ [completed] Run tests\n  ▸ [failed] Check output" `T.isInfixOf` conversationText openedGroup)
       let firstRunCall=case drop 1 (singleActions openedGroup) of values:_->values; _->error "missing grouped call"
           runAction d=case groupActions d of values:_->values; _->error "missing run toggle"
-      detailGroup<-send runtime "toggle-activity" firstRunCall openedGroup
+      detailGroup<-send runtime "toggle-activity" firstRunCall openedGroup >>= await runtime "adopted expansion" (\d->conversationBodySnapshot "" d/=conversationBodySnapshot "" openedGroup)
       check "group members still expose exact request and reply details"
         (all (`T.isInfixOf` conversationText detailGroup) ["run argument","run result"])
-      foldedGroup<-send runtime "toggle-tool-run" (runAction detailGroup) detailGroup
+      foldedGroup<-send runtime "toggle-tool-run" (runAction detailGroup) detailGroup >>= await runtime "adopted expansion" (\d->conversationBodySnapshot "" d/=conversationBodySnapshot "" detailGroup)
       check "folding a run hides every member and its expanded JSON"
         (conversationText foldedGroup==conversationText grouped)
-      reopenedGroup<-send runtime "toggle-tool-run" (runAction foldedGroup) foldedGroup
+      reopenedGroup<-send runtime "toggle-tool-run" (runAction foldedGroup) foldedGroup >>= await runtime "adopted expansion" (\d->conversationBodySnapshot "" d/=conversationBodySnapshot "" foldedGroup)
       check "unfolding restores individual detail state"
         (conversationText reopenedGroup==conversationText detailGroup)
       check "provider settings appear in the title" (conversationTitle streamed=="fixture-model (high) ▼")
@@ -1214,7 +1234,7 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary remov
       restarted<-prompt runtime "stream" legacy >>= done runtime
       disconnected<-prompt runtime "disconnect" restarted >>= await runtime "provider EOF" ((=="Agent disconnected.").status)
       reconnected<-prompt runtime "stream" disconnected >>= done runtime
-      resumed<-send runtime "load" ["0","saved-id"] reconnected >>= await runtime "resume session" ((=="Session saved-id").status)
+      resumed<-send runtime "load" ["0","saved-id"] reconnected >>= await runtime "resume session" (\d->status d=="Session saved-id" && "Session: saved-id" `T.isInfixOf` conversationText d)
       check "new session clears stale context usage" (agentContextUsage resumed==Nothing && " -- " `T.isInfixOf` snapshot resumed)
       check "conversation header follows resumed session" ("Session: saved-id" `T.isInfixOf` conversationText resumed)
       check "capability selects session/load" . any ((==Just ("session/load"::T.Text)).field "method") =<< logged
@@ -1344,7 +1364,7 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary remov
     forM_ editorSessions $ \(ident,providerId,_) -> withEditor ident $ C.withConsoles $ \consoles -> withConversation consoles $ \runtime -> do
       preparedDraft<-send runtime "show" [] draftBase
       let savedDraft=draftAt (newBuffer "existing draft") (Selection 4 4) preparedDraft
-      let recovered=addReadOnly "Conversation" "Retained conversation after a daemon crash" savedDraft
+      recovered<-recoveredBody "Retained conversation after a daemon crash" savedDraft
       idle<-tickConversation runtime recovered
       offered<-send runtime "resume" [] idle
       check "recovered editor selects its own provider resume ID" (resumeId offered==Just providerId)
@@ -1370,27 +1390,27 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary remov
       ((globalProvider >>= field "executable")==Just ("not-the-saved-provider"::T.Text))
     C.withConsoles $ \consoles -> withConversation consoles $ \runtime -> do
       configured<-configure runtime ("yes"::T.Text) desktop
-      answered<-prompt runtime ("wide\n"<>T.unwords (replicate 90 "user-width")) configured >>= done runtime
+      answered<-prompt runtime ("wide\n"<>T.unwords (replicate 90 "user-width")) configured >>= done runtime >>= await runtime "adopted wide reply" (T.isInfixOf "live λ".conversationText)
       forM_ [150,36,120] $ \columns -> do
         let resized=fst (handleEvent (V.EvResize columns 30) answered)
             (zoomed,effects)=runCommand Zoom resized
         (_,effected)<-conversationEffects runtime fallback zoomed effects
-        shown<-tickConversation runtime effected
-        let doc=fromMaybe (error "missing resized live conversation") (activeDocument shown)
+        shown<-await runtime "resized live body" (bodyAtWidth "") effected
+        let body=targetBody "" shown
             win=fromMaybe (error "missing resized live window") (activeWindow shown)
             available=width (bounds win)-2
-            rows=splitStyled (documentHighlight doc)
+            rows=splitStyled (bodyHighlight body)
             sent row=any (\(_,style)->case style of BubbleText _ True _->True; _->False) row
             received row=any (\(_,style)->case style of BubbleText _ False _->True; _->False) row
             columnsOf row=let text=T.pack (map fst row) in displayColumn text (T.length text)
-        check "live conversation publication advances source-map revision"
-          (revision (documentBuffer doc)>maybe (-1) (revision . documentBuffer) (activeDocument answered))
+        check "live conversation publication replaces immutable body identity"
+          (conversationBodySnapshot "" shown/=conversationBodySnapshot "" answered)
         check "resize then Zoom anchors live user bubbles at the right window edge"
           (not (null (filter sent rows)) && all ((==available).columnsOf) (filter sent rows))
         check "resize then Zoom lets long live replies span the available window"
           (maximum (0:map columnsOf (filter received rows))>available-16 && all ((<=available).columnsOf) rows)
         check "live reflow preserves exact shell payload"
-          (map (\(_,_,language,raw)->(language,raw)) (documentShellBlocks doc)==[("sh","printf 'live λ'\n")])
+          (map (\(_,_,language,raw)->(language,raw)) (bodyShellBlocks body)==[("sh","printf 'live λ'\n")])
 
       let hub=AR.agentHub (conversationAgents runtime)
           caps=AH.Capabilities False False False []
@@ -1400,20 +1420,20 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary remov
       ticket<-AH.sendAgent hub AH.Human child (T.unwords (replicate 90 "child-user")) >>= either (error . T.unpack) pure
       _<-AH.waitAgent hub AH.Human child ticket 2000 >>= either (error . T.unpack) pure
       AH.recordAgentEvent hub child "output" (object ["text" .= (T.unwords (replicate 90 ("child-reply"::T.Text))<>"\n\n```sh\nprintf 'child λ'\n```" :: T.Text)])
-      childView<-openChild runtime child answered >>= tickConversation runtime
-      let (primaryId,_)=fromMaybe (error "primary view missing") (conversationDocument "" childView)
-          (childId,_)=fromMaybe (error "child view missing") (conversationDocument (AH.agentIdText child) childView)
+      childView<-openChild runtime child answered >>= await runtime "adopted child layout" (\d->"child-reply" `T.isInfixOf` conversationText d && bodyAtWidth (AH.agentIdText child) d)
+      let primaryRef=fromMaybe (error "primary view missing") (M.lookup "" (conversationViews childView) >>= conversationBodyRef)
+          childRef=fromMaybe (error "child view missing") (M.lookup (AH.agentIdText child) (conversationViews childView) >>= conversationBodyRef)
           baseWindow=fromMaybe (error "child window missing") (activeWindow childView)
           paired primaryColumns childColumns=childView
             { conversationTarget=""
-            , windows=[baseWindow {windowContent=SourceContent childId,bounds=(bounds baseWindow) {width=childColumns}},
-                baseWindow {windowId=windowId baseWindow+100,windowContent=SourceContent primaryId,bounds=(bounds baseWindow) {width=primaryColumns}}] }
-          bufferIdentity bid d=makeStableName =<< evaluate (documentBuffer (fromMaybe (error "chat buffer missing") (M.lookup bid (buffers d))))
+            , windows=[baseWindow {windowContent=PluginContent childRef,bounds=(bounds baseWindow) {width=childColumns}},
+                baseWindow {windowId=windowId baseWindow+100,windowContent=PluginContent primaryRef,windowEditorMount=M.lookup "" (conversationViews childView) >>= conversationEditor,bounds=(bounds baseWindow) {width=primaryColumns}}] }
+
       forM_ [(148,62),(43,126)] $ \(primaryColumns,childColumns) -> do
-        shown<-tickConversation runtime (paired primaryColumns childColumns)
-        forM_ [(primaryId,primaryColumns,"printf 'live λ'\n"),(childId,childColumns,"printf 'child λ'\n")] $ \(bid,columns,body) -> do
-          let doc=fromMaybe (error "visible chat missing") (M.lookup bid (buffers shown))
-              rows=splitStyled (documentHighlight doc)
+        shown<-await runtime "paired body widths" (\d->bodyAtWidth "" d && bodyAtWidth (AH.agentIdText child) d) (paired primaryColumns childColumns)
+        forM_ [("",primaryColumns,"printf 'live λ'\n"),(AH.agentIdText child,childColumns,"printf 'child λ'\n")] $ \(target,columns,raw) -> do
+          let body=targetBody target shown
+              rows=splitStyled (bodyHighlight body)
               sent row=any (\(_,style)->case style of BubbleText _ True _->True; _->False) row
               received row=any (\(_,style)->case style of BubbleText _ False _->True; _->False) row
               columnsOf row=let text=T.pack (map fst row) in displayColumn text (T.length text)
@@ -1422,11 +1442,11 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary remov
           check "inactive child and primary replies reflow at their own window width"
             (maximum (0:map columnsOf (filter received rows))>columns-18 && all ((<=columns-2).columnsOf) rows)
           check "each resized target retains its own exact executable shell body"
-            (map (\(_,_,_,raw)->raw) (documentShellBlocks doc)==[body])
-        before<-mapM (\bid->bufferIdentity bid shown) [primaryId,childId]
+            (map (\(_,_,_,source)->source) (bodyShellBlocks body)==[raw])
+        let before=map (`conversationBodySnapshot` shown) ["",AH.agentIdText child]
         unchanged<-tickConversation runtime shown
-        after<-mapM (\bid->bufferIdentity bid unchanged) [primaryId,childId]
-        check "unchanged visible widths preserve rendered buffer identities" (before==after)
+        let after=map (`conversationBodySnapshot` unchanged) ["",AH.agentIdText child]
+        check "unchanged visible widths preserve prepared body identities" (before==after)
 
   where
     restore=maybe (unsetEnv "XDG_CONFIG_HOME") (setEnv "XDG_CONFIG_HOME")
@@ -1449,9 +1469,50 @@ readMessages path=do
   exists<-doesFileExist path
   if exists then mapMaybe decodeStrict' . B8.lines <$> BS.readFile path else pure []
 conversationText :: Desktop -> T.Text
-conversationText=T.pack . map fst . conversationHighlight
+conversationText desktop=maybe "" (\body->let text=W.preparedWindowText body in contentSlice text 0 (contentLength text)) (conversationBodySnapshot (conversationTarget desktop) desktop)
 conversationHighlight :: Desktop -> [(Char,Style)]
-conversationHighlight desktop=concat [documentHighlight doc | doc<-M.elems (buffers desktop),documentLabel doc==Just "Conversation"]
+conversationHighlight desktop=maybe [] bodyHighlight (conversationBodySnapshot (conversationTarget desktop) desktop)
+
+bodyHighlight :: W.PreparedWindow -> [(Char,Style)]
+bodyHighlight body=case W.preparedWindowRows body of
+  W.StyledRows rows->concat (intersperse [('\n',Plain)] (Vec.toList rows))
+  _->[(c,Plain) | c<-T.unpack (contentSlice (W.preparedWindowText body) 0 (contentLength (W.preparedWindowText body)))]
+
+targetBody :: T.Text -> Desktop -> W.PreparedWindow
+targetBody target desktop=fromMaybe (error "Missing prepared conversation body") (conversationBodySnapshot target desktop)
+
+bodyShellBlocks :: W.PreparedWindow -> [(Int,Int,T.Text,T.Text)]
+bodyShellBlocks=maybe [] (Vec.toList.W.textShellBlocks) . W.preparedWindowSemantics
+
+bodyAtWidth :: T.Text -> Desktop -> Bool
+bodyAtWidth target desktop=case M.lookup target (conversationViews desktop) of
+  Just view | InstalledBody _ (Just (BodyControlReceipt _ columns _ _ _))<-conversationBody view->
+    maybe False (\window->columns==max 1 (width (bounds window)-2)) (find ((==Just target).conversationTargetFor desktop) (windows desktop))
+  _->False
+
+-- Simulate inert restored installed text using the public retired publication
+-- law; explicit Show must replace this exact visible frame in place.
+recoveredBody :: T.Text -> Desktop -> IO Desktop
+recoveredBody text desktop=do
+  body<-W.prepareSemanticTextWindow "Conversation" [(c,Plain) | c<-T.unpack text]
+    (W.TextSemantics W.CopyText Nothing Vec.empty Vec.empty W.ReadableWindow Vec.empty Vec.empty Vec.empty) >>= either (error.T.unpack) pure
+  let reference=fromMaybe (error "Missing restored ref") (M.lookup "" (conversationViews desktop) >>= conversationBodyRef)
+  W.retireWindowRef reference
+  pure desktop {pluginWindows=M.insert reference body (pluginWindows desktop),
+    retiredPluginWindows=S.insert reference (retiredPluginWindows desktop),
+    conversationViews=M.adjust (\view->view {conversationBody=InstalledBody reference Nothing}) "" (conversationViews desktop)}
+
+conversationActions :: Desktop -> [(Int,Int,T.Text,[T.Text])]
+conversationActions desktop=maybe [] hostBodyActions (activeWindow desktop >>= windowConversationControls desktop)
+
+-- Pump the same scoped presentation owner as App; protocol readiness alone is
+-- deliberately insufficient for assertions about adopted transcript bodies.
+tickPresented :: TextPresentation -> ConversationState -> Desktop -> IO Desktop
+tickPresented presentation runtime desktop=do
+  updated<-Conversation.tickConversation runtime desktop
+  requests<-conversationBodyRequests runtime updated
+  (prepared,results)<-tickTextPresentation presentation requests updated
+  adoptConversationBodies runtime results prepared
 check :: String -> Bool -> IO ()
 check label success=unless success (error label)
 temporary :: IO FilePath

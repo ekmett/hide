@@ -53,7 +53,7 @@ checks=do
   check "Markdown view is named and preserves existing review enum values" (parseBufferView "markdown"==Just MarkdownView && fromEnum SideBySideView==3)
   check "Markdown preview keeps source identity and Current interaction" (bufferId (win pending)==bufferId (win current) && sameSource pending && not (windowChangeView original (win pending)))
   check "Pending preview never paints raw Markdown or source caret" (not ("# Heading" `T.isInfixOf` snapshot pending) && not ("later paragraph" `T.isInfixOf` snapshot pending))
-  forM_ [Copy,Cut,Paste,Undo,Redo,Replace,Definition,RenameSymbol,ExecuteShellBlock 1 (0,1,"sh","echo unsafe")] $ \command->do
+  forM_ [Copy,Cut,Paste,Undo,Redo,Replace,Definition,RenameSymbol,ExecuteShellBlock (SourceShell 1) (0,1,"sh","echo unsafe")] $ \command->do
     let after=fst (runCommand command pending {clipboard="poison",browserFrontend=True})
     check "Pending named commands cannot mutate source" (sameSource after)
   forM_ [V.EvKey (V.KChar 'x') [],V.EvKey V.KBS [],V.EvPaste "bad"] $ \event->check "Pending raw input cannot edit background source" (sameSource (fst (handleEvent event pending)))
@@ -76,7 +76,7 @@ checks=do
       (row,col)=windowTextPosition ready (win ready) text start
       r=bounds (win ready)
       browsed=modifyActive (modifyDisplayedWindow (\w->w {scrollRow=row,scrollColumn=0})) ready
-  check "Preview link hit uses rendered offset" (linkAt (left r+1+col) (top r+1) browsed==Just (OpenLink (Just "/tmp/notes.md") "next.md"))
+  check "Preview link hit uses rendered offset" (linkAt (left r+1+col) (top r+1) browsed==Just (OpenLink (SourceLink (Just "/tmp/notes.md")) "next.md"))
   check "Preview shell hit cannot authorize execution" (isNothing (shellBlockAt (left r+2) (top r+2) ready))
   let navigated=fst (handleEvent (V.EvKey V.KRight []) ready)
       scrolled=changeScroll True 5 navigated
@@ -108,7 +108,7 @@ checks=do
   let plain=addDocument Nothing (newBuffer "ordinary") (initialDesktop (60,20)) {defaultBufferView=MarkdownView}
   check "Markdown default does not preview arbitrary source" (bufferView (win plain)==CurrentView && not (commandEnabled plain (SetBufferView MarkdownView)))
   withTextPresentation $ \owner->do
-    queued<-tickTextPresentation owner pending
+    queued<-fmap fst (tickTextPresentation owner [] pending)
     let newer=mode MarkdownView (insertText "replacement" (mode CurrentView queued))
     completed<-timeout 5000000 (await owner newer)
     check "Live worker adopts only current source revision" (maybe False (\d->case windowMarkdown d (win d) of Just (_,content,_)->"replacement" `T.isInfixOf` contentSlice content 0 (contentLength content); _->False) completed)
@@ -123,7 +123,7 @@ checks=do
   putStrLn "markdown view checks passed"
   where
     await owner d=do
-      next<-tickTextPresentation owner d
+      next<-fmap fst (tickTextPresentation owner [] d)
       case activeWindow next >>= windowMarkdown next of
         Just _->pure next
         Nothing->threadDelay 10000 >> await owner next
