@@ -700,9 +700,10 @@ adoptForm (SidebarHost _ ref _ _ _ _) opening prepared d=do
         refresh dg=dg {purpose=case spec of Form.ChoiceFormSpec{}->PluginChoiceForm reference (Form.formRevision prepared); _->purpose dg,dialogTitle=Form.formTitle spec,buttons=[Form.formSubmit spec,"Cancel"],fields=case spec of
           Form.InputFormSpec _ label _ _->[case field of SelectedInput _ text selected->SelectedInput label text selected; _->field | field<-fields dg]
           Form.ChoiceFormSpec _ label choices _ _->[case field of
-            ListBox _ _ selected->let ident=inputForm state >>= \old->Form.formChoiceAt old selected
-                                     retained=maybe 0 choiceIndex ident
-                                 in ListBox label (map snd choices) retained
+            ListBox _ _ selected->
+              let ident=inputForm state >>= \old->Form.formChoiceAt old selected
+                  retained=maybe 0 choiceIndex ident
+              in ListBox label (map snd choices) retained
             _->field | field<-fields dg]}
     pure d {dialog=if opening then Just build else refresh <$> dialog d,contextMenu=Nothing,contextTarget=Nothing}
 -- Refresh transport is metadata-only and cannot create a modal by escaped ref.
