@@ -15,7 +15,7 @@ import Control.Monad (forM, void)
 import Data.Aeson
 import Data.Aeson.Types (parseMaybe)
 import qualified Data.ByteString as BS
-import Data.Char (isDigit)
+import Data.Char (isDigit, toLower)
 import Data.List (nub, sortOn)
 import Data.Maybe (catMaybes, fromMaybe, isJust)
 import Data.Ord (Down(..))
@@ -148,11 +148,11 @@ debuggerCompilerInfo root project command = do
         (Right version,Right library) | T.strip (T.pack version)==compilerVersion compiler -> do
           let directory=T.unpack (T.strip (T.pack library))
           exists<-if isAbsolute directory && cleanPath directory then doesDirectoryExist directory else pure False
+          path<-fromMaybe "" <$> lookupEnv "PATH"
           inherited<-getEnvironment
-          let path=fromMaybe "" (lookup "PATH" inherited)
-              overrides=[("GHC_BIN",executable),("GHC_LIBDIR",directory),
+          let overrides=[("GHC_BIN",executable),("GHC_LIBDIR",directory),
                 ("PATH",takeDirectory executable++[searchPathSeparator]++path)]
-              environment=overrides++filter (\(name,_)->name `notElem` map fst overrides) inherited
+              environment=overrides++filter (\(name,_)->map toLower name `notElem` map (map toLower . fst) overrides) inherited
           projectCompiler<-if project && exists
             then cabalCompilerInfo root (Just environment) [] >>= traverse (canonicalizePath . compilerPath)
             else pure (Right executable)
