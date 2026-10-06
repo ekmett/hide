@@ -22,6 +22,7 @@ import Hide.Plugin.Tree (TreeProvider,TreeRef,NodeId)
 -- Neither publication nor invalidation extends a retired registration lifetime.
 data Sidebar c r = Sidebar
   { sidebarOrigin :: c -> MenuOrigin
+  , sidebarWorkspace :: c -> FilePath
   , formReply :: PreparedForm c r -> r
   , publishTree :: TreeProvider c r -> IO ()
   , publishFormRefresh :: FormUpdate -> IO ()

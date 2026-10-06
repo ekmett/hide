@@ -346,15 +346,13 @@ applyAgentSidebar runtime@(ConversationState _ ref _ _ agents) request d=case re
   RenameAgentTo ident name->do
     result<-AH.renameAgent hub AH.Human ident name
     pure d {status=either id (const "Agent renamed.") result}
-  NewAgent->pure d {dialog=Just (Dialog "New agent" AgentNewDialog
-    [Input "Name" "" 0,Input "Task" "" 0] 0 ["Create","Cancel"]
-    ["Start a fresh agent in this workspace and enqueue its task."]),contextMenu=Nothing,contextTarget=Nothing}
-  CreateAgent name task->do
+  CreateAgent workspace _ _ | workspace/=startingDirectory d->pure d {status="Agent workspace changed; reopen the form."}
+  CreateAgent workspace name task->do
     state<-readIORef ref
     case creatingAgent state of
       Just _->pure d {status="An agent is already starting."}
       Nothing->mask $ \restore->do
-        let spec=AH.SpawnSpec name task (startingDirectory d) AH.Shared AH.Fresh Nothing Nothing
+        let spec=AH.SpawnSpec name task workspace AH.Shared AH.Fresh Nothing Nothing
         worker<-async (restore (AH.spawnAgentWithTask hub AH.Human spec))
         modifyIORef' ref (\current->current {creatingAgent=Just worker})
         pure d {status="Starting agent…"}

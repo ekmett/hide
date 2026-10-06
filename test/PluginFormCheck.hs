@@ -1,6 +1,8 @@
 {-# LANGUAGE OverloadedStrings #-}
 module PluginFormCheck (checks) where
 import Control.Monad (unless)
+import qualified Data.Map.Strict as M
+import qualified Data.Text as T
 import Hide.Plugin.Command
 import Hide.Plugin.Form hiding (prepareForm)
 import FormExtension
@@ -27,7 +29,7 @@ checks=do
     check "label refresh does not revoke unchanged submission" claimed
     repeated<-claimFormSubmission merged
     check "form submission claims once" (not repeated)
-    reply<-invokeFormAction merged () "New"
+    reply<-invokeFormAction merged () (TextValue "New")
     check "public typed form delivers submitted value on its worker" (reply==Right "New")
     pending<-submissionCurrent merged
     check "accepted submission survives its modal closing" pending
@@ -50,13 +52,30 @@ checks=do
     check "metadata refresh cannot replace the choice catalogue" (case changed of Left _->True; _->False)
     changedWidget<-refreshForm (formReference choices) (InputFormSpec "Model" "Name" "" "Apply")
     check "metadata refresh cannot replace the widget kind" (case changedWidget of Left _->True; _->False)
-    invalid<-invokeFormAction refreshed () "L"
+    invalid<-invokeFormAction refreshed () (TextValue "L")
     check "choice labels are not submit values" (case invalid of Left _->True; _->False)
     claimed<-claimFormSubmission refreshed
-    value<-invokeFormAction refreshed () "large"
+    value<-invokeFormAction refreshed () (TextValue "large")
     check "typed choices deliver the advertised stable ID" (claimed && value==Right "large")
     _<-finishFormSubmission (formReference refreshed)
     pure ()
+  withRegistry $ \registry->do
+    let spec=InputsFormSpec "Create" [InputField "task" "Task" "",InputField "name" "Name" ""] "Create"
+        values=M.fromList [("name","Child"),("task","Count files")]
+    prepared<-prepareInputsForm registry spec (\() submitted->pure (Right submitted)) >>= right
+    _<-admitForm False prepared
+    value<-invokeFormAction prepared () (InputValues values)
+    check "named input actions bind stable IDs independently of presentation order" (value==Right values)
+    changed<-refreshForm (formReference prepared) (InputsFormSpec "Create" [InputField "name" "Name" "",InputField "task" "Task" ""] "Create")
+    check "input metadata cannot reorder its immutable schema" (case changed of Left _->True; _->False)
+    missing<-invokeFormAction prepared () (InputValues (M.delete "task" values))
+    extra<-invokeFormAction prepared () (InputValues (M.insert "other" "x" values))
+    oversized<-invokeFormAction prepared () (InputValues (M.insert "task" (T.replicate 8193 "x") values))
+    check "named values reject missing extra and overbound inputs" (all rejected [missing,extra,oversized])
+    scalarShape<-prepareForm registry spec (\() value->pure (Right value))
+    namedShape<-withRegistry $ \other->prepareInputsForm other (InputFormSpec "Single" "Name" "" "Apply") (\() values->pure (Right values))
+    check "form preparation rejects spec action shape mismatches" (case (scalarShape,namedShape) of (Left InvalidArguments{},Left InvalidArguments{})->True; _->False)
+    retireForm (formReference prepared)
   escaped<-withRegistry $ \registry->do
     unconsumed<-prepareForm registry (InputFormSpec "Live" "Name" "Still live" "Submit") (\() text->pure (Right text)) >>= right
     opened<-admitForm False unconsumed
@@ -66,6 +85,9 @@ checks=do
   claimed<-claimFormSubmission escaped
   check "registration teardown rejects retained form and submission" (not live && not claimed)
   where
+    rejected :: Either a b -> Bool
+    rejected (Left _)=True
+    rejected _=False
     check label ok=unless ok (fail label)
     right=either (fail.show) pure
     just :: Maybe a -> IO a

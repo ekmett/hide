@@ -15,8 +15,8 @@ import Hide.AgentHub (AgentId,AgentConfigRef)
 
 -- | Conversation owns application and rechecks the exact target. Dialog submit
 -- retains the captured ID even if directory rows are renamed or reordered.
-data AgentSidebarRequest = ShowAgent !AgentId | NewAgent
-  | RenameAgentTo !AgentId !Text | CreateAgent !Text !Text
+data AgentSidebarRequest = ShowAgent !AgentId
+  | RenameAgentTo !AgentId !Text | CreateAgent !FilePath !Text !Text
   | ConfigureAgent !AgentConfigRef !Text !Text
   | ShowCompletion !CompletionTarget
   | ConfigureCompletion !CompletionTarget !Text !Text deriving (Eq,Show)

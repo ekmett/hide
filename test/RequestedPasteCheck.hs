@@ -66,7 +66,7 @@ checks=do
   check "Disconnected receipt cannot survive a new attachment" (activeText reconnected=="source")
   let wire=object ["type" .= ("paste-reply"::T.Text),"request" .= newer,"text" .= ("requested"::T.Text)]
   check "Requested reply parses distinctly and pure input fails closed" (parseEither P.parseInput wire==Right (P.PasteReply newer "requested") && activeText (fst (P.applyInput (P.PasteReply newer "requested") source))=="source")
-  denied<-P.applyGuestInput (P.PasteReply newer "spoof") opened {dialog=Just dg {purpose=AgentNewDialog}}
+  denied<-P.applyGuestInput (P.PasteReply newer "spoof") opened {dialog=Just dg {purpose=PermissionDialog "fixture"}}
   check "Guest cannot use an observed receipt for a human form" (case denied of Left _->True; _->False)
   forM_ ["",T.replicate 48 "G",T.replicate 49 "a"] $ \bad->check "Malformed request identity is rejected" (case parseEither P.parseInput (object ["type" .= ("paste-reply"::T.Text),"request" .= bad,"text" .= ("x"::T.Text)]) of Left _->True; _->False)
   check "Native/TUI requested replies use the parsed stamped schema" (P.clipboardReplyInput newer "requested"==Just wire && P.clipboardReplyInput "bad" "requested"==Nothing)
