@@ -719,10 +719,22 @@ An optional service can be unavailable in a build. Plugin-specific collaboration
 can use a normal Haskell dependency and scoped handles; add a dynamic service bus
 only if a concrete need appears.
 
-The current `ConversationState` owns build/terminal services and permission state
-as well as presentation. Those owners must be separated before claiming the agent
-UI is a plugin. The existing worker implementations can remain; the migration is
-about ownership and public boundaries, not rewriting ACP, Ghostty or DAP.
+`SessionServices` owns builds, compiler discovery, build settings and shared
+consoles for the editor session. Conversation receives a console handle and owns
+its provider's terminal IDs; retiring that provider releases those terminals,
+without stopping human terminals, builds or debugger consoles. Builds can run
+without a conversation mounted.
+
+Prepared builds still re-enter the full runtime permission and currentness checks
+before launch. The service interpreter sits inside conversation presentation when
+that presentation is present, so service results also refresh the conversation's
+layout. Session teardown joins pending acquisition cleanup before closing jobs
+and consoles.
+
+This is a private ownership boundary, not the finished agent plugin API.
+Conversation still owns provider permissions and presentation. Separating those
+remaining contributions is the next step; ACP, Ghostty and DAP keep their existing
+workers and protocols.
 
 ## Cabal navigation as a second example
 
