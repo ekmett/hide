@@ -38,7 +38,8 @@ checks = do
   check "UTF16 buffer position clamps negative and EOF coordinates" (bufferPositionOffset astral (-1,-1)==0 && bufferPositionOffset astral (99,99)==5)
   let long=Buffer.replaceSelection (Buffer.Selection 6 6) "x"
         (Buffer.newBuffer ("head\n"<>T.replicate 200000 "a😀b"<>"\r\nlast"))
-  -- Editing promotes the long row before measuring the endpoint lookup.
+  -- Install the edited raw row before measuring the bounded endpoint lookup.
+  -- This must not prepare the row's untouched display suffix.
   _<-evaluate (Buffer.prepareBuffer long)
   beforePrefix<-getAllocationCounter
   forM_ [3..12] $ \column->do
