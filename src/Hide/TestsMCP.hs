@@ -17,7 +17,7 @@ import qualified Data.Text as T
 import Hide.Buffer
 import qualified Hide.Build as B
 import qualified Hide.BuildJobs as Jobs
-import Hide.Conversation (ConversationState, conversationServices)
+import Hide.SessionServices
 import Hide.Model
 
 testsToolNames :: [T.Text]
@@ -33,7 +33,7 @@ testsTools=
     "annotations" .= object ["readOnlyHint" .= True,"destructiveHint" .= False,"openWorldHint" .= False]]]
 
 -- | Start a saved-source GHC/Cabal test job or read the latest shared test status.
-testsTool :: ConversationState -> Desktop -> T.Text -> Value -> IO (Desktop,IO (Either T.Text Value))
+testsTool :: SessionServices -> Desktop -> T.Text -> Value -> IO (Desktop,IO (Either T.Text Value))
 testsTool runtime d name arguments = case parseEither (withObject "test arguments" pure) arguments of
   Left err -> done d (Left (T.pack err))
   Right fields -> case name of
@@ -60,7 +60,8 @@ testsTool runtime d name arguments = case parseEither (withObject "test argument
                   results started
     _ -> done d (Left "Unknown test tool")
   where
-    (directory,_,jobs)=conversationServices runtime
+    directory=sessionDirectory runtime
+    jobs=sessionBuildJobs runtime
     done desktop result=pure (desktop,pure result)
     results desktop=do
       job<-Jobs.buildJobStatus jobs desktop

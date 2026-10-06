@@ -78,7 +78,7 @@ checks=do
   let modal=prompt "Question" Information [Input "Name" "" 0] source
   check "source bindings cannot invoke through a modal" (noEffects (key (V.KChar 's') [V.MCtrl,V.MShift] modal))
   let terminal=addReadOnly "Terminal test" "output" source
-  check "PTY Ctrl+C still sends interrupt" (snd (key (V.KChar 'c') [V.MCtrl] terminal)==[AgentAction "terminal-input" ["test","\ETX"]])
+  check "PTY Ctrl+C still sends interrupt" (snd (key (V.KChar 'c') [V.MCtrl] terminal)==[ServiceAction "terminal-input" ["test","\ETX"]])
   check "native frontend retains its own mapping in this stage" (not (noEffects (key (V.KFun 2) [] source {videoMode=Just 3})))
   let rebound=source {keyBindings=prepare [("hide.file.save",[])]}
   before<-renderKey source
@@ -105,14 +105,14 @@ checks=do
   check "conversation commands remain protected after remapping" (not (guestKeyAllowed chat (V.KChar 'k') [V.MCtrl,V.MShift]))
   check "conversation Enter keeps draft submission ownership" (snd (key V.KEnter [] chat)==[AgentAction "send-draft" []])
   let pty=addReadOnly "Terminal test" "output" contextBase
-  check "terminal editor actions can be rebound" (snd (key (V.KFun 11) [V.MAlt] pty)==[AgentAction "terminal-stop" []])
-  check "terminal control characters retain process ownership" (all (\(c,text)->snd (key (V.KChar c) [V.MCtrl] pty)==[AgentAction "terminal-input" ["test",text]]) [('c',"\ETX"),('q',"\DC1"),('s',"\DC3")])
+  check "terminal editor actions can be rebound" (snd (key (V.KFun 11) [V.MAlt] pty)==[ServiceAction "terminal-stop" []])
+  check "terminal control characters retain process ownership" (all (\(c,text)->snd (key (V.KChar c) [V.MCtrl] pty)==[ServiceAction "terminal-input" ["test",text]]) [('c',"\ETX"),('q',"\DC1"),('s',"\DC3")])
   check "terminal control chords cannot be assigned to commands" (either (const True) (const False) (platformBindings [] TerminalPlatform (M.singleton "terminal" (M.singleton "hide.terminal.stop" ["Ctrl+C"]))))
   let debug=addReadOnly "Debugger output" "stopped" contextBase
   check "debugger override drives dispatch and menu labels" (snd (key (V.KChar 'd') [V.MCtrl,V.MShift] debug)==[DebugAction "continue" []] && noEffects (key (V.KFun 4) [] debug) && menuShortcut debug (MenuItem "Continue" "F4" (DebugCommand "continue"))=="Ctrl+Shift+D")
   let global=either (error . show) id (platformBindings [] TerminalPlatform (M.fromList [("global",M.singleton "hide.file.save" ["Ctrl+Shift+S","Alt+F11"]),("wordstar",M.singleton "hide.cursor.left" []),("wordstar-quick",M.singleton "hide.cursor.row-start" [])]))
   check "global control overrides apply outside PTYs" (all (\context->bindingAction (global M.! (TerminalPlatform,context)) (V.KChar 's') [V.MCtrl,V.MShift]==Just Save) [SourceKeys,SidebarKeys,ConversationKeys,MessagesKeys,DebuggerKeys])
-  check "PTY inherits transferable global chords and omits process controls" (bindingKeys (global M.! (TerminalPlatform,TerminalKeys)) Save==["Alt+F11"] && snd (key (V.KChar 'c') [V.MCtrl] (pty {keyBindings=global}))==[AgentAction "terminal-input" ["test","\ETX"]])
+  check "PTY inherits transferable global chords and omits process controls" (bindingKeys (global M.! (TerminalPlatform,TerminalKeys)) Save==["Alt+F11"] && snd (key (V.KChar 'c') [V.MCtrl] (pty {keyBindings=global}))==[ServiceAction "terminal-input" ["test","\ETX"]])
   check "unknown contexts fail instead of disappearing" (either (const True) (const False) (platformBindings [] TerminalPlatform (M.singleton "sidebaar" M.empty)))
   let defaults=either (error . show) id (platformBindings [] TerminalPlatform M.empty)
       compiled d=d {keyBindings=defaults}
@@ -230,7 +230,7 @@ windowChecks=do
       chat=(addReadOnly "Conversation" "reply" base) {keyBindings=removed,composerBuffer=newBuffer "draft",composerSelection=Selection 1 3,composerFocused=True}
   check "unbound PTY window aliases send no bytes"
     (all (\(k,mods)->current (step k mods terminal)==current terminal && null (snd (event k mods terminal))) aliases &&
-     snd (event (V.KChar 'c') [V.MCtrl] terminal)==[AgentAction "terminal-input" ["test","\ETX"]])
+     snd (event (V.KChar 'c') [V.MCtrl] terminal)==[ServiceAction "terminal-input" ["test","\ETX"]])
   check "unbound chat window aliases preserve the draft selection"
     (all (\(k,mods)->let (d,effects)=event k mods chat in current d==current chat && composerSelection d==composerSelection chat && revision (composerBuffer d)==revision (composerBuffer chat) && bufferLength (composerBuffer d)==bufferLength (composerBuffer chat) && null effects) aliases)
   let tree=installSidebar (emptySidebar "/project" 24 True) base {keyBindings=defaults}
@@ -824,7 +824,7 @@ prefixChecks=do
      maybe BS.empty (bufferBytes . documentBuffer) (activeDocument (fst (runCommand DeleteSelection hex)))==BS.pack [65,66])
   check "prefix state cannot move into modal terminal or readonly owners"
     (not (commandEnabled modal WordStarBlockPrefix) && not (commandEnabled readonly MarkBlockStart) &&
-     snd (handleEvent (V.EvKey (V.KChar 'c') [V.MCtrl]) terminal)==[AgentAction "terminal-input" ["test","\ETX"]] &&
+     snd (handleEvent (V.EvKey (V.KChar 'c') [V.MCtrl]) terminal)==[ServiceAction "terminal-input" ["test","\ETX"]] &&
      not (guestKeyAllowed private (V.KChar 'y') []))
   check "menu mnemonic priority does not become a prefix continuation" (menu (event (V.KChar 'f') [V.MAlt] started)/=Nothing && prefix (event (V.KChar 'f') [V.MAlt] started)==Nothing)
   let batch=event (V.KChar 'y') [] (event (V.KChar 'j') [V.MCtrl] (beginGuestInput configured))

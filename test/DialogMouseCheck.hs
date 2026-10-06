@@ -327,7 +327,7 @@ checks = do
       ghc=fst (handleEvent (V.EvKey V.KDown []) toolchainPopup)
       (_,selectEffects)=handleEvent (V.EvKey V.KEnter []) ghc
   check "status toolchain dropdown selects GHC by keyboard"
-    (contextMenu toolchainPopup/=Nothing && selectEffects==[AgentAction "toolchain" ["GHC","ghc"]])
+    (contextMenu toolchainPopup/=Nothing && selectEffects==[ServiceAction "toolchain" ["GHC","ghc"]])
   check "modal status cannot switch toolchain"
     (dialog (fst (handleEvent (V.EvMouseDown (left selector+2) statusY V.BLeft []) statusModal))==dialog statusModal)
   let numbered=fst (runCommand New desktop)
@@ -463,7 +463,7 @@ searchChecks=do
   check "New conversation goes directly to the primary runtime session action" (conversationTarget new=="" && newEffects==[AgentAction "new" []])
   check "conversation shortcuts invoke explicit actions" (snd (handleEvent (V.EvKey (V.KChar 'c') [V.MCtrl,V.MShift]) base)==[AgentAction "show" []] && snd (handleEvent (V.EvKey (V.KChar 'n') [V.MCtrl,V.MShift]) base)==[AgentAction "new" []])
   let terminal=addReadOnly "Terminal 1" "" base
-  check "modern shortcuts do not consume PTY control bytes" (and [snd (handleEvent (V.EvKey (V.KChar c) mods) terminal)==[AgentAction "terminal-input" ["1",text]] |
+  check "modern shortcuts do not consume PTY control bytes" (and [snd (handleEvent (V.EvKey (V.KChar c) mods) terminal)==[ServiceAction "terminal-input" ["1",text]] |
     (c,mods,text)<-[('h',[V.MCtrl],"\b"),('f',[V.MCtrl],"\x06"),('n',[V.MCtrl,V.MShift],"\x0e"),('c',[V.MCtrl,V.MShift],"\x03")]])
 
 -- Independent exhaustive oracle includes overlapping matches and wraparound.

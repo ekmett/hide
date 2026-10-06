@@ -226,7 +226,7 @@ checks | os=="mingw32"=pure () -- Official hdb bindists are currently POSIX only
               "project"->pure progress {defaultDirectory=Just library}
               "edit"->pure (insertText "x" (focusWindow (maybe (error "missing source") windowId (activeWindow base)) progress))
               "reload"->pure progress {buffers=M.map (\doc->doc {documentBuffer=newBuffer "main = print (1::Int)\n"}) (buffers progress)}
-              "settings"->snd <$> debuggerEffects runtime core progress [AgentAction "toolchain" ["GHC","ghc-9.12.4"]]
+              "settings"->snd <$> debuggerEffects runtime core progress [ServiceAction "toolchain" ["GHC","ghc-9.12.4"]]
               "stop"->send runtime "disconnect" [] progress
               "newer"->send runtime "launch" [] progress
               _->pure progress

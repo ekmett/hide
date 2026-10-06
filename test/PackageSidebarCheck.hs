@@ -10,7 +10,7 @@ import qualified Data.ByteString.Lazy as BL
 import System.Environment (lookupEnv,setEnv,unsetEnv)
 import Hide.Buffer
 import qualified Hide.Build as B
-import Hide.Conversation
+import Hide.SessionServices
 import Hide.Plugin.BufferHost (captureVersion,versionCurrent)
 import qualified Hide.Plugin.Menu as Menu
 import qualified Data.Map.Strict as M
@@ -35,7 +35,7 @@ checks=bracket temporary removePathForcibly $ \root->do
       mainFile=root </> "Main.hs"
   writeFile file (manifest "sample")
   writeFile mainFile "main = pure ()\n"
-  withEnv "XDG_CONFIG_HOME" (Just (root </> "config")) $ withEnv "THC_EDIT_SESSION" Nothing $ withSidebarCommands $ \host->withConversationAt root $ \runtime->do
+  withEnv "XDG_CONFIG_HOME" (Just (root </> "config")) $ withEnv "THC_EDIT_SESSION" Nothing $ withSidebarCommands $ \host->withSessionServices $ \runtime->do
     let initial=(initialDesktop (100,35)) {sideTree=Just (emptySidebar root 28 False)}
     withPackageSidebar host initial $ \provider->do
       captured<-newIORef Nothing
@@ -48,9 +48,9 @@ checks=bracket temporary removePathForcibly $ \root->do
                 PackageBuildAction _ target->writeIORef captured (Just target)
                 PackageDebugAction target entry->writeIORef capturedDebug (Just (target,entry))
                 _->pure ()) pending
-              conversationEffects runtime (\state _->pure (False,state)) value pending) d effects
+              sessionEffects runtime (\state _->pure (False,state)) value pending) d effects
           sidebarTick d=tickPackageSidebar provider host d >>= tickSidebar host core
-          tick d=tickConversation runtime d >>= tickBuildPreparation runtime core >>= sidebarTick
+          tick d=tickSessionServices runtime d >>= tickBuildPreparation runtime core >>= sidebarTick
           wait label predicate current=timeout 5000000 (loop current) >>= maybe (fail (label<>" timed out")) pure
             where loop d=do next<-tick d; if predicate next then pure next else threadDelay 1000 >> loop next
           rows d=maybe [] (M.elems . treeRows) (sideTree d)
@@ -129,7 +129,7 @@ checks=bracket temporary removePathForcibly $ \root->do
         runArguments<-lines <$> readFile invocation
         unless (runArguments==[root,"run","sample:exe:second","--project-dir",root,"--thc-root","compiler root","--runtime","runtime path","--","program argument"])
           (fail "Executable Run uses captured target rather than focused source or saved target")
-        stopped<-stopConversationBuild runtime running
+        stopped<-stopSessionBuild runtime running
         -- Dirty source is captured before preparation: no target process is launched.
         removeFile invocation
         readyToReuse<-timeout 5000000 (let loop current=do next<-tick current; pending<-buildTerminalLaunchPending runtime; if pending then threadDelay 1000 >> loop next else pure next in loop stopped) >>= maybe (fail "Run preparation did not retire") pure
@@ -171,7 +171,7 @@ checks=bracket temporary removePathForcibly $ \root->do
             (fail "Benchmark uses captured component without Run program/runtime arguments")
           visible<-wait "captured Benchmark output" (any (\window->let text=W.preparedWindowText window in W.preparedWindowTitle window=="Benchmark output" && "captured runner output" `T.isInfixOf` contentSlice text 0 (contentLength text)) . M.elems . pluginWindows) benchmarked
           unless ((windowId <$> activeWindow visible)==(windowId <$> activeWindow other)) (fail "A reused captured output slot must preserve unrelated source focus")
-          cancelled<-stopConversationBuild runtime visible
+          cancelled<-stopSessionBuild runtime visible
           wait "captured Benchmark Stop" (T.isInfixOf "Stopped." . status) cancelled
         unchangedConfig<-BL.readFile configPath
         unless (unchangedConfig==ghcBytes) (fail "Test/Benchmark must not replace the saved target")

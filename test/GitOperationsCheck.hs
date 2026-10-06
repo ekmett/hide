@@ -116,7 +116,7 @@ checks = bracket temporary removePathForcibly $ \base -> do
     check "quit waits for active operation" (not exited && "Wait for" `T.isPrefixOf` status waiting)
     (_,blockedApproval)<-effects waiting [AgentAction "approval:1" ["0"]]
     check "mutating Git blocks agent approvals before they reach the writer" ("Wait for" `T.isPrefixOf` status blockedApproval)
-    (_,blockedRun)<-effects waiting [AgentAction "run" []]
+    (_,blockedRun)<-effects waiting [ServiceAction "run" []]
     check "mutating Git blocks starting a terminal run" ("Wait for" `T.isPrefixOf` status blockedRun)
     (_,cancelledAgent)<-effects waiting [AgentAction "cancel" []]
     check "mutating Git still delegates agent cancellation" (status cancelledAgent=="agent action delegated")
@@ -229,6 +229,7 @@ core desktop [RefreshGit path]=do
   pure (False,desktop {branchRoot=repoRoot <$> repo,branchStatus=maybe "" repoBranch repo})
 core desktop [Exit]=pure (True,desktop)
 core desktop [SaveDocument{}]=pure (False,desktop {status="save delegated"})
+core desktop [ServiceAction{}]=pure (False,desktop {status="service action delegated"})
 core desktop [AgentAction{}]=pure (False,desktop {status="agent action delegated"})
 core desktop _=pure (False,desktop)
 

@@ -79,7 +79,7 @@ checks = do
     check "browser menu commands cannot edit behind a modal dialog" (fst (applyInput (BrowserCommand cmd) modal)==modal)
   let terminal=addDocument Nothing (newBuffer "") base
       terminalView=terminal {buffers=M.adjust (\doc->doc {documentLabel=Just "Terminal 1"}) (nextId base) (buffers terminal)}
-  check "terminal Ctrl+C reaches the PTY" (snd (applyInput (Key "c" [V.MCtrl]) terminalView)==[AgentAction "terminal-input" ["1","\ETX"]])
+  check "terminal Ctrl+C reaches the PTY" (snd (applyInput (Key "c" [V.MCtrl]) terminalView)==[ServiceAction "terminal-input" ["1","\ETX"]])
   let originals=map frameRows [base,pasted,pasted {screenSize=(240,80)},base]
       decodePacket old packet = do
         let tag=BL.head packet

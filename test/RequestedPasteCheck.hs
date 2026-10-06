@@ -80,5 +80,5 @@ checks=do
   let output=terminal {buffers=M.map (\doc->doc {documentBuffer=newBuffer "new output"}) (buffers terminal)}
   refreshRequestedPaste reads output
   (_,effects)<-applyRequestedPaste reads terminalToken "terminal input" output
-  check "PTY output does not expire requested input" (effects==[AgentAction "terminal-input" ["test","terminal input"]])
+  check "PTY output does not expire requested input" (effects==[ServiceAction "terminal-input" ["test","terminal input"]])
   putStrLn "requested paste checks passed"

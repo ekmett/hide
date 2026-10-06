@@ -145,8 +145,8 @@ validateGuestEffects d=mapM_ check
       ResolveConflict conflict _->buffer (conflictBuffer conflict)
       _->pure ()
 
-agentActionAllowed :: Text -> Bool
-agentActionAllowed action=action `elem` ["compile","make","build-stop","run","run-options","run-config","toolchain","terminal","terminal-input","terminal-stop"]
+serviceActionAllowed :: Text -> Bool
+serviceActionAllowed action=action `elem` ["compile","make","build-stop","run","run-options","run-config","toolchain","terminal","terminal-input","terminal-stop"]
 guestEffectsAllowed :: [Effect] -> Bool
 guestEffectsAllowed=all allowed
   where
@@ -175,7 +175,8 @@ guestEffectsAllowed=all allowed
     allowed AutocompleteAction{}=False
     allowed DownloadCancelAction{}=False
     allowed (DebugAction action _)=not (privateDebuggerAction action)
-    allowed (AgentAction action _)=agentActionAllowed action
+    allowed (ServiceAction action _)=serviceActionAllowed action
+    allowed AgentAction{}=False
     allowed (SaveDocument _ _ follow)=maybe True guestCommandAllowed follow
     allowed ReadBrowserClipboard=False
     allowed WriteBrowserClipboard{}=False
@@ -192,7 +193,8 @@ protectedPurpose p=case p of
   DebugSourceWatchDialog{} -> True
   DebuggerWatchDialog{} -> True
   DebugDialog action -> privateDebuggerAction action
-  AgentDialog action -> not (agentActionAllowed action)
+  ServiceDialog action -> not (serviceActionAllowed action)
+  AgentDialog{} -> True
   DiscardDraft -> True
   Confirm command -> not (guestCommandAllowed command)
   _ -> False

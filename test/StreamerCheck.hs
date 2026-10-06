@@ -6,6 +6,7 @@ import qualified Data.ByteString.Lazy as BL
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Hide.Conversation
+import qualified Hide.Consoles as C
 import Hide.Model
 import Hide.Render (snapshot)
 
@@ -21,7 +22,7 @@ checks=do
   check "disabling streamer restores visible values" (snapshot (hidden {streamerMode=False})==snapshot original)
   let statusOnly=(initialDesktop (80,25)) {status="Session private-session-key",streamerMode=True}
   check "streamer mode covers session status" (not ("private-session-key" `T.isInfixOf` snapshot statusOnly))
-  withConversation $ \runtime -> do
+  C.withConsoles $ \consoles -> withConversation consoles $ \runtime -> do
     let state=(initialDesktop (80,25)) {agentSettings=[AgentSetting "model" "Model" "model" "model-public" [("model-public","Public model")],AgentSetting "token" "API token" "private" "private-value" [("private-value","private-choice")]]}
     (unchanged,finish)<-chatTool runtime state "agent_settings" (object [])
     result<-finish

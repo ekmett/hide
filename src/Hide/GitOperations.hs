@@ -181,7 +181,9 @@ gitOperationEffects runtime@(GitOperations ref _ _ _ terminalLaunch) core = fold
       case effect of
         Exit | busy -> pure (False,desktop {status="Wait for the Git operation to finish before quitting."})
         SaveDocument{} | mutating -> pure (False,desktop {status="Wait for the Git operation to finish before saving."})
-        AgentAction action _ | mutating, action `elem` ["run","compile","make"] || "approval:" `T.isPrefixOf` action ->
+        ServiceAction action _ | mutating, action `elem` ["run","compile","make"] ->
+          pure (False,desktop {status="Wait for the Git operation to finish before approving agent actions or running commands."})
+        AgentAction action _ | mutating, "approval:" `T.isPrefixOf` action ->
           pure (False,desktop {status="Wait for the Git operation to finish before approving agent actions or running commands."})
         AdoptPreparedDebug _ | mutating -> pure (False,desktop {status="Wait for the Git operation to finish before debugging."})
         AdoptPreparedBuild _ | mutating -> pure (False,desktop {status="Wait for the Git operation to finish before running commands."})

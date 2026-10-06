@@ -37,8 +37,8 @@ checks = bracket temporary removePathForcibly $ \root -> do
         maybe (error "build worker did not finish") pure answer
         where loop d=do fresh<-tickBuildJobs jobs d; if done fresh then pure fresh else threadDelay 10000 >> loop fresh
       finished d=any (`T.isInfixOf` status d) ["completed.","failed (exit", "does not exist", "No such file"]
-  check "F9 starts Make" (snd (handleEvent (V.EvKey (V.KFun 9) []) initial)==[AgentAction "make" []])
-  check "Alt-F9 starts Compile" (snd (handleEvent (V.EvKey (V.KFun 9) [V.MAlt]) initial)==[AgentAction "compile" []])
+  check "F9 starts Make" (snd (handleEvent (V.EvKey (V.KFun 9) []) initial)==[ServiceAction "make" []])
+  check "Alt-F9 starts Compile" (snd (handleEvent (V.EvKey (V.KFun 9) [V.MAlt]) initial)==[ServiceAction "compile" []])
   check "THC target retains literal argv" . (==Right [("thc with spaces",["run","exe:hello world;literal","--project-dir",root,"--thc-root","compiler root","--runtime","runtime path","--","one two"])]) =<< B.buildPlan B.Run thc root Nothing
   forM_ [B.Compile,B.Make] $ \action -> do
     check "THC builds selected components without runtime or program arguments" .

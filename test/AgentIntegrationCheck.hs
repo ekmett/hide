@@ -15,6 +15,7 @@ import System.FilePath ((</>))
 import System.IO (hClose,openTempFile)
 import System.Timeout (timeout)
 import Hide.Conversation
+import qualified Hide.Consoles as C
 import qualified Hide.AgentRuntime as AR
 import qualified Hide.AgentHub as AH
 import Hide.GuestAccess (guestKeyboardAllowed,guestCommandAllowed,sanitizedBuffer,guestTransitionAllowed)
@@ -41,7 +42,7 @@ checks=bracket temporary removePathForcibly $ \root ->
     BL.writeFile (config </> "agents.json") (encode (object ["executable" .= ("python3"::T.Text),"arguments" .= [script]]))
     record<-newSessionRecord Nothing ["--",root]
     rememberSession record
-    environment "THC_EDIT_SESSION" (Just (sessionId record)) $ withConversationAt root $ \conversation -> do
+    environment "THC_EDIT_SESSION" (Just (sessionId record)) $ C.withConsoles $ \consoles -> withConversationAt consoles root $ \conversation -> do
       let agents=conversationAgents conversation
           hub=AR.agentHub agents
           primary=AR.primaryAgent agents
@@ -230,7 +231,7 @@ checks=bracket temporary removePathForcibly $ \root ->
     let recoveredPath=root </> "newer-child.checkpoint"
         fakeDriver=AH.AgentDriver root "private-recovery-child" (AH.Capabilities False False False [])
           (\_ ->pure (Right (AH.Capabilities False False False []))) (\_ ->pure (Right Null)) (pure ()) (pure ()) (\_ ->pure (Left "unsupported"))
-    recoveredChild<-environment "THC_EDIT_SESSION" (Just (sessionId recoveryRecord)) $ withConversationAt root $ \conversation -> do
+    recoveredChild<-environment "THC_EDIT_SESSION" (Just (sessionId recoveryRecord)) $ C.withConsoles $ \consoles -> withConversationAt consoles root $ \conversation -> do
       let agents=conversationAgents conversation
           hub=AR.agentHub agents
       child<-AH.registerAgent hub "Recovered child" root fakeDriver >>= right
@@ -242,7 +243,7 @@ checks=bracket temporary removePathForcibly $ \root ->
       AR.activateAgentCheckpoint agents
       AR.checkpointAgents agents >>= right
       pure child
-    environment "THC_EDIT_SESSION" (Just (sessionId recoveryRecord)) $ withConversationAt root $ \conversation -> do
+    environment "THC_EDIT_SESSION" (Just (sessionId recoveryRecord)) $ C.withConsoles $ \consoles -> withConversationAt consoles root $ \conversation -> do
       recovered<-readCheckpoint recoveredPath (initialDesktop (80,25)) >>= right
       retained<-tickConversation conversation recovered
       ensure "stale recovered Hub history cannot overwrite newer Desktop transcript" (activeText retained=="newer Desktop child transcript" && contents (composerBuffer retained)=="recovered draft")
@@ -258,7 +259,7 @@ checks=bracket temporary removePathForcibly $ \root ->
     rememberSession corrupt
     checkpoint<-(++".agents.json") <$> checkpointPath (sessionId corrupt)
     writeFile checkpoint "{incomplete"
-    environment "THC_EDIT_SESSION" (Just (sessionId corrupt)) $ withConversationAt root $ \conversation -> do
+    environment "THC_EDIT_SESSION" (Just (sessionId corrupt)) $ C.withConsoles $ \consoles -> withConversationAt consoles root $ \conversation -> do
       noticed<-tickConversation conversation (initialDesktop (80,25))
       ensure "agent checkpoint failures reach the status line" ("checkpoint" `T.isInfixOf` status noticed && "retained" `T.isInfixOf` status noticed)
       consumed<-tickConversation conversation noticed {status="ordinary status"}

@@ -22,6 +22,7 @@ import System.Environment (getArgs, lookupEnv, setEnv, unsetEnv)
 import System.FilePath ((</>))
 import System.IO (hSetBuffering,stdout,BufferMode(LineBuffering))
 import Hide.App (applyEffects)
+import qualified Hide.Consoles as C
 import Hide.Conversation (withConversationAt, conversationEffects, tickConversation, renderReply)
 import Hide.Debugger (withDebugger, debuggerEffects, tickDebugger, hdbOfferDialog, debuggerTool)
 import Hide.DebuggerSidebar (withDebuggerSidebar,tickDebuggerSidebar)
@@ -80,7 +81,7 @@ main = PluginWindow.withWindowScope $ \downloadScope -> do
           Driver.await label pump predicate d
         chat d = case agentConfig of
           Nothing -> recordedChat d
-          Just _ -> withConversationAt root $ \conversation -> do
+          Just _ -> C.withConsoles $ \consoles -> withConversationAt consoles root $ \conversation -> do
             let liveEffects=conversationEffects conversation effects
             sent <- snd <$> liveEffects d [AgentAction "send" ["0",
               "Read src/Hide/Buffer.hs and explain its finger tree of lines in three short bullets (under 70 words). Read-only, please.",

@@ -18,7 +18,7 @@ import Data.Text.Encoding.Error (lenientDecode)
 import System.Directory (canonicalizePath)
 import Hide.Buffer
 import Hide.Model
-import Hide.Conversation (ConversationState,conversationServices,stopConversationBuild)
+import Hide.SessionServices
 import qualified Hide.Consoles as C
 import qualified Hide.Terminal as Term
 import qualified Hide.Build as B
@@ -51,9 +51,9 @@ runtimeTools=
       "inputSchema" .= object ["type" .= ("object"::T.Text),"properties" .= object [K.fromText key .= value | (key,value)<-props],"required" .= required,"additionalProperties" .= False],
       "annotations" .= object ["readOnlyHint" .= readOnly,"destructiveHint" .= not readOnly,"openWorldHint" .= not readOnly]]
 
--- | Dispatch against the conversation-owned build and console services.
+-- | Dispatch against the session-owned build and console services.
 -- Builds require saved source buffers; launch planning can perform synchronous IO.
-runtimeTool :: ConversationState -> Desktop -> T.Text -> Value -> IO (Desktop,IO (Either T.Text Value))
+runtimeTool :: SessionServices -> Desktop -> T.Text -> Value -> IO (Desktop,IO (Either T.Text Value))
 runtimeTool runtime d name args=case parseEither (withObject "arguments" pure) args of
   Left err -> done d (Left (T.pack err))
   Right o -> case name of
@@ -62,7 +62,7 @@ runtimeTool runtime d name args=case parseEither (withObject "arguments" pure) a
       Left err -> bad err
       Right (ident,offset,limit) -> (d,) <$> Jobs.buildJobOutput jobs ident offset limit
     "build_stop" -> do
-      updated<-stopConversationBuild runtime d
+      updated<-stopSessionBuild runtime d
       Jobs.buildJobStatus jobs updated >>= done updated . Right
     "build_start" -> case parseEither (\_ -> (,,,,) <$> o .: "action" <*> o .:? "toolchain" <*> o .:? "target" <*> o .:? "arguments" <*> o .:? "terminal" .!= False) args of
       Left err -> bad err
@@ -114,7 +114,9 @@ runtimeTool runtime d name args=case parseEither (withObject "arguments" pure) a
       Right ident -> C.killConsole consoles ident >>= done d . fmap (const (object ["accepted" .= True]))
     _ -> failWith "Unknown runtime tool."
   where
-    (directory,consoles,jobs)=conversationServices runtime
+    directory=sessionDirectory runtime
+    consoles=sessionConsoles runtime
+    jobs=sessionBuildJobs runtime
     done updated result=pure (updated,pure result)
     failWith=done d . Left
     bad=failWith . T.pack

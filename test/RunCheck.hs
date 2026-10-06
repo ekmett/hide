@@ -33,7 +33,8 @@ import Hide.Markdown (renderMarkdownWithShellBlocks)
 import qualified Hide.Build as B
 import Hide.Buffer
 import Hide.Debugger
-import Hide.Conversation
+import Hide.Conversation (withConversationAt, conversationAgents)
+import Hide.SessionServices
 import Hide.RuntimeMCP (runtimeTool)
 import Hide.GitOperations
 import Hide.GuestAccess (guestEffectsAllowed, validateGuestEffects)
@@ -65,14 +66,14 @@ checks = do
           runtimePath=T.pack (root </> "runtime with spaces")
           target="exe:target with spaces;$(touch should-not-exist)"
           desktop=(initialDesktop (80,25)) {sideTree=Just (emptySidebar root 20 False)}
-          core runtime=conversationEffects runtime (\state _ -> pure (False,state))
-          tick runtime d=tickBuildPreparation runtime (core runtime) d >>= tickConversation runtime
+          core runtime=sessionEffects runtime (\state _ -> pure (False,state))
+          tick runtime d=tickBuildPreparation runtime (core runtime) d >>= tickSessionServices runtime
           awaitDialog runtime d=timeout 5000000 (loop d) >>= maybe (error "Build target preparation timed out") pure
             where loop current=do
                     next<-tick runtime current
                     if dialog next/=Nothing then pure next else threadDelay 1000 >> loop next
           send runtime action values d=do
-            next<-snd <$> core runtime d [AgentAction action values]
+            next<-snd <$> core runtime d [ServiceAction action values]
             if action=="run-options" then awaitDialog runtime next else pure next
           awaitRun runtime d=do
             result<-timeout 5000000 (loop d)
@@ -100,16 +101,16 @@ checks = do
         ]
       permissions<-getPermissions command
       setPermissions command permissions {executable=True}
-      withConversation $ \runtime -> do
-        loading<-tickConversation runtime desktop {toolchain=Just GHC}
+      withSessionServices $ \runtime -> do
+        loading<-tickSessionServices runtime desktop {toolchain=Just GHC}
         check "pending settings refresh preserves the selected toolchain" (toolchain loading==Just GHC)
-      withConversation $ \runtime -> do
-        initial<-tickConversation runtime desktop
+      withSessionServices $ \runtime -> do
+        initial<-tickSessionServices runtime desktop
         check "status starts with persisted toolchain" (toolchain initial==Just THC)
         ghc<-send runtime "toolchain" ["GHC"] initial
         stored<-B.loadBuildConfig (root </> "config/thc-edit") root
         check "status selector saves GHC and compiler together" (toolchain ghc==Just GHC && B.buildToolchain stored==GHC && B.buildExecutable stored=="ghc")
-        withConversation $ \other -> do
+        withSessionServices $ \other -> do
           stale<-awaitToolchain other GHC desktop
           _<-send runtime "toolchain" ["THC"] ghc
           refreshed<-awaitToolchain other THC stale
@@ -141,9 +142,9 @@ checks = do
               Nothing -> error "missing target dialog"
             (_,submitted)=submitDialog 0 ghcDialog reopened
         check "dialog passes toolchain after text inputs" (case submitted of
-          [AgentAction "run-config" values] -> last values=="1" && values !! 5=="[]"
+          [ServiceAction "run-config" values] -> last values=="1" && values !! 5=="[]"
           _ -> False)
-        _<-conversationEffects runtime (\state _ -> pure (False,state)) configured submitted
+        _<-sessionEffects runtime (\state _ -> pure (False,state)) configured submitted
         withDebugger $ \debugger -> do
           (_,refusedDebug)<-debuggerEffects debugger (\state _ -> pure (False,state)) configured
             [DebugAction "launch-config" ["0","","4711"]]
@@ -167,7 +168,7 @@ checks = do
           (_,blankArguments)<-awaitRun runtime blankStarted
           check "blank target and optional roots omit CLI flags" (field "args" blankArguments==Just (["run","--project-dir",T.pack root]::[T.Text]))
       -- Persisted Run configuration must work in a fresh runtime, independently of ACP.
-      withConversation $ \runtime -> do
+      withSessionServices $ \runtime -> do
         restored<-send runtime "run-options" [] desktop
         check "Run configuration survives runtime restart" (case dialog restored of
           Just dg -> case fields dg of Input _ savedCommand _: _ -> savedCommand==T.pack command; _ -> False
@@ -187,8 +188,8 @@ buildPreparationChecks=when (os/="mingw32") $ bracket temporary removePathForcib
           {defaultDirectory=Just root}
         config=B.BuildConfig THC command "exe:captured" "" "" ["literal argument"]
         bytes=encode (B.buildConfigValue root config)
-        raw runtime action d=snd <$> conversationEffects runtime (\state _->pure (False,state)) d [AgentAction action []]
-        core runtime=conversationEffects runtime (\state _->pure (False,state))
+        raw runtime action d=snd <$> sessionEffects runtime (\state _->pure (False,state)) d [ServiceAction action []]
+        core runtime=sessionEffects runtime (\state _->pure (False,state))
         await label runtime predicate d=timeout 5000000 (loop d) >>= maybe (error ("Build preparation: "++label)) pure
           where loop current=do
                   next<-tickBuildPreparation runtime (core runtime) current
@@ -216,7 +217,7 @@ buildPreparationChecks=when (os/="mingw32") $ bracket temporary removePathForcib
     release<-newEmptyMVar
     withAsync (withSettingsWriter path $ \handle->do
       BL.hPut handle (bytes<>BL.replicate 1048577 32); hFlush handle; putMVar opened (); takeMVar release) $ \writer ->
-      withConversationAt root $ \runtime -> do
+      withSessionServices $ \runtime -> do
         fast<-timeout 500000 (raw runtime "make" base)
         pending<-maybe (error "build settings read blocked the owner") pure fast
         reader<-timeout 5000000 (takeMVar opened)
@@ -228,30 +229,30 @@ buildPreparationChecks=when (os/="mingw32") $ bracket temporary removePathForcib
         removeFile path
         BL.writeFile path bytes
         shown<-freshOptions runtime changed
-        let (_,_,jobs)=conversationServices runtime
+        let jobs=sessionBuildJobs runtime
         result<-Jobs.buildJobStatus jobs shown
         check "stale source preparation cannot start or replace output" (field "outputAvailable" result/=Just True)
         check "stale source preparation does not execute" . not =<< doesFileExist marker
 
-    withConversationAt root $ \runtime -> do
+    withSessionServices $ \runtime -> do
       queued<-raw runtime "run-options" base
       let modal=prompt "Unrelated" Information [SelectedInput "Name" "draft" (Selection 0 5)] queued
       retained<-foldM (\d _->threadDelay 1000 >> tickBuildPreparation runtime (core runtime) d) modal [1..30::Int]
       check "ready build options preserve a later modal" (dialog retained==dialog modal)
-      shown<-await "modal-deferred options" runtime (pure . maybe False ((==AgentDialog "run-config") . purpose) . dialog) retained {dialog=Nothing}
+      shown<-await "modal-deferred options" runtime (pure . maybe False ((==ServiceDialog "run-config") . purpose) . dialog) retained {dialog=Nothing}
       check "deferred options use the captured compiler" (case dialog shown of
         Just dg->case fields dg of Input _ selected _:_->selected==T.pack command; _->False
         _->False)
 
-    withConversationAt root $ \runtime -> do
+    withSessionServices $ \runtime -> do
       pending<-raw runtime "make" base
-      _<-snd <$> core runtime pending [AgentAction "run-config" ["0",T.pack command,"exe:new","","","[]","0"]]
+      _<-snd <$> core runtime pending [ServiceAction "run-config" ["0",T.pack command,"exe:new","","","[]","0"]]
       _<-freshOptions runtime pending
       check "settings Save retires an earlier captured build" . not =<< doesFileExist marker
 
     -- Refusing the delayed gate consumes the ready intent. A later permissive
     -- tick cannot resurrect it; Stop also retires a not-yet-adopted intent.
-    withConversationAt root $ \runtime -> do
+    withSessionServices $ \runtime -> do
       pending<-raw runtime "make" base
       gated<-newIORef False
       let refuse state effects=do
@@ -271,7 +272,7 @@ buildPreparationChecks=when (os/="mingw32") $ bracket temporary removePathForcib
       _<-freshOptions runtime stopped
       check "Stop before adoption starts no process" . not =<< doesFileExist marker
 
-    when terminalAvailable $ withConversationAt root $ \runtime -> do
+    when terminalAvailable $ withSessionServices $ \runtime -> do
       pending<-raw runtime "run" base
       launching<-await "terminal launch reservation" runtime (const (buildTerminalLaunchPending runtime)) pending
       withGitOperations (buildTerminalLaunchPending runtime) $ \git -> do
@@ -281,7 +282,7 @@ buildPreparationChecks=when (os/="mingw32") $ bracket temporary removePathForcib
         check "Git status remains readable during terminal launch" . either (const False) (const True) =<< readable
       stopped<-raw runtime "build-stop" launching
       _<-await "abandoned terminal cleanup" runtime (const (not <$> buildTerminalLaunchPending runtime)) stopped
-      let (_,consoles,_)=conversationServices runtime
+      let consoles=sessionConsoles runtime
       check "abandoned prepared terminal cannot become a visible console" . null =<< C.listConsoles consoles
 
       exists<-doesFileExist marker
@@ -294,7 +295,7 @@ buildPreparationChecks=when (os/="mingw32") $ bracket temporary removePathForcib
       processStarted<-timeout 5000000 waitMarker
       check "terminal worker actually starts the approved process" (processStarted==Just ())
       let edited=insertText "new" started
-      changed<-snd <$> core runtime edited [AgentAction "run-config" ["0",T.pack command,"exe:next","","","[]","0"]]
+      changed<-snd <$> core runtime edited [ServiceAction "run-config" ["0",T.pack command,"exe:next","","","[]","0"]]
       shown<-await "edited running terminal adoption" runtime (const (not . null <$> C.listConsoles consoles)) changed
       check "post-launch editing and settings Save preserve program adoption"
         (contents (documentBuffer (buffers shown M.! 1))=="newsource")
@@ -305,7 +306,7 @@ keyboardChecks = do
       sourceWindow=maybe (error "source window missing") id (activeWindow source)
       terminal=addReadOnly "Terminal fixture" "terminal text" source
       before=activeText terminal
-      expected text=[AgentAction "terminal-input" ["fixture",text]]
+      expected text=[ServiceAction "terminal-input" ["fixture",text]]
       cases=[(V.EvKey V.KEnter [],"\r"),(V.EvKey (V.KChar 'c') [V.MCtrl],"\ETX")
             ,(V.EvPaste (TE.encodeUtf8 "λ\ntext"),"λ\ntext"),(V.EvKey V.KUp [],"\ESC[A")
             ,(V.EvKey V.KLeft [V.MCtrl],"\ESC[1;5D"),(V.EvKey V.KRight [V.MShift],"\ESC[1;2C")]
@@ -321,7 +322,7 @@ keyboardChecks = do
   check "F6 still cycles windows from terminal" (fmap windowId (activeWindow cycled)==Just (windowId sourceWindow) && null cycleEffects)
   check "Alt-number still activates numbered source window" (fmap windowId (activeWindow numbered)==Just (windowId sourceWindow) && null numberEffects)
   check "native menu Paste targets terminal input" (snd (runCommand Paste terminal {clipboard="paste\n"})==expected "paste\n")
-  check "Ctrl-F9 remains editor Run shortcut" (snd (handleEvent (V.EvKey (V.KFun 9) [V.MCtrl]) terminal)==[AgentAction "run" []])
+  check "Ctrl-F9 remains editor Run shortcut" (snd (handleEvent (V.EvKey (V.KFun 9) [V.MCtrl]) terminal)==[ServiceAction "run" []])
 
 field :: FromJSON a => T.Text -> Value -> Maybe a
 field key=parseMaybe (withObject "object" (.: K.fromText key))
@@ -361,22 +362,22 @@ compilerMenuChecks=bracket temporary removePathForcibly $ \root -> do
       desktop=(initialDesktop (80,25)) {sideTree=Just (emptySidebar root 20 False)}
       core d _=pure (False,d)
       open runtime d=let (shown,effects)=runCommand ToolchainOptions d in
-        snd <$> conversationEffects runtime core shown effects
+        snd <$> sessionEffects runtime core shown effects
       await runtime label predicate d=timeout 5000000 (loop d) >>= maybe (error label) pure
         where loop current=do
-                next<-tickConversation runtime current
+                next<-tickSessionServices runtime current
                 if predicate next then pure next else threadDelay 1000 >> loop next
       waitFile file=timeout 5000000 loop >>= check "compiler menu fixture starts" . (==Just ())
         where loop=do exists<-doesFileExist file; if exists then pure () else threadDelay 1000 >> loop
       entries=contextItems . contextKind
       choose runtime label d=case [command | (name,command)<-entries d,label `T.isInfixOf` name] of
-        command:_ -> let (next,effects)=runCommand command d in snd <$> conversationEffects runtime core next effects
+        command:_ -> let (next,effects)=runCommand command d in snd <$> sessionEffects runtime core next effects
         [] -> error "missing compiler choice"
       saved=object ["toolchain" .= ("GHC"::T.Text),"command" .= ("ghc"::T.Text),"cwd" .= root,
         "target" .= ("exe:kept"::T.Text),"arguments" .= ["literal argument"::T.Text],"custom" .= True,
         "toolchains" .= object ["THC" .= object ["toolchain" .= ("THC"::T.Text),"command" .= ("/saved/thc"::T.Text),"custom" .= ("retain"::T.Text)]]]
   check "opening toolchain menu starts asynchronous catalogue discovery"
-    (snd (runCommand ToolchainOptions desktop)==[AgentAction "toolchain" []])
+    (snd (runCommand ToolchainOptions desktop)==[ServiceAction "toolchain" []])
   createDirectory bin
   createDirectoryIfMissing True settings
   writeFile selected ""
@@ -393,7 +394,7 @@ compilerMenuChecks=bracket temporary removePathForcibly $ \root -> do
   withEnv "XDG_CONFIG_HOME" (Just (root </> "config")) $ withEnv "PATH" (Just bin) $
     withEnv "MENU_STARTED" (Just started) $ withEnv "MENU_RELEASE" (Just release) $
     withEnv "MENU_DONE" (Just done) $ withEnv "MENU_COMPILER" (Just selected) $ do
-      withConversation $ \runtime -> do
+      withSessionServices $ \runtime -> do
         fast<-timeout 500000 (open runtime desktop)
         shown<-maybe (error "compiler discovery blocked UI") pure fast
         check "Automatic is immediately available while discovering" (any (T.isInfixOf "Automatic" . fst) (entries shown))
@@ -408,7 +409,7 @@ compilerMenuChecks=bracket temporary removePathForcibly $ \root -> do
         automatic<-choose runtime "Automatic" reopened
         restored<-B.loadBuildConfig settings root
         check "Automatic restores project compiler selection without losing target" (B.buildExecutable restored=="ghc" && B.buildTarget restored=="exe:kept")
-        (_,edited)<-conversationEffects runtime core automatic [AgentAction "run-config" ["0","ghc","exe:edited","","","[]","1"]]
+        (_,edited)<-sessionEffects runtime core automatic [ServiceAction "run-config" ["0","ghc","exe:edited","","","[]","1"]]
         afterEdit<-decodeStrict' <$> BS.readFile path
         check "editing target retains unknown saved fields" ((afterEdit >>= field "custom")==Just True)
         _<-choose runtime "THC" =<< open runtime edited
@@ -417,7 +418,7 @@ compilerMenuChecks=bracket temporary removePathForcibly $ \root -> do
       removeFile started
       removeFile release
       removeFile done
-      closed<-timeout 3000000 $ withConversation $ \runtime -> do
+      closed<-timeout 3000000 $ withSessionServices $ \runtime -> do
         opened<-open runtime desktop
         waitFile started
         let dismissed=fst (handleEvent (V.EvKey V.KEsc []) opened)
@@ -425,19 +426,19 @@ compilerMenuChecks=bracket temporary removePathForcibly $ \root -> do
         waitFile done
         -- The completed worker may be collected on either side of this tick;
         -- neither that result nor later ticks can restore the dismissed popup.
-        final<-foldM (\d _ -> threadDelay 1000 >> tickConversation runtime d) dismissed [1..100::Int]
+        final<-foldM (\d _ -> threadDelay 1000 >> tickSessionServices runtime d) dismissed [1..100::Int]
         check "discovery does not reopen a dismissed popup" (contextMenu final==Nothing)
       check "closed-menu worker cleanup is bounded" (closed==Just ())
       removeFile started
       removeFile release
-      cleanup<-timeout 3000000 $ withConversation $ \runtime -> do
+      cleanup<-timeout 3000000 $ withSessionServices $ \runtime -> do
         _<-open runtime desktop
         waitFile started
       check "conversation shutdown cancels pending discovery" (cleanup==Just ())
 
 shellBlockChecks :: IO ()
 shellBlockChecks = when (terminalAvailable && os/="mingw32") $ bracket temporary removePathForcibly $ \root ->
-  withEnv "XDG_CONFIG_HOME" (Just (root </> "config")) $ withConversationAt root $ \runtime -> do
+  withEnv "XDG_CONFIG_HOME" (Just (root </> "config")) $ withSessionServices $ \runtime -> do
     expectedRoot<-canonicalizePath root
     let body="printf '%s\\n' 'literal ; $(touch should-not-exist) λ'\npwd -P\nprintf 'ready\\n'\nIFS= read -r value\nprintf 'echo:%s\\n' \"$value\"\nprintf 'stderr-visible\\n' >&2\n"
         (styled,blocks)=renderMarkdownWithShellBlocks 30 ("intro\n\n```sh\n"<>body<>"```\n\nafter")
@@ -448,13 +449,13 @@ shellBlockChecks = when (terminalAvailable && os/="mingw32") $ bracket temporary
         chosen=case blocks of block:_->block; _->error "missing shell block"
         core d _=pure (False,d)
         execute d block=let (updated,effects)=runCommand (ExecuteShellBlock bid block) d
-                       in snd <$> conversationEffects runtime core updated effects
-        (_,consoles,_)=conversationServices runtime
+                       in snd <$> sessionEffects runtime core updated effects
+        consoles=sessionConsoles runtime
         await label predicate d=do
           result<-timeout 5000000 (loop d)
           maybe (error ("shell block timed out: "++label)) pure result
           where loop current=do
-                  updated<-tickConversation runtime current
+                  updated<-tickSessionServices runtime current
                   entries<-C.listConsoles consoles
                   ready<-predicate entries
                   if ready then pure updated else threadDelay 10000 >> loop updated
@@ -496,20 +497,20 @@ admittedBuildChecks=when (os/="mingw32") $ bracket temporary removePathForcibly 
         bytes=encode (B.buildConfigValue root (B.BuildConfig THC command "exe:captured" "" "" []))
         input events=object ["events" .= events]
         key=object ["type" .= ("key"::T.Text),"key" .= ("F9"::T.Text)]
-        core runtime=conversationEffects runtime (\d _->pure (False,d))
+        core runtime=sessionEffects runtime (\d _->pure (False,d))
         tick runtime permissions d=tickBuildPreparation runtime (core runtime) d >>= tickPermissions permissions
         policy mode=writeFile policyPath ("[editor.mcp.permissions]\neditor_input = '"++mode++"'\n")
         clearMarker=doesFileExist marker >>= \exists->when exists (removeFile marker)
         freshOptions runtime permissions d=timeout 5000000 (loop d) >>= maybe (error "admitted build did not retire") pure
           where loop current=do
                   next<-tick runtime permissions current
-                  queued<-snd <$> core runtime next [AgentAction "run-options" []]
+                  queued<-snd <$> core runtime next [ServiceAction "run-options" []]
                   shown<-tick runtime permissions queued
-                  if maybe False ((==AgentDialog "run-config").purpose) (dialog shown)
+                  if maybe False ((==ServiceDialog "run-config").purpose) (dialog shown)
                     then pure shown else threadDelay 1000 >> loop shown
         noLaunch label=check label . not =<< doesFileExist marker
         noJob runtime d label=do
-          let (_,_,jobs)=conversationServices runtime
+          let jobs=sessionBuildJobs runtime
           facts<-Jobs.buildJobStatus jobs d
           check label (field "active" facts==Just False && field "outputAvailable" facts/=Just True)
         launchCount=do
@@ -564,24 +565,24 @@ admittedBuildChecks=when (os/="mingw32") $ bracket temporary removePathForcibly 
     forM_ ["revoked","disabled","needs-approval","stopped"] $ \reason->do
       policy "enable"
       clearMarker
-      withConversationAt root $ \runtime->withPermissionsAt policyPath controlTools $ \permissions->do
-        caller<-attributed runtime
+      withSessionServices $ \runtime->withConversationAt (sessionConsoles runtime) root $ \conversation->withPermissionsAt policyPath controlTools $ \permissions->do
+        caller<-attributed conversation
         pending<-beforeAdoption runtime permissions caller $ \d->case reason of
           "revoked"->do
-            let agents=conversationAgents runtime
+            let agents=conversationAgents conversation
             revokeAgentAccess (AR.agentAccess agents) (AR.primaryAgent agents)
             pure d
           "disabled"->policy "disable" >> pure d
           "needs-approval"->policy "prompt" >> pure d
-          _->stopConversationBuild runtime d
+          _->stopSessionBuild runtime d
         shown<-freshOptions runtime permissions pending
         noJob runtime shown ("admitted build has no job: "++reason)
         noLaunch ("admitted build refusal: "++reason)
 
     policy "prompt"
     clearMarker
-    withConversationAt root $ \runtime->withPermissionsAt policyPath controlTools $ \permissions->do
-      caller<-attributed runtime
+    withSessionServices $ \runtime->withConversationAt (sessionConsoles runtime) root $ \conversation->withPermissionsAt policyPath controlTools $ \permissions->do
+      caller<-attributed conversation
       pending<-beforeAdoption runtime permissions caller pure
       launched<-awaitLaunch runtime permissions pending
       check "approved input final policy does not ask again" (dialog launched==Nothing)
@@ -590,8 +591,8 @@ admittedBuildChecks=when (os/="mingw32") $ bracket temporary removePathForcibly 
 
     policy "enable"
     clearMarker
-    withConversationAt root $ \runtime->withPermissionsAt policyPath controlTools $ \permissions->do
-      caller<-attributed runtime
+    withSessionServices $ \runtime->withConversationAt (sessionConsoles runtime) root $ \conversation->withPermissionsAt policyPath controlTools $ \permissions->do
+      caller<-attributed conversation
       pending<-admit runtime permissions caller base
       allowed<-freshPolicy runtime permissions pending
       noLaunch "fresh policy result alone does not launch"
@@ -607,12 +608,12 @@ admittedBuildChecks=when (os/="mingw32") $ bracket temporary removePathForcibly 
     -- Failure of the original callback must retire that intent, not just its RPC.
     policy "enable"
     clearMarker
-    withConversationAt root $ \runtime->withPermissionsAt policyPath controlTools $ \permissions->do
-      caller<-attributed runtime
+    withSessionServices $ \runtime->withConversationAt (sessionConsoles runtime) root $ \conversation->withPermissionsAt policyPath controlTools $ \permissions->do
+      caller<-attributed conversation
       seen<-newIORef (0::Int)
       let failing d fx=do
             validateGuestEffects d fx
-            when (AgentAction "make" [] `elem` fx) $ do
+            when (ServiceAction "make" [] `elem` fx) $ do
               n<-atomicModifyIORef' seen (\n->(n+1,n+1))
               when (n==2) (ioError (userError "fixture-only later input failure"))
             core runtime d fx
@@ -626,13 +627,13 @@ admittedBuildChecks=when (os/="mingw32") $ bracket temporary removePathForcibly 
     -- editor_input receipt but continues through the original execution gates.
     policy "enable"
     clearMarker
-    withConversationAt root $ \runtime->withPermissionsAt policyPath controlTools $ \permissions->do
+    withSessionServices $ \runtime->withConversationAt (sessionConsoles runtime) root $ \conversation->withPermissionsAt policyPath controlTools $ \permissions->do
       pending<-admit runtime permissions (pure (Right ())) base
       _<-awaitLaunch runtime permissions pending
       check "anonymous input uses the same admitted lifecycle" . (==1) =<< launchCount
     policy "disable"
     clearMarker
-    withConversationAt root $ \runtime->withPermissionsAt policyPath controlTools $ \permissions->do
-      pending<-snd <$> core runtime base [AgentAction "make" []]
+    withSessionServices $ \runtime->withConversationAt (sessionConsoles runtime) root $ \conversation->withPermissionsAt policyPath controlTools $ \permissions->do
+      pending<-snd <$> core runtime base [ServiceAction "make" []]
       _<-awaitLaunch runtime permissions pending
       check "human build remains independent of editor_input policy" . (==1) =<< launchCount
