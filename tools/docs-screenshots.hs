@@ -263,7 +263,7 @@ main = PluginWindow.withWindowScope $ \downloadScope -> do
                   positioned=modifyActive (\window -> window {bounds=Rect 1 1 78 11,scrollRow=scroll}) opened
                   -- Open the real context menu, without invoking its command.
                   (shown,pending)=handleEvent (V.EvMouseDown 26 (2+row-scroll+1) V.BRight []) positioned
-                  expected=ExecuteShellBlock bid block
+                  expected=ExecuteShellBlock (SourceShell bid) block
               unless (null pending && contextKind shown==ShellContext expected &&
                 contextItems (contextKind shown)==[("Execute in terminal",expected)] && contextMenu shown/=Nothing)
                 (fail "Shell block context menu did not open without executing")
@@ -282,7 +282,7 @@ main = PluginWindow.withWindowScope $ \downloadScope -> do
               unless (maybe False ((==Just (root </> "docs/install.md")).documentMarkdownPath) (activeDocument followed))
                 (fail "Installation link did not open in Help")
               let (shown,pending)=handleEvent (V.EvMouseDown x y V.BRight []) positioned
-              unless (null pending && contextKind shown==LinkContext (OpenLink (documentMarkdownPath doc) target))
+              unless (null pending && contextKind shown==LinkContext (OpenLink (SourceLink (documentMarkdownPath doc)) target))
                 (fail "Documentation link menu did not open")
               pure shown
             _ -> fail "README Installation link is missing"
