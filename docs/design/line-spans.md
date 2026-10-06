@@ -83,13 +83,13 @@ available to file output, HLS and highlighting on their owning workers.
 ## Prepare only what a seek needs
 
 Horizontal scrolling is uncommon. Do not eagerly dice every loaded long line
-into a complete display index. Group its receipts into disjoint measured finger
-trees containing 1, 2, 4, 8, ... spans. The next block stays lazy. A first distant
+into a complete display index. Group its receipts into disjoint vector
+checkpoints containing 1, 2, 4, 8, ... spans. The next block stays lazy. A first distant
 seek prepares fewer than twice the number of receipts needed to reach it, plus
 bounded item lookahead. A left-edge viewport starts with one span.
 
 Later seeks skip whole blocks by their cached scalar counts or column transforms,
-then select within one tree. This takes logarithmic index work in the reached
+then binary-search cached prefix coordinates within one block. This takes logarithmic index work in the reached
 span count; only the selected bounded span and visible successors need decoding.
 Each receipt belongs to one block, with no duplicate retained receipt list or
 second complete presentation tree. The first uncached seek still runs
