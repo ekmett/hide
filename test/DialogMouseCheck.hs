@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module DialogMouseCheck (checks) where
 
+import EditorFixture (withEditorFixture, sameBufferVersions)
 import Control.Monad (unless, forM_)
 import Control.Exception (evaluate)
 import GHC.Conc (getAllocationCounter)
@@ -26,7 +27,7 @@ import Data.Foldable (toList,foldl')
 import qualified Data.Text.Lazy as TL
 
 checks :: IO ()
-checks = do
+checks = withEditorFixture "child" (initialDesktop (80,25)) $ \childBase->do
   textAreaRenderChecks
   contextShortcutChecks
   searchChecks
@@ -129,7 +130,7 @@ checks = do
       replacedOutput=addReadOnly "Output" "second" outputPopup
   check "source context refuses sidebar ownership" (let (refused,effects)=selectPopup sidebarFocus in contextMenu refused==Nothing && clipboard refused==clipboard sidebarFocus && null effects)
   check "read-only output remains unavailable as replacement advances revision" (not (contextTargetCurrent outputPopup) && not (contextTargetCurrent replacedOutput) && fmap ((+1) . revision . documentBuffer) (activeDocument outputPopup)==fmap (revision . documentBuffer) (activeDocument replacedOutput))
-  let childPopup=openContext (AgentContext [("Cancel reply",AgentCancel)]) 10 5 (selectConversationView "child" "Child" targetSource)
+  let childPopup=openContext (AgentContext [("Cancel reply",AgentCancel)]) 10 5 childBase
       switched=childPopup {conversationTarget=""}
   check "unchanged conversation context can invoke" (snd (selectPopup childPopup)==[AgentAction "cancel" []])
   check "context action refuses a different conversation target" (let (refused,effects)=selectPopup switched in contextMenu refused==Nothing && null effects)
@@ -143,21 +144,20 @@ checks = do
       (_,keyJump)=handleEvent (V.EvKey V.KEnter []) focusedPane
       pasted=fst (handleEvent (V.EvPaste "overwrite") focusedPane)
   check "problems reserve editor area" (all (\w -> top (bounds w)+height (bounds w)<=py) (windows pane))
-  check "problems preserve documents" (buffers pane==buffers source && not (problemsFocused pane))
+  check "problems preserve documents" . (&& not (problemsFocused pane)) =<< sameBufferVersions pane source
   check "problem click selects; double click and Enter jump to diagnostic"
     (null clickEffects && problemsFocused selectedPane && jumpEffects==[JumpTo "/project/Main.hs" 1 2] && keyJump==jumpEffects)
   let copiedMessage=fst (handleEvent (V.EvKey (V.KChar 'c') [V.MCtrl]) selectedPane)
       copiedInsert=fst (handleEvent (V.EvKey V.KIns [V.MCtrl]) selectedPane)
       copiedMenu=fst (runCommand Copy selectedPane)
       expected="Error /project/Main.hs:2:3 Not in scope"
-  check "all Copy routes use the selected diagnostic rather than source text"
-    (all ((==expected).clipboard) [copiedMessage,copiedInsert,copiedMenu] && buffers copiedMessage==buffers pane)
+  check "all Copy routes use the selected diagnostic rather than source text" . (&& all ((==expected).clipboard) [copiedMessage,copiedInsert,copiedMenu]) =<< sameBufferVersions copiedMessage pane
   let messagePopup=fst (handleEvent (V.EvMouseDown (px+3) (py+1) V.BRight []) pane)
       copyPopup=fst (handleEvent (V.EvKey V.KEnter []) (fst (handleEvent (V.EvKey V.KDown []) messagePopup)))
   check "Messages right click offers and invokes Copy message"
     (contextMenu messagePopup/=Nothing && "Copy all messages" `T.isInfixOf` snapshot messagePopup && clipboard copyPopup==expected && contextMenu copyPopup==Nothing)
 
-  check "problems focus does not edit background" (buffers pasted==buffers pane)
+  check "problems focus does not edit background" =<< sameBufferVersions pasted pane
   let another=problem {diagnosticPath="/project/Other.hs",diagnosticMessage="Long first line\n  full second line"}
       allPane=selectedPane {diagnostics=[problem,another]}
       allCopied=fst (runCommand CopyAllMessages allPane)
@@ -168,8 +168,7 @@ checks = do
     ("/project/Other.hs:2:3 Long first line\n  full second line" `T.isInfixOf` clipboard allCopied && expected `T.isPrefixOf` clipboard allCopied)
   check "empty Messages preserves clipboard and disables copy"
     (clipboard emptyCopied=="keep me" && not (commandEnabled (selectedPane {diagnostics=[]}) CopyAllMessages))
-  check "Messages copy works without an editor and editing commands preserve source"
-    (clipboard (fst (runCommand Copy noSource))==expected && buffers protected==buffers selectedPane)
+  check "Messages copy works without an editor and editing commands preserve source" . (&& clipboard (fst (runCommand Copy noSource))==expected) =<< sameBufferVersions protected selectedPane
   let resizeMessagesTo y d=fst (handleEvent (V.EvMouseDown 10 y V.BLeft [])
         (fst (handleEvent (V.EvMouseDown 10 (top (problemsRect d)) V.BLeft []) d)))
       floatingMessage=modifyActive (\w -> w {bounds=Rect 10 6 60 10}) pane
@@ -177,12 +176,13 @@ checks = do
       pinned=resizeMessagesTo 8 pushed
       pulled=resizeMessagesTo 14 pinned
       untouched=modifyActive (\w -> w {bounds=Rect 0 3 80 5}) pane
+  samePulled<-sameBufferVersions pulled pane
   check "Messages title drag pushes and pulls abutting windows without sharing borders"
     (top (problemsRect pushed)==12 && fmap bounds (activeWindow pushed)==Just (Rect 10 2 60 10) &&
      fmap bounds (activeWindow pinned)==Just (Rect 10 1 60 7) && fmap bounds (activeWindow pulled)==Just (Rect 10 1 60 13) &&
-     fmap bounds (activeWindow (resizeMessagesTo 14 untouched))==Just (Rect 0 3 80 5) && buffers pulled==buffers pane)
+     fmap bounds (activeWindow (resizeMessagesTo 14 untouched))==Just (Rect 0 3 80 5) && samePulled)
   check "diagnostic chevron and message render" (all (`T.isInfixOf` snapshotHtml pane) ["▶","Not in scope"])
-  check "closing pane preserves documents" (buffers (setProblemsVisible False pane)==buffers source)
+  check "closing pane preserves documents" =<< sameBufferVersions (setProblemsVisible False pane) source
   let editedTitle=insertText "new" (addDocument Nothing (newBuffer "") (initialDesktop (80,25)))
       cleanTitle=editedTitle {buffers=M.map (\doc -> doc {documentBuffer=markSaved (documentBuffer doc)}) (buffers editedTitle)}
       narrowTitle=modifyActive (\w -> w {bounds=Rect 1 2 28 10}) editedTitle
@@ -278,7 +278,7 @@ checks = do
       restored=fst (handleEvent (V.EvKey V.KEsc []) taller)
       accepted=fst (handleEvent (V.EvKey V.KEnter []) taller)
   check "drag keys move and resize" (fmap bounds (activeWindow taller)==Just (Rect 6 5 30 11))
-  check "drag typing cannot edit source" (buffers ignored==buffers scrolling)
+  check "drag typing cannot edit source" =<< sameBufferVersions ignored scrolling
   check "Escape restores original geometry" (fmap bounds (activeWindow restored)==Just (bounds sw) && dragOriginal restored==Nothing && drag restored==Nothing)
   check "Enter accepts geometry" (fmap bounds (activeWindow accepted)==fmap bounds (activeWindow taller) && drag accepted==Nothing)
   check "drag status explains keys" (all (`T.isInfixOf` snapshot resizing) ["↑↓→← Move","Shift+↑↓→← Resize","↵ Done","Esc Cancel"])
@@ -410,7 +410,7 @@ checks = do
   check "Pixelate Unicode can be clicked immediately at 80x25" (pixelateUnicode savedPixel)
   check "focused Messages hides source caret" (V.picCursor (renderDesktop desktop {problemsFocused=True})==V.NoCursor)
   check "cursor blinking defaults on" (blinkCursor desktop)
-  check "cursor appearance checkbox uses shared mouse geometry" (not (blinkCursor savedPreferences) && buffers savedPreferences==buffers desktop)
+  check "cursor appearance checkbox uses shared mouse geometry" . (&& not (blinkCursor savedPreferences)) =<< sameBufferVersions savedPreferences desktop
   check "cursor appearance can be toggled by keyboard" (maybe False (elem (CheckBox "Blinking cursor" False) . fields) (dialog keyboardToggled))
   check "cancel preserves cursor appearance" (blinkCursor cancelledPreferences)
   check "appearance persists when preferences reopen" (maybe False (elem (CheckBox "Blinking cursor" False) . fields) (dialog reopened))
@@ -419,7 +419,7 @@ checks = do
   putStrLn "dialog mouse checks passed"
 
 searchChecks :: IO ()
-searchChecks=do
+searchChecks=withEditorFixture "child" (initialDesktop (80,25)) $ \child->do
   let check name ok=unless ok (error name)
       base=addDocument Nothing (newBuffer "hello world") (initialDesktop (80,25))
       key k mods=fst . handleEvent (V.EvKey k mods)
@@ -452,15 +452,17 @@ searchChecks=do
     (shortcut base Copy=="Ctrl+C" && shortcut base Cut=="Ctrl+X" && shortcut base Paste=="Ctrl+V" && shortcut base Replace=="Ctrl+H" &&
       shortcut base {nativeMac=True} Replace=="⌥⌘F" && shortcut base {nativeMac=True} Redo=="⇧⌘Z" &&
       nativeChordShortcut ["Cmd+,"]==(",",8) && nativeChordShortcut ["Cmd+Alt+F"]==("f",12) && nativeChordShortcut ["Cmd+Shift+G"]==("g",9))
-  let child=selectConversationView "child" "Worker" base
-      drafted=child {composerBuffer=newBuffer "keep draft",composerSelection=Selection 10 10}
+  let drafted=setComposerInput (newBuffer "keep draft") (Selection 10 10) True child
       (focused,focusEffects)=runCommand Conversation drafted
       (new,newEffects)=runCommand AgentNew drafted
+  sameFocused<-sameBufferVersions focused drafted
   check "Conversation focuses the existing child view without repaint or replacing its draft"
-    (buffers focused==buffers drafted && length (windows focused)==length (windows drafted) &&
+    (sameFocused && length (windows focused)==length (windows drafted) &&
       conversationTarget focused=="child" && contents (composerBuffer focused)=="keep draft" && focusEffects==[AgentAction "focus" []])
   check "Conversation opens through the existing runtime when absent" (snd (runCommand Conversation base)==[AgentAction "show" []])
-  check "New conversation goes directly to the primary runtime session action" (conversationTarget new=="" && newEffects==[AgentAction "new" []])
+  check "New conversation delegates primary selection to the runtime owner without replacing the child draft"
+    (newEffects==[AgentAction "new" []] && conversationTarget new==conversationTarget drafted &&
+     contents (composerBuffer new)=="keep draft" && composerSelection new==Selection 10 10)
   check "conversation shortcuts invoke explicit actions" (snd (handleEvent (V.EvKey (V.KChar 'c') [V.MCtrl,V.MShift]) base)==[AgentAction "show" []] && snd (handleEvent (V.EvKey (V.KChar 'n') [V.MCtrl,V.MShift]) base)==[AgentAction "new" []])
   let terminal=addReadOnly "Terminal 1" "" base
   check "modern shortcuts do not consume PTY control bytes" (and [snd (handleEvent (V.EvKey (V.KChar c) mods) terminal)==[ServiceAction "terminal-input" ["1",text]] |

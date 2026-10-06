@@ -36,6 +36,7 @@ import Hide.BufferView
 import Hide.Unicode (clusterWidth, textImage, wideTextImage, displayClusters, terminalProjection)
 import Hide.GuestAccess (streamerReadableAt)
 import qualified Hide.Plugin.Menu as Plugin
+import qualified Hide.Plugin.Editor as Editor
 import Hide.Sidebar
 import qualified Hide.Plugin.Tree as Tree
 import qualified Hide.Plugin.Window as PluginWindow
@@ -92,8 +93,6 @@ data RenderState = RenderState
   , keyBranchDeleted :: Int
   , keyBranchRoot :: Maybe FilePath
   , keyMessagesNumber :: Maybe Int
-  , keyComposerSelection :: Selection
-  , keyComposerFocused :: Bool
   , keyAgentSteering :: Bool
   , keyAgentReplying :: Bool
   , keyAgentQueued :: Int
@@ -128,7 +127,8 @@ data RenderState = RenderState
   } deriving Eq
 
 data DocumentKey = DocumentKey (Maybe (FilePath,Bool)) (Maybe Text) Int Bool (Maybe FilePath) Bool deriving Eq
-data ViewKey = ViewKey Int Text Selection (Int,Int) Selection deriving Eq
+data ViewKey = ViewKey Int Text Editor.DraftRef (Maybe Editor.EditorMount) (Maybe Int) (Int,Int) Selection deriving Eq
+data DraftKey = DraftKey Selection Bool (Maybe Editor.EditorMount) deriving Eq
 data QuestionKey = QuestionKey Int (Maybe Int) Selection Bool deriving Eq
 data FieldKey = InputKey Text Int | SelectedInputKey Text Selection | ComboBoxKey Text Int (Maybe Int) | CheckBoxKey Text Bool | RadioKey Text Int
   | ListBoxKey Text Int | FileListKey Int | ReadOnlyKey Text
@@ -136,7 +136,7 @@ data FieldKey = InputKey Text Int | SelectedInputKey Text Selection | ComboBoxKe
 data DialogKey = DialogKey Text Int [Text] [FieldKey] deriving Eq
 data SidebarKey = SidebarKey FilePath Int Int Int Bool Integer deriving Eq
 -- | Comparable UI metadata and immutable payload identities, without a Desktop payload.
-data RenderKey = RenderKey RenderState (M.Map Int DocumentKey) (M.Map Text ViewKey)
+data RenderKey = RenderKey RenderState (M.Map Int DocumentKey) (M.Map Text ViewKey) (M.Map Editor.DraftRef DraftKey)
   (Maybe QuestionKey) (Maybe DialogKey) (Maybe SidebarKey) Bool (Int,Bool) [RenderIdentity] deriving Eq
 
 -- | Capture a conservative redraw key from explicit metadata and immutable
@@ -161,10 +161,11 @@ renderKey original = do
         payload (documentShellBlocks value)
         pure (DocumentKey f (documentLabel value) (documentWidth value)
           (documentCursorVisible value) (documentSuggestedName value) (present (documentSourceRows value)))
-      view value=do
-        payload (conversationDraft value)
-        pure (ViewKey (conversationBufferId value) (conversationName value) (conversationDraftSelection value)
-          (conversationScroll value) (conversationReplySelection value))
+      view value=ViewKey (conversationBufferId value) (conversationName value) (conversationDraftRef value)
+        (conversationEditor value) (conversationEditorFrame value) (conversationScroll value) (conversationReplySelection value)
+      draft value=do
+        payload (editorDraftBuffer value)
+        pure (DraftKey (editorDraftSelection value) (editorDraftFocused value) (editorDraftMount value))
       question value=do
         payload (questionText value)
         payload (questionChoices value)
@@ -192,10 +193,10 @@ renderKey original = do
         pure (SidebarKey (treeRoot value) (treeSelected value) (treeScroll value) (treeWidth value) (treeFocused value) (treeRevision value))
   mapM_ payload (pluginWindows original)
   documents<-mapM document (buffers original)
-  payload (composerBuffer original)
+  drafts<-mapM draft (editorDrafts original)
   mapM_ payload (inlinePreview original)
   payload (autocompleteDraft original)
-  views<-mapM view (conversationViews original)
+  let views=M.map view (conversationViews original)
   question'<-traverse question (chatQuestion original)
   dialog'<-traverse dialogKey (dialog original)
   tree<-traverse sidebar (sideTree original)
@@ -246,8 +247,6 @@ renderKey original = do
         , keyBranchDeleted=branchDeleted original
         , keyBranchRoot=branchRoot original
         , keyMessagesNumber=messagesNumber original
-        , keyComposerSelection=composerSelection original
-        , keyComposerFocused=composerFocused original
         , keyAgentSteering=agentSteering original
         , keyAgentReplying=agentReplying original
         , keyAgentQueued=agentQueued original
@@ -280,7 +279,7 @@ renderKey original = do
         , keyDockedTerminals=dockedTerminals original
         , keyBottomTerminal=bottomTerminal original
         }
-  pure (RenderKey state documents views question' dialog' tree
+  pure (RenderKey state documents views drafts question' dialog' tree
     (present (gitReview original)) (fst (clipboardExport original),present (snd (clipboardExport original))) names)
 
 blue, gray, black, white, yellow, cyan, green, red :: V.Color
@@ -405,9 +404,9 @@ renderScene d=(privacyLayers++layers,visibleCursor)
           b=autocompleteDraft d; (r,c)=bufferLineColumn b (caret (autocompleteSelection d)); (sr,sc)=autocompleteComposerScroll d w
           rect=autocompleteComposerRect d w
           in if height rect>0 && width rect>0 then V.Cursor (left rect+displayColumn (bufferLineAt b r) c-sc) (top rect+r-sr) else V.NoCursor
-        (Just w,_) | composerActive d -> let
-          b=composerBuffer d; (r,c)=bufferLineColumn b (caret (composerSelection d)); (sr,sc)=composerScroll d w
-          rect=composerRect d w; (marker,line)=composerLine b r
+        (Just w,_) | composerActive d,Just draft<-windowEditorDraft d w -> let
+          b=editorDraftBuffer draft; (r,c)=bufferLineColumn b (caret (editorDraftSelection draft)); (sr,sc)=composerScroll d w
+          rect=composerRect d w; (marker,line)=if windowEditorCode w then composerLine b r else (0,bufferLineAt b r)
           in if height rect>0 && width rect>0 then V.Cursor (left rect+displayColumn line (max 0 (c-marker))-sc) (top rect+r-sr) else V.NoCursor
         (_,Just doc) | not (documentCursorVisible doc) -> V.NoCursor
         (Just original,Just doc) -> let { w=displayWindow original; b=documentBuffer doc; (r,c)=windowCaretCell d doc w; x=left (bounds w)+1+c-scrollColumn w; y=top (bounds w)+1+r-scrollRow w;
@@ -426,9 +425,41 @@ hostWindowFrame d active w frame=
     number=T.pack (show (windowNumber w))
     moving=case drag d of Just (Moving wid _ _)->wid==windowId w; Just (Resizing wid _ _)->wid==windowId w; _->False
 
+-- The host paints one input owner identically over source and prepared bodies.
+composerLayers :: Desktop -> Bool -> Window -> [V.Image]
+composerLayers d active w
+  | not (windowHasEditor d w) && not hintComposer = []
+  | otherwise = [place (left rect) (top rect) inputImage] ++ thoughtEdges
+  where
+    attached=windowEditorDraft d w
+    hintComposer=autocompletePane d w
+    rect=if hintComposer then autocompleteComposerRect d w else composerRect d w
+    draft=if hintComposer then autocompleteDraft d else maybe emptyEditorBuffer editorDraftBuffer attached
+    draftSelection=if hintComposer then autocompleteSelection d else maybe (Selection 0 0) editorDraftSelection attached
+    draftFocused=if hintComposer then autocompleteFocused d else maybe False editorDraftFocused attached
+    (sr,sc)=if hintComposer then autocompleteComposerScroll d w else composerScroll d w
+    draftLine n=if not hintComposer && windowEditorCode w then composerLine draft n else (0,bufferLineAt draft n)
+    thoughtEdges
+      | width rect<=0 || height rect<=0 = []
+      | otherwise = [place (left rect-1) (top rect) (edgeImage True),
+                     place (left rect+width rect) (top rect) (edgeImage False),
+                     place (left rect+width rect+1) (top rect) (label (attr scrollCyan blue) "•.")]
+    edgeImage leftSide=V.vertCat
+      [V.char (if corner then attr scrollCyan blue else attr black scrollCyan)
+        (if corner then bubbleTile (videoMode d/=Nothing) shape else ' ')
+      | n<-[0..height rect-1], let corner=n==0 || n==height rect-1,
+        let shape=if height rect==1 then if leftSide then 4 else 5
+                  else (if n==0 then 0 else 2)+(if leftSide then 0 else 1)]
+    inputImage=V.vertCat [V.cropRight (width rect)
+      (styledSourceImage (darkAppearance d) (Just fill) (active && draftFocused) draftSelection (bufferLineOffset draft n+marker) sc (width rect) (plainSourceRow line) V.<|> V.charFill fill ' ' (width rect) 1)
+      | n<-[sr..sr+height rect-1],let (marker,line)=draftLine n,
+        let fill=if marker>0 then attr yellow (if darkAppearance d then black else blue) else attr black scrollCyan]
+
 pluginWindowLayers :: Desktop -> Bool -> Window -> PluginWindow.PreparedWindow -> [CellLayer]
 pluginWindowLayers d active w prepared=
-  bodyLayers++map CellImage ((if active then [windowScrollbarImage d True w,windowScrollbarImage d False w] else [])++(place (x+column) y (label frame title):hostWindowFrame d active w frame))
+  map CellImage (composerLayers d active w)++bodyLayers++map CellImage ((if active then [windowScrollbarImage d True w,windowScrollbarImage d False w] else [])
+    ++(place (x+column) y (label frame title):hostWindowFrame d active w frame)
+    ++[place (x+1) (y+1) (V.charFill edit ' ' (max 0 (ww-2)) (max 0 (hh-2)))])
   where
     Rect x y ww hh=bounds w
     moving=case drag d of Just (Moving wid _ _) -> wid==windowId w; Just (Resizing wid _ _) -> wid==windowId w; _ -> False
@@ -438,9 +469,9 @@ pluginWindowLayers d active w prepared=
     title=" "<>T.take (columnOffset (windowTitle d w) (max 0 (ww-17))) (windowTitle d w)<>" "
     column=max 6 ((ww-keyLabelWidth title) `div` 2)
     bodyLayers | PluginWindow.RowsDetails listed index _<-rows =
-      let (listRect,detailRect)=rowsWindowRects w
+      let (listRect,detailRect)=rowsWindowRects d w
           chosen=case rowsInteraction w of Just (RowsInteraction ident _)->fromMaybe 0 (M.lookup ident index); _->0
-          offset=rowsListOffset w chosen
+          offset=rowsListOffset d w chosen
           detailsFocused=case rowsInteraction w of Just (RowsInteraction _ focused)->focused; _->False
           detail=fromMaybe prepared (windowPluginText d w)
           detailText=PluginWindow.preparedWindowText detail
@@ -450,21 +481,18 @@ pluginWindowLayers d active w prepared=
           detailLayers=case PluginWindow.preparedWindowRows detail of
             PluginWindow.PlainRows plain->plainLayers detailRect detailText plain (active && detailsFocused)
             _->[]
-      in detailLayers++map CellImage (listImages++[place (x+1) (top detailRect-1) (label frame " Details " V.<|>V.charFill frame '─' (max 0 (ww-11)) 1),
-        place (x+1) (y+1) (V.charFill edit ' ' (max 0 (ww-2)) (max 0 (hh-2)))])
+      in detailLayers++map CellImage (listImages++[place (x+1) (top detailRect-1) (label frame " Details " V.<|>V.charFill frame '─' (max 0 (ww-11)) 1)])
       | Just layout<-windowPresentation d w =
       [styledLayoutRow (darkAppearance d) (const True) active (selection w)
         (Rect (x+1) (y+1+n-scrollRow w) (max 0 (ww-2)) 1) (scrollColumn w) row
-      | n<-[scrollRow w..scrollRow w+max 0 (hh-3)],Just row<-[TextLayout.layoutRows layout Vec.!? n]]
-      ++[CellImage (place (x+1) (y+1) (V.charFill edit ' ' (max 0 (ww-2)) (max 0 (hh-2))))]
-      | PluginWindow.PlainRows plain<-rows =plainLayers (pluginTextRect w) text plain active
+      | n<-[scrollRow w..scrollRow w+pluginBodyRows d w-1],Just row<-[TextLayout.layoutRows layout Vec.!? n]]
+      | PluginWindow.PlainRows plain<-rows =plainLayers (pluginTextRect d w) text plain active
       | otherwise=[CellImage (place (x+1) (y+1) body)]
     plainLayers rect content plain focused=
       [sourceCellRow (darkAppearance d) Nothing focused (selection w) (contentLineOffset content n)
         (Rect (left rect) (top rect+n-scrollRow w) (width rect) 1) (scrollColumn w) row
       | n<-[scrollRow w..scrollRow w+height rect-1],Just row<-[plain Vec.!? n]]
-      ++[CellImage (place (left rect) (top rect) (V.charFill edit ' ' (width rect) (height rect)))]
-    body=V.vertCat [line n | n<-[scrollRow w..scrollRow w+max 0 (hh-3)]]
+    body=V.vertCat [line n | n<-[scrollRow w..scrollRow w+pluginBodyRows d w-1]]
     line n=V.cropRight (max 0 (ww-2)) (lineImage V.<|> V.charFill edit ' ' (max 0 (ww-2)) 1)
       where
         start=contentLineOffset text n
@@ -495,7 +523,7 @@ windowLayers d active original =
     | bufferView w/=MarkdownView,not (byteMode (documentBuffer doc)), issue<-diagnostics d, Just (diagnosticPath issue)==fmap filePath (documentFile doc), issueRow issue>=scrollRow w, issueRow issue<scrollRow w+hh-2]
   ++ (if active then [place (x+windowPositionColumn doc) (y+hh-1) (label frame (T.take (max 0 (ww-windowPositionColumn doc-2)) (windowPositionText d doc w))),windowScrollbarImage d True w,windowScrollbarImage d False w] else [])
   ++ [place (x+6) y (label frame "[" V.<|> label (attr cyan blue) " " V.<|> label frame "]") | active,terminalWindow d w,not (windowPinned d w)]
-  ++ composerLayers
+  ++ composerLayers d active w
   ++ hexDividerLayers
   ++ reviewDividerLayers
   ++ [place (x+titleColumn) y titleImage])
@@ -541,32 +569,6 @@ windowLayers d active original =
       Nothing -> True
       Just title -> title `elem` ["Conversation","Haskell Help"] || any (`T.isPrefixOf` title) ["Terminal ","Source "]
     styledLines=splitStyled (documentHighlight doc)
-    composerLayers
-      | documentLabel doc/=Just "Conversation" && not hintComposer = []
-      | otherwise = [place (left rect) (top rect) inputImage] ++ thoughtEdges
-      where
-        hintComposer=autocompletePane d w
-        rect=if hintComposer then autocompleteComposerRect d w else composerRect d w
-        draft=if hintComposer then autocompleteDraft d else composerBuffer d
-        draftSelection=if hintComposer then autocompleteSelection d else composerSelection d
-        draftFocused=if hintComposer then autocompleteFocused d else composerFocused d
-        (sr,sc)=if hintComposer then autocompleteComposerScroll d w else composerScroll d w
-        draftLine n=if hintComposer then (0,bufferLineAt draft n) else composerLine draft n
-        thoughtEdges
-          | width rect<=0 || height rect<=0 = []
-          | otherwise = [place (left rect-1) (top rect) (edgeImage True),
-                         place (left rect+width rect) (top rect) (edgeImage False),
-                         place (left rect+width rect+1) (top rect) (label (attr scrollCyan blue) "•.")]
-        edgeImage leftSide=V.vertCat
-          [V.char (if corner then attr scrollCyan blue else attr black scrollCyan)
-            (if corner then bubbleTile (videoMode d/=Nothing) shape else ' ')
-          | n<-[0..height rect-1], let corner=n==0 || n==height rect-1,
-            let shape=if height rect==1 then if leftSide then 4 else 5
-                      else (if n==0 then 0 else 2)+(if leftSide then 0 else 1)]
-        inputImage=V.vertCat [V.cropRight (width rect)
-          (styledSourceImage (darkAppearance d) (Just fill) (active && draftFocused) draftSelection (bufferLineOffset draft n+marker) sc (width rect) (plainSourceRow line) V.<|> V.charFill fill ' ' (width rect) 1)
-          | n<-[sr..sr+height rect-1],let (marker,line)=draftLine n,
-            let fill=if marker>0 then attr yellow (if darkAppearance d then black else blue) else attr black scrollCyan]
     hexDividerLayers =
       [place (x+1+column) y (V.vertCat [V.char frame (if active && not moving then '╤' else '┬'),
         V.charFill frame '│' 1 contentHeight,V.char frame (if active && not moving then '╧' else '┴')])

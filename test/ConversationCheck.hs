@@ -1,6 +1,10 @@
 {-# LANGUAGE CPP, OverloadedStrings #-}
 module ConversationCheck (checks, composerCodeChecks, draftReceiptChecks, questionInsertionChecks) where
 
+import EditorFixture (withEditorFixture,sameBufferVersions)
+import qualified Hide.Plugin.Menu as HideMenu
+import qualified Hide.Plugin.Editor as Editor
+import Hide.AgentSidebarTypes (AgentSidebarRequest(..))
 import MCPPermissionsCheck (settledTool,settleDialog)
 import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Concurrent (threadDelay)
@@ -60,140 +64,167 @@ import Hide.Syntax (Style(..))
 import Hide.Terminal (terminalAvailable)
 import Hide.Session (checkpointPath)
 
+draftBuffer :: Buffer -> Desktop -> Desktop
+draftBuffer b d=setComposerInput b (composerSelection d) (composerFocused d) d
+
+draftAt :: Buffer -> Selection -> Desktop -> Desktop
+draftAt b selected d=setComposerInput b selected True d
+
+sameDraftRoot :: Desktop -> Desktop -> IO Bool
+sameDraftRoot before after=captureVersion (composerBuffer before) >>= \version->versionCurrent version (composerBuffer after)
+
+editorEffect :: ChatSubmit -> Desktop -> Effect
+editorEffect action d=SubmitEditor (fromMaybe (error "Missing editor mount") (activeEditorMount d))
+  (if action==QuerySubmit then Editor.DefaultEditor else Editor.AlternateEditor) HideMenu.HumanMenu
+
+submit :: ConversationState -> ChatSubmit -> Desktop -> IO Desktop
+submit runtime action d=let (next,effects)=runCommand (SubmitChat action) d in
+  snd <$> conversationEffects runtime (\value _->pure (False,value)) next effects
+
+openChild :: ConversationState -> AH.AgentId -> Desktop -> IO Desktop
+openChild runtime ident d=snd <$> conversationEffects runtime (\value _->pure (False,value)) d [AgentSidebarAction (ShowAgent ident)]
+
 -- Draft code is ordinary Markdown carried by the existing Buffer. Exercise
 -- user edits and submitted/copy payloads, without depending on bubble artwork.
 composerCodeChecks :: IO ()
 composerCodeChecks=do
   questionInsertionChecks
-  let check label ok=unless ok (error label)
-      press key mods=fst . handleEvent (V.EvKey key mods)
-      typeText text desktop=foldl (\d c->press (V.KChar c) [] d) desktop (T.unpack text)
-      paste text=fst . handleEvent (V.EvPaste (TE.encodeUtf8 text))
-      chat=selectConversationView "" "Primary" (initialDesktop (100,35))
-      block=typeText "> " chat
-      code=typeText "x = 1" block
-      extended=paste "  y = 2\nz = 3" (press V.KEnter [] code)
-      normal=typeText "Then explain it." (press V.KDown [] extended)
-      text d=contents (composerBuffer d)
-      isCodeChar (_,CodeStyle _ _)=True
-      isCodeChar _=False
-  check "greater-than-space creates code with a normal exit line" (composerInCode block && bufferLineCount (composerBuffer block)==2)
-  let codeWindow=maybe (error "missing conversation window") id (activeWindow code)
-      codeRect=composerRect code codeWindow
-      clickedCode=fst (handleEvent (V.EvMouseDown (left codeRect+1) (top codeRect) V.BLeft []) code)
-  check "clicking visible code edits its text rather than its hidden indentation"
-    (text (typeText "Z" clickedCode)=="    xZ = 1\n")
-  check "code creation is one undoable edit" (text (fst (runCommand Undo block))==">" && text (fst (runCommand Redo (fst (runCommand Undo block))))==text block)
-  check "Enter extends code while Down leaves it for normal prose"
-    ("    x = 1\n      y = 2\n    z = 3\nThen explain it."==text normal &&
-     not (composerInCode normal) && any isCodeChar (renderMarkdown 80 (text normal)))
-  let listCode=paste "line = 1" (typeText "> " (press V.KEnter [V.MShift] (typeText "- Inspect this:" chat)))
-      fenceCode="    before\n    ```\n    after\n"
-  check "submission preserves code after a list and embedded fence characters"
-    (any isCodeChar (renderMarkdown 80 (composerMarkdown (text listCode))) &&
-     "```" `T.isInfixOf` T.pack [c | pair@(c,_)<-renderMarkdown 80 (composerMarkdown fenceCode),isCodeChar pair] &&
-     composerMarkdown "```hs\n    original indentation\n```\n"=="```hs\n    original indentation\n```\n")
-  check "Control Enter keeps the configured opposite submit action inside code"
-    (snd (handleEvent (V.EvKey V.KEnter [V.MCtrl]) extended)==[AgentAction "steer-draft" []] &&
-     snd (handleEvent (V.EvKey V.KEnter [V.MCtrl]) extended {chatSubmit=SteerSubmit})==[AgentAction "send-draft" []])
-  let maps=either (error . show) id (configuredBindings [] M.empty)
-      clickHint action desktop=case [r | (r,_,Left command)<-statusItemRects desktop,command==SubmitChat action] of
-        r:_->snd (handleEvent (V.EvMouseDown (left r) (top r) V.BLeft []) desktop)
-        []->error "missing code submission status action"
-  forM_ [QuerySubmit,SteerSubmit] $ \chosen->forM_ [False,True] $ \replying->do
-    let desktop=extended {keyBindings=maps,chatSubmit=chosen,agentReplying=replying}
-        caption action=(if action==chosen then "" else "Ctrl+Enter ")<>
-          (if action==SteerSubmit then "Steer" else if replying then "Queue query" else "Query")
-    check "code status preserves both fixed submission captions with compiled bindings"
-      (all (\action->any (\(label,target)->T.strip label==caption action && target==Just (Left (SubmitChat action))) (statusHints desktop)) [QuerySubmit,SteerSubmit])
-    check "code status clicks keep query and steer ownership with compiled bindings"
-      (clickHint QuerySubmit desktop==[AgentAction "send-draft" []] && clickHint SteerSubmit desktop==[AgentAction "steer-draft" []] &&
-       snd (handleEvent (V.EvKey V.KEnter [V.MCtrl]) desktop)==[AgentAction (if chosen==QuerySubmit then "steer-draft" else "send-draft") []])
-  let copied=fst (runCommand Copy (fst (runCommand SelectAll extended)))
-      unwrapped=press V.KBS [] (press V.KHome [] code)
-      backIn=press V.KBS [] (press V.KDown [] code)
-  check "composer copy removes only Markdown markers and keeps code indentation" (clipboard copied=="x = 1\n  y = 2\nz = 3\n")
-  check "backspace at code start unwraps and backspace from the exit line reenters" (text unwrapped=="x = 1\n" && composerInCode backIn && text backIn==text code)
-  let sourceText="main = 1\n  helper = 2\n"
-      source=fst (runCommand SelectAll (addDocument (Just (FileState "/project/Main.hs" Nothing)) (newBuffer sourceText) (initialDesktop (100,35))))
-      sourceCopy=fst (runCommand Copy source)
-      sourceCut=fst (runCommand Cut source)
-      pasted=fst (runCommand Paste (selectConversationView "" "Primary" sourceCopy))
-      nativePaste=paste sourceText (selectConversationView "" "Primary" sourceCopy)
-      browserPaste=runCommand Paste (selectConversationView "" "Primary" sourceCopy) {browserFrontend=True}
-      external=paste "plain replacement" (selectConversationView "" "Primary" sourceCopy)
-      prosePaste=paste sourceText (typeText "Please inspect:" (selectConversationView "" "Primary" sourceCopy))
-  check "copied and cut source paste as code through internal or native clipboard"
-    (composerInCode pasted && text pasted==text nativePaste && activeText sourceCut=="" &&
-     composerInCode (fst (runCommand Paste (selectConversationView "" "Primary" sourceCut))) &&
-     clipboard sourceCopy==sourceText && "      helper = 2" `T.isInfixOf` text pasted)
-  check "source paste is one undo step and separates existing prose"
-    (T.null (text (fst (runCommand Undo pasted))) && "Please inspect:\n\n    main" `T.isPrefixOf` text prosePaste)
-  check "browser paste still requests its clipboard and external text does not inherit code formatting"
-    (snd browserPaste==[ReadBrowserClipboard] && text external=="plain replacement" && not (composerInCode external))
-  let location=fst (runCommand CopyLocation (modifyActive (\w->w {selection=Selection 11 11}) (copyClipboard True "/project/Main.hs:2:3" sourceCopy)))
-      locationPaste=fst (runCommand Paste (selectConversationView "" "Primary" location))
-  check "Copy Location is one-based plain text even after copying source code"
-    (clipboard location=="/project/Main.hs:2:3" && text locationPaste==clipboard location && not (composerInCode locationPaste) && lookup "Copy Location" (contextItems SourceContext)==Just CopyLocation)
-  let child=selectConversationView "child" "Child" chat
-      childCode=typeText "child = 1" (typeText "> " child)
-      returned=selectConversationView "child" "Child" (selectConversationView "" "Primary" childCode)
-      question=chat {chatQuestion=Just (ChatQuestion 1 "Answer?" [] Nothing (newBuffer "") (Selection 0 0) True),clipboard=sourceText,clipboardCode=Just sourceText}
-      answered=typeText "> " question
-      questionPaste=fst (runCommand Paste question)
-  check "child code drafts survive switching conversations" (text returned==text childCode && composerInCode returned)
-  check "inline question input stays plain text" (fmap (contents.questionBuffer) (chatQuestion answered)==Just "> " && fmap (contents.questionBuffer) (chatQuestion questionPaste)==Just (T.map (\c->if c=='\n' then ' ' else c) sourceText))
-  let ignoredQuestion=fst (handleEvent (V.EvKey V.KEnter [V.MCtrl]) answered)
-  check "inline question Control Enter preserves answer and separate draft"
-    (chatQuestion ignoredQuestion==chatQuestion answered && composerBuffer ignoredQuestion==composerBuffer answered)
-  putStrLn "composer code checks passed"
+  withEditorFixture "" (initialDesktop (100,35)) $ \primary->
+    withEditorFixture "child" primary $ \fixtures->do
+      let check label ok=unless ok (error label)
+          press key mods=fst . handleEvent (V.EvKey key mods)
+          typeText text desktop=foldl (\d c->press (V.KChar c) [] d) desktop (T.unpack text)
+          paste text=fst . handleEvent (V.EvPaste (TE.encodeUtf8 text))
+          chat=selectConversationView "" "Primary" fixtures
+          toChat source=selectConversationView "" "Primary" source {conversationViews=conversationViews chat,editorDrafts=editorDrafts chat,windows=windows source++windows chat}
+          block=typeText "> " chat
+          code=typeText "x = 1" block
+          extended=paste "  y = 2\nz = 3" (press V.KEnter [] code)
+          normal=typeText "Then explain it." (press V.KDown [] extended)
+          text d=contents (composerBuffer d)
+          isCodeChar (_,CodeStyle _ _)=True
+          isCodeChar _=False
+      check "greater-than-space creates code with a normal exit line" (composerInCode block && bufferLineCount (composerBuffer block)==2)
+      let codeWindow=maybe (error "missing conversation window") id (activeWindow code)
+          codeRect=composerRect code codeWindow
+          clickedCode=fst (handleEvent (V.EvMouseDown (left codeRect+1) (top codeRect) V.BLeft []) code)
+      check "clicking visible code edits its text rather than its hidden indentation"
+        (text (typeText "Z" clickedCode)=="    xZ = 1\n")
+      check "code creation is one undoable edit" (text (fst (runCommand Undo block))==">" && text (fst (runCommand Redo (fst (runCommand Undo block))))==text block)
+      check "Enter extends code while Down leaves it for normal prose"
+        ("    x = 1\n      y = 2\n    z = 3\nThen explain it."==text normal &&
+         not (composerInCode normal) && any isCodeChar (renderMarkdown 80 (text normal)))
+      let listCode=paste "line = 1" (typeText "> " (press V.KEnter [V.MShift] (typeText "- Inspect this:" chat)))
+          fenceCode="    before\n    ```\n    after\n"
+      check "submission preserves code after a list and embedded fence characters"
+        (any isCodeChar (renderMarkdown 80 (composerMarkdown (text listCode))) &&
+         "```" `T.isInfixOf` T.pack [c | pair@(c,_)<-renderMarkdown 80 (composerMarkdown fenceCode),isCodeChar pair] &&
+         composerMarkdown "```hs\n    original indentation\n```\n"=="```hs\n    original indentation\n```\n")
+      check "Control Enter keeps the configured opposite submit action inside code"
+        (snd (handleEvent (V.EvKey V.KEnter [V.MCtrl]) extended)==[editorEffect SteerSubmit extended] &&
+         snd (handleEvent (V.EvKey V.KEnter [V.MCtrl]) extended {chatSubmit=SteerSubmit})==[editorEffect QuerySubmit extended])
+      let maps=either (error . show) id (configuredBindings [] M.empty)
+          clickHint action desktop=case [r | (r,_,Left command)<-statusItemRects desktop,command==SubmitChat action] of
+            r:_->snd (handleEvent (V.EvMouseDown (left r) (top r) V.BLeft []) desktop)
+            []->error "missing code submission status action"
+      forM_ [QuerySubmit,SteerSubmit] $ \chosen->forM_ [False,True] $ \replying->do
+        let desktop=extended {keyBindings=maps,chatSubmit=chosen,agentReplying=replying}
+            caption action=(if action==chosen then "" else "Ctrl+Enter ")<>
+              (if action==SteerSubmit then "Steer" else if replying then "Queue query" else "Query")
+        check "code status preserves both fixed submission captions with compiled bindings"
+          (all (\action->any (\(label,target)->T.strip label==caption action && target==Just (Left (SubmitChat action))) (statusHints desktop)) [QuerySubmit,SteerSubmit])
+        check "code status clicks keep query and steer ownership with compiled bindings"
+          (clickHint QuerySubmit desktop==[editorEffect QuerySubmit extended] && clickHint SteerSubmit desktop==[editorEffect SteerSubmit extended] &&
+           snd (handleEvent (V.EvKey V.KEnter [V.MCtrl]) desktop)==[editorEffect (if chosen==QuerySubmit then SteerSubmit else QuerySubmit) desktop])
+      let copied=fst (runCommand Copy (fst (runCommand SelectAll extended)))
+          unwrapped=press V.KBS [] (press V.KHome [] code)
+          backIn=press V.KBS [] (press V.KDown [] code)
+      check "composer copy removes only Markdown markers and keeps code indentation" (clipboard copied=="x = 1\n  y = 2\nz = 3\n")
+      check "backspace at code start unwraps and backspace from the exit line reenters" (text unwrapped=="x = 1\n" && composerInCode backIn && text backIn==text code)
+      let sourceText="main = 1\n  helper = 2\n"
+          source=fst (runCommand SelectAll (addDocument (Just (FileState "/project/Main.hs" Nothing)) (newBuffer sourceText) (initialDesktop (100,35))))
+          sourceCopy=fst (runCommand Copy source)
+          sourceCut=fst (runCommand Cut source)
+          pasted=fst (runCommand Paste (toChat sourceCopy))
+          nativePaste=paste sourceText (toChat sourceCopy)
+          browserPaste=runCommand Paste (toChat sourceCopy) {browserFrontend=True}
+          external=paste "plain replacement" (toChat sourceCopy)
+          prosePaste=paste sourceText (typeText "Please inspect:" (toChat sourceCopy))
+      check "copied and cut source paste as code through internal or native clipboard"
+        (composerInCode pasted && text pasted==text nativePaste && activeText sourceCut=="" &&
+         composerInCode (fst (runCommand Paste (toChat sourceCut))) &&
+         clipboard sourceCopy==sourceText && "      helper = 2" `T.isInfixOf` text pasted)
+      check "source paste is one undo step and separates existing prose"
+        (T.null (text (fst (runCommand Undo pasted))) && "Please inspect:\n\n    main" `T.isPrefixOf` text prosePaste)
+      check "browser paste still requests its clipboard and external text does not inherit code formatting"
+        (snd browserPaste==[ReadBrowserClipboard] && text external=="plain replacement" && not (composerInCode external))
+      let location=fst (runCommand CopyLocation (modifyActive (\w->w {selection=Selection 11 11}) (copyClipboard True "/project/Main.hs:2:3" sourceCopy)))
+          locationPaste=fst (runCommand Paste (toChat location))
+      check "Copy Location is one-based plain text even after copying source code"
+        (clipboard location=="/project/Main.hs:2:3" && text locationPaste==clipboard location && not (composerInCode locationPaste) && lookup "Copy Location" (contextItems SourceContext)==Just CopyLocation)
+      let child=selectConversationView "child" "Child" chat
+          childCode=typeText "child = 1" (typeText "> " child)
+          returned=selectConversationView "child" "Child" (selectConversationView "" "Primary" childCode)
+          question=chat {chatQuestion=Just (ChatQuestion 1 "Answer?" [] Nothing (newBuffer "") (Selection 0 0) True),clipboard=sourceText,clipboardCode=Just sourceText}
+          answered=typeText "> " question
+          questionPaste=fst (runCommand Paste question)
+      check "child code drafts survive switching conversations" (text returned==text childCode && composerInCode returned)
+      check "inline question input stays plain text" (fmap (contents.questionBuffer) (chatQuestion answered)==Just "> " && fmap (contents.questionBuffer) (chatQuestion questionPaste)==Just (T.map (\c->if c=='\n' then ' ' else c) sourceText))
+      let ignoredQuestion=fst (handleEvent (V.EvKey V.KEnter [V.MCtrl]) answered)
+      check "inline question Control Enter preserves answer and separate draft"
+        (chatQuestion ignoredQuestion==chatQuestion answered)
+      unchanged<-captureVersion (composerBuffer answered)
+      current<-versionCurrent unchanged (composerBuffer ignoredQuestion)
+      check "inline question leaves the separate draft root unchanged" current
+      putStrLn "composer code checks passed"
 
 
 -- Normalization and the cap belong to the inserted fragment, with one Undo.
 questionInsertionChecks :: IO ()
 questionInsertionChecks=do
-  let ordinary=newBuffer "independent draft"
-      chat=(selectConversationView "" "Primary" (initialDesktop (100,35))) {composerBuffer=ordinary}
-      question text sel=chat {chatQuestion=Just (ChatQuestion 1 "Answer?" [] Nothing (newBuffer text) sel True)}
-      answer d=maybe (error "Missing inline answer") questionBuffer (chatQuestion d)
-      pasted text d=fst (runCommand Paste d {clipboard=text})
-      textOf=contents.answer
-      expected source sel inserted=let (a,z)=ordered sel in
-        T.take 4096 (T.map (\c->if c `elem` ['\n','\r','\t'] then ' ' else c) (T.take a source<>inserted<>T.drop z source))
-      checkEdit source sel inserted result=do
-        let wanted=expected source sel inserted
-            undone=fst (runCommand Undo result)
-            redone=fst (runCommand Redo undone)
-        check "inline insertion keeps normalization and cap result" (textOf result==wanted)
-        check "inline normalized/capped insertion is one Undo step" (textOf undone==source && textOf (fst (runCommand Undo undone))==source)
-        check "inline insertion Redo restores the bounded answer" (textOf redone==wanted)
-        receipt<-captureVersion ordinary
-        current<-versionCurrent receipt (composerBuffer result)
-        check "inline insertion does not borrow the ordinary draft" current
-  let before="before"
-      inserted="\nnext\tpart\r"
-      initial=question before (Selection 6 6)
-  checkEdit before (Selection 6 6) inserted (pasted inserted initial)
-  checkEdit before (Selection 6 6) inserted (fst (handleEvent (V.EvPaste (TE.encodeUtf8 inserted)) initial))
-  checkEdit before (Selection 6 6) inserted (fst (handleEvent (V.EvKey (V.KChar 'v') [V.MCtrl]) initial {clipboard=inserted}))
-  checkEdit before (Selection 6 6) "\n" (fst (handleEvent (V.EvKey V.KEnter [V.MShift]) initial))
-  let nonuniform=T.take 4096 (T.concat (replicate 500 "012α界e\x301\&😀XYZ"))
-  forM_ [(Selection 0 0,"front"),(Selection 17 17,T.replicate 30 "λ界"),
-         (Selection 31 8,"selected λ界\ttext"),(Selection 25 25,T.replicate 5000 "界"),
-         (Selection 4096 4096,"full end")] $ \(sel,addition)->
-    checkEdit nonuniform sel addition (pasted addition (question nonuniform sel))
-  let large=(newBuffer (T.replicate 4096 "界")) {saved=error "question selection forced baseline",undoStack=error "question selection forced Undo"}
-      focused=chat {chatQuestion=Just (ChatQuestion 1 "Answer?" [] Nothing large (Selection 0 0) True)}
-  _<-evaluate (prepareBuffer large)
-  _<-evaluate (questionActive focused)
-  beforeAllocation<-getAllocationCounter
-  selected<-evaluate (maybe (-1) (caret.questionSelection) (chatQuestion (fst (runCommand SelectAll focused))))
-  afterAllocation<-getAllocationCounter
-  check "inline selection does not normalize the existing answer" (selected==4096 && beforeAllocation-afterAllocation<8000)
-  let first=pasted inserted initial
-      second=pasted "more" first
-  check "successive inline edits retain earlier Undo" (textOf (fst (runCommand Undo second))==textOf first && textOf (fst (runCommand Undo (fst (runCommand Undo second))))==before)
-  putStrLn "inline question insertion checks passed"
+  withEditorFixture "" (initialDesktop (100,35)) $ \prepared->do
+    let ordinary=newBuffer "independent draft"
+        chat=draftBuffer ordinary prepared
+        question text sel=chat {chatQuestion=Just (ChatQuestion 1 "Answer?" [] Nothing (newBuffer text) sel True)}
+        answer d=maybe (error "Missing inline answer") questionBuffer (chatQuestion d)
+        pasted text d=fst (runCommand Paste d {clipboard=text})
+        textOf=contents.answer
+        expected source sel inserted=let (a,z)=ordered sel in
+          T.take 4096 (T.map (\c->if c `elem` ['\n','\r','\t'] then ' ' else c) (T.take a source<>inserted<>T.drop z source))
+        checkEdit source sel inserted result=do
+          let wanted=expected source sel inserted
+              undone=fst (runCommand Undo result)
+              redone=fst (runCommand Redo undone)
+          check "inline insertion keeps normalization and cap result" (textOf result==wanted)
+          check "inline normalized/capped insertion is one Undo step" (textOf undone==source && textOf (fst (runCommand Undo undone))==source)
+          check "inline insertion Redo restores the bounded answer" (textOf redone==wanted)
+          receipt<-captureVersion ordinary
+          current<-versionCurrent receipt (composerBuffer result)
+          check "inline insertion does not borrow the ordinary draft" current
+    let before="before"
+        inserted="\nnext\tpart\r"
+        initial=question before (Selection 6 6)
+    checkEdit before (Selection 6 6) inserted (pasted inserted initial)
+    checkEdit before (Selection 6 6) inserted (fst (handleEvent (V.EvPaste (TE.encodeUtf8 inserted)) initial))
+    checkEdit before (Selection 6 6) inserted (fst (handleEvent (V.EvKey (V.KChar 'v') [V.MCtrl]) initial {clipboard=inserted}))
+    checkEdit before (Selection 6 6) "\n" (fst (handleEvent (V.EvKey V.KEnter [V.MShift]) initial))
+    let nonuniform=T.take 4096 (T.concat (replicate 500 "012α界e\x301\&😀XYZ"))
+    forM_ [(Selection 0 0,"front"),(Selection 17 17,T.replicate 30 "λ界"),
+           (Selection 31 8,"selected λ界\ttext"),(Selection 25 25,T.replicate 5000 "界"),
+           (Selection 4096 4096,"full end")] $ \(sel,addition)->
+      checkEdit nonuniform sel addition (pasted addition (question nonuniform sel))
+    let large=(newBuffer (T.replicate 4096 "界")) {saved=error "question selection forced baseline",undoStack=error "question selection forced Undo"}
+        focused=chat {chatQuestion=Just (ChatQuestion 1 "Answer?" [] Nothing large (Selection 0 0) True)}
+    _<-evaluate (prepareBuffer large)
+    _<-evaluate (questionActive focused)
+    beforeAllocation<-getAllocationCounter
+    selected<-evaluate (maybe (-1) (caret.questionSelection) (chatQuestion (fst (runCommand SelectAll focused))))
+    afterAllocation<-getAllocationCounter
+    check "inline selection does not normalize the existing answer" (selected==4096 && beforeAllocation-afterAllocation<8000)
+    let first=pasted inserted initial
+        second=pasted "more" first
+    check "successive inline edits retain earlier Undo" (textOf (fst (runCommand Undo second))==textOf first && textOf (fst (runCommand Undo (fst (runCommand Undo second))))==before)
+    putStrLn "inline question insertion checks passed"
 
 -- Acceptance consumes only the submitted immutable draft, including hidden views.
 -- Gates use the same ACP process and held-read fixture as the other owner checks.
@@ -211,7 +242,7 @@ draftReceiptChecks=bracket temporary removePathForcibly $ \root->
         source=root </> "Source.hs"
         environment=object ["THC_LOG" .= (root </> "messages.jsonl"),"THC_SOURCE" .= source,"THC_SECOND" .= source,"THC_RESUME" .= ("yes"::T.Text)]
         send runtime action values desktop=snd <$> conversationEffects runtime (\d _->pure (False,d)) desktop [AgentAction action values]
-        configure runtime=send runtime "configure" ["0","python3",json [server],json environment]
+        configure runtime d=send runtime "configure" ["0","python3",json [server],json environment] d >>= send runtime "show" []
         prompt runtime text=send runtime "send" ["0",text,"false","false","false"]
         await runtime label predicate desktop=do
           observed<-newIORef (status desktop,agentReplying desktop,agentQueued desktop)
@@ -246,11 +277,22 @@ draftReceiptChecks=bracket temporary removePathForcibly $ \root->
         original<-evaluate (newBuffer "stream")
         createNamedPipe gate 0o600
         withHeldRead server gate "connected" $ \opened release writer->do
-          submitted<-send runtime "send-draft" [] configured {composerBuffer=original}
+          submitted<-submit runtime QuerySubmit (draftBuffer original configured)
+          let awaitConnection d=do
+                openedNow<-not <$> isEmptyMVar opened
+                if openedNow then pure d else tickConversation runtime d >>= \next->threadDelay 1000 >> awaitConnection next
+          connecting<-timeout 3000000 (awaitConnection submitted) >>= maybe (error "Initial editor connection did not reach its gate") pure
           waitForReader opened
+          followup<-evaluate (newBuffer "stream\nconnecting followup")
+          queuedConnecting<-submit runtime QuerySubmit (draftBuffer followup connecting)
+          check "input while initializing joins the original provider queue" (agentQueued queuedConnecting==1)
           newer<-fresh original
           putMVar release (); wait writer
-          accepted<-primaryDone runtime "connecting replacement" submitted {composerBuffer=newer}
+          accepted<-primaryDone runtime "connecting replacement" (draftBuffer newer queuedConnecting)
+          connectedMessages<-readMessages (root </> "messages.jsonl")
+          let sent=[params | entry<-connectedMessages,field "method" entry==Just ("session/prompt"::T.Text),Just params<-[field "params" entry::Maybe Value]]
+              sentText params=case (field "prompt" params::Maybe [Value]) of Just (first:_)->field "text" first; _->Nothing
+          check "initial connection accepts queued input in order" (map sentText sent==[Just ("stream"::T.Text),Just "stream\nconnecting followup"])
           check "connecting submission cannot clear a same-text new draft" (contents (composerBuffer accepted)=="stream")
         removeFile gate
     writeFile context "[editor.agent]\ncontext='receipt guidance'\n"
@@ -259,30 +301,40 @@ draftReceiptChecks=bracket temporary removePathForcibly $ \root->
       configured<-configure runtime base
       connected<-prompt runtime "stream" configured >>= primaryDone runtime (scenario++" connect")
       untouched<-evaluate (newBuffer "stream")
-      independent<-prompt runtime "stream" connected {composerBuffer=untouched} >>= primaryDone runtime (scenario++" independent")
+      independent<-prompt runtime "stream" (draftBuffer untouched connected) >>= primaryDone runtime (scenario++" independent")
       check "independent prompt does not consume the composer" (contents (composerBuffer independent)=="stream")
       active<-if steer then prompt runtime "wait" independent >>= await runtime "active primary turn" (pure . (=="Agent is replying...") . status) else pure independent
       original<-evaluate (newBuffer (if steer then "direction" else "stream"))
       -- Preparation may finish off-thread, but only a later serialized tick adopts it.
+      beforeSubmission<-readMessages (root </> "messages.jsonl")
       submittedReceipt<-captureVersion original
-      submitted<-send runtime (if steer then "steer-draft" else "send-draft") [] active {composerBuffer=original}
+      submitted<-submit runtime (if steer then SteerSubmit else QuerySubmit) (draftBuffer original active)
       sameDraft<-versionCurrent submittedReceipt (composerBuffer submitted)
       check "submitted draft remains pending before owner adoption" (agentReplying submitted && sameDraft)
       current<-if replaced then fresh original else pure original
       staged<-if requeue then do
-        queued<-send runtime "send-draft" [] submitted {composerBuffer=current}
-        check "same-text replacement is a new queued query" (agentQueued queued==1 && bufferLength (composerBuffer queued)==0)
+        queuedIntent<-submit runtime QuerySubmit (draftBuffer current submitted)
+        pendingCurrent<-captureVersion current >>= \version->versionCurrent version (composerBuffer queuedIntent)
+        check "same-text replacement is a new queued query before adoption" (agentQueued queuedIntent==1 && pendingCurrent)
+        queued<-await runtime "replacement queued acceptance" (pure . (==0) . bufferLength . composerBuffer) queuedIntent
         newest<-fresh original
-        pure queued {composerBuffer=newest}
+        pure (draftBuffer newest queued)
         else if not steer && not replaced then do
-          duplicate<-send runtime "send-draft" [] submitted
+          duplicate<-submit runtime QuerySubmit submitted
           samePending<-versionCurrent submittedReceipt (composerBuffer duplicate)
           check "unchanged pending draft is submitted once" (agentQueued duplicate==0 && samePending)
           pure duplicate
-        else pure submitted {composerBuffer=current}
-      let hidden=if steer then selectConversationView "unregistered" "Other" staged else staged
+        else pure (draftBuffer current submitted)
+      let sourceFrame=fromMaybe (error "Missing receipt source frame") (listToMaybe [w | w<-windows staged,Just doc<-[windowDocument (buffers staged) w],fmap filePath (documentFile doc)==Just source])
+          hidden=if steer then focusWindow (windowId sourceFrame) staged else staged
       settled<-primaryDone runtime scenario hidden
       let restored=if steer then selectConversationView "" "Primary" settled else settled
+      when requeue $ do
+        afterSubmission<-readMessages (root </> "messages.jsonl")
+        let prompts values=[params | entry<-values,field "method" entry==Just ("session/prompt"::T.Text),Just params<-[field "params" entry::Maybe Value]]
+            added=drop (length (prompts beforeSubmission)) (prompts afterSubmission)
+            firstText params=case (field "prompt" params::Maybe [Value]) of Just (first:_)->field "text" first; _->Nothing
+        check "replacement query reaches the provider once in submission order" (length added==2 && all ((==Just ("stream"::T.Text)).firstText) added)
       check "acceptance preserves a replacement draft and clears only the submitted one"
         (if replaced then contents (composerBuffer restored)==contents original else bufferLength (composerBuffer restored)==0)
     bracket (lookupEnv "THC_EDIT_SESSION" <* setEnv "THC_EDIT_SESSION" (replicate 48 'c')) (restoreDraftEnvironment "THC_EDIT_SESSION") $ \_->
@@ -297,13 +349,14 @@ draftReceiptChecks=bracket temporary removePathForcibly $ \root->
           timeout 3000000 running >>= maybe (error "Receipt child did not start") pure
           original<-evaluate (newBuffer "child direction")
           let target=AH.agentIdText ident
-              selected=(selectConversationView target "Receipt child" base) {composerBuffer=original}
+          childView<-openChild runtime ident base
+          let selected=draftBuffer original childView
           createNamedPipe gate 0o600
           withHeldRead server gate "accepted" $ \opened release writer->do
-            submitted<-send runtime "steer-draft" [] selected
+            submitted<-submit runtime SteerSubmit selected
             waitForReader opened
             current<-if replaced then fresh original else pure original
-            let hidden=selectConversationView "" "Primary" submitted {composerBuffer=current}
+            hidden<-send runtime "show" [] (draftBuffer current submitted)
             putMVar release (); wait writer
             let accepted d=do
                   value<-AH.statusAgent hub AH.Human ident >>= either (error.T.unpack) pure
@@ -312,6 +365,14 @@ draftReceiptChecks=bracket temporary removePathForcibly $ \root->
             restored<-await runtime "child control completion" (pure . not . agentReplying) (selectConversationView target "Receipt child" settled)
             check "child acceptance preserves a replacement draft and clears only its submitted draft"
               (if replaced then contents (composerBuffer restored)==contents original else bufferLength (composerBuffer restored)==0)
+            when replaced $ do
+              let (requested,effects)=runCommand AgentNew restored
+              restarted<-snd <$> conversationEffects runtime (\value _->pure (False,value)) requested effects
+              let childAgain=selectConversationView target "Receipt child" restarted
+              retained<-sameDraftRoot restored childAgain
+              check "New conversation selects the real primary editor and retains the child draft"
+                (T.null (conversationTarget restarted) && activeConversation restarted && activeEditorMount restarted/=Nothing &&
+                 retained && composerSelection childAgain==composerSelection restored)
           removeFile gate
     putStrLn "draft receipt checks passed"
   where restoreDraftEnvironment name=maybe (unsetEnv name) (setEnv name)
@@ -369,24 +430,25 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary remov
         (T.pack (map fst (renderTimestamp 20 "12:05"))=="       12:05" && length (renderTimestamp 3 "12:05")==3)
       let tag ident=map (\(c,s) -> (c,case s of BubbleText _ out base -> BubbleText ident out base; _ -> s))
           cells=renderReply False 54 True "one"++[('\n',Plain),('\n',Plain)]++renderTimestamp 54 "12:05"++[('\n',Plain)]++tag 1 (renderReply False 54 False "two")
-          base=addReadOnly "Conversation" (T.pack (map fst cells)) (initialDesktop (60,18))
-          chat=base {buffers=M.map (\doc -> doc {documentHighlight=cells}) (buffers base),composerFocused=True,composerBuffer=newBuffer "draft",composerSelection=Selection 2 2}
-          positions ident=[i | (i,(_,BubbleText j _ _))<-zip [0..] cells,j==ident]
-          a=head (positions 0); z=last (positions 1)+1
-          selectedReply lo hi=modifyActive (\w -> w {selection=Selection lo hi}) chat
-          copiedReply lo hi=clipboard (fst (runCommand Copy (selectedReply lo hi)))
-      check "single-bubble copies omit speaker names and decoration"
-        (copiedReply a (a+3)=="one" && copiedReply (a+1) (a+3)=="ne")
-      check "cross-bubble copies label speakers and omit timestamps and furniture"
-        (copiedReply 0 (length cells)=="User: one\n\nBot: two" && copiedReply z a=="User: one\n\nBot: two")
-      let w=fromMaybe (error "conversation window") (activeWindow chat)
-          b=fromMaybe (newBuffer "") (documentBuffer <$> activeDocument chat)
-          clickAt p state=let (row,col)=bufferLineColumn b p in fst (handleEvent (V.EvMouseDown (left (bounds w)+1+col) (top (bounds w)+1+row) V.BLeft []) state)
-          dragging=clickAt z (clickAt a chat)
-          released=fst (handleEvent (V.EvMouseUp 0 0 (Just V.BLeft)) dragging)
-          keyCopied=fst (handleEvent (V.EvKey (V.KChar 'c') [V.MCtrl]) released)
-      check "dragging across bubbles preserves the draft caret and copies only message text"
-        (composerFocused released && composerSelection released==Selection 2 2 && clipboard keyCopied=="User: one\n\nBot: two")
+          initialChat=addReadOnly "Conversation" (T.pack (map fst cells)) (initialDesktop (60,18))
+      withEditorFixture "" initialChat $ \base->do
+        let chat=draftAt (newBuffer "draft") (Selection 2 2) base {buffers=M.map (\doc -> doc {documentHighlight=cells}) (buffers base)}
+            positions ident=[i | (i,(_,BubbleText j _ _))<-zip [0..] cells,j==ident]
+            a=head (positions 0); z=last (positions 1)+1
+            selectedReply lo hi=modifyActive (\w -> w {selection=Selection lo hi}) chat
+            copiedReply lo hi=clipboard (fst (runCommand Copy (selectedReply lo hi)))
+        check "single-bubble copies omit speaker names and decoration"
+          (copiedReply a (a+3)=="one" && copiedReply (a+1) (a+3)=="ne")
+        check "cross-bubble copies label speakers and omit timestamps and furniture"
+          (copiedReply 0 (length cells)=="User: one\n\nBot: two" && copiedReply z a=="User: one\n\nBot: two")
+        let w=fromMaybe (error "conversation window") (activeWindow chat)
+            b=fromMaybe (newBuffer "") (documentBuffer <$> activeDocument chat)
+            clickAt p state=let (row,col)=bufferLineColumn b p in fst (handleEvent (V.EvMouseDown (left (bounds w)+1+col) (top (bounds w)+1+row) V.BLeft []) state)
+            dragging=clickAt z (clickAt a chat)
+            released=fst (handleEvent (V.EvMouseUp 0 0 (Just V.BLeft)) dragging)
+            keyCopied=fst (handleEvent (V.EvKey (V.KChar 'c') [V.MCtrl]) released)
+        check "dragging across bubbles preserves the draft caret and copies only message text"
+          (composerFocused released && composerSelection released==Selection 2 2 && clipboard keyCopied=="User: one\n\nBot: two")
     let reply width outgoing=T.pack . map fst . renderReply False width outgoing
     check "short bubbles occupy one row with outward tails"
       (reply 30 True "hello"==T.replicate 22 " "<>"▐hello▛◤" && reply 30 False "hello"=="◥▜hello▌")
@@ -431,7 +493,6 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary remov
     let modeDialog=Dialog "Agent Permissions" (PermissionDialog "set:editor_file") [Radio "Permission" ["Enable","Prompt","Disable"] 2] 0 ["Save","Back"] []
     check "permission mode submission includes selected radio" (snd (submitDialog 0 modeDialog permissionBase {dialog=Just modeDialog})==[PermissionAction "set:editor_file" ["0","2"]])
     let draftBase=addReadOnly "Conversation" "" (initialDesktop (90,30))
-        savedDraft=draftBase {composerBuffer=newBuffer "existing draft",composerSelection=Selection 4 4}
         isLeft (Left _)=True
         isLeft _=False
         clickAction runtime=clickActionBeforeTick runtime True
@@ -463,12 +524,14 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary remov
         check "reflow preserves the whole shell source and maps its decorated cells"
           (map (\(_,_,dialect,raw)->(dialect,raw)) blocks==[("sh",rawShell)] &&
            all (\(i,_)->any (\(start,end,_,_)->i>=start && i<end) blocks) blockRows)
-        let selected=modifyActive (\w->w {selection=Selection 0 (T.length text)}) reflowed {composerFocused=False}
+        let selected=modifyActive (\w->w {selection=Selection 0 (T.length text)}) (setComposerInput (composerBuffer reflowed) (composerSelection reflowed) False reflowed)
             copied=fst (runCommand Copy selected)
         check "copy after chat reflow still excludes bubble furniture"
           ("window-width" `T.isInfixOf` clipboard copied && not ("┌" `T.isInfixOf` clipboard copied) && not ("```" `T.isInfixOf` clipboard copied))
         stable<-tickConversation runtime reflowed
-        check "timer tick keeps immediately reflowed layout stable" ((documentBuffer <$> activeDocument stable)==Just (documentBuffer doc))
+        receipt<-captureVersion (documentBuffer doc)
+        unchanged<-maybe (pure False) (versionCurrent receipt . documentBuffer) (activeDocument stable)
+        check "timer tick keeps immediately reflowed layout stable" unchanged
     forM_ [32,120,150] $ \columns -> do
       let outgoing=renderReply False columns True (T.unwords (replicate 90 "window-width"))
           incoming=renderReply False columns False (T.unwords (replicate 90 "window-width"))
@@ -477,18 +540,26 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary remov
         (length (firstRow outgoing)==columns && maybe False (\(_,style)->case style of BubbleText _ False _->False; _->True) (listToMaybe incoming) &&
          maximum (map (length . filter (\(_,style)->case style of BubbleText{}->True; _->False)) (splitStyled incoming))>columns-20)
     C.withConsoles $ \consoles -> withConversation consoles $ \runtime -> do
+      preparedDraft<-send runtime "show" [] draftBase
+      let savedDraft=draftAt (newBuffer "existing draft") (Selection 4 4) preparedDraft
       agents <- send runtime "directory" [] savedDraft
       check "Agents directory exposes an explicit reconnect action"
         (maybe False (elem "Reconnect" . buttons) (dialog agents))
       let recovered=addReadOnly "Conversation" "Recovered user and agent transcript" savedDraft
       idle<-tickConversation runtime recovered
       resized<-tickConversation runtime idle {screenSize=(100,35)}
+      sourceSame<-sameBufferVersions recovered resized
+      draftSame<-sameDraftRoot recovered resized
       check "idle fresh conversation runtime preserves recovered transcript and draft"
-        (buffers resized==buffers recovered && composerBuffer resized==composerBuffer recovered && composerSelection resized==composerSelection recovered)
+        (sourceSame && draftSame && composerSelection resized==composerSelection recovered)
       shown<-send runtime "show" [] resized
+      shownSources<-sameBufferVersions recovered shown
+      shownDraft<-sameDraftRoot recovered shown
       check "opening a recovered conversation preserves its transcript and draft"
-        (buffers shown==buffers recovered && composerBuffer shown==composerBuffer recovered && composerSelection shown==composerSelection recovered && composerFocused shown)
+        (shownSources && shownDraft && composerSelection shown==composerSelection recovered && composerFocused shown)
     C.withConsoles $ \consoles -> withConversation consoles $ \runtime -> do
+      preparedDraft<-send runtime "show" [] draftBase
+      let savedDraft=draftAt (newBuffer "existing draft") (Selection 4 4) preparedDraft
       (asked,reply)<-questionTool runtime savedDraft (object ["question" .= ("Question presentation identity"::T.Text)])
       _<-questionId reply
       let q=fromMaybe (error "Missing presentation question") (chatQuestion asked)
@@ -509,16 +580,21 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary remov
       check "equal-revision answer replacement invalidates question presentation"
         (revision answer==revision replacement && originalIdentity/=replacementIdentity && "fresh answer" `T.isInfixOf` conversationText redrawn)
     C.withConsoles $ \consoles -> withConversation consoles $ \runtime -> do
+      preparedDraft<-send runtime "show" [] draftBase
+      let savedDraft=draftAt (newBuffer "existing draft") (Selection 4 4) preparedDraft
       (_,anonymous)<-chatTool runtime savedDraft "ask_user" (object ["question" .= ("Anonymous question"::T.Text)])
       refused<-timeout 100000 anonymous
       check "anonymous ask_user cannot acquire a private answer" (case refused of Just (Left _)->True; _->False)
     C.withConsoles $ \consoles -> withConversation consoles $ \runtime -> do
+      preparedDraft<-send runtime "show" [] draftBase
+      let savedDraft=draftAt (newBuffer "existing draft") (Selection 4 4) preparedDraft
       (asked,answer)<-questionTool runtime savedDraft (object ["question" .= ("Pick a direction"::T.Text),"choices" .= (["Left","Right"]::[T.Text])])
       check "ask_user renders inline choices and custom entry without a modal" (dialog asked==Nothing && chatQuestion asked/=Nothing && all (`T.isInfixOf` conversationText asked) ["Pick a direction","Left","Right","Other:","Submit answer","Cancel"])
       check "question footer describes answer actions" ("Enter Answer" `T.isInfixOf` snapshot asked && not ("Session: not connected" `T.isInfixOf` conversationText asked))
-      check "ask_user preserves the existing draft and caret" (composerBuffer asked==composerBuffer savedDraft && composerSelection asked==composerSelection savedDraft)
+      draftKept<-sameDraftRoot savedDraft asked
+      check "ask_user preserves the existing draft and caret" (draftKept && composerSelection asked==composerSelection savedDraft)
       (duplicate,refused)<-questionTool runtime asked (object ["question" .= ("Another?"::T.Text)])
-      check "only one human question can wait" . (&& (duplicate==asked)) . isLeft =<< refused
+      check "only one human question can wait" . (&& (fmap questionToken (chatQuestion duplicate)==fmap questionToken (chatQuestion asked))) . isLeft =<< refused
       created<-timeout 100000 answer
       ident<-case created of Just (Right value)->maybe (error "Missing immediate questionId") pure (field "questionId" value :: Maybe Int); _->error "ask_user did not return pending immediately"
       check "question creation is immediately pending" (case created of Just (Right value)->field "status" value==Just ("pending"::T.Text); _->False)
@@ -537,7 +613,8 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary remov
       check "choice response is retained for the requesting actor" (case choiceReply of Right value->field "status" value==Just ("answered"::T.Text) && field "answer" value==Just ("Left"::T.Text) && field "custom" value==Just False; _->False)
       repeated<-questionPoll runtime submitted ident
       check "polling is stable and does not duplicate the transcript" (repeated==choiceReply && T.count "Pick a direction" (conversationText submitted)==1)
-      check "answer removes the inline form and preserves draft" (chatQuestion submitted==Nothing && composerBuffer submitted==composerBuffer savedDraft && composerSelection submitted==composerSelection savedDraft)
+      draftAfterAnswer<-sameDraftRoot savedDraft submitted
+      check "answer removes the inline form and preserves draft" (chatQuestion submitted==Nothing && draftAfterAnswer && composerSelection submitted==composerSelection savedDraft)
       (custom,customReply)<-questionTool runtime savedDraft (object ["question" .= ("Your answer?"::T.Text)])
       customId<-questionId customReply
       let typed=foldl (\desktop c->fst (handleEvent (V.EvKey (V.KChar c) []) desktop)) custom ("custom λ"::String)
@@ -546,7 +623,8 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary remov
       check "typed draft stays private until submitted" (stillPending==Right (object ["questionId" .= customId,"status" .= ("pending"::T.Text)]))
       sent<-snd <$> conversationEffects runtime fallback sending effects
       result<-questionPoll runtime sent customId
-      check "free text answers preserve Unicode and the ordinary draft" (case result of Right value->field "answer" value==Just ("custom λ"::T.Text) && composerBuffer sent==composerBuffer savedDraft; _->False)
+      draftAfterText<-sameDraftRoot savedDraft sent
+      check "free text answers preserve Unicode and the ordinary draft" (case result of Right value->field "answer" value==Just ("custom λ"::T.Text) && draftAfterText; _->False)
       (cancelledQuestion,cancelledReply)<-questionTool runtime savedDraft (object ["question" .= ("Cancel me"::T.Text)])
       cancelId<-questionId cancelledReply
       cancelledDesktop<-clickAction runtime "question-cancel" cancelledQuestion
@@ -577,6 +655,8 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary remov
       (_,invalid)<-questionTool runtime savedDraft (object ["question" .= ("Unsupported"::T.Text),"allowMultiple" .= True])
       check "unsupported multi-select is explicit" . isLeft =<< invalid
     C.withConsoles $ \consoles -> withConversation consoles $ \runtime->Permissions.withPermissionsAt (root </> "question-permissions.toml") chatTools $ \permissions->do
+      preparedDraft<-send runtime "show" [] draftBase
+      let savedDraft=draftAt (newBuffer "existing draft") (Selection 4 4) preparedDraft
       bound<-captureQuestionCaller runtime (AR.primaryAgent (conversationAgents runtime)) >>= either (error . T.unpack) pure
       let primary=AR.primaryAgent (conversationAgents runtime)
           actor=fmap (() <$) (AH.statusAgent (AR.agentHub (conversationAgents runtime)) (AH.Agent primary) primary)
@@ -607,10 +687,12 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary remov
         result<-wait request
         check "deferred approval cannot resurrect an ended question requester" (chatQuestion refused==Nothing && isLeft result)
     (closedRuntime,closedId)<-C.withConsoles $ \consoles -> withConversation consoles $ \runtime->do
+      preparedDraft<-send runtime "show" [] draftBase
+      let savedDraft=draftAt (newBuffer "existing draft") (Selection 4 4) preparedDraft
       (_,reply)<-questionTool runtime savedDraft (object ["question" .= ("Session closes"::T.Text)])
       ident<-questionId reply
       pure (runtime,ident)
-    check "session shutdown refuses further question retrieval" . isLeft =<< questionPoll closedRuntime savedDraft closedId
+    check "session shutdown refuses further question retrieval" . isLeft =<< questionPoll closedRuntime draftBase closedId
     BS.writeFile server (TE.encodeUtf8 (T.pack providerScript))
     BS.writeFile source "disk original\n"
     BS.writeFile secondSource "second original\n"
@@ -690,7 +772,7 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary remov
     C.withConsoles $ \consoles -> withConversation consoles $ \runtime -> do
       configured<-configure runtime ("yes"::T.Text) desktop
       connected<-prompt runtime "stream" configured >>= done runtime
-      let liveDraft=connected {composerBuffer=newBuffer "newer independent draft",composerSelection=Selection 6 6}
+      let liveDraft=draftAt (newBuffer "newer independent draft") (Selection 6 6) connected
       (asked,creation)<-questionTool runtime liveDraft (object ["question" .= ("Resume the idle provider?"::T.Text),"choices" .= (["async-answer-resume-marker"]::[T.Text])])
       ident<-questionId creation
       submitted<-clickAction runtime "question-submit" =<< clickAction runtime "question-choice" asked
@@ -733,7 +815,7 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary remov
         waitForReader opened
         let edited=insertText "during read " (focusSource responsive)
         composing<-send runtime "show" [] edited
-        let typed=fst (handleEvent (V.EvPaste "draft stays responsive") composing {composerFocused=True})
+        let typed=fst (handleEvent (V.EvPaste "draft stays responsive") (setComposerInput (composerBuffer composing) (composerSelection composing) True composing))
         ticked<-timeout 1000000 (tickConversation runtime typed)
         progressed<-maybe (error "Desktop tick blocked on ACP file read") pure ticked
         check "desktop input progresses while ACP filesystem read is held"
@@ -823,12 +905,12 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary remov
         takeMVar contextRelease
         BS.hPut handle "[editor.agent]\ncontext = 'late guidance'\n") $ \writer -> do
           takeMVar contextOpened
-          fast<-timeout 1000000 (send runtime "send-draft" [] connected {composerBuffer=newBuffer "cancel before send"})
+          fast<-timeout 1000000 (submit runtime QuerySubmit (draftBuffer (newBuffer "cancel before send") connected))
           preparing<-maybe (error "Context preparation blocked send/input") pure fast
           check "draft remains while context is preparing" (contents (composerBuffer preparing)=="cancel before send")
           next<-timeout 1000000 (tickConversation runtime preparing)
           responsive<-maybe (error "Context preparation blocked tick") pure next
-          let edited=responsive {composerBuffer=newBuffer "newer human draft"}
+          let edited=draftBuffer (newBuffer "newer human draft") responsive
           cancelled<-send runtime "cancel" [] edited
           check "cancelling context preparation preserves newer draft" (contents (composerBuffer cancelled)=="newer human draft")
           putMVar contextRelease ()
@@ -971,11 +1053,11 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary remov
       check "composer is a compact thought bubble without buttons or divider"
         (height (composerRect cancelled window)==1 && height (composerRect multiline window)==2 && width (composerRect multiline window)==12 &&
          "•." `T.isInfixOf` snapshot multiline && not (" Query " `T.isInfixOf` T.intercalate "\n" (init (T.lines (snapshot multiline)))))
-      let sized text=composerRect (cancelled {composerBuffer=newBuffer text}) window
+      let sized text=composerRect (draftBuffer (newBuffer text) cancelled) window
           edge r=left r+width r
           available=width (bounds window)-6
           wide=T.replicate 10 "界"<>"\nshort"
-          wideDesktop=cancelled {composerBuffer=newBuffer wide,composerSelection=Selection 0 0,composerFocused=True}
+          wideDesktop=draftAt (newBuffer wide) (Selection 0 0) cancelled
           wideRect=composerRect wideDesktop window
           clicked=fst (handleEvent (V.EvMouseDown (left wideRect+6) (top wideRect) V.BLeft []) wideDesktop)
       check "draft width follows the longest display line and keeps its right edge fixed"
@@ -1006,23 +1088,24 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary remov
       check "Options chat input selects and persists the human default"
         (chatSubmit selectedInput==SteerSubmit && saveInput==[SaveChatSubmit SteerSubmit] && dialog selectedInput==Nothing &&
          chatSubmit cancelledInput==QuerySubmit && null cancelEffects && any (\(_,_,items)->any (\(MenuItem label _ command)->label=="Chat input..." && command==ChatInputOptions) items) menus)
-      forM_ [QuerySubmit,SteerSubmit] $ \submitChoice -> forM_ [False,True] $ \replying -> forM_ ["","child-fixture"] $ \target -> do
-        let chatConfigured=(if T.null target then multiline else selectConversationView target "Child" multiline) {chatSubmit=submitChoice,agentReplying=replying,agentSteering=False,childAgentSteering=False}
-            queryMods=if submitChoice==QuerySubmit then [] else [V.MCtrl]
-            steerMods=if submitChoice==SteerSubmit then [] else [V.MCtrl]
-            queryHint=(if submitChoice==QuerySubmit then "Enter " else "Ctrl+Enter ")<>(if replying then "Queue query" else "Query")
-            steerHint=(if submitChoice==SteerSubmit then "Enter " else "Ctrl+Enter ")<>"Steer"
-        check "both shortcut labels follow the primary or child composer default"
-          (queryHint `T.isInfixOf` snapshot chatConfigured && steerHint `T.isInfixOf` snapshot chatConfigured)
-        check "Enter and Ctrl+Enter invoke the advertised opposite actions"
-          (snd (handleEvent (V.EvKey V.KEnter queryMods) chatConfigured)==[AgentAction "send-draft" []] &&
-           snd (handleEvent (V.EvKey V.KEnter steerMods) chatConfigured)==[AgentAction "steer-draft" []] &&
-           snd (clickStatus (if replying then "Queue query" else "Query") chatConfigured)==[AgentAction "send-draft" []] && snd (clickStatus "Steer" chatConfigured)==[AgentAction "steer-draft" []])
-        forM_ [[V.MShift],[V.MCtrl,V.MShift]] $ \mods -> do
-          let (newline,effects)=handleEvent (V.EvKey V.KEnter mods) chatConfigured
-          check "Shift+Enter always inserts newline without sending" (null effects && bufferLength (composerBuffer newline)==bufferLength (composerBuffer chatConfigured)+1)
+      withEditorFixture "child-fixture" multiline $ \fixtures->do
+        forM_ [QuerySubmit,SteerSubmit] $ \submitChoice -> forM_ [False,True] $ \replying -> forM_ ["","child-fixture"] $ \target -> do
+          let chatConfigured=(if T.null target then selectConversationView "" "Primary" fixtures else selectConversationView target "Child" fixtures) {chatSubmit=submitChoice,agentReplying=replying,agentSteering=False,childAgentSteering=False}
+              queryMods=if submitChoice==QuerySubmit then [] else [V.MCtrl]
+              steerMods=if submitChoice==SteerSubmit then [] else [V.MCtrl]
+              queryHint=(if submitChoice==QuerySubmit then "Enter " else "Ctrl+Enter ")<>(if replying then "Queue query" else "Query")
+              steerHint=(if submitChoice==SteerSubmit then "Enter " else "Ctrl+Enter ")<>"Steer"
+          check "both shortcut labels follow the primary or child composer default"
+            (queryHint `T.isInfixOf` snapshot chatConfigured && steerHint `T.isInfixOf` snapshot chatConfigured)
+          check "Enter and Ctrl+Enter invoke the advertised opposite actions"
+            (snd (handleEvent (V.EvKey V.KEnter queryMods) chatConfigured)==[editorEffect QuerySubmit chatConfigured] &&
+             snd (handleEvent (V.EvKey V.KEnter steerMods) chatConfigured)==[editorEffect SteerSubmit chatConfigured] &&
+             snd (clickStatus (if replying then "Queue query" else "Query") chatConfigured)==[editorEffect QuerySubmit chatConfigured] && snd (clickStatus "Steer" chatConfigured)==[editorEffect SteerSubmit chatConfigured])
+          forM_ [[V.MShift],[V.MCtrl,V.MShift]] $ \mods -> do
+            let (newline,effects)=handleEvent (V.EvKey V.KEnter mods) chatConfigured
+            check "Shift+Enter always inserts newline without sending" (null effects && bufferLength (composerBuffer newline)==bufferLength (composerBuffer chatConfigured)+1)
       check "status steering sends the advertised action"
-        (snd (clickStatus "Steer" (multiline {agentSteering=True,agentReplying=True}))==[AgentAction "steer-draft" []])
+        (snd (clickStatus "Steer" (multiline {agentSteering=True,agentReplying=True}))==[editorEffect SteerSubmit multiline])
       submitted<-uncurry (conversationEffects runtime fallback) (clickStatus "Query" (pasteDraft "stream" cancelled)) >>= done runtime . snd
       check "status Query posts draft into transcript and clears input" (T.null (contents (composerBuffer submitted)) && not (agentReplying submitted))
       let codeDraft=press V.KDown [] (pasteDraft "value = 42" (press (V.KChar ' ') [] (press (V.KChar '>') [] submitted)))
@@ -1038,7 +1121,7 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary remov
         (sentText==Just (composerMarkdown (contents (composerBuffer codeDraft))) && T.null (contents (composerBuffer codeSubmitted)))
       busyDraft<-prompt runtime "wait" codeSubmitted >>= await runtime "composer busy" ((=="Agent is replying...").status)
       preserved<-tickConversation runtime (pasteDraft "stream" busyDraft)
-      queued<-applyEvent (V.EvKey V.KEnter []) preserved
+      queued<-applyEvent (V.EvKey V.KEnter []) preserved >>= await runtime "busy query acceptance" (\d->agentQueued d==1 && bufferLength (composerBuffer d)==0)
       check "Enter queues a query while replying and retains input during ticks"
         (contents (composerBuffer preserved)=="stream" && agentQueued queued==1 && T.null (contents (composerBuffer queued)) && "Enter Queue query" `T.isInfixOf` snapshot queued)
       drained<-uncurry (conversationEffects runtime fallback) (clickStatus "Cancel" queued) >>= done runtime . snd
@@ -1053,12 +1136,14 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary remov
       check "default steering preserves unsupported draft" (contents (composerBuffer refusedDefault)=="direction")
       steered<-applyEvent (V.EvKey V.KEnter []) ((pasteDraft "direction" steeringWait) {chatSubmit=SteerSubmit}) >>= await runtime "steering delivered" (not . agentReplying)
       check "steering uses adapter extension and clears submitted draft" . any ((==Just ("_session/steering"::T.Text)).field "method") =<< logged
-      check "steering does not edit source or retain sent draft" (T.null (contents (composerBuffer steered)) && documentBuffer (sourceDocument steered)==documentBuffer (sourceDocument cancelled))
+      sourceReceipt<-captureVersion (documentBuffer (sourceDocument cancelled))
+      sameSource<-versionCurrent sourceReceipt (documentBuffer (sourceDocument steered))
+      check "steering does not edit source or retain sent draft" (T.null (contents (composerBuffer steered)) && sameSource)
       idleRace<-prompt runtime "wait" steered >>= await runtime "idle race active" ((=="Agent is replying...").status)
-      rejectedSteer<-send runtime "steer-draft" [] idleRace {composerBuffer=newBuffer "idle-race"} >>= await runtime "idle race response" (not . agentReplying)
+      rejectedSteer<-submit runtime SteerSubmit (draftBuffer (newBuffer "idle-race") idleRace) >>= await runtime "idle race response" (not . agentReplying)
       check "primary idle race leaves steering draft unsent" (contents (composerBuffer rejectedSteer)=="idle-race")
       legacyWait<-prompt runtime "wait" rejectedSteer >>= await runtime "legacy steer active" ((=="Agent is replying...").status)
-      legacy<-send runtime "steer-draft" [] legacyWait {composerBuffer=newBuffer "legacy-steer"} >>= await runtime "legacy steering retires provider" (T.isInfixOf "provider stopped" . status)
+      legacy<-submit runtime SteerSubmit (draftBuffer (newBuffer "legacy-steer") legacyWait) >>= await runtime "legacy steering retires provider" (T.isInfixOf "provider stopped" . status)
       check "primary legacy detached steering stops safely and retains the draft" (contents (composerBuffer legacy)=="legacy-steer" && not (agentSteering legacy))
       restarted<-prompt runtime "stream" legacy >>= done runtime
       disconnected<-prompt runtime "disconnect" restarted >>= await runtime "provider EOF" ((=="Agent disconnected.").status)
@@ -1138,25 +1223,27 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary remov
       check "saved project context reaches the next query without reconnecting" ("Updated project guidance" `T.isInfixOf` json latest)
       waiting<-prompt runtime "wait" updated >>= await runtime "context steering wait" ((=="Agent is replying...").status)
       writeFile (root </> "thc.toml") "[editor.agent]\ncontext = 'Steering guidance marker'\n"
-      steered<-send runtime "steer-draft" [] waiting {composerBuffer=newBuffer "direction"} >>= await runtime "context steering completion" (not . agentReplying)
+      steered<-submit runtime SteerSubmit (draftBuffer (newBuffer "direction") waiting) >>= await runtime "context steering completion" (not . agentReplying)
       steeringLog<-logged
       let lastSteer=last [params | entry<-steeringLog,field "method" entry==Just ("_session/steering"::T.Text),Just params<-[field "params" entry::Maybe Value]]
       check "primary steering requests host-owned idle handling" ((field "_meta" lastSteer >>= field "steering" >>= field "idleBehavior")==Just ("promptRequired"::T.Text))
       check "steering receives saved context updates" ("Steering guidance marker" `T.isInfixOf` json lastSteer)
       rejectionWait<-prompt runtime "wait" steered >>= await runtime "rejected context steering wait" ((=="Agent is replying...").status)
       writeFile (root </> "thc.toml") "[editor.agent]\ncontext = 'Retry context marker'\n"
-      pendingSteer<-send runtime "steer-draft" [] rejectionWait {composerBuffer=newBuffer "reject-context"}
-      let childWaiting=(selectConversationView "fixture-child" "Child" pendingSteer) {composerBuffer=newBuffer "child draft",composerSelection=Selection 2 4}
-      let settleHidden d=do
-            next<-tickConversation runtime d
-            (_,answer)<-chatTool runtime next "agent_settings" (object [])
-            settingsResult<-answer
-            if either (const False) ((==Just False).field "replying") settingsResult
-              then pure next else threadDelay 10000 >> settleHidden next
-      hiddenRestored<-timeout 8000000 (settleHidden childWaiting) >>= maybe (error "Hidden primary steering did not settle") pure
-      check "failed primary steering preserves selected child draft" (conversationTarget hiddenRestored=="fixture-child" && contents (composerBuffer hiddenRestored)=="child draft" && composerSelection hiddenRestored==Selection 2 4)
-      rejectedSteer<-send runtime "show" [] hiddenRestored
-      check "switching back restores rejected primary steering draft" (contents (composerBuffer rejectedSteer)=="reject-context")
+      pendingSteer<-submit runtime SteerSubmit (draftBuffer (newBuffer "reject-context") rejectionWait)
+      rejectedSteer<-withEditorFixture "fixture-child" pendingSteer $ \childFixture->do
+        let childWaiting=draftAt (newBuffer "child draft") (Selection 2 4) childFixture
+        let settleHidden d=do
+              next<-tickConversation runtime d
+              (_,answer)<-chatTool runtime next "agent_settings" (object [])
+              settingsResult<-answer
+              if either (const False) ((==Just False).field "replying") settingsResult
+                then pure next else threadDelay 10000 >> settleHidden next
+        hiddenRestored<-timeout 8000000 (settleHidden childWaiting) >>= maybe (error "Hidden primary steering did not settle") pure
+        check "failed primary steering preserves selected child draft" (conversationTarget hiddenRestored=="fixture-child" && contents (composerBuffer hiddenRestored)=="child draft" && composerSelection hiddenRestored==Selection 2 4)
+        restoredPrimary<-send runtime "show" [] hiddenRestored
+        check "switching back restores rejected primary steering draft" (contents (composerBuffer restoredPrimary)=="reject-context")
+        pure restoredPrimary
       afterRejection<-prompt runtime "stream" rejectedSteer >>= done runtime
       retryLog<-logged
       let retryPrompt=last [params | entry<-retryLog,field "method" entry==Just ("session/prompt"::T.Text),Just params<-[field "params" entry::Maybe Value]]
@@ -1189,12 +1276,15 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary remov
       pure ()
     beforeRecovery<-logged
     forM_ editorSessions $ \(ident,providerId,_) -> withEditor ident $ C.withConsoles $ \consoles -> withConversation consoles $ \runtime -> do
+      preparedDraft<-send runtime "show" [] draftBase
+      let savedDraft=draftAt (newBuffer "existing draft") (Selection 4 4) preparedDraft
       let recovered=addReadOnly "Conversation" "Retained conversation after a daemon crash" savedDraft
       idle<-tickConversation runtime recovered
       offered<-send runtime "resume" [] idle
       check "recovered editor selects its own provider resume ID" (resumeId offered==Just providerId)
-      check "reading resume metadata leaves recovered transcript and draft intact"
-        (buffers offered==buffers recovered && composerBuffer offered==composerBuffer recovered)
+      resumedSources<-sameBufferVersions recovered offered
+      resumedDraft<-sameDraftRoot recovered offered
+      check "reading resume metadata leaves recovered transcript and draft intact" (resumedSources && resumedDraft)
     afterRecovery<-logged
     check "recovery never starts a provider or sends a prompt automatically" (afterRecovery==beforeRecovery)
     forM_ editorSessions $ \(ident,providerId,providerRoot) -> withEditor ident $ C.withConsoles $ \consoles -> withConversation consoles $ \runtime -> do
@@ -1244,7 +1334,7 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary remov
       ticket<-AH.sendAgent hub AH.Human child (T.unwords (replicate 90 "child-user")) >>= either (error . T.unpack) pure
       _<-AH.waitAgent hub AH.Human child ticket 2000 >>= either (error . T.unpack) pure
       AH.recordAgentEvent hub child "output" (object ["text" .= (T.unwords (replicate 90 ("child-reply"::T.Text))<>"\n\n```sh\nprintf 'child λ'\n```" :: T.Text)])
-      childView<-tickConversation runtime (selectConversationView (AH.agentIdText child) "Layout child" answered)
+      childView<-openChild runtime child answered >>= tickConversation runtime
       let (primaryId,_)=fromMaybe (error "primary view missing") (conversationDocument "" childView)
           (childId,_)=fromMaybe (error "child view missing") (conversationDocument (AH.agentIdText child) childView)
           baseWindow=fromMaybe (error "child window missing") (activeWindow childView)

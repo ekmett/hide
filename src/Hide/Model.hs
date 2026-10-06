@@ -27,18 +27,18 @@ import Hide.Sidebar
 import Hide.DebuggerSidebarTypes
 import Hide.DownloadsWindowTypes
 import qualified Hide.Plugin.Form as Form
+import qualified Hide.Plugin.Editor as Editor
 import Hide.AgentSidebarTypes
 import Hide.SessionSidebarTypes
-import qualified Hide.AgentHub
 import qualified Hide.Plugin.Tree as Tree
 import Hide.Plugin.Command (CommandRef)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import Data.Maybe (listToMaybe, fromMaybe, isJust)
-import Data.List (find, findIndex, sortOn, mapAccumL, groupBy)
+import Data.List (find, findIndex, sortOn, mapAccumL, groupBy, nub)
 import Data.Char (toLower, isAlphaNum, chr, ord, toUpper, isHexDigit, digitToInt)
 import Text.Read (readMaybe)
-import System.FilePath ((</>), takeDirectory, takeFileName, takeExtension, isAbsolute, equalFilePath, splitDirectories, joinPath, normalise)
+import System.FilePath ((</>), takeDirectory, takeFileName, takeExtension, isAbsolute, splitDirectories, joinPath, normalise)
 import Hide.Browser (Entry(..))
 import Hide.Git (GitReview)
 import Hide.Syntax (Style(..), SourceRow, prepareSourceRow, highlightFor, linkSpans, styleLayoutMetadata)
@@ -115,7 +115,7 @@ data Window = Window
   { windowId :: Int, windowContent :: WindowContent, bounds :: Rect, selection :: Selection
   , scrollRow :: Int, scrollColumn :: Int, restoredBounds :: Maybe Rect
   , windowHexLow :: Bool, windowHexAscii :: Bool
-  , windowNumber :: Int, bufferView :: BufferView, reviewSelection :: Maybe ReviewSelection, reviewSplit :: Int, markdownInteraction :: Maybe MarkdownInteraction, rowsInteraction :: Maybe RowsInteraction, sourceWidthHint :: Maybe SourceWidthHint
+  , windowNumber :: Int, bufferView :: BufferView, reviewSelection :: Maybe ReviewSelection, reviewSplit :: Int, markdownInteraction :: Maybe MarkdownInteraction, rowsInteraction :: Maybe RowsInteraction, sourceWidthHint :: Maybe SourceWidthHint, windowEditorMount :: Maybe Editor.EditorMount
   } deriving (Eq,Show)
 -- Only a thumb estimate, never source identity or proof of EOF. A matching
 -- revision/range retains a discovered extent when scrolling left; every actual
@@ -224,7 +224,7 @@ data PackageBuildTarget = PackageBuildTarget
   , packageBuildName :: !Text } deriving (Eq,Show)
 
 -- | Ordered requests for the host interpreter, produced alongside a new desktop.
-data Effect = PackageDebugAction !PackageBuildTarget !(Either Text FilePath) | AdoptPreparedDebug !PackageBuildTarget | PackageBuildAction !BuildAction !PackageBuildTarget | AdoptPreparedBuild !(Maybe PackageBuildTarget) | DownloadCancelAction !DownloadCancelRequest | SubmitInputForm !Form.FormRef !Form.FormValue !Plugin.MenuOrigin | SubmitChoiceForm !Form.FormRef !Integer !Int !Plugin.MenuOrigin | RetireInputForm !Form.FormRef | SessionSidebarAction !SessionSidebarRequest | DebugSourceAction !DebugSourceRequest | RetirePluginWindow !PluginWindow.WindowRef | DebugSidebarAction !DebugSidebarRequest | AgentSidebarAction !AgentSidebarRequest | ReloadKeyBindings FilePath | InspectKeyBindings (Maybe (Bindings.BindingPlatform,Bindings.BindingContext)) (Maybe (Bindings.Bindings Command)) | FollowLink (Maybe FilePath) Text | FollowTreeLink [Tree.TreeHit] FilePath Text | EnvironmentAction Text [Text] | AutocompleteAction Text [Text] | SaveWideSectionTitles Bool | SaveMacKeySymbols Bool | SaveChatSubmit ChatSubmit | SaveBufferViewDefault BufferView | ProjectRequest ProjectAction | DownloadDocument Int | ReadBrowserClipboard | WriteBrowserClipboard Text | LanguageRequest LanguageAction | RunGit GitAction | ReadMergeBranches | JumpTo FilePath Int Int | ReadPath FilePath | BrowsePath FilePath Text | BrowseDirectories FilePath | ChangeDirectory FilePath | OpenChoice FilePath Text Text | ReadTree FilePath | RefreshRenamedPath FilePath FilePath | RefreshTree FilePath [Entry] | LoadTree TreeRequest Plugin.MenuOrigin | InvokeTree [Tree.TreeHit] CommandRef Plugin.MenuOrigin | ReadHelp | InvokeMenu Plugin.MenuRef Plugin.MenuOrigin (Maybe ContextTarget) | RefreshGit FilePath | ReadGitDiff | AskGitCommit | WriteGitCommit Text | SaveDocument Int (Maybe FilePath) (Maybe Command) | ReviewExternal | ResolveConflict Conflict ConflictAction | ServiceAction Text [Text] | AgentAction Text [Text] | PermissionAction Text [Text] | DebugAction Text [Text] | SetScreenMode Int | Exit deriving (Eq,Show)
+data Effect = SubmitEditor !Editor.EditorMount !Editor.EditorSlot !Plugin.MenuOrigin | RetireEditorMount !Editor.EditorMount | PackageDebugAction !PackageBuildTarget !(Either Text FilePath) | AdoptPreparedDebug !PackageBuildTarget | PackageBuildAction !BuildAction !PackageBuildTarget | AdoptPreparedBuild !(Maybe PackageBuildTarget) | DownloadCancelAction !DownloadCancelRequest | SubmitInputForm !Form.FormRef !Form.FormValue !Plugin.MenuOrigin | SubmitChoiceForm !Form.FormRef !Integer !Int !Plugin.MenuOrigin | RetireInputForm !Form.FormRef | SessionSidebarAction !SessionSidebarRequest | DebugSourceAction !DebugSourceRequest | RetirePluginWindow !PluginWindow.WindowRef | DebugSidebarAction !DebugSidebarRequest | AgentSidebarAction !AgentSidebarRequest | ReloadKeyBindings FilePath | InspectKeyBindings (Maybe (Bindings.BindingPlatform,Bindings.BindingContext)) (Maybe (Bindings.Bindings Command)) | FollowLink (Maybe FilePath) Text | FollowTreeLink [Tree.TreeHit] FilePath Text | EnvironmentAction Text [Text] | AutocompleteAction Text [Text] | SaveWideSectionTitles Bool | SaveMacKeySymbols Bool | SaveChatSubmit ChatSubmit | SaveBufferViewDefault BufferView | ProjectRequest ProjectAction | DownloadDocument Int | ReadBrowserClipboard | WriteBrowserClipboard Text | LanguageRequest LanguageAction | RunGit GitAction | ReadMergeBranches | JumpTo FilePath Int Int | ReadPath FilePath | BrowsePath FilePath Text | BrowseDirectories FilePath | ChangeDirectory FilePath | OpenChoice FilePath Text Text | ReadTree FilePath | RefreshRenamedPath FilePath FilePath | RefreshTree FilePath [Entry] | LoadTree TreeRequest Plugin.MenuOrigin | InvokeTree [Tree.TreeHit] CommandRef Plugin.MenuOrigin | ReadHelp | InvokeMenu Plugin.MenuRef Plugin.MenuOrigin (Maybe ContextTarget) | RefreshGit FilePath | ReadGitDiff | AskGitCommit | WriteGitCommit Text | SaveDocument Int (Maybe FilePath) (Maybe Command) | ReviewExternal | ResolveConflict Conflict ConflictAction | ServiceAction Text [Text] | AgentAction Text [Text] | PermissionAction Text [Text] | DebugAction Text [Text] | SetScreenMode Int | Exit deriving (Eq,Show)
 data Field = Input Text Text Int | SelectedInput Text Text Selection | ComboBox Text [Text] Int (Maybe Int) | CheckBox Text Bool | Radio Text [Text] Int | ListBox Text [Text] Int | FileList [Entry] Int
   | ReadOnly Text Text
   | TextArea Text Bool Buffer Selection Int Int deriving (Eq,Show)
@@ -271,9 +271,21 @@ data ChatQuestion = ChatQuestion
 -- selected; only the shared conversation window and composer change target.
 data ConversationView = ConversationView
   { conversationBufferId :: Int, conversationName :: Text
-  , conversationDraft :: Buffer, conversationDraftSelection :: Selection
+  , conversationDraftRef :: Editor.DraftRef, conversationEditor :: Maybe Editor.EditorMount, conversationEditorFrame :: Maybe Int
   , conversationScroll :: (Int,Int), conversationReplySelection :: Selection
   } deriving (Eq,Show)
+
+-- One editable state per opaque widget, including hidden conversation targets.
+-- The last mount is an ownership receipt retained after frame close; it is not
+-- itself proof of current input admission. Callable bindings live in IO owners.
+data EditorDraft = EditorDraft
+  { editorDraftBuffer :: Buffer, editorDraftSelection :: Selection
+  , editorDraftFocused :: Bool, editorDraftMount :: Maybe Editor.EditorMount
+  } deriving (Eq,Show)
+
+-- Shared editing selects the actual owner; temporary question/hint projections
+-- never copy their Buffer into another Desktop field or allocate a fake draft.
+data EditingInput = MountedInput | HintInput | QuestionInput deriving (Eq,Show)
 
 -- | Session UI state and references to immutable document payloads.
 -- This record is not a cheap equality key; use the dedicated rendering projection.
@@ -290,7 +302,7 @@ data Desktop = Desktop
   , dragOriginal :: Maybe [(Int,Rect,Maybe Rect)]
   , branchAdded :: Int, branchDeleted :: Int, branchRoot :: Maybe FilePath, contextKind :: ContextKind
   , messagesNumber :: Maybe Int
-  , composerBuffer :: Buffer, composerSelection :: Selection, composerFocused :: Bool, agentSteering :: Bool, agentReplying :: Bool, agentQueued :: Int
+  , editorDrafts :: M.Map Editor.DraftRef EditorDraft, editingInput :: EditingInput, agentSteering :: Bool, agentReplying :: Bool, agentQueued :: Int
   , blinkCursor :: Bool, crtFilter :: Bool, pixelateUnicode :: Bool, materialIcons :: Bool, defaultDirectory :: Maybe FilePath, statusHover :: Maybe Int, heldModifiers :: [V.Modifier], problemsPreferredHeight :: Int, agentContextUsage :: Maybe (Integer,Integer), agentSettings :: [AgentSetting], browserFrontend :: Bool, appearance :: Appearance, systemDark :: Bool, buildDiagnostics :: [Diagnostic]
   , chatQuestion :: Maybe ChatQuestion, chatActions :: [(Int,Int,Text,[Text])], chatInputOffset :: Maybe Int
   , childAgentSettings :: [AgentSetting], childAgentSteering :: Bool, childAgentContextUsage :: Maybe (Integer,Integer)
@@ -541,10 +553,14 @@ statusHintsRaw d
   | Just v<-inlinePreview d,inlineMatches d v = [key " Tab Accept" (V.KChar '\t') [],key "  Alt+Right Word" V.KRight [V.MAlt],key (if nativeMac d then "  Cmd+[ Previous" else "  Alt+[ Previous") (V.KChar '[') [V.MAlt],key (if nativeMac d then "  Cmd+] Next" else "  Alt+] Next") (V.KChar ']') [V.MAlt],key "  Esc Dismiss" V.KEsc []]
   | activeAutocomplete d = [key " Enter Send hint" V.KEnter [],key "  Shift+Enter Newline" V.KEnter [V.MShift],key "  Tab Transcript / hint" (V.KChar '\t') []]
   | questionActive d = [key " Enter Answer" V.KEnter [],key "  Tab Choices" (V.KChar '\t') [],key "  Esc Cancel" V.KEsc []]
-  | composerActive d, composerInCode d =
+  | composerActive d, activeConversation d, composerInCode d =
       [key " Enter Newline" V.KEnter []] ++
       [("  "<>submitHint action,Just (Left (SubmitChat action))) | action<-[QuerySubmit,SteerSubmit]] ++
       [key "  Esc Cancel" V.KEsc [] | agentReplying d]
+  | composerActive d,not (activeConversation d),Just mount<-activeEditorMount d =
+      [key (" Enter "<>Editor.editorDefaultLabel (Editor.mountSpec mount)) V.KEnter [],
+       key ("  Ctrl+Enter "<>Editor.editorAlternateLabel (Editor.mountSpec mount)) V.KEnter [V.MCtrl],
+       key "  Shift+Enter Newline" V.KEnter [V.MShift]]
   | activeConversation d =
       [key (" Enter "<>submitLabel False) V.KEnter [],key ("  Ctrl+Enter "<>submitLabel True) V.KEnter [V.MCtrl],
        key "  Shift+Enter Newline" V.KEnter [V.MShift]] ++ [key "  Esc Cancel" V.KEsc [] | agentReplying d]
@@ -615,7 +631,7 @@ commandEnabled :: Desktop -> Command -> Bool
 commandEnabled d cmd | cmd `elem` [DialogFocusNext,DialogFocusPrevious,DialogAccept,DialogCancel] = dialogCommandAllowed cmd d
 commandEnabled d cmd | dialogCommandAllowed cmd d = True
 commandEnabled d cmd | activeMarkdown d, markdownSourceCommand cmd = False
-commandEnabled d cmd | activePluginWindow d/=Nothing, sourceOnlyCommand cmd = False
+commandEnabled d cmd | activePluginWindow d/=Nothing, sourceOnlyCommand cmd,not (composerActive d && cmd `elem` [Undo,Redo,Cut,Paste]) = False
 commandEnabled d Download = browserFrontend d && maybe False ((==Nothing) . documentLabel) (activeDocument d)
 commandEnabled d GoToMessage | menusActive d = maybe False (commandEnabled d . contributionCommand d) (find ((=="hide.messages.go-to") . Plugin.menuName . Plugin.menuReference) (contributedMenus d))
 commandEnabled d (DebugCommand "breakpoint") | menusActive d = maybe False (commandEnabled d . contributionCommand d) (find ((=="hide.debug.toggle-breakpoint") . Plugin.menuName . Plugin.menuReference) (contributedMenus d))
@@ -689,7 +705,7 @@ menuRect d i = Rect (min x (max 0 (sw-w))) 1 w (length (menuItemsFor d i)+2)
         w = min sw (maximum [keyLabelWidth t + keyLabelWidth (menuShortcut d entry) + 5 + (case command of SetBufferView _ -> 4; _ -> 0) | entry@(MenuItem t _ command) <- menuItemsFor d i])
 
 initialDesktop :: (Int,Int) -> Desktop
-initialDesktop size = Desktop size [] M.empty M.empty S.empty 1 Nothing Nothing Nothing "" Nothing False Nothing "" Nothing "" Nothing "" False Nothing Nothing Nothing "" Nothing Nothing Nothing [] False 0 0 False Nothing 0 0 Nothing SourceContext Nothing (newBuffer "") (Selection 0 0) True False False 0 True False False False Nothing Nothing [] 8 Nothing [] False SystemMode True [] Nothing [] Nothing [] False Nothing "" M.empty False (0,Nothing) [] Nothing CurrentView QuerySubmit Nothing 0 M.empty Nothing False (newBuffer "") (Selection 0 0) True False M.empty [] [] False Nothing False M.empty 0
+initialDesktop size = Desktop size [] M.empty M.empty S.empty 1 Nothing Nothing Nothing "" Nothing False Nothing "" Nothing "" Nothing "" False Nothing Nothing Nothing "" Nothing Nothing Nothing [] False 0 0 False Nothing 0 0 Nothing SourceContext Nothing M.empty MountedInput False False 0 True False False False Nothing Nothing [] 8 Nothing [] False SystemMode True [] Nothing [] Nothing [] False Nothing "" M.empty False (0,Nothing) [] Nothing CurrentView QuerySubmit Nothing 0 M.empty Nothing False (newBuffer "") (Selection 0 0) True False M.empty [] [] False Nothing False M.empty 0
 
 activeWindow :: Desktop -> Maybe Window
 activeWindow d = listToMaybe (filter (windowVisible d) (windows d))
@@ -712,7 +728,7 @@ addPluginWindow reference prepared d=d {windows=w:windows d,pluginWindows=M.inse
     i=nextId d
     (sw,sh)=screenSize d
     w=Window i (PluginContent reference) (fitWindow d (Rect 0 1 sw (sh-2))) (Selection 0 0) 0 0 Nothing False False
-      (nextWindowNumber d) CurrentView Nothing 50 Nothing (initialRowsInteraction prepared) Nothing
+      (nextWindowNumber d) CurrentView Nothing 50 Nothing (initialRowsInteraction prepared) Nothing Nothing
 
 -- | Current Details text for rows, or the original plain/styled view. This reads
 -- only the selected NodeId and the prepared ordinal index, never content.
@@ -734,17 +750,21 @@ initialRowsInteraction prepared=case PluginWindow.preparedWindowRows prepared of
   _->Nothing
 
 -- | Shared fixed list/Details geometry. Both painting and pointer input use it.
-rowsWindowRects :: Window -> (Rect,Rect)
-rowsWindowRects w=(Rect (x+1) (y+1) inner listHeight,Rect (x+1) (y+listHeight+2) inner (max 0 (bodyHeight-listHeight-1)))
+rowsWindowRects :: Desktop -> Window -> (Rect,Rect)
+rowsWindowRects d w=(Rect (x+1) (y+1) inner listHeight,Rect (x+1) (y+listHeight+2) inner (max 0 (bodyHeight-listHeight-1)))
   where Rect x y ww hh=bounds w
         inner=max 0 (ww-2)
-        bodyHeight=max 0 (hh-2)
+        bodyHeight=pluginBodyRows d w
         listHeight=min 8 (max 1 (bodyHeight `div` 3))
 
-pluginTextRect :: Window -> Rect
-pluginTextRect w=case rowsInteraction w of
-  Just _->snd (rowsWindowRects w)
-  _->let Rect x y ww hh=bounds w in Rect (x+1) (y+1) (max 0 (ww-2)) (max 0 (hh-2))
+pluginTextRect :: Desktop -> Window -> Rect
+pluginTextRect d w=case rowsInteraction w of
+  Just _->snd (rowsWindowRects d w)
+  _->let Rect x y ww _=bounds w in Rect (x+1) (y+1) (max 0 (ww-2)) (pluginBodyRows d w)
+
+-- The same reserved body extent feeds paint, hit maps and scrollbar limits.
+pluginBodyRows :: Desktop -> Window -> Int
+pluginBodyRows d w=max 0 (height (bounds w)-2-if windowHasEditor d w then height (composerRect d w)+1 else 0)
 
 windowRows :: Desktop -> Window -> Maybe (Vec.Vector PluginWindow.WindowRow,M.Map Tree.NodeId Int,Tree.NodeId,Bool)
 windowRows d w=do
@@ -754,8 +774,8 @@ windowRows d w=do
   RowsInteraction ident details<-rowsInteraction w
   pure (rows,index,ident,details)
 
-rowsListOffset :: Window -> Int -> Int
-rowsListOffset w chosen=max 0 (chosen-height (fst (rowsWindowRects w))+1)
+rowsListOffset :: Desktop -> Window -> Int -> Int
+rowsListOffset d w chosen=max 0 (chosen-height (fst (rowsWindowRects d w))+1)
 
 selectWindowRow :: Int -> Desktop -> Desktop
 selectWindowRow requested d=case activeWindow d of
@@ -805,7 +825,7 @@ addDocument file b d = d { windows = w : windows d, buffers = M.insert i (newDoc
     i = nextId d
     offset = length (windows d) `mod` 5
     (sw,sh) = screenSize d
-    w = Window i (SourceContent i) (fitWindow d (Rect offset (1+offset) (sw-offset) (sh-2-offset))) (Selection 0 0) 0 0 Nothing False False (nextWindowNumber d) (if byteMode b || (defaultBufferView d==MarkdownView && not (markdownDocument (newDocument b file))) then CurrentView else defaultBufferView d) Nothing 50 Nothing Nothing Nothing
+    w = Window i (SourceContent i) (fitWindow d (Rect offset (1+offset) (sw-offset) (sh-2-offset))) (Selection 0 0) 0 0 Nothing False False (nextWindowNumber d) (if byteMode b || (defaultBufferView d==MarkdownView && not (markdownDocument (newDocument b file))) then CurrentView else defaultBufferView d) Nothing 50 Nothing Nothing Nothing Nothing
 
 nextWindowNumber :: Desktop -> Int
 nextWindowNumber d = choose 1
@@ -1144,7 +1164,7 @@ runCommand cmd source | sourceKeyCommand cmd, not (commandEnabled source cmd) =
       maybe False ((/=Nothing) . documentLabel) (activeDocument source)
     then source {status="This window is read-only."} else source,[])
 runCommand cmd source | dialog source==Nothing, activeMarkdown source, markdownSourceCommand cmd = (source {status="Markdown view is read-only. Switch to Current to edit."},[])
-runCommand cmd source | dialog source==Nothing, Just _<-activePluginWindow source, sourceOnlyCommand cmd = (source {status="This plugin window is read-only."},[])
+runCommand cmd source | dialog source==Nothing, Just _<-activePluginWindow source, sourceOnlyCommand cmd,not (composerActive source && cmd `elem` [Undo,Redo,Cut,Paste]) = (source {status="This plugin window is read-only."},[])
 runCommand cmd source | browserFrontend source, cmd `elem` [Copy,Cut,CopyAllMessages,CopyLocation] =
   let (next,requests)=runCommand cmd source {browserFrontend=False}
   in (next {browserFrontend=True},requests++[WriteBrowserClipboard (clipboard next)])
@@ -1165,7 +1185,7 @@ runCommand SelectAll source | dialog source==Nothing,activeMarkdown source,maybe
   (modifyActive (modifyDisplayedWindow (\w->w {selection=Selection 0 (maybe 0 (\(_,text,_)->contentLength text) (windowMarkdown source w))})) source,[])
 runCommand Copy source | dialog source==Nothing,Just view<-activePluginWindow source, Just w<-activeWindow source =
   let (a,b)=ordered (selection w)
-  in (copyClipboard False (contentSlice (PluginWindow.preparedWindowText view) a b) source {menu=Nothing,contextMenu=Nothing},[])
+  in (copyClipboard False (contentSlice (PluginWindow.preparedWindowText view) a (b-a)) source {menu=Nothing,contextMenu=Nothing},[])
 runCommand SelectAll source | dialog source==Nothing,Just view<-activePluginWindow source =
   (modifyActive (\w->w {selection=Selection 0 (contentLength (PluginWindow.preparedWindowText view))}) source,[])
 runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source {menu = Nothing, contextMenu=Nothing, buttonHover=Nothing, buttonPressed=Nothing, prefix = Nothing, drag = Nothing,dragOriginal=Nothing})
@@ -1192,7 +1212,7 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
     go (MessagesPage delta) d = (chooseProblem (problemsSelected d+delta*max 1 (problemsHeight d-2)) d,[])
     go (MessagesMove delta) d = (chooseProblem (problemsSelected d+delta) d,[])
     go FocusSource d = (d {problemsFocused=False,sideTree=fmap (\tree->tree {treeFocused=False}) (sideTree d)},[])
-    go (SubmitChat action) d = (d {composerFocused=True},[AgentAction (if action==QuerySubmit then "send-draft" else "steer-draft") []])
+    go (SubmitChat action) d = submitEditorSlot (if action==QuerySubmit then Editor.DefaultEditor else Editor.AlternateEditor) (setComposerInput (composerBuffer d) (composerSelection d) True d)
     go CopyLocation d = case (activeWindow d,activeDocument d) of
       (Just w,Just doc) | Just file<-documentFile doc ->
         let (r,col)=bufferLineColumn (documentBuffer doc) (caret (selection w))
@@ -1229,11 +1249,11 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
     go EnvironmentOptions d = (d,[EnvironmentAction "show" []])
     go AgentGuidance d = (d,[AgentAction "context" []])
     go Conversation d = case find (\w -> maybe False ((==Just "Conversation").documentLabel) (windowDocument (buffers d) w)) (windows d) of
-      Just w -> (focusWindow (windowId w) d {composerFocused=True},[AgentAction "focus" []])
+      Just w -> let focused=focusWindow (windowId w) d in (setComposerInput (composerBuffer focused) (composerSelection focused) True focused,[AgentAction "focus" []])
       Nothing -> (d,[AgentAction "show" []])
     go AgentCancel d = (d,[AgentAction "cancel" []])
     go AgentResume d = (d,[AgentAction "resume" []])
-    go AgentNew d = (selectConversationView "" "Primary" d,[AgentAction "new" []])
+    go AgentNew d = (d,[AgentAction "new" []])
     go (AgentChoose category) d = (openAgentChoices category d,[])
     go (AgentSet ident value) d = (d,[AgentAction "set-config" [ident,value]])
     go AgentCopyRaw d = (d,[AgentAction "copy" []])
@@ -1248,9 +1268,10 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
       Just (bid,_) -> let focused = maybe d (\w -> focusWindow (windowId w) d) (find ((==Just bid) . bufferId) (windows d))
                      in confirm Quit focused
     go Close d = case (activeWindow d, activeDocument d) of
-      (Just w,Nothing) | PluginContent reference<-windowContent w ->(closeActive d,[RetirePluginWindow reference])
+      (Just w,Nothing) | PluginContent reference<-windowContent w ->(closeActive d,RetirePluginWindow reference:closingEditors d w)
       (Just w, Just doc) | dirty (documentBuffer doc) && length (filter ((==bufferId w) . bufferId) (windows d)) == 1 -> confirm Close d
-      _ -> (closeActive d,[])
+      (Just w,_) -> (closeActive d,closingEditors d w)
+      _ -> (d,[])
     go command@(ExecuteShellBlock bid (start,end,dialect,raw)) d
       | commandEnabled d command = (d,[ServiceAction "execute-shell-block" [T.pack (show bid),T.pack (show start),T.pack (show end),dialect,raw]])
       | otherwise = (d {status="The shell code block is no longer current."},[])
@@ -1394,8 +1415,16 @@ closeActive d = case activeWindow d of
        Just bid | not (any ((==Just bid) . bufferId) ws), not (maybe False ((==Just "Conversation").documentLabel) (windowDocument (buffers d) w)) -> M.delete bid (buffers d)
        _ -> buffers d,
      retiredPluginWindows=case windowContent w of PluginContent reference->S.delete reference (retiredPluginWindows d); SourceContent _->retiredPluginWindows d,
-     pluginWindows=case windowContent w of PluginContent reference->M.delete reference (pluginWindows d); SourceContent _->pluginWindows d})
+     pluginWindows=case windowContent w of PluginContent reference->M.delete reference (pluginWindows d); SourceContent _->pluginWindows d,
+     conversationViews=M.map (\view->if conversationEditorFrame view==Just (windowId w)
+       then view {conversationEditor=Nothing,conversationEditorFrame=Nothing} else view) (conversationViews d)})
     where ws=filter ((/=windowId w).windowId) (windows d)
+
+-- Hidden target mounts share this host frame and close with it. Draft state
+-- remains in its owning map; reopening obtains fresh frame attachment identity.
+closingEditors :: Desktop -> Window -> [Effect]
+closingEditors d w=map RetireEditorMount (nub (maybe [] pure (windowEditorMount w)++
+  [mount | view<-M.elems (conversationViews d),conversationEditorFrame view==Just (windowId w),Just mount<-[conversationEditor view]]))
 
 tileWindows :: Bool -> Desktop -> Desktop
 tileWindows vertical d
@@ -1411,7 +1440,7 @@ splitWindow vertical d = case activeWindow d of
   Nothing -> (d,[])
   Just w | windowPinned d w -> (d {status="Unpin the terminal before splitting."},[])
   Just _ | (if vertical then (fst (screenSize d)-treeWidthOf d) `div` (length (floatingWindows d)+1) < 16 else (snd (screenSize d)-2-problemsHeight d) `div` (length (floatingWindows d)+1) < 5) -> (d {status="Not enough room to split; enlarge the terminal."},[])
-  Just w -> (tileWindows vertical d {windows = w {windowId = nextId d,windowNumber=nextWindowNumber d} : windows d, nextId = nextId d+1},[])
+  Just w -> (tileWindows vertical d {windows = w {windowId = nextId d,windowNumber=nextWindowNumber d,windowEditorMount=Nothing} : windows d, nextId = nextId d+1},[])
 
 findText :: Text -> Desktop -> Desktop
 findText needle d | T.null needle = d {status = "Enter search text first."}
@@ -1764,7 +1793,7 @@ handleEventCore :: V.Event -> Desktop -> (Desktop,[Effect])
 handleEventCore (V.EvMouseDown x y V.BLeft _) d | drag d==Nothing, y==snd (screenSize d)-1 =
   case find (\(rect,_,_)->inside rect x y) (statusItemRects d) of
     Just (_,_,Left cmd) -> runCommand cmd d
-    Just (_,_,Right event) -> handleEvent event (if activeConversation d then d {composerFocused=True} else d)
+    Just (_,_,Right event) -> handleEvent event (if activeConversation d then (setComposerInput (composerBuffer d) (composerSelection d) True d) else d)
     Nothing -> (d,[])
 handleEventCore event d = Bifunctor.first (layoutComposer d . clampReviewWindows . clampHexScroll d) $ dispatchEvent event (case event of
   V.EvKey{} -> d {hoverTarget=Nothing,typeHint="",buttonHover=Nothing,buttonPressed=Nothing,statusHover=Nothing}
@@ -1818,7 +1847,7 @@ dispatchEvent (V.EvKey (V.KFun key) mods) d
   | Just action <- lookup (key,mods) [((4,[]),"continue"),((7,[]),"stepIn"),((8,[]),"next"),((7,[V.MCtrl]),"stepOut"),((8,[V.MCtrl]),"breakpoint")] = runCommand (DebugCommand action) d
 dispatchEvent ev d | activeAutocomplete d, Just result<-autocompleteEvent ev d = result
 dispatchEvent ev d | questionActive d, Just result<-questionEvent ev d = result
-dispatchEvent ev d | activeConversation d, Just result<-composerEvent ev d = result
+dispatchEvent ev d | activeEditorMount d/=Nothing,maybe False (windowFocused d) (activeWindow d),Just result<-composerEvent ev d = result
 dispatchEvent ev d | Just ident<-activeTerminal d,Just text<-terminalInput ev = (d,[ServiceAction "terminal-input" [ident,text]])
 dispatchEvent (V.EvMouseUp x y button) d | Just (FollowingLink _ a b origin target)<-drag d,
   button==Nothing || button==Just V.BLeft =
@@ -1836,6 +1865,66 @@ dispatchEvent (V.EvKey key mods) d | Just _<-activePluginWindow d = (pluginKey k
 dispatchEvent (V.EvKey key mods) d = keyEvent key mods d
 dispatchEvent _ d = (d,[])
 
+-- | Exact attached editor for the currently focused frame. Metadata and draft
+-- lookup are shared by input, rendering and requested-paste capture.
+activeEditorMount :: Desktop -> Maybe Editor.EditorMount
+activeEditorMount d=do
+  w<-activeWindow d
+  mount<-windowEditorMount w
+  draft<-windowEditorDraft d w
+  if editorDraftMount draft==Just mount then Just mount else Nothing
+
+-- | Per-frame input state. Inactive windows never borrow another frame's draft.
+windowEditorDraft :: Desktop -> Window -> Maybe EditorDraft
+windowEditorDraft d w=do
+  mount<-windowEditorMount w
+  draft<-M.lookup (Editor.mountDraft mount) (editorDrafts d)
+  if editorDraftMount draft==Just mount then Just draft else Nothing
+
+windowHasEditor :: Desktop -> Window -> Bool
+windowHasEditor d w=maybe False (const True) (windowEditorDraft d w)
+
+windowEditorCode :: Window -> Bool
+windowEditorCode=maybe False (Editor.editorCodeInput . Editor.mountSpec) . windowEditorMount
+
+composerDraftRef :: Desktop -> Maybe Editor.DraftRef
+composerDraftRef d=case activeEditorMount d of
+  Just mount->Just (Editor.mountDraft mount)
+  Nothing->conversationDraftRef <$> M.lookup (conversationTarget d) (conversationViews d)
+
+-- These selectors read one actual input owner. An unmounted initial Desktop
+-- has no editable draft; its empty display value is not a retained input owner.
+composerBuffer :: Desktop -> Buffer
+composerBuffer d=case editingInput d of
+  HintInput->autocompleteDraft d
+  QuestionInput->maybe emptyEditorBuffer questionBuffer (chatQuestion d)
+  MountedInput->maybe emptyEditorBuffer editorDraftBuffer (composerDraftRef d >>= (`M.lookup` editorDrafts d))
+
+emptyEditorBuffer :: Buffer
+emptyEditorBuffer=newBuffer ""
+
+composerSelection :: Desktop -> Selection
+composerSelection d=case editingInput d of
+  HintInput->autocompleteSelection d
+  QuestionInput->maybe (Selection 0 0) questionSelection (chatQuestion d)
+  MountedInput->maybe (Selection 0 0) editorDraftSelection (composerDraftRef d >>= (`M.lookup` editorDrafts d))
+
+composerFocused :: Desktop -> Bool
+composerFocused d=case editingInput d of
+  HintInput->autocompleteFocused d
+  QuestionInput->maybe False questionFocused (chatQuestion d)
+  MountedInput->maybe False editorDraftFocused (composerDraftRef d >>= (`M.lookup` editorDrafts d))
+
+-- | Pure update of the selected real input owner. Missing mounts never create
+-- identities or input state. Argument evaluation stays as lazy as ordinary edits.
+setComposerInput :: Buffer -> Selection -> Bool -> Desktop -> Desktop
+setComposerInput text selected focused d=case editingInput d of
+  HintInput->d {autocompleteDraft=text,autocompleteSelection=selected,autocompleteFocused=focused}
+  QuestionInput->d {chatQuestion=fmap (\q->q {questionBuffer=text,questionSelection=selected,questionFocused=focused}) (chatQuestion d)}
+  MountedInput->case composerDraftRef d of
+    Nothing->d
+    Just ref->d {editorDrafts=M.adjust (\draft->draft {editorDraftBuffer=text,editorDraftSelection=selected,editorDraftFocused=focused}) ref (editorDrafts d)}
+
 conversationDocument :: Text -> Desktop -> Maybe (Int,Document)
 conversationDocument target d = case M.lookup target (conversationViews d) of
   Just view -> (conversationBufferId view,) <$> M.lookup (conversationBufferId view) (buffers d)
@@ -1843,22 +1932,22 @@ conversationDocument target d = case M.lookup target (conversationViews d) of
           | otherwise -> Nothing
 
 rememberConversationView :: Desktop -> Desktop
-rememberConversationView d = case conversationDocument (conversationTarget d) d of
-  Nothing -> d
-  Just (bid,_) ->
-    let old=M.lookup (conversationTarget d) (conversationViews d)
-        win=find ((==Just bid) . bufferId) (windows d)
-        view=ConversationView bid (maybe "Primary" conversationName old) (composerBuffer d) (composerSelection d)
-          (maybe (maybe (0,0) conversationScroll old) (\w->(scrollRow w,scrollColumn w)) win)
-          (maybe (maybe (Selection 0 0) conversationReplySelection old) selection win)
+rememberConversationView d = case (M.lookup (conversationTarget d) (conversationViews d),conversationDocument (conversationTarget d) d) of
+  (Just old,Just (bid,_))->
+    let win=find ((==Just bid) . bufferId) (windows d)
+        view=old {conversationScroll=maybe (conversationScroll old) (\w->(scrollRow w,scrollColumn w)) win,
+          conversationReplySelection=maybe (conversationReplySelection old) selection win}
     in d {conversationViews=M.insert (conversationTarget d) view (conversationViews d)}
+  _->d
 
 addConversationDocument :: Desktop -> Desktop
 addConversationDocument d=let added=addDocument Nothing (newBuffer "") d in
   (modifyActive (\w -> w {bufferView=CurrentView,reviewSelection=Nothing}) added) {buffers=M.adjust (\doc->doc {documentLabel=Just "Conversation",documentCursorVisible=False}) (nextId d) (buffers added)}
 
 selectConversationView :: Text -> Text -> Desktop -> Desktop
-selectConversationView target name original =
+selectConversationView target name original
+  | not (M.member target (conversationViews original))=original
+  | otherwise=
   let saved=rememberConversationView original
       existingWindow=find (\w->maybe False ((==Just "Conversation").documentLabel) (windowDocument (buffers saved) w)) (windows saved)
       (bid,prepared0)=case conversationDocument target saved of
@@ -1872,20 +1961,20 @@ selectConversationView target name original =
             [] -> []}
         _ -> prepared0
       old=M.lookup target (conversationViews prepared)
-      view=maybe (ConversationView bid name (newBuffer "") (Selection 0 0) (0,0) (Selection 0 0)) (\v->v {conversationName=name}) old
-      adjusted w=w {windowContent=SourceContent bid,scrollRow=fst (conversationScroll view),scrollColumn=snd (conversationScroll view),selection=conversationReplySelection view}
+      view=(fromMaybe (error "Missing prepared conversation editor") old) {conversationName=name}
+      adjusted w=w {windowContent=SourceContent bid,windowEditorMount=conversationEditor view,scrollRow=fst (conversationScroll view),scrollColumn=snd (conversationScroll view),selection=conversationReplySelection view}
       oldWindows=case existingWindow of
         Just _ -> windows saved
         Nothing -> windows prepared
-      views=map (\w->if maybe False ((==Just "Conversation").documentLabel) (windowDocument (buffers prepared) w) then adjusted w else w) oldWindows
-      result=prepared {windows=views,childAgentSettings=[],childAgentSteering=False,childAgentContextUsage=Nothing,conversationTarget=target,conversationViews=M.insert target view (conversationViews prepared),
-        composerBuffer=conversationDraft view,composerSelection=conversationDraftSelection view,composerFocused=True,
+      views=map (\w->if maybe False ((==windowId w).windowId) existingWindow || maybe True (const False) existingWindow && bufferId w==Just bid then adjusted w else w) oldWindows
+      result=prepared {windows=views, childAgentSettings=[], childAgentSteering=False, childAgentContextUsage=Nothing,
+        conversationTarget=target,conversationViews=M.insert target view {conversationEditorFrame=windowId <$> find ((==Just bid).bufferId) views} (conversationViews prepared),
+        editorDrafts=M.adjust (\draft->draft {editorDraftFocused=True}) (conversationDraftRef view) (editorDrafts prepared),
         chatActions=[],chatInputOffset=Nothing,contextMenu=Nothing,menu=Nothing}
   in maybe result (\w->focusWindow (windowId w) result) (find ((==Just bid) . bufferId) views)
 
 conversationHasDraft :: Desktop -> Bool
-conversationHasDraft d=not (T.null (contents (composerBuffer d))) ||
-  any (\(target,view)->target/=conversationTarget d && not (T.null (contents (conversationDraft view)))) (M.toList (conversationViews d))
+conversationHasDraft=any ((>0) . bufferLength . editorDraftBuffer) . M.elems . editorDrafts
 
 activeConversation :: Desktop -> Bool
 activeConversation d = maybe False (windowFocused d) (activeWindow d) && maybe False ((==Just "Conversation").documentLabel) (activeDocument d)
@@ -1905,10 +1994,10 @@ conversationSelection d = case (activeWindow d,activeDocument d) of
   _ -> ""
 
 clearReplySelection :: Desktop -> Desktop
-clearReplySelection d = if activeConversation d then modifyActive (\w -> w {selection=Selection 0 0}) d else d
+clearReplySelection d = if activeEditorMount d/=Nothing then modifyActive (\w -> w {selection=Selection 0 0}) d else d
 
 composerActive :: Desktop -> Bool
-composerActive d = activeConversation d && composerFocused d && not (questionActive d)
+composerActive d = activeEditorMount d/=Nothing && maybe False (windowFocused d) (activeWindow d) && composerFocused d && not (questionActive d)
 
 -- Preserve the last visible reply when the draft grows; browsing older replies
 -- keeps its position. Every viewport calculation uses the same draft height.
@@ -1916,7 +2005,7 @@ layoutComposer :: Desktop -> Desktop -> Desktop
 layoutComposer before after = after {windows=map adjust (windows after)}
   where
     adjust w | Just doc<-windowDocument (buffers after) w,
-               let reserved state | documentLabel doc==Just "Conversation" = height (composerRect state w)
+               let reserved state | windowHasEditor state w = height (composerRect state w)
                                   | autocompletePane state w = height (autocompleteComposerRect state w)
                                   | otherwise = 0,
                reserved before/=reserved after =
@@ -1929,9 +2018,9 @@ composerRect :: Desktop -> Window -> Rect
 composerRect d w = Rect (x+ww-4-columns) (y+hh-1-rows) columns rows
   where
     Rect x y ww hh=bounds w
-    draft=composerBuffer d
+    draft=maybe emptyEditorBuffer editorDraftBuffer (windowEditorDraft d w)
     rows=min (min 12 (bufferLineCount draft)) (max 0 (hh-6))
-    columns=draftColumns True (max 0 (ww-6)) draft
+    columns=draftColumns (windowEditorCode w) (max 0 (ww-6)) draft
 
 -- Measure only up to the window cap. One measured seek streams borrowed rows;
 -- once a row fills the bubble, neither its suffix nor later rows are needed.
@@ -1948,34 +2037,52 @@ draftColumns code limit b
       let start=if code && sourceLineLength line>=4 && sourceLineSlice line 0 4=="    " then 4 else 0
       in go (max widest (sourceLineSuffixWidth line start bound)) rest
 
+-- The transcript adapter chooses Query/Steer; generic editors use their fixed
+-- default/alternate slots. Labels never select a command registration.
+composerCodeInput :: Desktop -> Bool
+composerCodeInput d=editingInput d==MountedInput && maybe False (Editor.editorCodeInput . Editor.mountSpec) (activeEditorMount d)
+
 composerSubmit :: [V.Modifier] -> Desktop -> (Desktop,[Effect])
 composerSubmit mods d
   | V.MShift `elem` mods || composerInCode d && V.MCtrl `notElem` mods = (composerInsert (if composerInCode d then "\n    " else "\n") d,[])
-  | otherwise = (d,[AgentAction (if composerQuery (V.MCtrl `elem` mods) d then "send-draft" else "steer-draft") []])
+  | otherwise=submitEditorSlot slot d
+  where slot | activeConversation d=if composerQuery (V.MCtrl `elem` mods) d then Editor.DefaultEditor else Editor.AlternateEditor
+             | V.MCtrl `elem` mods=Editor.AlternateEditor
+             | otherwise=Editor.DefaultEditor
+
+submitEditorSlot :: Editor.EditorSlot -> Desktop -> (Desktop,[Effect])
+submitEditorSlot slot d=case activeEditorMount d of
+  Just mount->(d,[SubmitEditor mount slot Plugin.HumanMenu])
+  Nothing->(d,[])
 
 composerQuery :: Bool -> Desktop -> Bool
 composerQuery opposite d=(chatSubmit d==QuerySubmit)/=opposite
 
 windowContentRows :: Desktop -> Document -> Window -> Int
-windowContentRows d doc w = max 0 (height (bounds w)-2-reserved)
-  where reserved | documentLabel doc==Just "Conversation" = height (composerRect d w)+1
+windowContentRows d _ w = max 0 (height (bounds w)-2-reserved)
+  where reserved | windowHasEditor d w = height (composerRect d w)+1
                  | autocompletePane d w = height (autocompleteComposerRect d w)+1
                  | otherwise = 0
 
 composerScroll :: Desktop -> Window -> (Int,Int)
 composerScroll d w = (max 0 (r-height rect+1),max 0 (displayColumn line (max 0 (c-marker))-width rect+1))
-  where b=composerBuffer d; (r,c)=bufferLineColumn b (caret (composerSelection d)); (marker,line)=composerLine b r; rect=composerRect d w
+  where draft=windowEditorDraft d w
+        b=maybe emptyEditorBuffer editorDraftBuffer draft
+        selected=maybe (Selection 0 0) editorDraftSelection draft
+        (r,c)=bufferLineColumn b (caret selected)
+        (marker,line)=if windowEditorCode w then composerLine b r else (0,bufferLineAt b r)
+        rect=composerRect d w
 
 composerClick :: Int -> Int -> [V.Modifier] -> Window -> Desktop -> Desktop
-composerClick x y mods w d = clearReplySelection d {chatQuestion=fmap (\q->q {questionFocused=False}) (chatQuestion d),composerFocused=True,composerSelection=Selection (if V.MShift `elem` mods then anchor (composerSelection d) else p) p}
+composerClick x y mods w d = clearReplySelection (setComposerInput (composerBuffer d) (Selection (if V.MShift `elem` mods then anchor (composerSelection d) else p) p) (True) (d {chatQuestion=fmap (\q->q {questionFocused=False}) (chatQuestion d)}))
   where
     Rect l t _ _=composerRect d w; (sr,sc)=composerScroll d w; b=composerBuffer d
     r=min (bufferLineCount b-1) (max 0 (y-t+sr))
     p=bufferLineOffset b r+marker+columnOffset line (max 0 (x-l+sc))
-    (marker,line)=composerLine b r
+    (marker,line)=if windowEditorCode w then composerLine b r else (0,bufferLineAt b r)
 
 composerInsert :: Text -> Desktop -> Desktop
-composerInsert text d = clearReplySelection d {composerBuffer=replaceSelection sel text (composerBuffer d),composerSelection=Selection p p,composerFocused=True}
+composerInsert text d = clearReplySelection (setComposerInput (replaceSelection sel text (composerBuffer d)) (Selection p p) True d)
   where sel=composerSelection d; p=fst (ordered sel)+T.length text
 
 -- Clipboard provenance is ephemeral and only applies when the pasted bytes
@@ -1989,13 +2096,13 @@ composerLine :: Buffer -> Int -> (Int,Text)
 composerLine b row=let line=bufferLineAt b row in if "    " `T.isPrefixOf` line then (4,T.drop 4 line) else (0,line)
 
 composerInCode :: Desktop -> Bool
-composerInCode d=fst (composerLine b (fst (bufferLineColumn b (caret (composerSelection d)))))>0
+composerInCode d=composerCodeInput d && fst (composerLine b (fst (bufferLineColumn b (caret (composerSelection d)))))>0
   where b=composerBuffer d
 
 composerBlock :: Text -> Desktop -> Desktop
 composerBlock text d
   | T.null text=d
-  | otherwise=(composerInsert replacement d) {composerSelection=Selection p p}
+  | otherwise=let changed=composerInsert replacement d in setComposerInput (composerBuffer changed) (Selection p p) (composerFocused changed) changed
   where
     b=composerBuffer d; (a,z)=ordered (composerSelection d)
     (row,col)=bufferLineColumn b a
@@ -2041,10 +2148,10 @@ composerPaste text d
 composerTyped :: Text -> Desktop -> Desktop
 composerTyped text d
   | text==" ", anchor sel==caret sel, column==1, ">" `T.isPrefixOf` line =
-      let block=composerBlock (T.drop 1 line<>"\n") d {composerSelection=Selection start (start+T.length line)}
+      let block=composerBlock (T.drop 1 line<>"\n") (setComposerInput (composerBuffer d) (Selection start (start+T.length line)) (composerFocused d) (d))
           prefix=if row>0 && not (T.null (T.strip (bufferLineAt b (row-1)))) then 1 else 0
           pos=start+prefix+4
-      in block {composerSelection=Selection pos pos}
+      in (setComposerInput (composerBuffer block) (Selection pos pos) (composerFocused block) (block))
   | otherwise=composerInsert text d
   where b=composerBuffer d; sel=composerSelection d; (row,column)=bufferLineColumn b (caret sel)
         start=bufferLineOffset b row; line=bufferLineAt b row
@@ -2059,14 +2166,14 @@ composerCopied d=(not (null pieces) && all (\(code,_) -> code) pieces,T.concat (
         start<z,end>a,let (marker,_)=composerLine b row]
 
 composerCommand :: Command -> Desktop -> Desktop
-composerCommand=composerCommandWith True
+composerCommand command d=composerCommandWith (composerCodeInput d) command d
 
 composerCommandWith :: Bool -> Command -> Desktop -> Desktop
 composerCommandWith code cmd d = case cmd of
   Copy -> copied
   Cut -> composerInsert "" copied
   Paste -> if code then composerPaste (clipboard d) d else composerInsert (clipboard d) d
-  SelectAll -> clearReplySelection d {composerSelection=Selection 0 (bufferLength b)}
+  SelectAll -> clearReplySelection (setComposerInput (composerBuffer d) (Selection 0 (bufferLength b)) (composerFocused d) (d))
   Undo -> history undo
   Redo -> history redo
   _ -> d
@@ -2077,17 +2184,17 @@ composerCommandWith code cmd d = case cmd of
     history f=let changed=f b; bounded=min (bufferLength changed) (caret sel)
                   row=fst (bufferLineColumn changed bounded)
                   p=if code then max bounded (bufferLineOffset changed row+fst (composerLine changed row)) else bounded
-              in d {composerBuffer=changed,composerSelection=Selection p p}
+              in (setComposerInput (changed) (Selection p p) (composerFocused d) (d))
 
 composerEvent :: V.Event -> Desktop -> Maybe (Desktop,[Effect])
-composerEvent=composerEventWith True
+composerEvent event d=composerEventWith (composerCodeInput d) event d
 
 composerEventWith :: Bool -> V.Event -> Desktop -> Maybe (Desktop,[Effect])
 composerEventWith code (V.EvPaste bytes) d = Just (either (const d) (\text -> (if code then composerPaste else composerInsert) (T.filter (\c -> textInputChar c || c `elem` ['\n','\r','\t']) text) d) (TE.decodeUtf8' bytes),[])
 composerEventWith code (V.EvKey key mods) d
-  | key==V.KEsc, composerFocused d, agentReplying d = Just (d,[AgentAction "cancel" []])
-  | key==V.KChar '\t', null mods = Just (d {composerFocused=not (composerFocused d)},[])
-  | key==V.KEnter, composerFocused d, all (`elem` [V.MCtrl,V.MShift]) mods = Just (if code then composerSubmit mods d else if V.MShift `elem` mods then (composerInsert "\n" d,[]) else (d,[]))
+  | key==V.KEsc, activeConversation d, composerFocused d, agentReplying d = Just (d,[AgentAction "cancel" []])
+  | key==V.KChar '\t', null mods = Just ((setComposerInput (composerBuffer d) (composerSelection d) (not (composerFocused d)) d),[])
+  | key==V.KEnter, composerFocused d, all (`elem` [V.MCtrl,V.MShift]) mods = Just (if code || editingInput d==MountedInput then composerSubmit mods d else if V.MShift `elem` mods then (composerInsert "\n" d,[]) else (d,[]))
   | V.KChar c<-key, textInputChar c, null mods || mods==[V.MShift] = done ((if code then composerTyped else composerInsert) (T.singleton c) d)
   | not (composerFocused d) || V.MAlt `elem` mods || V.MMeta `elem` mods = Nothing
   | effectiveBindings d==Nothing, ctrl, V.KChar c<-key, toLower c=='z', V.MShift `elem` mods = Just (if code then runCommand Redo d else (composerCommandWith False Redo d,[]))
@@ -2098,7 +2205,7 @@ composerEventWith code (V.EvKey key mods) d
       V.KRight -> move (if ctrl then bufferWordRight b p else bufferNextCharacter b p)
       V.KUp -> vertical (-1)
       V.KDown | marker>0, r+1==bufferLineCount b ->
-        done (composerInsert "\n" d {composerSelection=Selection (bufferLength b) (bufferLength b)})
+        done (composerInsert "\n" (setComposerInput (composerBuffer d) (Selection (bufferLength b) (bufferLength b)) (composerFocused d) (d)))
       V.KDown -> vertical 1
       V.KHome -> move (if ctrl then 0 else start+marker)
       V.KEnd -> move (if ctrl then bufferLength b else bufferLineOffset b r+T.length (bufferLineAt b r))
@@ -2115,11 +2222,11 @@ composerEventWith code (V.EvKey key mods) d
     start=bufferLineOffset b r; (marker,line)=if code then composerLine b r else (0,bufferLineAt b r)
     move n=let bounded=max 0 (min (bufferLength b) n); row=fst (bufferLineColumn b bounded)
                q=if code then max bounded (bufferLineOffset b row+fst (composerLine b row)) else bounded
-           in done d {composerSelection=Selection (if V.MShift `elem` mods then anchor sel else q) q}
+           in done (setComposerInput (composerBuffer d) (Selection (if V.MShift `elem` mods then anchor sel else q) q) (composerFocused d) (d))
     vertical delta=let row=max 0 (min (bufferLineCount b-1) (r+delta))
                        (prefix,target)=if code then composerLine b row else (0,bufferLineAt b row)
                    in move (bufferLineOffset b row+prefix+columnOffset target (displayColumn line (max 0 (column-marker))))
-    erase a z=done (composerInsert "" d {composerSelection=if anchor sel/=p then sel else Selection a z})
+    erase a z=done (composerInsert "" (setComposerInput (composerBuffer d) (if anchor sel/=p then sel else Selection a z) (composerFocused d) (d)))
 composerEventWith _ _ _ = Nothing
 
 -- The Autocomplete hint is independent human input. Reuse editing operations
@@ -2131,8 +2238,7 @@ activeAutocomplete :: Desktop -> Bool
 activeAutocomplete d=maybe False (autocompletePane d) (activeWindow d)
 
 autocompleteProjection :: Desktop -> Desktop
-autocompleteProjection d=d {composerBuffer=autocompleteDraft d,composerSelection=autocompleteSelection d,
-  composerFocused=autocompleteFocused d,chatQuestion=Nothing,agentReplying=False}
+autocompleteProjection d=d {editingInput=HintInput,chatQuestion=Nothing,agentReplying=False}
 
 autocompleteEdit :: (Desktop -> Desktop) -> Desktop -> Desktop
 autocompleteEdit edit d=let changed=edit (autocompleteProjection d) in d
@@ -2182,7 +2288,7 @@ questionActive d=T.null (conversationTarget d) && activeConversation d && maybe 
 questionEdit :: (Desktop -> Desktop) -> Desktop -> Desktop
 questionEdit edit d=case chatQuestion d of
   Nothing -> d
-  Just q -> let temporary=d {chatQuestion=Nothing,composerBuffer=questionBuffer q,composerSelection=questionSelection q,composerFocused=True}
+  Just q -> let temporary=d {editingInput=QuestionInput,chatQuestion=Just q {questionFocused=True}}
                 changed=edit temporary
                 b=composerBuffer changed
                 bound n=max 0 (min (bufferLength b) n)
@@ -2207,7 +2313,7 @@ questionInsert text=questionEdit $ \d->
             | otherwise=[(a,z,inserted),(tailStart,size,"")]
       changed | tailStart<size=either (const b) id (replaceRanges edits b)
               | otherwise=replaceSelection (Selection a z) inserted b
-  in d {composerBuffer=changed,composerSelection=Selection (a+n) (a+n)}
+  in (setComposerInput (changed) (Selection (a+n) (a+n)) (composerFocused d) (d))
 
 questionCommand :: Command -> Desktop -> Desktop
 questionCommand Paste d=questionInsert (clipboard d) d
@@ -2239,7 +2345,7 @@ questionEvent event d=case chatQuestion d of
     V.EvKey V.KEnter mods | V.MShift `elem` mods, all (`elem` [V.MCtrl,V.MShift]) mods -> Just (questionInsert " " d,[])
     V.EvKey (V.KChar c) mods | effectiveBindings d==Nothing, toLower c=='v', V.MCtrl `elem` mods,
       V.MAlt `notElem` mods, V.MMeta `notElem` mods -> Just (questionCommand Paste d,[])
-    _ -> let temporary=d {chatQuestion=Nothing,composerBuffer=questionBuffer q,composerSelection=questionSelection q,composerFocused=True}
+    _ -> let temporary=d {editingInput=QuestionInput,chatQuestion=Just q {questionFocused=True}}
          in case composerEventWith False event temporary of
            Just (_,effects) | not (null effects) -> Just (d,[])
            Just _ -> Just (questionEdit (\state->maybe state fst (composerEventWith False event state)) d,[])
@@ -2614,11 +2720,11 @@ windowMouse :: Int -> Int -> V.Button -> [V.Modifier] -> Desktop -> (Desktop,[Ef
 windowMouse x y button mods d = case find (\w -> windowVisible d w && inside (bounds w) x y) (windows d) of
   Nothing -> (d,[])
   Just w -> let focused = focusWindow (windowId w) d {sideTree=fmap (\sidebar -> sidebar {treeFocused=False}) (sideTree d)}; Rect l t ww hh = bounds w in case button of
-    V.BScrollUp | Just _<-windowRows focused w,inside (fst (rowsWindowRects w)) x y -> (moveWindowRow (-3) focused,[])
+    V.BScrollUp | Just _<-windowRows focused w,inside (fst (rowsWindowRects focused w)) x y -> (moveWindowRow (-3) focused,[])
     V.BScrollUp -> (changeScroll True (-3) focused,[])
-    V.BScrollDown | Just _<-windowRows focused w,inside (fst (rowsWindowRects w)) x y -> (moveWindowRow 3 focused,[])
+    V.BScrollDown | Just _<-windowRows focused w,inside (fst (rowsWindowRects focused w)) x y -> (moveWindowRow 3 focused,[])
     V.BScrollDown -> (changeScroll True 3 focused,[])
-    V.BRight | Just _<-windowRows focused w,inside (fst (rowsWindowRects w)) x y ->
+    V.BRight | Just _<-windowRows focused w,inside (fst (rowsWindowRects focused w)) x y ->
       (openContext WindowRowsContext x y (selectAt False x y focused),[])
     V.BRight | Just command<-linkAt x y focused -> (openContext (LinkContext command) x (y+1) focused,[])
     V.BRight | x>l && x<l+ww-1 && y>t && y<t+hh-1,
@@ -2655,9 +2761,9 @@ windowMouse x y button mods d = case find (\w -> windowVisible d w && inside (bo
       | Just (OpenLink origin target)<-linkAt x y focused, null mods ->
           (selectAt False x y focused {drag=Just (FollowingLink (windowId w) x y origin target)},[])
       | activeConversation focused, Just action<-conversationClick x y w focused -> (focused {drag=Nothing},[action])
-      | activeConversation focused, inside (composerRect focused w) x y -> (composerClick x y mods w focused,[])
-      | activeConversation focused, y>=top (composerRect focused w) -> (focused,[])
-      | otherwise -> (selectAt (V.MShift `elem` mods) x y focused {drag=Just (Selecting (windowId w)),autocompleteFocused=if activeAutocomplete focused then False else autocompleteFocused focused,composerFocused=if activeConversation focused then True else composerFocused focused},[])
+      | windowHasEditor focused w, inside (composerRect focused w) x y -> (composerClick x y mods w focused,[])
+      | windowHasEditor focused w, y>=top (composerRect focused w) -> (focused,[])
+      | otherwise -> (selectAt (V.MShift `elem` mods) x y (setComposerInput (composerBuffer focused) (composerSelection focused) (if activeConversation focused then True else composerFocused focused) (focused {drag=Just (Selecting (windowId w)), autocompleteFocused=if activeAutocomplete focused then False else autocompleteFocused focused})),[])
     _ -> (focused,[])
 
 mapWindow :: Int -> (Window -> Window) -> Desktop -> Desktop
@@ -2826,7 +2932,7 @@ windowScrollbar d vertical original=case windowContent original of
   PluginContent _->do
     prepared<-windowPluginText d w
     let Rect x y ww hh= bounds w
-        detail=pluginTextRect w
+        detail=pluginTextRect d w
         rect=if vertical then Rect (x+ww-1) (top detail) 1 (height detail)
           else Rect (x+2) (y+hh-1) (max 0 (ww-4)) 1
         extent=if vertical then windowTextRows d w (PluginWindow.preparedWindowText prepared)
@@ -2880,7 +2986,7 @@ scrollClick vertical x y d = case activeWindow d of
         len=if vertical then height r else width r
         offset=if vertical then y-top r else x-left r
         thumb=scrollbarThumb len limit (if vertical then scrollRow w else scrollColumn w)
-        page=max 1 (case windowContent w of PluginContent _->(if vertical then height else width) (pluginTextRect w); _->(if vertical then height else width) (bounds w)-2)
+        page=max 1 (case windowContent w of PluginContent _->(if vertical then height else width) (pluginTextRect d w); _->(if vertical then height else width) (bounds w)-2)
     in if offset==0 then changeScroll vertical (-1) d
        else if offset==len-1 then changeScroll vertical 1 d
        else if offset==thumb then d {drag=Just (Scrolling (windowId w) vertical)}
@@ -2905,11 +3011,11 @@ selectAt extend x y d | activeMarkdown d,Just original<-activeWindow d,Just (_,t
   in markdownMoveTo extend (windowTextOffset d w text row col) d
 selectAt _ _ _ d | activeMarkdown d=d
 selectAt _ x y d | Just w<-activeWindow d,Just (_,index,ident,_)<-windowRows d w,
-  inside (fst (rowsWindowRects w)) x y = selectWindowRow (rowsListOffset w (fromMaybe 0 (M.lookup ident index))+y-top (fst (rowsWindowRects w))) d
+  inside (fst (rowsWindowRects d w)) x y = selectWindowRow (rowsListOffset d w (fromMaybe 0 (M.lookup ident index))+y-top (fst (rowsWindowRects d w))) d
 selectAt extend x y d | Just view<-activePluginWindow d,Just w<-activeWindow d =
   let text=PluginWindow.preparedWindowText view
-      row=max 0 (min (windowTextRows d w text-1) (y-top (pluginTextRect w)+scrollRow w))
-      col=max 0 (x-left (pluginTextRect w)+scrollColumn w)
+      row=max 0 (min (windowTextRows d w text-1) (y-top (pluginTextRect d w)+scrollRow w))
+      col=max 0 (x-left (pluginTextRect d w)+scrollColumn w)
       pos=windowTextOffset d w text row col
       focused=modifyActive (\v->v {rowsInteraction=fmap (\(RowsInteraction ident _)->RowsInteraction ident True) (rowsInteraction v)}) d
   in pluginMoveTo extend pos focused
@@ -2965,7 +3071,7 @@ pluginMoveTo extend requested d | Just view<-activePluginWindow d, Just w<-activ
       pos=max 0 (min (contentLength text) requested)
       (row,col)=windowTextPosition d w text pos
       update w=w {selection=Selection (if extend then anchor (selection w) else pos) pos,
-      scrollRow=max 0 (min row (max (scrollRow w) (row-height (pluginTextRect w)+1))),
+      scrollRow=max 0 (min row (max (scrollRow w) (row-height (pluginTextRect d w)+1))),
       scrollColumn=max 0 (min col (max (scrollColumn w) (col-width (bounds w)+3)))}
   in modifyActive update d
 pluginMoveTo _ _ d=d
@@ -3107,7 +3213,7 @@ bindingContext d
   | dialog d/=Nothing = Just Bindings.DialogKeys
   | problemsFocused d = Just Bindings.MessagesKeys
   | maybe False treeFocused (sideTree d) = Just Bindings.SidebarKeys
-  | activeConversation d = Just Bindings.ConversationKeys
+  | composerActive d || activeConversation d = Just Bindings.ConversationKeys
   | activeTerminal d/=Nothing = Just Bindings.TerminalKeys
   | Just label<-activeDocument d >>= documentLabel,
     "Debugger " `T.isPrefixOf` label || "Source " `T.isPrefixOf` label = Just Bindings.DebuggerKeys
@@ -3345,7 +3451,7 @@ documentEdge end extend d
 -- | Source/hex pages reserve three chrome rows; prepared read-only text reserves two.
 pageMove :: Bool -> Bool -> Desktop -> Desktop
 pageMove forward extend d=verticalMove (if forward then page else negate page) extend d
-  where page=maybe 10 (\w->case windowRows d w of Just (_,_,_,details)->max 1 (height (if details then snd (rowsWindowRects w) else fst (rowsWindowRects w))); _->max 1 (height (bounds w)-if activeMarkdown d || isJust (activePluginWindow d) then 2 else 3)) (activeWindow d)
+  where page=maybe 10 (\w->case windowRows d w of Just (_,_,_,details)->max 1 (height (if details then snd (rowsWindowRects d w) else fst (rowsWindowRects d w))); _->max 1 (height (bounds w)-if activeMarkdown d || isJust (activePluginWindow d) then 2 else 3)) (activeWindow d)
 
 -- | Use measured scalar word boundaries in source; preserve byte/grapheme steps in other views.
 wordMove :: Bool -> Bool -> Desktop -> Desktop
@@ -3729,11 +3835,13 @@ submitDialog button dg original
     GoingTo -> case readMaybe (T.unpack first) of
       Just n | n>0 -> (moveTo False (maybe 0 (\doc->bufferLineOffset (documentBuffer doc) (n-1)) (activeDocument d)) d,[])
       _ -> (original {status="Enter a positive line number."},[])
-    DiscardDraft | button==0 -> runCommand Quit d {composerBuffer=newBuffer "",composerSelection=Selection 0 0,conversationViews=M.map (\view->view {conversationDraft=newBuffer "",conversationDraftSelection=Selection 0 0}) (conversationViews d)}
+    DiscardDraft | button==0 -> runCommand Quit d {editorDrafts=M.map (\draft->draft {editorDraftBuffer=newBuffer "",editorDraftSelection=Selection 0 0}) (editorDrafts d)}
                  | otherwise -> (d,[])
     Confirm cmd | button==0 -> saveRequest (Just cmd) d
                 | button==1 -> case cmd of
-                    Close -> (closeActive d,[])
+                    Close -> case activeWindow d of
+                      Just w -> (closeActive d,closingEditors d w)
+                      Nothing -> (d,[])
                     Quit -> runCommand Quit (discardActive d)
                     _ -> (d,[])
                 | otherwise -> (d,[])

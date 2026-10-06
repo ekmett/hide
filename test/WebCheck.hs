@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 module WebCheck (checks) where
+import EditorFixture (withEditorFixture, sameBufferVersions)
 import SourceWindowFixture (sourceFixtureBuffer)
 import Data.Bits ((.&.), shiftR)
 import Control.Monad (unless,forM_)
@@ -18,7 +19,7 @@ import Hide.Buffer
 import Hide.Frontend
 
 checks :: IO ()
-checks = do
+checks = withEditorFixture "" (initialDesktop (80,25)) $ \chatBase->do
   let check name ok=unless ok (error name)
       base=addDocument Nothing (newBuffer "") (initialDesktop (80,25))
       typed=fst (applyInput (Key "λ" []) base)
@@ -26,7 +27,7 @@ checks = do
       modified=pasted {heldModifiers=[V.MCtrl],drag=Just DockSizing}
       released=fst (applyInput Blur modified)
   check "leave guard covers modified buffers and unsent conversation drafts"
-    (not (webDirty base) && webDirty typed && webDirty base {composerBuffer=newBuffer "unsent thought"})
+    (not (webDirty base) && webDirty typed && webDirty (setComposerInput (newBuffer "unsent thought") (Selection 0 0) True chatBase))
   check "web backend selection" (chooseBackend (Just "web") []==Right Web && chooseBackend Nothing [Web,Terminal]/=Right Web)
   let platform=object ["type" .= ("frontend"::T.Text),"mode" .= (3::Int),"mac" .= True]
       macFrontend=parseMaybe parseInput platform
@@ -35,8 +36,13 @@ checks = do
      not (nativeMac (fst (applyInput (Frontend Nothing False) base {nativeMac=True}))))
   check "browser text and paste preserve Unicode" (activeText pasted=="λ\n👩🏽\x200d\&💻")
   check "browser blur releases drag and modifiers" (null (heldModifiers released) && drag released==Nothing)
-  check "browser F2 matches existing Save event" (applyInput (Key "F2" []) pasted==handleEvent (V.EvKey (V.KFun 2) []) pasted)
-  check "Shift+Tab is backward traversal" (applyInput (Key "Tab" [V.MShift]) base==handleEvent (V.EvKey V.KBackTab [V.MShift]) base)
+  let (browserSaved,browserSaveEffects)=applyInput (Key "F2" []) pasted
+      (terminalSaved,terminalSaveEffects)=handleEvent (V.EvKey (V.KFun 2) []) pasted
+  sameSaved<-sameBufferVersions browserSaved terminalSaved
+  check "browser F2 matches existing Save event" (sameSaved && browserSaveEffects==terminalSaveEffects && dialog browserSaved==dialog terminalSaved)
+  let (browserTab,browserTabEffects)=applyInput (Key "Tab" [V.MShift]) base
+      (terminalTab,terminalTabEffects)=handleEvent (V.EvKey V.KBackTab [V.MShift]) base
+  check "Shift+Tab is backward traversal" ((windowId <$> activeWindow browserTab)==(windowId <$> activeWindow terminalTab) && browserTabEffects==terminalTabEffects && menu browserTab==menu terminalTab)
   check "ordinary screen text uses compact UTF-8 runs" (BL.length (encode (frameRows base))<8192)
   check "frame row count follows grid" (length (frameRows base)==25)
   check "origin must match exact loopback host" (allowedOrigin "127.0.0.1:123" "127.0.0.1:123" (Just "http://127.0.0.1:123") &&
@@ -72,11 +78,15 @@ checks = do
   check "browser find next and previous navigate matches" (fmap selection (activeWindow previous)==fmap selection (activeWindow found))
   forM_ ["../escape","a/b","a\\b",".","..",""] $ \name ->
     check "upload names cannot become server paths" (parseMaybe parseInput (object ["type" .= ("upload"::T.Text),"name" .= (name::T.Text)])==Nothing)
-  let draft=base {composerBuffer=newBuffer "draft"}
+  let draft=setComposerInput (newBuffer "draft") (Selection 0 0) True chatBase
   check "Exit asks before discarding a conversation draft" (null (snd (runCommand Quit draft)) && fmap purpose (dialog (fst (runCommand Quit draft)))==Just DiscardDraft)
   let modal=fst (runCommand SaveAs selected)
-  forM_ [SelectAll,Cut,Undo,Redo,Find,FindNext] $ \cmd ->
-    check "browser menu commands cannot edit behind a modal dialog" (fst (applyInput (BrowserCommand cmd) modal)==modal)
+  forM_ [SelectAll,Copy,Cut,Undo,Redo,Find,FindNext] $ \cmd ->do
+    let (blocked,blockedEffects)=applyInput (BrowserCommand cmd) modal
+    sameVersions<-sameBufferVersions blocked modal
+    check "browser menu commands cannot edit behind a modal dialog"
+      (sameVersions && fmap selection (activeWindow blocked)==fmap selection (activeWindow modal) &&
+       blockedEffects==[WriteBrowserClipboard "" | cmd `elem` [Copy,Cut]] && dialog blocked==dialog modal)
   let terminal=addDocument Nothing (newBuffer "") base
       terminalView=terminal {buffers=M.adjust (\doc->doc {documentLabel=Just "Terminal 1"}) (nextId base) (buffers terminal)}
   check "terminal Ctrl+C reaches the PTY" (snd (applyInput (Key "c" [V.MCtrl]) terminalView)==[ServiceAction "terminal-input" ["1","\ETX"]])

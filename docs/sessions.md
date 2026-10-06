@@ -100,7 +100,8 @@ The editor checkpoints its desktop once per second after changes. `--resume`
 reattaches to a live daemon or restores its last complete checkpoint after a
 crash. Recovery includes unsaved text and hex buffers, saved disk baselines,
 undo/redo history, split views, window placement, Files, display preferences and
-the conversation draft. Source files are never overwritten during recovery.
+each retained conversation draft, including its editing history. Source files
+are never overwritten during recovery.
 If a file changed on disk, the usual conflict checks still apply when saving.
 
 Conversation transcripts and their provider resume IDs are retained per editor

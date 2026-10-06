@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module HighlightingCheck (checks) where
 
+import EditorFixture (withEditorFixture)
 import Control.Concurrent
 import Control.Exception (evaluate,finally)
 import Control.Monad (unless,foldM,forM_)
@@ -23,7 +24,7 @@ import Hide.Unicode (CellSpan(..))
 import Hide.Syntax
 
 checks :: IO ()
-checks = do
+checks = withEditorFixture "" (addReadOnly "Conversation" "reply" (initialDesktop (100,35))) $ \chatBase->do
   sourceLineChecks
   composerWidthChecks
   plainSourceRowChecks
@@ -110,13 +111,12 @@ checks = do
   -- lines borrowed even when moving the selection without changing their text.
   forM_ [False,True] $ \hint->do
     let draft=newBuffer (T.intercalate "\n" (replicate 12 (T.replicate 100 "words 界 e\x301 👩🏽\x200d\&💻 ")))
-        base=addReadOnly (if hint then "Autocomplete" else "Conversation") "reply" (initialDesktop (100,35))
-        chat=base {sideTree=Nothing,blinkCursor=False,appearance=LightMode,
-          composerBuffer=draft,composerSelection=Selection 0 0,composerFocused=True,
+        base=if hint then addReadOnly "Autocomplete" "reply" (closeActive chatBase) else chatBase
+        chat=(setComposerInput draft (Selection 0 0) True base) {sideTree=Nothing,blinkCursor=False,appearance=LightMode,
           autocompleteACPEnabled=True,autocompleteDraft=draft,autocompleteSelection=Selection 0 0,autocompleteFocused=True}
     _<-evaluate (occupied (renderCellRows chat))
     before<-getAllocationCounter
-    count<-evaluate (occupied (renderCellRows chat {composerSelection=Selection 1 1,autocompleteSelection=Selection 1 1}))
+    count<-evaluate (occupied (renderCellRows (setComposerInput draft (Selection 1 1) True chat {autocompleteSelection=Selection 1 1})))
     after<-getAllocationCounter
     check "draft viewport avoids rebuilding offscreen character/style pairs" (count>0 && before-after<12000000)
   let mixedText="a界e\x301\t👩🏽\x200d\&💻z"
@@ -247,9 +247,9 @@ check label ok=unless ok (error label)
 
 -- Bubble sizing stops at the available width, before rendering its visible rows.
 composerWidthChecks :: IO ()
-composerWidthChecks=do
+composerWidthChecks=withEditorFixture "" (initialDesktop (100,35)) $ \chatBase->do
   let size hint b columns=
-        let d=(addReadOnly "Conversation" "" (initialDesktop (100,35))) {composerBuffer=b,autocompleteDraft=b}
+        let d=(setComposerInput b (Selection 0 0) True chatBase) {autocompleteDraft=b}
             w=(fromJust (activeWindow d)) {bounds=Rect 0 1 (columns+6) 30}
         in width ((if hint then autocompleteComposerRect else composerRect) d w)
   forM_ [False,True] $ \hint->do

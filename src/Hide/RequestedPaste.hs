@@ -18,11 +18,12 @@ import Hide.Buffer (Selection,Buffer)
 import Hide.BufferView (BufferView)
 import Hide.Model
 import Hide.Plugin.BufferHost (ContentVersion,captureVersion)
+import qualified Hide.Plugin.Editor as Editor
 import Hide.RemoteEndpoint (randomIdentity)
 
 -- Owner metadata is bounded; immutable payloads are represented only by identities.
 data Owner = SourceOwner !Int !Int !BufferView !(Maybe ReviewSelection) !Bool !Bool
-  | ComposerOwner !Int !Text !Bool | QuestionOwner !Int !Int | AutocompleteOwner !Int
+  | EditorOwner !Int !Editor.EditorMount !Bool | QuestionOwner !Int !Int | AutocompleteOwner !Int
   deriving Eq
 data Target = DialogTarget !(StableName Dialog)
   | BufferTarget !Owner !Selection !ContentVersion | TerminalTarget !Int !Text
@@ -88,13 +89,14 @@ captureTarget d
       else if questionActive d then case chatQuestion d of
         Just q->buffered (QuestionOwner (windowId w) (questionToken q)) (questionSelection q) (questionBuffer q)
         _->pure Nothing
-      else if activeConversation d then buffered (ComposerOwner (windowId w) (conversationTarget d) (composerFocused d)) (composerSelection d) (composerBuffer d)
-      else case activeTerminal d of
-        Just terminal->pure (Just (TerminalTarget (windowId w) terminal))
-        _->case (bufferId w,activeDocument d) of
-          (Just bid,Just doc) | documentLabel doc==Nothing,commandEnabled d Paste ->
-            buffered (SourceOwner (windowId w) bid (bufferView w) (reviewSelection w) (windowHexLow w) (windowHexAscii w)) (selection w) (documentBuffer doc)
-          _->pure Nothing
+      else case activeEditorMount d of
+        Just mount->buffered (EditorOwner (windowId w) mount (composerFocused d)) (composerSelection d) (composerBuffer d)
+        Nothing->case activeTerminal d of
+          Just terminal->pure (Just (TerminalTarget (windowId w) terminal))
+          _->case (bufferId w,activeDocument d) of
+            (Just bid,Just doc) | documentLabel doc==Nothing,commandEnabled d Paste ->
+              buffered (SourceOwner (windowId w) bid (bufferView w) (reviewSelection w) (windowHexLow w) (windowHexAscii w)) (selection w) (documentBuffer doc)
+            _->pure Nothing
   | otherwise=pure Nothing
   where
     named dg=Just . DialogTarget <$> (evaluate dg >>= makeStableName)

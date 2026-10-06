@@ -11,7 +11,7 @@ module Hide.AgentHub
   , AgentDriver(..), DriverEvent(..), StartProvider, StartRequest(..), PrivateSource(..), HubMessage(..)
   , Capabilities(..), ConfigChoice(..), parseCapabilities, filterPrivateCapabilities
   , newAgentHub, newAgentHubWithLimits, closeAgentHub, spawnAgent, spawnAgentWithTask, reconnectAgent, registerAgent, updateExternalAgent, setExternalAgentBusy, renameAgent
-  , configureAgent, steerAgent, listAgents, statusAgent, sendAgent, waitAgent, cancelAgent, endAgent
+  , configureAgent, steerAgent, steerAgentAt, listAgents, statusAgent, sendAgent, sendAgentAt, waitAgent, cancelAgent, endAgent
   , historyAgent, searchAgentHistory, recordAgentEvent, snapshotHub, restoreHub, restoreHubWithLimits
   ) where
 
@@ -54,12 +54,12 @@ data SpawnSpec = SpawnSpec
 data ConfigChoice = ConfigChoice
   { configId :: Text, configCategory :: Text, configCurrent :: Text, configValues :: [(Text,Text)]
   } deriving (Eq,Show)
--- | Opaque receipt for one agent incarnation and its advertised configuration.
--- It carries only the stable agent ID and existing owner version counters.
-data AgentConfigRef = AgentConfigRef !AgentId !Int !Int deriving (Eq,Show)
+-- | Opaque receipt for one agent incarnation, advertised configuration and
+-- cancellation lifetime. It contains only the stable ID and owner counters.
+data AgentConfigRef = AgentConfigRef !AgentId !Int !Int !Int deriving (Eq,Show)
 -- | Exact agent captured by a configuration dialog.
 agentConfigAgent :: AgentConfigRef -> AgentId
-agentConfigAgent (AgentConfigRef ident _ _)=ident
+agentConfigAgent (AgentConfigRef ident _ _ _)=ident
 
 data Capabilities = Capabilities { supportsFork :: Bool, supportsResume :: Bool, supportsSteering :: Bool, configChoices :: [ConfigChoice] }
   deriving (Eq,Show)
@@ -89,7 +89,7 @@ data Entry = Entry
   , entryResults :: M.Map Int (Either Text Value), entryNextTicket :: Int
   , entryHistory :: Q.Seq HistoryEvent, entryHistoryBytes :: Int, entryNextEvent :: Int
   , entryDropped :: Int, entryExternal :: Bool, entryCancelPending :: Bool, entryExternalBusy :: Bool
-  , entryControl :: Maybe (Int,Text), entryUsage :: Maybe (Integer,Integer), entryEpoch :: Int, entryCapsVersion :: Int }
+  , entryControl :: Maybe (Int,Text), entryUsage :: Maybe (Integer,Integer), entryEpoch :: Int, entryCapsVersion :: Int, entryCancelVersion :: !Int }
 data HubState = HubState { hubEntries :: M.Map AgentId Entry, hubNextId :: Int, hubClosed :: Bool, hubLastLimits :: HubLimits }
 data AgentHub = AgentHub (FilePath -> IO (Either Text HubLimits)) StartProvider (TVar HubState)
 
@@ -178,7 +178,7 @@ reserve (AgentHub _ _ ref) limits actor raw external=do
     Right (spec,source)->do
       let ident=AgentId ("agent-"<>T.pack (show (hubNextId state)))
           entry=appendEvent "created" actor (object ["name" .= spawnName spec,"task" .= spawnTask spec])
-            (Entry ident (case actor of Human->Nothing; Agent parent->Just parent) spec Starting Nothing Nothing emptyCaps Q.empty Nothing M.empty 1 Q.empty 0 1 0 external False False Nothing Nothing 1 0)
+            (Entry ident (case actor of Human->Nothing; Agent parent->Just parent) spec Starting Nothing Nothing emptyCaps Q.empty Nothing M.empty 1 Q.empty 0 1 0 external False False Nothing Nothing 1 0 0)
       writeTVar ref state {hubEntries=M.insert ident entry (hubEntries state),hubNextId=hubNextId state+1,hubLastLimits=limits}
       pure (Right (entry,source))
   where
@@ -419,7 +419,7 @@ configureAgentChecked hub ident expected option value=fmap (fmap (const ())) $
     commit caps=appendEvent "configured" Human (capabilitiesValue caps) . (\entry->entry {entryCaps=caps,entryCapsVersion=entryCapsVersion entry+1})
 
 configurationRef :: Entry -> AgentConfigRef
-configurationRef entry=AgentConfigRef (entryId entry) (entryEpoch entry) (entryCapsVersion entry)
+configurationRef entry=AgentConfigRef (entryId entry) (entryEpoch entry) (entryCapsVersion entry) (entryCancelVersion entry)
 
 -- | Read bounded public choices without task/history/private driver retention.
 -- Call on a preparation worker when preparing a large choice list.
@@ -440,11 +440,20 @@ agentConfigurationCurrent (AgentHub _ _ ref) expected=do
     _->False
 
 steerAgent :: AgentHub -> AgentId -> Text -> IO (Either Text Value)
-steerAgent hub ident text=childControl hub ident "steering" validate
+steerAgent hub ident=steerAgentChecked hub ident Nothing
+
+-- | The captured editor target must still be the same incarnation/configuration
+-- at the ordinary control reservation. It grants no new actor authority.
+steerAgentAt :: AgentHub -> AgentConfigRef -> Text -> IO (Either Text Value)
+steerAgentAt hub receipt=steerAgentChecked hub (agentConfigAgent receipt) (Just receipt)
+
+steerAgentChecked :: AgentHub -> AgentId -> Maybe AgentConfigRef -> Text -> IO (Either Text Value)
+steerAgentChecked hub ident expected text=childControl hub ident "steering" validate
   (\entry driver->driverSteer driver (HubMessage 0 Human text (entryParent entry==Nothing)))
   (\_ entry->appendEvent "steered" Human (object ["text" .= text,"userSeat" .= (entryParent entry==Nothing)]) entry)
   where
     validate entry=do
+      unless (maybe True (==configurationRef entry) expected) (Left "Agent target expired; submit to its current editor.")
       unless (not (T.null (T.strip text)) && T.length text<=65536 && not (T.any (=='\0') text))
         (Left "Steering requires 1–65536 characters without NUL.")
       unless (supportsSteering (entryCaps entry)) (Left "This child provider does not advertise steering support.")
@@ -489,7 +498,15 @@ childControl (AgentHub _ _ ref) ident kind validate action commit=mask $ \restor
 
 -- | Queue a message with authenticated author and derived user-seat attribution.
 sendAgent :: AgentHub -> Actor -> AgentId -> Text -> IO (Either Text Int)
-sendAgent (AgentHub _ _ ref) actor ident body=atomically $ do
+sendAgent hub actor ident=sendAgentChecked hub actor ident Nothing
+
+-- | Admit into the same message queue only while the captured human editor
+-- target is current. Direct messages retain their deliberate ID-based behavior.
+sendAgentAt :: AgentHub -> Actor -> AgentConfigRef -> Text -> IO (Either Text Int)
+sendAgentAt hub actor receipt=sendAgentChecked hub actor (agentConfigAgent receipt) (Just receipt)
+
+sendAgentChecked :: AgentHub -> Actor -> AgentId -> Maybe AgentConfigRef -> Text -> IO (Either Text Int)
+sendAgentChecked (AgentHub _ _ ref) actor ident expected body=atomically $ do
   state<-readTVar ref
   case prepare state of
     Left err->pure (Left err)
@@ -504,6 +521,7 @@ sendAgent (AgentHub _ _ ref) actor ident body=atomically $ do
   where prepare state=do
           validActor actor state
           entry<-maybe (Left "Unknown agent.") Right (M.lookup ident (hubEntries state))
+          unless (maybe True (==configurationRef entry) expected) (Left "Agent target expired; submit to its current editor.")
           unless (entryPhase entry `elem` [Idle,Running]) (Left "Agent is not accepting messages.")
           unless (Q.length (entryQueue entry)<32) (Left "Agent message queue is full.")
           unless (not (T.null (T.strip body)) && T.length body<=65536 && not (T.any (=='\0') body)) (Left "Message must contain 1–65536 characters without NUL.")
@@ -561,7 +579,7 @@ cancelAgent (AgentHub _ _ ref) actor ident = mask $ \restore -> do
         | entryPhase entry == Cancelling -> pure (Right Nothing)
         | otherwise -> do
             let next = cancelPending "Agent prompt cancelled." entry
-                  {entryPhase = Cancelling, entryCancelPending = True,entryControl=fmap (\(token,_)->(token,"cancelled")) (entryControl entry)}
+                  {entryPhase = Cancelling, entryCancelPending = True,entryCancelVersion=entryCancelVersion entry+1,entryControl=fmap (\(token,_)->(token,"cancelled")) (entryControl entry)}
             writeTVar ref state
               {hubEntries = M.insert ident (appendEvent "cancelled" actor Null next) (hubEntries state)}
             pure (Right (Just (mapM_ driverCancel (entryDriver entry))))
@@ -780,7 +798,7 @@ restoreHub limits launcher value=case parseEither persisted value of
       unless (ticket>0 && ticket<=1000000000 && index>0 && index<=1000000000 && dropped>=0 && dropped<index) (fail "Counters")
       history<-o .: "history" >>= mapM eventParser
       unless (length history<=1024 && sum (map eventSize history)<=4*1024*1024 && strictlyIncreasing [n | HistoryEvent n _ _ _<-history] && all (\(HistoryEvent n _ _ _)->n>0 && n<index) history) (fail "History")
-      pure (Entry ident parent checked (if ended then Ended else Recovered) Nothing key caps Q.empty Nothing M.empty ticket (Q.fromList history) (sum (map eventSize history)) index dropped external False False Nothing Nothing 0 0)
+      pure (Entry ident parent checked (if ended then Ended else Recovered) Nothing key caps Q.empty Nothing M.empty ticket (Q.fromList history) (sum (map eventSize history)) index dropped external False False Nothing Nothing 0 0 0)
     eventParser=withObject "event" $ \o->HistoryEvent <$> o .: "index" <*> (o .: "kind" >>= shortText) <*> (o .: "author" >>= actorParser) <*> o .: "detail"
     actorParser=withObject "actor" $ \o->do
       kind<-o .: "kind"::Parser Text

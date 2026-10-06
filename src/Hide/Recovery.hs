@@ -40,6 +40,7 @@ import Hide.BufferView
 import Hide.Files (FileState(..))
 import Hide.Model
 import qualified Hide.Plugin.Window as W
+import qualified Hide.Plugin.Editor as E
 
 -- Histories are never truncated to fit. A rejected checkpoint leaves the last
 -- complete checkpoint in place, and the caller must surface the returned error.
@@ -80,11 +81,17 @@ readCheckpoint path baseline=do
         prepared<-foldM (restore scope) baseline {windows=[],pluginWindows=M.empty,retiredPluginWindows=S.empty} snapshots
         case parseEither (desktopParser prepared) value of
           Left _->pure (Left "Invalid or unsupported recovery checkpoint.")
-          Right recovered->pure (Right recovered)
+          Right (recovered,seeds)->do
+            restored<-mapM restoreDraft seeds
+            pure (Right recovered {conversationViews=M.fromList [(target,view) | (target,view,_,_)<-restored],
+              editorDrafts=M.fromList [(ref,draft) | (_,_,ref,draft)<-restored]})
   where
     decode bytes=do
       unless (BS.length bytes<=checkpointLimit) (Left "Recovery checkpoint exceeds 256 MiB.")
       either (const (Left "Invalid recovery checkpoint JSON.")) Right (eitherDecodeStrict' bytes)
+    restoreDraft (target,ConversationSeed bid name buffer selected focused scrolled reply)=do
+      ref<-E.newDraftRef
+      pure (target,ConversationView bid name ref Nothing Nothing scrolled reply,ref,EditorDraft buffer selected focused Nothing)
     restore scope desktop (ident,kind,version,title,text)=do
       prepared<-W.prepareRecoverableTextWindow kind version title text >>= either (ioError . userError . T.unpack) pure
       update<-W.openTextWindow scope prepared >>= maybe (ioError (userError "Recovery scope ended")) pure
@@ -199,18 +206,16 @@ checkpointKey desktop=do
 desktopValueWith :: Monad m => ([(Int,Int)] -> Buffer -> m Value) -> (BS.ByteString -> m Value) -> (W.PreparedWindow -> m Value) -> Desktop -> m Value
 desktopValueWith buffer baseline plugin desktop=do
   encodedDocuments<-mapM (documentValueWith buffer baseline d) (M.toAscList documents)
-  views<-mapM (conversationViewValueWith buffer) (M.toList (conversationViews d))
+  views<-mapM (conversationViewValueWith buffer (editorDrafts d)) (M.toList (conversationViews d))
   plugins<-mapM (\(window,prepared,(kind,version))->do
     text<-plugin prepared
     pure (object ["id" .= windowId window,"kind" .= kind,"version" .= version,"title" .= W.preparedWindowTitle prepared,"text" .= text])) durable
-  composer<-buffer [] (composerBuffer d)
-  pure (object ["schemaVersion" .= (1::Int),"screen" .= screenSize d,"buffers" .= encodedDocuments,
+  pure (object ["schemaVersion" .= (2::Int),"screen" .= screenSize d,"buffers" .= encodedDocuments,
     "dockedTerminals" .= [object ["windowId" .= ident,"bounds" .= rectValue rectangle,"restoredBounds" .= fmap rectValue saved] | (ident,(rectangle,saved))<-M.toList (dockedTerminals d),any ((==ident).windowId) (windows d)],
     "bottomTerminal" .= bottomTerminal d,
     "pluginWindows" .= plugins,
     "windows" .= map windowValue [w | w<-windows d,maybe (S.member (windowId w) durableIds) (`M.member` documents) (bufferId w)],"nextId" .= nextId d,
     "conversationTarget" .= conversationTarget d,"conversationViews" .= views,
-    "composer" .= composer,"composerSelection" .= selectionValue (composerSelection d),"composerFocused" .= composerFocused d,
     "directory" .= defaultDirectory d,"sidebar" .= fmap sidebarValue (sideTree d),"preferences" .= object
       ["wordStar" .= wordStar d,"wideSectionTitles" .= wideSectionTitles d,"blinkCursor" .= blinkCursor d,"crtFilter" .= crtFilter d,"pixelateUnicode" .= pixelateUnicode d,
        "defaultBufferView" .= fromEnum (defaultBufferView d),"chatSubmit" .= chatSubmitName (chatSubmit d),"macKeySymbols" .= macKeySymbols d,"materialIcons" .= materialIcons d,"streamerMode" .= streamerMode d,"appearance" .= fromEnum (appearance d),"videoMode" .= videoMode d,
@@ -220,14 +225,20 @@ desktopValueWith buffer baseline plugin desktop=do
         durableIds=S.fromList [windowId w | (w,_,_)<-durable]
         durable=[(w,prepared,recovery) | w<-windows d,PluginContent reference<-[windowContent w],Just prepared<-[M.lookup reference (pluginWindows d)],Just recovery<-[W.preparedWindowRecovery prepared]]
 
-conversationViewValueWith :: Monad m => ([(Int,Int)] -> Buffer -> m Value) -> (Text,ConversationView) -> m Value
-conversationViewValueWith buffer (target,view)=do
-  draft<-buffer [] (conversationDraft view)
-  pure (object ["target" .= target,"bufferId" .= conversationBufferId view,"name" .= conversationName view,
-    "draft" .= draft,"selection" .= selectionValue (conversationDraftSelection view),
-    "scroll" .= conversationScroll view,"replySelection" .= selectionValue (conversationReplySelection view)])
+conversationViewValueWith :: Monad m => ([(Int,Int)] -> Buffer -> m Value) -> M.Map E.DraftRef EditorDraft -> (Text,ConversationView) -> m Value
+conversationViewValueWith buffer drafts (target,view)=case M.lookup (conversationDraftRef view) drafts of
+  Nothing->pure Null
+  Just state->do
+    draft<-buffer [] (editorDraftBuffer state)
+    pure (object ["target" .= target,"bufferId" .= conversationBufferId view,"name" .= conversationName view,
+      "draft" .= draft,"selection" .= selectionValue (editorDraftSelection state),"focused" .= editorDraftFocused state,
+      "scroll" .= conversationScroll view,"replySelection" .= selectionValue (conversationReplySelection view)])
 
-conversationViewParser :: M.Map Int Document -> Value -> Parser (Text,ConversationView)
+-- Temporary parser output: validation owns Buffer construction; IO adoption only
+-- allocates identities and transfers these roots, never text or callable bindings.
+data ConversationSeed = ConversationSeed Int Text Buffer Selection Bool (Int,Int) Selection
+
+conversationViewParser :: M.Map Int Document -> Value -> Parser (Text,ConversationSeed)
 conversationViewParser documents=withObject "conversation view" $ \o->do
   target<-o .: "target"
   unless (T.length target<=128 && not (T.any (<' ') target)) (fail "Invalid conversation target")
@@ -238,10 +249,11 @@ conversationViewParser documents=withObject "conversation view" $ \o->do
   unless (T.length name<=256 && not (T.any (<' ') name)) (fail "Invalid conversation name")
   draft<-o .: "draft" >>= bufferParser
   selected<-o .: "selection" >>= selectionParser (bufferLength draft)
+  focused<-o .: "focused"
   (row,col)<-o .: "scroll"
   unless (row>=0 && col>=0 && row<=1000000000 && col<=1000000000) (fail "Invalid conversation scroll")
   replySelection<-o .: "replySelection" >>= selectionParser (bufferLength (documentBuffer doc))
-  pure (target,ConversationView bid name draft selected (row,col) replySelection)
+  pure (target,ConversationSeed bid name draft selected focused (row,col) replySelection)
 
 windowValue :: Window -> Value
 windowValue original=object ["id" .= windowId w,"bufferId" .= bufferId w,"number" .= windowNumber w,"bounds" .= rectValue (bounds w),
@@ -275,10 +287,10 @@ sidebarValue tree=object ["root" .= treeRoot tree,"selected" .= selected,"scroll
     scrolled=locate (case topPath of Just path->Just path; Nothing->resourceAt (treeScroll tree))
     rows=[object ["name" .= name,"path" .= path,"depth" .= depth,"directory" .= directory,"expanded" .= expanded] | (name,path,depth,directory,expanded)<-values]
 
-desktopParser :: Desktop -> Value -> Parser Desktop
+desktopParser :: Desktop -> Value -> Parser (Desktop,[(Text,ConversationSeed)])
 desktopParser baseline=withObject "checkpoint" $ \o->do
   version<-o .: "schemaVersion"
-  unless (version==(1::Int)) (fail "Unsupported checkpoint version")
+  unless (version==(2::Int)) (fail "Unsupported checkpoint version")
   size@(cols,rows)<-o .: "screen"
   unless (cols>0 && rows>0 && cols<=4096 && rows<=4096 && toInteger cols*toInteger rows<=1048576) (fail "Invalid desktop dimensions")
   encodedDocuments<-o .: "buffers"
@@ -306,15 +318,12 @@ desktopParser baseline=withObject "checkpoint" $ \o->do
   unless (maybe True (`M.member` M.fromList pinned) selectedTerminal) (fail "Unknown selected terminal")
   ident<-o .: "nextId" >>= positive
   unless (all (<ident) (M.keys documents++map windowId views)) (fail "Invalid next ID")
-  composer<-o .: "composer" >>= bufferParser
-  composerSelection'<-o .: "composerSelection" >>= selectionParser (bufferLength composer)
-  composerFocused'<-o .: "composerFocused"
   selectedTarget<-o .:? "conversationTarget" .!= ""
   encodedViews<-o .:? "conversationViews" .!= []
   unless (length encodedViews<=1024) (fail "Too many conversation views")
   parsedViews<-mapM (conversationViewParser documents) encodedViews
   let conversationViews'=M.fromList parsedViews
-  unless (length parsedViews==M.size conversationViews' && S.size (S.fromList (map (conversationBufferId.snd) parsedViews))==length parsedViews) (fail "Duplicate conversation views")
+  unless (length parsedViews==M.size conversationViews' && S.size (S.fromList [bid | (_,ConversationSeed bid _ _ _ _ _ _)<-parsedViews])==length parsedViews) (fail "Duplicate conversation views")
   unless (T.null selectedTarget || M.member selectedTarget conversationViews') (fail "Unknown selected conversation")
   directory<-o .: "directory" >>= traverse (checkedPath True)
   sidebar<-o .: "sidebar" >>= traverse sidebarParser
@@ -330,15 +339,15 @@ desktopParser baseline=withObject "checkpoint" $ \o->do
   mode<-prefs .: "videoMode" >>= traverse (boundedInt 0 65535)
   problems<-prefs .: "problemsVisible"; preferred<-prefs .: "problemsHeight" >>= boundedInt 0 4096
   messages<-prefs .: "messagesNumber" >>= traverse positive
-  pure (layoutBottomWindows (normalizeBottom baseline {dockedTerminals=M.fromList pinned,bottomTerminal=selectedTerminal,screenSize=size,buffers=documents,windows=views,pluginWindows=M.fromList [(reference,prepared) | w<-views,Just (reference,prepared)<-[M.lookup (windowId w) recovered]],retiredPluginWindows=S.fromList [reference | w<-views,PluginContent reference<-[windowContent w]],nextId=ident,composerBuffer=composer,composerSelection=composerSelection',composerFocused=composerFocused',
-    conversationTarget=selectedTarget,conversationViews=conversationViews',defaultDirectory=directory,sideTree=sidebar,wideSectionTitles=wideTitles,windowPresentations=M.empty,wordStar=wordStar',blinkCursor=blink,crtFilter=crt,pixelateUnicode=pixelate,materialIcons=icons,streamerMode=streamer,
+  pure (layoutBottomWindows (normalizeBottom baseline {dockedTerminals=M.fromList pinned,bottomTerminal=selectedTerminal,screenSize=size,buffers=documents,windows=views,pluginWindows=M.fromList [(reference,prepared) | w<-views,Just (reference,prepared)<-[M.lookup (windowId w) recovered]],retiredPluginWindows=S.fromList [reference | w<-views,PluginContent reference<-[windowContent w]],nextId=ident,editorDrafts=M.empty,editingInput=MountedInput,
+    conversationTarget=selectedTarget,conversationViews=M.empty,defaultDirectory=directory,sideTree=sidebar,wideSectionTitles=wideTitles,windowPresentations=M.empty,wordStar=wordStar',blinkCursor=blink,crtFilter=crt,pixelateUnicode=pixelate,materialIcons=icons,streamerMode=streamer,
     defaultBufferView=toEnum defaultView,chatSubmit=submit,macKeySymbols=macSymbols,appearance=toEnum look,videoMode=mode,problemsVisible=problems,problemsPreferredHeight=preferred,messagesNumber=messages,
     menu=Nothing,dialog=Nothing,drag=Nothing,dragOriginal=Nothing,clipboard="",clipboardCode=Nothing,clipboardExport=(0,Nothing),prefix=Nothing,blockStart=Nothing,
     status="Recovered session. Background processes ended; reconnect agents as needed.",lastFind="",branchStatus="",branchAdded=0,branchDeleted=0,branchRoot=Nothing,
     gitReview=Nothing,hoverTarget=Nothing,typeHint="",buttonHover=Nothing,buttonPressed=Nothing,contextMenu=Nothing,contextKind=SourceContext,contributedMenus=contributedMenus baseline,agentMenuRefs=agentMenuRefs baseline,menusActive=menusActive baseline,contextTarget=Nothing,
     diagnostics=[],diagnosticsGeneration=diagnosticsGeneration baseline+1,buildDiagnostics=[],problemsSelected=0,problemsScroll=0,problemsFocused=False,statusHover=Nothing,heldModifiers=[],
     autocompleteACPEnabled=False,autocompleteDraft=newBuffer "",autocompleteSelection=Selection 0 0,autocompleteFocused=True,
-    childAgentSettings=[],childAgentSteering=False,childAgentContextUsage=Nothing,agentSteering=False,agentReplying=False,agentQueued=0,agentContextUsage=Nothing,chatQuestion=Nothing,chatActions=[],chatInputOffset=Nothing}))
+    childAgentSettings=[],childAgentSteering=False,childAgentContextUsage=Nothing,agentSteering=False,agentReplying=False,agentQueued=0,agentContextUsage=Nothing,chatQuestion=Nothing,chatActions=[],chatInputOffset=Nothing}),parsedViews)
 
 documentParser :: Value -> Parser (Int,Document)
 documentParser=withObject "document" $ \o->do
@@ -377,7 +386,7 @@ windowParser documents plugins=withObject "window" $ \o->do
     checkedStamp<-traverse (\(version,columns)->(,) <$> boundedInt 0 1073741823 version <*> boundedInt 1 1048576 columns) stamp
     pure (MarkdownInteraction selectedPreview rowPreview colPreview checkedStamp))
   let view=if sourceView && (toEnum viewIndex/=MarkdownView || maybe False markdownDocument (M.lookup (fromMaybe 0 bid) documents)) then toEnum viewIndex else CurrentView
-  Window ident content rectangle selected row column restored <$> o .: "hexLow" <*> o .: "hexAscii" <*> pure number <*> pure view <*> pure Nothing <*> pure split <*> pure preview <*> pure Nothing <*> pure Nothing
+  Window ident content rectangle selected row column restored <$> o .: "hexLow" <*> o .: "hexAscii" <*> pure number <*> pure view <*> pure Nothing <*> pure split <*> pure preview <*> pure Nothing <*> pure Nothing <*> pure Nothing
 rectParser :: Value -> Parser Rect
 rectParser value=do
   (x,y,w,h)<-parseJSON value

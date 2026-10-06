@@ -2,10 +2,12 @@
 
 Status: implemented typed command registration, immutable buffer reads and checked
 strict diffs, scoped menus/bindings, shared sidebar trees, prepared plugin text
-windows, fixed rows with readonly Details, and host-owned input and choice forms.
+windows, fixed rows with readonly Details, persistent multiline editors, and
+host-owned input and choice forms.
 The current APIs are in
-`Hide.Plugin.Command`, `Buffer`, `Menu`, `Tree`, `Sidebar`, `Window` and `Form`. The signatures
-below sketch the broader proposed contracts and are not a compilable SDK. The
+`Hide.Plugin.Command`, `Buffer`, `Menu`, `Tree`, `Sidebar`, `Window`, `Editor` and
+`Form`. The signatures below sketch the broader proposed contracts and are not a
+compilable SDK. The
 approved [sidebar design](../plans/sidebar-navigation.md) supplies the navigation
 model.
 
@@ -31,9 +33,10 @@ workspace expires that request. Once creation commits, the new agent has its own
 lifetime.
 
 The checked host results support agent creation, rename, configuration and
-saved-file basename rename. Arbitrary widget actions and embedded editable plugin
-windows remain separate work. Agent input cannot operate these forms. The linked
-owner declares capture disclosure when preparing a form; refresh cannot change
+saved-file basename rename. Persistent multiline input is described below;
+arbitrary widget actions remain separate work. Agent input cannot operate these
+forms. The linked owner declares capture disclosure when preparing a form;
+refresh cannot change
 it. Rename and new-agent forms are private. Model/effort forms expose filtered
 public capability labels, preserving readable agent settings without allowing
 agent input. A readable form is no authority to expose protected source or session
@@ -296,6 +299,42 @@ and selecting another row cannot retarget a captured action. Close/reopen and
 registration retirement reject late actions. Closing the manager leaves transfers
 running and progress cannot reopen it. Durable rows restore only a private inert
 label summary; recovery does not reconnect jobs or restore actions/Details.
+
+### Embedded editor ownership
+
+`Hide.Plugin.Editor` attaches persistent multiline input to a window. The host
+owns its draft, Undo history, caret, selection and focus separately from the
+prepared body. Both prepared plugin windows and conversation windows use this
+input path. Body refreshes preserve the draft.
+
+Prepare a draft under `withDraftRef` and bind its default and alternate slots to
+ordinary typed commands with `editorAction`. `prepareEditor` supplies initial
+text; `remountEditor` reuses retained input. Publish the body and attachment
+together through `Hide.Plugin.Window.openEditorWindow`. The menu or sidebar
+owner accepts both in one operation, or neither. Refreshing ordinary prepared
+content cannot install new actions or reset input.
+
+A draft outlives its visible mount. Switching conversations retains each draft;
+closing and reopening a window creates a fresh mount. Ending the owning session
+or plugin scope releases the retained draft. A widget has one live attachment;
+opening it through another owner must not take over its state. Input requires the
+current focused mount. Outstanding clipboard reads expire on a focus or target
+change, even if the user switches back before the reply arrives.
+
+Submission captures the action, target, provider and exact draft version before
+worker execution. An accepted response can clear that version even while its
+draft is hidden, but cannot clear newer typing or a same-text replacement.
+Existing command and provider workers own execution; input preparation never
+runs plugin callbacks on the UI owner. A plugin reply uses `clearEditorDraft` or
+`replacementEditorDraft` with the captured submission. Refused or stale replies
+preserve the draft. Two slots may invoke the same command with different typed
+arguments; labels do not resolve commands. Recovery restores conversation drafts
+into fresh identities and never restores callable bindings or replays submissions.
+
+This step retains the current transcript representation. Moving its bubble-aware
+copy, relative links, shell blocks and protected question controls into prepared
+semantic content is a separate migration. Human input and approval authority
+remain host-owned throughout.
 
 ### Broader proposed window contract
 

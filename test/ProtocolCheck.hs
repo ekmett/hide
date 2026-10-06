@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 module ProtocolCheck (checks) where
+import EditorFixture (withEditorFixture)
 import Control.Exception (SomeException, bracket, try, evaluate, displayException)
 import Control.DeepSeq (force)
 import GHC.Conc (getAllocationCounter)
@@ -32,7 +33,7 @@ import Hide.Unicode (Script(..))
 import Hide.RemoteWindow (RemoteCell(..),RemoteFrame(..),parseRemoteFrame)
 
 checks :: IO ()
-checks = do
+checks = withEditorFixture "" (initialDesktop (80,25)) $ \primary->do
   let check name ok=unless ok (error name)
       rejects name action=do
         result<-try action :: IO (Either SomeException ())
@@ -162,10 +163,9 @@ checks = do
   check "queued native and browser menu checks share current availability" (not (menuCommandAvailable unavailable SplitVertical) && null (snd (applyInput (MenuCommand SplitVertical) unavailable)))
   let emptySaveMenu=snapshotHtml unavailable {menu=Just (0,2)}
   check "main menu renders unavailable Save with disabled foreground" ("color:rgb(85,85,85);background:rgb(0,170,0)" `T.isInfixOf` emptySaveMenu)
-  let primary=selectConversationView "" "Primary" (initialDesktop (80,25))
-      drafted=primary {composerBuffer=newBuffer "unsent",composerSelection=Selection 6 6}
-      child=selectConversationView "child" "Worker" drafted
-  check "browser exit protects an inactive conversation draft" (webDirty child)
+  let drafted=setComposerInput (newBuffer "unsent") (Selection 6 6) True primary
+  withEditorFixture "child" drafted $ \child->
+    check "browser exit protects an inactive conversation draft" (webDirty child)
   _<-foldFrames check [] screens
   rejects "unknown display encoding rejected" (decodeFrame [] (BS.pack [9]) >> pure ())
   rejects "bad compressed stream rejected" (decodeFrame [] (BS.pack [0,255,255]) >> pure ())

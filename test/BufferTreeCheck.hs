@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module BufferTreeCheck (checks) where
 
+import EditorFixture (withEditorFixture)
 import Control.Monad (foldM, forM_, unless)
 import Control.Exception (evaluate)
 import GHC.Conc (getAllocationCounter)
@@ -295,7 +296,7 @@ batchChecks = do
 -- Check the existing Text policy independently at every scalar position, including
 -- inside combining/ZWJ sequences. Word motion intentionally is not grapheme motion.
 wordChecks :: IO ()
-wordChecks=do
+wordChecks=withEditorFixture "" (Model.addReadOnly "Conversation" "trace" (Model.initialDesktop (80,25))) $ \chatBase->do
   let fixtures=["", "alpha beta\n gamma", "a\r\n\r\n b", "a!! ???b\n", "界e\x301\x200d😀  \n_z'\t+", "  \n \n", "one\n two\n"]
       verify b=let text=contents b in forM_ [0..T.length text] $ \p->
         check "measured scalar word motion matches Text"
@@ -319,7 +320,7 @@ wordChecks=do
       contents (undo (Model.documentBuffer result))==source)
   let wordStar=Model.modifyActive (\w->w {Model.selection=Selection 8 8}) base {Model.wordStar=True}
       star=fst (Model.handleEvent (V.EvKey (V.KChar 'f') [V.MCtrl]) wordStar)
-      composer=(Model.addReadOnly "Conversation" "trace" base) {Model.composerFocused=True,Model.composerBuffer=newBuffer source,Model.composerSelection=Selection 8 8}
+      composer=Model.setComposerInput (newBuffer source) (Selection 8 8) True chatBase
       moved=fst (Model.handleEvent (V.EvKey V.KRight [V.MCtrl]) composer)
   check "WordStar and composer retain their word owner"
     (fmap (caret . Model.selection) (Model.activeWindow star)==Just (wordRight source 8) &&
