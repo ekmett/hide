@@ -1842,7 +1842,7 @@ submitConversationEditor runtime@(ConversationState _ ref _ agents) mount slot o
               (Left err,_)->pure d {status=err}
               (_,Nothing)->pure d {status="Conversation input expired."}
               (Right context',Just submitted)
-                | T.null target && slot==Editor.DefaultEditor && (not (isNothing (promptPreparation state)) || not (null (queuedQueries state)))->do
+                | T.null target && slot==Editor.DefaultEditor && (busy state || not (null (queuedQueries state)))->do
                     let queued=queuedQueries state++[EditorQuery submitted context' editor]
                     modifyIORef' ref (\s->s {queuedQueries=queued})
                     pure d {status="Query queued for preparation.",agentQueued=length queued,agentReplying=True}
