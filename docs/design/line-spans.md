@@ -2,21 +2,20 @@
 
 Status: in progress, 5 October 2026. Tracked in [issue #116](https://github.com/ekmett/hide/issues/116).
 Loaded long rows retain their original text and share lazy measured blocks of
-regular span receipts. Queries extend the cached prefix as needed. The first edit
-promotes that row to a measured tree for persistent local repair. Exact width
-remains available as a separate memoized full-row calculation for explicit
-queries. Ordinary Current source scrollbars estimate unvisited suffixes rather
-than demand that calculation on opening or paint.
+regular span receipts. Queries extend the cached prefix as needed. Edits retain
+unchanged ranges of those immutable owners and repair the joins. Exact width is
+an explicit query; ordinary Current source scrollbars estimate unvisited suffixes
+on both loaded and edited rows.
 
 We want cheap horizontal seeks and small edits in long lines. Dice the text into
 borrowed spans at roughly **128-byte intervals**. Keep old spans after an edit;
 merge short neighbors and split ones that grow too long. The cuts do not need to
 be canonical. There is no reason to compute a rolling hash to choose them.
 
-The outer finger tree still owns lines, provenance and Undo. An inner span tree
-must help the operations that actually need it: drawing a horizontal viewport,
-hit testing, selection and navigation. Flattening it before those operations
-would undo the work.
+The outer finger tree owns lines, provenance and Undo. An edited long row has
+an inner tree of source ranges. Its raw measures locate bytes and scalars without
+preparing display receipts. Drawing, hit testing and navigation demand only the
+necessary display prefix and visible spans.
 
 ## Cuts
 
@@ -49,20 +48,21 @@ borrowed spans. Loading and whole-text export do not force that stream. Saving
 encodes raw stored pieces directly: the original loaded text or an edited row's
 borrowed leaves, without scalar slicing, display indexing or an intermediate
 whole-line `Text`. The saved disk baseline remains a strict byte string, prepared
-before atomic replacement. A span
-stores no absolute source position: prefix measures supply it, so an insertion
-does not renumber the suffix. New typed text supplies
-new backing storage. Adjacent slices of the same array can be joined without a
-copy; crossing arrays requires copying only the small repaired region.
+before atomic replacement.
 
-The first edit of a loaded long row forces its remaining span receipts and
-promotes the row to a measured finger tree. This preparation is linear in that
-row; its span payloads remain shared with the previous immutable line in Undo.
-Later local edits locate the affected spans, splice the new text, and repair the
-join and adjacent short or oversized spans. Reuse the untouched suffix. Editing
-one character must not make us recut an otherwise unchanged periodic line.
-Chunk boundaries may depend on edit history; bytes, coordinates and rendering
-must not.
+An edited piece stores a range in an immutable source owner. Those coordinates
+belong to the original backing text; an insertion does not renumber the suffix.
+The piece tree measures bytes, scalars and content fingerprints strictly, while
+its complete display advance stays lazy. Each piece references an owner directly,
+never a previous edited row or a pending recipe for repairing it.
+
+The first edit retains the original owner, locates the affected receipts and
+repairs the join. It does not convert the untouched suffix into another tree.
+New typed text supplies new backing storage. Repaired spans retain the actual
+incoming Unicode cursor and outgoing overflow receipt. Adjacent slices of the
+same array can be joined without copying; crossing arrays copies only the small
+repaired region. Cuts may depend on edit history; bytes, coordinates and
+rendering must not.
 
 Unicode context still matters at a join. Reuse a suffix only when its captured
 segmentation state is valid there, and use the immutable edit splice to establish
@@ -95,10 +95,17 @@ Each receipt belongs to one block, with no duplicate retained receipt list or
 second complete presentation tree. The first uncached seek still runs
 synchronously; grouping does not move that work onto a background worker.
 
-The stream belongs to the immutable source line. Forcing its thunks changes no
-content identity, revision, dirty state or Undo. Only a real edit promotes it to
-the existing persistent measured tree. Scalar metadata and explicit whole-text
-reads remain independent of display preparation.
+The receipt index belongs to its immutable source owner. Forcing its thunks
+changes no content identity, revision, dirty state or Undo. Editing preserves
+that owner for unchanged ranges. Scalar metadata and explicit whole-text reads
+remain independent of display preparation.
+
+For an edited row, a scalar seek splits the raw piece tree and measures only the
+selected owner's prefix. Complete preceding pieces contribute their cached
+column transforms. A cell seek brackets the requested column with scalar probes,
+then searches for its complete display-item boundary. This composes piece-tree
+and owner-index lookups; it is not the single Loaded checkpoint search described
+above. A first distant query can still prepare the intervening source prefix.
 
 LSP UTF-16 position lookup borrows only the requested scalar prefix of its
 measured source row, preserving interior CR and clamping at its actual
@@ -109,8 +116,8 @@ compact representation and existing query path.
 Ordinary Current source scrollbars use the indexed prefix plus a conservative
 byte-derived estimate for the unvisited suffix. Arrow/page scrolling and drag
 seeks query the real prospective viewport; reaching EOF immediately clamps to
-its actual extent. An end drag can demand the whole row. Edited rows already
-have an exact measured extent. Tabs, Unicode and CR/LF use the same source
+its actual extent. An end drag can demand the whole row. Edited rows use the
+same estimate-until-needed rule. Tabs, Unicode and CR/LF use the same source
 coordinate rules as rendering and hit testing.
 
 A small per-window thumb hint retains a discovered extent when moving left. It
@@ -120,9 +127,9 @@ an old width. The thumb can briefly show an old estimate until the next seek
 refines it. Review and prepared Markdown geometry remain unchanged. File opening,
 recovery, debugger source preparation and interactive highlighting no longer
 prewarm total widths just for source scrollbars. Explicit exact width queries
-still perform a memoized numeric full-row scan; no hidden background scan is
-scheduled to stabilize the thumb. The first edit promotion described above
-remains linear in the loaded row.
+still demand the whole row: loaded rows use their independent numeric scan,
+while edited rows compose their owners' range advances. No hidden background
+scan is scheduled to stabilize the thumb.
 
 Hover rejects EOF using the reached source scalar offset and cached row length.
 Viewport queries normalize consumed line terminators to the editor's EOF without
@@ -153,9 +160,14 @@ Tab p s <> Tab q t = Tab p (next8(s + q) + t)
 identity           = Add 0
 ```
 
-The operation is associative because it composes these transforms. A measured
-prefix gives the absolute display column; only the selected span and visible
-successors need decoding. Source styles remain scalar ranges. Fused text runs
+The operation is associative because it composes these transforms. Owner ranges
+use cached endpoint columns and the first tab-containing receipt to derive their
+transform; cumulative tab transforms cannot simply be subtracted. Raw range
+fingerprints use the corresponding scalar prefix hashes. Neither query changes
+the owner or requires a second edited display index.
+
+A measured prefix gives the absolute display column; only the selected span and
+visible successors need decoding. Source styles remain scalar ranges. Fused text runs
 stop at their backing span and style boundary, rather than demanding a flattened
 line to borrow from.
 
@@ -164,9 +176,11 @@ line to borrow from.
 - Concatenating span bytes reproduces the original input exactly. Scalar and
   display queries agree with the flat source model, including positions inside
   a glyph, tabs, zero-width items, CRLF and overflow fragments.
-- Local edits preserve untouched spans and Undo sharing. Check middle rows with
-  following rows as well as a single long row; the existing splice contract
-  includes the final empty row when appropriate.
+- Local edits preserve untouched ranges and Undo sharing. Check the first edit
+  through actual paint, hit testing and scrolling, then separated edits and
+  batches made without painting. Check middle rows with following rows as well
+  as a single long row; the splice contract includes the final empty row when
+  appropriate.
 - Splitting or rebalancing preserves captured overflow at artificial leaf EOF.
   Test caps, combining marks, regional indicators and ZWJ sequences at cuts.
 - A left-edge viewport does not prepare a distant suffix. Extending the viewport

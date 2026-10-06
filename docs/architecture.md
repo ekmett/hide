@@ -59,11 +59,11 @@ and copied text remain unchanged. Cursor-only redraws reuse prepared styling. UT
 and scans only the prefix of the target line. Disjoint edit batches share
 untouched subtrees and create one undo step.
 
-The proposed [regular line spans](design/line-spans.md) use roughly 128-byte
-borrowed slices and local split/merge repair. A display index should prepare only
-as far as a requested viewport needs, retaining Unicode context and tab-aware
-measures. The design covers storage, lazy preparation and the source-window
-callers that must use those measures.
+[Regular line spans](design/line-spans.md) use roughly 128-byte borrowed slices
+and local join repair. Immutable source owners share lazy display checkpoints;
+edited rows retain ranges of those owners in a tree measured by raw bytes and
+scalars. Viewport queries demand display metadata as needed, preserving Unicode
+context and tab-aware advances. Raw save and Undo do not require that index.
 
 Skylighting supplies the language definitions. The filename chooses the grammar
 and the editor maps token categories into its palette. Hex buffers preserve raw
