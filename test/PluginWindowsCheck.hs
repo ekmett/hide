@@ -393,7 +393,7 @@ rowsChecks=W.withWindowScope $ \scope->withDocsCommands $ \docs->withMenuCommand
       (bar,_)=maybe (error "missing Details scrollbar") id (windowScrollbar longWindow True current)
       paged=fst (handleEvent (V.EvMouseDown (left bar) (top bar+2) V.BLeft []) longWindow)
   check "Details track pages by its viewport rather than the full list window"
-    (fmap scrollRow (activeWindow paged)==Just (height (snd (rowsWindowRects current))))
+    (fmap scrollRow (activeWindow paged)==Just (height (snd (rowsWindowRects longWindow current))))
   let chosen=move (V.EvKey V.KDown []) opened
       focused=move (V.EvKey (V.KChar '\t') []) chosen
       allDetails=fst (runCommand SelectAll focused)
@@ -412,7 +412,7 @@ rowsChecks=W.withWindowScope $ \scope->withDocsCommands $ \docs->withMenuCommand
     (selected refreshed==Just (RowsInteraction b True) && fmap selection (activeWindow refreshed)==fmap selection (activeWindow copied))
   check "bounded painter displays list and selected Details" (all (`T.isInfixOf` snapshot refreshed) ["B progress","A progress","BBB details updated"])
   let win=maybe (error "no window") id (activeWindow refreshed)
-      listRect=fst (rowsWindowRects win)
+      listRect=fst (rowsWindowRects refreshed win)
       wheeled=move (V.EvMouseDown (left listRect+1) (top listRect) V.BScrollDown []) refreshed
   check "wheel over list moves row selection" (selected wheeled==Just (RowsInteraction a False))
   check "source selection is untouched" (sourceSelection==fmap selection (findSource wheeled))
