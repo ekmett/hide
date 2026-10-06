@@ -386,7 +386,7 @@ runWindow _ _ _ _ _ = ioError (userError "Graphical support is not built. Instal
 -- Empty bindings remove the accelerator; every additional chord remains raw input.
 nativeMenuShortcut :: Desktop -> Command -> (String,Int)
 nativeMenuShortcut d cmd
-  | prefix d/=Nothing = ("",0)
+  | Just _<-wordStarPrefixContext d = ("",0)
   | bindingInputAvailable d = nativeChordShortcut (commandBindingKeys d cmd)
   | otherwise = ("",0)
 

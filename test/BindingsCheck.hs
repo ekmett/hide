@@ -790,6 +790,10 @@ prefixChecks=do
     (selected block==Just (Selection 1 4) && activeText removed=="ho" && activeText (fst (runCommand Undo removed))=="hello")
   check "explicit global overrides apply inside the finite prefix table"
     (boundKeyCommand (V.KFun 13) [] started {keyBindings=prepare TerminalPlatform (M.singleton "global" (M.singleton "hide.edit.undo" ["F13"]))}==Just Undo)
+  let reservedGlobal=prepare TerminalPlatform (M.singleton "global" (M.singleton "hide.app.quit" ["Ctrl+Alt+X"]))
+      resolves context=bindingAction (reservedGlobal M.! (TerminalPlatform,context)) (V.KChar 'x') [V.MCtrl,V.MAlt]
+  check "reserved inherited global chords are omitted consistently across WordStar contexts"
+    (resolves SourceKeys==Just Quit && all ((==Nothing) . resolves) [WordStarKeys,WordStarBlockKeys,WordStarQuickKeys])
   check "duplicate second strokes reject the complete configuration"
     (either (const True) (const False) (platformBindings [] TerminalPlatform (M.singleton "wordstar-block" (M.singleton "hide.edit.undo" ["C"]))))
   let two=addDocument Nothing (newBuffer "second") defaults
@@ -828,6 +832,10 @@ prefixChecks=do
     (clipboard batch=="hello" && prefix (endGuestInput configured pending)==Nothing && clipboard (endGuestInput configured batch)==clipboard configured)
   let mac=configured {nativeMac=True,videoMode=Just 3,keyBindings=prepare MacPlatform configuration}
       macPending=event (V.KChar 'j') [V.MCtrl] mac
+  let retainedModal=prompt "Edit" Information [Input "Name" "draft" 5] macPending
+  check "a retained prefix cannot suppress the focused dialog labels or native accelerator"
+    (prefix retainedModal==Just 'k' && bindingContext retainedModal==Just DialogKeys && nativeMenuShortcut retainedModal Copy==("c",8) &&
+     boundKeyCommand (V.KChar 'c') [V.MMeta] retainedModal==Just Copy && any ((==Just (Left DialogAccept)).snd) (statusHints retainedModal))
   check "macOS prefix has no inherited Command clipboard default"
     (boundKeyCommand (V.KChar 'c') [V.MMeta] macPending==Nothing && menuShortcut mac (MenuItem "Copy" "Cmd+C" Copy)=="⌃J Y")
   where activeText d=maybe "" (contents . documentBuffer) (activeDocument d)

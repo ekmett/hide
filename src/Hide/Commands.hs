@@ -212,7 +212,7 @@ platformBindings catalogue platform configuration=do
           inherited=case context of
             TerminalKeys -> fmap (filter (not . processControlChord)) global
             DialogKeys -> fmap (filter (not . dialogChord)) $ M.filterWithKey (\name _->name `elem` [builtinIdentifier entry | entry<-builtinCommands,builtinAction entry `elem` dialogBindingCommands]) global
-            WordStarKeys -> fmap (filter (not . wordStarChord)) global
+            owner | owner `elem` [WordStarKeys,WordStarBlockKeys,WordStarQuickKeys] -> fmap (filter (not . wordStarChord)) global
             _ -> global
           overrides=M.union (M.findWithDefault M.empty (contextName context) configuration) inherited
       forM_ [(name,raw) | (name,chords)<-M.toList overrides,raw<-chords] $ \(name,raw)->do

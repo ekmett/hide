@@ -527,7 +527,7 @@ statusHintsRaw :: Desktop -> [(Text,Maybe (Either Command V.Event))]
 statusHintsRaw d
   | dragOriginal d/=Nothing = [(keyLabel d " ↑↓→← Move  Shift+↑↓→← Resize",Nothing),key "  ↵ Done" V.KEnter [],key "  Esc Cancel" V.KEsc []]
   | Just text<-menuHelp d = [command " F1" "Help" Help,(" | "<>text,Nothing)]
-  | Just c<-prefix d = [(prefixHint c,Nothing),key " Esc Cancel" V.KEsc []]
+  | Just c<-prefix d, wordStarPrefixOwner d = [(prefixHint c,Nothing),key " Esc Cancel" V.KEsc []]
   | Just dg<-dialog d, approvalDialog dg = [command " Tab" "Next" DialogFocusNext,key "  Alt+A Allow" (V.KChar 'a') [V.MAlt],key "  Alt+D Deny" (V.KChar 'd') [V.MAlt],command "  Esc" "Deny" DialogCancel]
   | Just dg<-dialog d, searching dg = [key " Ctrl+Tab Find/Replace" (V.KChar '\t') [V.MCtrl],command "  Tab" "Next" DialogFocusNext,command "  Enter" "Apply" DialogAccept,command "  Esc" "Cancel" DialogCancel] ++
       [command (if nativeMac d then "  Cmd+Alt+F" else "  Ctrl+H") "Replace" Replace]
