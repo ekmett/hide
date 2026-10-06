@@ -320,7 +320,7 @@ tickMenus host@(MenuHost menus _ sourceRefs _ ref closed) core original=
   pending<-menuPending <$> readIORef ref
   case pending of
     Nothing->pure d
-    Just (PendingEditor submitted worker)->finishMenuEditor host core d submitted worker
+    Just (PendingEditor submitted worker)->finishMenuEditor host d submitted worker
     Just (RetiringEditor _ reaper)->do
       completed<-poll reaper
       case completed of
@@ -400,9 +400,9 @@ submitMenuEditor (MenuHost _ _ _ _ ref _) mount slot origin d=mask $ \_->do
 
 -- Popup/menu refresh is unrelated to an already accepted editor invocation.
 -- Closing its frame refuses pre-admission work but cannot undo committed work.
-finishMenuEditor :: MenuHost -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> Editor.DraftSubmission
+finishMenuEditor :: MenuHost -> Desktop -> Editor.DraftSubmission
   -> Async (Either CommandError MenuReply) -> IO Desktop
-finishMenuEditor host@(MenuHost _ _ _ _ ref _) core d submitted worker=do
+finishMenuEditor host@(MenuHost _ _ _ _ ref _) d submitted worker=do
   state<-readIORef ref
   owning<-case M.lookup (Editor.submissionDraft submitted) (menuEditors state) of
     Just (scope,editor) | Editor.mountActions (Editor.editorMount editor)==Editor.mountActions (Editor.submissionMount submitted)->do

@@ -240,7 +240,7 @@ invokeEditorAction (PreparedEditor mount@(EditorMount _ (DraftRef _ draftLive) _
                 then pure False else writeTVar state Invoked >> pure True
             if not accepted then pure (Left (CommandRejected "Editor submission expired.")) else do
               result<-invoke registry command context captured
-              case result of Left err->pure (Left err); Right resultValue->Right <$> reply context resultValue
+              case result of Left err->pure (Left err); Right resultValue->Right <$> (reply context resultValue >>= evaluate)
   where selected=case submissionSlot submitted of DefaultEditor->normal; AlternateEditor->alternate
 
 -- | A result for one exact submitted draft. This cannot select another target,

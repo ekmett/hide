@@ -23,7 +23,7 @@ import Hide.BufferView
 import Hide.Defaults
 import qualified Hide.Plugin.Menu as PluginMenu
 import Hide.TextPresentation
-import qualified Hide.Plugin.Editor as Editor
+import qualified Hide.Plugin.EditorHost as Editor
 import qualified Hide.Plugin.Form as Form
 import Hide.PluginWindowHost (tickPluginWindows,retireClosedWindow)
 import Hide.MenuCommands

@@ -30,7 +30,6 @@ import qualified Hide.Plugin.Form as Form
 import qualified Hide.Plugin.Editor as Editor
 import Hide.AgentSidebarTypes
 import Hide.SessionSidebarTypes
-import qualified Hide.AgentHub
 import qualified Hide.Plugin.Tree as Tree
 import Hide.Plugin.Command (CommandRef)
 import Data.ByteString (ByteString)
@@ -39,7 +38,7 @@ import Data.Maybe (listToMaybe, fromMaybe, isJust)
 import Data.List (find, findIndex, sortOn, mapAccumL, groupBy, nub)
 import Data.Char (toLower, isAlphaNum, chr, ord, toUpper, isHexDigit, digitToInt)
 import Text.Read (readMaybe)
-import System.FilePath ((</>), takeDirectory, takeFileName, takeExtension, isAbsolute, equalFilePath, splitDirectories, joinPath, normalise)
+import System.FilePath ((</>), takeDirectory, takeFileName, takeExtension, isAbsolute, splitDirectories, joinPath, normalise)
 import Hide.Browser (Entry(..))
 import Hide.Git (GitReview)
 import Hide.Syntax (Style(..), SourceRow, prepareSourceRow, highlightFor, linkSpans, styleLayoutMetadata)
@@ -761,7 +760,7 @@ rowsWindowRects d w=(Rect (x+1) (y+1) inner listHeight,Rect (x+1) (y+listHeight+
 pluginTextRect :: Desktop -> Window -> Rect
 pluginTextRect d w=case rowsInteraction w of
   Just _->snd (rowsWindowRects d w)
-  _->let Rect x y ww hh=bounds w in Rect (x+1) (y+1) (max 0 (ww-2)) (pluginBodyRows d w)
+  _->let Rect x y ww _=bounds w in Rect (x+1) (y+1) (max 0 (ww-2)) (pluginBodyRows d w)
 
 -- The same reserved body extent feeds paint, hit maps and scrollbar limits.
 pluginBodyRows :: Desktop -> Window -> Int
@@ -2060,7 +2059,7 @@ composerQuery :: Bool -> Desktop -> Bool
 composerQuery opposite d=(chatSubmit d==QuerySubmit)/=opposite
 
 windowContentRows :: Desktop -> Document -> Window -> Int
-windowContentRows d doc w = max 0 (height (bounds w)-2-reserved)
+windowContentRows d _ w = max 0 (height (bounds w)-2-reserved)
   where reserved | windowHasEditor d w = height (composerRect d w)+1
                  | autocompletePane d w = height (autocompleteComposerRect d w)+1
                  | otherwise = 0

@@ -59,7 +59,7 @@ import qualified Hide.AgentACP as AP
 import Hide.Session (checkpointPath)
 import Hide.AgentFiles
 import Hide.Buffer
-import Hide.Plugin.BufferHost (ContentVersion,captureVersion,versionCurrent)
+import Hide.Plugin.BufferHost (versionCurrent)
 import Hide.Markdown (renderMarkdownWithShellBlocks)
 import Hide.AgentSidebarTypes
 import Hide.Model hiding (prompt)
@@ -597,7 +597,6 @@ tickConversation runtime@(ConversationState _ ref _ _) original = do
     query:rest | not (busy afterEvents), not (isNothing (connection afterEvents)), session afterEvents/=Nothing -> do
       text<-case query of
         SubmittedQuery value->pure (Just value)
-        EditorQuery{}->pure Nothing
         QuestionQuery ident actor receipt answer->do
           live<-providerCurrent receipt afterEvents
           active<-AH.statusAgent (AR.agentHub (conversationAgents runtime)) (AH.Agent actor) actor
@@ -1050,11 +1049,11 @@ paint=paintView ""
 
 paintView :: Text -> Bool -> State -> Desktop -> IO Desktop
 paintView target force s original
-  | not force && isNothing (conversationDocument target d) = pure original
+  | not force && isNothing (conversationDocument target base) = pure original
   | otherwise = do
     let shown=target==conversationTarget original &&
-          (isNothing (conversationDocument target d) || any (\w->maybe False (\(bid,_)->bufferId w==Just bid) (conversationDocument target d)) (windows d))
-    prepared<-ensureEditorWithState shown s target (if T.null target then "Primary" else target) d
+          (isNothing (conversationDocument target base) || any (\w->maybe False (\(bid,_)->bufferId w==Just bid) (conversationDocument target base)) (windows base))
+    prepared<-ensureEditorWithState shown s target (if T.null target then "Primary" else target) base
     questionKey<-questionIdentity (chatQuestion prepared)
     pure $ let
       d=prepared
@@ -1100,7 +1099,7 @@ paintView target force s original
       focused=case find ((==Just bid) . bufferId) (windows colored) of Just w | force && visible -> focusComposer (focusWindow (windowId w) colored); _ -> colored
       in focused
   where
-    d=if T.null target && T.null (conversationTarget original) then original else original {chatQuestion=Nothing}
+    base=if T.null target && T.null (conversationTarget original) then original else original {chatQuestion=Nothing}
     plain style=map (,style).T.unpack
     renderRecords _ []=[]
     renderRecords width rows@(record:rest)
@@ -1890,8 +1889,8 @@ pollDraftPreparation runtime@(ConversationState _ ref _ _) d submitted captured 
     Just result->do
       modifyIORef' ref (\state->state {promptPreparation=Nothing})
       state<-readIORef ref
-      let queued=any (isQueuedEditor submitted) (queuedQueries state)
-      current<-if queued then case captured of
+      let queuedInput=any (isQueuedEditor submitted) (queuedQueries state)
+      current<-if queuedInput then case captured of
         ChatEditorContext _ launch receipt _->do
           sameLaunch<-(==launch) <$> (makeStableName =<< evaluate (provider state))
           sameProvider<-maybe (pure True) (`providerCurrent` state) receipt
@@ -1904,7 +1903,7 @@ pollDraftPreparation runtime@(ConversationState _ ref _ _) d submitted captured 
           zone<-getCurrentTimeZone
           let admitted=stampReply now zone state
           writeIORef ref admitted
-          if queued then do
+          if queuedInput then do
             let accepted=admitted {queuedQueries=map (\query->if isQueuedEditor submitted query then SubmittedQuery text else query) (queuedQueries admitted),
                   transcript=transcript admitted++[Reply "You" (composerMarkdown text)]}
             writeIORef ref accepted
