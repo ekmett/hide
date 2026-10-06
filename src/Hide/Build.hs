@@ -122,8 +122,6 @@ buildPlan action config root source = do
         if not exists then pure (Left "Save the source file before building.") else case action of
           Compile -> pure (Right [(exe,["--make","-fno-code","-fdiagnostics-color=never",file])])
           Make -> pure (Right [(exe,["--make","-fdiagnostics-color=never",file])])
-          Test -> pure (Left "Tests require a Cabal project.")
-          Benchmark -> pure (Left "Benchmarks require a Cabal project.")
           Run -> do
             -- runghc's -f executes a path directly rather than searching PATH.
             compiler<-findExecutable (if isAbsolute exe then exe else if takeFileName exe/=exe then root </> exe else exe)
