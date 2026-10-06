@@ -86,7 +86,14 @@ checks = bracket temporary removePathForcibly $ \root -> do
   check "Cabal project builds with selected compiler" . (==Right [("cabal",["build"])]) =<< B.buildPlan B.Make ghc root (Just file)
   check "explicit Cabal compiler is preserved literally" . (==Right [("cabal",["build","--with-compiler=compiler with spaces"])]) =<< B.buildPlan B.Make (ghc {B.buildExecutable="compiler with spaces"}) root (Just file)
   check "automatic Cabal tests defer to project compiler" . (==Right [("cabal",["test","--test-show-details=direct"])]) =<< B.testPlan ghc root
+  forM_ [(B.Test,"test","sample:test:check",["--test-show-details=direct"]),(B.Benchmark,"bench","sample:bench:measure",[])] $ \(action,verb,target,details)->do
+    let selected=ghc {B.buildExecutable="compiler with spaces",B.buildTarget=target,B.buildArguments=["Run argument"],B.buildRuntime="Run runtime"}
+    check "captured runner uses the selected GHC and literal target" .
+      (==Right [("cabal",[verb,"--with-compiler=compiler with spaces"]++details++[T.unpack target])]) =<< B.buildPlan action selected root (Just file)
+    check "THC runner is explicitly refused" . (\result->case result of Left message->"THC" `T.isPrefixOf` message; _->False) =<< B.buildPlan action thc root Nothing
   removeFile (root </> "fixture.cabal")
+  forM_ [B.Test,B.Benchmark] $ \action->
+    check "runner requires a Cabal project" . (\result->case result of Left _->True; _->False) =<< B.buildPlan action ghc root (Just file)
   check "path spaces and warning location" (parseBuildDiagnostic root "src/My File.hs:12:3: warning: unused name" == Just (Diagnostic (root </> "src" </> "My File.hs") Nothing 11 2 2 "warning: unused name"))
   python<-findExecutable "python3" >>= maybe (findExecutable "python") (pure . Just)
   forM_ python $ \command -> withBuildJobs $ \jobs -> do

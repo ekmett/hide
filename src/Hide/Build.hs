@@ -94,12 +94,15 @@ parseBuildConfig (command:target:thcRoot:runtime:rest) = do
     else Right (BuildConfig tool executable target thcRoot runtime args)
 parseBuildConfig _ = Left "Incomplete build target settings."
 
--- | Construct executable/argument steps for compile, make or run; do not execute them.
+-- | Construct build/run/test/benchmark steps without executing them.
+-- Test and Benchmark use Cabal with the selected GHC and literal target.
 buildPlan :: BuildAction -> BuildConfig -> FilePath -> Maybe FilePath -> IO (Either Text [(FilePath,[String])])
 buildPlan _ config _ _
   | null (buildExecutable config) || any (elem '\0') (buildExecutable config:T.unpack (buildTarget config):T.unpack (buildTHCRoot config):T.unpack (buildRuntime config):buildArguments config) =
       pure (Left "Invalid executable or NUL character in build settings.")
   | "-" `T.isPrefixOf` buildTarget config = pure (Left "A target cannot start with '-'.")
+buildPlan Test config root _ = testPlan config root
+buildPlan Benchmark config root _ = benchmarkPlan config root
 buildPlan action config root source = do
   project<-isProject root
   let target=buildTarget config
@@ -139,3 +142,13 @@ testPlan config root
       project<-isProject root
       pure $ if not project then Left "Tests require a Cabal project." else
         Right [("cabal",["test"]++["--with-compiler="++buildExecutable config | buildExecutable config/="ghc"]++["--test-show-details=direct"]++[T.unpack (buildTarget config) | not (T.null (buildTarget config))])]
+
+-- | Plan a GHC/Cabal benchmark run. Runtime and program arguments are not
+-- benchmark options; the captured target does not change saved settings.
+benchmarkPlan :: BuildConfig -> FilePath -> IO (Either Text [(FilePath,[String])])
+benchmarkPlan config root
+  | buildToolchain config/=GHC = pure (Left "THC has no configured benchmark runner. Select GHC to run Cabal benchmarks.")
+  | otherwise = do
+      project<-isProject root
+      pure $ if not project then Left "Benchmarks require a Cabal project." else
+        Right [("cabal",["bench"]++["--with-compiler="++buildExecutable config | buildExecutable config/="ghc"]++[T.unpack (buildTarget config) | not (T.null (buildTarget config))])]
