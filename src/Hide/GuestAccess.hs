@@ -184,7 +184,7 @@ protectedPurpose :: Purpose -> Bool
 protectedPurpose p=case p of
   PluginChoiceForm{} -> True
   PluginInputForm{} -> True
-  AgentNewDialog -> True
+  PluginInputsForm{} -> True
   EnvironmentDialog{} -> True
   PermissionDialog{} -> True
   ChatInputSettings -> True
@@ -271,7 +271,7 @@ privateField field | Just (label,_)<-inputValue field=sensitiveLabel label
 privateField (CheckBox "Streamer mode" _)=True
 privateField _=False
 pluginForm :: Dialog -> Bool
-pluginForm dg=case purpose dg of PluginInputForm reference->private reference; PluginChoiceForm reference _->private reference; _->False
+pluginForm dg=case purpose dg of PluginInputForm reference->private reference; PluginInputsForm reference _->private reference; PluginChoiceForm reference _->private reference; _->False
   where private reference=Form.formDisclosure reference==Form.PrivateForm
 privateDialogField :: Desktop -> Dialog -> Field -> Bool
 privateDialogField d dg field=pluginForm dg || privateSourceWatch d dg || privateField field || case inputValue field of

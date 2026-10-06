@@ -6,6 +6,7 @@ import Control.Concurrent.MVar
 import Control.Exception (bracket)
 import Control.Monad (unless)
 import Data.Aeson
+import Data.IORef
 import Data.Aeson.Types (parseMaybe)
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.Map.Strict as M
@@ -55,7 +56,10 @@ checks=bracket temporary removePathForcibly $ \root->
     rememberSession record
     environment "THC_EDIT_SESSION" (Just (sessionId record)) $ withSidebarCommands $ \host->withConversationAt root $ \conversation->
       withAutocomplete root $ \autocomplete->withAgentSidebar (sidebarCapabilities host) SidebarAgent (conversationAgents conversation) autocomplete $ \agents->do
-        let core=autocompleteEffects autocomplete (conversationEffects conversation applyEffects)
+        createRequests<-newIORef []
+        let core desktop effects=do
+              modifyIORef' createRequests (++[(workspace,name,task) | AgentSidebarAction (CreateAgent workspace name task)<-effects])
+              autocompleteEffects autocomplete (conversationEffects conversation applyEffects) desktop effects
             tick d=tickConversation conversation d >>= tickAutocomplete autocomplete >>= \current->tickAgentSidebar agents >> tickSidebar host core current
             act (d,effects)=snd <$> sidebarEffects host core d effects
             hub=AR.agentHub (conversationAgents conversation)
@@ -88,6 +92,7 @@ checks=bracket temporary removePathForcibly $ \root->
             formRef desktop=case dialog desktop of
               Just dg->case purpose dg of
                 PluginInputForm reference->reference
+                PluginInputsForm reference _->reference
                 PluginChoiceForm reference _->reference
                 _->error "Missing typed form"
               _->error "Missing typed form"
@@ -100,7 +105,7 @@ checks=bracket temporary removePathForcibly $ \root->
         ensure "reopened form has a fresh lifetime" (captured/=formRef reopened)
         refusedOld<-act (reopened,snd (handleEvent (V.EvKey V.KEnter []) renamed))
         ensure "old form submission leaves reopened draft intact" (inputValue refusedOld==Just ("Primary",Selection 0 7))
-        deniedAgent<-act (refusedOld,[SubmitInputForm (formRef refusedOld) "Agent edit" Menu.AgentMenu])
+        deniedAgent<-act (refusedOld,[SubmitInputForm (formRef refusedOld) (Form.TextValue "Agent edit") Menu.AgentMenu])
         ensure "agent-origin form submission leaves human draft intact" (inputValue deniedAgent==Just ("Primary",Selection 0 7))
         let renamed=deniedAgent
         ensure "rename opens with current name selected" (inputValue renamed==Just ("Primary",Selection 0 7))
@@ -172,7 +177,7 @@ checks=bracket temporary removePathForcibly $ \root->
         ensure "captured child navigation opens existing attributed view" (conversationTarget childView==AH.agentIdText peer)
         primaryView<-act (childView,[AgentSidebarAction (ShowAgent primary)])
         ensure "Primary navigation restores Primary target" (T.null (conversationTarget primaryView))
-        ensure "agent input cannot manufacture human sidebar controls" (not (guestEffectsAllowed [AgentSidebarAction NewAgent]))
+        ensure "agent input cannot manufacture human sidebar controls" (not (guestEffectsAllowed [AgentSidebarAction (CreateAgent root "Guest" "Task")]))
         connecting<-act (primaryView,[AgentAction "send" ["0","Count files","false","false","false"]])
         connected<-await tick (\d->not (agentReplying d) && has "N  idle" d && any ((=="model").settingId) (agentSettings d) &&
           "Model" `elem` map fst (contextItemsFor (popupFor "N  idle" d))) connecting
@@ -190,21 +195,58 @@ checks=bracket temporary removePathForcibly $ \root->
         primaryUpdated<-act capturedPrimary >>= await tick (any (\option->settingId option=="model" && settingCurrent option=="large") . agentSettings)
         stalePrimary<-act (primaryUpdated,snd capturedPrimary) >>= await tick (T.isInfixOf "expired" . status)
         ensure "Primary model change retains its exact conversation" (T.null (conversationTarget stalePrimary))
-        -- Real New Agent dialog submits through the existing runtime/ACP owner.
+        -- Real named form remains private, preserves drafts and captures workspace.
         newDialog<-act (chooseMenu "Agents" stalePrimary) >>= await tick (maybe False ((=="New agent").dialogTitle) . dialog)
-        let fill=fmapDialog (\dg->dg {fields=[Input "Name" "Child" 5,Input "Task" "Count files" 11]}) newDialog
-        starting<-act (handleEvent (V.EvKey V.KEnter []) fill)
+        let fill=fmapDialog (\dg->dg {fields=[SelectedInput "Name" "Child" (Selection 1 3),SelectedInput "Task" "Count files" (Selection 2 5)],focus=1}) newDialog
+            malformed=fmapDialog (\dg->dg {fields=fields dg++[CheckBox "Extra" False]}) fill
+            wrongKind=fmapDialog (\dg->dg {fields=[CheckBox "Name" False,Input "Task" "Count files" 11]}) fill
+        ensure "named form projection refuses malformed field count and kind"
+          (null (snd (handleEvent (V.EvKey V.KEnter []) malformed)) && null (snd (handleEvent (V.EvKey V.KEnter []) wrongKind)))
+        ensure "New agent inputs are private and human controlled" (not (guestKeyboardAllowed fill) && case dialog fill of
+          Just dg->not (readableAt fill (left (dialogRect fill dg)+2) (top (dialogRect fill dg)+2))
+          _->False)
+        updateInputs<-Form.refreshForm (formRef fill)
+          (Form.InputsFormSpec "New agent" [Form.InputField "name" "Agent name" "RESET",Form.InputField "task" "Initial task" "RESET"] "Create") >>= right >>= maybe (fail "Missing input refresh") pure
+        publishFormRefreshFromHost host updateInputs
+        refreshedInputs<-await tick (\desktop->case dialog desktop of
+          Just dg->fields dg==[SelectedInput "Agent name" "Child" (Selection 1 3),SelectedInput "Initial task" "Count files" (Selection 2 5)] && focus dg==1
+          _->False) fill
+        let closedSubmission=snd (handleEvent (V.EvKey V.KEnter []) refreshedInputs)
+        cancelled<-act (handleEvent (V.EvKey V.KEsc []) refreshedInputs)
+        refusedCreation<-act (cancelled,closedSubmission)
+        attempted<-readIORef createRequests
+        ensure "closed New agent form cannot commit a spawn" (null attempted && dialog refusedCreation==Nothing)
+        staleDialog<-act (chooseMenu "Agents" refusedCreation) >>= await tick (maybe False ((=="New agent").dialogTitle) . dialog)
+        let staleInputs=fmapDialog (\dg->dg {fields=[Input "Name" "Stale child" 11,Input "Task" "Count files" 11]}) staleDialog
+            other=root </> "other"
+        createDirectoryIfMissing True other
+        staleStarting<-act (handleEvent (V.EvKey V.KEnter []) staleInputs)
+        let staleAdopted _=any (\(_,name,_)->name=="Stale child") <$> readIORef createRequests
+        refusedWorkspace<-awaitIO tick staleAdopted staleStarting {defaultDirectory=Just other}
+        afterStale<-AH.listAgents hub AH.Human >>= right
+        ensure "changed workspace refuses the captured spawn"
+          ("workspace changed" `T.isInfixOf` status refusedWorkspace &&
+           not (any (\entry->field "name" entry==Just ("Stale child"::T.Text)) (maybe [] id (field "agents" afterStale :: Maybe [Value]))))
+        -- A Files directory is not the editor's captured workspace.
+        relocated<-act (refusedWorkspace {defaultDirectory=Just root},[ReadTree other]) >>= await tick (\desktop->treeRoot (tree desktop)==other && has "Agents" desktop)
+        reopenedCreate<-act (chooseMenu "Agents" relocated) >>= await tick (maybe False ((=="New agent").dialogTitle) . dialog)
+        let childInputs=fmapDialog (\dg->dg {fields=[Input "Name" "Child" 5,Input "Task" "Count files" 11]}) reopenedCreate
+            createSubmission=handleEvent (V.EvKey V.KEnter []) childInputs
+        starting<-act createSubmission
         let createdAndQueued desktop=do
               directoryNow<-AH.listAgents hub AH.Human >>= right
               case [AH.AgentId who | entry<-maybe [] id (field "agents" directoryNow :: Maybe [Value]),field "name" entry==Just ("Child"::T.Text),Just who<-[field "id" entry]] of
                 who:_->do
                   history<-AH.historyAgent hub AH.Human who 0 100 >>= right
-                  pure (has "Child" desktop && any (\event->field "kind" event==Just ("message_queued"::T.Text)) (maybe [] id (field "events" history :: Maybe [Value])))
+                  pure (has "Child" desktop && length [() | event<-maybe [] id (field "events" history :: Maybe [Value]),field "kind" event==Just ("message_queued"::T.Text)]==1)
                 _->pure False
         started<-awaitIO tick createdAndQueued starting
+        replayed<-act (started,snd createSubmission)
+        requests<-readIORef createRequests
+        ensure "New agent form commits the captured values once" ([(workspace,task) | (workspace,"Child",task)<-requests]==[(root,"Count files")])
         directory<-AH.listAgents hub AH.Human >>= right
         let children=[entry | entry<-maybe [] id (field "agents" directory :: Maybe [Value]),field "name" entry==Just ("Child"::T.Text)]
-        ensure "New Agent enqueues its task without selecting its view" (length children==1 && T.null (conversationTarget started))
+        ensure "New Agent enqueues its task without selecting its view" (length children==1 && all (\entry->field "cwd" entry==Just (T.pack root)) children && T.null (conversationTarget replayed))
         ensure "background completion never steals focus" (fmap windowId (activeWindow started)==fmap windowId (activeWindow primaryView))
         childId<-case children of [entry] | Just who<-field "id" entry->pure (AH.AgentId who); _->error "Missing created child"
         let childReady desktop=do

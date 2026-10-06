@@ -49,7 +49,7 @@ import qualified Hide.Plugin.Menu as Menu
 
 -- | Captured host policy; extension labels and paths grant no authority.
 data SidebarContext = SidebarContext
-  { sidebarOrigin :: !Menu.MenuOrigin, sidebarContextDirectory :: !FilePath, sidebarProvider :: !(Maybe P.TreeRef), sidebarPrivatePaths :: ![FilePath]
+  { sidebarOrigin :: !Menu.MenuOrigin, sidebarContextDirectory :: !FilePath, sidebarContextWorkspace :: !FilePath, sidebarProvider :: !(Maybe P.TreeRef), sidebarPrivatePaths :: ![FilePath]
   , sidebarColumns :: !Int, sidebarOpened :: !(Maybe (FilePath,Int,Int,ContentVersion)), sidebarRenameFiles :: ![Rename.RenameFile] }
 data SidebarReply = SidebarPackageDebug !PackageBuildTarget !(Either Text FilePath) | SidebarBuild !BuildAction !PackageBuildTarget | SidebarRename !P.TreeRef !Rename.PreparedRename | SidebarForm !(Form.PreparedForm SidebarContext SidebarReply) | SidebarSession !SessionSidebarRequest | SidebarExisting !FilePath !Int !Int !ContentVersion | SidebarDocument !FilePath !Document | SidebarPrepared !LinkResult | SidebarAgent !AgentSidebarRequest | SidebarDebug !DebugSidebarRequest | SidebarWindow !PluginWindow.WindowUpdate
 
@@ -79,7 +79,7 @@ sidebarRegistry (SidebarHost registry _ _ _ _ _)=registry
 -- | Public contribution capabilities reuse this host's ordered close-aware
 -- queue. The host retains all currentness, privacy and presentation decisions.
 sidebarCapabilities :: SidebarHost -> PluginSidebar.Sidebar SidebarContext SidebarReply
-sidebarCapabilities host=PluginSidebar.Sidebar sidebarOrigin SidebarForm
+sidebarCapabilities host=PluginSidebar.Sidebar sidebarOrigin sidebarContextWorkspace SidebarForm
   (publishTreeFromHost host) (publishFormRefreshFromHost host) (tryInvalidateTree host)
 
 -- Nonblocking because metadata-owner ticks call this while input is serialized.
@@ -137,7 +137,7 @@ retireTreeFromHost (SidebarHost _ ref _ _ _ _) owner d=do
   pure d {sideTree=fmap (removeRoot owner) (sideTree d),contextMenu=Nothing,contextTarget=Nothing}
 
 context :: Menu.MenuOrigin -> Desktop -> SidebarContext
-context origin d=SidebarContext origin (maybe (startingDirectory d) treeRoot (sideTree d)) Nothing (guestPrivatePaths d) (max 20 (min 76 (fst (screenSize d)-treeWidthOf d-4))) Nothing []
+context origin d=SidebarContext origin (maybe (startingDirectory d) treeRoot (sideTree d)) (startingDirectory d) Nothing (guestPrivatePaths d) (max 20 (min 76 (fst (screenSize d)-treeWidthOf d-4))) Nothing []
 metadata :: P.NodeDef c r -> (P.NodeInfo,Maybe CommandRef,[(Text,P.TreeMenuTarget)])
 metadata node=(P.nodeInfo node,fmap P.actionReference (P.nodeAction node),map P.menuTarget (P.nodeMenus node))
 addProvider :: P.TreeProvider SidebarContext SidebarReply -> Sidebar -> Sidebar
@@ -705,7 +705,7 @@ badges (SidebarHost _ ref _ _ _ _) d=do
 -- Form ownership is independent of the source tree once the human accepted it.
 formDialog :: Form.FormRef -> Desktop -> Bool
 formDialog reference d=case dialog d of
-  Just dg->case purpose dg of PluginInputForm owned->owned==reference; PluginChoiceForm owned _->owned==reference; _->False
+  Just dg->case purpose dg of PluginInputForm owned->owned==reference; PluginInputsForm owned _->owned==reference; PluginChoiceForm owned _->owned==reference; _->False
   _->False
 adoptForm :: SidebarHost -> Bool -> Form.PreparedForm SidebarContext SidebarReply -> Desktop -> IO Desktop
 adoptForm (SidebarHost _ ref _ _ _ _) opening prepared d=do
@@ -722,10 +722,16 @@ adoptForm (SidebarHost _ ref _ _ _ _) opening prepared d=do
         build=case spec of
           Form.InputFormSpec _ label initial _->Dialog (Form.formTitle spec) (PluginInputForm reference)
             [SelectedInput label initial (Selection 0 (T.length initial))] 0 [Form.formSubmit spec,"Cancel"] []
+          Form.InputsFormSpec _ inputs _->Dialog (Form.formTitle spec) (PluginInputsForm reference (map Form.inputId inputs))
+            [SelectedInput (Form.inputLabel field) (Form.inputInitial field) (Selection 0 (T.length (Form.inputInitial field))) | field<-inputs]
+            0 [Form.formSubmit spec,"Cancel"] []
           Form.ChoiceFormSpec _ label choices initial _->Dialog (Form.formTitle spec) (PluginChoiceForm reference (Form.formRevision prepared))
             [ListBox label (map snd choices) (choiceIndex initial)] 0 [Form.formSubmit spec,"Cancel"] []
         refresh dg=dg {purpose=case spec of Form.ChoiceFormSpec{}->PluginChoiceForm reference (Form.formRevision prepared); _->purpose dg,dialogTitle=Form.formTitle spec,buttons=[Form.formSubmit spec,"Cancel"],fields=case spec of
           Form.InputFormSpec _ label _ _->[case field of SelectedInput _ text selected->SelectedInput label text selected; _->field | field<-fields dg]
+          Form.InputsFormSpec _ inputs _->[case field of
+            SelectedInput _ text selected->SelectedInput (Form.inputLabel input) text selected
+            _->field | (input,field)<-zip inputs (fields dg)]
           Form.ChoiceFormSpec _ label choices _ _->[case field of
             ListBox _ _ selected->
               let ident=inputForm state >>= \old->Form.formChoiceAt old selected
@@ -760,10 +766,10 @@ submitChoiceForm :: SidebarHost -> Form.FormRef -> Integer -> Int -> Menu.MenuOr
 submitChoiceForm host@(SidebarHost _ ref _ _ _ _) reference version selected origin d=do
   state<-readIORef ref
   case inputForm state of
-    Just prepared | Form.formReference prepared==reference,Form.formRevision prepared==version,Just value<-Form.formChoiceAt prepared selected->submitForm host reference value origin d
+    Just prepared | Form.formReference prepared==reference,Form.formRevision prepared==version,Just value<-Form.formChoiceAt prepared selected->submitForm host reference (Form.TextValue value) origin d
     _->pure d {status="Choice form expired."}
-submitForm :: SidebarHost -> Form.FormRef -> Text -> Menu.MenuOrigin -> Desktop -> IO Desktop
-submitForm (SidebarHost _ ref _ _ _ _) reference text origin d=mask $ \restore->do
+submitForm :: SidebarHost -> Form.FormRef -> Form.FormValue -> Menu.MenuOrigin -> Desktop -> IO Desktop
+submitForm (SidebarHost _ ref _ _ _ _) reference value origin d=mask $ \restore->do
   state<-readIORef ref
   case inputForm state of
     Just prepared | origin==Menu.HumanMenu,Form.formReference prepared==reference,formDialog reference d->
@@ -772,7 +778,7 @@ submitForm (SidebarHost _ ref _ _ _ _) reference text origin d=mask $ \restore->
         Nothing->do
           accepted<-Form.claimFormSubmission prepared
           if not accepted then pure d {status="Input form expired."} else do
-            worker<-async (restore (Form.invokeFormAction prepared (context origin d) text >>= traverse forceFormReply)) `onException` Form.retireForm reference
+            worker<-async (restore (Form.invokeFormAction prepared (context origin d) value >>= traverse forceFormReply)) `onException` Form.retireForm reference
             modifyIORef' ref (\s->s {actionJob=Just (FormJob reference worker False)})
             pure d {dialog=Nothing,status="Submitting input form..."}
     _->pure d {status="Input form expired."}
@@ -786,6 +792,12 @@ forceFormReply (SidebarAgent (RenameAgentTo who value))
       let copied=T.copy value
       _<-evaluate (T.length copied)
       evaluate (SidebarAgent (RenameAgentTo who copied))
+forceFormReply (SidebarAgent (CreateAgent workspace name task))
+  | length workspace>32768 || T.length name>8192 || T.length task>8192=ioError (userError "Oversized named form result.")
+  | otherwise=do
+      let copiedName=T.copy name; copiedTask=T.copy task
+      _<-evaluate (length workspace+T.length copiedName+T.length copiedTask)
+      evaluate (SidebarAgent (CreateAgent workspace copiedName copiedTask))
 forceFormReply reply@(SidebarAgent request)=case request of
   ConfigureAgent _ option value->checked option value
   ConfigureCompletion _ option value->checked option value
@@ -796,6 +808,7 @@ forceFormReply reply@(SidebarAgent request)=case request of
 forceFormReply reply@SidebarRename{}=evaluate reply
 forceFormReply _=ioError (userError "Unsupported single-line form reply.")
 acceptedFormRequest :: AgentSidebarRequest -> Bool
+acceptedFormRequest CreateAgent{}=True
 acceptedFormRequest RenameAgentTo{}=True
 acceptedFormRequest ConfigureAgent{}=True
 acceptedFormRequest ConfigureCompletion{}=True

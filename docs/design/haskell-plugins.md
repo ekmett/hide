@@ -9,36 +9,43 @@ below sketch the broader proposed contracts and are not a compilable SDK. The
 approved [sidebar design](../plans/sidebar-navigation.md) supplies the navigation
 model.
 
-**Agents > Rename** and **Files > Rename** use input forms. The Agents tree’s
-**Model** and **Effort** actions use choice forms for primary, child and ACP
-completion agents. A linked handler prepares an `InputFormSpec` or
-`ChoiceFormSpec` with a typed registered action, then embeds the form in a host
-reply through the supplied sidebar capability.
-The host owns the draft, selection, focus and modal geometry.
+**Agents > Rename** and **Files > Rename** use single-input forms. **New Agent**
+uses named Name and Task inputs. **Model** and **Effort** use choice forms for
+primary, child and ACP completion agents. A linked handler prepares an
+`InputFormSpec`, `InputsFormSpec` or `ChoiceFormSpec` with a typed registered
+action, then embeds the form in a host reply through the sidebar capability.
+The host owns drafts, selection, focus and modal geometry.
 
 Choices submit provider IDs, not labels or row numbers. Metadata refresh can
-relabel or reorder the same choices while preserving the selected ID. Changing
-the available IDs requires a new form. Input refresh preserves the typed draft
-and selected range. Both keep the same `FormRef`; closing and reopening creates a
-new reference. A human submission is claimed once, and its reply is adopted only
-while that form and its command registration remain current. Agent configuration
-also rechecks the captured provider/session receipt at its owning operation.
+relabel or reorder the same choices while preserving the selected ID. Named
+inputs submit a map keyed by field ID; their ordered IDs stay fixed for the life
+of the form. Changing either schema requires a new form. Input refresh preserves
+the typed drafts, selected ranges and focus. Closing and reopening creates a new
+`FormRef`.
 
-The checked host results support agent rename, saved-file basename rename and
-agent configuration. Arbitrary widget actions and embedded editable plugin
-windows remain separate work. Agent input cannot operate either kind of form.
-The linked owner declares capture disclosure when preparing it; refresh cannot
-change that declaration. Rename forms are private. Model/effort forms expose
-already-filtered public capability labels, preserving readable agent settings
-without allowing agent input. A readable form is no authority to expose protected
-source or session keys; its owner must remove those before preparation.
+A human submission is claimed once, and its reply is adopted only while that form
+and its command registration remain current. Agent configuration rechecks the
+captured provider/session receipt. New-agent creation captures the workspace at
+opening and checks it before starting the existing spawn worker. Changing the
+workspace expires that request. Once creation commits, the new agent has its own
+lifetime.
+
+The checked host results support agent creation, rename, configuration and
+saved-file basename rename. Arbitrary widget actions and embedded editable plugin
+windows remain separate work. Agent input cannot operate these forms. The linked
+owner declares capture disclosure when preparing a form; refresh cannot change
+it. Rename and new-agent forms are private. Model/effort forms expose filtered
+public capability labels, preserving readable agent settings without allowing
+agent input. A readable form is no authority to expose protected source or session
+keys; its owner must remove those before preparation.
 
 `Hide.Plugin.Sidebar` connects those prepared trees and forms to the session.
-Its `Sidebar c r` capability keeps the invocation context and host reply types
-opaque to the provider. The host supplies origin inspection, form replies and
-scoped publication; domain operations use a separate typed reply injection.
-`AgentSidebar` uses this boundary without importing the desktop model or its
-sidebar interpreter. Agent transports and the separate API package remain
+Its `Sidebar c r` capability keeps invocation context and host reply types opaque
+to the provider. The host supplies origin and workspace inspection, form replies
+and scoped publication; domain operations use a separate typed reply injection.
+The workspace is the editor's working directory, independent of the Files tree
+root. `AgentSidebar` uses this boundary without importing the desktop model or
+its sidebar interpreter. Agent transports and the separate API package remain
 independent work.
 
 ## Direction

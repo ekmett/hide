@@ -496,7 +496,8 @@ cannot rename through a closed registration or replace a newer dialog. Rename
 submission is human-only. Names remain unique.
 
 Right-click **Agents** and choose **New Agent** to enter a name and task. This starts
-a fresh agent in the current shared workspace and queues that task. Creation and
+a fresh agent in the shared workspace where the dialog was opened and queues that
+task. If the workspace changes before submission, reopen the dialog. Creation and
 directory updates stay in the background and do not select another conversation.
 This requires a persistent editor session. Existing orchestration tools continue
 to support explicit fork/worktree choices.

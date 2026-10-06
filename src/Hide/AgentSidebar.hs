@@ -107,7 +107,17 @@ withAgentSidebar host inject runtime autocomplete use=withRegistry $ \registry->
   completionOpen<-command "hide.sidebar.completion.open" "Completion conversation" (\ctx target->human ctx (ShowCompletion target))
   completionModel<-command "hide.sidebar.completion.model" "Completion model" (completionCommand "model")
   completionEffort<-command "hide.sidebar.completion.effort" "Completion effort" (completionCommand "thought_level")
-  create<-command "hide.sidebar.agents.new" "New Agent" (\ctx ()->human ctx NewAgent)
+  createTo<-command "hide.sidebar.agents.create" "Create agent" (\ctx (workspace,name,task)->human ctx (CreateAgent workspace name task))
+  create<-command "hide.sidebar.agents.new" "New Agent" (\ctx ()->
+    if Sidebar.sidebarOrigin host ctx/=Menu.HumanMenu then pure (Left (CommandRejected "Agent forms require the human.")) else do
+      let workspace=Sidebar.sidebarWorkspace host ctx
+      _<-evaluate (length workspace)
+      prepared<-Form.prepareForm Form.PrivateForm
+        (Form.InputsFormSpec "New agent" [Form.InputField "name" "Name" "",Form.InputField "task" "Task" ""] "Create")
+        (Form.inputsFormAction registry createTo (\values->case (M.lookup "name" values,M.lookup "task" values) of
+          (Just name,Just task)->Right (workspace,name,task)
+          _->Left (InvalidArguments "Missing agent name or task.")) (\_ reply->pure reply))
+      pure (Sidebar.formReply host <$> prepared))
   let root=P.NodeDef (P.NodeInfo rootId "Agents" "" True Nothing) Nothing [P.ActionMenu "New Agent" (P.treeAction registry create () (\_ value->pure value))]
       node values summary=
         let who=A.summaryId summary
