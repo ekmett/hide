@@ -19,6 +19,8 @@ import SidebarFixture
 import Hide.Sidebar
 import Hide.Model
 import qualified Hide.Protocol as P
+import qualified Hide.Plugin.Editor as E
+import qualified Hide.Plugin.Menu as Menu
 
 checks :: IO ()
 checks=withEditorFixture "" (addReadOnly "Conversation" "Session: provider-secret\nPublic transcript\nOther: private answer" (addDocument Nothing (newBuffer "file") (initialDesktop (100,35)))) $ \conversation->do
@@ -162,8 +164,8 @@ checks=withEditorFixture "" (addReadOnly "Conversation" "Session: provider-secre
     (readableAt dropdown 4 3 && not (readableAt dropdown 14 3) && not (pointerAllowedAt dropdown 4 3))
   check "ordinary preferences remain usable" . not =<< denied base {dialog=Just (Dialog "Find" (Searching False "") [Input "Text" "" 0] 0 ["Find"] [])} (P.Paste "needle")
   check "build dialogs remain usable" (guestEffectsAllowed [ServiceAction "make" [],ServiceAction "run-config" [],ServiceAction "terminal-input" ["1","ls\n"]])
-  check "agent lifecycle and permission effects are rejected"
-    (not (guestEffectsAllowed [AgentAction "send-draft" []]) && not (guestEffectsAllowed [AgentAction "question-submit" []]) && not (guestEffectsAllowed [PermissionAction "show" []]))
+  check "human editor, agent question and permission effects are rejected"
+    (not (guestEffectsAllowed [SubmitEditor (maybe (error "missing fixture mount") id (activeWindow conversation >>= windowEditorMount)) E.DefaultEditor Menu.HumanMenu]) && not (guestEffectsAllowed [AgentAction "question-submit" []]) && not (guestEffectsAllowed [PermissionAction "show" []]))
   let sticky=base {prefix=Just 'k',heldModifiers=[V.MCtrl],drag=Just (Selecting 0),buttonPressed=Just 0,clipboard="human secret",clipboardCode=Just "human secret",blockStart=Just (0,0)}
       isolated=beginGuestInput sticky
   check "batch isolation removes human gestures and clipboard"

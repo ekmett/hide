@@ -1,9 +1,10 @@
 {-# LANGUAGE CPP, OverloadedStrings #-}
 module PluginWindowsCheck (checks,rowsChecks) where
-import Control.Concurrent (threadDelay)
+import Control.Concurrent (threadDelay,yield)
 import Control.Concurrent.MVar
-import Control.Exception (evaluate)
+import Control.Exception (evaluate,finally)
 import Control.Monad (unless)
+import Data.IORef
 import qualified Data.Map.Strict as M
 import qualified Data.Text as T
 import qualified Data.Vector as Vec
@@ -12,22 +13,24 @@ import System.Directory (removeFile,getTemporaryDirectory)
 import System.IO (openTempFile,hClose)
 import Hide.Recovery (writeCheckpoint,readCheckpoint,checkpointKey)
 import System.Timeout (timeout)
+import System.IO.Unsafe (unsafePerformIO)
 import Hide.App (applyEffects)
-import Hide.Buffer (newBuffer,contents,Selection(..))
+import Hide.Buffer (newBuffer,contents,contentSlice,contentLength,Selection(..))
 import Hide.Commands (configuredBindings,contributedBindingCommands)
 import Hide.DocsMCP
 import Hide.GuestAccess (guestKeyboardAllowed,pointerAllowedAt,readableAt)
 import Hide.Debugger (withDebugger,withDownloadsCommands)
 import Hide.MenuCommands
+import qualified Hide.Plugin.Editor as E
 import qualified Hide.Plugin.Window as W
 import Hide.PluginWindowHost (adoptWindowUpdate,replaceWindowUpdate,tickPluginWindows)
 import Hide.Sidebar
 import Hide.SidebarCommands
 import Hide.Model
-import Hide.Plugin.Command (withRegistry)
+import Hide.Plugin.Command (withRegistry,CommandError)
 import qualified Hide.Plugin.Menu as P
 import qualified Hide.Plugin.Tree as PTree
-import Hide.Render (snapshot,renderKey,renderCellRows)
+import Hide.Render (snapshot,renderKey,renderCellRows,renderCursor)
 import Hide.Unicode (CellSpan(..))
 import WindowExtension
 #ifdef WITH_PROTOCOL
@@ -258,7 +261,109 @@ checks=W.withWindowScope $ \scope->withDocsCommands $ \docs->withRegistry $ \reg
           if "expired" `T.isInfixOf` status next then pure next else threadDelay 1000 >> awaitExpired next
     refused<-timeout 5000000 (awaitExpired expired) >>= maybe (fail "late retired menu result timeout") pure
     check "retired originating command cannot adopt late plugin window" (activePluginWindow refused==Nothing && length (windows refused)==1)
+  editorChecks
   putStrLn "plugin window checks passed"
+
+-- Block the actual pure worker adapter before input admission. This is test-only
+-- scheduling control; no receipt or input authority is manufactured here.
+{-# NOINLINE editorArguments #-}
+editorArguments :: IORef Bool -> MVar () -> MVar () -> MVar () -> E.DraftSubmission -> Bool
+  -> Either CommandError (E.DraftSubmission,Bool)
+editorArguments gated entered release cancelled input alternate=unsafePerformIO $ do
+  blocked<-readIORef gated
+  if blocked then (putMVar entered () >> takeMVar release) `finally` putMVar cancelled () else pure ()
+  pure (Right (input,alternate))
+
+editorChecks :: IO ()
+editorChecks=W.withWindowScope $ \scope->E.withDraftRef $ \draft->withDocsCommands $ \docs->
+  withRegistry $ \registry->withMenuCommands docs $ \host->do
+  gated<-newIORef False
+  entered<-newEmptyMVar
+  adapterRelease<-newEmptyMVar
+  cancelled<-newEmptyMVar
+  accepted<-newEmptyMVar
+  finish<-newEmptyMVar
+  let check label condition=unless condition (fail label)
+      wait label action=timeout 5000000 action >>= maybe (fail label) pure
+      core _ _=error "embedded editor escaped its menu owner"
+      onSubmit input alternate=putMVar accepted (input,alternate) >> takeMVar finish
+      draftText d=maybe (error "lost owned editor draft") (contents . editorDraftBuffer) (M.lookup draft (editorDrafts d))
+      close d=let (closed,effects)=runCommand Close d in snd <$> applyEffects closed effects
+      submit modifiers d=let (chosen,effects)=handleEvent (V.EvKey V.KEnter modifiers) d in snd <$> menuEffects host core chosen effects
+  reference<-registerEditorNotes registry (menuContributions host) scope draft
+    (editorArguments gated entered adapterRelease cancelled) onSubmit PreparedEditorWindow PreparedEditorUpdate >>= either (fail . show) pure
+  catalogue<-P.menuSnapshot (menuContributions host)
+  let source=(addDocument Nothing (newBuffer "background source") (initialDesktop (80,25))) {contributedMenus=catalogue,menusActive=True}
+      -- Retrying the opening also proves the owner has drained the prior job.
+      open current=do
+        next<-tickMenus host core current
+        if (activeWindow next >>= windowEditorMount)/=Nothing then pure next else do
+          let (chosen,effects)=runCommand (RegisteredMenu reference False) next
+          (_,queued)<-menuEffects host core chosen effects
+          yield
+          open queued
+  opened<-wait "embedded editor did not open through menu worker" (open source)
+  let window=maybe (error "missing editor window") id (activeWindow opened)
+      rect=composerRect opened window
+      click offset modifiers d=fst (handleEvent (V.EvMouseDown (left rect+offset) (top rect) V.BLeft modifiers) d)
+      focused=click 4 [] opened
+      selected=click 6 [V.MShift] focused
+      copied=fst (runCommand Copy selected)
+      plainRow=T.take 15 (T.drop (left rect) (T.lines (snapshot opened) !! top rect))
+      bodySelected=modifyActive (\w->w {selection=Selection 2 7}) (setComposerInput (composerBuffer opened) (Selection 0 0) False opened)
+      bodyCopy=fst (runCommand Copy bodySelected)
+      escapeEffects=snd (handleEvent (V.EvKey V.KEsc []) focused {agentReplying=True})
+  check "plain editor leading spaces use matching click, selection and cursor geometry"
+    (composerSelection focused==Selection 4 4 && composerSelection selected==Selection 4 6 && clipboard copied=="pl" &&
+      plainRow=="    plain draft" && renderCursor selected==V.Cursor (left rect+6) (top rect))
+  check "plugin body copy uses its own nonzero semantic selection" (clipboard bodyCopy=="depen")
+  check "generic editor Escape cannot cancel an unrelated chat" (AgentAction "cancel" [] `notElem` escapeEffects)
+  let originalMount=maybe (error "missing original editor mount") id (windowEditorMount window)
+  defaultBusy<-submit [] focused
+  (defaultInput,defaultAlternate)<-wait "default editor handler was not admitted" (takeMVar accepted)
+  check "default adapter enters registered command with immutable input"
+    (not defaultAlternate && E.submissionSlot defaultInput==E.DefaultEditor && E.submissionMount defaultInput==originalMount &&
+      contentSlice (E.submissionContent defaultInput) 0 (contentLength (E.submissionContent defaultInput))=="    plain draft")
+  hidden<-close defaultBusy
+  responsive<-wait "accepted hidden work held owner tick" (tickMenus host core hidden)
+  check "accepted close retains hidden draft without reopening a frame"
+    (draftText responsive=="    plain draft" && length (windows responsive)==1)
+  putMVar finish ()
+  remounted<-wait "hidden completion did not drain and remount" (open responsive)
+  let nextMount=activeWindow remounted >>= windowEditorMount
+  check "exact-version hidden completion clears retained input before fresh remount"
+    (draftText remounted=="" && nextMount/=Just originalMount && fmap E.mountDraft nextMount==Just draft &&
+      fmap E.mountActions nextMount==Just (E.mountActions originalMount) && M.size (buffers remounted)==1)
+  let alternateDraft=setComposerInput (newBuffer "alternate draft") (Selection 0 0) True remounted
+  alternateBusy<-submit [V.MCtrl] alternateDraft
+  (alternateInput,alternate)<-wait "alternate editor handler was not admitted" (takeMVar accepted)
+  check "alternate adapter uses the same command with its own operation"
+    (alternate && E.submissionSlot alternateInput==E.AlternateEditor && E.submissionAction alternateInput==E.submissionAction defaultInput)
+  changedHidden<-close (setComposerInput (newBuffer "newer draft") (Selection 5 5) True alternateBusy)
+  putMVar finish ()
+  staleRemounted<-wait "stale completion did not drain and remount" (open changedHidden)
+  check "older accepted result cannot clear a changed hidden draft"
+    (draftText staleRemounted=="newer draft" && composerSelection staleRemounted==Selection 5 5)
+  writeIORef gated True
+  preparing<-submit [] (setComposerInput (composerBuffer staleRemounted) (Selection 0 0) True staleRemounted)
+  wait "editor argument adapter did not enter worker" (readMVar entered)
+  abandoned<-close preparing
+  retiring<-wait "unaccepted close held owner tick" (tickMenus host core abandoned)
+  wait "unaccepted adapter was not cancelled" (readMVar cancelled)
+  unexpected<-tryTakeMVar accepted
+  check "close cancels preparation before command admission and preserves hidden input"
+    (case unexpected of Nothing->draftText retiring=="newer draft" && length (windows retiring)==1; Just _->False)
+  writeIORef gated False
+  usable<-wait "cancelled worker left owner unavailable" (open retiring)
+  finalBusy<-submit [] (setComposerInput (composerBuffer usable) (Selection 0 0) True usable)
+  _<-wait "owner could not admit action after cancellation" (takeMVar accepted)
+  putMVar finish ()
+  let clear current=do
+        next<-tickMenus host core current
+        if draftText next=="" then pure next else yield >> clear next
+  final<-wait "action after cancellation did not clear exact input" (clear finalBusy)
+  check "embedded workflow leaves background source unchanged"
+    (fmap (contents . documentBuffer) (M.lookup 1 (buffers final))==Just "background source")
 
 -- The real host route keeps job selection separate from changing Details text.
 rowsChecks :: IO ()
