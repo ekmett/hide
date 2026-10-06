@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE OverloadedStrings, BangPatterns #-}
 -- SPDX-License-Identifier: BSD-3-Clause
 -- |
 -- Module      : Hide.Plugin.Window
@@ -6,7 +6,7 @@
 -- License     : BSD-3-Clause
 -- Maintainer  : Edward Kmett
 -- Stability   : experimental
--- Portability : OverloadedStrings
+-- Portability : OverloadedStrings, BangPatterns
 --
 -- Prepared read-only plugin content, independent of source documents.
 --
@@ -19,7 +19,7 @@ module Hide.Plugin.Window
   , updateWindowRef, admitWindowUpdate, windowRefCurrent, windowScopeCurrent, retireWindowRef
   , EditorWindowUpdate, openEditorWindow, editorWindowBody, editorWindowEditor, admitEditorWindowUpdate
   , PreparedWindow, prepareTextWindow, prepareMarkdownWindow, prepareStyledTextWindow, prepareSemanticTextWindow, prepareRecoverableTextWindow
-  , WindowDisclosure(..), TextCopy(..), MessageAttribution(..), TextSemantics(..), preparedWindowSemantics, preparedWindowDisclosure
+  , WindowDisclosure(..), TextCopy(..), MessageAttribution(..), TextSemantics(..), preparedWindowSemantics, preparedWindowDisclosure, preparedWindowMessages, copyPreparedSelection
   , WindowRow(..), prepareRowsWindow, prepareRecoverableRowsWindow
   , WindowRows(..), preparedWindowTitle, preparedWindowText, preparedWindowRows, preparedWindowWidth, preparedWindowHasSections, preparedWindowNeedsLayout, preparedWindowRecovery
   ) where
@@ -33,8 +33,8 @@ import qualified Data.Vector as V
 import qualified Data.Map.Strict as M
 import Hide.Plugin.Tree (NodeId)
 import Hide.Plugin.Menu (MenuRef)
-import Data.List (nub,foldl')
-import Hide.Buffer (contentLength,BufferContent, bufferContent, newBuffer, prepareBuffer)
+import Data.List (nub,foldl',groupBy)
+import Hide.Buffer (contentLength,contentSlice,BufferContent, bufferContent, newBuffer, prepareBuffer)
 import Hide.Unicode (sourceTextWidth)
 import Hide.Markdown (renderMarkdown)
 import Hide.Plugin.Command (validCommandName)
@@ -78,7 +78,7 @@ data TextSemantics = TextSemantics
   , textRecoveryHidden :: !(V.Vector (Int,Int))
   }
 
-data PreparedWindow = PreparedWindow !Unique !Text !BufferContent !WindowRows !Int !(Maybe (Text,Int)) !Bool !Bool !(Maybe TextSemantics)
+data PreparedWindow = PreparedWindow !Unique !Text !BufferContent !WindowRows !Int !(Maybe (Text,Int)) !Bool !Bool !(Maybe (TextSemantics,V.Vector (Int,Int,Int,Bool)))
 preparedWindowRef :: PreparedWindow -> Unique
 preparedWindowRef (PreparedWindow ident _ _ _ _ _ _ _ _)=ident
 preparedWindowTitle :: PreparedWindow -> Text
@@ -111,7 +111,43 @@ preparedWindowRecovery (PreparedWindow _ _ _ _ _ recovery _ _ _)=recovery
 
 -- | /O(1)/. Absent metadata retains ordinary private text/copy behavior.
 preparedWindowSemantics :: PreparedWindow -> Maybe TextSemantics
-preparedWindowSemantics (PreparedWindow _ _ _ _ _ _ _ _ semantics)=semantics
+preparedWindowSemantics (PreparedWindow _ _ _ _ _ _ _ _ semantics)=fst <$> semantics
+
+-- | /O(1)/. Cached passive message intervals include the original styled
+-- newline decisions. StyledRows alone intentionally excludes newline furniture.
+preparedWindowMessages :: PreparedWindow -> V.Vector (Int,Int,Int,Bool)
+preparedWindowMessages (PreparedWindow _ _ _ _ _ _ _ _ semantics)=maybe V.empty snd semantics
+
+-- | Copy in the same logical scalar space as selection. Message copy excludes
+-- furniture, preserving decorated newlines and optional multi-message attribution.
+copyPreparedSelection :: PreparedWindow -> Int -> Int -> Text
+copyPreparedSelection prepared start end=case maybe CopyText textCopy (preparedWindowSemantics prepared) of
+  CopyText->contentSlice source first (lastOffset-first)
+  CopyMessages attribution->T.intercalate "\n\n" (map render groups)
+    where
+      cells=[(ident,outgoing,contentSlice source a (z-a))
+        | (begin,finish,ident,outgoing)<-V.toList (preparedWindowMessages prepared)
+        , let a=max first begin,let z=min lastOffset finish,a<z]
+      groups=groupBy (\(a,_,_) (b,_,_)->a==b) cells
+      render group@((_,outgoing,_):_)=
+        (if attribution==UserBotAttribution && length groups>1 then if outgoing then "User: " else "Bot: " else "")<>
+        T.concat [text | (_,_,text)<-group]
+      render []=""
+  where
+    source=preparedWindowText prepared
+    first=max 0 (min (contentLength source) start)
+    lastOffset=max first (min (contentLength source) end)
+
+messageIntervals :: [(Char,Style)] -> V.Vector (Int,Int,Int,Bool)
+messageIntervals=V.fromList . go 0 Nothing []
+  where
+    go !_ current done []=reverse (maybe done (:done) current)
+    go !offset current done ((_,style):rest)=case style of
+      BubbleText ident outgoing _->case current of
+        Just (a,_,previous,sent) | previous==ident && sent==outgoing->
+          go (offset+1) (Just (a,offset+1,ident,outgoing)) done rest
+        _->go (offset+1) (Just (offset,offset+1,ident,outgoing)) (maybe done (:done) current) rest
+      _->go (offset+1) Nothing (maybe done (:done) current) rest
 
 -- | /O(1)/. Explicit immutable observation declaration, private by default.
 preparedWindowDisclosure :: PreparedWindow -> WindowDisclosure
@@ -132,7 +168,9 @@ prepareSemanticTextWindow title styled semantics=do
       V.foldl' (\n (a,z,url)->n+a+z+T.length url) 0 (textLinks semantics)+
       V.foldl' (\n (a,z,dialect,body)->n+a+z+T.length dialect+T.length body) 0 (textShellBlocks semantics)+
       V.foldl' (\n (a,z)->n+a+z) 0 ranges)
-    result<-evaluate (PreparedWindow ident caption text rows width recovery sections scripts (Just semantics))
+    let messages=case textCopy semantics of CopyText->V.empty; CopyMessages{}->messageIntervals styled
+    _<-evaluate (V.foldl' (\n (a,z,message,outgoing)->outgoing `seq` n+a+z+message) 0 messages)
+    result<-evaluate (PreparedWindow ident caption text rows width recovery sections scripts (Just (semantics,messages)))
     pure (Right result)
 
 -- | Prepare text whose title and content may be written to private recovery.
