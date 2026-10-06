@@ -161,7 +161,7 @@ checks=bracket temporary removePathForcibly $ \root->do
       set key value (Object fields)=Object (KM.insert key value fields)
       set _ _ value=value
   mutate (set "conversationTarget" (toJSON ("unknown-agent"::T.Text)))
-  mutate (set "schemaVersion" (toJSON (2::Int)))
+  mutate (set "schemaVersion" (toJSON (3::Int)))
   mutate (set "nextId" (toJSON (0::Int)))
   mutate (set "screen" (toJSON ((maxBound::Int),25::Int)))
   mutate (set "buffers" (toJSON ([]::[Value])))

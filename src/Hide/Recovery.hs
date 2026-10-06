@@ -210,7 +210,7 @@ desktopValueWith buffer baseline plugin desktop=do
   plugins<-mapM (\(window,prepared,(kind,version))->do
     text<-plugin prepared
     pure (object ["id" .= windowId window,"kind" .= kind,"version" .= version,"title" .= W.preparedWindowTitle prepared,"text" .= text])) durable
-  pure (object ["schemaVersion" .= (1::Int),"screen" .= screenSize d,"buffers" .= encodedDocuments,
+  pure (object ["schemaVersion" .= (2::Int),"screen" .= screenSize d,"buffers" .= encodedDocuments,
     "dockedTerminals" .= [object ["windowId" .= ident,"bounds" .= rectValue rectangle,"restoredBounds" .= fmap rectValue saved] | (ident,(rectangle,saved))<-M.toList (dockedTerminals d),any ((==ident).windowId) (windows d)],
     "bottomTerminal" .= bottomTerminal d,
     "pluginWindows" .= plugins,
@@ -290,7 +290,7 @@ sidebarValue tree=object ["root" .= treeRoot tree,"selected" .= selected,"scroll
 desktopParser :: Desktop -> Value -> Parser (Desktop,[(Text,ConversationSeed)])
 desktopParser baseline=withObject "checkpoint" $ \o->do
   version<-o .: "schemaVersion"
-  unless (version==(1::Int)) (fail "Unsupported checkpoint version")
+  unless (version==(2::Int)) (fail "Unsupported checkpoint version")
   size@(cols,rows)<-o .: "screen"
   unless (cols>0 && rows>0 && cols<=4096 && rows<=4096 && toInteger cols*toInteger rows<=1048576) (fail "Invalid desktop dimensions")
   encodedDocuments<-o .: "buffers"
