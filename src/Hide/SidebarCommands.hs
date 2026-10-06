@@ -8,7 +8,7 @@ module Hide.SidebarCommands
   , tickSidebar, refreshTreeFromHost, initializeSidebar, prepareSidebarFile, publishFormRefreshFromHost
   ) where
 
-import Control.Concurrent.Async (Async,async,cancel,poll)
+import Control.Concurrent.Async (Async,async,asyncWithUnmask,cancel,poll)
 import qualified Control.Concurrent.Async
 import Control.Concurrent.STM
 import Control.DeepSeq (force)
@@ -33,7 +33,7 @@ import qualified Hide.WorkspaceRename as Rename
 import System.IO.Error (tryIOError)
 import Hide.GuestAccess (protectedPath,protectedFilePath,protectedBuffer)
 import Hide.Links (LinkResult,applyLink)
-import Hide.PluginWindowHost (adoptWindowUpdate)
+import Hide.PluginWindowHost (adoptWindowUpdate,adoptEditorWindowUpdate,applyEditorUpdate)
 import qualified Hide.Plugin.Window as PluginWindow
 import Hide.Model
 import Hide.DebuggerSidebarTypes
@@ -43,6 +43,7 @@ import qualified Hide.Plugin.Sidebar as PluginSidebar
 import Hide.AgentSidebarTypes
 import Hide.SessionSidebarTypes
 import Hide.Sidebar
+import qualified Hide.Plugin.EditorHost as Editor
 import Hide.Plugin.Command
 import qualified Hide.Plugin.Tree as P
 import qualified Hide.Plugin.Menu as Menu
@@ -51,11 +52,12 @@ import qualified Hide.Plugin.Menu as Menu
 data SidebarContext = SidebarContext
   { sidebarOrigin :: !Menu.MenuOrigin, sidebarContextDirectory :: !FilePath, sidebarContextWorkspace :: !FilePath, sidebarProvider :: !(Maybe P.TreeRef), sidebarPrivatePaths :: ![FilePath]
   , sidebarColumns :: !Int, sidebarOpened :: !(Maybe (FilePath,Int,Int,ContentVersion)), sidebarRenameFiles :: ![Rename.RenameFile] }
-data SidebarReply = SidebarPackageDebug !PackageBuildTarget !(Either Text FilePath) | SidebarBuild !BuildAction !PackageBuildTarget | SidebarRename !P.TreeRef !Rename.PreparedRename | SidebarForm !(Form.PreparedForm SidebarContext SidebarReply) | SidebarSession !SessionSidebarRequest | SidebarExisting !FilePath !Int !Int !ContentVersion | SidebarDocument !FilePath !Document | SidebarPrepared !LinkResult | SidebarAgent !AgentSidebarRequest | SidebarDebug !DebugSidebarRequest | SidebarWindow !PluginWindow.WindowUpdate
+data SidebarReply = SidebarPackageDebug !PackageBuildTarget !(Either Text FilePath) | SidebarBuild !BuildAction !PackageBuildTarget | SidebarRename !P.TreeRef !Rename.PreparedRename | SidebarForm !(Form.PreparedForm SidebarContext SidebarReply) | SidebarSession !SessionSidebarRequest | SidebarExisting !FilePath !Int !Int !ContentVersion | SidebarDocument !FilePath !Document | SidebarPrepared !LinkResult | SidebarAgent !AgentSidebarRequest | SidebarDebug !DebugSidebarRequest | SidebarWindow !PluginWindow.WindowUpdate | SidebarEditorWindow !(PluginWindow.EditorWindowUpdate SidebarContext SidebarReply) | SidebarEditorUpdate !Editor.EditorUpdate
 
 data ChildJob = ChildJob !TreeRequest !Menu.MenuOrigin !(Async (Either CommandError (P.PreparedPage SidebarContext SidebarReply))) !Bool
 data ActionJob = ActionJob ![P.TreeHit] !CommandRef !Menu.MenuOrigin !Int !(Async (Either CommandError SidebarReply)) !Bool
   | FormJob !Form.FormRef !(Async (Either CommandError SidebarReply)) !Bool
+  | EditorJob !Editor.DraftSubmission !(Async (Either CommandError SidebarReply)) !Bool
 data Publication = TreePublication !(P.TreeProvider SidebarContext SidebarReply) | FormRefresh !Form.FormUpdate | TreeInvalidation !P.TreeRef !P.NodeId
 data FilesProvider = FilesProvider !(P.TreeProvider SidebarContext SidebarReply) !FilePath !CommandRef !CommandRef !CommandRef !(IORef (M.Map P.NodeId FilePath,M.Map FilePath P.NodeId,Int,M.Map FilePath [Entry]))
 data State = State
@@ -66,7 +68,8 @@ data State = State
   , actionJob :: !(Maybe ActionJob), filesProvider :: !(Maybe FilesProvider)
   , badgeStamp :: !(Maybe (StableName (M.Map Int Document)))
   , badgeJob :: !(Maybe (StableName (M.Map Int Document),Async (M.Map FilePath (Bool,Int,Int))))
-  , sidebarRevision :: !Integer, inputForm :: !(Maybe (Form.PreparedForm SidebarContext SidebarReply)) }
+  , sidebarRevision :: !Integer, inputForm :: !(Maybe (Form.PreparedForm SidebarContext SidebarReply))
+  , editorBindings :: !(M.Map Editor.DraftRef (PluginWindow.WindowRef,Editor.PreparedEditor SidebarContext SidebarReply)) }
 -- Prepared alongside visible rows; owner applies at most four branch changes.
 data RecoveryProjection = RecoveryProjection !(Maybe SidebarHints)
   ![(P.TreeHit,[P.TreeHit],Bool)] !(Maybe RowKey) !(Maybe RowKey)
@@ -79,7 +82,7 @@ sidebarRegistry (SidebarHost registry _ _ _ _ _)=registry
 -- | Public contribution capabilities reuse this host's ordered close-aware
 -- queue. The host retains all currentness, privacy and presentation decisions.
 sidebarCapabilities :: SidebarHost -> PluginSidebar.Sidebar SidebarContext SidebarReply
-sidebarCapabilities host=PluginSidebar.Sidebar sidebarOrigin sidebarContextWorkspace SidebarForm
+sidebarCapabilities host=PluginSidebar.Sidebar sidebarOrigin sidebarContextWorkspace SidebarForm SidebarEditorWindow SidebarEditorUpdate
   (publishTreeFromHost host) (publishFormRefreshFromHost host) (tryInvalidateTree host)
 
 -- Nonblocking because metadata-owner ticks call this while input is serialized.
@@ -94,7 +97,7 @@ withSidebarCommands :: (SidebarHost -> IO a) -> IO a
 withSidebarCommands use=withRegistry $ \registry->bracket (acquire registry) close use
   where
     acquire registry=do
-      state<-newIORef (State M.empty M.empty [] [] Nothing Nothing Nothing Nothing Nothing 0 Nothing)
+      state<-newIORef (State M.empty M.empty [] [] Nothing Nothing Nothing Nothing Nothing 0 Nothing M.empty)
       publications<-newTBQueueIO 32
       cancellation<-newTBQueueIO 32
       closed<-newTVarIO False
@@ -107,6 +110,7 @@ withSidebarCommands use=withRegistry $ \registry->bracket (acquire registry) clo
       mapM_ (cancel . snd) (projection state)
       mapM_ (cancel . actionWorker) (actionJob state)
       mapM_ (Form.retireForm . Form.formReference) (inputForm state)
+      mapM_ Editor.retireDraftRef (M.keys (editorBindings state))
       mapM_ (cancel . snd) (badgeJob state)
       cancel canceller
 
@@ -127,6 +131,7 @@ publishFormRefreshFromHost (SidebarHost _ _ queue _ _ closed) prepared=atomicall
 actionWorker :: ActionJob -> Async (Either CommandError SidebarReply)
 actionWorker (ActionJob _ _ _ _ worker _)=worker
 actionWorker (FormJob _ worker _)=worker
+actionWorker (EditorJob _ worker _)=worker
 -- | Withdrawal belongs to the session owner, so queued/late results cannot race
 -- adoption. Cancellation is scheduled to a worker and never waits under UI lock.
 retireTreeFromHost :: SidebarHost -> P.TreeRef -> Desktop -> IO Desktop
@@ -258,7 +263,7 @@ readState :: SidebarHost -> IO State
 readState (SidebarHost _ ref _ _ _ _)=readIORef ref
 
 sidebarEffects :: SidebarHost -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> [Effect] -> IO (Bool,Desktop)
-sidebarEffects host@(SidebarHost _ _ _ _ _ closed) core d effects=do
+sidebarEffects host@(SidebarHost _ ref _ _ _ closed) core d effects=do
   stopped<-readTVarIO closed
   when stopped (ioError (userError "Sidebar host closed."))
   mounted<-mount host d
@@ -266,6 +271,9 @@ sidebarEffects host@(SidebarHost _ _ _ _ _ closed) core d effects=do
   where
     step result@(True,_) _=pure result
     step (_,current) effect=case effect of
+      SubmitEditor editor slot origin->do
+        state<-readIORef ref
+        if M.member (Editor.mountDraft editor) (editorBindings state) then (False,) <$> submitEditor host editor slot origin current else core current [effect]
       LoadTree request origin->(False,) <$> enqueue host request origin current
       InvokeTree trace reference origin->(False,) <$> invokeAction host trace reference origin current
       SubmitChoiceForm reference version selected origin->(False,) <$> submitChoiceForm host reference version selected origin current
@@ -432,7 +440,8 @@ refreshTreeFromHost host@(SidebarHost _ ref _ _ _ _) owner ident d=do
 tickSidebar :: SidebarHost -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> IO Desktop
 tickSidebar host@(SidebarHost _ ref publications cancellation _ closed) core initial=
   readTVarIO closed >>= \stopped->if stopped then pure initial else do
-  validForm<-tickForm host initial
+  validEditors<-tickEditors host initial
+  validForm<-tickForm host validEditors
   mounted<-mount host validForm
   published<-foldM (\d _->do
     supplied<-atomically (tryReadTBQueue publications)
@@ -617,6 +626,7 @@ finishAction host@(SidebarHost _ ref _ cancellation _ _) core d=do
   case actionJob state of
     Nothing->pure d
     Just (FormJob reference worker cancelled)->finishFormJob host core d reference worker cancelled
+    Just (EditorJob submitted worker cancelled)->finishEditorJob host core d submitted worker cancelled
     Just (ActionJob trace reference origin columns worker cancelled)->do
       let owner=case trace of P.TreeHit value _ _:_->Just value; _->Nothing
       live<-maybe (pure False) P.treeCurrent (owner >>= (`M.lookup` providers state))
@@ -643,6 +653,7 @@ finishAction host@(SidebarHost _ ref _ cancellation _ _) core d=do
             Right (Right (SidebarDebug request)) | current && origin==Menu.HumanMenu->snd <$> core d [DebugSidebarAction request]
             Right (Right (SidebarSession request)) | current && origin==Menu.HumanMenu->snd <$> core d [SessionSidebarAction request]
             Right (Right (SidebarWindow request)) | current->adoptWindowUpdate origin request d
+            Right (Right (SidebarEditorWindow request)) | current->adoptEditor host origin request d
             Right (Right (SidebarForm prepared)) | current && origin==Menu.HumanMenu->adoptForm host True prepared d
             Right (Right (SidebarAgent request)) | current && origin==Menu.HumanMenu->snd <$> core d [AgentSidebarAction request]
             _->pure $ if not current then d {status="Sidebar result expired."} else case result of
@@ -654,6 +665,8 @@ finishAction host@(SidebarHost _ ref _ cancellation _ _) core d=do
               Right (Right SidebarDebug{})->d {status="Sidebar result expired."}
               Right (Right SidebarSession{})->d {status="Sidebar result expired."}
               Right (Right SidebarWindow{})->d {status="Sidebar result expired."}
+              Right (Right SidebarEditorWindow{})->d {status="Sidebar result expired."}
+              Right (Right SidebarEditorUpdate{})->d {status="Editor result has no submitted job."}
               Right (Right SidebarForm{})->d {status="Sidebar form expired."}
               Right (Right SidebarAgent{})->d {status="Sidebar result expired."}
               Right (Right SidebarRename{})->d {status="Sidebar result expired."}
@@ -844,3 +857,82 @@ finishFormJob host@(SidebarHost _ ref _ cancellation _ _) core d reference worke
                 refreshRenamedPath host old new renamed {status="File renamed."}
         Right (Left err) | consumed->pure d {status="Input form submission failed: "<>T.pack (show err)}
         _->pure d {status=if not consumed then "Input form expired." else "Input form submission failed."}
+
+-- A frame close retains one binding per draft. Scope/registration retirement
+-- drops both binding and sole host input state, even while the draft is hidden.
+tickEditors :: SidebarHost -> Desktop -> IO Desktop
+tickEditors (SidebarHost _ ref _ _ _ _) d=do
+  state<-readIORef ref
+  expired<-filterM (\(_, (scope,editor))->do
+    published<-PluginWindow.windowScopeCurrent scope
+    live<-Editor.editorBindingCurrent editor
+    pure (not (published && live))) (M.toList (editorBindings state))
+  mapM_ (Editor.retireDraftRef . fst) expired
+  let removed=map fst expired
+  modifyIORef' ref (\s->s {editorBindings=foldr M.delete (editorBindings s) removed})
+  pure d {editorDrafts=foldr M.delete (editorDrafts d) removed}
+
+adoptEditor :: SidebarHost -> Menu.MenuOrigin -> PluginWindow.EditorWindowUpdate SidebarContext SidebarReply -> Desktop -> IO Desktop
+adoptEditor host@(SidebarHost _ ref _ _ _ _) origin update original=do
+  d<-tickEditors host original
+  state<-readIORef ref
+  let editor=PluginWindow.editorWindowEditor update
+      draft=Editor.mountDraft (Editor.editorMount editor)
+      previous=Editor.editorMount . snd <$> M.lookup draft (editorBindings state)
+  (accepted,next)<-if M.size (editorBindings state)>=256 && M.notMember draft (editorBindings state)
+    then pure (False,d {status="Editor owner is full."})
+    else adoptEditorWindowUpdate origin previous update d
+  when accepted (modifyIORef' ref (\s->s {editorBindings=M.insert draft
+    (PluginWindow.updateWindowRef (PluginWindow.editorWindowBody update),Editor.installedEditor editor) (editorBindings s)}))
+  pure next
+
+submitEditor :: SidebarHost -> Editor.EditorMount -> Editor.EditorSlot -> Menu.MenuOrigin -> Desktop -> IO Desktop
+submitEditor (SidebarHost _ ref _ _ _ _) mount slot origin d=mask $ \_->do
+  state<-readIORef ref
+  case M.lookup (Editor.mountDraft mount) (editorBindings state) of
+    Just (_,editor) | origin==Menu.HumanMenu,activeEditorMount d==Just mount,composerActive d,Editor.editorMount editor==mount->case actionJob state of
+      Just _->pure d {status="Sidebar worker is busy; submit again."}
+      Nothing->do
+        captured<-Editor.captureDraftSubmission mount slot (composerBuffer d)
+        case captured of
+          Nothing->pure d {status="Editor input expired."}
+          Just submitted->do
+            worker<-asyncWithUnmask (\unmask->unmask (Editor.invokeEditorAction editor (context origin d) submitted >>= traverse evaluate))
+            modifyIORef' ref (\s->s {actionJob=Just (EditorJob submitted worker False)})
+            pure d {status="Submitting editor input..."}
+    _->pure d {status="Editor input expired."}
+
+-- Once accepted, an action uses its own captured context and command lifetime;
+-- tree focus, popup/projection revisions and body refresh cannot revoke it.
+finishEditorJob :: SidebarHost -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> Editor.DraftSubmission
+  -> Async (Either CommandError SidebarReply) -> Bool -> IO Desktop
+finishEditorJob host@(SidebarHost _ ref _ cancellation _ _) core d submitted worker cancelled=do
+  state<-readIORef ref
+  owning<-case M.lookup (Editor.submissionDraft submitted) (editorBindings state) of
+    Just (scope,editor) | Editor.mountActions (Editor.editorMount editor)==Editor.mountActions (Editor.submissionMount submitted)->do
+      published<-PluginWindow.windowScopeCurrent scope
+      registered<-Editor.editorBindingCurrent editor
+      pure (published && registered)
+    _->pure False
+  accepted<-Editor.submissionAccepted submitted
+  live<-Editor.mountCurrent (Editor.submissionMount submitted)
+  completed<-poll worker
+  case completed of
+    Nothing | not accepted && not live && not cancelled->do
+      queued<-atomically $ do
+        full<-isFullTBQueue cancellation
+        if full then pure False else writeTBQueue cancellation (Cancellation worker) >> pure True
+      modifyIORef' ref (\s->s {actionJob=Just (EditorJob submitted worker queued)})
+      pure d
+    Nothing->pure d
+    Just result->do
+      modifyIORef' ref (\s->s {actionJob=Nothing})
+      if not owning then pure d {status="Editor owner expired."} else case result of
+        Right (Right (SidebarEditorUpdate update))->applyEditorUpdate submitted update d
+        Right (Right (SidebarEditorWindow update))->adoptEditor host Menu.HumanMenu update d
+        Right (Right (SidebarWindow update))->adoptWindowUpdate Menu.HumanMenu update d
+        Right (Right (SidebarForm prepared))->adoptForm host True prepared d
+        Right (Right (SidebarAgent request))->snd <$> core d [AgentSidebarAction request]
+        Right (Left err)->pure d {status="Editor submission failed: "<>T.pack (show err)}
+        Left err->pure d {status="Editor submission failed: "<>T.pack (displayException err)}
+        _->pure d {status="Editor result requires its owning operation."}

@@ -10,6 +10,8 @@
 -- no capability exposes a desktop or grants command authority.
 module Hide.Plugin.Sidebar (Sidebar(..)) where
 
+import Hide.Plugin.Editor (EditorUpdate)
+import Hide.Plugin.Window (EditorWindowUpdate)
 import Hide.Plugin.Form (PreparedForm,FormUpdate)
 import Hide.Plugin.Menu (MenuOrigin)
 import Hide.Plugin.Tree (TreeProvider,TreeRef,NodeId)
@@ -24,6 +26,8 @@ data Sidebar c r = Sidebar
   { sidebarOrigin :: c -> MenuOrigin
   , sidebarWorkspace :: c -> FilePath
   , formReply :: PreparedForm c r -> r
+  , editorWindowReply :: EditorWindowUpdate c r -> r
+  , editorUpdateReply :: EditorUpdate -> r
   , publishTree :: TreeProvider c r -> IO ()
   , publishFormRefresh :: FormUpdate -> IO ()
   , tryInvalidateTree :: TreeRef -> NodeId -> IO Bool

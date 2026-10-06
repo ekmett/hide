@@ -11,7 +11,7 @@ module Hide.AgentHub
   , AgentDriver(..), DriverEvent(..), StartProvider, StartRequest(..), PrivateSource(..), HubMessage(..)
   , Capabilities(..), ConfigChoice(..), parseCapabilities, filterPrivateCapabilities
   , newAgentHub, newAgentHubWithLimits, closeAgentHub, spawnAgent, spawnAgentWithTask, reconnectAgent, registerAgent, updateExternalAgent, setExternalAgentBusy, renameAgent
-  , configureAgent, steerAgent, listAgents, statusAgent, sendAgent, waitAgent, cancelAgent, endAgent
+  , configureAgent, steerAgent, steerAgentAt, listAgents, statusAgent, sendAgent, sendAgentAt, waitAgent, cancelAgent, endAgent
   , historyAgent, searchAgentHistory, recordAgentEvent, snapshotHub, restoreHub, restoreHubWithLimits
   ) where
 
@@ -440,11 +440,20 @@ agentConfigurationCurrent (AgentHub _ _ ref) expected=do
     _->False
 
 steerAgent :: AgentHub -> AgentId -> Text -> IO (Either Text Value)
-steerAgent hub ident text=childControl hub ident "steering" validate
+steerAgent hub ident=steerAgentChecked hub ident Nothing
+
+-- | The captured editor target must still be the same incarnation/configuration
+-- at the ordinary control reservation. It grants no new actor authority.
+steerAgentAt :: AgentHub -> AgentConfigRef -> Text -> IO (Either Text Value)
+steerAgentAt hub receipt=steerAgentChecked hub (agentConfigAgent receipt) (Just receipt)
+
+steerAgentChecked :: AgentHub -> AgentId -> Maybe AgentConfigRef -> Text -> IO (Either Text Value)
+steerAgentChecked hub ident expected text=childControl hub ident "steering" validate
   (\entry driver->driverSteer driver (HubMessage 0 Human text (entryParent entry==Nothing)))
   (\_ entry->appendEvent "steered" Human (object ["text" .= text,"userSeat" .= (entryParent entry==Nothing)]) entry)
   where
     validate entry=do
+      unless (maybe True (==configurationRef entry) expected) (Left "Agent target expired; submit to its current editor.")
       unless (not (T.null (T.strip text)) && T.length text<=65536 && not (T.any (=='\0') text))
         (Left "Steering requires 1–65536 characters without NUL.")
       unless (supportsSteering (entryCaps entry)) (Left "This child provider does not advertise steering support.")
@@ -489,7 +498,15 @@ childControl (AgentHub _ _ ref) ident kind validate action commit=mask $ \restor
 
 -- | Queue a message with authenticated author and derived user-seat attribution.
 sendAgent :: AgentHub -> Actor -> AgentId -> Text -> IO (Either Text Int)
-sendAgent (AgentHub _ _ ref) actor ident body=atomically $ do
+sendAgent hub actor ident=sendAgentChecked hub actor ident Nothing
+
+-- | Admit into the same message queue only while the captured human editor
+-- target is current. Direct messages retain their deliberate ID-based behavior.
+sendAgentAt :: AgentHub -> Actor -> AgentConfigRef -> Text -> IO (Either Text Int)
+sendAgentAt hub actor receipt=sendAgentChecked hub actor (agentConfigAgent receipt) (Just receipt)
+
+sendAgentChecked :: AgentHub -> Actor -> AgentId -> Maybe AgentConfigRef -> Text -> IO (Either Text Int)
+sendAgentChecked (AgentHub _ _ ref) actor ident expected body=atomically $ do
   state<-readTVar ref
   case prepare state of
     Left err->pure (Left err)
@@ -504,6 +521,7 @@ sendAgent (AgentHub _ _ ref) actor ident body=atomically $ do
   where prepare state=do
           validActor actor state
           entry<-maybe (Left "Unknown agent.") Right (M.lookup ident (hubEntries state))
+          unless (maybe True (==configurationRef entry) expected) (Left "Agent target expired; submit to its current editor.")
           unless (entryPhase entry `elem` [Idle,Running]) (Left "Agent is not accepting messages.")
           unless (Q.length (entryQueue entry)<32) (Left "Agent message queue is full.")
           unless (not (T.null (T.strip body)) && T.length body<=65536 && not (T.any (=='\0') body)) (Left "Message must contain 1–65536 characters without NUL.")

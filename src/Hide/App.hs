@@ -23,6 +23,7 @@ import Hide.BufferView
 import Hide.Defaults
 import qualified Hide.Plugin.Menu as PluginMenu
 import Hide.TextPresentation
+import qualified Hide.Plugin.Editor as Editor
 import qualified Hide.Plugin.Form as Form
 import Hide.PluginWindowHost (tickPluginWindows,retireClosedWindow)
 import Hide.MenuCommands
@@ -554,6 +555,8 @@ applyEffects :: Desktop -> [Effect] -> IO (Bool,Desktop)
 applyEffects = foldM apply . (False,)
   where
     apply state@(True,_) _=pure state
+    apply (_,d) SubmitEditor{}=pure (False,d {status="Editor submission requires its callable owner."})
+    apply (_,d) (RetireEditorMount mount)=Editor.retireEditorMount mount >> pure (False,d)
     apply (_,d) (RetirePluginWindow reference)=(False,) <$> retireClosedWindow reference d
     -- Reload/inspection belong to the session worker, not this blocking file
     -- interpreter used by standalone drivers and snapshots.

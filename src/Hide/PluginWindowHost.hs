@@ -2,13 +2,15 @@
 -- | Closed prepared-window adoption shared by existing menu/sidebar owners.
 -- Workers retain preparation and cancellation; this adapter observes only exact
 -- scope/instance metadata and never runs extension callbacks or scans text.
-module Hide.PluginWindowHost (adoptWindowUpdate, replaceWindowUpdate, tickPluginWindows, retireClosedWindow) where
+module Hide.PluginWindowHost (adoptWindowUpdate, replaceWindowUpdate, tickPluginWindows, retireClosedWindow, adoptEditorWindowUpdate, applyEditorUpdate, installEditorDraft) where
 
 import qualified Data.Map.Strict as M
 import qualified Data.Set as S
 import qualified Data.Vector as V
 import Control.Monad (filterM)
-import Hide.Buffer (Selection(..),contentLength,contentLineCount)
+import Hide.Buffer (Buffer,Selection(..),contentLength,contentLineCount)
+import qualified Hide.Plugin.EditorHost as E
+import Hide.Plugin.BufferHost (versionCurrent)
 import qualified Hide.Plugin.Menu as P
 import qualified Hide.Plugin.Window as W
 import Hide.Model
@@ -51,10 +53,11 @@ replaceWindowUpdate origin old update desktop
           Nothing->pure desktop {status="Plugin window publication expired."}
           Just (reference,prepared)->do
             W.retireWindowRef old
+            mapM_ E.retireEditorMount [mount | w<-windows desktop,windowContent w==PluginContent old,Just mount<-[windowEditorMount w]]
             pure desktop {pluginWindows=M.insert reference prepared (M.delete old (pluginWindows desktop)),
               retiredPluginWindows=S.delete old (retiredPluginWindows desktop),windows=map (replace reference prepared) (windows desktop)}
   where
-    replace reference prepared w | windowContent w==PluginContent old=w {windowContent=PluginContent reference,
+    replace reference prepared w | windowContent w==PluginContent old=w {windowContent=PluginContent reference,windowEditorMount=Nothing,
       selection=Selection 0 0,scrollRow=0,scrollColumn=0,rowsInteraction=initialRowsInteraction prepared}
     replace _ _ w=w
 
@@ -90,3 +93,52 @@ retireClosedWindow :: W.WindowRef -> Desktop -> IO Desktop
 retireClosedWindow reference desktop=do
   if M.member reference (pluginWindows desktop) then pure () else W.retireWindowRef reference
   pure desktop
+
+-- | One frame per draft and one owning callable binding. A retained previous
+-- mount proves remount ownership; labels or a matching draft alone never do.
+adoptEditorWindowUpdate :: P.MenuOrigin -> Maybe E.EditorMount -> W.EditorWindowUpdate c r -> Desktop -> IO (Bool,Desktop)
+adoptEditorWindowUpdate origin previous update d
+  | origin/=P.HumanMenu || dialog d/=Nothing || questionActive d || activeAutocomplete d=
+      pure (False,d {status="Editor window publication is protected."})
+  | M.size (pluginWindows d)>=256 || M.member reference (pluginWindows d)=
+      pure (False,d {status="Editor window requires a fresh available frame."})
+  | any ((==Just draft).fmap E.mountDraft.windowEditorMount) (windows d)=
+      pure (False,d {status="Editor draft already has a visible frame."})
+  | Just retained<-M.lookup draft (editorDrafts d),editorDraftMount retained/=previous || previous==Nothing=
+      pure (False,d {status="Editor draft belongs to another owner."})
+  | M.notMember draft (editorDrafts d),Nothing<-E.editorInitialBuffer editor=
+      pure (False,d {status="Editor draft has no initial state."})
+  | otherwise=do
+      admitted<-W.admitEditorWindowUpdate update
+      pure $ case admitted of
+        Nothing->(False,d {status="Editor window publication expired."})
+        Just (ref,body,_)->let opened=addPluginWindow ref body (installEditorDraft mount (E.editorInitialBuffer editor) d)
+          in (True,modifyActive (\w->w {windowEditorMount=Just mount}) opened)
+  where
+    editor=W.editorWindowEditor update
+    mount=E.editorMount editor
+    draft=E.mountDraft mount
+    reference=W.updateWindowRef (W.editorWindowBody update)
+
+-- Transfer a preparation/recovery seed exactly once; remounts preserve Buffer,
+-- Undo, selection and focus. The callable owner retains no duplicate seed.
+installEditorDraft :: E.EditorMount -> Maybe Buffer -> Desktop -> Desktop
+installEditorDraft mount seed d=d {editorDrafts=M.alter install ref (editorDrafts d)}
+  where
+    ref=E.mountDraft mount
+    install (Just old)=Just old {editorDraftMount=Just mount}
+    install Nothing=fmap (\b->EditorDraft b (Selection 0 0) True (Just mount)) seed
+
+-- | Match the submitted job as well as its hidden draft's immutable version.
+-- Stale completion is consumed once but cannot clear a replacement or another
+-- action's draft. This is the only Buffer write in prepared result adoption.
+applyEditorUpdate :: E.DraftSubmission -> E.EditorUpdate -> Desktop -> IO Desktop
+applyEditorUpdate submitted update d
+  | E.updateSubmission update/=submitted=pure d {status="Editor result does not match its submission."}
+  | otherwise=case M.lookup (E.submissionDraft submitted) (editorDrafts d) of
+      Nothing->pure d
+      Just draft->do
+        current<-versionCurrent (E.submissionVersion submitted) (editorDraftBuffer draft)
+        consumed<-E.consumeEditorUpdate update
+        pure $ if not current || not consumed then d else d {editorDrafts=M.insert (E.submissionDraft submitted)
+          draft {editorDraftBuffer=E.updateReplacement update,editorDraftSelection=Selection 0 0} (editorDrafts d)}

@@ -21,9 +21,9 @@ module Hide.Plugin.EditorHost
   , EditorMount, mountDraft, mountSpec, mountActions, mountCurrent, retireEditorMount
   , EditorSpec(..), EditorSlot(..), EditorAction, editorAction
   , PreparedEditor, prepareEditorBuffer, remountEditor, editorMount, editorInitialBuffer
-  , installedEditor, editorCurrent, claimEditorMount
+  , installedEditor, editorCurrent, editorBindingCurrent, claimEditorMount
   , DraftSubmission, captureDraftSubmission, submissionDraft, submissionMount
-  , submissionVersion, submissionContent, submissionAction, submissionSlot, sameDraftSubmission
+  , submissionVersion, submissionContent, submissionAction, submissionSlot, sameDraftSubmission, submissionAccepted
   , invokeEditorAction, EditorUpdate, clearEditorDraft, replacementEditorDraft
   , updateSubmission, updateReplacement, consumeEditorUpdate
   ) where
@@ -145,6 +145,15 @@ editorCurrent (PreparedEditor mount _ normal alternate)=do
   let EditorMount _ _ _ _ _ state=mount
   phase<-readTVarIO state
   pure (draft && first && second && phase/=MountRetired)
+-- | Hidden drafts retain their callable binding after a frame closes. Its
+-- owner retires the draft when the publication scope or registration ends.
+editorBindingCurrent :: PreparedEditor c r -> IO Bool
+editorBindingCurrent (PreparedEditor mount _ normal alternate)=do
+  draft<-draftRefCurrent (mountDraft mount)
+  first<-actionCurrent normal
+  second<-actionCurrent alternate
+  pure (draft && first && second)
+
 -- | Host-only joint-admission primitive after actor/registration checks. Use in
 -- the same STM transaction as the readonly body opening; a failed pairing cannot
 -- consume either lifetime. It never reopens a retired or already adopted mount.
@@ -160,6 +169,10 @@ claimEditorMount (EditorMount _ (DraftRef _ live) _ _ _ state)=do
 -- The one-shot result claim prevents duplicate completion from clearing twice.
 data SubmissionPhase = Captured | Invoked | Consumed deriving Eq
 data DraftSubmission = DraftSubmission !EditorMount !EditorSlot !CommandRef !ContentVersion !BufferContent !(TVar SubmissionPhase)
+instance Eq DraftSubmission where
+  DraftSubmission _ _ _ _ _ a==DraftSubmission _ _ _ _ _ b=a==b
+instance Show DraftSubmission where
+  show submitted="DraftSubmission "++show (submissionMount submitted)++" "++show (submissionSlot submitted)
 -- | Capture after exact active/focused mount and human policy checks. Only an
 -- action declared on this mount is admissible. This never encodes the draft.
 captureDraftSubmission :: EditorMount -> EditorSlot -> Buffer -> IO (Maybe DraftSubmission)
@@ -189,6 +202,11 @@ submissionSlot (DraftSubmission _ slot _ _ _ _)=slot
 -- | Small duplicate-pending receipt comparison; never compares input or Undo.
 sameDraftSubmission :: DraftSubmission -> DraftSubmission -> Bool
 sameDraftSubmission a b=submissionDraft a==submissionDraft b && submissionVersion a==submissionVersion b && submissionSlot a==submissionSlot b
+-- | Accepted handoff is independent of later frame closure. This lets an
+-- owner cancel unaccepted preparation without recalling committed work.
+submissionAccepted :: DraftSubmission -> IO Bool
+submissionAccepted (DraftSubmission _ _ _ _ _ state)=(==Invoked) <$> readTVarIO state
+
 -- | Invoke on the existing action worker. Recheck the original mount before
 -- registry admission, after evaluating its argument adapter. This one-shot claim
 -- is the host input handoff; registry admission still refuses retired commands.

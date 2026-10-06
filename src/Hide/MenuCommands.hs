@@ -10,9 +10,9 @@ module Hide.MenuCommands
   ) where
 
 import Control.Concurrent.STM (TBQueue, atomically, newTBQueueIO, writeTBQueue, tryReadTBQueue, TVar, newTVarIO, readTVar, readTVarIO, writeTVar, flushTBQueue)
-import Control.Concurrent.Async (Async, async, cancel, poll)
+import Control.Concurrent.Async (Async, async, asyncWithUnmask, cancel, poll)
 import Control.Exception (bracket, displayException, mask, evaluate)
-import Control.Monad (when)
+import Control.Monad (filterM,when)
 import Data.Aeson
 import Data.Aeson.Types (parseEither)
 import Data.IORef
@@ -34,10 +34,11 @@ import qualified Hide.LSP as L
 import Hide.Documentation
 import Hide.Links (LinkResult, applyLink, prepareMarkdown)
 import Hide.BufferView (BufferView(..))
+import qualified Hide.Plugin.EditorHost as Editor
 import Hide.Model hiding (menus)
 import qualified Hide.Model as Model
 import qualified Hide.Plugin.Window as PluginWindow
-import Hide.PluginWindowHost (adoptWindowUpdate)
+import Hide.PluginWindowHost (adoptWindowUpdate,adoptEditorWindowUpdate,applyEditorUpdate)
 import Hide.Plugin.Command
 import qualified Hide.Plugin.Menu as Plugin
 
@@ -52,11 +53,15 @@ data SourceInput = SourceInput ContextTarget ContentVersion DirtySnapshot
 data NavigationInput = NavigationInput (FilePath,Int,Int) (Maybe OpenSource) (Maybe [FilePath])
 data OpenSource = OpenSource Int Int ContentVersion BufferContent
 data Navigation = Navigation FilePath Int Int (Maybe Document)
-data MenuReply = PreparedDownloadCancel !DownloadCancelRequest | PreparedDocument LinkResult | PreparedNavigation Navigation | PreparedDebugSource DebugSourceRequest | PreparedWindow PluginWindow.WindowUpdate
+data MenuReply = PreparedDownloadCancel !DownloadCancelRequest | PreparedDocument LinkResult | PreparedNavigation Navigation | PreparedDebugSource DebugSourceRequest | PreparedWindow PluginWindow.WindowUpdate | PreparedEditorWindow !(PluginWindow.EditorWindowUpdate MenuContext MenuReply) | PreparedEditorUpdate !Editor.EditorUpdate
 
 data Pending = Pending Plugin.MenuRef (Maybe ContextTarget) MenuContext (Async (Either Plugin.MenuError MenuReply))
+  | PendingEditor Editor.DraftSubmission (Async (Either CommandError MenuReply))
+data MenuState = MenuState
+  { menuPending :: Maybe Pending
+  , menuEditors :: M.Map Editor.DraftRef (PluginWindow.WindowRef,Editor.PreparedEditor MenuContext MenuReply) }
 data Publication = Publish Plugin.MenuItem | Withdraw Plugin.MenuRef
-data MenuHost = MenuHost (Plugin.Menus MenuContext MenuReply) [Plugin.MenuRef] [Plugin.MenuRef] (TBQueue Publication) (IORef (Maybe Pending)) !(TVar Bool)
+data MenuHost = MenuHost (Plugin.Menus MenuContext MenuReply) [Plugin.MenuRef] [Plugin.MenuRef] (TBQueue Publication) (IORef MenuState) !(TVar Bool)
 
 -- | Keep the registry independent of frontend attachments. The host may add
 -- linked extension declarations to menuContributions before taking its snapshot.
@@ -79,10 +84,14 @@ withMenuCommands docs use=withRegistry $ \registry->Plugin.withMenus ("context.w
       (Plugin.MenuDef name "context.source" "debug" 0 title "" False
         (Plugin.menuAction registry source (const (Right ())) (\_ ->pure . PreparedDebugSource)))
     pure item) [("hide.debug.toggle-breakpoint","Toggle breakpoint",ToggleSourceBreakpoint),("hide.debug.add-watch","Add watch…",AddSourceWatch)]
-  bracket (MenuHost menus [reference,navigationRef] sourceReferences <$> newTBQueueIO 256 <*> newIORef Nothing <*> newTVarIO False) close use
+  bracket (MenuHost menus [reference,navigationRef] sourceReferences <$> newTBQueueIO 256 <*> newIORef (MenuState Nothing M.empty) <*> newTVarIO False) close use
   where close (MenuHost _ _ _ changes ref closed)=do
           atomically (writeTVar closed True >> flushTBQueue changes >> pure ())
-          readIORef ref >>= mapM_ (\(Pending _ _ _ worker)->cancel worker)
+          state<-readIORef ref
+          mapM_ cancelPending (menuPending state)
+          mapM_ Editor.retireDraftRef (M.keys (menuEditors state))
+        cancelPending (Pending _ _ _ worker)=cancel worker
+        cancelPending (PendingEditor _ worker)=cancel worker
 
 menuContributions :: MenuHost -> Plugin.Menus MenuContext MenuReply
 menuContributions (MenuHost menus _ _ _ _ _)=menus
@@ -249,8 +258,9 @@ captureNavigation _ _ _=pure Nothing
 menuEffects :: MenuHost -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> [Effect] -> IO (Bool,Desktop)
 menuEffects host@(MenuHost menus permitted _ _ ref _) _ original [InvokeMenu reference origin target]=mask $ \restore->do
   requireOpen host
-  d<-adoptPublications host original
-  pending<-readIORef ref
+  published<-adoptPublications host original
+  d<-tickEditorBindings host published
+  pending<-menuPending <$> readIORef ref
   live<-Plugin.menuCurrent menus reference
   let item=find ((==reference) . Plugin.menuReference) (contributedMenus d)
       allowed=dialog d==Nothing && maybe False (\entry->origin==Plugin.HumanMenu || reference `elem` permitted && Plugin.menuAgentAllowed entry) item &&
@@ -264,8 +274,14 @@ menuEffects host@(MenuHost menus permitted _ _ ref _) _ original [InvokeMenu ref
       let row=case target of Just (WindowRowTarget reference ident)->Just (reference,ident); _->Nothing
           context=MenuContext (columns d) origin navigation source row
       worker<-async (restore (Plugin.invokeMenu menus reference context))
-      writeIORef ref (Just (Pending reference target context worker))
+      modifyIORef' ref (\s->s {menuPending=Just (Pending reference target context worker)})
       pure (False,d {status="Running menu action…"})
+menuEffects host@(MenuHost _ _ _ _ ref _) core d [effect@(SubmitEditor mount slot origin)]=do
+  requireOpen host
+  state<-readIORef ref
+  if M.member (Editor.mountDraft mount) (menuEditors state)
+    then (False,) <$> submitMenuEditor host mount slot origin d
+    else core d [effect]
 menuEffects host core d requests=requireOpen host >> core d requests
 
 -- | Check captured identity before applying prepared geometry. Dirty open files
@@ -297,16 +313,18 @@ adoptNavigation context (Navigation path row offset loaded) d
 tickMenus :: MenuHost -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> IO Desktop
 tickMenus host@(MenuHost menus _ sourceRefs _ ref closed) core original=
   readTVarIO closed >>= \stopped->if stopped then pure original else do
-  d<-adoptPublications host original
-  pending<-readIORef ref
+  published<-adoptPublications host original
+  d<-tickEditorBindings host published
+  pending<-menuPending <$> readIORef ref
   case pending of
     Nothing->pure d
+    Just (PendingEditor submitted worker)->finishMenuEditor host core d submitted worker
     Just (Pending reference target context worker)->do
       completed<-poll worker
       case completed of
         Nothing->pure d
         Just result->do
-          writeIORef ref Nothing
+          modifyIORef' ref (\s->s {menuPending=Nothing})
           live<-Plugin.menuCurrent menus reference
           let exactRow=case result of Right (Right PreparedDownloadCancel{})->invocationOrigin context==Plugin.HumanMenu && invocationRow context/=Nothing; _->False
               current=dialog d==Nothing && (not exactRow || reference `elem` windowRowMenuRefsFor target d) && (exactRow || columns d==invocationColumns context) &&
@@ -317,6 +335,8 @@ tickMenus host@(MenuHost menus _ sourceRefs _ ref closed) core original=
             Right (Left err)->pure d {status="Menu action failed: "<>T.pack (show err)}
             Right (Right (PreparedDownloadCancel request))->snd <$> core d [DownloadCancelAction request]
             Right (Right (PreparedWindow prepared))->adoptWindowUpdate (invocationOrigin context) prepared d
+            Right (Right (PreparedEditorWindow prepared))->adoptMenuEditor host (invocationOrigin context) prepared d
+            Right (Right PreparedEditorUpdate{})->pure d {status="Editor result has no submitted job."}
             Right (Right (PreparedDocument prepared))->pure (fst (applyLink prepared d))
             Right (Right (PreparedNavigation prepared))->adoptNavigation context prepared d
             Right (Right PreparedDebugSource{}) | reference `notElem` sourceRefs->pure d {status="Debugger source controls require a host-owned contribution."}
@@ -325,3 +345,74 @@ tickMenus host@(MenuHost menus _ sourceRefs _ ref closed) core original=
               Just doc->do
                 valid<-versionCurrent (debugSourceVersion prepared) (documentBuffer doc)
                 if valid then snd <$> core d [DebugSourceAction prepared] else pure d {status="Source action target changed."}
+
+-- Retain callable ownership independently of a visible frame; a scope end
+-- retires even a hidden draft and never retains its Undo in a prepared seed.
+tickEditorBindings :: MenuHost -> Desktop -> IO Desktop
+tickEditorBindings (MenuHost _ _ _ _ ref _) d=do
+  state<-readIORef ref
+  expired<-filterM (\(_, (scope,editor))->do
+    published<-PluginWindow.windowScopeCurrent scope
+    live<-Editor.editorBindingCurrent editor
+    pure (not (published && live))) (M.toList (menuEditors state))
+  mapM_ (Editor.retireDraftRef . fst) expired
+  let removed=map fst expired
+  modifyIORef' ref (\s->s {menuEditors=foldr M.delete (menuEditors s) removed})
+  pure d {editorDrafts=foldr M.delete (editorDrafts d) removed}
+
+adoptMenuEditor :: MenuHost -> Plugin.MenuOrigin -> PluginWindow.EditorWindowUpdate MenuContext MenuReply -> Desktop -> IO Desktop
+adoptMenuEditor host@(MenuHost _ _ _ _ ref _) origin update original=do
+  d<-tickEditorBindings host original
+  state<-readIORef ref
+  let editor=PluginWindow.editorWindowEditor update
+      draft=Editor.mountDraft (Editor.editorMount editor)
+      previous=Editor.editorMount . snd <$> M.lookup draft (menuEditors state)
+  (accepted,next)<-if M.size (menuEditors state)>=256 && M.notMember draft (menuEditors state)
+    then pure (False,d {status="Editor owner is full."})
+    else adoptEditorWindowUpdate origin previous update d
+  when accepted (modifyIORef' ref (\s->s {menuEditors=M.insert draft
+    (PluginWindow.updateWindowRef (PluginWindow.editorWindowBody update),Editor.installedEditor editor) (menuEditors s)}))
+  pure next
+
+submitMenuEditor :: MenuHost -> Editor.EditorMount -> Editor.EditorSlot -> Plugin.MenuOrigin -> Desktop -> IO Desktop
+submitMenuEditor (MenuHost _ _ _ _ ref _) mount slot origin d=mask $ \_->do
+  state<-readIORef ref
+  case M.lookup (Editor.mountDraft mount) (menuEditors state) of
+    Just (_,editor) | origin==Plugin.HumanMenu,activeEditorMount d==Just mount,composerActive d,Editor.editorMount editor==mount->case menuPending state of
+      Just _->pure d {status="A menu action is already running."}
+      Nothing->do
+        captured<-Editor.captureDraftSubmission mount slot (composerBuffer d)
+        case captured of
+          Nothing->pure d {status="Editor input expired."}
+          Just submitted->do
+            let context=MenuContext (columns d) origin Nothing Nothing Nothing
+            worker<-asyncWithUnmask (\unmask->unmask (Editor.invokeEditorAction editor context submitted >>= traverse evaluate))
+            modifyIORef' ref (\s->s {menuPending=Just (PendingEditor submitted worker)})
+            pure d {status="Submitting editor input..."}
+    _->pure d {status="Editor input expired."}
+
+-- Popup/menu refresh is unrelated to an already accepted editor invocation.
+-- Closing its frame refuses pre-admission work but cannot undo committed work.
+finishMenuEditor :: MenuHost -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> Editor.DraftSubmission
+  -> Async (Either CommandError MenuReply) -> IO Desktop
+finishMenuEditor host@(MenuHost _ _ _ _ ref _) core d submitted worker=do
+  state<-readIORef ref
+  owning<-case M.lookup (Editor.submissionDraft submitted) (menuEditors state) of
+    Just (scope,editor) | Editor.mountActions (Editor.editorMount editor)==Editor.mountActions (Editor.submissionMount submitted)->do
+      published<-PluginWindow.windowScopeCurrent scope
+      registered<-Editor.editorBindingCurrent editor
+      pure (published && registered)
+    _->pure False
+  completed<-poll worker
+  case completed of
+    Nothing->pure d
+    Just result->do
+      modifyIORef' ref (\s->s {menuPending=Nothing})
+      if not owning then pure d {status="Editor owner expired."} else case result of
+        Right (Right (PreparedEditorUpdate update))->applyEditorUpdate submitted update d
+        Right (Right (PreparedEditorWindow update))->adoptMenuEditor host Plugin.HumanMenu update d
+        Right (Right (PreparedWindow update))->adoptWindowUpdate Plugin.HumanMenu update d
+        Right (Right (PreparedDocument prepared))->pure (fst (applyLink prepared d))
+        Right (Left err)->pure d {status="Editor submission failed: "<>T.pack (show err)}
+        Left err->pure d {status="Editor submission failed: "<>T.pack (displayException err)}
+        _->pure d {status="Editor result requires its owning operation."}
