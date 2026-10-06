@@ -633,7 +633,7 @@ commandEnabled d cmd | cmd `elem` [MarkBlockStart,MarkBlockEnd] = sourceNavigati
 commandEnabled d cmd | sourceKeyCommand cmd = sourceNavigationOwner d &&
   (not (activeMarkdown d) || maybe False (isJust . windowMarkdown d) (activeWindow d)) &&
   (not (horizontalMutation cmd) || maybe False ((==Nothing) . documentLabel) (activeDocument d) && not (activeMarkdown d)) &&
-  (cmd/=DeleteLine || not (activeHex d))
+  (cmd `notElem` [DeleteLine,DeleteSelection] || not (activeHex d))
 commandEnabled _ Disabled{} = False
 commandEnabled d SidebarMove{} = maybe False treeFocused (sideTree d)
 commandEnabled d cmd | cmd `elem` [SidebarActivate,SidebarExpand,SidebarCollapse] = maybe False treeFocused (sideTree d)

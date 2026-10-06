@@ -776,7 +776,7 @@ prefixChecks=do
       [event (V.KChar 'c') [] pending,event V.KRight [] pending,event V.KEsc [] pending])
   forM_ [[],[V.MShift],[V.MCtrl],[V.MCtrl,V.MShift]] $ \mods->
     check "default bare Control and Shift block aliases resolve the same action" (clipboard (event (V.KChar 'C') mods started)=="hello")
-  let unavailable=started {keyBindings=prepare TerminalPlatform (M.singleton "wordstar-block" (M.singleton "hide.edit.copy-location" ["L"]))}
+  let unavailable=started {keyBindings=prepare TerminalPlatform (M.singleton "wordstar-block" (M.singleton "hide.source.copy-location" ["L"]))}
       refused=event (V.KChar 'l') [] unavailable
   check "an actually unavailable continuation still consumes one prefix"
     (not (commandEnabled unavailable CopyLocation) && prefix refused==Nothing && clipboard refused=="" &&
@@ -814,6 +814,10 @@ prefixChecks=do
       terminal=addReadOnly "Terminal test" "output" configured
       readonly=addReadOnly "Help" "protected" configured
       private=pending {guestPrivatePaths=["/authority"],buffers=M.map (\doc->doc {documentOrigin=Just "/authority/secret.hs"}) (buffers pending)}
+  let hex=addDocument Nothing (newByteBuffer (BS.pack [65,66])) configured
+  check "block actions retain ordinary text ownership rather than editing bytes"
+    (all (not . commandEnabled hex) [WordStarBlockPrefix,MarkBlockStart,MarkBlockEnd,DeleteSelection] &&
+     maybe BS.empty (bufferBytes . documentBuffer) (activeDocument (fst (runCommand DeleteSelection hex)))==BS.pack [65,66])
   check "prefix state cannot move into modal terminal or readonly owners"
     (not (commandEnabled modal WordStarBlockPrefix) && not (commandEnabled readonly MarkBlockStart) &&
      snd (handleEvent (V.EvKey (V.KChar 'c') [V.MCtrl]) terminal)==[AgentAction "terminal-input" ["test","\ETX"]] &&
