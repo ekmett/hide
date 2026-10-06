@@ -101,6 +101,7 @@ data ProviderReceipt = ProviderReceipt !(StableName A.Client) !Text
 -- Host-minted before any permission wait; extension arguments cannot forge it.
 data QuestionCaller = QuestionCaller !(StableName (IORef State)) !AH.AgentId !(Maybe ProviderReceipt)
 data QueuedQuery = SubmittedQuery !Text | QuestionQuery !Int !AH.AgentId !ProviderReceipt !Text
+  | EditorQuery !Editor.DraftSubmission !ChatEditorContext !(Editor.PreparedEditor ChatEditorContext ChatInput)
 data QuestionTicket = QuestionTicket !Int !AH.AgentId !(Maybe ProviderReceipt)
 data QuestionResult = QuestionResult !AH.AgentId !(Maybe ProviderReceipt) !Value
 
@@ -528,7 +529,7 @@ pollPromptPreparation :: ConversationState -> Desktop -> IO Desktop
 pollPromptPreparation runtime@(ConversationState _ ref _ _) d = do
   s<-readIORef ref
   case promptPreparation s of
-    Nothing -> sendQueued runtime d
+    Nothing -> prepareQueuedEditor runtime s d
     Just (DraftPrompt submitted captured worker)->pollDraftPreparation runtime d submitted captured worker
     Just (ContextPrompt steering text receipt worker) -> do
       result<-poll worker
@@ -592,9 +593,11 @@ tickConversation runtime@(ConversationState _ ref _ _) original = do
   updated<-pollPromptPreparation runtime captured
   afterEvents<-readIORef ref
   advanced<-case queuedQueries afterEvents of
+    EditorQuery{}:_ -> pure updated
     query:rest | not (busy afterEvents), not (isNothing (connection afterEvents)), session afterEvents/=Nothing -> do
       text<-case query of
         SubmittedQuery value->pure (Just value)
+        EditorQuery{}->pure Nothing
         QuestionQuery ident actor receipt answer->do
           live<-providerCurrent receipt afterEvents
           active<-AH.statusAgent (AR.agentHub (conversationAgents runtime)) (AH.Agent actor) actor
@@ -1824,11 +1827,12 @@ submitConversationEditor runtime@(ConversationState _ ref _ agents) mount slot o
         Nothing->pure d {status="Conversation input expired."}
         Just editor | Editor.editorMount editor/=mount->pure d {status="Conversation input expired."}
         Just editor->do
-          previous<-case queuedPrompt state of
-            Just (_,Just submitted)->draftCurrent submitted d
-            _->pure False
+          let pendingDrafts=maybe [] (\(_,receipt)->maybe [] pure receipt) (queuedPrompt state)++
+                [submitted | DraftPrompt submitted _ _<-maybe [] pure (promptPreparation state)]++
+                [submitted | EditorQuery submitted _ _<-queuedQueries state]
+          previous<-or <$> mapM (\submitted->draftCurrent submitted d) pendingDrafts
           if T.null target && previous then pure d {status="Preparing the submitted draft..."}
-          else if T.null target && not (isNothing (promptPreparation state)) || M.member target (childControls state)
+          else if M.member target (childControls state)
             then pure d {status="A conversation input operation is already pending."}
           else if slot==Editor.AlternateEditor && T.null target && (not (agentSteering d) || Prompting `notElem` M.elems (pending state) || steeringPending state)
             then pure d {status="No active turn is available for steering; use Query."}
@@ -1839,6 +1843,11 @@ submitConversationEditor runtime@(ConversationState _ ref _ agents) mount slot o
               (Left err,_)->pure d {status=err}
               (_,Nothing)->pure d {status="Conversation input expired."}
               (Right context',Just submitted)
+                | T.null target && slot==Editor.DefaultEditor && not (isNothing (promptPreparation state))->do
+                    let queued=queuedQueries state++[EditorQuery submitted context' editor]
+                    modifyIORef' ref (\s->s {queuedQueries=queued})
+                    pure d {status="Query queued for preparation.",agentQueued=length queued,agentReplying=True}
+                | T.null target && not (isNothing (promptPreparation state))->pure d {status="A conversation input operation is already pending."}
                 | T.null target->do
                     worker<-asyncWithUnmask $ \unmask->unmask (fmap (either (Left . T.pack . show) Right) (Editor.invokeEditorAction editor context' submitted))
                     modifyIORef' ref (\s->s {promptPreparation=Just (DraftPrompt submitted context' worker)})
@@ -1853,6 +1862,24 @@ submitConversationEditor runtime@(ConversationState _ ref _ agents) mount slot o
                           else fmap (fmap (const ())) (AH.sendAgentAt (AR.agentHub agents) AH.Human receipt (composerMarkdown text))
                         _->pure (Left "Child target expired.")) d
 
+-- Queued editor input is still immutable intent, not accepted text. The
+-- existing queue is cleared at every provider reset. Its original launch and,
+-- when already connected, exact client receipt remain authoritative; a request
+-- captured before first connect follows only that queue's initial connection.
+prepareQueuedEditor :: ConversationState -> State -> Desktop -> IO Desktop
+prepareQueuedEditor runtime@(ConversationState _ ref _ _) state d
+  | not (isNothing (queuedPrompt state))=sendQueued runtime d
+  | otherwise=case [(submitted,captured,editor) | EditorQuery submitted captured editor<-queuedQueries state] of
+      (submitted,captured,editor):_->mask $ \_->do
+        worker<-asyncWithUnmask (\unmask->unmask (fmap (either (Left . T.pack . show) Right) (Editor.invokeEditorAction editor captured submitted)))
+        modifyIORef' ref (\s->s {promptPreparation=Just (DraftPrompt submitted captured worker)})
+        pure d
+      []->pure d
+
+isQueuedEditor :: DraftReceipt -> QueuedQuery -> Bool
+isQueuedEditor submitted (EditorQuery actual _ _)=submitted==actual
+isQueuedEditor _ _=False
+
 -- The input worker uses the existing prompt slot. Its checked result then
 -- enters the existing queue/context/connect path; no second request scheduler.
 pollDraftPreparation :: ConversationState -> Desktop -> DraftReceipt -> ChatEditorContext -> Async (Either Text ChatInput) -> IO Desktop
@@ -1863,7 +1890,13 @@ pollDraftPreparation runtime@(ConversationState _ ref _ _) d submitted captured 
     Just result->do
       modifyIORef' ref (\state->state {promptPreparation=Nothing})
       state<-readIORef ref
-      current<-chatContextCurrent captured state
+      let queued=any (isQueuedEditor submitted) (queuedQueries state)
+      current<-if queued then case captured of
+        ChatEditorContext _ launch receipt _->do
+          sameLaunch<-(==launch) <$> (makeStableName =<< evaluate (provider state))
+          sameProvider<-maybe (pure True) (`providerCurrent` state) receipt
+          pure (sameLaunch && sameProvider)
+        else chatContextCurrent captured state
       live<-Editor.draftRefCurrent (Editor.submissionDraft submitted)
       case result of
         Right (Right (ChatInput actual steering text)) | actual==submitted,current && live->do
@@ -1871,7 +1904,14 @@ pollDraftPreparation runtime@(ConversationState _ ref _ _) d submitted captured 
           zone<-getCurrentTimeZone
           let admitted=stampReply now zone state
           writeIORef ref admitted
-          if steering then beginPromptPreparation ref True text (Just submitted) d
+          if queued then do
+            let accepted=admitted {queuedQueries=map (\query->if isQueuedEditor submitted query then SubmittedQuery text else query) (queuedQueries admitted),
+                  transcript=transcript admitted++[Reply "You" (composerMarkdown text)]}
+            writeIORef ref accepted
+            cleared<-clearSubmittedDraft (Just submitted) d
+            painted<-paint True accepted cleared
+            pure painted {agentQueued=length (queuedQueries accepted),status="Query queued."}
+          else if steering then beginPromptPreparation ref True text (Just submitted) d
           else if busy admitted then do
             let queued=admitted {queuedQueries=queuedQueries admitted++[SubmittedQuery text],transcript=transcript admitted++[Reply "You" (composerMarkdown text)]}
             writeIORef ref queued
@@ -1879,6 +1919,10 @@ pollDraftPreparation runtime@(ConversationState _ ref _ _) d submitted captured 
             painted<-paint True queued cleared
             pure painted {agentQueued=length (queuedQueries queued),status="Query queued."}
           else submitPrimaryPrompt runtime admitted (Just submitted) text (False,False,False) d
-        Right (Left err)->pure d {status=err}
-        Left _->pure d {status="Conversation input preparation interrupted."}
-        _->pure d {status="Conversation target changed; draft kept."}
+        Right (Left err)->refuse err
+        Left _->refuse "Conversation input preparation interrupted."
+        _->refuse "Conversation target changed; draft kept."
+  where
+    refuse err=do
+      modifyIORef' ref (\state->state {queuedQueries=filter (not . isQueuedEditor submitted) (queuedQueries state)})
+      pure d {status=err}

@@ -57,6 +57,7 @@ data MenuReply = PreparedDownloadCancel !DownloadCancelRequest | PreparedDocumen
 
 data Pending = Pending Plugin.MenuRef (Maybe ContextTarget) MenuContext (Async (Either Plugin.MenuError MenuReply))
   | PendingEditor Editor.DraftSubmission (Async (Either CommandError MenuReply))
+  | RetiringEditor (Async (Either CommandError MenuReply)) (Async ())
 data MenuState = MenuState
   { menuPending :: Maybe Pending
   , menuEditors :: M.Map Editor.DraftRef (PluginWindow.WindowRef,Editor.PreparedEditor MenuContext MenuReply) }
@@ -92,6 +93,7 @@ withMenuCommands docs use=withRegistry $ \registry->Plugin.withMenus ("context.w
           mapM_ Editor.retireDraftRef (M.keys (menuEditors state))
         cancelPending (Pending _ _ _ worker)=cancel worker
         cancelPending (PendingEditor _ worker)=cancel worker
+        cancelPending (RetiringEditor worker reaper)=cancel worker >> cancel reaper
 
 menuContributions :: MenuHost -> Plugin.Menus MenuContext MenuReply
 menuContributions (MenuHost menus _ _ _ _ _)=menus
@@ -319,6 +321,11 @@ tickMenus host@(MenuHost menus _ sourceRefs _ ref closed) core original=
   case pending of
     Nothing->pure d
     Just (PendingEditor submitted worker)->finishMenuEditor host core d submitted worker
+    Just (RetiringEditor _ reaper)->do
+      completed<-poll reaper
+      case completed of
+        Nothing->pure d
+        Just _->modifyIORef' ref (\s->s {menuPending=Nothing}) >> pure d
     Just (Pending reference target context worker)->do
       completed<-poll worker
       case completed of
@@ -405,7 +412,13 @@ finishMenuEditor host@(MenuHost _ _ _ _ ref _) core d submitted worker=do
     _->pure False
   completed<-poll worker
   case completed of
-    Nothing->pure d
+    Nothing->do
+      live<-Editor.mountCurrent (Editor.submissionMount submitted)
+      aborted<-if live && owning then pure False else Editor.abortEditorSubmission submitted
+      if not aborted then pure d else mask $ \_->do
+        reaper<-asyncWithUnmask (\unmask->unmask (cancel worker))
+        modifyIORef' ref (\s->s {menuPending=Just (RetiringEditor worker reaper)})
+        pure d
     Just result->do
       modifyIORef' ref (\s->s {menuPending=Nothing})
       if not owning then pure d {status="Editor owner expired."} else case result of

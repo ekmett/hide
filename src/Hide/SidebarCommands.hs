@@ -914,12 +914,13 @@ finishEditorJob host@(SidebarHost _ ref _ cancellation _ _) core d submitted wor
       registered<-Editor.editorBindingCurrent editor
       pure (published && registered)
     _->pure False
-  accepted<-Editor.submissionAccepted submitted
   live<-Editor.mountCurrent (Editor.submissionMount submitted)
   completed<-poll worker
   case completed of
-    Nothing | not accepted && not live && not cancelled->do
-      queued<-atomically $ do
+    Nothing | not live && not cancelled->do
+      aborted<-Editor.abortEditorSubmission submitted
+      accepted<-Editor.submissionAccepted submitted
+      queued<-if not aborted && accepted then pure False else atomically $ do
         full<-isFullTBQueue cancellation
         if full then pure False else writeTBQueue cancellation (Cancellation worker) >> pure True
       modifyIORef' ref (\s->s {actionJob=Just (EditorJob submitted worker queued)})

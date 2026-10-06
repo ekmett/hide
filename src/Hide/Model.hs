@@ -1794,7 +1794,7 @@ handleEventCore :: V.Event -> Desktop -> (Desktop,[Effect])
 handleEventCore (V.EvMouseDown x y V.BLeft _) d | drag d==Nothing, y==snd (screenSize d)-1 =
   case find (\(rect,_,_)->inside rect x y) (statusItemRects d) of
     Just (_,_,Left cmd) -> runCommand cmd d
-    Just (_,_,Right event) -> handleEvent event (if activeConversation d then (setComposerInput (composerBuffer (d)) (composerSelection (d)) (True) (d)) else d)
+    Just (_,_,Right event) -> handleEvent event (if activeConversation d then (setComposerInput (composerBuffer d) (composerSelection d) True d) else d)
     Nothing -> (d,[])
 handleEventCore event d = Bifunctor.first (layoutComposer d . clampReviewWindows . clampHexScroll d) $ dispatchEvent event (case event of
   V.EvKey{} -> d {hoverTarget=Nothing,typeHint="",buttonHover=Nothing,buttonPressed=Nothing,statusHover=Nothing}
@@ -2075,7 +2075,7 @@ composerScroll d w = (max 0 (r-height rect+1),max 0 (displayColumn line (max 0 (
         rect=composerRect d w
 
 composerClick :: Int -> Int -> [V.Modifier] -> Window -> Desktop -> Desktop
-composerClick x y mods w d = clearReplySelection (setComposerInput (composerBuffer (d)) (Selection (if V.MShift `elem` mods then anchor (composerSelection d) else p) p) (True) (d {chatQuestion=fmap (\q->q {questionFocused=False}) (chatQuestion d)}))
+composerClick x y mods w d = clearReplySelection (setComposerInput (composerBuffer d) (Selection (if V.MShift `elem` mods then anchor (composerSelection d) else p) p) (True) (d {chatQuestion=fmap (\q->q {questionFocused=False}) (chatQuestion d)}))
   where
     Rect l t _ _=composerRect d w; (sr,sc)=composerScroll d w; b=composerBuffer d
     r=min (bufferLineCount b-1) (max 0 (y-t+sr))
@@ -2083,7 +2083,7 @@ composerClick x y mods w d = clearReplySelection (setComposerInput (composerBuff
     (marker,line)=if windowEditorCode w then composerLine b r else (0,bufferLineAt b r)
 
 composerInsert :: Text -> Desktop -> Desktop
-composerInsert text d = clearReplySelection (setComposerInput (replaceSelection sel text (composerBuffer d)) (Selection p p) (True) (d))
+composerInsert text d = clearReplySelection (setComposerInput (replaceSelection sel text (composerBuffer d)) (Selection p p) True d)
   where sel=composerSelection d; p=fst (ordered sel)+T.length text
 
 -- Clipboard provenance is ephemeral and only applies when the pasted bytes
@@ -2149,10 +2149,10 @@ composerPaste text d
 composerTyped :: Text -> Desktop -> Desktop
 composerTyped text d
   | text==" ", anchor sel==caret sel, column==1, ">" `T.isPrefixOf` line =
-      let block=composerBlock (T.drop 1 line<>"\n") (setComposerInput (composerBuffer (d)) (Selection start (start+T.length line)) (composerFocused (d)) (d))
+      let block=composerBlock (T.drop 1 line<>"\n") (setComposerInput (composerBuffer d) (Selection start (start+T.length line)) (composerFocused d) (d))
           prefix=if row>0 && not (T.null (T.strip (bufferLineAt b (row-1)))) then 1 else 0
           pos=start+prefix+4
-      in (setComposerInput (composerBuffer (block)) (Selection pos pos) (composerFocused (block)) (block))
+      in (setComposerInput (composerBuffer block) (Selection pos pos) (composerFocused block) (block))
   | otherwise=composerInsert text d
   where b=composerBuffer d; sel=composerSelection d; (row,column)=bufferLineColumn b (caret sel)
         start=bufferLineOffset b row; line=bufferLineAt b row
@@ -2174,7 +2174,7 @@ composerCommandWith code cmd d = case cmd of
   Copy -> copied
   Cut -> composerInsert "" copied
   Paste -> if code then composerPaste (clipboard d) d else composerInsert (clipboard d) d
-  SelectAll -> clearReplySelection (setComposerInput (composerBuffer (d)) (Selection 0 (bufferLength b)) (composerFocused (d)) (d))
+  SelectAll -> clearReplySelection (setComposerInput (composerBuffer d) (Selection 0 (bufferLength b)) (composerFocused d) (d))
   Undo -> history undo
   Redo -> history redo
   _ -> d
@@ -2185,7 +2185,7 @@ composerCommandWith code cmd d = case cmd of
     history f=let changed=f b; bounded=min (bufferLength changed) (caret sel)
                   row=fst (bufferLineColumn changed bounded)
                   p=if code then max bounded (bufferLineOffset changed row+fst (composerLine changed row)) else bounded
-              in (setComposerInput (changed) (Selection p p) (composerFocused (d)) (d))
+              in (setComposerInput (changed) (Selection p p) (composerFocused d) (d))
 
 composerEvent :: V.Event -> Desktop -> Maybe (Desktop,[Effect])
 composerEvent event d=composerEventWith (composerCodeInput d) event d
@@ -2194,7 +2194,7 @@ composerEventWith :: Bool -> V.Event -> Desktop -> Maybe (Desktop,[Effect])
 composerEventWith code (V.EvPaste bytes) d = Just (either (const d) (\text -> (if code then composerPaste else composerInsert) (T.filter (\c -> textInputChar c || c `elem` ['\n','\r','\t']) text) d) (TE.decodeUtf8' bytes),[])
 composerEventWith code (V.EvKey key mods) d
   | key==V.KEsc, composerFocused d, agentReplying d = Just (d,[AgentAction "cancel" []])
-  | key==V.KChar '\t', null mods = Just ((setComposerInput (composerBuffer (d)) (composerSelection (d)) (not (composerFocused d)) (d)),[])
+  | key==V.KChar '\t', null mods = Just ((setComposerInput (composerBuffer d) (composerSelection d) (not (composerFocused d)) d),[])
   | key==V.KEnter, composerFocused d, all (`elem` [V.MCtrl,V.MShift]) mods = Just (if code || editingInput d==MountedInput then composerSubmit mods d else if V.MShift `elem` mods then (composerInsert "\n" d,[]) else (d,[]))
   | V.KChar c<-key, textInputChar c, null mods || mods==[V.MShift] = done ((if code then composerTyped else composerInsert) (T.singleton c) d)
   | not (composerFocused d) || V.MAlt `elem` mods || V.MMeta `elem` mods = Nothing
@@ -2206,7 +2206,7 @@ composerEventWith code (V.EvKey key mods) d
       V.KRight -> move (if ctrl then bufferWordRight b p else bufferNextCharacter b p)
       V.KUp -> vertical (-1)
       V.KDown | marker>0, r+1==bufferLineCount b ->
-        done (composerInsert "\n" (setComposerInput (composerBuffer (d)) (Selection (bufferLength b) (bufferLength b)) (composerFocused (d)) (d)))
+        done (composerInsert "\n" (setComposerInput (composerBuffer d) (Selection (bufferLength b) (bufferLength b)) (composerFocused d) (d)))
       V.KDown -> vertical 1
       V.KHome -> move (if ctrl then 0 else start+marker)
       V.KEnd -> move (if ctrl then bufferLength b else bufferLineOffset b r+T.length (bufferLineAt b r))
@@ -2223,11 +2223,11 @@ composerEventWith code (V.EvKey key mods) d
     start=bufferLineOffset b r; (marker,line)=if code then composerLine b r else (0,bufferLineAt b r)
     move n=let bounded=max 0 (min (bufferLength b) n); row=fst (bufferLineColumn b bounded)
                q=if code then max bounded (bufferLineOffset b row+fst (composerLine b row)) else bounded
-           in done (setComposerInput (composerBuffer (d)) (Selection (if V.MShift `elem` mods then anchor sel else q) q) (composerFocused (d)) (d))
+           in done (setComposerInput (composerBuffer d) (Selection (if V.MShift `elem` mods then anchor sel else q) q) (composerFocused d) (d))
     vertical delta=let row=max 0 (min (bufferLineCount b-1) (r+delta))
                        (prefix,target)=if code then composerLine b row else (0,bufferLineAt b row)
                    in move (bufferLineOffset b row+prefix+columnOffset target (displayColumn line (max 0 (column-marker))))
-    erase a z=done (composerInsert "" (setComposerInput (composerBuffer (d)) (if anchor sel/=p then sel else Selection a z) (composerFocused (d)) (d)))
+    erase a z=done (composerInsert "" (setComposerInput (composerBuffer d) (if anchor sel/=p then sel else Selection a z) (composerFocused d) (d)))
 composerEventWith _ _ _ = Nothing
 
 -- The Autocomplete hint is independent human input. Reuse editing operations
@@ -2314,7 +2314,7 @@ questionInsert text=questionEdit $ \d->
             | otherwise=[(a,z,inserted),(tailStart,size,"")]
       changed | tailStart<size=either (const b) id (replaceRanges edits b)
               | otherwise=replaceSelection (Selection a z) inserted b
-  in (setComposerInput (changed) (Selection (a+n) (a+n)) (composerFocused (d)) (d))
+  in (setComposerInput (changed) (Selection (a+n) (a+n)) (composerFocused d) (d))
 
 questionCommand :: Command -> Desktop -> Desktop
 questionCommand Paste d=questionInsert (clipboard d) d
@@ -2764,7 +2764,7 @@ windowMouse x y button mods d = case find (\w -> windowVisible d w && inside (bo
       | activeConversation focused, Just action<-conversationClick x y w focused -> (focused {drag=Nothing},[action])
       | windowHasEditor focused w, inside (composerRect focused w) x y -> (composerClick x y mods w focused,[])
       | windowHasEditor focused w, y>=top (composerRect focused w) -> (focused,[])
-      | otherwise -> (selectAt (V.MShift `elem` mods) x y (setComposerInput (composerBuffer (focused)) (composerSelection (focused)) (if activeConversation focused then True else composerFocused focused) (focused {drag=Just (Selecting (windowId w)), autocompleteFocused=if activeAutocomplete focused then False else autocompleteFocused focused})),[])
+      | otherwise -> (selectAt (V.MShift `elem` mods) x y (setComposerInput (composerBuffer focused) (composerSelection focused) (if activeConversation focused then True else composerFocused focused) (focused {drag=Just (Selecting (windowId w)), autocompleteFocused=if activeAutocomplete focused then False else autocompleteFocused focused})),[])
     _ -> (focused,[])
 
 mapWindow :: Int -> (Window -> Window) -> Desktop -> Desktop

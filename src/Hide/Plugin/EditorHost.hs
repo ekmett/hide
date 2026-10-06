@@ -23,7 +23,7 @@ module Hide.Plugin.EditorHost
   , PreparedEditor, prepareEditorBuffer, remountEditor, editorMount, editorInitialBuffer
   , installedEditor, editorCurrent, editorBindingCurrent, claimEditorMount
   , DraftSubmission, captureDraftSubmission, submissionDraft, submissionMount
-  , submissionVersion, submissionContent, submissionAction, submissionSlot, sameDraftSubmission, submissionAccepted
+  , submissionVersion, submissionContent, submissionAction, submissionSlot, sameDraftSubmission, submissionAccepted, abortEditorSubmission
   , invokeEditorAction, EditorUpdate, clearEditorDraft, replacementEditorDraft
   , updateSubmission, updateReplacement, consumeEditorUpdate
   ) where
@@ -206,6 +206,14 @@ sameDraftSubmission a b=submissionDraft a==submissionDraft b && submissionVersio
 -- owner cancel unaccepted preparation without recalling committed work.
 submissionAccepted :: DraftSubmission -> IO Bool
 submissionAccepted (DraftSubmission _ _ _ _ _ state)=(==Invoked) <$> readTVarIO state
+
+-- | Atomically retire only unaccepted input before scheduling off-owner
+-- cancellation. The command handoff competes on this same phase; Invoked work
+-- drains and can never be recalled by a later frame or scope closure.
+abortEditorSubmission :: DraftSubmission -> IO Bool
+abortEditorSubmission (DraftSubmission _ _ _ _ _ state)=atomically $ do
+  phase<-readTVar state
+  if phase/=Captured then pure False else writeTVar state Consumed >> pure True
 
 -- | Invoke on the existing action worker. Recheck the original mount before
 -- registry admission, after evaluating its argument adapter. This one-shot claim
