@@ -179,12 +179,14 @@ chunksFlags (Loaded (SourceOwner _ _ flags _ _ _) _)=flags
 chunksFlags (Edited _ flags)=flags
 
 -- A proven stored receipt edge in one immutable owner. Raw coordinates/hash
--- are strict; display facts MUST stay lazy. In particular constructing EOF for
+-- are strict; hash/display facts MUST stay lazy until their owning demand.
+-- RawMeasure construction forces the hash; numeric display queries never need
+-- prefix base powers. In particular constructing EOF for
 -- a suffix raw measure must use the seed, not prepare the whole display index.
 -- The final Boolean is the preceding item's proven overflow at this edge,
 -- including interior artificial EOF. Edges belong to that same owner;
 -- fingerprints never prove it.
-data ReceiptEdge = ReceiptEdge !Int !Int !Word64 Int Int SourceCursor Bool
+data ReceiptEdge = ReceiptEdge !Int !Int Word64 Int Int SourceCursor Bool
 
 -- Normalize to the preceding stored receipt edge. An interior scalar is not an
 -- installable Piece edge: later splice repair must recut its bounded receipt.
@@ -196,7 +198,7 @@ ownerReceiptEdge (SourceOwner _ seed _ incoming finalOverflow blocks) requested
   | otherwise=find 0 0 0 0 0 False blocks
   where
     goal=max 0 requested
-    find !char !byte !hash !tabs !col previousOverflow (LoadedBlock chars bytes advance blockHash blockTabs entries rest)
+    find !char !byte hash !tabs !col previousOverflow (LoadedBlock chars bytes advance blockHash blockTabs entries rest)
       | char+chars<=goal=find (char+chars) (byte+bytes) (hash*16777619^chars+blockHash)
           (tabs+blockTabs) (applyAdvance advance col) (entryOverflow entries (V.length entries-1)) rest
       | otherwise=case V.unsafeIndex entries index of
