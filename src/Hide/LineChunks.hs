@@ -178,7 +178,9 @@ chunksFlags (Edited tree)=chunkFlags (FT.measure tree)
 -- A proven stored receipt edge in one immutable owner. Raw coordinates/hash
 -- are strict; display facts MUST stay lazy. In particular constructing EOF for
 -- a suffix raw measure must use the seed, not prepare the whole display index.
--- Edges passed to a range belong to that same owner; fingerprints never prove it.
+-- The final Boolean is the preceding item's proven overflow at this edge,
+-- including interior artificial EOF. Edges belong to that same owner;
+-- fingerprints never prove it.
 data ReceiptEdge = ReceiptEdge !Int !Int !Word64 Int Int SourceCursor Bool
 
 -- Normalize to the preceding stored receipt edge. An interior scalar is not an
@@ -188,21 +190,24 @@ ownerReceiptEdge (SourceOwner _ seed _ incoming finalOverflow blocks) requested
   | goal<=0=ReceiptEdge 0 0 0 0 0 incoming False
   | goal>=rawCharacters seed=ReceiptEdge (rawCharacters seed) (rawBytes seed) (rawHash seed)
       (applyAdvance (loadedAdvance blocks) 0) (endTabs blocks) (endCursor incoming blocks) (endOverflow finalOverflow blocks)
-  | otherwise=find 0 0 0 0 0 blocks
+  | otherwise=find 0 0 0 0 0 False blocks
   where
     goal=max 0 requested
-    find !char !byte !hash !tabs !col (LoadedBlock chars bytes advance blockHash blockTabs entries rest)
+    find !char !byte !hash !tabs !col previousOverflow (LoadedBlock chars bytes advance blockHash blockTabs entries rest)
       | char+chars<=goal=find (char+chars) (byte+bytes) (hash*16777619^chars+blockHash)
-          (tabs+blockTabs) (applyAdvance advance col) rest
+          (tabs+blockTabs) (applyAdvance advance col) (entryOverflow entries (V.length entries-1)) rest
       | otherwise=case V.unsafeIndex entries index of
           LoadedEntry scalar offset prefix localHash localTabs (Chunk _ _ cursor _ _)->
             ReceiptEdge (char+scalar) (byte+offset) (hash*16777619^scalar+localHash)
-              (applyAdvance prefix col) (tabs+localTabs) cursor False
+              (applyAdvance prefix col) (tabs+localTabs) cursor
+              (if index==0 then previousOverflow else entryOverflow entries (index-1))
       where
         index=loadedIndex (\i->char+endpoint i>goal) entries
         endpoint i | i+1==V.length entries=chars
                    | otherwise=case V.unsafeIndex entries (i+1) of LoadedEntry scalar _ _ _ _ _->scalar
-    find _ _ _ _ _ LoadedEnd=error "Source receipt ended before its raw extent."
+    find _ _ _ _ _ _ LoadedEnd=error "Source receipt ended before its raw extent."
+    entryOverflow entries index=case V.unsafeIndex entries index of
+      LoadedEntry _ _ _ _ _ (Chunk _ _ _ _ overflow)->overflow
     endTabs LoadedEnd=0
     endTabs (LoadedBlock _ _ _ _ tabs _ rest)=tabs+endTabs rest
     endCursor fallback LoadedEnd=fallback
