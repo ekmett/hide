@@ -29,7 +29,7 @@ checks=withEditorFixture "" (addReadOnly "Conversation" "Session: provider-secre
       sourceId=maybe (-1) sourceFixtureBuffer (activeWindow base)
       firstRect d dg=case fieldRects d dg of r:_->r; _->error "missing field rectangle"
       chat=(setComposerInput (newBuffer "private draft") (Selection 0 0) True conversation) {
-        chatActions=[(43,64,"question-input",[])],chatInputOffset=Just 50}
+        chatActions=[(43,64,"question-input",[])]}
       window=case activeWindow chat of Just w->w; _->error "no chat window"
       ident=sourceFixtureBuffer window
       Rect x y _ _=bounds window
@@ -102,7 +102,7 @@ checks=withEditorFixture "" (addReadOnly "Conversation" "Session: provider-secre
     (not (pointerAllowedAt chat (x+2) (y+2)) && not (pointerAllowedAt chat (x+2) (top draft)))
   forM_ [P.Key "Enter" [],P.Key "x" [],P.Paste "answer",P.Mouse "down" (left draft) (top draft) 0 1 [],P.Mouse "down" (x+2) (top draft) 0 1 []] $ \event ->
     checkDenied "guest cannot type or click into human draft/answer controls" chat [event]
-  let generic=chat {buffers=M.adjust (\doc->doc {documentLabel=Nothing}) ident (buffers chat),chatActions=[],chatInputOffset=Nothing}
+  let generic=chat {buffers=M.adjust (\doc->doc {documentLabel=Nothing}) ident (buffers chat),chatActions=[]}
       genericWindow=maybe (error "generic editor missing") id (activeWindow generic)
       genericDraft=composerRect generic genericWindow
   check "source-attached input is private regardless of document title while its body stays readable"
