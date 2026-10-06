@@ -2,10 +2,12 @@
 
 Status: implemented typed command registration, immutable buffer reads and checked
 strict diffs, scoped menus/bindings, shared sidebar trees, prepared plugin text
-windows, fixed rows with readonly Details, and host-owned input and choice forms.
+windows, fixed rows with readonly Details, persistent multiline editors, and
+host-owned input and choice forms.
 The current APIs are in
-`Hide.Plugin.Command`, `Buffer`, `Menu`, `Tree`, `Sidebar`, `Window` and `Form`. The signatures
-below sketch the broader proposed contracts and are not a compilable SDK. The
+`Hide.Plugin.Command`, `Buffer`, `Menu`, `Tree`, `Sidebar`, `Window`, `Editor` and
+`Form`. The signatures below sketch the broader proposed contracts and are not a
+compilable SDK. The
 approved [sidebar design](../plans/sidebar-navigation.md) supplies the navigation
 model.
 
@@ -31,9 +33,10 @@ workspace expires that request. Once creation commits, the new agent has its own
 lifetime.
 
 The checked host results support agent creation, rename, configuration and
-saved-file basename rename. Arbitrary widget actions and embedded editable plugin
-windows remain separate work. Agent input cannot operate these forms. The linked
-owner declares capture disclosure when preparing a form; refresh cannot change
+saved-file basename rename. Persistent multiline input is described below;
+arbitrary widget actions remain separate work. Agent input cannot operate these
+forms. The linked owner declares capture disclosure when preparing a form;
+refresh cannot change
 it. Rename and new-agent forms are private. Model/effort forms expose filtered
 public capability labels, preserving readable agent settings without allowing
 agent input. A readable form is no authority to expose protected source or session
