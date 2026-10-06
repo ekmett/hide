@@ -629,9 +629,9 @@ editTree mode a z inserted tree=foldl' (flip cancelRestoredLine) updated [firstR
       | not mode,ChunkedLine _ _ _ _ _ chunks<-first
       , characterCount (FT.measure rawBefore)==characterCount (FT.measure endBefore)
       , not (T.any (=='\n') inserted)=
-          let repaired=Chunks.chunksEdit chunks start end inserted; m=Chunks.chunksMeasure repaired
-          in let line=ChunkedLine (Chunks.chunkCharacters m) (Chunks.chunkFlags m) Original (Chunks.chunkHash m) (Chunks.chunkFactor m) repaired
-             in if Chunks.chunkFlags m .&. 4/=0 then FT.fromList [line,Line 0 0 Original 0 1 T.empty] else FT.singleton line
+          let repaired=Chunks.chunksEdit chunks start end inserted; m=Chunks.chunksRawMeasure repaired
+          in let line=ChunkedLine (Chunks.rawCharacters m) (Chunks.chunksFlags repaired) Original (Chunks.rawHash m) (Chunks.rawFactor m) repaired
+             in if Chunks.chunksFlags repaired .&. 4/=0 then FT.fromList [line,Line 0 0 Original 0 1 T.empty] else FT.singleton line
       -- Multiline edits retain the existing exact splice path. Its physical-line
       -- projections may be linear; this first repair owner bounds same-row edits.
       | otherwise=linesFromText mode (T.take start (lineText first) <> inserted <> T.drop end (lineText lastLine))
