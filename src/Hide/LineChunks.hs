@@ -764,12 +764,25 @@ editedFlags original start end inserted tree=nul .|. terminal .|. (trailing `shi
         | not (any (T.any (=='\0')) (chunksFragments original start (end-start)))=1
         | any (T.any (=='\0')) texts=1
         | otherwise=0
-    trailing | end<size-oldTrailing=oldTrailing
-             | otherwise=tailCount 0 tree
-    tailCount !n remaining=case FT.viewr remaining of
-      FT.EmptyR->n
-      rest FT.:> piece->let text=pieceText piece; tailText=T.takeWhileEnd (\c->c=='\r'||c=='\n') text
-                       in if TU.lengthWord8 tailText==TU.lengthWord8 text then tailCount (n+T.length tailText) rest else n+T.length tailText
+    tailStart=size-oldTrailing
+    insertedLength=T.length inserted
+    insertedTrailing=T.length (T.takeWhileEnd terminator inserted)
+    terminator c=c=='\r'||c=='\n'
+    trailing | end<tailStart=oldTrailing
+             | insertedTrailing<insertedLength=size-end+insertedTrailing
+             | start>=tailStart=oldTrailing-(end-start)+insertedLength
+             | otherwise=size-end+insertedLength+prefixTrailing start (piecesTree original)
+    -- Only a newly exposed, previously unknown prefix tail is inspected.
+    -- The unchanged terminator suffix has an exact cached scalar count already.
+    prefixTrailing point source=case FT.viewl suffix of
+      FT.EmptyL->tailCount 0 T.empty prefix
+      piece FT.:< _->tailCount 0 (pieceFragments piece 0 (point-rawCharacters (FT.measure prefix))) prefix
+      where (prefix,suffix)=FT.split ((>=point).rawCharacters) source
+    tailCount !n text previous=
+      let tailText=T.takeWhileEnd terminator text; total=n+T.length tailText in
+      if TU.lengthWord8 tailText<TU.lengthWord8 text then total else case FT.viewr previous of
+        FT.EmptyR->total
+        rest FT.:> piece->tailCount total (pieceText piece) rest
     lastTwo=takeEnd 2 tree
     takeEnd n remaining=case FT.viewr remaining of
       FT.EmptyR->T.empty
