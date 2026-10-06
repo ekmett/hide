@@ -11,6 +11,7 @@
 module Hide.Render (renderDesktop, renderCellRows, renderCursor, snapshot, snapshotHtml, RenderKey, renderKey) where
 
 import Control.Exception (evaluate)
+import Hide.ConversationBody (QuestionProjection(..))
 import Data.IORef
 import System.Mem.StableName (StableName, makeStableName, eqStableName)
 import Data.List (find, groupBy)

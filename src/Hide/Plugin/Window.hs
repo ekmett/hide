@@ -18,7 +18,8 @@ module Hide.Plugin.Window
   ( WindowRef, WindowScope, WindowUpdate, withWindowScope, openTextWindow, refreshTextWindow
   , updateWindowRef, admitWindowUpdate, windowRefCurrent, windowScopeCurrent, retireWindowRef
   , EditorWindowUpdate, openEditorWindow, editorWindowBody, editorWindowEditor, admitEditorWindowUpdate
-  , PreparedWindow, prepareTextWindow, prepareMarkdownWindow, prepareStyledTextWindow, prepareRecoverableTextWindow
+  , PreparedWindow, prepareTextWindow, prepareMarkdownWindow, prepareStyledTextWindow, prepareSemanticTextWindow, prepareRecoverableTextWindow
+  , WindowDisclosure(..), TextCopy(..), MessageAttribution(..), TextSemantics(..), preparedWindowSemantics, preparedWindowDisclosure
   , WindowRow(..), prepareRowsWindow, prepareRecoverableRowsWindow
   , WindowRows(..), preparedWindowTitle, preparedWindowText, preparedWindowRows, preparedWindowWidth, preparedWindowHasSections, preparedWindowNeedsLayout, preparedWindowRecovery
   ) where
@@ -41,13 +42,13 @@ import qualified Hide.Plugin.EditorHost as E
 import Hide.Syntax (Style(..),SourceRow,plainSourceRow,sourceRowText,sourceRowRanges,sourceRangeCharEnd,sectionTitle,styleLayoutMetadata)
 
 -- | Exact content instance. A closed/reopened view cannot reuse this identity.
-data WindowRef = WindowRef Unique WindowScope (TVar (Integer,Bool))
+data WindowRef = WindowRef Unique WindowScope !WindowDisclosure (TVar (Integer,Bool))
 instance Eq WindowRef where
-  WindowRef a _ _==WindowRef b _ _=a==b
+  WindowRef a _ _ _==WindowRef b _ _ _=a==b
 instance Ord WindowRef where
-  compare (WindowRef a _ _) (WindowRef b _ _)=compare a b
+  compare (WindowRef a _ _ _) (WindowRef b _ _ _)=compare a b
 instance Show WindowRef where
-  show (WindowRef ident _ _)="WindowRef "++show (hashUnique ident)
+  show (WindowRef ident _ _ _)="WindowRef "++show (hashUnique ident)
 
 -- | Fully prepared immutable text and styled display rows. Equality observes
 -- the unique prepared identity only, never text or styled payloads.
@@ -56,36 +57,83 @@ instance Show WindowRef where
 data WindowRow = WindowRow !NodeId !Text !PreparedWindow
 data WindowRows = PlainRows !(V.Vector SourceRow) | StyledRows !(V.Vector [(Char,Style)])
   | RowsDetails !(V.Vector WindowRow) !(M.Map NodeId Int) ![MenuRef]
-data PreparedWindow = PreparedWindow !Unique !Text !BufferContent !WindowRows !Int !(Maybe (Text,Int)) !Bool !Bool
+-- | Observation only. Readability grants no input, shell or command authority.
+-- The declaration is frozen by each WindowRef; changing it needs a fresh open.
+data WindowDisclosure = PrivateWindow | ReadableWindow deriving (Eq,Show)
+
+-- | Message attribution belongs to copied text, never provider identity.
+data MessageAttribution = NoAttribution | UserBotAttribution deriving (Eq,Show)
+data TextCopy = CopyText | CopyMessages !MessageAttribution deriving (Eq,Show)
+
+-- | Immutable scalar intervals over exactly the prepared text. Masks describe
+-- the distinct guest, human-streamer and recovery projections. No field grants
+-- authority or contains a callback; owners sanitize data before preparation.
+data TextSemantics = TextSemantics
+  { textCopy :: !TextCopy, textLinkBase :: !(Maybe FilePath)
+  , textLinks :: !(V.Vector (Int,Int,Text))
+  , textShellBlocks :: !(V.Vector (Int,Int,Text,Text))
+  , textDisclosure :: !WindowDisclosure
+  , textGuestHidden :: !(V.Vector (Int,Int))
+  , textStreamerHidden :: !(V.Vector (Int,Int))
+  , textRecoveryHidden :: !(V.Vector (Int,Int))
+  }
+
+data PreparedWindow = PreparedWindow !Unique !Text !BufferContent !WindowRows !Int !(Maybe (Text,Int)) !Bool !Bool !(Maybe TextSemantics)
 preparedWindowRef :: PreparedWindow -> Unique
-preparedWindowRef (PreparedWindow ident _ _ _ _ _ _ _)=ident
+preparedWindowRef (PreparedWindow ident _ _ _ _ _ _ _ _)=ident
 preparedWindowTitle :: PreparedWindow -> Text
-preparedWindowTitle (PreparedWindow _ title _ _ _ _ _ _)=title
+preparedWindowTitle (PreparedWindow _ title _ _ _ _ _ _ _)=title
 preparedWindowText :: PreparedWindow -> BufferContent
-preparedWindowText (PreparedWindow _ _ text _ _ _ _ _)=text
+preparedWindowText (PreparedWindow _ _ text _ _ _ _ _ _)=text
 preparedWindowRows :: PreparedWindow -> WindowRows
-preparedWindowRows (PreparedWindow _ _ _ rows _ _ _ _)=rows
+preparedWindowRows (PreparedWindow _ _ _ rows _ _ _ _ _)=rows
 
 -- | Worker-cached natural cell extent; querying it never scans content. Semantic
 -- heading/script layouts override this extent with their own prepared width.
 preparedWindowWidth :: PreparedWindow -> Int
-preparedWindowWidth (PreparedWindow _ _ _ _ width _ _ _)=width
+preparedWindowWidth (PreparedWindow _ _ _ _ width _ _ _ _)=width
 
 -- | Cached heading presence, forced during preparation; input never scans rows.
 preparedWindowHasSections :: PreparedWindow -> Bool
-preparedWindowHasSections (PreparedWindow _ _ _ _ _ _ sections _)=sections
+preparedWindowHasSections (PreparedWindow _ _ _ _ _ _ sections _ _)=sections
 
 -- | Cached semantic layout admission, forced by the preparation worker. Input
 -- observes only these scalar flags; it never scans styled rows. Script geometry
 -- is independent of the wide-heading preference.
 preparedWindowNeedsLayout :: Bool -> PreparedWindow -> Bool
-preparedWindowNeedsLayout wide (PreparedWindow _ _ _ _ _ _ sections scripts)=scripts || wide && sections
+preparedWindowNeedsLayout wide (PreparedWindow _ _ _ _ _ _ sections scripts _)=scripts || wide && sections
 
 -- | Explicit durable type/version. Ordinary prepared views are transient: their
 -- text is never checkpointed implicitly. The host restores durable text as an
 -- inert unavailable view; it does not invoke a plugin from the recovery parser.
 preparedWindowRecovery :: PreparedWindow -> Maybe (Text,Int)
-preparedWindowRecovery (PreparedWindow _ _ _ _ _ recovery _ _)=recovery
+preparedWindowRecovery (PreparedWindow _ _ _ _ _ recovery _ _ _)=recovery
+
+-- | /O(1)/. Absent metadata retains ordinary private text/copy behavior.
+preparedWindowSemantics :: PreparedWindow -> Maybe TextSemantics
+preparedWindowSemantics (PreparedWindow _ _ _ _ _ _ _ _ semantics)=semantics
+
+-- | /O(1)/. Explicit immutable observation declaration, private by default.
+preparedWindowDisclosure :: PreparedWindow -> WindowDisclosure
+preparedWindowDisclosure=maybe PrivateWindow textDisclosure . preparedWindowSemantics
+
+-- | Prepare styled text and validate every semantic interval on its worker.
+-- @0 <= start <= end <= contentLength preparedWindowText@ holds for every
+-- returned range. Strings and vectors are forced here; adoption only reads refs.
+prepareSemanticTextWindow :: Text -> [(Char,Style)] -> TextSemantics -> IO (Either Text PreparedWindow)
+prepareSemanticTextWindow title styled semantics=do
+  PreparedWindow ident caption text rows width recovery sections scripts _<-prepareStyledTextWindow title styled
+  let valid (a,z)=a>=0 && a<=z && z<=contentLength text
+      ranges=V.map (\(a,z,_)->(a,z)) (textLinks semantics) V.++
+        V.map (\(a,z,_,_)->(a,z)) (textShellBlocks semantics) V.++
+        textGuestHidden semantics V.++ textStreamerHidden semantics V.++ textRecoveryHidden semantics
+  if not (V.all valid ranges) then pure (Left "Invalid prepared window semantic range.") else do
+    _<-evaluate (maybe 0 length (textLinkBase semantics)+
+      V.foldl' (\n (a,z,url)->n+a+z+T.length url) 0 (textLinks semantics)+
+      V.foldl' (\n (a,z,dialect,body)->n+a+z+T.length dialect+T.length body) 0 (textShellBlocks semantics)+
+      V.foldl' (\n (a,z)->n+a+z) 0 ranges)
+    result<-evaluate (PreparedWindow ident caption text rows width recovery sections scripts (Just semantics))
+    pure (Right result)
 
 -- | Prepare text whose title and content may be written to private recovery.
 -- Use only non-secret state declared durable by the view's owner. Type IDs are
@@ -94,8 +142,8 @@ prepareRecoverableTextWindow :: Text -> Int -> Text -> Text -> IO (Either Text P
 prepareRecoverableTextWindow kind version title text
   | not (validCommandName kind) || T.length kind>128 || version<=0=pure (Left "Invalid durable plugin window type/version.")
   | otherwise=do
-      PreparedWindow ident caption measured rows width _ sections scripts<-prepareTextWindow title text
-      pure (Right (PreparedWindow ident caption measured rows width (Just (kind,version)) sections scripts))
+      PreparedWindow ident caption measured rows width _ sections scripts semantics<-prepareTextWindow title text
+      pure (Right (PreparedWindow ident caption measured rows width (Just (kind,version)) sections scripts semantics))
 
 -- | Prepare a fixed selectable list above one readonly Details pane on a worker.
 -- Refresh preserves the selected ID if present; host geometry, draft selection
@@ -118,9 +166,9 @@ prepareRowsWindow title references entries
         mapM_ evaluate references
         let rows=V.fromList entries
         _<-evaluate (V.foldl' (\n (WindowRow ident caption detail)->ident `seq` detail `seq` n+T.length caption) 0 rows)
-        PreparedWindow ident caption text _ width recovery sections scripts<-prepareTextWindow title
+        PreparedWindow ident caption text _ width recovery sections scripts semantics<-prepareTextWindow title
           (T.intercalate "\n" [label | WindowRow _ label _<-entries])
-        pure (Right (PreparedWindow ident caption text (RowsDetails rows index references) width recovery sections scripts))
+        pure (Right (PreparedWindow ident caption text (RowsDetails rows index references) width recovery sections scripts semantics))
   where
     validate [] index _=Right index
     validate (WindowRow ident caption detail:rest) index n
@@ -139,8 +187,8 @@ prepareRecoverableRowsWindow kind version title references entries
       result<-prepareRowsWindow title references entries
       pure $ case result of
         Left err->Left err
-        Right (PreparedWindow ident caption text rows width _ sections scripts)->
-          Right (PreparedWindow ident caption text rows width (Just (kind,version)) sections scripts)
+        Right (PreparedWindow ident caption text rows width _ sections scripts semantics)->
+          Right (PreparedWindow ident caption text rows width (Just (kind,version)) sections scripts semantics)
 
 instance Eq PreparedWindow where
   a==b=preparedWindowRef a==preparedWindowRef b
@@ -159,7 +207,7 @@ prepareTextWindow title text=do
         in count `seq` max longest (sourceTextWidth (sourceRowText row))) 0 rows
   _<-evaluate width
   _<-evaluate (prepareBuffer measured)
-  evaluate (PreparedWindow ident (safeTitle title) (bufferContent measured) (PlainRows rows) width Nothing False False)
+  evaluate (PreparedWindow ident (safeTitle title) (bufferContent measured) (PlainRows rows) width Nothing False False Nothing)
 
 -- | Prepare CommonMark at a requested cell width on the calling worker.
 -- Copy addresses the laid-out semantic text, excluding host chrome.
@@ -179,7 +227,7 @@ prepareStyledTextWindow title styled=do
   _<-evaluate (prepareBuffer measured)
   let width=maximum (0:map sourceTextWidth (T.splitOn "\n" source))
   _<-evaluate width
-  evaluate (PreparedWindow ident (safeTitle title) (bufferContent measured) (StyledRows rows) width Nothing (any (sectionTitle . snd) styled) (any (styleLayoutMetadata . snd) styled))
+  evaluate (PreparedWindow ident (safeTitle title) (bufferContent measured) (StyledRows rows) width Nothing (any (sectionTitle . snd) styled) (any (styleLayoutMetadata . snd) styled) Nothing)
   where
     split chars=case break ((=='\n').fst) chars of
       (line,[])->[line]
@@ -206,24 +254,24 @@ openTextWindow :: WindowScope -> PreparedWindow -> IO (Maybe WindowUpdate)
 openTextWindow scope@(WindowScope live) prepared=do
   current<-readTVarIO live
   if not current then pure Nothing else do
-    reference<-WindowRef <$> newUnique <*> pure scope <*> newTVarIO (1,False)
+    reference<-WindowRef <$> newUnique <*> pure scope <*> pure (preparedWindowDisclosure prepared) <*> newTVarIO (1,False)
     pure (Just (WindowUpdate reference 1 True prepared))
 
 -- | Prepare a complete refresh for an exact adopted instance. Issuing a later
 -- revision invalidates older queued publications. Host geometry and selection
 -- are retained; refresh never opens a missing or closed window.
 refreshTextWindow :: WindowRef -> PreparedWindow -> IO (Maybe WindowUpdate)
-refreshTextWindow reference@(WindowRef _ (WindowScope scope) state) prepared=atomically $ do
+refreshTextWindow reference@(WindowRef _ (WindowScope scope) disclosure state) prepared=atomically $ do
   live<-readTVar scope
   (revision,opened)<-readTVar state
-  if not live || revision<=0 || not opened then pure Nothing else do
+  if not live || revision<=0 || not opened || preparedWindowDisclosure prepared/=disclosure then pure Nothing else do
     let next=revision+1
     writeTVar state (next,opened)
     pure (Just (WindowUpdate reference next False prepared))
 
 -- | Host lifetime check; observes scalar scope/instance state only.
 windowRefCurrent :: WindowRef -> IO Bool
-windowRefCurrent (WindowRef _ (WindowScope scope) state)=atomically $ do
+windowRefCurrent (WindowRef _ (WindowScope scope) _ state)=atomically $ do
   live<-readTVar scope
   (revision,_)<-readTVar state
   pure (live && revision>0)
@@ -232,24 +280,24 @@ windowRefCurrent (WindowRef _ (WindowScope scope) state)=atomically $ do
 -- owners retain one draft binding until this scope or its registration retires;
 -- closing a mount must not lose the receipt needed to release its hidden state.
 windowScopeCurrent :: WindowRef -> IO Bool
-windowScopeCurrent (WindowRef _ (WindowScope scope) _)=readTVarIO scope
+windowScopeCurrent (WindowRef _ (WindowScope scope) _ _)=readTVarIO scope
 
 -- | Host adoption primitive. The supplied flag records whether the exact view
 -- is already installed; false cannot turn a refresh into an open operation.
 -- A missing refresh retires its instance. Caller must check actor/modal policy
 -- before invoking this function; this primitive grants no desktop capability.
 admitWindowUpdate :: Bool -> WindowUpdate -> IO (Maybe (WindowRef,PreparedWindow))
-admitWindowUpdate present (WindowUpdate reference@(WindowRef _ (WindowScope scope) state) revision opening prepared)=atomically $ do
+admitWindowUpdate present (WindowUpdate reference@(WindowRef _ (WindowScope scope) disclosure state) revision opening prepared)=atomically $ do
   live<-readTVar scope
   (latest,opened)<-readTVar state
-  if not live || latest<=0 then pure Nothing
+  if not live || latest<=0 || preparedWindowDisclosure prepared/=disclosure then pure Nothing
   else if not opening && not present then writeTVar state (0,False) >> pure Nothing
   else if latest/=revision || opening && (opened || present) || not opening && not opened then pure Nothing
   else writeTVar state (latest,True) >> pure (Just (reference,prepared))
 
 -- | Host close invalidates the exact instance. Idempotent and callback-free.
 retireWindowRef :: WindowRef -> IO ()
-retireWindowRef (WindowRef _ _ state)=atomically (writeTVar state (0,False))
+retireWindowRef (WindowRef _ _ _ state)=atomically (writeTVar state (0,False))
 
 -- | A joint readonly body and typed editor attachment. Only this reply carrier
 -- is parameterized; body content never retains an extension callback. It is an
@@ -280,12 +328,12 @@ editorWindowEditor (EditorWindowUpdate _ editor)=editor
 -- Returning Nothing cannot leave either lifetime partly adopted. Command
 -- retirement can leave an inert view, but submission rechecks registration.
 admitEditorWindowUpdate :: EditorWindowUpdate c r -> IO (Maybe (WindowRef,PreparedWindow,E.PreparedEditor c r))
-admitEditorWindowUpdate (EditorWindowUpdate (WindowUpdate reference@(WindowRef _ (WindowScope scope) state) revision opening prepared) editor)=do
+admitEditorWindowUpdate (EditorWindowUpdate (WindowUpdate reference@(WindowRef _ (WindowScope scope) disclosure state) revision opening prepared) editor)=do
   current<-E.editorCurrent editor
   if not current then pure Nothing else atomically $ do
     live<-readTVar scope
     (latest,opened)<-readTVar state
-    if not live || latest<=0 || latest/=revision || not opening || opened then pure Nothing else do
+    if not live || latest<=0 || latest/=revision || not opening || opened || preparedWindowDisclosure prepared/=disclosure then pure Nothing else do
       claimed<-E.claimEditorMount (E.editorMount editor)
       if not claimed then pure Nothing else do
         writeTVar state (latest,True)

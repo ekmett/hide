@@ -22,6 +22,7 @@ import qualified Data.Text.Encoding as TE
 import qualified Data.Map.Strict as M
 import qualified Data.Vector as Vec
 import qualified Hide.Plugin.Window as PluginWindow
+import Hide.ConversationBody (QuestionProjection(..))
 import qualified Hide.Privacy as Privacy
 import Hide.Sidebar
 import Hide.DebuggerSidebarTypes
@@ -265,14 +266,6 @@ data ChatQuestion = ChatQuestion
   { questionToken :: Int, questionText :: Text, questionChoices :: [Text]
   , questionChoice :: Maybe Int, questionBuffer :: Buffer, questionSelection :: Selection
   , questionFocused :: Bool
-  } deriving (Eq,Show)
-
--- | Fixed question furniture belongs to the generated body, never its live
--- answer. All intervals address that body's scalar space; geometry consumers
--- resolve them through the current window presentation. Restyling drops it.
-data QuestionProjection = QuestionProjection
-  { projectedQuestionToken :: !Int, projectedQuestionWidth :: !Int
-  , projectedQuestionInput :: !Int, projectedQuestionChoices :: [[Int]]
   } deriving (Eq,Show)
 
 -- Transcript documents remain in the normal buffer store when another agent is

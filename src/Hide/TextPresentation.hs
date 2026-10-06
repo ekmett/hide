@@ -4,7 +4,7 @@
 -- checks bounded exact window/content/version/width targets. Retired or resized
 -- styled targets use ordinary geometry until matching preparation completes;
 -- Markdown previews remain a read-only pending/error surface.
-module Hide.TextPresentation (TextPresentation,withTextPresentation,tickTextPresentation,prepareTextPresentations) where
+module Hide.TextPresentation (TextPresentation,withTextPresentation,tickTextPresentation,prepareTextPresentations,BodyRequest(..),BodyResult(..)) where
 
 import Control.Concurrent.Async (Async,async,cancel,poll)
 import Control.Exception (bracket,mask,evaluate)
@@ -16,6 +16,7 @@ import Hide.Markdown (renderMarkdown)
 import Hide.Syntax (linkSpans,styleLayoutMetadata)
 import qualified Data.Text as T
 import Hide.Model
+import Hide.ConversationBody (BodyRequest(..),BodyResult(..))
 import qualified Hide.Plugin.Window as W
 import Hide.Syntax (Style)
 import Hide.TextLayout (prepareTextLayout)

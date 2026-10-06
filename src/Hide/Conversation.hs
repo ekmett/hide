@@ -12,6 +12,7 @@
 module Hide.Conversation (ConversationState, conversationAgents, withConversationAt, chatTools, chatToolNames, chatTool, QuestionCaller, captureQuestionCaller, chatToolAs, withConversation, conversationEffects, tickConversation, parseLaunch, renderReply, pauseLabel, renderTimestamp) where
 
 import Hide.Sidebar
+import Hide.ConversationBody (Record(..),QuestionProjection(..))
 import Hide.SessionServices (persist)
 import Prelude hiding (reads)
 import Control.Exception (IOException, bracket, try, onException, mask, mask_, evaluate)
@@ -84,7 +85,6 @@ preparationCancel :: PromptPreparation -> IO ()
 preparationCancel (ContextPrompt _ _ _ worker)=cancel worker
 preparationCancel (DraftPrompt _ _ worker)=cancel worker
 
-data Record = Reply Text Text | Activity Text Value [Value] Bool | Pause Text deriving (Eq,Show)
 
 activity :: Text -> Value -> Record
 activity ident value=Activity ident value [value] False
