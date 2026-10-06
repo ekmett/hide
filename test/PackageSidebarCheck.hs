@@ -95,10 +95,11 @@ checks=bracket temporary removePathForcibly $ \root->do
                       exists<-doesFileExist invocation
                       if exists then pure next else threadDelay 1000 >> loop next
         debugQueued<-request "exe:demo" "Debug" sourceOpened
-        debugAdmitted<-timeout 5000000 (let loop d=do
-          next<-sidebarTick d
-          receipt<-readIORef capturedDebug
-          if maybe False (const True) receipt then pure next else threadDelay 1000 >> loop next in loop debugQueued)
+        let waitDebug d=do
+              next<-sidebarTick d
+              receipt<-readIORef capturedDebug
+              if maybe False (const True) receipt then pure next else threadDelay 1000 >> waitDebug next
+        debugAdmitted<-timeout 5000000 (waitDebug debugQueued)
           >>= maybe (fail "Captured package Debug did not reach host") pure
         receipt<-readIORef capturedDebug
         unless (maybe False (\(target,entry)->packageBuildName target=="sample:exe:demo" &&
