@@ -81,10 +81,12 @@ checks = withEditorFixture "" (initialDesktop (80,25)) $ \chatBase->do
   let draft=setComposerInput (newBuffer "draft") (Selection 0 0) True chatBase
   check "Exit asks before discarding a conversation draft" (null (snd (runCommand Quit draft)) && fmap purpose (dialog (fst (runCommand Quit draft)))==Just DiscardDraft)
   let modal=fst (runCommand SaveAs selected)
-  forM_ [SelectAll,Cut,Undo,Redo,Find,FindNext] $ \cmd ->do
+  forM_ [SelectAll,Copy,Cut,Undo,Redo,Find,FindNext] $ \cmd ->do
     let (blocked,blockedEffects)=applyInput (BrowserCommand cmd) modal
     sameVersions<-sameBufferVersions blocked modal
-    check "browser menu commands cannot edit behind a modal dialog" (sameVersions && null blockedEffects && dialog blocked==dialog modal)
+    check "browser menu commands cannot edit behind a modal dialog"
+      (sameVersions && fmap selection (activeWindow blocked)==fmap selection (activeWindow modal) &&
+       blockedEffects==[WriteBrowserClipboard "" | cmd `elem` [Copy,Cut]] && dialog blocked==dialog modal)
   let terminal=addDocument Nothing (newBuffer "") base
       terminalView=terminal {buffers=M.adjust (\doc->doc {documentLabel=Just "Terminal 1"}) (nextId base) (buffers terminal)}
   check "terminal Ctrl+C reaches the PTY" (snd (applyInput (Key "c" [V.MCtrl]) terminalView)==[ServiceAction "terminal-input" ["1","\ETX"]])
