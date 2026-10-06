@@ -24,11 +24,12 @@ open an output window; output arrives while you keep editing. Compiler errors
 and warnings appear in **Messages**, where **Alt+F8** and **Alt+F7** move between
 source locations. **Compile > Stop build** stops the current job.
 
-Build, run, test and benchmark commands, and the target dialog, prepare project
-discovery and settings in the background. Stop also cancels a pending preparation.
+The editor’s Compile, Make and Run controls, target dialog, and sidebar
+Test/Benchmark actions prepare project discovery and settings in the background.
+Stop also cancels a pending preparation.
 Changing its source buffers, selected project or build settings saved in the
-editor cancels that captured intent; retry the command with the new state. After execution starts, editing or saving
-settings does not stop the program. Ready results wait while another dialog
+editor cancels that captured intent; retry the command with the new state. After
+execution starts, editing or saving settings does not stop the program. Ready results wait while another dialog
 or inline question owns input, and do not replace that surface. External settings
 file edits apply to the next command; an existing preparation uses its captured
 settings.
@@ -55,7 +56,8 @@ Outside a Cabal project, Compile checks the current `.hs` or `.lhs` file with
 For a component in the Cabal sidebar, right-click its row and choose **Build**
 or, for an executable, **Run**. With **GHC** selected in **Run > Target**, choose
 **Test** on a test suite or **Benchmark** on a benchmark. These runners use
-`cabal test` and `cabal bench`; they are unavailable with THC selected.
+`cabal test` and `cabal bench`. Test and Benchmark require GHC; with THC selected,
+the editor reports that no runner is configured.
 
 The action uses the captured package, component and project root with the selected
 compiler, without changing the saved target. Save modified source files first.
