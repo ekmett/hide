@@ -832,9 +832,9 @@ prefixChecks=do
     (clipboard batch=="hello" && prefix (endGuestInput configured pending)==Nothing && clipboard (endGuestInput configured batch)==clipboard configured)
   let mac=configured {nativeMac=True,videoMode=Just 3,keyBindings=prepare MacPlatform configuration}
       macPending=event (V.KChar 'j') [V.MCtrl] mac
-  let retainedModal=prompt "Edit" Information [Input "Name" "draft" 5] macPending
+  let retainedModal=prompt "Edit" Information [TextArea "Text" True (newBuffer "draft") (Selection 0 5) 0 0] macPending
   check "a retained prefix cannot suppress the focused dialog labels or native accelerator"
-    (prefix retainedModal==Just 'k' && bindingContext retainedModal==Just DialogKeys && nativeMenuShortcut retainedModal Copy==("c",8) &&
+    (dialogCommandAllowed Copy retainedModal && prefix retainedModal==Just 'k' && bindingContext retainedModal==Just DialogKeys && nativeMenuShortcut retainedModal Copy==("c",8) &&
      boundKeyCommand (V.KChar 'c') [V.MMeta] retainedModal==Just Copy && any ((==Just (Left DialogAccept)).snd) (statusHints retainedModal))
   check "macOS prefix has no inherited Command clipboard default"
     (boundKeyCommand (V.KChar 'c') [V.MMeta] macPending==Nothing && menuShortcut mac (MenuItem "Copy" "Cmd+C" Copy)=="⌃J Y")
