@@ -1081,7 +1081,7 @@ paintView target force s original
         q<-chatQuestion d
         input<-inputOffset
         let starts index label=case [a | (a,_,action,values)<-actions,action=="question-choice",values==[T.pack (show (questionToken q)),T.pack (show index)]] of
-              start:_->snd (mapAccumL (\offset line->(offset+T.length line+1,offset)) start
+              first:_->snd (mapAccumL (\offset line->(offset+T.length line+1,offset)) first
                 (T.splitOn "\n" (questionChoiceLines width False label)))
               _->[]
         pure (QuestionProjection (questionToken q) width input
