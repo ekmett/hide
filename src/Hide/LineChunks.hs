@@ -81,8 +81,8 @@ type ChunkTree = FT.FingerTree ChunkMeasure Chunk
 -- remain lazy: a small query must not construct the next checkpoint. There is
 -- no separately retained receipt list. Each entry owns its cached prefix once;
 -- immutable binary searches never construct split trees or cumulative measures.
-data LoadedEntry = LoadedEntry {-# UNPACK #-} !Int {-# UNPACK #-} !Int !ColumnAdvance !Chunk
-data LoadedBlocks = LoadedBlock {-# UNPACK #-} !Int {-# UNPACK #-} !Int !ColumnAdvance !(V.Vector LoadedEntry) LoadedBlocks | LoadedEnd
+data LoadedEntry = LoadedEntry {-# UNPACK #-} !Int {-# UNPACK #-} !Int !ColumnAdvance !Word64 {-# UNPACK #-} !Int !Chunk
+data LoadedBlocks = LoadedBlock {-# UNPACK #-} !Int {-# UNPACK #-} !Int !ColumnAdvance !Word64 {-# UNPACK #-} !Int !(V.Vector LoadedEntry) LoadedBlocks | LoadedEnd
 
 -- Raw storage measures never demand display preparation. The final field MUST
 -- remain lazy: scalar/byte/hash tree splits must not inspect a suffix advance.
@@ -113,8 +113,8 @@ chunksTree (Edited tree)=tree
 -- Word/range/display queries must not call this whole-index conversion.
 loadedTree :: LoadedBlocks -> ChunkTree
 loadedTree LoadedEnd=FT.empty
-loadedTree (LoadedBlock _ _ _ entries rest)=
-  V.foldl' (\tree (LoadedEntry _ _ _ chunk)->tree FT.|> chunk) FT.empty entries FT.>< loadedTree rest
+loadedTree (LoadedBlock _ _ _ _ _ entries rest)=
+  V.foldl' (\tree (LoadedEntry _ _ _ _ _ chunk)->tree FT.|> chunk) FT.empty entries FT.>< loadedTree rest
 
 -- Start at one receipt. Cumulative checkpoint sizes are 1,3,7,... receipts,
 -- strictly less than twice the first demanded receipt count at each expansion.
@@ -123,29 +123,30 @@ loadedTree (LoadedBlock _ _ _ entries rest)=
 loadedBlocks :: [Chunk] -> LoadedBlocks
 loadedBlocks=build (1::Int)
   where
-    build count source=case collect count 0 0 mempty [] source of
-      (_,_,_,[],_)->LoadedEnd
-      (chars,bytes,advance,entries,rest)->
-        LoadedBlock chars bytes advance (V.fromListN (length entries) (reverse entries)) (build next rest)
+    build count source=case collect count 0 0 mempty 0 0 [] source of
+      (_,_,_,_,_,[],_)->LoadedEnd
+      (chars,bytes,advance,hash,tabs,entries,rest)->
+        LoadedBlock chars bytes advance hash tabs (V.fromListN (length entries) (reverse entries)) (build next rest)
       where next=if count>maxBound `div` 2 then maxBound else count*2
-    collect 0 !chars !bytes !advance entries rest=(chars,bytes,advance,entries,rest)
-    collect _ !chars !bytes !advance entries []=(chars,bytes,advance,entries,[])
-    collect count !chars !bytes !advance entries (chunk:rest)=
+    collect 0 !chars !bytes !advance !hash !tabs entries rest=(chars,bytes,advance,hash,tabs,entries,rest)
+    collect _ !chars !bytes !advance !hash !tabs entries []=(chars,bytes,advance,hash,tabs,entries,[])
+    collect count !chars !bytes !advance !hash !tabs entries (chunk:rest)=
       let m=FT.measure chunk
-          entry=LoadedEntry chars bytes advance chunk
+          entry=LoadedEntry chars bytes advance hash tabs chunk
+          hasTab=case chunkAdvance m of Add _->0; Tab _ _->1
       in entry `seq` collect (count-1) (chars+chunkCharacters m) (bytes+chunkBytes m)
-        (advance<>chunkAdvance m) (entry:entries) rest
+        (advance<>chunkAdvance m) (hash*chunkFactor m+chunkHash m) (tabs+hasTab) (entry:entries) rest
 
 loadedChunks :: LoadedBlocks -> [Chunk]
 loadedChunks LoadedEnd=[]
-loadedChunks (LoadedBlock _ _ _ entries rest)=loadedSuffix 0 entries rest
+loadedChunks (LoadedBlock _ _ _ _ _ entries rest)=loadedSuffix 0 entries rest
 
 loadedSuffix :: Int -> V.Vector LoadedEntry -> LoadedBlocks -> [Chunk]
 loadedSuffix start entries rest=go start
   where
     go index | index>=V.length entries=loadedChunks rest
              | otherwise=case V.unsafeIndex entries index of
-                 LoadedEntry _ _ _ chunk->chunk:go (index+1)
+                 LoadedEntry _ _ _ _ _ chunk->chunk:go (index+1)
 
 -- The endpoint of an entry is the following cached prefix, or the block total.
 -- Binary predicates inspect those scalars directly; no per-probe transform is
@@ -173,6 +174,77 @@ chunksRawMeasure (Edited tree)=let m=FT.measure tree in
 chunksFlags :: Chunks -> Int
 chunksFlags (Loaded (SourceOwner _ _ flags _ _ _) _)=flags
 chunksFlags (Edited tree)=chunkFlags (FT.measure tree)
+
+-- A proven stored receipt edge in one immutable owner. Raw coordinates/hash
+-- are strict; display facts MUST stay lazy. In particular constructing EOF for
+-- a suffix raw measure must use the seed, not prepare the whole display index.
+-- Edges passed to a range belong to that same owner; fingerprints never prove it.
+data ReceiptEdge = ReceiptEdge !Int !Int !Word64 Int Int SourceCursor Bool
+
+-- Normalize to the preceding stored receipt edge. An interior scalar is not an
+-- installable Piece edge: later splice repair must recut its bounded receipt.
+ownerReceiptEdge :: SourceOwner -> Int -> ReceiptEdge
+ownerReceiptEdge (SourceOwner _ seed _ incoming finalOverflow blocks) requested
+  | goal<=0=ReceiptEdge 0 0 0 0 0 incoming False
+  | goal>=rawCharacters seed=ReceiptEdge (rawCharacters seed) (rawBytes seed) (rawHash seed)
+      (applyAdvance (loadedAdvance blocks) 0) (endTabs blocks) (endCursor incoming blocks) (endOverflow finalOverflow blocks)
+  | otherwise=find 0 0 0 0 0 blocks
+  where
+    goal=max 0 requested
+    find !char !byte !hash !tabs !col (LoadedBlock chars bytes advance blockHash blockTabs entries rest)
+      | char+chars<=goal=find (char+chars) (byte+bytes) (hash*16777619^chars+blockHash)
+          (tabs+blockTabs) (applyAdvance advance col) rest
+      | otherwise=case V.unsafeIndex entries index of
+          LoadedEntry scalar offset prefix localHash localTabs (Chunk _ _ cursor _ _)->
+            ReceiptEdge (char+scalar) (byte+offset) (hash*16777619^scalar+localHash)
+              (applyAdvance prefix col) (tabs+localTabs) cursor False
+      where
+        index=loadedIndex (\i->char+endpoint i>goal) entries
+        endpoint i | i+1==V.length entries=chars
+                   | otherwise=case V.unsafeIndex entries (i+1) of LoadedEntry scalar _ _ _ _ _->scalar
+    find _ _ _ _ _ LoadedEnd=error "Source receipt ended before its raw extent."
+    endTabs LoadedEnd=0
+    endTabs (LoadedBlock _ _ _ _ tabs _ rest)=tabs+endTabs rest
+    endCursor fallback LoadedEnd=fallback
+    endCursor _ (LoadedBlock _ _ _ _ _ entries rest)=case V.last entries of
+      LoadedEntry _ _ _ _ _ (Chunk _ _ _ outgoing _)->endCursor outgoing rest
+    endOverflow fallback LoadedEnd=fallback
+    endOverflow _ (LoadedBlock _ _ _ _ _ entries rest)=case V.last entries of
+      LoadedEntry _ _ _ _ _ (Chunk _ _ _ _ overflow)->endOverflow (overflow || finalOverflow) rest
+
+-- Exact raw range at stored receipt endpoints. Its advance closes over only the
+-- immutable owner/edges, never a prior Piece or Edited root. Whole-owner reuse
+-- returns the seed; that seed's advance is the independent loadedAdvance fold.
+-- H[a,b) = H(b) - H(a)*B^(b-a); factors count scalars, never UTF8 bytes.
+ownerRangeMeasure :: SourceOwner -> ReceiptEdge -> ReceiptEdge -> RawMeasure
+ownerRangeMeasure owner@(SourceOwner _ seed _ _ _ _) a@(ReceiptEdge start firstByte firstHash _ _ _ _) b@(ReceiptEdge end lastByte lastHash _ _ _ _)
+  | end<=start=mempty
+  | start==0 && end==rawCharacters seed=seed
+  | otherwise=RawMeasure (lastByte-firstByte) count (lastHash-firstHash*factor) factor (ownerRangeAdvance owner a b)
+  where
+    count=end-start
+    factor=16777619^count
+
+-- Prefix Tab transforms cannot be inverted. Locate the first tab-containing
+-- receipt using monotone cached counts; its local Tab prefix and endpoint
+-- columns yield an exact transform for every incoming column residue.
+ownerRangeAdvance :: SourceOwner -> ReceiptEdge -> ReceiptEdge -> ColumnAdvance
+ownerRangeAdvance (SourceOwner _ _ _ _ _ blocks) (ReceiptEdge _ _ _ firstColumn firstTabs _ _) (ReceiptEdge _ _ _ lastColumn lastTabs _ _)
+  | firstTabs==lastTabs=Add (lastColumn-firstColumn)
+  | otherwise=case firstTab 0 0 blocks of
+      (column,prefix)->Tab (column-firstColumn+prefix) (lastColumn-nextTab (column+prefix))
+  where
+    firstTab !tabs !col (LoadedBlock _ _ advance _ count entries rest)
+      | tabs+count<=firstTabs=firstTab (tabs+count) (applyAdvance advance col) rest
+      | otherwise=case V.unsafeIndex entries index of
+          LoadedEntry _ _ before _ _ (Chunk m _ _ _ _)->case chunkAdvance m of
+            Tab prefix _->(applyAdvance before col,prefix)
+            Add _->error "Tab receipt count selected an additive receipt."
+      where
+        index=loadedIndex (\i->tabs+endpoint i>firstTabs) entries
+        endpoint i | i+1==V.length entries=count
+                   | otherwise=case V.unsafeIndex entries (i+1) of LoadedEntry _ _ _ _ n _->n
+    firstTab _ _ LoadedEnd=error "Missing tab receipt in source range."
 
 -- | Exact width is memoized independently of loaded receipts. Its first use
 -- scans the original row; it does not dice an undemanded row into spans.
@@ -246,16 +318,16 @@ seekLoadedColumn :: Int -> LoadedBlocks -> (# Int#,Int#,Int#,[Chunk] #)
 seekLoadedColumn goal=go 0 0 0
   where
     go !char !col !byte LoadedEnd=finish char col byte []
-    go !char !col !byte (LoadedBlock chars bytes advance entries rest)
+    go !char !col !byte (LoadedBlock chars bytes advance _ _ entries rest)
       | next<=goal=go (char+chars) next (byte+bytes) rest
       | otherwise=case V.unsafeIndex entries index of
-          LoadedEntry scalar offset prefix _->finish (char+scalar) (applyAdvance prefix col)
+          LoadedEntry scalar offset prefix _ _ _->finish (char+scalar) (applyAdvance prefix col)
             (byte+offset) (loadedSuffix index entries rest)
       where
         next=applyAdvance advance col
         index=loadedIndex (\i->applyAdvance (endpoint i) col>goal) entries
         endpoint i | i+1==V.length entries=advance
-                   | otherwise=case V.unsafeIndex entries (i+1) of LoadedEntry _ _ prefix _->prefix
+                   | otherwise=case V.unsafeIndex entries (i+1) of LoadedEntry _ _ prefix _ _ _->prefix
     finish (I# char) (I# col) (I# byte) suffix=(# char,col,byte,suffix #)
 
 -- | Seek only through the requested column. Return reached scalar/column and
@@ -279,15 +351,15 @@ seekLoadedScalar :: Int -> LoadedBlocks -> (# Int#,Int#,[Chunk] #)
 seekLoadedScalar goal=go 0 0
   where
     go !char !col LoadedEnd=finish char col []
-    go !char !col (LoadedBlock chars _ advance entries rest)
+    go !char !col (LoadedBlock chars _ advance _ _ entries rest)
       | char+chars<=goal=go (char+chars) (applyAdvance advance col) rest
       | otherwise=case V.unsafeIndex entries index of
-          LoadedEntry scalar _ prefix _->finish (char+scalar) (applyAdvance prefix col)
+          LoadedEntry scalar _ prefix _ _ _->finish (char+scalar) (applyAdvance prefix col)
             (loadedSuffix index entries rest)
       where
         index=loadedIndex (\i->char+endpoint i>goal) entries
         endpoint i | i+1==V.length entries=chars
-                   | otherwise=case V.unsafeIndex entries (i+1) of LoadedEntry scalar _ _ _->scalar
+                   | otherwise=case V.unsafeIndex entries (i+1) of LoadedEntry scalar _ _ _ _ _->scalar
     finish (I# char) (I# col) suffix=(# char,col,suffix #)
 
 windowSuffix :: Int -> Int -> Int -> Chunk -> [Chunk] -> (Int,Int,[(T.Text,[DisplayItem])])
@@ -381,15 +453,15 @@ chunksSpanLeft predicate (Loaded (SourceOwner _ _ _ _ _ blocks) _) requested=fin
   where
     goal=max 0 requested
     find !base previous LoadedEnd=go base T.empty previous
-    find !base previous (LoadedBlock chars _ _ entries rest)
+    find !base previous (LoadedBlock chars _ _ _ _ entries rest)
       | base+chars<goal=find (base+chars) ((entries,V.length entries-1):previous) rest
       | otherwise=case V.unsafeIndex entries index of
-          LoadedEntry scalar _ _ (Chunk _ text _ _ _)->
+          LoadedEntry scalar _ _ _ _ (Chunk _ text _ _ _)->
             go goal (T.take (goal-base-scalar) text) ((entries,index-1):previous)
       where
         index=loadedIndex (\i->base+endpoint i>=goal) entries
         endpoint i | i+1==V.length entries=chars
-                   | otherwise=case V.unsafeIndex entries (i+1) of LoadedEntry scalar _ _ _->scalar
+                   | otherwise=case V.unsafeIndex entries (i+1) of LoadedEntry scalar _ _ _ _ _->scalar
     go !offset text previous=
       let consumed=T.takeWhileEnd predicate text; next=offset-T.length consumed
       in if TU.lengthWord8 consumed<TU.lengthWord8 text then next else earlier next previous
@@ -397,7 +469,7 @@ chunksSpanLeft predicate (Loaded (SourceOwner _ _ _ _ _ blocks) _) requested=fin
     earlier !offset ((entries,index):rest)
       | index<0=earlier offset rest
       | otherwise=case V.unsafeIndex entries index of
-          LoadedEntry _ _ _ (Chunk _ source _ _ _)->go offset source ((entries,index-1):rest)
+          LoadedEntry _ _ _ _ _ (Chunk _ source _ _ _)->go offset source ((entries,index-1):rest)
 chunksSpanLeft predicate (Edited tree) requested=case FT.viewl suffix of
   Chunk _ text _ _ _ FT.:< _->go goal (T.take (goal-base) text) prefix
   FT.EmptyL->go goal T.empty prefix
@@ -465,7 +537,7 @@ chunksFromText text=Loaded (SourceOwner text seed flags initialSourceCursor Fals
 -- advance. Never implemented through ownerRangeMeasure's whole-seed shortcut.
 loadedAdvance :: LoadedBlocks -> ColumnAdvance
 loadedAdvance LoadedEnd=mempty
-loadedAdvance (LoadedBlock _ _ advance _ rest)=advance<>loadedAdvance rest
+loadedAdvance (LoadedBlock _ _ advance _ _ _ rest)=advance<>loadedAdvance rest
 
 -- One raw numeric pass supplies the outer Buffer long-line leaf as well as the
 -- immutable owner. No Unicode segmentation, source copies or per-scalar records.
