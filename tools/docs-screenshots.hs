@@ -240,8 +240,8 @@ main = PluginWindow.withWindowScope $ \downloadScope -> do
             [value]->pure value
             _->fail "Missing executable target"
           shown<-Driver.input effects (V.EvMouseDown 20 (2+index-maybe 0 treeScroll (sideTree selected)) V.BRight []) selected
-          unless (map fst (contextItemsFor shown)==["Build","Run"] && contextMenu shown/=Nothing)
-            (fail "Executable target context menu did not offer Build and Run")
+          unless (map fst (contextItemsFor shown)==["Build","Run","Debug"] && contextMenu shown/=Nothing)
+            (fail "Executable target context menu did not offer Build, Run and Debug")
           capture effects scratch output "package-target-menu" shown
         permissionDiff d = case (activeWindow d,activeDocument d) of
           (Just w,Just doc) | first:rest<-take 6 (T.lines (contents (documentBuffer doc))) -> do

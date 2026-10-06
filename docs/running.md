@@ -54,7 +54,8 @@ Outside a Cabal project, Compile checks the current `.hs` or `.lhs` file with
 `runghc` with the selected GHC.
 
 For a component in the Cabal sidebar, right-click its row and choose **Build**
-or, for an executable, **Run**. With **GHC** selected in **Run > Target**, choose
+or, for an executable-backed component, **Run** or **Debug**. This includes
+executable tests and benchmarks. With **GHC** selected in **Run > Target**, choose
 **Test** on a test suite or **Benchmark** on a benchmark. These runners use
 `cabal test` and `cabal bench`. Test and Benchmark require GHC; with THC selected,
 the editor reports that no runner is configured.
@@ -65,7 +66,7 @@ If the package, source or editor build settings change during preparation, choos
 the action again. Test and benchmark output appears in the shared output window;
 **Compile > Stop build** also stops these jobs or their pending preparation.
 
-[![The hide package's executable row, with Build and Run in its context menu.](site/screenshots/package-target-menu.png)](site/screenshots/package-target-menu.png)
+[![The hide package's executable row, with Build, Run and Debug in its context menu.](site/screenshots/package-target-menu.png)](site/screenshots/package-target-menu.png)
 
 The target dialog also accepts an optional THC root and runtime path, and
 program arguments as a JSON array, for example `["input.txt", "--verbose"]`.
@@ -108,6 +109,16 @@ processes. Detaching the frontend leaves them running; return with `--resume`.
 ACP terminal requests use the same backend, with approval before execution.
 
 ## Launch or attach a debugger
+
+Right-click an executable, executable test or benchmark in the Cabal sidebar and
+choose **Debug** to debug that component with the selected THC/GHC toolchain.
+The active source file and saved run target stay unchanged. The same breakpoints,
+stepping, Watches and output controls apply.
+
+For GHC, this selects the component explicitly through Cabal. It needs one
+unambiguous, unconditional Haskell entry file. Use **Adapter config** when a
+component needs a custom cradle or a conditional entry path. Conflicting project
+compiler settings are reported before launch.
 
 **Debug > Launch** offers **Selected target** and **Adapter config**. With THC selected, Selected target
 uses the THC installation and package selected in **Run > Target**. Choose an
@@ -296,7 +307,7 @@ for the cache location and supported binary releases.
 
 hdb uses that file's cradle/component and its own compiled-in
 GHC version. A customized GHC executable requires explicit **Adapter config**,
-so Selected target cannot silently substitute another compiler. Use **Adapter config**
+and Cabal's project compiler must agree with the selected GHC. Use **Adapter config**
 for a different entry point or additional GHC options.
 
 
