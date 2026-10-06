@@ -788,23 +788,25 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ bracket temporary remov
         wait writer
     let runSettings=settings </> "run.json"
     createNamedPipe runSettings 0o600
-    settingsOpened<-newEmptyMVar
-    settingsRelease<-newEmptyMVar
-    withAsync (bracket (Posix.openFd runSettings Posix.ReadWrite Posix.defaultFileFlags >>= \fd -> Posix.setFdOption fd Posix.CloseOnExec True >> Posix.fdToHandle fd) hClose $ \handle -> do
-      putMVar settingsOpened ()
-      takeMVar settingsRelease
-      BS.hPut handle "{\"toolchain\":\"GHC\"}") $ \writer -> withSessionServices $ \runtime -> do
-        takeMVar settingsOpened
+    withHeldRead server runSettings "{\"toolchain\":\"GHC\"}" $ \opened release writer -> withSessionServices $ \runtime -> do
         ready<-timeout 1000000 (tickSessionServices runtime desktop)
         responsive<-maybe (error "Idle tick blocked on build settings read") pure ready
-        next<-timeout 1000000 (tickSessionServices runtime responsive)
+        -- The child acknowledges an actual reader, never just its own writer.
+        -- Keep polling if discovery reached the FIFO before the child opened it.
+        let reader current=do
+              next<-tickSessionServices runtime current
+              pending<-isEmptyMVar opened
+              if pending then threadDelay 10000 >> reader next else pure next
+        held<-timeout 3000000 (reader responsive) >>= maybe (error "Settings reader did not acquire held FIFO") pure
+        waitForReader opened
+        next<-timeout 1000000 (tickSessionServices runtime held)
         check "repeated ticks do not join or duplicate blocked settings discovery" (maybe False (const True) next)
-        putMVar settingsRelease ()
+        putMVar release ()
         wait writer
         let loop current=do
               next<-tickSessionServices runtime current
               if toolchain next==Just GHC then pure next else threadDelay 10000 >> loop next
-        _<-timeout 8000000 (loop responsive) >>= maybe (error "asynchronous persisted toolchain timed out") pure
+        _<-timeout 8000000 (loop held) >>= maybe (error "asynchronous persisted toolchain timed out") pure
         pure ()
     removeFile runSettings
     -- Context reads happen before enqueueing a prompt. Holding one must leave
