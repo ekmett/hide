@@ -776,6 +776,10 @@ prefixChecks=do
       [event (V.KChar 'c') [] pending,event V.KRight [] pending,event V.KEsc [] pending])
   forM_ [[],[V.MShift],[V.MCtrl],[V.MCtrl,V.MShift]] $ \mods->
     check "default bare Control and Shift block aliases resolve the same action" (clipboard (event (V.KChar 'C') mods started)=="hello")
+  let empty=modifyActive (\w->w {selection=Selection 0 0}) started
+      refused=event (V.KChar 'c') [] empty
+  check "an unavailable continuation still consumes one prefix"
+    (prefix refused==Nothing && clipboard refused=="" && activeText (event (V.KChar '!') [] refused)=="!hello")
   let marks=modifyActive (\w->w {selection=Selection 1 1}) defaults
       marked=event (V.KChar 'b') [] (event (V.KChar 'k') [V.MCtrl] marks)
       moved=modifyActive (\w->w {selection=Selection 4 4}) marked

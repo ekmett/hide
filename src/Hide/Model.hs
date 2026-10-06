@@ -1791,7 +1791,7 @@ dispatchEvent (V.EvKey key mods) d
       case Bindings.bindingAction bindings key mods of
         Just cmd | dialog d/=Nothing, not (dialogCommandAllowed cmd d) -> unboundKey key mods d
                  | sourceKeyCommand cmd || commandEnabled d cmd -> runCommand cmd d {prefix=Nothing}
-                 | otherwise -> (d,[])
+                 | otherwise -> (d {prefix=Nothing},[])
         Nothing -> unboundKey key mods d
 dispatchEvent (V.EvKey key mods) d | key `elem` [V.KChar '\t',V.KBackTab], V.MAlt `elem` mods =
   case dialog d of
