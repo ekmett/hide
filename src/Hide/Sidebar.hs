@@ -17,6 +17,7 @@ import qualified Data.Text as T
 import Data.Maybe (fromMaybe)
 import System.FilePath (addTrailingPathSeparator)
 import Hide.Plugin.Command (CommandRef)
+import Hide.Plugin.Menu (MenuOrigin)
 import Hide.Plugin.Tree
 
 -- | A key remains stable through row movement; the publication hit also carries
@@ -29,6 +30,7 @@ data LoadState = Unloaded | Loading !Integer !(Maybe Text) | Loaded !(Maybe Text
 data NodeState = NodeState
   { stateInfo :: !NodeInfo, stateGeneration :: !Integer, stateParent :: !(Maybe NodeKey)
   , stateChildren :: !(S.Seq NodeKey), stateChildIndex :: !(M.Map NodeKey ()), stateExpanded :: !Bool, stateLoad :: !LoadState
+  , stateLoadOrigin :: !(Maybe MenuOrigin)
   , stateRequest :: !Integer, stateAddress :: ![Int], stateAction :: !(Maybe CommandRef), stateActions :: ![(Text,TreeMenuTarget)]
   } deriving (Eq,Show)
 data RowAction = ActivateNode | WaitForLoad | RetryLoad | LoadNext !Text deriving (Eq,Show)
@@ -120,7 +122,7 @@ addRoot ref info action actions tree
   | S.length (treeRoots tree)>=32 || M.size (treeNodes tree)>=32768=tree
   | otherwise=tree {treeNodes=M.insert key node (treeNodes tree),treeRoots=treeRoots tree S.|> key,treeRevision=treeRevision tree+1}
   where key=NodeKey ref (infoId info)
-        node=NodeState info (treeEpoch tree) Nothing S.empty M.empty False Unloaded (treeEpoch tree) [] action actions
+        node=NodeState info (treeEpoch tree) Nothing S.empty M.empty False Unloaded Nothing (treeEpoch tree) [] action actions
 removeRoot :: TreeRef -> Sidebar -> Sidebar
 removeRoot ref tree
   | null roots=tree
@@ -146,7 +148,7 @@ requestChildren hit cursor tree=case nodeAt hit tree of
   Just node | infoBranch (stateInfo node), Loading{}<-stateLoad node->(tree,Nothing)
   Just node | infoBranch (stateInfo node)->
     let generation=stateRequest node+1
-        opened=node {stateGeneration=stateGeneration node+1,stateExpanded=True,stateLoad=Loading generation cursor,stateRequest=generation}
+        opened=node {stateGeneration=stateGeneration node+1,stateExpanded=True,stateLoad=Loading generation cursor,stateLoadOrigin=Nothing,stateRequest=generation}
         changed=tree {treeNodes=M.insert (keyOf hit) opened (treeNodes tree),treeRevision=treeRevision tree+1}
     in (changed,Just (TreeRequest (nodeHit (keyOf hit) opened) generation cursor (hitTrace (keyOf hit) changed)))
   _->(tree,Nothing)
@@ -206,6 +208,7 @@ adoptPage request nodes next tree
           retained=previous >>= \old->if infoBranch info && infoBranch (stateInfo old) && infoResource info==infoResource (stateInfo old) then Just old else Nothing
           node=NodeState info (maybe (treeEpoch tree) ((+1).stateGeneration) previous) (Just parent)
             (maybe S.empty stateChildren retained) (maybe M.empty stateChildIndex retained) (maybe False stateExpanded retained) (maybe Unloaded stateLoad retained)
+            (retained >>= stateLoadOrigin)
             (maybe (treeEpoch tree) stateRequest previous) (maybe [] stateAddress previous) action actions
       in M.insert key node values
 failRequest :: TreeRequest -> Text -> Sidebar -> Sidebar

@@ -34,6 +34,7 @@ import Hide.Model
 import Hide.Render
 import Hide.Sidebar
 import Hide.SidebarCommands
+import qualified Hide.Plugin.Sidebar as PluginSidebar
 import Hide.Reconcile
 import Hide.GuestAccess
 import qualified Hide.Protocol as Wire
@@ -227,14 +228,19 @@ publicationLifetimeChecks=withRegistry $ \registry->do
   withAsync (readMVar hostReady >>= \host->publishTreeFromHost host provider) $ \treeWriter->
     withAsync (readMVar hostReady >>= \host->publishFormRefreshFromHost host update) $ \formWriter->do
       escaped<-withSidebarCommands $ \host->do
-        replicateM_ 32 (publishTreeFromHost host provider)
+        let capabilities=sidebarCapabilities host
+        replicateM_ 32 (PluginSidebar.publishTree capabilities provider)
+        accepted<-PluginSidebar.tryInvalidateTree capabilities (P.treeReference provider) (P.infoId (P.nodeInfo (P.treeRoot provider)))
+        check "full shared queue refuses invalidation without blocking the owner" (not accepted)
         putMVar hostReady host
         mapM_ blocked [treeWriter,formWriter]
         pure host
       mapM_ rejected [treeWriter,formWriter]
       treeLate<-tryIOError (publishTreeFromHost escaped provider)
-      formLate<-tryIOError (publishFormRefreshFromHost escaped update)
-      check "closed host explicitly rejects late tree and form publications" (closedError treeLate && closedError formLate)
+      formLate<-tryIOError (PluginSidebar.publishFormRefresh (sidebarCapabilities escaped) update)
+      invalidationLate<-tryIOError (() <$ PluginSidebar.tryInvalidateTree (sidebarCapabilities escaped) (P.treeReference provider) (P.infoId (P.nodeInfo (P.treeRoot provider))))
+      check "closed host explicitly rejects late tree form and invalidation publications"
+        (closedError treeLate && closedError formLate && closedError invalidationLate)
       let initial=installSidebar (emptySidebar "/" 24 True) (initialDesktop (100,30))
       effectsLate<-tryIOError (sidebarEffects escaped (\_ _->error "closed host dispatched effects") initial [])
       check "closed host rejects effect dispatch before mounting" (case effectsLate of Left err->closedError (Left err); Right _->False)
@@ -320,13 +326,29 @@ refresh host dir d=withReconciliation $ \watcher->do
   let nested=dir </> "src"
       tick value=tickReconciliation watcher (sidebarEffects host applyEffects) value >>= tickSidebar host applyEffects
   TIO.writeFile (nested </> "a.hs") "a"
-  opened<-act host (activateTree True (atLabel "src" d) d) >>= settle host
+  let src=select (atLabel "src" d) d
+  guestExpansion<-Wire.applyGuestInput (Wire.Key "ArrowRight" []) src >>= right
+  check "agent directory expansion carries its actual load origin"
+    (case snd guestExpansion of [LoadTree _ Menu.AgentMenu]->True; _->False)
+  opened<-act host guestExpansion >>= settle host
   let selected=select (atLabel "a.hs" opened) opened
       focused=selected {sideTree=Just (treeOf selected) {treeFocused=False}}
   subscribed<-tick focused
   TIO.writeFile (nested </> "b.hs") "b"
   refreshed<-await tick (T.isInfixOf "b.hs" . snapshot) subscribed
   check "directory refresh preserves expansion selection and input owner" (not (treeFocused (treeOf refreshed)) && P.infoLabel (rowInfo (maybe (error "selected") id (rowAt (treeSelected (treeOf refreshed)) (treeOf refreshed))))=="a.hs")
+  let branch=maybe (error "src row") id (rowAt (atLabel "src" refreshed) (treeOf refreshed))
+      receipt=stateLoadOrigin <$> nodeAt (rowHit branch) (treeOf refreshed)
+  check "automatic directory refresh preserves the admitted agent origin" (receipt==Just (Just Menu.AgentMenu))
+  -- A fresh request has no authority until its actual enqueue is admitted.
+  let closed=collapseNode (rowHit branch) (treeOf refreshed)
+      old=treeNodes closed M.! keyOf (rowHit branch)
+      (requested,_)=requestChildren (nodeHit (keyOf (rowHit branch)) old) Nothing closed
+  check "fresh request clears the prior automatic refresh origin"
+    (stateLoadOrigin (treeNodes requested M.! keyOf (rowHit branch))==Nothing)
+  invalidated<-refreshTreeFromHost host (case rowHit branch of P.TreeHit owner _ _->owner) (P.infoId (rowInfo branch)) refreshed {sideTree=Just requested}
+  check "missing origin invalidates without inventing human admission"
+    (let node=treeNodes (treeOf invalidated) M.! keyOf (rowHit branch) in not (stateExpanded node) && stateLoadOrigin node==Nothing)
 
 temporary :: IO FilePath
 temporary=do root<-getTemporaryDirectory; (path,handle)<-openTempFile root "hide-sidebar"; hClose handle; removeFile path; createDirectory path; canonicalizePath path
