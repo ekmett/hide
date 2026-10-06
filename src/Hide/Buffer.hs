@@ -198,7 +198,9 @@ sourceLineWidth (ChunkedLine _ flags _ _ _ chunks)=
 -- Untouched long rows estimate their unindexed suffix from cached UTF8 bytes;
 -- edited rows use their exact measure. CR/LF never contribute editor cells.
 sourceLineExtentThrough :: SourceLine -> Int -> (Int,Bool)
-sourceLineExtentThrough line@Line{} _=(sourceLineWidth line,True)
+sourceLineExtentThrough line@Line{} _=
+  let (_,_,column,_)=sourceGraphemesFrom maxBound (sourceLineText line)
+  in (column,True)
 sourceLineExtentThrough line@(ChunkedLine _ _ _ _ _ chunks) column=
   let (char,reached,upper)=Chunks.chunksExtentThrough chunks column
   in if char>=sourceLineLength line
