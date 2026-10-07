@@ -795,7 +795,10 @@ receive runtime@(ConversationState _ ref consoles _) d event = do
                   loadSupported=field "loadSession" capabilities==Just True
                   resumeSupported=case field "sessionCapabilities" capabilities >>= field "resume" of Just (Object _) -> True; _ -> False
                   method=case resume of Nothing -> "session/new"; Just _ | loadSupported -> "session/load"; _ -> "session/resume"
-              if resume/=Nothing && not loadSupported && not resumeSupported then pure d {status="This provider cannot resume sessions."}
+              if resume/=Nothing && not loadSupported && not resumeSupported then do
+                A.stopClient client
+                modifyIORef' ref (\state -> state {connection=Nothing,session=Nothing,queuedPrompt=Nothing})
+                pure d {status="This provider cannot resume sessions.",agentReplying=False,agentSteering=False}
               else do
                 servers<-AR.primaryServers (conversationAgents runtime)
                 requestId<-A.request client method (object (["cwd" .= project s,"mcpServers" .= servers]++maybe [] (\sid->["sessionId" .= sid]) resume))
