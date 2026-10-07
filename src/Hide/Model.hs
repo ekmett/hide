@@ -22,7 +22,7 @@ import qualified Data.Text.Encoding as TE
 import qualified Data.Map.Strict as M
 import qualified Data.Vector as Vec
 import qualified Hide.Plugin.Window as PluginWindow
-import Hide.ConversationBody (LogicalBody,ConversationCopy(..),BodyPoint(..),BodyAnchor(..),BodySelection(..),BodyDemand(..),BodyViewport(..),BodyRow(..),logicalBodyItemIndex,logicalBodyItems,logicalItemRecord,Record(..),viewportPoint,viewportOffset,questionChoiceLines,QuestionProjection(..),ConversationBody(..),BodyControlReceipt(..),HostBodyControls(..))
+import Hide.ConversationBody (CapturedConversationSource,LogicalBody,ConversationCopy(..),BodyPoint(..),BodyAnchor(..),BodySelection(..),BodyDemand(..),BodyViewport(..),BodyRow(..),logicalBodyItemIndex,logicalBodyItems,logicalItemRecord,Record(..),viewportPoint,viewportOffset,questionChoiceLines,QuestionProjection(..),ConversationBody(..),BodyControlReceipt(..),HostBodyControls(..))
 import qualified Hide.Privacy as Privacy
 import Control.Applicative ((<|>))
 import Hide.Sidebar
@@ -281,6 +281,7 @@ data ConversationView = ConversationView
   , conversationReplySelection :: !(Maybe BodySelection)
   , conversationLogical :: Maybe LogicalBody
   , conversationCaretIntent :: Maybe ConversationCaretIntent
+  , conversationSource :: Maybe CapturedConversationSource
   } deriving (Eq,Show)
 
 -- Finite input intent resolved through the next exact viewport receipt.

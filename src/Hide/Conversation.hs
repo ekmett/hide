@@ -227,7 +227,9 @@ parseLaunch command args env = do
 conversationEffects :: ConversationState -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> [Effect] -> IO (Bool,Desktop)
 conversationEffects runtime@(ConversationState _ ref _ _) fallback original effects = do
   (quit,updated)<-foldM apply (False,original) effects
-  if quit then pure (True,updated) else (False,) <$> revealQuestion runtime updated
+  shown<-if quit then pure updated else revealQuestion runtime updated
+  captured<-captureConversationSources runtime shown
+  pure (quit,captured)
   where
     apply state@(True,_) _=pure state
     apply (_,d) effect@(SubmitEditor mount slot origin)=do
@@ -620,7 +622,31 @@ tickConversation runtime@(ConversationState _ ref _ _) original = do
   created<-pollAgentCreation runtime visible
   shown<-present runtime created
   notice<-AR.runtimeNotice (conversationAgents runtime)
-  pure (maybe shown (\text -> shown {status=text}) notice)
+  captureConversationSources runtime (maybe shown (\text -> shown {status=text}) notice)
+
+-- Capture every received source root, including closed/inert views. Painting
+-- and parser construction remain on the existing presentation/checkpoint workers.
+captureConversationSources :: ConversationState -> Desktop -> IO Desktop
+captureConversationSources (ConversationState _ ref _ agents) desktop=do
+  state<-readIORef ref
+  launch<-makeStableName =<< evaluate (provider state)
+  sessionName<-traverse evaluate (session state)
+  primary<-traverse (\client->do ident<-makeStableName =<< evaluate client; evaluate (ident,sessionName)) (connection state)
+  views<-M.traverseWithKey (capture state launch primary) (conversationViews desktop)
+  pure desktop {conversationViews=views}
+  where
+    capture state launch primary target view
+      | T.null target,not (isNothing (connection state)) || not (null (transcript state)) || not (isNothing (chatQuestion desktop)) || not (isNothing (conversationSource view))->do
+          source<-captureConversationSource target (PrimaryBodyProvider launch primary) (transcript state) (conversationSource view)
+          pure view {conversationSource=Just source}
+      | not (T.null target),Just records<-M.lookup target (childRecords state)->do
+          receipt<-AH.agentConfiguration (AR.agentHub agents) (AH.AgentId target)
+          case receipt of
+            Right (owner,_)->do
+              source<-captureConversationSource target (ChildBodyProvider owner) records (conversationSource view)
+              pure view {conversationSource=Just source}
+            Left _->pure view
+      | otherwise=pure view
 
 -- Capture only immutable roots and small presentation/lifetime receipts. Every
 -- installed target owns one payload; closed inert snapshots are not scheduled.
@@ -1712,7 +1738,7 @@ ensureEditorWithState opening state target name original=do
   draftRef<-maybe Editor.newDraftRef (pure.conversationDraftRef) found
   let initial=fromMaybe (EditorDraft (newBuffer "") (Selection 0 0) True Nothing) (M.lookup draftRef (editorDrafts original))
       body=fromMaybe (loadingBody state) (conversationBodySnapshot target original)
-      view=maybe (ConversationView (InertBody body) name draftRef Nothing Nothing FollowEnd 0 0 Nothing Nothing Nothing) (\old->old {conversationName=name}) found
+      view=maybe (ConversationView (InertBody body) name draftRef Nothing Nothing FollowEnd 0 0 Nothing Nothing Nothing Nothing) (\old->old {conversationName=name}) found
       seeded=original {conversationViews=M.insert target view (conversationViews original),editorDrafts=M.insert draftRef initial (editorDrafts original)}
       -- Live output may resume an existing recovered frame; only explicit Show
       -- creates a frame for a closed or hidden inert body.

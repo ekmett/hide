@@ -6,10 +6,11 @@
 -- Conversation retains task/control authority and adopts their exact results.
 module Hide.ConversationBody
   ( BodyItemId(..), Record(..), RecordContent(..), BodyPoint(..), BodyAnchor(..), BodySelection(..), BodyDemand(..), BodyViewport(..), BodyRow(..), viewportPoint, viewportOffset
-  , LogicalBody, LogicalItem, logicalBodyIdentity, logicalBodyProvider, logicalBodyTranscriptIdentity, logicalBodyRead, validateLogicalPoint, logicalBodyItems, logicalBodyItemIndex, logicalItemRecord, logicalItemMarkdown, logicalItemBlocks, prepareLogicalBody, restoreLogicalBody, restoreLogicalViewport
+  , LogicalBody, LogicalItem, logicalBodyIdentity, logicalBodyProvider, logicalBodyTranscriptIdentity, logicalBodyRead, validateLogicalPoint, clampPoint, logicalBodyItems, logicalBodyItemIndex, logicalItemRecord, logicalItemMarkdown, logicalItemBlocks, prepareLogicalBody, restoreLogicalBody, restoreLogicalViewport
   , ConversationCopy(..), logicalBodyCopy
   , ToolExpansion(..), QuestionSchema(..), QuestionProjection(..)
   , BodyProvider(..), BodyKey(..), bodyOwnerMatches, BodyInput(..)
+  , CapturedConversationSource, captureConversationSource, capturedSourceIdentity, prepareCapturedSource
   , BodyRequest(..), BodyResult(..), PreparedBody(..), HostBodyControls(..)
   , BodyControlReceipt(..), ConversationBody(..)
   , prepareConversationBody, renderReply, renderReplyWithShellBlocks, renderTimestamp, questionChoiceLines
@@ -216,19 +217,48 @@ logicalBodyItemIndex wanted body=search 0 (V.length items)
 -- revisions or equal text alone cannot prove the cached parser still applies.
 prepareLogicalBody :: BodyKey -> BodyInput -> Maybe LogicalBody -> IO LogicalBody
 prepareLogicalBody key input previous=do
-  body<-case previous of
-    Just body | logicalTarget body==bodyTarget key && logicalProvider body==bodyProvider key &&
-      logicalTranscript body==bodyTranscript key && questionTokenOf (logicalQuestion body)==bodyQuestionToken key->pure body
+  body<-captureLogicalBody (bodyTarget key) (bodyProvider key) (bodyTranscript key)
+    (bodySession input) (bodyQuestion input) (bodyRecords input) previous
+  withLogicalWidth (bodyWide key) (max 1 (bodyColumns key-5)) body
+
+-- Latest received immutable source is durable before any viewport job finishes.
+-- Its identity is independent of layout, and capturing it parses no item.
+data CapturedConversationSource = CapturedConversationSource !Unique !Text !BodyProvider !(StableName [Record]) ![Record]
+instance Eq CapturedConversationSource where
+  CapturedConversationSource a _ _ _ _==CapturedConversationSource b _ _ _ _=a==b
+instance Show CapturedConversationSource where
+  show (CapturedConversationSource ident _ _ _ _)="CapturedConversationSource "++show (hashUnique ident)
+
+capturedSourceIdentity :: CapturedConversationSource -> Unique
+capturedSourceIdentity (CapturedConversationSource ident _ _ _ _)=ident
+
+captureConversationSource :: Text -> BodyProvider -> [Record] -> Maybe CapturedConversationSource -> IO CapturedConversationSource
+captureConversationSource target provider records previous=do
+  root<-makeStableName =<< evaluate records
+  case previous of
+    Just source@(CapturedConversationSource _ sameTarget sameProvider sameRoot _) | target==sameTarget && provider==sameProvider && root==sameRoot->pure source
+    _->do
+      ident<-newUnique
+      evaluate (CapturedConversationSource ident target provider root records)
+
+-- Checkpoint work uses the same lazy parser catalogue as presentation. This
+-- omits transient session/question state and never requests painted rows.
+prepareCapturedSource :: CapturedConversationSource -> Maybe LogicalBody -> IO LogicalBody
+prepareCapturedSource (CapturedConversationSource _ target provider root records) previous=
+  captureLogicalBody target provider root Nothing Nothing records previous
+
+captureLogicalBody :: Text -> BodyProvider -> StableName [Record] -> Maybe Text -> Maybe QuestionSchema -> [Record] -> Maybe LogicalBody -> IO LogicalBody
+captureLogicalBody target provider root session question records previous=case previous of
+    Just body | logicalTarget body==target && logicalProvider body==provider &&
+      logicalTranscript body==root && questionTokenOf (logicalQuestion body)==questionTokenOf question->pure body
     _->do
       identity<-newUnique
       let old=case previous of
-            Just body | logicalTarget body==bodyTarget key && logicalProvider body==bodyProvider key->M.fromList
+            Just body | logicalTarget body==target && logicalProvider body==provider->M.fromList
               [(recordId (logicalItemRecord item),item) | item<-V.toList (logicalItems body)]
             _->M.empty
-      items<-V.fromList <$> mapM (capture old) (bodyRecords input)
-      evaluate (LogicalBody identity (bodyTarget key) (bodyProvider key) (bodyTranscript key)
-        (bodySession input) (bodyQuestion input) (0,False) items)
-  withLogicalWidth (bodyWide key) (max 1 (bodyColumns key-5)) body
+      items<-V.fromList <$> mapM (capture old) records
+      evaluate (LogicalBody identity target provider root session question (0,False) items)
   where
     questionTokenOf Nothing=Nothing
     questionTokenOf (Just (QuestionSchema token _ _))=Just token
