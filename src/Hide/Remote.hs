@@ -198,6 +198,7 @@ data Session = Session
   , savedReplies :: [(Int,[WirePacket])]
   , generation :: Int
   , stopped :: Bool
+  , suspending :: Bool
   }
 
 -- | Acquire the session lifetime lock, recover state and serve attachments.
@@ -228,8 +229,9 @@ runRemoteDaemonWithStartup owned wake session scale effects tick inspect initial
     epoch <- randomIdentity
     font <- loadFont
     pasteReads <- newRequestedPaste
-    state <- newMVar (Session recovered {browserFrontend=True} Nothing 0 [] 0 False)
+    state <- newMVar (Session recovered {browserFrontend=True} Nothing 0 [] 0 False False)
     writer <- newMVar ()
+    checkpointPublisher <- newMVar ()
     done <- newEmptyMVar
     preserveCheckpoint <- newTVarIO False
     inspections <- newTVarIO M.empty
@@ -240,36 +242,47 @@ runRemoteDaemonWithStartup owned wake session scale effects tick inspect initial
     linkReplies <- newTBQueueIO 4
     let commandLoop = forever $ do
           (serial,received,input,reply) <- atomically (readTBQueue commands)
-          result <- try $ modifyMVar state $ \original -> do
-            unless (serial>=0 && serial<=acknowledged original+1 && received>=0 && received<=acknowledged original) (failure "Remote input sequence gap")
-            let s=if serial==0 then original else original {savedReplies=filter ((>received).fst) (savedReplies original)}
-            if serial==0 then cancelRequestedPaste pasteReads >> pure (s {desktop=fst (applyInput Blur (desktop s))},([],stopped s,acknowledged s,webDirty (desktop s)))
-            else if stopped s then pure (s,([],True,acknowledged s,webDirty (desktop s)))
-            else if input==SuspendSession && serial>acknowledged s then do
-              -- Capture accepted owner output before suspension; durability
-              -- cannot depend on a display preparation completing first.
-              updated<-tick (desktop s)
-              -- A failed checkpoint must leave the daemon alive with its buffers.
-              writeCheckpoint checkpoint updated >>= either (failure . T.unpack) pure
-              atomically (writeTVar preserveCheckpoint True)
-              pure (s {desktop=updated,stopped=True,acknowledged=serial},([],True,serial,webDirty updated))
-            else if serial<=acknowledged s then pure (s,(concatMap snd (savedReplies s),stopped s,acknowledged s,webDirty (desktop s))) else do
-              (next,requests)<-case input of
-                PasteReply token text->applyRequestedPaste pasteReads token text (desktop s)
-                _->pure (applyInput input (desktop s))
-              refreshRequestedPaste pasteReads next
-              let anticipated=concatMap (responsePackets next) requests
-                  retained=concatMap snd (savedReplies s)
-                  tooLarge=any ((>=maxPacketSize) . packetSize) anticipated
-                  full=not (null anticipated) && (length (savedReplies s)>=128 || sum (map packetSize (retained++anticipated))>33554432)
-              (exited,updated,replies) <- if tooLarge || full
-                then pure (False,(desktop s) {status=if tooLarge then "Clipboard or download exceeds 16 MiB; the command was not applied." else "Remote reply journal is full; reconnect before retrying this command."},[])
-                else foldM (effect (owner s,generation s)) (False,next,[]) requests
-              refreshRequestedPaste pasteReads updated
-              -- Replaying a clipboard read could produce a second, distinct paste input.
-              let retainedReplies=filter (\packet -> packetType packet `notElem` [Just "paste-request",Just "open-resource"]) replies
-                  saved=savedReplies s++[(serial,retainedReplies) | not (null retainedReplies)]
-              pure (s {desktop=updated,acknowledged=serial,stopped=exited,savedReplies=saved},(replies,exited,serial,webDirty updated))
+          let serialize action=if input==SuspendSession
+                then withMVar checkpointPublisher (\_->mask (\restore->action restore)) else action id
+          result <- try $ serialize $ \restore->do
+            pending <- modifyMVar state $ \original -> do
+              unless (serial>=0 && serial<=acknowledged original+1 && received>=0 && received<=acknowledged original) (failure "Remote input sequence gap")
+              let s=if serial==0 then original else original {savedReplies=filter ((>received).fst) (savedReplies original)}
+              if serial==0 then do
+                cancelRequestedPaste pasteReads
+                let settled=if stopped s || suspending s then s else s {desktop=fst (applyInput Blur (desktop s))}
+                pure (settled,Right ([],stopped s,acknowledged s,webDirty (desktop s)))
+              else if stopped s then pure (s,Right ([],True,acknowledged s,webDirty (desktop s)))
+              else if input==SuspendSession && serial>acknowledged s then do
+                -- Capture accepted output once, then freeze adoption while the
+                -- checkpoint worker owns this exact snapshot outside the lock.
+                updated<-tick (desktop s)
+                pure (s {desktop=updated,suspending=True},Left updated)
+              else if serial<=acknowledged s then pure (s,Right (concatMap snd (savedReplies s),stopped s,acknowledged s,webDirty (desktop s))) else do
+                (next,requests)<-case input of
+                  PasteReply token text->applyRequestedPaste pasteReads token text (desktop s)
+                  _->pure (applyInput input (desktop s))
+                refreshRequestedPaste pasteReads next
+                let anticipated=concatMap (responsePackets next) requests
+                    retained=concatMap snd (savedReplies s)
+                    tooLarge=any ((>=maxPacketSize) . packetSize) anticipated
+                    full=not (null anticipated) && (length (savedReplies s)>=128 || sum (map packetSize (retained++anticipated))>33554432)
+                (exited,updated,replies) <- if tooLarge || full
+                  then pure (False,(desktop s) {status=if tooLarge then "Clipboard or download exceeds 16 MiB; the command was not applied." else "Remote reply journal is full; reconnect before retrying this command."},[])
+                  else foldM (effect (owner s,generation s)) (False,next,[]) requests
+                refreshRequestedPaste pasteReads updated
+                -- Replaying a clipboard read could produce a second, distinct paste input.
+                let retainedReplies=filter (\packet -> packetType packet `notElem` [Just "paste-request",Just "open-resource"]) replies
+                    saved=savedReplies s++[(serial,retainedReplies) | not (null retainedReplies)]
+                pure (s {desktop=updated,acknowledged=serial,stopped=exited,savedReplies=saved},Right (replies,exited,serial,webDirty updated))
+            case pending of
+              Right ready->pure ready
+              Left snapshot->(do
+                restore (writeCheckpoint checkpoint snapshot) >>= either (failure . T.unpack) pure
+                modifyMVar state $ \current->do
+                  atomically (writeTVar preserveCheckpoint True)
+                  pure (current {suspending=False,stopped=True,acknowledged=serial},([],True,serial,webDirty snapshot)))
+                `onException` modifyMVar_ state (\current->pure current {suspending=False})
           case result of
             Left (_::IOException) -> modifyMVar_ state (\s -> cancelRequestedPaste pasteReads >> pure s {generation=generation s+1})
             Right _ -> pure ()
@@ -277,7 +290,9 @@ runRemoteDaemonWithStartup owned wake session scale effects tick inspect initial
         linkLoop = forever $ do
           (stamp,captured,columns,directory,origin,target)<-atomically (readTBQueue linkJobs)
           prepared<-prepareLink True columns directory origin target
-          modifyMVar_ state $ \s->do
+          -- A prepared link waits for the suspension outcome; a failed save
+          -- must not discard an already accepted completion.
+          withMVar checkpointPublisher $ \_->modifyMVar_ state $ \s->do
             if stopped s || stamp/=(owner s,generation s) || not (maybe True (\receipt->case receipt of
               Left trace->maybe False (\tree->treeFocused tree && hitCurrent trace tree) (sideTree (desktop s)) && dialog (desktop s)==Nothing && columns==max 20 (min 76 (fst (screenSize (desktop s))-treeWidthOf (desktop s)-4))
               Right source->linkOriginCurrent (desktop s) source) captured) then pure s else do
@@ -293,7 +308,7 @@ runRemoteDaemonWithStartup owned wake session scale effects tick inspect initial
         tickLoop = forever $ do
           timer<-registerDelay 50000
           atomically (wake `orElse` (readTVar timer >>= check))
-          modifyMVar_ state $ \s -> if stopped s then pure s else do
+          modifyMVar_ state $ \s -> if stopped s || suspending s then pure s else do
             d <- tick (desktop s)
             refreshRequestedPaste pasteReads d
             pure s {desktop=d}
@@ -322,7 +337,7 @@ runRemoteDaemonWithStartup owned wake session scale effects tick inspect initial
                       atomically (modifyTVar' inspections (M.delete thread))
                 flip finally release $ do
                   (exited,finish) <- modifyMVar state $ \s -> do
-                    when (stopped s) (failure "Editor session is closing")
+                    when (stopped s || suspending s) (failure "Editor session is closing or suspending")
                     -- Registration and initiation share the desktop lock with
                     -- approval/Exit, so accepted replies cannot miss the drain.
                     atomically (modifyTVar' inspections (M.insert thread stop))
@@ -362,8 +377,8 @@ runRemoteDaemonWithStartup owned wake session scale effects tick inspect initial
                   putMVar writer ())
         attachment connection client clientAck = do
           (ack,attachmentEpoch,replay) <- modifyMVar state $ \s -> do
+            when (stopped s || suspending s) (failure "Editor session is closing or suspending")
             cancelRequestedPaste pasteReads
-            when (stopped s) (failure "Editor session is closing")
             let switched=owner s/=Just client
                 ack=if switched then 0 else acknowledged s
                 gen=generation s+if switched then 1 else 0
@@ -421,13 +436,13 @@ runRemoteDaemonWithStartup owned wake session scale effects tick inspect initial
                       [if name=="title" then (name,String (applicationTitle cwd d<>" ["<>label<>"]")) else (name,value) | (name,value)<-frameMetadata cwd d]
                     reset=maybe True (\(_,old,_,_)->old/=resetKey) previous
                 case clipboardExport d of
-                  (serial,Just text) -> do
+                  (serial,Just text) | not (stopped s || suspending s) -> do
                     writePacket connection (json "copy" ["text" .= text])
                     -- This is explicit clipboard_write output, never clipboard
                     -- capture. Preserve any newer export, even identical text.
                     modifyMVar_ state $ \current ->
                       let latest=desktop current
-                      in pure $ if fst (clipboardExport latest)==serial
+                      in pure $ if not (stopped current || suspending current) && fst (clipboardExport latest)==serial
                         then current {desktop=latest {clipboardExport=(serial,Nothing)}} else current
                   _ -> pure ()
                 let changed=reset || (not sameFrame && (rows/=oldRows || metadata/=oldMeta))
@@ -503,7 +518,11 @@ runRemoteDaemonWithStartup owned wake session scale effects tick inspect initial
             (exited,updated) <- effects d [request]
             refreshRequestedPaste pasteReads updated
             pure (exited,updated,replies)
-    let checkpointNow d = do
+    -- Concurrent publishers acquire this lock before reading the Desktop lock;
+    -- a periodic snapshot cannot overwrite final suspension. Initial/final
+    -- snapshots are captured outside the concurrent worker lifetime.
+    let checkpointNow d = withMVar checkpointPublisher (const (writeSnapshot d))
+        writeSnapshot d = do
           result <- writeCheckpoint checkpoint d
           case result of
             Left err -> do
@@ -513,13 +532,15 @@ runRemoteDaemonWithStartup owned wake session scale effects tick inspect initial
           pure result
         checkpointLoop previous = do
           threadDelay 1000000
-          current <- readMVar state
-          if stopped current then pure () else do
-            let snapshot=desktop current
-            key <- checkpointKey snapshot
-            if Just key==previous then checkpointLoop previous else do
-              result <- checkpointNow snapshot
-              checkpointLoop (either (const previous) (const (Just key)) result)
+          next <- withMVar checkpointPublisher $ \_->do
+            current <- readMVar state
+            if stopped current then pure Nothing else do
+              let snapshot=desktop current
+              key <- checkpointKey snapshot
+              if Just key==previous then pure (Just previous) else do
+                result <- writeSnapshot snapshot
+                pure (Just (either (const previous) (const (Just key)) result))
+          maybe (pure ()) checkpointLoop next
         finishSession = do
           current <- readMVar state
           resumable <- readTVarIO preserveCheckpoint

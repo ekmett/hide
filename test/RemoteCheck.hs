@@ -32,6 +32,7 @@ import Hide.Protocol
 import Hide.Remote
 import Hide.RemoteEndpoint
 import qualified Hide.Session as S
+import Hide.Recovery (readCheckpoint)
 isolatedStore :: IO a -> IO a
 #ifndef mingw32_HOST_OS
 isolatedStore action=do
@@ -588,9 +589,21 @@ requestedPasteReconnectCheck=do
       receipt h=control h "paste-request" >>= maybe (error "missing requested paste identity") pure . parseMaybe (.:"request")
       check name ok=unless ok (error name)
   observed<-newIORef initial
+  validNextId<-newIORef (nextId initial)
   let tick d=writeIORef observed d >> pure d
       core d _=pure (False,d)
+      inspect d _ (String "invalidate-checkpoint")=do
+        writeIORef validNextId (nextId d)
+        pure (False,d {nextId=0},pure (Just (String "ready")))
+      inspect d _ (String "repair-checkpoint")=do
+        restored<-readIORef validNextId
+        pure (False,d {nextId=restored},pure (Just (String "ready")))
       inspect d _ _=pure (False,d,pure Nothing)
+      checkpointState request=bracket open hClose $ \h->do
+        writePacket h (JsonPacket (object ["type" .= ("inspect"::T.Text),"request" .= (request::T.Text)]))
+        response<-timeout 3000000 (readPacket h)
+        check "Checkpoint fixture change reaches the actual inspection owner"
+          (response==Just (Just (JsonPacket (String "ready"))))
       awaitText expected=do
         d<-readIORef observed
         if activeText d==expected then pure () else threadDelay 10000 >> awaitText expected
@@ -627,3 +640,24 @@ requestedPasteReconnectCheck=do
       void (control second "ack")
       done<-timeout 3000000 (awaitText "acceptedsource")
       check "Closed-dialog/reconnect/old/duplicate replies cannot edit wrong target or consume fresh receipt" (done==Just ())
+      checkpointState "invalidate-checkpoint"
+      writePacket second (JsonPacket (object ["type" .= ("suspend"::T.Text),"seq" .= (10::Int)]))
+      void (control second "error")
+    checkpointState "repair-checkpoint"
+    bracket open hClose $ \third->do
+      resumed<-attach third 9
+      check "Failed suspension leaves the daemon alive without acknowledging its input"
+        (KM.lookup "ack" resumed==Just (toJSON (9::Int)))
+      writePacket third (JsonPacket (object ["type" .= ("suspend"::T.Text),"seq" .= (10::Int)]))
+      committed<-control third "ack"
+      check "Retrying suspension commits only its successful exact input"
+        (KM.lookup "seq" committed==Just (toJSON (10::Int)))
+      closed<-control third "closed"
+      check "Successful suspension retains a resumable checkpoint"
+        (KM.lookup "resumable" closed==Just (Bool True))
+    ended<-timeout 3000000 (wait daemon)
+    check "Suspended daemon joins after its close acknowledgement" (ended==Just ())
+    checkpoint<-S.checkpointPath session
+    recovered<-readCheckpoint checkpoint initial >>= either (error . T.unpack) pure
+    check "Suspension preserves the accepted paste buffer exactly"
+      (activeText recovered=="acceptedsource")
