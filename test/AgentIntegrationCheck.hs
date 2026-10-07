@@ -278,6 +278,14 @@ checks=bracket temporary removePathForcibly $ \root ->
             if "new live child output" `T.isInfixOf` activeText next then pure next else threadDelay 10000 >> awaitLive next
       refreshed<-timeout 5000000 (awaitLive retained) >>= maybe (fail "Live recovered body preparation timed out") pure
       ensure "live output replaces frozen recovered presentation" ("new live child output" `T.isInfixOf` activeText refreshed)
+      ensure "live recovery refresh retains the existing frame geometry"
+        (map (\w->(windowId w,bounds w)) (windows refreshed)==map (\w->(windowId w,bounds w)) (windows retained))
+      let closed=fst (runCommand Close refreshed)
+      AH.recordAgentEvent hub recoveredChild "output" (object ["text" .= ("output after close"::T.Text)])
+      stayedClosed<-tickBody presentation conversation closed
+      ensure "live child output cannot reopen or focus its closed conversation"
+        (map windowId (windows stayedClosed)==map windowId (windows closed) &&
+          fmap windowId (activeWindow stayedClosed)==fmap windowId (activeWindow closed))
     corrupt<-newSessionRecord Nothing ["--",root]
     rememberSession corrupt
     checkpoint<-(++".agents.json") <$> checkpointPath (sessionId corrupt)

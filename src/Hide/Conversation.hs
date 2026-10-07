@@ -1644,6 +1644,9 @@ ensureEditorWithState opening state target name original=do
       body=fromMaybe (loadingBody state) (conversationBodySnapshot target original)
       view=maybe (ConversationView (InertBody body) name draftRef Nothing Nothing (0,0) (Selection 0 0)) (\old->old {conversationName=name}) found
       seeded=original {conversationViews=M.insert target view (conversationViews original),editorDrafts=M.insert draftRef initial (editorDrafts original)}
+      -- Live output may resume an existing recovered frame; only explicit Show
+      -- creates a frame for a closed or hidden inert body.
+      activate=opening || maybe False (\reference->any ((==PluginContent reference).windowContent) (windows original)) (conversationBodyRef view)
   retained<-readIORef (conversationEditors state)
   binding<-case M.lookup target retained of
     Just editor | Editor.mountDraft (Editor.editorMount editor)==draftRef->pure editor
@@ -1652,18 +1655,18 @@ ensureEditorWithState opening state target name original=do
       Editor.prepareEditorBuffer draftRef (Editor.EditorSpec True "Query" "Steer") (editorDraftBuffer initial) (action False) (action True) >>= either (ioError . userError . show) pure
   live<-Editor.mountCurrent (Editor.editorMount binding)
   bodyLive<-maybe (pure False) W.windowRefCurrent (conversationBodyRef view)
-  when (opening && not bodyLive && live) (Editor.retireEditorMount (Editor.editorMount binding))
-  nextBinding<-if opening && (not live || not bodyLive) then do
+  when (activate && not bodyLive && live) (Editor.retireEditorMount (Editor.editorMount binding))
+  nextBinding<-if activate && (not live || not bodyLive) then do
     current<-Editor.editorCurrent binding
     if current && bodyLive then pure binding else Editor.remountEditor binding
     else pure binding
   let mount=Editor.editorMount nextBinding
   opened<-case conversationBodyRef view of
     Just reference | bodyLive->do
-      admitted<-if opening && not live then atomically (Editor.claimEditorMount mount) else pure live
+      admitted<-if activate && not live then atomically (Editor.claimEditorMount mount) else pure live
       let mounted=if admitted then installEditorDraft mount Nothing seeded else seeded
       pure mounted {conversationViews=M.adjust (\v->v {conversationEditor=if admitted then Just mount else conversationEditor v}) target (conversationViews mounted)}
-    _ | opening->do
+    _ | activate->do
       update<-W.openEditorWindow (bodyScope state) body nextBinding
       admitted<-maybe (pure Nothing) W.admitEditorWindowUpdate update
       pure $ case admitted of
