@@ -300,13 +300,23 @@ checks=bracket temporary removePathForcibly $ \root ->
             _->error "Missing fixture conversation views"
       BL.writeFile recoveredPath (encode input)
       acquired<-readCheckpoint recoveredPath (initialDesktop (80,25)) >>= right
-      writeCheckpoint recoveredPath acquired >>= right
+      writeCheckpoint recoveredPath (fst (runCommand Close acquired)) >>= right
       AR.activateAgentCheckpoint agents
       AR.checkpointAgents agents >>= right
       pure child
     environment "THC_EDIT_SESSION" (Just (sessionId recoveryRecord)) $ C.withConsoles $ \consoles -> withConversationAt consoles root $ \conversation -> withTextPresentation $ \presentation->do
       recovered<-readCheckpoint recoveredPath (initialDesktop (80,25)) >>= right
-      retained<-tickBody presentation conversation recovered
+      closedRetained<-tickBody presentation conversation recovered
+      ensure "a hidden recovered child catalogue stays closed before explicit show"
+        (null (windows closedRetained) && M.null (pluginWindows closedRetained) &&
+         conversationTarget closedRetained==AH.agentIdText recoveredChild)
+      (_,shown)<-conversationEffects conversation (\d _->pure (False,d)) closedRetained
+        [AgentSidebarAction (ShowAgent recoveredChild)]
+      let awaitRecovered current=do
+            next<-tickBody presentation conversation current
+            if "newer Desktop child transcript" `T.isInfixOf` activeText next then pure next
+              else threadDelay 10000 >> awaitRecovered next
+      retained<-timeout 5000000 (awaitRecovered shown) >>= maybe (fail "Hidden recovered child body preparation timed out") pure
       ensure "stale recovered Hub history cannot overwrite newer logical transcript"
         ("newer Desktop child transcript" `T.isInfixOf` activeText retained && not ("older Hub history" `T.isInfixOf` activeText retained) && contents (composerBuffer retained)=="recovered draft")
       ensure "recovered child projects current status while retaining text" (not (agentReplying retained) && agentQueued retained==0)

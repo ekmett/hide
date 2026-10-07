@@ -1614,7 +1614,8 @@ refreshChildConversation (ConversationState _ ref _ agents) d=do
         -- until a live/reconnected child owns its transcript again.
         let frozen=M.notMember target (childRecords current) &&
               field "status" entry `elem` [Just ("recovered"::Text),Just "ended"] &&
-              maybe False ((>0).contentLength.W.preparedWindowText) (conversationBodySnapshot target projected)
+              maybe False (\logical->case logicalBodyProvider logical of
+                RecoveredBodyProvider{}->True; _->False) (conversationLogicalBody target projected)
         if frozen || childRender current==Just signature then pure projected else do
           history<-recentChildHistory hub (AH.AgentId target) (fromMaybe 1 (field "nextEvent" entry))
           case history of
