@@ -139,21 +139,17 @@ copyPreparedSelection prepared start end=case maybe CopyText textCopy (preparedW
     lastOffset=max first (min (contentLength source) end)
 
 messageIntervals :: [StyledRow] -> V.Vector (Int,Int,Int,Bool)
-messageIntervals rows=V.fromList (reverse (maybe done (:done) current))
+messageIntervals rows=V.fromList (reverse (foldl' merge [] (reverse pieces)))
   where
-    (_,current,done)=foldl' row (0,Nothing,[]) rows
-    row state (StyledRow sigils newline)=maybe after (\style->collect after 1 style) newline
-      where after=go state sigils
-    go state Nil=state
-    go state (ConsChars text style rest)=go (collect state (T.length text) style) rest
-    go state (ConsSigil glyph style _ rest)=go (collect state (T.length (graphemeText glyph)) style) rest
-    collect (offset,current,done) count style=(offset+count,case style of
-      BubbleText ident outgoing _->case current of
-        Just (a,_,previous,sent) | previous==ident && sent==outgoing->Just (a,offset+count,ident,outgoing)
-        _->Just (offset,offset+count,ident,outgoing)
-      _->Nothing,case (style,current) of
-        (BubbleText ident outgoing _,Just (_,_,previous,sent)) | previous==ident && sent==outgoing->done
-        _->maybe done (:done) current)
+    (_,pieces)=foldl' row (0,[]) rows
+    row (offset,found) (StyledRow sigils newline messages)=
+      let size=sigilsLength sigils
+          shifted=[(offset+a,offset+z,ident,outgoing) | (a,z,ident,outgoing)<-V.toList messages]
+          ending=case newline of Just (BubbleText ident outgoing _)->[(offset+size,offset+size+1,ident,outgoing)]; _->[]
+      in (offset+size+maybe 0 (const 1) newline,reverse ending++reverse shifted++found)
+    merge ((a,z,ident,outgoing):rest) (b,end,other,sent)
+      | z==b && ident==other && outgoing==sent=(a,end,ident,outgoing):rest
+    merge done piece=piece:done
 
 -- | /O(1)/. Explicit immutable observation declaration, private by default.
 preparedWindowDisclosure :: PreparedWindow -> WindowDisclosure
@@ -282,16 +278,16 @@ prepareStyledRowsWindow :: Text -> [StyledRow] -> IO PreparedWindow
 prepareStyledRowsWindow title styled=do
   ident<-newUnique
   let rows=V.fromList styled
-      textOfRow (StyledRow sigils newline)=sigilsText sigils<>maybe "" (const "\n") newline
+      textOfRow (StyledRow sigils newline _)=sigilsText sigils<>maybe "" (const "\n") newline
       source=T.concat (map textOfRow styled)
       measured=newBuffer source
-      styles (StyledRow sigils newline)=sigilsStyles sigils++maybe [] pure newline
+      styles (StyledRow sigils newline _)=sigilsStyles sigils++maybe [] pure newline
       metadata predicate=any (any predicate . styles) styled
-      width=V.foldl' (\longest (StyledRow sigils _)->max longest (extent 0 sigils)) 0 rows
+      width=V.foldl' (\longest (StyledRow sigils _ _)->max longest (extent 0 sigils)) 0 rows
       extent !col Nil=col
       extent !col (ConsChars text _ rest)=extent (col+T.length text) rest
       extent !col (ConsSigil _ _ advance rest)=extent (col+advance) rest
-  _<-evaluate (V.foldl' (\n (StyledRow sigils newline)->n+sigilsLength sigils+maybe 0 (\style->style `seq` 1) newline) 0 rows)
+  _<-evaluate (V.foldl' (\n (StyledRow sigils newline _)->n+sigilsLength sigils+maybe 0 (\style->style `seq` 1) newline) 0 rows)
   _<-evaluate (prepareBuffer measured)
   _<-evaluate width
   evaluate (PreparedWindow ident (safeTitle title) (bufferContent measured) (StyledRows rows) width Nothing (metadata sectionTitle) (metadata styleLayoutMetadata) Nothing)

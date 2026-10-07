@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings, BangPatterns #-}
+{-# LANGUAGE OverloadedStrings, BangPatterns, UnboxedTuples #-}
 -- | Source token styles and presentation annotations shared by renderers.
 --
 -- Skylighting supplies language grammars; this module maps token classes to editor
@@ -14,7 +14,7 @@ import Data.Word (Word32)
 import qualified Data.Text as T
 import qualified Data.Text.Unsafe as TU
 import qualified Data.Vector as V
-import Hide.Unicode (DisplayItem,itemScalarCount,itemOverflow,itemSourceText,itemDisplayText,itemWidth,sourceGraphemesFrom,sourceItemAdvance,displayItems,scalarWidth,Script)
+import Hide.Unicode (DisplayItem,itemScalarCount,itemOverflow,itemSourceText,itemDisplayText,itemWidth,sourceGraphemesFrom,sourceItemAdvance,displayItems,scalarWidth,initialSourceCursor,sourceItemStep,sourceSpanStep,sourceItemsFromCursor,Script)
 import Hide.LineChunks (joinAdjacent)
 import Hide.Buffer (SourceLine,sourceLineText,sourceLineRawText,sourceLineLength,sourceLineHasChunks,sourceLineWindow)
 import qualified Skylighting as S
@@ -84,7 +84,9 @@ splitStyledText=go []
 
 -- | One finalized physical row. Strict Sigils remain bounded by the demanded
 -- row; the enclosing row list stays lazy. Newline metadata is not painted.
-data StyledRow = StyledRow !Sigils !(Maybe Style) deriving Show
+-- Passive message ranges preserve original scalar attribution independently of
+-- the first-scalar style used to paint a cross-run grapheme.
+data StyledRow = StyledRow !Sigils !(Maybe Style) !(V.Vector (Int,Int,Int,Bool)) deriving Show
 
 -- | One demanded row's paint-to-logical source map. Furniture has no range;
 -- its hit boundary comes from the nearest logical edge. Expanded tabs can map
@@ -98,7 +100,13 @@ data MappedStyledRow = MappedStyledRow
 -- | Segment before assigning styles, preserving cross-run graphemes and exact
 -- overflow markers. Only the first scalar's style paints a complete item.
 styledRows :: StyledText -> [StyledRow]
-styledRows=map (\(runs,newline)->StyledRow (styledSigils (compactStyled runs)) newline) . splitStyledText
+styledRows=map row . splitStyledText
+  where
+    row (runs,newline)=StyledRow (styledSigils (compactStyled runs)) newline
+      (V.fromList (concat (snd (List.mapAccumL passive 0 runs))))
+    passive offset (text,style)=let end=offset+T.length text in
+      (end,case style of BubbleText ident outgoing _->[(offset,end,ident,outgoing)]; _->[])
+
 
 -- | Original bytes and scalar count of a finalized row, without display text.
 sigilsText :: Sigils -> T.Text
@@ -433,8 +441,39 @@ presentationItems text styled=go 0 text (map (\i->(itemSourceText i,itemOverflow
       where size=T.length glyph
 
 styledSigils :: StyledText -> Sigils
-styledSigils runs=build 0 0 text (presentationItems text runs) ranges
+styledSigils runs
+  | any ((/=Nothing) . styleOverflowExtent . snd) runs=marked
+  | otherwise=borrowed 0 initialSourceCursor runs
   where
+    -- Numeric span receipts consume ordinary ASCII without per-scalar Text,
+    -- DisplayItem or tuple objects. Leave its last scalar for real lookahead;
+    -- a following run may begin with a combining/ZWJ continuation.
+    borrowed _ _ []=Nil
+    borrowed col cursor remaining@((text,style):rest)
+      | T.null text=borrowed col cursor rest
+      | count>1=case sourceSpanStep text 0 cursor maxBound (count-1) False of
+          (# byte,chars,_,_,_,_,next #)->
+            let original=TU.takeWord8 byte text
+                following=TU.dropWord8 byte text
+            in ConsChars original style (borrowed (col+chars) next ((following,style):rest))
+      | otherwise=
+          let bridge=styledContents (fst (splitStyledAt 33 remaining))
+          in case sourceItemStep bridge 0 cursor of
+            (# byte,chars,natural,tab,overflow,next #)->
+              let original=TU.takeWord8 byte bridge
+                  glyph=case sourceItemsFromCursor cursor overflow original of
+                    item:_->Grapheme item
+                    _->OverflowGrapheme original
+                  advance=if tab then 8-col `mod` 8 else natural
+                  following=snd (splitStyledAt chars remaining)
+                  ordinary=not overflow && chars==1 && natural==1 &&
+                    T.all (\c->c>=' ' && c/='\DEL') original
+              in if ordinary then ConsChars original style (borrowed (col+advance) next following)
+                else ConsSigil glyph style advance (borrowed (col+advance) next following)
+      where count=T.length (T.takeWhile (\c->c>=' ' && c<='~') text)
+    -- Captured overflow fragments own exact original extents, including a
+    -- fragment beginning inside a freshly segmented padding/ZWJ item.
+    marked=build 0 0 text (presentationItems text runs) ranges
     text=styledContents runs
     ranges=V.toList (sourceRowRanges (prepareSourceRow text runs))
     build !_ !_ _ [] _=Nil

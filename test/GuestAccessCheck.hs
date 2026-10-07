@@ -31,7 +31,7 @@ checks=do
       hidden=Vec.fromList [(0,T.length "Session: provider-secret"),(T.length "Session: provider-secret\nPublic transcript\nOther: ",T.length text)]
       semantics=W.TextSemantics W.CopyText Nothing Vec.empty Vec.empty W.ReadableWindow hidden
         (Vec.singleton (0,T.length "Session: provider-secret")) Vec.empty
-  body<-W.prepareSemanticTextWindow "Conversation" [(c,Plain) | c<-T.unpack text] semantics
+  body<-W.prepareSemanticTextWindow "Conversation" [(text,Plain)] semantics
     >>= either (error . T.unpack) pure
   withEditorBodyFixture "" body (addDocument Nothing (newBuffer "file") (initialDesktop (100,35))) checksWithBody
 
@@ -119,7 +119,7 @@ checksWithBody conversation=do
     checkDenied "guest cannot type or click into human draft/answer controls" chat [event]
   let genericText="Public generic body"
       publicSemantics=W.TextSemantics W.CopyText Nothing Vec.empty Vec.empty W.ReadableWindow Vec.empty Vec.empty Vec.empty
-  publicBody<-W.prepareSemanticTextWindow "Plain text" [(c,Plain) | c<-T.unpack genericText] publicSemantics
+  publicBody<-W.prepareSemanticTextWindow "Plain text" [(genericText,Plain)] publicSemantics
     >>= either (error . T.unpack) pure
   withEditorBodyFixture "" publicBody base $ \mounted->do
     let generic=mounted {conversationViews=M.empty}

@@ -29,7 +29,7 @@ checks = withEditorTextFixture "" "reply" (initialDesktop (100,35)) $ \chatBase-
   composerWidthChecks
   plainSourceRowChecks
   let exact="aé𝄞\t─\x301\r"
-      row=prepareSourceRow exact (zip (T.unpack exact) (cycle [Keyword,Keyword,Plain]))
+      row=prepareSourceRow exact (zip (map T.singleton (T.unpack exact)) (cycle [Keyword,Keyword,Plain]))
       pieces=[sourceRangeText row r | r<-V.toList (sourceRowRanges row)]
       ends=scanl (\(chars,bytes) text->(chars+T.length text,bytes+TU.lengthWord8 text)) (0,0) pieces
   check "source ranges preserve original UTF8 and character boundaries"
@@ -45,7 +45,7 @@ checks = withEditorTextFixture "" "reply" (initialDesktop (100,35)) $ \chatBase-
   check "ordinary non-ASCII glyphs coalesce into a borrowed source run" (case sourceSigils (plainSourceRow "éδ─") of
     ConsChars "éδ─" Plain Nil->True
     _->False)
-  let cluster=sourceSigils (prepareSourceRow "a\x301z" [('a',Keyword),('\x301',Plain),('z',Plain)])
+  let cluster=sourceSigils (prepareSourceRow "a\x301z" [("a",Keyword),("\x301",Plain),("z",Plain)])
   check "style boundary cannot split a combining source grapheme" (case cluster of
     ConsSigil glyph Keyword 1 (ConsChars "z" Plain Nil)->graphemeText glyph=="a\x301"
     _->False)
@@ -77,7 +77,7 @@ checks = withEditorTextFixture "" "reply" (initialDesktop (100,35)) $ \chatBase-
       replace text d=d {buffers=M.adjust (\old->restyle old {documentBuffer=newBuffer text}) 1 (buffers d)}
       ready=isJust . documentSourceRows . doc
   check "new source has no lazy tokenizer to force on the display thread" (null (documentHighlight (doc initial)) && not (ready initial))
-  let decorated=initial {buffers=M.map (\d->d {documentSourceRows=Just (V.singleton (prepareSourceRow "decorated" [(c,TerminalStyle 0x123456 0x654321 15) | c<-"decorated"]))}) (buffers initial)}
+  let decorated=initial {buffers=M.map (\d->d {documentSourceRows=Just (V.singleton (prepareSourceRow "decorated" [(T.singleton c,TerminalStyle 0x123456 0x654321 15) | c<-"decorated"]))}) (buffers initial)}
   check "HTML source capture keeps underline and strikethrough together" ("text-decoration:underline line-through" `T.isInfixOf` snapshotHtml decorated)
   let longText=T.replicate 100000 "界"
       longBase=addDocument Nothing (newBuffer longText) (initialDesktop (180,55))
@@ -96,7 +96,7 @@ checks = withEditorTextFixture "" "reply" (initialDesktop (100,35)) $ \chatBase-
   let viewportText=T.replicate 200 (T.replicate 20 "Haskell λ ⌘ "<>"\n")
       viewportSource=addDocument Nothing (newBuffer viewportText) (initialDesktop (180,55))
       preparedViewport=viewportSource {sideTree=Nothing,blinkCursor=False,buffers=M.map (\d->d
-        {documentSourceRows=Just (V.fromList [prepareSourceRow line [(c,if c=='H' then Keyword else Plain) | c<-T.unpack line] | line<-T.lines viewportText])}) (buffers viewportSource)}
+        {documentSourceRows=Just (V.fromList [prepareSourceRow line [(T.singleton c,if c=='H' then Keyword else Plain) | c<-T.unpack line] | line<-T.lines viewportText])}) (buffers viewportSource)}
       occupied=V.foldl' (V.foldl' (\n span->case span of
         CellText paint text->paint `seq` n+T.length text
         CellGlyph paint text full start shown->paint `seq` n+T.length text+full+start+shown
@@ -122,7 +122,7 @@ checks = withEditorTextFixture "" "reply" (initialDesktop (100,35)) $ \chatBase-
   let mixedText="a界e\x301\t👩🏽\x200d\&💻z"
       mixedSource=addDocument (Just (FileState "Mixed.hs" Nothing)) (newBuffer mixedText) (initialDesktop (30,12))
       styledMixed=mixedSource {sideTree=Nothing,buffers=M.map (\d->d {documentLabel=Just "Source Mixed",documentSourceRows=Just
-        (V.singleton (prepareSourceRow mixedText [(c,TerminalStyle 0x123456 0x654321 15) | c<-T.unpack mixedText]))}) (buffers mixedSource)}
+        (V.singleton (prepareSourceRow mixedText [(T.singleton c,TerminalStyle 0x123456 0x654321 15) | c<-T.unpack mixedText]))}) (buffers mixedSource)}
       clipped=modifyActive (\w->w {bounds=Rect 1 1 14 7,scrollColumn=2,selection=Selection 1 2}) styledMixed
       glyphs=[(paint,text,full,start,shown) | CellGlyph paint text full start shown<-V.toList (renderCellRows clipped V.! 2)]
   check "source clipping keeps selected whole glyph and font traits"
@@ -222,7 +222,7 @@ checks = withEditorTextFixture "" "reply" (initialDesktop (100,35)) $ \chatBase-
       text=T.replicate lineCount "prefix\n"<>"TAIL"
       deep=addDocument Nothing (newBuffer text) (initialDesktop (80,25))
       indexed=deep {buffers=M.map (\d->d {documentHighlight=error "flat syntax traversed",documentWidth=8,
-        documentSourceRows=Just (V.generate (lineCount+1) (\n->if n==lineCount then prepareSourceRow "TAIL" [('T',Keyword),('A',Keyword),('I',Keyword),('L',Keyword)] else error "offscreen syntax forced"))}) (buffers deep),
+        documentSourceRows=Just (V.generate (lineCount+1) (\n->if n==lineCount then prepareSourceRow "TAIL" [("T",Keyword),("A",Keyword),("I",Keyword),("L",Keyword)] else error "offscreen syntax forced"))}) (buffers deep),
         windows=map (\w->w {scrollRow=lineCount}) (windows deep)}
   check "deep source scroll indexes only the visible highlighted row" ("TAIL" `T.isInfixOf` snapshot indexed)
   let pending=indexed {buffers=M.map (\d->d {documentSourceRows=Nothing}) (buffers indexed)}
@@ -280,7 +280,7 @@ composerWidthChecks=withEditorFixture "" (initialDesktop (100,35)) $ \chatBase->
 plainSourceRowChecks :: IO ()
 plainSourceRowChecks=forM_ ["","abc","éδ─","a界e\x301\t👩🏽\x200d\&💻z","\rabc","a\r\n","\x301\&x","a\NUL\DELz"] $ \text->do
   let implicit=plainSourceRow text
-      explicit=prepareSourceRow text [(c,Plain) | c<-T.unpack text]
+      explicit=prepareSourceRow text [(text,Plain)]
       ranges=sourceRowRanges implicit
       pieces=[sourceRangeText implicit range | range<-V.toList ranges]
       fragments Nil=[]
@@ -295,7 +295,7 @@ plainSourceRowChecks=forM_ ["","abc","éδ─","a界e\x301\t👩🏽\x200d\&💻
         _->False)
   check "SourceRow equality is extensional across implicit and prepared Plain rows"
     (implicit==explicit && explicit==implicit && implicit==prepareSourceRow text [] &&
-      (T.null text || implicit/=prepareSourceRow text [(c,Keyword) | c<-T.unpack text]))
+      (T.null text || implicit/=prepareSourceRow text [(T.singleton c,Keyword) | c<-T.unpack text]))
   forM_ [0,1,2,6,8,12] $ \offset->do
     check "implicit Plain style projection preserves character offsets" (sourceStylesAt implicit offset==sourceStylesAt explicit offset)
     forM_ [0,1,2,8,32] $ \width->check "implicit Plain windows preserve complete fragments and original coordinates"
@@ -321,7 +321,7 @@ sourceLineChecks=do
         line=contentSourceLineAt (bufferContent b) 0
         visible=lineAt source 0
         raw=head (T.splitOn "\n" source)
-        prepared=prepareSourceRow raw (zip (T.unpack raw) (cycle [Plain,Keyword,Comment]))
+        prepared=prepareSourceRow raw (zip (map T.singleton (T.unpack raw)) (cycle [Plain,Keyword,Comment]))
         live=attachSourceLine line prepared
     check "live source row keeps exact public text and ranges" (live==prepared)
     check "implicit live source row keeps exact plain projection" (plainSourceLine line==plainSourceRow visible)

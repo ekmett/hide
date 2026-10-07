@@ -41,7 +41,7 @@ layoutWidth (TextLayout _ _ width)=width
 prepareTextLayout :: Bool -> Int -> BufferContent -> V.Vector StyledRow -> IO TextLayout
 prepareTextLayout wide requested text styled=prepareMappedTextLayout wide requested (V.imap row styled)
   where
-    row number styledRow@(StyledRow sigils _)=
+    row number styledRow@(StyledRow sigils _ _)=
       let start=contentLineOffset text number; end=start+sigilsLength sigils
       in MappedStyledRow styledRow start end (V.singleton (0,end-start,start,end))
 
@@ -62,7 +62,7 @@ prepareMappedTextLayout wide requested styled=do
   where
     columns=max 1 requested
     line mapped=case mappedStyledRow mapped of
-      StyledRow sigils _->finishEnd (mappedRowEnd mapped) (wrap [] 0 (mappedRowStart mapped)
+      StyledRow sigils _ _->finishEnd (mappedRowEnd mapped) (wrap [] 0 (mappedRowStart mapped)
         (glyphs 0 (mappedRowStart mapped) (V.toList (mappedSourceRanges mapped)) sigils))
     finishEnd _ []=[]
     finishEnd end [row]=[row {layoutRowEnd=max end (layoutRowEnd row)}]

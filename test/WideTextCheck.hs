@@ -25,7 +25,7 @@ import qualified Data.Text.Encoding as TE
 import qualified Data.ByteString as BS
 import Hide.Files (FileState(..))
 import Hide.Buffer (Buffer(undoStack),Selection(..),newBuffer,bufferContent,contentSlice,contentLength,contents)
-import Hide.Syntax (Style(..),fontTraits)
+import Hide.Syntax (Style(..),fontTraits,styledRows,styledContents)
 import Hide.TextLayout
 import Hide.Unicode
 import qualified Hide.Protocol as Protocol
@@ -65,7 +65,7 @@ checks=do
  let heading="ABé界é👩🏽\x200d\&💻"
      semantic=heading<>"\nplain"
      source=bufferContent (newBuffer semantic)
-     styles=Vec.fromList [[(c,SectionStyle 1 (BoldStyle (ItalicStyle (Heading 1)))) | c<-T.unpack heading],[(c,Plain) | c<-"plain"]]
+     styles=Vec.fromList (styledRows [(heading,SectionStyle 1 (BoldStyle (ItalicStyle (Heading 1)))),("\nplain",Plain)])
  layout<-prepareTextLayout True 5 source styles
  ordinary<-prepareTextLayout False 5 source styles
  check "wide layout wraps without changing semantic source" (Vec.length (layoutRows layout)==4 && contentSlice source 0 (contentLength source)==semantic && Vec.length (layoutRows ordinary)==2)
@@ -73,13 +73,13 @@ checks=do
    forM_ (Vec.toList (layoutGlyphs visual)) $ \glyph->do
      check "prepared source ranges retain complete original graphemes" (contentSlice source (layoutStart glyph) (layoutEnd glyph-layoutStart glyph)==layoutText glyph)
      check "render and navigation share the prepared position map" (layoutPosition layout (layoutStart glyph)==(rowNumber,layoutColumn glyph))
-     forM_ [0..layoutAdvance glyph-1] $ \cell->check "all glyph cells hit one original source range" (layoutOffset layout rowNumber (layoutColumn glyph+cell)==layoutStart glyph)
+     forM_ [0..layoutAdvance glyph-1] $ \cell->check "all glyph cells retain their original complete source item" (layoutOffset layout rowNumber (layoutColumn glyph+cell)==layoutStart glyph+if layoutRunStep glyph>0 then cell `div` layoutRunStep glyph else 0)
  check "widening removes bold while retaining italic and heading semantics" (all (\glyph->let (_,bold,italic)=fontTraits (layoutStyle glyph) in not bold && italic) [glyph | row<-Vec.toList (layoutRows layout),glyph<-Vec.toList (layoutGlyphs row),layoutStart glyph<T.length heading])
  check "ordinary heading styles retain bold and italic" (all (\glyph->let (_,bold,italic)=fontTraits (layoutStyle glyph) in bold && italic) (Vec.toList (layoutGlyphs (Vec.head (layoutRows ordinary)))))
  check "ordinary rows do not acquire title geometry" (layoutRowWidth (Vec.last (layoutRows layout))==5)
  let controls="A\ESC#6B\r"
      controlSource=bufferContent (newBuffer controls)
-     controlStyles=Vec.singleton [(c,SectionStyle 1 (Heading 1)) | c<-T.unpack controls]
+     controlStyles=Vec.fromList (styledRows [(controls,SectionStyle 1 (Heading 1))])
  controlLayout<-prepareTextLayout True 40 controlSource controlStyles
  check "prepared rendering sanitizes controls before measuring glyphs" (all (\glyph->not (T.any (\c->c<' ') (layoutDisplayText glyph))) (Vec.toList (layoutGlyphs (Vec.head (layoutRows controlLayout)))) && contentSlice controlSource 0 (contentLength controlSource)==controls)
  let overflowing=["q"<>T.replicate 70 "\x301","👩🏽\x200d"<>T.intercalate "\x200d" (replicate 40 "👩")]
@@ -102,7 +102,7 @@ checks=do
      (T.filter (/='\n') (M.clipboard copied)==expected<>"🇦🇧🇨Z" && M.clipboard sourceCopied==source && contents (M.documentBuffer (fromJust (M.activeDocument ready)))==source)
  forM_ [1,2,9] $ \columns->forM_ ["```\n "<>T.replicate 70 "\x301"<>"Z\n```","| H |\n|---|\n| "<>head overflowing<>"Z |"] $ \source->do
    let chars=renderMarkdown columns source
-       measured=bufferContent (newBuffer (T.pack (map fst chars)))
+       measured=bufferContent (newBuffer (styledContents chars))
    prepared<-prepareTextLayout False columns measured (M.indexedHighlightRows chars)
    let fragments=[g | row<-Vec.toList (layoutRows prepared),g<-Vec.toList (layoutGlyphs row),layoutDisplayText g=="�"]
    check "code/table wrapping preserves overflow atoms including leading whitespace"
@@ -110,13 +110,13 @@ checks=do
  forM_ [3,5,9] $ \columns->forM_ overflowing $ \cluster->
    forM_ ["```\n"<>cluster<>"Z\n```","| H |\n|---|\n| "<>cluster<>"Z |","> "<>cluster<>"Z"] $ \source->do
      let chars=renderMarkdown columns source
-         measured=bufferContent (newBuffer (T.pack (map fst chars)))
+         measured=bufferContent (newBuffer (styledContents chars))
      prepared<-prepareTextLayout False columns measured (M.indexedHighlightRows chars)
      let fragments=[g | row<-Vec.toList (layoutRows prepared),g<-Vec.toList (layoutGlyphs row),layoutDisplayText g=="�"]
      check "inserted code/table/indent padding cannot swallow captured combining or ZWJ extents"
        (length fragments==3 && T.concat (map layoutText fragments)==cluster && all ((==1) . layoutAdvance) fragments)
  let plainHelp=M.modifyActive (\w->w {M.selection=Selection 2 2,M.scrollRow=2,M.scrollColumn=1})
-       (M.addHelpStyled [(c,Plain) | c<-"plain\ntext"] (M.initialDesktop (40,25)))
+       (M.addHelpStyled [("plain\ntext",Plain)] (M.initialDesktop (40,25)))
  negative<-prepareTextPresentations plainHelp
  let negativeView=fromJust (M.activeWindow negative)
  check "metadata-free generated text retains a negative receipt without layout or viewport change"
@@ -125,7 +125,7 @@ checks=do
         (M.selection negativeView,M.scrollRow negativeView,M.scrollColumn negativeView)==(Selection 2 2,2,1)
       _->False)
  let scripted="A界e\x301👩🏽\x200d\&💻"
-     scriptStyles=Vec.singleton [(c,ScriptStyle Superscript (BoldStyle Plain)) | c<-T.unpack scripted]
+     scriptStyles=Vec.fromList (styledRows [(scripted,ScriptStyle Superscript (BoldStyle Plain))])
  scriptLayout<-prepareTextLayout False 40 (bufferContent (newBuffer scripted)) scriptStyles
  check "explicit scripted natural one/two-cell graphemes each advance one cell"
    (map layoutAdvance (Vec.toList (layoutGlyphs (Vec.head (layoutRows scriptLayout))))==[1,1,1,1])
@@ -134,19 +134,31 @@ checks=do
  check "prepared script metadata separates natural width from allocated advance"
    (map (\glyph->(layoutNatural glyph,layoutScript glyph)) (Vec.toList (layoutGlyphs (Vec.head (layoutRows scriptLayout))))==[(1,Just Superscript),(2,Just Superscript),(1,Just Superscript),(2,Just Superscript)])
  zeroScript<-prepareTextLayout True 40 (bufferContent (newBuffer "\x301"))
-   (Vec.singleton [('\x301',ScriptStyle Subscript (SectionStyle 1 Plain))])
+   (Vec.fromList (styledRows [("\x301",ScriptStyle Subscript (SectionStyle 1 Plain))]))
  check "scripted standalone zero-width grapheme retains zero advance and no script cell"
    (case Vec.toList (layoutGlyphs (Vec.head (layoutRows zeroScript))) of [glyph]->layoutAdvance glyph==0 && layoutScript glyph==Nothing; _->False)
  check "cached horizontal glyph view retains the whole clipped script target"
    (map layoutText (Vec.toList (layoutVisibleGlyphs 1 1 (Vec.head (layoutRows scriptLayout))))==["界"])
- let sourceScript=M.addHelpStyled [('界',ScriptStyle Subscript (BoldStyle Plain)),('X',Plain)] (M.initialDesktop (80,25))
+ crossRun<-W.prepareSemanticTextWindow "Cross-run message" [("e",BubbleText 1 True Plain),("\x301",BubbleText 2 False Plain)]
+   (W.TextSemantics (W.CopyMessages W.UserBotAttribution) Nothing Vec.empty Vec.empty W.ReadableWindow Vec.empty Vec.empty Vec.empty)
+   >>= either (fail . T.unpack) pure
+ check "message copy retains original scalar attribution across one painted grapheme"
+   (W.copyPreparedSelection crossRun 0 2=="User: e\n\nBot: \x301" &&
+    W.preparedWindowMessages crossRun==Vec.fromList [(0,1,1,True),(1,2,2,False)])
+ crossLayout<-prepareTextLayout False 40 (W.preparedWindowText crossRun)
+   (case W.preparedWindowRows crossRun of W.StyledRows rows->rows; _->error "Cross-run styled body missing")
+ check "cross-run message paint remains one complete first-style grapheme"
+   (case Vec.toList (layoutGlyphs (Vec.head (layoutRows crossLayout))) of
+      [glyph]->layoutText glyph=="e\x301" && layoutStyle glyph==BubbleText 1 True Plain && layoutAdvance glyph==1
+      _->False)
+ let sourceScript=M.addHelpStyled [("界",ScriptStyle Subscript (BoldStyle Plain)),("X",Plain)] (M.initialDesktop (80,25))
      sourceView=fromJust (M.activeWindow sourceScript)
  check "styled Help admits script geometry with the default heading preference"
    (not (M.wideSectionTitles sourceScript) && M.windowPresentationNeeded sourceScript sourceView)
  let scriptDocument=fromJust (M.activeDocument sourceScript)
  check "style installation and invalidation keep cached script admission exact"
    (M.documentHasLayoutMetadata scriptDocument && not (M.documentHasLayoutMetadata (M.restyle scriptDocument)) &&
-    not (M.documentHasLayoutMetadata (M.setDocumentHighlight [('X',Plain)] scriptDocument)))
+    not (M.documentHasLayoutMetadata (M.setDocumentHighlight [("X",Plain)] scriptDocument)))
  sourceReady<-prepareTextPresentations sourceScript
  let sourceWindow=fromJust (M.activeWindow sourceReady)
      sourceLayout=fromJust (M.windowPresentation sourceReady sourceWindow)
@@ -158,7 +170,7 @@ checks=do
    ([(text,natural,mode) | row<-Vec.toList (renderCellRows sourceReady),CellScript _ text natural mode<-Vec.toList row]==[("界",2,Subscript)] &&
     layoutPosition sourceLayout 1==(0,1) && caret (M.selection (fromJust (M.activeWindow sourceClicked)))==1)
  check "default styled Help copy retains original source" (M.clipboard sourceCopied=="界X")
- let plainReplacement=M.addHelpStyled [('X',Plain)] sourceReady
+ let plainReplacement=M.addHelpStyled [("X",Plain)] sourceReady
  check "replacing scripted Help with plain styling retires its cached admission and layout"
    (maybe False (not . M.documentHasLayoutMetadata) (M.activeDocument plainReplacement) &&
     maybe False (\w->not (M.windowPresentationNeeded plainReplacement w) && M.windowPresentation plainReplacement w==Nothing) (M.activeWindow plainReplacement))
@@ -169,7 +181,7 @@ checks=do
  check "default scripted Help privacy removes script metadata and original source"
    (null [() | row<-Vec.toList (renderCellRows privateSource),CellScript{}<-Vec.toList row] && not ("界" `T.isInfixOf` snapshot privateSource))
  W.withWindowScope $ \scope->withTextPresentation $ \owner->do
-   prepared<-W.prepareStyledTextWindow "Script test" (concat [[(c,ScriptStyle mode Plain) | c<-T.unpack text] | (text,mode)<-[("A",Superscript),("界",Subscript),("e\x301",Superscript),("👩🏽\x200d\&💻",Subscript)]]++[('X',Plain)])
+   prepared<-W.prepareStyledTextWindow "Script test" ([(text,ScriptStyle mode Plain) | (text,mode)<-[("A",Superscript),("界",Subscript),("e\x301",Superscript),("👩🏽\x200d\&💻",Subscript)]]++[("X",Plain)])
    check "plugin worker caches script admission independently of wide headings" (W.preparedWindowNeedsLayout False prepared && not (W.preparedWindowHasSections prepared))
    update<-W.openTextWindow scope prepared >>= maybe (fail "missing scripted plugin open") pure
    (reference,payload)<-W.admitWindowUpdate False update >>= maybe (fail "missing scripted plugin admission") pure
@@ -275,7 +287,7 @@ checks=do
    _<-fmap fst (tickTextPresentation owner [] poisoned)
    check "render/layout metadata never inspect Undo" ("Ａ" `T.isInfixOf` snapshot poisoned)
    let terminal=M.addReadOnly "Terminal test" "title" ready
-       terminalStyled=terminal {M.buffers=Map.adjust (\document->document {M.documentHighlight=[('t',TerminalStyle 0xffffff 0 1)]}) (M.nextId terminal) (M.buffers terminal)}
+       terminalStyled=terminal {M.buffers=Map.adjust (\document->document {M.documentHighlight=[("t",TerminalStyle 0xffffff 0 1)]}) (M.nextId terminal) (M.buffers terminal)}
    check "terminal ownership never enters Markdown preparation" (isNothing (M.windowPresentationTarget terminalStyled (fromJust (M.activeWindow terminalStyled))))
  W.withWindowScope $ \scope->withTextPresentation $ \owner->do
    prepared<-W.prepareMarkdownWindow 40 "Private notes" "# ABCDEF\n\nbody"

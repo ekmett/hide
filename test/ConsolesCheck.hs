@@ -68,7 +68,7 @@ nativeChecks consoles desktop = do
   let doc = buffers painted M.! bid
       screen = contents (documentBuffer doc)
       terminalView = case [w | w <- windows painted,sourceFixtureBuffer w == bid] of w:_ -> w; [] -> error "missing terminal window"
-  check "truecolor and attributes reach document" (('A',TerminalStyle 0x0c2238 0x412b15 1) `elem` documentHighlight doc)
+  check "truecolor and attributes reach document" (any (\(text,style)->"A" `T.isInfixOf` text && style==TerminalStyle 0x0c2238 0x412b15 1) (documentHighlight doc))
   check "wide continuation omitted and blank cells preserved" ("A界" `T.isPrefixOf` screen && T.length (T.takeWhile (/= '\n') screen) == 19 && length (T.lines screen) == 4)
   check "terminal selection and scrolling clamped" (caret (selection terminalView) <= T.length screen && scrollRow terminalView <= scrollbarLimit painted True doc terminalView && scrollColumn terminalView <= scrollbarLimit painted False doc terminalView)
   check "collapsed selection follows terminal cursor across wide glyph" (caret (selection terminalView) == 2)

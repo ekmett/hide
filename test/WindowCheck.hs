@@ -30,7 +30,7 @@ checks = do
   let original=newBuffer "same revision source"
       opaque=original {B.undoStack=error "redraw key forced Undo history",B.redoStack=error "redraw key forced Redo history"}
       base=addDocument (Just (FileState "Fixture.hs" Nothing)) opaque (initialDesktop (80,25))
-      large=base {buffers=M.adjust (\doc->doc {documentHighlight=('x',Plain):error "redraw key forced highlight tail",documentLinks=(0,1,"target"):error "redraw key forced link tail"}) 1 (buffers base),
+      large=base {buffers=M.adjust (\doc->doc {documentHighlight=("x",Plain):error "redraw key forced highlight tail",documentLinks=(0,1,"target"):error "redraw key forced link tail"}) 1 (buffers base),
         diagnostics=Diagnostic "Fixture.hs" Nothing 0 0 1 "problem":error "redraw key forced diagnostics tail"}
       changeDoc f d=d {buffers=M.adjust f 1 (buffers d)}
   key<-renderKey large
@@ -38,9 +38,9 @@ checks = do
   check "redraw identity does not inspect histories, highlights or diagnostics" =<< evaluate (key==same)
   baseKey<-renderKey base
   forM_ [changeDoc (\doc->doc {documentBuffer=newBuffer "replacement with same revision"}) base,
-         changeDoc (\doc->doc {documentHighlight=[('x',Keyword)]}) base,
+         changeDoc (\doc->doc {documentHighlight=[("x",Keyword)]}) base,
          changeDoc (\doc->doc {documentLinks=[(0,1,"new target")]}) base,
-         changeDoc (\doc->doc {documentSourceRows=Just (Vec.singleton (prepareSourceRow "x" [('x',Comment)]))}) base,
+         changeDoc (\doc->doc {documentSourceRows=Just (Vec.singleton (prepareSourceRow "x" [("x",Comment)]))}) base,
          changeDoc (\doc->doc {documentBuffer=B.markSaved original}) base,
          base {editorDrafts=M.singleton ref (EditorDraft (newBuffer "new draft") (Selection 0 0) True Nothing)},
          setDiagnostics (diagnostics base) base,

@@ -56,7 +56,7 @@ checks = do
       answerStart=T.length "Session: provider-secret\nPublic assistant response\nOther: "
       semantics=W.TextSemantics W.CopyText Nothing V.empty V.empty W.ReadableWindow
         (V.fromList [(0,T.length "Session: provider-secret"),(answerStart,T.length conversationText)]) V.empty V.empty
-  conversationBody<-W.prepareSemanticTextWindow "Conversation" [(c,Plain) | c<-T.unpack conversationText] semantics
+  conversationBody<-W.prepareSemanticTextWindow "Conversation" [(conversationText,Plain)] semantics
     >>= either (error . T.unpack) pure
   withEditorBodyFixture "" conversationBody (initialDesktop (80,25)) $ \conversation->withBufferReadCommands $ \commands->do
     (_,finishRead)<-readWindowTool commands (captureWindow conversation) conversation "read_window" (object [])

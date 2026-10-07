@@ -9,19 +9,19 @@ import Hide.Buffer (displayColumn)
 import Hide.Model
 import Hide.Render (snapshotHtml)
 import Hide.Markdown
-import Hide.Syntax (Style(..),linkSpans)
+import Hide.Syntax (Style(..),linkSpans,styledContents,styledLength,splitStyledAt)
 
 checks :: IO ()
 checks = do
-  let text width = T.pack . map fst . renderMarkdown width
+  let text width = styledContents . renderMarkdown width
       styled = renderMarkdown 80 "# Heading\n\nSome *emphasis* and **strong** with `code`."
-  check "headings and inline markup render with styles" (text 80 "# Heading" == "Heading" && ('H',SectionStyle 1 (BoldStyle (Heading 1))) `elem` styled && ('e',ItalicStyle Constructor) `elem` styled && ('s',BoldStyle Keyword) `elem` styled && ('c',Literal) `elem` styled)
+  check "headings and inline markup render with styles" (text 80 "# Heading" == "Heading" && contains 'H' (SectionStyle 1 (BoldStyle (Heading 1))) styled && contains 'e' (ItalicStyle Constructor) styled && contains 's' (BoldStyle Keyword) styled && contains 'c' Literal styled)
   check "links retain destination metadata and decode entities" (text 80 "[docs][ref] &amp; &#955;\n\n[ref]: https://example.test/a" == "docs & λ" && linkSpans (renderMarkdown 80 "[docs](https://example.test/a)")==[(0,4,"https://example.test/a")])
   check "escapes are parsed by CommonMark" (text 80 "\\*literal\\*" == "*literal*")
   check "ordered, nested lists and quotes render" ("3. one\n4. two\n   • nested" `T.isInfixOf` text 80 "3. one\n4. two\n   - nested" && text 80 "> quote" == "> quote")
   let haskell = renderMarkdown 80 "```haskell\nmodule X where\nx = 42\n```"
       python = renderMarkdown 80 "```python\ndef answer():\n    return 42\n```"
-  check "fenced languages use Skylighting styles" (('m',CodeStyle False Keyword) `elem` haskell && ('4',CodeStyle False Number) `elem` haskell && ('d',CodeStyle False Keyword) `elem` python)
+  check "fenced languages use Skylighting styles" (contains 'm' (CodeStyle False Keyword) haskell && contains '4' (CodeStyle False Number) haskell && contains 'd' (CodeStyle False Keyword) python)
   check "unknown code preserves whitespace" ("     a < b" `T.isInfixOf` text 80 "```unknown\n  a < b\n```")
   check "unfinished fence stays readable" ("   x = 1" `T.isInfixOf` text 80 "```haskell\nx = 1")
   check "unfinished inline markup stays readable" (text 80 "hello **unfinished" == "hello **unfinished")
@@ -38,12 +38,12 @@ checks = do
     ("┌" `T.isInfixOf` text 40 table && "│" `T.isInfixOf` text 40 table && "alpha" `T.isInfixOf` text 40 table && not ("**" `T.isInfixOf` text 40 table))
   forM_ [4,8,12,40] $ \width -> check "tables fit narrow windows"
     (all (\line -> displayColumn line (T.length line)<=width) (T.lines (text width table)))
-  check "heading levels retain hierarchy" (('S',SectionStyle 2 (BoldStyle (Heading 2))) `elem` renderMarkdown 40 "## Section" && ('T',SectionStyle 3 (BoldStyle (Heading 3))) `elem` renderMarkdown 40 "### Topic")
-  check "code backgrounds include padding" ((' ',CodeStyle False Plain) `elem` haskell)
+  check "heading levels retain hierarchy" (contains 'S' (SectionStyle 2 (BoldStyle (Heading 2))) (renderMarkdown 40 "## Section") && contains 'T' (SectionStyle 3 (BoldStyle (Heading 3))) (renderMarkdown 40 "### Topic"))
+  check "code backgrounds include padding" (contains ' ' (CodeStyle False Plain) haskell)
   let shell=renderMarkdown 20 "```sh\necho hello\n```"
-      shellLines=T.lines (T.pack (map fst shell))
+      shellLines=T.lines (styledContents shell)
   check "shell panels use their own background style" (any (\(_,style)->case style of CodeStyle True _->True; _->False) shell)
-  check "code panel includes top bottom and side padding" (length shellLines==3 && all T.null (map T.strip [head shellLines,last shellLines]) && "   echo hello " `T.isInfixOf` T.pack (map fst shell))
+  check "code panel includes top bottom and side padding" (length shellLines==3 && all T.null (map T.strip [head shellLines,last shellLines]) && "   echo hello " `T.isInfixOf` styledContents shell)
   check "list continuation hangs below content" (text 12 "- one two three four" == "• one two\n  three four")
   let help=addHelpStyled (renderMarkdown 40 "# Title\n\nText\n\n```sh\necho hi\n```") (initialDesktop (80,25))
       light=snapshotHtml help {appearance=LightMode}
@@ -57,9 +57,9 @@ checks = do
     check "execution metadata preserves whole original shell body"
       (map (\(_,_,dialect,body)->(dialect,body)) blocks==[("bash",rawShell),("zsh","echo second\n")])
     check "execution spans cover shell panels only and exclude surrounding prose"
-      (all (\(start,end,_,_)->start>=0 && end>start && end<=length cells &&
-        any (\(_,style)->case style of CodeStyle True _->True; _->False) (take (end-start) (drop start cells)) &&
-        not ("before" `T.isInfixOf` T.pack (map fst (take (end-start) (drop start cells))))) blocks)
+      (all (\(start,end,_,_)->start>=0 && end>start && end<=styledLength cells &&
+        any (\(_,style)->case style of CodeStyle True _->True; _->False) (fst (splitStyledAt (end-start) (snd (splitStyledAt start cells)))) &&
+        not ("before" `T.isInfixOf` styledContents (fst (splitStyledAt (end-start) (snd (splitStyledAt start cells)))))) blocks)
     check "metadata does not change Markdown rendering" (cells==renderMarkdown width shellSource)
   check "nested fenced code retains commands without Markdown list markers"
     (map (\(_,_,dialect,body)->(dialect,body)) (snd (renderMarkdownWithShellBlocks 15 "- example\n\n  ```sh\n  echo nested\n  ```"))==[("sh","echo nested\n")])
@@ -68,10 +68,11 @@ checks = do
   check "empty input" (null (renderMarkdown 80 ""))
   let paragraph=T.replicate 2000 "Ordinary message with some **bold** and code `abc`.\n"
       long=renderMarkdown 73 paragraph
-  rendered<-timeout 2000000 (evaluate (length long))
+  rendered<-timeout 2000000 (evaluate (styledLength long))
   check "large streamed paragraph avoids quadratic inline concatenation" (maybe False (>90000) rendered)
   check "large paragraph retains text order and inline styles"
-    (take 8 (map fst long)=="Ordinary" && length [() | ('b',BoldStyle Keyword)<-long]==2000 && length [() | ('a',Literal)<-long]==2000)
+    (T.take 8 (styledContents long)=="Ordinary" && sum [T.count "b" text | (text,BoldStyle Keyword)<-long]==2000 && sum [T.count "a" text | (text,Literal)<-long]==2000)
 
   putStrLn "Markdown checks passed"
   where check label ok = unless ok (error label)
+        contains character style=any (\(text,actual)->actual==style && T.any (==character) text)

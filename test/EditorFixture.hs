@@ -29,7 +29,7 @@ withEditorFixture target original run=case conversationBodySnapshot target origi
 -- fixtures use withEditorBodyFixture with their actual immutable semantics.
 withEditorTextFixture :: Text -> Text -> Desktop -> (Desktop -> IO a) -> IO a
 withEditorTextFixture target text original run=do
-  prepared<-W.prepareSemanticTextWindow "Conversation" [(c,Plain) | c<-T.unpack text]
+  prepared<-W.prepareSemanticTextWindow "Conversation" [(text,Plain)]
     (W.TextSemantics W.CopyText Nothing V.empty V.empty W.ReadableWindow V.empty V.empty V.empty)
     >>= either (error . show) pure
   withEditorBodyFixture target prepared original run

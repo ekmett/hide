@@ -135,7 +135,7 @@ renderMarkdownBlock width (MarkdownBlock block canonical gap)=mapped 0 (render (
           ends=[z | (_,_,_,z)<-V.toList ranges]
           start=case starts of []->boundary; _->minimum starts
           end=if null rest then T.length canonical else case ends of []->boundary; _->maximum ends
-          row=case styledRows (plainRuns compact) of first:_->first; []->StyledRow Nil Nothing
+          row=case styledRows (plainRuns compact) of first:_->first; []->StyledRow Nil Nothing V.empty
       in MappedStyledRow row start end ranges:mapped end rest
     collect (offset,found) (text,_,source)=
       let end=offset+T.length text

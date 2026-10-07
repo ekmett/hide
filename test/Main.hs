@@ -207,23 +207,24 @@ main = do
   check "click inside wide glyph" (columnOffset "\t界x" 9 == 1)
   check "click after wide glyph" (columnOffset "\t界x" 10 == 2)
   check "combining sequence moves together" (nextCharacter "e\x0301x" 0 == 2)
+  let scalarStyles=concatMap (\(text,style)->replicate (T.length text) style)
   check "nested comment stays a comment" (all ((== Comment) . snd) (highlight "{- x {- y -} z -}"))
-  check "apostrophe identifiers" (map snd (highlight "foldl' x") == replicate 6 Plain ++ [Plain,Plain])
-  check "highlight preserves all characters" (T.pack (map fst (highlight "x = \"hi\" -- ok\n")) == "x = \"hi\" -- ok\n")
-  check "Python uses maintained language definition" (all ((== Keyword) . snd) (take 3 (highlightFor "test.py" "def f():\n    return 42\n")))
+  check "apostrophe identifiers" (scalarStyles (highlight "foldl' x") == replicate 6 Plain ++ [Plain,Plain])
+  check "highlight preserves all characters" (styledContents (highlight "x = \"hi\" -- ok\n") == "x = \"hi\" -- ok\n")
+  check "Python uses maintained language definition" (all ((== Keyword) . snd) (fst (splitStyledAt 3 (highlightFor "test.py" "def f():\n    return 42\n"))))
   mapM_ (\(path,source) -> let tokens=highlightFor path source in
-    check ("maintained syntax for "++path) (any ((/=Plain) . snd) tokens && T.pack (map fst tokens)==source))
+    check ("maintained syntax for "++path) (any ((/=Plain) . snd) tokens && styledContents tokens==source))
     [("test.c","int main(void) { return 42; }\n"),("test.cpp","class Thing { public: int value = 42; };\n"),
      ("test.cabal","name: example\nversion: 0.1\nlibrary\n  build-depends: base\n"),("cabal.project","packages: .\n")]
   check "unknown extension remains plain" (all ((== Plain) . snd) (highlightFor "notes.unknown" "module x = 42"))
-  mapM_ (\text -> check "tokenizer preserves source positions" (T.pack (map fst (highlight text)) == text))
+  mapM_ (\text -> check "tokenizer preserves source positions" (styledContents (highlight text) == text))
     ["", "\n", "\n\n", "module Main where\r\n\tmain = print \"λ界\"\r\n", "x = '\\x03bb'", "x = [1..10] -- unfinished", "{- open comment\n"]
   let python=highlightDocument $ newDocument (newBuffer "def f():\n    return 42\n") (Just (FileState "test.py" Nothing))
       renamed=highlightDocument $ restyle python {documentFile=Just (FileState "notes.unknown" Nothing)}
   let sourceStyles doc=maybe [] (concatMap (\row->sourceStylesAt row 0) . Vec.toList) (documentSourceRows doc)
   check "document filename chooses syntax" (take 3 (sourceStyles python) == replicate 3 Keyword)
   check "renaming refreshes syntax" (sourceStyles renamed == replicate (T.length "def f():    return 42") Plain)
-  check "CRLF input is highlighted, not just preserved" (take 6 (map snd (highlight "module Main where\r\n")) == replicate 6 Keyword)
+  check "CRLF input is highlighted, not just preserved" (take 6 (scalarStyles (highlight "module Main where\r\n")) == replicate 6 Keyword)
   let d = initialDesktop (80,25)
       key k ms s = fst (handleEvent (V.EvKey k ms) s)
       n = fst (runCommand New d)

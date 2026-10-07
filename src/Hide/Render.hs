@@ -520,7 +520,7 @@ pluginWindowLayers d active w prepared=
           PluginWindow.PlainRows _->V.emptyImage
           PluginWindow.RowsDetails{}->V.emptyImage
           PluginWindow.StyledRows styled->V.translateX (negate (scrollColumn w))
-            (styledSigilsImage (darkAppearance d) selectable Nothing active (selection w) start (case styled Vec.!? n of Just (StyledRow sigils _)->sigils; _->Nil))
+            (styledSigilsImage (darkAppearance d) selectable Nothing active (selection w) start (case styled Vec.!? n of Just (StyledRow sigils _ _)->sigils; _->Nil))
 
 -- Shared frame chrome uses the same semantic geometry as pointer dispatch.
 windowScrollbarImage :: Desktop -> Bool -> Window -> V.Image
@@ -791,7 +791,7 @@ sourceCellSpans project dark override active sel start left columns row=(column,
 
 styledImage :: Bool -> (Style -> Bool) -> Maybe V.Attr -> Bool -> Selection -> Int -> StyledText -> V.Image
 styledImage dark selectable override active sel start styled=case styledRows styled of
-  StyledRow sigils _:_->styledSigilsImage dark selectable override active sel start sigils
+  StyledRow sigils _ _:_->styledSigilsImage dark selectable override active sel start sigils
   []->V.emptyImage
 
 -- Consume finalized borrowed rows directly; no pack/unpack or second glyph pass.

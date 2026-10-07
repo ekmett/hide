@@ -34,7 +34,7 @@ checks=do
   let text="Session: provider-secret\nPublic assistant response 中"
       hidden=Vec.singleton (0,T.length "Session: provider-secret")
       semantics=W.TextSemantics W.CopyText Nothing Vec.empty Vec.empty W.ReadableWindow hidden hidden Vec.empty
-  body<-W.prepareSemanticTextWindow "Conversation" [(c,Plain) | c<-T.unpack text] semantics
+  body<-W.prepareSemanticTextWindow "Conversation" [(text,Plain)] semantics
     >>= either (error . T.unpack) pure
   withEditorBodyFixture "" body (initialDesktop (80,25)) checksWithBody
 
@@ -95,7 +95,7 @@ checksWithBody chatBase=do
   check "quarter block retains filled and empty quadrants"
     (pixelAt image (qx*8+1) (qy*16+2)/=pixelAt image (qx*8+6) (qy*16+2) &&
      pixelAt image (qx*8+1) (qy*16+13)==pixelAt image (qx*8+6) (qy*16+13))
-  let scriptInitial=(addHelpStyled [('█',ScriptStyle Superscript Plain),('中',ScriptStyle Subscript Plain),('X',Plain)] (initialDesktop (80,25)))
+  let scriptInitial=(addHelpStyled [("█",ScriptStyle Superscript Plain),("中",ScriptStyle Subscript Plain),("X",Plain)] (initialDesktop (80,25)))
   scriptReady<-prepareTextPresentations scriptInitial
   scriptCapture<-takeCapture scriptReady True
   scriptImage<-pngImage scriptCapture
