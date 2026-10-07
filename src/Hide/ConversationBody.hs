@@ -628,7 +628,7 @@ demandedRows key input logical=case anchor of
       | needed<=0 || index<0=[]
       | otherwise=let item=items V.! index; rows=lastBlocks needed index (blockCount item-1)
                       previous=case collapsedGroup index of Just (first,_,_)->first-1; Nothing->index-1
-                      separator=if needed>length rows && previous>=0 then blankRow:[] else []
+                      separator=if needed>length rows && previous>=0 then itemSeparator previous else []
                   in takeEnd (needed-length rows-length separator) previous++separator++rows
     lastBlocks needed index block
       | needed<=0 || block<0=[]

@@ -685,10 +685,17 @@ conversationBodyRequests (ConversationState _ ref _ agents) desktop=do
             (BodyDemand (conversationAnchor view) (conversationRowShift view) (conversationHeightFor target desktop)) expansion)
           (BodyInput (if T.null target then "Conversation" else conversationName view) (project state) Nothing [] Nothing S.empty (Just logical) (capturedSelection view))]
         _->case captured of
-          Just owner | live && owns->let same=maybe True ((==owner).logicalBodyProvider) (conversationLogical view)
+          Just owner | live && owns->
+            let same=maybe True ((==owner).logicalBodyProvider) (conversationLogical view)
+                retained=case conversationAnchor view of
+                  At (QuestionPoint token _ _)->case schema of
+                    Just (QuestionSchema current _ _) -> token==current
+                    Nothing -> False
+                  _->True
+                keepAnchor=same && retained
             in [BodyRequest (BodyKey reference target owner identity (case schema of Just (QuestionSchema token _ _)->Just token; Nothing->Nothing)
               (conversationWidthFor target desktop) (videoMode desktop/=Nothing) (wideSectionTitles desktop)
-              (BodyDemand (if same then conversationAnchor view else FollowEnd) (if same then conversationRowShift view else 0) (conversationHeightFor target desktop)) expansion)
+              (BodyDemand (if keepAnchor then conversationAnchor view else FollowEnd) (if keepAnchor then conversationRowShift view else 0) (conversationHeightFor target desktop)) expansion)
               (BodyInput (if T.null target then "Conversation" else conversationName view) (project state) sessionName records
                 schema (toolExpansions state) (conversationLogical view) (if same then capturedSelection view else Nothing))]
           _->[]
