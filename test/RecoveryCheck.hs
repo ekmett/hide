@@ -31,6 +31,12 @@ import qualified Hide.Plugin.Editor as E
 import qualified Hide.Plugin.Window as W
 import Hide.Syntax (Style(..))
 
+check :: String -> Bool -> IO ()
+check label ok=unless ok (error label)
+
+right :: Either T.Text a -> IO a
+right=either (error . T.unpack) pure
+
 checks :: IO ()
 checks=bracket temporary removePathForcibly $ \root->W.withWindowScope $ \scope->do
   keyChecks
@@ -66,8 +72,6 @@ checks=bracket temporary removePathForcibly $ \root->W.withWindowScope $ \scope-
         agentReplying=True,agentQueued=3,agentSettings=[AgentSetting "token" "Token" "private" "secret" []],
         agentContextUsage=Just (1,2),diagnostics=[Diagnostic sourcePath Nothing 0 0 1 "old diagnostic"]}
       get d ident=documentBuffer (buffers d M.! ident)
-      right=either (error . T.unpack) pure
-      check label ok=unless ok (error label)
   BS.writeFile sourcePath (bufferBytes original)
   writeCheckpoint path desktop >>= right
 #ifndef mingw32_HOST_OS
@@ -309,7 +313,6 @@ keyChecks=W.withWindowScope $ \scope->do
       desktop=addDocument (Just (FileState "/project/source.hs" (Just "abc"))) original (initialDesktop (80,25))
       update f d=d {buffers=M.map f (buffers d)}
       replace buffer=update (\doc->doc {documentBuffer=buffer}) desktop
-      check label ok=unless ok (error label)
       changed label d=do a<-checkpointKey desktop; b<-checkpointKey d; check label (a/=b)
   initial<-checkpointKey desktop
   repeated<-checkpointKey desktop

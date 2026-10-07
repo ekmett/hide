@@ -74,6 +74,12 @@ storageChecks=do
      bufferWordLeft editedAgain 147==bufferWordLeft edited 147 && bufferWordRight editedAgain 140==bufferWordRight edited 140)
   let poisoned=(newBuffer "raw\n") {saved=error "raw storage forced saved projection"}
   _<-recover poisoned
+  let short=fmap snd (snapshotBufferStorage (newBuffer "borrowed\r\n"))
+      borrowed=case storageCurrent short of StoredLine _ [text]:_->text; _->error "missing raw physical line"
+  shortRestored<-either (error . T.unpack) pure (restoreBufferStorage short)
+  originalPayload<-evaluate borrowed >>= makeStableName
+  restoredPayload<-evaluate (sourceLineRawText (contentSourceLineAt (bufferContent shortRestored) 0)) >>= makeStableName
+  check "short terminated lines retain the borrowed string-table payload" (originalPayload==restoredPayload)
   let bad=base {storageCurrent=[StoredLine AddedLine ["replacement"]]}
   check "raw storage rejects forged provenance" (case restoreBufferStorage bad of Left _->True; _->False)
 

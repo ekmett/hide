@@ -315,9 +315,7 @@ restoreBufferStorage s=do
                 let chunks=Chunks.chunksFromPieces pieces; raw=Chunks.chunksRawMeasure chunks
                 in ChunkedLine (Chunks.rawCharacters raw) (Chunks.chunksFlags chunks) origin
                   (Chunks.rawHash raw) (Chunks.rawFactor raw) chunks
-            | otherwise=case FT.viewl (linesFromText lineMode (T.concat pieces)) of
-                value FT.:< _->withOrigin origin value
-                FT.EmptyL->error "linesFromText always includes the final editor row"
+            | otherwise=withOrigin origin (lineFromText lineMode (T.concat pieces))
       pure line
     provenance baseline tree=do
       let original=filter (\line->lineOrigin line/=Added && lineCharacters line/=0) (toList tree)
@@ -485,23 +483,28 @@ treeText :: LineTree -> Text
 treeText = T.concat . map lineText . filter ((/=Deleted) . lineOrigin) . toList
 
 -- Byte leaves retain their Latin1 scalar policy and never run segmentation.
+-- Construct one already-delimited physical line without splitting/copying its
+-- payload. Restored string-table entries keep their shared original storage.
+lineFromText :: Bool -> Text -> Line
+lineFromText mode t
+  | not mode && TU.lengthWord8 t>512=
+      let chunks=Chunks.chunksFromText t; raw=Chunks.chunksRawMeasure chunks
+      in ChunkedLine (Chunks.rawCharacters raw) (Chunks.chunksFlags chunks) Original
+        (Chunks.rawHash raw) (Chunks.rawFactor raw) chunks
+  | otherwise=
+      let n=T.length t
+          flags=(if T.any (=='\0') t then 1 else 0) .|.
+                (if "\r\n" `T.isSuffixOf` t then 2 else 0) .|.
+                (if "\n" `T.isSuffixOf` t then 4 else 0) .|.
+                ((TU.lengthWord8 t-TU.lengthWord8 (T.dropWhileEnd (\c->c=='\r' || c=='\n') t)) `shiftL` 3)
+          hash=T.foldl' (\fingerprint c->fingerprint*16777619+fromIntegral (ord c)+1) 0 t
+          factor=16777619^n
+      in Line n flags Original hash factor t
+
 linesFromText :: Bool -> Text -> LineTree
 linesFromText mode = FT.fromList . go . T.splitOn "\n"
   where
-    line t
-      | not mode && TU.lengthWord8 t>512=
-          let chunks=Chunks.chunksFromText t; raw=Chunks.chunksRawMeasure chunks
-          in ChunkedLine (Chunks.rawCharacters raw) (Chunks.chunksFlags chunks) Original
-            (Chunks.rawHash raw) (Chunks.rawFactor raw) chunks
-      | otherwise=
-          let n=T.length t
-              flags=(if T.any (=='\0') t then 1 else 0) .|.
-                    (if "\r\n" `T.isSuffixOf` t then 2 else 0) .|.
-                    (if "\n" `T.isSuffixOf` t then 4 else 0) .|.
-                    ((TU.lengthWord8 t-TU.lengthWord8 (T.dropWhileEnd (\c->c=='\r' || c=='\n') t)) `shiftL` 3)
-              hash=T.foldl' (\fingerprint c->fingerprint*16777619+fromIntegral (ord c)+1) 0 t
-              factor=16777619^n
-          in Line n flags Original hash factor t
+    line=lineFromText mode
     go [] = []
     go [t] = [line t]
     go (t:ts) = line (t <> "\n") : go ts
