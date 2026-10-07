@@ -313,8 +313,9 @@ prepareConversationBody (BodyRequest key input)=do
   case demandedRows key input logical of
     Left message->pure (BodyResult key (Left message))
     Right (pending,scroll,atEnd)->do
-      let (_,receipts)=mapAccumL receipt 0 pending
-          rows=[row | PendingRow _ mapped _ _ _<-pending,let row=mappedStyledRow mapped]
+      let rows=[StyledRow sigils (if null rest then Nothing else Just Plain) messages
+            | (PendingRow _ mapped _ _ _,rest)<-withTail pending,let StyledRow sigils _ messages=mappedStyledRow mapped]
+          (_,receipts)=mapAccumL receipt 0 (zip pending rows)
           actions=[(bodyRowPaintStart row+a,bodyRowPaintStart row+z,name,values)
             | (row,PendingRow _ _ spans _ _)<-zip receipts pending,(a,z,name,values)<-spans]
           links=concat [projectRanges row mapped (a,z) (\lo hi->(lo,hi,url))
@@ -355,9 +356,9 @@ prepareConversationBody (BodyRequest key input)=do
             V.foldl' (\m (a,z,lo,hi)->m+a+z+lo+hi) 0 (bodyRowRanges row)) 0 (viewportRows viewport))
           evaluate (BodyResult key (Right (PreparedBody body layout controls logical)))
   where
-    receipt offset (PendingRow point mapped _ _ _)=
-      let StyledRow sigils _ _=mappedStyledRow mapped; end=offset+sigilsLength sigils
-      in (end+1,BodyRow point (mappedRowEnd mapped) offset end (mappedSourceRanges mapped))
+    receipt offset (PendingRow point mapped _ _ _,StyledRow sigils newline _)=
+      let end=offset+sigilsLength sigils
+      in (end+maybe 0 (const 1) newline,BodyRow point (mappedRowEnd mapped) offset end (mappedSourceRanges mapped))
     projectRanges row mapped (a,z) build=
       [build (bodyRowPaintStart row+lo+(max a start-start)*(hi-lo) `div` max 1 (end-start))
         (bodyRowPaintStart row+lo+((min z end-start)*(hi-lo)+end-start-1) `div` max 1 (end-start))
