@@ -88,7 +88,7 @@ preparationCancel (ContextPrompt _ _ _ worker)=cancel worker
 preparationCancel (DraftPrompt _ _ worker)=cancel worker
 
 
-activity :: Text -> Value -> Record
+activity :: Text -> Value -> RecordContent
 activity ident value=Activity ident value [value]
 
 toggleExpansion :: Text -> ToolExpansion -> State -> State
@@ -113,7 +113,7 @@ data QuestionResult = QuestionResult !AH.AgentId !(Maybe ProviderReceipt) !Value
 
 data State = State
   { provider :: A.Launch, connection :: Maybe A.Client, session :: Maybe Text, project :: FilePath
-  , pending :: M.Map Int Phase, queuedPrompt :: Maybe (Text,Maybe DraftReceipt), transcript :: [Record]
+  , pending :: M.Map Int Phase, queuedPrompt :: Maybe (Text,Maybe DraftReceipt), transcript :: [Record], nextRecord :: !Int
   , reads :: M.Map FilePath Snapshot, approvals :: [(Int,Approval)], presented :: Maybe Int, deferredApproval :: Bool, nextApproval :: Int
   , queuedQueries :: [QueuedQuery]
   , ownedTerminals :: S.Set Text
@@ -169,7 +169,7 @@ withConversationAt consoles root action = W.withWindowScope $ \scope->Command.wi
   editors<-newIORef M.empty
   ref<-newIORef State
     { provider=launch,connection=Nothing,session=Nothing,project=root
-    , pending=M.empty,queuedPrompt=Nothing,transcript=[],reads=M.empty
+    , pending=M.empty,queuedPrompt=Nothing,transcript=[],nextRecord=0,reads=M.empty
     , approvals=[],presented=Nothing,deferredApproval=False,nextApproval=1,queuedQueries=[]
     , ownedTerminals=S.empty,terminalWaiters=M.empty,lastMessageAt=Nothing
     , lastSession=remembered,waitingQuestion=Nothing,questionResults=M.empty,questionsClosed=False,lastQuestion=Nothing,lastQuestionInteraction=Nothing
@@ -378,8 +378,8 @@ performPrimary runtime@(ConversationState directory ref consoles _) action value
           else do
             let value=object ["questionId" .= ident,"status" .= ("answered"::Text),"answer" .= answer,"choiceIndex" .= questionChoice q,"custom" .= isNothing (questionChoice q)]
                 queued=case receipt of Nothing->queuedQueries s; Just target->queuedQueries s++[QuestionQuery ident actor target answer]
-                next=(rememberQuestion ident actor receipt value s) {waitingQuestion=Nothing,queuedQueries=queued,
-                  transcript=transcript s++[Reply "Agent" (questionText q),Reply "You" answer]}
+                next=appendRecords [Reply "Agent" (questionText q),Reply "You" answer]
+                  (rememberQuestion ident actor receipt value s) {waitingQuestion=Nothing,queuedQueries=queued}
             writeIORef ref next
             paint False next d {chatQuestion=Nothing,status="Answer submitted.",agentQueued=queryCount "" queued}
     ("question-cancel",[token]) | Just q<-chatQuestion d,token==T.pack (show (questionToken q)) ->
@@ -459,7 +459,7 @@ submitPrimaryPrompt :: ConversationState -> State -> Maybe DraftReceipt -> Text 
 submitPrimaryPrompt runtime@(ConversationState _ ref _ _) s receipt prompt (selectionFlag,fileFlag,diagnosticFlag) d=do
   let context=contextText selectionFlag fileFlag diagnosticFlag d
       full=prompt<>(if T.null context then "" else "\n\n"<>context)
-      next=s {queuedPrompt=Just (full,receipt),reads=sourceSnapshots d,transcript=transcript s++[Reply "You" (composerMarkdown prompt)]}
+      next=appendRecords [Reply "You" (composerMarkdown prompt)] s {queuedPrompt=Just (full,receipt),reads=sourceSnapshots d}
   writeIORef ref next
   opened<-if isNothing (connection s) then start runtime Nothing d else sendQueued runtime d
   latest<-readIORef ref
@@ -711,8 +711,8 @@ receive runtime@(ConversationState _ ref consoles _) d event = do
       mapM_ denyChild (map snd (approvals s))
       mapM_ (C.releaseConsole consoles) (S.toList (ownedTerminals s))
       retired<-retireRequests ref
-      writeIORef ref retired {connection=Nothing,session=Nothing,agentDelivery=Nothing,streamTails=M.empty,pending=M.empty,queuedPrompt=Nothing,queuedQueries=childQueries (queuedQueries retired),approvals=[],presented=Nothing,deferredApproval=False,ownedTerminals=S.empty,terminalWaiters=M.empty,
-        transcript=transcript current++[activity "Connection closed" (object ["message" .= redact reason])]}
+      writeIORef ref (appendRecords [activity "Connection closed" (object ["message" .= redact reason])]
+        retired {transcript=transcript current,connection=Nothing,session=Nothing,agentDelivery=Nothing,streamTails=M.empty,pending=M.empty,queuedPrompt=Nothing,queuedQueries=childQueries (queuedQueries retired),approvals=[],presented=Nothing,deferredApproval=False,ownedTerminals=S.empty,terminalWaiters=M.empty})
       pure (dismissPermission cleared) {status="Agent disconnected.",agentSteering=False}
     A.Response ident result -> do
       writeIORef ref s {pending=M.delete ident (pending s)}
@@ -722,7 +722,7 @@ receive runtime@(ConversationState _ ref consoles _) d event = do
         (_,Left err,_) -> do
           redact<-conversationRedactor runtime s
           when (M.lookup ident (pending s)==Just Prompting) (completeConversationDelivery runtime (Left "Agent prompt failed."))
-          modifyIORef' ref (\state -> state {queuedPrompt=Nothing,deliveredContext=Nothing,transcript=transcript state++[activity "Request failed" (redactValue redact err)]})
+          modifyIORef' ref (\state -> appendRecords [activity "Request failed" (redactValue redact err)] state {queuedPrompt=Nothing,deliveredContext=Nothing})
           let restored=case M.lookup ident (pending s) of Just (Steering text _) -> restoreEmptyPrimaryDraft text d; _ -> d
           pure restored {status="Agent request failed; see Conversation."}
         (Just (Initializing resume),Right value,Just client)
@@ -754,7 +754,7 @@ receive runtime@(ConversationState _ ref consoles _) d event = do
           pure d {agentSettings=safeSettings,contextMenu=Nothing,status="Conversation settings updated."}
         (Just (Steering text receipt),Right value,_) -> case field "outcome" value :: Maybe Text of
           Just "injected" -> do
-            modifyIORef' ref (\state->state {transcript=transcript state++[Reply "You" (composerMarkdown text)]})
+            modifyIORef' ref (appendRecords [Reply "You" (composerMarkdown text)])
             cleared<-clearSubmittedDraft receipt d
             pure cleared {status="Follow-up added to the active turn."}
           Just outcome | outcome `elem` ["promptRequired","failed"] -> do
@@ -766,7 +766,7 @@ receive runtime@(ConversationState _ ref consoles _) d event = do
             pure stopped {status="Steering ownership was not confirmed; provider stopped. Draft kept; queued turns cancelled without replay."}
         (Just Prompting,Right value,_) -> do
           current<-readIORef ref
-          let text=case reverse (transcript current) of Reply "Agent" body:_ -> body; _ -> ""
+          let text=case reverse (transcript current) of Record _ _ (Reply "Agent" body):_ -> body; _ -> ""
           redact<-conversationRedactor runtime current
           completeConversationDelivery runtime (Right (object ["text" .= redact text,"stopReason" .= fmap redact (field "stopReason" value :: Maybe Text)]))
           pure d {status="Agent: "<>redact (fromMaybe "finished" (field "stopReason" value))}
@@ -782,7 +782,7 @@ receive runtime@(ConversationState _ ref consoles _) d event = do
             "tool_call_update" -> recordTool update
             "plan" -> do
               redact<-conversationRedactor runtime s
-              modifyIORef' ref (\state -> state {transcript=transcript state++[activity "Plan" (redactValue redact update)]})
+              modifyIORef' ref (appendRecords [activity "Plan" (redactValue redact update)])
             _ -> pure ()
           when (kind=="config_option_update") (modifyIORef' ref (\state -> state {agentConfig=update}))
           safeSettings<-if kind=="config_option_update" then publicAgentSettings runtime update else pure []
@@ -811,14 +811,14 @@ receive runtime@(ConversationState _ ref consoles _) d event = do
               held=maximum (0:[n | key<-keys,n<-[1..T.length key-1],T.take n key `T.isSuffixOf` redacted])
               (safe,tailText)=T.splitAt (T.length redacted-held) redacted
               timed=if T.null safe then state else stampReply now zone state
-          in timed {transcript=if T.null safe then transcript timed else appendChunk role safe (transcript timed),
-            streamTails=M.insert role tailText (streamTails timed)}
+          in (if T.null safe then timed else recordChunk role safe timed)
+            {streamTails=M.insert role tailText (streamTails timed)}
       _ -> pure ()
     recordTool update=do
       current<-readIORef ref
       redact<-conversationRedactor runtime current
       now<-getCurrentTime
-      modifyIORef' ref (\state -> state {lastMessageAt=Just now,transcript=mergeTool (redactValue redact update) (transcript state)})
+      modifyIORef' ref (\state -> recordToolUpdate (redactValue redact update) state {lastMessageAt=Just now})
 
 pauseLabel :: Maybe UTCTime -> UTCTime -> TimeZone -> Maybe Text
 pauseLabel previous now zone = case previous of
@@ -826,24 +826,41 @@ pauseLabel previous now zone = case previous of
   _ -> Nothing
 
 stampReply :: UTCTime -> TimeZone -> State -> State
-stampReply now zone s = s {lastMessageAt=Just now,
-  transcript=transcript s++maybe [] (\label -> [Pause label]) (pauseLabel (lastMessageAt s) now zone)}
+stampReply now zone state=appendRecords (maybe [] (pure . Pause) (pauseLabel (lastMessageAt state) now zone))
+  state {lastMessageAt=Just now}
 
--- Tool records never pass through the Markdown parser.
-appendChunk :: Text -> Text -> [Record] -> [Record]
-appendChunk role text records = case reverse records of
-  Reply previous body:rest | previous==role -> reverse rest++[Reply role (body<>text)]
-  _ -> records++[Reply role text]
+-- Allocation happens at insertion, not in layout. Advancing the owner counter
+-- for a merged update supplies its exact content revision without payload Eq.
+appendRecords :: [RecordContent] -> State -> State
+appendRecords values state=foldl' append state values
+  where
+    append current value=let ident=nextRecord current in current
+      {transcript=transcript current++[Record (BodyItemId ident) ident value],nextRecord=ident+1}
 
-mergeTool :: Value -> [Record] -> [Record]
-mergeTool update records = case field "toolCallId" update :: Maybe Text of
+recordChunk :: Text -> Text -> State -> State
+recordChunk role text state=let revision=nextRecord state in state
+  {transcript=appendChunk (BodyItemId revision) revision role text (transcript state),nextRecord=revision+1}
+
+recordToolUpdate :: Value -> State -> State
+recordToolUpdate update state=let revision=nextRecord state in state
+  {transcript=mergeTool (BodyItemId revision) revision update (transcript state),nextRecord=revision+1}
+
+-- A child caller supplies the actual Hub event ordinal instead of a local
+-- counter. A merged reply keeps the first contributing event's item identity.
+appendChunk :: BodyItemId -> Int -> Text -> Text -> [Record] -> [Record]
+appendChunk candidate revision role text records = case reverse records of
+  Record ident _ (Reply previous body):rest | previous==role -> reverse rest++[Record ident revision (Reply role (body<>text))]
+  _ -> records++[Record candidate revision (Reply role text)]
+
+mergeTool :: BodyItemId -> Int -> Value -> [Record] -> [Record]
+mergeTool candidate revision update records = case field "toolCallId" update :: Maybe Text of
   Nothing -> records
   Just ident ->
-    let merge (Activity old (Object previous) history)
-          | old==ident, Object new<-update = Activity old (Object (KM.union (KM.filter (/=Null) new) previous)) (history++[update])
+    let merge (Record item _ (Activity old (Object previous) history))
+          | old==ident, Object new<-update = Record item revision (Activity old (Object (KM.union (KM.filter (/=Null) new) previous)) (history++[update]))
         merge other=other
-    in if any (\record -> case record of Activity old _ _ -> old==ident; _ -> False) records
-       then map merge records else records++[activity ident update]
+    in if any (\record -> case recordContent record of Activity old _ _ -> old==ident; _ -> False) records
+       then map merge records else records++[Record candidate revision (activity ident update)]
 
 incoming :: ConversationState -> A.Client -> Value -> Text -> Value -> Desktop -> IO Desktop
 incoming runtime@(ConversationState _ ref consoles _) client ident method params d = do
@@ -1132,7 +1149,7 @@ parseAgentSettings value=mapMaybe parseOption (fromMaybe [] (field "configOption
       _ -> concatMap choice (fromMaybe [] (field "options" option))
 
 rawTranscript :: [Record] -> Text
-rawTranscript=T.intercalate "\n\n" . mapMaybe (\record -> case record of Reply role text -> Just (role<>"\n"<>text); Activity ident _ history -> Just (ident<>"\n"<>T.intercalate "\n" (map jsonText history)); Pause _ -> Nothing)
+rawTranscript=T.intercalate "\n\n" . mapMaybe (\record -> case recordContent record of Reply role text -> Just (role<>"\n"<>text); Activity ident _ history -> Just (ident<>"\n"<>T.intercalate "\n" (map jsonText history)); Pause _ -> Nothing)
 
 field :: FromJSON a => Text -> Value -> Maybe a
 field name=parseMaybe (withObject "object" (.: K.fromText name))
@@ -1377,8 +1394,8 @@ drainConversationAgents runtime@(ConversationState _ ref _ agents) d=do
       else do
         let author=case AH.messageAuthor msg of AH.Human -> "Human"; AH.Agent ident -> "Agent "<>AH.agentIdText ident
             attribution=if AH.messageIsUserSeat msg then "Human message" else author<>" sent a peer message, not the human user seat"
-        writeIORef ref s {agentDelivery=Just (msg,reply),queuedPrompt=Just (attribution<>"\n\n"<>AH.messageText msg,Nothing),
-          transcript=transcript s++[Reply author (AH.messageText msg)],reads=sourceSnapshots desktop}
+        writeIORef ref (appendRecords [Reply author (AH.messageText msg)] s
+          {agentDelivery=Just (msg,reply),queuedPrompt=Just (attribution<>"\n\n"<>AH.messageText msg,Nothing),reads=sourceSnapshots desktop})
         sendQueued runtime desktop
     apply desktop AR.CancelPrimary=performPrimary runtime "cancel" [] desktop
     apply desktop AR.EndPrimary=do
@@ -1535,7 +1552,7 @@ refreshChildConversation (ConversationState _ ref _ agents) d=do
                   trimmed=fromMaybe (0::Int) (field "nextEvent" entry)>101 || dropped
                   metadata=T.intercalate " · " ([fromMaybe "" (field "status" entry)]++
                     maybe [] (\parent->["parent: "<>parent]) (field "parentName" entry)++models++["recent history" | trimmed])
-                  records=Pause metadata:foldl (childHistoryRecord name) [] events
+                  records=Record (BodyItemId (-1)) (fromMaybe 0 (field "nextEvent" entry)) (Pause metadata):foldl' (childHistoryRecord name) [] events
               modifyIORef' ref (\s->s {childRecords=M.insert target records (childRecords s),childRender=Just signature})
               paintView target False current {transcript=records} projected
 
@@ -1564,16 +1581,19 @@ childHistoryRecord name records value=let detail=fromMaybe Null (field "detail" 
         human=field "kind" author==Just ("human"::Text)
         who=if human then "Human" else "Agent "<>fromMaybe "unknown" (field "id" author)
         seat=if field "userSeat" detail==Just True then if human then "human user seat" else "controlling parent" else "peer message"
-    in records++[Reply (if human then "You" else "Peer") (who<>" ("<>seat<>")\n\n"<>fromMaybe "" (field "text" detail))]
-  Just "output" -> appendChunk "Agent" (if lastRole records==Just "Agent" then chunk else name<>"\n\n"<>chunk) records
+    in records++[eventRecord (Reply (if human then "You" else "Peer") (who<>" ("<>seat<>")\n\n"<>fromMaybe "" (field "text" detail)))]
+  Just "output" -> appendChunk (BodyItemId eventIndex) eventIndex "Agent" (if lastRole records==Just "Agent" then chunk else name<>"\n\n"<>chunk) records
     where chunk=fromMaybe "" (field "text" detail)
   Just "thought" -> records -- Thoughts stay in the bounded history API.
   Just "tool" -> case field "toolCallId" detail :: Maybe Text of
-    Just _ -> mergeTool detail records
-    Nothing -> records++[Activity ("event-"<>T.pack (show (fromMaybe (length records) (field "index" value)::Int))) detail [detail]]
-  Just "message_finished" | field "status" detail/=Just ("completed"::Text) -> records++[Pause (fromMaybe "Stopped" (field "error" detail))]
+    Just _ -> mergeTool (BodyItemId eventIndex) eventIndex detail records
+    Nothing -> records++[eventRecord (Activity ("event-"<>T.pack (show eventIndex)) detail [detail])]
+  Just "message_finished" | field "status" detail/=Just ("completed"::Text) -> records++[eventRecord (Pause (fromMaybe "Stopped" (field "error" detail)))]
   _ -> records
-  where lastRole xs=case reverse xs of Reply role _:_->Just role; _->Nothing
+  where
+    eventIndex=fromMaybe 0 (field "index" value)
+    eventRecord=Record (BodyItemId eventIndex) eventIndex
+    lastRole xs=case reverse xs of Record _ _ (Reply role _):_->Just role; _->Nothing
 
 -- Publish the next human turn before releasing the Hub ticket. Otherwise its
 -- worker can dequeue another peer in the gap before the editor's next tick.
@@ -1614,9 +1634,9 @@ redactValue redact value=case value of
 -- A matching prompt response is the only boundary that can release an
 -- incomplete credential prefix. Unrelated RPC replies leave held text private.
 flushConversationChunks :: IORef State -> IO ()
-flushConversationChunks ref=modifyIORef' ref $ \state -> state
-  {streamTails=M.empty,transcript=foldl (\records (role,text) -> if T.null text then records else appendChunk role text records)
-    (transcript state) (M.toList (streamTails state))}
+flushConversationChunks ref=modifyIORef' ref $ \state ->
+  (foldl' (\current (role,text) -> if T.null text then current else recordChunk role text current)
+    state (M.toList (streamTails state))) {streamTails=M.empty}
 
 
 -- One ordinary registered handler serves both immutable argument slots. It
@@ -1844,15 +1864,15 @@ pollDraftPreparation runtime@(ConversationState _ ref _ _) d submitted captured 
           let admitted=stampReply now zone state
           writeIORef ref admitted
           if queuedInput then do
-            let accepted=admitted {queuedQueries=map (\query->if isQueuedEditor submitted query then SubmittedQuery text else query) (queuedQueries admitted),
-                  transcript=transcript admitted++[Reply "You" (composerMarkdown text)]}
+            let accepted=appendRecords [Reply "You" (composerMarkdown text)] admitted
+                  {queuedQueries=map (\query->if isQueuedEditor submitted query then SubmittedQuery text else query) (queuedQueries admitted)}
             writeIORef ref accepted
             cleared<-clearSubmittedDraft (Just submitted) d
             painted<-paint True accepted cleared
             pure painted {agentQueued=queryCount "" (queuedQueries accepted),status="Query queued."}
           else if steering then beginPromptPreparation ref True text (Just submitted) d
           else if busy admitted then do
-            let queued=admitted {queuedQueries=queuedQueries admitted++[SubmittedQuery text],transcript=transcript admitted++[Reply "You" (composerMarkdown text)]}
+            let queued=appendRecords [Reply "You" (composerMarkdown text)] admitted {queuedQueries=queuedQueries admitted++[SubmittedQuery text]}
             writeIORef ref queued
             cleared<-clearSubmittedDraft (Just submitted) d
             painted<-paint True queued cleared

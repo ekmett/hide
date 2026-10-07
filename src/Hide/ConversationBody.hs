@@ -5,7 +5,7 @@
 -- TextPresentation's existing serial worker will consume these closed requests;
 -- Conversation retains task/control authority and adopts their exact results.
 module Hide.ConversationBody
-  ( Record(..), ToolExpansion(..), QuestionSchema(..), QuestionProjection(..)
+  ( BodyItemId(..), Record(..), RecordContent(..), ToolExpansion(..), QuestionSchema(..), QuestionProjection(..)
   , BodyProvider(..), BodyKey(..), bodyOwnerMatches, BodyInput(..)
   , BodyRequest(..), BodyResult(..), PreparedBody(..), HostBodyControls(..)
   , BodyControlReceipt(..), ConversationBody(..)
@@ -35,9 +35,13 @@ import qualified Hide.AgentHub as AH
 import qualified Hide.Plugin.Window as W
 import Hide.TextLayout (TextLayout,prepareTextLayout)
 
--- Records retain immutable transcript data only; copy identities are local to
--- one rendering and do not identify a provider or grant input authority.
-data Record = Reply Text Text | Activity Text Value [Value] | Pause Text deriving (Eq,Show)
+-- Item identity is allocated by the transcript/event owner, never rendering.
+-- It survives chunk append/tool update and grants no provider/input authority.
+newtype BodyItemId = BodyItemId Int deriving (Eq,Ord,Show)
+data Record = Record
+  { recordId :: !BodyItemId, recordRevision :: !Int, recordContent :: !RecordContent
+  } deriving (Eq,Show)
+data RecordContent = Reply Text Text | Activity Text Value [Value] | Pause Text deriving (Eq,Show)
 
 -- One existing UI expansion owner covers individual activities and grouped runs.
 -- Transcript updates contain data only and cannot overwrite this interaction.
@@ -133,10 +137,10 @@ prepareConversationBody (BodyRequest key input)=do
   where
     target=bodyTarget key
     columns=bodyColumns key
-    records=zip [0..] (bodyRecords input)
+    records=[(ident,recordContent record) | record<-bodyRecords input,let BodyItemId ident=recordId record]
     header=if T.null target then "Session: "<>fromMaybe "not connected" (bodySession input)<>"\n" else "No messages yet.\n"
     chunks=if null records then [(plain Comment header,Nothing,[]) | maybe True (const False) (bodyQuestion input)] else renderRecords columns records
-    questions=maybe [] (renderQuestion columns (length records)) (bodyQuestion input)
+    questions=maybe [] (renderQuestion columns (-2)) (bodyQuestion input)
     allChunks=chunks++[(plain Plain "\n\n",Nothing,[]) | not (null chunks) && not (null questions)]++questions
     styled=concatMap (\(cells,_,_)->cells) allChunks
     (_,shellBlocks)=foldl' (\(offset,found) (cells,_,blocks)->(offset+length cells,found++[(offset+a,offset+z,dialect,body) | (a,z,dialect,body)<-blocks])) (0,[]) allChunks
@@ -178,17 +182,17 @@ prepareConversationBody (BodyRequest key input)=do
       _ -> []
     sameSpeaker (Reply a _) (Reply b _)=a==b
     sameSpeaker _ _=False
-    renderRecord width (recordId,record)=case record of
+    renderRecord width (messageId,record)=case record of
       Pause label -> [(renderTimestamp width label,Nothing,[])]
-      Reply role text -> [replyChunk width recordId (role=="You") text]
+      Reply role text -> [replyChunk width messageId (role=="You") text]
       Activity ident value history ->
         let expanded=S.member (target,ActivityExpansion ident) (bodyExpandedTools input)
             title=T.unwords (T.words ("["<>fromMaybe "activity" (field "status" value)<>"] "<>fromMaybe ident (field "title" value)))
             heading=(if expanded then "▾ " else "▸ ")<>clipCells (max 1 (width-2)) title
         in [(plain Pragma heading,Just ("toggle-activity",[ident]),[])]++
           [(plain Plain ("\n"<>T.intercalate "\n" (map jsonText history)),Nothing,[]) | expanded]
-    renderQuestion width recordId (QuestionSchema tokenId prompt choices)=
-      [replyChunk width recordId False (prompt)]++
+    renderQuestion width messageId (QuestionSchema tokenId prompt choices)=
+      [replyChunk width messageId False (prompt)]++
       concat [[(plain Plain "\n",Nothing,[]),(plain Plain
         (questionChoiceLines width False text),Just ("question-choice",[token,T.pack (show index)]),[])] | (index,text)<-zip [0::Int ..] (choices)]++
       [(plain Plain "\n",Nothing,[]),(plain Plain
@@ -197,15 +201,15 @@ prepareConversationBody (BodyRequest key input)=do
        (plain Plain "  ",Nothing,[]),(plain Comment "[Cancel]",Just ("question-cancel",[token]),[])]
       where token=T.pack (show (tokenId))
 
-    replyChunk width recordId outgoing text =
+    replyChunk width messageId outgoing text =
       let (cells,blocks)=renderReplyWithShellBlocks (bodyGraphical key) width outgoing text
-      in (map (\(c,style)->(c,case style of BubbleText _ sent base->BubbleText recordId sent base; _->style)) cells,Nothing,blocks)
+      in (map (\(c,style)->(c,case style of BubbleText _ sent base->BubbleText messageId sent base; _->style)) cells,Nothing,blocks)
 
 
 clipCells :: Int -> Text -> Text
 clipCells count text=T.take (columnOffset text (max 0 count)) text
 
-isToolRecord :: Record -> Bool
+isToolRecord :: RecordContent -> Bool
 isToolRecord (Activity _ value _)=field "status" value `elem`
   [Just ("pending"::Text),Just "in_progress",Just "completed",Just "failed"]
 isToolRecord _=False
