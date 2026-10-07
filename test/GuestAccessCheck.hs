@@ -140,8 +140,12 @@ checksWithBody conversation=do
       (streamerReadableAt generic {streamerMode=True} (left genericDraft) (top genericDraft))
   let (human,_) = P.applyInput (P.Paste "human") chat
   check "human input still edits the conversation draft" (contents (composerBuffer human)/=contents (composerBuffer chat))
-  moved<-either (error . T.unpack) pure =<< P.applyGuestInput (P.Key "F6" []) chat
-  check "guest may focus a normal window away from conversation" (maybe False (not . protectedBuffer (fst moved) . sourceFixtureBuffer) (activeWindow (fst moved)))
+  let navigating=chat {keyBindings=either (error . T.unpack) id (configuredBindings [] M.empty)}
+  check "guest window navigation resolves the configured conversation command"
+    (boundKeyCommand (V.KFun 6) [] navigating==Just NextWindow)
+  moved<-either (error . T.unpack) pure =<< P.applyGuestInput (P.Key "F6" []) navigating
+  check "guest may focus the normal source window away from conversation"
+    (maybe False (\w->bufferId w==Just sourceId && not (protectedWindow (fst moved) w)) (activeWindow (fst moved)))
   forM_ ["Agent request","Proposed agent edit","Git diff","Disk changes: /example/thc.toml"] $ \label -> do
     let review=addReadOnly label "private review" base
         bid=maybe (-1) sourceFixtureBuffer (activeWindow review)
