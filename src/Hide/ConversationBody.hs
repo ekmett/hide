@@ -28,7 +28,7 @@ import qualified Data.Set as S
 import System.FilePath ((</>))
 import Data.Maybe (fromMaybe)
 import Control.Applicative ((<|>))
-import Data.List (mapAccumL,find,findIndex)
+import Data.List (mapAccumL,find)
 import qualified Data.List as List
 import Data.Unique (Unique,newUnique,hashUnique)
 import qualified Data.Map.Strict as M
@@ -586,14 +586,12 @@ demandedRows key input logical=case anchor of
         shown=take (height+2) remaining
         ended=length (take (height+1) remaining)<=height
     if null selected then Left "The anchored conversation position is no longer present."
-      else if ended && length shown<height then
-        let final=ending height
-            target=case remaining of PendingRow (Just first) _ _ _ _:_->Just first; _->Nothing
-            requestedRow=fromMaybe (max 0 (length final-1)) (target >>= \first->findIndex (rowStarts first) final)
-        in Right (final,0,True,requestedRow)
+      -- Ordinary anchors retain the requested top row even near EOF. Only
+      -- explicit FollowEnd fills backwards from history. A forward movement
+      -- past EOF clamps to the final row already demanded from this anchor.
+      else if null shown then Right (lastRows 1 (take start combined),0,True,0)
       else Right (shown,0,ended,0)
   where
-    rowStarts point (PendingRow selected _ _ _ _)=selected==Just point
     BodyDemand anchor delta requested=displayDemand key
     height=max 1 requested
     budget=height+2
