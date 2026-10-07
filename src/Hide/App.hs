@@ -56,7 +56,7 @@ import Hide.AgentAccess (resolveAgentAccess,resolveActiveAgentAccess)
 import Hide.AgentMCP (agentTools, agentToolNames, agentTool)
 import Hide.BufferReadCommand (withBufferReadCommands)
 import Hide.BufferDiffCommand (withBufferDiffCommands,bufferDiffTool)
-import Hide.EditorMCP (runEditorMCP, editorResponseOnly, rpcError, editorResponseWith, debugTools, builtinTools, builtinTool, readBufferTool)
+import Hide.EditorMCP (runEditorMCP, editorResponseOnly, rpcError, editorResponseWith, debugTools, builtinTools, builtinTool, readBufferTool, readWindowTool)
 import Hide.RemoteEndpoint (sessionEndpoint)
 import Hide.Session
 import Hide.Completion (bashCompletion)
@@ -300,7 +300,11 @@ runEditor args = do
                     approvedExit<-readIORef exiting
                     pure (quit || approvedExit,updated)
                   tickAgents current=tickAgentSidebar agentSidebar >> pure current
-                  tick d=tickProjectBrowser projectBrowser d >>= tickGitOperations gitOperations applyEffects >>= tickTooling tooling applyEffects >>= tickReconciliation reconciliation (sidebarEffects sidebarHost applyEffects) >>= tickSessionServices services >>= tickConversation conversation >>= tickBuildPreparation services runtimeEffects >>= tickDebugger debugger >>= tickPreparedDebug debugger runtimeEffects >>= tickPermissions permissions >>= tickHighlighting highlighting >>= tickAutocomplete autocomplete >>= tickKeybindings keybindings >>= tickMenus menuHost runtimeEffects >>= tickDebuggerSidebar debugSidebar sidebarHost debugger >>= tickPackageSidebar packageSidebar sidebarHost >>= tickAgents >>= tickSessionSidebar sessionSidebar sidebarHost >>= tickSidebar sidebarHost runtimeEffects >>= tickPluginWindows >>= tickTextPresentation textPresentation
+                  prepareBodies desktop=do
+                    requests<-conversationBodyRequests conversation desktop
+                    (prepared,completed)<-tickTextPresentation textPresentation requests desktop
+                    adoptConversationBodies conversation completed prepared
+                  tick d=tickProjectBrowser projectBrowser d >>= tickGitOperations gitOperations applyEffects >>= tickTooling tooling applyEffects >>= tickReconciliation reconciliation (sidebarEffects sidebarHost applyEffects) >>= tickSessionServices services >>= tickConversation conversation >>= tickBuildPreparation services runtimeEffects >>= tickDebugger debugger >>= tickPreparedDebug debugger runtimeEffects >>= tickPermissions permissions >>= tickHighlighting highlighting >>= tickAutocomplete autocomplete >>= tickKeybindings keybindings >>= tickMenus menuHost runtimeEffects >>= tickDebuggerSidebar debugSidebar sidebarHost debugger >>= tickPackageSidebar packageSidebar sidebarHost >>= tickAgents >>= tickSessionSidebar sessionSidebar sidebarHost >>= tickSidebar sidebarHost runtimeEffects >>= tickPluginWindows >>= prepareBodies
                   inspectTool d name parameters
                     | name `elem` ["list_windows","list_buffers","read_buffer","read_selection"] = pure (d,pure (builtinTool d name parameters))
                     | name `elem` chatToolNames = chatTool conversation d name parameters
@@ -326,6 +330,7 @@ runEditor args = do
                         reject=pure (d,pure (Just (rpcError (fromMaybe Null (parseMaybe (withObject "request" (.: "id")) request)) (-32600) "Invalid or inactive agent connection.")))
                     let permitted callback current name parameters
                           | name=="read_buffer" = readBufferTool bufferCommands (bufferReader permissions currentCaller) current name parameters
+                          | name=="read_window" = readWindowTool bufferCommands (windowReader permissions currentCaller) current name parameters
                           | name=="buffer_apply_diff" = bufferDiffTool diffCommands (bufferEditor permissions currentCaller) current name parameters
                           | name=="editor_input" = permissionBuildInputAs currentCaller permissions
                               (\admission admittedDesktop admittedTool admittedArgs->withBuildAdmission services admission (controlTool guestCore admittedDesktop admittedTool admittedArgs)) current name parameters
@@ -577,6 +582,7 @@ applyEffects = foldM apply . (False,)
     apply (_,d) DownloadCancelAction{}=pure (False,d {status="Downloads cancellation requires its running owner."})
     apply (_,d) DebugAction{}=pure (False,d {status="Debugger unavailable in this preview."})
     apply (_,d) PermissionAction{}=pure (False,d {status="Agent permissions are unavailable in this preview."})
+    apply (_,d) ExecuteShellBlockAction{}=pure (False,d {status="Session services are unavailable in this preview."})
     apply (_,d) ServiceAction{}=pure (False,d {status="Session services are unavailable in this preview."})
     apply (_,d) AgentAction{}=pure (False,d {status="Agents are unavailable in this preview."})
     apply (_,d) PackageDebugAction{}=pure (False,d {status="Package debug requires its running owner."})
@@ -661,9 +667,11 @@ applyEffects = foldM apply . (False,)
           (opened,_)<-followLink False d (Just path) target
           pure (False,opened)
       | otherwise=pure (False,d {status="Sidebar link target expired."})
-    apply (_,d) (FollowLink origin target)=do
-      (opened,_)<-followLink False d origin target
-      pure (False,opened)
+    apply (_,d) (FollowLink origin target)
+      | not (linkOriginCurrent d origin)=pure (False,d {status="Link body expired."})
+      | otherwise=do
+          (opened,_)<-followLink False d (linkOriginPath origin) target
+          pure (False,opened)
     apply (_,d) (RefreshGit path)=do
       repo<-repositoryStatus path
       pure (False,d {branchStatus=maybe "" (\r -> repoBranch r <> if repoDirty r then "*" else "") repo,branchAdded=maybe 0 repoAdded repo,branchDeleted=maybe 0 repoDeleted repo,branchRoot=fmap repoRoot repo,gitReview=case gitReview d of Just review | fmap repoRoot repo == Just (reviewRoot review) -> Just review; _ -> Nothing})

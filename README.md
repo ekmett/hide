@@ -1,5 +1,6 @@
 # hide — Haskell IDE
 
+![Haskell](https://img.shields.io/badge/Haskell-%235e5086.svg?style=for-the-badge&logo=haskell&logoColor=white)
 [![Docs build](https://github.com/ekmett/hide/actions/workflows/docs.yml/badge.svg?branch=main)](https://github.com/ekmett/hide/actions/workflows/docs.yml)
 
 hide is a Haskell IDE written in Haskell. Edit source, inspect types and

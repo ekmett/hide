@@ -331,16 +331,39 @@ preserve the draft. Two slots may invoke the same command with different typed
 arguments; labels do not resolve commands. Recovery restores conversation drafts
 into fresh identities and never restores callable bindings or replays submissions.
 
-This step retains the current transcript representation. Moving its bubble-aware
-copy, relative links, shell blocks and protected question controls into prepared
-semantic content is a separate migration. Human input and approval authority
-remain host-owned throughout.
+### Prepared transcript content
 
-Inline questions keep their prompt and choice labels in the transcript body;
-the host draws the live answer and selected choice over their reserved regions.
-Editing an answer does not rebuild the Markdown history. The question token
-identifies its immutable prompt and choices. Field positions belong to that body
-and use the current layout for painting, clicks, caret and privacy masking.
+Conversation output uses prepared windows with the same independent editor
+attachment. The prepared body carries message-copy boundaries, relative links,
+shell blocks and the ranges hidden from agent reads, Streamer mode and recovery.
+Those projections have distinct purposes and share the body's scalar coordinates.
+Preparation validates their ranges and evaluates their metadata on the worker.
+The body has one immutable identity; redraw and checkpoint checks inspect that
+identity without comparing text or history.
+
+A window is private by default. Explicit readability permits observation of its
+masked content, while input and command authority remain separate. The declaration
+is fixed for that window's lifetime. Links and shell actions capture the exact
+body they came from; replacement or closure expires an unexecuted action.
+
+The existing presentation worker prepares conversation history. First show opens
+a small loading view, or a retained snapshot, so the input remains available.
+Completed stream progress can be displayed while its successor is queued.
+Changes to the provider, question, expansion state or layout reject stale work;
+receiving more transcript text alone does not starve the display.
+
+Switching targets keeps their installed bodies. Closing a conversation transfers
+its body into an inert snapshot, and reopening gives it a fresh window lifetime.
+Recovery saves each target once, alongside its independently owned draft. Restored
+message boundaries support copy; callable controls, links and shell actions are
+not restored. This is the conversation presentation migration, not completion of
+the separate first-party plugin package.
+
+Inline questions keep their prompt and choice labels in the prepared body; the
+host paints the live answer and selected choice over their reserved regions.
+Editing an answer does not rebuild the Markdown history. The question token and
+exact body identify those controls. Painting, clicks, caret and privacy masking
+use the current layout. Human answer submission and approval remain host-owned.
 
 ### Broader proposed window contract
 

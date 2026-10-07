@@ -448,7 +448,7 @@ shellBlockChecks = when (terminalAvailable && os/="mingw32") $ bracket temporary
         desktop=help {buffers=M.adjust (\doc->doc {documentShellBlocks=blocks}) bid (buffers help)}
         chosen=case blocks of block:_->block; _->error "missing shell block"
         core d _=pure (False,d)
-        execute d block=let (updated,effects)=runCommand (ExecuteShellBlock bid block) d
+        execute d block=let (updated,effects)=runCommand (ExecuteShellBlock (SourceShell bid) block) d
                        in snd <$> sessionEffects runtime core updated effects
         consoles=sessionConsoles runtime
         await label predicate d=do

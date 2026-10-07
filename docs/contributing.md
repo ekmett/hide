@@ -611,15 +611,20 @@ movement and resize geometry. It adds no source Document or BufferRef.
 checked `windowDocument` lookup. Selection and copying operate on the prepared
 semantic text; source editing, Save and language tooling are unavailable there.
 
-The initial presentation is private to guests and masked by Streamer mode.
+Prepared windows are private by default. `prepareSemanticTextWindow` can declare
+readable content with `TextSemantics`: message-copy behavior, links and their base,
+shell spans, and separate hidden ranges for agent reads, Streamer mode and recovery.
+Preparation validates scalar ranges and evaluates metadata on its worker.
+Readability grants no input or execution authority, and cannot change during a
+window's lifetime. Title disclosure follows the same declaration.
+
 The same adapter accepts `SidebarWindow` replies after existing sidebar action
 checks. Duplicate opens and stale refreshes are refused, and refresh retains host
-geometry and selection, clamping offsets when text shrinks. Closing it removes the prepared content while preserving
-source documents; an escaped update cannot reopen the closed instance. Scope
-retirement revokes further publication. All plugin titles are masked in streamer
-mode, including application and Dock metadata. A retired scope retains its
-read-only snapshot with an unavailable title; its old references cannot refresh
-or reopen it.
+geometry and selection, clamping offsets when text shrinks. Closing removes the
+installed body; an escaped update cannot reopen it. Scope retirement revokes
+publication while retaining an inert read-only snapshot. Its old references cannot
+refresh or reopen it. A content owner may retain the closed snapshot for an
+explicit later opening under a fresh reference.
 
 Ordinary views are transient. `prepareRecoverableTextWindow` explicitly declares
 non-secret text eligible for private recovery, with a namespaced type ID and
@@ -628,9 +633,16 @@ inert unavailable view with a fresh revoked reference. Parsing never runs plugin
 code and a restored type does not automatically reattach to a registration.
 Prepared content identities make redraw/checkpoint invalidation shallow.
 
-Public privacy grants, automatic reattachment and richer widget APIs remain tracked in
-[#5](https://github.com/ekmett/hide/issues/5). Editable widgets and the broader
-`WindowDef` signatures in the design document remain proposed.
+Persistent multiline input uses `Hide.Plugin.Editor`: the host retains the draft,
+Undo and selection independently of body refreshes. `openEditorWindow` publishes
+an input attachment and prepared body together through the same command owner.
+See [embedded editor ownership](design/haskell-plugins.md#embedded-editor-ownership)
+for submission and lifetime rules. Conversation uses that input attachment and
+prepared semantic bodies, with history rendering on the existing presentation
+worker. See [prepared transcript content](design/haskell-plugins.md#prepared-transcript-content)
+for copying, background adoption and recovery. Automatic reattachment and richer
+widget APIs remain tracked in [#5](https://github.com/ekmett/hide/issues/5); the broader
+`WindowDef` signatures remain proposed.
 
 Agent sidebar configuration returns prepared public choices with an opaque receipt
 from the existing hub epoch/capability version. Child configuration rechecks it

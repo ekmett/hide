@@ -1,7 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 module AgentIntegrationCheck (checks, fixture) where
 
-import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Concurrent (threadDelay)
 import Control.Exception (bracket)
 import Control.Monad (unless)
@@ -16,19 +15,25 @@ import System.FilePath ((</>))
 import System.IO (hClose,openTempFile)
 import System.Timeout (timeout)
 import Hide.Conversation
+import Hide.TextPresentation (TextPresentation,withTextPresentation,tickTextPresentation)
 import qualified Hide.Consoles as C
 import qualified Hide.AgentRuntime as AR
 import qualified Hide.AgentHub as AH
-import Hide.GuestAccess (guestKeyboardAllowed,guestCommandAllowed,sanitizedBuffer,guestTransitionAllowed)
+import Hide.GuestAccess (guestKeyboardAllowed,guestCommandAllowed,sanitizedBuffer,sanitizedPreparedContent,guestTransitionAllowed)
 import qualified Data.Map.Strict as M
+import qualified Data.Vector as V
+import Hide.Syntax (Style(..))
 import Data.IORef
-import Hide.Buffer (contents,newBuffer,Selection(..))
+import Hide.Buffer (contents,newBuffer,contentSlice,contentLength,Selection(..))
 import Hide.AgentSidebarTypes (AgentSidebarRequest(ShowAgent))
 import Hide.Recovery (writeCheckpoint,readCheckpoint)
 import qualified Hide.Font as Font
 import Hide.ScreenCapture (capture)
 import Hide.Session
 import Hide.Model
+import qualified Hide.Plugin.Window as W
+import qualified Hide.Plugin.Menu as P
+import Hide.PluginWindowHost (adoptWindowUpdate)
 
 checks :: IO ()
 checks=bracket temporary removePathForcibly $ \root ->
@@ -43,7 +48,7 @@ checks=bracket temporary removePathForcibly $ \root ->
     BL.writeFile (config </> "agents.json") (encode (object ["executable" .= ("python3"::T.Text),"arguments" .= [script]]))
     record<-newSessionRecord Nothing ["--",root]
     rememberSession record
-    environment "THC_EDIT_SESSION" (Just (sessionId record)) $ C.withConsoles $ \consoles -> withConversationAt consoles root $ \conversation -> do
+    environment "THC_EDIT_SESSION" (Just (sessionId record)) $ C.withConsoles $ \consoles -> withConversationAt consoles root $ \conversation -> withTextPresentation $ \presentation->do
       let agents=conversationAgents conversation
           hub=AR.agentHub agents
           primary=AR.primaryAgent agents
@@ -57,28 +62,28 @@ checks=bracket temporary removePathForcibly $ \root ->
           tickUntil test d=do
             answer<-timeout 5000000 (loop d)
             maybe (error "Agent conversation integration timed out") pure answer
-            where loop current=do next<-tickConversation conversation current; ok<-test next; if ok then pure next else threadDelay 10000 >> loop next
+            where loop current=do next<-tickBody presentation conversation current; ok<-test next; if ok then pure next else threadDelay 10000 >> loop next
       shown<-ui "show" [] initial
-      connected<-send "Hello" shown >>= tickUntil (pure . (=="Agent: end_turn") . status)
+      connected<-send "Hello" shown >>= tickUntil (pure . (\d->status d=="Agent: end_turn" && "Hello" `T.isInfixOf` activeText d))
       servers<-AR.primaryServers agents
       let tokens=[value | server<-servers, entry<-maybe [] id (field "env" server :: Maybe [Value]),Just value<-[field "value" entry :: Maybe T.Text]]
       let publicSafe desktop=do
-            let readable=T.concat [body | ident<-M.keys (buffers desktop),Just body<-[sanitizedBuffer desktop ident]]
+            let readable=T.concat ([body | ident<-M.keys (buffers desktop),Just body<-[sanitizedBuffer desktop ident]]++readableBodies desktop)
                 private="private-main-key":tokens
             screen<-capture font desktop False
             ensure "primary transcript never exposes private keys through buffer reads" (all (not . (`T.isInfixOf` readable)) private)
             ensure "primary transcript never exposes private keys through screen capture" (all (not . (`T.isInfixOf` T.pack (show screen))) private)
       publicSafe connected
-      split<-send "split-private" connected >>= tickUntil (\desktop->publicSafe desktop >> pure (status desktop=="Agent: end_turn"))
+      split<-send "split-private" connected >>= tickUntil (\desktop->publicSafe desktop >> pure (status desktop=="Agent: end_turn" && "split-private" `T.isInfixOf` activeText desktop))
       publicSafe split
-      nested<-send "nested-private" split >>= tickUntil (\desktop->publicSafe desktop >> pure (status desktop=="Agent: end_turn"))
+      nested<-send "nested-private" split >>= tickUntil (\desktop->publicSafe desktop >> pure (status desktop=="Agent: end_turn" && "nested-private" `T.isInfixOf` activeText desktop))
       expanded<-snd <$> conversationEffects conversation (\x _->pure (False,x)) nested [AgentAction "copy" []]
       ensure "raw tool and plan details never retain bearer values" (all (not . (`T.isInfixOf` clipboard expanded)) ("private-main-key":tokens))
       peerCancels<-newIORef (0::Int)
       peer<-AH.registerAgent hub "Peer" root (AH.AgentDriver root "private-peer-key" (AH.Capabilities False False False [])
         (\_ ->pure (Right (AH.Capabilities False False False []))) (\_ ->pure (Right Null)) (modifyIORef' peerCancels (+1)) (pure ()) (\_ ->pure (Left "unsupported"))) >>= right
       ticket<-AH.sendAgent hub (AH.Agent peer) primary "Count files" >>= right
-      finished<-tickUntil (\_ ->do result<-AH.waitAgent hub AH.Human primary ticket 0 >>= right; pure (field "status" result==Just ("completed"::T.Text))) connected
+      finished<-tickUntil (\d->do result<-AH.waitAgent hub AH.Human primary ticket 0 >>= right; pure (field "status" result==Just ("completed"::T.Text) && "Count files" `T.isInfixOf` activeText d)) connected
       result<-AH.waitAgent hub AH.Human primary ticket 0 >>= right
       ensure "peer message reaches the primary provider and returns text" (maybe False (T.isInfixOf "Count files") (field "result" result >>= field "text"))
       ensure "peer output cannot publish private provider references" (not ("private-main-key" `T.isInfixOf` T.pack (show result)))
@@ -95,11 +100,11 @@ checks=bracket temporary removePathForcibly $ \root ->
       peerTicket<-AH.sendAgent hub (AH.Agent primary) peer "Peer attribution fixture" >>= right
       _<-AH.waitAgent hub AH.Human peer peerTicket 1000 >>= right
       let primaryDrafted=draft "primary unsent" (Selection 3 7) cleared
-          primaryText=maybe "" (contents.documentBuffer.snd) (conversationDocument "" primaryDrafted)
+          primaryText=bodyText "" primaryDrafted
       directoryView<-ui "directory" [] primaryDrafted
       directory<-AH.listAgents hub AH.Human >>= right
       ensure "registered peer remains listed in the directory" (any ((==Just (AH.agentIdText peer)) . field "id") (maybe [] id (field "agents" directory :: Maybe [Value])))
-      history<-select peer directoryView {dialog=Nothing}
+      history<-select peer directoryView {dialog=Nothing} >>= tickUntil (pure . T.isInfixOf ("Agent "<>AH.agentIdText primary<>" (peer message)") . activeText)
       ensure "child opens in the existing protected conversation composer" (activeConversation history && not (guestKeyboardAllowed history))
       let historyText=activeText history
       ensure "history preserves peer identity instead of assigning the human seat" (("Agent "<>AH.agentIdText primary<>" (peer message)") `T.isInfixOf` historyText)
@@ -112,53 +117,54 @@ checks=bracket temporary removePathForcibly $ \root ->
       ensure "switching restores child draft caret" (contents (composerBuffer childAgain)=="child unsent" && composerSelection childAgain==Selection 2 5)
       let childTool ident state details=object
             ["toolCallId" .= (ident::T.Text),"title" .= ident,"status" .= (state::T.Text),"rawInput" .= (details::T.Text)]
-          actions name desktop=[values | (_,_,action,values)<-chatActions desktop,action==name]
+          actions name desktop=[values | Just w<-[activeWindow desktop],Just controls<-[windowConversationControls desktop w],
+            (_,_,action,values)<-hostBodyActions controls,action==name]
           childGroupText=activeText
       AH.recordAgentEvent hub peer "tool" (childTool "child-first" "pending" "first arguments")
       AH.recordAgentEvent hub peer "tool" (childTool "child-second" "pending" "second arguments")
-      groupedChild<-tickConversation conversation childAgain
+      groupedChild<-tickUntil (pure . (\d->length (actions "toggle-tool-run" d)==1 && "2 tool calls" `T.isInfixOf` activeText d)) childAgain
       ensure "child tools form one collapsed run" (length (actions "toggle-tool-run" groupedChild)==1 &&
         null (actions "toggle-activity" groupedChild) && "2 tool calls" `T.isInfixOf` childGroupText groupedChild)
       let groupValues=case actions "toggle-tool-run" groupedChild of values:_->values; _->error "Missing child run action"
-      openChildRun<-ui "toggle-tool-run" groupValues groupedChild
+      openChildRun<-ui "toggle-tool-run" groupValues groupedChild >>= tickUntil (pure . (\d->length (actions "toggle-activity" d)==2))
       let firstCall=case actions "toggle-activity" openChildRun of values:_->values; _->error "Missing child call action"
-      openChildCall<-ui "toggle-activity" firstCall openChildRun
+      openChildCall<-ui "toggle-activity" firstCall openChildRun >>= tickUntil (pure . T.isInfixOf "first arguments" . activeText)
       ensure "child call exposes its raw arguments" ("first arguments" `T.isInfixOf` childGroupText openChildCall)
       AH.recordAgentEvent hub peer "tool" (object ["toolCallId" .= ("child-first"::T.Text),"status" .= ("completed"::T.Text),"rawOutput" .= ("first result"::T.Text)])
       AH.recordAgentEvent hub peer "tool" (childTool "child-third" "in_progress" "third arguments")
-      streamedChild<-tickConversation conversation openChildCall
+      streamedChild<-tickUntil (pure . (\d->length (actions "toggle-activity" d)==3 && all (`T.isInfixOf` activeText d) ["3 tool calls","2 running","first result"])) openChildCall
       ensure "child updates count calls rather than events and preserve the open run" (actions "toggle-tool-run" streamedChild==[groupValues] &&
         length (actions "toggle-activity" streamedChild)==3 && "3 tool calls" `T.isInfixOf` childGroupText streamedChild &&
         "2 running" `T.isInfixOf` childGroupText streamedChild)
       ensure "child refresh preserves open call input and all streamed raw output" (all (`T.isInfixOf` childGroupText streamedChild) ["first arguments","first result"])
       switchedPrimary<-ui "show" [] streamedChild
-      switchedChild<-select peer switchedPrimary
+      switchedChild<-select peer switchedPrimary >>= tickUntil (pure . (\d->length (actions "toggle-activity" d)==3 && "first result" `T.isInfixOf` activeText d))
       ensure "child run and call expansion survive switching through Primary" (childGroupText switchedChild==childGroupText streamedChild &&
         actions "toggle-tool-run" switchedChild==[groupValues] && length (actions "toggle-activity" switchedChild)==3)
-      collapsedChild<-ui "toggle-tool-run" groupValues switchedChild
+      collapsedChild<-ui "toggle-tool-run" groupValues switchedChild >>= tickUntil (pure . (\d->null (actions "toggle-activity" d) && not ("first arguments" `T.isInfixOf` activeText d)))
       copiedChild<-ui "copy" [] collapsedChild
       ensure "collapsed child run retains all raw call updates for copying" (all (`T.isInfixOf` clipboard copiedChild)
         ["first arguments","first result","second arguments","third arguments"])
-      reopenedChild<-ui "toggle-tool-run" groupValues collapsedChild
+      reopenedChild<-ui "toggle-tool-run" groupValues collapsedChild >>= tickUntil (pure . (\d->length (actions "toggle-activity" d)==3 && "first arguments" `T.isInfixOf` activeText d))
       ensure "child per-call expansion survives collapsing its run" (childGroupText reopenedChild==childGroupText streamedChild)
       AH.recordAgentEvent hub peer "output" (object ["text" .= ("Reply between child tool runs"::T.Text)])
       AH.recordAgentEvent hub peer "tool" (childTool "child-isolated" "completed" "isolated arguments")
-      separatedChild<-tickConversation conversation reopenedChild
+      separatedChild<-tickUntil (pure . (\d->length (actions "toggle-activity" d)==4 && "Reply between child tool runs" `T.isInfixOf` activeText d)) reopenedChild
       ensure "child reply ends a tool run and leaves the next isolated call visible" (actions "toggle-tool-run" separatedChild==[groupValues] &&
         length (actions "toggle-activity" separatedChild)==4 && "Reply between child tool runs" `T.isInfixOf` childGroupText separatedChild)
       let largeTool=object ["title" .= ("Large tool"::T.Text),"payload" .= T.replicate 600000 "x"]
       AH.recordAgentEvent hub peer "tool" largeTool
       AH.recordAgentEvent hub peer "tool" largeTool
       AH.recordAgentEvent hub peer "output" (object ["text" .= ("latest reply after paged tools"::T.Text)])
-      paged<-tickConversation conversation childAgain
+      paged<-tickUntil (pure . T.isInfixOf "latest reply after paged tools" . activeText) childAgain
       ensure "live child reaches newest reply past history byte cap" ("latest reply after paged tools" `T.isInfixOf` activeText paged)
       _<-AH.cancelAgent hub AH.Human primary >>= right
-      afterPrimaryCancel<-tickConversation conversation childAgain
+      afterPrimaryCancel<-tickBody presentation conversation childAgain
       ensure "primary mailbox cancellation does not cancel selected child" . (==0) =<< readIORef peerCancels
       ensure "primary cancellation preserves child target and draft" (conversationTarget afterPrimaryCancel==AH.agentIdText peer && contents (composerBuffer afterPrimaryCancel)=="child unsent")
       let primaryMetadata=childAgain {agentReplying=True,agentSteering=True,agentContextUsage=Just (42,84),agentSettings=[AgentSetting "model" "Model" "model" "primary-model" [("primary-model","Primary")]]}
       ensure "child capabilities do not inherit primary steering or model settings" (not (conversationSteering primaryMetadata) && not (commandEnabled primaryMetadata (AgentChoose "")) && not (commandEnabled primaryMetadata (AgentSet "model" "primary-model")))
-      ensure "child view does not show primary context usage" (case (activeDocument primaryMetadata,activeWindow primaryMetadata) of (Just doc,Just win)->windowPositionText primaryMetadata doc win==" -- "; _->False)
+      ensure "child view does not show primary context usage" (conversationContextUsage primaryMetadata==Nothing)
       (_,settingsReply)<-chatTool conversation primaryMetadata "agent_settings" (object [])
       settingsInfo<-settingsReply >>= right
       ensure "settings snapshot identifies primary scope and does not mix child busy state" (field "scope" settingsInfo==Just ("primary"::T.Text) && field "replying" settingsInfo==Just False)
@@ -173,7 +179,7 @@ checks=bracket temporary removePathForcibly $ \root ->
       refreshedDirectory<-ui "directory" [] childAgain
       listedNow<-AH.listAgents hub AH.Human >>= right
       ensure "live child remains listed in the directory" (any ((==Just (AH.agentIdText liveChild)) . field "id") (maybe [] id (field "agents" listedNow::Maybe [Value])))
-      liveView<-select liveChild refreshedDirectory {dialog=Nothing}
+      liveView<-select liveChild refreshedDirectory {dialog=Nothing} >>= tickUntil (pure . T.isInfixOf "controlling parent" . activeText)
       ensure "parent-owned child shows controlling-parent attribution" ("controlling parent" `T.isInfixOf` activeText liveView)
       ensure "live child title/dropdown use advertised child model choices" ("small" `T.isInfixOf` conversationTitle liveView && commandEnabled liveView (AgentChoose ""))
       changedChild<-ui "set-config" ["model","large"] liveView
@@ -184,10 +190,10 @@ checks=bracket temporary removePathForcibly $ \root ->
       ensure "child reports its own context usage" (conversationContextUsage steerReady==Just (120,1000))
       steeringChild<-submit SteerSubmit (draft "human direction" (Selection 15 15) steerReady)
       ensure "pending child steering keeps the draft until acknowledged" (contents (composerBuffer steeringChild)=="human direction")
-      steeredChild<-tickUntil (pure . (\d->not (agentReplying d) && T.null (contents (composerBuffer d)))) steeringChild
+      steeredChild<-tickUntil (pure . (\d->not (agentReplying d) && T.null (contents (composerBuffer d)) && "human direction" `T.isInfixOf` activeText d)) steeringChild
       ensure "child steering retains human peer attribution" ("Human (peer message)" `T.isInfixOf` activeText steeredChild && "human direction" `T.isInfixOf` activeText steeredChild)
       humanSent<-submit QuerySubmit (draft "human followup" (Selection 14 14) steeredChild)
-      replied<-tickUntil (pure . T.isInfixOf "Human (peer message)" . activeText) humanSent
+      replied<-tickUntil (pure . (\d->"human followup" `T.isInfixOf` activeText d && T.null (contents (composerBuffer d)))) humanSent
       ensure "accepted human message clears only its own composer" (T.null (contents (composerBuffer replied)) && maybe False ((=="primary unsent").contents.editorDraftBuffer) (M.lookup "" (conversationViews replied) >>= \view->M.lookup (conversationDraftRef view) (editorDrafts replied)))
       ensure "child transcript carries no provider keys" (not ("private-main-key" `T.isInfixOf` activeText replied))
       firstQueued<-submit QuerySubmit (draft "permission" (Selection 10 10) replied)
@@ -198,7 +204,7 @@ checks=bracket temporary removePathForcibly $ \root ->
       awaiting<-tickUntil (pure . maybe False (T.isPrefixOf "Agent permission:" . dialogTitle) . dialog) childAfterPrimaryConfig
       ensure "human can queue a followup while child is running" (agentQueued awaiting>=1)
       _<-AH.cancelAgent hub AH.Human primary >>= right
-      childStillWaiting<-tickConversation conversation awaiting
+      childStillWaiting<-tickBody presentation conversation awaiting
       ensure "primary cancellation leaves child approval pending" (maybe False (T.isPrefixOf "Agent permission:" . dialogTitle) (dialog childStillWaiting))
       cancelledChild<-ui "cancel" [] childStillWaiting
       afterChildCancel<-tickUntil (\desktop->do entry<-AH.statusAgent hub AH.Human liveChild >>= right; pure (field "status" entry==Just ("idle"::T.Text) && field "queued" entry==Just (0::Int) && dialog desktop==Nothing)) cancelledChild
@@ -214,7 +220,7 @@ checks=bracket temporary removePathForcibly $ \root ->
       writeCheckpoint recovery finalDraft >>= right
       recovered<-readCheckpoint recovery initial >>= right
       ensure "selected child and active draft survive recovery" (conversationTarget recovered==AH.agentIdText liveChild && contents (composerBuffer recovered)=="recover child draft" && composerSelection recovered==Selection 4 9)
-      let restoredPrimary=selectConversationView "" "Primary" recovered
+      restoredPrimary<-ui "show" [] recovered
       ensure "hidden primary transcript and draft survive recovery" (activeText restoredPrimary==primaryText && contents (composerBuffer restoredPrimary)=="primary unsent")
       ensure "hidden unsent drafts still prevent quiet Exit" (conversationHasDraft recovered && not (null (conversationViews recovered)))
       recoveredShown<-ui "show" [] recovered
@@ -222,16 +228,17 @@ checks=bracket temporary removePathForcibly $ \root ->
       caller<-captureQuestionCaller conversation primary >>= right
       (questionView,_)<-chatToolAs conversation (Just caller) recoveredShown "ask_user" (object ["question" .= ("Choose privately"::T.Text)])
       let privateAnswer=questionView {chatQuestion=fmap (\q->q {questionBuffer=newBuffer "unsent secret answer",questionSelection=Selection 20 20}) (chatQuestion questionView)}
-      paintedAnswer<-tickConversation conversation privateAnswer
+      paintedAnswer<-tickUntil (pure . (\d->"Choose privately" `T.isInfixOf` activeText d &&
+        maybe False (maybe False (const True) . windowQuestion d) (activeWindow d))) privateAnswer
       hiddenQuestion<-select liveChild paintedAnswer
-      ensure "hidden primary question answer never becomes readable transcript" (all (maybe True (not . T.isInfixOf "unsent secret answer") . sanitizedBuffer hiddenQuestion) (M.keys (buffers hiddenQuestion)))
+      ensure "hidden primary question answer never becomes readable transcript" (all (not . T.isInfixOf "unsent secret answer") (readableBodies hiddenQuestion))
       writeCheckpoint recovery hiddenQuestion >>= right
       questionCheckpoint<-readCheckpoint recovery initial >>= right
-      ensure "hidden transient answer is omitted from recovery" (all (not . T.isInfixOf "unsent secret answer" . contents . documentBuffer) (M.elems (buffers questionCheckpoint)))
+      ensure "hidden transient answer is omitted from recovery" (all (not . T.isInfixOf "unsent secret answer" . (\target->bodyText target questionCheckpoint)) (M.keys (conversationViews questionCheckpoint)))
       returnedQuestion<-ui "show" [] hiddenQuestion
       ensure "switching preserves the live primary answer without sending it" (maybe False ((=="unsent secret answer").contents.questionBuffer) (chatQuestion returnedQuestion))
       _<-AH.endAgent hub AH.Human primary >>= right
-      _<-tickConversation conversation finished
+      _<-tickBody presentation conversation finished
       invalid<-AH.statusAgent hub (AH.Agent primary) primary
       ensure "ended primary loses orchestration authority" (case invalid of Left _->True; _->False)
     recoveryRecord<-newSessionRecord Nothing ["--",root]
@@ -239,22 +246,26 @@ checks=bracket temporary removePathForcibly $ \root ->
     let recoveredPath=root </> "newer-child.checkpoint"
         fakeDriver=AH.AgentDriver root "private-recovery-child" (AH.Capabilities False False False [])
           (\_ ->pure (Right (AH.Capabilities False False False []))) (\_ ->pure (Right Null)) (pure ()) (pure ()) (\_ ->pure (Left "unsupported"))
-    recoveredChild<-environment "THC_EDIT_SESSION" (Just (sessionId recoveryRecord)) $ C.withConsoles $ \consoles -> withConversationAt consoles root $ \conversation -> do
+    recoveredChild<-environment "THC_EDIT_SESSION" (Just (sessionId recoveryRecord)) $ C.withConsoles $ \consoles -> withConversationAt consoles root $ \conversation -> withTextPresentation $ \presentation->do
       let agents=conversationAgents conversation
           hub=AR.agentHub agents
       child<-AH.registerAgent hub "Recovered child" root fakeDriver >>= right
       AH.recordAgentEvent hub child "output" (object ["text" .= ("older Hub history"::T.Text)])
       (_,selected)<-conversationEffects conversation (\d _->pure (False,d)) (initialDesktop (80,25)) [AgentSidebarAction (ShowAgent child)]
-      let bid=maybe (error "missing child view") sourceFixtureBuffer (activeWindow selected)
-          newer=(setComposerInput (newBuffer "recovered draft") (Selection 0 0) True selected)
-            {buffers=M.adjust (\doc->doc {documentBuffer=newBuffer "newer Desktop child transcript"}) bid (buffers selected),agentReplying=True,agentQueued=5}
+      let view=conversationViews selected M.! AH.agentIdText child
+      reference<-maybe (fail "missing child body ref") pure (conversationBodyRef view)
+      body<-W.prepareSemanticTextWindow "Recovered child" [(c,Plain) | c<-"newer Desktop child transcript"]
+        (W.TextSemantics W.CopyText Nothing V.empty V.empty W.ReadableWindow V.empty V.empty V.empty) >>= right
+      publication<-W.refreshTextWindow reference body >>= maybe (fail "child fixture publication expired") pure
+      installed<-adoptWindowUpdate P.HumanMenu publication selected
+      let newer=(setComposerInput (newBuffer "recovered draft") (Selection 0 0) True installed) {agentReplying=True,agentQueued=5}
       writeCheckpoint recoveredPath newer >>= right
       AR.activateAgentCheckpoint agents
       AR.checkpointAgents agents >>= right
       pure child
-    environment "THC_EDIT_SESSION" (Just (sessionId recoveryRecord)) $ C.withConsoles $ \consoles -> withConversationAt consoles root $ \conversation -> do
+    environment "THC_EDIT_SESSION" (Just (sessionId recoveryRecord)) $ C.withConsoles $ \consoles -> withConversationAt consoles root $ \conversation -> withTextPresentation $ \presentation->do
       recovered<-readCheckpoint recoveredPath (initialDesktop (80,25)) >>= right
-      retained<-tickConversation conversation recovered
+      retained<-tickBody presentation conversation recovered
       ensure "stale recovered Hub history cannot overwrite newer Desktop transcript" (activeText retained=="newer Desktop child transcript" && contents (composerBuffer retained)=="recovered draft")
       ensure "recovered child projects current status while retaining text" (not (agentReplying retained) && agentQueued retained==0)
       (_,copied)<-conversationEffects conversation (\d _->pure (False,d)) retained [AgentAction "copy" []]
@@ -262,20 +273,48 @@ checks=bracket temporary removePathForcibly $ \root ->
       let hub=AR.agentHub (conversationAgents conversation)
       AH.updateExternalAgent hub recoveredChild fakeDriver >>= right
       AH.recordAgentEvent hub recoveredChild "output" (object ["text" .= ("new live child output"::T.Text)])
-      refreshed<-tickConversation conversation retained
+      let awaitLive current=do
+            next<-tickBody presentation conversation current
+            if "new live child output" `T.isInfixOf` activeText next then pure next else threadDelay 10000 >> awaitLive next
+      refreshed<-timeout 5000000 (awaitLive retained) >>= maybe (fail "Live recovered body preparation timed out") pure
       ensure "live output replaces frozen recovered presentation" ("new live child output" `T.isInfixOf` activeText refreshed)
+      ensure "live recovery refresh retains the existing frame geometry"
+        (map (\w->(windowId w,bounds w)) (windows refreshed)==map (\w->(windowId w,bounds w)) (windows retained))
+      let closed=fst (runCommand Close refreshed)
+      AH.recordAgentEvent hub recoveredChild "output" (object ["text" .= ("output after close"::T.Text)])
+      stayedClosed<-tickBody presentation conversation closed
+      ensure "live child output cannot reopen or focus its closed conversation"
+        (map windowId (windows stayedClosed)==map windowId (windows closed) &&
+          fmap windowId (activeWindow stayedClosed)==fmap windowId (activeWindow closed))
     corrupt<-newSessionRecord Nothing ["--",root]
     rememberSession corrupt
     checkpoint<-(++".agents.json") <$> checkpointPath (sessionId corrupt)
     writeFile checkpoint "{incomplete"
-    environment "THC_EDIT_SESSION" (Just (sessionId corrupt)) $ C.withConsoles $ \consoles -> withConversationAt consoles root $ \conversation -> do
-      noticed<-tickConversation conversation (initialDesktop (80,25))
+    environment "THC_EDIT_SESSION" (Just (sessionId corrupt)) $ C.withConsoles $ \consoles -> withConversationAt consoles root $ \conversation -> withTextPresentation $ \presentation->do
+      noticed<-tickBody presentation conversation (initialDesktop (80,25))
       ensure "agent checkpoint failures reach the status line" ("checkpoint" `T.isInfixOf` status noticed && "retained" `T.isInfixOf` status noticed)
-      consumed<-tickConversation conversation noticed {status="ordinary status"}
+      consumed<-tickBody presentation conversation noticed {status="ordinary status"}
       ensure "agent runtime notices are shown only once" (status consumed=="ordinary status")
   where
     right=either (error . T.unpack) pure
     ensure label ok=unless ok (error label)
+
+-- Run the same existing protocol and presentation owners as the application's
+-- final body phase; tests wait for adopted text rather than provider status.
+tickBody :: TextPresentation -> ConversationState -> Desktop -> IO Desktop
+tickBody owner conversation current=do
+  protocol<-tickConversation conversation current
+  requests<-conversationBodyRequests conversation protocol
+  (prepared,completed)<-tickTextPresentation owner requests protocol
+  adoptConversationBodies conversation completed prepared
+
+bodyText :: T.Text -> Desktop -> T.Text
+bodyText target desktop=maybe "" (\prepared->let text=W.preparedWindowText prepared in contentSlice text 0 (contentLength text))
+  (conversationBodySnapshot target desktop)
+
+readableBodies :: Desktop -> [T.Text]
+readableBodies desktop=[contentSlice text 0 (contentLength text) | target<-M.keys (conversationViews desktop),
+  Just prepared<-[conversationBodySnapshot target desktop],Just (_,text)<-[sanitizedPreparedContent prepared]]
 
 field :: FromJSON a => Key -> Value -> Maybe a
 field key=parseMaybe (withObject "field" (.:key))

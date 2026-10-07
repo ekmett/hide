@@ -275,7 +275,9 @@ runRemoteDaemonWithStartup owned wake session scale effects tick inspect initial
           (stamp,captured,columns,directory,origin,target)<-atomically (readTBQueue linkJobs)
           prepared<-prepareLink True columns directory origin target
           modifyMVar_ state $ \s->do
-            if stopped s || stamp/=(owner s,generation s) || not (maybe True (\trace->maybe False (\tree->treeFocused tree && hitCurrent trace tree) (sideTree (desktop s)) && dialog (desktop s)==Nothing && columns==max 20 (min 76 (fst (screenSize (desktop s))-treeWidthOf (desktop s)-4))) captured) then pure s else do
+            if stopped s || stamp/=(owner s,generation s) || not (maybe True (\receipt->case receipt of
+              Left trace->maybe False (\tree->treeFocused tree && hitCurrent trace tree) (sideTree (desktop s)) && dialog (desktop s)==Nothing && columns==max 20 (min 76 (fst (screenSize (desktop s))-treeWidthOf (desktop s)-4))
+              Right source->linkOriginCurrent (desktop s) source) captured) then pure s else do
               let (updated,packet)=applyLink prepared (desktop s)
               -- Bounded and live-only: the display drains these without replay.
               delivered<-case packet of
@@ -477,8 +479,10 @@ runRemoteDaemonWithStartup owned wake session scale effects tick inspect initial
         effect _ result@(True,_,_) _ = pure result
         effect stamp (_,d,replies) request = case request of
           ReadHelp -> getDataFileName "README.md" >>= \helpPath -> queueLink stamp Nothing d replies (Just helpPath) ""
-          FollowTreeLink trace resource target -> queueLink stamp (Just trace) d replies (Just resource) target
-          FollowLink origin target -> queueLink stamp Nothing d replies origin target
+          FollowTreeLink trace resource target -> queueLink stamp (Just (Left trace)) d replies (Just resource) target
+          FollowLink origin target
+            | not (linkOriginCurrent d origin)->pure (False,d {status="Link body expired."},replies)
+            | otherwise->queueLink stamp (case origin of SourceLink{}->Nothing; WindowLink{}->Just (Right origin)) d replies (linkOriginPath origin) target
           ReadBrowserClipboard -> do
             token<-requestPaste pasteReads d
             pure (False,d,replies++[json "paste-request" ["request" .= value] | Just value<-[token]])

@@ -20,12 +20,14 @@ import Hide.Sidebar
 import Hide.Model
 import Hide.Render
 import qualified Hide.Plugin.Editor as E
+import qualified Hide.Plugin.Window as W
 import Hide.Syntax
 import Hide.Unicode (displayOpsForPic)
 
 checks :: IO ()
 checks=do
   ref<-E.newDraftRef
+  chatBody<-W.prepareTextWindow "Chat" ""
   let source="before\nlet old tail\nfollowing\nlast"
       b=newBuffer source
       raw=addDocument (Just (FileState "Preview.hs" Nothing)) b (initialDesktop (80,25))
@@ -84,7 +86,7 @@ checks=do
   let hint=colored {buffers=M.adjust (\doc->doc {documentLabel=Just "Autocomplete"}) (sourceFixtureBuffer w) (buffers colored),
         autocompleteACPEnabled=True,autocompleteDraft=newBuffer "    hint",autocompleteSelection=Selection 2 2,
         autocompleteFocused=True,inlinePreview=Nothing,
-        conversationViews=M.singleton "" (ConversationView (sourceFixtureBuffer w) "Chat" ref Nothing Nothing (0,0) (Selection 0 0)),
+        conversationViews=M.singleton "" (ConversationView (InertBody chatBody) "Chat" ref Nothing Nothing (0,0) (Selection 0 0)),
         editorDrafts=M.singleton ref (EditorDraft (newBuffer "CHAT_ONLY") (Selection 0 0) True Nothing)}
       hintRect=autocompleteComposerRect hint w
   check "ACP hint composer retains plain indentation and does not render the chat draft"

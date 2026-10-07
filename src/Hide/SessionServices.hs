@@ -44,6 +44,8 @@ import Hide.MCPPermissions (AdmittedBuild, reserveAdmittedBuild, stepAdmittedBui
 import Hide.Plugin.BufferHost (ContentVersion, captureVersion, versionCurrent)
 import Hide.Files (filePath)
 import Hide.Buffer
+import qualified Hide.Plugin.Window as W
+import qualified Data.Vector as V
 import Hide.Model
 import Hide.Sidebar (treeRoot)
 
@@ -104,6 +106,7 @@ sessionEffects :: SessionServices -> (Desktop -> [Effect] -> IO (Bool,Desktop)) 
 sessionEffects runtime fallback=foldM apply . (False,)
   where
     apply state@(True,_) _=pure state
+    apply (_,d) (ExecuteShellBlockAction origin block)=(False,) <$> executeShellBlock runtime origin block d
     apply (_,d) (ServiceAction action values)=(False,) <$> perform runtime action values d
     apply (_,d) (PackageBuildAction action target)=(False,) <$> startPackageBuildPreparation runtime action target d
     apply (_,d) (AdoptPreparedBuild target)=(False,) <$> adoptBuildPreparation runtime target d
@@ -199,21 +202,34 @@ compilerMenu preserve saved compilers d = opened {contextMenu=fmap (\(r,_) -> (r
     Rect x y _ _=toolchainBadgeRect d
     opened=openContext (ToolchainContext rows) x y d
 
-perform :: SessionServices -> Text -> [Text] -> Desktop -> IO Desktop
-perform (SessionServices _ _ _ ref) "execute-shell-block" [bidText,startText,endText,dialect,body] d
-  | Just bid<-readMaybe (T.unpack bidText), Just blockStart<-readMaybe (T.unpack startText), Just blockEnd<-readMaybe (T.unpack endText),
-    Just doc<-M.lookup bid (buffers d), (blockStart,blockEnd,dialect,body) `elem` documentShellBlocks doc =
-      if not Terminal.terminalAvailable then pure (message "Cannot execute shell block" ["Embedded terminals are unavailable in this build."] d)
-      else if T.null (T.strip body) then pure (message "Cannot execute shell block" ["This shell block is empty."] d)
-      else if dialect `notElem` ["sh","bash","zsh"] then pure (message "Cannot execute shell block" ["This shell dialect is unavailable."] d)
-      else mask_ $ do
-        worker<-async $ mask_ $ do
-          root<-B.resolveBuildRoot d
-          C.prepareConsole [] (Terminal.TerminalConfig (T.unpack dialect) ["-c",T.unpack body] [] root 80 24) (1024*1024)
-        modifyIORef' ref (\state->state {shellLaunches=shellLaunches state++[worker]})
-        pure d {status="Starting shell block in terminal..."}
-perform _ "execute-shell-block" _ d = pure (message "Cannot execute shell block" ["The code block changed; open its context menu again."] d)
+-- One existing terminal-preparation lifetime serves both source and immutable
+-- transcript blocks. Readability itself cannot manufacture this host action.
+executeShellBlock :: SessionServices -> ShellOrigin -> (Int,Int,Text,Text) -> Desktop -> IO Desktop
+executeShellBlock (SessionServices _ _ _ ref) origin requested d
+  | not (shellBlockCurrent d origin requested)=pure (message "Cannot execute shell block" ["The code block changed; open its context menu again."] d)
+  | otherwise=case canonicalBlock of
+      Nothing->pure d
+      Just (_,_,dialect,body)
+        | not Terminal.terminalAvailable->pure (message "Cannot execute shell block" ["Embedded terminals are unavailable in this build."] d)
+        | SourceShell{}<-origin,T.null (T.strip body)->pure (message "Cannot execute shell block" ["This shell block is empty."] d)
+        | dialect `notElem` ["sh","bash","zsh"]->pure (message "Cannot execute shell block" ["This shell dialect is unavailable."] d)
+        | otherwise->mask_ $ do
+            worker<-async $ mask_ $ do
+              root<-case origin of
+                SourceShell _->B.resolveBuildRoot d
+                WindowShell _ prepared->canonicalizePath (maybe (startingDirectory d) takeDirectory (W.preparedWindowSemantics prepared >>= W.textLinkBase))
+              C.prepareConsole [] (Terminal.TerminalConfig (T.unpack dialect) ["-c",T.unpack body] [] root 80 24) (1024*1024)
+            modifyIORef' ref (\state->state {shellLaunches=shellLaunches state++[worker]})
+            pure d {status="Starting shell block in terminal..."}
+  where
+    canonicalBlock=case origin of
+      SourceShell _->Just requested
+      WindowShell _ prepared->do
+        semantics<-W.preparedWindowSemantics prepared
+        let (start,end,_,_)=requested
+        V.find (\(a,z,_,_)->a==start && z==end) (W.textShellBlocks semantics)
 
+perform :: SessionServices -> Text -> [Text] -> Desktop -> IO Desktop
 perform runtime@(SessionServices directory consoles _ ref) action values d=case (action,values) of
     ("terminal",_) -> do
       shell<-if os=="mingw32" then fromMaybe "cmd.exe" <$> lookupEnv "COMSPEC" else fromMaybe "/bin/sh" <$> lookupEnv "SHELL"

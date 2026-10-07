@@ -5,7 +5,7 @@
 -- Tool initiation and reply waiting are separate phases so HLS, DAP and human
 -- approvals can continue while a request is pending. Actor-bound routes expose
 -- only their supplied tools, with no fallback into ordinary desktop reads.
-module Hide.EditorMCP (editorResponse, editorResponseWith, editorResponseOnly, rpcError, builtinTools, builtinTool, readBufferTool, debugTools, editorServers, editorServersFor, editorServersAt, runEditorMCP, runEditorMCPWithHandles, runEditorMCPWithToken, readMCPLine) where
+module Hide.EditorMCP (editorResponse, editorResponseWith, editorResponseOnly, rpcError, builtinTools, builtinTool, readBufferTool, readWindowTool, debugTools, editorServers, editorServersFor, editorServersAt, runEditorMCP, runEditorMCPWithHandles, runEditorMCPWithToken, readMCPLine) where
 
 import Hide.Sidebar
 import Control.Exception (bracket, try, IOException, finally, catch, mask, throwIO)
@@ -29,7 +29,9 @@ import Paths_hide (getDataFileName)
 import System.Environment (lookupEnv, getExecutablePath)
 import System.IO (Handle, stdin, stdout, hClose, hFlush, hSetBinaryMode)
 import Hide.Buffer
-import Hide.BufferReadCommand (BufferReadCommands,readPage,readBufferCommand,formatBufferRead)
+import Hide.BufferReadCommand (BufferReadCommands,readPage,readBufferCommand,readWindowCommand,formatBufferRead)
+import Hide.BufferReads (WindowReadTarget,CapturedWindowRead,windowReadTarget)
+import qualified Hide.Plugin.Window as W
 import Hide.Plugin.BufferHost (readerReference)
 import qualified Hide.Plugin.Buffer as P
 import Hide.Files (filePath)
@@ -192,6 +194,7 @@ builtinTool desktop=tool
       (ident,doc,start,count,offset)<-readBufferRequest desktop args
       (redacted,b)<-maybe (Left "This buffer contains private user or approval content.") Right (sanitizedBufferContent desktop ident)
       formatBufferRead (bufferInfo ident doc) start count offset redacted b
+    tool "read_window" _=Left "Window reads require the live permission owner."
     tool "read_selection" args = parseArgs (withObject "read_selection" (.:? "windowId")) args >>= \wanted -> do
       w <- maybe (maybe (Left "No active window") Right (activeWindow desktop))
         (\ident -> maybe (Left "Window not found") Right (findWindow ident)) wanted
@@ -209,9 +212,14 @@ builtinTool desktop=tool
     parseArgs parser=either (Left . T.pack) Right . parseEither parser
     findWindow ident=case filter ((==ident).windowId) (windows desktop) of w:_->Just w; _->Nothing
     window w=object ["windowId" .= windowId w,"number" .= windowNumber w,"bufferId" .= bufferId w,
-      "title" .= maybe "[private]" title (windowDocument (buffers desktop) w),
+      "title" .= windowTitle w,
       "kind" .= (case windowContent w of SourceContent _->"source"::T.Text; PluginContent _->"plugin"),
       "active" .= (fmap windowId (activeWindow desktop)==Just (windowId w)),"bounds" .= rect (bounds w)]
+    windowTitle w=case windowContent w of
+      SourceContent _->maybe "[private]" title (windowDocument (buffers desktop) w)
+      PluginContent reference->case M.lookup reference (pluginWindows desktop) of
+        Just prepared | W.preparedWindowDisclosure prepared==W.ReadableWindow->W.preparedWindowTitle prepared
+        _->"[private]"
     panels=[object ["kind" .= ("files"::T.Text),"title" .= ("Files"::T.Text),"path" .= treeRoot tree] | Just tree<-[sideTree desktop]]
       ++[object ["kind" .= ("messages"::T.Text),"title" .= ("Messages"::T.Text),"bounds" .= rect (problemsRect desktop)] | problemsVisible desktop]
     rect (Rect x y w h)=object ["x" .= x,"y" .= y,"width" .= w,"height" .= h]
@@ -229,6 +237,21 @@ readBufferTool commands reader desktop _ args=case readBufferRequest desktop arg
     Left err->pure (desktop,pure (Left err))
     Right page->let reference=readerReference reader ident
       in pure (desktop,readBufferCommand commands reader reference page)
+
+-- | Select one exact prepared body under serialization, then return the fixed
+-- capture/format worker continuation. No body walk or masking occurs here.
+readWindowTool :: BufferReadCommands -> (WindowReadTarget -> IO (Either T.Text CapturedWindowRead)) -> Desktop -> T.Text -> Value -> IO (Desktop,IO (Either T.Text Value))
+readWindowTool commands capture desktop _ args=case request of
+  Left err->pure (desktop,pure (Left err))
+  Right (target,page)->target `seq` page `seq` pure (desktop,readWindowCommand commands (capture target) page)
+  where
+    request=do
+      (wanted,start,count)<-either (Left . T.pack) Right $ parseEither
+        (withObject "read_window" $ \o->(,,) <$> o .:? "windowId" <*> o .:? "startLine" .!= 1 <*> o .:? "lineCount" .!= 200) args
+      ident<-maybe (maybe (Left "No active window") (Right . windowId) (activeWindow desktop)) Right wanted
+      target<-windowReadTarget desktop ident
+      page<-readPage start count 0
+      pure (target,page)
 
 readBufferRequest :: Desktop -> Value -> Either T.Text (Int,Document,Int,Int,Int)
 readBufferRequest desktop args=do
@@ -345,6 +368,7 @@ tools =
   [ describe "list_windows" "List editor window IDs, titles, buffer IDs, geometry, active window and side panels." []
   , describe "list_buffers" "List open buffers with paths and unsaved-change state, including untitled buffers." []
   , describe "read_buffer" "Read live buffer contents including unsaved edits; private conversation fields are redacted and approval buffers are unavailable. Text is paged by 1-based lines (200 default, 1000 maximum); binary buffers return up to 4096 hex bytes from byteOffset." [("bufferId","integer"),("startLine","integer"),("lineCount","integer"),("byteOffset","integer")]
+  , describe "read_window" "Read an explicitly readable prepared text window by logical window-text lines; private regions are redacted. Defaults to the active window, 200 lines; maximum 1000 lines and 131072 characters. Source windows use read_buffer." [("windowId","integer"),("startLine","integer"),("lineCount","integer")]
   , describe "read_selection" "Read selected text and cursor offsets in an editor window. coordinateSpace distinguishes source from rendered-markdown offsets; a pending Markdown view refuses the read. Defaults to the active window." [("windowId","integer")]
   ]
   where

@@ -46,7 +46,7 @@ checks=bracket temporary removePathForcibly $ \root->do
       (dragged,_)=handleEvent (V.EvMouseDown (x+2) y V.BLeft []) pressed
       (_,dragEffects)=handleEvent (V.EvMouseUp (x+2) y (Just V.BLeft)) dragged
       (menu,_)=handleEvent (V.EvMouseDown x y V.BRight []) help
-  check "click activates on release, drag remains selection" (null startEffects && clickEffects==[FollowLink (Just (root </> "README.md")) "docs/install.md"] && null dragEffects)
+  check "click activates on release, drag remains selection" (null startEffects && clickEffects==[FollowLink (SourceLink (Just (root </> "README.md"))) "docs/install.md"] && null dragEffects)
   check "context menu offers linked target" (case contextKind menu of LinkContext (OpenLink _ "docs/install.md")->True; _->False)
   let chat=help {buffers=M.adjust (\value->value {documentLabel=Just "Conversation"}) (sourceFixtureBuffer w) (buffers help)}
       hiddenAt=top (composerRect chat w)
@@ -66,7 +66,7 @@ checks=bracket temporary removePathForcibly $ \root->do
     check "unsafe URL rejected" (not (validWebURL urlText))
     result<-openResource (object ["url" .= (urlText::T.Text)])
     check "client rejects unsafe open without invoking OS" (either (const True) (const False) result)
-  check "agent input cannot launch browser outside tool permissions" (not (guestCommandAllowed (OpenLink Nothing "https://example.com")) && not (guestEffectsAllowed [FollowLink Nothing "https://example.com"]))
+  check "agent input cannot launch browser outside tool permissions" (not (guestCommandAllowed (OpenLink (SourceLink Nothing) "https://example.com")) && not (guestEffectsAllowed [FollowLink (SourceLink Nothing) "https://example.com"]))
   putStrLn "Links checks passed"
   where
     temporary=do

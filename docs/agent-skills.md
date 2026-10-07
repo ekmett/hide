@@ -9,6 +9,7 @@ The [operation reference](agent-tools.md) describes each call.
 | Skill | Use when | Evidence of completion |
 | --- | --- | --- |
 | [Explore a project](#explore-a-project) | Locate code, understand the package or follow a symbol | Relevant files, symbols and current revisions identified |
+| [Read a conversation or text window](#read-a-conversation-or-text-window) | Inspect published window content without screen scraping | Window ID, readable text and pagination accounted for |
 | [Edit and review](#edit-and-review) | Make a focused change or apply a patch | Intended buffer diff, with saved/unsaved state explicit |
 | [Diagnose and refactor Haskell](#diagnose-and-refactor-haskell) | Explain types, fix diagnostics or rename a symbol | Current HLS result and reviewed edits |
 | [Build, test and run](#build-test-and-run) | Check a change or execute the project | Actual completion status and relevant output |
@@ -58,6 +59,26 @@ unsaved buffer contents; its default search also includes untitled buffers.
 missing match as absent. Project context identifies the root/package. The existing
 Cabal component/dependency graph is available through `workspace_project` and
 **Tools > Project browser**.
+
+## Read a conversation or text window
+
+**Use:** inspect published conversation text or another prepared text window.
+
+**Do:** `list_windows` → `read_window` with the chosen `windowId`. Page by
+`startLine` and `lineCount`. For a source window, use its `bufferId` with
+`read_buffer` instead.
+
+**Why these tools:** read the logical text directly without drawing or decoding a
+screenshot. The installed body declares whether it is readable; protected spans
+are masked. Human drafts and approval controls are not conversation history.
+
+**Check:** coordinates belong to `window-text`, not source offsets or screen
+cells. Check `redacted`, `truncated`, `lineCount` and `totalLines`. Use
+`editor_screen` when the task concerns placement, clipping or controls.
+
+**Recover:** a body refreshed or closed before capture requires a new request.
+A stopped conversation may remain readable; that does not restore its actions or
+agent connection. Private windows and Rows/Details projections refuse this read.
 
 ## Edit and review
 

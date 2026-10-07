@@ -11,6 +11,7 @@
 module Hide.Render (renderDesktop, renderCellRows, renderCursor, snapshot, snapshotHtml, RenderKey, renderKey) where
 
 import Control.Exception (evaluate)
+import Hide.ConversationBody (QuestionProjection(..))
 import Data.IORef
 import System.Mem.StableName (StableName, makeStableName, eqStableName)
 import Data.List (find, groupBy)
@@ -126,7 +127,7 @@ data RenderState = RenderState
   } deriving Eq
 
 data DocumentKey = DocumentKey (Maybe (FilePath,Bool)) (Maybe Text) Int Bool (Maybe FilePath) Bool deriving Eq
-data ViewKey = ViewKey Int Text Editor.DraftRef (Maybe Editor.EditorMount) (Maybe Int) (Int,Int) Selection deriving Eq
+data ViewKey = ViewKey (Maybe PluginWindow.WindowRef) Text Editor.DraftRef (Maybe Editor.EditorMount) (Maybe Int) (Int,Int) Selection deriving Eq
 data DraftKey = DraftKey Selection Bool (Maybe Editor.EditorMount) deriving Eq
 data QuestionKey = QuestionKey Int (Maybe Int) Selection Bool deriving Eq
 data FieldKey = InputKey Text Int | SelectedInputKey Text Selection | ComboBoxKey Text Int (Maybe Int) | CheckBoxKey Text Bool | RadioKey Text Int
@@ -160,8 +161,12 @@ renderKey original = do
         payload (documentShellBlocks value)
         pure (DocumentKey f (documentLabel value) (documentWidth value)
           (documentCursorVisible value) (documentSuggestedName value) (present (documentSourceRows value)))
-      view value=ViewKey (conversationBufferId value) (conversationName value) (conversationDraftRef value)
-        (conversationEditor value) (conversationEditorFrame value) (conversationScroll value) (conversationReplySelection value)
+      view value=do
+        case conversationBody value of
+          InstalledBody _ receipt->mapM_ (\(BodyControlReceipt prepared _ _ _ _)->payload prepared) receipt
+          InertBody prepared->payload prepared
+        pure (ViewKey (conversationBodyRef value) (conversationName value) (conversationDraftRef value)
+          (conversationEditor value) (conversationEditorFrame value) (conversationScroll value) (conversationReplySelection value))
       draft value=do
         payload (editorDraftBuffer value)
         pure (DraftKey (editorDraftSelection value) (editorDraftFocused value) (editorDraftMount value))
@@ -195,13 +200,12 @@ renderKey original = do
   drafts<-mapM draft (editorDrafts original)
   mapM_ payload (inlinePreview original)
   payload (autocompleteDraft original)
-  let views=M.map view (conversationViews original)
+  views<-mapM view (conversationViews original)
   question'<-traverse question (chatQuestion original)
   dialog'<-traverse dialogKey (dialog original)
   tree<-traverse sidebar (sideTree original)
   payload (diagnostics original)
   payload (buildDiagnostics original)
-  payload (chatActions original)
   mapM_ payload (gitReview original)
   payload (clipboard original)
   mapM_ payload (snd (clipboardExport original))
@@ -390,12 +394,12 @@ renderScene d=(privacyLayers++layers,visibleCursor)
       Nothing | menu d/=Nothing || contextMenu d/=Nothing || problemsFocused d || maybe False treeFocused (sideTree d) -> V.NoCursor
       Nothing | activeMarkdown d,Just w<-activeWindow d,Nothing<-windowMarkdown d w -> V.NoCursor
       Nothing -> case (activeWindow d,activeDocument d) of
-        (Just w,Just doc) | questionActive d,Just (rect,q,projected)<-questionInputGeometry d w,questionChoice q==Nothing -> let
+        (Just w,_) | questionActive d,Just (rect,q,projected)<-questionInputGeometry d w,questionChoice q==Nothing -> let
           text=contents (questionBuffer q)
           delta=displayColumn text (caret (questionSelection q))-displayColumn text (questionInputStart (projectedQuestionWidth projected) q)
           cx=left rect+delta
           cy=top rect
-          body=Rect (left (bounds w)+1) (top (bounds w)+1) (width (bounds w)-2) (windowContentRows d doc w)
+          body=pluginTextRect d w
           in if inside body cx cy then V.Cursor cx cy else V.NoCursor
         (Just w,_) | activeAutocomplete d && autocompleteFocused d -> let
           b=autocompleteDraft d; (r,c)=bufferLineColumn b (caret (autocompleteSelection d)); (sr,sc)=autocompleteComposerScroll d w
@@ -414,15 +418,15 @@ renderScene d=(privacyLayers++layers,visibleCursor)
 -- The static body owns all question offsets; bounded live rows use exactly
 -- that body's current layout and clip, without rebuilding transcript Markdown.
 questionLayers :: Desktop -> Window -> [V.Image]
-questionLayers d w=case windowDocument (buffers d) w of
+questionLayers d w=case windowPluginText d w of
   Nothing->[]
-  Just doc->
+  Just prepared->
     [place (left (bounds w)+1) (top (bounds w)+1+row-scrollRow w)
       (V.cropRight columns (V.translateX (column-scrollColumn w)
         (styledImage (darkAppearance d) (const False) Nothing False (Selection 0 0) offset chars)))
     | (offset,chars)<-questionOverlayRows d w
-    , let (row,column)=windowTextPosition d w (bufferContent (documentBuffer doc)) offset
-    , row>=scrollRow w,row<scrollRow w+windowContentRows d doc w]
+    , let (row,column)=windowTextPosition d w (PluginWindow.preparedWindowText prepared) offset
+    , row>=scrollRow w,row<scrollRow w+pluginBodyRows d w]
     where columns=max 0 (width (bounds w)-2)
 
 -- The same host buttons and border geometry are shared by source and plugin text.
@@ -468,7 +472,7 @@ composerLayers d active w
 
 pluginWindowLayers :: Desktop -> Bool -> Window -> PluginWindow.PreparedWindow -> [CellLayer]
 pluginWindowLayers d active w prepared=
-  map CellImage (composerLayers d active w)++bodyLayers++map CellImage ((if active then [windowScrollbarImage d True w,windowScrollbarImage d False w] else [])
+  map CellImage (questionLayers d w++composerLayers d active w)++bodyLayers++map CellImage ((if active then positionBadge++[windowScrollbarImage d True w,windowScrollbarImage d False w] else [])
     ++(place (x+column) y (label frame title):hostWindowFrame d active w frame)
     ++[place (x+1) (y+1) (V.charFill edit ' ' (max 0 (ww-2)) (max 0 (hh-2)))])
   where
@@ -479,6 +483,11 @@ pluginWindowLayers d active w prepared=
     rows=PluginWindow.preparedWindowRows prepared
     title=" "<>T.take (columnOffset (windowTitle d w) (max 0 (ww-17))) (windowTitle d w)<>" "
     column=max 6 ((ww-keyLabelWidth title) `div` 2)
+    positionBadge=[place (x+2) (y+hh-1) (label frame (T.take (max 0 (ww-4)) (conversationPositionText d)))
+      | conversationTargetFor d w/=Nothing]
+    selectable style=case fmap PluginWindow.textCopy (PluginWindow.preparedWindowSemantics prepared) of
+      Just PluginWindow.CopyMessages{}->case style of BubbleText{}->True; _->False
+      _->True
     bodyLayers | PluginWindow.RowsDetails listed index _<-rows =
       let (listRect,detailRect)=rowsWindowRects d w
           chosen=case rowsInteraction w of Just (RowsInteraction ident _)->fromMaybe 0 (M.lookup ident index); _->0
@@ -494,7 +503,7 @@ pluginWindowLayers d active w prepared=
             _->[]
       in detailLayers++map CellImage (listImages++[place (x+1) (top detailRect-1) (label frame " Details " V.<|>V.charFill frame '─' (max 0 (ww-11)) 1)])
       | Just layout<-windowPresentation d w =
-      [styledLayoutRow (darkAppearance d) (const True) active (selection w)
+      [styledLayoutRow (darkAppearance d) selectable active (selection w)
         (Rect (x+1) (y+1+n-scrollRow w) (max 0 (ww-2)) 1) (scrollColumn w) row
       | n<-[scrollRow w..scrollRow w+pluginBodyRows d w-1],Just row<-[TextLayout.layoutRows layout Vec.!? n]]
       | PluginWindow.PlainRows plain<-rows =plainLayers (pluginTextRect d w) text plain active
@@ -511,7 +520,7 @@ pluginWindowLayers d active w prepared=
           PluginWindow.PlainRows _->V.emptyImage
           PluginWindow.RowsDetails{}->V.emptyImage
           PluginWindow.StyledRows styled->V.translateX (negate (scrollColumn w))
-            (styledImage (darkAppearance d) (const True) Nothing active (selection w) start (fromMaybe [] (styled Vec.!? n)))
+            (styledImage (darkAppearance d) selectable Nothing active (selection w) start (fromMaybe [] (styled Vec.!? n)))
 
 -- Shared frame chrome uses the same semantic geometry as pointer dispatch.
 windowScrollbarImage :: Desktop -> Bool -> Window -> V.Image
@@ -534,7 +543,6 @@ windowLayers d active original =
     | bufferView w/=MarkdownView,not (byteMode (documentBuffer doc)), issue<-diagnostics d, Just (diagnosticPath issue)==fmap filePath (documentFile doc), issueRow issue>=scrollRow w, issueRow issue<scrollRow w+hh-2]
   ++ (if active then [place (x+windowPositionColumn doc) (y+hh-1) (label frame (T.take (max 0 (ww-windowPositionColumn doc-2)) (windowPositionText d doc w))),windowScrollbarImage d True w,windowScrollbarImage d False w] else [])
   ++ [place (x+6) y (label frame "[" V.<|> label (attr cyan blue) " " V.<|> label frame "]") | active,terminalWindow d w,not (windowPinned d w)]
-  ++ questionLayers d w
   ++ composerLayers d active w
   ++ hexDividerLayers
   ++ reviewDividerLayers
@@ -553,7 +561,7 @@ windowLayers d active original =
     file=maybe (maybe ("NONAME"<>maybe "" (T.pack . show) (bufferId w)<>".HS") T.pack (documentSuggestedName doc)) (T.pack . takeFileName . filePath) (documentFile doc)
     -- Measured line changes are shared by all views; never diff text while drawing.
     -- Docs: docs/editing.md (unsaved change counts in each buffer title).
-    name=(if documentLabel doc==Just "Conversation" then conversationTitle d else fromMaybe file (documentLabel doc))<>(if dirty b then " *" else "")
+    name=fromMaybe file (documentLabel doc)<>(if dirty b then " *" else "")
     (added,deleted)=bufferLineChanges b
     badge=if documentLabel doc==Nothing && (added/=0 || deleted/=0)
       then [("+"<>T.pack (show added),attr (V.RGBColor 85 255 85) background),
@@ -579,7 +587,7 @@ windowLayers d active original =
     -- Docs: docs/site/screenshots/debug-step.png (docs/running.md).
     useStyles=case documentLabel doc of
       Nothing -> True
-      Just title -> title `elem` ["Conversation","Haskell Help"] || any (`T.isPrefixOf` title) ["Terminal ","Source "]
+      Just title -> title=="Haskell Help" || any (`T.isPrefixOf` title) ["Terminal ","Source "]
     styledLines=splitStyled (documentHighlight doc)
     hexDividerLayers =
       [place (x+1+column) y (V.vertCat [V.char frame (if active && not moving then '╤' else '┬'),
@@ -683,8 +691,7 @@ windowLayers d active original =
         in V.cropRight columns (styledSourceImage (darkAppearance d) color canSelect sel start (scrollColumn w) columns tokens
           V.<|> V.charFill base ' ' columns 1)
       _ -> V.charFill base ' ' columns 1
-    selectable style | documentLabel doc==Just "Conversation" = case style of BubbleText{} -> True; _ -> False
-                     | otherwise = True
+    selectable _ = True
     renderLine n | byteMode b && n>=documentRows doc w = V.charFill base ' ' contentWidth 1
     renderLine n | byteMode b = V.cropRight contentWidth (V.translateX (negate (scrollColumn w)) (V.horizCat
       [V.char (if active && maybe False highlighted offset then selected else if maybe False (\i -> let byte=T.index bytes (i-n*count) in byte<' ' || byte>'~') offset then attr gray blue else edit) ch | (ch,offset)<-hexRowChunk count (n*count) bytes]) V.<|> V.charFill base ' ' contentWidth 1)

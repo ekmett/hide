@@ -183,6 +183,7 @@ gitOperationEffects runtime@(GitOperations ref _ _ _ terminalLaunch) core = fold
         SaveDocument{} | mutating -> pure (False,desktop {status="Wait for the Git operation to finish before saving."})
         ServiceAction action _ | mutating, action `elem` ["run","compile","make"] ->
           pure (False,desktop {status="Wait for the Git operation to finish before approving agent actions or running commands."})
+        ExecuteShellBlockAction{} | mutating ->pure (False,desktop {status="Wait for the Git operation to finish before running commands."})
         AgentAction action _ | mutating, "approval:" `T.isPrefixOf` action ->
           pure (False,desktop {status="Wait for the Git operation to finish before approving agent actions or running commands."})
         AdoptPreparedDebug _ | mutating -> pure (False,desktop {status="Wait for the Git operation to finish before debugging."})

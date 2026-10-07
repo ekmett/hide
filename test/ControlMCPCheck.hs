@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module ControlMCPCheck (checks) where
 
-import EditorFixture (withEditorFixture, sameBufferVersions)
+import EditorFixture (withEditorTextFixture, sameBufferVersions)
 import Control.Exception (bracket)
 import Control.Monad (unless, forM_)
 import Data.Aeson
@@ -19,7 +19,7 @@ import Hide.MCPPermissions (readEditorDefaults,permissionConfigPath)
 import Hide.Model
 
 checks :: IO ()
-checks=withEditorFixture "" (addReadOnly "Conversation" "Public reply" (initialDesktop (100,35))) $ \conversation ->
+checks=withEditorTextFixture "" "Public reply" (initialDesktop (100,35)) $ \conversation ->
   bracket temporary removePathForcibly $ \root ->
   bracket (lookupEnv "XDG_CONFIG_HOME") (maybe (unsetEnv "XDG_CONFIG_HOME") (setEnv "XDG_CONFIG_HOME")) $ \_ -> do
     setEnv "XDG_CONFIG_HOME" root

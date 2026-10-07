@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 module GuestAccessCheck (checks) where
-import EditorFixture (withEditorFixture)
+import EditorFixture (withEditorBodyFixture)
 import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Monad (unless,forM_)
 import Data.Aeson (object,(.=),withObject,(.:))
@@ -21,17 +21,28 @@ import Hide.Model
 import qualified Hide.Protocol as P
 import qualified Hide.Plugin.Editor as E
 import qualified Hide.Plugin.Menu as Menu
+import qualified Hide.Plugin.Window as W
+import qualified Data.Vector as Vec
+import Hide.Syntax (Style(..))
 
 checks :: IO ()
-checks=withEditorFixture "" (addReadOnly "Conversation" "Session: provider-secret\nPublic transcript\nOther: private answer" (addDocument Nothing (newBuffer "file") (initialDesktop (100,35)))) $ \conversation->do
+checks=do
+  let text="Session: provider-secret\nPublic transcript\nOther: private answer"
+      hidden=Vec.fromList [(0,T.length "Session: provider-secret"),(T.length "Session: provider-secret\nPublic transcript\nOther: ",T.length text)]
+      semantics=W.TextSemantics W.CopyText Nothing Vec.empty Vec.empty W.ReadableWindow hidden
+        (Vec.singleton (0,T.length "Session: provider-secret")) Vec.empty
+  body<-W.prepareSemanticTextWindow "Conversation" [(c,Plain) | c<-T.unpack text] semantics
+    >>= either (error . T.unpack) pure
+  withEditorBodyFixture "" body (addDocument Nothing (newBuffer "file") (initialDesktop (100,35))) checksWithBody
+
+checksWithBody :: Desktop -> IO ()
+checksWithBody conversation=do
   let check label ok=unless ok (error label)
       base=(addDocument Nothing (newBuffer "file") (initialDesktop (100,35))) {wordStar=False}
       sourceId=maybe (-1) sourceFixtureBuffer (activeWindow base)
       firstRect d dg=case fieldRects d dg of r:_->r; _->error "missing field rectangle"
-      chat=(setComposerInput (newBuffer "private draft") (Selection 0 0) True conversation) {
-        chatActions=[(43,64,"question-input",[])]}
+      chat=setComposerInput (newBuffer "private draft") (Selection 0 0) True conversation
       window=case activeWindow chat of Just w->w; _->error "no chat window"
-      ident=sourceFixtureBuffer window
       Rect x y _ _=bounds window
       draft=composerRect chat window
       denied d event=either (const True) (const False) <$> P.applyGuestInput event d
@@ -97,28 +108,44 @@ checks=withEditorFixture "" (addReadOnly "Conversation" "Session: provider-secre
   check "conversation transcript is public but draft and provider session ID are private"
     (readableAt chat (x+2) (y+2) && not (readableAt chat (x+2) (y+1)) && not (readableAt chat (left draft) (top draft)))
   check "conversation read sanitization preserves offsets and removes private spans"
-    (case sanitizedBuffer chat ident of Just text -> T.length text==T.length (activeText chat) && not ("provider-secret" `T.isInfixOf` text) && "Public transcript" `T.isInfixOf` text && not ("private answer" `T.isInfixOf` text); _->False)
+    (case windowPluginText chat window >>= sanitizedPreparedContent of
+      Just (True,content)->let text=contentSlice content 0 (contentLength content)
+        in contentLength content==maybe (-1) (contentLength.W.preparedWindowText) (windowPluginText chat window) &&
+           not ("provider-secret" `T.isInfixOf` text) && "Public transcript" `T.isInfixOf` text && not ("private answer" `T.isInfixOf` text)
+      _->False)
   check "whole conversation window is not clickable, even blank composer space"
     (not (pointerAllowedAt chat (x+2) (y+2)) && not (pointerAllowedAt chat (x+2) (top draft)))
   forM_ [P.Key "Enter" [],P.Key "x" [],P.Paste "answer",P.Mouse "down" (left draft) (top draft) 0 1 [],P.Mouse "down" (x+2) (top draft) 0 1 []] $ \event ->
     checkDenied "guest cannot type or click into human draft/answer controls" chat [event]
-  let generic=chat {buffers=M.adjust (\doc->doc {documentLabel=Nothing}) ident (buffers chat),chatActions=[]}
-      genericWindow=maybe (error "generic editor missing") id (activeWindow generic)
-      genericDraft=composerRect generic genericWindow
-  check "source-attached input is private regardless of document title while its body stays readable"
-    (readableAt generic (x+2) (y+2) && not (readableAt generic (left genericDraft) (top genericDraft)) &&
-     not (pointerAllowedAt generic (left genericDraft) (top genericDraft)) &&
-     not (guestKeyboardAllowed generic) && not (guestCommandAllowedIn generic Copy) &&
-     sanitizedBuffer generic ident==Just (activeText generic))
-  checkDenied "generic attached editor rejects guest text, clipboard and pointer routes" generic
-    [P.Paste "guest",P.Key "x" [],P.Key "c" [V.MCtrl],P.MenuCommand Copy,P.BrowserCommand Copy,
-     P.Mouse "down" (left genericDraft) (top genericDraft) 0 1 []]
-  check "human streamer presentation keeps the attached draft visible"
-    (streamerReadableAt generic {streamerMode=True} (left genericDraft) (top genericDraft))
+  let genericText="Public generic body"
+      publicSemantics=W.TextSemantics W.CopyText Nothing Vec.empty Vec.empty W.ReadableWindow Vec.empty Vec.empty Vec.empty
+  publicBody<-W.prepareSemanticTextWindow "Plain text" [(c,Plain) | c<-T.unpack genericText] publicSemantics
+    >>= either (error . T.unpack) pure
+  withEditorBodyFixture "" publicBody base $ \mounted->do
+    let generic=mounted {conversationViews=M.empty}
+        genericWindow=maybe (error "generic editor missing") id (activeWindow generic)
+        genericDraft=composerRect generic genericWindow
+        Rect gx gy _ _=bounds genericWindow
+    check "attached input is private regardless of body title while its body stays readable"
+      (readableAt generic (gx+2) (gy+1) && not (readableAt generic (left genericDraft) (top genericDraft)) &&
+       not (pointerAllowedAt generic (left genericDraft) (top genericDraft)) &&
+       not (guestKeyboardAllowed generic) && not (guestCommandAllowedIn generic Copy) &&
+       case sanitizedPreparedContent publicBody of
+         Just (False,content)->contentSlice content 0 (contentLength content)==genericText
+         _->False)
+    checkDenied "generic attached editor rejects guest text, clipboard and pointer routes" generic
+      [P.Paste "guest",P.Key "x" [],P.Key "c" [V.MCtrl],P.MenuCommand Copy,P.BrowserCommand Copy,
+       P.Mouse "down" (left genericDraft) (top genericDraft) 0 1 []]
+    check "human streamer presentation keeps the attached draft visible"
+      (streamerReadableAt generic {streamerMode=True} (left genericDraft) (top genericDraft))
   let (human,_) = P.applyInput (P.Paste "human") chat
   check "human input still edits the conversation draft" (contents (composerBuffer human)/=contents (composerBuffer chat))
-  moved<-either (error . T.unpack) pure =<< P.applyGuestInput (P.Key "F6" []) chat
-  check "guest may focus a normal window away from conversation" (maybe False (not . protectedBuffer (fst moved) . sourceFixtureBuffer) (activeWindow (fst moved)))
+  let navigating=chat {keyBindings=either (error . T.unpack) id (configuredBindings [] M.empty)}
+  check "guest window navigation resolves the configured conversation command"
+    (boundKeyCommand (V.KFun 6) [] navigating==Just NextWindow)
+  moved<-either (error . T.unpack) pure =<< P.applyGuestInput (P.Key "F6" []) navigating
+  check "guest may focus the normal source window away from conversation"
+    (maybe False (\w->bufferId w==Just sourceId && not (protectedWindow (fst moved) w)) (activeWindow (fst moved)))
   forM_ ["Agent request","Proposed agent edit","Git diff","Disk changes: /example/thc.toml"] $ \label -> do
     let review=addReadOnly label "private review" base
         bid=maybe (-1) sourceFixtureBuffer (activeWindow review)

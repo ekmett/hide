@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module EditorMCPCheck (checks) where
 import SourceWindowFixture (sourceFixtureBuffer)
+import EditorFixture (withEditorBodyFixture)
 import Control.Monad (unless)
 import Data.IORef
 import Control.Exception (bracket, try, IOException, evaluate)
@@ -18,6 +19,11 @@ import Data.Maybe (fromJust)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Hide.EditorMCP
+import Hide.BufferReads (captureWindow)
+import Hide.BufferReadCommand (withBufferReadCommands)
+import qualified Hide.Plugin.Window as W
+import qualified Data.Vector as V
+import Hide.Syntax (Style(..))
 import Hide.Files (FileState(..))
 import Hide.Buffer
 import Hide.Model
@@ -33,7 +39,7 @@ checks = do
       text=TE.decodeUtf8 . BL.toStrict . encode
       names=editorResponse edited (rpc "tools/list" (object []))
       content=call "read_buffer" (object ["bufferId" .= sourceFixtureBuffer win,"startLine" .= (1::Int),"lineCount" .= (1::Int)])
-  check "MCP lists live windows and buffers" (all (\name->maybe False (T.isInfixOf name . text) names) ["list_windows","list_buffers","read_buffer","read_selection"])
+  check "MCP lists live windows and buffers" (all (\name->maybe False (T.isInfixOf name . text) names) ["list_windows","list_buffers","read_buffer","read_window","read_selection"])
   check "MCP returns unsaved Unicode text" (maybe False (T.isInfixOf "unsaved λ" . text) content && not (maybe False (T.isInfixOf "second" . text) content))
   check "MCP does not fabricate saved paths for untitled buffers" (maybe False (T.isInfixOf "Untitled" . text) (call "list_windows" (object [])))
   check "MCP missing buffer is a tool error" (maybe False (T.isInfixOf "Buffer not found" . text) (call "read_buffer" (object ["bufferId" .= (999::Int)])))
@@ -46,16 +52,25 @@ checks = do
   check "MCP invalid request is protocol error" (case editorResponse edited Null of Just (Object fields)->KM.member "error" fields; _->False)
   let decoded=content >>= parseMaybe (withObject "reply" (.: "result")) :: Maybe Value
   check "MCP tool result envelope exists" (decoded/=Nothing)
-  let privateConversation=addReadOnly "Conversation" "Session: provider-secret\nPublic assistant response\nOther: unsent-secret" (initialDesktop (80,25))
-      privateWindow=fromJust (activeWindow privateConversation)
-      answerStart=T.length "Session: provider-secret\nPublic assistant response\n"
-      withPrivateInput=privateConversation {chatActions=[(answerStart,answerStart+T.length "Other: unsent-secret","question-input",["1"])]}
-      privateRead=builtinTool withPrivateInput "read_buffer" (object ["bufferId" .= sourceFixtureBuffer privateWindow])
-      encodedRead=case privateRead of Right value->text value; Left err->err
-  check "MCP conversation reads redact session identifiers and unsent answers" (not ("provider-secret" `T.isInfixOf` encodedRead) && not ("unsent-secret" `T.isInfixOf` encodedRead) && "Public assistant response" `T.isInfixOf` encodedRead)
-  check "MCP conversation selections cannot bypass private redaction" (case builtinTool (modifyActive (\w->w {selection=Selection 0 200}) withPrivateInput) "read_selection" (object []) of Left _->True; _->False)
-  let binaryConversation=privateConversation {buffers=M.adjust (\doc->doc {documentBuffer=newByteBuffer "Session: binary-session-secret"}) (sourceFixtureBuffer privateWindow) (buffers privateConversation)}
-  check "MCP binary conversation cannot bypass session redaction" (case builtinTool binaryConversation "read_buffer" (object []) of Left _->True; _->False)
+  let conversationText="Session: provider-secret\nPublic assistant response\nOther: unsent-secret"
+      answerStart=T.length "Session: provider-secret\nPublic assistant response\nOther: "
+      semantics=W.TextSemantics W.CopyText Nothing V.empty V.empty W.ReadableWindow
+        (V.fromList [(0,T.length "Session: provider-secret"),(answerStart,T.length conversationText)]) V.empty V.empty
+  conversationBody<-W.prepareSemanticTextWindow "Conversation" [(c,Plain) | c<-T.unpack conversationText] semantics
+    >>= either (error . T.unpack) pure
+  withEditorBodyFixture "" conversationBody (initialDesktop (80,25)) $ \conversation->withBufferReadCommands $ \commands->do
+    (_,finishRead)<-readWindowTool commands (captureWindow conversation) conversation "read_window" (object [])
+    privateRead<-finishRead
+    let encodedRead=either id text privateRead
+    check "MCP prepared conversation reads redact session identifiers and unsent answers"
+      (case privateRead of
+        Right _->not ("provider-secret" `T.isInfixOf` encodedRead) && not ("unsent-secret" `T.isInfixOf` encodedRead)
+          && "Public assistant response" `T.isInfixOf` encodedRead
+        Left _->False)
+    check "MCP conversation selections cannot bypass private redaction"
+      (case builtinTool (modifyActive (\w->w {selection=Selection 0 200}) conversation) "read_selection" (object []) of Left _->True; _->False)
+    check "MCP prepared conversations cannot fabricate a source buffer read"
+      (M.null (buffers conversation) && case builtinTool conversation "read_buffer" (object []) of Left _->True; _->False)
   let byteDocument=addDocument Nothing (newByteBuffer (BS.pack [0,127,128,255])) (initialDesktop (80,25))
   check "MCP byte formatting preserves original values and spacing" (case builtinTool byteDocument "read_buffer" (object []) of
     Right (Object fields)->KM.lookup "hex" fields==Just (String "00 7f 80 ff") && KM.lookup "totalBytes" fields==Just (toJSON (4::Int))

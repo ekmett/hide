@@ -4,9 +4,9 @@
 -- checks bounded exact window/content/version/width targets. Retired or resized
 -- styled targets use ordinary geometry until matching preparation completes;
 -- Markdown previews remain a read-only pending/error surface.
-module Hide.TextPresentation (TextPresentation,withTextPresentation,tickTextPresentation,prepareTextPresentations) where
+module Hide.TextPresentation (TextPresentation,withTextPresentation,tickTextPresentation,prepareTextPresentations,BodyRequest(..),BodyResult(..)) where
 
-import Control.Concurrent.Async (Async,async,cancel,poll)
+import Control.Concurrent.Async (Async,asyncWithUnmask,cancel,poll)
 import Control.Exception (bracket,mask,evaluate)
 import Data.IORef
 import qualified Data.Map.Strict as M
@@ -16,6 +16,7 @@ import Hide.Markdown (renderMarkdown)
 import Hide.Syntax (linkSpans,styleLayoutMetadata)
 import qualified Data.Text as T
 import Hide.Model
+import Hide.ConversationBody (BodyRequest(..),BodyResult(..),BodyKey,prepareConversationBody)
 import qualified Hide.Plugin.Window as W
 import Hide.Syntax (Style)
 import Hide.TextLayout (prepareTextLayout)
@@ -23,45 +24,59 @@ import Hide.TextLayout (prepareTextLayout)
 type Target = (Int,PresentationTarget,Int,Bool)
 data StyledPayload = MarkdownSource | DocumentStyles ![(Char,Style)] | PluginStyles !(V.Vector [(Char,Style)])
 data Capture = Capture !Target !BufferContent !StyledPayload
-data Pending = Pending [Target] (Async [(Int,WindowPresentation)])
-data TextPresentation = TextPresentation (IORef (Maybe Pending)) (IORef [Target])
+data Pending = Pending [Target] [BodyKey] (Async ([(Int,WindowPresentation)],[BodyResult]))
+data TextPresentation = TextPresentation (IORef (Maybe Pending)) (IORef ([Target],[BodyKey]))
 
 -- | Own and join the single presentation worker at session shutdown.
 withTextPresentation :: (TextPresentation -> IO a) -> IO a
-withTextPresentation=bracket (TextPresentation <$> newIORef Nothing <*> newIORef []) close
-  where close (TextPresentation pending _)=readIORef pending >>= mapM_ (\(Pending _ worker)->cancel worker)
+withTextPresentation=bracket (TextPresentation <$> newIORef Nothing <*> newIORef ([],[])) close
+  where close (TextPresentation pending _)=readIORef pending >>= mapM_ (\(Pending _ _ worker)->cancel worker)
 
 -- | Poll/adopt complete snapshots and enqueue only when scalar targets change.
 -- Preparation failure retains ordinary text or a bounded Markdown error state;
 -- no input operation waits for it.
-tickTextPresentation :: TextPresentation -> Desktop -> IO Desktop
-tickTextPresentation (TextPresentation pending observed) desktop=mask $ \restore->do
+tickTextPresentation :: TextPresentation -> [BodyRequest] -> Desktop -> IO (Desktop,[BodyResult])
+tickTextPresentation (TextPresentation pending observed) bodies desktop=mask $ \_->do
   let targets=metadata desktop
+      keys=[key | BodyRequest key _<-bodies]
+  mapM_ evaluate keys
   running<-readIORef pending
-  completed<-case running of Nothing->pure Nothing; Just (Pending _ worker)->poll worker
-  ready<-case (running,completed) of
-    (Just (Pending captured _),Just result)->do
+  completed<-case running of Nothing->pure Nothing; Just (Pending _ _ worker)->poll worker
+  (ready,bodyResults)<-case (running,completed) of
+    (Just (Pending captured bodyKeys _),Just result)->do
       writeIORef pending Nothing
       pure $ case result of
-        Right prepared | captured==targets->reprojectWindowPresentations desktop desktop {windowPresentations=M.fromList prepared}
-        Left _ | captured==targets->desktop {windowPresentations=M.fromList [(ident,MarkdownWindowFailure target width wide) | (ident,target@MarkdownPresentation{},width,wide)<-captured],status="Markdown view preparation failed."}
-        _->desktop
-    _->pure desktop
-  let retained=M.filterWithKey (\ident prepared->let (target,width,wide)=presentationMetadata prepared in (ident,target,width,wide) `elem` targets) (windowPresentations ready)
+        Right (prepared,finished)->
+          (reprojectWindowPresentations desktop desktop {windowPresentations=M.union
+            (M.fromList [(ident,presentation) | (ident,presentation)<-prepared,
+              let (target,width,wide)=presentationMetadata presentation,(ident,target,width,wide) `elem` targets])
+            (windowPresentations desktop)},finished)
+        Left _->(desktop {windowPresentations=M.union
+          (M.fromList [(ident,MarkdownWindowFailure target width wide) | entry@(ident,target@MarkdownPresentation{},width,wide)<-captured,entry `elem` targets])
+          (windowPresentations desktop),status="Text view preparation failed."},
+          [BodyResult key (Left "Conversation body preparation failed.") | key<-bodyKeys])
+    _->pure (desktop,[])
+  let retained=M.filterWithKey (\ident prepared->let (target,width,wide)=presentationMetadata prepared
+        in (ident,target,width,wide) `elem` targets || any (\window->windowId window==ident && maybe False (const True) (conversationTargetFor ready window)) (windows ready)) (windowPresentations ready)
       shown=ready {windowPresentations=retained}
   previous<-readIORef observed
   active<-readIORef pending
   case active of
-    Just _->pure shown
-    Nothing | previous==targets->pure shown
-    Nothing | null targets->writeIORef observed [] >> pure shown
+    Just _->pure (shown,bodyResults)
+    Nothing | previous==(targets,keys)->pure (shown,bodyResults)
+    Nothing | null targets && null bodies->writeIORef observed ([],[]) >> pure (shown,bodyResults)
     Nothing->do
-      let captured=captures shown targets
+      let workTargets=filter (`notElem` fst previous) targets
+          captured=captures shown workTargets
+          changed=[request | request@(BodyRequest key _)<-bodies,key `notElem` snd previous]
+      let workKeys=[key | BodyRequest key _<-changed]
+      mapM_ evaluate workKeys
       mapM_ evaluate captured
-      worker<-async (restore (mapM prepare captured))
-      writeIORef pending (Just (Pending targets worker))
-      writeIORef observed targets
-      pure shown
+      mapM_ evaluate changed
+      worker<-asyncWithUnmask $ \unmask->unmask ((,) <$> mapM prepare captured <*> mapM prepareConversationBody changed)
+      writeIORef pending (Just (Pending workTargets workKeys worker))
+      writeIORef observed (targets,keys)
+      pure (shown,bodyResults)
 
 prepare :: Capture -> IO (Int,WindowPresentation)
 prepare (Capture (ident,target,width,wide) text MarkdownSource)=do
@@ -88,7 +103,7 @@ prepareTextPresentations desktop=do
 
 metadata :: Desktop -> [Target]
 metadata desktop=[(windowId window,target,max 1 (width (bounds window)-2),wideSectionTitles desktop)
-      | window<-windows desktop,Just target<-[windowPresentationTarget desktop window],
+      | window<-windows desktop,conversationTargetFor desktop window==Nothing,Just target<-[windowPresentationTarget desktop window],
         windowPresentationNeeded desktop window || case target of DocumentPresentation{}->True; _->False]
 
 captures :: Desktop -> [Target] -> [Capture]

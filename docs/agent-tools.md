@@ -56,6 +56,7 @@ reads use a bounded declared corpus, not automatic classification of every word.
 | `list_buffers` | R | `{}` | Buffer IDs, paths, revisions, dirty state; includes untitled buffers |
 | `list_windows` | R | `{}` | Window IDs, titles, buffer IDs, rectangles, active window and panels |
 | `read_buffer` | R | `bufferId?`, `startLine?`, `lineCount?`, `byteOffset?` | Live text; 200 lines default, 1000 maximum. Binary: up to 4096 hex bytes. Defaults to active buffer |
+| `read_window` | R | `windowId?`, `startLine?`, `lineCount?` | Readable prepared text; 200 lines default, 1000 maximum, 131072 characters. Logical `window-text` coordinates; protected spans masked. Defaults to active window |
 | `read_selection` | R | `windowId?` | Selected content and cursor offsets; `coordinateSpace` is `source` or `rendered-markdown`. Defaults to active window |
 | `workspace_project` | R | `{}` | Project root, Cabal package file, active source, unsaved buffers, existing Cabal component/dependency graph |
 | `workspace_search` | R | `query`, `trackedOnly?`, `offset?`, `limit?` | Literal line matches with live-buffer substitution; tracked-only or ignore-respecting workspace search |
@@ -69,6 +70,13 @@ files/matches. Inspect truncation flags. Filesystem mutations stay inside the
 project, refuse overwrite/dirty descendants, protect Git metadata and symlink
 endpoints, and do not recursively delete directories. Save uses disk-conflict
 checks. These reads use the [protected content policy](#protected-content-policy).
+
+`read_window` reads an installed prepared text body, including a stopped
+conversation. Use `read_buffer` for source files. Rows/Details windows do not
+provide this text projection. A refresh or close before capture rejects the
+request; an admitted immutable snapshot remains readable after close. Permission
+is checked by the same owner as buffer reads. The result has `window` metadata,
+not a fabricated buffer ID or source revision.
 
 `workspace_project.cabalPlan` reads only `dist-newstyle/cache/plan.json`; it does
 not invoke Cabal. `status` distinguishes `available`, `missing`, `invalid`,

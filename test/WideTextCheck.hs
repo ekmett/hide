@@ -124,14 +124,6 @@ checks=do
       Just M.WindowPresentationUnneeded{}->M.windowPresentation negative negativeView==Nothing &&
         (M.selection negativeView,M.scrollRow negativeView,M.scrollColumn negativeView)==(Selection 2 2,2,1)
       _->False)
- let overflowChars=renderMarkdown 1 (head overflowing<>"Z")
-     transcript=M.addHelpStyled overflowChars (M.initialDesktop (40,25))
-     adopted=transcript {M.buffers=Map.map (\doc->doc {M.documentHasLayoutMetadata=False,M.documentLabel=Just "Conversation"}) (M.buffers transcript)}
- admitted<-prepareTextPresentations adopted
- let admittedView=fromJust (M.activeWindow admitted)
- check "worker discovers generated transcript metadata without a UI-owner admission scan"
-   (not (M.documentHasLayoutMetadata (fromJust (M.activeDocument admitted))) &&
-    maybe False ((==3) . length . filter ((=="�") . layoutDisplayText) . concatMap (Vec.toList . layoutGlyphs) . Vec.toList . layoutRows) (M.windowPresentation admitted admittedView))
  let scripted="A界e\x301👩🏽\x200d\&💻"
      scriptStyles=Vec.singleton [(c,ScriptStyle Superscript (BoldStyle Plain)) | c<-T.unpack scripted]
  scriptLayout<-prepareTextLayout False 40 (bufferContent (newBuffer scripted)) scriptStyles
@@ -184,7 +176,7 @@ checks=do
    let opened=M.addPluginWindow reference payload (M.initialDesktop (80,25))
        initial=opened {M.wideSectionTitles=False}
        settle desktop=do
-         next<-tickTextPresentation owner desktop
+         next<-fmap fst (tickTextPresentation owner [] desktop)
          if M.windowPresentation next (head (M.windows next))/=Nothing then pure next else threadDelay 1000 >> settle next
    ready<-timeout 5000000 (settle initial) >>= maybe (fail "script-only plugin layout not adopted") pure
    let view=head (M.windows ready)
@@ -210,7 +202,7 @@ checks=do
        view=fromJust (M.activeWindow opened)
        initial=opened {M.wideSectionTitles=True,M.windows=[view {M.bounds=M.Rect 2 2 8 12}]}
        settle desktop=do
-         next<-tickTextPresentation owner desktop
+         next<-fmap fst (tickTextPresentation owner [] desktop)
          if maybe False (\w->M.windowPresentation next w/=Nothing) (M.activeWindow next) then pure next
          else threadDelay 1000 >> settle next
        prepare desktop=timeout 5000000 (settle desktop) >>= maybe (fail "wide heading owner did not adopt") pure
@@ -223,7 +215,7 @@ checks=do
        offDialog=(fromJust (M.dialog shownPreferences)) {M.fields=map (\field->case field of M.CheckBox "Wide section titles" _->M.CheckBox "Wide section titles" False; _->field) (M.fields (fromJust (M.dialog shownPreferences)))}
        returned=fst (M.submitDialog 0 offDialog shownPreferences)
    check "disabling wide titles preserves semantic manual browsing" (topOffset returned==topOffset preparedBrowsing)
-   queued<-tickTextPresentation owner initial
+   queued<-fmap fst (tickTextPresentation owner [] initial)
    let queuedResize=queued {M.windows=[view {M.bounds=M.Rect 2 2 10 12}]}
    pendingReady<-prepare queuedResize
    check "pending resize cannot adopt the old worker width" (case Map.lookup (M.windowId view) (M.windowPresentations pendingReady) of Just (M.WindowPresentation _ columns _ _)->columns==8; _->False)
@@ -257,7 +249,7 @@ checks=do
        (linkRow,linkColumn)=layoutPosition layout a
        lx=M.left (M.bounds w)+1+linkColumn
        ly=M.top (M.bounds w)+1+linkRow
-   check "links below wrapped headings retain their original target" (M.linkAt lx ly ready==Just (M.OpenLink Nothing "file.md") && z>a)
+   check "links below wrapped headings retain their original target" (M.linkAt lx ly ready==Just (M.OpenLink (M.SourceLink Nothing) "file.md") && z>a)
    let resized=ready {M.windows=[w {M.bounds=M.Rect 2 2 10 12}]}
        disabled=ready {M.wideSectionTitles=False}
    let review=ready {M.windows=[w {M.bufferView=M.SideBySideView}]}
@@ -280,7 +272,7 @@ checks=do
    check "same read-only document replacement retires old presentation" (maybe False (\current->M.windowPresentation replaced current==Nothing) (M.activeWindow replaced))
    _<-prepare replaced
    let poisoned=ready {M.buffers=Map.map (\document->document {M.documentBuffer=(M.documentBuffer document) {undoStack=error "wide heading inspected Undo"}}) (M.buffers ready)}
-   _<-tickTextPresentation owner poisoned
+   _<-fmap fst (tickTextPresentation owner [] poisoned)
    check "render/layout metadata never inspect Undo" ("Ａ" `T.isInfixOf` snapshot poisoned)
    let terminal=M.addReadOnly "Terminal test" "title" ready
        terminalStyled=terminal {M.buffers=Map.adjust (\document->document {M.documentHighlight=[('t',TerminalStyle 0xffffff 0 1)]}) (M.nextId terminal) (M.buffers terminal)}
@@ -293,7 +285,7 @@ checks=do
        w=fromJust (M.activeWindow opened)
        initial=opened {M.wideSectionTitles=True,M.windows=[w {M.bounds=M.Rect 2 2 8 12}]}
        settle desktop=do
-         next<-tickTextPresentation owner desktop
+         next<-fmap fst (tickTextPresentation owner [] desktop)
          if M.windowPresentation next (head (M.windows next))/=Nothing then pure next else threadDelay 1000 >> settle next
    ready<-timeout 5000000 (settle initial) >>= maybe (fail "plugin heading layout not adopted") pure
    let view=head (M.windows ready)

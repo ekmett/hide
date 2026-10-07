@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 module BindingsCheck (checks) where
-import EditorFixture (withEditorFixture)
+import EditorFixture (withEditorTextFixture)
 import qualified Hide.Plugin.Editor as E
 import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Monad (unless,forM_)
@@ -36,7 +36,7 @@ import Hide.Buffer
 import Hide.Render (renderKey)
 
 checks :: IO ()
-checks=withEditorFixture "" (addReadOnly "Conversation" "reply" (initialDesktop (80,25))) $ \chatBase->do
+checks=withEditorTextFixture "" "reply" (initialDesktop (80,25)) $ \chatBase->do
   prefixChecks
   dialogInputChecks
   debuggerNavigationChecks
@@ -204,7 +204,7 @@ checks=withEditorFixture "" (addReadOnly "Conversation" "reply" (initialDesktop 
   putStrLn "keybinding checks passed"
 
 windowChecks :: IO ()
-windowChecks=withEditorFixture "" (addReadOnly "Conversation" "reply" (initialDesktop (80,25))) $ \chatBase->do
+windowChecks=withEditorTextFixture "" "reply" (initialDesktop (80,25)) $ \chatBase->do
   let check name ok=unless ok (error name)
       compile entries=either (error . show) id (platformBindings [] TerminalPlatform (M.singleton "global" (M.fromList entries)))
       defaults=compile []
@@ -390,7 +390,7 @@ verticalChecks=do
   check "vertical platform remap projects the same identity and label" (range (event (V.KChar 'j') [V.MMeta,V.MShift] mac)==Just (Selection 1 1) && lookup "Cmd+Shift+J" (focusedBindingChords mac)==Just "hide.cursor.up" && commandBindingKeys mac (CursorUp False)==["Cmd+Shift+J"])
 
 edgePageChecks :: IO ()
-edgePageChecks=withEditorFixture "" (addReadOnly "Conversation" "reply" (initialDesktop (80,25))) $ \chatBase->do
+edgePageChecks=withEditorTextFixture "" "reply" (initialDesktop (80,25)) $ \chatBase->do
   let check name ok=unless ok (error name)
       event k mods=fst . handleEvent (V.EvKey k mods)
       range d=selection <$> activeWindow d
@@ -463,7 +463,7 @@ edgePageChecks=withEditorFixture "" (addReadOnly "Conversation" "reply" (initial
   check "edge chord reassignment must explicitly release its owner" (either (const True) (const False) conflict)
 
 wordChecks :: IO ()
-wordChecks=withEditorFixture "" (addReadOnly "Conversation" "reply" (initialDesktop (80,25))) $ \chatBase->do
+wordChecks=withEditorTextFixture "" "reply" (initialDesktop (80,25)) $ \chatBase->do
   let check name ok=unless ok (error name)
       event k mods=fst . handleEvent (V.EvKey k mods)
       range d=selection <$> activeWindow d
@@ -605,7 +605,7 @@ dialogControlChecks=do
   check "dialog controls are unavailable outside a modal" (not (commandEnabled base accept) && not (commandEnabled base cancel) && null (snd (runCommand accept base)))
 
 dialogFocusChecks :: IO ()
-dialogFocusChecks=do
+dialogFocusChecks=withEditorTextFixture "" "Transcript" (initialDesktop (80,25)) $ \questionHost->do
   let check label ok=unless ok (error label)
       prepared entries=either (error . show) id (configuredBindings [] (M.singleton "terminal" (M.singleton "dialog" (M.fromList entries))))
       defaults=either (error . show) id (configuredBindings [] M.empty)
@@ -659,7 +659,7 @@ dialogFocusChecks=do
   let privateSelected=prompt "Private" Information [SelectedInput "API key" "secret" (Selection 0 6)] base {keyBindings=prepared [("hide.dialog.focus-next",[]),("hide.edit.copy",["Tab"])]}
   blockedCopy<-P.applyGuestInput (P.Key "Tab" []) privateSelected
   check "rebinding Tab to editing cannot borrow safe navigation authority" (case blockedCopy of Left _->True; _->False)
-  let questionBase=(addReadOnly "Conversation" "Transcript" base) {chatQuestion=Just (ChatQuestion 42 "Question" ["Yes"] Nothing (newBuffer "") (Selection 0 0) True)}
+  let questionBase=questionHost {keyBindings=remapped,chatQuestion=Just (ChatQuestion 42 "Question" ["Yes"] Nothing (newBuffer "") (Selection 0 0) True)}
   check "dialog commands do not replace inline question ownership" (not (commandEnabled questionBase nextCommand) && maybe False ((==Just 0).questionChoice) (chatQuestion (event (V.KChar '\t') [] questionBase)) && snd (handleEvent (V.EvKey V.KEnter []) questionBase)==[AgentAction "question-submit" ["42"]] && snd (handleEvent (V.EvKey V.KEsc []) questionBase)==[AgentAction "question-cancel" ["42"]])
   check "dialog focus chords are configurable on every platform" (all (\platform->case platformBindings [] platform (M.singleton "dialog" (M.fromList [("hide.dialog.focus-next",["Alt+Tab"]),("hide.dialog.focus-previous",["Shift+Tab"])])) of Right _->True; _->False) [TerminalPlatform,GraphicalPlatform,MacPlatform])
 
