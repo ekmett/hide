@@ -555,7 +555,7 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ withTextPresentation $ 
             blocks=bodyShellBlocks prepared
         check "background chat preparation adopts the resized window width"
           (maximum (0:map T.length nonempty)>columns-22 && all ((<=columns-2).T.length) nonempty)
-        check "reflow preserves the whole shell source and maps its decorated cells"
+        check ("reflow preserves the whole shell source and maps its decorated cells: "++show (columns,map (\(a,z,_,_)->(a,z)) blocks,blockRows,map (\(_,_,dialect,raw)->(dialect,raw)) blocks==[("sh",rawShell)]))
           (map (\(_,_,dialect,raw)->(dialect,raw)) blocks==[("sh",rawShell)] &&
            all (\(a,z)->any (\(start,end,_,_)->a>=start && z<=end) blocks) blockRows)
         let browsing=(setComposerInput (composerBuffer reflowed) (composerSelection reflowed) False reflowed) {chatQuestion=fmap (\q->q {questionFocused=False}) (chatQuestion reflowed)}
