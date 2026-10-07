@@ -565,6 +565,7 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ withTextPresentation $ 
         selected<-await runtime "logical transcript Shift End" caretReady (fst (runCommand (CursorDocumentEnd True) first))
         let (pendingCopy,copyEffects)=runCommand Copy selected
         (_,capturedCopy)<-textPresentationEffects presentation fallback pendingCopy copyEffects
+        putStrLn ("Question copy admission: "++show (columns,questionActive selected,conversationReplySelection =<< M.lookup "" (conversationViews first),conversationReplySelection =<< M.lookup "" (conversationViews selected),copyEffects,status capturedCopy))
         copied<-await runtime "logical transcript copy" (T.isInfixOf "window-width".clipboard) capturedCopy
         check "copy after chat reflow still excludes bubble furniture"
           ("window-width" `T.isInfixOf` clipboard copied && not ("┌" `T.isInfixOf` clipboard copied) && not ("```" `T.isInfixOf` clipboard copied))
