@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE BangPatterns, OverloadedStrings #-}
 -- | CommonMark layout into borrowed styled rows for help and conversations.
 --
 -- Parsing builds a small block representation, then wrapping and table layout
@@ -311,15 +311,19 @@ stripFinalNewline chars=case reverse chars of
   _->chars
 
 wrapWords :: Int -> Styled -> [Styled]
-wrapWords width = go [] . wordsOf . boundedParts
+wrapWords width = go 0 [] . map (\word->(word,columns word)) . wordsOf . boundedParts
   where
-    go current [] = [current]
-    go [] (word:rest)
-      | columns word > width = let parts = wrapExact width word in init parts ++ go (last parts) rest
-      | otherwise = go word rest
-    go current remaining@(word:rest)
-      | columns current + 1 + columns word <= width = go (current ++ [(" ",Plain,between current word)] ++ word) rest
-      | otherwise = current : go [] remaining
+    -- Word splitting removes tabs; advances compose with the inserted one-cell
+    -- blank. Carry the accepted width instead of segmenting the row again.
+    go !_ current [] = [current]
+    go !_ [] ((word,advance):rest)
+      | advance > width =
+          let parts=wrapExact width word; final=last parts
+          in init parts ++ go (columns final) final rest
+      | otherwise = go advance word rest
+    go !col current remaining@((word,advance):rest)
+      | col + 1 + advance <= width = go (col+1+advance) (current ++ [(" ",Plain,between current word)] ++ word) rest
+      | otherwise = current : go 0 [] remaining
     wordsOf pending=case dropWhile whitespace pending of
       []->[]
       remaining->let (word,rest)=break whitespace remaining in compactRuns (concat word):wordsOf rest
