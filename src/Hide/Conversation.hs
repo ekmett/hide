@@ -640,6 +640,10 @@ conversationBodyRequests (ConversationState _ ref _ agents) desktop=do
       let question=if T.null target then chatQuestion desktop else Nothing
           records=if T.null target then transcript state else M.findWithDefault [] target (childRecords state)
           owns=if T.null target then not (isNothing (connection state)) || not (null records) || not (isNothing question) || not (isNothing (lastQuestion state)) else M.member target (childRecords state)
+          visible=any ((==PluginContent reference).windowContent) (windows desktop)
+          recovered=case conversationLogical view of
+            Just logical | RecoveredBodyProvider{}<-logicalBodyProvider logical,not owns->Just logical
+            _->Nothing
       captured<-if T.null target then pure (Just (PrimaryBodyProvider launch primary)) else fmap (either (const Nothing) (Just . ChildBodyProvider . fst)) (AH.agentConfiguration (AR.agentHub agents) (AH.AgentId target))
       schema<-traverse (\q->evaluate (QuestionSchema (questionToken q) (questionText q) (questionChoices q))) question
       -- Retain the pending question lifetime until a question-free body is
@@ -648,11 +652,20 @@ conversationBodyRequests (ConversationState _ ref _ agents) desktop=do
         Just (QuestionSchema token _ _) | live->modifyIORef' ref (\current->current {lastQuestion=Just token})
         _->pure ()
       identity<-makeStableName =<< evaluate records
-      pure $ case captured of
-        Just owner | live && owns->[BodyRequest (BodyKey reference target owner identity (case schema of Just (QuestionSchema token _ _)->Just token; Nothing->Nothing) (conversationWidthFor target desktop) (videoMode desktop/=Nothing) (wideSectionTitles desktop) expansion)
-          (BodyInput (if T.null target then "Conversation" else conversationName view) (project state) sessionName records
-            schema (toolExpansions state) (conversationLogical view))]
-        _->[]
+      pure $ case recovered of
+        Just logical | visible->[BodyRequest
+          (BodyKey reference target (logicalBodyProvider logical) (logicalBodyTranscriptIdentity logical) Nothing
+            (conversationWidthFor target desktop) (videoMode desktop/=Nothing) (wideSectionTitles desktop)
+            (BodyDemand (conversationAnchor view) (conversationRowShift view) (conversationHeightFor target desktop)) expansion)
+          (BodyInput (if T.null target then "Conversation" else conversationName view) (project state) Nothing [] Nothing S.empty (Just logical))]
+        _->case captured of
+          Just owner | live && owns->let same=maybe True ((==owner).logicalBodyProvider) (conversationLogical view)
+            in [BodyRequest (BodyKey reference target owner identity (case schema of Just (QuestionSchema token _ _)->Just token; Nothing->Nothing)
+              (conversationWidthFor target desktop) (videoMode desktop/=Nothing) (wideSectionTitles desktop)
+              (BodyDemand (if same then conversationAnchor view else FollowEnd) (if same then conversationRowShift view else 0) (conversationHeightFor target desktop)) expansion)
+              (BodyInput (if T.null target then "Conversation" else conversationName view) (project state) sessionName records
+                schema (toolExpansions state) (conversationLogical view))]
+          _->[]
 
 -- Completed streaming text may trail the latest root while the single worker
 -- prepares its successor. Owner/question/UI expansion identities remain exact.
@@ -666,34 +679,39 @@ adoptConversationBodies runtime results desktop=do
       _->case result of
         Left err->pure current {status=err}
         Right (PreparedBody body layout controls logical)->do
-          update<-W.refreshTextWindow (bodyWindow key) body
-          case update of
+          admitted<-case bodyProvider key of
+            RecoveredBodyProvider identity | bodyWindow key `S.member` retiredPluginWindows current,
+              Just retained<-conversationLogicalBody (bodyTarget key) current,
+              logicalBodyIdentity retained==identity->pure (Just current {pluginWindows=M.insert (bodyWindow key) body (pluginWindows current)})
+            _->do
+              update<-W.refreshTextWindow (bodyWindow key) body
+              traverse (\prepared->adoptWindowUpdate Plugin.HumanMenu prepared current) update
+          case admitted of
             Nothing->pure current
-            Just prepared->do
-              next<-adoptWindowUpdate Plugin.HumanMenu prepared current
-              if M.lookup (bodyWindow key) (pluginWindows next)/=Just body then pure current else do
+            Just next->if M.lookup (bodyWindow key) (pluginWindows next)/=Just body then pure current else do
                 let target=bodyTarget key
-                    before=M.lookup (bodyWindow key) (pluginWindows current)
-                    extent=contentLength (W.preparedWindowText body)
-                    boundSelection (Selection a z)=Selection (max 0 (min extent a)) (max 0 (min extent z))
-                    count=maybe (contentLineCount (W.preparedWindowText body)) (V.length.Layout.layoutRows) layout
+                    viewport=hostBodyViewport controls
                     adjust window | windowContent window/=PluginContent (bodyWindow key)=window
-                                  | otherwise=let old=fromMaybe window (find ((==windowId window).windowId) (windows current))
-                                                  rows=max 1 (pluginBodyRows next window)
-                                                  previous=maybe 0 (\prepared->windowTextRows current old (W.preparedWindowText prepared)) before
-                                                  atEnd=scrollRow old>=max 0 (previous-rows)
-                                              in window {scrollRow=if atEnd then max 0 (count-rows) else min (scrollRow old) (max 0 (count-rows))}
+                                  | otherwise=let view=M.lookup target (conversationViews next)
+                                              in window {scrollRow=maybe 0 viewportScroll viewport,
+                                                scrollColumn=maybe 0 conversationScrollColumn view,
+                                                selection=maybe (Selection 0 0) (\v->projectConversationSelection v viewport) view}
                     frames=map adjust (windows next)
-                    retain view=let visible=find ((==PluginContent (bodyWindow key)).windowContent) frames
-                                    (row,column)=conversationScroll view
-                                in view {conversationLogical=Just logical,conversationBody=InstalledBody (bodyWindow key) (Just (BodyControlReceipt body (bodyColumns key) (bodyWide key) layout controls)),
-                                  conversationReplySelection=boundSelection (maybe (conversationReplySelection view) selection visible),
-                                  conversationScroll=maybe (max 0 (min row (max 0 (count-1))),column) (\w->(scrollRow w,scrollColumn w)) visible}
+                    survives point=case point of
+                      BodyPoint ident _ _->logicalBodyItemIndex ident logical/=Nothing
+                      QuestionPoint token _ _->bodyQuestionToken key==Just token
+                    retain view=let same=maybe True ((==bodyProvider key).logicalBodyProvider) (conversationLogical view)
+                                in view {conversationLogical=Just logical,
+                      conversationAnchor=maybe (conversationAnchor view) viewportAnchor viewport,conversationRowShift=0,
+                      conversationBody=InstalledBody (bodyWindow key) (Just (BodyControlReceipt body (bodyColumns key) (bodyWide key) layout controls)),
+                      conversationReplySelection=case conversationReplySelection view of
+                        Just (BodySelection a z) | same && survives a && survives z->Just (BodySelection a z)
+                        _->Nothing}
                     presented=next {conversationViews=M.adjust retain target (conversationViews next),windows=frames}
                 let previousQuestion=do
                       view<-M.lookup target (conversationViews current)
                       InstalledBody _ (Just (BodyControlReceipt _ _ _ _ oldControls))<-pure (conversationBody view)
-                      projectedQuestionToken <$> hostBodyQuestion oldControls
+                      hostBodyQuestionToken oldControls
                     next=presented
                 when (T.null target) (modifyIORef' (case runtime of ConversationState _ owner _ _->owner) (\state->state {lastQuestion=bodyQuestionToken key}))
                 pure (if previousQuestion/=bodyQuestionToken key then ensureQuestionVisible next else next)
@@ -1111,7 +1129,22 @@ paint=paintView ""
 paintView :: Text -> Bool -> State -> Desktop -> IO Desktop
 paintView target opening state desktop
   | not opening && M.notMember target (conversationViews desktop)=pure desktop
-  | otherwise=ensureEditorWithState opening state target (if T.null target then "Primary" else target) desktop
+  | otherwise=do
+      ready<-ensureEditorWithState opening state target (if T.null target then "Primary" else target) desktop
+      pure $ if not (T.null target) then ready else ready {conversationViews=M.adjust (admitQuestion ready) target (conversationViews ready)}
+  where
+    admitQuestion ready view=case conversationBody view of
+      InstalledBody reference receipt | reference `S.notMember` retiredPluginWindows ready,
+        Just prepared<-M.lookup reference (pluginWindows ready)->
+          let token=questionToken <$> chatQuestion ready
+              columns=conversationWidthFor target ready
+              empty=HostBodyControls token Nothing Nothing []
+              current=case receipt of
+                Just (BodyControlReceipt body _ _ layout controls) | body==prepared->
+                  BodyControlReceipt prepared columns (wideSectionTitles ready) layout controls {hostBodyQuestionToken=token}
+                _->BodyControlReceipt prepared columns (wideSectionTitles ready) Nothing empty
+          in view {conversationBody=InstalledBody reference (Just current)}
+      _->view
 
 publicAgentSettings :: ConversationState -> Value -> IO [AgentSetting]
 publicAgentSettings runtime@(ConversationState _ ref _ _) value=do
@@ -1200,6 +1233,11 @@ conversationWidthFor target d = max 1 $ case matching++available of
   where
     matching=[w | w<-windows d,conversationTargetFor d w==Just target]
     available=[w | w<-windows d,maybe False (const True) (conversationTargetFor d w)]
+
+conversationHeightFor :: Text -> Desktop -> Int
+conversationHeightFor target d=case [window | window<-windows d,conversationTargetFor d window==Just target] of
+  window:_->max 1 (pluginBodyRows d window)
+  []->max 1 (snd (screenSize d)-6)
 
 chatToolNames :: [Text]
 chatToolNames=["ask_user","agent_settings"]
@@ -1665,7 +1703,7 @@ ensureEditorWithState opening state target name original=do
   draftRef<-maybe Editor.newDraftRef (pure.conversationDraftRef) found
   let initial=fromMaybe (EditorDraft (newBuffer "") (Selection 0 0) True Nothing) (M.lookup draftRef (editorDrafts original))
       body=fromMaybe (loadingBody state) (conversationBodySnapshot target original)
-      view=maybe (ConversationView (InertBody body) name draftRef Nothing Nothing (0,0) (Selection 0 0) Nothing) (\old->old {conversationName=name}) found
+      view=maybe (ConversationView (InertBody body) name draftRef Nothing Nothing FollowEnd 0 0 Nothing Nothing) (\old->old {conversationName=name}) found
       seeded=original {conversationViews=M.insert target view (conversationViews original),editorDrafts=M.insert draftRef initial (editorDrafts original)}
       -- Live output may resume an existing recovered frame; only explicit Show
       -- creates a frame for a closed or hidden inert body.

@@ -10,7 +10,7 @@
 -- gesture ownership and source/chat editing. Derived equality exists for tests
 -- and explicit data operations; never use Desktop, Document or Buffer equality
 -- as an interaction or redraw gate. Cached text work belongs to its worker.
-module Hide.Model (module Hide.Model,questionChoiceLines,QuestionProjection(..),ConversationBody(..),BodyControlReceipt(..),HostBodyControls(..)) where
+module Hide.Model (module Hide.Model,questionChoiceLines,QuestionProjection(..),ConversationBody(..),BodyControlReceipt(..),HostBodyControls(..),BodyPoint(..),BodyAnchor(..),BodySelection(..),BodyDemand(..),BodyViewport(..),BodyRow(..)) where
 
 import qualified Hide.TextLayout as TextLayout
 import qualified Data.Bifunctor as Bifunctor
@@ -22,8 +22,9 @@ import qualified Data.Text.Encoding as TE
 import qualified Data.Map.Strict as M
 import qualified Data.Vector as Vec
 import qualified Hide.Plugin.Window as PluginWindow
-import Hide.ConversationBody (LogicalBody,questionChoiceLines,QuestionProjection(..),ConversationBody(..),BodyControlReceipt(..),HostBodyControls(..))
+import Hide.ConversationBody (LogicalBody,BodyPoint(..),BodyAnchor(..),BodySelection(..),BodyDemand(..),BodyViewport(..),BodyRow(..),logicalBodyItemIndex,logicalBodyItems,logicalItemRecord,Record(..),viewportPoint,viewportOffset,questionChoiceLines,QuestionProjection(..),ConversationBody(..),BodyControlReceipt(..),HostBodyControls(..))
 import qualified Hide.Privacy as Privacy
+import Control.Applicative ((<|>))
 import Hide.Sidebar
 import Hide.DebuggerSidebarTypes
 import Hide.DownloadsWindowTypes
@@ -276,7 +277,8 @@ data ChatQuestion = ChatQuestion
 data ConversationView = ConversationView
   { conversationBody :: ConversationBody, conversationName :: Text
   , conversationDraftRef :: Editor.DraftRef, conversationEditor :: Maybe Editor.EditorMount, conversationEditorFrame :: Maybe Int
-  , conversationScroll :: (Int,Int), conversationReplySelection :: Selection
+  , conversationAnchor :: !BodyAnchor, conversationRowShift :: !Int, conversationScrollColumn :: !Int
+  , conversationReplySelection :: !(Maybe BodySelection)
   , conversationLogical :: Maybe LogicalBody
   } deriving (Eq,Show)
 
@@ -2018,12 +2020,26 @@ windowConversationControls d w=do
   current<-M.lookup reference (pluginWindows d)
   if current==captured && reference `S.notMember` retiredPluginWindows d then Just controls else Nothing
 
+-- | Only the current bounded prepared receipt maps paint to logical points.
+bodyViewportFor :: Desktop -> Text -> Maybe BodyViewport
+bodyViewportFor d target=do
+  view<-M.lookup target (conversationViews d)
+  InstalledBody reference (Just (BodyControlReceipt captured _ _ _ controls))<-pure (conversationBody view)
+  current<-M.lookup reference (pluginWindows d)
+  if current==captured then hostBodyViewport controls else Nothing
+
+projectConversationSelection :: ConversationView -> Maybe BodyViewport -> Selection
+projectConversationSelection view captured=case (conversationReplySelection view,captured) of
+  (Just (BodySelection a z),Just viewport)->case (viewportOffset viewport a,viewportOffset viewport z) of
+    (Just start,Just end)->Selection start end
+    _->Selection 0 0
+  _->Selection 0 0
+
 rememberConversationView :: Desktop -> Desktop
 rememberConversationView d=case M.lookup (conversationTarget d) (conversationViews d) of
   Just old | Just reference<-conversationBodyRef old ->
     let win=find ((==PluginContent reference).windowContent) (windows d)
-        view=old {conversationScroll=maybe (conversationScroll old) (\w->(scrollRow w,scrollColumn w)) win,
-          conversationReplySelection=maybe (conversationReplySelection old) selection win}
+        view=old {conversationScrollColumn=maybe (conversationScrollColumn old) scrollColumn win}
     in d {conversationViews=M.insert (conversationTarget d) view (conversationViews d)}
   _->d
 
@@ -2034,7 +2050,8 @@ selectConversationView target name original=case M.lookup target (conversationVi
   Just view | Just reference<-conversationBodyRef view ->
     let existing=find (\w->conversationTargetFor saved w/=Nothing) (windows saved)
         adjusted w=w {windowContent=PluginContent reference,windowEditorMount=conversationEditor view,
-          scrollRow=fst (conversationScroll view),scrollColumn=snd (conversationScroll view),selection=conversationReplySelection view}
+          scrollRow=maybe 0 viewportScroll (bodyViewportFor saved target),
+          scrollColumn=conversationScrollColumn view,selection=projectConversationSelection view (bodyViewportFor saved target)}
         frames=case existing of
           Just old->map (\w->if windowId w==windowId old then adjusted w else w) (windows saved)
           Nothing->windows saved
@@ -2061,7 +2078,9 @@ conversationSelection d=case activeWindow d of
   _->""
 
 clearReplySelection :: Desktop -> Desktop
-clearReplySelection d = if activeEditorMount d/=Nothing then modifyActive (\w -> w {selection=Selection 0 0}) d else d
+clearReplySelection d = case activeWindow d >>= conversationTargetFor d of
+  Just target->(modifyActive (\w->w {selection=Selection 0 0}) d) {conversationViews=M.adjust (\view->view {conversationReplySelection=Nothing}) target (conversationViews d)}
+  _->d
 
 composerActive :: Desktop -> Bool
 composerActive d = activeEditorMount d/=Nothing && maybe False (windowFocused d) (activeWindow d) && composerFocused d && not (questionActive d)
@@ -2350,7 +2369,10 @@ autocompleteClick x y mods w d=d {autocompleteFocused=True,
 -- Inline questions have their own editing state; the ordinary draft is never
 -- borrowed or cleared while a tool waits for a human response.
 questionActive :: Desktop -> Bool
-questionActive d=T.null (conversationTarget d) && activeConversation d && maybe False questionFocused (chatQuestion d)
+questionActive d=T.null (conversationTarget d) && activeConversation d && maybe False questionFocused (chatQuestion d) &&
+  case (chatQuestion d,activeWindow d >>= windowConversationControls d) of
+    (Just q,Just controls)->hostBodyQuestionToken controls==Just (questionToken q)
+    _->False
 
 questionEdit :: (Desktop -> Desktop) -> Desktop -> Desktop
 questionEdit edit d=case chatQuestion d of
@@ -2416,8 +2438,8 @@ questionOverlayRows d w=case windowQuestion d w of
     | (index,(starts,text))<-zip [0..] (zip (projectedQuestionChoices projected) (questionChoices q))
     , questionChoice q==Just index
     , (offset,line)<-zip starts (T.splitOn "\n" (questionChoiceLines columns True text))]
-    ++[(projectedQuestionInput projected-7,styledText (if questionChoice q==Nothing then Literal else Plain)
-      ("Other: "<>shown<>T.replicate (max 1 (columns-7-displayColumn shown (T.length shown))) " "))]
+    ++[(offset-7,styledText (if questionChoice q==Nothing then Literal else Plain)
+      ("Other: "<>shown<>T.replicate (max 1 (columns-7-displayColumn shown (T.length shown))) " ")) | offset<-maybe [] pure (projectedQuestionInput projected)]
     where columns=projectedQuestionWidth projected; shown=questionVisibleInput columns q
 
 -- | The live input starts at this body coordinate. Its width is also used for
@@ -2426,21 +2448,34 @@ questionInputGeometry :: Desktop -> Window -> Maybe (Rect,ChatQuestion,QuestionP
 questionInputGeometry d w=do
   (q,projected)<-windowQuestion d w
   prepared<-windowPluginText d w
-  let (row,column)=windowTextPosition d w (PluginWindow.preparedWindowText prepared) (projectedQuestionInput projected)
+  offset<-projectedQuestionInput projected
+  let (row,column)=windowTextPosition d w (PluginWindow.preparedWindowText prepared) offset
   pure (Rect (left (bounds w)+1+column-scrollColumn w) (top (bounds w)+1+row-scrollRow w)
     (max 1 (projectedQuestionWidth projected-8)) 1,q,projected)
 
 -- | Reveal a newly focused choice/input without reflowing transcript history.
 -- The owner calls this only for a new interaction, never an idle/manual scroll.
 ensureQuestionVisible :: Desktop -> Desktop
-ensureQuestionVisible d=d {windows=map reveal (windows d)}
+ensureQuestionVisible d=case chatQuestion d of
+  Just q | questionFocused q,T.null (conversationTarget d),activeConversation d->
+    let visible=any (\window->case windowQuestion d window of
+          Just (_,projection)->case questionChoice q of
+            Just index->maybe False (not . null) (listToMaybe (drop index (projectedQuestionChoices projection)))
+            Nothing->projectedQuestionInput projection/=Nothing
+          _->False) (windows d)
+        changed=if visible then d else d {conversationViews=M.adjust (\view->view {
+          conversationAnchor=At (QuestionPoint (questionToken q) (questionBlock q) 0),conversationRowShift=0}) "" (conversationViews d)}
+    in changed {windows=map reveal (windows changed)}
+  _->d
   where
+    -- Negative slots name fixed controls, independently of prompt parsing.
+    questionBlock q=maybe (-1) (\index->(-3)-index) (questionChoice q)
     reveal w=case windowQuestion d w of
       Just (q,projected) | questionFocused q,Just prepared<-windowPluginText d w ->
         let offset=case questionChoice q of
-              Just index->fromMaybe (projectedQuestionInput projected) (listToMaybe =<< listToMaybe (drop index (projectedQuestionChoices projected)))
+              Just index->(listToMaybe =<< listToMaybe (drop index (projectedQuestionChoices projected))) <|> projectedQuestionInput projected
               Nothing->projectedQuestionInput projected
-            row=fst (windowTextPosition d w (PluginWindow.preparedWindowText prepared) offset)
+            row=maybe (scrollRow w) (fst . windowTextPosition d w (PluginWindow.preparedWindowText prepared)) offset
             rows=max 1 (pluginBodyRows d w)
             previous=scrollRow w
             revealed=if row<previous then row else if row>=previous+rows then row-rows+1 else previous
@@ -3092,6 +3127,8 @@ scrollbarThumb :: Int -> Int -> Int -> Int
 scrollbarThumb len limit position = 1+min limit (max 0 position)*max 0 (len-3) `div` max 1 limit
 
 changeScroll :: Bool -> Int -> Desktop -> Desktop
+changeScroll True delta d | Just window<-activeWindow d,Just target<-conversationTargetFor d window =
+  d {conversationViews=M.adjust (\view->view {conversationRowShift=conversationRowShift view+delta}) target (conversationViews d)}
 changeScroll vertical delta d | activeMarkdown d,Just w<-activeWindow d =
   modifyActive (modifyDisplayedWindow (\shown->if vertical then shown {scrollRow=max 0 (min (markdownScrollLimit d True w) (scrollRow shown+delta))}
     else shown {scrollColumn=max 0 (min (markdownScrollLimit d False w) (scrollColumn shown+delta))})) d
@@ -3203,7 +3240,13 @@ pluginMoveTo extend requested d | Just view<-activePluginWindow d, Just w<-activ
       update w=w {selection=Selection (if extend then anchor (selection w) else pos) pos,
       scrollRow=max 0 (min row (max (scrollRow w) (row-height (pluginTextRect d w)+1))),
       scrollColumn=max 0 (min col (max (scrollColumn w) (col-width (bounds w)+3)))}
-  in modifyActive update d
+      moved=modifyActive update d
+  in case conversationTargetFor d w of
+    Just target | Just viewport<-bodyViewportFor d target,Just point<-viewportPoint viewport pos->
+      let original=do view<-M.lookup target (conversationViews d); BodySelection first _<-conversationReplySelection view; pure first
+          chosen=BodySelection (if extend then fromMaybe point original else point) point
+      in moved {conversationViews=M.adjust (\v->v {conversationReplySelection=Just chosen}) target (conversationViews moved)}
+    _->moved
 pluginMoveTo _ _ d=d
 
 -- | Ready Markdown content shares exactly the target used for paint and hits.
