@@ -280,8 +280,14 @@ data ConversationView = ConversationView
   , conversationAnchor :: !BodyAnchor, conversationRowShift :: !Int, conversationScrollColumn :: !Int
   , conversationReplySelection :: !(Maybe BodySelection)
   , conversationLogical :: Maybe LogicalBody
-  , conversationCaretIntent :: Maybe (Bool,Maybe BodyPoint)
+  , conversationCaretIntent :: Maybe ConversationCaretIntent
   } deriving (Eq,Show)
+
+-- Finite input intent resolved through the next exact viewport receipt.
+data ConversationCaretIntent
+  = EdgeCaret !Bool !(Maybe BodyPoint)
+  | RowCaret !Int !(Maybe BodyPoint)
+  deriving (Eq,Show)
 
 -- One editable state per opaque widget, including hidden conversation targets.
 -- The last mount is an ownership receipt retained after frame close; it is not
@@ -2078,18 +2084,25 @@ conversationPaintSelection d window=do
     scalar (BodyPoint _ _ value)=value
     scalar (QuestionPoint _ _ value)=value
 
--- A pending Home/End caret uses the already-demanded viewport receipt; source
--- parsing is never needed on input. Its optional anchor preserves Shift range.
-settleConversationCaret :: Maybe BodyViewport -> ConversationView -> ConversationView
-settleConversationCaret captured view=case (conversationCaretIntent view,captured) of
-  (Just (end,extended),Just viewport) | not end || viewportAtEnd viewport->case points viewport of
+-- Pending edge/row carets use the already-demanded viewport receipt; source
+-- parsing is never needed on input. Their optional anchor preserves Shift range.
+settleConversationCaret :: Maybe TextLayout.TextLayout -> Maybe BodyViewport -> ConversationView -> ConversationView
+settleConversationCaret layout captured view=case (conversationCaretIntent view,captured) of
+  (Just (EdgeCaret end extended),Just viewport) | not end || viewportAtEnd viewport->case points viewport of
     []->view {conversationCaretIntent=Nothing}
     entries->let (point,finish)=if end then last entries else head entries
                  chosen=if end then ending point finish else point
-             in view {conversationCaretIntent=Nothing,conversationReplySelection=Just (BodySelection (fromMaybe chosen extended) chosen)}
+             in selected extended chosen
+  (Just (RowCaret column extended),Just viewport)->case viewportPoint viewport offset <|> firstPoint viewport of
+    Just chosen->selected extended chosen
+    Nothing->view {conversationCaretIntent=Nothing}
+    where offset=maybe (maybe 0 bodyRowPaintStart (viewportRows viewport Vec.!? viewportDemandRow viewport))
+            (\ready->TextLayout.layoutOffset ready (viewportDemandRow viewport) column) layout
   _->view
   where
+    selected extended chosen=view {conversationCaretIntent=Nothing,conversationReplySelection=Just (BodySelection (fromMaybe chosen extended) chosen)}
     points viewport=[(point,bodyRowLogicalEnd row) | row<-Vec.toList (viewportRows viewport),Just point<-[bodyRowPoint row]]
+    firstPoint viewport=listToMaybe [point | row<-drop (viewportDemandRow viewport) (Vec.toList (viewportRows viewport)),Just point<-[bodyRowPoint row]]
     ending (BodyPoint ident block _) scalar=BodyPoint ident block scalar
     ending (QuestionPoint token block _) scalar=QuestionPoint token block scalar
 
@@ -2104,7 +2117,7 @@ conversationEdge end extend d=case activeWindow d of
             Just viewport | end && viewportAtEnd viewport->Just viewport
             Just viewport | not end,Just actual<-viewportPoint viewport 0,actual==first->Just viewport
             _->Nothing
-          next=settleConversationCaret ready view {conversationAnchor=requested,conversationRowShift=0,conversationCaretIntent=Just (end,extended)}
+          next=settleConversationCaret (windowPresentation d window) ready view {conversationAnchor=requested,conversationRowShift=0,conversationCaretIntent=Just (EdgeCaret end extended)}
       in (modifyActive (\w->w {selection=projectConversationSelection next previous}) d) {conversationViews=M.insert target next (conversationViews d)}
   _->d
   where
@@ -2552,7 +2565,14 @@ ensureQuestionVisible d=case chatQuestion d of
           _->False) (windows d)
         changed=if visible then d else d {conversationViews=M.adjust (\view->view {
           conversationAnchor=At (QuestionPoint (questionToken q) (questionBlock q) 0),conversationRowShift=0}) "" (conversationViews d)}
-    in changed {windows=map reveal (windows changed)}
+        revealedWindows=map reveal (windows changed)
+        revealedAnchor=case [(w,old) | w<-revealedWindows,old<-windows changed,windowId w==windowId old,scrollRow w/=scrollRow old,
+                    conversationTargetFor changed w==Just ""] of
+          (w,_):_->bodyViewportFor changed "" >>= \viewport->conversationScrollPoint changed w viewport (scrollRow w)
+          _->Nothing
+    in changed {windows=revealedWindows,conversationViews=case revealedAnchor of
+      Just point->M.adjust (\view->view {conversationAnchor=At point,conversationRowShift=0}) "" (conversationViews changed)
+      Nothing->conversationViews changed}
   _->d
   where
     -- Negative slots name fixed controls, independently of prompt parsing.
@@ -3342,6 +3362,13 @@ readOnlyTextKey text w moveToText key mods d=
     V.KEnd->if V.MCtrl `elem` mods then documentEdge True extend d else rowEdge True extend d
     _->d
 
+-- Map only the currently prepared rows when local visibility changes.
+conversationScrollPoint :: Desktop -> Window -> BodyViewport -> Int -> Maybe BodyPoint
+conversationScrollPoint d w viewport row=do
+  prepared<-windowPluginText d w
+  viewportPoint viewport (windowTextOffset d w (PluginWindow.preparedWindowText prepared) row 0) <|>
+    listToMaybe [point | entry<-drop row (Vec.toList (viewportRows viewport)),Just point<-[bodyRowPoint entry]]
+
 pluginMoveTo :: Bool -> Int -> Desktop -> Desktop
 pluginMoveTo extend requested d | Just view<-activePluginWindow d, Just w<-activeWindow d =
   let text=PluginWindow.preparedWindowText view
@@ -3350,12 +3377,15 @@ pluginMoveTo extend requested d | Just view<-activePluginWindow d, Just w<-activ
       update w=w {selection=Selection (if extend then anchor (selection w) else pos) pos,
       scrollRow=max 0 (min row (max (scrollRow w) (row-height (pluginTextRect d w)+1))),
       scrollColumn=max 0 (min col (max (scrollColumn w) (col-width (bounds w)+3)))}
+      movedWindow=update w
       moved=modifyActive update d
   in case conversationTargetFor d w of
     Just target | Just viewport<-bodyViewportFor d target,Just point<-viewportPoint viewport pos->
       let original=do view<-M.lookup target (conversationViews d); BodySelection first _<-conversationReplySelection view; pure first
           chosen=BodySelection (if extend then fromMaybe point original else point) point
-      in moved {conversationViews=M.adjust (\v->v {conversationReplySelection=Just chosen,conversationCaretIntent=Nothing}) target (conversationViews moved)}
+      in moved {conversationViews=M.adjust (\v->v {conversationReplySelection=Just chosen,conversationCaretIntent=Nothing,
+        conversationScrollColumn=scrollColumn movedWindow,
+        conversationAnchor=if scrollRow movedWindow/=scrollRow w then maybe (conversationAnchor v) At (conversationScrollPoint d w viewport (scrollRow movedWindow)) else conversationAnchor v}) target (conversationViews moved)}
     _->moved
 pluginMoveTo _ _ d=d
 
@@ -3679,6 +3709,15 @@ verticalMove delta extend d
       Just w | Just (_,text,_)<-windowMarkdown d w ->
         markdownMoveTo extend (verticalTextOffset d (displayWindow w) text (caret (selection (displayWindow w))) delta) d
       _->d
+  | Just view<-activePluginWindow d,Just w<-activeWindow d,Just target<-conversationTargetFor d w,
+    Just captured<-bodyViewportFor d target,Just retained<-M.lookup target (conversationViews d),
+    let text=PluginWindow.preparedWindowText view,
+    let (row,column)=windowTextPosition d w text (caret (selection w)),
+    row+delta<scrollRow w || row+delta>=scrollRow w+max 1 (pluginBodyRows d w),
+    Just point<-viewportPoint captured (caret (selection w))->
+      let extended=if extend then case conversationReplySelection retained of Just (BodySelection first _)->Just first; _->Just point else Nothing
+          requested=retained {conversationAnchor=At point,conversationRowShift=delta,conversationCaretIntent=Just (RowCaret column extended)}
+      in d {conversationViews=M.insert target requested (conversationViews d)}
   | Just view<-activePluginWindow d, Just w<-activeWindow d =
       pluginMoveTo extend (verticalTextOffset d w (PluginWindow.preparedWindowText view) (caret (selection w)) delta) d
   | Just w<-activeWindow d, Just doc<-activeDocument d =

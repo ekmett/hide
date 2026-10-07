@@ -557,6 +557,36 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ withTextPresentation $ 
           ("window-width" `T.isInfixOf` clipboard copied && not ("┌" `T.isInfixOf` clipboard copied) && not ("```" `T.isInfixOf` clipboard copied))
         stable<-tickConversation runtime reflowed
         check "timer tick keeps adopted body identity stable" (conversationBodySnapshot "" stable==Just prepared)
+    C.withConsoles $ \consoles -> withConversation consoles $ \runtime -> do
+      let sourceText="# Alpha界Beta Gamma界Delta Epsilon Zeta Eta Theta\n\n"<>T.unwords (replicate 80 "following")
+          base=(initialDesktop (32,18)) {wideSectionTitles=True}
+          caretReady d=maybe False ((==Nothing).conversationCaretIntent) (M.lookup "" (conversationViews d))
+          retained d=fromMaybe (error "wide heading target") (M.lookup "" (conversationViews d))
+          geometry d=case (activeWindow d,bodyViewportFor d "") of
+            (Just w,Just viewport) | Just body<-windowPluginText d w->
+              windowTextRows d w (W.preparedWindowText body)==Vec.length (viewportRows viewport)
+            _->False
+      (asked,_)<-questionTool runtime base (object ["question" .= sourceText])
+      let browsing=(setComposerInput (composerBuffer asked) (composerSelection asked) False asked) {chatQuestion=fmap (\q->q {questionFocused=False}) (chatQuestion asked)}
+      first<-await runtime "wide heading Home" caretReady (fst (runCommand (CursorDocumentStart False) browsing))
+      let previous=conversationBodySnapshot "" first
+      scrolled<-await runtime "wide heading next physical row" (\d->conversationRowShift (retained d)==0 && conversationBodySnapshot "" d/=previous) (changeScroll True 1 first)
+      check "conversation wide headings budget physical rows and retain the next logical row"
+        (geometry first && geometry scrolled && case conversationAnchor (retained scrolled) of
+          At (QuestionPoint _ 0 scalar)->scalar>0
+          _->False)
+      let selected=fst (runCommand (CursorDown True) (fst (runCommand (CursorRowStart False) scrolled)))
+          logicalSelection=conversationReplySelection (retained selected)
+          resized=modifyActive (\w->w {bounds=(bounds w) {width=40}}) selected {screenSize=(40,18)}
+      reflowed<-await runtime "wide heading anchored resize" (bodyAtWidth "") resized
+      check "wide heading resize preserves logical selection and mapped paint"
+        (geometry reflowed && conversationReplySelection (retained reflowed)==logicalSelection &&
+          maybe False (not . null) (activeWindow reflowed >>= conversationPaintSelection reflowed))
+      paged<-await runtime "wide heading Shift Page Down" caretReady (fst (runCommand (CursorPageDown True) reflowed))
+      check "page movement preserves an offscreen logical extension anchor"
+        (case (logicalSelection,conversationReplySelection (retained paged)) of
+          (Just (BodySelection a _),Just (BodySelection b z))->a==b && z>b
+          _->False)
     forM_ [32,120,150] $ \columns -> do
       let outgoing=renderReply False columns True (T.unwords (replicate 90 "window-width"))
           incoming=renderReply False columns False (T.unwords (replicate 90 "window-width"))

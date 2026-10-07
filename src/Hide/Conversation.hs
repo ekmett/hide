@@ -714,7 +714,7 @@ adoptConversationBodies runtime results desktop=do
                           Just (original,clamped) | chosen==original->clamped
                           _->Just chosen
                         _->Nothing,conversationCaretIntent=if same then conversationCaretIntent view else Nothing}
-                                in settleConversationCaret viewport preparedView
+                                in settleConversationCaret layout viewport preparedView
                     retainedViews=M.adjust retain target (conversationViews next)
                     presented=next {conversationViews=retainedViews,windows=frames}
                 let previousQuestion=do

@@ -27,7 +27,7 @@ import qualified Data.Set as S
 import System.FilePath ((</>))
 import Data.Maybe (fromMaybe)
 import Control.Applicative ((<|>))
-import Data.List (mapAccumL,foldl',find)
+import Data.List (mapAccumL,foldl',find,findIndex)
 import Data.Unique (Unique,newUnique,hashUnique)
 import qualified Data.Map.Strict as M
 import qualified Data.Sequence as Seq
@@ -76,7 +76,7 @@ data BodyRow = BodyRow
   } deriving Show
 data BodyViewport = BodyViewport
   { viewportRows :: !(V.Vector BodyRow), viewportAnchor :: !BodyAnchor
-  , viewportScroll :: !Int, viewportAtEnd :: !Bool, viewportProgress :: !(Int,Int)
+  , viewportScroll :: !Int, viewportDemandRow :: !Int, viewportAtEnd :: !Bool, viewportProgress :: !(Int,Int)
   } deriving Show
 
 -- | /O(demanded rows + row spans)/. Convert only through the authoritative
@@ -473,7 +473,7 @@ prepareConversationBody (BodyRequest key input)=do
 prepareRenderedBody :: Bool -> BodyDisplay -> BodyInput -> LogicalBody -> IO (Either Text (W.PreparedWindow,Maybe TextLayout,HostBodyControls))
 prepareRenderedBody inert key input logical=case demandedRows key input logical of
     Left message->pure (Left message)
-    Right (pending,scroll,atEnd)->do
+    Right (pending,scroll,atEnd,demandRow)->do
       let rows=[StyledRow sigils (if null rest then Nothing else Just Plain) messages
             | (PendingRow _ mapped _ _ _,rest)<-withTail pending,let StyledRow sigils _ messages=mappedStyledRow mapped]
           (_,receipts)=mapAccumL receipt 0 (zip pending rows)
@@ -502,7 +502,7 @@ prepareRenderedBody inert key input logical=case demandedRows key input logical 
           BodyDemand requested _ _=displayDemand key
           anchor=case requested of FollowEnd | let BodyDemand _ delta _=displayDemand key,delta>=0->FollowEnd; _->maybe requested At (bodyRowPoint =<< listAt scroll receipts)
           progress@(position,limit)=logicalProgress logical anchor
-          viewport=BodyViewport (V.fromList receipts) anchor scroll atEnd progress
+          viewport=BodyViewport (V.fromList receipts) anchor scroll demandRow atEnd progress
           controls=if inert then HostBodyControls Nothing (Just viewport) Nothing [] else HostBodyControls questionToken (Just viewport) projected actions
       prepared<-W.prepareSemanticRowsWindow (bodyTitle input) rows semantics
       case prepared of
@@ -531,14 +531,14 @@ prepareRenderedBody inert key input logical=case demandedRows key input logical 
 
 -- Locate by item/block metadata, not accumulated prior row heights. A missing
 -- anchor is refused rather than redirected to a different surviving item.
-demandedRows :: BodyDisplay -> BodyInput -> LogicalBody -> Either Text ([PendingRow],Int,Bool)
+demandedRows :: BodyDisplay -> BodyInput -> LogicalBody -> Either Text ([PendingRow],Int,Bool,Int)
 demandedRows key input logical=case anchor of
   WithinItem ident fraction->do
     point<-withinItemPoint logical ident fraction
     demandedRows key {displayDemand=BodyDemand (At point) delta requested} input logical
   FollowEnd->let rows=ending (budget+max 0 (-delta))
                  scroll=max 0 (min (max 0 (length rows-height)) (length rows-height+delta))
-             in Right (take (scroll+budget) rows,scroll,scroll+height>=length rows)
+             in Right (take (scroll+budget) rows,scroll,scroll+height>=length rows,scroll)
   At point->do
     (index,block,rows)<-locate point
     let (prior,selectedPairs)=break (\(row,rest)->contains (anchorPoint index block point) row || null rest && endsAt (anchorPoint index block point) row) (withTail rows)
@@ -555,9 +555,14 @@ demandedRows key input logical=case anchor of
         shown=take (height+2) remaining
         ended=length (take (height+1) remaining)<=height
     if null selected then Left "The anchored conversation position is no longer present."
-      else if ended && length shown<height then Right (ending height,0,True)
-      else Right (shown,0,ended)
+      else if ended && length shown<height then
+        let final=ending height
+            target=case remaining of PendingRow (Just point) _ _ _ _:_->Just point; _->Nothing
+            requestedRow=fromMaybe (max 0 (length final-1)) (target >>= \point->findIndex (rowStarts point) final)
+        in Right (final,0,True,requestedRow)
+      else Right (shown,0,ended,0)
   where
+    rowStarts point (PendingRow selected _ _ _ _)=selected==Just point
     BodyDemand anchor delta requested=displayDemand key
     height=max 1 requested
     budget=height+2
