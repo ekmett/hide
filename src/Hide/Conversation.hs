@@ -640,7 +640,7 @@ conversationBodyRequests (ConversationState _ ref _ agents) desktop=do
       let question=if T.null target then chatQuestion desktop else Nothing
           records=if T.null target then transcript state else M.findWithDefault [] target (childRecords state)
           owns=if T.null target then not (isNothing (connection state)) || not (null records) || not (isNothing question) || not (isNothing (lastQuestion state)) else M.member target (childRecords state)
-      captured<-if T.null target then pure (Just (PrimaryBodyProvider launch primary)) else fmap (either (const Nothing) (Just.ChildBodyProvider.fst)) (AH.agentConfiguration (AR.agentHub agents) (AH.AgentId target))
+      captured<-if T.null target then pure (Just (PrimaryBodyProvider launch primary)) else fmap (either (const Nothing) (Just . ChildBodyProvider . fst)) (AH.agentConfiguration (AR.agentHub agents) (AH.AgentId target))
       schema<-traverse (\q->evaluate (QuestionSchema (questionToken q) (questionText q) (questionChoices q))) question
       -- Retain the pending question lifetime until a question-free body is
       -- adopted, even if cancellation races its first preparation.
