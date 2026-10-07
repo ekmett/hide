@@ -4,10 +4,11 @@
 -- checks bounded exact window/content/version/width targets. Retired or resized
 -- styled targets use ordinary geometry until matching preparation completes;
 -- Markdown previews remain a read-only pending/error surface.
-module Hide.TextPresentation (TextPresentation,withTextPresentation,tickTextPresentation,prepareTextPresentations,BodyRequest(..),BodyResult(..)) where
+module Hide.TextPresentation (TextPresentation,withTextPresentation,textPresentationEffects,tickTextPresentation,prepareTextPresentations,BodyRequest(..),BodyResult(..)) where
 
 import Control.Concurrent.Async (Async,asyncWithUnmask,cancel,poll)
 import Control.Exception (bracket,mask,evaluate)
+import Control.Monad (foldM)
 import Data.IORef
 import qualified Data.Map.Strict as M
 import qualified Data.Vector as V
@@ -16,26 +17,46 @@ import Hide.Markdown (renderMarkdown)
 import Hide.Syntax (linkSpans,styleLayoutMetadata,StyledText,StyledRow,styledContents)
 import qualified Data.Text as T
 import Hide.Model
-import Hide.ConversationBody (BodyRequest(..),BodyResult(..),BodyKey,prepareConversationBody)
+import Hide.ConversationBody (BodyRequest(..),BodyResult(..),BodyKey,ConversationCopy(..),logicalBodyCopy,logicalBodyProvider,prepareConversationBody)
 import qualified Hide.Plugin.Window as W
 import Hide.TextLayout (prepareTextLayout)
 
 type Target = (Int,PresentationTarget,Int,Bool)
 data StyledPayload = MarkdownSource | DocumentStyles !StyledText | PluginStyles !(V.Vector StyledRow)
 data Capture = Capture !Target !BufferContent !StyledPayload
-data Pending = Pending [Target] [BodyKey] (Async ([(Int,WindowPresentation)],[BodyResult]))
-data TextPresentation = TextPresentation (IORef (Maybe Pending)) (IORef ([Target],[BodyKey]))
+data Pending = Pending [Target] [BodyKey] (Async ([(Int,WindowPresentation)],[BodyResult],Maybe (ConversationCopy,T.Text)))
+data TextPresentation = TextPresentation (IORef (Maybe Pending)) (IORef ([Target],[BodyKey])) (IORef (Maybe ConversationCopy))
 
 -- | Own and join the single presentation worker at session shutdown.
 withTextPresentation :: (TextPresentation -> IO a) -> IO a
-withTextPresentation=bracket (TextPresentation <$> newIORef Nothing <*> newIORef ([],[])) close
-  where close (TextPresentation pending _)=readIORef pending >>= mapM_ (\(Pending _ _ worker)->cancel worker)
+withTextPresentation=bracket (TextPresentation <$> newIORef Nothing <*> newIORef ([],[]) <*> newIORef Nothing) close
+  where close (TextPresentation pending _ _)=readIORef pending >>= mapM_ (\(Pending _ _ worker)->cancel worker)
+
+-- | The existing serial presentation owner accepts one latest closed human
+-- copy intent. No formatting/owner lookup runs on input; stale intent serials
+-- and frame/provider retirement prevent eventual clipboard publication.
+textPresentationEffects :: TextPresentation -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> [Effect] -> IO (Bool,Desktop)
+textPresentationEffects (TextPresentation _ _ requested) fallback original=foldM step (False,original)
+  where
+    step state@(True,_) _=pure state
+    step (_,desktop) (CopyConversation copy)
+      | copyCurrent desktop copy=writeIORef requested (Just copy) >> pure (False,desktop)
+      | otherwise=pure (False,desktop)
+    step (_,desktop) effect=fallback desktop [effect]
+
+copyCurrent :: Desktop -> ConversationCopy -> Bool
+copyCurrent desktop (ConversationCopy reference target logical _ serial)=
+  fst (clipboardExport desktop)==serial && any ((==PluginContent reference).windowContent) (windows desktop) &&
+  case M.lookup target (conversationViews desktop) of
+    Just view | conversationBodyRef view==Just reference,Just current<-conversationLogical view->
+      logicalBodyProvider current==logicalBodyProvider logical
+    _->False
 
 -- | Poll/adopt complete snapshots and enqueue only when scalar targets change.
 -- Preparation failure retains ordinary text or a bounded Markdown error state;
 -- no input operation waits for it.
 tickTextPresentation :: TextPresentation -> [BodyRequest] -> Desktop -> IO (Desktop,[BodyResult])
-tickTextPresentation (TextPresentation pending observed) bodies desktop=mask $ \_->do
+tickTextPresentation (TextPresentation pending observed requested) bodies desktop=mask $ \_->do
   let targets=metadata desktop
       keys=[key | BodyRequest key _<-bodies]
   mapM_ evaluate keys
@@ -45,11 +66,11 @@ tickTextPresentation (TextPresentation pending observed) bodies desktop=mask $ \
     (Just (Pending captured bodyKeys _),Just result)->do
       writeIORef pending Nothing
       pure $ case result of
-        Right (prepared,finished)->
-          (reprojectWindowPresentations desktop desktop {windowPresentations=M.union
+        Right (prepared,finished,copied)->
+          (publishCopy copied (reprojectWindowPresentations desktop desktop {windowPresentations=M.union
             (M.fromList [(ident,presentation) | (ident,presentation)<-prepared,
               let (target,width,wide)=presentationMetadata presentation,(ident,target,width,wide) `elem` targets])
-            (windowPresentations desktop)},finished)
+            (windowPresentations desktop)}),finished)
         Left _->(desktop {windowPresentations=M.union
           (M.fromList [(ident,MarkdownWindowFailure target width wide) | entry@(ident,target@MarkdownPresentation{},width,wide)<-captured,entry `elem` targets])
           (windowPresentations desktop),status="Text view preparation failed."},
@@ -59,11 +80,14 @@ tickTextPresentation (TextPresentation pending observed) bodies desktop=mask $ \
         in (ident,target,width,wide) `elem` targets || any (\window->windowId window==ident && maybe False (const True) (conversationTargetFor ready window)) (windows ready)) (windowPresentations ready)
       shown=ready {windowPresentations=retained}
   previous<-readIORef observed
+  waiting<-readIORef requested
+  let wanted=case waiting of Just copy | copyCurrent shown copy->Just copy; _->Nothing
+  if waiting/=wanted then writeIORef requested wanted else pure ()
   active<-readIORef pending
   case active of
     Just _->pure (shown,bodyResults)
-    Nothing | previous==(targets,keys)->pure (shown,bodyResults)
-    Nothing | null targets && null bodies->writeIORef observed ([],[]) >> pure (shown,bodyResults)
+    Nothing | previous==(targets,keys) && wanted==Nothing->pure (shown,bodyResults)
+    Nothing | null targets && null bodies && wanted==Nothing->writeIORef observed ([],[]) >> pure (shown,bodyResults)
     Nothing->do
       let workTargets=filter (`notElem` fst previous) targets
           captured=captures shown workTargets
@@ -72,10 +96,21 @@ tickTextPresentation (TextPresentation pending observed) bodies desktop=mask $ \
       mapM_ evaluate workKeys
       mapM_ evaluate captured
       mapM_ evaluate changed
-      worker<-asyncWithUnmask $ \unmask->unmask ((,) <$> mapM prepare captured <*> mapM prepareConversationBody changed)
+      worker<-asyncWithUnmask $ \unmask->unmask ((,,) <$> mapM prepare captured <*> mapM prepareConversationBody changed <*> traverse prepareCopy wanted)
+      writeIORef requested Nothing
       writeIORef pending (Just (Pending workTargets workKeys worker))
       writeIORef observed (targets,keys)
       pure (shown,bodyResults)
+
+publishCopy :: Maybe (ConversationCopy,T.Text) -> Desktop -> Desktop
+publishCopy (Just (copy@(ConversationCopy _ _ _ _ serial),text)) desktop
+  | copyCurrent desktop copy=desktop {clipboard=text,clipboardCode=Nothing,clipboardExport=(serial,Just text),status="Conversation text copied."}
+publishCopy _ desktop=desktop
+
+prepareCopy :: ConversationCopy -> IO (ConversationCopy,T.Text)
+prepareCopy copy@(ConversationCopy _ _ logical selection _)=do
+  text<-logicalBodyCopy logical selection
+  pure (copy,text)
 
 prepare :: Capture -> IO (Int,WindowPresentation)
 prepare (Capture (ident,target,width,wide) text MarkdownSource)=do

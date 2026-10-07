@@ -70,7 +70,7 @@ import qualified Hide.Plugin.Window as W
 import qualified Data.Vector as V
 import qualified Hide.TextLayout as Layout
 import System.Environment (lookupEnv)
-import Hide.Syntax (Style(..))
+import Hide.Syntax (Style(..),styledText)
 
 -- One configured stdio provider; its protocol supplies models and tools.
 data Phase = Initializing (Maybe Text) | Starting (Maybe Text) | Prompting | Steering Text (Maybe DraftReceipt) | Setting deriving Eq
@@ -155,7 +155,7 @@ withConversation consoles action = getCurrentDirectory >>= \root -> withConversa
 -- | Load conversation configuration and scope only provider and agent workers.
 withConversationAt :: C.Consoles -> FilePath -> (ConversationState -> IO a) -> IO a
 withConversationAt consoles root action = W.withWindowScope $ \scope->Command.withRegistry $ \registry->do
-  loading<-W.prepareSemanticTextWindow "Conversation" (map (,Comment) (T.unpack "Preparing conversation…"))
+  loading<-W.prepareSemanticTextWindow "Conversation" (styledText Comment "Preparing conversation…")
     (W.TextSemantics (W.CopyMessages W.UserBotAttribution) (Just root) V.empty V.empty W.ReadableWindow V.empty V.empty V.empty) >>= either (ioError . userError . T.unpack) pure
   command<-Command.registerCommand registry chatEditorCommand >>= either (ioError . userError . show) pure
   directory<-getXdgDirectory XdgConfig "thc-edit"

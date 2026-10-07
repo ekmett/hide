@@ -284,7 +284,7 @@ runEditor args = do
             let liveDesktop=liveBase {keyBindings=keymap}
             withKeybindings keys (contributedBindingCommands liveBase) $ \keybindings -> withTextPresentation $ \textPresentation -> do
               exiting<-newIORef False
-              let runtimeEffects=sidebarEffects sidebarHost (packageBuildEffects packageSidebar (sessionSidebarEffects sessionSidebar (menuEffects menuHost (keybindingEffects keybindings (autocompleteEffects autocomplete (projectBrowserEffects projectBrowser (gitOperationEffects gitOperations (debuggerEffects debugger (conversationEffects conversation (sessionEffects services (reconciliationEffects reconciliation (toolingEffects tooling applyEffects))))))))))))
+              let runtimeEffects=textPresentationEffects textPresentation $ sidebarEffects sidebarHost (packageBuildEffects packageSidebar (sessionSidebarEffects sessionSidebar (menuEffects menuHost (keybindingEffects keybindings (autocompleteEffects autocomplete (projectBrowserEffects projectBrowser (gitOperationEffects gitOperations (debuggerEffects debugger (conversationEffects conversation (sessionEffects services (reconciliationEffects reconciliation (toolingEffects tooling applyEffects))))))))))))
                   core d pending=foldM step (False,d) pending
                     where
                       step result@(True,_) _=pure result
@@ -560,6 +560,7 @@ applyEffects :: Desktop -> [Effect] -> IO (Bool,Desktop)
 applyEffects = foldM apply . (False,)
   where
     apply state@(True,_) _=pure state
+    apply (_,d) CopyConversation{}=pure (False,d {status="Conversation copy requires its presentation owner."})
     apply (_,d) SubmitEditor{}=pure (False,d {status="Editor submission requires its callable owner."})
     apply (_,d) (RetireEditorMount mount)=Editor.retireEditorMount mount >> pure (False,d)
     apply (_,d) (RetirePluginWindow reference)=(False,) <$> retireClosedWindow reference d

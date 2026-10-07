@@ -22,7 +22,7 @@ import qualified Data.Text.Encoding as TE
 import qualified Data.Map.Strict as M
 import qualified Data.Vector as Vec
 import qualified Hide.Plugin.Window as PluginWindow
-import Hide.ConversationBody (LogicalBody,BodyPoint(..),BodyAnchor(..),BodySelection(..),BodyDemand(..),BodyViewport(..),BodyRow(..),logicalBodyItemIndex,logicalBodyItems,logicalItemRecord,Record(..),viewportPoint,viewportOffset,questionChoiceLines,QuestionProjection(..),ConversationBody(..),BodyControlReceipt(..),HostBodyControls(..))
+import Hide.ConversationBody (LogicalBody,ConversationCopy(..),BodyPoint(..),BodyAnchor(..),BodySelection(..),BodyDemand(..),BodyViewport(..),BodyRow(..),logicalBodyItemIndex,logicalBodyItems,logicalItemRecord,Record(..),viewportPoint,viewportOffset,questionChoiceLines,QuestionProjection(..),ConversationBody(..),BodyControlReceipt(..),HostBodyControls(..))
 import qualified Hide.Privacy as Privacy
 import Control.Applicative ((<|>))
 import Hide.Sidebar
@@ -229,7 +229,7 @@ data PackageBuildTarget = PackageBuildTarget
   , packageBuildName :: !Text } deriving (Eq,Show)
 
 -- | Ordered requests for the host interpreter, produced alongside a new desktop.
-data Effect = ExecuteShellBlockAction !ShellOrigin !(Int,Int,Text,Text) | SubmitEditor !Editor.EditorMount !Editor.EditorSlot !Plugin.MenuOrigin | RetireEditorMount !Editor.EditorMount | PackageDebugAction !PackageBuildTarget !(Either Text FilePath) | AdoptPreparedDebug !PackageBuildTarget | PackageBuildAction !BuildAction !PackageBuildTarget | AdoptPreparedBuild !(Maybe PackageBuildTarget) | DownloadCancelAction !DownloadCancelRequest | SubmitInputForm !Form.FormRef !Form.FormValue !Plugin.MenuOrigin | SubmitChoiceForm !Form.FormRef !Integer !Int !Plugin.MenuOrigin | RetireInputForm !Form.FormRef | SessionSidebarAction !SessionSidebarRequest | DebugSourceAction !DebugSourceRequest | RetirePluginWindow !PluginWindow.WindowRef | DebugSidebarAction !DebugSidebarRequest | AgentSidebarAction !AgentSidebarRequest | ReloadKeyBindings FilePath | InspectKeyBindings (Maybe (Bindings.BindingPlatform,Bindings.BindingContext)) (Maybe (Bindings.Bindings Command)) | FollowLink !LinkOrigin Text | FollowTreeLink [Tree.TreeHit] FilePath Text | EnvironmentAction Text [Text] | AutocompleteAction Text [Text] | SaveWideSectionTitles Bool | SaveMacKeySymbols Bool | SaveChatSubmit ChatSubmit | SaveBufferViewDefault BufferView | ProjectRequest ProjectAction | DownloadDocument Int | ReadBrowserClipboard | WriteBrowserClipboard Text | LanguageRequest LanguageAction | RunGit GitAction | ReadMergeBranches | JumpTo FilePath Int Int | ReadPath FilePath | BrowsePath FilePath Text | BrowseDirectories FilePath | ChangeDirectory FilePath | OpenChoice FilePath Text Text | ReadTree FilePath | RefreshRenamedPath FilePath FilePath | RefreshTree FilePath [Entry] | LoadTree TreeRequest Plugin.MenuOrigin | InvokeTree [Tree.TreeHit] CommandRef Plugin.MenuOrigin | ReadHelp | InvokeMenu Plugin.MenuRef Plugin.MenuOrigin (Maybe ContextTarget) | RefreshGit FilePath | ReadGitDiff | AskGitCommit | WriteGitCommit Text | SaveDocument Int (Maybe FilePath) (Maybe Command) | ReviewExternal | ResolveConflict Conflict ConflictAction | ServiceAction Text [Text] | AgentAction Text [Text] | PermissionAction Text [Text] | DebugAction Text [Text] | SetScreenMode Int | Exit deriving (Eq,Show)
+data Effect = CopyConversation !ConversationCopy | ExecuteShellBlockAction !ShellOrigin !(Int,Int,Text,Text) | SubmitEditor !Editor.EditorMount !Editor.EditorSlot !Plugin.MenuOrigin | RetireEditorMount !Editor.EditorMount | PackageDebugAction !PackageBuildTarget !(Either Text FilePath) | AdoptPreparedDebug !PackageBuildTarget | PackageBuildAction !BuildAction !PackageBuildTarget | AdoptPreparedBuild !(Maybe PackageBuildTarget) | DownloadCancelAction !DownloadCancelRequest | SubmitInputForm !Form.FormRef !Form.FormValue !Plugin.MenuOrigin | SubmitChoiceForm !Form.FormRef !Integer !Int !Plugin.MenuOrigin | RetireInputForm !Form.FormRef | SessionSidebarAction !SessionSidebarRequest | DebugSourceAction !DebugSourceRequest | RetirePluginWindow !PluginWindow.WindowRef | DebugSidebarAction !DebugSidebarRequest | AgentSidebarAction !AgentSidebarRequest | ReloadKeyBindings FilePath | InspectKeyBindings (Maybe (Bindings.BindingPlatform,Bindings.BindingContext)) (Maybe (Bindings.Bindings Command)) | FollowLink !LinkOrigin Text | FollowTreeLink [Tree.TreeHit] FilePath Text | EnvironmentAction Text [Text] | AutocompleteAction Text [Text] | SaveWideSectionTitles Bool | SaveMacKeySymbols Bool | SaveChatSubmit ChatSubmit | SaveBufferViewDefault BufferView | ProjectRequest ProjectAction | DownloadDocument Int | ReadBrowserClipboard | WriteBrowserClipboard Text | LanguageRequest LanguageAction | RunGit GitAction | ReadMergeBranches | JumpTo FilePath Int Int | ReadPath FilePath | BrowsePath FilePath Text | BrowseDirectories FilePath | ChangeDirectory FilePath | OpenChoice FilePath Text Text | ReadTree FilePath | RefreshRenamedPath FilePath FilePath | RefreshTree FilePath [Entry] | LoadTree TreeRequest Plugin.MenuOrigin | InvokeTree [Tree.TreeHit] CommandRef Plugin.MenuOrigin | ReadHelp | InvokeMenu Plugin.MenuRef Plugin.MenuOrigin (Maybe ContextTarget) | RefreshGit FilePath | ReadGitDiff | AskGitCommit | WriteGitCommit Text | SaveDocument Int (Maybe FilePath) (Maybe Command) | ReviewExternal | ResolveConflict Conflict ConflictAction | ServiceAction Text [Text] | AgentAction Text [Text] | PermissionAction Text [Text] | DebugAction Text [Text] | SetScreenMode Int | Exit deriving (Eq,Show)
 data Field = Input Text Text Int | SelectedInput Text Text Selection | ComboBox Text [Text] Int (Maybe Int) | CheckBox Text Bool | Radio Text [Text] Int | ListBox Text [Text] Int | FileList [Entry] Int
   | ReadOnly Text Text
   | TextArea Text Bool Buffer Selection Int Int deriving (Eq,Show)
@@ -1215,12 +1215,18 @@ runCommand cmd source | dialog source==Nothing, activeMarkdown source, markdownS
 runCommand cmd source | dialog source==Nothing, Just _<-activePluginWindow source, sourceOnlyCommand cmd,not ((composerActive source || questionActive source) && cmd `elem` [Undo,Redo,Cut,Paste]) = (source {status="This plugin window is read-only."},[])
 runCommand cmd source | browserFrontend source, cmd `elem` [Copy,Cut,CopyAllMessages,CopyLocation] =
   let (next,requests)=runCommand cmd source {browserFrontend=False}
-  in (next {browserFrontend=True},requests++[WriteBrowserClipboard (clipboard next)])
+  in (next {browserFrontend=True},requests++[WriteBrowserClipboard (clipboard next) | not (any deferredCopy requests)])
+  where deferredCopy CopyConversation{}=True; deferredCopy _=False
 runCommand Paste source | browserFrontend source = (source {menu=Nothing,contextMenu=Nothing,prefix=Nothing},[ReadBrowserClipboard])
 runCommand cmd source | dialogCommandAllowed cmd source = applyDialogCommand cmd source
 runCommand cmd source | problemsVisible source && problemsFocused source, cmd `elem` [Undo,Redo,Cut,Paste,SelectAll] = (source {menu=Nothing,contextMenu=Nothing},[])
-runCommand Copy source | activeConversation source, Just w<-activeWindow source, anchor (selection w)/=caret (selection w) =
-  ((copyClipboard False (conversationSelection source) source) {status="Conversation text copied.",menu=Nothing,contextMenu=Nothing},[])
+runCommand Copy source | activeConversation source,Just window<-activeWindow source,
+  Just target<-conversationTargetFor source window,Just view<-M.lookup target (conversationViews source),
+  Just logical<-conversationLogical view,Just chosen@(BodySelection a z)<-conversationCopySelection source target window,a/=z,
+  Just reference<-conversationBodyRef view =
+    let serial=fst (clipboardExport source)+1
+    in (source {clipboardExport=(serial,Nothing),status="Preparing conversation copy.",menu=Nothing,contextMenu=Nothing},
+      [CopyConversation (ConversationCopy reference target logical chosen serial)])
 runCommand cmd source | activeAutocomplete source, autocompleteFocused source, cmd `elem` [Undo,Redo,Copy,Cut,Paste,SelectAll] = (autocompleteEdit (composerCommandWith False cmd) source,[])
 runCommand cmd source | questionActive source, cmd `elem` [Undo,Redo,Copy,Cut,Paste,SelectAll] = (questionCommand cmd source,[])
 runCommand cmd source | not (problemsFocused source), composerActive source, cmd `elem` [Undo,Redo,Copy,Cut,Paste,SelectAll] = (composerCommand cmd source,[])
@@ -2071,6 +2077,13 @@ conversationHasDraft=any ((>0) . bufferLength . editorDraftBuffer) . M.elems . e
 activeConversation :: Desktop -> Bool
 activeConversation d=maybe False (\w->windowFocused d w && conversationTargetFor d w/=Nothing) (activeWindow d)
 
+conversationCopySelection :: Desktop -> Text -> Window -> Maybe BodySelection
+conversationCopySelection d target window=do
+  view<-M.lookup target (conversationViews d)
+  conversationReplySelection view <|> do
+    viewport<-bodyViewportFor d target
+    BodySelection <$> viewportPoint viewport (anchor (selection window)) <*> viewportPoint viewport (caret (selection window))
+
 conversationSelection :: Desktop -> Text
 conversationSelection d=case activeWindow d of
   Just w | conversationTargetFor d w/=Nothing,Just prepared<-windowPluginText d w ->
@@ -2174,7 +2187,8 @@ composerInsert text d = clearReplySelection (setComposerInput (replaceSelection 
 -- Clipboard provenance is ephemeral and only applies when the pasted bytes
 -- still match the source copy. Plain copies explicitly clear it.
 copyClipboard :: Bool -> Text -> Desktop -> Desktop
-copyClipboard code text d=d {clipboard=text,clipboardCode=if code && not (T.null text) then Just text else Nothing}
+copyClipboard code text d=d {clipboard=text,clipboardCode=if code && not (T.null text) then Just text else Nothing,
+  clipboardExport=(fst (clipboardExport d)+1,Nothing)}
 
 -- Indented Markdown keeps the draft itself as the sole editable/recoverable
 -- state. A row-local marker needs no whole-draft parsing during rendering.

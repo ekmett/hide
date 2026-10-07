@@ -7,6 +7,7 @@
 module Hide.ConversationBody
   ( BodyItemId(..), Record(..), RecordContent(..), BodyPoint(..), BodyAnchor(..), BodySelection(..), BodyDemand(..), BodyViewport(..), BodyRow(..), viewportPoint, viewportOffset
   , LogicalBody, LogicalItem, logicalBodyIdentity, logicalBodyProvider, logicalBodyTranscriptIdentity, logicalBodyRead, validateLogicalPoint, logicalBodyItems, logicalBodyItemIndex, logicalItemRecord, logicalItemMarkdown, logicalItemBlocks, prepareLogicalBody, restoreLogicalBody, restoreLogicalViewport
+  , ConversationCopy(..), logicalBodyCopy
   , ToolExpansion(..), QuestionSchema(..), QuestionProjection(..)
   , BodyProvider(..), BodyKey(..), bodyOwnerMatches, BodyInput(..)
   , BodyRequest(..), BodyResult(..), PreparedBody(..), HostBodyControls(..)
@@ -52,7 +53,16 @@ data RecordContent = Reply Text Text | Activity Text Value [Value] | Pause Text 
 
 -- Positions belong to the target's logical catalogue, never a painted row.
 -- Missing item IDs cannot be redirected to an unrelated surviving item.
-data BodyPoint = BodyPoint !BodyItemId !Int !Int | QuestionPoint !Int !Int !Int deriving (Eq,Ord,Show)
+data BodyPoint = BodyPoint !BodyItemId !Int !Int | QuestionPoint !Int !Int !Int deriving (Eq,Show)
+instance Ord BodyPoint where
+  compare a b=compare (order a) (order b)
+    where
+      order (BodyPoint (BodyItemId ident) block scalar)=(0::Int,ident,0::Int,block,scalar)
+      order (QuestionPoint token block scalar)
+        | block>=0=(1,token,0,block,scalar)
+        | block<=(-3)=(1,token,1,(-3)-block,scalar)
+        | block==(-1)=(1,token,2,0,scalar)
+        | otherwise=(1,token,3,0,scalar)
 data BodyAnchor = At !BodyPoint | FollowEnd deriving (Eq,Show)
 data BodySelection = BodySelection !BodyPoint !BodyPoint deriving (Eq,Show)
 
@@ -69,7 +79,7 @@ data BodyViewport = BodyViewport
   , viewportScroll :: !Int, viewportAtEnd :: !Bool
   } deriving Show
 
--- | /O(log demanded rows + row spans)/. Convert only through the authoritative
+-- | /O(demanded rows + row spans)/. Convert only through the authoritative
 -- bounded receipt; furniture uses its nearest surviving logical boundary.
 viewportPoint :: BodyViewport -> Int -> Maybe BodyPoint
 viewportPoint viewport offset=do
@@ -123,7 +133,7 @@ data LogicalBody = LogicalBody
   { logicalIdentity :: !Unique, logicalTarget :: !Text
   , logicalProvider :: !BodyProvider, logicalTranscript :: !(StableName [Record])
   , logicalSession :: !(Maybe Text), logicalQuestion :: !(Maybe QuestionSchema)
-  , logicalItems :: !(V.Vector LogicalItem)
+  , logicalWidth :: !Int, logicalItems :: !(V.Vector LogicalItem)
   }
 instance Eq LogicalBody where a==b=logicalIdentity a==logicalIdentity b
 instance Show LogicalBody where show body="LogicalBody "++show (hashUnique (logicalIdentity body))
@@ -203,7 +213,7 @@ prepareLogicalBody key input previous=do
             _->M.empty
       items<-V.fromList <$> mapM (capture old) (bodyRecords input)
       evaluate (LogicalBody identity (bodyTarget key) (bodyProvider key) (bodyTranscript key)
-        (bodySession input) (bodyQuestion input) items)
+        (bodySession input) (bodyQuestion input) 0 items)
   withLogicalWidth (max 1 (bodyColumns key-5)) body
   where
     questionTokenOf Nothing=Nothing
@@ -217,9 +227,11 @@ prepareLogicalBody key input previous=do
           _->Nothing) 0 V.empty)
 
 withLogicalWidth :: Int -> LogicalBody -> IO LogicalBody
-withLogicalWidth columns body=do
-  items<-V.mapM resize (logicalItems body)
-  evaluate body {logicalItems=items}
+withLogicalWidth columns body
+  | logicalWidth body==columns=pure body
+  | otherwise=do
+      items<-V.mapM resize (logicalItems body)
+      evaluate body {logicalWidth=columns,logicalItems=items}
   where
     resize item@(LogicalItem record payload parsed width _)
       | width==columns=pure item
@@ -262,6 +274,53 @@ logicalBodyRead body=do
     redacted=case logicalQuestion body of
       Just _->True
       Nothing->V.null (logicalItems body) && T.null (logicalTarget body)
+
+-- A human copy intent owns its immutable source/selection. Later streaming
+-- append may replace the catalogue but not this capture. Delivery checks the
+-- frame/provider lifetime and the shared clipboard intent serial.
+data ConversationCopy = ConversationCopy !W.WindowRef !Text !LogicalBody !BodySelection !Int
+  deriving (Eq,Show)
+
+-- | Read only selected canonical blocks on the presentation worker. Furniture
+-- and soft wraps are absent; hard breaks/block separators belong to the parser.
+-- As in prepared message copy, one bubble is speaker-free and cross-bubble
+-- primary copy carries attribution. Live answers/choice controls are absent.
+logicalBodyCopy :: LogicalBody -> BodySelection -> IO Text
+logicalBodyCopy body (BodySelection anchor caret)=do
+  result<-evaluate (T.intercalate "\n\n" (map render messages))
+  _<-evaluate (T.length result)
+  pure result
+  where
+    first=min anchor caret
+    lastPoint=max anchor caret
+    items=logicalBodyItems body
+    lower=case first of BodyPoint ident _ _->logicalBodyItemIndex ident body; QuestionPoint{}->Just (V.length items)
+    upper=case lastPoint of BodyPoint ident _ _->logicalBodyItemIndex ident body; QuestionPoint{}->Just (V.length items-1)
+    selected=case (lower,upper) of
+      (Just a,Just z) | a<=z->V.toList (V.slice a (z-a+1) items)
+      _->[]
+    messages=[(role=="You",text) | item<-selected,Reply role _<-[recordContent (logicalItemRecord item)],
+      let ident=recordId (logicalItemRecord item),let text=part (BodyPoint ident) (logicalItemBlocks item),not (T.null text)]++question
+    question=case logicalQuestion body of
+      Just (QuestionSchema token prompt _) | first<=QuestionPoint token maxBound maxBound,lastPoint>=QuestionPoint token 0 0->
+        let text=part (QuestionPoint token) (V.fromList (markdownBlocks (parseMarkdown prompt)))
+        in [(False,text) | not (T.null text)]
+      _->[]
+    part point blocks
+      | V.null blocks=""
+      | otherwise=T.concat [slice block (markdownBlockText (blocks V.! block)) | block<-[startBlock..endBlock]]
+      where
+        end=max 0 (V.length blocks-1)
+        bound source fallback=case source of
+          BodyPoint ident block scalar | point 0 0==BodyPoint ident 0 0->(max 0 (min end block),scalar)
+          QuestionPoint token block scalar | block>=0,point 0 0==QuestionPoint token 0 0->(max 0 (min end block),scalar)
+          _->fallback
+        (startBlock,startScalar)=bound first (0,0)
+        (endBlock,endScalar)=bound lastPoint (end,maxBound)
+        slice block text=let begin=if block==startBlock then max 0 startScalar else 0
+                             count=if block==endBlock then max 0 (endScalar-begin) else maxBound
+                         in T.take count (T.drop begin text)
+    render (outgoing,text)=(if T.null (logicalTarget body) && length messages>1 then if outgoing then "User: " else "Bot: " else "")<>text
 
 -- One existing UI expansion owner covers individual activities and grouped runs.
 -- Transcript updates contain data only and cannot overwrite this interaction.
@@ -354,7 +413,7 @@ restoreLogicalBody target records=do
   identity<-newUnique
   root<-makeStableName =<< evaluate records
   items<-V.fromList <$> mapM restore records
-  evaluate (LogicalBody identity target (RecoveredBodyProvider identity) root Nothing Nothing items)
+  evaluate (LogicalBody identity target (RecoveredBodyProvider identity) root Nothing Nothing 0 items)
   where
     restore record=do
       payload<-makeStableName =<< evaluate record

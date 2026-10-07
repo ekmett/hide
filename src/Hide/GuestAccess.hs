@@ -157,6 +157,7 @@ serviceActionAllowed action=action `elem` ["compile","make","build-stop","run","
 guestEffectsAllowed :: [Effect] -> Bool
 guestEffectsAllowed=all allowed
   where
+    allowed CopyConversation{}=False
     allowed ExecuteShellBlockAction{}=False
     allowed PackageDebugAction{}=False
     allowed AdoptPreparedDebug{}=False
