@@ -69,6 +69,7 @@ import Hide.Markdown (renderMarkdown)
 import Hide.Syntax (Style(..),StyledText,StyledRow(..),Sigils(..),styledText,styledContents,styledLength,splitStyledText,graphemeText)
 import Hide.Terminal (terminalAvailable)
 import Hide.Session (checkpointPath)
+import Hide.Recovery (writeCheckpoint,readCheckpoint)
 
 draftBuffer :: Buffer -> Desktop -> Desktop
 draftBuffer b d=setComposerInput b (composerSelection d) (composerFocused d) d
@@ -1315,7 +1316,36 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ withTextPresentation $ 
       countAfter<-length . filter ((==Just ("session/load"::T.Text)).field "method") <$> logged
       check "resume is capability-gated" (countBefore==countAfter)
       _<-send runtime "options" [] gated
-      pure ()
+      shownBeforeClose<-send runtime "show" [] gated
+      pendingClosed<-prompt runtime "wide" shownBeforeClose
+      let (closing,closeEffects)=runCommand Close pendingClosed
+          oldPaint=conversationBodySnapshot "" closing
+          oldSource=M.lookup "" (conversationViews closing) >>= conversationSource
+          received current=do
+            next<-Conversation.tickConversation runtime current
+            if status next=="Agent: end_turn" then pure next else threadDelay 10000 >> received next
+      closed<-snd <$> conversationEffects runtime fallback closing closeEffects
+      receivedClosed<-timeout 8000000 (received closed) >>= maybe (error "Closed conversation source timed out") pure
+      let closedSource=M.lookup "" (conversationViews receivedClosed) >>= conversationSource
+          checkpoint=root </> "closed-conversation.checkpoint"
+          expected=T.replicate 90 "reply-width "<>"\n\n```sh\nprintf 'live λ'\n```"
+          replies value=do
+            views<-field "conversationViews" value :: Maybe [Value]
+            primary<-find ((==Just (""::T.Text)).field "target") views
+            body<-field "body" primary
+            items<-field "items" body :: Maybe [Value]
+            pure (mapMaybe (\item->field "content" item >>= field "markdown") items :: [T.Text])
+      check "closed output advances source without presenting or reopening its body"
+        (closedSource/=Nothing && closedSource/=oldSource && conversationBodySnapshot "" receivedClosed==oldPaint &&
+         not (any ((==Just "").conversationTargetFor receivedClosed) (windows receivedClosed)))
+      writeCheckpoint checkpoint receivedClosed >>= either (error.T.unpack) pure
+      saved<-decodeStrict' <$> BS.readFile checkpoint
+      restoredClosed<-readCheckpoint checkpoint desktop >>= either (error.T.unpack) pure
+      writeCheckpoint checkpoint restoredClosed >>= either (error.T.unpack) pure
+      restoredSource<-decodeStrict' <$> BS.readFile checkpoint
+      check "checkpoint preserves latest closed canonical source rather than stale painted rows"
+        (maybe False (elem expected) (saved >>= replies) && maybe False (elem expected) (restoredSource >>= replies) &&
+         not (any ((==Just "").conversationTargetFor restoredClosed) (windows restoredClosed)))
     -- User guidance reaches ACP as context, without changing the visible query.
     createDirectoryIfMissing True (root </> "config/thc")
     writeFile (root </> "config/thc/config.toml") "[editor.agent]\ncontext = 'Global guidance marker'\n"
