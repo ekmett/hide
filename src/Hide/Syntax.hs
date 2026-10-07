@@ -189,7 +189,13 @@ prepareSourceRow text tokens=SourceRow text (V.fromList (ranges 0 0 text (compac
       | otherwise=let (part,after)=T.splitAt (T.length token) remaining
                       endChar=char+T.length part
                       endByte=byte+TU.lengthWord8 part
-                  in SourceRange char endChar byte endByte style:ranges endChar endByte after rest
+                  in addRange (SourceRange char endChar byte endByte style) (ranges endChar endByte after rest)
+    -- Ranges describe the authoritative source, not tokenizer array ownership.
+    -- Equal adjacent styles therefore coalesce even when lexical slices came
+    -- from distinct arrays; no Text concatenation is required.
+    addRange (SourceRange a _ b _ style) (SourceRange _ z _ end other:rest)
+      | style==other=SourceRange a z b end style:rest
+    addRange range rest=range:rest
 
 -- | /O(1)/. Plain visible rows borrow their original Text without counting or
 -- rebuilding characters. Exact ranges remain available through 'sourceRowRanges'.

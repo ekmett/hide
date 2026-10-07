@@ -1,3 +1,4 @@
+{-# LANGUAGE OverloadedStrings #-}
 -- | Worker-prepared visual rows with original semantic character ranges.
 -- Widening never inserts padding or wrapping newlines into the source. Render,
 -- hit testing and navigation consume one measured snapshot. Layout equality

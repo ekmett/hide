@@ -159,13 +159,16 @@ normalize (Blocks blocks)=go blocks
       let (_,rows)=mapAccum 0 (header:body)
           prepareRow start cells=mapAccumCells start cells
           mapAccum offset []=(offset,[])
-          mapAccum offset (row:rest)=let (end,prepared)=prepareRow offset row
-                                       (finish,more)=mapAccum (end+1) rest
-                                   in (finish,prepared:more)
+          mapAccum offset (row:rest)=
+            let (end,prepared)=prepareRow offset row
+                (finish,more)=mapAccum (end+1) rest
+            in (finish,prepared:more)
           mapAccumCells offset []=(offset,[])
-          mapAccumCells offset (cell:rest)=let normalized=normalizeProse cell; count=lengthOf normalized
-                                              (finish,more)=mapAccumCells (offset+count+1) rest
-                                          in (if null rest then offset+count else finish,assign offset normalized:more)
+          mapAccumCells offset (cell:rest)=
+            let normalized=normalizeProse cell
+                count=lengthOf normalized
+                (finish,more)=mapAccumCells (offset+count+1) rest
+            in (if null rest then offset+count else finish,assign offset normalized:more)
           text=T.intercalate "\n" [T.intercalate "\t" (map (textOf . normalizeProse) row) | row<-header:body]
       in case rows of first:rest->(Table aligns first rest,text); []->(Table aligns [] [],text)
     canonicalBlock (Indent prefix children)=

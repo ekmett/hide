@@ -6,7 +6,7 @@ import Control.Monad (forM_, unless, when, (>=>))
 import qualified Data.Map.Strict as M
 import Data.Aeson (object, (.=))
 import Data.List (intersperse)
-import Hide.Syntax (Style(Plain))
+import Hide.Syntax (Style(Plain),styledContents)
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
 import Hide.Buffer (newBuffer, Selection(..), revision, contents, replaceSelection, bufferLineOffset, bufferLineChanges, bufferLineColumn, displayColumn, bufferLineCount, bufferLineAt)
@@ -125,14 +125,14 @@ main = PluginWindow.withWindowScope $ \downloadScope -> do
                     ]
                   contentWidth=width (bounds window)-2
                   bubbles=[renderReply True contentWidth outgoing (T.stripEnd replyText) | (outgoing,replyText)<-replies]
-                  styled=concat (intersperse [('\n',Plain),('\n',Plain)] bubbles)
-                  text=T.pack (map fst styled)
+                  styled=concat (intersperse [("\n\n",Plain)] bubbles)
+                  text=styledContents styled
                   draft="How would you benchmark edits to a large file?"
                   shown=(setComposerInput (newBuffer draft) (Selection (T.length draft) (T.length draft)) True full) {buffers=M.adjust (\doc -> doc {documentBuffer=newBuffer text,documentHighlight=styled,documentCursorVisible=False}) bid (buffers full)
 
                     ,agentSettings=[AgentSetting "model" "Model" "model" "gpt-6-astra" [("gpt-6-astra","gpt-6-astra")],AgentSetting "effort" "Effort" "thought_level" "medium" [("medium","medium")]]
                     ,agentContextUsage=Just (33000,258000),status="Recorded conversation"}
-              let rowWidths=[displayColumn row (T.length row) | cells<-bubbles,row<-T.lines (T.pack (map fst cells))]
+              let rowWidths=[displayColumn row (T.length row) | cells<-bubbles,row<-T.lines (styledContents cells)]
               unless (all (<=contentWidth) rowWidths && maximum (0:rowWidths)>=contentWidth-6)
                 (fail "Recorded conversation does not fit its current window width")
               case activeDocument shown of
