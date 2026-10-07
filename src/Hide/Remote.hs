@@ -290,8 +290,8 @@ runRemoteDaemonWithStartup owned wake session scale effects tick inspect initial
         linkLoop = forever $ do
           (stamp,captured,columns,directory,origin,target)<-atomically (readTBQueue linkJobs)
           prepared<-prepareLink True columns directory origin target
-          -- A prepared link waits for the suspension outcome; a failed save
-          -- must not discard an already accepted completion.
+          -- A prepared link waits for the suspension outcome, then rechecks
+          -- its attachment lifetime, including ordinary I/O-error invalidation.
           withMVar checkpointPublisher $ \_->modifyMVar_ state $ \s->do
             if stopped s || stamp/=(owner s,generation s) || not (maybe True (\receipt->case receipt of
               Left trace->maybe False (\tree->treeFocused tree && hitCurrent trace tree) (sideTree (desktop s)) && dialog (desktop s)==Nothing && columns==max 20 (min 76 (fst (screenSize (desktop s))-treeWidthOf (desktop s)-4))
