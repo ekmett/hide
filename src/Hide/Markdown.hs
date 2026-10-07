@@ -197,7 +197,7 @@ shift offset block=case block of
 normalizeProse :: Styled -> Styled
 normalizeProse=intercalate [("\n",Plain,Nothing)] . map normalizeLine . rows
   where
-    normalizeLine=compactRuns . intercalate [(" ",Plain,Nothing)] . wordsOf . parts . boundedStyles
+    normalizeLine=compactRuns . intercalate [(" ",Plain,Nothing)] . wordsOf . boundedParts
     wordsOf pending=case dropWhile whitespace pending of
       []->[]
       remaining->let (word,rest)=break whitespace remaining in concat word:wordsOf rest
@@ -311,7 +311,7 @@ stripFinalNewline chars=case reverse chars of
   _->chars
 
 wrapWords :: Int -> Styled -> [Styled]
-wrapWords width = go [] . wordsStyled . boundedStyles
+wrapWords width = go [] . wordsOf . boundedParts
   where
     go current [] = [current]
     go [] (word:rest)
@@ -320,7 +320,6 @@ wrapWords width = go [] . wordsStyled . boundedStyles
     go current remaining@(word:rest)
       | columns current + 1 + columns word <= width = go (current ++ [(" ",Plain,between current word)] ++ word) rest
       | otherwise = current : go [] remaining
-    wordsStyled=wordsOf . parts
     wordsOf pending=case dropWhile whitespace pending of
       []->[]
       remaining->let (word,rest)=break whitespace remaining in compactRuns (concat word):wordsOf rest
@@ -335,23 +334,21 @@ between left right=case (extent left,extent right) of
 
 -- Capture overflow boundaries before any operation introduces row breaks or
 -- trims whitespace. Each part remains atomic, including space + combining runs.
-boundedStyles :: Styled -> Styled
-boundedStyles chars=concat (zipWith mark (presentationItems (textOf chars) (plainRuns chars)) (parts chars))
+boundedParts :: Styled -> [Styled]
+boundedParts chars=go (presentationItems (textOf chars) (plainRuns chars)) chars
   where
-    mark (_,True) part@((_,style,_):_)
+    go [] _=[]
+    go ((text,overflow):rest) remaining=
+      let (part,after)=splitRuns (T.length text) remaining
+      in mark overflow part:go rest after
+    mark True part@((_,style,_):_)
       | styleOverflowExtent style==Nothing=
         let (first,after)=splitRuns 1 part
         in [(t,OverflowFragment (lengthOf part) s,span) | (t,s,span)<-first]++after
     mark _ part=part
 
-parts :: Styled -> [Styled]
-parts chars=go (presentationItems (textOf chars) (plainRuns chars)) chars
-  where
-    go [] _=[]
-    go ((text,_):rest) remaining=let (part,after)=splitRuns (T.length text) remaining in part:go rest after
-
 wrapExact :: Int -> Styled -> [Styled]
-wrapExact width chars=go [] 0 (parts (boundedStyles chars))
+wrapExact width chars=go [] 0 (boundedParts chars)
   where
     go current _ []=[compactRuns (concat (reverse current))]
     go current col pending@(part:rest)
@@ -360,7 +357,9 @@ wrapExact width chars=go [] 0 (parts (boundedStyles chars))
       where advance=columns part
 
 expandTabs :: Styled -> Styled
-expandTabs chars = go 0 (displayItems (textOf chars)) chars
+expandTabs chars
+  | not (any (\(text,_,_)->T.any (=='\t') text) chars)=chars
+  | otherwise=go 0 (displayItems (textOf chars)) chars
   where
     go _ [] _=[]
     go col (item:gs) remaining = expanded ++ go next gs rest
