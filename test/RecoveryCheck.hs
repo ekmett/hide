@@ -293,9 +293,11 @@ keyChecks=W.withWindowScope $ \scope->do
   maskedKey<-checkpointKey masked
   opening<-W.openTextWindow scope maskedBody >>= maybe (fail "Key fixture scope ended") pure
   (reference,_)<-W.admitWindowUpdate False opening >>= maybe (fail "Key fixture admission failed") pure
-  let controlled token=masked {pluginWindows=M.insert reference maskedBody (pluginWindows masked),
-        conversationViews=M.adjust (\view->view {conversationBody=InstalledBody reference
-          (Just (BodyControlReceipt maskedBody 80 False Nothing (HostBodyControls Nothing [(14,28,"question-input",[token])])))} "" (conversationViews masked)}
+  let receipt token=BodyControlReceipt maskedBody 80 False Nothing
+        (HostBodyControls Nothing [(14,28,"question-input",[token])])
+      controlled token=masked {pluginWindows=M.insert reference maskedBody (pluginWindows masked),
+        conversationViews=M.adjust (\view->view {conversationBody=InstalledBody reference (Just (receipt token))})
+          "" (conversationViews masked)}
   tokenOnly<-checkpointKey (controlled "other-token")
   originalToken<-checkpointKey (controlled "ephemeral-token")
   remembered<-checkpointKey (rememberConversationView masked)
