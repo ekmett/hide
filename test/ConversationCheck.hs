@@ -1102,8 +1102,8 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ withTextPresentation $ 
       check "live transcript Copy retains the cursor and exact draft while carrying canonical attribution"
         (composerFocused copiedChat && retainedDraft && composerSelection copiedChat==Selection 2 2 &&
          any (\effect->case effect of CopyConversation{}->True; _->False) copyRequests)
-      let draftActions=[fst (handleEvent (V.EvKey V.KRight [])) dragged,
-            fst (handleEvent (V.EvKey V.KLeft [V.MShift])) dragged,fst (runCommand Undo dragged),fst (runCommand SelectAll dragged)]
+      let draftActions=[fst (handleEvent (V.EvKey V.KRight []) dragged),
+            fst (handleEvent (V.EvKey V.KLeft [V.MShift]) dragged),fst (runCommand Undo dragged),fst (runCommand SelectAll dragged)]
       check "actual draft navigation, history and selection retire the transcript copy selection"
         (all (\current->maybe False ((==Nothing).conversationReplySelection) (M.lookup "" (conversationViews current))) draftActions)
       let activityAction=case [values | (_,_,name,values)<-conversationActions streamed,name=="toggle-activity"] of values:_->values; _->error "missing activity action"
