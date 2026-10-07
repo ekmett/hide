@@ -20,8 +20,8 @@ import Data.Foldable (toList)
 import Data.Maybe (fromMaybe, listToMaybe)
 import qualified Data.Text as T
 import qualified Skylighting as S
-import Hide.Unicode (displayItems, itemSourceText, itemWidth,sourceGlyphAdvance,sourceTextWidth)
-import Hide.Syntax (Style(..), Sigils(..), StyledText, StyledRow(..), MappedStyledRow(..), styledContents, compactStyled, styledLength, styledRows, presentationItems, styleOverflowExtent, highlightFor, linkSpans)
+import Hide.Unicode (displayItems, itemSourceText, itemWidth,sourceTextWidth)
+import Hide.Syntax (Style(..), Sigils(..), StyledText, StyledRow(..), MappedStyledRow(..), styledContents, compactStyled, styledLength, styledRows, styledColumn, presentationItems, styleOverflowExtent, highlightFor, linkSpans)
 
 type Styled = [(T.Text,Style,Maybe (Int,Int,Int))]
 newtype Inline = Inline (Seq.Seq (T.Text,Style,Maybe (Int,Int,Int))) deriving (Show, Semigroup, Monoid)
@@ -124,8 +124,8 @@ markdownIntrinsicWidth (Markdown blocks)=maximum (1:[sourceTextWidth line
 
 -- | Demand mapped physical rows from one immutable logical block. The map is
 -- consumed by TextLayout; no global source-map owner or transcript is created.
-renderMarkdownBlock :: Int -> MarkdownBlock -> [MappedStyledRow]
-renderMarkdownBlock width (MarkdownBlock block canonical gap)=mapped 0 (render (max 1 width) (Blocks ([block]++[Gap | gap])))
+renderMarkdownBlock :: Bool -> Int -> MarkdownBlock -> [MappedStyledRow]
+renderMarkdownBlock wide width (MarkdownBlock block canonical gap)=mapped 0 (render wide (max 1 width) (Blocks ([block]++[Gap | gap])))
   where
     mapped _ []=[]
     mapped boundary ((runs,_):rest)=
@@ -211,7 +211,7 @@ renderMarkdownWithShellBlocks requested source =
   (compactStyled (plainRuns (intercalate [("\n",Plain,Nothing)] (map fst rendered))), reverse (snd (foldl collect (0,[]) rendered)))
   where
     Markdown parsed=parseMarkdown source
-    rendered=concatMap (\(MarkdownBlock block _ gap)->render (max 1 requested) (Blocks ([block]++[Gap | gap]))) parsed
+    rendered=concatMap (\(MarkdownBlock block _ gap)->render False (max 1 requested) (Blocks ([block]++[Gap | gap]))) parsed
     collect (offset,found) (chars,payload)=
       let end=offset+lengthOf chars
           next=case payload of
@@ -240,17 +240,17 @@ decorate style (Inline chars)=Inline (fmap (\(c,old,span)->(c,style old,span)) c
 textOf :: Styled -> T.Text
 textOf = styledContents . plainRuns
 
-columns :: Styled -> Int
-columns chars=foldl (\col (text,overflow)->col+if overflow then 1 else sourceGlyphAdvance col text) 0 (presentationItems (textOf chars) (plainRuns chars))
+columns :: Bool -> Styled -> Int
+columns wide=styledColumn wide 0 . plainRuns
 
 trim :: Blocks -> Blocks
 trim (Blocks blocks) = Blocks (reverse (dropWhile gap (reverse blocks)))
   where gap Gap = True; gap _ = False
 
-render :: Int -> Blocks -> [(Styled,Maybe (T.Text,T.Text))]
-render width (Blocks blocks) = concatMap block blocks
+render :: Bool -> Int -> Blocks -> [(Styled,Maybe (T.Text,T.Text))]
+render wide width (Blocks blocks) = concatMap block blocks
   where
-    block (Flow chars) = plainRows (concatMap (wrapWords width) (rows chars))
+    block (Flow chars) = plainRows (concatMap (wrapWords wide width) (rows chars))
     block (Code info source chars) =
       let margin=if width>=8 then 2 else 0
           panelWidth=width-margin
@@ -259,37 +259,37 @@ render width (Blocks blocks) = concatMap block blocks
           shell=shellBlock info
           base=CodeStyle shell Plain
           line xs=paint Plain (T.replicate margin " ") ++ paint base (T.replicate padding " ") ++
-            [(c,CodeStyle shell style,span) | (c,style,span)<-xs] ++ paint base (T.replicate (max 0 (panelWidth-padding-columns xs)) " ")
-          content=concatMap (wrapExact inner) (rows (stripFinalNewline (expandTabs chars)))
+            [(c,CodeStyle shell style,span) | (c,style,span)<-xs] ++ paint base (T.replicate (max 0 (panelWidth-padding-columns wide xs)) " ")
+          content=concatMap (wrapExact wide inner) (rows (stripFinalNewline (expandTabs chars)))
       in [(line xs, (,source) <$> executableShell info) | xs<-[]:content++[[]]]
-    block (Table aligns header body)=plainRows (renderTable width aligns header body)
-    block (Pre chars) = plainRows (concatMap (wrapExact width) (rows (stripFinalNewline (expandTabs chars))))
+    block (Table aligns header body)=plainRows (renderTable wide width aligns header body)
+    block (Pre chars) = plainRows (concatMap (wrapExact wide width) (rows (stripFinalNewline (expandTabs chars))))
     block Gap = [([],Nothing)]
     block (Indent prefix content)
-      | indent >= width = concatMap (\(chars,payload)->map (,payload) (wrapExact width chars)) (attach (render width content))
-      | otherwise = attach (render (width-indent) content)
+      | indent >= width = concatMap (\(chars,payload)->map (,payload) (wrapExact wide width chars)) (attach (render wide width content))
+      | otherwise = attach (render wide (width-indent) content)
       where
         indent = T.length prefix
         attach [] = [(paint Comment (T.stripEnd prefix),Nothing)]
         attach ((first,payload):rest) = (paint Comment prefix ++ first,payload) : map (\(chars,tag)->(paint Plain (T.replicate indent " ") ++ chars,tag)) rest
     plainRows=map (,Nothing)
 
-renderTable :: Int -> [ColAlignment] -> [Styled] -> [[Styled]] -> [Styled]
-renderTable width aligns header body
+renderTable :: Bool -> Int -> [ColAlignment] -> [Styled] -> [[Styled]] -> [Styled]
+renderTable wide width aligns header body
   | count==0 = []
-  | width < count*4+1 = concat [concat [wrapWords width (h++paint Comment ": "++value) | (h,value)<-zip header row] ++ [[]] | row<-body]
+  | width < count*4+1 = concat [concat [wrapWords wide width (h++paint Comment ": "++value) | (h,value)<-zip header row] ++ [[]] | row<-body]
   | otherwise = [rule '┌' '┬' '┐'] ++ rowLines True header ++ [rule '├' '┼' '┤'] ++ concatMap (rowLines False) body ++ [rule '└' '┴' '┘']
   where
     count=length header
     budget=width-3*count-1
-    natural=[maximum (1:[columns cell | row<-header:body,cell<-take 1 (drop i row)]) | i<-[0..count-1]]
+    natural=[maximum (1:[columns wide cell | row<-header:body,cell<-take 1 (drop i row)]) | i<-[0..count-1]]
     shrink widths | sum widths<=budget = widths
                   | otherwise = let biggest=maximum widths; (before,after)=break (==biggest) widths
                                in shrink (before++[biggest-1]++drop 1 after)
     sizes=shrink natural
     rule a b c=paint Comment (T.singleton a<>T.intercalate (T.singleton b) [T.replicate (n+2) "─" | n<-sizes]<>T.singleton c)
     rowLines isHeader cells=
-      let wrapped=zipWith wrapWords sizes (take count (cells++repeat []))
+      let wrapped=zipWith (wrapWords wide) sizes (take count (cells++repeat []))
           height=maximum (1:map length wrapped)
           line j=paint Comment "│"++concat [paint Plain " "++pad alignment n (if isHeader then [(c,headerStyle s,span) | (c,s,span)<-part] else part)++paint Comment " │"
             | (n,alignment,parts)<-zip3 sizes (aligns++repeat DefaultAlignedCol) wrapped, let part=case drop j parts of x:_->x; _->[]]
@@ -298,7 +298,7 @@ renderTable width aligns header body
     headerStyle (LinkStyle url _)=LinkStyle url (Heading 2)
     headerStyle _=Heading 2
     pad alignment n chars=paint Plain (T.replicate left " ")++chars++paint Plain (T.replicate (extra-left) " ")
-      where extra=max 0 (n-columns chars)
+      where extra=max 0 (n-columns wide chars)
             left=case alignment of RightAlignedCol->extra; CenterAlignedCol->extra `div` 2; _->0
 
 rows :: Styled -> [Styled]
@@ -310,16 +310,16 @@ stripFinalNewline chars=case reverse chars of
     reverse ([(T.dropEnd 1 text,style,fmap (\(a,z,n)->(a,z-1,n-1)) span) | T.length text>1]++rest)
   _->chars
 
-wrapWords :: Int -> Styled -> [Styled]
-wrapWords width = go 0 [] . map (\word->(word,columns word)) . wordsOf . boundedParts
+wrapWords :: Bool -> Int -> Styled -> [Styled]
+wrapWords wide width = go 0 [] . map (\word->(word,columns wide word)) . wordsOf . boundedParts
   where
     -- Word splitting removes tabs; advances compose with the inserted one-cell
     -- blank. Carry the accepted width instead of segmenting the row again.
     go !_ current [] = [current]
     go !_ [] ((word,advance):rest)
       | advance > width =
-          let parts=wrapExact width word; final=last parts
-          in init parts ++ go (columns final) final rest
+          let parts=wrapExact wide width word; final=last parts
+          in init parts ++ go (columns wide final) final rest
       | otherwise = go advance word rest
     go !col current remaining@((word,advance):rest)
       | col + 1 + advance <= width = go (col+1+advance) (current ++ [(" ",Plain,between current word)] ++ word) rest
@@ -351,14 +351,14 @@ boundedParts chars=go (presentationItems (textOf chars) (plainRuns chars)) chars
         in [(t,OverflowFragment (lengthOf part) s,span) | (t,s,span)<-first]++after
     mark _ part=part
 
-wrapExact :: Int -> Styled -> [Styled]
-wrapExact width chars=go [] 0 (boundedParts chars)
+wrapExact :: Bool -> Int -> Styled -> [Styled]
+wrapExact wide width chars=go [] 0 (boundedParts chars)
   where
     go current _ []=[compactRuns (concat (reverse current))]
     go current col pending@(part:rest)
       | not (null current) && col+advance>width=compactRuns (concat (reverse current)):go [] 0 pending
       | otherwise=go (part:current) (col+advance) rest
-      where advance=columns part
+      where advance=columns wide part
 
 expandTabs :: Styled -> Styled
 expandTabs chars

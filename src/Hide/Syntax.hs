@@ -5,7 +5,7 @@
 -- styles. A tokenizer result is accepted only when it preserves the original
 -- characters exactly. Link and bubble annotations remain in the styled stream
 -- so later layout can retain interaction metadata without reparsing text.
-module Hide.Syntax (Style(..), StyledText, styledText, styledContents, compactStyled, styledLength, splitStyledAt, splitStyledText, StyledRow(..), MappedStyledRow(..), styledRows, sigilsText, sigilsLength, sigilsStyles, mapSigilsStyle, Grapheme, graphemeText, graphemeDisplayText, graphemeWidth, graphemeOverflow, Sigils(..), sourceSigilsWindow, SourceRow, SourceRange, prepareSourceRow, plainSourceRow, plainSourceLine, attachSourceLine, sourceRowText, sourceRowRanges, sourceRangeCharStart, sourceRangeCharEnd, sourceRangeByteStart, sourceRangeByteEnd, sourceRangeStyle, sourceRangeText, sourceStylesAt, presentationItems, styleOverflowExtent, styleLayoutMetadata, styleScript, fontTraits, sectionTitle, highlight, highlightFor, bubbleTile, linkSpans) where
+module Hide.Syntax (Style(..), StyledText, styledText, styledContents, compactStyled, styledLength, splitStyledAt, splitStyledText, StyledRow(..), MappedStyledRow(..), styledRows, sigilsText, sigilsLength, sigilsColumn, styledColumn, styleRunStep, styleGlyphAdvance, sigilsStyles, mapSigilsStyle, Grapheme, graphemeText, graphemeDisplayText, graphemeWidth, graphemeOverflow, Sigils(..), sourceSigilsWindow, SourceRow, SourceRange, prepareSourceRow, plainSourceRow, plainSourceLine, attachSourceLine, sourceRowText, sourceRowRanges, sourceRangeCharStart, sourceRangeCharEnd, sourceRangeByteStart, sourceRangeByteEnd, sourceRangeStyle, sourceRangeText, sourceStylesAt, presentationItems, styleOverflowExtent, styleLayoutMetadata, styleScript, fontTraits, sectionTitle, highlight, highlightFor, bubbleTile, linkSpans) where
 
 import Data.List (intercalate)
 import qualified Data.List as List
@@ -14,7 +14,7 @@ import Data.Word (Word32)
 import qualified Data.Text as T
 import qualified Data.Text.Unsafe as TU
 import qualified Data.Vector as V
-import Hide.Unicode (DisplayItem,itemScalarCount,itemOverflow,itemSourceText,itemDisplayText,itemWidth,sourceGraphemesFrom,sourceItemAdvance,displayItems,scalarWidth,initialSourceCursor,sourceItemStep,sourceSpanStep,sourceItemsFromCursor,Script)
+import Hide.Unicode (DisplayItem,itemScalarCount,itemOverflow,itemSourceText,itemDisplayText,itemWidth,sourceGraphemesFrom,sourceItemAdvance,sourceGlyphAdvance,displayItems,scalarWidth,initialSourceCursor,sourceItemStep,sourceSpanStep,sourceItemsFromCursor,Script)
 import Hide.LineChunks (joinAdjacent)
 import Hide.Buffer (SourceLine,sourceLineText,sourceLineRawText,sourceLineLength,sourceLineHasChunks,sourceLineWindow)
 import qualified Skylighting as S
@@ -122,6 +122,59 @@ sigilsLength=go 0
     go !n (ConsChars text _ rest)=go (n+T.length text) rest
     go !n (ConsSigil glyph _ _ rest)=go (n+T.length (graphemeText glyph)) rest
 
+-- | Displayed column shared by wrapping, bubble furniture and layout. Ordinary
+-- one-cell scalar runs widen only for unscripted section titles; exceptional
+-- items remain whole, including overflow and private combining continuations.
+sigilsColumn :: Bool -> Int -> Sigils -> Int
+sigilsColumn wide=go
+  where
+    go !col Nil=col
+    go !col (ConsChars text style rest)=go (col+T.length text*styleRunStep wide style) rest
+    go !col (ConsSigil glyph style _ rest)=go
+      (col+styleGlyphAdvance wide col style (graphemeText glyph) (graphemeOverflow glyph) (graphemeWidth glyph)) rest
+
+-- | Resolve borrowed lexical text through the same grapheme-first row policy.
+-- No width or style boundary can split a complete display item.
+styledColumn :: Bool -> Int -> StyledText -> Int
+styledColumn wide column runs=go 0 column (presentationItems text runs) (positions 0 runs)
+  where
+    text=styledContents runs
+    positions _ []=[]
+    positions offset ((run,style):rest)=let end=offset+T.length run in (end,style):positions end rest
+    go !_ !col [] _=col
+    go !offset !col ((glyph,overflow):rest) pending=
+      let current=dropStyles offset pending
+          style=case current of (_,value):_->value; _->Plain
+          advance=styleGlyphAdvance wide col style glyph overflow (sourceGlyphAdvance 0 glyph)
+      in go (offset+T.length glyph) (col+advance) rest current
+    dropStyles offset ((end,_):rest) | end<=offset=dropStyles offset rest
+    dropStyles _ pending=pending
+
+-- | Cell step of an ordinary one-cell scalar run. Scripted text owns one cell
+-- per scalar; a heading's natural two-cell items are handled separately.
+styleRunStep :: Bool -> Style -> Int
+styleRunStep wide style=if wide && sectionTitle style && styleScript style==Nothing then 2 else 1
+
+-- | Exact exceptional-item advance at the incoming displayed column. This is
+-- the common numeric policy used before and during physical row preparation.
+styleGlyphAdvance :: Bool -> Int -> Style -> T.Text -> Bool -> Int -> Int
+styleGlyphAdvance wide col style text overflow naturalWidth
+  | overflow=1
+  | scripted=1
+  | requestedScript/=Nothing && natural==0=0
+  | widened && text/="\r" && not (T.null text)=2
+  | otherwise=natural
+  where
+    requestedScript=styleScript style
+    widened=styleRunStep wide style==2
+    control=T.any (\c->c<' ' || c=='\DEL') text
+    natural | text=="\r"=0
+            | text=="\t"=if widened then 1 else 8-col `mod` 8
+            | control=1
+            | otherwise=naturalWidth
+    scripted=requestedScript/=Nothing && natural `elem` [1,2] && not control
+
+
 -- | Run-level metadata fold. Ordinary one-cell text is never expanded.
 sigilsStyles :: Sigils -> [Style]
 sigilsStyles Nil=[]
@@ -179,7 +232,7 @@ data SourceRange = SourceRange
 -- authoritative; missing style positions are Plain, and no token character is
 -- copied into the retained representation.
 prepareSourceRow :: T.Text -> StyledText -> SourceRow
-prepareSourceRow text tokens=SourceRow text (V.fromList (ranges 0 0 text (compactStyled tokens)))
+prepareSourceRow text tokens=SourceRow text (V.fromList (ranges 0 0 text tokens))
   where
     ranges !_ !_ remaining _ | T.null remaining=[]
     ranges !char !byte remaining []=

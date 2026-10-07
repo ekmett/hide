@@ -8,7 +8,7 @@ import qualified Data.Map.Strict as Map
 import qualified Hide.Model as M
 import qualified Hide.BufferView as M
 import Hide.TextPresentation
-import Hide.Markdown (renderMarkdown)
+import Hide.Markdown (renderMarkdown,parseMarkdown,markdownBlocks,renderMarkdownBlock)
 import qualified Hide.Links as Links
 import Hide.Render (snapshot,snapshotHtml,renderKey,renderCellRows)
 import qualified Hide.Plugin.Window as W
@@ -25,7 +25,7 @@ import qualified Data.Text.Encoding as TE
 import qualified Data.ByteString as BS
 import Hide.Files (FileState(..))
 import Hide.Buffer (Buffer(undoStack),Selection(..),newBuffer,bufferContent,contentSlice,contentLength,contents)
-import Hide.Syntax (Style(..),fontTraits,styledRows,styledContents)
+import Hide.Syntax (Style(..),fontTraits,styledRows,styledContents,StyledRow(..),MappedStyledRow(..),sigilsColumn)
 import Hide.TextLayout
 import Hide.Unicode
 import qualified Hide.Protocol as Protocol
@@ -124,6 +124,15 @@ checks=do
       Just M.WindowPresentationUnneeded{}->M.windowPresentation negative negativeView==Nothing &&
         (M.selection negativeView,M.scrollRow negativeView,M.scrollColumn negativeView)==(Selection 2 2,2,1)
       _->False)
+ let headingBlock=head (markdownBlocks (parseMarkdown "# ABCDE界q\x301\&FGHIJKLMNOP"))
+     headingRows=Vec.fromList (renderMarkdownBlock True 12 headingBlock)
+     naturalRows=renderMarkdownBlock False 12 headingBlock
+     rowWidth row=case mappedStyledRow row of StyledRow sigils _ _->sigilsColumn True 0 sigils
+ headingLayout<-prepareMappedTextLayout True 12 headingRows
+ check "wide Markdown rows already match physical layout before viewport receipts"
+   (Vec.length headingRows>length naturalRows && Vec.length (layoutRows headingLayout)==Vec.length headingRows &&
+     Vec.toList (Vec.map rowWidth headingRows)==Vec.toList (Vec.map layoutRowWidth (layoutRows headingLayout)) &&
+     Vec.all ((<=12) . layoutRowWidth) (layoutRows headingLayout))
  let scripted="A界e\x301👩🏽\x200d\&💻"
      scriptStyles=Vec.fromList (styledRows [(scripted,ScriptStyle Superscript (BoldStyle Plain))])
  scriptLayout<-prepareTextLayout False 40 (bufferContent (newBuffer scripted)) scriptStyles

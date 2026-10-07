@@ -13,7 +13,7 @@ import qualified Data.Text as T
 import qualified Data.Vector as V
 import Data.Unique (Unique,newUnique,hashUnique)
 import Hide.Buffer (BufferContent,contentLineOffset)
-import Hide.Syntax (Style(..),StyledRow(..),MappedStyledRow(..),Sigils(..),fontTraits,sectionTitle,styleScript,sigilsLength,graphemeText,graphemeDisplayText,graphemeWidth,graphemeOverflow)
+import Hide.Syntax (Style(..),StyledRow(..),MappedStyledRow(..),Sigils(..),fontTraits,sectionTitle,styleScript,styleRunStep,styleGlyphAdvance,sigilsLength,graphemeText,graphemeDisplayText,graphemeWidth,graphemeOverflow)
 import Hide.Unicode (Script)
 
 data LayoutGlyph = LayoutGlyph
@@ -117,7 +117,7 @@ prepareMappedTextLayout wide requested styled=do
       | otherwise=wrap (LayoutGlyph g drawn a z col advance shownStyle natural script 0:current) (col+advance) start rest
       where
         widened=wide && sectionTitle style && requestedScript==Nothing
-        step=if widened then 2 else 1
+        step=styleRunStep wide style
         firstAdvance=if isRun then step else advance
         shownStyle
           | widened=let (base,_,italic)=fontTraits style in if italic then ItalicStyle base else base
@@ -130,11 +130,7 @@ prepareMappedTextLayout wide requested styled=do
         script=case requestedScript of
           Just mode | (isRun || natural `elem` [1,2]),not (T.any (\c->c<' ' || c=='\DEL') g)->Just mode
           _->Nothing
-        advance | overflow=1
-                | Just _<-script=1
-                | requestedScript/=Nothing && natural==0=0
-                | widened && not (T.null drawn)=2
-                | otherwise=natural
+        advance=styleGlyphAdvance wide col style g overflow naturalWidth
         drawn | g=="\r"=T.empty
               | g=="\t"=T.replicate natural " "
               | overflow=displayed
