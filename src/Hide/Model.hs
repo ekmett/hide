@@ -1239,7 +1239,7 @@ runCommand SelectAll source | dialog source==Nothing,activeMarkdown source,maybe
   (modifyActive (modifyDisplayedWindow (\w->w {selection=Selection 0 (maybe 0 (\(_,text,_)->contentLength text) (windowMarkdown source w))})) source,[])
 runCommand Copy source | dialog source==Nothing,Just view<-activePluginWindow source, Just w<-activeWindow source =
   let (a,b)=ordered (selection w)
-  in (copyClipboard False (contentSlice (PluginWindow.preparedWindowText view) a (b-a)) source {menu=Nothing,contextMenu=Nothing},[])
+  in (copyClipboard False (PluginWindow.copyPreparedSelection view a b) source {menu=Nothing,contextMenu=Nothing},[])
 runCommand SelectAll source | dialog source==Nothing,Just view<-activePluginWindow source =
   (modifyActive (\w->w {selection=Selection 0 (contentLength (PluginWindow.preparedWindowText view))}) source,[])
 runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source {menu = Nothing, contextMenu=Nothing, buttonHover=Nothing, buttonPressed=Nothing, prefix = Nothing, drag = Nothing,dragOriginal=Nothing})
@@ -1677,9 +1677,8 @@ applyDialogCommand cmd d
             Paste -> replaceInputSelection (T.filter textInputChar (clipboard d)) field
             SelectAll -> SelectedInput caption value (Selection 0 (T.length value))
             _ -> field
-      in (d {clipboard=if cmd `elem` [Copy,Cut] then copied else clipboard d,
-             clipboardCode=if cmd `elem` [Copy,Cut] then Nothing else clipboardCode d,
-             dialog=Just dg {fields=replaceAt (focus dg) edited (fields dg)}},[])
+          updated=if cmd `elem` [Copy,Cut] then copyClipboard False copied d else d
+      in (updated {dialog=Just dg {fields=replaceAt (focus dg) edited (fields dg)}},[])
   | Just dg<-dialog d,field@(TextArea _ True b sel _ _):_<-drop (focus dg) (fields dg) =
       let rect=fromMaybe (Rect 0 0 1 1) (listToMaybe (drop (focus dg) (fieldRects d dg)))
           copied=selectedText sel b
@@ -1688,9 +1687,8 @@ applyDialogCommand cmd d
             Paste -> textAreaEdit rect (insertText (clipboard d)) field
             Copy -> field
             _ -> textAreaEdit rect (fst . runCommand cmd) field
-      in (d {clipboard=if cmd `elem` [Copy,Cut] then copied else clipboard d,
-             clipboardCode=if cmd `elem` [Copy,Cut] then Nothing else clipboardCode d,
-             dialog=Just dg {fields=replaceAt (focus dg) edited (fields dg)}},[])
+          updated=if cmd `elem` [Copy,Cut] then copyClipboard False copied d else d
+      in (updated {dialog=Just dg {fields=replaceAt (focus dg) edited (fields dg)}},[])
   | otherwise = (d,[])
 
 -- | Project only prepared chords and bounded contribution/focus metadata.
@@ -2040,6 +2038,36 @@ projectConversationSelection view captured=case (conversationReplySelection view
     (Just start,Just end)->Selection start end
     _->Selection 0 0
   _->Selection 0 0
+
+-- | Bounded paint intervals selected in logical source space. Repeated table
+-- header mappings may produce disjoint intervals; furniture has no interval.
+-- Render uses these endpoints to cut ordinary runs and whole-glyph overlap for
+-- exceptional glyphs. Nothing leaves ordinary/plugin Selection unchanged.
+conversationPaintSelection :: Desktop -> Window -> Maybe [(Int,Int)]
+conversationPaintSelection d window=do
+  target<-conversationTargetFor d window
+  view<-M.lookup target (conversationViews d)
+  _<-conversationLogical view
+  pure $ case (conversationReplySelection view,bodyViewportFor d target) of
+    (Just (BodySelection anchor caret),Just viewport)->concatMap (ranges (min anchor caret) (max anchor caret)) (Vec.toList (viewportRows viewport))
+    _->[]
+  where
+    ranges first end row=case bodyRowPoint row of
+      Nothing->[]
+      Just point->[(bodyRowPaintStart row+a+(start-lo)*(z-a) `div` (hi-lo),
+          bodyRowPaintStart row+a+((finish-lo)*(z-a)+hi-lo-1) `div` (hi-lo))
+        | (a,z,lo,hi)<-Vec.toList (bodyRowRanges row),hi>lo,
+          let low=scalarPoint point lo,let high=scalarPoint point hi,
+          first<high,end>low,
+          let start=if sameSource first point then max lo (scalar first) else lo,
+          let finish=if sameSource end point then min hi (scalar end) else hi,start<finish]
+    scalarPoint (BodyPoint ident block _) value=BodyPoint ident block value
+    scalarPoint (QuestionPoint token block _) value=QuestionPoint token block value
+    sameSource (BodyPoint ident block _) (BodyPoint other next _)=ident==other && block==next
+    sameSource (QuestionPoint token block _) (QuestionPoint other next _)=token==other && block==next
+    sameSource _ _=False
+    scalar (BodyPoint _ _ value)=value
+    scalar (QuestionPoint _ _ value)=value
 
 rememberConversationView :: Desktop -> Desktop
 rememberConversationView d=case M.lookup (conversationTarget d) (conversationViews d) of
@@ -2396,7 +2424,7 @@ questionEdit edit d=case chatQuestion d of
                 b=composerBuffer changed
                 bound n=max 0 (min (bufferLength b) n)
                 sel=composerSelection changed
-            in d {clipboard=clipboard changed,clipboardCode=clipboardCode changed,chatQuestion=Just q {questionChoice=Nothing,questionFocused=True,questionBuffer=b,
+            in d {clipboard=clipboard changed,clipboardCode=clipboardCode changed,clipboardExport=clipboardExport changed,chatQuestion=Just q {questionChoice=Nothing,questionFocused=True,questionBuffer=b,
                 questionSelection=Selection (bound (anchor sel)) (bound (caret sel))}}
 
 -- Only insertion normalizes input. Empty creation and these bounded edits keep
@@ -3117,8 +3145,19 @@ windowScrollbar d vertical original=case windowContent original of
         extent=if vertical then windowTextRows d w (PluginWindow.preparedWindowText prepared)
           else maybe (PluginWindow.preparedWindowWidth prepared) TextLayout.layoutWidth (windowPresentation d w)
         viewport=if vertical then max 1 (height detail) else max 1 (ww-2)
-    pure (rect,max 0 (extent-viewport+(if vertical then 0 else 1)))
+    pure (rect,case (vertical,conversationTargetFor d w) of
+      (True,Just target) | Just captured<-bodyViewportFor d target->snd (viewportProgress captured)
+      _->max 0 (extent-viewport+(if vertical then 0 else 1)))
   where w=displayWindow original
+
+-- Conversation frame scrolling is logical; its paint rows cover only the
+-- current viewport. The scalar progress receipt is prepared outside input.
+windowScrollPosition :: Desktop -> Bool -> Window -> Int
+windowScrollPosition d True window | Just target<-conversationTargetFor d window,
+  Just captured<-bodyViewportFor d target=case M.lookup target (conversationViews d) of
+    Just view | conversationAnchor view==FollowEnd->snd (viewportProgress captured)
+    _->fst (viewportProgress captured)
+windowScrollPosition _ vertical window=if vertical then scrollRow (displayWindow window) else scrollColumn (displayWindow window)
 
 -- Each split chooses its own layout. Keep the byte viewport and a visible caret
 -- anchored when resizing or docking Files changes the number of bytes per row.
@@ -3166,7 +3205,7 @@ scrollClick vertical x y d = case activeWindow d of
     let w=displayWindow original
         len=if vertical then height r else width r
         offset=if vertical then y-top r else x-left r
-        thumb=scrollbarThumb len limit (if vertical then scrollRow w else scrollColumn w)
+        thumb=scrollbarThumb len limit (windowScrollPosition d vertical w)
         page=max 1 (case windowContent w of PluginContent _->(if vertical then height else width) (pluginTextRect d w); _->(if vertical then height else width) (bounds w)-2)
     in if offset==0 then changeScroll vertical (-1) d
        else if offset==len-1 then changeScroll vertical 1 d
@@ -3175,6 +3214,14 @@ scrollClick vertical x y d = case activeWindow d of
   _ -> d
 
 scrollTrack :: Bool -> Int -> Int -> Desktop -> Desktop
+scrollTrack True x y d | Just window<-activeWindow d,Just target<-conversationTargetFor d window,
+  Just logical<-conversationLogicalBody target d,Just (area,_)<-windowScrollbar d True window=
+    let slots=logicalBodyItems logical
+        fraction=max 0 (min 1000 ((y-top area-1)*1000 `div` max 1 (height area-3)))
+        scaled=Vec.length slots*fraction
+        index=min (Vec.length slots-1) (scaled `div` 1000)
+        point=if fraction>=1000 then FollowEnd else WithinItem (recordId (logicalItemRecord (slots Vec.! index))) (scaled `mod` 1000)
+    in if Vec.null slots then d else d {conversationViews=M.adjust (\view->view {conversationAnchor=point,conversationRowShift=0}) target (conversationViews d)}
 scrollTrack vertical x y d = case activeWindow d of
   Just original | Just (r,limit)<-windowScrollbar d vertical original -> let { w=displayWindow original
                          ; len=if vertical then height r else width r
@@ -3856,7 +3903,8 @@ dialogEvent ev dg d
     areaKey (V.KChar c) mods | not prepared, V.MCtrl `elem` mods, c `elem` ['c','x','v'], f@(TextArea _ True b sel _ _)<-fields dg !! focus dg =
       let copied=selectedText sel b
           edited=case c of 'x' -> textAreaEdit focusedRect (insertText "") f; 'v' -> textAreaEdit focusedRect (insertText (clipboard d)) f; _ -> f
-      in (d {clipboard=if c=='v' then clipboard d else copied,clipboardCode=if c=='v' then clipboardCode d else Nothing,dialog=Just dg {fields=replaceAt (focus dg) edited (fields dg)}},[])
+          updated=if c=='v' then d else copyClipboard False copied d
+      in (updated {dialog=Just dg {fields=replaceAt (focus dg) edited (fields dg)}},[])
     areaKey key mods = updateField $ \f -> if editableArea f
       then textAreaEdit focusedRect (case key of
         V.KChar c | not prepared, V.MCtrl `elem` mods, Just cmd<-lookup (toLower c) [('z',if V.MShift `elem` mods then Redo else Undo),('y',Redo),('a',SelectAll)] -> fst . runCommand cmd
@@ -4195,7 +4243,7 @@ layoutProblems before after = clampHexScroll before (ensureVisibleAfterLayout be
 
 copyMessages :: [Diagnostic] -> Desktop -> (Desktop,[Effect])
 copyMessages [] d = (d {status="No messages to copy."},[])
-copyMessages issues d = (d {clipboard=T.intercalate "\n\n" (map format issues),clipboardCode=Nothing,status="Messages copied."},[])
+copyMessages issues d = ((copyClipboard False (T.intercalate "\n\n" (map format issues)) d) {status="Messages copied."},[])
   where format issue=(case diagnosticSeverity issue of 1 -> "Error "; 2 -> "Warning "; 3 -> "Info "; _ -> "Hint ")<>
           T.pack (diagnosticPath issue)<>":"<>T.pack (show (diagnosticRow issue+1))<>":"<>T.pack (show (diagnosticColumn issue+1))<>" "<>diagnosticMessage issue
 

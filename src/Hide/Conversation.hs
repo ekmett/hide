@@ -418,7 +418,7 @@ performPrimary runtime@(ConversationState directory ref consoles _) action value
           modifyIORef' ref (\state -> state {pending=M.insert requestId Setting (pending state)})
           pure d {status="Updating conversation settings...",agentReplying=True}
       | otherwise -> pure d {status="This conversation setting is unavailable."}
-    ("copy",_) -> pure d {clipboard=rawTranscript (transcript s),clipboardCode=Nothing,status="Raw conversation copied."}
+    ("copy",_) -> pure (copyClipboard False (rawTranscript (transcript s)) d) {status="Raw conversation copied."}
     ("send",_:prompt:selectionFlag:fileFlag:diagnosticFlag:_) | not (T.null (T.strip prompt)),not (busy s) ->
       submitPrimaryPrompt runtime s Nothing prompt (selectionFlag=="true",fileFlag=="true",diagnosticFlag=="true") d
     ("cancel",_) -> do
@@ -1507,7 +1507,7 @@ performChild runtime@(ConversationState _ ref _ agents) action values d=do
         worker<-async (AH.cancelAgent hub AH.Human ident)
         modifyIORef' ref (\s->s {childCancels=M.insert target worker (childCancels s),queuedQueries=filter ((/=target).queryTarget) (queuedQueries s)})
         pure d {status="Cancellation requested."}
-    "copy" -> pure d {clipboardCode=Nothing,clipboard=if M.member target (childRecords state) then rawTranscript records else maybe "" (\body->W.copyPreparedSelection body 0 (contentLength (W.preparedWindowText body))) (conversationBodySnapshot target d),status="Conversation copied with sender attribution."}
+    "copy" -> pure (copyClipboard False (if M.member target (childRecords state) then rawTranscript records else maybe "" (\body->W.copyPreparedSelection body 0 (contentLength (W.preparedWindowText body))) (conversationBodySnapshot target d)) d) {status="Conversation copied with sender attribution."}
     "toggle-activity" | [activityId]<-values -> do
       let next=toggleExpansion target (ActivityExpansion activityId) state
       writeIORef ref next

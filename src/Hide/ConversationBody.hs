@@ -63,7 +63,7 @@ instance Ord BodyPoint where
         | block<=(-3)=(1,token,1,(-3)-block,scalar)
         | block==(-1)=(1,token,2,0,scalar)
         | otherwise=(1,token,3,0,scalar)
-data BodyAnchor = At !BodyPoint | FollowEnd deriving (Eq,Show)
+data BodyAnchor = At !BodyPoint | FollowEnd | WithinItem !BodyItemId !Int deriving (Eq,Show)
 data BodySelection = BodySelection !BodyPoint !BodyPoint deriving (Eq,Show)
 
 -- A signed row request is relative to the containing logical row, never an
@@ -76,7 +76,7 @@ data BodyRow = BodyRow
   } deriving Show
 data BodyViewport = BodyViewport
   { viewportRows :: !(V.Vector BodyRow), viewportAnchor :: !BodyAnchor
-  , viewportScroll :: !Int, viewportAtEnd :: !Bool
+  , viewportScroll :: !Int, viewportAtEnd :: !Bool, viewportProgress :: !(Int,Int)
   } deriving Show
 
 -- | /O(demanded rows + row spans)/. Convert only through the authoritative
@@ -477,7 +477,7 @@ prepareRenderedBody inert key input logical=case demandedRows key input logical 
             (V.fromList (sessionHidden++guestHidden)) (V.fromList sessionHidden) (V.fromList (sessionHidden++questionHidden))
           BodyDemand requested _ _=displayDemand key
           anchor=case requested of FollowEnd | let BodyDemand _ delta _=displayDemand key,delta>=0->FollowEnd; _->maybe requested At (bodyRowPoint =<< listAt scroll receipts)
-          viewport=BodyViewport (V.fromList receipts) anchor scroll atEnd
+          viewport=BodyViewport (V.fromList receipts) anchor scroll atEnd (logicalProgress logical anchor)
           controls=if inert then HostBodyControls Nothing (Just viewport) Nothing [] else HostBodyControls questionToken (Just viewport) projected actions
       prepared<-W.prepareSemanticRowsWindow (bodyTitle input) rows semantics
       case prepared of
@@ -506,6 +506,9 @@ prepareRenderedBody inert key input logical=case demandedRows key input logical 
 -- anchor is refused rather than redirected to a different surviving item.
 demandedRows :: BodyDisplay -> BodyInput -> LogicalBody -> Either Text ([PendingRow],Int,Bool)
 demandedRows key input logical=case anchor of
+  WithinItem ident fraction->do
+    point<-withinItemPoint logical ident fraction
+    demandedRows key {displayDemand=BodyDemand (At point) delta requested} input logical
   FollowEnd->let rows=ending (budget+max 0 (-delta))
                  scroll=max 0 (min (max 0 (length rows-height)) (length rows-height+delta))
              in Right (take (scroll+budget) rows,scroll,scroll+height>=length rows)
@@ -617,6 +620,45 @@ demandedRows key input logical=case anchor of
     contains _ _=False
     endsAt point (PendingRow (Just first) row _ _ _)=sameBlock first point && pointScalar point==mappedRowEnd row
     endsAt _ _=False
+
+-- Canonical point resolution is worker-only and visits the selected item's
+-- parsed blocks. Earlier items' payloads/row heights are never demanded.
+itemBlockTexts :: LogicalItem -> V.Vector Text
+itemBlockTexts item=case recordContent (logicalItemRecord item) of
+  Reply _ _->V.map markdownBlockText (logicalItemBlocks item)
+  Pause label->V.singleton label
+  Activity ident value history->V.singleton (activityTitle ident value<>"\n"<>T.intercalate "\n" (map jsonText history))
+
+withinItemPoint :: LogicalBody -> BodyItemId -> Int -> Either Text BodyPoint
+withinItemPoint logical ident fraction
+  | fraction<0 || fraction>1000=Left "Conversation seek fraction is outside its range."
+  | otherwise=do
+      index<-maybe (Left "The sought conversation item is no longer present.") Right (logicalBodyItemIndex ident logical)
+      let sizes=V.map T.length (itemBlockTexts (logicalItems logical V.! index))
+          scalar=fromInteger (toInteger (V.sum sizes)*toInteger fraction `div` 1000)
+          locate block remaining
+            | block>=V.length sizes=BodyPoint ident (max 0 (V.length sizes-1)) (if V.null sizes then 0 else V.last sizes)
+            | remaining<sizes V.! block || block==V.length sizes-1=BodyPoint ident block remaining
+            | otherwise=locate (block+1) (remaining-sizes V.! block)
+      pure (locate 0 scalar)
+
+-- The thumb estimates equal item slots, refined by canonical progress within
+-- the current item. It is never a measured sum of earlier wrapped row heights.
+logicalProgress :: LogicalBody -> BodyAnchor -> (Int,Int)
+logicalProgress logical anchor=(position,limit)
+  where
+    items=logicalItems logical
+    limit=max 1 ((V.length items+maybe 0 (const 1) (logicalQuestion logical))*1000)
+    position=case anchor of
+      FollowEnd->limit
+      WithinItem ident fraction->maybe 0 (\index->index*1000+max 0 (min 1000 fraction)) (logicalBodyItemIndex ident logical)
+      At QuestionPoint{}->V.length items*1000
+      At (BodyPoint ident block scalar)->case logicalBodyItemIndex ident logical of
+        Nothing->0
+        Just index->let sizes=V.map T.length (itemBlockTexts (items V.! index))
+                        total=V.sum sizes
+                        offset=V.sum (V.take (max 0 block) sizes)+max 0 scalar
+                    in index*1000+fromInteger (min 1000 (toInteger offset*1000 `div` toInteger (max 1 total)))
 
 blockCount :: LogicalItem -> Int
 blockCount item=max 1 (V.length (logicalItemBlocks item))
