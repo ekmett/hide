@@ -15,6 +15,7 @@ import System.Environment
 import System.FilePath ((</>))
 import System.IO (hClose,openTempFile)
 import System.Timeout (timeout)
+import GHC.Stack (HasCallStack,callStack,prettyCallStack)
 import Hide.Conversation
 import Hide.TextPresentation (TextPresentation,withTextPresentation,textPresentationEffects,tickTextPresentation)
 import qualified Hide.Consoles as C
@@ -58,10 +59,12 @@ checks=bracket temporary removePathForcibly $ \root ->
           submit action d=let (prepared,effects)=runCommand (SubmitChat action) d in apply prepared effects
           draft text selected d=setComposerInput (newBuffer text) selected True d
           send text d=submit QuerySubmit (draft text (Selection (T.length text) (T.length text)) d)
+          tickUntil :: HasCallStack => (Desktop -> IO Bool) -> Desktop -> IO Desktop
           tickUntil=testUntil "provider/body"
+          testUntil :: HasCallStack => String -> (Desktop -> IO Bool) -> Desktop -> IO Desktop
           testUntil label test d=do
             answer<-timeout 5000000 (loop d)
-            maybe (error ("Agent conversation integration timed out: "++label)) pure answer
+            maybe (error ("Agent conversation integration timed out: "++label++"\n"++prettyCallStack callStack)) pure answer
             where loop current=do next<-tickBody presentation conversation current; ok<-test next; if ok then pure next else threadDelay 10000 >> loop next
       shown<-ui "show" [] initial
       connected<-send "Hello" shown >>= tickUntil (pure . (\d->status d=="Agent: end_turn" && "Hello" `T.isInfixOf` activeText d))
