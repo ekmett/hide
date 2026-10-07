@@ -582,7 +582,11 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ withTextPresentation $ 
       check "wide heading resize preserves logical selection and mapped paint"
         (geometry reflowed && conversationReplySelection (retained reflowed)==logicalSelection &&
           maybe False (not . null) (activeWindow reflowed >>= conversationPaintSelection reflowed))
-      paged<-await runtime "wide heading Shift Page Down" caretReady (fst (runCommand (CursorPageDown True) reflowed))
+      let pageOnce=fst (runCommand (CursorPageDown True) reflowed)
+          pageTwice=fst (runCommand (CursorPageDown True) pageOnce)
+      check "pending page movement retains repeated input"
+        (conversationRowShift (retained pageOnce)>0 && conversationRowShift (retained pageTwice)==2*conversationRowShift (retained pageOnce))
+      paged<-await runtime "wide heading Shift Page Down" caretReady pageTwice
       check "page movement preserves an offscreen logical extension anchor"
         (case (logicalSelection,conversationReplySelection (retained paged)) of
           (Just (BodySelection a _),Just (BodySelection b z))->a==b && z>b
