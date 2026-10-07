@@ -674,6 +674,7 @@ demandedRows key input logical=case anchor of
               rows=indentMember padding (blockRows key {displayColumns=max 1 (displayColumns key-padding)} input (items V.! index) block)
           in if index==first && block==0 then groupHeading Nothing True first lastIndex ident:rows else rows
         _->blockRows key input (items V.! index) block
+    indentMember 0 rows=rows
     indentMember padding (PendingRow point mapped actions links shell:rest)=
       let StyledRow sigils newline messages=mappedStyledRow mapped
           shift (a,z,lo,hi)=(a+padding,z+padding,lo,hi)
