@@ -26,6 +26,8 @@ import Data.IORef
 import Hide.Buffer (contents,newBuffer,contentSlice,contentLength,Selection(..))
 import Hide.AgentSidebarTypes (AgentSidebarRequest(ShowAgent))
 import Hide.Recovery (writeCheckpoint,readCheckpoint)
+import Hide.BufferReadCommand (withBufferReadCommands,readPage,readWindowCommand)
+import Hide.BufferReads (windowReadTarget,captureWindow)
 import qualified Hide.Font as Font
 import Hide.ScreenCapture (capture)
 import Hide.Session
@@ -98,6 +100,7 @@ checks=bracket temporary removePathForcibly $ \root ->
       _<-AH.waitAgent hub AH.Human peer peerTicket 1000 >>= right
       let primaryDrafted=draft "primary unsent" (Selection 3 7) cleared
           primaryText=bodyText "" primaryDrafted
+      primaryCanonical<-canonicalWindowText primaryDrafted
       directoryView<-ui "directory" [] primaryDrafted
       directory<-AH.listAgents hub AH.Human >>= right
       ensure "registered peer remains listed in the directory" (any ((==Just (AH.agentIdText peer)) . field "id") (maybe [] id (field "agents" directory :: Maybe [Value])))
@@ -217,11 +220,16 @@ checks=bracket temporary removePathForcibly $ \root ->
       writeCheckpoint recovery finalDraft >>= right
       recovered<-readCheckpoint recovery initial >>= right
       ensure "selected child and active draft survive recovery" (conversationTarget recovered==AH.agentIdText liveChild && contents (composerBuffer recovered)=="recover child draft" && composerSelection recovered==Selection 4 9)
-      restoredPrimary<-ui "show" [] recovered
-      ensure "hidden primary transcript and draft survive recovery" (activeText restoredPrimary==primaryText && contents (composerBuffer restoredPrimary)=="primary unsent")
+      let awaitPrimary desktop=do
+            text<-canonicalWindowText desktop
+            pure (not (T.null (activeText desktop)) && text==primaryCanonical)
+      restoredPrimary<-ui "show" [] recovered >>= tickUntil awaitPrimary
+      restoredCanonical<-canonicalWindowText restoredPrimary
+      ensure "hidden primary transcript and draft survive recovery" (restoredCanonical==primaryCanonical && contents (composerBuffer restoredPrimary)=="primary unsent")
       ensure "hidden unsent drafts still prevent quiet Exit" (conversationHasDraft recovered && not (null (conversationViews recovered)))
-      recoveredShown<-ui "show" [] recovered
-      ensure "show after switching does not lose primary transcript" (activeText recoveredShown==primaryText)
+      recoveredShown<-ui "show" [] recovered >>= tickUntil awaitPrimary
+      shownCanonical<-canonicalWindowText recoveredShown
+      ensure "show after switching does not lose primary transcript" (shownCanonical==primaryCanonical)
       caller<-captureQuestionCaller conversation primary >>= right
       (questionView,_)<-chatToolAs conversation (Just caller) recoveredShown "ask_user" (object ["question" .= ("Choose privately"::T.Text)])
       let privateAnswer=questionView {chatQuestion=fmap (\q->q {questionBuffer=newBuffer "unsent secret answer",questionSelection=Selection 20 20}) (chatQuestion questionView)}
@@ -230,8 +238,11 @@ checks=bracket temporary removePathForcibly $ \root ->
       hiddenQuestion<-select liveChild paintedAnswer
       ensure "hidden primary question answer never becomes readable transcript" (all (not . T.isInfixOf "unsent secret answer") (readableBodies hiddenQuestion))
       writeCheckpoint recovery hiddenQuestion >>= right
+      questionBytes<-BL.readFile recovery
       questionCheckpoint<-readCheckpoint recovery initial >>= right
-      ensure "hidden transient answer is omitted from recovery" (all (not . T.isInfixOf "unsent secret answer" . (\target->bodyText target questionCheckpoint)) (M.keys (conversationViews questionCheckpoint)))
+      ensure "hidden transient answer is omitted from recovery"
+        (not ("unsent secret answer" `T.isInfixOf` TE.decodeUtf8 (BL.toStrict questionBytes)) &&
+         all (not . T.isInfixOf "unsent secret answer" . (\target->bodyText target questionCheckpoint)) (M.keys (conversationViews questionCheckpoint)))
       returnedQuestion<-ui "show" [] hiddenQuestion
       ensure "switching preserves the live primary answer without sending it" (maybe False ((=="unsent secret answer").contents.questionBuffer) (chatQuestion returnedQuestion))
       _<-AH.endAgent hub AH.Human primary >>= right
@@ -330,6 +341,18 @@ tickBody owner conversation current=do
   requests<-conversationBodyRequests conversation protocol
   (prepared,completed)<-tickTextPresentation owner requests protocol
   adoptConversationBodies conversation completed prepared
+
+-- Public read_window acquisition checks exact logical source independently of
+-- width, bubble furniture and the asynchronously adopted bounded viewport.
+canonicalWindowText :: Desktop -> IO T.Text
+canonicalWindowText desktop=withBufferReadCommands $ \commands->do
+  window<-maybe (fail "No canonical conversation frame") pure (activeWindow desktop)
+  target<-either (fail . T.unpack) pure (windowReadTarget desktop (windowId window))
+  page<-either (fail . T.unpack) pure (readPage 1 1000 0)
+  value<-readWindowCommand commands (captureWindow desktop target) page >>= either (fail . T.unpack) pure
+  case (field "text" value,field "truncated" value,field "lineCount" value::Maybe Int,field "totalLines" value) of
+    (Just text,Just False,Just count,Just total) | count==total->pure text
+    _->fail "Canonical recovery fixture requires one complete read page"
 
 bodyText :: T.Text -> Desktop -> T.Text
 bodyText target desktop=maybe "" (\prepared->let text=W.preparedWindowText prepared in contentSlice text 0 (contentLength text))
