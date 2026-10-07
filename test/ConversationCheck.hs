@@ -26,7 +26,7 @@ import qualified Data.Map.Strict as M
 import qualified Data.Set as S
 import Data.Maybe (mapMaybe, fromMaybe, listToMaybe)
 import Data.Time (UTCTime(..), fromGregorian, secondsToDiffTime, minutesToTimeZone, addUTCTime)
-import Data.List (find,findIndex,intersperse)
+import Data.List (find,findIndex,mapAccumL)
 import Data.IORef (newIORef,writeIORef,readIORef)
 import GHC.Conc (getAllocationCounter)
 import qualified Data.Text as T
@@ -66,7 +66,7 @@ import qualified Hide.MCPPermissions as Permissions
 import Hide.Model hiding (prompt)
 import Hide.Commands (configuredBindings)
 import Hide.Markdown (renderMarkdown)
-import Hide.Syntax (Style(..))
+import Hide.Syntax (Style(..),StyledText,StyledRow(..),Sigils(..),styledText,styledContents,styledLength,splitStyledText,graphemeText)
 import Hide.Terminal (terminalAvailable)
 import Hide.Session (checkpointPath)
 
@@ -124,7 +124,7 @@ composerCodeChecks=do
           fenceCode="    before\n    ```\n    after\n"
       check "submission preserves code after a list and embedded fence characters"
         (any isCodeChar (renderMarkdown 80 (composerMarkdown (text listCode))) &&
-         "```" `T.isInfixOf` T.pack [c | pair@(c,_)<-renderMarkdown 80 (composerMarkdown fenceCode),isCodeChar pair] &&
+         "```" `T.isInfixOf` T.concat [text | pair@(text,_)<-renderMarkdown 80 (composerMarkdown fenceCode),isCodeChar pair] &&
          composerMarkdown "```hs\n    original indentation\n```\n"=="```hs\n    original indentation\n```\n")
       check "Control Enter keeps the configured opposite submit action inside code"
         (snd (handleEvent (V.EvKey V.KEnter [V.MCtrl]) extended)==[editorEffect SteerSubmit extended] &&
@@ -444,21 +444,21 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ withTextPresentation $ 
         (pauseLabel Nothing noon zone==Nothing && pauseLabel (Just noon) (addUTCTime 299 noon) zone==Nothing &&
          pauseLabel (Just noon) (addUTCTime 300 noon) zone==Just "Sep 30, 12:05")
       check "timestamps are centered and clipped to narrow windows"
-        (T.pack (map fst (renderTimestamp 20 "12:05"))=="       12:05" && length (renderTimestamp 3 "12:05")==3)
+        (styledContents (renderTimestamp 20 "12:05")=="       12:05" && styledLength (renderTimestamp 3 "12:05")==3)
       let tag ident=map (\(c,s) -> (c,case s of BubbleText _ out base -> BubbleText ident out base; _ -> s))
-          cells=renderReply False 54 True "one"++[('\n',Plain),('\n',Plain)]++renderTimestamp 54 "12:05"++[('\n',Plain)]++tag 1 (renderReply False 54 False "two")
+          cells=renderReply False 54 True "one"++styledText Plain "\n\n"++renderTimestamp 54 "12:05"++styledText Plain "\n"++tag 1 (renderReply False 54 False "two")
       preparedCopy<-W.prepareSemanticTextWindow "Conversation" cells
         (W.TextSemantics (W.CopyMessages W.UserBotAttribution) Nothing Vec.empty Vec.empty W.ReadableWindow Vec.empty Vec.empty Vec.empty) >>= either (error.T.unpack) pure
       withEditorBodyFixture "" preparedCopy (initialDesktop (60,18)) $ \base->do
         let chat=draftAt (newBuffer "draft") (Selection 2 2) base
-            positions ident=[i | (i,(_,BubbleText j _ _))<-zip [0..] cells,j==ident]
-            a=head (positions 0); z=last (positions 1)+1
+            positions ident=[(a,z) | (a,z,BubbleText j _ _)<-styleRanges cells,j==ident]
+            a=fst (head (positions 0)); z=snd (last (positions 1))
             selectedReply lo hi=modifyActive (\w -> w {selection=Selection lo hi}) chat
             copiedReply lo hi=clipboard (fst (runCommand Copy (selectedReply lo hi)))
         check "single-bubble copies omit speaker names and decoration"
           (copiedReply a (a+3)=="one" && copiedReply (a+1) (a+3)=="ne")
         check "cross-bubble copies label speakers and omit timestamps and furniture"
-          (copiedReply 0 (length cells)=="User: one\n\nBot: two" && copiedReply z a=="User: one\n\nBot: two")
+          (copiedReply 0 (styledLength cells)=="User: one\n\nBot: two" && copiedReply z a=="User: one\n\nBot: two")
         let w=fromMaybe (error "conversation window") (activeWindow chat)
             b=W.preparedWindowText preparedCopy
             clickAt p state=let (row,col)=windowTextPosition chat w b p in fst (handleEvent (V.EvMouseDown (left (bounds w)+1+col) (top (bounds w)+1+row) V.BLeft []) state)
@@ -467,34 +467,34 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ withTextPresentation $ 
             keyCopied=fst (handleEvent (V.EvKey (V.KChar 'c') [V.MCtrl]) released)
         check "dragging across bubbles preserves the draft caret and copies only message text"
           (composerFocused released && composerSelection released==Selection 2 2 && clipboard keyCopied=="User: one\n\nBot: two")
-    let reply width outgoing=T.pack . map fst . renderReply False width outgoing
+    let reply width outgoing=styledContents . renderReply False width outgoing
     check "short bubbles occupy one row with outward tails"
       (reply 30 True "hello"==T.replicate 22 " "<>"▐hello▛◤" && reply 30 False "hello"=="◥▜hello▌")
     check "outgoing bubble is black on VGA cyan"
-      (('h',BubbleText 0 True Plain) `elem` renderReply False 30 True "hello")
+      (hasStyledChar 'h' (BubbleText 0 True Plain) (renderReply False 30 True "hello"))
     check "agent prose and code retain their styles inside bubbles"
-      (('h',BubbleText 0 False Plain) `elem` renderReply False 30 False "hello" && ('4',BubbleText 0 False (CodeStyle False Number)) `elem` renderReply False 30 False "```haskell\nx = 42\n```")
+      (hasStyledChar 'h' (BubbleText 0 False Plain) (renderReply False 30 False "hello") && hasStyledChar '4' (BubbleText 0 False (CodeStyle False Number)) (renderReply False 30 False "```haskell\nx = 42\n```"))
     forM_ [False,True] $ \outgoing -> do
       let sourceText="```haskell\nx = 42\n```"
           cells=renderReply False 40 outgoing sourceText
-          firstRow=takeWhile ((/='\n').fst) cells
+          firstRow=head (splitStyled cells)
           codeCell (_,BubbleText _ _ (CodeStyle _ _))=True
           codeCell _=False
-          copied=[c | (c,BubbleText _ _ _)<-cells]
+          copied=T.concat [text | (text,BubbleText _ _ _)<-cells]
       check "leading code panels leave the bubble top edge clear"
         (not (any codeCell firstRow) && any codeCell cells)
       check "leading code panel spacing is decoration, not copied text"
-        (copied==map fst (renderMarkdown 35 sourceText))
+        (copied==styledContents (renderMarkdown 35 sourceText))
     forM_ [False,True] $ \graphical -> forM_ [False,True] $ \outgoing -> forM_ [8,40,100] $ \width ->
       forM_ ["```haskell\nx = 42\n```","Before\n\n```sh\nprintf hello\n```"] $ \sourceText -> do
         let cells=renderReply graphical width outgoing sourceText
-            lastRow=takeWhile ((/='\n').fst) (reverse cells)
+            lastRow=last (splitStyled cells)
             codeCell (_,BubbleText _ _ (CodeStyle _ _))=True
             codeCell _=False
         check "trailing code panels leave the bubble bottom edge clear"
           (not (any codeCell lastRow) && any codeCell cells)
         check "code panel margins leave copied contents unchanged"
-          ([c | (c,BubbleText _ _ _)<-cells]==map fst (renderMarkdown (width-5) sourceText))
+          (T.concat [text | (text,BubbleText _ _ _)<-cells]==styledContents (renderMarkdown (width-5) sourceText))
     forM_ [1,2,5,6,8,30,80] $ \width -> forM_ [False,True] $ \outgoing -> do
       let rendered=reply width outgoing "Wide 界 words é and more words"
       check "bubbles wrap within the window width"
@@ -537,15 +537,15 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ withTextPresentation $ 
         reflowed<-await runtime "resized question body" (bodyAtWidth "") pending
         let prepared=targetBody "" reflowed
             text=conversationText reflowed
-            bubbleRows=[T.pack [c | (c,BubbleText _ _ _) <- row] | row<-splitStyled (bodyHighlight prepared)]
+            bubbleRows=[T.concat [text | (text,BubbleText _ _ _) <- row] | row<-splitStyled (bodyHighlight prepared)]
             nonempty=filter (not . T.null) bubbleRows
-            blockRows=[(i,c) | (i,(c,BubbleText _ _ (CodeStyle True _)))<-zip [0..] (bodyHighlight prepared)]
+            blockRows=[(a,z) | (a,z,BubbleText _ _ (CodeStyle True _))<-styleRanges (bodyHighlight prepared)]
             blocks=bodyShellBlocks prepared
         check "background chat preparation adopts the resized window width"
           (maximum (0:map T.length nonempty)>columns-22 && all ((<=columns-2).T.length) nonempty)
         check "reflow preserves the whole shell source and maps its decorated cells"
           (map (\(_,_,dialect,raw)->(dialect,raw)) blocks==[("sh",rawShell)] &&
-           all (\(i,_)->any (\(start,end,_,_)->i>=start && i<end) blocks) blockRows)
+           all (\(a,z)->any (\(start,end,_,_)->a>=start && z<=end) blocks) blockRows)
         let selected=modifyActive (\w->w {selection=Selection 0 (T.length text)}) (setComposerInput (composerBuffer reflowed) (composerSelection reflowed) False reflowed)
             copied=fst (runCommand Copy selected)
         check "copy after chat reflow still excludes bubble furniture"
@@ -555,10 +555,10 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ withTextPresentation $ 
     forM_ [32,120,150] $ \columns -> do
       let outgoing=renderReply False columns True (T.unwords (replicate 90 "window-width"))
           incoming=renderReply False columns False (T.unwords (replicate 90 "window-width"))
-          firstRow=takeWhile ((/='\n').fst)
+          firstRow=head . splitStyled
       check "wide user bubbles anchor on the right and replies on the left"
-        (length (firstRow outgoing)==columns && maybe False (\(_,style)->case style of BubbleText _ False _->False; _->True) (listToMaybe incoming) &&
-         maximum (map (length . filter (\(_,style)->case style of BubbleText{}->True; _->False)) (splitStyled incoming))>columns-20)
+        (styledLength (firstRow outgoing)==columns && maybe False (\(_,style)->case style of BubbleText _ False _->False; _->True) (listToMaybe incoming) &&
+         maximum (map (styledLength . filter (\(_,style)->case style of BubbleText{}->True; _->False)) (splitStyled incoming))>columns-20)
     C.withConsoles $ \consoles -> withConversation consoles $ \runtime -> do
       preparedDraft<-send runtime "show" [] draftBase
       let savedDraft=draftAt (newBuffer "existing draft") (Selection 4 4) preparedDraft
@@ -1402,7 +1402,7 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ withTextPresentation $ 
             rows=splitStyled (bodyHighlight body)
             sent row=any (\(_,style)->case style of BubbleText _ True _->True; _->False) row
             received row=any (\(_,style)->case style of BubbleText _ False _->True; _->False) row
-            columnsOf row=let text=T.pack (map fst row) in displayColumn text (T.length text)
+            columnsOf row=let text=styledContents row in displayColumn text (T.length text)
         check "live conversation publication replaces immutable body identity"
           (conversationBodySnapshot "" shown/=conversationBodySnapshot "" answered)
         check "resize then Zoom anchors live user bubbles at the right window edge"
@@ -1436,7 +1436,7 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ withTextPresentation $ 
               rows=splitStyled (bodyHighlight body)
               sent row=any (\(_,style)->case style of BubbleText _ True _->True; _->False) row
               received row=any (\(_,style)->case style of BubbleText _ False _->True; _->False) row
-              columnsOf row=let text=T.pack (map fst row) in displayColumn text (T.length text)
+              columnsOf row=let text=styledContents row in displayColumn text (T.length text)
           check "simultaneously visible chats anchor user bubbles to their own right edge"
             (not (null (filter sent rows)) && all ((==columns-2).columnsOf) (filter sent rows))
           check "inactive child and primary replies reflow at their own window width"
@@ -1470,13 +1470,17 @@ readMessages path=do
   if exists then mapMaybe decodeStrict' . B8.lines <$> BS.readFile path else pure []
 conversationText :: Desktop -> T.Text
 conversationText desktop=maybe "" (\body->let text=W.preparedWindowText body in contentSlice text 0 (contentLength text)) (conversationBodySnapshot (conversationTarget desktop) desktop)
-conversationHighlight :: Desktop -> [(Char,Style)]
+conversationHighlight :: Desktop -> StyledText
 conversationHighlight desktop=maybe [] bodyHighlight (conversationBodySnapshot (conversationTarget desktop) desktop)
 
-bodyHighlight :: W.PreparedWindow -> [(Char,Style)]
+bodyHighlight :: W.PreparedWindow -> StyledText
 bodyHighlight body=case W.preparedWindowRows body of
-  W.StyledRows rows->concat (intersperse [('\n',Plain)] (Vec.toList rows))
-  _->[(c,Plain) | c<-T.unpack (contentSlice (W.preparedWindowText body) 0 (contentLength (W.preparedWindowText body)))]
+  W.StyledRows rows->concat [runs sigils++maybe [] (\style->styledText style "\n") newline | StyledRow sigils newline _<-Vec.toList rows]
+  _->styledText Plain (contentSlice (W.preparedWindowText body) 0 (contentLength (W.preparedWindowText body)))
+  where
+    runs Nil=[]
+    runs (ConsChars text style rest)=(text,style):runs rest
+    runs (ConsSigil glyph style _ rest)=(graphemeText glyph,style):runs rest
 
 targetBody :: T.Text -> Desktop -> W.PreparedWindow
 targetBody target desktop=fromMaybe (error "Missing prepared conversation body") (conversationBodySnapshot target desktop)
@@ -1494,7 +1498,7 @@ bodyAtWidth target desktop=case M.lookup target (conversationViews desktop) of
 -- law; explicit Show must replace this exact visible frame in place.
 recoveredBody :: T.Text -> Desktop -> IO Desktop
 recoveredBody text desktop=do
-  body<-W.prepareSemanticTextWindow "Conversation" [(c,Plain) | c<-T.unpack text]
+  body<-W.prepareSemanticTextWindow "Conversation" (styledText Plain text)
     (W.TextSemantics W.CopyText Nothing Vec.empty Vec.empty W.ReadableWindow Vec.empty Vec.empty Vec.empty) >>= either (error.T.unpack) pure
   let reference=fromMaybe (error "Missing restored ref") (M.lookup "" (conversationViews desktop) >>= conversationBodyRef)
   W.retireWindowRef reference
@@ -1661,7 +1665,11 @@ providerScript=unlines
   , "    elif ident.startswith('terminal-after-release-'): finish()"
   ]
 
-splitStyled :: [(Char,Style)] -> [[(Char,Style)]]
-splitStyled cells=case break ((=='\n').fst) cells of
-  (row,[]) -> [row]
-  (row,_:rest) -> row:splitStyled rest
+splitStyled :: StyledText -> [StyledText]
+splitStyled=map fst . splitStyledText
+
+styleRanges :: StyledText -> [(Int,Int,Style)]
+styleRanges=snd . mapAccumL (\offset (text,style)->let end=offset+T.length text in (end,(offset,end,style))) 0
+
+hasStyledChar :: Char -> Style -> StyledText -> Bool
+hasStyledChar wanted style=any (\(text,actual)->actual==style && T.any (==wanted) text)
