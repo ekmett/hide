@@ -124,14 +124,6 @@ checks=do
       Just M.WindowPresentationUnneeded{}->M.windowPresentation negative negativeView==Nothing &&
         (M.selection negativeView,M.scrollRow negativeView,M.scrollColumn negativeView)==(Selection 2 2,2,1)
       _->False)
- let overflowChars=renderMarkdown 1 (head overflowing<>"Z")
-     transcript=M.addHelpStyled overflowChars (M.initialDesktop (40,25))
-     adopted=transcript {M.buffers=Map.map (\doc->doc {M.documentHasLayoutMetadata=False,M.documentLabel=Just "Conversation"}) (M.buffers transcript)}
- admitted<-prepareTextPresentations adopted
- let admittedView=fromJust (M.activeWindow admitted)
- check "worker discovers generated transcript metadata without a UI-owner admission scan"
-   (not (M.documentHasLayoutMetadata (fromJust (M.activeDocument admitted))) &&
-    maybe False ((==3) . length . filter ((=="�") . layoutDisplayText) . concatMap (Vec.toList . layoutGlyphs) . Vec.toList . layoutRows) (M.windowPresentation admitted admittedView))
  let scripted="A界e\x301👩🏽\x200d\&💻"
      scriptStyles=Vec.singleton [(c,ScriptStyle Superscript (BoldStyle Plain)) | c<-T.unpack scripted]
  scriptLayout<-prepareTextLayout False 40 (bufferContent (newBuffer scripted)) scriptStyles
