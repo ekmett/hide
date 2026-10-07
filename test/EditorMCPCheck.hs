@@ -1,7 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 module EditorMCPCheck (checks) where
 import SourceWindowFixture (sourceFixtureBuffer)
-import EditorFixture (withEditorBodyFixture)
 import Control.Monad (unless)
 import Data.IORef
 import Control.Exception (bracket, try, IOException, evaluate)
@@ -58,18 +57,21 @@ checks = do
         (V.fromList [(0,T.length "Session: provider-secret"),(answerStart,T.length conversationText)]) V.empty V.empty
   conversationBody<-W.prepareSemanticTextWindow "Conversation" [(conversationText,Plain)] semantics
     >>= either (error . T.unpack) pure
-  withEditorBodyFixture "" conversationBody (initialDesktop (80,25)) $ \conversation->withBufferReadCommands $ \commands->do
+  W.withWindowScope $ \scope->withBufferReadCommands $ \commands->do
+    update<-W.openTextWindow scope conversationBody >>= maybe (error "Prepared read fixture scope ended") pure
+    (reference,_)<-W.admitWindowUpdate False update >>= maybe (error "Prepared read fixture admission failed") pure
+    let conversation=addPluginWindow reference conversationBody (initialDesktop (80,25))
     (_,finishRead)<-readWindowTool commands (captureWindow conversation) conversation "read_window" (object [])
     privateRead<-finishRead
     let encodedRead=either id text privateRead
-    check "MCP prepared conversation reads redact session identifiers and unsent answers"
+    check "MCP prepared window reads redact private semantic ranges"
       (case privateRead of
         Right _->not ("provider-secret" `T.isInfixOf` encodedRead) && not ("unsent-secret" `T.isInfixOf` encodedRead)
           && "Public assistant response" `T.isInfixOf` encodedRead
         Left _->False)
-    check "MCP conversation selections cannot bypass private redaction"
+    check "MCP prepared window selections cannot bypass private redaction"
       (case builtinTool (modifyActive (\w->w {selection=Selection 0 200}) conversation) "read_selection" (object []) of Left _->True; _->False)
-    check "MCP prepared conversations cannot fabricate a source buffer read"
+    check "MCP prepared windows cannot fabricate a source buffer read"
       (M.null (buffers conversation) && case builtinTool conversation "read_buffer" (object []) of Left _->True; _->False)
   let byteDocument=addDocument Nothing (newByteBuffer (BS.pack [0,127,128,255])) (initialDesktop (80,25))
   check "MCP byte formatting preserves original values and spacing" (case builtinTool byteDocument "read_buffer" (object []) of
