@@ -466,7 +466,7 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ withTextPresentation $ 
         let chat=draftAt (newBuffer "draft") (Selection 2 2) base
             positions ident=[(a,z) | (a,z,BubbleText j _ _)<-styleRanges cells,j==ident]
             a=fst (head (positions 0)); z=snd (last (positions 1))
-            copiedReply=W.copyPreparedSelection preparedCopy
+            copiedReply x y=W.copyPreparedSelection preparedCopy (min x y) (max x y)
         check "single-bubble copies omit speaker names and decoration"
           (copiedReply a (a+3)=="one" && copiedReply (a+1) (a+3)=="ne")
         check "cross-bubble copies label speakers and omit timestamps and furniture"
