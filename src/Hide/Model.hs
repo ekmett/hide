@@ -1227,7 +1227,8 @@ runCommand cmd source | browserFrontend source, cmd `elem` [Copy,Cut,CopyAllMess
 runCommand Paste source | browserFrontend source = (source {menu=Nothing,contextMenu=Nothing,prefix=Nothing},[ReadBrowserClipboard])
 runCommand cmd source | dialogCommandAllowed cmd source = applyDialogCommand cmd source
 runCommand cmd source | problemsVisible source && problemsFocused source, cmd `elem` [Undo,Redo,Cut,Paste,SelectAll] = (source {menu=Nothing,contextMenu=Nothing},[])
-runCommand Copy source | activeConversation source,Just window<-activeWindow source,
+runCommand Copy source | dialog source==Nothing,activeConversation source,
+  not (composerActive source || questionActive source || activeAutocomplete source && autocompleteFocused source),Just window<-activeWindow source,
   Just target<-conversationTargetFor source window,Just view<-M.lookup target (conversationViews source),
   Just logical<-conversationLogical view,Just chosen@(BodySelection a z)<-conversationCopySelection source target window,a/=z,
   Just reference<-conversationBodyRef view =
