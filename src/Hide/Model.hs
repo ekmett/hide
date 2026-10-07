@@ -3714,7 +3714,7 @@ verticalMove delta extend d
     let text=PluginWindow.preparedWindowText view,
     let (row,column)=windowTextPosition d w text (caret (selection w)),
     row+delta<scrollRow w || row+delta>=scrollRow w+max 1 (pluginBodyRows d w),
-    Just point<-viewportPoint captured (caret (selection w))->
+    Just point<-viewportPoint captured (caret (selection w))=
       let (shift,previousAnchor)=case conversationCaretIntent retained of
             Just (RowCaret _ original) | conversationAnchor retained==At point->(conversationRowShift retained+delta,original)
             _->(delta,Nothing)

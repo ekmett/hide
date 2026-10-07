@@ -27,14 +27,15 @@ import qualified Data.Set as S
 import System.FilePath ((</>))
 import Data.Maybe (fromMaybe)
 import Control.Applicative ((<|>))
-import Data.List (mapAccumL,foldl',find,findIndex)
+import Data.List (mapAccumL,find,findIndex)
+import qualified Data.List as List
 import Data.Unique (Unique,newUnique,hashUnique)
 import qualified Data.Map.Strict as M
 import qualified Data.Sequence as Seq
 import Data.Foldable (toList)
 import Hide.Buffer (BufferContent,newBuffer,bufferContent,columnOffset,displayColumn,lineColumn)
 import Hide.Markdown (Markdown,MarkdownBlock,parseMarkdown,markdownBlocks,markdownBlockText,markdownBlockLinks,markdownBlockShell,markdownIntrinsicWidth,renderMarkdownBlock,renderMarkdownWithShellBlocks)
-import Hide.Syntax (Style(..),StyledText,StyledRow(..),MappedStyledRow(..),Sigils(..),styledText,styledContents,styledLength,splitStyledText,styledRows,sigilsColumn,sigilsLength,sigilsText,mapSigilsStyle,bubbleTile,linkSpans)
+import Hide.Syntax (Style(..),StyledText,StyledRow(..),MappedStyledRow(..),Sigils(..),styledText,styledContents,styledLength,splitStyledText,styledRows,sigilsColumn,sigilsLength,mapSigilsStyle,bubbleTile)
 import Data.Text (Text)
 import Data.Set (Set)
 import System.Mem.StableName (StableName,makeStableName)
@@ -557,8 +558,8 @@ demandedRows key input logical=case anchor of
     if null selected then Left "The anchored conversation position is no longer present."
       else if ended && length shown<height then
         let final=ending height
-            target=case remaining of PendingRow (Just point) _ _ _ _:_->Just point; _->Nothing
-            requestedRow=fromMaybe (max 0 (length final-1)) (target >>= \point->findIndex (rowStarts point) final)
+            target=case remaining of PendingRow (Just first) _ _ _ _:_->Just first; _->Nothing
+            requestedRow=fromMaybe (max 0 (length final-1)) (target >>= \first->findIndex (rowStarts first) final)
         in Right (final,0,True,requestedRow)
       else Right (shown,0,ended,0)
   where
@@ -708,7 +709,7 @@ blockRows key input item block=case recordContent record of
         decorate _ []=[]
         outgoing=role=="You"
         BodyItemId ident=recordId record
-    in decorate 0 rows
+    in decorate (0::Int) rows
   Pause label->[PendingRow (Just (BodyPoint (recordId record) 0 0)) (plainMapped Comment label) [] [] Nothing]
   Activity ident value history->
     let expanded=S.member (displayTarget key,ActivityExpansion ident) (bodyExpandedTools input)
@@ -736,7 +737,7 @@ questionPendingRows key (QuestionSchema token prompt choices)=promptRows++choice
     promptRows=concat [
       [PendingRow (Just (QuestionPoint token number (mappedRowStart row)))
         (if columns<6 then recolorMapped (-2) False row else bubbleMapped (displayWide key) (displayGraphical key) columns (min (max 1 (columns-5)) (markdownIntrinsicWidth parsed)) (-2) False (number==0 && index==0) (number==length blocks-1 && null rest) row) [] [] Nothing
-      | (index,(row,rest))<-zip [0..] (withTail (renderMarkdownBlock (displayWide key) (max 1 (columns-5)) block))]
+      | (index,(row,rest))<-zip [0::Int ..] (withTail (renderMarkdownBlock (displayWide key) (max 1 (columns-5)) block))]
       | (number,block)<-zip [0..] blocks]
     choiceRows=concat [[make (-3-index) offset text (Just ("question-choice",[shownToken,T.pack (show index)]))
       | (offset,text)<-snd (mapAccumL (\offset text->(offset+T.length text+1,(offset,text))) 0 (T.splitOn "\n" (questionChoiceLines columns False label)))]
@@ -793,7 +794,7 @@ withTail :: [a] -> [(a,[a])]
 withTail []=[]
 withTail (first:rest)=(first,rest):withTail rest
 lastRows :: Int -> [a] -> [a]
-lastRows count=toList . foldl' (\rows row->let next=rows Seq.|> row in if Seq.length next>count then Seq.drop 1 next else next) Seq.empty
+lastRows count=toList . List.foldl' (\rows row->let next=rows Seq.|> row in if Seq.length next>count then Seq.drop 1 next else next) Seq.empty
 
 
 clipCells :: Int -> Text -> Text
