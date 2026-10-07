@@ -4,7 +4,7 @@ module ConversationCheck (checks, composerCodeChecks, draftReceiptChecks, questi
 import EditorFixture (withEditorFixture,withEditorBodyFixture,sameBufferVersions)
 import qualified Hide.Plugin.Window as W
 import qualified Data.Vector as Vec
-import Hide.TextPresentation (withTextPresentation,tickTextPresentation,TextPresentation)
+import Hide.TextPresentation (withTextPresentation,textPresentationEffects,tickTextPresentation,TextPresentation)
 import qualified Hide.Conversation as Conversation
 import qualified Hide.Plugin.Menu as HideMenu
 import qualified Hide.Plugin.Editor as Editor
@@ -536,7 +536,6 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ withTextPresentation $ 
         (_,pending)<-conversationEffects runtime fallback resized []
         reflowed<-await runtime "resized question body" (bodyAtWidth "") pending
         let prepared=targetBody "" reflowed
-            text=conversationText reflowed
             bubbleRows=[T.concat [text | (text,BubbleText _ _ _) <- row] | row<-splitStyled (bodyHighlight prepared)]
             nonempty=filter (not . T.null) bubbleRows
             blockRows=[(a,z) | (a,z,BubbleText _ _ (CodeStyle True _))<-styleRanges (bodyHighlight prepared)]
@@ -546,8 +545,14 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ withTextPresentation $ 
         check "reflow preserves the whole shell source and maps its decorated cells"
           (map (\(_,_,dialect,raw)->(dialect,raw)) blocks==[("sh",rawShell)] &&
            all (\(a,z)->any (\(start,end,_,_)->a>=start && z<=end) blocks) blockRows)
-        let selected=modifyActive (\w->w {selection=Selection 0 (T.length text)}) (setComposerInput (composerBuffer reflowed) (composerSelection reflowed) False reflowed)
-            copied=fst (runCommand Copy selected)
+        let browsing=(setComposerInput (composerBuffer reflowed) (composerSelection reflowed) False reflowed) {chatQuestion=fmap (\q->q {questionFocused=False}) (chatQuestion reflowed)}
+            home=fst (runCommand (CursorDocumentStart False) browsing)
+            caretReady d=maybe False ((==Nothing).conversationCaretIntent) (M.lookup "" (conversationViews d))
+        first<-await runtime "logical transcript Home" caretReady home
+        selected<-await runtime "logical transcript Shift End" caretReady (fst (runCommand (CursorDocumentEnd True) first))
+        let (pendingCopy,copyEffects)=runCommand Copy selected
+        (_,capturedCopy)<-textPresentationEffects presentation fallback pendingCopy copyEffects
+        copied<-await runtime "logical transcript copy" (T.isInfixOf "window-width".clipboard) capturedCopy
         check "copy after chat reflow still excludes bubble furniture"
           ("window-width" `T.isInfixOf` clipboard copied && not ("┌" `T.isInfixOf` clipboard copied) && not ("```" `T.isInfixOf` clipboard copied))
         stable<-tickConversation runtime reflowed

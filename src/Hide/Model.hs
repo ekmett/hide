@@ -2096,18 +2096,23 @@ settleConversationCaret captured view=case (conversationCaretIntent view,capture
 conversationEdge :: Bool -> Bool -> Desktop -> Desktop
 conversationEdge end extend d=case activeWindow d of
   Just window | Just target<-conversationTargetFor d window,Just view<-M.lookup target (conversationViews d),
-    Just logical<-conversationLogical view,not (Vec.null (logicalBodyItems logical))->
-      let first=recordId (logicalItemRecord (Vec.head (logicalBodyItems logical)))
-          requested=if end then FollowEnd else At (BodyPoint first 0 0)
+    Just logical<-conversationLogical view,Just first<-firstPoint target window logical->
+      let requested=if end then FollowEnd else At first
           extended=if extend then case conversationCopySelection d target window of Just (BodySelection anchor _)->Just anchor; _->Nothing else Nothing
           previous=bodyViewportFor d target
           ready=case previous of
             Just viewport | end && viewportAtEnd viewport->Just viewport
-            Just viewport | not end,Just actual<-viewportPoint viewport 0,actual==BodyPoint first 0 0->Just viewport
+            Just viewport | not end,Just actual<-viewportPoint viewport 0,actual==first->Just viewport
             _->Nothing
           next=settleConversationCaret ready view {conversationAnchor=requested,conversationRowShift=0,conversationCaretIntent=Just (end,extended)}
       in (modifyActive (\w->w {selection=projectConversationSelection next previous}) d) {conversationViews=M.insert target next (conversationViews d)}
   _->d
+  where
+    firstPoint target window logical=case logicalBodyItems logical Vec.!? 0 of
+      Just item->Just (BodyPoint (recordId (logicalItemRecord item)) 0 0)
+      Nothing | T.null target,Just question<-chatQuestion d,Just controls<-windowConversationControls d window,
+        hostBodyQuestionToken controls==Just (questionToken question)->Just (QuestionPoint (questionToken question) 0 0)
+      _->Nothing
 
 rememberConversationView :: Desktop -> Desktop
 rememberConversationView d=case M.lookup (conversationTarget d) (conversationViews d) of
