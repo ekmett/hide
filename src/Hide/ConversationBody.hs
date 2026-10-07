@@ -6,7 +6,7 @@
 -- Conversation retains task/control authority and adopts their exact results.
 module Hide.ConversationBody
   ( BodyItemId(..), Record(..), RecordContent(..), BodyPoint(..), BodyAnchor(..), BodySelection(..), BodyDemand(..), BodyViewport(..), BodyRow(..), viewportPoint, viewportOffset
-  , LogicalBody, LogicalItem, logicalBodyIdentity, logicalBodyRead, logicalBodyItems, logicalBodyItemIndex, logicalItemRecord, logicalItemMarkdown, logicalItemBlocks, prepareLogicalBody
+  , LogicalBody, LogicalItem, logicalBodyIdentity, logicalBodyProvider, logicalBodyTranscriptIdentity, logicalBodyRead, validateLogicalPoint, logicalBodyItems, logicalBodyItemIndex, logicalItemRecord, logicalItemMarkdown, logicalItemBlocks, prepareLogicalBody, restoreLogicalBody, restoreLogicalViewport
   , ToolExpansion(..), QuestionSchema(..), QuestionProjection(..)
   , BodyProvider(..), BodyKey(..), bodyOwnerMatches, BodyInput(..)
   , BodyRequest(..), BodyResult(..), PreparedBody(..), HostBodyControls(..)
@@ -116,7 +116,9 @@ sameBlock _ _=False
 -- The record and its exact payload identity are strict metadata. Markdown is
 -- lazy: looking up an item or constructing this vector parses no prior items.
 data LogicalParsed = LogicalParsed !Markdown !(V.Vector MarkdownBlock) Int
-data LogicalItem = LogicalItem !Record !(StableName Record) (Maybe LogicalParsed)
+data LogicalItem = LogicalItem !Record !(StableName Record) (Maybe LogicalParsed) !Int (V.Vector [MappedStyledRow])
+-- One width's lazy block rows belong to this immutable item. Replacing width
+-- drops the old derived roots without parsing or laying out untouched items.
 data LogicalBody = LogicalBody
   { logicalIdentity :: !Unique, logicalTarget :: !Text
   , logicalProvider :: !BodyProvider, logicalTranscript :: !(StableName [Record])
@@ -130,14 +132,33 @@ instance Show LogicalBody where show body="LogicalBody "++show (hashUnique (logi
 -- catalogue receives a fresh worker-issued identity, never a payload comparison.
 logicalBodyIdentity :: LogicalBody -> Unique
 logicalBodyIdentity=logicalIdentity
+logicalBodyProvider :: LogicalBody -> BodyProvider
+logicalBodyProvider=logicalProvider
+logicalBodyTranscriptIdentity :: LogicalBody -> StableName [Record]
+logicalBodyTranscriptIdentity=logicalTranscript
+
+-- | Validate only the named item/block on a worker. Recovery never accepts a
+-- transient question point or redirects a missing source to another item.
+validateLogicalPoint :: LogicalBody -> BodyPoint -> Either Text ()
+validateLogicalPoint _ QuestionPoint{}=Left "Transient question positions cannot be recovered."
+validateLogicalPoint body (BodyPoint ident block scalar)=do
+  index<-maybe (Left "Conversation position names a missing item.") Right (logicalBodyItemIndex ident body)
+  let item=logicalItems body V.! index
+      source=case recordContent (logicalItemRecord item) of
+        Reply _ _->markdownBlockText <$> (logicalItemBlocks item V.!? block)
+        Activity label value history | block==0->Just (activityTitle label value<>"\n"<>T.intercalate "\n" (map jsonText history))
+        Pause label | block==0->Just label
+        _->Nothing
+  text<-maybe (Left "Conversation position names a missing block.") Right source
+  if scalar>=0 && scalar<=T.length text then Right () else Left "Conversation position is outside its logical block."
 
 -- | /O(1)/. Borrow ordered items. Their parser owners remain lazy.
 logicalBodyItems :: LogicalBody -> V.Vector LogicalItem
 logicalBodyItems=logicalItems
 logicalItemRecord :: LogicalItem -> Record
-logicalItemRecord (LogicalItem record _ _)=record
+logicalItemRecord (LogicalItem record _ _ _ _)=record
 logicalItemMarkdown :: LogicalItem -> Maybe Markdown
-logicalItemMarkdown (LogicalItem _ _ parsed)=case parsed of
+logicalItemMarkdown (LogicalItem _ _ parsed _ _)=case parsed of
   Nothing->Nothing
   Just (LogicalParsed markdown _ _)->Just markdown
 
@@ -145,11 +166,11 @@ logicalItemMarkdown (LogicalItem _ _ parsed)=case parsed of
 -- Block metadata is cached, so a selected block is indexed without replaying
 -- preceding blocks or laying out their rows.
 logicalItemBlocks :: LogicalItem -> V.Vector MarkdownBlock
-logicalItemBlocks (LogicalItem _ _ parsed)=case parsed of
+logicalItemBlocks (LogicalItem _ _ parsed _ _)=case parsed of
   Nothing->V.empty
   Just (LogicalParsed _ blocks _)->blocks
 logicalItemWidth :: LogicalItem -> Int
-logicalItemWidth (LogicalItem _ _ parsed)=case parsed of Nothing->1; Just (LogicalParsed _ _ intrinsic)->intrinsic
+logicalItemWidth (LogicalItem _ _ parsed _ _)=case parsed of Nothing->1; Just (LogicalParsed _ _ intrinsic)->intrinsic
 
 -- | /O(log items)/. Insertion/event IDs are strictly ordered within one target.
 -- Missing IDs return Nothing, never a neighboring item's source position.
@@ -170,28 +191,46 @@ logicalBodyItemIndex wanted body=search 0 (V.length items)
 -- Reuse requires exact provider, item and immutable record identities; numeric
 -- revisions or equal text alone cannot prove the cached parser still applies.
 prepareLogicalBody :: BodyKey -> BodyInput -> Maybe LogicalBody -> IO LogicalBody
-prepareLogicalBody key input previous=case previous of
-  Just body | logicalTarget body==bodyTarget key && logicalProvider body==bodyProvider key &&
-    logicalTranscript body==bodyTranscript key && questionTokenOf (logicalQuestion body)==bodyQuestionToken key->pure body
-  _->do
-    identity<-newUnique
-    let old=case previous of
-          Just body | logicalTarget body==bodyTarget key && logicalProvider body==bodyProvider key->M.fromList
-            [(recordId (logicalItemRecord item),item) | item<-V.toList (logicalItems body)]
-          _->M.empty
-    items<-V.fromList <$> mapM (capture old) (bodyRecords input)
-    evaluate (LogicalBody identity (bodyTarget key) (bodyProvider key) (bodyTranscript key)
-      (bodySession input) (bodyQuestion input) items)
+prepareLogicalBody key input previous=do
+  body<-case previous of
+    Just body | logicalTarget body==bodyTarget key && logicalProvider body==bodyProvider key &&
+      logicalTranscript body==bodyTranscript key && questionTokenOf (logicalQuestion body)==bodyQuestionToken key->pure body
+    _->do
+      identity<-newUnique
+      let old=case previous of
+            Just body | logicalTarget body==bodyTarget key && logicalProvider body==bodyProvider key->M.fromList
+              [(recordId (logicalItemRecord item),item) | item<-V.toList (logicalItems body)]
+            _->M.empty
+      items<-V.fromList <$> mapM (capture old) (bodyRecords input)
+      evaluate (LogicalBody identity (bodyTarget key) (bodyProvider key) (bodyTranscript key)
+        (bodySession input) (bodyQuestion input) items)
+  withLogicalWidth (max 1 (bodyColumns key-5)) body
   where
     questionTokenOf Nothing=Nothing
     questionTokenOf (Just (QuestionSchema token _ _))=Just token
     capture old record=do
       payload<-makeStableName =<< evaluate record
       case M.lookup (recordId record) old of
-        Just item@(LogicalItem _ same _) | same==payload->pure item
+        Just item@(LogicalItem _ same _ _ _) | same==payload->pure item
         _->evaluate (LogicalItem record payload (case recordContent record of
           Reply _ text->let parsed=parseMarkdown text in Just (LogicalParsed parsed (V.fromList (markdownBlocks parsed)) (markdownIntrinsicWidth parsed))
-          _->Nothing))
+          _->Nothing) 0 V.empty)
+
+withLogicalWidth :: Int -> LogicalBody -> IO LogicalBody
+withLogicalWidth columns body=do
+  items<-V.mapM resize (logicalItems body)
+  evaluate body {logicalItems=items}
+  where
+    resize item@(LogicalItem record payload parsed width _)
+      | width==columns=pure item
+      | otherwise=evaluate (LogicalItem record payload parsed columns (case parsed of
+          Nothing->V.empty
+          Just (LogicalParsed _ blocks _)->V.map (renderMarkdownBlock columns) blocks))
+
+logicalItemRows :: Int -> LogicalItem -> Int -> [MappedStyledRow]
+logicalItemRows columns item@(LogicalItem _ _ _ width rows) block
+  | width==columns=fromMaybe [] (rows V.!? block)
+  | otherwise=maybe [] (renderMarkdownBlock columns) (logicalItemBlocks item V.!? block)
 
 -- | Project full canonical logical text on a read worker, independently of
 -- folding and viewport rows. True means privacy redaction was applied. Session
@@ -243,6 +282,7 @@ data QuestionProjection = QuestionProjection
 data BodyProvider
   = PrimaryBodyProvider !(StableName A.Launch) !(Maybe (StableName A.Client,Maybe Text))
   | ChildBodyProvider !AH.AgentConfigRef
+  | RecoveredBodyProvider !Unique
   deriving Eq
 
 -- Desired work includes the transcript root. Completion admission deliberately
@@ -299,6 +339,39 @@ instance Show ConversationBody where
   show (InstalledBody reference _)="InstalledBody "++show reference
   show (InertBody prepared)="InertBody "++show prepared
 
+-- Rendering owns no callable lifetime. Recovery uses the same block producer
+-- without allocating a fake WindowRef or recreating host question/shell actions.
+data BodyDisplay = BodyDisplay
+  { displayTarget :: !Text, displayColumns :: !Int, displayGraphical :: !Bool
+  , displayWide :: !Bool, displayDemand :: !BodyDemand
+  }
+
+-- | Restore inert logical source on the recovery worker. IDs/revisions and
+-- bounds are validated by the codec before this constructor; no live provider,
+-- session, question, command or clipboard authority survives restoration.
+restoreLogicalBody :: Text -> [Record] -> IO LogicalBody
+restoreLogicalBody target records=do
+  identity<-newUnique
+  root<-makeStableName =<< evaluate records
+  items<-V.fromList <$> mapM restore records
+  evaluate (LogicalBody identity target (RecoveredBodyProvider identity) root Nothing Nothing items)
+  where
+    restore record=do
+      payload<-makeStableName =<< evaluate record
+      evaluate (LogicalItem record payload (case recordContent record of
+        Reply _ text->let parsed=parseMarkdown text in Just (LogicalParsed parsed (V.fromList (markdownBlocks parsed)) (markdownIntrinsicWidth parsed))
+        _->Nothing) 0 V.empty)
+
+-- | Prepare an inert bounded recovery viewport on its worker. Only passive
+-- copy/style semantics are installed; links, shell and host control actions are
+-- deliberately absent. The durable source remains this logical catalogue.
+restoreLogicalViewport :: Bool -> Bool -> Int -> Int -> BodyAnchor -> LogicalBody -> IO (Either Text W.PreparedWindow)
+restoreLogicalViewport graphical wide columns height anchor source=do
+  logical<-withLogicalWidth (max 1 (columns-5)) source
+  let display=BodyDisplay (logicalTarget logical) (max 1 columns) graphical wide (BodyDemand anchor 0 (max 1 height))
+      input=BodyInput "Conversation" "" Nothing (map logicalItemRecord (V.toList (logicalItems logical))) Nothing S.empty (Just logical)
+  fmap (\(body,_,_)->body) <$> prepareRenderedBody True display input logical
+
 -- A row is derived only while its block is demanded. Logical ranges are
 -- retained by the bounded receipt; styled payloads transfer into PreparedWindow.
 data PendingRow = PendingRow !(Maybe BodyPoint) !MappedStyledRow
@@ -310,8 +383,13 @@ data PendingRow = PendingRow !(Maybe BodyPoint) !MappedStyledRow
 prepareConversationBody :: BodyRequest -> IO BodyResult
 prepareConversationBody (BodyRequest key input)=do
   logical<-prepareLogicalBody key input (bodyPreviousLogical input)
-  case demandedRows key input logical of
-    Left message->pure (BodyResult key (Left message))
+  let display=BodyDisplay (bodyTarget key) (bodyColumns key) (bodyGraphical key) (bodyWide key) (bodyDemand key)
+  result<-prepareRenderedBody (case bodyProvider key of RecoveredBodyProvider{}->True; _->False) display input logical
+  pure (BodyResult key (fmap (\(body,layout,controls)->PreparedBody body layout controls logical) result))
+
+prepareRenderedBody :: Bool -> BodyDisplay -> BodyInput -> LogicalBody -> IO (Either Text (W.PreparedWindow,Maybe TextLayout,HostBodyControls))
+prepareRenderedBody inert key input logical=case demandedRows key input logical of
+    Left message->pure (Left message)
     Right (pending,scroll,atEnd)->do
       let rows=[StyledRow sigils (if null rest then Nothing else Just Plain) messages
             | (PendingRow _ mapped _ _ _,rest)<-withTail pending,let StyledRow sigils _ messages=mappedStyledRow mapped]
@@ -328,33 +406,33 @@ prepareConversationBody (BodyRequest key input)=do
             let starts index=[a | (a,_,name,values)<-actions,name=="question-choice",values==[T.pack (show token),T.pack (show index)]]
                 other=case [a+7 | (a,_,name,_)<-actions,name=="question-input"] of first:_->Just first; _->Nothing
             if other==Nothing && all (null . starts) [0..length choices-1] then Nothing
-              else Just (QuestionProjection token (bodyColumns key) other [starts index | index<-[0..length choices-1]])
+              else Just (QuestionProjection token (displayColumns key) other [starts index | index<-[0..length choices-1]])
           guestHidden=[(if name=="question-input" then a+6 else a,z)
             | (a,z,name,_)<-actions,name `elem` ["question-input","question-choice"]]
           sessionHidden=[(bodyRowPaintStart row,bodyRowPaintEnd row)
-            | (row,PendingRow Nothing _ _ _ _)<-zip receipts pending,V.null (logicalBodyItems logical),T.null (bodyTarget key)]
+            | (row,PendingRow Nothing _ _ _ _)<-zip receipts pending,V.null (logicalBodyItems logical),T.null (displayTarget key)]
           questionHidden=[(bodyRowPaintStart row,bodyRowPaintEnd row)
             | row<-receipts,Just QuestionPoint{}<-[bodyRowPoint row]]
-          semantics=W.TextSemantics (W.CopyMessages (if T.null (bodyTarget key) then W.UserBotAttribution else W.NoAttribution))
-            (Just (bodyProject input </> "conversation.md")) (V.fromList links) (V.fromList shells) W.ReadableWindow
+          semantics=W.TextSemantics (W.CopyMessages (if T.null (displayTarget key) then W.UserBotAttribution else W.NoAttribution))
+            (if inert then Nothing else Just (bodyProject input </> "conversation.md")) (if inert then V.empty else V.fromList links) (if inert then V.empty else V.fromList shells) W.ReadableWindow
             (V.fromList (sessionHidden++guestHidden)) (V.fromList sessionHidden) (V.fromList (sessionHidden++questionHidden))
-          BodyDemand requested _ _=bodyDemand key
-          anchor=case requested of FollowEnd->FollowEnd; At _ | let BodyDemand _ delta _=bodyDemand key,delta==0->requested; At _->maybe requested At (bodyRowPoint =<< listAt scroll receipts)
+          BodyDemand requested _ _=displayDemand key
+          anchor=case requested of FollowEnd | let BodyDemand _ delta _=displayDemand key,delta>=0->FollowEnd; _->maybe requested At (bodyRowPoint =<< listAt scroll receipts)
           viewport=BodyViewport (V.fromList receipts) anchor scroll atEnd
-          controls=HostBodyControls questionToken (Just viewport) projected actions
+          controls=if inert then HostBodyControls Nothing (Just viewport) Nothing [] else HostBodyControls questionToken (Just viewport) projected actions
       prepared<-W.prepareSemanticRowsWindow (bodyTitle input) rows semantics
       case prepared of
-        Left message->pure (BodyResult key (Left message))
+        Left message->pure (Left message)
         Right body->do
           -- TextLayout remains in viewport paint coordinates. Its same glyph
           -- extents drive paint/privacy; the bounded receipt maps to logical IDs.
           layout<-case W.preparedWindowRows body of
-            W.StyledRows styled->Just <$> prepareTextLayout (bodyWide key) (bodyColumns key) (W.preparedWindowText body) styled
+            W.StyledRows styled->Just <$> prepareTextLayout (displayWide key) (displayColumns key) (W.preparedWindowText body) styled
             _->pure Nothing
           _<-evaluate (sum [a+z+T.length name+sum (map T.length values) | (a,z,name,values)<-actions])
           _<-evaluate (V.foldl' (\n row->maybe () (\point->point `seq` ()) (bodyRowPoint row) `seq` n+bodyRowPaintStart row+bodyRowPaintEnd row+bodyRowLogicalEnd row+
             V.foldl' (\m (a,z,lo,hi)->m+a+z+lo+hi) 0 (bodyRowRanges row)) 0 (viewportRows viewport))
-          evaluate (BodyResult key (Right (PreparedBody body layout controls logical)))
+          evaluate (Right (body,layout,controls))
   where
     receipt offset (PendingRow point mapped _ _ _,StyledRow sigils newline _)=
       let end=offset+sigilsLength sigils
@@ -367,15 +445,18 @@ prepareConversationBody (BodyRequest key input)=do
 
 -- Locate by item/block metadata, not accumulated prior row heights. A missing
 -- anchor is refused rather than redirected to a different surviving item.
-demandedRows :: BodyKey -> BodyInput -> LogicalBody -> Either Text ([PendingRow],Int,Bool)
+demandedRows :: BodyDisplay -> BodyInput -> LogicalBody -> Either Text ([PendingRow],Int,Bool)
 demandedRows key input logical=case anchor of
-  FollowEnd->let rows=ending budget; scroll=max 0 (length rows-height)
-            in Right (rows,scroll,True)
+  FollowEnd->let rows=ending (budget+max 0 (-delta))
+                 scroll=max 0 (min (max 0 (length rows-height)) (length rows-height+delta))
+             in Right (take (scroll+budget) rows,scroll,scroll+height>=length rows)
   At point->do
     (index,block,rows)<-locate point
-    let (prior,selectedPairs)=break (\(row,rest)->contains point row || null rest && endsAt point row) (withTail rows)
-        before=map fst prior
-        selected=map fst selectedPairs
+    let (prior,selectedPairs)=break (\(row,rest)->contains (anchorPoint index block point) row || null rest && endsAt (anchorPoint index block point) row) (withTail rows)
+        -- Source replacement may shorten a surviving item's selected block.
+        -- Clamp within that item, never redirect an evicted ID to its neighbor.
+        selected=if null selectedPairs then lastRows 1 rows else map fst selectedPairs
+        before=if null selectedPairs then take (max 0 (length prior-1)) (map fst prior) else map fst prior
         needed=max 0 (-delta)
         nearby=lastRows needed before
         prefix=preceding (needed-length nearby) index block++nearby
@@ -383,12 +464,12 @@ demandedRows key input logical=case anchor of
         start=max 0 (length prefix+delta)
         remaining=drop start combined
         shown=take (height+2) remaining
-        ended=length (take (height+3) remaining)<=height+2
+        ended=length (take (height+1) remaining)<=height
     if null selected then Left "The anchored conversation position is no longer present."
-      else if null shown then Right (lastRows height combined,0,True)
+      else if ended && length shown<height then Right (ending height,0,True)
       else Right (shown,0,ended)
   where
-    BodyDemand anchor delta requested=bodyDemand key
+    BodyDemand anchor delta requested=displayDemand key
     height=max 1 requested
     budget=height+2
     items=logicalBodyItems logical
@@ -396,24 +477,24 @@ demandedRows key input logical=case anchor of
     questionRows=case bodyQuestion input of Nothing->[]; Just schema->questionPendingRows key schema
     locate (BodyPoint ident block _)=do
       index<-maybe (Left "The anchored conversation item is no longer present.") Right (logicalBodyItemIndex ident logical)
-      let item=items V.! index; blocks=logicalItemBlocks item
-      if block<0 || (not (V.null blocks) && block>=V.length blocks) then Left "The anchored conversation block is no longer present."
-        else Right (index,block,rowsAt index block)
+      let item=items V.! index; selectedBlock=min (blockCount item-1) block
+      if block<0 then Left "The anchored conversation block is no longer present."
+        else Right (index,selectedBlock,rowsAt index selectedBlock)
     locate (QuestionPoint token block _)=case bodyQuestion input of
       Just (QuestionSchema current _ _) | token==current->Right (count,block,filter (sameQuestionBlock block) questionRows)
       _->Left "The anchored question is no longer present."
+    anchorPoint _ block (BodyPoint ident actual scalar)=BodyPoint ident block (if block==actual then scalar else maxBound)
+    anchorPoint _ _ point=point
     sameQuestionBlock block (PendingRow (Just (QuestionPoint _ actual _)) _ _ _ _)=actual==block
     sameQuestionBlock _ _=False
     following index block
-      | index>=count=filter (laterQuestionBlock block) questionRows
+      | index>=count=dropWhile (sameQuestionBlock block) (dropWhile (not . sameQuestionBlock block) questionRows)
       | otherwise=let item=items V.! index
                   in concat [rowsAt index next | next<-[block+1..blockCount item-1]]++
                     itemSeparator index++itemsFrom (nextItem index)++questionRows
-    laterQuestionBlock block (PendingRow (Just (QuestionPoint _ actual _)) _ _ _ _)=actual>block
-    laterQuestionBlock _ _=False
     ending needed
       | not (null questionRows)=let tailRows=lastRows needed questionRows in takeEnd (needed-length tailRows) (count-1)++tailRows
-      | count==0=[PendingRow Nothing (plainMapped Comment (if T.null (bodyTarget key) then "Session: "<>fromMaybe "not connected" (bodySession input) else "No messages yet.")) [] [] Nothing]
+      | count==0=[PendingRow Nothing (plainMapped Comment (if T.null (displayTarget key) then "Session: "<>fromMaybe "not connected" (bodySession input) else "No messages yet.")) [] [] Nothing]
       | otherwise=takeEnd needed (count-1)
     takeEnd needed index
       | needed<=0 || index<0=[]
@@ -427,13 +508,11 @@ demandedRows key input logical=case anchor of
                   in lastBlocks (needed-length rows) index (block-1)++rows
     preceding needed index block
       | needed<=0=[]
-      | index>=count=let earlier=lastRows needed (filter (\row->not (sameQuestionBlock block row) && questionBlock row<block) questionRows)
+      | index>=count=let earlier=lastRows needed (takeWhile (not . sameQuestionBlock block) questionRows)
                     in takeEnd (needed-length earlier) (count-1)++earlier
       | otherwise=let prior=lastBlocks needed index (block-1)
                       previous=case collapsedGroup index of Just (first,_,_)->first-1; Nothing->index-1
                   in takeEnd (needed-length prior) previous++prior
-    questionBlock (PendingRow (Just (QuestionPoint _ block _)) _ _ _ _)=block
-    questionBlock _ _=maxBound
     blankRow=PendingRow Nothing (MappedStyledRow (StyledRow Nil Nothing V.empty) 0 0 V.empty) [] [] Nothing
     itemsFrom index
       | index>=count=[]
@@ -457,7 +536,7 @@ demandedRows key input logical=case anchor of
     forward index | tool (index+1)=forward (index+1) | otherwise=index
     collapsedGroup index=do
       found@(_,_,ident)<-group index
-      if S.member (bodyTarget key,RunExpansion ident) (bodyExpandedTools input) then Nothing else Just found
+      if S.member (displayTarget key,RunExpansion ident) (bodyExpandedTools input) then Nothing else Just found
     rowsAt index block=case collapsedGroup index of
       Just (first,lastIndex,ident)->[groupHeading (Just (BodyPoint (recordId (logicalItemRecord (items V.! index))) 0 0)) False first lastIndex ident]
       Nothing->case group index of
@@ -471,7 +550,7 @@ demandedRows key input logical=case anchor of
           labels=[T.pack (show running)<>" running" | running>0]++[T.pack (show failed)<>" failed" | failed>0]
           title=T.intercalate " · " (T.pack (show (lastIndex-first+1))<>" tool calls":labels++
             [T.intercalate ", " [fromMaybe label (field "title" value) | (label,value)<-take 3 calls]])
-          text=clipCells (bodyColumns key) ((if expanded then "▾▾ " else "▸▸ ")<>title)
+          text=clipCells (displayColumns key) ((if expanded then "▾▾ " else "▸▸ ")<>title)
       in PendingRow point (plainMapped Pragma text) (actionRanges text (Just ("toggle-tool-run",[ident]))) [] Nothing
     contains point (PendingRow (Just first) row actions _ _)=sameBlock first point &&
       (any (\(_,_,name,_)->name=="toggle-tool-run") actions ||
@@ -483,14 +562,14 @@ demandedRows key input logical=case anchor of
 blockCount :: LogicalItem -> Int
 blockCount item=max 1 (V.length (logicalItemBlocks item))
 
-blockRows :: BodyKey -> BodyInput -> LogicalItem -> Int -> [PendingRow]
+blockRows :: BodyDisplay -> BodyInput -> LogicalItem -> Int -> [PendingRow]
 blockRows key input item block=case recordContent record of
   Reply role _ | Just source<-logicalItemBlocks item V.!? block->
-    let columns=bodyColumns key; available=max 1 (columns-5)
+    let columns=displayColumns key; available=max 1 (columns-5)
         cap=min available (logicalItemWidth item)
-        rows=renderMarkdownBlock available source
+        rows=logicalItemRows available item block
         decorate index (row:rest)=
-          let mapped=if columns<6 then recolorMapped ident outgoing row else bubbleMapped (bodyGraphical key) columns cap ident outgoing (block==0 && index==0) (block==blockCount item-1 && null rest) row
+          let mapped=if columns<6 then recolorMapped ident outgoing row else bubbleMapped (displayGraphical key) columns cap ident outgoing (block==0 && index==0) (block==blockCount item-1 && null rest) row
           in PendingRow (Just (BodyPoint (recordId record) block (mappedRowStart row))) mapped []
                (markdownBlockLinks source) (markdownBlockShell source):decorate (index+1) rest
         decorate _ []=[]
@@ -499,9 +578,9 @@ blockRows key input item block=case recordContent record of
     in decorate 0 rows
   Pause label->[PendingRow (Just (BodyPoint (recordId record) 0 0)) (plainMapped Comment label) [] [] Nothing]
   Activity ident value history->
-    let expanded=S.member (bodyTarget key,ActivityExpansion ident) (bodyExpandedTools input)
+    let expanded=S.member (displayTarget key,ActivityExpansion ident) (bodyExpandedTools input)
         title=activityTitle ident value
-        shown=clipCells (max 0 (bodyColumns key-2)) title
+        shown=clipCells (max 0 (displayColumns key-2)) title
         heading=(if expanded then "▾ " else "▸ ")<>shown
         header=(plainMapped Pragma heading) {mappedRowEnd=T.length title,
           mappedSourceRanges=V.singleton (2,T.length heading,0,T.length shown)}
@@ -515,25 +594,24 @@ blockRows key input item block=case recordContent record of
   _->[]
   where record=logicalItemRecord item
 
-questionPendingRows :: BodyKey -> QuestionSchema -> [PendingRow]
+questionPendingRows :: BodyDisplay -> QuestionSchema -> [PendingRow]
 questionPendingRows key (QuestionSchema token prompt choices)=promptRows++choiceRows++otherRows
   where
-    columns=bodyColumns key
+    columns=displayColumns key
     parsed=parseMarkdown prompt
     blocks=markdownBlocks parsed
     promptRows=concat [
       [PendingRow (Just (QuestionPoint token number (mappedRowStart row)))
-        (if columns<6 then recolorMapped (-2) False row else bubbleMapped (bodyGraphical key) columns (min (max 1 (columns-5)) (markdownIntrinsicWidth parsed)) (-2) False (number==0 && index==0) (number==length blocks-1 && null rest) row) [] [] Nothing
+        (if columns<6 then recolorMapped (-2) False row else bubbleMapped (displayGraphical key) columns (min (max 1 (columns-5)) (markdownIntrinsicWidth parsed)) (-2) False (number==0 && index==0) (number==length blocks-1 && null rest) row) [] [] Nothing
       | (index,(row,rest))<-zip [0..] (withTail (renderMarkdownBlock (max 1 (columns-5)) block))]
       | (number,block)<-zip [0..] blocks]
-    firstChoice=length blocks
-    choiceRows=concat [[make (firstChoice+index) offset text (Just ("question-choice",[shownToken,T.pack (show index)]))
+    choiceRows=concat [[make (-3-index) offset text (Just ("question-choice",[shownToken,T.pack (show index)]))
       | (offset,text)<-snd (mapAccumL (\offset text->(offset+T.length text+1,(offset,text))) 0 (T.splitOn "\n" (questionChoiceLines columns False label)))]
       | (index,label)<-zip [0..] choices]
-    otherBlock=firstChoice+length choices
+    otherBlock=(-1)
     otherRows=[make otherBlock 0 ("Other: "<>T.replicate (max 1 (columns-8)+1) " ") (Just ("question-input",[shownToken])),
-      submitRow otherBlock]
-    submitRow otherBlock=PendingRow (Just (QuestionPoint token (otherBlock+1) 0))
+      submitRow]
+    submitRow=PendingRow (Just (QuestionPoint token (-2) 0))
       (plainMapped Plain "[Submit answer]  [Cancel]")
       [(0,15,"question-submit",[shownToken]),(17,25,"question-cancel",[shownToken])] [] Nothing
     shownToken=T.pack (show token)
