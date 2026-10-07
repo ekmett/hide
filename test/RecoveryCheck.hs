@@ -148,6 +148,12 @@ checks=bracket temporary removePathForcibly $ \root->W.withWindowScope $ \scope-
     (conversationBodyRef primaryView==Nothing && bodyText "" restoredViews=="" &&
       M.size (pluginWindows restoredViews)==1 &&
       all (\w->conversationTargetFor restoredViews w==Just "agent-2") (windows restoredViews))
+  let hiddenBody=fromJust (conversationBodySnapshot "" restoredViews)
+      hiddenMetadata=fromJust (W.preparedWindowSemantics hiddenBody)
+  check "hidden recovery placeholder admits the readable passive transcript policy"
+    (W.preparedWindowDisclosure hiddenBody==W.ReadableWindow &&
+     V.null (W.textLinks hiddenMetadata) && V.null (W.textShellBlocks hiddenMetadata) &&
+     W.textLinkBase hiddenMetadata==Nothing)
   let closedRecovered=closeActive restoredViews
   check "closing a recovered frame retains its catalogue without editor bindings"
     (null (windows closedRecovered) && M.null (pluginWindows closedRecovered) &&

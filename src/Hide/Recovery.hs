@@ -175,7 +175,10 @@ readCheckpoint path baseline=do
         rectangle:_->restoreLogicalViewport (videoMode desktop/=Nothing) (wideSectionTitles desktop)
           (max 1 (width rectangle-2)) (max 1 (height rectangle-2)) anchored logical
             >>= either (ioError . userError . T.unpack) pure
-        []->W.prepareTextWindow name ""
+        []->W.prepareSemanticTextWindow name []
+          (W.TextSemantics (W.CopyMessages (if T.null target then W.UserBotAttribution else W.NoAttribution))
+            Nothing V.empty V.empty W.ReadableWindow V.empty V.empty V.empty)
+            >>= either (ioError . userError . T.unpack) pure
       body<-if not (null rectangles)
         then (\(reference,_)->InstalledBody reference Nothing) <$> install scope prepared
         else pure (InertBody prepared)
