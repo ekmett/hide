@@ -268,7 +268,12 @@ runWindow backend scale effects tick initial = do
     if captureOnly then systemTheme sized >>= draw font else systemTheme sized >>= tick >>= loop font Nothing
   where
     systemTheme d = do value<-c_system_dark; pure d {systemDark=value/=0}
-    loop font previous d = do
+    loop font previous pending = do
+      d<-case clipboardExport pending of
+        (serial,Just text)->do
+          utf8 text c_set_clipboard
+          pure pending {clipboardExport=(serial,Nothing)}
+        _->pure pending
       key<-renderKey d
       when (fmap (\(_,old,_)->old) previous /= Just key) $ do
         when (fmap (\(_,_,catalogue)->catalogue) previous/=Just (contributedMenus d)) (nativeMenusFor d)
@@ -356,8 +361,11 @@ runWindow backend scale effects tick initial = do
       | otherwise = clipboardResult (copies ev d) d (handleEvent ev d)
     dispatchKey ev d = pure (handleEvent ev d)
     paste d = do bytes <- c_clipboard >>= BS.packCString; pure (handleEvent (V.EvPaste bytes) d)
-    clipboardResult force before result@(after,_) = do
-      when (force || clipboard before /= clipboard after) (utf8 (clipboard after) c_set_clipboard)
+    clipboardResult force before result@(after,requests) = do
+      let deferred CopyConversation{}=True
+          deferred _=False
+      when (not (any deferred requests) && (force || clipboard before /= clipboard after))
+        (utf8 (clipboard after) c_set_clipboard)
       pure result
     copyClick x y d = case contextMenu d of
       Just (r,chosen) | inside r x y, y>top r, y<top r+height r-1 ->

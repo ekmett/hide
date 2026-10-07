@@ -66,7 +66,14 @@ runWeb scale effects tick initial = do
         WS.withPingThread conn 15 (pure ()) $ withAsync (finally receive (atomically (void (tryPutTMVar disconnected ())))) $ \_ ->
           readIORef state >>= loop pasteReads conn send queue disconnected Nothing
       loop pasteReads conn send queue disconnected previous d = do
-        current<-tick d
+        pending<-tick d
+        -- Retain the pending intent if socket delivery fails before retirement.
+        writeIORef state pending
+        current<-case clipboardExport pending of
+          (serial,Just text)->do
+            send (object ["type" .= ("copy"::T.Text),"text" .= text])
+            pure pending {clipboardExport=(serial,Nothing)}
+          _->pure pending
         refreshRequestedPaste pasteReads current
         cwd<-getCurrentDirectory
         writeIORef state current

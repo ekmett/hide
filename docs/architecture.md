@@ -110,6 +110,14 @@ Grapheme segmentation and cell widths use utf8proc. Bold and italic affect the
 atlas tile; underline and strikethrough are cell paint. These traits do not
 change grapheme advances.
 
+Styled text borrows same-style `Text` runs. Finalized rows use the same
+`ConsChars`/`ConsSigil` representation as source rendering: ordinary text stays
+in runs, while exceptional graphemes retain their complete source fragment and
+display width. A style boundary cannot split a grapheme. Layout keeps ordinary
+runs intact and computes positions within them; only visible wide or scripted
+glyphs need individual paint operations. Copy and privacy coordinates remain
+source coordinates, independent of wrapping and decorative cells.
+
 Prepared styled rows can use `ScriptStyle Superscript` or `ScriptStyle Subscript`.
 A scripted grapheme occupies one cell and keeps its complete source text for
 copying and hit testing. Graphical backends scale the normal atlas tile to half
