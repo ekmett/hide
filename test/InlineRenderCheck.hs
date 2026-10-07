@@ -86,7 +86,7 @@ checks=do
   let hint=colored {buffers=M.adjust (\doc->doc {documentLabel=Just "Autocomplete"}) (sourceFixtureBuffer w) (buffers colored),
         autocompleteACPEnabled=True,autocompleteDraft=newBuffer "    hint",autocompleteSelection=Selection 2 2,
         autocompleteFocused=True,inlinePreview=Nothing,
-        conversationViews=M.singleton "" (ConversationView (InertBody chatBody) "Chat" ref Nothing Nothing FollowEnd 0 0 Nothing Nothing Nothing),
+        conversationViews=M.singleton "" (ConversationView (InertBody chatBody) "Chat" ref Nothing Nothing FollowEnd 0 0 Nothing Nothing Nothing Nothing),
         editorDrafts=M.singleton ref (EditorDraft (newBuffer "CHAT_ONLY") (Selection 0 0) True Nothing)}
       hintRect=autocompleteComposerRect hint w
   check "ACP hint composer retains plain indentation and does not render the chat draft"
