@@ -258,6 +258,7 @@ snapshotBufferStorage b=BufferStorage (capture (bufferLines b)) (capture (baseli
   where
     capture=map captureLine . toList
     captureLine line=StoredLine (origin (lineOrigin line)) (case pieces line of
+      []->[(lineHash line,T.empty)]
       [text]->[(lineHash line,text)]
       texts->[(T.foldl' (\h c->h*16777619+fromIntegral (ord c)+1) 0 text,text) | text<-texts])
     pieces (Line _ _ _ _ _ text)=[text]

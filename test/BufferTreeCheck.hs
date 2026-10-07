@@ -43,8 +43,9 @@ storageChecks=do
   let recover b=either (error . T.unpack) pure (restoreBufferStorage (fmap snd (snapshotBufferStorage b)))
       ordinary=replaceSelection (Selection 2 5) "界\n" (newBuffer "a\r\nb\nc\n")
       bytes=replaceSelection (Selection 1 3) "\255\n" (newByteBuffer (BS.pack [0,128,255,10,13,10]))
+      emptied=replaceSelection (Selection 0 1024) "" (newBuffer (T.replicate 1024 "a"))
   switched<-either (error . T.unpack) pure (toggleByteMode (newBuffer "λ中\n"))
-  forM_ [ordinary,undo ordinary,markSaved ordinary,bytes,switched] $ \buffer->do
+  forM_ [ordinary,undo ordinary,markSaved ordinary,bytes,switched,emptied] $ \buffer->do
     restored<-recover buffer
     check "raw storage preserves bytes, saved mode and provenance"
       (bufferBytes restored==bufferBytes buffer && saved restored==saved buffer &&
