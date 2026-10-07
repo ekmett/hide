@@ -512,8 +512,9 @@ prepareRenderedBody inert key input logical=case demandedRows key input logical 
             | (row,PendingRow _ _ spans _ _)<-zip receipts pending,(a,z,name,values)<-spans]
           links=concat [projectRanges row mapped (a,z) (\lo hi->(lo,hi,url))
             | (row,PendingRow _ mapped _ ranges _)<-zip receipts pending,(a,z,url)<-ranges]
-          shells=[(bodyRowPaintStart row,bodyRowPaintEnd row,dialect,source)
-            | (row,PendingRow _ _ _ _ (Just (dialect,source)))<-zip receipts pending]
+          shells=[(bodyRowPaintStart first,bodyRowPaintEnd (fst (last grouped)),dialect,source)
+            | grouped<-List.groupBy sameShellBlock (zip receipts pending)
+            , (first,PendingRow _ _ _ _ (Just (dialect,source))):_<-[grouped]]
           questionToken=case bodyQuestion input of Just (QuestionSchema token _ _)->Just token; Nothing->Nothing
           projected=do
             QuestionSchema token _ choices<-bodyQuestion input
@@ -558,6 +559,10 @@ prepareRenderedBody inert key input logical=case demandedRows key input logical 
       [build (bodyRowPaintStart row+lo+(max a start-start)*(hi-lo) `div` max 1 (end-start))
         (bodyRowPaintStart row+lo+((min z end-start)*(hi-lo)+end-start-1) `div` max 1 (end-start))
       | (lo,hi,start,end)<-V.toList (mappedSourceRanges mapped),end>start,a<end,z>start]
+    -- The parser owns the payload; contiguous demanded rows of its exact
+    -- block share one visible action span without comparing source text.
+    sameShellBlock (_,PendingRow (Just a) _ _ _ (Just _)) (_,PendingRow (Just z) _ _ _ (Just _))=sameBlock a z
+    sameShellBlock _ _=False
     listAt index rows=case drop index rows of first:_->Just first; _->Nothing
 
 -- Locate by item/block metadata, not accumulated prior row heights. A missing
@@ -764,7 +769,7 @@ questionPendingRows key (QuestionSchema token prompt choices)=promptRows++choice
     blocks=markdownBlocks parsed
     promptRows=concat [
       [PendingRow (Just (QuestionPoint token number (mappedRowStart row)))
-        (if columns<6 then recolorMapped (-2) False row else bubbleMapped (displayWide key) (displayGraphical key) columns (min (max 1 (columns-5)) (markdownIntrinsicWidth parsed)) (-2) False (number==0 && index==0) (number==length blocks-1 && null rest) row) [] [] Nothing
+        (if columns<6 then recolorMapped (-2) False row else bubbleMapped (displayWide key) (displayGraphical key) columns (min (max 1 (columns-5)) (markdownIntrinsicWidth parsed)) (-2) False (number==0 && index==0) (number==length blocks-1 && null rest) row) [] (markdownBlockLinks block) (markdownBlockShell block)
       | (index,(row,rest))<-zip [0::Int ..] (withTail (renderMarkdownBlock (displayWide key) (max 1 (columns-5)) block))]
       | (number,block)<-zip [0..] blocks]
     choiceRows=concat [[make (-3-index) offset text (Just ("question-choice",[shownToken,T.pack (show index)]))
