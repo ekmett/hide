@@ -455,7 +455,7 @@ styledSigils runs
           (# byte,chars,_,_,_,_,next #)->
             let original=TU.takeWord8 byte text
                 following=TU.dropWord8 byte text
-            in ConsChars original style (borrowed (col+chars) next ((following,style):rest))
+            in ordinaryRun original style (borrowed (col+chars) next ((following,style):rest))
       | otherwise=
           let bridge=styledContents (fst (splitStyledAt 33 remaining))
           in case sourceItemStep bridge 0 cursor of
@@ -468,9 +468,12 @@ styledSigils runs
                   following=snd (splitStyledAt chars remaining)
                   ordinary=not overflow && chars==1 && natural==1 &&
                     T.all (\c->c>=' ' && c/='\DEL') original
-              in if ordinary then ConsChars original style (borrowed (col+advance) next following)
+              in if ordinary then ordinaryRun original style (borrowed (col+advance) next following)
                 else ConsSigil glyph style advance (borrowed (col+advance) next following)
       where count=T.length (T.takeWhile (\c->c>=' ' && c<='~') text)
+    ordinaryRun text style (ConsChars next other rest)
+      | style==other,Just joined<-joinAdjacent text next=ConsChars joined style rest
+    ordinaryRun text style rest=ConsChars text style rest
     -- Captured overflow fragments own exact original extents, including a
     -- fragment beginning inside a freshly segmented padding/ZWJ item.
     marked=build 0 0 text (presentationItems text runs) ranges

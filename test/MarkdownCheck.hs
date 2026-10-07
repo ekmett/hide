@@ -66,6 +66,13 @@ checks = do
   check "empty shell block metadata is retained for clear execution errors"
     (map (\(_,_,_,body)->body) (snd (renderMarkdownWithShellBlocks 40 "```sh\n```"))==[""])
   check "empty input" (null (renderMarkdown 80 ""))
+  let logical source=T.concat (map markdownBlockText (markdownBlocks (parseMarkdown source)))
+  check "logical copy retains hard breaks and block separation without list furniture"
+    (logical "a **b**\nc  \nd\n\n- one\n- two\n\n```sh\n\tx\n```"=="a b c\nd\n\none\ntwo\n\n\tx\n")
+  let linkedTable=markdownBlocks (parseMarkdown "| H | V |\n|---|---|\n| [alpha](target.md) | 42 |")
+  check "table logical copy and link offsets share the parser's canonical cells"
+    (T.concat (map markdownBlockText linkedTable)=="H\tV\nalpha\t42" &&
+      concatMap markdownBlockLinks linkedTable==[(4,9,"target.md")])
   let paragraph=T.replicate 2000 "Ordinary message with some **bold** and code `abc`.\n"
       long=renderMarkdown 73 paragraph
   rendered<-timeout 2000000 (evaluate (styledLength long))
