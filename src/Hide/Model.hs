@@ -3394,6 +3394,8 @@ unboundKey key mods d
     not (bindingPlatform d==Bindings.TerminalPlatform && V.MMeta `elem` mods),
     key `elem` [V.KUp,V.KDown,V.KHome,V.KEnd,V.KPageUp,V.KPageDown,V.KLeft,V.KRight,V.KBS,V.KDel] = (d,[])
 unboundKey key mods d | activeMarkdown d, dialog d==Nothing,maybe False (windowFocused d) (activeWindow d) = (markdownKey key mods d,[])
+unboundKey key mods d | dialog d==Nothing,activeEditorMount d/=Nothing,maybe False (windowFocused d) (activeWindow d),
+  Just result<-composerEvent (V.EvKey key mods) d = result
 unboundKey key mods d | Just _<-activePluginWindow d, dialog d==Nothing,maybe False (windowFocused d) (activeWindow d) = (pluginKey key mods d,[])
 unboundKey key mods d = case bindingContext d of
   Just Bindings.DialogKeys | Just dg<-dialog d -> dialogEvent (V.EvKey key mods) dg d
