@@ -643,15 +643,22 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ withTextPresentation $ 
       (asked,reply)<-questionTool runtime savedDraft (object ["question" .= ("Question presentation identity"::T.Text),"choices" .= (["First","Second"]::[T.Text])])
       _<-questionId reply
       let q=fromMaybe (error "Missing presentation question") (chatQuestion asked)
+          bodyFocused=(setComposerInput (composerBuffer asked) (composerSelection asked) False asked) {chatQuestion=Just q {questionFocused=False}}
+          endSettled d=case (M.lookup "" (conversationViews d),bodyViewportFor d "") of
+            (Just view,Just viewport)->conversationAnchor view==FollowEnd && conversationRowShift view==0 &&
+              conversationCaretIntent view==Nothing && viewportAnchor viewport==FollowEnd
+            _->False
+      ended<-await runtime "settled question viewport" endSettled (fst (runCommand (CursorDocumentEnd False) bodyFocused))
+      let focused=setComposerInput (composerBuffer ended) (composerSelection ended) True ended
           answer=(newBuffer "kept answer") {saved=error "Question presentation forced saved answer",
             undoStack=error "Question presentation forced answer Undo",redoStack=error "Question presentation forced answer Redo"}
-          poisoned=asked {chatQuestion=Just q {questionBuffer=answer}}
+          poisoned=focused {chatQuestion=Just q {questionBuffer=answer}}
           questionBody d=targetBody "" d
       first<-tickConversation runtime poisoned
       let originalIdentity=questionBody first
       unchanged<-tickConversation runtime first
       let unchangedIdentity=questionBody unchanged
-      check ("unchanged question redraw never compares retained answer history: "++show (originalIdentity==unchangedIdentity,map scrollRow (windows first),map scrollRow (windows unchanged),fmap (\v->(conversationAnchor v,conversationRowShift v)) (M.lookup "" (conversationViews first)),fmap (\v->(conversationAnchor v,conversationRowShift v)) (M.lookup "" (conversationViews unchanged))))
+      check "unchanged question redraw never compares retained answer history"
         (originalIdentity==unchangedIdentity && map scrollRow (windows first)==map scrollRow (windows unchanged))
       let replacement=newBuffer "fresh answer"
           replaced=unchanged {chatQuestion=Just q {questionBuffer=replacement}}
