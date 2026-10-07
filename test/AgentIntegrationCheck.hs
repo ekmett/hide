@@ -6,6 +6,7 @@ import Control.Exception (bracket)
 import Control.Monad (unless)
 import Data.Aeson
 import Data.Aeson.Types (parseMaybe)
+import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -15,14 +16,12 @@ import System.FilePath ((</>))
 import System.IO (hClose,openTempFile)
 import System.Timeout (timeout)
 import Hide.Conversation
-import Hide.TextPresentation (TextPresentation,withTextPresentation,tickTextPresentation)
+import Hide.TextPresentation (TextPresentation,withTextPresentation,textPresentationEffects,tickTextPresentation)
 import qualified Hide.Consoles as C
 import qualified Hide.AgentRuntime as AR
 import qualified Hide.AgentHub as AH
 import Hide.GuestAccess (guestKeyboardAllowed,guestCommandAllowed,sanitizedBuffer,sanitizedPreparedContent,guestTransitionAllowed)
 import qualified Data.Map.Strict as M
-import qualified Data.Vector as V
-import Hide.Syntax (Style(..))
 import Data.IORef
 import Hide.Buffer (contents,newBuffer,contentSlice,contentLength,Selection(..))
 import Hide.AgentSidebarTypes (AgentSidebarRequest(ShowAgent))
@@ -32,8 +31,6 @@ import Hide.ScreenCapture (capture)
 import Hide.Session
 import Hide.Model
 import qualified Hide.Plugin.Window as W
-import qualified Hide.Plugin.Menu as P
-import Hide.PluginWindowHost (adoptWindowUpdate)
 
 checks :: IO ()
 checks=bracket temporary removePathForcibly $ \root ->
@@ -252,23 +249,49 @@ checks=bracket temporary removePathForcibly $ \root ->
       child<-AH.registerAgent hub "Recovered child" root fakeDriver >>= right
       AH.recordAgentEvent hub child "output" (object ["text" .= ("older Hub history"::T.Text)])
       (_,selected)<-conversationEffects conversation (\d _->pure (False,d)) (initialDesktop (80,25)) [AgentSidebarAction (ShowAgent child)]
-      let view=conversationViews selected M.! AH.agentIdText child
-      reference<-maybe (fail "missing child body ref") pure (conversationBodyRef view)
-      body<-W.prepareSemanticTextWindow "Recovered child" [(c,Plain) | c<-"newer Desktop child transcript"]
-        (W.TextSemantics W.CopyText Nothing V.empty V.empty W.ReadableWindow V.empty V.empty V.empty) >>= right
-      publication<-W.refreshTextWindow reference body >>= maybe (fail "child fixture publication expired") pure
-      installed<-adoptWindowUpdate P.HumanMenu publication selected
-      let newer=(setComposerInput (newBuffer "recovered draft") (Selection 0 0) True installed) {agentReplying=True,agentQueued=5}
+      let awaitOlder current=do
+            next<-tickBody presentation conversation current
+            if "older Hub history" `T.isInfixOf` activeText next then pure next else threadDelay 10000 >> awaitOlder next
+      older<-timeout 5000000 (awaitOlder selected) >>= maybe (fail "Original child body preparation timed out") pure
+      let newer=(setComposerInput (newBuffer "recovered draft") (Selection 0 0) True older) {agentReplying=True,agentQueued=5}
       writeCheckpoint recoveredPath newer >>= right
+      -- The independent durable source enters through the real schema5 trust
+      -- boundary. A painted refresh cannot create logical transcript authority.
+      encoded<-BL.readFile recoveredPath
+      value<-either error pure (eitherDecode encoded)
+      let text="newer Desktop child transcript"::T.Text
+          item=object ["id" .= (0::Int),"revision" .= (0::Int),"content" .=
+            object ["kind" .= ("reply"::T.Text),"role" .= ("Agent"::T.Text),"markdown" .= text]]
+          replaceView (Object fields)
+            | KM.lookup "target" fields==Just (toJSON (AH.agentIdText child))=
+                Object (KM.insert "body" (object ["items" .= [item]])
+                  (KM.insert "anchor" Null
+                    (KM.insert "replySelection" (toJSON (toJSON (0::Int,0::Int,0::Int),toJSON (0::Int,0::Int,T.length text))) fields)))
+          replaceView other=other
+          input=case value of
+            Object fields | Just (Array entries)<-KM.lookup "conversationViews" fields->
+              Object (KM.insert "conversationViews" (Array (fmap replaceView entries)) fields)
+            _->error "Missing fixture conversation views"
+      BL.writeFile recoveredPath (encode input)
+      acquired<-readCheckpoint recoveredPath (initialDesktop (80,25)) >>= right
+      writeCheckpoint recoveredPath acquired >>= right
       AR.activateAgentCheckpoint agents
       AR.checkpointAgents agents >>= right
       pure child
     environment "THC_EDIT_SESSION" (Just (sessionId recoveryRecord)) $ C.withConsoles $ \consoles -> withConversationAt consoles root $ \conversation -> withTextPresentation $ \presentation->do
       recovered<-readCheckpoint recoveredPath (initialDesktop (80,25)) >>= right
       retained<-tickBody presentation conversation recovered
-      ensure "stale recovered Hub history cannot overwrite newer Desktop transcript" (activeText retained=="newer Desktop child transcript" && contents (composerBuffer retained)=="recovered draft")
+      ensure "stale recovered Hub history cannot overwrite newer logical transcript"
+        ("newer Desktop child transcript" `T.isInfixOf` activeText retained && not ("older Hub history" `T.isInfixOf` activeText retained) && contents (composerBuffer retained)=="recovered draft")
       ensure "recovered child projects current status while retaining text" (not (agentReplying retained) && agentQueued retained==0)
-      (_,copied)<-conversationEffects conversation (\d _->pure (False,d)) retained [AgentAction "copy" []]
+      let (copyRequested,copyEffects)=runCommand Copy retained
+      ensure "recovered selection uses the actual logical copy worker" (case copyEffects of [CopyConversation{}]->True; _->False)
+      (_,copying)<-textPresentationEffects presentation
+        (conversationEffects conversation (\d _->pure (False,d))) copyRequested copyEffects
+      let awaitCopy current=do
+            next<-tickBody presentation conversation current
+            if clipboard next=="newer Desktop child transcript" then pure next else threadDelay 10000 >> awaitCopy next
+      copied<-timeout 5000000 (awaitCopy copying) >>= maybe (fail "Recovered logical copy timed out") pure
       ensure "recovered transcript remains copyable before reconnect" (clipboard copied=="newer Desktop child transcript")
       let hub=AR.agentHub (conversationAgents conversation)
       AH.updateExternalAgent hub recoveredChild fakeDriver >>= right
