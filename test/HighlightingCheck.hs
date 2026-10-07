@@ -141,7 +141,7 @@ checks = withEditorTextFixture "" "reply" (initialDesktop (100,35)) $ \chatBase-
         index<-atomicModifyIORef' calls (\old->(old++[text],length old))
         if index==0 then putMVar firstStarted () >> takeMVar releaseFirst
                     else putMVar nextStarted () >> takeMVar releaseNext
-        pure (zipWith (\i c->(c,if i<3 then Keyword else Plain)) [0::Int ..] (T.unpack text))
+        pure (zipWith (\i c->(T.singleton c,if i<3 then Keyword else Plain)) [0::Int ..] (T.unpack text))
   withHighlightingUsing (pure ()) tokenizer $ \worker -> do
     first<-tickHighlighting worker initial
     bounded "first tokenizer starts" (takeMVar firstStarted)
@@ -169,7 +169,7 @@ checks = withEditorTextFixture "" "reply" (initialDesktop (100,35)) $ \chatBase-
   releaseInitialization<-newEmptyMVar
   initializedCalls<-newIORef ([]::[T.Text])
   withHighlightingUsing (putMVar initializing () >> takeMVar releaseInitialization)
-    (\_ text->modifyIORef' initializedCalls (++[text]) >> pure (map (,Plain) (T.unpack text))) $ \worker -> do
+    (\_ text->modifyIORef' initializedCalls (++[text]) >> pure [(text,Plain)]) $ \worker -> do
       bounded "catalog initialization starts on its worker" (takeMVar initializing)
       queued<-bounded "source updates remain responsive during catalog initialization" $ foldM
         (\d n->tickHighlighting worker (replace ("newest "<>T.pack (show n)) d)) initial [1::Int ..20]
