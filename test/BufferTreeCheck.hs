@@ -83,7 +83,8 @@ storageChecks=do
       borrowed=case storageCurrent short of StoredLine _ [text]:_->text; _->error "missing raw physical line"
   shortRestored<-either (error . T.unpack) pure (restoreBufferStorage short)
   originalPayload<-evaluate borrowed
-  restoredPayload<-evaluate (sourceLineRawText (contentSourceLineAt (bufferContent shortRestored) 0))
+  restoredPayload<-evaluate (case storageCurrent (fmap snd (snapshotBufferStorage shortRestored)) of
+    StoredLine _ [text]:_->text; _->error "missing restored raw physical line")
   let sameSlice (TI.Text (TA.ByteArray first) start size) (TI.Text (TA.ByteArray second) offset count)=
         isTrue# (sameByteArray# first second) && start==offset && size==count
   check "short terminated lines retain the borrowed string-table payload" (sameSlice originalPayload restoredPayload)
