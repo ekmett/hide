@@ -280,6 +280,7 @@ data ConversationView = ConversationView
   , conversationAnchor :: !BodyAnchor, conversationRowShift :: !Int, conversationScrollColumn :: !Int
   , conversationReplySelection :: !(Maybe BodySelection)
   , conversationLogical :: Maybe LogicalBody
+  , conversationCaretIntent :: Maybe (Bool,Maybe BodyPoint)
   } deriving (Eq,Show)
 
 -- One editable state per opaque widget, including hidden conversation targets.
@@ -2034,10 +2035,18 @@ bodyViewportFor d target=do
 
 projectConversationSelection :: ConversationView -> Maybe BodyViewport -> Selection
 projectConversationSelection view captured=case (conversationReplySelection view,captured) of
-  (Just (BodySelection a z),Just viewport)->case (viewportOffset viewport a,viewportOffset viewport z) of
-    (Just start,Just end)->Selection start end
-    _->Selection 0 0
+  (Just (BodySelection a z),Just viewport)->Selection (clipped viewport a) (clipped viewport z)
   _->Selection 0 0
+  where
+    -- Copy retains the exact logical endpoints. Keyboard movement can use the
+    -- nearest currently visible endpoint instead of fabricating paint offset0
+    -- when its extension anchor is offscreen. Exact paint ranges are separate.
+    clipped viewport point=fromMaybe (boundary viewport point) (viewportOffset viewport point)
+    boundary viewport point=case [(bodyRowPaintStart row,first) | row<-Vec.toList (viewportRows viewport),Just first<-[bodyRowPoint row],first>=point] of
+      (offset,_):_->offset
+      []->maybe 0 bodyRowPaintEnd (lastMaybe (Vec.toList (viewportRows viewport)))
+    lastMaybe []=Nothing
+    lastMaybe rows=Just (last rows)
 
 -- | Bounded paint intervals selected in logical source space. Repeated table
 -- header mappings may produce disjoint intervals; furniture has no interval.
@@ -2068,6 +2077,37 @@ conversationPaintSelection d window=do
     sameSource _ _=False
     scalar (BodyPoint _ _ value)=value
     scalar (QuestionPoint _ _ value)=value
+
+-- A pending Home/End caret uses the already-demanded viewport receipt; source
+-- parsing is never needed on input. Its optional anchor preserves Shift range.
+settleConversationCaret :: Maybe BodyViewport -> ConversationView -> ConversationView
+settleConversationCaret captured view=case (conversationCaretIntent view,captured) of
+  (Just (end,extended),Just viewport) | not end || viewportAtEnd viewport->case points viewport of
+    []->view {conversationCaretIntent=Nothing}
+    entries->let (point,finish)=if end then last entries else head entries
+                 chosen=if end then ending point finish else point
+             in view {conversationCaretIntent=Nothing,conversationReplySelection=Just (BodySelection (fromMaybe chosen extended) chosen)}
+  _->view
+  where
+    points viewport=[(point,bodyRowLogicalEnd row) | row<-Vec.toList (viewportRows viewport),Just point<-[bodyRowPoint row]]
+    ending (BodyPoint ident block _) scalar=BodyPoint ident block scalar
+    ending (QuestionPoint token block _) scalar=QuestionPoint token block scalar
+
+conversationEdge :: Bool -> Bool -> Desktop -> Desktop
+conversationEdge end extend d=case activeWindow d of
+  Just window | Just target<-conversationTargetFor d window,Just view<-M.lookup target (conversationViews d),
+    Just logical<-conversationLogical view,not (Vec.null (logicalBodyItems logical))->
+      let first=recordId (logicalItemRecord (Vec.head (logicalBodyItems logical)))
+          requested=if end then FollowEnd else At (BodyPoint first 0 0)
+          extended=if extend then case conversationCopySelection d target window of Just (BodySelection anchor _)->Just anchor; _->Nothing else Nothing
+          previous=bodyViewportFor d target
+          ready=case previous of
+            Just viewport | end && viewportAtEnd viewport->Just viewport
+            Just viewport | not end,Just actual<-viewportPoint viewport 0,actual==BodyPoint first 0 0->Just viewport
+            _->Nothing
+          next=settleConversationCaret ready view {conversationAnchor=requested,conversationRowShift=0,conversationCaretIntent=Just (end,extended)}
+      in (modifyActive (\w->w {selection=projectConversationSelection next previous}) d) {conversationViews=M.insert target next (conversationViews d)}
+  _->d
 
 rememberConversationView :: Desktop -> Desktop
 rememberConversationView d=case M.lookup (conversationTarget d) (conversationViews d) of
@@ -3181,7 +3221,11 @@ scrollbarThumb len limit position = 1+min limit (max 0 position)*max 0 (len-3) `
 
 changeScroll :: Bool -> Int -> Desktop -> Desktop
 changeScroll True delta d | Just window<-activeWindow d,Just target<-conversationTargetFor d window =
-  d {conversationViews=M.adjust (\view->view {conversationRowShift=conversationRowShift view+delta}) target (conversationViews d)}
+  d {conversationViews=M.adjust (\view->view {conversationRowShift=conversationRowShift view+delta,conversationCaretIntent=Nothing}) target (conversationViews d)}
+changeScroll False delta d | Just window<-activeWindow d,Just target<-conversationTargetFor d window,
+  Just (_,limit)<-windowScrollbar d False window=
+    let column=max 0 (min limit (scrollColumn window+delta))
+    in (modifyActive (\w->w {scrollColumn=column}) d) {conversationViews=M.adjust (\view->view {conversationScrollColumn=column}) target (conversationViews d)}
 changeScroll vertical delta d | activeMarkdown d,Just w<-activeWindow d =
   modifyActive (modifyDisplayedWindow (\shown->if vertical then shown {scrollRow=max 0 (min (markdownScrollLimit d True w) (scrollRow shown+delta))}
     else shown {scrollColumn=max 0 (min (markdownScrollLimit d False w) (scrollColumn shown+delta))})) d
@@ -3221,7 +3265,7 @@ scrollTrack True x y d | Just window<-activeWindow d,Just target<-conversationTa
         scaled=Vec.length slots*fraction
         index=min (Vec.length slots-1) (scaled `div` 1000)
         point=if fraction>=1000 then FollowEnd else WithinItem (recordId (logicalItemRecord (slots Vec.! index))) (scaled `mod` 1000)
-    in if Vec.null slots then d else d {conversationViews=M.adjust (\view->view {conversationAnchor=point,conversationRowShift=0}) target (conversationViews d)}
+    in if Vec.null slots then d else d {conversationViews=M.adjust (\view->view {conversationAnchor=point,conversationRowShift=0,conversationCaretIntent=Nothing}) target (conversationViews d)}
 scrollTrack vertical x y d = case activeWindow d of
   Just original | Just (r,limit)<-windowScrollbar d vertical original -> let { w=displayWindow original
                          ; len=if vertical then height r else width r
@@ -3306,7 +3350,7 @@ pluginMoveTo extend requested d | Just view<-activePluginWindow d, Just w<-activ
     Just target | Just viewport<-bodyViewportFor d target,Just point<-viewportPoint viewport pos->
       let original=do view<-M.lookup target (conversationViews d); BodySelection first _<-conversationReplySelection view; pure first
           chosen=BodySelection (if extend then fromMaybe point original else point) point
-      in moved {conversationViews=M.adjust (\v->v {conversationReplySelection=Just chosen}) target (conversationViews moved)}
+      in moved {conversationViews=M.adjust (\v->v {conversationReplySelection=Just chosen,conversationCaretIntent=Nothing}) target (conversationViews moved)}
     _->moved
 pluginMoveTo _ _ d=d
 
@@ -3680,6 +3724,7 @@ rowEdge end extend d
 -- | Document edges use measured lengths in their owning source or prepared text.
 documentEdge :: Bool -> Bool -> Desktop -> Desktop
 documentEdge end extend d
+  | activeConversation d=conversationEdge end extend d
   | Just w<-activeWindow d,Just (rows,_,_,False)<-windowRows d w=selectWindowRow (if end then Vec.length rows-1 else 0) d
   | activeMarkdown d = case activeWindow d of
       Just w | Just (_,text,_)<-windowMarkdown d w ->markdownMoveTo extend (edge (contentLength text)) d

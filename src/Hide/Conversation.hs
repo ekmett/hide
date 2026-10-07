@@ -692,7 +692,7 @@ adoptConversationBodies runtime results desktop=do
                 let target=bodyTarget key
                     viewport=hostBodyViewport controls
                     adjust window | windowContent window/=PluginContent (bodyWindow key)=window
-                                  | otherwise=let view=M.lookup target (conversationViews next)
+                                  | otherwise=let view=M.lookup target retainedViews
                                               in window {scrollRow=maybe 0 viewportScroll viewport,
                                                 scrollColumn=maybe 0 conversationScrollColumn view,
                                                 selection=maybe (Selection 0 0) (\v->projectConversationSelection v viewport) view}
@@ -701,13 +701,15 @@ adoptConversationBodies runtime results desktop=do
                       BodyPoint ident _ _->logicalBodyItemIndex ident logical/=Nothing
                       QuestionPoint token _ _->bodyQuestionToken key==Just token
                     retain view=let same=maybe True ((==bodyProvider key).logicalBodyProvider) (conversationLogical view)
-                                in view {conversationLogical=Just logical,
+                                    preparedView=view {conversationLogical=Just logical,
                       conversationAnchor=maybe (conversationAnchor view) viewportAnchor viewport,conversationRowShift=0,
                       conversationBody=InstalledBody (bodyWindow key) (Just (BodyControlReceipt body (bodyColumns key) (bodyWide key) layout controls)),
                       conversationReplySelection=case conversationReplySelection view of
                         Just (BodySelection a z) | same && survives a && survives z->Just (BodySelection a z)
-                        _->Nothing}
-                    presented=next {conversationViews=M.adjust retain target (conversationViews next),windows=frames}
+                        _->Nothing,conversationCaretIntent=if same then conversationCaretIntent view else Nothing}
+                                in settleConversationCaret viewport preparedView
+                    retainedViews=M.adjust retain target (conversationViews next)
+                    presented=next {conversationViews=retainedViews,windows=frames}
                 let previousQuestion=do
                       view<-M.lookup target (conversationViews current)
                       InstalledBody _ (Just (BodyControlReceipt _ _ _ _ oldControls))<-pure (conversationBody view)
@@ -1703,7 +1705,7 @@ ensureEditorWithState opening state target name original=do
   draftRef<-maybe Editor.newDraftRef (pure.conversationDraftRef) found
   let initial=fromMaybe (EditorDraft (newBuffer "") (Selection 0 0) True Nothing) (M.lookup draftRef (editorDrafts original))
       body=fromMaybe (loadingBody state) (conversationBodySnapshot target original)
-      view=maybe (ConversationView (InertBody body) name draftRef Nothing Nothing FollowEnd 0 0 Nothing Nothing) (\old->old {conversationName=name}) found
+      view=maybe (ConversationView (InertBody body) name draftRef Nothing Nothing FollowEnd 0 0 Nothing Nothing Nothing) (\old->old {conversationName=name}) found
       seeded=original {conversationViews=M.insert target view (conversationViews original),editorDrafts=M.insert draftRef initial (editorDrafts original)}
       -- Live output may resume an existing recovered frame; only explicit Show
       -- creates a frame for a closed or hidden inert body.
