@@ -48,7 +48,9 @@ storageChecks=do
       bytes=replaceSelection (Selection 1 3) "\255\n" (newByteBuffer (BS.pack [0,128,255,10,13,10]))
       emptied=replaceSelection (Selection 0 1024) "" (newBuffer (T.replicate 1024 "a"))
   switched<-either (error . T.unpack) pure (toggleByteMode (newBuffer "λ中\n"))
-  forM_ [ordinary,undo ordinary,markSaved ordinary,bytes,switched,emptied] $ \buffer->do
+  multiByte<-either (error . T.unpack) pure (toggleByteMode
+    (markSaved (replaceSelection (Selection 256 257) "x" (newBuffer (T.replicate 1024 "a")))))
+  forM_ [ordinary,undo ordinary,markSaved ordinary,bytes,switched,emptied,multiByte] $ \buffer->do
     restored<-recover buffer
     check "raw storage preserves bytes, saved mode and provenance"
       (bufferBytes restored==bufferBytes buffer && saved restored==saved buffer &&
@@ -85,6 +87,12 @@ storageChecks=do
   let sameSlice (TI.Text (TA.ByteArray first) start size) (TI.Text (TA.ByteArray second) offset count)=
         isTrue# (sameByteArray# first second) && start==offset && size==count
   check "short terminated lines retain the borrowed string-table payload" (sameSlice originalPayload restoredPayload)
+  multiRestored<-recover multiByte
+  let rawPieces b=[text | StoredLine _ pieces<-storageCurrent (fmap snd (snapshotBufferStorage b)),text<-pieces]
+      originalPieces=rawPieces multiByte
+      restoredPieces=rawPieces multiRestored
+  check "a real ASCII mode toggle retains multiple borrowed raw pieces"
+    (length originalPieces>1 && length originalPieces==length restoredPieces && and (zipWith sameSlice originalPieces restoredPieces))
   let bad=base {storageCurrent=[StoredLine AddedLine ["replacement"]]}
   check "raw storage rejects forged provenance" (case restoreBufferStorage bad of Left _->True; _->False)
 

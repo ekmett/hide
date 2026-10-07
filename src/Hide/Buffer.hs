@@ -311,7 +311,7 @@ restoreBufferStorage s=do
       unless (origin/=Deleted || size>0) (Left "Invalid deleted buffer line")
       unless (not lineMode || all (T.all ((<=255).ord)) pieces) (Left "Invalid byte buffer representation")
       let line
-            | not lineMode && (length pieces>1 || TU.lengthWord8 (head pieces)>512)=
+            | length pieces>1 || (not lineMode && TU.lengthWord8 (head pieces)>512)=
                 let chunks=Chunks.chunksFromPieces pieces; raw=Chunks.chunksRawMeasure chunks
                 in ChunkedLine (Chunks.rawCharacters raw) (Chunks.chunksFlags chunks) origin
                   (Chunks.rawHash raw) (Chunks.rawFactor raw) chunks
