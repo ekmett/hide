@@ -431,7 +431,7 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ withTextPresentation $ 
         sourceDocument desktop=case [doc | doc<-M.elems (buffers desktop),fmap filePath (documentFile doc)==Just source] of
           doc:_ -> doc
           [] -> error "Source document missing"
-        focusSource desktop=case [w | w<-windows desktop,Just doc<-[M.lookup (sourceFixtureBuffer w) (buffers desktop)],fmap filePath (documentFile doc)==Just source] of
+        focusSource desktop=case [w | w<-windows desktop,Just bid<-[bufferId w],Just doc<-[M.lookup bid (buffers desktop)],fmap filePath (documentFile doc)==Just source] of
           w:_ -> focusWindow (windowId w) desktop
           [] -> error "Source window missing"
     check "token counts use compact rounded SI units"
