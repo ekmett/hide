@@ -1229,7 +1229,7 @@ runCommand Paste source | browserFrontend source = (source {menu=Nothing,context
 runCommand cmd source | dialogCommandAllowed cmd source = applyDialogCommand cmd source
 runCommand cmd source | problemsVisible source && problemsFocused source, cmd `elem` [Undo,Redo,Cut,Paste,SelectAll] = (source {menu=Nothing,contextMenu=Nothing},[])
 runCommand Copy source | dialog source==Nothing,activeConversation source,
-  not (composerActive source || questionActive source || activeAutocomplete source && autocompleteFocused source),Just window<-activeWindow source,
+  not (questionActive source || activeAutocomplete source && autocompleteFocused source),Just window<-activeWindow source,
   Just target<-conversationTargetFor source window,Just view<-M.lookup target (conversationViews source),
   Just logical<-conversationLogical view,Just chosen@(BodySelection a z)<-conversationCopySelection source target window,a/=z,
   Just reference<-conversationBodyRef view =
@@ -2372,7 +2372,7 @@ composerCommandWith code cmd d = case cmd of
     history f=let changed=f b; bounded=min (bufferLength changed) (caret sel)
                   row=fst (bufferLineColumn changed bounded)
                   p=if code then max bounded (bufferLineOffset changed row+fst (composerLine changed row)) else bounded
-              in (setComposerInput (changed) (Selection p p) (composerFocused d) (d))
+              in clearReplySelection (setComposerInput changed (Selection p p) (composerFocused d) d)
 
 composerEvent :: V.Event -> Desktop -> Maybe (Desktop,[Effect])
 composerEvent event d=composerEventWith (composerCodeInput d) event d
@@ -2404,7 +2404,7 @@ composerEventWith code (V.EvKey key mods) d
       V.KDel -> erase p (if ctrl then bufferWordRight b p else bufferNextCharacter b p)
       _ -> Nothing
   where
-    done next=Just (next,[])
+    done next=Just (clearReplySelection next,[])
     b=composerBuffer d; sel=composerSelection d; p=caret sel
     (r,column)=bufferLineColumn b p; ctrl=V.MCtrl `elem` mods
     start=bufferLineOffset b r; (marker,line)=if code then composerLine b r else (0,bufferLineAt b r)
@@ -3319,8 +3319,7 @@ selectAt extend x y d | Just view<-activePluginWindow d,Just w<-activeWindow d =
       row=max 0 (min (windowTextRows d w text-1) (y-top (pluginTextRect d w)+scrollRow w))
       col=max 0 (x-left (pluginTextRect d w)+scrollColumn w)
       pos=windowTextOffset d w text row col
-      bodyFocused=if windowHasEditor d w then setComposerInput (composerBuffer d) (composerSelection d) False d else d
-      focused=modifyActive (\v->v {rowsInteraction=fmap (\(RowsInteraction ident _)->RowsInteraction ident True) (rowsInteraction v)}) bodyFocused
+      focused=modifyActive (\v->v {rowsInteraction=fmap (\(RowsInteraction ident _)->RowsInteraction ident True) (rowsInteraction v)}) d
   in pluginMoveTo extend pos focused
 selectAt extend x y d = case activeWindow d of
   Nothing -> d

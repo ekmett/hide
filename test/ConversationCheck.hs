@@ -466,9 +466,7 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ withTextPresentation $ 
         let chat=draftAt (newBuffer "draft") (Selection 2 2) base
             positions ident=[(a,z) | (a,z,BubbleText j _ _)<-styleRanges cells,j==ident]
             a=fst (head (positions 0)); z=snd (last (positions 1))
-            selectedReply lo hi=modifyActive (\w -> w {selection=Selection lo hi})
-              (setComposerInput (composerBuffer chat) (composerSelection chat) False chat)
-            copiedReply lo hi=clipboard (fst (runCommand Copy (selectedReply lo hi)))
+            copiedReply=W.copyPreparedSelection preparedCopy
         check "single-bubble copies omit speaker names and decoration"
           (copiedReply a (a+3)=="one" && copiedReply (a+1) (a+3)=="ne")
         check "cross-bubble copies label speakers and omit timestamps and furniture"
@@ -478,10 +476,10 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ withTextPresentation $ 
             clickAt p state=let (row,col)=windowTextPosition chat w b p in fst (handleEvent (V.EvMouseDown (left (bounds w)+1+col) (top (bounds w)+1+row) V.BLeft []) state)
             dragging=clickAt z (clickAt a chat)
             released=fst (handleEvent (V.EvMouseUp 0 0 (Just V.BLeft)) dragging)
-            keyCopied=fst (handleEvent (V.EvKey (V.KChar 'c') [V.MCtrl]) released)
+            (start,end)=maybe (0,0) (ordered . selection) (activeWindow released)
         preservedDraft<-sameDraftRoot chat released
-        check "dragging across bubbles focuses body copy and preserves the draft caret"
-          (not (composerFocused released) && preservedDraft && composerSelection released==Selection 2 2 && clipboard keyCopied=="User: one\n\nBot: two")
+        check "dragging across bubbles preserves the draft caret and copies only message text"
+          (composerFocused released && preservedDraft && composerSelection released==Selection 2 2 && W.copyPreparedSelection preparedCopy start end=="User: one\n\nBot: two")
     let reply width outgoing=styledContents . renderReply False width outgoing
     check "short bubbles occupy one row with outward tails"
       (reply 30 True "hello"==T.replicate 22 " "<>"▐hello▛◤" && reply 30 False "hello"=="◥▜hello▌")
@@ -597,7 +595,7 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ withTextPresentation $ 
       check "wide heading resize preserves logical selection and mapped paint"
         (geometry reflowed && conversationReplySelection (retained reflowed)==logicalSelection &&
           maybe False (not . null) (activeWindow reflowed >>= conversationPaintSelection reflowed))
-      let draftCopy=draftAt (newBuffer "draft-copy") (Selection 0 10) reflowed
+      let draftCopy=fst (runCommand SelectAll (draftAt (newBuffer "draft-copy") (Selection 10 10) reflowed))
           (copiedDraft,draftEffects)=runCommand Copy draftCopy
           answerCopy=reflowed {chatQuestion=fmap (\q->q {questionFocused=True,questionChoice=Nothing,
             questionBuffer=newBuffer "answer-copy",questionSelection=Selection 0 11}) (chatQuestion reflowed)}
@@ -1085,11 +1083,37 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ withTextPresentation $ 
       check "conversation preserves Markdown styling" (any ((==BubbleText 1 False (BoldStyle Keyword)).snd) (conversationHighlight streamed))
       check "tool update merges pending record" (T.count "[completed] Local tool" (conversationText streamed)==1 && not ("[pending] Local tool" `T.isInfixOf` conversationText streamed))
       check "tool activity starts collapsed without raw arguments" (not ("rawInput" `T.isInfixOf` conversationText streamed) && "▸" `T.isInfixOf` conversationText streamed)
+      let selectedChat=draftAt (newBuffer "retained draft") (Selection 2 2) streamed
+          selectedWindow=fromMaybe (error "missing live copy frame") (activeWindow selectedChat)
+          selectedBody=targetBody "" selectedChat
+          liveContent=W.preparedWindowText selectedBody
+          interval ident=case [(a,z) | (a,z,message,_)<-Vec.toList (W.preparedWindowMessages selectedBody),message==ident] of
+            first:_->first
+            _->error "missing live copy bubble"
+          (from,_)=interval 0
+          (_,to)=interval 1
+          click pos state=let (row,col)=windowTextPosition selectedChat selectedWindow liveContent pos
+            in fst (handleEvent (V.EvMouseDown (left (bounds selectedWindow)+1+col) (top (bounds selectedWindow)+1+row) V.BLeft []) state)
+          dragged=fst (handleEvent (V.EvMouseUp 0 0 (Just V.BLeft)) (click to (click from selectedChat)))
+          (copying,copyRequests)=handleEvent (V.EvKey (V.KChar 'c') [V.MCtrl]) dragged
+      (_,queuedCopy)<-textPresentationEffects presentation fallback copying copyRequests
+      copiedChat<-await runtime "live transcript drag copy" ((=="User: stream\n\nBot: Hello").clipboard) queuedCopy
+      retainedDraft<-sameDraftRoot selectedChat copiedChat
+      check "live transcript Copy retains the cursor and exact draft while carrying canonical attribution"
+        (composerFocused copiedChat && retainedDraft && composerSelection copiedChat==Selection 2 2 &&
+         any (\effect->case effect of CopyConversation{}->True; _->False) copyRequests)
+      let draftActions=[fst (handleEvent (V.EvKey V.KRight [])) dragged,
+            fst (handleEvent (V.EvKey V.KLeft [V.MShift])) dragged,fst (runCommand Undo dragged),fst (runCommand SelectAll dragged)]
+      check "actual draft navigation, history and selection retire the transcript copy selection"
+        (all (\current->maybe False ((==Nothing).conversationReplySelection) (M.lookup "" (conversationViews current))) draftActions)
       let activityAction=case [values | (_,_,name,values)<-conversationActions streamed,name=="toggle-activity"] of values:_->values; _->error "missing activity action"
       expanded<-clickAction runtime "toggle-activity" streamed
       check "expanded activity retains original request and response JSON" (all (`T.isInfixOf` conversationText expanded) ["rawInput","rawOutput","original argument","exact response"])
       let selectedActivity=modifyActive (\w->w {selection=Selection 0 (maybe 0 (contentLength.W.preparedWindowText) (conversationBodySnapshot "" expanded))}) expanded
-          selectedTextOnly=clipboard (fst (runCommand Copy selectedActivity))
+          (preparingSelection,selectionEffects)=runCommand Copy selectedActivity
+      (_,selectionRequested)<-textPresentationEffects presentation fallback preparingSelection selectionEffects
+      selectionCopied<-await runtime "activity selection copy" (T.isInfixOf "Hello".clipboard) selectionRequested
+      let selectedTextOnly=clipboard selectionCopied
       check "conversation copies omit activity chevrons and raw JSON" (not ("rawInput" `T.isInfixOf` selectedTextOnly) && not ("▾" `T.isInfixOf` selectedTextOnly) && "Hello" `T.isInfixOf` selectedTextOnly)
       collapsed<-send runtime "toggle-activity" activityAction expanded >>= await runtime "adopted expansion" (\d->conversationBodySnapshot "" d/=conversationBodySnapshot "" expanded)
       check "activity collapses without changing prose" (conversationText collapsed==conversationText streamed)
@@ -1335,8 +1359,8 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ withTextPresentation $ 
       let (closing,closeEffects)=runCommand Close pendingClosed
           oldPaint=conversationBodySnapshot "" closing
           oldSource=M.lookup "" (conversationViews closing) >>= conversationSource
-          received current=do
-            next<-Conversation.tickConversation runtime current
+          received incomingView=do
+            next<-Conversation.tickConversation runtime incomingView
             if status next=="Agent: end_turn" then pure next else threadDelay 10000 >> received next
       closed<-snd <$> conversationEffects runtime fallback closing closeEffects
       receivedClosed<-timeout 8000000 (received closed) >>= maybe (error "Closed conversation source timed out") pure
