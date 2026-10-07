@@ -34,7 +34,7 @@ import qualified Data.Sequence as Seq
 import Data.Foldable (toList)
 import Hide.Buffer (BufferContent,newBuffer,bufferContent,columnOffset,displayColumn,lineColumn)
 import Hide.Markdown (Markdown,MarkdownBlock,parseMarkdown,markdownBlocks,markdownBlockText,markdownBlockLinks,markdownBlockShell,markdownIntrinsicWidth,renderMarkdownBlock,renderMarkdownWithShellBlocks)
-import Hide.Syntax (Style(..),StyledText,StyledRow(..),MappedStyledRow(..),Sigils(..),styledText,styledContents,styledLength,splitStyledText,styledRows,sigilsLength,sigilsText,mapSigilsStyle,bubbleTile,linkSpans)
+import Hide.Syntax (Style(..),StyledText,StyledRow(..),MappedStyledRow(..),Sigils(..),styledText,styledContents,styledLength,splitStyledText,styledRows,sigilsColumn,sigilsLength,sigilsText,mapSigilsStyle,bubbleTile,linkSpans)
 import Data.Text (Text)
 import Data.Set (Set)
 import System.Mem.StableName (StableName,makeStableName)
@@ -126,14 +126,14 @@ sameBlock _ _=False
 -- The record and its exact payload identity are strict metadata. Markdown is
 -- lazy: looking up an item or constructing this vector parses no prior items.
 data LogicalParsed = LogicalParsed !Markdown !(V.Vector MarkdownBlock) Int
-data LogicalItem = LogicalItem !Record !(StableName Record) (Maybe LogicalParsed) !Int (V.Vector [MappedStyledRow])
+data LogicalItem = LogicalItem !Record !(StableName Record) (Maybe LogicalParsed) !(Int,Bool) (V.Vector [MappedStyledRow])
 -- One width's lazy block rows belong to this immutable item. Replacing width
 -- drops the old derived roots without parsing or laying out untouched items.
 data LogicalBody = LogicalBody
   { logicalIdentity :: !Unique, logicalTarget :: !Text
   , logicalProvider :: !BodyProvider, logicalTranscript :: !(StableName [Record])
   , logicalSession :: !(Maybe Text), logicalQuestion :: !(Maybe QuestionSchema)
-  , logicalWidth :: !Int, logicalItems :: !(V.Vector LogicalItem)
+  , logicalWidth :: !(Int,Bool), logicalItems :: !(V.Vector LogicalItem)
   }
 instance Eq LogicalBody where a==b=logicalIdentity a==logicalIdentity b
 instance Show LogicalBody where show body="LogicalBody "++show (hashUnique (logicalIdentity body))
@@ -226,8 +226,8 @@ prepareLogicalBody key input previous=do
             _->M.empty
       items<-V.fromList <$> mapM (capture old) (bodyRecords input)
       evaluate (LogicalBody identity (bodyTarget key) (bodyProvider key) (bodyTranscript key)
-        (bodySession input) (bodyQuestion input) 0 items)
-  withLogicalWidth (max 1 (bodyColumns key-5)) body
+        (bodySession input) (bodyQuestion input) (0,False) items)
+  withLogicalWidth (bodyWide key) (max 1 (bodyColumns key-5)) body
   where
     questionTokenOf Nothing=Nothing
     questionTokenOf (Just (QuestionSchema token _ _))=Just token
@@ -237,25 +237,25 @@ prepareLogicalBody key input previous=do
         Just item@(LogicalItem _ same _ _ _) | same==payload->pure item
         _->evaluate (LogicalItem record payload (case recordContent record of
           Reply _ text->let parsed=parseMarkdown text in Just (LogicalParsed parsed (V.fromList (markdownBlocks parsed)) (markdownIntrinsicWidth parsed))
-          _->Nothing) 0 V.empty)
+          _->Nothing) (0,False) V.empty)
 
-withLogicalWidth :: Int -> LogicalBody -> IO LogicalBody
-withLogicalWidth columns body
-  | logicalWidth body==columns=pure body
+withLogicalWidth :: Bool -> Int -> LogicalBody -> IO LogicalBody
+withLogicalWidth wide columns body
+  | logicalWidth body==(columns,wide)=pure body
   | otherwise=do
       items<-V.mapM resize (logicalItems body)
-      evaluate body {logicalWidth=columns,logicalItems=items}
+      evaluate body {logicalWidth=(columns,wide),logicalItems=items}
   where
     resize item@(LogicalItem record payload parsed width _)
-      | width==columns=pure item
-      | otherwise=evaluate (LogicalItem record payload parsed columns (case parsed of
+      | width==(columns,wide)=pure item
+      | otherwise=evaluate (LogicalItem record payload parsed (columns,wide) (case parsed of
           Nothing->V.empty
-          Just (LogicalParsed _ blocks _)->V.map (renderMarkdownBlock columns) blocks))
+          Just (LogicalParsed _ blocks _)->V.map (renderMarkdownBlock wide columns) blocks))
 
-logicalItemRows :: Int -> LogicalItem -> Int -> [MappedStyledRow]
-logicalItemRows columns item@(LogicalItem _ _ _ width rows) block
-  | width==columns=fromMaybe [] (rows V.!? block)
-  | otherwise=maybe [] (renderMarkdownBlock columns) (logicalItemBlocks item V.!? block)
+logicalItemRows :: Bool -> Int -> LogicalItem -> Int -> [MappedStyledRow]
+logicalItemRows wide columns item@(LogicalItem _ _ _ width rows) block
+  | width==(columns,wide)=fromMaybe [] (rows V.!? block)
+  | otherwise=maybe [] (renderMarkdownBlock wide columns) (logicalItemBlocks item V.!? block)
 
 -- | Project full canonical logical text on a read worker, independently of
 -- folding and viewport rows. True means privacy redaction was applied. Session
@@ -428,20 +428,20 @@ restoreLogicalBody target records=do
   identity<-newUnique
   root<-makeStableName =<< evaluate records
   items<-V.fromList <$> mapM restore records
-  evaluate (LogicalBody identity target (RecoveredBodyProvider identity) root Nothing Nothing 0 items)
+  evaluate (LogicalBody identity target (RecoveredBodyProvider identity) root Nothing Nothing (0,False) items)
   where
     restore record=do
       payload<-makeStableName =<< evaluate record
       evaluate (LogicalItem record payload (case recordContent record of
         Reply _ text->let parsed=parseMarkdown text in Just (LogicalParsed parsed (V.fromList (markdownBlocks parsed)) (markdownIntrinsicWidth parsed))
-        _->Nothing) 0 V.empty)
+        _->Nothing) (0,False) V.empty)
 
 -- | Prepare an inert bounded recovery viewport on its worker. Only passive
 -- copy/style semantics are installed; links, shell and host control actions are
 -- deliberately absent. The durable source remains this logical catalogue.
 restoreLogicalViewport :: Bool -> Bool -> Int -> Int -> BodyAnchor -> LogicalBody -> IO (Either Text W.PreparedWindow)
 restoreLogicalViewport graphical wide columns height anchor source=do
-  logical<-withLogicalWidth (max 1 (columns-5)) source
+  logical<-withLogicalWidth wide (max 1 (columns-5)) source
   let display=BodyDisplay (logicalTarget logical) (max 1 columns) graphical wide (BodyDemand anchor 0 (max 1 height))
       input=BodyInput "Conversation" "" Nothing (map logicalItemRecord (V.toList (logicalItems logical))) Nothing S.empty (Just logical) Nothing
   fmap (\(body,_,_)->body) <$> prepareRenderedBody True display input logical
@@ -695,9 +695,9 @@ blockRows key input item block=case recordContent record of
   Reply role _ | Just source<-logicalItemBlocks item V.!? block->
     let columns=displayColumns key; available=max 1 (columns-5)
         cap=min available (logicalItemWidth item)
-        rows=logicalItemRows available item block
+        rows=logicalItemRows (displayWide key) available item block
         decorate index (row:rest)=
-          let mapped=if columns<6 then recolorMapped ident outgoing row else bubbleMapped (displayGraphical key) columns cap ident outgoing (block==0 && index==0) (block==blockCount item-1 && null rest) row
+          let mapped=if columns<6 then recolorMapped ident outgoing row else bubbleMapped (displayWide key) (displayGraphical key) columns cap ident outgoing (block==0 && index==0) (block==blockCount item-1 && null rest) row
           in PendingRow (Just (BodyPoint (recordId record) block (mappedRowStart row))) mapped []
                (markdownBlockLinks source) (markdownBlockShell source):decorate (index+1) rest
         decorate _ []=[]
@@ -730,8 +730,8 @@ questionPendingRows key (QuestionSchema token prompt choices)=promptRows++choice
     blocks=markdownBlocks parsed
     promptRows=concat [
       [PendingRow (Just (QuestionPoint token number (mappedRowStart row)))
-        (if columns<6 then recolorMapped (-2) False row else bubbleMapped (displayGraphical key) columns (min (max 1 (columns-5)) (markdownIntrinsicWidth parsed)) (-2) False (number==0 && index==0) (number==length blocks-1 && null rest) row) [] [] Nothing
-      | (index,(row,rest))<-zip [0..] (withTail (renderMarkdownBlock (max 1 (columns-5)) block))]
+        (if columns<6 then recolorMapped (-2) False row else bubbleMapped (displayWide key) (displayGraphical key) columns (min (max 1 (columns-5)) (markdownIntrinsicWidth parsed)) (-2) False (number==0 && index==0) (number==length blocks-1 && null rest) row) [] [] Nothing
+      | (index,(row,rest))<-zip [0..] (withTail (renderMarkdownBlock (displayWide key) (max 1 (columns-5)) block))]
       | (number,block)<-zip [0..] blocks]
     choiceRows=concat [[make (-3-index) offset text (Just ("question-choice",[shownToken,T.pack (show index)]))
       | (offset,text)<-snd (mapAccumL (\offset text->(offset+T.length text+1,(offset,text))) 0 (T.splitOn "\n" (questionChoiceLines columns False label)))]
@@ -759,10 +759,10 @@ recolorMapped ident outgoing row=let StyledRow sigils newline _=mappedStyledRow 
 
 -- Bubble furniture changes paint ranges only; logical endpoints remain exactly
 -- the parser's block coordinates. No whole-message row maximum/last scan occurs.
-bubbleMapped :: Bool -> Int -> Int -> Int -> Bool -> Bool -> Bool -> MappedStyledRow -> MappedStyledRow
-bubbleMapped graphical columns cap ident outgoing first lastRow row=
+bubbleMapped :: Bool -> Bool -> Int -> Int -> Int -> Bool -> Bool -> Bool -> MappedStyledRow -> MappedStyledRow
+bubbleMapped wide graphical columns cap ident outgoing first lastRow row=
   let StyledRow sigils newline _=mappedStyledRow row
-      natural=sigilColumns sigils
+      natural=sigilsColumn wide 0 sigils
       contentWidth=max natural cap
       background=BubbleStyle outgoing Plain
       edge=TerminalStyle (if outgoing then 0x00aaaa else 0xaaaaaa) 0x0000aa 0
@@ -783,9 +783,6 @@ bubbleMapped graphical columns cap ident outgoing first lastRow row=
     appendSigils Nil rest=rest
     appendSigils (ConsChars text style rest) next=ConsChars text style (appendSigils rest next)
     appendSigils (ConsSigil glyph style advance rest) next=ConsSigil glyph style advance (appendSigils rest next)
-    sigilColumns Nil=0
-    sigilColumns (ConsChars text _ rest)=T.length text+sigilColumns rest
-    sigilColumns (ConsSigil _ _ advance rest)=advance+sigilColumns rest
 
 withTail :: [a] -> [(a,[a])]
 withTail []=[]
