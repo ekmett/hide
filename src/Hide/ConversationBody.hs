@@ -5,7 +5,7 @@
 -- TextPresentation's existing serial worker will consume these closed requests;
 -- Conversation retains task/control authority and adopts their exact results.
 module Hide.ConversationBody
-  ( BodyItemId(..), Record(..), RecordContent(..), BodyPoint(..), BodyAnchor(..), BodySelection(..)
+  ( BodyItemId(..), Record(..), RecordContent(..), BodyPoint(..), BodyAnchor(..), BodySelection(..), BodyDemand(..), BodyViewport(..), BodyRow(..), viewportPoint, viewportOffset
   , LogicalBody, LogicalItem, logicalBodyIdentity, logicalBodyRead, logicalBodyItems, logicalBodyItemIndex, logicalItemRecord, logicalItemMarkdown, logicalItemBlocks, prepareLogicalBody
   , ToolExpansion(..), QuestionSchema(..), QuestionProjection(..)
   , BodyProvider(..), BodyKey(..), bodyOwnerMatches, BodyInput(..)
@@ -25,12 +25,15 @@ import qualified Data.Vector as V
 import qualified Data.Set as S
 import System.FilePath ((</>))
 import Data.Maybe (fromMaybe)
-import Data.List (mapAccumL,foldl')
+import Control.Applicative ((<|>))
+import Data.List (mapAccumL,foldl',find)
 import Data.Unique (Unique,newUnique,hashUnique)
 import qualified Data.Map.Strict as M
+import qualified Data.Sequence as Seq
+import Data.Foldable (toList)
 import Hide.Buffer (BufferContent,newBuffer,bufferContent,columnOffset,displayColumn,lineColumn)
-import Hide.Markdown (Markdown,MarkdownBlock,parseMarkdown,markdownBlocks,markdownBlockText,renderMarkdownWithShellBlocks)
-import Hide.Syntax (Style(..),bubbleTile,linkSpans)
+import Hide.Markdown (Markdown,MarkdownBlock,parseMarkdown,markdownBlocks,markdownBlockText,markdownBlockLinks,markdownBlockShell,markdownIntrinsicWidth,renderMarkdownBlock,renderMarkdownWithShellBlocks)
+import Hide.Syntax (Style(..),StyledText,StyledRow(..),MappedStyledRow(..),Sigils(..),styledText,styledContents,styledLength,splitStyledText,styledRows,sigilsLength,sigilsText,mapSigilsStyle,bubbleTile,linkSpans)
 import Data.Text (Text)
 import Data.Set (Set)
 import System.Mem.StableName (StableName,makeStableName)
@@ -49,13 +52,70 @@ data RecordContent = Reply Text Text | Activity Text Value [Value] | Pause Text 
 
 -- Positions belong to the target's logical catalogue, never a painted row.
 -- Missing item IDs cannot be redirected to an unrelated surviving item.
-data BodyPoint = BodyPoint !BodyItemId !Int !Int deriving (Eq,Ord,Show)
+data BodyPoint = BodyPoint !BodyItemId !Int !Int | QuestionPoint !Int !Int !Int deriving (Eq,Ord,Show)
 data BodyAnchor = At !BodyPoint | FollowEnd deriving (Eq,Show)
 data BodySelection = BodySelection !BodyPoint !BodyPoint deriving (Eq,Show)
 
+-- A signed row request is relative to the containing logical row, never an
+-- accumulated rendered height. Adoption replaces it with the resulting anchor.
+data BodyDemand = BodyDemand !BodyAnchor !Int !Int deriving (Eq,Show)
+data BodyRow = BodyRow
+  { bodyRowPoint :: !(Maybe BodyPoint), bodyRowLogicalEnd :: !Int
+  , bodyRowPaintStart :: !Int, bodyRowPaintEnd :: !Int
+  , bodyRowRanges :: !(V.Vector (Int,Int,Int,Int))
+  } deriving Show
+data BodyViewport = BodyViewport
+  { viewportRows :: !(V.Vector BodyRow), viewportAnchor :: !BodyAnchor
+  , viewportScroll :: !Int, viewportAtEnd :: !Bool
+  } deriving Show
+
+-- | /O(log demanded rows + row spans)/. Convert only through the authoritative
+-- bounded receipt; furniture uses its nearest surviving logical boundary.
+viewportPoint :: BodyViewport -> Int -> Maybe BodyPoint
+viewportPoint viewport offset=do
+  row<-find (\r->offset>=bodyRowPaintStart r && offset<=bodyRowPaintEnd r) (V.toList (viewportRows viewport))
+  point<-bodyRowPoint row
+  let paint=max 0 (offset-bodyRowPaintStart row)
+      spans=V.toList (bodyRowRanges row)
+      scalar=case find (\(a,z,_,_)->paint>=a && paint<z) spans of
+        Just (a,z,start,end)->start+(paint-a)*(end-start) `div` max 1 (z-a)
+        Nothing->case takeWhile (\(a,_,_,_)->a<=paint) spans of
+          []->pointScalar point
+          before->let (_,_,_,end)=last before in end
+  pure (withScalar scalar point)
+
+-- | /O(demanded rows + spans)/. Tables may revisit a header's canonical range;
+-- choose its first visible occurrence, never assume globally monotone offsets.
+viewportOffset :: BodyViewport -> BodyPoint -> Maybe Int
+viewportOffset viewport point=do
+  row<-find matches rows <|> find ends (reverse rows)
+  let scalar=pointScalar point
+      offset=case find (\(_,_,a,z)->scalar>=a && scalar<z) (V.toList (bodyRowRanges row)) of
+        Just (start,end,a,z)->start+(scalar-a)*(end-start) `div` max 1 (z-a)
+        Nothing->if scalar<=maybe 0 pointScalar (bodyRowPoint row) then 0 else bodyRowPaintEnd row-bodyRowPaintStart row
+  pure (bodyRowPaintStart row+offset)
+  where
+    rows=V.toList (viewportRows viewport)
+    matches row=case bodyRowPoint row of
+      Just first->sameBlock first point && pointScalar point>=pointScalar first && pointScalar point<bodyRowLogicalEnd row
+      Nothing->False
+    ends row=case bodyRowPoint row of
+      Just first->sameBlock first point && pointScalar point==bodyRowLogicalEnd row
+      Nothing->False
+pointScalar :: BodyPoint -> Int
+pointScalar (BodyPoint _ _ scalar)=scalar
+pointScalar (QuestionPoint _ _ scalar)=scalar
+withScalar :: Int -> BodyPoint -> BodyPoint
+withScalar scalar (BodyPoint item block _)=BodyPoint item block scalar
+withScalar scalar (QuestionPoint token block _)=QuestionPoint token block scalar
+sameBlock :: BodyPoint -> BodyPoint -> Bool
+sameBlock (BodyPoint item block _) (BodyPoint other next _)=item==other && block==next
+sameBlock (QuestionPoint token block _) (QuestionPoint other next _)=token==other && block==next
+sameBlock _ _=False
+
 -- The record and its exact payload identity are strict metadata. Markdown is
 -- lazy: looking up an item or constructing this vector parses no prior items.
-data LogicalParsed = LogicalParsed !Markdown !(V.Vector MarkdownBlock)
+data LogicalParsed = LogicalParsed !Markdown !(V.Vector MarkdownBlock) Int
 data LogicalItem = LogicalItem !Record !(StableName Record) (Maybe LogicalParsed)
 data LogicalBody = LogicalBody
   { logicalIdentity :: !Unique, logicalTarget :: !Text
@@ -79,7 +139,7 @@ logicalItemRecord (LogicalItem record _ _)=record
 logicalItemMarkdown :: LogicalItem -> Maybe Markdown
 logicalItemMarkdown (LogicalItem _ _ parsed)=case parsed of
   Nothing->Nothing
-  Just (LogicalParsed markdown _)->Just markdown
+  Just (LogicalParsed markdown _ _)->Just markdown
 
 -- | Parse only this item's immutable source on the preparation/read worker.
 -- Block metadata is cached, so a selected block is indexed without replaying
@@ -87,7 +147,9 @@ logicalItemMarkdown (LogicalItem _ _ parsed)=case parsed of
 logicalItemBlocks :: LogicalItem -> V.Vector MarkdownBlock
 logicalItemBlocks (LogicalItem _ _ parsed)=case parsed of
   Nothing->V.empty
-  Just (LogicalParsed _ blocks)->blocks
+  Just (LogicalParsed _ blocks _)->blocks
+logicalItemWidth :: LogicalItem -> Int
+logicalItemWidth (LogicalItem _ _ parsed)=case parsed of Nothing->1; Just (LogicalParsed _ _ intrinsic)->intrinsic
 
 -- | /O(log items)/. Insertion/event IDs are strictly ordered within one target.
 -- Missing IDs return Nothing, never a neighboring item's source position.
@@ -109,12 +171,12 @@ logicalBodyItemIndex wanted body=search 0 (V.length items)
 -- revisions or equal text alone cannot prove the cached parser still applies.
 prepareLogicalBody :: BodyKey -> BodyInput -> Maybe LogicalBody -> IO LogicalBody
 prepareLogicalBody key input previous=case previous of
-  Just body | logicalProvider body==bodyProvider key &&
+  Just body | logicalTarget body==bodyTarget key && logicalProvider body==bodyProvider key &&
     logicalTranscript body==bodyTranscript key && questionTokenOf (logicalQuestion body)==bodyQuestionToken key->pure body
   _->do
     identity<-newUnique
     let old=case previous of
-          Just body | logicalProvider body==bodyProvider key->M.fromList
+          Just body | logicalTarget body==bodyTarget key && logicalProvider body==bodyProvider key->M.fromList
             [(recordId (logicalItemRecord item),item) | item<-V.toList (logicalItems body)]
           _->M.empty
     items<-V.fromList <$> mapM (capture old) (bodyRecords input)
@@ -128,7 +190,7 @@ prepareLogicalBody key input previous=case previous of
       case M.lookup (recordId record) old of
         Just item@(LogicalItem _ same _) | same==payload->pure item
         _->evaluate (LogicalItem record payload (case recordContent record of
-          Reply _ text->let parsed=parseMarkdown text in Just (LogicalParsed parsed (V.fromList (markdownBlocks parsed)))
+          Reply _ text->let parsed=parseMarkdown text in Just (LogicalParsed parsed (V.fromList (markdownBlocks parsed)) (markdownIntrinsicWidth parsed))
           _->Nothing))
 
 -- | Project full canonical logical text on a read worker, independently of
@@ -148,9 +210,10 @@ logicalBodyRead body=do
     itemText item=case recordContent (logicalItemRecord item) of
       Reply _ text->maybe (canonical (parseMarkdown text)) canonical (logicalItemMarkdown item)
       Pause label->label
+      -- Both live provider producers scrub this immutable activity history
+      -- before insertion; use exactly the existing expanded-display payload.
       Activity ident value history->
-        T.unwords (T.words ("["<>fromMaybe "activity" (field "status" value)<>"] "<>fromMaybe ident (field "title" value)))<>
-        "\n"<>T.intercalate "\n" (map jsonText history)
+        activityTitle ident value<>"\n"<>T.intercalate "\n" (map jsonText history)
     question=case logicalQuestion body of
       Nothing->[]
       Just (QuestionSchema _ prompt choices)->
@@ -173,7 +236,7 @@ data QuestionSchema = QuestionSchema !Int !Text ![Text]
 -- Live answer paint/hit/caret resolves them through that body's current layout.
 data QuestionProjection = QuestionProjection
   { projectedQuestionToken :: !Int, projectedQuestionWidth :: !Int
-  , projectedQuestionInput :: !Int, projectedQuestionChoices :: [[Int]]
+  , projectedQuestionInput :: !(Maybe Int), projectedQuestionChoices :: [[Int]]
   } deriving (Eq,Show)
 
 -- Captured incarnation, never a reusable provider/session display label.
@@ -187,7 +250,7 @@ data BodyProvider
 data BodyKey = BodyKey
   { bodyWindow :: !W.WindowRef, bodyTarget :: !Text, bodyProvider :: !BodyProvider
   , bodyTranscript :: !(StableName [Record]), bodyQuestionToken :: !(Maybe Int)
-  , bodyColumns :: !Int, bodyGraphical :: !Bool, bodyWide :: !Bool
+  , bodyColumns :: !Int, bodyGraphical :: !Bool, bodyWide :: !Bool, bodyDemand :: !BodyDemand
   , bodyExpansion :: !(StableName (Set (Text,ToolExpansion)))
   } deriving Eq
 
@@ -198,7 +261,7 @@ bodyOwnerMatches :: BodyKey -> BodyKey -> Bool
 bodyOwnerMatches a b=bodyWindow a==bodyWindow b && bodyTarget a==bodyTarget b &&
   bodyProvider a==bodyProvider b && bodyQuestionToken a==bodyQuestionToken b &&
   bodyColumns a==bodyColumns b && bodyGraphical a==bodyGraphical b &&
-  bodyWide a==bodyWide b && bodyExpansion a==bodyExpansion b
+  bodyWide a==bodyWide b && bodyDemand a==bodyDemand b && bodyExpansion a==bodyExpansion b
 
 -- Immutable roots captured by the owner; all rendering/string/semantic walks
 -- belong to preparation, not adoption. This contains no Conversation State.
@@ -213,7 +276,8 @@ data PreparedBody = PreparedBody !W.PreparedWindow !(Maybe TextLayout) !HostBody
 
 -- Private host-minted regions; public TextSemantics cannot install controls.
 data HostBodyControls = HostBodyControls
-  { hostBodyQuestion :: !(Maybe QuestionProjection)
+  { hostBodyQuestionToken :: !(Maybe Int), hostBodyViewport :: !(Maybe BodyViewport)
+  , hostBodyQuestion :: !(Maybe QuestionProjection)
   , hostBodyActions :: [(Int,Int,Text,[Text])]
   }
 -- The layout belongs to the immutable body, including while its frame is hidden.
@@ -235,94 +299,292 @@ instance Show ConversationBody where
   show (InstalledBody reference _)="InstalledBody "++show reference
   show (InertBody prepared)="InertBody "++show prepared
 
--- | Render and force one immutable transcript on the presentation worker.
--- Live question answers never enter this capture.
+-- A row is derived only while its block is demanded. Logical ranges are
+-- retained by the bounded receipt; styled payloads transfer into PreparedWindow.
+data PendingRow = PendingRow !(Maybe BodyPoint) !MappedStyledRow
+  ![(Int,Int,Text,[Text])] ![(Int,Int,Text)] !(Maybe (Text,Text))
+
+-- | Prepare the containing block and forward viewport only. No previous
+-- transcript item is parsed or laid out to locate an ordinary anchored view.
+-- FollowEnd may scan the final demanded block's rows; it never scans history.
 prepareConversationBody :: BodyRequest -> IO BodyResult
 prepareConversationBody (BodyRequest key input)=do
   logical<-prepareLogicalBody key input (bodyPreviousLogical input)
-  prepared<-W.prepareSemanticTextWindow (bodyTitle input) styled semantics
-  case prepared of
+  case demandedRows key input logical of
     Left message->pure (BodyResult key (Left message))
-    Right body->do
-      layout<-if bodyWide key || W.preparedWindowNeedsLayout False body
-        then case W.preparedWindowRows body of
-          W.StyledRows rows->Just <$> prepareTextLayout (bodyWide key) columns (W.preparedWindowText body) rows
-          _->pure Nothing
-        else pure Nothing
-      _<-evaluate (sum [a+z+T.length action+sum (map T.length values) | (a,z,action,values)<-actions])
-      _<-evaluate (maybe 0 (sum . concat . projectedQuestionChoices) projection)
-      snapshot<-evaluate (PreparedBody body layout (HostBodyControls projection actions) logical)
-      evaluate (BodyResult key (Right snapshot))
+    Right (pending,scroll,atEnd)->do
+      let (_,receipts)=mapAccumL receipt 0 pending
+          rows=[row | PendingRow _ mapped _ _ _<-pending,let row=mappedStyledRow mapped]
+          actions=[(bodyRowPaintStart row+a,bodyRowPaintStart row+z,name,values)
+            | (row,PendingRow _ _ spans _ _)<-zip receipts pending,(a,z,name,values)<-spans]
+          links=concat [projectRanges row mapped (a,z) (\lo hi->(lo,hi,url))
+            | (row,PendingRow _ mapped _ ranges _)<-zip receipts pending,(a,z,url)<-ranges]
+          shells=[(bodyRowPaintStart row,bodyRowPaintEnd row,dialect,source)
+            | (row,PendingRow _ _ _ _ (Just (dialect,source)))<-zip receipts pending]
+          questionToken=case bodyQuestion input of Just (QuestionSchema token _ _)->Just token; Nothing->Nothing
+          projected=do
+            QuestionSchema token _ choices<-bodyQuestion input
+            let starts index=[a | (a,_,name,values)<-actions,name=="question-choice",values==[T.pack (show token),T.pack (show index)]]
+                other=case [a+7 | (a,_,name,_)<-actions,name=="question-input"] of first:_->Just first; _->Nothing
+            if other==Nothing && all (null . starts) [0..length choices-1] then Nothing
+              else Just (QuestionProjection token (bodyColumns key) other [starts index | index<-[0..length choices-1]])
+          guestHidden=[(if name=="question-input" then a+6 else a,z)
+            | (a,z,name,_)<-actions,name `elem` ["question-input","question-choice"]]
+          sessionHidden=[(bodyRowPaintStart row,bodyRowPaintEnd row)
+            | (row,PendingRow Nothing _ _ _ _)<-zip receipts pending,V.null (logicalBodyItems logical),T.null (bodyTarget key)]
+          questionHidden=[(bodyRowPaintStart row,bodyRowPaintEnd row)
+            | row<-receipts,Just QuestionPoint{}<-[bodyRowPoint row]]
+          semantics=W.TextSemantics (W.CopyMessages (if T.null (bodyTarget key) then W.UserBotAttribution else W.NoAttribution))
+            (Just (bodyProject input </> "conversation.md")) (V.fromList links) (V.fromList shells) W.ReadableWindow
+            (V.fromList (sessionHidden++guestHidden)) (V.fromList sessionHidden) (V.fromList (sessionHidden++questionHidden))
+          BodyDemand requested _ _=bodyDemand key
+          anchor=case requested of FollowEnd->FollowEnd; At _ | let BodyDemand _ delta _=bodyDemand key,delta==0->requested; At _->maybe requested At (bodyRowPoint =<< listAt scroll receipts)
+          viewport=BodyViewport (V.fromList receipts) anchor scroll atEnd
+          controls=HostBodyControls questionToken (Just viewport) projected actions
+      prepared<-W.prepareSemanticRowsWindow (bodyTitle input) rows semantics
+      case prepared of
+        Left message->pure (BodyResult key (Left message))
+        Right body->do
+          -- TextLayout remains in viewport paint coordinates. Its same glyph
+          -- extents drive paint/privacy; the bounded receipt maps to logical IDs.
+          layout<-case W.preparedWindowRows body of
+            W.StyledRows styled->Just <$> prepareTextLayout (bodyWide key) (bodyColumns key) (W.preparedWindowText body) styled
+            _->pure Nothing
+          _<-evaluate (sum [a+z+T.length name+sum (map T.length values) | (a,z,name,values)<-actions])
+          _<-evaluate (V.foldl' (\n row->maybe () (\point->point `seq` ()) (bodyRowPoint row) `seq` n+bodyRowPaintStart row+bodyRowPaintEnd row+bodyRowLogicalEnd row+
+            V.foldl' (\m (a,z,lo,hi)->m+a+z+lo+hi) 0 (bodyRowRanges row)) 0 (viewportRows viewport))
+          evaluate (BodyResult key (Right (PreparedBody body layout controls logical)))
   where
-    target=bodyTarget key
-    columns=bodyColumns key
-    records=[(ident,recordContent record) | record<-bodyRecords input,let BodyItemId ident=recordId record]
-    header=if T.null target then "Session: "<>fromMaybe "not connected" (bodySession input)<>"\n" else "No messages yet.\n"
-    chunks=if null records then [(plain Comment header,Nothing,[]) | maybe True (const False) (bodyQuestion input)] else renderRecords columns records
-    questions=maybe [] (renderQuestion columns (-2)) (bodyQuestion input)
-    allChunks=chunks++[(plain Plain "\n\n",Nothing,[]) | not (null chunks) && not (null questions)]++questions
-    styled=concatMap (\(cells,_,_)->cells) allChunks
-    (_,shellBlocks)=foldl' (\(offset,found) (cells,_,blocks)->(offset+length cells,found++[(offset+a,offset+z,dialect,body) | (a,z,dialect,body)<-blocks])) (0,[]) allChunks
-    (_,actions)=foldl' (\(offset,found) (cells,action,_)->(offset+length cells,found++maybe [] (\(name,values)->[(offset,offset+length cells,name,values)]) action)) (0,[]) allChunks
-    projection=do
-      QuestionSchema token _ choices<-bodyQuestion input
-      first<-case [a+7 | (a,_,action,_)<-actions,action=="question-input"] of a:_->Just a; _->Nothing
-      let starts index label=case [a | (a,_,action,values)<-actions,action=="question-choice",values==[T.pack (show token),T.pack (show index)]] of
-            a:_->snd (mapAccumL (\offset line->(offset+T.length line+1,offset)) a (T.splitOn "\n" (questionChoiceLines columns False label)))
-            _->[]
-      pure (QuestionProjection token columns first [starts index label | (index,label)<-zip [0::Int ..] choices])
-    sessionHidden=if "Session: " `T.isPrefixOf` header && null records && null questions then [(0,T.length (T.takeWhile (/='\n') header))] else []
-    guestHidden=sessionHidden++[(if action=="question-input" then a+6 else a,z) | (a,z,action,_)<-actions,action `elem` ["question-input","question-choice"]]
-    questionStart=sum [length cells | (cells,_,_)<-chunks]+if null chunks || null questions then 0 else 2
-    recoveryHidden=sessionHidden++[(questionStart,length styled) | not (null questions)]
-    semantics=W.TextSemantics (W.CopyMessages (if T.null target then W.UserBotAttribution else W.NoAttribution)) (Just (bodyProject input </> "conversation.md"))
-      (V.fromList (linkSpans styled)) (V.fromList shellBlocks) W.ReadableWindow
-      (V.fromList guestHidden) (V.fromList sessionHidden) (V.fromList recoveryHidden)
-    plain style=map (,style).T.unpack
-    renderRecords _ []=[]
-    renderRecords width rows@(record:rest)
-      | (calls@(_:_:_),after)<-span (isToolRecord.snd) rows = renderRun width calls++continue (last calls) after
-      | otherwise = renderRecord width record++continue record rest
-      where
-        continue _ []=[]
-        continue previous remaining@(next:_)=
-          [(plain Plain (if sameSpeaker (snd previous) (snd next) then "\n" else "\n\n"),Nothing,[])]++renderRecords width remaining
-    renderRun width calls=case calls of
-      (_,Activity ident _ _):_ ->
-        let expanded=S.member (target,RunExpansion ident) (bodyExpandedTools input)
-            titles=[fromMaybe label (field "title" value) | (_,Activity label value _)<-calls]
-            running=length [() | (_,Activity _ value _)<-calls,field "status" value `elem` [Just ("pending"::Text),Just "in_progress"]]
-            failed=length [() | (_,Activity _ value _)<-calls,field "status" value==Just ("failed"::Text)]
-            count n label=[T.pack (show n)<>label | n>0]
-            summary=T.intercalate " · " (T.pack (show (length calls))<>" tool calls":count running " running"++count failed " failed"++[T.intercalate ", " (take 3 titles)])
-            heading=clipCells width ((if expanded then "▾▾ " else "▸▸ ")<>T.unwords (T.words summary))
-        in [(plain Pragma heading,Just ("toggle-tool-run",[ident]),[])]++
-           (if expanded then concatMap (\call->(plain Plain "\n  ",Nothing,[]):renderRecord (max 1 (width-2)) call) calls else [])
-      _ -> []
+    receipt offset (PendingRow point mapped _ _ _)=
+      let StyledRow sigils _ _=mappedStyledRow mapped; end=offset+sigilsLength sigils
+      in (end+1,BodyRow point (mappedRowEnd mapped) offset end (mappedSourceRanges mapped))
+    projectRanges row mapped (a,z) build=
+      [build (bodyRowPaintStart row+lo+(max a start-start)*(hi-lo) `div` max 1 (end-start))
+        (bodyRowPaintStart row+lo+((min z end-start)*(hi-lo)+end-start-1) `div` max 1 (end-start))
+      | (lo,hi,start,end)<-V.toList (mappedSourceRanges mapped),end>start,a<end,z>start]
+    listAt index rows=case drop index rows of first:_->Just first; _->Nothing
+
+-- Locate by item/block metadata, not accumulated prior row heights. A missing
+-- anchor is refused rather than redirected to a different surviving item.
+demandedRows :: BodyKey -> BodyInput -> LogicalBody -> Either Text ([PendingRow],Int,Bool)
+demandedRows key input logical=case anchor of
+  FollowEnd->let rows=ending budget; scroll=max 0 (length rows-height)
+            in Right (rows,scroll,True)
+  At point->do
+    (index,block,rows)<-locate point
+    let (prior,selectedPairs)=break (\(row,rest)->contains point row || null rest && endsAt point row) (withTail rows)
+        before=map fst prior
+        selected=map fst selectedPairs
+        needed=max 0 (-delta)
+        nearby=lastRows needed before
+        prefix=preceding (needed-length nearby) index block++nearby
+        combined=prefix++selected++following index block
+        start=max 0 (length prefix+delta)
+        remaining=drop start combined
+        shown=take (height+2) remaining
+        ended=length (take (height+3) remaining)<=height+2
+    if null selected then Left "The anchored conversation position is no longer present."
+      else if null shown then Right (lastRows height combined,0,True)
+      else Right (shown,0,ended)
+  where
+    BodyDemand anchor delta requested=bodyDemand key
+    height=max 1 requested
+    budget=height+2
+    items=logicalBodyItems logical
+    count=V.length items
+    questionRows=case bodyQuestion input of Nothing->[]; Just schema->questionPendingRows key schema
+    locate (BodyPoint ident block _)=do
+      index<-maybe (Left "The anchored conversation item is no longer present.") Right (logicalBodyItemIndex ident logical)
+      let item=items V.! index; blocks=logicalItemBlocks item
+      if block<0 || (not (V.null blocks) && block>=V.length blocks) then Left "The anchored conversation block is no longer present."
+        else Right (index,block,rowsAt index block)
+    locate (QuestionPoint token block _)=case bodyQuestion input of
+      Just (QuestionSchema current _ _) | token==current->Right (count,block,filter (sameQuestionBlock block) questionRows)
+      _->Left "The anchored question is no longer present."
+    sameQuestionBlock block (PendingRow (Just (QuestionPoint _ actual _)) _ _ _ _)=actual==block
+    sameQuestionBlock _ _=False
+    following index block
+      | index>=count=filter (laterQuestionBlock block) questionRows
+      | otherwise=let item=items V.! index
+                  in concat [rowsAt index next | next<-[block+1..blockCount item-1]]++
+                    itemSeparator index++itemsFrom (nextItem index)++questionRows
+    laterQuestionBlock block (PendingRow (Just (QuestionPoint _ actual _)) _ _ _ _)=actual>block
+    laterQuestionBlock _ _=False
+    ending needed
+      | not (null questionRows)=let tailRows=lastRows needed questionRows in takeEnd (needed-length tailRows) (count-1)++tailRows
+      | count==0=[PendingRow Nothing (plainMapped Comment (if T.null (bodyTarget key) then "Session: "<>fromMaybe "not connected" (bodySession input) else "No messages yet.")) [] [] Nothing]
+      | otherwise=takeEnd needed (count-1)
+    takeEnd needed index
+      | needed<=0 || index<0=[]
+      | otherwise=let item=items V.! index; rows=lastBlocks needed index (blockCount item-1)
+                      previous=case collapsedGroup index of Just (first,_,_)->first-1; Nothing->index-1
+                      separator=if needed>length rows && previous>=0 then blankRow:[] else []
+                  in takeEnd (needed-length rows-length separator) previous++separator++rows
+    lastBlocks needed index block
+      | needed<=0 || block<0=[]
+      | otherwise=let rows=lastRows needed (rowsAt index block)
+                  in lastBlocks (needed-length rows) index (block-1)++rows
+    preceding needed index block
+      | needed<=0=[]
+      | index>=count=let earlier=lastRows needed (filter (\row->not (sameQuestionBlock block row) && questionBlock row<block) questionRows)
+                    in takeEnd (needed-length earlier) (count-1)++earlier
+      | otherwise=let prior=lastBlocks needed index (block-1)
+                      previous=case collapsedGroup index of Just (first,_,_)->first-1; Nothing->index-1
+                  in takeEnd (needed-length prior) previous++prior
+    questionBlock (PendingRow (Just (QuestionPoint _ block _)) _ _ _ _)=block
+    questionBlock _ _=maxBound
+    blankRow=PendingRow Nothing (MappedStyledRow (StyledRow Nil Nothing V.empty) 0 0 V.empty) [] [] Nothing
+    itemsFrom index
+      | index>=count=[]
+      | otherwise=concat [rowsAt index block | block<-[0..blockCount (items V.! index)-1]]++
+          itemSeparator index++itemsFrom (nextItem index)
+    itemSeparator index
+      | nextItem index>=count=[]
+      | sameSpeaker (recordContent (logicalItemRecord (items V.! index))) (recordContent (logicalItemRecord (items V.! nextItem index)))=[]
+      | otherwise=[blankRow]
     sameSpeaker (Reply a _) (Reply b _)=a==b
     sameSpeaker _ _=False
-    renderRecord width (messageId,record)=case record of
-      Pause label -> [(renderTimestamp width label,Nothing,[])]
-      Reply role text -> [replyChunk width messageId (role=="You") text]
-      Activity ident value history ->
-        let expanded=S.member (target,ActivityExpansion ident) (bodyExpandedTools input)
-            title=T.unwords (T.words ("["<>fromMaybe "activity" (field "status" value)<>"] "<>fromMaybe ident (field "title" value)))
-            heading=(if expanded then "▾ " else "▸ ")<>clipCells (max 1 (width-2)) title
-        in [(plain Pragma heading,Just ("toggle-activity",[ident]),[])]++
-          [(plain Plain ("\n"<>T.intercalate "\n" (map jsonText history)),Nothing,[]) | expanded]
-    renderQuestion width messageId (QuestionSchema tokenId prompt choices)=
-      [replyChunk width messageId False (prompt)]++
-      concat [[(plain Plain "\n",Nothing,[]),(plain Plain
-        (questionChoiceLines width False text),Just ("question-choice",[token,T.pack (show index)]),[])] | (index,text)<-zip [0::Int ..] (choices)]++
-      [(plain Plain "\n",Nothing,[]),(plain Plain
-        ("Other: "<>T.replicate (max 1 (width-8)+1) " "),Just ("question-input",[token]),[]),
-       (plain Plain "\n",Nothing,[]),(plain Keyword "[Submit answer]",Just ("question-submit",[token]),[]),
-       (plain Plain "  ",Nothing,[]),(plain Comment "[Cancel]",Just ("question-cancel",[token]),[])]
-      where token=T.pack (show (tokenId))
+    nextItem index=case collapsedGroup index of Just (_,lastIndex,_)->lastIndex+1; Nothing->index+1
+    group index
+      | not (tool index)=Nothing
+      | otherwise=let first=back index; lastIndex=forward index
+                  in if lastIndex<=first then Nothing else case recordContent (logicalItemRecord (items V.! first)) of
+                    Activity ident _ _->Just (first,lastIndex,ident)
+                    _->Nothing
+    tool index=index>=0 && index<count && isToolRecord (recordContent (logicalItemRecord (items V.! index)))
+    back index | tool (index-1)=back (index-1) | otherwise=index
+    forward index | tool (index+1)=forward (index+1) | otherwise=index
+    collapsedGroup index=do
+      found@(_,_,ident)<-group index
+      if S.member (bodyTarget key,RunExpansion ident) (bodyExpandedTools input) then Nothing else Just found
+    rowsAt index block=case collapsedGroup index of
+      Just (first,lastIndex,ident)->[groupHeading (Just (BodyPoint (recordId (logicalItemRecord (items V.! index))) 0 0)) False first lastIndex ident]
+      Nothing->case group index of
+        Just (first,lastIndex,ident) | index==first,block==0->
+          groupHeading Nothing True first lastIndex ident:blockRows key input (items V.! index) block
+        _->blockRows key input (items V.! index) block
+    groupHeading point expanded first lastIndex ident=
+      let calls=[(label,value) | index<-[first..lastIndex],Activity label value _<-[recordContent (logicalItemRecord (items V.! index))]]
+          running=length [() | (_,value)<-calls,field "status" value `elem` [Just ("pending"::Text),Just "in_progress"]]
+          failed=length [() | (_,value)<-calls,field "status" value==Just ("failed"::Text)]
+          labels=[T.pack (show running)<>" running" | running>0]++[T.pack (show failed)<>" failed" | failed>0]
+          title=T.intercalate " · " (T.pack (show (lastIndex-first+1))<>" tool calls":labels++
+            [T.intercalate ", " [fromMaybe label (field "title" value) | (label,value)<-take 3 calls]])
+          text=clipCells (bodyColumns key) ((if expanded then "▾▾ " else "▸▸ ")<>title)
+      in PendingRow point (plainMapped Pragma text) (actionRanges text (Just ("toggle-tool-run",[ident]))) [] Nothing
+    contains point (PendingRow (Just first) row actions _ _)=sameBlock first point &&
+      (any (\(_,_,name,_)->name=="toggle-tool-run") actions ||
+        pointScalar point>=mappedRowStart row && pointScalar point<mappedRowEnd row)
+    contains _ _=False
+    endsAt point (PendingRow (Just first) row _ _ _)=sameBlock first point && pointScalar point==mappedRowEnd row
+    endsAt _ _=False
 
-    replyChunk width messageId outgoing text =
-      let (cells,blocks)=renderReplyWithShellBlocks (bodyGraphical key) width outgoing text
-      in (map (\(c,style)->(c,case style of BubbleText _ sent base->BubbleText messageId sent base; _->style)) cells,Nothing,blocks)
+blockCount :: LogicalItem -> Int
+blockCount item=max 1 (V.length (logicalItemBlocks item))
+
+blockRows :: BodyKey -> BodyInput -> LogicalItem -> Int -> [PendingRow]
+blockRows key input item block=case recordContent record of
+  Reply role _ | Just source<-logicalItemBlocks item V.!? block->
+    let columns=bodyColumns key; available=max 1 (columns-5)
+        cap=min available (logicalItemWidth item)
+        rows=renderMarkdownBlock available source
+        decorate index (row:rest)=
+          let mapped=if columns<6 then recolorMapped ident outgoing row else bubbleMapped (bodyGraphical key) columns cap ident outgoing (block==0 && index==0) (block==blockCount item-1 && null rest) row
+          in PendingRow (Just (BodyPoint (recordId record) block (mappedRowStart row))) mapped []
+               (markdownBlockLinks source) (markdownBlockShell source):decorate (index+1) rest
+        decorate _ []=[]
+        outgoing=role=="You"
+        BodyItemId ident=recordId record
+    in decorate 0 rows
+  Pause label->[PendingRow (Just (BodyPoint (recordId record) 0 0)) (plainMapped Comment label) [] [] Nothing]
+  Activity ident value history->
+    let expanded=S.member (bodyTarget key,ActivityExpansion ident) (bodyExpandedTools input)
+        title=activityTitle ident value
+        shown=clipCells (max 0 (bodyColumns key-2)) title
+        heading=(if expanded then "▾ " else "▸ ")<>shown
+        header=(plainMapped Pragma heading) {mappedRowEnd=T.length title,
+          mappedSourceRanges=V.singleton (2,T.length heading,0,T.length shown)}
+        row offset text=PendingRow (Just (BodyPoint (recordId record) 0 offset))
+          ((plainMapped Plain text) {mappedRowStart=offset,mappedRowEnd=offset+T.length text,
+            mappedSourceRanges=V.singleton (0,T.length text,offset,offset+T.length text)}) [] [] Nothing
+        (_,details)=mapAccumL (\offset text->(offset+T.length text+1,row offset text))
+          (T.length title+1) (T.splitOn "\n" (T.intercalate "\n" (map jsonText history)))
+    in PendingRow (Just (BodyPoint (recordId record) 0 0)) header (actionRanges heading (Just ("toggle-activity",[ident]))) [] Nothing:
+      [detail | expanded,detail<-details]
+  _->[]
+  where record=logicalItemRecord item
+
+questionPendingRows :: BodyKey -> QuestionSchema -> [PendingRow]
+questionPendingRows key (QuestionSchema token prompt choices)=promptRows++choiceRows++otherRows
+  where
+    columns=bodyColumns key
+    parsed=parseMarkdown prompt
+    blocks=markdownBlocks parsed
+    promptRows=concat [
+      [PendingRow (Just (QuestionPoint token number (mappedRowStart row)))
+        (if columns<6 then recolorMapped (-2) False row else bubbleMapped (bodyGraphical key) columns (min (max 1 (columns-5)) (markdownIntrinsicWidth parsed)) (-2) False (number==0 && index==0) (number==length blocks-1 && null rest) row) [] [] Nothing
+      | (index,(row,rest))<-zip [0..] (withTail (renderMarkdownBlock (max 1 (columns-5)) block))]
+      | (number,block)<-zip [0..] blocks]
+    firstChoice=length blocks
+    choiceRows=concat [[make (firstChoice+index) offset text (Just ("question-choice",[shownToken,T.pack (show index)]))
+      | (offset,text)<-snd (mapAccumL (\offset text->(offset+T.length text+1,(offset,text))) 0 (T.splitOn "\n" (questionChoiceLines columns False label)))]
+      | (index,label)<-zip [0..] choices]
+    otherBlock=firstChoice+length choices
+    otherRows=[make otherBlock 0 ("Other: "<>T.replicate (max 1 (columns-8)+1) " ") (Just ("question-input",[shownToken])),
+      submitRow otherBlock]
+    submitRow otherBlock=PendingRow (Just (QuestionPoint token (otherBlock+1) 0))
+      (plainMapped Plain "[Submit answer]  [Cancel]")
+      [(0,15,"question-submit",[shownToken]),(17,25,"question-cancel",[shownToken])] [] Nothing
+    shownToken=T.pack (show token)
+    make block offset text action=let row=plainMapped Plain text
+      in PendingRow (Just (QuestionPoint token block offset)) (row {mappedRowStart=offset,mappedRowEnd=offset+T.length text,
+        mappedSourceRanges=V.singleton (0,T.length text,offset,offset+T.length text)}) (actionRanges text action) [] Nothing
+
+actionRanges :: Text -> Maybe (Text,[Text]) -> [(Int,Int,Text,[Text])]
+actionRanges text=maybe [] (\(name,values)->[(0,T.length text,name,values)])
+
+plainMapped :: Style -> Text -> MappedStyledRow
+plainMapped style text=MappedStyledRow (case styledRows (styledText style text) of first:_->first; []->StyledRow Nil Nothing V.empty)
+  0 (T.length text) (V.singleton (0,T.length text,0,T.length text))
+recolorMapped :: Int -> Bool -> MappedStyledRow -> MappedStyledRow
+recolorMapped ident outgoing row=let StyledRow sigils newline _=mappedStyledRow row
+  in row {mappedStyledRow=StyledRow (mapSigilsStyle (BubbleText ident outgoing) sigils) newline (V.map (\(a,z,_,_)->(a,z,ident,outgoing)) (mappedSourceRanges row))}
+
+-- Bubble furniture changes paint ranges only; logical endpoints remain exactly
+-- the parser's block coordinates. No whole-message row maximum/last scan occurs.
+bubbleMapped :: Bool -> Int -> Int -> Int -> Bool -> Bool -> Bool -> MappedStyledRow -> MappedStyledRow
+bubbleMapped graphical columns cap ident outgoing first lastRow row=
+  let StyledRow sigils newline _=mappedStyledRow row
+      natural=sigilColumns sigils
+      contentWidth=max natural cap
+      background=BubbleStyle outgoing Plain
+      edge=TerminalStyle (if outgoing then 0x00aaaa else 0xaaaaaa) 0x0000aa 0
+      tile number=styledText edge (T.singleton (bubbleTile graphical number))
+      side leftSide | first && lastRow=tile (if leftSide then if outgoing then 4 else 2 else if outgoing then 3 else 5)
+                    | first && (if outgoing then leftSide else not leftSide)=tile (if outgoing then 0 else 1)
+                    | lastRow=tile (if leftSide then 2 else 3)
+                    | otherwise=styledText background " "
+      tailCell=if first then tile (if outgoing then 7 else 6) else styledText Plain " "
+      prefix=if outgoing then styledText Plain (T.replicate (max 0 (columns-contentWidth-3)) " ")++side True else tailCell++side True
+      suffix=styledText background (T.replicate (max 0 (contentWidth-natural)) " ")++side False++if outgoing then tailCell else []
+      fromRuns runs=case styledRows runs of StyledRow value _ _:_->value; _->Nil
+      before=fromRuns prefix
+      shifted=V.map (\(a,z,lo,hi)->(a+sigilsLength before,z+sigilsLength before,lo,hi)) (mappedSourceRanges row)
+      paint=appendSigils before (appendSigils (mapSigilsStyle (BubbleText ident outgoing) sigils) (fromRuns suffix))
+  in row {mappedStyledRow=StyledRow paint newline (V.map (\(a,z,_,_)->(a,z,ident,outgoing)) shifted),mappedSourceRanges=shifted}
+  where
+    appendSigils Nil rest=rest
+    appendSigils (ConsChars text style rest) next=ConsChars text style (appendSigils rest next)
+    appendSigils (ConsSigil glyph style advance rest) next=ConsSigil glyph style advance (appendSigils rest next)
+    sigilColumns Nil=0
+    sigilColumns (ConsChars text _ rest)=T.length text+sigilColumns rest
+    sigilColumns (ConsSigil _ _ advance rest)=advance+sigilColumns rest
+
+withTail :: [a] -> [(a,[a])]
+withTail []=[]
+withTail (first:rest)=(first,rest):withTail rest
+lastRows :: Int -> [a] -> [a]
+lastRows count=toList . foldl' (\rows row->let next=rows Seq.|> row in if Seq.length next>count then Seq.drop 1 next else next) Seq.empty
 
 
 clipCells :: Int -> Text -> Text
@@ -333,13 +595,16 @@ isToolRecord (Activity _ value _)=field "status" value `elem`
   [Just ("pending"::Text),Just "in_progress",Just "completed",Just "failed"]
 isToolRecord _=False
 
+activityTitle :: Text -> Value -> Text
+activityTitle ident value=T.unwords (T.words ("["<>fromMaybe "activity" (field "status" value)<>"] "<>fromMaybe ident (field "title" value)))
+
 field :: FromJSON a => Text -> Value -> Maybe a
 field name=parseMaybe (withObject "object" (.: K.fromText name))
 jsonText :: ToJSON a => a -> Text
 jsonText=TE.decodeUtf8 . BL.toStrict . encode
 
-renderTimestamp :: Int -> Text -> [(Char,Style)]
-renderTimestamp width label = map (,Comment) (T.unpack (T.replicate (max 0 ((width-T.length label) `div` 2)) " "<>T.take (max 0 width) label))
+renderTimestamp :: Int -> Text -> StyledText
+renderTimestamp width label = styledText Comment (T.replicate (max 0 ((width-T.length label) `div` 2)) " "<>T.take (max 0 width) label)
 
 -- | The same scalar-wrapped labels prepare the static body and live paint.
 questionChoiceLines :: Int -> Bool -> Text -> Text
@@ -352,10 +617,10 @@ questionChoiceLines columns selected text=T.intercalate "\n" (zipWith (<>)
                   in T.take count remaining:wrap (T.drop count remaining)
 
 -- | Lay out Markdown as styled response-bubble characters for the chosen frontend.
-renderReply :: Bool -> Int -> Bool -> Text -> [(Char,Style)]
+renderReply :: Bool -> Int -> Bool -> Text -> StyledText
 renderReply graphical width outgoing = fst . renderReplyWithShellBlocks graphical width outgoing
 
-renderReplyWithShellBlocks :: Bool -> Int -> Bool -> Text -> ([(Char,Style)],[(Int,Int,Text,Text)])
+renderReplyWithShellBlocks :: Bool -> Int -> Bool -> Text -> (StyledText,[(Int,Int,Text,Text)])
 renderReplyWithShellBlocks graphical requested outgoing text
   | width<6 = (recolor markdown,blocks)
   | otherwise = (concat rendered,[(position blockStart,position blockEnd,dialect,body) | (blockStart,blockEnd,dialect,body)<-blocks])
@@ -366,38 +631,36 @@ renderReplyWithShellBlocks graphical requested outgoing text
     rendered=zipWith renderLine [0::Int ..] rows
     -- Every source cell survives bubble decoration; only row prefixes change.
     position offset =
-      let (row,column)=lineColumn (T.pack (map fst markdown)) offset
+      let (row,column)=lineColumn (styledContents markdown) offset
           renderedRow=row+if leadingCode then 1 else 0
           prefix=if outgoing then max 0 (width-bubbleWidth-3)+1 else 2
-      in sum (map length (take renderedRow rendered)) + (if renderedRow>0 then 1 else 0) + prefix + column
+      in sum (map styledLength (take renderedRow rendered)) + (if renderedRow>0 then 1 else 0) + prefix + column
     codeRow=any (\(_,style)->case style of BubbleText _ _ (CodeStyle _ _)->True; _->False)
     leadingCode=case contentRows of first:_->codeRow first; []->False
     trailingCode=case reverse contentRows of lastRow:_->codeRow lastRow; []->False
     rows=[[] | leadingCode]++contentRows++[[] | trailingCode]
-    columns chars=let t=T.pack (map fst chars) in displayColumn t (T.length t)
+    columns chars=let t=styledContents chars in displayColumn t (T.length t)
     bubbleWidth=maximum (0:map columns rows)
     background=BubbleStyle outgoing Plain
     edge=TerminalStyle (if outgoing then 0x00aaaa else 0xaaaaaa) 0x0000aa 0
     recolor=map (\(c,style)->(c,BubbleText 0 outgoing style))
-    spaces style n=replicate (max 0 n) (' ',style)
-    tile n=(bubbleTile graphical n,edge)
+    spaces style n=styledText style (T.replicate (max 0 n) " ")
+    tile n=(T.singleton (bubbleTile graphical n),edge)
     side first lastRow leftSide
       | first && lastRow = if leftSide then if outgoing then tile 4 else tile 2
                                             else if outgoing then tile 3 else tile 5
-      | first = if leftSide then if outgoing then tile 0 else (' ',background)
-                             else if outgoing then (' ',background) else tile 1
+      | first = if leftSide then if outgoing then tile 0 else (" ",background)
+                             else if outgoing then (" ",background) else tile 1
       | lastRow = tile (if leftSide then 2 else 3)
-      | otherwise = (' ',background)
+      | otherwise = (" ",background)
     lastIndex=length rows-1
     -- Margins belong to the bubble, never to copied text or shell-block spans.
     renderLine i chars =
-      [('\n',if (leadingCode && i==1) || (trailingCode && i==lastIndex) then background else BubbleText 0 outgoing Plain) | i>0] ++ line i chars
+      [("\n",if (leadingCode && i==1) || (trailingCode && i==lastIndex) then background else BubbleText 0 outgoing Plain) | i>0] ++ line i chars
     line i chars =
       let first=i==0; lastRow=i==lastIndex
           body=side first lastRow True:chars++spaces background (bubbleWidth-columns chars)++[side first lastRow False]
-          tailCell=if first then tile (if outgoing then 7 else 6) else (' ',Plain)
+          tailCell=if first then tile (if outgoing then 7 else 6) else (" ",Plain)
       in if outgoing then spaces Plain (width-bubbleWidth-3)++body++[tailCell]
                      else tailCell:body
-    splitRows chars=case break ((=='\n').fst) chars of
-      (row,[]) -> [row]
-      (row,_:rest) -> row:splitRows rest
+    splitRows=map fst . splitStyledText
