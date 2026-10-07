@@ -30,6 +30,7 @@ import Hide.Buffer (Buffer(revision),Selection(..),bufferLength)
 import Hide.LSP (uriFilePath)
 import Hide.Markdown (renderMarkdownWithShellBlocks)
 import Hide.Model
+import Hide.Syntax (styledContents,splitStyledText)
 
 -- | Accept control-free absolute HTTP(S) URLs with a nonempty host.
 validWebURL :: Text -> Bool
@@ -90,7 +91,7 @@ prepareMarkdown :: Int -> FilePath -> Text -> Text -> IO LinkResult
 prepareMarkdown columns path fragment text=do
   let (styled,blocks)=renderMarkdownWithShellBlocks columns text
       opened=addHelpStyled styled (initialDesktop (columns+4,25))
-      rows=map (T.pack . map fst) (splitStyled styled)
+      rows=map (styledContents . fst) (splitStyledText styled)
       matching=[i | (i,line)<-zip [0..] rows, slug line==fragment]
       row=if T.null fragment then 0 else fromMaybe 0 (case matching of first:_ -> Just first; _ -> Nothing)
   case activeDocument opened of
@@ -101,7 +102,6 @@ prepareMarkdown columns path fragment text=do
       pure (LinkDocument prepared row path)
   where
     slug=T.intercalate "-" . T.words . T.filter (\c->isAlphaNum c || c==' ' || c=='-' || c=='_') . T.toLower
-    splitStyled chars=let (line,rest)=break ((=='\n').fst) chars in line:case rest of []->[]; _:more->splitStyled more
 
 -- | Install a prepared document or status notice, returning an optional client packet.
 applyLink :: LinkResult -> Desktop -> (Desktop,Maybe Value)

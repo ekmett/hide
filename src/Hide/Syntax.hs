@@ -5,7 +5,7 @@
 -- styles. A tokenizer result is accepted only when it preserves the original
 -- characters exactly. Link and bubble annotations remain in the styled stream
 -- so later layout can retain interaction metadata without reparsing text.
-module Hide.Syntax (Style(..), Grapheme, graphemeText, graphemeDisplayText, Sigils(..), sourceSigilsWindow, SourceRow, SourceRange, prepareSourceRow, plainSourceRow, plainSourceLine, attachSourceLine, sourceRowText, sourceRowRanges, sourceRangeCharStart, sourceRangeCharEnd, sourceRangeByteStart, sourceRangeByteEnd, sourceRangeStyle, sourceRangeText, sourceStylesAt, presentationItems, styleOverflowExtent, styleLayoutMetadata, styleScript, fontTraits, sectionTitle, highlight, highlightFor, bubbleTile, linkSpans) where
+module Hide.Syntax (Style(..), StyledText, styledText, styledContents, compactStyled, styledLength, splitStyledAt, splitStyledText, StyledRow(..), MappedStyledRow(..), styledRows, sigilsText, sigilsLength, sigilsStyles, mapSigilsStyle, Grapheme, graphemeText, graphemeDisplayText, graphemeWidth, graphemeOverflow, Sigils(..), sourceSigilsWindow, SourceRow, SourceRange, prepareSourceRow, plainSourceRow, plainSourceLine, attachSourceLine, sourceRowText, sourceRowRanges, sourceRangeCharStart, sourceRangeCharEnd, sourceRangeByteStart, sourceRangeByteEnd, sourceRangeStyle, sourceRangeText, sourceStylesAt, presentationItems, styleOverflowExtent, styleLayoutMetadata, styleScript, fontTraits, sectionTitle, highlight, highlightFor, bubbleTile, linkSpans) where
 
 import Data.List (intercalate)
 import qualified Data.List as List
@@ -14,13 +14,117 @@ import Data.Word (Word32)
 import qualified Data.Text as T
 import qualified Data.Text.Unsafe as TU
 import qualified Data.Vector as V
-import Hide.Unicode (DisplayItem,itemScalarCount,itemOverflow,itemSourceText,itemDisplayText,itemWidth,sourceGraphemesFrom,sourceItemAdvance,displayItems,Script)
+import Hide.Unicode (DisplayItem,itemScalarCount,itemOverflow,itemSourceText,itemDisplayText,itemWidth,sourceGraphemesFrom,sourceItemAdvance,displayItems,scalarWidth,Script)
+import Hide.LineChunks (joinAdjacent)
 import Hide.Buffer (SourceLine,sourceLineText,sourceLineRawText,sourceLineLength,sourceLineHasChunks,sourceLineWindow)
 import qualified Skylighting as S
 import System.FilePath (takeFileName)
 
 -- | Token color intent plus nested prose, link, bubble or terminal annotations.
 data Style = OverflowFragment !Int Style | ScriptStyle !Script Style | SectionStyle Int Style | BoldStyle Style | ItalicStyle Style | LinkStyle T.Text Style | Plain | Heading Int | CodeStyle Bool Style | ProseStyle Style | Keyword | Comment | Literal | Number | Constructor | Pragma | BubbleStyle Bool Style | BubbleText Int Bool Style | TerminalStyle Word32 Word32 Word32 deriving (Eq,Show)
+
+-- | Borrowed lexical runs, before grapheme segmentation. Concatenation and
+-- decoration preserve every scalar; a style boundary is not a glyph boundary.
+-- The parser uses Seq internally for append, then passes these runs to its row
+-- worker. Runs are never expanded into character/style tuples.
+type StyledText = [(T.Text,Style)]
+
+-- | /O(1)/. Borrow one lexical run; empty input contributes no source extent.
+styledText :: Style -> T.Text -> StyledText
+styledText style text=[(text,style) | not (T.null text)]
+
+-- | Project exact lexical text. A single run retains its existing Text array.
+-- This projection belongs to parsing/preparation, never an interaction owner.
+styledContents :: StyledText -> T.Text
+styledContents=T.concat . map fst
+
+-- | Coalesce adjacent equal-style slices only when their immutable arrays
+-- prove they are contiguous. This borrows bytes without concatenation. Captured
+-- overflow starts remain separate even when two fragments share a style.
+compactStyled :: StyledText -> StyledText
+compactStyled []=[]
+compactStyled ((text,style):rest)
+  | T.null text=compactStyled rest
+  | otherwise=gather text rest
+  where
+    gather current ((next,other):more)
+      | T.null next=gather current more
+      | style==other,styleOverflowExtent style==Nothing,Just joined<-joinAdjacent current next=gather joined more
+    gather current remaining=(current,style):compactStyled remaining
+
+-- | Scalar extent of lexical runs, independent of display-cell width.
+styledLength :: StyledText -> Int
+styledLength=List.foldl' (\n (text,_)->n+T.length text) 0
+
+-- | Split exact scalar coordinates by borrowing Text slices. No glyph decision
+-- is made here; wrapping calls this only at its captured complete item edges.
+splitStyledAt :: Int -> StyledText -> (StyledText,StyledText)
+splitStyledAt requested=go (max 0 requested) []
+  where
+    go _ done []=(reverse done,[])
+    go n done remaining | n<=0=(reverse done,remaining)
+    go n done ((text,style):rest)
+      | T.null after=go (n-T.length before) ((before,style):done) rest
+      | otherwise=(reverse ((before,style):done),(after,style):rest)
+      where (before,after)=T.splitAt n text
+
+-- | Split LF on borrowed run boundaries. CR remains source text. The optional
+-- style names the removed newline, including its passive message identity.
+-- Concatenating rows and their breaks recovers the original lexical text.
+splitStyledText :: StyledText -> [(StyledText,Maybe Style)]
+splitStyledText=go []
+  where
+    go current []=[(reverse current,Nothing)]
+    go current ((text,style):rest)
+      | T.null text=go current rest
+      | T.null after=go ((text,style):current) rest
+      | otherwise=(reverse ([(before,style) | not (T.null before)]++current),Just style):
+          go [] ((T.drop 1 after,style):rest)
+      where (before,after)=T.breakOn "\n" text
+
+-- | One finalized physical row. Strict Sigils remain bounded by the demanded
+-- row; the enclosing row list stays lazy. Newline metadata is not painted.
+data StyledRow = StyledRow !Sigils !(Maybe Style) deriving Show
+
+-- | One demanded row's paint-to-logical source map. Furniture has no range;
+-- its hit boundary comes from the nearest logical edge. Expanded tabs can map
+-- several painted scalars to one logical scalar. Layout consumes these ranges
+-- into its glyph receipts rather than retaining another mapping owner.
+data MappedStyledRow = MappedStyledRow
+  { mappedStyledRow :: !StyledRow, mappedRowStart :: !Int, mappedRowEnd :: !Int
+  , mappedSourceRanges :: !(V.Vector (Int,Int,Int,Int))
+  } deriving Show
+
+-- | Segment before assigning styles, preserving cross-run graphemes and exact
+-- overflow markers. Only the first scalar's style paints a complete item.
+styledRows :: StyledText -> [StyledRow]
+styledRows=map (\(runs,newline)->StyledRow (styledSigils (compactStyled runs)) newline) . splitStyledText
+
+-- | Original bytes and scalar count of a finalized row, without display text.
+sigilsText :: Sigils -> T.Text
+sigilsText=T.concat . pieces
+  where
+    pieces Nil=[]
+    pieces (ConsChars text _ rest)=text:pieces rest
+    pieces (ConsSigil glyph _ _ rest)=graphemeText glyph:pieces rest
+sigilsLength :: Sigils -> Int
+sigilsLength=go 0
+  where
+    go !n Nil=n
+    go !n (ConsChars text _ rest)=go (n+T.length text) rest
+    go !n (ConsSigil glyph _ _ rest)=go (n+T.length (graphemeText glyph)) rest
+
+-- | Run-level metadata fold. Ordinary one-cell text is never expanded.
+sigilsStyles :: Sigils -> [Style]
+sigilsStyles Nil=[]
+sigilsStyles (ConsChars _ style rest)=style:sigilsStyles rest
+sigilsStyles (ConsSigil _ style _ rest)=style:sigilsStyles rest
+
+-- | Decorate a finalized row without changing source extents or geometry.
+mapSigilsStyle :: (Style -> Style) -> Sigils -> Sigils
+mapSigilsStyle _ Nil=Nil
+mapSigilsStyle f (ConsChars text style rest)=ConsChars text (f style) (mapSigilsStyle f rest)
+mapSigilsStyle f (ConsSigil glyph style advance rest)=ConsSigil glyph (f style) advance (mapSigilsStyle f rest)
 
 -- | Original source row and worker-prepared style ranges. Styling never changes
 -- character positions; range boundaries also name complete UTF8 codepoints.
@@ -66,23 +170,18 @@ data SourceRange = SourceRange
 -- owning worker; a trailing CR may remain). The source remains
 -- authoritative; missing style positions are Plain, and no token character is
 -- copied into the retained representation.
-prepareSourceRow :: T.Text -> [(Char,Style)] -> SourceRow
-prepareSourceRow text tokens=SourceRow text (V.fromList (ranges 0 0 tokens))
+prepareSourceRow :: T.Text -> StyledText -> SourceRow
+prepareSourceRow text tokens=SourceRow text (V.fromList (ranges 0 0 text (compactStyled tokens)))
   where
-    size=TU.lengthWord8 text
-    ranges !char !byte rest
-      | byte>=size=[]
-      | otherwise=let style=case rest of (_,s):_->s; _->Plain
-                      (endChar,endByte,after)=consume style char byte rest
-                  in SourceRange char endChar byte endByte style:ranges endChar endByte after
-    consume style !char !byte rest
-      | byte>=size=(char,byte,rest)
-      | otherwise=case rest of
-          (_,s):more | s/=style->(char,byte,rest)
-                     | otherwise->step more
-          [] | style/=Plain->(char,byte,rest)
-             | otherwise->step []
-      where step more=case TU.iter text byte of TU.Iter _ bytes->consume style (char+1) (byte+bytes) more
+    ranges !_ !_ remaining _ | T.null remaining=[]
+    ranges !char !byte remaining []=
+      [SourceRange char (char+T.length remaining) byte (byte+TU.lengthWord8 remaining) Plain]
+    ranges !char !byte remaining ((token,style):rest)
+      | T.null token=ranges char byte remaining rest
+      | otherwise=let (part,after)=T.splitAt (T.length token) remaining
+                      endChar=char+T.length part
+                      endByte=byte+TU.lengthWord8 part
+                  in SourceRange char endChar byte endByte style:ranges endChar endByte after rest
 
 -- | /O(1)/. Plain visible rows borrow their original Text without counting or
 -- rebuilding characters. Exact ranges remain available through 'sourceRowRanges'.
@@ -122,12 +221,22 @@ sourceStylesAt row offset=concat
 
 -- | One bounded source display item, borrowed from the original row.
 -- Normal graphemes stay complete; capped fragments keep separate display text.
-newtype Grapheme = Grapheme DisplayItem deriving (Eq,Show)
+data Grapheme = Grapheme !DisplayItem | OverflowGrapheme !T.Text deriving (Eq,Show)
 
 graphemeText :: Grapheme -> T.Text
 graphemeText (Grapheme item)=itemSourceText item
+graphemeText (OverflowGrapheme text)=text
 graphemeDisplayText :: Grapheme -> T.Text
 graphemeDisplayText (Grapheme item)=itemDisplayText item
+graphemeDisplayText OverflowGrapheme{}="�"
+
+-- | Natural displayed cells and captured overflow, independent of source size.
+graphemeWidth :: Grapheme -> Int
+graphemeWidth (Grapheme item)=itemWidth item
+graphemeWidth OverflowGrapheme{}=1
+graphemeOverflow :: Grapheme -> Bool
+graphemeOverflow (Grapheme item)=itemOverflow item
+graphemeOverflow OverflowGrapheme{}=True
 
 -- | Visible source display stream. Each character in ConsChars independently
 -- occupies one cell; ConsSigil retains one complete exceptional grapheme. Both
@@ -206,24 +315,24 @@ sourceSigilsWindow requested width row
             gather rangeLimit (col+1) (char+1) (byte+TU.lengthWord8 (itemSourceText glyph)) rest
           _->(char,byte,pending)
 
-highlight :: T.Text -> [(Char,Style)]
+highlight :: T.Text -> StyledText
 highlight = highlightFor "Main.hs"
 
 -- | Choose a grammar by filename, tokenize, and preserve exact source positions.
 -- Unknown grammars, tokenizer failure or normalized output fall back to plain text.
-highlightFor :: FilePath -> T.Text -> [(Char,Style)]
+highlightFor :: FilePath -> T.Text -> StyledText
 highlightFor path source = case S.syntaxesByFilename S.defaultSyntaxMap (takeFileName path) of
   syntax:_ -> case S.tokenize (S.TokenizerConfig S.defaultSyntaxMap False) syntax source of
     Right lines' ->
-      let styled = intercalate [('\n',Plain)] (map (concatMap paint) lines')
-                   ++ [('\n',Plain) | "\n" `T.isSuffixOf` source]
+      let styled = intercalate [("\n",Plain)] (map (concatMap paint) lines')
+                   ++ [("\n",Plain) | "\n" `T.isSuffixOf` source]
       -- Never change buffer positions if a tokenizer normalizes its input.
-      in if T.pack (map fst styled) == source then styled else plain
+      in if styledContents styled == source then styled else plain
     Left _ -> plain
   [] -> plain
   where
-    plain = map (,Plain) (T.unpack source)
-    paint (token,text) = map (,if markdown && token==S.FunctionTok then Heading (max 1 (min 6 (T.length (T.takeWhile (=='#') (T.stripStart text))))) else style token) (T.unpack text)
+    plain = styledText Plain source
+    paint (token,text) = styledText (if markdown && token==S.FunctionTok then Heading (max 1 (min 6 (T.length (T.takeWhile (=='#') (T.stripStart text))))) else style token) text
     markdown = any ((=="Markdown") . S.sName) (S.syntaxesByFilename S.defaultSyntaxMap (takeFileName path))
     style token = case token of
       S.KeywordTok -> Keyword; S.ControlFlowTok -> Keyword; S.ImportTok -> Keyword
@@ -244,7 +353,7 @@ bubbleTile graphical n
 
 -- | Collect half-open character-offset spans from nested link annotations.
 -- Compute during layout, not on each paint.
-linkSpans :: [(Char,Style)] -> [(Int,Int,T.Text)]
+linkSpans :: StyledText -> [(Int,Int,T.Text)]
 linkSpans = reverse . snd . List.foldl' collect (0,[])
   where
     target (OverflowFragment _ s)=target s
@@ -257,11 +366,11 @@ linkSpans = reverse . snd . List.foldl' collect (0,[])
     target (BubbleText _ _ s)=target s
     target (BubbleStyle _ s)=target s
     target _=Nothing
-    collect (offset,found) (_,style)=(offset+1,case target style of
+    collect (offset,found) (text,style)=(offset+T.length text,case target style of
       Nothing->found
       Just url->case found of
-        (start,end,old):rest | end==offset && url==old -> (start,offset+1,url):rest
-        _->(offset,offset+1,url):found)
+        (start,end,old):rest | end==offset && url==old -> (start,offset+T.length text,url):rest
+        _->(offset,offset+T.length text,url):found)
 
 -- | Captured scalar extent of a capped presentation fragment, at its first
 -- character. Wrapping retains the marker and original characters together.
@@ -287,32 +396,76 @@ styleLayoutMetadata s=styleScript s/=Nothing || styleOverflowExtent s/=Nothing
 -- after wrapping. Fresh Unicode segmentation cannot recover a fragment's GB11
 -- context, so annotated fragments consume their exact original scalar range.
 -- Ordinary items retain the shared stateful cursor; no source bytes are changed.
-presentationItems :: T.Text -> [(Char,Style)] -> [(T.Text,Bool)]
-presentationItems text=go text (map (\i->(itemSourceText i,itemOverflow i)) (displayItems text))
+presentationItems :: T.Text -> StyledText -> [(T.Text,Bool)]
+presentationItems text styled=go 0 text (map (\i->(itemSourceText i,itemOverflow i)) (displayItems text)) ranges
   where
-    go _ [] _=[]
-    go remaining pending@((glyph,overflow):rest) styles=
+    ranges=positions 0 styled
+    positions _ []=[]
+    positions !offset ((run,style):rest)
+      | T.null run=positions offset rest
+      | otherwise=let end=offset+T.length run in (offset,end,style):positions end rest
+    go _ _ [] _=[]
+    go offset remaining pending@((glyph,overflow):rest) styles=
       case styles of
-        (_,style):_ | Just n<-styleOverflowExtent style,n>0,n<=32,
-                      let original=T.take n remaining,T.length original==n ->
-          (original,True):go (T.drop n remaining) (skip n pending) (drop n styles)
-        _->case markerBefore (T.length glyph) 1 (drop 1 styles) of
-          Just n->(T.take n glyph,False):go (T.drop n remaining) (skip n pending) (drop n styles)
-          Nothing->let n=T.length glyph in (glyph,overflow):go (T.drop n remaining) rest (drop n styles)
-    -- Inserted padding can join a leading mark/ZWJ under GB9. Captured fragment
-    -- boundaries take precedence; that borrowed prefix is ordinary presentation.
-    markerBefore limit n styles
-      | n>=limit=Nothing
-      | otherwise=case styles of
-          (_,style):more | styleOverflowExtent style/=Nothing->Just n
-                         | otherwise->markerBefore limit (n+1) more
-          []->Nothing
+        (start,_,style):_ | start==offset,Just n<-styleOverflowExtent style,n>0,n<=32,
+                           let original=T.take n remaining,T.length original==n->
+          (original,True):go (offset+n) (T.drop n remaining) (skip n pending) (dropRanges (offset+n) styles)
+        _->case markerBefore (offset+T.length glyph) styles of
+          Just start->let n=start-offset in (T.take n glyph,False):
+            go start (T.drop n remaining) (skip n pending) (dropRanges start styles)
+          Nothing->let n=T.length glyph; end=offset+n
+                   in (glyph,overflow):go end (T.drop n remaining) rest (dropRanges end styles)
+      where
+        markerBefore limit ((start,_,style):more)
+          | start>=limit=Nothing
+          | start>offset && styleOverflowExtent style/=Nothing=Just start
+          | otherwise=markerBefore limit more
+        markerBefore _ []=Nothing
+    dropRanges offset ranges@((_,end,_):rest)
+      | end<=offset=dropRanges offset rest
+      | otherwise=ranges
+    dropRanges _ []=[]
     skip _ []=[]
     skip n pending@((glyph,overflow):rest)
       | n<=0=pending
       | n>=size=skip (n-size) rest
       | otherwise=(T.drop n glyph,overflow):rest
       where size=T.length glyph
+
+styledSigils :: StyledText -> Sigils
+styledSigils runs=build 0 0 text (presentationItems text runs) ranges
+  where
+    text=styledContents runs
+    ranges=V.toList (sourceRowRanges (prepareSourceRow text runs))
+    build !_ !_ _ [] _=Nil
+    build !offset !col raw ((glyph,overflow):rest) styles=
+      let current=dropRanges offset styles
+          style=case current of range:_->sourceRangeStyle range; _->Plain
+          count=T.length glyph
+          ordinary=not overflow && count==1 && T.all (\c->c>=' ' && c/='\DEL') glyph &&
+            T.all ((==1) . scalarWidth) glyph
+      in if ordinary then
+           let limit=case current of range:_->sourceRangeCharEnd range; _->maxBound
+               (end,after)=gather limit (offset+1) rest
+               (original,following)=T.splitAt (end-offset) raw
+           in ConsChars original style (build end (col+end-offset) following after current)
+         else let item=if overflow then OverflowGrapheme glyph else case displayItems glyph of
+                          [value]->Grapheme value
+                          _->OverflowGrapheme glyph
+                  advance=if overflow then 1 else case displayItems glyph of
+                    [value]->sourceItemAdvance col value
+                    _->1
+              in ConsSigil item style advance (build (offset+count) (col+advance) (T.drop count raw) rest current)
+    gather limit !offset pending
+      | offset>=limit=(offset,pending)
+      | otherwise=case pending of
+          (glyph,False):rest | T.length glyph==1,T.all (\c->c>=' ' && c/='\DEL') glyph,
+            T.all ((==1) . scalarWidth) glyph->gather limit (offset+1) rest
+          _->(offset,pending)
+    dropRanges offset ranges@(range:rest)
+      | sourceRangeCharEnd range<=offset=dropRanges offset rest
+      | otherwise=ranges
+    dropRanges _ []=[]
 
 -- | Outermost explicit script annotation, preserved through existing color,
 -- font, link and bubble wrappers. A script hint never changes source characters.

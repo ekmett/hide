@@ -23,7 +23,7 @@ import System.Mem.StableName
 import System.Timeout (timeout)
 import Hide.Buffer
 import Hide.Model
-import Hide.Syntax (Style,SourceRow,sourceRowText,sourceRowRanges,sourceRangeByteEnd,sourceRangeStyle,highlightFor)
+import Hide.Syntax (StyledText,SourceRow,sourceRowText,sourceRowRanges,sourceRangeByteEnd,sourceRangeStyle,highlightFor)
 
 -- Stable identity distinguishes replacements/reloads with equal revisions.
 data Key = Key Int Int FilePath (StableName Buffer) deriving Eq
@@ -47,7 +47,7 @@ withHighlighting = withHighlightingUsing initializeSyntax (\path text -> pure (h
 -- | Alternate initializer and tokenizer for deterministic lifecycle tests.
 -- Initialization has its own bounded worker phase; pending requests coalesce
 -- while it runs. The worker forces every source cell before publishing it.
-withHighlightingUsing :: IO () -> (FilePath -> Text -> IO [(Char,Style)]) -> (Highlighting -> IO a) -> IO a
+withHighlightingUsing :: IO () -> (FilePath -> Text -> IO StyledText) -> (Highlighting -> IO a) -> IO a
 withHighlightingUsing initialize tokenize action = do
   state<-newTVarIO (Work [] Nothing M.empty)
   withAsync (do

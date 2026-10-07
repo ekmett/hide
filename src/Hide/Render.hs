@@ -520,7 +520,7 @@ pluginWindowLayers d active w prepared=
           PluginWindow.PlainRows _->V.emptyImage
           PluginWindow.RowsDetails{}->V.emptyImage
           PluginWindow.StyledRows styled->V.translateX (negate (scrollColumn w))
-            (styledImage (darkAppearance d) selectable Nothing active (selection w) start (fromMaybe [] (styled Vec.!? n)))
+            (styledSigilsImage (darkAppearance d) selectable Nothing active (selection w) start (case styled Vec.!? n of Just (StyledRow sigils _)->sigils; _->Nil))
 
 -- Shared frame chrome uses the same semantic geometry as pointer dispatch.
 windowScrollbarImage :: Desktop -> Bool -> Window -> V.Image
@@ -632,17 +632,27 @@ windowLayers d active original =
                 | (i,(text,changed))<-zip [0::Int ..] chunks])) V.<|> V.charFill base ' ' contentWidth 1)
           Nothing -> renderLine (n-inlineRowDelta option)
       _ -> renderLine n
-    inlineChunk _ _ _ text True=[(ch,TerminalStyle 0xaaaaaa 0x0000aa 0) | ch<-T.unpack text]
-    inlineChunk option rowIndex chunkIndex text False=
-      [(ch,if active && offset+i>=lo && offset+i<hi then TerminalStyle 0x0000aa 0xaaaaaa 0 else style)
-      | (i,(ch,style))<-zip [0..] (zip (T.unpack text) styles)]
+    inlineChunk _ _ _ text True=styledText (TerminalStyle 0xaaaaaa 0x0000aa 0) text
+    inlineChunk option rowIndex chunkIndex text False=highlight offset (runs text ranges)
       where
         offset | rowIndex==0 && chunkIndex==0 = bufferLineOffset b (optionFirstRow option)
                | otherwise = proposalEnd (optionProposal option)
         (sourceRow,sourceColumn)=bufferLineColumn b offset
-        styles=case documentSourceRows doc >>= (Vec.!? sourceRow) of
-          Just row -> sourceStylesAt row sourceColumn++repeat Plain
-          Nothing -> repeat Plain
+        ranges=case documentSourceRows doc >>= (Vec.!? sourceRow) of
+          Just row->[(sourceRangeCharEnd range-max sourceColumn (sourceRangeCharStart range),sourceRangeStyle range)
+            | range<-Vec.toList (sourceRowRanges row),sourceRangeCharEnd range>sourceColumn]
+          Nothing->[]
+        runs remaining _ | T.null remaining=[]
+        runs remaining []=styledText Plain remaining
+        runs remaining ((count,style):rest)=let (part,after)=T.splitAt count remaining
+                                           in styledText style part++runs after rest
+        highlight _ []=[]
+        highlight position ((part,style):rest)=
+          let n=T.length part
+              a=max 0 (min n (lo-position)); z=max a (min n (hi-position))
+              (before,tailText)=T.splitAt a part; (chosen,after)=T.splitAt (z-a) tailText
+          in (if active then styledText style before++styledText (TerminalStyle 0x0000aa 0xaaaaaa 0) chosen++styledText style after
+              else styledText style part)++highlight (position+n) rest
         (lo,hi)=ordered (selection w)
     -- Docs: docs/editing.md (buffer views). Shared compact projections skip
     -- unchanged subtrees; only these visible rows request source text.
@@ -706,7 +716,7 @@ windowLayers d active original =
           | syntaxDocument doc = styledSourceImage (darkAppearance d) (lineColor n) active (selection w) (bufferLineOffset b n) (scrollColumn w) contentWidth
               (sourceRow n)
           | otherwise = V.translateX (negate (scrollColumn w)) (styledImage (darkAppearance d) selectable (lineColor n) active (selection w) (bufferLineOffset b n)
-              (if useStyles && not (null (documentHighlight doc)) then fromMaybe [] (atMay styledLines n) else [(ch,Plain) | ch<-T.unpack plain]))
+              (if useStyles && not (null (documentHighlight doc)) then fromMaybe [] (atMay styledLines n) else styledText Plain plain))
 
     sourceLines=contentSourceLinesFrom (bufferContent b) (max 0 (scrollRow w))
     sourceRow n=let line=if n>=max 0 (scrollRow w)
@@ -726,9 +736,8 @@ diffLineAttr line=attr (if "+" `T.isPrefixOf` line then V.RGBColor 85 255 85 els
 atMay :: [a] -> Int -> Maybe a
 atMay xs n = case drop n xs of a:_ -> Just a; [] -> Nothing
 
-splitStyled :: [(Char,Style)] -> [[(Char,Style)]]
-splitStyled []=[[]]
-splitStyled xs=let (a,b)=break ((=='\n').fst) xs in a:case b of []->[]; _:rest->splitStyled rest
+splitStyled :: StyledText -> [StyledText]
+splitStyled=map fst . splitStyledText
 
 -- Source runs retain original UTF8 slices. Selection cuts ordinary runs at
 -- character boundaries; exceptional graphemes keep one complete source target
@@ -780,67 +789,83 @@ sourceCellSpans project dark override active sel start left columns row=(column,
                    | otherwise=[project (CellGlyph paint shown advance 0 advance)]
       in occupied++draw (offset+n) rest
 
-styledImage :: Bool -> (Style -> Bool) -> Maybe V.Attr -> Bool -> Selection -> Int -> [(Char,Style)] -> V.Image
-styledImage dark selectable override active sel start chars
-  | all (\(c,_) -> c<'\128' && c/='\n') chars = V.horizCat (ascii 0 start chars)
-  | otherwise = V.horizCat
-  [I.HorizText paint (TL.fromStrict (T.concat [text | (_,text,_)<-run]))
-    (sum [width | (_,_,width)<-run]) (sum [T.length text | (_,text,_)<-run])
-  | run@((paint,_,_):_)<-groupBy (\(a,_,_) (b,_,_)->a==b) (expand 0 start (presentationItems (T.pack (map fst chars)) chars) chars)]
+styledImage :: Bool -> (Style -> Bool) -> Maybe V.Attr -> Bool -> Selection -> Int -> StyledText -> V.Image
+styledImage dark selectable override active sel start styled=case styledRows styled of
+  StyledRow sigils _:_->styledSigilsImage dark selectable override active sel start sigils
+  []->V.emptyImage
+
+-- Consume finalized borrowed rows directly; no pack/unpack or second glyph pass.
+styledSigilsImage :: Bool -> (Style -> Bool) -> Maybe V.Attr -> Bool -> Selection -> Int -> Sigils -> V.Image
+styledSigilsImage dark selectable override active sel start=V.horizCat . draw start
   where
     (lo,hi)=ordered sel
-    paintAt offset style = if active && selectable style && offset<hi && offset>=lo
-      then colored `V.withForeColor` blue `V.withBackColor` gray else colored
-      where
-        normal=syntaxAttr dark style
-        colored=maybe normal (\color->color {V.attrStyle=V.attrStyle normal}) override
-    -- Source token rows already carry character offsets. Ordinary ASCII needs
-    -- no grapheme Text per character: collect normalized output into paint runs.
-    -- Newlines retain the general path, including its CRLF cluster semantics.
-    ascii _ _ []=[]
-    ascii col offset tokens@((_,style):_)=collect (paintAt offset style) [] 0 col offset tokens
-    collect a reversed n _ _ []=[image a reversed n]
-    collect a reversed n col offset tokens@((c,style):rest)
-      | paintAt offset style/=a = image a reversed n:ascii col offset tokens
-      | c=='\r' = collect a reversed n col (offset+1) rest
-      | c=='\t' = let width=8-col `mod` 8 in collect a (replicate width ' '++reversed) (n+width) (col+width) (offset+1) rest
-      | otherwise = collect a ((if c<' ' || c=='\DEL' then '·' else c):reversed) (n+1) (col+1) (offset+1) rest
-    image a reversed n=I.HorizText a (TL.fromStrict (T.pack (reverse reversed))) n n
-    expand _ _ [] _=[]
-    expand col offset ((g,overflow):gs) styled = (a,text,width) : expand (col+width) (offset+T.length g) gs (drop (T.length g) styled)
-      where
-        style=case styled of (_,s):_->s; _->Plain
-        normal=syntaxAttr dark style
-        colored=maybe normal (\color->color {V.attrStyle=V.attrStyle normal}) override
-        a=if active && selectable style && offset<hi && offset+T.length g>lo then colored `V.withForeColor` blue `V.withBackColor` gray else colored
-        text | overflow="�"
-             | g=="\r"=""
-             | g=="\t"=T.replicate (8-col `mod` 8) " "
-             | otherwise=T.map (\c -> if c<' ' || c=='\DEL' then '·' else c) g
-        width | g=="\t"=8-col `mod` 8
-              | g=="\r"=0
-              | otherwise=clusterWidth text
+    color style=maybe normal (\paint->paint {V.attrStyle=V.attrStyle normal}) override
+      where normal=syntaxAttr dark style
+    selected paint=paint `V.withForeColor` blue `V.withBackColor` gray
+    image paint text advance=[I.HorizText paint (TL.fromStrict text) advance (T.length text) | not (T.null text)]
+    draw _ Nil=[]
+    draw offset (ConsChars text style rest)=
+      let n=T.length text; paint=color style
+          a=max 0 (min n (lo-offset)); z=max a (min n (hi-offset))
+          (before,tailText)=T.splitAt a text; (chosen,after)=T.splitAt (z-a) tailText
+          pieces=if active && selectable style && z>a then
+            image paint before a++image (selected paint) chosen (z-a)++image paint after (n-z)
+            else image paint text n
+      in pieces++draw (offset+n) rest
+    draw offset (ConsSigil glyph style advance rest)=
+      let original=graphemeText glyph; n=T.length original
+          paint=if active && selectable style && offset<hi && offset+n>lo then selected (color style) else color style
+          shown | original=="\r"=""
+                | original=="\t"=T.replicate advance " "
+                | graphemeOverflow glyph=graphemeDisplayText glyph
+                | T.any (\c->c<' ' || c=='\DEL') original=T.map (\c->if c<' ' || c=='\DEL' then '·' else c) original
+                | otherwise=graphemeDisplayText glyph
+      in image paint shown advance++draw (offset+n) rest
 
 -- Prepared semantic rows enter the common grid directly. Only the cached
 -- horizontal glyph slice is visited; padding is a separate baseline layer.
 -- Script metadata never passes through a Vty attribute or image round trip.
 styledLayoutRow :: Bool -> (Style -> Bool) -> Bool -> Selection -> Rect -> Int -> TextLayout.LayoutRow -> CellLayer
 styledLayoutRow dark selectable active sel (Rect x y columns _) left row=
-  CellRow (x+origin-left) y x (x+columns) (Vec.map span visible)
+  CellRow (x+origin-left) y x (x+columns) (Vec.fromList (concatMap spans (Vec.toList visible)))
   where
     visible=TextLayout.layoutVisibleGlyphs left columns row
     origin=maybe left TextLayout.layoutColumn (visible Vec.!? 0)
     (lo,hi)=ordered sel
-    span glyph=case TextLayout.layoutScript glyph of
-      Just script->CellScript paint text (TextLayout.layoutNatural glyph) script
-      Nothing | TextLayout.layoutAdvance glyph==T.length text && T.all (\c->c>=' ' && c/='\DEL' && scalarWidth c==1) text->CellText paint text
-              | otherwise->CellGlyph paint text (TextLayout.layoutAdvance glyph) 0 (TextLayout.layoutAdvance glyph)
+    spans glyph
+      | step>0=if step==1 && TextLayout.layoutScript glyph==Nothing then ordinary else characters 0 text
+      | otherwise=[case TextLayout.layoutScript glyph of
+          Just script->CellScript (paintAt a z) text (TextLayout.layoutNatural glyph) script
+          Nothing->CellGlyph (paintAt a z) text (TextLayout.layoutAdvance glyph) 0 (TextLayout.layoutAdvance glyph)]
       where
         text=TextLayout.layoutDisplayText glyph
         style=TextLayout.layoutStyle glyph
         normal=syntaxAttr dark style
-        paint=if active && selectable style && TextLayout.layoutStart glyph<hi && TextLayout.layoutEnd glyph>lo
-          then normal `V.withForeColor` blue `V.withBackColor` gray else normal
+        a=TextLayout.layoutStart glyph; z=TextLayout.layoutEnd glyph
+        step=TextLayout.layoutRunStep glyph
+        n=if step>0 then TextLayout.layoutAdvance glyph `div` step else 0
+        selected paint=paint `V.withForeColor` blue `V.withBackColor` gray
+        paintAt first lastOffset=if active && selectable style && first<hi && lastOffset>lo then selected normal else normal
+        cut value | z<=a=0
+                  | otherwise=max 0 (min n (((value-a)*n+z-a-1) `div` (z-a)))
+        first=cut lo; lastOffset=max first (cut hi)
+        (before,tailText)=T.splitAt first text
+        (chosen,after)=T.splitAt (lastOffset-first) tailText
+        piece paint value=[CellText paint value | not (T.null value)]
+        ordinary | active && selectable style && lastOffset>first=
+            piece normal before++piece (selected normal) chosen++piece normal after
+                 | otherwise=piece normal text
+        characters index remaining=case T.uncons remaining of
+          Nothing->[]
+          Just (_,rest)->
+            let char=T.take 1 remaining
+                first=a+index*(z-a) `div` n
+                lastOffset=a+((index+1)*(z-a)+n-1) `div` n
+                paint=paintAt first lastOffset
+                cell=case TextLayout.layoutScript glyph of
+                  Just script->CellScript paint char 1 script
+                  Nothing->CellGlyph paint char step 0 step
+            in cell:characters (index+1) rest
 
 -- One paint owner for ordinary and prepared semantic glyphs.
 syntaxAttr :: Bool -> Style -> V.Attr

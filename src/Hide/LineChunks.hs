@@ -11,7 +11,7 @@ module Hide.LineChunks
   ( Chunks, RawMeasure(..), ColumnAdvance(..), applyAdvance
   , chunksFromText, chunksEdit, chunksRawMeasure, chunksFlags, chunksWidth, chunksText, chunksPieces, chunksSlice, chunksFragments
   , chunksWindow, chunksExtentThrough, chunksDisplayColumn, chunksColumnOffset
-  , chunksPreviousCharacter, chunksSpanLeft, chunksSpanRight, chunksSuffixWidth
+  , chunksPreviousCharacter, chunksSpanLeft, chunksSpanRight, chunksSuffixWidth, joinAdjacent
   ) where
 
 import Data.Bits ((.&.), (.|.), shiftR, shiftL)

@@ -42,7 +42,7 @@ import Text.Read (readMaybe)
 import System.FilePath ((</>), takeDirectory, takeFileName, takeExtension, isAbsolute, splitDirectories, joinPath, normalise)
 import Hide.Browser (Entry(..))
 import Hide.Git (GitReview)
-import Hide.Syntax (Style(..), SourceRow, prepareSourceRow, highlightFor, linkSpans, styleLayoutMetadata)
+import Hide.Syntax (Style(..), StyledText, StyledRow, styledText, styledContents, styledRows, splitStyledText, SourceRow, prepareSourceRow, highlightFor, linkSpans, styleLayoutMetadata)
 import Hide.Hex
 import Hide.Unicode (textInputChar)
 import Hide.InlineState
@@ -61,7 +61,7 @@ inside (Rect x y w h) a b = a >= x && a < x+w && b >= y && b < y+h
 -- | Shared buffer and prepared presentation metadata; split windows reference its ID.
 -- documentOrigin retains canonical privacy provenance for generated source. It
 -- does not authorize saving, filesystem access or debugger source operations.
-data Document = Document { documentBuffer :: Buffer, documentFile :: Maybe FileState, documentLabel :: Maybe Text, documentHighlight :: [(Char,Style)], documentHasLayoutMetadata :: !Bool, documentWidth :: Int, documentCursorVisible :: Bool, documentSuggestedName :: Maybe FilePath, documentSourceRows :: Maybe (Vec.Vector SourceRow), documentShellBlocks :: [(Int,Int,Text,Text)], documentLinks :: [(Int,Int,Text)], documentMarkdownPath :: Maybe FilePath, documentOrigin :: Maybe FilePath } deriving (Eq,Show)
+data Document = Document { documentBuffer :: Buffer, documentFile :: Maybe FileState, documentLabel :: Maybe Text, documentHighlight :: StyledText, documentHasLayoutMetadata :: !Bool, documentWidth :: Int, documentCursorVisible :: Bool, documentSuggestedName :: Maybe FilePath, documentSourceRows :: Maybe (Vec.Vector SourceRow), documentShellBlocks :: [(Int,Int,Text,Text)], documentLinks :: [(Int,Int,Text)], documentMarkdownPath :: Maybe FilePath, documentOrigin :: Maybe FilePath } deriving (Eq,Show)
 -- Source colors are populated by the session worker, never forced by input or drawing.
 newDocument :: Buffer -> Maybe FileState -> Document
 newDocument b file = restyle (Document b file Nothing [] False 0 True Nothing Nothing [] [] Nothing Nothing)
@@ -73,7 +73,7 @@ restyle doc = doc {documentHighlight=[],documentHasLayoutMetadata=False,document
 -- | Install prepared styling and its cached layout admission together. The
 -- owner replaces content/version before installing new styles; input and layout
 -- admission read this flag without traversing the styled payload.
-setDocumentHighlight :: [(Char,Style)] -> Document -> Document
+setDocumentHighlight :: StyledText -> Document -> Document
 setDocumentHighlight styled doc=doc {documentHighlight=styled,documentHasLayoutMetadata=any (styleLayoutMetadata . snd) styled}
 
 syntaxDocument :: Document -> Bool
@@ -92,16 +92,14 @@ highlightDocument doc
   where text=contents (documentBuffer doc)
         tokens=highlightFor (documentSyntaxPath doc) text
 
-indexedHighlightRows :: [(Char,Style)] -> Vec.Vector [(Char,Style)]
-indexedHighlightRows = Vec.fromList . rows
-  where rows []=[[]]
-        rows xs=let (line,rest)=break ((=='\n').fst) xs in line:case rest of []->[]; _:more->rows more
+indexedHighlightRows :: StyledText -> Vec.Vector StyledRow
+indexedHighlightRows=Vec.fromList . styledRows
 
--- | Preserve original source Text while compressing tokenizer style positions.
+-- | Preserve original source Text while retaining borrowed tokenizer run ranges.
 -- Prepare on the highlighting worker; Markdown keeps its semantic styled rows.
-sourceHighlightRows :: Text -> [(Char,Style)] -> Vec.Vector SourceRow
+sourceHighlightRows :: Text -> StyledText -> Vec.Vector SourceRow
 sourceHighlightRows text tokens=Vec.imap (\i row->prepareSourceRow row (fromMaybe [] (styles Vec.!? i))) (Vec.fromList (T.splitOn "\n" text))
-  where styles=indexedHighlightRows tokens
+  where styles=Vec.fromList (map fst (splitStyledText tokens))
 
 measureDocumentWidth :: Text -> Int
 measureDocumentWidth text=maximum (0:[displayColumn line (T.length line) | raw<-textLines text,let line=T.dropWhileEnd (=='\r') raw])
@@ -2410,16 +2408,16 @@ windowQuestion d w=do
     then Just (q,projected) else Nothing
 
 -- | Only bounded question rows are projected; transcript/Markdown is untouched.
-questionOverlayRows :: Desktop -> Window -> [(Int,[(Char,Style)])]
+questionOverlayRows :: Desktop -> Window -> [(Int,StyledText)]
 questionOverlayRows d w=case windowQuestion d w of
   Nothing->[]
   Just (q,projected)->
-    [(offset,map (,Keyword) (T.unpack line))
+    [(offset,styledText Keyword line)
     | (index,(starts,text))<-zip [0..] (zip (projectedQuestionChoices projected) (questionChoices q))
     , questionChoice q==Just index
     , (offset,line)<-zip starts (T.splitOn "\n" (questionChoiceLines columns True text))]
-    ++[(projectedQuestionInput projected-7,map (,if questionChoice q==Nothing then Literal else Plain)
-      (T.unpack ("Other: "<>shown<>T.replicate (max 1 (columns-7-displayColumn shown (T.length shown))) " ")))]
+    ++[(projectedQuestionInput projected-7,styledText (if questionChoice q==Nothing then Literal else Plain)
+      ("Other: "<>shown<>T.replicate (max 1 (columns-7-displayColumn shown (T.length shown))) " "))]
     where columns=projectedQuestionWidth projected; shown=questionVisibleInput columns q
 
 -- | The live input starts at this body coordinate. Its width is also used for
@@ -4356,8 +4354,8 @@ openDirectoryBrowser base entries d = d {dialog=Just (Dialog "Change directory" 
 openBrowser :: FilePath -> Text -> [Entry] -> Desktop -> Desktop
 openBrowser base pattern entries d = d {dialog=Just (Dialog "Open a file" (Opening base pattern entries) [Input "Name" pattern (T.length pattern),FileList entries 0] 1 ["Open","Cancel"] []),menu=Nothing,drag=Nothing,dragOriginal=Nothing}
 
-addHelpStyled :: [(Char,Style)] -> Desktop -> Desktop
-addHelpStyled chars d = let opened=addHelp (T.pack (map fst chars)) d
+addHelpStyled :: StyledText -> Desktop -> Desktop
+addHelpStyled chars d = let opened=addHelp (styledContents chars) d
                        in case activeWindow opened of
                          Nothing -> opened
                          Just w | Just bid<-bufferId w -> opened {buffers=M.adjust (\doc -> (setDocumentHighlight [(c,ProseStyle style) | (c,style)<-chars] doc) {documentLinks=linkSpans chars}) bid (buffers opened)}

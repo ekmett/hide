@@ -21,7 +21,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Hide.Buffer
 import Hide.Model hiding (message)
-import Hide.Syntax (Style(..))
+import Hide.Syntax (Style(..),StyledText,styledContents)
 import Hide.Terminal
 
 newtype Consoles = Consoles (MVar (Integer,M.Map Text Console))
@@ -184,7 +184,7 @@ showConsole console desktop = case M.lookup bid (buffers desktop) of
   Nothing -> desktop -- Closing a window must not reopen it on the next tick.
   Just original ->
     let styled = snapshotStyles snapshot
-        text = T.pack (map fst styled)
+        text = styledContents styled
         -- Terminal snapshots only produce TerminalStyle, never script hints.
         rendered = if documentHighlight original == styled then original else original
           {documentBuffer=newBuffer text,documentHighlight=styled,documentHasLayoutMetadata=False}
@@ -206,16 +206,15 @@ showConsole console desktop = case M.lookup bid (buffers desktop) of
     bid = consoleBuffer console
     snapshot = latestSnapshot console
 
-snapshotStyles :: TerminalSnapshot -> [(Char,Style)]
-snapshotStyles snapshot = intercalate [('\n',Plain)] (map (concatMap cell) (rows (snapshotCells snapshot)))
+snapshotStyles :: TerminalSnapshot -> StyledText
+snapshotStyles snapshot = intercalate [("\n",Plain)] (map (concatMap cell) (rows (snapshotCells snapshot)))
   where
     columns = max 1 (snapshotColumns snapshot)
     rows [] = []
     rows cells = let (row,rest) = splitAt columns cells in row : rows rest
     cell value
       | cellWidth value == 0 = []
-      | otherwise = [(char,TerminalStyle (cellForeground value) (cellBackground value) (cellAttributes value))
-                    | char <- T.unpack (if T.null (cellText value) then " " else cellText value)]
+      | otherwise = [(if T.null (cellText value) then " " else cellText value,TerminalStyle (cellForeground value) (cellBackground value) (cellAttributes value))]
 
 listConsoles :: Consoles -> IO [(Text,Int,Maybe Int)]
 listConsoles (Consoles state)=withMVar state $ \(_,consoles) -> pure [(ident,consoleBuffer c,snapshotExitCode (latestSnapshot c)) | (ident,c)<-M.toAscList consoles]

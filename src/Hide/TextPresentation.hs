@@ -13,16 +13,15 @@ import qualified Data.Map.Strict as M
 import qualified Data.Vector as V
 import Hide.Buffer (BufferContent,bufferContent,contentSlice,contentLength,newBuffer,prepareBuffer)
 import Hide.Markdown (renderMarkdown)
-import Hide.Syntax (linkSpans,styleLayoutMetadata)
+import Hide.Syntax (linkSpans,styleLayoutMetadata,StyledText,StyledRow,styledContents)
 import qualified Data.Text as T
 import Hide.Model
 import Hide.ConversationBody (BodyRequest(..),BodyResult(..),BodyKey,prepareConversationBody)
 import qualified Hide.Plugin.Window as W
-import Hide.Syntax (Style)
 import Hide.TextLayout (prepareTextLayout)
 
 type Target = (Int,PresentationTarget,Int,Bool)
-data StyledPayload = MarkdownSource | DocumentStyles ![(Char,Style)] | PluginStyles !(V.Vector [(Char,Style)])
+data StyledPayload = MarkdownSource | DocumentStyles !StyledText | PluginStyles !(V.Vector StyledRow)
 data Capture = Capture !Target !BufferContent !StyledPayload
 data Pending = Pending [Target] [BodyKey] (Async ([(Int,WindowPresentation)],[BodyResult]))
 data TextPresentation = TextPresentation (IORef (Maybe Pending)) (IORef ([Target],[BodyKey]))
@@ -81,7 +80,7 @@ tickTextPresentation (TextPresentation pending observed) bodies desktop=mask $ \
 prepare :: Capture -> IO (Int,WindowPresentation)
 prepare (Capture (ident,target,width,wide) text MarkdownSource)=do
   let chars=renderMarkdown width (contentSlice text 0 (contentLength text))
-      rendered=T.pack (map fst chars)
+      rendered=styledContents chars
   let measured=newBuffer rendered
   _<-evaluate (prepareBuffer measured)
   let content=bufferContent measured

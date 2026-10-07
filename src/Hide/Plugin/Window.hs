@@ -18,7 +18,7 @@ module Hide.Plugin.Window
   ( WindowRef, WindowScope, WindowUpdate, withWindowScope, openTextWindow, refreshTextWindow
   , updateWindowRef, admitWindowUpdate, windowRefCurrent, windowScopeCurrent, retireWindowRef
   , EditorWindowUpdate, openEditorWindow, editorWindowBody, editorWindowEditor, admitEditorWindowUpdate
-  , PreparedWindow, prepareTextWindow, prepareMarkdownWindow, prepareStyledTextWindow, prepareSemanticTextWindow, prepareRecoverableTextWindow
+  , PreparedWindow, prepareTextWindow, prepareMarkdownWindow, prepareStyledTextWindow, prepareStyledRowsWindow, prepareSemanticTextWindow, prepareSemanticRowsWindow, prepareRecoverableTextWindow
   , WindowDisclosure(..), TextCopy(..), MessageAttribution(..), TextSemantics(..), preparedWindowSemantics, preparedWindowDisclosure, preparedWindowMessages, copyPreparedSelection
   , WindowRow(..), prepareRowsWindow, prepareRecoverableRowsWindow
   , WindowRows(..), preparedWindowTitle, preparedWindowText, preparedWindowRows, preparedWindowWidth, preparedWindowHasSections, preparedWindowNeedsLayout, preparedWindowRecovery
@@ -36,10 +36,10 @@ import Hide.Plugin.Menu (MenuRef)
 import Data.List (nub,foldl',groupBy)
 import Hide.Buffer (contentLength,contentSlice,BufferContent, bufferContent, newBuffer, prepareBuffer)
 import Hide.Unicode (sourceTextWidth)
-import Hide.Markdown (renderMarkdown)
+import Hide.Markdown (renderMarkdownRows)
 import Hide.Plugin.Command (validCommandName)
 import qualified Hide.Plugin.EditorHost as E
-import Hide.Syntax (Style(..),SourceRow,plainSourceRow,sourceRowText,sourceRowRanges,sourceRangeCharEnd,sectionTitle,styleLayoutMetadata)
+import Hide.Syntax (Style(..),StyledText,StyledRow(..),Sigils(..),styledRows,sigilsText,sigilsLength,sigilsStyles,graphemeText,SourceRow,plainSourceRow,sourceRowText,sourceRowRanges,sourceRangeCharEnd,sectionTitle,styleLayoutMetadata)
 
 -- | Exact content instance. A closed/reopened view cannot reuse this identity.
 data WindowRef = WindowRef Unique WindowScope !WindowDisclosure (TVar (Integer,Bool))
@@ -55,7 +55,7 @@ instance Show WindowRef where
 -- | One stable selectable row and its already-prepared plain Details snapshot.
 -- IDs are local to the containing WindowRef; labels never identify actions.
 data WindowRow = WindowRow !NodeId !Text !PreparedWindow
-data WindowRows = PlainRows !(V.Vector SourceRow) | StyledRows !(V.Vector [(Char,Style)])
+data WindowRows = PlainRows !(V.Vector SourceRow) | StyledRows !(V.Vector StyledRow)
   | RowsDetails !(V.Vector WindowRow) !(M.Map NodeId Int) ![MenuRef]
 -- | Observation only. Readability grants no input, shell or command authority.
 -- The declaration is frozen by each WindowRef; changing it needs a fresh open.
@@ -138,16 +138,22 @@ copyPreparedSelection prepared start end=case maybe CopyText textCopy (preparedW
     first=max 0 (min (contentLength source) start)
     lastOffset=max first (min (contentLength source) end)
 
-messageIntervals :: [(Char,Style)] -> V.Vector (Int,Int,Int,Bool)
-messageIntervals=V.fromList . go 0 Nothing []
+messageIntervals :: [StyledRow] -> V.Vector (Int,Int,Int,Bool)
+messageIntervals rows=V.fromList (reverse (maybe done (:done) current))
   where
-    go !_ current done []=reverse (maybe done (:done) current)
-    go !offset current done ((_,style):rest)=case style of
+    (_,current,done)=foldl' row (0,Nothing,[]) rows
+    row state (StyledRow sigils newline)=maybe after (\style->collect after 1 style) newline
+      where after=go state sigils
+    go state Nil=state
+    go state (ConsChars text style rest)=go (collect state (T.length text) style) rest
+    go state (ConsSigil glyph style _ rest)=go (collect state (T.length (graphemeText glyph)) style) rest
+    collect (offset,current,done) count style=(offset+count,case style of
       BubbleText ident outgoing _->case current of
-        Just (a,_,previous,sent) | previous==ident && sent==outgoing->
-          go (offset+1) (Just (a,offset+1,ident,outgoing)) done rest
-        _->go (offset+1) (Just (offset,offset+1,ident,outgoing)) (maybe done (:done) current) rest
-      _->go (offset+1) Nothing (maybe done (:done) current) rest
+        Just (a,_,previous,sent) | previous==ident && sent==outgoing->Just (a,offset+count,ident,outgoing)
+        _->Just (offset,offset+count,ident,outgoing)
+      _->Nothing,case (style,current) of
+        (BubbleText ident outgoing _,Just (_,_,previous,sent)) | previous==ident && sent==outgoing->done
+        _->maybe done (:done) current)
 
 -- | /O(1)/. Explicit immutable observation declaration, private by default.
 preparedWindowDisclosure :: PreparedWindow -> WindowDisclosure
@@ -156,9 +162,15 @@ preparedWindowDisclosure=maybe PrivateWindow textDisclosure . preparedWindowSema
 -- | Prepare styled text and validate every semantic interval on its worker.
 -- @0 <= start <= end <= contentLength preparedWindowText@ holds for every
 -- returned range. Strings and vectors are forced here; adoption only reads refs.
-prepareSemanticTextWindow :: Text -> [(Char,Style)] -> TextSemantics -> IO (Either Text PreparedWindow)
-prepareSemanticTextWindow title styled semantics=do
-  PreparedWindow ident caption text rows width recovery sections scripts _<-prepareStyledTextWindow title styled
+prepareSemanticTextWindow :: Text -> StyledText -> TextSemantics -> IO (Either Text PreparedWindow)
+prepareSemanticTextWindow title styled=prepareSemanticRowsWindow title (styledRows styled)
+
+-- | Prepare already-finalized demanded rows without segmenting them again.
+-- Semantic intervals address their exact original scalar text, including the
+-- retained styled newline decisions.
+prepareSemanticRowsWindow :: Text -> [StyledRow] -> TextSemantics -> IO (Either Text PreparedWindow)
+prepareSemanticRowsWindow title styled semantics=do
+  PreparedWindow ident caption text rows width recovery sections scripts _<-prepareStyledRowsWindow title styled
   let valid (a,z)=a>=0 && a<=z && z<=contentLength text
       ranges=V.map (\(a,z,_)->(a,z)) (textLinks semantics) V.++
         V.map (\(a,z,_,_)->(a,z)) (textShellBlocks semantics) V.++
@@ -254,26 +266,35 @@ prepareTextWindow title text=do
 -- | Prepare CommonMark at a requested cell width on the calling worker.
 -- Copy addresses the laid-out semantic text, excluding host chrome.
 prepareMarkdownWindow :: Int -> Text -> Text -> IO PreparedWindow
-prepareMarkdownWindow columns title text=prepareStyledTextWindow title (renderMarkdown columns text)
+prepareMarkdownWindow columns title text=prepareStyledRowsWindow title (renderMarkdownRows columns text)
 
 -- | Prepare explicit semantic styled text on the calling worker. Source/copy
 -- remains exactly the supplied characters; script hints do not insert markers.
 -- This is the same row owner used by ordinary text and CommonMark preparation.
-prepareStyledTextWindow :: Text -> [(Char,Style)] -> IO PreparedWindow
-prepareStyledTextWindow title styled=do
+prepareStyledTextWindow :: Text -> StyledText -> IO PreparedWindow
+prepareStyledTextWindow title=prepareStyledRowsWindow title . styledRows
+
+-- | Prepare exactly the supplied finalized rows. The caller owns the demand
+-- boundary: a conversation supplies its visible slice, never one strict Sigils
+-- chain for the complete history. Ordinary public text windows may supply all
+-- their rows. Original text and newline metadata remain the copy projection.
+prepareStyledRowsWindow :: Text -> [StyledRow] -> IO PreparedWindow
+prepareStyledRowsWindow title styled=do
   ident<-newUnique
-  let rows=V.fromList (split styled)
-  _<-evaluate (V.foldl' (\n row->foldl' (\m (c,s)->c `seq` s `seq` m+1) n row) (0::Int) rows)
-  let source=T.pack (map fst styled)
+  let rows=V.fromList styled
+      textOfRow (StyledRow sigils newline)=sigilsText sigils<>maybe "" (const "\n") newline
+      source=T.concat (map textOfRow styled)
       measured=newBuffer source
+      styles (StyledRow sigils newline)=sigilsStyles sigils++maybe [] pure newline
+      metadata predicate=any (any predicate . styles) styled
+      width=V.foldl' (\longest (StyledRow sigils _)->max longest (extent 0 sigils)) 0 rows
+      extent !col Nil=col
+      extent !col (ConsChars text _ rest)=extent (col+T.length text) rest
+      extent !col (ConsSigil _ _ advance rest)=extent (col+advance) rest
+  _<-evaluate (V.foldl' (\n (StyledRow sigils newline)->n+sigilsLength sigils+maybe 0 (\style->style `seq` 1) newline) 0 rows)
   _<-evaluate (prepareBuffer measured)
-  let width=maximum (0:map sourceTextWidth (T.splitOn "\n" source))
   _<-evaluate width
-  evaluate (PreparedWindow ident (safeTitle title) (bufferContent measured) (StyledRows rows) width Nothing (any (sectionTitle . snd) styled) (any (styleLayoutMetadata . snd) styled) Nothing)
-  where
-    split chars=case break ((=='\n').fst) chars of
-      (line,[])->[line]
-      (line,_:rest)->line:split rest
+  evaluate (PreparedWindow ident (safeTitle title) (bufferContent measured) (StyledRows rows) width Nothing (metadata sectionTitle) (metadata styleLayoutMetadata) Nothing)
 
 safeTitle :: Text -> Text
 safeTitle=T.take 8192 . T.map (\c->if c<' ' || c=='\DEL' then ' ' else c)
