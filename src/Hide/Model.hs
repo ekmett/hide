@@ -2566,7 +2566,10 @@ ensureQuestionVisible d=case chatQuestion d of
             Nothing->projectedQuestionInput projection/=Nothing
           _->False) (windows d)
         changed=if visible then d else d {conversationViews=M.adjust (\view->view {
-          conversationAnchor=At (QuestionPoint (questionToken q) (questionBlock q) 0),conversationRowShift=0}) "" (conversationViews d)}
+          conversationAnchor=At (QuestionPoint (questionToken q) (questionBlock q) 0),
+          -- A deliberate control reveal requests nearby prompt context. Keep
+          -- room for Other and Submit; ordinary resize still has zero shift.
+          conversationRowShift=negate (max 0 (conversationHeightFor "" d-(if questionChoice q==Nothing then 2 else 1)))}) "" (conversationViews d)}
         revealedWindows=map reveal (windows changed)
         revealedAnchor=case [(w,old) | w<-revealedWindows,old<-windows changed,windowId w==windowId old,scrollRow w/=scrollRow old,
                     conversationTargetFor changed w==Just ""] of
