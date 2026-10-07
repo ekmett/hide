@@ -651,7 +651,7 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ withTextPresentation $ 
       let originalIdentity=questionBody first
       unchanged<-tickConversation runtime first
       let unchangedIdentity=questionBody unchanged
-      check "unchanged question redraw never compares retained answer history"
+      check ("unchanged question redraw never compares retained answer history: "++show (originalIdentity==unchangedIdentity,map scrollRow (windows first),map scrollRow (windows unchanged),fmap (\v->(conversationAnchor v,conversationRowShift v)) (M.lookup "" (conversationViews first)),fmap (\v->(conversationAnchor v,conversationRowShift v)) (M.lookup "" (conversationViews unchanged))))
         (originalIdentity==unchangedIdentity && map scrollRow (windows first)==map scrollRow (windows unchanged))
       let replacement=newBuffer "fresh answer"
           replaced=unchanged {chatQuestion=Just q {questionBuffer=replacement}}
