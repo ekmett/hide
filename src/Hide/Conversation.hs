@@ -657,15 +657,20 @@ conversationBodyRequests (ConversationState _ ref _ agents) desktop=do
           (BodyKey reference target (logicalBodyProvider logical) (logicalBodyTranscriptIdentity logical) Nothing
             (conversationWidthFor target desktop) (videoMode desktop/=Nothing) (wideSectionTitles desktop)
             (BodyDemand (conversationAnchor view) (conversationRowShift view) (conversationHeightFor target desktop)) expansion)
-          (BodyInput (if T.null target then "Conversation" else conversationName view) (project state) Nothing [] Nothing S.empty (Just logical))]
+          (BodyInput (if T.null target then "Conversation" else conversationName view) (project state) Nothing [] Nothing S.empty (Just logical) (capturedSelection view))]
         _->case captured of
           Just owner | live && owns->let same=maybe True ((==owner).logicalBodyProvider) (conversationLogical view)
             in [BodyRequest (BodyKey reference target owner identity (case schema of Just (QuestionSchema token _ _)->Just token; Nothing->Nothing)
               (conversationWidthFor target desktop) (videoMode desktop/=Nothing) (wideSectionTitles desktop)
               (BodyDemand (if same then conversationAnchor view else FollowEnd) (if same then conversationRowShift view else 0) (conversationHeightFor target desktop)) expansion)
               (BodyInput (if T.null target then "Conversation" else conversationName view) (project state) sessionName records
-                schema (toolExpansions state) (conversationLogical view))]
+                schema (toolExpansions state) (conversationLogical view) (if same then capturedSelection view else Nothing))]
           _->[]
+
+capturedSelection :: ConversationView -> Maybe BodySelection
+capturedSelection view=case conversationReplySelection view of
+  Just selected->selected `seq` Just selected
+  Nothing->Nothing
 
 -- Completed streaming text may trail the latest root while the single worker
 -- prepares its successor. Owner/question/UI expansion identities remain exact.
@@ -678,7 +683,7 @@ adoptConversationBodies runtime results desktop=do
       []->pure current
       _->case result of
         Left err->pure current {status=err}
-        Right (PreparedBody body layout controls logical)->do
+        Right (PreparedBody body layout controls logical normalized)->do
           admitted<-case bodyProvider key of
             RecoveredBodyProvider identity | bodyWindow key `S.member` retiredPluginWindows current,
               Just retained<-conversationLogicalBody (bodyTarget key) current,
@@ -705,7 +710,9 @@ adoptConversationBodies runtime results desktop=do
                       conversationAnchor=maybe (conversationAnchor view) viewportAnchor viewport,conversationRowShift=0,
                       conversationBody=InstalledBody (bodyWindow key) (Just (BodyControlReceipt body (bodyColumns key) (bodyWide key) layout controls)),
                       conversationReplySelection=case conversationReplySelection view of
-                        Just (BodySelection a z) | same && survives a && survives z->Just (BodySelection a z)
+                        Just chosen@(BodySelection a z) | same && survives a && survives z->case normalized of
+                          Just (original,clamped) | chosen==original->clamped
+                          _->Just chosen
                         _->Nothing,conversationCaretIntent=if same then conversationCaretIntent view else Nothing}
                                 in settleConversationCaret viewport preparedView
                     retainedViews=M.adjust retain target (conversationViews next)

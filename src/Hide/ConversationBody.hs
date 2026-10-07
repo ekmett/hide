@@ -162,6 +162,19 @@ validateLogicalPoint body (BodyPoint ident block scalar)=do
   text<-maybe (Left "Conversation position names a missing block.") Right source
   if scalar>=0 && scalar<=T.length text then Right () else Left "Conversation position is outside its logical block."
 
+-- Source replacement may shorten an existing item. Normalize only its named
+-- endpoints on the worker; missing identities are never redirected elsewhere.
+clampPoint :: LogicalBody -> BodyPoint -> Maybe BodyPoint
+clampPoint body (BodyPoint ident block scalar)=do
+  index<-logicalBodyItemIndex ident body
+  let texts=itemBlockTexts (logicalItems body V.! index)
+      selected=max 0 (min (max 0 (V.length texts-1)) block)
+      size=maybe 0 T.length (texts V.!? selected)
+  pure (BodyPoint ident selected (max 0 (min size (if selected==block then scalar else maxBound))))
+clampPoint body point@(QuestionPoint token _ _)=case logicalQuestion body of
+  Just (QuestionSchema current _ _) | token==current->Just point
+  _->Nothing
+
 -- | /O(1)/. Borrow ordered items. Their parser owners remain lazy.
 logicalBodyItems :: LogicalBody -> V.Vector LogicalItem
 logicalBodyItems=logicalItems
@@ -368,10 +381,12 @@ data BodyInput = BodyInput
   { bodyTitle :: !Text, bodyProject :: !FilePath, bodySession :: !(Maybe Text)
   , bodyRecords :: ![Record], bodyQuestion :: !(Maybe QuestionSchema)
   , bodyExpandedTools :: !(Set (Text,ToolExpansion)), bodyPreviousLogical :: !(Maybe LogicalBody)
+  , bodySelection :: !(Maybe BodySelection)
   }
 data BodyRequest = BodyRequest !BodyKey !BodyInput
 data BodyResult = BodyResult !BodyKey !(Either Text PreparedBody)
 data PreparedBody = PreparedBody !W.PreparedWindow !(Maybe TextLayout) !HostBodyControls !LogicalBody
+  !(Maybe (BodySelection,Maybe BodySelection))
 
 -- Private host-minted regions; public TextSemantics cannot install controls.
 data HostBodyControls = HostBodyControls
@@ -428,7 +443,7 @@ restoreLogicalViewport :: Bool -> Bool -> Int -> Int -> BodyAnchor -> LogicalBod
 restoreLogicalViewport graphical wide columns height anchor source=do
   logical<-withLogicalWidth (max 1 (columns-5)) source
   let display=BodyDisplay (logicalTarget logical) (max 1 columns) graphical wide (BodyDemand anchor 0 (max 1 height))
-      input=BodyInput "Conversation" "" Nothing (map logicalItemRecord (V.toList (logicalItems logical))) Nothing S.empty (Just logical)
+      input=BodyInput "Conversation" "" Nothing (map logicalItemRecord (V.toList (logicalItems logical))) Nothing S.empty (Just logical) Nothing
   fmap (\(body,_,_)->body) <$> prepareRenderedBody True display input logical
 
 -- A row is derived only while its block is demanded. Logical ranges are
@@ -444,7 +459,16 @@ prepareConversationBody (BodyRequest key input)=do
   logical<-prepareLogicalBody key input (bodyPreviousLogical input)
   let display=BodyDisplay (bodyTarget key) (bodyColumns key) (bodyGraphical key) (bodyWide key) (bodyDemand key)
   result<-prepareRenderedBody (case bodyProvider key of RecoveredBodyProvider{}->True; _->False) display input logical
-  pure (BodyResult key (fmap (\(body,layout,controls)->PreparedBody body layout controls logical) result))
+  let sourceChanged=case bodyPreviousLogical input of
+        Just previous->logicalTranscript previous/=logicalTranscript logical || logicalProvider previous/=logicalProvider logical
+        Nothing->True
+  normalized<-if sourceChanged then traverse (normalize logical) (bodySelection input) else pure Nothing
+  pure (BodyResult key (fmap (\(body,layout,controls)->PreparedBody body layout controls logical normalized) result))
+  where
+    normalize logical original@(BodySelection a z)=do
+      let normalized=BodySelection <$> clampPoint logical a <*> clampPoint logical z
+      case normalized of Just chosen->evaluate chosen >> pure (); Nothing->pure ()
+      pure (original,normalized)
 
 prepareRenderedBody :: Bool -> BodyDisplay -> BodyInput -> LogicalBody -> IO (Either Text (W.PreparedWindow,Maybe TextLayout,HostBodyControls))
 prepareRenderedBody inert key input logical=case demandedRows key input logical of
