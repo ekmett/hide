@@ -80,6 +80,18 @@ draftAt b selected d=setComposerInput b selected True d
 sameDraftRoot :: Desktop -> Desktop -> IO Bool
 sameDraftRoot before after=captureVersion (composerBuffer before) >>= \version->versionCurrent version (composerBuffer after)
 
+-- Input checks attach the authenticated token to their already-admitted
+-- immutable body; setting ChatQuestion alone grants no editing authority.
+questionOwner :: Int -> Desktop -> Desktop
+questionOwner token desktop=desktop {conversationViews=M.adjust authorize "" (conversationViews desktop)}
+  where
+    body=fromMaybe (error "Missing inline question fixture body") (conversationBodySnapshot "" desktop)
+    columns=maybe 1 (\window->max 1 (width (bounds window)-2)) (activeWindow desktop)
+    authorize view=case conversationBody view of
+      InstalledBody reference _->view {conversationBody=InstalledBody reference
+        (Just (BodyControlReceipt body columns (wideSectionTitles desktop) Nothing (HostBodyControls (Just token) Nothing Nothing [])))}
+      _->error "Missing inline question fixture lifetime"
+
 editorEffect :: ChatSubmit -> Desktop -> Effect
 editorEffect action d=SubmitEditor (fromMaybe (error "Missing editor mount") (activeEditorMount d))
   (if action==QuerySubmit then Editor.DefaultEditor else Editor.AlternateEditor) HideMenu.HumanMenu
@@ -172,7 +184,7 @@ composerCodeChecks=do
       let child=selectConversationView "child" "Child" chat
           childCode=typeText "child = 1" (typeText "> " child)
           returned=selectConversationView "child" "Child" (selectConversationView "" "Primary" childCode)
-          question=chat {chatQuestion=Just (ChatQuestion 1 "Answer?" [] Nothing (newBuffer "") (Selection 0 0) True),clipboard=sourceText,clipboardCode=Just sourceText}
+          question=(questionOwner 1 chat) {chatQuestion=Just (ChatQuestion 1 "Answer?" [] Nothing (newBuffer "") (Selection 0 0) True),clipboard=sourceText,clipboardCode=Just sourceText}
           answered=typeText "> " question
           questionPaste=fst (runCommand Paste question)
       check "child code drafts survive switching conversations" (text returned==text childCode && composerInCode returned)
@@ -191,7 +203,7 @@ questionInsertionChecks :: IO ()
 questionInsertionChecks=do
   withEditorFixture "" (initialDesktop (100,35)) $ \prepared->do
     let ordinary=newBuffer "independent draft"
-        chat=draftBuffer ordinary prepared
+        chat=questionOwner 1 (draftBuffer ordinary prepared)
         question text sel=chat {chatQuestion=Just (ChatQuestion 1 "Answer?" [] Nothing (newBuffer text) sel True)}
         answer d=maybe (error "Missing inline answer") questionBuffer (chatQuestion d)
         pasted text d=fst (runCommand Paste d {clipboard=text})
