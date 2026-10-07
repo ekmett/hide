@@ -2,7 +2,7 @@
 module AgentIntegrationCheck (checks, fixture) where
 
 import Control.Concurrent (threadDelay)
-import Control.Exception (bracket)
+import Control.Exception (bracket,onException)
 import Control.Monad (unless)
 import Data.Aeson
 import Data.Aeson.Types (parseMaybe)
@@ -58,9 +58,10 @@ checks=bracket temporary removePathForcibly $ \root ->
           submit action d=let (prepared,effects)=runCommand (SubmitChat action) d in apply prepared effects
           draft text selected d=setComposerInput (newBuffer text) selected True d
           send text d=submit QuerySubmit (draft text (Selection (T.length text) (T.length text)) d)
-          tickUntil test d=do
+          tickUntil=testUntil "provider/body"
+          testUntil label test d=do
             answer<-timeout 5000000 (loop d)
-            maybe (error "Agent conversation integration timed out") pure answer
+            maybe (error ("Agent conversation integration timed out: "++label)) pure answer
             where loop current=do next<-tickBody presentation conversation current; ok<-test next; if ok then pure next else threadDelay 10000 >> loop next
       shown<-ui "show" [] initial
       connected<-send "Hello" shown >>= tickUntil (pure . (\d->status d=="Agent: end_turn" && "Hello" `T.isInfixOf` activeText d))
@@ -229,14 +230,19 @@ checks=bracket temporary removePathForcibly $ \root ->
       writeCheckpoint recovery finalDraft >>= right
       recovered<-readCheckpoint recovery initial >>= right
       ensure "selected child and active draft survive recovery" (conversationTarget recovered==AH.agentIdText liveChild && contents (composerBuffer recovered)=="recover child draft" && composerSelection recovered==Selection 4 9)
+      primaryProgress<-newIORef (0,False,"not ticked"::T.Text)
       let awaitPrimary desktop=do
             text<-canonicalWindowText desktop
+            writeIORef primaryProgress (T.length text,not (T.null (activeText desktop)),status desktop)
             pure (not (T.null (activeText desktop)) && text==primaryCanonical)
-      restoredPrimary<-ui "show" [] recovered >>= tickUntil awaitPrimary
+          awaitRecovered label desktop=testUntil label awaitPrimary desktop
+            `onException` (readIORef primaryProgress >>= \progress->putStrLn
+              ("Primary recovery progress: expected scalars="++show (T.length primaryCanonical)++", actual="++show progress))
+      restoredPrimary<-ui "show" [] recovered >>= awaitRecovered "hidden primary recovery"
       restoredCanonical<-canonicalWindowText restoredPrimary
       ensure "hidden primary transcript and draft survive recovery" (restoredCanonical==primaryCanonical && contents (composerBuffer restoredPrimary)=="primary unsent")
       ensure "hidden unsent drafts still prevent quiet Exit" (conversationHasDraft recovered && not (null (conversationViews recovered)))
-      recoveredShown<-ui "show" [] recovered >>= tickUntil awaitPrimary
+      recoveredShown<-ui "show" [] recovered >>= awaitRecovered "repeated primary recovery"
       shownCanonical<-canonicalWindowText recoveredShown
       ensure "show after switching does not lose primary transcript" (shownCanonical==primaryCanonical)
       caller<-captureQuestionCaller conversation primary >>= right
