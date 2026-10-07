@@ -39,7 +39,7 @@ right=either (error . T.unpack) pure
 
 checks :: IO ()
 checks=bracket temporary removePathForcibly $ \root->W.withWindowScope $ \scope->do
-  keyChecks
+  keyChecks root
   sharedTextChecks root
   primaryRef<-E.newDraftRef
   childRef<-E.newDraftRef
@@ -59,7 +59,15 @@ checks=bracket temporary removePathForcibly $ \root->W.withWindowScope $ \scope-
       draft=replaceSelection (Selection 0 0) "private draft λ\n\n    main = 1\n      continuation\n" (newBuffer "")
   primaryBody<-semanticBody "Primary" (styledText Plain transcript) W.CopyText
     [(0,T.length "Session: old-provider-id"),(T.length "Session: old-provider-id\nPublic transcript\n",T.length transcript)]
-  conversation<-showBody scope "" "Primary" (installDraft "" "Primary" primaryBody primaryRef draft (Selection 1 5) True binary)
+  primarySeed<-logicalFixture root "" "Primary" [replyRecord 0 "Agent" "Public transcript"] Null Null
+  emptyBody<-W.prepareTextWindow "Primary" ""
+  let unpublishedPath=root </> "unpublished-draft.checkpoint"
+      unpublished=installDraft "" "Primary" primarySeed emptyBody primaryRef draft (Selection 1 5) True (initialDesktop (80,25))
+  writeCheckpoint unpublishedPath unpublished {conversationViews=M.adjust (\view->view {conversationLogical=Nothing}) "" (conversationViews unpublished)} >>= right
+  unpublishedDraft<-readCheckpoint unpublishedPath fresh >>= right
+  check "a draft survives before the first asynchronous logical publication"
+    (snapshotBuffer (composerBuffer unpublishedDraft)==snapshotBuffer draft && composerSelection unpublishedDraft==Selection 1 5 && bodyText "" unpublishedDraft=="")
+  conversation<-showBody scope "" "Primary" (installDraft "" "Primary" primarySeed primaryBody primaryRef draft (Selection 1 5) True binary)
   let terminal=addReadOnly "Terminal 7" "last terminal output" conversation
       terminalId=sourceFixtureBuffer (fromJust (activeWindow terminal))
       approval=addReadOnly "Agent request" "pending approval body" terminal
@@ -84,7 +92,7 @@ checks=bracket temporary removePathForcibly $ \root->W.withWindowScope $ \scope-
   check "recovered undo and redo behave exactly like the original"
     (snapshotBuffer (undo (get recovered sourceId))==snapshotBuffer (undo edited) && snapshotBuffer (redo (get recovered sourceId))==snapshotBuffer (redo edited))
   check "hex bytes saved representation and history survive recovery" (snapshotBuffer (get recovered binaryId)==snapshotBuffer hex && bufferBytes (redo (get recovered binaryId))==bufferBytes (redo hex))
-  check "split windows retain shared buffer IDs geometry and selection" (map windowState (windows recovered)==map windowState (filter ((/=Just approvalId).bufferId) (windows desktop)))
+  check "split windows retain shared buffer IDs geometry and selection" (map windowState (filter ((/=Nothing).bufferId) (windows recovered))==map windowState (filter (\w->bufferId w/=Nothing && bufferId w/=Just approvalId) (windows desktop)))
   check "conversation transcript and private draft history survive"
     ("Public transcript" `T.isInfixOf` bodyText "" recovered && not ("private pending answer" `T.isInfixOf` bodyText "" recovered) && not ("old-provider-id" `T.isInfixOf` bodyText "" recovered) && snapshotBuffer (composerBuffer recovered)==snapshotBuffer draft && composerSelection recovered==Selection 1 5)
   check "ended terminals are inert read-only views and approval buffers are omitted"
@@ -107,63 +115,83 @@ checks=bracket temporary removePathForcibly $ \root->W.withWindowScope $ \scope-
      documentLabel (buffers recoveredPinned M.! terminalId)==Just "Ended Terminal 7" && activeTerminal recoveredPinned==Nothing)
   let viewsPath=root </> "views.checkpoint"
       hiddenSession="Session: old-hidden-provider-id\n"
-      hiddenSessionLength=T.length hiddenSession
-      primaryText=T.replicate (hiddenSessionLength-1) " "<>"\nhi\nx..ok"<>T.replicate 80 "primary transcript\n"
-      primaryRuns=[(hiddenSession,BubbleText 1 True Plain),("hi\nx",BubbleText 1 True (LinkStyle "https://private.invalid" Plain)),
-        ("..",Plain),("ok",BubbleText 2 False Plain),(T.replicate 80 "primary transcript\n",Plain)]
+      primaryRuns=[(hiddenSession,Plain),("hi\nx",BubbleText 0 True (LinkStyle "https://private.invalid" Plain)),
+        ("..",Plain),("ok",BubbleText 1 False Plain)]
       primaryDraft=undo (replaceSelection (Selection 0 0) "redo " (replaceSelection (Selection 0 0) "primary draft" (newBuffer "")))
-      childText=T.replicate 80 "child transcript\n"
       childDraft=replaceSelection (Selection 0 0) "child draft" (newBuffer "")
+      primaryRecords=[replyRecord 0 "You" "hi  \nx",replyRecord 1 "Agent" "ok",
+        replyRecord 2 "Agent" (T.replicate 12 "original Markdown with `inline code` ")]++
+        [replyRecord n "Agent" ("primary transcript "<>T.pack (show n)) | n<-[3..81]]
+      childRecords=pauseRecord (-1) "Child status: idle":
+        [replyRecord n "Agent" ("child transcript "<>T.pack (show n)) | n<-[0..79]]
+      primaryAnchor=toJSON (0::Int,0::Int,0::Int)
+      primaryReply=toJSON (toJSON (0::Int,0::Int,0::Int),toJSON (1::Int,0::Int,2::Int))
+  primaryLogicalSeed<-logicalFixture root "" "Primary" primaryRecords primaryAnchor primaryReply
+  let primaryLogical=primaryLogicalSeed {conversationViews=M.adjust (\view->view
+        {conversationRowShift=7,conversationScrollColumn=3}) "" (conversationViews primaryLogicalSeed)}
+  childLogical<-logicalFixture root "agent-2" "Child" childRecords Null Null
   primaryPrepared<-W.prepareSemanticTextWindow "Primary" primaryRuns
     (W.TextSemantics (W.CopyMessages W.UserBotAttribution) (Just root)
       (V.singleton (0,2,"https://private.invalid")) (V.singleton (0,2,"sh","printf private-shell"))
-      W.ReadableWindow V.empty V.empty (V.singleton (0,hiddenSessionLength))) >>= right
-  childPrepared<-semanticBody "Child" (styledText Plain childText) W.CopyText []
-  initialPrimary<-showBody scope "" "Primary" (installDraft "" "Primary" primaryPrepared primaryRef primaryDraft (Selection 2 5) False (initialDesktop (80,25)))
-  let primaryChat=modifyActive (\w->w {scrollRow=12,selection=Selection 1 6})
-        (setComposerInput (composerBuffer initialPrimary) (Selection 2 5) False initialPrimary)
-  childChat<-showBody scope "agent-2" "Child" (installDraft "agent-2" "Child" childPrepared childRef childDraft (Selection 1 4) True (closeActive (rememberConversationView primaryChat)))
-  let populated=modifyActive (\w->w {scrollRow=8,selection=Selection 2 7}) childChat
-  writeCheckpoint viewsPath populated >>= right
+      W.ReadableWindow V.empty V.empty (V.singleton (0,T.length hiddenSession))) >>= right
+  childPrepared<-semanticBody "Child" (styledText Plain "current child viewport") W.CopyText []
+  initialPrimary<-showBody scope "" "Primary" (installDraft "" "Primary" primaryLogical primaryPrepared primaryRef primaryDraft (Selection 2 5) False (initialDesktop (80,25)))
+  let primaryChat=setComposerInput (composerBuffer initialPrimary) (Selection 2 5) False initialPrimary
+  childChat<-showBody scope "agent-2" "Child" (installDraft "agent-2" "Child" childLogical childPrepared childRef childDraft (Selection 1 4) True (closeActive (rememberConversationView primaryChat)))
+  writeCheckpoint viewsPath childChat >>= right
   restoredViews<-readCheckpoint viewsPath fresh >>= right
   let primaryView=conversationViews restoredViews M.! ""
       childView=conversationViews restoredViews M.! "agent-2"
       primaryState=editorDrafts restoredViews M.! conversationDraftRef primaryView
       childState=editorDrafts restoredViews M.! conversationDraftRef childView
-  check "closed hidden target recovers as one inert body outside the installed map"
-    (conversationBodyRef primaryView==Nothing && M.size (pluginWindows restoredViews)==1 &&
+  check "hidden target retains logical ownership without laying out its history"
+    (conversationBodyRef primaryView==Nothing && bodyText "" restoredViews=="" &&
+      M.size (pluginWindows restoredViews)==1 &&
       all (\w->conversationTargetFor restoredViews w==Just "agent-2") (windows restoredViews))
   let closedRecovered=closeActive restoredViews
-  check "closing an inert recovered frame retains its one body without editor bindings"
+  check "closing a recovered frame retains its catalogue without editor bindings"
     (null (windows closedRecovered) && M.null (pluginWindows closedRecovered) &&
-      conversationBodyRef (conversationViews closedRecovered M.! "agent-2")==Nothing && bodyText "agent-2" closedRecovered==childText)
-  restoredPrimary<-showBody scope "" "Primary" restoredViews
-  restoredChild<-showBody scope "agent-2" "Child" restoredPrimary
-  check "each conversation retains its prepared body draft selection and scroll"
-    (activeText restoredPrimary==primaryText && contents (composerBuffer restoredPrimary)=="primary draft" &&
-     composerSelection restoredPrimary==Selection 2 5 && scrollRow (fromJust (activeWindow restoredPrimary))==12 &&
-     activeText restoredChild==childText && contents (composerBuffer restoredChild)=="child draft" &&
-     composerSelection restoredChild==Selection 1 4 && scrollRow (fromJust (activeWindow restoredChild))==8)
-  let recoveredBody=fromJust (conversationBodySnapshot "" restoredViews)
-      copied=fst (runCommand Copy (modifyActive (\w->w {selection=Selection hiddenSessionLength (hiddenSessionLength+8)}) restoredPrimary))
+      conversationBodyRef (conversationViews closedRecovered M.! "agent-2")==Nothing &&
+      maybe False (const True) (conversationLogical (conversationViews closedRecovered M.! "agent-2")))
+  -- Install the retained hidden frame through public admission, then acquire its
+  -- real bounded projection through the same recovery worker used at restart.
+  reopened<-showBody scope "" "Primary" closedRecovered
+  writeCheckpoint viewsPath reopened >>= right
+  restoredPrimary<-readCheckpoint viewsPath fresh >>= right
+  let recoveredBody=fromJust (conversationBodySnapshot "" restoredPrimary)
       copyMetadata=fromJust (W.preparedWindowSemantics recoveredBody)
-  check "inert recovery retains passive message attribution and decorated newline copy"
-    (clipboard copied=="User: hi\nx\n\nBot: ok" &&
-      W.copyPreparedSelection recoveredBody 0 (hiddenSessionLength+8)=="User: hi\nx\n\nBot: ok" && V.null (W.textLinks copyMetadata) && V.null (W.textShellBlocks copyMetadata) &&
-      all (\w->maybe True (const False) (windowConversationControls restoredViews w)) (windows restoredViews))
+      restoredView=conversationViews restoredPrimary M.! ""
+      expectedView=conversationViews primaryLogical M.! ""
+  check "logical anchor and selection survive separately from viewport rows"
+    (conversationAnchor restoredView==conversationAnchor expectedView &&
+     conversationReplySelection restoredView==conversationReplySelection expectedView &&
+     conversationRowShift restoredView==0 && conversationScrollColumn restoredView==3 &&
+     contents (composerBuffer restoredPrimary)=="primary draft" && composerSelection restoredPrimary==Selection 2 5)
+  check "recovered visible text is a bounded passive projection of original Markdown"
+    ("hi" `T.isInfixOf` activeText restoredPrimary && "ok" `T.isInfixOf` activeText restoredPrimary &&
+     not ("primary transcript 81" `T.isInfixOf` activeText restoredPrimary) &&
+     V.null (W.textLinks copyMetadata) && V.null (W.textShellBlocks copyMetadata) &&
+     all (\w->maybe True (const False) (windowConversationControls restoredPrimary w)) (windows restoredPrimary))
+  let projected=W.preparedWindowText recoveredBody
+      allCopied=W.copyPreparedSelection recoveredBody 0 (contentLength projected)
+  check "passive copy retains hard breaks and outgoing attribution"
+    ("User: hi\nx" `T.isInfixOf` allCopied && "Bot: ok" `T.isInfixOf` allCopied)
   viewBytes<-BS.readFile viewsPath
-  check "recovery discards actionable link and shell metadata"
+  check "recovery discards provider headers and actionable viewport metadata"
     (not ("https://private.invalid" `BS.isInfixOf` viewBytes) && not ("private-shell" `BS.isInfixOf` viewBytes) && not ("old-hidden-provider-id" `BS.isInfixOf` viewBytes))
   viewJSON<-either error pure (eitherDecodeStrict' viewBytes)
   let field key=case viewJSON of Object fields->KM.lookup key fields; _->Nothing
-  check "targets serialize one body each without synthetic documents or generic duplicates"
+      catalogueCounts=case field "conversationViews" of
+        Just (Array entries)->[V.length items | Object view<-V.toList entries,Just (Object body)<-[KM.lookup "body" view],Just (Array items)<-[KM.lookup "items" body]]
+        _->[]
+  check "targets serialize complete logical catalogues once without synthetic documents"
     (field "buffers"==Just (toJSON ([]::[Value])) && field "pluginWindows"==Just (toJSON ([]::[Value])) &&
-      case field "conversationViews" of Just (Array entries)->V.length entries==2; _->False)
+     catalogueCounts==[82,81] && "primary transcript 81" `BS.isInfixOf` viewBytes && "child transcript 79" `BS.isInfixOf` viewBytes)
   check "hidden draft history and focus survive independently of active input"
     (not (editorDraftFocused primaryState) && editorDraftFocused childState &&
      contents (undo (editorDraftBuffer primaryState))=="" && contents (redo (editorDraftBuffer primaryState))=="redo primary draft" &&
      contents (undo (editorDraftBuffer childState))=="")
-  check "recovery allocates fresh per-target draft identity without editor or frame bindings"
+  check "recovery allocates fresh per-target draft identity without editor bindings"
     (conversationDraftRef primaryView/=primaryRef && conversationDraftRef childView/=childRef &&
      conversationDraftRef primaryView/=conversationDraftRef childView &&
      all (\v->conversationEditor v==Nothing && conversationEditorFrame v==Nothing) (M.elems (conversationViews restoredViews)) &&
@@ -172,9 +200,29 @@ checks=bracket temporary removePathForcibly $ \root->W.withWindowScope $ \scope-
   restoredAgain<-readCheckpoint viewsPath fresh >>= right
   check "another recovery lifetime cannot reuse a draft reference"
     (conversationDraftRef (conversationViews restoredAgain M.! "")/=conversationDraftRef primaryView)
-  reopened<-showBody scope "" "Primary" (closeActive restoredChild)
-  check "closing and reopening a conversation retains transcript with valid IDs" (activeText reopened==activeText restoredPrimary && all ((<nextId reopened).windowId) (windows reopened))
-  writeCheckpoint viewsPath reopened >>= right
+  let wider=restoredPrimary {screenSize=(120,35),windows=map (\w->w {bounds=Rect 0 0 120 35}) (windows restoredPrimary)}
+  writeCheckpoint viewsPath wider >>= right
+  resized<-readCheckpoint viewsPath fresh >>= right
+  check "restart at another width preserves logical coordinates and original sources"
+    (conversationAnchor (conversationViews resized M.! "")==conversationAnchor restoredView &&
+     conversationReplySelection (conversationViews resized M.! "")==conversationReplySelection restoredView &&
+     "hi" `T.isInfixOf` activeText resized && activeText resized/=activeText restoredPrimary)
+  beforeInvalidPoint<-BS.readFile viewsPath
+  let invalidAnchor=case conversationAnchor expectedView of
+        At (BodyPoint ident _ _)->At (BodyPoint ident 99999 0)
+        _->error "Expected fixture anchor"
+  invalidPoint<-writeCheckpoint viewsPath resized {conversationViews=M.adjust (\view->view {conversationAnchor=invalidAnchor}) "" (conversationViews resized)}
+  afterInvalidPoint<-BS.readFile viewsPath
+  check "invalid canonical coordinates cannot replace a complete checkpoint"
+    (case invalidPoint of Left _->beforeInvalidPoint==afterInvalidPoint; _->False)
+  let questionPath=root </> "transient-question.checkpoint"
+      questionPoint=QuestionPoint 17 0 0
+  writeCheckpoint questionPath resized {conversationViews=M.map (\view->view
+    {conversationAnchor=At questionPoint,conversationReplySelection=Just (BodySelection questionPoint questionPoint)}) (conversationViews resized)} >>= right
+  withoutQuestion<-readCheckpoint questionPath fresh >>= right
+  check "transient question coordinates restore as a cleared passive selection"
+    (all (\view->conversationAnchor view==FollowEnd && conversationReplySelection view==Nothing)
+      (M.elems (conversationViews withoutQuestion)))
   check "recovered background drafts still require discard confirmation" (conversationHasDraft restoredViews && maybe False ((==DiscardDraft).purpose) (dialog (fst (runCommand Quit restoredViews))))
   BS.writeFile sourcePath "external disk edit"
   let baseline=fromJust (documentFile (buffers recovered M.! sourceId))
@@ -217,8 +265,12 @@ checks=bracket temporary removePathForcibly $ \root->W.withWindowScope $ \scope-
       duplicateBuffers value=value
   mutate (alterFirst "conversationViews" (set "selection" (toJSON ((-1::Int),999999::Int))))
   mutate (alterFirst "conversationViews" (set "replySelection" (toJSON ((-1::Int),999999::Int))))
-  mutate (alterFirst "conversationViews" (alterFirstBody (set "copy" (toJSON ("unknown"::T.Text)))))
-  mutate (alterFirst "conversationViews" (alterFirstBody (set "messages" (toJSON [(-1::Int,2::Int,0::Int,True)]))))
+  mutate (alterFirst "conversationViews" (set "anchor" (toJSON (99999::Int,0::Int,0::Int))))
+  mutate (alterFirst "conversationViews" (set "anchor" (toJSON (0::Int,99999::Int,0::Int))))
+  mutate (alterFirst "conversationViews" (set "anchor" (toJSON (0::Int,0::Int,99999::Int))))
+  mutate (alterFirst "conversationViews" (alterFirstBody (set "items" (toJSON [replyRecord 0 "Agent" "first",replyRecord 0 "Agent" "duplicate"]))))
+  mutate (alterFirst "conversationViews" (alterFirstBody (set "items" (toJSON [pauseRecord (-1) "invalid primary metadata"]))))
+  mutate (alterFirst "conversationViews" (alterFirstBody (alterFirst "items" (set "revision" (toJSON (-1::Int))))))
   mutate duplicateBuffers
   mutate (alterFirst "windows" (set "bounds" (toJSON ((0::Int),(0::Int),(0::Int),(10::Int)))))
   mutate (alterFirst "windows" (set "selection" (toJSON ((-1::Int),(0::Int)))))
@@ -306,8 +358,8 @@ temporary=do
   canonicalizePath path
 
 -- Change detection must not inspect text, history or rendering caches.
-keyChecks :: IO ()
-keyChecks=W.withWindowScope $ \scope->do
+keyChecks :: FilePath -> IO ()
+keyChecks root=W.withWindowScope $ \scope->do
   let original=replaceSelection (Selection 1 1) "x" (newBuffer "abc")
       desktop=addDocument (Just (FileState "/project/source.hs" (Just "abc"))) original (initialDesktop (80,25))
       update f d=d {buffers=M.map f (buffers d)}
@@ -331,26 +383,33 @@ keyChecks=W.withWindowScope $ \scope->do
   ref<-E.newDraftRef
   prepared<-semanticBody "Primary" (styledText Plain "Public prompt\nOther: private") W.CopyText []
   maskedBody<-semanticBody "Primary" (styledText Plain "Public prompt\nOther: private") W.CopyText [(14,28)]
-  let chat=installDraft "" "Primary" prepared ref (newBuffer "unsent draft") (Selection 0 0) True desktop
+  seed<-logicalFixture root "" "Primary" [replyRecord 0 "Agent" "Public prompt"] Null Null
+  replacementSeed<-logicalFixture root "" "Primary" [replyRecord 0 "Agent" "Public prompt"] Null Null
+  let chat=installDraft "" "Primary" seed prepared ref (newBuffer "unsent draft") (Selection 0 0) True desktop
       masked=chat {conversationViews=M.adjust (\view->view {conversationBody=InertBody maskedBody}) "" (conversationViews chat)}
   chatKey<-checkpointKey chat
   wrappedBodyKey<-checkpointKey chat {conversationViews=M.map id (conversationViews chat),pluginWindows=M.map id (pluginWindows chat)}
-  check "prepared body wrapper retains one cheap checkpoint identity" (chatKey==wrappedBodyKey)
+  check "logical body wrapper retains one cheap checkpoint identity" (chatKey==wrappedBodyKey)
   maskedKey<-checkpointKey masked
   opening<-W.openTextWindow scope maskedBody >>= maybe (fail "Key fixture scope ended") pure
   (reference,_)<-W.admitWindowUpdate False opening >>= maybe (fail "Key fixture admission failed") pure
   let receipt token=BodyControlReceipt maskedBody 80 False Nothing
-        (HostBodyControls Nothing [(14,28,"question-input",[token])])
+        (HostBodyControls Nothing Nothing Nothing [(14,28,"question-input",[token])])
       controlled token=masked {pluginWindows=M.insert reference maskedBody (pluginWindows masked),
         conversationViews=M.adjust (\view->view {conversationBody=InstalledBody reference (Just (receipt token))})
           "" (conversationViews masked)}
   tokenOnly<-checkpointKey (controlled "other-token")
   originalToken<-checkpointKey (controlled "ephemeral-token")
   remembered<-checkpointKey (rememberConversationView masked)
-  check "fresh prepared privacy projection participates but host tokens do not" (chatKey/=maskedKey && maskedKey==tokenOnly && tokenOnly==originalToken)
+  replacedKey<-checkpointKey chat {conversationViews=M.adjust (\view->view {conversationLogical=conversationLogical (conversationViews replacementSeed M.! "")}) "" (conversationViews chat)}
+  check "logical replacement changes identity while viewport masks and host tokens do not" (chatKey/=replacedKey && chatKey==maskedKey && maskedKey==tokenOnly && tokenOnly==originalToken)
   check "checkpoint key shares conversation-view normalization" (maskedKey==remembered)
   draftKey<-checkpointKey (setComposerInput (newBuffer "different draft") (Selection 0 0) True chat)
   check "unsent composer replacement changes checkpoint key" (chatKey/=draftKey)
+  let unpublished=chat {conversationViews=M.adjust (\view->view {conversationLogical=Nothing}) "" (conversationViews chat)}
+  unpublishedKey<-checkpointKey unpublished
+  unpublishedEditKey<-checkpointKey (setComposerInput (newBuffer "new chat draft") (Selection 0 0) True unpublished)
+  check "draft edits invalidate checkpoints before logical publication" (unpublishedKey/=unpublishedEditKey)
   focusedKey<-checkpointKey (setComposerInput (composerBuffer chat) (Selection 0 0) False chat)
   selectedKey<-checkpointKey (setComposerInput (composerBuffer chat) (Selection 1 2) True chat)
   check "host-owned draft selection and focus participate in checkpoint invalidation" (chatKey/=focusedKey && chatKey/=selectedKey)
@@ -368,10 +427,42 @@ semanticBody :: T.Text -> StyledText -> W.TextCopy -> [(Int,Int)] -> IO W.Prepar
 semanticBody title styled copy hidden=W.prepareSemanticTextWindow title styled
   (W.TextSemantics copy Nothing V.empty V.empty W.ReadableWindow V.empty V.empty (V.fromList hidden)) >>= either (fail . T.unpack) pure
 
-installDraft :: T.Text -> T.Text -> W.PreparedWindow -> E.DraftRef -> Buffer -> Selection -> Bool -> Desktop -> Desktop
-installDraft target name body ref buffer selected focused d=d
-  {conversationViews=M.insert target (ConversationView (InertBody body) name ref Nothing Nothing (0,0) (Selection 0 0) Nothing) (conversationViews d),
+installDraft :: T.Text -> T.Text -> Desktop -> W.PreparedWindow -> E.DraftRef -> Buffer -> Selection -> Bool -> Desktop -> Desktop
+installDraft target name seed body ref buffer selected focused d=d
+  {conversationViews=M.insert target view {conversationBody=InertBody body,conversationName=name,conversationDraftRef=ref,
+      conversationEditor=Nothing,conversationEditorFrame=Nothing} (conversationViews d),
    editorDrafts=M.insert ref (EditorDraft buffer selected focused Nothing) (editorDrafts d)}
+  where view=conversationViews seed M.! target
+
+-- These inputs are independently written original sources, not render output or
+-- private runtime constructors. readCheckpoint mints the actual logical owner.
+replyRecord :: Int -> T.Text -> T.Text -> Value
+replyRecord ident role markdown=object ["id" .= ident,"revision" .= (0::Int),
+  "content" .= object ["kind" .= ("reply"::T.Text),"role" .= role,"markdown" .= markdown]]
+pauseRecord :: Int -> T.Text -> Value
+pauseRecord ident text=object ["id" .= ident,"revision" .= (0::Int),
+  "content" .= object ["kind" .= ("pause"::T.Text),"text" .= text]]
+
+logicalFixture :: FilePath -> T.Text -> T.Text -> [Value] -> Value -> Value -> IO Desktop
+logicalFixture root target name records anchored selected=do
+  let path=root </> "logical-input.checkpoint"
+      baseline=initialDesktop (80,25)
+  writeCheckpoint path baseline >>= right
+  encoded<-BS.readFile path
+  base<-either error pure (eitherDecodeStrict' encoded)
+  let emptyBuffer=object ["current" .= [(0::Int,[0::Int])],"saved" .= [(0::Int,[0::Int])],
+        "undo" .= ([]::[Value]),"redo" .= ([]::[Value]),"revision" .= (0::Int),
+        "lastChange" .= Null,"byteMode" .= False,"savedByteMode" .= False]
+      view=object ["target" .= target,"name" .= name,"body" .= object ["items" .= records],
+        "draft" .= emptyBuffer,"selection" .= ((0::Int),(0::Int)),"focused" .= True,
+        "anchor" .= anchored,"column" .= (0::Int),"replySelection" .= selected]
+      set key value (Object fields)=Object (KM.insert key value fields)
+      set _ _ value=value
+      input=set "schemaVersion" (toJSON (5::Int)) . set "strings" (toJSON [""::T.Text]) .
+        set "buffers" (toJSON ([]::[Value])) .
+        set "conversationTarget" (toJSON target) . set "conversationViews" (toJSON [view]) $ base
+  BL.writeFile path (encode input)
+  readCheckpoint path baseline >>= right
 
 showBody :: W.WindowScope -> T.Text -> T.Text -> Desktop -> IO Desktop
 showBody scope target name original=case conversationBody view of

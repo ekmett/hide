@@ -29,8 +29,10 @@ import qualified Data.ByteString.Lazy as BL
 import qualified Data.Map.Strict as M
 import qualified Data.Set as S
 import qualified Data.Vector as V
-import Hide.Syntax (Style(..), styledText)
-import Hide.ConversationBody (ConversationBody(..))
+import Hide.ConversationBody (ConversationBody(..), LogicalBody, BodyItemId(..), Record(..), RecordContent(..),
+  BodyPoint(..), BodyAnchor(..), BodySelection(..), logicalBodyItems, logicalItemRecord, logicalBodyIdentity,
+  restoreLogicalBody, restoreLogicalViewport, validateLogicalPoint)
+import Data.Unique (Unique)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -56,20 +58,38 @@ checkpointLimit=256*1024*1024
 -- | Validate serialized state before publishing by rename. Oversized output
 -- is refused without truncating histories or replacing the previous checkpoint.
 writeCheckpoint :: FilePath -> Desktop -> IO (Either Text ())
-writeCheckpoint path desktop=do
-  let encoded=BL.take (fromIntegral checkpointLimit+1) (encode (desktopValue desktop))
-  if BL.length encoded>fromIntegral checkpointLimit then pure (Left "Recovery checkpoint exceeds 256 MiB; no data was truncated.")
-    else case eitherDecode encoded >>= parseEither (desktopParser desktop) of
-      Left _->pure (Left "Editor state cannot be represented by a valid recovery checkpoint.")
-      Right _->safeIO $ bracket (openBinaryTempFile (takeDirectory path) ".thc-recovery-") cleanup $ \(temporary,handle)->do
+writeCheckpoint path desktop=case validateConversationPoints desktop of
+  Left _->pure (Left "Editor state cannot be represented by a valid recovery checkpoint.")
+  Right ()->publish
+  where
+    publish=do
+      let encoded=BL.take (fromIntegral checkpointLimit+1) (encode (desktopValue desktop))
+      if BL.length encoded>fromIntegral checkpointLimit then pure (Left "Recovery checkpoint exceeds 256 MiB; no data was truncated.")
+        else case eitherDecode encoded >>= parseEither (desktopParser desktop) of
+          Left _->pure (Left "Editor state cannot be represented by a valid recovery checkpoint.")
+          Right _->safeIO $ bracket (openBinaryTempFile (takeDirectory path) ".thc-recovery-") cleanup $ \(temporary,handle)->do
 #ifndef mingw32_HOST_OS
-        setFileMode temporary 0o600
+            setFileMode temporary 0o600
 #endif
-        BL.hPut handle encoded
-        hFlush handle
-        hClose handle
-        renameFile temporary path
-  where cleanup (temporary,handle)=ignore (hClose handle) >> ignore (removeFile temporary)
+            BL.hPut handle encoded
+            hFlush handle
+            hClose handle
+            renameFile temporary path
+    cleanup (temporary,handle)=ignore (hClose handle) >> ignore (removeFile temporary)
+
+-- Canonical block/scalar validation may parse the named immutable item, so it
+-- belongs to the checkpoint worker, never the small UI invalidation key.
+validateConversationPoints :: Desktop -> Either Text ()
+validateConversationPoints desktop=mapM_ validate (M.elems (conversationViews desktop))
+  where
+    validate view=case conversationLogical view of
+      Nothing->Right ()
+      Just logical->mapM_ (validateLogicalPoint logical) (anchored++selected)
+        where
+          anchored=case conversationAnchor view of At point@BodyPoint{}->[point]; _->[]
+          selected=case conversationReplySelection view of
+            Just (BodySelection a@BodyPoint{} z@BodyPoint{})->[a,z]
+            _->[]
 
 -- | Bound and validate checkpoint input, then overlay it on a supplied baseline.
 -- Reject symlink input and invalid references/ranges; clear transient interactions.
@@ -85,10 +105,10 @@ readCheckpoint path baseline=do
       Left _->pure (Left "Invalid or unsupported recovery checkpoint.")
       Right (recovered,frames,snapshots,seeds)->safeIO $ W.withWindowScope $ \scope->do
         generic<-mapM (restorePlugin scope) snapshots
-        restored<-mapM (restoreConversation scope frames) seeds
+        restored<-mapM (restoreConversation scope recovered frames) seeds
         let bodies=M.fromList [(target,body) | (target,_,_,_,body)<-restored]
             plugins=M.fromList [(ident,(reference,prepared)) | (ident,reference,prepared)<-generic]
-            materialize (WindowSeed _ content window)=window $ case content of
+            materialize (WindowSeed _ content _ window)=window $ case content of
               StoredSource ident->SourceContent ident
               StoredPlugin ident->PluginContent (fst (plugins M.! ident))
               StoredConversation target->case bodies M.! target of
@@ -114,13 +134,22 @@ readCheckpoint path baseline=do
       prepared<-W.prepareRecoverableTextWindow kind version title text >>= either (ioError . userError . T.unpack) pure
       (reference,view)<-install scope prepared
       pure (ident,reference,view)
-    restoreConversation scope frames (target,ConversationSeed name bodySeed buffer selected focused scrolled reply)=do
-      prepared<-restoreBody bodySeed
-      body<-if any (\(WindowSeed _ content _)->case content of StoredConversation owner->owner==target; _->False) frames
+    restoreConversation scope desktop frames (target,ConversationSeed name records buffer selected focused anchored column reply)=do
+      logical<-restoreLogicalBody target records
+      let points=case anchored of At point->[point]; FollowEnd->[]
+          endpoints=case reply of Just (BodySelection a z)->[a,z]; Nothing->[]
+      mapM_ (either (ioError . userError . T.unpack) pure . validateLogicalPoint logical) (points++endpoints)
+      let rectangles=[rectangle | WindowSeed _ (StoredConversation owner) rectangle _<-frames,owner==target]
+      prepared<-case rectangles of
+        rectangle:_->restoreLogicalViewport (videoMode desktop/=Nothing) (wideSectionTitles desktop)
+          (max 1 (width rectangle-2)) (max 1 (height rectangle-2)) anchored logical
+            >>= either (ioError . userError . T.unpack) pure
+        []->W.prepareTextWindow name ""
+      body<-if not (null rectangles)
         then (\(reference,_)->InstalledBody reference Nothing) <$> install scope prepared
         else pure (InertBody prepared)
       ref<-E.newDraftRef
-      pure (target,ConversationView body name ref Nothing Nothing scrolled reply Nothing,
+      pure (target,ConversationView body name ref Nothing Nothing anchored 0 column reply (Just logical),
         (ref,EditorDraft buffer selected focused Nothing),prepared,body)
 
 -- Validation is pure and never calls a plugin. All rendering preparation belongs
@@ -222,7 +251,7 @@ desktopValue desktop=runST $ do
   pure (case encoded of Object fields->Object (KM.insert "strings" (toJSON (reverse texts)) fields); _->encoded)
 
 -- | Durable scalar metadata and stable source/draft/baseline/prepared identities.
-data CheckpointKey = CheckpointKey Value [StableName Buffer] [StableName BS.ByteString] [StableName W.PreparedWindow] deriving Eq
+data CheckpointKey = CheckpointKey Value [StableName Buffer] [StableName BS.ByteString] [StableName W.PreparedWindow] [Unique] deriving Eq
 -- | Capture persistence identity without walking buffer contents or Undo history.
 -- Payload replacement is detected even when its revision number is unchanged.
 checkpointKey :: Desktop -> IO CheckpointKey
@@ -230,6 +259,7 @@ checkpointKey desktop=do
   buffersRef<-newIORef []
   baselinesRef<-newIORef []
   pluginsRef<-newIORef []
+  logicalRef<-newIORef []
   let buffer value=do
         ident<-evaluate value >>= makeStableName
         modifyIORef' buffersRef (ident:)
@@ -242,17 +272,21 @@ checkpointKey desktop=do
         ident<-evaluate value >>= makeStableName
         modifyIORef' pluginsRef (ident:)
         pure Null
-  metadata<-desktopValueWith buffer baseline plugin plugin desktop
-  CheckpointKey metadata <$> readIORef buffersRef <*> readIORef baselinesRef <*> readIORef pluginsRef
+      logical value=do
+        ident<-evaluate (logicalBodyIdentity value)
+        modifyIORef' logicalRef (ident:)
+        pure Null
+  metadata<-desktopValueWith buffer baseline plugin logical desktop
+  CheckpointKey metadata <$> readIORef buffersRef <*> readIORef baselinesRef <*> readIORef pluginsRef <*> readIORef logicalRef
 
-desktopValueWith :: Monad m => (Buffer -> m Value) -> (BS.ByteString -> m Value) -> (W.PreparedWindow -> m Value) -> (W.PreparedWindow -> m Value) -> Desktop -> m Value
+desktopValueWith :: Monad m => (Buffer -> m Value) -> (BS.ByteString -> m Value) -> (W.PreparedWindow -> m Value) -> (LogicalBody -> m Value) -> Desktop -> m Value
 desktopValueWith buffer baseline plugin body desktop=do
   encodedDocuments<-mapM (documentValueWith buffer baseline) (M.toAscList documents)
   views<-mapM (conversationViewValueWith buffer body d) (M.toList (conversationViews d))
   plugins<-mapM (\(window,prepared,(kind,version))->do
     text<-plugin prepared
     pure (object ["id" .= windowId window,"kind" .= kind,"version" .= version,"title" .= W.preparedWindowTitle prepared,"text" .= text])) durable
-  pure (object ["schemaVersion" .= (4::Int),"screen" .= screenSize d,"buffers" .= encodedDocuments,
+  pure (object ["schemaVersion" .= (5::Int),"screen" .= screenSize d,"buffers" .= encodedDocuments,
     "dockedTerminals" .= [object ["windowId" .= ident,"bounds" .= rectValue rectangle,"restoredBounds" .= fmap rectValue saved] | (ident,(rectangle,saved))<-M.toList (dockedTerminals d),any ((==ident).windowId) (windows d)],
     "bottomTerminal" .= bottomTerminal d,
     "pluginWindows" .= plugins,
@@ -267,82 +301,85 @@ desktopValueWith buffer baseline plugin body desktop=do
         durableIds=S.fromList [windowId w | (w,_,_)<-durable]
         durable=[(w,prepared,recovery) | w<-windows d,conversationTargetFor d w==Nothing,PluginContent reference<-[windowContent w],Just prepared<-[M.lookup reference (pluginWindows d)],Just recovery<-[W.preparedWindowRecovery prepared]]
 
-conversationViewValueWith :: Monad m => (Buffer -> m Value) -> (W.PreparedWindow -> m Value)
+conversationViewValueWith :: Monad m => (Buffer -> m Value) -> (LogicalBody -> m Value)
   -> Desktop -> (Text,ConversationView) -> m Value
 conversationViewValueWith buffer body desktop (target,view)=case
-  (M.lookup (conversationDraftRef view) (editorDrafts desktop),conversationBodySnapshot target desktop) of
-  (Just state,Just prepared)->do
+  M.lookup (conversationDraftRef view) (editorDrafts desktop) of
+  Just state->do
     draft<-buffer (editorDraftBuffer state)
-    snapshot<-body prepared
+    snapshot<-case conversationLogical view of
+      Just logical->body logical
+      Nothing->pure (object ["items" .= ([]::[Value])])
     pure (object ["target" .= target,"name" .= conversationName view,"body" .= snapshot,
       "draft" .= draft,"selection" .= selectionValue (editorDraftSelection state),"focused" .= editorDraftFocused state,
-      "scroll" .= conversationScroll view,"replySelection" .= selectionValue (conversationReplySelection view)])
+      "anchor" .= anchorValue (conversationAnchor view),"column" .= conversationScrollColumn view,
+      "replySelection" .= selectionBodyValue (conversationReplySelection view)])
   _->pure Null
 
--- Only passive message identity survives over the single redacted text.
-bodyValue :: W.PreparedWindow -> Value
-bodyValue prepared=object ["title" .= W.preparedWindowTitle prepared,"text" .= redacted,
-  "copy" .= copyName (maybe W.CopyText W.textCopy semantics),
-  "messages" .= concatMap (visible hidden) (V.toList (W.preparedWindowMessages prepared)),
-  "readable" .= (W.preparedWindowDisclosure prepared==W.ReadableWindow)]
-  where
-    semantics=W.preparedWindowSemantics prepared
-    text=W.preparedWindowText prepared
-    hidden=maybe [] (V.toList . W.textRecoveryHidden) semantics
-    redacted=T.pack [if c/='\n' && c/='\r' && any (\(a,z)->n>=a && n<z) hidden then ' ' else c
-      | (n,c)<-zip [0..] (T.unpack (contentSlice text 0 (contentLength text)))]
-    visible [] interval=[interval]
-    visible ((a,z):rest) interval@(start,end,ident,outgoing)
-      | z<=start || a>=end=visible rest interval
-      | otherwise=concatMap (visible rest)
-          ([(start,min a end,ident,outgoing) | start<a]++[(max z start,end,ident,outgoing) | z<end])
-    copyName W.CopyText="text"::Text
-    copyName (W.CopyMessages W.NoAttribution)="messages"
-    copyName (W.CopyMessages W.UserBotAttribution)="messages-attributed"
+-- Records contain the producers' redacted immutable sources. Provider/session
+-- and pending question state are separate fields and never enter this codec.
+bodyValue :: LogicalBody -> Value
+bodyValue body=object ["items" .= map (recordValue . logicalItemRecord) (V.toList (logicalBodyItems body))]
+
+recordValue :: Record -> Value
+recordValue (Record (BodyItemId ident) version content)=object
+  ["id" .= ident,"revision" .= version,"content" .= case content of
+    Reply role text->object ["kind" .= ("reply"::Text),"role" .= role,"markdown" .= text]
+    Activity label value history->object ["kind" .= ("activity"::Text),"label" .= label,"value" .= value,"history" .= history]
+    Pause label->object ["kind" .= ("pause"::Text),"text" .= label]]
+
+pointValue :: BodyPoint -> Value
+pointValue (BodyPoint (BodyItemId ident) block scalar)=toJSON (ident,block,scalar)
+pointValue QuestionPoint{}=Null
+anchorValue :: BodyAnchor -> Value
+anchorValue (At point)=pointValue point
+anchorValue FollowEnd=Null
+selectionBodyValue :: Maybe BodySelection -> Value
+selectionBodyValue (Just (BodySelection a@BodyPoint{} z@BodyPoint{}))=toJSON (pointValue a,pointValue z)
+selectionBodyValue _=Null
+
+pointParser :: S.Set BodyItemId -> Value -> Parser BodyPoint
+pointParser ids value=do
+  (ident,block,scalar)<-parseJSON value
+  unless (S.member (BodyItemId ident) ids && block>=0 && scalar>=0) (fail "Invalid logical conversation point")
+  pure (BodyPoint (BodyItemId ident) block scalar)
+anchorParser :: S.Set BodyItemId -> Value -> Parser BodyAnchor
+anchorParser _ Null=pure FollowEnd
+anchorParser ids value=At <$> pointParser ids value
+selectionBodyParser :: S.Set BodyItemId -> Value -> Parser (Maybe BodySelection)
+selectionBodyParser _ Null=pure Nothing
+selectionBodyParser ids value=do
+  (a,z)<-parseJSON value
+  Just <$> (BodySelection <$> pointParser ids a <*> pointParser ids z)
 
 -- Validated temporary seeds are not another production content owner.
-data BodySeed = BodySeed Text Text W.TextCopy [(Int,Int,Int,Bool)] W.WindowDisclosure
-data ConversationSeed = ConversationSeed Text BodySeed Buffer Selection Bool (Int,Int) Selection
+data ConversationSeed = ConversationSeed Text [Record] Buffer Selection Bool BodyAnchor Int (Maybe BodySelection)
 data StoredContent = StoredSource Int | StoredPlugin Int | StoredConversation Text
-data WindowSeed = WindowSeed Int StoredContent (WindowContent -> Window)
+data WindowSeed = WindowSeed Int StoredContent Rect (WindowContent -> Window)
 
-bodySeedLength :: BodySeed -> Int
-bodySeedLength (BodySeed _ text _ _ _)=T.length text
-
-bodyParser :: Value -> Parser BodySeed
-bodyParser=withObject "conversation body" $ \o->do
-  title<-o .: "title"
-  unless (T.length title<=8192 && T.all (\c->c>=' ' && c/='\DEL') title) (fail "Invalid conversation title")
-  text<-o .: "text"
-  copy<-o .: "copy" >>= \kind->case (kind::Text) of
-    "text"->pure W.CopyText
-    "messages"->pure (W.CopyMessages W.NoAttribution)
-    "messages-attributed"->pure (W.CopyMessages W.UserBotAttribution)
-    _->fail "Invalid conversation copy mode"
-  messages<-o .: "messages"
-  let size=T.length text
-  _<-foldM (\(previous,roles) (a,z,ident,outgoing)->do
-    unless (a>=previous && a<z && z<=size && ident>=0 && ident<=1073741823) (fail "Invalid message interval")
-    unless (maybe True (==outgoing) (M.lookup ident roles)) (fail "Inconsistent message attribution")
-    pure (z,M.insert ident outgoing roles)) (0,M.empty) messages
-  unless (copy/=W.CopyText || null messages) (fail "Plain copy has message intervals")
-  readable<-o .: "readable"
-  pure (BodySeed title text copy messages (if readable then W.ReadableWindow else W.PrivateWindow))
-
-restoreBody :: BodySeed -> IO W.PreparedWindow
-restoreBody (BodySeed title text copy messages disclosure)=
-  W.prepareSemanticTextWindow title (paint 0 text messages)
-    (W.TextSemantics copy Nothing V.empty V.empty disclosure V.empty V.empty V.empty)
-    >>= either (ioError . userError . T.unpack) pure
+bodyParser :: Text -> Value -> Parser [Record]
+bodyParser target=withObject "logical conversation" $ \o->do
+  encoded<-o .: "items"
+  records<-mapM recordParser encoded
+  _<-foldM (\previous record->do
+    let BodyItemId ident=recordId record
+    unless (ident>previous && (ident>=0 || ident==(-1) && not (T.null target) && case recordContent record of Pause{}->True; _->False))
+      (fail "Invalid ordered conversation item identity")
+    pure ident) (-2) records
+  pure records
   where
-    paint _ remaining _ | T.null remaining=[]
-    paint _ remaining []=styledText Plain remaining
-    paint n remaining intervals@((a,z,ident,outgoing):rest)
-      | n>=z=paint n remaining rest
-      | n<a=let (before,after)=T.splitAt (a-n) remaining
-             in styledText Plain before++paint a after intervals
-      | otherwise=let (before,after)=T.splitAt (z-n) remaining
-                  in styledText (BubbleText ident outgoing Plain) before++paint z after rest
+    recordParser=withObject "conversation item" $ \entry->do
+      ident<-entry .: "id"
+      version<-entry .: "revision"
+      unless (version>=0) (fail "Invalid conversation item revision")
+      content<-entry .: "content" >>= withObject "conversation item content" (\value->do
+        kind<-value .: "kind"
+        case kind::Text of
+          "reply"->Reply <$> value .: "role" <*> value .: "markdown"
+          "activity"->Activity <$> value .: "label" <*> value .: "value" <*> value .: "history"
+          "pause"->Pause <$> value .: "text"
+          _->fail "Invalid conversation item kind")
+      pure (Record (BodyItemId ident) version content)
 
 conversationViewParser :: V.Vector Text -> Value -> Parser (Text,ConversationSeed)
 conversationViewParser strings=withObject "conversation view" $ \o->do
@@ -350,21 +387,25 @@ conversationViewParser strings=withObject "conversation view" $ \o->do
   unless (T.length target<=128 && not (T.any (<' ') target)) (fail "Invalid conversation target")
   name<-o .: "name"
   unless (T.length name<=256 && not (T.any (<' ') name)) (fail "Invalid conversation name")
-  body<-o .: "body" >>= bodyParser
+  records<-o .: "body" >>= bodyParser target
   draft<-o .: "draft" >>= bufferParser strings
   selected<-o .: "selection" >>= selectionParser (bufferLength draft)
   focused<-o .: "focused"
-  (row,col)<-o .: "scroll"
-  unless (row>=0 && col>=0 && row<=1000000000 && col<=1000000000) (fail "Invalid conversation scroll")
-  replySelection<-o .: "replySelection" >>= selectionParser (bodySeedLength body)
-  pure (target,ConversationSeed name body draft selected focused (row,col) replySelection)
+  let ids=S.fromList (map recordId records)
+  anchored<-o .: "anchor" >>= anchorParser ids
+  column<-o .: "column" >>= boundedInt 0 1073741823
+  reply<-o .: "replySelection" >>= selectionBodyParser ids
+  pure (target,ConversationSeed name records draft selected focused anchored column reply)
 
 windowValue :: Desktop -> Window -> Value
 windowValue desktop original=object ["id" .= windowId w,"sourceId" .= bufferId w,"target" .= conversationTargetFor desktop w,
   "number" .= windowNumber w,"bounds" .= rectValue (bounds w),
   "selection" .= selectionValue (selection w),"scrollRow" .= scrollRow w,"scrollColumn" .= scrollColumn w,
   "restoredBounds" .= fmap rectValue (restoredBounds w),"hexLow" .= windowHexLow w,"hexAscii" .= windowHexAscii w,"bufferView" .= fromEnum (bufferView w),"reviewSplit" .= reviewSplit w,"markdownInteraction" .= fmap (\(MarkdownInteraction selected row column stamp)->(selectionValue selected,row,column,stamp)) (markdownInteraction w)]
-  where w=case rowsInteraction original of Just _->original {selection=Selection 0 0,scrollRow=0,scrollColumn=0}; _->original
+  where w=case (rowsInteraction original,conversationTargetFor desktop original) of
+          (Just _,_)->original {selection=Selection 0 0,scrollRow=0,scrollColumn=0}
+          (_,Just _)->original {selection=Selection 0 0,scrollRow=0}
+          _->original
 
 rectValue :: Rect -> Value
 rectValue (Rect x y w h)=toJSON (x,y,w,h)
@@ -393,7 +434,7 @@ sidebarValue tree=object ["root" .= treeRoot tree,"selected" .= selected,"scroll
 desktopParser :: Desktop -> Value -> Parser (Desktop,[WindowSeed],[(Int,Text,Int,Text,Text)],[(Text,ConversationSeed)])
 desktopParser baseline=withObject "checkpoint" $ \o->do
   version<-o .: "schemaVersion"
-  unless (version==(4::Int)) (fail "Unsupported checkpoint version")
+  unless (version==(5::Int)) (fail "Unsupported checkpoint version")
   strings<-o .: "strings"
   size@(cols,rows)<-o .: "screen"
   unless (cols>0 && rows>0 && cols<=4096 && rows<=4096 && toInteger cols*toInteger rows<=1048576) (fail "Invalid desktop dimensions")
@@ -414,9 +455,9 @@ desktopParser baseline=withObject "checkpoint" $ \o->do
   snapshots<-pluginSnapshots o
   let pluginText=M.fromList [(ident,text) | (ident,_,_,_,text)<-snapshots]
   views<-mapM (windowParser documents pluginText conversationViews') encodedWindows
-  let frameIds=[ident | WindowSeed ident _ _<-views]
-      frameTargets=[target | WindowSeed _ (StoredConversation target) _<-views]
-      pluginIds=[ident | WindowSeed _ (StoredPlugin ident) _<-views]
+  let frameIds=[ident | WindowSeed ident _ _ _<-views]
+      frameTargets=[target | WindowSeed _ (StoredConversation target) _ _<-views]
+      pluginIds=[ident | WindowSeed _ (StoredPlugin ident) _ _<-views]
   unless (S.size (S.fromList frameIds)==length views) (fail "Duplicate window IDs")
   unless (S.size (S.fromList frameTargets)==length frameTargets) (fail "Duplicate conversation frames")
   unless (S.fromList pluginIds==M.keysSet pluginText) (fail "Unowned plugin snapshot")
@@ -424,7 +465,7 @@ desktopParser baseline=withObject "checkpoint" $ \o->do
   unless (length encodedDock<=length views) (fail "Too many docked terminals")
   pinned<-mapM (withObject "docked terminal" $ \entry->do
     wid<-entry .: "windowId"
-    unless (any (\(WindowSeed ident content make)->ident==wid && case content of StoredSource bid->terminalWindow baseline {buffers=documents} (make (SourceContent bid)); _->False) views) (fail "Dock references missing terminal")
+    unless (any (\(WindowSeed ident content _ make)->ident==wid && case content of StoredSource bid->terminalWindow baseline {buffers=documents} (make (SourceContent bid)); _->False) views) (fail "Dock references missing terminal")
     rectangle<-entry .: "bounds" >>= rectParser
     restored<-entry .: "restoredBounds" >>= traverse rectParser
     pure (wid,(rectangle,restored))) encodedDock
@@ -479,8 +520,8 @@ windowParser documents plugins conversations=withObject "window" $ \o->do
       pure (StoredSource source,bufferLength (documentBuffer doc),not (byteMode (documentBuffer doc)) && documentLabel doc==Nothing)
     (Nothing,Just owner)->do
       unless (not (M.member ident plugins)) (fail "Conversation frame owns generic plugin state")
-      ConversationSeed _ body _ _ _ _ _<-maybe (fail "Window references missing conversation") pure (M.lookup owner conversations)
-      pure (StoredConversation owner,bodySeedLength body,False)
+      unless (M.member owner conversations) (fail "Window references missing conversation")
+      pure (StoredConversation owner,0,False)
     (Nothing,Nothing)->case M.lookup ident plugins of
       Just text->pure (StoredPlugin ident,T.length text,False)
       Nothing->fail "Window references missing plugin state"
@@ -503,7 +544,7 @@ windowParser documents plugins conversations=withObject "window" $ \o->do
   low<-o .: "hexLow"
   ascii<-o .: "hexAscii"
   let view=if sourceView && (toEnum viewIndex/=MarkdownView || maybe False markdownDocument (M.lookup (fromMaybe 0 bid) documents)) then toEnum viewIndex else CurrentView
-  pure (WindowSeed ident content (\owner->Window ident owner rectangle selected row column restored low ascii number view Nothing split preview Nothing Nothing Nothing))
+  pure (WindowSeed ident content rectangle (\owner->Window ident owner rectangle selected row column restored low ascii number view Nothing split preview Nothing Nothing Nothing))
 
 rectParser :: Value -> Parser Rect
 rectParser value=do
