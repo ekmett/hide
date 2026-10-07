@@ -233,14 +233,10 @@ checks=bracket temporary removePathForcibly $ \root ->
       writeCheckpoint recovery finalDraft >>= right
       recovered<-readCheckpoint recovery initial >>= right
       ensure "selected child and active draft survive recovery" (conversationTarget recovered==AH.agentIdText liveChild && contents (composerBuffer recovered)=="recover child draft" && composerSelection recovered==Selection 4 9)
-      primaryProgress<-newIORef (0,False,"not ticked"::T.Text)
       let awaitPrimary desktop=do
             text<-canonicalWindowText desktop
-            writeIORef primaryProgress (T.length text,not (T.null (activeText desktop)),status desktop)
             pure (not (T.null (activeText desktop)) && text==primaryCanonical)
           awaitRecovered label desktop=testUntil label awaitPrimary desktop
-            `onException` (readIORef primaryProgress >>= \progress->putStrLn
-              ("Primary recovery progress: expected scalars="++show (T.length primaryCanonical)++", actual="++show progress))
       restoredPrimary<-ui "show" [] recovered >>= awaitRecovered "hidden primary recovery"
       restoredCanonical<-canonicalWindowText restoredPrimary
       ensure "hidden primary transcript and draft survive recovery" (restoredCanonical==primaryCanonical && contents (composerBuffer restoredPrimary)=="primary unsent")
@@ -251,8 +247,13 @@ checks=bracket temporary removePathForcibly $ \root ->
       caller<-captureQuestionCaller conversation primary >>= right
       (questionView,_)<-chatToolAs conversation (Just caller) recoveredShown "ask_user" (object ["question" .= ("Choose privately"::T.Text)])
       let privateAnswer=questionView {chatQuestion=fmap (\q->q {questionBuffer=newBuffer "unsent secret answer",questionSelection=Selection 20 20}) (chatQuestion questionView)}
-      paintedAnswer<-tickUntil (pure . (\d->"Choose privately" `T.isInfixOf` activeText d &&
-        maybe False (maybe False (const True) . windowQuestion d) (activeWindow d))) privateAnswer
+      questionProgress<-newIORef (False,False,Nothing::Maybe BodyAnchor,"not ticked"::T.Text)
+      paintedAnswer<-testUntil "live recovered question prompt and input" (\d->do
+        let prompt="Choose privately" `T.isInfixOf` activeText d
+            projected=maybe False (maybe False (const True) . windowQuestion d) (activeWindow d)
+        writeIORef questionProgress (prompt,projected,conversationAnchor <$> M.lookup "" (conversationViews d),status d)
+        pure (prompt && projected)) privateAnswer
+        `onException` (readIORef questionProgress >>= \progress->putStrLn ("Question recovery progress: "++show progress))
       hiddenQuestion<-select liveChild paintedAnswer
       ensure "hidden primary question answer never becomes readable transcript" (all (not . T.isInfixOf "unsent secret answer") (readableBodies hiddenQuestion))
       writeCheckpoint recovery hiddenQuestion >>= right
