@@ -31,7 +31,8 @@ import qualified Data.Set as S
 import qualified Data.Vector as V
 import Hide.ConversationBody (ConversationBody(..), LogicalBody, BodyItemId(..), Record(..), RecordContent(..),
   BodyPoint(..), BodyAnchor(..), BodySelection(..), logicalBodyItems, logicalItemRecord, logicalBodyIdentity, logicalBodyItemIndex,
-  restoreLogicalBody, restoreLogicalViewport, validateLogicalPoint)
+  restoreLogicalBody, restoreLogicalViewport, validateLogicalPoint, logicalBodyProvider, clampPoint,
+  capturedSourceIdentity, prepareCapturedSource)
 import Data.Unique (Unique)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -58,14 +59,16 @@ checkpointLimit=256*1024*1024
 -- | Validate serialized state before publishing by rename. Oversized output
 -- is refused without truncating histories or replacing the previous checkpoint.
 writeCheckpoint :: FilePath -> Desktop -> IO (Either Text ())
-writeCheckpoint path desktop=case validateConversationPoints desktop of
-  Left _->pure (Left "Editor state cannot be represented by a valid recovery checkpoint.")
-  Right ()->publish
+writeCheckpoint path desktop=do
+  current<-prepareRecoverySources desktop
+  case validateConversationPoints current of
+    Left _->pure (Left "Editor state cannot be represented by a valid recovery checkpoint.")
+    Right ()->publish current
   where
-    publish=do
-      let encoded=BL.take (fromIntegral checkpointLimit+1) (encode (desktopValue desktop))
+    publish current=do
+      let encoded=BL.take (fromIntegral checkpointLimit+1) (encode (desktopValue current))
       if BL.length encoded>fromIntegral checkpointLimit then pure (Left "Recovery checkpoint exceeds 256 MiB; no data was truncated.")
-        else case eitherDecode encoded >>= parseEither (desktopParser desktop) of
+        else case eitherDecode encoded >>= parseEither (desktopParser current) of
           Left _->pure (Left "Editor state cannot be represented by a valid recovery checkpoint.")
           Right _->safeIO $ bracket (openBinaryTempFile (takeDirectory path) ".thc-recovery-") cleanup $ \(temporary,handle)->do
 #ifndef mingw32_HOST_OS
@@ -76,6 +79,28 @@ writeCheckpoint path desktop=case validateConversationPoints desktop of
             hClose handle
             renameFile temporary path
     cleanup (temporary,handle)=ignore (hClose handle) >> ignore (removeFile temporary)
+
+-- The received source may lead its displayed viewport or belong to a closed
+-- target. Capture its catalogue on this worker without preparing painted rows.
+prepareRecoverySources :: Desktop -> IO Desktop
+prepareRecoverySources desktop=do
+  views<-mapM prepare (conversationViews desktop)
+  pure desktop {conversationViews=views}
+  where
+    prepare view=case conversationSource view of
+      Nothing->pure view
+      Just source->do
+        latest<-prepareCapturedSource source (conversationLogical view)
+        let same=maybe True ((==logicalBodyProvider latest).logicalBodyProvider) (conversationLogical view)
+            anchored=case conversationAnchor view of
+              At point->maybe FollowEnd At (clampPoint latest point)
+              WithinItem ident fraction | logicalBodyItemIndex ident latest/=Nothing->WithinItem ident fraction
+              _->FollowEnd
+            selected=case conversationReplySelection view of
+              Just (BodySelection a z)->BodySelection <$> clampPoint latest a <*> clampPoint latest z
+              Nothing->Nothing
+        pure view {conversationLogical=Just latest,conversationAnchor=if same then anchored else FollowEnd,
+          conversationReplySelection=if same then selected else Nothing}
 
 -- Canonical block/scalar validation may parse the named immutable item, so it
 -- belongs to the checkpoint worker, never the small UI invalidation key.
@@ -155,7 +180,7 @@ readCheckpoint path baseline=do
         then (\(reference,_)->InstalledBody reference Nothing) <$> install scope prepared
         else pure (InertBody prepared)
       ref<-E.newDraftRef
-      pure (target,ConversationView body name ref Nothing Nothing anchored 0 column reply (Just logical) Nothing,
+      pure (target,ConversationView body name ref Nothing Nothing anchored 0 column reply (Just logical) Nothing Nothing,
         (ref,EditorDraft buffer selected focused Nothing),prepared,body)
 
 -- Validation is pure and never calls a plugin. All rendering preparation belongs
@@ -252,7 +277,7 @@ desktopValue desktop=runST $ do
     (fmap bufferValue . traverse intern . snapshotBufferStorage)
     (pure . String . TE.decodeUtf8 . B64.encode)
     (\prepared->let text=W.preparedWindowText prepared in pure (String (contentSlice text 0 (contentLength text))))
-    (pure . bodyValue) desktop
+    (pure . viewBodyValue) desktop
   StringTable _ _ texts<-readSTRef table
   pure (case encoded of Object fields->Object (KM.insert "strings" (toJSON (reverse texts)) fields); _->encoded)
 
@@ -278,14 +303,19 @@ checkpointKey desktop=do
         ident<-evaluate value >>= makeStableName
         modifyIORef' pluginsRef (ident:)
         pure Null
-      logical value=do
-        ident<-evaluate (logicalBodyIdentity value)
+      logical view=case conversationSource view of
+        Just source->remember (capturedSourceIdentity source)
+        Nothing->case conversationLogical view of
+          Just value->remember (logicalBodyIdentity value)
+          Nothing->pure (object ["items" .= ([]::[Value])])
+      remember value=do
+        ident<-evaluate value
         modifyIORef' logicalRef (ident:)
         pure Null
   metadata<-desktopValueWith buffer baseline plugin logical desktop
   CheckpointKey metadata <$> readIORef buffersRef <*> readIORef baselinesRef <*> readIORef pluginsRef <*> readIORef logicalRef
 
-desktopValueWith :: Monad m => (Buffer -> m Value) -> (BS.ByteString -> m Value) -> (W.PreparedWindow -> m Value) -> (LogicalBody -> m Value) -> Desktop -> m Value
+desktopValueWith :: Monad m => (Buffer -> m Value) -> (BS.ByteString -> m Value) -> (W.PreparedWindow -> m Value) -> (ConversationView -> m Value) -> Desktop -> m Value
 desktopValueWith buffer baseline plugin body desktop=do
   encodedDocuments<-mapM (documentValueWith buffer baseline) (M.toAscList documents)
   views<-mapM (conversationViewValueWith buffer body d) (M.toList (conversationViews d))
@@ -307,15 +337,13 @@ desktopValueWith buffer baseline plugin body desktop=do
         durableIds=S.fromList [windowId w | (w,_,_)<-durable]
         durable=[(w,prepared,recovery) | w<-windows d,conversationTargetFor d w==Nothing,PluginContent reference<-[windowContent w],Just prepared<-[M.lookup reference (pluginWindows d)],Just recovery<-[W.preparedWindowRecovery prepared]]
 
-conversationViewValueWith :: Monad m => (Buffer -> m Value) -> (LogicalBody -> m Value)
+conversationViewValueWith :: Monad m => (Buffer -> m Value) -> (ConversationView -> m Value)
   -> Desktop -> (Text,ConversationView) -> m Value
 conversationViewValueWith buffer body desktop (target,view)=case
   M.lookup (conversationDraftRef view) (editorDrafts desktop) of
   Just state->do
     draft<-buffer (editorDraftBuffer state)
-    snapshot<-case conversationLogical view of
-      Just logical->body logical
-      Nothing->pure (object ["items" .= ([]::[Value])])
+    snapshot<-body view
     pure (object ["target" .= target,"name" .= conversationName view,"body" .= snapshot,
       "draft" .= draft,"selection" .= selectionValue (editorDraftSelection state),"focused" .= editorDraftFocused state,
       "anchor" .= anchorValue (conversationAnchor view),"column" .= conversationScrollColumn view,
@@ -324,6 +352,11 @@ conversationViewValueWith buffer body desktop (target,view)=case
 
 -- Records contain the producers' redacted immutable sources. Provider/session
 -- and pending question state are separate fields and never enter this codec.
+viewBodyValue :: ConversationView -> Value
+viewBodyValue view=case conversationLogical view of
+  Just logical->bodyValue logical
+  Nothing->object ["items" .= ([]::[Value])]
+
 bodyValue :: LogicalBody -> Value
 bodyValue body=object ["items" .= map (recordValue . logicalItemRecord) (V.toList (logicalBodyItems body))]
 

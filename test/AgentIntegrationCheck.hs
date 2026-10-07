@@ -25,7 +25,7 @@ import qualified Data.Map.Strict as M
 import Data.IORef
 import Hide.Buffer (contents,newBuffer,contentSlice,contentLength,Selection(..))
 import Hide.AgentSidebarTypes (AgentSidebarRequest(ShowAgent))
-import Hide.Recovery (writeCheckpoint,readCheckpoint)
+import Hide.Recovery (writeCheckpoint,readCheckpoint,checkpointKey)
 import Hide.BufferReadCommand (withBufferReadCommands,readPage,readWindowCommand)
 import Hide.BufferReads (windowReadTarget,captureWindow)
 import qualified Hide.Font as Font
@@ -101,6 +101,15 @@ checks=bracket temporary removePathForcibly $ \root ->
       let primaryDrafted=draft "primary unsent" (Selection 3 7) cleared
           primaryText=bodyText "" primaryDrafted
       primaryCanonical<-canonicalWindowText primaryDrafted
+      earlierSource<-maybe (fail "Primary source capture missing before output") pure
+        (M.lookup "" (conversationViews connected) >>= conversationSource)
+      sourceKey<-checkpointKey primaryDrafted
+      earlierKey<-checkpointKey primaryDrafted {conversationViews=M.adjust
+        (\view->view {conversationSource=Just earlierSource}) "" (conversationViews primaryDrafted)}
+      unpaintedKey<-checkpointKey primaryDrafted {conversationViews=M.adjust
+        (\view->view {conversationLogical=error "Checkpoint key forced adopted logical source"}) "" (conversationViews primaryDrafted)}
+      ensure "received source identity invalidates checkpoints without inspecting painted catalogues"
+        (sourceKey/=earlierKey && sourceKey==unpaintedKey)
       directoryView<-ui "directory" [] primaryDrafted
       directory<-AH.listAgents hub AH.Human >>= right
       ensure "registered peer remains listed in the directory" (any ((==Just (AH.agentIdText peer)) . field "id") (maybe [] id (field "agents" directory :: Maybe [Value])))
