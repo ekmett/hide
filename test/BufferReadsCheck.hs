@@ -3,7 +3,6 @@ module BufferReadsCheck (checks) where
 
 import MCPPermissionsCheck (settledTool,settleDialog)
 import SourceWindowFixture (sourceFixtureBuffer)
-import EditorFixture (withEditorBodyFixture)
 import Control.Exception (bracket,onException)
 import qualified Control.Concurrent.STM as STM
 import Control.Concurrent (threadDelay)
@@ -102,16 +101,19 @@ checks=bracket temporary removePathForcibly $ \directory -> do
           (V.fromList [(0,T.length "Session: private-token"),(answerStart,T.length conversationText-1)]) V.empty V.empty
     (_,hidden)<-begin reader private
     check "admitted reads retain private-buffer refusal" . isLeft =<< hidden
-    body<-W.prepareSemanticTextWindow "Conversation" [(c,Plain) | c<-T.unpack conversationText] semantics
+    body<-W.prepareSemanticTextWindow "Conversation" [(conversationText,Plain)] semantics
       >>= either (error . T.unpack) pure
-    withEditorBodyFixture "" body base $ \conversation->do
+    W.withWindowScope $ \scope->do
+      update<-W.openTextWindow scope body >>= maybe (error "read window opening failed") pure
+      (reference,_)<-W.admitWindowUpdate False update >>= maybe (error "read window admission failed") pure
+      let conversation=addPluginWindow reference body base
       target<-either (error . T.unpack) pure (windowReadTarget conversation (maybe (error "missing conversation frame") windowId (activeWindow conversation)))
       image<-captureWindow conversation target >>= either (error . T.unpack) pure
       check "window admission captures raw immutable body without applying masks"
         (contentSlice (W.preparedWindowText (capturedWindowPrepared image)) 0 (T.length conversationText)==conversationText)
       (_,masked)<-beginWindow conversation
       maskedResult<-masked
-      check "admitted conversation window read applies semantic privacy masks"
+      check "admitted prepared window read applies semantic privacy masks"
         (either (const False) (\value->case parseMaybe (withObject "read result" (.: "text")) value of
           Just output->not ("private-token" `T.isInfixOf` output) && not ("unsent-secret" `T.isInfixOf` output) && "public λ" `T.isInfixOf` output
           Nothing->False) maskedResult)

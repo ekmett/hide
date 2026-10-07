@@ -14,7 +14,8 @@ import qualified Hide.Plugin.Window as W
 import qualified Data.Map.Strict as M
 import Data.Text (Text)
 import Hide.GuestAccess (sanitizedBufferContent)
-import Hide.Model (Desktop(..),Document(..),Window(..),WindowContent(..))
+import Hide.Model (Desktop(..),Document(..),Window(..),WindowContent(..),conversationTargetFor,conversationLogicalBody)
+import Hide.ConversationBody (LogicalBody,logicalBodyIdentity)
 import Hide.BufferReadAdmission (ReadAdmission,resolveReadReference)
 import Hide.Plugin.BufferHost (BufferRef,CapturedRead(..),BufferMetadata(..))
 import Hide.Plugin.BufferHost (captureVersion)
@@ -50,11 +51,12 @@ captureBuffer admission desktop reference=do
 
 -- | An exact installed frame and immutable prepared body, captured without
 -- granting a live action capability. Refresh/replacement requires a new request.
-data WindowReadTarget = WindowReadTarget !Int !W.WindowRef !W.PreparedWindow
+-- Conversation text belongs to its logical catalogue, independent of its viewport.
+data WindowReadTarget = WindowReadTarget !Int !W.WindowRef !W.PreparedWindow !(Maybe LogicalBody)
 
 -- | /O(1)/. Wire selector retained for the existing policy request.
 windowReadIdentifier :: WindowReadTarget -> Int
-windowReadIdentifier (WindowReadTarget ident _ _)=ident
+windowReadIdentifier (WindowReadTarget ident _ _ _)=ident
 
 -- | Capture only immutable identity while serialized. Ordinary source windows
 -- use read_buffer; rows/details need their own logical projection. Declaration
@@ -66,22 +68,33 @@ windowReadTarget desktop ident=do
     PluginContent ref->Right ref
     SourceContent _->Left "Use read_buffer for source windows."
   prepared<-maybe (Left "Window body not found") Right (M.lookup reference (pluginWindows desktop))
+  logical<-case conversationTargetFor desktop window of
+    Nothing->Right Nothing
+    Just target->maybe (Left "Conversation text is not ready.") (Right . Just)
+      (conversationLogicalBody target desktop)
   if W.preparedWindowDisclosure prepared/=W.ReadableWindow then Left "This window is private." else
     case W.preparedWindowRows prepared of
       W.RowsDetails{}->Left "Rows and Details are not a text body."
-      _->Right (WindowReadTarget ident reference prepared)
+      _->Right (WindowReadTarget ident reference prepared logical)
 
 -- | An admitted immutable snapshot. Masking and formatting use only this body
 -- on the invoking worker; it retains no Desktop or editable Buffer/Undo root.
 data CapturedWindowRead = CapturedWindowRead
-  { capturedWindowIdentifier :: !Int, capturedWindowPrepared :: !W.PreparedWindow }
+  { capturedWindowIdentifier :: !Int, capturedWindowPrepared :: !W.PreparedWindow
+  , capturedWindowLogical :: !(Maybe LogicalBody) }
 
 -- | Recheck the exact frame/ref/body under the request claim. Closing or any
--- prepared refresh rejects before capture. An accepted snapshot remains usable
+-- logical replacement rejects before capture; conversation viewport-only changes
+-- do not replace its logical body. An accepted snapshot remains usable
 -- after close, independently of retired input/action capability lifetimes.
 captureWindow :: Desktop -> WindowReadTarget -> IO (Either Text CapturedWindowRead)
-captureWindow desktop (WindowReadTarget ident reference prepared)=case windowReadTarget desktop ident of
+captureWindow desktop (WindowReadTarget ident reference prepared logical)=case windowReadTarget desktop ident of
   Left err->pure (Left err)
-  Right (WindowReadTarget _ currentRef currentBody)
-    | currentRef/=reference || currentBody/=prepared->pure (Left "Window body changed; read the window again.")
-    | otherwise->Right <$> evaluate (CapturedWindowRead ident prepared)
+  Right (WindowReadTarget _ currentRef currentBody currentLogical)
+    | currentRef/=reference || not (sameBody currentBody currentLogical)->pure (Left "Window body changed; read the window again.")
+    | otherwise->Right <$> evaluate (CapturedWindowRead ident currentBody currentLogical)
+  where
+    sameBody _ (Just current)=case logical of
+      Just captured->logicalBodyIdentity current==logicalBodyIdentity captured
+      Nothing->False
+    sameBody current Nothing=case logical of Nothing->current==prepared; Just _->False

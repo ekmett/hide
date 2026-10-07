@@ -11,6 +11,7 @@ import Data.Aeson
 import Data.Aeson.Types (parseEither)
 import qualified Data.Aeson.Key as K
 import Hide.BufferReads (CapturedWindowRead(..))
+import Hide.ConversationBody (logicalBodyRead)
 import Hide.GuestAccess (sanitizedPreparedContent)
 import qualified Hide.Plugin.Window as W
 import qualified Data.ByteString as BS
@@ -66,13 +67,18 @@ definition name title=CommandDef name title input output $ \context (ReadPage st
         formatBufferRead metadata start count offset (P.capturedRedacted image) (P.capturedContent image)
     WindowReadContext capture->do
       captured<-capture
-      pure $ do
-        image<-captured
-        let prepared=capturedWindowPrepared image
-            metadata=object ["windowId" .= capturedWindowIdentifier image,"title" .= W.preparedWindowTitle prepared,
-              "coordinateSpace" .= ("window-text"::T.Text)]
-        (redacted,content)<-maybe (Left "This window is private.") Right (sanitizedPreparedContent prepared)
-        formatTextRead "window" metadata start count redacted content
+      case captured of
+        Left err->pure (Left err)
+        Right image->do
+          let prepared=capturedWindowPrepared image
+              metadata=object ["windowId" .= capturedWindowIdentifier image,"title" .= W.preparedWindowTitle prepared,
+                "coordinateSpace" .= ("window-text"::T.Text)]
+          projection<-case capturedWindowLogical image of
+            Nothing->pure (maybe (Left "This window is private.") Right (sanitizedPreparedContent prepared))
+            Just body->Right <$> logicalBodyRead body
+          pure $ do
+            (redacted,content)<-projection
+            formatTextRead "window" metadata start count redacted content
   case result of
     Left err->pure (Left (CommandRejected err))
     Right value->Right <$> evaluate (force value)

@@ -214,7 +214,7 @@ windowReadChecks path=W.withWindowScope $ \scope->do
   let check label ok=unless ok (error label)
       semantics=W.TextSemantics W.CopyText Nothing V.empty V.empty W.ReadableWindow
         (V.singleton (7,13)) V.empty V.empty
-      prepare text=W.prepareSemanticTextWindow "Transcript" [(c,Plain) | c<-T.unpack text] semantics >>= either (error . T.unpack) pure
+      prepare text=W.prepareSemanticTextWindow "Transcript" [(text,Plain)] semantics >>= either (error . T.unpack) pure
       rejected result=case result of Left _->True; _->False
       queued worker=do
         let observe=threadStatus (asyncThreadId worker) >>= \state->case state of
