@@ -18,10 +18,10 @@ The main implementation boundaries are:
 | Area | Modules to start with | Design boundary |
 | --- | --- | --- |
 | Editing and change views | `Buffer`, `BufferView`, `Model` | Persistent text versus per-window coordinates and presentation |
-| Rendering | `Render`, `Unicode`, `Font`, `Markdown` | Prepared styled text versus grapheme/cell composition |
+| Rendering | `Render`, `Syntax`, `TextLayout`, `Unicode`, `Font`, `Markdown` | Borrowed styled runs versus grapheme/cell composition |
 | Sessions and displays | `Remote`, `Protocol`, `Recovery`, `Session` | Persistent owner versus replaceable frontend attachment |
 | Language/build/debug | `Tooling`, `LSP`, `BuildJobs`, `Debugger`, `DAP` | Worker preparation versus checked adoption and reply waits |
-| Conversations | `Conversation`, `AgentHub`, `AgentRuntime`, `Autocomplete` | Provider lifecycle, authenticated actors and immutable request context |
+| Conversations | `Conversation`, `ConversationBody`, `TextPresentation`, `AgentHub` | Provider authority versus logical source and bounded viewport preparation |
 | Agent tools and policy | `EditorMCP`, `MCPPermissions`, `GuestAccess`, the `*MCP` modules | Serialized initiation versus outside-lock continuation; independent privacy checks |
 | Disk and Git | `Files`, `External`, `Reconcile`, `GitOperations` | Observed baselines versus current unsaved edits |
 
@@ -113,7 +113,8 @@ change grapheme advances.
 Styled text borrows same-style `Text` runs. Finalized rows use the same
 `ConsChars`/`ConsSigil` representation as source rendering: ordinary text stays
 in runs, while exceptional graphemes retain their complete source fragment and
-display width. A style boundary cannot split a grapheme. Layout keeps ordinary
+display width. A style boundary cannot split a grapheme. Wrapping, bubble padding and layout
+share the same displayed-width policy, including wide headings and scripts. Layout keeps ordinary
 runs intact and computes positions within them; only visible wide or scripted
 glyphs need individual paint operations. Copy and privacy coordinates remain
 source coordinates, independent of wrapping and decorative cells.
