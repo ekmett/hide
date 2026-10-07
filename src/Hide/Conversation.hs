@@ -636,10 +636,10 @@ captureConversationSources (ConversationState _ ref _ agents) desktop=do
   pure desktop {conversationViews=views}
   where
     capture state launch primary target view
-      | T.null target,not (isNothing (connection state)) || not (null (transcript state)) || not (isNothing (chatQuestion desktop)) || not (isNothing (conversationSource view))->do
+      | T.null target,not (isNothing (connection state)) || not (null (transcript state)) || not (isNothing (chatQuestion desktop)) || not (isNothing (conversationSource view))=do
           source<-captureConversationSource target (PrimaryBodyProvider launch primary) (transcript state) (conversationSource view)
           pure view {conversationSource=Just source}
-      | not (T.null target),Just records<-M.lookup target (childRecords state)->do
+      | not (T.null target),Just records<-M.lookup target (childRecords state)=do
           receipt<-AH.agentConfiguration (AR.agentHub agents) (AH.AgentId target)
           case receipt of
             Right (owner,_)->do
