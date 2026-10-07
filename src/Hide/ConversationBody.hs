@@ -477,7 +477,8 @@ prepareRenderedBody inert key input logical=case demandedRows key input logical 
             (V.fromList (sessionHidden++guestHidden)) (V.fromList sessionHidden) (V.fromList (sessionHidden++questionHidden))
           BodyDemand requested _ _=displayDemand key
           anchor=case requested of FollowEnd | let BodyDemand _ delta _=displayDemand key,delta>=0->FollowEnd; _->maybe requested At (bodyRowPoint =<< listAt scroll receipts)
-          viewport=BodyViewport (V.fromList receipts) anchor scroll atEnd (logicalProgress logical anchor)
+          progress@(position,limit)=logicalProgress logical anchor
+          viewport=BodyViewport (V.fromList receipts) anchor scroll atEnd progress
           controls=if inert then HostBodyControls Nothing (Just viewport) Nothing [] else HostBodyControls questionToken (Just viewport) projected actions
       prepared<-W.prepareSemanticRowsWindow (bodyTitle input) rows semantics
       case prepared of
@@ -488,6 +489,8 @@ prepareRenderedBody inert key input logical=case demandedRows key input logical 
           layout<-case W.preparedWindowRows body of
             W.StyledRows styled->Just <$> prepareTextLayout (displayWide key) (displayColumns key) (W.preparedWindowText body) styled
             _->pure Nothing
+          _<-evaluate position
+          _<-evaluate limit
           _<-evaluate (sum [a+z+T.length name+sum (map T.length values) | (a,z,name,values)<-actions])
           _<-evaluate (V.foldl' (\n row->maybe () (\point->point `seq` ()) (bodyRowPoint row) `seq` n+bodyRowPaintStart row+bodyRowPaintEnd row+bodyRowLogicalEnd row+
             V.foldl' (\m (a,z,lo,hi)->m+a+z+lo+hi) 0 (bodyRowRanges row)) 0 (viewportRows viewport))
