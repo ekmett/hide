@@ -15,7 +15,7 @@ import Hide.ConversationBody (QuestionProjection(..),logicalBodyIdentity)
 import Data.Unique (Unique)
 import Data.IORef
 import System.Mem.StableName (StableName, makeStableName, eqStableName)
-import Data.List (find, groupBy)
+import Data.List (find, group, groupBy, sort)
 import qualified Graphics.Vty as V
 import qualified Graphics.Vty.Image.Internal as I
 import qualified Hide.TextLayout as TextLayout
@@ -484,6 +484,7 @@ pluginWindowLayers d active w prepared=
     frame=attr (if moving then cyan else if active then white else gray) blue
     text=PluginWindow.preparedWindowText prepared
     rows=PluginWindow.preparedWindowRows prepared
+    paintSelection=conversationPaintSelection d w
     title=" "<>T.take (columnOffset (windowTitle d w) (max 0 (ww-17))) (windowTitle d w)<>" "
     column=max 6 ((ww-keyLabelWidth title) `div` 2)
     positionBadge=[place (x+2) (y+hh-1) (label frame (T.take (max 0 (ww-4)) (conversationPositionText d)))
@@ -506,7 +507,7 @@ pluginWindowLayers d active w prepared=
             _->[]
       in detailLayers++map CellImage (listImages++[place (x+1) (top detailRect-1) (label frame " Details " V.<|>V.charFill frame '─' (max 0 (ww-11)) 1)])
       | Just layout<-windowPresentation d w =
-      [styledLayoutRow (darkAppearance d) selectable active (selection w)
+      [styledLayoutRow (darkAppearance d) selectable active (selection w) paintSelection
         (Rect (x+1) (y+1+n-scrollRow w) (max 0 (ww-2)) 1) (scrollColumn w) row
       | n<-[scrollRow w..scrollRow w+pluginBodyRows d w-1],Just row<-[TextLayout.layoutRows layout Vec.!? n]]
       | PluginWindow.PlainRows plain<-rows =plainLayers (pluginTextRect d w) text plain active
@@ -523,7 +524,7 @@ pluginWindowLayers d active w prepared=
           PluginWindow.PlainRows _->V.emptyImage
           PluginWindow.RowsDetails{}->V.emptyImage
           PluginWindow.StyledRows styled->V.translateX (negate (scrollColumn w))
-            (styledSigilsImage (darkAppearance d) selectable Nothing active (selection w) start (case styled Vec.!? n of Just (StyledRow sigils _ _)->sigils; _->Nil))
+            (styledSigilsImage (darkAppearance d) selectable Nothing active (selection w) paintSelection start (case styled Vec.!? n of Just (StyledRow sigils _ _)->sigils; _->Nil))
 
 -- Shared frame chrome uses the same semantic geometry as pointer dispatch.
 windowScrollbarImage :: Desktop -> Bool -> Window -> V.Image
@@ -531,8 +532,7 @@ windowScrollbarImage d vertical w=case windowScrollbar d vertical w of
   Nothing->V.emptyImage
   Just (Rect sx sy bw bh,limit)->
     let len=if vertical then bh else bw
-        shown=displayWindow w
-        thumb=scrollbarThumb len limit (if vertical then scrollRow shown else scrollColumn shown)
+        thumb=scrollbarThumb len limit (windowScrollPosition d vertical w)
         cell n=V.char (if n==0 || n==len-1 then attr blue scrollCyan else attr scrollCyan blue)
           (if n==0 then if vertical then '▲' else '◄' else if n==len-1 then if vertical then '▼' else '►' else if n==thumb then '█' else '░')
     in place sx sy ((if vertical then V.vertCat else V.horizCat) [cell n | n<-[0..len-1]])
@@ -603,7 +603,7 @@ windowLayers d active original =
           Just failed@MarkdownWindowFailure{} | let (target,columns,wide)=presentationMetadata failed,Just target==windowPresentationTarget d w,columns==max 1 (ww-2),wide==wideSectionTitles d -> "Markdown view preparation failed."
           _->"Preparing Markdown view..."))),CellImage (place (x+1) (y+1) (V.charFill base ' ' contentWidth contentHeight))]
       | Just layout<-windowPresentation d w =
-      [styledLayoutRow (darkAppearance d) selectable active (selection w)
+      [styledLayoutRow (darkAppearance d) selectable active (selection w) Nothing
         (Rect (x+1) (y+1+n-scrollRow w) contentWidth 1) (scrollColumn w) row
       | n<-[scrollRow w..scrollRow w+contentHeight-1],Just row<-[TextLayout.layoutRows layout Vec.!? n]]
       ++[CellImage (place (x+1) (y+1) (V.charFill base ' ' contentWidth contentHeight))]
@@ -794,14 +794,16 @@ sourceCellSpans project dark override active sel start left columns row=(column,
 
 styledImage :: Bool -> (Style -> Bool) -> Maybe V.Attr -> Bool -> Selection -> Int -> StyledText -> V.Image
 styledImage dark selectable override active sel start styled=case styledRows styled of
-  StyledRow sigils _ _:_->styledSigilsImage dark selectable override active sel start sigils
+  StyledRow sigils _ _:_->styledSigilsImage dark selectable override active sel Nothing start sigils
   []->V.emptyImage
 
 -- Consume finalized borrowed rows directly; no pack/unpack or second glyph pass.
-styledSigilsImage :: Bool -> (Style -> Bool) -> Maybe V.Attr -> Bool -> Selection -> Int -> Sigils -> V.Image
-styledSigilsImage dark selectable override active sel start=V.horizCat . draw start
+styledSigilsImage :: Bool -> (Style -> Bool) -> Maybe V.Attr -> Bool -> Selection -> Maybe [(Int,Int)] -> Int -> Sigils -> V.Image
+styledSigilsImage dark selectable override active sel logicalSelection start=V.horizCat . draw start
   where
     (lo,hi)=ordered sel
+    selectedRanges=fromMaybe [(lo,hi)] logicalSelection
+    intersects a z=any (\(first,lastOffset)->a<lastOffset && first<z) selectedRanges
     color style=maybe normal (\paint->paint {V.attrStyle=V.attrStyle normal}) override
       where normal=syntaxAttr dark style
     selected paint=paint `V.withForeColor` blue `V.withBackColor` gray
@@ -811,13 +813,16 @@ styledSigilsImage dark selectable override active sel start=V.horizCat . draw st
       let n=T.length text; paint=color style
           a=max 0 (min n (lo-offset)); z=max a (min n (hi-offset))
           (before,tailText)=T.splitAt a text; (chosen,after)=T.splitAt (z-a) tailText
-          pieces=if active && selectable style && z>a then
+          pieces | active && selectable style,Just ranges<-logicalSelection=
+              concat [image (if intersects (offset+first) (offset+lastOffset) then selected paint else paint) value (lastOffset-first)
+                | (first,lastOffset,value)<-selectionRunPieces n (\value->max 0 (min n (value-offset))) ranges text]
+                 | active && selectable style && z>a=
             image paint before a++image (selected paint) chosen (z-a)++image paint after (n-z)
-            else image paint text n
+                 | otherwise=image paint text n
       in pieces++draw (offset+n) rest
     draw offset (ConsSigil glyph style advance rest)=
       let original=graphemeText glyph; n=T.length original
-          paint=if active && selectable style && offset<hi && offset+n>lo then selected (color style) else color style
+          paint=if active && selectable style && intersects offset (offset+n) then selected (color style) else color style
           shown | original=="\r"=""
                 | original=="\t"=T.replicate advance " "
                 | graphemeOverflow glyph=graphemeDisplayText glyph
@@ -828,13 +833,14 @@ styledSigilsImage dark selectable override active sel start=V.horizCat . draw st
 -- Prepared semantic rows enter the common grid directly. Only the cached
 -- horizontal glyph slice is visited; padding is a separate baseline layer.
 -- Script metadata never passes through a Vty attribute or image round trip.
-styledLayoutRow :: Bool -> (Style -> Bool) -> Bool -> Selection -> Rect -> Int -> TextLayout.LayoutRow -> CellLayer
-styledLayoutRow dark selectable active sel (Rect x y columns _) left row=
+styledLayoutRow :: Bool -> (Style -> Bool) -> Bool -> Selection -> Maybe [(Int,Int)] -> Rect -> Int -> TextLayout.LayoutRow -> CellLayer
+styledLayoutRow dark selectable active sel logicalSelection (Rect x y columns _) left row=
   CellRow (x+origin-left) y x (x+columns) (Vec.fromList (concatMap spans (Vec.toList visible)))
   where
     visible=TextLayout.layoutVisibleGlyphs left columns row
     origin=maybe left TextLayout.layoutColumn (visible Vec.!? 0)
     (lo,hi)=ordered sel
+    selectedRanges=fromMaybe [(lo,hi)] logicalSelection
     spans glyph
       | step>0=if step==1 && TextLayout.layoutScript glyph==Nothing then ordinary else characters 0 text
       | otherwise=[case TextLayout.layoutScript glyph of
@@ -848,14 +854,17 @@ styledLayoutRow dark selectable active sel (Rect x y columns _) left row=
         step=TextLayout.layoutRunStep glyph
         n=if step>0 then TextLayout.layoutAdvance glyph `div` step else 0
         selected paint=paint `V.withForeColor` blue `V.withBackColor` gray
-        paintAt first lastOffset=if active && selectable style && first<hi && lastOffset>lo then selected normal else normal
+        paintAt first lastOffset=if active && selectable style && any (\(lo,hi)->first<hi && lastOffset>lo) selectedRanges then selected normal else normal
         cut value | z<=a=0
                   | otherwise=max 0 (min n (((value-a)*n+z-a-1) `div` (z-a)))
         first=cut lo; lastOffset=max first (cut hi)
         (before,tailText)=T.splitAt first text
         (chosen,after)=T.splitAt (lastOffset-first) tailText
         piece paint value=[CellText paint value | not (T.null value)]
-        ordinary | active && selectable style && lastOffset>first=
+        ordinary | active && selectable style,Just ranges<-logicalSelection=
+            concat [piece (paintAt (a+begin*(z-a) `div` n) (a+(end*(z-a)+n-1) `div` n)) value
+              | (begin,end,value)<-selectionRunPieces n cut ranges text]
+                 | active && selectable style && lastOffset>first=
             piece normal before++piece (selected normal) chosen++piece normal after
                  | otherwise=piece normal text
         characters index remaining=case T.uncons remaining of
@@ -869,6 +878,17 @@ styledLayoutRow dark selectable active sel (Rect x y columns _) left row=
                   Just script->CellScript paint char 1 script
                   Nothing->CellGlyph paint char step 0 step
             in cell:characters (index+1) rest
+
+-- Split only at bounded selected paint endpoints, borrowing each run slice.
+-- Ordinary/source callers retain their single-Selection path above.
+selectionRunPieces :: Int -> (Int -> Int) -> [(Int,Int)] -> Text -> [(Int,Int,Text)]
+selectionRunPieces count cut ranges text=go 0 text (drop 1 endpoints)
+  where
+    endpoints=map head (group (sort (0:count:concat [[cut a,cut z] | (a,z)<-ranges])))
+    go _ _ []=[]
+    go start remaining (end:rest)=
+      let (part,after)=T.splitAt (end-start) remaining
+      in (start,end,part):go end after rest
 
 -- One paint owner for ordinary and prepared semantic glyphs.
 syntaxAttr :: Bool -> Style -> V.Attr
