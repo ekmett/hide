@@ -1,4 +1,4 @@
-{-# LANGUAGE MultiParamTypeClasses, OverloadedStrings #-}
+{-# LANGUAGE DeriveFoldable, DeriveFunctor, DeriveTraversable, MultiParamTypeClasses, OverloadedStrings #-}
 -- | Persistent editable text, byte-preserving buffers and change provenance.
 --
 -- A finger tree stores newline-inclusive lines. Its measure counts live text,
@@ -12,7 +12,8 @@
 -- never establish equality without an exact check. Derived Eq is not a redraw key.
 module Hide.Buffer
   ( Buffer(saved,undoStack,redoStack,revision,lastChange,byteMode,savedByteMode), Selection(..)
-  , BufferSnapshot(..), snapshotBuffer, restoreBuffer
+  , BufferSnapshot(..), snapshotBuffer
+  , BufferStorage(..), StoredLine(..), StoredHistory(..), snapshotBufferStorage, restoreBufferStorage
   , BufferContent, bufferContent, contentLength, contentLineCount, contentByteMode
   , contentSlice, contentByteSlice, contentLineOffset, contentLineAt
   , SourceLine, contentSourceLineAt, contentSourceLinesFrom, sourceLineText, sourceLineRawText
@@ -233,7 +234,107 @@ sourceLineWindow line@(ChunkedLine _ _ _ _ _ chunks) column=
      then (sourceLineLength line,col-if char>=lineCharacters line && lineTerminated line then 1 else 0,[])
      else (char,col,groups)
 
--- | Explicit recovery representation, including flattened histories and provenance.
+-- | Ordered physical lines and raw pieces, independent of display preparation.
+-- The parameter is raw text when restoring and a checkpoint-local reference when
+-- encoding. Deleted lines retain baseline provenance but occupy no live range.
+data StoredLine a = StoredLine !ChangeKind [a] deriving (Show,Functor,Foldable,Traversable)
+-- | One retained history root, its representation and inverse edit coordinates.
+data StoredHistory a = StoredHistory [StoredLine a] !Bool !(Int,Int,Int)
+  deriving (Show,Functor,Foldable,Traversable)
+-- | Raw immutable roots for checkpoint transport. No whole-text projection or
+-- display index is needed to capture this value; repeated pieces may share IDs.
+data BufferStorage a = BufferStorage
+  { storageCurrent :: [StoredLine a], storageSaved :: [StoredLine a]
+  , storageUndo :: [StoredHistory a], storageRedo :: [StoredHistory a]
+  , storageRevision :: !Int, storageLastChange :: Maybe (Int,Int,Int)
+  , storageByteMode :: !Bool, storageSavedByteMode :: !Bool
+  } deriving (Show,Functor,Foldable,Traversable)
+
+-- | Capture existing physical pieces with rejection fingerprints. Hash equality
+-- never proves text equality; a string table must check exact text on collision.
+snapshotBufferStorage :: Buffer -> BufferStorage (Word64,Text)
+snapshotBufferStorage b=BufferStorage (capture (bufferLines b)) (capture (baselineLines b))
+  (map history (undoStack b)) (map history (redoStack b)) (revision b) (lastChange b) (byteMode b) (savedByteMode b)
+  where
+    capture=map captureLine . toList
+    captureLine line=StoredLine (origin (lineOrigin line)) (case pieces line of
+      []->[(lineHash line,T.empty)]
+      [text]->[(lineHash line,text)]
+      texts->[(T.foldl' (\h c->h*16777619+fromIntegral (ord c)+1) 0 text,text) | text<-texts])
+    pieces (Line _ _ _ _ _ text)=[text]
+    pieces (ChunkedLine _ _ _ _ _ chunks)=Chunks.chunksPieces chunks
+    origin Original=OriginalLine
+    origin Added=AddedLine
+    origin Deleted=DeletedLine
+    history (tree,mode,change)=StoredHistory (capture tree) mode change
+
+-- | Validate raw roots, provenance, representation and inverse edits before
+-- adopting them. Recompute derived measures; text projections remain lazy.
+-- @restoreBufferStorage (fmap snd (snapshotBufferStorage b))@ preserves file
+-- bytes, retained edits and saved-line provenance without flattening histories.
+restoreBufferStorage :: BufferStorage Text -> Either Text Buffer
+restoreBufferStorage s=do
+  unless (storageRevision s>=0 && storageRevision s<=limit) (Left "Invalid buffer revision")
+  unless (all ((<=100).length) [storageUndo s,storageRedo s]) (Left "Invalid buffer history length")
+  baseline<-restoreTree (storageSavedByteMode s) (storageSaved s)
+  unless (all ((==Original).lineOrigin) (toList baseline)) (Left "Invalid saved line provenance")
+  current<-restoreTree (storageByteMode s) (storageCurrent s) >>= provenance baseline
+  history<-mapM (restoreHistory baseline) (storageUndo s)
+  future<-mapM (restoreHistory baseline) (storageRedo s)
+  let size=characterCount (FT.measure current)
+  unless (validHistory size history && validHistory size future) (Left "Invalid buffer history")
+  unless (maybe True (validChange size) (storageLastChange s)) (Left "Invalid last buffer change")
+  pure (Buffer current (ProjectedContents (treeText current)) (treeText baseline) history future
+    (storageRevision s) (storageLastChange s) (storageByteMode s) (storageSavedByteMode s) baseline (projectionFor current))
+  where
+    limit=1073741823
+    restoreHistory baseline (StoredHistory lines' mode change)=do
+      tree<-restoreTree mode lines' >>= provenance baseline
+      pure (tree,mode,change)
+    restoreTree mode stored=do
+      unless (not (null stored) && sum [sum (map (toInteger . T.length) pieces) | StoredLine _ pieces<-stored]<=toInteger limit)
+        (Left "Invalid buffer root size")
+      lines'<-mapM (restoreLine mode) stored
+      let live=filter ((/=Deleted).lineOrigin) lines'
+      unless (not (null live) && all lineTerminated (init live) && not (lineTerminated (last live)))
+        (Left "Invalid physical buffer lines")
+      unless (canonical False lines') (Left "Invalid buffer change-run ordering")
+      pure (FT.fromList lines')
+    restoreLine mode (StoredLine kind pieces)=do
+      unless (not (null pieces)) (Left "Missing buffer line pieces")
+      let size=sum (map T.length pieces)
+          terminated=maybe False ((=='\n').snd) (T.unsnoc (last pieces))
+          newlineCount=sum (map (T.count "\n") pieces)
+          origin=case kind of OriginalLine->Original; AddedLine->Added; DeletedLine->Deleted
+          lineMode=if origin==Deleted then storageSavedByteMode s else mode
+      unless (newlineCount==if terminated then 1 else 0) (Left "Invalid buffer line terminator")
+      unless (origin/=Deleted || size>0) (Left "Invalid deleted buffer line")
+      unless (not lineMode || all (T.all ((<=255).ord)) pieces) (Left "Invalid byte buffer representation")
+      let line
+            | length pieces>1 || (not lineMode && TU.lengthWord8 (head pieces)>512)=
+                let chunks=Chunks.chunksFromPieces pieces; raw=Chunks.chunksRawMeasure chunks
+                in ChunkedLine (Chunks.rawCharacters raw) (Chunks.chunksFlags chunks) origin
+                  (Chunks.rawHash raw) (Chunks.rawFactor raw) chunks
+            | otherwise=withOrigin origin (lineFromText lineMode (T.concat pieces))
+      pure line
+    provenance baseline tree=do
+      let original=filter (\line->lineOrigin line/=Added && lineCharacters line/=0) (toList tree)
+          savedLines=filter ((/=0).lineCharacters) (toList baseline)
+      unless (length original==length savedLines && and (zipWith sameLineText original savedLines))
+        (Left "Buffer line provenance does not match saved lines")
+      pure tree
+    canonical _ []=True
+    canonical added (line:rest)=case lineOrigin line of
+      Original->canonical False rest
+      Added->canonical True rest
+      Deleted->not added && canonical False rest
+    validChange size (a,z,n)=a>=0 && z>=a && n>=0 && toInteger a+toInteger n<=toInteger size
+    validHistory _ []=True
+    validHistory size ((tree,_,change@(a,z,n)):rest)=
+      let previous=characterCount (FT.measure tree)
+      in validChange previous change && z<=size && toInteger size-toInteger (z-a)+toInteger n==toInteger previous && validHistory previous rest
+
+-- | Explicit flat diagnostic representation, including histories and provenance.
 -- Constructing or encoding this value may traverse all retained buffer text.
 data BufferSnapshot = BufferSnapshot
   { snapshotContents :: Text, snapshotSaved :: Text
@@ -247,7 +348,7 @@ data BufferSnapshot = BufferSnapshot
 -- omitted; all coordinates and baseline text are checked when restoring.
 type LineChangesSnapshot = [(Int,Bool,Text)]
 
--- | Project a buffer and its history for persistence. Keep this out of input/render work.
+-- | Flat diagnostic oracle. Keep this out of persistence and input/render work.
 snapshotBuffer :: Buffer -> BufferSnapshot
 snapshotBuffer b=BufferSnapshot (contents b) (saved b) (map flatten (undoStack b)) (map flatten (redoStack b))
   (revision b) (lastChange b) (byteMode b) (savedByteMode b)
@@ -255,40 +356,6 @@ snapshotBuffer b=BufferSnapshot (contents b) (saved b) (map flatten (undoStack b
   where
     flatten (tree,mode,change)=(treeText tree,mode,change)
     first (tree,_,_)=tree
-
--- | Validate recovery coordinates, byte representation and history before rebuilding trees.
-restoreBuffer :: BufferSnapshot -> Either Text Buffer
-restoreBuffer s
-  | snapshotRevision s<0 || snapshotRevision s>1073741823=Left "Invalid buffer revision"
-  | not (validText (snapshotByteMode s) (snapshotContents s) && validText (snapshotSavedByteMode s) (snapshotSaved s))=Left "Invalid byte buffer representation"
-  | any ((>100).length) [snapshotUndo s,snapshotRedo s]=Left "Invalid buffer history length"
-  | not (validHistory (T.length (snapshotContents s)) (snapshotUndo s) && validHistory (T.length (snapshotContents s)) (snapshotRedo s))=Left "Invalid buffer history"
-  | maybe False (not . validChange (T.length (snapshotContents s))) (snapshotLastChange s)=Left "Invalid last buffer change"
-  | otherwise=do
-      (current,history,future)<-case snapshotLineChanges s of
-        Nothing -> pure (fromSaved (snapshotByteMode s) (snapshotContents s),map inflate (snapshotUndo s),map inflate (snapshotRedo s))
-        Just (currentChanges,historyChanges,futureChanges) -> do
-          unless (length historyChanges==length (snapshotUndo s) && length futureChanges==length (snapshotRedo s))
-            (Left "Invalid buffer line-change history")
-          current<-restoreLines (snapshotSavedByteMode s) (snapshotSaved s) (snapshotByteMode s) (snapshotContents s) currentChanges
-          history<-sequence (zipWith restoreEntry (snapshotUndo s) historyChanges)
-          future<-sequence (zipWith restoreEntry (snapshotRedo s) futureChanges)
-          pure (current,history,future)
-      pure (Buffer current (RawContents (snapshotContents s)) (snapshotSaved s) history future (snapshotRevision s) (snapshotLastChange s)
-        (snapshotByteMode s) (snapshotSavedByteMode s) (linesFromText (snapshotSavedByteMode s) (snapshotSaved s)) (projectionFor current))
-  where
-    validText mode text=not mode || T.all ((<=255).ord) text
-    validChange size (a,z,n)=a>=0 && z>=a && n>=0 && toInteger a+toInteger n<=toInteger size
-    validHistory _ []=True
-    validHistory size ((text,mode,change@(a,z,n)):rest)=validText mode text && validChange (T.length text) change && z<=size &&
-      toInteger size-toInteger (z-a)+toInteger n==toInteger (T.length text) && validHistory (T.length text) rest
-    -- Older checkpoints have no provenance. Reconcile their saved/current line
-    -- regions conservatively; all new checkpoints preserve exact edit identity.
-    fromSaved mode text=normalizeHunks (reconcileTree (linesFromText (snapshotSavedByteMode s) (snapshotSaved s)) (linesFromText mode text))
-    inflate (text,mode,change)=(fromSaved mode text,mode,change)
-    restoreEntry (text,mode,change) changes=do
-      tree<-restoreLines (snapshotSavedByteMode s) (snapshotSaved s) mode text changes
-      pure (tree,mode,change)
 
 -- | Anchor and caret in zero-based character offsets; either end may come first.
 data Selection = Selection { anchor :: Int, caret :: Int } deriving (Eq, Show)
@@ -416,23 +483,28 @@ treeText :: LineTree -> Text
 treeText = T.concat . map lineText . filter ((/=Deleted) . lineOrigin) . toList
 
 -- Byte leaves retain their Latin1 scalar policy and never run segmentation.
+-- Construct one already-delimited physical line without splitting/copying its
+-- payload. Restored string-table entries keep their shared original storage.
+lineFromText :: Bool -> Text -> Line
+lineFromText mode t
+  | not mode && TU.lengthWord8 t>512=
+      let chunks=Chunks.chunksFromText t; raw=Chunks.chunksRawMeasure chunks
+      in ChunkedLine (Chunks.rawCharacters raw) (Chunks.chunksFlags chunks) Original
+        (Chunks.rawHash raw) (Chunks.rawFactor raw) chunks
+  | otherwise=
+      let n=T.length t
+          flags=(if T.any (=='\0') t then 1 else 0) .|.
+                (if "\r\n" `T.isSuffixOf` t then 2 else 0) .|.
+                (if "\n" `T.isSuffixOf` t then 4 else 0) .|.
+                ((TU.lengthWord8 t-TU.lengthWord8 (T.dropWhileEnd (\c->c=='\r' || c=='\n') t)) `shiftL` 3)
+          hash=T.foldl' (\fingerprint c->fingerprint*16777619+fromIntegral (ord c)+1) 0 t
+          factor=16777619^n
+      in Line n flags Original hash factor t
+
 linesFromText :: Bool -> Text -> LineTree
 linesFromText mode = FT.fromList . go . T.splitOn "\n"
   where
-    line t
-      | not mode && TU.lengthWord8 t>512=
-          let chunks=Chunks.chunksFromText t; raw=Chunks.chunksRawMeasure chunks
-          in ChunkedLine (Chunks.rawCharacters raw) (Chunks.chunksFlags chunks) Original
-            (Chunks.rawHash raw) (Chunks.rawFactor raw) chunks
-      | otherwise=
-          let n=T.length t
-              flags=(if T.any (=='\0') t then 1 else 0) .|.
-                    (if "\r\n" `T.isSuffixOf` t then 2 else 0) .|.
-                    (if "\n" `T.isSuffixOf` t then 4 else 0) .|.
-                    ((TU.lengthWord8 t-TU.lengthWord8 (T.dropWhileEnd (\c->c=='\r' || c=='\n') t)) `shiftL` 3)
-              hash=T.foldl' (\fingerprint c->fingerprint*16777619+fromIntegral (ord c)+1) 0 t
-              factor=16777619^n
-          in Line n flags Original hash factor t
+    line=lineFromText mode
     go [] = []
     go [t] = [line t]
     go (t:ts) = line (t <> "\n") : go ts
@@ -792,33 +864,6 @@ snapshotLines=go 0 . toList
       Deleted -> (row,False,lineText line):go row rest
       Added | lineCharacters line/=0 -> (row,True,""):go (row+1) rest
       _ -> go (row+1) rest
-
-restoreLines :: Bool -> Text -> Bool -> Text -> LineChangesSnapshot -> Either Text LineTree
-restoreLines baselineMode baseline mode text changes=do
-  lines'<-go 0 (toList (linesFromText mode text)) changes
-  let original=[lineText line | line<-lines',lineOrigin line/=Added,lineCharacters line/=0]
-      savedLines=filter (not . T.null) (map lineText (toList (linesFromText baselineMode baseline)))
-  unless (original==savedLines) (Left "Buffer line changes do not match saved lines")
-  unless (canonical False lines') (Left "Invalid buffer change-run ordering")
-  pure (FT.fromList lines')
-  where
-    go _ [] []=Right []
-    go row live ((index,False,deleted):rest) | index==row && validDeleted deleted =
-      case toList (linesFromText baselineMode deleted) of
-        line:_ -> (withOrigin Deleted line:) <$> go row live rest
-        [] -> Left "Invalid deleted buffer line"
-    go row (line:live) ((index,True,empty):rest) | index==row && T.null empty && lineCharacters line/=0 =
-      (withOrigin Added line:) <$> go (row+1) live rest
-    go row (line:live) []=(line:) <$> go (row+1) live []
-    go row (line:live) pending@((index,_,_):_)
-      | index>row = (line:) <$> go (row+1) live pending
-    go _ _ _=Left "Invalid buffer line-change coordinates"
-    validDeleted deleted=not (T.null deleted) && not (T.any (=='\n') (T.dropEnd 1 deleted))
-    canonical _ []=True
-    canonical added (line:rest)=case lineOrigin line of
-      Original -> canonical False rest
-      Added -> canonical True rest
-      Deleted -> not added && canonical False rest
 
 undo, redo :: Buffer -> Buffer
 undo b@Buffer{bufferLines=current,undoStack=history,redoStack=future,revision=version} = case history of

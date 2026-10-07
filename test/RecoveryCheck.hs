@@ -3,7 +3,9 @@ module RecoveryCheck (checks) where
 
 import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Exception (bracket)
-import Control.Monad (unless)
+import Control.Monad (unless, forM_)
+import Data.Char (chr, ord)
+import Data.Word (Word64)
 import Data.Aeson
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString as BS
@@ -29,9 +31,16 @@ import qualified Hide.Plugin.Editor as E
 import qualified Hide.Plugin.Window as W
 import Hide.Syntax (Style(..))
 
+check :: String -> Bool -> IO ()
+check label ok=unless ok (error label)
+
+right :: Either T.Text a -> IO a
+right=either (error . T.unpack) pure
+
 checks :: IO ()
 checks=bracket temporary removePathForcibly $ \root->W.withWindowScope $ \scope->do
   keyChecks
+  sharedTextChecks root
   primaryRef<-E.newDraftRef
   childRef<-E.newDraftRef
   let path=root </> "session.checkpoint"
@@ -63,8 +72,6 @@ checks=bracket temporary removePathForcibly $ \root->W.withWindowScope $ \scope-
         agentReplying=True,agentQueued=3,agentSettings=[AgentSetting "token" "Token" "private" "secret" []],
         agentContextUsage=Just (1,2),diagnostics=[Diagnostic sourcePath Nothing 0 0 1 "old diagnostic"]}
       get d ident=documentBuffer (buffers d M.! ident)
-      right=either (error . T.unpack) pure
-      check label ok=unless ok (error label)
   BS.writeFile sourcePath (bufferBytes original)
   writeCheckpoint path desktop >>= right
 #ifndef mingw32_HOST_OS
@@ -217,10 +224,18 @@ checks=bracket temporary removePathForcibly $ \root->W.withWindowScope $ \scope-
   mutate (alterFirst "windows" (set "bounds" (toJSON ((0::Int),(0::Int),(0::Int),(10::Int)))))
   mutate (alterFirst "windows" (set "selection" (toJSON ((-1::Int),(0::Int)))))
   mutate (alterFirst "windows" (set "sourceId" (toJSON (999999::Int))))
+  let alterBuffer change (Object fields)=case KM.lookup "buffer" fields of
+        Just buffer->Object (KM.insert "buffer" (change buffer) fields)
+        _->Object fields
+      alterBuffer _ value=value
+  mutate (set "strings" (toJSON ([]::[T.Text])))
+  mutate (alterFirst "buffers" (alterBuffer (set "current" (toJSON [(0::Int,[-1::Int])]))))
+  mutate (alterFirst "buffers" (alterBuffer (set "current" (toJSON [(0::Int,[maxBound::Int])]))))
+  mutate (alterFirst "buffers" (alterBuffer (set "current" (toJSON [(7::Int,[0::Int])]))))
   BS.writeFile path "{not-json: secret}"
   corrupted<-readCheckpoint path fresh
   check "corrupt checkpoint returns an error" (case corrupted of Left _->True; _->False)
-  switched<-right (toggleByteMode (newBuffer "λ中") >>= restoreBuffer . snapshotBuffer)
+  switched<-right (toggleByteMode (newBuffer "λ中") >>= restoreBufferStorage . fmap snd . snapshotBufferStorage)
   check "mode-switch recovery keeps text saved baseline and reversible representation" (byteMode switched && not (savedByteMode switched) && contents (undo switched)=="λ中" && not (byteMode (undo switched)))
   let longPath=root </> "long-source.checkpoint"
       longText=T.replicate 400 "\t界e\x301"<>"\r\nlast"
@@ -239,8 +254,8 @@ checks=bracket temporary removePathForcibly $ \root->W.withWindowScope $ \scope-
      scrollbarLimit longRecovered False longDocument longWindow>expectedLimit &&
      scrollColumn discoveredWindow==expectedLimit &&
      scrollbarLimit discovered False discoveredDocument discoveredWindow==expectedLimit)
-  let badSnapshot=(snapshotBuffer edited) {snapshotByteMode=True,snapshotContents="中"}
-  check "invalid byte representation cannot silently truncate on recovery" (case restoreBuffer badSnapshot of Left _->True; _->False)
+  let badStorage=(fmap snd (snapshotBufferStorage (newBuffer "中"))) {storageByteMode=True}
+  check "invalid byte representation cannot silently truncate on recovery" (case restoreBufferStorage badStorage of Left _->True; _->False)
 #ifndef mingw32_HOST_OS
   let alias=root </> "checkpoint-alias"
   createFileLink path alias
@@ -248,6 +263,39 @@ checks=bracket temporary removePathForcibly $ \root->W.withWindowScope $ \scope-
   check "checkpoint reads refuse symlink endpoints" (case symbolic of Left _->True; _->False)
 #endif
   putStrLn "recovery checks passed"
+
+sharedTextChecks :: FilePath -> IO ()
+sharedTextChecks root=do
+  -- These distinct scalar sequences collide under the production polynomial
+  -- fingerprint modulo 2^64. The table must resolve the bucket by exact text.
+  let first=T.replicate 8 (T.singleton (chr 1000))
+      second=T.pack (map (chr . (1000+)) [14,32,-86,-157,-11,-121,43,62])
+      fingerprint=T.foldl' (\h c->h*16777619+fromIntegral (ord c)+1) (0::Word64)
+      desktop=addDocument Nothing (newBuffer second) (addDocument Nothing (newBuffer first) (initialDesktop (80,25)))
+      path=root </> "shared-text.checkpoint"
+  check "collision fixture uses distinct raw text in one hash bucket" (first/=second && fingerprint first==fingerprint second)
+  writeCheckpoint path desktop >>= right
+  recovered<-readCheckpoint path (initialDesktop (80,25)) >>= right
+  check "hash collisions preserve both exact string payloads"
+    (map (contents . documentBuffer) (M.elems (buffers recovered))==[first,second])
+  -- A file larger than three MiB with 100 localized edits used to retain over
+  -- 300 MiB of flattened states. Repeated raw lines now have one shared payload.
+  let line=T.replicate 1023 "a"<>"\n"
+      source=T.replicate 3073 line
+      edited=foldl (\b n->replaceSelection (Selection 5 6) (if even n then "x" else "y") b) (newBuffer source) [1..100::Int]
+      large=addDocument Nothing edited (initialDesktop (80,25))
+      largePath=root </> "large-history.checkpoint"
+  writeCheckpoint largePath large >>= right
+  encoded<-BS.readFile largePath
+  restored<-readCheckpoint largePath (initialDesktop (80,25)) >>= right
+  let buffer=documentBuffer (snd (M.findMin (buffers restored)))
+  check "mostly unchanged histories share checkpoint text rather than snapshots" (BS.length encoded<T.length source && length (undoStack buffer)==100)
+  forM_ [0,1,50,100] $ \steps->do
+    let actual=iterate undo buffer!!steps
+        expected=iterate undo edited!!steps
+    check "shared history retains exact bytes and saved-line changes" (bufferBytes actual==bufferBytes expected && bufferLineChanges actual==bufferLineChanges expected)
+  let oldest=iterate undo buffer!!100
+  check "shared history replays every retained edit" (bufferBytes (iterate redo oldest!!100)==bufferBytes edited)
 
 temporary :: IO FilePath
 temporary=do
@@ -265,7 +313,6 @@ keyChecks=W.withWindowScope $ \scope->do
       desktop=addDocument (Just (FileState "/project/source.hs" (Just "abc"))) original (initialDesktop (80,25))
       update f d=d {buffers=M.map f (buffers d)}
       replace buffer=update (\doc->doc {documentBuffer=buffer}) desktop
-      check label ok=unless ok (error label)
       changed label d=do a<-checkpointKey desktop; b<-checkpointKey d; check label (a/=b)
   initial<-checkpointKey desktop
   repeated<-checkpointKey desktop

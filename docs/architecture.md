@@ -65,6 +65,15 @@ edited rows retain ranges of those owners in a tree measured by raw bytes and
 scalars. Viewport queries demand display metadata as needed, preserving Unicode
 context and tab-aware advances. Raw save and Undo do not require that index.
 
+Recovery writes a checkpoint-local string table for physical lines and long-line
+pieces. Current, saved, undo and redo roots refer to those strings; serialization
+does not flatten each retained state into another copy of the file. Cached
+fingerprints select table buckets, and exact text equality resolves collisions.
+Restore checks references, byte representation, edit coordinates and saved-line
+provenance, then rebuilds raw measured roots with shared strings. Display indexes
+remain lazy. The checkpoint stores text and line provenance, not the internal
+finger-tree graph or a cache of its geometry.
+
 Skylighting supplies the language definitions. The filename chooses the grammar
 and the editor maps token categories into its palette. Hex buffers preserve raw
 bytes and use the same file and undo machinery.
