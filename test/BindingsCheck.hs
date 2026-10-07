@@ -659,7 +659,13 @@ dialogFocusChecks=withEditorTextFixture "" "Transcript" (initialDesktop (80,25))
   let privateSelected=prompt "Private" Information [SelectedInput "API key" "secret" (Selection 0 6)] base {keyBindings=prepared [("hide.dialog.focus-next",[]),("hide.edit.copy",["Tab"])]}
   blockedCopy<-P.applyGuestInput (P.Key "Tab" []) privateSelected
   check "rebinding Tab to editing cannot borrow safe navigation authority" (case blockedCopy of Left _->True; _->False)
-  let questionBase=questionHost {keyBindings=remapped,chatQuestion=Just (ChatQuestion 42 "Question" ["Yes"] Nothing (newBuffer "") (Selection 0 0) True)}
+  let questionBody=maybe (error "Missing question fixture body") id (conversationBodySnapshot "" questionHost)
+      authorize view=case conversationBody view of
+        InstalledBody reference _->view {conversationBody=InstalledBody reference
+          (Just (BodyControlReceipt questionBody 80 False Nothing (HostBodyControls (Just 42) Nothing Nothing [])))}
+        _->error "Missing question fixture lifetime"
+      questionBase=questionHost {keyBindings=remapped,conversationViews=M.map authorize (conversationViews questionHost),
+        chatQuestion=Just (ChatQuestion 42 "Question" ["Yes"] Nothing (newBuffer "") (Selection 0 0) True)}
   check "dialog commands do not replace inline question ownership" (not (commandEnabled questionBase nextCommand) && maybe False ((==Just 0).questionChoice) (chatQuestion (event (V.KChar '\t') [] questionBase)) && snd (handleEvent (V.EvKey V.KEnter []) questionBase)==[AgentAction "question-submit" ["42"]] && snd (handleEvent (V.EvKey V.KEsc []) questionBase)==[AgentAction "question-cancel" ["42"]])
   check "dialog focus chords are configurable on every platform" (all (\platform->case platformBindings [] platform (M.singleton "dialog" (M.fromList [("hide.dialog.focus-next",["Alt+Tab"]),("hide.dialog.focus-previous",["Shift+Tab"])])) of Right _->True; _->False) [TerminalPlatform,GraphicalPlatform,MacPlatform])
 
