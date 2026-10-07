@@ -38,8 +38,47 @@ checkIndexed b text = do
     check "indexed CRLF line content matches Text" (bufferLineAt b row == lineAt text row)
     check "borrowed live rows match Text" (bufferRowsFrom b row == map (T.dropWhileEnd (=='\r')) (drop (max 0 row) (textLines text)))
 
+storageChecks :: IO ()
+storageChecks=do
+  let recover b=either (error . T.unpack) pure (restoreBufferStorage (fmap snd (snapshotBufferStorage b)))
+      ordinary=replaceSelection (Selection 2 5) "界\n" (newBuffer "a\r\nb\nc\n")
+      bytes=replaceSelection (Selection 1 3) "\255\n" (newByteBuffer (BS.pack [0,128,255,10,13,10]))
+  switched<-either (error . T.unpack) pure (toggleByteMode (newBuffer "λ中\n"))
+  forM_ [ordinary,undo ordinary,markSaved ordinary,bytes,switched] $ \buffer->do
+    restored<-recover buffer
+    check "raw storage preserves bytes, saved mode and provenance"
+      (bufferBytes restored==bufferBytes buffer && saved restored==saved buffer &&
+       byteMode restored==byteMode buffer && savedByteMode restored==savedByteMode buffer && bufferLineChanges restored==bufferLineChanges buffer)
+    check "raw history preserves inverse edit behavior"
+      (bufferBytes (undo restored)==bufferBytes (undo buffer) && bufferBytes (redo restored)==bufferBytes (redo buffer) &&
+       bufferLineChanges (undo restored)==bufferLineChanges (undo buffer) && bufferLineChanges (redo restored)==bufferLineChanges (redo buffer))
+  -- Deliberately cut storage inside combining, ZWJ and regional-indicator runs.
+  -- Logical/display results must depend on source context, not storage boundaries.
+  let text=T.replicate 140 "a"<>"e\x301\x200d😀👩\x200d👧🇺🇸\t\r\nlast"
+      base=fmap snd (snapshotBufferStorage (newBuffer text))
+      cut (StoredLine kind pieces)=StoredLine kind (case concatMap (map T.singleton . T.unpack) pieces of []->[""]; scalars->scalars)
+      split=base {storageCurrent=map cut (storageCurrent base),storageSaved=map cut (storageSaved base)}
+  restored<-either (error . T.unpack) pure (restoreBufferStorage split)
+  checkIndexed restored text
+  let source=contentSourceLineAt (bufferContent restored) 0
+      reference=contentSourceLineAt (bufferContent (newBuffer text)) 0
+  check "raw cuts preserve geometry across Unicode and CRLF boundaries"
+    (sourceLineWidth source==sourceLineWidth reference &&
+     all (\p->sourceLineDisplayColumn source p==sourceLineDisplayColumn reference p) [135..T.length (lineAt text 0)])
+  let edited=replaceSelection (Selection 141 143) "x\x301" restored
+  editedAgain<-recover edited
+  check "edited recovered raw pieces retain context and exact slices"
+    (bufferBytes editedAgain==bufferBytes edited && bufferSlice editedAgain 135 24==bufferSlice edited 135 24 &&
+     bufferPreviousCharacter editedAgain 147==bufferPreviousCharacter edited 147 &&
+     bufferWordLeft editedAgain 147==bufferWordLeft edited 147 && bufferWordRight editedAgain 140==bufferWordRight edited 140)
+  let poisoned=(newBuffer "raw\n") {saved=error "raw storage forced saved projection"}
+  _<-recover poisoned
+  let bad=base {storageCurrent=[StoredLine AddedLine ["replacement"]]}
+  check "raw storage rejects forged provenance" (case restoreBufferStorage bad of Left _->True; _->False)
+
 checks :: IO ()
 checks = do
+  storageChecks
   lazyLineChecks
   longLineChecks
   wordChecks
@@ -137,38 +176,35 @@ lineChangesChecks=do
   count "undo saved deletion adds a line" (1,0) (undo (markSaved deleted))
   count "undo saved insertion deletes a line" (0,1) (undo (markSaved inserted))
   forM_ [original,changed,reedited,restored,inserted,removedFresh,deleted,savedEdit,undo savedEdit] $ \buffer -> do
-    recovered<-either (error . T.unpack) pure (restoreBuffer (snapshotBuffer buffer))
+    recovered<-either (error . T.unpack) pure (restoreBufferStorage (fmap snd (snapshotBufferStorage buffer)))
     check "snapshot restores line counts" (bufferLineChanges recovered==bufferLineChanges buffer)
     check "snapshot restores undo line counts" (bufferLineChanges (undo recovered)==bufferLineChanges (undo buffer))
     check "snapshot restores redo line counts" (bufferLineChanges (redo recovered)==bufferLineChanges (redo buffer))
 
-  let oldCheckpoint=(snapshotBuffer changed) {snapshotLineChanges=Nothing}
-  oldRestored<-either (error . T.unpack) pure (restoreBuffer oldCheckpoint)
-  count "old checkpoint restores conservative line counts" (1,1) oldRestored
-  checkIndexed oldRestored (contents changed)
-  let snapshot=snapshotBuffer changed
-      invalid changes=snapshot {snapshotLineChanges=Just (changes,replicate (length (snapshotUndo snapshot)) [],[])}
-      rejected candidate=case restoreBuffer candidate of Left _ -> True; Right _ -> False
-  forM_ [[(-1,True,"")],[(maxBound,True,"")],[(0,True,"forged")],[(0,False,"forged\n")],[(0,False,"one\ntwo\n")],[(0,True,""),(0,True,"")]] $ \changes ->
-    check "invalid recovery line metadata is rejected" (rejected (invalid changes))
-  let forged=(snapshotBuffer (newBuffer "z")) {snapshotSaved="abc",snapshotLineChanges=Just ([(0,False,"a"),(0,False,"bc"),(0,True,"")],[],[])}
+  let snapshot=fmap snd (snapshotBufferStorage changed)
+      rejected candidate=case restoreBufferStorage candidate of Left _ -> True; Right _ -> False
+  forM_ [[StoredLine AddedLine []],[StoredLine DeletedLine [""]],[StoredLine OriginalLine ["one\ntwo\n"]],[]] $ \lines' ->
+    check "invalid recovery line metadata is rejected" (rejected snapshot {storageCurrent=lines'})
+  let forged=(fmap snd (snapshotBufferStorage (newBuffer "z")))
+        {storageSaved=[StoredLine OriginalLine ["abc"]],
+         storageCurrent=[StoredLine DeletedLine ["a"],StoredLine DeletedLine ["bc"],StoredLine AddedLine ["z"]]}
   check "recovery rejects forged baseline line boundaries" (rejected forged)
-  check "recovery rejects insertions before deletions" (rejected forged {snapshotLineChanges=Just ([(0,True,""),(1,False,"abc")],[],[])})
-  check "missing recovery line history is rejected" (rejected snapshot {snapshotLineChanges=Just ([],[],[])})
+  check "recovery rejects insertions before deletions" (rejected forged {storageCurrent=[StoredLine AddedLine ["z"],StoredLine DeletedLine ["abc"]]})
+  check "missing recovery line history is rejected" (rejected snapshot {storageUndo=[StoredHistory [] False (0,0,0)]})
   let aged=foldl (\b n -> replaceSelection (Selection 0 1) (if even n then "X" else "Y") b) (newBuffer "original\n") [1::Int ..150]
-  agedRestored<-either (error . T.unpack) pure (restoreBuffer (snapshotBuffer aged))
+  agedRestored<-either (error . T.unpack) pure (restoreBufferStorage (fmap snd (snapshotBufferStorage aged)))
   count "provenance survives after baseline leaves undo history" (1,1) agedRestored
   count "oldest recovered undo still compares with original baseline" (1,1) (iterate undo agedRestored !! 100)
   let bytes=newByteBuffer (BS.pack [65,0,10,66])
       byteEdit=replaceSelection (Selection 0 2) "C" bytes
   count "byte buffers track changed lines" (1,1) byteEdit
   count "byte-buffer save resets counts" (0,0) (markSaved byteEdit)
-  byteRestored<-either (error . T.unpack) pure (restoreBuffer (snapshotBuffer byteEdit))
+  byteRestored<-either (error . T.unpack) pure (restoreBufferStorage (fmap snd (snapshotBufferStorage byteEdit)))
   check "byte-buffer provenance preserves exact bytes" (bufferBytes byteRestored==bufferBytes byteEdit && bufferLineChanges byteRestored==(1,1))
   let modeOriginal=newBuffer "λ\n"
   modeBytes<-either (error . T.unpack) pure (toggleByteMode modeOriginal)
   check "representation-only toggle remains clean" (not (dirty modeBytes))
-  modeRestored<-either (error . T.unpack) pure (restoreBuffer (snapshotBuffer modeBytes))
+  modeRestored<-either (error . T.unpack) pure (restoreBufferStorage (fmap snd (snapshotBufferStorage modeBytes)))
   check "representation changes restore unchanged bytes" (bufferBytes modeRestored==bufferBytes modeOriginal && not (dirty modeRestored))
   let large=newBuffer (T.replicate 200000 "unchanged\n")
   _<-evaluate (bufferLineCount large)
@@ -280,7 +316,7 @@ batchChecks = do
   changed<-either (error . T.unpack) pure (replaceRanges [(0,3,"1"),(8,13,"THREE!")] original)
   check "disjoint batch retains unchanged-line provenance" (bufferLineChanges changed==(2,2))
   check "batch reports enclosing replacement and inverse" (lastChange changed==Just (0,13,12) && lastChange (undo changed)==Just (0,12,13))
-  recovered<-either (error . T.unpack) pure (restoreBuffer (snapshotBuffer changed))
+  recovered<-either (error . T.unpack) pure (restoreBufferStorage (fmap snd (snapshotBufferStorage changed)))
   check "batch snapshot retains undo and change counts" (contents (undo recovered)==contents original && bufferLineChanges recovered==(2,2))
   let savedBatch=markSaved changed
   check "batch undo across save uses enclosing inverse correctly" (contents (undo savedBatch)==contents original && contents (redo (undo savedBatch))==contents changed && bufferLineChanges (redo (undo savedBatch))==(0,0))

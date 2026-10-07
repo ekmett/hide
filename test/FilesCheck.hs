@@ -120,7 +120,7 @@ checks = bracket makeDirectory removePathForcibly $ \dir -> do
     (piecesBytes == expected && diskBytes piecesSaved == Just expected)
 
   let switched = replaceBuffer True "\NUL\255\r\n" edited
-      restored = either (error . T.unpack) id (restoreBuffer (snapshotBuffer switched))
+      restored = either (error . T.unpack) id (restoreBufferStorage (fmap snd (snapshotBufferStorage switched)))
       transitions =
         [ ("Undo", undo edited, TE.encodeUtf8 (row <> "\r\nlast"))
         , ("Redo", redo (undo edited), expected)

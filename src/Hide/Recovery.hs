@@ -16,7 +16,10 @@ import Control.Exception (IOException, bracket, try, evaluate)
 import Control.Monad (unless, when, foldM)
 import Hide.Plugin.Command (validCommandName)
 import Data.Aeson
-import Data.Functor.Identity (runIdentity)
+import qualified Data.Aeson.KeyMap as KM
+import Control.Monad.ST (runST)
+import Data.STRef
+import Data.Word (Word64)
 import Data.IORef
 import System.Mem.StableName
 import Data.Aeson.Types (Parser, parseEither)
@@ -144,18 +147,36 @@ safeIO action=do
 ignore :: IO () -> IO ()
 ignore action=catchIOError action (const (pure ()))
 
-bufferValue :: Buffer -> Value
-bufferValue buffer=let s=snapshotBuffer buffer in object
-  ["contents" .= snapshotContents s,"saved" .= snapshotSaved s,"byteMode" .= snapshotByteMode s,"savedByteMode" .= snapshotSavedByteMode s,
-   "revision" .= snapshotRevision s,"lastChange" .= snapshotLastChange s,"undo" .= map history (snapshotUndo s),"redo" .= map history (snapshotRedo s),"lineChanges" .= snapshotLineChanges s]
-  where history (text,mode,change)=object ["contents" .= text,"byteMode" .= mode,"change" .= change]
+-- One checkpoint owns this table. Cached hashes select buckets, while exact
+-- equality disambiguates collisions. IDs follow first encounter, not map order.
+data StringTable = StringTable !Int !(M.Map Word64 [(Text,Int)]) [Text]
 
-bufferParser :: Value -> Parser Buffer
-bufferParser=withObject "buffer" $ \o->do
-  snapshot<-BufferSnapshot <$> o .: "contents" <*> o .: "saved" <*> (o .: "undo" >>= mapM history) <*> (o .: "redo" >>= mapM history)
-    <*> o .: "revision" <*> o .: "lastChange" <*> o .: "byteMode" <*> o .: "savedByteMode" <*> o .:? "lineChanges"
-  either (fail . T.unpack) pure (restoreBuffer snapshot)
-  where history=withObject "history" $ \o->(,,) <$> o .: "contents" <*> o .: "byteMode" <*> o .: "change"
+bufferValue :: BufferStorage Int -> Value
+bufferValue s=object
+  ["current" .= map line (storageCurrent s),"saved" .= map line (storageSaved s),
+   "byteMode" .= storageByteMode s,"savedByteMode" .= storageSavedByteMode s,
+   "revision" .= storageRevision s,"lastChange" .= storageLastChange s,
+   "undo" .= map history (storageUndo s),"redo" .= map history (storageRedo s)]
+  where
+    line (StoredLine kind refs)=toJSON (fromEnumKind kind,refs)
+    fromEnumKind OriginalLine=0::Int
+    fromEnumKind AddedLine=1
+    fromEnumKind DeletedLine=2
+    history (StoredHistory lines' mode change)=object ["lines" .= map line lines',"byteMode" .= mode,"change" .= change]
+
+bufferParser :: V.Vector Text -> Value -> Parser Buffer
+bufferParser strings=withObject "buffer" $ \o->do
+  stored<-BufferStorage <$> (o .: "current" >>= mapM line) <*> (o .: "saved" >>= mapM line)
+    <*> (o .: "undo" >>= mapM history) <*> (o .: "redo" >>= mapM history)
+    <*> o .: "revision" <*> o .: "lastChange" <*> o .: "byteMode" <*> o .: "savedByteMode"
+  either (fail . T.unpack) pure (restoreBufferStorage stored)
+  where
+    line value=do
+      (kind,refs)<-parseJSON value
+      origin<-case kind::Int of 0->pure OriginalLine; 1->pure AddedLine; 2->pure DeletedLine; _->fail "Invalid line provenance"
+      pieces<-mapM (\ident->maybe (fail "Invalid buffer string reference") pure (strings V.!? ident)) refs
+      pure (StoredLine origin pieces)
+    history=withObject "history" $ \o->StoredHistory <$> (o .: "lines" >>= mapM line) <*> o .: "byteMode" <*> o .: "change"
 
 fileValueWith :: Monad m => (BS.ByteString -> m Value) -> FileState -> m Value
 fileValueWith baseline file=do
@@ -183,9 +204,22 @@ documentValueWith buffer baseline (ident,doc)=do
     recoveredLabel label=label
 
 desktopValue :: Desktop -> Value
-desktopValue desktop=runIdentity (desktopValueWith
-  (pure . bufferValue)
-  (pure . String . TE.decodeUtf8 . B64.encode) (\prepared->let text=W.preparedWindowText prepared in pure (String (contentSlice text 0 (contentLength text)))) (pure . bodyValue) desktop)
+desktopValue desktop=runST $ do
+  table<-newSTRef (StringTable 0 M.empty [])
+  let intern (fingerprint,text)=do
+        StringTable next buckets texts<-readSTRef table
+        case lookup text (M.findWithDefault [] fingerprint buckets) of
+          Just ident->pure ident
+          Nothing->do
+            writeSTRef table (StringTable (next+1) (M.insertWith (++) fingerprint [(text,next)] buckets) (text:texts))
+            pure next
+  encoded<-desktopValueWith
+    (fmap bufferValue . traverse intern . snapshotBufferStorage)
+    (pure . String . TE.decodeUtf8 . B64.encode)
+    (\prepared->let text=W.preparedWindowText prepared in pure (String (contentSlice text 0 (contentLength text))))
+    (pure . bodyValue) desktop
+  StringTable _ _ texts<-readSTRef table
+  pure (case encoded of Object fields->Object (KM.insert "strings" (toJSON (reverse texts)) fields); _->encoded)
 
 -- | Durable scalar metadata and stable source/draft/baseline/prepared identities.
 data CheckpointKey = CheckpointKey Value [StableName Buffer] [StableName BS.ByteString] [StableName W.PreparedWindow] deriving Eq
@@ -218,7 +252,7 @@ desktopValueWith buffer baseline plugin body desktop=do
   plugins<-mapM (\(window,prepared,(kind,version))->do
     text<-plugin prepared
     pure (object ["id" .= windowId window,"kind" .= kind,"version" .= version,"title" .= W.preparedWindowTitle prepared,"text" .= text])) durable
-  pure (object ["schemaVersion" .= (3::Int),"screen" .= screenSize d,"buffers" .= encodedDocuments,
+  pure (object ["schemaVersion" .= (4::Int),"screen" .= screenSize d,"buffers" .= encodedDocuments,
     "dockedTerminals" .= [object ["windowId" .= ident,"bounds" .= rectValue rectangle,"restoredBounds" .= fmap rectValue saved] | (ident,(rectangle,saved))<-M.toList (dockedTerminals d),any ((==ident).windowId) (windows d)],
     "bottomTerminal" .= bottomTerminal d,
     "pluginWindows" .= plugins,
@@ -307,14 +341,14 @@ restoreBody (BodySeed title text copy messages disclosure)=
       | n>=a=(c,BubbleText ident outgoing Plain):paint (n+1) cs intervals
     paint n (c:cs) intervals=(c,Plain):paint (n+1) cs intervals
 
-conversationViewParser :: Value -> Parser (Text,ConversationSeed)
-conversationViewParser=withObject "conversation view" $ \o->do
+conversationViewParser :: V.Vector Text -> Value -> Parser (Text,ConversationSeed)
+conversationViewParser strings=withObject "conversation view" $ \o->do
   target<-o .: "target"
   unless (T.length target<=128 && not (T.any (<' ') target)) (fail "Invalid conversation target")
   name<-o .: "name"
   unless (T.length name<=256 && not (T.any (<' ') name)) (fail "Invalid conversation name")
   body<-o .: "body" >>= bodyParser
-  draft<-o .: "draft" >>= bufferParser
+  draft<-o .: "draft" >>= bufferParser strings
   selected<-o .: "selection" >>= selectionParser (bufferLength draft)
   focused<-o .: "focused"
   (row,col)<-o .: "scroll"
@@ -356,18 +390,19 @@ sidebarValue tree=object ["root" .= treeRoot tree,"selected" .= selected,"scroll
 desktopParser :: Desktop -> Value -> Parser (Desktop,[WindowSeed],[(Int,Text,Int,Text,Text)],[(Text,ConversationSeed)])
 desktopParser baseline=withObject "checkpoint" $ \o->do
   version<-o .: "schemaVersion"
-  unless (version==(3::Int)) (fail "Unsupported checkpoint version")
+  unless (version==(4::Int)) (fail "Unsupported checkpoint version")
+  strings<-o .: "strings"
   size@(cols,rows)<-o .: "screen"
   unless (cols>0 && rows>0 && cols<=4096 && rows<=4096 && toInteger cols*toInteger rows<=1048576) (fail "Invalid desktop dimensions")
   encodedDocuments<-o .: "buffers"
   unless (length encodedDocuments<=2048) (fail "Too many recovered buffers")
-  parsedDocuments<-mapM documentParser encodedDocuments
+  parsedDocuments<-mapM (documentParser strings) encodedDocuments
   let documents=M.fromList parsedDocuments
   unless (M.size documents==length parsedDocuments) (fail "Duplicate buffer IDs")
   selectedTarget<-o .: "conversationTarget"
   encodedViews<-o .: "conversationViews"
   unless (length encodedViews<=1024) (fail "Too many conversation views")
-  parsedViews<-mapM conversationViewParser encodedViews
+  parsedViews<-mapM (conversationViewParser strings) encodedViews
   let conversationViews'=M.fromList parsedViews
   unless (length parsedViews==M.size conversationViews') (fail "Duplicate conversation views")
   unless (T.null selectedTarget || M.member selectedTarget conversationViews') (fail "Unknown selected conversation")
@@ -419,10 +454,10 @@ desktopParser baseline=withObject "checkpoint" $ \o->do
     autocompleteACPEnabled=False,autocompleteDraft=newBuffer "",autocompleteSelection=Selection 0 0,autocompleteFocused=True,
     childAgentSettings=[],childAgentSteering=False,childAgentContextUsage=Nothing,agentSteering=False,agentReplying=False,agentQueued=0,agentContextUsage=Nothing,chatQuestion=Nothing},views,snapshots,parsedViews)
 
-documentParser :: Value -> Parser (Int,Document)
-documentParser=withObject "document" $ \o->do
+documentParser :: V.Vector Text -> Value -> Parser (Int,Document)
+documentParser strings=withObject "document" $ \o->do
   ident<-o .: "id" >>= positive
-  buffer<-o .: "buffer" >>= bufferParser
+  buffer<-o .: "buffer" >>= bufferParser strings
   file<-o .: "file" >>= traverse fileParser
   label<-o .: "label" >>= traverse (boundedText 32768)
   suggested<-o .: "suggestedName" >>= traverse (checkedPath False)
