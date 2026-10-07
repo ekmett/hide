@@ -364,8 +364,10 @@ ordinary streaming progress does not.
 
 Switching targets retains their catalogues and drafts. Closing a conversation
 retires its visible frame; reopening creates a fresh window lifetime. Recovery
-stores each target's logical sources, anchor and selection once, alongside the
-draft and its history. Hidden conversations need no layout during restore, and
+stores each target's latest received logical sources, anchor and selection once,
+alongside the draft and its history. Source capture is independent of painting:
+closed conversations retain incoming output, and suspension captures accepted
+owner output before saving. Hidden conversations need no layout during restore, and
 visible conversations reflow at their recovered width. Restored controls, links,
 shell actions and provider credentials remain inactive. This does not complete
 the separate first-party plugin package.
