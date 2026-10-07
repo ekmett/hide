@@ -466,7 +466,8 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ withTextPresentation $ 
         let chat=draftAt (newBuffer "draft") (Selection 2 2) base
             positions ident=[(a,z) | (a,z,BubbleText j _ _)<-styleRanges cells,j==ident]
             a=fst (head (positions 0)); z=snd (last (positions 1))
-            selectedReply lo hi=modifyActive (\w -> w {selection=Selection lo hi}) chat
+            selectedReply lo hi=modifyActive (\w -> w {selection=Selection lo hi})
+              (setComposerInput (composerBuffer chat) (composerSelection chat) False chat)
             copiedReply lo hi=clipboard (fst (runCommand Copy (selectedReply lo hi)))
         check "single-bubble copies omit speaker names and decoration"
           (copiedReply a (a+3)=="one" && copiedReply (a+1) (a+3)=="ne")
@@ -478,8 +479,9 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ withTextPresentation $ 
             dragging=clickAt z (clickAt a chat)
             released=fst (handleEvent (V.EvMouseUp 0 0 (Just V.BLeft)) dragging)
             keyCopied=fst (handleEvent (V.EvKey (V.KChar 'c') [V.MCtrl]) released)
-        check "dragging across bubbles preserves the draft caret and copies only message text"
-          (composerFocused released && composerSelection released==Selection 2 2 && clipboard keyCopied=="User: one\n\nBot: two")
+        preservedDraft<-sameDraftRoot chat released
+        check "dragging across bubbles focuses body copy and preserves the draft caret"
+          (not (composerFocused released) && preservedDraft && composerSelection released==Selection 2 2 && clipboard keyCopied=="User: one\n\nBot: two")
     let reply width outgoing=styledContents . renderReply False width outgoing
     check "short bubbles occupy one row with outward tails"
       (reply 30 True "hello"==T.replicate 22 " "<>"▐hello▛◤" && reply 30 False "hello"=="◥▜hello▌")

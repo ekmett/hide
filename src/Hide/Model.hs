@@ -3319,7 +3319,8 @@ selectAt extend x y d | Just view<-activePluginWindow d,Just w<-activeWindow d =
       row=max 0 (min (windowTextRows d w text-1) (y-top (pluginTextRect d w)+scrollRow w))
       col=max 0 (x-left (pluginTextRect d w)+scrollColumn w)
       pos=windowTextOffset d w text row col
-      focused=modifyActive (\v->v {rowsInteraction=fmap (\(RowsInteraction ident _)->RowsInteraction ident True) (rowsInteraction v)}) d
+      bodyFocused=if windowHasEditor d w then setComposerInput (composerBuffer d) (composerSelection d) False d else d
+      focused=modifyActive (\v->v {rowsInteraction=fmap (\(RowsInteraction ident _)->RowsInteraction ident True) (rowsInteraction v)}) bodyFocused
   in pluginMoveTo extend pos focused
 selectAt extend x y d = case activeWindow d of
   Nothing -> d
