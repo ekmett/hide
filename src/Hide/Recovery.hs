@@ -155,7 +155,7 @@ readCheckpoint path baseline=do
         then (\(reference,_)->InstalledBody reference Nothing) <$> install scope prepared
         else pure (InertBody prepared)
       ref<-E.newDraftRef
-      pure (target,ConversationView body name ref Nothing Nothing anchored 0 column reply (Just logical),
+      pure (target,ConversationView body name ref Nothing Nothing anchored 0 column reply (Just logical) Nothing,
         (ref,EditorDraft buffer selected focused Nothing),prepared,body)
 
 -- Validation is pure and never calls a plugin. All rendering preparation belongs

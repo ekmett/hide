@@ -194,7 +194,7 @@ checks=bracket temporary removePathForcibly $ \root->W.withWindowScope $ \scope-
   check "recovery allocates fresh per-target draft identity without editor bindings"
     (conversationDraftRef primaryView/=primaryRef && conversationDraftRef childView/=childRef &&
      conversationDraftRef primaryView/=conversationDraftRef childView &&
-     all (\v->conversationEditor v==Nothing && conversationEditorFrame v==Nothing) (M.elems (conversationViews restoredViews)) &&
+     all (\v->conversationEditor v==Nothing && conversationEditorFrame v==Nothing && conversationCaretIntent v==Nothing) (M.elems (conversationViews restoredViews)) &&
      all ((==Nothing).editorDraftMount) (M.elems (editorDrafts restoredViews)) &&
      all ((==Nothing).windowEditorMount) (windows restoredViews) && activeEditorMount restoredViews==Nothing)
   restoredAgain<-readCheckpoint viewsPath fresh >>= right
@@ -430,7 +430,7 @@ keyChecks root=W.withWindowScope $ \scope->do
       cheap=setComposerInput retained (Selection 0 0) True chat
   cheapKey<-checkpointKey cheap
   bindingsKey<-checkpointKey cheap
-    {conversationViews=M.map (\view->view {conversationEditor=error "editor authority forced",conversationEditorFrame=error "frame binding forced"}) (conversationViews cheap),
+    {conversationViews=M.map (\view->view {conversationEditor=error "editor authority forced",conversationEditorFrame=error "frame binding forced",conversationCaretIntent=error "pending caret intent forced"}) (conversationViews cheap),
      editorDrafts=M.map (\state->state {editorDraftMount=error "draft mount forced"}) (editorDrafts cheap),
      windows=map (\w->w {windowEditorMount=error "window mount forced"}) (windows cheap)}
   check "checkpoint keys never force draft history or ephemeral editor bindings" (cheapKey==bindingsKey)
