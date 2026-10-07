@@ -29,7 +29,7 @@ import qualified Data.ByteString.Lazy as BL
 import qualified Data.Map.Strict as M
 import qualified Data.Set as S
 import qualified Data.Vector as V
-import Hide.Syntax (Style(..))
+import Hide.Syntax (Style(..), styledText)
 import Hide.ConversationBody (ConversationBody(..))
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -120,7 +120,7 @@ readCheckpoint path baseline=do
         then (\(reference,_)->InstalledBody reference Nothing) <$> install scope prepared
         else pure (InertBody prepared)
       ref<-E.newDraftRef
-      pure (target,ConversationView body name ref Nothing Nothing scrolled reply,
+      pure (target,ConversationView body name ref Nothing Nothing scrolled reply Nothing,
         (ref,EditorDraft buffer selected focused Nothing),prepared,body)
 
 -- Validation is pure and never calls a plugin. All rendering preparation belongs
@@ -331,15 +331,18 @@ bodyParser=withObject "conversation body" $ \o->do
 
 restoreBody :: BodySeed -> IO W.PreparedWindow
 restoreBody (BodySeed title text copy messages disclosure)=
-  W.prepareSemanticTextWindow title (paint 0 (T.unpack text) messages)
+  W.prepareSemanticTextWindow title (paint 0 text messages)
     (W.TextSemantics copy Nothing V.empty V.empty disclosure V.empty V.empty V.empty)
     >>= either (ioError . userError . T.unpack) pure
   where
-    paint _ [] _=[]
-    paint n chars@(c:cs) intervals@((a,z,ident,outgoing):rest)
-      | n>=z=paint n chars rest
-      | n>=a=(c,BubbleText ident outgoing Plain):paint (n+1) cs intervals
-    paint n (c:cs) intervals=(c,Plain):paint (n+1) cs intervals
+    paint _ remaining _ | T.null remaining=[]
+    paint _ remaining []=styledText Plain remaining
+    paint n remaining intervals@((a,z,ident,outgoing):rest)
+      | n>=z=paint n remaining rest
+      | n<a=let (before,after)=T.splitAt (a-n) remaining
+             in styledText Plain before++paint a after intervals
+      | otherwise=let (before,after)=T.splitAt (z-n) remaining
+                  in styledText (BubbleText ident outgoing Plain) before++paint z after rest
 
 conversationViewParser :: V.Vector Text -> Value -> Parser (Text,ConversationSeed)
 conversationViewParser strings=withObject "conversation view" $ \o->do

@@ -29,7 +29,7 @@ import Hide.Model
 import Hide.Recovery
 import qualified Hide.Plugin.Editor as E
 import qualified Hide.Plugin.Window as W
-import Hide.Syntax (Style(..))
+import Hide.Syntax (Style(..), StyledText, styledText)
 
 check :: String -> Bool -> IO ()
 check label ok=unless ok (error label)
@@ -57,7 +57,7 @@ checks=bracket temporary removePathForcibly $ \root->W.withWindowScope $ \scope-
       binaryId=sourceFixtureBuffer (fromJust (activeWindow binary))
       transcript="Session: old-provider-id\nPublic transcript\nOther: private pending answer"
       draft=replaceSelection (Selection 0 0) "private draft λ\n\n    main = 1\n      continuation\n" (newBuffer "")
-  primaryBody<-semanticBody "Primary" (map (\c->(c,Plain)) (T.unpack transcript)) W.CopyText
+  primaryBody<-semanticBody "Primary" (styledText Plain transcript) W.CopyText
     [(0,T.length "Session: old-provider-id"),(T.length "Session: old-provider-id\nPublic transcript\n",T.length transcript)]
   conversation<-showBody scope "" "Primary" (installDraft "" "Primary" primaryBody primaryRef draft (Selection 1 5) True binary)
   let terminal=addReadOnly "Terminal 7" "last terminal output" conversation
@@ -109,17 +109,16 @@ checks=bracket temporary removePathForcibly $ \root->W.withWindowScope $ \scope-
       hiddenSession="Session: old-hidden-provider-id\n"
       hiddenSessionLength=T.length hiddenSession
       primaryText=T.replicate (hiddenSessionLength-1) " "<>"\nhi\nx..ok"<>T.replicate 80 "primary transcript\n"
-      primaryCells=[(c,BubbleText 1 True Plain) | c<-T.unpack hiddenSession]++[(c,BubbleText 1 True (LinkStyle "https://private.invalid" Plain)) | c<-"hi\nx"]++
-        [(c,Plain) | c<-".."]++[(c,BubbleText 2 False Plain) | c<-"ok"]++
-        [(c,Plain) | c<-T.unpack (T.replicate 80 "primary transcript\n")]
+      primaryRuns=[(hiddenSession,BubbleText 1 True Plain),("hi\nx",BubbleText 1 True (LinkStyle "https://private.invalid" Plain)),
+        ("..",Plain),("ok",BubbleText 2 False Plain),(T.replicate 80 "primary transcript\n",Plain)]
       primaryDraft=undo (replaceSelection (Selection 0 0) "redo " (replaceSelection (Selection 0 0) "primary draft" (newBuffer "")))
       childText=T.replicate 80 "child transcript\n"
       childDraft=replaceSelection (Selection 0 0) "child draft" (newBuffer "")
-  primaryPrepared<-W.prepareSemanticTextWindow "Primary" primaryCells
+  primaryPrepared<-W.prepareSemanticTextWindow "Primary" primaryRuns
     (W.TextSemantics (W.CopyMessages W.UserBotAttribution) (Just root)
       (V.singleton (0,2,"https://private.invalid")) (V.singleton (0,2,"sh","printf private-shell"))
       W.ReadableWindow V.empty V.empty (V.singleton (0,hiddenSessionLength))) >>= right
-  childPrepared<-semanticBody "Child" [(c,Plain) | c<-T.unpack childText] W.CopyText []
+  childPrepared<-semanticBody "Child" (styledText Plain childText) W.CopyText []
   initialPrimary<-showBody scope "" "Primary" (installDraft "" "Primary" primaryPrepared primaryRef primaryDraft (Selection 2 5) False (initialDesktop (80,25)))
   let primaryChat=modifyActive (\w->w {scrollRow=12,selection=Selection 1 6})
         (setComposerInput (composerBuffer initialPrimary) (Selection 2 5) False initialPrimary)
@@ -330,8 +329,8 @@ keyChecks=W.withWindowScope $ \scope->do
   lazyB<-checkpointKey (replace poison)
   check "checkpoint key never walks buffer snapshots" (lazyA==lazyB)
   ref<-E.newDraftRef
-  prepared<-semanticBody "Primary" [(c,Plain) | c<-"Public prompt\nOther: private"] W.CopyText []
-  maskedBody<-semanticBody "Primary" [(c,Plain) | c<-"Public prompt\nOther: private"] W.CopyText [(14,28)]
+  prepared<-semanticBody "Primary" (styledText Plain "Public prompt\nOther: private") W.CopyText []
+  maskedBody<-semanticBody "Primary" (styledText Plain "Public prompt\nOther: private") W.CopyText [(14,28)]
   let chat=installDraft "" "Primary" prepared ref (newBuffer "unsent draft") (Selection 0 0) True desktop
       masked=chat {conversationViews=M.adjust (\view->view {conversationBody=InertBody maskedBody}) "" (conversationViews chat)}
   chatKey<-checkpointKey chat
@@ -365,13 +364,13 @@ keyChecks=W.withWindowScope $ \scope->do
   check "checkpoint keys never force draft history or ephemeral editor bindings" (cheapKey==bindingsKey)
 
 -- Public preparation/admission creates real snapshots and lifetime identities.
-semanticBody :: T.Text -> [(Char,Style)] -> W.TextCopy -> [(Int,Int)] -> IO W.PreparedWindow
+semanticBody :: T.Text -> StyledText -> W.TextCopy -> [(Int,Int)] -> IO W.PreparedWindow
 semanticBody title styled copy hidden=W.prepareSemanticTextWindow title styled
   (W.TextSemantics copy Nothing V.empty V.empty W.ReadableWindow V.empty V.empty (V.fromList hidden)) >>= either (fail . T.unpack) pure
 
 installDraft :: T.Text -> T.Text -> W.PreparedWindow -> E.DraftRef -> Buffer -> Selection -> Bool -> Desktop -> Desktop
 installDraft target name body ref buffer selected focused d=d
-  {conversationViews=M.insert target (ConversationView (InertBody body) name ref Nothing Nothing (0,0) (Selection 0 0)) (conversationViews d),
+  {conversationViews=M.insert target (ConversationView (InertBody body) name ref Nothing Nothing (0,0) (Selection 0 0) Nothing) (conversationViews d),
    editorDrafts=M.insert ref (EditorDraft buffer selected focused Nothing) (editorDrafts d)}
 
 showBody :: W.WindowScope -> T.Text -> T.Text -> Desktop -> IO Desktop
