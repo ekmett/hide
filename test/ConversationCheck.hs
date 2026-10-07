@@ -432,6 +432,15 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ withTextPresentation $ 
           where loop d=do
                   next<-tickConversation runtime d
                   if predicate next then pure next else threadDelay 10000 >> loop next
+        bodyEdge runtime target end desktop=do
+          let window=fromMaybe (error "Missing body edge window") (find ((==Just target).conversationTargetFor desktop) (windows desktop))
+              selected=focusWindow (windowId window) desktop
+              browsing=setComposerInput (composerBuffer selected) (composerSelection selected) False selected
+              ready d=case (M.lookup target (conversationViews d),bodyViewportFor d target) of
+                (Just view,Just viewport)->conversationCaretIntent view==Nothing && conversationRowShift view==0 &&
+                  (if end then conversationAnchor view==FollowEnd && viewportAnchor viewport==FollowEnd else conversationAnchor view==viewportAnchor viewport)
+                _->False
+          await runtime (if end then "logical body End" else "logical body Home") ready (fst (runCommand (if end then CursorDocumentEnd False else CursorDocumentStart False) browsing))
         done runtime=await runtime "prompt completion" ((=="Agent: end_turn").status)
         modal runtime=await runtime "approval dialog" (maybe False isApproval . dialog)
         actDialog runtime button desktop=case dialog desktop of
@@ -536,6 +545,9 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ withTextPresentation $ 
             next<-snd <$> conversationEffects runtime fallback changed effects
             if settle then case conversationBodySnapshot (conversationTarget desktop) desktop of
               Just previous | action `elem` ["toggle-activity","toggle-tool-run"]->await runtime "expanded body" (\d->conversationBodySnapshot (conversationTarget desktop) d/=Just previous) next
+              Just previous | action `elem` ["question-submit","question-cancel"],chatQuestion next==Nothing->
+                await runtime "retired question body" (\d->conversationBodySnapshot (conversationTarget desktop) d/=Just previous &&
+                  maybe True ((==Nothing).hostBodyQuestionToken) (activeWindow d >>= windowConversationControls d)) next
               _->tickConversation runtime next
             else pure next
           _ -> error ("Missing inline action "++T.unpack action)
@@ -1534,17 +1546,20 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ withTextPresentation $ 
             (zoomed,effects)=runCommand Zoom resized
         (_,effected)<-conversationEffects runtime fallback zoomed effects
         shown<-await runtime "resized live body" (bodyAtWidth "") effected
-        let body=targetBody "" shown
-            win=fromMaybe (error "missing resized live window") (activeWindow shown)
+        first<-bodyEdge runtime "" False shown
+        ended<-bodyEdge runtime "" True first
+        let body=targetBody "" ended
+            win=fromMaybe (error "missing resized live window") (activeWindow ended)
             available=width (bounds win)-2
             rows=splitStyled (bodyHighlight body)
+            userRows=splitStyled (bodyHighlight (targetBody "" first))
             sent row=any (\(_,style)->case style of BubbleText _ True _->True; _->False) row
             received row=any (\(_,style)->case style of BubbleText _ False _->True; _->False) row
             columnsOf row=let text=styledContents row in displayColumn text (T.length text)
         check "live conversation publication replaces immutable body identity"
           (conversationBodySnapshot "" shown/=conversationBodySnapshot "" answered)
         check "resize then Zoom anchors live user bubbles at the right window edge"
-          (not (null (filter sent rows)) && all ((==available).columnsOf) (filter sent rows))
+          (not (null (filter sent userRows)) && all ((==available).columnsOf) (filter sent userRows))
         check "resize then Zoom lets long live replies span the available window"
           (maximum (0:map columnsOf (filter received rows))>available-16 && all ((<=available).columnsOf) rows)
         check "live reflow preserves exact shell payload"
@@ -1569,20 +1584,24 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ withTextPresentation $ 
 
       forM_ [(148,62),(43,126)] $ \(primaryColumns,childColumns) -> do
         shown<-await runtime "paired body widths" (\d->bodyAtWidth "" d && bodyAtWidth (AH.agentIdText child) d) (paired primaryColumns childColumns)
-        forM_ [("",primaryColumns,"printf 'live λ'\n"),(AH.agentIdText child,childColumns,"printf 'child λ'\n")] $ \(target,columns,raw) -> do
-          let body=targetBody target shown
+        ended<-foldM (\current (target,columns,raw)->do
+          first<-bodyEdge runtime target False current
+          lastView<-bodyEdge runtime target True first
+          let body=targetBody target lastView
               rows=splitStyled (bodyHighlight body)
+              userRows=splitStyled (bodyHighlight (targetBody target first))
               sent row=any (\(_,style)->case style of BubbleText _ True _->True; _->False) row
               received row=any (\(_,style)->case style of BubbleText _ False _->True; _->False) row
               columnsOf row=let text=styledContents row in displayColumn text (T.length text)
           check "simultaneously visible chats anchor user bubbles to their own right edge"
-            (not (null (filter sent rows)) && all ((==columns-2).columnsOf) (filter sent rows))
+            (not (null (filter sent userRows)) && all ((==columns-2).columnsOf) (filter sent userRows))
           check "inactive child and primary replies reflow at their own window width"
             (maximum (0:map columnsOf (filter received rows))>columns-18 && all ((<=columns-2).columnsOf) rows)
           check "each resized target retains its own exact executable shell body"
             (map (\(_,_,_,source)->source) (bodyShellBlocks body)==[raw])
-        let before=map (`conversationBodySnapshot` shown) ["",AH.agentIdText child]
-        unchanged<-tickConversation runtime shown
+          pure lastView) shown [("",primaryColumns,"printf 'live λ'\n"),(AH.agentIdText child,childColumns,"printf 'child λ'\n")]
+        let before=map (`conversationBodySnapshot` ended) ["",AH.agentIdText child]
+        unchanged<-tickConversation runtime ended
         let after=map (`conversationBodySnapshot` unchanged) ["",AH.agentIdText child]
         check "unchanged visible widths preserve prepared body identities" (before==after)
 
