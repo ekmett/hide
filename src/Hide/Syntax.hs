@@ -86,7 +86,7 @@ splitStyledText=go []
 -- row; the enclosing row list stays lazy. Newline metadata is not painted.
 -- Passive message ranges preserve original scalar attribution independently of
 -- the first-scalar style used to paint a cross-run grapheme.
-data StyledRow = StyledRow !Sigils !(Maybe Style) !(V.Vector (Int,Int,Int,Bool)) deriving Show
+data StyledRow = StyledRow !Sigils !(Maybe Style) !(V.Vector (Int,Int,Int,Bool))
 
 -- | One demanded row's paint-to-logical source map. Furniture has no range;
 -- its hit boundary comes from the nearest logical edge. Expanded tabs can map
@@ -95,7 +95,7 @@ data StyledRow = StyledRow !Sigils !(Maybe Style) !(V.Vector (Int,Int,Int,Bool))
 data MappedStyledRow = MappedStyledRow
   { mappedStyledRow :: !StyledRow, mappedRowStart :: !Int, mappedRowEnd :: !Int
   , mappedSourceRanges :: !(V.Vector (Int,Int,Int,Int))
-  } deriving Show
+  }
 
 -- | Segment before assigning styles, preserving cross-run graphemes and exact
 -- overflow markers. Only the first scalar's style paints a complete item.
