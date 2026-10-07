@@ -551,17 +551,18 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ withTextPresentation $ 
         let prepared=targetBody "" reflowed
             bubbleRows=[T.concat [text | (text,BubbleText _ _ _) <- row] | row<-splitStyled (bodyHighlight prepared)]
             nonempty=filter (not . T.null) bubbleRows
-            blockRows=[(a,z) | (a,z,BubbleText _ _ (CodeStyle True _))<-styleRanges (bodyHighlight prepared)]
-            blocks=bodyShellBlocks prepared
         check "background chat preparation adopts the resized window width"
           (maximum (0:map T.length nonempty)>columns-22 && all ((<=columns-2).T.length) nonempty)
-        check ("reflow preserves the whole shell source and maps its decorated cells: "++show (columns,map (\(a,z,_,_)->(a,z)) blocks,blockRows,map (\(_,_,dialect,raw)->(dialect,raw)) blocks==[("sh",rawShell)]))
+        let browsing=(setComposerInput (composerBuffer reflowed) (composerSelection reflowed) False reflowed) {chatQuestion=fmap (\q->q {questionFocused=False}) (chatQuestion reflowed)}
+            caretReady d=maybe False ((==Nothing).conversationCaretIntent) (M.lookup "" (conversationViews d))
+        ended<-await runtime "resized shell at logical End" caretReady (fst (runCommand (CursorDocumentEnd False) browsing))
+        let visible=targetBody "" ended
+            blockRows=[(a,z) | (a,z,BubbleText _ _ (CodeStyle True _))<-styleRanges (bodyHighlight visible)]
+            blocks=bodyShellBlocks visible
+        check "reflow preserves the whole shell source and maps its decorated cells"
           (map (\(_,_,dialect,raw)->(dialect,raw)) blocks==[("sh",rawShell)] &&
            all (\(a,z)->any (\(start,end,_,_)->a>=start && z<=end) blocks) blockRows)
-        let browsing=(setComposerInput (composerBuffer reflowed) (composerSelection reflowed) False reflowed) {chatQuestion=fmap (\q->q {questionFocused=False}) (chatQuestion reflowed)}
-            home=fst (runCommand (CursorDocumentStart False) browsing)
-            caretReady d=maybe False ((==Nothing).conversationCaretIntent) (M.lookup "" (conversationViews d))
-        first<-await runtime "logical transcript Home" caretReady home
+        first<-await runtime "logical transcript Home" caretReady (fst (runCommand (CursorDocumentStart False) ended))
         selected<-await runtime "logical transcript Shift End" caretReady (fst (runCommand (CursorDocumentEnd True) first))
         let (pendingCopy,copyEffects)=runCommand Copy selected
         (_,capturedCopy)<-textPresentationEffects presentation fallback pendingCopy copyEffects
