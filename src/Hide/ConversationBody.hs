@@ -5,7 +5,9 @@
 -- TextPresentation's existing serial worker will consume these closed requests;
 -- Conversation retains task/control authority and adopts their exact results.
 module Hide.ConversationBody
-  ( BodyItemId(..), Record(..), RecordContent(..), ToolExpansion(..), QuestionSchema(..), QuestionProjection(..)
+  ( BodyItemId(..), Record(..), RecordContent(..), BodyPoint(..), BodyAnchor(..), BodySelection(..)
+  , LogicalBody, LogicalItem, logicalBodyIdentity, logicalBodyRead, logicalBodyItems, logicalBodyItemIndex, logicalItemRecord, logicalItemMarkdown, logicalItemBlocks, prepareLogicalBody
+  , ToolExpansion(..), QuestionSchema(..), QuestionProjection(..)
   , BodyProvider(..), BodyKey(..), bodyOwnerMatches, BodyInput(..)
   , BodyRequest(..), BodyResult(..), PreparedBody(..), HostBodyControls(..)
   , BodyControlReceipt(..), ConversationBody(..)
@@ -24,12 +26,14 @@ import qualified Data.Set as S
 import System.FilePath ((</>))
 import Data.Maybe (fromMaybe)
 import Data.List (mapAccumL,foldl')
-import Hide.Buffer (columnOffset,displayColumn,lineColumn)
-import Hide.Markdown (renderMarkdownWithShellBlocks)
+import Data.Unique (Unique,newUnique,hashUnique)
+import qualified Data.Map.Strict as M
+import Hide.Buffer (BufferContent,newBuffer,bufferContent,columnOffset,displayColumn,lineColumn)
+import Hide.Markdown (Markdown,MarkdownBlock,parseMarkdown,markdownBlocks,markdownBlockText,renderMarkdownWithShellBlocks)
 import Hide.Syntax (Style(..),bubbleTile,linkSpans)
 import Data.Text (Text)
 import Data.Set (Set)
-import System.Mem.StableName (StableName)
+import System.Mem.StableName (StableName,makeStableName)
 import qualified Hide.ACP as A
 import qualified Hide.AgentHub as AH
 import qualified Hide.Plugin.Window as W
@@ -42,6 +46,120 @@ data Record = Record
   { recordId :: !BodyItemId, recordRevision :: !Int, recordContent :: !RecordContent
   } deriving (Eq,Show)
 data RecordContent = Reply Text Text | Activity Text Value [Value] | Pause Text deriving (Eq,Show)
+
+-- Positions belong to the target's logical catalogue, never a painted row.
+-- Missing item IDs cannot be redirected to an unrelated surviving item.
+data BodyPoint = BodyPoint !BodyItemId !Int !Int deriving (Eq,Ord,Show)
+data BodyAnchor = At !BodyPoint | FollowEnd deriving (Eq,Show)
+data BodySelection = BodySelection !BodyPoint !BodyPoint deriving (Eq,Show)
+
+-- The record and its exact payload identity are strict metadata. Markdown is
+-- lazy: looking up an item or constructing this vector parses no prior items.
+data LogicalParsed = LogicalParsed !Markdown !(V.Vector MarkdownBlock)
+data LogicalItem = LogicalItem !Record !(StableName Record) (Maybe LogicalParsed)
+data LogicalBody = LogicalBody
+  { logicalIdentity :: !Unique, logicalTarget :: !Text
+  , logicalProvider :: !BodyProvider, logicalTranscript :: !(StableName [Record])
+  , logicalSession :: !(Maybe Text), logicalQuestion :: !(Maybe QuestionSchema)
+  , logicalItems :: !(V.Vector LogicalItem)
+  }
+instance Eq LogicalBody where a==b=logicalIdentity a==logicalIdentity b
+instance Show LogicalBody where show body="LogicalBody "++show (hashUnique (logicalIdentity body))
+
+-- | /O(1)/. Width and viewport changes preserve this exact identity. A changed
+-- catalogue receives a fresh worker-issued identity, never a payload comparison.
+logicalBodyIdentity :: LogicalBody -> Unique
+logicalBodyIdentity=logicalIdentity
+
+-- | /O(1)/. Borrow ordered items. Their parser owners remain lazy.
+logicalBodyItems :: LogicalBody -> V.Vector LogicalItem
+logicalBodyItems=logicalItems
+logicalItemRecord :: LogicalItem -> Record
+logicalItemRecord (LogicalItem record _ _)=record
+logicalItemMarkdown :: LogicalItem -> Maybe Markdown
+logicalItemMarkdown (LogicalItem _ _ parsed)=case parsed of
+  Nothing->Nothing
+  Just (LogicalParsed markdown _)->Just markdown
+
+-- | Parse only this item's immutable source on the preparation/read worker.
+-- Block metadata is cached, so a selected block is indexed without replaying
+-- preceding blocks or laying out their rows.
+logicalItemBlocks :: LogicalItem -> V.Vector MarkdownBlock
+logicalItemBlocks (LogicalItem _ _ parsed)=case parsed of
+  Nothing->V.empty
+  Just (LogicalParsed _ blocks)->blocks
+
+-- | /O(log items)/. Insertion/event IDs are strictly ordered within one target.
+-- Missing IDs return Nothing, never a neighboring item's source position.
+logicalBodyItemIndex :: BodyItemId -> LogicalBody -> Maybe Int
+logicalBodyItemIndex wanted body=search 0 (V.length items)
+  where
+    items=logicalItems body
+    search low high
+      | low>=high=Nothing
+      | ident==wanted=Just middle
+      | ident<wanted=search (middle+1) high
+      | otherwise=search low middle
+      where
+        middle=low+(high-low) `div` 2
+        ident=recordId (logicalItemRecord (items V.! middle))
+
+-- | Update immutable logical ownership on the existing presentation worker.
+-- Reuse requires exact provider, item and immutable record identities; numeric
+-- revisions or equal text alone cannot prove the cached parser still applies.
+prepareLogicalBody :: BodyKey -> BodyInput -> Maybe LogicalBody -> IO LogicalBody
+prepareLogicalBody key input previous=case previous of
+  Just body | logicalProvider body==bodyProvider key &&
+    logicalTranscript body==bodyTranscript key && questionTokenOf (logicalQuestion body)==bodyQuestionToken key->pure body
+  _->do
+    identity<-newUnique
+    let old=case previous of
+          Just body | logicalProvider body==bodyProvider key->M.fromList
+            [(recordId (logicalItemRecord item),item) | item<-V.toList (logicalItems body)]
+          _->M.empty
+    items<-V.fromList <$> mapM (capture old) (bodyRecords input)
+    evaluate (LogicalBody identity (bodyTarget key) (bodyProvider key) (bodyTranscript key)
+      (bodySession input) (bodyQuestion input) items)
+  where
+    questionTokenOf Nothing=Nothing
+    questionTokenOf (Just (QuestionSchema token _ _))=Just token
+    capture old record=do
+      payload<-makeStableName =<< evaluate record
+      case M.lookup (recordId record) old of
+        Just item@(LogicalItem _ same _) | same==payload->pure item
+        _->evaluate (LogicalItem record payload (case recordContent record of
+          Reply _ text->let parsed=parseMarkdown text in Just (LogicalParsed parsed (V.fromList (markdownBlocks parsed)))
+          _->Nothing))
+
+-- | Project full canonical logical text on a read worker, independently of
+-- folding and viewport rows. True means privacy redaction was applied. Session
+-- headers and question choices/input retain their existing exclusions; no live
+-- answer, approval or input/action capability belongs to this catalogue.
+logicalBodyRead :: LogicalBody -> IO (Bool,BufferContent)
+logicalBodyRead body=do
+  text<-evaluate (T.intercalate "\n\n" (records++question))
+  content<-evaluate (bufferContent (newBuffer text))
+  pure (redacted,content)
+  where
+    records
+      | V.null (logicalItems body),maybe True (const False) (logicalQuestion body)=
+          [if T.null (logicalTarget body) then hide ("Session: "<>fromMaybe "not connected" (logicalSession body))<>"\n" else "No messages yet.\n"]
+      | otherwise=map itemText (V.toList (logicalItems body))
+    itemText item=case recordContent (logicalItemRecord item) of
+      Reply _ text->maybe (canonical (parseMarkdown text)) canonical (logicalItemMarkdown item)
+      Pause label->label
+      Activity ident value history->
+        T.unwords (T.words ("["<>fromMaybe "activity" (field "status" value)<>"] "<>fromMaybe ident (field "title" value)))<>
+        "\n"<>T.intercalate "\n" (map jsonText history)
+    question=case logicalQuestion body of
+      Nothing->[]
+      Just (QuestionSchema _ prompt choices)->
+        [canonical (parseMarkdown prompt)<>"\n"<>T.intercalate "\n" (map hide choices)<>"\nOther:  \n[Submit answer]  [Cancel]"]
+    canonical=T.concat . map markdownBlockText . markdownBlocks
+    hide=T.map (\c->if c=='\n' || c=='\r' then c else ' ')
+    redacted=case logicalQuestion body of
+      Just _->True
+      Nothing->V.null (logicalItems body) && T.null (logicalTarget body)
 
 -- One existing UI expansion owner covers individual activities and grouped runs.
 -- Transcript updates contain data only and cannot overwrite this interaction.
@@ -87,11 +205,11 @@ bodyOwnerMatches a b=bodyWindow a==bodyWindow b && bodyTarget a==bodyTarget b &&
 data BodyInput = BodyInput
   { bodyTitle :: !Text, bodyProject :: !FilePath, bodySession :: !(Maybe Text)
   , bodyRecords :: ![Record], bodyQuestion :: !(Maybe QuestionSchema)
-  , bodyExpandedTools :: !(Set (Text,ToolExpansion))
+  , bodyExpandedTools :: !(Set (Text,ToolExpansion)), bodyPreviousLogical :: !(Maybe LogicalBody)
   }
 data BodyRequest = BodyRequest !BodyKey !BodyInput
 data BodyResult = BodyResult !BodyKey !(Either Text PreparedBody)
-data PreparedBody = PreparedBody !W.PreparedWindow !(Maybe TextLayout) !HostBodyControls
+data PreparedBody = PreparedBody !W.PreparedWindow !(Maybe TextLayout) !HostBodyControls !LogicalBody
 
 -- Private host-minted regions; public TextSemantics cannot install controls.
 data HostBodyControls = HostBodyControls
@@ -121,6 +239,7 @@ instance Show ConversationBody where
 -- Live question answers never enter this capture.
 prepareConversationBody :: BodyRequest -> IO BodyResult
 prepareConversationBody (BodyRequest key input)=do
+  logical<-prepareLogicalBody key input (bodyPreviousLogical input)
   prepared<-W.prepareSemanticTextWindow (bodyTitle input) styled semantics
   case prepared of
     Left message->pure (BodyResult key (Left message))
@@ -132,7 +251,7 @@ prepareConversationBody (BodyRequest key input)=do
         else pure Nothing
       _<-evaluate (sum [a+z+T.length action+sum (map T.length values) | (a,z,action,values)<-actions])
       _<-evaluate (maybe 0 (sum . concat . projectedQuestionChoices) projection)
-      snapshot<-evaluate (PreparedBody body layout (HostBodyControls projection actions))
+      snapshot<-evaluate (PreparedBody body layout (HostBodyControls projection actions) logical)
       evaluate (BodyResult key (Right snapshot))
   where
     target=bodyTarget key

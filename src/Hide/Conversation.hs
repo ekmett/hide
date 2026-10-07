@@ -651,7 +651,7 @@ conversationBodyRequests (ConversationState _ ref _ agents) desktop=do
       pure $ case captured of
         Just owner | live && owns->[BodyRequest (BodyKey reference target owner identity (case schema of Just (QuestionSchema token _ _)->Just token; Nothing->Nothing) (conversationWidthFor target desktop) (videoMode desktop/=Nothing) (wideSectionTitles desktop) expansion)
           (BodyInput (if T.null target then "Conversation" else conversationName view) (project state) sessionName records
-            schema (toolExpansions state))]
+            schema (toolExpansions state) (conversationLogical view))]
         _->[]
 
 -- Completed streaming text may trail the latest root while the single worker
@@ -665,7 +665,7 @@ adoptConversationBodies runtime results desktop=do
       []->pure current
       _->case result of
         Left err->pure current {status=err}
-        Right (PreparedBody body layout controls)->do
+        Right (PreparedBody body layout controls logical)->do
           update<-W.refreshTextWindow (bodyWindow key) body
           case update of
             Nothing->pure current
@@ -686,7 +686,7 @@ adoptConversationBodies runtime results desktop=do
                     frames=map adjust (windows next)
                     retain view=let visible=find ((==PluginContent (bodyWindow key)).windowContent) frames
                                     (row,column)=conversationScroll view
-                                in view {conversationBody=InstalledBody (bodyWindow key) (Just (BodyControlReceipt body (bodyColumns key) (bodyWide key) layout controls)),
+                                in view {conversationLogical=Just logical,conversationBody=InstalledBody (bodyWindow key) (Just (BodyControlReceipt body (bodyColumns key) (bodyWide key) layout controls)),
                                   conversationReplySelection=boundSelection (maybe (conversationReplySelection view) selection visible),
                                   conversationScroll=maybe (max 0 (min row (max 0 (count-1))),column) (\w->(scrollRow w,scrollColumn w)) visible}
                     presented=next {conversationViews=M.adjust retain target (conversationViews next),windows=frames}
@@ -1575,24 +1575,27 @@ recentChildHistory hub ident next=go (max 0 (next-101)) [] False
           else pure (Right (combined,omitted || more))
 
 childHistoryRecord :: Text -> [Record] -> Value -> [Record]
-childHistoryRecord name records value=let detail=fromMaybe Null (field "detail" value) in case field "kind" value :: Maybe Text of
-  Just kind | kind `elem` ["message_queued","steered"] ->
-    let author=fromMaybe Null (field "author" value)
-        human=field "kind" author==Just ("human"::Text)
-        who=if human then "Human" else "Agent "<>fromMaybe "unknown" (field "id" author)
-        seat=if field "userSeat" detail==Just True then if human then "human user seat" else "controlling parent" else "peer message"
-    in records++[eventRecord (Reply (if human then "You" else "Peer") (who<>" ("<>seat<>")\n\n"<>fromMaybe "" (field "text" detail)))]
-  Just "output" -> appendChunk (BodyItemId eventIndex) eventIndex "Agent" (if lastRole records==Just "Agent" then chunk else name<>"\n\n"<>chunk) records
-    where chunk=fromMaybe "" (field "text" detail)
-  Just "thought" -> records -- Thoughts stay in the bounded history API.
-  Just "tool" -> case field "toolCallId" detail :: Maybe Text of
-    Just _ -> mergeTool (BodyItemId eventIndex) eventIndex detail records
-    Nothing -> records++[eventRecord (Activity ("event-"<>T.pack (show eventIndex)) detail [detail])]
-  Just "message_finished" | field "status" detail/=Just ("completed"::Text) -> records++[eventRecord (Pause (fromMaybe "Stopped" (field "error" detail)))]
-  _ -> records
+childHistoryRecord name records value
+  | Just eventIndex<-field "index" value,eventIndex>=0 =
+      let detail=fromMaybe Null (field "detail" value)
+          eventRecord=Record (BodyItemId eventIndex) eventIndex
+      in case field "kind" value :: Maybe Text of
+        Just kind | kind `elem` ["message_queued","steered"] ->
+          let author=fromMaybe Null (field "author" value)
+              human=field "kind" author==Just ("human"::Text)
+              who=if human then "Human" else "Agent "<>fromMaybe "unknown" (field "id" author)
+              seat=if field "userSeat" detail==Just True then if human then "human user seat" else "controlling parent" else "peer message"
+          in records++[eventRecord (Reply (if human then "You" else "Peer") (who<>" ("<>seat<>")\n\n"<>fromMaybe "" (field "text" detail)))]
+        Just "output" -> appendChunk (BodyItemId eventIndex) eventIndex "Agent" (if lastRole records==Just "Agent" then chunk else name<>"\n\n"<>chunk) records
+          where chunk=fromMaybe "" (field "text" detail)
+        Just "thought" -> records -- Thoughts stay in the bounded history API.
+        Just "tool" -> case field "toolCallId" detail :: Maybe Text of
+          Just _ -> mergeTool (BodyItemId eventIndex) eventIndex detail records
+          Nothing -> records++[eventRecord (Activity ("event-"<>T.pack (show eventIndex)) detail [detail])]
+        Just "message_finished" | field "status" detail/=Just ("completed"::Text) -> records++[eventRecord (Pause (fromMaybe "Stopped" (field "error" detail)))]
+        _ -> records
+  | otherwise=records
   where
-    eventIndex=fromMaybe 0 (field "index" value)
-    eventRecord=Record (BodyItemId eventIndex) eventIndex
     lastRole xs=case reverse xs of Record _ _ (Reply role _):_->Just role; _->Nothing
 
 -- Publish the next human turn before releasing the Hub ticket. Otherwise its
@@ -1662,7 +1665,7 @@ ensureEditorWithState opening state target name original=do
   draftRef<-maybe Editor.newDraftRef (pure.conversationDraftRef) found
   let initial=fromMaybe (EditorDraft (newBuffer "") (Selection 0 0) True Nothing) (M.lookup draftRef (editorDrafts original))
       body=fromMaybe (loadingBody state) (conversationBodySnapshot target original)
-      view=maybe (ConversationView (InertBody body) name draftRef Nothing Nothing (0,0) (Selection 0 0)) (\old->old {conversationName=name}) found
+      view=maybe (ConversationView (InertBody body) name draftRef Nothing Nothing (0,0) (Selection 0 0) Nothing) (\old->old {conversationName=name}) found
       seeded=original {conversationViews=M.insert target view (conversationViews original),editorDrafts=M.insert draftRef initial (editorDrafts original)}
       -- Live output may resume an existing recovered frame; only explicit Show
       -- creates a frame for a closed or hidden inert body.

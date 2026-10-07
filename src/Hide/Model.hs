@@ -22,7 +22,7 @@ import qualified Data.Text.Encoding as TE
 import qualified Data.Map.Strict as M
 import qualified Data.Vector as Vec
 import qualified Hide.Plugin.Window as PluginWindow
-import Hide.ConversationBody (questionChoiceLines,QuestionProjection(..),ConversationBody(..),BodyControlReceipt(..),HostBodyControls(..))
+import Hide.ConversationBody (LogicalBody,questionChoiceLines,QuestionProjection(..),ConversationBody(..),BodyControlReceipt(..),HostBodyControls(..))
 import qualified Hide.Privacy as Privacy
 import Hide.Sidebar
 import Hide.DebuggerSidebarTypes
@@ -279,6 +279,7 @@ data ConversationView = ConversationView
   { conversationBody :: ConversationBody, conversationName :: Text
   , conversationDraftRef :: Editor.DraftRef, conversationEditor :: Maybe Editor.EditorMount, conversationEditorFrame :: Maybe Int
   , conversationScroll :: (Int,Int), conversationReplySelection :: Selection
+  , conversationLogical :: Maybe LogicalBody
   } deriving (Eq,Show)
 
 -- One editable state per opaque widget, including hidden conversation targets.
@@ -1993,6 +1994,11 @@ conversationBodySnapshot target d=do
   case conversationBody view of
     InstalledBody reference _->M.lookup reference (pluginWindows d)
     InertBody prepared->Just prepared
+
+-- | /O(log targets)/. The logical transcript belongs to the retained target,
+-- independent of visibility, viewport presentation or callable window lifetime.
+conversationLogicalBody :: Text -> Desktop -> Maybe LogicalBody
+conversationLogicalBody target desktop=conversationLogical =<< M.lookup target (conversationViews desktop)
 
 -- | Installed ownership is distinct from callable liveness or visibility.
 conversationBodyRef :: ConversationView -> Maybe PluginWindow.WindowRef
